@@ -51,7 +51,9 @@ GitHub Actions から Projects API にアクセスするには `GITHUB_TOKEN` �
 
 ### Step A-3: GitHub Actions ワークフローを生成する
 
-`.github/workflows/project-sync.yml` を生成する:
+`Fandhe-AI/actions/project-sync` Composite Action を使用する。`.github/workflows/project-sync.yml` を生成する:
+
+**PAT を使用する場合:**
 
 ```yaml
 name: Project Sync
@@ -62,9 +64,28 @@ on:
   pull_request:
     types: [opened, closed, ready_for_review, review_requested]
 
-env:
-  PROJECT_NUMBER: <number>
-  PROJECT_OWNER: <owner>
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync project status
+        uses: Fandhe-AI/actions/project-sync@main
+        with:
+          project-number: '<number>'
+          project-owner: '<owner>'
+          token: ${{ secrets.PROJECT_TOKEN }}
+```
+
+**GitHub App を使用する場合（推奨）:**
+
+```yaml
+name: Project Sync
+
+on:
+  issues:
+    types: [opened, closed, reopened]
+  pull_request:
+    types: [opened, closed, ready_for_review, review_requested]
 
 jobs:
   sync:
@@ -72,117 +93,35 @@ jobs:
     steps:
       - name: Generate token
         id: token
-        # 方法 1: PAT を使用する場合
-        # env.GH_TOKEN に PROJECT_TOKEN シークレットを設定
-        run: echo "token=${{ secrets.PROJECT_TOKEN }}" >> "$GITHUB_OUTPUT"
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: '<owner>'
 
-        # 方法 2: GitHub App を使用する場合（推奨）
-        # uses: actions/create-github-app-token@v2
-        # with:
-        #   app-id: ${{ vars.APP_ID }}
-        #   private-key: ${{ secrets.APP_PRIVATE_KEY }}
-        #   owner: ${{ env.PROJECT_OWNER }}
+      - name: Sync project status
+        uses: Fandhe-AI/actions/project-sync@main
+        with:
+          project-number: '<number>'
+          project-owner: '<owner>'
+          token: ${{ steps.token.outputs.token }}
+```
 
-      - name: Get project metadata
-        id: meta
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          # プロジェクト ID を取得
-          PROJECT_ID=$(gh project view ${{ env.PROJECT_NUMBER }} \
-            --owner ${{ env.PROJECT_OWNER }} \
-            --format json -q '.id')
-          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+**カスタム Status オプション名を使用する場合:**
 
-          # Status フィールドの ID とオプション ID を取得
-          FIELDS=$(gh project field-list ${{ env.PROJECT_NUMBER }} \
-            --owner ${{ env.PROJECT_OWNER }} \
-            --format json)
+Status オプション名がデフォルト（Todo / In Progress / In Review / Done）と異なる場合は inputs で指定する:
 
-          STATUS_FIELD_ID=$(echo "$FIELDS" | jq -r '.fields[] | select(.name == "Status") | .id')
-          echo "status_field_id=$STATUS_FIELD_ID" >> "$GITHUB_OUTPUT"
-
-          TODO_ID=$(echo "$FIELDS" | jq -r '.fields[] | select(.name == "Status") | .options[] | select(.name == "Todo") | .id')
-          IN_PROGRESS_ID=$(echo "$FIELDS" | jq -r '.fields[] | select(.name == "Status") | .options[] | select(.name == "In Progress") | .id')
-          IN_REVIEW_ID=$(echo "$FIELDS" | jq -r '.fields[] | select(.name == "Status") | .options[] | select(.name == "In Review") | .id')
-          DONE_ID=$(echo "$FIELDS" | jq -r '.fields[] | select(.name == "Status") | .options[] | select(.name == "Done") | .id')
-
-          echo "todo_id=$TODO_ID" >> "$GITHUB_OUTPUT"
-          echo "in_progress_id=$IN_PROGRESS_ID" >> "$GITHUB_OUTPUT"
-          echo "in_review_id=$IN_REVIEW_ID" >> "$GITHUB_OUTPUT"
-          echo "done_id=$DONE_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Add item to project
-        id: add
-        if: >-
-          (github.event_name == 'issues' && github.event.action == 'opened') ||
-          (github.event_name == 'pull_request' && github.event.action == 'opened')
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          ITEM_URL="${{ github.event.issue.html_url || github.event.pull_request.html_url }}"
-          ITEM_ID=$(gh project item-add ${{ env.PROJECT_NUMBER }} \
-            --owner ${{ env.PROJECT_OWNER }} \
-            --url "$ITEM_URL" \
-            --format json -q '.id')
-          echo "item_id=$ITEM_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Get existing item ID
-        id: existing
-        if: steps.add.outcome == 'skipped'
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          CONTENT_URL="${{ github.event.issue.html_url || github.event.pull_request.html_url }}"
-          ITEMS=$(gh project item-list ${{ env.PROJECT_NUMBER }} \
-            --owner ${{ env.PROJECT_OWNER }} \
-            --format json --limit 999)
-          ITEM_ID=$(echo "$ITEMS" | jq -r \
-            --arg url "$CONTENT_URL" \
-            '.items[] | select(.content.url == $url) | .id')
-          echo "item_id=$ITEM_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Determine target status
-        id: status
-        run: |
-          EVENT="${{ github.event_name }}"
-          ACTION="${{ github.event.action }}"
-          MERGED="${{ github.event.pull_request.merged }}"
-
-          if [ "$EVENT" = "issues" ]; then
-            case "$ACTION" in
-              opened)   echo "option_id=${{ steps.meta.outputs.todo_id }}" >> "$GITHUB_OUTPUT" ;;
-              closed)   echo "option_id=${{ steps.meta.outputs.done_id }}" >> "$GITHUB_OUTPUT" ;;
-              reopened) echo "option_id=${{ steps.meta.outputs.todo_id }}" >> "$GITHUB_OUTPUT" ;;
-            esac
-          elif [ "$EVENT" = "pull_request" ]; then
-            case "$ACTION" in
-              opened)           echo "option_id=${{ steps.meta.outputs.in_progress_id }}" >> "$GITHUB_OUTPUT" ;;
-              ready_for_review) echo "option_id=${{ steps.meta.outputs.in_review_id }}" >> "$GITHUB_OUTPUT" ;;
-              review_requested) echo "option_id=${{ steps.meta.outputs.in_review_id }}" >> "$GITHUB_OUTPUT" ;;
-              closed)
-                if [ "$MERGED" = "true" ]; then
-                  echo "option_id=${{ steps.meta.outputs.done_id }}" >> "$GITHUB_OUTPUT"
-                else
-                  echo "option_id=${{ steps.meta.outputs.todo_id }}" >> "$GITHUB_OUTPUT"
-                fi
-                ;;
-            esac
-          fi
-
-      - name: Update status
-        if: steps.status.outputs.option_id != ''
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          ITEM_ID="${{ steps.add.outputs.item_id || steps.existing.outputs.item_id }}"
-          if [ -n "$ITEM_ID" ]; then
-            gh project item-edit \
-              --id "$ITEM_ID" \
-              --field-id "${{ steps.meta.outputs.status_field_id }}" \
-              --project-id "${{ steps.meta.outputs.project_id }}" \
-              --single-select-option-id "${{ steps.status.outputs.option_id }}"
-          fi
+```yaml
+      - name: Sync project status
+        uses: Fandhe-AI/actions/project-sync@main
+        with:
+          project-number: '<number>'
+          project-owner: '<owner>'
+          token: ${{ secrets.PROJECT_TOKEN }}
+          status-todo: 'バックログ'
+          status-in-progress: '作業中'
+          status-in-review: 'レビュー中'
+          status-done: '完了'
 ```
 
 ### Step A-4: ステータスマッピングを確認する
@@ -302,7 +241,9 @@ gh project item-add <number> \
 ## 注意事項
 
 - **認証:** GitHub Actions から Projects API へのアクセスには `GITHUB_TOKEN` では不足。PAT または GitHub App トークンが必要
+- **PAT 有効期限:** fine-grained PAT は最大1年。定期ローテーション推奨
 - **ビルトインワークフローとの併用:** `project-init` でビルトインワークフロー（closed→Done, merged→Done）を有効化済みの場合、Actions ワークフローと二重に発火するが、同じ値への更新なので実害はない
 - **PR ライフサイクル:** ビルトインワークフローは closed/merged のみ対応。opened→In Progress, review_requested→In Review は Actions でのみ自動化可能
+- **プライベートリポジトリ:** org の Settings → Actions → General でプライベートリポジトリからの Action 共有を許可する必要あり
 - 手動補正モードは同期前に必ずユーザーの確認を得る
 - DraftIssue タイプのアイテムは同期対象外（実 Issue が存在しないため）
