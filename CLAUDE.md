@@ -16,9 +16,15 @@ skills/                           -- スキル本体（各ディレクトリに 
   skills/                         -- skills/ へのシンボリックリンク
 ```
 
-## Current Skills (8)
+## Current Skills (15)
+
+### 開発ワークフロー (8)
 
 create-commit, create-issue, create-plan, create-pr, implement-issue, implement-review, implement-review-pr, update-docs
+
+### GitHub Projects 管理 (7)
+
+project-init, project-add-items, project-create-issues, project-view-status, project-update-items, project-sync-issues, project-archive-done
 
 ## Conventions
 

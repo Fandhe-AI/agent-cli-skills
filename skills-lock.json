@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "github-docs": {
+      "source": "Fandhe-AI/agent-reference-skills",
+      "sourceType": "github",
+      "computedHash": "9588194200c2bd16d1b6c4c54c91b405b6a98a7b9c7d9e3d03681dbf25738c01"
+    }
+  }
+}
