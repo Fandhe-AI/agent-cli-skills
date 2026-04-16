@@ -114,7 +114,7 @@ git diff
 ### Step 9: ブランチ作成・コミット
 
 ```bash
-SLUG=$(date +%Y%m%d)
+SLUG=$(date +%Y%m%d-%H%M%S)
 git switch -c "contribute/<SKILL_NAME>-${SLUG}"
 git add <変更パス>
 git commit -m "$(cat <<'EOF'
@@ -172,20 +172,11 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **sandbox 環境での `GIT_SSL_NO_VERIFY=1` 併用**：詳細は後述の「sandbox 環境での実行」節を参照
 - **upstream のパス構造は事前確認**：`skills/<name>/` か `.agents/skills/<name>/` かは upstream によって異なる
-- **既に同名の branch がある場合**：日時スラッグで回避するか、ユーザーに確認
+- **既に同名の branch がある場合**：秒単位スラッグで通常は衝突しないが、万一の場合はユーザーに確認
 
 ## sandbox 環境での実行
 
-sandbox では中間 TLS 証明書の検証に通らない場合があります。ネットワーク越しの GitHub 操作には `GIT_SSL_NO_VERIFY=1` の併用を検討してください（ホスト側で allow 済みが前提）。
-
-| 対象 | `GIT_SSL_NO_VERIFY=1` の要否 | コマンド例 |
-|------|-----------------------------|-----------|
-| upstream の取得 | 要 | `gh repo clone`, `git clone`, `git fetch`, `git pull`, `git ls-remote` |
-| upstream への書き込み | 要 | `git push`, `git push -u origin ...` |
-| GitHub API 操作 | 要 | `gh auth`, `gh api`, `gh pr create`, `gh pr view`, `gh pr edit`, `gh issue ...` |
-| ローカル操作 | 不要 | `git log`, `git diff`, `git status`, `git add`, `git commit`, `git switch`, ファイル I/O |
-
-`GIT_SSL_NO_VERIFY=1` は TLS 検証を無効にするだけで、認証自体は別途必要です（`gh auth login` 済み OAuth トークン / SSH 鍵 / PAT）。信頼できないネットワーク下では使用しないでください。
+sandbox で本スキルを実行する場合、ネットワーク越しの GitHub 操作には `GIT_SSL_NO_VERIFY=1` の併用を検討してください。本スキルの主なリモート操作は `gh repo clone` / `git push` / `gh pr create` で、「リモート書き込み」判定は **要** です。コマンド分類の詳細と TLS 検証無効化の注意事項は [`docs/sandbox-tls.md`](../../docs/sandbox-tls.md) を参照してください。
 
 ## 既存スキルとの関係
 
