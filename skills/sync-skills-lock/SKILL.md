@@ -64,8 +64,8 @@ TS=$(date +%Y%m%d-%H%M%S)
 WORKDIR="/tmp/claude-${UID_VAL}/sync-skills-${TS}"
 mkdir -p "$WORKDIR"
 
-# sandbox で GIT_SSL_NO_VERIFY=1 を必要に応じて併用
-GIT_SSL_NO_VERIFY=1 gh repo clone Fandhe-AI/<repo> "$WORKDIR/<repo>"
+# sandbox 環境では各コマンドに GIT_SSL_NO_VERIFY=1 を前置する（詳細: docs/sandbox-tls.md）
+gh repo clone Fandhe-AI/<repo> "$WORKDIR/<repo>"
 ```
 
 ### Step 4: 各スキルの SHA256 を計算する

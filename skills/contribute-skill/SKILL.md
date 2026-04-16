@@ -80,8 +80,8 @@ mkdir -p "$WORKDIR"
 ### Step 6: upstream を clone する
 
 ```bash
-# sandbox 環境では GIT_SSL_NO_VERIFY=1 の併用を検討
-GIT_SSL_NO_VERIFY=1 gh repo clone Fandhe-AI/<repo> "$WORKDIR/upstream"
+# sandbox 環境では各コマンドに GIT_SSL_NO_VERIFY=1 を前置する（詳細: docs/sandbox-tls.md）
+gh repo clone Fandhe-AI/<repo> "$WORKDIR/upstream"
 cd "$WORKDIR/upstream"
 ```
 
@@ -133,9 +133,10 @@ EOF
 ### Step 10: push と PR 作成
 
 ```bash
-GIT_SSL_NO_VERIFY=1 git push -u origin "contribute/<SKILL_NAME>-${SLUG}"
+# sandbox 環境では各コマンドに GIT_SSL_NO_VERIFY=1 を前置する（詳細: docs/sandbox-tls.md）
+git push -u origin "contribute/<SKILL_NAME>-${SLUG}"
 
-GIT_SSL_NO_VERIFY=1 gh pr create \
+gh pr create \
   --repo Fandhe-AI/<repo> \
   --base main \
   --title "<type>(<scope>): <subject>" \
