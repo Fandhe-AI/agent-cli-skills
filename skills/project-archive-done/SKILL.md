@@ -102,3 +102,17 @@ Auto-archive が無効の場合は有効化を推奨:
 - アーカイブされたアイテムはプロジェクトビューから非表示になるが、削除はされない
 - Auto-archive ビルトインワークフローとの併用で手動実行の頻度を減らせる
 - 特定の条件（日付範囲、ラベル等）でフィルタしてアーカイブすることも可能
+- **sandbox 環境での `GIT_SSL_NO_VERIFY=1` 併用**：詳細は後述の「sandbox 環境での実行」節を参照
+
+## sandbox 環境での実行
+
+sandbox では中間 TLS 証明書の検証に通らない場合があります。ネットワーク越しの GitHub 操作には `GIT_SSL_NO_VERIFY=1` の併用を検討してください（ホスト側で allow 済みが前提）。
+
+| 対象 | `GIT_SSL_NO_VERIFY=1` の要否 | コマンド例 |
+|------|-----------------------------|-----------|
+| リモート取得 | 要 | `gh repo clone`, `git clone`, `git fetch`, `git pull`, `git ls-remote` |
+| リモート書き込み | 要（本スキルは主に API 経由） | `git push` |
+| GitHub API 操作 | 要 | `gh auth`, `gh api`, `gh pr ...`, `gh issue ...`, `gh project ...`, `gh label ...` |
+| ローカル操作 | 不要 | `git log`, `git diff`, `git status`, `git add`, `git commit`, `git switch`, ファイル I/O |
+
+`GIT_SSL_NO_VERIFY=1` は TLS 検証を無効にするだけで、認証自体は別途必要です（`gh auth login` 済み OAuth トークン / SSH 鍵 / PAT）。信頼できないネットワーク下では使用しないでください。
