@@ -11,8 +11,8 @@ user-invocable: true
 
 ## 対象ファイル
 
-- **ルート**: `/Users/nancy/fandhe/_/ideas/skills-lock.json` — このスキルが唯一編集するファイル
-- **除外**: `ideas/orchestra/skills-lock.json`, `ideas/automation/skills-lock.json` — サブモジュール配下のため **絶対に触らない**
+- **ルート**: 呼び出し元リポジトリ直下の `skills-lock.json` — このスキルが唯一編集するファイル
+- **除外**: submodule 配下の `skills-lock.json` — submodule 境界を跨がないため **絶対に触らない**
 
 ## 前提条件
 
@@ -82,7 +82,7 @@ sha256sum "$WORKDIR/<repo>/skills/<name>/SKILL.md" | awk '{print $1}'
 
 ### Step 7: `skills-lock.json` を更新する
 
-ルート直下の `skills-lock.json` のみを更新します。`ideas/orchestra/`, `ideas/automation/` 配下は **絶対に触りません**（submodule 境界を跨がない）。
+呼び出し元リポジトリ直下の `skills-lock.json` のみを更新します。submodule 配下の `skills-lock.json` は **絶対に触りません**（submodule 境界を跨がない）。
 
 ```bash
 # jq を使う例
@@ -108,7 +108,7 @@ EOF
 
 ## 注意事項
 
-- **ルートの `skills-lock.json` のみを編集**：submodule 配下 (`ideas/orchestra/`, `ideas/automation/`) は手を付けない
+- **ルートの `skills-lock.json` のみを編集**：submodule 配下は手を付けない
 - **upstream の path 構造を事前確認**：`skills/<name>/` か `.agents/skills/<name>/` か
 - **ハッシュ算出対象の一貫性**：上流側との合意が必要。初期は `SKILL.md` のみを推奨
 - **sandbox 環境では `GIT_SSL_NO_VERIFY=1` を併用**
