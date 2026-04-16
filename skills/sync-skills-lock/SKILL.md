@@ -42,6 +42,20 @@ Fandhe-AI/agent-cli-skills:
 
 ### Step 3: upstream を取得する
 
+**安全弁**: clone 前に必ず `source` フィールドが信頼された prefix で始まっていることを確認します。本スキルは `Fandhe-AI/` で始まる source のみを許可します（`contribute-skill` と同じポリシー）。想定外の source は skip してユーザーに警告します。`skills-lock.json` の改ざん・誤設定によって untrusted リポジトリから clone することを防ぐためです。
+
+```bash
+# source の検証（Fandhe-AI/ で始まらないエントリは skip）
+case "$SOURCE" in
+  Fandhe-AI/*)
+    ;; # OK
+  *)
+    echo "警告: 想定外の source: $SOURCE — このスキルは skip します"
+    continue
+    ;;
+esac
+```
+
 リポジトリごとに以下を実行:
 
 ```bash
@@ -109,10 +123,24 @@ EOF
 ## 注意事項
 
 - **ルートの `skills-lock.json` のみを編集**：submodule 配下は手を付けない
+- **source prefix 検証 (必須)**：`source` が `Fandhe-AI/` で始まらないエントリは clone せず skip する（`contribute-skill` と同じ安全弁）。`skills-lock.json` の改ざんや誤設定から防御するため
 - **upstream の path 構造を事前確認**：`skills/<name>/` か `.agents/skills/<name>/` か
 - **ハッシュ算出対象の一貫性**：上流側との合意が必要。初期は `SKILL.md` のみを推奨
-- **sandbox 環境では `GIT_SSL_NO_VERIFY=1` を併用**
+- **sandbox 環境での `GIT_SSL_NO_VERIFY=1` 併用**：詳細は後述の「sandbox 環境での実行」節を参照
 - **新スキルの取扱い**：ローカルに存在するが upstream に未登録のスキル（`contribute-skill`, `sync-skills-lock` 自身など）は、upstream マージ後に登録する。マージ前に `computedHash` を勝手に書き込まない
+
+## sandbox 環境での実行
+
+sandbox では中間 TLS 証明書の検証に通らない場合があります。ネットワーク越しの GitHub 操作には `GIT_SSL_NO_VERIFY=1` の併用を検討してください（ホスト側で allow 済みが前提）。
+
+| 対象 | `GIT_SSL_NO_VERIFY=1` の要否 | コマンド例 |
+|------|-----------------------------|-----------|
+| upstream の取得 | 要 | `gh repo clone`, `git clone`, `git fetch`, `git pull`, `git ls-remote` |
+| upstream への書き込み | 要（本スキルは read-only） | `git push` |
+| GitHub API 操作 | 要 | `gh auth`, `gh api`, `gh pr view`, `gh issue view` など |
+| ローカル操作 | 不要 | `git log`, `git diff`, `git status`, `git add`, `git commit`, `git switch`, ファイル I/O |
+
+`GIT_SSL_NO_VERIFY=1` は TLS 検証を無効にするだけで、認証自体は別途必要です（`gh auth login` 済み OAuth トークン / SSH 鍵 / PAT）。信頼できないネットワーク下では使用しないでください。
 
 ## 既存スキルとの関係
 
