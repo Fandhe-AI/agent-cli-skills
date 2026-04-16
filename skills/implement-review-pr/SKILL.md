@@ -93,3 +93,8 @@ gh pr review <number> --request-changes --body "..."
 
 - セキュリティ問題（HIGH）がある場合は request-changes を推奨する
 - CI が失敗している場合はレビューをブロックすることを推奨する
+- **sandbox 環境での `GIT_SSL_NO_VERIFY=1` 併用**：詳細は後述の「sandbox 環境での実行」節を参照
+
+## sandbox 環境での実行
+
+sandbox で本スキルを実行する場合、ネットワーク越しの GitHub 操作には `GIT_SSL_NO_VERIFY=1` の併用を検討してください。本スキルの主なリモート操作は `gh pr view` / `gh pr checks` / `gh pr review` で、「リモート書き込み」判定は **要（本スキルは read-only）** です。コマンド分類の詳細と TLS 検証無効化の注意事項は [`docs/sandbox-tls.md`](../../docs/sandbox-tls.md) を参照してください。

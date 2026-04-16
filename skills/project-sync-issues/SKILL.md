@@ -247,3 +247,8 @@ gh project item-add <number> \
 - **プライベートリポジトリ:** org の Settings → Actions → General でプライベートリポジトリからの Action 共有を許可する必要あり
 - 手動補正モードは同期前に必ずユーザーの確認を得る
 - DraftIssue タイプのアイテムは同期対象外（実 Issue が存在しないため）
+- **sandbox 環境での `GIT_SSL_NO_VERIFY=1` 併用**：詳細は後述の「sandbox 環境での実行」節を参照
+
+## sandbox 環境での実行
+
+sandbox で本スキルを実行する場合、ネットワーク越しの GitHub 操作には `GIT_SSL_NO_VERIFY=1` の併用を検討してください。本スキルの主なリモート操作は `git push` / `gh project item-edit` / `gh issue list` で、「リモート書き込み」判定は **要** です。コマンド分類の詳細と TLS 検証無効化の注意事項は [`docs/sandbox-tls.md`](../../docs/sandbox-tls.md) を参照してください。

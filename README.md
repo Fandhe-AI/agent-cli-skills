@@ -62,6 +62,10 @@ skills/
     SKILL.md                      -- 完了アイテムのアーカイブ
   update-docs/
     SKILL.md                      -- コード変更に基づく CLAUDE.md 更新
+  contribute-skill/
+    SKILL.md                      -- skills-lock.json の source に応じた upstream への PR 作成
+  sync-skills-lock/
+    SKILL.md                      -- skills-lock.json の computedHash を upstream と同期
 ```
 
 ## スキル一覧
@@ -90,6 +94,13 @@ skills/
 | **project-update-items** | プロジェクトアイテムのフィールド値（ステータス・優先度等）を一括更新する |
 | **project-sync-issues** | GitHub Issue の状態変更をプロジェクトのフィールドに同期する |
 | **project-archive-done** | 完了済みプロジェクトアイテムをアーカイブしてボードを整理する |
+
+### 上流貢献
+
+| スキル | 説明 |
+|--------|------|
+| **contribute-skill** | `skills-lock.json` の `source` が `Fandhe-AI/*` のスキルを手元で改修した後、upstream リポジトリへ PR を作成する |
+| **sync-skills-lock** | `skills-lock.json` の `computedHash` を upstream の最新と同期する（submodule 配下は対象外） |
 
 ## Agent
 
