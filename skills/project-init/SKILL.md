@@ -1,6 +1,7 @@
 ---
 name: project-init
-description: GitHub Project v2 を作成し、標準フィールド・ビルトインワークフローを設定する。
+description: GitHub Project v2 を新規作成し、Status/Priority/Size の標準フィールドを設定してリポジトリにリンクする。Auto-add/Auto-archive/Auto-close 等のビルトインワークフロー設定 URL もガイド (CLI 不可・Web UI のみ)。「プロジェクト作って」「Project v2 セットアップ」「カンバン作成」などで使用。
+model: sonnet
 ---
 
 # project-init

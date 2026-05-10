@@ -1,6 +1,7 @@
 ---
 name: project-update-items
-description: プロジェクトアイテムのフィールド値（ステータス・優先度等）を一括更新する。
+description: プロジェクトアイテムのフィールド値 (Status/Priority/Size 他) をクエリフィルタやアイテム指定で絞り込んで一括更新する。SINGLE_SELECT/TEXT/NUMBER/DATE のフィールドタイプに対応。「Status を In Progress に変更」「優先度を一括更新」「Todo を全部 In Progress に」などで使用。
+model: haiku
 ---
 
 # project-update-items

@@ -1,8 +1,9 @@
 ---
 name: contribute-skill
-description: ローカルで改修した .agents/skills/ 配下のスキルを upstream リポジトリ (Fandhe-AI/agent-cli-skills 等) へ PR として投稿する。skills-lock.json の source を読み、外部リポジトリへ貢献する際に使用する。
+description: ローカル改修した `.agents/skills/<skill-name>/` を upstream リポジトリ (Fandhe-AI/agent-cli-skills 等) へ PR として投稿する。`skills-lock.json` の `source` を読み、`Fandhe-AI/` 以外への push は安全弁で中止。clone → 反映 → セキュリティチェック → ブランチ作成 → push → `gh pr create` を実行。マージ後は sync-skills-lock で hash 更新。「スキルを upstream に貢献」「外部リポジトリに PR」などで使用。
 argument-hint: "<skill-name> (例: contribute-skill create-pr)"
 user-invocable: true
+model: sonnet
 ---
 
 # contribute-skill

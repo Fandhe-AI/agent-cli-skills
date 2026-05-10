@@ -1,8 +1,9 @@
 ---
 name: sync-skills-lock
-description: skills-lock.json の computedHash を upstream の最新状態と照合して更新する。contribute-skill でのマージ後、または upstream 側の更新をローカルに反映した後に使用する。
+description: ルート直下の `skills-lock.json` の `computedHash` を upstream リポジトリの最新状態と照合して更新する。`source` が `Fandhe-AI/` で始まらないエントリは clone せず skip (安全弁)。submodule 配下の `skills-lock.json` は触らない。contribute-skill のマージ後や upstream 同期後、「ハッシュ更新」「skills-lock 同期」などで使用。
 argument-hint: "[skill-name] (省略時は全スキル)"
 user-invocable: true
+model: haiku
 ---
 
 # sync-skills-lock

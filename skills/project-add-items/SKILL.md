@@ -1,6 +1,7 @@
 ---
 name: project-add-items
-description: 要件ドキュメントやタスクリストからプロジェクトアイテムを一括作成する。
+description: Markdown チェックリスト・YAML タスクリスト・要件定義書などからプロジェクトアイテムを一括作成する。タイトル・本文・Priority・Size をパースして `gh project item-create` + `item-edit` でフィールド設定。「要件書からアイテム作って」「タスクをプロジェクトに追加」「ロードマップを取り込んで」などで使用。
+model: sonnet
 ---
 
 # project-add-items
