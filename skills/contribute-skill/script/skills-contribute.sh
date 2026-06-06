@@ -19,6 +19,12 @@ if [[ -z "$SKILL_NAME" || -z "$UPSTREAM_REPO" ]]; then
   exit 1
 fi
 
+# SKILL_NAME のバリデーション（kebab-case のみ許可、パストラバーサル防止）
+if [[ ! "$SKILL_NAME" =~ ^[a-z][a-z0-9-]+$ ]]; then
+  echo "エラー: SKILL_NAME は小文字 kebab-case のみ許可されています: ${SKILL_NAME}"
+  exit 1
+fi
+
 # source の安全弁: Fandhe-AI/ または https://github.com/Fandhe-AI/ のみ許可
 case "$UPSTREAM_REPO" in
   Fandhe-AI/*)

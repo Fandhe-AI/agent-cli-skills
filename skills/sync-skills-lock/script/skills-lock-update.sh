@@ -30,6 +30,12 @@ case "$SOURCE_REPO" in
     ;;
 esac
 
+# gh CLI の認証確認
+if ! gh auth status &>/dev/null; then
+  echo "エラー: gh CLI が認証されていません。gh auth login を実行してください。" >&2
+  exit 1
+fi
+
 echo "==> skills-lock.json を更新中: ${SKILL_NAME} (source: ${SOURCE_REPO})"
 echo ""
 
