@@ -1,0 +1,48 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git switch:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh issue create:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh api:*)",
+      "Bash(gh project:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(mkdir -p:*)",
+      "Bash(mv:*)",
+      "Bash(ln -s:*)",
+      "Bash(rmdir:*)",
+      "Bash(readlink:*)",
+      "Bash(python3 -c:*)",
+      "Bash(python3 -m json.tool)",
+      "WebFetch(domain:docs.github.com)"
+    ],
+    "deny": [
+      "Bash(git commit --no-verify:*)",
+      "Bash(git push --force:*)",
+      "Bash(rm -rf .claude:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "echo '=== Claude Code セッション開始 ==='; echo '重要な規約:'; echo '  - Conventional Commits 形式でコミット (type(scope): subject)'; echo '  - --no-verify は使用禁止'; echo '  - .claude/ 配下は _/dotclaude/ 経由で編集'; echo '  - シークレット (.env 等) を含むファイルはコミット禁止'; echo '================================'"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "matcher": "Edit",
+        "command": "FILE_PATH=$(echo \"$CLAUDE_TOOL_RESULT\" | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('file_path',''))\" 2>/dev/null || true); if [[ \"$FILE_PATH\" == *.md ]]; then echo \"[hook] Markdown ファイルが更新されました: $FILE_PATH\"; fi"
+      }
+    ]
+  }
+}
