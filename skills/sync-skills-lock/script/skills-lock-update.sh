@@ -64,4 +64,5 @@ git diff skills-lock.json
 echo ""
 echo "コミットするには:"
 echo "  git add skills-lock.json"
+echo "  git add .agents/skills/"
 echo "  git commit -m 'chore(skills-lock): ${SKILL_NAME} の computedHash を upstream と同期'"

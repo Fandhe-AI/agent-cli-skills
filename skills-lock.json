@@ -4,7 +4,7 @@
     "github-docs": {
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
-      "skillPath": "skills/github-docs/SKILL.md",
+      "skillPath": ".agents/skills/github-docs/SKILL.md",
       "computedHash": "b3781fe412c6d5e1967ed704b3774a8495c0bf99f00ac3504c5f728c051ed9ef"
     }
   }
