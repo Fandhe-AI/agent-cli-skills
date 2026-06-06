@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # skills-lock-update.sh — skills-lock.json の computedHash を npx skills add で更新する
 #
-# 使い方: ./script/skills-lock-update.sh <skill-name> <source-repo>
-# 例: ./script/skills-lock-update.sh github-docs Fandhe-AI/agent-reference-skills
+# 使い方（リポジトリルートから実行）:
+#   skills/sync-skills-lock/script/skills-lock-update.sh <skill-name> <source-repo>
+#   （インストール先からは .agents/skills/sync-skills-lock/script/skills-lock-update.sh）
+# 例:
+#   skills/sync-skills-lock/script/skills-lock-update.sh github-docs Fandhe-AI/agent-reference-skills
 #
 # このスクリプトは sync-skills-lock スキルが使用する実例コマンド集。
 # リポジトリルートから実行すること。
@@ -18,6 +21,12 @@ if [[ -z "$SKILL_NAME" || -z "$SOURCE_REPO" ]]; then
   exit 1
 fi
 
+# SKILL_NAME バリデーション: 小文字 kebab-case のみ許可（パストラバーサル防止）
+if [[ ! "$SKILL_NAME" =~ ^[a-z][a-z0-9-]+$ ]]; then
+  echo "エラー: SKILL_NAME は小文字 kebab-case のみ許可されています: ${SKILL_NAME}" >&2
+  exit 1
+fi
+
 # source の安全弁: Fandhe-AI/ または https://github.com/Fandhe-AI/ のみ許可
 case "$SOURCE_REPO" in
   Fandhe-AI/*)
@@ -29,6 +38,19 @@ case "$SOURCE_REPO" in
     exit 1
     ;;
 esac
+
+# skills-lock.json に source があれば SOURCE_REPO と照合する（誤 upstream 同期防止）
+if command -v jq >/dev/null 2>&1 && [[ -f skills-lock.json ]]; then
+  LOCK_SOURCE=$(jq -r ".skills[\"${SKILL_NAME}\"].source // empty" skills-lock.json 2>/dev/null)
+  if [[ -n "${LOCK_SOURCE}" ]]; then
+    norm_lock="${LOCK_SOURCE#https://github.com/}"; norm_lock="${norm_lock%.git}"
+    norm_arg="${SOURCE_REPO#https://github.com/}"; norm_arg="${norm_arg%.git}"
+    if [[ "${norm_lock}" != "${norm_arg}" ]]; then
+      echo "エラー: 指定された source (${SOURCE_REPO}) が skills-lock.json の source (${LOCK_SOURCE}) と一致しません。中止します。" >&2
+      exit 1
+    fi
+  fi
+fi
 
 # gh CLI の認証確認
 if ! gh auth status &>/dev/null; then
@@ -59,16 +81,31 @@ PYEOF
 
 echo ""
 
+# skills-lock.json の clean チェック（sync 由来以外の変更の混入を防ぐ）
+# git diff 系は untracked を検出しないため porcelain を使う
+if [[ -n "$(git status --porcelain -- skills-lock.json)" ]]; then
+  echo "エラー: skills-lock.json に未コミットの変更があります。コミットまたは退避してから再実行してください。" >&2
+  exit 1
+fi
+
+# 当該スキルの install ツリーの clean チェック（npx による WIP 上書きを防ぐ）
+# git diff 系は untracked を検出しないため porcelain を使う（未追跡 WIP も保護対象）
+if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]]; then
+  echo "エラー: .agents/skills/${SKILL_NAME}/ に未コミット変更（未追跡含む）があります。npx の上書きで失われるため中止します。コミットまたは退避してから再実行してください。" >&2
+  exit 1
+fi
+
 # npx skills add で CLI に computedHash を更新させる
 # --yes / -y で確認プロンプトをスキップ
 npx skills add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes
 
 echo ""
 echo "==> 更新完了。変更内容:"
-git diff skills-lock.json
+# install ツリーの上書きも確認するため、skills-lock.json と当該スキルの install ツリー両方を diff する
+git diff skills-lock.json ".agents/skills/${SKILL_NAME}/"
 
 echo ""
 echo "コミットするには:"
 echo "  git add skills-lock.json"
-echo "  git add .agents/skills/"
+echo "  git add .agents/skills/${SKILL_NAME}/"
 echo "  git commit -m 'chore(skills-lock): ${SKILL_NAME} の computedHash を upstream と同期'"

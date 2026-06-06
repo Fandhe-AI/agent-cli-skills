@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # skills-contribute.sh — ローカルスキルを upstream リポジトリへ PR として投稿する実例
 #
-# 使い方: ./script/skills-contribute.sh <skill-name> <upstream-repo>
-# 例: ./script/skills-contribute.sh create-commit Fandhe-AI/agent-cli-skills
+# 使い方（リポジトリルートから実行）:
+#   skills/contribute-skill/script/skills-contribute.sh <skill-name> <upstream-repo>
+#   （インストール先からは .agents/skills/contribute-skill/script/skills-contribute.sh）
+# 例: skills/contribute-skill/script/skills-contribute.sh create-commit Fandhe-AI/agent-cli-skills
 #
 # このスクリプトは contribute-skill スキルが使用するコマンド集。
 # Claude がフロー全体を制御するため、直接実行時は各ステップを確認しながら進めること。
@@ -37,14 +39,46 @@ case "$UPSTREAM_REPO" in
     ;;
 esac
 
-# ローカルスキルのパス確認（skills/ → .agents/skills/ の順で探す）
-if [[ -d "skills/${SKILL_NAME}" ]]; then
-  LOCAL_SKILL_DIR="skills/${SKILL_NAME}"
-elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
-  LOCAL_SKILL_DIR=".agents/skills/${SKILL_NAME}"
+# skills-lock.json に source があれば argv の UPSTREAM_REPO と照合する（誤リポ clone 防止）
+if command -v jq >/dev/null 2>&1 && [[ -f skills-lock.json ]]; then
+  LOCK_SOURCE=$(jq -r ".skills[\"${SKILL_NAME}\"].source // empty" skills-lock.json 2>/dev/null)
+  if [[ -n "${LOCK_SOURCE}" ]]; then
+    norm_lock="${LOCK_SOURCE#https://github.com/}"; norm_lock="${norm_lock%.git}"
+    norm_arg="${UPSTREAM_REPO#https://github.com/}"; norm_arg="${norm_arg%.git}"
+    if [[ "${norm_lock}" != "${norm_arg}" ]]; then
+      echo "エラー: 指定された upstream (${UPSTREAM_REPO}) が skills-lock.json の source (${LOCK_SOURCE}) と一致しません。中止します。" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# ローカルスキルのパス確認（override: 環境変数 LOCAL_SKILL_DIR が設定済みならそれを検証して使う）
+if [[ -n "${LOCAL_SKILL_DIR:-}" ]]; then
+  if [[ "${LOCAL_SKILL_DIR}" != "skills/${SKILL_NAME}" && "${LOCAL_SKILL_DIR}" != ".agents/skills/${SKILL_NAME}" ]]; then
+    echo "エラー: LOCAL_SKILL_DIR は skills/${SKILL_NAME} か .agents/skills/${SKILL_NAME} のいずれかを指定してください: ${LOCAL_SKILL_DIR}"
+    exit 1
+  fi
+  if [[ ! -d "${LOCAL_SKILL_DIR}" ]]; then
+    echo "エラー: 指定された LOCAL_SKILL_DIR が存在しません: ${LOCAL_SKILL_DIR}"
+    exit 1
+  fi
 else
-  echo "エラー: ローカルスキルが見つかりません: skills/${SKILL_NAME} / .agents/skills/${SKILL_NAME}"
-  exit 1
+  # 自動解決（両方存在する場合は中止して override を促す）
+  have_skills=0; have_agents=0
+  [[ -d "skills/${SKILL_NAME}" ]] && have_skills=1
+  [[ -d ".agents/skills/${SKILL_NAME}" ]] && have_agents=1
+  if [[ "${have_skills}" -eq 1 && "${have_agents}" -eq 1 ]]; then
+    echo "エラー: skills/${SKILL_NAME} と .agents/skills/${SKILL_NAME} の両方が存在します。"
+    echo "環境変数 LOCAL_SKILL_DIR にどちらかを指定して再実行してください（例: LOCAL_SKILL_DIR=.agents/skills/${SKILL_NAME} $0 ${SKILL_NAME} ${UPSTREAM_REPO}）。"
+    exit 1
+  elif [[ "${have_skills}" -eq 1 ]]; then
+    LOCAL_SKILL_DIR="skills/${SKILL_NAME}"
+  elif [[ "${have_agents}" -eq 1 ]]; then
+    LOCAL_SKILL_DIR=".agents/skills/${SKILL_NAME}"
+  else
+    echo "エラー: ローカルスキルが見つかりません: skills/${SKILL_NAME} / .agents/skills/${SKILL_NAME}"
+    exit 1
+  fi
 fi
 
 echo "==> contribute-skill: ${SKILL_NAME} → ${UPSTREAM_REPO}"
@@ -66,6 +100,8 @@ mkdir -p "$WORKDIR"
 echo "==> 作業ディレクトリ: $WORKDIR"
 
 # Step 6: upstream を clone する
+# cd する前にローカルリポジトリのルートを捕捉する（cd - は stdout 汚染があるため使用しない）
+ORIG_DIR="$(pwd)"
 echo "==> upstream を clone 中..."
 gh repo clone "${UPSTREAM_REPO}" "${WORKDIR}/upstream"
 cd "${WORKDIR}/upstream"
@@ -73,21 +109,32 @@ cd "${WORKDIR}/upstream"
 DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
 echo "    デフォルトブランチ: ${DEFAULT_BRANCH:-main}"
 
-# Step 7: upstream のパス構造を確認してコピーする
-# upstream 側のパスは skills/<name>/ か .agents/skills/<name>/ かを確認する
+# UPSTREAM_REPO を OWNER/REPO 形式へ正規化する（URL 形式の場合に gh pr create が失敗するのを防ぐ）
+REPO_SLUG="${UPSTREAM_REPO#https://github.com/}"
+REPO_SLUG="${REPO_SLUG%.git}"
+
+# Step 7: upstream のスキル配置を決定する（クローンしたリポジトリのレイアウトで判定）
+# skills-lock.json の skillPath はローカル install パスであり upstream の配置ではないため使わない
 UPSTREAM_SKILL_PATH=""
 if [[ -d "skills/${SKILL_NAME}" ]]; then
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
 elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
   UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
+elif [[ -d "skills" ]]; then
+  # upstream が skills/ 配下で公開している慣習
+  UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
+  mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
+elif [[ -d ".agents/skills" ]]; then
+  # upstream が .agents/skills/ 配下で公開している慣習
+  UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
+  mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 else
-  echo "警告: upstream に ${SKILL_NAME} のパスが見つかりません。新規追加として扱います。"
+  echo "警告: upstream にスキルルートが見つかりません。skills/ を既定として新規追加します。"
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
   mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 fi
 
 echo "==> upstream パス: ${UPSTREAM_SKILL_PATH}"
-ORIG_DIR="$(cd - && pwd)"
 cp -R "${ORIG_DIR}/${LOCAL_SKILL_DIR}/." "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}/"
 
 # Step 8: 差分を確認する
@@ -106,6 +153,6 @@ echo "  git switch -c '${BRANCH}'"
 echo "  git add ${UPSTREAM_SKILL_PATH}/"
 echo "  git commit -m '<type>(<scope>): <subject>'"
 echo "  git push -u origin '${BRANCH}'"
-echo "  gh pr create --repo ${UPSTREAM_REPO} --base main --title '<title>' --body '...'"
+echo "  gh pr create --repo ${REPO_SLUG} --base ${DEFAULT_BRANCH:-main} --title '<title>' --body '...'"
 echo ""
 echo "作業ディレクトリ: ${WORKDIR}/upstream"
