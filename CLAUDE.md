@@ -59,6 +59,8 @@ skills/                               -- スキル本体（各ディレクトリ
     security.md                       -- セキュリティチェック規約
     japanese-style.md                 -- 日本語スタイルガイド
     dotclaude-via-temp.md             -- .claude/ 操作時の一時ディレクトリルール
+    description-style.md              -- description 著作スタイル
+    reference-template.md             -- reference 型スキルの書式規約
   skills/                             -- skills/ へのシンボリックリンク
   settings.local.json                 -- ローカル権限設定（git 管理対象外）
   settings.json                       -- hooks 設定（SessionStart リマインダー）
@@ -131,6 +133,8 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `security.md` | security-auditor / create-pr 等 | OWASP Top 10 セキュリティチェック基準 |
 | `japanese-style.md` | 全 Agent | 日本語スタイルガイド |
 | `dotclaude-via-temp.md` | agent-author / rules-author | `.claude/` 操作時の一時ディレクトリルール |
+| `description-style.md` | skill-author / agent-author / skill-reviewer / reference-researcher | description 著作スタイル（発火率・長さ・YAML 落とし穴） |
+| `reference-template.md` | reference-researcher / skill-author | reference 型スキルの reference/*.md と README 索引の書式規約 |
 
 ## Current Skills (21)
 

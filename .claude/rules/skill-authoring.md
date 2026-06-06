@@ -30,14 +30,18 @@ argument-hint: "<引数説明>"    # 引数を取る場合（任意）
 
 ### description の注意事項
 
-- 役割を一文で表現し、発火トリガー語（「〜して」「〜作って」「〜レビューして」等）を含める
-- 関連スキルがあれば「詳細は contribute-skill」のように導線を記載
+description の書き方の詳細は `./description-style.md` を参照する。
+ここでは最重要の YAML 落とし穴のみ記載する。
+
 - `description:` 値に `#` を含める場合は**必ずクォートで囲む**（YAML コメント扱いを防ぐ）
+  - 悪い例: `description: 変更をコミット # 詳細は create-commit`
+  - 良い例: `description: "変更をコミット # 詳細は create-commit"`
+  - 参考: コミット e83e1bb（YAML description 内の `#` をコメント扱いから保護）
+- `:` の後にスペース+テキストが続く場合も語順変更で回避する（詳細は `./description-style.md`）
 
-  悪い例: `description: 変更をコミット # 詳細は create-commit`
-  良い例: `description: "変更をコミット # 詳細は create-commit"`
+### reference 型スキルの書式
 
-  参考: コミット e83e1bb（YAML description 内の `#` をコメント扱いから保護）
+`reference/`・`references/` 配下のページと README 索引の書式は `./reference-template.md` を参照する。
 
 ## 本文構成
 

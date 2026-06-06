@@ -50,6 +50,8 @@ npx skills add Fandhe-AI/agent-cli-skills --all
     security.md                      -- セキュリティチェック規約
     japanese-style.md                -- 日本語スタイルガイド
     dotclaude-via-temp.md            -- .claude/ 操作時の一時ディレクトリルール
+    description-style.md             -- description 著作スタイル
+    reference-template.md            -- reference 型スキルの書式規約
   skills/                            -- シンボリックリンク（skills/ → .claude/skills/）
   settings.json                      -- SessionStart hook（リマインダー）
 skills/
@@ -185,6 +187,8 @@ skills/
 | **security.md** | OWASP Top 10 セキュリティチェック基準 |
 | **japanese-style.md** | 日本語スタイルガイド |
 | **dotclaude-via-temp.md** | `.claude/` 操作時の一時ディレクトリルール（`_/dotclaude/` 経由） |
+| **description-style.md** | description 著作スタイル（発火率・長さ・YAML 落とし穴） |
+| **reference-template.md** | reference 型スキルの reference/*.md と README 索引の書式規約 |
 
 ## 特徴
 

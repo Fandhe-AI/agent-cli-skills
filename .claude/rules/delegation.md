@@ -15,6 +15,17 @@ main の役割は **対話・計画・委譲・報告** に徹することで、
 | `_/`・`docs/`・`.claude/` の**閲覧のみ** | 調査・設計モード | 本ファイル（`./delegation.md`） |
 | `skills/`・`.claude/agents/`・`.claude/rules/` を**作成・編集** | 作成・編集モード | `./delegation-impl.md` |
 
+## model 配分戦略
+
+| 用途 | model |
+|-----|-------|
+| 複雑な横断分析・計画立案 | `opus` |
+| 調査・生成・レビュー・複数ファイル読解 | `sonnet` |
+| 機械的・集計・lint・frontmatter 検証・ドキュメント一覧更新 | `haiku` |
+
+opus はリポジトリ横断分析など特に複雑な判断に限定し、コストを抑える。
+sonnet は調査・作成・検証の主力。haiku は判断不要の機械的処理に使用する。
+
 ## 委譲先マッピング（調査系）
 
 | やりたいこと | subagent_type | model |
@@ -50,3 +61,4 @@ prompt: "skills/ 配下の全スキルの frontmatter を読み、name・descrip
 - `skills/`・`.claude/agents/`・`.claude/rules/` の直接編集（→ 作成・編集モードの Agent へ委譲）
 - 大量ファイルの逐次 Read（→ skill-explorer 等へ委譲）
 - セキュリティ監査（→ security-auditor へ委譲）
+- 「単純だから」「数行だから」を理由に委譲をスキップすること

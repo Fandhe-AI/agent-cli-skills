@@ -25,6 +25,8 @@ tools:                         # 最小権限の原則に従う
 ---
 ```
 
+description の書き方の詳細（トリガー語・略語・YAML 落とし穴・良い例/悪い例）は `./description-style.md` を参照する。
+
 ### model 選定基準
 
 | ユースケース | model |

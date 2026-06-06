@@ -1,6 +1,7 @@
 <!-- source: https://code.claude.com/docs/en/skills -->
 <!-- 最終確認日: 2026-06-06 -->
 <!-- ✅ 取得済み（WebFetch による公式ドキュメント取得） -->
+<!-- 取得状況: ✅ 取得済み -->
 
 # Agent Skills リファレンス
 
