@@ -178,8 +178,8 @@ check_agents() {
     if $fm_ok && [[ -n "$name_val" ]] && [[ -n "$desc_val" ]] && $model_ok; then
       status="$OK"
     else
-      status="$WARN"
-      TOTAL_WARN=$((TOTAL_WARN + 1))
+      status="$NG"
+      TOTAL_NG=$((TOTAL_NG + 1))
     fi
 
     printf "  [%b] %-50s model=%s\n" "$status" "$agent_path" "$(val_str "$model_val")"

@@ -31,10 +31,13 @@ case "$UPSTREAM_REPO" in
     ;;
 esac
 
-# ローカルスキルのパス確認
-LOCAL_SKILL_DIR="skills/${SKILL_NAME}"
-if [[ ! -d "$LOCAL_SKILL_DIR" ]]; then
-  echo "エラー: ローカルスキルが見つかりません: $LOCAL_SKILL_DIR"
+# ローカルスキルのパス確認（skills/ → .agents/skills/ の順で探す）
+if [[ -d "skills/${SKILL_NAME}" ]]; then
+  LOCAL_SKILL_DIR="skills/${SKILL_NAME}"
+elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
+  LOCAL_SKILL_DIR=".agents/skills/${SKILL_NAME}"
+else
+  echo "エラー: ローカルスキルが見つかりません: skills/${SKILL_NAME} / .agents/skills/${SKILL_NAME}"
   exit 1
 fi
 

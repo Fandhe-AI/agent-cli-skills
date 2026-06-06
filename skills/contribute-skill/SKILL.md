@@ -32,8 +32,8 @@ SKILL_NAME="$ARGUMENTS"
 # 引数が空の場合: skills/ を列挙してユーザーに選ばせる
 ```
 
-対象ディレクトリ: `skills/<SKILL_NAME>/`
-存在しなければエラーで中止します。
+対象ディレクトリ: `skills/<SKILL_NAME>/` または `.agents/skills/<SKILL_NAME>/`（この順で探す）。
+どちらにも存在しなければエラーで中止します。
 
 ### Step 2: upstream を特定する
 
