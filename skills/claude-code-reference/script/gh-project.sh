@@ -40,15 +40,16 @@ get_field_list() {
 # 例: get_field_id_by_name "Status"
 get_field_id_by_name() {
   local field_name="$1"
-  get_field_list | python3 -c "
-import sys, json
+  get_field_list | FIELD_NAME="${field_name}" python3 - <<'PYEOF'
+import sys, json, os
 data = json.load(sys.stdin)
 fields = data.get('fields', [])
+target = os.environ['FIELD_NAME']
 for f in fields:
-    if f.get('name') == '${field_name}':
+    if f.get('name') == target:
         print(f['id'])
         break
-"
+PYEOF
 }
 
 # フィールドのオプション名→オプション ID を解決する例
@@ -56,17 +57,19 @@ for f in fields:
 get_option_id_by_name() {
   local field_name="$1"
   local option_name="$2"
-  get_field_list | python3 -c "
-import sys, json
+  get_field_list | FIELD_NAME="${field_name}" OPTION_NAME="${option_name}" python3 - <<'PYEOF'
+import sys, json, os
 data = json.load(sys.stdin)
 fields = data.get('fields', [])
+target_field = os.environ['FIELD_NAME']
+target_opt   = os.environ['OPTION_NAME']
 for f in fields:
-    if f.get('name') == '${field_name}':
+    if f.get('name') == target_field:
         for opt in f.get('options', []):
-            if opt.get('name') == '${option_name}':
+            if opt.get('name') == target_opt:
                 print(opt['id'])
                 break
-"
+PYEOF
 }
 
 # ----------------------------------------------------------------

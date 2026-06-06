@@ -27,7 +27,7 @@ argument-hint: "<category>/<agent-name> (例: create-agent quality/lint-runner)"
 |---------|------|------|-----------|
 | research/ | `.claude/agents/research/` | 調査・情報収集・WebFetch | `sonnet` |
 | author/ | `.claude/agents/author/` | 作成・編集（Edit/Write/Bash を使用） | `sonnet` |
-| quality/ | `.claude/agents/quality/` | レビュー・lint・検証（読み取り専用） | `haiku` |
+| quality/ | `.claude/agents/quality/` | レビュー・lint・検証（読み取り専用） | `sonnet`（推論・レビュー）/ `haiku`（機械的 lint のみ） |
 
 ### model 詳細基準
 

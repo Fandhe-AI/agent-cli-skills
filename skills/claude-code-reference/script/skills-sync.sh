@@ -142,9 +142,9 @@ check_skills_lock() {
   fi
 
   echo "[INFO] skills-lock.json のスキル一覧:"
-  python3 -c "
-import json
-with open('${lock_file}') as f:
+  LOCK_FILE="${lock_file}" python3 - <<'PYEOF'
+import json, os
+with open(os.environ['LOCK_FILE']) as f:
     d = json.load(f)
 skills = d.get('skills', {})
 print(f'  合計 {len(skills)} スキル')
@@ -152,7 +152,7 @@ for name, info in skills.items():
     source = info.get('source', '(source なし)')
     h = info.get('computedHash', '(hash なし)')
     print(f'  - {name}: source={source}, hash={h[:10]}...')
-"
+PYEOF
 }
 
 # ----------------------------------------------------------------

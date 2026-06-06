@@ -42,6 +42,23 @@ tools:                         # 最小権限の原則に従う
 
 読み取り専用 Agent は `Edit`・`Write`・`Bash` を **tools リストに含めない**。
 
+#### 例外: Bash を許可する読み取り専用 Agent
+
+以下の場合は、読み取り専用カテゴリ（research/・quality/）でも `Bash` を許可する:
+
+- **機械的検証 Agent**（例: `frontmatter-linter`）— `ls`・`find`・`readlink` 等のファイルシステム確認コマンドのみ使用。外部サービスへの接続や副作用コマンド（`git commit`・`gh` 等）は禁止。
+- **CLI 失敗調査 Agent**（例: `sub-investigator`）— `git`・`gh` コマンドの診断的実行（`--dry-run`・`status`・`log` 等）のみ使用。破壊的操作は禁止。
+
+このような例外 Agent は本文内に「Bash は〇〇コマンドの診断目的のみ（破壊的操作禁止）」と明記すること。
+
+#### WebFetch / WebSearch を許可する読み取り専用 Agent
+
+調査系 Agent（research/）が WebFetch を使用する場合、本文内に **許可ドメイン一覧** を明示すること:
+
+- `docs.anthropic.com` / `code.claude.com`（Claude Code 公式）
+- `github.com` / `cli.github.com` / `docs.github.com`（GitHub 公式）
+- プライベート IP（`localhost`・`127.x`・`10.x`・`192.168.x`）へのアクセスは禁止。
+
 ## カテゴリ配置
 
 | カテゴリ | パス | 役割 |
