@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'agent-cli-skills: 日本語でやりとり / 作業は subagent へ委譲し main 消費を抑える (.claude/rules/delegation.md, delegation-impl.md) / .claude 配下の編集は _/dotclaude 経由 (dotclaude-via-temp) / Conventional Commits 厳守 (--no-verify 禁止) / implement-issue は計画承認後に実装'"
+          }
+        ]
+      }
+    ]
+  }
+}
