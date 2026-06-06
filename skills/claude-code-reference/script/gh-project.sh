@@ -40,9 +40,11 @@ get_field_list() {
 # 例: get_field_id_by_name "Status"
 get_field_id_by_name() {
   local field_name="$1"
-  get_field_list | FIELD_NAME="${field_name}" python3 - <<'PYEOF'
-import sys, json, os
-data = json.load(sys.stdin)
+  local field_json
+  field_json="$(get_field_list)"
+  FIELD_NAME="${field_name}" FIELDS_JSON="${field_json}" python3 - <<'PYEOF'
+import json, os
+data = json.loads(os.environ['FIELDS_JSON'])
 fields = data.get('fields', [])
 target = os.environ['FIELD_NAME']
 for f in fields:
@@ -57,9 +59,11 @@ PYEOF
 get_option_id_by_name() {
   local field_name="$1"
   local option_name="$2"
-  get_field_list | FIELD_NAME="${field_name}" OPTION_NAME="${option_name}" python3 - <<'PYEOF'
-import sys, json, os
-data = json.load(sys.stdin)
+  local field_json
+  field_json="$(get_field_list)"
+  FIELD_NAME="${field_name}" OPTION_NAME="${option_name}" FIELDS_JSON="${field_json}" python3 - <<'PYEOF'
+import json, os
+data = json.loads(os.environ['FIELDS_JSON'])
 fields = data.get('fields', [])
 target_field = os.environ['FIELD_NAME']
 target_opt   = os.environ['OPTION_NAME']

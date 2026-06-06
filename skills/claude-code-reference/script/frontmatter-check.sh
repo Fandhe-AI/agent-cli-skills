@@ -230,6 +230,64 @@ check_symlinks() {
 }
 
 # ----------------------------------------------------------------
+# E: skills-lock.json 整合確認
+# ----------------------------------------------------------------
+check_skills_lock() {
+  echo "=== E. skills-lock.json 整合確認 ==="
+  echo ""
+
+  local lock_file="${REPO_ROOT}/skills-lock.json"
+  if [[ ! -f "$lock_file" ]]; then
+    echo "  [${WARN}] skills-lock.json が見つかりません"
+    TOTAL_WARN=$((TOTAL_WARN + 1))
+    echo ""
+    return
+  fi
+
+  local any_ng=0
+
+  while IFS=$'\t' read -r name loc; do
+    case "$loc" in
+      skills/)
+        printf "  [%b] %-30s 実在場所: skills/\n" "$OK" "$name"
+        ;;
+      .agents/skills/)
+        printf "  [%b] %-30s 実在場所: .agents/skills/\n" "$OK" "$name"
+        ;;
+      MISSING)
+        printf "  [%b] %-30s 実在場所: ❌ MISSING\n" "$NG" "$name"
+        any_ng=$((any_ng + 1))
+        TOTAL_NG=$((TOTAL_NG + 1))
+        ;;
+    esac
+  done < <(python3 - "${lock_file}" "${REPO_ROOT}" <<'PYEOF'
+import json, os, sys
+lock_file, repo_root = sys.argv[1], sys.argv[2]
+with open(lock_file) as f:
+    d = json.load(f)
+for name in d.get('skills', {}).keys():
+    in_skills = os.path.isdir(os.path.join(repo_root, f'skills/{name}'))
+    in_agents = os.path.isdir(os.path.join(repo_root, f'.agents/skills/{name}'))
+    if in_skills:
+        loc = 'skills/'
+    elif in_agents:
+        loc = '.agents/skills/'
+    else:
+        loc = 'MISSING'
+    print(f'{name}\t{loc}')
+PYEOF
+  )
+
+  echo ""
+  if [[ "$any_ng" -gt 0 ]]; then
+    echo -e "  ${NG}: ${any_ng} 件のエントリが実在しません"
+  else
+    echo -e "  ${OK}: 全エントリが実在"
+  fi
+  echo ""
+}
+
+# ----------------------------------------------------------------
 # ヘルパー関数
 # ----------------------------------------------------------------
 bool_str() {
@@ -271,10 +329,12 @@ main() {
     --skills)   check_skills ;;
     --agents)   check_agents ;;
     --symlinks) check_symlinks ;;
+    --lock)     check_skills_lock ;;
     --all | *)
       check_skills
       check_agents
       check_symlinks
+      check_skills_lock
       ;;
   esac
 
