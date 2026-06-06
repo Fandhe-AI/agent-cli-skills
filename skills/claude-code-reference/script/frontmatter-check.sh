@@ -155,7 +155,7 @@ check_agents() {
   local agents_dir="${REPO_ROOT}/.claude/agents"
   local any_ng=0
 
-  find "${agents_dir}" -name "*.md" | sort | while read -r agent_md; do
+  while read -r agent_md; do
     local agent_path="${agent_md#${REPO_ROOT}/}"
 
     local name_val model_val desc_val fm_ok
@@ -183,7 +183,7 @@ check_agents() {
     fi
 
     printf "  [%b] %-50s model=%s\n" "$status" "$agent_path" "$(val_str "$model_val")"
-  done
+  done < <(find "${agents_dir}" -name "*.md" | sort)
 
   echo ""
 }

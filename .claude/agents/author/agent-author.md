@@ -66,7 +66,7 @@ Agent はカテゴリ別ディレクトリに配置する。
 | カテゴリ例 | パス例 |
 |-----------|--------|
 | 著作・生成系 | `.claude/agents/author/<name>.md` |
-| 検証・レビュー系 | `.claude/agents/verifier/<name>.md` |
+| 検証・レビュー系 | `.claude/agents/quality/<name>.md` |
 | 汎用 | `.claude/agents/<name>.md` |
 
 一時作業先: `_/dotclaude/agents/<category>/<name>.md`

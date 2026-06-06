@@ -3,7 +3,7 @@ name: reference-researcher
 description: >
   Claude Code（skill/agent/rule/hook/settings.json の仕様）・vercel-labs/skills CLI・`gh` CLI・GitHub API の外部ドキュメントを調査し、出典付きリファレンスノートを返す調査 Agent。
   新スキル・新 Agent・新 Rule を著作する前に仕様を確認したい、または既存実装の根拠ドキュメントを探したい場面で委譲する。
-  リポ内 `.claude/agents/skills/github-docs/references/` も一次情報として参照する。
+  リポ内 `.agents/skills/github-docs/references/` も一次情報として参照する。
 model: sonnet
 tools:
   - Read
@@ -32,7 +32,7 @@ tools:
 | 対象 | 操作 |
 |------|------|
 | リポ内 `skills/*/SKILL.md` / `.claude/**/*.md` | ✅ Read/Grep |
-| `.claude/agents/skills/github-docs/references/` | ✅ Read（一次情報として優先） |
+| `.agents/skills/github-docs/references/` | ✅ Read（一次情報として優先） |
 | 公式外部ドキュメント（Claude Code / gh / GitHub API） | ✅ WebFetch/WebSearch（許可ドメインのみ） |
 | ファイルの作成・編集・削除 | ❌ 禁止 |
 
@@ -57,10 +57,10 @@ SSRF を防ぐため、WebFetch は以下の許可ドメインのみを対象と
 
 ### Step 1: リポ内参照の確認
 
-まず Glob で `skills/*/SKILL.md` と `.claude/agents/skills/github-docs/references/` を検索し、トピックに関連する既存ドキュメントを Read する。ローカルで見つかった情報を一次情報として記録する。
+まず Glob で `skills/*/SKILL.md` と `.agents/skills/github-docs/references/` を検索し、トピックに関連する既存ドキュメントを Read する。ローカルで見つかった情報を一次情報として記録する。
 
 ```
-.claude/agents/skills/github-docs/references/
+.agents/skills/github-docs/references/
 ```
 
 ### Step 2: 公式ドキュメントの特定
