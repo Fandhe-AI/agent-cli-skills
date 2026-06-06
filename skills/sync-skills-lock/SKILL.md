@@ -107,10 +107,12 @@ git checkout -- .agents/skills/<name>/
 
 ### Step 7: git add する
 
-`npx skills add` がすでに `skills-lock.json` を更新済みのため、ファイル更新は不要。ステージングのみ行う。
+`npx skills add` がすでに `skills-lock.json` と `.agents/skills/<name>/` を更新済みのため、ファイル更新は不要。ステージングのみ行う。
 
 ```bash
+# skills-lock.json と更新されたスキルファイルを両方ステージング
 git add skills-lock.json
+git add .agents/skills/
 ```
 
 ### Step 8: コミット提案

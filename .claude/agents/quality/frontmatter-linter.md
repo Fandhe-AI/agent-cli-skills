@@ -73,8 +73,8 @@ tools:
 
 `skills-lock.json` が存在する場合:
 
-- ファイルに列挙されたスキル名が `skills/` に実在するか
-- `skills/` に存在するスキルが `skills-lock.json` に登録されているか（孤立スキル検出）
+- ファイルに列挙されたスキル名が `skills/<name>/` または `.agents/skills/<name>/` のいずれかに実在するか
+- `skills/` に存在するスキルが `skills-lock.json` に未登録でも NG としない（ローカル開発スキルは登録不要）
 
 ### F. kebab-case 命名規則
 
@@ -129,12 +129,16 @@ done
 ### Step 5: skills-lock.json 整合確認（ファイルが存在する場合）
 
 ```bash
-# skills-lock.json のスキル名一覧
-python3 -c "import json,sys; d=json.load(open('skills-lock.json')); [print(k) for k in d.get('skills',{}).keys()]" 2>/dev/null || echo "SKIP: skills-lock.json not found"
-```
-
-```
-Glob: skills/*/  ← 実在スキルディレクトリ一覧と突合
+# skills-lock.json に列挙されたスキルが skills/ または .agents/skills/ のどちらかに存在するか確認
+python3 -c "
+import json, os, sys
+d = json.load(open('skills-lock.json'))
+for name in d.get('skills', {}).keys():
+    in_skills = os.path.isdir(f'skills/{name}')
+    in_agents = os.path.isdir(f'.agents/skills/{name}')
+    loc = 'skills/' if in_skills else ('.agents/skills/' if in_agents else 'MISSING')
+    print(f'{name}\t{loc}')
+" 2>/dev/null || echo "SKIP: skills-lock.json not found"
 ```
 
 ### Step 6: レポート生成
@@ -179,11 +183,11 @@ Glob: skills/*/  ← 実在スキルディレクトリ一覧と突合
 
 ### E. skills-lock.json 整合
 
-| スキル名 | lock に存在 | skills/ に存在 |
-|--------|-----------|--------------|
-| create-commit | ✅ | ✅ |
-| phantom-skill | ✅ | ❌ 孤立 |
-| new-skill     | ❌ 未登録 | ✅ |
+| スキル名 | lock に存在 | 実在場所 |
+|--------|-----------|--------|
+| create-commit | ✅ | skills/ |
+| github-docs   | ✅ | .agents/skills/ |
+| phantom-skill | ✅ | ❌ MISSING |
 
 ### F. kebab-case 命名
 
