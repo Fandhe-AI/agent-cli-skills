@@ -33,10 +33,22 @@ tools:
 |------|------|
 | ログ・設定ファイルの読み取り | ✅ Read/Grep |
 | バージョン・環境情報の取得 | ✅ Bash（診断のみ） |
-| 外部ドキュメント参照 | ✅ WebFetch |
+| 外部ドキュメント参照 | ✅ WebFetch（許可ドメインのみ） |
 | ファイルの作成・編集・削除 | ❌ 禁止 |
 | ブランチ操作・プッシュ・リセット | ❌ 禁止 |
 | `--force` / `--no-verify` オプション使用 | ❌ 禁止 |
+
+## WebFetch 許可ドメイン
+
+SSRF を防ぐため、WebFetch は以下の許可ドメインのみを対象とする。ユーザー入力 URL をそのまま渡してはならない。
+
+- `docs.anthropic.com`
+- `code.claude.com`
+- `github.com`
+- `cli.github.com`
+- `docs.github.com`
+
+プライベート IP（`localhost`・`127.x`・`10.x`・`192.168.x`）へのアクセスは禁止。
 
 ## 遵守する規約
 

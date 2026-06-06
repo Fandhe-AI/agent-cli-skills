@@ -129,14 +129,14 @@ CLAUDE.md の Sub-agents 表・構造ツリーを更新するには:
 
 ## 検証
 
-1. `.claude/agents/<category>/<agent-name>.md` が正しいパスに存在することを確認する
+1. `.claude/agents/<category>/<agent-name>.md` が正しいパスに存在することを確認する（`agent-author` が dotclaude-via-temp に従い `_/dotclaude/agents/` への一時作成から `.claude/agents/` への `mv` まで一貫して実行するため、`create-agent` 側で `mv` を別途実行する必要はない）
 2. frontmatter の `name:` フィールドが `<agent-name>` と一致していることを確認する
 3. `tools` リストがカテゴリの最小権限ポリシーを遵守していることを確認する
 4. `subagent_type: <agent-name>` で呼び出せる状態になっているか確認する
 
 ## 注意事項
 
-- **dotclaude-via-temp 必須**: `agent-author` は `.claude/agents/` に直接書き込まず、`_/dotclaude/agents/` 経由で最終配置する（詳細: `.claude/rules/dotclaude-via-temp.md`）
+- **dotclaude-via-temp 必須**: `agent-author` は `.claude/agents/` に直接書き込まず、`_/dotclaude/agents/` への一時作成から `.claude/agents/` への `mv` まで一貫して実行する。`create-agent` 側で `mv` を別途実行する必要はない（詳細: `.claude/rules/dotclaude-via-temp.md`）
 - **`rm -rf _/dotclaude` は禁止**: `rmdir` で空ディレクトリのみ削除する（他の並行作業との共有ディレクトリ）
 - **読み取り専用 Agent の tools**: `research/` と `quality/` カテゴリには `Edit`・`Write`・`Bash` を含めない
 - **name の解決**: `subagent_type:` による呼び出しは frontmatter の `name:` フィールドで解決される。カテゴリを移動しても呼び出しコードの変更が不要

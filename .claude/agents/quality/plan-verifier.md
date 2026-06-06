@@ -9,8 +9,6 @@ tools:
   - Glob
   - Grep
   - Read
-  - WebFetch
-  - WebSearch
 ---
 
 # Plan Verifier Agent
