@@ -8,7 +8,7 @@
 #
 # 重要:
 #   - --no-verify は絶対に使用しない（pre-commit フック回避禁止）
-#   - body に HEREDOC を使うと特殊文字・シングルクォートを安全に扱える
+#   - printf -v で変数にビルドすることで特殊文字・コマンド展開を安全に扱える
 #   - .env や認証情報ファイルが staged に含まれる場合はコミットを中止する
 
 set -euo pipefail
@@ -47,7 +47,7 @@ check_staged() {
 }
 
 # ----------------------------------------------------------------
-# コミット実行（HEREDOC を使って特殊文字を安全に渡す）
+# コミット実行（printf -v で変数にビルドし特殊文字を安全に渡す）
 # ----------------------------------------------------------------
 # 引数: TYPE SCOPE SUBJECT [BODY]
 #   TYPE:    Conventional Commits の type（feat, fix, docs, refactor, test, chore, ...）
@@ -72,23 +72,15 @@ do_commit() {
     echo "[WARN] 件名が 72 文字を超えています (${#full_subject} 文字): ${full_subject}" >&2
   fi
 
+  local full_msg
   if [[ -n "$body" ]]; then
-    git commit -m "$(cat <<EOF
-${type}${scope_part}: ${subject}
-
-${body}
-
-Co-Authored-By: Claude <noreply@anthropic.com>
-EOF
-)"
+    printf -v full_msg '%s%s: %s\n\n%s\n\nCo-Authored-By: Claude <noreply@anthropic.com>' \
+      "${type}" "${scope_part}" "${subject}" "${body}"
   else
-    git commit -m "$(cat <<EOF
-${type}${scope_part}: ${subject}
-
-Co-Authored-By: Claude <noreply@anthropic.com>
-EOF
-)"
+    printf -v full_msg '%s%s: %s\n\nCo-Authored-By: Claude <noreply@anthropic.com>' \
+      "${type}" "${scope_part}" "${subject}"
   fi
+  git commit -m "$full_msg"
 }
 
 # ----------------------------------------------------------------

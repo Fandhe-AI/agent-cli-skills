@@ -20,7 +20,7 @@ tools:
 ## 対象スコープ
 
 - `skills/*/SKILL.md`（スキル本体のコマンド・手順）
-- `.claude/agents/*.md`（Agent 定義のコマンド・ツール使用）
+- `.claude/agents/**/*.md`（Agent 定義のコマンド・ツール使用。`research/`・`author/`・`quality/` サブカテゴリを含む）
 - `git diff` または指定されたファイル・ディレクトリ
 
 スコープ外（ネットワーク上の実際のサービス動作、ブラウザ実行環境）は検証不能として明示的にスキップする。
