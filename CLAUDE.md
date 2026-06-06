@@ -18,13 +18,10 @@ skills/                               -- スキル本体（各ディレクトリ
   implement-review/
   implement-review-pr/
   update-docs/
-  create-skill/
-  create-agent/
   claude-code-reference/
     reference/                        -- 公式仕様要約
     sample/                           -- 実例
     script/                           -- 実行可能コマンド集
-  update-reference/
   project-init/
   project-add-items/
   project-create-issues/
@@ -61,7 +58,12 @@ skills/                               -- スキル本体（各ディレクトリ
     dotclaude-via-temp.md             -- .claude/ 操作時の一時ディレクトリルール
     description-style.md              -- description 著作スタイル
     reference-template.md             -- reference 型スキルの書式規約
-  skills/                             -- skills/ へのシンボリックリンク
+  skills/                             -- skills/ へのシンボリックリンク（一部実ディレクトリ）
+    create-skill/                     -- リポジトリ管理スキル（実ディレクトリ）
+    create-agent/                     -- リポジトリ管理スキル（実ディレクトリ）
+    update-reference/                 -- リポジトリ管理スキル（実ディレクトリ）
+    github-docs                       -- 参照スキル（symlink）
+    (他 create-commit 等は skills/ への symlink)
   settings.local.json                 -- ローカル権限設定（git 管理対象外）
   settings.json                       -- hooks 設定（SessionStart リマインダー）
 ```
@@ -136,15 +138,15 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `description-style.md` | skill-author / agent-author / skill-reviewer / reference-researcher | description 著作スタイル（発火率・長さ・YAML 落とし穴） |
 | `reference-template.md` | reference-researcher / skill-author | reference 型スキルの reference/*.md と README 索引の書式規約 |
 
-## Current Skills (21)
+## Current Skills (18)
 
 ### 開発ワークフロー (8)
 
 create-commit, create-issue, create-plan, create-pr, implement-issue, implement-review, implement-review-pr, update-docs
 
-### スキル著作・リファレンス (4)
+### スキル著作・リファレンス (1)
 
-create-skill, create-agent, claude-code-reference, update-reference
+claude-code-reference
 
 ### GitHub Projects 管理 (7)
 
@@ -153,6 +155,10 @@ project-init, project-add-items, project-create-issues, project-view-status, pro
 ### 上流貢献 (2)
 
 contribute-skill, sync-skills-lock
+
+### リポジトリ管理スキル（.claude/skills/ に配置）
+
+create-skill, create-agent, update-reference
 
 ### 参照スキル（.claude/skills/ に配置）
 
