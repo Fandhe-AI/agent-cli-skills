@@ -79,6 +79,8 @@ git diff skills-lock.json
 
 **重要な副作用**: `npx skills add` はインストール済みファイルを最新の upstream 版で上書きする。upstream との同期が目的のため、これは意図した動作である。
 
+**注意**: このコマンドは即座に `skills-lock.json` と `.agents/skills/<name>/` を書き換える。ユーザー承認（Step 6）の前に変更が確定するため、承認しない場合は Step 6 の案内に従いリバートが必要。
+
 ### Step 5: 差分を表示する
 
 ```bash
@@ -89,7 +91,19 @@ git diff skills-lock.json
 
 ### Step 6: ユーザーに承認を求める
 
-差分がある場合のみ、ユーザーに「この更新を適用してよいか」を確認する。承認がなければ中止する。
+差分がある場合のみ、ユーザーに「この更新を適用してよいか」を確認する。
+
+承認がなければ以下のコマンドで変更を元に戻してから中止する（`<name>` は対象スキル名に置換）:
+
+```bash
+# skills-lock.json をリバート
+git checkout skills-lock.json
+
+# インストール済みスキルファイルをリバート（<name> を置換）
+git checkout -- .agents/skills/<name>/
+```
+
+変更を元に戻した後、作業を中止する。
 
 ### Step 7: git add する
 

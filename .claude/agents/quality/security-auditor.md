@@ -132,6 +132,12 @@ Step 3 でヒットしたファイル、または変更差分のファイルを 
 スキルが `curl | bash` パターンや外部スクリプト取得を行う場合、
 WebFetch でその URL の内容を確認し安全性を評価する。
 
+**SSRF 制約**: WebFetch は以下の許可ドメインのみを対象とする。スキル内に書かれた任意の URL をそのまま渡してはならない。許可ドメイン外の URL は「外部参照あり — 手動確認要」としてレポートに記載して終了する。
+
+- `docs.anthropic.com` / `code.claude.com`（Claude Code 公式）
+- `github.com` / `cli.github.com` / `docs.github.com`（GitHub 公式）
+- プライベート IP（`localhost`・`127.x`・`10.x`・`192.168.x`）へのアクセスは禁止
+
 ### Step 6: レポート生成
 
 以下フォーマットで出力する。
