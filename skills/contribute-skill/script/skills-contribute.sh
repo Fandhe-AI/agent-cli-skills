@@ -50,6 +50,13 @@ if command -v jq >/dev/null 2>&1 && [[ -f skills-lock.json ]]; then
       exit 1
     fi
   fi
+  # sourceType の安全弁: github 以外は gh repo clone / gh pr create が成立しないため中止する
+  # （contribute-skill/SKILL.md Step 2 と同じガード）
+  LOCK_SOURCE_TYPE=$(jq -r ".skills[\"${SKILL_NAME}\"].sourceType // empty" skills-lock.json 2>/dev/null)
+  if [[ -n "${LOCK_SOURCE_TYPE}" && "${LOCK_SOURCE_TYPE}" != "github" ]]; then
+    echo "エラー: sourceType '${LOCK_SOURCE_TYPE}' は github ではありません。中止します。" >&2
+    exit 1
+  fi
 fi
 
 # ローカルスキルのパス確認（override: 環境変数 LOCAL_SKILL_DIR が設定済みならそれを検証して使う）
