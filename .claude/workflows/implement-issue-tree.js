@@ -22,6 +22,12 @@ if (!Number.isInteger(parent) || parent <= 0) {
   throw new Error('親イシュー番号を args で指定すること（例: {"parent": 1008, "branch": "main"}）')
 }
 
+// GitHub API から取得した文字列をエージェントプロンプトに埋め込む前にサニタイズする
+// バッククォート・バックスラッシュによるプロンプトインジェクションを軽減する
+function sanitize(str) {
+  return String(str).replace(/`/g, "'").replace(/\\/g, '/')
+}
+
 const COMMON = [
   `カレントディレクトリのリポジトリで作業する。base branch: ${baseBranch}。`,
   '自動運転モード: ユーザーへの質問・承認待ちは不可。判断が必要なら安全側に倒して進める。',
@@ -91,8 +97,9 @@ const CLOSE_SCHEMA = {
 }
 
 function implementPrompt(item) {
+  const title = sanitize(item.title)
   return [
-    `イシュー #${item.number}「${item.title}」を実装し PR を作成する担当エージェント。`,
+    `イシュー #${item.number}「${title}」を実装し PR を作成する担当エージェント。`,
     COMMON,
     '手順:',
     '1. git status が clean か確認する。差分が残っていれば作業せず prNumber: 0 と理由を返す。',
@@ -126,13 +133,14 @@ function monitorPrompt(item, impl) {
 }
 
 function fixPrompt(item, impl, finding) {
+  const branch = sanitize(impl.branch)
   return [
-    `PR #${impl.prNumber}（イシュー #${item.number}、ブランチ ${impl.branch}）への指摘を修正する担当。`,
+    `PR #${impl.prNumber}（イシュー #${item.number}、ブランチ ${branch}）への指摘を修正する担当。`,
     COMMON,
     '指摘内容:',
     finding.summary,
     '手順:',
-    `1. git fetch origin && git checkout ${impl.branch} && git pull origin ${impl.branch}。コンフリクト解消が必要な場合は origin/${baseBranch} をマージして解消する。`,
+    `1. git fetch origin && git checkout ${branch} && git pull origin ${branch}。コンフリクト解消が必要な場合は origin/${baseBranch} をマージして解消する。`,
     '2. 指摘を重要度を問わずすべて修正する。',
     '3. .claude/skills/create-commit/SKILL.md に従いコミットし、git push origin ${impl.branch} で反映する。',
     '4. unresolved-comments の指摘を修正した場合は、対応したスレッドを gh api graphql の resolveReviewThread ミューテーションで解決済みにマークする（可能な場合）。',
@@ -141,8 +149,9 @@ function fixPrompt(item, impl, finding) {
 }
 
 function closePrompt(item) {
+  const title = sanitize(item.title)
   return [
-    `親イシュー #${item.number}「${item.title}」の完了検証とクローズの担当。配下の子イシューは本ワークフローで処理済み。`,
+    `親イシュー #${item.number}「${title}」の完了検証とクローズの担当。配下の子イシューは本ワークフローで処理済み。`,
     COMMON,
     '手順:',
     `1. gh api repos/{owner}/{repo}/issues/${item.number}/sub_issues で全子イシューが closed であることを確認する。open が残っていれば closed: false で理由を返す。`,
