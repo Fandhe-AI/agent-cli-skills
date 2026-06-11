@@ -1,0 +1,17 @@
+{
+  "_comment": "implement-issue-tree workflow の args 例",
+  "examples": [
+    {
+      "description": "親イシュー #42 の配下を main へマージ（branch 省略時のデフォルト）",
+      "args": { "parent": 42 }
+    },
+    {
+      "description": "親イシュー #100 の配下を develop ブランチへマージ",
+      "args": { "parent": 100, "branch": "develop" }
+    },
+    {
+      "description": "サブ親イシュー #200 だけを対象に部分実行（大規模ツリーの分割実行）",
+      "args": { "parent": 200, "branch": "main" }
+    }
+  ]
+}
