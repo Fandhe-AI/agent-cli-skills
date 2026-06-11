@@ -117,8 +117,10 @@ PHASE=1
 # （作成済みの場合は失敗を無視して続行する）
 gh label create "phase:${PHASE}" --color "0075ca" 2>/dev/null || true
 
-# --root 再実行時の重複防止: ルート直下に同じ phase ラベルの open な親が既にあれば再利用する
+# --root 再実行時の重複防止: ルート直下に同じ Phase の open な親が既にあれば再利用する
 # closed な親は再利用しない（closed 親の下に open issue を残置しない運用ルールと整合させる）。
+# phase ラベルだけでは同ラベルの一般 issue がルート直下に混在した場合に誤マッチするため、
+# Phase 親のタイトル規約（feat(phase-N): 接頭辞）でも絞り込む。
 # 直下が 100 件を超える場合に備えてページングで全件走査する
 PHASE_NUMBER=""
 PAGE=1
@@ -126,13 +128,18 @@ while true; do
   RESULT=$(gh api \
     "repos/{owner}/{repo}/issues/${ROOT_NUMBER}/sub_issues?per_page=100&page=${PAGE}")
   PHASE_NUMBER=$(echo "${RESULT}" | jq -r \
-    "[.[] | select(.state == \"open\" and any(.labels[]?; .name == \"phase:${PHASE}\"))][0].number // empty")
+    "[.[] | select(.state == \"open\"
+      and (.title | startswith(\"feat(phase-${PHASE}):\"))
+      and any(.labels[]?; .name == \"phase:${PHASE}\"))][0].number // empty")
   COUNT=$(echo "${RESULT}" | jq 'length')
   if [[ -n "${PHASE_NUMBER}" || "${COUNT}" -lt 100 ]]; then break; fi
   PAGE=$((PAGE + 1))
 done
 [[ -n "${PHASE_NUMBER}" ]] && echo "既存の Phase 親 issue を再利用: #${PHASE_NUMBER}"
 ```
+
+タイトル規約が `feat(phase-N):` と異なるツリーでは上記の自動判定に頼らず、候補をユーザーに
+提示して再利用すべき Phase 親を確認する。
 
 `PHASE_NUMBER` が空（既存の Phase 親がない）場合のみ、以下で新規作成してルートへ紐付ける。
 
