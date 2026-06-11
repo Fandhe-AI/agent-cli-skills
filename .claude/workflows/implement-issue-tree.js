@@ -196,6 +196,13 @@ function visit(node) {
 const root = tree.nodes.find((n) => n.number === parent)
 if (!root) throw new Error(`ルートイシュー #${parent} がツリー取得結果に含まれていない`)
 visit(root)
+const unreachable = tree.nodes.filter((n) => !visited.has(n.number))
+if (unreachable.length > 0) {
+  throw new Error(
+    `Plan が返したノードのうち ${unreachable.length} 件がルート #${parent} から到達不能: ` +
+    unreachable.map((n) => `#${n.number}（parent: ${n.parent}）`).join(', '),
+  )
+}
 const openImpl = queue.filter((q) => q.kind === 'implement' && q.state === 'open').length
 log(`実行キュー ${queue.length} 件（うち実装対象 ${openImpl} 件）を post-order で構築した`)
 
