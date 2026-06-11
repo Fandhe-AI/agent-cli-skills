@@ -65,9 +65,13 @@ create-issue-tree requirements.md --phase 2 --root 123
 ルート issue を重複作成しないため、既存ルートの番号を `ROOT_NUMBER` に設定して再利用する。
 
 ```bash
-# --root 指定時: 既存ルートを再利用する（open であることを検証してから使う）
+# --root 指定時: 既存ルートを再利用する（OPEN でなければ中止する）
 ROOT_NUMBER=123  # --root で渡された番号
-gh issue view "${ROOT_NUMBER}" --json state --jq '.state'  # OPEN であることを確認
+ROOT_STATE=$(gh issue view "${ROOT_NUMBER}" --json state --jq '.state')
+if [[ "${ROOT_STATE}" != "OPEN" ]]; then
+  echo "エラー: ルート issue #${ROOT_NUMBER} は OPEN ではありません (state: ${ROOT_STATE})。中止します。"
+  exit 1
+fi
 ```
 
 `--root` 未指定の場合のみ、以下でルート issue を新規作成する。
@@ -201,6 +205,20 @@ done
 
 全 issue の作成が完了したら、ルート issue 本文の Phase 別表を実際の issue 番号・件数で更新する。
 
+**`--root` での部分起票では本文を全置換しない。** 既存ルートの本文には先行 Phase の表が
+含まれるため、現在の本文を取得し、今回起票した Phase の行・セクションのみを追記・更新した
+本文で `gh issue edit` する。以下の全置換テンプレートは新規作成（`--root` 未指定）時のみ使う。
+
+```bash
+# --root 指定時: 既存本文を取得し、今回の Phase 分をマージしてから編集する
+CURRENT_BODY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body')
+# CURRENT_BODY の「Phase 別実装計画」表へ今回の Phase 行を追記し、
+# 「### Phase N」セクションを追加した本文を組み立てて gh issue edit --body に渡す。
+# 既存ツリーの棚卸しを伴う場合は update-issue-tree への委譲でもよい
+```
+
+`--root` 未指定（新規作成）の場合は以下で全体を更新する。
+
 ```bash
 gh issue edit "${ROOT_NUMBER}" --body "$(cat <<'EOF'
 ## 概要
@@ -275,7 +293,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
 
 - **1 issue は 4h 程度に収める。** 4h を超えると判断した場合は sub-issue に分解する
 - issue タイトルは Conventional Commits 形式を推奨（`feat:`・`fix:`・`chore:` 等）
-- `--phase` 指定で部分起票した場合、別 Phase の追加起票では **必ず `--root <既存ルートissue番号>` を渡す**（Step 3 の新規作成をスキップして既存ツリーへ継ぎ足す）。起票後は update-issue-tree に同じルート issue 番号を渡して棚卸しする
+- `--phase` 指定で部分起票した場合、別 Phase の追加起票では **必ず `--root <既存ルートissue番号>` を渡す**（Step 3 の新規作成をスキップして既存ツリーへ継ぎ足し、Step 6 も全置換せず既存本文へ差分追記する）。起票後は update-issue-tree に同じルート issue 番号を渡して棚卸しする
 - ページネーション: sub-issues が 100 件を超える場合は `per_page=100&page=N` でページングして全件取得する
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）
 - `--no-verify` は絶対に使用しない
