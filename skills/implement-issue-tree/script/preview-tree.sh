@@ -38,9 +38,17 @@ declare -A HAS_CHILDREN=()
 collect_postorder() {
   local issue_number="$1"
 
-  # まず子を再帰取得（post-order: 子が先、親が後）
-  local sub_issues
-  sub_issues=$(gh api "repos/{owner}/{repo}/issues/${issue_number}/sub_issues?per_page=100" --jq '.[].number' 2>/dev/null || true)
+  # まず子を再帰取得（post-order: 子が先、親が後）。100 件超はページネーションで全取得する
+  local sub_issues=""
+  local page=1
+  local page_result
+  while true; do
+    page_result=$(gh api "repos/{owner}/{repo}/issues/${issue_number}/sub_issues?per_page=100&page=${page}" --jq '.[].number' 2>/dev/null || true)
+    [[ -z "${page_result}" ]] && break
+    sub_issues="${sub_issues}${sub_issues:+$'\n'}${page_result}"
+    page=$((page + 1))
+  done
+
   if [[ -n "${sub_issues}" ]]; then
     HAS_CHILDREN["${issue_number}"]=1
     while IFS= read -r child_number; do
@@ -57,12 +65,14 @@ echo ""
 echo "ツリーを取得中..."
 collect_postorder "${PARENT}"
 echo ""
-printf "%-5s %-8s %-10s %s\n" "順序" "番号" "種別" "タイトル [状態]"
+printf "%-5s %-8s %-12s %s\n" "順序" "番号" "種別" "タイトル [状態]"
 echo "------------------------------------------------------------"
 
 for i in "${!POSTORDER[@]}"; do
   issue="${POSTORDER[$i]}"
-  info=$(gh api "repos/{owner}/{repo}/issues/${issue}" --jq '"#\(.number) [\(.state)] \(.title)"' 2>/dev/null || echo "#${issue} [取得失敗]")
+  # 番号列と "タイトル [状態]" 列を別々に取得してヘッダーの 4 列に揃える
+  issue_data=$(gh api "repos/{owner}/{repo}/issues/${issue}" --jq '"#\(.number)\t[\(.state)] \(.title)"' 2>/dev/null || echo "#${issue}\t[取得失敗]")
+  IFS=$'\t' read -r number_col title_state <<< "${issue_data}"
 
   if [[ -n "${HAS_CHILDREN[${issue}]:-}" ]]; then
     kind="verify-close"
@@ -70,7 +80,7 @@ for i in "${!POSTORDER[@]}"; do
     kind="implement"
   fi
 
-  printf "%-5d %-10s %s\n" "$((i + 1))" "${kind}" "${info}"
+  printf "%-5d %-8s %-12s %s\n" "$((i + 1))" "${number_col}" "${kind}" "${title_state}"
 done
 
 echo ""

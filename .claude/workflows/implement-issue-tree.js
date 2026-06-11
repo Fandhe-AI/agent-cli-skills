@@ -43,12 +43,13 @@ const TREE_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['number', 'title', 'state', 'parent'],
+        required: ['number', 'title', 'state', 'parent', 'siblingIndex'],
         properties: {
           number: { type: 'number' },
           title: { type: 'string' },
           state: { type: 'string', description: 'open または closed' },
           parent: { type: 'number', description: '直上の親イシュー番号。ルート自身は 0' },
+          siblingIndex: { type: 'number', description: '親の sub_issues API 返却における 0-indexed 位置。ルート自身は 0' },
         },
       },
     },
@@ -121,9 +122,11 @@ function monitorPrompt(item, impl) {
     '2. 全チェック完了後の CI 判定:',
     '   - 失敗チェックがあれば gh run view --log-failed 等で原因を特定し state: needs-fix。summary に修正に必要な情報をすべて書く。',
     '   - マージコンフリクトがあれば state: needs-fix とし、summary にコンフリクト解消が必要と書く。',
-    `3. CI が全 green の場合、GraphQL API でレビュースレッドの解決状況を確認する:`,
-    `   gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(last:1){nodes{body author{login}}}}}}}}' -F owner="{owner}" -F name="{repo}" -F number=${impl.prNumber}`,
-    '   - isResolved: false のスレッドが 1 件でもあれば state: unresolved-comments。summary に各未解決スレッドの最終コメント内容（author + body）をすべて列挙する。',
+    `3. CI が全 green の場合、GraphQL API でレビュースレッドの全件を確認する（100 件超はページネーション必須）:`,
+    `   cursor=""; hasNextPage=true; unresolved=()`,
+    `   while $hasNextPage: gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved comments(last:1){nodes{body author{login}}}}pageInfo{hasNextPage endCursor}}}}}' -F owner="{owner}" -F name="{repo}" -F number=${impl.prNumber} -F cursor="$cursor"`,
+    `   → 各ページの isResolved:false スレッドを unresolved に追加し、pageInfo.hasNextPage/endCursor で次ページへ進む。`,
+    '   - unresolved が 1 件でもあれば state: unresolved-comments。summary に各未解決スレッドの最終コメント内容（author + body）をすべて列挙する。',
     '   - 全スレッド解決済み（または未解決スレッドなし）の場合のみ次のステップに進む。',
     `4. CI 全 green かつ未解決レビューコメントなしなら gh pr merge ${impl.prNumber} --squash --delete-branch でマージする。`,
     `5. マージ後、gh issue view ${item.number} --json state でクローズを確認し、open のままなら gh issue close ${item.number} する。git checkout ${baseBranch} && git pull origin ${baseBranch} で作業コピーを最新化する。`,
@@ -168,7 +171,7 @@ const tree = await agent([
   '手順:',
   `1. gh api repos/{owner}/{repo}/issues/${parent} でルートを取得する。`,
   '2. gh api "repos/{owner}/{repo}/issues/<n>/sub_issues?per_page=100" を再帰的に呼び、全子孫を列挙する（100 件超は page=2 以降も取得）。',
-  '3. nodes にはルート自身（parent: 0）と全子孫を含める。同じ親を持つ子は API の返却順のまま並べること（この順序が実行順の正本になる）。',
+  '3. nodes にはルート自身（parent: 0、siblingIndex: 0）と全子孫を含める。各ノードの siblingIndex は、その親の sub_issues API が返した配列内での 0-indexed 位置とする（ルートは 0）。この値が実行順の正本になるため正確に記録すること。',
 ].join('\n'), { label: 'plan:issue-tree', phase: 'Plan', model: 'sonnet', schema: TREE_SCHEMA })
 
 const byParent = new Map()
@@ -176,6 +179,10 @@ for (const n of tree.nodes) {
   const list = byParent.get(n.parent) ?? []
   list.push(n)
   byParent.set(n.parent, list)
+}
+// API 返却順（siblingIndex）で兄弟を確定的にソートする
+for (const [, children] of byParent) {
+  children.sort((a, b) => a.siblingIndex - b.siblingIndex)
 }
 const queue = []
 function visit(node) {

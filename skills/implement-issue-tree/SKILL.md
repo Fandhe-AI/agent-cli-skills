@@ -98,17 +98,19 @@ EOF
 # CI 監視
 gh pr checks <pr-number> --watch --interval 60
 
-# レビュースレッドの解決確認（GraphQL）
+# レビュースレッドの解決確認（GraphQL）— 100 件超はページネーションで全件取得する
+# after: $cursor を使い pageInfo.hasNextPage が false になるまでループする
 gh api graphql -f query='
-  query($owner: String!, $name: String!, $number: Int!) {
+  query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
     repository(owner: $owner, name: $name) {
       pullRequest(number: $number) {
-        reviewThreads(first: 100) {
+        reviewThreads(first: 100, after: $cursor) {
           nodes { isResolved comments(last: 1) { nodes { body author { login } } } }
+          pageInfo { hasNextPage endCursor }
         }
       }
     }
-  }' -F owner="{owner}" -F name="{repo}" -F number=<pr-number>
+  }' -F owner="{owner}" -F name="{repo}" -F number=<pr-number> -F cursor=""
 
 # 全解決済みの場合のみ squash merge
 gh pr merge <pr-number> --squash --delete-branch
