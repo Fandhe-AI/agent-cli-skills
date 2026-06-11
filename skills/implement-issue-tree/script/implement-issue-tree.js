@@ -462,7 +462,7 @@ function markBlockedByDeps(item, failedDeps) {
   results.push({
     issue: item.number,
     status: 'blocked',
-    note: `依存イシューが未完了のため未着手: ${failedDeps.map((d) => `#${d}`).join(', ')}`,
+    note: `依存イシューの失敗・ブロックにより未着手: ${failedDeps.map((d) => `#${d}`).join(', ')}`,
   })
   log(`#${item.number} は依存 ${failedDeps.map((d) => `#${d}`).join(', ')} の失敗により着手しない`)
 }
