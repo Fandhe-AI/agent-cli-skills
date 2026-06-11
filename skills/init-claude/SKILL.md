@@ -226,11 +226,28 @@ gh auth status
 gh api --method GET /repos/<owner>/<repo>/sub_issues 2>&1 | head -5
 
 # workflow js の参照確認
-ls <target-repo>/.claude/workflows/implement-issue-tree.js 2>/dev/null || \
-  echo "workflow js が存在しない場合は implement-issue-tree スキルの手順に従い配置する"
+ls -la <target-repo>/.claude/workflows/implement-issue-tree.js 2>/dev/null || \
+  echo "workflow js が存在しない"
 ```
 
-不足がある場合は対処方法をユーザーに案内する。
+不足がある場合は以下の対処方法をユーザーに案内する。
+
+**workflow js が存在しない場合の配置方法:**
+
+named workflow（`{name: "implement-issue-tree"}`）として呼ばない場合は `.claude/workflows/` への配置自体が不要で、Workflow ツールの `scriptPath` に `.claude/skills/implement-issue-tree/script/implement-issue-tree.js` を直接指定すればよい。
+
+named workflow として配置する場合は `cp` ではなく**相対 symlink** を使用する。`cp` で配置すると `npx skills add` による更新が named workflow に届かなくなる。
+
+```bash
+mkdir -p <target-repo>/.claude/workflows/
+
+# .claude/workflows/ から見た相対パスで symlink を作成する
+# 既に symlink が存在する場合はそのままにする（実体ファイルを上書きしない）
+if [ ! -e "<target-repo>/.claude/workflows/implement-issue-tree.js" ]; then
+  ln -s ../skills/implement-issue-tree/script/implement-issue-tree.js \
+        <target-repo>/.claude/workflows/implement-issue-tree.js
+fi
+```
 
 ### Step 5: 生成結果を報告する
 

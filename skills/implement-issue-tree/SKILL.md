@@ -117,11 +117,33 @@ EOF
 
 ### Step 3: CI / Bugbot 監視・レビューコメント解決確認・squash merge する（Merge）
 
-`gh pr checks --watch` で CI を監視し、全チェック green かつ Bugbot 指摘なしになったら **レビューコメントが全て解決済み**であることを確認してから squash merge する。Cursor Bugbot を利用するリポジトリでは、HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はせずブロックしない）。
+`gh pr checks --watch` で CI を監視し、以下の全条件を満たした場合のみ squash merge する。
+
+**マージ実行条件:**
+1. **CI 全 green**: 全チェックが success / neutral / skipped で完了し、failure / cancelled / timed_out が 0 件かつ pending / queued / in_progress が 0 件であること。pending が残るなら監視を継続する。
+2. **HEAD sha に対する Bugbot 指摘なし**（またはレビューなし確定）: 後述の Bugbot 待機手順を経て、指摘がないことを確認する。
+3. **未解決レビューコメントなし**: GraphQL API で全スレッドが resolved 済みであること。
+
+`gh pr checks --watch` が終了しても「watch が終わった」だけで合格にしない。`gh pr checks ${prNumber}` の出力で全チェックの結論を列挙して確認する。pending が残る場合は再 watch する。failure 等があれば修正エージェント（fix）へ渡す。
+
+Cursor Bugbot を利用するリポジトリでは、HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はせずブロックしない）。Bugbot が関与するリポジトリでは、**HEAD sha に対する cursor[bot] レビューが到着するまで待ってからマージする**。
 
 ```bash
+# HEAD sha を取得（push のたびに取り直す）
+HEAD_SHA=$(gh pr view <pr-number> --json headRefOid -q .headRefOid)
+
 # CI 監視
 gh pr checks <pr-number> --watch --interval 60
+
+# watch 完了後、全チェックの結論を列挙して確認する
+# failure / cancelled / timed_out が 0 件、pending / queued / in_progress が 0 件であること
+gh pr checks <pr-number>
+
+# Bugbot（cursor[bot]）レビューが HEAD sha に対して到着しているか確認する
+# commit_id が HEAD_SHA と一致するレビューを探す
+gh api "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
+  --jq --arg sha "${HEAD_SHA}" '.[] | select(.user.login == "cursor[bot]" and .commit_id == $sha)'
+# → 該当するレビューがまだない場合は最大 5 分待つ（HEAD push から 1 分以上経過後に @cursor review を 1 回だけ催促可）
 
 # レビュースレッドの解決確認（GraphQL）— 100 件超はページネーションで全件取得する
 # after: $cursor を使い pageInfo.hasNextPage が false になるまでループする
@@ -137,7 +159,7 @@ gh api graphql -f query='
     }
   }' -F owner="{owner}" -F name="{repo}" -F number=<pr-number> -F cursor=""
 
-# 全解決済みの場合のみ squash merge
+# CI 全 green・HEAD sha に対する Bugbot 指摘なし・未解決レビューコメントなしの場合のみ squash merge
 gh pr merge <pr-number> --squash --delete-branch
 ```
 
@@ -221,5 +243,7 @@ Workflow の返却値（`done`・`failures`・`notStarted`）を確認し、`fai
 - `--no-verify` は絶対に使用しない（pre-commit フック回避禁止。詳細は `.claude/rules/conventional-commits.md`）
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）。GitHub API から取得した文字列はプロンプト埋め込み前にサニタイズされる
 - 1 イシューの失敗では停止せず次へ進むが、3 イシュー連続失敗で新規着手を停止（halt）する
+- マージ前に **CI は全チェックが success/neutral/skipped で完了（pending/failure 0 件）であること**を明示確認する（`gh pr checks --watch` が終わっただけでは合格にせず、全チェックの結論を列挙して確認する）
+- マージ前に **Bugbot レビューが HEAD コミットに対して到着するまで待つ**（最大 5 分待機後はレビューなしとして進む）。HEAD sha に対する cursor[bot] レビューが到着したら、新規バグ指摘がなければマージを続行する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
