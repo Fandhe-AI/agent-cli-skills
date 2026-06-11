@@ -142,7 +142,7 @@ function fixPrompt(item, impl, finding) {
     '手順:',
     `1. git fetch origin && git checkout ${branch} && git pull origin ${branch}。コンフリクト解消が必要な場合は origin/${baseBranch} をマージして解消する。`,
     '2. 指摘を重要度を問わずすべて修正する。',
-    '3. .claude/skills/create-commit/SKILL.md に従いコミットし、git push origin ${impl.branch} で反映する。',
+    `3. .claude/skills/create-commit/SKILL.md に従いコミットし、git push origin ${branch} で反映する。`,
     '4. unresolved-comments の指摘を修正した場合は、対応したスレッドを gh api graphql の resolveReviewThread ミューテーションで解決済みにマークする（可能な場合）。',
     '返却: pushed / summary。',
   ].join('\n')

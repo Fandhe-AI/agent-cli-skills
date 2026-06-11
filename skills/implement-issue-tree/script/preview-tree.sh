@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# preview-tree.sh — 親イシューの配下を post-order DFS で表示する（実装は行わない）
+# preview-tree.sh — 親イシューの配下を post-order DFS で実行順序プレビューする（実装は行わない）
 #
 # 使い方:
 #   ./preview-tree.sh <親イシュー番号>
@@ -31,29 +31,48 @@ if ! gh auth status &> /dev/null; then
   exit 1
 fi
 
-# イシュー情報を取得して表示
-fetch_subtree() {
+# post-order DFS でイシュー番号を収集する（子をすべて列挙してから親を追加）
+declare -a POSTORDER=()
+declare -A HAS_CHILDREN=()
+
+collect_postorder() {
   local issue_number="$1"
-  local depth="$2"
-  local indent=""
-  for ((i = 0; i < depth; i++)); do indent+="  "; done
 
-  local info
-  info=$(gh api "repos/{owner}/{repo}/issues/${issue_number}" --jq '"\(.number) [\(.state)] \(.title)"' 2>/dev/null || echo "${issue_number} [取得失敗]")
-  echo "${indent}#${info}"
-
-  # サブイシューを再帰取得
+  # まず子を再帰取得（post-order: 子が先、親が後）
   local sub_issues
   sub_issues=$(gh api "repos/{owner}/{repo}/issues/${issue_number}/sub_issues?per_page=100" --jq '.[].number' 2>/dev/null || true)
   if [[ -n "${sub_issues}" ]]; then
+    HAS_CHILDREN["${issue_number}"]=1
     while IFS= read -r child_number; do
-      fetch_subtree "${child_number}" "$((depth + 1))"
+      collect_postorder "${child_number}"
     done <<< "${sub_issues}"
   fi
+
+  # 子の後に自身を追加（post-order）
+  POSTORDER+=("${issue_number}")
 }
 
-echo "=== イシューツリープレビュー: #${PARENT} ==="
+echo "=== 実行順序プレビュー（post-order DFS）: #${PARENT} ==="
 echo ""
-fetch_subtree "${PARENT}" 0
+echo "ツリーを取得中..."
+collect_postorder "${PARENT}"
 echo ""
+printf "%-5s %-8s %-10s %s\n" "順序" "番号" "種別" "タイトル [状態]"
+echo "------------------------------------------------------------"
+
+for i in "${!POSTORDER[@]}"; do
+  issue="${POSTORDER[$i]}"
+  info=$(gh api "repos/{owner}/{repo}/issues/${issue}" --jq '"#\(.number) [\(.state)] \(.title)"' 2>/dev/null || echo "#${issue} [取得失敗]")
+
+  if [[ -n "${HAS_CHILDREN[${issue}]:-}" ]]; then
+    kind="verify-close"
+  else
+    kind="implement"
+  fi
+
+  printf "%-5d %-10s %s\n" "$((i + 1))" "${kind}" "${info}"
+done
+
+echo ""
+echo "合計 ${#POSTORDER[@]} 件"
 echo "（このスクリプトは表示のみ行います。実装は implement-issue-tree workflow を使用してください）"
