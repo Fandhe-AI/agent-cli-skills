@@ -15,6 +15,9 @@ skills/                               -- スキル本体（各ディレクトリ
   create-plan/
   create-pr/
   implement-issue/
+  implement-issue-tree/
+    sample/                           -- 引数例・ツリー例
+    script/                           -- preview-tree.sh（ツリー確認用）
   implement-review/
   implement-review-pr/
   update-docs/
@@ -64,6 +67,8 @@ skills/                               -- スキル本体（各ディレクトリ
     update-reference/                 -- リポジトリ管理スキル（実ディレクトリ）
     github-docs                       -- 参照スキル（symlink）
     (他 create-commit 等は skills/ への symlink)
+  workflows/
+    implement-issue-tree.js           -- イシューツリー自動開発 Workflow
   settings.local.json                 -- ローカル権限設定（git 管理対象外）
   settings.json                       -- hooks 設定（SessionStart リマインダー）
 ```
@@ -138,11 +143,11 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `description-style.md` | skill-author / agent-author / skill-reviewer / reference-researcher | description 著作スタイル（発火率・長さ・YAML 落とし穴） |
 | `reference-template.md` | reference-researcher / skill-author | reference 型スキルの reference/*.md と README 索引の書式規約 |
 
-## Current Skills (18)
+## Current Skills (19)
 
-### 開発ワークフロー (8)
+### 開発ワークフロー (9)
 
-create-commit, create-issue, create-plan, create-pr, implement-issue, implement-review, implement-review-pr, update-docs
+create-commit, create-issue, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, update-docs
 
 ### スキル著作・リファレンス (1)
 
