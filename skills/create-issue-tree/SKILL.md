@@ -89,16 +89,25 @@ echo "ルート issue: ${ROOT_NUMBER}"
 ### Step 4: Phase 親 issue を作成して紐付ける
 
 Phase ごとに親 issue を作成し、sub_issues API でルートへ紐付ける。
+以下のスニペットは `PHASE` 変数で Phase 番号を切り替える。`--phase` 指定時はその番号を、
+全 Phase 起票時は処理中の Phase 番号を設定する（タイトル・ラベルとも `PHASE` に追従させる）。
 
 ```bash
+# 処理対象の Phase 番号（--phase 指定時はその番号、全 Phase 起票時はループ中の番号）
+PHASE=1
+
+# phase ラベルが存在しないリポジトリでは issue 作成が失敗するため、必ず事前作成する
+# （作成済みの場合は失敗を無視して続行する）
+gh label create "phase:${PHASE}" --color "0075ca" 2>/dev/null || true
+
 # Phase 親 issue を作成（URL 末尾から番号を抽出）
 PHASE_URL=$(gh issue create \
-  --title "feat(phase-1): Phase 1 基盤整備" \
-  --label "phase:1" \
+  --title "feat(phase-${PHASE}): Phase ${PHASE} 基盤整備" \
+  --label "phase:${PHASE}" \
   --body "$(cat <<'EOF'
 ## 概要
 
-Phase 1 の実装タスクをまとめる親 issue。
+この Phase の実装タスクをまとめる親 issue。
 
 ## タスク一覧
 
@@ -122,10 +131,10 @@ gh api \
 各タスクを issue として作成し、Phase 親へ紐付ける。4h 超のタスクはさらに sub-issue に分解する。
 
 ```bash
-# 子 issue を作成（URL 末尾から番号を抽出）
+# 子 issue を作成（URL 末尾から番号を抽出）。PHASE は Step 4 で設定した番号を引き継ぐ
 CHILD_URL=$(gh issue create \
   --title "feat: タスク名" \
-  --label "phase:1" \
+  --label "phase:${PHASE}" \
   --body "$(cat <<'EOF'
 ## 概要
 
@@ -149,7 +158,7 @@ gh api \
 # 4h 超の場合は sub-issue を作成して子 issue へ紐付け
 SUB_URL=$(gh issue create \
   --title "feat: サブタスク名" \
-  --label "phase:1" \
+  --label "phase:${PHASE}" \
   --body "...")
 SUB_NUMBER=$(printf '%s' "${SUB_URL}" | grep -oE '[0-9]+$')
 
@@ -259,4 +268,4 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
 - `--no-verify` は絶対に使用しない
 - **`gh issue create` は `--json` 非対応**。issue URL を stdout に出力するため、`| grep -oE '[0-9]+$'` で末尾の番号を抽出して変数に保持する
 - **sub_issues API の `sub_issue_id` は issue 番号ではなく database id**（GitHub 仕様）。`gh api "repos/{owner}/{repo}/issues/<number>" --jq '.id'` で id を取得してから POST する。番号をそのまま渡すと誤った issue を紐付ける／404 になる
-- phase ラベルが存在しない場合は `gh label create "phase:1" --color "0075ca"` で事前作成する
+- phase ラベルは Step 4 冒頭の `gh label create "phase:${PHASE}" --color "0075ca"` で issue 作成より前に必ず作成する（作成済みリポジトリでは no-op）
