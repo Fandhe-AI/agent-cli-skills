@@ -112,6 +112,10 @@ gh api \
 既存 Phase に収まらない新規タスクが多い場合、新 Phase 親 issue を作成してルートへ紐付ける。
 
 ```bash
+# phase ラベルが存在しないリポジトリでは issue 作成が失敗するため、必ず事前作成する
+# （作成済みの場合は失敗を無視して続行する）
+gh label create "phase:N" --color "0075ca" 2>/dev/null || true
+
 # gh issue create は URL を出力する（--json 非対応）。URL 末尾から番号を抽出する
 NEW_PHASE_URL=$(gh issue create \
   --title "feat(phase-N): Phase N タイトル" \
@@ -154,6 +158,9 @@ gh issue edit "${ISSUE_NUMBER}" --remove-label "phase:0"
 棚卸し中に 4h 超と判断した issue は、create-issue-tree と同じ粒度基準で sub-issue に分解する。
 
 ```bash
+# phase ラベルが存在しない場合に備えて事前作成する（作成済みなら no-op）
+gh label create "phase:N" --color "0075ca" 2>/dev/null || true
+
 # sub-issue を作成（URL 末尾から番号を抽出）
 SUB_URL=$(gh issue create \
   --title "feat: サブタスク名" \
