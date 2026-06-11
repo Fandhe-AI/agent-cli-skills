@@ -77,17 +77,20 @@ fetch_sub_issues "${ROOT_NUMBER}"
 closed 親の下に残置されている open issue を、対応する open Phase 親へ移動する。
 
 ```bash
+# sub_issue_id は issue 番号ではなく database id を渡す（GitHub sub-issues API 仕様）
+ISSUE_ID=$(gh api "repos/{owner}/{repo}/issues/${ISSUE_NUMBER}" --jq '.id')
+
 # 既存の親から外す（sub_issues API の DELETE）
 gh api \
   --method DELETE \
   "repos/{owner}/{repo}/issues/${OLD_PARENT}/sub_issues" \
-  -F "sub_issue_id=${ISSUE_NUMBER}"
+  -F "sub_issue_id=${ISSUE_ID}"
 
 # 新しい親へ紐付ける
 gh api \
   --method POST \
   "repos/{owner}/{repo}/issues/${NEW_PARENT}/sub_issues" \
-  -F "sub_issue_id=${ISSUE_NUMBER}"
+  -F "sub_issue_id=${ISSUE_ID}"
 ```
 
 ### Step 4: 孤児 issue を再配置する
@@ -96,10 +99,12 @@ gh api \
 Phase が不明な issue はタイトル・本文を読んで判断し、判断できない場合はユーザーに確認する。
 
 ```bash
+# sub_issue_id は database id を渡す（issue 番号ではない）
+ORPHAN_ID=$(gh api "repos/{owner}/{repo}/issues/${ORPHAN_NUMBER}" --jq '.id')
 gh api \
   --method POST \
   "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
-  -F "sub_issue_id=${ORPHAN_NUMBER}"
+  -F "sub_issue_id=${ORPHAN_ID}"
 ```
 
 ### Step 5: 必要に応じて新 Phase 親を新設する
@@ -107,7 +112,8 @@ gh api \
 既存 Phase に収まらない新規タスクが多い場合、新 Phase 親 issue を作成してルートへ紐付ける。
 
 ```bash
-NEW_PHASE_NUMBER=$(gh issue create \
+# gh issue create は URL を出力する（--json 非対応）。URL 末尾から番号を抽出する
+NEW_PHASE_URL=$(gh issue create \
   --title "feat(phase-N): Phase N タイトル" \
   --label "phase:N" \
   --body "$(cat <<'EOF'
@@ -120,14 +126,15 @@ Phase N の実装タスクをまとめる親 issue。
 | Issue | タイトル | 分解 |
 |-------|---------|------|
 EOF
-)" \
-  --json number --jq '.number')
+)")
+NEW_PHASE_NUMBER=$(printf '%s' "${NEW_PHASE_URL}" | grep -oE '[0-9]+$')
 
-# ルートへ紐付け
+# ルートへ紐付け。sub_issue_id は issue 番号ではなく database id を渡す（GitHub sub-issues API 仕様）
+NEW_PHASE_ID=$(gh api "repos/{owner}/{repo}/issues/${NEW_PHASE_NUMBER}" --jq '.id')
 gh api \
   --method POST \
   "repos/{owner}/{repo}/issues/${ROOT_NUMBER}/sub_issues" \
-  -F "sub_issue_id=${NEW_PHASE_NUMBER}"
+  -F "sub_issue_id=${NEW_PHASE_ID}"
 ```
 
 ### Step 6: phase ラベルを同期する
@@ -147,18 +154,19 @@ gh issue edit "${ISSUE_NUMBER}" --remove-label "phase:0"
 棚卸し中に 4h 超と判断した issue は、create-issue-tree と同じ粒度基準で sub-issue に分解する。
 
 ```bash
-# sub-issue を作成
-SUB_NUMBER=$(gh issue create \
+# sub-issue を作成（URL 末尾から番号を抽出）
+SUB_URL=$(gh issue create \
   --title "feat: サブタスク名" \
   --label "phase:N" \
-  --body "..." \
-  --json number --jq '.number')
+  --body "...")
+SUB_NUMBER=$(printf '%s' "${SUB_URL}" | grep -oE '[0-9]+$')
 
-# 親 issue へ紐付け
+# 親 issue へ紐付け（sub_issue_id は database id）
+SUB_ID=$(gh api "repos/{owner}/{repo}/issues/${SUB_NUMBER}" --jq '.id')
 gh api \
   --method POST \
   "repos/{owner}/{repo}/issues/${ISSUE_NUMBER}/sub_issues" \
-  -F "sub_issue_id=${SUB_NUMBER}"
+  -F "sub_issue_id=${SUB_ID}"
 ```
 
 ### Step 8: ルート issue 本文を再生成して更新する
@@ -253,6 +261,8 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
 - ページネーション: sub-issues が 100 件を超える場合は `per_page=100&page=N` でページングして全件取得する
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）
 - `--no-verify` は絶対に使用しない
+- **`gh issue create` は `--json` 非対応**。issue URL を stdout に出力するため、`| grep -oE '[0-9]+$'` で末尾の番号を抽出する
+- **sub_issues API（POST / DELETE）の `sub_issue_id` は issue 番号ではなく database id**（GitHub 仕様）。`gh api "repos/{owner}/{repo}/issues/<number>" --jq '.id'` で id を取得してから渡す。番号をそのまま渡すと誤った issue を操作する／404 になる
 - 孤児 issue の Phase が判断できない場合は推測せずにユーザーへ確認する
 - sub_issues の DELETE API で付け替えを行う際、操作対象の issue 番号を必ず確認してから実行する
 - ツリー更新後は implement-issue-tree が post-order DFS で正しく消化できる構造になっているか確認する

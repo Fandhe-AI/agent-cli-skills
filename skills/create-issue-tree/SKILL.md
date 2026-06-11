@@ -60,7 +60,8 @@ create-issue-tree requirements.md --phase 2
 ルート issue はツリー全体の進捗を管理するトラッキング issue として作成する。**ルート issue 自体には phase ラベルは付与しない**（Phase 親以下の issue にのみ付与する）。
 
 ```bash
-ROOT_NUMBER=$(gh issue create \
+# gh issue create は issue URL を stdout に出力する（--json 非対応）。URL 末尾から番号を抽出する
+ROOT_URL=$(gh issue create \
   --title "chore: 全 open issue の Phase 別トラッキング ($(date +%Y-%m-%d))" \
   --body "$(cat <<'EOF'
 ## 概要
@@ -80,8 +81,8 @@ ROOT_NUMBER=$(gh issue create \
 - closed 親の下に open issue を残置しない
 - implement-issue-tree が post-order DFS で消化可能な構造を維持する
 EOF
-)" \
-  --json number --jq '.number')
+)")
+ROOT_NUMBER=$(printf '%s' "${ROOT_URL}" | grep -oE '[0-9]+$')
 echo "ルート issue: ${ROOT_NUMBER}"
 ```
 
@@ -90,8 +91,8 @@ echo "ルート issue: ${ROOT_NUMBER}"
 Phase ごとに親 issue を作成し、sub_issues API でルートへ紐付ける。
 
 ```bash
-# Phase 親 issue を作成
-PHASE_NUMBER=$(gh issue create \
+# Phase 親 issue を作成（URL 末尾から番号を抽出）
+PHASE_URL=$(gh issue create \
   --title "feat(phase-1): Phase 1 基盤整備" \
   --label "phase:1" \
   --body "$(cat <<'EOF'
@@ -105,14 +106,15 @@ Phase 1 の実装タスクをまとめる親 issue。
 |-------|---------|------|
 | (子 issue 作成後に更新) | | |
 EOF
-)" \
-  --json number --jq '.number')
+)")
+PHASE_NUMBER=$(printf '%s' "${PHASE_URL}" | grep -oE '[0-9]+$')
 
-# ルートへ紐付け
+# ルートへ紐付け。sub_issue_id は issue 番号ではなく database id を渡す（GitHub sub-issues API 仕様）
+PHASE_ID=$(gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}" --jq '.id')
 gh api \
   --method POST \
   "repos/{owner}/{repo}/issues/${ROOT_NUMBER}/sub_issues" \
-  -F "sub_issue_id=${PHASE_NUMBER}"
+  -F "sub_issue_id=${PHASE_ID}"
 ```
 
 ### Step 5: 子 issue・sub-issue を作成して紐付ける
@@ -120,8 +122,8 @@ gh api \
 各タスクを issue として作成し、Phase 親へ紐付ける。4h 超のタスクはさらに sub-issue に分解する。
 
 ```bash
-# 子 issue を作成
-CHILD_NUMBER=$(gh issue create \
+# 子 issue を作成（URL 末尾から番号を抽出）
+CHILD_URL=$(gh issue create \
   --title "feat: タスク名" \
   --label "phase:1" \
   --body "$(cat <<'EOF'
@@ -134,26 +136,28 @@ CHILD_NUMBER=$(gh issue create \
 - [ ] 条件1
 - [ ] 条件2
 EOF
-)" \
-  --json number --jq '.number')
+)")
+CHILD_NUMBER=$(printf '%s' "${CHILD_URL}" | grep -oE '[0-9]+$')
 
-# Phase 親へ紐付け
+# Phase 親へ紐付け（sub_issue_id は database id）
+CHILD_ID=$(gh api "repos/{owner}/{repo}/issues/${CHILD_NUMBER}" --jq '.id')
 gh api \
   --method POST \
   "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
-  -F "sub_issue_id=${CHILD_NUMBER}"
+  -F "sub_issue_id=${CHILD_ID}"
 
 # 4h 超の場合は sub-issue を作成して子 issue へ紐付け
-SUB_NUMBER=$(gh issue create \
+SUB_URL=$(gh issue create \
   --title "feat: サブタスク名" \
   --label "phase:1" \
-  --body "..." \
-  --json number --jq '.number')
+  --body "...")
+SUB_NUMBER=$(printf '%s' "${SUB_URL}" | grep -oE '[0-9]+$')
 
+SUB_ID=$(gh api "repos/{owner}/{repo}/issues/${SUB_NUMBER}" --jq '.id')
 gh api \
   --method POST \
   "repos/{owner}/{repo}/issues/${CHILD_NUMBER}/sub_issues" \
-  -F "sub_issue_id=${SUB_NUMBER}"
+  -F "sub_issue_id=${SUB_ID}"
 ```
 
 issue 数が多い場合（50 件超が目安）は `per_page=100` パラメータを使用し、ページネーションで全件確認する。
@@ -253,5 +257,6 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
 - ページネーション: sub-issues が 100 件を超える場合は `per_page=100&page=N` でページングして全件取得する
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）
 - `--no-verify` は絶対に使用しない
-- issue 番号は `gh issue create ... --json number --jq '.number'` で取得し変数に保持してから sub_issues API に渡す
+- **`gh issue create` は `--json` 非対応**。issue URL を stdout に出力するため、`| grep -oE '[0-9]+$'` で末尾の番号を抽出して変数に保持する
+- **sub_issues API の `sub_issue_id` は issue 番号ではなく database id**（GitHub 仕様）。`gh api "repos/{owner}/{repo}/issues/<number>" --jq '.id'` で id を取得してから POST する。番号をそのまま渡すと誤った issue を紐付ける／404 になる
 - phase ラベルが存在しない場合は `gh label create "phase:1" --color "0075ca"` で事前作成する
