@@ -138,7 +138,7 @@ function fixPrompt(item, impl, finding) {
     `PR #${impl.prNumber}（イシュー #${item.number}、ブランチ ${branch}）への指摘を修正する担当。`,
     COMMON,
     '指摘内容:',
-    finding.summary,
+    sanitize(finding.summary),
     '手順:',
     `1. git fetch origin && git checkout ${branch} && git pull origin ${branch}。コンフリクト解消が必要な場合は origin/${baseBranch} をマージして解消する。`,
     '2. 指摘を重要度を問わずすべて修正する。',
@@ -198,7 +198,12 @@ for (const item of queue) {
   }
   if (item.kind === 'verify-close') {
     const v = await agent(closePrompt(item), { label: `close:#${item.number}`, phase: 'Merge', model: 'sonnet', schema: CLOSE_SCHEMA })
-    results.push({ issue: item.number, status: v?.closed ? 'closed' : 'needs-attention', note: v?.summary ?? 'agent error' })
+    if (v?.closed) {
+      results.push({ issue: item.number, status: 'closed', note: v.summary })
+    } else {
+      halted = { issue: item.number, reason: `親イシューのクローズ検証に失敗した: ${v?.summary ?? 'agent error'}` }
+      break
+    }
     continue
   }
 
@@ -211,7 +216,8 @@ for (const item of queue) {
 
   let merged = false
   let lastState = 'timeout'
-  for (let round = 0; round < 6 && !merged; round++) {
+  // round < 7: fix の後に必ず再監視が入るよう monitor 上限を 7 回に設定する（fix は最大 6 回）
+  for (let round = 0; round < 7 && !merged; round++) {
     const m = await agent(monitorPrompt(item, impl), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', schema: MERGE_SCHEMA })
     lastState = m?.state ?? 'blocked'
     if (lastState === 'merged') {
