@@ -117,6 +117,15 @@ PHASE=1
 # （作成済みの場合は失敗を無視して続行する）
 gh label create "phase:${PHASE}" --color "0075ca" 2>/dev/null || true
 
+# --root 再実行時の重複防止: ルート直下に同じ phase ラベルの親が既にあれば再利用する
+PHASE_NUMBER=$(gh api "repos/{owner}/{repo}/issues/${ROOT_NUMBER}/sub_issues?per_page=100" \
+  --jq "[.[] | select(any(.labels[]?; .name == \"phase:${PHASE}\"))][0].number // empty")
+[[ -n "${PHASE_NUMBER}" ]] && echo "既存の Phase 親 issue を再利用: #${PHASE_NUMBER}"
+```
+
+`PHASE_NUMBER` が空（既存の Phase 親がない）場合のみ、以下で新規作成してルートへ紐付ける。
+
+```bash
 # Phase 親 issue を作成（URL 末尾から番号を抽出）
 PHASE_URL=$(gh issue create \
   --title "feat(phase-${PHASE}): Phase ${PHASE} 基盤整備" \
