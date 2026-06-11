@@ -1,17 +1,19 @@
 ---
 name: implement-issue-tree
 description: >
-  親イシュー配下のサブイシュー（孫含む）を post-order DFS で自動実装・レビュー・PR 作成・CI 監視・squash merge まで一括自動化。
-  「イシューツリーを自動開発」「配下のサブイシューを順番に実装」「ツリー全体を実装して」「イシュー階層をまとめて実装」で使用。
-  単一イシューの実装は implement-issue、PR レビューは implement-review-pr を参照。
+  親イシュー配下のサブイシュー（孫含む）を依存順を保ちつつ worktree で並列に自動実装・レビュー・PR 作成・CI 監視・squash merge まで一括自動化。
+  「イシューツリーを並列実装」「配下のサブイシューをまとめて実装」「ツリー全体を並列で実装して」「イシュー階層を自動開発」で使用。
+  並列度（parallel）と依存（dependsOn）で実行順を制御。単一イシューの実装は implement-issue、PR レビューは implement-review-pr を参照。
 model: opus
 user-invocable: true
-argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 main）]"
+argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 main）] [並列度（省略時 3）]"
 ---
 
 # implement-issue-tree
 
-親イシュー番号を指定し、配下のサブイシュー（孫含む）を post-order DFS（子をすべて終えてから親）で自動実装・レビュー・PR 作成・CI 監視・squash merge まで自動化する Workflow を起動する。
+親イシュー番号を指定し、配下のサブイシュー（孫含む）を依存順を保ちつつ worktree で並列に自動実装・レビュー・PR 作成・CI 監視・squash merge まで自動化する Workflow を起動する。
+
+末端の実装イシューは post-order DFS の順序を優先度として空きスロットへ貪欲投入し、最大 `parallel`（既定 3）件まで並列実行する。各 implement / fix は独立した git worktree で隔離実行されるため、並列でもブランチ・working copy が衝突しない。機能的依存（`dependsOn`）と親子関係（親は全子の完了を待つ verify-close）だけが待機条件となる。
 
 ## 前提条件
 
@@ -19,63 +21,86 @@ argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 ma
 - git working tree が clean であること（`git status` で確認）
 - マージ先ブランチが CI green の状態であること
 - 対象リポジトリへの書き込み権限があること
+- 親イシューと子イシューが GitHub の sub-issues API で紐付いていること（紐付けは `create-issue` / `create-issue-tree` を参照）
 
 ## 使い方
 
-Workflow ツールで以下のように起動する:
+Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `script/implement-issue-tree.js` を指定して起動する。パスは導入形態で異なる:
+
+- 本リポジトリ内: `skills/implement-issue-tree/script/implement-issue-tree.js`
+- `npx skills add Fandhe-AI/agent-cli-skills` で導入した場合: `.claude/skills/implement-issue-tree/script/implement-issue-tree.js`
 
 ```json
 {
-  "scriptPath": ".claude/workflows/implement-issue-tree.js",
+  "scriptPath": "<このスキルディレクトリ>/script/implement-issue-tree.js",
   "args": {
     "parent": "<親イシュー番号>",
-    "branch": "<マージ先ブランチ（省略時 main）>"
+    "branch": "<マージ先ブランチ（省略時 main）>",
+    "parallel": "<並列度 1〜8（省略時 3）>"
   }
 }
 ```
 
-例: 親イシュー `#42` の配下を `main` にマージする場合:
+例: 親イシュー `#42` の配下を `main` へ、並列度 3 でマージする場合:
 
 ```json
 {
-  "scriptPath": ".claude/workflows/implement-issue-tree.js",
-  "args": { "parent": 42, "branch": "main" }
+  "scriptPath": ".claude/skills/implement-issue-tree/script/implement-issue-tree.js",
+  "args": { "parent": 42, "branch": "main", "parallel": 3 }
 }
 ```
 
+### 引数
+
+| 引数 | 必須 | 既定 | 説明 |
+|------|------|------|------|
+| `parent` | 必須 | — | 親（ルート）イシュー番号。`issue` でも可 |
+| `branch` | 任意 | `main` | マージ先ブランチ。不正な文字を含む場合はエラー |
+| `parallel` | 任意 | `3` | 並列実行数（1〜8）。`1` を指定すると実質的に直列実行になる |
+
 ## フロー
 
-### Step 1: ツリーを取得して実行キューを構築する（Plan）
+### Step 1: ツリーを取得して依存グラフ付き実行キューを構築する（Plan）
 
-gh CLI の sub-issues API で親イシュー配下の全ツリーを再帰取得し、post-order DFS で実行キューを構築する。
+gh CLI の sub-issues API で親イシュー配下の全ツリーを再帰取得し、post-order DFS で実行キューを構築する。各 open イシューは本文を読んで機能的依存（`dependsOn`）を抽出する。
 
 ```bash
-# 親イシューのサブイシューを取得
-gh api repos/{owner}/{repo}/issues/<parent>/sub_issues
+# 親イシューのサブイシューを取得（100 件超は page=2 以降も取得）
+gh api "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100"
 
-# 再帰的に孫以下も取得してツリーを構築
-# post-order DFS: 同一親内はリスト順、子をすべて終えてから親を処理
+# 各 open イシューの本文を読み、機能的依存を抽出
+gh issue view <N>
 ```
 
-実行キューの構築ルール:
-- 同一親内のサブイシューはリスト順（上から）に処理する
-- 子イシューがすべて完了してから親イシューを処理する（post-order）
+実行キューと依存グラフの構築ルール:
+- 同一親内のサブイシューは sub_issues API 返却順（`siblingIndex`）で並べる
+- 子イシューがすべて完了してから親イシューを処理する（親ノードは verify-close）
 - closed 済みイシューは自動でスキップする
+- `dependsOn` には「機能的に先行完了が必須」のイシュー番号のみを入れる（本文の明示的な依存記述・前提実装に限る。単なる関連やコンフリクトの可能性だけなら含めない）
+- 祖先イシューへの `dependsOn` は無視する（親は子の完了を待つ側のため）
+- 依存グラフに循環がある場合は DFS で検出し、循環を構成する非ツリー辺（`dependsOn`）を除去してデッドロックを防ぐ
 
-### Step 2: 各イシューを独立したサブエージェントで実装する（Implement）
+### Step 2: 末端イシューを worktree 隔離で並列実装する（Implement）
 
-実行キューの各イシューを独立したサブエージェントで処理する。同一階層の子イシューは**直列処理**（post-order DFS の性質上、子が完了するまで次の子には進まない）。
+末端の実装イシューを post-order DFS 順を優先度として空きスロットへ貪欲投入し、最大 `parallel`（既定 3）件まで並列実行する。各 implement / fix エージェントは**独立した git worktree** で隔離実行されるため、並列でもブランチ・working copy が衝突しない。
 
-処理内容:
-1. 指定ブランチ（デフォルト: `main`）から作業ブランチを作成する
-2. `implement-issue` フローでコードを実装する（**本ワークフローではユーザー承認を省略**）
-3. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む
-4. `implement-review` の指摘を重要度問わずすべて修正する
-5. `create-pr` で PR を作成する（body に `Closes #N`、base: 指定ブランチ）
+並列スケジューリングのルール:
+- 依存（`dependsOn` と親子関係）がすべて完了したイシューのみ投入する
+- 依存先が失敗したイシューは `blocked` として記録し着手しない
+- ファイル競合によるマージコンフリクトは待機せず、後段の修正ループ（Step 3）で解消する
+
+各イシューの処理内容:
+1. 隔離 worktree で `git status` が clean か確認し、差分があれば作業せず失敗を返す
+2. 指定ブランチ（デフォルト: `main`）から作業ブランチを作成する（並列時のブランチ名衝突を防ぐためブランチ名にイシュー番号を含める）
+3. `implement-issue` フローでコードを実装する（**本ワークフローではユーザー承認を省略**）
+4. 対象リポジトリの CLAUDE.md・rules・テスト実行規約に従いビルド・lint・テストを通す
+5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む
+6. `implement-review` の指摘を重要度問わずすべて修正する
+7. `create-pr` で PR を作成する（body に `Closes #N`、base: 指定ブランチ）
 
 ```bash
-# 作業ブランチ作成例
-git checkout -b feat/issue-<N>-<slug> <base-branch>
+# 作業ブランチ作成例（並列時の衝突回避のためイシュー番号を含める）
+git fetch origin && git checkout -B feat/<N>-<short-name> origin/<base-branch>
 
 # PR 作成例（Closes でイシューと紐付け）
 gh pr create \
@@ -90,9 +115,9 @@ EOF
 )"
 ```
 
-### Step 3: CI 監視・レビューコメント解決確認・squash merge する（Merge）
+### Step 3: CI / Bugbot 監視・レビューコメント解決確認・squash merge する（Merge）
 
-`gh pr checks --watch` で CI を監視し、全チェック green になったら **レビューコメントが全て解決済み**であることを確認してから squash merge する。
+`gh pr checks --watch` で CI を監視し、全チェック green かつ Bugbot 指摘なしになったら **レビューコメントが全て解決済み**であることを確認してから squash merge する。Cursor Bugbot を利用するリポジトリでは、HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はせずブロックしない）。
 
 ```bash
 # CI 監視
@@ -116,7 +141,7 @@ gh api graphql -f query='
 gh pr merge <pr-number> --squash --delete-branch
 ```
 
-未解決のレビュースレッドがある場合は修正エージェントが指摘内容を反映して再監視する（最大 6 ラウンド）。6 ラウンド以内に解決できない場合はそのイシューで停止し、最終レポートに記録する。
+CI 失敗・Bugbot 指摘・コンフリクト・未解決レビュースレッドがある場合は、修正エージェント（fix）が detached HEAD で対象ブランチを取得して指摘を反映し再 push する。修正エージェントも worktree 隔離で動作するため、他の並列イシューのブランチに干渉しない。監視（monitor）は最大 7 回、修正（fix）は最大 6 回まで実行し、push なしが 2 回連続したイシューは `blocked` として記録する。
 
 ### Step 4: 親イシューを検証してクローズする
 
@@ -133,55 +158,68 @@ gh issue view <parent-number>
 gh issue close <parent-number> --comment "配下のサブイシューがすべて実装・マージ完了。受入基準を確認してクローズ。"
 ```
 
-open のサブイシューが残っている場合、または受入基準が未達の場合はクローズせずに停止し、最終レポートに残課題を記録する。
+open のサブイシューが残っている場合、または受入基準が未達の場合はクローズせず `failed` として記録する。親ノードは全子イシューが完了するまで投入されないため、子の並列実行完了後に検証される。
 
 ### Step 5: 最終レポートを生成する
 
-全イシューの処理結果をまとめてレポートを出力する。
+全イシューの処理結果をまとめてレポートを出力する。1 イシューの失敗では即停止せず次へ進むが、**3 イシュー連続で完了できなかった場合は新規着手を停止（halt）**し、ユーザーの判断を待つ。halt 後に着手しなかったイシューは `not-started` として記録される。
 
 ```
 ## implement-issue-tree 完了レポート
 
 ### 処理結果サマリー
-- 完了: N 件
+- 並列度: N
+- 完了（merged / closed）: N 件
 - スキップ（closed 済み）: N 件
-- 停止: N 件
+- 失敗（failed）: N 件
+- 依存失敗で未着手（blocked）: N 件
+- halt により未着手（not-started）: N 件
 
 ### 完了イシュー
 - #N: タイトル — PR #M (squash merged)
 ...
 
-### 停止イシュー（要確認）
-- #N: タイトル — 停止理由（CI 失敗 / レビュー未解決等）
+### 失敗・未着手イシュー（要確認）
+- #N: タイトル — 理由（CI 失敗 / レビュー未解決 / 依存先失敗 / halt 等）
 ```
+
+返却値: `parent` / `baseBranch` / `parallel` / `total` / `done`（各イシューの status） / `failures` / `notStarted` / `halted`。
 
 ## 検証
 
 最終レポートの「完了イシュー」に全対象イシューが列挙され、「停止イシュー」が空であることを確認する。
 
 ```bash
-# 対象イシューが全て closed になっているか確認
-gh api repos/{owner}/{repo}/issues/<parent>/sub_issues --jq '.[].state'
+# 親イシューの直下サブイシューが全て closed か確認
+gh api "repos/{owner}/{repo}/issues/<parent>/sub_issues" \
+  --jq '.[] | {number: .number, state: .state, title: .title}'
 
-# PR が全て squash merge されているか確認
-gh pr list --state merged --search "Closes #<parent>"
+# 孫まで含む全サブイシューの状態確認（再帰が必要な場合は各 Phase 親でも実行）
+gh api "repos/{owner}/{repo}/issues/<phase-parent>/sub_issues" \
+  --jq '.[] | {number: .number, state: .state}'
 ```
+
+Workflow の返却値（`done`・`failures`・`notStarted`）を確認し、`failures` と `notStarted` が空であることを確認する。
 
 ## モデル割り当て
 
 | 処理 | model |
 |------|-------|
-| 実装系（implement-issue フロー） | opus |
-| 監視・検証系（CI 監視・受入基準確認） | sonnet |
+| ツリー取得・依存抽出（Plan） | sonnet |
+| 実装・修正系（implement / fix） | opus |
+| 監視・検証系（CI / Bugbot 監視・受入基準確認・クローズ） | sonnet |
 
 ## 注意事項
 
-- **ユーザー承認なしで PR 作成・merge まで自動実行する**ため、事前に親イシュー番号・ブランチを慎重に確認する
+- **ユーザー承認なしで PR 作成・merge まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する
+- `parallel` は 1〜8 の整数のみ有効。整数以外・範囲外は既定の 3 にフォールバックする。並列度を上げるほど API レート制限・CI キューの逼迫に注意する
+- 各 implement / fix は独立した worktree で隔離実行されるが、メイン working copy のブランチ・共有設定などグローバル状態は変更しない
 - 大規模ツリー（数百件）はサブ親単位で複数回に分けて実行する（1 ワークフローのエージェント上限は 1,000）
 - 中断・失敗からの再開:
-  - 同一セッション内なら `resumeFromRunId` を使用する
+  - 同一セッション内なら Workflow ツールの `resumeFromRunId` パラメータで再開できる（スクリプト側の対応は不要。Workflow ツールが journal から自動再開する）
   - セッションを跨ぐ場合は同じ `args` で再実行すれば closed 済みイシューは自動でスキップされる
-- `--no-verify` は絶対に使用しない（pre-commit フック回避禁止）
-- シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）
-- いずれかのイシューでマージに到達できない場合はそこで停止し、最終レポートに記録する
+- `--no-verify` は絶対に使用しない（pre-commit フック回避禁止。詳細は `.claude/rules/conventional-commits.md`）
+- シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）。GitHub API から取得した文字列はプロンプト埋め込み前にサニタイズされる
+- 1 イシューの失敗では停止せず次へ進むが、3 イシュー連続失敗で新規着手を停止（halt）する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
+- コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
