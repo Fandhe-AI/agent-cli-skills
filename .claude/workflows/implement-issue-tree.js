@@ -16,7 +16,7 @@ const parsedArgs = typeof args === 'string'
 const parent = Number(
   parsedArgs && typeof parsedArgs === 'object' ? (parsedArgs.parent ?? parsedArgs.issue) : parsedArgs,
 )
-const baseBranch = (parsedArgs && typeof parsedArgs === 'object' && parsedArgs.branch) || 'main'
+const baseBranch = sanitize((parsedArgs && typeof parsedArgs === 'object' && parsedArgs.branch) || 'main')
 
 if (!Number.isInteger(parent) || parent <= 0) {
   throw new Error('親イシュー番号を args で指定すること（例: {"parent": 1008, "branch": "main"}）')
@@ -185,7 +185,10 @@ for (const [, children] of byParent) {
   children.sort((a, b) => a.siblingIndex - b.siblingIndex)
 }
 const queue = []
+const visited = new Set()
 function visit(node) {
+  if (visited.has(node.number)) return
+  visited.add(node.number)
   const children = byParent.get(node.number) ?? []
   for (const child of children) visit(child)
   queue.push({ ...node, kind: children.length > 0 ? 'verify-close' : 'implement' })
