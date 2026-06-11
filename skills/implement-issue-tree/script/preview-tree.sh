@@ -43,7 +43,10 @@ collect_postorder() {
   local page=1
   local page_result
   while true; do
-    page_result=$(gh api "repos/{owner}/{repo}/issues/${issue_number}/sub_issues?per_page=100&page=${page}" --jq '.[].number' 2>/dev/null || true)
+    if ! page_result=$(gh api "repos/{owner}/{repo}/issues/${issue_number}/sub_issues?per_page=100&page=${page}" --jq '.[].number' 2>/dev/null); then
+      echo "エラー: イシュー #${issue_number} のサブイシュー取得に失敗しました" >&2
+      exit 1
+    fi
     [[ -z "${page_result}" ]] && break
     sub_issues="${sub_issues}${sub_issues:+$'\n'}${page_result}"
     page=$((page + 1))

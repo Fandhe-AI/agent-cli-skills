@@ -157,7 +157,7 @@ function closePrompt(item) {
     `親イシュー #${item.number}「${title}」の完了検証とクローズの担当。配下の子イシューは本ワークフローで処理済み。`,
     COMMON,
     '手順:',
-    `1. gh api repos/{owner}/{repo}/issues/${item.number}/sub_issues で全子イシューが closed であることを確認する。open が残っていれば closed: false で理由を返す。`,
+    `1. gh api "repos/{owner}/{repo}/issues/${item.number}/sub_issues?per_page=100" をページネーション（page=1,2,...）で全件取得し、全子イシューが closed であることを確認する。open が残っていれば closed: false で理由を返す。`,
     `2. gh issue view ${item.number} で本文の受入基準・チェックリストを読み、子イシューのマージ済み PR で満たされているか確認する。`,
     `3. 満たされていれば完了サマリーをコメントしてから gh issue close ${item.number} する。実装漏れ・残課題がある場合はクローズせず closed: false で残課題を summary に書く。`,
     '返却: closed / summary。',
