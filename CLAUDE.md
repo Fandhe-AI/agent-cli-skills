@@ -12,15 +12,19 @@ Claude Code 向けの CLI ワークフロースキル集。コミット・PR・I
 skills/                               -- スキル本体（各ディレクトリに SKILL.md）
   create-commit/
   create-issue/
+  create-issue-tree/
   create-plan/
   create-pr/
   implement-issue/
   implement-issue-tree/
     sample/                           -- 引数例・ツリー例
-    script/                           -- preview-tree.sh（ツリー確認用）
+    script/                           -- preview-tree.sh、implement-issue-tree.js（ツリー確認・自動開発用）
   implement-review/
   implement-review-pr/
+  init-claude/
   update-docs/
+  update-issue-tree/
+  update-claude/
   claude-code-reference/
     reference/                        -- 公式仕様要約
     sample/                           -- 実例
@@ -68,7 +72,7 @@ skills/                               -- スキル本体（各ディレクトリ
     github-docs                       -- 参照スキル（symlink）
     (他 create-commit 等は skills/ への symlink)
   workflows/
-    implement-issue-tree.js           -- イシューツリー自動開発 Workflow
+    implement-issue-tree.js           -- イシューツリー自動開発 Workflow（symlink: ../../skills/implement-issue-tree/script/implement-issue-tree.js）
   settings.local.json                 -- ローカル権限設定（git 管理対象外）
   settings.json                       -- hooks 設定（SessionStart リマインダー）
 ```
@@ -143,11 +147,11 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `description-style.md` | skill-author / agent-author / skill-reviewer / reference-researcher | description 著作スタイル（発火率・長さ・YAML 落とし穴） |
 | `reference-template.md` | reference-researcher / skill-author | reference 型スキルの reference/*.md と README 索引の書式規約 |
 
-## Current Skills (19)
+## Current Skills (23)
 
-### 開発ワークフロー (9)
+### 開発ワークフロー (11)
 
-create-commit, create-issue, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, update-docs
+create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, update-docs, update-issue-tree
 
 ### スキル著作・リファレンス (1)
 
@@ -156,6 +160,10 @@ claude-code-reference
 ### GitHub Projects 管理 (7)
 
 project-init, project-add-items, project-create-issues, project-view-status, project-update-items, project-sync-issues, project-archive-done
+
+### Claude Code セットアップ (2)
+
+init-claude, update-claude
 
 ### 上流貢献 (2)
 

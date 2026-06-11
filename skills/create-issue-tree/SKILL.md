@@ -1,0 +1,257 @@
+---
+name: create-issue-tree
+description: >
+  Phase 分割された GitHub Issue ツリーを新規作成するスキル。「イシューツリー作って」「タスクを Phase 別に Issue 化」「Issue ツリーを起票して」で使用。
+  要件・タスク一覧を受け取り、タスク分解（4h 粒度）→ Phase 分割 → ルート（トラッキング）issue → Phase 親 issue → 子 issue の階層を sub_issues API で紐付け。
+  phase ラベル付与・ルート issue 本文の Phase 別表生成まで自動化。任意の phase 指定で部分起票にも対応。
+  ツリーの棚卸し・更新は update-issue-tree、実装消化は implement-issue-tree を参照。
+model: opus
+user-invocable: true
+argument-hint: "<要件テキストまたはファイルパス> [--phase <phase番号>]"
+---
+
+# create-issue-tree
+
+要件・タスク一覧から Phase 分割された GitHub Issue ツリーを新規作成する。
+ルート（トラッキング issue）→ Phase 親 issue → issue → sub-issue の 4 階層を構築し、implement-issue-tree が post-order DFS で消化できる構造を維持する。
+
+## 使い方
+
+引数としてタスク要件テキストまたはファイルパスを渡す。  
+`--phase` オプションで特定 Phase のみ起票することもできる（大規模ツリーを段階的に起票する場合）。
+
+```
+create-issue-tree "ユーザー認証機能を実装する"
+create-issue-tree requirements.md
+create-issue-tree requirements.md --phase 2
+```
+
+## 前提条件
+
+- `gh` CLI がインストールされ、認証済みであること（`gh auth status` で確認）
+- 対象リポジトリへの Issue 書き込み権限があること
+
+## フロー
+
+### Step 1: 要件を分析してタスクを分解する
+
+入力テキストまたはファイルから要件を読み込み、以下の観点でタスクを分解する。
+
+- **粒度基準: 1 issue は実装 4h 程度に収める。** 4h を超えると判断した場合は sub-issue に再分解する
+- 各タスクの依存関係・実行順を把握する
+- タスク数を集計し、Phase 分割の要否を判断する（目安: 10 件超で Phase 分割を検討）
+
+分解結果をユーザーに提示し、Phase 構成・issue 数について確認を取る。  
+`--phase` オプションが指定されている場合は該当 Phase のタスクのみ対象とする。
+
+### Step 2: Phase 構成を設計する
+
+タスク数・依存関係をもとに Phase を設計する。
+
+- Phase は独立して開発可能な単位で分割する（例: Phase 1 基盤・Phase 2 機能・Phase 3 改善）
+- 各 Phase に親 issue タイトル（Conventional Commits 形式推奨）を割り当てる
+- 全体をまとめるルート（トラッキング）issue のタイトルを決定する
+  - 例: `chore(global): 全 open issue の Phase 別トラッキング (YYYY-MM-DD)`
+
+タスクが少数（Phase 分割不要）の場合はルート issue + 子 issue の 2 階層構成にする。
+
+### Step 3: ルート（トラッキング）issue を作成する
+
+ルート issue はツリー全体の進捗を管理するトラッキング issue として作成する。**ルート issue 自体には phase ラベルは付与しない**（Phase 親以下の issue にのみ付与する）。
+
+```bash
+ROOT_NUMBER=$(gh issue create \
+  --title "chore: 全 open issue の Phase 別トラッキング ($(date +%Y-%m-%d))" \
+  --body "$(cat <<'EOF'
+## 概要
+
+全 open issue を Phase 別に 1 ツリーへ整理する。各 Phase 親 issue を sub-issues として紐付け。
+
+## Phase 別実装計画
+
+| Phase | 親 issue | 直下 | 総 open 件数 |
+|-------|----------|------|-------------|
+| (作成後に更新) | | | |
+
+## 運用
+
+- 新規 issue は起票時に Phase 親へ紐付ける
+- 実行順は sub-issues リスト順が正
+- closed 親の下に open issue を残置しない
+- implement-issue-tree が post-order DFS で消化可能な構造を維持する
+EOF
+)" \
+  --json number --jq '.number')
+echo "ルート issue: ${ROOT_NUMBER}"
+```
+
+### Step 4: Phase 親 issue を作成して紐付ける
+
+Phase ごとに親 issue を作成し、sub_issues API でルートへ紐付ける。
+
+```bash
+# Phase 親 issue を作成
+PHASE_NUMBER=$(gh issue create \
+  --title "feat(phase-1): Phase 1 基盤整備" \
+  --label "phase:1" \
+  --body "$(cat <<'EOF'
+## 概要
+
+Phase 1 の実装タスクをまとめる親 issue。
+
+## タスク一覧
+
+| Issue | タイトル | 分解 |
+|-------|---------|------|
+| (子 issue 作成後に更新) | | |
+EOF
+)" \
+  --json number --jq '.number')
+
+# ルートへ紐付け
+gh api \
+  --method POST \
+  "repos/{owner}/{repo}/issues/${ROOT_NUMBER}/sub_issues" \
+  -F "sub_issue_id=${PHASE_NUMBER}"
+```
+
+### Step 5: 子 issue・sub-issue を作成して紐付ける
+
+各タスクを issue として作成し、Phase 親へ紐付ける。4h 超のタスクはさらに sub-issue に分解する。
+
+```bash
+# 子 issue を作成
+CHILD_NUMBER=$(gh issue create \
+  --title "feat: タスク名" \
+  --label "phase:1" \
+  --body "$(cat <<'EOF'
+## 概要
+
+...
+
+## 受け入れ条件
+
+- [ ] 条件1
+- [ ] 条件2
+EOF
+)" \
+  --json number --jq '.number')
+
+# Phase 親へ紐付け
+gh api \
+  --method POST \
+  "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
+  -F "sub_issue_id=${CHILD_NUMBER}"
+
+# 4h 超の場合は sub-issue を作成して子 issue へ紐付け
+SUB_NUMBER=$(gh issue create \
+  --title "feat: サブタスク名" \
+  --label "phase:1" \
+  --body "..." \
+  --json number --jq '.number')
+
+gh api \
+  --method POST \
+  "repos/{owner}/{repo}/issues/${CHILD_NUMBER}/sub_issues" \
+  -F "sub_issue_id=${SUB_NUMBER}"
+```
+
+issue 数が多い場合（50 件超が目安）は `per_page=100` パラメータを使用し、ページネーションで全件確認する。
+
+```bash
+# ページネーション例（全 sub-issues を取得）
+PAGE=1
+while true; do
+  RESULT=$(gh api \
+    "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100&page=${PAGE}")
+  COUNT=$(echo "${RESULT}" | jq 'length')
+  echo "${RESULT}"
+  if [ "${COUNT}" -lt 100 ]; then break; fi
+  PAGE=$((PAGE + 1))
+done
+```
+
+### Step 6: ルート issue 本文を Phase 別表で更新する
+
+全 issue の作成が完了したら、ルート issue 本文の Phase 別表を実際の issue 番号・件数で更新する。
+
+```bash
+gh issue edit "${ROOT_NUMBER}" --body "$(cat <<'EOF'
+## 概要
+
+全 open issue を Phase 別に 1 ツリーへ整理する。各 Phase 親 issue を sub-issues として紐付け。
+
+## Phase 別実装計画
+
+| Phase | 親 issue | 直下 | 総 open 件数 |
+|-------|----------|------|-------------|
+| Phase 1 | #<phase1_number> タイトル | N | N |
+| Phase 2 | #<phase2_number> タイトル | N | N |
+
+### Phase 1: 基盤整備
+
+| Issue | タイトル | 分解 |
+|-------|---------|------|
+| #N | タイトル | - |
+| #N | タイトル | sub-issue あり |
+
+## 運用
+
+- 新規 issue は起票時に Phase 親へ紐付ける
+- 実行順は sub-issues リスト順が正
+- closed 親の下に open issue を残置しない
+- implement-issue-tree が post-order DFS で消化可能な構造を維持する
+EOF
+)"
+```
+
+### Step 7: 作成結果を報告する
+
+```
+## create-issue-tree 完了レポート
+
+### ルート issue
+- #N: タイトル
+
+### Phase 別作成サマリー
+| Phase | 親 issue | 起票数 |
+|-------|----------|-------|
+| Phase 1 | #N | N 件 |
+
+### 作成した issue 一覧
+- #N: タイトル（Phase 1 / 親: #M）
+...
+
+### 次のアクション
+- 実装消化: implement-issue-tree スキルに ルート issue 番号を渡す
+- ツリー更新: update-issue-tree スキルでトラッキング issue を棚卸しする
+```
+
+## 検証
+
+- ルート issue の sub-issues に各 Phase 親 issue が列挙されていることを確認する
+- 各 Phase 親 issue の sub-issues に子 issue が列挙されていることを確認する
+- `gh issue view "${ROOT_NUMBER}"` でルート issue 本文の Phase 別表が正しく生成されていることを確認する
+
+```bash
+# ルート直下の sub-issues を確認
+gh api "repos/{owner}/{repo}/issues/${ROOT_NUMBER}/sub_issues" --jq '.[].number'
+
+# Phase 親直下の sub-issues を確認
+gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" --jq '.[].number'
+
+# phase ラベルの同期確認（Phase 親・子 issue にラベルが付いているか確認）
+gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
+  --jq '.[] | {number: .number, labels: [.labels[].name]}'
+```
+
+## 注意事項
+
+- **1 issue は 4h 程度に収める。** 4h を超えると判断した場合は sub-issue に分解する
+- issue タイトルは Conventional Commits 形式を推奨（`feat:`・`fix:`・`chore:` 等）
+- `--phase` 指定で部分起票した場合は、別 Phase を起票する際に同じルート issue 番号を update-issue-tree に渡して棚卸しする
+- ページネーション: sub-issues が 100 件を超える場合は `per_page=100&page=N` でページングして全件取得する
+- シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）
+- `--no-verify` は絶対に使用しない
+- issue 番号は `gh issue create ... --json number --jq '.number'` で取得し変数に保持してから sub_issues API に渡す
+- phase ラベルが存在しない場合は `gh label create "phase:1" --color "0075ca"` で事前作成する

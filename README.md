@@ -59,18 +59,30 @@ skills/
     SKILL.md                         -- Conventional Commits 形式でコミット作成
   create-issue/
     SKILL.md                         -- GitHub Issue を親子構造で作成
+  create-issue-tree/
+    SKILL.md                         -- Phase 分割された Issue ツリーを新規作成
   create-plan/
     SKILL.md                         -- 実装計画ファイルを作成
   create-pr/
     SKILL.md                         -- Conventional Commits 形式で PR 作成
   implement-issue/
     SKILL.md                         -- Issue を読み込み計画・実装
+  implement-issue-tree/
+    SKILL.md                         -- Issue ツリーを post-order DFS で自動開発
+    sample/                          -- 引数例・ツリー例
+    script/                          -- preview-tree.sh、implement-issue-tree.js
   implement-review/
     SKILL.md                         -- コード変更の品質・セキュリティレビュー
   implement-review-pr/
     SKILL.md                         -- PR の CI・品質・規約レビュー
+  init-claude/
+    SKILL.md                         -- 対象リポジトリに .claude/ 体系を初期セットアップ
   update-docs/
     SKILL.md                         -- コード変更に基づく CLAUDE.md 更新
+  update-issue-tree/
+    SKILL.md                         -- 既存 Issue ツリーを棚卸し・更新
+  update-claude/
+    SKILL.md                         -- 既存 .claude/ 体系を診断・差分追補
   create-skill/
     SKILL.md                         -- 新規スキルを scaffold・symlink・update-docs まで自動化
   create-agent/
@@ -110,12 +122,15 @@ skills/
 |--------|------|
 | **create-commit** | `git diff` を分析し、Conventional Commits 形式でコミットメッセージを生成・実行する |
 | **create-issue** | タスクを分析し、GitHub Issue を親子構造（sub-issues）で作成する |
+| **create-issue-tree** | タスク要件を Phase 分割して GitHub Issue ツリーを新規作成（4h 粒度分解・Phase 階層化） |
 | **create-plan** | コードベースを調査し、実装計画を `_/local-plans/` に作成する |
 | **create-pr** | 変更内容のセキュリティチェック後、Conventional Commits 形式で PR を作成する |
 | **implement-issue** | GitHub Issue を取得し、計画作成 → ユーザー承認 → 実装 → テストの流れで開発する |
+| **implement-issue-tree** | Issue ツリーを post-order DFS で自動開発（並列実行対応・Phase 自動消化） |
 | **implement-review** | コード変更に対して品質・アーキテクチャ・セキュリティの読み取り専用レビューを行う |
 | **implement-review-pr** | PR の CI ステータス・タイトル規約・コード品質・セキュリティを包括的にレビューする |
 | **update-docs** | コード変更差分に基づいて CLAUDE.md のスキル一覧やリポジトリ構成を更新する |
+| **update-issue-tree** | 既存 Issue ツリーを棚卸し・整理（closed 親下の付け替え・孤児再配置・phase ラベル同期） |
 
 ### スキル著作・リファレンス
 
@@ -125,6 +140,13 @@ skills/
 | **create-agent** | 新規サブエージェントを scaffold する（agent-author へ委譲、dotclaude-via-temp 準拠） |
 | **claude-code-reference** | Claude Code 本体（Skills/Subagents/Hooks/settings/slash-commands/MCP/memory）の公式仕様リファレンス |
 | **update-reference** | `claude-code-reference/reference/` の更新確認・再取得を行う（reference-researcher へ委譲） |
+
+### Claude Code セットアップ
+
+| スキル | 説明 |
+|--------|------|
+| **init-claude** | 任意のリポジトリに Claude Code の `.claude/` 体系（Agents・Rules・Skills・hooks）を初期セットアップ |
+| **update-claude** | 既存の `.claude/` 体系を診断し、理想形との差分を提示・追補する（破壊なし） |
 
 ### GitHub Projects 管理
 
