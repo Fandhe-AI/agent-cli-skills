@@ -216,7 +216,8 @@ for (const item of queue) {
 
   let merged = false
   let lastState = 'timeout'
-  // round < 7: fix の後に必ず再監視が入るよう monitor 上限を 7 回に設定する（fix は最大 6 回）
+  let fixCount = 0
+  // fix は最大 6 回。7 回目の monitor は 6 回目 fix 後の再確認専用（fix を起動しない）
   for (let round = 0; round < 7 && !merged; round++) {
     const m = await agent(monitorPrompt(item, impl), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', schema: MERGE_SCHEMA })
     lastState = m?.state ?? 'blocked'
@@ -224,7 +225,12 @@ for (const item of queue) {
       merged = true
       results.push({ issue: item.number, status: 'merged', pr: impl.prNumber, note: m.summary })
     } else if (lastState === 'needs-fix' || lastState === 'unresolved-comments') {
-      log(`PR #${impl.prNumber} に修正が必要（${lastState}）、修正エージェントを起動する`)
+      if (fixCount >= 6) {
+        lastState = 'blocked'
+        break
+      }
+      fixCount++
+      log(`PR #${impl.prNumber} に修正が必要（${lastState}）、修正エージェントを起動する（${fixCount}/6 回目）`)
       const f = await agent(fixPrompt(item, impl, m), { label: `fix:#${item.number}`, phase: 'Implement', model: 'opus', schema: FIX_SCHEMA })
       if (!f?.pushed) {
         lastState = 'blocked'

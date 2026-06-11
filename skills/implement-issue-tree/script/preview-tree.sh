@@ -16,7 +16,7 @@ if [[ -z "${PARENT}" ]]; then
   exit 1
 fi
 
-if ! [[ "${PARENT}" =~ ^[0-9]+$ ]]; then
+if ! [[ "${PARENT}" =~ ^[1-9][0-9]*$ ]]; then
   echo "エラー: イシュー番号は正の整数で指定してください（例: $0 42）" >&2
   exit 1
 fi
