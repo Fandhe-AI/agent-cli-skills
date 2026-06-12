@@ -27,8 +27,8 @@ argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 ma
 
 Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `script/implement-issue-tree.js` を指定して起動する。パスは導入形態で異なる:
 
-- 本リポジトリ内: `skills/implement-issue-tree/script/implement-issue-tree.js`
-- `npx skills add Fandhe-AI/agent-cli-skills` で導入した場合: `.claude/skills/implement-issue-tree/script/implement-issue-tree.js`
+- `skills/` レイアウトの upstream リポジトリ（`Fandhe-AI/agent-cli-skills`）: `skills/implement-issue-tree/script/implement-issue-tree.js`
+- `npx skills add Fandhe-AI/agent-cli-skills` で導入したリポジトリ、または `.claude/skills/` に配置したリポジトリ（本リポジトリ含む）: `.claude/skills/implement-issue-tree/script/implement-issue-tree.js`
 
 ```json
 {
@@ -126,7 +126,7 @@ EOF
 
 `gh pr checks --watch` が終了しても「watch が終わった」だけで合格にしない。`gh pr checks ${prNumber}` の出力で全チェックの結論を列挙して確認する。pending が残る場合は再 watch する。failure 等があれば修正エージェント（fix）へ渡す。
 
-Cursor Bugbot を利用するリポジトリでは、HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はせずブロックしない）。Bugbot が関与するリポジトリでは、**HEAD sha に対する cursor[bot] レビューが到着するまで待ってからマージする**。
+Cursor Bugbot を利用するリポジトリでは、HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はせずブロックしない）。Bugbot が関与するリポジトリでは、**HEAD sha に対する cursor[bot] レビューの到着を最大 5 分待ち、到着すれば指摘解決を待ってからマージ、到着しなければ「レビューなし確定」として先へ進む**（ブロックはしない。後述の待機手順を参照）。より厳格に「レビュー到着まで無期限に待つ」運用が必要なリポジトリは、待機手順を上書きして timeout を撤廃する。
 
 ```bash
 # HEAD sha を取得（push のたびに取り直す）
