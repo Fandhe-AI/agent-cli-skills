@@ -3,7 +3,9 @@ export const meta = {
   description: '親イシュー配下のサブイシューを依存順を保ちつつ worktree で並列に実装・レビュー・PR 作成・squash merge まで自動化する',
   whenToUse: '親イシュー番号を指定してサブイシュー群（孫含む）を依存順を保ちつつ並列に自動開発するとき',
   phases: [
+    { title: 'Restore', detail: '状態ファイルの読み込み・再開情報の復元' },
     { title: 'Plan', detail: 'イシューツリー取得・機能的依存の抽出・並列実行順の決定' },
+    { title: 'State', detail: '状態ファイル更新（進捗・worktree パスの記録）' },
     { title: 'Implement', detail: 'イシューごとの実装・レビュー・修正・PR 作成（worktree 並列）', model: 'opus' },
     { title: 'Merge', detail: 'CI / Bugbot 監視・レビューコメント全解決確認・squash merge・クローズ', model: 'sonnet' },
   ],
@@ -26,6 +28,10 @@ const concurrency = (() => {
 if (!Number.isInteger(parent) || parent <= 0) {
   throw new Error('親イシュー番号を args で指定すること（例: {"parent": 1008, "branch": "main", "parallel": 3}）')
 }
+
+// 状態ファイルのパス（メインリポルート相対）
+// parent は整数検証済みなのでファイル名として安全に使用できる
+const STATE_FILE = `_/issue-trees/${parent}.json`
 
 // GitHub API から取得した文字列をエージェントプロンプトに埋め込む前にサニタイズする
 // バッククォート・バックスラッシュ・改行・ドル記号によるプロンプトインジェクションを軽減する
@@ -50,6 +56,17 @@ function sanitizeBranch(str) {
 function assertInt(val, label) {
   if (!Number.isInteger(val) || val <= 0) throw new Error(`${label} が正の整数ではない: ${val}`)
   return val
+}
+
+// worktree パスのホワイトリスト検証
+// 英数字・スラッシュ・ハイフン・アンダースコア・ドット・スペースのみ許可。
+// 先頭は英数字か '/'、'..' 連続（ディレクトリトラバーサル）は不許可。
+// 不正な場合は '' を返す（throw しない。呼び出し側でスキップ判定する）。
+function sanitizeWorktreePath(p) {
+  if (typeof p !== 'string' || p === '') return ''
+  if (/\.\./.test(p)) return ''
+  if (!/^[a-zA-Z0-9/][a-zA-Z0-9\-_./ ]*$/.test(p)) return ''
+  return p
 }
 
 const COMMON = [
@@ -90,6 +107,7 @@ const TREE_SCHEMA = {
   },
 }
 
+// worktreePath を追加: 中断後にユーザーが残骸 worktree を特定・掃除できるようにする
 const IMPL_SCHEMA = {
   type: 'object',
   required: ['prNumber', 'branch', 'summary'],
@@ -97,6 +115,7 @@ const IMPL_SCHEMA = {
     prNumber: { type: 'number', description: '作成した PR 番号。作成できなければ 0' },
     branch: { type: 'string' },
     summary: { type: 'string' },
+    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
   },
 }
 
@@ -119,6 +138,7 @@ const FIX_SCHEMA = {
   properties: {
     pushed: { type: 'boolean' },
     summary: { type: 'string' },
+    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
   },
 }
 
@@ -131,12 +151,206 @@ const CLOSE_SCHEMA = {
   },
 }
 
+// 状態ファイルの読み込みスキーマ（additionalProperties 許可で柔軟に受け取る）
+const STATE_LOAD_SCHEMA = {
+  type: 'object',
+  required: ['ok', 'fileExisted', 'items'],
+  properties: {
+    ok: { type: 'boolean', description: '読み込み・パース成功なら true。ファイルなしの初期化成功も true。jq パース失敗等は false' },
+    fileExisted: { type: 'boolean', description: 'ファイルが存在した場合 true（新規作成した場合は false）' },
+    items: {
+      type: 'object',
+      description: 'issue 番号（文字列キー）→ 状態オブジェクトのマップ。空オブジェクトも可',
+      additionalProperties: true,
+    },
+  },
+  additionalProperties: true,
+}
+
+// 状態書き込み確認スキーマ
+const STATE_WRITE_SCHEMA = {
+  type: 'object',
+  required: ['ok'],
+  properties: {
+    ok: { type: 'boolean' },
+  },
+}
+
+// --- 状態ファイル書き込みミューテックス ---
+// parallel > 1 で複数の runOne が同時に updateState / initAllPending を呼ぶと
+// jq の read-modify-write が競合して last-writer-wins で進捗が消える。
+// 書き込み操作を Promise チェーンで直列化することで常に 1 つの jq だけが動く状態にする。
+let stateQueue = Promise.resolve()
+function enqueueStateWrite(fn) {
+  const next = stateQueue.then(fn, fn) // 前段が失敗してもチェーンを止めない
+  stateQueue = next.catch(() => {})
+  return next
+}
+
+// --- 状態ファイル操作ヘルパー ---
+
+// 状態ファイルを読み込む（存在しなければ初期 JSON を作成して返す）
+// monitor / close エージェント（isolation なし）はメインリポの cwd で動くため _/ に直接アクセスできる
+async function loadState() {
+  const result = await agent(
+    [
+      `状態ファイル読み込みタスク。`,
+      `【手順】`,
+      `1. ${STATE_FILE} が存在するか test -f で確認する。`,
+      `2. ファイルが存在する場合:`,
+      `   a. jq . ${STATE_FILE} でパースを試みる（jq の終了コードで成否を判断する）。`,
+      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。`,
+      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {} を返す。`,
+      `3. ファイルが存在しない場合:`,
+      `   a. mkdir -p _/issue-trees を実行し、`,
+      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","items":{}} を`,
+      `   c. ${STATE_FILE} に書き込む。`,
+      `   d. 書き込み成功: ok: true, fileExisted: false, items: {} を返す。`,
+      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {} を返す。`,
+      `返却: ok（boolean）, fileExisted（boolean）, items（JSON オブジェクト）。`,
+    ].join('\n'),
+    { label: 'state:load', phase: 'Restore', model: 'haiku', schema: STATE_LOAD_SCHEMA },
+  )
+  // 読み込み・初期化のいずれが失敗しても停止する
+  // （壊れた・未永続化の状態で続行すると重複 PR・重複実装が発生する危険がある）
+  if (!result?.ok) {
+    if (result?.fileExisted) {
+      throw new Error(
+        `状態ファイル（${STATE_FILE}）の読み込みまたは JSON パースに失敗した。` +
+        `ファイルを手動で確認・修復してから再実行すること。` +
+        `削除してフレッシュスタートする場合は \`rm ${STATE_FILE}\` を実行する。`,
+      )
+    } else {
+      throw new Error(
+        `状態ファイル（${STATE_FILE}）の初期化に失敗した。` +
+        `ディレクトリ作成・書き込み権限を確認してから再実行すること。`,
+      )
+    }
+  }
+  return result?.items ?? {}
+}
+
+// 指定イシューの状態を patch でマージ更新する（jq で安全に書き戻す）
+// patch の値はすべて JSON.stringify 経由で埋め込む（インジェクション対策）
+// issue 番号は整数検証済みのものだけ渡す
+// options.cleanupWorktree: string のとき、そのパスを削除対象として worktree 削除と worktree フィールドのクリアを同エージェント内で実施する
+//                          true のとき、patch.worktree を削除対象として同様に実施する
+//                          falsy のとき、削除処理を行わない
+// worktreePath は JSON.stringify 経由でプロンプトに埋め込むため、エージェント返却値由来でも安全に扱える
+async function updateState(issueNumber, patch, options = {}) {
+  assertInt(issueNumber, 'updateState issueNumber')
+  // patch を JSON シリアライズしてプロンプトに安全に埋め込む
+  const patchJson = JSON.stringify(patch)
+
+  // worktreePath はホワイトリスト検証を通過したものだけを削除対象にする
+  const rawCleanupPath =
+    typeof options.cleanupWorktree === 'string'
+      ? options.cleanupWorktree
+      : options.cleanupWorktree
+        ? (patch.worktree ?? '')
+        : ''
+  const cleanupWorktreePath = sanitizeWorktreePath(rawCleanupPath)
+  // worktreePath は JSON.stringify 経由でエスケープしてプロンプトに埋め込む（インジェクション対策）
+  const cleanupPathJson = JSON.stringify(cleanupWorktreePath)
+
+  const cleanupInstructions = cleanupWorktreePath
+    ? [
+        ``,
+        `worktree 削除タスク（同一エージェントで実施）:`,
+        `対象パス: ${cleanupPathJson}`,
+        `1. 対象パスが空文字なら何もしない。`,
+        `2. git worktree list --porcelain を実行し、出力に対象パス（${cleanupPathJson}）が含まれるか確認する。`,
+        `   メインリポ自身（先頭エントリの worktree 行）は絶対に削除しない。`,
+        `3. 含まれる場合: パスをシェル変数に格納してから削除する（インジェクション防止のため必ずこの手順を守る）:`,
+        `     p=${cleanupPathJson}`,
+        `     git worktree remove --force -- "$p"`,
+        `   （merge 済みのため --force でよい。クリーン確認は不要）`,
+        `   含まれない場合・すでに存在しない場合: 何もせず正常終了する。`,
+        `4. 削除後（または削除不要の場合も）: git worktree prune を実行する。`,
+        `5. 削除完了後、${STATE_FILE} の .items["${issueNumber}"].worktree を "" に更新する。`,
+        `   更新方法（mktemp で衝突回避・--argjson でインジェクション対策）:`,
+        `     tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+        `     jq --argjson patch '{"worktree":""}' '.items["${issueNumber}"] = ((.items["${issueNumber}"] // {}) + $patch) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+      ].join('\n')
+    : ''
+
+  const result = await enqueueStateWrite(() =>
+    agent(
+      [
+        `状態ファイル更新タスク。`,
+        `${STATE_FILE} の .items["${issueNumber}"] に以下の JSON をマージし、`,
+        `.updatedAt を \`date -u +%FT%TZ\` の値に更新して書き戻す。`,
+        `マージする JSON（以下コードブロック内がそのまま JSON データ）:`,
+        `\`\`\`json`,
+        `${patchJson}`,
+        `\`\`\``,
+        `書き戻し方法: jq コマンドで行い、mktemp で一時ファイルを2つ作成して安全に上書きする（衝突回避）。`,
+        `patch JSON は HEREDOC でファイルに書き出し --slurpfile で読み込むこと（アポストロフィ等の特殊文字が含まれても安全）。`,
+        `例:`,
+        `  patch_file=$(mktemp)`,
+        `  cat <<'PATCH_EOF' > "$patch_file"`,
+        `${patchJson}`,
+        `  PATCH_EOF`,
+        `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+        `  jq --slurpfile patch "$patch_file" '.items["${issueNumber}"] = ((.items["${issueNumber}"] // {}) + $patch[0]) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+        `  rm -f "$patch_file"`,
+        cleanupInstructions,
+        `返却: ok: true（成功時）/ ok: false（失敗時）。`,
+      ].join('\n'),
+      { label: `state:update:#${issueNumber}`, phase: 'State', model: 'haiku', schema: STATE_WRITE_SCHEMA },
+    ),
+  )
+  if (result?.ok !== true) {
+    log(`⚠️ 状態ファイル更新失敗（issue #${issueNumber}）: エージェントが ok:false を返した`)
+    return false
+  }
+  return true
+}
+
+// 全イシューを pending で一括初期化する（既存状態があるものは上書きしない）
+// 1 回の haiku エージェントでまとめて処理する
+async function initAllPending(queueItems) {
+  // キューの各アイテムを { type, status: "pending", ... } で初期化する JSON を構築する
+  const initEntries = queueItems.map((item) => ({
+    number: item.number,
+    type: item.kind === 'verify-close' ? 'verify-close' : 'implement',
+  }))
+  const initJson = JSON.stringify(initEntries)
+  const result = await enqueueStateWrite(() =>
+    agent(
+      [
+        `状態ファイル一括初期化タスク。`,
+        `以下のイシューリストについて、${STATE_FILE} の .items に存在しないエントリのみ追加する（既存エントリは上書きしない）。`,
+        `追加するエントリの初期値: {"status":"pending","pr":0,"branch":"","worktree":"","fixCount":0,"note":""}`,
+        `イシューリスト（JSON 配列）: ${initJson}`,
+        `jq を使い mktemp で一時ファイルを作成して安全に上書きする（衝突回避）。`,
+        `ヒント: reduce を使って各エントリを条件付きで追加できる。`,
+        `例:`,
+        `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+        `  jq --argjson entries '${initJson}' 'reduce $entries[] as $e (.; if .items[($e.number|tostring)] == null then .items[($e.number|tostring)] = {"type":$e.type,"status":"pending","pr":0,"branch":"","worktree":"","fixCount":0,"note":""} else . end) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+        `返却: ok: true（成功時）/ ok: false（失敗時）。`,
+      ].join('\n'),
+      { label: 'state:init-all', phase: 'State', model: 'haiku', schema: STATE_WRITE_SCHEMA },
+    ),
+  )
+  if (result?.ok !== true) {
+    log(`⚠️ 状態ファイル一括初期化失敗: エージェントが ok:false を返した`)
+  }
+}
+
 function implementPrompt(item) {
   const title = sanitize(item.title)
   return [
     `イシュー #${item.number}「${title}」を実装し PR を作成する担当エージェント。`,
     COMMON,
     '手順:',
+    `0. まず既存 PR・ブランチを確認する（中断再開・重複 PR 防止）:`,
+    `   a. 以下の 2 通りでイシュー #${item.number} に対応する open PR が既にないか確認する:`,
+    `      - gh pr list --state open --search "Closes #${item.number}" --json number,title,headRefName`,
+    `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
+    `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
+    `   b. open PR が見つかった場合は新規 PR を作らず、そのブランチを git fetch origin && git checkout <branch> で取得して続きから作業し、既存 PR 番号を prNumber として返す。`,
+    `   c. open PR がない場合は手順 1 以降に進む。`,
     '1. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
     `2. git fetch origin && git checkout -B <type>/${item.number}-<short-name> origin/${baseBranch} で作業ブランチを作成する（type は feat / fix 等の Conventional Commits 規約。並列実行時のブランチ名衝突を防ぐためイシュー番号を必ず含める）。`,
     '3. implement-issue スキルのフローに従う。ただしユーザー承認ステップは本ワークフローでは省略し、計画を _/local-plans/ に書いたら自己レビューのうえ即実装に進む。',
@@ -145,7 +359,8 @@ function implementPrompt(item) {
     '6. implement-review スキルに従いセルフレビュー（品質 + セキュリティ）を実施し、指摘は重要度を問わず（要改善レベルも含め）すべて修正する。',
     '7. create-commit スキルに従い Conventional Commits でコミットする（type/scope は英語、件名は対象リポジトリの言語規約に従う）。',
     `8. create-pr スキルに従い base ${baseBranch} で PR を作成する。body に必ず「Closes #${item.number}」を含める。`,
-    '返却: prNumber（失敗時 0）/ branch / summary（実装内容の要約。失敗時は理由と現状）。',
+    '9. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
+    '返却: prNumber（失敗時 0）/ branch / summary（実装内容の要約。失敗時は理由と現状）/ worktreePath（pwd の結果）。',
   ].join('\n')
 }
 
@@ -191,7 +406,8 @@ function fixPrompt(item, impl, finding) {
     '3. 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して通す。',
     `4. create-commit スキルに従いコミットし、git push origin HEAD:refs/heads/${branch} で反映する。`,
     '5. unresolved-comments の指摘を修正した場合は、対応したスレッドを gh api graphql の resolveReviewThread ミューテーションで解決済みにマークする（可能な場合）。',
-    '返却: pushed / summary。',
+    '6. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
+    '返却: pushed / summary / worktreePath（pwd の結果）。',
   ].join('\n')
 }
 
@@ -207,6 +423,11 @@ function closePrompt(item) {
     '返却: closed / summary。',
   ].join('\n')
 }
+
+// --- Restore フェーズ: 状態ファイルを読み込む ---
+phase('Restore')
+const savedItems = await loadState()
+log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
 phase('Plan')
 const tree = await agent([
@@ -261,6 +482,11 @@ if (unreachable.length > 0) {
 const openImpl = queue.filter((q) => q.kind === 'implement' && q.state === 'open').length
 log(`実行キュー ${queue.length} 件（うち実装対象 ${openImpl} 件）を post-order で構築した（並列度 ${concurrency}）`)
 
+// --- キュー確定後: 全ノードを pending で一括初期化（既存エントリは保持）---
+// closed の issue は pending で初期化しない。実行スキップ対象のため状態ファイルに残しても再開・目視確認を誤らせる。
+// open の issue のみを初期化対象とする
+await initAllPending(queue.filter((q) => q.state === 'open'))
+
 const results = []
 const failures = []
 let consecutiveFailures = 0
@@ -283,37 +509,107 @@ function recordFailure(failure) {
 
 // 親イシュー（verify-close）の完了検証とクローズ
 async function runVerifyClose(item) {
+  // impl 開始前に状態を implementing（verify-close の場合も同フィールドを流用）に更新
+  await updateState(item.number, { status: 'implementing' })
   const v = await agent(closePrompt(item), { label: `close:#${item.number}`, phase: 'Merge', model: 'sonnet', schema: CLOSE_SCHEMA })
   if (v?.closed) {
     results.push({ issue: item.number, status: 'closed', note: v.summary })
     consecutiveFailures = 0
+    // verify-close 成功 → closed に更新
+    await updateState(item.number, { status: 'closed', note: String(v.summary ?? '') })
     return true
   }
-  recordFailure({ issue: item.number, reason: `親イシューのクローズ検証に失敗した: ${sanitize(v?.summary ?? 'agent error')}` })
+  const reason = `親イシューのクローズ検証に失敗した: ${sanitize(v?.summary ?? 'agent error')}`
+  await updateState(item.number, { status: 'failed', note: reason })
+  recordFailure({ issue: item.number, reason })
   return false
 }
 
 // 末端イシューの実装 → 監視 → 修正 → マージ。implement / fix は worktree 隔離で並列実行する
 async function runImplement(item) {
-  const impl = await agent(implementPrompt(item), { label: `impl:#${item.number}`, phase: 'Implement', model: 'opus', schema: IMPL_SCHEMA, isolation: 'worktree' })
-  if (!impl || !impl.prNumber) {
-    recordFailure({ issue: item.number, reason: sanitize(impl?.summary ?? '実装エージェントが異常終了した') })
-    return false
+  // 状態ファイルから保存済みの情報を取得（再開判定に使用）
+  const saved = savedItems[String(item.number)] ?? {}
+
+  // monitoring から再開する場合: impl フェーズをスキップして monitor ループから開始する
+  // branch が不正な場合は再開を諦めて通常の impl から実行する（最初からやり直せば回復できる）
+  const savedBranchValid =
+    saved.status === 'monitoring' &&
+    typeof saved.branch === 'string' &&
+    /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(saved.branch)
+  const isResumeFromMonitoring = saved.status === 'monitoring' && Number.isInteger(saved.pr) && saved.pr > 0 && savedBranchValid
+  if (saved.status === 'monitoring' && !isResumeFromMonitoring) {
+    log(`#${item.number}: 状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)
   }
-  if (!Number.isInteger(impl.prNumber) || impl.prNumber <= 0) {
-    recordFailure({ issue: item.number, reason: `prNumber が正の整数ではない: ${impl.prNumber}` })
-    return false
-  }
-  // エージェント返却の branch 名もブランチ名として有効な文字種のみ許可する
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(impl.branch ?? '')) {
-    recordFailure({ issue: item.number, pr: impl.prNumber, reason: `branch 名が不正: ${sanitize(impl.branch ?? '(空)')}` })
-    return false
+  // 保存済みの fixCount。monitoring からの再開（正常再開・フォールバック含む）のときのみ引き継ぐ。
+  // failed / blocked / pending / implementing などからの再実行時は 0 にリセットして fix 上限を新規カウントする
+  const savedFixCount =
+    saved.status === 'monitoring' && Number.isInteger(saved.fixCount)
+      ? Math.min(Math.max(saved.fixCount, 0), 6)
+      : 0
+
+  let impl
+  if (isResumeFromMonitoring) {
+    // 保存済みの pr / branch / fixCount を引き継いで再開する
+    impl = {
+      prNumber: saved.pr,
+      branch: saved.branch,
+      summary: '（状態ファイルから再開）',
+      worktreePath: sanitizeWorktreePath(saved.worktree ?? ''),
+    }
+    log(`#${item.number}: 状態ファイルから monitoring 再開（PR #${impl.prNumber}、fixCount: ${savedFixCount}）`)
+  } else {
+    // 通常の impl フェーズを実行する（monitoring フォールバック含む）
+    // フォールバック時に状態ファイルに保存済みの worktree パスがあれば孤児化防止のため記録しておく
+    // impl 成功後に新パスで上書きされるため、旧 worktree が追跡されないまま残るのを防ぐ
+    const fallbackOldWorktree = sanitizeWorktreePath(saved.worktree ?? '')
+    // impl 開始直前に状態を implementing に更新
+    await updateState(item.number, { status: 'implementing' })
+    impl = await agent(implementPrompt(item), { label: `impl:#${item.number}`, phase: 'Implement', model: 'opus', schema: IMPL_SCHEMA, isolation: 'worktree' })
+    if (!impl || !impl.prNumber) {
+      const reason = sanitize(impl?.summary ?? '実装エージェントが異常終了した')
+      await updateState(item.number, { status: 'failed', note: reason })
+      recordFailure({ issue: item.number, reason })
+      return false
+    }
+    if (!Number.isInteger(impl.prNumber) || impl.prNumber <= 0) {
+      const reason = `prNumber が正の整数ではない: ${impl.prNumber}`
+      await updateState(item.number, { status: 'failed', note: reason })
+      recordFailure({ issue: item.number, reason })
+      return false
+    }
+    // エージェント返却の branch 名もブランチ名として有効な文字種のみ許可する
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(impl.branch ?? '')) {
+      const reason = `branch 名が不正: ${sanitize(impl.branch ?? '(空)')}`
+      await updateState(item.number, { status: 'failed', note: reason })
+      recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+      return false
+    }
+    // impl が返した worktreePath もホワイトリスト検証を通す
+    impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? '') }
+    // impl 完了直後: monitoring に遷移し pr / branch / worktree を記録する。
+    // monitoring フォールバック時は中断前の fixCount を引き継ぐ（新規実行時のみ 0）。
+    // フォールバック前に保存済みの旧 worktree があれば削除して孤児化を防ぐ
+    await updateState(
+      item.number,
+      {
+        status: 'monitoring',
+        pr: impl.prNumber,
+        branch: impl.branch,
+        worktree: impl.worktreePath,
+        fixCount: savedFixCount,
+      },
+      fallbackOldWorktree ? { cleanupWorktree: fallbackOldWorktree } : {},
+    )
   }
 
   let merged = false
   let lastState = 'timeout'
-  let fixCount = 0
+  // 再開時・monitoring フォールバック時は保存済みの fixCount を引き継ぐ。新規実行時のみ 0
+  let fixCount = savedFixCount
   let noPushRounds = 0
+  // 現在追跡中の worktree パス。impl または最後の fix の worktreePath を常に最新に保つ。
+  // 再開時は状態ファイルから引き継ぐ。merged 時・fix 時の削除対象として使用する
+  let currentWorktreePath = impl.worktreePath ?? ''
   // 監視は timeout 再試行を含め 7 回まで。fix は最大 6 回で、push 後は必ず 1 回以上の
   // 再監視を確保する（push した fix が再監視されないままループ終了しないように）
   let monitorsLeft = 7
@@ -325,15 +621,52 @@ async function runImplement(item) {
       merged = true
       results.push({ issue: item.number, status: 'merged', pr: impl.prNumber, note: m.summary })
       consecutiveFailures = 0
+      // merged 確定: fixCount も同時に書く（更新まとめ）。現在追跡中の worktree を自動削除して残骸を防ぐ
+      // 終端状態なので書き込み失敗時は 1 回リトライする（失敗したまま終えると次回実行で monitor が再走する）
+      {
+        const mergedPatch = { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath }
+        const mergedOpts = { cleanupWorktree: currentWorktreePath }
+        const mergedOk = await updateState(item.number, mergedPatch, mergedOpts)
+        if (!mergedOk) {
+          log(`⚠️ issue #${item.number}: merged 状態のリトライ書き込みを試みる`)
+          const retryOk = await updateState(item.number, mergedPatch, mergedOpts)
+          if (!retryOk) {
+            log(`⚠️ issue #${item.number}: 状態ファイルへの merged 記録に失敗。次回実行時に monitor が再走する可能性あり（${STATE_FILE} を手動確認すること）`)
+          }
+        }
+      }
     } else if (lastState === 'needs-fix' || lastState === 'unresolved-comments') {
       if (fixCount >= 6) {
         lastState = 'blocked'
         break
       }
-      fixCount++
-      log(`PR #${impl.prNumber} に修正が必要（${lastState}）、修正エージェントを起動する（${fixCount}/6 回目）`)
+      log(`PR #${impl.prNumber} に修正が必要（${lastState}）、修正エージェントを起動する（${fixCount + 1}/6 回目）`)
+      const oldWorktreePath = currentWorktreePath
       const f = await agent(fixPrompt(item, impl, m), { label: `fix:#${item.number}`, phase: 'Implement', model: 'opus', schema: FIX_SCHEMA, isolation: 'worktree' })
-      if (!f?.pushed) {
+      // fix 結果が有効かどうかを判定する:
+      // - f が null/undefined でない
+      // - worktreePath が sanitize を通る（空文字でも可）かつ pushed が boolean
+      const newWorktreePath = sanitizeWorktreePath(f?.worktreePath ?? '')
+      const fixSucceeded = f !== null && f !== undefined && typeof f.pushed === 'boolean'
+      if (!fixSucceeded) {
+        // fix エージェントが null/不正な値を返した場合: fixCount を消費せず即座に blocked とする
+        // （無限ループ防止のため再試行はしない）
+        const fixFailReason = `fix エージェントが無効な結果を返した（${fixCount + 1} 回目）`
+        log(`⚠️ issue #${item.number}: ${fixFailReason}`)
+        await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: fixFailReason })
+        recordFailure({ issue: item.number, pr: impl.prNumber, reason: fixFailReason })
+        return false
+      }
+      // fix 成功: fixCount をインクリメントして永続化し、旧 worktree を削除する
+      fixCount++
+      // 旧パスを保持し続けると stale になるため、有効・無効を問わず必ず新値で上書きする
+      currentWorktreePath = newWorktreePath
+      if (!newWorktreePath) {
+        log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡不能。git worktree prune での手動掃除が必要な場合あり`)
+      }
+      // fix 実行後: fixCount・新 worktree パスを更新し、旧 worktree を削除する
+      await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePath })
+      if (!f.pushed) {
         // 「指摘は修正済みで push 不要」の場合があるため即 blocked にせず 1 回だけ再監視する。
         // 2 回連続で push なしなら進展がないため blocked とする
         noPushRounds++
@@ -352,7 +685,9 @@ async function runImplement(item) {
     // timeout は次ラウンドで再監視する
   }
   if (!merged) {
-    recordFailure({ issue: item.number, pr: impl.prNumber, reason: `マージに到達できなかった（最終状態: ${lastState}）` })
+    const reason = `マージに到達できなかった（最終状態: ${lastState}）`
+    await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason })
+    recordFailure({ issue: item.number, pr: impl.prNumber, reason })
     return false
   }
   return true
@@ -363,7 +698,9 @@ async function runOne(item) {
     const ok = item.kind === 'verify-close' ? await runVerifyClose(item) : await runImplement(item)
     return { number: item.number, ok }
   } catch (e) {
-    recordFailure({ issue: item.number, reason: sanitize(e?.message ?? 'agent error') })
+    const reason = sanitize(e?.message ?? 'agent error')
+    await updateState(item.number, { status: 'failed', note: reason })
+    recordFailure({ issue: item.number, reason })
     return { number: item.number, ok: false }
   }
 }
@@ -380,9 +717,17 @@ for (const item of queue) {
   if (item.state !== 'open') {
     results.push({ issue: item.number, status: 'skipped', note: 'すでに closed' })
     done.add(item.number)
+  } else {
+    // 状態ファイルで merged / closed のものは done 扱いにしてスキップする（再開時の防御）
+    const saved = savedItems[String(item.number)] ?? {}
+    if (saved.status === 'merged' || saved.status === 'closed') {
+      results.push({ issue: item.number, status: saved.status, note: saved.note ?? '状態ファイルから復元（スキップ）' })
+      done.add(item.number)
+      log(`#${item.number}: 状態ファイルで ${saved.status} 済みのためスキップ`)
+    }
   }
 }
-const work = queue.filter((q) => q.state === 'open')
+const work = queue.filter((q) => q.state === 'open' && !done.has(q.number))
 const inTree = new Set(queue.map((q) => q.number))
 
 // 依存グラフを事前構築し、解決不能な依存を除去してデッドロックを防ぐ:
@@ -462,13 +807,27 @@ function depsOf(item) {
   return depsMap.get(item.number) ?? new Set()
 }
 
-function markBlockedByDeps(item, failedDeps) {
+// 状態ファイル上で monitoring かつ pr > 0 の issue は再開情報が有効なため blocked で上書きしない
+function isActiveMonitoring(n) {
+  const s = savedItems[String(n)] ?? {}
+  return s.status === 'monitoring' && Number.isInteger(s.pr) && s.pr > 0
+}
+
+async function markBlockedByDeps(item, failedDeps) {
   failedSet.add(item.number)
+  const note = `依存イシューの失敗・ブロックにより未着手: ${failedDeps.map((d) => `#${d}`).join(', ')}`
   results.push({
     issue: item.number,
     status: 'blocked',
-    note: `依存イシューの失敗・ブロックにより未着手: ${failedDeps.map((d) => `#${d}`).join(', ')}`,
+    note,
   })
+  // monitoring かつ pr > 0 の場合は blocked で上書きしない（halt 処理と同じガード）
+  if (isActiveMonitoring(item.number)) {
+    log(`#${item.number}: monitoring 状態を維持する（PR #${savedItems[String(item.number)].pr} の再開情報を保持）。依存失敗により新規着手はしない`)
+    return
+  }
+  // blocked 確定: note に理由を記録する（await して return 前に永続化を保証する）
+  await updateState(item.number, { status: 'blocked', note })
   log(`#${item.number} は依存 ${failedDeps.map((d) => `#${d}`).join(', ')} の失敗により着手しない`)
 }
 
@@ -483,7 +842,7 @@ while (true) {
       const ds = [...depsOf(item)]
       const failedDeps = ds.filter((d) => failedSet.has(d))
       if (failedDeps.length > 0) {
-        markBlockedByDeps(item, failedDeps)
+        await markBlockedByDeps(item, failedDeps)
         continue
       }
       if (!ds.every((d) => done.has(d))) continue
@@ -507,7 +866,7 @@ while (cascaded) {
     if (done.has(n) || failedSet.has(n)) continue
     const failedDeps = [...depsOf(item)].filter((d) => failedSet.has(d))
     if (failedDeps.length > 0) {
-      markBlockedByDeps(item, failedDeps)
+      await markBlockedByDeps(item, failedDeps)
       cascaded = true
     }
   }
@@ -518,6 +877,14 @@ const notStarted = work
   .map((q) => q.number)
 for (const n of notStarted) {
   results.push({ issue: n, status: 'not-started', note: 'halted により未着手' })
+  // halted 時の notStarted は blocked として状態ファイルに記録する。
+  // ただし既に monitoring 状態（PR 作成済み）の issue は上書きしない。
+  // 状態ファイル上で monitoring かつ pr > 0 の場合は再開情報が有効なため保持する。
+  if (!isActiveMonitoring(n)) {
+    await updateState(n, { status: 'blocked', note: 'halted により未着手' })
+  } else {
+    log(`#${n}: halt 時も monitoring 状態を維持する（PR #${savedItems[String(n)].pr} の再開情報を保持）`)
+  }
 }
 if (notStarted.length > 0) {
   log(`未着手のまま終了: ${notStarted.map((n) => `#${n}`).join(', ')}`)

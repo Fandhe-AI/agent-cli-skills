@@ -231,15 +231,98 @@ Workflow の返却値（`done`・`failures`・`notStarted`）を確認し、`fai
 | 実装・修正系（implement / fix） | opus |
 | 監視・検証系（CI / Bugbot 監視・受入基準確認・クローズ） | sonnet |
 
+## 中断・失敗からの再開
+
+実行中の状態は `_/issue-trees/<親イシュー番号>.json` に自動保存される。セッションが中断・強制終了した場合でも、**同じ `args` で再実行するだけで再開できる**。
+
+```bash
+# 状態ファイルの確認
+cat _/issue-trees/42.json
+```
+
+状態ファイルの `status` フィールドは以下の値を取る:
+
+| status | 意味 | 再開時の挙動 |
+|--------|------|------------|
+| `pending` | 未着手 | 最初から実行 |
+| `implementing` | 実装中（中断） | 最初から実行（impl フェーズ再実行） |
+| `monitoring` | 監視中（中断） | **impl をスキップし monitor ループから再開**（PR 番号・ブランチ・fixCount を引き継ぐ） |
+| `merged` | マージ済み | スキップ（完了扱い） |
+| `closed` | クローズ済み | スキップ（完了扱い） |
+| `failed` | 失敗 | 最初から再実行（再チャンスを与える） |
+| `blocked` | 依存失敗または halted | 最初から再実行（再チャンスを与える） |
+| `skipped` | GitHub 側で closed 済み | スキップ（変更なし） |
+
+`monitoring` 中断からの再開では、保存された `pr`（PR 番号）・`branch`・`fixCount`（修正済み回数）を引き継いで monitor ループから再開する。`fixCount` の上限（6 回）は引き継いだ値に基づいて判定される。
+
+状態ファイルの `worktree` フィールドには実装エージェントが動作した worktree の絶対パスが記録される。中断後に残骸 worktree を特定・掃除する際に利用できる。
+
+### worktree の自動削除
+
+**merged 確定時**に、状態ファイルの更新と同じエージェント内で worktree を自動削除する。削除は `git worktree remove --force <path>` で実行し（squash merge 済みのため force でよい）、削除後に `git worktree prune` を実行する。削除完了後、状態ファイルの `worktree` フィールドは空文字に更新されるため、残骸の有無を状態ファイルから判別できる。
+
+**fix のたびに古い worktree は削除され、常に最新の 1 つだけが追跡される**。fix エージェントも `isolation: 'worktree'` で動作するため、fix のたびに新しい worktree が作成される。fix 完了後に旧 worktree を自動削除し、状態ファイルの `worktree` フィールドを新しいパスに更新する。これにより fix を複数回繰り返しても残骸 worktree が蓄積しない。
+
+**failed / blocked の worktree は削除しない**（デバッグ・手動再開用に残す）。不要になった場合は状態ファイルの `worktree` フィールドを参照して手動で削除する:
+
+```bash
+# 状態ファイルで worktree パスを確認
+cat _/issue-trees/42.json | jq '.items | to_entries[] | select(.value.status == "failed") | {issue: .key, worktree: .value.worktree}'
+
+# 手動削除
+git worktree remove <worktree-path>
+git worktree prune
+```
+
+### 実装エージェントによる既存 PR の再利用
+
+実装エージェントは着手時にまず `gh pr list --state open` でイシュー番号に対応する open PR が既に存在しないかを確認する。既存 PR が見つかった場合は新規 PR を作らず、そのブランチを取得して続きから作業し、既存 PR 番号をそのまま返す。これにより中断再開時や monitoring フォールバック時に重複 PR が作成されない。
+
+### 状態ファイルが壊れている場合
+
+状態ファイルが存在するが JSON パースに失敗している場合、**ワークフローはエラー停止する**（壊れたファイルを無視してフレッシュスタートすると重複 PR・重複実装が発生する危険があるため）。
+
+エラーメッセージ例:
+```
+状態ファイル（_/issue-trees/42.json）の読み込みまたは JSON パースに失敗した。
+ファイルを手動で確認・修復してから再実行すること。
+削除してフレッシュスタートする場合は `rm _/issue-trees/42.json` を実行する。
+```
+
+対処方法:
+```bash
+# 状態ファイルの内容を確認する
+cat _/issue-trees/42.json
+
+# 修復できる場合: jq で検証・修正してから再実行
+jq . _/issue-trees/42.json
+
+# 完全にやり直す場合: 削除してから再実行（進捗は失われる）
+rm _/issue-trees/42.json
+```
+
+### 最初からやり直す場合
+
+状態ファイルを削除してから再実行する:
+
+```bash
+rm _/issue-trees/42.json
+# 再実行
+```
+
+### 状態ファイルについて
+
+- パス: `_/issue-trees/<親イシュー番号>.json`（メインリポルート相対）
+- `_/` は git 管理外のローカルディレクトリ（`.gitignore` 対象）であり、状態ファイルは git にコミットされない
+- 同一セッション内での再開は Workflow ツールの `resumeFromRunId` パラメータも利用できる（Workflow ツールが journal から自動再開する）
+- サンプル: `skills/implement-issue-tree/sample/state-example.json` を参照
+
 ## 注意事項
 
 - **ユーザー承認なしで PR 作成・merge まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する
 - `parallel` は 1〜8 の整数のみ有効。整数以外・範囲外は既定の 3 にフォールバックする。並列度を上げるほど API レート制限・CI キューの逼迫に注意する
 - 各 implement / fix は独立した worktree で隔離実行されるが、メイン working copy のブランチ・共有設定などグローバル状態は変更しない
 - 大規模ツリー（数百件）はサブ親単位で複数回に分けて実行する（1 ワークフローのエージェント上限は 1,000）
-- 中断・失敗からの再開:
-  - 同一セッション内なら Workflow ツールの `resumeFromRunId` パラメータで再開できる（スクリプト側の対応は不要。Workflow ツールが journal から自動再開する）
-  - セッションを跨ぐ場合は同じ `args` で再実行すれば closed 済みイシューは自動でスキップされる
 - `--no-verify` は絶対に使用しない（pre-commit フック回避禁止。詳細は `.claude/rules/conventional-commits.md`）
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）。GitHub API から取得した文字列はプロンプト埋め込み前にサニタイズされる
 - 1 イシューの失敗では停止せず次へ進むが、3 イシュー連続失敗で新規着手を停止（halt）する
