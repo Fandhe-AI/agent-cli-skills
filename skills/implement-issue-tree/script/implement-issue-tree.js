@@ -738,12 +738,35 @@ for (const item of queue) {
     results.push({ issue: item.number, status: 'skipped', note: 'すでに closed' })
     done.add(item.number)
   } else {
-    // 状態ファイルで merged / closed のものは done 扱いにしてスキップする（再開時の防御）
+    // 状態ファイルで merged / closed のものは done 扱いにしてスキップする（再開時の防御）。
+    // ただしここに来た時点で GitHub 上の issue は open であり、記録と実態が矛盾している
+    // （merged 後の issue close 失敗・手動 reopen 等）。GitHub を正として無条件 skip しない:
+    //   - verify-close ノード: 冪等（全子 closed 確認 → close）のため再実行する
+    //   - merged かつ再開情報（pr / branch）が有効: monitoring に格下げして再投入する。
+    //     monitor が手順 1 で PR の MERGED を検出し、issue close を再試行して即終端する
+    //   - それ以外（再開情報なし）: skip するが、要手動確認であることを results に明記する
     const saved = savedItems[String(item.number)] ?? {}
     if (saved.status === 'merged' || saved.status === 'closed') {
-      results.push({ issue: item.number, status: saved.status, note: saved.note ?? '状態ファイルから復元（スキップ）' })
-      done.add(item.number)
-      log(`#${item.number}: 状態ファイルで ${saved.status} 済みのためスキップ`)
+      const resumable =
+        saved.status === 'merged' &&
+        Number.isInteger(saved.pr) &&
+        saved.pr > 0 &&
+        typeof saved.branch === 'string' &&
+        /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(saved.branch)
+      if (item.kind === 'verify-close') {
+        log(`#${item.number}: 状態ファイルは ${saved.status} だが GitHub では open のため verify-close を再実行する`)
+      } else if (resumable) {
+        savedItems[String(item.number)] = { ...saved, status: 'monitoring' }
+        log(`#${item.number}: 状態ファイルは merged だが GitHub では open のため monitor を再実行する（PR #${saved.pr} の MERGED 確認と issue close を再試行）`)
+      } else {
+        results.push({
+          issue: item.number,
+          status: saved.status,
+          note: `状態ファイルは ${saved.status} だが GitHub では open（再開情報なし）。手動確認が必要`,
+        })
+        done.add(item.number)
+        log(`⚠️ #${item.number}: 状態ファイルは ${saved.status} だが GitHub では open。再開情報がないため skip する（手動確認が必要）`)
+      }
     }
   }
 }
