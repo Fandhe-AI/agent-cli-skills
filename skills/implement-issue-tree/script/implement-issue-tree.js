@@ -882,8 +882,12 @@ while (cascaded) {
   for (const item of work) {
     const n = item.number
     if (done.has(n) || failedSet.has(n)) continue
-    const failedDeps = [...depsOf(item)].filter((d) => failedSet.has(d))
-    if (failedDeps.length > 0) {
+    const ds = [...depsOf(item)]
+    const failedDeps = ds.filter((d) => failedSet.has(d))
+    // dispatch ループと同じ確定条件を適用する: 未確定（halt で未着手のまま終了した）依存が
+    // 残る item は blocked にせず notStarted へ落とす。失敗依存リストが不完全なまま
+    // blocked 確定すると note が新ルール（全依存確定後に確定）と矛盾するため。
+    if (failedDeps.length > 0 && ds.every((d) => done.has(d) || failedSet.has(d))) {
       await markBlockedByDeps(item, failedDeps)
       cascaded = true
     }
