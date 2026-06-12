@@ -154,8 +154,10 @@ const CLOSE_SCHEMA = {
 // 状態ファイルの読み込みスキーマ（additionalProperties 許可で柔軟に受け取る）
 const STATE_LOAD_SCHEMA = {
   type: 'object',
-  required: ['items'],
+  required: ['ok', 'fileExisted', 'items'],
   properties: {
+    ok: { type: 'boolean', description: '読み込み・パース成功なら true。ファイルなしの初期化成功も true。jq パース失敗等は false' },
+    fileExisted: { type: 'boolean', description: 'ファイルが存在した場合 true（新規作成した場合は false）' },
     items: {
       type: 'object',
       description: 'issue 番号（文字列キー）→ 状態オブジェクトのマップ。空オブジェクトも可',
@@ -193,14 +195,31 @@ async function loadState() {
   const result = await agent(
     [
       `状態ファイル読み込みタスク。`,
-      `${STATE_FILE} が存在すれば cat でそのまま内容を読み取り、items フィールドとして返す。`,
-      `存在しなければ mkdir -p _/issue-trees を実行し、`,
-      `{"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","items":{}} を`,
-      `${STATE_FILE} に書き込んでから、その内容を items として返す。`,
-      `返却: items（JSON オブジェクト。空でも可）。`,
+      `【手順】`,
+      `1. ${STATE_FILE} が存在するか test -f で確認する。`,
+      `2. ファイルが存在する場合:`,
+      `   a. jq . ${STATE_FILE} でパースを試みる（jq の終了コードで成否を判断する）。`,
+      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。`,
+      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {} を返す。`,
+      `3. ファイルが存在しない場合:`,
+      `   a. mkdir -p _/issue-trees を実行し、`,
+      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","items":{}} を`,
+      `   c. ${STATE_FILE} に書き込む。`,
+      `   d. 書き込み成功: ok: true, fileExisted: false, items: {} を返す。`,
+      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {} を返す。`,
+      `返却: ok（boolean）, fileExisted（boolean）, items（JSON オブジェクト）。`,
     ].join('\n'),
     { label: 'state:load', phase: 'Restore', model: 'haiku', schema: STATE_LOAD_SCHEMA },
   )
+  // ファイルが存在するのに読み込み・パース失敗の場合はフレッシュスタートせず停止する
+  // （壊れた状態ファイルで黙って再実装すると重複 PR・重複実装が発生する危険がある）
+  if (result?.fileExisted && !result?.ok) {
+    throw new Error(
+      `状態ファイル（${STATE_FILE}）の読み込みまたは JSON パースに失敗した。` +
+      `ファイルを手動で確認・修復してから再実行すること。` +
+      `削除してフレッシュスタートする場合は \`rm ${STATE_FILE}\` を実行する。`,
+    )
+  }
   return result?.items ?? {}
 }
 
@@ -267,7 +286,9 @@ async function updateState(issueNumber, patch, options = {}) {
   )
   if (result?.ok !== true) {
     log(`⚠️ 状態ファイル更新失敗（issue #${issueNumber}）: エージェントが ok:false を返した`)
+    return false
   }
+  return true
 }
 
 // 全イシューを pending で一括初期化する（既存状態があるものは上書きしない）
@@ -585,7 +606,19 @@ async function runImplement(item) {
       results.push({ issue: item.number, status: 'merged', pr: impl.prNumber, note: m.summary })
       consecutiveFailures = 0
       // merged 確定: fixCount も同時に書く（更新まとめ）。現在追跡中の worktree を自動削除して残骸を防ぐ
-      await updateState(item.number, { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath }, { cleanupWorktree: currentWorktreePath })
+      // 終端状態なので書き込み失敗時は 1 回リトライする（失敗したまま終えると次回実行で monitor が再走する）
+      {
+        const mergedPatch = { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath }
+        const mergedOpts = { cleanupWorktree: currentWorktreePath }
+        const mergedOk = await updateState(item.number, mergedPatch, mergedOpts)
+        if (!mergedOk) {
+          log(`⚠️ issue #${item.number}: merged 状態のリトライ書き込みを試みる`)
+          const retryOk = await updateState(item.number, mergedPatch, mergedOpts)
+          if (!retryOk) {
+            log(`⚠️ issue #${item.number}: 状態ファイルへの merged 記録に失敗。次回実行時に monitor が再走する可能性あり（${STATE_FILE} を手動確認すること）`)
+          }
+        }
+      }
     } else if (lastState === 'needs-fix' || lastState === 'unresolved-comments') {
       if (fixCount >= 6) {
         lastState = 'blocked'
