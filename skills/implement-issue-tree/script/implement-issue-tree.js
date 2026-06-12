@@ -253,6 +253,14 @@ async function updateState(issueNumber, patch, options = {}) {
   // worktreePath は JSON.stringify 経由でエスケープしてプロンプトに埋め込む（インジェクション対策）
   const cleanupPathJson = JSON.stringify(cleanupWorktreePath)
 
+  // 削除対象が patch の記録する worktree と異なる場合（旧 worktree を削除しつつ新パスを
+  // 記録するケース）、削除後に .worktree を "" に上書きすると記録したばかりの新パスの
+  // 追跡が失われる。クリアは「patch が worktree を持たない」「patch の worktree が空」
+  // 「削除対象と同一パス」の場合に限る
+  const patchWorktree = typeof patch.worktree === 'string' ? patch.worktree : null
+  const clearWorktreeAfterCleanup =
+    patchWorktree === null || patchWorktree === '' || patchWorktree === cleanupWorktreePath
+
   const cleanupInstructions = cleanupWorktreePath
     ? [
         ``,
@@ -267,10 +275,17 @@ async function updateState(issueNumber, patch, options = {}) {
         `   （merge 済みのため --force でよい。クリーン確認は不要）`,
         `   含まれない場合・すでに存在しない場合: 何もせず正常終了する。`,
         `4. 削除後（または削除不要の場合も）: git worktree prune を実行する。`,
-        `5. 削除完了後、${STATE_FILE} の .items["${issueNumber}"].worktree を "" に更新する。`,
-        `   更新方法（mktemp で衝突回避・--argjson でインジェクション対策）:`,
-        `     tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
-        `     jq --argjson patch '{"worktree":""}' '.items["${issueNumber}"] = ((.items["${issueNumber}"] // {}) + $patch) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+        ...(clearWorktreeAfterCleanup
+          ? [
+              `5. 削除完了後、${STATE_FILE} の .items["${issueNumber}"].worktree を "" に更新する。`,
+              `   更新方法（mktemp で衝突回避・--argjson でインジェクション対策）:`,
+              `     tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+              `     jq --argjson patch '{"worktree":""}' '.items["${issueNumber}"] = ((.items["${issueNumber}"] // {}) + $patch) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+            ]
+          : [
+              `5. ${STATE_FILE} の .items["${issueNumber}"].worktree は更新しない`,
+              `   （状態ファイル更新タスクで新しい worktree パスを記録済みのため、上書きしないこと）。`,
+            ]),
       ].join('\n')
     : ''
 
