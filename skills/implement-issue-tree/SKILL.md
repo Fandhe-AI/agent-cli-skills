@@ -274,6 +274,10 @@ git worktree remove <worktree-path>
 git worktree prune
 ```
 
+### 実装エージェントによる既存 PR の再利用
+
+実装エージェントは着手時にまず `gh pr list --state open` でイシュー番号に対応する open PR が既に存在しないかを確認する。既存 PR が見つかった場合は新規 PR を作らず、そのブランチを取得して続きから作業し、既存 PR 番号をそのまま返す。これにより中断再開時や monitoring フォールバック時に重複 PR が作成されない。
+
 ### 最初からやり直す場合
 
 状態ファイルを削除してから再実行する:

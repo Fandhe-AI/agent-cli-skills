@@ -174,6 +174,17 @@ const STATE_WRITE_SCHEMA = {
   },
 }
 
+// --- 状態ファイル書き込みミューテックス ---
+// parallel > 1 で複数の runOne が同時に updateState / initAllPending を呼ぶと
+// jq の read-modify-write が競合して last-writer-wins で進捗が消える。
+// 書き込み操作を Promise チェーンで直列化することで常に 1 つの jq だけが動く状態にする。
+let stateQueue = Promise.resolve()
+function enqueueStateWrite(fn) {
+  const next = stateQueue.then(fn, fn) // 前段が失敗してもチェーンを止めない
+  stateQueue = next.catch(() => {})
+  return next
+}
+
 // --- 状態ファイル操作ヘルパー ---
 
 // 状態ファイルを読み込む（存在しなければ初期 JSON を作成して返す）
@@ -237,20 +248,22 @@ async function updateState(issueNumber, patch, options = {}) {
       ].join('\n')
     : ''
 
-  const result = await agent(
-    [
-      `状態ファイル更新タスク。`,
-      `${STATE_FILE} の .items["${issueNumber}"] に以下の JSON をマージし、`,
-      `.updatedAt を \`date -u +%FT%TZ\` の値に更新して書き戻す。`,
-      `マージする JSON: ${patchJson}`,
-      `書き戻し方法: jq コマンドで行い、mktemp で一時ファイルを作成して安全に上書きする（衝突回避）。`,
-      `例:`,
-      `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
-      `  jq --argjson patch '${patchJson}' '.items["${issueNumber}"] = ((.items["${issueNumber}"] // {}) + $patch) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
-      cleanupInstructions,
-      `返却: ok: true（成功時）/ ok: false（失敗時）。`,
-    ].join('\n'),
-    { label: `state:update:#${issueNumber}`, phase: 'State', model: 'haiku', schema: STATE_WRITE_SCHEMA },
+  const result = await enqueueStateWrite(() =>
+    agent(
+      [
+        `状態ファイル更新タスク。`,
+        `${STATE_FILE} の .items["${issueNumber}"] に以下の JSON をマージし、`,
+        `.updatedAt を \`date -u +%FT%TZ\` の値に更新して書き戻す。`,
+        `マージする JSON: ${patchJson}`,
+        `書き戻し方法: jq コマンドで行い、mktemp で一時ファイルを作成して安全に上書きする（衝突回避）。`,
+        `例:`,
+        `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+        `  jq --argjson patch '${patchJson}' '.items["${issueNumber}"] = ((.items["${issueNumber}"] // {}) + $patch) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+        cleanupInstructions,
+        `返却: ok: true（成功時）/ ok: false（失敗時）。`,
+      ].join('\n'),
+      { label: `state:update:#${issueNumber}`, phase: 'State', model: 'haiku', schema: STATE_WRITE_SCHEMA },
+    ),
   )
   if (result?.ok !== true) {
     log(`⚠️ 状態ファイル更新失敗（issue #${issueNumber}）: エージェントが ok:false を返した`)
@@ -266,20 +279,22 @@ async function initAllPending(queueItems) {
     type: item.kind === 'verify-close' ? 'verify-close' : 'implement',
   }))
   const initJson = JSON.stringify(initEntries)
-  const result = await agent(
-    [
-      `状態ファイル一括初期化タスク。`,
-      `以下のイシューリストについて、${STATE_FILE} の .items に存在しないエントリのみ追加する（既存エントリは上書きしない）。`,
-      `追加するエントリの初期値: {"status":"pending","pr":0,"branch":"","worktree":"","fixCount":0,"note":""}`,
-      `イシューリスト（JSON 配列）: ${initJson}`,
-      `jq を使い mktemp で一時ファイルを作成して安全に上書きする（衝突回避）。`,
-      `ヒント: reduce を使って各エントリを条件付きで追加できる。`,
-      `例:`,
-      `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
-      `  jq --argjson entries '${initJson}' 'reduce $entries[] as $e (.; if .items[($e.number|tostring)] == null then .items[($e.number|tostring)] = {"type":$e.type,"status":"pending","pr":0,"branch":"","worktree":"","fixCount":0,"note":""} else . end) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
-      `返却: ok: true（成功時）/ ok: false（失敗時）。`,
-    ].join('\n'),
-    { label: 'state:init-all', phase: 'State', model: 'haiku', schema: STATE_WRITE_SCHEMA },
+  const result = await enqueueStateWrite(() =>
+    agent(
+      [
+        `状態ファイル一括初期化タスク。`,
+        `以下のイシューリストについて、${STATE_FILE} の .items に存在しないエントリのみ追加する（既存エントリは上書きしない）。`,
+        `追加するエントリの初期値: {"status":"pending","pr":0,"branch":"","worktree":"","fixCount":0,"note":""}`,
+        `イシューリスト（JSON 配列）: ${initJson}`,
+        `jq を使い mktemp で一時ファイルを作成して安全に上書きする（衝突回避）。`,
+        `ヒント: reduce を使って各エントリを条件付きで追加できる。`,
+        `例:`,
+        `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+        `  jq --argjson entries '${initJson}' 'reduce $entries[] as $e (.; if .items[($e.number|tostring)] == null then .items[($e.number|tostring)] = {"type":$e.type,"status":"pending","pr":0,"branch":"","worktree":"","fixCount":0,"note":""} else . end) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+        `返却: ok: true（成功時）/ ok: false（失敗時）。`,
+      ].join('\n'),
+      { label: 'state:init-all', phase: 'State', model: 'haiku', schema: STATE_WRITE_SCHEMA },
+    ),
   )
   if (result?.ok !== true) {
     log(`⚠️ 状態ファイル一括初期化失敗: エージェントが ok:false を返した`)
@@ -292,6 +307,11 @@ function implementPrompt(item) {
     `イシュー #${item.number}「${title}」を実装し PR を作成する担当エージェント。`,
     COMMON,
     '手順:',
+    `0. まず既存 PR・ブランチを確認する（中断再開・重複 PR 防止）:`,
+    `   a. gh pr list --state open --search "${item.number} in:title" と`,
+    `      gh pr list --state open --head "" でイシュー #${item.number} に対応する open PR が既にないか確認する。`,
+    `   b. open PR が見つかった場合は新規 PR を作らず、そのブランチを git fetch origin && git checkout <branch> で取得して続きから作業し、既存 PR 番号を prNumber として返す。`,
+    `   c. open PR がない場合は手順 1 以降に進む。`,
     '1. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
     `2. git fetch origin && git checkout -B <type>/${item.number}-<short-name> origin/${baseBranch} で作業ブランチを作成する（type は feat / fix 等の Conventional Commits 規約。並列実行時のブランチ名衝突を防ぐためイシュー番号を必ず含める）。`,
     '3. implement-issue スキルのフローに従う。ただしユーザー承認ステップは本ワークフローでは省略し、計画を _/local-plans/ に書いたら自己レビューのうえ即実装に進む。',
@@ -561,7 +581,11 @@ async function runImplement(item) {
       const f = await agent(fixPrompt(item, impl, m), { label: `fix:#${item.number}`, phase: 'Implement', model: 'opus', schema: FIX_SCHEMA, isolation: 'worktree' })
       // fix が返した worktreePath もホワイトリスト検証を通して追跡パスを更新し、旧 worktree を削除する
       const newWorktreePath = sanitizeWorktreePath(f?.worktreePath ?? '')
-      currentWorktreePath = newWorktreePath || currentWorktreePath
+      // 旧パスを保持し続けると stale になるため、有効・無効を問わず必ず新値で上書きする
+      currentWorktreePath = newWorktreePath
+      if (!newWorktreePath) {
+        log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡不能。git worktree prune での手動掃除が必要な場合あり`)
+      }
       // fix 実行後: fixCount・新 worktree パスを更新し、旧 worktree を削除する
       await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePath })
       if (!f?.pushed) {
@@ -705,7 +729,7 @@ function depsOf(item) {
   return depsMap.get(item.number) ?? new Set()
 }
 
-function markBlockedByDeps(item, failedDeps) {
+async function markBlockedByDeps(item, failedDeps) {
   failedSet.add(item.number)
   const note = `依存イシューの失敗・ブロックにより未着手: ${failedDeps.map((d) => `#${d}`).join(', ')}`
   results.push({
@@ -713,8 +737,8 @@ function markBlockedByDeps(item, failedDeps) {
     status: 'blocked',
     note,
   })
-  // blocked 確定: note に理由を記録する
-  updateState(item.number, { status: 'blocked', note })
+  // blocked 確定: note に理由を記録する（await して return 前に永続化を保証する）
+  await updateState(item.number, { status: 'blocked', note })
   log(`#${item.number} は依存 ${failedDeps.map((d) => `#${d}`).join(', ')} の失敗により着手しない`)
 }
 
@@ -729,7 +753,7 @@ while (true) {
       const ds = [...depsOf(item)]
       const failedDeps = ds.filter((d) => failedSet.has(d))
       if (failedDeps.length > 0) {
-        markBlockedByDeps(item, failedDeps)
+        await markBlockedByDeps(item, failedDeps)
         continue
       }
       if (!ds.every((d) => done.has(d))) continue
@@ -753,7 +777,7 @@ while (cascaded) {
     if (done.has(n) || failedSet.has(n)) continue
     const failedDeps = [...depsOf(item)].filter((d) => failedSet.has(d))
     if (failedDeps.length > 0) {
-      markBlockedByDeps(item, failedDeps)
+      await markBlockedByDeps(item, failedDeps)
       cascaded = true
     }
   }
