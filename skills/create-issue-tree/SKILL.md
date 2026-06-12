@@ -305,14 +305,17 @@ EOF
 - `gh issue view "${ROOT_NUMBER}"` でルート issue 本文の Phase 別表が正しく生成されていることを確認する
 
 ```bash
+# sub-issues は 1 ページ最大 100 件。100 件超のツリーは Step 5 のページネーション
+# ループで全件確認する（以下は per_page=100 で先頭ページのみ。件数が 100 未満なら全件）
+
 # ルート直下の sub-issues を確認
-gh api "repos/{owner}/{repo}/issues/${ROOT_NUMBER}/sub_issues" --jq '.[].number'
+gh api "repos/{owner}/{repo}/issues/${ROOT_NUMBER}/sub_issues?per_page=100" --jq '.[].number'
 
 # Phase 親直下の sub-issues を確認
-gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" --jq '.[].number'
+gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" --jq '.[].number'
 
 # phase ラベルの同期確認（Phase 親・子 issue にラベルが付いているか確認）
-gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
+gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" \
   --jq '.[] | {number: .number, labels: [.labels[].name]}'
 ```
 
