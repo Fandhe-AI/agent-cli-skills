@@ -545,13 +545,10 @@ async function runImplement(item) {
   // 状態ファイルから保存済みの情報を取得（再開判定に使用）
   const saved = savedItems[String(item.number)] ?? {}
 
-  // monitoring から再開する場合: impl フェーズをスキップして monitor ループから開始する
-  // branch が不正な場合は再開を諦めて通常の impl から実行する（最初からやり直せば回復できる）
-  const savedBranchValid =
-    saved.status === 'monitoring' &&
-    typeof saved.branch === 'string' &&
-    /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(saved.branch)
-  const isResumeFromMonitoring = saved.status === 'monitoring' && Number.isInteger(saved.pr) && saved.pr > 0 && savedBranchValid
+  // monitoring から再開する場合: impl フェーズをスキップして monitor ループから開始する。
+  // branch が不正な場合は再開を諦めて通常の impl から実行する（最初からやり直せば回復できる）。
+  // 判定は報告系（halt / 依存失敗）と共有の isActiveMonitoring に一元化する（条件不一致防止）
+  const isResumeFromMonitoring = isActiveMonitoring(item.number)
   if (saved.status === 'monitoring' && !isResumeFromMonitoring) {
     log(`#${item.number}: 状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)
   }
@@ -593,7 +590,7 @@ async function runImplement(item) {
       return false
     }
     // エージェント返却の branch 名もブランチ名として有効な文字種のみ許可する
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(impl.branch ?? '')) {
+    if (!isValidBranchName(impl.branch ?? '')) {
       const reason = `branch 名が不正: ${sanitize(impl.branch ?? '(空)')}`
       await updateState(item.number, { status: 'failed', note: reason })
       recordFailure({ issue: item.number, pr: impl.prNumber, reason })
@@ -748,11 +745,7 @@ for (const item of queue) {
     const saved = savedItems[String(item.number)] ?? {}
     if (saved.status === 'merged' || saved.status === 'closed') {
       const resumable =
-        saved.status === 'merged' &&
-        Number.isInteger(saved.pr) &&
-        saved.pr > 0 &&
-        typeof saved.branch === 'string' &&
-        /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(saved.branch)
+        saved.status === 'merged' && Number.isInteger(saved.pr) && saved.pr > 0 && isValidBranchName(saved.branch)
       if (item.kind === 'verify-close') {
         log(`#${item.number}: 状態ファイルは ${saved.status} だが GitHub では open のため verify-close を再実行する`)
       } else if (resumable) {
@@ -850,10 +843,18 @@ function depsOf(item) {
   return depsMap.get(item.number) ?? new Set()
 }
 
-// 状態ファイル上で monitoring かつ pr > 0 の issue は再開情報が有効なため blocked で上書きしない
+// branch 名としてブランチ名に有効な文字種のみかを検証する（runImplement の再開ガードと共有）
+function isValidBranchName(b) {
+  return typeof b === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
+}
+
+// 状態ファイル上で monitoring かつ再開情報（pr / branch）が有効な issue は
+// blocked で上書きせず「monitor から再開する」と報告してよい。
+// runImplement の monitor 再開ガード（pr > 0 かつ branch 有効）と必ず同一条件にする。
+// 条件が食い違うと「monitor から再開する」と報告したのに次回実行で impl が再走する
 function isActiveMonitoring(n) {
   const s = savedItems[String(n)] ?? {}
-  return s.status === 'monitoring' && Number.isInteger(s.pr) && s.pr > 0
+  return s.status === 'monitoring' && Number.isInteger(s.pr) && s.pr > 0 && isValidBranchName(s.branch)
 }
 
 async function markBlockedByDeps(item, failedDeps) {
