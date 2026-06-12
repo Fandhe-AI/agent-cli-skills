@@ -130,11 +130,11 @@ cat <target-repo>/.github/workflows/*.yml 2>/dev/null | head -60 || true
 承認後、以下の順で生成する。対象リポに `dotclaude-via-temp` ルール（`_/dotclaude/` 経由）がない場合は
 対象リポの `.claude/` へ直接書き込んで良い。
 
-サブステップの実行順は **3-1（CLAUDE.md）→ 3-2（agents/）→ 3-3（rules/）→ 3-4（settings.json）→ 3-5（スキル導入）** の順とする。CLAUDE.md は Agent・Rules・Skills の一覧を参照するため、それらの生成後に最終調整する。
+サブステップの実行順は **3-1（CLAUDE.md 骨子）→ 3-2（agents/）→ 3-3（rules/）→ 3-4（settings.json）→ 3-5（スキル導入）→ 3-6（CLAUDE.md 確定）** の順とする。CLAUDE.md は Agent・Rules・Skills の一覧を参照するため、3-1 では確定済みの項目（Overview / Repository Structure 等）のみ記載し、`Sub-agents` / `Rules` / `Current Skills` の各表は 3-2〜3-5 完了後に 3-6 で実体に合わせて確定する。
 
-#### 3-1. CLAUDE.md を生成する
+#### 3-1. CLAUDE.md の骨子を生成する
 
-対象リポのルートに `CLAUDE.md` を作成する。以下のセクションを含める。
+対象リポのルートに `CLAUDE.md` の骨子を作成する。以下のセクションを含めるが、`Sub-agents` / `Rules` / `Current Skills` は 3-2〜3-5 で実体を生成するまで見出しのみ（プレースホルダ）とし、内容は 3-6 で確定する。
 
 ```markdown
 # CLAUDE.md
@@ -218,12 +218,21 @@ npx skills add Fandhe-AI/agent-cli-skills
 
 `skills-lock.json` が生成されることを確認する。
 
+#### 3-6. CLAUDE.md を確定する
+
+3-2〜3-5 で生成した Agent・Rules・導入スキルの実体をもとに、3-1 で見出しのみとした
+`Sub-agents` / `Rules` / `Current Skills` の各表を実際の一覧（subagent_type / model /
+ファイル名 / 導入スキル名）で埋めて確定する。未存在の項目を列挙したまま残さない。
+
 ### Step 4: implement-issue-tree の動作前提を確認する
 
 ```bash
 # gh auth と sub_issues API の確認
 gh auth status
-gh api --method GET /repos/<owner>/<repo>/sub_issues 2>&1 | head -5
+# sub_issues は issue 番号付き `issues/{n}/sub_issues` のみ有効（リポジトリ直下に
+# sub_issues エンドポイントは存在しない）。既存 issue があれば番号を指定して疎通確認する
+# （issue が未作成なら gh auth status のみで前提確認とする）
+gh api "repos/<owner>/<repo>/issues/<既存issue番号>/sub_issues" 2>&1 | head -5
 
 # workflow js の参照確認
 ls -la <target-repo>/.claude/workflows/implement-issue-tree.js 2>/dev/null || \
