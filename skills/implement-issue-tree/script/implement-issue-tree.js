@@ -446,7 +446,9 @@ const openImpl = queue.filter((q) => q.kind === 'implement' && q.state === 'open
 log(`実行キュー ${queue.length} 件（うち実装対象 ${openImpl} 件）を post-order で構築した（並列度 ${concurrency}）`)
 
 // --- キュー確定後: 全ノードを pending で一括初期化（既存エントリは保持）---
-await initAllPending(queue)
+// closed の issue は pending で初期化しない。実行スキップ対象のため状態ファイルに残しても再開・目視確認を誤らせる。
+// open の issue のみを初期化対象とする
+await initAllPending(queue.filter((q) => q.state === 'open'))
 
 const results = []
 const failures = []
@@ -520,6 +522,9 @@ async function runImplement(item) {
     log(`#${item.number}: 状態ファイルから monitoring 再開（PR #${impl.prNumber}、fixCount: ${savedFixCount}）`)
   } else {
     // 通常の impl フェーズを実行する（monitoring フォールバック含む）
+    // フォールバック時に状態ファイルに保存済みの worktree パスがあれば孤児化防止のため記録しておく
+    // impl 成功後に新パスで上書きされるため、旧 worktree が追跡されないまま残るのを防ぐ
+    const fallbackOldWorktree = sanitizeWorktreePath(saved.worktree ?? '')
     // impl 開始直前に状態を implementing に更新
     await updateState(item.number, { status: 'implementing' })
     impl = await agent(implementPrompt(item), { label: `impl:#${item.number}`, phase: 'Implement', model: 'opus', schema: IMPL_SCHEMA, isolation: 'worktree' })
@@ -545,14 +550,19 @@ async function runImplement(item) {
     // impl が返した worktreePath もホワイトリスト検証を通す
     impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? '') }
     // impl 完了直後: monitoring に遷移し pr / branch / worktree を記録する。
-    // monitoring フォールバック時は中断前の fixCount を引き継ぐ（新規実行時のみ 0）
-    await updateState(item.number, {
-      status: 'monitoring',
-      pr: impl.prNumber,
-      branch: impl.branch,
-      worktree: impl.worktreePath,
-      fixCount: savedFixCount,
-    })
+    // monitoring フォールバック時は中断前の fixCount を引き継ぐ（新規実行時のみ 0）。
+    // フォールバック前に保存済みの旧 worktree があれば削除して孤児化を防ぐ
+    await updateState(
+      item.number,
+      {
+        status: 'monitoring',
+        pr: impl.prNumber,
+        branch: impl.branch,
+        worktree: impl.worktreePath,
+        fixCount: savedFixCount,
+      },
+      fallbackOldWorktree ? { cleanupWorktree: fallbackOldWorktree } : {},
+    )
   }
 
   let merged = false
@@ -581,12 +591,25 @@ async function runImplement(item) {
         lastState = 'blocked'
         break
       }
-      fixCount++
-      log(`PR #${impl.prNumber} に修正が必要（${lastState}）、修正エージェントを起動する（${fixCount}/6 回目）`)
+      log(`PR #${impl.prNumber} に修正が必要（${lastState}）、修正エージェントを起動する（${fixCount + 1}/6 回目）`)
       const oldWorktreePath = currentWorktreePath
       const f = await agent(fixPrompt(item, impl, m), { label: `fix:#${item.number}`, phase: 'Implement', model: 'opus', schema: FIX_SCHEMA, isolation: 'worktree' })
-      // fix が返した worktreePath もホワイトリスト検証を通して追跡パスを更新し、旧 worktree を削除する
+      // fix 結果が有効かどうかを判定する:
+      // - f が null/undefined でない
+      // - worktreePath が sanitize を通る（空文字でも可）かつ pushed が boolean
       const newWorktreePath = sanitizeWorktreePath(f?.worktreePath ?? '')
+      const fixSucceeded = f !== null && f !== undefined && typeof f.pushed === 'boolean'
+      if (!fixSucceeded) {
+        // fix エージェントが null/不正な値を返した場合: fixCount を消費せず即座に blocked とする
+        // （無限ループ防止のため再試行はしない）
+        const fixFailReason = `fix エージェントが無効な結果を返した（${fixCount + 1} 回目）`
+        log(`⚠️ issue #${item.number}: ${fixFailReason}`)
+        await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: fixFailReason })
+        recordFailure({ issue: item.number, pr: impl.prNumber, reason: fixFailReason })
+        return false
+      }
+      // fix 成功: fixCount をインクリメントして永続化し、旧 worktree を削除する
+      fixCount++
       // 旧パスを保持し続けると stale になるため、有効・無効を問わず必ず新値で上書きする
       currentWorktreePath = newWorktreePath
       if (!newWorktreePath) {
@@ -594,7 +617,7 @@ async function runImplement(item) {
       }
       // fix 実行後: fixCount・新 worktree パスを更新し、旧 worktree を削除する
       await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePath })
-      if (!f?.pushed) {
+      if (!f.pushed) {
         // 「指摘は修正済みで push 不要」の場合があるため即 blocked にせず 1 回だけ再監視する。
         // 2 回連続で push なしなら進展がないため blocked とする
         noPushRounds++
@@ -735,6 +758,12 @@ function depsOf(item) {
   return depsMap.get(item.number) ?? new Set()
 }
 
+// 状態ファイル上で monitoring かつ pr > 0 の issue は再開情報が有効なため blocked で上書きしない
+function isActiveMonitoring(n) {
+  const s = savedItems[String(n)] ?? {}
+  return s.status === 'monitoring' && Number.isInteger(s.pr) && s.pr > 0
+}
+
 async function markBlockedByDeps(item, failedDeps) {
   failedSet.add(item.number)
   const note = `依存イシューの失敗・ブロックにより未着手: ${failedDeps.map((d) => `#${d}`).join(', ')}`
@@ -743,6 +772,11 @@ async function markBlockedByDeps(item, failedDeps) {
     status: 'blocked',
     note,
   })
+  // monitoring かつ pr > 0 の場合は blocked で上書きしない（halt 処理と同じガード）
+  if (isActiveMonitoring(item.number)) {
+    log(`#${item.number}: monitoring 状態を維持する（PR #${savedItems[String(item.number)].pr} の再開情報を保持）。依存失敗により新規着手はしない`)
+    return
+  }
   // blocked 確定: note に理由を記録する（await して return 前に永続化を保証する）
   await updateState(item.number, { status: 'blocked', note })
   log(`#${item.number} は依存 ${failedDeps.map((d) => `#${d}`).join(', ')} の失敗により着手しない`)
@@ -797,12 +831,10 @@ for (const n of notStarted) {
   // halted 時の notStarted は blocked として状態ファイルに記録する。
   // ただし既に monitoring 状態（PR 作成済み）の issue は上書きしない。
   // 状態ファイル上で monitoring かつ pr > 0 の場合は再開情報が有効なため保持する。
-  const savedForN = savedItems[String(n)] ?? {}
-  const isMonitoring = savedForN.status === 'monitoring' && Number.isInteger(savedForN.pr) && savedForN.pr > 0
-  if (!isMonitoring) {
+  if (!isActiveMonitoring(n)) {
     await updateState(n, { status: 'blocked', note: 'halted により未着手' })
   } else {
-    log(`#${n}: halt 時も monitoring 状態を維持する（PR #${savedForN.pr} の再開情報を保持）`)
+    log(`#${n}: halt 時も monitoring 状態を維持する（PR #${savedItems[String(n)].pr} の再開情報を保持）`)
   }
 }
 if (notStarted.length > 0) {
