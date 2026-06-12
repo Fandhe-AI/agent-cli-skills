@@ -552,10 +552,13 @@ async function runImplement(item) {
   if (saved.status === 'monitoring' && !isResumeFromMonitoring) {
     log(`#${item.number}: 状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)
   }
-  // 保存済みの fixCount。monitoring からの再開（正常再開・フォールバック含む）のときのみ引き継ぐ。
-  // failed / blocked / pending / implementing などからの再実行時は 0 にリセットして fix 上限を新規カウントする
+  // 保存済みの fixCount。monitoring からの正常再開（impl スキップ → monitor 続行）のときのみ
+  // 引き継ぐ。再開情報が不正で impl からやり直す場合は新しい PR を作るため 0 にリセットする
+  // （旧 PR の fixCount を引き継ぐと、新 PR への fix が一度も走る前に 6 回上限へ到達しうる）。
+  // failed / blocked / pending / implementing などからの再実行時も 0 にリセットして
+  // fix 上限を新規カウントする
   const savedFixCount =
-    saved.status === 'monitoring' && Number.isInteger(saved.fixCount)
+    isResumeFromMonitoring && Number.isInteger(saved.fixCount)
       ? Math.min(Math.max(saved.fixCount, 0), 6)
       : 0
 
@@ -599,7 +602,7 @@ async function runImplement(item) {
     // impl が返した worktreePath もホワイトリスト検証を通す
     impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? '') }
     // impl 完了直後: monitoring に遷移し pr / branch / worktree を記録する。
-    // monitoring フォールバック時は中断前の fixCount を引き継ぐ（新規実行時のみ 0）。
+    // この分岐は新規 PR を作るため fixCount は常に 0（savedFixCount は正常再開時のみ非 0）。
     // フォールバック前に保存済みの旧 worktree があれば削除して孤児化を防ぐ
     await updateState(
       item.number,
@@ -616,7 +619,7 @@ async function runImplement(item) {
 
   let merged = false
   let lastState = 'timeout'
-  // 再開時・monitoring フォールバック時は保存済みの fixCount を引き継ぐ。新規実行時のみ 0
+  // monitoring からの正常再開時のみ保存済みの fixCount を引き継ぐ。それ以外は 0
   let fixCount = savedFixCount
   let noPushRounds = 0
   // 現在追跡中の worktree パス。impl または最後の fix の worktreePath を常に最新に保つ。
