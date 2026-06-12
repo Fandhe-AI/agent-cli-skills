@@ -501,8 +501,12 @@ async function runImplement(item) {
   if (saved.status === 'monitoring' && !isResumeFromMonitoring) {
     log(`#${item.number}: 状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)
   }
-  // 保存済みの fixCount（クランプ済み）。monitoring フォールバック時の引き継ぎにも使用する
-  const savedFixCount = Number.isInteger(saved.fixCount) ? Math.min(Math.max(saved.fixCount, 0), 6) : 0
+  // 保存済みの fixCount。monitoring からの再開（正常再開・フォールバック含む）のときのみ引き継ぐ。
+  // failed / blocked / pending / implementing などからの再実行時は 0 にリセットして fix 上限を新規カウントする
+  const savedFixCount =
+    saved.status === 'monitoring' && Number.isInteger(saved.fixCount)
+      ? Math.min(Math.max(saved.fixCount, 0), 6)
+      : 0
 
   let impl
   if (isResumeFromMonitoring) {
