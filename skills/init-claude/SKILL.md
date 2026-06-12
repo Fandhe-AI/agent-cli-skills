@@ -149,13 +149,13 @@ cat <target-repo>/.github/workflows/*.yml 2>/dev/null | head -60 || true
 main の役割・パスベース切り替え表・model 配分表
 
 ## Sub-agents
-カテゴリ別 Agent 一覧（subagent_type / model / 概要の表）
+（3-1 では見出しのみ。カテゴリ別 Agent 一覧の表は 3-2 完了後に 3-6 で確定する）
 
 ## Rules
-ルールファイル一覧（ファイル名 / 対象 / 概要の表）
+（3-1 では見出しのみ。ルールファイル一覧の表は 3-3 完了後に 3-6 で確定する）
 
 ## Current Skills
-導入済みスキル一覧
+（3-1 では見出しのみ。導入済みスキル一覧は 3-5 完了後に 3-6 で確定する）
 
 ## Conventions
 Conventional Commits・セキュリティレビュー・日本語出力・ユーザー承認フローなど
