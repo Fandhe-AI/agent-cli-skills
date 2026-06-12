@@ -369,7 +369,7 @@ function monitorPrompt(item, impl) {
     `PR #${impl.prNumber}（イシュー #${item.number}）の CI / Bugbot 監視・レビューコメント確認・マージ判定の担当。修正作業は行わない。`,
     COMMON,
     '手順:',
-    `1. まず現在の HEAD sha を取得して固定する: gh pr view ${impl.prNumber} --json headRefOid -q .headRefOid。fix 後に再監視するたびに取り直す（古い sha を参照しないため）。`,
+    `1. まず gh pr view ${impl.prNumber} --json state,headRefOid で PR の状態と HEAD sha を取得して固定する。state が MERGED の場合（前回実行で状態記録に失敗したマージ済み PR の再監視）は CI 監視を行わず、手順 7 のイシュークローズ確認のみ実施して即 state: merged を返す。state が CLOSED（未マージクローズ）の場合は state: blocked とし summary に理由を書く。fix 後に再監視するたびに sha を取り直す（古い sha を参照しないため）。`,
     `2. gh pr checks ${impl.prNumber} --watch --interval 60 で全チェック完了まで監視する（Bash の timeout に 600000 を指定し、コマンドがタイムアウトしたら同コマンドを再実行。再実行は 4 回まで = 最長およそ 40 分）。`,
     `3. watch 完了後、gh pr checks ${impl.prNumber} の出力で全チェックの結論を列挙して確認する。「watch が終わった」だけでは合格にしない。以下を厳密に確認する:`,
     '   a. 全チェックが success / neutral / skipped で完了していること（failure / cancelled / timed_out が 0 件）。',
@@ -417,7 +417,7 @@ function closePrompt(item) {
     `親イシュー #${item.number}「${title}」の完了検証とクローズの担当。配下の子イシューは本ワークフローで処理済み。`,
     COMMON,
     '手順:',
-    `1. gh api "repos/{owner}/{repo}/issues/${item.number}/sub_issues?per_page=100" をページネーション（page=1,2,...）で全件取得し、全子イシューが closed であることを確認する。open が残っていれば closed: false で理由を返す。`,
+    `1. gh api --paginate "repos/{owner}/{repo}/issues/${item.number}/sub_issues?per_page=100" で全子イシューを全件取得し（--paginate が 100 件超も自動で全ページ取得する）、全子イシューが closed であることを確認する。open が残っていれば closed: false で理由を返す。`,
     `2. gh issue view ${item.number} で本文の受入基準・チェックリストを読み、子イシューのマージ済み PR で満たされているか確認する。満たされたチェックボックスは更新してよい。`,
     `3. 満たされていれば完了サマリーをコメントしてから gh issue close ${item.number} する。実装漏れ・残課題がある場合はクローズせず closed: false で残課題を summary に書く。`,
     '返却: closed / summary。',
@@ -435,7 +435,7 @@ const tree = await agent([
   COMMON,
   '手順:',
   `1. gh api repos/{owner}/{repo}/issues/${parent} でルートを取得する。`,
-  '2. gh api "repos/{owner}/{repo}/issues/<n>/sub_issues?per_page=100" を再帰的に呼び、全子孫を列挙する（100 件超は page=2 以降も取得）。',
+  '2. gh api --paginate "repos/{owner}/{repo}/issues/<n>/sub_issues?per_page=100" を再帰的に呼び、全子孫を列挙する（--paginate が 100 件超も自動で全ページ取得する。返却順は API の並び順のまま連結される）。',
   '3. nodes にはルート自身（parent: 0、siblingIndex: 0）と全子孫を含める。各ノードの siblingIndex は、その親の sub_issues API が返した配列内での 0-indexed 位置とする（ルートは 0）。この値が実行順の正本になるため正確に記録すること。',
   '4. 各 open ノードについて gh issue view <n> で本文を読み、dependsOn に「機能的に先行完了が必須」のイシュー番号のみを入れる。対象は本文に明示された依存記述（「依存:」「Depends on」「Blocked by」等）と、そのイシューの成果物（型・API・スキーマ等）を前提にしないと実装が成立しないものだけ。判断に迷う場合・単なる関連・同じファイルを触りそうというだけの場合は含めない（コンフリクトは後段の修正ループで解消されるため空配列でよい）。',
 ].join('\n'), { label: 'plan:issue-tree', phase: 'Plan', model: 'sonnet', schema: TREE_SCHEMA })
@@ -619,10 +619,14 @@ async function runImplement(item) {
     lastState = m?.state ?? 'blocked'
     if (lastState === 'merged') {
       merged = true
-      results.push({ issue: item.number, status: 'merged', pr: impl.prNumber, note: m.summary })
+      const mergedResult = { issue: item.number, status: 'merged', pr: impl.prNumber, note: m.summary }
+      results.push(mergedResult)
       consecutiveFailures = 0
       // merged 確定: fixCount も同時に書く（更新まとめ）。現在追跡中の worktree を自動削除して残骸を防ぐ
-      // 終端状態なので書き込み失敗時は 1 回リトライする（失敗したまま終えると次回実行で monitor が再走する）
+      // 終端状態なので書き込み失敗時は 1 回リトライする。リトライも失敗した場合、merged の事実
+      // （PR は GitHub 上で MERGED）は変わらないため成功扱いを維持するが、レポートの note に
+      // 永続化失敗を明記する。次回実行時は monitor が手順 1 で PR の MERGED 状態を検出して
+      // 即 merged を返すため、再監視ループには入らない（冪等）
       {
         const mergedPatch = { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath }
         const mergedOpts = { cleanupWorktree: currentWorktreePath }
@@ -631,7 +635,8 @@ async function runImplement(item) {
           log(`⚠️ issue #${item.number}: merged 状態のリトライ書き込みを試みる`)
           const retryOk = await updateState(item.number, mergedPatch, mergedOpts)
           if (!retryOk) {
-            log(`⚠️ issue #${item.number}: 状態ファイルへの merged 記録に失敗。次回実行時に monitor が再走する可能性あり（${STATE_FILE} を手動確認すること）`)
+            log(`⚠️ issue #${item.number}: 状態ファイルへの merged 記録に失敗（${STATE_FILE} を手動確認すること）。PR はマージ済みのため成功として扱う。次回実行時は monitor が MERGED を検出して即終端する`)
+            mergedResult.note = `${mergedResult.note}（注意: 状態ファイルへの merged 記録に失敗。次回実行時は monitor が PR の MERGED 状態を検出して即終端する）`
           }
         }
       }
@@ -831,16 +836,25 @@ async function markBlockedByDeps(item, failedDeps) {
   } else {
     note = `前提イシューの失敗・ブロックにより未着手: ${failedPrereqs.map((d) => `#${d}`).join(', ')}`
   }
+  // monitoring かつ pr > 0 の場合は blocked で上書きしない（halt 処理と同じガード）。
+  // 状態ファイルが monitoring の再開情報を保持するため、レポート側にも PR 番号と
+  // 再開手順を併記する（blocked のみの報告だと実態＝再開可能と矛盾するため）
+  if (isActiveMonitoring(item.number)) {
+    const pr = savedItems[String(item.number)].pr
+    results.push({
+      issue: item.number,
+      status: 'blocked',
+      pr,
+      note: `${note}（中断時に monitoring・PR #${pr} 作成済み。同じ引数で再実行すると monitor から再開する）`,
+    })
+    log(`#${item.number}: monitoring 状態を維持する（PR #${pr} の再開情報を保持）。依存失敗により新規着手はしない`)
+    return
+  }
   results.push({
     issue: item.number,
     status: 'blocked',
     note,
   })
-  // monitoring かつ pr > 0 の場合は blocked で上書きしない（halt 処理と同じガード）
-  if (isActiveMonitoring(item.number)) {
-    log(`#${item.number}: monitoring 状態を維持する（PR #${savedItems[String(item.number)].pr} の再開情報を保持）。依存失敗により新規着手はしない`)
-    return
-  }
   // blocked 確定: note に理由を記録する（await して return 前に永続化を保証する）
   await updateState(item.number, { status: 'blocked', note })
   log(`#${item.number}: ${note}`)
@@ -893,27 +907,39 @@ while (cascaded) {
     }
   }
 }
-// halted により着手しなかったものも results に必ず記録する（報告漏れ防止）
-const notStarted = work
+// halted により完了しなかったものも results に必ず記録する（報告漏れ防止）。
+// 「未着手」と「monitoring 中断（PR 作成済み・再開可能）」は実態が異なるため status を分ける
+const pending = work
   .filter((q) => !done.has(q.number) && !failedSet.has(q.number))
   .map((q) => q.number)
+const notStarted = pending.filter((n) => !isActiveMonitoring(n))
+const interrupted = pending.filter((n) => isActiveMonitoring(n))
 const notStartedNote = halted
   ? `halted により未着手（理由: ${halted.reason}）`
   : 'スケジューラ終了時に未着手（キュー未到達）'
 for (const n of notStarted) {
   results.push({ issue: n, status: 'not-started', note: notStartedNote })
-  // 未着手の notStarted は blocked として状態ファイルに記録する。
-  // ただし既に monitoring 状態（PR 作成済み）の issue は上書きしない。
-  // 状態ファイル上で monitoring かつ pr > 0 の場合は再開情報が有効なため保持する。
-  if (!isActiveMonitoring(n)) {
-    await updateState(n, { status: 'blocked', note: notStartedNote })
-  } else {
-    log(`#${n}: halt 時も monitoring 状態を維持する（PR #${savedItems[String(n)].pr} の再開情報を保持）`)
-  }
+  // 未着手の notStarted は blocked として状態ファイルに記録する
+  await updateState(n, { status: 'blocked', note: notStartedNote })
+}
+for (const n of interrupted) {
+  // 状態ファイル上で monitoring かつ pr > 0: 再開情報が有効なため状態を上書きせず、
+  // results にも not-started ではなく monitoring として記録する（レポートと実態の矛盾防止）
+  const pr = savedItems[String(n)].pr
+  results.push({
+    issue: n,
+    status: 'monitoring',
+    pr,
+    note: `中断時に monitoring（PR #${pr} 作成済み）。同じ引数で再実行すると monitor から再開する`,
+  })
+  log(`#${n}: halt 時も monitoring 状態を維持する（PR #${pr} の再開情報を保持）`)
 }
 if (notStarted.length > 0) {
   log(`未着手のまま終了: ${notStarted.map((n) => `#${n}`).join(', ')}`)
 }
+if (interrupted.length > 0) {
+  log(`monitoring 中断（再開可能）: ${interrupted.map((n) => `#${n}`).join(', ')}`)
+}
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)
-return { parent, baseBranch, parallel: concurrency, total: queue.length, done: results, failures, notStarted, halted }
+return { parent, baseBranch, parallel: concurrency, total: queue.length, done: results, failures, notStarted, interrupted, halted }
