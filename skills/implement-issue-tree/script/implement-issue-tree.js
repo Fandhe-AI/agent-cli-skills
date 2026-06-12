@@ -211,14 +211,21 @@ async function loadState() {
     ].join('\n'),
     { label: 'state:load', phase: 'Restore', model: 'haiku', schema: STATE_LOAD_SCHEMA },
   )
-  // ファイルが存在するのに読み込み・パース失敗の場合はフレッシュスタートせず停止する
-  // （壊れた状態ファイルで黙って再実装すると重複 PR・重複実装が発生する危険がある）
-  if (result?.fileExisted && !result?.ok) {
-    throw new Error(
-      `状態ファイル（${STATE_FILE}）の読み込みまたは JSON パースに失敗した。` +
-      `ファイルを手動で確認・修復してから再実行すること。` +
-      `削除してフレッシュスタートする場合は \`rm ${STATE_FILE}\` を実行する。`,
-    )
+  // 読み込み・初期化のいずれが失敗しても停止する
+  // （壊れた・未永続化の状態で続行すると重複 PR・重複実装が発生する危険がある）
+  if (!result?.ok) {
+    if (result?.fileExisted) {
+      throw new Error(
+        `状態ファイル（${STATE_FILE}）の読み込みまたは JSON パースに失敗した。` +
+        `ファイルを手動で確認・修復してから再実行すること。` +
+        `削除してフレッシュスタートする場合は \`rm ${STATE_FILE}\` を実行する。`,
+      )
+    } else {
+      throw new Error(
+        `状態ファイル（${STATE_FILE}）の初期化に失敗した。` +
+        `ディレクトリ作成・書き込み権限を確認してから再実行すること。`,
+      )
+    }
   }
   return result?.items ?? {}
 }
@@ -273,11 +280,20 @@ async function updateState(issueNumber, patch, options = {}) {
         `状態ファイル更新タスク。`,
         `${STATE_FILE} の .items["${issueNumber}"] に以下の JSON をマージし、`,
         `.updatedAt を \`date -u +%FT%TZ\` の値に更新して書き戻す。`,
-        `マージする JSON: ${patchJson}`,
-        `書き戻し方法: jq コマンドで行い、mktemp で一時ファイルを作成して安全に上書きする（衝突回避）。`,
+        `マージする JSON（以下コードブロック内がそのまま JSON データ）:`,
+        `\`\`\`json`,
+        `${patchJson}`,
+        `\`\`\``,
+        `書き戻し方法: jq コマンドで行い、mktemp で一時ファイルを2つ作成して安全に上書きする（衝突回避）。`,
+        `patch JSON は HEREDOC でファイルに書き出し --slurpfile で読み込むこと（アポストロフィ等の特殊文字が含まれても安全）。`,
         `例:`,
+        `  patch_file=$(mktemp)`,
+        `  cat <<'PATCH_EOF' > "$patch_file"`,
+        `${patchJson}`,
+        `  PATCH_EOF`,
         `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
-        `  jq --argjson patch '${patchJson}' '.items["${issueNumber}"] = ((.items["${issueNumber}"] // {}) + $patch) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+        `  jq --slurpfile patch "$patch_file" '.items["${issueNumber}"] = ((.items["${issueNumber}"] // {}) + $patch[0]) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+        `  rm -f "$patch_file"`,
         cleanupInstructions,
         `返却: ok: true（成功時）/ ok: false（失敗時）。`,
       ].join('\n'),
