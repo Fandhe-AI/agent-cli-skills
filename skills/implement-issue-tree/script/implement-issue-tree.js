@@ -308,8 +308,10 @@ function implementPrompt(item) {
     COMMON,
     '手順:',
     `0. まず既存 PR・ブランチを確認する（中断再開・重複 PR 防止）:`,
-    `   a. gh pr list --state open --search "${item.number} in:title" と`,
-    `      gh pr list --state open --head "" でイシュー #${item.number} に対応する open PR が既にないか確認する。`,
+    `   a. 以下の 2 通りでイシュー #${item.number} に対応する open PR が既にないか確認する:`,
+    `      - gh pr list --state open --search "Closes #${item.number}" --json number,title,headRefName`,
+    `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
+    `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
     `   b. open PR が見つかった場合は新規 PR を作らず、そのブランチを git fetch origin && git checkout <branch> で取得して続きから作業し、既存 PR 番号を prNumber として返す。`,
     `   c. open PR がない場合は手順 1 以降に進む。`,
     '1. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
@@ -499,11 +501,12 @@ async function runImplement(item) {
   if (saved.status === 'monitoring' && !isResumeFromMonitoring) {
     log(`#${item.number}: 状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)
   }
+  // 保存済みの fixCount（クランプ済み）。monitoring フォールバック時の引き継ぎにも使用する
+  const savedFixCount = Number.isInteger(saved.fixCount) ? Math.min(Math.max(saved.fixCount, 0), 6) : 0
+
   let impl
   if (isResumeFromMonitoring) {
     // 保存済みの pr / branch / fixCount を引き継いで再開する
-    // fixCount は 0〜6 にクランプする（状態ファイル改ざん対策）
-    const savedFixCount = Number.isInteger(saved.fixCount) ? Math.min(Math.max(saved.fixCount, 0), 6) : 0
     impl = {
       prNumber: saved.pr,
       branch: saved.branch,
@@ -512,7 +515,7 @@ async function runImplement(item) {
     }
     log(`#${item.number}: 状態ファイルから monitoring 再開（PR #${impl.prNumber}、fixCount: ${savedFixCount}）`)
   } else {
-    // 通常の impl フェーズを実行する
+    // 通常の impl フェーズを実行する（monitoring フォールバック含む）
     // impl 開始直前に状態を implementing に更新
     await updateState(item.number, { status: 'implementing' })
     impl = await agent(implementPrompt(item), { label: `impl:#${item.number}`, phase: 'Implement', model: 'opus', schema: IMPL_SCHEMA, isolation: 'worktree' })
@@ -537,22 +540,21 @@ async function runImplement(item) {
     }
     // impl が返した worktreePath もホワイトリスト検証を通す
     impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? '') }
-    // impl 完了直後: monitoring に遷移し pr / branch / worktree を記録する
+    // impl 完了直後: monitoring に遷移し pr / branch / worktree を記録する。
+    // monitoring フォールバック時は中断前の fixCount を引き継ぐ（新規実行時のみ 0）
     await updateState(item.number, {
       status: 'monitoring',
       pr: impl.prNumber,
       branch: impl.branch,
       worktree: impl.worktreePath,
-      fixCount: 0,
+      fixCount: savedFixCount,
     })
   }
 
   let merged = false
   let lastState = 'timeout'
-  // 再開時は保存済みの fixCount（クランプ済み）を引き継ぐ。通常開始時は 0
-  let fixCount = isResumeFromMonitoring
-    ? (Number.isInteger(saved.fixCount) ? Math.min(Math.max(saved.fixCount, 0), 6) : 0)
-    : 0
+  // 再開時・monitoring フォールバック時は保存済みの fixCount を引き継ぐ。新規実行時のみ 0
+  let fixCount = savedFixCount
   let noPushRounds = 0
   // 現在追跡中の worktree パス。impl または最後の fix の worktreePath を常に最新に保つ。
   // 再開時は状態ファイルから引き継ぐ。merged 時・fix 時の削除対象として使用する
@@ -788,8 +790,16 @@ const notStarted = work
   .map((q) => q.number)
 for (const n of notStarted) {
   results.push({ issue: n, status: 'not-started', note: 'halted により未着手' })
-  // halted 時の notStarted は blocked として状態ファイルに記録する
-  await updateState(n, { status: 'blocked', note: 'halted により未着手' })
+  // halted 時の notStarted は blocked として状態ファイルに記録する。
+  // ただし既に monitoring 状態（PR 作成済み）の issue は上書きしない。
+  // 状態ファイル上で monitoring かつ pr > 0 の場合は再開情報が有効なため保持する。
+  const savedForN = savedItems[String(n)] ?? {}
+  const isMonitoring = savedForN.status === 'monitoring' && Number.isInteger(savedForN.pr) && savedForN.pr > 0
+  if (!isMonitoring) {
+    await updateState(n, { status: 'blocked', note: 'halted により未着手' })
+  } else {
+    log(`#${n}: halt 時も monitoring 状態を維持する（PR #${savedForN.pr} の再開情報を保持）`)
+  }
 }
 if (notStarted.length > 0) {
   log(`未着手のまま終了: ${notStarted.map((n) => `#${n}`).join(', ')}`)
