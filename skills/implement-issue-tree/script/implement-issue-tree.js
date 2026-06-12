@@ -836,16 +836,25 @@ async function markBlockedByDeps(item, failedDeps) {
   } else {
     note = `前提イシューの失敗・ブロックにより未着手: ${failedPrereqs.map((d) => `#${d}`).join(', ')}`
   }
+  // monitoring かつ pr > 0 の場合は blocked で上書きしない（halt 処理と同じガード）。
+  // 状態ファイルが monitoring の再開情報を保持するため、レポート側にも PR 番号と
+  // 再開手順を併記する（blocked のみの報告だと実態＝再開可能と矛盾するため）
+  if (isActiveMonitoring(item.number)) {
+    const pr = savedItems[String(item.number)].pr
+    results.push({
+      issue: item.number,
+      status: 'blocked',
+      pr,
+      note: `${note}（中断時に monitoring・PR #${pr} 作成済み。同じ引数で再実行すると monitor から再開する）`,
+    })
+    log(`#${item.number}: monitoring 状態を維持する（PR #${pr} の再開情報を保持）。依存失敗により新規着手はしない`)
+    return
+  }
   results.push({
     issue: item.number,
     status: 'blocked',
     note,
   })
-  // monitoring かつ pr > 0 の場合は blocked で上書きしない（halt 処理と同じガード）
-  if (isActiveMonitoring(item.number)) {
-    log(`#${item.number}: monitoring 状態を維持する（PR #${savedItems[String(item.number)].pr} の再開情報を保持）。依存失敗により新規着手はしない`)
-    return
-  }
   // blocked 確定: note に理由を記録する（await して return 前に永続化を保証する）
   await updateState(item.number, { status: 'blocked', note })
   log(`#${item.number}: ${note}`)
