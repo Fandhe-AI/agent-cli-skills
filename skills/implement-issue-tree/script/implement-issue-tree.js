@@ -815,7 +815,22 @@ function isActiveMonitoring(n) {
 
 async function markBlockedByDeps(item, failedDeps) {
   failedSet.add(item.number)
-  const note = `依存イシューの失敗・ブロックにより未着手: ${failedDeps.map((d) => `#${d}`).join(', ')}`
+  // 失敗依存を「子イシュー（tree edge）」と「dependsOn 前提」に分けて文言を変える。
+  // 親は子の失敗そのものを実行できないのではなく、子孫が未解決のためクローズ検証を保留する。
+  // leaf の前提失敗（本当に着手不能）と混同しないよう区別する。
+  const childSet = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
+  const failedChildren = failedDeps.filter((d) => childSet.has(d))
+  const failedPrereqs = failedDeps.filter((d) => !childSet.has(d))
+  let note
+  if (failedChildren.length > 0 && failedPrereqs.length === 0) {
+    note = `子イシューの失敗・ブロックによりクローズ検証を保留: ${failedChildren.map((d) => `#${d}`).join(', ')}`
+  } else if (failedChildren.length > 0) {
+    note =
+      `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
+      `${failedPrereqs.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
+  } else {
+    note = `前提イシューの失敗・ブロックにより未着手: ${failedPrereqs.map((d) => `#${d}`).join(', ')}`
+  }
   results.push({
     issue: item.number,
     status: 'blocked',
@@ -828,7 +843,7 @@ async function markBlockedByDeps(item, failedDeps) {
   }
   // blocked 確定: note に理由を記録する（await して return 前に永続化を保証する）
   await updateState(item.number, { status: 'blocked', note })
-  log(`#${item.number} は依存 ${failedDeps.map((d) => `#${d}`).join(', ')} の失敗により着手しない`)
+  log(`#${item.number}: ${note}`)
 }
 
 const running = new Map()
@@ -842,7 +857,10 @@ while (true) {
       const ds = [...depsOf(item)]
       const failedDeps = ds.filter((d) => failedSet.has(d))
       if (failedDeps.length > 0) {
-        await markBlockedByDeps(item, failedDeps)
+        // 失敗依存があっても、未確定（実行中/未投入）の依存が残る間は blocked を確定しない。
+        // 全依存が確定（done/failed）してから確定することで、兄弟イシューの完了・マージを待ち、
+        // 親が最初の子失敗で早すぎる blocked にならないようにする（失敗依存リストも完全になる）。
+        if (ds.every((d) => done.has(d) || failedSet.has(d))) await markBlockedByDeps(item, failedDeps)
         continue
       }
       if (!ds.every((d) => done.has(d))) continue
@@ -864,8 +882,12 @@ while (cascaded) {
   for (const item of work) {
     const n = item.number
     if (done.has(n) || failedSet.has(n)) continue
-    const failedDeps = [...depsOf(item)].filter((d) => failedSet.has(d))
-    if (failedDeps.length > 0) {
+    const ds = [...depsOf(item)]
+    const failedDeps = ds.filter((d) => failedSet.has(d))
+    // dispatch ループと同じ確定条件を適用する: 未確定（halt で未着手のまま終了した）依存が
+    // 残る item は blocked にせず notStarted へ落とす。失敗依存リストが不完全なまま
+    // blocked 確定すると note が新ルール（全依存確定後に確定）と矛盾するため。
+    if (failedDeps.length > 0 && ds.every((d) => done.has(d) || failedSet.has(d))) {
       await markBlockedByDeps(item, failedDeps)
       cascaded = true
     }
@@ -875,13 +897,16 @@ while (cascaded) {
 const notStarted = work
   .filter((q) => !done.has(q.number) && !failedSet.has(q.number))
   .map((q) => q.number)
+const notStartedNote = halted
+  ? `halted により未着手（理由: ${halted.reason}）`
+  : 'スケジューラ終了時に未着手（キュー未到達）'
 for (const n of notStarted) {
-  results.push({ issue: n, status: 'not-started', note: 'halted により未着手' })
-  // halted 時の notStarted は blocked として状態ファイルに記録する。
+  results.push({ issue: n, status: 'not-started', note: notStartedNote })
+  // 未着手の notStarted は blocked として状態ファイルに記録する。
   // ただし既に monitoring 状態（PR 作成済み）の issue は上書きしない。
   // 状態ファイル上で monitoring かつ pr > 0 の場合は再開情報が有効なため保持する。
   if (!isActiveMonitoring(n)) {
-    await updateState(n, { status: 'blocked', note: 'halted により未着手' })
+    await updateState(n, { status: 'blocked', note: notStartedNote })
   } else {
     log(`#${n}: halt 時も monitoring 状態を維持する（PR #${savedItems[String(n)].pr} の再開情報を保持）`)
   }
