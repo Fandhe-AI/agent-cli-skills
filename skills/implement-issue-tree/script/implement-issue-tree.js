@@ -744,7 +744,9 @@ for (const item of queue) {
     //   - verify-close ノード: 冪等（全子 closed 確認 → close）のため再実行する
     //   - merged かつ再開情報（pr / branch）が有効: monitoring に格下げして再投入する。
     //     monitor が手順 1 で PR の MERGED を検出し、issue close を再試行して即終端する
-    //   - それ以外（再開情報なし）: skip するが、要手動確認であることを results に明記する
+    //   - それ以外（再開情報なし）: skip するが done 扱いにはしない。記録と実態が矛盾し
+    //     完了を検証できないため、failedSet に入れて後続イシューをブロックする
+    //     （done に入れると後続が「前提充足」とみなして進んでしまうため）。要手動確認を明記する
     const saved = savedItems[String(item.number)] ?? {}
     if (saved.status === 'merged' || saved.status === 'closed') {
       const resumable =
@@ -757,11 +759,14 @@ for (const item of queue) {
       } else {
         results.push({
           issue: item.number,
-          status: saved.status,
-          note: `状態ファイルは ${saved.status} だが GitHub では open（再開情報なし）。手動確認が必要`,
+          status: 'blocked',
+          note: `状態ファイルは ${saved.status} だが GitHub では open（再開情報なし）。完了を検証できないため後続をブロックする。手動確認が必要`,
         })
-        done.add(item.number)
-        log(`⚠️ #${item.number}: 状態ファイルは ${saved.status} だが GitHub では open。再開情報がないため skip する（手動確認が必要）`)
+        // done ではなく failedSet に入れる: 完了が検証できない以上「前提充足」として
+        // 後続を進めてはならない。failedSet 入りにより依存する後続は markBlockedByDeps で
+        // blocked になる。dispatch ループは failedSet も skip するため本人は再実行されない
+        failedSet.add(item.number)
+        log(`⚠️ #${item.number}: 状態ファイルは ${saved.status} だが GitHub では open。再開情報がないため skip し、後続イシューをブロックする（手動確認が必要）`)
       }
     }
   }
