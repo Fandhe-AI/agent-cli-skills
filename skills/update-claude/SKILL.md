@@ -121,12 +121,16 @@ ls <target-repo>/.claude/workflows/implement-issue-tree.js 2>/dev/null || echo "
 
 ```bash
 gh auth status
-gh api --method GET /repos/<owner>/<repo>/sub_issues 2>&1 | head -5
+# sub_issues は issue 番号付き `issues/{n}/sub_issues` のみ有効（リポジトリ直下に
+# sub_issues エンドポイントは存在しない）。既存 issue があれば番号を指定して疎通確認する
+# （issue が未作成なら gh auth status のみで前提確認とする）
+gh api "repos/<owner>/<repo>/issues/<既存issue番号>/sub_issues" 2>&1 | head -5
 ls <target-repo>/.claude/workflows/implement-issue-tree.js 2>/dev/null
 ```
 
 - gh auth の認証状態
-- sub_issues API の応答（404 = GitHub Apps が有効でない可能性）
+- sub_issues API の応答（既存 issue 番号を指定。404 = GitHub Apps が有効でない可能性。
+  なお `repos/{owner}/{repo}/sub_issues` というリポジトリ直下のエンドポイントは存在しないため使わない）
 - workflow js の存在
 
 ### Step 3: ギャップ一覧をユーザーに提示して承認を得る
