@@ -915,6 +915,18 @@ while (true) {
       if (running.size >= concurrency) break
       const n = item.number
       if (done.has(n) || failedSet.has(n) || running.has(n)) continue
+      // active monitoring（PR 作成済み）は依存の成否に関わらず monitor 再開に載せる。
+      // 前回実行で PR を作った後に依存失敗で markBlockedByDeps された場合、その時点では
+      // failedSet に入る（同一実行内の伝播・無限ループ防止のため）が、状態ファイルは
+      // monitoring のまま残る。failedSet はメモリのみで次回実行時にリセットされるため、
+      // ここで依存ガードより前に拾わないと「依存が done でない」L927 で continue され、
+      // PR がマージ監視に戻れず宙に浮く。マージ可否は runImplement の monitor ループ内の
+      // CI/レビュー条件で判定されるため、依存未充足の PR をここで誤マージすることはない。
+      if (isActiveMonitoring(n)) {
+        log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(item.title)}`)
+        running.set(n, runOne(item))
+        continue
+      }
       const ds = [...depsOf(item)]
       const failedDeps = ds.filter((d) => failedSet.has(d))
       if (failedDeps.length > 0) {
