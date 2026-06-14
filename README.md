@@ -42,6 +42,7 @@ npx skills add Fandhe-AI/agent-cli-skills --all
       frontmatter-linter.md          -- frontmatter/symlink 機械検証
       plan-verifier.md               -- 計画ファイル検証（読み取り専用）
   rules/
+    code-comment-style.md            -- コード内コメント・ドキュメンテーションコメント規約
     delegation.md                    -- 委譲の原則（調査・設計フェーズ）
     delegation-impl.md               -- 委譲マッピング（作成・編集フェーズ）
     skill-authoring.md               -- スキル著作規約
@@ -55,6 +56,8 @@ npx skills add Fandhe-AI/agent-cli-skills --all
   skills/                            -- シンボリックリンク（skills/ → .claude/skills/）
   settings.json                      -- SessionStart hook（リマインダー）
 skills/
+  comment-code/
+    SKILL.md                         -- コメント・ドキュメンテーションコメントを追加・補強
   create-commit/
     SKILL.md                         -- Conventional Commits 形式でコミット作成
   create-issue/
@@ -120,6 +123,7 @@ skills/
 
 | スキル | 説明 |
 |--------|------|
+| **comment-code** | コードにコメント・ドキュメンテーションコメント（JSDoc / docstring 等）を追加・補強する。パッケージ・サービス視点での役割境界、呼び出し元・呼び出し先の前提と契約、他ファイル・他サービスからの文脈を記述 |
 | **create-commit** | `git diff` を分析し、Conventional Commits 形式でコミットメッセージを生成・実行する |
 | **create-issue** | タスクを分析し、GitHub Issue を親子構造（sub-issues）で作成する |
 | **create-issue-tree** | タスク要件を Phase 分割して GitHub Issue ツリーを新規作成（4h 粒度分解・Phase 階層化） |
@@ -201,6 +205,7 @@ skills/
 
 | ルール | 概要 |
 |--------|------|
+| **code-comment-style.md** | コード内コメント・ドキュメンテーションコメント規約（役割・境界・呼び出し文脈・他所からの前提を明示） |
 | **delegation.md** | 調査・設計フェーズの委譲原則（main がやること/やってはいけないこと） |
 | **delegation-impl.md** | 作成・編集フェーズの委譲マッピング（対象パス → subagent_type） |
 | **skill-authoring.md** | スキル著作フォーマット・品質基準 |
