@@ -1,0 +1,57 @@
+name: Update external sources
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 毎日 0:00 UTC = 09:00 JST
+  workflow_dispatch:       # 手動実行も可能
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-external
+  cancel-in-progress: false
+
+jobs:
+  # --------------------------------------------------
+  # Skills の更新 (Fandhe-AI/actions/skills-update)
+  # --------------------------------------------------
+  # 本リポジトリに submodule (.gitmodules) は無いため submodule ジョブは設けない。
+  update-skills:
+    name: Update agent skills
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # PAT 未設定時は GITHUB_TOKEN にフォールバック（auto-merge 後の CI 未発火に注意）。
+      # GITHUB_TOKEN で作成・マージした PR は後続 CI を発火しない制約があるため、
+      # auto-merge 後の CI 連鎖を期待する場合は SKILLS_PAT を設定すること。
+      - name: Checkout code
+        # actions/checkout v5.0.1
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: main
+          token: ${{ secrets.SKILLS_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        # actions/setup-node v6.4.0。skills-update が使う npx skills のため node を固定する。
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '20'
+
+      - name: Update skills and open PR
+        # Fandhe-AI/actions はタグ未作成のため最新コミット SHA に固定する。
+        uses: Fandhe-AI/actions/skills-update@c80ff94f229f86ba9e08723948c4dee0e1fb66bf
+        with:
+          # PAT 未設定時は GITHUB_TOKEN にフォールバック（auto-merge 後の CI 未発火に注意）。
+          token: ${{ secrets.SKILLS_PAT || secrets.GITHUB_TOKEN }}
+          base-branch: main
+          branch-prefix: chore/skills-update
+          commit-message: 'chore: エージェントスキルを最新に更新'
+          pr-title: 'chore: エージェントスキルを最新に更新'
+          pr-labels: 'dependencies,automated'
+          # auto-merge の ON/OFF。repository variable SKILLS_AUTO_MERGE で制御。
+          # skills-update は未設定 (null/空) を有効と解釈する非対称設計のため、
+          # 未設定時は明示的に 'false' へフォールバックしオプトイン運用とする。
+          auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}

@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------
+  # fork-guard（CICD-SEC-02）
+  # --------------------------------------------------
+  # fork 由来の PR は信頼境界の外にあるため、後続ジョブを動かす前に reject する。
+  # secrets を読む後続ジョブ（update-external 等）への横展開リスクを断つ防衛線。
+  fork-guard:
+    name: Fork guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Reject fork-originated PR
+        # fork からの pull_request の場合 head.repo の fullname が
+        # base リポジトリと一致しない。一致しなければ即失敗させる。
+        if: >
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::fork 由来の PR は CI 実行対象外（CICD-SEC-02）。メンテナがレビューのうえ手動対応する。"
+          exit 1
+
+  # --------------------------------------------------
+  # スキル構造検証（依存なし・全 PR / push 共通）
+  # --------------------------------------------------
+  # 各 skills/<name>/SKILL.md の frontmatter (name / description)、
+  # name とディレクトリ名の一致、.claude/skills/ の symlink リンク切れ、
+  # skills-lock.json の存在と JSON 妥当性を bash で検証する。
+  structure:
+    name: Skill structure check
+    runs-on: ubuntu-latest
+    needs: fork-guard
+    # bash + grep のみの軽量ジョブ。hang 検知の保険として 5 分で打ち切る。
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        # actions/checkout v5.0.1
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+
+      - name: Validate skill structure
+        run: bash .github/scripts/check-skill-structure.sh
+
+  # --------------------------------------------------
+  # markdownlint（全 markdown の lint）
+  # --------------------------------------------------
+  # ルール設定は `.markdownlint-cli2.jsonc` を参照する（緑のベースライン構成）。
+  markdownlint:
+    name: markdownlint
+    runs-on: ubuntu-latest
+    needs: fork-guard
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        # actions/checkout v5.0.1
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        # actions/setup-node v6.4.0。node バージョンを固定して再現性を確保する。
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '20'
+
+      - name: Run markdownlint-cli2
+        # 設定 (globs / ignores / rules) は .markdownlint-cli2.jsonc から自動検出する。
+        # サプライチェーン強化のためバージョンを固定する。
+        run: npx --yes markdownlint-cli2@0.22.1
