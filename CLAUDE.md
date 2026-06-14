@@ -10,6 +10,11 @@ Claude Code 向けの CLI ワークフロースキル集。コミット・PR・I
 
 ```
 skills/                               -- スキル本体（各ディレクトリに SKILL.md）
+  claude-code-reference/
+    reference/                        -- 公式仕様要約
+    sample/                           -- 実例
+    script/                           -- 実行可能コマンド集
+  comment-code/
   create-commit/
   create-issue/
   create-issue-tree/
@@ -25,10 +30,6 @@ skills/                               -- スキル本体（各ディレクトリ
   update-docs/
   update-issue-tree/
   update-claude/
-  claude-code-reference/
-    reference/                        -- 公式仕様要約
-    sample/                           -- 実例
-    script/                           -- 実行可能コマンド集
   project-init/
   project-add-items/
   project-create-issues/
@@ -65,6 +66,7 @@ skills/                               -- スキル本体（各ディレクトリ
     dotclaude-via-temp.md             -- .claude/ 操作時の一時ディレクトリルール
     description-style.md              -- description 著作スタイル
     reference-template.md             -- reference 型スキルの書式規約
+    code-comment-style.md             -- コード内コメント・ドキュメンテーションコメント規約
   skills/                             -- skills/ へのシンボリックリンク（一部実ディレクトリ）
     create-skill/                     -- リポジトリ管理スキル（実ディレクトリ）
     create-agent/                     -- リポジトリ管理スキル（実ディレクトリ）
@@ -140,6 +142,7 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `delegation-impl.md` | main / author 系 Agent | 作成・編集フェーズの委譲マッピング |
 | `skill-authoring.md` | skill-author / skill-reviewer | スキル著作フォーマット・品質基準 |
 | `agent-authoring.md` | agent-author | エージェント著作フォーマット・品質基準 |
+| `code-comment-style.md` | 実装系スキル / 全 author Agent | コード内コメント・ドキュメンテーションコメント規約（役割・境界・文脈） |
 | `conventional-commits.md` | create-commit / create-pr 等 | Conventional Commits 詳細規約 |
 | `security.md` | security-auditor / create-pr 等 | OWASP Top 10 セキュリティチェック基準 |
 | `japanese-style.md` | 全 Agent | 日本語スタイルガイド |
@@ -147,11 +150,11 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `description-style.md` | skill-author / agent-author / skill-reviewer / reference-researcher | description 著作スタイル（発火率・長さ・YAML 落とし穴） |
 | `reference-template.md` | reference-researcher / skill-author | reference 型スキルの reference/*.md と README 索引の書式規約 |
 
-## Current Skills (23)
+## Current Skills (24)
 
-### 開発ワークフロー (11)
+### 開発ワークフロー (12)
 
-create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, update-docs, update-issue-tree
+comment-code, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, update-docs, update-issue-tree
 
 ### スキル著作・リファレンス (1)
 
