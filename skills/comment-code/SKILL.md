@@ -27,7 +27,7 @@ comment-code <対象ファイルまたはディレクトリ> [--lang <言語>]
 ## 前提条件
 
 - 対象ファイルが読み取り可能な状態であること
-- Git リポジトリ内であること（引数省略時に `git diff` を使用するため）
+- Git リポジトリ内であること（引数省略時に `git diff HEAD` を使用するため）
 
 ## フロー
 
@@ -36,10 +36,10 @@ comment-code <対象ファイルまたはディレクトリ> [--lang <言語>]
 引数が指定された場合はそのファイル・ディレクトリを対象にする。
 
 ```bash
-# 引数なしの場合: 直近の差分ファイルを列挙
+# 引数なしの場合: 直近の差分ファイルを列挙（staged / unstaged 両方を HEAD と比較）
 git diff HEAD --name-only
-# ステージ済み変更も含める場合
-git diff --cached --name-only
+# untracked（新規未追跡）ファイルも対象にしたい場合
+git ls-files --others --exclude-standard
 ```
 
 対象が空（変更なし・引数なし）の場合はユーザーに対象を確認する。
