@@ -371,10 +371,11 @@ function implementPrompt(item) {
     '3. implement-issue スキルのフローに従う。ただしユーザー承認ステップは本ワークフローでは省略し、計画を _/local-plans/ に書いたら自己レビューのうえ即実装に進む。',
     '4. 実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い役割単位で委譲する。対象リポジトリの CLAUDE.md・rules（migration・スキーマ等の不変条件を含む）を必ず守る。',
     '5. 完了条件: 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して pass すること。フォーマッタ・静的解析があればコミット前に通す。',
-    '6. implement-review スキルに従いセルフレビュー（品質 + セキュリティ）を実施し、指摘は重要度を問わず（要改善レベルも含め）すべて修正する。',
-    '7. create-commit スキルに従い Conventional Commits でコミットする（type/scope は英語、件名は対象リポジトリの言語規約に従う）。',
-    `8. create-pr スキルに従い base ${baseBranch} で PR を作成する。body に必ず「Closes #${item.number}」を含める。`,
-    '9. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
+    '6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（この時点では実装内容のみ。type/scope は英語、件名は対象リポジトリの言語規約に従う）。',
+    '7. implement-review スキルに従いセルフレビュー（品質 + セキュリティ）を実施し、指摘は重要度を問わず（low 含む要改善レベルも含め）すべて修正する。',
+    '8. 手順 7 で修正を行った場合は、create-commit スキルに従い Conventional Commits でレビュー対応のコミットを別に 1 つ作成する（手順 6 の実装コミットとは分ける）。指摘がなく修正不要であれば追加コミットはしない（無理に空コミットしない）。',
+    `9. create-pr スキルに従い base ${baseBranch} で PR を作成する。body に必ず「Closes #${item.number}」を含める。`,
+    '10. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
     '返却: prNumber（失敗時 0）/ branch / summary（実装内容の要約。失敗時は理由と現状）/ worktreePath（pwd の結果）。',
   ].join('\n')
 }
