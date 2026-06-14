@@ -242,12 +242,14 @@ Step 2 で設計したルールを `.claude/rules/` に作成する。
 3. **ユーザーに承認を得る**: 既存 Issue への追記か新規起票かをユーザーと確認する
 4. **記録**:
    - 既存 Issue がある場合:
-     ```bash
-     gh issue comment "${ISSUE_NUMBER}" --body "$(cat <<'EOF'
-     （本文をここに記述）
+
+```bash
+gh issue comment "${ISSUE_NUMBER}" --body "$(cat <<'EOF'
+（本文をここに記述）
 EOF
-     )"
-     ```
+)"
+```
+
    - 存在しない場合: `create-issue-tree` または `create-issue` で適切な親 Issue 配下に起票
 5. **元 PR・レビューに切り出し先を記録**: コメントまたは PR 本文に切り出し先の Issue 番号を記載する
 

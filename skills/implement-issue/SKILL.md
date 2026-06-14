@@ -103,33 +103,36 @@ Agent ツールでセキュリティ確認を行う。
 
 1. **既存 Issue を確認する**
    対象を実装している既存の open Issue があるか検索する:
-   ```bash
-   gh issue list --state open --search "${KEYWORD}"
-   ```
+
+```bash
+gh issue list --state open --search "${KEYWORD}"
+```
+
    キーワードは `"${KEYWORD}"` でクォートして渡す。
 
 2. **ユーザーに提示して承認を得る**
    out-of-scope 項目・既存 Issue の有無・対応案（既存 Issue へのコメント追加 or 新規起票）をユーザーに提示する。**承認を得てから実行する**（確認なしに Issue 操作をしない）。
 
 3. **既存 Issue がある場合: コメントを追加する**
-   ```bash
-   gh issue comment "${ISSUE_NUMBER}" --body "$(cat <<'EOF'
-   ## 実装サポート情報（別作業から検出）
 
-   ### 検出背景
-   今回の実装（Issue #N）の過程で発見した事項。
+```bash
+gh issue comment "${ISSUE_NUMBER}" --body "$(cat <<'EOF'
+## 実装サポート情報（別作業から検出）
 
-   ### 関連ファイル・シンボル
-   - `src/path/to/file.ts` — 対象関数名・クラス名
+### 検出背景
+今回の実装（Issue #N）の過程で発見した事項。
 
-   ### パッケージ・サービスから見た役割・影響範囲
-   （このシンボルの担う境界、呼び出し元/呼び出し先）
+### 関連ファイル・シンボル
+- `src/path/to/file.ts` — 対象関数名・クラス名
 
-   ### 着手時の注意点・依存関係
-   （依存パッケージ、順序制約など）
+### パッケージ・サービスから見た役割・影響範囲
+（このシンボルの担う境界、呼び出し元/呼び出し先）
+
+### 着手時の注意点・依存関係
+（依存パッケージ、順序制約など）
 EOF
-   )"
-   ```
+)"
+```
 
 4. **既存 Issue がない場合: 新規起票する**
    `create-issue-tree`（既存ルートへの紐付けは `--root <ルートissue番号>`）または `create-issue` を使用して、適切な親 Issue 配下に起票する。タイトルは Conventional Commits 形式とする。

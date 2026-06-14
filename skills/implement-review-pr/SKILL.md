@@ -60,6 +60,8 @@ Agent ツールに委譲してセキュリティを確認:
 
 ### Step 6: レビューレポートを生成する
 
+out-of-scope 項目を検出した場合は本レポートに「対象外とした項目」と切り出し先 Issue 番号を含める（後述の「実装対象外（out-of-scope）の扱い」を参照）。out-of-scope の収集はレビュー中（Step 4〜5）に行う。
+
 ```
 ## PR #123: feat(auth): 新機能追加
 
@@ -98,39 +100,42 @@ gh pr review <number> --request-changes --body "..."
 
 1. **既存 Issue を確認する**
    対象を実装している既存の open Issue があるか検索する:
-   ```bash
-   gh issue list --state open --search "${KEYWORD}"
-   ```
+
+```bash
+gh issue list --state open --search "${KEYWORD}"
+```
+
    キーワードは `"${KEYWORD}"` でクォートして渡す。
 
 2. **ユーザーに提示して承認を得る**
    out-of-scope 項目・既存 Issue の有無・対応案（既存 Issue へのコメント追加 or 新規起票）をレビューレポートに含めてユーザーに提示する。**承認を得てから実行する**（確認なしに Issue 操作をしない）。
 
 3. **既存 Issue がある場合: コメントを追加する**
-   ```bash
-   gh issue comment "${ISSUE_NUMBER}" --body "$(cat <<'EOF'
-   ## 実装サポート情報（別作業から検出）
 
-   ### 検出背景
-   PR レビュー（PR #N）の過程で発見した事項。
+```bash
+gh issue comment "${ISSUE_NUMBER}" --body "$(cat <<'EOF'
+## 実装サポート情報（別作業から検出）
 
-   ### 関連ファイル・シンボル
-   - `src/path/to/file.ts` — 対象関数名・クラス名
+### 検出背景
+PR レビュー（PR #N）の過程で発見した事項。
 
-   ### パッケージ・サービスから見た役割・影響範囲
-   （このシンボルの担う境界、呼び出し元/呼び出し先）
+### 関連ファイル・シンボル
+- `src/path/to/file.ts` — 対象関数名・クラス名
 
-   ### 着手時の注意点・依存関係
-   （依存パッケージ、順序制約など）
+### パッケージ・サービスから見た役割・影響範囲
+（このシンボルの担う境界、呼び出し元/呼び出し先）
+
+### 着手時の注意点・依存関係
+（依存パッケージ、順序制約など）
 EOF
-   )"
-   ```
+)"
+```
 
 4. **既存 Issue がない場合: 新規起票する**
    `create-issue-tree`（既存ルートへの紐付けは `--root <ルートissue番号>`）または `create-issue` を使用して、適切な親 Issue 配下に起票する。タイトルは Conventional Commits 形式とする。
 
 5. **PR 本文・レビューレポートに明記する**
-   Step 6 のレビューレポートおよび Step 7 の GitHub レビューコメントに「対象外とした項目」と「切り出し先 Issue 番号」を記載する。
+   out-of-scope 項目はレビュー中（Step 4〜5）に収集し Step 6 のレポートに含める。Issue への書き込み操作は承認後に行う。Step 6 のレビューレポートおよび Step 7 の GitHub レビューコメントに「対象外とした項目」と「切り出し先 Issue 番号」を記載する。
 
 > **セキュリティ注記**: `gh` へ渡すキーワード・コメント本文は変数を `"${var}"` でクォートし、本文は HEREDOC（`<<'EOF'`）で渡してインジェクションを防ぐ。
 
