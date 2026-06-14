@@ -368,7 +368,7 @@ function implementPrompt(item) {
     `   c. open PR がない場合は手順 1 以降に進む。`,
     '1. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
     `2. git fetch origin && git checkout -B <type>/${item.number}-<short-name> origin/${baseBranch} で作業ブランチを作成する（type は feat / fix 等の Conventional Commits 規約。並列実行時のブランチ名衝突を防ぐためイシュー番号を必ず含める）。`,
-    '3. implement-issue スキルのフローに従う。ただしユーザー承認ステップは本ワークフローでは省略し、計画を _/local-plans/ に書いたら自己レビューのうえ即実装に進む。',
+    '3. implement-issue スキルのフローに従う。ただしユーザー承認ステップおよびコミット作成（implement-issue の Step 7: create-commit）は本ワークフローでは省略する。計画を _/local-plans/ に書いたら自己レビューのうえ即実装に進む。コミットは本ワークフローの手順 6・手順 8 で行う。',
     '4. 実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い役割単位で委譲する。対象リポジトリの CLAUDE.md・rules（migration・スキーマ等の不変条件を含む）を必ず守る。',
     '5. 完了条件: 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して pass すること。フォーマッタ・静的解析があればコミット前に通す。',
     '6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（この時点では実装内容のみ。type/scope は英語、件名は対象リポジトリの言語規約に従う）。',
