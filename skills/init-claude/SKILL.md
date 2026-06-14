@@ -236,11 +236,18 @@ Step 2 で設計したルールを `.claude/rules/` に作成する。
 1. **検出**: 実装・レビュー中にスコープ外と判断した事項をメモする
 2. **既存 Issue の確認**:
    ```bash
-   gh issue list --search "<キーワード>" --state open
+   gh issue list --search "${KEYWORD}" --state open
    ```
+   キーワードは `"${KEYWORD}"` でクォートして渡す。
 3. **ユーザーに承認を得る**: 既存 Issue への追記か新規起票かをユーザーと確認する
 4. **記録**:
-   - 既存 Issue がある場合: `gh issue comment <番号> --body "<内容>"`
+   - 既存 Issue がある場合:
+     ```bash
+     gh issue comment "${ISSUE_NUMBER}" --body "$(cat <<'EOF'
+     （本文をここに記述）
+EOF
+     )"
+     ```
    - 存在しない場合: `create-issue-tree` または `create-issue` で適切な親 Issue 配下に起票
 5. **元 PR・レビューに切り出し先を記録**: コメントまたは PR 本文に切り出し先の Issue 番号を記載する
 
