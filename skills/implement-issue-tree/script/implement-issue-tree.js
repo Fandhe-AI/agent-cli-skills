@@ -433,7 +433,7 @@ function fixPrompt(item, impl, finding) {
     `4. create-commit スキルに従いコミットし、git push origin HEAD:refs/heads/${branch} で反映する。`,
     '5. unresolved-comments の指摘を修正した場合は、対応したスレッドを gh api graphql の resolveReviewThread ミューテーションで解決済みにマークする（可能な場合）。',
     '6. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
-    '返却: pushed / summary / worktreePath（pwd の結果）。',
+    '返却: pushed / summary / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）。',
   ].join('\n')
 }
 
@@ -688,6 +688,23 @@ async function runImplement(item) {
         recordFailure({ issue: item.number, pr: impl.prNumber, reason: fixFailReason })
         return false
       }
+      if (f.routingError) {
+        // worktree 誤配置（別リポ）は修正不能。fix 成功パス（fixCount++ / 旧 worktree 削除）より
+        // 前に即 blocked にする。誤配置で新たに作られた worktree のみ掃除し、直前の正常
+        // worktree（oldWorktreePath）はデバッグ・手動再開用に残す（worktree フィールドは更新
+        // しない）。push 不要（修正済み）と区別し noPushRounds の再監視を挟まない。
+        const routingReason =
+          'worktree routing error: fix worktree が別リポに誤配置（修正不能）。'
+          + '実装リポの worktree への再配置が必要'
+        log(`PR #${impl.prNumber} の修正エージェントが worktree routing error を報告、即 blocked とする`)
+        await updateState(
+          item.number,
+          { status: 'blocked', pr: impl.prNumber, note: routingReason },
+          { cleanupWorktree: newWorktreePath },
+        )
+        lastState = 'blocked'
+        break
+      }
       // fix 成功: fixCount をインクリメントして永続化し、旧 worktree を削除する
       fixCount++
       // 旧パスを保持し続けると stale になるため、有効・無効を問わず必ず新値で上書きする
@@ -697,13 +714,6 @@ async function runImplement(item) {
       }
       // fix 実行後: fixCount・新 worktree パスを更新し、旧 worktree を削除する
       await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePath })
-      if (f.routingError) {
-        // worktree 誤配置（別リポ）は修正不能。push 不要（修正済み）と区別し即 blocked にする
-        // （noPushRounds の再監視を挟むと routing 障害がマージ失敗に紛れるため）。
-        log(`PR #${impl.prNumber} の修正エージェントが worktree routing error を報告、即 blocked とする`)
-        lastState = 'blocked'
-        break
-      }
       if (!f.pushed) {
         // 「指摘は修正済みで push 不要」の場合があるため即 blocked にせず 1 回だけ再監視する。
         // 2 回連続で push なしなら進展がないため blocked とする
