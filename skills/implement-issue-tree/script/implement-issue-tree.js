@@ -663,7 +663,7 @@ const detectResult = await agent(
     `     | xargs -I{} sh -c 'gh api "repos/\${REPO}/commits/$1/check-runs" \\`,
     `         --jq \\'[.check_runs[] | select(.app.slug != "github-actions") | .app.slug] | .[]\\'  2>/dev/null' _ {} \\`,
     `     | sort -u`,
-    `   （SHA は xargs の '{}' を直接 URL に展開せず、sh -c の位置引数 $1 経由で渡してインジェクションを防ぐ。変数 REPO も "\\${REPO}" でクォート済み）`,
+    `   （SHA は xargs の '{}' を直接 URL に展開せず、sh -c の位置引数 $1 経由で渡してインジェクションを防ぐ。変数 REPO も "\${REPO}" でクォート済み）`,
     '3. merged PR が 0 件・コマンド失敗・出力が空の場合は apps: [] を返す（新規リポで停止しない）。',
     '4. 収集した slug を重複排除して apps 配列として返す（例: ["cursor"]）。',
     '返却: apps（外部 App slug の一意配列。検出なしなら空配列）。',
