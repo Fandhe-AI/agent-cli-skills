@@ -610,7 +610,7 @@ const detectResult = await agent(
     COMMON,
     '直前 3 件の merged PR から GitHub Actions 以外の CI チェック App を検出する。',
     '手順:',
-    `1. REPO=$(gh repo view --json owner,name --jq '"\\(.owner.login)/\\(.name)") を実行してリポジトリを取得する。`,
+    `1. REPO=$(gh repo view --json owner,name --jq '"\\(.owner.login)/\\(.name)"') を実行してリポジトリを取得する。`,
     `2. 以下のコマンドで外部チェック App slug を収集する:`,
     `   gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \\`,
     `     | xargs -I{} sh -c 'gh api "repos/\${REPO}/commits/$1/check-runs" \\`,
@@ -852,6 +852,12 @@ async function runImplement(item) {
       // needs-fix または r が無効（安全側に倒して fix 相当とみなす）
       lastReviewSummary = r?.summary ?? 'review エージェントが異常終了した'
       log(`#${item.number}: Review 指摘あり（残り ${reviewsLeft} 回）: ${sanitize(lastReviewSummary)}`)
+      // 残レビュー回数が 0（最終反復）なら fix しても再レビューできない。
+      // 未検証の変更をブランチに残さず計算資源も浪費しないため、fix を行わず
+      // 収束失敗として下の !reviewPassed ハンドラへ抜ける。
+      if (reviewsLeft === 0) {
+        break
+      }
       if (fixCount >= 6) {
         const reason = `Review ループで修正上限（6 回）に到達した: ${sanitize(lastReviewSummary)}`
         await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason })
@@ -1169,8 +1175,11 @@ function depsOf(item) {
 }
 
 // branch 名としてブランチ名に有効な文字種のみかを検証する（runImplement の再開ガードと共有）
+// reviewPrompt / fixPrompt は impl.branch を sanitizeBranch に通す。sanitizeBranch は
+// '..' を拒否するため、ゲート側の本関数でも '..' を弾いて検証条件を一致させる
+// （食い違うと a..b 等が初期ゲートを通過し、reviewing 遷移後に sanitizeBranch で例外になる）。
 function isValidBranchName(b) {
-  return typeof b === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
+  return typeof b === 'string' && !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
 }
 
 // 状態ファイル上で monitoring かつ再開情報（pr / branch）が有効な issue は
