@@ -139,6 +139,12 @@ const FIX_SCHEMA = {
     pushed: { type: 'boolean' },
     summary: { type: 'string' },
     worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
+    routingError: {
+      type: 'boolean',
+      description:
+        'worktree が別リポ（submodule 等）に誤配置されていて修正不能な場合 true。'
+        + 'true のとき pushed は false。push 不要（修正済み）と区別するための専用シグナル。',
+    },
   },
 }
 
@@ -413,13 +419,15 @@ function monitorPrompt(item, impl) {
 
 function fixPrompt(item, impl, finding) {
   const branch = sanitizeBranch(impl.branch)
+  const title = sanitize(item.title)
   return [
     `PR #${impl.prNumber}（イシュー #${item.number}、ブランチ ${branch}）への指摘を修正する担当。`,
     COMMON,
     '指摘内容:',
     sanitize(finding.summary),
     '手順:',
-    `1. 本エージェントは隔離された git worktree 内で動作する。ブランチ ${branch} は他の worktree で checkout 済みの可能性があるため、git fetch origin && git checkout --detach origin/${branch} で detached HEAD として取得して作業する（誤配置 worktree では当該ブランチを fetch できず失敗するため、fix は自然に進めなくなる）。マージコンフリクトの解消が必要な場合は git merge origin/${baseBranch} を実行して解消する。`,
+    `0. worktree routing ガード（他のどの gh / git 操作よりも先に、最初に必ず実行する）: \`git remote get-url origin\` でカレント worktree の remote を確認し、\`gh issue view ${item.number} --json number,title\` で取得した title が、このタスクの対象イシュー「${title}」と実質的に同一であることを確認する（プロンプト中の「${title}」は安全化のため記号がエスケープ／除去されている場合があるため完全一致は要求せず語句の一致で判断する。番号の存在だけでは別リポの同番号 issue を誤認しうる）。remote が想定と異なる / issue が解決できない / 取得 title が明らかに無関係（別 issue）のいずれか（= submodule 等の別リポ worktree に誤配置）なら、git fetch / git push を含む後続を一切実行せず、即 \`routingError: true\`・\`pushed: false\`・summary に「worktree routing error: remote=<URL> で誤配置」を入れて返す（routingError は「push 不要（修正済み）」と区別され、オーケストレーターが即 blocked にする）。`,
+    `1. 本エージェントは隔離された git worktree 内で動作する。ブランチ ${branch} は他の worktree で checkout 済みの可能性があるため、git fetch origin && git checkout --detach origin/${branch} で detached HEAD として取得して作業する。マージコンフリクトの解消が必要な場合は git merge origin/${baseBranch} を実行して解消する。`,
     '2. 指摘を重要度を問わずすべて修正する（実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い委譲する）。対象リポジトリの CLAUDE.md・rules の不変条件（migration・スキーマ等）を守る。',
     '3. 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して通す。',
     `4. create-commit スキルに従いコミットし、git push origin HEAD:refs/heads/${branch} で反映する。`,
@@ -689,6 +697,13 @@ async function runImplement(item) {
       }
       // fix 実行後: fixCount・新 worktree パスを更新し、旧 worktree を削除する
       await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePath })
+      if (f.routingError) {
+        // worktree 誤配置（別リポ）は修正不能。push 不要（修正済み）と区別し即 blocked にする
+        // （noPushRounds の再監視を挟むと routing 障害がマージ失敗に紛れるため）。
+        log(`PR #${impl.prNumber} の修正エージェントが worktree routing error を報告、即 blocked とする`)
+        lastState = 'blocked'
+        break
+      }
       if (!f.pushed) {
         // 「指摘は修正済みで push 不要」の場合があるため即 blocked にせず 1 回だけ再監視する。
         // 2 回連続で push なしなら進展がないため blocked とする
