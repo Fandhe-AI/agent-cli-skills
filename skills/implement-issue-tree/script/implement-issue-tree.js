@@ -70,7 +70,7 @@ function sanitizeWorktreePath(p) {
 }
 
 const COMMON = [
-  `リポジトリ: カレントディレクトリ（base branch: ${baseBranch}）。`,
+  `リポジトリ: カレントディレクトリが実装対象リポ（base branch: ${baseBranch}）であること。起動直後に \`git remote get-url origin\` を確認し、想定と異なる submodule（例: docs/spec 等）の worktree に誤配置されていないか検証すること。`,
   '自動運転モード: ユーザーへの質問・承認待ちは不可。判断が必要なら安全側に倒して進める。',
   '対象リポジトリの CLAUDE.md・.claude/rules・テスト実行規約・コーディング規約があれば必ず読んで従う。',
   '対象リポジトリに delegation ルールや専門サブエージェントがあれば、それに従い役割単位で委譲する。',
@@ -366,7 +366,8 @@ function implementPrompt(item) {
     `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
     `   b. open PR が見つかった場合は新規 PR を作らず、そのブランチを git fetch origin && git checkout <branch> で取得して続きから作業し、既存 PR 番号を prNumber として返す。`,
     `   c. open PR がない場合は手順 1 以降に進む。`,
-    '1. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
+    `1a. worktree routing ガード（最優先）: まず \`git remote get-url origin\` でカレント worktree の remote を確認し、続けて \`gh issue view ${item.number}\` がこの remote 上で解決できることを確認する。解決できない（= 想定と別リポ。submodule 等の worktree に誤配置された状態）場合は、一切作業せず prNumber: 0 と「worktree routing error: remote=<URL> でイシュー #${item.number} を解決できず誤配置。実装リポの worktree への再配置が必要」を理由として即座に返す。手動で別ディレクトリへ移動して作業しないこと（隔離契約違反・他エージェント干渉のため）。`,
+    '1b. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
     `2. git fetch origin && git checkout -B <type>/${item.number}-<short-name> origin/${baseBranch} で作業ブランチを作成する（type は feat / fix 等の Conventional Commits 規約。並列実行時のブランチ名衝突を防ぐためイシュー番号を必ず含める）。`,
     '3. implement-issue スキルのフローに従う。ただしユーザー承認ステップおよびコミット作成（implement-issue の Step 7: create-commit）は本ワークフローでは省略する。計画を _/local-plans/ に書いたら自己レビューのうえ即実装に進む。コミットは本ワークフローの手順 6・手順 8 で行う。',
     '   コメント方針: コードコメントは「何をするか」より「なぜ存在するか／パッケージ・サービスから見た対象の役割」を書く。呼び出し元/呼び出し先・他サービスからの観点（このシンボルがどこから呼ばれ、どの境界を担うか）を明示し、対象リポジトリの .claude/rules/code-comment-style.md があればそれに従う。',
@@ -418,7 +419,7 @@ function fixPrompt(item, impl, finding) {
     '指摘内容:',
     sanitize(finding.summary),
     '手順:',
-    `1. 本エージェントは隔離された git worktree 内で動作する。ブランチ ${branch} は他の worktree で checkout 済みの可能性があるため、git fetch origin && git checkout --detach origin/${branch} で detached HEAD として取得して作業する。マージコンフリクトの解消が必要な場合は git merge origin/${baseBranch} を実行して解消する。`,
+    `1. 本エージェントは隔離された git worktree 内で動作する。まず \`git remote get-url origin\` でカレント worktree の remote を確認し、想定と異なる submodule 等の worktree に誤配置されていれば（ブランチ ${branch} を fetch できない等）pushed: false と「worktree routing error: 誤配置のため修正不可」を返す。問題なければブランチ ${branch} は他の worktree で checkout 済みの可能性があるため、git fetch origin && git checkout --detach origin/${branch} で detached HEAD として取得して作業する。マージコンフリクトの解消が必要な場合は git merge origin/${baseBranch} を実行して解消する。`,
     '2. 指摘を重要度を問わずすべて修正する（実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い委譲する）。対象リポジトリの CLAUDE.md・rules の不変条件（migration・スキーマ等）を守る。',
     '3. 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して通す。',
     `4. create-commit スキルに従いコミットし、git push origin HEAD:refs/heads/${branch} で反映する。`,
