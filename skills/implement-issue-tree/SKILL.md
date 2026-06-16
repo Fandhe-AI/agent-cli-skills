@@ -283,7 +283,7 @@ Workflow の返却値（`done`・`failures`・`notStarted`）を確認し、`fai
 
 | 問題 | 回避策 |
 |------|--------|
-| テスト失敗の原因を調査せず当て推量で修正を繰り返す | `debugging.md` の4フェーズ（調査→分析→仮説→修正）を踏む。3回失敗したら `blocked` にしてユーザーへ報告 |
+| テスト失敗の原因を調査せず当て推量で修正を繰り返す | `.claude/rules/debugging.md` の4フェーズ（調査→分析→仮説→修正）を踏む。3回失敗したら `blocked` にしてユーザーへ報告 |
 | `gh pr checks --watch` 終了だけで CI 合格と判断する | watch 後に `gh pr checks <pr-number>` で全チェックの結論を列挙して確認する |
 | 仕様準拠を確認せずにコード品質レビューへ移行する | Step 4 のレビューは①仕様準拠→②コード品質の順に実施する |
 | 状態ファイルが壊れたまま再実行して重複 PR を作成する | パースエラー時は即停止。`cat _/issue-trees/<N>.json` で確認してから再実行する |
@@ -452,3 +452,7 @@ EOF
 - 外部チェック（Cursor Bugbot 等）は Step 1（Tree フェーズ）で直前 3 件の merged PR を分析して自動判定する。外部チェックが検出されない場合は Bugbot 待機・`@cursor review` 催促は行わない（CI green と未解決スレッドなしのみで判定する）。Bugbot 待機は外部チェック検出時のみ実施する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
+
+## sandbox 環境での実行
+
+このスキルは sandbox 環境では実行できない。ネットワークアクセス・ファイルシステムへの書き込みが必要なため、通常の Claude Code セッションで実行すること。

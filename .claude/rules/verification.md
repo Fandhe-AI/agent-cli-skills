@@ -14,6 +14,8 @@ applies_to: implement-issue, implement-issue-tree, implement-review, implement-r
 | スキル | implement-issue, implement-issue-tree, implement-review, implement-review-pr, create-pr |
 | Agent | 実装・修正を行う全 Agent（implement-issue-tree の worktree 系 Agent を含む） |
 
+applies_to に列挙したスキルは代表例である。コードやファイル・GitHub 状態を自動で生成・修正・実行するなど**副作用を伴う作業を行う全スキル・Agent はこの完了ゲートに従う**（例: project 系の状態変更スキルも対象）。
+
 ## 5段階完了ゲート
 
 | # | フェーズ | 内容 |

@@ -60,13 +60,17 @@ gh issue create \
 
 ### Step 4: Sub-issues として紐付ける
 
-`gh api` を使用して子 Issue を親の sub-issues に追加:
+`gh api` を使用して子 Issue を親の sub-issues に追加する。GitHub sub-issues API は **issue 番号ではなく database id** を要求するため、先に `gh api` で database id を取得してから渡す:
 
 ```bash
+# 子 Issue の database id を取得する（issue 番号 {child_number} から変換）
+child_id=$(gh api "repos/{owner}/{repo}/issues/{child_number}" --jq '.id')
+
+# database id を sub_issue_id に渡して紐付ける
 gh api \
   --method POST \
-  repos/{owner}/{repo}/issues/{parent_number}/sub_issues \
-  -f sub_issue_id={child_number}
+  "repos/{owner}/{repo}/issues/{parent_number}/sub_issues" \
+  -F "sub_issue_id=${child_id}"
 ```
 
 ### Step 5: Issue URL を返す
