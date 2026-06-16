@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Tree', detail: 'イシューツリー取得・機能的依存の抽出・並列実行順の決定・外部チェック自動判定', model: 'sonnet' },
     { title: 'State', detail: '状態ファイル更新（進捗・worktree パスの記録）', model: 'haiku' },
     { title: 'Plan', detail: 'イシューごとの実装計画立案（opus・worktree なし）', model: 'opus' },
-    { title: 'Implement', detail: '計画に沿った実装・修正・PR 作成（worktree 並列）', model: 'sonnet' },
+    { title: 'Implement', detail: '計画に沿った実装・ローカルコミット（push・PR 作成なし）（worktree 並列）', model: 'sonnet' },
     { title: 'Review', detail: 'ローカル diff の品質・セキュリティレビュー（OK→Merge / Low 含む指摘→修正ループ）', model: 'sonnet' },
     { title: 'Merge', detail: 'CI / 外部チェック（検出時のみ）監視・レビュー全解決確認・squash merge・クローズ', model: 'sonnet' },
   ],
@@ -19,7 +19,7 @@ export const meta = {
 //   2. 共通ユーティリティ    — sanitize / sanitizeBranch / assertInt / sanitizeWorktreePath
 //   3. 定数・JSON スキーマ   — COMMON / *_SCHEMA（Tree/Impl/Merge/Fix/Close/External/Plan/Review/State）
 //   4. 状態ファイル操作      — stateQueue / enqueueStateWrite / loadState / updateState / initAllPending
-//   5. プロンプト構築        — planPrompt / reviewPrompt / implementPrompt / monitorPrompt / fixPrompt / closePrompt
+//   5. プロンプト構築        — planPrompt / reviewPrompt / implementPrompt / prCreatePrompt / monitorPrompt / fixPrompt / closePrompt
 //   6. 実行: Restore→Tree→State — 状態読込・ツリー取得・外部チェック判定・依存グラフ/キュー構築・pending 初期化
 //   7. per-issue ドライバ    — recordFailure / runVerifyClose / runImplement / runMergeLoop / runOne（関数宣言。8 のスケジューラから呼ばれる）
 //   8. 実行: スケジューラ     — 依存グラフ補助（isAncestor/findDependencyCycle/depsOf/isValidBranchName/isActiveMonitoring/markBlockedByDeps）・並列実行ループ・後処理レポート
@@ -143,11 +143,13 @@ const TREE_SCHEMA = {
 }
 
 // worktreePath を追加: 中断後にユーザーが残骸 worktree を特定・掃除できるようにする
+// prNumber は push 前 review フローではこの時点で未作成（0）のため必須から外す。
+// PR 作成は Review 通過後の push + pr-create ステップで行う。
 const IMPL_SCHEMA = {
   type: 'object',
-  required: ['prNumber', 'branch', 'summary'],
+  required: ['branch', 'summary'],
   properties: {
-    prNumber: { type: 'number', description: '作成した PR 番号。作成できなければ 0' },
+    prNumber: { type: 'number', description: 'push 前 review フローでは常に 0（PR はまだ作成しない）' },
     branch: { type: 'string' },
     summary: { type: 'string' },
     worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
@@ -214,6 +216,18 @@ const PLAN_SCHEMA = {
   required: ['plan', 'summary'],
   properties: {
     plan: { type: 'string', description: '実装計画の本文（markdown）' },
+    summary: { type: 'string' },
+  },
+}
+
+// Review 通過後の push + PR 作成エージェントのスキーマ。
+// CI を一切起動しない Review を全て通過してから、ここで初めて push・PR 作成を行う。
+// prNumber: 0 は PR 作成失敗（branch push は成功している可能性あり）。
+const PR_CREATE_SCHEMA = {
+  type: 'object',
+  required: ['prNumber', 'summary'],
+  properties: {
+    prNumber: { type: 'number', description: '作成した PR 番号。作成できなければ 0' },
     summary: { type: 'string' },
   },
 }
@@ -469,21 +483,28 @@ function planPrompt(item) {
   ].join('\n')
 }
 
-// 独立 Review フェーズのプロンプト。
-// worktree 隔離で動作し、impl エージェントが作成したブランチを detached HEAD で取得する。
+// 独立 Review フェーズのプロンプト（push 前ローカル diff レビュー版）。
+// push 前のローカルブランチを対象にするため git fetch / origin 参照は不要。
+// worktree は .git を共有するため、impl が作ったローカルブランチは別 worktree からでも
+// 参照できる。ブランチが他の worktree で checkout 済みの可能性があるため detach で取得する。
 // 修正は行わず判定のみを担う（修正は fix エージェントへ委譲される）。
 // Low（要改善）含む指摘が 1 件でもあれば needs-fix を返す（安全側に倒す）。
 // impl.branch は sanitizeBranch 検証済みの値を渡すこと。
 function reviewPrompt(item, impl) {
   const branch = sanitizeBranch(impl.branch)
   return [
-    `PR #${impl.prNumber}（イシュー #${item.number}、ブランチ ${branch}）のコードレビュー担当エージェント。`,
+    `イシュー #${item.number}（ブランチ ${branch}）のコードレビュー担当エージェント（push 前ローカル diff レビュー）。`,
     COMMON,
     '本エージェントは判定のみを行い、コードの変更・コミット・push は行わない。',
+    // push 前レビューのため origin には当該ブランチがまだ存在しない。
+    // worktree は .git を共有するため impl のローカルコミットをそのまま参照できる。
+    'push 前の段階であり origin に対象ブランチはまだ存在しない。git fetch は不要。',
     '手順:',
-    `1. git fetch origin && git checkout --detach origin/${branch} で対象ブランチを取得する。`,
+    `1. git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
+    `   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
     `   （ブランチ名は ${JSON.stringify(branch)} — 変数展開不要、そのまま使用する）`,
-    `2. implement-review スキルに従い、git diff origin/${baseBranch}...HEAD のローカル diff を対象に品質・セキュリティレビューを実施する。`,
+    `2. implement-review スキルに従い、git diff ${baseBranch}...HEAD のローカル diff を対象に品質・セキュリティレビューを実施する。`,
+    `   （origin/${baseBranch} ではなくローカルの ${baseBranch} ブランチと比較する。fetch 不要）`,
     '   レビュー観点:',
     '   - 実装品質（設計・可読性・エッジケース・テストカバレッジ）',
     '   - OWASP Top 10 セキュリティ（インジェクション・認証・秘密情報露出等）',
@@ -504,7 +525,7 @@ function implementPrompt(item, plan) {
   // バッククォートや改行を含む計画本文によるプロンプト構造の破壊を防ぐ。
   const planJson = JSON.stringify(plan ?? '')
   return [
-    `イシュー #${item.number}「${title}」を実装し PR を作成する担当エージェント。`,
+    `イシュー #${item.number}「${title}」を実装してローカルブランチにコミットする担当エージェント（push・PR 作成は行わない）。`,
     COMMON,
     '実装計画（Plan フェーズで作成済み。以下コードブロック内がそのまま計画の JSON 文字列）:',
     '```json',
@@ -527,9 +548,15 @@ function implementPrompt(item, plan) {
     '4. 完了条件: 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して pass すること。フォーマッタ・静的解析があればコミット前に通す。',
     '5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む。',
     '6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。',
-    `7. create-pr スキルに従い base ${baseBranch} で PR を作成する。body に必ず「Closes #${item.number}」を含める。実装の過程で現スコープ外と判断した事項（未対応の改善・別機能・技術的負債・後続作業）を検出した場合は、PR body の「対象外（out-of-scope）」節に「対象外とした項目」と対応案を箇条書きで記載する。本エージェントはヘッドレス自動実行でユーザー承認を待てないため、ここでは Issue へのコメント/起票（承認が必要な書き込み操作）は行わず記録のみとする（Issue 化は最終レポート確認時に人手で行う）。`,
+    // push・PR 作成は Review 通過後に行う（CI リソース節約のため）。
+    // Review が収束失敗した場合は push も PR 作成も行わず CI を一切起動しない。
+    '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
+    '   （push と PR 作成は後続の Review が全通過した後に別エージェントが行う）',
+    '   実装の過程で現スコープ外と判断した事項（未対応の改善・別機能・技術的負債・後続作業）は変数等に記録しておき、',
+    '   summary に「対象外（out-of-scope）」として列挙する（push 後の PR 本文への記録は後続エージェントが行う）。',
     '8. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
-    '返却: prNumber（失敗時 0）/ branch / summary（実装内容の要約。失敗時は理由と現状）/ worktreePath（pwd の結果）。',
+    '返却: branch / summary（実装内容の要約。対象外項目を含む。失敗時は理由と現状）/ worktreePath（pwd の結果）。',
+    '（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）',
   ].join('\n')
 }
 
@@ -591,22 +618,86 @@ function monitorPrompt(item, impl, externalApps) {
   ].join('\n')
 }
 
-function fixPrompt(item, impl, finding) {
+// Review が全通過した後に呼ばれる push + PR 作成エージェントのプロンプト。
+// impl フェーズで積んだローカルコミットをここで初めて push し、PR を作成する。
+// この push が CI トリガーになる（push は 1 回のみ）。
+// PR 作成後に prNumber を返し、以降の Merge ループへ渡す。
+// impl.branch は sanitizeBranch 検証済みの値を渡すこと。
+// outOfScope: impl の summary から抽出した対象外項目のテキスト（PR body に記録する）。
+function prCreatePrompt(item, impl, outOfScope) {
   const branch = sanitizeBranch(impl.branch)
   const title = sanitize(item.title)
+  const outOfScopeSection = outOfScope
+    ? `\n\n## 対象外（out-of-scope）\n${sanitize(outOfScope)}`
+    : ''
   return [
-    `PR #${impl.prNumber}（イシュー #${item.number}、ブランチ ${branch}）への指摘を修正する担当。`,
+    `イシュー #${item.number}「${title}」の実装コミット（ブランチ ${branch}）を push して PR を作成する担当エージェント。`,
+    COMMON,
+    'Review フェーズが全通過した後にのみ呼ばれる。この push が CI トリガーになる（push はこの 1 回のみ）。',
+    '手順:',
+    `1. git push origin ${branch} でローカルブランチを push する（Bash の timeout に 600000 を指定）。`,
+    `   push が失敗した場合は prNumber: 0 と失敗理由を返す。`,
+    `2. create-pr スキルに従い base ${baseBranch} で PR を作成する。`,
+    `   body のテンプレート:`,
+    '   ```',
+    '   ## Summary',
+    '   - 実装内容の要約',
+    '',
+    `   Closes #${item.number}`,
+    outOfScopeSection,
+    '   ```',
+    `   body に必ず「Closes #${item.number}」を含めること。`,
+    `   （ブランチ名は ${JSON.stringify(branch)} — 変数展開不要、そのまま使用する）`,
+    '3. PR 作成成功後、prNumber を返す。',
+    '返却: prNumber（失敗時 0）/ summary（push・PR 作成の結果要約）。',
+  ].join('\n')
+}
+
+// Review ループ内の fix（push しない版）または Merge ループの fix（push する版）のプロンプト。
+// pushAfterFix: true のとき Merge ループ由来（CI 失敗等）→ 修正後に push する。
+// pushAfterFix: false のとき Review ループ由来（Review 指摘）→ ローカルに再コミットするだけ。
+// Review fix が push しないのは、収束失敗時に CI を起動させないため（CI リソース節約）。
+function fixPrompt(item, impl, finding, pushAfterFix = true) {
+  const branch = sanitizeBranch(impl.branch)
+  const title = sanitize(item.title)
+  // push しない Review fix では branch は別 worktree に checkout 済みのためローカル
+  // ブランチを detach で取得し、修正コミット後に `git branch -f <branch> HEAD` で先端更新する。
+  const checkoutInstructions = pushAfterFix
+    ? [
+        `1. 本エージェントは隔離された git worktree 内で動作する。ブランチ ${branch} は他の worktree で checkout 済みの可能性があるため、git fetch origin && git checkout --detach origin/${branch} で detached HEAD として取得して作業する。マージコンフリクトの解消が必要な場合は git merge origin/${baseBranch} を実行して解消する。`,
+      ]
+    : [
+        `1. 本エージェントは隔離された git worktree 内で動作する。push 前のローカル修正のため fetch は不要。`,
+        `   git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
+        `   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
+        `   マージコンフリクトの解消が必要な場合は git merge ${baseBranch}（ローカル）を実行して解消する。`,
+      ]
+  const commitAndPushInstructions = pushAfterFix
+    ? [
+        `4. create-commit スキルに従いコミットし、git push origin HEAD:refs/heads/${branch} で反映する。`,
+      ]
+    : [
+        `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
+        `   コミット後に git branch -f ${branch} HEAD でローカルブランチの先端を更新する`,
+        `   （detached HEAD 作業後のブランチ先端を確実に更新するため）。`,
+      ]
+  return [
+    pushAfterFix
+      ? `PR #${impl.prNumber}（イシュー #${item.number}、ブランチ ${branch}）への指摘を修正する担当。`
+      : `イシュー #${item.number}（ブランチ ${branch}）への Review 指摘をローカルで修正する担当（push はしない）。`,
     COMMON,
     '指摘内容:',
     sanitize(finding.summary),
     '手順:',
     `0. worktree routing ガード（他のどの gh / git 操作よりも先に、最初に必ず実行する）: \`git remote get-url origin\` でカレント worktree の remote を確認し、\`gh issue view ${item.number} --json number,title\` で取得した title が、このタスクの対象イシュー「${title}」と実質的に同一であることを確認する（プロンプト中の「${title}」は安全化のため記号がエスケープ／除去されている場合があるため完全一致は要求せず語句の一致で判断する。番号の存在だけでは別リポの同番号 issue を誤認しうる）。remote が想定と異なる / issue が解決できない / 取得 title が明らかに無関係（別 issue）のいずれか（= submodule 等の別リポ worktree に誤配置）なら、git fetch / git push を含む後続を一切実行せず、即 \`routingError: true\`・\`pushed: false\`・summary に「worktree routing error: remote=<URL> で誤配置」を入れて返す（routingError は「push 不要（修正済み）」と区別され、オーケストレーターが即 blocked にする）。`,
-    `1. 本エージェントは隔離された git worktree 内で動作する。ブランチ ${branch} は他の worktree で checkout 済みの可能性があるため、git fetch origin && git checkout --detach origin/${branch} で detached HEAD として取得して作業する。マージコンフリクトの解消が必要な場合は git merge origin/${baseBranch} を実行して解消する。`,
+    ...checkoutInstructions,
     '2. 指摘を重要度を問わずすべて修正する（実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い委譲する）。対象リポジトリの CLAUDE.md・rules の不変条件（migration・スキーマ等）を守る。',
     '3. 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して通す。',
-    `4. create-commit スキルに従いコミットし、git push origin HEAD:refs/heads/${branch} で反映する。`,
-    '5. unresolved-comments の指摘を修正した場合は、対応したスレッドを gh api graphql の resolveReviewThread ミューテーションで解決済みにマークする（可能な場合）。',
-    '6. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
+    ...commitAndPushInstructions,
+    ...(pushAfterFix
+      ? ['5. unresolved-comments の指摘を修正した場合は、対応したスレッドを gh api graphql の resolveReviewThread ミューテーションで解決済みにマークする（可能な場合）。']
+      : []),
+    `${pushAfterFix ? '6' : '5'}. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。`,
     '返却: pushed / summary / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）。',
   ].join('\n')
 }
@@ -840,14 +931,10 @@ async function runImplement(item) {
       schema: IMPL_SCHEMA,
       isolation: 'worktree',
     })
-    if (!impl || !impl.prNumber) {
+    // impl の成否判定: push 前 review フローでは prNumber は存在しない（PR 未作成）。
+    // branch が有効かどうかで実装の成否を判定する。
+    if (!impl || !impl.branch) {
       const reason = sanitize(impl?.summary ?? '実装エージェントが異常終了した')
-      await updateState(item.number, { status: 'failed', note: reason })
-      recordFailure({ issue: item.number, reason })
-      return false
-    }
-    if (!Number.isInteger(impl.prNumber) || impl.prNumber <= 0) {
-      const reason = `prNumber が正の整数ではない: ${impl.prNumber}`
       await updateState(item.number, { status: 'failed', note: reason })
       recordFailure({ issue: item.number, reason })
       return false
@@ -856,19 +943,19 @@ async function runImplement(item) {
     if (!isValidBranchName(impl.branch ?? '')) {
       const reason = `branch 名が不正: ${sanitize(impl.branch ?? '(空)')}`
       await updateState(item.number, { status: 'failed', note: reason })
-      recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+      recordFailure({ issue: item.number, reason })
       return false
     }
     // impl が返した worktreePath もホワイトリスト検証を通す
-    impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? '') }
-    // impl 完了直後: reviewing に遷移し pr / branch / worktree を記録する。
-    // この分岐は新規 PR を作るため fixCount は常に 0（savedFixCount は正常再開時のみ非 0）。
+    impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? ''), prNumber: 0 }
+    // impl 完了直後: reviewing に遷移し branch / worktree を記録する。
+    // PR はまだ作成していないため pr: 0 を記録する（PR 作成は Review 通過後）。
     // フォールバック前に保存済みの旧 worktree があれば削除して孤児化を防ぐ
     await updateState(
       item.number,
       {
         status: 'reviewing',
-        pr: impl.prNumber,
+        pr: 0,
         branch: impl.branch,
         worktree: impl.worktreePath,
         fixCount: savedFixCount,
@@ -876,7 +963,9 @@ async function runImplement(item) {
       fallbackOldWorktree ? { cleanupWorktree: fallbackOldWorktree } : {},
     )
 
-    // --- Review フェーズ: ローカル diff を implement-review で独立レビューする ---
+    // --- Review フェーズ: push 前のローカル diff を implement-review で独立レビューする ---
+    // push 前に Review を完結させることで、Review 失敗時に CI を一切起動しない（CI リソース節約）。
+    // push・PR 作成は Review が全通過した後に初めて行う。
     // fixCount は Review ループと後続 Merge ループで共有する（修正総数上限 6 を一元管理）。
     // Review worktree はレビューのみで変更しないため Workflow の unchanged worktree 自動削除で
     // 残骸にならない（impl/fix の worktree のみ追跡している）。
@@ -915,14 +1004,16 @@ async function runImplement(item) {
       }
       if (fixCount >= 6) {
         const reason = `Review ループで修正上限（6 回）に到達した: ${sanitize(lastReviewSummary)}`
-        await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason })
-        recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+        // push 前のため pr: 0 のまま記録する（PR 未作成）
+        await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason })
+        recordFailure({ issue: item.number, reason })
         return false
       }
-      // fix エージェントで Review 指摘を修正する
+      // Review ループの fix は push しない（Review 収束失敗時に CI を起動させないため）。
       // finding には Review エージェントの結果を渡す（summary が指摘全文を含む）
       const oldWorktreePathReview = currentWorktreePath
-      const fReview = await agent(fixPrompt(item, impl, { summary: lastReviewSummary }), {
+      // pushAfterFix: false → ローカルに修正コミットを積むだけ（push なし）
+      const fReview = await agent(fixPrompt(item, impl, { summary: lastReviewSummary }, false), {
         label: `fix:#${item.number}`,
         phase: 'Implement',
         model: 'sonnet',
@@ -935,23 +1026,24 @@ async function runImplement(item) {
       if (!fixReviewSucceeded) {
         const fixFailReason = `Review fix エージェントが無効な結果を返した（${fixCount + 1} 回目）`
         log(`⚠️ issue #${item.number}: ${fixFailReason}`)
-        await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: fixFailReason })
-        recordFailure({ issue: item.number, pr: impl.prNumber, reason: fixFailReason })
+        // push 前のため pr: 0 のまま記録する（PR 未作成）
+        await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: fixFailReason })
+        recordFailure({ issue: item.number, reason: fixFailReason })
         return false
       }
       if (fReview.routingError) {
         // worktree 誤配置（別リポ）は修正不能。Merge ループの routingError 処理と同様に
         // 即停止する。誤配置で新規作成された worktree（newWorktreePathReview）のみ掃除し、
         // 直前の正常 worktree（oldWorktreePathReview）は保持してデバッグ・手動再開に残す。
-        // fixCount は進展なしのため増やさない。
+        // fixCount は進展なしのため増やさない。push 前のため pr: 0 で記録する。
         const reason = 'worktree routing error: Review fix worktree が別リポに誤配置（修正不能）。実装リポの worktree への再配置が必要'
-        log(`PR #${impl.prNumber} の Review 修正エージェントが worktree routing error を報告、即停止する`)
+        log(`イシュー #${item.number} の Review 修正エージェントが worktree routing error を報告、即停止する`)
         await updateState(
           item.number,
-          { status: 'failed', pr: impl.prNumber, fixCount, note: reason, worktree: oldWorktreePathReview },
+          { status: 'failed', pr: 0, fixCount, note: reason, worktree: oldWorktreePathReview },
           { cleanupWorktree: newWorktreePathReview },
         )
-        recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+        recordFailure({ issue: item.number, reason })
         return false
       }
       fixCount++
@@ -962,22 +1054,45 @@ async function runImplement(item) {
       await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePathReview })
     }
     if (!reviewPassed) {
-      // 3 回 Review しても収束しなかった。SKILL.md Step 4 の仕様に従い blocked として
-      // 記録する（blocked / failed はいずれも次回最初から再実行されるが、blocked を
-      // キーに運用・自動化する側が意図した状態を観測できるようにする）。
-      const reason = `Review フェーズが 3 回で収束しなかった（最終指摘: ${sanitize(lastReviewSummary)}）`
-      await updateState(item.number, { status: 'blocked', pr: impl.prNumber, fixCount, note: reason })
-      recordFailure({ issue: item.number, pr: impl.prNumber, reason, status: 'blocked' })
+      // 3 回 Review しても収束しなかった。push も PR 作成も行わない（CI を一切起動しない）。
+      // SKILL.md Step 4 の仕様に従い blocked として記録する（blocked / failed はいずれも
+      // 次回最初から再実行されるが、blocked をキーに運用・自動化する側が意図した状態を
+      // 観測できるようにする）。push 前のため pr: 0 で記録する。
+      const reason = `Review フェーズが 3 回で収束しなかった（最終指摘: ${sanitize(lastReviewSummary)}）。push・PR 作成は行わない`
+      await updateState(item.number, { status: 'blocked', pr: 0, fixCount, note: reason })
+      recordFailure({ issue: item.number, reason, status: 'blocked' })
       return false
     }
 
-    // Review 通過後: monitoring に遷移して monitor ループへ
-    await updateState(item.number, { status: 'monitoring' })
-    // fixCount を runImplement スコープ全体で共有するため、以降の Merge ループもこの変数を使う
-    // （let 宣言は if ブロック内だが後続の Merge ループが同スコープで参照できるよう変数を返す）。
+    // --- push + PR 作成フェーズ: Review 全通過後にここで初めて push・PR を作る ---
+    // Review が収束した場合のみここに到達する（CI を 1 回のみ起動する）。
+    // PR 作成後に prNumber を取得し、以降の Merge ループへ渡す。
+    const outOfScope = impl.summary?.includes('対象外') ? impl.summary : ''
+    const prCreateResult = await agent(prCreatePrompt(item, impl, outOfScope), {
+      label: `pr-create:#${item.number}`,
+      phase: 'Implement',
+      model: 'sonnet',
+      effort: 'low',
+      schema: PR_CREATE_SCHEMA,
+      isolation: 'worktree',
+    })
+    if (!prCreateResult || !Number.isInteger(prCreateResult.prNumber) || prCreateResult.prNumber <= 0) {
+      const reason = sanitize(prCreateResult?.summary ?? 'push・PR 作成エージェントが異常終了した、または prNumber が不正')
+      // push は成功している可能性があるが PR がないため monitoring には移行できない。
+      // branch は有効なので次回再実行時に既存 PR 検索（impl 手順 0b）で回復できる。
+      await updateState(item.number, { status: 'failed', pr: 0, branch: impl.branch, fixCount, note: reason })
+      recordFailure({ issue: item.number, reason })
+      return false
+    }
+    // impl オブジェクトを PR 作成後の prNumber で更新する（以降の Merge ループが参照する）
+    impl = { ...impl, prNumber: prCreateResult.prNumber }
+    log(`#${item.number}: push + PR 作成完了 — PR #${impl.prNumber}`)
+    // PR 作成完了: pr / status を monitoring に更新して Merge ループへ引き継ぐ。
+    // fixCount を runImplement スコープ全体で共有するため、以降の Merge ループもこの変数を使う。
     // Review fix で worktree が差し替わっている場合があるため、impl.worktreePath（最初の
     // Implement worktree。Review fix 後は削除済みのことが多い）ではなく Review ループで
     // 追跡した最新の currentWorktreePath を Merge ループへ引き継ぐ（孤児 worktree 防止）。
+    await updateState(item.number, { status: 'monitoring', pr: impl.prNumber })
     return await runMergeLoop(item, impl, fixCount, currentWorktreePath)
   }
 
@@ -1042,8 +1157,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
       }
       log(`PR #${impl.prNumber} に修正が必要（${lastState}）、修正エージェントを起動する（${fixCount + 1}/6 回目）`)
       const oldWorktreePath = currentWorktreePath
-      // fix エージェントは計画と同格の実装系タスク。sonnet/medium で十分（opus から変更）。
-      const f = await agent(fixPrompt(item, impl, m), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
+      // Merge ループの fix は CI 失敗・レビューコメント等の修正。push が必要（pushAfterFix: true）。
+      // push 後に CI が再実行されるため、push なし fix（Review ループ用）とは明確に区別する。
+      const f = await agent(fixPrompt(item, impl, m, true), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
       // fix 結果が有効かどうかを判定する:
       // - f が null/undefined でない
       // - worktreePath が sanitize を通る（空文字でも可）かつ pushed が boolean
