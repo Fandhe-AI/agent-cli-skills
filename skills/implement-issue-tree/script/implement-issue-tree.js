@@ -687,7 +687,9 @@ let halted = null
 // 3 イシュー連続で停滞した場合のみ新規着手を止めてユーザーの判断を待つ
 function recordFailure(failure) {
   failures.push(failure)
-  results.push({ issue: failure.issue, status: 'failed', pr: failure.pr, note: failure.reason })
+  // results の status は既定で 'failed'。状態ファイルへ 'blocked' を書く呼び出し
+  // （Review 非収束など）は failure.status を渡し、results と状態ファイルの status を一致させる。
+  results.push({ issue: failure.issue, status: failure.status ?? 'failed', pr: failure.pr, note: failure.reason })
   consecutiveFailures++
   log(`#${failure.issue} を完了できず次へ進む（${consecutiveFailures} 連続）: ${failure.reason}`)
   if (consecutiveFailures >= 3 && !halted) {
@@ -912,7 +914,7 @@ async function runImplement(item) {
       // キーに運用・自動化する側が意図した状態を観測できるようにする）。
       const reason = `Review フェーズが 3 回で収束しなかった（最終指摘: ${sanitize(lastReviewSummary)}）`
       await updateState(item.number, { status: 'blocked', pr: impl.prNumber, fixCount, note: reason })
-      recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+      recordFailure({ issue: item.number, pr: impl.prNumber, reason, status: 'blocked' })
       return false
     }
 
