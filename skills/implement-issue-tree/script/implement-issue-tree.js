@@ -633,6 +633,9 @@ async function runImplement(item) {
   // monitoring からの正常再開時のみ保存済みの fixCount を引き継ぐ。それ以外は 0
   let fixCount = savedFixCount
   let noPushRounds = 0
+  // fix 中に worktree 誤配置（別リポ）を検出したか。ループ後の最終 updateState で
+  // 汎用マージ失敗 note ではなく routing 専用 note を記録するために使う。
+  let routingErrorDetected = false
   // 現在追跡中の worktree パス。impl または最後の fix の worktreePath を常に最新に保つ。
   // 再開時は状態ファイルから引き継ぐ。merged 時・fix 時の削除対象として使用する
   let currentWorktreePath = impl.worktreePath ?? ''
@@ -690,16 +693,16 @@ async function runImplement(item) {
       }
       if (f.routingError) {
         // worktree 誤配置（別リポ）は修正不能。fix 成功パス（fixCount++ / 旧 worktree 削除）より
-        // 前に即 blocked にする。誤配置で新たに作られた worktree のみ掃除し、直前の正常
-        // worktree（oldWorktreePath）はデバッグ・手動再開用に残す（worktree フィールドは更新
-        // しない）。push 不要（修正済み）と区別し noPushRounds の再監視を挟まない。
-        const routingReason =
-          'worktree routing error: fix worktree が別リポに誤配置（修正不能）。'
-          + '実装リポの worktree への再配置が必要'
+        // 前に即 break する。誤配置で新たに作られた worktree（newWorktreePath）のみ掃除し、
+        // 直前の正常 worktree（oldWorktreePath）は patch.worktree で明示保持してデバッグ・
+        // 手動再開用に残す（patch から worktree を省くと cleanup 後に .worktree が "" へ
+        // クリアされ正常 worktree の追跡を失うため、必ず oldWorktreePath を渡す）。fixCount は
+        // 進展なしのため増やさない。最終 status / note はループ後の共通処理で記録する。
+        routingErrorDetected = true
         log(`PR #${impl.prNumber} の修正エージェントが worktree routing error を報告、即 blocked とする`)
         await updateState(
           item.number,
-          { status: 'blocked', pr: impl.prNumber, note: routingReason },
+          { worktree: oldWorktreePath },
           { cleanupWorktree: newWorktreePath },
         )
         lastState = 'blocked'
@@ -733,7 +736,11 @@ async function runImplement(item) {
     // timeout は次ラウンドで再監視する
   }
   if (!merged) {
-    const reason = `マージに到達できなかった（最終状態: ${lastState}）`
+    // routing error は専用 note を残す（汎用マージ失敗 note で上書きしない）。worktree は
+    // 直前の正常パスを残すため、ここでは cleanupWorktree を指定せず .worktree を触らない。
+    const reason = routingErrorDetected
+      ? 'worktree routing error: fix worktree が別リポに誤配置（修正不能）。実装リポの worktree への再配置が必要'
+      : `マージに到達できなかった（最終状態: ${lastState}）`
     await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason })
     recordFailure({ issue: item.number, pr: impl.prNumber, reason })
     return false
