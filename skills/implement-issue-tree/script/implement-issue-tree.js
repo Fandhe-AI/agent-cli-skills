@@ -13,6 +13,23 @@ export const meta = {
   ],
 }
 
+// ============================================================================
+// FILE MAP（このスクリプトの構成。詳細は各セクション見出しを参照）
+//   1. Bootstrap            — 引数パース・検証（parsedArgs / parent / baseBranch / concurrency / STATE_FILE）
+//   2. 共通ユーティリティ    — sanitize / sanitizeBranch / assertInt / sanitizeWorktreePath
+//   3. 定数・JSON スキーマ   — COMMON / *_SCHEMA（Tree/Impl/Merge/Fix/Close/External/Plan/Review/State）
+//   4. 状態ファイル操作      — stateQueue / enqueueStateWrite / loadState / updateState / initAllPending
+//   5. プロンプト構築        — planPrompt / reviewPrompt / implementPrompt / monitorPrompt / fixPrompt / closePrompt
+//   6. 実行: Restore→Tree→State — 状態読込・ツリー取得・外部チェック判定・依存グラフ/キュー構築・pending 初期化
+//   7. per-issue ドライバ    — recordFailure / runVerifyClose / runImplement / runMergeLoop / runOne（関数宣言。8 のスケジューラから呼ばれる）
+//   8. 実行: スケジューラ     — 依存グラフ補助（isAncestor/findDependencyCycle/depsOf/isValidBranchName/isActiveMonitoring/markBlockedByDeps）・並列実行ループ・後処理レポート
+// ============================================================================
+
+// ============================================================================
+// セクション 1: Bootstrap
+// 引数パース・検証・定数設定。このスクリプトのエントリポイント。
+// ============================================================================
+
 // args は string で渡される場合がある（Workflow args は string 防御）
 const parsedArgs = typeof args === 'string'
   ? (() => { try { return JSON.parse(args) } catch { return args } })()
@@ -34,6 +51,12 @@ if (!Number.isInteger(parent) || parent <= 0) {
 // 状態ファイルのパス（メインリポルート相対）
 // parent は整数検証済みなのでファイル名として安全に使用できる
 const STATE_FILE = `_/issue-trees/${parent}.json`
+
+// ============================================================================
+// セクション 2: 共通ユーティリティ
+// プロンプト注入防止・入力バリデーション用のピュア関数群。
+// 全セクションから参照されるため Bootstrap 直後に配置する。
+// ============================================================================
 
 // GitHub API から取得した文字列をエージェントプロンプトに埋め込む前にサニタイズする
 // バッククォート・バックスラッシュ・改行・ドル記号によるプロンプトインジェクションを軽減する
@@ -74,6 +97,12 @@ function sanitizeWorktreePath(p) {
   if (!/^[a-zA-Z0-9/][a-zA-Z0-9\-_./ ]*$/.test(p)) return ''
   return p
 }
+
+// ============================================================================
+// セクション 3: 定数・JSON スキーマ
+// COMMON は全エージェントプロンプトに挿入する共通指示。
+// *_SCHEMA は各エージェントの返却値を型検証するための JSON Schema 定義。
+// ============================================================================
 
 const COMMON = [
   `リポジトリ: カレントディレクトリが実装対象リポ（base branch: ${baseBranch}）であること。起動直後に \`git remote get-url origin\` を確認し、想定と異なる submodule（例: docs/spec 等）の worktree に誤配置されていないか検証すること。`,
@@ -225,6 +254,12 @@ const STATE_WRITE_SCHEMA = {
     ok: { type: 'boolean' },
   },
 }
+
+// ============================================================================
+// セクション 4: 状態ファイル操作
+// _/issue-trees/<parent>.json への読み書きを担う。並列実行時の競合を防ぐため
+// enqueueStateWrite で書き込みを直列化する。
+// ============================================================================
 
 // --- 状態ファイル書き込みミューテックス ---
 // parallel > 1 で複数の runOne が同時に updateState / initAllPending を呼ぶと
@@ -402,6 +437,12 @@ async function initAllPending(queueItems) {
     log(`⚠️ 状態ファイル一括初期化失敗: エージェントが ok:false を返した`)
   }
 }
+
+// ============================================================================
+// セクション 5: プロンプト構築
+// 各エージェント（Plan/Review/Implement/Monitor/Fix/Close）に渡すプロンプト文字列を
+// 組み立てる純粋関数群。COMMON・サニタイズ済み値・スキーマ参照に依存する。
+// ============================================================================
 
 // per-issue Plan エージェントのプロンプト。
 // isolation なし（メインリポ cwd で読み取りのみ）。計画立案はコード変更を伴わないため
@@ -583,6 +624,12 @@ function closePrompt(item) {
   ].join('\n')
 }
 
+// ============================================================================
+// セクション 6: 実行: Restore → Tree → State
+// ここから実行フロー。上記の関数・定数を順に使い、状態読込・ツリー取得・
+// 外部チェック判定・依存グラフ/キュー構築・pending 初期化を行う。
+// ============================================================================
+
 // --- Restore フェーズ: 状態ファイルを読み込む ---
 phase('Restore')
 const savedItems = await loadState()
@@ -682,6 +729,12 @@ const results = []
 const failures = []
 let consecutiveFailures = 0
 let halted = null
+
+// ============================================================================
+// セクション 7: per-issue ドライバ
+// 1 イシューの実行フローを担う関数宣言。セクション 8 の並列スケジューラから呼ばれる。
+// recordFailure / runVerifyClose / runImplement / runMergeLoop / runOne の順で定義する。
+// ============================================================================
 
 // 失敗を記録する。完了できないイシューがあっても即停止せず次へ進み、
 // 3 イシュー連続で停滞した場合のみ新規着手を止めてユーザーの判断を待つ
@@ -1073,6 +1126,13 @@ async function runOne(item) {
     return { number: item.number, ok: false }
   }
 }
+
+// ============================================================================
+// セクション 8: 実行: スケジューラ
+// ここから実行フロー（続き）。依存グラフ補助関数を定義してから並列実行ループに入る。
+// isAncestor / findDependencyCycle / depsOf / isValidBranchName / isActiveMonitoring /
+// markBlockedByDeps を含み、全イシューを post-order 順に並列投入して後処理レポートを返す。
+// ============================================================================
 
 // --- 並列スケジューラ ---
 // 待機が必要なのは「機能的依存」のみ:
