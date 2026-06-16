@@ -67,6 +67,8 @@ skills/                               -- スキル本体（各ディレクトリ
     description-style.md              -- description 著作スタイル
     reference-template.md             -- reference 型スキルの書式規約
     code-comment-style.md             -- コード内コメント・ドキュメンテーションコメント規約
+    verification.md                   -- 完了ゲート規約（証拠なき完了宣言の禁止・5段階検証）
+    debugging.md                      -- 根本原因デバッグ規約（修正前の原因調査・3回失敗でエスカレーション）
   skills/                             -- skills/ へのシンボリックリンク（一部実ディレクトリ）
     create-skill/                     -- リポジトリ管理スキル（実ディレクトリ）
     create-agent/                     -- リポジトリ管理スキル（実ディレクトリ）
@@ -149,6 +151,8 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `dotclaude-via-temp.md` | agent-author / rules-author | `.claude/` 操作時の一時ディレクトリルール |
 | `description-style.md` | skill-author / agent-author / skill-reviewer / reference-researcher | description 著作スタイル（発火率・長さ・YAML 落とし穴） |
 | `reference-template.md` | reference-researcher / skill-author | reference 型スキルの reference/*.md と README 索引の書式規約 |
+| `verification.md` | implement-issue / implement-issue-tree / implement-review / implement-review-pr / create-pr | 完了ゲート（証拠なき完了宣言の禁止・5段階検証） |
+| `debugging.md` | implement-issue / implement-issue-tree / sub-investigator | 根本原因デバッグ（修正前の原因調査・3回失敗でエスカレーション） |
 
 ## Current Skills (24)
 
