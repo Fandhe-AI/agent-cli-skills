@@ -884,6 +884,21 @@ async function runImplement(item) {
         recordFailure({ issue: item.number, pr: impl.prNumber, reason: fixFailReason })
         return false
       }
+      if (fReview.routingError) {
+        // worktree 誤配置（別リポ）は修正不能。Merge ループの routingError 処理と同様に
+        // 即停止する。誤配置で新規作成された worktree（newWorktreePathReview）のみ掃除し、
+        // 直前の正常 worktree（oldWorktreePathReview）は保持してデバッグ・手動再開に残す。
+        // fixCount は進展なしのため増やさない。
+        const reason = 'worktree routing error: Review fix worktree が別リポに誤配置（修正不能）。実装リポの worktree への再配置が必要'
+        log(`PR #${impl.prNumber} の Review 修正エージェントが worktree routing error を報告、即停止する`)
+        await updateState(
+          item.number,
+          { status: 'failed', pr: impl.prNumber, fixCount, note: reason, worktree: oldWorktreePathReview },
+          { cleanupWorktree: newWorktreePathReview },
+        )
+        recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+        return false
+      }
       fixCount++
       currentWorktreePath = newWorktreePathReview
       if (!currentWorktreePath) {
@@ -892,9 +907,11 @@ async function runImplement(item) {
       await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePathReview })
     }
     if (!reviewPassed) {
-      // 3 回 Review しても収束しなかった
+      // 3 回 Review しても収束しなかった。SKILL.md Step 4 の仕様に従い blocked として
+      // 記録する（blocked / failed はいずれも次回最初から再実行されるが、blocked を
+      // キーに運用・自動化する側が意図した状態を観測できるようにする）。
       const reason = `Review フェーズが 3 回で収束しなかった（最終指摘: ${sanitize(lastReviewSummary)}）`
-      await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason })
+      await updateState(item.number, { status: 'blocked', pr: impl.prNumber, fixCount, note: reason })
       recordFailure({ issue: item.number, pr: impl.prNumber, reason })
       return false
     }
@@ -902,18 +919,25 @@ async function runImplement(item) {
     // Review 通過後: monitoring に遷移して monitor ループへ
     await updateState(item.number, { status: 'monitoring' })
     // fixCount を runImplement スコープ全体で共有するため、以降の Merge ループもこの変数を使う
-    // （let 宣言は if ブロック内だが後続の Merge ループが同スコープで参照できるよう変数を返す）
-    return await runMergeLoop(item, impl, fixCount)
+    // （let 宣言は if ブロック内だが後続の Merge ループが同スコープで参照できるよう変数を返す）。
+    // Review fix で worktree が差し替わっている場合があるため、impl.worktreePath（最初の
+    // Implement worktree。Review fix 後は削除済みのことが多い）ではなく Review ループで
+    // 追跡した最新の currentWorktreePath を Merge ループへ引き継ぐ（孤児 worktree 防止）。
+    return await runMergeLoop(item, impl, fixCount, currentWorktreePath)
   }
 
-  // monitoring 再開パス: Review はスキップして monitor ループから再開する
-  return await runMergeLoop(item, impl, savedFixCount)
+  // monitoring 再開パス: Review はスキップして monitor ループから再開する。
+  // impl.worktreePath は状態ファイルの saved.worktree から復元済みのため最新を指す。
+  return await runMergeLoop(item, impl, savedFixCount, impl.worktreePath)
 }
 
 // Merge ループを独立関数に分離する。
 // runImplement の「新規 impl パス」と「monitoring 再開パス」の両方から呼ばれる。
 // fixCount: Review ループで既に消費した修正回数（上限 6 を一元管理するため引き継ぐ）。
-async function runMergeLoop(item, impl, initialFixCount) {
+// initialWorktreePath: Merge ループ開始時点で追跡すべき worktree パス。新規 impl パスでは
+// Review ループ後の最新 worktree、monitoring 再開パスでは状態ファイル由来の worktree を渡す。
+// impl.worktreePath をそのまま使うと Review fix で差し替わった後に stale になるため引数で受ける。
+async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -921,9 +945,9 @@ async function runMergeLoop(item, impl, initialFixCount) {
   // fix 中に worktree 誤配置（別リポ）を検出したか。ループ後の最終 updateState で
   // 汎用マージ失敗 note ではなく routing 専用 note を記録するために使う。
   let routingErrorDetected = false
-  // 現在追跡中の worktree パス。impl または最後の fix の worktreePath を常に最新に保つ。
-  // 再開時は状態ファイルから引き継ぐ。merged 時・fix 時の削除対象として使用する
-  let currentWorktreePath = impl.worktreePath ?? ''
+  // 現在追跡中の worktree パス。Merge ループ開始時点の最新値を呼び出し元から受け取り、
+  // 以降は最後の fix の worktreePath を常に最新に保つ。merged 時・fix 時の削除対象として使用する
+  let currentWorktreePath = initialWorktreePath ?? impl.worktreePath ?? ''
   // 監視は timeout 再試行を含め 7 回まで。fix は最大 6 回で、push 後は必ず 1 回以上の
   // 再監視を確保する（push した fix が再監視されないままループ終了しないように）
   let monitorsLeft = 7
