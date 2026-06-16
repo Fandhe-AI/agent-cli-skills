@@ -113,8 +113,13 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 **ここでは push も PR 作成も行わない**。CI リソース節約のため、Review 通過後にまとめて 1 回だけ push・PR 作成する設計になっている。
 
 各イシューの処理内容（Step 2 で立案した計画に従って実装する）:
+0. **worktree routing ガード**（最初に実行）: `git remote get-url origin` とイシュータイトル照合でカレント worktree が正しいリポ・イシューに配置されているか確認する
+0b. **既存 PR・リモートブランチを確認する**（中断再開・重複 PR 防止）:
+   - 0b-a（open PR 検索）: `gh pr list --state open` でイシュー番号に対応する open PR が既に存在するか確認する。見つかれば新規 PR を作らずそのブランチを取得して続きから作業し、既存 PR 番号を返す
+   - 0b-b（リモートブランチ再利用）: open PR が見つからない場合、`git ls-remote --heads origin` でイシュー番号を含むリモートブランチ（命名規約: `<type>/<N>-<short-name>`）が残っていないか確認する。「push 成功・PR 作成失敗」で残ったブランチを検出し、`git fetch origin <branch> && git checkout -B <branch> origin/<branch>` で取得して push 済みコミットを保持したまま続きを実装する（`origin/<base>` から新規作成し直さない）。branch 名として返し、prNumber は 0 のまま（PR は後続の PR Create フェーズが作成）
+   - 0b-c: open PR もリモートブランチも存在しない場合のみ手順 1・2 で新規ブランチを作成する
 1. 隔離 worktree で `git status` が clean か確認し、差分があれば作業せず失敗を返す
-2. 指定ブランチ（デフォルト: `main`）から作業ブランチを作成する（並列時のブランチ名衝突を防ぐためブランチ名にイシュー番号を含める）
+2. （0b-b でリモートブランチを再利用した場合はスキップ）指定ブランチ（デフォルト: `main`）から作業ブランチを作成する（並列時のブランチ名衝突を防ぐためブランチ名にイシュー番号を含める）
 3. **渡された計画に従って実装する**（計画立案は Plan フェーズで完了済み）。実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い役割単位で委譲する
 
    コメント方針（実装時）:
@@ -185,7 +190,7 @@ EOF
 )"
 ```
 
-PR 作成が失敗した場合は `failed` として記録する。次回再実行時に impl 手順 0b（既存 PR 検索）が open PR を発見して回復できる。
+PR 作成が失敗した場合は `failed` として記録し、`branch` を保存する。push が成功していた場合、次回再実行時に impl 手順 0b-b（リモートブランチ再利用）がそのブランチを検出して push 済みコミットを保持したまま回復する（open PR がない状態のため 0b-a の PR 検索では拾えない点に注意）。
 
 ### Step 5: CI / 外部チェック監視・レビューコメント解決確認・squash merge する（Merge）
 
@@ -344,7 +349,7 @@ cat _/issue-trees/42.json
 | `pending` | 未着手 | 最初から実行 |
 | `planning` | 計画立案中（中断） | 最初から実行（Plan→Implement から再実行）。PR 未作成のため重複 PR は発生しない |
 | `implementing` | 実装中（中断） | 最初から実行（Plan→Implement から再実行）。PR 未作成のため重複 PR は発生しない |
-| `reviewing` | レビュー中（中断） | 最初から実行（Plan→Implement から再実行）。push 前 review フローのため PR 未作成。次回 impl 手順 0b で push 済みブランチがあれば既存 PR を再利用する |
+| `reviewing` | レビュー中（中断） | 最初から実行（Plan→Implement から再実行）。push 前 review フローのため PR 未作成。次回 impl 手順 0b-a で open PR を検索し、0b-b でリモートブランチ（push 成功・PR 作成失敗ケース）を検出して回復する |
 | `monitoring` | 監視中（中断） | **impl をスキップし monitor ループから再開**（PR 番号・ブランチ・fixCount を引き継ぐ） |
 | `merged` | マージ済み | スキップ（完了扱い） |
 | `closed` | クローズ済み | スキップ（完了扱い） |
@@ -354,7 +359,7 @@ cat _/issue-trees/42.json
 
 `monitoring` 中断からの再開では、保存された `pr`（PR 番号）・`branch`・`fixCount`（修正済み回数）を引き継いで monitor ループから再開する。`fixCount` の上限（6 回）は引き継いだ値に基づいて判定される。
 
-`planning` / `reviewing` からの再開は通常の Plan→Implement から再実行する。push 前 review フローのため PR 未作成の状態で中断している。impl 手順 0b が既存 open PR を検索し、あれば再利用する（push 後の中断なら PR が存在する可能性がある）。
+`planning` / `reviewing` からの再開は通常の Plan→Implement から再実行する。push 前 review フローのため PR 未作成の状態で中断している。impl 手順 0b-a が既存 open PR を検索し、あれば再利用する。`reviewing` から再実行する場合で「push 成功・PR 作成失敗」のケース（状態 `failed`・`branch` 保存済み）では、impl 手順 0b-b がリモートブランチを検出して push 済みコミットを保持したまま回復する（0b-a で open PR が見つからない場合でも 0b-b が拾う）。
 
 状態ファイルの `worktree` フィールドには実装エージェントが動作した worktree の絶対パスが記録される。中断後に残骸 worktree を特定・掃除する際に利用できる。
 
@@ -375,9 +380,13 @@ git worktree remove <worktree-path>
 git worktree prune
 ```
 
-### 実装エージェントによる既存 PR の再利用
+### 実装エージェントによる既存 PR・リモートブランチの再利用
 
-実装エージェントは着手時にまず `gh pr list --state open` でイシュー番号に対応する open PR が既に存在しないかを確認する。既存 PR が見つかった場合は新規 PR を作らず、そのブランチを取得して続きから作業し、既存 PR 番号をそのまま返す。これにより中断再開時や monitoring フォールバック時に重複 PR が作成されない。
+実装エージェントは着手時に以下の順で回復手順（手順 0b）を実行する。
+
+**0b-a（open PR 検索）**: `gh pr list --state open` でイシュー番号に対応する open PR が既に存在しないかを確認する。既存 PR が見つかった場合は新規 PR を作らず、そのブランチを取得して続きから作業し、既存 PR 番号をそのまま返す。これにより中断再開時や monitoring フォールバック時に重複 PR が作成されない。
+
+**0b-b（リモートブランチ再利用）**: open PR が見つからない場合、`git ls-remote --heads origin` でイシュー番号を含むリモートブランチ（命名規約 `<type>/<N>-<short-name>`）が残っていないか確認する。「push 成功・PR 作成失敗」で残ったブランチを検出し、`git fetch origin <branch> && git checkout -B <branch> origin/<branch>` でそのブランチを取得して push 済みコミットを保持したまま続きを実装する。`origin/<base>` から新規作成し直さないため、push 済みコミットが孤児化しない。このブランチ名を branch として返し、prNumber は 0 のまま（PR は後続の PR Create フェーズが作成する）。
 
 ### 状態ファイルが壊れている場合
 

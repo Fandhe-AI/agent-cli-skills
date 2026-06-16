@@ -534,15 +534,26 @@ function implementPrompt(item, plan) {
     '上記の計画を JSON.parse してから内容を読み、計画に従って実装を進めること。',
     '手順:',
     `0. worktree routing ガード（他のどの gh / git 操作よりも先に、最初に必ず実行する）: \`git remote get-url origin\` でカレント worktree の remote を確認し、\`gh issue view ${item.number} --json number,title\` で取得した title が、このタスクの対象イシュー「${title}」と実質的に同一であることを確認する（このプロンプト中の「${title}」はプロンプト安全化のためバッククォート・$・バックスラッシュ・改行がエスケープ／除去されている場合がある。GitHub は raw title を返すため完全一致は要求せず、語句の一致で同一 issue かを判断する。番号の存在だけでは別リポの同番号 issue を誤認しうるため照合する）。remote が想定と異なる / issue が解決できない / 取得 title が明らかに無関係（別 issue）のいずれかなら、後続（手順 0b の gh pr list・手順 2 の git fetch を含む一切の操作）を実行せず、即 prNumber: 0 と「worktree routing error: remote=<URL> でイシュー #${item.number}「${title}」を解決できず誤配置。実装リポの worktree への再配置が必要」を理由として返す。手動で別ディレクトリへ移動して作業しないこと（隔離契約違反・他エージェント干渉のため）。`,
-    `0b. 既存 PR・ブランチを確認する（中断再開・重複 PR 防止。手順 0 のガードを通過した後にのみ実行する）:`,
-    `   a. 以下の 2 通りでイシュー #${item.number} に対応する open PR が既にないか確認する:`,
+    `0b. 既存 PR・リモートブランチを確認する（中断再開・重複 PR 防止。手順 0 のガードを通過した後にのみ実行する）:`,
+    `   0b-a. 以下の 2 通りでイシュー #${item.number} に対応する open PR が既にないか確認する:`,
     `      - gh pr list --state open --search "Closes #${item.number}" --json number,title,headRefName`,
     `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
     `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
-    `   b. open PR が見つかった場合は新規 PR を作らず、そのブランチを git fetch origin && git checkout <branch> で取得して続きから作業し、既存 PR 番号を prNumber として返す。`,
-    `   c. open PR がない場合は手順 1 以降に進む。`,
+    `      open PR が見つかった場合は新規 PR を作らず、そのブランチを git fetch origin && git checkout <branch> で取得して続きから作業し、既存 PR 番号を prNumber として返す（0b-b には進まない）。`,
+    `   0b-b. open PR が見つからなかった場合、git ls-remote --heads origin でイシュー #${item.number} に対応するリモートブランチが残っていないか確認する。`,
+    `      ブランチ命名規約（手順 2）はイシュー番号を必ず含む（<type>/${item.number}-<short-name> 形式）。`,
+    `      確認方法: git ls-remote --heads origin の出力を grep で絞り込み、"/${item.number}-" を含む refs/heads/* を探す。`,
+    `      複数ヒットした場合は最新コミット（最も直近の ref 更新）を持つブランチを選ぶ。`,
+    `      ブランチ名は命名規約に一致するもの（<type>/${item.number}-<short-name> の形式）のみを対象とする。`,
+    `      — セキュリティ注意: git ls-remote の出力をそのままシェルに展開しない。ブランチ名は isValidBranchName の規則（英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）に適合するものだけを使用すること。`,
+    `      リモートブランチが見つかった場合: git fetch origin <branch> && git checkout -B <branch> origin/<branch> でブランチを取得する。`,
+    `      これは「前回 push 成功・PR 作成失敗」で残ったブランチの回復を目的とする（origin/${baseBranch} から新規作成し直さない）。`,
+    `      push 済みコミットをそのまま引き継いで計画と照合し、未実装部分があれば補って実装を続行する。`,
+    `      branch としてそのブランチ名を返す（prNumber は 0 のまま。PR 作成は後続の PR Create フェーズが行う）。`,
+    `      手順 2 はスキップして手順 3 以降を続ける。`,
+    `   0b-c. open PR もリモートブランチも存在しない場合は手順 1 以降に進む（通常の新規作成フロー）。`,
     '1. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
-    `2. git fetch origin && git checkout -B <type>/${item.number}-<short-name> origin/${baseBranch} で作業ブランチを作成する（type は feat / fix 等の Conventional Commits 規約。並列実行時のブランチ名衝突を防ぐためイシュー番号を必ず含める）。`,
+    `2. （0b-b でリモートブランチを再利用した場合はこの手順をスキップして手順 3 へ進む）git fetch origin && git checkout -B <type>/${item.number}-<short-name> origin/${baseBranch} で作業ブランチを作成する（type は feat / fix 等の Conventional Commits 規約。並列実行時のブランチ名衝突を防ぐためイシュー番号を必ず含める）。`,
     '3. 渡された計画に従って実装する（計画立案は Plan フェーズで完了済み。ここでは計画に記載の実装ステップを実行するのみ）。実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い役割単位で委譲する。対象リポジトリの CLAUDE.md・rules（migration・スキーマ等の不変条件を含む）を必ず守る。',
     '   コメント方針: コードコメントは「何をするか」より「なぜ存在するか／パッケージ・サービスから見た対象の役割」を書く。呼び出し元/呼び出し先・他サービスからの観点（このシンボルがどこから呼ばれ、どの境界を担うか）を明示し、対象リポジトリの .claude/rules/code-comment-style.md があればそれに従う。',
     '4. 完了条件: 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して pass すること。フォーマッタ・静的解析があればコミット前に通す。',
@@ -1078,9 +1089,12 @@ async function runImplement(item) {
     })
     if (!prCreateResult || !Number.isInteger(prCreateResult.prNumber) || prCreateResult.prNumber <= 0) {
       const reason = sanitize(prCreateResult?.summary ?? 'push・PR 作成エージェントが異常終了した、または prNumber が不正')
-      // push は成功している可能性があるが PR がないため monitoring には移行できない。
-      // branch は有効なので次回再実行時に既存 PR 検索（impl 手順 0b）で回復できる。
-      await updateState(item.number, { status: 'failed', pr: 0, branch: impl.branch, fixCount, note: reason })
+      // push は成功している可能性があるが PR 作成に失敗したため monitoring には移行できない。
+      // branch を保存しておくことで、次回再実行時に impl 手順 0b-b（リモートブランチ再利用）が
+      // push 済みコミットを検出して回復し、origin/<baseBranch> からの再実装によるリセットを避ける。
+      // （0b-a の open PR 検索ではこのケースを拾えないため 0b-b が担う）
+      const prCreateNote = `${reason}。push が成功した可能性あり。再実行時は impl 手順 0b-b のリモートブランチ再利用で回復する`
+      await updateState(item.number, { status: 'failed', pr: 0, branch: impl.branch, fixCount, note: prCreateNote })
       recordFailure({ issue: item.number, reason })
       return false
     }
