@@ -73,13 +73,35 @@ gh api \
 
 作成した親 Issue と子 Issue の URL を一覧表示する。
 
+## 検証
+
+Issue 作成後、以下で確認する。
+
+```bash
+# 親 Issue の内容と sub-issues の紐付けを確認
+gh issue view <親Issue番号>
+
+# sub-issues が正しく紐付いているか確認
+gh api "repos/{owner}/{repo}/issues/<親Issue番号>/sub_issues" --jq '.[].number'
+```
+
+- 親 Issue に全子 Issue が列挙されていること
+- 各 Issue のタイトルが Conventional Commits 形式になっていること
+
+## よくある失敗
+
+| 問題 | 回避策 |
+|------|--------|
+| `sub_issue_id` に issue 番号を渡す | `gh api .../issues/<number>` の `.id`（database id）を取得して渡す |
+| 子 Issue が独立して完了できない粒度になっている | 受け入れ条件を見直し、単一の関心事に絞って再分解する |
+| 認証エラーで `gh api` が失敗する | `gh auth status` で認証状態を確認し、`gh auth login` で再認証する |
+
 ## 注意事項
 
 - Issue タイトルは Conventional Commits 形式を推奨
 - 子 Issue は独立して完了できる粒度にする
 - ラベル・マイルストーンが必要な場合はユーザーに確認する
-- **sandbox 環境での `GIT_SSL_NO_VERIFY=1` 併用**：詳細は後述の「sandbox 環境での実行」節を参照
 
 ## sandbox 環境での実行
 
-sandbox で本スキルを実行する場合、ネットワーク越しの GitHub 操作には `GIT_SSL_NO_VERIFY=1` の併用を検討してください。本スキルの主なリモート操作は `gh issue create` / `gh api` で、「リモート書き込み」判定は **要（本スキルは主に API 経由）** です。コマンド分類の詳細と TLS 検証無効化の注意事項は [`docs/sandbox-tls.md`](../../docs/sandbox-tls.md) を参照してください。
+このスキルは sandbox 環境では実行できない。ネットワークアクセス・ファイルシステムへの書き込みが必要なため、通常の Claude Code セッションで実行すること。
