@@ -886,7 +886,10 @@ function recordFailure(failure) {
   if (consecutiveFailures >= 3 && !halted) {
     halted = {
       reason: '3 イシュー連続で完了できなかったため新規着手を停止する。ユーザーの判断を待つこと',
-      issues: failures.slice(-3).map((f) => f.issue),
+      // halt は非 blocked（'failed'）の連続でのみ発火する。blocked は連続カウントに数えないため、
+      // 停滞イシューの報告も blocked を除外した直近 3 件の 'failed' から取る（さもないと halt の
+      // 真因でない blocked を「直近の停滞イシュー」として誤表示する。Bugbot PR #40 指摘）。
+      issues: failures.filter((f) => f.status !== 'blocked').slice(-3).map((f) => f.issue),
     }
   }
 }
@@ -1047,16 +1050,19 @@ async function runImplement(item) {
       lastReviewSummary = r?.summary ?? 'review エージェントが異常終了した'
       log(`#${item.number}: Review 指摘あり（残り ${reviewsLeft} 回）: ${sanitize(lastReviewSummary)}`)
       // 残レビュー回数が 0（最終反復）なら fix しても再レビューできない。
-      // ここで Low のみの指摘（highestSeverity が low / none）は通過扱いにし、
+      // ここで Low のみの指摘（highestSeverity === 'low'）は通過扱いにし、
       // その Low 指摘は PR 作成後にコメントとして追加する（マージ後 follow-up 候補）。
       // Medium 以上が残る場合は従来どおり fix を行わず収束失敗（blocked）として抜ける。
       if (reviewsLeft === 0) {
-        // highestSeverity 不明（r が無効等）は安全側で medium 相当とみなしブロックする。
+        // この分岐は state === 'needs-fix'（指摘あり）でのみ到達する。指摘がある以上
+        // highestSeverity は最低でも low のはず。'none' は state === 'ok'（指摘なし）専用の値であり、
+        // needs-fix + none は矛盾した出力なので未解決指摘として安全側でブロックする（low のみ通過。
+        // Bugbot PR #40 指摘）。highestSeverity 不明（r が無効等）も安全側で medium 相当とみなす。
         const finalSeverity = r?.highestSeverity ?? 'medium'
-        if (finalSeverity === 'low' || finalSeverity === 'none') {
+        if (finalSeverity === 'low') {
           reviewPassed = true
           deferredLowFindings = lastReviewSummary
-          log(`#${item.number}: 最終 Review は Low のみ（${finalSeverity}）— 通過させ、Low 指摘は PR コメントへ追加する`)
+          log(`#${item.number}: 最終 Review は Low のみ — 通過させ、Low 指摘は PR コメントへ追加する`)
         }
         break
       }
