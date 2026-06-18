@@ -396,16 +396,16 @@ async function updateState(issueNumber, patch, options = {}) {
         ? (patch.worktree ?? '')
         : ''
   const sanitizedCleanupPath = sanitizeWorktreePath(rawCleanupPath)
-  // メインリポ自身（process.cwd()）または cwd 配下への誤削除をコード側でもガードする。
+  // メインリポ自身（process.cwd()）の誤削除をコード側でもガードする。
   // プロンプト指示（「先頭エントリのメインリポは削除しない」）と二重防御にする。
-  // sanitizeWorktreePath を通過した後でも、cwd と完全一致するパス・cwd をプレフィックスとして
-  // 含むパス（cwd + '/'）は削除対象から除外する。
+  // ガード対象は cwd と完全一致するパスのみ。cwd 配下の worktree（例: .worktrees/...）は
+  // 正当な掃除対象であるためプレフィックス一致（cwd + '/'）では除外しない。
+  // プレフィックス判定を残すと、Recover が掃除すべき残骸 worktree がスキップされ
+  // checkout -B 衝突が再発するリグレッションを引き起こす（PR #41 修正 #4）。
   const cwd = process.cwd()
-  const isMainRepo =
-    sanitizedCleanupPath !== '' &&
-    (sanitizedCleanupPath === cwd || sanitizedCleanupPath.startsWith(cwd + '/'))
+  const isMainRepo = sanitizedCleanupPath !== '' && sanitizedCleanupPath === cwd
   if (isMainRepo) {
-    log(`⚠️ updateState: cleanupWorktree "${sanitizedCleanupPath}" がメインリポ（${cwd}）またはその配下のため削除をスキップする`)
+    log(`⚠️ updateState: cleanupWorktree "${sanitizedCleanupPath}" がメインリポ（${cwd}）と完全一致するため削除をスキップする`)
   }
   const cleanupWorktreePath = isMainRepo ? '' : sanitizedCleanupPath
   // worktreePath は JSON.stringify 経由でエスケープしてプロンプトに埋め込む（インジェクション対策）
@@ -873,8 +873,54 @@ function recoverPrompt(item, branch, oldWorktree) {
   const title = sanitize(item.title)
   const branchJson = JSON.stringify(branch)
   const oldWorktreeJson = JSON.stringify(oldWorktree)
+
+  // 手順 1（WIP 退避）・手順 2b（diff 読み取り）は、残骸の種類（worktree あり / branch のみ）で
+  // 条件分岐する。oldWorktree が空のとき git -C "" がメインリポ cwd を対象にしてしまい、
+  // メインリポの未 commit 変更を誤ったブランチへ commit するリスクがある（PR #41 修正 #3）。
+
+  // 手順 1: WIP 退避（oldWorktree が非空のときのみ。空のときはスキップ指示）
+  const step1Lines = oldWorktree
+    ? [
+        `1. 未 commit 変更の退避（WIP commit）:`,
+        `   a. git -C ${oldWorktreeJson} status --porcelain で未 commit 変更の有無を確認する。`,
+        `   b. 変更がある場合: 以下のコマンドで WIP commit として branch に退避する（--no-verify は絶対に使わない）。`,
+        `      git -C ${oldWorktreeJson} add -A`,
+        `      git -C ${oldWorktreeJson} commit -m "$(cat <<'WIPEOF'`,
+        `wip(recover): 中断時の未コミット変更を退避`,
+        `WIPEOF`,
+        `)"`,
+        `      退避成功後: wipCommitted: true を返却に含める。`,
+        `      pre-commit フックが失敗して commit できない場合: --no-verify で強行せずに WIP 退避をスキップする。`,
+        `      wipCommitted: false を返し、summary（または reason）に「フック失敗により未コミット変更を退避できなかった。ユーザーは旧 worktree の未コミット変更を手動で確認すること」と記録して続行する。`,
+        `   c. 変更がない場合: 何もしない。wipCommitted: false。`,
+      ]
+    : [
+        // oldWorktree が空 = branch のみの残骸。git -C "" はメインリポ cwd を対象にするため、
+        // WIP 退避手順を一切出力しない。wipCommitted: false で続行する。
+        `1. 旧 worktree が記録されていない（branch のみの残骸）。`,
+        `   退避対象の作業ディレクトリが無いため WIP 退避はスキップする。wipCommitted: false。`,
+        `   git -C を使ったコマンドは一切実行しないこと。`,
+      ]
+
+  // 手順 2b: diff 読み取り（branch が非空のときのみ）
+  // branch が空のとき git diff の対象が不定になるため、読み取りをスキップして discard を促す。
+  const step2bLines = branch
+    ? [
+        `2. 既存作業の読み取り:`,
+        `   a. git fetch origin ${baseBranch} で origin/${baseBranch} を最新化する。`,
+        `   b. git diff origin/${baseBranch}...${branchJson} で branch の既存コミットと origin/${baseBranch} の差分を読む。`,
+        `      （--quiet で差分が空か確認してから diff を取得する。差分がない場合は空 branch と判断）`,
+        `   c. gh issue view ${item.number} でイシュー本文・受入基準を読む。`,
+      ]
+    : [
+        // branch 名が無い場合は既存コミットを参照できないため継続不可。
+        // discard を返すよう明示的に指示し、continue の誤判定を防ぐ。
+        `2. branch ref が記録されていないため既存コミットを読めない。`,
+        `   継続不可のため次の手順 3 では discard を選ぶこと。`,
+      ]
+
   return [
-    `イシュー #${item.number}「${title}」の中断作業（branch: ${branch}）の回復担当エージェント。`,
+    `イシュー #${item.number}「${title}」の中断作業（branch: ${branch || '(不明)'}）の回復担当エージェント。`,
     COMMON,
     `本エージェントは中断 worktree に残った作業を継続するか破棄するかを判断する。`,
     ``,
@@ -885,27 +931,13 @@ function recoverPrompt(item, branch, oldWorktree) {
     `discard は「空 / 方向違い / 継続より作り直しが妥当」な場合のみ選ぶ。`,
     ``,
     `手順:`,
-    `1. 未 commit 変更の退避（WIP commit）:`,
-    `   a. git -C ${oldWorktreeJson} status --porcelain で未 commit 変更の有無を確認する。`,
-    `   b. 変更がある場合: 以下のコマンドで WIP commit として branch に退避する（--no-verify は絶対に使わない）。`,
-    `      git -C ${oldWorktreeJson} add -A`,
-    `      git -C ${oldWorktreeJson} commit -m "$(cat <<'WIPEOF'`,
-    `wip(recover): 中断時の未コミット変更を退避`,
-    `WIPEOF`,
-    `)"`,
-    `      退避成功後: wipCommitted: true を返却に含める。`,
-    `      pre-commit フックが失敗して commit できない場合: --no-verify で強行せずに WIP 退避をスキップする。`,
-    `      wipCommitted: false を返し、summary（または reason）に「フック失敗により未コミット変更を退避できなかった。ユーザーは旧 worktree の未コミット変更を手動で確認すること」と記録して続行する。`,
-    `   c. 変更がない場合: 何もしない。wipCommitted: false。`,
-    `2. 既存作業の読み取り:`,
-    `   a. git fetch origin ${baseBranch} で origin/${baseBranch} を最新化する。`,
-    `   b. git diff origin/${baseBranch}...${branchJson} で branch の既存コミットと origin/${baseBranch} の差分を読む。`,
-    `      （--quiet で差分が空か確認してから diff を取得する。差分がない場合は空 branch と判断）`,
-    `   c. gh issue view ${item.number} でイシュー本文・受入基準を読む。`,
+    ...step1Lines,
+    ...step2bLines,
     `3. 継続可否の判断:`,
     `   - continue（継続）: 既存作業がイシュー要件と方向的に合っており継続可能な場合。`,
     `     未完成・一部壊れていても構わない（Implement が完成させる）。`,
     `   - discard（破棄）: 差分が完全に空 / 方向が全く違う / 継続より作り直しが明らかに速い場合。`,
+    `     branch ref が無い場合も discard を選ぶこと。`,
     `4. 回復ブリーフの作成（continue の場合のみ）:`,
     `   done: 実装済み内容の要約（何が完成しているか）`,
     `   remaining: 残タスクの要約（何を完成させる必要があるか）`,
@@ -1221,7 +1253,16 @@ async function runImplement(item) {
         },
       )
 
-      if (recoverResult?.decision === 'continue') {
+      // Recover 結果を3分岐で処理する。
+      // - continue かつ有効 branch: 継続経路（旧 worktree のみ掃除して Implement へ）
+      // - discard: 破棄経路（旧 worktree + branch を掃除して通常 Plan へ）
+      // - それ以外（null / 異常 / 不正 decision / branch 無し continue）:
+      //   一過性のエージェントエラーや曖昧な結果で作業を破棄しないよう、
+      //   残骸（worktree/branch）を保全したまま failed にする。
+      //   状態に hasRemnant フラグが残るため次回再実行で Recover が再試行される。
+      //   明示的 discard 以外では worktree/branch を絶対に削除しない（PR #41 修正 #1・#2）。
+      const recoverDecision = recoverResult?.decision
+      if (recoverDecision === 'continue' && sanitizedRecoverBranch) {
         // --- continue 経路: 旧 worktree のみ掃除し、branch を保持して Implement を継続 ---
         // WIP commit は Recover エージェントが branch に退避済みのため、物理 worktree を
         // 削除しても作業データは失われない。Plan をスキップして recoverImplementPrompt で
@@ -1272,7 +1313,7 @@ async function runImplement(item) {
           worktree: impl.worktreePath,
           fixCount: 0,
         })
-      } else {
+      } else if (recoverDecision === 'discard') {
         // --- discard 経路: 旧 worktree と branch を掃除し、通常 Plan へフォールスルー ---
         // WIP commit を Recover エージェントが先に積んでから branch を削除するため、
         // 誤判定時は reflog から復元できる（最後の保険）。
@@ -1303,6 +1344,22 @@ async function runImplement(item) {
         // planning 状態に戻してクリアする（branch: '' で状態を初期化）
         await updateState(item.number, { status: 'planning', branch: '', worktree: '' })
         // discard 後は通常 Plan へフォールスルーするため impl は未設定のまま続行
+      } else {
+        // --- 保全経路: エージェント異常 / 不正 decision / branch 無し continue ---
+        // 一過性のエージェントエラーや曖昧な結果で作業を破棄しないよう、
+        // 残骸（worktree/branch）は削除せず保全したまま failed にする。
+        // 状態に残骸情報が残るため、次回再実行時に Recover が再試行されて回復できる。
+        // 明示的な 'discard' 返却のみを worktree/branch 削除の条件とすることで、
+        // 誤動作による作業消失リスクを最小化する（PR #41 修正 #1・#2）。
+        const reason = sanitize(
+          recoverDecision === 'continue'
+            ? '回復継続には有効な branch が必要だが状態に記録がない。worktree/branch を保全して failed にする'
+            : (recoverResult?.reason ?? 'Recover エージェントが異常終了または不正な decision を返した。worktree/branch を保全して failed にする'),
+        )
+        log(`#${item.number}: Recover → 保全（decision: ${sanitize(recoverDecision ?? '(null)')}, reason: ${reason}）`)
+        await updateState(item.number, { status: 'failed', note: reason })
+        recordFailure({ issue: item.number, reason })
+        return false
       }
     }
 
