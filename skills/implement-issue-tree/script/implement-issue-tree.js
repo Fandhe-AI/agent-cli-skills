@@ -259,6 +259,9 @@ const REVIEW_SCHEMA = {
 // discard は「空 / 方向違い / 継続より作り直しが妥当」な場合のみ選ぶ。
 // wipCommitted: WIP 退避を行ったか（branch に commit が積まれているか）。
 // brief は continue 時のみ必須。reason は discard 時のみ必須。
+// branch: 継続・退避・削除の対象として確定した実ブランチ名。
+//   state に branch が記録されていなく worktree から解決した場合を含む。
+//   解決できない場合は空文字。driver 側で isValidBranchName + sanitizeBranch を通して使用する。
 const RECOVER_SCHEMA = {
   type: 'object',
   required: ['decision'],
@@ -267,6 +270,11 @@ const RECOVER_SCHEMA = {
       type: 'string',
       enum: ['continue', 'discard'],
       description: 'continue: 既存作業を継続する / discard: 作り直す',
+    },
+    branch: {
+      type: 'string',
+      description:
+        '継続・退避・削除の対象として確定した実ブランチ名。state に branch が無く worktree HEAD から解決した場合を含む。解決できない場合は空文字。',
     },
     brief: {
       type: 'object',
@@ -869,21 +877,61 @@ function closePrompt(item) {
 // 同様に非隔離で操作する（worktree 隔離では git -C <oldwt> が別 worktree を指し、
 // グローバル branch ref 操作や git diff origin/<base>...<branch> ができない）。
 // item / branch / oldWorktree は sanitize / sanitizeBranch / sanitizeWorktreePath 検証済みを渡すこと。
+//
+// branch が空かつ oldWorktree が非空の場合（state に branch 記録なし・worktree あり）:
+//   エージェントが worktree HEAD からブランチ名を解決する「ブランチ解決ステップ」を先頭に追加する。
+//   解決できなければ decision を返さず（または "unresolved"）保全のため driver が failed にする。
+//   これにより、後続 Plan→Implement の git checkout -B が同一ブランチを origin/base から
+//   サイレントリセットし WIP commit が消えるデータ損失（Missing branch forces discard data loss）を防ぐ。
 function recoverPrompt(item, branch, oldWorktree) {
   const title = sanitize(item.title)
   const branchJson = JSON.stringify(branch)
   const oldWorktreeJson = JSON.stringify(oldWorktree)
 
+  // ブランチ解決ステップ: branch が空かつ oldWorktree が非空のとき先頭に挿入する。
+  // state に branch が記録されていない状態で worktree だけ残っているケースが対象。
+  // このステップで確定したブランチ名を以降の手順（step1 WIP 退避・step2b diff 読み取り・判断）で使う。
+  // 解決失敗時（detached HEAD など）は WIP commit・diff 取得・削除を一切実行せず保全して返す。
+  const resolveStepLines =
+    !branch && oldWorktree
+      ? [
+          `【ブランチ解決ステップ】（state に branch が記録されていないため先にブランチ名を特定する）`,
+          `   git -C ${oldWorktreeJson} rev-parse --abbrev-ref HEAD を実行してチェックアウト中のブランチ名を取得する。`,
+          `   - 出力が "HEAD"（detached HEAD）または空の場合: ブランチ解決失敗。`,
+          `     WIP commit・diff 取得・worktree/branch の削除を一切実行しない。`,
+          `     decision は返さない（または "unresolved" を返す）。reason に「worktree のブランチを解決できず保全が必要」を入れて返す。`,
+          `     branch は空文字で返す。`,
+          `   - 取得できた場合: 解決したブランチ名を「対象ブランチ」として以降の手順で使用する。`,
+          `     返却の branch にこの解決したブランチ名を入れる。`,
+          ``,
+        ]
+      : []
+
+  // branch が最初から非空で渡された場合は「対象ブランチ」として直接使用する（解決ステップ不要）。
+  // 返却の branch にはその名前を入れる。
+  const resolvedBranchNote = branch
+    ? [`（対象ブランチ: ${branch}。返却の branch にこの名前を入れる）`, ``]
+    : []
+
   // 手順 1（WIP 退避）・手順 2b（diff 読み取り）は、残骸の種類（worktree あり / branch のみ）で
   // 条件分岐する。oldWorktree が空のとき git -C "" がメインリポ cwd を対象にしてしまい、
   // メインリポの未 commit 変更を誤ったブランチへ commit するリスクがある（PR #41 修正 #3）。
+  //
+  // branch が空かつ oldWorktree が非空の場合は「ブランチ解決ステップ」で対象ブランチが確定した
+  // 場合のみ WIP 退避を実行する。解決失敗時は step1 を実行しないこと（未確定ブランチへ commit させない）。
 
   // 手順 1: WIP 退避（oldWorktree が非空のときのみ。空のときはスキップ指示）
   const step1Lines = oldWorktree
     ? [
         `1. 未 commit 変更の退避（WIP commit）:`,
+        ...(!branch
+          ? [
+              `   前提: 上記ブランチ解決ステップで対象ブランチが確定している場合のみ実行する。`,
+              `   解決失敗（decision を返さない / "unresolved" の場合）はこの手順を飛ばすこと。`,
+            ]
+          : []),
         `   a. git -C ${oldWorktreeJson} status --porcelain で未 commit 変更の有無を確認する。`,
-        `   b. 変更がある場合: 以下のコマンドで WIP commit として branch に退避する（--no-verify は絶対に使わない）。`,
+        `   b. 変更がある場合: 以下のコマンドで WIP commit として対象ブランチに退避する（--no-verify は絶対に使わない）。`,
         `      git -C ${oldWorktreeJson} add -A`,
         `      git -C ${oldWorktreeJson} commit -m "$(cat <<'WIPEOF'`,
         `wip(recover): 中断時の未コミット変更を退避`,
@@ -902,22 +950,31 @@ function recoverPrompt(item, branch, oldWorktree) {
         `   git -C を使ったコマンドは一切実行しないこと。`,
       ]
 
-  // 手順 2b: diff 読み取り（branch が非空のときのみ）
-  // branch が空のとき git diff の対象が不定になるため、読み取りをスキップして discard を促す。
-  const step2bLines = branch
-    ? [
-        `2. 既存作業の読み取り:`,
-        `   a. git fetch origin ${baseBranch} で origin/${baseBranch} を最新化する。`,
-        `   b. git diff origin/${baseBranch}...${branchJson} で branch の既存コミットと origin/${baseBranch} の差分を読む。`,
-        `      （--quiet で差分が空か確認してから diff を取得する。差分がない場合は空 branch と判断）`,
-        `   c. gh issue view ${item.number} でイシュー本文・受入基準を読む。`,
-      ]
-    : [
-        // branch 名が無い場合は既存コミットを参照できないため継続不可。
-        // discard を返すよう明示的に指示し、continue の誤判定を防ぐ。
-        `2. branch ref が記録されていないため既存コミットを読めない。`,
-        `   継続不可のため次の手順 3 では discard を選ぶこと。`,
-      ]
+  // 手順 2b: diff 読み取り（対象ブランチが確定しているときのみ）
+  // branch が空で oldWorktree が非空の場合は「ブランチ解決ステップ」でブランチが確定した場合のみ実行する。
+  // branch が最初から空で oldWorktree も空の場合は既存コミットを参照できないため discard を促す。
+  const step2bLines =
+    branch || (!branch && oldWorktree)
+      ? [
+          `2. 既存作業の読み取り:`,
+          ...(!branch && oldWorktree
+            ? [
+                `   前提: 上記ブランチ解決ステップで対象ブランチが確定している場合のみ実行する。`,
+                `   解決失敗の場合はこの手順を飛ばすこと。`,
+              ]
+            : []),
+          `   a. git fetch origin ${baseBranch} で origin/${baseBranch} を最新化する。`,
+          `   b. 対象ブランチと origin/${baseBranch} の差分を読む:`,
+          `      git diff origin/${baseBranch}...${branch ? branchJson : '<解決したブランチ名>'} を実行する。`,
+          `      （--quiet で差分が空か確認してから diff を取得する。差分がない場合は空 branch と判断）`,
+          `   c. gh issue view ${item.number} でイシュー本文・受入基準を読む。`,
+        ]
+      : [
+          // branch 名が無く oldWorktree も無い場合は既存コミットを参照できないため継続不可。
+          // discard を返すよう明示的に指示し、continue の誤判定を防ぐ。
+          `2. branch ref も旧 worktree も記録されていないため既存コミットを読めない。`,
+          `   継続不可のため次の手順 3 では discard を選ぶこと。`,
+        ]
 
   return [
     `イシュー #${item.number}「${title}」の中断作業（branch: ${branch || '(不明)'}）の回復担当エージェント。`,
@@ -929,20 +986,23 @@ function recoverPrompt(item, branch, oldWorktree) {
     `ここでの判断は「この途中作業から継続するのが妥当か」である。`,
     `動かない・未完成でも、方向が妥当なら continue を選ぶ（残りの完成は Implement が担う）。`,
     `discard は「空 / 方向違い / 継続より作り直しが妥当」な場合のみ選ぶ。`,
+    `continue は対象ブランチが確定していることを前提とする（ブランチ未確定時は continue を返してはならない）。`,
     ``,
     `手順:`,
+    ...resolveStepLines,
+    ...resolvedBranchNote,
     ...step1Lines,
     ...step2bLines,
     `3. 継続可否の判断:`,
-    `   - continue（継続）: 既存作業がイシュー要件と方向的に合っており継続可能な場合。`,
+    `   - continue（継続）: 対象ブランチが確定しており、既存作業がイシュー要件と方向的に合っている場合。`,
     `     未完成・一部壊れていても構わない（Implement が完成させる）。`,
     `   - discard（破棄）: 差分が完全に空 / 方向が全く違う / 継続より作り直しが明らかに速い場合。`,
-    `     branch ref が無い場合も discard を選ぶこと。`,
+    `     branch ref が無く worktree から解決できた場合でも discard を選ぶことができる。`,
     `4. 回復ブリーフの作成（continue の場合のみ）:`,
     `   done: 実装済み内容の要約（何が完成しているか）`,
     `   remaining: 残タスクの要約（何を完成させる必要があるか）`,
     `   broken: 壊れ・未完で優先修正が必要な箇所（なければ空文字）`,
-    `返却: decision（"continue" または "discard"）/ brief（continue 時のみ: done/remaining/broken）/ reason（discard 時のみ: 破棄理由）/ wipCommitted。`,
+    `返却: decision（"continue" または "discard"）/ branch（確定した対象ブランチ名。解決できなければ空文字）/ brief（continue 時のみ: done/remaining/broken）/ reason（discard 時のみ: 破棄理由）/ wipCommitted。`,
   ].join('\n')
 }
 
@@ -1254,34 +1314,49 @@ async function runImplement(item) {
       )
 
       // Recover 結果を3分岐で処理する。
-      // - continue かつ有効 branch: 継続経路（旧 worktree のみ掃除して Implement へ）
-      // - discard: 破棄経路（旧 worktree + branch を掃除して通常 Plan へ）
-      // - それ以外（null / 異常 / 不正 decision / branch 無し continue）:
+      // - continue かつ effectiveBranch が有効: 継続経路（旧 worktree のみ掃除して Implement へ）
+      // - discard かつ effectiveBranch が有効: 破棄経路（旧 worktree + branch を掃除して通常 Plan へ）
+      //   ※ effectiveBranch が必ず削除されることで、後続 Plan→Implement の git checkout -B が
+      //     同一ブランチを origin/base からサイレントリセットして WIP commit を消す問題を防ぐ。
+      // - それ以外（null / 異常 / 不正 decision / ブランチ未確定の continue|discard / "unresolved"）:
       //   一過性のエージェントエラーや曖昧な結果で作業を破棄しないよう、
       //   残骸（worktree/branch）を保全したまま failed にする。
       //   状態に hasRemnant フラグが残るため次回再実行で Recover が再試行される。
       //   明示的 discard 以外では worktree/branch を絶対に削除しない（PR #41 修正 #1・#2）。
+      //
+      // 【effectiveBranch の決定】
+      //   state に branch が記録されていなく worktree のみ残っていた場合、Recover エージェントが
+      //   worktree HEAD から実ブランチ名を解決して recoverResult.branch に入れて返す。
+      //   driver 側でエージェント返却の branch を isValidBranchName 検証 + sanitizeBranch して使用する。
+      //   sanitizedRecoverBranch（state からの branch）か resolvedBranch（エージェント解決）の
+      //   いずれかが有効であれば effectiveBranch として採用する。
       const recoverDecision = recoverResult?.decision
-      if (recoverDecision === 'continue' && sanitizedRecoverBranch) {
-        // --- continue 経路: 旧 worktree のみ掃除し、branch を保持して Implement を継続 ---
-        // WIP commit は Recover エージェントが branch に退避済みのため、物理 worktree を
+      const resolvedBranch = isValidBranchName(recoverResult?.branch ?? '')
+        ? sanitizeBranch(recoverResult.branch)
+        : ''
+      // sanitizedRecoverBranch（state 由来）を優先し、無ければ resolvedBranch（エージェント解決）を使う。
+      const effectiveBranch = sanitizedRecoverBranch || resolvedBranch
+
+      if (recoverDecision === 'continue' && effectiveBranch) {
+        // --- continue 経路: 旧 worktree のみ掃除し、effectiveBranch を保持して Implement を継続 ---
+        // WIP commit は Recover エージェントが effectiveBranch に退避済みのため、物理 worktree を
         // 削除しても作業データは失われない。Plan をスキップして recoverImplementPrompt で
         // Implement を直接起動する。その後は通常どおり reviewing → Review → Merge に合流する。
         //
         // deleteBranch を渡さない理由: branch に退避済みの WIP commit が乗っているため。
         // branch を削除すると退避した作業も失われる。
-        log(`#${item.number}: Recover → continue（branch: ${sanitize(sanitizedRecoverBranch)}）、旧 worktree を掃除して Implement 継続`)
+        log(`#${item.number}: Recover → continue（branch: ${sanitize(effectiveBranch)}）、旧 worktree を掃除して Implement 継続`)
 
         await updateState(
           item.number,
-          { status: 'implementing', branch: sanitizedRecoverBranch, worktree: '' },
+          { status: 'implementing', branch: effectiveBranch, worktree: '' },
           sanitizedRecoverWorktree ? { cleanupWorktree: sanitizedRecoverWorktree } : {},
         )
 
         // --- recoverImplement: 回復ブリーフで Implement を起動（Plan をスキップ）---
-        // sanitizedRecoverBranch は isValidBranchName 検証済みの値（Recover 残骸検出で設定）。
+        // effectiveBranch は isValidBranchName 検証 + sanitizeBranch 済み。
         // branch を明示渡しすることで、エージェントが自律的に誤った branch を checkout するのを防ぐ。
-        impl = await agent(recoverImplementPrompt(item, recoverResult.brief, sanitizedRecoverBranch), {
+        impl = await agent(recoverImplementPrompt(item, recoverResult.brief, effectiveBranch), {
           label: `impl:#${item.number}`,
           phase: 'Implement',
           model: 'sonnet',
@@ -1313,50 +1388,52 @@ async function runImplement(item) {
           worktree: impl.worktreePath,
           fixCount: 0,
         })
-      } else if (recoverDecision === 'discard') {
-        // --- discard 経路: 旧 worktree と branch を掃除し、通常 Plan へフォールスルー ---
+      } else if (recoverDecision === 'discard' && effectiveBranch) {
+        // --- discard 経路（effectiveBranch あり）: 旧 worktree と branch を掃除し、通常 Plan へフォールスルー ---
         // WIP commit を Recover エージェントが先に積んでから branch を削除するため、
         // 誤判定時は reflog から復元できる（最後の保険）。
-        log(`#${item.number}: Recover → discard（reason: ${sanitize(recoverResult?.reason ?? '不明')}, wipCommitted: ${recoverResult?.wipCommitted ?? 'unknown'}）、旧 worktree + branch を掃除して通常 Plan へ`)
+        //
+        // effectiveBranch を必ず削除する。これにより後続 Plan→Implement の
+        // git checkout -B <effectiveBranch> origin/<base> が同一ブランチを origin/base から
+        // サイレントリセットして WIP commit を消すデータ損失を防ぐ。
+        log(`#${item.number}: Recover → discard（reason: ${sanitize(recoverResult?.reason ?? '不明')}, wipCommitted: ${recoverResult?.wipCommitted ?? 'unknown'}）、旧 worktree + branch（${sanitize(effectiveBranch)}）を掃除して通常 Plan へ`)
 
         // discard: worktree 削除後に branch も削除する。
         // options.deleteBranch は patch.branch を branch 名として使用するため、
         // patch に branch 名を持たせてから deleteBranch: true を渡す。
         // patch.branch を '' にすると deleteBranch の対象が空になるため 2 段階に分ける:
-        //   1. branch 名を patch に持たせて deleteBranch: true でブランチ削除
+        //   1. branch 名（effectiveBranch）を patch に持たせて deleteBranch: true でブランチ削除
         //   2. status: 'planning', branch: '', worktree: '' でクリーン状態に更新
-        if (sanitizedRecoverBranch) {
-          await updateState(
-            item.number,
-            { branch: sanitizedRecoverBranch },
-            {
-              ...(sanitizedRecoverWorktree ? { cleanupWorktree: sanitizedRecoverWorktree } : {}),
-              deleteBranch: true,
-            },
-          )
-        } else if (sanitizedRecoverWorktree) {
-          await updateState(
-            item.number,
-            { worktree: '' },
-            { cleanupWorktree: sanitizedRecoverWorktree },
-          )
-        }
+        await updateState(
+          item.number,
+          { branch: effectiveBranch },
+          {
+            ...(sanitizedRecoverWorktree ? { cleanupWorktree: sanitizedRecoverWorktree } : {}),
+            deleteBranch: true,
+          },
+        )
         // planning 状態に戻してクリアする（branch: '' で状態を初期化）
         await updateState(item.number, { status: 'planning', branch: '', worktree: '' })
         // discard 後は通常 Plan へフォールスルーするため impl は未設定のまま続行
       } else {
-        // --- 保全経路: エージェント異常 / 不正 decision / branch 無し continue ---
+        // --- 保全経路: エージェント異常 / 不正 decision / "unresolved" / ブランチ未確定の continue|discard ---
+        //
+        // ブランチが確定できない（effectiveBranch が空）まま continue|discard の場合も保全経路に入る。
+        // これにより「worktree はあるが state に branch なく、エージェントも解決できなかった」状態で
+        // worktree だけ削除 → 後続 checkout -B でサイレント WIP 消失、という問題を防ぐ。
+        //
         // 一過性のエージェントエラーや曖昧な結果で作業を破棄しないよう、
         // 残骸（worktree/branch）は削除せず保全したまま failed にする。
         // 状態に残骸情報が残るため、次回再実行時に Recover が再試行されて回復できる。
-        // 明示的な 'discard' 返却のみを worktree/branch 削除の条件とすることで、
-        // 誤動作による作業消失リスクを最小化する（PR #41 修正 #1・#2）。
+        // 明示的な 'discard' かつ effectiveBranch 確定時のみ worktree/branch を削除する（PR #41）。
         const reason = sanitize(
-          recoverDecision === 'continue'
-            ? '回復継続には有効な branch が必要だが状態に記録がない。worktree/branch を保全して failed にする'
-            : (recoverResult?.reason ?? 'Recover エージェントが異常終了または不正な decision を返した。worktree/branch を保全して failed にする'),
+          recoverDecision === 'continue' && !effectiveBranch
+            ? '回復継続には有効な branch が必要だが state にも worktree HEAD からも解決できなかった。worktree/branch を保全して failed にする'
+            : recoverDecision === 'discard' && !effectiveBranch
+              ? 'discard 指示だが対象ブランチを確定できないため安全に削除できない。worktree/branch を保全して failed にする'
+              : (recoverResult?.reason ?? 'Recover エージェントが異常終了または不正な decision を返した。worktree/branch を保全して failed にする'),
         )
-        log(`#${item.number}: Recover → 保全（decision: ${sanitize(recoverDecision ?? '(null)')}, reason: ${reason}）`)
+        log(`#${item.number}: Recover → 保全（decision: ${sanitize(recoverDecision ?? '(null)')}, effectiveBranch: ${sanitize(effectiveBranch || '(空)')}, reason: ${reason}）`)
         await updateState(item.number, { status: 'failed', note: reason })
         recordFailure({ issue: item.number, reason })
         return false
