@@ -1375,18 +1375,22 @@ async function runImplement(item) {
       //     continue / discard ガードが成立せず残骸を保全（failed）する。
       //   - worktree が無い branch のみの残骸、または dead worktree（worktreeMissing: true、
       //     state にパス記録ありだが実体なし）の場合: worktree 実体が無く WIP 退避も発生しないため、
-      //     state 由来の sanitizedRecoverBranch へのフォールバックを許可する。
+      //     state 由来の sanitizedRecoverBranch を権威として優先する（食い違う agent branch より state を信頼。
+      //     branch-only は元々 state が源泉、dead worktree も live な worktree HEAD が無いため state が正）。
+      //     これにより有効な state branch があれば回復に到達でき（Dead worktree path blocks branch, PR #42 一次対応）、
+      //     かつ agent が誤った branch を返しても state を上書きしない（Branch-only state branch precedence, PR #42）。
       //     driver は worktree 実体の有無を直接判定できない（fs アクセスなし）ため、エージェントが
-      //     返す worktreeMissing を実在判定の signal として用いる（Dead worktree path blocks branch, PR #42）。
+      //     返す worktreeMissing を実在判定の signal として用いる。
       const recoverDecision = recoverResult?.decision
       const resolvedBranch = isValidBranchName(recoverResult?.branch ?? '')
         ? sanitizeBranch(recoverResult.branch)
         : ''
       // worktree がパス記録あり かつ 実在する（= worktreeMissing でない）ときのみ resolvedBranch を排他採用。
+      // それ以外（branch-only / dead worktree）は state 優先で fallback する。
       const worktreeAlive = Boolean(sanitizedRecoverWorktree) && recoverResult?.worktreeMissing !== true
       const effectiveBranch = worktreeAlive
         ? resolvedBranch
-        : resolvedBranch || sanitizedRecoverBranch
+        : sanitizedRecoverBranch || resolvedBranch
 
       if (recoverDecision === 'continue' && effectiveBranch) {
         // --- continue 経路: 旧 worktree のみ掃除し、effectiveBranch を保持して Implement を継続 ---
