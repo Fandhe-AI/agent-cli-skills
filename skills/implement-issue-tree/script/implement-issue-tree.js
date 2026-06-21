@@ -390,19 +390,26 @@ async function loadState() {
 // メインリポの絶対パス（cwd）を一度だけ解決してキャッシュする。
 // Workflow サンドボックスには process.cwd() が無いため、軽量 agent で pwd を取得する。
 // worktree 削除の安全ガード（メインリポ誤削除防止）でのみ必要なため、cleanup 発生時に遅延解決する。
-let _cachedMainRepoCwd = null
+// 解決成功（絶対パス）のみをキャッシュする。空（解決失敗）はキャッシュせず次回再試行する
+// （一過性失敗からの回復のため）。呼び出し側は空文字を「解決不能」とみなし fail-closed する。
+let _cachedMainRepoCwd = ''
 async function getMainRepoCwd() {
-  if (_cachedMainRepoCwd === null) {
-    const out = await agent(
-      'カレントディレクトリの絶対パスを取得する。`pwd` を実行し、その出力（絶対パス 1 行）だけを返す。' +
-        '他のテキスト・説明・引用符は一切出力しない。',
-      { label: 'util:cwd', phase: 'Restore', model: 'haiku', effort: 'low' },
-    )
-    // agent が余計な行を返しても、絶対パスらしき行（/ 始まり）だけを採用する。
-    const lines = String(out ?? '').split('\n').map((s) => s.trim()).filter(Boolean)
-    _cachedMainRepoCwd = lines.reverse().find((l) => l.startsWith('/')) ?? ''
+  if (_cachedMainRepoCwd) {
+    return _cachedMainRepoCwd
   }
-  return _cachedMainRepoCwd
+  const out = await agent(
+    'カレントディレクトリの絶対パスを取得する。`pwd` を実行し、その出力（絶対パス 1 行）だけを返す。' +
+      '他のテキスト・説明・引用符・追加の絶対パスは一切出力しない。',
+    { label: 'util:cwd', phase: 'Restore', model: 'haiku', effort: 'low' },
+  )
+  // pwd の出力は 1 行。agent が余計な行を足しても、最初の絶対パス行（/ 始まり）を採用する
+  // （末尾だと後続で引用された別パスを誤って拾うため、最初を取る）。
+  const lines = String(out ?? '').split('\n').map((s) => s.trim()).filter(Boolean)
+  const resolved = lines.find((l) => l.startsWith('/')) ?? ''
+  if (resolved) {
+    _cachedMainRepoCwd = resolved
+  }
+  return resolved
 }
 
 // 指定イシューの状態を patch でマージ更新する（jq で安全に書き戻す）
@@ -439,8 +446,15 @@ async function updateState(issueNumber, patch, options = {}) {
   let cleanupWorktreePath = sanitizedCleanupPath
   if (sanitizedCleanupPath !== '') {
     const cwd = await getMainRepoCwd()
-    const isMainRepo = cwd !== '' && sanitizedCleanupPath === cwd
-    if (isMainRepo) {
+    if (cwd === '') {
+      // cwd を解決できない場合は fail-closed。メインリポ誤削除を避けるため削除自体をスキップする
+      // （cwd 不明のまま削除を続けると、cleanup 対象がメインリポでも検出できず消してしまう）。
+      log(
+        `⚠️ updateState: メインリポ cwd を解決できないため、cleanupWorktree ` +
+          `"${sanitizedCleanupPath}" の削除を安全側でスキップする（fail-closed）`,
+      )
+      cleanupWorktreePath = ''
+    } else if (sanitizedCleanupPath === cwd) {
       log(`⚠️ updateState: cleanupWorktree "${sanitizedCleanupPath}" がメインリポ（${cwd}）と完全一致するため削除をスキップする`)
       cleanupWorktreePath = ''
     }
