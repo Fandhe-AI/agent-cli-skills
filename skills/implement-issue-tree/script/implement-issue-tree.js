@@ -387,6 +387,24 @@ async function loadState() {
   return result?.items ?? {}
 }
 
+// メインリポの絶対パス（cwd）を一度だけ解決してキャッシュする。
+// Workflow サンドボックスには process.cwd() が無いため、軽量 agent で pwd を取得する。
+// worktree 削除の安全ガード（メインリポ誤削除防止）でのみ必要なため、cleanup 発生時に遅延解決する。
+let _cachedMainRepoCwd = null
+async function getMainRepoCwd() {
+  if (_cachedMainRepoCwd === null) {
+    const out = await agent(
+      'カレントディレクトリの絶対パスを取得する。`pwd` を実行し、その出力（絶対パス 1 行）だけを返す。' +
+        '他のテキスト・説明・引用符は一切出力しない。',
+      { label: 'util:cwd', phase: 'Restore', model: 'haiku', effort: 'low' },
+    )
+    // agent が余計な行を返しても、絶対パスらしき行（/ 始まり）だけを採用する。
+    const lines = String(out ?? '').split('\n').map((s) => s.trim()).filter(Boolean)
+    _cachedMainRepoCwd = lines.reverse().find((l) => l.startsWith('/')) ?? ''
+  }
+  return _cachedMainRepoCwd
+}
+
 // 指定イシューの状態を patch でマージ更新する（jq で安全に書き戻す）
 // patch の値はすべて JSON.stringify 経由で埋め込む（インジェクション対策）
 // issue 番号は整数検証済みのものだけ渡す
@@ -416,12 +434,17 @@ async function updateState(issueNumber, patch, options = {}) {
   // 正当な掃除対象であるためプレフィックス一致（cwd + '/'）では除外しない。
   // プレフィックス判定を残すと、Recover が掃除すべき残骸 worktree がスキップされ
   // checkout -B 衝突が再発するリグレッションを引き起こす（PR #41 修正 #4）。
-  const cwd = process.cwd()
-  const isMainRepo = sanitizedCleanupPath !== '' && sanitizedCleanupPath === cwd
-  if (isMainRepo) {
-    log(`⚠️ updateState: cleanupWorktree "${sanitizedCleanupPath}" がメインリポ（${cwd}）と完全一致するため削除をスキップする`)
+  // メインリポ cwd は worktree 削除が発生するときだけ必要。Workflow サンドボックスには
+  // process.cwd() が無いため、cleanup 対象があるときに限り軽量 agent で解決する（結果はキャッシュ）。
+  let cleanupWorktreePath = sanitizedCleanupPath
+  if (sanitizedCleanupPath !== '') {
+    const cwd = await getMainRepoCwd()
+    const isMainRepo = cwd !== '' && sanitizedCleanupPath === cwd
+    if (isMainRepo) {
+      log(`⚠️ updateState: cleanupWorktree "${sanitizedCleanupPath}" がメインリポ（${cwd}）と完全一致するため削除をスキップする`)
+      cleanupWorktreePath = ''
+    }
   }
-  const cleanupWorktreePath = isMainRepo ? '' : sanitizedCleanupPath
   // worktreePath は JSON.stringify 経由でエスケープしてプロンプトに埋め込む（インジェクション対策）
   const cleanupPathJson = JSON.stringify(cleanupWorktreePath)
 
