@@ -120,7 +120,8 @@ fi
 
 ```bash
 git log --oneline -- "${LOCAL_SKILL_DIR}/"
-git diff HEAD~1 HEAD -- "${LOCAL_SKILL_DIR}/"
+# 親コミットがない場合（初回コミット・shallow clone 等）は作業ツリー差分にフォールバックする
+git diff HEAD~1 HEAD -- "${LOCAL_SKILL_DIR}/" 2>/dev/null || git diff -- "${LOCAL_SKILL_DIR}/"
 ```
 
 ユーザーに「この改修内容で upstream に PR を作ってよいか」を確認します。
@@ -142,11 +143,10 @@ git diff HEAD~1 HEAD -- "${LOCAL_SKILL_DIR}/"
 ```bash
 UID_VAL=$(id -u)
 TS=$(date +%Y%m%d-%H%M%S)
-WORKDIR="/tmp/claude-${UID_VAL}/contribute-${SKILL_NAME}-${TS}"
+# $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
+WORKDIR="${TMPDIR:-/tmp/claude-${UID_VAL}}/contribute-${SKILL_NAME}-${TS}"
 mkdir -p "$WORKDIR"
 ```
-
-`$TMPDIR` が設定されていればそちらを優先します（サンドボックス互換）。
 
 ### Step 6: upstream を clone する
 
@@ -214,7 +214,7 @@ git diff
 
 ```bash
 SLUG=$(date +%Y%m%d-%H%M%S)
-git switch -c "contribute/<SKILL_NAME>-${SLUG}"
+git switch -c "contribute/${SKILL_NAME}-${SLUG}"
 git add <変更パス>
 git commit -m "$(cat <<'EOF'
 <type>(<scope>): <subject>
@@ -232,7 +232,7 @@ EOF
 ### Step 10: push と PR 作成
 
 ```bash
-git push -u origin "contribute/<SKILL_NAME>-${SLUG}"
+git push -u origin "contribute/${SKILL_NAME}-${SLUG}"
 
 gh pr create \
   --repo "${REPO_SLUG}" \
