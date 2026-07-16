@@ -101,9 +101,10 @@ git diff HEAD~1 HEAD -- "${LOCAL_SKILL_DIR}/" 2>/dev/null || git diff -- "${LOCA
 echo ""
 
 # Step 5: 作業用ディレクトリを用意する
+# $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
 UID_VAL=$(id -u)
 TS=$(date +%Y%m%d-%H%M%S)
-WORKDIR="/tmp/claude-${UID_VAL}/contribute-${SKILL_NAME}-${TS}"
+WORKDIR="${TMPDIR:-/tmp/claude-${UID_VAL}}/contribute-${SKILL_NAME}-${TS}"
 mkdir -p "$WORKDIR"
 echo "==> 作業ディレクトリ: $WORKDIR"
 
