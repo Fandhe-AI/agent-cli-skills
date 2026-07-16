@@ -65,13 +65,26 @@ create-issue-tree requirements.md --milestone "v2.0"
 このツリーに割り当てる GitHub Milestone を決定する。ルート・Phase 親・子・sub-issue の
 全件に同一 milestone を適用する（ツリー単位で 1 milestone）。
 
-- `--root` 指定時: 既存ルートの milestone を自動継承する。ユーザーへの確認は不要。
+`--root` が指定されている場合は、ここで先に `ROOT_NUMBER` を設定する（Step 3 の
+再利用判定でもこの値を使う。Step 3 側では再代入しない）。
+
+```bash
+ROOT_NUMBER=123  # --root で渡された番号（未指定なら空のまま）
+```
+
+優先順位は **`--milestone` > `--root` からの継承 > ユーザーへの確認** の順。
+
+- `--milestone` が指定されている場合: その値をそのまま `MILESTONE` として使用する
+  （`--root` も同時指定されている場合、ルート側の milestone より `--milestone` を優先する。
+  ルート側と異なる値の場合は、ルートの milestone も合わせて更新してよいかユーザーに確認する）
+- `--milestone` 未指定かつ `--root` 指定時: 既存ルートの milestone を自動継承する
+  （ユーザーへの確認は不要）
 
   ```bash
   MILESTONE=$(gh issue view "${ROOT_NUMBER}" --json milestone --jq '.milestone.title // empty')
   ```
 
-- `--root` 未指定かつ `--milestone` 未指定の場合: milestone を割り当てるかユーザーに確認する。
+- どちらも未指定の場合: milestone を割り当てるかユーザーに確認する。
   割り当てる場合はオープン中の milestone 一覧を提示して選ばせるか、新規 milestone 名の
   入力を受け付けて `MILESTONE` に設定する。割り当てないと回答されたら `MILESTONE` は
   空のまま Step 3 以降へ進む（issue は milestone なしで作成される）。
@@ -80,18 +93,23 @@ create-issue-tree requirements.md --milestone "v2.0"
   gh api "repos/{owner}/{repo}/milestones" --jq '.[] | select(.state=="open") | .title'
   ```
 
-- `--milestone` が指定されている場合はその値をそのまま `MILESTONE` として使用する。
+  ユーザーが一覧にない新規 milestone 名を入力した場合、`gh issue create --milestone` は
+  既存の milestone 名しか受け付けないため、使用前に milestone 自体を作成する。
+
+  ```bash
+  gh api --method POST "repos/{owner}/{repo}/milestones" -f "title=${MILESTONE}"
+  ```
 
 ### Step 3: ルート（トラッキング）issue を作成する
 
 ルート issue はツリー全体の進捗を管理するトラッキング issue として作成する。**ルート issue 自体には phase ラベルは付与しない**（Phase 親以下の issue にのみ付与する）。
 
 **`--root` 指定時は新規作成をスキップする。** `--phase` での 2 回目以降の部分起票で
-ルート issue を重複作成しないため、既存ルートの番号を `ROOT_NUMBER` に設定して再利用する。
+ルート issue を重複作成しないため、Step 2.5 で設定済みの `ROOT_NUMBER` を再利用する
+（ここで再代入しない）。
 
 ```bash
-# --root 指定時: 既存ルートを再利用する（OPEN でなければ中止する）
-ROOT_NUMBER=123  # --root で渡された番号
+# --root 指定時: 既存ルートを再利用する（OPEN でなければ中止する）。ROOT_NUMBER は Step 2.5 で設定済み
 ROOT_STATE=$(gh issue view "${ROOT_NUMBER}" --json state --jq '.state')
 if [[ "${ROOT_STATE}" != "OPEN" ]]; then
   echo "エラー: ルート issue #${ROOT_NUMBER} は OPEN ではありません (state: ${ROOT_STATE})。中止します。"
