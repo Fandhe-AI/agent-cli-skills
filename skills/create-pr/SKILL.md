@@ -40,9 +40,13 @@ Agent ツールでセキュリティ確認を行う。
 ### Step 2.5: Closes 対象 Issue の milestone 確認
 
 この PR で close する予定の Issue（same-repo のみ）を特定し、milestone の割当状況を確認する。
-close 対象は、作業対象の Issue 番号（会話文脈）・ブランチのコミットメッセージ中の
-`Closes #N` / `Fixes #N` / `Resolves #N` 参照から特定する（Step 4 の PR body には
-ここで特定した Issue を `Closes #N` として記載する）。
+
+1. 候補の特定: 作業対象の Issue 番号（会話文脈）・ブランチのコミットメッセージ中の
+   `Closes #N` / `Fixes #N` / `Resolves #N` 参照から候補を挙げる
+2. close 可否の確認: 候補ごとに「この PR で当該 Issue が完了するか」を確認する
+   （部分実装・関連のみの Issue は close 対象にしない。Step 4 の PR body には
+   close 対象のみ `Closes #N` と記載し、それ以外は `Refs #N` 等の関連参照にとどめる）
+3. milestone 確認: close 対象と確定した Issue について、以下で割当状況を確認する
 
 ```bash
 gh issue view <N> --json milestone --jq '.milestone.title // empty'
