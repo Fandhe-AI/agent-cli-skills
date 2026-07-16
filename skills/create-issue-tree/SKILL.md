@@ -80,6 +80,16 @@ if [[ "${ROOT_STATE}" != "OPEN" ]]; then
 fi
 ```
 
+**milestone 非運用リポジトリのガード**: `--milestone` が明示されていない場合、リポジトリに
+milestone が 1 件も存在しなければ（closed 含む）milestone 非運用リポジトリとみなし、
+以降の確認をすべてスキップして `MILESTONE` は空のまま Step 3 へ進む
+（milestone を使わないリポジトリの起票フローに確認を増やさない）。
+
+```bash
+MILESTONE_COUNT=$(gh api "repos/{owner}/{repo}/milestones?state=all" --jq 'length')
+# MILESTONE_COUNT が 0 かつ --milestone 未指定なら、このステップの残りをスキップする
+```
+
 優先順位は **`--milestone` > `--root` からの継承 > ユーザーへの確認** の順。
 
 - `--milestone` が指定されている場合: その値をそのまま `MILESTONE` として使用する
