@@ -37,6 +37,26 @@ Agent ツールでセキュリティ確認を行う。
 
 問題が見つかった場合はユーザーに警告し、対処後に PR 作成を再試行するよう案内する。
 
+### Step 2.5: Closes 対象 Issue の milestone 確認
+
+Step 4 で組み立てる PR body 案から `Closes #N` / `Fixes #N` / `Resolves #N`（same-repo のみ）で
+参照する Issue 番号を抽出し、milestone の割当状況を確認する。
+
+```bash
+gh issue view <N> --json milestone --jq '.milestone.title // empty'
+```
+
+- milestone が既に割当済み → 次の Step へ進む
+- 未割当の場合:
+  - オープン中の milestone が 1 件のみなら、その milestone を割り当ててよいかユーザーに確認し、
+    同意が得られたら `gh issue edit <N> --milestone <title>` で付与する
+  - 複数件 or 0 件の場合はユーザーに確認する。どの milestone を使うか決まらない場合は
+    milestone なしのまま Step 3 へ進めてよいが、その旨を PR body に警告として明記する
+    （milestone を必須とする CI ゲートがあるリポジトリではそちらが最終防衛線として
+    機能する前提とし、本 Step は PR 作成自体をブロックしない）
+
+対象 Issue が存在しない、または Closes 系キーワードが PR body にない場合はこの Step をスキップする。
+
 ### Step 3: PR タイトルを生成する
 
 Conventional Commits 形式: `type(scope): subject`
@@ -98,11 +118,13 @@ gh pr checks <pr-number>
 | セキュリティ問題を検出しても PR 作成を続行する | Step 2 で問題を発見したら即座に処理を中止し、ユーザーに警告して修正を依頼する |
 | PR URL を返さずに完了する | `gh pr create` の出力から PR URL を取得してユーザーに提示する |
 | Conventional Commits 形式に準拠しないタイトルをつける | `type(scope): subject`（72文字以内）の形式を厳守する |
+| Closes 対象 Issue が milestone 未割当のまま PR 作成 → CI で初めて失敗する | Step 2.5 で必ず確認する。milestone を決めきれない場合も PR body に警告を残す |
 
 ## 注意事項
 
 - ベースブランチはリポジトリの規約に従う
 - セキュリティ問題が未解決の場合は PR 作成を中止する
+- Step 2.5 の milestone 確認は省略しない（Closes 対象がない場合のみスキップ可）
 - Draft PR を作成する場合は `--draft` フラグを追加する（ユーザーに確認）
 
 ## sandbox 環境での実行
