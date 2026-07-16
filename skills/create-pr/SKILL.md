@@ -41,23 +41,22 @@ Agent ツールでセキュリティ確認を行う。
 
 この PR で close する予定の Issue（same-repo のみ）を特定し、milestone の割当状況を確認する。
 
-**milestone 非運用リポジトリのガード**: リポジトリに milestone が 1 件も存在しない場合
-（closed 含む）は milestone 非運用リポジトリとみなし、このステップ全体を確認・警告なしで
-スキップする（milestone を使わないリポジトリの PR 作成にノイズを加えない）。
-
-```bash
-MILESTONE_COUNT=$(gh api "repos/{owner}/{repo}/milestones?state=all" --jq 'length')
-# MILESTONE_COUNT が 0 なら、このステップをスキップして Step 3 へ進む
-```
-
 1. 候補の特定: 作業対象の Issue 番号（会話文脈）・ブランチのコミットメッセージ中の
    `Closes #N` / `Fixes #N` / `Resolves #N` 参照から候補を挙げる
 2. close 可否の確認: 候補ごとに「この PR で当該 Issue が完了するか」を確認する
    （部分実装・関連のみの Issue は close 対象にしない。Step 4 の PR body には
    close 対象のみ `Closes #N` と記載し、それ以外は `Refs #N` 等の関連参照にとどめる）
-3. milestone 確認: close 対象と確定した Issue について、以下で割当状況を確認する
+3. milestone 確認: close 対象と確定した Issue について、以下で割当状況を確認する。
+   **milestone 非運用リポジトリのガード**: リポジトリに milestone が 1 件も存在しない場合
+   （closed 含む）は milestone 非運用リポジトリとみなし、この手順 3 のみ確認・警告なしで
+   スキップして Step 3 へ進む（milestone を使わないリポジトリの PR 作成にノイズを加えない。
+   手順 1〜2 の close 可否確認は milestone と無関係の安全確認のためスキップしない）
 
 ```bash
+# 非運用ガード: MILESTONE_COUNT が 0 なら手順 3 をスキップして Step 3 へ進む
+MILESTONE_COUNT=$(gh api "repos/{owner}/{repo}/milestones?state=all" --jq 'length')
+
+# close 対象 Issue の milestone 割当状況を確認する
 gh issue view <N> --json milestone --jq '.milestone.title // empty'
 ```
 
