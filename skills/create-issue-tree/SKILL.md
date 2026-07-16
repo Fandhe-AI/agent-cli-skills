@@ -65,11 +65,19 @@ create-issue-tree requirements.md --milestone "v2.0"
 このツリーに割り当てる GitHub Milestone を決定する。ルート・Phase 親・子・sub-issue の
 全件に同一 milestone を適用する（ツリー単位で 1 milestone）。
 
-`--root` が指定されている場合は、ここで先に `ROOT_NUMBER` を設定する（Step 3 の
-再利用判定でもこの値を使う。Step 3 側では再代入しない）。
+`--root` が指定されている場合は、ここで先に `ROOT_NUMBER` を設定し、milestone の
+継承・書き込みを行う前に OPEN 状態を検証する（closed なルートの milestone を
+書き換えてから中断する事故を防ぐ。Step 3 側では再代入・再検証しない）。
 
 ```bash
 ROOT_NUMBER=123  # --root で渡された番号（未指定なら空のまま）
+
+# --root 指定時: OPEN でなければ milestone 操作より前に中止する
+ROOT_STATE=$(gh issue view "${ROOT_NUMBER}" --json state --jq '.state')
+if [[ "${ROOT_STATE}" != "OPEN" ]]; then
+  echo "エラー: ルート issue #${ROOT_NUMBER} は OPEN ではありません (state: ${ROOT_STATE})。中止します。"
+  exit 1
+fi
 ```
 
 優先順位は **`--milestone` > `--root` からの継承 > ユーザーへの確認** の順。
@@ -123,17 +131,8 @@ ROOT_NUMBER=123  # --root で渡された番号（未指定なら空のまま）
 ルート issue はツリー全体の進捗を管理するトラッキング issue として作成する。**ルート issue 自体には phase ラベルは付与しない**（Phase 親以下の issue にのみ付与する）。
 
 **`--root` 指定時は新規作成をスキップする。** `--phase` での 2 回目以降の部分起票で
-ルート issue を重複作成しないため、Step 2.5 で設定済みの `ROOT_NUMBER` を再利用する
-（ここで再代入しない）。
-
-```bash
-# --root 指定時: 既存ルートを再利用する（OPEN でなければ中止する）。ROOT_NUMBER は Step 2.5 で設定済み
-ROOT_STATE=$(gh issue view "${ROOT_NUMBER}" --json state --jq '.state')
-if [[ "${ROOT_STATE}" != "OPEN" ]]; then
-  echo "エラー: ルート issue #${ROOT_NUMBER} は OPEN ではありません (state: ${ROOT_STATE})。中止します。"
-  exit 1
-fi
-```
+ルート issue を重複作成しないため、Step 2.5 で設定・OPEN 検証済みの `ROOT_NUMBER` を
+そのまま再利用する（ここで再代入・再検証しない）。
 
 `--root` 未指定の場合のみ、以下でルート issue を新規作成する。
 
