@@ -7,7 +7,7 @@ description: >
   ツリーの棚卸し・更新は update-issue-tree、実装消化は implement-issue-tree を参照。
 model: opus
 user-invocable: true
-argument-hint: "<要件テキストまたはファイルパス> [--phase <phase番号>] [--root <既存ルートissue番号>]"
+argument-hint: "<要件テキストまたはファイルパス> [--phase <phase番号>] [--root <既存ルートissue番号>] [--milestone <milestone名>]"
 ---
 
 # create-issue-tree
@@ -20,12 +20,15 @@ argument-hint: "<要件テキストまたはファイルパス> [--phase <phase�
 引数としてタスク要件テキストまたはファイルパスを渡す。  
 `--phase` オプションで特定 Phase のみ起票することもできる（大規模ツリーを段階的に起票する場合）。  
 2 回目以降の部分起票では `--root` で既存ルート issue 番号を渡し、同じツリーに継ぎ足す
-（指定しないと新しいルート issue が重複作成される）。
+（指定しないと新しいルート issue が重複作成される）。  
+`--milestone` オプションで起票する issue 全件に割り当てる GitHub Milestone を指定できる
+（`--root` 指定時は省略可。既存ルートの milestone を自動継承する）。
 
 ```
 create-issue-tree "ユーザー認証機能を実装する"
 create-issue-tree requirements.md
 create-issue-tree requirements.md --phase 2 --root 123
+create-issue-tree requirements.md --milestone "v2.0"
 ```
 
 ## 前提条件
@@ -57,6 +60,28 @@ create-issue-tree requirements.md --phase 2 --root 123
 
 タスクが少数（Phase 分割不要）の場合はルート issue + 子 issue の 2 階層構成にする。
 
+### Step 2.5: milestone を決定する
+
+このツリーに割り当てる GitHub Milestone を決定する。ルート・Phase 親・子・sub-issue の
+全件に同一 milestone を適用する（ツリー単位で 1 milestone）。
+
+- `--root` 指定時: 既存ルートの milestone を自動継承する。ユーザーへの確認は不要。
+
+  ```bash
+  MILESTONE=$(gh issue view "${ROOT_NUMBER}" --json milestone --jq '.milestone.title // empty')
+  ```
+
+- `--root` 未指定かつ `--milestone` 未指定の場合: milestone を割り当てるかユーザーに確認する。
+  割り当てる場合はオープン中の milestone 一覧を提示して選ばせるか、新規 milestone 名の
+  入力を受け付けて `MILESTONE` に設定する。割り当てないと回答されたら `MILESTONE` は
+  空のまま Step 3 以降へ進む（issue は milestone なしで作成される）。
+
+  ```bash
+  gh api "repos/{owner}/{repo}/milestones" --jq '.[] | select(.state=="open") | .title'
+  ```
+
+- `--milestone` が指定されている場合はその値をそのまま `MILESTONE` として使用する。
+
 ### Step 3: ルート（トラッキング）issue を作成する
 
 ルート issue はツリー全体の進捗を管理するトラッキング issue として作成する。**ルート issue 自体には phase ラベルは付与しない**（Phase 親以下の issue にのみ付与する）。
@@ -77,9 +102,14 @@ fi
 `--root` 未指定の場合のみ、以下でルート issue を新規作成する。
 
 ```bash
+# MILESTONE が空でなければ --milestone を付与する（Step 2.5 で決定済み）
+ROOT_ARGS=(--title "chore: 全 open issue の Phase 別トラッキング ($(date +%Y-%m-%d))")
+if [[ -n "${MILESTONE}" ]]; then
+  ROOT_ARGS+=(--milestone "${MILESTONE}")
+fi
+
 # gh issue create は issue URL を stdout に出力する（--json 非対応）。URL 末尾から番号を抽出する
-ROOT_URL=$(gh issue create \
-  --title "chore: 全 open issue の Phase 別トラッキング ($(date +%Y-%m-%d))" \
+ROOT_URL=$(gh issue create "${ROOT_ARGS[@]}" \
   --body "$(cat <<'EOF'
 ## 概要
 
@@ -144,10 +174,14 @@ done
 `PHASE_NUMBER` が空（既存の Phase 親がない）場合のみ、以下で新規作成してルートへ紐付ける。
 
 ```bash
+# MILESTONE が空でなければ --milestone を付与する（Step 2.5 で決定済み）
+PHASE_ARGS=(--title "feat(phase-${PHASE}): Phase ${PHASE} 基盤整備" --label "phase:${PHASE}")
+if [[ -n "${MILESTONE}" ]]; then
+  PHASE_ARGS+=(--milestone "${MILESTONE}")
+fi
+
 # Phase 親 issue を作成（URL 末尾から番号を抽出）
-PHASE_URL=$(gh issue create \
-  --title "feat(phase-${PHASE}): Phase ${PHASE} 基盤整備" \
-  --label "phase:${PHASE}" \
+PHASE_URL=$(gh issue create "${PHASE_ARGS[@]}" \
   --body "$(cat <<'EOF'
 ## 概要
 
@@ -175,10 +209,14 @@ gh api \
 各タスクを issue として作成し、Phase 親へ紐付ける。4h 超のタスクはさらに sub-issue に分解する。
 
 ```bash
+# MILESTONE が空でなければ --milestone を付与する（Step 2.5 で決定済み）
+CHILD_ARGS=(--title "feat: タスク名" --label "phase:${PHASE}")
+if [[ -n "${MILESTONE}" ]]; then
+  CHILD_ARGS+=(--milestone "${MILESTONE}")
+fi
+
 # 子 issue を作成（URL 末尾から番号を抽出）。PHASE は Step 4 で設定した番号を引き継ぐ
-CHILD_URL=$(gh issue create \
-  --title "feat: タスク名" \
-  --label "phase:${PHASE}" \
+CHILD_URL=$(gh issue create "${CHILD_ARGS[@]}" \
   --body "$(cat <<'EOF'
 ## 概要
 
@@ -199,11 +237,12 @@ gh api \
   "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
   -F "sub_issue_id=${CHILD_ID}"
 
-# 4h 超の場合は sub-issue を作成して子 issue へ紐付け
-SUB_URL=$(gh issue create \
-  --title "feat: サブタスク名" \
-  --label "phase:${PHASE}" \
-  --body "...")
+# 4h 超の場合は sub-issue を作成して子 issue へ紐付け（同じく MILESTONE を付与）
+SUB_ARGS=(--title "feat: サブタスク名" --label "phase:${PHASE}")
+if [[ -n "${MILESTONE}" ]]; then
+  SUB_ARGS+=(--milestone "${MILESTONE}")
+fi
+SUB_URL=$(gh issue create "${SUB_ARGS[@]}" --body "...")
 SUB_NUMBER=$(printf '%s' "${SUB_URL}" | grep -oE '[0-9]+$')
 
 SUB_ID=$(gh api "repos/{owner}/{repo}/issues/${SUB_NUMBER}" --jq '.id')
@@ -303,6 +342,8 @@ EOF
 - ルート issue の sub-issues に各 Phase 親 issue が列挙されていることを確認する
 - 各 Phase 親 issue の sub-issues に子 issue が列挙されていることを確認する
 - `gh issue view "${ROOT_NUMBER}"` でルート issue 本文の Phase 別表が正しく生成されていることを確認する
+- `MILESTONE` を割り当てた場合、`gh issue view <N> --json milestone --jq '.milestone.title'`
+  でルート・Phase 親・子いずれも `${MILESTONE}` と一致することを確認する
 
 ```bash
 # sub-issues は 1 ページ最大 100 件。100 件超のツリーは Step 5 のページネーション
@@ -326,6 +367,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" \
 | `--root` を指定せず 2 回目の部分起票でルート issue が重複作成される | 2 回目以降は必ず `--root <既存ルートissue番号>` を渡す |
 | `sub_issue_id` に issue 番号をそのまま渡す | `gh api .../issues/<number> --jq '.id'` で database id を取得してから POST する |
 | phase ラベルが存在しないリポジトリで issue 作成が失敗する | Step 4 冒頭の `gh label create "phase:${PHASE}"` を必ず先に実行する |
+| `--root` 追記時に既存ルートの milestone が未設定で、子 issue も milestone なしになる | Step 2.5 で `MILESTONE` が空になった場合は先に `gh issue edit "${ROOT_NUMBER}" --milestone <名前>` でルートへ付与してから起票し直す |
 | closed 親の下に open issue が残置される | Phase 親を close する前に全子 issue の close を確認する |
 
 ## 注意事項
