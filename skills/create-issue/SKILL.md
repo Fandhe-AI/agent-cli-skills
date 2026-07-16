@@ -27,6 +27,15 @@ GitHub Issue を親子構造で作成します。
 
 作成する Issue（親・子とも同一）に GitHub Milestone を割り当てるかユーザーに確認する。
 
+**milestone 非運用リポジトリのガード**: リポジトリに milestone が 1 件も存在しない場合
+（closed 含む）は milestone 非運用リポジトリとみなし、確認せずこのステップをスキップする
+（ユーザーが明示的に milestone 割当を求めた場合を除く）。
+
+```bash
+MILESTONE_COUNT=$(gh api "repos/{owner}/{repo}/milestones?state=all" --jq 'length')
+# MILESTONE_COUNT が 0 なら、このステップをスキップして Step 2 へ進む
+```
+
 - 割り当てる場合:
   - 親 Issue 番号が分かっている場合（既存ツリーへの追加等）は、
     `gh issue view <親番号> --json milestone --jq '.milestone.title // empty'` で親の milestone を
