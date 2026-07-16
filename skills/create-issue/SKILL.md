@@ -39,6 +39,9 @@ GitHub Issue を親子構造で作成します。
     受け付けないため、先に `gh api --method POST "repos/{owner}/{repo}/milestones" -f "title=<名前>"`
     で作成する（同名の closed milestone があると 422 になるため reopen か別名をユーザーに確認する）
   - 決定した名前を `MILESTONE` に設定する
+  - 親 Issue 番号が分かっていて親が milestone 未設定の場合は、決定した `MILESTONE` を
+    親にも `gh issue edit <親番号> --milestone "${MILESTONE}"` で反映する
+    （子だけ milestone が付き親が未設定のまま残る不整合を防ぐ。冪等）
 - 割り当てない場合: `MILESTONE` は空のまま Step 2 以降へ進む（Issue は milestone なしで作成する）
 
 ### Step 2: 親 Issue を作成する
