@@ -41,6 +41,15 @@ Agent ツールでセキュリティ確認を行う。
 
 この PR で close する予定の Issue（same-repo のみ）を特定し、milestone の割当状況を確認する。
 
+**milestone 非運用リポジトリのガード**: リポジトリに milestone が 1 件も存在しない場合
+（closed 含む）は milestone 非運用リポジトリとみなし、このステップ全体を確認・警告なしで
+スキップする（milestone を使わないリポジトリの PR 作成にノイズを加えない）。
+
+```bash
+MILESTONE_COUNT=$(gh api "repos/{owner}/{repo}/milestones?state=all" --jq 'length')
+# MILESTONE_COUNT が 0 なら、このステップをスキップして Step 3 へ進む
+```
+
 1. 候補の特定: 作業対象の Issue 番号（会話文脈）・ブランチのコミットメッセージ中の
    `Closes #N` / `Fixes #N` / `Resolves #N` 参照から候補を挙げる
 2. close 可否の確認: 候補ごとに「この PR で当該 Issue が完了するか」を確認する
