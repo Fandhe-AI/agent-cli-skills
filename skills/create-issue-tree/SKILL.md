@@ -76,7 +76,8 @@ ROOT_NUMBER=123  # --root で渡された番号（未指定なら空のまま）
 
 - `--milestone` が指定されている場合: その値をそのまま `MILESTONE` として使用する
   （`--root` も同時指定されている場合、ルート側の milestone より `--milestone` を優先する。
-  ルート側と異なる値の場合は、ルートの milestone も合わせて更新してよいかユーザーに確認する）
+  ルート側と異なる値の場合は、ルートの milestone も合わせて更新してよいかユーザーに確認する。
+  更新しないと回答された場合はツリー内で milestone が混在する点を伝えたうえで続行する）
 - `--milestone` 未指定かつ `--root` 指定時: 既存ルートの milestone を自動継承する
   （milestone が取得できた場合のみユーザーへの確認は不要）
 
@@ -100,6 +101,8 @@ ROOT_NUMBER=123  # --root で渡された番号（未指定なら空のまま）
 
   ユーザーが一覧にない新規 milestone 名を入力した場合、`gh issue create --milestone` は
   既存の milestone 名しか受け付けないため、使用前に milestone 自体を作成する。
+  同名の closed milestone が既に存在すると作成が 422（already_exists）で失敗するため、
+  その場合は reopen するか別名にするかをユーザーに確認する。
 
   ```bash
   gh api --method POST "repos/{owner}/{repo}/milestones" -f "title=${MILESTONE}"
@@ -199,6 +202,12 @@ while true; do
   PAGE=$((PAGE + 1))
 done
 [[ -n "${PHASE_NUMBER}" ]] && echo "既存の Phase 親 issue を再利用: #${PHASE_NUMBER}"
+
+# 再利用する Phase 親が milestone 未設定の場合はここで揃える（milestone 導入前に
+# 作られたツリーへの追記で、新規の子だけに milestone が付く不整合を防ぐ。冪等）
+if [[ -n "${PHASE_NUMBER}" && -n "${MILESTONE}" ]]; then
+  gh issue edit "${PHASE_NUMBER}" --milestone "${MILESTONE}"
+fi
 ```
 
 タイトル規約が `feat(phase-N):` と異なるツリーでは上記の自動判定に頼らず、候補をユーザーに
