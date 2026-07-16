@@ -29,9 +29,11 @@ GitHub Issue を親子構造で作成します。
 
 - 割り当てる場合:
   - 親 Issue 番号が分かっている場合（既存ツリーへの追加等）は、
-    `gh issue view <親番号> --json milestone --jq '.milestone.title'` で親の milestone を
-    取得し、継承してよいかユーザーに確認する
-  - 不明な場合は `gh api repos/{owner}/{repo}/milestones --jq '.[] | select(.state=="open") | .title'`
+    `gh issue view <親番号> --json milestone --jq '.milestone.title // empty'` で親の milestone を
+    取得し、継承してよいかユーザーに確認する。取得結果が空（親が milestone 未設定）の場合は
+    継承せず、次の一覧提示フローへ進む
+  - 親が不明・親の milestone が空の場合は
+    `gh api repos/{owner}/{repo}/milestones --jq '.[] | select(.state=="open") | .title'`
     でオープン中の milestone 一覧を提示し、選んでもらう
   - 一覧にない新規 milestone 名を使う場合は、`gh issue create --milestone` が既存名しか
     受け付けないため、先に `gh api --method POST "repos/{owner}/{repo}/milestones" -f "title=<名前>"`
