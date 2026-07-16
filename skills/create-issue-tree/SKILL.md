@@ -70,7 +70,9 @@ create-issue-tree requirements.md --milestone "v2.0"
 書き換えてから中断する事故を防ぐ。Step 3 側では再代入・再検証しない）。
 
 ```bash
-ROOT_NUMBER="${ROOT_NUMBER:-}"  # --root で渡された番号を設定する（未指定なら空のまま）
+# --root で渡された Issue 番号を実際の値で代入する（実行時に Claude が置き換える）
+# 例: --root 123 が指定された場合 → ROOT_NUMBER="123" / --root 未指定の場合 → ROOT_NUMBER=""
+ROOT_NUMBER="<--root で渡された Issue 番号（未指定なら空文字）>"
 
 # --root 指定時のみ: OPEN でなければ milestone 操作より前に中止する
 # （新規ツリー作成で ROOT_NUMBER が空の場合はこの検証をスキップする）
