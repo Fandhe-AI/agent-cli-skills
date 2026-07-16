@@ -120,7 +120,8 @@ fi
 
 ```bash
 git log --oneline -- "${LOCAL_SKILL_DIR}/"
-git diff HEAD~1 HEAD -- "${LOCAL_SKILL_DIR}/"
+# 親コミットがない場合（初回コミット・shallow clone 等）は作業ツリー差分にフォールバックする
+git diff HEAD~1 HEAD -- "${LOCAL_SKILL_DIR}/" 2>/dev/null || git diff -- "${LOCAL_SKILL_DIR}/"
 ```
 
 ユーザーに「この改修内容で upstream に PR を作ってよいか」を確認します。
