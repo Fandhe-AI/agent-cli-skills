@@ -78,13 +78,18 @@ ROOT_NUMBER=123  # --root で渡された番号（未指定なら空のまま）
   （`--root` も同時指定されている場合、ルート側の milestone より `--milestone` を優先する。
   ルート側と異なる値の場合は、ルートの milestone も合わせて更新してよいかユーザーに確認する）
 - `--milestone` 未指定かつ `--root` 指定時: 既存ルートの milestone を自動継承する
-  （ユーザーへの確認は不要）
+  （milestone が取得できた場合のみユーザーへの確認は不要）
 
   ```bash
   MILESTONE=$(gh issue view "${ROOT_NUMBER}" --json milestone --jq '.milestone.title // empty')
   ```
 
-- どちらも未指定の場合: milestone を割り当てるかユーザーに確認する。
+  `MILESTONE` が空（既存ルートに milestone が未設定）の場合は自動継承とみなさず、
+  「どちらも未指定の場合」と同じユーザー確認フローへ進む（サイレントに milestone なしで
+  進行しない）。
+
+- どちらも未指定の場合、または `--root` 指定時に継承すべき milestone が空だった場合:
+  milestone を割り当てるかユーザーに確認する。
   割り当てる場合はオープン中の milestone 一覧を提示して選ばせるか、新規 milestone 名の
   入力を受け付けて `MILESTONE` に設定する。割り当てないと回答されたら `MILESTONE` は
   空のまま Step 3 以降へ進む（issue は milestone なしで作成される）。
@@ -98,6 +103,16 @@ ROOT_NUMBER=123  # --root で渡された番号（未指定なら空のまま）
 
   ```bash
   gh api --method POST "repos/{owner}/{repo}/milestones" -f "title=${MILESTONE}"
+  ```
+
+  `--root` 指定時に継承すべき milestone が空でこのフローに合流した場合、決定した
+  `MILESTONE` を既存ルート issue にも反映する（子だけ milestone が付き、ルートが
+  未設定のまま残る不整合を防ぐ）。
+
+  ```bash
+  if [[ -n "${ROOT_NUMBER}" && -n "${MILESTONE}" ]]; then
+    gh issue edit "${ROOT_NUMBER}" --milestone "${MILESTONE}"
+  fi
   ```
 
 ### Step 3: ルート（トラッキング）issue を作成する
@@ -385,7 +400,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" \
 | `--root` を指定せず 2 回目の部分起票でルート issue が重複作成される | 2 回目以降は必ず `--root <既存ルートissue番号>` を渡す |
 | `sub_issue_id` に issue 番号をそのまま渡す | `gh api .../issues/<number> --jq '.id'` で database id を取得してから POST する |
 | phase ラベルが存在しないリポジトリで issue 作成が失敗する | Step 4 冒頭の `gh label create "phase:${PHASE}"` を必ず先に実行する |
-| `--root` 追記時に既存ルートの milestone が未設定で、子 issue も milestone なしになる | Step 2.5 で `MILESTONE` が空になった場合は先に `gh issue edit "${ROOT_NUMBER}" --milestone <名前>` でルートへ付与してから起票し直す |
+| `--root` 追記時に既存ルートの milestone が未設定なのに気づかず milestone なしで起票してしまう | Step 2.5 は継承結果が空ならユーザー確認フローへ自動的に合流する（サイレント進行しない）。確認で milestone を選ぶとルート issue にも反映される |
 | closed 親の下に open issue が残置される | Phase 親を close する前に全子 issue の close を確認する |
 
 ## 注意事項
