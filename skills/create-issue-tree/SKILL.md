@@ -70,13 +70,16 @@ create-issue-tree requirements.md --milestone "v2.0"
 書き換えてから中断する事故を防ぐ。Step 3 側では再代入・再検証しない）。
 
 ```bash
-ROOT_NUMBER=123  # --root で渡された番号（未指定なら空のまま）
+ROOT_NUMBER="${ROOT_NUMBER:-}"  # --root で渡された番号を設定する（未指定なら空のまま）
 
-# --root 指定時: OPEN でなければ milestone 操作より前に中止する
-ROOT_STATE=$(gh issue view "${ROOT_NUMBER}" --json state --jq '.state')
-if [[ "${ROOT_STATE}" != "OPEN" ]]; then
-  echo "エラー: ルート issue #${ROOT_NUMBER} は OPEN ではありません (state: ${ROOT_STATE})。中止します。"
-  exit 1
+# --root 指定時のみ: OPEN でなければ milestone 操作より前に中止する
+# （新規ツリー作成で ROOT_NUMBER が空の場合はこの検証をスキップする）
+if [[ -n "${ROOT_NUMBER}" ]]; then
+  ROOT_STATE=$(gh issue view "${ROOT_NUMBER}" --json state --jq '.state')
+  if [[ "${ROOT_STATE}" != "OPEN" ]]; then
+    echo "エラー: ルート issue #${ROOT_NUMBER} は OPEN ではありません (state: ${ROOT_STATE})。中止します。"
+    exit 1
+  fi
 fi
 ```
 
