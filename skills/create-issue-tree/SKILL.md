@@ -104,8 +104,9 @@ MILESTONE_COUNT=$(gh api "repos/{owner}/{repo}/milestones?state=all" --jq 'lengt
   ```
 
   `MILESTONE` が空（既存ルートに milestone が未設定）の場合は自動継承とみなさず、
-  「どちらも未指定の場合」と同じユーザー確認フローへ進む（サイレントに milestone なしで
-  進行しない）。
+  「どちらも未指定の場合」と同じユーザー確認フローへ進む（リポジトリに milestone が
+  存在するのにサイレントに milestone なしで進行しない。milestone が 1 件もない場合は
+  冒頭の非運用ガードが先に働くため、この確認には到達しない）。
 
 - どちらも未指定の場合、または `--root` 指定時に継承すべき milestone が空だった場合:
   milestone を割り当てるかユーザーに確認する。
@@ -418,7 +419,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" \
 | `--root` を指定せず 2 回目の部分起票でルート issue が重複作成される | 2 回目以降は必ず `--root <既存ルートissue番号>` を渡す |
 | `sub_issue_id` に issue 番号をそのまま渡す | `gh api .../issues/<number> --jq '.id'` で database id を取得してから POST する |
 | phase ラベルが存在しないリポジトリで issue 作成が失敗する | Step 4 冒頭の `gh label create "phase:${PHASE}"` を必ず先に実行する |
-| `--root` 追記時に既存ルートの milestone が未設定なのに気づかず milestone なしで起票してしまう | Step 2.5 は継承結果が空ならユーザー確認フローへ自動的に合流する（サイレント進行しない）。確認で milestone を選ぶとルート issue にも反映される |
+| `--root` 追記時に既存ルートの milestone が未設定なのに気づかず milestone なしで起票してしまう | リポジトリに milestone が存在する場合、Step 2.5 は継承結果が空ならユーザー確認フローへ自動的に合流する（確認で milestone を選ぶとルート issue にも反映される）。milestone が 1 件もない非運用リポジトリでは非運用ガードによる milestone なし起票が正常動作 |
 | closed 親の下に open issue が残置される | Phase 親を close する前に全子 issue の close を確認する |
 
 ## 注意事項
