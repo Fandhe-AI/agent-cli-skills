@@ -233,6 +233,9 @@ const PR_CREATE_SCHEMA = {
   properties: {
     prNumber: { type: 'number', description: '作成した PR 番号。作成できなければ 0' },
     summary: { type: 'string' },
+    // pr-create の worktree は push 完了時点で origin に成果が存在するため保持価値がない。
+    // 呼び出し元が返却直後に削除して残骸の蓄積を防ぐ（イシュー close 時まで残さない）。
+    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
   },
 }
 
@@ -250,6 +253,10 @@ const REVIEW_SCHEMA = {
       description: '全指摘のうち最も高い重要度。指摘なし（state=ok）は none。最終 Review ラウンドで low/none なら通過扱いにするため必須。',
     },
     summary: { type: 'string', description: 'ok の場合は確認内容の要約。needs-fix の場合は全指摘を重要度付きで列挙' },
+    // Review は読み取り専用（判定のみ）で worktree に成果物を残さないため、
+    // 呼び出し元が返却直後に削除する。impl / fix の worktree（未 push の実装コミットを
+    // 保持する唯一の場所）とは扱いが異なる点に注意。
+    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
   },
 }
 
@@ -427,9 +434,13 @@ async function updateState(issueNumber, patch, options = {}) {
   // 記録するケース）、削除後に .worktree を "" に上書きすると記録したばかりの新パスの
   // 追跡が失われる。クリアは「patch が worktree を持たない」「patch の worktree が空」
   // 「削除対象と同一パス」の場合に限る
+  // options.preserveWorktreeField: 追跡中の worktree（impl / fix）とは別の使い捨て worktree
+  // （review / pr-create）を削除する場合に true。patch が空でも .worktree を消さないことで、
+  // 状態ファイルが指す実装 worktree の追跡を失わないようにする。
   const patchWorktree = typeof patch.worktree === 'string' ? patch.worktree : null
   const clearWorktreeAfterCleanup =
-    patchWorktree === null || patchWorktree === '' || patchWorktree === cleanupWorktreePath
+    options.preserveWorktreeField !== true &&
+    (patchWorktree === null || patchWorktree === '' || patchWorktree === cleanupWorktreePath)
 
   // deleteBranch: Recover の discard 時にのみ使用。branch 名を isValidBranchName で検証し、
   // git branch -D -- <branch> で安全に削除する（-- 終端でオプション誤認を防ぐ）。
@@ -483,7 +494,8 @@ async function updateState(issueNumber, patch, options = {}) {
                   ]
                 : [
                     `5. ${STATE_FILE} の .items["${issueNumber}"].worktree は更新しない`,
-                    `   （状態ファイル更新タスクで新しい worktree パスを記録済みのため、上書きしないこと）。`,
+                    `   （削除対象は追跡中の worktree とは別物のため。新しい worktree パスを記録済みの場合、`,
+                    `   または review / pr-create の使い捨て worktree を削除した場合が該当する。上書きしないこと）。`,
                   ]),
             ]
           : []),
@@ -524,6 +536,128 @@ async function updateState(issueNumber, patch, options = {}) {
     return false
   }
   return true
+}
+
+// 本ラン内で実際に観測した worktree の絶対パス集合。
+// 最終スイープ（sweepClosedWorktrees）の削除対象を、この集合の要素だけに限定する。
+//
+// 当初はパスの命名規約（親ディレクトリ + ラン ID プレフィックス）を推測して絞り込んでいたが、
+// その方式は「ホスト（Workflow ランタイム）の worktree 命名がラン単位で一意である」という
+// 検証不能な前提に依存していた。前提が崩れた場合の失敗方向が「削除不足」ではなく
+// 「git worktree remove --force による削除過多」であり、並行する別ランや利用者が手動で
+// 作った worktree の未コミット変更を破棄し得るため、推測を廃して実測値のみを使う。
+// この方式ならホスト側の命名規約に一切依存しない。
+const observedWorktreePaths = new Set()
+
+// エージェントが返した worktree パスを記録し、検証済みのパスを返す。
+// 未検証パス（sanitizeWorktreePath 不合格）は記録も返却もしない。
+//
+// 記録は「エージェントの返却値を受け取った時点」で行い、状態ファイルへの書き込み成否には
+// 依存しない。これによりスイープ本来の目的（状態ファイル書き込み失敗で追跡から漏れた
+// 残骸の回収）が維持される。worktree を生成する全経路（impl / fix / review / pr-create）が
+// 本関数を通ること。
+function noteWorktreePath(rawPath) {
+  const p = sanitizeWorktreePath(rawPath ?? '')
+  if (!p) return ''
+  observedWorktreePaths.add(p)
+  return p
+}
+
+// review / pr-create のような「成果物を保持しない使い捨て worktree」を返却直後に削除する。
+// impl / fix の worktree（未 push の実装コミットを保持する唯一の場所）は対象外であり、
+// そちらは merged 確定時の cleanupWorktree と最終スイープが扱う。
+// preserveWorktreeField: true により、状態ファイルが追跡する実装 worktree のパスは消さない。
+//
+// 削除の成否を握り潰さない: 失敗を「削除した」とログすると、本修正が解決しようとしている
+// 「取りこぼしに気づけない」問題そのものを再生産するため、失敗時は警告として可視化する
+// （残骸自体は最終スイープが回収する）。
+async function cleanupEphemeralWorktree(issueNumber, rawPath, kind) {
+  const p = noteWorktreePath(rawPath)
+  if (!p) {
+    // フォーマット不正パスを無言で捨てると、observedWorktreePaths にも載らず最終スイープでも
+    // 永久に回収できなくなる。impl / fix 経路の「追跡不能」警告と同じ粒度で可視化する。
+    log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できず追跡不能（削除できていない可能性がある）`)
+    return
+  }
+  const ok = await updateState(issueNumber, {}, { cleanupWorktree: p, preserveWorktreeField: true })
+  if (ok) {
+    log(`#${issueNumber}: ${kind} worktree を削除した（${p}）`)
+  } else {
+    log(`#${issueNumber}: ${kind} worktree の削除に失敗した（${p}）。最終スイープで回収を試みる`)
+  }
+}
+
+const SWEEP_SCHEMA = {
+  type: 'object',
+  required: ['removed'],
+  properties: {
+    removed: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '削除した worktree の絶対パス一覧。削除ゼロなら空配列',
+    },
+    retained: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'failed / blocked のため意図的に保持した worktree の絶対パス一覧',
+    },
+  },
+}
+
+// ラン終了時の worktree スイープ。
+// クローズ（merged / closed）に至ったイシューの worktree を残さないことを保証する最終防衛線であり、
+// 個別削除経路が状態ファイル書き込み失敗等で取りこぼした残骸を回収する。
+// 保持するのは failed / blocked イシューが状態ファイルに記録した worktree のみ（Recover 用）。
+// 削除範囲は「本ラン内で実際に観測した worktree パス」（observedWorktreePaths）に限定する。
+// パスの命名規約からの推測は行わないため、並行ランや利用者が手動作成した worktree には
+// 構造的に触れ得ない。観測ゼロなら削除を一切行わない（fail-safe）。
+async function sweepClosedWorktrees() {
+  if (observedWorktreePaths.size === 0) {
+    log('worktree スイープ: 本ランで worktree を観測しなかったため削除を行わない')
+    return []
+  }
+  const candidatesJson = JSON.stringify([...observedWorktreePaths])
+  const v = await agent(
+    [
+      'worktree スイープタスク（ラン終了時の残骸回収）。',
+      'クローズ済みイシューの git worktree を削除し、失敗・中断イシューの worktree のみ残す。',
+      '',
+      '対象パス一覧（本ランが作成した worktree。JSON 配列）:',
+      candidatesJson,
+      '',
+      '重要: 削除してよいのは上記一覧に含まれるパスだけである。一覧にないパスは、',
+      '並行して走る別ランや利用者が手動で作成した worktree の可能性があるため、',
+      'どのような条件でも削除してはならない（一覧外のパスへの推測・パターン一致は禁止）。',
+      '',
+      '手順:',
+      `1. 保持対象パスを取得する（failed / blocked / monitoring のイシューが記録した worktree）:`,
+      `     jq -r '.items | to_entries[] | select(.value.status == "failed" or .value.status == "blocked" or .value.status == "monitoring") | .value.worktree | select(. != null and . != "")' ${STATE_FILE}`,
+      `   monitoring は halt 等で中断したイシュー。状態ファイルが worktree を指したまま実体だけ消えると`,
+      `   ディスクと状態の乖離が生じるため保持する（Recover 用の failed / blocked と同じ扱い）。`,
+      `   ${STATE_FILE} が存在しない・パースできない場合は削除を一切行わず removed: [] を返して終了する（fail-safe）。`,
+      '2. git worktree list --porcelain を実行し、"worktree " 行から登録済みパスを列挙する。',
+      '   先頭エントリはメインリポジトリ自身であり、絶対に削除対象へ含めない。',
+      '3. 削除候補 = 「上記の対象パス一覧に含まれる」かつ「手順 2 の登録済みパスに実在する」かつ',
+      '   「手順 1 の保持対象パスに含まれない」パス。この 3 条件をすべて満たすものだけを候補とする。',
+      '4. 各候補を 1 件ずつ、パスをシェル変数に格納してから削除する（インジェクション防止）:',
+      '     p="<候補パス>"',
+      '     git worktree remove --force -- "$p"',
+      '   削除に失敗したパスはスキップし、残りの候補の処理を継続する（1 件の失敗で中断しない）。',
+      '5. 全候補の処理後に git worktree prune を実行する。',
+      '6. removed に実際に削除できたパス、retained に手順 1 の保持対象パスを入れて返す。',
+      '',
+      '注意: ブランチは削除しない（git branch -D は実行しない）。未 push のコミットを持つブランチが',
+      '含まれ得るため、ブランチの寿命は worktree の寿命と切り離す。',
+    ].join('\n'),
+    { label: 'worktree:sweep', phase: 'State', model: 'haiku', effort: 'low', schema: SWEEP_SCHEMA },
+  )
+  const removed = Array.isArray(v?.removed) ? v.removed : []
+  if (removed.length > 0) {
+    log(`worktree スイープ: ${removed.length} 件を削除した`)
+  } else {
+    log('worktree スイープ: 削除対象なし')
+  }
+  return removed
 }
 
 // 全イシューを pending で一括初期化する（既存状態があるものは上書きしない）
@@ -619,7 +753,8 @@ function reviewPrompt(item, impl) {
     '4. highestSeverity に全指摘のうち最も高い重要度を入れる（Critical→critical / High→high / Medium→medium / Low→low）。指摘なし（state=ok）は none。',
     '   重要: 重要度は厳密に判定すること。Low は「動作に影響しない様式・命名・重複・行数・コメント等の改善提案」に限る。',
     '   実バグ・誤った挙動・セキュリティ・認可・データ不整合・エッジケースの欠落は最低でも medium とする（最終ラウンドで Low のみは通過扱いになるため）。',
-    '返却: state（"ok" または "needs-fix"）/ highestSeverity / summary。',
+    '5. pwd の結果を worktreePath として返す（呼び出し元が本 worktree を削除して残骸の蓄積を防ぐため）。',
+    '返却: state（"ok" または "needs-fix"）/ highestSeverity / summary / worktreePath（pwd の結果）。',
   ].join('\n')
 }
 
@@ -788,7 +923,8 @@ function prCreatePrompt(item, impl, outOfScope) {
     `   body に必ず「Closes #${item.number}」を含めること。`,
     `   （ブランチ名は ${JSON.stringify(branch)} — 変数展開不要、そのまま使用する）`,
     '3. PR 作成成功後、prNumber を返す。',
-    '返却: prNumber（失敗時 0）/ summary（push・PR 作成の結果要約）。',
+    '4. pwd の結果を worktreePath として返す（呼び出し元が本 worktree を削除して残骸の蓄積を防ぐため）。',
+    '返却: prNumber（失敗時 0）/ summary（push・PR 作成の結果要約）/ worktreePath（pwd の結果）。',
   ].join('\n')
 }
 
@@ -1430,7 +1566,7 @@ async function runImplement(item) {
           recordFailure({ issue: item.number, reason })
           return false
         }
-        impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? ''), prNumber: 0 }
+        impl = { ...impl, worktreePath: noteWorktreePath(impl.worktreePath ?? ''), prNumber: 0 }
         // impl 完了直後: reviewing に遷移し branch / worktree を記録する
         // continue 経路では旧 worktree は既に掃除済みのため cleanupWorktree は渡さない
         await updateState(item.number, {
@@ -1543,8 +1679,9 @@ async function runImplement(item) {
         recordFailure({ issue: item.number, reason })
         return false
       }
-      // impl が返した worktreePath もホワイトリスト検証を通す
-      impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? ''), prNumber: 0 }
+      // impl が返した worktreePath もホワイトリスト検証を通す。
+      // あわせて最終スイープの削除対象集合（observedWorktreePaths）へ記録する。
+      impl = { ...impl, worktreePath: noteWorktreePath(impl.worktreePath ?? ''), prNumber: 0 }
       // impl 完了直後: reviewing に遷移し branch / worktree を記録する。
       // PR はまだ作成していないため pr: 0 を記録する（PR 作成は Review 通過後）。
       // フォールバック前に保存済みの旧 worktree があれば削除して孤児化を防ぐ
@@ -1589,6 +1726,10 @@ async function runImplement(item) {
         schema: REVIEW_SCHEMA,
         isolation: 'worktree',
       })
+      // Review worktree は読み取り専用（判定のみ）で保持価値がないため返却直後に削除する。
+      // currentWorktreePath へは代入しない（同変数は impl / fix の worktree を指し続ける必要が
+      // あり、上書きすると後続の cleanupWorktree が実装 worktree を取り違えて漏らす）。
+      await cleanupEphemeralWorktree(item.number, r?.worktreePath, 'review')
       if (r?.state === 'ok') {
         reviewPassed = true
         log(`#${item.number}: Review 通過 — ${sanitize(r.summary ?? '')}`)
@@ -1633,7 +1774,7 @@ async function runImplement(item) {
         schema: FIX_SCHEMA,
         isolation: 'worktree',
       })
-      const newWorktreePathReview = sanitizeWorktreePath(fReview?.worktreePath ?? '')
+      const newWorktreePathReview = noteWorktreePath(fReview?.worktreePath ?? '')
       const fixReviewSucceeded = fReview !== null && fReview !== undefined && typeof fReview.pushed === 'boolean'
       if (!fixReviewSucceeded) {
         const fixFailReason = `Review fix エージェントが無効な結果を返した（${fixCount + 1} 回目）`
@@ -1688,6 +1829,9 @@ async function runImplement(item) {
       schema: PR_CREATE_SCHEMA,
       isolation: 'worktree',
     })
+    // push 完了後は成果が origin 上に存在するため pr-create worktree に保持価値はない。
+    // 失敗時も同様（回復は impl 手順 0b-b のリモートブランチ再利用が担い、この worktree に依存しない）。
+    await cleanupEphemeralWorktree(item.number, prCreateResult?.worktreePath, 'pr-create')
     if (!prCreateResult || !Number.isInteger(prCreateResult.prNumber) || prCreateResult.prNumber <= 0) {
       const reason = sanitize(prCreateResult?.summary ?? 'push・PR 作成エージェントが異常終了した、または prNumber が不正')
       // push は成功している可能性があるが PR 作成に失敗したため monitoring には移行できない。
@@ -1790,7 +1934,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
       // fix 結果が有効かどうかを判定する:
       // - f が null/undefined でない
       // - worktreePath が sanitize を通る（空文字でも可）かつ pushed が boolean
-      const newWorktreePath = sanitizeWorktreePath(f?.worktreePath ?? '')
+      const newWorktreePath = noteWorktreePath(f?.worktreePath ?? '')
       const fixSucceeded = f !== null && f !== undefined && typeof f.pushed === 'boolean'
       if (!fixSucceeded) {
         // fix エージェントが null/不正な値を返した場合: fixCount を消費せず即座に blocked とする
@@ -2156,4 +2300,15 @@ if (interrupted.length > 0) {
 }
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)
-return { parent, baseBranch, parallel: concurrency, total: queue.length, done: results, failures, notStarted, interrupted, halted }
+
+// --- 最終 worktree スイープ: クローズ済みイシューの worktree を残さない ---
+// 個別の削除経路（merged 確定時の cleanupWorktree、review / pr-create の即時削除）が
+// 状態ファイル書き込み失敗などで取りこぼした残骸を、ラン終了時にまとめて回収する。
+// 保持するのは failed / blocked / monitoring イシューの worktree のみ（Recover・監視再開が使うため）。
+// 削除対象は本ラン内で実際に観測した worktree パス（observedWorktreePaths）に限定する。
+// パスの命名規約からの推測は行わないため、並行して走る別ランや利用者が手動で作った
+// worktree は構造的に対象になり得ない。観測ゼロなら何も削除しない（fail-safe）。
+// この方式を選んだ理由は observedWorktreePaths の定義（本ファイル冒頭付近）を参照。
+const sweptWorktrees = await sweepClosedWorktrees()
+
+return { parent, baseBranch, parallel: concurrency, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees }
