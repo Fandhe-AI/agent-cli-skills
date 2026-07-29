@@ -572,18 +572,26 @@ const sweepEligiblePaths = new Set()
 // 「取りこぼしに気づけない」問題そのものを再生産するため、失敗時は警告として可視化する
 // （残骸自体は最終スイープが回収する）。
 async function cleanupEphemeralWorktree(issueNumber, rawPath, kind) {
-  const p = sanitizeWorktreePath(rawPath ?? '')
-  if (!p) {
-    // フォーマット不正パスを無言で捨てると、削除候補にも載らず最終スイープでも
-    // 永久に回収できなくなる。impl / fix 経路の「追跡不能」警告と同じ粒度で可視化する。
-    log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できず追跡不能（削除できていない可能性がある）`)
-    return
-  }
-  const ok = await updateState(issueNumber, {}, { cleanupWorktree: p, preserveWorktreeField: true })
-  if (ok) {
-    log(`#${issueNumber}: ${kind} worktree を削除した（${p}）`)
-  } else {
-    log(`#${issueNumber}: ${kind} worktree の削除に失敗した（${p}）。最終スイープで回収を試みる`)
+  try {
+    const p = sanitizeWorktreePath(rawPath ?? '')
+    if (!p) {
+      // フォーマット不正パスを無言で捨てると、削除候補にも載らず最終スイープでも
+      // 永久に回収できなくなる。impl / fix 経路の「追跡不能」警告と同じ粒度で可視化する。
+      log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できず追跡不能（削除できていない可能性がある）`)
+      return
+    }
+    const ok = await updateState(issueNumber, {}, { cleanupWorktree: p, preserveWorktreeField: true })
+    if (ok) {
+      log(`#${issueNumber}: ${kind} worktree を削除した（${p}）`)
+    } else {
+      log(`#${issueNumber}: ${kind} worktree の削除に失敗した（${p}）。最終スイープで回収を試みる`)
+    }
+  } catch (e) {
+    // updateState / agent の throw をここで吸収する。cleanup は review 成功処理・
+    // pr-create 後の監視状態保存より前に走るため、例外を伝播させると runOne の catch に
+    // 落ちて成功済みイシューが failed 扱いになり、PR 作成・マージ監視がスキップされる。
+    // ok:false と同じ非致命パスに倒し、残骸の回収は最終スイープに委ねる。
+    log(`⚠️ #${issueNumber}: ${kind} worktree の削除中に例外が発生した（${e?.message ?? e}）。最終スイープで回収を試みる`)
   }
 }
 
@@ -614,52 +622,60 @@ const SWEEP_SCHEMA = {
 // 候補外であり、状態ファイル書き込み失敗が削除過多へ倒れない（詳細は sweepEligiblePaths
 // の定義を参照）。候補ゼロなら削除を一切行わない（fail-safe）。
 async function sweepClosedWorktrees() {
-  if (sweepEligiblePaths.size === 0) {
-    log('worktree スイープ: 削除を試みた worktree がないため削除を行わない')
+  try {
+    if (sweepEligiblePaths.size === 0) {
+      log('worktree スイープ: 削除を試みた worktree がないため削除を行わない')
+      return []
+    }
+    const candidatesJson = JSON.stringify([...sweepEligiblePaths])
+    const v = await agent(
+      [
+        'worktree スイープタスク（ラン終了時の残骸回収）。',
+        'クローズ済みイシューの git worktree を削除し、失敗・中断イシューの worktree のみ残す。',
+        '',
+        '対象パス一覧（本ランが作成した worktree。JSON 配列）:',
+        candidatesJson,
+        '',
+        '重要: 削除してよいのは上記一覧に含まれるパスだけである。一覧にないパスは、',
+        '並行して走る別ランや利用者が手動で作成した worktree の可能性があるため、',
+        'どのような条件でも削除してはならない（一覧外のパスへの推測・パターン一致は禁止）。',
+        '',
+        '手順:',
+        `1. 保持対象パスを取得する（failed / blocked / monitoring のイシューが記録した worktree）:`,
+        `     jq -r '.items | to_entries[] | select(.value.status == "failed" or .value.status == "blocked" or .value.status == "monitoring") | .value.worktree | select(. != null and . != "")' ${STATE_FILE}`,
+        `   monitoring は halt 等で中断したイシュー。状態ファイルが worktree を指したまま実体だけ消えると`,
+        `   ディスクと状態の乖離が生じるため保持する（Recover 用の failed / blocked と同じ扱い）。`,
+        `   ${STATE_FILE} が存在しない・パースできない場合は削除を一切行わず removed: [] を返して終了する（fail-safe）。`,
+        '2. git worktree list --porcelain を実行し、"worktree " 行から登録済みパスを列挙する。',
+        '   先頭エントリはメインリポジトリ自身であり、絶対に削除対象へ含めない。',
+        '3. 削除候補 = 「上記の対象パス一覧に含まれる」かつ「手順 2 の登録済みパスに実在する」かつ',
+        '   「手順 1 の保持対象パスに含まれない」パス。この 3 条件をすべて満たすものだけを候補とする。',
+        '4. 各候補を 1 件ずつ、パスをシェル変数に格納してから削除する（インジェクション防止）:',
+        '     p="<候補パス>"',
+        '     git worktree remove --force -- "$p"',
+        '   削除に失敗したパスはスキップし、残りの候補の処理を継続する（1 件の失敗で中断しない）。',
+        '5. 全候補の処理後に git worktree prune を実行する。',
+        '6. removed に実際に削除できたパス、retained に手順 1 の保持対象パスを入れて返す。',
+        '',
+        '注意: ブランチは削除しない（git branch -D は実行しない）。未 push のコミットを持つブランチが',
+        '含まれ得るため、ブランチの寿命は worktree の寿命と切り離す。',
+      ].join('\n'),
+      { label: 'worktree:sweep', phase: 'State', model: 'haiku', effort: 'low', schema: SWEEP_SCHEMA },
+    )
+    const removed = Array.isArray(v?.removed) ? v.removed : []
+    if (removed.length > 0) {
+      log(`worktree スイープ: ${removed.length} 件を削除した`)
+    } else {
+      log('worktree スイープ: 削除対象なし')
+    }
+    return removed
+  } catch (e) {
+    // agent の throw をここで吸収する。最終スイープは run report の return 直前に走るため、
+    // 例外を伝播させると全イシュー処理完了後でも done / failures / notStarted / interrupted の
+    // 結果が失われる。残骸清掃の失敗は結果報告より優先されない（次ランのスイープが回収する）。
+    log(`⚠️ worktree スイープ中に例外が発生した（${e?.message ?? e}）。削除は行われなかった可能性がある`)
     return []
   }
-  const candidatesJson = JSON.stringify([...sweepEligiblePaths])
-  const v = await agent(
-    [
-      'worktree スイープタスク（ラン終了時の残骸回収）。',
-      'クローズ済みイシューの git worktree を削除し、失敗・中断イシューの worktree のみ残す。',
-      '',
-      '対象パス一覧（本ランが作成した worktree。JSON 配列）:',
-      candidatesJson,
-      '',
-      '重要: 削除してよいのは上記一覧に含まれるパスだけである。一覧にないパスは、',
-      '並行して走る別ランや利用者が手動で作成した worktree の可能性があるため、',
-      'どのような条件でも削除してはならない（一覧外のパスへの推測・パターン一致は禁止）。',
-      '',
-      '手順:',
-      `1. 保持対象パスを取得する（failed / blocked / monitoring のイシューが記録した worktree）:`,
-      `     jq -r '.items | to_entries[] | select(.value.status == "failed" or .value.status == "blocked" or .value.status == "monitoring") | .value.worktree | select(. != null and . != "")' ${STATE_FILE}`,
-      `   monitoring は halt 等で中断したイシュー。状態ファイルが worktree を指したまま実体だけ消えると`,
-      `   ディスクと状態の乖離が生じるため保持する（Recover 用の failed / blocked と同じ扱い）。`,
-      `   ${STATE_FILE} が存在しない・パースできない場合は削除を一切行わず removed: [] を返して終了する（fail-safe）。`,
-      '2. git worktree list --porcelain を実行し、"worktree " 行から登録済みパスを列挙する。',
-      '   先頭エントリはメインリポジトリ自身であり、絶対に削除対象へ含めない。',
-      '3. 削除候補 = 「上記の対象パス一覧に含まれる」かつ「手順 2 の登録済みパスに実在する」かつ',
-      '   「手順 1 の保持対象パスに含まれない」パス。この 3 条件をすべて満たすものだけを候補とする。',
-      '4. 各候補を 1 件ずつ、パスをシェル変数に格納してから削除する（インジェクション防止）:',
-      '     p="<候補パス>"',
-      '     git worktree remove --force -- "$p"',
-      '   削除に失敗したパスはスキップし、残りの候補の処理を継続する（1 件の失敗で中断しない）。',
-      '5. 全候補の処理後に git worktree prune を実行する。',
-      '6. removed に実際に削除できたパス、retained に手順 1 の保持対象パスを入れて返す。',
-      '',
-      '注意: ブランチは削除しない（git branch -D は実行しない）。未 push のコミットを持つブランチが',
-      '含まれ得るため、ブランチの寿命は worktree の寿命と切り離す。',
-    ].join('\n'),
-    { label: 'worktree:sweep', phase: 'State', model: 'haiku', effort: 'low', schema: SWEEP_SCHEMA },
-  )
-  const removed = Array.isArray(v?.removed) ? v.removed : []
-  if (removed.length > 0) {
-    log(`worktree スイープ: ${removed.length} 件を削除した`)
-  } else {
-    log('worktree スイープ: 削除対象なし')
-  }
-  return removed
 }
 
 // 全イシューを pending で一括初期化する（既存状態があるものは上書きしない）
