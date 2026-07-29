@@ -23,23 +23,35 @@ if ! REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null)"
   done
 fi
 
+# スキル実体ディレクトリの解決。upstream リポジトリは skills/、skills add 導入先は
+# .agents/skills/ にスキル実体を置くため、実在する方を採用する。
+# SKILLS_REL は .claude/skills/ から見た実体ディレクトリへの相対パス（symlink 作成に使用）。
+if [[ -d "${REPO_ROOT}/skills" ]]; then
+  SKILLS_DIR="${REPO_ROOT}/skills"
+  SKILLS_REL="../../skills"
+else
+  SKILLS_DIR="${REPO_ROOT}/.agents/skills"
+  SKILLS_REL="../../.agents/skills"
+fi
+SKILLS_LABEL="${SKILLS_DIR#${REPO_ROOT}/}"
+
 # ----------------------------------------------------------------
 # 用途1: スキルの symlink を作成する
 # ----------------------------------------------------------------
 # 元スキル: skill-authoring.md Step 2
 #   ln -s ../../skills/<name> .claude/skills/<name>
 #
-# .claude/skills/<name> → ../../skills/<name>/SKILL.md を辿れるようにする。
+# .claude/skills/<name> → ${SKILLS_REL}/<name>/SKILL.md を辿れるようにする。
 # 相対パスで指定することで、リポジトリをどこに clone しても壊れない。
 create_symlink() {
   local skill_name="${1:?スキル名が必要です}"
-  local skills_dir="${REPO_ROOT}/skills"
+  local skills_dir="${SKILLS_DIR}"
   local dotclaude_skills_dir="${REPO_ROOT}/.claude/skills"
 
   # スキルディレクトリの存在確認
   if [[ ! -d "${skills_dir}/${skill_name}" ]]; then
-    echo "[ERROR] skills/${skill_name}/ が存在しません。" >&2
-    echo "[INFO]  先に skills/${skill_name}/SKILL.md を作成してください。" >&2
+    echo "[ERROR] ${SKILLS_LABEL}/${skill_name}/ が存在しません。" >&2
+    echo "[INFO]  先に ${SKILLS_LABEL}/${skill_name}/SKILL.md を作成してください。" >&2
     exit 1
   fi
 
@@ -57,10 +69,10 @@ create_symlink() {
   # ln の -s オプションのみ使用。-f（強制上書き）は使わない（安全のため）
   (
     cd "${dotclaude_skills_dir}"
-    ln -s "../../skills/${skill_name}" "${skill_name}"
+    ln -s "${SKILLS_REL}/${skill_name}" "${skill_name}"
   )
 
-  echo "[OK] symlink 作成: .claude/skills/${skill_name} -> ../../skills/${skill_name}"
+  echo "[OK] symlink 作成: .claude/skills/${skill_name} -> ${SKILLS_REL}/${skill_name}"
 }
 
 # ----------------------------------------------------------------
@@ -91,7 +103,7 @@ check_symlinks() {
   echo ""
   if [[ "$broken" -gt 0 ]]; then
     echo "[WARN] リンク切れが ${broken} 件あります。"
-    echo "[INFO] 修正方法: ln -s ../../skills/<name> .claude/skills/<name>"
+    echo "[INFO] 修正方法: ln -s ${SKILLS_REL}/<name> .claude/skills/<name>"
   else
     echo "[OK] リンク切れなし"
   fi
@@ -101,10 +113,10 @@ check_symlinks() {
 # スキル一覧と symlink の対応を確認する
 # ----------------------------------------------------------------
 check_all_skills_have_symlinks() {
-  local skills_dir="${REPO_ROOT}/skills"
+  local skills_dir="${SKILLS_DIR}"
   local dotclaude_skills_dir="${REPO_ROOT}/.claude/skills"
 
-  echo "[INFO] skills/ ↔ .claude/skills/ の対応確認:"
+  echo "[INFO] ${SKILLS_LABEL}/ ↔ .claude/skills/ の対応確認:"
   echo ""
 
   local missing=0
@@ -128,7 +140,7 @@ check_all_skills_have_symlinks() {
       local skill_name
       skill_name=$(basename "${skill_dir}")
       if [[ ! -e "${dotclaude_skills_dir}/${skill_name}" ]]; then
-        echo "  ln -s ../../skills/${skill_name} .claude/skills/${skill_name}"
+        echo "  ln -s ${SKILLS_REL}/${skill_name} .claude/skills/${skill_name}"
       fi
     done
   else
