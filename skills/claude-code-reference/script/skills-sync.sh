@@ -13,7 +13,15 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# リポジトリルートの解決。frontmatter-check.sh と同一方針: 固定の相対深さは
+# skills add 導入先（.agents/skills/ 配下・4 階層）でルートを誤るため使わない。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null)"; then
+  REPO_ROOT="${SCRIPT_DIR}"
+  while [[ "${REPO_ROOT}" != "/" && ! -f "${REPO_ROOT}/skills-lock.json" && ! -d "${REPO_ROOT}/.git" ]]; do
+    REPO_ROOT="$(dirname "${REPO_ROOT}")"
+  done
+fi
 
 # ----------------------------------------------------------------
 # 用途1: スキルの symlink を作成する

@@ -19,11 +19,15 @@ argument-hint: "<skill-name> (例: create-skill summarize-pr)"
 
 スキルの雛形は `skills/claude-code-reference/sample/SKILL.sample.md` を参照します。
 
+## subagent フォールバック（skills add 導入先向け）
+
+本スキルが委譲する subagent（`skill-explorer`・`skill-author`・`skill-reviewer`・`frontmatter-linter`）は Fandhe-AI/agent-cli-skills リポジトリの `.claude/agents/` 定義を前提とする。**導入先リポジトリに該当 subagent が存在しない場合は委譲せず、各 Step の委譲プロンプトに記載した確認観点・入力・必須項目を main が直接実行する**。`frontmatter-linter` の代替としては `claude-code-reference` スキルの `script/frontmatter-check.sh` の実行、または Step 4 の検証観点の手動確認で足りる。導入先ではスキル実体が `.agents/skills/` に置かれるため、検索対象・出力先のパスは導入先の配置に読み替える。
+
 ## フロー
 
 ### Step 1: 既存スキルの重複確認（skill-explorer に委譲）
 
-**skill-explorer（subagent_type: skill-explorer）**に委譲して以下を確認させる。
+**skill-explorer（subagent_type: skill-explorer）**に委譲して以下を確認させる（存在しない場合は「subagent フォールバック」に従い main が直接確認する。以降の Step も同様）。
 
 ```
 subagent_type: skill-explorer

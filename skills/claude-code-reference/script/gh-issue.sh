@@ -17,7 +17,9 @@ REPO="${2:?第2引数 repo が必要です (例: agent-cli-skills)}"
 # ----------------------------------------------------------------
 # 親 Issue を作成する
 # ----------------------------------------------------------------
-# 返り値: 作成された Issue 番号（stdout）
+# 返り値: 作成された Issue の URL（stdout）
+# 注意: `gh issue create` は --json / -q をサポートしない（unknown flag で即失敗する）。
+#       作成された Issue の URL は stdout にそのまま出力されるため、それを捕捉する。
 create_parent_issue() {
   local title="$1"
 
@@ -44,8 +46,7 @@ create_parent_issue() {
 - Figma: （あれば記載）
 - 関連 Issue: #（あれば記載）
 EOF
-)" \
-    --json url -q '.url')
+)")
 
   echo "${issue_url}"
 }
@@ -53,8 +54,9 @@ EOF
 # ----------------------------------------------------------------
 # 子 Issue を作成する
 # ----------------------------------------------------------------
-# 返り値: 作成された Issue 番号（stdout）
+# 返り値: 作成された Issue の URL（stdout）
 # 警告: title・body は呼び出し元でサニタイズ済みのリテラルを渡すこと。外部入力を直接渡してはならない。
+# 注意: create_parent_issue と同じく --json は使えない。stdout の URL を捕捉する。
 create_child_issue() {
   local title="$1"
   local body="$2"
@@ -63,8 +65,7 @@ create_child_issue() {
   issue_url=$(gh issue create \
     --repo "${OWNER}/${REPO}" \
     --title "${title}" \
-    --body "${body}" \
-    --json url -q '.url')
+    --body "${body}")
 
   echo "${issue_url}"
 }
