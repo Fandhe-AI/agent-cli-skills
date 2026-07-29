@@ -19,7 +19,25 @@ git diff --staged
 
 staged がない場合は `git diff` も確認してユーザーに staging を案内する。
 
-### Step 2: Conventional Commits type を決定する
+### Step 2: シークレット混入チェック（必須）
+
+コミット実行前に、staged 差分へ秘密情報が含まれていないことを確認する。
+
+```bash
+# 認証情報ファイルの検出（.env・秘密鍵等。.env.example 等のテンプレートは除外）
+git diff --staged --name-only \
+  | grep -E '(^|/)\.env(\..+)?$|(^|/)(id_rsa|id_ed25519)(\..+)?$|\.(pem|p12|pfx|key)$' \
+  | grep -vE '\.(example|sample|template)$' || echo "認証情報ファイル: 検出なし"
+
+# 差分本文中のシークレットパターンの検出
+git diff --staged \
+  | grep -nE 'sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+|AIza[0-9A-Za-z_-]{35}|BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' \
+  || echo "シークレットパターン: 検出なし"
+```
+
+いずれかが検出された場合は**コミットを中止**し、ユーザーに警告して該当ファイルの unstage・該当行の除去を案内する。例示値・プレースホルダ等の誤検知と判断できる場合のみ、ユーザーの明示確認を得てから続行する。
+
+### Step 3: Conventional Commits type を決定する
 
 | type | 用途 |
 |------|------|
@@ -34,12 +52,12 @@ staged がない場合は `git diff` も確認してユーザーに staging を�
 | `ci` | CI 設定の変更 |
 | `perf` | パフォーマンス改善 |
 
-### Step 3: scope を推定する
+### Step 4: scope を推定する
 
 変更ファイルのパスから scope を推定する。
 複数にまたがる場合は省略可。
 
-### Step 4: コミットメッセージを生成してユーザーに確認する
+### Step 5: コミットメッセージを生成してユーザーに確認する
 
 フォーマット: `type(scope): subject`
 
@@ -52,7 +70,7 @@ refactor(ui): コンポーネント構造を整理
 
 ユーザーに提案して確認を取る。
 
-### Step 5: コミットを実行する
+### Step 6: コミットを実行する
 
 ```bash
 git commit -m "$(cat <<'EOF'
@@ -81,7 +99,8 @@ git log --oneline -3
 | 問題 | 回避策 |
 |------|--------|
 | 複数の関心事を 1 コミットに混ぜる | 関心事ごとに `git add -p` で staging を分けて別コミットにする |
-| type を誤選定する（バグ修正に `feat`、機能追加に `fix`）| Step 2 の type 表を参照し、差分の意図を優先して選ぶ |
+| type を誤選定する（バグ修正に `feat`、機能追加に `fix`）| Step 3 の type 表を参照し、差分の意図を優先して選ぶ |
+| シークレットチェックを飛ばして type 決定に進む | Step 2 は省略不可。検出時はコミットを中止してユーザーに警告する |
 | `--no-verify` でフックを回避しようとする | フック失敗の原因を調査・修正してから再コミットする（回避は禁止） |
 | 件名が 72 文字を超える | scope を省略するか subject を短縮する。詳細は body に書く |
 
@@ -90,4 +109,4 @@ git log --oneline -3
 - Breaking change がある場合は `!` を付ける: `feat!: ...` または body に `BREAKING CHANGE:` を記述
 - 件名は命令形・現在形で記述（日本語可）
 - 件名は 72 文字以内
-- `.env` や認証情報ファイルが含まれる場合は警告してコミットを中止する
+- `.env` や認証情報ファイルが含まれる場合は警告してコミットを中止する（Step 2 で必ず検出する）
