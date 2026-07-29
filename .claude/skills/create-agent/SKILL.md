@@ -46,6 +46,10 @@ argument-hint: "<category>/<agent-name> (例: create-agent quality/lint-runner)"
 
 読み取り専用 Agent には `Edit`・`Write`・`Bash` を **含めない**。
 
+## subagent フォールバック（skills add 導入先向け）
+
+本スキルが委譲する subagent（`agent-author`・`frontmatter-linter`）は Fandhe-AI/agent-cli-skills リポジトリの `.claude/agents/` 定義を前提とする。**導入先リポジトリに該当 subagent が存在しない場合は委譲せず、各 Step の委譲プロンプトに記載した入力・適用ルール・必須項目を main が直接実行して同じ成果物を作成する**。`frontmatter-linter` の代替としては `claude-code-reference` スキルの `script/frontmatter-check.sh` の実行、または Step 4 の検証観点の手動確認で足りる。適用ルール（`dotclaude-via-temp.md` 等）は導入先に存在するもののみ適用し、存在しない場合は `.claude/agents/` へ直接作成してよい。
+
 ## フロー
 
 ### Step 1: カテゴリと responsibilities を確認する
@@ -58,7 +62,7 @@ argument-hint: "<category>/<agent-name> (例: create-agent quality/lint-runner)"
 
 ### Step 2: agent-author に委譲してファイルを作成する
 
-**agent-author（subagent_type: agent-author）**に委譲してファイルを作成させる。
+**agent-author（subagent_type: agent-author）**に委譲してファイルを作成させる（存在しない場合は「subagent フォールバック」に従い main が直接作成する）。
 
 **重要**: `agent-author` は `dotclaude-via-temp.md` に従い、`_/dotclaude/agents/<category>/<name>.md` を経由して最終配置する（`.claude/agents/` への直接書き込みは行わない）。
 
@@ -96,7 +100,7 @@ prompt: |
 
 ### Step 4: frontmatter-linter で検証する
 
-**frontmatter-linter（subagent_type: frontmatter-linter）**に委譲して検証させる。
+**frontmatter-linter（subagent_type: frontmatter-linter）**に委譲して検証させる（存在しない場合は `frontmatter-check.sh` の実行または下記観点の手動確認で代替する）。
 
 検証観点:
 - `name` が kebab-case で正しく設定されているか

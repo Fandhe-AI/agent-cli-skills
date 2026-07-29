@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# frontmatter-check.sh — 全 SKILL.md / agent / rule の frontmatter 検査と symlink リンク切れ確認
+# frontmatter-check.sh — 全 SKILL.md / agent の frontmatter 検査と symlink・skills-lock 整合確認
 #
-# 使い方: ./script/frontmatter-check.sh [--skills | --agents | --rules | --symlinks | --all]
+# 使い方: ./script/frontmatter-check.sh [--skills | --agents | --symlinks | --lock | --all]
 # 元スキル: .claude/agents/quality/frontmatter-linter.md（検証項目 A〜F）
 #
 # このスクリプトは「読み取り専用」— ファイルの作成・変更・削除は一切行わない。
 
 set -euo pipefail
 
-# このスクリプトは skills/claude-code-reference/script/ 配下にあるため、リポジトリルートは3階層上
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# リポジトリルートの解決。本スクリプトは upstream では skills/claude-code-reference/script/
+# （3 階層）、skills add 導入先では .agents/skills/claude-code-reference/script/（4 階層）に
+# 置かれるため、固定の相対深さでは導入先でルートを誤る。git のトップレベルを第一候補とし、
+# git が使えない場合はマーカー（skills-lock.json / .git）を探して遡る。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null)"; then
+  REPO_ROOT="${SCRIPT_DIR}"
+  while [[ "${REPO_ROOT}" != "/" && ! -f "${REPO_ROOT}/skills-lock.json" && ! -d "${REPO_ROOT}/.git" ]]; do
+    REPO_ROOT="$(dirname "${REPO_ROOT}")"
+  done
+fi
 
 # ANSI カラー（ターミナル判定付き）
 if [[ -t 1 ]]; then
@@ -80,7 +89,9 @@ check_skills() {
   echo "=== A. SKILL.md frontmatter 検査 ==="
   echo ""
 
+  # upstream は skills/、skills add 導入先は .agents/skills/ にスキル実体を置く
   local skill_dir="${REPO_ROOT}/skills"
+  [[ -d "${skill_dir}" ]] || skill_dir="${REPO_ROOT}/.agents/skills"
   local any_ng=0
 
   for skill_md in "${skill_dir}"/*/SKILL.md; do
