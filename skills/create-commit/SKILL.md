@@ -24,18 +24,22 @@ staged がない場合は `git diff` も確認してユーザーに staging を�
 コミット実行前に、staged 差分へ秘密情報が含まれていないことを確認する。
 
 ```bash
-# 認証情報ファイルの検出（.env・秘密鍵等。.env.example 等のテンプレートは除外）
-git diff --staged --name-only \
+# 認証情報ファイルの検出（.env・秘密鍵等）。追加・変更（--diff-filter=ACMR）のみを対象とし、
+# 削除コミット（漏洩した .env の除去等の是正コミット）はブロックしない。
+# .env.example 等のテンプレートと公開鍵（.pub）は除外する。
+git diff --staged --name-only --diff-filter=ACMR \
   | grep -E '(^|/)\.env(\..+)?$|(^|/)(id_rsa|id_ed25519)(\..+)?$|\.(pem|p12|pfx|key)$' \
-  | grep -vE '\.(example|sample|template)$' || echo "認証情報ファイル: 検出なし"
+  | grep -vE '\.(example|sample|template|pub)$' || echo "認証情報ファイル: 検出なし"
 
-# 差分本文中のシークレットパターンの検出
-git diff --staged \
-  | grep -nE 'sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+|AIza[0-9A-Za-z_-]{35}|BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' \
+# 差分本文中のシークレットパターンの検出。追加行（^+。ファイルヘッダ +++ は除外）のみを対象とし、
+# 漏洩済みシークレットの削除（- 行）を妨げない。
+git diff --staged --diff-filter=ACMR \
+  | grep -E '^\+' | grep -v '^\+\+\+' \
+  | grep -E 'sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]+|AIza[0-9A-Za-z_-]{35}|BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY' \
   || echo "シークレットパターン: 検出なし"
 ```
 
-いずれかが検出された場合は**コミットを中止**し、ユーザーに警告して該当ファイルの unstage・該当行の除去を案内する。例示値・プレースホルダ等の誤検知と判断できる場合のみ、ユーザーの明示確認を得てから続行する。
+いずれかが検出された場合は**コミットを中止**し、ユーザーに警告して該当ファイルの unstage・該当行の除去を案内する。例示値・プレースホルダ等の誤検知と判断できる場合のみ、ユーザーの明示確認を得てから続行する。削除のみのコミット（`.env` の削除・漏洩キーの除去）は上記フィルタにより検出対象外であり、そのまま続行してよい。
 
 ### Step 3: Conventional Commits type を決定する
 
