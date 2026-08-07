@@ -69,6 +69,8 @@ skills/                               -- スキル本体（各ディレクトリ
     create-skill/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
     create-agent/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
     github-docs                       -- 参照スキル（symlink）
+    anthropic-claude-code             -- 参照スキル（symlink）
+    anthropic-claude-code-extend      -- 参照スキル（symlink）
     (他 create-commit 等は skills/ への symlink)
   workflows/
     implement-issue-tree.js           -- イシューツリー自動開発 Workflow（symlink: ../../skills/implement-issue-tree/script/implement-issue-tree.js）
@@ -173,7 +175,7 @@ create-skill, create-agent
 
 ### 参照スキル（.claude/skills/ に配置）
 
-github-docs
+github-docs, anthropic-claude-code, anthropic-claude-code-extend
 
 ## Conventions
 

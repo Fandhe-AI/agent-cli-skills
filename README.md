@@ -57,6 +57,8 @@ npx skills add Fandhe-AI/agent-cli-skills --all
     create-skill/                  -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
     create-agent/                  -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
     github-docs                    -- 参照スキル（symlink）
+    anthropic-claude-code          -- 参照スキル（symlink）
+    anthropic-claude-code-extend   -- 参照スキル（symlink）
   settings.json                      -- SessionStart hook（リマインダー）
 skills/
   comment-code/
@@ -160,6 +162,14 @@ skills/
 |--------|------|
 | **contribute-skill** | `skills-lock.json` の `source` が `Fandhe-AI/*` のスキルを手元で改修した後、upstream リポジトリへ PR を作成する |
 | **sync-skills-lock** | `skills-lock.json` の `computedHash` を upstream の最新と同期する（submodule 配下は対象外） |
+
+### 参照スキル（.claude/skills/ に配置）
+
+| スキル | 説明 |
+|--------|------|
+| **github-docs** | GitHub CLI（`gh`）の公式ドキュメント・リファレンス |
+| **anthropic-claude-code** | Claude Code CLI 本体のリファレンス（settings・env-vars・cli-reference・sessions 等） |
+| **anthropic-claude-code-extend** | Claude Code 拡張リファレンス（Agent Skills・slash commands・subagents・hooks・plugins・MCP 設定等） |
 
 ## Agents（サブエージェント）
 
