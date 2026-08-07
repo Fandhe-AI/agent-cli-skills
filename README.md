@@ -53,7 +53,12 @@ npx skills add Fandhe-AI/agent-cli-skills --all
     dotclaude-via-temp.md            -- .claude/ 操作時の一時ディレクトリルール
     description-style.md             -- description 著作スタイル
     reference-template.md            -- reference 型スキルの書式規約
-  skills/                            -- シンボリックリンク（skills/ → .claude/skills/）
+  skills/                          -- skills/ へのシンボリックリンク（一部実ディレクトリ）
+    create-skill/                  -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
+    create-agent/                  -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
+    github-docs                    -- 参照スキル（symlink）
+    anthropic-claude-code          -- 参照スキル（symlink）
+    anthropic-claude-code-extend   -- 参照スキル（symlink）
   settings.json                      -- SessionStart hook（リマインダー）
 skills/
   comment-code/
@@ -86,17 +91,6 @@ skills/
     SKILL.md                         -- 既存 Issue ツリーを棚卸し・更新
   update-claude/
     SKILL.md                         -- 既存 .claude/ 体系を診断・差分追補
-  create-skill/
-    SKILL.md                         -- 新規スキルを scaffold・symlink・update-docs まで自動化
-  create-agent/
-    SKILL.md                         -- 新規サブエージェントを scaffold（dotclaude-via-temp 準拠）
-  claude-code-reference/
-    SKILL.md                         -- Claude Code 本体の公式仕様リファレンス
-    reference/                       -- 公式仕様要約
-    sample/                          -- 実例
-    script/                          -- 実行可能コマンド集
-  update-reference/
-    SKILL.md                         -- claude-code-reference の更新確認・再取得
   project-init/
     SKILL.md                         -- GitHub Project v2 作成・フィールド設定
   project-add-items/
@@ -136,14 +130,12 @@ skills/
 | **update-docs** | コード変更差分に基づいて CLAUDE.md のスキル一覧やリポジトリ構成を更新する |
 | **update-issue-tree** | 既存 Issue ツリーを棚卸し・整理（closed 親下の付け替え・孤児再配置・phase ラベル同期） |
 
-### スキル著作・リファレンス
+### リポジトリ管理スキル（.claude/skills/ に配置）
 
 | スキル | 説明 |
 |--------|------|
 | **create-skill** | 新規スキルを scaffold し、symlink 作成・update-docs 実行まで自動化する（skill-explorer/skill-author/skill-reviewer/frontmatter-linter へ委譲） |
 | **create-agent** | 新規サブエージェントを scaffold する（agent-author へ委譲、dotclaude-via-temp 準拠） |
-| **claude-code-reference** | Claude Code 本体（Skills/Subagents/Hooks/settings/slash-commands/MCP/memory）の公式仕様リファレンス |
-| **update-reference** | `claude-code-reference/reference/` の更新確認・再取得を行う（reference-researcher へ委譲） |
 
 ### Claude Code セットアップ
 
@@ -170,6 +162,14 @@ skills/
 |--------|------|
 | **contribute-skill** | `skills-lock.json` の `source` が `Fandhe-AI/*` のスキルを手元で改修した後、upstream リポジトリへ PR を作成する |
 | **sync-skills-lock** | `skills-lock.json` の `computedHash` を upstream の最新と同期する（submodule 配下は対象外） |
+
+### 参照スキル（.claude/skills/ に配置）
+
+| スキル | 説明 |
+|--------|------|
+| **github-docs** | GitHub CLI（`gh`）の公式ドキュメント・リファレンス |
+| **anthropic-claude-code** | Claude Code CLI 本体のリファレンス（settings・env-vars・cli-reference・sessions 等） |
+| **anthropic-claude-code-extend** | Claude Code 拡張リファレンス（Agent Skills・slash commands・subagents・hooks・plugins・MCP 設定等） |
 
 ## Agents（サブエージェント）
 

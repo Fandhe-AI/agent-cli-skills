@@ -23,7 +23,7 @@ tools: [Bash, Read, Write]     # 使用するツールを明示する場合（�
 
 ### user-invocable の既定値
 
-`user-invocable` を省略した場合は `true`（ユーザーが直接呼び出せる）として扱われる。ユーザーから直接呼び出させない内部専用スキルのみ `user-invocable: false` を明示する（本リポでは `claude-code-reference` が該当）。
+`user-invocable` を省略した場合は `true`（ユーザーが直接呼び出せる）として扱われる。ユーザーから直接呼び出させない内部専用スキル（他スキルから内部的に参照されるのみのスキル等）のみ `user-invocable: false` を明示する（例: 本リポ導入済みの `anthropic-claude-code`・`anthropic-claude-code-extend` 等の参照スキル）。
 
 ### tools フィールドの扱い
 
@@ -59,6 +59,10 @@ description の書き方の詳細は `./description-style.md` を参照する。
 ### reference 型スキルの書式
 
 `reference/`・`references/` 配下のページと README 索引の書式は `./reference-template.md` を参照する。
+
+### SKILL.md 公式仕様の一次情報
+
+frontmatter・発火条件・構造など SKILL.md の公式仕様を確認する場合は、本リポ導入済みの `anthropic-claude-code-extend` スキルの `.agents/skills/anthropic-claude-code-extend/references/` を一次情報として参照する。
 
 ## 本文構成
 

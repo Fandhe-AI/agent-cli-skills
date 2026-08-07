@@ -9,7 +9,7 @@ applies_to: reference-researcher, skill-author
 # リファレンスファイル書式
 
 `skills/<name>/reference/`（または `references/`）配下の個別ページと README 索引の書式規約。
-`update-reference` スキルが本書式を前提にドキュメントを再取得・更新する。
+公式ドキュメントの再取得・更新を行う際は本書式を前提とする。
 
 ## 個別ページの書式
 
@@ -49,7 +49,7 @@ functionName(param: Type): ReturnType
 
 | フィールド | 値 | 用途 |
 |-----------|---|------|
-| `source` | 取得元 URL | `update-reference` が再取得する際の起点 |
+| `source` | 取得元 URL | 再取得する際の起点 |
 | `最終確認日` | `YYYY-MM-DD` | 鮮度判定。古い場合は再取得を検討 |
 | `取得状況` | `✅ 取得済み` / `⚠️ オンライン未検証` | 手書きか WebFetch 取得かを区別 |
 
@@ -103,7 +103,7 @@ functionName(param: Type): ReturnType
 
 ## 鮮度管理
 
-`最終確認日` が古い場合（目安: 3ヶ月以上）は `update-reference` スキルで再取得を検討する。
+`最終確認日` が古い場合（目安: 3ヶ月以上）は公式ドキュメントを再取得して更新することを検討する。
 `⚠️ オンライン未検証` のファイルは手書きのため、公式ドキュメントとの差異に注意する。
 
 ## 関連
