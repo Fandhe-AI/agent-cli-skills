@@ -84,3 +84,6 @@ Managed settings still apply (system path outside `~/.claude`). Linux/Windows pr
 - [claude-directory.md](./claude-directory.md): every config file location and what reads it
 - [settings.md](./settings.md): precedence order and the full key list
 
+## Notes
+
+This page was retrieved in full (no truncation observed).
