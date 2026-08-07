@@ -197,3 +197,6 @@ Maps individual Anthropic model IDs to provider-specific strings (Bedrock ARN, V
 - [fast-mode.md](./fast-mode.md): the Opus-only fast mode toggle that interacts with model switching
 - [statusline.md](./statusline.md): displaying the current model/effort in a status line
 
+## Notes
+
+This page was retrieved in full (no truncation observed).
