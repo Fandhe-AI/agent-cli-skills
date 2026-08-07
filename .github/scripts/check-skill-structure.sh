@@ -60,7 +60,7 @@ echo "checked ${found} skill(s)"
 
 # --- 4. .claude/skills/ 配下の symlink リンク切れ検証 ---
 # .claude/skills/ には skills/ への symlink のほか、実ディレクトリ
-# (create-skill / create-agent / update-reference) や別ソースへの
+# (create-skill / create-agent) や別ソースへの
 # symlink (github-docs) も混在する。symlink のみを対象にリンク切れを検出する。
 if [ -d .claude/skills ]; then
   link_found=0

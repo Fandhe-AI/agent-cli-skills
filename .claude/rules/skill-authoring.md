@@ -23,7 +23,7 @@ tools: [Bash, Read, Write]     # 使用するツールを明示する場合（�
 
 ### user-invocable の既定値
 
-`user-invocable` を省略した場合は `true`（ユーザーが直接呼び出せる）として扱われる。ユーザーから直接呼び出させない内部専用スキルのみ `user-invocable: false` を明示する（本リポでは `claude-code-reference` が該当）。
+`user-invocable` を省略した場合は `true`（ユーザーが直接呼び出せる）として扱われる。ユーザーから直接呼び出させない内部専用スキル（他スキルから内部的に参照されるのみのスキル等）のみ `user-invocable: false` を明示する。
 
 ### tools フィールドの扱い
 
