@@ -141,7 +141,7 @@ Beyond authored config, `~/.claude` holds data Claude Code writes during session
 
 ## Notes
 
-This page's content is authored as an interactive JS explorer component; the textual descriptions, examples, and reference tables above were extracted from its embedded data and the surrounding prose. No truncation observed.
+This page's content is authored as an interactive JS explorer component; the textual descriptions, examples, and reference tables above were extracted from its embedded data and the surrounding prose.
 
 ## Related
 

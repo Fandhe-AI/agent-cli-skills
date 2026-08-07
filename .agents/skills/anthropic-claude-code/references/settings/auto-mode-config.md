@@ -104,9 +104,6 @@ Denials appear under `/permissions` → **Recently denied**; press `r` to mark f
 | `autoMode.hard_deny` | array | Unconditional security boundaries (prose) |
 | `autoMode.classifyAllShell` | boolean | Route every shell command through the classifier while auto mode is active |
 
-## Notes
-
-This page was retrieved in full (no truncation observed).
 
 ## Related
 
