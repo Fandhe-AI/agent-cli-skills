@@ -50,7 +50,18 @@ GitHub Actions から Projects API にアクセスするには `GITHUB_TOKEN` �
 
 #### Step A-3: GitHub Actions ワークフローを生成する
 
-`Fandhe-AI/actions/project-sync` Composite Action を使用する。`.github/workflows/project-sync.yml` を生成する:
+`Fandhe-AI/actions/project-sync` Composite Action を使用する。`.github/workflows/project-sync.yml` を生成する。
+
+**SHA 解決手順（生成前に必ず実行する）:**
+
+サードパーティ action は `@main` / `@vN` 等の可動参照ではなく、検証済みのコミット SHA で固定する。生成のたびに以下で最新の SHA を取得し、コメント（取得日・対応バージョン）付きで `uses` に埋め込む:
+
+```bash
+# Composite Action の最新コミット SHA を取得して uses に埋め込む
+gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'
+# create-github-app-token の安定タグが指すコミット SHA を取得
+gh api repos/actions/create-github-app-token/git/ref/tags/v2 --jq '.object.sha'
+```
 
 **PAT を使用する場合:**
 
@@ -63,12 +74,15 @@ on:
   pull_request:
     types: [opened, closed, ready_for_review, review_requested]
 
+permissions:
+  contents: read
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - name: Sync project status
-        uses: Fandhe-AI/actions/project-sync@main
+        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main (2026-08-09 時点)
         with:
           project-number: '<number>'
           project-owner: '<owner>'
@@ -86,20 +100,23 @@ on:
   pull_request:
     types: [opened, closed, ready_for_review, review_requested]
 
+permissions:
+  contents: read
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - name: Generate token
         id: token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: '<owner>'
 
       - name: Sync project status
-        uses: Fandhe-AI/actions/project-sync@main
+        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main (2026-08-09 時点)
         with:
           project-number: '<number>'
           project-owner: '<owner>'
@@ -112,7 +129,7 @@ Status オプション名がデフォルト（Todo / In Progress / In Review / D
 
 ```yaml
       - name: Sync project status
-        uses: Fandhe-AI/actions/project-sync@main
+        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main (2026-08-09 時点)
         with:
           project-number: '<number>'
           project-owner: '<owner>'
@@ -245,10 +262,16 @@ gh project item-add <number> \
 - 手動補正モードは同期前に必ずユーザーの確認を得る
 - DraftIssue タイプのアイテムは同期対象外（実 Issue が存在しないため）
 - sandbox 環境では実行できない（後述の「sandbox 環境での実行」節を参照）
+- **action は必ずコミット SHA で固定する**: `@main` / `@vN` 等の可動参照は生成しない。上流のタグ付け替え・ブランチ改変が未検証のまま流れ込むサプライチェーンリスクを避けるため（SHA 更新時は差分を確認してから更新する）
+- **permissions は最小権限で明示する**: workflow レベルで `contents: read` を明示する。同期処理自体は `PROJECT_TOKEN` / GitHub App トークン側の権限で動作するため、`GITHUB_TOKEN` への追加権限は不要
 
 ## 検証
 
-**モード A 完了後:** `.github/workflows/project-sync.yml` が存在し、YAML が正しく記述されていること。コミット・プッシュ後に GitHub Actions の実行履歴で初回トリガーが確認できれば完了。
+**モード A 完了後:** `.github/workflows/project-sync.yml` が存在し、YAML が正しく記述されていること。加えて以下を確認する:
+- 可動参照が残っていないこと: `grep -E '@(main|v[0-9]+)\s*$' .github/workflows/project-sync.yml` がヒット 0 件
+- `permissions` が明示されていること: `grep -c 'permissions:' .github/workflows/project-sync.yml` が 1 以上
+
+コミット・プッシュ後に GitHub Actions の実行履歴で初回トリガーが確認できれば完了。
 
 **モード B 完了後:** Step B-7 の結果表で「変更なし: 0 件以上」が表示されていること。以下で最終状態を確認する:
 
