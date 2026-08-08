@@ -154,6 +154,20 @@ function sanitizeOutOfScopeLog(arr) {
     .map((v) => capText(v, 450))
 }
 
+// 状態ファイルの saved.lastUnresolvedInfo（monitor が最後に観測した未解決コメント情報）を
+// runMergeLoop 再入時の初期値として復元するためのバリデーションヘルパー。
+// sanitizeOutOfScopeLog と同じ方針: 状態ファイルは JS 自身が書いた値のみを保持する想定だが、
+// 手動編集・破損で不正な型・巨大文字列が紛れ込む可能性を排除できないため、文字列以外は
+// 空文字へ落とし、長さのみ上限（書き込み側 capText の既定値 2000 と同一）で切り詰める。
+// 検証のみで再変換しない（冪等）: 書き込み側（runMergeLoop の monitor ラウンド）が
+// sanitize・capText 済みで永続化した値であり、ここで sanitize を再適用すると `\$` が
+// 二重エスケープされて復元のたびにテキストが変わり冪等性が崩れるため、
+// 型・長さの検証だけを行い内容には手を加えない（PR #85 codex-review P1 対応）。
+function sanitizeUnresolvedInfo(v) {
+  if (typeof v !== 'string') return ''
+  return capText(v, 2000)
+}
+
 // エージェント返却値の整数検証
 function assertInt(val, label) {
   if (!Number.isInteger(val) || val <= 0) throw new Error(`${label} が正の整数ではない: ${val}`)
@@ -2250,7 +2264,18 @@ async function runImplement(item) {
   // saved.outOfScopeLog も同様に復元する（sanitizeOutOfScopeLog で形式・件数・長さを再検証）。
   // これを渡さないと直前ラウンドまでの fix の対象外記録が監視再開のたびに失われてしまう
   // （PR #85 codex-review P1 対応）。
-  return await runMergeLoop(item, impl, savedFixCount, impl.worktreePath, sanitizeOutOfScopeLog(saved.outOfScopeLog))
+  // saved.lastUnresolvedInfo（monitor が最後に観測した未解決コメント情報）も同じパターンで
+  // 復元する。これを渡さないと fix 後に中断・再開したとき、再開後の monitor が needs-fix /
+  // timeout / unresolvedComments 省略の blocked を返した場合に「直前の観測値を保持する」設計の
+  // 情報が最終 note・recordFailure から消える（PR #85 codex-review P1 対応）。
+  return await runMergeLoop(
+    item,
+    impl,
+    savedFixCount,
+    impl.worktreePath,
+    sanitizeOutOfScopeLog(saved.outOfScopeLog),
+    sanitizeUnresolvedInfo(saved.lastUnresolvedInfo),
+  )
 }
 
 // Merge ループを独立関数に分離する。
@@ -2263,7 +2288,11 @@ async function runImplement(item) {
 // 渡す。新規 impl パスは新しい PR を作るため常に空配列（呼び出し元で明示せず省略）。
 // これにより、fix が outOfScopeComments を記録した直後にプロセスが中断・再開されても
 // ホスト側ログが失われず最終 note・reason へ引き継がれる（PR #85 codex-review P1 対応）。
-async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = []) {
+// initialUnresolvedInfo: monitoring 再開パスでのみ状態ファイルの saved.lastUnresolvedInfo
+// （sanitizeUnresolvedInfo 検証済み）を渡す。新規 impl パスは常に空文字（省略）。
+// これにより fix 後の中断・再開を跨いでも monitor の最終観測情報が最終 note・reason へ
+// 引き継がれる（PR #85 codex-review P1 対応）。
+async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '') {
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -2274,7 +2303,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // 最後に monitor が収集した未解決コメント情報（sanitize 済み）。fixCount >= 6 で blocked に
   // 落ちる際に m を破棄してしまうと unresolved 一覧が失われるため、monitor 結果を受け取る
   // たびに更新して保持しておく（Issue #81: blocked 時の未解決コメント追跡）。
-  let lastUnresolvedInfo = ''
+  // monitoring 再開パスでは initialUnresolvedInfo（状態ファイルから検証済みで復元した値）を
+  // 初期値として引き継ぐ（新規パスは従来どおり空文字）。呼び出し元で sanitizeUnresolvedInfo を
+  // 通過済みだが、直呼び出しへの防御として冪等な同関数をもう一度通す（PR #85 codex-review P1 対応）。
+  let lastUnresolvedInfo = sanitizeUnresolvedInfo(initialUnresolvedInfo)
   // fix エージェントが対象外と申告した指摘の検証済みログ（"threadId: xxx / reason: yyy" 形式の
   // 文字列を蓄積）。FIX_SCHEMA.outOfScopeComments は「ホスト側のログ・最終レポート専用」と
   // 宣言しているため、この配列に集約して host 側ログへ出力し、merged/failed 双方の最終
@@ -2450,7 +2482,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // されても runMergeLoop 再入時に saved.outOfScopeLog から復元でき、対象外コメント記録が
       // 失われない（PR #85 codex-review P1 対応: FIX_SCHEMA が宣言した「ホスト側のログ・
       // 最終レポート専用」という保存契約を、監視再開を跨いでも満たす）。
-      await updateState(item.number, { fixCount, worktree: currentWorktreePath, outOfScopeLog }, { cleanupWorktree: oldWorktreePath })
+      // lastUnresolvedInfo も同時に永続化する。非終端状態での updateState はこの fix 直後の
+      // 1 箇所のみだが、これで足りる: fix は needs-fix / unresolved-comments の直後にのみ走り、
+      // unresolved-comments ラウンドで更新された lastUnresolvedInfo はこの保存で即座に永続化
+      // される。fix を伴わないラウンドのうち blocked / merged はループ後・merged 分岐の終端
+      // updateState で note / status に反映され、timeout は lastUnresolvedInfo を変更しない
+      // （直前の永続化済みの値を保持したまま）ため、「fix 後の中断 → 再開」で最終観測値が
+      // 復元されるという契約はこの 1 箇所で満たされる（PR #85 codex-review P1 対応）。
+      await updateState(item.number, { fixCount, worktree: currentWorktreePath, outOfScopeLog, lastUnresolvedInfo }, { cleanupWorktree: oldWorktreePath })
       if (!f.pushed) {
         // 「指摘は修正済みで push 不要」の場合があるため即 blocked にせず 1 回だけ再監視する。
         // 2 回連続で push なしなら進展がないため blocked とする
