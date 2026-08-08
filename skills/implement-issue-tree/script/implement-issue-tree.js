@@ -168,6 +168,63 @@ function sanitizeUnresolvedInfo(v) {
   return capText(v, 2000)
 }
 
+// unresolvedComments 要素の url フィールド（monitor がスレッド最終コメントの GitHub 上の
+// リンクとして返す自由文字列）の形式検証。sanitize（改行・バッククォート除去のみ）では
+// javascript: スキームや外部ドメインへの誘導リンクを排除できないため、完了レポート・状態
+// ファイルへ載せる前に「GitHub 上の PR リンク」という形式へ厳格に限定する（Issue #82
+// セキュリティ考慮: A10 SSRF / リンク偽装対策）。不一致は空文字（省略）扱いとし、要素自体
+// は残す（記録は失わない）。
+function sanitizeCommentUrl(str) {
+  const s = String(str ?? '')
+  return /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+[A-Za-z0-9#_\/?=-]{0,120}$/.test(s) ? s : ''
+}
+
+// MERGE_SCHEMA.unresolvedComments（monitor が state: unresolved-comments / blocked のときに
+// 返す { threadId, text, url } 配列）を、results・状態ファイル・完了レポートへ埋め込む前に
+// 検証・正規化する書き込みパス用ヘルパー。schema の maxItems/maxLength はモデル出力への契約で
+// あり信頼境界ではないため、sanitizeOutOfScopeLog / sanitizeUnresolvedInfo と同様にホスト側でも
+// 同じ上限（件数 20・text 300 文字）を二重に適用する（PR #85 codex-review P1 と同方針）。
+// url は sanitizeCommentUrl で GitHub PR リンク形式のみ許可し、不一致・省略時は空文字に落とす
+// （出力先では url が空の要素はリンクなしとして扱われる想定）。
+function normalizeUnresolvedComments(arr) {
+  if (!Array.isArray(arr)) return []
+  return arr
+    .filter((v) => v && typeof v === 'object')
+    .slice(0, 20)
+    .map((c) => ({
+      threadId: sanitizeThreadId(c?.threadId ?? ''),
+      text: capText(sanitize(c?.text ?? ''), 300),
+      url: sanitizeCommentUrl(c?.url ?? ''),
+    }))
+}
+
+// 状態ファイルの saved.lastUnresolvedComments を runMergeLoop 再入時の初期値として復元する
+// バリデーションヘルパー。sanitizeOutOfScopeLog / restoreUnresolvedComments と同じ方針:
+// 状態ファイルは JS 自身が書いた値（normalizeUnresolvedComments 済み）のみを保持する想定だが、
+// 手動編集・破損由来の不正な型・巨大配列が紛れ込む可能性を排除できないため、型・長さ・件数の
+// 検証のみを行う。sanitize は再適用しない（冪等）: 再適用すると `\$` が `/\$` へ二重エスケープ
+// され、復元のたびにテキストが変わり冪等性が崩れる（PR #85 Bugbot 指摘と同種の問題の事前回避）。
+// threadId は sanitizeThreadId の形式（英数字・アンダースコア・ハイフンのみ）に一致しないものは
+// 空文字に落とす（サニタイズ関数の再適用ではなく形式検証のみのため冪等性を壊さない）。
+// url のみ例外的に sanitizeCommentUrl を適用する（codex-review P1 対応, PR #94）:
+// text/threadId と異なり url は正規表現の「完全一致検証」であり `\$` 二重エスケープの
+// ような再変換は発生しないため冪等性を壊さずに再適用できる。手動編集・破損した状態
+// ファイルに外部ドメイン・javascript: スキーム等の URL が混入した場合、slice のみでは
+// 形式を保証できず、完了レポートのリンクとしてそのまま表示され得る
+// （GitHub PR リンクへの厳格な限定というセキュリティ前提が崩れる）。
+function restoreUnresolvedComments(arr) {
+  if (!Array.isArray(arr)) return []
+  return arr
+    .filter((v) => v && typeof v === 'object')
+    .slice(0, 20)
+    .map((c) => {
+      const threadId = typeof c.threadId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(c.threadId) ? c.threadId : ''
+      const text = typeof c.text === 'string' ? c.text.slice(0, 320) : ''
+      const url = sanitizeCommentUrl(c.url)
+      return { threadId, text, url }
+    })
+}
+
 // エージェント返却値の整数検証
 function assertInt(val, label) {
   if (!Number.isInteger(val) || val <= 0) throw new Error(`${label} が正の整数ではない: ${val}`)
@@ -272,6 +329,12 @@ const MERGE_SCHEMA = {
         properties: {
           threadId: { type: 'string', maxLength: 100, description: 'GraphQL reviewThreads ノードの id（不透明な識別子。次ラウンドの fix/monitor が ID 一致でのみ照合するために必須）' },
           text: { type: 'string', maxLength: 300, description: 'author + 内容要約。monitor 自身がスレッド内容を読んで対象外相当と判断した場合のみ【対象外コメント】マーカーと理由を付す（過去ラウンドの fix エージェントによる未検証の分類結果はここに引き継がない。PR #85 codex-review P0 対応）' },
+          // Issue #82: 完了レポートの「未解決コメント（issue 化候補）」節から該当スレッドへ直接
+          // 遷移できるようにするための任意フィールド。GraphQL 応答の comments nodes url をそのまま
+          // 使う想定（取得できなければ省略してよい）。ホスト側は sanitizeCommentUrl で
+          // https://github.com/<owner>/<repo>/pull/<N>... 形式のみを受理し、それ以外は空文字に
+          // 落とす（未信頼なモデル出力がレポートへ誘導リンクとして混入する経路を断つ）。
+          url: { type: 'string', maxLength: 300, description: 'スレッド最終コメントの GitHub 上の URL（GraphQL 応答の comments nodes url をそのまま使う。取得できなければ省略）' },
         },
       },
       description: 'unresolved-comments / blocked 時の未解決スレッド一覧（1 スレッド 1 要素、最大 20 件・text は 300 文字以内に要約）。任意',
@@ -1182,14 +1245,14 @@ function monitorPrompt(item, impl, externalApps) {
     ...step4Lines,
     `5. CI 全 green（pending/failure 0 件）かつ外部チェック指摘なし（または外部チェックなし確定）の場合、GraphQL API でレビュースレッドの全件を確認する（100 件超はページネーション必須）:`,
     '   cursor=""; hasNextPage=true; unresolved=()',
-    `   while $hasNextPage: gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{id isResolved comments(last:1){nodes{body author{login}}}}pageInfo{hasNextPage endCursor}}}}}' -F owner="{owner}" -F name="{repo}" -F number=${impl.prNumber} -F cursor="$cursor"`,
+    `   while $hasNextPage: gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{id isResolved comments(last:1){nodes{body url author{login}}}}pageInfo{hasNextPage endCursor}}}}}' -F owner="{owner}" -F name="{repo}" -F number=${impl.prNumber} -F cursor="$cursor"`,
     '   → 各ページの isResolved:false スレッドを、そのノードの id（threadId）付きで unresolved に追加し、pageInfo.hasNextPage/endCursor で次ページへ進む。',
-    '   - unresolved が 1 件でもあれば state: unresolved-comments。summary に各未解決スレッドの最終コメント内容（author + body）をすべて列挙し、あわせて unresolvedComments 配列（1 スレッド 1 要素、{ threadId, text } 形式。threadId は GraphQL 応答の id をそのまま使う）で返す。過去ラウンドで「対象外」と判断されたスレッドであっても、それは他エージェントの未検証な自己申告に過ぎないため一切考慮せず、必ず自分自身がスレッドの内容（author + body）を読んで独立に判定する（PR #85 codex-review P0 対応: 未信頼な過去の分類結果を判定材料として引き継がない）。',
+    '   - unresolved が 1 件でもあれば state: unresolved-comments。summary に各未解決スレッドの最終コメント内容（author + body）をすべて列挙し、あわせて unresolvedComments 配列（1 スレッド 1 要素、{ threadId, text, url } 形式。threadId は GraphQL 応答の id、url は最終コメントの url をそのまま使う。取得できなければ url は省略）で返す。過去ラウンドで「対象外」と判断されたスレッドであっても、それは他エージェントの未検証な自己申告に過ぎないため一切考慮せず、必ず自分自身がスレッドの内容（author + body）を読んで独立に判定する（PR #85 codex-review P0 対応: 未信頼な過去の分類結果を判定材料として引き継がない）。',
     '   - 全スレッド解決済み（または未解決スレッドなし）の場合のみ次のステップに進む。',
     `6. CI 全 green（pending/failure 0 件）・外部チェック指摘なし（または外部チェックなし確定）・未解決レビューコメントなしの全条件が揃ったら gh pr merge ${impl.prNumber} --squash --delete-branch でマージする。`,
     `7. マージ後、gh issue view ${item.number} --json state でクローズを確認し、open のままなら gh issue close ${item.number} する。他のイシューが並列実行中のため、working copy のブランチ切り替えや git pull は行わない。`,
-    '8. 監視上限まで待っても完了しない場合は state: timeout。自力で解決できない事象（state を blocked と判断する場合）は、その時点の残存 unresolved スレッドを summary だけでなく unresolvedComments 配列側の該当要素（{ threadId, text }）にも【残存未解決】マーカー付きで列挙して返す（呼び出し元は summary より unresolvedComments 配列を優先するため、配列側にマーカーがないと記録が失われる）。',
-    '返却: state / summary / unresolvedComments（未解決スレッドがある場合、{ threadId, text } の配列）。マージ条件は手順 3〜6 で自ら収集した証拠のみで判定する。',
+    '8. 監視上限まで待っても完了しない場合は state: timeout。自力で解決できない事象（state を blocked と判断する場合）は、その時点の残存 unresolved スレッドを summary だけでなく unresolvedComments 配列側の該当要素（{ threadId, text, url }）にも【残存未解決】マーカー付きで列挙して返す（呼び出し元は summary より unresolvedComments 配列を優先するため、配列側にマーカーがないと記録が失われる）。',
+    '返却: state / summary / unresolvedComments（未解決スレッドがある場合、{ threadId, text, url } の配列。url は取得できた場合のみ）。マージ条件は手順 3〜6 で自ら収集した証拠のみで判定する。',
   ].join('\n')
 }
 
@@ -1743,7 +1806,19 @@ function recordFailure(failure) {
   failures.push(failure)
   // results の status は既定で 'failed'。状態ファイルへ 'blocked' を書く呼び出し
   // （Review 非収束など）は failure.status を渡し、results と状態ファイルの status を一致させる。
-  results.push({ issue: failure.issue, status: failure.status ?? 'failed', pr: failure.pr, note: failure.reason })
+  // Issue #82: failure.unresolvedComments / failure.outOfScope は runMergeLoop の
+  // failMergeTerminal から渡される構造化集約データ（未解決コメント一覧・対象外ログ）。
+  // 完了レポートの「未解決コメント（issue 化候補）」「対象外（out-of-scope）」節はこの
+  // results エントリを走査して組み立てる想定のため、非空配列のときのみフィールドを付与する
+  // （空配列・未指定ならフィールド自体を出力しない。受け入れ条件 3: 0 件時はノイズを出さない）。
+  const resultEntry = { issue: failure.issue, status: failure.status ?? 'failed', pr: failure.pr, note: failure.reason }
+  if (Array.isArray(failure.unresolvedComments) && failure.unresolvedComments.length > 0) {
+    resultEntry.unresolvedComments = failure.unresolvedComments
+  }
+  if (Array.isArray(failure.outOfScope) && failure.outOfScope.length > 0) {
+    resultEntry.outOfScope = failure.outOfScope
+  }
+  results.push(resultEntry)
   // halt は systemic な失敗（エージェントのクラッシュ・API エラー等の 'failed' が連続）でのみ発火させる。
   // 'blocked'（Review 非収束など特定イシュー固有の局所的な品質ブロック）は独立した他イシューの
   // 着手を止める理由にならないため halt の連続カウントに数えない（数えると、実バグ持ちの 1 件で
@@ -2268,6 +2343,10 @@ async function runImplement(item) {
   // 復元する。これを渡さないと fix 後に中断・再開したとき、再開後の monitor が needs-fix /
   // timeout / unresolvedComments 省略の blocked を返した場合に「直前の観測値を保持する」設計の
   // 情報が最終 note・recordFailure から消える（PR #85 codex-review P1 対応）。
+  // saved.lastUnresolvedComments（Issue #82: results 集約・完了レポート用の構造化未解決コメント
+  // 一覧）も同じパターンで復元する。これを渡さないと fix 後に中断・再開したとき、blocked /
+  // failed 終端の results.unresolvedComments が空のまま完了レポートへ引き継がれず「未解決
+  // コメント（issue 化候補）」節が欠落する。
   return await runMergeLoop(
     item,
     impl,
@@ -2275,6 +2354,7 @@ async function runImplement(item) {
     impl.worktreePath,
     sanitizeOutOfScopeLog(saved.outOfScopeLog),
     sanitizeUnresolvedInfo(saved.lastUnresolvedInfo),
+    restoreUnresolvedComments(saved.lastUnresolvedComments),
   )
 }
 
@@ -2292,7 +2372,13 @@ async function runImplement(item) {
 // （sanitizeUnresolvedInfo 検証済み）を渡す。新規 impl パスは常に空文字（省略）。
 // これにより fix 後の中断・再開を跨いでも monitor の最終観測情報が最終 note・reason へ
 // 引き継がれる（PR #85 codex-review P1 対応）。
-async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '') {
+// initialUnresolvedComments: monitoring 再開パスでのみ状態ファイルの saved.lastUnresolvedComments
+// （restoreUnresolvedComments 検証済み）を渡す。新規 impl パスは常に空配列（省略）。
+// lastUnresolvedInfo（表示用の合成テキスト）と別に構造化データを保持するのは、Issue #82 の
+// 完了レポート「未解決コメント（issue 化候補）」節が threadId・url 単位でスレッドへ遷移
+// できる形を要求するため（lastUnresolvedInfo は summary 全文を連結した表示専用の文字列で
+// スレッド単位に分解できない）。
+async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = []) {
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -2307,6 +2393,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // 初期値として引き継ぐ（新規パスは従来どおり空文字）。呼び出し元で sanitizeUnresolvedInfo を
   // 通過済みだが、直呼び出しへの防御として冪等な同関数をもう一度通す（PR #85 codex-review P1 対応）。
   let lastUnresolvedInfo = sanitizeUnresolvedInfo(initialUnresolvedInfo)
+  // 最後に monitor が収集した未解決コメントの構造化一覧（{ threadId, text, url }。
+  // restoreUnresolvedComments / normalizeUnresolvedComments 検証済み）。lastUnresolvedInfo と
+  // 同じ保持・クリア方針で並行して更新する（Issue #82: results.unresolvedComments 経由で
+  // 完了レポートの「未解決コメント（issue 化候補）」節へ引き継ぐための構造化データ）。
+  let lastUnresolvedComments = restoreUnresolvedComments(initialUnresolvedComments)
   // fix エージェントが対象外と申告した指摘の検証済みログ（"threadId: xxx / reason: yyy" 形式の
   // 文字列を蓄積）。FIX_SCHEMA.outOfScopeComments は「ホスト側のログ・最終レポート専用」と
   // 宣言しているため、この配列に集約して host 側ログへ出力し、merged/failed 双方の最終
@@ -2345,8 +2436,22 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     const reason = `${baseReason}${unresolvedNote}${outOfScopeNote}`
     // cleanupWorktree は指定しない（worktree はデバッグ・手動再開用に直前の正常パスを残す。
     // patch も worktree を含めないため updateState が .worktree をクリアすることはない）
-    await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason, outOfScopeLog, lastUnresolvedInfo })
-    recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+    // lastUnresolvedComments（Issue #82: 構造化未解決コメント一覧）も lastUnresolvedInfo /
+    // outOfScopeLog と同じ形式で状態ファイルへ永続化する。次回実行時の monitoring 再開パスが
+    // restoreUnresolvedComments 経由で復元し、完了レポート集約（results.unresolvedComments）を
+    // 中断・再開を跨いで失わないようにするため。
+    await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason, outOfScopeLog, lastUnresolvedInfo, lastUnresolvedComments })
+    // recordFailure へ構造化データを渡す。unresolvedComments / outOfScope は「未解決コメント
+    // （issue 化候補）」「対象外（out-of-scope）」節をレポート生成側が組み立てるための
+    // 集約データであり、recordFailure 側で非空のときのみ results エントリへ付与する
+    // （受け入れ条件 3: 0 件時は results にフィールド自体を出力しない）。
+    recordFailure({
+      issue: item.number,
+      pr: impl.prNumber,
+      reason,
+      unresolvedComments: lastUnresolvedComments,
+      outOfScope: outOfScopeLog,
+    })
     return false
   }
   while (!merged && monitorsLeft > 0) {
@@ -2377,16 +2482,28 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           ? m.unresolvedComments.map(unresolvedCommentText).join(' / ')
           : sanitize(m?.summary ?? '')
       lastUnresolvedInfo = capText(rawInfo)
+      // 構造化一覧（lastUnresolvedComments）も表示用テキスト（lastUnresolvedInfo）と同じ
+      // タイミングで更新するが、m.unresolvedComments が空/省略の場合は blocked 分岐と同様に
+      // 直前ラウンドの一覧を保持する（上書きしない）。state: unresolved-comments は「未解決
+      // スレッドが実在する」ことを意味するため、監視エージェントが配列フィールドだけを省略
+      // しても、既知の構造化データを空配列で消去してはならない（Bugbot PR #94 指摘:
+      // Comments cleared on omitted array）。
+      if (Array.isArray(m?.unresolvedComments) && m.unresolvedComments.length > 0) {
+        lastUnresolvedComments = normalizeUnresolvedComments(m.unresolvedComments)
+      }
     } else if (lastState === 'blocked') {
       if (Array.isArray(m?.unresolvedComments) && m.unresolvedComments.length > 0) {
         lastUnresolvedInfo = capText(m.unresolvedComments.map(unresolvedCommentText).join(' / '))
+        lastUnresolvedComments = normalizeUnresolvedComments(m.unresolvedComments)
       }
-      // unresolvedComments が空/省略なら、直前ラウンドの lastUnresolvedInfo をそのまま保持する
-      // （blocked 自体の理由は m.summary 側で別途 reason に含まれるため、ここでは上書きしない）。
+      // unresolvedComments が空/省略なら、直前ラウンドの lastUnresolvedInfo / lastUnresolvedComments
+      // をそのまま保持する（blocked 自体の理由は m.summary 側で別途 reason に含まれるため、
+      // ここでは上書きしない）。
     } else if (lastState === 'merged') {
       // merged はレビュースレッド解決を含むマージ条件の充足が monitor により確認された状態で
       // あり、このときのみ未解決コメント情報を確定的に破棄できる。
       lastUnresolvedInfo = ''
+      lastUnresolvedComments = []
     }
     if (lastState === 'merged') {
       merged = true
@@ -2401,6 +2518,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 状態ファイル書き込みパスへも渡るため、巨大 summary で終端 write が肥大・失敗しないよう
       // capText(2000) で必ず打ち切る（PR #85 Bugbot Low: Uncapped summary in merged note 対応）。
       const mergedResult = { issue: item.number, status: 'merged', pr: impl.prNumber, note: `${capText(sanitize(m?.summary ?? ''))}${outOfScopeNote}` }
+      // merged でも fix ラウンド中に記録された対象外判断（outOfScopeLog）は issue 化候補として
+      // レポートに載せる（recordFailure と同じ「非空のときのみフィールド付与」方針。Issue #82）。
+      // lastUnresolvedComments は直前で [] に確定済み（merged はレビュースレッド解決を含む
+      // マージ条件充足が確認された状態）のため results 側には付与しない。
+      if (outOfScopeLog.length > 0) {
+        mergedResult.outOfScope = outOfScopeLog
+      }
       results.push(mergedResult)
       consecutiveFailures = 0
       // merged 確定: fixCount も同時に書く（更新まとめ）。現在追跡中の worktree を自動削除して残骸を防ぐ
@@ -2414,9 +2538,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // outOfScopeLog / lastUnresolvedInfo を保存するのと同じ形式に揃えることで、プロセス
         // 終了後・次回実行時も状態ファイルから対象外コメント記録を復元できる
         // （PR #85 codex-review P1 対応: results 表示のみでは最終記録が残らない）。
-        // lastUnresolvedInfo はこの直前の merged 分岐で '' に確定済みのため、fix ラウンドで
-        // 保存した過去の観測値を状態ファイルに残さないよう空文字で明示的に上書きする。
-        const mergedPatch = { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath, note: mergedResult.note, outOfScopeLog, lastUnresolvedInfo }
+        // lastUnresolvedInfo / lastUnresolvedComments はこの直前の merged 分岐で '' / [] に
+        // 確定済みのため、fix ラウンドで保存した過去の観測値を状態ファイルに残さないよう
+        // 明示的に上書きする（Issue #82: lastUnresolvedComments も同じ理由で明示保存）。
+        const mergedPatch = { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath, note: mergedResult.note, outOfScopeLog, lastUnresolvedInfo, lastUnresolvedComments }
         const mergedOpts = { cleanupWorktree: currentWorktreePath }
         const mergedOk = await updateState(item.number, mergedPatch, mergedOpts)
         if (!mergedOk) {
@@ -2527,7 +2652,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // updateState で note / status に反映され、timeout は lastUnresolvedInfo を変更しない
       // （直前の永続化済みの値を保持したまま）ため、「fix 後の中断 → 再開」で最終観測値が
       // 復元されるという契約はこの 1 箇所で満たされる（PR #85 codex-review P1 対応）。
-      await updateState(item.number, { fixCount, worktree: currentWorktreePath, outOfScopeLog, lastUnresolvedInfo }, { cleanupWorktree: oldWorktreePath })
+      // lastUnresolvedComments（Issue #82: 構造化未解決コメント一覧）も lastUnresolvedInfo と
+      // 全く同じタイミング・理由でここに含める。含めないと「fix 後に中断 → 再開」した際、
+      // restoreUnresolvedComments が古い（前回 fix 直前の）配列を復元してしまい、直前ラウンドで
+      // 観測した最新の未解決スレッドが完了レポート集約から欠落する。
+      await updateState(item.number, { fixCount, worktree: currentWorktreePath, outOfScopeLog, lastUnresolvedInfo, lastUnresolvedComments }, { cleanupWorktree: oldWorktreePath })
       if (!f.pushed) {
         // 「指摘は修正済みで push 不要」の場合があるため即 blocked にせず 1 回だけ再監視する。
         // 2 回連続で push なしなら進展がないため blocked とする
