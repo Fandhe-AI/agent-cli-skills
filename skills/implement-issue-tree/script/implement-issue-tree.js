@@ -127,6 +127,13 @@ function unresolvedCommentText(c) {
 // （PR #85 codex-review P1 対応: 状態ファイル永続化・復元のための共通定数）。
 const OUT_OF_SCOPE_LOG_MAX = 20
 
+// impl.outOfScope（Implement エージェントが返す対象外項目の配列）の上限。IMPL_SCHEMA に
+// maxItems / maxLength を宣言しているが、schema はモデル出力への契約であり信頼境界ではない
+// ため、prCreatePrompt が PR body へ展開する際にもホスト側で同じ上限を二重に適用する
+// （codex-review P1 対応: 未検証の巨大配列が後続エージェントのコンテキストを圧迫する問題）。
+const IMPL_OUT_OF_SCOPE_MAX_ITEMS = 20
+const IMPL_OUT_OF_SCOPE_MAX_LEN = 300
+
 // 状態ファイルの saved.outOfScopeLog を runMergeLoop 再入時の初期値として復元するための
 // バリデーションヘルパー。状態ファイルは JS 自身が書いた値のみを保持する想定だが、手動編集や
 // 破損を経由して不正な形（文字列以外の要素・巨大配列等）が紛れ込む可能性を排除できないため、
@@ -350,8 +357,12 @@ const IMPL_SCHEMA = {
     // 呼び出し側（PR 作成フェーズ）が推測抽出せずに済む。
     outOfScope: {
       type: 'array',
-      items: { type: 'string' },
-      description: '現スコープ外と判断した項目のみを列挙（1 項目 1 要素）。なければ空配列または省略',
+      // 件数・長さ上限は下流の prCreatePrompt が PR body へ展開する際の肥大化を防ぐため。
+      // schema はモデル出力への契約であり信頼境界ではないため、ホスト側（prCreatePrompt の
+      // slice / capText）でも同じ上限を二重に適用する（codex-review P1 対応）。
+      maxItems: IMPL_OUT_OF_SCOPE_MAX_ITEMS,
+      items: { type: 'string', maxLength: IMPL_OUT_OF_SCOPE_MAX_LEN },
+      description: '現スコープ外と判断した項目のみを列挙（1 項目 1 要素、最大 20 件・1 件 300 文字以内）。なければ空配列または省略',
     },
   },
 }
@@ -1331,7 +1342,8 @@ function prCreatePrompt(item, impl, outOfScope) {
   // 結合後に一括 sanitize すると箇条書き構造が失われる）。
   const outOfScopeItems = (Array.isArray(outOfScope) ? outOfScope : [])
     .filter((s) => typeof s === 'string' && s.trim())
-    .map((s) => `   - ${sanitize(s).trim()}`)
+    .slice(0, IMPL_OUT_OF_SCOPE_MAX_ITEMS)
+    .map((s) => `   - ${capText(sanitize(s).trim(), IMPL_OUT_OF_SCOPE_MAX_LEN)}`)
   const outOfScopeSection = outOfScopeItems.length
     ? `\n\n## 対象外（out-of-scope）\n${outOfScopeItems.join('\n')}`
     : ''
