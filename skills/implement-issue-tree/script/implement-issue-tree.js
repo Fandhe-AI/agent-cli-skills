@@ -130,7 +130,14 @@ const OUT_OF_SCOPE_LOG_MAX = 20
 // 状態ファイルの saved.outOfScopeLog を runMergeLoop 再入時の初期値として復元するための
 // バリデーションヘルパー。状態ファイルは JS 自身が書いた値のみを保持する想定だが、手動編集や
 // 破損を経由して不正な形（文字列以外の要素・巨大配列等）が紛れ込む可能性を排除できないため、
-// 文字列要素のみを受け入れ・各要素を capText で再度切り詰め・件数を上限で切る。
+// 文字列要素のみを受け入れ・各要素の長さと件数を上限で切る。
+// 検証のみで再変換しない（冪等）: 各エントリは書き込み側（runMergeLoop の蓄積ループ）が
+// sanitize・capText 済みで永続化したものであり、ここで sanitize を再適用すると `\$` が
+// `/\$`→二重エスケープと破損していく（復元のたびにテキストが変わり冪等性が崩れる）ため、
+// 型・長さ・件数の検証だけを行い内容には手を加えない（PR #85 Bugbot 指摘:
+// Restore truncates stored log entries への対応）。
+// 1 件あたりの上限は "threadId: <100文字> / reason: <300文字>" のエントリ形式全体が収まる
+// 450 文字とし、超過は破棄せず切り詰めて記録自体は残す。
 // unresolvedCommentText と異なりオブジェクト形式は受け付けない（outOfScopeLog は host 側が
 // 生成した "threadId: xxx / reason: yyy" 形式の文字列のみを蓄積する契約のため）。
 function sanitizeOutOfScopeLog(arr) {
@@ -138,7 +145,7 @@ function sanitizeOutOfScopeLog(arr) {
   return arr
     .filter((v) => typeof v === 'string' && v.length > 0)
     .slice(0, OUT_OF_SCOPE_LOG_MAX)
-    .map((v) => capText(sanitize(v), 300))
+    .map((v) => capText(v, 450))
 }
 
 // エージェント返却値の整数検証
@@ -235,15 +242,19 @@ const MERGE_SCHEMA = {
     // 状態ファイル・失敗レポートへ引き継ぐための構造化データ。
     unresolvedComments: {
       type: 'array',
+      // 件数・長さ上限はプロンプト再展開時（fixPrompt）と状態ファイルの肥大化を防ぐため。
+      // schema はモデル出力への契約であり信頼境界ではないため、ホスト側（fixPrompt の
+      // slice / capText）でも同じ上限を二重に適用する（PR #85 codex-review P1 対応）。
+      maxItems: 20,
       items: {
         type: 'object',
         required: ['threadId', 'text'],
         properties: {
-          threadId: { type: 'string', description: 'GraphQL reviewThreads ノードの id（不透明な識別子。次ラウンドの fix/monitor が ID 一致でのみ照合するために必須）' },
-          text: { type: 'string', description: 'author + 内容要約。monitor 自身がスレッド内容を読んで対象外相当と判断した場合のみ【対象外コメント】マーカーと理由を付す（過去ラウンドの fix エージェントによる未検証の分類結果はここに引き継がない。PR #85 codex-review P0 対応）' },
+          threadId: { type: 'string', maxLength: 100, description: 'GraphQL reviewThreads ノードの id（不透明な識別子。次ラウンドの fix/monitor が ID 一致でのみ照合するために必須）' },
+          text: { type: 'string', maxLength: 300, description: 'author + 内容要約。monitor 自身がスレッド内容を読んで対象外相当と判断した場合のみ【対象外コメント】マーカーと理由を付す（過去ラウンドの fix エージェントによる未検証の分類結果はここに引き継がない。PR #85 codex-review P0 対応）' },
         },
       },
-      description: 'unresolved-comments / blocked 時の未解決スレッド一覧（1 スレッド 1 要素）。任意',
+      description: 'unresolved-comments / blocked 時の未解決スレッド一覧（1 スレッド 1 要素、最大 20 件・text は 300 文字以内に要約）。任意',
     },
   },
 }
@@ -269,16 +280,21 @@ const FIX_SCHEMA = {
     // ホスト側のログ・最終レポート記録のみに用途を限定する（監視・マージ判定への影響を断つ）。
     outOfScopeComments: {
       type: 'array',
+      // 件数・長さ上限は outOfScopeLog（状態ファイル永続化対象）の肥大化を防ぐため。
+      // schema はモデル出力への契約であり信頼境界ではないため、ホスト側（runMergeLoop の
+      // 蓄積ループの capText / 共有上限ゲート）でも同じ上限を二重に適用する
+      // （PR #85 codex-review P1 対応）。
+      maxItems: 20,
       items: {
         type: 'object',
         required: ['threadId', 'reason'],
         properties: {
           threadId: { type: 'string', description: '対象外と判断した review thread の GraphQL ノード id（不透明な識別子。渡された「未解決スレッド一覧」からそのままコピーする。不明な場合はこの要素ごと省略する）' },
-          reason: { type: 'string', description: '対応不能・スコープ外と判断した理由（fix エージェント自身の未検証な判断。次ラウンドの monitor へは渡らずホスト側のログにのみ使う）' },
+          reason: { type: 'string', maxLength: 300, description: '対応不能・スコープ外と判断した理由（300 文字以内。fix エージェント自身の未検証な判断。次ラウンドの monitor へは渡らずホスト側のログにのみ使う）' },
         },
       },
       description:
-        '対応不能・スコープ外と判断したレビューコメントの一覧（1件1要素）。'
+        '対応不能・スコープ外と判断したレビューコメントの一覧（1件1要素、最大 20 件）。'
         + '該当がなければ空配列または省略。summary 本文にはマーカーを埋め込まない。'
         + 'この一覧は監視・マージ判定には一切使われないログ用データである。',
     },
@@ -1216,17 +1232,26 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
   // プロンプト生成時点まで存在しないため事前に混入させることは不可能だが、二重の安全策とする）。
   const nonce = boundaryNonce()
   const stripNonce = (s) => String(s ?? '').split(nonce).join('')
-  const summaryText = stripNonce(sanitize(finding.summary))
+  // MERGE_SCHEMA は maxItems / maxLength を宣言しているが、schema はモデル出力への契約であり
+  // 信頼境界ではない（スキーマ検証をすり抜けた過大出力でプロンプトが肥大化する余地が残る）。
+  // そのためホスト側でも件数 20 件・text 300 文字・summary 2000 文字の同じ上限を二重に適用する
+  // （PR #85 codex-review P1 対応）。
+  const summaryText = capText(stripNonce(sanitize(finding.summary)), 2000)
+  const unresolvedAll = Array.isArray(finding?.unresolvedComments) ? finding.unresolvedComments : []
+  const unresolvedShown = unresolvedAll.slice(0, 20)
   const unresolvedThreadLines =
-    Array.isArray(finding?.unresolvedComments) && finding.unresolvedComments.length > 0
+    unresolvedShown.length > 0
       ? [
           '',
           '未解決スレッド一覧（threadId 付き。対象外と判断した場合は該当 threadId を outOfScopeComments に記録する）:',
-          ...finding.unresolvedComments.map((c) => {
+          ...unresolvedShown.map((c) => {
             const tid = sanitizeThreadId(c?.threadId ?? '')
-            const text = stripNonce(sanitize(c?.text ?? ''))
+            const text = capText(stripNonce(sanitize(c?.text ?? '')), 300)
             return `- threadId: ${tid || '(不明・対象外記録の対象外)'} / ${text}`
           }),
+          ...(unresolvedAll.length > unresolvedShown.length
+            ? [`-（他 ${unresolvedAll.length - unresolvedShown.length} 件省略）`]
+            : []),
         ]
       : []
   // push しない Review fix では branch は別 worktree に checkout 済みのためローカル
@@ -2276,8 +2301,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // 一方 state: blocked は「未解決コメント」以外の一般的な失敗理由（PR が CLOSED 等）でも
     // 発生しうるため、unresolvedComments が空/省略の blocked では summary へフォールバックしない
     // （PR #85 codex-review P1: blocked の一般的な理由が「未解決コメント」として誤記録される問題）。
-    // それ以外の状態（needs-fix / merged / timeout）へ遷移した場合は前ラウンドの未解決コメント
-    // 情報が陳腐化しているため破棄し、後続で blocked に落ちても古い情報を引きずらないようにする。
+    // クリアは merged 時のみ行う。needs-fix / timeout はレビュースレッドを再確認する前に発生する
+    // 状態（CI 失敗・監視タイムアウト等）であり、未解決コメントが解消された証拠にはならないため、
+    // 直前の観測値を保持する。ここでクリアすると、needs-fix → fixCount 上限で blocked に落ちた
+    // 場合などに最終 note・reason から未解決コメントの追跡情報が消えてしまう
+    // （PR #85 Bugbot 指摘: Unresolved info cleared too early への対応）。
     if (lastState === 'unresolved-comments') {
       const rawInfo =
         Array.isArray(m?.unresolvedComments) && m.unresolvedComments.length > 0
@@ -2290,7 +2318,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       // unresolvedComments が空/省略なら、直前ラウンドの lastUnresolvedInfo をそのまま保持する
       // （blocked 自体の理由は m.summary 側で別途 reason に含まれるため、ここでは上書きしない）。
-    } else {
+    } else if (lastState === 'merged') {
+      // merged はレビュースレッド解決を含むマージ条件の充足が monitor により確認された状態で
+      // あり、このときのみ未解決コメント情報を確定的に破棄できる。
       lastUnresolvedInfo = ''
     }
     if (lastState === 'merged') {
@@ -2376,15 +2406,25 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 「未解決スレッド一覧に threadId が見つからない場合は対象外記録をスキップしてよい」と
       // 案内しているため、threadId が不正・不明でも reason があるレコードは「対象外判断が
       // あった」という記録そのものを失わないよう不明マーカー付きで残す（reason 欠落分のみ
-      // 実質的に空レコードとしてスキップする）。件数は暴走防止のため先頭 20 件に制限する。
+      // 実質的に空レコードとしてスキップする）。件数は暴走防止のため、復元済みエントリを含む
+      // outOfScopeLog 全体で OUT_OF_SCOPE_LOG_MAX（20）件に制限する。
       if (Array.isArray(f.outOfScopeComments)) {
-        let loggedCount = 0
-        for (const oc of f.outOfScopeComments) {
+        for (let i = 0; i < f.outOfScopeComments.length; i++) {
+          const oc = f.outOfScopeComments[i]
           const reason = capText(sanitize(oc?.reason ?? ''), 300)
           if (!reason) continue
-          if (loggedCount >= OUT_OF_SCOPE_LOG_MAX) {
-            const omitted = f.outOfScopeComments.length - loggedCount
-            outOfScopeLog.push(`（他 ${omitted} 件省略）`)
+          // 上限判定はバッチ内カウントではなく outOfScopeLog 全体の長さで行う。
+          // outOfScopeLog は monitoring 再開時に状態ファイルから復元されたエントリを含むため、
+          // バッチごとにカウントをリセットすると resume・複数 fix ラウンドを跨いで上限
+          // （OUT_OF_SCOPE_LOG_MAX 件）を迂回できてしまう（PR #85 Bugbot 指摘:
+          // Resume bypasses out-of-scope cap への対応）。共有上限により合計 20 件を超えない。
+          if (outOfScopeLog.length >= OUT_OF_SCOPE_LOG_MAX) {
+            const omitted = f.outOfScopeComments.length - i
+            // 省略マーカーはちょうど上限到達時の 1 度だけ追加する（fix ラウンドごとに
+            // マーカーが増殖して上限の意味を失わないため）。
+            if (outOfScopeLog.length === OUT_OF_SCOPE_LOG_MAX) {
+              outOfScopeLog.push(`（他 ${omitted} 件省略）`)
+            }
             log(`#${item.number}: fix エージェントの対象外コメント記録が上限（${OUT_OF_SCOPE_LOG_MAX}）を超えたため以降を省略した`)
             break
           }
@@ -2392,7 +2432,6 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           const entry = `threadId: ${tid} / reason: ${reason}`
           outOfScopeLog.push(entry)
           log(`#${item.number}: fix エージェントが対象外と判断したコメント（${entry}）`)
-          loggedCount++
         }
       }
       // 旧パスを保持し続けると stale になるため、有効・無効を問わず必ず新値で上書きする
@@ -2429,9 +2468,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // 直前の正常パスを残すため、ここでは cleanupWorktree を指定せず .worktree を触らない。
     // 未解決コメントがあれば note・recordFailure の reason に引き継ぎ、blocked 後もユーザーが
     // 状態ファイル・最終レポートから追跡できるようにする（Issue #81 の目的そのもの）。
-    // blocked 分岐は unresolvedComments が空の場合に前ラウンドの値をそのまま保持することがあるため、
-    // 「現在確定した未解決コメント」ではなく「最後に観測された」情報である旨を明示する。
-    const unresolvedNote = lastUnresolvedInfo ? `。最後に観測された未解決コメント: ${lastUnresolvedInfo}` : ''
+    // lastUnresolvedInfo は merged 時以外はクリアされず（blocked の空/省略時・needs-fix / timeout
+    // 遷移時に直前の値を保持する）、「現在確定した未解決コメント」ではなくレビュースレッドを
+    // 最後に確認できた時点の情報であるため、「最終観測時点」である旨を文言で明示する。
+    const unresolvedNote = lastUnresolvedInfo ? `。最終観測時点の未解決コメント: ${lastUnresolvedInfo}` : ''
     // outOfScopeLog も unresolvedNote 同様に最終 reason へ引き継ぐ（PR #85 codex-review P1 対応）。
     const outOfScopeNote =
       outOfScopeLog.length > 0
