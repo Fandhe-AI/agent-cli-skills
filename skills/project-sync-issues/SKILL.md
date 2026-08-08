@@ -52,16 +52,25 @@ GitHub Actions から Projects API にアクセスするには `GITHUB_TOKEN` �
 
 `Fandhe-AI/actions/project-sync` Composite Action を使用する。`.github/workflows/project-sync.yml` を生成する。
 
-**SHA 解決手順（生成前に必ず実行する）:**
+**SHA 解決手順（レビュー済み固定 SHA を使用する）:**
 
-サードパーティ action は `@main` / `@vN` 等の可動参照ではなく、検証済みのコミット SHA で固定する。生成のたびに以下で最新の SHA を取得し、コメント（取得日・対応バージョン）付きで `uses` に埋め込む:
+サードパーティ action は `@main` / `@vN` 等の可動参照ではなく、検証済みのコミット SHA で固定する。生成のたびに最新 SHA を動的取得して埋め込む方式は、取得時点で上流が侵害・意図せず改変されていた場合にそのコードをそのまま導入先へ伝播させてしまう。そのため**ワークフロー生成時は以下のレビュー済み固定 SHA を定数として使用し、動的な最新 SHA 取得は行わない**:
+
+| Action | 固定 SHA | 対応バージョン | レビュー日 |
+|--------|---------|--------------|-----------|
+| `Fandhe-AI/actions/project-sync` | `a85f9d283bfdbe7ff76823d2ca766222a268ee10` | main (2026-08-09 時点) | 2026-08-09 |
+| `actions/create-github-app-token` | `fee1f7d63c2ff003460e3d139729b119787bc349` | v2.2.2 | 2026-08-09 |
+
+SHA を更新する必要がある場合のみ（生成のたびには実行しない）、以下の手順で差分を確認してから本ファイルの定数とワークフロー例を更新する:
 
 ```bash
-# Composite Action の最新コミット SHA を取得して uses に埋め込む
+# 更新候補の最新 SHA を取得（更新作業時のみ実行）
 gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'
-# create-github-app-token の安定タグが指すコミット SHA を取得
-gh api repos/actions/create-github-app-token/git/ref/tags/v2 --jq '.object.sha'
+# 旧 SHA との差分ファイル一覧を確認してから採否を判断する
+gh api repos/Fandhe-AI/actions/compare/<旧SHA>...<新SHA> --jq '.files[].filename'
 ```
+
+差分に意図しない変更が含まれないことを確認したうえで、上記の固定 SHA 表と後続のワークフロー例内 `uses:` 行のコメント（対応バージョン・レビュー日）を合わせて更新する。
 
 **PAT を使用する場合:**
 
