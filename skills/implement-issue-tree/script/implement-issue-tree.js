@@ -173,7 +173,15 @@ const MERGE_SCHEMA = {
       enum: ['merged', 'needs-fix', 'unresolved-comments', 'timeout', 'blocked'],
       description: 'merged: マージ成功 / needs-fix: CI 失敗・Bugbot 指摘・コンフリクト / unresolved-comments: レビューコメント未解決 / timeout: 監視上限超過 / blocked: 自力解決不可',
     },
-    summary: { type: 'string', description: 'needs-fix / unresolved-comments の場合は対応に必要な情報の全文' },
+    summary: { type: 'string', description: 'needs-fix / unresolved-comments の場合は対応に必要な情報の全文。blocked の場合は残存未解決コメントを含める' },
+    // 任意フィールド。旧応答形式（summary のみ）との後方互換のため required には含めない。
+    // fixCount 上限到達時（runMergeLoop の blocked 分岐）に最後の monitor 結果を失わず
+    // 状態ファイル・失敗レポートへ引き継ぐための構造化データ。
+    unresolvedComments: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'unresolved-comments / blocked 時の未解決スレッド一覧（author + 内容要約）。fix が対象外と判断したものは【対象外コメント】マーカーと理由を付す。任意',
+    },
   },
 }
 
@@ -999,7 +1007,10 @@ function implementPrompt(item, plan) {
 // "cursor" を含む → 現行 cursor[bot] フローをそのまま出力する。
 // cursor 以外のみ（例: sonarcloud）→ CI チェックとして gh pr checks --watch が既に監視済み
 //   のため追加待機節は出さず、一文のみ添える。
-function monitorPrompt(item, impl, externalApps) {
+// lastFixSummary: 直前ラウンドの fix エージェントの summary（sanitize 済みで渡すこと）。
+// fix が【対象外コメント】マーカー付きで記録した「対応不能・スコープ外」判断を monitor へ
+// 引き継ぎ、unresolved スレッドの再列挙時にマーカーを保持させるために使う。空文字なら未添付。
+function monitorPrompt(item, impl, externalApps, lastFixSummary = '') {
   const apps = Array.isArray(externalApps) ? externalApps : []
   const hasCursor = apps.includes('cursor')
 
@@ -1027,9 +1038,16 @@ function monitorPrompt(item, impl, externalApps) {
     ]
   }
 
+  // 直前 fix の【対象外コメント】判断を monitor 側の unresolved 再列挙時に引き継がせるための節。
+  // lastFixSummary は runMergeLoop 側で既に sanitize 済みだが、二重防御として再度 sanitize を通す。
+  const lastFixLines = lastFixSummary
+    ? [`直前の fix エージェントの報告（対象外コメント判断の引き継ぎ用）:`, sanitize(lastFixSummary)]
+    : []
+
   return [
     `PR #${impl.prNumber}（イシュー #${item.number}）の CI / 外部チェック監視・レビューコメント確認・マージ判定の担当。修正作業は行わない。`,
     COMMON,
+    ...lastFixLines,
     '手順:',
     `1. まず gh pr view ${impl.prNumber} --json state,headRefOid で PR の状態と HEAD sha を取得して固定する。state が MERGED の場合（前回実行で状態記録に失敗したマージ済み PR の再監視）は CI 監視を行わず、手順 6 のイシュークローズ確認のみ実施して即 state: merged を返す。state が CLOSED（未マージクローズ）の場合は state: blocked とし summary に理由を書く。fix 後に再監視するたびに sha を取り直す（古い sha を参照しないため）。`,
     `2. gh pr checks ${impl.prNumber} --watch --interval 60 で全チェック完了まで監視する（Bash の timeout に 600000 を指定し、コマンドがタイムアウトしたら同コマンドを再実行。再実行は 4 回まで = 最長およそ 40 分）。`,
@@ -1043,12 +1061,12 @@ function monitorPrompt(item, impl, externalApps) {
     '   cursor=""; hasNextPage=true; unresolved=()',
     `   while $hasNextPage: gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved comments(last:1){nodes{body author{login}}}}pageInfo{hasNextPage endCursor}}}}}' -F owner="{owner}" -F name="{repo}" -F number=${impl.prNumber} -F cursor="$cursor"`,
     '   → 各ページの isResolved:false スレッドを unresolved に追加し、pageInfo.hasNextPage/endCursor で次ページへ進む。',
-    '   - unresolved が 1 件でもあれば state: unresolved-comments。summary に各未解決スレッドの最終コメント内容（author + body）をすべて列挙する。',
+    '   - unresolved が 1 件でもあれば state: unresolved-comments。summary に各未解決スレッドの最終コメント内容（author + body）をすべて列挙し、あわせて unresolvedComments 配列（1 スレッド 1 要素、author + 内容要約）で返す。直前 fix 報告（上記）で【対象外コメント】として理由付きで記録済みのスレッドは、summary への列挙時にも【対象外コメント】マーカーを引き継いで記録する。',
     '   - 全スレッド解決済み（または未解決スレッドなし）の場合のみ次のステップに進む。',
     `6. CI 全 green（pending/failure 0 件）・外部チェック指摘なし（または外部チェックなし確定）・未解決レビューコメントなしの全条件が揃ったら gh pr merge ${impl.prNumber} --squash --delete-branch でマージする。`,
     `7. マージ後、gh issue view ${item.number} --json state でクローズを確認し、open のままなら gh issue close ${item.number} する。他のイシューが並列実行中のため、working copy のブランチ切り替えや git pull は行わない。`,
-    '8. 監視上限まで待っても完了しない場合は state: timeout。自力で解決できない事象は state: blocked。',
-    '返却: state / summary。',
+    '8. 監視上限まで待っても完了しない場合は state: timeout。自力で解決できない事象（state を blocked と判断する場合）は、その時点の残存 unresolved スレッドを【残存未解決】マーカー付きで summary に列挙し、あわせて unresolvedComments 配列（1 スレッド 1 要素、author + 内容要約）で返す。',
+    '返却: state / summary / unresolvedComments（未解決スレッドがある場合）。',
   ].join('\n')
 }
 
@@ -1127,13 +1145,14 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
     `0. worktree routing ガード（他のどの gh / git 操作よりも先に、最初に必ず実行する）: \`git remote get-url origin\` でカレント worktree の remote を確認し、\`gh issue view ${item.number} --json number,title\` で取得した title が、このタスクの対象イシュー「${title}」と実質的に同一であることを確認する（プロンプト中の「${title}」は安全化のため記号がエスケープ／除去されている場合があるため完全一致は要求せず語句の一致で判断する。番号の存在だけでは別リポの同番号 issue を誤認しうる）。remote が想定と異なる / issue が解決できない / 取得 title が明らかに無関係（別 issue）のいずれか（= submodule 等の別リポ worktree に誤配置）なら、git fetch / git push を含む後続を一切実行せず、即 \`routingError: true\`・\`pushed: false\`・summary に「worktree routing error: remote=<URL> で誤配置」を入れて返す（routingError は「push 不要（修正済み）」と区別され、オーケストレーターが即 blocked にする）。`,
     ...checkoutInstructions,
     '2. 指摘を重要度を問わずすべて修正する（実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い委譲する）。対象リポジトリの CLAUDE.md・rules の不変条件（migration・スキーマ等）を守る。',
+    '   対応不能・実装スコープ外と判断した指摘は修正をスキップしてよい。ただし無言でスキップせず、判断理由とともに summary に `【対象外コメント】<author>: <内容要約> — 理由: <理由>` の形式で必ず明記する（次ラウンドの監視エージェントが未解決スレッドとの照合に使う）。',
     '3. 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して通す。',
     ...commitAndPushInstructions,
     ...(pushAfterFix
       ? ['5. unresolved-comments の指摘を修正した場合は、対応したスレッドを gh api graphql の resolveReviewThread ミューテーションで解決済みにマークする（可能な場合）。']
       : []),
     `${pushAfterFix ? '6' : '5'}. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。`,
-    '返却: pushed / summary / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）。',
+    '返却: pushed / summary（対象外コメントがある場合は【対象外コメント】マーカー付きで列挙） / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）。',
   ].join('\n')
 }
 
@@ -2086,6 +2105,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
   // fix 中に worktree 誤配置（別リポ）を検出したか。ループ後の最終 updateState で
   // 汎用マージ失敗 note ではなく routing 専用 note を記録するために使う。
   let routingErrorDetected = false
+  // 最後に monitor が収集した未解決コメント情報（sanitize 済み）。fixCount >= 6 で blocked に
+  // 落ちる際に m を破棄してしまうと unresolved 一覧が失われるため、monitor 結果を受け取る
+  // たびに更新して保持しておく（Issue #81: blocked 時の未解決コメント追跡）。
+  let lastUnresolvedInfo = ''
+  // 直前ラウンドの fix summary（sanitize 済み）。次ラウンドの monitorPrompt へ渡し、
+  // fix が【対象外コメント】として記録した判断を monitor 側の unresolved 再列挙に引き継がせる。
+  let lastFixSummary = ''
   // 現在追跡中の worktree パス。Merge ループ開始時点の最新値を呼び出し元から受け取り、
   // 以降は最後の fix の worktreePath を常に最新に保つ。merged 時・fix 時の削除対象として使用する
   let currentWorktreePath = initialWorktreePath ?? impl.worktreePath ?? ''
@@ -2096,8 +2122,18 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
     monitorsLeft--
     // externalCheckApps は Workflow スコープのトップレベル変数（Tree フェーズで確定済み）。
     // monitoring 再開パスも同じ externalCheckApps を参照する（再起動しないため一貫している）。
-    const m = await agent(monitorPrompt(item, impl, externalCheckApps), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA })
+    const m = await agent(monitorPrompt(item, impl, externalCheckApps, lastFixSummary), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA })
     lastState = m?.state ?? 'blocked'
+    // unresolved-comments / blocked のときのみ更新する。fixCount >= 6 到達時に m が break で
+    // 破棄されても、この時点で保持した値が最終 note・recordFailure の reason に引き継がれる。
+    if (lastState === 'unresolved-comments' || lastState === 'blocked') {
+      const rawInfo =
+        Array.isArray(m?.unresolvedComments) && m.unresolvedComments.length > 0
+          ? m.unresolvedComments.map(sanitize).join(' / ')
+          : sanitize(m?.summary ?? '')
+      // 状態ファイル・失敗レポートの肥大化を防ぐため上限 2000 字で切り詰める
+      lastUnresolvedInfo = rawInfo.length > 2000 ? `${rawInfo.slice(0, 2000)}（省略）` : rawInfo
+    }
     if (lastState === 'merged') {
       merged = true
       const mergedResult = { issue: item.number, status: 'merged', pr: impl.prNumber, note: m.summary }
@@ -2164,6 +2200,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
       }
       // fix 成功: fixCount をインクリメントして永続化し、旧 worktree を削除する
       fixCount++
+      // 次ラウンドの monitorPrompt へ引き継ぐ（【対象外コメント】判断の追跡用）
+      lastFixSummary = sanitize(f.summary ?? '')
       // 旧パスを保持し続けると stale になるため、有効・無効を問わず必ず新値で上書きする
       currentWorktreePath = newWorktreePath
       if (!newWorktreePath) {
@@ -2192,9 +2230,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
   if (!merged) {
     // routing error は専用 note を残す（汎用マージ失敗 note で上書きしない）。worktree は
     // 直前の正常パスを残すため、ここでは cleanupWorktree を指定せず .worktree を触らない。
+    // 未解決コメントがあれば note・recordFailure の reason に引き継ぎ、blocked 後もユーザーが
+    // 状態ファイル・最終レポートから追跡できるようにする（Issue #81 の目的そのもの）。
+    const unresolvedNote = lastUnresolvedInfo ? `。未解決コメント: ${lastUnresolvedInfo}` : ''
     const reason = routingErrorDetected
       ? 'worktree routing error: fix worktree が別リポに誤配置（修正不能）。実装リポの worktree への再配置が必要'
-      : `マージに到達できなかった（最終状態: ${lastState}）`
+      : `マージに到達できなかった（最終状態: ${lastState}）${unresolvedNote}`
     await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason })
     recordFailure({ issue: item.number, pr: impl.prNumber, reason })
     return false
