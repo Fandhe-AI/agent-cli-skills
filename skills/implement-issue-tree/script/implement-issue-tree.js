@@ -2477,10 +2477,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           : sanitize(m?.summary ?? '')
       lastUnresolvedInfo = capText(rawInfo)
       // 構造化一覧（lastUnresolvedComments）も表示用テキスト（lastUnresolvedInfo）と同じ
-      // タイミングで更新する。summary へのフォールバックがある lastUnresolvedInfo と異なり、
-      // 構造化一覧は m.unresolvedComments が空/省略のときは空配列のまま（summary はスレッド
-      // 単位に分解できないため構造化データへ合成しない）。
-      lastUnresolvedComments = normalizeUnresolvedComments(m?.unresolvedComments)
+      // タイミングで更新するが、m.unresolvedComments が空/省略の場合は blocked 分岐と同様に
+      // 直前ラウンドの一覧を保持する（上書きしない）。state: unresolved-comments は「未解決
+      // スレッドが実在する」ことを意味するため、監視エージェントが配列フィールドだけを省略
+      // しても、既知の構造化データを空配列で消去してはならない（Bugbot PR #94 指摘:
+      // Comments cleared on omitted array）。
+      if (Array.isArray(m?.unresolvedComments) && m.unresolvedComments.length > 0) {
+        lastUnresolvedComments = normalizeUnresolvedComments(m.unresolvedComments)
+      }
     } else if (lastState === 'blocked') {
       if (Array.isArray(m?.unresolvedComments) && m.unresolvedComments.length > 0) {
         lastUnresolvedInfo = capText(m.unresolvedComments.map(unresolvedCommentText).join(' / '))
