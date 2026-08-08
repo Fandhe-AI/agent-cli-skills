@@ -68,9 +68,10 @@ GitHub Actions から Projects API にアクセスするには `GITHUB_TOKEN` �
 gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'
 # 旧 SHA との差分パッチ（変更内容そのもの）を取得して精査する。ファイル名一覧だけでは不十分
 gh api repos/Fandhe-AI/actions/compare/<旧SHA>...<新SHA> --jq '.files[] | {filename, patch}'
-# action.yml・参照される全スクリプトの新 SHA 時点の内容を取得し、composite action が
-# 実行するコマンド・ダウンロードするバイナリ等に不審な変更がないか実際に読んで確認する
-gh api repos/Fandhe-AI/actions/contents/action.yml?ref=<新SHA> --jq '.content' | base64 -d
+# project-sync Composite Action のエントリーポイント（action.yml）と参照される
+# 全スクリプトを新 SHA 時点の内容で取得し、composite action が実行するコマンド・
+# ダウンロードするバイナリ等に不審な変更がないか実際に読んで確認する
+gh api repos/Fandhe-AI/actions/contents/project-sync/action.yml?ref=<新SHA> --jq '.content' | base64 -d
 ```
 
 差分パッチと `action.yml`（および参照スクリプト全文）を実際に読み、意図しない変更・不審なコマンド追加がないことを人手で確認する。可能であれば署名・リリース provenance（`gh attestation verify` 等）も確認する。確認が取れた場合のみ、上記の固定 SHA 表と後続のワークフロー例内 `uses:` 行のコメント（対応バージョン）を合わせて更新する。
@@ -280,7 +281,13 @@ gh project item-add <number> \
 ## 検証
 
 **モード A 完了後:** `.github/workflows/project-sync.yml` が存在し、YAML が正しく記述されていること。加えて以下を確認する:
-- 可動参照が残っていないこと: `grep -E '@(main|v[0-9]+)\s*$' .github/workflows/project-sync.yml` がヒット 0 件
+- 全 `uses:` 行が40桁の16進数コミット SHA で固定されていること（`@main`・`@v2.2.2`・`@master`・任意ブランチ名等の可動参照が残っていないことを積極的に検証する）:
+  ```bash
+  total=$(grep -c 'uses:' .github/workflows/project-sync.yml)
+  pinned=$(grep -cE 'uses:\s*[^@[:space:]]+@[0-9a-f]{40}([[:space:]]|#|$)' .github/workflows/project-sync.yml)
+  [ "$total" -eq "$pinned" ] && echo OK
+  ```
+  `OK` が出力されること（`total` と `pinned` が一致 = 全 `uses:` が SHA 固定）
 - `permissions` が明示されていること: `grep -c 'permissions:' .github/workflows/project-sync.yml` が 1 以上
 
 コミット・プッシュ後に GitHub Actions の実行履歴で初回トリガーが確認できれば完了。
