@@ -122,6 +122,25 @@ function unresolvedCommentText(c) {
   return sanitize(c ?? '')
 }
 
+// outOfScopeLog（fix エージェントが対象外と判断したコメントの host 側ログ）の上限件数。
+// runMergeLoop 内での新規蓄積時、および状態ファイルからの復元時の両方で同じ上限を使う
+// （PR #85 codex-review P1 対応: 状態ファイル永続化・復元のための共通定数）。
+const OUT_OF_SCOPE_LOG_MAX = 20
+
+// 状態ファイルの saved.outOfScopeLog を runMergeLoop 再入時の初期値として復元するための
+// バリデーションヘルパー。状態ファイルは JS 自身が書いた値のみを保持する想定だが、手動編集や
+// 破損を経由して不正な形（文字列以外の要素・巨大配列等）が紛れ込む可能性を排除できないため、
+// 文字列要素のみを受け入れ・各要素を capText で再度切り詰め・件数を上限で切る。
+// unresolvedCommentText と異なりオブジェクト形式は受け付けない（outOfScopeLog は host 側が
+// 生成した "threadId: xxx / reason: yyy" 形式の文字列のみを蓄積する契約のため）。
+function sanitizeOutOfScopeLog(arr) {
+  if (!Array.isArray(arr)) return []
+  return arr
+    .filter((v) => typeof v === 'string' && v.length > 0)
+    .slice(0, OUT_OF_SCOPE_LOG_MAX)
+    .map((v) => capText(sanitize(v), 300))
+}
+
 // エージェント返却値の整数検証
 function assertInt(val, label) {
   if (!Number.isInteger(val) || val <= 0) throw new Error(`${label} が正の整数ではない: ${val}`)
@@ -2197,7 +2216,10 @@ async function runImplement(item) {
 
   // monitoring 再開パス: Review はスキップして monitor ループから再開する。
   // impl.worktreePath は状態ファイルの saved.worktree から復元済みのため最新を指す。
-  return await runMergeLoop(item, impl, savedFixCount, impl.worktreePath)
+  // saved.outOfScopeLog も同様に復元する（sanitizeOutOfScopeLog で形式・件数・長さを再検証）。
+  // これを渡さないと直前ラウンドまでの fix の対象外記録が監視再開のたびに失われてしまう
+  // （PR #85 codex-review P1 対応）。
+  return await runMergeLoop(item, impl, savedFixCount, impl.worktreePath, sanitizeOutOfScopeLog(saved.outOfScopeLog))
 }
 
 // Merge ループを独立関数に分離する。
@@ -2206,7 +2228,11 @@ async function runImplement(item) {
 // initialWorktreePath: Merge ループ開始時点で追跡すべき worktree パス。新規 impl パスでは
 // Review ループ後の最新 worktree、monitoring 再開パスでは状態ファイル由来の worktree を渡す。
 // impl.worktreePath をそのまま使うと Review fix で差し替わった後に stale になるため引数で受ける。
-async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
+// initialOutOfScopeLog: monitoring 再開パスでのみ状態ファイルの saved.outOfScopeLog（検証済み）を
+// 渡す。新規 impl パスは新しい PR を作るため常に空配列（呼び出し元で明示せず省略）。
+// これにより、fix が outOfScopeComments を記録した直後にプロセスが中断・再開されても
+// ホスト側ログが失われず最終 note・reason へ引き継がれる（PR #85 codex-review P1 対応）。
+async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = []) {
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -2224,7 +2250,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
   // note・reason へ引き継ぐ（PR #85 codex-review P1 対応: 宣言した保存契約と、実装が
   // 当該フィールドを読み捨てるだけだった不整合を解消）。monitorPrompt など後続の判定材料
   // には一切渡さない（未信頼な自己申告の再利用を断つ設計は維持）。
-  const outOfScopeLog = []
+  // monitoring 再開パスでは initialOutOfScopeLog（状態ファイルから検証済みで復元した値）を
+  // 初期値として引き継ぐ。呼び出し元で既に sanitizeOutOfScopeLog を通過済みのため再検証しない。
+  const outOfScopeLog = Array.isArray(initialOutOfScopeLog) ? [...initialOutOfScopeLog] : []
   // 現在追跡中の worktree パス。Merge ループ開始時点の最新値を呼び出し元から受け取り、
   // 以降は最後の fix の worktreePath を常に最新に保つ。merged 時・fix 時の削除対象として使用する
   let currentWorktreePath = initialWorktreePath ?? impl.worktreePath ?? ''
@@ -2350,15 +2378,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
       // あった」という記録そのものを失わないよう不明マーカー付きで残す（reason 欠落分のみ
       // 実質的に空レコードとしてスキップする）。件数は暴走防止のため先頭 20 件に制限する。
       if (Array.isArray(f.outOfScopeComments)) {
-        const MAX_OUT_OF_SCOPE_LOG = 20
         let loggedCount = 0
         for (const oc of f.outOfScopeComments) {
           const reason = capText(sanitize(oc?.reason ?? ''), 300)
           if (!reason) continue
-          if (loggedCount >= MAX_OUT_OF_SCOPE_LOG) {
+          if (loggedCount >= OUT_OF_SCOPE_LOG_MAX) {
             const omitted = f.outOfScopeComments.length - loggedCount
             outOfScopeLog.push(`（他 ${omitted} 件省略）`)
-            log(`#${item.number}: fix エージェントの対象外コメント記録が上限（${MAX_OUT_OF_SCOPE_LOG}）を超えたため以降を省略した`)
+            log(`#${item.number}: fix エージェントの対象外コメント記録が上限（${OUT_OF_SCOPE_LOG_MAX}）を超えたため以降を省略した`)
             break
           }
           const tid = sanitizeThreadId(oc?.threadId ?? '') || '(不明・形式不正)'
@@ -2373,8 +2400,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath) {
       if (!newWorktreePath) {
         log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡不能。git worktree prune での手動掃除が必要な場合あり`)
       }
-      // fix 実行後: fixCount・新 worktree パスを更新し、旧 worktree を削除する
-      await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePath })
+      // fix 実行後: fixCount・新 worktree パス・outOfScopeLog（検証・上限制御済み）を更新し、
+      // 旧 worktree を削除する。outOfScopeLog を含めることで、この後プロセスが中断・再起動
+      // されても runMergeLoop 再入時に saved.outOfScopeLog から復元でき、対象外コメント記録が
+      // 失われない（PR #85 codex-review P1 対応: FIX_SCHEMA が宣言した「ホスト側のログ・
+      // 最終レポート専用」という保存契約を、監視再開を跨いでも満たす）。
+      await updateState(item.number, { fixCount, worktree: currentWorktreePath, outOfScopeLog }, { cleanupWorktree: oldWorktreePath })
       if (!f.pushed) {
         // 「指摘は修正済みで push 不要」の場合があるため即 blocked にせず 1 回だけ再監視する。
         // 2 回連続で push なしなら進展がないため blocked とする
