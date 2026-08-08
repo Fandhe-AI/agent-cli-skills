@@ -2378,7 +2378,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 永続化失敗を明記する。次回実行時は monitor が手順 1 で PR の MERGED 状態を検出して
       // 即 merged を返すため、再監視ループには入らない（冪等）
       {
-        const mergedPatch = { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath }
+        // note（outOfScopeNote 反映済みの最終文言）と outOfScopeLog（検証・上限制御済み）も
+        // patch に含めて永続化する。blocked / failed の終端 patch が note を保存するのと同じ形式に
+        // 揃えることで、プロセス終了後・次回実行時も状態ファイルから対象外コメント記録を復元できる
+        // （PR #85 codex-review P1 対応: results 表示のみでは最終記録が残らない）
+        const mergedPatch = { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath, note: mergedResult.note, outOfScopeLog }
         const mergedOpts = { cleanupWorktree: currentWorktreePath }
         const mergedOk = await updateState(item.number, mergedPatch, mergedOpts)
         if (!mergedOk) {
