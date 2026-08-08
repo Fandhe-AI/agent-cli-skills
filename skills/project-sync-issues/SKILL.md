@@ -56,21 +56,24 @@ GitHub Actions から Projects API にアクセスするには `GITHUB_TOKEN` �
 
 サードパーティ action は `@main` / `@vN` 等の可動参照ではなく、検証済みのコミット SHA で固定する。生成のたびに最新 SHA を動的取得して埋め込む方式は、取得時点で上流が侵害・意図せず改変されていた場合にそのコードをそのまま導入先へ伝播させてしまう。そのため**ワークフロー生成時は以下のレビュー済み固定 SHA を定数として使用し、動的な最新 SHA 取得は行わない**:
 
-| Action | 固定 SHA | 対応バージョン | レビュー日 |
-|--------|---------|--------------|-----------|
-| `Fandhe-AI/actions/project-sync` | `a85f9d283bfdbe7ff76823d2ca766222a268ee10` | main (2026-08-09 時点) | 2026-08-09 |
-| `actions/create-github-app-token` | `fee1f7d63c2ff003460e3d139729b119787bc349` | v2.2.2 | 2026-08-09 |
+| Action | 固定 SHA | 対応バージョン |
+|--------|---------|--------------|
+| `Fandhe-AI/actions/project-sync` | `a85f9d283bfdbe7ff76823d2ca766222a268ee10` | main |
+| `actions/create-github-app-token` | `fee1f7d63c2ff003460e3d139729b119787bc349` | v2.2.2 |
 
-SHA を更新する必要がある場合のみ（生成のたびには実行しない）、以下の手順で差分を確認してから本ファイルの定数とワークフロー例を更新する:
+上記 SHA は導入時点でコード内容（`action.yml`・参照スクリプト全文）を実際に取得・精査したうえで固定した値である。SHA を更新する必要がある場合のみ（生成のたびには実行しない）、以下の手順で**変更内容そのもの**を精査してから本ファイルの定数とワークフロー例を更新する:
 
 ```bash
 # 更新候補の最新 SHA を取得（更新作業時のみ実行）
 gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'
-# 旧 SHA との差分ファイル一覧を確認してから採否を判断する
-gh api repos/Fandhe-AI/actions/compare/<旧SHA>...<新SHA> --jq '.files[].filename'
+# 旧 SHA との差分パッチ（変更内容そのもの）を取得して精査する。ファイル名一覧だけでは不十分
+gh api repos/Fandhe-AI/actions/compare/<旧SHA>...<新SHA> --jq '.files[] | {filename, patch}'
+# action.yml・参照される全スクリプトの新 SHA 時点の内容を取得し、composite action が
+# 実行するコマンド・ダウンロードするバイナリ等に不審な変更がないか実際に読んで確認する
+gh api repos/Fandhe-AI/actions/contents/action.yml?ref=<新SHA> --jq '.content' | base64 -d
 ```
 
-差分に意図しない変更が含まれないことを確認したうえで、上記の固定 SHA 表と後続のワークフロー例内 `uses:` 行のコメント（対応バージョン・レビュー日）を合わせて更新する。
+差分パッチと `action.yml`（および参照スクリプト全文）を実際に読み、意図しない変更・不審なコマンド追加がないことを人手で確認する。可能であれば署名・リリース provenance（`gh attestation verify` 等）も確認する。確認が取れた場合のみ、上記の固定 SHA 表と後続のワークフロー例内 `uses:` 行のコメント（対応バージョン）を合わせて更新する。
 
 **PAT を使用する場合:**
 
@@ -91,7 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Sync project status
-        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main (2026-08-09 時点)
+        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main
         with:
           project-number: '<number>'
           project-owner: '<owner>'
@@ -125,7 +128,7 @@ jobs:
           owner: '<owner>'
 
       - name: Sync project status
-        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main (2026-08-09 時点)
+        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main
         with:
           project-number: '<number>'
           project-owner: '<owner>'
@@ -138,7 +141,7 @@ Status オプション名がデフォルト（Todo / In Progress / In Review / D
 
 ```yaml
       - name: Sync project status
-        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main (2026-08-09 時点)
+        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main
         with:
           project-number: '<number>'
           project-owner: '<owner>'
