@@ -88,19 +88,31 @@ SOURCE=$(jq -r ".skills[\"${SKILL_NAME}\"].source" skills-lock.json)
 SOURCE_TYPE=$(jq -r ".skills[\"${SKILL_NAME}\"].sourceType" skills-lock.json)
 
 # 安全弁: Fandhe-AI org 以外への push を拒否する
-# 短縮形 (Fandhe-AI/<repo>) と URL 形式 (https://github.com/Fandhe-AI/<repo>) の両方を許可する
+# 1) まず正規化する（短縮形はそのまま、URL 形式は OWNER/REPO へ変換し末尾 .git を除去）
 case "${SOURCE}" in
-  Fandhe-AI/*)
-    # 短縮形: そのまま使用
-    REPO_SLUG="${SOURCE}"
-    ;;
-  https://github.com/Fandhe-AI/*)
-    # URL 形式: OWNER/REPO 形式に正規化し末尾 .git を除去する
+  https://github.com/*)
     REPO_SLUG="${SOURCE#https://github.com/}"
     REPO_SLUG="${REPO_SLUG%.git}"
     ;;
   *)
-    echo "エラー: source '${SOURCE}' は Fandhe-AI org のリポジトリではありません。中止します。"
+    REPO_SLUG="${SOURCE}"
+    ;;
+esac
+
+# 2) 正規化後の値を厳密検証する: owner は Fandhe-AI 固定、repo は単一セグメントのみ許可する
+#    [A-Za-z0-9._-]+ は '/'・'?'・'#'・空文字を含められないため、
+#    パストラバーサル（../）・余剰パスセグメント・クエリ・フラグメントをすべて拒否できる
+#    （前方一致 case では `Fandhe-AI/../../attacker/repo` のような値が誤って通過していた）
+if [[ ! "${REPO_SLUG}" =~ ^Fandhe-AI/[A-Za-z0-9._-]+$ ]]; then
+  echo "エラー: source '${SOURCE}' は Fandhe-AI/<repo> 形式ではありません。中止します。"
+  exit 1
+fi
+
+# 3) '.'・'..' は上記正規表現を通過してしまうため repo 名として明示拒否する
+#    （例: 'Fandhe-AI/..git' は .git 除去後に 'Fandhe-AI/.' へ化ける）
+case "${REPO_SLUG#Fandhe-AI/}" in
+  .|..)
+    echo "エラー: source '${SOURCE}' の repository 名が不正です。中止します。"
     exit 1
     ;;
 esac
@@ -112,7 +124,7 @@ if [[ "${SOURCE_TYPE}" != "github" ]]; then
 fi
 ```
 
-- `source` が `Fandhe-AI/`（短縮形）または `https://github.com/Fandhe-AI/`（URL 形式）のいずれでも始まらない場合は **エラーで中止** します（安全弁：見知らぬリポジトリへ意図せず push しないため）。
+- `source` は正規化後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致する場合のみ許可します（安全弁：見知らぬリポジトリへ意図せず push しないため）。`../` を含むパストラバーサル・クエリ（`?x=1`）・フラグメント（`#frag`）・余剰パスセグメント（`/extra`）を含む値は正規表現に一致せずエラーで中止します。検証は必ず `.git` 除去などの正規化の**後**に行います（正規化前に検証すると `Fandhe-AI/..git` のような値が正規化後に別の値へ化けてすり抜けるため）。
 - `sourceType` が `github` 以外の場合も **エラーで中止** します（GitHub 以外の source は本スキルの想定外であり、`gh repo clone` / `gh pr create` が正常動作しないため）。
 - 正規化後の `REPO_SLUG` は以降の Step で `gh repo clone`・`gh pr create --repo` に利用します。
 
@@ -285,7 +297,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 
 - **SKILL_NAME は kebab-case のみ許可**：`..` のような値によるパストラバーサルを防ぐため、空判定の直後・パス解決の前に `^[a-z][a-z0-9-]+$` で検証する（security.md A03/A01）
 - **`skills/` と `.agents/skills/` の両方が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>` か `.agents/skills/<name>` の2パスのみ受理し、任意パス指定によるパストラバーサルを防ぐ
-- **source が Fandhe-AI org 以外の場合は中止**：`Fandhe-AI/`（短縮形）と `https://github.com/Fandhe-AI/`（URL 形式）のみを許可し、それ以外は意図しない外部リポジトリへの push を防ぐため中止する
+- **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → スキルルート親ディレクトリ（`skills/` or `.agents/skills/`）の慣習 → 最終デフォルト `skills/`（より一般的な公開レイアウト）
 - **既に同名の branch がある場合**：秒単位スラッグで通常は衝突しないが、万一の場合はユーザーに確認
