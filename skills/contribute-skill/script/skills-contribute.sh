@@ -156,18 +156,28 @@ elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
 elif [[ -d "skills" ]]; then
   # upstream が skills/ 配下で公開している慣習
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
-  mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 elif [[ -d ".agents/skills" ]]; then
   # upstream が .agents/skills/ 配下で公開している慣習
   UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
-  mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 else
   echo "警告: upstream にスキルルートが見つかりません。skills/ を既定として新規追加します。"
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
-  mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 fi
 
 echo "==> upstream パス: ${UPSTREAM_SKILL_PATH}"
+
+# 削除伝搬のための同期: cp -R は追加・上書きのみで削除を反映しないため、
+# ローカルで削除したファイルが upstream 側に残存してしまう。宛先を消してから作り直す（delete-then-copy）。
+# 安全弁: 削除対象が clone 内の想定スキルパス（2 形態のみ）であることを検証してから rm する
+case "${UPSTREAM_SKILL_PATH}" in
+  "skills/${SKILL_NAME}"|".agents/skills/${SKILL_NAME}") ;;
+  *)
+    echo "エラー: 想定外の UPSTREAM_SKILL_PATH です: ${UPSTREAM_SKILL_PATH}"
+    exit 1
+    ;;
+esac
+rm -rf "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
+mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 cp -R "${ORIG_DIR}/${LOCAL_SKILL_DIR}/." "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}/"
 
 # Step 8: 差分を確認する
