@@ -2396,7 +2396,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         outOfScopeLog.length > 0
           ? `。対象外と判断されたコメント: ${capText(outOfScopeLog.join(' / '), 500)}`
           : ''
-      const mergedResult = { issue: item.number, status: 'merged', pr: impl.prNumber, note: `${m.summary}${outOfScopeNote}` }
+      // summary は monitor エージェント由来の自由文のため、unresolved-comments 経路（sanitize +
+      // capText）と同様に検証・上限化してから note に合成する。この note は mergedPatch として
+      // 状態ファイル書き込みパスへも渡るため、巨大 summary で終端 write が肥大・失敗しないよう
+      // capText(2000) で必ず打ち切る（PR #85 Bugbot Low: Uncapped summary in merged note 対応）。
+      const mergedResult = { issue: item.number, status: 'merged', pr: impl.prNumber, note: `${capText(sanitize(m?.summary ?? ''))}${outOfScopeNote}` }
       results.push(mergedResult)
       consecutiveFailures = 0
       // merged 確定: fixCount も同時に書く（更新まとめ）。現在追跡中の worktree を自動削除して残骸を防ぐ
