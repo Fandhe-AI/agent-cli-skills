@@ -144,7 +144,13 @@ function sanitizeOutOfScopeLog(arr) {
   if (!Array.isArray(arr)) return []
   return arr
     .filter((v) => typeof v === 'string' && v.length > 0)
-    .slice(0, OUT_OF_SCOPE_LOG_MAX)
+    // 書き込み側（runMergeLoop の蓄積ループ）は本体 OUT_OF_SCOPE_LOG_MAX 件に加えて
+    // 上限到達時の省略マーカー行（「（他 N 件省略）」）を 1 件だけ追加するため、
+    // 状態ファイルには最大 OUT_OF_SCOPE_LOG_MAX + 1 件が正当に保存されうる。
+    // 上限を +1 しないと復元時にマーカー行（21 件目）が破棄され、「さらに省略が
+    // あった」事実が最終 note から消える（PR #85 Bugbot 指摘:
+    // Restore drops omission marker への対応）。
+    .slice(0, OUT_OF_SCOPE_LOG_MAX + 1)
     .map((v) => capText(v, 450))
 }
 
