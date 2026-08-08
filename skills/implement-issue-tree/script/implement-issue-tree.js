@@ -344,6 +344,15 @@ const IMPL_SCHEMA = {
     branch: { type: 'string' },
     summary: { type: 'string' },
     worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
+    // out-of-scope 項目専用フィールド。以前は summary 内の文字列マッチ（'対象外' を含むか）で
+    // 抽出していたため、対象外項目が無くても「〜は対象外とせず実装した」等の通常文を含む
+    // summary 全文が PR 本文へ誤って混入していた（#92）。専用フィールド化により
+    // 呼び出し側（PR 作成フェーズ）が推測抽出せずに済む。
+    outOfScope: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '現スコープ外と判断した項目のみを列挙（1 項目 1 要素）。なければ空配列または省略',
+    },
   },
 }
 
@@ -1231,10 +1240,10 @@ function implementPrompt(item, plan) {
     // Review が収束失敗した場合は push も PR 作成も行わず CI を一切起動しない。
     '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
     '   （push と PR 作成は後続の Review が全通過した後に別エージェントが行う）',
-    '   実装の過程で現スコープ外と判断した事項（未対応の改善・別機能・技術的負債・後続作業）は変数等に記録しておき、',
-    '   summary に「対象外（out-of-scope）」として列挙する（push 後の PR 本文への記録は後続エージェントが行う）。',
+    '   実装の過程で現スコープ外と判断した事項（未対応の改善・別機能・技術的負債・後続作業）は',
+    '   返却フィールド outOfScope に 1 項目 1 要素の配列として列挙する（summary には含めなくてよい。push 後の PR 本文への記録は後続エージェントが行う）。',
     '8. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
-    '返却: branch / summary（実装内容の要約。対象外項目を含む。失敗時は理由と現状）/ worktreePath（pwd の結果）。',
+    '返却: branch / summary（実装内容の要約。失敗時は理由と現状）/ outOfScope（対象外項目の配列。なければ空配列）/ worktreePath（pwd の結果）。',
     '（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）',
   ].join('\n')
 }
@@ -1315,11 +1324,16 @@ function monitorPrompt(item, impl, externalApps) {
 // この push が CI トリガーになる（push は 1 回のみ）。
 // PR 作成後に prNumber を返し、以降の Merge ループへ渡す。
 // impl.branch は sanitizeBranch 検証済みの値を渡すこと。
-// outOfScope: impl の summary から抽出した対象外項目のテキスト（PR body に記録する）。
+// outOfScope: impl が専用フィールドで返した対象外項目の配列（PR body に記録する）。
 function prCreatePrompt(item, impl, outOfScope) {
   const branch = sanitizeBranch(impl.branch)
-  const outOfScopeSection = outOfScope
-    ? `\n\n## 対象外（out-of-scope）\n${sanitize(outOfScope)}`
+  // 各項目を個別に sanitize してから改行結合する（sanitize は改行をスペースに潰すため、
+  // 結合後に一括 sanitize すると箇条書き構造が失われる）。
+  const outOfScopeItems = (Array.isArray(outOfScope) ? outOfScope : [])
+    .filter((s) => typeof s === 'string' && s.trim())
+    .map((s) => `   - ${sanitize(s).trim()}`)
+  const outOfScopeSection = outOfScopeItems.length
+    ? `\n\n## 対象外（out-of-scope）\n${outOfScopeItems.join('\n')}`
     : ''
   return [
     `イシュー #${item.number}「${untrusted(item.title, 'issue-title')}」の実装コミット（ブランチ ${branch}）を push して PR を作成する担当エージェント。`,
@@ -1704,9 +1718,9 @@ function recoverImplementPrompt(item, brief, branch) {
     '6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。',
     '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
     '   （push と PR 作成は後続の Review が全通過した後に別エージェントが行う）',
-    '   実装の過程で現スコープ外と判断した事項は summary に「対象外（out-of-scope）」として列挙する。',
+    '   実装の過程で現スコープ外と判断した事項は返却フィールド outOfScope に 1 項目 1 要素の配列として列挙する（summary には含めなくてよい）。',
     '8. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
-    '返却: branch / summary（実装内容の要約。対象外項目を含む。失敗時は理由と現状）/ worktreePath（pwd の結果）。',
+    '返却: branch / summary（実装内容の要約。失敗時は理由と現状）/ outOfScope（対象外項目の配列。なければ空配列）/ worktreePath（pwd の結果）。',
     '（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）',
   ].join('\n')
 }
@@ -2360,7 +2374,9 @@ async function runImplement(item) {
     // --- push + PR 作成フェーズ: Review 全通過後にここで初めて push・PR を作る ---
     // Review が収束した場合のみここに到達する（CI を 1 回のみ起動する）。
     // PR 作成後に prNumber を取得し、以降の Merge ループへ渡す。
-    const outOfScope = impl.summary?.includes('対象外') ? impl.summary : ''
+    // 対象外項目は impl の専用フィールド outOfScope から受け取る。
+    // summary の文字列マッチは「対象外」を含む通常サマリー全文が混入するため使わない（#92）。
+    const outOfScope = Array.isArray(impl.outOfScope) ? impl.outOfScope : []
     const prCreateResult = await agent(prCreatePrompt(item, impl, outOfScope), {
       label: `pr-create:#${item.number}`,
       phase: 'Implement',
