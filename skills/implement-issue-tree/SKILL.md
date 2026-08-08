@@ -276,7 +276,7 @@ open のサブイシューが残っている場合、または受入基準が未
 
 ### Step 8: 最終レポートを生成する
 
-全イシューの処理結果をまとめてレポートを出力する。1 イシューの失敗では即停止せず次へ進むが、**3 イシュー連続で完了できなかった場合は新規着手を停止（halt）**し、ユーザーの判断を待つ。halt 後に着手しなかったイシューは `not-started` として記録される。out-of-scope 項目は各 PR 本文の「対象外（out-of-scope）」節に記録されているため、レポート確認時にそれらを参照して Issue 化判断（承認後に「実装対象外（out-of-scope）の扱い」手順 3・4 を実行）を行う。
+全イシューの処理結果をまとめてレポートを出力する。1 イシューの失敗では即停止せず次へ進むが、**3 イシュー連続で完了できなかった場合は新規着手を停止（halt）**し、ユーザーの判断を待つ。halt 後に着手しなかったイシューは `not-started` として記録される。out-of-scope 項目は各 PR 本文の「対象外（out-of-scope）」節に記録されているため、レポート確認時にそれらを参照して Issue 化判断（承認後に「実装対象外（out-of-scope）の扱い」手順 3・4 を実行）を行う。あわせて、blocked / fix 対象外の未解決コメント（Merge ループの fixCount 上限到達・blocked 到達で自力解決できなかったレビュースレッド）は `done` 各エントリの `unresolvedComments`（構造化未解決コメント一覧）/ `outOfScope`（fix エージェントが対象外と判断したコメントのログ）フィールドに集約されるため、レポート生成時にそれらを本節へ一覧化する。
 
 ```
 ## implement-issue-tree 完了レポート
@@ -298,9 +298,13 @@ open のサブイシューが残っている場合、または受入基準が未
 
 ### 対象外（out-of-scope）— 各 PR 本文の「対象外」節を参照
 - #N（PR #M）: 対象外項目あり（詳細は PR 本文。Issue 化は承認のうえ人手で実施、切り出し先 Issue 番号: TBD）
+
+### 未解決コメント（issue 化候補）— 該当があるときのみ出力する（0 件ならこの節ごと省略）
+- #N（PR #M）: コメント author — 本文要約（スレッド URL）
+  Issue 化は本レポート確認 → ユーザー承認のうえ実施する（承認なしに Issue 操作をしない。手順は「実装対象外（out-of-scope）の扱い」手順 3・4 と同様）
 ```
 
-返却値: `parent` / `baseBranch` / `parallel` / `total` / `done`（各イシューの status） / `failures` / `notStarted` / `halted`。
+返却値: `parent` / `baseBranch` / `parallel` / `total` / `done`（各イシューの status。blocked / failed で未解決コメントがあれば `unresolvedComments`、fix 対象外の判断ログがあれば `outOfScope` を含む） / `failures` / `notStarted` / `halted`。
 
 ## 検証
 
