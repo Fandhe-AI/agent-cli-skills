@@ -206,6 +206,12 @@ function normalizeUnresolvedComments(arr) {
 // され、復元のたびにテキストが変わり冪等性が崩れる（PR #85 Bugbot 指摘と同種の問題の事前回避）。
 // threadId は sanitizeThreadId の形式（英数字・アンダースコア・ハイフンのみ）に一致しないものは
 // 空文字に落とす（サニタイズ関数の再適用ではなく形式検証のみのため冪等性を壊さない）。
+// url のみ例外的に sanitizeCommentUrl を適用する（codex-review P1 対応, PR #94）:
+// text/threadId と異なり url は正規表現の「完全一致検証」であり `\$` 二重エスケープの
+// ような再変換は発生しないため冪等性を壊さずに再適用できる。手動編集・破損した状態
+// ファイルに外部ドメイン・javascript: スキーム等の URL が混入した場合、slice のみでは
+// 形式を保証できず、完了レポートのリンクとしてそのまま表示され得る
+// （GitHub PR リンクへの厳格な限定というセキュリティ前提が崩れる）。
 function restoreUnresolvedComments(arr) {
   if (!Array.isArray(arr)) return []
   return arr
@@ -214,7 +220,7 @@ function restoreUnresolvedComments(arr) {
     .map((c) => {
       const threadId = typeof c.threadId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(c.threadId) ? c.threadId : ''
       const text = typeof c.text === 'string' ? c.text.slice(0, 320) : ''
-      const url = typeof c.url === 'string' ? c.url.slice(0, 300) : ''
+      const url = sanitizeCommentUrl(c.url)
       return { threadId, text, url }
     })
 }
