@@ -2322,6 +2322,33 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // 監視は timeout 再試行を含め 7 回まで。fix は最大 6 回で、push 後は必ず 1 回以上の
   // 再監視を確保する（push した fix が再監視されないままループ終了しないように）
   let monitorsLeft = 7
+  // 【永続化契約の choke point】runMergeLoop がどの経路で失敗終端しても、その時点までに
+  // 収集した追跡情報（lastUnresolvedInfo / outOfScopeLog。いずれも sanitize 済み）を失わない:
+  //   1. note / recordFailure.reason へ「最終観測時点の未解決コメント」「対象外と判断された
+  //      コメント」を合成する（Issue #81 の目的そのもの。blocked 後もユーザーが最終レポート・
+  //      状態ファイルから追跡できる）
+  //   2. 状態ファイルへ lastUnresolvedInfo / outOfScopeLog フィールドとして保存する
+  //      （merged / fix 直後の非終端保存と同じキー名。次回実行・手動確認時に復元可能）
+  // 失敗終端の updateState / recordFailure は必ずこの関数を経由すること。新しい exit 経路
+  // （早期 return・break 条件）を追加する場合も直接 updateState を呼ばず本関数へ合流させる
+  // （PR #85 codex-review P1 対応: fix 失敗の早期 return が追跡情報を破棄していた問題の
+  // 構造的再発防止）。クロージャで最新の lastUnresolvedInfo / outOfScopeLog を参照する。
+  async function failMergeTerminal(baseReason) {
+    // lastUnresolvedInfo は merged 時以外はクリアされず（blocked の空/省略時・needs-fix /
+    // timeout 遷移時に直前の値を保持する）、「現在確定した未解決コメント」ではなくレビュー
+    // スレッドを最後に確認できた時点の情報であるため、「最終観測時点」である旨を文言で明示する。
+    const unresolvedNote = lastUnresolvedInfo ? `。最終観測時点の未解決コメント: ${lastUnresolvedInfo}` : ''
+    const outOfScopeNote =
+      outOfScopeLog.length > 0
+        ? `。対象外と判断されたコメント: ${capText(outOfScopeLog.join(' / '), 500)}`
+        : ''
+    const reason = `${baseReason}${unresolvedNote}${outOfScopeNote}`
+    // cleanupWorktree は指定しない（worktree はデバッグ・手動再開用に直前の正常パスを残す。
+    // patch も worktree を含めないため updateState が .worktree をクリアすることはない）
+    await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason, outOfScopeLog, lastUnresolvedInfo })
+    recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+    return false
+  }
   while (!merged && monitorsLeft > 0) {
     monitorsLeft--
     // externalCheckApps は Workflow スコープのトップレベル変数（Tree フェーズで確定済み）。
@@ -2379,10 +2406,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 即 merged を返すため、再監視ループには入らない（冪等）
       {
         // note（outOfScopeNote 反映済みの最終文言）と outOfScopeLog（検証・上限制御済み）も
-        // patch に含めて永続化する。blocked / failed の終端 patch が note を保存するのと同じ形式に
-        // 揃えることで、プロセス終了後・次回実行時も状態ファイルから対象外コメント記録を復元できる
-        // （PR #85 codex-review P1 対応: results 表示のみでは最終記録が残らない）
-        const mergedPatch = { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath, note: mergedResult.note, outOfScopeLog }
+        // patch に含めて永続化する。blocked / failed の終端 patch（failMergeTerminal）が note /
+        // outOfScopeLog / lastUnresolvedInfo を保存するのと同じ形式に揃えることで、プロセス
+        // 終了後・次回実行時も状態ファイルから対象外コメント記録を復元できる
+        // （PR #85 codex-review P1 対応: results 表示のみでは最終記録が残らない）。
+        // lastUnresolvedInfo はこの直前の merged 分岐で '' に確定済みのため、fix ラウンドで
+        // 保存した過去の観測値を状態ファイルに残さないよう空文字で明示的に上書きする。
+        const mergedPatch = { status: 'merged', pr: impl.prNumber, fixCount, worktree: currentWorktreePath, note: mergedResult.note, outOfScopeLog, lastUnresolvedInfo }
         const mergedOpts = { cleanupWorktree: currentWorktreePath }
         const mergedOk = await updateState(item.number, mergedPatch, mergedOpts)
         if (!mergedOk) {
@@ -2410,13 +2440,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       const newWorktreePath = sanitizeWorktreePath(f?.worktreePath ?? '')
       const fixSucceeded = f !== null && f !== undefined && typeof f.pushed === 'boolean'
       if (!fixSucceeded) {
-        // fix エージェントが null/不正な値を返した場合: fixCount を消費せず即座に blocked とする
-        // （無限ループ防止のため再試行はしない）
+        // fix エージェントが null/不正な値を返した場合: fixCount を消費せず即座に失敗終端とする
+        // （無限ループ防止のため再試行はしない）。この時点までに収集済みの lastUnresolvedInfo /
+        // outOfScopeLog を破棄しないよう、直接 updateState せず必ず共通終端ヘルパーを経由する
+        // （PR #85 codex-review P1 対応: この早期 return だけが追跡情報を記録していなかった）。
         const fixFailReason = `fix エージェントが無効な結果を返した（${fixCount + 1} 回目）`
         log(`⚠️ issue #${item.number}: ${fixFailReason}`)
-        await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: fixFailReason })
-        recordFailure({ issue: item.number, pr: impl.prNumber, reason: fixFailReason })
-        return false
+        return await failMergeTerminal(fixFailReason)
       }
       if (f.routingError) {
         // worktree 誤配置（別リポ）は修正不能。fix 成功パス（fixCount++ / 旧 worktree 削除）より
@@ -2513,25 +2543,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // timeout は次ラウンドで再監視する
   }
   if (!merged) {
-    // routing error は専用 note を残す（汎用マージ失敗 note で上書きしない）。worktree は
-    // 直前の正常パスを残すため、ここでは cleanupWorktree を指定せず .worktree を触らない。
-    // 未解決コメントがあれば note・recordFailure の reason に引き継ぎ、blocked 後もユーザーが
-    // 状態ファイル・最終レポートから追跡できるようにする（Issue #81 の目的そのもの）。
-    // lastUnresolvedInfo は merged 時以外はクリアされず（blocked の空/省略時・needs-fix / timeout
-    // 遷移時に直前の値を保持する）、「現在確定した未解決コメント」ではなくレビュースレッドを
-    // 最後に確認できた時点の情報であるため、「最終観測時点」である旨を文言で明示する。
-    const unresolvedNote = lastUnresolvedInfo ? `。最終観測時点の未解決コメント: ${lastUnresolvedInfo}` : ''
-    // outOfScopeLog も unresolvedNote 同様に最終 reason へ引き継ぐ（PR #85 codex-review P1 対応）。
-    const outOfScopeNote =
-      outOfScopeLog.length > 0
-        ? `。対象外と判断されたコメント: ${capText(outOfScopeLog.join(' / '), 500)}`
-        : ''
-    const reason = routingErrorDetected
+    // routing error は専用の基底 note を使う（汎用マージ失敗文言で上書きしない）。従来は
+    // routing 経路だけ unresolvedNote / outOfScopeNote を落としていたが、追跡情報の合成・
+    // 保存は failMergeTerminal に一本化したため、どちらの基底 reason でも契約を満たす。
+    const baseReason = routingErrorDetected
       ? 'worktree routing error: fix worktree が別リポに誤配置（修正不能）。実装リポの worktree への再配置が必要'
-      : `マージに到達できなかった（最終状態: ${lastState}）${unresolvedNote}${outOfScopeNote}`
-    await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason })
-    recordFailure({ issue: item.number, pr: impl.prNumber, reason })
-    return false
+      : `マージに到達できなかった（最終状態: ${lastState}）`
+    return await failMergeTerminal(baseReason)
   }
   return true
 }
