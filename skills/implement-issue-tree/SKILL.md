@@ -229,7 +229,7 @@ EOF
 再利用の条件は 2 つあり、**両方を満たす場合にのみ**その番号を `prNumber` として返す。
 
 - `baseRefName` が指定 base ブランチと一致すること（同じ head から別 base（リリースブランチ等）へ開かれた PR を再利用すると、`base <branch>` の契約を迂回して意図しないブランチへマージされる）
-- `headRefOid` が push 後のローカル HEAD（`git rev-parse HEAD`）と一致すること（他者・別ランの push で HEAD が動いた PR を、検証していないコミットごとマージ対象にしない）
+- `headRefOid` が push したブランチの先端 sha と一致すること（他者・別ランの push で head が動いた PR を、検証していないコミットごとマージ対象にしない）。比較対象の sha は必ずブランチ ref（`git rev-parse --verify "refs/heads/<branch>"`、解決できなければ `refs/remotes/origin/<branch>`）から解決する。PR Create エージェントは隔離 worktree で動作し、その worktree が対象ブランチを checkout している保証がないため `git rev-parse HEAD` を使ってはならない
 
 条件を満たす PR を再利用する場合は、本文に `Closes #<N>`（および対象外項目があれば「対象外（out-of-scope）」節）が無ければ `gh pr edit --body-file` で追記する。条件を満たさない open PR しか存在しない場合は、再利用も新規作成も行わず `prNumber: 0` と理由を返して停止する（`branch` は保存されるため、次回実行は impl 手順 0b から回復する）。
 
