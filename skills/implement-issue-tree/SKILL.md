@@ -210,8 +210,10 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 
 **監視とマージ実行の権限分離（Issue #145）:** このステップは 2 つのエージェントに分かれる。
 - **監視エージェント（monitor）**: CI・外部チェック・レビュースレッドを確認し、`state`（`ready` / `needs-fix` / `unresolved-comments` / `timeout` / `blocked`）と `headSha`（40 桁）を返す助言的判定のみを行う。PR レビュー本文という未信頼データを読むため、`gh pr merge` / `gh issue close` / `gh pr edit` / resolve mutation の実行権限を持たない。
-- **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文を一切読まず、PR の `state` / `headRefOid` / `mergeable`、チェックの結論、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）を自ら再取得して検証し、全条件を満たす場合にのみ squash merge とイシュークローズを実行する。監視時点の HEAD sha と一致しない場合はマージせず辞退する（監視後に push された未検証のコミットをマージしない）。
-  辞退理由（`reason`）はホスト側で `head-moved` / `checks-not-green` / `merge-failed` → 再監視、`unresolved-threads` → fix ループ、`not-mergeable` → fix ループ、`pr-closed` → blocked、enum 外 → systemic failure、へマッピングされる。
+- **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文・**チェック名**を一切読まず、PR の `state` / `headRefOid` / `mergeable`（enum・sha）、チェックの**状態別件数**（`gh pr checks <N> --json state --jq '[.[].state] | group_by(.) | map({state: .[0], count: length})'`。素の `gh pr checks` や `--json name / description / link` は使わない）、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）を自ら再取得して検証し、全条件を満たす場合にのみ squash merge とイシュークローズを実行する。監視時点の HEAD sha と一致しない場合はマージせず辞退する（監視後に push された未検証のコミットをマージしない）。
+  - チェック名を除外するのは、名称が PR 側の workflow / job / matrix 定義から生成される外部由来テキストであり、マージ権限を持つ実行主体のコンテキストへ命令文を持ち込む経路になるため（PR #150 codex-review P0 対応）。
+  - 監視が有効な `headSha`（40 桁）を返さなかった場合も merge-exec は起動するが、新規マージは行わず「PR が既に MERGED ならイシュークローズ確認のみ」に限定される（前回ランでマージ済み・状態記録に失敗した PR の回復パスを保ちつつ fail-closed を維持する）。
+  - 辞退理由（`reason`）はホスト側で `head-moved` / `checks-not-green` / `merge-failed` → 再監視、`unresolved-threads` → fix ループ（ただし手元にスレッド内容の構造化一覧がない場合は fix を起動せず再監視し、監視エージェントに内容を収集させる）、`not-mergeable` → fix ループ、`pr-closed` → blocked、enum 外 → systemic failure、へマッピングされる。
 
 **マージ実行条件:**
 1. **CI 全 green**: 全チェックが success / neutral / skipped で完了し、failure / cancelled / timed_out が 0 件かつ pending / queued / in_progress が 0 件であること。pending が残るなら監視を継続する。
