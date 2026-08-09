@@ -955,9 +955,17 @@ async function updateState(issueNumber, patch, options = {}) {
     if (!mergeOk) log(`⚠️ 状態ファイル更新失敗（issue #${issueNumber}）: JSON マージエージェントが ok:false を返した`)
     // 掃除は JSON マージの後に実行する（掃除側が .worktree を "" に上書きするため、
     // 順序が逆だとマージ側の patch が worktree を書き戻してしまう）。
-    // マージが失敗しても掃除は実行する（worktree の残骸は状態ファイルの成否と独立に回収する）。
+    //
+    // マージが失敗した場合は掃除を実行しない（PR #150 codex-review P0 対応）。状態ファイルへ
+    // 新しい状態・回復情報を永続化できていないのに worktree / branch を削除すると、
+    // 特に Recover の discard 経路（WIP commit を積んだ branch の削除）でデータ損失に直結する。
+    // 削除意図は sweepEligiblePaths に登録済みのため、スキップしても最終スイープが回収する
+    // （fail-safe: 削除しそこねる方向へ倒す）。
     let cleanupOk = true
-    if (cleanupPromptText) {
+    if (cleanupPromptText && !mergeOk) {
+      cleanupOk = false
+      log(`⚠️ #${issueNumber}: 状態ファイル更新に失敗したため worktree / branch の掃除をスキップした（回復情報の保全を優先。残骸は最終スイープで回収する）`)
+    } else if (cleanupPromptText) {
       const cleanupResult = await agent(cleanupPromptText, {
         label: `state:cleanup:#${issueNumber}`,
         phase: 'State',
