@@ -2047,7 +2047,14 @@ async function runImplement(item) {
     // 実際に走っているのに状態ファイルが blocked のまま残り、レポート・halt ガード・
     // 次回再開判定が実態と食い違う（PR #124 Bugbot Medium 対応）。
     if (saved.status !== 'monitoring') {
-      await updateState(item.number, { status: 'monitoring', pr: impl.prNumber })
+      // 返値を検証する（codex-review P1 対応）。ただしここは blocked → monitoring の表示同期であり、
+      // 状態ファイルには前回実行が永続化した pr / branch（再開情報）が既に残っている。書き込みに
+      // 失敗しても blocked + pr のまま isActiveMonitoring の再開対象であり続け、重複 PR 作成には
+      // 倒れないため、警告ログに留めて監視を継続する（fresh PR 経路の必須検証とは危険度が異なる）。
+      const resumeOk = await updateState(item.number, { status: 'monitoring', pr: impl.prNumber })
+      if (!resumeOk) {
+        log(`⚠️ issue #${item.number}: monitoring 再開時の status 同期書き込みに失敗（再開情報は保持済みのため監視は継続する）`)
+      }
     }
   } else {
     // 通常の impl フェーズを実行する（Recover フェーズ含む）
@@ -2310,18 +2317,30 @@ async function runImplement(item) {
       impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? ''), prNumber: 0 }
       // impl 完了直後: reviewing に遷移し branch / worktree を記録する。
       // PR はまだ作成していないため pr: 0 を記録する（PR 作成は Review 通過後）。
-      // フォールバック前に保存済みの旧 worktree があれば削除して孤児化を防ぐ
-      await updateState(
-        item.number,
-        {
-          status: 'reviewing',
-          pr: 0,
-          branch: impl.branch,
-          worktree: impl.worktreePath,
-          fixCount: savedFixCount,
-        },
-        fallbackOldWorktree ? { cleanupWorktree: fallbackOldWorktree } : {},
-      )
+      // フォールバック前に保存済みの旧 worktree があれば削除して孤児化を防ぐ。
+      // branch / worktree の記録は重要遷移のため成功を検証する（codex-review P1 対応）:
+      // 未永続化のまま続行してクラッシュすると、worktree が孤立し次回実行が同一イシューを
+      // 再実装する（checkout -B の衝突・重複作業）。失敗時は 1 回リトライし、それでも
+      // 失敗したら Review・push へ進まず failed 終端で停止する（push 前のため副作用は残らない）。
+      const reviewingPatch = {
+        status: 'reviewing',
+        pr: 0,
+        branch: impl.branch,
+        worktree: impl.worktreePath,
+        fixCount: savedFixCount,
+      }
+      const reviewingOpts = fallbackOldWorktree ? { cleanupWorktree: fallbackOldWorktree } : {}
+      const reviewingOk =
+        (await updateState(item.number, reviewingPatch, reviewingOpts)) ||
+        (await updateState(item.number, reviewingPatch, reviewingOpts))
+      if (!reviewingOk) {
+        const reason =
+          `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
+          `永続化できなかった。重複実装防止のため Review・push へ進まず停止する（${STATE_FILE} を手動確認すること）`
+        log(`⚠️ issue #${item.number}: ${reason}`)
+        recordFailure({ issue: item.number, reason })
+        return false
+      }
     }
 
     // --- Review フェーズ: push 前のローカル diff を implement-review で独立レビューする ---
@@ -2491,7 +2510,23 @@ async function runImplement(item) {
     // Review fix で worktree が差し替わっている場合があるため、impl.worktreePath（最初の
     // Implement worktree。Review fix 後は削除済みのことが多い）ではなく Review ループで
     // 追跡した最新の currentWorktreePath を Merge ループへ引き継ぐ（孤児 worktree 防止）。
-    await updateState(item.number, { status: 'monitoring', pr: impl.prNumber })
+    // この書き込みは重要遷移のため成功を検証する（codex-review P1 対応）: pr が永続化されない
+    // まま続行・終了すると、次回実行が同じイシューを再実装・再 push して重複 PR を作成する
+    // （loadState が掲げる「未永続化状態での続行による重複を防ぐ」契約に反する）。
+    // 失敗時は 1 回リトライし、それでも失敗したらマージへ進まず failed 終端で停止する。
+    {
+      const monitoringOk =
+        (await updateState(item.number, { status: 'monitoring', pr: impl.prNumber })) ||
+        (await updateState(item.number, { status: 'monitoring', pr: impl.prNumber }))
+      if (!monitoringOk) {
+        const reason =
+          `PR #${impl.prNumber} 作成後の monitoring 遷移（pr 記録）を状態ファイルへ永続化できなかった。` +
+          `重複 PR 防止のためマージ監視へ進まず停止する（${STATE_FILE} と PR #${impl.prNumber} を手動確認すること）`
+        log(`⚠️ issue #${item.number}: ${reason}`)
+        recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+        return false
+      }
+    }
     return await runMergeLoop(item, impl, fixCount, currentWorktreePath)
   }
 
