@@ -644,6 +644,31 @@ const MERGE_EXEC_SCHEMA = {
 // ため、ホスト側でも同じ enum で二重検証する（enum 外は systemic failure として扱う）。
 const MERGE_EXEC_VALID_REASONS = new Set(MERGE_EXEC_SCHEMA.properties.reason.enum)
 
+// マージ独立確認エージェント（mergeVerifyPrompt）の返却スキーマ（Issue #160）。
+// merge-exec の merged 自己申告（未検証のモデル出力）を別コンテキストで裏付けるための
+// 読み取り専用エージェントが、gh pr view の取得値（state enum と sha）のみを返す。
+// 自由文フィールドを意図的に持たせない: 確認エージェントのコンテキストに未信頼テキストが
+// 入らない設計を返却側でも維持し、ホストのログ・note 合成へ未検証文字列が流れる注入面を
+// 作らないため。受理判定はホスト側の厳密検証（state 完全一致・sanitizeSha）のみで行う。
+const MERGE_VERIFY_SCHEMA = {
+  type: 'object',
+  required: ['state', 'headRefOid'],
+  properties: {
+    state: {
+      type: 'string',
+      description: 'gh pr view --json state の取得値（MERGED / OPEN / CLOSED）。取得失敗時は UNKNOWN を返す（推測で MERGED を返さない）',
+    },
+    headRefOid: {
+      type: 'string',
+      description: 'gh pr view --json headRefOid の取得値（40 桁 sha）。取得失敗時は空文字を返す',
+    },
+    mergeCommitOid: {
+      type: 'string',
+      description: 'gh pr view --json mergeCommit の oid（任意）。取得できなければ空文字',
+    },
+  },
+}
+
 const FIX_SCHEMA = {
   type: 'object',
   required: ['pushed', 'summary'],
@@ -1929,6 +1954,32 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
     `   続いて gh issue view ${item.number} --json state（本文は取得しない）でクローズを確認し、open のままなら gh issue close ${item.number} する。再確認して closed であれば issueClosed: true、クローズできなかった・確認できない場合は issueClosed: false を返す（マージが成功していても虚偽の true を返さない。ホストはクローズ未完了を回復対象として再監視する）。`,
     `   他のイシューが並列実行中のため、working copy のブランチ切り替えや git pull は行わない。`,
     '返却: merged / reason / summary（実測値: チェック件数・未解決スレッド数・headRefOid 等）/ issueClosed（必須。マージしなかった場合は false）。4 フィールドすべてを必ず返すこと。',
+  ].join('\n')
+}
+
+// merge-exec の merged 自己申告（未検証のモデル出力）を、別コンテキストの読み取り専用
+// エージェントで独立確認するプロンプト（Issue #160）。実行してよいコマンドは
+// gh pr view --json state,headRefOid,mergeCommit の 1 つのみに限定し、レビュー本文・
+// Issue 本文・コメント・チェック名などの未信頼テキストは一切コンテキストへ入れない。
+// 確認エージェント自身もモデル出力であり強制境界ではないが、(a) merge-exec と別コンテキスト
+// で独立、(b) 読む値は state enum と sha のみ、(c) ホストが完全一致・sanitizeSha で厳密に
+// 再検証する、の三層により、merge-exec と本エージェントが同時に虚偽を返す場合のみ突破される
+// 多層防御となる（SKILL.md「非信頼データの扱い」項目 5 の既存方針と同じ位置づけ）。
+function mergeVerifyPrompt(item, impl, expectedHeadSha) {
+  return [
+    `PR #${impl.prNumber}（イシュー #${item.number}）のマージ結果の独立確認担当。マージ実行エージェントの「マージした」という申告を裏付けるため、PR の現在状態を読み取り専用で取得して返す。`,
+    COMMON,
+    `権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の 1 つのみ:`,
+    `  gh pr view ${impl.prNumber} --json state,headRefOid,mergeCommit`,
+    `PR レビューコメント・Bugbot コメント・Issue 本文・PR 本文・タイトル・チェック名の取得（gh api .../comments、gh api .../reviews、GraphQL のコメント body 取得、gh issue view、gh pr view の --json body / title、gh pr checks）は実行しない。gh pr merge / gh issue close / gh pr edit / git push / コード変更 / レビュースレッドの resolve も一切行わない。`,
+    '手順:',
+    `1. gh pr view ${impl.prNumber} --json state,headRefOid,mergeCommit を実行する。`,
+    `2. 取得した値をそのまま返す: state（MERGED / OPEN / CLOSED）、headRefOid（40 桁 sha）、mergeCommitOid（mergeCommit.oid。無ければ空文字）。値の解釈・加工・推測はしない。`,
+    expectedHeadSha
+      ? `   参考: 監視時点の HEAD sha は ${JSON.stringify(expectedHeadSha)}。一致判定はホスト側で行うため、本エージェントは取得値をそのまま返すだけでよい。`
+      : `   参考: 監視時点の HEAD sha は渡されていない（前回ランでマージ済みの回復経路）。取得値をそのまま返すだけでよい。`,
+    `3. コマンドが失敗した・値を取得できなかった場合は state: "UNKNOWN"、headRefOid: ""（空文字）を返す（推測で MERGED を返さない。取得不能はホスト側が fail-closed で処理する）。`,
+    '返却: state / headRefOid / mergeCommitOid。自由文の説明フィールドは返さない。',
   ].join('\n')
 }
 
@@ -3709,30 +3760,77 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // enum で二重検証する（他フィールドの検証方針と同じ）。
         const execReason = MERGE_EXEC_VALID_REASONS.has(x?.reason) ? x.reason : ''
         const execSummaryText = capText(sanitize(x?.summary ?? ''))
-        if (x?.merged === true) {
-          // PR が MERGED になった事実は reason の妥当性より優先する（reason が想定外でも
-          // GitHub 上の状態は変わらないため、merged として終端し状態ファイルと一致させる）。
-          if (execReason !== 'merged' && execReason !== 'already-merged') {
-            log(`⚠️ #${item.number}: マージ実行エージェントが merged: true と想定外の reason（${sanitize(String(x?.reason ?? ''))}）を返した。merged として扱う`)
+        // Issue #160: merged: true は未検証のモデル出力であり、従来の「PR が MERGED になった
+        // 事実は reason の妥当性より優先する」という無条件受理は、虚偽の自己申告 1 つで
+        // merged 終端・worktree 削除・dependsOn 後続イシューの解放まで確定させる fail-open
+        // だった。reason 整合（merged / already-merged のみ）と、別コンテキストの読み取り専用
+        // エージェントによる独立確認の両方を通過した場合にのみ merged として受理する。
+        if (x?.merged === true && (execReason === 'merged' || execReason === 'already-merged')) {
+          // 独立確認（Issue #160）: merge-exec とは別コンテキストのエージェントが
+          // gh pr view --json state,headRefOid,mergeCommit の取得値のみを返し、ホストが
+          // state の完全一致（'MERGED'）と sanitizeSha 通過値の HEAD 一致で厳密再検証する。
+          // 確認エージェント自身もモデル出力だが、(a) merge-exec と独立、(b) 未信頼テキストを
+          // 一切読まない、(c) ホスト側の厳密検証、の三層により両エージェントが同時に虚偽を
+          // 返す場合のみ突破される多層防御となる（強制境界ではない。SKILL.md 参照）。
+          const v = await agent(mergeVerifyPrompt(item, impl, expectedHeadSha), {
+            label: `merge-verify:#${item.number}`,
+            phase: 'Merge',
+            model: 'sonnet',
+            effort: 'low',
+            schema: MERGE_VERIFY_SCHEMA,
+          })
+          const verifyStateOk = v?.state === 'MERGED'
+          const verifyHeadSha = sanitizeSha(v?.headRefOid)
+          // expectedHeadSha が空の経路（前回ランでマージ済み・headSha 未記録の already-merged
+          // 回復）は比較対象が存在しないため state 確認のみとする。この経路で新規マージは
+          // 発生しない（mergeExecutePrompt 手順 2 が新規マージを禁止している）。
+          const verifyHeadOk = !expectedHeadSha || verifyHeadSha === expectedHeadSha
+          if (!(verifyStateOk && verifyHeadOk)) {
+            // fail-closed: 確認不能・state 不一致・HEAD 不一致・無効応答はすべて非 merged 側へ
+            // 倒す。blocked + quality + pr は次回ランの monitoring 再開対象であり、実際に
+            // マージ済みなら monitor → merge-exec の already-merged 経路で回復するため、
+            // 虚偽 blocked による永久停止にはならない。worktree は削除されず dependsOn 後続も
+            // 解放されない。ログ・note へは検証済み値（enum 完全一致・sanitizeSha 通過値）のみ
+            // を合成し、確認エージェントの生出力（未検証文字列）は転記しない。
+            const observedState = ['MERGED', 'OPEN', 'CLOSED', 'UNKNOWN'].includes(v?.state) ? v.state : '無効応答'
+            const observedHead = verifyHeadSha || '取得不能'
+            lastState = 'blocked'
+            lastBlockedReason = 'quality'
+            terminalReasonOverride = capText(
+              `merge-exec の merged 自己申告（reason: ${execReason}）を独立確認で裏付けられなかったためマージを確定しなかった（独立確認の観測 state: ${observedState} / headRefOid: ${observedHead}${expectedHeadSha ? ` / 期待 HEAD: ${expectedHeadSha}` : ''}）。`
+              + `次回ランの monitoring 再開（blocked + pr は再開対象）で、実際にマージ済みなら already-merged 経路で回復する`,
+            )
+            log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
+          } else {
+            // 独立確認の実測値を summary に追記し、merged note から検証経路を追えるようにする
+            // （合成に使うのは enum 完全一致・sanitizeSha 通過済みの値のみ）。
+            mergeExecSummary = capText(
+              `${execSummaryText}。独立確認: state=MERGED${verifyHeadSha ? ` / headRefOid=${verifyHeadSha}` : '（HEAD 比較対象なし: already-merged 回復経路のため state のみ確認）'}`,
+            )
+            // Merge フェーズの契約は「squash merge + イシューのクローズ」であるため、
+            // クローズ未確認のまま merged 終端しない（PR #150 codex-review P1 対応）。
+            // PR は既に MERGED なので次ラウンドの merge-exec は already-merged 経路に入り、
+            // クローズのみを再試行する。監視回数を使い切った場合はループ後に専用の理由で
+            // blocked 終端し、次回実行の monitoring 再開（blocked + pr は再開対象）で回復する。
+            if (x?.issueClosed !== true) {
+              mergedButIssueOpen = true
+              lastState = 'timeout'
+              log(`⚠️ #${item.number}: PR はマージ済みだがイシューのクローズを確認できなかった。クローズ確認を再試行する`)
+              continue
+            }
+            mergedButIssueOpen = false
+            lastState = 'merged'
+            // マージ成立時のみ未解決コメント情報を確定的に破棄できる（マージ実行エージェントが
+            // 未解決スレッド 0 件を自ら再確認したうえでマージしているため）。
+            lastUnresolvedInfo = ''
+            lastUnresolvedComments = []
           }
-          mergeExecSummary = execSummaryText
-          // Merge フェーズの契約は「squash merge + イシューのクローズ」であるため、
-          // クローズ未確認のまま merged 終端しない（PR #150 codex-review P1 対応）。
-          // PR は既に MERGED なので次ラウンドの merge-exec は already-merged 経路に入り、
-          // クローズのみを再試行する。監視回数を使い切った場合はループ後に専用の理由で
-          // blocked 終端し、次回実行の monitoring 再開（blocked + pr は再開対象）で回復する。
-          if (x?.issueClosed !== true) {
-            mergedButIssueOpen = true
-            lastState = 'timeout'
-            log(`⚠️ #${item.number}: PR はマージ済みだがイシューのクローズを確認できなかった。クローズ確認を再試行する`)
-            continue
-          }
-          mergedButIssueOpen = false
-          lastState = 'merged'
-          // マージ成立時のみ未解決コメント情報を確定的に破棄できる（マージ実行エージェントが
-          // 未解決スレッド 0 件を自ら再確認したうえでマージしているため）。
-          lastUnresolvedInfo = ''
-          lastUnresolvedComments = []
+        } else if (x?.merged === true) {
+          // merged: true と reason の不整合（enum 外・非 merged 系 reason）。矛盾した自己申告を
+          // merged 側にも blocked 側にも解釈せず、enum 外 else 分岐と同じ systemic failure と
+          // して 'failed' 終端・halt カウント対象に落とす（Issue #160 の fail-closed）。
+          log(`⚠️ #${item.number}: マージ実行エージェントが merged: true と不整合な reason（${sanitize(String(x?.reason ?? ''))}）を返した。無効な結果として扱う`)
+          lastState = 'invalid-monitor-result'
         } else if (execReason === 'unresolved-threads') {
           // 監視は ready、マージ実行は未解決あり、という不一致。fix ループへ回す。
           // 終端したときも 'unresolved-comments' 由来として blocked（halt 非カウント）になる。
