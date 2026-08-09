@@ -452,7 +452,7 @@ const MERGE_VALID_STATES = new Set(MERGE_SCHEMA.properties.state.enum)
 // 未解決スレッド「数」のみを自ら再取得して検証し、条件充足時のみ merge / close を実行する。
 const MERGE_EXEC_SCHEMA = {
   type: 'object',
-  required: ['merged', 'reason', 'summary'],
+  required: ['merged', 'reason', 'summary', 'issueClosed'],
   properties: {
     merged: { type: 'boolean', description: 'PR が MERGED 状態になった場合のみ true' },
     reason: {
@@ -465,7 +465,8 @@ const MERGE_EXEC_SCHEMA = {
       type: 'boolean',
       description:
         'マージ後（または already-merged 時）にイシューが closed であることを gh issue view --json state で確認できた場合のみ true。'
-        + 'クローズに失敗した・確認できない場合は false を返す（merged: true でも虚偽の true を返さないこと。ホストはクローズ未完了を回復対象として扱う）',
+        + 'クローズに失敗した・確認できない場合は false を返す（merged: true でも虚偽の true を返さないこと。ホストはクローズ未完了を回復対象として扱う）。'
+        + 'マージしなかった場合（merged: false）も必ず false を返す（省略不可。ホストは省略を「クローズ未確認」として扱うため、正常クローズ時の省略は不要な再試行を招く）',
     },
   },
 }
@@ -1558,7 +1559,7 @@ function mergeExecutePrompt(item, impl, expectedHeadSha) {
     `   マージ成功後に gh pr view ${impl.prNumber} --json state で MERGED を確認する（確認できなければ merged: false / reason: merge-failed）。`,
     `   続いて gh issue view ${item.number} --json state（本文は取得しない）でクローズを確認し、open のままなら gh issue close ${item.number} する。再確認して closed であれば issueClosed: true、クローズできなかった・確認できない場合は issueClosed: false を返す（マージが成功していても虚偽の true を返さない。ホストはクローズ未完了を回復対象として再監視する）。`,
     `   他のイシューが並列実行中のため、working copy のブランチ切り替えや git pull は行わない。`,
-    '返却: merged / reason / summary（実測値: チェック件数・未解決スレッド数・headRefOid 等）/ issueClosed。',
+    '返却: merged / reason / summary（実測値: チェック件数・未解決スレッド数・headRefOid 等）/ issueClosed（必須。マージしなかった場合は false）。4 フィールドすべてを必ず返すこと。',
   ].join('\n')
 }
 
