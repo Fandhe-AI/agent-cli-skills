@@ -461,7 +461,12 @@ const MERGE_EXEC_SCHEMA = {
       description: 'merged: 本エージェントがマージした / already-merged: 既に MERGED だった / head-moved: HEAD sha が監視時点と不一致 / checks-not-green: チェック未完了・失敗 / unresolved-threads: 未解決スレッドが残存 / not-mergeable: コンフリクト等でマージ不可 / merge-failed: merge コマンド自体が失敗 / pr-closed: 未マージクローズ',
     },
     summary: { type: 'string', description: '検証結果の要約（チェック件数・未解決スレッド数・HEAD sha 等の実測値）' },
-    issueClosed: { type: 'boolean', description: 'マージ後にイシューが closed であることを確認できた場合 true' },
+    issueClosed: {
+      type: 'boolean',
+      description:
+        'マージ後（または already-merged 時）にイシューが closed であることを gh issue view --json state で確認できた場合のみ true。'
+        + 'クローズに失敗した・確認できない場合は false を返す（merged: true でも虚偽の true を返さないこと。ホストはクローズ未完了を回復対象として扱う）',
+    },
   },
 }
 
@@ -1533,7 +1538,7 @@ function mergeExecutePrompt(item, impl, expectedHeadSha) {
     `   手順 1 の mergeable が CONFLICTING の場合は merged: false / reason: not-mergeable を返す。`,
     `5. 手順 2〜4 の全条件を満たす場合のみ gh pr merge ${impl.prNumber} --squash --delete-branch を実行する。`,
     `   マージ成功後に gh pr view ${impl.prNumber} --json state で MERGED を確認する（確認できなければ merged: false / reason: merge-failed）。`,
-    `   続いて gh issue view ${item.number} --json state（本文は取得しない）でクローズを確認し、open のままなら gh issue close ${item.number} する。確認できたら issueClosed: true とする。`,
+    `   続いて gh issue view ${item.number} --json state（本文は取得しない）でクローズを確認し、open のままなら gh issue close ${item.number} する。再確認して closed であれば issueClosed: true、クローズできなかった・確認できない場合は issueClosed: false を返す（マージが成功していても虚偽の true を返さない。ホストはクローズ未完了を回復対象として再監視する）。`,
     `   他のイシューが並列実行中のため、working copy のブランチ切り替えや git pull は行わない。`,
     '返却: merged / reason / summary（実測値: チェック件数・未解決スレッド数・headRefOid 等）/ issueClosed。',
   ].join('\n')
@@ -2813,6 +2818,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // fix 中に worktree 誤配置（別リポ）を検出したか。ループ後の最終 updateState で
   // 汎用マージ失敗 note ではなく routing 専用 note を記録するために使う。
   let routingErrorDetected = false
+  // PR はマージ済みだがイシューのクローズを確認できなかったか（PR #150 codex-review P1 対応）。
+  // ループ後の終端理由・status の決定に使う（マージ失敗ではなくクローズ未完了として記録し、
+  // 次回実行の monitoring 再開で回復できるよう blocked で終端する）。
+  let mergedButIssueOpen = false
   // 最後に monitor が収集した未解決コメント情報（sanitize 済み）。fixCount >= 6 で blocked に
   // 落ちる際に m を破棄してしまうと unresolved 一覧が失われるため、monitor 結果を受け取る
   // たびに更新して保持しておく（Issue #81: blocked 時の未解決コメント追跡）。
@@ -3003,8 +3012,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           if (execReason !== 'merged' && execReason !== 'already-merged') {
             log(`⚠️ #${item.number}: マージ実行エージェントが merged: true と想定外の reason（${sanitize(String(x?.reason ?? ''))}）を返した。merged として扱う`)
           }
-          lastState = 'merged'
           mergeExecSummary = execSummaryText
+          // Merge フェーズの契約は「squash merge + イシューのクローズ」であるため、
+          // クローズ未確認のまま merged 終端しない（PR #150 codex-review P1 対応）。
+          // PR は既に MERGED なので次ラウンドの merge-exec は already-merged 経路に入り、
+          // クローズのみを再試行する。監視回数を使い切った場合はループ後に専用の理由で
+          // blocked 終端し、次回実行の monitoring 再開（blocked + pr は再開対象）で回復する。
+          if (x?.issueClosed !== true) {
+            mergedButIssueOpen = true
+            lastState = 'timeout'
+            log(`⚠️ #${item.number}: PR はマージ済みだがイシューのクローズを確認できなかった。クローズ確認を再試行する`)
+            continue
+          }
+          mergedButIssueOpen = false
+          lastState = 'merged'
           // マージ成立時のみ未解決コメント情報を確定的に破棄できる（マージ実行エージェントが
           // 未解決スレッド 0 件を自ら再確認したうえでマージしているため）。
           lastUnresolvedInfo = ''
@@ -3262,7 +3283,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // 保存は failMergeTerminal に一本化したため、どちらの基底 reason でも契約を満たす。
     const baseReason = routingErrorDetected
       ? 'worktree routing error: fix worktree が別リポに誤配置（修正不能）。実装リポの worktree への再配置が必要'
-      : `マージに到達できなかった（最終状態: ${lastState}）`
+      : mergedButIssueOpen
+        ? 'PR はマージ済みだがイシューのクローズを確認できなかった（手動クローズ、または再実行時の monitoring 再開で回復する）'
+        : `マージに到達できなかった（最終状態: ${lastState}）`
     // 終端 status の決定（Issue #121: Bugbot High 対応）。未解決レビューコメント・対象外
     // コメント起因の非収束（lastState: unresolved-comments / blocked。fixCount 上限到達・
     // push なし 2 連続・monitor の blocked 判定を含む）は、SKILL.md の
@@ -3276,8 +3299,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // 状態（unresolved-comments 中の fix で発生したか等）という偶然に分類を左右させると、
     // halt 防御（consecutiveFailures 3 連続で新規着手停止）を回避してしまう
     // （PR #122 codex-review P1 第 2 指摘対応）。
+    // mergedButIssueOpen は「マージは成功しておりクローズのみ未完了」という特定イシュー固有の
+    // 回復可能な状態のため 'blocked'（halt 非カウント・次回実行で monitoring 再開の対象）とする。
     const terminalStatus =
-      !routingErrorDetected && (lastState === 'blocked' || lastState === 'unresolved-comments')
+      !routingErrorDetected && (mergedButIssueOpen || lastState === 'blocked' || lastState === 'unresolved-comments')
         ? 'blocked'
         : 'failed'
     return await failMergeTerminal(baseReason, terminalStatus)
