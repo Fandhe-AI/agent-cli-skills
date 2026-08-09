@@ -3145,28 +3145,28 @@ while (true) {
       if (running.size >= concurrency) break
       const n = item.number
       if (done.has(n) || failedSet.has(n) || running.has(n)) continue
-      // active monitoring（PR 作成済み）は依存の成否に関わらず monitor 再開に載せる。
-      // 前回実行で PR を作った後に依存失敗で markBlockedByDeps された場合、その時点では
-      // failedSet に入る（同一実行内の伝播・無限ループ防止のため）が、状態ファイルは
-      // monitoring のまま残る。failedSet はメモリのみで次回実行時にリセットされるため、
-      // ここで依存ガードより前に拾わないと「依存が done でない」L927 で continue され、
-      // PR がマージ監視に戻れず宙に浮く。マージ可否は runImplement の monitor ループ内の
-      // CI/レビュー条件で判定されるため、依存未充足の PR をここで誤マージすることはない。
-      if (isActiveMonitoring(n)) {
-        log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(item.title)}`)
-        running.set(n, runOne(item))
-        continue
-      }
       const ds = [...depsOf(item)]
       const failedDeps = ds.filter((d) => failedSet.has(d))
       if (failedDeps.length > 0) {
         // 失敗依存があっても、未確定（実行中/未投入）の依存が残る間は blocked を確定しない。
         // 全依存が確定（done/failed）してから確定することで、兄弟イシューの完了・マージを待ち、
         // 親が最初の子失敗で早すぎる blocked にならないようにする（失敗依存リストも完全になる）。
+        // active monitoring（PR 作成済み）の item も例外にしない: markBlockedByDeps は
+        // isActiveMonitoring の場合に再開情報（pr / branch）を保持したまま blocked 報告する
+        // ため、PR がマージ監視に戻れず宙に浮くことはない（次回実行で依存が解消すれば再開する）。
         if (ds.every((d) => done.has(d) || failedSet.has(d))) await markBlockedByDeps(item, failedDeps)
         continue
       }
       if (!ds.every((d) => done.has(d))) continue
+      // active monitoring（PR 作成済み）の再開も上記の依存ゲートを通過した後にのみ行う。
+      // monitor ループは CI・レビュー条件のみで gh pr merge を実行し、依存イシューの done /
+      // failedSet は確認しないため、依存未充足のまま再開すると依存順のマージ契約が破れる
+      // （codex-review P1 対応）。依存が pending の間はこの while ループが次周回で再評価する。
+      if (isActiveMonitoring(n)) {
+        log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(item.title)}`)
+        running.set(n, runOne(item))
+        continue
+      }
       log(`#${n} を開始（実行中 ${running.size + 1}/${concurrency}）: ${sanitize(item.title)}`)
       running.set(n, runOne(item))
     }
