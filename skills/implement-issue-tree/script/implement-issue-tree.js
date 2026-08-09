@@ -2886,13 +2886,21 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       : `マージに到達できなかった（最終状態: ${lastState}）`
     // 終端 status の決定（Issue #121: Bugbot High 対応）。未解決レビューコメント・対象外
     // コメント起因の非収束（lastState: unresolved-comments / blocked。fixCount 上限到達・
-    // push なし 2 連続・monitor の blocked 判定・routing error を含む）は、SKILL.md の
+    // push なし 2 連続・monitor の blocked 判定を含む）は、SKILL.md の
     // 「未解決のまま blocked → 最終レポートへ」の規定どおり 'blocked' で終端し、halt の
     // 連続カウントに乗せない。timeout・invalid-monitor-result（monitor の無効応答 =
     // エージェントのクラッシュ・API エラー）等の systemic な失敗のみ 'failed' で終端する
     // （PR #122 codex-review P1 対応: lastState は有効な monitor 応答のみを取るよう検証済みの
     // ため、既定値フォールバック経由で blocked に落ちることはない）。
-    const terminalStatus = lastState === 'blocked' || lastState === 'unresolved-comments' ? 'blocked' : 'failed'
+    // routingErrorDetected は lastState より優先して常に 'failed' とする。worktree の別リポ
+    // への誤配置はレビュー非収束ではなく実行基盤上の systemic failure であり、直前の monitor
+    // 状態（unresolved-comments 中の fix で発生したか等）という偶然に分類を左右させると、
+    // halt 防御（consecutiveFailures 3 連続で新規着手停止）を回避してしまう
+    // （PR #122 codex-review P1 第 2 指摘対応）。
+    const terminalStatus =
+      !routingErrorDetected && (lastState === 'blocked' || lastState === 'unresolved-comments')
+        ? 'blocked'
+        : 'failed'
     return await failMergeTerminal(baseReason, terminalStatus)
   }
   return true
