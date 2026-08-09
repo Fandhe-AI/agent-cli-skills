@@ -2338,6 +2338,22 @@ async function runImplement(item) {
           `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
           `永続化できなかった。重複実装防止のため Review・push へ進まず停止する（${STATE_FILE} を手動確認すること）`
         log(`⚠️ issue #${item.number}: ${reason}`)
+        // 他の failed 終端と同様、best-effort で failed 状態と回復メタデータ（branch / worktree）の
+        // 保存を試みる（Cursor Bugbot 指摘対応）。直前の reviewing 書き込みが失敗しているため
+        // 成功は期待できないが、一時的な失敗（一過性の I/O エラー・ロック競合）であればここで
+        // 永続化でき、次回実行が implement 手順 0b のブランチ再利用で回復できる。
+        // cleanupWorktree は指定しない（状態未永続化のまま worktree を削除すると回復手段を失う）。
+        const failedSaved = await updateState(item.number, {
+          status: 'failed',
+          pr: 0,
+          branch: impl.branch,
+          worktree: impl.worktreePath,
+          fixCount: savedFixCount,
+          note: reason,
+        })
+        if (!failedSaved) {
+          log(`⚠️ issue #${item.number}: failed 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
+        }
         recordFailure({ issue: item.number, reason })
         return false
       }
@@ -2523,6 +2539,20 @@ async function runImplement(item) {
           `PR #${impl.prNumber} 作成後の monitoring 遷移（pr 記録）を状態ファイルへ永続化できなかった。` +
           `重複 PR 防止のためマージ監視へ進まず停止する（${STATE_FILE} と PR #${impl.prNumber} を手動確認すること）`
         log(`⚠️ issue #${item.number}: ${reason}`)
+        // 他の failed 終端と同様、best-effort で failed 状態と回復メタデータ（pr / branch）の保存を
+        // 試みる（Cursor Bugbot 指摘対応）。一時的な書き込み失敗であればここで pr が永続化され、
+        // 次回実行が既存 PR を検出して重複 PR 作成を回避できる。
+        const failedSaved = await updateState(item.number, {
+          status: 'failed',
+          pr: impl.prNumber,
+          branch: impl.branch,
+          worktree: currentWorktreePath,
+          fixCount,
+          note: reason,
+        })
+        if (!failedSaved) {
+          log(`⚠️ issue #${item.number}: failed 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
+        }
         recordFailure({ issue: item.number, pr: impl.prNumber, reason })
         return false
       }
