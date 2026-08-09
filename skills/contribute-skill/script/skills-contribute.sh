@@ -28,16 +28,19 @@ if [[ ! "$SKILL_NAME" =~ ^[a-z][a-z0-9-]+$ ]]; then
 fi
 
 # source の安全弁: 正規化後の OWNER/REPO が Fandhe-AI/<repo>（単一セグメント）に完全一致する場合のみ許可する
-# 1) まず正規化する（短縮形はそのまま、URL 形式は OWNER/REPO へ変換し末尾 .git を除去）
+# 1) まず正規化する（URL 形式は OWNER/REPO へ変換、短縮形はそのまま採用）
 case "$UPSTREAM_REPO" in
   https://github.com/*)
     REPO_SLUG="${UPSTREAM_REPO#https://github.com/}"
-    REPO_SLUG="${REPO_SLUG%.git}"
     ;;
   *)
     REPO_SLUG="$UPSTREAM_REPO"
     ;;
 esac
+# 末尾 .git の除去は両形式共通で行う
+# （URL 分岐内のみで除去すると短縮形 'Fandhe-AI/<repo>.git' が .git 付きのまま
+#   後段の正規表現を通過してしまうため、検証の前に必ずここで正規化する）
+REPO_SLUG="${REPO_SLUG%.git}"
 
 # 2) 正規化後の値を厳密検証する: owner は Fandhe-AI 固定、repo は単一セグメントのみ許可する
 #    [A-Za-z0-9._-]+ は '/'・'?'・'#'・空文字を含められないため、
