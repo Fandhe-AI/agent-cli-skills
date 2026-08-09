@@ -1712,8 +1712,10 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed) {
 //       * reviews → 「HEAD sha に一致する `<slug>[bot]` レビューの件数」という非負整数、
 //         または「その state（APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED /
 //         PENDING）ごとの件数」。本エージェントはレビュー本文を読まないため内容を評価できず、
-//         合格の根拠にできるのは APPROVED の件数のみとする（PR #156 codex-review P0 対応。
-//         件数だけを見ると CHANGES_REQUESTED の否定的レビューが合格扱いになる）。
+//         合格にできるのは「APPROVED が 1 件以上、かつ CHANGES_REQUESTED / COMMENTED /
+//         PENDING が 0 件」の場合のみとする（PR #156 codex-review P0 / P1 対応。件数だけを
+//         見ると否定的レビューが合格扱いになり、APPROVED の存在だけを見ると否定的レビューが
+//         併存する場合に監視側の needs-fix 判定と食い違って承認ゲートが後退する）。
 //       * check-runs → 「`app.slug` が一致する check-run の `.conclusion // .status`（enum）
 //         ごとの件数」。App 名・チェック名・description・output・詳細 URL は取得させない。
 //     `app.slug` は args 入力時に slug 形式（英小文字・数字・ハイフン）へ検証済みの値と
@@ -1765,12 +1767,12 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
           `     ${externalCheckRunsCommand(app, expectedHeadSha)}`,
           `     出力は結論（.conclusion）または進行状態（.status）の enum 値ごとの件数のみ。全ページの count を合計した値をこの App の check-run 件数とする。合計が 0 の場合に限り、レビューのみ投稿する App のフォールバックとして次を実行する（レビュー本文は取得せず、レビュー状態 enum ごとの件数のみを取得する）:`,
           `     gh api --paginate "repos/{owner}/{repo}/pulls/${impl.prNumber}/reviews" --jq '[.[] | select(.user.login == ${JSON.stringify(`${app}[bot]`)} and .commit_id == ${JSON.stringify(expectedHeadSha)}) | .state] | group_by(.) | map({v: .[0], count: length})'`,
-          `     フォールバックで合格にできるのは APPROVED の件数が 1 以上の場合のみ。CHANGES_REQUESTED / COMMENTED / DISMISSED / PENDING は指摘や未完了を含みうるため合格の根拠にしない（本エージェントはレビュー本文を読まないため内容を評価できない。評価できないものは fail-closed で不合格にする）。`,
+          `     フォールバックで合格にできるのは「APPROVED が 1 件以上、かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」の場合のみ。これらは指摘や未完了を含みうるため、APPROVED と併存していても合格の根拠にしない（本エージェントはレビュー本文を読まないため内容を評価できない。評価できないものは fail-closed で不合格にする）。DISMISSED は GitHub 上で無効化済みのため判定に含めない。`,
         ]),
         `   判定（summary には App ごとの件数・状態別内訳と HEAD sha を必ず書く。App の特定ができないと利用者が原因に到達できないため、どの slug が不合格だったかを明記する）:`,
-        `   - check-run が 0 件、かつフォールバックの APPROVED レビューも 0 件の App が 1 つでもあれば、マージせず merged: false / reason: external-review-missing を返す（APPROVED 以外のレビューしかない場合もこの経路で不合格にする。summary にはレビュー状態別の件数を書く）。`,
+        `   - check-run が 0 件で、かつフォールバックが合格条件（APPROVED が 1 件以上、かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない App が 1 つでもあれば、マージせず merged: false / reason: external-review-missing を返す（APPROVED が 0 件の場合も、APPROVED と CHANGES_REQUESTED 等が併存する場合も、この経路で不合格にする。summary にはレビュー状態別の件数を書く）。`,
         `   - check-run が 1 件以上だが success / neutral / skipped 以外の結論（failure / cancelled / timed_out）や未完了（queued / in_progress）が 1 件でもある App があれば、マージせず merged: false / reason: checks-not-green を返す。`,
-        `   - すべての App について「結論がすべて success / neutral / skipped の check-run が 1 件以上」または「APPROVED レビューが 1 件以上」が成立する場合のみ手順 5 へ進む。`,
+        `   - すべての App について「結論がすべて success / neutral / skipped の check-run が 1 件以上」または「APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」が成立する場合のみ手順 5 へ進む。`,
       ]
     : []
   return [

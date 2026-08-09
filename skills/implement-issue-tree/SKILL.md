@@ -69,7 +69,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 |------|------|-----------|
 | 未指定 | 外部チェック構成が**未確定** | 観測結果にかかわらず自動マージを停止し `blocked` で終端する（実装・PR 作成・CI までは進む） |
 | `[]` | 「外部チェックを使用しない」と人間が**確定** | 外部レビュー待機をスキップして CI green と未解決スレッドなしのみで判定する |
-| `["cursor"]` 等 | 指定 App を正とする（観測結果より優先） | 指定した**全 App** について「HEAD sha に対して許容 conclusion の check-run が 1 件以上、または APPROVED レビューが 1 件以上存在すること」をマージ条件とする（Issue #155） |
+| `["cursor"]` 等 | 指定 App を正とする（観測結果より優先） | 指定した**全 App** についてHEAD sha に対して「許容 conclusion の check-run が 1 件以上」または「APPROVED レビューが 1 件以上かつ否定的レビュー 0 件」であることをマージ条件とする（Issue #155） |
 
 観測ベースの検出は直近 3 件の merged PR しか見ないため、新規導入 App・条件付き起動 App・直近 3 件で実行されなかった App を取りこぼす。「検出なし」が不在の証明にならないのはもちろん、**「検出あり」も集合としての完全性を保証しない**（例: 観測で `sonarcloud` だけを拾い、実際には必須の `cursor` を取りこぼしたまま「確定済み」として cursor[bot] レビューの再検証を省いてしまう）。したがって観測結果は確定情報として扱わず、参考値としてログ・停止理由・返却値に残すだけにする。`externalChecks` が配列でない・slug 形式でない・11 件以上の場合は既定値へフォールバックせずエラーで停止する（`parallel` は性能ノブのため不正値を既定 3 へ落とすが、`externalChecks` はマージゲートの入力であり、誤記を黙って「未指定」や「なし確定」に読み替えるとゲートが静かに弱まるため）。
 
@@ -259,7 +259,7 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 - **確定不能（`externalChecks` 未指定）**: 外部レビューを省略してよいか判断できないため、CI の結果にかかわらず `state: blocked` で停止する（Issue #147）。ホスト側にも同じゲートがあり、監視エージェントが `ready` を返しても merge-exec を起動せず `blocked` で終端する（プロンプト + ホストの二重検証）。停止理由には観測結果（参考値）と再実行用の `args` 例が記録され、`blocked` + `pr` は次回ランの monitoring 再開対象となる。
 - **外部チェックなし確定（`externalChecks: []`）**: 外部レビュー待機はスキップする。CI 全 green と未解決スレッドなしのみで判定する。
 - **cursor（Cursor Bugbot）**: cursor[bot] によるレビュー待機フローを実行する。HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はしない）。HEAD sha に対する cursor[bot] レビューの到着を最大 10 分待ち、到着すれば指摘解決を待ってからマージする。**到着しない場合は「レビューなし」とみなさず `state: blocked` で停止する**（Issue #146。App の障害・遅延・起動失敗時にレビューゲートを迂回させないための fail-closed。レビュー到着後に再実行すれば monitoring 再開で継続する）。
-- **cursor 以外の外部チェック（例: sonarcloud）**: `gh pr checks --watch`（CI 監視）は「**存在する**チェックが緑になったか」しか保証せず、App がそもそも起動していなければ何も監視しないまま全 green と判定される。そのため App ごとに **HEAD sha に対する check-run の起動そのもの**を確認する（Issue #155。従来はこの確認がなく、`externalChecks: ["sonarcloud"]` と明示しても SonarCloud が未起動のままマージできる fail-open だった）。0 件なら最大 10 分待って再確認し、それでも 0 件なら `state: blocked` で停止する。check-run を作らずレビューのみ投稿する App のために `<slug>[bot]` レビューの HEAD sha 一致もフォールバックとして確認する（**レビューは `state` まで検証する**。`APPROVED` 以外（`CHANGES_REQUESTED` / `COMMENTED` / `DISMISSED` / `PENDING`）は指摘・未完了を含みうるため合格の根拠にしない。merge-exec はレビュー本文を読まず内容を評価できないため、評価できないものは fail-closed で不合格とする）。
+- **cursor 以外の外部チェック（例: sonarcloud）**: `gh pr checks --watch`（CI 監視）は「**存在する**チェックが緑になったか」しか保証せず、App がそもそも起動していなければ何も監視しないまま全 green と判定される。そのため App ごとに **HEAD sha に対する check-run の起動そのもの**を確認する（Issue #155。従来はこの確認がなく、`externalChecks: ["sonarcloud"]` と明示しても SonarCloud が未起動のままマージできる fail-open だった）。0 件なら最大 10 分待って再確認し、それでも 0 件なら `state: blocked` で停止する。check-run を作らずレビューのみ投稿する App のために `<slug>[bot]` レビューの HEAD sha 一致もフォールバックとして確認する（**レビューは `state` まで検証する**。合格にできるのは「`APPROVED` が 1 件以上、かつ `CHANGES_REQUESTED` / `COMMENTED` / `PENDING` が 0 件」の場合のみで、否定的レビューが `APPROVED` と併存する場合も不合格とする。merge-exec はレビュー本文を読まず内容を評価できないため、評価できないものは fail-closed で不合格とする。`DISMISSED` は GitHub 上で無効化済みのため判定に含めない）。
   - cursor と他 App を併記した構成（例: `["cursor", "sonarcloud"]`）では、cursor のレビュー到着確認に加えて他 App の起動確認も併せて実施する。
   - `blocked` が再実行でも解消しない場合は slug の誤記、または当該 App が対象リポジトリで動作していない可能性がある。App の導入状況を確認するか、`args.externalChecks` から当該 slug を除外して再実行する。
 
@@ -290,8 +290,8 @@ gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs" \
 # → 0 件のときは <slug>[bot] レビューをフォールバックとして確認する（state 別件数のみ取得する）
 gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
   --jq "[.[] | select(.user.login == \"sonarcloud[bot]\" and .commit_id == \"${HEAD_SHA}\") | .state] | group_by(.) | map({v: .[0], count: length})"
-# → 合格にできるのは APPROVED が 1 件以上の場合のみ。CHANGES_REQUESTED / COMMENTED /
-#   DISMISSED / PENDING は指摘・未完了を含みうるため合格の根拠にしない（fail-closed）
+# → 合格にできるのは APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が
+#   0 件の場合のみ。否定的レビューが APPROVED と併存する場合も不合格（fail-closed）
 
 # マージ実行エージェント側の再検証も本文を読まず「件数・状態 enum」のみへ正規化して取得する
 # （確定済み App ごとに実行する。合格の根拠が 1 件もなければ external-review-missing でマージしない）
@@ -665,7 +665,7 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
 - 1 イシューの失敗では停止せず次へ進むが、3 イシュー連続失敗で新規着手を停止（halt）する
 - マージ前に **CI は全チェックが success/neutral/skipped で完了（pending/failure 0 件）であること**を明示確認する（`gh pr checks --watch` が終わっただけでは合格にせず、全チェックの結論を列挙して確認する）
 - 外部チェック（Cursor Bugbot 等）の構成は `args.externalChecks` で明示する。Step 1（Tree フェーズ）の観測（直近 3 件の merged PR 分析）は参考値にすぎず、明示がない限り自動マージを停止する。Bugbot 待機・`@cursor review` 催促を省略できるのは `externalChecks: []` で「外部チェックなし」を確定した場合のみ
-- `args.externalChecks` で明示した外部チェック App は、slug を問わず **HEAD sha に対して許容 conclusion の check-run が 1 件以上、または APPROVED レビューが 1 件以上存在すること**をマージの必須条件とする（Issue #155。cursor だけでなく sonarcloud 等も同様に検証する）。待機上限（最大 10 分）内に起動を確認できなければ「チェックなし」とみなさず `blocked` で停止する（App の障害・遅延・起動失敗時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも App ごとに件数・状態 enum のみを再取得して独立に検証する
+- `args.externalChecks` で明示した外部チェック App は、slug を問わず **HEAD sha に対して許容 conclusion の check-run が 1 件以上、または「APPROVED レビューが 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」であること**をマージの必須条件とする（Issue #155。cursor だけでなく sonarcloud 等も同様に検証する）。待機上限（最大 10 分）内に起動を確認できなければ「チェックなし」とみなさず `blocked` で停止する（App の障害・遅延・起動失敗時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも App ごとに件数・状態 enum のみを再取得して独立に検証する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
 - **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。discard の削除は WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する
