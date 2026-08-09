@@ -255,7 +255,7 @@ gh api graphql -f query='
 gh pr merge <pr-number> --squash --delete-branch
 ```
 
-CI 失敗・外部チェック指摘・コンフリクト・未解決レビュースレッドがある場合は、修正エージェント（fix）が detached HEAD で対象ブランチを取得して指摘を反映し再 push する。修正エージェントも worktree 隔離で動作するため、他の並列イシューのブランチに干渉しない。fix 対象外と判断したコメントは「実装対象外（out-of-scope）の扱い」節の手順に従い PR 本文へ記録してから resolve する。監視（monitor）は最大 7 回まで実行し、push なしが 2 回連続したイシューは `blocked` として記録する。修正（fix）の上限は Review と共有（上限 6）。詳細は Review ステップ参照。
+CI 失敗・外部チェック指摘・コンフリクト・未解決レビュースレッドがある場合は、修正エージェント（fix）が detached HEAD で対象ブランチを取得して指摘を反映し再 push する。修正エージェントも worktree 隔離で動作するため、他の並列イシューのブランチに干渉しない。fix 対象外と判断したコメントは「実装対象外（out-of-scope）の扱い」節の手順に従い PR 本文へ記録してから resolve する（resolve は記録確認と、当該監視ラウンドで実際に収集した threadId 一覧との突き合わせをオーケストレータが完了させた後にのみ実行される。fix エージェント自身が resolve を実行するわけではない）。監視（monitor）は最大 7 回まで実行し、push なしが 2 回連続したイシューは `blocked` として記録する。修正（fix）の上限は Review と共有（上限 6）。詳細は Review ステップ参照。
 
 ### Step 7: 親イシューを検証してクローズする
 
@@ -362,6 +362,8 @@ grep -n "gh issue view" script/implement-issue-tree.js
 | Review fix で push してしまう | Review ループの fix はローカルコミットのみ。push は Step 5.5 のみで行う |
 | 状態ファイルが壊れたまま再実行して重複 PR を作成する | パースエラー時は即停止。`cat _/issue-trees/<N>.json` で確認してから再実行する |
 | 中断後に手動で worktree を削除してから再実行する | 再実行時に Recover phase が自動処理するため手動削除は不要。手動削除してしまうと Recover が残骸なしと判定し、中断前の作業を引き継がずに Plan から新規実行する |
+| 対象外スレッドを PR 本文記録なしで resolve する | 記録（PR 本文の「対象外（out-of-scope）」節への追記確認）がなければオーケストレータは resolve しない（記録なし resolve 不可のゲート） |
+| P0/P1 相当・セキュリティ指摘を対象外扱いにする | fix エージェントは単独で対象外・resolve と判定してはならない。修正するか、ユーザーまたは指摘者の承認を得るまで `blocked` として扱う（安全側ガード） |
 
 ## モデル / effort 割り当て
 
