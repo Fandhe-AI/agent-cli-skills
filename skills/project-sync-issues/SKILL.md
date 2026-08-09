@@ -93,6 +93,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Sync project status
         uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main
@@ -119,6 +120,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: token
@@ -297,6 +299,7 @@ gh project item-add <number> \
   ```
   `OK` が出力されること（`uses:` 行が 1 件以上存在し、かつ `total` と `pinned` が一致 = 全 `uses:` が SHA 固定）。`NG:` が出力された場合は workflow の生成内容を見直す
 - `permissions` が明示されていること: `grep -c 'permissions:' .github/workflows/project-sync.yml` が 1 以上
+- `sync` ジョブに `timeout-minutes` が設定されていること: `grep -n 'timeout-minutes' .github/workflows/project-sync.yml` で 1 行以上ヒットする（欠落は CI ワークフロー規約違反・P1）
 
 コミット・プッシュ後に GitHub Actions の実行履歴で初回トリガーが確認できれば完了。
 
