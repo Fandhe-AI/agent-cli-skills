@@ -91,6 +91,8 @@ skills/
     SKILL.md                         -- 既存 Issue ツリーを棚卸し・更新
   update-claude/
     SKILL.md                         -- 既存 .claude/ 体系を診断・差分追補
+  setup-repo-guards/
+    SKILL.md                         -- 組織標準の CI ガード一式（codex-review / AGENTS.md / 集約ジョブ / branch protection）を導入
   project-init/
     SKILL.md                         -- GitHub Project v2 作成・フィールド設定
   project-add-items/
@@ -143,6 +145,7 @@ skills/
 |--------|------|
 | **init-claude** | 任意のリポジトリに Claude Code の `.claude/` 体系（Agents・Rules・Skills・hooks）を初期セットアップ |
 | **update-claude** | 既存の `.claude/` 体系を診断し、理想形との差分を提示・追補する（破壊なし） |
+| **setup-repo-guards** | 対象リポジトリへ組織標準の CI ガード一式（codex-review / AGENTS.md / 必須チェック集約ジョブ / branch protection ruleset）を導入する |
 
 ### GitHub Projects 管理
 

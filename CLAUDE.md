@@ -26,6 +26,7 @@ skills/                               -- スキル本体（各ディレクトリ
   update-docs/
   update-issue-tree/
   update-claude/
+  setup-repo-guards/
   project-init/
   project-add-items/
   project-create-issues/
@@ -151,7 +152,7 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `verification.md` | implement-issue / implement-issue-tree / implement-review / implement-review-pr / create-pr | 完了ゲート（証拠なき完了宣言の禁止・5段階検証） |
 | `debugging.md` | implement-issue / implement-issue-tree / sub-investigator | 根本原因デバッグ（修正前の原因調査・3回失敗でエスカレーション） |
 
-## Current Skills (23)
+## Current Skills (24)
 
 ### 開発ワークフロー (12)
 
@@ -161,9 +162,9 @@ comment-code, create-commit, create-issue, create-issue-tree, create-plan, creat
 
 project-init, project-add-items, project-create-issues, project-view-status, project-update-items, project-sync-issues, project-archive-done
 
-### Claude Code セットアップ (2)
+### Claude Code セットアップ (3)
 
-init-claude, update-claude
+init-claude, update-claude, setup-repo-guards
 
 ### 上流貢献 (2)
 
