@@ -69,7 +69,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 |------|------|-----------|
 | 未指定 | 外部チェック構成が**未確定** | 観測結果にかかわらず自動マージを停止し `blocked` で終端する（実装・PR 作成・CI までは進む） |
 | `[]` | 「外部チェックを使用しない」と人間が**確定** | 外部レビュー待機をスキップして CI green と未解決スレッドなしのみで判定する |
-| `["cursor"]` 等 | 指定 App を正とする（観測結果より優先） | 指定した**全 App** についてHEAD sha に対して「許容 conclusion の check-run が 1 件以上」または「APPROVED レビューが 1 件以上かつ否定的レビュー 0 件」であることをマージ条件とする（Issue #155） |
+| `["cursor"]` 等 | 指定 App を正とする（観測結果より優先） | 指定した**全 App** について HEAD sha に対する起動を検証する。cursor は「レビューが 1 件以上到着していること」（Issue #146。内容評価は監視側が担当）、それ以外の App は「許容 conclusion の check-run が 1 件以上」または「APPROVED レビューが 1 件以上かつ否定的レビュー 0 件」をマージ条件とする（Issue #155） |
 
 観測ベースの検出は直近 3 件の merged PR しか見ないため、新規導入 App・条件付き起動 App・直近 3 件で実行されなかった App を取りこぼす。「検出なし」が不在の証明にならないのはもちろん、**「検出あり」も集合としての完全性を保証しない**（例: 観測で `sonarcloud` だけを拾い、実際には必須の `cursor` を取りこぼしたまま「確定済み」として cursor[bot] レビューの再検証を省いてしまう）。したがって観測結果は確定情報として扱わず、参考値としてログ・停止理由・返却値に残すだけにする。`externalChecks` が配列でない・slug 形式でない・11 件以上の場合は既定値へフォールバックせずエラーで停止する（`parallel` は性能ノブのため不正値を既定 3 へ落とすが、`externalChecks` はマージゲートの入力であり、誤記を黙って「未指定」や「なし確定」に読み替えるとゲートが静かに弱まるため）。
 
@@ -665,7 +665,7 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
 - 1 イシューの失敗では停止せず次へ進むが、3 イシュー連続失敗で新規着手を停止（halt）する
 - マージ前に **CI は全チェックが success/neutral/skipped で完了（pending/failure 0 件）であること**を明示確認する（`gh pr checks --watch` が終わっただけでは合格にせず、全チェックの結論を列挙して確認する）
 - 外部チェック（Cursor Bugbot 等）の構成は `args.externalChecks` で明示する。Step 1（Tree フェーズ）の観測（直近 3 件の merged PR 分析）は参考値にすぎず、明示がない限り自動マージを停止する。Bugbot 待機・`@cursor review` 催促を省略できるのは `externalChecks: []` で「外部チェックなし」を確定した場合のみ
-- `args.externalChecks` で明示した外部チェック App は、slug を問わず **HEAD sha に対して許容 conclusion の check-run が 1 件以上、または「APPROVED レビューが 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」であること**をマージの必須条件とする（Issue #155。cursor だけでなく sonarcloud 等も同様に検証する）。待機上限（最大 10 分）内に起動を確認できなければ「チェックなし」とみなさず `blocked` で停止する（App の障害・遅延・起動失敗時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも App ごとに件数・状態 enum のみを再取得して独立に検証する
+- `args.externalChecks` で明示した外部チェック App は、slug を問わず **HEAD sha に対する起動の確認**をマージの必須条件とする（Issue #155。cursor だけでなく sonarcloud 等も検証する）。cursor はレビューが 1 件以上到着していること（内容評価は監視側の needs-fix 判定が担う。Bugbot は APPROVED を出さないため state は問わない）、cursor 以外は許容 conclusion の check-run が 1 件以上、または「APPROVED レビューが 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」であることを条件とする。待機上限（最大 10 分）内に起動を確認できなければ「チェックなし」とみなさず `blocked` で停止する（App の障害・遅延・起動失敗時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも App ごとに件数・状態 enum のみを再取得して独立に検証する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
 - **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。discard の削除は WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する

@@ -1756,9 +1756,14 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
   const externalCheckLines = requireExternalCheck
     ? [
         `4b. 確定済みの外部チェック App が HEAD sha に対して実際に起動していることを、App ごとに件数のみで確認する（レビュー本文・チェック名・description・output は取得しない。以下に示す --jq 正規化済みコマンド以外は実行しないこと）。--jq はページごとに適用されるため、出力は 1 ページにつき 1 個で、全ページ分を合計した値を件数とする（1 ページ目だけを見ないこと）:`,
+        // cursor だけは「レビューの到着」を条件とし state は問わない（Issue #146 の契約を維持）。
+        // Bugbot は指摘の有無にかかわらず COMMENTED でレビューを投稿し APPROVED を出さないため、
+        // APPROVED を要求すると常にマージ不能になる。指摘内容の評価は、レビュー本文を読む
+        // 監視エージェントが needs-fix 判定として実施済みであり、ここでの再検証の役割は
+        // 「ゲートとなるレビューが HEAD sha に対して実在すること」の独立確認に限られる。
         ...(hasCursor
           ? [
-              `   - cursor（レビュー到着の確認）:`,
+              `   - cursor（レビュー到着の確認。state は問わない。指摘内容の評価は監視エージェントが実施済みであり、ここでは HEAD sha に対するレビューの実在のみを独立確認する）:`,
               `     gh api --paginate "repos/{owner}/{repo}/pulls/${impl.prNumber}/reviews" --jq '[.[] | select(.user.login == "cursor[bot]" and .commit_id == ${JSON.stringify(expectedHeadSha)})] | length'`,
             ]
           : []),
@@ -1770,9 +1775,17 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
           `     フォールバックで合格にできるのは「APPROVED が 1 件以上、かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」の場合のみ。これらは指摘や未完了を含みうるため、APPROVED と併存していても合格の根拠にしない（本エージェントはレビュー本文を読まないため内容を評価できない。評価できないものは fail-closed で不合格にする）。DISMISSED は GitHub 上で無効化済みのため判定に含めない。`,
         ]),
         `   判定（summary には App ごとの件数・状態別内訳と HEAD sha を必ず書く。App の特定ができないと利用者が原因に到達できないため、どの slug が不合格だったかを明記する）:`,
-        `   - check-run が 0 件で、かつフォールバックが合格条件（APPROVED が 1 件以上、かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない App が 1 つでもあれば、マージせず merged: false / reason: external-review-missing を返す（APPROVED が 0 件の場合も、APPROVED と CHANGES_REQUESTED 等が併存する場合も、この経路で不合格にする。summary にはレビュー状態別の件数を書く）。`,
-        `   - check-run が 1 件以上だが success / neutral / skipped 以外の結論（failure / cancelled / timed_out）や未完了（queued / in_progress）が 1 件でもある App があれば、マージせず merged: false / reason: checks-not-green を返す。`,
-        `   - すべての App について「結論がすべて success / neutral / skipped の check-run が 1 件以上」または「APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」が成立する場合のみ手順 5 へ進む。`,
+        ...(hasCursor
+          ? [`   - cursor: 全ページの合計が 0 件ならマージせず merged: false / reason: external-review-missing を返す。1 件以上なら合格とする（state による絞り込みは行わない）。`]
+          : []),
+        ...(nonCursorApps.length
+          ? [
+              `   - cursor 以外の App: 「結論がすべて success / neutral / skipped の check-run が 1 件以上」または「APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」のいずれかが成立する場合のみ合格とする。`,
+              `   - check-run が 0 件で、かつフォールバックが合格条件（APPROVED が 1 件以上、かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない App が 1 つでもあれば、マージせず merged: false / reason: external-review-missing を返す（APPROVED が 0 件の場合も、APPROVED と CHANGES_REQUESTED 等が併存する場合も、この経路で不合格にする。summary にはレビュー状態別の件数を書く）。`,
+              `   - check-run が 1 件以上だが success / neutral / skipped 以外の結論（failure / cancelled / timed_out）や未完了（queued / in_progress）が 1 件でもある App があれば、マージせず merged: false / reason: checks-not-green を返す。`,
+            ]
+          : []),
+        `   - 確定済みの全 App が上記の合格条件を満たす場合のみ手順 5 へ進む。`,
       ]
     : []
   return [
