@@ -149,11 +149,11 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 各イシューの処理内容（Step 3 で立案した計画に従って実装する）:
 0. **worktree routing ガード**（最初に実行）: `git remote get-url origin` とイシュータイトル照合でカレント worktree が正しいリポ・イシューに配置されているか確認する
 0b. **既存 PR・リモートブランチを確認する**（中断再開・重複 PR 防止）:
-   - 0b-a（open PR 検索）: `gh pr list --state open` でイシュー番号に対応する open PR が既に存在するか確認する。見つかれば新規 PR を作らずそのブランチを取得して続きから作業し、そのブランチ名を返す（PR 番号は返さない。同じブランチの open PR は後続の PR Create フェーズが再検出して再利用する）
+   - 0b-a（open PR 検索）: `gh pr list --state open` でイシュー番号に対応する open PR が既に存在するか確認する。見つかれば新規 PR を作らずそのブランチを取得して続きから作業し、そのブランチ名を返す（PR 番号は返さない。同じブランチの open PR は後続の PR Create フェーズが再検出して再利用する）。**手順 2 のブランチ作成はスキップする**（`origin/<base>` から `checkout -B` し直すとその PR のコミットを失うため）
    - 0b-b（リモートブランチ再利用）: open PR が見つからない場合、`git ls-remote --heads origin` でイシュー番号を含むリモートブランチ（命名規約: `<type>/<N>-<short-name>`）が残っていないか確認する。「push 成功・PR 作成失敗」で残ったブランチを検出し、`git fetch origin <branch> && git checkout -B <branch> origin/<branch>` で取得して push 済みコミットを保持したまま続きを実装する（`origin/<base>` から新規作成し直さない）。branch 名として返し、prNumber は 0 のまま（PR は後続の PR Create フェーズが作成）
    - 0b-c: open PR もリモートブランチも存在しない場合のみ手順 1・2 で新規ブランチを作成する
 1. 隔離 worktree で `git status` が clean か確認し、差分があれば作業せず失敗を返す
-2. （0b-b でリモートブランチを再利用した場合はスキップ）指定ブランチ（デフォルト: `main`）から作業ブランチを作成する（並列時のブランチ名衝突を防ぐためブランチ名にイシュー番号を含める）
+2. （0b-a で既存 open PR のブランチを取得した場合・0b-b でリモートブランチを再利用した場合はスキップ）指定ブランチ（デフォルト: `main`）から作業ブランチを作成する（並列時のブランチ名衝突を防ぐためブランチ名にイシュー番号を含める）
 3. **渡された計画に従って実装する**（計画立案は Plan フェーズで完了済み）。実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い役割単位で委譲する
 
    コメント方針（実装時）:
