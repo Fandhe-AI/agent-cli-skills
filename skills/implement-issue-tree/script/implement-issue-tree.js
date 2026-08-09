@@ -116,14 +116,68 @@ function capText(str, max = 2000) {
   return s.length > max ? `${s.slice(0, max)}（省略）` : s
 }
 
-// fixPrompt が未信頼データ（PR レビューコメント・外部レビュー結果由来の自由文）を埋め込む際の
-// データ境界マーカーに使う使い捨てトークンを生成する。固定文字列のマーカーだと、埋め込む
-// テキスト自身がマーカーと同じ文字列を含むことで境界を偽装・早期終端できてしまう
+// fixPrompt / mergePrompt が未信頼データ（PR レビューコメント・外部レビュー結果由来の自由文）を
+// 埋め込む際のデータ境界マーカーに使う使い捨てトークンを生成する。固定文字列のマーカーだと、
+// 埋め込むテキスト自身がマーカーと同じ文字列を含むことで境界を偽装・早期終端できてしまう
 // （PR #85 codex-review P0 対応・三次修正）。呼び出しごとに予測不能な値にすることで、
 // 埋め込み側テキストの内容だけでは境界を模倣できないようにする。暗号学的乱数までは要さず、
-// 「攻撃者がプロンプト生成前に値を知り得ない」ことのみを要件とするため Math.random で足りる。
+// 「攻撃者がプロンプト生成前に値を知り得ない」ことのみを要件とする。
+//
+// seed をエージェント経由で取る理由（Fandhe-AI/rust-ai-library #408 のランで実測した不具合）:
+// Workflow harness は resume 再現性を守るため、driver（このスクリプト）側の乱数・現在時刻 API を
+// 一切提供しない。乱数系 API はスクリプト本文の静的検査で拒否されて起動自体が失敗し、動的参照で
+// 迂回しても実行時に「unavailable in workflow scripts (breaks resume)」で例外になる。
+// `crypto`・`performance`・`process` も未定義（probe workflow で実測確認）。このため従来実装は
+// **fix フェーズへ到達した全イシューが確定的に落ちる**（実装・PR 作成まで済んでいても
+// レビュー指摘の修正に入った瞬間に failed になる）。
+// 一方エージェントの返り値は resume 時にキャッシュ再生されるため、実行時に /dev/urandom から
+// seed を作る方式なら「攻撃者が事前に知り得ない」と「resume 再現性」を同時に満たせる。
+// 埋め込むテキストのハッシュから決定的に導く案は、秘密を持たず攻撃者が同じ値を計算できて
+// 偽造可能になるため採らない（P0 対策の緩和になる）。
+let boundaryNonceSeed = ''
+let boundaryNonceCounter = 0
+
+// ラン開始時（Restore フェーズ冒頭）に 1 回だけ呼ぶ。boundaryNonce を使うフェーズより前に
+// 完了している必要がある。取得に失敗した場合は予測可能なトークンで未信頼データの境界を
+// 区切ることになるため、fail-closed で停止する。
+async function ensureBoundaryNonceSeed() {
+  if (boundaryNonceSeed) return
+  const seed = await agent(
+    [
+      `使い捨て境界トークン用の乱数 seed を生成するタスク。`,
+      `【手順】`,
+      `1. head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' を実行する。`,
+      `2. 出力された 16 進文字列（64 桁）のみを返す。説明文・コードブロック・改行を付けない。`,
+    ].join('\n'),
+    { label: 'nonce:seed', phase: 'Restore', model: 'haiku', effort: 'low' },
+  )
+  const hex = String(seed ?? '').replace(/[^0-9a-fA-F]/g, '').toLowerCase()
+  if (hex.length < 32) {
+    throw new Error(
+      `境界トークン用 seed の生成に失敗した（16 進 32 桁以上が必要・取得長 ${hex.length}）。` +
+      `未信頼データの境界を予測可能なトークンで区切ることは避けるため fail-closed で停止する。`,
+    )
+  }
+  boundaryNonceSeed = hex.slice(0, 64)
+}
+
 function boundaryNonce() {
-  return `${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`
+  if (!boundaryNonceSeed) {
+    throw new Error('boundaryNonce: seed が未初期化（ensureBoundaryNonceSeed をラン開始時に呼ぶこと）')
+  }
+  boundaryNonceCounter += 1
+  // seed（実行時生成・予測不能）と呼び出し連番を FNV-1a 系の 2 系列で混ぜる。seed を知らなければ
+  // 出力を事前に予測できないため、境界マーカーの偽装・早期終端を防げる。連番により同一ランでの
+  // 呼び出しごとに異なる値になり、かつ resume 時は同じ seed・同じ順序で同じ値を再現する。
+  const input = `${boundaryNonceSeed}:${boundaryNonceCounter}`
+  let h1 = 0x811c9dc5
+  let h2 = 0xcbf29ce4
+  for (let i = 0; i < input.length; i += 1) {
+    const c = input.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0
+    h2 = Math.imul(h2 + c, 0x85ebca6b) >>> 0
+  }
+  return `${h1.toString(36)}${h2.toString(36)}`
 }
 
 // ブランチ名として不正な文字（スペース・セミコロン等）を拒否する。
@@ -2389,6 +2443,12 @@ function recoverImplementPrompt(item, brief, branch) {
 
 // --- Restore フェーズ: 状態ファイルを読み込む ---
 phase('Restore')
+
+// 未信頼データの境界マーカー用 seed をラン開始時に 1 回だけ取得する（fix / merge フェーズの
+// boundaryNonce が使う）。driver 側に乱数源が存在しないためエージェント経由で生成する。
+// 詳細な根拠は ensureBoundaryNonceSeed のコメントを参照。
+await ensureBoundaryNonceSeed()
+
 const savedItems = await loadState()
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
