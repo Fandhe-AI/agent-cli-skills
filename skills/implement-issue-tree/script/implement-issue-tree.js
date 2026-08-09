@@ -1590,7 +1590,7 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, requireExternalReview) 
   return [
     `PR #${impl.prNumber}（イシュー #${item.number}）のマージ実行担当。マージ条件を自ら再検証し、全て満たす場合にのみ squash merge する。`,
     COMMON,
-    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews は手順 4b の「件数のみへ正規化した --jq 出力」に限り実行してよく、レビュー本文（body）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部レビューの件数のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。`,
+    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews は手順 4b が提示されている場合に限り、その「件数のみへ正規化した --jq 出力」としてのみ実行してよい（手順 4b がない場合は一切実行しない）。レビュー本文（body）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部レビューの件数のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。`,
     '手順:',
     `1. gh pr view ${impl.prNumber} --json state,headRefOid,mergeable で現在の状態を取得する。`,
     `   - state が MERGED: マージ済み。手順 5 のイシュークローズ確認のみ行い merged: true / reason: already-merged を返す。`,
@@ -1620,7 +1620,7 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, requireExternalReview) 
           `   合計が 0 の場合はマージせず merged: false / reason: external-review-missing を返す（summary に合計件数と HEAD sha を書く）。1 以上の場合のみ手順 5 へ進む。`,
         ]
       : []),
-    `5. 手順 2〜4b の全条件を満たす場合のみ、検証した HEAD と実際にマージされる HEAD を GitHub 側で原子的に結び付けてマージする（手順 2 の照合から本コマンド実行までの間に新しいコミットが push されても、未検証の HEAD をマージしないため）:`,
+    `5. ${requireExternalReview && expectedHeadSha ? '手順 2〜4b' : '手順 2〜4'} の全条件を満たす場合のみ、検証した HEAD と実際にマージされる HEAD を GitHub 側で原子的に結び付けてマージする（手順 2 の照合から本コマンド実行までの間に新しいコミットが push されても、未検証の HEAD をマージしないため）:`,
     `     gh pr merge ${impl.prNumber} --squash --delete-branch --match-head-commit ${JSON.stringify(expectedHeadSha)}`,
     `   HEAD 不一致でコマンドが失敗した場合（--match-head-commit の条件不成立）は merged: false / reason: head-moved を返す。--match-head-commit を省略してマージし直さないこと。`,
     `   マージ成功後に gh pr view ${impl.prNumber} --json state で MERGED を確認する（確認できなければ merged: false / reason: merge-failed）。`,
@@ -2114,28 +2114,30 @@ const detectResult = await agent(
 )
 // 観測結果（参考値）。取得失敗（null）時は空配列として扱う。
 const observedCheckApps = detectResult?.apps ?? []
-// 外部チェック構成の確定（Issue #147）。観測は「検出できたものは実在する」ことしか示さず、
-// 空集合は「存在しない」ことを意味しない（新規導入・条件付き起動・直近 3 件で未実行の App を
-// 取りこぼす）。したがって確定条件は以下のとおりとする:
-//   - args.externalChecks が明示された    → 明示値が正（[] を含む）。確定。
-//   - 明示なし・観測が非空               → 少なくとも 1 つ実在するため待機側（安全側）へ倒せる。確定扱い。
-//   - 明示なし・観測が空                 → 確定不能。自動マージを停止する（fail-closed）。
+// 外部チェック構成の確定（Issue #147）。確定情報は args.externalChecks の明示入力のみとする。
+// 観測は「検出できた App は実在する」ことしか示さず、集合としての完全性を保証しない。
+// 空集合が「存在しない」ことを意味しないのはもちろん、非空集合も「これで全部」を意味しない
+// （PR #151 codex-review P1: 観測で sonarcloud だけを拾ったケースを確定扱いにすると、
+// 実際には必須の cursor[bot] レビュー再検証を経ずにマージできてしまう）。したがって
+// 「観測が非空なら確定」という扱いはせず、明示入力がない限り常に確定不能とする。
 const externalCheckApps = externalChecksInput ?? observedCheckApps
-const externalChecksConfirmed = externalChecksInput !== undefined || observedCheckApps.length > 0
+const externalChecksConfirmed = externalChecksInput !== undefined
 // 観測結果は「参考値」としてログ・マージ停止理由に残す（確定情報としては使わない）。
 const observedAppsNote = observedCheckApps.length > 0 ? observedCheckApps.map(sanitize).join(', ') : 'なし'
+// 確定不能時の停止理由・再実行手順。監視 blocked とホスト側ゲートの双方から参照するため、
+// 文言を 1 か所に集約する（PR #151 Bugbot Medium: 停止理由が経路によって失われる問題）。
+const EXTERNAL_CHECKS_UNCONFIRMED_REASON =
+  '外部チェック（GitHub Actions 以外の CI / レビュー App）の構成が args.externalChecks で明示されていないため自動マージを停止した'
+  + `（直近 3 件の merged PR による観測結果は参考値: ${observedAppsNote}。観測は取りこぼしうるため、検出の有無いずれも構成の確定情報にはならない）`
+  + `。args に外部チェックを明示して再実行すること（例: {"parent": ${parent}, "externalChecks": ["cursor"]}。外部チェックを使用しないリポジトリでは {"parent": ${parent}, "externalChecks": []}）`
 if (externalChecksInput !== undefined) {
   log(
     externalCheckApps.length > 0
       ? `外部チェック（args.externalChecks による明示指定）: ${externalCheckApps.map(sanitize).join(', ')}（観測結果は参考値: ${observedAppsNote}）`
       : `外部チェックなし（args.externalChecks: [] による明示確定）。GitHub Actions の green のみで判定する（観測結果は参考値: ${observedAppsNote}）`,
   )
-} else if (externalChecksConfirmed) {
-  log(`外部チェック検出: ${externalCheckApps.map(sanitize).join(', ')}（観測ベース）`)
 } else {
-  log(
-    `⚠️ 外部チェックの有無を確定できない（観測結果: なし）。観測は直近 3 件の merged PR しか見ないため「検出なし」は不在の証明にならない。自動マージは停止する（args に "externalChecks": [] または ["cursor"] 等を明示すれば続行できる）`,
-  )
+  log(`⚠️ ${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`)
 }
 
 // エージェント返却値の整数検証（スキーマ宣言のみに依存しない）
@@ -3090,6 +3092,18 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // unresolvedComments が空/省略なら、直前ラウンドの lastUnresolvedInfo / lastUnresolvedComments
       // をそのまま保持する（blocked 自体の理由は m.summary 側で別途 reason に含まれるため、
       // ここでは上書きしない）。
+      //
+      // 監視エージェントが自ら blocked と判定した経路（外部チェック構成の未確定・cursor[bot]
+      // レビューの待機上限超過・PR の未マージクローズ等）の停止理由を終端 note へ引き継ぐ
+      // （PR #151 Bugbot Medium 対応。従来は m.summary が破棄され「マージに到達できなかった
+      // （最終状態: blocked）」という汎用文言だけが残り、次の行動が追えなかった）。
+      // m.summary は非信頼データのため sanitize + capText を通す（他経路と同じ扱い）。
+      terminalReasonOverride = capText(`監視エージェントが blocked と判定: ${sanitize(m?.summary ?? '')}`)
+      // 構成が未確定のランでは、監視の申告内容によらず再実行手順を必ず添える
+      // （監視 summary が要点を落としても人間が次の行動を取れるようにするため）。
+      if (!externalChecksConfirmed) {
+        terminalReasonOverride = `${terminalReasonOverride}。${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`
+      }
     }
     // マージ実行フェーズ（Issue #145）。監視エージェントが ready を返したときにのみ起動し、
     // レビュー本文を読まない別エージェントが checks・HEAD sha・未解決スレッド数を再取得して
@@ -3101,10 +3115,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // モデル出力への契約でしかなく信頼境界ではないため、ready が返ってきた場合もここで
       // 無条件に停止する（マージ実行エージェントは起動しない）。blocked + pr の終端は
       // 次回ラン以降の monitoring 再開対象であり、args を明示して再実行すれば継続できる。
-      const reason =
-        '外部チェック（GitHub Actions 以外の CI / レビュー App）の構成を確定できないため自動マージを停止した'
-        + `（直近 3 件の merged PR による観測結果は参考値: ${observedAppsNote}。観測は新規導入・条件付き起動・直近 3 件で未実行の App を検出できないため「検出なし」は不在の証明にならない）`
-        + `。args に外部チェックを明示して再実行すること（例: {"parent": ${parent}, "externalChecks": ["cursor"]}。外部チェックを使用しないリポジトリでは {"parent": ${parent}, "externalChecks": []}）`
+      const reason = EXTERNAL_CHECKS_UNCONFIRMED_REASON
       log(`⚠️ #${item.number}: ${reason}`)
       // lastUnresolvedInfo / outOfScopeLog はここで上書きしない（failMergeTerminal が
       // 「最終観測時点の未解決コメント」として reason へ合成する既存の追跡情報を保つ）。
