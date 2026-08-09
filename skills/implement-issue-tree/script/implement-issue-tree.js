@@ -415,6 +415,12 @@ const MERGE_SCHEMA = {
   },
 }
 
+// MERGE_SCHEMA.state の enum と同一の妥当値集合。schema はモデル出力への契約であり信頼境界
+// ではないため、runMergeLoop が monitor 結果を受理する際にホスト側でも同じ enum で二重検証する
+// （PR #122 codex-review P1 対応: null・enum 外の無効結果を 'blocked' へフォールバックさせず
+// systemic failure として 'failed' 終端に落とし、halt カウントの防御を維持するため）。
+const MERGE_VALID_STATES = new Set(MERGE_SCHEMA.properties.state.enum)
+
 const FIX_SCHEMA = {
   type: 'object',
   required: ['pushed', 'summary'],
@@ -2546,6 +2552,18 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // monitoring 再開パスでは initialOutOfScopeLog（状態ファイルから検証済みで復元した値）を
   // 初期値として引き継ぐ。呼び出し元で既に sanitizeOutOfScopeLog を通過済みのため再検証しない。
   const outOfScopeLog = Array.isArray(initialOutOfScopeLog) ? [...initialOutOfScopeLog] : []
+  // outOfScopeLog に記録済みの threadId 集合（Issue #121: Bugbot Medium 対応）。
+  // 自動 resolve 撤去（Issue #119）後は対象外スレッドが open のまま次の fix ラウンドへ再入する
+  // ため、同一 threadId が繰り返し申告されて OUT_OF_SCOPE_LOG_MAX（20）件のキャップを埋め、
+  // 他のエントリを押し出してしまう。追記時に threadId で重複排除するため、復元済みエントリ
+  // （"threadId: xxx / reason: yyy" 形式。書き込み側が生成した契約どおりの文字列）から
+  // threadId を取り出して初期化する。threadId 不明マーカー（形式不正・省略）のエントリは
+  // 識別子として同一性を判定できないため集合に入れない（別個の記録として保持する）。
+  const seenOutOfScopeThreadIds = new Set()
+  for (const entry of outOfScopeLog) {
+    const idMatch = /^threadId: ([A-Za-z0-9_-]{1,100}) \/ reason: /.exec(entry)
+    if (idMatch) seenOutOfScopeThreadIds.add(idMatch[1])
+  }
   // 現在追跡中の worktree パス。Merge ループ開始時点の最新値を呼び出し元から受け取り、
   // 以降は最後の fix の worktreePath を常に最新に保つ。merged 時・fix 時の削除対象として使用する
   let currentWorktreePath = initialWorktreePath ?? impl.worktreePath ?? ''
@@ -2563,7 +2581,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // （早期 return・break 条件）を追加する場合も直接 updateState を呼ばず本関数へ合流させる
   // （PR #85 codex-review P1 対応: fix 失敗の早期 return が追跡情報を破棄していた問題の
   // 構造的再発防止）。クロージャで最新の lastUnresolvedInfo / outOfScopeLog を参照する。
-  async function failMergeTerminal(baseReason) {
+  // terminalStatus: 終端の status（'failed' | 'blocked'）。未解決レビューコメント・対象外
+  // コメント起因の非収束（lastState: unresolved-comments / blocked）は systemic な失敗では
+  // なく特定イシュー固有の品質ブロックのため 'blocked' で終端し、halt の連続カウント
+  // （consecutiveFailures）に乗せない（Issue #121: Bugbot High 対応。recordFailure は
+  // status: 'blocked' を halt 非カウントで records へ記録する既存挙動と整合する）。
+  // エージェントのクラッシュ・監視タイムアウト等の systemic な失敗は既定の 'failed' で終端する。
+  async function failMergeTerminal(baseReason, terminalStatus = 'failed') {
     // lastUnresolvedInfo は merged 時以外はクリアされず（blocked の空/省略時・needs-fix /
     // timeout 遷移時に直前の値を保持する）、「現在確定した未解決コメント」ではなくレビュー
     // スレッドを最後に確認できた時点の情報であるため、「最終観測時点」である旨を文言で明示する。
@@ -2579,15 +2603,18 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // outOfScopeLog と同じ形式で状態ファイルへ永続化する。次回実行時の monitoring 再開パスが
     // restoreUnresolvedComments 経由で復元し、完了レポート集約（results.unresolvedComments）を
     // 中断・再開を跨いで失わないようにするため。
-    await updateState(item.number, { status: 'failed', pr: impl.prNumber, fixCount, note: reason, outOfScopeLog, lastUnresolvedInfo, lastUnresolvedComments })
+    await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, note: reason, outOfScopeLog, lastUnresolvedInfo, lastUnresolvedComments })
     // recordFailure へ構造化データを渡す。unresolvedComments / outOfScope は「未解決コメント
     // （issue 化候補）」「対象外（out-of-scope）」節をレポート生成側が組み立てるための
     // 集約データであり、recordFailure 側で非空のときのみ results エントリへ付与する
     // （受け入れ条件 3: 0 件時は results にフィールド自体を出力しない）。
+    // status も状態ファイルと同じ値を渡し、results と状態ファイルの status を一致させる
+    // （'blocked' のとき recordFailure は halt 非カウントで記録する）。
     recordFailure({
       issue: item.number,
       pr: impl.prNumber,
       reason,
+      status: terminalStatus,
       unresolvedComments: lastUnresolvedComments,
       outOfScope: outOfScopeLog,
     })
@@ -2601,7 +2628,15 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // outOfScopeComments 分類（未信頼の PR コメントを読んだ未検証の自己申告）は monitor へ
     // 一切渡さない。monitor は毎ラウンド GraphQL から自ら収集したスレッド内容のみで独立判定する。
     const m = await agent(monitorPrompt(item, impl, externalCheckApps), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA })
-    lastState = m?.state ?? 'blocked'
+    // monitor 結果のホスト側検証（PR #122 codex-review P1 対応）。schema はモデル出力への
+    // 契約であり信頼境界ではないため、m が null / state 欠落 / MERGE_SCHEMA の enum 外の
+    // 無効結果はエージェントのクラッシュ・API エラー等の systemic failure として扱う。
+    // 従来の既定値フォールバック（?? 'blocked'）のままだと、無効結果が終端判定で halt
+    // 非カウントの 'blocked' に化けて systemic failure で halt する防御が弱まるため、
+    // 専用 sentinel 'invalid-monitor-result' に落とし、終端 status を 'failed'
+    // （halt カウント対象）に確定させる。'blocked' が halt 非カウントで終端するのは、
+    // monitor が有効な結果として blocked / unresolved-comments を返した文脈に限る。
+    lastState = MERGE_VALID_STATES.has(m?.state) ? m.state : 'invalid-monitor-result'
     // unresolved-comments / blocked のときのみ更新する。fixCount >= 6 到達時に m が break で
     // 破棄されても、この時点で保持した値が最終 note・recordFailure の reason に引き継がれる。
     //
@@ -2756,17 +2791,36 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // （lastUnresolvedInfo / lastUnresolvedComments / outOfScopeLog）→ 最終レポート →
       // ユーザー承認で issue 化・人間による手動 resolve の流れに乗せる。
       if (Array.isArray(f.outOfScopeComments)) {
-        for (let i = 0; i < f.outOfScopeComments.length; i++) {
-          const oc = f.outOfScopeComments[i]
+        // 1 パス目: 形式検証と threadId 重複排除（Issue #121: Bugbot Medium 対応）。
+        // 対象外スレッドは resolve されず open のまま次の fix ラウンドへ再入するため、
+        // 同一 threadId の再申告はここでスキップして再記録しない（初回の記録を正とする）。
+        // threadId が不明・形式不正のエントリは同一性を判定できないため重複排除の対象外とし、
+        // 従来どおり不明マーカー付きで記録する。省略マーカーの件数を「実際に記録されなかった
+        // 新規エントリ数」と整合させるため、追記対象の確定（このパス）と上限付き追記
+        // （次のパス）を分離する（重複・reason 欠落分を省略件数に数えない）。
+        const newOutOfScopeEntries = []
+        for (const oc of f.outOfScopeComments) {
           const reason = capText(sanitize(oc?.reason ?? ''), 300)
           if (!reason) continue
-          // 上限判定はバッチ内カウントではなく outOfScopeLog 全体の長さで行う。
-          // outOfScopeLog は monitoring 再開時に状態ファイルから復元されたエントリを含むため、
-          // バッチごとにカウントをリセットすると resume・複数 fix ラウンドを跨いで上限
-          // （OUT_OF_SCOPE_LOG_MAX 件）を迂回できてしまう（PR #85 Bugbot 指摘:
-          // Resume bypasses out-of-scope cap への対応）。共有上限により合計 20 件を超えない。
+          const tid = sanitizeThreadId(oc?.threadId ?? '')
+          if (tid) {
+            if (seenOutOfScopeThreadIds.has(tid)) {
+              log(`#${item.number}: fix エージェントの対象外コメント（threadId: ${tid}）は記録済みのためスキップした`)
+              continue
+            }
+            seenOutOfScopeThreadIds.add(tid)
+          }
+          newOutOfScopeEntries.push(`threadId: ${tid || '(不明・形式不正)'} / reason: ${reason}`)
+        }
+        // 2 パス目: 上限付き追記。上限判定はバッチ内カウントではなく outOfScopeLog 全体の
+        // 長さで行う。outOfScopeLog は monitoring 再開時に状態ファイルから復元されたエントリを
+        // 含むため、バッチごとにカウントをリセットすると resume・複数 fix ラウンドを跨いで
+        // 上限（OUT_OF_SCOPE_LOG_MAX 件）を迂回できてしまう（PR #85 Bugbot 指摘:
+        // Resume bypasses out-of-scope cap への対応）。共有上限により合計 20 件を超えない。
+        for (let i = 0; i < newOutOfScopeEntries.length; i++) {
           if (outOfScopeLog.length >= OUT_OF_SCOPE_LOG_MAX) {
-            const omitted = f.outOfScopeComments.length - i
+            // 省略件数は重複排除後の「記録できなかった新規エントリ数」を数える。
+            const omitted = newOutOfScopeEntries.length - i
             // 省略マーカーはちょうど上限到達時の 1 度だけ追加する（fix ラウンドごとに
             // マーカーが増殖して上限の意味を失わないため）。
             if (outOfScopeLog.length === OUT_OF_SCOPE_LOG_MAX) {
@@ -2775,8 +2829,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             log(`#${item.number}: fix エージェントの対象外コメント記録が上限（${OUT_OF_SCOPE_LOG_MAX}）を超えたため以降を省略した`)
             break
           }
-          const tid = sanitizeThreadId(oc?.threadId ?? '') || '(不明・形式不正)'
-          const entry = `threadId: ${tid} / reason: ${reason}`
+          const entry = newOutOfScopeEntries[i]
           outOfScopeLog.push(entry)
           log(`#${item.number}: fix エージェントが対象外と判断したコメント（${entry}。resolve は行わず記録のみ。最終レポートで issue 化・手動 resolve を判断する）`)
         }
@@ -2816,7 +2869,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         noPushRounds = 0
       }
       if (monitorsLeft < 1) monitorsLeft = 1
-    } else if (lastState === 'blocked') {
+    } else if (lastState === 'blocked' || lastState === 'invalid-monitor-result') {
+      // invalid-monitor-result（無効な monitor 結果）も従来の blocked フォールバックと同様に
+      // 即終端する（再監視しても同じ失敗を繰り返す可能性が高く、ラウンドを浪費するだけの
+      // ため）。終端 status の扱いだけが異なる（blocked: halt 非カウント / invalid: failed）。
       break
     }
     // timeout は次ラウンドで再監視する
@@ -2828,7 +2884,24 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     const baseReason = routingErrorDetected
       ? 'worktree routing error: fix worktree が別リポに誤配置（修正不能）。実装リポの worktree への再配置が必要'
       : `マージに到達できなかった（最終状態: ${lastState}）`
-    return await failMergeTerminal(baseReason)
+    // 終端 status の決定（Issue #121: Bugbot High 対応）。未解決レビューコメント・対象外
+    // コメント起因の非収束（lastState: unresolved-comments / blocked。fixCount 上限到達・
+    // push なし 2 連続・monitor の blocked 判定を含む）は、SKILL.md の
+    // 「未解決のまま blocked → 最終レポートへ」の規定どおり 'blocked' で終端し、halt の
+    // 連続カウントに乗せない。timeout・invalid-monitor-result（monitor の無効応答 =
+    // エージェントのクラッシュ・API エラー）等の systemic な失敗のみ 'failed' で終端する
+    // （PR #122 codex-review P1 対応: lastState は有効な monitor 応答のみを取るよう検証済みの
+    // ため、既定値フォールバック経由で blocked に落ちることはない）。
+    // routingErrorDetected は lastState より優先して常に 'failed' とする。worktree の別リポ
+    // への誤配置はレビュー非収束ではなく実行基盤上の systemic failure であり、直前の monitor
+    // 状態（unresolved-comments 中の fix で発生したか等）という偶然に分類を左右させると、
+    // halt 防御（consecutiveFailures 3 連続で新規着手停止）を回避してしまう
+    // （PR #122 codex-review P1 第 2 指摘対応）。
+    const terminalStatus =
+      !routingErrorDetected && (lastState === 'blocked' || lastState === 'unresolved-comments')
+        ? 'blocked'
+        : 'failed'
+    return await failMergeTerminal(baseReason, terminalStatus)
   }
   return true
 }
