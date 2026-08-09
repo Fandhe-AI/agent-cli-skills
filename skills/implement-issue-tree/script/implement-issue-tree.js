@@ -2539,19 +2539,23 @@ async function runImplement(item) {
           `PR #${impl.prNumber} 作成後の monitoring 遷移（pr 記録）を状態ファイルへ永続化できなかった。` +
           `重複 PR 防止のためマージ監視へ進まず停止する（${STATE_FILE} と PR #${impl.prNumber} を手動確認すること）`
         log(`⚠️ issue #${item.number}: ${reason}`)
-        // 他の failed 終端と同様、best-effort で failed 状態と回復メタデータ（pr / branch）の保存を
-        // 試みる（Cursor Bugbot 指摘対応）。一時的な書き込み失敗であればここで pr が永続化され、
-        // 次回実行が既存 PR を検出して重複 PR 作成を回避できる。
-        const failedSaved = await updateState(item.number, {
-          status: 'failed',
+        // best-effort で終端状態と回復メタデータ（pr / branch）の保存を試みる（Cursor Bugbot 指摘対応）。
+        // 一時的な書き込み失敗であればここで pr が永続化され、次回実行が重複 PR 作成を回避できる。
+        // status は 'failed' ではなく 'blocked' を使う: PR は実在するため、次回実行では
+        // isActiveMonitoring（status が monitoring / blocked かつ pr > 0 かつ branch が有効）で
+        // 監視再開させる必要がある。'failed' で保存すると再開対象から外れ、既存 PR が
+        // 未監視のまま Recover / Implement / PR 作成へ再突入して重複 PR を作りうる
+        // （pr を持つ blocked 終端を再開対象とする設計は PR #124 に準拠）。
+        const blockedSaved = await updateState(item.number, {
+          status: 'blocked',
           pr: impl.prNumber,
           branch: impl.branch,
           worktree: currentWorktreePath,
           fixCount,
           note: reason,
         })
-        if (!failedSaved) {
-          log(`⚠️ issue #${item.number}: failed 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
+        if (!blockedSaved) {
+          log(`⚠️ issue #${item.number}: blocked 状態（監視再開情報）の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
         }
         recordFailure({ issue: item.number, pr: impl.prNumber, reason })
         return false
