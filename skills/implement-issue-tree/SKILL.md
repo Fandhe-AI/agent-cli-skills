@@ -401,7 +401,7 @@ cat _/issue-trees/42.json
 | `merged` | マージ済み | スキップ（完了扱い） |
 | `closed` | クローズ済み | スキップ（完了扱い） |
 | `failed` | 失敗 | Recover phase が残骸の有無を確認して再実行（continue / discard に分岐） |
-| `blocked` | 依存失敗または halted | Recover phase が残骸の有無を確認して再実行（continue / discard に分岐） |
+| `blocked` | 依存失敗・halted・Review/Merge 非収束（未解決レビューコメント・対象外コメント起因を含む、イシュー固有の品質ブロック。halt の連続カウントには乗せない） | Recover phase が残骸の有無を確認して再実行（continue / discard に分岐） |
 | `skipped` | GitHub 側で closed 済み | スキップ（変更なし） |
 
 `monitoring` 中断からの再開では、保存された `pr`（PR 番号）・`branch`・`fixCount`（修正済み回数）を引き継いで monitor ループから再開する。`fixCount` の上限（6 回）は引き継いだ値に基づいて判定される。
