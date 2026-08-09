@@ -305,6 +305,10 @@ gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証し�
 
 CI 失敗・外部チェック指摘・コンフリクト・未解決レビュースレッドがある場合は、修正エージェント（fix）が detached HEAD で対象ブランチを取得して指摘を反映し再 push する。修正エージェントも worktree 隔離で動作するため、他の並列イシューのブランチに干渉しない。fix 対象外と判断したコメントは「実装対象外（out-of-scope）の扱い」節の手順に従い PR 本文へ記録する（自動フローは記録までで停止し、resolve はどのエージェント・どの経路でも実行しない。resolve は人間が GitHub 上で行い、未解決のまま残ったスレッドは blocked → 最終レポートで issue 化承認・手動 resolve を判断する）。fix エージェントは修正済みの指摘のスレッドも resolve しない（スレッドの解決状態は変更しない）。監視（monitor）は最大 7 回まで実行し、push なしが 2 回連続したイシューは `blocked` として記録する。監視エージェントが `blocked` を返す場合は `blockedReason`（`quality` / `unrecoverable`）の付与を必須とし、ホスト側でも enum を二重検証する。省略・enum 外は `unrecoverable` として扱う（fail-safe）。`quality`（再監視・再実行で解消し得る）のみ状態ファイルへ `blocked` で終端して次回ランの monitoring 再開対象とし、`unrecoverable`（PR の未マージクローズ等）は `failed` で終端して再開対象から外す。修正（fix）の上限は Review と共有（上限 6）。詳細は Review ステップ参照。
 
+**修正上限（6 回）到達時の分類（Issue #141）:** 上限到達で `blocked` へ落ちる際は、上限に達した時点で観測していた状態で再開可否を分類する。`unresolved-comments`（未解決スレッドが実在する）は人間の resolve で解消し得るため `quality`（`blocked` 終端・monitoring 再開対象）、`needs-fix`（CI 失敗等）は修正予算が尽きているため `unrecoverable`（`failed` 終端・再開対象外）とする。後者を再開可能にすると、`fixCount` が上限のまま復元されたランが「即 blocked」を毎回繰り返し、`blocked` は halt の連続カウントに乗らないため停止防御も働かない。
+
+**対象外コメントの省略件数（Issue #133・#141）:** `outOfScopeLog` は本体 20 件 + 省略マーカー行（`（他 N 件省略）`）1 件の最大 21 件で永続化する。マーカーは配列全体で 1 行だけを使い、後続の fix ラウンド・中断再開を跨いで N を累積更新する。あわせて、対象外と申告済みの threadId 集合を `outOfScopeSeen` として状態ファイルへ保存し、再開時に復元する（省略されて `outOfScopeLog` に本文が残らなかった threadId を失うと、再開後の同一スレッド再申告が省略件数へ重複加算されるため）。
+
 ### Step 7: 親イシューを検証してクローズする
 
 子を持つノード（親イシュー）は、配下のすべての子イシューが完了した時点で以下を確認してクローズする。

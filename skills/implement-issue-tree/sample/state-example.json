@@ -38,6 +38,7 @@
       "outOfScopeLog": [
         "threadId: PRRT_kwDOxyz789 / reason: ログフォーマット変更は今回のスコープ外のため対応見送り"
       ],
+      "outOfScopeSeen": ["PRRT_kwDOxyz789"],
       "lastUnresolvedInfo": "reviewer が支払い失敗時のロールバック処理漏れを指摘",
       "lastUnresolvedComments": [
         {

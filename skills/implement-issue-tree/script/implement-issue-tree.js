@@ -175,6 +175,11 @@ function unresolvedCommentText(c) {
 // （PR #85 codex-review P1 対応: 状態ファイル永続化・復元のための共通定数）。
 const OUT_OF_SCOPE_LOG_MAX = 20
 
+// outOfScopeLog の末尾に置く省略マーカー行（「（他 N 件省略）」）の書式。
+// 追記側は既存マーカーを検出して N を累積更新するために、復元側は行そのものを識別するために
+// 同じ正規表現を共有する（Issue #133: 上限到達後のラウンドで省略件数が更新されない問題の修正）。
+const OUT_OF_SCOPE_OMITTED_MARKER_RE = /^（他 (\d+) 件省略）$/
+
 // impl.outOfScope（Implement エージェントが返す対象外項目の配列）の上限。IMPL_SCHEMA に
 // maxItems / maxLength を宣言しているが、schema はモデル出力への契約であり信頼境界ではない
 // ため、prCreatePrompt が PR body へ展開する際にもホスト側で同じ上限を二重に適用する
@@ -211,6 +216,24 @@ function sanitizeOutOfScopeLog(arr) {
     // Restore drops omission marker への対応）。
     .slice(0, OUT_OF_SCOPE_LOG_MAX + 1)
     .map((v) => capText(v, 450))
+}
+
+// 状態ファイルの saved.outOfScopeSeen（対象外と申告済みの threadId 集合。省略マーカーで
+// 件数のみ記録され outOfScopeLog に本文が残らなかった分を含む）を runMergeLoop 再入時の
+// seenOutOfScopeThreadIds 初期値として復元するバリデーションヘルパー。
+// sanitizeOutOfScopeLog と同じ方針で、sanitizeThreadId と同一の文字種・長さに一致する
+// 文字列要素のみ受け入れ、件数を上限で切る。
+// この集合を永続化しないと、seenOutOfScopeThreadIds を outOfScopeLog のエントリだけから
+// 再構築することになり、省略された threadId が復元されず、再開後のラウンドで同一スレッドが
+// 再申告されたときに省略マーカーの件数へ重複加算される（Issue #141 由来。local-llm-server
+// PR #580 Bugbot Low 指摘: Resume inflates omission marker count）。
+// 上限は log 本体 20 件 + 省略分の余裕を見て 200 件とする。
+const OUT_OF_SCOPE_SEEN_MAX = 200
+function sanitizeOutOfScopeSeen(arr) {
+  if (!Array.isArray(arr)) return []
+  return arr
+    .filter((v) => typeof v === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(v))
+    .slice(0, OUT_OF_SCOPE_SEEN_MAX)
 }
 
 // 状態ファイルの saved.lastUnresolvedInfo（monitor が最後に観測した未解決コメント情報）を
@@ -3157,6 +3180,7 @@ async function runImplement(item) {
     sanitizeOutOfScopeLog(saved.outOfScopeLog),
     sanitizeUnresolvedInfo(saved.lastUnresolvedInfo),
     restoreUnresolvedComments(saved.lastUnresolvedComments),
+    sanitizeOutOfScopeSeen(saved.outOfScopeSeen),
   )
 }
 
@@ -3180,7 +3204,11 @@ async function runImplement(item) {
 // 完了レポート「未解決コメント（issue 化候補）」節が threadId・url 単位でスレッドへ遷移
 // できる形を要求するため（lastUnresolvedInfo は summary 全文を連結した表示専用の文字列で
 // スレッド単位に分解できない）。
-async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = []) {
+// initialOutOfScopeSeen: monitoring 再開パスでのみ状態ファイルの saved.outOfScopeSeen
+// （sanitizeOutOfScopeSeen 検証済み）を渡す。新規 impl パスは常に空配列（省略）。
+// outOfScopeLog とは別に threadId 集合を持つのは、上限到達で省略されたエントリが log 本文に
+// 残らず、log からの再構築だけでは「申告済み」の事実を復元できないため（Issue #141）。
+async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = []) {
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -3235,7 +3263,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // （"threadId: xxx / reason: yyy" 形式。書き込み側が生成した契約どおりの文字列）から
   // threadId を取り出して初期化する。threadId 不明マーカー（形式不正・省略）のエントリは
   // 識別子として同一性を判定できないため集合に入れない（別個の記録として保持する）。
-  const seenOutOfScopeThreadIds = new Set()
+  // monitoring 再開パスでは initialOutOfScopeSeen（呼び出し元で sanitizeOutOfScopeSeen 検証済み）
+  // を先に流し込んでから log 由来の threadId を足す。log エントリだけから再構築すると、
+  // 上限到達で省略された（＝ log に本文が残らなかった）threadId が失われ、再開後のラウンドで
+  // 同一スレッドが再申告されたときに省略マーカーの件数へ重複加算される（Issue #141）。
+  const seenOutOfScopeThreadIds = new Set(initialOutOfScopeSeen)
   for (const entry of outOfScopeLog) {
     const idMatch = /^threadId: ([A-Za-z0-9_-]{1,100}) \/ reason: /.exec(entry)
     if (idMatch) seenOutOfScopeThreadIds.add(idMatch[1])
@@ -3279,7 +3311,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // outOfScopeLog と同じ形式で状態ファイルへ永続化する。次回実行時の monitoring 再開パスが
     // restoreUnresolvedComments 経由で復元し、完了レポート集約（results.unresolvedComments）を
     // 中断・再開を跨いで失わないようにするため。
-    await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, note: reason, outOfScopeLog, lastUnresolvedInfo, lastUnresolvedComments })
+    // outOfScopeSeen: 省略マーカーで本文が log に残らなかった分を含む「対象外と申告済みの
+    // threadId 集合」。復元時の重複加算防止のため outOfScopeLog と併せて永続化する（Issue #141）。
+    await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments })
     // recordFailure へ構造化データを渡す。unresolvedComments / outOfScope は「未解決コメント
     // （issue 化候補）」「対象外（out-of-scope）」節をレポート生成側が組み立てるための
     // 集約データであり、recordFailure 側で非空のときのみ results エントリへ付与する
@@ -3558,9 +3592,19 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
     } else if (lastState === 'needs-fix' || lastState === 'unresolved-comments') {
       if (fixCount >= 6) {
+        // 修正上限到達時の再開可否は「上限に達した時点で観測していた状態」で決める（Issue #141。
+        // local-llm-server PR #580 Bugbot High 指摘: Resume stalls after fix limit）。
+        // lastState を 'blocked' へ上書きする前に分類すること（上書き後は判別できない）。
+        // - 'unresolved-comments': 未解決スレッドが実在する状態。人間が resolve すれば次回実行の
+        //   monitoring 再開で先へ進めるため 'quality'（＝ status: blocked で再開対象）とする。
+        // - 'needs-fix': CI 失敗等で、修正予算が尽きている。再開しても monitor が同じ needs-fix を
+        //   返す → 修正回数ゼロで即 blocked、を毎ラン繰り返すだけで進展せず、blocked は halt の
+        //   連続カウントに乗らないため停止防御も働かない。よって 'unrecoverable'（＝ status:
+        //   failed で再開対象外・halt カウント対象）へ倒す（fail-safe）。
+        // なお、この直後に lastState を 'blocked' へ倒すため、ループ後の終端判定式にある
+        // `lastState === 'unresolved-comments'` 節がここでの分類を 'blocked' へ引き戻すことはない。
+        lastBlockedReason = lastState === 'unresolved-comments' ? 'quality' : 'unrecoverable'
         lastState = 'blocked'
-        // 修正上限到達。人手のレビュー対応後に再実行すれば継続できるため回復可能（Issue #142）。
-        lastBlockedReason = 'quality'
         break
       }
       log(`PR #${impl.prNumber} に修正が必要（${lastState}）、修正エージェントを起動する（${fixCount + 1}/6 回目）`)
@@ -3657,11 +3701,22 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           if (outOfScopeLog.length >= OUT_OF_SCOPE_LOG_MAX) {
             // 省略件数は重複排除後の「記録できなかった新規エントリ数」を数える。
             const omitted = newOutOfScopeEntries.length - i
-            // 省略マーカーはちょうど上限到達時の 1 度だけ追加する（fix ラウンドごとに
-            // マーカーが増殖して上限の意味を失わないため）。
-            if (outOfScopeLog.length === OUT_OF_SCOPE_LOG_MAX) {
-              outOfScopeLog.push(`（他 ${omitted} 件省略）`)
-            }
+            // 省略マーカーは配列全体で 1 行だけを使い、その件数を後続の fix ラウンド・
+            // resume（復元は MAX + 1 件まで保持）を跨いで累積更新する（Issue #133）。
+            // 旧実装は `length === OUT_OF_SCOPE_LOG_MAX` の初回到達時にだけ push していたため、
+            // マーカー追加後は length が MAX + 1 になって条件が二度と成立せず、以降のラウンドで
+            // 省略された分が状態ファイル・最終レポートから黙って欠落していた。
+            // 既存マーカーは配列位置ではなく書式（OUT_OF_SCOPE_OMITTED_MARKER_RE）で探す。
+            // 固定 index を前提にすると、復元時に不正要素が除去されてマーカー位置がずれた場合に
+            // 2 本目のマーカーを書いて累積件数を失う。
+            const markerIndex = outOfScopeLog.findIndex(
+              (v) => typeof v === 'string' && OUT_OF_SCOPE_OMITTED_MARKER_RE.test(v),
+            )
+            const prevOmitted =
+              markerIndex >= 0 ? Number(OUT_OF_SCOPE_OMITTED_MARKER_RE.exec(outOfScopeLog[markerIndex])[1]) : 0
+            const markerText = `（他 ${prevOmitted + omitted} 件省略）`
+            if (markerIndex >= 0) outOfScopeLog[markerIndex] = markerText
+            else outOfScopeLog.push(markerText)
             log(`#${item.number}: fix エージェントの対象外コメント記録が上限（${OUT_OF_SCOPE_LOG_MAX}）を超えたため以降を省略した`)
             break
           }
@@ -3691,7 +3746,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 全く同じタイミング・理由でここに含める。含めないと「fix 後に中断 → 再開」した際、
       // restoreUnresolvedComments が古い（前回 fix 直前の）配列を復元してしまい、直前ラウンドで
       // 観測した最新の未解決スレッドが完了レポート集約から欠落する。
-      await updateState(item.number, { fixCount, worktree: currentWorktreePath, outOfScopeLog, lastUnresolvedInfo, lastUnresolvedComments }, { cleanupWorktree: oldWorktreePath })
+      // outOfScopeSeen も outOfScopeLog と同じタイミングで永続化する（Issue #141）。
+      await updateState(item.number, { fixCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments }, { cleanupWorktree: oldWorktreePath })
       if (!f.pushed) {
         // 「指摘は修正済みで push 不要」の場合があるため即 blocked にせず 1 回だけ再監視する。
         // 2 回連続で push なしなら進展がないため blocked とする
