@@ -2557,7 +2557,17 @@ async function runImplement(item) {
         if (!blockedSaved) {
           log(`⚠️ issue #${item.number}: blocked 状態（監視再開情報）の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
         }
-        recordFailure({ issue: item.number, pr: impl.prNumber, reason })
+        // results の status は状態ファイルへ実際に書けた内容と一致させる（Cursor Bugbot 指摘対応）。
+        // 保存成功時は状態ファイルが 'blocked'（次回 monitoring 再開対象）なので results も
+        // 'blocked' とし、halt の連続カウントには数えない（他イシューの着手を止める理由がない）。
+        // 保存失敗時は状態ファイルに 'blocked' が残らず、原因も状態ファイル自体の書き込み不能
+        // （権限・容量など systemic な障害）であるため 'failed' として halt カウント対象にする。
+        recordFailure({
+          issue: item.number,
+          pr: impl.prNumber,
+          reason,
+          ...(blockedSaved ? { status: 'blocked' } : {}),
+        })
         return false
       }
     }
