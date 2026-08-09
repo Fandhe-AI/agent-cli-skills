@@ -47,6 +47,15 @@ const concurrency = (() => {
   const p = Number(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.parallel : undefined)
   return Number.isInteger(p) && p >= 1 && p <= 8 ? p : 3
 })()
+// Issue #117（rust-ai-library#407 codex P0 対応）: 対象外（out-of-scope）レビュースレッドの
+// 自動 resolve を許可する明示オプトイン。このフラグは「人間がこの実行に限り、非 P0/P1・
+// 非セキュリティの対象外スレッドの自動 resolve を明示承認した」ことを表す検証可能な入力であり、
+// AI の重要度自己判定のみで resolveReviewThread が実行される経路（誤分類時に修正必須指摘を
+// 消して自動マージへ進めるガードレール迂回）を既定で塞ぐ。
+// 既定 false。厳密 boolean 比較（=== true）により、boolean 以外の値（文字列 "true"・数値 1 等）
+// が渡されても false として扱う（フェイルクローズ: 誤設定で承認ゲートが開かないようにする）。
+const autoResolveOutOfScope =
+  (parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.autoResolveOutOfScope : undefined) === true
 
 if (!Number.isInteger(parent) || parent <= 0) {
   throw new Error('親イシュー番号を args で指定すること（例: {"parent": 1008, "branch": "main", "parallel": 3}）')
@@ -1555,7 +1564,13 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
     ...checkoutInstructions,
     '2. 指摘を重要度を問わずすべて修正する（実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い委譲する）。対象リポジトリの CLAUDE.md・rules の不変条件（migration・スキーマ等）を守る。',
     '   P0/P1 相当・セキュリティ上の指摘（脆弱性・認証認可の不備・秘密情報露出・破壊的操作等）は対象外と判定して記録・スキップしてはならない。修正するか、修正不能なら pushed: false とし summary に理由を具体的に書いて返す（ホストはこれを blocked として扱いユーザー判断へ委ねる）。対象外にすべきか判断に迷う場合は安全側（対象外にしない）に倒す。',
-    '   対応不能・実装スコープ外と判断した指摘（上記の P0/P1・セキュリティ除外に該当しないもの）は修正をスキップしてよい。ただし無言でスキップせず、上記「未解決スレッド一覧」に記載された該当スレッドの threadId と判断理由を outOfScopeComments 配列に { threadId, reason } 形式で1件1要素として記録する（summary 本文には埋め込まない。threadId が「未解決スレッド一覧」に見つからない指摘は対象外記録をスキップしてよい。この記録はホスト側のログ・最終レポート専用であり、次ラウンドの監視エージェントの判定材料には一切引き継がれない。監視エージェントは毎回スレッド内容を自ら読んで独立に判定する）。対象外と判断したスレッドは自分では resolve しない（resolve はこの後の PR 本文記録・ホスト側検証を経て別エージェントが実行する）。',
+    `   対応不能・実装スコープ外と判断した指摘（上記の P0/P1・セキュリティ除外に該当しないもの）は修正をスキップしてよい。ただし無言でスキップせず、上記「未解決スレッド一覧」に記載された該当スレッドの threadId と判断理由を outOfScopeComments 配列に { threadId, reason } 形式で1件1要素として記録する（summary 本文には埋め込まない。threadId が「未解決スレッド一覧」に見つからない指摘は対象外記録をスキップしてよい。この記録はホスト側のログ・最終レポート専用であり、次ラウンドの監視エージェントの判定材料には一切引き継がれない。監視エージェントは毎回スレッド内容を自ら読んで独立に判定する）。対象外と判断したスレッドは自分では resolve しない（${
+      // Issue #117: 既定パスのプロンプトに「後で resolve される」という指示・期待を含めない。
+      // autoResolveOutOfScope: true（人間の明示承認）のときのみ後続 resolve への言及を提示する。
+      autoResolveOutOfScope
+        ? 'resolve はこの後の PR 本文記録・ホスト側検証を経て別エージェントが実行する'
+        : '自動フローは記録までで停止し resolve は行われない。resolve は人間の明示承認（autoResolveOutOfScope: true での実行、または人間による手動 resolve）がある場合のみ行われ、未解決のまま残ったスレッドは blocked → 最終レポートでの issue 化承認の判断材料になる'
+    }）。`,
     '3. 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して通す。',
     ...commitAndPushInstructions,
     ...(pushAfterFix
@@ -2911,7 +2926,18 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // fix エージェントが任意の threadId を自己申告するだけでは resolve に到達できない構造的
       // ガードであり、未信頼な分類結果が GitHub 状態変更の権限に直結する経路を断つ
       // （PR #85 codex-review P0 対応の設計方針の延長）。
-      if (recordedCandidateIndex.size > 0) {
+      // Issue #117（rust-ai-library#407 codex P0 対応）: 上記の各ゲートを通過しても、
+      // autoResolveOutOfScope: true（人間の明示承認を表す検証可能な入力。Bootstrap の定義
+      // コメント参照）がない限り resolve エージェントは一切起動しない。既定（false）は
+      // 記録（outOfScopeLog / PR 本文の「対象外（out-of-scope）」節）までで停止し、スレッドを
+      // 未解決のまま残す → monitor が unresolved-comments / blocked へ落とし、既存の集約
+      // （lastUnresolvedInfo / lastUnresolvedComments / outOfScopeLog）→ 最終レポート →
+      // ユーザー承認で issue 化・手動 resolve の流れに乗せる（AI の重要度自己判定のみで
+      // 修正必須指摘が消え自動マージへ進むガードレール迂回を断つ）。
+      if (!autoResolveOutOfScope && recordedCandidateIndex.size > 0) {
+        log(`#${item.number}: 対象外コメント ${recordedCandidateIndex.size} 件は autoResolveOutOfScope 無効（既定）のため resolve せず記録のみ（人間承認待ち。最終レポートで issue 化・手動 resolve を判断する）`)
+      }
+      if (autoResolveOutOfScope && recordedCandidateIndex.size > 0) {
         const currentRoundThreadIds = new Set(
           (lastState === 'unresolved-comments' && Array.isArray(m?.unresolvedComments) ? m.unresolvedComments : [])
             .map((c) => sanitizeThreadId(c?.threadId ?? ''))
