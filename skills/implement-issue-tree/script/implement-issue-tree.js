@@ -723,7 +723,10 @@ const DISCARD_SAFETY_SCHEMA = {
     },
     aheadCount: {
       type: 'integer',
-      description: '対象 branch が origin/<base> より先行している commit 数。取得できなければ -1',
+      // 診断専用フィールド。削除ゲートには使わない: 「WIP commit を積んだ」場合と「退避すべき
+      // 変更が無かった」場合を先行 commit 数では区別できず、0 を不許可にすると正当な discard
+      // （空ブランチの作り直し）まで恒久的に保全へ倒れて停滞するため。削除可否は dirty のみで判定する。
+      description: '対象 branch が origin/<base> より先行している commit 数（ログ・診断用。削除可否の判定には使わない）。取得できなければ -1',
     },
   },
 }
@@ -1410,7 +1413,7 @@ function reviewPrompt(item, impl) {
     '4. highestSeverity に全指摘のうち最も高い重要度を入れる（Critical→critical / High→high / Medium→medium / Low→low）。指摘なし（state=ok）は none。',
     '   重要: 重要度は厳密に判定すること。Low は「動作に影響しない様式・命名・重複・行数・コメント等の改善提案」に限る。',
     '   実バグ・誤った挙動・セキュリティ・認可・データ不整合・エッジケースの欠落は最低でも medium とする（最終ラウンドで Low のみは通過扱いになるため）。',
-    '5. pwd の結果を worktreePath として返す（呼び出し元が本 worktree を削除して残骸の蓄積を防ぐため）。',
+    '5. pwd の結果を worktreePath として返す（呼び出し元がラン終了時の残骸一覧に記録するため。自動削除はされない）。',
     '返却: state（"ok" または "needs-fix"）/ highestSeverity / summary / worktreePath（pwd の結果）。',
   ].join('\n')
 }
@@ -1735,7 +1738,7 @@ function prCreatePrompt(item, impl, outOfScope) {
     `   body に必ず「Closes #${item.number}」を含めること。`,
     `   （ブランチ名は ${JSON.stringify(branch)} — 変数展開不要、そのまま使用する）`,
     '3. PR 作成成功後、prNumber を返す。',
-    '4. pwd の結果を worktreePath として返す（呼び出し元が本 worktree を削除して残骸の蓄積を防ぐため）。',
+    '4. pwd の結果を worktreePath として返す（呼び出し元がラン終了時の残骸一覧に記録するため。自動削除はされない）。',
     '返却: prNumber（失敗時 0）/ summary（push・PR 作成の結果要約）/ worktreePath（pwd の結果）。',
   ].join('\n')
 }
@@ -2088,6 +2091,8 @@ function recoverPrompt(item, branch, oldWorktree) {
 // 未信頼由来の自由文（reason / summary 等）は一切含めない（Issue #144 と同じコンテキスト分離）。
 //
 // 返却: { safe: boolean, detail: string }
+// safe の判定根拠は dirty（未 commit 変更の有無）のみ。aheadCount はログ・診断用であり
+// ゲートには使わない（理由は DISCARD_SAFETY_SCHEMA.aheadCount のコメント参照）。
 async function verifyDiscardSafety(issueNumber, worktreePath, branch) {
   const pathJson = JSON.stringify(worktreePath ?? '')
   const branchJson = JSON.stringify(branch ?? '')
@@ -3992,6 +3997,8 @@ if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halte
 // 所有権を照合できない worktree は削除せず、failed / blocked 等と同様にログ報告・状態ファイルへの
 // 記録に留める（次回 Recover・手動での確認に委ねる）。
 const orphanEntriesAtEnd = await scanOrphanWorktrees()
+// 本ランが記録した使い捨て worktree（review / pr-create）のパス集合。孤立スキャンの除外に使う。
+const ephemeralWorktreePaths = new Set(ephemeralWorktrees.map((e) => e.path))
 const orphanDeleteCandidates = []
 if (orphanEntriesAtEnd.length > 0) {
   const mainWorktreePathAtEnd = findMainWorktreePath(orphanEntriesAtEnd)
@@ -4006,7 +4013,17 @@ if (orphanEntriesAtEnd.length > 0) {
   for (const entry of orphanEntriesAtEnd) {
     if (entry?.isMain) continue
     const p = sanitizeWorktreePath(entry?.path ?? '')
-    if (!p || (mainWorktreePathAtEnd && p === mainWorktreePathAtEnd) || sweepEligiblePaths.has(p)) continue // 既に通常経路が処理済み・メインリポは対象外
+    // 使い捨て worktree（review / pr-create）は自動削除しない方針（Issue #142）に変わったため、
+    // ラン終了時まで実在し続ける。孤立 worktree スキャンの対象に混ぜると、
+    //   - merged / closed のイシューでは所有権照合に落ちて毎ラン無意味な警告を出す
+    //   - それ以外では updateState(matched.number, { worktree: p }) により、読み取り専用の
+    //     review worktree のパスが「追跡中の実装 worktree」として状態ファイルへ書き込まれ、
+    //     次回ランの Recover が実装残骸と取り違える
+    // ため、本ランが自ら記録したパスを sweepEligiblePaths と同じ形で除外する。
+    // （review は detached HEAD で動くため通常はブランチ名照合の時点で弾かれるが、
+    //   isolation ランタイムが worktree をどのブランチ状態で作るかはホスト側の契約ではないため、
+    //   記録済みパスによる明示的な除外で構造的に保証する。）
+    if (!p || (mainWorktreePathAtEnd && p === mainWorktreePathAtEnd) || sweepEligiblePaths.has(p) || ephemeralWorktreePaths.has(p)) continue // 既に通常経路が処理済み・メインリポ・使い捨て worktree は対象外
     const branch = typeof entry?.branch === 'string' ? entry.branch : ''
     if (!branch || branch === baseBranch || !isValidBranchName(branch)) continue
     // ラン開始時（1467 行付近）と対称に、ツリー取得時点で open だった実装対象のみを照合する。
