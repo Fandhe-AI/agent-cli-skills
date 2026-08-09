@@ -415,6 +415,12 @@ const MERGE_SCHEMA = {
   },
 }
 
+// MERGE_SCHEMA.state の enum と同一の妥当値集合。schema はモデル出力への契約であり信頼境界
+// ではないため、runMergeLoop が monitor 結果を受理する際にホスト側でも同じ enum で二重検証する
+// （PR #122 codex-review P1 対応: null・enum 外の無効結果を 'blocked' へフォールバックさせず
+// systemic failure として 'failed' 終端に落とし、halt カウントの防御を維持するため）。
+const MERGE_VALID_STATES = new Set(MERGE_SCHEMA.properties.state.enum)
+
 const FIX_SCHEMA = {
   type: 'object',
   required: ['pushed', 'summary'],
@@ -2622,7 +2628,15 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // outOfScopeComments 分類（未信頼の PR コメントを読んだ未検証の自己申告）は monitor へ
     // 一切渡さない。monitor は毎ラウンド GraphQL から自ら収集したスレッド内容のみで独立判定する。
     const m = await agent(monitorPrompt(item, impl, externalCheckApps), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA })
-    lastState = m?.state ?? 'blocked'
+    // monitor 結果のホスト側検証（PR #122 codex-review P1 対応）。schema はモデル出力への
+    // 契約であり信頼境界ではないため、m が null / state 欠落 / MERGE_SCHEMA の enum 外の
+    // 無効結果はエージェントのクラッシュ・API エラー等の systemic failure として扱う。
+    // 従来の既定値フォールバック（?? 'blocked'）のままだと、無効結果が終端判定で halt
+    // 非カウントの 'blocked' に化けて systemic failure で halt する防御が弱まるため、
+    // 専用 sentinel 'invalid-monitor-result' に落とし、終端 status を 'failed'
+    // （halt カウント対象）に確定させる。'blocked' が halt 非カウントで終端するのは、
+    // monitor が有効な結果として blocked / unresolved-comments を返した文脈に限る。
+    lastState = MERGE_VALID_STATES.has(m?.state) ? m.state : 'invalid-monitor-result'
     // unresolved-comments / blocked のときのみ更新する。fixCount >= 6 到達時に m が break で
     // 破棄されても、この時点で保持した値が最終 note・recordFailure の reason に引き継がれる。
     //
@@ -2855,7 +2869,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         noPushRounds = 0
       }
       if (monitorsLeft < 1) monitorsLeft = 1
-    } else if (lastState === 'blocked') {
+    } else if (lastState === 'blocked' || lastState === 'invalid-monitor-result') {
+      // invalid-monitor-result（無効な monitor 結果）も従来の blocked フォールバックと同様に
+      // 即終端する（再監視しても同じ失敗を繰り返す可能性が高く、ラウンドを浪費するだけの
+      // ため）。終端 status の扱いだけが異なる（blocked: halt 非カウント / invalid: failed）。
       break
     }
     // timeout は次ラウンドで再監視する
@@ -2871,7 +2888,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // コメント起因の非収束（lastState: unresolved-comments / blocked。fixCount 上限到達・
     // push なし 2 連続・monitor の blocked 判定・routing error を含む）は、SKILL.md の
     // 「未解決のまま blocked → 最終レポートへ」の規定どおり 'blocked' で終端し、halt の
-    // 連続カウントに乗せない。timeout 等の systemic な失敗のみ 'failed' で終端する。
+    // 連続カウントに乗せない。timeout・invalid-monitor-result（monitor の無効応答 =
+    // エージェントのクラッシュ・API エラー）等の systemic な失敗のみ 'failed' で終端する
+    // （PR #122 codex-review P1 対応: lastState は有効な monitor 応答のみを取るよう検証済みの
+    // ため、既定値フォールバック経由で blocked に落ちることはない）。
     const terminalStatus = lastState === 'blocked' || lastState === 'unresolved-comments' ? 'blocked' : 'failed'
     return await failMergeTerminal(baseReason, terminalStatus)
   }
