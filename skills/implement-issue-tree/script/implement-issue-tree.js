@@ -1598,6 +1598,12 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
 // が完全一致で存在するかを1件ずつ確認するよう変更し、対応する記録がない候補は securityHeld へ
 // 回して resolve させない（RESOLVE_SCHEMA.securityHeld の説明も両方の見送り理由を含むよう
 // 拡張済み）。
+//
+// codex-review P1 対応（PR #111 三次修正）: 手順 3 の元コメント取得が comments(first:10) 固定で
+// ページネーションしておらず、長いスレッドの11件目以降に追加された P0/P1・セキュリティ上の
+// 指摘を取得できないまま手順 4 の独立検証が「安全」と誤判定しうる欠陥があった（承認境界の
+// 後退）。pageInfo.hasNextPage を使って全ページ回収するよう変更し、全ページの回収を完了
+// できない場合は取得できた分だけで判定を進めず securityHeld へ回す（fail-closed）。
 function resolveThreadsPrompt(item, impl, threadIds) {
   const ids = (Array.isArray(threadIds) ? threadIds : [])
     .map((id) => sanitizeThreadId(id))
@@ -1611,12 +1617,12 @@ function resolveThreadsPrompt(item, impl, threadIds) {
     '手順:',
     `1. gh pr view ${impl.prNumber} --json body で PR 本文を取得し、「## 対象外（out-of-scope）」節を読む。節が存在しない、または空の場合は候補の threadId 全件を resolve せず securityHeld へ計上し、理由を summary に書いて終了する。`,
     '2. 候補の各 threadId について、取得した「対象外（out-of-scope）」節のテキスト内に `[threadId: <その threadId>]` の形式で完全一致する記載が実在するかを個別に確認する（節が非空であることだけでは不十分。候補ごとに、その threadId 自身の記録が節内にあるかを1件ずつ確認する）。一致する記載が見つからない threadId は resolve せず securityHeld へ追加し、理由（PR 本文に対応する記録が見つからない旨）を summary に書く。この候補についてはこれ以降の手順を実行しない。',
-    '3. 2 で PR 本文に対応する記載が確認できた threadId についてのみ、次を実行してスレッドの元コメント本文を取得する: gh api graphql -f query=\'query($id:ID!){node(id:$id){... on PullRequestReviewThread{isResolved comments(first:10){nodes{body}}}}}\' -F id="$tid"',
+    '3. 2 で PR 本文に対応する記載が確認できた threadId についてのみ、次を実行してスレッドの元コメント全件を取得する。1回のクエリでは comments(first:100) までしか取得できず、11件目以降の指摘（P0/P1・セキュリティ上のものを含む可能性がある）を見落とすと安全性が損なわれるため、pageInfo.hasNextPage が true の間は取得を打ち切らず全ページ回収する: 1ページ目は gh api graphql -f query=\'query($id:ID!){node(id:$id){... on PullRequestReviewThread{isResolved comments(first:100){pageInfo{hasNextPage endCursor} nodes{body}}}}}\' -F id="$tid" 、hasNextPage が true なら endCursor を $cursor に入れて gh api graphql -f query=\'query($id:ID!,$cursor:String!){node(id:$id){... on PullRequestReviewThread{comments(first:100, after:$cursor){pageInfo{hasNextPage endCursor} nodes{body}}}}}\' -F id="$tid" -F cursor="$cursor" を hasNextPage が false になるまで繰り返す。API エラー・タイムアウト等で全ページの回収を完了できないと判断した場合は、取得できた分だけで判定を進めず、その threadId は resolve せず securityHeld へ追加し、理由（全コメントを取得しきれなかった旨）を summary に書く。この候補についてはこれ以降の手順を実行しない（fail-closed: 判定材料が不完全な場合は安全側に倒す）。',
     '4. 取得した元コメント本文と、2 で特定した PR 本文中の該当エントリ（同一 threadId の記載）を自ら読み、次のいずれかに該当するかを独立に判定する（fix エージェントの分類・reason 文言はこの判定の参考にせず、コメント本文そのものから判断する）: (a) 脆弱性・認証認可の不備・秘密情報露出・インジェクション・破壊的操作等のセキュリティ上の指摘、(b) P0/P1 相当の重大度が明記または強く示唆される指摘。いずれかに該当すると判断した threadId は resolve せず securityHeld へ追加する（判断に迷う場合も安全側に倒し securityHeld へ入れる）。',
     '5. 4 で該当しないと判断した threadId のみ、シェル変数へ格納したうえで次を実行する: gh api graphql -f query=\'mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}\' -F id="$tid"',
     '6. 応答の thread.isResolved が true であることを確認できた threadId のみ resolved 配列へ追加する。',
     '7. 失敗した（isResolved が true にならない、または API がエラーを返した）threadId は resolved に含めず、summary にその threadId と理由を書く。失敗した ID を再試行する必要はない。',
-    '返却: resolved（isResolved: true を確認できた threadId の配列。1件も確認できなければ空配列） / securityHeld（PR 本文に対応する記録が見つからない、または P0/P1・セキュリティ相当と判断し resolve を見送った threadId の配列） / summary（失敗・securityHeld の理由を含む要約）。',
+    '返却: resolved（isResolved: true を確認できた threadId の配列。1件も確認できなければ空配列） / securityHeld（PR 本文に対応する記録が見つからない、元コメント全件の取得を完了できなかった、または P0/P1・セキュリティ相当と判断し resolve を見送った threadId の配列） / summary（失敗・securityHeld の理由を含む要約）。',
   ].join('\n')
 }
 
