@@ -1781,9 +1781,9 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
           : []),
         ...(nonCursorApps.length
           ? [
-              `   - cursor 以外の App: 「結論がすべて success / neutral / skipped の check-run が 1 件以上」または「APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」のいずれかが成立する場合のみ合格とする。`,
-              `   - check-run が 0 件で、かつフォールバックが合格条件（APPROVED が 1 件以上、かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない App が 1 つでもあれば、マージせず merged: false / reason: external-review-missing を返す（APPROVED が 0 件の場合も、APPROVED と CHANGES_REQUESTED 等が併存する場合も、この経路で不合格にする。summary にはレビュー状態別の件数を書く）。`,
-              `   - check-run が 1 件以上だが success / neutral / skipped 以外の結論（failure / cancelled / timed_out）や未完了（queued / in_progress）が 1 件でもある App があれば、マージせず merged: false / reason: checks-not-green を返す。`,
+              `   - cursor 以外の App は、まず check-run の合計件数で経路を決める（レビューへのフォールバックは check-run が 0 件の場合に限る。両者を OR で選べる条件ではない）:`,
+              `     (i) check-run が 1 件以上の App: 全件の結論が success / neutral / skipped であることが唯一の合格条件とする。failure / cancelled / timed_out や未完了（queued / in_progress）が 1 件でもあれば、レビューの state を問わず（APPROVED レビューが存在しても）マージせず merged: false / reason: checks-not-green を返す。`,
+              `     (ii) check-run が 0 件の App: フォールバックのレビュー state で判定する。APPROVED が 1 件以上、かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件の場合のみ合格とする。それ以外（APPROVED が 0 件の場合も、APPROVED と CHANGES_REQUESTED 等が併存する場合も）はマージせず merged: false / reason: external-review-missing を返す（summary にレビュー状態別の件数を書く）。`,
             ]
           : []),
         `   - 確定済みの全 App が上記の合格条件を満たす場合のみ手順 5 へ進む。`,
