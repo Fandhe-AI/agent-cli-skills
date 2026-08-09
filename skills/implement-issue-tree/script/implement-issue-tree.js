@@ -116,14 +116,107 @@ function capText(str, max = 2000) {
   return s.length > max ? `${s.slice(0, max)}（省略）` : s
 }
 
-// fixPrompt が未信頼データ（PR レビューコメント・外部レビュー結果由来の自由文）を埋め込む際の
-// データ境界マーカーに使う使い捨てトークンを生成する。固定文字列のマーカーだと、埋め込む
-// テキスト自身がマーカーと同じ文字列を含むことで境界を偽装・早期終端できてしまう
+// fixPrompt / mergePrompt が未信頼データ（PR レビューコメント・外部レビュー結果由来の自由文）を
+// 埋め込む際のデータ境界マーカーに使う使い捨てトークンを生成する。固定文字列のマーカーだと、
+// 埋め込むテキスト自身がマーカーと同じ文字列を含むことで境界を偽装・早期終端できてしまう
 // （PR #85 codex-review P0 対応・三次修正）。呼び出しごとに予測不能な値にすることで、
 // 埋め込み側テキストの内容だけでは境界を模倣できないようにする。暗号学的乱数までは要さず、
-// 「攻撃者がプロンプト生成前に値を知り得ない」ことのみを要件とするため Math.random で足りる。
-function boundaryNonce() {
-  return `${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`
+// 「攻撃者がプロンプト生成前に値を知り得ない」ことのみを要件とする。
+//
+// seed をエージェント経由で取る理由（Fandhe-AI/rust-ai-library #408 のランで実測した不具合）:
+// Workflow harness は resume 再現性を守るため、driver（このスクリプト）側の乱数・現在時刻 API を
+// 一切提供しない。乱数系 API はスクリプト本文の静的検査で拒否されて起動自体が失敗し、動的参照で
+// 迂回しても実行時に「unavailable in workflow scripts (breaks resume)」で例外になる。
+// `crypto`・`performance`・`process` も未定義（probe workflow で実測確認）。このため従来実装は
+// **fix フェーズへ到達した全イシューが確定的に落ちる**（実装・PR 作成まで済んでいても
+// レビュー指摘の修正に入った瞬間に failed になる）。
+// 一方エージェントの返り値は resume 時にキャッシュ再生されるため、実行時に /dev/urandom から
+// seed を作る方式なら「攻撃者が事前に知り得ない」と「resume 再現性」を同時に満たせる。
+// 埋め込むテキストのハッシュから決定的に導く案は、秘密を持たず攻撃者が同じ値を計算できて
+// 偽造可能になるため採らない（P0 対策の緩和になる）。
+let boundaryNonceSeed = ''
+
+// nonce:seed エージェントの返却スキーマ。厳密な 64 桁 hex のみを受理する
+// （schema 違反はツール呼び出し層でモデルへ差し戻され、リトライされる）。
+const NONCE_SEED_SCHEMA = {
+  type: 'object',
+  properties: {
+    seedHex: {
+      type: 'string',
+      description: 'head -c 32 /dev/urandom | od -An -tx1 | tr -d " \\n" の出力（小文字 16 進 64 桁）',
+      pattern: '^[0-9a-f]{64}$',
+    },
+  },
+  required: ['seedHex'],
+  additionalProperties: false,
+}
+
+// ラン開始時（Restore フェーズ冒頭）に 1 回だけ呼ぶ。boundaryNonce を使うフェーズより前に
+// 完了している必要がある。取得に失敗した場合は予測可能なトークンで未信頼データの境界を
+// 区切ることになるため、fail-closed で停止する。
+async function ensureBoundaryNonceSeed() {
+  if (boundaryNonceSeed) return
+  const result = await agent(
+    [
+      `境界トークン用の乱数 seed を生成するタスク。`,
+      `【手順】`,
+      `1. head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' を実行する。`,
+      `2. 出力された小文字 16 進 64 桁を seedHex として返す。`,
+      `【禁止】`,
+      `- コマンドを実行せずに値を捏造すること（乱数性が失われ、未信頼データの境界を`,
+      `  予測可能なトークンで区切ることになる）。`,
+      `- 説明文・コードブロック・改行を含めること。`,
+    ].join('\n'),
+    { label: 'nonce:seed', phase: 'Restore', model: 'haiku', effort: 'low', schema: NONCE_SEED_SCHEMA },
+  )
+  // driver 側でも厳密検証する（schema 宣言のみに依存しない。本 SKILL の
+  // 「構造化抽出の限定と driver 側検証」と同じ方針）。非 hex 文字を除去して繋ぐ寛容な
+  // 正規化は行わない: エージェントが urandom を読まず説明文を返した場合でも、その中の
+  // a〜f と数字が連結されて長さ検査を通り、乱数でない値を seed として受理してしまう
+  // （PR #167 codex-review P0・Bugbot Medium 指摘）。
+  const hex = String(result?.seedHex ?? '').trim().toLowerCase()
+  if (!/^[0-9a-f]{64}$/.test(hex)) {
+    throw new Error(
+      `境界トークン用 seed の生成に失敗した（小文字 16 進 64 桁ちょうどを要求・取得長 ${hex.length}）。` +
+      `未信頼データの境界を予測可能なトークンで区切ることは避けるため fail-closed で停止する。`,
+    )
+  }
+  boundaryNonceSeed = hex
+}
+
+// 境界トークンを「seed（実行時生成・予測不能）で鍵付けした keyMaterial のハッシュ」として導出する。
+// keyMaterial には、そのトークンで囲む対象の内容（patch の JSON・finding 等）を渡す。
+//
+// プロセス共通カウンタを使わない理由（PR #167 Bugbot High 指摘）: カウンタ方式は採番が
+// 呼び出し順に依存する。並列実行（既定 parallel 3）ではエージェントのレイテンシで順序が
+// 変わるため、resume 時に同じ論理呼び出しへ別のカウンタ値が割り当たり、プロンプトのバイト列が
+// 変わって journal のキャッシュを外し、**副作用を持つ fix / state エージェントが再実行される**。
+// 内容から導出すれば順序に依存せず、同じ内容の呼び出しは resume でも同じトークンを再現する。
+//
+// 攻撃者は keyMaterial（＝自分が書いたレビューコメント等）を知り得るが、seed を知らないため
+// トークンを事前に計算できない。したがって境界マーカーの偽装・早期終端は防げる。
+function boundaryNonce(keyMaterial) {
+  if (!boundaryNonceSeed) {
+    throw new Error('boundaryNonce: seed が未初期化（ensureBoundaryNonceSeed をラン開始時に呼ぶこと）')
+  }
+  const material = String(keyMaterial ?? '')
+  if (!material) {
+    throw new Error('boundaryNonce: keyMaterial が空（囲む対象の内容を渡すこと）')
+  }
+  // FNV-1a 系の 4 系列で混ぜる（base36 出力で 20 文字以上・実質 128 bit 相当の鍵空間）。
+  const input = `${boundaryNonceSeed}:${material.length}:${material}`
+  let h1 = 0x811c9dc5
+  let h2 = 0xcbf29ce4
+  let h3 = 0x9e3779b9
+  let h4 = 0x85ebca6b
+  for (let i = 0; i < input.length; i += 1) {
+    const c = input.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0
+    h2 = Math.imul(h2 + c, 0x85ebca6b) >>> 0
+    h3 = Math.imul(h3 ^ (c + i), 0x27220a95) >>> 0
+    h4 = Math.imul(h4 + (c ^ (i & 0xff)), 0xc2b2ae35) >>> 0
+  }
+  return `${h1.toString(36)}${h2.toString(36)}${h3.toString(36)}${h4.toString(36)}`
 }
 
 // ブランチ名として不正な文字（スペース・セミコロン等）を拒否する。
@@ -911,8 +1004,11 @@ async function updateState(issueNumber, patch, options = {}) {
   // 実行例へ再度そのまま埋め込むと、その 2 つ目のコピーが「手順（信頼された指示）」側に
   // 置かれて境界を迂回するため、例ではプレースホルダ（<<PATCH>>）を置いて境界内の値を
   // 参照させる（Bugbot PR #150 High 指摘への対応）。
-  const nonce = boundaryNonce()
-  const patchJson = JSON.stringify(patch).split(nonce).join('')
+  // nonce は「囲む対象の内容 + イシュー番号」から seed 鍵付きで導出する（呼び出し順に
+  // 依存しないため並列実行・resume でも同じ論理呼び出しが同じ値を再現する）。
+  const rawPatchJson = JSON.stringify(patch)
+  const nonce = boundaryNonce(`state:${issueNumber}:${rawPatchJson}`)
+  const patchJson = rawPatchJson.split(nonce).join('')
   const heredocDelimiter = `PATCH_EOF_${nonce}`
 
   // worktreePath はホワイトリスト検証を通過したものだけを削除対象にする
@@ -1949,7 +2045,9 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
   // テキストに同じトークンがたまたま含まれていた場合に境界を偽装されないよう、埋め込み前に
   // トークン文字列自体を除去しておく（ベルト・アンド・サスペンダー。本来トークンは
   // プロンプト生成時点まで存在しないため事前に混入させることは不可能だが、二重の安全策とする）。
-  const nonce = boundaryNonce()
+  // nonce は「囲む対象の未信頼データ + イシュー番号」から seed 鍵付きで導出する（呼び出し順に
+  // 依存しないため並列実行・resume でも同じ論理呼び出しが同じ値を再現する。PR #167 Bugbot High）。
+  const nonce = boundaryNonce(`fix:${item?.number ?? 0}:${JSON.stringify(finding ?? '')}`)
   const stripNonce = (s) => String(s ?? '').split(nonce).join('')
   // MERGE_SCHEMA は maxItems / maxLength を宣言しているが、schema はモデル出力への契約であり
   // 信頼境界ではない（スキーマ検証をすり抜けた過大出力でプロンプトが肥大化する余地が残る）。
@@ -2389,6 +2487,12 @@ function recoverImplementPrompt(item, brief, branch) {
 
 // --- Restore フェーズ: 状態ファイルを読み込む ---
 phase('Restore')
+
+// 未信頼データの境界マーカー用 seed をラン開始時に 1 回だけ取得する（fix / merge フェーズの
+// boundaryNonce が使う）。driver 側に乱数源が存在しないためエージェント経由で生成する。
+// 詳細な根拠は ensureBoundaryNonceSeed のコメントを参照。
+await ensureBoundaryNonceSeed()
+
 const savedItems = await loadState()
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
