@@ -994,7 +994,8 @@ const SWEEP_SCHEMA = {
 // の定義を参照）。候補ゼロなら削除を一切行わない（fail-safe）。
 //
 // orphanPaths: ラン終了時の孤立 worktree スキャン（scanOrphanWorktrees）でブランチ名照合により
-// issue と紐付いた worktree のうち、対応する issue が merged / closed に確定したもの。
+// issue と紐付いた worktree のうち、対応する issue が merged / closed に確定し、かつ状態ファイルに
+// 記録済みの worktree パスと一致（所有権照合済み）のもの。命名規約の一致だけでは含めない。
 // sweepEligiblePaths（個別削除の試行実績）とは出自が異なるため別引数として合流させる。
 // こちらも「一覧に含まれるパスだけ削除してよい」という制約は共有する。
 async function sweepClosedWorktrees(orphanPaths = []) {
@@ -3238,9 +3239,12 @@ if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halte
 // 最終スイープの削除候補に合流させる（プロセス kill 等でランが打ち切られた場合はこの
 // コード自体到達しないため対象外だが、次回ランの開始時 orphan scan が引き続き回収する）。
 // 削除可否の判定は「ブランチ名から issue 番号を特定できる」かつ「その issue の最新状態が
-// merged / closed」の場合のみ削除候補にする（sweepEligiblePaths と同じく一覧外への
-// 推測・パターン一致は行わない）。failed / blocked 等はここでは削除せず、次回 Recover が
-// 使えるよう状態ファイルへ worktree パスを記録するに留める。
+// merged / closed」かつ「状態ファイルに記録済みの worktree パスとスキャン結果のパスが一致する」
+// 場合のみ削除候補にする。パスの一致は「過去のランが自ら作成し状態へ記録した worktree である」
+// ことの所有権照合であり、ブランチ名の命名規約一致だけでは削除しない（同じ命名規約を使った
+// 利用者の手動 worktree・並行する別ランの worktree を誤って破壊しないため。codex-review P0 対応）。
+// 所有権を照合できない worktree は削除せず、failed / blocked 等と同様にログ報告・状態ファイルへの
+// 記録に留める（次回 Recover・手動での確認に委ねる）。
 const orphanEntriesAtEnd = await scanOrphanWorktrees()
 const orphanDeleteCandidates = []
 if (orphanEntriesAtEnd.length > 0) {
@@ -3265,12 +3269,20 @@ if (orphanEntriesAtEnd.length > 0) {
       (q) => q.kind === 'implement' && q.state === 'open' && branchMatchesIssue(branch, q.number),
     )
     if (!matched) continue
-    const st = freshItems[String(matched.number)]?.status
+    const savedEntryAtEnd = freshItems[String(matched.number)] ?? {}
+    const st = savedEntryAtEnd.status
     if (st === 'merged' || st === 'closed') {
-      orphanDeleteCandidates.push(p)
+      // 状態ファイルが記録している worktree パスと一致した場合のみ削除候補にする（所有権照合）。
+      // ブランチ名の一致だけでは、同じ命名規約で利用者が手動作成した worktree や並行ランの
+      // worktree と区別できないため、照合できないものは報告に留めて --force 削除の対象にしない。
+      if (savedEntryAtEnd.worktree === p) {
+        orphanDeleteCandidates.push(p)
+      } else {
+        log(`#${matched.number}: ブランチ名が一致する worktree を検出したが、状態ファイルに記録された worktree と一致しないため削除しない（${p}）。不要であれば手動で削除すること`)
+      }
     } else {
       // 既に追跡済み（worktree が記録済み）なら上書きしない。ラン開始時の同種ガード（1490 行付近）と揃える。
-      if (freshItems[String(matched.number)]?.worktree) continue
+      if (savedEntryAtEnd.worktree) continue
       log(`#${matched.number}: 孤立 worktree を検出（status: ${st ?? '(不明)'}）。削除せず次回 Recover 用に記録する（${p}）`)
       await updateState(matched.number, { worktree: p })
     }
@@ -3282,9 +3294,9 @@ if (orphanEntriesAtEnd.length > 0) {
 // 状態ファイル書き込み失敗などで取りこぼした残骸を、ラン終了時にまとめて回収する。
 // 保持するのは failed / blocked / monitoring イシューの worktree のみ（Recover・監視再開が使うため）。
 // 削除対象は本ラン内で削除を試みた worktree パス（sweepEligiblePaths）と、上記の孤立 worktree
-// スキャンで merged / closed と確定した worktree（orphanDeleteCandidates）に限定する。
-// パスの命名規約からの推測は行わないため、並行して走る別ランや利用者が手動で作った
-// worktree は構造的に対象になり得ない。実装中・レビュー中でまだ削除を試みていない
+// スキャンで merged / closed かつ状態ファイル記録パスと一致（所有権照合済み）と確定した
+// worktree（orphanDeleteCandidates）に限定する。パス・命名規約からの推測だけでは削除しないため、
+// 並行して走る別ランや利用者が手動で作った worktree は対象にならない。実装中・レビュー中でまだ削除を試みていない
 // worktree も候補外であり、状態ファイル書き込み失敗が削除過多へ倒れない。
 // 候補ゼロなら何も削除しない（fail-safe）。理由は sweepEligiblePaths の定義を参照。
 const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
