@@ -1182,12 +1182,14 @@ function findMainWorktreePath(entries) {
 const sweepEligiblePaths = new Set()
 
 // review / pr-create のような「成果物を保持しない使い捨て worktree」の記録簿。
-// { issue, kind, path } を追記し、ラン終了時に一覧をログ出力する（削除は行わない）。
+// { issue, kind, path } を追記し、ラン終了時に最終スイープ（sweepClosedWorktrees）へ
+// 回収候補として渡す。**ラン中には削除しない**（Issue #142 / #163）。
 const ephemeralWorktrees = []
 
-// 使い捨て worktree（review / pr-create）を記録する。**削除はしない**（Issue #142）。
+// 使い捨て worktree（review / pr-create）を記録する。**ラン中には削除しない**（Issue #142）。
+// 回収はラン終了時の最終スイープで所有権・安全性を検証してから行う（Issue #163）。
 //
-// 廃止の理由（配布先 desktop-automation-app#305 の codex-review P0）:
+// ラン中に削除しない理由（配布先 desktop-automation-app#305 の codex-review P0）:
 //   従来はエージェント返却値の `worktreePath` をそのまま `git worktree remove --force` して
 //   いたが、このパスは「そのエージェント用に作られた worktree である」ことをホスト側で
 //   確認する手段がない自己申告値である。`sanitizeWorktreePath` は文字種を検査するだけの
@@ -1195,20 +1197,24 @@ const ephemeralWorktrees = []
 //   インジェクションで並列実装中の別イシューの worktree パスを返させれば、未コミットの
 //   実装成果ごと削除できてしまう。
 //
-// 不採用となった代替案:
+// ラン中の削除に対して不採用のままの代替案:
 //   - isolation ランタイム発行の worktree ID / path との照合 → ランタイムは作成パスを
 //     ホストへ返さないため、照合材料そのものが存在しない。
-//   - 状態ファイル記録済みパスを「保護リスト」とする消極的レジストリ → 並列実行では
-//     別イシューの Implement エージェントが `worktreePath` を返す前＝未登録の窓があり、
-//     その窓を塞げない。
 //   - エージェント起動前後の `git worktree list` 差分 → 並列の worktree 作成と競合して
 //     一意に定まらず、レースで誤削除に倒れる。
 //
-// 採用した方針は「推測に基づく削除をしない」であり、`sweepEligiblePaths` の既存設計
-// （命名規約からの推測で削除しない／失敗方向を削除過多にしない）と一貫する。
-// 使い捨て worktree は最終スイープ（sweepClosedWorktrees）の削除対象にも入れない
-// （`updateState` の cleanupWorktree を経由しないため、構造的に候補にならない）。
-// 残った worktree はラン終了時のログ一覧と `git worktree list` から手動で掃除できる。
+// ラン終了時に限り「状態ファイル記録済みパスを保護リストとする消極的レジストリ」が成立する
+// （Issue #163。automation#367 codex-review P1 への対応）:
+//   この案を Issue #142 で退けた理由は「並列実行中は別イシューの Implement エージェントが
+//   `worktreePath` を返す前＝未登録の窓があり、その窓を塞げない」ことだった。ラン終了時点では
+//   全イシューが終端し `updateState` の書き込みも完了しているため、保護すべき worktree は
+//   すべて状態ファイルへ記録済みであり、この窓は構造的に閉じている。したがって最終スイープに
+//   限っては保護リストが機能し、「削除しない」ではなく「所有権を検証して回収する」へ倒せる。
+//   検証条件と fail-safe の倒れ方は sweepClosedWorktrees の使い捨て回収ステップを参照。
+//
+// 「推測に基づく削除をしない」という方針自体は維持する。回収対象は本ランが記録したパス一覧に
+// 限定され、命名規約やパターン一致から候補を広げることはない（`sweepEligiblePaths` の既存設計と
+// 一貫する）。検証できないパスは削除せずログ一覧に残し、`git worktree list` から手動で掃除できる。
 function recordEphemeralWorktree(issueNumber, rawPath, kind) {
   const p = sanitizeWorktreePath(rawPath ?? '')
   if (!p) {
@@ -1217,7 +1223,7 @@ function recordEphemeralWorktree(issueNumber, rawPath, kind) {
     return
   }
   ephemeralWorktrees.push({ issue: issueNumber, kind, path: p })
-  log(`#${issueNumber}: ${kind} worktree を記録した（自動削除はしない。${p}）`)
+  log(`#${issueNumber}: ${kind} worktree を記録した（ラン終了時の最終スイープで検証のうえ回収する。${p}）`)
 }
 
 const SWEEP_SCHEMA = {
@@ -1252,13 +1258,20 @@ const SWEEP_SCHEMA = {
 // 記録済みの worktree パスと一致（所有権照合済み）のもの。命名規約の一致だけでは含めない。
 // sweepEligiblePaths（個別削除の試行実績）とは出自が異なるため別引数として合流させる。
 // こちらも「一覧に含まれるパスだけ削除してよい」という制約は共有する。
-async function sweepClosedWorktrees(orphanPaths = []) {
+//
+// ephemeralPaths: 本ランが recordEphemeralWorktree で記録した使い捨て worktree（review / pr-create）の
+// パス一覧（Issue #163）。これらは自己申告パスであり所有権をランタイムから検証できないため、
+// 上記 2 系統とは合流させず、より厳しい専用ゲート（状態ファイル記録パス全件の保護リストに
+// 含まれない・git worktree list に登録済み・未コミット変更なし）を通したものだけを削除する。
+// 削除できないものは残置してログ報告する（rm -rf フォールバックも行わない fail-safe）。
+async function sweepClosedWorktrees(orphanPaths = [], ephemeralPaths = []) {
   try {
-    if (sweepEligiblePaths.size === 0 && orphanPaths.length === 0) {
-      log('worktree スイープ: 削除を試みた worktree・検出した孤立 worktree がないため削除を行わない')
+    if (sweepEligiblePaths.size === 0 && orphanPaths.length === 0 && ephemeralPaths.length === 0) {
+      log('worktree スイープ: 削除を試みた worktree・検出した孤立 worktree・使い捨て worktree がないため削除を行わない')
       return []
     }
     const candidatesJson = JSON.stringify([...new Set([...sweepEligiblePaths, ...orphanPaths])])
+    const ephemeralJson = JSON.stringify([...new Set(ephemeralPaths)])
     const v = await agent(
       [
         'worktree スイープタスク（ラン終了時の残骸回収）。',
@@ -1279,6 +1292,11 @@ async function sweepClosedWorktrees(orphanPaths = []) {
         `   monitoring は halt 等で中断したイシュー。状態ファイルが worktree を指したまま実体だけ消えると`,
         `   ディスクと状態の乖離が生じるため保持する（Recover 用の failed / blocked と同じ扱い）。`,
         `   ${STATE_FILE} が存在しない・パースできない場合は削除を一切行わず removed: [] を返して終了する（fail-safe）。`,
+        `1b. 使い捨て worktree の回収（手順 5）で使う保護リストを取得し、ファイルへ束縛する。`,
+        `   こちらは status を問わず、状態ファイルが記録している worktree パスを全件集める`,
+        `   （実装成果の所在をすべて保護対象にするため。手順 1 の retain_file より広い集合になる）:`,
+        `     owned_file=$(mktemp)`,
+        `     jq -r '.items | to_entries[] | .value.worktree | select(. != null and . != "")' ${STATE_FILE} > "$owned_file"`,
         '2. git worktree list --porcelain の "worktree " 行から登録済みパスを列挙し、ファイルへ束縛する',
         '   （先頭エントリ＝メインリポジトリ自身は除外する）。パスに空白を含む場合でも壊れないよう、',
         '   `$2` 等のフィールド分割ではなく "worktree " プレフィックスの除去方式で抽出すること:',
@@ -1321,10 +1339,36 @@ async function sweepClosedWorktrees(orphanPaths = []) {
         '       rm -rf -- "$p"',
         '       # フォールバックも失敗した場合は警告を残して継続する（非致命。次回ランのスイープに委ねる）。',
         '     done',
-        '     rm -f "$candidates_file" "$retain_file" "$registered_file"',
+        '     rm -f "$candidates_file"',
         '   削除に失敗したパスはスキップし、残りの候補の処理を継続する（1 件の失敗で中断しない）。',
-        '5. 全候補の処理後に git worktree prune を実行する。',
-        '6. removed に実際に削除できたパス、retained に手順 1 の保持対象パスを入れて返す。',
+        '   retain_file / registered_file / owned_file は手順 5 でも使うため、ここでは削除しない。',
+        '5. 使い捨て worktree（review / pr-create）の回収。対象は次の JSON 配列に含まれるパスだけであり、',
+        '   一覧外のパスはどのような条件でも削除してはならない:',
+        ephemeralJson,
+        '   これらはエージェントの自己申告パスで所有権を検証できないため、手順 4 より厳しいゲートを課す。',
+        '   4 条件（一覧に含まれる／owned_file に含まれない／registered_file に実在する／未コミット変更なし）を',
+        '   すべて満たすものだけを削除し、1 つでも満たさない・観測できない場合は削除せずスキップする。',
+        '   rm -rf のフォールバックは行わない（残置してログ報告するほうが安全なため）。',
+        '   以下のコマンドをそのまま使うこと（インジェクション防止のため HEREDOC + jq 経由を必ず守る）:',
+        '     ephemeral_file=$(mktemp)',
+        '     cat <<\'EPHEMERAL_EOF\' > "$ephemeral_file"',
+        ephemeralJson,
+        '     EPHEMERAL_EOF',
+        '     jq -r \'.[]\' "$ephemeral_file" | while IFS= read -r p; do',
+        '       [ -z "$p" ] && continue',
+        '       # 状態ファイルが記録した worktree（status を問わず全件）は実装成果の所在のため絶対に削除しない。',
+        '       # プロンプトインジェクション等で別イシューの worktree パスを返された場合もここで弾かれる:',
+        '       grep -qxF -- "$p" "$owned_file" && continue',
+        '       # git worktree list の登録済みパスに実在しないものは削除しない:',
+        '       grep -qxF -- "$p" "$registered_file" || continue',
+        '       # 未コミット変更が残っていれば削除しない。status 自体が失敗した（観測できない）場合も削除しない:',
+        '       st=$(git -C "$p" status --porcelain 2>/dev/null) || continue',
+        '       [ -n "$st" ] && continue',
+        '       git worktree remove --force -- "$p" || continue',
+        '     done',
+        '     rm -f "$ephemeral_file" "$retain_file" "$registered_file" "$owned_file"',
+        '6. 全候補の処理後に git worktree prune を実行する。',
+        '7. removed に手順 4・手順 5 で実際に削除できたパス、retained に手順 1 の保持対象パスを入れて返す。',
         '',
         '注意: ブランチは削除しない（git branch -D は実行しない）。未 push のコミットを持つブランチが',
         '含まれ得るため、ブランチの寿命は worktree の寿命と切り離す。',
@@ -4344,8 +4388,9 @@ if (orphanEntriesAtEnd.length > 0) {
 }
 
 // --- 最終 worktree スイープ: クローズ済みイシューの worktree を残さない ---
-// 個別の削除経路（merged 確定時の cleanupWorktree、review / pr-create の即時削除）が
+// 個別の削除経路（merged 確定時の cleanupWorktree）が
 // 状態ファイル書き込み失敗などで取りこぼした残骸を、ラン終了時にまとめて回収する。
+// あわせて使い捨て worktree（review / pr-create）も専用ゲート経由で回収する（Issue #163）。
 // 保持するのは failed / blocked / monitoring イシューの worktree のみ（Recover・監視再開が使うため）。
 // 削除対象は本ラン内で削除を試みた worktree パス（sweepEligiblePaths）と、上記の孤立 worktree
 // スキャンで merged / closed かつ状態ファイル記録パスと一致（所有権照合済み）と確定した
@@ -4353,17 +4398,24 @@ if (orphanEntriesAtEnd.length > 0) {
 // 並行して走る別ランや利用者が手動で作った worktree は対象にならない。実装中・レビュー中でまだ削除を試みていない
 // worktree も候補外であり、状態ファイル書き込み失敗が削除過多へ倒れない。
 // 候補ゼロなら何も削除しない（fail-safe）。理由は sweepEligiblePaths の定義を参照。
-const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
+const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates, [...ephemeralWorktreePaths])
 
-// --- 使い捨て worktree（review / pr-create）の一覧報告 ---
-// Issue #142: これらは自動削除しない（所有権を確認できない自己申告パスを --force 削除しない
-// ため）。残骸の存在を利用者が把握できるよう、ラン終了時に記録簿を一覧として出力する。
+// --- 使い捨て worktree（review / pr-create）の回収結果報告 ---
+// Issue #163: ラン終了時の最終スイープが所有権・安全性を検証したうえで回収する。ラン中は
+// 削除しない（所有権を確認できない自己申告パスを --force 削除しないため。Issue #142）。
+// 検証を通らず残置したものは利用者が把握できるよう一覧として出力する。
 if (ephemeralWorktrees.length > 0) {
-  log(`使い捨て worktree（review / pr-create）を ${ephemeralWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
-  for (const e of ephemeralWorktrees) log(`  #${e.issue} (${e.kind}): ${e.path}`)
+  const sweptSet = new Set(sweptWorktrees)
+  const retainedEphemeral = ephemeralWorktrees.filter((e) => !sweptSet.has(e.path))
+  log(`使い捨て worktree（review / pr-create）を ${ephemeralWorktrees.length} 件記録し、${ephemeralWorktrees.length - retainedEphemeral.length} 件を最終スイープで回収した。`)
+  if (retainedEphemeral.length > 0) {
+    log(`回収できなかった ${retainedEphemeral.length} 件（状態ファイル記録パスとの一致・未コミット変更の残存・登録なし等で削除ゲートを通らなかったもの）。不要であれば git worktree remove で手動削除すること:`)
+    for (const e of retainedEphemeral) log(`  #${e.issue} (${e.kind}): ${e.path}`)
+  }
 }
 
 // externalChecks（確定値）・externalChecksConfirmed・externalChecksObserved（観測の参考値）も
 // 返す。マージゲートの前提条件が何だったかをレポート側で検証できるようにするため（Issue #147）。
-// ephemeralWorktrees: 自動削除しない使い捨て worktree の記録（Issue #142）。手動掃除の対象。
+// ephemeralWorktrees: 使い捨て worktree の記録（Issue #142 / #163）。ラン終了時の最終スイープが
+// 検証のうえ回収し、回収できなかったものは sweptWorktrees との差分として手動掃除の対象になる。
 return { parent, baseBranch, parallel: concurrency, externalChecks: externalCheckApps, externalChecksConfirmed, externalChecksObserved: observedCheckApps, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees }

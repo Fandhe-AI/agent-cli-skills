@@ -426,7 +426,7 @@ grep -n "gh pr merge\|gh issue close" script/implement-issue-tree.js
 grep -n "PATCH_EOF\|boundaryNonce" script/implement-issue-tree.js
 
 # worktree 削除の安全性（Issue #139 / #142 / #148）
-# 1. 使い捨て worktree（review / pr-create）が削除されず記録のみであること
+# 1. 使い捨て worktree（review / pr-create）がラン中は削除されず、最終スイープで回収されること
 grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree" script/implement-issue-tree.js
 # 2. continue / discard の削除ゲート（申告 wipCommitted + ホスト側の実測）が両方あること
 grep -n "wipCommitted === true\|verifyDiscardSafety" script/implement-issue-tree.js
@@ -438,7 +438,7 @@ grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scrip
 
 期待結果: `UNTRUSTED_POLICY` が `COMMON` 配列の末尾で参照され、あわせて `updateState` の State プロンプト（JSON マージ担当・掃除担当の両方）でも参照されていること。`untrusted(` が上記 8 関数それぞれの中で最低 1 回出現すること。`gh issue view` の全ヒットのうち、worktree routing ガード（implementPrompt 手順 0・fixPrompt 手順 0・recoverImplementPrompt 手順 0）と mergeExecutePrompt 手順 5 が `--json number,title` または `--json state` に限定されており、本文を読む箇所（planPrompt 手順 1・closePrompt 手順 2・recoverPrompt 手順 2c・Tree 手順 4）はいずれも「本文は非信頼データ」の注意文と同一手順内にあること。`monitorPrompt` に `gh pr merge` / `gh issue close` が出現しないこと（コンテキスト分離の確認）。
 
-worktree 削除の安全性については、`cleanupEphemeralWorktree` が 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree の自動削除廃止）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
+worktree 削除の安全性については、`cleanupEphemeralWorktree` が 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（ラン中の即時削除は行わない）、使い捨て worktree の回収が `sweepClosedWorktrees` の第 2 引数（`ephemeralPaths`）経由でのみ行われ、そのループが `owned_file`（状態ファイル記録パス全件）・`registered_file`・`git status --porcelain` の 3 条件をすべて `continue` ガードとして持つこと、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
 
 ## よくある失敗
 
@@ -509,9 +509,18 @@ cat _/issue-trees/42.json
 
 **fix のたびに古い worktree は削除され、常に最新の 1 つだけが追跡される**。fix エージェントも `isolation: 'worktree'` で動作するため、fix のたびに新しい worktree が作成される。fix 完了後に旧 worktree を自動削除し、状態ファイルの `worktree` フィールドを新しいパスに更新する。これにより fix を複数回繰り返しても残骸 worktree が蓄積しない。
 
-**review / pr-create の worktree は自動削除しない（記録のみ）**。この 2 つは `isolation: 'worktree'` で動作するが成果物を保持しない（review は読み取り専用の判定のみ、pr-create は push 完了時点で成果が origin 上に存在する）ため保持価値はない。しかし削除に使えるのはエージェントが返した `worktreePath` だけであり、これは「そのエージェント用に作られた worktree である」ことをホスト側で確認できない自己申告値である。パス検証（`sanitizeWorktreePath`）は文字種を見るだけのため、誤応答や、レビュー対象テキスト（PR 本文・レビューコメント）経由のプロンプトインジェクションで並列実装中の別イシューの worktree パスを返させると、未コミットの実装成果ごと `git worktree remove --force` で失う。
+**review / pr-create の worktree はラン中には削除せず、ラン終了時の最終スイープで検証のうえ回収する**。この 2 つは `isolation: 'worktree'` で動作するが成果物を保持しない（review は読み取り専用の判定のみ、pr-create は push 完了時点で成果が origin 上に存在する）ため保持価値はない。しかし削除に使えるのはエージェントが返した `worktreePath` だけであり、これは「そのエージェント用に作られた worktree である」ことをホスト側で確認できない自己申告値である。パス検証（`sanitizeWorktreePath`）は文字種を見るだけのため、誤応答や、レビュー対象テキスト（PR 本文・レビューコメント）経由のプロンプトインジェクションで並列実装中の別イシューの worktree パスを返させると、未コミットの実装成果ごと `git worktree remove --force` で失う。
 
-そのため**自動削除は廃止**し、返却されたパスの記録とラン終了時のログ一覧出力のみを行う（Workflow の返却値 `ephemeralWorktrees` でも確認できる）。最終スイープ（`sweepClosedWorktrees`）の削除対象にも入らない（`updateState` の `cleanupWorktree` を経由しないため構造的に候補にならない）。これは「推測に基づく削除をしない」という `sweepEligiblePaths` の設計方針と一貫する。残った worktree は一覧を見て手動で削除する。
+そのため**ラン中の即時削除は行わず**、返却されたパスを記録するにとどめる（Workflow の返却値 `ephemeralWorktrees` で確認できる）。ラン中に所有権を確認できない理由は、並列実行中は別イシューの Implement エージェントが `worktreePath` を返す前＝状態ファイル未登録の窓が存在し、その窓を保護リストで塞げないためである。
+
+**ラン終了時にはこの窓が構造的に閉じている**（全イシューが終端し `updateState` の書き込みも完了しているため、保護すべき worktree はすべて状態ファイルに記録済み）。したがって最終スイープ（`sweepClosedWorktrees`）が使い捨て worktree を専用ゲート経由で回収する。削除するのは次の 4 条件を**すべて**満たすものだけである。
+
+1. 本ランが `recordEphemeralWorktree` で記録したパス一覧に含まれる（一覧外のパスには一切触れない）
+2. 状態ファイルが記録する worktree パス（status を問わず全件）に**含まれない**（実装成果の所在を保護する。インジェクションで別イシューの worktree パスを返された場合もここで弾かれる）
+3. `git worktree list --porcelain` に登録済みである（stale なパス・一覧外の絶対パスを除外する）
+4. `git -C <path> status --porcelain` が空である（観測できない場合を含め、未コミット変更があれば削除しない）
+
+1 つでも満たさない場合は削除せず残置し、ログ一覧に出力する（`rm -rf` フォールバックも行わない）。残置分は `git worktree remove` で手動削除できる。これは「推測に基づく削除をしない」という `sweepEligiblePaths` の設計方針と一貫する。
 
 検討して不採用とした代替案:
 
@@ -521,7 +530,7 @@ cat _/issue-trees/42.json
 | 状態ファイル記録済みパスを保護する消極的レジストリ | 並列実行では別イシューの Implement エージェントが `worktreePath` を返す前＝未登録の窓があり、その窓を塞げない |
 | エージェント起動前後の `git worktree list` 差分 | 並列の worktree 作成と競合して一意に定まらず、レースで誤削除に倒れる |
 
-**ラン終了時に worktree スイープを実行する**。個別の削除経路が状態ファイル書き込み失敗等で取りこぼした残骸を回収する最終防衛線であり、クローズ（merged / closed）に至ったイシューの実装 worktree（impl / fix）を残さないことを保証する。使い捨て worktree（review / pr-create）は前述のとおり削除を試みないためスイープの対象外であり、ログ一覧から手動で掃除する。削除対象は**本ラン内で削除を試みた worktree パスの集合**と、後述の孤立 worktree スキャンでブランチ名一致・merged / closed 確定した worktree に限定され、かつ `git worktree list` に実在するものだけを削除する。「観測した全パスから保持リストを引く」方式は採らない（状態ファイルへの書き込みが失敗した worktree が「削除候補には載るが保持リストには載らない」状態になり、実装中・レビュー中の worktree が未コミット変更ごと消える。書き込み失敗が fail-safe ではなく fail-destructive に倒れる）。パスの命名規約からの推測は行わないため、並行して走る別ランの worktree・利用者が手動で作った worktree は構造的に対象になり得ない（ホスト側の worktree 命名規約に依存しない設計。命名規約に依存した絞り込みは、規約の想定が外れたときの失敗方向が `git worktree remove --force` による削除過多になるため採用しない）。観測がゼロなら削除を一切行わない（fail-safe）。保持されるのは failed / blocked / monitoring イシューが記録した worktree で（monitoring は halt 等で中断したイシュー。状態ファイルが指す worktree の実体だけ消えると乖離が生じるため保持する）、ブランチは削除しない（未 push のコミットを持つ可能性があるため、ブランチの寿命は worktree の寿命と切り離す）。スイープ結果は Workflow の返却値 `sweptWorktrees` で確認できる。
+**ラン終了時に worktree スイープを実行する**。個別の削除経路が状態ファイル書き込み失敗等で取りこぼした残骸を回収する最終防衛線であり、クローズ（merged / closed）に至ったイシューの実装 worktree（impl / fix）を残さないことを保証する。使い捨て worktree（review / pr-create）は前述の 4 条件を満たすものだけを専用ゲート経由で回収する（実装 worktree の候補集合とは合流させない）。削除対象は**本ラン内で削除を試みた worktree パスの集合**と、後述の孤立 worktree スキャンでブランチ名一致・merged / closed 確定した worktree に限定され、かつ `git worktree list` に実在するものだけを削除する。「観測した全パスから保持リストを引く」方式は採らない（状態ファイルへの書き込みが失敗した worktree が「削除候補には載るが保持リストには載らない」状態になり、実装中・レビュー中の worktree が未コミット変更ごと消える。書き込み失敗が fail-safe ではなく fail-destructive に倒れる）。パスの命名規約からの推測は行わないため、並行して走る別ランの worktree・利用者が手動で作った worktree は構造的に対象になり得ない（ホスト側の worktree 命名規約に依存しない設計。命名規約に依存した絞り込みは、規約の想定が外れたときの失敗方向が `git worktree remove --force` による削除過多になるため採用しない）。観測がゼロなら削除を一切行わない（fail-safe）。保持されるのは failed / blocked / monitoring イシューが記録した worktree で（monitoring は halt 等で中断したイシュー。状態ファイルが指す worktree の実体だけ消えると乖離が生じるため保持する）、ブランチは削除しない（未 push のコミットを持つ可能性があるため、ブランチの寿命は worktree の寿命と切り離す）。スイープ結果は Workflow の返却値 `sweptWorktrees` で確認できる。
 
 なお、削除候補への登録は「削除を試みる地点」（`updateState` の `cleanupWorktree` 処理）で、実際の削除を行うエージェント呼び出しより**前**に行う。このため状態ファイルへの書き込みが失敗しても候補には残り、スイープ本来の目的（書き込み失敗で追跡から漏れた残骸の回収）が維持される。逆に、まだ削除を試みていない worktree は候補に載らないため削除され得ない。
 
@@ -668,7 +677,7 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
 - `args.externalChecks` で明示した外部チェック App は、slug を問わず **HEAD sha に対する起動の確認**をマージの必須条件とする（Issue #155。cursor だけでなく sonarcloud 等も検証する）。cursor はレビューが 1 件以上到着していること（内容評価は監視側の needs-fix 判定が担う。Bugbot は APPROVED を出さないため state は問わない）、cursor 以外は check-run が 1 件以上ならその全件が許容 conclusion であること（failure・未完了があれば APPROVED レビューが存在しても不合格）、check-run が 0 件のときに限り「APPROVED レビューが 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」であることを条件とする。待機上限（最大 10 分）内に起動を確認できなければ「チェックなし」とみなさず `blocked` で停止する（App の障害・遅延・起動失敗時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも App ごとに件数・状態 enum のみを再取得して独立に検証する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
-- **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。continue / discard いずれの worktree 削除も WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する
+- **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。continue / discard いずれの worktree 削除も WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree はラン終了時の最終スイープが所有権・未コミット変更を検証したうえで回収する。ゲートを通らず残置されたものだけがログ一覧に出るため、必要に応じ手動で掃除する
 
 ## sandbox 環境での実行
 
