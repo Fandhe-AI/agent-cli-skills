@@ -2006,18 +2006,21 @@ async function runImplement(item) {
   // 状態ファイルから保存済みの情報を取得（再開判定に使用）
   const saved = savedItems[String(item.number)] ?? {}
 
-  // monitoring から再開する場合: impl フェーズをスキップして monitor ループから開始する。
+  // monitoring / blocked（pr 保存済み）から再開する場合: impl フェーズをスキップして
+  // monitor ループから開始する（blocked の再開対象化は Issue #123。人間がレビュースレッドを
+  // resolve した後の再実行で既存 PR を宙に浮かせないため）。
   // branch が不正な場合は再開を諦めて通常の impl から実行する（最初からやり直せば回復できる）。
   // 判定は報告系（halt / 依存失敗）と共有の isActiveMonitoring に一元化する（条件不一致防止）
   const isResumeFromMonitoring = isActiveMonitoring(item.number)
   if (saved.status === 'monitoring' && !isResumeFromMonitoring) {
     log(`#${item.number}: 状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)
   }
-  // 保存済みの fixCount。monitoring からの正常再開（impl スキップ → monitor 続行）のときのみ
-  // 引き継ぐ。再開情報が不正で impl からやり直す場合は新しい PR を作るため 0 にリセットする
-  // （旧 PR の fixCount を引き継ぐと、新 PR への fix が一度も走る前に 6 回上限へ到達しうる）。
-  // failed / blocked / pending / implementing などからの再実行時も 0 にリセットして
-  // fix 上限を新規カウントする
+  // 保存済みの fixCount。monitor ループからの正常再開（impl スキップ → monitor 続行）の
+  // ときのみ引き継ぐ。再開情報が不正で impl からやり直す場合は新しい PR を作るため 0 に
+  // リセットする（旧 PR の fixCount を引き継ぐと、新 PR への fix が一度も走る前に
+  // 6 回上限へ到達しうる）。
+  // failed / pending / implementing や pr を持たない blocked などからの再実行時も 0 に
+  // リセットして fix 上限を新規カウントする
   const savedFixCount =
     isResumeFromMonitoring && Number.isInteger(saved.fixCount)
       ? Math.min(Math.max(saved.fixCount, 0), 6)
@@ -2033,6 +2036,13 @@ async function runImplement(item) {
       worktreePath: sanitizeWorktreePath(saved.worktree ?? ''),
     }
     log(`#${item.number}: 状態ファイルから monitoring 再開（PR #${impl.prNumber}、fixCount: ${savedFixCount}）`)
+    // fresh PR 経路（PR 作成完了時の updateState）と同じく、monitor ループ突入前に status を
+    // monitoring へ更新する。blocked（pr 保存済み）からの再開では書かないと、マージ監視が
+    // 実際に走っているのに状態ファイルが blocked のまま残り、レポート・halt ガード・
+    // 次回再開判定が実態と食い違う（PR #124 Bugbot Medium 対応）。
+    if (saved.status !== 'monitoring') {
+      await updateState(item.number, { status: 'monitoring', pr: impl.prNumber })
+    }
   } else {
     // 通常の impl フェーズを実行する（Recover フェーズ含む）
     // フォールバック時に状態ファイルに保存済みの worktree パスがあれば孤児化防止のため記録しておく
@@ -3059,13 +3069,24 @@ function isValidBranchName(b) {
   return typeof b === 'string' && !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
 }
 
-// 状態ファイル上で monitoring かつ再開情報（pr / branch）が有効な issue は
-// blocked で上書きせず「monitor から再開する」と報告してよい。
+// 状態ファイル上で再開情報（pr / branch）が有効な issue は blocked で上書きせず
+// 「monitor から再開する」と報告してよい。
 // runImplement の monitor 再開ガード（pr > 0 かつ branch 有効）と必ず同一条件にする。
-// 条件が食い違うと「monitor から再開する」と報告したのに次回実行で impl が再走する
+// 条件が食い違うと「monitor から再開する」と報告したのに次回実行で impl が再走する。
+// status は monitoring に加えて blocked も対象とする（Issue #123: PR #122 codex-review P1
+// 対応）。レビュー非収束起因の blocked 終端（failMergeTerminal）は pr / branch / fixCount を
+// 保持したまま永続化されるため、人間がレビュースレッドを resolve した後の再実行では既存 PR の
+// monitor ループから再開する（新規 Implement / PR 作成経路に入ると既存 PR が宙に浮く）。
+// pr を持たない blocked（依存失敗・push 前の Review 非収束等は pr: 0 で保存）は従来どおり
+// この条件を満たさず、Recover を含む通常の impl 経路で処理される。
 function isActiveMonitoring(n) {
   const s = savedItems[String(n)] ?? {}
-  return s.status === 'monitoring' && Number.isInteger(s.pr) && s.pr > 0 && isValidBranchName(s.branch)
+  return (
+    (s.status === 'monitoring' || s.status === 'blocked') &&
+    Number.isInteger(s.pr) &&
+    s.pr > 0 &&
+    isValidBranchName(s.branch)
+  )
 }
 
 async function markBlockedByDeps(item, failedDeps) {
@@ -3086,7 +3107,7 @@ async function markBlockedByDeps(item, failedDeps) {
   } else {
     note = `前提イシューの失敗・ブロックにより未着手: ${failedPrereqs.map((d) => `#${d}`).join(', ')}`
   }
-  // monitoring かつ pr > 0 の場合は blocked で上書きしない（halt 処理と同じガード）。
+  // monitoring / blocked かつ pr > 0 の場合は再開情報を上書きしない（halt 処理と同じガード）。
   // 状態ファイルが monitoring の再開情報を保持するため、レポート側にも PR 番号と
   // 再開手順を併記する（blocked のみの報告だと実態＝再開可能と矛盾するため）
   if (isActiveMonitoring(item.number)) {
@@ -3095,9 +3116,9 @@ async function markBlockedByDeps(item, failedDeps) {
       issue: item.number,
       status: 'blocked',
       pr,
-      note: `${note}（中断時に monitoring・PR #${pr} 作成済み。同じ引数で再実行すると monitor から再開する）`,
+      note: `${note}（中断時に PR #${pr} 作成済み。同じ引数で再実行すると monitor から再開する）`,
     })
-    log(`#${item.number}: monitoring 状態を維持する（PR #${pr} の再開情報を保持）。依存失敗により新規着手はしない`)
+    log(`#${item.number}: 再開情報を維持する（PR #${pr}）。依存失敗により新規着手はしない`)
     return
   }
   results.push({
@@ -3185,22 +3206,24 @@ for (const n of notStarted) {
   await updateState(n, { status: 'blocked', note: notStartedNote })
 }
 for (const n of interrupted) {
-  // 状態ファイル上で monitoring かつ pr > 0: 再開情報が有効なため状態を上書きせず、
-  // results にも not-started ではなく monitoring として記録する（レポートと実態の矛盾防止）
-  const pr = savedItems[String(n)].pr
+  // 状態ファイル上で monitoring / blocked かつ pr > 0: 再開情報が有効なため状態を上書きせず、
+  // results にも not-started ではなく状態ファイルの実際の status で記録する（レポートと
+  // 実態の矛盾防止）。isActiveMonitoring は blocked（pr 保存済み）も再開対象に含めるため、
+  // monitoring 固定で報告すると状態ファイルと食い違う（PR #124 Bugbot Medium 対応）
+  const { pr, status } = savedItems[String(n)]
   results.push({
     issue: n,
-    status: 'monitoring',
+    status,
     pr,
-    note: `中断時に monitoring（PR #${pr} 作成済み）。同じ引数で再実行すると monitor から再開する`,
+    note: `中断時に ${status}（PR #${pr} 作成済み）。同じ引数で再実行すると monitor から再開する`,
   })
-  log(`#${n}: halt 時も monitoring 状態を維持する（PR #${pr} の再開情報を保持）`)
+  log(`#${n}: halt 時も ${status} 状態を維持する（PR #${pr} の再開情報を保持）`)
 }
 if (notStarted.length > 0) {
   log(`未着手のまま終了: ${notStarted.map((n) => `#${n}`).join(', ')}`)
 }
 if (interrupted.length > 0) {
-  log(`monitoring 中断（再開可能）: ${interrupted.map((n) => `#${n}`).join(', ')}`)
+  log(`monitor 再開可能な中断: ${interrupted.map((n) => `#${n}`).join(', ')}`)
 }
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)

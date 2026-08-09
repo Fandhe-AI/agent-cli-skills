@@ -401,10 +401,10 @@ cat _/issue-trees/42.json
 | `merged` | マージ済み | スキップ（完了扱い） |
 | `closed` | クローズ済み | スキップ（完了扱い） |
 | `failed` | 失敗 | Recover phase が残骸の有無を確認して再実行（continue / discard に分岐） |
-| `blocked` | 依存失敗・halted・Review/Merge 非収束（未解決レビューコメント・対象外コメント起因を含む、イシュー固有の品質ブロック。halt の連続カウントには乗せない） | Recover phase が残骸の有無を確認して再実行（continue / discard に分岐） |
+| `blocked` | 依存失敗・halted・Review/Merge 非収束（未解決レビューコメント・対象外コメント起因を含む、イシュー固有の品質ブロック。halt の連続カウントには乗せない） | **`pr` 保存済み（PR 作成後の Merge 非収束）なら impl をスキップし monitor ループから再開**（PR 番号・ブランチ・fixCount を引き継ぐ。人間がレビュースレッドを resolve した後の再実行で既存 PR のマージ監視を続行する）。`pr` なし（依存失敗・push 前の Review 非収束等）は Recover phase が残骸の有無を確認して再実行（continue / discard に分岐） |
 | `skipped` | GitHub 側で closed 済み | スキップ（変更なし） |
 
-`monitoring` 中断からの再開では、保存された `pr`（PR 番号）・`branch`・`fixCount`（修正済み回数）を引き継いで monitor ループから再開する。`fixCount` の上限（6 回）は引き継いだ値に基づいて判定される。
+`monitoring` 中断、および `pr` 保存済みの `blocked` からの再開では、保存された `pr`（PR 番号）・`branch`・`fixCount`（修正済み回数）を引き継いで monitor ループから再開する。`fixCount` の上限（6 回）は引き継いだ値に基づいて判定される。
 
 `planning` / `implementing` / `reviewing` からの再開では、まず Recover phase が残骸 worktree / branch の有無を確認する。**残骸がある場合**は Recover が「途中作業を継続できるか」を判断し、continue なら既存 branch を checkout して Implement で継続、discard なら worktree と branch を掃除して Plan から新規実行する。**残骸がない場合**は通常の Plan → Implement から再実行する。いずれの経路でも push 前 review フローのため PR 未作成の状態で中断している。impl 手順 0b-a が既存 open PR を検索し、あれば再利用する。「push 成功・PR 作成失敗」のケース（状態 `failed`・`branch` 保存済み）では impl 手順 0b-b がリモートブランチを検出して push 済みコミットを保持したまま回復する。
 
