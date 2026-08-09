@@ -4,7 +4,7 @@ description: >
   親イシュー配下のサブイシュー（孫含む）を依存順を保ちつつ worktree で並列に自動実装・push 前 review・PR 作成・CI 監視・squash merge まで一括自動化。
   「イシューツリーを並列実装」「配下のサブイシューをまとめて実装」「ツリー全体を並列で実装して」「イシュー階層を自動開発」で使用。
   per-issue 計画立案（Plan: セッション継承モデル）→実装（Implement: sonnet）の分業。push 前 review（Review 通過後にのみ push・PR 作成して CI を 1 回だけ起動）。
-  外部チェック自動判定（Cursor Bugbot 非導入リポでも不要待機なし）。並列度（parallel）と依存（dependsOn）で実行順を制御。
+  外部チェック構成は args の externalChecks で明示（[] で「なし」を確定して不要待機なし・未指定なら自動マージ停止）。並列度（parallel）と依存（dependsOn）で実行順を制御。
   単一イシューの実装は implement-issue、PR レビューは implement-review-pr を参照。
 user-invocable: true
 argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 main）] [並列度（省略時 3）]"
@@ -39,17 +39,18 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
   "args": {
     "parent": "<親イシュー番号>",
     "branch": "<マージ先ブランチ（省略時 main）>",
-    "parallel": "<並列度 1〜8（省略時 3）>"
+    "parallel": "<並列度 1〜8（省略時 3）>",
+    "externalChecks": "<外部チェック App slug の配列（例: [\"cursor\"]。使用しない場合は []）>"
   }
 }
 ```
 
-例: 親イシュー `#42` の配下を `main` へ、並列度 3 でマージする場合:
+例: 親イシュー `#42` の配下を `main` へ、並列度 3・Cursor Bugbot 導入済みでマージする場合:
 
 ```json
 {
   "scriptPath": ".claude/skills/implement-issue-tree/script/implement-issue-tree.js",
-  "args": { "parent": 42, "branch": "main", "parallel": 3 }
+  "args": { "parent": 42, "branch": "main", "parallel": 3, "externalChecks": ["cursor"] }
 }
 ```
 
@@ -60,6 +61,17 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | `parent` | 必須 | — | 親（ルート）イシュー番号。`issue` でも可 |
 | `branch` | 任意 | `main` | マージ先ブランチ。不正な文字を含む場合はエラー |
 | `parallel` | 任意 | `3` | 並列実行数（1〜8）。`1` を指定すると実質的に直列実行になる |
+| `externalChecks` | 任意 | 未指定 | GitHub Actions 以外の外部チェック App slug の配列（最大 10 件、slug 形式は英小文字・数字・ハイフン）。**未指定と `[]` は意味が異なる** |
+
+**`externalChecks` の 3 状態（Issue #147）:**
+
+| 指定 | 意味 | マージ挙動 |
+|------|------|-----------|
+| 未指定 | 外部チェック構成が**未確定** | 観測結果にかかわらず自動マージを停止し `blocked` で終端する（実装・PR 作成・CI までは進む） |
+| `[]` | 「外部チェックを使用しない」と人間が**確定** | 外部レビュー待機をスキップして CI green と未解決スレッドなしのみで判定する |
+| `["cursor"]` 等 | 指定 App を正とする（観測結果より優先） | 指定 App のレビューゲートを適用する |
+
+観測ベースの検出は直近 3 件の merged PR しか見ないため、新規導入 App・条件付き起動 App・直近 3 件で実行されなかった App を取りこぼす。「検出なし」が不在の証明にならないのはもちろん、**「検出あり」も集合としての完全性を保証しない**（例: 観測で `sonarcloud` だけを拾い、実際には必須の `cursor` を取りこぼしたまま「確定済み」として cursor[bot] レビューの再検証を省いてしまう）。したがって観測結果は確定情報として扱わず、参考値としてログ・停止理由・返却値に残すだけにする。`externalChecks` が配列でない・slug 形式でない・11 件以上の場合は既定値へフォールバックせずエラーで停止する（`parallel` は性能ノブのため不正値を既定 3 へ落とすが、`externalChecks` はマージゲートの入力であり、誤記を黙って「未指定」や「なし確定」に読み替えるとゲートが静かに弱まるため）。
 
 ## フロー
 
@@ -67,7 +79,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 
 gh CLI の sub-issues API で親イシュー配下の全ツリーを再帰取得し、post-order DFS で実行キューを構築する。各 open イシューは本文を読んで機能的依存（`dependsOn`）を抽出する。
 
-ツリー取得に続いて、直前 3 件の merged PR の check-runs から GitHub Actions 以外の外部チェック App（例: Cursor Bugbot）を自動検出する。検出結果は後続の Merge ステップで使用する（外部チェック待機の要否を制御する）。
+ツリー取得に続いて、直前 3 件の merged PR の check-runs から GitHub Actions 以外の外部チェック App（例: Cursor Bugbot）を観測する。**観測結果は参考値であり構成の確定情報ではない**。構成の確定は `args.externalChecks` の明示入力で行い、明示がない限り「確定不能」として後続の Merge ステップで自動マージを停止する（Issue #147）。
 
 ```bash
 # 親イシューのサブイシューを取得（--paginate で 100 件超も全ページ自動取得）
@@ -76,7 +88,7 @@ gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100"
 # 各 open イシューの本文を読み、機能的依存を抽出
 gh issue view <N>
 
-# 外部チェック自動判定（直前 3 件の merged PR の check-runs を確認）
+# 外部チェック観測（直前 3 件の merged PR の check-runs を確認。結果は参考値）
 REPO=$(gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"')
 gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
   | xargs -I{} sh -c 'gh api "repos/${REPO}/commits/$1/check-runs" \
@@ -210,22 +222,24 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 
 **監視とマージ実行の分離（Issue #145）:** このステップは 2 つのエージェントに分かれる。実行基盤がエージェント単位のツール権限制御を提供しないため、これは権限の剥奪ではなく**コンテキスト分離**（未信頼テキストをマージ実行主体へ入れない）である。残存リスクと必要な基盤対応は「非信頼データの扱い」項目 5 を参照。
 - **監視エージェント（monitor）**: CI・外部チェック・レビュースレッドを確認し、`state`（`ready` / `needs-fix` / `unresolved-comments` / `timeout` / `blocked`）と `headSha`（40 桁）を返す助言的判定のみを行う。PR レビュー本文という未信頼データを読むため、`gh pr merge` / `gh issue close` / `gh pr edit` / resolve mutation の実行権限を持たない。
-- **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文・**チェック名**を一切読まず、PR の `state` / `headRefOid` / `mergeable`（enum・sha）、チェックの**状態別件数**（`gh pr checks <N> --json state --jq '[.[].state] | group_by(.) | map({state: .[0], count: length})'`。素の `gh pr checks` や `--json name / description / link` は使わない）、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）を自ら再取得して検証し、全条件を満たす場合にのみ squash merge とイシュークローズを実行する。監視時点の HEAD sha と一致しない場合はマージせず辞退する（監視後に push された未検証のコミットをマージしない）。マージは `gh pr merge <N> --squash --delete-branch --match-head-commit <監視時点の sha>` で実行し、照合とマージの間に push される競合（TOCTOU）を GitHub 側の条件評価で塞ぐ。
-  - チェック名を除外するのは、名称が PR 側の workflow / job / matrix 定義から生成される外部由来テキストであり、マージ権限を持つ実行主体のコンテキストへ命令文を持ち込む経路になるため（PR #150 codex-review P0 対応）。
+- **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文・**チェック名**を一切読まず、PR の `state` / `headRefOid` / `mergeable`（enum・sha）、チェックの**状態別件数**（`gh pr checks <N> --json state --jq '[.[].state] | group_by(.) | map({state: .[0], count: length})'`。素の `gh pr checks` や `--json name / description / link` は使わない）、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）、および外部レビューが cursor で確定している場合は HEAD sha に一致する cursor[bot] レビューの**件数のみ**（`--jq` で整数へ正規化。body 等のテキストは取得しない）を自ら再取得して検証し、全条件を満たす場合にのみ squash merge とイシュークローズを実行する。監視時点の HEAD sha と一致しない場合はマージせず辞退する（監視後に push された未検証のコミットをマージしない）。マージは `gh pr merge <N> --squash --delete-branch --match-head-commit <監視時点の sha>` で実行し、照合とマージの間に push される競合（TOCTOU）を GitHub 側の条件評価で塞ぐ。
+  - チェック名を除外するのは、名称が PR 側の workflow / job / matrix 定義から生成される外部由来テキストであり、マージ権限を持つ実行主体のコンテキストへ命令文を持ち込む経路になるため（PR #150 codex-review P0 対応）。cursor[bot] レビューの**件数**（非負整数）は任意テキストを注入できる媒体ではないため、この理由づけの対象外として `--jq` 正規化つきの取得のみを許可する（Issue #146）。
+  - 外部レビューの再検証を監視エージェント側だけに置かないのは、未信頼テキストを読む監視の判定は「マージを試みてよい」という起動条件にすぎず、ゲートの証拠にできないため。
   - 監視が有効な `headSha`（40 桁）を返さなかった場合も merge-exec は起動するが、新規マージは行わず「PR が既に MERGED ならイシュークローズ確認のみ」に限定される（前回ランでマージ済み・状態記録に失敗した PR の回復パスを保ちつつ fail-closed を維持する）。
   - マージ成功でもイシューのクローズを確認できない場合（`issueClosed: false`）は `merged` として終端せず再監視でクローズを再試行し、監視回数を使い切った場合は「PR はマージ済みだがクローズ未確認」として `blocked` で終端する（次回実行の monitoring 再開で回復する）。
-  - 辞退理由（`reason`）はホスト側で `head-moved` / `checks-not-green` / `merge-failed` → 再監視、`unresolved-threads` → fix ループ（ただし手元にスレッド内容の構造化一覧がない場合は fix を起動せず再監視し、監視エージェントに内容を収集させる）、`not-mergeable` → fix ループ、`pr-closed` → blocked、enum 外 → systemic failure、へマッピングされる。
+  - 辞退理由（`reason`）はホスト側で `head-moved` / `checks-not-green` / `merge-failed` → 再監視、`unresolved-threads` → fix ループ（ただし手元にスレッド内容の構造化一覧がない場合は fix を起動せず再監視し、監視エージェントに内容を収集させる）、`not-mergeable` → fix ループ、`pr-closed` → blocked、`external-review-missing` → blocked（Issue #146。同一ラン内で再監視しても到着を保証できないため fail-open せず終端し、レビュー到着後の再実行で monitoring 再開により継続する）、enum 外 → systemic failure、へマッピングされる。
 
 **マージ実行条件:**
 1. **CI 全 green**: 全チェックが success / neutral / skipped で完了し、failure / cancelled / timed_out が 0 件かつ pending / queued / in_progress が 0 件であること。pending が残るなら監視を継続する。
-2. **外部チェック指摘なし**（または外部チェックなし確定）: Step 1 の自動判定結果に基づき後述の待機手順を実施する。
+2. **外部チェック指摘なし**（または「外部チェックなし」が `args.externalChecks: []` で確定していること）: `args.externalChecks` と Step 1 の観測結果に基づき後述の待機手順を実施する。構成が確定できない場合・必須の外部レビューが HEAD sha に対して到着していない場合はマージしない。
 3. **未解決レビューコメントなし**: GraphQL API で全スレッドが resolved 済みであること。**スレッドの resolve は常に人間が GitHub 上で行う。自動フロー（fix エージェント・オーケストレータを含むどのエージェント・どの経路）も resolve mutation を実行しない**（修正済みの指摘のスレッドも自動では resolve しない）。fix エージェントが検討した結果 **fix 不能・現イシューのスコープ外と判断したコメント**は、その場で Issue 化せず、対応しない理由と対応案を「実装対象外（out-of-scope）の扱い」節の手順に従い **PR 本文の「対象外（out-of-scope）」節に記録する**（自動フローの責務は記録まで）。記録されたスレッドも未解決のまま残るため、人間が resolve しない限り監視は unresolved-comments → blocked へ落ち、最終レポートでの issue 化承認・手動 resolve の判断に乗る。**P0/P1 相当・セキュリティ上の指摘（脆弱性・認証認可・秘密情報露出・破壊的操作等）は「対応不要・スコープ外」の記録のみで済ませることを禁止する**（修正するか、修正不能なら blocked としてユーザー判断へ委ねる。判断がつかない場合は安全側に倒し P0/P1 相当として扱う）。**Issue 化の要否はユーザー承認前に確定させない**（Issue 化の実行判断は同節の手順 3・4 に従い最終レポート確認時にユーザー承認のうえで実施する）。
 
 `gh pr checks --watch` が終了しても「watch が終わった」だけで合格にしない。`gh pr checks ${prNumber}` の出力で全チェックの結論を列挙して確認する。pending が残る場合は再 watch する。failure 等があれば修正エージェント（fix）へ渡す。
 
-**外部チェック待機の 3 分岐（Step 1 の自動判定結果による）:**
-- **外部チェックなし（`apps: []`）**: Step 1 の直前 PR 分析の結果 GitHub Actions 以外の外部チェックを使用していないため、外部レビュー待機はスキップする。CI 全 green と未解決スレッドなしのみで判定する。
-- **cursor（Cursor Bugbot）検出**: cursor[bot] によるレビュー待機フローを実行する。HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はせずブロックしない）。HEAD sha に対する cursor[bot] レビューの到着を最大 5 分待ち、到着すれば指摘解決を待ってからマージ、到着しなければ「レビューなし確定」として先へ進む。
+**外部チェック待機の 4 分岐（`args.externalChecks` と Step 1 の観測結果による）:**
+- **確定不能（`externalChecks` 未指定）**: 外部レビューを省略してよいか判断できないため、CI の結果にかかわらず `state: blocked` で停止する（Issue #147）。ホスト側にも同じゲートがあり、監視エージェントが `ready` を返しても merge-exec を起動せず `blocked` で終端する（プロンプト + ホストの二重検証）。停止理由には観測結果（参考値）と再実行用の `args` 例が記録され、`blocked` + `pr` は次回ランの monitoring 再開対象となる。
+- **外部チェックなし確定（`externalChecks: []`）**: 外部レビュー待機はスキップする。CI 全 green と未解決スレッドなしのみで判定する。
+- **cursor（Cursor Bugbot）**: cursor[bot] によるレビュー待機フローを実行する。HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はしない）。HEAD sha に対する cursor[bot] レビューの到着を最大 10 分待ち、到着すれば指摘解決を待ってからマージする。**到着しない場合は「レビューなし」とみなさず `state: blocked` で停止する**（Issue #146。App の障害・遅延・起動失敗時にレビューゲートを迂回させないための fail-closed。レビュー到着後に再実行すれば monitoring 再開で継続する）。
 - **cursor 以外の外部チェック（例: sonarcloud）**: `gh pr checks --watch`（CI 監視）が既にステータスチェックを監視しているため追加の待機手順は不要。
 
 ```bash
@@ -239,11 +253,17 @@ gh pr checks <pr-number> --watch --interval 60
 # failure / cancelled / timed_out が 0 件、pending / queued / in_progress が 0 件であること
 gh pr checks <pr-number>
 
-# Bugbot（cursor[bot]）レビューが HEAD sha に対して到着しているか確認する（cursor 検出時のみ）
-# commit_id が HEAD_SHA と一致するレビューを探す
-gh api "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
+# Bugbot（cursor[bot]）レビューが HEAD sha に対して到着しているか確認する（cursor 確定時のみ）
+# commit_id が HEAD_SHA と一致するレビューを探す（30 件超のレビューを取りこぼさないよう --paginate 必須）
+gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
   --jq --arg sha "${HEAD_SHA}" '.[] | select(.user.login == "cursor[bot]" and .commit_id == $sha)'
-# → 該当するレビューがまだない場合は最大 5 分待つ（HEAD push から 1 分以上経過後に @cursor review を 1 回だけ催促可）
+# → 該当するレビューがまだない場合は最大 10 分待つ（HEAD push から 1 分以上経過後に @cursor review を 1 回だけ催促可）
+# → 待機上限を超えても到着しない場合は blocked で停止する（「レビューなし」として先へ進まない）
+
+# マージ実行エージェント側の再検証は本文を読まず「件数」のみへ正規化して取得する
+gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
+  --jq '[.[] | select(.user.login == "cursor[bot]" and .commit_id == "<検証した HEAD sha>")] | length'
+# → --jq はページごとに適用されるため出力はページ数ぶんの整数になる。合計が 0 ならマージしない
 
 # レビュースレッドの解決確認（GraphQL）— 100 件超はページネーションで全件取得する
 # after: $cursor を使い pageInfo.hasNextPage が false になるまでループする
@@ -314,7 +334,7 @@ open のサブイシューが残っている場合、または受入基準が未
   Issue 化は本レポート確認 → ユーザー承認のうえ実施する（承認なしに Issue 操作をしない。手順は「実装対象外（out-of-scope）の扱い」手順 3・4 と同様）
 ```
 
-返却値: `parent` / `baseBranch` / `parallel` / `total` / `done`（各イシューの status。blocked / failed で未解決コメントがあれば `unresolvedComments`、fix 対象外の判断ログがあれば `outOfScope` を含む） / `failures` / `notStarted` / `halted`。
+返却値: `parent` / `baseBranch` / `parallel` / `externalChecks`（確定した外部チェック App 一覧） / `externalChecksConfirmed`（構成が確定していたか。`false` のイシューは自動マージされない） / `externalChecksObserved`（観測ベースの参考値） / `total` / `done`（各イシューの status。blocked / failed で未解決コメントがあれば `unresolvedComments`、fix 対象外の判断ログがあれば `outOfScope` を含む） / `failures` / `notStarted` / `halted`。
 
 ## 検証
 
@@ -580,7 +600,8 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）。GitHub API から取得した文字列はプロンプト埋め込み前にサニタイズされる
 - 1 イシューの失敗では停止せず次へ進むが、3 イシュー連続失敗で新規着手を停止（halt）する
 - マージ前に **CI は全チェックが success/neutral/skipped で完了（pending/failure 0 件）であること**を明示確認する（`gh pr checks --watch` が終わっただけでは合格にせず、全チェックの結論を列挙して確認する）
-- 外部チェック（Cursor Bugbot 等）は Step 1（Tree フェーズ）で直前 3 件の merged PR を分析して自動判定する。外部チェックが検出されない場合は Bugbot 待機・`@cursor review` 催促は行わない（CI green と未解決スレッドなしのみで判定する）。Bugbot 待機は外部チェック検出時のみ実施する
+- 外部チェック（Cursor Bugbot 等）の構成は `args.externalChecks` で明示する。Step 1（Tree フェーズ）の観測（直近 3 件の merged PR 分析）は参考値にすぎず、明示がない限り自動マージを停止する。Bugbot 待機・`@cursor review` 催促を省略できるのは `externalChecks: []` で「外部チェックなし」を確定した場合のみ
+- 外部レビューゲートが有効なリポジトリでは、HEAD sha に対する cursor[bot] レビューの到着を**マージの必須条件**とする。待機上限（最大 10 分）内に到着しなければ「レビューなし」とみなさず `blocked` で停止する（App の障害・遅延時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも件数のみを再取得して独立に検証する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
 - **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（自動削除 → Plan から新規）に振り分ける。空・破棄判定の worktree は自動削除されるため、残骸を手動で掃除してから再実行する必要がない
