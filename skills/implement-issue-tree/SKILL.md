@@ -210,7 +210,7 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 
 **監視とマージ実行の権限分離（Issue #145）:** このステップは 2 つのエージェントに分かれる。
 - **監視エージェント（monitor）**: CI・外部チェック・レビュースレッドを確認し、`state`（`ready` / `needs-fix` / `unresolved-comments` / `timeout` / `blocked`）と `headSha`（40 桁）を返す助言的判定のみを行う。PR レビュー本文という未信頼データを読むため、`gh pr merge` / `gh issue close` / `gh pr edit` / resolve mutation の実行権限を持たない。
-- **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文・**チェック名**を一切読まず、PR の `state` / `headRefOid` / `mergeable`（enum・sha）、チェックの**状態別件数**（`gh pr checks <N> --json state --jq '[.[].state] | group_by(.) | map({state: .[0], count: length})'`。素の `gh pr checks` や `--json name / description / link` は使わない）、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）を自ら再取得して検証し、全条件を満たす場合にのみ squash merge とイシュークローズを実行する。監視時点の HEAD sha と一致しない場合はマージせず辞退する（監視後に push された未検証のコミットをマージしない）。
+- **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文・**チェック名**を一切読まず、PR の `state` / `headRefOid` / `mergeable`（enum・sha）、チェックの**状態別件数**（`gh pr checks <N> --json state --jq '[.[].state] | group_by(.) | map({state: .[0], count: length})'`。素の `gh pr checks` や `--json name / description / link` は使わない）、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）を自ら再取得して検証し、全条件を満たす場合にのみ squash merge とイシュークローズを実行する。監視時点の HEAD sha と一致しない場合はマージせず辞退する（監視後に push された未検証のコミットをマージしない）。マージは `gh pr merge <N> --squash --delete-branch --match-head-commit <監視時点の sha>` で実行し、照合とマージの間に push される競合（TOCTOU）を GitHub 側の条件評価で塞ぐ。
   - チェック名を除外するのは、名称が PR 側の workflow / job / matrix 定義から生成される外部由来テキストであり、マージ権限を持つ実行主体のコンテキストへ命令文を持ち込む経路になるため（PR #150 codex-review P0 対応）。
   - 監視が有効な `headSha`（40 桁）を返さなかった場合も merge-exec は起動するが、新規マージは行わず「PR が既に MERGED ならイシュークローズ確認のみ」に限定される（前回ランでマージ済み・状態記録に失敗した PR の回復パスを保ちつつ fail-closed を維持する）。
   - マージ成功でもイシューのクローズを確認できない場合（`issueClosed: false`）は `merged` として終端せず再監視でクローズを再試行し、監視回数を使い切った場合は「PR はマージ済みだがクローズ未確認」として `blocked` で終端する（次回実行の monitoring 再開で回復する）。
@@ -261,7 +261,7 @@ gh api graphql -f query='
 
 # CI 全 green・外部チェック指摘なし・未解決レビューコメントなしの場合のみ squash merge
 # （実行するのは監視エージェントではなくマージ実行エージェント。上記条件を自ら再取得して検証したうえで実行する）
-gh pr merge <pr-number> --squash --delete-branch
+gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証した HEAD sha>
 ```
 
 CI 失敗・外部チェック指摘・コンフリクト・未解決レビュースレッドがある場合は、修正エージェント（fix）が detached HEAD で対象ブランチを取得して指摘を反映し再 push する。修正エージェントも worktree 隔離で動作するため、他の並列イシューのブランチに干渉しない。fix 対象外と判断したコメントは「実装対象外（out-of-scope）の扱い」節の手順に従い PR 本文へ記録する（自動フローは記録までで停止し、resolve はどのエージェント・どの経路でも実行しない。resolve は人間が GitHub 上で行い、未解決のまま残ったスレッドは blocked → 最終レポートで issue 化承認・手動 resolve を判断する）。fix エージェントは修正済みの指摘のスレッドも resolve しない（スレッドの解決状態は変更しない）。監視（monitor）は最大 7 回まで実行し、push なしが 2 回連続したイシューは `blocked` として記録する。修正（fix）の上限は Review と共有（上限 6）。詳細は Review ステップ参照。

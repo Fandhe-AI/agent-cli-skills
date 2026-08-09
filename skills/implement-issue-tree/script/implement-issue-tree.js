@@ -1507,7 +1507,10 @@ function monitorPrompt(item, impl, externalApps) {
 //     あって、マージ条件の証拠ではない）。
 //   - expectedHeadSha はホストが sanitizeSha（40 桁小文字 16 進）で検証済みの値。監視時点と
 //     HEAD が変わっていれば辞退する（監視後の push を未検証のままマージしない）。偽の sha は
-//     一致せずマージが実行されない方向にしか働かないため fail-closed。
+//     一致せずマージが実行されない方向にしか働かないため fail-closed。照合とマージの間に
+//     push される競合を塞ぐため、マージは必ず `gh pr merge --match-head-commit <sha>` で
+//     実行し、HEAD 条件を GitHub 側で原子的に評価させる（PR #150 codex-review P0 対応。
+//     エージェントによる事前照合だけでは TOCTOU が残る）。
 //   - expectedHeadSha が空文字（監視エージェントが有効な headSha を返さなかった場合）でも
 //     起動する。この場合は新規マージを一切許可せず、「PR が既に MERGED ならイシューの
 //     クローズ確認だけを行う」経路に限定する（Bugbot PR #150 指摘: headSha 欠落で
@@ -1536,7 +1539,9 @@ function mergeExecutePrompt(item, impl, expectedHeadSha) {
     `   while $hasNextPage: gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}' -F owner="{owner}" -F name="{repo}" -F number=${impl.prNumber} -F cursor="$cursor"`,
     `   → isResolved:false の件数を数える。1 件でもあれば merged: false / reason: unresolved-threads を返す（summary に件数を書く）。`,
     `   手順 1 の mergeable が CONFLICTING の場合は merged: false / reason: not-mergeable を返す。`,
-    `5. 手順 2〜4 の全条件を満たす場合のみ gh pr merge ${impl.prNumber} --squash --delete-branch を実行する。`,
+    `5. 手順 2〜4 の全条件を満たす場合のみ、検証した HEAD と実際にマージされる HEAD を GitHub 側で原子的に結び付けてマージする（手順 2 の照合から本コマンド実行までの間に新しいコミットが push されても、未検証の HEAD をマージしないため）:`,
+    `     gh pr merge ${impl.prNumber} --squash --delete-branch --match-head-commit ${JSON.stringify(expectedHeadSha)}`,
+    `   HEAD 不一致でコマンドが失敗した場合（--match-head-commit の条件不成立）は merged: false / reason: head-moved を返す。--match-head-commit を省略してマージし直さないこと。`,
     `   マージ成功後に gh pr view ${impl.prNumber} --json state で MERGED を確認する（確認できなければ merged: false / reason: merge-failed）。`,
     `   続いて gh issue view ${item.number} --json state（本文は取得しない）でクローズを確認し、open のままなら gh issue close ${item.number} する。再確認して closed であれば issueClosed: true、クローズできなかった・確認できない場合は issueClosed: false を返す（マージが成功していても虚偽の true を返さない。ホストはクローズ未完了を回復対象として再監視する）。`,
     `   他のイシューが並列実行中のため、working copy のブランチ切り替えや git pull は行わない。`,
