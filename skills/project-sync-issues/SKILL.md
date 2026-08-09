@@ -287,10 +287,12 @@ gh project item-add <number> \
   pinned=$(grep -cE 'uses:\s*[^@[:space:]]+@[0-9a-f]{40}([[:space:]]|#|$)' .github/workflows/project-sync.yml)
   if [ "$total" -eq 0 ]; then
     echo "NG: 検証対象の uses: 行が見つからない（workflow 生成に失敗している可能性）" >&2
+    exit 1
   elif [ "$total" -eq "$pinned" ]; then
     echo OK
   else
     echo "NG: SHA 固定されていない uses: 行がある（total=${total}, pinned=${pinned}）" >&2
+    exit 1
   fi
   ```
   `OK` が出力されること（`uses:` 行が 1 件以上存在し、かつ `total` と `pinned` が一致 = 全 `uses:` が SHA 固定）。`NG:` が出力された場合は workflow の生成内容を見直す
