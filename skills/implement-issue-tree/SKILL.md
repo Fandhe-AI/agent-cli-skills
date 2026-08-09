@@ -111,19 +111,19 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 
 各末端イシューに着手する前に、残骸 worktree / ブランチが存在するかを確認する。**既存作業がなければ Recover をスキップして Plan へ進む**。既存作業がある場合は Recover phase（セッション継承モデルのエージェント）が「途中作業を継続できるか」を判断し、その結果に応じて以下のどちらかへ分岐する。
 
-- **continue（継続）**: 既存 branch をそのまま checkout し、回復ブリーフ（done / remaining / broken の要約）を Implement へ渡して続きから実装する。Plan はスキップされる。Recover が直接 Review へ進むことはなく、継続作業は必ず Implement → Review → Merge を経由する。
+- **continue（継続）**: 既存 branch をそのまま checkout し、回復ブリーフ（done / remaining / broken の要約）を Implement へ渡して続きから実装する。Plan はスキップされる。Recover が直接 Review へ進むことはなく、継続作業は必ず Implement → Review → Merge を経由する。旧 worktree の削除は **WIP 退避の完了が検証できた場合のみ**実行する（後述の削除ゲート）。検証できない場合は残骸を削除せず `failed` で保全する（退避されていない未コミット変更を欠いたまま継続すると不完全な実装になるため、削除だけを飛ばして継続することはしない）。
 - **discard（破棄）**: 既存 worktree と branch を削除し、通常の Plan → Implement（新規 branch）で再実行する。削除は **WIP 退避の完了が検証できた場合のみ**実行する（後述の削除ゲート）。検証できない場合は残骸を削除せず `failed` で保全し、次回ランの Recover に委ねる。
 
 **Recover の判断軸は Review とは別**である。Review は「実装が正しいか・マージできるか」を判定するのに対し、Recover は「この途中作業から継続するのが妥当か」を判断する。動かない・未完成でも方向が妥当なら continue（残りは Implement が完成させる）。
 
 **未 commit 変更は WIP commit として branch へ退避してから worktree を削除する**ため、continue / discard どちらの経路でもデータを失わない。discard の場合は WIP commit を残した状態で branch を削除するため、誤判定時に reflog から救出できる。
 
-**discard の削除ゲート**: Recover エージェントの返す `wipCommitted` は自己申告値であり、誤判定・異常応答・プロンプトインジェクションで真を騙られ得る。そのため削除は次の 2 条件を**両方**満たす場合にのみ実行する。
+**削除ゲート（continue / discard 共通）**: Recover エージェントの返す `wipCommitted` は自己申告値であり、誤判定・異常応答・プロンプトインジェクションで真を騙られ得る。加えて Recover は「フック失敗等で退避できなかった場合は `wipCommitted: false` を返して続行する」契約のため、`continue` も退避失敗時に返り得る。そのため **continue / discard いずれの経路でも** worktree の削除は次の 2 条件を**両方**満たす場合にのみ実行する。
 
 1. **申告ゲート**: Recover エージェントが `wipCommitted: true` を返している（退避した場合、および退避すべき未 commit 変更が最初から無かった場合に true。フック失敗等で退避できなかった場合は false）
 2. **事実ゲート**: ホストが起動する読み取り専用の安全確認エージェントが、対象 worktree に未 commit 変更が残っていないこと（`git status --porcelain` の出力が空であること）を確認できている
 
-どちらか一方でも満たさない場合、あるいは安全確認自体が失敗した場合は worktree / branch を削除せず `failed` で保全する（fail-safe）。保全された残骸は次回ランの Recover が再度判断する。
+どちらか一方でも満たさない場合、あるいは安全確認自体が失敗した場合は worktree / branch を削除せず `failed` で保全する（fail-safe）。保全された残骸は次回ランの Recover が再度判断する。worktree が無い branch のみの残骸は削除対象も未 commit 変更も存在しないため、このゲートの対象外とする。
 
 ### Step 3: イシューごとに実装計画を立案する（Plan）
 
@@ -428,7 +428,7 @@ grep -n "PATCH_EOF\|boundaryNonce" script/implement-issue-tree.js
 # worktree 削除の安全性（Issue #139 / #142 / #148）
 # 1. 使い捨て worktree（review / pr-create）が削除されず記録のみであること
 grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree" script/implement-issue-tree.js
-# 2. discard の削除ゲート（申告 wipCommitted + ホスト側の実測）が両方あること
+# 2. continue / discard の削除ゲート（申告 wipCommitted + ホスト側の実測）が両方あること
 grep -n "wipCommitted === true\|verifyDiscardSafety" script/implement-issue-tree.js
 # 3. 孤立 worktree の削除に所有権照合（状態ファイル記録パスとの一致）があること
 grep -n "orphanDeleteCandidates" script/implement-issue-tree.js
@@ -438,7 +438,7 @@ grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scrip
 
 期待結果: `UNTRUSTED_POLICY` が `COMMON` 配列の末尾で参照され、あわせて `updateState` の State プロンプト（JSON マージ担当・掃除担当の両方）でも参照されていること。`untrusted(` が上記 8 関数それぞれの中で最低 1 回出現すること。`gh issue view` の全ヒットのうち、worktree routing ガード（implementPrompt 手順 0・fixPrompt 手順 0・recoverImplementPrompt 手順 0）と mergeExecutePrompt 手順 5 が `--json number,title` または `--json state` に限定されており、本文を読む箇所（planPrompt 手順 1・closePrompt 手順 2・recoverPrompt 手順 2c・Tree 手順 4）はいずれも「本文は非信頼データ」の注意文と同一手順内にあること。`monitorPrompt` に `gh pr merge` / `gh issue close` が出現しないこと（コンテキスト分離の確認）。
 
-worktree 削除の安全性については、`cleanupEphemeralWorktree` が 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree の自動削除廃止）、discard 経路が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
+worktree 削除の安全性については、`cleanupEphemeralWorktree` が 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree の自動削除廃止）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
 
 ## よくある失敗
 
@@ -499,7 +499,7 @@ cat _/issue-trees/42.json
 
 **重要遷移の書き込み検証と副作用の分離:** `reviewing`（branch / worktree の記録）と `monitoring`（`pr` の記録）への遷移は、失敗すると重複実装・重複 PR につながるため書き込み成功を検証し、1 回リトライしても失敗する場合は先へ進まず終端する。このとき **worktree 削除を同じ `updateState` 呼び出しに載せない**（Issue #143）。`updateState` は「JSON マージ」と「掃除」の AND を 1 つの `ok` として返すため、状態書き込みは成功して削除だけが失敗した場合（worktree が locked、Recover の discard で既に削除済み等）でも書き込み失敗と誤認され、正常に実装できたイシューが `failed` 終端になる。旧 worktree の削除は書き込み成功後に別呼び出し（`preserveWorktreeField: true`）で非致命的に行い、失敗はラン終了時の最終スイープに委ねる。同様に、Low 指摘の PR コメント投稿は `monitoring` 遷移（`pr` の永続化）より**後**に、かつ try/catch 付きで行う（Issue #136。投稿失敗・例外で PR 番号が未保存のまま `failed` 終端になると、次回実行が monitoring 再開経路へ入れず既存 PR を放置したまま重複 PR を作りうる）。
 
-**Recover の判断軸は Review とは別**である。Review は「正しいか・マージできるか」を判定するのに対し、Recover は「この途中作業から継続するのが妥当か」を判断する。動かない・未完成でも方向が妥当なら continue（残りは Implement が完成させる）。未 commit 変更は Recover が WIP commit として branch へ退避してから worktree を削除するため、continue / discard どちらの経路でもデータを失わない。discard の削除は退避完了を申告・実測の 2 段で検証してから行う（Step 2 の削除ゲート参照）。
+**Recover の判断軸は Review とは別**である。Review は「正しいか・マージできるか」を判定するのに対し、Recover は「この途中作業から継続するのが妥当か」を判断する。動かない・未完成でも方向が妥当なら continue（残りは Implement が完成させる）。未 commit 変更は Recover が WIP commit として branch へ退避してから worktree を削除するため、continue / discard どちらの経路でもデータを失わない。worktree の削除は continue / discard いずれでも退避完了を申告・実測の 2 段で検証してから行う（Step 2 の削除ゲート参照）。
 
 状態ファイルの `worktree` フィールドには実装エージェントが動作した worktree の絶対パスが記録される。Recover phase はこのフィールドと `git worktree list --porcelain` を使って残骸を特定する。
 
@@ -527,7 +527,7 @@ cat _/issue-trees/42.json
 
 **孤立 worktree の自動検出（orphan scan）**。エージェントが worktree 作成後・`worktreePath` 返却前にクラッシュすると、そのパスは状態ファイルにも削除候補にも載らず、checkout 済みの branch だけが残って次回実行の checkout を失敗させ続けることがある。これに対処するため、ラン開始時とラン終了時の両方で `git worktree list --porcelain` を取得し、ブランチ名（`<type>/<issueNumber>-<short-name>`）を実行キューの issue 番号と照合する。命名規約からの推測は行わず、ブランチ名一致のみを根拠にする。ラン開始時に一致した孤立 worktree は状態ファイルへ記録して Recover の対象に載せ、ラン終了時に一致したものは対応イシューが merged / closed 確定であれば削除候補へ、それ以外（failed 等）は削除せず状態ファイルへ記録して次回 Recover に委ねる。
 
-**中断・失敗後の残骸 worktree は、再実行時に Recover phase が自動処理する**。continue 判定の残骸は Recover が worktree を削除してから Implement で既存 branch を checkout し、discard 判定（空 worktree・方向違い等）は Recover が worktree と branch を削除する。ただし discard の削除は「Recover の `wipCommitted: true` 申告」と「ホスト側の読み取り専用エージェントによる未 commit 変更なしの実測」の**両方**を満たした場合にのみ実行する（Step 2 の削除ゲート参照）。満たせない場合は残骸を削除せず `failed` で保全し、次回ランの Recover に委ねる。手動で worktree を削除したり、削除確認に答えたりする必要はない。
+**中断・失敗後の残骸 worktree は、再実行時に Recover phase が自動処理する**。continue 判定の残骸は Recover が worktree を削除してから Implement で既存 branch を checkout し、discard 判定（空 worktree・方向違い等）は Recover が worktree と branch を削除する。ただし worktree の削除は continue / discard いずれの経路でも「Recover の `wipCommitted: true` 申告」と「ホスト側の読み取り専用エージェントによる未 commit 変更なしの実測」の**両方**を満たした場合にのみ実行する（Step 2 の削除ゲート参照）。満たせない場合は残骸を削除せず `failed` で保全し、次回ランの Recover に委ねる。手動で worktree を削除したり、削除確認に答えたりする必要はない。
 
 **failed / blocked の worktree のうち Recover が discard と判定しなかったものは削除しない**（デバッグ・手動再開用に残る）。不要になった場合は状態ファイルの `worktree` フィールドを参照して手動で削除する:
 
@@ -668,7 +668,7 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
 - `args.externalChecks` で明示した外部チェック App は、slug を問わず **HEAD sha に対する起動の確認**をマージの必須条件とする（Issue #155。cursor だけでなく sonarcloud 等も検証する）。cursor はレビューが 1 件以上到着していること（内容評価は監視側の needs-fix 判定が担う。Bugbot は APPROVED を出さないため state は問わない）、cursor 以外は check-run が 1 件以上ならその全件が許容 conclusion であること（failure・未完了があれば APPROVED レビューが存在しても不合格）、check-run が 0 件のときに限り「APPROVED レビューが 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」であることを条件とする。待機上限（最大 10 分）内に起動を確認できなければ「チェックなし」とみなさず `blocked` で停止する（App の障害・遅延・起動失敗時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも App ごとに件数・状態 enum のみを再取得して独立に検証する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
-- **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。discard の削除は WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する
+- **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。continue / discard いずれの worktree 削除も WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する
 
 ## sandbox 環境での実行
 
