@@ -224,7 +224,14 @@ EOF
 )"
 ```
 
-**既存 open PR の再利用（Issue #135）:** push 成功後・`gh pr create` の前に、このブランチに対する open PR が既に存在しないかを `gh pr list --state open --head <branch> --json number` で必ず確認する。存在する場合は新規作成せずその番号を `prNumber` として返し、本文に `Closes #<N>` が無ければ `gh pr edit --body-file` で追記する。中断再開（PR 作成直後のクラッシュ・`pr` 保存済み `failed` からの再実行）では open PR が残っていることがあり、確認せずに `gh pr create` すると必ず失敗して、生きている PR が追跡されないまま残るため。
+**既存 open PR の再利用（Issue #135）:** push 成功後・`gh pr create` の前に、このブランチに対する open PR が既に存在しないかを `gh pr list --state open --head <branch> --json number,baseRefName,headRefOid` で必ず確認する。中断再開（PR 作成直後のクラッシュ・`pr` 保存済み `failed` からの再実行）では open PR が残っていることがあり、確認せずに `gh pr create` すると必ず失敗して、生きている PR が追跡されないまま残るため。
+
+再利用の条件は 2 つあり、**両方を満たす場合にのみ**その番号を `prNumber` として返す。
+
+- `baseRefName` が指定 base ブランチと一致すること（同じ head から別 base（リリースブランチ等）へ開かれた PR を再利用すると、`base <branch>` の契約を迂回して意図しないブランチへマージされる）
+- `headRefOid` が push 後のローカル HEAD（`git rev-parse HEAD`）と一致すること（他者・別ランの push で HEAD が動いた PR を、検証していないコミットごとマージ対象にしない）
+
+条件を満たす PR を再利用する場合は、本文に `Closes #<N>`（および対象外項目があれば「対象外（out-of-scope）」節）が無ければ `gh pr edit --body-file` で追記する。条件を満たさない open PR しか存在しない場合は、再利用も新規作成も行わず `prNumber: 0` と理由を返して停止する（`branch` は保存されるため、次回実行は impl 手順 0b から回復する）。
 
 PR 作成が失敗した場合は `failed` として記録し、`branch` を保存する。push が成功していた場合、次回再実行時に impl 手順 0b-b（リモートブランチ再利用）がそのブランチを検出して push 済みコミットを保持したまま回復する（open PR がない状態のため 0b-a の PR 検索では拾えない点に注意）。
 
@@ -516,7 +523,7 @@ git worktree prune
 
 実装エージェントは着手時に以下の順で回復手順（手順 0b）を実行する。
 
-**0b-a（open PR 検索）**: `gh pr list --state open` でイシュー番号に対応する open PR が既に存在しないかを確認する。既存 PR が見つかった場合は新規 PR を作らず、そのブランチを取得して続きから作業し、そのブランチ名を branch として返す（実装フェーズの `prNumber` はホスト側で常に 0 として扱われるため PR 番号は返さない）。PR 番号の再利用は PR Create フェーズが担い、同じブランチに対する open PR を `gh pr list --state open --head <branch>` で再検出してその番号を `prNumber` として返す（Issue #135）。これにより中断再開時や monitoring フォールバック時に重複 PR の作成も `gh pr create` の失敗も起きない。
+**0b-a（open PR 検索）**: `gh pr list --state open` でイシュー番号に対応する open PR が既に存在しないかを確認する。既存 PR が見つかった場合は新規 PR を作らず、そのブランチを取得して続きから作業し、そのブランチ名を branch として返す（実装フェーズの `prNumber` はホスト側で常に 0 として扱われるため PR 番号は返さない）。PR 番号の再利用は PR Create フェーズが担い、同じブランチに対する open PR を `gh pr list --state open --head <branch>` で再検出し、base ブランチと head sha の一致を検証したうえでその番号を `prNumber` として返す（Issue #135。検証の詳細は Step 5.5 参照）。これにより中断再開時や monitoring フォールバック時に重複 PR の作成も `gh pr create` の失敗も起きない。
 
 **0b-b（リモートブランチ再利用）**: open PR が見つからない場合、`git ls-remote --heads origin` でイシュー番号を含むリモートブランチ（命名規約 `<type>/<N>-<short-name>`）が残っていないか確認する。「push 成功・PR 作成失敗」で残ったブランチを検出し、`git fetch origin <branch> && git checkout -B <branch> origin/<branch>` でそのブランチを取得して push 済みコミットを保持したまま続きを実装する。`origin/<base>` から新規作成し直さないため、push 済みコミットが孤児化しない。このブランチ名を branch として返し、prNumber は 0 のまま（PR は後続の PR Create フェーズが作成する）。
 

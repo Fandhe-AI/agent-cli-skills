@@ -1726,12 +1726,20 @@ function prCreatePrompt(item, impl, outOfScope) {
     // ブランチに対する open PR が既に存在しうる。その状態で gh pr create すると必ず失敗し、
     // 生きている PR が追跡されないまま残る（Issue #135）。push 後・PR 作成前に必ず確認する。
     `1b. push 成功後、このブランチに対する open PR が既に存在しないか確認する（中断再開時の重複 PR 作成・作成失敗を防ぐ）:`,
-    `     gh pr list --state open --head ${JSON.stringify(branch)} --json number,url --jq '.[0].number // empty'`,
-    `   出力が空でない場合は新規 PR を作成せず、その番号を prNumber として返す（手順 2・3 はスキップして手順 1c へ）。`,
+    `     gh pr list --state open --head ${JSON.stringify(branch)} --json number,baseRefName,headRefOid`,
+    `   判定は以下のとおり（base が異なる PR を誤って再利用すると base ${baseBranch} 契約を迂回してマージされるため、必ず検証する）:`,
+    `   - 出力が空の場合: 既存 PR なし。手順 2 へ進む。`,
+    `   - baseRefName が ${JSON.stringify(baseBranch)} と一致する PR がある場合: その headRefOid が push 後のローカル HEAD（git rev-parse HEAD）と一致することを確認する。`,
+    `     一致すればその番号を prNumber として再利用する（手順 2・3 はスキップして手順 1c へ）。`,
+    `     一致しない場合は他者・別ランの push で HEAD が動いているため、再利用も新規作成もせず prNumber: 0 と「既存 open PR #<番号> の head sha が push 済みローカル HEAD と一致しない」を理由として返す。`,
+    `   - baseRefName が ${JSON.stringify(baseBranch)} と異なる PR しか存在しない場合: 自動では扱えないため、再利用も新規作成もせず prNumber: 0 と「同一 head branch から別 base（<baseRefName>）への open PR #<番号> が存在する」を理由として返す。`,
     `1c. （既存 PR 再利用時のみ）gh pr view <番号> --json body で本文を取得し、「Closes #${item.number}」が含まれているか確認する。`,
     `   含まれていない場合は本文末尾に「Closes #${item.number}」を追記した全文を一時ファイルへ HEREDOC \`<<'EOF'\` で書き出し、`,
     `   gh pr edit <番号> --body-file <一時ファイル> で更新する（マージ時にイシューが自動クローズされないと監視が空転するため）。`,
-    `   summary には「既存 open PR #<番号> を再利用した」旨と Closes 追記の有無を書く。`,
+    ...(outOfScopeItems.length
+      ? [`   同様に、本文に「## 対象外（out-of-scope）」節が無い場合は下記テンプレートの同節を同じ更新で追記する（対象外項目は最終レポートの issue 化判断の材料であり、再利用経路でも失われてはならない）。`]
+      : []),
+    `   summary には「既存 open PR #<番号> を再利用した」旨と Closes 追記の有無を書き、その後は手順 4 へ進む。`,
     `2. （1b で既存 PR が見つからなかった場合のみ）create-pr スキルに従い base ${baseBranch} で PR を作成する。`,
     // 対象外セクションは Implement エージェントの summary から抽出したテキストであり、
     // 元をたどれば Issue 本文由来の内容を含みうる非信頼データである。PR body に文言として
@@ -2833,7 +2841,14 @@ async function runImplement(item) {
         // 保存を試みる（Cursor Bugbot 指摘対応）。直前の reviewing 書き込みが失敗しているため
         // 成功は期待できないが、一時的な失敗（一過性の I/O エラー・ロック競合）であればここで
         // 永続化でき、次回実行が implement 手順 0b のブランチ再利用で回復できる。
-        // cleanupWorktree は指定しない（状態未永続化のまま worktree を削除すると回復手段を失う）。
+        // cleanupWorktree には旧 worktree（フォールバック前）のみを指定する。実装 worktree は
+        // 指定しない（状態未永続化のまま削除すると回復手段を失う）。旧 worktree を指定するのは、
+        // updateState が呼び出し時点で削除意図を sweepEligiblePaths へ登録し、書き込みが失敗して
+        // 実削除に至らなくても最終スイープが回収できるようにするため（reviewing 書き込みから
+        // cleanupWorktree を外したことで失われる登録をここで取り戻す）。実際の削除は JSON マージ
+        // 成功時にのみ実行される（未永続化のまま削除しない fail-safe は updateState 側が担保）。
+        // 戻り値の AND に掃除結果が混ざるが、failedSaved は警告ログの出し分けにしか使わないため
+        // 終端の分岐を誤らせない。
         const failedSaved = await updateState(item.number, {
           status: 'failed',
           pr: 0,
@@ -2841,7 +2856,9 @@ async function runImplement(item) {
           worktree: impl.worktreePath,
           fixCount: savedFixCount,
           note: reason,
-        })
+        }, fallbackOldWorktree && fallbackOldWorktree !== impl.worktreePath
+          ? { cleanupWorktree: fallbackOldWorktree, preserveWorktreeField: true }
+          : {})
         if (!failedSaved) {
           log(`⚠️ issue #${item.number}: failed 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
         }
@@ -2849,12 +2866,16 @@ async function runImplement(item) {
         return false
       }
       // 状態の永続化に成功した後で、フォールバック前の旧 worktree を非致命的に削除する。
-      // preserveWorktreeField: true は必須（patch が空のため、指定しないと掃除エージェントが
-      // .worktree を "" に上書きし、いま記録したばかりの実装 worktree の追跡を失う）。
+      // patch には実装 worktree の再表明（冪等）を載せる。空 patch にすると JSON マージ側が
+      // 「何もマージしない」タスクになり、ok:false を返した場合に updateState の fail-safe
+      // （マージ失敗時は掃除をスキップ）で削除自体が実行されなくなるため。
+      // preserveWorktreeField: true は多層防御（patch.worktree が削除対象と異なるため
+      // clearWorktreeAfterCleanup は元々 false だが、記録したばかりの実装 worktree の追跡を
+      // 掃除エージェントに消させないことを明示する）。
       // 戻り値を無視してよいのは、削除意図が updateState 内の sweepEligiblePaths へ
       // 掃除エージェント起動前に登録済みで、失敗してもラン終了時の最終スイープが回収するため。
       if (fallbackOldWorktree && fallbackOldWorktree !== impl.worktreePath) {
-        const cleanedOk = await updateState(item.number, {}, {
+        const cleanedOk = await updateState(item.number, { worktree: impl.worktreePath }, {
           cleanupWorktree: fallbackOldWorktree,
           preserveWorktreeField: true,
         })
