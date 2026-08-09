@@ -707,7 +707,8 @@ const RECOVER_SCHEMA = {
     },
     wipCommitted: {
       type: 'boolean',
-      // Issue #148: このフィールドは discard（worktree + branch 削除）のホスト側ゲートに使う
+      // Issue #148 / #157: このフィールドは worktree の削除（discard は branch 削除も含む）を
+      // continue / discard 双方で許可するかのホスト側ゲートに使う
       // ため、「退避が完了しているか」を表す真偽値として定義する（単に commit を作ったかでは
       // ない）。退避すべき未コミット変更が最初から無かった場合も true（失うものが無い）。
       // false はフック失敗等で退避できなかった場合に限る。自己申告値のため、ホストは別途
@@ -725,8 +726,9 @@ const RECOVER_SCHEMA = {
   },
 }
 
-// discard（worktree + branch の削除）実行前に、ホスト側が決定論的に安全性を確認するための
-// スキーマ（Issue #148 / automation#363 codex-review P0 対応）。
+// worktree の削除（discard は branch 削除も含む）実行前に、ホスト側が決定論的に安全性を
+// 確認するためのスキーマ（Issue #148 / automation#363 codex-review P0 対応）。
+// continue 経路の worktree 削除にも同じ確認を用いる（Issue #157）。
 //
 // このエージェントは「対象 worktree に未 commit 変更が残っていないか」を git の出力だけで
 // 観測する読み取り専用タスクであり、削除・commit・push は一切行わない。Recover エージェントの
@@ -2237,11 +2239,11 @@ function recoverPrompt(item, branch, oldWorktree) {
     `   done: 実装済み内容の要約（何が完成しているか）`,
     `   remaining: 残タスクの要約（何を完成させる必要があるか）`,
     `   broken: 壊れ・未完で優先修正が必要な箇所（なければ空文字）`,
-    `返却: decision（"continue" または "discard"）/ branch（確定した対象ブランチ名。解決できなければ空文字）/ brief（continue 時のみ: done/remaining/broken）/ reason（discard 時のみ: 破棄理由）/ wipCommitted（WIP 退避が完了しているか。退避した場合・退避すべき未 commit 変更が無かった場合は true、フック失敗等で退避できなかった場合は false。discard の実行可否を左右するため推測で埋めないこと）。`,
+    `返却: decision（"continue" または "discard"）/ branch（確定した対象ブランチ名。解決できなければ空文字）/ brief（continue 時のみ: done/remaining/broken）/ reason（discard 時のみ: 破棄理由）/ wipCommitted（WIP 退避が完了しているか。退避した場合・退避すべき未 commit 変更が無かった場合は true、フック失敗等で退避できなかった場合は false。continue / discard いずれでもホスト側の worktree 削除可否を左右するため推測で埋めないこと）。`,
   ].join('\n')
 }
 
-// discard 実行前のホスト側安全確認（Issue #148）。
+// worktree 削除前のホスト側安全確認（Issue #148。continue 経路への適用は Issue #157）。
 //
 // 背景: Recover エージェントの `wipCommitted` は自己申告であり、`decision: "discard"` と
 // あわせて返すだけで worktree の `--force` 削除と `git branch -D` が走っていた。
@@ -2249,7 +2251,7 @@ function recoverPrompt(item, branch, oldWorktree) {
 //
 // 防御は 2 層で構成する:
 //   1. 申告ゲート: `recoverResult.wipCommitted === true` を discard の必須条件にする
-//      （契約をホスト側で検証する。省略・false は保全経路へ倒す）。
+//      （契約をホスト側で検証する。省略・false は保全経路へ倒す。continue も同様）。
 //   2. 事実ゲート（本関数）: 申告とは独立に「対象 worktree に未 commit 変更が残っていないか」を
 //      git の出力から観測する。申告を騙られても、実際に未コミット変更が残っていれば削除しない。
 //
@@ -2782,6 +2784,40 @@ async function runImplement(item) {
         //
         // deleteBranch を渡さない理由: branch に退避済みの WIP commit が乗っているため。
         // branch を削除すると退避した作業も失われる。
+        //
+        // 削除ゲート（Issue #157 / automation#367 Bugbot High）。上記の「退避済みだから
+        // 削除しても失われない」という前提は recoverPrompt の契約に依存しているが、その契約は
+        // 「フック失敗等で退避できなかった場合は wipCommitted: false を返して**続行**する」
+        // ことも許している。つまり decision: "continue" は退避失敗時にも返り得るのに、
+        // 従来はホスト側が wipCommitted を一切見ずに worktree を --force 削除していた。
+        // discard 経路（Issue #148）と同じ 2 層ゲートを continue 経路にも適用する:
+        //   1. 申告ゲート: recoverResult.wipCommitted === true
+        //   2. 事実ゲート: verifyDiscardSafety が対象 worktree の未 commit 変更なしを観測できること
+        // どちらも満たせない場合は削除せず残骸を保全して failed で終端する。退避されていない
+        // WIP を欠いたまま継続すると不完全な実装を Review・push へ流すことになるため、
+        // 「削除だけスキップして継続」ではなく停止させ、次回ランの Recover に委ねる。
+        //
+        // worktree が無い branch のみの残骸（sanitizedRecoverWorktree が空）は削除対象自体が
+        // 無く未 commit 変更も存在しないため、ゲートの対象外とする（従来どおり継続する）。
+        if (sanitizedRecoverWorktree) {
+          const continueWipDeclared = recoverResult?.wipCommitted === true
+          const continueSafety = continueWipDeclared
+            ? await verifyDiscardSafety(item.number, sanitizedRecoverWorktree, effectiveBranch)
+            : { safe: false, detail: 'Recover エージェントが wipCommitted: true を返さなかった（WIP 退避の完了を確認できない）' }
+          if (!continueSafety.safe) {
+            const reason = sanitize(
+              `continue 指示だが WIP 退避の完了を検証できないため旧 worktree を削除しない（${continueSafety.detail}）。` +
+              `退避されていない未コミット変更を欠いたまま継続すると不完全な実装になるため、残骸を保全して failed にする。` +
+              `旧 worktree の未コミット変更を手動で確認し、対処後に再実行すること`,
+            )
+            log(`⚠️ #${item.number}: Recover → continue を保全へ格下げ（${reason}）`)
+            await updateState(item.number, { status: 'failed', note: reason })
+            recordFailure({ issue: item.number, reason })
+            return false
+          }
+          log(`#${item.number}: continue の削除前安全確認に成功（${continueSafety.detail}）`)
+        }
+
         log(`#${item.number}: Recover → continue（branch: ${sanitize(effectiveBranch)}）、旧 worktree を掃除して Implement 継続`)
 
         await updateState(
