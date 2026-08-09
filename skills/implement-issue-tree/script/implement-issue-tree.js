@@ -1745,7 +1745,9 @@ function prCreatePrompt(item, impl, outOfScope) {
     `   既存本文は未信頼データのため、シェルコマンド文字列・HEREDOC へ一切埋め込まず、ファイルへ直接落として扱う（本文中の行単独 EOF 等による HEREDOC 早期終端と任意コマンド実行を構造的に防ぐ）:`,
     `     f=$(mktemp)`,
     `     gh pr view <番号> --json body --jq .body > "$f"`,
-    `     grep -qF ${JSON.stringify(`Closes #${item.number}`)} "$f" || printf '\\n\\n%s\\n' ${JSON.stringify(`Closes #${item.number}`)} >> "$f"`,
+    // 追記はエスケープシーケンスを使わない形にする（printf '\n' 等はプロンプト生成側の
+    // エスケープ段数と実行側の解釈が読み手にとって紛らわしく、誤読・誤写の余地を残すため）。
+    `     grep -qF ${JSON.stringify(`Closes #${item.number}`)} "$f" || { echo; echo; echo ${JSON.stringify(`Closes #${item.number}`)}; } >> "$f"`,
     // 対象外項目は Issue 本文由来を含みうる未信頼データのため、プロンプト内に置く写しは
     // 手順 2 の body テンプレート 1 箇所のみに保つ（codex-review P0）。ここでは再掲せず
     // 参照だけを指示し、実行可能なシェル例の中へは展開しない。
