@@ -2924,14 +2924,31 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
               effort: 'medium',
               schema: RESOLVE_SCHEMA,
             })
-            // エージェント返却も信頼境界の外側として扱う: resolved に含まれる値を鵜呑みにせず、
-            // 形式検証（sanitizeThreadId）と今回の候補集合（resolveTargets）との突き合わせを
-            // 再度行ってからのみ確定させる。
-            const verifiedResolved = new Set(
+            // エージェント返却も信頼境界の外側として扱う: resolved / securityHeld に含まれる
+            // 値を鵜呑みにせず、形式検証（sanitizeThreadId）と今回の候補集合（resolveTargets）
+            // との突き合わせを再度行ってからのみ確定させる。
+            const rawResolved = new Set(
               (Array.isArray(r?.resolved) ? r.resolved : [])
                 .map((id) => sanitizeThreadId(id))
                 .filter((tid) => tid && resolveTargets.includes(tid)),
             )
+            // codex-review Low 対応（PR #111 Bugbot 指摘）: resolve エージェントが契約に反し
+            // 同一 threadId を resolved と securityHeld の両方へ返した場合、fail-safe の hold
+            // （人間承認待ち）が resolved 側の処理で上書きされ lastUnresolvedComments から
+            // 除外されてしまう危険がある。securityHeld を resolved より優先させ、重複した
+            // threadId は resolved 集合から除外する（securityHeld 側で処理する）ことで、
+            // 「held が resolved として報告される」経路を構造的に断つ。
+            const rawSecurityHeld = new Set(
+              (Array.isArray(r?.securityHeld) ? r.securityHeld : [])
+                .map((id) => sanitizeThreadId(id))
+                .filter((tid) => tid && resolveTargets.includes(tid)),
+            )
+            for (const tid of rawSecurityHeld) {
+              if (rawResolved.delete(tid)) {
+                log(`⚠️ #${item.number}: resolve エージェントが threadId（${tid}）を resolved と securityHeld の両方に返した契約違反を検出、securityHeld（held）を優先した`)
+              }
+            }
+            const verifiedResolved = rawResolved
             for (const tid of verifiedResolved) {
               const idx = recordedCandidateIndex.get(tid)
               if (idx !== undefined && !outOfScopeLog[idx].startsWith('[resolved] ')) {
@@ -2947,11 +2964,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             // 記録が見つからない」場合にも計上されるようになった（RESOLVE_SCHEMA.securityHeld
             // 参照）ため、ログ文言を「セキュリティ相当」固定から二値の理由を包含する表現へ
             // 汎化した（片方の原因のみを示す文言が残ると調査時に誤誘導するため）。
-            const securityHeld = new Set(
-              (Array.isArray(r?.securityHeld) ? r.securityHeld : [])
-                .map((id) => sanitizeThreadId(id))
-                .filter((tid) => tid && resolveTargets.includes(tid)),
-            )
+            const securityHeld = rawSecurityHeld
             for (const tid of securityHeld) {
               const idx = recordedCandidateIndex.get(tid)
               if (idx !== undefined && !outOfScopeLog[idx].startsWith('[security-held: 要人間承認] ')) {
