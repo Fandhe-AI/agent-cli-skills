@@ -5289,18 +5289,23 @@ if (!residualObserved) {
 //   worktree は merged 確定時の掃除・次ラン Recover の再利用対象で、「手動掃除の対象」として
 //   返すと消費側が failed イシューの未マージ成果を削除しかねない。implement を含む本ラン
 //   積み増しの総数は residualWorktrees.addedThisRun が別途返す）。
-// autoMerge（Issue #165）: 本ランで自動マージが有効だったか。false のランでは「マージ待ち PR
-// 一覧（autoMerge 無効による blocked）」を最終レポートで追跡するための判定材料になる。
+// autoMerge（Issue #165 → PR #182 codex P0 → 下流 actions#66 codex-review P1 で再修正）:
+//   常に実効状態（= false 固定）を返す。PR #182 codex P0 以降この実行基盤は autoMerge の値によらず
+//   無条件 fail-closed で新規マージ経路を開かないため、要求値をそのまま返すと「本ランで自動マージが
+//   有効だったか」という消費側の後方互換判定が実態と食い違う（要求 true でも実効は常に無効）。
+// autoMergeRequested（下流 actions#66 codex-review P1）: args.autoMerge の要求値（受理はするが
+//   実効しない）。要求値を追跡したい消費側はこちらを参照する。false のランでは autoMerge と同じく
+//   「マージ待ち PR 一覧（blocked）」を最終レポートで追跡するための判定材料になる点は従来どおり。
 // mergeGuard（PR #182 codex P0）: 自動マージは autoMerge の値によらずこの実行基盤では提供されない
 //   （grant 偽造で偽造不能なマージ認可を hook で検証できないため）。grant / canary /
 //   branch-protection ランタイムゲートは撤去し、hook は deny 専用へ降格した。hookDenyOnly: true は
 //   その方針を返却値として明示する（レポート側で「自動マージ無効・PR はマージ可能状態で人間が
-//   マージ」を案内する材料）。autoMerge:true のランの終端 note には AUTO_MERGE_UNSUPPORTED_REASON が
-//   記録される。
+//   マージ」を案内する材料）。autoMergeRequested:true のランの終端 note には
+//   AUTO_MERGE_UNSUPPORTED_REASON が記録される。
 // residualWorktrees（PR #588 codex P1）: 使い捨て worktree を削除しない設計の下でディスク枯渇を防ぐ
 //   残置上限ゲートの観測結果。observed: false はラン開始時の worktree 観測が成立しなかった（未確定）
 //   ことを示し、この場合 observedAtStart / overLimit は信頼できないため最終レポートで「未観測」を
 //   明示すること。overLimit: true は次ラン開始時に新規着手が停止する見込みで、git worktree remove に
 //   よる手動掃除の案内を最終レポートに含めること。suppressed は本ランで残置上限超過により新規着手を
 //   抑止したか（monitoring 再開は抑止対象外）。limit: 0 は上限なし（チェック無効）。
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled, externalChecks: externalCheckApps, externalChecksConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
+return { parent, baseBranch, parallel: concurrency, autoMerge: false, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalChecksConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
