@@ -37,7 +37,32 @@
 #     "agent_id" が現れない入力（main スレッド）は jq 不在でも許可する
 #     （jq 不在環境で main スレッドをロックアウトしないための入口判定）
 #   - 上記以外のコマンド（gh pr comment "@cursor review"・読み取り系等）→ 許可（出力なし exit 0）
-
+#
+# サブコマンド判定はトークン化 + 語順部分列一致で行う（Fandhe-AI/actions PR #66 codex P0）:
+#   従来は `gh[[:space:]]+pr[[:space:]]*merge` のように「gh」「pr」「merge」の**隣接**を要求する
+#   正規表現だったため、`gh -R owner/repo pr merge` / `gh --repo owner/repo pr merge` のように
+#   サブコマンド前へ gh のグローバルオプション（-R/--repo・--hostname 等）を挟む正規の CLI 構文で
+#   容易に迂回できた（同様に `gh[[:space:]]+api` も `gh --repo o/r api ...` で迂回できていた）。
+#   個別のフラグ名を列挙して読み飛ばす方式（ブラックリスト）は、gh が新設する未知のグローバル
+#   オプションに追従できず再発するため採用しない。代わりに以下の方式でフラグの語彙に依存せず
+#   汎用的に扱う:
+#     1. コマンド区切り（; & | && ||）でセグメントに分割する（`;` 等を跨いだ語順一致による
+#        誤検知を防ぐため。例: `gh pr view 1 && git merge main` は "gh" "pr" "merge" が
+#        セグメントをまたぐため deny されない）。
+#     2. セグメントごとに、空白区切りの各トークンのうち `-` で始まるもの（フラグ。値の有無を
+#        問わず）をすべて除去したトークン列を作る。値トークン（`-R owner/repo` の
+#        `owner/repo` 側）は孤立して残るが、判定は**隣接ではなく語順の部分列一致**（後述）で
+#        行うため、孤立した値トークンが偶然すり抜けの原因にはならない（値トークンが
+#        たまたま "pr" や "merge" と完全一致しない限り無害。あえて「フラグとその次の値トークン」
+#        をまとめて削る方式は採らない — その方式では `gh --version pr merge` のような
+#        引数なしフラグの直後に来た本物のサブコマンド語まで値と誤認して削ってしまい、
+#        `gh` → `pr` → `merge` の並びを見逃す fail-open 方向の誤りになるため）。
+#     3. フラグ除去後のトークン列に「gh」→「pr」→「merge」（または「gh」→「api」等）が
+#        **この順序で**（連続でなくてよい）現れるかを判定する。順序判定のため、値トークンの
+#        混入は誤検知（over-deny）方向にのみ働き、見逃し（under-deny）方向には働かない。
+#   `gh pr review --approve` の `--approve`自体はフラグなのでフラグ除去後には残らない。
+#   そのため「gh」→「pr」→「review」の順序判定はフラグ除去後トークン列で行い、`--approve` の
+#   有無は元のセグメント（フラグ除去前）に対して判定する。
 set -u
 
 # deny 応答を出力して終了する。reason は本スクリプト内の固定文言のみを渡す契約
@@ -90,21 +115,21 @@ if printf '%s' "$cmd" | grep -qE '[$]\{?IFS'; then
   deny "IFS 由来の展開（\$IFS / \${IFS} / \${IFS%?} 等）を含むコマンドは deny（トークン分割難読化を防ぐ best-effort。fail-closed）"
 fi
 
-# --- deny 照合: 難読化対策の正規化後にパターン評価 --------------------------------------
-# subagent からのマージ系コマンドはすべて deny（allow 経路なし）。deny 判定に限り、
+# --- 正規化: 難読化対策（クォート分割・行継続・IFS 直書き等）を潰す ----------------------
+# subagent からのマージ系コマンドはすべて deny（allow 経路なし）。以下の順で正規化してから
+# セグメント分割・トークン判定を行う:
 #   (1) バックスラッシュ + 改行の行継続を除去
 #   (2) 改行 → 空白
 #   (3) ${IFS} / $IFS（波括弧あり/なし）を空白へ置換（gh${IFS}pr${IFS}merge のトークン分割難読化を潰す）
 #   (4) シングル/ダブルクォート文字の除去（g''h → gh 等のクォート分割難読化を潰す）
 #   (5) 残存する単独バックスラッシュを全除去（g\h pr merge / gh a\lias 等の直接実行形を潰す）
 #   (6) 連続空白の圧縮
-# の順で正規化してから照合する。(5) のバックスラッシュ全除去は deny の一致範囲を広げる方向
-# のみで安全（fail-closed）。${IFS} 展開や ANSI-C クォート（$'...'）の「意味的デコード」は
-# 文字削除では追えないため、それらは本正規化ではなく最前段の「デコード用プリミティブの存在
-# 検知 deny」で raw 段階で弾いている（波括弧なし $IFS の直書きはここでも (3) で空白化される）。
-# これらにより既知の直接実行形は塞ぐが、間接実行（eval・base64 復元・変数間接呼び出し・
-# コマンド置換 $(...) 等）までは文字列照合では防げない（残存リスク。ファイル冒頭コメント・
-# SKILL.md 参照。実強制は「自動マージを行わない」方針とサーバ側 branch protection が担う）。
+# ${IFS} 展開や ANSI-C クォート（$'...'）の「意味的デコード」は文字削除では追えないため、
+# それらは本正規化ではなく前段の「デコード用プリミティブの存在検知 deny」で raw 段階で
+# 弾いている。これらにより既知の直接実行形は塞ぐが、間接実行（eval・base64 復元・
+# 変数間接呼び出し・コマンド置換 $(...) 等）までは文字列照合では防げない（残存リスク。
+# ファイル冒頭コメント・SKILL.md 参照。実強制は「自動マージを行わない」方針とサーバ側
+# branch protection が担う）。
 norm=$(printf '%s\n' "$cmd" \
   | awk '{ if (sub(/\\$/, "")) printf "%s", $0; else print }' \
   | tr '\n' ' ' \
@@ -113,44 +138,84 @@ norm=$(printf '%s\n' "$cmd" \
   | tr -d "\\\\" \
   | tr -s '[:space:]' ' ')
 
-nmatches() {
-  printf '%s' "$norm" | grep -qE "$1"
+# --- セグメント分割: コマンド区切り（; & | && ||）ごとに判定する -------------------------
+# 分割しないと「gh pr view 1 && git merge main」のような無関係な複合コマンドが、文字列全体
+# を対象にした語順一致で誤って deny されうる（"gh" → "pr" → "merge" が偶然この順で並ぶが
+# 別コマンドの語）。awk の ERE 代替（gsub の POSIX 最長一致規則）により `&&`/`||` は
+# 単一文字の `&`/`|` より優先して区切り文字として扱われる。
+segments_raw=$(printf '%s\n' "$norm" | awk '{ gsub(/&&|\|\||[;&|]/, "\n"); print }')
+
+# フラグトークン（`-` で始まるすべてのトークン）を除去したトークン列を返す。
+# 値トークンは孤立して残る（コメント冒頭の設計注記のとおり、これは語順部分列判定と
+# 組み合わせる前提で安全側）。
+strip_flags() {
+  local seg="$1" tok out=""
+  for tok in $seg; do
+    case "$tok" in
+      -*) : ;;
+      *) out="$out $tok" ;;
+    esac
+  done
+  printf '%s' "$out"
 }
 
-# gh pr merge（あらゆる形）。pr と merge の間は [[:space:]]* とし、行継続除去で密着した形
-# （prmerge）も検出する。allow 経路は撤去したため grant による例外は一切ない。
-if nmatches 'gh[[:space:]]+pr[[:space:]]*merge'; then
-  deny "subagent からの gh pr merge は禁止（この基盤では自動マージを行わない。マージは GitHub 上で人間が行う）"
-fi
+# $1 に渡したトークン列（空白区切り、word-splitting 前提）の中に、$2 以降で指定した語が
+# **この順序で**（連続でなくてよい）出現するかを判定する。
+contains_subsequence() {
+  local tokens="$1"; shift
+  local -a want=("$@")
+  local idx=0 tok
+  for tok in $tokens; do
+    if [ "$tok" = "${want[$idx]}" ]; then
+      idx=$((idx + 1))
+      [ "$idx" -eq "${#want[@]}" ] && return 0
+    fi
+  done
+  return 1
+}
 
-if nmatches 'gh[[:space:]]+api'; then
-  # REST merge: PUT repos/<owner>/<repo>/pulls/<n>/merge
-  if nmatches 'pulls/[^[:space:]]*/merge'; then
-    deny "subagent からの REST merge（gh api pulls/<n>/merge）は禁止"
-  fi
-  # REST ブランチマージ: POST repos/<owner>/<repo>/merges
-  if nmatches '/merges([[:space:]?]|$)'; then
-    deny "subagent からの REST ブランチマージ（gh api repos/<o>/<r>/merges）は禁止"
-  fi
-  # GraphQL merge / auto-merge 有効化 / ref 直接マージ mutation。
-  # mergeBranch は PR を経由せず head ref を base へ直接マージできる迂回経路として塞ぐ。
-  if nmatches 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
-    deny "subagent からの GraphQL merge 系 mutation（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）は禁止"
-  fi
-fi
+while IFS= read -r seg; do
+  [ -z "$seg" ] && continue
+  seg_nf=$(strip_flags "$seg")
 
-# レビュー承認（外部レビューゲートの自作自演を防ぐ）
-if nmatches 'gh[[:space:]]+pr[[:space:]]+review' && nmatches '(^|[[:space:]])--approve([[:space:]]|$|=)'; then
-  deny "subagent からの gh pr review --approve は禁止"
-fi
+  # gh pr merge（あらゆる形。グローバルオプションの挟み込みで迂回不可）
+  if contains_subsequence "$seg_nf" gh pr merge; then
+    deny "subagent からの gh pr merge は禁止（この基盤では自動マージを行わない。マージは GitHub 上で人間が行う）"
+  fi
 
-# 別名・拡張経由の迂回封じ: gh alias（set / import 等すべて）・gh extension（install 等）
-if nmatches 'gh[[:space:]]+alias([[:space:]]|$)'; then
-  deny "subagent からの gh alias は禁止（別名経由のマージ迂回を防ぐ）"
-fi
-if nmatches 'gh[[:space:]]+extensions?([[:space:]]|$)'; then
-  deny "subagent からの gh extension は禁止（拡張経由のマージ迂回を防ぐ）"
-fi
+  # gh api 経由のマージ（グローバルオプションの挟み込みで迂回不可）
+  if contains_subsequence "$seg_nf" gh api; then
+    # REST merge: PUT repos/<owner>/<repo>/pulls/<n>/merge
+    if printf '%s' "$seg" | grep -qE 'pulls/[^[:space:]]*/merge'; then
+      deny "subagent からの REST merge（gh api pulls/<n>/merge）は禁止"
+    fi
+    # REST ブランチマージ: POST repos/<owner>/<repo>/merges
+    if printf '%s' "$seg" | grep -qE '/merges([[:space:]?]|$)'; then
+      deny "subagent からの REST ブランチマージ（gh api repos/<o>/<r>/merges）は禁止"
+    fi
+    # GraphQL merge / auto-merge 有効化 / ref 直接マージ mutation。
+    # mergeBranch は PR を経由せず head ref を base へ直接マージできる迂回経路として塞ぐ。
+    if printf '%s' "$seg" | grep -qE 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
+      deny "subagent からの GraphQL merge 系 mutation（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）は禁止"
+    fi
+  fi
+
+  # レビュー承認（外部レビューゲートの自作自演を防ぐ）。--approve はフラグなので
+  # strip_flags 後には残らない。元セグメント（フラグ除去前）に対して判定する。
+  if contains_subsequence "$seg_nf" gh pr review \
+    && printf '%s' "$seg" | grep -qE '(^|[[:space:]])--approve([[:space:]]|$|=)'; then
+    deny "subagent からの gh pr review --approve は禁止"
+  fi
+
+  # 別名・拡張経由の迂回封じ: gh alias（set / import 等すべて）・gh extension（install 等）
+  if contains_subsequence "$seg_nf" gh alias; then
+    deny "subagent からの gh alias は禁止（別名経由のマージ迂回を防ぐ）"
+  fi
+  if contains_subsequence "$seg_nf" gh extension \
+    || contains_subsequence "$seg_nf" gh extensions; then
+    deny "subagent からの gh extension は禁止（拡張経由のマージ迂回を防ぐ）"
+  fi
+done <<< "$segments_raw"
 
 # マージ系以外のコマンド（gh pr comment による催促・読み取り系等）は許可
 exit 0
