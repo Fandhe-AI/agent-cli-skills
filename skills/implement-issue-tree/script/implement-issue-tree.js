@@ -231,7 +231,11 @@ function boundaryNonce(keyMaterial) {
   if (!material) {
     throw new Error('boundaryNonce: keyMaterial が空（囲む対象の内容を渡すこと）')
   }
-  // FNV-1a 系の 4 系列で混ぜる（base36 出力で 20 文字以上・実質 128 bit 相当の鍵空間）。
+  // FNV-1a 系の 4 系列で混ぜる（各 32bit 値を base36・7 桁ゼロ埋めで連結 = 常に 28 文字・
+  // 実質 128 bit 相当の鍵空間）。ゼロ埋めは長さ下限の保証（merge grant nonce は
+  // MERGE_GRANT_NONCE_RE の [a-z0-9]{16,128} 下限に依存するため、稀に各値が小さく合計 16 桁
+  // 未満になると grant 発行が形式不一致で失敗する。padStart で構成的に回避。決定的なので
+  // 同一 material は resume でも同一 nonce を再現しキャッシュを外さない）。
   const input = `${boundaryNonceSeed}:${material.length}:${material}`
   let h1 = 0x811c9dc5
   let h2 = 0xcbf29ce4
@@ -244,7 +248,8 @@ function boundaryNonce(keyMaterial) {
     h3 = Math.imul(h3 ^ (c + i), 0x27220a95) >>> 0
     h4 = Math.imul(h4 + (c ^ (i & 0xff)), 0xc2b2ae35) >>> 0
   }
-  return `${h1.toString(36)}${h2.toString(36)}${h3.toString(36)}${h4.toString(36)}`
+  const pad = (h) => h.toString(36).padStart(7, '0')
+  return `${pad(h1)}${pad(h2)}${pad(h3)}${pad(h4)}`
 }
 
 // ブランチ名として不正な文字（スペース・セミコロン等）を拒否する。
@@ -2968,26 +2973,35 @@ const MERGE_GRANT_RESIDUAL_REASON =
 // --- branch protection のランタイムゲート（security-auditor 3 回目監査・advisor 助言）---
 // 自動マージの load-bearing な強制はサーバ側にある。hook（ローカル）は compromised な
 // エージェントに対して文字列照合の best-effort に留まるが、GitHub のサーバ側 branch protection
-// は「第三者レビュー必須・required status checks・直接 push 禁止」を、ローカルで何が実行されても
-// 迂回できない形で強制する。自動マージを有効化する前に対象ベースブランチの保護を観測し、
-// 要件未達なら自動マージ無効（recoveryOnly 相当）へ倒す（canary と AND 条件。両方通過で初めて有効）。
+// は「第三者（非 author）承認必須・承認後 HEAD 更新で承認失効・通常/force push 禁止・管理者含む
+// enforcement・required status checks」を、ローカルで何が実行されても迂回できない形で強制する。
+// 自動マージを有効化する前に対象ベースブランチの保護を観測し、これら 5 要件を positive に
+// AND 検証し、1 つでも未確認なら自動マージ無効（recoveryOnly 相当）へ倒す（canary と AND 条件。
+// 両方通過で初めて有効）。force push 禁止は通常直接 push を禁止しないため、両者を別要件として
+// 要求する（codex P0 対応: force push 禁止のみを直接 push 禁止と誤判定しない）。
 //
 // 観測は未信頼テキストを一切読まない host 指示専用の小型エージェント（haiku）に、保護 API の
 // 構造化フィールドのみを取得させる。classic protection（.../branches/<b>/protection）と rulesets
 // の両方を試み、いずれかで要件を確認できれば満たしたと判定する。取得失敗・404（保護なし）・
 // スキーマ不一致はすべて「未確認」= 自動マージ無効（fail-closed）。
+// 5 要件を positive 確認するためのスキーマ（codex P0 対応）。従来は allowsForcePush=false のみで
+// directPushBlocked を true にしていたが、force push 禁止は通常の直接 push を禁止しない。また
+// enforce_admins / bypass_actors / dismiss_stale_reviews / 非 author 承認を判定に使っていなかった。
+// その結果 (a) automation が base へ通常 push できる, (b) 管理者・bypass actor が保護を迂回できる,
+// (c) 承認後 HEAD 更新で古い承認を再利用できる 構成でも satisfied=true になっていた。各フィールドは
+// 「肯定的に確認できたときだけ true/件数」を返し、取得不能・不明はすべて安全側（未達）へ倒す契約。
 const BRANCH_PROTECTION_SCHEMA = {
   type: 'object',
   required: ['rawFound'],
   properties: {
     rawFound: { type: 'boolean', description: 'classic protection または ruleset のいずれかで保護設定を取得できた場合 true。404・取得失敗は false' },
-    requiredApprovingReviewCount: { type: 'integer', description: '必須の承認レビュー数（required_pull_request_reviews.required_approving_review_count 相当。取得できなければ 0）' },
-    dismissStaleReviews: { type: 'boolean', description: 'dismiss_stale_reviews 相当。取得できなければ false' },
-    requiresNonAuthorApproval: { type: 'boolean', description: 'require_last_push_approval 等、PR author 以外の承認を要求する設定が確認できれば true。取得できなければ false' },
-    requiredStatusChecksCount: { type: 'integer', description: 'required status checks の件数（required_status_checks.checks / contexts の長さ相当。取得できなければ 0）' },
-    allowsForcePush: { type: 'boolean', description: 'allow_force_pushes.enabled 相当。直接 push / force push が許可されていれば true。取得できなければ（不明として）true 側に倒す' },
-    restrictsDirectPush: { type: 'boolean', description: 'ruleset の非 pull_request マージ制限・push 制限、または classic の restrictions により base への直接 push が制限されていれば true。取得できなければ false' },
-    enforced: { type: 'boolean', description: '上記の保護が管理者含め enforce されていれば true（enforce_admins 相当）。取得できなければ false' },
+    requiredApprovingReviewCount: { type: 'integer', description: '必須の承認レビュー数（classic: required_pull_request_reviews.required_approving_review_count / ruleset: pull_request ルールの required_approving_review_count）。取得できなければ 0' },
+    dismissStaleReviews: { type: 'boolean', description: '承認後に HEAD 更新すると古い承認が失効する設定が確認できれば true（classic: dismiss_stale_reviews / ruleset: pull_request ルールの dismiss_stale_reviews_on_push）。取得できなければ false' },
+    requiresNonAuthorApproval: { type: 'boolean', description: 'PR author 以外の承認を要求する設定が確認できれば true（classic: require_last_push_approval / ruleset: require_last_push_approval。いずれも「最後に push した本人以外の承認」を要求する）。取得できなければ false' },
+    requiredStatusChecksCount: { type: 'integer', description: 'required status checks の件数（classic: required_status_checks.checks / contexts の長さ / ruleset: required_status_checks ルールの required_status_checks 配列長）。取得できなければ 0' },
+    directPushBlocked: { type: 'boolean', description: 'PR を経由しない base への通常直接 push が塞がれていることを肯定的に確認できた場合のみ true（classic: required_pull_request_reviews が存在し、かつ push できる actor を制限する restrictions が設定されているか、そもそも PR 必須で直接 push 経路がない / ruleset: 該当ブランチに active な pull_request タイプのルールが存在し直接 push を禁止している）。force push だけの禁止では true にしない。不明・未確認は false', default: false },
+    allowsForcePush: { type: 'boolean', description: 'force push が許可されていれば true（classic: allow_force_pushes.enabled / ruleset: non_fast_forward ルールがなければ許可相当）。追加条件としてのみ使う。取得できなければ不明として true に倒す', default: true },
+    enforcedIncludingAdmins: { type: 'boolean', description: '管理者を含め enforce され、かつ automation identity を含む bypass 経路が存在しないことを肯定的に確認できた場合のみ true（classic: enforce_admins.enabled === true / ruleset: enforcement === "active" かつ bypass_actors が空、または automation identity を含まないことを確認できた場合）。bypass_actors を取得・確認できない場合は false（fail-closed）', default: false },
   },
 }
 // run 内 1 回・Promise キャッシュ。autoMergeEnabled のときのみ ensureMergeGuardActive と AND で参照する。
@@ -3007,14 +3021,29 @@ function ensureBranchProtection() {
           `対象ブランチ: ${baseBranch}`,
           `【手順】`,
           `1. classic protection を試す（存在しなければ 404）:`,
-          `   gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection" --jq '{rev: (.required_pull_request_reviews.required_approving_review_count // 0), dsr: (.required_pull_request_reviews.dismiss_stale_reviews // false), rlpa: (.required_pull_request_reviews.require_last_push_approval // false), rsc: ((.required_status_checks.checks // .required_status_checks.contexts // []) | length), afp: (.allow_force_pushes.enabled // true), restr: (.restrictions != null), enf: (.enforce_admins.enabled // false)}' 2>/dev/null`,
+          `   gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection" 2>/dev/null を取得し、次を読む:`,
+          `   - required_pull_request_reviews.required_approving_review_count（承認必須数）`,
+          `   - required_pull_request_reviews.dismiss_stale_reviews（HEAD 更新で承認失効するか）`,
+          `   - required_pull_request_reviews.require_last_push_approval（最後に push した本人以外の承認を要求するか）`,
+          `   - required_status_checks.checks（無ければ contexts）の件数`,
+          `   - restrictions（push できる actor を制限しているか。null でなければ制限あり）`,
+          `   - allow_force_pushes.enabled（force push 許可か）`,
+          `   - enforce_admins.enabled（管理者にも適用されるか）`,
           `2. rulesets も試す（classic が無い/情報不足のリポジトリ向け）:`,
-          `   gh api "repos/{owner}/{repo}/rulesets?includes_parents=true" 2>/dev/null で active な ruleset 一覧を取得し、対象ブランチ ${baseBranch} を対象とする ruleset の rules を確認する（gh api "repos/{owner}/{repo}/rulesets/<id>" で各 ruleset 詳細を取得）。pull_request ルールの required_approving_review_count、required_status_checks ルールのチェック件数、非 pull_request 経路の push を制限する設定（update / deletion 制限、required で pull_request マージ強制）を読む。`,
-          `3. いずれかで取得できた値を集約して返す。両方 404・取得失敗なら rawFound: false を返す。`,
+          `   gh api "repos/{owner}/{repo}/rulesets?includes_parents=true" 2>/dev/null で ruleset 一覧を取得し、対象ブランチ ${baseBranch} を対象とする active な ruleset を特定して gh api "repos/{owner}/{repo}/rulesets/<id>" で詳細を読む。次を確認する:`,
+          `   - pull_request タイプのルールが active か（＝直接 push を塞ぎ PR 経由を強制するか）。その required_approving_review_count / require_last_push_approval / dismiss_stale_reviews_on_push`,
+          `   - required_status_checks タイプのルールの required_status_checks 配列の件数`,
+          `   - enforcement が "active" か（"evaluate"/"disabled" は不可）`,
+          `   - bypass_actors: 空か、automation identity（本ワークフローを実行するトークンの identity）を含まないことを確認できるか。bypass_actors を取得・確認できない場合は enforcedIncludingAdmins を false にする`,
+          `3. classic と ruleset のどちらか（または両方）で肯定的に確認できた値を集約して返す。両方 404・取得失敗なら rawFound: false を返す。`,
+          `【判定契約（肯定的確認のみ true。不明・取得不能はすべて安全側へ倒す）】`,
+          `- directPushBlocked: PR を経由しない base への通常直接 push が塞がれていることを肯定的に確認できたときのみ true（classic なら PR レビュー必須 + restrictions あり、または PR 必須で直接 push 経路なし。ruleset なら active な pull_request ルールあり）。force push だけの禁止では true にしない。不明は false。`,
+          `- enforcedIncludingAdmins: 管理者を含め enforce され、かつ automation identity を含む bypass が存在しないことを肯定的に確認できたときのみ true（classic: enforce_admins.enabled === true / ruleset: enforcement === "active" かつ bypass_actors が空 or automation を含まない）。bypass_actors 不明は false。`,
+          `- allowsForcePush: 取得できなければ不明として true（未達側）に倒す。`,
           `【禁止】`,
-          `- 値の創作・推測（実際に API が返した値のみ。取得できないフィールドは説明の既定値に従う）。`,
-          `- allowsForcePush を取得できないのに false（安全側）と偽ること（不明時は true に倒す）。`,
-          `返却: rawFound / requiredApprovingReviewCount / dismissStaleReviews / requiresNonAuthorApproval / requiredStatusChecksCount / allowsForcePush / restrictsDirectPush / enforced。`,
+          `- 値の創作・推測（実際に API が返した値のみ。取得できないフィールドは上記契約の安全側へ倒す）。`,
+          `- 不明・取得不能を「保護あり」側（directPushBlocked=true / enforcedIncludingAdmins=true / allowsForcePush=false）と偽ること。`,
+          `返却: rawFound / requiredApprovingReviewCount / dismissStaleReviews / requiresNonAuthorApproval / requiredStatusChecksCount / directPushBlocked / allowsForcePush / enforcedIncludingAdmins。`,
         ].join('\n'),
         { label: 'merge-guard:branch-protection', phase: 'Merge', model: 'haiku', effort: 'low', schema: BRANCH_PROTECTION_SCHEMA },
       )
@@ -3025,26 +3054,50 @@ function ensureBranchProtection() {
       // モデルの単純な誤申告（API を叩かず「保護あり」と申告する等）までは検出できない。
       // その実害は canary（ローカル hook 実効）+ 完全一致 grant + merge-verify の多層防御で
       // 限定される（branch protection ゲート単独を信頼の根拠にしない）。
-      // 3 要件すべてを満たす場合のみ satisfied。1 つでも欠ける・取得不能は fail-closed。
+      //
+      // 5 要件をすべて positive に AND 検証する（codex P0 対応）。各要件はサーバ側強制の
+      // 「必要条件」であり、1 つでも肯定的に確認できない・取得不能・スキーマ不一致・404 は
+      // satisfied=false（fail-closed）。要件の意図:
+      //   (1) reviewOk           : 現 HEAD に対する第三者の承認レビューを必須にする土台
+      //   (2) nonAuthorApproval  : author 自身の承認では通らない（automation の自己承認を防ぐ）
+      //   (3) dismissStale       : 承認後に HEAD を差し替えると承認が失効する（古い承認の再利用防止）
+      //   (4) directPushBlocked  : PR を経由しない base への通常直接 push を塞ぐ（force push だけの
+      //                            禁止では不十分。通常 push が通れば hook もサーバ側 PR ゲートも迂回される）
+      //   (5) enforcedIncludingAdmins : 管理者・bypass actor（automation 含む）が保護を迂回できない
+      //   加えて requiredStatusChecksCount >= 1 を必須にする（CI 未通過のマージを塞ぐ）。
+      // allowsForcePush=false は単独で directPushBlocked にはしない（force push 禁止 ≠ 通常 push 禁止）。
+      // ここでは「追加で force push も禁止であること」を必須要件に含める（承認失効の実効性を担保）。
       const rawFound = p?.rawFound === true
       const reviewCount = Number.isInteger(p?.requiredApprovingReviewCount) ? p.requiredApprovingReviewCount : 0
       const statusChecks = Number.isInteger(p?.requiredStatusChecksCount) ? p.requiredStatusChecksCount : 0
-      // 直接 push 禁止相当: force push 不可（allowsForcePush=false）または push 制限あり
-      // （restrictsDirectPush=true）。allowsForcePush は不明時 true（未確認）に倒れる契約。
-      const directPushBlocked = p?.allowsForcePush === false || p?.restrictsDirectPush === true
       const reviewOk = reviewCount >= 1
+      const nonAuthorApprovalOk = p?.requiresNonAuthorApproval === true
+      const dismissStaleOk = p?.dismissStaleReviews === true
+      // directPushBlocked は「通常 push が塞がれている」ことの肯定的確認のみ（observation の
+      // 契約側で force push だけの禁止では true にしないよう指示済み）。加えて force push も
+      // 禁止（allowsForcePush === false）であることを別要件として要求する。
+      const directPushBlockedOk = p?.directPushBlocked === true
+      const forcePushBlockedOk = p?.allowsForcePush === false
+      const enforcedOk = p?.enforcedIncludingAdmins === true
+      const statusChecksOk = statusChecks >= 1
       const missing = [
         ...(rawFound ? [] : ['保護設定を取得できない（classic protection・ruleset いずれも未確認 / 404）']),
         ...(reviewOk ? [] : [`第三者レビュー必須（required_approving_review_count >= 1）が未確認（観測値: ${reviewCount}）`]),
-        ...(directPushBlocked ? [] : ['ベースブランチへの直接 push 禁止（force push 不可 / push 制限）が未確認']),
-        ...(statusChecks >= 1 ? [] : [`required status checks が 1 件以上設定されていることが未確認（観測値: ${statusChecks}）`]),
+        ...(nonAuthorApprovalOk ? [] : ['author 以外の承認要求（require_last_push_approval 相当）が未確認 — automation 自身の承認でマージできる恐れ']),
+        ...(dismissStaleOk ? [] : ['承認後 HEAD 更新での承認失効（dismiss_stale_reviews 相当）が未確認 — 古い承認を再利用できる恐れ']),
+        ...(directPushBlockedOk ? [] : ['PR を経由しない通常直接 push の禁止が未確認 — automation が base へ直接 push できる恐れ（force push 禁止だけでは不十分）']),
+        ...(forcePushBlockedOk ? [] : ['force push の禁止（allow_force_pushes=false）が未確認']),
+        ...(enforcedOk ? [] : ['管理者含む enforcement・bypass actor 不在（enforce_admins / enforcement=active かつ automation を含む bypass なし）が未確認 — 管理者・bypass で迂回できる恐れ']),
+        ...(statusChecksOk ? [] : [`required status checks が 1 件以上設定されていることが未確認（観測値: ${statusChecks}）`]),
       ]
-      branchProtectionSatisfied = rawFound && reviewOk && directPushBlocked && statusChecks >= 1
+      branchProtectionSatisfied =
+        rawFound && reviewOk && nonAuthorApprovalOk && dismissStaleOk &&
+        directPushBlockedOk && forcePushBlockedOk && enforcedOk && statusChecksOk
       branchProtectionReason = branchProtectionSatisfied
         ? ''
         : `${BRANCH_PROTECTION_MISSING_REASON_PREFIX}: ${missing.join(' / ')}。${BRANCH_PROTECTION_MISSING_REASON_SUFFIX}`
       log(branchProtectionSatisfied
-        ? `branch protection: 要件を満たすことを確認した（${baseBranch}: 承認 ${reviewCount} 件・required checks ${statusChecks} 件・直接 push 禁止）。自動マージ経路を許可する`
+        ? `branch protection: 全 5 要件を満たすことを確認した（${baseBranch}: 承認 ${reviewCount} 件・非 author 承認必須・stale 承認失効・通常/force push 禁止・管理者含む enforce・required checks ${statusChecks} 件）。自動マージ経路を許可する`
         : `⚠️ ${branchProtectionReason}`)
       return branchProtectionSatisfied
     })()
@@ -3055,7 +3108,7 @@ function ensureBranchProtection() {
 const BRANCH_PROTECTION_MISSING_REASON_PREFIX =
   'ベースブランチのサーバ側 branch protection が自動マージの要件を満たさないため autoMerge: true でも自動マージを無効化した（fail-closed）。未達項目'
 const BRANCH_PROTECTION_MISSING_REASON_SUFFIX =
-  '対象ブランチに branch protection または ruleset を設定すること（第三者レビュー必須 required_approving_review_count >= 1・required status checks 1 件以上・直接 push / force push の禁止）。設定手順は SKILL.md「merge-guard hook の導入」を参照。設定後に同じ引数で再実行すると monitoring 再開で自動マージまで完結する。または人間が GitHub 上でマージする'
+  '対象ブランチに branch protection または ruleset を設定すること（5 要件: 第三者レビュー必須 required_approving_review_count >= 1・author 以外の承認要求（require_last_push_approval）・承認後 HEAD 更新で承認失効（dismiss_stale_reviews）・PR を経由しない通常直接 push の禁止かつ force push 禁止・管理者含む enforcement で automation を含む bypass actor なし。加えて required status checks 1 件以上）。設定手順は SKILL.md「merge-guard hook の導入」を参照。設定後に同じ引数で再実行すると monitoring 再開で自動マージまで完結する。または人間が GitHub 上でマージする'
 
 // エージェント返却値の整数検証（スキーマ宣言のみに依存しない）
 for (const n of tree.nodes) {
@@ -4330,12 +4383,33 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         let grantNonce = ''
         if (expectedHeadSha) {
           grantNonce = boundaryNonce(`merge-grant:${item.number}:${impl.prNumber}:${expectedHeadSha}`)
-          const granted = await issueMergeGrant(impl.prNumber, expectedHeadSha, grantNonce)
+          // 発行が false/throw でも grant ファイルが部分的に書けている可能性がある
+          // （issueMergeGrant のエージェントが printf 後・jq 確認前に失敗した等）。その残置
+          // grant の expectedCommand は任意 subagent に対して有効なままになるため、merge-exec へ
+          // 進まず、かつ必ず回収を試みる（Bugbot High 対応: 発行失敗時の grant リーク。merge-exec
+          // 経路の回収失敗と同じく fatal クラスとして扱う）。
+          let granted = false
+          try {
+            granted = await issueMergeGrant(impl.prNumber, expectedHeadSha, grantNonce)
+          } catch (e) {
+            log(`⚠️ #${item.number}: merge grant 発行エージェントが例外で失敗した: ${sanitize(e?.message ?? 'agent error')}`)
+            granted = false
+          }
           if (!granted) {
-            // grant を永続化できないまま merge-exec を起動すると、hook 導入環境では正規マージが
-            // 必ず deny されて merge-failed を空費するため、このラウンドは見送って再監視へ回す
-            // （timeout 扱い。monitorsLeft の予算内で再試行し、尽きれば従来どおり終端する）。
-            log(`⚠️ #${item.number}: merge grant の発行に失敗したためこのラウンドのマージを見送り再監視する`)
+            // 部分書き込みの残置を必ず回収する。回収も失敗したら当該 run の自動マージ全体を
+            // 無効化し（mergeGuardRevokeFailed）、残置パスを最終レポートの P0 警告へ記録する。
+            const revoked = await revokeMergeGrant(impl.prNumber)
+            if (!revoked) {
+              mergeGuardRevokeFailed = true
+              const residualPath = `${MERGE_GRANT_DIR}/grant-${impl.prNumber}.json`
+              if (!residualGrantPaths.includes(residualPath)) residualGrantPaths.push(residualPath)
+              log(`🚨 #${item.number}: merge grant の発行に失敗し、残置分の回収にも失敗した。本 run の自動マージ経路を無効化する（${residualPath} を手動削除すること）`)
+            } else {
+              // grant を永続化できないまま merge-exec を起動すると、hook 導入環境では正規マージが
+              // 必ず deny されて merge-failed を空費するため、このラウンドは見送って再監視へ回す
+              // （timeout 扱い。monitorsLeft の予算内で再試行し、尽きれば従来どおり終端する）。
+              log(`⚠️ #${item.number}: merge grant の発行に失敗した（残置分は回収済み）。このラウンドのマージを見送り再監視する`)
+            }
             lastState = 'timeout'
             continue
           }

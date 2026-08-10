@@ -65,7 +65,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | `branch` | 任意 | `main` | マージ先ブランチ。不正な文字を含む場合はエラー |
 | `parallel` | 任意 | `3` | 並列実行数（1〜8）。`1` を指定すると実質的に直列実行になる |
 | `externalChecks` | 任意 | 未指定 | GitHub Actions 以外の外部チェック App slug の配列（最大 10 件、slug 形式は英小文字・数字・ハイフン）。**未指定と `[]` は意味が異なる** |
-| `autoMerge` | 任意 | `false` | 自動マージの明示 opt-in（boolean）。**未指定は自動マージ無効**（Issue #165 の fail-closed）。`true` を明示した場合のみ squash merge まで自動実行する。**自動マージの有効化には `autoMerge: true` に加えて (a) merge-guard hook の導入（canary で実効確認）と (b) 対象ベースブランチの branch protection（第三者レビュー必須・required checks 1 件以上・直接 push 禁止）が必須**で、(b) は host がランタイム検証する（「merge-guard hook の導入」節参照。hook 未検出・保護未達はいずれも fail-closed で `autoMerge: true` でも自動マージを無効化する）。無効時も実装・push 前 Review・PR 作成・CI 監視・fix ループは従来どおり自動で進み、PR はマージ可能状態の `blocked` で停止する。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
+| `autoMerge` | 任意 | `false` | 自動マージの明示 opt-in（boolean）。**未指定は自動マージ無効**（Issue #165 の fail-closed）。`true` を明示した場合のみ squash merge まで自動実行する。**自動マージの有効化には `autoMerge: true` に加えて (a) merge-guard hook の導入（canary で実効確認）と (b) 対象ベースブランチの branch protection（5 要件: 非 author 承認必須・承認後 HEAD 更新で承認失効・通常/force push 禁止・管理者含む enforcement・required checks 1 件以上）が必須**で、(b) は host がランタイムで positive に AND 検証する（「merge-guard hook の導入」節参照。hook 未検出・保護未達はいずれも fail-closed で `autoMerge: true` でも自動マージを無効化する）。無効時も実装・push 前 Review・PR 作成・CI 監視・fix ループは従来どおり自動で進み、PR はマージ可能状態の `blocked` で停止する。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
 
 **`externalChecks` の 3 状態（Issue #147）:**
 
@@ -83,9 +83,14 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 
 1. `args.autoMerge: true` の明示
 2. **merge-guard hook**（`script/merge-guard-hook.sh`）の導入（canary プローブで実効を確認）
-3. **対象ベースブランチの branch protection**（第三者レビュー必須 `required_approving_review_count >= 1`・required status checks 1 件以上・直接 push / force push 禁止）
+3. **対象ベースブランチの branch protection**（次の 5 要件をすべて満たすこと）:
+   - **第三者レビュー必須**（`required_approving_review_count >= 1`）
+   - **author 以外の承認要求**（`require_last_push_approval` 相当。最後に push した本人＝automation 自身の承認では通らない）
+   - **承認後 HEAD 更新で承認失効**（`dismiss_stale_reviews` 相当。古い承認を差し替え後の HEAD へ再利用させない）
+   - **PR を経由しない通常直接 push の禁止、かつ force push 禁止**（`allow_force_pushes=false`）。**force push 禁止だけでは不十分**（通常 push が通れば hook もサーバ側 PR ゲートも迂回される）
+   - **管理者を含む enforcement**（classic: `enforce_admins=true` / ruleset: `enforcement=active` かつ automation を含む `bypass_actors` なし）。加えて **required status checks 1 件以上**
 
-3 は**ランタイムで検証**される。自動マージを有効化する前に host がサーバ側の保護設定を観測し、要件を満たさなければ `autoMerge: true` でも自動マージを無効化する（fail-closed。`ensureBranchProtection`）。canary（2）と branch protection（3）は AND 条件で、両方通過して初めて新規マージ経路が開く。
+3 は**ランタイムで検証**される（5 要件を positive に AND 検証）。自動マージを有効化する前に host がサーバ側の保護設定を観測し、いずれか 1 つでも肯定的に確認できなければ（取得不能・404・スキーマ不一致を含む）`autoMerge: true` でも自動マージを無効化する（fail-closed。`ensureBranchProtection`）。canary（2）と branch protection（3）は AND 条件で、両方通過して初めて新規マージ経路が開く。**この 5 要件が「注入された monitor がマージできない」ことのサーバ側保証の本体**である（automation は自己承認を作れず、古い承認は失効し、管理者 bypass もない）。ただし host が観測エージェント経由で得る保護設定は**値の型・閾値のみ再検証**しており、その値が実際に GitHub API から取得されたか（provenance）までは検証できない（merge grant nonce と同じ既知の構造的限界。観測エージェントは未信頼テキストを読まない構成で注入経路は塞ぐが、モデルの単純な誤申告は検出しない）。実害は canary + 完全一致 grant + merge-verify の多層防御で限定されるが、この 5 要件の充足は「サーバ側で本当に強制されていること」を運用側でも別途担保すること。
 
 Workflow ランタイムは `agent()` 単位のツール allowlist・credential 分離を提供せず、未信頼の PR レビュー本文を読む monitor エージェントも merge-exec と同じ Bash・`gh` 認証を持つ。PreToolUse hook の deny は `bypassPermissions` でも迂回できないため、この hook が subagent からのマージ系コマンドを既定 deny する。
 
@@ -101,7 +106,7 @@ Workflow ランタイムは `agent()` 単位のツール allowlist・credential 
 | `gh pr merge` | 実行コマンド（前後 trim のみ・無正規化）が host 発行 grant の `expectedCommand` と**完全一致**した場合のみ許可。部分一致による許可はない（コマンド連結・フラグ追加・クォート追加・改行分割はすべて不一致で拒否） |
 | `gh api .../pulls/<n>/merge`（REST merge） | grant の有無によらず拒否 |
 | `gh api repos/<o>/<r>/merges`（REST ブランチマージ） | grant の有無によらず拒否 |
-| `gh api graphql`（`mergePullRequest` / `enablePullRequestAutoMerge`） | grant の有無によらず拒否 |
+| `gh api graphql`（`mergePullRequest` / `enablePullRequestAutoMerge` / `mergeBranch`） | grant の有無によらず拒否（`mergeBranch` は PR を経由せず head ref を base へ直接マージできる迂回経路のため含める） |
 | `gh pr review --approve` | grant の有無によらず拒否 |
 | `gh alias`（set / import 等すべて）・`gh extension` | grant の有無によらず拒否（別名・拡張経由の迂回封じ） |
 | 上記以外（`gh pr comment` の催促・読み取り系等） | 許可 |
@@ -750,14 +755,14 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
    - **実行基盤の制約と 3 層の強制（重要。主張と保証を一致させる）**: Workflow ランタイムはスクリプト自身に `process` / `fs` / shell を与えず、`agent()` 単位の読み取り専用 credential・ツール allowlist も提供しない。分割後の各エージェントは同じ Bash・同じ `gh` 認証コンテキストを持つため、本節の分離自体は「権限の剥奪」ではなく「未信頼テキストと破壊的操作のコンテキスト分離」である。この空白を、実装が保証できる強さの異なる 3 層で埋める（「merge-guard hook の導入」節参照）:
      - **allow = 証明可能な強制境界**: subagent の `gh pr merge` は「host が grant 窓の間だけ発行した 1 バイト列（`expectedCommand`）との完全一致」でのみ許可する。正規化の網羅性に依存しないため「未承認の新規マージコマンドを許可しない」ことを構造的に保証できる。nonce（`/dev/urandom` 由来 seed で鍵付け・merge-exec プロンプトにのみ埋め込み）は秘匿を前提にしない多層防御の一層。
      - **deny = best-effort（サンドボックスと主張しない）**: allow で許可されないマージ系コマンドを、既知の直接実行難読化（行継続・改行・クォート分割・単独バックスラッシュ・IFS 直書き、および ANSI-C クォート `$'...'` / IFS 展開 `${IFS}` の存在検知）まで潰して deny する攻撃面削減の一層。**間接実行（`eval`・base64 復元・変数間接呼び出し・コマンド置換 `$(...)`）は文字列照合では原理的に防げない。完全なサンドボックスではない**。`gh` 認証そのものの分離（読み取り専用トークン）や `agent()` 単位のツール allowlist は依然として基盤側の対応領域。
-     - **実際の load-bearing な強制 = サーバ側**: branch protection（第三者レビュー必須・required checks・直接 push 禁止。host がランタイム観測し未達なら自動マージ無効へ倒す）+ 完全一致 nonce grant + merge-verify の独立再検証。compromised なローカルエージェントはサーバ側ルールを迂回できない（例: PR author と自動化 identity が同一なら `gh pr review --approve` はサーバ側で拒否される）。
+     - **実際の load-bearing な強制 = サーバ側**: branch protection の 5 要件（第三者=非 author 承認必須・承認後 HEAD 更新で承認失効・通常/force push 禁止・管理者含む enforcement（automation を含む bypass なし）・required checks 1 件以上。host がランタイムで positive に AND 観測し、1 つでも未確認なら自動マージ無効へ倒す）+ 完全一致 nonce grant + merge-verify の独立再検証。compromised なローカルエージェントはサーバ側ルールを迂回できない（例: PR author と自動化 identity が同一なら `gh pr review --approve` はサーバ側で拒否され、automation は自己承認を作れない）。force push 禁止だけでは通常直接 push を塞げないため両者を別要件として要求する。
      hook の実効性はセッション設定に依存するため、自動マージ経路を開く前に canary プローブ（素の形式 + クォート分割形 + バックスラッシュ形の 3 コマンド）で deny マーカーの検出を確認し、branch protection のランタイム検証と AND で、**両方通過して初めて新規マージ経路が開く**（未達はいずれも fail-closed で `autoMerge: true` でも自動マージ無効）。自動マージが既定で無効・明示 opt-in（`args.autoMerge: true`。Issue #165）である点は従来どおりで、正規経路はホストの決定的コード（args パース + expectedHeadSha 強制）で、正規経路の外は hook（best-effort）+ サーバ側 branch protection（load-bearing）で閉じる。
 
 残存リスクとして、自然言語インジェクションは境界タグ + 取り扱い規則でも確率的にしか防げない。push 前 Review フェーズ・CI・Bugbot・squash merge 前の Merge フェーズ監視が最終防衛線であることに留意する。
 
 ## 注意事項
 
-- **ユーザー承認なしで PR 作成まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する。**merge の自動実行は次の 3 条件がすべて揃った場合のみ**（AND。既定は無効。Issue #165 の fail-closed）: (1) `args.autoMerge: true` の明示、(2) merge-guard hook の導入（canary プローブで実効確認）、(3) 対象ベースブランチの branch protection のランタイム検証（第三者レビュー必須・required checks 1 件以上・直接 push 禁止）。(2) 未検出・(3) 未達はいずれも fail-closed で `autoMerge: true` でも自動マージを無効化する（branch protection は「推奨運用」ではなく、未達なら自動マージが成立しない必須ゲート）。マージ条件を満たした PR はマージ可能状態の `blocked` で停止し、3 条件を満たした再実行の monitoring 再開、または人間の GitHub 上でのマージで完了する。正規経路の外（注入された monitor 自身によるマージ実行）は merge-guard hook が grant の `expectedCommand` 完全一致以外を強制 deny で閉じる（Step 6・「merge-guard hook の導入」・「非信頼データの扱い」項目 5 参照）
+- **ユーザー承認なしで PR 作成まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する。**merge の自動実行は次の 3 条件がすべて揃った場合のみ**（AND。既定は無効。Issue #165 の fail-closed）: (1) `args.autoMerge: true` の明示、(2) merge-guard hook の導入（canary プローブで実効確認）、(3) 対象ベースブランチの branch protection のランタイム検証（5 要件: 非 author 承認必須・承認後 HEAD 更新で承認失効・通常/force push 禁止・管理者含む enforcement・required checks 1 件以上を positive に AND 検証）。(2) 未検出・(3) 未達はいずれも fail-closed で `autoMerge: true` でも自動マージを無効化する（branch protection は「推奨運用」ではなく、未達なら自動マージが成立しない必須ゲート）。マージ条件を満たした PR はマージ可能状態の `blocked` で停止し、3 条件を満たした再実行の monitoring 再開、または人間の GitHub 上でのマージで完了する。正規経路の外（注入された monitor 自身によるマージ実行）は merge-guard hook が grant の `expectedCommand` 完全一致以外を強制 deny で閉じる（Step 6・「merge-guard hook の導入」・「非信頼データの扱い」項目 5 参照）
 - `parallel` は 1〜8 の整数のみ有効。整数以外・範囲外は既定の 3 にフォールバックする。並列度を上げるほど API レート制限・CI キューの逼迫に注意する
 - レビュースレッドの resolve（解決済み化）は自動フローのどのエージェント・どの経路でも実行されない（自動 resolve 機能は撤去済み）。自動フローは PR 本文への記録までで停止し、未解決スレッドは blocked → 最終レポートで issue 化承認を判断する。resolve は常に人間が GitHub 上で行い、resolve 後の再実行（または監視継続中の resolve）でマージ条件が再判定される
 - 各 implement / fix は独立した worktree で隔離実行されるが、メイン working copy のブランチ・共有設定などグローバル状態は変更しない

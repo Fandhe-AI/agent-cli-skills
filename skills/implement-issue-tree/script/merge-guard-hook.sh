@@ -197,9 +197,12 @@ if nmatches 'gh[[:space:]]+api'; then
   if nmatches '/merges([[:space:]?]|$)'; then
     deny "subagent からの REST ブランチマージ（gh api repos/<o>/<r>/merges）は禁止"
   fi
-  # GraphQL merge / auto-merge 有効化 mutation
-  if nmatches 'mergePullRequest|enablePullRequestAutoMerge'; then
-    deny "subagent からの GraphQL merge / auto-merge 有効化（mergePullRequest / enablePullRequestAutoMerge）は禁止"
+  # GraphQL merge / auto-merge 有効化 / ref 直接マージ mutation。
+  # mergeBranch は PR を経由せず head ref を base へ直接マージできるため、
+  # grant 照合（PR 単位の expectedCommand 完全一致）を通らない迂回経路として塞ぐ
+  # （Bugbot Medium 対応）。
+  if nmatches 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
+    deny "subagent からの GraphQL merge 系 mutation（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）は禁止"
   fi
 fi
 
