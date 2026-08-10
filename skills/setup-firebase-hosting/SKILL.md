@@ -207,6 +207,8 @@ curl -s -o /dev/null -w '%{http_code} redirects=%{num_redirects}\n' -L "$B/about
 
 **`deploy` job は PR でも常に base 側（`github.event.pull_request.base.sha`）の `firebase.json` を checkout します。** PR 側の revision を使うと、悪意ある PR が `firebase.json` の predeploy hook 等を通じて write 権限トークンや Firebase secret を窃取できるためです。この結果、**PR で `firebase.json` 等のデプロイ設定を変更してもプレビューには反映されず、マージ後の本番デプロイから反映されます**（セキュア・バイ・デフォルトを優先した意図的な制約です）。
 
+**fork からの PR では `deploy` job 自体をスキップします。** GitHub は fork 由来の PR に Actions secrets を渡さないため、`FIREBASE_SERVICE_ACCOUNT` を要求する `deploy` job は認証エラーで失敗します。プレビューデプロイの対象は同一リポジトリのブランチからの PR のみです。
+
 ```yaml
 name: デプロイ
 
@@ -278,8 +280,11 @@ jobs:
 
   # secret と書き込み権限トークンを扱う job。未信頼コードは一切実行せず、
   # build job が作った成果物を配信するだけに限定する。
+  # fork 由来の PR には GitHub が Actions secrets を渡さないため、この job を
+  # スキップする（同一リポジトリのブランチからの PR のみプレビュー対象）。
   deploy:
     needs: build
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
