@@ -19,7 +19,7 @@ skills/                               -- スキル本体（各ディレクトリ
   implement-issue/
   implement-issue-tree/
     sample/                           -- 引数例・ツリー例
-    script/                           -- preview-tree.sh、implement-issue-tree.js（ツリー確認・自動開発用）
+    script/                           -- preview-tree.sh、implement-issue-tree.js（ツリー確認・自動開発）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
   implement-review/
   implement-review-pr/
   init-claude/

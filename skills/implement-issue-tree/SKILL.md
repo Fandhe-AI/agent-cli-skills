@@ -5,7 +5,7 @@ description: >
   「イシューツリーを並列実装」「配下のサブイシューをまとめて実装」「ツリー全体を並列で実装して」「イシュー階層を自動開発」で使用。
   per-issue 計画立案（Plan: セッション継承モデル）→実装（Implement: sonnet）の分業。push 前 review（Review 通過後にのみ push・PR 作成して CI を 1 回だけ起動）。
   外部チェック構成は args の externalChecks で明示（[] で「なし」を確定して不要待機なし・未指定なら自動マージ停止）。
-  squash merge の自動実行は autoMerge を true 明示した場合のみ（既定は無効 = fail-closed で PR をマージ可能状態のまま停止）。並列度（parallel）と依存（dependsOn）で実行順を制御。
+  自動 squash merge はこの実行基盤では提供しない（autoMerge: true でも無条件 fail-closed で PR をマージ可能状態のまま停止し人間がマージ）。並列度（parallel）と依存（dependsOn）で実行順を制御。
   単一イシューの実装は implement-issue、PR レビューは implement-review-pr を参照。
 user-invocable: true
 argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 main）] [並列度（省略時 3）]"
@@ -29,10 +29,11 @@ CI リソース節約のため「push 前 review」設計を採用している�
 
 ## 使い方
 
-Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `script/implement-issue-tree.js` を指定して起動する。パスは導入形態で異なる:
+Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `script/implement-issue-tree.js` を指定して起動する。パスは導入形態で異なり、後述の merge-guard hook のパスと**同じ導入形態なら同じルート配下**にある（js と hook は必ず同一のスキルディレクトリに同居する）。3 レイアウト:
 
-- `skills/` レイアウトの upstream リポジトリ（`Fandhe-AI/agent-cli-skills`）: `skills/implement-issue-tree/script/implement-issue-tree.js`
-- `npx skills add Fandhe-AI/agent-cli-skills` で導入したリポジトリ、または `.claude/skills/` に配置したリポジトリ（本リポジトリ含む）: `.claude/skills/implement-issue-tree/script/implement-issue-tree.js`
+- **upstream `skills/` レイアウト**（本リポジトリ `Fandhe-AI/agent-cli-skills` のソース）: `skills/implement-issue-tree/script/implement-issue-tree.js`
+- **`.agents/skills/` に vendored**（`npx skills add Fandhe-AI/agent-cli-skills` で導入した downstream リポジトリ）: `.agents/skills/implement-issue-tree/script/implement-issue-tree.js`
+- **`.claude/skills/` symlink 経由**（本リポジトリが内部参照に使うレイアウト。実体は `skills/` を指す symlink）: `.claude/skills/implement-issue-tree/script/implement-issue-tree.js`
 
 ```json
 {
@@ -64,7 +65,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | `branch` | 任意 | `main` | マージ先ブランチ。不正な文字を含む場合はエラー |
 | `parallel` | 任意 | `3` | 並列実行数（1〜8）。`1` を指定すると実質的に直列実行になる |
 | `externalChecks` | 任意 | 未指定 | GitHub Actions 以外の外部チェック App slug の配列（最大 10 件、slug 形式は英小文字・数字・ハイフン）。**未指定と `[]` は意味が異なる** |
-| `autoMerge` | 任意 | `false` | 自動マージの明示 opt-in（boolean）。**未指定は自動マージ無効**（Issue #165 の fail-closed）。`true` を明示した場合のみ squash merge まで自動実行する。無効時も実装・push 前 Review・PR 作成・CI 監視・fix ループは従来どおり自動で進み、PR はマージ可能状態の `blocked` で停止する。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
+| `autoMerge` | 任意 | `false` | boolean として**受理はされる**が、**この実行基盤では自動マージを行わない**（`true` でも無条件 fail-closed。PR #182 codex P0）。理由: 未信頼のレビュー本文を読む monitor が merge-exec と同じ Bash・gh 認証・FS を共有し、hook 専用の秘密を持てないため subagent が grant を偽造でき、偽造不能なマージ認可を hook で実装できない。よって Codex 元指摘の「境界を実装できるまで自動マージ無効化」に従い自動マージ経路を閉じた。`true` / `false` いずれでも実装・push 前 Review・PR 作成・CI 監視・fix ループは自動で進み、PR はマージ可能状態の `blocked` で停止する（マージは GitHub 上で人間が行う。対象ブランチに branch protection を設定することを推奨）。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
 
 **`externalChecks` の 3 状態（Issue #147）:**
 
@@ -75,6 +76,73 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | `["cursor"]` 等 | 指定 App を正とする（観測結果より優先） | 指定した**全 App** について HEAD sha に対する起動を検証する。cursor は「レビューが 1 件以上到着していること」（Issue #146。内容評価は監視側が担当）、それ以外の App は check-run が 1 件以上ならその全件が許容 conclusion であること、check-run が 0 件のときに限りフォールバックとして「APPROVED レビューが 1 件以上かつ否定的レビュー 0 件」であることをマージ条件とする（Issue #155） |
 
 観測ベースの検出は直近 3 件の merged PR しか見ないため、新規導入 App・条件付き起動 App・直近 3 件で実行されなかった App を取りこぼす。「検出なし」が不在の証明にならないのはもちろん、**「検出あり」も集合としての完全性を保証しない**（例: 観測で `sonarcloud` だけを拾い、実際には必須の `cursor` を取りこぼしたまま「確定済み」として cursor[bot] レビューの再検証を省いてしまう）。したがって観測結果は確定情報として扱わず、参考値としてログ・停止理由・返却値に残すだけにする。`externalChecks` が配列でない・slug 形式でない・11 件以上の場合は既定値へフォールバックせずエラーで停止する（`parallel` は性能ノブのため不正値を既定 3 へ落とすが、`externalChecks` はマージゲートの入力であり、誤記を黙って「未指定」や「なし確定」に読み替えるとゲートが静かに弱まるため）。
+
+### 自動マージを行わない理由と merge-guard hook（deny 専用・best-effort）
+
+**この実行基盤では自動マージを提供しない**（`autoMerge: true` でも無条件 fail-closed。PR #182 codex P0）。当初は「host が発行する grant（正規マージコマンド全文 = `expectedCommand`）を hook が完全一致で照合する allow 経路」で「未承認マージを許可しない証明可能な境界」を作ろうとした。しかしこの基盤は `agent()` 単位のツール allowlist・credential 分離を提供せず、**未信頼のレビュー本文を読む monitor エージェントも merge-exec と同じ Bash・`gh` 認証・FS を共有する**。monitor は Bash を持ち通常のファイル作成も hook を通るため、`gh pr view` で HEAD を取得 → 任意 nonce で `grant-<pr>.json` を自作 → その `expectedCommand` を実行できる（**grant 偽造 P0**）。この基盤には hook 専用の秘密注入経路がなく（`settings.json` の env はセッション全体 = subagent の Bash 含めて共有）、**hook が検証でき subagent が読めない鍵を持てない**ため、署名 / MAC による偽造防止も実装不能。よって偽造不能なマージ認可を hook で検証することは原理的に不可能である。
+
+これは Codex 元指摘（rust-ai-library PR #441）の 2 つ目の許容解「**権限分離できない基盤では、境界を実装できるまで自動マージを無効化する**」に正確に該当する。したがって:
+
+- **自動マージは無条件 fail-closed**: host は `autoMerge` の値によらず新規マージ経路を開かない（既存の recoveryOnly / `expectedHeadSha=''` 機構を流用し、`ready` 到達時つねに回復専用経路へ固定。merge-exec は `gh pr merge` を一切出力しない）。opt-in 判定はホストの決定的コード（args パース）のみ。
+- **grant / canary / branch-protection ランタイムゲートは撤去**した（grant は偽造可能で allow の根拠にならず、canary は hook 実効を確認しても新規マージ許可の根拠にならない）。
+- **merge-guard hook は deny 専用へ降格**した（下記）。**承認境界ではなく、迂回可能な best-effort の攻撃面削減**にすぎない。
+- PR はマージ可能状態の `blocked` で停止し、**マージは GitHub 上で人間が行う**（対象ブランチの branch protection は下記のとおり運用推奨）。
+
+**merge-guard hook（`script/merge-guard-hook.sh`）— 導入は任意**: 入れると subagent（monitor 等）からのマージ系コマンドを deny する多層防御の一層になる。PreToolUse hook の deny は `bypassPermissions` でも迂回できない。ただし前述のとおりこれは承認境界ではなく、間接実行や未知のスペリングは防げない。
+
+**hook の判定ポリシー（allow 経路なし。deny 専用）:**
+
+| 対象コマンド（subagent = `agent_id` あり 発行時） | 判定 |
+|------|------|
+| `gh pr merge`（あらゆる形） | **無条件 deny**（grant による例外なし） |
+| `gh api .../pulls/<n>/merge`（REST merge） | deny |
+| `gh api repos/<o>/<r>/merges`（REST ブランチマージ） | deny |
+| `gh api graphql`（`mergePullRequest` / `enablePullRequestAutoMerge` / `mergeBranch`） | deny（`mergeBranch` は PR を経由せず head ref を base へ直接マージする迂回経路のため含める） |
+| `gh pr review --approve` | deny |
+| `gh alias`（set / import 等すべて）・`gh extension` | deny（別名・拡張経由の迂回封じ） |
+| 上記以外（`gh pr comment` の催促・読み取り系等） | 許可 |
+| main スレッド（`agent_id` なし）の全コマンド | 制限対象外（人間の監督下の対話コンテキスト。`jq` 不在時もロックアウトされない） |
+| subagent の入力で `jq` 不在・hook 入力のパース失敗 | 拒否（fail-closed） |
+
+deny 判定は 2 段構えである。**最前段（raw コマンドに対する存在検知）**で、意味的デコードが必要な難読化構文 — ANSI-C クォート `$'...'`（`$'\x67\x68'` 等の 16/8/Unicode エスケープ）と IFS 由来展開（`$IFS` / `${IFS}` / `${IFS%?}` 等）— を含むコマンドを即 deny する（正当な `gh` コマンドはこれらを使わない前提。過検知は fail-closed 方向）。続く**正規化段**で、行継続（`\`+改行）除去 → 改行の空白化 → `${IFS}` / `$IFS` の空白置換 → クォート文字除去 → 単独バックスラッシュの全除去 → 連続空白圧縮を行い、`g''h pr merge`（クォート分割）・`g\h pr merge`（バックスラッシュ）・`gh${IFS}pr${IFS}merge`（IFS 分割）といった直接実行形を塞ぐ。なお deny 対象は **`gh` サブコマンドの文字列照合のみ**であり、`gh` を経由しない直接実行 — `git merge` + `git push` によるローカルマージ・`curl -X PUT .../pulls/N/merge` 等の REST 直接呼び出し — や、**間接実行**（`eval`・base64 復元・コマンド置換 `$(...)`・変数間接呼び出し等）は文字列照合では原理的に防げない残存リスクである。これらは hook が best-effort（承認境界ではない）であることの帰結であり、実強制は「自動マージを行わない」方針とサーバ側 branch protection（`gh` 迂回にもサーバ側で効く）が担う。
+
+**導入手順**: 対象リポジトリの `.claude/settings.json` の `hooks.PreToolUse` に本 hook を登録する（`jq` の導入が前提。`jq` 不在時は subagent のコマンドが fail-closed で deny される。main スレッドは `agent_id` を含まない入力の入口判定により `jq` 不在でも許可される）:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/skills/implement-issue-tree/script/merge-guard-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`command` のパスは導入形態に合わせる（「使い方」節の `scriptPath` の 3 レイアウトと同一区分。**同じ導入形態なら js と hook は同じルート配下**にある）:
+
+- **upstream `skills/` レイアウト**: `"$CLAUDE_PROJECT_DIR"/skills/implement-issue-tree/script/merge-guard-hook.sh`
+- **`.agents/skills/` に vendored**（`npx skills add` で導入した downstream リポジトリ）: `"$CLAUDE_PROJECT_DIR"/.agents/skills/implement-issue-tree/script/merge-guard-hook.sh`
+- **`.claude/skills/` symlink 経由**（本リポジトリ内部参照）: `"$CLAUDE_PROJECT_DIR"/.claude/skills/implement-issue-tree/script/merge-guard-hook.sh`
+
+登録後、スクリプトに実行権限があることを確認する（`chmod +x`）。hook を導入しなくても自動マージが起きることはない（自動マージ自体を行わないため）。hook は監査ログ・多層防御の一層として任意で導入する。
+
+### branch protection（人間がマージする前提の運用推奨）
+
+自動マージは行わず人間がマージするため、対象ベースブランチには**サーバ側 branch protection を設定することを強く推奨**する（ランタイムゲートではなく運用推奨）。compromised なローカルエージェントもサーバ側ルールは迂回できない。特に、注入された monitor 等が仮に何らかの経路でマージを試みても止まるよう、次を設定する:
+
+- **第三者（非 author）承認必須**（`required_approving_review_count >= 1` かつ `require_last_push_approval` 相当）。automation identity 自身は承認を作れない（`gh pr review --approve` は hook で deny、サーバ側も PR author = automation 時の自己承認を拒否）
+- **承認後 HEAD 更新で承認失効**（`dismiss_stale_reviews`。古い承認の再利用を防ぐ）
+- **PR を経由しない通常直接 push の禁止、かつ force push 禁止**（`allow_force_pushes=false`）。force push 禁止だけでは通常 push を塞げないため両方
+- **管理者を含む enforcement**（classic: `enforce_admins=true` / ruleset: `enforcement=active` かつ automation を含む `bypass_actors` なし）
+- **required status checks 1 件以上**
 
 ## フロー
 
@@ -242,7 +310,9 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 
 `gh pr checks --watch` で CI を監視し、以下の全条件を満たした場合のみ squash merge する。
 
-**自動マージは opt-in（Issue #165）:** squash merge の自動実行は `args.autoMerge: true` を明示した場合のみ行う。既定（未指定）では、実装・push 前 Review・PR 作成・CI 監視・fix ループまでは従来どおり自動で進み、全マージ条件を満たしても新規マージは実行せず、PR をマージ可能状態のまま `blocked`（`blockedReason: quality`）+ `pr` 保持で終端する。monitor が `ready`（虚偽含む）を返してもホストが `expectedHeadSha` を空文字へ強制し、merge-exec は `gh pr merge` を含まない回復専用経路（空 sha 経路）に固定されるため、**ホストが指示する正規経路からの新規マージ**は成立しない（Issue #168 の機構を流用したホスト側ゲート。opt-in 判定はホストの決定的コード = args パースのみで行い、モデル出力・未信頼テキストに依存しない）。`blocked` + `pr` は次回ランの monitoring 再開対象のため、`autoMerge: true` を付けた再実行 1 回でマージまで完結する（または人間が GitHub 上でマージする）。**残存リスク（既定無効時も同じ）**: このゲートが閉じるのは正規経路（ホストが merge-exec へ渡す指示）だけである。monitor は既定無効時も従来どおり未信頼の PR レビュー本文を読み、merge-exec と同一の Bash・`gh` 認証コンテキストで動作するため、プロンプトインジェクション成立時に monitor 自身が `gh pr merge` を直接実行する経路は `autoMerge` の値にかかわらず技術的に残る（「非信頼データの扱い」項目 5 参照）。したがって既定無効は未承認マージの不成立を保証する強制境界ではなく、正規経路を決定的コードで閉じる多層防御の一層である。`autoMerge` の値にかかわらず branch protection の必須レビュー・マージ後の人間レビューを併用すること。
+**自動マージは行わない（無条件 fail-closed。PR #182 codex P0）:** `args.autoMerge` は boolean として受理されるが、**`true` でもこの実行基盤では squash merge を実行しない**。実装・push 前 Review・PR 作成・CI 監視・fix ループまでは `autoMerge` の値によらず自動で進み、全マージ条件を満たしても新規マージは実行せず、PR をマージ可能状態のまま `blocked`（`blockedReason: quality`）+ `pr` 保持で終端する。monitor が `ready`（虚偽含む）を返してもホストが `expectedHeadSha` を空文字へ強制し（既存 Issue #168 機構の流用。`ready` 到達時つねに recoveryOnly=true）、merge-exec は `gh pr merge` を含まない回復専用経路（空 sha 経路）に固定されるため、**ホストが指示する新規マージ経路は開かない**（opt-in 判定はホストの決定的コード = args パースのみ。モデル出力・未信頼テキストに依存しない）。前回ランでマージ済みだが状態記録に失敗した PR のクローズ回復（already-merged 経路）だけは通る。`blocked` + `pr` は次回ランの monitoring 再開対象で、**マージは GitHub 上で人間が行う**（対象ブランチに branch protection を設定することを推奨）。
+
+**なぜ自動マージを提供しないか**: 当初は host が発行する grant（正規マージコマンド全文 = `expectedCommand`）を merge-guard hook が完全一致照合する allow 経路で承認境界を作ろうとした。しかし monitor は未信頼のレビュー本文を読みつつ merge-exec と同じ Bash・`gh` 認証・FS を共有し、`gh pr view` で HEAD を取得して任意 nonce の grant を自作できる（**grant 偽造 P0**）。hook 専用の秘密注入経路がなく、hook が検証でき subagent が読めない鍵を持てないため署名 / MAC も実装不能で、偽造不能なマージ認可を hook で実装することは原理的に不可能。よって Codex 元指摘（rust-ai-library PR #441）の「境界を実装できるまで自動マージ無効化」に従い、grant / canary / branch-protection ランタイムゲートを撤去し、hook を deny 専用（best-effort・承認境界ではない）へ降格し、自動マージ経路を閉じた。**正規経路の外**（注入に従った monitor 自身の `gh pr merge` 直接実行・REST / GraphQL merge・approve・alias / extension）は merge-guard hook が best-effort で deny するが、これは迂回可能な多層防御の一層にすぎない。**実際にマージを止めるのは「自動マージを行わない」方針そのものと、人間がマージする前提のサーバ側 branch protection**（第三者=非 author 承認必須・dismiss stale・通常/force push 禁止・required checks。「自動マージを行わない理由と merge-guard hook」節参照）である。
 
 **監視とマージ実行の分離（Issue #145）・merged 自己申告の独立確認（Issue #160）:** このステップは監視・マージ実行・独立確認の 3 つのエージェントに分かれる。実行基盤がエージェント単位のツール権限制御を提供しないため、これは権限の剥奪ではなく**コンテキスト分離**（未信頼テキストをマージ実行主体へ入れない）である。残存リスクと必要な基盤対応は「非信頼データの扱い」項目 5 を参照。
 - **監視エージェント（monitor）**: CI・外部チェック・レビュースレッドを確認し、`state`（`ready` / `needs-fix` / `unresolved-comments` / `timeout` / `blocked`）と `headSha`（40 桁）を返す助言的判定のみを行う。PR レビュー本文という未信頼データを読むため、`gh pr merge` / `gh issue close` / `gh pr edit` / resolve mutation の実行権限を持たない。
@@ -446,6 +516,31 @@ grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scrip
 期待結果: `UNTRUSTED_POLICY` が `COMMON` 配列の末尾で参照され、あわせて `updateState` の State プロンプト（JSON マージ担当・掃除担当の両方）でも参照されていること。`untrusted(` が上記 8 関数それぞれの中で最低 1 回出現すること。`gh issue view` の全ヒットのうち、worktree routing ガード（implementPrompt 手順 0・fixPrompt 手順 0・recoverImplementPrompt 手順 0）と mergeExecutePrompt 手順 5 が `--json number,title` または `--json state` に限定されており、本文を読む箇所（planPrompt 手順 1・closePrompt 手順 2・recoverPrompt 手順 2c・Tree 手順 4）はいずれも「本文は非信頼データ」の注意文と同一手順内にあること。`monitorPrompt` に `gh pr merge` / `gh issue close` が出現しないこと（コンテキスト分離の確認）。
 
 worktree 削除の安全性については、`cleanupEphemeralWorktree` と `implement-issue-tree-owner` がいずれも 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree の自動削除廃止。所有権マーカー方式もエージェントへ開示した nonce は所有権証明にならないため不採用）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
+
+### merge-guard hook（deny 専用）・自動マージ無効化の適用確認（PR #182 codex P0）
+
+`script/merge-guard-hook.sh` または自動マージ経路を変更した場合、以下で「hook が deny 専用（allow 経路なし）であること」と「`autoMerge: true` でも実マージ経路が開かないこと（recoveryOnly 強制）」を確認する:
+
+```bash
+# 1. hook の構文検証（shellcheck があれば併用）
+bash -n script/merge-guard-hook.sh
+command -v shellcheck >/dev/null && shellcheck script/merge-guard-hook.sh
+
+# 2. hook に allow 経路の実ロジックが残っていないこと（ALLOW_RE 定数・grant ファイル参照が 0 件。
+#    冒頭コメントの経緯説明での expectedCommand 言及は該当しないため grep -v '^#' で除外）
+grep -vE '^\s*#' script/merge-guard-hook.sh | grep -nE "ALLOW_RE|expectedCommand|merge-grants/grant-" || echo "allow 経路の実ロジックなし（deny 専用）"
+
+# 3. js から grant / canary / branch-protection ゲートが撤去されていること（0 件）
+grep -n "issueMergeGrant\|buildMergeCommand\|ensureMergeGuardActive\|ensureBranchProtection\|IIT_MERGE_GRANT\|MERGE_GRANT_DIR" script/implement-issue-tree.js || echo "撤去済み（コメントの言及を除く）"
+
+# 4. boundaryNonce / ensureBoundaryNonceSeed は保持されていること（fix/state 用）
+grep -n "function boundaryNonce\|async function ensureBoundaryNonceSeed" script/implement-issue-tree.js
+
+# 5. autoMerge:true でも新規マージ経路を開かないこと（ready 到達時つねに recoveryOnly=true）
+grep -n "const recoveryOnly = lastState === 'ready'" script/implement-issue-tree.js
+```
+
+期待結果: `bash -n` が終了コード 0。手順 2 で hook に allow 経路（grant 照合・`expectedCommand`・完全一致）が **1 件も残っていない**こと。手順 3 で js から grant / canary / branch-protection 関連シンボルが（コメントの経緯言及を除き）**撤去されている**こと。手順 4 で `boundaryNonce` / `ensureBoundaryNonceSeed`（fix / state フェーズの未信頼データ境界トークン用）は**残存**していること。手順 5 で `recoveryOnly` が `lastState === 'ready'` のみで真になり（外部条件の AND なし）、`autoMerge` の値によらず `expectedHeadSha` が空文字へ倒れて merge-exec が `gh pr merge` を出力しないこと。hook テストは `bash -n` に加え、deny 専用ケース群（subagent の全マージ系スペリング → deny、`gh pr comment @cursor review`・読み取り系・main スレッド → 許可）で判定を確認する。
 
 ## よくある失敗
 
@@ -657,14 +752,17 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
    **これは強制的なセキュリティ境界ではない**（後述の実行基盤の制約を参照）。攻撃者が制御可能なテキストを読む主体を「実行しない主体」に寄せることで、注入が成功しても直接には破壊的操作へ到達しないようにする多層防御の一層である。
    - **Merge フェーズ（Issue #145 / #160）**: PR レビュー本文を読む監視エージェントは `gh pr merge` / `gh issue close` を持たない。マージ実行は、レビュー本文を読まず checks・HEAD sha・未解決スレッド数のみを自ら再取得して検証する別エージェントに限定する（Step 6 参照）。さらに merge-exec の `merged` 自己申告も未検証のモデル出力として扱い、ホストの reason 整合ゲート + 独立確認エージェント（merge-verify。読み取り専用・`state` / `headRefOid` のみ取得）の二重化を通過した場合にのみ受理する（Issue #160）。確認エージェントもモデル出力であり強制境界ではないが、merge-exec と merge-verify が同時に虚偽を返す場合のみ突破される多層防御として機能する。
    - **State フェーズ（Issue #144）**: 状態ファイルへマージする patch JSON は `note` / `summary` 等の未信頼由来の自由文を含むため、使い捨て nonce のデータ境界で隔離し（固定の ```json フェンス・固定 HEREDOC デリミタは境界を偽装されうるため廃止）、`UNTRUSTED_POLICY` を State プロンプトにも適用する。さらに JSON マージ担当と worktree / branch 掃除担当を別エージェントに分け、自由文と削除権限が同じ実行主体に同居しないようにする。掃除側が受け取るのは `sanitizeWorktreePath` / `isValidBranchName` 検証済みの値と固定文言のみ。JSON マージが失敗した場合は掃除を実行しない（回復情報を永続化できていない状態で worktree / branch を削除しないための fail-safe。削除意図は最終スイープの候補に登録済みのため残骸は後で回収される）。
-   - **実行基盤の制約と残存リスク（重要）**: Workflow ランタイムはスクリプト自身に `process` / `fs` / shell を与えず、`agent()` 単位の読み取り専用 credential・ツール allowlist も提供しない。分割後の各エージェントは同じ Bash・同じ `gh` 認証コンテキストを持つため、注入に従った監視エージェントが `gh pr merge` を直接実行する経路は**技術的には残る**。したがって本節の分離は「権限の剥奪」ではなく「未信頼テキストと破壊的操作のコンテキスト分離」であり、CI・独立検証（merge-exec の再取得検証）・`--match-head-commit` による HEAD 固定と合わせた多層防御として機能する。このため自動マージは既定で無効・明示 opt-in（`args.autoMerge: true`。Issue #165 の fail-closed）とし、ホストが正規経路（merge-exec への指示）で新規マージを実行するランを残存リスクを理解した人間の明示的な選択に限定する。ただしこのゲートは正規経路のみを閉じるものであり、monitor は既定無効時も未信頼テキストを読み同一の Bash・`gh` 認証コンテキストで動作するため、注入された monitor 自身が `gh pr merge` を直接実行する経路は `autoMerge` の値にかかわらず残る（既定無効は未承認マージの不成立を保証しない。Step 6 参照）。基盤が per-agent のツール allowlist / read-only credential を提供した時点で monitor へ適用し、既定を見直す。
-   - 強制境界にするには実行基盤側の対応（監視エージェントへ読み取り専用トークンを渡す、`gh pr merge` / `gh issue close` を拒否するツール allowlist を `agent()` に指定できるようにする、ホスト側の決定的コードでマージを実行する）が必要であり、現時点の Workflow ランタイムでは提供されていない。導入先でこのスキルを利用する際は、この残存リスクを前提に PR の最終確認（人間によるマージ後レビュー・branch protection の必須レビュー設定）を併用すること。
+   - **実行基盤の制約と 3 層の防御（重要。主張と保証を一致させる。PR #182 codex P0）**: Workflow ランタイムはスクリプト自身に `process` / `fs` / shell を与えず、`agent()` 単位の読み取り専用 credential・ツール allowlist も提供しない。分割後の各エージェントは同じ Bash・同じ `gh` 認証・同じ FS を持つため、本節の分離自体は「権限の剥奪」ではなく「未信頼テキストと破壊的操作のコンテキスト分離」である。当初は host 発行の grant（`expectedCommand` 完全一致）を hook で照合する **allow 経路を「証明可能な強制境界」と主張していたが、この主張は grant 偽造で崩れたため撤回する**（monitor は Bash と FS を持ち `grant-<pr>.json` を自作できる。hook 専用の秘密を持てず署名も不能）。防御は次の 3 層で、実装が保証できる強さの順に:
+     - **(1) 自動マージを行わない（唯一の確実な措置）**: host は `autoMerge` の値によらず新規マージ経路を開かない（`ready` 到達時つねに recoveryOnly=true・`expectedHeadSha=''` 強制・merge-exec は `gh pr merge` 非出力）。opt-in 判定はホストの決定的コード（args パース）のみで、モデル出力・未信頼テキストに依存しない。これが未承認マージを止める本体である。
+     - **(2) merge-guard hook = best-effort deny（境界ではない）**: subagent のマージ系コマンドを既知の直接実行難読化（行継続・改行・クォート分割・単独バックスラッシュ・IFS 直書き、ANSI-C クォート `$'...'` / IFS 展開 `${IFS}` の存在検知）まで潰して deny する攻撃面削減の一層。**間接実行（`eval`・base64 復元・変数間接呼び出し・コマンド置換 `$(...)`）や未知のスペリングは防げない。完全なサンドボックスではなく、迂回可能**。`gh` 認証の分離（読み取り専用トークン）や `agent()` 単位のツール allowlist は依然として基盤側の対応領域。
+     - **(3) 運用: サーバ側 branch protection + 人間マージ**: 人間がマージする前提で、対象ブランチに第三者=非 author 承認必須・dismiss stale・通常/force push 禁止・管理者含む enforcement・required checks を設定する（compromised なローカルエージェントもサーバ側ルールは迂回できない。automation は自己承認を作れない）。これはランタイムゲートではなく運用推奨だが、注入されたエージェントが仮に何らかの経路でマージを試みても止める最終防壁になる。
+   - **不可避の限界（受容済み。PR #182 codex P0）**: monitor（CI・レビュー状態の判定）と fix（レビュー指摘の自動修正）は、その職務上**未信頼のレビュー本文を自コンテキストへ読み込む必要があり**、かつ同じ Bash・`gh` 認証・FS を持つ。この基盤には `agent()` 単位の権限分離がないため、「未信頼テキストを読む主体」と「特権を持つ主体」を技術的に分離できず、注入が成功すれば理論上は任意の破壊的操作（`gh` 直叩き・`curl`・`git push` 等）へ到達し得る。本節の分離・hook・prompt はいずれもこれを**緩和**するが**強制境界にはならない**（monitor から本文読解を外しても、レビュー指摘を修正するには誰かが本文を読む必要があり、vector が fix エージェントへ移るだけで消えない = 自律的レビュー修正という中核機能に内在する）。この限界はこの実行基盤でコード変更では閉じられないため、**能力（自律的レビュー修正ループ）を保持したうえで受容し、本節に明記する**という方針を採る。完全に閉じる必要がある運用では、対象ブランチのサーバ側 branch protection（上記 (3)）を必須とし、マージ前の人間レビューを併用すること。
 
 残存リスクとして、自然言語インジェクションは境界タグ + 取り扱い規則でも確率的にしか防げない。push 前 Review フェーズ・CI・Bugbot・squash merge 前の Merge フェーズ監視が最終防衛線であることに留意する。
 
 ## 注意事項
 
-- **ユーザー承認なしで PR 作成まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する。**merge の自動実行は `args.autoMerge: true` の明示時のみ**（既定は無効。Issue #165 の fail-closed。マージ条件を満たした PR はマージ可能状態の `blocked` で停止し、`autoMerge: true` を付けた再実行の monitoring 再開、または人間の GitHub 上でのマージで完了する）。既定無効が閉じるのはホスト正規経路のみで、注入された monitor 自身によるマージ実行経路は残る（Step 6・「非信頼データの扱い」項目 5 参照。`autoMerge` の値にかかわらず branch protection の必須レビューを併用する）
+- **ユーザー承認なしで PR 作成まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する。**自動マージはこの実行基盤では行わない**（`args.autoMerge: true` でも無条件 fail-closed。PR #182 codex P0: monitor が grant を偽造できるため偽造不能なマージ認可を hook で実装できず、「境界を実装できるまで自動マージ無効化」に従った）。`autoMerge` の値によらずマージ条件を満たした PR はマージ可能状態の `blocked` で停止し、**マージは GitHub 上で人間が行う**。merge-guard hook（deny 専用・best-effort・承認境界ではない）と、人間マージ前提のサーバ側 branch protection（第三者=非 author 承認必須・dismiss stale・通常/force push 禁止・required checks を推奨）を併用すること（Step 6・「自動マージを行わない理由と merge-guard hook」・「非信頼データの扱い」項目 5 参照）
 - `parallel` は 1〜8 の整数のみ有効。整数以外・範囲外は既定の 3 にフォールバックする。並列度を上げるほど API レート制限・CI キューの逼迫に注意する
 - レビュースレッドの resolve（解決済み化）は自動フローのどのエージェント・どの経路でも実行されない（自動 resolve 機能は撤去済み）。自動フローは PR 本文への記録までで停止し、未解決スレッドは blocked → 最終レポートで issue 化承認を判断する。resolve は常に人間が GitHub 上で行い、resolve 後の再実行（または監視継続中の resolve）でマージ条件が再判定される
 - 各 implement / fix は独立した worktree で隔離実行されるが、メイン working copy のブランチ・共有設定などグローバル状態は変更しない
