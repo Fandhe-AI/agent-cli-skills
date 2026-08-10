@@ -2181,9 +2181,15 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
     `   gh issue view ${item.number} --json state（本文は取得しない）でクローズを確認し、open のままなら gh issue close ${item.number} する。再確認して closed であれば issueClosed: true、クローズできなかった・確認できない場合は issueClosed: false を返す（マージが成功していても虚偽の true を返さない。ホストはクローズ未完了を回復対象として再監視する）。`,
   ]
   return [
-    `PR #${impl.prNumber}（イシュー #${item.number}）のマージ実行担当。マージ条件を自ら再検証し、全て満たす場合にのみ squash merge する。`,
+    // PR #182 codex P0 以降、本プロンプトが gh pr merge を出力するのは常に不可能
+    // （expectedHeadSha は runMergeLoop により ready 到達時つねに空文字へ強制される。
+    // 2132-2135 の設計コメント参照）。冒頭の役割説明は squash merge の実行主体を
+    // 名乗ってはならず、手順 5「gh pr merge は実行しない」と整合させる（Bugbot 指摘:
+    // local-llm-server PR #588 / ideas PR #227。この矛盾は #182 で fail-closed 化した際に
+    // 冒頭文言だけが旧仕様のまま取り残されたもの）。
+    `PR #${impl.prNumber}（イシュー #${item.number}）のマージ可否確認担当。マージ条件を自ら再検証するが、squash merge の実行（gh pr merge）は一切行わない。既に MERGED の場合はイシュークローズ確認のみを行う。`,
     COMMON,
-    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews と gh api .../commits/<sha>/check-runs は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない。--jq を外した実行・別の jq 式への差し替えも行わない）。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。`,
+    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews と gh api .../commits/<sha>/check-runs は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない。--jq を外した実行・別の jq 式への差し替えも行わない）。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。gh pr merge の実行も行わない（手順 5 のとおり常に禁止）。`,
     '手順:',
     `1. gh pr view ${impl.prNumber} --json state,headRefOid,mergeable で現在の状態を取得する。`,
     `   - state が MERGED: マージ済み。手順 5 のイシュークローズ確認のみ行い merged: true / reason: already-merged を返す。`,
