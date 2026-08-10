@@ -82,7 +82,10 @@ const externalChecksInput = (() => {
 // Workflow ランタイムは per-agent の read-only credential・ツール allowlist を提供しないため、
 // monitor から merge 権限を技術的に剥奪できない（コンテキスト分離は権限剥奪ではない）。
 // 基盤が権限分離を提供するまで自動マージは既定で無効（fail-closed）とし、残存リスクを理解した
-// 人間が args.autoMerge: true を明示した場合のみ従来どおり自動マージする。
+// 人間が args.autoMerge: true を明示した場合のみ従来どおり自動マージする。ただしこのゲートが
+// 閉じるのはホスト正規経路（merge-exec への指示）のみで、未信頼テキストを読む monitor 自身が
+// 注入に従いマージを直接実行する経路は既定無効時も残る（未承認マージの不成立を保証しない。
+// SKILL.md Step 6・「非信頼データの扱い」項目 5 参照。PR #178 codex P0 対応）。
 //   - 未指定（undefined / null） → false（既定。新規マージは実行せず blocked で終端する）
 //   - boolean true / false       → その値
 //   - それ以外の型               → throw。マージゲートの入力のため寛容フォールバック禁止
@@ -2698,8 +2701,10 @@ if (externalChecksInput !== undefined) {
   log(`⚠️ ${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`)
 }
 // 自動マージ無効時の停止理由・再実行手順（Issue #165）。固定文言 + 検証済み整数（parent）のみで
-// 合成する（未信頼テキストを含めない）。EXTERNAL_CHECKS_UNCONFIRMED_REASON と同様、監視 blocked・
-// merge-verify 失敗・recoveryOnly 辞退の各終端から参照するため文言を 1 か所に集約する。
+// 合成する（未信頼テキストを含めない）。付与するのは「マージ条件を満たしたが自動マージ無効
+// ゲートだけで停止した」recoveryOnly の fail-closed 終端のみ（PR #178 Bugbot Medium 対応:
+// monitor 自身の blocked 判定・merge-verify 失敗は別理由の停止であり、「PR はマージ可能状態」
+// という本文言を添えると虚偽になるため付与しない）。
 const AUTO_MERGE_DISABLED_REASON =
   '自動マージは無効（args.autoMerge が true でない。monitor エージェントの権限をランタイム側で遮断できないため fail-closed が既定。Issue #165）。PR はマージ可能状態。'
   + `args に "autoMerge": true を明示して再実行すれば monitoring 再開で自動マージする（例: {"parent": ${parent}, "externalChecks": [...], "autoMerge": true}）。または人間が GitHub 上でマージする`
@@ -3888,10 +3893,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       if (!externalChecksConfirmed) {
         terminalReasonOverride = `${terminalReasonOverride}。${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`
       }
-      // 自動マージ無効ラン（Issue #165）も同様に再実行手順を必ず添える（両方該当なら併記）。
-      if (!autoMergeEnabled) {
-        terminalReasonOverride = capText(`${terminalReasonOverride}。${AUTO_MERGE_DISABLED_REASON}`)
-      }
+      // AUTO_MERGE_DISABLED_REASON はここでは添えない（PR #178 Bugbot Medium 対応）。
+      // 自動マージ無効ゲートに掛かったランでは monitor は blocked ではなく ready を返す契約の
+      // ため、この分岐（monitor 自身の blocked 判定）は別の品質理由による停止であり、
+      // 「PR はマージ可能状態。autoMerge: true の再実行でマージする」という文言は虚偽になる。
+      // 後置の capText 再適用が既存の EXTERNAL_CHECKS_UNCONFIRMED_REASON を切り詰める問題も
+      // 併せて解消する。自動マージ無効の再実行手順は、実際にゲートだけで停止した終端
+      // （recoveryOnly の fail-closed 分岐）でのみ添える。
     }
     // マージ実行フェーズ（Issue #145）。監視エージェントが ready を返したときにのみ起動し、
     // レビュー本文を読まない別エージェントが checks・HEAD sha・未解決スレッド数を再取得して
@@ -3908,8 +3916,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // 空振り → 従来と同じ未確定理由の blocked 終端であり、新規マージは成立しない。
     // Issue #165: 自動マージ無効（args.autoMerge が true でないラン）も recoveryOnly と同じホスト側
     // ゲートへ乗せる。monitor が ready（虚偽含む）を返しても expectedHeadSha が空文字へ強制され、
-    // merge-exec は gh pr merge を含まない空 sha 経路プロンプトに固定されるため新規マージは
-    // 成立しない。前回ランでマージ済み PR のクローズ回復（already-merged 経路）だけが通る。
+    // merge-exec は gh pr merge を含まない空 sha 経路プロンプトに固定されるため、ホストが指示する
+    // 正規経路からの新規マージは成立しない。前回ランでマージ済み PR のクローズ回復
+    // （already-merged 経路）だけが通る。このゲートが閉じるのは正規経路のみであり、未信頼テキスト
+    // を読む monitor 自身が注入に従い gh pr merge を直接実行する経路は基盤制約（per-agent の
+    // ツール allowlist / read-only credential なし）により autoMerge の値にかかわらず残る
+    // （SKILL.md「非信頼データの扱い」項目 5。PR #178 codex P0 対応: 既定無効は保証ではない）。
     const recoveryOnly = lastState === 'ready' && (!externalChecksConfirmed || !autoMergeEnabled)
     if (recoveryOnly) {
       const recoveryOnlyCauses = [
@@ -3999,10 +4011,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             if (!externalChecksConfirmed) {
               terminalReasonOverride = capText(`${terminalReasonOverride}。${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`)
             }
-            // 自動マージ無効ラン（Issue #165）も同様に再実行手順を必ず添える（両方該当なら併記）。
-            if (!autoMergeEnabled) {
-              terminalReasonOverride = capText(`${terminalReasonOverride}。${AUTO_MERGE_DISABLED_REASON}`)
-            }
+            // AUTO_MERGE_DISABLED_REASON はここでは添えない（PR #178 Bugbot Medium 対応）。
+            // この分岐は merged 自己申告を独立確認で裏付けられなかった停止であり、
+            // 「PR はマージ可能状態。autoMerge: true の再実行でマージする」という文言は
+            // 実態（マージ済みか否か不明）と一致しない。capText 再適用による
+            // EXTERNAL_CHECKS_UNCONFIRMED_REASON の切り詰めも併せて回避する。
             log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
           } else {
             // 独立確認の実測値を summary に追記し、merged note から検証経路を追えるようにする

@@ -6,8 +6,8 @@
     "[\"cursor\"]": "Cursor Bugbot 導入済み。HEAD sha に対する cursor[bot] レビュー到着をマージの必須条件とする"
   },
   "_autoMerge": {
-    "未指定 / false": "自動マージ無効（既定。Issue #165 の fail-closed）。実装・push 前 Review・PR 作成・CI 監視・fix ループまでは自動で進み、PR はマージ可能状態の blocked で停止する",
-    "true": "squash merge まで自動実行する明示 opt-in。monitor は未信頼テキストを読むため branch protection の必須レビュー等を併用する",
+    "未指定 / false": "自動マージ無効（既定。Issue #165 の fail-closed）。実装・push 前 Review・PR 作成・CI 監視・fix ループまでは自動で進み、PR はマージ可能状態の blocked で停止する。閉じるのはホスト正規経路のみで、未信頼テキストを読む monitor 自身によるマージ実行経路は残る（未承認マージの不成立を保証しない。SKILL.md Step 6 参照）",
+    "true": "squash merge まで自動実行する明示 opt-in。monitor は未信頼テキストを読むため、autoMerge の値にかかわらず branch protection の必須レビュー等を併用する",
     "boolean 以外": "エラーで停止する（誤記を黙って読み替えない）"
   },
   "examples": [
