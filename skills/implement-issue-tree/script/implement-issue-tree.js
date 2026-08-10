@@ -1769,10 +1769,11 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed) {
   let step4Lines
   if (!externalChecksConfirmed) {
     // 確定不能（Issue #147）: 外部チェックの有無が分からない状態でマージ条件を判定しない。
-    // ホスト側にも同じゲート（lastState === 'ready' を blocked へ倒す）があるため、
-    // このプロンプト指示が守られなくてもマージへは進まない（プロンプト + ホストの二重検証）。
+    // ホスト側にも同じゲート（Issue #168: ready を新規マージに使わせず、expectedHeadSha を
+    // 空に固定したクローズ回復専用の merge-exec のみ許可する）があるため、このプロンプト
+    // 指示が守られなくても新規マージへは進まない（プロンプト + ホストの二重検証）。
     step4Lines = [
-      `4. このリポジトリで使用されている外部チェック（GitHub Actions 以外の CI / レビュー App）を確定できていない。外部レビューを省略してよいか判断できないため、CI の結果にかかわらず state: blocked / blockedReason: "quality" を返して終了する（args を明示して再実行すれば継続できるため回復可能）。summary には「外部チェック構成が未確定のため自動マージを停止した。args に externalChecks を明示する必要がある」と書く（手順 5 以降は実施しない）。`,
+      `4. このリポジトリで使用されている外部チェック（GitHub Actions 以外の CI / レビュー App）を確定できていない。外部レビューを省略してよいか判断できないため、CI の結果にかかわらず state: blocked / blockedReason: "quality" を返して終了する（args を明示して再実行すれば継続できるため回復可能）。summary には「外部チェック構成が未確定のため自動マージを停止した。args に externalChecks を明示する必要がある」と書く（手順 5 以降は実施しない）。手順 1 で PR state が MERGED だった場合の ready はこの限りではない（新規マージは不要で、呼び出し元がクローズ回復専用の経路で処理する）。`,
     ]
   } else if (apps.length === 0) {
     // 外部チェックなし確定（args.externalChecks: [] の明示指定）: Bugbot 待機手順を出力しない
@@ -3757,18 +3758,17 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // レビュー本文を読まない別エージェントが checks・HEAD sha・未解決スレッド数を再取得して
     // 検証したうえでマージする。監視の判定は「マージを試みてよい」という起動条件にすぎず、
     // マージ条件の証拠としては採用しない。
-    if (lastState === 'ready' && !externalChecksConfirmed) {
-      // Issue #147: 外部チェック構成が未確定のままマージへ進ませないホスト側ゲート。
-      // 監視プロンプト側にも同じ指示（手順 4 で blocked を返す）を置いているが、プロンプトは
-      // モデル出力への契約でしかなく信頼境界ではないため、ready が返ってきた場合もここで
-      // 無条件に停止する（マージ実行エージェントは起動しない）。blocked + pr の終端は
-      // 次回ラン以降の monitoring 再開対象であり、args を明示して再実行すれば継続できる。
-      const reason = EXTERNAL_CHECKS_UNCONFIRMED_REASON
-      log(`⚠️ #${item.number}: ${reason}`)
-      // lastUnresolvedInfo / outOfScopeLog はここで上書きしない（failMergeTerminal が
-      // 「最終観測時点の未解決コメント」として reason へ合成する既存の追跡情報を保つ）。
-      return await failMergeTerminal(reason, 'blocked')
-    }
+    // Issue #147 → #168: 外部チェック構成が未確定のままマージへ進ませないホスト側ゲートは
+    // 「新規マージ」にのみ適用する。monitor が手順 1 で PR state=MERGED を検出して返した
+    // ready（クローズ・状態記録の回復のみが必要なケース。Issue #161）まで無条件に blocked へ
+    // 倒すと、クローズ回復だけが必要なイシューが無関係な理由で回復不能になるため、
+    // expectedHeadSha を強制的に空にした回復専用 merge-exec（空 sha 経路のプロンプトは
+    // gh pr merge を一切含まない。Issue #161 のホスト側分岐）だけを許可する。
+    // 監視プロンプト側の指示（手順 4 で blocked を返す）はモデル出力への契約でしかなく
+    // 信頼境界ではないため、虚偽の ready が返ってきても結果は回復専用 merge-exec 1 回の
+    // 空振り → 従来と同じ未確定理由の blocked 終端であり、新規マージは成立しない。
+    const recoveryOnly = lastState === 'ready' && !externalChecksConfirmed
+    if (recoveryOnly) log(`#${item.number}: 外部チェック構成が未確定のため新規マージは行わない。PR がマージ済みの場合のクローズ回復のみ試行する`)
     if (lastState === 'ready') {
       // headSha はホスト側で 40 桁小文字 16 進のみを受理する（sanitizeSha）。取得できない
       // 場合も空文字のままマージ実行エージェントを起動する: プロンプト側が「新規マージは
@@ -3777,15 +3777,21 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 回復パスを維持できる（Bugbot PR #150 指摘: headSha 欠落で回復パスが失われる問題）。
       // Issue #161: 空 sha 経路では手順 5 の文面自体もホスト側で分岐し、プロンプトに
       // マージコマンドを含めない（プロンプト解釈依存の残存リスクを除去）。
-      const expectedHeadSha = sanitizeSha(m?.headSha)
+      // Issue #168: recoveryOnly（外部チェック構成が未確定）では monitor が headSha を
+      // 返していてもホストが強制的に空文字へ倒す。monitor の自己申告 sha を新規マージに
+      // 転用させないための強制であり、これにより merge-exec は空 sha 経路（マージコマンド
+      // 非出力・requireExternalCheck も false）に固定される。
+      const expectedHeadSha = recoveryOnly ? '' : sanitizeSha(m?.headSha)
       {
         if (!expectedHeadSha) {
           log(`⚠️ #${item.number}: 監視エージェントが有効な headSha（40 桁）を返さなかった。新規マージは行わずマージ済み確認のみ実行する`)
         }
         // 確定済みの外部チェック App 全件をマージ実行側へ渡し、HEAD sha に対する起動を
         // App ごとに件数で再検証させる（Issue #146 の cursor 限定ゲートを #155 で汎用化）。
-        // ここに到達するのは externalChecksConfirmed が true の経路のみ（直前のホスト側
-        // ゲートで未確定は blocked 終端しているため）、externalCheckApps は明示入力の値。
+        // externalChecksConfirmed が true の経路では externalCheckApps は明示入力の値。
+        // 未確定の recoveryOnly 経路（Issue #168）でも起動するが、expectedHeadSha が空文字に
+        // 固定されるため requireExternalCheck は false になり、externalCheckApps（観測由来の
+        // 参考値の可能性あり）はプロンプトの外部チェック検証手順に使われない。
         const x = await agent(mergeExecutePrompt(item, impl, expectedHeadSha, externalCheckApps), {
           label: `merge-exec:#${item.number}`,
           phase: 'Merge',
@@ -3839,6 +3845,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
               `merge-exec の merged 自己申告（reason: ${execReason}）を独立確認で裏付けられなかったためマージを確定しなかった（独立確認の観測 state: ${observedState} / headRefOid: ${observedHead}${expectedHeadSha ? ` / 期待 HEAD: ${expectedHeadSha}` : ''}）。`
               + `次回ランの monitoring 再開（blocked + pr は再開対象）で、実際にマージ済みなら already-merged 経路で回復する`,
             )
+            // 構成が未確定のランでは、monitor-blocked 分岐（Issue #147）と同じパターンで
+            // 再実行手順を必ず添える（回復失敗の理由を人間が追えるようにするため。Issue #168）。
+            if (!externalChecksConfirmed) {
+              terminalReasonOverride = capText(`${terminalReasonOverride}。${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`)
+            }
             log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
           } else {
             // 独立確認の実測値を summary に追記し、merged note から検証経路を追えるようにする
@@ -3922,6 +3933,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // 'quality' に誤分類すると isActiveMonitoring が毎ラン再開し続け halt 防御を迂回する。
           lastBlockedReason = 'unrecoverable'
           lastUnresolvedInfo = lastUnresolvedInfo || capText(`PR が未マージのままクローズされている: ${execSummaryText}`)
+        } else if (recoveryOnly && execReason) {
+          // 回復専用経路で PR がマージ済みでなかった（空 sha 経路の merge-exec は他条件を
+          // 確認せず head-moved で辞退する）。未確定ランで fix ループ・再監視へ進ませず、
+          // 従来どおり未確定理由の blocked で終端する（fail-closed 維持。Issue #168）。
+          // blocked + pr は次回ランの monitoring 再開対象であり、args を明示して再実行すれば
+          // 新規マージ経路で継続できる。execReason が enum 外・結果 null の場合はこの分岐に
+          // 入れず、既存どおり systemic failure（invalid-monitor-result → failed 終端）とする。
+          return await failMergeTerminal(capText(`${EXTERNAL_CHECKS_UNCONFIRMED_REASON}（PR のマージ済みクローズ回復のみ試行したが PR はマージ済みではなかった: ${execSummaryText}）`), 'blocked')
         } else if (execReason === 'head-moved' || execReason === 'checks-not-green' || execReason === 'merge-failed') {
           // いずれも一過性（監視後の push・チェック未完了・merge コマンドの一時失敗）。
           // 再監視で解消しうるため timeout として次ラウンドへ回す（監視回数の上限で終端する）。
