@@ -467,36 +467,31 @@ function parseMaxResidualWorktrees(raw) {
 }
 
 // ラン開始時の残置 worktree 総数を数える純粋関数（fail-closed ゲートの観測値）。
-// entries は scanOrphanWorktrees（agent 経由の git worktree list --porcelain）の返却エントリ。
-// メインの working tree（mainPath）だけを除外した**物理総数**を数える（PR #185 codex P1
-// 第 5 ラウンド）。以前は状態ファイル追跡済みの worktree を「現在使用中」として除外していたが、
-// failed / blocked のまま長期滞留する実装 worktree が毎ラン除外され続け、何件蓄積しても上限に
-// 計上されない過小カウントになっていた。maxResidualWorktrees の契約は「残置 worktree 総数の上限」
-// （ディスク枯渇防止）であり、使用中かどうかはディスク消費を変えないため、追跡状態によらず
-// 全 worktree を数える。使用中の worktree が数えられる分は過大側（＝過剰に停止する fail-closed）
-// で安全。上限に近い場合は利用者が limit を引き上げるか手動掃除する（停止理由に一覧を出す）。
-// sanitize 不可パスも同じ理由で過大側に倒して計上する。
-// 返却は { count, paths }（paths は停止時レポートで残置一覧を提示するため）。
-function countResidualWorktrees(entries, mainPath) {
+// entries は scanOrphanWorktrees（agent 経由の git worktree list --porcelain）の返却エントリで、
+// 呼び出し元が独立レコードカウント（countWorktreeRecords）と entries.length を照合済みであることを
+// 前提とする。メイン worktree だけを除外した**物理総数**を数える（PR #185 codex P1 第 5 ラウンド。
+// 以前の状態ファイル追跡済み除外は failed / blocked の長期滞留が何件でも計上されない過小カウント
+// だった。使用中かどうかはディスク消費を変えないため除外しない。過大側＝過剰停止で安全）。
+//
+// 件数はレコード**内容**に依存させない（PR #185 codex P1 第 6 ラウンド）: 以前は isMain: true の
+// レコードをすべて除外し空 path もスキップしていたが、ORPHAN_SCAN_SCHEMA は isMain の個数も path の
+// 非空も制約しないため、全件返しつつ複数を isMain: true にする・path を空にする転記（誤り・
+// プロンプトインジェクション）で独立カウントと件数が一致したまま過小計上できた。
+// git worktree list --porcelain の先頭レコードは仕様上必ずメイン worktree のため、**位置**で先頭
+// 1 件のみを除外し、残り全件を isMain フラグ・path の中身と無関係に必ず 1 件ずつ計上する。
+// これにより count は常に entries.length - 1 となり、長さが独立照合済みである以上、転記内容を
+// どう細工しても件数を減らせない（エージェントが順序を入れ替えてメインが後方に来ても、除外は
+// ちょうど 1 件のため件数は不変。paths の表示が乱れるだけで判定は影響を受けない）。
+// path が検証できないレコードも「(検証不可)」として計上する（残置が不可視になる fail-open を防ぐ。
+// 表示用の raw は sanitize()＋長さ制限で無害化し、エージェントプロンプトへは再投入しない）。
+// 返却は { count, paths }（paths は停止時レポートで残置一覧を提示するため。count === paths.length）。
+function countResidualWorktrees(entries) {
+  const list = Array.isArray(entries) ? entries : []
   const paths = []
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    if (entry?.isMain) continue
-    const raw = typeof entry?.path === 'string' ? entry.path : ''
-    if (!raw) continue // "worktree <path>" 行が無いエントリ（通常あり得ない）は残置に数えない
+  for (let i = 1; i < list.length; i++) {
+    const raw = typeof list[i]?.path === 'string' ? list[i].path : ''
     const p = sanitizeWorktreePath(raw)
-    if (p) {
-      // 検証済みパス: メイン worktree のみ除外して残置（物理総数）に数える。
-      if (mainPath && p === mainPath) continue
-      paths.push(p)
-    } else {
-      // sanitizeWorktreePath が弾いたパス（unicode・`~`・非標準文字を含む等）。検証できないことを
-      // 理由に「残置ゼロ」へ落とすと fail-closed ゲートが fail-open する（残置が不可視になる）ため、
-      // 数えることを優先する（over-count は「過剰に停止する」安全側。scan 失敗時と同じ判断）。
-      // tracked / main との照合はできないので保守的に残置として計上し、手動掃除のため raw を
-      // sanitize()（改行・バッククォート・$ の無害化）＋長さ制限して残す（ログ・レポート表示専用。
-      // このパスがエージェントプロンプトへ再投入されることはない）。
-      paths.push(`(検証不可: ${sanitize(raw).slice(0, 120)})`)
-    }
+    paths.push(p || `(検証不可: ${sanitize(raw).slice(0, 120) || 'パス欠落'})`)
   }
   return { count: paths.length, paths }
 }
@@ -3081,7 +3076,7 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
     residualObserved = true
     // メイン worktree のみ除外した物理総数を観測する（追跡済み＝使用中の worktree も数える。
     // countResidualWorktrees のコメント参照。PR #185 codex P1 第 5 ラウンド）。
-    const residual = countResidualWorktrees(runStartOrphanEntries, mainWorktreePath)
+    const residual = countResidualWorktrees(runStartOrphanEntries)
     residualObservedAtStart = residual.count
     residualPathsAtStart = residual.paths
     // maxResidualWorktrees === 0 は上限なし（チェック無効）。「超過」判定のため count > limit で発火する
@@ -5282,7 +5277,11 @@ if (!residualObserved) {
 
 // externalChecks（確定値）・externalChecksConfirmed・externalChecksObserved（観測の参考値）も
 // 返す。マージゲートの前提条件が何だったかをレポート側で検証できるようにするため（Issue #147）。
-// ephemeralWorktrees: 自動削除しない使い捨て worktree の記録（Issue #142）。手動掃除の対象。
+// ephemeralWorktrees: 自動削除しない使い捨て worktree（review / pr-create / fix-routing-error）の
+//   記録（Issue #142）。手動掃除の対象。implement は返さない（PR #185 Bugbot Medium: 実装
+//   worktree は merged 確定時の掃除・次ラン Recover の再利用対象で、「手動掃除の対象」として
+//   返すと消費側が failed イシューの未マージ成果を削除しかねない。implement を含む本ラン
+//   積み増しの総数は residualWorktrees.addedThisRun が別途返す）。
 // autoMerge（Issue #165）: 本ランで自動マージが有効だったか。false のランでは「マージ待ち PR
 // 一覧（autoMerge 無効による blocked）」を最終レポートで追跡するための判定材料になる。
 // mergeGuard（PR #182 codex P0）: 自動マージは autoMerge の値によらずこの実行基盤では提供されない
@@ -5297,4 +5296,4 @@ if (!residualObserved) {
 //   明示すること。overLimit: true は次ラン開始時に新規着手が停止する見込みで、git worktree remove に
 //   よる手動掃除の案内を最終レポートに含めること。suppressed は本ランで残置上限超過により新規着手を
 //   抑止したか（monitoring 再開は抑止対象外）。limit: 0 は上限なし（チェック無効）。
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled, externalChecks: externalCheckApps, externalChecksConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees }
+return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled, externalChecks: externalCheckApps, externalChecksConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
