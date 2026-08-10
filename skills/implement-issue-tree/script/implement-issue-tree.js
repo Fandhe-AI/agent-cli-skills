@@ -1344,12 +1344,12 @@ const ephemeralWorktrees = []
 //   - エージェント起動前後の `git worktree list` 差分 → 並列の worktree 作成と競合して
 //     一意に定まらず、レースで誤削除に倒れる。
 //   - ホスト発行 nonce をエージェント自身に cwd へ所有権マーカーとして書かせ、ラン終了時に
-//     マーカー照合の上で回収する（Issue #163 の試行）→ nonce は未信頼データ（diff・PR 本文）を
-//     処理するエージェント自身へプロンプトで開示されるため、所持していても所有権の証明に
-//     ならない。プロンプトインジェクションを受けたエージェントが `git worktree list` から
+//     マーカー照合の上で回収する → nonce は未信頼データ（diff・PR 本文）を処理する
+//     エージェント自身へプロンプトで開示されるため、所持していても所有権の証明にならない。
+//     プロンプトインジェクションを受けたエージェントが `git worktree list` から
 //     別の clean worktree を選び、既知の nonce をその配下へ書いて自パスとして返せば、
 //     状態ファイル未登録の worktree（利用者の手動 worktree・並行ラン）を全ゲート通過で
-//     `git worktree remove --force` できてしまう（PR #177 codex-review P0）。
+//     `git worktree remove --force` できてしまう。
 //     ランタイムが作成パスをホストへ返さない以上「信頼済みホストが実際に作成・登録した
 //     パス」を削除根拠にできないため、自動削除は復活させない。
 //
@@ -1404,7 +1404,7 @@ const SWEEP_SCHEMA = {
 //
 // 使い捨て worktree（review / pr-create）はこのスイープの対象に入れない（recordEphemeralWorktree
 // の不採用案コメント参照。自己申告パス＋エージェントへ開示済みの値では所有権を証明できないため、
-// 記録・残置報告のみ行い削除しない。PR #177 codex-review P0）。
+// 記録・残置報告のみ行い削除しない）。
 async function sweepClosedWorktrees(orphanPaths = []) {
   try {
     if (sweepEligiblePaths.size === 0 && orphanPaths.length === 0) {
@@ -4752,8 +4752,7 @@ if (orphanEntriesAtEnd.length > 0) {
 // worktree も候補外であり、状態ファイル書き込み失敗が削除過多へ倒れない。
 // 候補ゼロなら何も削除しない（fail-safe）。理由は sweepEligiblePaths の定義を参照。
 // 使い捨て worktree（review / pr-create）はスイープの対象に入れない（recordEphemeralWorktree の
-// 不採用案コメント参照。エージェントへ開示済みの値では所有権を証明できないため削除しない。
-// PR #177 codex-review P0）。
+// 不採用案コメント参照。エージェントへ開示済みの値では所有権を証明できないため削除しない）。
 const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
 
 // --- 使い捨て worktree（review / pr-create）の一覧報告 ---
