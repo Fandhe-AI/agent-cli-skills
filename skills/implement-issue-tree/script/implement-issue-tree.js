@@ -1765,8 +1765,8 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed) {
   // （Bugbot が check-run を作らずレビューのみ投稿する構成でも誤って blocked にしないため）。
   // ただし「レビューの到着」だけを起動証拠にはしない: Bugbot は指摘 0 件のとき check-run
   // （app.slug = cursor）だけを completed にしてレビューを投稿しないため、レビュー必須では
-  // 指摘なしの PR が恒久的に blocked になる（rust-ai-library PR #437 / #438 / #439 実測:
-  // check-run success・レビュー 0 件。逆に PR #434 / #436 は指摘ありでレビュー到着）。
+  // 指摘なしの PR が恒久的に blocked になる（実測で確認済み: check-run が success で
+  // レビュー 0 件の PR と、指摘ありでレビューが到着する PR の双方を観測している）。
   const nonCursorApps = apps.filter((a) => a !== 'cursor')
 
   // cursor 以外の確定済み外部チェックについて「HEAD sha に対する起動」を確認させる行。
@@ -1932,9 +1932,9 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
         // 契約を維持）。Bugbot は指摘があるとき COMMENTED でレビューを投稿し APPROVED を
         // 出さないため、APPROVED を要求すると常にマージ不能になる。一方で指摘 0 件のときは
         // レビューを一切投稿せず check-run のみを completed にするため、レビュー必須では
-        // 「指摘なし」の PR が恒久的に external-review-missing になる（実測: rust-ai-library
-        // PR #437 / #438 / #439 は check-run success・レビュー 0 件、PR #434 / #436 は指摘あり
-        // でレビュー到着）。そのため cursor 以外の App と同じ「check-run 優先・0 件のときのみ
+        // 「指摘なし」の PR が恒久的に external-review-missing になる（実測で確認済み:
+        // check-run が success でレビュー 0 件の PR と、指摘ありでレビューが到着する PR の
+        // 双方を観測している）。そのため cursor 以外の App と同じ「check-run 優先・0 件のときのみ
         // レビューへフォールバック」構造に揃え、フォールバック側の合格条件のみ cursor 固有
         // （件数 1 件以上・state は問わない）とする。指摘内容の評価はレビュー本文を読む監視
         // エージェントが needs-fix 判定として実施済みであり、ここでの再検証の役割は
