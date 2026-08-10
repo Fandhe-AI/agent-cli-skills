@@ -205,6 +205,8 @@ curl -s -o /dev/null -w '%{http_code} redirects=%{num_redirects}\n' -L "$B/about
 
 **`build` job と `deploy` job を分離しています。** `pull_request` では PR 側の未信頼コード（`cargo run` / `cargo test`）が実行されるため、この job には write 権限のトークンも Firebase の secret も渡しません（`persist-credentials: false` で `actions/checkout` の資格情報も残しません）。ビルド成果物だけを `deploy` job へ artifact 経由で渡し、`pull-requests: write` / `checks: write` や `FIREBASE_SERVICE_ACCOUNT` を扱うのは信頼済みコードだけが動く `deploy` job に限定します。同一 job で未信頼コードと書き込み権限トークンを同居させると、悪意ある PR がビルド中に `GITHUB_TOKEN` や secret を窃取・悪用できてしまうためです。
 
+**`deploy` job は PR でも常に base 側（`github.event.pull_request.base.sha`）の `firebase.json` を checkout します。** PR 側の revision を使うと、悪意ある PR が `firebase.json` の predeploy hook 等を通じて write 権限トークンや Firebase secret を窃取できるためです。この結果、**PR で `firebase.json` 等のデプロイ設定を変更してもプレビューには反映されず、マージ後の本番デプロイから反映されます**（セキュア・バイ・デフォルトを優先した意図的な制約です）。
+
 ```yaml
 name: デプロイ
 
@@ -288,11 +290,18 @@ jobs:
       checks: write
     steps:
       # firebase.json（Step 3 で作成）を読み込むためリポジトリを checkout する。
-      # PR 側の artifact に設定ファイルを含めない（未信頼コードがデプロイ設定を
-      # 書き換えられる経路を作らないため）。checkout はデフォルトで作業ディレクトリを
-      # クリーンにするので、必ず download-artifact より前に実行する。
+      # PR 側の checkout はデフォルトで PR のマージコミット（未信頼コードを含む）を
+      # 取得してしまう。PR で firebase.json に predeploy hook 等を仕込まれると、
+      # write 権限トークンと Firebase secret を持つこの job で任意コマンドが実行
+      # されてしまうため、必ず base（信頼済み revision）を checkout する。
+      # これにより「PR で firebase.json を変更してもプレビューには反映されず、
+      # マージ後の本番デプロイから反映される」という制約を受け入れる
+      # （セキュア・バイ・デフォルトを優先）。
+      # checkout はデフォルトで作業ディレクトリをクリーンにするので、必ず
+      # download-artifact より前に実行する。
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
 
       - name: 成果物をダウンロード
