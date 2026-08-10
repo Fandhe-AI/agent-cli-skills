@@ -4,7 +4,8 @@ description: >
   親イシュー配下のサブイシュー（孫含む）を依存順を保ちつつ worktree で並列に自動実装・push 前 review・PR 作成・CI 監視・squash merge まで一括自動化。
   「イシューツリーを並列実装」「配下のサブイシューをまとめて実装」「ツリー全体を並列で実装して」「イシュー階層を自動開発」で使用。
   per-issue 計画立案（Plan: セッション継承モデル）→実装（Implement: sonnet）の分業。push 前 review（Review 通過後にのみ push・PR 作成して CI を 1 回だけ起動）。
-  外部チェック構成は args の externalChecks で明示（[] で「なし」を確定して不要待機なし・未指定なら自動マージ停止）。並列度（parallel）と依存（dependsOn）で実行順を制御。
+  外部チェック構成は args の externalChecks で明示（[] で「なし」を確定して不要待機なし・未指定なら自動マージ停止）。
+  squash merge の自動実行は autoMerge を true 明示した場合のみ（既定は無効 = fail-closed で PR をマージ可能状態のまま停止）。並列度（parallel）と依存（dependsOn）で実行順を制御。
   単一イシューの実装は implement-issue、PR レビューは implement-review-pr を参照。
 user-invocable: true
 argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 main）] [並列度（省略時 3）]"
@@ -40,17 +41,18 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
     "parent": "<親イシュー番号>",
     "branch": "<マージ先ブランチ（省略時 main）>",
     "parallel": "<並列度 1〜8（省略時 3）>",
-    "externalChecks": "<外部チェック App slug の配列（例: [\"cursor\"]。使用しない場合は []）>"
+    "externalChecks": "<外部チェック App slug の配列（例: [\"cursor\"]。使用しない場合は []）>",
+    "autoMerge": "<自動マージの明示 opt-in（boolean。true 明示時のみ squash merge を自動実行。省略時 false = マージ可能状態で停止）>"
   }
 }
 ```
 
-例: 親イシュー `#42` の配下を `main` へ、並列度 3・Cursor Bugbot 導入済みでマージする場合:
+例: 親イシュー `#42` の配下を `main` へ、並列度 3・Cursor Bugbot 導入済み・自動マージ opt-in でマージする場合:
 
 ```json
 {
   "scriptPath": ".claude/skills/implement-issue-tree/script/implement-issue-tree.js",
-  "args": { "parent": 42, "branch": "main", "parallel": 3, "externalChecks": ["cursor"] }
+  "args": { "parent": 42, "branch": "main", "parallel": 3, "externalChecks": ["cursor"], "autoMerge": true }
 }
 ```
 
@@ -62,6 +64,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | `branch` | 任意 | `main` | マージ先ブランチ。不正な文字を含む場合はエラー |
 | `parallel` | 任意 | `3` | 並列実行数（1〜8）。`1` を指定すると実質的に直列実行になる |
 | `externalChecks` | 任意 | 未指定 | GitHub Actions 以外の外部チェック App slug の配列（最大 10 件、slug 形式は英小文字・数字・ハイフン）。**未指定と `[]` は意味が異なる** |
+| `autoMerge` | 任意 | `false` | 自動マージの明示 opt-in（boolean）。**未指定は自動マージ無効**（Issue #165 の fail-closed）。`true` を明示した場合のみ squash merge まで自動実行する。無効時も実装・push 前 Review・PR 作成・CI 監視・fix ループは従来どおり自動で進み、PR はマージ可能状態の `blocked` で停止する。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
 
 **`externalChecks` の 3 状態（Issue #147）:**
 
@@ -239,6 +242,8 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 
 `gh pr checks --watch` で CI を監視し、以下の全条件を満たした場合のみ squash merge する。
 
+**自動マージは opt-in（Issue #165）:** squash merge の自動実行は `args.autoMerge: true` を明示した場合のみ行う。既定（未指定）では、実装・push 前 Review・PR 作成・CI 監視・fix ループまでは従来どおり自動で進み、全マージ条件を満たしても新規マージは実行せず、PR をマージ可能状態のまま `blocked`（`blockedReason: quality`）+ `pr` 保持で終端する。monitor が `ready`（虚偽含む）を返してもホストが `expectedHeadSha` を空文字へ強制し、merge-exec は `gh pr merge` を含まない回復専用経路（空 sha 経路）に固定されるため新規マージは成立しない（Issue #168 の機構を流用したホスト側ゲート。opt-in 判定はホストの決定的コード = args パースのみで行い、モデル出力・未信頼テキストに依存しない）。`blocked` + `pr` は次回ランの monitoring 再開対象のため、`autoMerge: true` を付けた再実行 1 回でマージまで完結する（または人間が GitHub 上でマージする）。**opt-in 時の残存リスク**: monitor は merge-exec と同一の Bash・`gh` 認証コンテキストを持つため、プロンプトインジェクション成立時に monitor が直接マージを実行する経路が技術的に残る（「非信頼データの扱い」項目 5 参照）。opt-in する場合は branch protection の必須レビュー・マージ後の人間レビューを併用すること。
+
 **監視とマージ実行の分離（Issue #145）・merged 自己申告の独立確認（Issue #160）:** このステップは監視・マージ実行・独立確認の 3 つのエージェントに分かれる。実行基盤がエージェント単位のツール権限制御を提供しないため、これは権限の剥奪ではなく**コンテキスト分離**（未信頼テキストをマージ実行主体へ入れない）である。残存リスクと必要な基盤対応は「非信頼データの扱い」項目 5 を参照。
 - **監視エージェント（monitor）**: CI・外部チェック・レビュースレッドを確認し、`state`（`ready` / `needs-fix` / `unresolved-comments` / `timeout` / `blocked`）と `headSha`（40 桁）を返す助言的判定のみを行う。PR レビュー本文という未信頼データを読むため、`gh pr merge` / `gh issue close` / `gh pr edit` / resolve mutation の実行権限を持たない。
 - **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文・**チェック名**を一切読まず、PR の `state` / `headRefOid` / `mergeable`（enum・sha）、チェックの**状態別件数**（`gh pr checks <N> --json state --jq '[.[].state] | group_by(.) | map({state: .[0], count: length})'`。素の `gh pr checks` や `--json name / description / link` は使わない）、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）、および `args.externalChecks` で確定した外部チェック App について HEAD sha に対する**件数と状態 enum のみ**（`--jq` で正規化。App 名・チェック名・body 等のテキストは取得しない）を自ら再取得して検証し、全条件を満たす場合にのみ squash merge とイシュークローズを実行する。監視時点の HEAD sha と一致しない場合はマージせず辞退する（監視後に push された未検証のコミットをマージしない）。マージは `gh pr merge <N> --squash --delete-branch --match-head-commit <監視時点の sha>` で実行し、照合とマージの間に push される競合（TOCTOU）を GitHub 側の条件評価で塞ぐ。
@@ -375,7 +380,7 @@ open のサブイシューが残っている場合、または受入基準が未
   Issue 化は本レポート確認 → ユーザー承認のうえ実施する（承認なしに Issue 操作をしない。手順は「実装対象外（out-of-scope）の扱い」手順 3・4 と同様）
 ```
 
-返却値: `parent` / `baseBranch` / `parallel` / `externalChecks`（確定した外部チェック App 一覧） / `externalChecksConfirmed`（構成が確定していたか。`false` のイシューは自動マージされない） / `externalChecksObserved`（観測ベースの参考値） / `total` / `done`（各イシューの status。blocked / failed で未解決コメントがあれば `unresolvedComments`、fix 対象外の判断ログがあれば `outOfScope` を含む） / `failures` / `notStarted` / `halted`。
+返却値: `parent` / `baseBranch` / `parallel` / `autoMerge`（自動マージが有効だったか。`false` のランはマージ条件を満たしたイシューも `blocked` + `pr` で終端し、マージ待ち PR 一覧として追跡する。Issue #165） / `externalChecks`（確定した外部チェック App 一覧） / `externalChecksConfirmed`（構成が確定していたか。`false` のイシューは自動マージされない） / `externalChecksObserved`（観測ベースの参考値） / `total` / `done`（各イシューの status。blocked / failed で未解決コメントがあれば `unresolvedComments`、fix 対象外の判断ログがあれば `outOfScope` を含む） / `failures` / `notStarted` / `halted`。
 
 ## 検証
 
@@ -652,14 +657,14 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
    **これは強制的なセキュリティ境界ではない**（後述の実行基盤の制約を参照）。攻撃者が制御可能なテキストを読む主体を「実行しない主体」に寄せることで、注入が成功しても直接には破壊的操作へ到達しないようにする多層防御の一層である。
    - **Merge フェーズ（Issue #145 / #160）**: PR レビュー本文を読む監視エージェントは `gh pr merge` / `gh issue close` を持たない。マージ実行は、レビュー本文を読まず checks・HEAD sha・未解決スレッド数のみを自ら再取得して検証する別エージェントに限定する（Step 6 参照）。さらに merge-exec の `merged` 自己申告も未検証のモデル出力として扱い、ホストの reason 整合ゲート + 独立確認エージェント（merge-verify。読み取り専用・`state` / `headRefOid` のみ取得）の二重化を通過した場合にのみ受理する（Issue #160）。確認エージェントもモデル出力であり強制境界ではないが、merge-exec と merge-verify が同時に虚偽を返す場合のみ突破される多層防御として機能する。
    - **State フェーズ（Issue #144）**: 状態ファイルへマージする patch JSON は `note` / `summary` 等の未信頼由来の自由文を含むため、使い捨て nonce のデータ境界で隔離し（固定の ```json フェンス・固定 HEREDOC デリミタは境界を偽装されうるため廃止）、`UNTRUSTED_POLICY` を State プロンプトにも適用する。さらに JSON マージ担当と worktree / branch 掃除担当を別エージェントに分け、自由文と削除権限が同じ実行主体に同居しないようにする。掃除側が受け取るのは `sanitizeWorktreePath` / `isValidBranchName` 検証済みの値と固定文言のみ。JSON マージが失敗した場合は掃除を実行しない（回復情報を永続化できていない状態で worktree / branch を削除しないための fail-safe。削除意図は最終スイープの候補に登録済みのため残骸は後で回収される）。
-   - **実行基盤の制約と残存リスク（重要）**: Workflow ランタイムはスクリプト自身に `process` / `fs` / shell を与えず、`agent()` 単位の読み取り専用 credential・ツール allowlist も提供しない。分割後の各エージェントは同じ Bash・同じ `gh` 認証コンテキストを持つため、注入に従った監視エージェントが `gh pr merge` を直接実行する経路は**技術的には残る**。したがって本節の分離は「権限の剥奪」ではなく「未信頼テキストと破壊的操作のコンテキスト分離」であり、CI・独立検証（merge-exec の再取得検証）・`--match-head-commit` による HEAD 固定と合わせた多層防御として機能する。
+   - **実行基盤の制約と残存リスク（重要）**: Workflow ランタイムはスクリプト自身に `process` / `fs` / shell を与えず、`agent()` 単位の読み取り専用 credential・ツール allowlist も提供しない。分割後の各エージェントは同じ Bash・同じ `gh` 認証コンテキストを持つため、注入に従った監視エージェントが `gh pr merge` を直接実行する経路は**技術的には残る**。したがって本節の分離は「権限の剥奪」ではなく「未信頼テキストと破壊的操作のコンテキスト分離」であり、CI・独立検証（merge-exec の再取得検証）・`--match-head-commit` による HEAD 固定と合わせた多層防御として機能する。このため自動マージは既定で無効・明示 opt-in（`args.autoMerge: true`。Issue #165 の fail-closed）とし、「未信頼テキストを読む主体がマージに到達し得るラン」を残存リスクを理解した人間の明示的な選択に限定する。基盤が per-agent のツール allowlist / read-only credential を提供した時点で monitor へ適用し、既定を見直す。
    - 強制境界にするには実行基盤側の対応（監視エージェントへ読み取り専用トークンを渡す、`gh pr merge` / `gh issue close` を拒否するツール allowlist を `agent()` に指定できるようにする、ホスト側の決定的コードでマージを実行する）が必要であり、現時点の Workflow ランタイムでは提供されていない。導入先でこのスキルを利用する際は、この残存リスクを前提に PR の最終確認（人間によるマージ後レビュー・branch protection の必須レビュー設定）を併用すること。
 
 残存リスクとして、自然言語インジェクションは境界タグ + 取り扱い規則でも確率的にしか防げない。push 前 Review フェーズ・CI・Bugbot・squash merge 前の Merge フェーズ監視が最終防衛線であることに留意する。
 
 ## 注意事項
 
-- **ユーザー承認なしで PR 作成・merge まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する
+- **ユーザー承認なしで PR 作成まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する。**merge の自動実行は `args.autoMerge: true` の明示時のみ**（既定は無効。Issue #165 の fail-closed。マージ条件を満たした PR はマージ可能状態の `blocked` で停止し、`autoMerge: true` を付けた再実行の monitoring 再開、または人間の GitHub 上でのマージで完了する）
 - `parallel` は 1〜8 の整数のみ有効。整数以外・範囲外は既定の 3 にフォールバックする。並列度を上げるほど API レート制限・CI キューの逼迫に注意する
 - レビュースレッドの resolve（解決済み化）は自動フローのどのエージェント・どの経路でも実行されない（自動 resolve 機能は撤去済み）。自動フローは PR 本文への記録までで停止し、未解決スレッドは blocked → 最終レポートで issue 化承認を判断する。resolve は常に人間が GitHub 上で行い、resolve 後の再実行（または監視継続中の resolve）でマージ条件が再判定される
 - 各 implement / fix は独立した worktree で隔離実行されるが、メイン working copy のブランチ・共有設定などグローバル状態は変更しない
