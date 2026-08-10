@@ -304,3 +304,8 @@ echo "  git push -u origin '${BRANCH}'"
 echo "  gh pr create --repo ${REPO_SLUG} --base ${DEFAULT_BRANCH:-main} --title '<title>' --body '...'"
 echo ""
 echo "作業ディレクトリ: ${WORKDIR}/upstream"
+# 呼び出し元（SKILL.md）が後続 Step（差分確認・commit・push・PR 作成）で使う
+# 作業 clone を機械的に取得できるよう、標準出力の最終行に機械可読な key=value を出力する。
+# 呼び出し元はこの行を唯一の作業ディレクトリとして採用し、Step 5〜6 で別途作成した
+# ディレクトリではなく、ここで確定した clone を後続処理に使うこと。
+echo "CONTRIBUTE_SKILL_WORKDIR=${WORKDIR}/upstream"
