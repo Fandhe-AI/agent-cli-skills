@@ -428,7 +428,8 @@ grep -n "PATCH_EOF\|boundaryNonce" script/implement-issue-tree.js
 
 # worktree 削除の安全性（Issue #139 / #142 / #148）
 # 1. 使い捨て worktree（review / pr-create）が削除されず記録のみであること
-grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree" script/implement-issue-tree.js
+#    （所有権マーカー照合による回収も不採用 — マーカー植え付け指示が存在しないこと）
+grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree\|implement-issue-tree-owner" script/implement-issue-tree.js
 # 2. continue / discard の削除ゲート（申告 wipCommitted + ホスト側の実測）が両方あること
 grep -n "wipCommitted === true\|verifyDiscardSafety" script/implement-issue-tree.js
 # 3. 孤立 worktree の削除に所有権照合（状態ファイル記録パスとの一致）があること
@@ -439,7 +440,7 @@ grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scrip
 
 期待結果: `UNTRUSTED_POLICY` が `COMMON` 配列の末尾で参照され、あわせて `updateState` の State プロンプト（JSON マージ担当・掃除担当の両方）でも参照されていること。`untrusted(` が上記 8 関数それぞれの中で最低 1 回出現すること。`gh issue view` の全ヒットのうち、worktree routing ガード（implementPrompt 手順 0・fixPrompt 手順 0・recoverImplementPrompt 手順 0）と mergeExecutePrompt 手順 5 が `--json number,title` または `--json state` に限定されており、本文を読む箇所（planPrompt 手順 1・closePrompt 手順 2・recoverPrompt 手順 2c・Tree 手順 4）はいずれも「本文は非信頼データ」の注意文と同一手順内にあること。`monitorPrompt` に `gh pr merge` / `gh issue close` が出現しないこと（コンテキスト分離の確認）。
 
-worktree 削除の安全性については、`cleanupEphemeralWorktree` が 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree の自動削除廃止）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
+worktree 削除の安全性については、`cleanupEphemeralWorktree` と `implement-issue-tree-owner` がいずれも 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree の自動削除廃止。所有権マーカー方式もエージェントへ開示した nonce は所有権証明にならないため不採用）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
 
 ## よくある失敗
 
@@ -522,6 +523,7 @@ cat _/issue-trees/42.json
 | isolation ランタイムが発行した worktree ID / path との照合 | ランタイムは作成パスをホストへ返さないため、照合材料そのものが存在しない |
 | 状態ファイル記録済みパスを保護する消極的レジストリ | 並列実行では別イシューの Implement エージェントが `worktreePath` を返す前＝未登録の窓があり、その窓を塞げない |
 | エージェント起動前後の `git worktree list` 差分 | 並列の worktree 作成と競合して一意に定まらず、レースで誤削除に倒れる |
+| ホスト発行 nonce をエージェント自身に cwd へ所有権マーカーとして書かせ、ラン終了時にマーカー照合の上で回収する | nonce は未信頼データ（diff・PR 本文）を処理するエージェント自身へプロンプトで開示されるため所持証明にならない。プロンプトインジェクションを受けたエージェントが `git worktree list` から別の clean worktree を選び、既知の nonce をその配下へ書いてそのパスを返せば、状態ファイル未登録の worktree（利用者の手動 worktree・並行ラン）を全ゲート通過で削除できてしまう。ランタイムが作成パスをホストへ返さない以上、「信頼済みホストが実際に作成・登録したパス」を削除根拠にできず、自動削除は復活させない |
 
 **ラン終了時に worktree スイープを実行する**。個別の削除経路が状態ファイル書き込み失敗等で取りこぼした残骸を回収する最終防衛線であり、クローズ（merged / closed）に至ったイシューの実装 worktree（impl / fix）を残さないことを保証する。使い捨て worktree（review / pr-create）は前述のとおり削除を試みないためスイープの対象外であり、ログ一覧から手動で掃除する。削除対象は**本ラン内で削除を試みた worktree パスの集合**と、後述の孤立 worktree スキャンでブランチ名一致・merged / closed 確定した worktree に限定され、かつ `git worktree list` に実在するものだけを削除する。「観測した全パスから保持リストを引く」方式は採らない（状態ファイルへの書き込みが失敗した worktree が「削除候補には載るが保持リストには載らない」状態になり、実装中・レビュー中の worktree が未コミット変更ごと消える。書き込み失敗が fail-safe ではなく fail-destructive に倒れる）。パスの命名規約からの推測は行わないため、並行して走る別ランの worktree・利用者が手動で作った worktree は構造的に対象になり得ない（ホスト側の worktree 命名規約に依存しない設計。命名規約に依存した絞り込みは、規約の想定が外れたときの失敗方向が `git worktree remove --force` による削除過多になるため採用しない）。観測がゼロなら削除を一切行わない（fail-safe）。保持されるのは failed / blocked / monitoring イシューが記録した worktree で（monitoring は halt 等で中断したイシュー。状態ファイルが指す worktree の実体だけ消えると乖離が生じるため保持する）、ブランチは削除しない（未 push のコミットを持つ可能性があるため、ブランチの寿命は worktree の寿命と切り離す）。スイープ結果は Workflow の返却値 `sweptWorktrees` で確認できる。
 

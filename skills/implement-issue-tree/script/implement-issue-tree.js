@@ -1343,6 +1343,15 @@ const ephemeralWorktrees = []
 //     その窓を塞げない。
 //   - エージェント起動前後の `git worktree list` 差分 → 並列の worktree 作成と競合して
 //     一意に定まらず、レースで誤削除に倒れる。
+//   - ホスト発行 nonce をエージェント自身に cwd へ所有権マーカーとして書かせ、ラン終了時に
+//     マーカー照合の上で回収する → nonce は未信頼データ（diff・PR 本文）を処理する
+//     エージェント自身へプロンプトで開示されるため、所持していても所有権の証明にならない。
+//     プロンプトインジェクションを受けたエージェントが `git worktree list` から
+//     別の clean worktree を選び、既知の nonce をその配下へ書いて自パスとして返せば、
+//     状態ファイル未登録の worktree（利用者の手動 worktree・並行ラン）を全ゲート通過で
+//     `git worktree remove --force` できてしまう。
+//     ランタイムが作成パスをホストへ返さない以上「信頼済みホストが実際に作成・登録した
+//     パス」を削除根拠にできないため、自動削除は復活させない。
 //
 // 採用した方針は「推測に基づく削除をしない」であり、`sweepEligiblePaths` の既存設計
 // （命名規約からの推測で削除しない／失敗方向を削除過多にしない）と一貫する。
@@ -1392,6 +1401,10 @@ const SWEEP_SCHEMA = {
 // 記録済みの worktree パスと一致（所有権照合済み）のもの。命名規約の一致だけでは含めない。
 // sweepEligiblePaths（個別削除の試行実績）とは出自が異なるため別引数として合流させる。
 // こちらも「一覧に含まれるパスだけ削除してよい」という制約は共有する。
+//
+// 使い捨て worktree（review / pr-create）はこのスイープの対象に入れない（recordEphemeralWorktree
+// の不採用案コメント参照。自己申告パス＋エージェントへ開示済みの値では所有権を証明できないため、
+// 記録・残置報告のみ行い削除しない）。
 async function sweepClosedWorktrees(orphanPaths = []) {
   try {
     if (sweepEligiblePaths.size === 0 && orphanPaths.length === 0) {
@@ -3387,7 +3400,8 @@ async function runImplement(item) {
         isolation: 'worktree',
       })
       // Review worktree は読み取り専用（判定のみ）で保持価値がないが、返却された
-      // worktreePath は自己申告値で所有権を確認できないため自動削除はしない（Issue #142）。
+      // worktreePath は自己申告値で所有権を確認できないため自動削除はしない（Issue #142。
+      // マーカー照合による回収も不採用: recordEphemeralWorktree の不採用案コメント参照）。
       // 記録のみ行い、ラン終了時に一覧をログ出力する。
       // currentWorktreePath へは代入しない（同変数は impl / fix の worktree を指し続ける必要が
       // あり、上書きすると後続の cleanupWorktree が実装 worktree を取り違えて漏らす）。
@@ -3495,7 +3509,8 @@ async function runImplement(item) {
     })
     // push 完了後は成果が origin 上に存在するため pr-create worktree に保持価値はないが、
     // 返却された worktreePath は所有権を確認できない自己申告値のため自動削除はしない
-    // （Issue #142）。記録のみ行い、ラン終了時に一覧をログ出力する。
+    // （Issue #142。マーカー照合による回収も不採用: recordEphemeralWorktree の不採用案コメント参照）。
+    // 記録のみ行い、ラン終了時に一覧をログ出力する。
     // 失敗時も同様（回復は impl 手順 0b-b のリモートブランチ再利用が担い、この worktree に依存しない）。
     recordEphemeralWorktree(item.number, prCreateResult?.worktreePath, 'pr-create')
     if (!prCreateResult || !Number.isInteger(prCreateResult.prNumber) || prCreateResult.prNumber <= 0) {
@@ -4736,6 +4751,8 @@ if (orphanEntriesAtEnd.length > 0) {
 // 並行して走る別ランや利用者が手動で作った worktree は対象にならない。実装中・レビュー中でまだ削除を試みていない
 // worktree も候補外であり、状態ファイル書き込み失敗が削除過多へ倒れない。
 // 候補ゼロなら何も削除しない（fail-safe）。理由は sweepEligiblePaths の定義を参照。
+// 使い捨て worktree（review / pr-create）はスイープの対象に入れない（recordEphemeralWorktree の
+// 不採用案コメント参照。エージェントへ開示済みの値では所有権を証明できないため削除しない）。
 const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
 
 // --- 使い捨て worktree（review / pr-create）の一覧報告 ---
