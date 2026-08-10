@@ -228,36 +228,13 @@ Step 7 で `skills-contribute.sh` を実行すると、同スクリプトが自�
 
 ### Step 7: 変更を反映する
 
-upstream 側でスキルがどのパス構造に置かれているか確認します。`UPSTREAM_SKILL_PATH` の決定は、クローンしたリポジトリのレイアウトのみで判定します（`cd "$WORKDIR/upstream"` 済みの前提）。
-
-`skills-lock.json` の `skillPath` はローカル install パスであり upstream リポジトリ内の配置ではないため、使用しません。
-
-```bash
-# upstream のスキル配置はクローンしたリポジトリのレイアウトで判定する
-# （skills-lock.json の skillPath はローカル install パスであり upstream の配置ではないため使わない）
-if [[ -d "skills/${SKILL_NAME}" ]]; then
-  UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
-elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
-  UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
-elif [[ -d "skills" ]]; then
-  # upstream が skills/ 配下で公開している慣習
-  UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
-elif [[ -d ".agents/skills" ]]; then
-  # upstream が .agents/skills/ 配下で公開している慣習
-  UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
-else
-  echo "警告: upstream にスキルルートが見つかりません。skills/ を既定として新規追加します。"
-  UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
-fi
-```
-
-`UPSTREAM_SKILL_PATH` が確定したらコピーを実行します。`cp -R` は追加・上書きのみで削除を伝搬しないため、ローカルで削除したファイルが upstream 側に残存してしまいます。これを避けるため、宛先ディレクトリを一度消してから作り直し、コピーし直す（delete-then-copy）方式を取ります。
-
 **このステップは手順を個別に打鍵せず、必ず本スキル自身のスクリプト（`skills-contribute.sh`）を実行してください。** 同スクリプトには rm -rf 前の symlink 境界検証（TOCTOU 対策込み）が実装されており、以下の断片だけを個別に実行すると検証が欠落します。
+
+`skills-contribute.sh` は upstream 側でスキルがどのパス構造に置かれているか（`UPSTREAM_SKILL_PATH`。`skills-lock.json` の `skillPath` はローカル install パスであり upstream 内の配置ではないため使用しません）の判定と、`cp -R` の delete-then-copy 反映を内部で行う自己完結型スクリプトです。判定・反映のロジックは後述の参考コードのとおりです。
 
 `LOCAL_SKILL_DIR` は Step 1 で解決した**貢献対象スキル**（`$ARGUMENTS`）のパスであり、本スキル（contribute-skill）自身の配置とは無関係です。スクリプトの実行パスに `LOCAL_SKILL_DIR` を流用すると、貢献対象が contribute-skill 以外の場合に存在しないパスを参照してしまいます。実行するスクリプト自身の配置は別変数 `CONTRIBUTE_SKILL_DIR` として、本スキル（contribute-skill）自身のインストール場所から解決してください。
 
-`skills-contribute.sh` は呼び出し時のカレントディレクトリを貢献元リポジトリのルートとして `LOCAL_SKILL_DIR`・`skills-lock.json` を探索し、内部で自分自身の `gh repo clone` と `WORKDIR`（clone 先）を新規作成する自己完結型スクリプトです。そのため実行直前に必ず Step 6 で捕捉済みの `ORIG_DIR`（clone 前のローカルリポジトリルート）へ `cd` し直し、スクリプトの標準出力最終行が返す `CONTRIBUTE_SKILL_WORKDIR=<path>` を捕捉して、Step 6 で作成した `WORKDIR` をこの値で上書きします。これにより Step 8 以降が参照する `${WORKDIR}/upstream` は、スクリプトが実際にコピーを行った clone と一致します（Step 6 で別途 clone した内容は使用しません）。
+`skills-contribute.sh` は呼び出し時のカレントディレクトリを貢献元リポジトリのルートとして `LOCAL_SKILL_DIR`・`skills-lock.json` を探索し、内部で自分自身の `gh repo clone` と `WORKDIR`（clone 先）を新規作成します。そのため実行直前に必ず Step 6 で捕捉済みの `ORIG_DIR`（clone 前のローカルリポジトリルート）へ `cd` し直してください。スクリプトの標準出力最終行群が返す `CONTRIBUTE_SKILL_WORKDIR=<path>` と `CONTRIBUTE_SKILL_UPSTREAM_PATH=<path>` を捕捉し、Step 6 で作成した `WORKDIR` および（後述の参考コードで示す判定ロジックの）`UPSTREAM_SKILL_PATH` をこれらの値で上書きします。これにより Step 8 以降が参照する `${WORKDIR}/upstream` と `${UPSTREAM_SKILL_PATH}` は、スクリプトが実際に使った clone・実際に反映したパスと一致します（Step 6 で別途 clone した内容や、参考コードを個別実行して得た値は使用しません）。
 
 ```bash
 # 本スキル自身（contribute-skill）の配置を ORIG_DIR 基準の絶対パスで解決する。
@@ -277,19 +254,44 @@ fi
 cd "${ORIG_DIR}"
 SCRIPT_OUTPUT=$(LOCAL_SKILL_DIR="${LOCAL_SKILL_DIR}" "${CONTRIBUTE_SKILL_DIR}/script/skills-contribute.sh" "${SKILL_NAME}" "${REPO_SLUG}" | tee /dev/stderr)
 
-# スクリプトが実際に使った作業 clone を Step 8 以降の唯一の作業ディレクトリとして採用する。
-# Step 6 で mktemp した WORKDIR はこの値で上書きし、以降 "${WORKDIR}/upstream" は常に
-# スクリプトが cp -R でコピーした clone を指す。
+# スクリプトが実際に使った作業 clone・upstream スキルパスを Step 8 以降の唯一の正として採用する。
+# Step 6 で mktemp した WORKDIR、および以下の参考コードで計算され得る UPSTREAM_SKILL_PATH は
+# この値で上書きする。以降 "${WORKDIR}/upstream" は常にスクリプトが cp -R でコピーした clone を、
+# "${UPSTREAM_SKILL_PATH}" は常にスクリプトが実際に反映したパスを指す。
 SCRIPT_UPSTREAM_DIR=$(echo "${SCRIPT_OUTPUT}" | grep '^CONTRIBUTE_SKILL_WORKDIR=' | tail -1 | cut -d= -f2-)
+UPSTREAM_SKILL_PATH=$(echo "${SCRIPT_OUTPUT}" | grep '^CONTRIBUTE_SKILL_UPSTREAM_PATH=' | tail -1 | cut -d= -f2-)
 if [[ -z "${SCRIPT_UPSTREAM_DIR}" || ! -d "${SCRIPT_UPSTREAM_DIR}" ]]; then
   echo "エラー: skills-contribute.sh の出力から作業ディレクトリ（CONTRIBUTE_SKILL_WORKDIR）を取得できませんでした。"
+  exit 1
+fi
+if [[ -z "${UPSTREAM_SKILL_PATH}" ]]; then
+  echo "エラー: skills-contribute.sh の出力から upstream スキルパス（CONTRIBUTE_SKILL_UPSTREAM_PATH）を取得できませんでした。"
   exit 1
 fi
 WORKDIR="$(dirname "${SCRIPT_UPSTREAM_DIR}")"
 cd "${SCRIPT_UPSTREAM_DIR}"
 ```
 
-以下は `skills-contribute.sh` が内部で実行する処理の参考（`UPSTREAM_SKILL_PATH` の判定・delete-then-copy）です。上記のスクリプト実行によって既に完了しているため、個別に実行する必要はありません。
+以下は `skills-contribute.sh` が内部で実行する処理（`UPSTREAM_SKILL_PATH` の判定・delete-then-copy）の参考コードです。上記のスクリプト実行によって既に完了しているため、個別に実行する必要はありません（実行すると Step 6 の clone 側に対して重複適用してしまいます）。
+
+```bash
+# upstream のスキル配置はクローンしたリポジトリのレイアウトで判定する
+# （skills-lock.json の skillPath はローカル install パスであり upstream の配置ではないため使わない）
+if [[ -d "skills/${SKILL_NAME}" ]]; then
+  UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
+elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
+  UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
+elif [[ -d "skills" ]]; then
+  # upstream が skills/ 配下で公開している慣習
+  UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
+elif [[ -d ".agents/skills" ]]; then
+  # upstream が .agents/skills/ 配下で公開している慣習
+  UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
+else
+  echo "警告: upstream にスキルルートが見つかりません。skills/ を既定として新規追加します。"
+  UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
+fi
+```
 
 ```bash
 # 削除伝搬のための同期: cp -R は削除を反映しないため、宛先を消してからコピーする
