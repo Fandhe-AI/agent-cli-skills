@@ -4978,9 +4978,11 @@ const running = new Map()
 // fix / impl の worktree は状態ファイルで追跡・削除されるため残置に数えない。
 // 本ランで新規着手し、まだ完了していないイシュー番号の集合。dispatch の予約計上に使う。
 const newStartActive = new Set()
-// 本ランで monitoring 再開し、まだ完了していないイシュー番号の集合。monitoring 再開は
-// review / pr-create を積み増さないが、Merge ループの fix が routingError 終端する際に
-// fix-routing-error を最大 1 件記録し得る（PR #184 以降）ため、
+// 本ランで monitoring 再開し、まだ完了していない implement イシュー番号の集合（kind: 'implement'
+// の再開のみ載せる。verify-close の再開は worktree を作らず予約 0 のため載せない——載せると
+// reservedTotal 計算に幽霊予約が乗る。Cursor Bugbot Low 対応 / PR #185 Bugbot Medium と同じ線引き。
+// PR #200 参照）。monitoring 再開は review / pr-create を積み増さないが、Merge ループの fix が
+// routingError 終端する際に fix-routing-error を最大 1 件記録し得る（PR #184 以降）ため、
 // EPHEMERAL_RESERVE_PER_MONITORING_RESUME 分を予約計上する。この予約は新規着手側
 // （implement 候補）の投入判定を保守的にするだけでなく、monitoring 再開自身の開始判定にも
 // 使う（pet-hub PR #1062 codex-review P1 対応。以前は monitoring 再開自身の開始を抑止せず、
@@ -5075,7 +5077,13 @@ while (true) {
           }
         }
         log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(item.title)}`)
-        monitoringResumeActive.add(n)
+        // monitoringResumeActive には kind: 'implement' の再開のみ載せる（Cursor Bugbot Low 対応。
+        // PR #200 レビュー）。verify-close の再開は上の projected 判定でも予約 0 として扱っている
+        // のに、ここで無条件に add すると reservedTotal 計算（このブロック・下の implement 判定
+        // (b) 双方）が実記録 0 の verify-close イシューにも EPHEMERAL_RESERVE_PER_MONITORING_RESUME
+        // 分の幽霊予約を積み、他の implement 再開・新規着手候補を過剰に defer/抑止しかねない。
+        // newStartActive が verify-close を載せない設計（PR #185 Bugbot Medium）と同じ線引き。
+        if (item.kind === 'implement') monitoringResumeActive.add(n)
         running.set(n, runOne(item))
         continue
       }
