@@ -140,26 +140,46 @@ echo ""
 # group/other 書き込み可能な場合は sticky bit（他者による rename/置換を阻止）が
 # 設定されていることを fail-closed で検証する。検証したパスと mktemp に渡す
 # パスを一致させることで「検証対象と使用対象がずれる」種類のすり抜けを防ぐ。
+# さらに、検証対象を TMP_ROOT_REAL 単体に限定すると、その祖先ディレクトリが
+# 攻撃者所有・非 sticky な書き込み可能ディレクトリだった場合に検証後 rename で
+# TMP_ROOT_REAL ごと差し替えられてしまう（検証窓の外側からの置換）。そのため
+# TMP_ROOT_REAL からファイルシステムルートまでの全祖先ディレクトリへ同じ基準を
+# 適用する。
+
+# 単一ディレクトリに対して 所有者=自分 or root／他者書き込み可なら sticky bit
+# 必須、を fail-closed で判定する（TMP_ROOT_REAL と全祖先ディレクトリで共用）。
+check_dir_trusted() {
+  local dir="$1" owner mode
+  owner=$(stat -c '%u' "$dir" 2>/dev/null || stat -f '%u' "$dir")
+  if [[ "$owner" != "$(id -u)" && "$owner" != "0" ]]; then
+    echo "エラー: ディレクトリの所有者が不正です（自分でも root でもありません）: ${dir}" >&2
+    return 1
+  fi
+  mode=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir")
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    echo "エラー: ディレクトリのパーミッションを取得できません: ${dir}" >&2
+    return 1
+  fi
+  if (( (8#$mode & 8#022) != 0 )) && [[ ! -k "$dir" ]]; then
+    echo "エラー: ディレクトリが他者から書き込み可能なのに sticky bit が設定されていません: ${dir}（mode ${mode}）" >&2
+    return 1
+  fi
+  return 0
+}
+
 TMP_ROOT="${TMPDIR:-/tmp}"
 TMP_ROOT_REAL=$(cd -P "$TMP_ROOT" 2>/dev/null && pwd -P) || TMP_ROOT_REAL=""
 if [[ -z "$TMP_ROOT_REAL" || ! -d "$TMP_ROOT_REAL" ]]; then
   echo "エラー: TMPDIR が実在するディレクトリを指していません: ${TMP_ROOT}" >&2
   exit 1
 fi
-TMP_ROOT_OWNER=$(stat -c '%u' "$TMP_ROOT_REAL" 2>/dev/null || stat -f '%u' "$TMP_ROOT_REAL")
-if [[ "$TMP_ROOT_OWNER" != "$(id -u)" && "$TMP_ROOT_OWNER" != "0" ]]; then
-  echo "エラー: TMPDIR の所有者が不正です（自分でも root でもありません）: ${TMP_ROOT_REAL}" >&2
-  exit 1
-fi
-TMP_ROOT_MODE=$(stat -c '%a' "$TMP_ROOT_REAL" 2>/dev/null || stat -f '%Lp' "$TMP_ROOT_REAL")
-if [[ ! "$TMP_ROOT_MODE" =~ ^[0-7]{3,4}$ ]]; then
-  echo "エラー: TMPDIR のパーミッションを取得できません: ${TMP_ROOT_REAL}" >&2
-  exit 1
-fi
-if (( (8#$TMP_ROOT_MODE & 8#022) != 0 )) && [[ ! -k "$TMP_ROOT_REAL" ]]; then
-  echo "エラー: TMPDIR が他者から書き込み可能なのに sticky bit が設定されていません: ${TMP_ROOT_REAL}（mode ${TMP_ROOT_MODE}）" >&2
-  exit 1
-fi
+# TMP_ROOT_REAL 自身とその全祖先（ルートまで）を検証する
+CHECK_DIR="$TMP_ROOT_REAL"
+while true; do
+  check_dir_trusted "$CHECK_DIR" || exit 1
+  [[ "$CHECK_DIR" == "/" ]] && break
+  CHECK_DIR="$(dirname "$CHECK_DIR")"
+done
 # 上記で検証済みの実体パス（TMP_ROOT_REAL）に対して mktemp -d を直接呼び、
 # 中間ディレクトリを挟まず mode 700 のディレクトリを原子的（mkdtemp(3) の O_EXCL 相当）
 # に新規作成する。これにより Step 7 の rm -rf 前検証と実行の間の TOCTOU 窓へ

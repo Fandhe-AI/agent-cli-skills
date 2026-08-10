@@ -167,28 +167,44 @@ fi
 # TMPDIR は環境変数であり任意の値を指定され得るため、${TMPDIR:-/tmp} を
 # 無条件に信頼せず、mktemp -d に渡す前に実体パス（symlink 解決後）・所有者
 # （自分または root）・書き込み権限（他者書き込み可なら sticky bit 必須）を
-# fail-closed で検証する。検証済みの実体パス直下に mktemp -d で mode 700 の
-# ディレクトリを原子的に新規作成する。
+# fail-closed で検証する。検証対象は実体パス自身だけでなく、ファイルシステム
+# ルートまでの全祖先ディレクトリに及ぶ（祖先が攻撃者所有・非 sticky な場合、
+# 検証後に祖先側から rename で実体パスごと差し替えられ得るため）。
+
+# 単一ディレクトリに対して 所有者=自分 or root／他者書き込み可なら sticky bit
+# 必須、を fail-closed で判定する（実体パスと全祖先ディレクトリで共用）。
+check_dir_trusted() {
+  local dir="$1" owner mode
+  owner=$(stat -c '%u' "$dir" 2>/dev/null || stat -f '%u' "$dir")
+  if [[ "$owner" != "$(id -u)" && "$owner" != "0" ]]; then
+    echo "エラー: ディレクトリの所有者が不正です（自分でも root でもありません）: ${dir}" >&2
+    return 1
+  fi
+  mode=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir")
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    echo "エラー: ディレクトリのパーミッションを取得できません: ${dir}" >&2
+    return 1
+  fi
+  if (( (8#$mode & 8#022) != 0 )) && [[ ! -k "$dir" ]]; then
+    echo "エラー: ディレクトリが他者から書き込み可能なのに sticky bit が設定されていません: ${dir}（mode ${mode}）" >&2
+    return 1
+  fi
+  return 0
+}
+
 TMP_ROOT="${TMPDIR:-/tmp}"
 TMP_ROOT_REAL=$(cd -P "$TMP_ROOT" 2>/dev/null && pwd -P) || TMP_ROOT_REAL=""
 if [[ -z "$TMP_ROOT_REAL" || ! -d "$TMP_ROOT_REAL" ]]; then
   echo "エラー: TMPDIR が実在するディレクトリを指していません: ${TMP_ROOT}" >&2
   exit 1
 fi
-TMP_ROOT_OWNER=$(stat -c '%u' "$TMP_ROOT_REAL" 2>/dev/null || stat -f '%u' "$TMP_ROOT_REAL")
-if [[ "$TMP_ROOT_OWNER" != "$(id -u)" && "$TMP_ROOT_OWNER" != "0" ]]; then
-  echo "エラー: TMPDIR の所有者が不正です（自分でも root でもありません）: ${TMP_ROOT_REAL}" >&2
-  exit 1
-fi
-TMP_ROOT_MODE=$(stat -c '%a' "$TMP_ROOT_REAL" 2>/dev/null || stat -f '%Lp' "$TMP_ROOT_REAL")
-if [[ ! "$TMP_ROOT_MODE" =~ ^[0-7]{3,4}$ ]]; then
-  echo "エラー: TMPDIR のパーミッションを取得できません: ${TMP_ROOT_REAL}" >&2
-  exit 1
-fi
-if (( (8#$TMP_ROOT_MODE & 8#022) != 0 )) && [[ ! -k "$TMP_ROOT_REAL" ]]; then
-  echo "エラー: TMPDIR が他者から書き込み可能なのに sticky bit が設定されていません: ${TMP_ROOT_REAL}（mode ${TMP_ROOT_MODE}）" >&2
-  exit 1
-fi
+# TMP_ROOT_REAL 自身とその全祖先（ルートまで）を検証する
+CHECK_DIR="$TMP_ROOT_REAL"
+while true; do
+  check_dir_trusted "$CHECK_DIR" || exit 1
+  [[ "$CHECK_DIR" == "/" ]] && break
+  CHECK_DIR="$(dirname "$CHECK_DIR")"
+done
 WORKDIR=$(mktemp -d "${TMP_ROOT_REAL}/contribute-${SKILL_NAME}-XXXXXXXX")
 ```
 
