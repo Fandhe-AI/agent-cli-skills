@@ -253,32 +253,15 @@ fi
 
 **このステップは手順を個別に打鍵せず、必ず本スキル自身のスクリプト（`skills-contribute.sh`）を実行してください。** 同スクリプトには rm -rf 前の symlink 境界検証（TOCTOU 対策込み）が実装されており、以下の断片だけを個別に実行すると検証が欠落します。
 
-`LOCAL_SKILL_DIR` は Step 1 で解決した**貢献対象スキル**（`$ARGUMENTS`）のパスであり、本スキル（contribute-skill）自身の配置とは無関係です。スクリプトの実行パスに `LOCAL_SKILL_DIR` を流用すると、貢献対象が contribute-skill 以外の場合に存在しないパスを参照してしまいます。実行直前に本スキル自身の配置を別変数 `CONTRIBUTE_SKILL_DIR` として解決してください。
-
-Step 6 で `cd "$WORKDIR/upstream"` 済みのため、カレントディレクトリは upstream の clone 内です。ここで相対パスのまま `skills/contribute-skill` 等を解決すると、ローカルにインストールされた本スキルではなく **clone 側**（貢献対象が偶然 upstream にも存在する場合はその内容）を参照してしまいます。必ず Step 6 で捕捉済みの `ORIG_DIR`（clone 前のローカルリポジトリルート）を基準に絶対パスで解決し、スクリプト自体も `ORIG_DIR` へ `cd` し直してから実行してください（同スクリプトは自分自身で `gh repo clone` を行う自己完結型のため、呼び出し時点のカレントディレクトリがローカルリポジトリルートである必要があります）。
+`LOCAL_SKILL_DIR` は Step 1 で解決した**貢献対象スキル**（`$ARGUMENTS`）のパスであり、本スキル（contribute-skill）自身の配置とは無関係です。スクリプトの実行パスに `LOCAL_SKILL_DIR` を流用すると、貢献対象が contribute-skill 以外の場合に存在しないパスを参照してしまいます。実行するスクリプト自身の配置は別変数 `CONTRIBUTE_SKILL_DIR` として、次のように本スキル（contribute-skill）自身のインストール場所から解決してください（`skills/contribute-skill` → `.agents/skills/contribute-skill` の順に存在確認。カレントディレクトリが upstream の clone 内に移動している場合は Step 6 で捕捉済みの `ORIG_DIR` を基準にした絶対パスで解決すること）。
 
 ```bash
-# 本スキル自身（contribute-skill）の配置を ORIG_DIR 基準の絶対パスで解決する。
-# LOCAL_SKILL_DIR（貢献対象）とは別物。cwd は Step 6 の cd で upstream clone 内にあるため、
-# 相対パスのまま解決すると clone 側を誤参照する。
-if [[ -d "${ORIG_DIR}/skills/contribute-skill" ]]; then
-  CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/skills/contribute-skill"
-elif [[ -d "${ORIG_DIR}/.agents/skills/contribute-skill" ]]; then
-  CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/.agents/skills/contribute-skill"
-else
-  echo "エラー: contribute-skill 自身の配置が見つかりません（${ORIG_DIR}/skills/contribute-skill / ${ORIG_DIR}/.agents/skills/contribute-skill）。"
-  exit 1
-fi
-
-# 同スクリプトは自分自身で gh repo clone を行う自己完結型のため、
-# 呼び出し前に必ずローカルリポジトリルートへ cd し直す（Step 6 の手動 clone とは独立した処理）。
-cd "${ORIG_DIR}"
-
-# LOCAL_SKILL_DIR は通常の変数代入では子プロセスへ継承されない（export されていない）。
-# Step 1 で skills/ と .agents/skills/ の両方が存在し LOCAL_SKILL_DIR を明示選択していた場合、
-# 継承せずに起動すると子スクリプトが両方を再検出して中止してしまうため、明示的に渡す。
-LOCAL_SKILL_DIR="${LOCAL_SKILL_DIR}" "${CONTRIBUTE_SKILL_DIR}/script/skills-contribute.sh" "${SKILL_NAME}" "${REPO_SLUG}"
+# 例（実行時はカレントディレクトリに応じて ORIG_DIR/ 等の基準パスを補って解決する）:
+#   test -d skills/contribute-skill && CONTRIBUTE_SKILL_DIR="skills/contribute-skill"
+#   test -d .agents/skills/contribute-skill && CONTRIBUTE_SKILL_DIR=".agents/skills/contribute-skill"
 ```
+
+既知の制約: `skills-contribute.sh` は呼び出し時のカレントディレクトリを起点に自分自身で `gh repo clone` を行う自己完結型のスクリプトであり、内部で独自の `WORKDIR` を新規作成します。この `WORKDIR` は呼び出し元（本 SKILL.md の Step 6 以降が使う `${WORKDIR}/upstream`）へは伝播しないため、スクリプト実行と Step 8 以降の手動フローをそのまま連結することはできません。本 PR ではスクリプトパスの誤参照（`LOCAL_SKILL_DIR` の誤用）のみを修正し、実行モデルの統合（Step 5〜11 全体の再設計）は別途フォローアップとして扱います。
 
 ```bash
 # 削除伝搬のための同期: cp -R は削除を反映しないため、宛先を消してからコピーする
