@@ -468,19 +468,16 @@ function parseMaxResidualWorktrees(raw) {
 
 // ラン開始時の残置 worktree 総数を数える純粋関数（fail-closed ゲートの観測値）。
 // entries は scanOrphanWorktrees（agent 経由の git worktree list --porcelain）の返却エントリ。
-// メインの working tree（mainPath）と、状態ファイルで既に追跡済みの worktree（trackedPaths）を
-// 除いた「未追跡の残置」を数える。使い捨て worktree（recordEphemeralWorktree）は状態ファイルへ
-// 書き込まれないため、過去ランの review / pr-create 残骸は trackedPaths に載らず、ここで残置として
-// 確実に計上される（本ゲートが捕捉したい DoS ベクトルそのもの）。追跡済み（実装中・監視中・
-// failed / blocked）の worktree は「現在使用中」として除外する。厳密な所有権判定は不要で、
-// sanitize 不可パスを残置として計上する分には過大側（＝過剰に停止する fail-closed）に倒れる。
-// ただし非対称性がある: failed / blocked のまま状態ファイルに居座り続ける実装 worktree は
-// trackedPaths として毎ラン除外されるため、それ自体が長期滞留してもこのカウントには現れない
-// （＝その分は過小カウント）。本ゲートは「削除されない使い捨て worktree の累積」を主対象とし、
-// tracked-but-stale の滞留は Recover / 最終スイープ側の責務とする（sweepClosedWorktrees）。
+// メインの working tree（mainPath）だけを除外した**物理総数**を数える（PR #185 codex P1
+// 第 5 ラウンド）。以前は状態ファイル追跡済みの worktree を「現在使用中」として除外していたが、
+// failed / blocked のまま長期滞留する実装 worktree が毎ラン除外され続け、何件蓄積しても上限に
+// 計上されない過小カウントになっていた。maxResidualWorktrees の契約は「残置 worktree 総数の上限」
+// （ディスク枯渇防止）であり、使用中かどうかはディスク消費を変えないため、追跡状態によらず
+// 全 worktree を数える。使用中の worktree が数えられる分は過大側（＝過剰に停止する fail-closed）
+// で安全。上限に近い場合は利用者が limit を引き上げるか手動掃除する（停止理由に一覧を出す）。
+// sanitize 不可パスも同じ理由で過大側に倒して計上する。
 // 返却は { count, paths }（paths は停止時レポートで残置一覧を提示するため）。
-function countResidualWorktrees(entries, mainPath, trackedPaths) {
-  const tracked = trackedPaths instanceof Set ? trackedPaths : new Set(trackedPaths ?? [])
+function countResidualWorktrees(entries, mainPath) {
   const paths = []
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (entry?.isMain) continue
@@ -488,8 +485,8 @@ function countResidualWorktrees(entries, mainPath, trackedPaths) {
     if (!raw) continue // "worktree <path>" 行が無いエントリ（通常あり得ない）は残置に数えない
     const p = sanitizeWorktreePath(raw)
     if (p) {
-      // 検証済みパス: メイン worktree・追跡済み（現在使用中）を除外して残置に数える。
-      if ((mainPath && p === mainPath) || tracked.has(p)) continue
+      // 検証済みパス: メイン worktree のみ除外して残置（物理総数）に数える。
+      if (mainPath && p === mainPath) continue
       paths.push(p)
     } else {
       // sanitizeWorktreePath が弾いたパス（unicode・`~`・非標準文字を含む等）。検証できないことを
@@ -1473,8 +1470,13 @@ function findMainWorktreePath(entries) {
 //    候補にならない。
 const sweepEligiblePaths = new Set()
 
-// review / pr-create のような「成果物を保持しない使い捨て worktree」と、routingError 時に
-// fix エージェントが自己申告した worktree（fix-routing-error）の記録簿。
+// 本ランで新規作成された worktree の記録簿（残置上限ゲートの「本ラン積み増し」実測）。
+// review / pr-create のような使い捨て worktree、routingError 時に fix エージェントが自己申告した
+// worktree（fix-routing-error）に加え、実装 worktree（implement。新規着手 1 件につき 1 個）も
+// 記録する（PR #185 codex P1 第 5 ラウンド: 上限契約が物理総数になったため、実装 worktree の
+// 物理増分もラン中の再評価へ反映する）。fix の worktree は記録しない——fix は旧 worktree の
+// cleanup とペアの「置換」で純増せず、記録すると fix 連鎖のたびに実測が単調増加して過剰停止する。
+// cleanup 失敗で実際に残った fix 残骸は次ラン開始時の物理総数観測が捕捉する。
 // { issue, kind, path } を追記し、ラン終了時に一覧をログ出力する（削除は行わない）。
 const ephemeralWorktrees = []
 
@@ -1485,12 +1487,16 @@ const ephemeralWorktrees = []
 // 必ずここへ kind と最大数を宣言する。未宣言の kind での記録は recordEphemeralWorktree
 // が契約違反として警告する（記録自体は行い、実測ベースの上限 latch は機能し続ける）。
 // 現在の内訳:
+//   - implement: 実装エージェント起動 1 回（新規着手・recover-continue とも isolation: 'worktree'
+//     で 1 個作成。PR #185 codex P1 第 5 ラウンドで台帳へ追加）
 //   - review: Review ループ最大 3 回（reviewsLeft = 3）× 各回 isolation: 'worktree'
 //   - pr-create: Review 全通過後に 1 回のみ
 //   - fix-routing-error: 最大 1 回。routingError は Review ループ・Merge ループの
 //     どちらでも検出と同時にイシューを即終端（failed）するため、1 イシューが同一ラン内で
 //     複数回記録することはない（PR #184 で追加された記録経路）
-const EPHEMERAL_KIND_MAX = Object.freeze({ review: 3, 'pr-create': 1, 'fix-routing-error': 1 })
+// fix（通常の修正再コミット）は旧 worktree cleanup とペアの置換のため宣言しない
+// （ephemeralWorktrees のコメント参照）。
+const EPHEMERAL_KIND_MAX = Object.freeze({ implement: 1, review: 3, 'pr-create': 1, 'fix-routing-error': 1 })
 // 新規着手 1 イシューが本ランで積み増しうる使い捨て worktree の最大総数（全 kind 合計）。
 // dispatch ループの予約計上（newStartActive）で参照する。
 const EPHEMERAL_RESERVE_PER_NEW_START = Object.values(EPHEMERAL_KIND_MAX).reduce((a, b) => a + b, 0)
@@ -1501,9 +1507,12 @@ const EPHEMERAL_RESERVE_PER_NEW_START = Object.values(EPHEMERAL_KIND_MAX).reduce
 // 予約計上でも monitoring 再開分を別枠で見込む。
 const EPHEMERAL_RESERVE_PER_MONITORING_RESUME = EPHEMERAL_KIND_MAX['fix-routing-error']
 
-// 使い捨て worktree（review / pr-create）と routingError 時の fix worktree
-// （fix-routing-error。rust-ai-library PR #436 codex-review P0 対応）を記録する。
-// **削除はしない**（Issue #142）。
+// 使い捨て worktree（review / pr-create）、routingError 時の fix worktree
+// （fix-routing-error。rust-ai-library PR #436 codex-review P0 対応）、および実装 worktree
+// （implement。PR #185 codex P1 第 5 ラウンド: 残置上限の契約が物理総数になったため、実装
+// worktree の物理増分もラン中の実測へ反映する）を記録する。**この関数は削除をしない**
+// （Issue #142。implement worktree だけは merged 確定時の cleanupWorktree・終了時スイープという
+// 既存の所有権照合付き削除経路を別途持つ）。
 //
 // 廃止の理由（配布先 desktop-automation-app#305 の codex-review P0）:
 //   従来はエージェント返却値の `worktreePath` をそのまま `git worktree remove --force` して
@@ -2989,7 +2998,7 @@ await initAllPending(queue.filter((q) => q.state === 'open'))
 // 残置 worktree 上限ゲート（PR #588 codex P1）の観測結果。ラン開始時に一度だけ観測し、
 // 新規着手の抑止判定（下の dispatch ループ）と最終レポートの両方で参照するため外側スコープに置く。
 let residualObserved = false // 観測が成立したか（scan 失敗時は false のまま新規着手を抑止＝fail-closed。レポートで「未観測」を明示）
-let residualObservedAtStart = 0 // メイン・追跡済みを除いた未追跡の残置件数
+let residualObservedAtStart = 0 // メイン worktree のみ除外した物理総数（使用中含む。第 5 ラウンド対応）
 let residualPathsAtStart = [] // 停止時レポート用の残置パス一覧
 let newStartSuppressed = null // 上限超過による新規着手抑止の理由（null なら抑止しない。monitoring 再開は抑止しない）
 {
@@ -3027,11 +3036,10 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
   // コミット 2539cbb）のため、削除の代わりに「複数ラン累積の残置総数」に上限を設けてディスク枯渇
   // （DoS）を防ぐ。単一ラン内の ephemeralWorktrees.length はラン開始ごとに空初期化され過去ラン分を
   // 捕捉できないため、ここで横断スキャン（scanOrphanWorktrees）の結果から残置総数を観測する。
-  // 観測はこの孤立 worktree 採用ループの「後」で行う: 採用された孤立 worktree は savedItems へ
-  // 書き戻されて「追跡済み＝現在使用中」となり、本ランが Recover で正当に再利用する残骸なので
-  // 残置に数えない（採用ループより前で数えると、これから使う残骸でゲートが誤発火する）。
-  // なお使い捨て worktree は detached HEAD で branchMatchesIssue に一致せず採用対象にならないため、
-  // この順序が残置件数へ与える差は実質わずかだが、意図を明示するため位置とコメントで固定する。
+  // 観測はメイン worktree のみ除外した物理総数で行う（追跡済み＝使用中も数える。PR #185 codex
+  // P1 第 5 ラウンド。countResidualWorktrees のコメント参照）ため、直前の孤立 worktree 採用
+  // ループが savedItems へ何を書き戻したかは件数に影響しない（採用は Recover 再利用のための
+  // 状態記録であり、カウント除外ではない）。
   // 観測成立の判定は 2 段構え（PR #185 codex P1 ×2）。
   // ① 空チェック: scanOrphanWorktrees は取得失敗時に例外を伝播させず [] を返す。実在するリポジトリは
   //    必ず先頭にメイン worktree エントリを持つため、length 0 は「正当に残置ゼロ」ではなく「観測が
@@ -3071,14 +3079,9 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
     }
   } else {
     residualObserved = true
-    // 「現在使用中」＝状態ファイルで worktree を保持する追跡済みエントリ（実装中・監視中・
-    // failed / blocked）。上の採用ループが savedItems へ書き戻した孤立 worktree もここに反映される。
-    const trackedWorktreePaths = new Set()
-    for (const it of Object.values(savedItems)) {
-      const wp = sanitizeWorktreePath(it?.worktree ?? '')
-      if (wp) trackedWorktreePaths.add(wp)
-    }
-    const residual = countResidualWorktrees(runStartOrphanEntries, mainWorktreePath, trackedWorktreePaths)
+    // メイン worktree のみ除外した物理総数を観測する（追跡済み＝使用中の worktree も数える。
+    // countResidualWorktrees のコメント参照。PR #185 codex P1 第 5 ラウンド）。
+    const residual = countResidualWorktrees(runStartOrphanEntries, mainWorktreePath)
     residualObservedAtStart = residual.count
     residualPathsAtStart = residual.paths
     // maxResidualWorktrees === 0 は上限なし（チェック無効）。「超過」判定のため count > limit で発火する
@@ -3416,6 +3419,9 @@ async function runImplement(item) {
           schema: IMPL_SCHEMA,
           isolation: 'worktree',
         })
+        // 実装 worktree の物理増分を成否判定より前に記録する（ランタイムはエージェントの
+        // 応答内容と無関係に worktree を作成済みのため。残置上限ゲートの実測に反映される）。
+        recordEphemeralWorktree(item.number, impl?.worktreePath, 'implement')
 
         // impl の成否判定（通常 Implement と同じ検証）
         if (!impl || !impl.branch) {
@@ -3606,6 +3612,9 @@ async function runImplement(item) {
         schema: IMPL_SCHEMA,
         isolation: 'worktree',
       })
+      // 実装 worktree の物理増分を成否判定より前に記録する（ランタイムはエージェントの
+      // 応答内容と無関係に worktree を作成済みのため。残置上限ゲートの実測に反映される）。
+      recordEphemeralWorktree(item.number, impl?.worktreePath, 'implement')
       // impl の成否判定: push 前 review フローでは prNumber は存在しない（PR 未作成）。
       // branch が有効かどうかで実装の成否を判定する。
       if (!impl || !impl.branch) {
@@ -5000,7 +5009,7 @@ while (true) {
       // 残置 worktree 上限超過時（PR #588 codex P1）は新規イシューの着手を抑止する。
       // monitoring 再開（上の分岐で通過済み。fix-routing-error 最大 1 件のみ積み増し得るが
       // 予約計上で見込む）は抑止しない。
-      // この continue は実装投入（review / pr-create で使い捨て worktree を積み増す本来の抑止対象）
+      // この continue は実装投入（implement / review / pr-create で worktree を積み増す本来の抑止対象）
       // に加え verify-close 等の新規着手も一律に止めるが、worktree を積まない着手まで巻き込むのは
       // 過剰抑止＝安全側であり許容する（queue は毎ラン GitHub の open/closed 実態で再構築されるため
       // 恒久 blocked にはならず、上限解消後の再実行で再着手される）。
@@ -5009,13 +5018,16 @@ while (true) {
       // 過剰なため。isActiveMonitoring 分岐の後にこのチェックを置くのが線引きの実装表現）。
       if (newStartSuppressed) continue
       // ラン中の積み増し再評価（PR #185 codex P1）: ラン開始時の観測が上限以下でも、本ランの
-      // review / pr-create が使い捨て worktree を積み増して上限を超えることがある（大きなツリーほど
-      // 顕著）。開始時観測値＋本ラン積み増し数を新規着手の直前に毎回比較し、超過が判明した時点で
-      // 以降の新規着手を止める（既に走っている実装・monitoring 再開は止めない。ラン開始時の判定と
-      // 同じ粒度）。観測失敗時（residualObserved === false）は開始時に newStartSuppressed が設定済みで
-      // ここへ到達しないため、residualObservedAtStart は常に実測値として扱える。
+      // worktree 新規作成（implement / review / pr-create / fix-routing-error）が積み増して上限を
+      // 超えることがある（大きなツリーほど顕著）。開始時観測値＋本ラン積み増し数を新規着手の直前に
+      // 毎回比較し、超過が判明した時点で以降の新規着手を止める（既に走っている実装・monitoring
+      // 再開は止めない。ラン開始時の判定と同じ粒度）。観測失敗時（residualObserved === false）は
+      // 開始時に newStartSuppressed が設定済みでここへ到達しないため、residualObservedAtStart は
+      // 常に実測値として扱える。
       if (maxResidualWorktrees > 0 && residualObserved) {
-        // (a) 実測超過 → 恒久停止（実測は減らないため latch でよい）
+        // (a) 実測超過 → 恒久停止（台帳 ephemeralWorktrees は単調増加のため latch でよい。
+        //     merged 確定時に掃除された implement worktree 分は差し引かず、実測は物理増分の
+        //     上界＝過大停止側で安全）
         if (residualObservedAtStart + ephemeralWorktrees.length > maxResidualWorktrees) {
           newStartSuppressed = {
             reason:
@@ -5163,8 +5175,14 @@ if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halte
 // 所有権を照合できない worktree は削除せず、failed / blocked 等と同様にログ報告・状態ファイルへの
 // 記録に留める（次回 Recover・手動での確認に委ねる）。
 const orphanEntriesAtEnd = await scanOrphanWorktrees()
-// 本ランが記録した使い捨て worktree（review / pr-create）のパス集合。孤立スキャンの除外に使う。
-const ephemeralWorktreePaths = new Set(ephemeralWorktrees.map((e) => e.path))
+// 本ランが記録した使い捨て worktree（review / pr-create / fix-routing-error）のパス集合。
+// 孤立スキャンの除外に使う。implement は除外リストへ入れない: 実装 worktree は状態ファイルで
+// 追跡され、merged / closed 確定時にこの後の所有権照合（savedEntryAtEnd.worktree === p）を経て
+// 削除候補になる正当な回収対象のため、台帳（残置上限ゲートの実測用）に載っていることを理由に
+// 回収から外すと既存の取りこぼし回収が消失する。
+const ephemeralWorktreePaths = new Set(
+  ephemeralWorktrees.filter((e) => e.kind !== 'implement').map((e) => e.path),
+)
 const orphanDeleteCandidates = []
 if (orphanEntriesAtEnd.length > 0) {
   const mainWorktreePathAtEnd = findMainWorktreePath(orphanEntriesAtEnd)
@@ -5232,20 +5250,25 @@ if (orphanEntriesAtEnd.length > 0) {
 // 不採用案コメント参照。エージェントへ開示済みの値では所有権を証明できないため削除しない）。
 const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
 
-// --- 使い捨て worktree（review / pr-create）の一覧報告 ---
+// --- 使い捨て worktree（review / pr-create / fix-routing-error）の一覧報告 ---
 // Issue #142: これらは自動削除しない（所有権を確認できない自己申告パスを --force 削除しない
 // ため）。残骸の存在を利用者が把握できるよう、ラン終了時に記録簿を一覧として出力する。
-if (ephemeralWorktrees.length > 0) {
-  log(`使い捨て worktree（review / pr-create）を ${ephemeralWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
-  for (const e of ephemeralWorktrees) log(`  #${e.issue} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
+// implement は一覧から除く: 実装 worktree は merged 確定時の掃除・次ラン Recover の再利用対象で、
+// 「不要なら手動削除」の案内に載せると failed イシューの未マージ成果を利用者が誤って
+// 削除しかねない（台帳上の implement 記録は残置上限ゲートの実測専用）。
+const disposableWorktrees = ephemeralWorktrees.filter((e) => e.kind !== 'implement')
+if (disposableWorktrees.length > 0) {
+  log(`使い捨て worktree（review / pr-create / fix-routing-error）を ${disposableWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
+  for (const e of disposableWorktrees) log(`  #${e.issue} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
 // --- 残置 worktree 総数のサマリ報告（PR #588 codex P1）---
-// ラン開始時の観測（residualObservedAtStart）＋今回積み増した使い捨て worktree（ephemeralWorktrees）
-// を合算し、上限に対する充足状況を報告する。使い捨て worktree は削除しない設計のため、この合算値が
-// 次ラン開始時の残置観測の下限になる。上限の 8 割に近づいたら手動掃除を促す早期警告を出す。
-// implementation worktree は merged 確定時に掃除される（sweepClosedWorktrees）ため加算しない
-// （加算すると警告が過剰発火する）。
+// ラン開始時の観測（residualObservedAtStart）＋本ランの worktree 新規作成台帳（ephemeralWorktrees。
+// implement 含む）を合算し、上限に対する充足状況を報告する。合算値はラン中の再評価（dispatch
+// ループ）と同じ式で、次ラン開始時の物理総数観測の**上界の見積もり**である: merged 確定時に
+// 掃除された implement worktree 分を差し引かないため過大側に出得る（fail-closed 方向。
+// 差し引きには掃除成功の確認と台帳の減算が要り、単調な latch 前提が崩れるため行わない）。
+// 上限の 8 割に近づいたら手動掃除を促す早期警告を出す。
 const residualAddedThisRun = ephemeralWorktrees.length
 const residualTotalAtEnd = residualObservedAtStart + residualAddedThisRun
 const residualOverLimit = maxResidualWorktrees > 0 && residualTotalAtEnd > maxResidualWorktrees
