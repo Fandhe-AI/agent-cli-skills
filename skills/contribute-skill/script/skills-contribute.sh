@@ -129,19 +129,16 @@ fi
 echo ""
 
 # Step 5: 作業用ディレクトリを用意する
-# $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
-UID_VAL=$(id -u)
-BASE_DIR="${TMPDIR:-/tmp/claude-${UID_VAL}}"
-mkdir -p "$BASE_DIR"
-# mktemp -d で作業ディレクトリを新規作成する: mkdtemp(3) は O_EXCL 相当で同名衝突時に
-# 別のランダムサフィックスへ再試行するため、他ユーザーが事前に用意した書き込み可能な
-# 既存ディレクトリを専有領域として誤って受け入れることがない（fail-closed。
-# mkdir -p は既存ディレクトリの所有者・権限を検証せず受け入れてしまうため使わない）。
-# mode は mktemp のデフォルト（700）で同一 uid 以外の書き込みを塞ぎ、rm -rf 前の
-# 検証と実行の間の TOCTOU 窓に他プロセスが介入できないようにする
-# （openat/O_NOFOLLOW ベースの原子的削除はシェルスクリプトの範囲外のため、
-# 非予測可能かつ専有の作業ディレクトリで代替する）
-WORKDIR=$(mktemp -d "${BASE_DIR}/contribute-${SKILL_NAME}-XXXXXXXX")
+# 自前の中間ディレクトリ（例: /tmp/claude-<uid>）は作らない: そのディレクトリを
+# 他ユーザーが先に作成していた場合、mkdir -p は所有者・権限を検証せず受け入れてしまい、
+# 親ディレクトリの所有者が配下のエントリを rename・置換できてしまう（sticky bit の
+# 保護は親ディレクトリ自体が信頼できる場合のみ有効）。mktemp -d を
+# ${TMPDIR:-/tmp} 直下（システム標準の sticky bit 付き tmp ルート）に対して直接呼び、
+# 中間ディレクトリを挟まず mode 700 のディレクトリを原子的（mkdtemp(3) の O_EXCL 相当）
+# に新規作成する。これにより Step 7 の rm -rf 前検証と実行の間の TOCTOU 窓へ
+# 他プロセスが介入する経路を断つ（openat/O_NOFOLLOW ベースの完全な原子的削除は
+# シェルスクリプトの範囲外のため、非予測可能かつ専有の作業ディレクトリで代替する）。
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/contribute-${SKILL_NAME}-XXXXXXXX")
 echo "==> 作業ディレクトリ: $WORKDIR"
 
 # Step 6: upstream を clone する

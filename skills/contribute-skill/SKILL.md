@@ -162,14 +162,12 @@ fi
 ### Step 5: 作業用ディレクトリを用意する
 
 ```bash
-UID_VAL=$(id -u)
-# $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
-BASE_DIR="${TMPDIR:-/tmp/claude-${UID_VAL}}"
-mkdir -p "$BASE_DIR"
-# mktemp -d で作業ディレクトリを新規作成する（mode 700・O_EXCL 相当で原子的）。
-# mkdir -p は既存ディレクトリの所有者・権限を検証せず受け入れてしまうため使わない。
-# Step 7 の rm -rf 前検証と実行の間の TOCTOU 窓に他プロセスが介入できないようにする
-WORKDIR=$(mktemp -d "${BASE_DIR}/contribute-${SKILL_NAME}-XXXXXXXX")
+# 自前の中間ディレクトリ（例: /tmp/claude-<uid>）は作らない: 他ユーザーが先に
+# 作成していた場合 mkdir -p は所有者・権限を検証せず受け入れてしまうため。
+# mktemp -d を ${TMPDIR:-/tmp}（システム標準の sticky bit 付き tmp ルート）直下に
+# 直接呼び、mode 700 のディレクトリを原子的に新規作成する
+# （サンドボックス互換: $TMPDIR が設定されていればそちらを優先する）
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/contribute-${SKILL_NAME}-XXXXXXXX")
 ```
 
 ### Step 6: upstream を clone する
