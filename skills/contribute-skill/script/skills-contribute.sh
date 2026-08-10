@@ -304,3 +304,10 @@ echo "  git push -u origin '${BRANCH}'"
 echo "  gh pr create --repo ${REPO_SLUG} --base ${DEFAULT_BRANCH:-main} --title '<title>' --body '...'"
 echo ""
 echo "作業ディレクトリ: ${WORKDIR}/upstream"
+# 呼び出し元（SKILL.md）が後続 Step（差分確認・commit・push・PR 作成）で使う
+# 作業 clone と upstream 側のスキルパスを機械的に取得できるよう、標準出力の
+# 最終行群に機械可読な key=value を出力する。呼び出し元はこれらの値を唯一の
+# 正とし、Step 5〜7 で別途算出した値（別 clone を前提に計算されている可能性がある）
+# ではなく、ここで確定した値を後続処理に使うこと。
+echo "CONTRIBUTE_SKILL_WORKDIR=${WORKDIR}/upstream"
+echo "CONTRIBUTE_SKILL_UPSTREAM_PATH=${UPSTREAM_SKILL_PATH}"
