@@ -163,12 +163,13 @@ fi
 
 ```bash
 UID_VAL=$(id -u)
-TS=$(date +%Y%m%d-%H%M%S)
 # $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
-WORKDIR="${TMPDIR:-/tmp/claude-${UID_VAL}}/contribute-${SKILL_NAME}-${TS}"
-# mode 700: 同一 uid 以外の書き込みを塞ぎ、Step 7 の rm -rf 前検証と実行の間の
-# TOCTOU 窓に他プロセスが介入できないようにする
-mkdir -m 700 -p "$WORKDIR"
+BASE_DIR="${TMPDIR:-/tmp/claude-${UID_VAL}}"
+mkdir -p "$BASE_DIR"
+# mktemp -d で作業ディレクトリを新規作成する（mode 700・O_EXCL 相当で原子的）。
+# mkdir -p は既存ディレクトリの所有者・権限を検証せず受け入れてしまうため使わない。
+# Step 7 の rm -rf 前検証と実行の間の TOCTOU 窓に他プロセスが介入できないようにする
+WORKDIR=$(mktemp -d "${BASE_DIR}/contribute-${SKILL_NAME}-XXXXXXXX")
 ```
 
 ### Step 6: upstream を clone する

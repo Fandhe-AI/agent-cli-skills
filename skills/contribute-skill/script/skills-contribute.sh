@@ -131,14 +131,17 @@ echo ""
 # Step 5: 作業用ディレクトリを用意する
 # $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
 UID_VAL=$(id -u)
-TS=$(date +%Y%m%d-%H%M%S)
-WORKDIR="${TMPDIR:-/tmp/claude-${UID_VAL}}/contribute-${SKILL_NAME}-${TS}"
-# mode 700: 同一 uid 以外の書き込みを塞ぎ、rm -rf 前の検証と実行の間の TOCTOU 窓に
-# 他プロセスが介入できないようにする（openat/O_NOFOLLOW ベースの原子的削除は
-# シェルスクリプトの範囲外のため、非予測可能かつ専有の作業ディレクトリで代替する）
-# shellcheck disable=SC2174 # -p との併用で -m は最深階層のみに適用されるが、
-# 保護対象は $WORKDIR 自身であり中間ディレクトリ（$TMPDIR 側）は対象外のため意図通り
-mkdir -m 700 -p "$WORKDIR"
+BASE_DIR="${TMPDIR:-/tmp/claude-${UID_VAL}}"
+mkdir -p "$BASE_DIR"
+# mktemp -d で作業ディレクトリを新規作成する: mkdtemp(3) は O_EXCL 相当で同名衝突時に
+# 別のランダムサフィックスへ再試行するため、他ユーザーが事前に用意した書き込み可能な
+# 既存ディレクトリを専有領域として誤って受け入れることがない（fail-closed。
+# mkdir -p は既存ディレクトリの所有者・権限を検証せず受け入れてしまうため使わない）。
+# mode は mktemp のデフォルト（700）で同一 uid 以外の書き込みを塞ぎ、rm -rf 前の
+# 検証と実行の間の TOCTOU 窓に他プロセスが介入できないようにする
+# （openat/O_NOFOLLOW ベースの原子的削除はシェルスクリプトの範囲外のため、
+# 非予測可能かつ専有の作業ディレクトリで代替する）
+WORKDIR=$(mktemp -d "${BASE_DIR}/contribute-${SKILL_NAME}-XXXXXXXX")
 echo "==> 作業ディレクトリ: $WORKDIR"
 
 # Step 6: upstream を clone する
