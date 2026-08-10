@@ -44,27 +44,42 @@
 #   サブコマンド前へ gh のグローバルオプション（-R/--repo・--hostname 等）を挟む正規の CLI 構文で
 #   容易に迂回できた（同様に `gh[[:space:]]+api` も `gh --repo o/r api ...` で迂回できていた）。
 #   個別のフラグ名を列挙して読み飛ばす方式（ブラックリスト）は、gh が新設する未知のグローバル
-#   オプションに追従できず再発するため採用しない。代わりに以下の方式でフラグの語彙に依存せず
+#   オプションに追従できず再発するため採用せず、代わりに以下の方式でフラグの語彙に依存せず
 #   汎用的に扱う:
-#     1. 独立コマンドの区切り（; & && ||）でセグメントに分割する（`;` 等を跨いだ語順一致に
-#        よる誤検知を防ぐため。例: `gh pr view 1 && git merge main` は "gh" "pr" "merge" が
-#        セグメントをまたぐため deny されない）。単一の `|`（パイプ）は分割しない
-#        （前段の出力を後段が読む単一パイプラインのため分割すると mutation 名等の照合が
-#        セグメントをまたいで見逃される。agent-cli-skills PR #195 codex P0）。
-#     2. セグメントごとに、空白区切りの各トークンのうち `-` で始まるもの（フラグ。値の有無を
-#        問わず）をすべて除去したトークン列を作る。値トークン（`-R owner/repo` の
-#        `owner/repo` 側）は孤立して残るが、判定は**隣接ではなく語順の部分列一致**（後述）で
-#        行うため、孤立した値トークンが偶然すり抜けの原因にはならない（値トークンが
-#        たまたま "pr" や "merge" と完全一致しない限り無害。あえて「フラグとその次の値トークン」
-#        をまとめて削る方式は採らない — その方式では `gh --version pr merge` のような
-#        引数なしフラグの直後に来た本物のサブコマンド語まで値と誤認して削ってしまい、
-#        `gh` → `pr` → `merge` の並びを見逃す fail-open 方向の誤りになるため）。
-#     3. フラグ除去後のトークン列に「gh」→「pr」→「merge」（または「gh」→「api」等）が
-#        **この順序で**（連続でなくてよい）現れるかを判定する。順序判定のため、値トークンの
-#        混入は誤検知（over-deny）方向にのみ働き、見逃し（under-deny）方向には働かない。
-#   `gh pr review --approve` の `--approve`自体はフラグなのでフラグ除去後には残らない。
-#   そのため「gh」→「pr」→「review」の順序判定はフラグ除去後トークン列で行い、`--approve` の
-#   有無は元のセグメント（フラグ除去前）に対して判定する。
+#     1. 正規化済みコマンド全体（`norm`）から、空白区切りの各トークンのうち `-` で始まるもの
+#        （フラグ。値の有無を問わず）をすべて除去したトークン列（`all_nf`）を作る。値トークン
+#        （`-R owner/repo` の `owner/repo` 側）は孤立して残るが、判定は**隣接ではなく語順の
+#        部分列一致**（後述）で行うため、孤立した値トークンが偶然すり抜けの原因にはならない
+#        （値トークンがたまたま "pr" や "merge" と完全一致しない限り無害。あえて「フラグと
+#        その次の値トークン」をまとめて削る方式は採らない — その方式では
+#        `gh --version pr merge` のような引数なしフラグの直後に来た本物のサブコマンド語まで
+#        値と誤認して削ってしまい、`gh` → `pr` → `merge` の並びを見逃す fail-open 方向の
+#        誤りになるため）。
+#     2. `all_nf` に「gh」→「pr」→「merge」（または「gh」→「api」等）が**この順序で**
+#        （連続でなくてよい）現れるかを判定する。順序判定のため、値トークンの混入は誤検知
+#        （over-deny）方向にのみ働き、見逃し（under-deny）方向には働かない。
+#   `gh pr review --approve` の `--approve` 自体はフラグなのでフラグ除去後には残らない。
+#   そのため「gh」→「pr」→「review」の順序判定はフラグ除去後トークン列（`all_nf`）で行い、
+#   `--approve` の有無は正規化済みコマンド全体（フラグ除去前の `norm`）に対して判定する。
+#
+#   コマンド区切り（; & | && ||）によるセグメント分割は**採用しない**（PR #195 で一度導入し、
+#   2 ラウンドの codex-review でいずれも P0 の回帰を出したため撤回した）:
+#     - 単一の `|` で分割すると、`printf '...mergePullRequest...' | gh api graphql --input -`
+#       のように mutation 名（前段）と `gh api`（後段）が別セグメントに分かれ、REST/GraphQL
+#       merge 照合が両方とも不成立になり見逃す（前段の出力を後段が読む単一パイプラインを
+#       人為的に切断してしまうため）。
+#     - `norm` はクォート文字を既に除去済み（後述の正規化参照）のため、`;`・`&` はシェルの
+#       制御演算子だけでなく、元は引用符内にあった**リテラル文字**（GraphQL クエリの文字列
+#       引数中の `;` 等）も無条件に区切りとして拾ってしまう。攻撃者が正規の文字列値へ区切り
+#       文字を紛れ込ませれば、`gh api` と危険な mutation 名を任意に別セグメントへ分断でき、
+#       クォート状態を追跡しない限りこの迂回は原理的に防げない。
+#   両 P0 とも「セグメント分割によって判定対象の文字列が分断され、本来同一コマンドとして
+#   見るべき情報が失われる」ことが原因であり、fail-closed の hook にとって情報を削ることは
+#   常に迂回面を広げる。よってセグメント分割をやめ、正規化済みコマンド全体を単位として
+#   判定する（`gh pr view 1 && git merge main` のような無関係な複合コマンドも過検知で deny
+#   されうるが、これは意図した over-deny — 1 回の Bash 呼び出しに複数コマンドを `&&`/`;` で
+#   連結せず、個別の Bash 呼び出しに分ければ回避できる。fail-closed の設計思想上、この
+#   over-deny は under-deny より常に安全な方向）。
 set -u
 
 # deny 応答を出力して終了する。reason は本スクリプト内の固定文言のみを渡す契約
@@ -140,25 +155,12 @@ norm=$(printf '%s\n' "$cmd" \
   | tr -d "\\\\" \
   | tr -s '[:space:]' ' ')
 
-# --- セグメント分割: 独立コマンドの区切り（; & && ||）ごとに判定する ---------------------
-# 分割しないと「gh pr view 1 && git merge main」のような無関係な複合コマンドが、文字列全体
-# を対象にした語順一致で誤って deny されうる（"gh" → "pr" → "merge" が偶然この順で並ぶが
-# 別コマンドの語）。ただし単一の `|`（パイプ）は分割しない —— `;`/`&`/`&&`/`||` は互いに
-# 無関係な独立コマンドの区切りだが、`|` は前段の出力を後段の標準入力へ流し込む単一の
-# パイプラインであり、`printf '...mergePullRequest...' | gh api graphql --input -` のように
-# mutation 名（前段）と `gh api`（後段）が同一パイプラインの別セグメントに分かれてしまうと、
-# 後段の REST/GraphQL merge 照合（`gh api` 判定と同一セグメント内の文字列一致が前提）が
-# 両方とも不成立になり見逃す（agent-cli-skills PR #195 codex P0: セグメント分割導入時に
-# `|` も区切りに含めたことで発生した回帰）。よって `|` はセグメント区切りに含めない
-# （`||` は制御フローであり標準入力を運ばないため区切りに含めてよい）。
-segments_raw=$(printf '%s\n' "$norm" | awk '{ gsub(/&&|\|\||[;&]/, "\n"); print }')
-
 # フラグトークン（`-` で始まるすべてのトークン）を除去したトークン列を返す。
-# 値トークンは孤立して残る（コメント冒頭の設計注記のとおり、これは語順部分列判定と
+# 値トークンは孤立して残る（ファイル冒頭の設計注記のとおり、これは語順部分列判定と
 # 組み合わせる前提で安全側）。
 strip_flags() {
-  local seg="$1" tok out=""
-  for tok in $seg; do
+  local s="$1" tok out=""
+  for tok in $s; do
     case "$tok" in
       -*) : ;;
       *) out="$out $tok" ;;
@@ -182,48 +184,47 @@ contains_subsequence() {
   return 1
 }
 
-while IFS= read -r seg; do
-  [ -z "$seg" ] && continue
-  seg_nf=$(strip_flags "$seg")
+# フラグ除去後のトークン列（正規化済みコマンド全体が対象。セグメント分割は行わない —
+# 理由はファイル冒頭のコメント参照）。
+all_nf=$(strip_flags "$norm")
 
-  # gh pr merge（あらゆる形。グローバルオプションの挟み込みで迂回不可）
-  if contains_subsequence "$seg_nf" gh pr merge; then
-    deny "subagent からの gh pr merge は禁止（この基盤では自動マージを行わない。マージは GitHub 上で人間が行う）"
-  fi
+# gh pr merge（あらゆる形。グローバルオプションの挟み込みで迂回不可）
+if contains_subsequence "$all_nf" gh pr merge; then
+  deny "subagent からの gh pr merge は禁止（この基盤では自動マージを行わない。マージは GitHub 上で人間が行う）"
+fi
 
-  # gh api 経由のマージ（グローバルオプションの挟み込みで迂回不可）
-  if contains_subsequence "$seg_nf" gh api; then
-    # REST merge: PUT repos/<owner>/<repo>/pulls/<n>/merge
-    if printf '%s' "$seg" | grep -qE 'pulls/[^[:space:]]*/merge'; then
-      deny "subagent からの REST merge（gh api pulls/<n>/merge）は禁止"
-    fi
-    # REST ブランチマージ: POST repos/<owner>/<repo>/merges
-    if printf '%s' "$seg" | grep -qE '/merges([[:space:]?]|$)'; then
-      deny "subagent からの REST ブランチマージ（gh api repos/<o>/<r>/merges）は禁止"
-    fi
-    # GraphQL merge / auto-merge 有効化 / ref 直接マージ mutation。
-    # mergeBranch は PR を経由せず head ref を base へ直接マージできる迂回経路として塞ぐ。
-    if printf '%s' "$seg" | grep -qE 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
-      deny "subagent からの GraphQL merge 系 mutation（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）は禁止"
-    fi
+# gh api 経由のマージ（グローバルオプションの挟み込みで迂回不可）
+if contains_subsequence "$all_nf" gh api; then
+  # REST merge: PUT repos/<owner>/<repo>/pulls/<n>/merge
+  if printf '%s' "$norm" | grep -qE 'pulls/[^[:space:]]*/merge'; then
+    deny "subagent からの REST merge（gh api pulls/<n>/merge）は禁止"
   fi
+  # REST ブランチマージ: POST repos/<owner>/<repo>/merges
+  if printf '%s' "$norm" | grep -qE '/merges([[:space:]?]|$)'; then
+    deny "subagent からの REST ブランチマージ（gh api repos/<o>/<r>/merges）は禁止"
+  fi
+  # GraphQL merge / auto-merge 有効化 / ref 直接マージ mutation。
+  # mergeBranch は PR を経由せず head ref を base へ直接マージできる迂回経路として塞ぐ。
+  if printf '%s' "$norm" | grep -qE 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
+    deny "subagent からの GraphQL merge 系 mutation（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）は禁止"
+  fi
+fi
 
-  # レビュー承認（外部レビューゲートの自作自演を防ぐ）。--approve はフラグなので
-  # strip_flags 後には残らない。元セグメント（フラグ除去前）に対して判定する。
-  if contains_subsequence "$seg_nf" gh pr review \
-    && printf '%s' "$seg" | grep -qE '(^|[[:space:]])--approve([[:space:]]|$|=)'; then
-    deny "subagent からの gh pr review --approve は禁止"
-  fi
+# レビュー承認（外部レビューゲートの自作自演を防ぐ）。--approve はフラグなので
+# strip_flags 後には残らない。正規化済みコマンド全体（フラグ除去前の norm）に対して判定する。
+if contains_subsequence "$all_nf" gh pr review \
+  && printf '%s' "$norm" | grep -qE '(^|[[:space:]])--approve([[:space:]]|$|=)'; then
+  deny "subagent からの gh pr review --approve は禁止"
+fi
 
-  # 別名・拡張経由の迂回封じ: gh alias（set / import 等すべて）・gh extension（install 等）
-  if contains_subsequence "$seg_nf" gh alias; then
-    deny "subagent からの gh alias は禁止（別名経由のマージ迂回を防ぐ）"
-  fi
-  if contains_subsequence "$seg_nf" gh extension \
-    || contains_subsequence "$seg_nf" gh extensions; then
-    deny "subagent からの gh extension は禁止（拡張経由のマージ迂回を防ぐ）"
-  fi
-done <<< "$segments_raw"
+# 別名・拡張経由の迂回封じ: gh alias（set / import 等すべて）・gh extension（install 等）
+if contains_subsequence "$all_nf" gh alias; then
+  deny "subagent からの gh alias は禁止（別名経由のマージ迂回を防ぐ）"
+fi
+if contains_subsequence "$all_nf" gh extension \
+  || contains_subsequence "$all_nf" gh extensions; then
+  deny "subagent からの gh extension は禁止（拡張経由のマージ迂回を防ぐ）"
+fi
 
 # マージ系以外のコマンド（gh pr comment による催促・読み取り系等）は許可
 exit 0
