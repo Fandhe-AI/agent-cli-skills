@@ -171,11 +171,26 @@ fi
 # ディレクトリを原子的に新規作成する。
 TMP_ROOT="${TMPDIR:-/tmp}"
 TMP_ROOT_REAL=$(cd -P "$TMP_ROOT" 2>/dev/null && pwd -P) || TMP_ROOT_REAL=""
-# 以降、実在性・所有者・書き込み権限を検証してから
+if [[ -z "$TMP_ROOT_REAL" || ! -d "$TMP_ROOT_REAL" ]]; then
+  echo "エラー: TMPDIR が実在するディレクトリを指していません: ${TMP_ROOT}" >&2
+  exit 1
+fi
+TMP_ROOT_OWNER=$(stat -c '%u' "$TMP_ROOT_REAL" 2>/dev/null || stat -f '%u' "$TMP_ROOT_REAL")
+if [[ "$TMP_ROOT_OWNER" != "$(id -u)" && "$TMP_ROOT_OWNER" != "0" ]]; then
+  echo "エラー: TMPDIR の所有者が不正です（自分でも root でもありません）: ${TMP_ROOT_REAL}" >&2
+  exit 1
+fi
+TMP_ROOT_MODE=$(stat -c '%a' "$TMP_ROOT_REAL" 2>/dev/null || stat -f '%Lp' "$TMP_ROOT_REAL")
+if [[ ! "$TMP_ROOT_MODE" =~ ^[0-7]{3,4}$ ]]; then
+  echo "エラー: TMPDIR のパーミッションを取得できません: ${TMP_ROOT_REAL}" >&2
+  exit 1
+fi
+if (( (8#$TMP_ROOT_MODE & 8#022) != 0 )) && [[ ! -k "$TMP_ROOT_REAL" ]]; then
+  echo "エラー: TMPDIR が他者から書き込み可能なのに sticky bit が設定されていません: ${TMP_ROOT_REAL}（mode ${TMP_ROOT_MODE}）" >&2
+  exit 1
+fi
 WORKDIR=$(mktemp -d "${TMP_ROOT_REAL}/contribute-${SKILL_NAME}-XXXXXXXX")
 ```
-
-検証の詳細は `skills-contribute.sh` の Step 5 コメントを参照してください。
 
 ### Step 6: upstream を clone する
 
