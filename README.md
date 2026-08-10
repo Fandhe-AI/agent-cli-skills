@@ -65,6 +65,8 @@ skills/
     SKILL.md                         -- コメント・ドキュメンテーションコメントを追加・補強
   create-commit/
     SKILL.md                         -- Conventional Commits 形式でコミット作成
+  create-html-report/
+    SKILL.md                         -- 比較・分析結果を表・グラフ付きの自己完結 HTML レポートで生成
   create-issue/
     SKILL.md                         -- GitHub Issue を親子構造で作成
   create-issue-tree/
@@ -121,6 +123,7 @@ skills/
 |--------|------|
 | **comment-code** | コードにコメント・ドキュメンテーションコメント（JSDoc / docstring 等）を追加・補強する。パッケージ・サービス視点での役割境界、呼び出し元・呼び出し先の前提と契約、他ファイル・他サービスからの文脈を記述 |
 | **create-commit** | `git diff` を分析し、Conventional Commits 形式でコミットメッセージを生成・実行する |
+| **create-html-report** | 表・グラフ（棒グラフ・折れ線グラフ・レーダーチャート）付きの自己完結 HTML レポートで比較・分析結果を生成する。外部 CDN 不使用・レスポンシブ・ダークモード対応 |
 | **create-issue** | タスクを分析し、GitHub Issue を親子構造（sub-issues）で作成する |
 | **create-issue-tree** | タスク要件を Phase 分割して GitHub Issue ツリーを新規作成（4h 粒度分解・Phase 階層化） |
 | **create-plan** | コードベースを調査し、実装計画を `_/local-plans/` に作成する |
