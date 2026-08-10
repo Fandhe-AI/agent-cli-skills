@@ -3024,11 +3024,44 @@ async function runImplement(item) {
 
         log(`#${item.number}: Recover → continue（branch: ${sanitize(effectiveBranch)}）、旧 worktree を掃除して Implement 継続`)
 
-        await updateState(
+        // 掃除実施ゲート（Issue #166 / automation#367 Bugbot）。discard 経路の
+        // discardCleanupOk（Issue #162）と対になる continue 側の検証。戻り値 false は
+        // mergeOk 失敗（掃除自体がスキップされた）か cleanupOk 失敗（削除未完）のいずれかで、
+        // どちらでも旧 worktree の掃除と implementing 遷移の永続化を完了確認できない。
+        // 旧 worktree が effectiveBranch を掴んだままだと recoverImplement の新 worktree が
+        // 同一 branch を checkout できず（git は同一 branch の多重 checkout を拒否する）、
+        // 継続実装は必ず失敗するため fail-closed で停止する。
+        //
+        // 設計メモ: 通常経路の Issue #143（掃除の AND が正常イシューを failed に倒す問題）は
+        // ここでは該当しない。continue 経路は「掃除成功そのもの」が後続 checkout の前提条件で
+        // あり、掃除エージェントは worktree が既に存在しない場合 ok:true を返す契約のため
+        // 偽陽性失敗もない。単一呼び出しの AND 判定 + fail-closed が正しい。
+        //
+        // failed patch に branch / worktree を再記録するのは、次回ランの Recover
+        // （branch-only / dead-worktree 経路）が hasRemnant で再発火できるようにするため。
+        // deleteBranch は絶対に渡さない（branch に退避済み WIP commit が乗っている）。
+        const continueCleanupOk = await updateState(
           item.number,
           { status: 'implementing', branch: effectiveBranch, worktree: '' },
           sanitizedRecoverWorktree ? { cleanupWorktree: sanitizedRecoverWorktree } : {},
         )
+        if (!continueCleanupOk) {
+          const reason = sanitize(
+            `旧 worktree の掃除または implementing 遷移の永続化を完了確認できなかった` +
+            `（状態マージ失敗による掃除スキップ、または掃除エージェント失敗）。` +
+            `旧 worktree が branch を掴んだままだと新 worktree が同 branch を checkout できないため、` +
+            `Implement を起動せず残骸を保全して failed にする。旧 worktree と branch を手動確認し、対処後に再実行すること`,
+          )
+          log(`⚠️ #${item.number}: Recover → continue を保全へ格下げ（${reason}）`)
+          await updateState(item.number, {
+            status: 'failed',
+            branch: effectiveBranch,
+            worktree: sanitizedRecoverWorktree,
+            note: reason,
+          })
+          recordFailure({ issue: item.number, reason })
+          return false
+        }
 
         // --- recoverImplement: 回復ブリーフで Implement を起動（Plan をスキップ）---
         // effectiveBranch は isValidBranchName 検証 + sanitizeBranch 済み。
@@ -3056,15 +3089,49 @@ async function runImplement(item) {
           return false
         }
         impl = { ...impl, worktreePath: sanitizeWorktreePath(impl.worktreePath ?? ''), prNumber: 0 }
-        // impl 完了直後: reviewing に遷移し branch / worktree を記録する
-        // continue 経路では旧 worktree は既に掃除済みのため cleanupWorktree は渡さない
-        await updateState(item.number, {
+        // impl 完了直後: reviewing に遷移し branch / worktree を記録する。
+        // continue 経路では旧 worktree は既に掃除済みのため cleanupWorktree は渡さない。
+        //
+        // 通常経路（Issue #166 で同期。codex-review P1 対応と同じ契約）と同様、branch /
+        // worktree の記録は重要遷移のため成功を検証する。未永続化のまま続行してクラッシュ
+        // すると worktree が孤立し、次回実行が同一イシューを再実装する（checkout -B の衝突・
+        // 重複作業）。失敗時は 1 回リトライし、それでも失敗したら Review・push へ進まず
+        // failed 終端で停止する（push 前のため副作用は残らない）。
+        // 通常経路との差分は fallbackOldWorktree（continue 経路には存在しない）のみのため、
+        // ヘルパー抽出はせず同契約のインライン複製とする（差分最小を優先）。
+        const continueReviewingPatch = {
           status: 'reviewing',
           pr: 0,
           branch: impl.branch,
           worktree: impl.worktreePath,
           fixCount: 0,
-        })
+        }
+        const continueReviewingOk =
+          (await updateState(item.number, continueReviewingPatch)) ||
+          (await updateState(item.number, continueReviewingPatch))
+        if (!continueReviewingOk) {
+          const reason =
+            `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
+            `永続化できなかった。重複実装防止のため Review・push へ進まず停止する（${STATE_FILE} を手動確認すること）`
+          log(`⚠️ issue #${item.number}: ${reason}`)
+          // 他の failed 終端と同様、best-effort で failed 状態と回復メタデータ（branch / worktree）の
+          // 保存を試みる。直前の reviewing 書き込みが失敗しているため成功は期待できないが、
+          // 一過性の失敗（I/O エラー・ロック競合）であればここで永続化でき、次回実行が
+          // implement 手順 0b のブランチ再利用で回復できる。
+          const failedSaved = await updateState(item.number, {
+            status: 'failed',
+            pr: 0,
+            branch: impl.branch,
+            worktree: impl.worktreePath,
+            fixCount: 0,
+            note: reason,
+          })
+          if (!failedSaved) {
+            log(`⚠️ issue #${item.number}: failed 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
+          }
+          recordFailure({ issue: item.number, reason })
+          return false
+        }
       } else if (recoverDecision === 'discard' && effectiveBranch) {
         // --- discard 経路（effectiveBranch あり）: 旧 worktree と branch を掃除し、通常 Plan へフォールスルー ---
         //
@@ -3960,8 +4027,25 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           lastState = 'blocked'
           // チェック到着後の再実行でそのまま継続できるため回復可能（Issue #142）。
           lastBlockedReason = 'quality'
+          // 合格条件の提示は App 種別で出し分ける（Issue #166）。判定ロジック
+          // （mergeExecutePrompt の hasCursor / nonCursorApps 分割）は既に App ごとに
+          // 非対称だが、従来の終端文言は全 App に「許容 conclusion の check-run / APPROVED
+          // レビュー」を一律提示していた。cursor の合格条件は「HEAD sha へのレビュー到着のみ
+          // （state 不問）」であり、Bugbot は APPROVED を返さないため、旧文言は利用者を
+          // 「APPROVED 待ち」へ誤誘導する。判定側と同じ分割で文言を構築する。
+          const terminalHasCursor = externalCheckApps.includes('cursor')
+          const terminalNonCursorApps = externalCheckApps.filter((a) => a !== 'cursor')
+          const passConditionParts = [
+            ...(terminalHasCursor
+              ? ['cursor の合格条件は HEAD sha に対する cursor[bot] レビューの到着のみ（state 不問。Bugbot は APPROVED を返さないため APPROVED を待たないこと）']
+              : []),
+            ...(terminalNonCursorApps.length
+              ? [`${terminalNonCursorApps.map(sanitize).join(', ')} の合格条件は check-run の合格 conclusion（success / neutral / skipped）で、check-run 0 件時のみ APPROVED レビューへフォールバックする`]
+              : []),
+          ]
           terminalReasonOverride = capText(
-            `HEAD sha に対する外部チェック（確定済み: ${externalCheckApps.map(sanitize).join(', ') || 'なし'}）が起動していない、または合格（許容 conclusion の check-run / APPROVED レビュー）を確認できないためマージを停止した（監視エージェントの ready 判定と不一致）。`
+            `HEAD sha に対する外部チェック（確定済み: ${externalCheckApps.map(sanitize).join(', ') || 'なし'}）が起動していない、または合格を確認できないためマージを停止した（監視エージェントの ready 判定と不一致）。`
+            + (passConditionParts.length ? `${passConditionParts.join('。')}。` : '')
             + `チェック到着後に再実行すれば monitoring 再開で継続する。再実行しても解消しない場合は args.externalChecks の slug 誤記、または当該 App が本リポジトリで動作していない可能性があるため、App の導入状況を確認するか args.externalChecks から当該 slug を除外して再実行する: ${execSummaryText}`,
           )
           log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
