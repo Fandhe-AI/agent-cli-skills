@@ -3881,6 +3881,18 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // して 'failed' 終端・halt カウント対象に落とす（Issue #160 の fail-closed）。
           log(`⚠️ #${item.number}: マージ実行エージェントが merged: true と不整合な reason（${sanitize(String(x?.reason ?? ''))}）を返した。無効な結果として扱う`)
           lastState = 'invalid-monitor-result'
+        } else if (recoveryOnly && execReason) {
+          // 回復専用経路で PR がマージ済みでなかった。空 sha 経路の merge-exec は他条件を
+          // 確認せず head-moved で辞退する想定だが、これはプロンプト契約にすぎないため、
+          // どの reason（unresolved-threads / not-mergeable / external-review-missing /
+          // pr-closed / head-moved 等）が返っても、reason 別分岐より先にこの fail-closed で
+          // 捕捉する。未確定ランで fix ループ・再監視へ進ませず、従来どおり未確定理由の
+          // blocked で終端する（Issue #168。PR #173 Bugbot 指摘: 後置だと unresolved-threads /
+          // not-mergeable が fix 予算を消費し push まで発生し得た）。
+          // blocked + pr は次回ランの monitoring 再開対象であり、args を明示して再実行すれば
+          // 新規マージ経路で継続できる。execReason が enum 外・結果 null の場合はこの分岐に
+          // 入れず、既存どおり systemic failure（invalid-monitor-result → failed 終端）とする。
+          return await failMergeTerminal(capText(`${EXTERNAL_CHECKS_UNCONFIRMED_REASON}（PR のマージ済みクローズ回復のみ試行したが PR はマージ済みではなかった: ${execSummaryText}）`), 'blocked')
         } else if (execReason === 'unresolved-threads') {
           // 監視は ready、マージ実行は未解決あり、という不一致。fix ループへ回す。
           // 終端したときも 'unresolved-comments' 由来として blocked（halt 非カウント）になる。
@@ -3933,14 +3945,6 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // 'quality' に誤分類すると isActiveMonitoring が毎ラン再開し続け halt 防御を迂回する。
           lastBlockedReason = 'unrecoverable'
           lastUnresolvedInfo = lastUnresolvedInfo || capText(`PR が未マージのままクローズされている: ${execSummaryText}`)
-        } else if (recoveryOnly && execReason) {
-          // 回復専用経路で PR がマージ済みでなかった（空 sha 経路の merge-exec は他条件を
-          // 確認せず head-moved で辞退する）。未確定ランで fix ループ・再監視へ進ませず、
-          // 従来どおり未確定理由の blocked で終端する（fail-closed 維持。Issue #168）。
-          // blocked + pr は次回ランの monitoring 再開対象であり、args を明示して再実行すれば
-          // 新規マージ経路で継続できる。execReason が enum 外・結果 null の場合はこの分岐に
-          // 入れず、既存どおり systemic failure（invalid-monitor-result → failed 終端）とする。
-          return await failMergeTerminal(capText(`${EXTERNAL_CHECKS_UNCONFIRMED_REASON}（PR のマージ済みクローズ回復のみ試行したが PR はマージ済みではなかった: ${execSummaryText}）`), 'blocked')
         } else if (execReason === 'head-moved' || execReason === 'checks-not-green' || execReason === 'merge-failed') {
           // いずれも一過性（監視後の push・チェック未完了・merge コマンドの一時失敗）。
           // 再監視で解消しうるため timeout として次ラウンドへ回す（監視回数の上限で終端する）。
