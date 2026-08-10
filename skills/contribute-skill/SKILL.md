@@ -239,13 +239,34 @@ Step 7 で `skills-contribute.sh` を実行すると、同スクリプトが自�
 ```bash
 # 本スキル自身（contribute-skill）の配置を ORIG_DIR 基準の絶対パスで解決する。
 # LOCAL_SKILL_DIR（貢献対象）とは別物。
-if [[ -d "${ORIG_DIR}/skills/contribute-skill" ]]; then
-  CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/skills/contribute-skill"
-elif [[ -d "${ORIG_DIR}/.agents/skills/contribute-skill" ]]; then
-  CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/.agents/skills/contribute-skill"
+# override: 環境変数 CONTRIBUTE_SKILL_DIR が設定済みならそれを検証して使う
+if [[ -n "${CONTRIBUTE_SKILL_DIR:-}" ]]; then
+  if [[ "${CONTRIBUTE_SKILL_DIR}" != "${ORIG_DIR}/skills/contribute-skill" && "${CONTRIBUTE_SKILL_DIR}" != "${ORIG_DIR}/.agents/skills/contribute-skill" ]]; then
+    echo "エラー: CONTRIBUTE_SKILL_DIR は ${ORIG_DIR}/skills/contribute-skill か ${ORIG_DIR}/.agents/skills/contribute-skill のいずれかを指定してください: ${CONTRIBUTE_SKILL_DIR}"
+    exit 1
+  fi
+  if [[ ! -d "${CONTRIBUTE_SKILL_DIR}" ]]; then
+    echo "エラー: 指定された CONTRIBUTE_SKILL_DIR が存在しません: ${CONTRIBUTE_SKILL_DIR}"
+    exit 1
+  fi
 else
-  echo "エラー: contribute-skill 自身の配置が見つかりません（${ORIG_DIR}/skills/contribute-skill / ${ORIG_DIR}/.agents/skills/contribute-skill）。"
-  exit 1
+  # 自動解決。Step 1 の LOCAL_SKILL_DIR 解決と同じ fail-closed 方針: 両方存在する場合は
+  # どちらを使うべきか判断できないため中止する（silently に skills/ を優先しない）。
+  have_contribute_skills=0; have_contribute_agents=0
+  [[ -d "${ORIG_DIR}/skills/contribute-skill" ]] && have_contribute_skills=1
+  [[ -d "${ORIG_DIR}/.agents/skills/contribute-skill" ]] && have_contribute_agents=1
+  if [[ "${have_contribute_skills}" -eq 1 && "${have_contribute_agents}" -eq 1 ]]; then
+    echo "エラー: ${ORIG_DIR}/skills/contribute-skill と ${ORIG_DIR}/.agents/skills/contribute-skill の両方が存在します。"
+    echo "環境変数 CONTRIBUTE_SKILL_DIR にどちらかを指定して再実行してください（例: CONTRIBUTE_SKILL_DIR=${ORIG_DIR}/.agents/skills/contribute-skill）。"
+    exit 1
+  elif [[ "${have_contribute_skills}" -eq 1 ]]; then
+    CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/skills/contribute-skill"
+  elif [[ "${have_contribute_agents}" -eq 1 ]]; then
+    CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/.agents/skills/contribute-skill"
+  else
+    echo "エラー: contribute-skill 自身の配置が見つかりません（${ORIG_DIR}/skills/contribute-skill / ${ORIG_DIR}/.agents/skills/contribute-skill）。"
+    exit 1
+  fi
 fi
 
 # skills-contribute.sh は自分自身で clone するため、呼び出し前に必ずローカルリポジトリ
@@ -428,7 +449,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 ## 注意事項
 
 - **SKILL_NAME は kebab-case のみ許可**：`..` のような値によるパストラバーサルを防ぐため、空判定の直後・パス解決の前に `^[a-z][a-z0-9-]+$` で検証する（security.md A03/A01）
-- **`skills/` と `.agents/skills/` の両方が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>` か `.agents/skills/<name>` の2パスのみ受理し、任意パス指定によるパストラバーサルを防ぐ
+- **`skills/` と `.agents/skills/` の両方が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>` か `.agents/skills/<name>` の2パスのみ受理し、任意パス指定によるパストラバーサルを防ぐ。Step 7 で本スキル自身（contribute-skill）の配置を解決する `CONTRIBUTE_SKILL_DIR` も同じ fail-closed 方針を取り、`skills/contribute-skill` と `.agents/skills/contribute-skill` の両方が存在する場合は silently に `skills/` を優先せず中止して環境変数 `CONTRIBUTE_SKILL_DIR` での指定を求める（LOCAL_SKILL_DIR とは非対称にしない）
 - **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → スキルルート親ディレクトリ（`skills/` or `.agents/skills/`）の慣習 → 最終デフォルト `skills/`（より一般的な公開レイアウト）
