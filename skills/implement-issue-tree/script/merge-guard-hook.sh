@@ -1,67 +1,42 @@
 #!/usr/bin/env bash
 # implement-issue-tree の merge-guard hook（PreToolUse / matcher: Bash）。
 #
-# 役割の境界（主張と保証を一致させる。security-auditor 3 回目監査・advisor 助言反映）:
-# 本 hook が担うのは implement-issue-tree Workflow の「未承認マージ防止」の一層である。
-# Workflow ランタイムは agent() 単位のツール allowlist・credential 分離を提供しないため、
-# 未信頼の PR レビュー本文を読む monitor エージェントも merge-exec と同じ Bash・gh 認証を持つ。
-# その前提で、本 hook の各経路が「実装として保証できる主張の強さ」は次のように異なる:
+# この hook は subagent（monitor 等）のマージ系コマンドを deny する **best-effort の攻撃面
+# 削減**であり、**承認境界ではない**。当初は host 発行の grant（expectedCommand 完全一致）に
+# よる allow 経路を持たせて「未承認マージを許可しない証明可能な境界」を主張していたが、
+# 同一トラストドメイン（hook と subagent が同じ FS・env・gh 認証を共有し、agent 単位の
+# 権限分離がない）では偽造不能な認可を hook 側で検証できないことが判明したため、allow 経路を
+# 全撤去した（grant 偽造 P0: monitor は Bash を持ち通常のファイル作成も hook を通るため、
+# gh pr view で HEAD を取得 → 任意 nonce で grant-<pr>.json を自作 → その expectedCommand を
+# 実行できる。hook は grant の真正性・署名を検証できない。この基盤には hook 専用の秘密注入
+# 経路がなく（settings.json の env はセッション全体=subagent Bash 含めて共有）、hook が
+# 検証でき subagent が読めない鍵を持てないため、MAC/署名による偽造防止は実装不能）。
 #
-#   - allow 経路 = 証明可能な強制境界（本 hook が全 subagent Bash 呼び出しに発火し続ける
-#     限りにおいて。強い主張をしてよい）:
-#       subagent の gh pr merge は「host が grant 窓の間だけ発行した 1 バイト列
-#       （expectedCommand）との完全一致」でのみ許可する。host が承認したその瞬間の正規
-#       コマンドそのもの以外は（前後連結・フラグ追加・クォート/バックスラッシュ/IFS 難読化を
-#       含め）一致せず deny される。これは文字列削除による正規化の網羅性に依存しないため、
-#       「未承認の新規マージコマンドを許可しない」ことを構造的に保証できる。
-#       前提: この保証は hook が settings に登録され全 Bash 呼び出しに発火していることに依存
-#       する。canary はラン開始時 1 回のみ実効を検証するため、セッション途中で settings から
-#       hook が外される・上書きされる変更は再検知しない（残存リスク。settings をラン中に
-#       改変しない運用・PreToolUse hook 群の保護で担保する）。
-#   - deny 経路 = best-effort（サンドボックスとは主張しない）:
-#       allow で許可されなかったマージ系コマンド（gh pr merge / REST merges / GraphQL /
-#       alias / extension / --approve）を、既知の直接実行難読化スペリング（行継続・改行・
-#       クォート分割・単独バックスラッシュ・IFS 直書き、および ANSI-C クォート/IFS 展開の
-#       存在検知）まで潰して deny する攻撃面削減の一層。間接実行（eval・base64 復元・変数
-#       間接呼び出し・コマンド置換 $(...) 等）は文字列照合では原理的に防げない。完全な
-#       サンドボックスではない。
-#   - 実際の load-bearing な強制はサーバ側にある:
-#       branch protection（第三者レビュー必須・required checks・直接 push 禁止。host 側
-#       ランタイムで検証し未達なら自動マージ無効へ倒す。ensureBranchProtection 参照）+
-#       完全一致 nonce grant + merge-verify の独立再検証。compromised なローカルエージェントは
-#       サーバ側ルールを迂回できない（例: PR author と自動化 identity が同一なら
-#       gh pr review --approve はサーバ側で拒否される。hook より強い論拠）。
-# rust-ai-library PR #441 codex P0 対応。
+# したがって本 hook は subagent からのマージ系コマンドを**無条件 deny**する（例外なし）。
+# 間接実行（eval・base64 復元・変数間接呼び出し・コマンド置換 $(...)）や未知のスペリングは
+# 文字列照合では防げない。**実際にマージを止めるのは、この Workflow が『自動マージを行わない』
+# 方針そのもの（autoMerge を無条件 fail-closed 化し新規マージ経路を開かない）と、サーバ側の
+# branch protection（人間がマージする前提の運用推奨）である**（rust-ai-library PR #441 /
+# agent-cli-skills PR #182 codex P0）。この hook は多層防御の一層（best-effort deny）にすぎない。
 #
 # 呼び出し元の前提（契約）:
 #   - .claude/settings.json の hooks.PreToolUse（matcher: "Bash"）に登録されて実行される。
-#     stdin に hook JSON（agent_id / tool_input.command 等）を受け取る。
+#     stdin に hook JSON（agent_id / tool_input.command 等）を受け取る。導入は任意。
 #   - agent_id は subagent 実行時のみ存在する。main スレッド（agent_id なし）は人間の監督下の
 #     対話コンテキストであり、本 hook の制限対象外（何も出力せず許可）。
-#   - 正規のマージ経路は「host（implement-issue-tree.js）が merge-exec 起動直前に発行する
-#     grant ファイル（$CLAUDE_PROJECT_DIR/_/implement-issue-tree/merge-grants/grant-<pr>.json）
-#     の expectedCommand と、実行コマンド（trim のみ・無正規化）の完全一致」でのみ許可する。
-#     部分一致（nonce・PR 番号・--match-head-commit の個別照合）による許可は行わない。
-#     これにより grant ファイルの内容を読まれても、実行できるのは host がその瞬間に承認した
-#     正規コマンドそのもの（前後へのコマンド連結・フラグ追加は不一致で deny）だけになり、
-#     nonce の秘匿には依存しない（nonce は多層防御の一層として残す）。
-#   - deny 応答の permissionDecisionReason には必ずマーカー文字列
-#     「implement-issue-tree-merge-guard」を含める。implement-issue-tree.js の canary プローブ
-#     （merge-guard:probe エージェント）がこのマーカーの有無で hook の実効性を判定し、
-#     未検出なら autoMerge: true でも自動マージを無効化する（fail-closed）。canary は hook の
-#     「導入検証」であり、あらゆる難読化への耐性証明ではない点に注意。
+#   - deny 応答の permissionDecisionReason にはマーカー文字列
+#     「implement-issue-tree-merge-guard」を含める（多層防御のログ識別用。allow 経路・canary は
+#     撤去したため必須ではないが、ログ突き合わせのために残す）。
 #
-# 判定ポリシー:
-#   - allow 照合（正規化前の raw コマンド。前後 trim のみ）:
-#       tool_input.command が grant の expectedCommand と完全一致 → 許可
-#   - deny 照合（allow 不成立時。難読化対策の正規化後に評価）:
-#       gh pr merge / REST merge（pulls/<n>/merge・repos/<o>/<r>/merges）/
-#       GraphQL merge（mergePullRequest / enablePullRequestAutoMerge）/
-#       gh pr review --approve / gh alias / gh extension → deny
+# 判定ポリシー（allow 経路なし。deny 専用）:
+#   - subagent（agent_id あり）からのマージ系スペリングは無条件 deny:
+#       gh pr merge（あらゆる形）/ REST merge（pulls/<n>/merge・repos/<o>/<r>/merges）/
+#       GraphQL merge（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）/
+#       gh pr review --approve / gh alias / gh extension
 #   - jq 不在・stdin パース失敗等の異常時 → deny（fail-closed）。ただし stdin に文字列
 #     "agent_id" が現れない入力（main スレッド）は jq 不在でも許可する
 #     （jq 不在環境で main スレッドをロックアウトしないための入口判定）
-#   - 上記以外のコマンド → 許可（出力なし exit 0）
+#   - 上記以外のコマンド（gh pr comment "@cursor review"・読み取り系等）→ 許可（出力なし exit 0）
 
 set -u
 
@@ -106,8 +81,8 @@ cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) \
 # 使わない前提のため、構文の存在自体を raw 段階で検知して deny する（過検知は fail-closed
 # 方向で安全）。これは既知の直接実行難読化を減らす best-effort であり、間接実行
 # （eval・base64 復元・変数間接呼び出し・コマンド置換 $(...) 等）は文字列照合では原理的に
-# 防げない。本 hook は完全なサンドボックスではない（実強制は branch protection + 完全一致
-# nonce + merge-verify が担う。ファイル冒頭コメント・SKILL.md 参照）。
+# 防げない。本 hook は完全なサンドボックスではない（実強制は「自動マージを行わない」方針と
+# サーバ側 branch protection が担う。ファイル冒頭コメント・SKILL.md 参照）。
 if printf '%s' "$cmd" | grep -qE "[$]'"; then
   deny "ANSI-C クォート構文（\$'...'）を含むコマンドは deny（デコードで難読化されたマージ経路を防ぐ best-effort。fail-closed）"
 fi
@@ -115,61 +90,21 @@ if printf '%s' "$cmd" | grep -qE '[$]\{?IFS'; then
   deny "IFS 由来の展開（\$IFS / \${IFS} / \${IFS%?} 等）を含むコマンドは deny（トークン分割難読化を防ぐ best-effort。fail-closed）"
 fi
 
-# --- allow 照合: grant expectedCommand との完全一致（正規化前の raw で判定）------------
-# host が生成する正規マージコマンドの形式。grant ファイルの改ざん・破損への fail-closed
-# として、grant 側の expectedCommand 自体もこの形式に一致しなければ照合対象にしない。
-# implement-issue-tree.js の buildMergeCommand / MERGE_GRANT_NONCE_RE と必ず一致させる。
-ALLOW_RE='^IIT_MERGE_GRANT=[a-z0-9]{16,128} gh pr merge [0-9]+ --squash --delete-branch --match-head-commit [0-9a-f]{40}$'
-
-# tool_input.command は tool 規約上末尾に改行が付き得るため、allow 判定に限り先に末尾の
-# 空白・改行のみを剥がす（Low 対応。先頭・中間には触れず、クォート除去等の正規化も足さない
-# ため、完全一致偽装の再発余地を作らない）。中間の改行はここでは残す。
-# bash パラメータ展開で実装する（外部ツール非依存）。従来の
-# `awk 'BEGIN{RS="\0"} ...'` は macOS awk 20200816 で RS=NUL が単一レコード化されず
-# `printf 'a\n\nb\n'` が `ab` へ誤結合される（実測確認）。誤結合すると複数行コマンドの
-# 中間行が allow 完全一致をすり抜ける恐れがあるため、RS 解釈の曖昧さを排して bash 展開に置換した。
-# ${cmd##*[![:space:]]} = 末尾の空白類（改行含む）の連なり。それを ${cmd%...} で末尾から剥がす。
-cmd_rstrip="${cmd%"${cmd##*[![:space:]]}"}"
-# 完全一致照合は単一行コマンドのみを対象にする。複数行コマンドに grep -E の ^...$ を当てると
-# 中間 1 行だけの一致で全体を許可してしまうため、末尾改行を剥がした後になお改行が残る
-# （＝中間に改行がある）時点で allow 経路から外す。
-nl_count=$(printf '%s' "$cmd_rstrip" | wc -l | tr -d ' ')
-if [ "$nl_count" = "0" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-  # trim は前後の空白除去のみ。中身の正規化（クォート除去等）は行わない
-  trimmed=$(printf '%s' "$cmd_rstrip" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-  if printf '%s' "$trimmed" | grep -qE "$ALLOW_RE"; then
-    pr=$(printf '%s' "$trimmed" | grep -oE 'gh pr merge [0-9]+' | grep -oE '[0-9]+')
-    grant_file="${CLAUDE_PROJECT_DIR}/_/implement-issue-tree/merge-grants/grant-${pr}.json"
-    if [ -f "$grant_file" ]; then
-      expected=$(jq -r '.expectedCommand // empty' "$grant_file" 2>/dev/null) || expected=""
-      if [ -n "$expected" ] \
-        && [ "$(printf '%s' "$expected" | wc -l | tr -d ' ')" = "0" ] \
-        && printf '%s' "$expected" | grep -qE "$ALLOW_RE" \
-        && [ "$trimmed" = "$expected" ]; then
-        # host が承認した正規コマンドそのもの。許可（出力なし exit 0）
-        exit 0
-      fi
-    fi
-  fi
-fi
-
 # --- deny 照合: 難読化対策の正規化後にパターン評価 --------------------------------------
-# allow が完全一致で成立しなかったコマンドのみここへ来る。deny 判定に限り、
+# subagent からのマージ系コマンドはすべて deny（allow 経路なし）。deny 判定に限り、
 #   (1) バックスラッシュ + 改行の行継続を除去
 #   (2) 改行 → 空白
 #   (3) ${IFS} / $IFS（波括弧あり/なし）を空白へ置換（gh${IFS}pr${IFS}merge のトークン分割難読化を潰す）
 #   (4) シングル/ダブルクォート文字の除去（g''h → gh 等のクォート分割難読化を潰す）
 #   (5) 残存する単独バックスラッシュを全除去（g\h pr merge / gh a\lias 等の直接実行形を潰す）
 #   (6) 連続空白の圧縮
-# の順で正規化してから照合する。正規化は deny 専用であり、allow 判定には決して使わない
-# （正規化後の文字列で許可すると、正規化で潰れる差異を悪用した偽装 allow の余地が生まれる）。
-# (5) のバックスラッシュ全除去は deny の一致範囲を広げる方向のみで安全（fail-closed）。
-# ${IFS} 展開や ANSI-C クォート（$'...'）の「意味的デコード」は文字削除では追えないため、
-# それらは本正規化ではなく最前段の「デコード用プリミティブの存在検知 deny」で raw 段階で
-# 弾いている（波括弧なし $IFS の直書きはここでも (3) で空白化される）。これらにより既知の
-# 直接実行形は塞ぐが、間接実行（eval・base64 復元・変数間接呼び出し・コマンド置換 $(...) 等）
-# までは文字列照合では防げない（残存リスク。ファイル冒頭コメント・SKILL.md 参照。実強制は
-# サーバ側 branch protection + 完全一致 nonce + merge-verify が担う多層防御の一層として運用する）。
+# の順で正規化してから照合する。(5) のバックスラッシュ全除去は deny の一致範囲を広げる方向
+# のみで安全（fail-closed）。${IFS} 展開や ANSI-C クォート（$'...'）の「意味的デコード」は
+# 文字削除では追えないため、それらは本正規化ではなく最前段の「デコード用プリミティブの存在
+# 検知 deny」で raw 段階で弾いている（波括弧なし $IFS の直書きはここでも (3) で空白化される）。
+# これらにより既知の直接実行形は塞ぐが、間接実行（eval・base64 復元・変数間接呼び出し・
+# コマンド置換 $(...) 等）までは文字列照合では防げない（残存リスク。ファイル冒頭コメント・
+# SKILL.md 参照。実強制は「自動マージを行わない」方針とサーバ側 branch protection が担う）。
 norm=$(printf '%s\n' "$cmd" \
   | awk '{ if (sub(/\\$/, "")) printf "%s", $0; else print }' \
   | tr '\n' ' ' \
@@ -182,10 +117,10 @@ nmatches() {
   printf '%s' "$norm" | grep -qE "$1"
 }
 
-# gh pr merge（grant の expectedCommand と完全一致しなかったものすべて）。
-# pr と merge の間は [[:space:]]* とし、行継続除去で密着した形（prmerge）も検出する
+# gh pr merge（あらゆる形）。pr と merge の間は [[:space:]]* とし、行継続除去で密着した形
+# （prmerge）も検出する。allow 経路は撤去したため grant による例外は一切ない。
 if nmatches 'gh[[:space:]]+pr[[:space:]]*merge'; then
-  deny "subagent からの gh pr merge は grant の expectedCommand と完全一致する場合のみ許可（grant は host が merge-exec 起動時にのみ発行する）"
+  deny "subagent からの gh pr merge は禁止（この基盤では自動マージを行わない。マージは GitHub 上で人間が行う）"
 fi
 
 if nmatches 'gh[[:space:]]+api'; then
@@ -198,9 +133,7 @@ if nmatches 'gh[[:space:]]+api'; then
     deny "subagent からの REST ブランチマージ（gh api repos/<o>/<r>/merges）は禁止"
   fi
   # GraphQL merge / auto-merge 有効化 / ref 直接マージ mutation。
-  # mergeBranch は PR を経由せず head ref を base へ直接マージできるため、
-  # grant 照合（PR 単位の expectedCommand 完全一致）を通らない迂回経路として塞ぐ
-  # （Bugbot Medium 対応）。
+  # mergeBranch は PR を経由せず head ref を base へ直接マージできる迂回経路として塞ぐ。
   if nmatches 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
     deny "subagent からの GraphQL merge 系 mutation（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）は禁止"
   fi
