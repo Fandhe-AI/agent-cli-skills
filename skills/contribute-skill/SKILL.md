@@ -164,11 +164,18 @@ fi
 ```bash
 # 自前の中間ディレクトリ（例: /tmp/claude-<uid>）は作らない: 他ユーザーが先に
 # 作成していた場合 mkdir -p は所有者・権限を検証せず受け入れてしまうため。
-# mktemp -d を ${TMPDIR:-/tmp}（システム標準の sticky bit 付き tmp ルート）直下に
-# 直接呼び、mode 700 のディレクトリを原子的に新規作成する
-# （サンドボックス互換: $TMPDIR が設定されていればそちらを優先する）
-WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/contribute-${SKILL_NAME}-XXXXXXXX")
+# TMPDIR は環境変数であり任意の値を指定され得るため、${TMPDIR:-/tmp} を
+# 無条件に信頼せず、mktemp -d に渡す前に実体パス（symlink 解決後）・所有者
+# （自分または root）・書き込み権限（他者書き込み可なら sticky bit 必須）を
+# fail-closed で検証する。検証済みの実体パス直下に mktemp -d で mode 700 の
+# ディレクトリを原子的に新規作成する。
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_ROOT_REAL=$(cd -P "$TMP_ROOT" 2>/dev/null && pwd -P) || TMP_ROOT_REAL=""
+# 以降、実在性・所有者・書き込み権限を検証してから
+WORKDIR=$(mktemp -d "${TMP_ROOT_REAL}/contribute-${SKILL_NAME}-XXXXXXXX")
 ```
+
+検証の詳細は `skills-contribute.sh` の Step 5 コメントを参照してください。
 
 ### Step 6: upstream を clone する
 

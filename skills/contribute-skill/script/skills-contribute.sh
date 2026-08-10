@@ -132,13 +132,36 @@ echo ""
 # 自前の中間ディレクトリ（例: /tmp/claude-<uid>）は作らない: そのディレクトリを
 # 他ユーザーが先に作成していた場合、mkdir -p は所有者・権限を検証せず受け入れてしまい、
 # 親ディレクトリの所有者が配下のエントリを rename・置換できてしまう（sticky bit の
-# 保護は親ディレクトリ自体が信頼できる場合のみ有効）。mktemp -d を
-# ${TMPDIR:-/tmp} 直下（システム標準の sticky bit 付き tmp ルート）に対して直接呼び、
+# 保護は親ディレクトリ自体が信頼できる場合のみ有効）。
+# TMPDIR は環境変数であり呼び出し元が任意の値（他ユーザー所有のディレクトリ・
+# symlink 越しの差し替え先等）を指定できるため、${TMPDIR:-/tmp} を無条件に
+# 信頼済みルートとは扱わない。mktemp -d へ渡す前に実体パス（symlink 解決後）を
+# 求め、実在ディレクトリであること・所有者が自分または root であること・
+# group/other 書き込み可能な場合は sticky bit（他者による rename/置換を阻止）が
+# 設定されていることを fail-closed で検証する。検証したパスと mktemp に渡す
+# パスを一致させることで「検証対象と使用対象がずれる」種類のすり抜けを防ぐ。
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_ROOT_REAL=$(cd -P "$TMP_ROOT" 2>/dev/null && pwd -P) || TMP_ROOT_REAL=""
+if [[ -z "$TMP_ROOT_REAL" || ! -d "$TMP_ROOT_REAL" ]]; then
+  echo "エラー: TMPDIR が実在するディレクトリを指していません: ${TMP_ROOT}" >&2
+  exit 1
+fi
+TMP_ROOT_OWNER=$(stat -c '%u' "$TMP_ROOT_REAL" 2>/dev/null || stat -f '%u' "$TMP_ROOT_REAL")
+if [[ "$TMP_ROOT_OWNER" != "$(id -u)" && "$TMP_ROOT_OWNER" != "0" ]]; then
+  echo "エラー: TMPDIR の所有者が不正です（自分でも root でもありません）: ${TMP_ROOT_REAL}" >&2
+  exit 1
+fi
+TMP_ROOT_MODE=$(stat -c '%a' "$TMP_ROOT_REAL" 2>/dev/null || stat -f '%Lp' "$TMP_ROOT_REAL")
+if (( (8#$TMP_ROOT_MODE & 8#022) != 0 )) && [[ ! -k "$TMP_ROOT_REAL" ]]; then
+  echo "エラー: TMPDIR が他者から書き込み可能なのに sticky bit が設定されていません: ${TMP_ROOT_REAL}（mode ${TMP_ROOT_MODE}）" >&2
+  exit 1
+fi
+# 上記で検証済みの実体パス（TMP_ROOT_REAL）に対して mktemp -d を直接呼び、
 # 中間ディレクトリを挟まず mode 700 のディレクトリを原子的（mkdtemp(3) の O_EXCL 相当）
 # に新規作成する。これにより Step 7 の rm -rf 前検証と実行の間の TOCTOU 窓へ
 # 他プロセスが介入する経路を断つ（openat/O_NOFOLLOW ベースの完全な原子的削除は
 # シェルスクリプトの範囲外のため、非予測可能かつ専有の作業ディレクトリで代替する）。
-WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/contribute-${SKILL_NAME}-XXXXXXXX")
+WORKDIR=$(mktemp -d "${TMP_ROOT_REAL}/contribute-${SKILL_NAME}-XXXXXXXX")
 echo "==> 作業ディレクトリ: $WORKDIR"
 
 # Step 6: upstream を clone する
