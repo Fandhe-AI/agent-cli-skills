@@ -109,6 +109,9 @@ skills/
     SKILL.md                         -- Issue 状態とプロジェクトの同期
   project-archive-done/
     SKILL.md                         -- 完了アイテムのアーカイブ
+  setup-firebase-hosting/
+    SKILL.md                         -- Firebase Hosting（Spark プラン）への公開環境をコードで構築
+    scripts/                         -- bootstrap-firebase.sh（GCP/Firebase 環境構築スクリプト）
   contribute-skill/
     SKILL.md                         -- skills-lock.json の source に応じた upstream への PR 作成
   sync-skills-lock/
@@ -132,6 +135,7 @@ skills/
 | **implement-issue-tree** | Issue ツリーを post-order DFS で自動開発（並列実行対応・Phase 自動消化） |
 | **implement-review** | コード変更に対して品質・アーキテクチャ・セキュリティの読み取り専用レビューを行う |
 | **implement-review-pr** | PR の CI ステータス・タイトル規約・コード品質・セキュリティを包括的にレビューする |
+| **setup-firebase-hosting** | 静的サイトを Firebase Hosting（Spark プラン・課金なし）で公開し、GitHub Actions から自動デプロイする環境をコードで構築する。プロジェクト作成・API 有効化・サービスアカウント・Secret 登録・firebase.json・デプロイワークフローまでを一括で用意する |
 | **update-docs** | コード変更差分に基づいて CLAUDE.md のスキル一覧やリポジトリ構成を更新する |
 | **update-issue-tree** | 既存 Issue ツリーを棚卸し・整理（closed 親下の付け替え・孤児再配置・phase ラベル同期） |
 

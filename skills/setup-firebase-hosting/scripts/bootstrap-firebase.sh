@@ -10,10 +10,10 @@
 #   3. プロジェクトへ Firebase を追加し、Hosting サイトを作成する
 #   4. CI 用サービスアカウントを作り、Hosting デプロイに必要な最小ロールを付与する
 #   5. サービスアカウント鍵を発行し、GitHub Secret へ登録して手元から消す
-#      （サービスアカウントを今回新規作成した場合のみ、旧鍵を自動削除する。
-#      既存のサービスアカウントに対する再実行で鍵を世代交代したい場合は
-#      ROTATE_EXISTING_KEYS=true を明示的に指定する。指定しなければ鍵は
-#      自動削除されない）
+#      （登録成功後、同アカウントの旧鍵を既定で削除して世代交代する。
+#      無効化したい場合は ROTATE_EXISTING_KEYS=false を指定する。この
+#      自動削除は「サービスアカウントの email が本スクリプト専用のものだ」
+#      という前提条件の契約を根拠にしている。他用途と共有すると事故る）
 #   6. .firebaserc を生成する
 #
 # ## 意図的にやらないこと
@@ -204,16 +204,42 @@ ${add_body}"
     ;;
   409) echo "既に Firebase プロジェクトのためスキップします" ;;
   403)
-    # IAM 権限（firebase.projects.update ほか）が揃っていても、その Google
-    # アカウントが Firebase 利用規約に未承諾だと addFirebase は
-    # PERMISSION_DENIED を返す。そして規約の承諾は Firebase コンソールでしか
-    # できない（公式ドキュメントに明記。CLI / REST / Terraform では不可能）。
-    # ここだけは仕様上 UI 操作が避けられないため、案内して停止する。
-    die "Firebase の追加が 403 で拒否されました。
+    # 403 は「IAM 権限不足」と「Firebase 利用規約が未承諾」のどちらでも
+    # 起こり得て、レスポンス本文だけでは区別できない。決めつけて誤案内
+    # しないよう、testIamPermissions で実際に必要権限を確認してから
+    # メッセージを出し分ける。
+    required_perm="firebase.projects.update"
+    perm_check_result="$(gcloud projects test-iam-permissions "${PROJECT_ID}" \
+      --permissions="${required_perm}" \
+      --format='value(permissions)' 2>/dev/null || echo "__CHECK_FAILED__")"
+    if [ "${perm_check_result}" = "__CHECK_FAILED__" ]; then
+      die "Firebase の追加が 403 で拒否されました。
 
-権限は足りています（testIamPermissions で確認済みの前提）。原因は
-**Firebase 利用規約が未承諾**であることがほとんどです。規約の承諾は
-Firebase コンソールでしかできません（CLI / REST API / Terraform では不可能）。
+必要権限（${required_perm}）を testIamPermissions で確認しようとしましたが、
+確認コマンド自体が失敗しました。まず以下を手動で実行し、権限があるか
+確認してください:
+
+  gcloud projects test-iam-permissions ${PROJECT_ID} --permissions=${required_perm}
+
+権限が揃っている場合、原因は**Firebase 利用規約が未承諾**である可能性が
+あります。規約の承諾は Firebase コンソールでしかできません（CLI / REST
+API / Terraform では不可能）:
+
+  https://console.firebase.google.com/
+
+  1. 「プロジェクトを追加」
+  2. 「Google Cloud プロジェクトに Firebase を追加」を選び ${PROJECT_ID} を選択
+  3. 利用規約に同意
+
+権限が不足している場合は、実行アカウントに Owner 等の適切なロールを
+付与してから再実行してください。"
+    elif [ "${perm_check_result}" = "${required_perm}" ]; then
+      die "Firebase の追加が 403 で拒否されました。
+
+必要権限（${required_perm}）は確認できました（testIamPermissions で実測）。
+権限は足りているため、原因は**Firebase 利用規約が未承諾**である可能性が
+高いです。規約の承諾は Firebase コンソールでしかできません（公式ドキュ
+メントに明記。CLI / REST API / Terraform では不可能）:
 
   https://console.firebase.google.com/
 
@@ -223,6 +249,18 @@ Firebase コンソールでしかできません（CLI / REST API / Terraform �
 
 Google アカウントにつき 1 回だけの操作です。完了後にこのスクリプトを
 再実行すると、以降はすべて自動で進みます。"
+    else
+      die "Firebase の追加が 403 で拒否されました。
+
+必要権限（${required_perm}）が不足しています（testIamPermissions で実測。
+現在保持している権限: ${perm_check_result:-なし}）。
+
+実行アカウントに Owner または同等のロールを付与してから再実行してください:
+
+  gcloud projects add-iam-policy-binding ${PROJECT_ID} \\
+    --member=\"user:<実行アカウントのメールアドレス>\" \\
+    --role=\"roles/owner\""
+    fi
     ;;
   *)
     # ALREADY_EXISTS は 400 で返ることもある
@@ -259,18 +297,18 @@ esac
 
 # --- (4) CI 用サービスアカウント ---
 log "CI 用サービスアカウント ${sa_email} を確認します"
-# displayName は誰でも後から書き換えられるため、鍵の自動削除を許可する
-# 根拠にはしない（別用途のアカウントが同じ displayName を名乗っていれば
-# すり抜けてしまう）。「このスクリプトの今回の実行で新規作成したかどうか」
-# だけを根拠にする。
+# 「${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com」という完全一致の email
+# だけが、本スクリプトが作成・管理する専用サービスアカウントを指す契約と
+# する（前提条件に明記）。displayName のような書き換え可能な情報は判定に
+# 使わない。この email を書き換えて既存の共有アカウントを指すように使う
+# ことは契約違反であり、鍵の自動削除（後述 (5)）が誤って他用途の認証を
+# 壊しうる。
 if gcloud iam service-accounts describe "${sa_email}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
   echo "既に存在するため作成をスキップします"
-  sa_created_this_run=false
 else
   gcloud iam service-accounts create "${SA_ID}" \
     --display-name="${sa_display_name}" \
     --project="${PROJECT_ID}"
-  sa_created_this_run=true
 fi
 
 log "最小ロールを付与します"
@@ -318,14 +356,12 @@ gh variable set FIREBASE_SITE_ID --repo "${GITHUB_REPO}" --body "${SITE_ID}"
 echo "登録しました（鍵ファイルは削除されます）"
 
 if [ -n "${existing_keys}" ]; then
-  if [ "${sa_created_this_run}" = "true" ]; then
-    # このスクリプトが今回の実行で新規作成したサービスアカウントに
-    # 「作成直後から鍵が存在する」ことは通常あり得ない。念のため到達したら
-    # 安全側に倒して自動削除はしない（displayName 等の推測に頼らない）。
-    echo "警告: 今回新規作成したはずのアカウントに既存鍵が見つかりました。想定外の状態のため自動削除をスキップします。"
-    echo "      内容を確認し、必要なら ROTATE_EXISTING_KEYS=true を指定して再実行してください。"
-  elif [ "${ROTATE_EXISTING_KEYS:-false}" = "true" ]; then
-    echo "新しい鍵の登録が完了したため、直前まで存在していた旧鍵を削除します（ROTATE_EXISTING_KEYS=true による明示指定）"
+  # ROTATE_EXISTING_KEYS は「無効化する opt-out」フラグ（既定 true）。
+  # ${sa_email} は前提条件により本スクリプト専用アカウントの完全一致 email
+  # であるという契約なので、既定で世代交代する。この契約を信頼したくない
+  # 場合（例: 手動で鍵を管理したい）は ROTATE_EXISTING_KEYS=false を指定する。
+  if [ "${ROTATE_EXISTING_KEYS:-true}" = "true" ]; then
+    echo "新しい鍵の登録が完了したため、${sa_email} の旧鍵を削除します（世代交代）"
     while IFS= read -r key_name; do
       [ -n "${key_name}" ] || continue
       gcloud iam service-accounts keys delete "${key_name}" \
@@ -334,14 +370,8 @@ if [ -n "${existing_keys}" ]; then
         --quiet
     done <<< "${existing_keys}"
   else
-    # このサービスアカウントは今回の実行より前から存在していた
-    # （＝本スクリプトの初回実行で作られたものではないかもしれない）。
-    # displayName のような書き換え可能な情報だけを根拠に「専用アカウントだ」
-    # と推測して削除すると、同名・同表示名の別用途アカウントの認証を
-    # 誤って壊しかねないため、既定では削除しない。
-    echo "警告: ${sa_email} は今回の実行より前から存在していたサービスアカウントです。"
-    echo "      既存の鍵を自動削除すると他用途の認証を壊す恐れがあるため、削除をスキップします。"
-    echo "      本スクリプト専用のアカウントだと確認できる場合のみ、ROTATE_EXISTING_KEYS=true を指定して再実行してください。"
+    echo "ROTATE_EXISTING_KEYS=false が指定されているため、旧鍵の削除をスキップします。"
+    echo "手動で不要な鍵を整理してください: gcloud iam service-accounts keys list --iam-account=${sa_email} --project=${PROJECT_ID}"
   fi
 fi
 

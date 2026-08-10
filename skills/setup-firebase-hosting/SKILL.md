@@ -18,6 +18,7 @@ model: sonnet
 - `gh` CLI（認証済み）
 - Node.js（`npx firebase-tools` を使う）
 - 対象リポジトリが GitHub 上にあること
+- **`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com`（既定 `SA_ID=github-actions-hosting`）は本スクリプトが作成・管理する専用サービスアカウントとし、他用途と共有しないこと。** 鍵の自動ローテーション（後述）はこの完全一致 email を根拠に旧鍵を削除するため、既存の共有アカウントを指すよう `SA_ID` を書き換えて使うと、その用途の認証を誤って壊す可能性がある
 
 対象サイトの条件:
 
@@ -103,9 +104,9 @@ bash tools/bootstrap-firebase.sh  # 冪等。再実行しても安全
 
 1. GCP プロジェクトを確認・作成（**請求先アカウントを紐付けない = Spark 固定**）し、`billingEnabled` が `False` と判定できなければ **fail-closed で停止**する（未紐付けと決めつけない）。意図的に Blaze で進める場合のみ `ALLOW_BLAZE=true` を付けて明示的に承認する
 2. `firebase` / `firebasehosting` / `cloudresourcemanager` / `serviceusage` / `iam` の API を有効化
-3. Firebase Management API で Firebase を追加、Hosting API でサイトを作成
+3. Firebase Management API で Firebase を追加。`addFirebase` が 403 の場合は `testIamPermissions` で実際に権限を確認し、権限が足りているか不足しているかで案内を出し分ける（決め打ちしない）。Hosting API でサイトを作成
 4. CI 用サービスアカウントを作成し**最小ロール**を付与（`roles/firebasehosting.admin` + `roles/serviceusage.apiKeysViewer`）
-5. 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後、**サービスアカウントを今回の実行で新規作成した場合のみ**旧 USER_MANAGED 鍵を自動削除（10 個上限対策の世代交代。登録前に削除すると失敗時に有効な鍵が残らないため、必ず登録成功後に削除する）。**サービスアカウントが実行前から存在していた場合は自動削除しません**（`displayName` のような書き換え可能な情報だけを根拠に「本スクリプト専用アカウントだ」と推測すると、同名の別用途アカウントの認証を誤って壊しかねないため）。2 回目以降の再実行で鍵の世代交代をしたい場合は、内容を確認したうえで `ROTATE_EXISTING_KEYS=true` を明示的に指定してください。指定しない場合、鍵は自動削除されず手動での整理が必要になります。最後に**手元の鍵ファイルを削除**（trap で異常終了時も）
+5. 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後、**同サービスアカウントの旧 USER_MANAGED 鍵を既定で削除**（10 個上限対策の世代交代。登録前に削除すると失敗時に有効な鍵が残らないため、必ず登録成功後に削除する）。この自動削除は「`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com` は本スクリプトが作成・管理する専用アカウントであり、他用途と共有しない」という前提条件（後述）を根拠にしている。無効化したい場合は `ROTATE_EXISTING_KEYS=false` を指定する。最後に**手元の鍵ファイルを削除**（trap で異常終了時も）
 6. `gh variable set FIREBASE_PROJECT_ID` / `FIREBASE_SITE_ID`、`.firebaserc` を生成
 
 **Firebase の追加とサイト作成は firebase CLI ではなく REST API を gcloud のトークンで直接叩きます。** firebase CLI は gcloud と別の認証情報を持つため、CLI を使うとブラウザ認証がもう 1 回増えるためです。API 呼び出しには `x-goog-user-project: <PROJECT_ID>` ヘッダが必須です。gcloud のユーザー認証情報はクォータ課金先を持たず、これがないと gcloud 自身のクライアントプロジェクトが consumer とみなされて `403 SERVICE_DISABLED` になります。
