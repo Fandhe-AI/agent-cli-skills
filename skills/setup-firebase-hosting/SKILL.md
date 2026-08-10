@@ -287,6 +287,14 @@ jobs:
       # （Resource not accessible by integration）でデプロイ前に落ちる。
       checks: write
     steps:
+      # firebase.json（Step 3 で作成）を読み込むためリポジトリを checkout する。
+      # PR 側の artifact に設定ファイルを含めない（未信頼コードがデプロイ設定を
+      # 書き換えられる経路を作らないため）。checkout はデフォルトで作業ディレクトリを
+      # クリーンにするので、必ず download-artifact より前に実行する。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
       - name: 成果物をダウンロード
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
