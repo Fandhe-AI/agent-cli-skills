@@ -255,18 +255,25 @@ fi
 
 `LOCAL_SKILL_DIR` は Step 1 で解決した**貢献対象スキル**（`$ARGUMENTS`）のパスであり、本スキル（contribute-skill）自身の配置とは無関係です。スクリプトの実行パスに `LOCAL_SKILL_DIR` を流用すると、貢献対象が contribute-skill 以外の場合に存在しないパスを参照してしまいます。実行直前に本スキル自身の配置を別変数 `CONTRIBUTE_SKILL_DIR` として解決してください。
 
+Step 6 で `cd "$WORKDIR/upstream"` 済みのため、カレントディレクトリは upstream の clone 内です。ここで相対パスのまま `skills/contribute-skill` 等を解決すると、ローカルにインストールされた本スキルではなく **clone 側**（貢献対象が偶然 upstream にも存在する場合はその内容）を参照してしまいます。必ず Step 6 で捕捉済みの `ORIG_DIR`（clone 前のローカルリポジトリルート）を基準に絶対パスで解決し、スクリプト自体も `ORIG_DIR` へ `cd` し直してから実行してください（同スクリプトは自分自身で `gh repo clone` を行う自己完結型のため、呼び出し時点のカレントディレクトリがローカルリポジトリルートである必要があります）。
+
 ```bash
-# 本スキル自身（contribute-skill）の配置を解決する。LOCAL_SKILL_DIR（貢献対象）とは別物。
-if [[ -d "skills/contribute-skill" ]]; then
-  CONTRIBUTE_SKILL_DIR="skills/contribute-skill"
-elif [[ -d ".agents/skills/contribute-skill" ]]; then
-  CONTRIBUTE_SKILL_DIR=".agents/skills/contribute-skill"
+# 本スキル自身（contribute-skill）の配置を ORIG_DIR 基準の絶対パスで解決する。
+# LOCAL_SKILL_DIR（貢献対象）とは別物。cwd は Step 6 の cd で upstream clone 内にあるため、
+# 相対パスのまま解決すると clone 側を誤参照する。
+if [[ -d "${ORIG_DIR}/skills/contribute-skill" ]]; then
+  CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/skills/contribute-skill"
+elif [[ -d "${ORIG_DIR}/.agents/skills/contribute-skill" ]]; then
+  CONTRIBUTE_SKILL_DIR="${ORIG_DIR}/.agents/skills/contribute-skill"
 else
-  echo "エラー: contribute-skill 自身の配置が見つかりません（skills/contribute-skill / .agents/skills/contribute-skill）。"
+  echo "エラー: contribute-skill 自身の配置が見つかりません（${ORIG_DIR}/skills/contribute-skill / ${ORIG_DIR}/.agents/skills/contribute-skill）。"
   exit 1
 fi
 
-# 例: "${CONTRIBUTE_SKILL_DIR}/script/skills-contribute.sh" "${SKILL_NAME}" "${REPO_SLUG}"
+# 同スクリプトは自分自身で gh repo clone を行う自己完結型のため、
+# 呼び出し前に必ずローカルリポジトリルートへ cd し直す（Step 6 の手動 clone とは独立した処理）。
+cd "${ORIG_DIR}"
+"${CONTRIBUTE_SKILL_DIR}/script/skills-contribute.sh" "${SKILL_NAME}" "${REPO_SLUG}"
 ```
 
 ```bash
