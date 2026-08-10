@@ -452,7 +452,7 @@ open のサブイシューが残っている場合、または受入基準が未
   Issue 化は本レポート確認 → ユーザー承認のうえ実施する（承認なしに Issue 操作をしない。手順は「実装対象外（out-of-scope）の扱い」手順 3・4 と同様）
 ```
 
-返却値: `parent` / `baseBranch` / `parallel` / `autoMerge`（自動マージが有効だったか。`false` のランはマージ条件を満たしたイシューも `blocked` + `pr` で終端し、マージ待ち PR 一覧として追跡する。Issue #165） / `externalChecks`（確定した外部チェック App 一覧） / `externalChecksConfirmed`（構成が確定していたか。`false` のイシューは自動マージされない） / `externalChecksObserved`（観測ベースの参考値） / `total` / `done`（各イシューの status。blocked / failed で未解決コメントがあれば `unresolvedComments`、fix 対象外の判断ログがあれば `outOfScope` を含む） / `failures` / `notStarted` / `halted`。
+返却値: `parent` / `baseBranch` / `parallel` / `autoMerge`（実効状態。PR #182 codex P0 以降、この実行基盤は `args.autoMerge` の値によらず無条件 fail-closed のため常に `false` を返す。下流 actions#66 codex-review P1: 要求値を実効状態のように返すと後方互換性の判定材料として食い違うため、実効値固定に修正） / `autoMergeRequested`（要求値。`args.autoMerge` の受理値をそのまま返す。`false` のランはマージ条件を満たしたイシューも `blocked` + `pr` で終端し、マージ待ち PR 一覧として追跡する。Issue #165） / `externalChecks`（確定した外部チェック App 一覧） / `externalChecksConfirmed`（構成が確定していたか。`false` のイシューは自動マージされない） / `externalChecksObserved`（観測ベースの参考値） / `total` / `done`（各イシューの status。blocked / failed で未解決コメントがあれば `unresolvedComments`、fix 対象外の判断ログがあれば `outOfScope` を含む） / `failures` / `notStarted` / `halted`。
 
 ## 検証
 
