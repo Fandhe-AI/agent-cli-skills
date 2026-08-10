@@ -162,11 +162,12 @@ fi
 ### Step 5: 作業用ディレクトリを用意する
 
 ```bash
-UID_VAL=$(id -u)
-TS=$(date +%Y%m%d-%H%M%S)
-# $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
-WORKDIR="${TMPDIR:-/tmp/claude-${UID_VAL}}/contribute-${SKILL_NAME}-${TS}"
-mkdir -p "$WORKDIR"
+# 自前の中間ディレクトリ（例: /tmp/claude-<uid>）は作らない: 他ユーザーが先に
+# 作成していた場合 mkdir -p は所有者・権限を検証せず受け入れてしまうため。
+# mktemp -d を ${TMPDIR:-/tmp}（システム標準の sticky bit 付き tmp ルート）直下に
+# 直接呼び、mode 700 のディレクトリを原子的に新規作成する
+# （サンドボックス互換: $TMPDIR が設定されていればそちらを優先する）
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/contribute-${SKILL_NAME}-XXXXXXXX")
 ```
 
 ### Step 6: upstream を clone する
@@ -212,9 +213,11 @@ fi
 
 `UPSTREAM_SKILL_PATH` が確定したらコピーを実行します。`cp -R` は追加・上書きのみで削除を伝搬しないため、ローカルで削除したファイルが upstream 側に残存してしまいます。これを避けるため、宛先ディレクトリを一度消してから作り直し、コピーし直す（delete-then-copy）方式を取ります。
 
+**このステップは手順を個別に打鍵せず、必ず `skills/contribute-skill/script/skills-contribute.sh` を実行してください。** 同スクリプトには rm -rf 前の symlink 境界検証（TOCTOU 対策込み）が実装されており、以下の断片だけを個別に実行すると検証が欠落します。
+
 ```bash
 # 削除伝搬のための同期: cp -R は削除を反映しないため、宛先を消してからコピーする
-# 安全弁: 削除対象が clone 内の想定スキルパス（2 形態のみ）であることを検証してから rm する
+# 安全弁1: 削除対象が clone 内の想定スキルパス（2 形態のみ）であることを検証してから rm する
 case "${UPSTREAM_SKILL_PATH}" in
   "skills/${SKILL_NAME}"|".agents/skills/${SKILL_NAME}") ;;
   *)
@@ -222,14 +225,51 @@ case "${UPSTREAM_SKILL_PATH}" in
     exit 1
     ;;
 esac
-rm -rf "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
+
+# 安全弁2: 実体パスでの symlink 境界検証（fail-closed）。安全弁1 の case allowlist は
+# 文字列形式のみの検証であり、clone 内の中間ディレクトリ（skills / .agents 等）が
+# 実行中に symlink へ差し替えられた場合には対応できないため、rm -rf の直前に
+# 以下を実体パスで再確認する（詳細な実装は script/skills-contribute.sh を参照）。
+#   (a) clone ルートから削除対象までの各中間パス要素が symlink でないこと
+#   (b) 削除対象の親ディレクトリの正規パス（pwd -P）が clone ルート配下であること
+#   (c) 検証と削除の間の TOCTOU を閉じるため、検証済みの親ディレクトリへ cd -P した
+#       cwd に対して相対パスで rm する（パス文字列を再解決しない）
+# いずれかに違反する場合は削除を実行せずエラー終了する。
+CLONE_ROOT="${WORKDIR}/upstream"
+DELETE_TARGET="${CLONE_ROOT}/${UPSTREAM_SKILL_PATH}"
+CLONE_ROOT_REAL="$(cd "${CLONE_ROOT}" && pwd -P)"
+check_dir="${CLONE_ROOT}"
+IFS='/' read -ra UPSTREAM_SKILL_PATH_PARTS <<< "${UPSTREAM_SKILL_PATH}"
+for part in "${UPSTREAM_SKILL_PATH_PARTS[@]}"; do
+  check_dir="${check_dir}/${part}"
+  if [[ -L "${check_dir}" ]]; then
+    echo "エラー: 削除対象の経路に symlink が含まれています: ${check_dir}"
+    exit 1
+  fi
+done
+DELETE_PARENT="$(dirname "${DELETE_TARGET}")"
+DELETE_LEAF="$(basename "${DELETE_TARGET}")"
+if [[ -d "${DELETE_PARENT}" ]]; then
+  (
+    cd -P -- "${DELETE_PARENT}" || exit 1
+    PARENT_REAL="$(pwd -P)"
+    case "${PARENT_REAL}/" in
+      "${CLONE_ROOT_REAL}/"*) ;;
+      *)
+        echo "エラー: 削除対象の親ディレクトリが clone ルート配下ではありません: ${PARENT_REAL}"
+        exit 1
+        ;;
+    esac
+    rm -rf -- "${DELETE_LEAF}"
+  )
+fi
 mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 # LOCAL_SKILL_DIR は Step 1 で解決済み（skills/<name>/ または .agents/skills/<name>/）
 # ORIG_DIR は Step 6 で cd する前に捕捉済み（cd - は stdout 汚染のため使用しない）
 cp -R "${ORIG_DIR}/${LOCAL_SKILL_DIR}/." "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}/"
 ```
 
-削除対象は必ず `${WORKDIR}/upstream/` 配下（clone 用の一時ディレクトリ）に閉じ、`UPSTREAM_SKILL_PATH` が `skills/<name>` か `.agents/skills/<name>` の 2 形態以外なら `rm -rf` の前に中止します。新規スキル追加（宛先未存在）の場合も `rm -rf` は無害に成功し、直後の `mkdir -p` で作成されます。
+削除対象は必ず `${WORKDIR}/upstream/` 配下（clone 用の一時ディレクトリ）に閉じ、`UPSTREAM_SKILL_PATH` が `skills/<name>` か `.agents/skills/<name>` の 2 形態以外なら `rm -rf` の前に中止します。加えて中間パスの symlink 化・TOCTOU に対する実体パス検証を rm 直前に行います。新規スキル追加（宛先未存在）の場合も削除処理は無害にスキップされ、直後の `mkdir -p` で作成されます。
 
 ### Step 8: 差分を確認する
 
@@ -314,7 +354,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 - **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → スキルルート親ディレクトリ（`skills/` or `.agents/skills/`）の慣習 → 最終デフォルト `skills/`（より一般的な公開レイアウト）
-- **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>` か `.agents/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない
+- **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>` か `.agents/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 7 は必ず `script/skills-contribute.sh` 経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
 - **既に同名の branch がある場合**：秒単位スラッグで通常は衝突しないが、万一の場合はユーザーに確認
 
 ## sandbox 環境での実行

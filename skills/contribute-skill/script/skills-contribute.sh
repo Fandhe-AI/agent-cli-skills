@@ -129,11 +129,16 @@ fi
 echo ""
 
 # Step 5: 作業用ディレクトリを用意する
-# $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
-UID_VAL=$(id -u)
-TS=$(date +%Y%m%d-%H%M%S)
-WORKDIR="${TMPDIR:-/tmp/claude-${UID_VAL}}/contribute-${SKILL_NAME}-${TS}"
-mkdir -p "$WORKDIR"
+# 自前の中間ディレクトリ（例: /tmp/claude-<uid>）は作らない: そのディレクトリを
+# 他ユーザーが先に作成していた場合、mkdir -p は所有者・権限を検証せず受け入れてしまい、
+# 親ディレクトリの所有者が配下のエントリを rename・置換できてしまう（sticky bit の
+# 保護は親ディレクトリ自体が信頼できる場合のみ有効）。mktemp -d を
+# ${TMPDIR:-/tmp} 直下（システム標準の sticky bit 付き tmp ルート）に対して直接呼び、
+# 中間ディレクトリを挟まず mode 700 のディレクトリを原子的（mkdtemp(3) の O_EXCL 相当）
+# に新規作成する。これにより Step 7 の rm -rf 前検証と実行の間の TOCTOU 窓へ
+# 他プロセスが介入する経路を断つ（openat/O_NOFOLLOW ベースの完全な原子的削除は
+# シェルスクリプトの範囲外のため、非予測可能かつ専有の作業ディレクトリで代替する）。
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/contribute-${SKILL_NAME}-XXXXXXXX")
 echo "==> 作業ディレクトリ: $WORKDIR"
 
 # Step 6: upstream を clone する
@@ -179,7 +184,57 @@ case "${UPSTREAM_SKILL_PATH}" in
     exit 1
     ;;
 esac
-rm -rf "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
+
+# symlink 境界検証（fail-closed）: 上記 case allowlist は UPSTREAM_SKILL_PATH の
+# 文字列形式のみを検証しており、clone 内の中間ディレクトリが実行中に symlink へ
+# 差し替えられた場合には対応できない。rm -rf の直前に以下 2 点を実体パスで再確認する。
+#   (a) clone ルートから削除対象までの各中間パス要素が symlink でないこと
+#   (b) 削除対象の親ディレクトリの正規パス（pwd -P）が clone ルート配下であること
+# いずれかに違反する場合は削除を実行せずエラー終了する。
+# 残存する境界: 検証（pwd -P 確認）と rm -rf 実行の間に、書き込み権限を持つ別プロセスが
+# 検証済みディレクトリ自体を改名・移動する可能性は原理上残る。これを検査と削除を単一の
+# システムコールで不可分にして完全に閉じるには openat(..., O_NOFOLLOW) ベースの
+# コンパイル済みヘルパーが必要であり、シェルスクリプトの範囲外とする。代わりに
+# Step 5 で $WORKDIR を mode 700（同一 uid 専有）の非予測可能なパスとして作成し、
+# 同一 uid の敵対プロセスは脅威モデル外とする（そのようなプロセスは本スクリプト自体
+# も書き換え可能なため、追加防御しても意味がない）。
+CLONE_ROOT="${WORKDIR}/upstream"
+DELETE_TARGET="${CLONE_ROOT}/${UPSTREAM_SKILL_PATH}"
+CLONE_ROOT_REAL="$(cd "${CLONE_ROOT}" && pwd -P)"
+
+check_dir="${CLONE_ROOT}"
+IFS='/' read -ra UPSTREAM_SKILL_PATH_PARTS <<< "${UPSTREAM_SKILL_PATH}"
+for part in "${UPSTREAM_SKILL_PATH_PARTS[@]}"; do
+  check_dir="${check_dir}/${part}"
+  if [[ -L "${check_dir}" ]]; then
+    echo "エラー: 削除対象の経路に symlink が含まれています: ${check_dir}"
+    exit 1
+  fi
+done
+
+DELETE_PARENT="$(dirname "${DELETE_TARGET}")"
+DELETE_LEAF="$(basename "${DELETE_TARGET}")"
+if [[ -d "${DELETE_PARENT}" ]]; then
+  # cd -P + 相対 rm で検証と削除の間の TOCTOU を閉じる: 上記ループでの検証後に
+  # 中間ディレクトリが symlink へ差し替えられても、rm はパス文字列を再解決せず
+  # cd -P が確定した実体（プロセスの cwd）に対して相対的に動作するため影響を受けない。
+  # cd -P 自体は symlink を辿るため、cd 直後に物理パスを再検証してから rm する
+  # （検証と削除の間に別の文字列解決を挟まないことで TOCTOU の窓を最小化する）。
+  (
+    cd -P -- "${DELETE_PARENT}" || exit 1
+    PARENT_REAL="$(pwd -P)"
+    case "${PARENT_REAL}/" in
+      "${CLONE_ROOT_REAL}/"*) ;;
+      *)
+        echo "エラー: 削除対象の親ディレクトリが clone ルート配下ではありません: ${PARENT_REAL}"
+        exit 1
+        ;;
+    esac
+    # leaf 自体が symlink に差し替えられていても、rm -rf はリンク先を辿らず
+    # リンク自体のみを削除するため clone 外には影響しない
+    rm -rf -- "${DELETE_LEAF}"
+  )
+fi
 mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 cp -R "${ORIG_DIR}/${LOCAL_SKILL_DIR}/." "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}/"
 
