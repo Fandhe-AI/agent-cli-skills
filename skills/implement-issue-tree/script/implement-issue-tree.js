@@ -1876,6 +1876,9 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed) {
 //     起動する。この場合は新規マージを一切許可せず、「PR が既に MERGED ならイシューの
 //     クローズ確認だけを行う」経路に限定する（Bugbot PR #150 指摘: headSha 欠落で
 //     マージ済み PR のクローズ回復パスが失われる問題への対応。fail-closed は維持する）。
+//     Issue #161: この限定はエージェントのプロンプト解釈に任せず、手順 5 の文面自体を
+//     ホスト側で分岐させる（requireExternalCheck と同方式）。空 sha 経路のプロンプトには
+//     gh pr merge / --match-head-commit を一切含めず、イシュークローズ確認のみを出力する。
 // 本スクリプトは Workflow サンドボックス上で動作し process / fs / 直接の shell を持たないため
 // 「モデル外の決定的なホストコードがマージを実行する」形は取れない。実行可能な緩和は
 // エージェント分割によるコンテキスト分離であり、強制的な権限剥奪ではない（Issue #145 の
@@ -1927,6 +1930,11 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
         `   - 確定済みの全 App が上記の合格条件を満たす場合のみ手順 5 へ進む。`,
       ]
     : []
+  // イシュークローズ確認（Issue #161 で手順 5 の両経路へ共通化）。マージ成功後・
+  // already-merged 回復のいずれでも同一手順でクローズを確認し issueClosed を返す。
+  const issueCloseLines = [
+    `   gh issue view ${item.number} --json state（本文は取得しない）でクローズを確認し、open のままなら gh issue close ${item.number} する。再確認して closed であれば issueClosed: true、クローズできなかった・確認できない場合は issueClosed: false を返す（マージが成功していても虚偽の true を返さない。ホストはクローズ未完了を回復対象として再監視する）。`,
+  ]
   return [
     `PR #${impl.prNumber}（イシュー #${item.number}）のマージ実行担当。マージ条件を自ら再検証し、全て満たす場合にのみ squash merge する。`,
     COMMON,
@@ -1961,11 +1969,22 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
     // 排除した #150 P0 と同じ方針。本文と違い件数・enum は攻撃者が任意テキストを注入できる
     // 媒体ではないため carve-out できる）。
     ...externalCheckLines,
-    `5. ${requireExternalCheck ? '手順 2〜4b' : '手順 2〜4'} の全条件を満たす場合のみ、検証した HEAD と実際にマージされる HEAD を GitHub 側で原子的に結び付けてマージする（手順 2 の照合から本コマンド実行までの間に新しいコミットが push されても、未検証の HEAD をマージしないため）:`,
-    `     gh pr merge ${impl.prNumber} --squash --delete-branch --match-head-commit ${JSON.stringify(expectedHeadSha)}`,
-    `   HEAD 不一致でコマンドが失敗した場合（--match-head-commit の条件不成立）は merged: false / reason: head-moved を返す。--match-head-commit を省略してマージし直さないこと。`,
-    `   マージ成功後に gh pr view ${impl.prNumber} --json state で MERGED を確認する（確認できなければ merged: false / reason: merge-failed）。`,
-    `   続いて gh issue view ${item.number} --json state（本文は取得しない）でクローズを確認し、open のままなら gh issue close ${item.number} する。再確認して closed であれば issueClosed: true、クローズできなかった・確認できない場合は issueClosed: false を返す（マージが成功していても虚偽の true を返さない。ホストはクローズ未完了を回復対象として再監視する）。`,
+    // Issue #161: 手順 5 の文面はホスト側で expectedHeadSha の有無により分岐する
+    // （requireExternalCheck と同方式）。空 sha 経路にマージコマンドを含めたままにすると、
+    // 手順 1 の MERGED 分岐指示にかかわらずエージェントが空 OID 付き gh pr merge を実行し、
+    // 必ず失敗して already-merged 回復が空振りするプロンプト解釈依存のリスクが残るため。
+    ...(expectedHeadSha
+      ? [
+          `5. ${requireExternalCheck ? '手順 2〜4b' : '手順 2〜4'} の全条件を満たす場合のみ、検証した HEAD と実際にマージされる HEAD を GitHub 側で原子的に結び付けてマージする（手順 2 の照合から本コマンド実行までの間に新しいコミットが push されても、未検証の HEAD をマージしないため）:`,
+          `     gh pr merge ${impl.prNumber} --squash --delete-branch --match-head-commit ${JSON.stringify(expectedHeadSha)}`,
+          `   HEAD 不一致でコマンドが失敗した場合（--match-head-commit の条件不成立）は merged: false / reason: head-moved を返す。--match-head-commit を省略してマージし直さないこと。`,
+          `   マージ成功後に gh pr view ${impl.prNumber} --json state で MERGED を確認する（確認できなければ merged: false / reason: merge-failed）。`,
+          ...issueCloseLines,
+        ]
+      : [
+          `5. 本経路（監視時点の HEAD sha が渡されていない）では gh pr merge を実行しない。手順 1 で state が MERGED だった場合のみ本手順に到達し、イシュークローズ確認だけを行って merged: true / reason: already-merged を返す:`,
+          ...issueCloseLines,
+        ]),
     `   他のイシューが並列実行中のため、working copy のブランチ切り替えや git pull は行わない。`,
     '返却: merged / reason / summary（実測値: チェック件数・未解決スレッド数・headRefOid 等）/ issueClosed（必須。マージしなかった場合は false）。4 フィールドすべてを必ず返すこと。',
   ].join('\n')
@@ -3756,6 +3775,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 行わず、PR が既に MERGED ならイシューのクローズ確認だけを行う」経路に限定するため、
       // fail-closed を保ったまま「前回ランでマージ済みだが状態記録に失敗した PR」のクローズ
       // 回復パスを維持できる（Bugbot PR #150 指摘: headSha 欠落で回復パスが失われる問題）。
+      // Issue #161: 空 sha 経路では手順 5 の文面自体もホスト側で分岐し、プロンプトに
+      // マージコマンドを含めない（プロンプト解釈依存の残存リスクを除去）。
       const expectedHeadSha = sanitizeSha(m?.headSha)
       {
         if (!expectedHeadSha) {
