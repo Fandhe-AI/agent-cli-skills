@@ -43,7 +43,8 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
     "branch": "<マージ先ブランチ（省略時 main）>",
     "parallel": "<並列度 1〜8（省略時 3）>",
     "externalChecks": "<外部チェック App slug の配列（例: [\"cursor\"]。使用しない場合は []）>",
-    "autoMerge": "<boolean として受理されるが、この実行基盤では自動マージを行わない（true でも無条件 fail-closed。PR はマージ可能状態で停止し、マージは GitHub 上で人間が行う）>"
+    "autoMerge": "<boolean として受理されるが、この実行基盤では自動マージを行わない（true でも無条件 fail-closed。PR はマージ可能状態で停止し、マージは GitHub 上で人間が行う）>",
+    "maxResidualWorktrees": "<残置 worktree 総数の上限（0 以上の整数。省略時 20、0 で上限なし）>"
   }
 }
 ```
@@ -66,6 +67,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | `parallel` | 任意 | `3` | 並列実行数（1〜8）。`1` を指定すると実質的に直列実行になる |
 | `externalChecks` | 任意 | 未指定 | GitHub Actions 以外の外部チェック App slug の配列（最大 10 件、slug 形式は英小文字・数字・ハイフン）。**未指定と `[]` は意味が異なる** |
 | `autoMerge` | 任意 | `false` | boolean として**受理はされる**が、**この実行基盤では自動マージを行わない**（`true` でも無条件 fail-closed。PR #182 codex P0）。理由: 未信頼のレビュー本文を読む monitor が merge-exec と同じ Bash・gh 認証・FS を共有し、hook 専用の秘密を持てないため subagent が grant を偽造でき、偽造不能なマージ認可を hook で実装できない。よって Codex 元指摘の「境界を実装できるまで自動マージ無効化」に従い自動マージ経路を閉じた。`true` / `false` いずれでも実装・push 前 Review・PR 作成・CI 監視・fix ループは自動で進み、PR はマージ可能状態の `blocked` で停止する（マージは GitHub 上で人間が行う。対象ブランチに branch protection を設定することを推奨）。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
+| `maxResidualWorktrees` | 任意 | `20` | 残置 worktree 総数の上限（DoS 防止ゲート）。ラン開始時に横断スキャンで観測した残置 worktree 総数がこの値を**超過**（`>`）していたら、ディスク枯渇を防ぐため**新規イシューの着手を停止**する（fail-closed。既に監視中の PR の継続＝monitoring 再開は停止しない）。使い捨て worktree は削除しない設計（後述「worktree の自動削除」節）のため、この上限超過時は `git worktree list` で確認し不要な worktree を `git worktree remove` で**手動削除**してから再実行する。`0` は「上限なし（チェック無効）」の明示オプトアウト。**負値・非整数はエラーで停止**（マージゲート入力と同じ厳格さ。誤記を黙って読み替えない） |
 
 **`externalChecks` の 3 状態（Issue #147）:**
 
@@ -517,6 +519,25 @@ grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scrip
 
 worktree 削除の安全性については、`cleanupEphemeralWorktree` と `implement-issue-tree-owner` がいずれも 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree の自動削除廃止。所有権マーカー方式もエージェントへ開示した nonce は所有権証明にならないため不採用）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
 
+### 残置 worktree 上限ゲートの適用確認（PR #588 codex P1）
+
+使い捨て worktree を削除しない設計の下で、複数ラン累積の残置 worktree によるディスク枯渇（DoS）を防ぐ `maxResidualWorktrees` ゲートを変更した場合、以下で args 検証・ラン開始時観測・fail-closed 停止・レポート出力を確認する:
+
+```bash
+# 1. args 検証（parseMaxResidualWorktrees）: 0 以上の整数のみ受理・0 は上限なし・既定 20
+grep -n "parseMaxResidualWorktrees\|maxResidualWorktrees" script/implement-issue-tree.js
+# 2. ラン開始時に横断スキャンで残置総数を観測している（既存 scanOrphanWorktrees の再利用）
+grep -n "countResidualWorktrees\|residualObservedAtStart\|newStartSuppressed" script/implement-issue-tree.js
+# 3. 上限超過時に新規着手のみ抑止（monitoring 再開は抑止しない）— dispatch ループの位置確認
+grep -n "if (newStartSuppressed) continue" script/implement-issue-tree.js
+# 4. 削除ロジックを新設していないこと（この機能で worktree remove / --force を追加していない）
+grep -nE "worktree remove|--force" script/implement-issue-tree.js
+# 5. 最終レポートの残置サマリと返却フィールド
+grep -n "residualWorktrees" script/implement-issue-tree.js
+```
+
+期待結果: `parseMaxResidualWorktrees` が `undefined`/`null` を既定 `20` に、`0` を「上限なし（チェック無効）」に、負値・非整数・非数値を throw に振り分けること（純粋関数のため件数比較ロジックを単体スクリプトで検証できる。`count === limit` は非発火・`count === limit + 1` で発火＝「超過」の境界）。`countResidualWorktrees` がメイン worktree と状態ファイル追跡済みパスを除外した未追跡残置のみを数えること（過去ランの使い捨て worktree は状態ファイル未記録のため残置として計上される）。ラン開始時の横断スキャンが失敗（`runStartOrphanEntries.length === 0`）した場合はゲートをスキップして `residualObserved` を `false` のままにし、観測不成立を「残置ゼロ＝安全」と誤認しない（fail-closed ゲートの fail-open 防止）こと。上限超過時に `newStartSuppressed` が設定され、dispatch ループの `isActiveMonitoring` 分岐の**後**に `if (newStartSuppressed) continue` が置かれ、新規着手のみ抑止して monitoring 再開は止めないこと。手順 4 の `worktree remove` / `--force` のヒットが、既存の削除経路（`sweepClosedWorktrees` 内のスイープ・Recover の discard・`cleanupWorktree`）か、または本ゲートが追加した**人間向け案内文字列・コメント**（`newStartSuppressed.reason` の手動削除案内・ラン終了時警告ログ・返却フィールドのコメント）のいずれかであり、本ゲートが**実行可能な削除呼び出し**を新設していないこと（削除ロジックを新設しない設計）。返却値 `residualWorktrees`（`observed` / `observedAtStart` / `addedThisRun` / `limit` / `overLimit` / `suppressed` / `paths`）が最終レポートで残置総数と上限比率・8 割警告に反映されること。
+
 ### merge-guard hook（deny 専用）・自動マージ無効化の適用確認（PR #182 codex P0）
 
 `script/merge-guard-hook.sh` または自動マージ経路を変更した場合、以下で「hook が deny 専用（allow 経路なし）であること」と「`autoMerge: true` でも実マージ経路が開かないこと（recoveryOnly 強制）」を確認する:
@@ -614,7 +635,9 @@ cat _/issue-trees/42.json
 
 **review / pr-create の worktree は自動削除しない（記録のみ）**。この 2 つは `isolation: 'worktree'` で動作するが成果物を保持しない（review は読み取り専用の判定のみ、pr-create は push 完了時点で成果が origin 上に存在する）ため保持価値はない。しかし削除に使えるのはエージェントが返した `worktreePath` だけであり、これは「そのエージェント用に作られた worktree である」ことをホスト側で確認できない自己申告値である。パス検証（`sanitizeWorktreePath`）は文字種を見るだけのため、誤応答や、レビュー対象テキスト（PR 本文・レビューコメント）経由のプロンプトインジェクションで並列実装中の別イシューの worktree パスを返させると、未コミットの実装成果ごと `git worktree remove --force` で失う。
 
-そのため**自動削除は廃止**し、返却されたパスの記録とラン終了時のログ一覧出力のみを行う（Workflow の返却値 `ephemeralWorktrees` でも確認できる）。最終スイープ（`sweepClosedWorktrees`）の削除対象にも入らない（`updateState` の `cleanupWorktree` を経由しないため構造的に候補にならない）。これは「推測に基づく削除をしない」という `sweepEligiblePaths` の設計方針と一貫する。残った worktree は一覧を見て手動で削除する。
+そのため**自動削除は廃止**し、返却されたパスの記録とラン終了時のログ一覧出力のみを行う（Workflow の返却値 `ephemeralWorktrees` でも確認できる）。最終スイープ（`sweepClosedWorktrees`）の削除対象にも入らない（`updateState` の `cleanupWorktree` を経由しないため構造的に候補にならない）。これは「推測に基づく削除をしない」という `sweepEligiblePaths` の設計方針と一貫する。残った worktree は一覧を見て手動で削除する。所有権マーカー（nonce）方式による回収もコミット 2539cbb で意図的に不採用とした（下表参照。nonce は未信頼データを読むエージェント自身に開示済みで所有権証明にならず、削除ロジックを新設すること自体が誤削除リスクを招く）。
+
+**削除しない代わりに、残置総数の上限 + fail-closed 停止でディスク枯渇を防ぐ**（PR #588 codex P1）。使い捨て worktree を削除しないと、ツリー実装を反復するたびに review / pr-create の worktree が単調増加し、無人運用でディスクが枯渇して後続ジョブを失敗させ得る（AGENTS.md「リソース枯渇（DoS）耐性」）。単一ラン内の記録（`ephemeralWorktrees`）はラン開始ごとに空初期化され複数ラン累積を捕捉できないため、**ラン開始時に横断スキャン（`scanOrphanWorktrees`）で過去ラン分も含む残置総数を観測**し、`maxResidualWorktrees`（既定 20・`0` で無効）を**超過**していたら新規イシューの着手を fail-closed で停止する（削除は一切行わない。既存の実装中・監視中イシューの継続＝monitoring 再開は止めない）。観測は未信頼テキストを読まない host 指示専用エージェントが構造化スキーマで返す既存の orphan scan を再利用する。停止時はレポートに残置パス一覧を出し、利用者は `git worktree list` で確認して不要な worktree を `git worktree remove` で手動削除してから再実行する。ラン開始時のスキャンが失敗した場合はゲートをスキップし、観測不成立を「残置ゼロ＝安全」と誤認しない（返却値 `residualWorktrees.observed: false`）。ラン終了時は「開始時観測 + 本ラン積み増し」の残置総数と上限比率をレポートし、8 割接近で早期警告を出す（返却値 `residualWorktrees`）。
 
 検討して不採用とした代替案:
 
