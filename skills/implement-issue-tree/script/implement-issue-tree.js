@@ -1435,6 +1435,29 @@ const sweepEligiblePaths = new Set()
 // { issue, kind, path } を追記し、ラン終了時に一覧をログ出力する（削除は行わない）。
 const ephemeralWorktrees = []
 
+// 使い捨て worktree の kind ごとの「1 イシュー当たりの最大生成数」宣言テーブル
+// （PR #185 codex P1: 生成経路と予約定数の乖離防止）。残置上限ゲートの予約計上
+// （EPHEMERAL_RESERVE_PER_NEW_START）はこのテーブルの合計から導出するため、
+// recordEphemeralWorktree の呼び出し箇所（= 生成経路）を追加・変更するときは
+// 必ずここへ kind と最大数を宣言する。未宣言の kind での記録は recordEphemeralWorktree
+// が契約違反として警告する（記録自体は行い、実測ベースの上限 latch は機能し続ける）。
+// 現在の内訳:
+//   - review: Review ループ最大 3 回（reviewsLeft = 3）× 各回 isolation: 'worktree'
+//   - pr-create: Review 全通過後に 1 回のみ
+//   - fix-routing-error: 最大 1 回。routingError は Review ループ・Merge ループの
+//     どちらでも検出と同時にイシューを即終端（failed）するため、1 イシューが同一ラン内で
+//     複数回記録することはない（PR #184 で追加された記録経路）
+const EPHEMERAL_KIND_MAX = Object.freeze({ review: 3, 'pr-create': 1, 'fix-routing-error': 1 })
+// 新規着手 1 イシューが本ランで積み増しうる使い捨て worktree の最大総数（全 kind 合計）。
+// dispatch ループの予約計上（newStartActive）で参照する。
+const EPHEMERAL_RESERVE_PER_NEW_START = Object.values(EPHEMERAL_KIND_MAX).reduce((a, b) => a + b, 0)
+// monitoring 再開 1 イシューが本ランで積み増しうる使い捨て worktree の最大数。
+// monitoring 再開は review / pr-create を経ない（PR 作成済みで Merge ループから再開する）が、
+// Merge ループの fix が routingError で終端する際に fix-routing-error を最大 1 件記録し得る
+// （PR #184 以降）。「monitoring 再開は積み増さない」という旧前提はここで崩れているため、
+// 予約計上でも monitoring 再開分を別枠で見込む。
+const EPHEMERAL_RESERVE_PER_MONITORING_RESUME = EPHEMERAL_KIND_MAX['fix-routing-error']
+
 // 使い捨て worktree（review / pr-create）と routingError 時の fix worktree
 // （fix-routing-error。rust-ai-library PR #436 codex-review P0 対応）を記録する。
 // **削除はしない**（Issue #142）。
@@ -1471,6 +1494,13 @@ const ephemeralWorktrees = []
 // （`updateState` の cleanupWorktree を経由しないため、構造的に候補にならない）。
 // 残った worktree はラン終了時のログ一覧と `git worktree list` から手動で掃除できる。
 function recordEphemeralWorktree(issueNumber, rawPath, kind) {
+  // 予約契約の検証: 未宣言 kind の記録は残置上限ゲートの予約（EPHEMERAL_KIND_MAX 由来）を
+  // 過小にする実装ミスのため、契約違反として警告する。記録は継続する（記録を落とすと
+  // 実測（ephemeralWorktrees.length）まで過小になり、実測ベースの上限 latch も弱まるため。
+  // 警告 + 実測計上により、予約が過小でも実測超過の時点で新規着手は停止する）。
+  if (!(kind in EPHEMERAL_KIND_MAX)) {
+    log(`⚠️ #${issueNumber}: 使い捨て worktree の kind '${kind}' が EPHEMERAL_KIND_MAX に未宣言（予約契約違反。生成経路を追加したら最大数を宣言すること）`)
+  }
   const p = sanitizeWorktreePath(rawPath ?? '')
   if (!p) {
     // フォーマット不正パスを無言で捨てると、ログ一覧にも載らず利用者が残骸に気づけない。
@@ -4862,16 +4892,17 @@ async function markBlockedByDeps(item, failedDeps) {
 
 const running = new Map()
 // 残置 worktree 上限ゲートの予約計上（PR #185 codex P1 第 2 ラウンド）。
-// 新規着手 1 イシューが本ランで積み増しうる使い捨て worktree の最大数。
-// 内訳: review ×3（Review ループ最大 3 回・各回 isolation: 'worktree' で新規作成）+
-// pr-create ×1（Review 全通過後に 1 回のみ）= 4。fix / impl の worktree は状態ファイルで
-// 追跡・削除されるため残置に数えない。この値は Review ループ上限（reviewsLeft = 3）と
-// recordEphemeralWorktree の呼び出し箇所（review / pr-create の 2 種）に連動する —
-// どちらかを変えたらここも見直すこと。
-const EPHEMERAL_RESERVE_PER_NEW_START = 4
-// 本ランで新規着手し（monitoring 再開は含まない = 使い捨て worktree を積み増さない）、
-// まだ完了していないイシュー番号の集合。dispatch の予約計上に使う。
+// 新規着手 1 イシューの最大積み増し数 EPHEMERAL_RESERVE_PER_NEW_START は
+// EPHEMERAL_KIND_MAX テーブル（ephemeralWorktrees 宣言の直下）の合計から導出される。
+// fix / impl の worktree は状態ファイルで追跡・削除されるため残置に数えない。
+// 本ランで新規着手し、まだ完了していないイシュー番号の集合。dispatch の予約計上に使う。
 const newStartActive = new Set()
+// 本ランで monitoring 再開し、まだ完了していないイシュー番号の集合。monitoring 再開は
+// review / pr-create を積み増さないが、Merge ループの fix が routingError 終端する際に
+// fix-routing-error を最大 1 件記録し得る（PR #184 以降）ため、
+// EPHEMERAL_RESERVE_PER_MONITORING_RESUME 分を予約計上する（再開自体は抑止しない —
+// 予約は新規着手側の投入判定を保守的にするだけで、monitoring 再開の実行を止めない）。
+const monitoringResumeActive = new Set()
 while (true) {
   // 空きスロットへ post-order 順に投入する（halted 後は新規着手しない）
   if (!halted) {
@@ -4898,11 +4929,13 @@ while (true) {
       // （codex-review P1 対応）。依存が pending の間はこの while ループが次周回で再評価する。
       if (isActiveMonitoring(n)) {
         log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(item.title)}`)
+        monitoringResumeActive.add(n)
         running.set(n, runOne(item))
         continue
       }
       // 残置 worktree 上限超過時（PR #588 codex P1）は新規イシューの着手を抑止する。
-      // monitoring 再開（上の分岐で通過済み・新規 worktree を積み増さない）は抑止しない。
+      // monitoring 再開（上の分岐で通過済み。fix-routing-error 最大 1 件のみ積み増し得るが
+      // 予約計上で見込む）は抑止しない。
       // この continue は実装投入（review / pr-create で使い捨て worktree を積み増す本来の抑止対象）
       // に加え verify-close 等の新規着手も一律に止めるが、worktree を積まない着手まで巻き込むのは
       // 過剰抑止＝安全側であり許容する（queue は毎ラン GitHub の open/closed 実態で再構築されるため
@@ -4948,6 +4981,11 @@ while (true) {
         for (const rn of newStartActive) {
           reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
         }
+        // monitoring 再開中のイシューも Merge ループの fix-routing-error を最大 1 件
+        // 積み増し得る（PR #184 以降）ため、その分を予約に含める。
+        for (const rn of monitoringResumeActive) {
+          reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
+        }
         const projected =
           residualObservedAtStart + ephemeralWorktrees.length + reservedTotal + EPHEMERAL_RESERVE_PER_NEW_START
         if (projected > maxResidualWorktrees) {
@@ -4975,6 +5013,7 @@ while (true) {
   running.delete(finished.number)
   // 完了イシューの残余予約を解放する（実際に積んだ分は ephemeralWorktrees の実測に反映済み）
   newStartActive.delete(finished.number)
+  monitoringResumeActive.delete(finished.number)
   if (finished.ok) done.add(finished.number)
   else failedSet.add(finished.number)
 }
