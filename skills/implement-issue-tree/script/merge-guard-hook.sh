@@ -90,6 +90,35 @@
 #   パス修飾された起動形をすべて "gh" として扱う（`gh` の直後が空白または文字列末尾であることを
 #   要求するため、`gh-helper`・`ghcr.io/...`のようなパス末尾が偶然 "gh" で終わらない無関係な
 #   トークンは対象外）。
+#
+#   シェルメタ文字を無条件にトークン区切りへ正規化する over-deny 設計（PR #195 codex P0
+#   第4ラウンド）: `contains_subsequence` は空白区切りトークナイザ（`for tok in $s`）を使うため、
+#   `gh pr merge;echo done` / `gh pr merge&&true` / `gh pr merge|cat` のように制御演算子を
+#   空白なしで直後に連結すると、対象トークンが `merge;echo`・`merge&&true`・`merge|cat` となり
+#   "merge" と完全一致せず deny をすり抜けた（変更前の正規表現は "merge" の後方境界を要求して
+#   いなかったため、これらの直接実行形を偶然検出できていた回帰）。
+#
+#   本 hook は deny 専用の best-effort 攻撃面削減であり、誤って deny しても安全側（subagent は
+#   コマンドを言い換えて再実行できるだけで、実害はない）。したがって「正確なシェル構文解析」を
+#   目指すのではなく、**マッチング専用の正規化コピー（`tokenized`）ではシェルメタ文字
+#   （`; & | < > ( ) { } `（バッククォート）・`$`）を無条件に空白へ置換してトークン区切りとして
+#   扱う** over-deny 設計に振り切った。これにより `merge;echo` は `merge` `echo` の2トークンに
+#   分かれ、"merge" トークンとして検出される。
+#
+#   この設計が安全な理由（クォート状態を追跡しない over-deny が under-deny を生まないことの
+#   根拠）: 本 hook はコマンド区切り（; & | 等）によるセグメント分割を行わず（前述のとおり
+#   PR #195 の2ラウンドでいずれも P0 の回帰を出したため撤回済み）、正規化済みコマンド全体を
+#   1 単位としてトークンの語順部分列一致で判定する。`tokenized` は `norm` に対して**メタ文字を
+#   トークン区切りへ変換する（＝トークン数を増やす）操作のみ**を行い、既存のトークンを削除・
+#   結合することはない。トークン列への操作が「区切りを増やす」方向にしか働かない以上、
+#   語順部分列一致の対象となるトークン集合は変換前の部分集合を常に含む（真の subsequence
+#   関係は保存されるか、区切りの増加によって新たに成立し得るのみ）。したがって
+#   `tokenized` を経由した判定は `norm` を直接判定するより **deny が増える方向にのみ**働き、
+#   本来 deny すべきコマンドを見逃す（under-deny）方向には決して働かない。GraphQL クエリの
+#   文字列引数中にリテラルの `(` `)` `$` 等が含まれ、それが偶然 "gh"→"pr"→"merge" のような
+#   語順を構成してしまう場合（例: `echo 'gh pr merge のことです'` のような、クォート内に
+#   "gh"・"pr"・"merge" を含む説明文）も deny されるが、これは意図した over-deny であり
+#   best-effort として許容する（ユニットテスト参照）。
 set -u
 
 # deny 応答を出力して終了する。reason は本スクリプト内の固定文言のみを渡す契約
@@ -169,6 +198,14 @@ norm=$(printf '%s\n' "$cmd" \
   | sed -E 's#(^|[[:space:]])([^[:space:]]*/)gh([[:space:]]|$)#\1gh\3#g' \
   | tr -s '[:space:]' ' ')
 
+# トークン判定専用の正規化コピー。シェルメタ文字（; & | < > ( ) { } `（バッククォート）・$）を
+# 無条件に空白へ置換し、制御演算子が空白なしで直後に連結された形（`merge;echo`・`merge&&true`・
+# `merge|cat` 等）もトークン境界として分離する（over-deny 設計。安全性の根拠はファイル冒頭の
+# コメント「シェルメタ文字を無条件にトークン区切りへ正規化する over-deny 設計」参照）。
+# REST/GraphQL の URL・mutation 名の部分文字列照合（`pulls/<n>/merge`・`mergePullRequest` 等）は
+# `(` `)` を含む元の文字列が必要なため、こちらではなく `norm` に対して行う。
+tokenized=$(printf '%s' "$norm" | sed -e 's/[;&|<>(){}`$]/ /g' | tr -s '[:space:]' ' ')
+
 # フラグトークン（`-` で始まるすべてのトークン）を除去したトークン列を返す。
 # 値トークンは孤立して残る（ファイル冒頭の設計注記のとおり、これは語順部分列判定と
 # 組み合わせる前提で安全側）。
@@ -198,9 +235,9 @@ contains_subsequence() {
   return 1
 }
 
-# フラグ除去後のトークン列（正規化済みコマンド全体が対象。セグメント分割は行わない —
+# フラグ除去後のトークン列（メタ文字区切り済みの tokenized が対象。セグメント分割は行わない —
 # 理由はファイル冒頭のコメント参照）。
-all_nf=$(strip_flags "$norm")
+all_nf=$(strip_flags "$tokenized")
 
 # gh pr merge（あらゆる形。グローバルオプションの挟み込みで迂回不可）
 if contains_subsequence "$all_nf" gh pr merge; then
@@ -225,9 +262,10 @@ if contains_subsequence "$all_nf" gh api; then
 fi
 
 # レビュー承認（外部レビューゲートの自作自演を防ぐ）。--approve はフラグなので
-# strip_flags 後には残らない。正規化済みコマンド全体（フラグ除去前の norm）に対して判定する。
+# strip_flags 後には残らない。tokenized（フラグ除去前・メタ文字区切り済み）に対して判定する
+# ことで、`--approve;echo` のようにメタ文字が空白なしで後置された形の境界判定漏れも防ぐ。
 if contains_subsequence "$all_nf" gh pr review \
-  && printf '%s' "$norm" | grep -qE '(^|[[:space:]])--approve([[:space:]]|$|=)'; then
+  && printf '%s' "$tokenized" | grep -qE '(^|[[:space:]])--approve([[:space:]]|$|=)'; then
   deny "subagent からの gh pr review --approve は禁止"
 fi
 
