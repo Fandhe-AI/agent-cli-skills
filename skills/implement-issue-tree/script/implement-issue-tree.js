@@ -4861,6 +4861,17 @@ async function markBlockedByDeps(item, failedDeps) {
 }
 
 const running = new Map()
+// 残置 worktree 上限ゲートの予約計上（PR #185 codex P1 第 2 ラウンド）。
+// 新規着手 1 イシューが本ランで積み増しうる使い捨て worktree の最大数。
+// 内訳: review ×3（Review ループ最大 3 回・各回 isolation: 'worktree' で新規作成）+
+// pr-create ×1（Review 全通過後に 1 回のみ）= 4。fix / impl の worktree は状態ファイルで
+// 追跡・削除されるため残置に数えない。この値は Review ループ上限（reviewsLeft = 3）と
+// recordEphemeralWorktree の呼び出し箇所（review / pr-create の 2 種）に連動する —
+// どちらかを変えたらここも見直すこと。
+const EPHEMERAL_RESERVE_PER_NEW_START = 4
+// 本ランで新規着手し（monitoring 再開は含まない = 使い捨て worktree を積み増さない）、
+// まだ完了していないイシュー番号の集合。dispatch の予約計上に使う。
+const newStartActive = new Set()
 while (true) {
   // 空きスロットへ post-order 順に投入する（halted 後は新規着手しない）
   if (!halted) {
@@ -4906,29 +4917,64 @@ while (true) {
       // 以降の新規着手を止める（既に走っている実装・monitoring 再開は止めない。ラン開始時の判定と
       // 同じ粒度）。観測失敗時（residualObserved === false）は開始時に newStartSuppressed が設定済みで
       // ここへ到達しないため、residualObservedAtStart は常に実測値として扱える。
-      if (
-        maxResidualWorktrees > 0 &&
-        residualObserved &&
-        residualObservedAtStart + ephemeralWorktrees.length > maxResidualWorktrees
-      ) {
-        newStartSuppressed = {
-          reason:
-            `残置 worktree がラン中の積み増しで上限 ${maxResidualWorktrees} 件を超過` +
-            `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件）。` +
-            `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-            `不要な worktree を git worktree remove で手動削除してから再実行すること`,
-          paths: residualPathsAtStart,
+      if (maxResidualWorktrees > 0 && residualObserved) {
+        // (a) 実測超過 → 恒久停止（実測は減らないため latch でよい）
+        if (residualObservedAtStart + ephemeralWorktrees.length > maxResidualWorktrees) {
+          newStartSuppressed = {
+            reason:
+              `残置 worktree がラン中の積み増しで上限 ${maxResidualWorktrees} 件を超過` +
+              `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件）。` +
+              `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
+              `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+            paths: residualPathsAtStart,
+          }
+          log(`⚠️ ${newStartSuppressed.reason}`)
+          continue
         }
-        log(`⚠️ ${newStartSuppressed.reason}`)
-        continue
+        // (b) 予約込み超過（PR #185 codex P1 第 2 ラウンド）: 並列投入済みでまだ
+        // recordEphemeralWorktree に到達していないタスクが今後作る使い捨て worktree は
+        // ephemeralWorktrees に現れないため、実測だけの比較では同一 dispatch 周回で
+        // 最大 parallel × EPHEMERAL_RESERVE_PER_NEW_START 件の超過を許してしまう。
+        // 実行中の新規着手イシューごとに「最大増分 − 実記録数」を予約として計上し、
+        // 「実測 + 予約 + 着手候補自身の最大増分」が上限を超える投入を止める。
+        // 予約は当該タスクの record 到達・完了で自然に解放されるため、予約起因の
+        // 超過見込みは latch せず defer（今周回の投入見送り）に留める。予約が 0 件
+        // （解放待ちの余地なし）でなお超過が見込まれる場合のみ恒久停止する。
+        const recordedByIssue = new Map()
+        for (const e of ephemeralWorktrees) {
+          recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+        }
+        let reservedTotal = 0
+        for (const rn of newStartActive) {
+          reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
+        }
+        const projected =
+          residualObservedAtStart + ephemeralWorktrees.length + reservedTotal + EPHEMERAL_RESERVE_PER_NEW_START
+        if (projected > maxResidualWorktrees) {
+          if (reservedTotal > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
+          newStartSuppressed = {
+            reason:
+              `残置 worktree が予約込みで上限 ${maxResidualWorktrees} 件を超過する見込み` +
+              `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋` +
+              `着手候補の最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件）。` +
+              `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
+              `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+            paths: residualPathsAtStart,
+          }
+          log(`⚠️ ${newStartSuppressed.reason}`)
+          continue
+        }
       }
       log(`#${n} を開始（実行中 ${running.size + 1}/${concurrency}）: ${sanitize(item.title)}`)
+      newStartActive.add(n)
       running.set(n, runOne(item))
     }
   }
   if (running.size === 0) break
   const finished = await Promise.race(running.values())
   running.delete(finished.number)
+  // 完了イシューの残余予約を解放する（実際に積んだ分は ephemeralWorktrees の実測に反映済み）
+  newStartActive.delete(finished.number)
   if (finished.ok) done.add(finished.number)
   else failedSet.add(finished.number)
 }
