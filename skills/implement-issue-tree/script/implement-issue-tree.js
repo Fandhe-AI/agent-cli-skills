@@ -103,6 +103,12 @@ const autoMergeEnabled = (() => {
   }
   return raw
 })()
+// 残置 worktree 総数の上限（Issue #142 の後続・PR #588 codex P1 対応）。使い捨て worktree は
+// 削除しない設計のため、ラン開始時の残置総数がこの上限を超えていたら新規着手を止めて手動介入を
+// 促す（削除は一切行わない fail-closed ゲート）。検証・既定値・0 の意味は parseMaxResidualWorktrees 参照。
+const maxResidualWorktrees = parseMaxResidualWorktrees(
+  parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.maxResidualWorktrees : undefined,
+)
 // Issue #119（rust-ai-library#407 codex P0 対応・最終形）: レビュースレッドの resolve は
 // このワークフローのどのエージェント・どの経路でも実行しない（自動 resolve 機能は全面撤去）。
 // 未信頼データ（PR 本文・レビューコメント）を読むエージェントに resolve 実行権限を持たせる
@@ -435,6 +441,59 @@ function restoreUnresolvedComments(arr) {
 function assertInt(val, label) {
   if (!Number.isInteger(val) || val <= 0) throw new Error(`${label} が正の整数ではない: ${val}`)
   return val
+}
+
+// args.maxResidualWorktrees（残置 worktree 総数の上限）を検証して数値化する純粋関数。
+// 使い捨て worktree（review / pr-create）は所有権を証明できず自動削除しない設計（Issue #142・
+// コミット 2539cbb）のため、代わりにラン開始時の残置総数に上限を設けてディスク枯渇（DoS）を防ぐ。
+// これはマージゲート（externalChecks / autoMerge）と同じく「安全側の閾値」であり、誤記を黙って
+// 読み替えるとガードの実効強度が静かに下がるため、parallel のような寛容フォールバックはしない。
+//   - 未指定（undefined / null） → 既定 20（保守的な上限。無人ラン反復での単調増加を早期に止める）
+//   - 0                          → 上限なし（チェック無効化の明示オプトアウト）。負値ではなく 0 を
+//                                  無効化に割り当てるのは「上限 0 件」が実運用で無意味（常に停止）で
+//                                  あり、無効化の意図と衝突しないため
+//   - 正の整数                    → その値を上限とする
+//   - 負値・非整数・数値化不能     → throw（assertInt と同じ厳格さ。ゲート入力のため fail-closed）
+// assertInt は 0 を弾く（> 0 必須）ため流用できず、0 を許容する専用の検証をここに置く。
+function parseMaxResidualWorktrees(raw) {
+  if (raw === undefined || raw === null) return 20
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) {
+    throw new Error(
+      `args.maxResidualWorktrees は 0 以上の整数で指定すること（0 は上限なし＝チェック無効。` +
+        `既定は 20。残置 worktree のディスク枯渇防止ゲートの入力のため誤記は fail-closed で拒否する）: ${String(raw).slice(0, 50)}`,
+    )
+  }
+  return raw
+}
+
+// ラン開始時の残置 worktree 総数を数える純粋関数（fail-closed ゲートの観測値）。
+// entries は scanOrphanWorktrees（agent 経由の git worktree list --porcelain）の返却エントリで、
+// 呼び出し元が独立レコードカウント（countWorktreeRecords）と entries.length を照合済みであることを
+// 前提とする。メイン worktree だけを除外した**物理総数**を数える（PR #185 codex P1 第 5 ラウンド。
+// 以前の状態ファイル追跡済み除外は failed / blocked の長期滞留が何件でも計上されない過小カウント
+// だった。使用中かどうかはディスク消費を変えないため除外しない。過大側＝過剰停止で安全）。
+//
+// 件数はレコード**内容**に依存させない（PR #185 codex P1 第 6 ラウンド）: 以前は isMain: true の
+// レコードをすべて除外し空 path もスキップしていたが、ORPHAN_SCAN_SCHEMA は isMain の個数も path の
+// 非空も制約しないため、全件返しつつ複数を isMain: true にする・path を空にする転記（誤り・
+// プロンプトインジェクション）で独立カウントと件数が一致したまま過小計上できた。
+// git worktree list --porcelain の先頭レコードは仕様上必ずメイン worktree のため、**位置**で先頭
+// 1 件のみを除外し、残り全件を isMain フラグ・path の中身と無関係に必ず 1 件ずつ計上する。
+// これにより count は常に entries.length - 1 となり、長さが独立照合済みである以上、転記内容を
+// どう細工しても件数を減らせない（エージェントが順序を入れ替えてメインが後方に来ても、除外は
+// ちょうど 1 件のため件数は不変。paths の表示が乱れるだけで判定は影響を受けない）。
+// path が検証できないレコードも「(検証不可)」として計上する（残置が不可視になる fail-open を防ぐ。
+// 表示用の raw は sanitize()＋長さ制限で無害化し、エージェントプロンプトへは再投入しない）。
+// 返却は { count, paths }（paths は停止時レポートで残置一覧を提示するため。count === paths.length）。
+function countResidualWorktrees(entries) {
+  const list = Array.isArray(entries) ? entries : []
+  const paths = []
+  for (let i = 1; i < list.length; i++) {
+    const raw = typeof list[i]?.path === 'string' ? list[i].path : ''
+    const p = sanitizeWorktreePath(raw)
+    paths.push(p || `(検証不可: ${sanitize(raw).slice(0, 120) || 'パス欠落'})`)
+  }
+  return { count: paths.length, paths }
 }
 
 // GitHub 由来の文字列（イシュータイトル・本文要約・PR/レビューコメント等）をプロンプトへ
@@ -974,6 +1033,24 @@ const ORPHAN_SCAN_SCHEMA = {
   },
 }
 
+// worktree レコード総数の独立カウント返却スキーマ。
+// scanOrphanWorktrees の一覧転記（LLM 経由）の完全性照合に使う（PR #185 codex P1:
+// 転記が一部レコードを落としても非空なら観測成功と誤認され、残置上限ゲートが fail-open になる）。
+// 数値 1 個だけの転記は一覧全体の転記より脱落しにくく、別エージェントで独立に取得するため
+// 「一覧側の欠落」と「カウント側の誤り」が同時に同じ値へ揃わない限り不一致として検出できる
+// （両者が偶然一致する残存リスクはあるが、単一転記を無条件に信じる現状よりゲートを強くする）。
+const ORPHAN_COUNT_SCHEMA = {
+  type: 'object',
+  required: ['count'],
+  properties: {
+    count: {
+      type: 'integer',
+      minimum: 0,
+      description: 'git worktree list --porcelain | grep -c \'^worktree \' の出力数値そのまま',
+    },
+  },
+}
+
 // ============================================================================
 // セクション 4: 状態ファイル操作
 // _/issue-trees/<parent>.json への読み書きを担う。並列実行時の競合を防ぐため
@@ -1323,6 +1400,31 @@ async function scanOrphanWorktrees() {
   }
 }
 
+// worktree レコード総数の独立カウント。scanOrphanWorktrees とは別エージェントで
+// `git worktree list --porcelain | grep -c '^worktree '` を実行し、数値 1 個だけを転記させる。
+// 残置上限ゲート（maxResidualWorktrees > 0）の観測完全性照合専用で、呼び出し元は
+// 「scanOrphanWorktrees の entries.length と一致しない・取得できない」場合を観測失敗
+// （fail-closed）として扱う契約。取得失敗は null を返す（0 と区別する。0 は grep の正当な
+// 出力になり得ないが、スキーマ上は通るため照合側で一覧件数との不一致として弾かれる）。
+async function countWorktreeRecords() {
+  try {
+    const v = await agent(
+      [
+        'git worktree レコード総数の取得タスク（読み取り専用。削除・変更は一切行わない）。',
+        '手順:',
+        "1. git worktree list --porcelain | grep -c '^worktree ' を実行する。",
+        '2. 出力された数値をそのまま count として返す（加工・推測をしない）。',
+        'コマンドが失敗した場合も、他の方法で数え直さずそのタスクを失敗として報告する。',
+      ].join('\n'),
+      { label: 'worktree:record-count', phase: 'State', model: 'haiku', effort: 'low', schema: ORPHAN_COUNT_SCHEMA },
+    )
+    return Number.isInteger(v?.count) && v.count >= 0 ? v.count : null
+  } catch (e) {
+    log(`⚠️ worktree レコード総数の独立カウント中に例外が発生した（${e?.message ?? e}）`)
+    return null
+  }
+}
+
 // 実装ブランチ命名規約（<type>/<issueNumber>-<short-name>）へのアンカー付き一致判定。
 // 孤立 worktree 検出（scanOrphanWorktrees の呼び出し元）専用。type は英小文字のみ
 // （Conventional Commits の type は feat/fix/docs 等すべて英小文字。938〜948 行付近の
@@ -1363,14 +1465,49 @@ function findMainWorktreePath(entries) {
 //    候補にならない。
 const sweepEligiblePaths = new Set()
 
-// review / pr-create のような「成果物を保持しない使い捨て worktree」と、routingError 時に
-// fix エージェントが自己申告した worktree（fix-routing-error）の記録簿。
+// 本ランで新規作成された worktree の記録簿（残置上限ゲートの「本ラン積み増し」実測）。
+// review / pr-create のような使い捨て worktree、routingError 時に fix エージェントが自己申告した
+// worktree（fix-routing-error）に加え、実装 worktree（implement。新規着手 1 件につき 1 個）も
+// 記録する（PR #185 codex P1 第 5 ラウンド: 上限契約が物理総数になったため、実装 worktree の
+// 物理増分もラン中の再評価へ反映する）。fix の worktree は記録しない——fix は旧 worktree の
+// cleanup とペアの「置換」で純増せず、記録すると fix 連鎖のたびに実測が単調増加して過剰停止する。
+// cleanup 失敗で実際に残った fix 残骸は次ラン開始時の物理総数観測が捕捉する。
 // { issue, kind, path } を追記し、ラン終了時に一覧をログ出力する（削除は行わない）。
 const ephemeralWorktrees = []
 
-// 使い捨て worktree（review / pr-create）と routingError 時の fix worktree
-// （fix-routing-error。rust-ai-library PR #436 codex-review P0 対応）を記録する。
-// **削除はしない**（Issue #142）。
+// 使い捨て worktree の kind ごとの「1 イシュー当たりの最大生成数」宣言テーブル
+// （PR #185 codex P1: 生成経路と予約定数の乖離防止）。残置上限ゲートの予約計上
+// （EPHEMERAL_RESERVE_PER_NEW_START）はこのテーブルの合計から導出するため、
+// recordEphemeralWorktree の呼び出し箇所（= 生成経路）を追加・変更するときは
+// 必ずここへ kind と最大数を宣言する。未宣言の kind での記録は recordEphemeralWorktree
+// が契約違反として警告する（記録自体は行い、実測ベースの上限 latch は機能し続ける）。
+// 現在の内訳:
+//   - implement: 実装エージェント起動 1 回（新規着手・recover-continue とも isolation: 'worktree'
+//     で 1 個作成。PR #185 codex P1 第 5 ラウンドで台帳へ追加）
+//   - review: Review ループ最大 3 回（reviewsLeft = 3）× 各回 isolation: 'worktree'
+//   - pr-create: Review 全通過後に 1 回のみ
+//   - fix-routing-error: 最大 1 回。routingError は Review ループ・Merge ループの
+//     どちらでも検出と同時にイシューを即終端（failed）するため、1 イシューが同一ラン内で
+//     複数回記録することはない（PR #184 で追加された記録経路）
+// fix（通常の修正再コミット）は旧 worktree cleanup とペアの置換のため宣言しない
+// （ephemeralWorktrees のコメント参照）。
+const EPHEMERAL_KIND_MAX = Object.freeze({ implement: 1, review: 3, 'pr-create': 1, 'fix-routing-error': 1 })
+// 新規着手 1 イシューが本ランで積み増しうる使い捨て worktree の最大総数（全 kind 合計）。
+// dispatch ループの予約計上（newStartActive）で参照する。
+const EPHEMERAL_RESERVE_PER_NEW_START = Object.values(EPHEMERAL_KIND_MAX).reduce((a, b) => a + b, 0)
+// monitoring 再開 1 イシューが本ランで積み増しうる使い捨て worktree の最大数。
+// monitoring 再開は review / pr-create を経ない（PR 作成済みで Merge ループから再開する）が、
+// Merge ループの fix が routingError で終端する際に fix-routing-error を最大 1 件記録し得る
+// （PR #184 以降）。「monitoring 再開は積み増さない」という旧前提はここで崩れているため、
+// 予約計上でも monitoring 再開分を別枠で見込む。
+const EPHEMERAL_RESERVE_PER_MONITORING_RESUME = EPHEMERAL_KIND_MAX['fix-routing-error']
+
+// 使い捨て worktree（review / pr-create）、routingError 時の fix worktree
+// （fix-routing-error。rust-ai-library PR #436 codex-review P0 対応）、および実装 worktree
+// （implement。PR #185 codex P1 第 5 ラウンド: 残置上限の契約が物理総数になったため、実装
+// worktree の物理増分もラン中の実測へ反映する）を記録する。**この関数は削除をしない**
+// （Issue #142。implement worktree だけは merged 確定時の cleanupWorktree・終了時スイープという
+// 既存の所有権照合付き削除経路を別途持つ）。
 //
 // 廃止の理由（配布先 desktop-automation-app#305 の codex-review P0）:
 //   従来はエージェント返却値の `worktreePath` をそのまま `git worktree remove --force` して
@@ -1404,10 +1541,24 @@ const ephemeralWorktrees = []
 // （`updateState` の cleanupWorktree を経由しないため、構造的に候補にならない）。
 // 残った worktree はラン終了時のログ一覧と `git worktree list` から手動で掃除できる。
 function recordEphemeralWorktree(issueNumber, rawPath, kind) {
+  // 予約契約の検証: 未宣言 kind の記録は残置上限ゲートの予約（EPHEMERAL_KIND_MAX 由来）を
+  // 過小にする実装ミスのため、契約違反として警告する。記録は継続する（記録を落とすと
+  // 実測（ephemeralWorktrees.length）まで過小になり、実測ベースの上限 latch も弱まるため。
+  // 警告 + 実測計上により、予約が過小でも実測超過の時点で新規着手は停止する）。
+  if (!(kind in EPHEMERAL_KIND_MAX)) {
+    log(`⚠️ #${issueNumber}: 使い捨て worktree の kind '${kind}' が EPHEMERAL_KIND_MAX に未宣言（予約契約違反。生成経路を追加したら最大数を宣言すること）`)
+  }
   const p = sanitizeWorktreePath(rawPath ?? '')
   if (!p) {
-    // フォーマット不正パスを無言で捨てると、ログ一覧にも載らず利用者が残骸に気づけない。
-    log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できず記録できなかった（残骸が残っている可能性がある）`)
+    // パスを検証できなくても「使い捨て worktree が 1 件生成された事実」は path: '' で計上する
+    // （PR #185 Bugbot Medium 対応）。schema は worktreePath に空文字を許し、ランタイムは
+    // エージェントの返答内容と無関係に worktree を実際に作成しているため、ここで記録を
+    // スキップすると実測（ephemeralWorktrees.length）が実際のディスク増加より過小になり、
+    // 実測 latch・予約解放（recordedByIssue）の両方が甘くなって fail-closed が弱まる。
+    // path が空のエントリはラン終了時の一覧で「パス不明」と表示し、手動掃除は
+    // git worktree list からの突き合わせに委ねる。
+    log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できなかった（件数のみ計上する。git worktree list で残骸を確認すること）`)
+    ephemeralWorktrees.push({ issue: issueNumber, kind, path: '' })
     return
   }
   ephemeralWorktrees.push({ issue: issueNumber, kind, path: p })
@@ -2840,6 +2991,12 @@ await initAllPending(queue.filter((q) => q.state === 'open'))
 // "already checked out" で失敗し続ける。ここでブランチ名（<type>/<issueNumber>-<short-name>）を
 // queue の issue 番号と照合し、一致する孤立 worktree を発見できれば状態ファイルへ書き戻す。
 // 命名規約からの推測（547 行目付近のコメント参照）はしない。照合するのはブランチ名のみ。
+// 残置 worktree 上限ゲート（PR #588 codex P1）の観測結果。ラン開始時に一度だけ観測し、
+// 新規着手の抑止判定（下の dispatch ループ）と最終レポートの両方で参照するため外側スコープに置く。
+let residualObserved = false // 観測が成立したか（scan 失敗時は false のまま新規着手を抑止＝fail-closed。レポートで「未観測」を明示）
+let residualObservedAtStart = 0 // メイン worktree のみ除外した物理総数（使用中含む。第 5 ラウンド対応）
+let residualPathsAtStart = [] // 停止時レポート用の残置パス一覧
+let newStartSuppressed = null // 上限超過による新規着手抑止の理由（null なら抑止しない。monitoring 再開は抑止しない）
 {
   const runStartOrphanEntries = await scanOrphanWorktrees()
   const mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
@@ -2867,6 +3024,80 @@ await initAllPending(queue.filter((q) => q.state === 'open'))
       log(`#${matched.number}: 孤立 worktree を検出し状態ファイルへ記録した（${p}）`)
     } else {
       log(`⚠️ #${matched.number}: 孤立 worktree を検出したが状態ファイルへの記録に失敗した（${p}）`)
+    }
+  }
+
+  // --- 残置 worktree 上限ゲート（PR #588 codex P1）---
+  // 使い捨て worktree（review / pr-create）は所有権を証明できず自動削除しない設計（Issue #142・
+  // コミット 2539cbb）のため、削除の代わりに「複数ラン累積の残置総数」に上限を設けてディスク枯渇
+  // （DoS）を防ぐ。単一ラン内の ephemeralWorktrees.length はラン開始ごとに空初期化され過去ラン分を
+  // 捕捉できないため、ここで横断スキャン（scanOrphanWorktrees）の結果から残置総数を観測する。
+  // 観測はメイン worktree のみ除外した物理総数で行う（追跡済み＝使用中も数える。PR #185 codex
+  // P1 第 5 ラウンド。countResidualWorktrees のコメント参照）ため、直前の孤立 worktree 採用
+  // ループが savedItems へ何を書き戻したかは件数に影響しない（採用は Recover 再利用のための
+  // 状態記録であり、カウント除外ではない）。
+  // 観測成立の判定は 2 段構え（PR #185 codex P1 ×2）。
+  // ① 空チェック: scanOrphanWorktrees は取得失敗時に例外を伝播させず [] を返す。実在するリポジトリは
+  //    必ず先頭にメイン worktree エントリを持つため、length 0 は「正当に残置ゼロ」ではなく「観測が
+  //    成立しなかった」ことを意味する。
+  // ② 完全性照合: 一覧は LLM エージェントの転記であり、スキーマは全レコードが返されたことを
+  //    保証しない。一部レコードが脱落しても非空なら①を通ってしまうため、別エージェントが独立に
+  //    取得したレコード総数（countWorktreeRecords）と件数照合し、不一致・カウント取得失敗も
+  //    観測失敗として扱う（照合はゲート有効時のみ実行。無効時は結果を使わないためエージェント起動を節約する）。
+  // どちらの観測不成立も「残置ゼロ＝安全」と誤認して通常続行するとゲート自体が fail-open するため、
+  // 上限ゲートが有効（maxResidualWorktrees > 0）な場合は新規着手を抑止する（fail-closed）。
+  // monitoring 再開（PR 作成済みイシューの監視継続）は抑止対象外のまま継続し、次ランの再観測が
+  // 成功すれば自動的に解除される。residualObserved は false のまま残し、最終レポートで「未観測」を明示する。
+  let scanFailureDetail = runStartOrphanEntries.length === 0 ? 'git worktree list を取得できず' : ''
+  if (!scanFailureDetail && maxResidualWorktrees > 0) {
+    const independentCount = await countWorktreeRecords()
+    if (independentCount === null) {
+      scanFailureDetail = `一覧転記の完全性を照合する独立レコードカウントを取得できず（一覧側 ${runStartOrphanEntries.length} 件）`
+    } else if (independentCount !== runStartOrphanEntries.length) {
+      scanFailureDetail = `一覧転記が不完全な疑い（一覧側 ${runStartOrphanEntries.length} 件 ≠ 独立カウント ${independentCount} 件）`
+    }
+  }
+  if (scanFailureDetail) {
+    if (maxResidualWorktrees > 0) {
+      newStartSuppressed = {
+        reason:
+          `ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。` +
+          `残置総数を確認できないため、ディスク枯渇防止の上限ゲート（上限 ${maxResidualWorktrees} 件）を` +
+          `適用できず、新規イシューの着手を停止した（fail-closed。monitoring 再開は継続する）。` +
+          `git worktree list が実行できる状態を確認してから再実行すること`,
+        paths: [],
+      }
+      log(`⚠️ ${newStartSuppressed.reason}`)
+    } else {
+      // 上限なし（maxResidualWorktrees === 0）の明示オプトアウト時は観測失敗でも抑止しない
+      // （ゲート無効の意思表示が優先。「観測できない」ことがチェック無効時の安全性を変えない）。
+      log(`⚠️ ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。上限ゲートは無効（maxResidualWorktrees: 0）のため続行する`)
+    }
+  } else {
+    residualObserved = true
+    // メイン worktree のみ除外した物理総数を観測する（追跡済み＝使用中の worktree も数える。
+    // countResidualWorktrees のコメント参照。PR #185 codex P1 第 5 ラウンド）。
+    const residual = countResidualWorktrees(runStartOrphanEntries)
+    residualObservedAtStart = residual.count
+    residualPathsAtStart = residual.paths
+    // maxResidualWorktrees === 0 は上限なし（チェック無効）。「超過」判定のため count > limit で発火する
+    // （count === limit は許容。上限ちょうどまでは新規着手を許す）。
+    if (maxResidualWorktrees > 0 && residual.count > maxResidualWorktrees) {
+      newStartSuppressed = {
+        reason:
+          `残置 worktree が上限 ${maxResidualWorktrees} 件を超過（実測 ${residual.count} 件）。` +
+          `ディスク枯渇防止のため新規イシューの着手を停止した。git worktree list で確認し、` +
+          `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+        paths: residual.paths,
+      }
+      log(`⚠️ ${newStartSuppressed.reason}`)
+      log(`残置 worktree 一覧（${residual.paths.length} 件）:`)
+      for (const p of residual.paths) log(`  ${p}`)
+    } else if (maxResidualWorktrees > 0 && residual.count >= Math.ceil(maxResidualWorktrees * 0.8)) {
+      // 早期警告（上限の 8 割到達）。停止はしないが、次ラン以降で上限に達する見込みを知らせる。
+      log(`⚠️ 残置 worktree が ${residual.count} 件（上限 ${maxResidualWorktrees} 件の 8 割超）。不要な worktree の手動削除を検討すること`)
+    } else {
+      log(`残置 worktree 観測: ${residual.count} 件（上限 ${maxResidualWorktrees > 0 ? `${maxResidualWorktrees} 件` : 'なし'}）`)
     }
   }
 }
@@ -3184,6 +3415,9 @@ async function runImplement(item) {
           schema: IMPL_SCHEMA,
           isolation: 'worktree',
         })
+        // 実装 worktree の物理増分を成否判定より前に記録する（ランタイムはエージェントの
+        // 応答内容と無関係に worktree を作成済みのため。残置上限ゲートの実測に反映される）。
+        recordEphemeralWorktree(item.number, impl?.worktreePath, 'implement')
 
         // impl の成否判定（通常 Implement と同じ検証）
         if (!impl || !impl.branch) {
@@ -3374,6 +3608,9 @@ async function runImplement(item) {
         schema: IMPL_SCHEMA,
         isolation: 'worktree',
       })
+      // 実装 worktree の物理増分を成否判定より前に記録する（ランタイムはエージェントの
+      // 応答内容と無関係に worktree を作成済みのため。残置上限ゲートの実測に反映される）。
+      recordEphemeralWorktree(item.number, impl?.worktreePath, 'implement')
       // impl の成否判定: push 前 review フローでは prNumber は存在しない（PR 未作成）。
       // branch が有効かどうかで実装の成否を判定する。
       if (!impl || !impl.branch) {
@@ -4723,6 +4960,18 @@ async function markBlockedByDeps(item, failedDeps) {
 }
 
 const running = new Map()
+// 残置 worktree 上限ゲートの予約計上（PR #185 codex P1 第 2 ラウンド）。
+// 新規着手 1 イシューの最大積み増し数 EPHEMERAL_RESERVE_PER_NEW_START は
+// EPHEMERAL_KIND_MAX テーブル（ephemeralWorktrees 宣言の直下）の合計から導出される。
+// fix / impl の worktree は状態ファイルで追跡・削除されるため残置に数えない。
+// 本ランで新規着手し、まだ完了していないイシュー番号の集合。dispatch の予約計上に使う。
+const newStartActive = new Set()
+// 本ランで monitoring 再開し、まだ完了していないイシュー番号の集合。monitoring 再開は
+// review / pr-create を積み増さないが、Merge ループの fix が routingError 終端する際に
+// fix-routing-error を最大 1 件記録し得る（PR #184 以降）ため、
+// EPHEMERAL_RESERVE_PER_MONITORING_RESUME 分を予約計上する（再開自体は抑止しない —
+// 予約は新規着手側の投入判定を保守的にするだけで、monitoring 再開の実行を止めない）。
+const monitoringResumeActive = new Set()
 while (true) {
   // 空きスロットへ post-order 順に投入する（halted 後は新規着手しない）
   if (!halted) {
@@ -4749,16 +4998,105 @@ while (true) {
       // （codex-review P1 対応）。依存が pending の間はこの while ループが次周回で再評価する。
       if (isActiveMonitoring(n)) {
         log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(item.title)}`)
+        monitoringResumeActive.add(n)
         running.set(n, runOne(item))
         continue
       }
+      // 残置 worktree 上限超過時（PR #588 codex P1）は新規イシューの着手を抑止する。
+      // monitoring 再開（上の分岐で通過済み。fix-routing-error 最大 1 件のみ積み増し得るが
+      // 予約計上で見込む）は抑止しない。
+      // この continue は実装投入（implement / review / pr-create で worktree を積み増す本来の抑止対象）
+      // に加え verify-close 等の新規着手も一律に止めるが、worktree を積まない着手まで巻き込むのは
+      // 過剰抑止＝安全側であり許容する（queue は毎ラン GitHub の open/closed 実態で再構築されるため
+      // 恒久 blocked にはならず、上限解消後の再実行で再着手される）。
+      // 既存の halt（3 連続失敗）が for ループ全体を skip して monitoring 再開まで止めるのに対し、
+      // こちらは「新規着手のみ抑止」の粒度に絞る（既に着手済み・監視中の継続まで一律停止するのは
+      // 過剰なため。isActiveMonitoring 分岐の後にこのチェックを置くのが線引きの実装表現）。
+      if (newStartSuppressed) continue
+      // ラン中の積み増し再評価（PR #185 codex P1）: ラン開始時の観測が上限以下でも、本ランの
+      // worktree 新規作成（implement / review / pr-create / fix-routing-error）が積み増して上限を
+      // 超えることがある（大きなツリーほど顕著）。開始時観測値＋本ラン積み増し数を新規着手の直前に
+      // 毎回比較し、超過が判明した時点で以降の新規着手を止める（既に走っている実装・monitoring
+      // 再開は止めない。ラン開始時の判定と同じ粒度）。観測失敗時（residualObserved === false）は
+      // 開始時に newStartSuppressed が設定済みでここへ到達しないため、residualObservedAtStart は
+      // 常に実測値として扱える。
+      if (maxResidualWorktrees > 0 && residualObserved) {
+        // (a) 実測超過 → 恒久停止（台帳 ephemeralWorktrees は単調増加のため latch でよい。
+        //     merged 確定時に掃除された implement worktree 分は差し引かず、実測は物理増分の
+        //     上界＝過大停止側で安全）
+        if (residualObservedAtStart + ephemeralWorktrees.length > maxResidualWorktrees) {
+          newStartSuppressed = {
+            reason:
+              `残置 worktree がラン中の積み増しで上限 ${maxResidualWorktrees} 件を超過` +
+              `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件）。` +
+              `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
+              `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+            paths: residualPathsAtStart,
+          }
+          log(`⚠️ ${newStartSuppressed.reason}`)
+          continue
+        }
+        // (b) 予約込み超過（PR #185 codex P1 第 2 ラウンド）: 並列投入済みでまだ
+        // recordEphemeralWorktree に到達していないタスクが今後作る使い捨て worktree は
+        // ephemeralWorktrees に現れないため、実測だけの比較では同一 dispatch 周回で
+        // 最大 parallel × EPHEMERAL_RESERVE_PER_NEW_START 件の超過を許してしまう。
+        // 実行中の新規着手イシューごとに「最大増分 − 実記録数」を予約として計上し、
+        // 「実測 + 予約 + 着手候補自身の最大増分」が上限を超える投入を止める。
+        // 予約は当該タスクの record 到達・完了で自然に解放されるため、予約起因の
+        // 超過見込みは latch せず defer（今周回の投入見送り）に留める。予約が 0 件
+        // （解放待ちの余地なし）でなお超過が見込まれる場合のみ恒久停止する。
+        //
+        // 判定 (b) は着手候補が implement の場合のみ行う（PR #185 Bugbot Medium 対応）:
+        // verify-close は isolation: 'worktree' を使わず worktree を一切作らないため予約 0 で
+        // あり、増分 0 の投入は上限契約を破り得ない（予約は最悪ケースの見込み）。ここで
+        // verify-close に implement と同じ最大増分を課すと、上限付近で親クローズが誤って
+        // defer / 恒久停止し、ラン全体の新規着手まで巻き込む。実測超過の恒久 latch (a) は
+        // 従来どおり verify-close にも効く（その過剰抑止が安全側であることは上のコメントのとおり）。
+        if (item.kind === 'implement') {
+          const recordedByIssue = new Map()
+          for (const e of ephemeralWorktrees) {
+            recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+          }
+          let reservedTotal = 0
+          for (const rn of newStartActive) {
+            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
+          }
+          // monitoring 再開中のイシューも Merge ループの fix-routing-error を最大 1 件
+          // 積み増し得る（PR #184 以降）ため、その分を予約に含める。
+          for (const rn of monitoringResumeActive) {
+            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
+          }
+          const projected =
+            residualObservedAtStart + ephemeralWorktrees.length + reservedTotal + EPHEMERAL_RESERVE_PER_NEW_START
+          if (projected > maxResidualWorktrees) {
+            if (reservedTotal > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
+            newStartSuppressed = {
+              reason:
+                `残置 worktree が予約込みで上限 ${maxResidualWorktrees} 件を超過する見込み` +
+                `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋` +
+                `着手候補の最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件）。` +
+                `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
+                `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+              paths: residualPathsAtStart,
+            }
+            log(`⚠️ ${newStartSuppressed.reason}`)
+            continue
+          }
+        }
+      }
       log(`#${n} を開始（実行中 ${running.size + 1}/${concurrency}）: ${sanitize(item.title)}`)
+      // verify-close は worktree を作らないため予約保持者（newStartActive）に載せない
+      // （Bugbot Medium 対応。載せると完了まで他の implement 候補の予約枠を無意味に塞ぐ）。
+      if (item.kind === 'implement') newStartActive.add(n)
       running.set(n, runOne(item))
     }
   }
   if (running.size === 0) break
   const finished = await Promise.race(running.values())
   running.delete(finished.number)
+  // 完了イシューの残余予約を解放する（実際に積んだ分は ephemeralWorktrees の実測に反映済み）
+  newStartActive.delete(finished.number)
+  monitoringResumeActive.delete(finished.number)
   if (finished.ok) done.add(finished.number)
   else failedSet.add(finished.number)
 }
@@ -4790,7 +5128,9 @@ const notStarted = pending.filter((n) => !isActiveMonitoring(n))
 const interrupted = pending.filter((n) => isActiveMonitoring(n))
 const notStartedNote = halted
   ? `halted により未着手（理由: ${halted.reason}）`
-  : 'スケジューラ終了時に未着手（キュー未到達）'
+  : newStartSuppressed
+    ? `残置 worktree 上限ゲートにより新規着手を抑止（理由: ${newStartSuppressed.reason}）`
+    : 'スケジューラ終了時に未着手（キュー未到達）'
 for (const n of notStarted) {
   results.push({ issue: n, status: 'not-started', note: notStartedNote })
   // 未着手の notStarted は blocked として状態ファイルに記録する
@@ -4831,8 +5171,14 @@ if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halte
 // 所有権を照合できない worktree は削除せず、failed / blocked 等と同様にログ報告・状態ファイルへの
 // 記録に留める（次回 Recover・手動での確認に委ねる）。
 const orphanEntriesAtEnd = await scanOrphanWorktrees()
-// 本ランが記録した使い捨て worktree（review / pr-create）のパス集合。孤立スキャンの除外に使う。
-const ephemeralWorktreePaths = new Set(ephemeralWorktrees.map((e) => e.path))
+// 本ランが記録した使い捨て worktree（review / pr-create / fix-routing-error）のパス集合。
+// 孤立スキャンの除外に使う。implement は除外リストへ入れない: 実装 worktree は状態ファイルで
+// 追跡され、merged / closed 確定時にこの後の所有権照合（savedEntryAtEnd.worktree === p）を経て
+// 削除候補になる正当な回収対象のため、台帳（残置上限ゲートの実測用）に載っていることを理由に
+// 回収から外すと既存の取りこぼし回収が消失する。
+const ephemeralWorktreePaths = new Set(
+  ephemeralWorktrees.filter((e) => e.kind !== 'implement').map((e) => e.path),
+)
 const orphanDeleteCandidates = []
 if (orphanEntriesAtEnd.length > 0) {
   const mainWorktreePathAtEnd = findMainWorktreePath(orphanEntriesAtEnd)
@@ -4900,17 +5246,43 @@ if (orphanEntriesAtEnd.length > 0) {
 // 不採用案コメント参照。エージェントへ開示済みの値では所有権を証明できないため削除しない）。
 const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
 
-// --- 使い捨て worktree（review / pr-create）の一覧報告 ---
+// --- 使い捨て worktree（review / pr-create / fix-routing-error）の一覧報告 ---
 // Issue #142: これらは自動削除しない（所有権を確認できない自己申告パスを --force 削除しない
 // ため）。残骸の存在を利用者が把握できるよう、ラン終了時に記録簿を一覧として出力する。
-if (ephemeralWorktrees.length > 0) {
-  log(`使い捨て worktree（review / pr-create）を ${ephemeralWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
-  for (const e of ephemeralWorktrees) log(`  #${e.issue} (${e.kind}): ${e.path}`)
+// implement は一覧から除く: 実装 worktree は merged 確定時の掃除・次ラン Recover の再利用対象で、
+// 「不要なら手動削除」の案内に載せると failed イシューの未マージ成果を利用者が誤って
+// 削除しかねない（台帳上の implement 記録は残置上限ゲートの実測専用）。
+const disposableWorktrees = ephemeralWorktrees.filter((e) => e.kind !== 'implement')
+if (disposableWorktrees.length > 0) {
+  log(`使い捨て worktree（review / pr-create / fix-routing-error）を ${disposableWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
+  for (const e of disposableWorktrees) log(`  #${e.issue} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
+}
+
+// --- 残置 worktree 総数のサマリ報告（PR #588 codex P1）---
+// ラン開始時の観測（residualObservedAtStart）＋本ランの worktree 新規作成台帳（ephemeralWorktrees。
+// implement 含む）を合算し、上限に対する充足状況を報告する。合算値はラン中の再評価（dispatch
+// ループ）と同じ式で、次ラン開始時の物理総数観測の**上界の見積もり**である: merged 確定時に
+// 掃除された implement worktree 分を差し引かないため過大側に出得る（fail-closed 方向。
+// 差し引きには掃除成功の確認と台帳の減算が要り、単調な latch 前提が崩れるため行わない）。
+// 上限の 8 割に近づいたら手動掃除を促す早期警告を出す。
+const residualAddedThisRun = ephemeralWorktrees.length
+const residualTotalAtEnd = residualObservedAtStart + residualAddedThisRun
+const residualOverLimit = maxResidualWorktrees > 0 && residualTotalAtEnd > maxResidualWorktrees
+if (!residualObserved) {
+  log('⚠️ ラン開始時の残置 worktree 観測が成立しなかったため、残置総数の上限判定は未確定（未観測）。git worktree list で手動確認すること')
+} else if (residualOverLimit) {
+  log(`⚠️ ラン終了時の残置 worktree 総数が上限を超過（${residualTotalAtEnd} 件 / 上限 ${maxResidualWorktrees} 件。開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${residualAddedThisRun} 件）。次ラン開始時に新規着手が停止する見込み。git worktree remove で手動掃除すること`)
+} else if (maxResidualWorktrees > 0 && residualTotalAtEnd >= Math.ceil(maxResidualWorktrees * 0.8)) {
+  log(`⚠️ ラン終了時の残置 worktree 総数が上限の 8 割超（${residualTotalAtEnd} 件 / 上限 ${maxResidualWorktrees} 件）。不要な worktree の手動削除を検討すること`)
 }
 
 // externalChecks（確定値）・externalChecksConfirmed・externalChecksObserved（観測の参考値）も
 // 返す。マージゲートの前提条件が何だったかをレポート側で検証できるようにするため（Issue #147）。
-// ephemeralWorktrees: 自動削除しない使い捨て worktree の記録（Issue #142）。手動掃除の対象。
+// ephemeralWorktrees: 自動削除しない使い捨て worktree（review / pr-create / fix-routing-error）の
+//   記録（Issue #142）。手動掃除の対象。implement は返さない（PR #185 Bugbot Medium: 実装
+//   worktree は merged 確定時の掃除・次ラン Recover の再利用対象で、「手動掃除の対象」として
+//   返すと消費側が failed イシューの未マージ成果を削除しかねない。implement を含む本ラン
+//   積み増しの総数は residualWorktrees.addedThisRun が別途返す）。
 // autoMerge（Issue #165）: 本ランで自動マージが有効だったか。false のランでは「マージ待ち PR
 // 一覧（autoMerge 無効による blocked）」を最終レポートで追跡するための判定材料になる。
 // mergeGuard（PR #182 codex P0）: 自動マージは autoMerge の値によらずこの実行基盤では提供されない
@@ -4919,4 +5291,10 @@ if (ephemeralWorktrees.length > 0) {
 //   その方針を返却値として明示する（レポート側で「自動マージ無効・PR はマージ可能状態で人間が
 //   マージ」を案内する材料）。autoMerge:true のランの終端 note には AUTO_MERGE_UNSUPPORTED_REASON が
 //   記録される。
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled, externalChecks: externalCheckApps, externalChecksConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees }
+// residualWorktrees（PR #588 codex P1）: 使い捨て worktree を削除しない設計の下でディスク枯渇を防ぐ
+//   残置上限ゲートの観測結果。observed: false はラン開始時の worktree 観測が成立しなかった（未確定）
+//   ことを示し、この場合 observedAtStart / overLimit は信頼できないため最終レポートで「未観測」を
+//   明示すること。overLimit: true は次ラン開始時に新規着手が停止する見込みで、git worktree remove に
+//   よる手動掃除の案内を最終レポートに含めること。suppressed は本ランで残置上限超過により新規着手を
+//   抑止したか（monitoring 再開は抑止対象外）。limit: 0 は上限なし（チェック無効）。
+return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled, externalChecks: externalCheckApps, externalChecksConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
