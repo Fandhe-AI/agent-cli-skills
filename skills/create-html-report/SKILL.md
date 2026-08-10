@@ -183,9 +183,10 @@ pointY_i = cy + r * (value_i / maxValue) * sin(θ_i)
 ls -la "_/reports/<report-name>.html"
 
 # 簡易構文チェック（開始・終了タグの対応、文字化けの有無）
-# grep -c は一致した「行数」のカウントであり、タグの出現総数ではない点に注意
-grep -c "<svg" "_/reports/<report-name>.html"
-grep -c "</svg>" "_/reports/<report-name>.html"
+# grep -c は「一致した行数」を返すため、同一行に複数タグがあると出現数を見誤る。
+# grep -o でタグ文字列を抽出し wc -l で実際の出現数を数える
+grep -o '<svg\b' "_/reports/<report-name>.html" | wc -l
+grep -o '</svg>' "_/reports/<report-name>.html" | wc -l
 ```
 
 - `<svg` と `</svg>` の出現数が一致すること（未閉タグがないこと）
@@ -217,3 +218,7 @@ grep -nE 'https?://' "_/reports/<report-name>.html"
 - レポートに機密情報（トークン・個人情報・内部限定データ）を含める場合は、出力先が公開領域でないことを事前にユーザーへ確認する
 - レポート化対象のデータに機密情報（トークン・個人情報等）や信頼できない外部由来データが含まれ、埋め込み可否が不明な場合は生成を中止し、ユーザーに確認を求める
 - 出力先ディレクトリ（`_/reports/` 等）が存在しない場合は `mkdir -p` で作成してから書き出す
+
+## sandbox 環境での実行
+
+このスキルは sandbox 環境では実行できない。ネットワークアクセス・ファイルシステムへの書き込みが必要なため、通常の Claude Code セッションで実行すること。
