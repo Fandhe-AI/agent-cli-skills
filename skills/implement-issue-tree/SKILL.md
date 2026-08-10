@@ -1,7 +1,7 @@
 ---
 name: implement-issue-tree
 description: >
-  親イシュー配下のサブイシュー（孫含む）を依存順を保ちつつ worktree で並列に自動実装・push 前 review・PR 作成・CI 監視・squash merge まで一括自動化。
+  親イシュー配下のサブイシュー（孫含む）を依存順を保ちつつ worktree で並列に自動実装・push 前 review・PR 作成・CI 監視・マージ可能状態化まで一括自動化。
   「イシューツリーを並列実装」「配下のサブイシューをまとめて実装」「ツリー全体を並列で実装して」「イシュー階層を自動開発」で使用。
   per-issue 計画立案（Plan: セッション継承モデル）→実装（Implement: sonnet）の分業。push 前 review（Review 通過後にのみ push・PR 作成して CI を 1 回だけ起動）。
   外部チェック構成は args の externalChecks で明示（[] で「なし」を確定して不要待機なし・未指定なら自動マージ停止）。
@@ -13,7 +13,7 @@ argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 ma
 
 # implement-issue-tree
 
-親イシュー番号を指定し、配下のサブイシュー（孫含む）を依存順を保ちつつ worktree で並列に自動実装・ローカル diff レビュー・push + PR 作成・CI 監視・squash merge まで自動化する Workflow を起動する。
+親イシュー番号を指定し、配下のサブイシュー（孫含む）を依存順を保ちつつ worktree で並列に自動実装・ローカル diff レビュー・push + PR 作成・CI 監視・マージ可能状態化まで自動化する Workflow を起動する（squash merge 自体は行わない。マージは GitHub 上で人間が行う）。
 
 CI リソース節約のため「push 前 review」設計を採用している。Implement フェーズではローカルブランチにコミットのみ積み、Review が全通過した後にはじめて push・PR 作成を行う。Review が収束失敗した場合は push も PR も作らないため、CI が一切起動しない。
 
@@ -43,17 +43,17 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
     "branch": "<マージ先ブランチ（省略時 main）>",
     "parallel": "<並列度 1〜8（省略時 3）>",
     "externalChecks": "<外部チェック App slug の配列（例: [\"cursor\"]。使用しない場合は []）>",
-    "autoMerge": "<自動マージの明示 opt-in（boolean。true 明示時のみ squash merge を自動実行。省略時 false = マージ可能状態で停止）>"
+    "autoMerge": "<boolean として受理されるが、この実行基盤では自動マージを行わない（true でも無条件 fail-closed。PR はマージ可能状態で停止し、マージは GitHub 上で人間が行う）>"
   }
 }
 ```
 
-例: 親イシュー `#42` の配下を `main` へ、並列度 3・Cursor Bugbot 導入済み・自動マージ opt-in でマージする場合:
+例: 親イシュー `#42` の配下を `main` へ、並列度 3・Cursor Bugbot 導入済みで実行する場合（マージ可能状態まで自動で進み、マージは GitHub 上で人間が行う）:
 
 ```json
 {
   "scriptPath": ".claude/skills/implement-issue-tree/script/implement-issue-tree.js",
-  "args": { "parent": 42, "branch": "main", "parallel": 3, "externalChecks": ["cursor"], "autoMerge": true }
+  "args": { "parent": 42, "branch": "main", "parallel": 3, "externalChecks": ["cursor"] }
 }
 ```
 
