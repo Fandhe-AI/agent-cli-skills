@@ -112,7 +112,7 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 各末端イシューに着手する前に、残骸 worktree / ブランチが存在するかを確認する。**既存作業がなければ Recover をスキップして Plan へ進む**。既存作業がある場合は Recover phase（セッション継承モデルのエージェント）が「途中作業を継続できるか」を判断し、その結果に応じて以下のどちらかへ分岐する。
 
 - **continue（継続）**: 既存 branch をそのまま checkout し、回復ブリーフ（done / remaining / broken の要約）を Implement へ渡して続きから実装する。Plan はスキップされる。Recover が直接 Review へ進むことはなく、継続作業は必ず Implement → Review → Merge を経由する。旧 worktree の削除は **WIP 退避の完了が検証できた場合のみ**実行する（後述の削除ゲート）。検証できない場合は残骸を削除せず `failed` で保全する（退避されていない未コミット変更を欠いたまま継続すると不完全な実装になるため、削除だけを飛ばして継続することはしない）。
-- **discard（破棄）**: 既存 worktree と branch を削除し、通常の Plan → Implement（新規 branch）で再実行する。削除は **WIP 退避の完了が検証できた場合のみ**実行する（後述の削除ゲート）。検証できない場合は残骸を削除せず `failed` で保全し、次回ランの Recover に委ねる。
+- **discard（破棄）**: 既存 worktree と branch を削除し、通常の Plan → Implement（新規 branch）で再実行する。削除は **WIP 退避の完了が検証できた場合のみ**実行する（後述の削除ゲート）。検証できない場合は残骸を削除せず `failed` で保全し、次回ランの Recover に委ねる。加えて、worktree / branch の掃除完了を状態更新の戻り値で確認できなかった場合も Plan へ進まず `failed` で保全する（branch 残存下で再 Plan すると `git checkout -B` が WIP commit を orphan 化するため）。
 
 **Recover の判断軸は Review とは別**である。Review は「実装が正しいか・マージできるか」を判定するのに対し、Recover は「この途中作業から継続するのが妥当か」を判断する。動かない・未完成でも方向が妥当なら continue（残りは Implement が完成させる）。
 

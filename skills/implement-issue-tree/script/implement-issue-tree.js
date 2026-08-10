@@ -1221,7 +1221,12 @@ async function updateState(issueNumber, patch, options = {}) {
     // マージが失敗した場合は掃除を実行しない（PR #150 codex-review P0 対応）。状態ファイルへ
     // 新しい状態・回復情報を永続化できていないのに worktree / branch を削除すると、
     // 特に Recover の discard 経路（WIP commit を積んだ branch の削除）でデータ損失に直結する。
-    // 削除意図は sweepEligiblePaths に登録済みのため、スキップしても最終スイープが回収する
+    // なお最終スイープ（sweepClosedWorktrees）が回収するのは worktree のみで、branch は
+    // 回収されない（git worktree remove しか行わない）。branch 残骸の一括削除を sweep に
+    // 追加することは意図的に見送る: sweep 時点では WIP 退避の 2 層ゲート（wipCommitted 申告 +
+    // verifyDiscardSafety）を再検証できず、fail-open のデータ損失経路（#148 で封鎖）を
+    // 再導入するため。branch 残骸は呼び出し側（Recover の discard 経路）が本関数の戻り値
+    // false を検知して failed 終端で保全し、次回ランの Recover に委ねる
     // （fail-safe: 削除しそこねる方向へ倒す）。
     let cleanupOk = true
     if (cleanupPromptText && !mergeOk) {
@@ -3103,7 +3108,7 @@ async function runImplement(item) {
         // patch.branch を '' にすると deleteBranch の対象が空になるため 2 段階に分ける:
         //   1. branch 名（effectiveBranch）を patch に持たせて deleteBranch: true でブランチ削除
         //   2. status: 'planning', branch: '', worktree: '' でクリーン状態に更新
-        await updateState(
+        const discardCleanupOk = await updateState(
           item.number,
           { branch: effectiveBranch },
           {
@@ -3111,6 +3116,23 @@ async function runImplement(item) {
             deleteBranch: true,
           },
         )
+        // 削除実施ゲート（Issue #162 / actions#58 Bugbot Medium）。戻り値 false は
+        // mergeOk 失敗（掃除自体がスキップされた）か cleanupOk 失敗（削除未完）の
+        // いずれかであり、どちらでも branch 削除の完了を確認できない。branch が残存した
+        // まま Plan へフォールスルーすると Implement の git checkout -B <effectiveBranch>
+        // origin/<base> が同一ブランチをサイレントリセットし、退避済み WIP commit が
+        // orphan 化する。fail-closed で Plan へ進まず、残骸を保全して failed 終端にする。
+        if (!discardCleanupOk) {
+          const reason = sanitize(
+            `discard の worktree / branch 掃除を完了確認できなかった（状態マージ失敗による掃除スキップ、または掃除エージェント失敗）。` +
+            `branch が残存したまま Plan へ進むと git checkout -B により退避済み WIP commit が orphan 化するため、残骸を保全して failed にする。` +
+            `branch ${effectiveBranch} と旧 worktree を手動確認し、対処後に再実行すること`,
+          )
+          log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
+          await updateState(item.number, { status: 'failed', note: reason })
+          recordFailure({ issue: item.number, reason })
+          return false
+        }
         // planning 状態に戻してクリアする（branch: '' で状態を初期化）
         await updateState(item.number, { status: 'planning', branch: '', worktree: '' })
         // discard 後は通常 Plan へフォールスルーするため impl は未設定のまま続行
