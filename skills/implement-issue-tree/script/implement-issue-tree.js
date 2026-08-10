@@ -2908,7 +2908,7 @@ await initAllPending(queue.filter((q) => q.state === 'open'))
 // 命名規約からの推測（547 行目付近のコメント参照）はしない。照合するのはブランチ名のみ。
 // 残置 worktree 上限ゲート（PR #588 codex P1）の観測結果。ラン開始時に一度だけ観測し、
 // 新規着手の抑止判定（下の dispatch ループ）と最終レポートの両方で参照するため外側スコープに置く。
-let residualObserved = false // 観測が成立したか（scan 失敗時は false のままゲートをスキップ＝fail-open 防止）
+let residualObserved = false // 観測が成立したか（scan 失敗時は false のまま新規着手を抑止＝fail-closed。レポートで「未観測」を明示）
 let residualObservedAtStart = 0 // メイン・追跡済みを除いた未追跡の残置件数
 let residualPathsAtStart = [] // 停止時レポート用の残置パス一覧
 let newStartSuppressed = null // 上限超過による新規着手抑止の理由（null なら抑止しない。monitoring 再開は抑止しない）
@@ -2955,10 +2955,26 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
   if (runStartOrphanEntries.length === 0) {
     // scanOrphanWorktrees は取得失敗時に例外を伝播させず [] を返す。実在するリポジトリは必ず
     // 先頭にメイン worktree エントリを持つため、length 0 は「正当に残置ゼロ」ではなく「観測が
-    // 成立しなかった」ことを意味する。fail-closed ゲートが観測不成立を「残置ゼロ＝安全」と誤認すると
-    // ゲート自体が fail-open するため、観測不成立時はゲートをスキップしつつ residualObserved を false の
-    // ままにして最終レポートで「未観測」を明示する（transient な agent 失敗でランは止めない）。
-    log('⚠️ ラン開始時の worktree 残置観測に失敗した（git worktree list を取得できず）。残置上限ゲートは今回スキップする')
+    // 成立しなかった」ことを意味する。観測不成立を「残置ゼロ＝安全」と誤認して通常続行すると
+    // ゲート自体が fail-open する（PR #185 codex P1）ため、上限ゲートが有効（maxResidualWorktrees > 0）
+    // な場合は新規着手を抑止する（fail-closed）。monitoring 再開（新規 worktree を積み増さない）は
+    // 抑止対象外のまま継続し、次ランの再観測が成功すれば自動的に解除される。residualObserved は
+    // false のまま残し、最終レポートで「未観測」を明示する。
+    if (maxResidualWorktrees > 0) {
+      newStartSuppressed = {
+        reason:
+          `ラン開始時の worktree 残置観測に失敗した（git worktree list を取得できず）。` +
+          `残置総数を確認できないため、ディスク枯渇防止の上限ゲート（上限 ${maxResidualWorktrees} 件）を` +
+          `適用できず、新規イシューの着手を停止した（fail-closed。monitoring 再開は継続する）。` +
+          `git worktree list が実行できる状態を確認してから再実行すること`,
+        paths: [],
+      }
+      log(`⚠️ ${newStartSuppressed.reason}`)
+    } else {
+      // 上限なし（maxResidualWorktrees === 0）の明示オプトアウト時は観測失敗でも抑止しない
+      // （ゲート無効の意思表示が優先。「観測できない」ことがチェック無効時の安全性を変えない）。
+      log('⚠️ ラン開始時の worktree 残置観測に失敗した（git worktree list を取得できず）。上限ゲートは無効（maxResidualWorktrees: 0）のため続行する')
+    }
   } else {
     residualObserved = true
     // 「現在使用中」＝状態ファイルで worktree を保持する追跡済みエントリ（実装中・監視中・
@@ -4884,6 +4900,28 @@ while (true) {
       // こちらは「新規着手のみ抑止」の粒度に絞る（既に着手済み・監視中の継続まで一律停止するのは
       // 過剰なため。isActiveMonitoring 分岐の後にこのチェックを置くのが線引きの実装表現）。
       if (newStartSuppressed) continue
+      // ラン中の積み増し再評価（PR #185 codex P1）: ラン開始時の観測が上限以下でも、本ランの
+      // review / pr-create が使い捨て worktree を積み増して上限を超えることがある（大きなツリーほど
+      // 顕著）。開始時観測値＋本ラン積み増し数を新規着手の直前に毎回比較し、超過が判明した時点で
+      // 以降の新規着手を止める（既に走っている実装・monitoring 再開は止めない。ラン開始時の判定と
+      // 同じ粒度）。観測失敗時（residualObserved === false）は開始時に newStartSuppressed が設定済みで
+      // ここへ到達しないため、residualObservedAtStart は常に実測値として扱える。
+      if (
+        maxResidualWorktrees > 0 &&
+        residualObserved &&
+        residualObservedAtStart + ephemeralWorktrees.length > maxResidualWorktrees
+      ) {
+        newStartSuppressed = {
+          reason:
+            `残置 worktree がラン中の積み増しで上限 ${maxResidualWorktrees} 件を超過` +
+            `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件）。` +
+            `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
+            `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+          paths: residualPathsAtStart,
+        }
+        log(`⚠️ ${newStartSuppressed.reason}`)
+        continue
+      }
       log(`#${n} を開始（実行中 ${running.size + 1}/${concurrency}）: ${sanitize(item.title)}`)
       running.set(n, runOne(item))
     }
@@ -4923,7 +4961,7 @@ const interrupted = pending.filter((n) => isActiveMonitoring(n))
 const notStartedNote = halted
   ? `halted により未着手（理由: ${halted.reason}）`
   : newStartSuppressed
-    ? `残置 worktree 上限超過により新規着手を抑止（理由: ${newStartSuppressed.reason}）`
+    ? `残置 worktree 上限ゲートにより新規着手を抑止（理由: ${newStartSuppressed.reason}）`
     : 'スケジューラ終了時に未着手（キュー未到達）'
 for (const n of notStarted) {
   results.push({ issue: n, status: 'not-started', note: notStartedNote })
