@@ -4961,7 +4961,13 @@ async function markBlockedByDeps(item, failedDeps) {
     note,
   })
   // blocked 確定: note に理由を記録する（await して return 前に永続化を保証する）
-  await updateState(item.number, { status: 'blocked', note })
+  // updateState はマージ更新のため、pr を明示しないと過去実行由来の stale な PR 番号が
+  // 状態ファイルに残ったままになる。ここは isActiveMonitoring(item.number) が false の
+  // 分岐（上の early return を通らなかった経路）なので有効な再開対象ではなく、
+  // 次回実行時に isActiveMonitoring が誤って true 判定して未解決の依存を monitor
+  // 再開してしまわないよう pr: 0 で必ずクリアする（下流 ideas PR #227 codex-review P1 /
+  // Cursor Bugbot High 指摘）。
+  await updateState(item.number, { status: 'blocked', note, pr: 0 })
   log(`#${item.number}: ${note}`)
 }
 
@@ -5139,8 +5145,13 @@ const notStartedNote = halted
     : 'スケジューラ終了時に未着手（キュー未到達）'
 for (const n of notStarted) {
   results.push({ issue: n, status: 'not-started', note: notStartedNote })
-  // 未着手の notStarted は blocked として状態ファイルに記録する
-  await updateState(n, { status: 'blocked', note: notStartedNote })
+  // 未着手の notStarted は blocked として状態ファイルに記録する。
+  // notStarted は isActiveMonitoring(n) が false（有効な再開対象ではない）の集合のため、
+  // updateState のマージ更新特性により過去実行由来の stale な PR 番号を pr: 0 で
+  // 明示的にクリアする。省略すると次回実行時に isActiveMonitoring が誤って true 判定し、
+  // 未解決の依存を monitor 再開してしまう（下流 ideas PR #227 codex-review P1 /
+  // Cursor Bugbot High 指摘）。
+  await updateState(n, { status: 'blocked', note: notStartedNote, pr: 0 })
 }
 for (const n of interrupted) {
   // 状態ファイル上で monitoring / blocked かつ pr > 0: 再開情報が有効なため状態を上書きせず、
