@@ -1363,11 +1363,14 @@ function findMainWorktreePath(entries) {
 //    候補にならない。
 const sweepEligiblePaths = new Set()
 
-// review / pr-create のような「成果物を保持しない使い捨て worktree」の記録簿。
+// review / pr-create のような「成果物を保持しない使い捨て worktree」と、routingError 時に
+// fix エージェントが自己申告した worktree（fix-routing-error）の記録簿。
 // { issue, kind, path } を追記し、ラン終了時に一覧をログ出力する（削除は行わない）。
 const ephemeralWorktrees = []
 
-// 使い捨て worktree（review / pr-create）を記録する。**削除はしない**（Issue #142）。
+// 使い捨て worktree（review / pr-create）と routingError 時の fix worktree
+// （fix-routing-error。rust-ai-library PR #436 codex-review P0 対応）を記録する。
+// **削除はしない**（Issue #142）。
 //
 // 廃止の理由（配布先 desktop-automation-app#305 の codex-review P0）:
 //   従来はエージェント返却値の `worktreePath` をそのまま `git worktree remove --force` して
@@ -3555,16 +3558,21 @@ async function runImplement(item) {
       }
       if (fReview.routingError) {
         // worktree 誤配置（別リポ）は修正不能。Merge ループの routingError 処理と同様に
-        // 即停止する。誤配置で新規作成された worktree（newWorktreePathReview）のみ掃除し、
-        // 直前の正常 worktree（oldWorktreePathReview）は保持してデバッグ・手動再開に残す。
-        // fixCount は進展なしのため増やさない。push 前のため pr: 0 で記録する。
+        // 即停止する。直前の正常 worktree（oldWorktreePathReview）は保持してデバッグ・
+        // 手動再開に残す。fixCount は進展なしのため増やさない。push 前のため pr: 0 で記録する。
+        //
+        // newWorktreePathReview（エージェント自己申告の worktreePath）は自動削除せず記録に
+        // 留める（rust-ai-library PR #436 codex-review P0 対応）。このパスが「この fix
+        // エージェント用に作られた worktree」であることをホスト側で照合する材料は存在しない
+        // （isolation ランタイムは作成パスをホストへ返さない。recordEphemeralWorktree の
+        // 不採用案コメント参照）。とりわけ routingError 経路はエージェントが異常応答・
+        // プロンプトインジェクションの影響下にある可能性が最も高い局面であり、自己申告値を
+        // cleanupWorktree（git worktree remove --force / rm -rf）へ渡すと、並行実装中・
+        // 利用者作成の別 worktree を指定させて未コミット変更を破壊できてしまう。
         const reason = 'worktree routing error: Review fix worktree が別リポに誤配置（修正不能）。実装リポの worktree への再配置が必要'
         log(`イシュー #${item.number} の Review 修正エージェントが worktree routing error を報告、即停止する`)
-        await updateState(
-          item.number,
-          { status: 'failed', pr: 0, fixCount, note: reason, worktree: oldWorktreePathReview },
-          { cleanupWorktree: newWorktreePathReview },
-        )
+        recordEphemeralWorktree(item.number, fReview?.worktreePath, 'fix-routing-error')
+        await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason, worktree: oldWorktreePathReview })
         recordFailure({ issue: item.number, reason })
         return false
       }
@@ -4308,18 +4316,22 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       if (f.routingError) {
         // worktree 誤配置（別リポ）は修正不能。fix 成功パス（fixCount++ / 旧 worktree 削除）より
-        // 前に即 break する。誤配置で新たに作られた worktree（newWorktreePath）のみ掃除し、
-        // 直前の正常 worktree（oldWorktreePath）は patch.worktree で明示保持してデバッグ・
-        // 手動再開用に残す（patch から worktree を省くと cleanup 後に .worktree が "" へ
-        // クリアされ正常 worktree の追跡を失うため、必ず oldWorktreePath を渡す）。fixCount は
-        // 進展なしのため増やさない。最終 status / note はループ後の共通処理で記録する。
+        // 前に即 break する。直前の正常 worktree（oldWorktreePath）は patch.worktree で明示
+        // 保持してデバッグ・手動再開用に残す。fixCount は進展なしのため増やさない。
+        // 最終 status / note はループ後の共通処理で記録する。
+        //
+        // newWorktreePath（エージェント自己申告の worktreePath）は自動削除せず記録に留める
+        // （rust-ai-library PR #436 codex-review P0 対応）。このパスが「この fix エージェント
+        // 用に作られた worktree」であることをホスト側で照合する材料は存在しない（isolation
+        // ランタイムは作成パスをホストへ返さない。recordEphemeralWorktree の不採用案コメント
+        // 参照）。とりわけ routingError 経路はエージェントが異常応答・プロンプトインジェク
+        // ションの影響下にある可能性が最も高い局面であり、自己申告値を cleanupWorktree
+        // （git worktree remove --force / rm -rf）へ渡すと、並行実装中・利用者作成の別
+        // worktree を指定させて未コミット変更を破壊できてしまう。
         routingErrorDetected = true
         log(`PR #${impl.prNumber} の修正エージェントが worktree routing error を報告、即 failed 終端（halt カウント対象）とする`)
-        await updateState(
-          item.number,
-          { worktree: oldWorktreePath },
-          { cleanupWorktree: newWorktreePath },
-        )
+        recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-routing-error')
+        await updateState(item.number, { worktree: oldWorktreePath })
         lastState = 'blocked'
         // routingErrorDetected が終端 status を 'failed' に確定させるため分類は結果に影響しないが、
         // 意味としては自動では回復し得ない（worktree の手動再配置が必要）。
