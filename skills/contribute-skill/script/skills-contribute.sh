@@ -132,13 +132,60 @@ echo ""
 # 自前の中間ディレクトリ（例: /tmp/claude-<uid>）は作らない: そのディレクトリを
 # 他ユーザーが先に作成していた場合、mkdir -p は所有者・権限を検証せず受け入れてしまい、
 # 親ディレクトリの所有者が配下のエントリを rename・置換できてしまう（sticky bit の
-# 保護は親ディレクトリ自体が信頼できる場合のみ有効）。mktemp -d を
-# ${TMPDIR:-/tmp} 直下（システム標準の sticky bit 付き tmp ルート）に対して直接呼び、
+# 保護は親ディレクトリ自体が信頼できる場合のみ有効）。
+# TMPDIR は環境変数であり呼び出し元が任意の値（他ユーザー所有のディレクトリ・
+# symlink 越しの差し替え先等）を指定できるため、${TMPDIR:-/tmp} を無条件に
+# 信頼済みルートとは扱わない。mktemp -d へ渡す前に実体パス（symlink 解決後）を
+# 求め、実在ディレクトリであること・所有者が自分または root であること・
+# group/other 書き込み可能な場合は sticky bit（他者による rename/置換を阻止）が
+# 設定されていることを fail-closed で検証する。検証したパスと mktemp に渡す
+# パスを一致させることで「検証対象と使用対象がずれる」種類のすり抜けを防ぐ。
+# さらに、検証対象を TMP_ROOT_REAL 単体に限定すると、その祖先ディレクトリが
+# 攻撃者所有・非 sticky な書き込み可能ディレクトリだった場合に検証後 rename で
+# TMP_ROOT_REAL ごと差し替えられてしまう（検証窓の外側からの置換）。そのため
+# TMP_ROOT_REAL からファイルシステムルートまでの全祖先ディレクトリへ同じ基準を
+# 適用する。
+
+# 単一ディレクトリに対して 所有者=自分 or root／他者書き込み可なら sticky bit
+# 必須、を fail-closed で判定する（TMP_ROOT_REAL と全祖先ディレクトリで共用）。
+check_dir_trusted() {
+  local dir="$1" owner mode
+  owner=$(stat -c '%u' "$dir" 2>/dev/null || stat -f '%u' "$dir")
+  if [[ "$owner" != "$(id -u)" && "$owner" != "0" ]]; then
+    echo "エラー: ディレクトリの所有者が不正です（自分でも root でもありません）: ${dir}" >&2
+    return 1
+  fi
+  mode=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir")
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    echo "エラー: ディレクトリのパーミッションを取得できません: ${dir}" >&2
+    return 1
+  fi
+  if (( (8#$mode & 8#022) != 0 )) && [[ ! -k "$dir" ]]; then
+    echo "エラー: ディレクトリが他者から書き込み可能なのに sticky bit が設定されていません: ${dir}（mode ${mode}）" >&2
+    return 1
+  fi
+  return 0
+}
+
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_ROOT_REAL=$(cd -P "$TMP_ROOT" 2>/dev/null && pwd -P) || TMP_ROOT_REAL=""
+if [[ -z "$TMP_ROOT_REAL" || ! -d "$TMP_ROOT_REAL" ]]; then
+  echo "エラー: TMPDIR が実在するディレクトリを指していません: ${TMP_ROOT}" >&2
+  exit 1
+fi
+# TMP_ROOT_REAL 自身とその全祖先（ルートまで）を検証する
+CHECK_DIR="$TMP_ROOT_REAL"
+while true; do
+  check_dir_trusted "$CHECK_DIR" || exit 1
+  [[ "$CHECK_DIR" == "/" ]] && break
+  CHECK_DIR="$(dirname "$CHECK_DIR")"
+done
+# 上記で検証済みの実体パス（TMP_ROOT_REAL）に対して mktemp -d を直接呼び、
 # 中間ディレクトリを挟まず mode 700 のディレクトリを原子的（mkdtemp(3) の O_EXCL 相当）
 # に新規作成する。これにより Step 7 の rm -rf 前検証と実行の間の TOCTOU 窓へ
 # 他プロセスが介入する経路を断つ（openat/O_NOFOLLOW ベースの完全な原子的削除は
 # シェルスクリプトの範囲外のため、非予測可能かつ専有の作業ディレクトリで代替する）。
-WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/contribute-${SKILL_NAME}-XXXXXXXX")
+WORKDIR=$(mktemp -d "${TMP_ROOT_REAL}/contribute-${SKILL_NAME}-XXXXXXXX")
 echo "==> 作業ディレクトリ: $WORKDIR"
 
 # Step 6: upstream を clone する

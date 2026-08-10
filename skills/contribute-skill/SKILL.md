@@ -164,10 +164,48 @@ fi
 ```bash
 # 自前の中間ディレクトリ（例: /tmp/claude-<uid>）は作らない: 他ユーザーが先に
 # 作成していた場合 mkdir -p は所有者・権限を検証せず受け入れてしまうため。
-# mktemp -d を ${TMPDIR:-/tmp}（システム標準の sticky bit 付き tmp ルート）直下に
-# 直接呼び、mode 700 のディレクトリを原子的に新規作成する
-# （サンドボックス互換: $TMPDIR が設定されていればそちらを優先する）
-WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/contribute-${SKILL_NAME}-XXXXXXXX")
+# TMPDIR は環境変数であり任意の値を指定され得るため、${TMPDIR:-/tmp} を
+# 無条件に信頼せず、mktemp -d に渡す前に実体パス（symlink 解決後）・所有者
+# （自分または root）・書き込み権限（他者書き込み可なら sticky bit 必須）を
+# fail-closed で検証する。検証対象は実体パス自身だけでなく、ファイルシステム
+# ルートまでの全祖先ディレクトリに及ぶ（祖先が攻撃者所有・非 sticky な場合、
+# 検証後に祖先側から rename で実体パスごと差し替えられ得るため）。
+
+# 単一ディレクトリに対して 所有者=自分 or root／他者書き込み可なら sticky bit
+# 必須、を fail-closed で判定する（実体パスと全祖先ディレクトリで共用）。
+check_dir_trusted() {
+  local dir="$1" owner mode
+  owner=$(stat -c '%u' "$dir" 2>/dev/null || stat -f '%u' "$dir")
+  if [[ "$owner" != "$(id -u)" && "$owner" != "0" ]]; then
+    echo "エラー: ディレクトリの所有者が不正です（自分でも root でもありません）: ${dir}" >&2
+    return 1
+  fi
+  mode=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir")
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    echo "エラー: ディレクトリのパーミッションを取得できません: ${dir}" >&2
+    return 1
+  fi
+  if (( (8#$mode & 8#022) != 0 )) && [[ ! -k "$dir" ]]; then
+    echo "エラー: ディレクトリが他者から書き込み可能なのに sticky bit が設定されていません: ${dir}（mode ${mode}）" >&2
+    return 1
+  fi
+  return 0
+}
+
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_ROOT_REAL=$(cd -P "$TMP_ROOT" 2>/dev/null && pwd -P) || TMP_ROOT_REAL=""
+if [[ -z "$TMP_ROOT_REAL" || ! -d "$TMP_ROOT_REAL" ]]; then
+  echo "エラー: TMPDIR が実在するディレクトリを指していません: ${TMP_ROOT}" >&2
+  exit 1
+fi
+# TMP_ROOT_REAL 自身とその全祖先（ルートまで）を検証する
+CHECK_DIR="$TMP_ROOT_REAL"
+while true; do
+  check_dir_trusted "$CHECK_DIR" || exit 1
+  [[ "$CHECK_DIR" == "/" ]] && break
+  CHECK_DIR="$(dirname "$CHECK_DIR")"
+done
+WORKDIR=$(mktemp -d "${TMP_ROOT_REAL}/contribute-${SKILL_NAME}-XXXXXXXX")
 ```
 
 ### Step 6: upstream を clone する
@@ -213,7 +251,7 @@ fi
 
 `UPSTREAM_SKILL_PATH` が確定したらコピーを実行します。`cp -R` は追加・上書きのみで削除を伝搬しないため、ローカルで削除したファイルが upstream 側に残存してしまいます。これを避けるため、宛先ディレクトリを一度消してから作り直し、コピーし直す（delete-then-copy）方式を取ります。
 
-**このステップは手順を個別に打鍵せず、必ず `skills/contribute-skill/script/skills-contribute.sh` を実行してください。** 同スクリプトには rm -rf 前の symlink 境界検証（TOCTOU 対策込み）が実装されており、以下の断片だけを個別に実行すると検証が欠落します。
+**このステップは手順を個別に打鍵せず、必ず本スキル自身のスクリプト（`${LOCAL_SKILL_DIR}/script/skills-contribute.sh`。`LOCAL_SKILL_DIR` は Step 1 で解決済みのため `skills/contribute-skill` 配置・`.agents/skills/contribute-skill` 配置のいずれでも解決されます）を実行してください。** 同スクリプトには rm -rf 前の symlink 境界検証（TOCTOU 対策込み）が実装されており、以下の断片だけを個別に実行すると検証が欠落します。
 
 ```bash
 # 削除伝搬のための同期: cp -R は削除を反映しないため、宛先を消してからコピーする
@@ -354,7 +392,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 - **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → スキルルート親ディレクトリ（`skills/` or `.agents/skills/`）の慣習 → 最終デフォルト `skills/`（より一般的な公開レイアウト）
-- **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>` か `.agents/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 7 は必ず `script/skills-contribute.sh` 経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
+- **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>` か `.agents/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 7 は必ず `${LOCAL_SKILL_DIR}/script/skills-contribute.sh`（本スキル自身の配置から解決したパス）経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
 - **既に同名の branch がある場合**：秒単位スラッグで通常は衝突しないが、万一の場合はユーザーに確認
 
 ## sandbox 環境での実行
