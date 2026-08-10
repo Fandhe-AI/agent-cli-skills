@@ -105,7 +105,7 @@ bash tools/bootstrap-firebase.sh  # 冪等。再実行しても安全
 2. `firebase` / `firebasehosting` / `cloudresourcemanager` / `serviceusage` / `iam` の API を有効化
 3. Firebase Management API で Firebase を追加、Hosting API でサイトを作成
 4. CI 用サービスアカウントを作成し**最小ロール**を付与（`roles/firebasehosting.admin` + `roles/serviceusage.apiKeysViewer`）
-5. 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後に**旧 USER_MANAGED 鍵を削除**（10 個上限に達しないよう世代交代。登録前に削除すると失敗時に有効な鍵が残らないため、必ず登録成功後に削除する）。ただし削除するのは `displayName` が本スクリプト専用アカウントと確認できた場合のみで、`SA_ID` の書き換え等で既存の無関係なサービスアカウントと衝突した場合は自動削除しない（削除するには `ROTATE_EXISTING_KEYS=true` の明示指定が必要）。最後に**手元の鍵ファイルを削除**（trap で異常終了時も）
+5. 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後、**サービスアカウントを今回の実行で新規作成した場合のみ**旧 USER_MANAGED 鍵を自動削除（10 個上限対策の世代交代。登録前に削除すると失敗時に有効な鍵が残らないため、必ず登録成功後に削除する）。**サービスアカウントが実行前から存在していた場合は自動削除しません**（`displayName` のような書き換え可能な情報だけを根拠に「本スクリプト専用アカウントだ」と推測すると、同名の別用途アカウントの認証を誤って壊しかねないため）。2 回目以降の再実行で鍵の世代交代をしたい場合は、内容を確認したうえで `ROTATE_EXISTING_KEYS=true` を明示的に指定してください。指定しない場合、鍵は自動削除されず手動での整理が必要になります。最後に**手元の鍵ファイルを削除**（trap で異常終了時も）
 6. `gh variable set FIREBASE_PROJECT_ID` / `FIREBASE_SITE_ID`、`.firebaserc` を生成
 
 **Firebase の追加とサイト作成は firebase CLI ではなく REST API を gcloud のトークンで直接叩きます。** firebase CLI は gcloud と別の認証情報を持つため、CLI を使うとブラウザ認証がもう 1 回増えるためです。API 呼び出しには `x-goog-user-project: <PROJECT_ID>` ヘッダが必須です。gcloud のユーザー認証情報はクォータ課金先を持たず、これがないと gcloud 自身のクライアントプロジェクトが consumer とみなされて `403 SERVICE_DISABLED` になります。
@@ -203,6 +203,8 @@ curl -s -o /dev/null -w '%{http_code} redirects=%{num_redirects}\n' -L "$B/about
 
 **runner は組織の runner-policy（[Fandhe-AI/actions](https://github.com/Fandhe-AI/actions) の `docs/runner-policy.md`）に従います。public リポジトリは GitHub ホステッド runner（`ubuntu-latest` 等）を使い、`pull_request` で未信頼コードを self-hosted 上で実行しません。** private リポジトリで self-hosted を使う場合も、`pull_request_target` の使用や secret を扱う job との信頼境界には注意し、runner-policy.md の手順に従ってください。
 
+**`build` job と `deploy` job を分離しています。** `pull_request` では PR 側の未信頼コード（`cargo run` / `cargo test`）が実行されるため、この job には write 権限のトークンも Firebase の secret も渡しません（`persist-credentials: false` で `actions/checkout` の資格情報も残しません）。ビルド成果物だけを `deploy` job へ artifact 経由で渡し、`pull-requests: write` / `checks: write` や `FIREBASE_SERVICE_ACCOUNT` を扱うのは信頼済みコードだけが動く `deploy` job に限定します。同一 job で未信頼コードと書き込み権限トークンを同居させると、悪意ある PR がビルド中に `GITHUB_TOKEN` や secret を窃取・悪用できてしまうためです。
+
 ```yaml
 name: デプロイ
 
@@ -212,14 +214,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pull-requests: write
-  # action-hosting-deploy は結果を check-run として作成する。permissions を
-  # 明示すると未列挙のスコープは none になるため、checks を落とすと 403
-  # （Resource not accessible by integration）でデプロイ前に落ちる。
-  checks: write
-
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
@@ -228,10 +222,17 @@ env:
   SITE_BASE_URL: https://${{ vars.FIREBASE_SITE_ID || '<site-id>' }}.web.app
 
 jobs:
-  deploy:
+  # 未信頼な PR コードをビルド・テストする job。write 権限のトークンも
+  # Firebase の secret も渡さない（persist-credentials: false で checkout の
+  # 資格情報も残さない）。
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: 前提の確認（fail-closed）
         run: |
@@ -265,6 +266,32 @@ jobs:
           # 別ステップで生成する成果物（wasm 等）の欠落は静的チェックでは
           # 検出できないことが多い。存在を明示的に確認する
           # test -f dist/static/wasm/<name>_bg.wasm || { echo "wasm がありません"; exit 1; }
+
+      - name: 成果物をアップロード
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  # secret と書き込み権限トークンを扱う job。未信頼コードは一切実行せず、
+  # build job が作った成果物を配信するだけに限定する。
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      # action-hosting-deploy は結果を check-run として作成する。permissions を
+      # 明示すると未列挙のスコープは none になるため、checks を落とすと 403
+      # （Resource not accessible by integration）でデプロイ前に落ちる。
+      checks: write
+    steps:
+      - name: 成果物をダウンロード
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
 
       - name: プレビューチャンネルへデプロイ（PR）
         if: github.event_name == 'pull_request'

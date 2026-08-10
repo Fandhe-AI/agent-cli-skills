@@ -10,6 +10,10 @@
 #   3. プロジェクトへ Firebase を追加し、Hosting サイトを作成する
 #   4. CI 用サービスアカウントを作り、Hosting デプロイに必要な最小ロールを付与する
 #   5. サービスアカウント鍵を発行し、GitHub Secret へ登録して手元から消す
+#      （サービスアカウントを今回新規作成した場合のみ、旧鍵を自動削除する。
+#      既存のサービスアカウントに対する再実行で鍵を世代交代したい場合は
+#      ROTATE_EXISTING_KEYS=true を明示的に指定する。指定しなければ鍵は
+#      自動削除されない）
 #   6. .firebaserc を生成する
 #
 # ## 意図的にやらないこと
@@ -67,9 +71,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 project_root="$(cd -- "${script_dir}/.." >/dev/null 2>&1 && pwd)"
 
 sa_email="${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-# 本スクリプトが作成するサービスアカウントの displayName。鍵の自動削除
-# 対象を「このスクリプト専用のサービスアカウント」に限定するための目印
-# として使う（後述）。
+# 本スクリプトが新規作成するサービスアカウントの displayName（表示用）。
 sa_display_name="GitHub Actions (Firebase Hosting deploy)"
 
 log() { printf '\n==> %s\n' "$1"; }
@@ -257,25 +259,18 @@ esac
 
 # --- (4) CI 用サービスアカウント ---
 log "CI 用サービスアカウント ${sa_email} を確認します"
+# displayName は誰でも後から書き換えられるため、鍵の自動削除を許可する
+# 根拠にはしない（別用途のアカウントが同じ displayName を名乗っていれば
+# すり抜けてしまう）。「このスクリプトの今回の実行で新規作成したかどうか」
+# だけを根拠にする。
 if gcloud iam service-accounts describe "${sa_email}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
   echo "既に存在するため作成をスキップします"
+  sa_created_this_run=false
 else
   gcloud iam service-accounts create "${SA_ID}" \
     --display-name="${sa_display_name}" \
     --project="${PROJECT_ID}"
-fi
-
-# 実際の displayName を確認する。SA_ID を書き換えて実行した場合など、
-# 既存の無関係なサービスアカウント（他の CI・サービスが使っている共有
-# アカウント等）と衝突している可能性があるため、鍵の自動削除は
-# 「本スクリプトが作成した専用アカウントだと確認できた場合」に限定する
-# （下記 (5) を参照）。
-actual_display_name="$(gcloud iam service-accounts describe "${sa_email}" \
-  --project="${PROJECT_ID}" --format="value(displayName)" 2>/dev/null || echo "")"
-if [ "${actual_display_name}" = "${sa_display_name}" ]; then
-  sa_is_dedicated=true
-else
-  sa_is_dedicated=false
+  sa_created_this_run=true
 fi
 
 log "最小ロールを付与します"
@@ -323,8 +318,14 @@ gh variable set FIREBASE_SITE_ID --repo "${GITHUB_REPO}" --body "${SITE_ID}"
 echo "登録しました（鍵ファイルは削除されます）"
 
 if [ -n "${existing_keys}" ]; then
-  if [ "${sa_is_dedicated}" = "true" ] || [ "${ROTATE_EXISTING_KEYS:-false}" = "true" ]; then
-    echo "新しい鍵の登録が完了したため、直前まで存在していた旧鍵を削除します（世代交代）"
+  if [ "${sa_created_this_run}" = "true" ]; then
+    # このスクリプトが今回の実行で新規作成したサービスアカウントに
+    # 「作成直後から鍵が存在する」ことは通常あり得ない。念のため到達したら
+    # 安全側に倒して自動削除はしない（displayName 等の推測に頼らない）。
+    echo "警告: 今回新規作成したはずのアカウントに既存鍵が見つかりました。想定外の状態のため自動削除をスキップします。"
+    echo "      内容を確認し、必要なら ROTATE_EXISTING_KEYS=true を指定して再実行してください。"
+  elif [ "${ROTATE_EXISTING_KEYS:-false}" = "true" ]; then
+    echo "新しい鍵の登録が完了したため、直前まで存在していた旧鍵を削除します（ROTATE_EXISTING_KEYS=true による明示指定）"
     while IFS= read -r key_name; do
       [ -n "${key_name}" ] || continue
       gcloud iam service-accounts keys delete "${key_name}" \
@@ -333,13 +334,14 @@ if [ -n "${existing_keys}" ]; then
         --quiet
     done <<< "${existing_keys}"
   else
-    # displayName が本スクリプトの想定と一致しない = SA_ID が意図せず
-    # 既存の別用途サービスアカウントと衝突している可能性がある。他の
-    # CI・サービスの認証情報を誤って失効させないよう、確認なしでは
-    # 削除しない。
-    echo "警告: ${sa_email} は本スクリプトが作成した専用アカウントと確認できませんでした。"
+    # このサービスアカウントは今回の実行より前から存在していた
+    # （＝本スクリプトの初回実行で作られたものではないかもしれない）。
+    # displayName のような書き換え可能な情報だけを根拠に「専用アカウントだ」
+    # と推測して削除すると、同名・同表示名の別用途アカウントの認証を
+    # 誤って壊しかねないため、既定では削除しない。
+    echo "警告: ${sa_email} は今回の実行より前から存在していたサービスアカウントです。"
     echo "      既存の鍵を自動削除すると他用途の認証を壊す恐れがあるため、削除をスキップします。"
-    echo "      意図的に削除する場合は ROTATE_EXISTING_KEYS=true を指定して再実行してください。"
+    echo "      本スクリプト専用のアカウントだと確認できる場合のみ、ROTATE_EXISTING_KEYS=true を指定して再実行してください。"
   fi
 fi
 
