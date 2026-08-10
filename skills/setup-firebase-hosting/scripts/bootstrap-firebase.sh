@@ -88,6 +88,37 @@ api_post() {
     ${body:+-d "${body}"}
 }
 
+# Firebase Management API の long-running Operation が完了するまで待つ。
+# addFirebase は HTTP 200 を返した時点ではまだプロジェクトへの Firebase
+# 追加が終わっておらず、`done: true` になるまでは後続の Hosting
+# sites.create がプロジェクト未整備のまま呼ばれて失敗し得る。
+# タイムアウト（既定 180 秒）に達したら停止し、再実行を促す。
+wait_for_operation() {
+  local op_name="$1" timeout_sec="${2:-180}" interval_sec="${3:-5}" elapsed=0
+  while (( elapsed < timeout_sec )); do
+    local op_result op_status op_body
+    op_result="$(curl -sS -X GET "https://firebase.googleapis.com/v1beta1/${op_name}" \
+      -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+      -H "x-goog-user-project: ${PROJECT_ID}" \
+      -w '\nHTTP_STATUS:%{http_code}')"
+    op_status="$(printf '%s' "${op_result}" | sed -n 's/^HTTP_STATUS://p')"
+    op_body="$(printf '%s' "${op_result}" | sed '$d')"
+    if [ "${op_status}" = "200" ]; then
+      if printf '%s' "${op_body}" | grep -q '"error"'; then
+        die "operation ${op_name} がエラーで終了しました:
+${op_body}"
+      fi
+      if printf '%s' "${op_body}" | grep -Eq '"done"[[:space:]]*:[[:space:]]*true'; then
+        return 0
+      fi
+    fi
+    sleep "${interval_sec}"
+    elapsed=$((elapsed + interval_sec))
+  done
+  die "operation ${op_name} が ${timeout_sec} 秒以内に完了しませんでした。
+GCP 側の処理が続いている可能性があります。しばらくしてから再実行してください。"
+}
+
 # --- (0) 前提ツール ---
 command -v gcloud >/dev/null 2>&1 || die "gcloud が見つかりません。https://cloud.google.com/sdk/docs/install からインストールし、PATH を通してください。"
 command -v gh >/dev/null 2>&1 || die "gh が見つかりません（GitHub Secret の登録に使います）。"
@@ -121,11 +152,15 @@ fi
 
 # --- (2) API 有効化 ---
 log "必要な API を有効化します"
+# iam.googleapis.com が無いと、新規プロジェクトでは (4) のサービスアカウント
+# 作成・鍵発行が失敗するか、gcloud が対話的な有効化プロンプトを出して
+# 非対話実行（CI 等）を止めてしまう。
 gcloud services enable \
   firebase.googleapis.com \
   firebasehosting.googleapis.com \
   cloudresourcemanager.googleapis.com \
   serviceusage.googleapis.com \
+  iam.googleapis.com \
   --project="${PROJECT_ID}"
 
 # --- (3) Firebase の追加と Hosting サイト作成 ---
@@ -133,7 +168,19 @@ log "プロジェクトへ Firebase を追加します"
 add_result="$(api_post "https://firebase.googleapis.com/v1beta1/projects/${PROJECT_ID}:addFirebase" || true)"
 add_status="$(printf '%s' "${add_result}" | sed -n 's/^HTTP_STATUS://p')"
 case "${add_status}" in
-  200) echo "追加しました" ;;
+  200)
+    # addFirebase は Operation（`{"name": "operations/..."}`）を返すのみで、
+    # この時点ではまだ追加が完了していない。done: true になるまで待つ。
+    add_body="$(printf '%s' "${add_result}" | sed '$d')"
+    add_op_name="$(printf '%s' "${add_body}" | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
+    if [ -z "${add_op_name}" ]; then
+      die "addFirebase のレスポンスから operation 名を取得できませんでした:
+${add_body}"
+    fi
+    echo "追加リクエストを受け付けました。完了を待ちます（operation: ${add_op_name}）"
+    wait_for_operation "${add_op_name}"
+    echo "追加しました"
+    ;;
   409) echo "既に Firebase プロジェクトのためスキップします" ;;
   403)
     # IAM 権限（firebase.projects.update ほか）が揃っていても、その Google
@@ -168,7 +215,10 @@ ${add_result}"
 esac
 
 log "Hosting サイト ${SITE_ID} を作成します"
-site_result="$(api_post "https://firebasehosting.googleapis.com/v1beta1/projects/${PROJECT_ID}/sites?siteId=${SITE_ID}" || true)"
+# Hosting API は Site リソースの JSON ボディを要求する。空ボディだと
+# Content-Type: application/json のまま本文が無くなり 400 になり得るため
+# 最小の Site ペイロード（{}）を明示的に送る。
+site_result="$(api_post "https://firebasehosting.googleapis.com/v1beta1/projects/${PROJECT_ID}/sites?siteId=${SITE_ID}" '{}' || true)"
 site_status="$(printf '%s' "${site_result}" | sed -n 's/^HTTP_STATUS://p')"
 case "${site_status}" in
   200) echo "作成しました（https://${SITE_ID}.web.app）" ;;
@@ -211,6 +261,27 @@ done
 
 # --- (5) 鍵を発行して GitHub Secret へ登録（手元には残さない） ---
 log "サービスアカウント鍵を発行し GitHub Secret ${SECRET_NAME} へ登録します"
+
+# 再実行のたびに鍵を増やすと GitHub Secret には最新の 1 個しか反映されない
+# のに古い鍵だけがアクティブなまま残り続け、サービスアカウントあたり 10 個
+# という GCP の上限にいずれ達する。このサービスアカウントは本スクリプト
+# 専用なので、既存の USER_MANAGED 鍵は新規発行前に全て削除してよい。
+existing_keys="$(gcloud iam service-accounts keys list \
+  --iam-account="${sa_email}" \
+  --project="${PROJECT_ID}" \
+  --managed-by=user \
+  --format="value(name)")"
+if [ -n "${existing_keys}" ]; then
+  echo "既存の鍵を削除します（世代交代のため）"
+  while IFS= read -r key_name; do
+    [ -n "${key_name}" ] || continue
+    gcloud iam service-accounts keys delete "${key_name}" \
+      --iam-account="${sa_email}" \
+      --project="${PROJECT_ID}" \
+      --quiet
+  done <<< "${existing_keys}"
+fi
+
 key_file="$(mktemp -t firebase-sa-key)"
 # 鍵ファイルは必ず消す（異常終了時も含む）
 trap 'rm -f "${key_file}"' EXIT
