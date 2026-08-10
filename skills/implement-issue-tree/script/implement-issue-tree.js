@@ -1390,11 +1390,6 @@ const SWEEP_SCHEMA = {
       items: { type: 'string' },
       description: '使い捨て worktree（review / pr-create）のうちマーカー照合を含む全ゲートを通過して削除できた絶対パス一覧。削除ゼロなら空配列',
     },
-    ephemeralRetained: {
-      type: 'array',
-      items: { type: 'string' },
-      description: '使い捨て worktree のうちゲート不成立・削除失敗で残置した絶対パス一覧',
-    },
   },
 }
 
@@ -1427,7 +1422,15 @@ const SWEEP_SCHEMA = {
 // 削除は git worktree remove --force のみで、rm -rf フォールバックは行わない（実装 worktree
 // 側と意図的に非対称。失敗方向は常に残置 + ログ）。
 async function sweepClosedWorktrees(orphanPaths = [], ephemeralRecords = []) {
-  const emptyResult = { removed: [], ephemeralRemoved: [], ephemeralRetained: [] }
+  // ephemeralRetained（残置＝手動掃除の対象）は agent の自己申告ではなく、常にホスト側で
+  // 「記録簿（ephemeralRecords）− 削除実績（ephemeralRemoved）」として導出する。
+  // 早期終了・例外・agent 側の fail-safe 分岐でも残置を過少報告せず、ラン終了ログの
+  // filter 導出（ephemeralWorktrees ベース）と恒等的に一致させるため。
+  const deriveEphemeralRetained = (removedPaths) => {
+    const removedSet = new Set(removedPaths)
+    return ephemeralRecords.map((e) => e.path).filter((p) => !removedSet.has(p))
+  }
+  const emptyResult = { removed: [], ephemeralRemoved: [], ephemeralRetained: deriveEphemeralRetained([]) }
   try {
     if (sweepEligiblePaths.size === 0 && orphanPaths.length === 0 && ephemeralRecords.length === 0) {
       log('worktree スイープ: 削除を試みた worktree・孤立 worktree・使い捨て worktree の記録がないため削除を行わない')
@@ -1515,7 +1518,7 @@ async function sweepClosedWorktrees(orphanPaths = [], ephemeralRecords = []) {
         '   保護する（実装 worktree の誤削除防止。手順 1 の retain_file より広い集合であることに注意）:',
         `     owned_file=$(mktemp)`,
         `     jq -r '.items | to_entries[].value.worktree | select(. != null and . != "")' ${STATE_FILE} > "$owned_file"`,
-        '   この jq が失敗した場合は使い捨て worktree を 1 件も削除せず（全件を ephemeralRetained に入れる）、',
+        '   この jq が失敗した場合は使い捨て worktree を 1 件も削除せず（ephemeralRemoved は空配列のまま）、',
         '   手順 6 へ進む（fail-safe）。成功した場合のみ以下のループを実行する。削除してよいのは',
         '   5 条件（一覧に含まれる・保護リスト外・登録済み実在・マーカー nonce 一致・クリーン）を',
         '   すべて満たすパスだけであり、照合は自力実装に委ねず必ず以下のコマンドをそのまま使うこと:',
@@ -1541,8 +1544,8 @@ async function sweepClosedWorktrees(orphanPaths = [], ephemeralRecords = []) {
         '   削除に失敗した・条件を満たさなかったパスはスキップして残りを継続する（1 件の失敗で中断しない）。',
         '6. 全候補の処理後に git worktree prune を実行する。',
         '7. removed に手順 4 で実際に削除できたパス、retained に手順 1 の保持対象パス、',
-        '   ephemeralRemoved に手順 5 で実際に削除できたパス、ephemeralRetained に手順 5 の一覧の',
-        '   うち削除しなかった（条件不成立・削除失敗）パスを入れて返す。',
+        '   ephemeralRemoved に手順 5 で実際に削除できたパスを入れて返す',
+        '   （手順 5 の一覧のうち削除しなかったパスの残置集計はホスト側で行うため報告不要）。',
         '',
         '注意: ブランチは削除しない（git branch -D は実行しない）。未 push のコミットを持つブランチが',
         '含まれ得るため、ブランチの寿命は worktree の寿命と切り離す。',
@@ -1551,13 +1554,12 @@ async function sweepClosedWorktrees(orphanPaths = [], ephemeralRecords = []) {
     )
     const removed = Array.isArray(v?.removed) ? v.removed : []
     const ephemeralRemoved = Array.isArray(v?.ephemeralRemoved) ? v.ephemeralRemoved : []
-    const ephemeralRetained = Array.isArray(v?.ephemeralRetained) ? v.ephemeralRetained : []
     if (removed.length > 0) {
       log(`worktree スイープ: ${removed.length} 件を削除した`)
     } else {
       log('worktree スイープ: 削除対象なし')
     }
-    return { removed, ephemeralRemoved, ephemeralRetained }
+    return { removed, ephemeralRemoved, ephemeralRetained: deriveEphemeralRetained(ephemeralRemoved) }
   } catch (e) {
     // agent の throw をここで吸収する。最終スイープは run report の return 直前に走るため、
     // 例外を伝播させると全イシュー処理完了後でも done / failures / notStarted / interrupted の
