@@ -1231,7 +1231,7 @@ async function updateState(issueNumber, patch, options = {}) {
     let cleanupOk = true
     if (cleanupPromptText && !mergeOk) {
       cleanupOk = false
-      log(`⚠️ #${issueNumber}: 状態ファイル更新に失敗したため worktree / branch の掃除をスキップした（回復情報の保全を優先。残骸は最終スイープで回収する）`)
+      log(`⚠️ #${issueNumber}: 状態ファイル更新に失敗したため worktree / branch の掃除をスキップした（回復情報の保全を優先。worktree は最終スイープで回収されるが branch は残存し、discard 経路は本関数の戻り値 false の検知で failed 終端として保全する）`)
     } else if (cleanupPromptText) {
       const cleanupResult = await agent(cleanupPromptText, {
         label: `state:cleanup:#${issueNumber}`,
