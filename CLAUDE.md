@@ -37,6 +37,8 @@ skills/                               -- スキル本体（各ディレクトリ
   project-update-items/
   project-sync-issues/
   project-archive-done/
+  setup-firebase-hosting/
+    scripts/                           -- bootstrap-firebase.sh（GCP/Firebase 環境構築スクリプト）
   contribute-skill/
   sync-skills-lock/
 .claude/
@@ -154,11 +156,11 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `verification.md` | implement-issue / implement-issue-tree / implement-review / implement-review-pr / create-pr | 完了ゲート（証拠なき完了宣言の禁止・5段階検証） |
 | `debugging.md` | implement-issue / implement-issue-tree / sub-investigator | 根本原因デバッグ（修正前の原因調査・3回失敗でエスカレーション） |
 
-## Current Skills (24)
+## Current Skills (25)
 
-### 開発ワークフロー (12)
+### 開発ワークフロー (13)
 
-comment-code, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, update-docs, update-issue-tree
+comment-code, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, setup-firebase-hosting, update-docs, update-issue-tree
 
 ### スキル著作・リファレンス (1)
 

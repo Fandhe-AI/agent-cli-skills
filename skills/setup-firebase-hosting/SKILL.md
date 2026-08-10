@@ -24,6 +24,8 @@ model: sonnet
 - **完全な静的サイト**であること（サーバー処理・API・DB を持たない）。動的処理が要るなら Cloud Run 等を検討する（後述の「他サービスを選ばない理由」参照）
 - ビルドコマンドを 1 つ叩けば出力ディレクトリ（`dist/` 等）が完成すること
 
+**sandbox 環境での実行について:** `bootstrap-firebase.sh` は `gcloud auth login` のブラウザ認証・GCP/Firebase API 呼び出し・`gh secret set` などネットワーク越しの認証操作を必須とするため、sandbox（ネットワーク制限下）では実行できません。認証済みのローカル端末または CI 上で実行してください。`firebase.json` の作成やローカル検証（Step 3-4）はネットワーク不要なため sandbox でも実行可能です。
+
 ## 最初にユーザーへ確認すること
 
 ### 1. Firebase 利用規約の承諾（**Google アカウントにつき 1 回・コンソールでしか行えない**）
@@ -199,6 +201,8 @@ curl -s -o /dev/null -w '%{http_code} redirects=%{num_redirects}\n' -L "$B/about
 
 `.github/workflows/deploy.yml`。以下は Rust + wasm の例です。**ビルド部分は対象プロジェクトに合わせて差し替えてください。**
 
+**runner は組織の runner-policy（[Fandhe-AI/actions](https://github.com/Fandhe-AI/actions) の `docs/runner-policy.md`）に従います。public リポジトリは GitHub ホステッド runner（`ubuntu-latest` 等）を使い、`pull_request` で未信頼コードを self-hosted 上で実行しません。** private リポジトリで self-hosted を使う場合も、`pull_request_target` の使用や secret を扱う job との信頼境界には注意し、runner-policy.md の手順に従ってください。
+
 ```yaml
 name: デプロイ
 
@@ -225,7 +229,7 @@ env:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -236,7 +240,7 @@ jobs:
           test -n "${{ vars.FIREBASE_SITE_ID }}" \
             || { echo "FIREBASE_SITE_ID が未設定です。"; exit 1; }
 
-      # self-hosted ランナーの PATH には ~/.cargo/bin が入っていないことがある
+      # GitHub ホステッド runner は毎回まっさらな環境のため ~/.cargo/bin が PATH に無い
       - name: ツールチェーンを用意
         run: |
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
