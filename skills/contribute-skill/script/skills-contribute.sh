@@ -179,7 +179,40 @@ case "${UPSTREAM_SKILL_PATH}" in
     exit 1
     ;;
 esac
-rm -rf "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
+
+# symlink 境界検証（fail-closed）: 上記 case allowlist は UPSTREAM_SKILL_PATH の
+# 文字列形式のみを検証しており、clone 内の中間ディレクトリが実行中に symlink へ
+# 差し替えられた場合には対応できない。rm -rf の直前に以下 2 点を実体パスで再確認する。
+#   (a) clone ルートから削除対象までの各中間パス要素が symlink でないこと
+#   (b) 削除対象の親ディレクトリの正規パス（pwd -P）が clone ルート配下であること
+# いずれかに違反する場合は削除を実行せずエラー終了する。
+CLONE_ROOT="${WORKDIR}/upstream"
+DELETE_TARGET="${CLONE_ROOT}/${UPSTREAM_SKILL_PATH}"
+CLONE_ROOT_REAL="$(cd "${CLONE_ROOT}" && pwd -P)"
+
+check_dir="${CLONE_ROOT}"
+IFS='/' read -ra UPSTREAM_SKILL_PATH_PARTS <<< "${UPSTREAM_SKILL_PATH}"
+for part in "${UPSTREAM_SKILL_PATH_PARTS[@]}"; do
+  check_dir="${check_dir}/${part}"
+  if [[ -L "${check_dir}" ]]; then
+    echo "エラー: 削除対象の経路に symlink が含まれています: ${check_dir}"
+    exit 1
+  fi
+done
+
+DELETE_PARENT="$(dirname "${DELETE_TARGET}")"
+if [[ -d "${DELETE_PARENT}" ]]; then
+  DELETE_PARENT_REAL="$(cd "${DELETE_PARENT}" && pwd -P)"
+  case "${DELETE_PARENT_REAL}/" in
+    "${CLONE_ROOT_REAL}/"*) ;;
+    *)
+      echo "エラー: 削除対象の親ディレクトリが clone ルート配下ではありません: ${DELETE_PARENT_REAL}"
+      exit 1
+      ;;
+  esac
+fi
+
+rm -rf "${DELETE_TARGET}"
 mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 cp -R "${ORIG_DIR}/${LOCAL_SKILL_DIR}/." "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}/"
 
