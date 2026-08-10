@@ -133,7 +133,12 @@ echo ""
 UID_VAL=$(id -u)
 TS=$(date +%Y%m%d-%H%M%S)
 WORKDIR="${TMPDIR:-/tmp/claude-${UID_VAL}}/contribute-${SKILL_NAME}-${TS}"
-mkdir -p "$WORKDIR"
+# mode 700: 同一 uid 以外の書き込みを塞ぎ、rm -rf 前の検証と実行の間の TOCTOU 窓に
+# 他プロセスが介入できないようにする（openat/O_NOFOLLOW ベースの原子的削除は
+# シェルスクリプトの範囲外のため、非予測可能かつ専有の作業ディレクトリで代替する）
+# shellcheck disable=SC2174 # -p との併用で -m は最深階層のみに適用されるが、
+# 保護対象は $WORKDIR 自身であり中間ディレクトリ（$TMPDIR 側）は対象外のため意図通り
+mkdir -m 700 -p "$WORKDIR"
 echo "==> 作業ディレクトリ: $WORKDIR"
 
 # Step 6: upstream を clone する
@@ -186,6 +191,13 @@ esac
 #   (a) clone ルートから削除対象までの各中間パス要素が symlink でないこと
 #   (b) 削除対象の親ディレクトリの正規パス（pwd -P）が clone ルート配下であること
 # いずれかに違反する場合は削除を実行せずエラー終了する。
+# 残存する境界: 検証（pwd -P 確認）と rm -rf 実行の間に、書き込み権限を持つ別プロセスが
+# 検証済みディレクトリ自体を改名・移動する可能性は原理上残る。これを検査と削除を単一の
+# システムコールで不可分にして完全に閉じるには openat(..., O_NOFOLLOW) ベースの
+# コンパイル済みヘルパーが必要であり、シェルスクリプトの範囲外とする。代わりに
+# Step 5 で $WORKDIR を mode 700（同一 uid 専有）の非予測可能なパスとして作成し、
+# 同一 uid の敵対プロセスは脅威モデル外とする（そのようなプロセスは本スクリプト自体
+# も書き換え可能なため、追加防御しても意味がない）。
 CLONE_ROOT="${WORKDIR}/upstream"
 DELETE_TARGET="${CLONE_ROOT}/${UPSTREAM_SKILL_PATH}"
 CLONE_ROOT_REAL="$(cd "${CLONE_ROOT}" && pwd -P)"

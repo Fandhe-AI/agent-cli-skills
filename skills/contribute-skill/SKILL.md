@@ -166,7 +166,9 @@ UID_VAL=$(id -u)
 TS=$(date +%Y%m%d-%H%M%S)
 # $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
 WORKDIR="${TMPDIR:-/tmp/claude-${UID_VAL}}/contribute-${SKILL_NAME}-${TS}"
-mkdir -p "$WORKDIR"
+# mode 700: 同一 uid 以外の書き込みを塞ぎ、Step 7 の rm -rf 前検証と実行の間の
+# TOCTOU 窓に他プロセスが介入できないようにする
+mkdir -m 700 -p "$WORKDIR"
 ```
 
 ### Step 6: upstream を clone する
