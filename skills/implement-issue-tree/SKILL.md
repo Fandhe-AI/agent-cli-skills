@@ -69,7 +69,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 |------|------|-----------|
 | 未指定 | 外部チェック構成が**未確定** | 観測結果にかかわらず自動マージを停止し `blocked` で終端する（実装・PR 作成・CI までは進む） |
 | `[]` | 「外部チェックを使用しない」と人間が**確定** | 外部レビュー待機をスキップして CI green と未解決スレッドなしのみで判定する |
-| `["cursor"]` 等 | 指定 App を正とする（観測結果より優先） | 指定した**全 App** について HEAD sha に対する起動を検証する。cursor は「レビューが 1 件以上到着していること」（Issue #146。内容評価は監視側が担当）、それ以外の App は check-run が 1 件以上ならその全件が許容 conclusion であること、check-run が 0 件のときに限りフォールバックとして「APPROVED レビューが 1 件以上かつ否定的レビュー 0 件」であることをマージ条件とする（Issue #155） |
+| `["cursor"]` 等 | 指定 App を正とする（観測結果より優先） | 指定した**全 App** について HEAD sha に対する起動を検証する。cursor は check-run が 1 件以上ならその全件が許容 conclusion であること、check-run が 0 件のときに限りフォールバックとして「レビューが 1 件以上到着していること」（Issue #146。内容評価は監視側が担当。state は問わない）、それ以外の App は check-run が 1 件以上ならその全件が許容 conclusion であること、check-run が 0 件のときに限りフォールバックとして「APPROVED レビューが 1 件以上かつ否定的レビュー 0 件」であることをマージ条件とする（Issue #155） |
 
 観測ベースの検出は直近 3 件の merged PR しか見ないため、新規導入 App・条件付き起動 App・直近 3 件で実行されなかった App を取りこぼす。「検出なし」が不在の証明にならないのはもちろん、**「検出あり」も集合としての完全性を保証しない**（例: 観測で `sonarcloud` だけを拾い、実際には必須の `cursor` を取りこぼしたまま「確定済み」として cursor[bot] レビューの再検証を省いてしまう）。したがって観測結果は確定情報として扱わず、参考値としてログ・停止理由・返却値に残すだけにする。`externalChecks` が配列でない・slug 形式でない・11 件以上の場合は既定値へフォールバックせずエラーで停止する（`parallel` は性能ノブのため不正値を既定 3 へ落とすが、`externalChecks` はマージゲートの入力であり、誤記を黙って「未指定」や「なし確定」に読み替えるとゲートが静かに弱まるため）。
 
@@ -247,7 +247,7 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
   - 監視が有効な `headSha`（40 桁）を返さなかった場合も merge-exec は起動するが、新規マージは行わず「PR が既に MERGED ならイシュークローズ確認のみ」に限定される（前回ランでマージ済み・状態記録に失敗した PR の回復パスを保ちつつ fail-closed を維持する）。この限定はプロンプト解釈に任せず、マージ実行手順の文面もホスト側で分岐し、空 sha 経路のプロンプトには `gh pr merge` / `--match-head-commit` を一切含めずイシュークローズ確認のみを出力する（Issue #161）。外部チェック構成が未確定のラン（`externalChecks` 未指定）では、監視が headSha を返していてもホストが `expectedHeadSha` を強制的に空にし、この回復専用経路のみを許可する（Issue #168）。
   - マージ成功でもイシューのクローズを確認できない場合（`issueClosed: false`）は `merged` として終端せず再監視でクローズを再試行し、監視回数を使い切った場合は「PR はマージ済みだがクローズ未確認」として `blocked` で終端する（次回実行の monitoring 再開で回復する）。
 - **独立確認エージェント（merge-verify、Issue #160）**: merge-exec が `merged: true` を返しても、ホストはそれを未検証のモデル出力として扱い無条件受理しない。`merged: true` は `reason` が `merged` / `already-merged` と整合する場合のみ受理候補とし（不整合・enum 外は systemic failure として `failed` 終端・halt カウント対象）、さらに merge-exec とは別コンテキストの読み取り専用エージェントが `gh pr view <N> --json state,headRefOid,mergeCommit` の取得値のみを返し、ホストが `state` の完全一致（`MERGED`）と監視時点 HEAD sha との一致（`sanitizeSha` 通過値。前回ランでマージ済み・headSha 未記録の already-merged 回復経路では比較対象がないため state のみ）を厳密再検証する。裏付けられない場合（state 不一致・HEAD 不一致・取得不能・無効応答）は fail-closed で `blocked`（`blockedReason: quality`）で終端し、worktree 削除・`dependsOn` 後続イシューの解放は行わない。`blocked` + `pr` は次回ランの monitoring 再開対象のため、実際にマージ済みなら already-merged 経路で自然回復する。返却 schema は自由文フィールドを持たず、確認エージェントはレビュー本文・Issue 本文・コメント・チェック名を一切読まない（ホストのログ・note には enum 完全一致・`sanitizeSha` 通過済みの検証値のみを合成する）。
-  - 辞退理由（`reason`）はホスト側で `head-moved` / `checks-not-green`（許容外 state の存在に加え、チェック総数 0 件・`gh pr checks` 非ゼロ終了の fail-closed 辞退を含む。Issue #159） / `merge-failed` → 再監視、`unresolved-threads` → fix ループ（ただし手元にスレッド内容の構造化一覧がない場合は fix を起動せず再監視し、監視エージェントに内容を収集させる）、`not-mergeable` → fix ループ、`pr-closed` → blocked、`external-review-missing` → blocked（Issue #146 / #155。同一ラン内で再監視しても到着を保証できないため fail-open せず終端し、チェック到着後の再実行で monitoring 再開により継続する。終端理由には確定済み slug 一覧と「解消しない場合は slug の誤記・当該 App 未導入を疑い、App の導入状況を確認するか当該 slug を `args.externalChecks` から除外する」旨を添える。合格条件の提示は App 種別で出し分ける: cursor は「HEAD sha に対する cursor[bot] レビューの到着のみ（state 不問。Bugbot は APPROVED を返さないため APPROVED を待たない）」、cursor 以外の slug は「check-run の合格 conclusion、check-run 0 件時のみ APPROVED レビューへフォールバック」を明記する）、enum 外 → systemic failure、へマッピングされる。
+  - 辞退理由（`reason`）はホスト側で `head-moved` / `checks-not-green`（許容外 state の存在に加え、チェック総数 0 件・`gh pr checks` 非ゼロ終了の fail-closed 辞退を含む。Issue #159） / `merge-failed` → 再監視、`unresolved-threads` → fix ループ（ただし手元にスレッド内容の構造化一覧がない場合は fix を起動せず再監視し、監視エージェントに内容を収集させる）、`not-mergeable` → fix ループ、`pr-closed` → blocked、`external-review-missing` → blocked（Issue #146 / #155。同一ラン内で再監視しても到着を保証できないため fail-open せず終端し、チェック到着後の再実行で monitoring 再開により継続する。終端理由には確定済み slug 一覧と「解消しない場合は slug の誤記・当該 App 未導入を疑い、App の導入状況を確認するか当該 slug を `args.externalChecks` から除外する」旨を添える。合格条件の提示は App 種別で出し分ける: cursor は「check-run の合格 conclusion、check-run 0 件時のみ cursor[bot] レビューの到着へフォールバック（state 不問。Bugbot は APPROVED を返さないため APPROVED を待たない）」、cursor 以外の slug は「check-run の合格 conclusion、check-run 0 件時のみ APPROVED レビューへフォールバック」を明記する）、enum 外 → systemic failure、へマッピングされる。
 
 **マージ実行条件:**
 1. **CI 全 green**: 全チェックが success / neutral / skipped で完了し、failure / cancelled / timed_out が 0 件かつ pending / queued / in_progress が 0 件であること。pending が残るなら監視を継続する。かつ**チェック総数が 1 件以上存在する**こと。0 件は green とみなさず、監視側は最大 10 分の再確認後に `blocked`（quality）で停止する（Issue #159。workflow の `on:` 条件・パスフィルタによる全 job スキップや required workflow 未配置で CI が一度も起動していない PR を自動マージしない fail-closed。merge-exec 側もチェック総数 0 件・`gh pr checks` の非ゼロ終了を `checks-not-green` として辞退する）。
@@ -259,9 +259,9 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 **外部チェック待機の 4 分岐（`args.externalChecks` と Step 1 の観測結果による）:**
 - **確定不能（`externalChecks` 未指定）**: 外部レビューを省略してよいか判断できないため、CI の結果にかかわらず `state: blocked` で停止する（Issue #147）。ホスト側にも同じゲートがあり、監視エージェントが `ready` を返しても**新規マージ**は行わず `blocked` で終端する（プロンプト + ホストの二重検証）。停止理由には観測結果（参考値）と再実行用の `args` 例が記録され、`blocked` + `pr` は次回ランの monitoring 再開対象となる。ただし PR が既に `MERGED` の場合（前回ランでマージ済み・状態記録に失敗した PR）のクローズ・状態記録の回復は、ホストが `expectedHeadSha` を空に固定した回復専用 merge-exec（プロンプトに `gh pr merge` を含まない空 sha 経路）+ merge-verify の `state=MERGED` 独立確認を経て `merged` 終端できる（Issue #168。新規マージ経路は開かず、PR がマージ済みでなければ従来どおり未確定理由の `blocked` で終端する）。
 - **外部チェックなし確定（`externalChecks: []`）**: 外部レビュー待機はスキップする。CI 全 green と未解決スレッドなしのみで判定する。
-- **cursor（Cursor Bugbot）**: cursor[bot] によるレビュー待機フローを実行する。HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はしない）。HEAD sha に対する cursor[bot] レビューの到着を最大 10 分待ち、到着すれば指摘解決を待ってからマージする。**到着しない場合は「レビューなし」とみなさず `state: blocked` で停止する**（Issue #146。App の障害・遅延・起動失敗時にレビューゲートを迂回させないための fail-closed。レビュー到着後に再実行すれば monitoring 再開で継続する）。
+- **cursor（Cursor Bugbot）**: Bugbot の起動待機フローを実行する。HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はしない）。起動の証拠は **HEAD sha に対する cursor の check-run** または **cursor[bot] レビュー**のいずれかで、Bugbot は**指摘が 1 件以上あるときだけレビューを投稿し、指摘 0 件のときは check-run のみを completed にする**ため、レビュー不在を未起動とみなしてはならない（実測: rust-ai-library PR #437 / #438 / #439 は check-run `success`・レビュー 0 件、PR #434 / #436 は指摘ありでレビュー到着）。check-run が未完了（`queued` / `in_progress`）なら完了まで待ち、許容外 conclusion（`failure` / `cancelled` / `timed_out`）なら `needs-fix` とする。レビューが到着している場合のみ内容を評価し、指摘があれば `needs-fix` とする。**check-run もレビューも最大 10 分待って 0 件のままなら「チェックなし」とみなさず `state: blocked` で停止する**（Issue #146。App の障害・遅延・起動失敗時にレビューゲートを迂回させないための fail-closed。起動後に再実行すれば monitoring 再開で継続する）。なお check-run の conclusion は指摘の有無を表さない（指摘ありでも `success` / `neutral` の双方が観測される）ため合格 conclusion を「指摘なし」の根拠にはしない。Bugbot の指摘はレビュースレッドとして現れ、**未解決スレッド 0 件**という別条件で独立にゲートされる（resolve は常に人間が行う）。
 - **cursor 以外の外部チェック（例: sonarcloud）**: `gh pr checks --watch`（CI 監視）は「**存在する**チェックが緑になったか」しか保証せず、App がそもそも起動していなければ何も監視しないまま全 green と判定される。そのため App ごとに **HEAD sha に対する check-run の起動そのもの**を確認する（Issue #155。従来はこの確認がなく、`externalChecks: ["sonarcloud"]` と明示しても SonarCloud が未起動のままマージできる fail-open だった）。0 件なら最大 10 分待って再確認し、それでも 0 件なら `state: blocked` で停止する。check-run を作らずレビューのみ投稿する App のために `<slug>[bot]` レビューの HEAD sha 一致もフォールバックとして確認する（**レビューは `state` まで検証する**。合格にできるのは「`APPROVED` が 1 件以上、かつ `CHANGES_REQUESTED` / `COMMENTED` / `PENDING` が 0 件」の場合のみで、否定的レビューが `APPROVED` と併存する場合も不合格とする。merge-exec はレビュー本文を読まず内容を評価できないため、評価できないものは fail-closed で不合格とする。`DISMISSED` は GitHub 上で無効化済みのため判定に含めない）。
-  - cursor と他 App を併記した構成（例: `["cursor", "sonarcloud"]`）では、cursor のレビュー到着確認に加えて他 App の起動確認も併せて実施する。
+  - cursor と他 App を併記した構成（例: `["cursor", "sonarcloud"]`）では、cursor の起動確認に加えて他 App の起動確認も併せて実施する。
   - `blocked` が再実行でも解消しない場合は slug の誤記、または当該 App が対象リポジトリで動作していない可能性がある。App の導入状況を確認するか、`args.externalChecks` から当該 slug を除外して再実行する。
 
 ```bash
@@ -275,12 +275,16 @@ gh pr checks <pr-number> --watch --interval 60
 # failure / cancelled / timed_out が 0 件、pending / queued / in_progress が 0 件であること
 gh pr checks <pr-number>
 
-# Bugbot（cursor[bot]）レビューが HEAD sha に対して到着しているか確認する（cursor 確定時のみ）
+# Bugbot（cursor）が HEAD sha に対して起動しているか確認する（cursor 確定時のみ）
+# まず check-run を見る（指摘 0 件のとき Bugbot はレビューを投稿せず check-run だけを completed にする）
+gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs" \
+  --jq '[.check_runs[] | select(.app.slug == "cursor") | (.conclusion // .status)] | group_by(.) | map({v: .[0], count: length})'
+# check-run が 0 件のときのみ、レビュー到着へフォールバックする（state は問わない）
 # commit_id が HEAD_SHA と一致するレビューを探す（30 件超のレビューを取りこぼさないよう --paginate 必須）
 gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
   --jq "[.[] | select(.user.login == \"cursor[bot]\" and .commit_id == \"${HEAD_SHA}\")] | length"
-# → 合計が 0 の場合は最大 10 分待つ（HEAD push から 1 分以上経過後に @cursor review を 1 回だけ催促可）
-# → 待機上限を超えても到着しない場合は blocked で停止する（「レビューなし」として先へ進まない）
+# → いずれも 0 件の場合は最大 10 分待つ（HEAD push から 1 分以上経過後に @cursor review を 1 回だけ催促可）
+# → 待機上限を超えても 0 件のままなら blocked で停止する（「チェックなし」として先へ進まない）
 
 # cursor 以外の外部チェック App（例: sonarcloud）が HEAD sha に対して起動しているかを確認する
 # commits/<sha>/check-runs は sha でスコープ済みのため jq 側で sha 比較は不要
@@ -670,7 +674,7 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
 - マージ前に **CI は全チェックが success/neutral/skipped で完了（pending/failure 0 件）であること**を明示確認する（`gh pr checks --watch` が終わっただけでは合格にせず、全チェックの結論を列挙して確認する）
 - マージ前に **チェックが 1 件以上存在すること**を確認する。チェック総数 0 件・`gh pr checks` の非ゼロ終了（チェック不在エラー・取得不能を含む）は green とみなさず、監視側は `blocked`（quality）で停止し、merge-exec 側は `checks-not-green` で辞退する（Issue #159。CI 未起動の PR を自動マージしない fail-closed）
 - 外部チェック（Cursor Bugbot 等）の構成は `args.externalChecks` で明示する。Step 1（Tree フェーズ）の観測（直近 3 件の merged PR 分析）は参考値にすぎず、明示がない限り**新規マージ**を停止する（PR が既に `MERGED` の場合のクローズ・状態記録回復のみ、空 sha 固定の回復専用 merge-exec + merge-verify 経由で `merged` 終端できる。Issue #168）。Bugbot 待機・`@cursor review` 催促を省略できるのは `externalChecks: []` で「外部チェックなし」を確定した場合のみ
-- `args.externalChecks` で明示した外部チェック App は、slug を問わず **HEAD sha に対する起動の確認**をマージの必須条件とする（Issue #155。cursor だけでなく sonarcloud 等も検証する）。cursor はレビューが 1 件以上到着していること（内容評価は監視側の needs-fix 判定が担う。Bugbot は APPROVED を出さないため state は問わない）、cursor 以外は check-run が 1 件以上ならその全件が許容 conclusion であること（failure・未完了があれば APPROVED レビューが存在しても不合格）、check-run が 0 件のときに限り「APPROVED レビューが 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」であることを条件とする。待機上限（最大 10 分）内に起動を確認できなければ「チェックなし」とみなさず `blocked` で停止する（App の障害・遅延・起動失敗時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも App ごとに件数・状態 enum のみを再取得して独立に検証する
+- `args.externalChecks` で明示した外部チェック App は、slug を問わず **HEAD sha に対する起動の確認**をマージの必須条件とする（Issue #155。cursor だけでなく sonarcloud 等も検証する）。cursor は check-run が 1 件以上ならその全件が許容 conclusion であること、check-run が 0 件のときに限り「cursor[bot] レビューが 1 件以上到着していること」（内容評価は監視側の needs-fix 判定が担う。Bugbot は APPROVED を出さないため state は問わない。指摘 0 件のときはレビュー自体が投稿されないため check-run が唯一の起動証拠になる）、cursor 以外は check-run が 1 件以上ならその全件が許容 conclusion であること（failure・未完了があれば APPROVED レビューが存在しても不合格）、check-run が 0 件のときに限り「APPROVED レビューが 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」であることを条件とする。待機上限（最大 10 分）内に起動を確認できなければ「チェックなし」とみなさず `blocked` で停止する（App の障害・遅延・起動失敗時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも App ごとに件数・状態 enum のみを再取得して独立に検証する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
 - **merged 終端は独立確認を通過した場合のみ**確定する。merge-exec の `merged: true` は `reason`（`merged` / `already-merged`）との整合を必須とし（不整合は systemic failure として `failed` 終端）、さらに読み取り専用の merge-verify エージェントで `state=MERGED` と監視時点 HEAD sha の一致を独立確認できた場合にのみ merged として扱う。確認不能・不一致は `blocked`（quality）で fail-closed し、実際にマージ済みなら次回ランの monitoring 再開（already-merged 経路）で回復する（Issue #160）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
