@@ -141,11 +141,26 @@ else
 fi
 
 # 請求先アカウントが紐付いていないことを確認する（Spark 前提の生命線）。
+# billingEnabled が取得できない（unknown）場合も、紐付いていないと決めつけず
+# fail-closed で停止する。「課金され得ない」という本スクリプトの中核の安全
+# 保証は、判定不能な状態のまま進めた時点で崩れるため。
 billing_enabled="$(gcloud billing projects describe "${PROJECT_ID}" \
   --format="value(billingEnabled)" 2>/dev/null || echo "unknown")"
-if [ "${billing_enabled}" = "True" ]; then
-  echo "警告: このプロジェクトには請求先アカウントが紐付いています。"
-  echo "      Spark プランの「課金され得ない」保証は失われます。意図した構成か確認してください。"
+if [ "${billing_enabled}" != "False" ]; then
+  if [ "${ALLOW_BLAZE:-false}" = "true" ]; then
+    echo "警告: 請求先アカウントの状態が Spark 確定ではありません（billingEnabled=${billing_enabled}）。"
+    echo "      ALLOW_BLAZE=true が指定されているため、明示的な承認とみなし続行します。"
+  else
+    die "請求先アカウントの状態が Spark 確定ではありません（billingEnabled=${billing_enabled}）。
+
+このプロジェクトには請求先アカウントが紐付いているか、状態を判定できません
+でした。Spark プランの『課金され得ない』保証は billingEnabled=False の場合
+にしか成立しないため、既定では停止します。
+
+意図的に Blaze（従量課金）で進める場合のみ、明示的に承認したことを示す
+環境変数を付けて再実行してください:
+  ALLOW_BLAZE=true PROJECT_ID=${PROJECT_ID} SITE_ID=${SITE_ID} GITHUB_REPO=${GITHUB_REPO} bash $0"
+  fi
 else
   echo "請求先アカウントは未紐付け（Spark プラン）です"
 fi
@@ -264,23 +279,18 @@ log "サービスアカウント鍵を発行し GitHub Secret ${SECRET_NAME} へ
 
 # 再実行のたびに鍵を増やすと GitHub Secret には最新の 1 個しか反映されない
 # のに古い鍵だけがアクティブなまま残り続け、サービスアカウントあたり 10 個
-# という GCP の上限にいずれ達する。このサービスアカウントは本スクリプト
-# 専用なので、既存の USER_MANAGED 鍵は新規発行前に全て削除してよい。
+# という GCP の上限にいずれ達する。ただし削除を先にやると、鍵作成や
+# gh secret set が途中で失敗した場合に GitHub 側が失効済みの鍵しか持たない
+# 状態になり CI デプロイが止まる。そのため
+#   1. 削除対象を「今から作る新しい鍵より前に存在した鍵」に限定して先に記録
+#   2. 新しい鍵を作成し、GitHub Secret への登録まで成功させる
+#   3. 登録が成功した後にだけ、記録しておいた旧鍵を削除する
+# の順で行い、途中失敗時は Secret が有効な鍵を指したまま保たれるようにする。
 existing_keys="$(gcloud iam service-accounts keys list \
   --iam-account="${sa_email}" \
   --project="${PROJECT_ID}" \
   --managed-by=user \
   --format="value(name)")"
-if [ -n "${existing_keys}" ]; then
-  echo "既存の鍵を削除します（世代交代のため）"
-  while IFS= read -r key_name; do
-    [ -n "${key_name}" ] || continue
-    gcloud iam service-accounts keys delete "${key_name}" \
-      --iam-account="${sa_email}" \
-      --project="${PROJECT_ID}" \
-      --quiet
-  done <<< "${existing_keys}"
-fi
 
 key_file="$(mktemp -t firebase-sa-key)"
 # 鍵ファイルは必ず消す（異常終了時も含む）
@@ -294,6 +304,17 @@ gh secret set "${SECRET_NAME}" --repo "${GITHUB_REPO}" < "${key_file}"
 gh variable set FIREBASE_PROJECT_ID --repo "${GITHUB_REPO}" --body "${PROJECT_ID}"
 gh variable set FIREBASE_SITE_ID --repo "${GITHUB_REPO}" --body "${SITE_ID}"
 echo "登録しました（鍵ファイルは削除されます）"
+
+if [ -n "${existing_keys}" ]; then
+  echo "新しい鍵の登録が完了したため、直前まで存在していた旧鍵を削除します（世代交代）"
+  while IFS= read -r key_name; do
+    [ -n "${key_name}" ] || continue
+    gcloud iam service-accounts keys delete "${key_name}" \
+      --iam-account="${sa_email}" \
+      --project="${PROJECT_ID}" \
+      --quiet
+  done <<< "${existing_keys}"
+fi
 
 # --- (6) .firebaserc の生成 ---
 log ".firebaserc を生成します"

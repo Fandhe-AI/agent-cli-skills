@@ -99,11 +99,11 @@ bash tools/bootstrap-firebase.sh  # 冪等。再実行しても安全
 
 スクリプトが行うこと:
 
-1. GCP プロジェクトを確認・作成（**請求先アカウントを紐付けない = Spark 固定**）し、紐付いていれば警告する
+1. GCP プロジェクトを確認・作成（**請求先アカウントを紐付けない = Spark 固定**）し、`billingEnabled` が `False` と判定できなければ **fail-closed で停止**する（未紐付けと決めつけない）。意図的に Blaze で進める場合のみ `ALLOW_BLAZE=true` を付けて明示的に承認する
 2. `firebase` / `firebasehosting` / `cloudresourcemanager` / `serviceusage` / `iam` の API を有効化
 3. Firebase Management API で Firebase を追加、Hosting API でサイトを作成
 4. CI 用サービスアカウントを作成し**最小ロール**を付与（`roles/firebasehosting.admin` + `roles/serviceusage.apiKeysViewer`）
-5. **既存の USER_MANAGED 鍵を削除**（10 個上限に達しないよう再実行のたびに世代交代） → 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → **手元の鍵ファイルを削除**（trap で異常終了時も）
+5. 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後に**旧 USER_MANAGED 鍵を削除**（10 個上限に達しないよう世代交代。登録前に削除すると失敗時に有効な鍵が残らないため、必ず登録成功後に削除する） → **手元の鍵ファイルを削除**（trap で異常終了時も）
 6. `gh variable set FIREBASE_PROJECT_ID` / `FIREBASE_SITE_ID`、`.firebaserc` を生成
 
 **Firebase の追加とサイト作成は firebase CLI ではなく REST API を gcloud のトークンで直接叩きます。** firebase CLI は gcloud と別の認証情報を持つため、CLI を使うとブラウザ認証がもう 1 回増えるためです。API 呼び出しには `x-goog-user-project: <PROJECT_ID>` ヘッダが必須です。gcloud のユーザー認証情報はクォータ課金先を持たず、これがないと gcloud 自身のクライアントプロジェクトが consumer とみなされて `403 SERVICE_DISABLED` になります。
@@ -264,7 +264,7 @@ jobs:
 
       - name: プレビューチャンネルへデプロイ（PR）
         if: github.event_name == 'pull_request'
-        uses: FirebaseExtended/action-hosting-deploy@v0
+        uses: FirebaseExtended/action-hosting-deploy@500ac625ca2dd40cbd15f7659af953801858032a # v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
@@ -273,7 +273,7 @@ jobs:
 
       - name: 本番チャンネルへデプロイ（main）
         if: github.event_name != 'pull_request'
-        uses: FirebaseExtended/action-hosting-deploy@v0
+        uses: FirebaseExtended/action-hosting-deploy@500ac625ca2dd40cbd15f7659af953801858032a # v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
