@@ -19,7 +19,7 @@ argument-hint: "<category>/<agent-name> (例: create-agent quality/lint-runner)"
 /create-agent                         # 引数省略時はインタラクティブに確認
 ```
 
-サブエージェントの雛形は `skills/claude-code-reference/sample/agent.sample.md` を参照します。
+サブエージェントの雛形は本スキル同梱の `sample/agent.sample.md` を参照します。
 
 ## カテゴリと model 選定指針
 
@@ -48,7 +48,7 @@ argument-hint: "<category>/<agent-name> (例: create-agent quality/lint-runner)"
 
 ## subagent フォールバック（skills add 導入先向け）
 
-本スキルが委譲する subagent（`agent-author`・`frontmatter-linter`）は Fandhe-AI/agent-cli-skills リポジトリの `.claude/agents/` 定義を前提とする。**導入先リポジトリに該当 subagent が存在しない場合は委譲せず、各 Step の委譲プロンプトに記載した入力・適用ルール・必須項目を main が直接実行して同じ成果物を作成する**。`frontmatter-linter` の代替としては `claude-code-reference` スキルの `script/frontmatter-check.sh` の実行、または Step 4 の検証観点の手動確認で足りる。適用ルール（`dotclaude-via-temp.md` 等）は導入先に存在するもののみ適用し、存在しない場合は `.claude/agents/` へ直接作成してよい。
+本スキルが委譲する subagent（`agent-author`・`frontmatter-linter`）は Fandhe-AI/agent-cli-skills リポジトリの `.claude/agents/` 定義を前提とする。**導入先リポジトリに該当 subagent が存在しない場合は委譲せず、各 Step の委譲プロンプトに記載した入力・適用ルール・必須項目を main が直接実行して同じ成果物を作成する**。`frontmatter-linter` の代替としては Step 4 の検証観点の手動確認で足りる。適用ルール（`dotclaude-via-temp.md` 等）は導入先に存在するもののみ適用し、存在しない場合は `.claude/agents/` へ直接作成してよい。
 
 ## フロー
 
@@ -76,7 +76,7 @@ prompt: |
     - Agent 名: <agent-name>
     - カテゴリ: <category>（research/author/quality/）
     - 役割・責務: <ユーザーから受け取った内容>
-    - 雛形: skills/claude-code-reference/sample/agent.sample.md
+    - 雛形: 本スキル同梱の sample/agent.sample.md
     - 既存 Agent の参考: .claude/agents/ 配下の既存ファイル
   出力先: .claude/agents/<category>/<agent-name>.md
   適用ルール:
@@ -100,7 +100,7 @@ prompt: |
 
 ### Step 4: frontmatter-linter で検証する
 
-**frontmatter-linter（subagent_type: frontmatter-linter）**に委譲して検証させる（存在しない場合は `frontmatter-check.sh` の実行または下記観点の手動確認で代替する）。
+**frontmatter-linter（subagent_type: frontmatter-linter）**に委譲して検証させる（存在しない場合は下記観点の手動確認で代替する）。
 
 検証観点:
 - `name` が kebab-case で正しく設定されているか

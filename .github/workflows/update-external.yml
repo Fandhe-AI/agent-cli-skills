@@ -77,14 +77,16 @@ jobs:
     steps:
       - name: Checkout
         # actions/checkout v6.0.3
-        # PAT 未設定時は GITHUB_TOKEN にフォールバック（auto-merge 後の CI 未発火に注意）。
+        # SKILLS_PAT 未設定時は org 共通の SUBMODULE_PAT を流用する。GITHUB_TOKEN まで
+        # フォールバックすると bot 作成 PR が pull_request workflow を発火させず
+        # 必須チェック未実行で BLOCKED になる（PR #176 の障害）。
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           # base-branch が main 固定のため、workflow_dispatch で非 main ブランチから
           # 起動された場合でも常に main を checkout し、他ブランチのツリー混入を防ぐ。
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.SKILLS_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         # actions/setup-node v6.4.0。skills-update が使う npx skills のため node を固定する。
@@ -96,7 +98,7 @@ jobs:
         # Fandhe-AI/actions はタグ未作成のため最新コミット SHA に固定する。
         uses: Fandhe-AI/actions/skills-update@c80ff94f229f86ba9e08723948c4dee0e1fb66bf
         with:
-          token: ${{ secrets.SKILLS_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
           base-branch: main
           branch-prefix: chore/skills-update
           commit-message: 'chore: エージェントスキルを最新に更新'

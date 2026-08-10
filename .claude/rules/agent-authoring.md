@@ -61,6 +61,8 @@ description の書き方の詳細（トリガー語・略語・YAML 落とし穴
 - `github.com` / `cli.github.com` / `docs.github.com`（GitHub 公式）
 - プライベート IP（`localhost`・`127.x`・`10.x`・`192.168.x`）へのアクセスは禁止。
 
+外部 WebFetch より先に、リポ内の参照スキルを一次情報として確認する。subagents・hooks の公式仕様は `.agents/skills/anthropic-claude-code-extend/references/`、`settings.json` 等 CLI 本体の仕様は `.agents/skills/anthropic-claude-code/references/` を参照する。
+
 ## カテゴリ配置
 
 | カテゴリ | パス | 役割 |

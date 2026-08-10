@@ -88,19 +88,34 @@ SOURCE=$(jq -r ".skills[\"${SKILL_NAME}\"].source" skills-lock.json)
 SOURCE_TYPE=$(jq -r ".skills[\"${SKILL_NAME}\"].sourceType" skills-lock.json)
 
 # 安全弁: Fandhe-AI org 以外への push を拒否する
-# 短縮形 (Fandhe-AI/<repo>) と URL 形式 (https://github.com/Fandhe-AI/<repo>) の両方を許可する
+# 1) まず正規化する（URL 形式は OWNER/REPO へ変換、短縮形はそのまま採用）
 case "${SOURCE}" in
-  Fandhe-AI/*)
-    # 短縮形: そのまま使用
-    REPO_SLUG="${SOURCE}"
-    ;;
-  https://github.com/Fandhe-AI/*)
-    # URL 形式: OWNER/REPO 形式に正規化し末尾 .git を除去する
+  https://github.com/*)
     REPO_SLUG="${SOURCE#https://github.com/}"
-    REPO_SLUG="${REPO_SLUG%.git}"
     ;;
   *)
-    echo "エラー: source '${SOURCE}' は Fandhe-AI org のリポジトリではありません。中止します。"
+    REPO_SLUG="${SOURCE}"
+    ;;
+esac
+# 末尾 .git の除去は両形式共通で行う
+# （URL 分岐内のみで除去すると短縮形 'Fandhe-AI/<repo>.git' が .git 付きのまま
+#   後段の正規表現を通過してしまうため、検証の前に必ずここで正規化する）
+REPO_SLUG="${REPO_SLUG%.git}"
+
+# 2) 正規化後の値を厳密検証する: owner は Fandhe-AI 固定、repo は単一セグメントのみ許可する
+#    [A-Za-z0-9._-]+ は '/'・'?'・'#'・空文字を含められないため、
+#    パストラバーサル（../）・余剰パスセグメント・クエリ・フラグメントをすべて拒否できる
+#    （前方一致 case では `Fandhe-AI/../../attacker/repo` のような値が誤って通過していた）
+if [[ ! "${REPO_SLUG}" =~ ^Fandhe-AI/[A-Za-z0-9._-]+$ ]]; then
+  echo "エラー: source '${SOURCE}' は Fandhe-AI/<repo> 形式ではありません。中止します。"
+  exit 1
+fi
+
+# 3) '.'・'..' は上記正規表現を通過してしまうため repo 名として明示拒否する
+#    （例: 'Fandhe-AI/..git' は .git 除去後に 'Fandhe-AI/.' へ化ける）
+case "${REPO_SLUG#Fandhe-AI/}" in
+  .|..)
+    echo "エラー: source '${SOURCE}' の repository 名が不正です。中止します。"
     exit 1
     ;;
 esac
@@ -112,7 +127,7 @@ if [[ "${SOURCE_TYPE}" != "github" ]]; then
 fi
 ```
 
-- `source` が `Fandhe-AI/`（短縮形）または `https://github.com/Fandhe-AI/`（URL 形式）のいずれでも始まらない場合は **エラーで中止** します（安全弁：見知らぬリポジトリへ意図せず push しないため）。
+- `source` は正規化後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致する場合のみ許可します（安全弁：見知らぬリポジトリへ意図せず push しないため）。`../` を含むパストラバーサル・クエリ（`?x=1`）・フラグメント（`#frag`）・余剰パスセグメント（`/extra`）を含む値は正規表現に一致せずエラーで中止します。検証は必ず `.git` 除去などの正規化の**後**に行います（正規化前に検証すると `Fandhe-AI/..git` のような値が正規化後に別の値へ化けてすり抜けるため）。
 - `sourceType` が `github` 以外の場合も **エラーで中止** します（GitHub 以外の source は本スキルの想定外であり、`gh repo clone` / `gh pr create` が正常動作しないため）。
 - 正規化後の `REPO_SLUG` は以降の Step で `gh repo clone`・`gh pr create --repo` に利用します。
 
@@ -147,11 +162,50 @@ fi
 ### Step 5: 作業用ディレクトリを用意する
 
 ```bash
-UID_VAL=$(id -u)
-TS=$(date +%Y%m%d-%H%M%S)
-# $TMPDIR が設定されていればそちらを優先する（サンドボックス互換: /tmp が書き込み不可の環境がある）
-WORKDIR="${TMPDIR:-/tmp/claude-${UID_VAL}}/contribute-${SKILL_NAME}-${TS}"
-mkdir -p "$WORKDIR"
+# 自前の中間ディレクトリ（例: /tmp/claude-<uid>）は作らない: 他ユーザーが先に
+# 作成していた場合 mkdir -p は所有者・権限を検証せず受け入れてしまうため。
+# TMPDIR は環境変数であり任意の値を指定され得るため、${TMPDIR:-/tmp} を
+# 無条件に信頼せず、mktemp -d に渡す前に実体パス（symlink 解決後）・所有者
+# （自分または root）・書き込み権限（他者書き込み可なら sticky bit 必須）を
+# fail-closed で検証する。検証対象は実体パス自身だけでなく、ファイルシステム
+# ルートまでの全祖先ディレクトリに及ぶ（祖先が攻撃者所有・非 sticky な場合、
+# 検証後に祖先側から rename で実体パスごと差し替えられ得るため）。
+
+# 単一ディレクトリに対して 所有者=自分 or root／他者書き込み可なら sticky bit
+# 必須、を fail-closed で判定する（実体パスと全祖先ディレクトリで共用）。
+check_dir_trusted() {
+  local dir="$1" owner mode
+  owner=$(stat -c '%u' "$dir" 2>/dev/null || stat -f '%u' "$dir")
+  if [[ "$owner" != "$(id -u)" && "$owner" != "0" ]]; then
+    echo "エラー: ディレクトリの所有者が不正です（自分でも root でもありません）: ${dir}" >&2
+    return 1
+  fi
+  mode=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir")
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    echo "エラー: ディレクトリのパーミッションを取得できません: ${dir}" >&2
+    return 1
+  fi
+  if (( (8#$mode & 8#022) != 0 )) && [[ ! -k "$dir" ]]; then
+    echo "エラー: ディレクトリが他者から書き込み可能なのに sticky bit が設定されていません: ${dir}（mode ${mode}）" >&2
+    return 1
+  fi
+  return 0
+}
+
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_ROOT_REAL=$(cd -P "$TMP_ROOT" 2>/dev/null && pwd -P) || TMP_ROOT_REAL=""
+if [[ -z "$TMP_ROOT_REAL" || ! -d "$TMP_ROOT_REAL" ]]; then
+  echo "エラー: TMPDIR が実在するディレクトリを指していません: ${TMP_ROOT}" >&2
+  exit 1
+fi
+# TMP_ROOT_REAL 自身とその全祖先（ルートまで）を検証する
+CHECK_DIR="$TMP_ROOT_REAL"
+while true; do
+  check_dir_trusted "$CHECK_DIR" || exit 1
+  [[ "$CHECK_DIR" == "/" ]] && break
+  CHECK_DIR="$(dirname "$CHECK_DIR")"
+done
+WORKDIR=$(mktemp -d "${TMP_ROOT_REAL}/contribute-${SKILL_NAME}-XXXXXXXX")
 ```
 
 ### Step 6: upstream を clone する
@@ -186,25 +240,74 @@ elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
 elif [[ -d "skills" ]]; then
   # upstream が skills/ 配下で公開している慣習
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
-  mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 elif [[ -d ".agents/skills" ]]; then
   # upstream が .agents/skills/ 配下で公開している慣習
   UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
-  mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 else
   echo "警告: upstream にスキルルートが見つかりません。skills/ を既定として新規追加します。"
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
-  mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 fi
 ```
 
-`UPSTREAM_SKILL_PATH` が確定したらコピーを実行します。
+`UPSTREAM_SKILL_PATH` が確定したらコピーを実行します。`cp -R` は追加・上書きのみで削除を伝搬しないため、ローカルで削除したファイルが upstream 側に残存してしまいます。これを避けるため、宛先ディレクトリを一度消してから作り直し、コピーし直す（delete-then-copy）方式を取ります。
+
+**このステップは手順を個別に打鍵せず、必ず本スキル自身のスクリプト（`${LOCAL_SKILL_DIR}/script/skills-contribute.sh`。`LOCAL_SKILL_DIR` は Step 1 で解決済みのため `skills/contribute-skill` 配置・`.agents/skills/contribute-skill` 配置のいずれでも解決されます）を実行してください。** 同スクリプトには rm -rf 前の symlink 境界検証（TOCTOU 対策込み）が実装されており、以下の断片だけを個別に実行すると検証が欠落します。
 
 ```bash
+# 削除伝搬のための同期: cp -R は削除を反映しないため、宛先を消してからコピーする
+# 安全弁1: 削除対象が clone 内の想定スキルパス（2 形態のみ）であることを検証してから rm する
+case "${UPSTREAM_SKILL_PATH}" in
+  "skills/${SKILL_NAME}"|".agents/skills/${SKILL_NAME}") ;;
+  *)
+    echo "エラー: 想定外の UPSTREAM_SKILL_PATH です: ${UPSTREAM_SKILL_PATH}"
+    exit 1
+    ;;
+esac
+
+# 安全弁2: 実体パスでの symlink 境界検証（fail-closed）。安全弁1 の case allowlist は
+# 文字列形式のみの検証であり、clone 内の中間ディレクトリ（skills / .agents 等）が
+# 実行中に symlink へ差し替えられた場合には対応できないため、rm -rf の直前に
+# 以下を実体パスで再確認する（詳細な実装は script/skills-contribute.sh を参照）。
+#   (a) clone ルートから削除対象までの各中間パス要素が symlink でないこと
+#   (b) 削除対象の親ディレクトリの正規パス（pwd -P）が clone ルート配下であること
+#   (c) 検証と削除の間の TOCTOU を閉じるため、検証済みの親ディレクトリへ cd -P した
+#       cwd に対して相対パスで rm する（パス文字列を再解決しない）
+# いずれかに違反する場合は削除を実行せずエラー終了する。
+CLONE_ROOT="${WORKDIR}/upstream"
+DELETE_TARGET="${CLONE_ROOT}/${UPSTREAM_SKILL_PATH}"
+CLONE_ROOT_REAL="$(cd "${CLONE_ROOT}" && pwd -P)"
+check_dir="${CLONE_ROOT}"
+IFS='/' read -ra UPSTREAM_SKILL_PATH_PARTS <<< "${UPSTREAM_SKILL_PATH}"
+for part in "${UPSTREAM_SKILL_PATH_PARTS[@]}"; do
+  check_dir="${check_dir}/${part}"
+  if [[ -L "${check_dir}" ]]; then
+    echo "エラー: 削除対象の経路に symlink が含まれています: ${check_dir}"
+    exit 1
+  fi
+done
+DELETE_PARENT="$(dirname "${DELETE_TARGET}")"
+DELETE_LEAF="$(basename "${DELETE_TARGET}")"
+if [[ -d "${DELETE_PARENT}" ]]; then
+  (
+    cd -P -- "${DELETE_PARENT}" || exit 1
+    PARENT_REAL="$(pwd -P)"
+    case "${PARENT_REAL}/" in
+      "${CLONE_ROOT_REAL}/"*) ;;
+      *)
+        echo "エラー: 削除対象の親ディレクトリが clone ルート配下ではありません: ${PARENT_REAL}"
+        exit 1
+        ;;
+    esac
+    rm -rf -- "${DELETE_LEAF}"
+  )
+fi
+mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 # LOCAL_SKILL_DIR は Step 1 で解決済み（skills/<name>/ または .agents/skills/<name>/）
 # ORIG_DIR は Step 6 で cd する前に捕捉済み（cd - は stdout 汚染のため使用しない）
 cp -R "${ORIG_DIR}/${LOCAL_SKILL_DIR}/." "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}/"
 ```
+
+削除対象は必ず `${WORKDIR}/upstream/` 配下（clone 用の一時ディレクトリ）に閉じ、`UPSTREAM_SKILL_PATH` が `skills/<name>` か `.agents/skills/<name>` の 2 形態以外なら `rm -rf` の前に中止します。加えて中間パスの symlink 化・TOCTOU に対する実体パス検証を rm 直前に行います。新規スキル追加（宛先未存在）の場合も削除処理は無害にスキップされ、直後の `mkdir -p` で作成されます。
 
 ### Step 8: 差分を確認する
 
@@ -221,7 +324,7 @@ git diff
 ```bash
 SLUG=$(date +%Y%m%d-%H%M%S)
 git switch -c "contribute/${SKILL_NAME}-${SLUG}"
-git add <変更パス>
+git add "${UPSTREAM_SKILL_PATH}/"
 git commit -m "$(cat <<'EOF'
 <type>(<scope>): <subject>
 
@@ -231,6 +334,7 @@ EOF
 )"
 ```
 
+- `git add "${UPSTREAM_SKILL_PATH}/"` はパス指定 add のため、Step 7 の delete-then-copy で消えたファイルの削除（`D`）も含めて stage されます
 - Conventional Commits 形式
 - `--no-verify` は使用しない（pre-commit フックを通す）
 - co-author は付けない（ローカル規約に合わせる）
@@ -285,9 +389,10 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 
 - **SKILL_NAME は kebab-case のみ許可**：`..` のような値によるパストラバーサルを防ぐため、空判定の直後・パス解決の前に `^[a-z][a-z0-9-]+$` で検証する（security.md A03/A01）
 - **`skills/` と `.agents/skills/` の両方が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>` か `.agents/skills/<name>` の2パスのみ受理し、任意パス指定によるパストラバーサルを防ぐ
-- **source が Fandhe-AI org 以外の場合は中止**：`Fandhe-AI/`（短縮形）と `https://github.com/Fandhe-AI/`（URL 形式）のみを許可し、それ以外は意図しない外部リポジトリへの push を防ぐため中止する
+- **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → スキルルート親ディレクトリ（`skills/` or `.agents/skills/`）の慣習 → 最終デフォルト `skills/`（より一般的な公開レイアウト）
+- **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>` か `.agents/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 7 は必ず `${LOCAL_SKILL_DIR}/script/skills-contribute.sh`（本スキル自身の配置から解決したパス）経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
 - **既に同名の branch がある場合**：秒単位スラッグで通常は衝突しないが、万一の場合はユーザーに確認
 
 ## sandbox 環境での実行

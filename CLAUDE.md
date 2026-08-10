@@ -10,12 +10,9 @@ Claude Code 向けの CLI ワークフロースキル集。コミット・PR・I
 
 ```
 skills/                               -- スキル本体（各ディレクトリに SKILL.md）
-  claude-code-reference/
-    reference/                        -- 公式仕様要約
-    sample/                           -- 実例
-    script/                           -- 実行可能コマンド集
   comment-code/
   create-commit/
+  create-html-report/
   create-issue/
   create-issue-tree/
   create-plan/
@@ -23,13 +20,14 @@ skills/                               -- スキル本体（各ディレクトリ
   implement-issue/
   implement-issue-tree/
     sample/                           -- 引数例・ツリー例
-    script/                           -- preview-tree.sh、implement-issue-tree.js（ツリー確認・自動開発用）
+    script/                           -- preview-tree.sh、implement-issue-tree.js（ツリー確認・自動開発）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
   implement-review/
   implement-review-pr/
   init-claude/
   update-docs/
   update-issue-tree/
   update-claude/
+  setup-repo-guards/
   project-init/
   project-add-items/
   project-create-issues/
@@ -72,10 +70,11 @@ skills/                               -- スキル本体（各ディレクトリ
     verification.md                   -- 完了ゲート規約（証拠なき完了宣言の禁止・5段階検証）
     debugging.md                      -- 根本原因デバッグ規約（修正前の原因調査・3回失敗でエスカレーション）
   skills/                             -- skills/ へのシンボリックリンク（一部実ディレクトリ）
-    create-skill/                     -- リポジトリ管理スキル（実ディレクトリ）
-    create-agent/                     -- リポジトリ管理スキル（実ディレクトリ）
-    update-reference/                 -- リポジトリ管理スキル（実ディレクトリ）
+    create-skill/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
+    create-agent/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
     github-docs                       -- 参照スキル（symlink）
+    anthropic-claude-code             -- 参照スキル（symlink）
+    anthropic-claude-code-extend      -- 参照スキル（symlink）
     (他 create-commit 等は skills/ への symlink)
   workflows/
     implement-issue-tree.js           -- イシューツリー自動開発 Workflow（symlink: ../../skills/implement-issue-tree/script/implement-issue-tree.js）
@@ -156,23 +155,19 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `verification.md` | implement-issue / implement-issue-tree / implement-review / implement-review-pr / create-pr | 完了ゲート（証拠なき完了宣言の禁止・5段階検証） |
 | `debugging.md` | implement-issue / implement-issue-tree / sub-investigator | 根本原因デバッグ（修正前の原因調査・3回失敗でエスカレーション） |
 
-## Current Skills (25)
+## Current Skills (26)
 
-### 開発ワークフロー (13)
+### 開発ワークフロー (14)
 
-comment-code, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, setup-firebase-hosting, update-docs, update-issue-tree
-
-### スキル著作・リファレンス (1)
-
-claude-code-reference
+comment-code, create-commit, create-html-report, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, setup-firebase-hosting, update-docs, update-issue-tree
 
 ### GitHub Projects 管理 (7)
 
 project-init, project-add-items, project-create-issues, project-view-status, project-update-items, project-sync-issues, project-archive-done
 
-### Claude Code セットアップ (2)
+### Claude Code セットアップ (3)
 
-init-claude, update-claude
+init-claude, update-claude, setup-repo-guards
 
 ### 上流貢献 (2)
 
@@ -180,11 +175,11 @@ contribute-skill, sync-skills-lock
 
 ### リポジトリ管理スキル（.claude/skills/ に配置）
 
-create-skill, create-agent, update-reference
+create-skill, create-agent
 
 ### 参照スキル（.claude/skills/ に配置）
 
-github-docs
+github-docs, anthropic-claude-code, anthropic-claude-code-extend
 
 ## Conventions
 
