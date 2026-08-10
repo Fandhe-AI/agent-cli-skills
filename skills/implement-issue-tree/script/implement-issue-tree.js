@@ -1041,6 +1041,24 @@ const ORPHAN_SCAN_SCHEMA = {
   },
 }
 
+// worktree レコード総数の独立カウント返却スキーマ。
+// scanOrphanWorktrees の一覧転記（LLM 経由）の完全性照合に使う（PR #185 codex P1:
+// 転記が一部レコードを落としても非空なら観測成功と誤認され、残置上限ゲートが fail-open になる）。
+// 数値 1 個だけの転記は一覧全体の転記より脱落しにくく、別エージェントで独立に取得するため
+// 「一覧側の欠落」と「カウント側の誤り」が同時に同じ値へ揃わない限り不一致として検出できる
+// （両者が偶然一致する残存リスクはあるが、単一転記を無条件に信じる現状よりゲートを強くする）。
+const ORPHAN_COUNT_SCHEMA = {
+  type: 'object',
+  required: ['count'],
+  properties: {
+    count: {
+      type: 'integer',
+      minimum: 0,
+      description: 'git worktree list --porcelain | grep -c \'^worktree \' の出力数値そのまま',
+    },
+  },
+}
+
 // ============================================================================
 // セクション 4: 状態ファイル操作
 // _/issue-trees/<parent>.json への読み書きを担う。並列実行時の競合を防ぐため
@@ -1387,6 +1405,31 @@ async function scanOrphanWorktrees() {
     // 取得失敗を伝播させない（孤立 worktree の検出は本来のイシュー処理を止める理由にならない）。
     log(`⚠️ worktree 孤立スキャン中に例外が発生した（${e?.message ?? e}）。今回はスキップする`)
     return []
+  }
+}
+
+// worktree レコード総数の独立カウント。scanOrphanWorktrees とは別エージェントで
+// `git worktree list --porcelain | grep -c '^worktree '` を実行し、数値 1 個だけを転記させる。
+// 残置上限ゲート（maxResidualWorktrees > 0）の観測完全性照合専用で、呼び出し元は
+// 「scanOrphanWorktrees の entries.length と一致しない・取得できない」場合を観測失敗
+// （fail-closed）として扱う契約。取得失敗は null を返す（0 と区別する。0 は grep の正当な
+// 出力になり得ないが、スキーマ上は通るため照合側で一覧件数との不一致として弾かれる）。
+async function countWorktreeRecords() {
+  try {
+    const v = await agent(
+      [
+        'git worktree レコード総数の取得タスク（読み取り専用。削除・変更は一切行わない）。',
+        '手順:',
+        "1. git worktree list --porcelain | grep -c '^worktree ' を実行する。",
+        '2. 出力された数値をそのまま count として返す（加工・推測をしない）。',
+        'コマンドが失敗した場合も、他の方法で数え直さずそのタスクを失敗として報告する。',
+      ].join('\n'),
+      { label: 'worktree:record-count', phase: 'State', model: 'haiku', effort: 'low', schema: ORPHAN_COUNT_SCHEMA },
+    )
+    return Number.isInteger(v?.count) && v.count >= 0 ? v.count : null
+  } catch (e) {
+    log(`⚠️ worktree レコード総数の独立カウント中に例外が発生した（${e?.message ?? e}）`)
+    return null
   }
 }
 
@@ -2989,18 +3032,32 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
   // 残置に数えない（採用ループより前で数えると、これから使う残骸でゲートが誤発火する）。
   // なお使い捨て worktree は detached HEAD で branchMatchesIssue に一致せず採用対象にならないため、
   // この順序が残置件数へ与える差は実質わずかだが、意図を明示するため位置とコメントで固定する。
-  if (runStartOrphanEntries.length === 0) {
-    // scanOrphanWorktrees は取得失敗時に例外を伝播させず [] を返す。実在するリポジトリは必ず
-    // 先頭にメイン worktree エントリを持つため、length 0 は「正当に残置ゼロ」ではなく「観測が
-    // 成立しなかった」ことを意味する。観測不成立を「残置ゼロ＝安全」と誤認して通常続行すると
-    // ゲート自体が fail-open する（PR #185 codex P1）ため、上限ゲートが有効（maxResidualWorktrees > 0）
-    // な場合は新規着手を抑止する（fail-closed）。monitoring 再開（新規 worktree を積み増さない）は
-    // 抑止対象外のまま継続し、次ランの再観測が成功すれば自動的に解除される。residualObserved は
-    // false のまま残し、最終レポートで「未観測」を明示する。
+  // 観測成立の判定は 2 段構え（PR #185 codex P1 ×2）。
+  // ① 空チェック: scanOrphanWorktrees は取得失敗時に例外を伝播させず [] を返す。実在するリポジトリは
+  //    必ず先頭にメイン worktree エントリを持つため、length 0 は「正当に残置ゼロ」ではなく「観測が
+  //    成立しなかった」ことを意味する。
+  // ② 完全性照合: 一覧は LLM エージェントの転記であり、スキーマは全レコードが返されたことを
+  //    保証しない。一部レコードが脱落しても非空なら①を通ってしまうため、別エージェントが独立に
+  //    取得したレコード総数（countWorktreeRecords）と件数照合し、不一致・カウント取得失敗も
+  //    観測失敗として扱う（照合はゲート有効時のみ実行。無効時は結果を使わないためエージェント起動を節約する）。
+  // どちらの観測不成立も「残置ゼロ＝安全」と誤認して通常続行するとゲート自体が fail-open するため、
+  // 上限ゲートが有効（maxResidualWorktrees > 0）な場合は新規着手を抑止する（fail-closed）。
+  // monitoring 再開（PR 作成済みイシューの監視継続）は抑止対象外のまま継続し、次ランの再観測が
+  // 成功すれば自動的に解除される。residualObserved は false のまま残し、最終レポートで「未観測」を明示する。
+  let scanFailureDetail = runStartOrphanEntries.length === 0 ? 'git worktree list を取得できず' : ''
+  if (!scanFailureDetail && maxResidualWorktrees > 0) {
+    const independentCount = await countWorktreeRecords()
+    if (independentCount === null) {
+      scanFailureDetail = `一覧転記の完全性を照合する独立レコードカウントを取得できず（一覧側 ${runStartOrphanEntries.length} 件）`
+    } else if (independentCount !== runStartOrphanEntries.length) {
+      scanFailureDetail = `一覧転記が不完全な疑い（一覧側 ${runStartOrphanEntries.length} 件 ≠ 独立カウント ${independentCount} 件）`
+    }
+  }
+  if (scanFailureDetail) {
     if (maxResidualWorktrees > 0) {
       newStartSuppressed = {
         reason:
-          `ラン開始時の worktree 残置観測に失敗した（git worktree list を取得できず）。` +
+          `ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。` +
           `残置総数を確認できないため、ディスク枯渇防止の上限ゲート（上限 ${maxResidualWorktrees} 件）を` +
           `適用できず、新規イシューの着手を停止した（fail-closed。monitoring 再開は継続する）。` +
           `git worktree list が実行できる状態を確認してから再実行すること`,
@@ -3010,7 +3067,7 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
     } else {
       // 上限なし（maxResidualWorktrees === 0）の明示オプトアウト時は観測失敗でも抑止しない
       // （ゲート無効の意思表示が優先。「観測できない」ことがチェック無効時の安全性を変えない）。
-      log('⚠️ ラン開始時の worktree 残置観測に失敗した（git worktree list を取得できず）。上限ゲートは無効（maxResidualWorktrees: 0）のため続行する')
+      log(`⚠️ ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。上限ゲートは無効（maxResidualWorktrees: 0）のため続行する`)
     }
   } else {
     residualObserved = true
