@@ -103,7 +103,7 @@ bash tools/bootstrap-firebase.sh  # 冪等。再実行しても安全
 2. `firebase` / `firebasehosting` / `cloudresourcemanager` / `serviceusage` / `iam` の API を有効化
 3. Firebase Management API で Firebase を追加、Hosting API でサイトを作成
 4. CI 用サービスアカウントを作成し**最小ロール**を付与（`roles/firebasehosting.admin` + `roles/serviceusage.apiKeysViewer`）
-5. 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後に**旧 USER_MANAGED 鍵を削除**（10 個上限に達しないよう世代交代。登録前に削除すると失敗時に有効な鍵が残らないため、必ず登録成功後に削除する） → **手元の鍵ファイルを削除**（trap で異常終了時も）
+5. 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後に**旧 USER_MANAGED 鍵を削除**（10 個上限に達しないよう世代交代。登録前に削除すると失敗時に有効な鍵が残らないため、必ず登録成功後に削除する）。ただし削除するのは `displayName` が本スクリプト専用アカウントと確認できた場合のみで、`SA_ID` の書き換え等で既存の無関係なサービスアカウントと衝突した場合は自動削除しない（削除するには `ROTATE_EXISTING_KEYS=true` の明示指定が必要）。最後に**手元の鍵ファイルを削除**（trap で異常終了時も）
 6. `gh variable set FIREBASE_PROJECT_ID` / `FIREBASE_SITE_ID`、`.firebaserc` を生成
 
 **Firebase の追加とサイト作成は firebase CLI ではなく REST API を gcloud のトークンで直接叩きます。** firebase CLI は gcloud と別の認証情報を持つため、CLI を使うとブラウザ認証がもう 1 回増えるためです。API 呼び出しには `x-goog-user-project: <PROJECT_ID>` ヘッダが必須です。gcloud のユーザー認証情報はクォータ課金先を持たず、これがないと gcloud 自身のクライアントプロジェクトが consumer とみなされて `403 SERVICE_DISABLED` になります。

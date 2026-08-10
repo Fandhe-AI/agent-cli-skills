@@ -67,6 +67,10 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 project_root="$(cd -- "${script_dir}/.." >/dev/null 2>&1 && pwd)"
 
 sa_email="${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+# 本スクリプトが作成するサービスアカウントの displayName。鍵の自動削除
+# 対象を「このスクリプト専用のサービスアカウント」に限定するための目印
+# として使う（後述）。
+sa_display_name="GitHub Actions (Firebase Hosting deploy)"
 
 log() { printf '\n==> %s\n' "$1"; }
 die() { printf '\nerror: %s\n' "$1" >&2; exit 1; }
@@ -257,8 +261,21 @@ if gcloud iam service-accounts describe "${sa_email}" --project="${PROJECT_ID}" 
   echo "既に存在するため作成をスキップします"
 else
   gcloud iam service-accounts create "${SA_ID}" \
-    --display-name="GitHub Actions (Firebase Hosting deploy)" \
+    --display-name="${sa_display_name}" \
     --project="${PROJECT_ID}"
+fi
+
+# 実際の displayName を確認する。SA_ID を書き換えて実行した場合など、
+# 既存の無関係なサービスアカウント（他の CI・サービスが使っている共有
+# アカウント等）と衝突している可能性があるため、鍵の自動削除は
+# 「本スクリプトが作成した専用アカウントだと確認できた場合」に限定する
+# （下記 (5) を参照）。
+actual_display_name="$(gcloud iam service-accounts describe "${sa_email}" \
+  --project="${PROJECT_ID}" --format="value(displayName)" 2>/dev/null || echo "")"
+if [ "${actual_display_name}" = "${sa_display_name}" ]; then
+  sa_is_dedicated=true
+else
+  sa_is_dedicated=false
 fi
 
 log "最小ロールを付与します"
@@ -306,14 +323,24 @@ gh variable set FIREBASE_SITE_ID --repo "${GITHUB_REPO}" --body "${SITE_ID}"
 echo "登録しました（鍵ファイルは削除されます）"
 
 if [ -n "${existing_keys}" ]; then
-  echo "新しい鍵の登録が完了したため、直前まで存在していた旧鍵を削除します（世代交代）"
-  while IFS= read -r key_name; do
-    [ -n "${key_name}" ] || continue
-    gcloud iam service-accounts keys delete "${key_name}" \
-      --iam-account="${sa_email}" \
-      --project="${PROJECT_ID}" \
-      --quiet
-  done <<< "${existing_keys}"
+  if [ "${sa_is_dedicated}" = "true" ] || [ "${ROTATE_EXISTING_KEYS:-false}" = "true" ]; then
+    echo "新しい鍵の登録が完了したため、直前まで存在していた旧鍵を削除します（世代交代）"
+    while IFS= read -r key_name; do
+      [ -n "${key_name}" ] || continue
+      gcloud iam service-accounts keys delete "${key_name}" \
+        --iam-account="${sa_email}" \
+        --project="${PROJECT_ID}" \
+        --quiet
+    done <<< "${existing_keys}"
+  else
+    # displayName が本スクリプトの想定と一致しない = SA_ID が意図せず
+    # 既存の別用途サービスアカウントと衝突している可能性がある。他の
+    # CI・サービスの認証情報を誤って失効させないよう、確認なしでは
+    # 削除しない。
+    echo "警告: ${sa_email} は本スクリプトが作成した専用アカウントと確認できませんでした。"
+    echo "      既存の鍵を自動削除すると他用途の認証を壊す恐れがあるため、削除をスキップします。"
+    echo "      意図的に削除する場合は ROTATE_EXISTING_KEYS=true を指定して再実行してください。"
+  fi
 fi
 
 # --- (6) .firebaserc の生成 ---
