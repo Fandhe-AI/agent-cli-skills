@@ -1503,8 +1503,15 @@ function recordEphemeralWorktree(issueNumber, rawPath, kind) {
   }
   const p = sanitizeWorktreePath(rawPath ?? '')
   if (!p) {
-    // フォーマット不正パスを無言で捨てると、ログ一覧にも載らず利用者が残骸に気づけない。
-    log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できず記録できなかった（残骸が残っている可能性がある）`)
+    // パスを検証できなくても「使い捨て worktree が 1 件生成された事実」は path: '' で計上する
+    // （PR #185 Bugbot Medium 対応）。schema は worktreePath に空文字を許し、ランタイムは
+    // エージェントの返答内容と無関係に worktree を実際に作成しているため、ここで記録を
+    // スキップすると実測（ephemeralWorktrees.length）が実際のディスク増加より過小になり、
+    // 実測 latch・予約解放（recordedByIssue）の両方が甘くなって fail-closed が弱まる。
+    // path が空のエントリはラン終了時の一覧で「パス不明」と表示し、手動掃除は
+    // git worktree list からの突き合わせに委ねる。
+    log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できなかった（件数のみ計上する。git worktree list で残骸を確認すること）`)
+    ephemeralWorktrees.push({ issue: issueNumber, kind, path: '' })
     return
   }
   ephemeralWorktrees.push({ issue: issueNumber, kind, path: p })
@@ -4973,38 +4980,49 @@ while (true) {
         // 予約は当該タスクの record 到達・完了で自然に解放されるため、予約起因の
         // 超過見込みは latch せず defer（今周回の投入見送り）に留める。予約が 0 件
         // （解放待ちの余地なし）でなお超過が見込まれる場合のみ恒久停止する。
-        const recordedByIssue = new Map()
-        for (const e of ephemeralWorktrees) {
-          recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
-        }
-        let reservedTotal = 0
-        for (const rn of newStartActive) {
-          reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
-        }
-        // monitoring 再開中のイシューも Merge ループの fix-routing-error を最大 1 件
-        // 積み増し得る（PR #184 以降）ため、その分を予約に含める。
-        for (const rn of monitoringResumeActive) {
-          reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
-        }
-        const projected =
-          residualObservedAtStart + ephemeralWorktrees.length + reservedTotal + EPHEMERAL_RESERVE_PER_NEW_START
-        if (projected > maxResidualWorktrees) {
-          if (reservedTotal > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
-          newStartSuppressed = {
-            reason:
-              `残置 worktree が予約込みで上限 ${maxResidualWorktrees} 件を超過する見込み` +
-              `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋` +
-              `着手候補の最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件）。` +
-              `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-              `不要な worktree を git worktree remove で手動削除してから再実行すること`,
-            paths: residualPathsAtStart,
+        //
+        // 判定 (b) は着手候補が implement の場合のみ行う（PR #185 Bugbot Medium 対応）:
+        // verify-close は isolation: 'worktree' を使わず worktree を一切作らないため予約 0 で
+        // あり、増分 0 の投入は上限契約を破り得ない（予約は最悪ケースの見込み）。ここで
+        // verify-close に implement と同じ最大増分を課すと、上限付近で親クローズが誤って
+        // defer / 恒久停止し、ラン全体の新規着手まで巻き込む。実測超過の恒久 latch (a) は
+        // 従来どおり verify-close にも効く（その過剰抑止が安全側であることは上のコメントのとおり）。
+        if (item.kind === 'implement') {
+          const recordedByIssue = new Map()
+          for (const e of ephemeralWorktrees) {
+            recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
           }
-          log(`⚠️ ${newStartSuppressed.reason}`)
-          continue
+          let reservedTotal = 0
+          for (const rn of newStartActive) {
+            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
+          }
+          // monitoring 再開中のイシューも Merge ループの fix-routing-error を最大 1 件
+          // 積み増し得る（PR #184 以降）ため、その分を予約に含める。
+          for (const rn of monitoringResumeActive) {
+            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
+          }
+          const projected =
+            residualObservedAtStart + ephemeralWorktrees.length + reservedTotal + EPHEMERAL_RESERVE_PER_NEW_START
+          if (projected > maxResidualWorktrees) {
+            if (reservedTotal > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
+            newStartSuppressed = {
+              reason:
+                `残置 worktree が予約込みで上限 ${maxResidualWorktrees} 件を超過する見込み` +
+                `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋` +
+                `着手候補の最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件）。` +
+                `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
+                `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+              paths: residualPathsAtStart,
+            }
+            log(`⚠️ ${newStartSuppressed.reason}`)
+            continue
+          }
         }
       }
       log(`#${n} を開始（実行中 ${running.size + 1}/${concurrency}）: ${sanitize(item.title)}`)
-      newStartActive.add(n)
+      // verify-close は worktree を作らないため予約保持者（newStartActive）に載せない
+      // （Bugbot Medium 対応。載せると完了まで他の implement 候補の予約枠を無意味に塞ぐ）。
+      if (item.kind === 'implement') newStartActive.add(n)
       running.set(n, runOne(item))
     }
   }
@@ -5162,7 +5180,7 @@ const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
 // ため）。残骸の存在を利用者が把握できるよう、ラン終了時に記録簿を一覧として出力する。
 if (ephemeralWorktrees.length > 0) {
   log(`使い捨て worktree（review / pr-create）を ${ephemeralWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
-  for (const e of ephemeralWorktrees) log(`  #${e.issue} (${e.kind}): ${e.path}`)
+  for (const e of ephemeralWorktrees) log(`  #${e.issue} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
 // --- 残置 worktree 総数のサマリ報告（PR #588 codex P1）---
