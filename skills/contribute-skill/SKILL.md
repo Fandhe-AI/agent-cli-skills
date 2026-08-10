@@ -273,7 +273,11 @@ fi
 # 同スクリプトは自分自身で gh repo clone を行う自己完結型のため、
 # 呼び出し前に必ずローカルリポジトリルートへ cd し直す（Step 6 の手動 clone とは独立した処理）。
 cd "${ORIG_DIR}"
-"${CONTRIBUTE_SKILL_DIR}/script/skills-contribute.sh" "${SKILL_NAME}" "${REPO_SLUG}"
+
+# LOCAL_SKILL_DIR は通常の変数代入では子プロセスへ継承されない（export されていない）。
+# Step 1 で skills/ と .agents/skills/ の両方が存在し LOCAL_SKILL_DIR を明示選択していた場合、
+# 継承せずに起動すると子スクリプトが両方を再検出して中止してしまうため、明示的に渡す。
+LOCAL_SKILL_DIR="${LOCAL_SKILL_DIR}" "${CONTRIBUTE_SKILL_DIR}/script/skills-contribute.sh" "${SKILL_NAME}" "${REPO_SLUG}"
 ```
 
 ```bash
