@@ -201,18 +201,28 @@ for part in "${UPSTREAM_SKILL_PATH_PARTS[@]}"; do
 done
 
 DELETE_PARENT="$(dirname "${DELETE_TARGET}")"
+DELETE_LEAF="$(basename "${DELETE_TARGET}")"
 if [[ -d "${DELETE_PARENT}" ]]; then
-  DELETE_PARENT_REAL="$(cd "${DELETE_PARENT}" && pwd -P)"
-  case "${DELETE_PARENT_REAL}/" in
-    "${CLONE_ROOT_REAL}/"*) ;;
-    *)
-      echo "エラー: 削除対象の親ディレクトリが clone ルート配下ではありません: ${DELETE_PARENT_REAL}"
-      exit 1
-      ;;
-  esac
+  # cd -P + 相対 rm で検証と削除の間の TOCTOU を閉じる: 上記ループでの検証後に
+  # 中間ディレクトリが symlink へ差し替えられても、rm はパス文字列を再解決せず
+  # cd -P が確定した実体（プロセスの cwd）に対して相対的に動作するため影響を受けない。
+  # cd -P 自体は symlink を辿るため、cd 直後に物理パスを再検証してから rm する
+  # （検証と削除の間に別の文字列解決を挟まないことで TOCTOU の窓を最小化する）。
+  (
+    cd -P -- "${DELETE_PARENT}" || exit 1
+    PARENT_REAL="$(pwd -P)"
+    case "${PARENT_REAL}/" in
+      "${CLONE_ROOT_REAL}/"*) ;;
+      *)
+        echo "エラー: 削除対象の親ディレクトリが clone ルート配下ではありません: ${PARENT_REAL}"
+        exit 1
+        ;;
+    esac
+    # leaf 自体が symlink に差し替えられていても、rm -rf はリンク先を辿らず
+    # リンク自体のみを削除するため clone 外には影響しない
+    rm -rf -- "${DELETE_LEAF}"
+  )
 fi
-
-rm -rf "${DELETE_TARGET}"
 mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 cp -R "${ORIG_DIR}/${LOCAL_SKILL_DIR}/." "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}/"
 
