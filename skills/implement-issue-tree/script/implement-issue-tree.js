@@ -2354,37 +2354,53 @@ function mergeVerifyPrompt(item, impl) {
 //     含まれる。0 件のときは判定対象なしで true）
 function autoMergePrecheckPrompt(externalCheckApps) {
   const apps = Array.isArray(externalCheckApps) ? externalCheckApps : []
+  // 固定コマンド 1-6（Bugbot High/Medium 対応。commit 6d1584e）:
+  //   - コマンド 4 は「最初の 1 件の pull_request ルールのみ」参照していたため、後続の
+  //     ruleset にのみ強い条件がある構成を見落として under-report していた（Medium: First
+  //     ruleset rule only）。複数の pull_request ルールは GitHub 上で累積適用される
+  //     （すべてを満たす必要がある）ため、必須承認数は全ルールの max、スレッド解消は
+  //     いずれか 1 件でも要求していれば true（any）に修正する。
+  //   - 旧版は ruleset の pull_request ルールしか見ておらず、classic branch protection の
+  //     required_pull_request_reviews / required_conversation_resolution を一切見ていなかった
+  //     ため、classic 設定のみで正しく保護されているリポジトリが恒久的に arm 不能になっていた
+  //     （High: Classic review gates ignored）。コマンド 5・6 で classic 側も取得し、
+  //     ruleset 側との max / OR を取る。
+  const fixedLines = [
+    `  1. gh api repos/{owner}/{repo} --jq '.allow_auto_merge'`,
+    `  2. gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?] | length'`,
+    `  3. gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection/required_status_checks" --jq '.contexts | length'`,
+    `  4. gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '{count: ([.[] | select(.type == "pull_request") | .parameters.required_approving_review_count // 0] | max // 0), resolve: ([.[] | select(.type == "pull_request") | .parameters.required_review_thread_resolution // false] | any)}'（ruleset 側の必須レビュー条件。複数 pull_request ルールは累積適用のため max / any で集約する）`,
+    `  5. gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection/required_pull_request_reviews" --jq '.required_approving_review_count // 0'（classic branch protection の必須承認数。未設定・403/404 は 0）`,
+    `  6. gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection/required_conversation_resolution" --jq '.enabled // false'（classic branch protection の未解決スレッド解消必須設定。未設定・403/404 は false）`,
+  ]
   // App ごとの integration_id 取得コマンド（slug は検証済みのためプロンプトへ直接埋め込んでよい。
   // mergeExecutePrompt の externalCheckRunsCommand と同じ方針）。
   const appCoverageLines = apps.length
     ? [
-        `  5. 確定済み externalChecks の App ごとに integration_id を取得する（App 数 = ${apps.length}）:`,
+        `  7. 確定済み externalChecks の App ごとに integration_id を取得する（App 数 = ${apps.length}）:`,
         ...apps.map((app) => `     gh api "apps/${app}" --jq '.id'`),
-        `  6. ruleset 側の required_status_checks を integration_id 込みで取得する:`,
+        `  8. ruleset 側の required_status_checks を integration_id 込みで取得する:`,
         `     gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.integration_id] | map(select(. != null))'`,
-        `  7. classic 側の required_status_checks を app_id 込みで取得する:`,
+        `  9. classic 側の required_status_checks を app_id 込みで取得する:`,
         `     gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection/required_status_checks" --jq '[.checks[]?.app_id] | map(select(. != null))'`,
       ]
     : []
   return [
     'この実行基盤の GitHub ネイティブ auto-merge 前提を確認する読み取り専用担当（Issue #205 / PR #206）。',
-    `権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の${apps.length ? '7' : '4'}つのみ:`,
-    `  1. gh api repos/{owner}/{repo} --jq '.allow_auto_merge'`,
-    `  2. gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?] | length'`,
-    `  3. gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection/required_status_checks" --jq '.contexts | length'`,
-    `  4. gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "pull_request")][0].parameters // {} | {count: (.required_approving_review_count // 0), resolve: (.required_review_thread_resolution // false)}'（必須レビュー条件の算出用）`,
+    `権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の${apps.length ? '9' : '6'}つのみ:`,
+    ...fixedLines,
     ...appCoverageLines,
     '{owner}/{repo} は gh repo view --json owner,name --jq \'"\\(.owner.login)/\\(.name)"\' で取得すること。上記以外のコマンド（gh pr merge・gh pr review・書き込み系すべて）は実行しない。',
     '手順:',
     '1. コマンド 1 を実行し、取得できた bool をそのまま autoMergeAllowed として返す（取得失敗は false）。',
     '2. コマンド 2 を実行し、取得できた非負整数をそのまま requiredChecksRuleset として返す（ruleset なし・取得失敗は 0）。',
     '3. コマンド 3 を実行し、取得できた非負整数を requiredChecksClassic として返す（403/404・取得失敗は 0。classic protection 未設定は正常なケースであり異常ではない）。',
-    '4. コマンド 4 を実行し、count を requiredApprovingReviewCount（整数）、resolve を requiredReviewThreadResolution（boolean）として返す（pull_request ルールなし・取得失敗はどちらも既定値 0 / false）。',
+    '4. コマンド 4・5・6 を実行する。requiredApprovingReviewCount には「コマンド 4 の count」と「コマンド 5 の値」の大きい方（max）を、requiredReviewThreadResolution には「コマンド 4 の resolve」と「コマンド 6 の値」の論理和（OR）をそれぞれ設定する（ruleset と classic のどちらか一方で満たされていれば十分。取得失敗はその項目を 0 / false として扱う）。',
     ...(apps.length
       ? [
-          `5. コマンド 5 を App ごとに実行し、各 App の integration_id（取得失敗はその App を欠落として扱う）を控える。`,
-          `6. コマンド 6・7 を実行し、それぞれの配列を得る。`,
-          `7. 手順 5 で取得できた ${apps.length} 件の integration_id が、手順 6 と手順 7 の配列の和集合に**すべて**含まれる場合のみ externalChecksCovered: true を返す。1 件でも欠落・取得失敗があれば externalChecksCovered: false を返す（summary にどの App の integration_id が欠落したか slug で明記する）。`,
+          `5. コマンド 7 を App ごとに実行し、各 App の integration_id（取得失敗はその App を欠落として扱う）を控える。`,
+          `6. コマンド 8・9 を実行し、それぞれの配列を得る。`,
+          `7. 手順 5 で取得できた ${apps.length} 件の integration_id が、手順 6 の 2 つの配列の和集合に**すべて**含まれる場合のみ externalChecksCovered: true を返す。1 件でも欠落・取得失敗があれば externalChecksCovered: false を返す（summary にどの App の integration_id が欠落したか slug で明記する）。`,
         ]
       : [`5. externalChecks は 0 件のため externalChecksCovered: true を返す（判定対象なし）。`]),
     '返却: autoMergeAllowed（boolean）/ requiredChecksRuleset（整数）/ requiredChecksClassic（整数）/ requiredApprovingReviewCount（整数）/ requiredReviewThreadResolution（boolean）/ externalChecksCovered（boolean）/ summary（実行結果の要約）。値の解釈・推測はしない（取得できた生の値のみを使う）。',
