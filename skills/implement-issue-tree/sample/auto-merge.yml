@@ -50,12 +50,21 @@
 #         1 件でも設定されていると、その actor による merge は G1〜G3 の保護を迂回できる
 #         ため、G1〜G3 が true でも人間承認なしの即時マージが成立し得る。ruleset 詳細の
 #         取得・解析に失敗した場合も arm しない）。
-#         ruleset 詳細（GET /repos/{repo}/rulesets/{id}）の bypass_actors は
-#         Administration: read 権限がないと応答に含まれず、workflow の GITHUB_TOKEN
-#         では取得できない（PR #207 Bugbot High 対応。GITHUB_TOKEN のままでは推奨構成の
-#         ruleset 保護下で G4 が常に検証不能となり一切 arm されない）。そのため G4 の
-#         詳細取得**のみ**、Administration: read を持つ専用 token
-#         `secrets.AUTOMERGE_RULESET_TOKEN` で行う（下記「前提」3 参照）。
+#         ruleset 詳細の取得先は、実効ルール（GET /rules/branches/{branch}）各要素の
+#         ruleset_source_type でルーティングする（消費リポ Bugbot High 対応）:
+#         Repository → GET /repos/{owner}/{repo}/rulesets/{id}、
+#         Organization → GET /orgs/{org}/rulesets/{id}。org 継承 ruleset の ID を
+#         repo 側エンドポイントで引くと 404 になるため、repo 側のみの実装では
+#         org ruleset 適用ブランチが恒久的に検証不能（= 一切 arm されない）だった。
+#         未知のソース種別は列挙不完全として arm しない（fail-closed）。
+#         ruleset 詳細の bypass_actors は Administration: read 権限がないと応答に
+#         含まれず、workflow の GITHUB_TOKEN では取得できない（PR #207 Bugbot High 対応。
+#         GITHUB_TOKEN のままでは推奨構成の ruleset 保護下で G4 が常に検証不能となり
+#         一切 arm されない）。そのため G4 の詳細取得**のみ**、Administration: read を
+#         持つ専用 token `secrets.AUTOMERGE_RULESET_TOKEN` で行う（下記「前提」3 参照）。
+#         Organization 継承 ruleset の詳細取得には token に org ruleset の読取権限
+#         （組織レベルの Administration: read）が別途必要で、権限が無い場合は従来どおり
+#         arm しない（fail-closed）が、その旨をログで明示する。
 #         token を要求するのは ruleset 由来の実効ルールが 1 件以上あるときのみ:
 #         ベースブランチに適用される ruleset が 0 件（classic branch protection のみで
 #         G1〜G3 充足）の場合、G4 は検証対象なしとして token 不要で通過する
@@ -68,14 +77,18 @@
 #           ここに登録された users / teams / apps は enforce_admins が有効でも PR レビュー
 #           要件（G2/G3）を明示的に迂回できるため、automation App / user が登録された構成では
 #           非 author 承認なしの即時マージが成立し得る。実 API 仕様
-#           （GET /repos/{owner}/{repo}/branches/{branch}/protection）では、この allowance を
-#           **一度も設定していない場合はキー自体が応答に含まれない**のが正常応答であるため、
-#           「キーなし = bypass 許可なしとして通過」「キーあり = object 型で、かつ
-#           users / teams / apps がすべて配列型かつ空の場合のみ通過」とする。キーがあるのに
-#           null・非 object・リストが非配列・1 件でも要素あり、の場合はすべて classic を
-#           認可入力から除外する（fail-closed。除外後は ruleset 側のみで G1〜G3 を判定）。
-#         - restrictions（push 制限の users / teams / apps）: 同様にキーなし（未設定）が
-#           正常応答。キーなしは通過、キーありは全リストが配列型かつ空の場合のみ通過とし、
+#           （GET /repos/{owner}/{repo}/branches/{branch}/protection）では、未設定の表現が
+#           「キー自体が応答に含まれない」または「キーはあるが値が null」の 2 形態を取る
+#           （消費リポ Bugbot High 対応: restrictions は未設定時に `"restrictions": null` を
+#           返すのが正常応答であり、null を unsafe 扱いすると classic-only リポで classic が
+#           常に {} へ落ち、G1〜G6 が恒久 fail する）。そのため
+#           「キー欠落または null = 未設定（安全・通過）」「object 型 = 中の
+#           users / teams / apps がすべて配列型かつ空の場合のみ通過」とする。
+#           非 object（文字列・数値等）・リストが非配列・1 件でも要素あり、の場合はすべて
+#           classic を認可入力から除外する（fail-closed。除外後は ruleset 側のみで
+#           G1〜G3 を判定）。
+#         - restrictions（push 制限の users / teams / apps）: 同上。キー欠落・null は
+#           未設定として通過、object は全リストが配列型かつ空の場合のみ通過とし、
 #           それ以外は classic を認可入力から除外する（登録された actor に直接 push 経路を
 #           与える構成を、安全側に倒して認可根拠から外す）。
 #
@@ -95,6 +108,9 @@
 #   3. （ruleset を 1 件以上適用する場合のみ）リポジトリ secret `AUTOMERGE_RULESET_TOKEN` に、
 #      ruleset 詳細を読める token を設定する
 #      （fine-grained PAT または GitHub App token。必要権限は **Administration: read のみ**。
+#      org 継承 ruleset を適用する場合は、org ruleset の読取権限 = 組織レベルの
+#      Administration: read も併せて付与する（無いと org ruleset の G4 検証が不能となり
+#      arm されない）。
 #      write 権限は不要 — arm 実行（gh pr merge --auto）は従来どおり workflow の
 #      GITHUB_TOKEN が行い、この token は G4 の読み取り検証にしか使わない権限分離構成）。
 #      ruleset が 1 件以上あるのに未構成（空）の場合は G4 が検証不能となり一切 arm されない。
@@ -180,10 +196,15 @@ concurrency:
 
 jobs:
   sweep:
-    # 組織方針: private リポジトリは self-hosted runner を使用する（GitHub ホステッド
-    # ランナー指定は CI 規約違反）。public リポジトリへ配置する場合は組織の runner 方針に
-    # 従い ubuntu-latest 等の GitHub ホステッドランナーへ変更してよい。
-    runs-on: self-hosted
+    # runner は repo variable で切り替える（消費リポ codex P1 対応: runner 方針は
+    # public / private で正反対のため、サンプルへの直書きはどちらかの規約に必ず違反する）。
+    #   - public リポジトリ: self-hosted runner の使用は禁止（fork PR からの任意コード実行
+    #     リスク）。変数未設定のまま配置すれば既定の ubuntu-latest で動く。
+    #   - Fandhe-AI の private リポジトリ: GitHub ホステッドランナー指定は CI 規約違反のため、
+    #     リポジトリ設定変数 `AUTOMERGE_RUNNER` に `self-hosted` を設定して切り替える。
+    # GitHub Actions の runs-on は式を評価でき、`vars.X || 'literal'` のフォールバックは
+    # 公式仕様（expressions の || 演算子 + 未設定 vars は空文字 = falsy）で動作する。
+    runs-on: ${{ vars.AUTOMERGE_RUNNER || 'ubuntu-latest' }}
     # ハング・API 待ちの滞留で runner を占有しないための上限（組織 CI 規約: 全ジョブに
     # timeout-minutes 必須）。スイープは読み取り API + arm のみで通常は数十秒で終わる。
     timeout-minutes: 10
@@ -292,25 +313,29 @@ jobs:
             # - bypass_pull_request_allowances: 登録された users/teams/apps は
             #   enforce_admins が有効でも PR レビュー要件を明示的に迂回できる
             # - restrictions: 登録 actor に直接 push 経路を与える構成を安全側で除外
-            # 実 API 仕様では両キーとも「未設定ならキー自体が応答に含まれない」のが正常応答
-            # のため、キーなし = bypass なしとして通過。キーありは object 型かつ
-            # users/teams/apps がすべて配列型かつ空の場合のみ通過し、null・非 object・
-            # 非配列・要素ありはすべて不採用（fail-closed）。不採用時は classic を
-            # 「保護なし」に落とし、ruleset 側の実測のみで判定する。
+            # 実 API 仕様では未設定の表現が「キー欠落」と「キーありで値 null」の 2 形態
+            # （restrictions は未設定時に null を返すのが正常応答 — 消費リポ Bugbot High
+            # 対応。null を unsafe 扱いすると classic-only リポで G1〜G6 が恒久 fail）。
+            # キー欠落・null = 未設定として通過。object 型は users/teams/apps がすべて
+            # 配列型かつ空の場合のみ通過し、非 object・非配列・要素ありは不採用
+            # （fail-closed）。不採用時は classic を「保護なし」に落とし、ruleset 側の
+            # 実測のみで判定する。
             classic_ok=$(jq -n --argjson c "$classic" '
-              def empty_lists($o; $keys):
-                ($o | type) == "object"
-                and ($keys | all(. as $k
-                  | ($o[$k] | type) == "array" and ($o[$k] | length) == 0));
+              def unset_or_empty($o; $keys):
+                $o == null
+                or (($o | type) == "object"
+                  and ($keys | all(. as $k
+                    | ($o[$k] | type) == "array" and ($o[$k] | length) == 0)));
               (($c.enforce_admins.enabled // false) == true)
               and (($c | has("required_pull_request_reviews") | not)
+                or ($c.required_pull_request_reviews == null)
                 or (($c.required_pull_request_reviews
                       | has("bypass_pull_request_allowances") | not)
-                  or empty_lists(
+                  or unset_or_empty(
                       $c.required_pull_request_reviews.bypass_pull_request_allowances;
                       ["users", "teams", "apps"])))
               and (($c | has("restrictions") | not)
-                or empty_lists($c.restrictions; ["users", "teams", "apps"]))
+                or unset_or_empty($c.restrictions; ["users", "teams", "apps"]))
             ' 2>/dev/null) || classic_ok=false
             if [ "$classic_ok" != "true" ]; then
               classic='{}'
@@ -401,15 +426,26 @@ jobs:
             fi
             # G4: ベースブランチに適用される全 ruleset の bypass_actors が 0 件であること。
             # まず ruleset の列挙が完全であること（G1〜G3 の判定に使った実効ルール全要素に
-            # 数値 ruleset_id があり、ルールが 1 件以上あるのに ID が 0 件という不整合が
-            # なく、実効ルール API の取得自体が成功していること）を検証する。ID 欠落・
-            # 非数値・件数不整合・取得失敗・解析失敗はすべて arm しない側へ倒す
-            # （fail-closed）。
+            # 数値 ruleset_id と既知のソース種別があり、ルールが 1 件以上あるのに ID が
+            # 0 件という不整合がなく、実効ルール API の取得自体が成功していること）を検証
+            # する。ID 欠落・非数値・未知ソース種別・件数不整合・取得失敗・解析失敗はすべて
+            # arm しない側へ倒す（fail-closed）。
+            # ソース種別のルーティング（消費リポ Bugbot High 対応）: 実効ルール
+            # （GET /rules/branches/{branch}）の各要素は `ruleset_source_type`
+            # （Repository / Organization）を持ち、org 継承 ruleset の ID を
+            # repos/{owner}/{repo}/rulesets/{id} で引くと 404 になる（org レベル ruleset は
+            # repo 側エンドポイントに存在しない）。旧実装は repo 側のみで取得していたため、
+            # org 継承 ruleset が 1 件でも適用されたベースブランチでは bypass_actors が
+            # 恒久的に読めず、fail-closed により一切 arm されなかった。ソース種別ごとに
+            # 取得先を Repository → repos/{owner}/{repo}/rulesets/{id}、
+            # Organization → orgs/{org}/rulesets/{id} へ振り分けて解消する。
             rules_total=$(jq 'flatten | length' <<<"$rules" 2>/dev/null) || rules_total=''
             ids_json=$(jq -c '
               flatten
-              | if all(.ruleset_id | type == "number")
-                then [.[].ruleset_id] | unique
+              | if all((.ruleset_id | type) == "number"
+                    and (.ruleset_source_type == "Repository"
+                      or .ruleset_source_type == "Organization"))
+                then [.[] | {id: .ruleset_id, src: .ruleset_source_type}] | unique
                 else null end
             ' <<<"$rules" 2>/dev/null) || ids_json='null'
             ids_count=$(jq 'length' <<<"$ids_json" 2>/dev/null) || ids_count=''
@@ -447,24 +483,37 @@ jobs:
               # 詳細の bypass_actors は「配列である」ことを型検証した上で空配列の場合のみ
               # 通過。欠落・null・非配列・取得失敗（token の権限不足で bypass_actors が
               # 応答に含まれない場合を含む）はすべて arm しない（fail-closed）。
-              # rid は上の jq が返した数値 ID のみ。取得は RULESET_TOKEN（read 専用）で行う。
-              ruleset_ids=$(jq -r '.[]' <<<"$ids_json")
-              for rid in $ruleset_ids; do
-                bypass_len=$(GH_TOKEN="$RULESET_TOKEN" gh api \
-                  "repos/${REPO}/rulesets/${rid}" --jq '
+              # 取得先はソース種別で振り分ける（上記ルーティング参照）。rid は上の jq が
+              # 型検証済みの数値 ID、src は Repository / Organization の 2 値のみ。
+              # org 継承 ruleset の詳細取得には RULESET_TOKEN に組織レベルの
+              # Administration: read（org ruleset の読取権限）が必要で、repo 権限しか
+              # 持たない token では 404/403 になる。その場合も従来どおり arm しない
+              # （fail-closed）が、原因が token 権限である旨をログで明示する。
+              while IFS= read -r rs; do
+                rid=$(jq -r '.id' <<<"$rs")
+                src=$(jq -r '.src' <<<"$rs")
+                if [ "$src" = "Organization" ]; then
+                  endpoint="orgs/${REPO%%/*}/rulesets/${rid}"
+                else
+                  endpoint="repos/${REPO}/rulesets/${rid}"
+                fi
+                bypass_len=$(GH_TOKEN="$RULESET_TOKEN" gh api "$endpoint" --jq '
                   if (.bypass_actors | type) == "array"
                   then .bypass_actors | length
                   else "not-array" end
                 ' 2>/dev/null) || bypass_len=''
                 if [ "$bypass_len" != "0" ]; then
-                  echo "skip PR #${PR_NUMBER}: ruleset ${rid} has bypass actors or its" \
-                    "details are unreadable (bypass_actors=${bypass_len:-unreadable})." \
+                  echo "skip PR #${PR_NUMBER}: ${src} ruleset ${rid} has bypass actors" \
+                    "or its details are unreadable" \
+                    "(bypass_actors=${bypass_len:-unreadable})." \
                     "Not arming (fail-closed). If unreadable, AUTOMERGE_RULESET_TOKEN の" \
-                    "Administration: read 権限を確認。"
+                    "権限を確認（Repository ruleset はリポジトリの Administration: read、" \
+                    "Organization 継承 ruleset は org ruleset の読取権限 =" \
+                    "組織レベル Administration: read が必要）。"
                   g4_ok=false
                   break
                 fi
-              done
+              done <<<"$(jq -c '.[]' <<<"$ids_json")"
             fi
             if [ "$g4_ok" != "true" ]; then
               continue
