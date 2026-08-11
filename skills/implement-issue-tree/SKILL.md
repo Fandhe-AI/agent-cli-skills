@@ -7,6 +7,7 @@ description: >
   外部チェック構成は args の externalChecks で明示（[] で「なし」を確定して不要待機なし・未指定なら自動マージ停止）。
   自動 squash merge はクライアント側では提供しない（autoMerge: true でも arm せず PR をマージ可能状態のまま停止。auto-merge は消費リポのサーバー側 workflow サンプル docs/implement-issue-tree/auto-merge-sample.yml + branch protection で実現）。並列度（parallel）と依存（dependsOn）で実行順を制御。
   単一イシューの実装は implement-issue、PR レビューは implement-review-pr を参照。
+model: sonnet
 user-invocable: true
 argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 main）] [並列度（省略時 3）]"
 ---
