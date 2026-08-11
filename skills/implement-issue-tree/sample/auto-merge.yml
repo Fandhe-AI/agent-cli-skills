@@ -23,8 +23,14 @@
 #         （PR #207 codex ラウンド3 P0 対応。bypass actor（App・チーム・ロール等）が
 #         1 件でも設定されていると、その actor による merge は G1〜G3 の保護を迂回できる
 #         ため、G1〜G3 が true でも人間承認なしの即時マージが成立し得る。ruleset 詳細の
-#         取得・解析に失敗した場合 — org 管理 ruleset を GITHUB_TOKEN で読めない場合を
-#         含む — も arm しない）
+#         取得・解析に失敗した場合も arm しない）。
+#         ruleset 詳細（GET /repos/{repo}/rulesets/{id}）の bypass_actors は
+#         Administration: read 権限がないと応答に含まれず、workflow の GITHUB_TOKEN
+#         （contents / pull-requests write のみ）では取得できない（PR #207 Bugbot High 対応。
+#         GITHUB_TOKEN のままでは推奨構成の ruleset 保護下で G4 が常に検証不能となり
+#         一切 arm されない）。そのため G4 の詳細取得**のみ**、Administration: read を持つ
+#         専用 token `secrets.AUTOMERGE_RULESET_TOKEN` で行う（下記「前提」3 参照）。
+#         secret 未構成（空）の場合は G4 を検証不能とみなし arm しない（fail-closed）
 #   同じ理由から、classic branch protection は enforce_admins が有効な場合にのみ G1〜G3 の
 #   認可入力として採用する（無効だと管理者がその保護を迂回して直接マージできるため。
 #   無効なら classic 側は「保護なし」として扱い、ruleset 側のみで判定する）。
@@ -40,6 +46,11 @@
 #      リポジトリ管理者権限を要求するため、workflow の GITHUB_TOKEN では読めないことがある。
 #      その場合 classic 側の実測は不成立となり arm されない（fail-closed）。**ruleset での
 #      構成を推奨**する（GET /rules/branches/{branch} は読み取り権限で実効ルールを取得できる）。
+#   3. リポジトリ secret `AUTOMERGE_RULESET_TOKEN` に、ruleset 詳細を読める token を設定する
+#      （fine-grained PAT または GitHub App token。必要権限は **Administration: read のみ**。
+#      write 権限は不要 — arm 実行（gh pr merge --auto）は従来どおり workflow の
+#      GITHUB_TOKEN が行い、この token は G4 の読み取り検証にしか使わない権限分離構成）。
+#      未構成（空）の場合は G4 が検証不能となり一切 arm されない（fail-closed）。
 #
 # 絞り込み条件（認可根拠ではない。誤爆防止の対象限定のみ。3 条件の AND）:
 #   1. author が「implement-issue-tree の PR 作成専用の automation identity（GitHub App の
@@ -66,7 +77,8 @@
 #   - fork からの PR を昇格権限で扱う pull_request_target は使わない（pull_request のまま維持）。
 #
 # permissions は arm に必要な最小構成（contents: write は merge コミット作成、
-# pull-requests: write は auto-merge の有効化に必要）。
+# pull-requests: write は auto-merge の有効化に必要）。AUTOMERGE_RULESET_TOKEN には
+# write 権限を一切要求しない（G4 の読み取り検証専用。arm は GITHUB_TOKEN が行う）。
 
 name: auto-merge
 
@@ -109,6 +121,9 @@ jobs:
       - name: Verify branch protection and provenance, then arm auto-merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # G4 の ruleset 詳細取得専用（Administration: read のみ。write 不要）。
+          # 未構成なら G4 が検証不能となり arm しない（fail-closed）。
+          RULESET_TOKEN: ${{ secrets.AUTOMERGE_RULESET_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           HEAD_REF: ${{ github.head_ref }}
@@ -163,6 +178,16 @@ jobs:
             exit 0
           fi
           # G4: ベースブランチに適用される全 ruleset の bypass_actors が 0 件であること。
+          # ruleset 詳細の bypass_actors は Administration: read がないと応答に含まれず、
+          # workflow の GITHUB_TOKEN では読めないため、詳細取得のみ専用 token
+          # AUTOMERGE_RULESET_TOKEN で行う（arm 実行は従来どおり GITHUB_TOKEN）。
+          # secret 未構成（空）なら G4 は検証不能 = arm しない（fail-closed）。
+          if [ -z "$RULESET_TOKEN" ]; then
+            echo "skip: AUTOMERGE_RULESET_TOKEN 未構成のため G4 (ruleset bypass_actors) を" \
+              "検証できず arm しない (fail-closed)。Administration: read のみの" \
+              "fine-grained PAT / GitHub App token を secret に設定すること。"
+            exit 0
+          fi
           # bypass actor（App・チーム・ロール等）が 1 件でも設定されていると、その actor
           # による merge は G1〜G3 の保護を迂回できるため arm しない。前段として ruleset の
           # 列挙が完全であること（G1〜G3 の判定に使った実効ルール全要素に数値 ruleset_id が
@@ -184,19 +209,20 @@ jobs:
             exit 0
           fi
           # 各 ruleset 詳細の bypass_actors は「配列である」ことを型検証した上で
-          # 空配列の場合のみ通過。欠落・null・非配列・取得失敗（org 管理 ruleset を
-          # GITHUB_TOKEN で読めない場合を含む）はすべて arm しない（fail-closed）。
-          # rid は上の jq が返した数値 ID のみ。
+          # 空配列の場合のみ通過。欠落・null・非配列・取得失敗（token の権限不足で
+          # bypass_actors が応答に含まれない場合を含む）はすべて arm しない（fail-closed）。
+          # rid は上の jq が返した数値 ID のみ。取得は RULESET_TOKEN（read 専用）で行う。
           ruleset_ids=$(jq -r '.[]' <<<"$ids_json")
           for rid in $ruleset_ids; do
-            bypass_len=$(gh api "repos/${REPO}/rulesets/${rid}" --jq '
+            bypass_len=$(GH_TOKEN="$RULESET_TOKEN" gh api "repos/${REPO}/rulesets/${rid}" --jq '
               if (.bypass_actors | type) == "array"
               then .bypass_actors | length
               else "not-array" end
             ' 2>/dev/null) || bypass_len=''
             if [ "$bypass_len" != "0" ]; then
               echo "skip: ruleset ${rid} has bypass actors or its details are unreadable" \
-                "(bypass_actors=${bypass_len:-unreadable}). Not arming (fail-closed)."
+                "(bypass_actors=${bypass_len:-unreadable}). Not arming (fail-closed)." \
+                "If unreadable, AUTOMERGE_RULESET_TOKEN の Administration: read 権限を確認。"
               exit 0
             fi
           done
