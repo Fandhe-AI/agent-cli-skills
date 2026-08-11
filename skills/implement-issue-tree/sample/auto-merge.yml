@@ -12,20 +12,30 @@
 #   これらは arm 対象の**絞り込み（誤爆防止）にすぎない**。
 #   本 workflow の認可根拠は「PR 作成主体が生成できない信頼済みシグナル」= ベースブランチの
 #   branch protection / ruleset をサーバー側 API で**実測検証**することに置く。arm 実行前に
-#   次の 3 点がすべて構成済みであることを決定的に検証し、1 つでも欠ければ arm せず終了する
+#   次の 4 点がすべて構成済みであることを決定的に検証し、1 つでも欠ければ arm せず終了する
 #   （fail-closed。API 取得・解析失敗も arm しない）:
 #     G1. required status checks が 1 件以上構成されている
 #     G2. required approving review count >= 1 が構成されている
 #         （GitHub は PR author の自己承認をサーバー側で拒否するため、これが
 #         「PR 作成主体が生成できない非 author 承認」という偽造不能シグナルになる）
 #     G3. dismiss stale reviews（承認後の HEAD 更新で承認を失効させる）が有効である
+#     G4. ベースブランチに適用される**全 ruleset の bypass_actors が 0 件**である
+#         （PR #207 codex ラウンド3 P0 対応。bypass actor（App・チーム・ロール等）が
+#         1 件でも設定されていると、その actor による merge は G1〜G3 の保護を迂回できる
+#         ため、G1〜G3 が true でも人間承認なしの即時マージが成立し得る。ruleset 詳細の
+#         取得・解析に失敗した場合 — org 管理 ruleset を GITHUB_TOKEN で読めない場合を
+#         含む — も arm しない）
+#   同じ理由から、classic branch protection は enforce_admins が有効な場合にのみ G1〜G3 の
+#   認可入力として採用する（無効だと管理者がその保護を迂回して直接マージできるため。
+#   無効なら classic 側は「保護なし」として扱い、ruleset 側のみで判定する）。
 #   この構造では、偽造 PR が仮に arm されても、サーバー側で非 author の人間承認と
 #   required checks が揃わない限りマージされず、人間の承認境界を迂回できない。arm は
 #   「承認とチェックが揃った時点で自動的にマージが完了する」利便性だけを担う。
 #
 # 前提（これらが未設定だと arm されない / arm 失敗になる）:
 #   1. リポジトリ設定で auto-merge を許可する（Settings → General → Allow auto-merge）
-#   2. base ブランチに branch protection / ruleset で上記 G1〜G3 を設定する。
+#   2. base ブランチに branch protection / ruleset で上記 G1〜G3 を設定し、bypass actor を
+#      置かない（G4）。classic を使う場合は enforce_admins も有効にする。
 #      注意: classic branch protection の読み取り API（GET /branches/{branch}/protection）は
 #      リポジトリ管理者権限を要求するため、workflow の GITHUB_TOKEN では読めないことがある。
 #      その場合 classic 側の実測は不成立となり arm されない（fail-closed）。**ruleset での
@@ -90,7 +100,7 @@ jobs:
       )
     runs-on: ubuntu-latest
     steps:
-      # 認可根拠 = branch protection の実測（G1〜G3）を先に検証し、通過した場合のみ
+      # 認可根拠 = branch protection の実測（G1〜G4）を先に検証し、通過した場合のみ
       # 絞り込み（ブランチ名・本文マーカー）を確認して arm する。判定に使う値はすべて
       # env 経由のクォート参照（ブランチ名・base ブランチ名・PR 番号・リポジトリ名）か
       # jq で取り出した真偽値のみで、未信頼テキストをシェルコマンドとして展開しない。
@@ -113,6 +123,14 @@ jobs:
             || classic='{}'
           rules=$(gh api "repos/${REPO}/rules/branches/${BASE_REF}" --paginate --slurp \
             2>/dev/null) || rules='[[]]'
+          # classic は enforce_admins が有効な場合のみ G1〜G3 の認可入力として採用する
+          # （無効だと管理者がその保護を迂回して直接マージできるため。無効・取得失敗時は
+          # classic 側を「保護なし」に落とし、ruleset 側の実測のみで判定する）
+          enforce_ok=$(jq -n --argjson c "$classic" \
+            '($c.enforce_admins.enabled // false) == true' 2>/dev/null) || enforce_ok=false
+          if [ "$enforce_ok" != "true" ]; then
+            classic='{}'
+          fi
           # G1: required status checks >= 1 件（classic か ruleset のいずれかで構成済み）
           checks_ok=$(jq -n --argjson c "$classic" --argjson r "$rules" '
             (($c.required_status_checks? // {})
@@ -144,6 +162,28 @@ jobs:
               "dismiss_stale=${dismiss_ok}). Not arming (fail-closed)."
             exit 0
           fi
+          # G4: ベースブランチに適用される全 ruleset の bypass_actors が 0 件であること。
+          # bypass actor（App・チーム・ロール等）が 1 件でも設定されていると、その actor
+          # による merge は G1〜G3 の保護を迂回できるため arm しない。ruleset の列挙・
+          # 詳細取得・解析に失敗した場合（org 管理 ruleset を GITHUB_TOKEN で読めない場合を
+          # 含む）も arm しない（fail-closed）。rid は jq が返す ruleset_id の数値のみ。
+          ruleset_ids=$(jq -r \
+            '[flatten[] | .ruleset_id | select(. != null)] | unique | .[]' \
+            <<<"$rules" 2>/dev/null) || ruleset_ids='__parse_error__'
+          if [ "$ruleset_ids" = "__parse_error__" ]; then
+            echo "skip: could not enumerate rulesets for base branch '${BASE_REF}'." \
+              "Not arming (fail-closed)."
+            exit 0
+          fi
+          for rid in $ruleset_ids; do
+            bypass_len=$(gh api "repos/${REPO}/rulesets/${rid}" \
+              --jq '.bypass_actors | length' 2>/dev/null) || bypass_len=''
+            if [ "$bypass_len" != "0" ]; then
+              echo "skip: ruleset ${rid} has bypass actors or its details are unreadable" \
+                "(bypass_actors length=${bypass_len:-unknown}). Not arming (fail-closed)."
+              exit 0
+            fi
+          done
           # --- 絞り込み（認可根拠ではない。誤爆防止のみ）---
           # 1. ブランチ名の厳密一致（implement-issue-tree の実装ブランチ命名規約に
           #    アンカー付きで一致し、イシュー番号を抽出できること）
