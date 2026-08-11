@@ -6,6 +6,12 @@
 # 本 workflow を消費リポジトリの .github/workflows/auto-merge.yml として配置し、
 # arm の実行をサーバー側（GitHub Actions）へ委譲する。
 #
+# 配布方針: 本サンプルは意図的に vendored 配布しない（skills/ 配下から docs/ へ移設済みで、
+# npx skills add では消費リポジトリへコピーされない）。各リポジトリの runner 方針・信頼
+# author・opt-in variable は相反し得るため（public は GitHub ホステッド必須 / private は
+# self-hosted 必須 等）、導入するリポジトリが本ファイルを参照し、自リポジトリの方針に
+# 合わせて設定した上で .github/workflows/ へ**手動配置**する。
+#
 # トリガー設計（PR #207 消費リポ codex ラウンド P0/P1 対応）:
 #   pull_request / pull_request_target は一切使わず、schedule（cron）+ workflow_dispatch のみで
 #   起動する「cron スイープ方式」を採用する。理由: pull_request 系トリガーは、たとえ
@@ -123,6 +129,12 @@
 #      個人アカウントを指定すると、その人物が手作業で作る通常の PR まで命名規約に一致する
 #      だけで arm 対象になってしまう。専用 identity が未整備の場合は本 workflow を配置せず、
 #      人間マージ運用に留めること。
+#   5. リポジトリ設定変数 `AUTOMERGE_OPTIN` に文字列 `true` を設定する（job レベル if の
+#      明示 opt-in ゲート。admin のみ設定可能なサーバー側シグナルで、設定しない限り
+#      workflow は何もしない。詳細は jobs.sweep の if コメント参照）。
+#   6. リポジトリ設定変数 `AUTOMERGE_RUNNER` に runner ラベルを設定する（public リポは
+#      `ubuntu-latest`、Fandhe-AI の private リポは `self-hosted`。フォールバックなし・
+#      未設定では job が起動しない。詳細は jobs.sweep の runs-on コメント参照）。
 #
 # 絞り込み条件（認可根拠ではない。誤爆防止の対象限定のみ。3 条件の AND）:
 #   1. author が上記 TRUSTED_AUTHOR（設定変数）に完全一致すること（open PR を REST API の
@@ -196,15 +208,23 @@ concurrency:
 
 jobs:
   sweep:
-    # runner は repo variable で切り替える（消費リポ codex P1 対応: runner 方針は
-    # public / private で正反対のため、サンプルへの直書きはどちらかの規約に必ず違反する）。
-    #   - public リポジトリ: self-hosted runner の使用は禁止（fork PR からの任意コード実行
-    #     リスク）。変数未設定のまま配置すれば既定の ubuntu-latest で動く。
-    #   - Fandhe-AI の private リポジトリ: GitHub ホステッドランナー指定は CI 規約違反のため、
-    #     リポジトリ設定変数 `AUTOMERGE_RUNNER` に `self-hosted` を設定して切り替える。
-    # GitHub Actions の runs-on は式を評価でき、`vars.X || 'literal'` のフォールバックは
-    # 公式仕様（expressions の || 演算子 + 未設定 vars は空文字 = falsy）で動作する。
-    runs-on: ${{ vars.AUTOMERGE_RUNNER || 'ubuntu-latest' }}
+    # opt-in ゲート: このリポジトリで auto-merge スイープを有効化する明示 opt-in。
+    # リポジトリ設定変数 `AUTOMERGE_OPTIN` に文字列 `true` を設定しない限り workflow は
+    # 何もしない（job ごとスキップ。fail-closed）。repo variable は admin のみ設定可能で、
+    # PR 作成主体（共有 gh 認証を持つエージェント含む）には偽造不能なサーバー側 opt-in
+    # シグナルとなる（消費リポ codex P0 対応: sweep の候補選定条件がすべて PR 作成主体の
+    # 偽造可能な provenance である問題に対し、作成主体が生成できない opt-in を要求する）。
+    if: ${{ vars.AUTOMERGE_OPTIN == 'true' }}
+    # runner は repo variable で指定し、**フォールバックを置かない**（消費リポ codex P1
+    # 対応: runner 方針は public / private で正反対のため、サンプルへの直書き・既定値の
+    # どちらもいずれかの規約に必ず違反する）。`AUTOMERGE_RUNNER` 未設定なら runs-on が
+    # 空になり job は起動しない（fail-closed）。
+    #   - public リポジトリ: `AUTOMERGE_RUNNER` に `ubuntu-latest` を設定する
+    #     （self-hosted runner の使用は禁止 — fork PR からの任意コード実行リスク）。
+    #   - Fandhe-AI の private リポジトリ: `AUTOMERGE_RUNNER` に `self-hosted` を設定する
+    #     （GitHub ホステッドランナー指定は CI 規約違反）。
+    # 未設定のままでは動かない（既定値なし）。
+    runs-on: ${{ vars.AUTOMERGE_RUNNER }}
     # ハング・API 待ちの滞留で runner を占有しないための上限（組織 CI 規約: 全ジョブに
     # timeout-minutes 必須）。スイープは読み取り API + arm のみで通常は数十秒で終わる。
     timeout-minutes: 10
