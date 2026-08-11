@@ -227,7 +227,7 @@ red / green だけで positive / negative を表現しない。例: 「↑ +12.4
 
 標準モードでは JavaScript を必須にせず、まず native HTML / CSS（`<details><summary>`・anchor navigation・CSS sticky header）を使う。
 
-`--interactive` が指定された場合、または静的表示では明らかに使いにくい大量データの場合だけ inline vanilla JavaScript を追加できる（table search / sort、series visibility、section collapse、theme override、gantt の detail toggle 等）。
+`--interactive` が指定された場合、または静的表示では明らかに使いにくい大量データの場合だけ inline vanilla JavaScript を追加できる（table search / sort、series visibility、section collapse、theme override、gantt の detail toggle 等）。validator は renderer が注入する bundled JS との完全一致のみ許可するため、独自 script を HTML へ直接書かない（機能追加は renderer の `INTERACTIVE_JS` を拡張する）。
 
 ただし以下を必ず守る。
 

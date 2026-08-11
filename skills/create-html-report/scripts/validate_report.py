@@ -14,6 +14,7 @@
 結果は日本語の PASS/FAIL 一覧で出力する。
 """
 
+import os
 import re
 import sys
 from html.parser import HTMLParser
@@ -29,10 +30,17 @@ from html.parser import HTMLParser
 DATA_URI_ALLOWED = re.compile(r"^\s*data:image/(png|jpeg|gif|webp)[;,]", re.IGNORECASE)
 FRAGMENT_URL = re.compile(r"^\s*#")
 
-# inline JS 内で禁止する network API のパターン
+# inline JS 内で禁止する network API のパターン。
+# 主防御は bundled JS との完全一致ゲート（bundled_js / check #6）であり、
+# 本 regex は難読化（window['fetch'] 等）を完全一致が弾いた上での防御多層として残す。
 NETWORK_API = re.compile(
     r"\b(fetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts|navigator\.serviceWorker)"
 )
+
+# CSS escape（\69 / \00069 形式 + 継続空白 1 文字、および \x の単文字 escape）。
+# `@\69mport` や `u\72l(` のような難読化で @import / url() の文字列検査を
+# 迂回できるため、検査前に css_unescape で Unicode へ正規化する。
+CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(.)", re.DOTALL)
 
 # CSS 内で一律禁止する外部読み込み。url(...) は CSS_URL で全件抽出し、
 # リソース属性と同じ許可リスト方式（許可画像 MIME の data: と #fragment のみ）で検査する。
@@ -54,6 +62,38 @@ URL_IGNORABLE = re.compile(r"[\s\x00-\x1f]+")
 SEMANTIC_SVG_MIN_ELEMS = 6
 
 
+def css_unescape(css_text):
+    """CSS escape を Unicode へ展開し、検査用に正規化したテキストを返す。
+
+    hex escape（1〜6 桁 + 任意の継続空白 1 文字）と単文字 escape の両方を展開する。
+    コードポイント範囲外は U+FFFD へ倒す（CSS 仕様と同じ fail 方向）。
+    @import / url() 検査は必ず本関数の出力に対して行うこと。
+    """
+    def repl(m):
+        if m.group(1) is not None:
+            try:
+                return chr(int(m.group(1), 16))
+            except (ValueError, OverflowError):
+                return "�"
+        return m.group(2)
+    return CSS_ESCAPE.sub(repl, css_text)
+
+
+def bundled_js():
+    """renderer が注入する唯一の許可 inline JS（INTERACTIVE_JS）を返す。
+
+    validate との比較の一次ソースとして render_report.py から import する
+    （同一ディレクトリ配置が前提）。import に失敗した場合は None を返し、
+    呼び出し側は「script は一切不許可」として扱う（fail-closed）。
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from render_report import INTERACTIVE_JS
+        return INTERACTIVE_JS
+    except Exception:
+        return None
+
+
 def css_bad_urls(css_text):
     """CSS 中の url(...) から自己完結契約に違反する参照を抽出する。
 
@@ -63,6 +103,7 @@ def css_bad_urls(css_text):
     url(image.png) / url(../fonts/a.woff2) のような相対 URL も配布先で
     欠落・意図しないリクエストの原因になるため、http(s) / // と同様に不合格。
     """
+    css_text = css_unescape(css_text)
     bad = []
     n_matched = 0
     for m in CSS_URL.finditer(css_text):
@@ -177,8 +218,9 @@ class ReportParser(HTMLParser):
                 if key in ad and not (DATA_URI_ALLOWED.match(v) or FRAGMENT_URL.match(v)):
                     self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
         # style 属性内の CSS も <style> ブロックと同じ許可リストで検査する
+        # （escape 難読化を塞ぐため、@import 検査は css_unescape 後に行う）
         sv = ad.get("style") or ""
-        if "style" in ad and (CSS_IMPORT.search(sv) or css_bad_urls(sv)):
+        if "style" in ad and (CSS_IMPORT.search(css_unescape(sv)) or css_bad_urls(sv)):
             self.style_attr_external.append(f"<{tag} style=...>")
 
         if tag == "a" and ad.get("href"):
@@ -307,12 +349,26 @@ def run_checks(path):
           not parser.external_refs, "; ".join(parser.external_refs[:5]))
     css_all = "\n".join(parser.styles)
     css_bad = css_bad_urls(css_all)
-    css_detail = (["@import"] if CSS_IMPORT.search(css_all) else []) \
+    # @import 検査は CSS escape 正規化後に行う（`@\69mport` 等の難読化対策）
+    css_detail = (["@import"] if CSS_IMPORT.search(css_unescape(css_all)) else []) \
         + css_bad[:3] + parser.style_attr_external[:3]
     check("CSS に @import / 不許可の url() がない（url() は画像 data: と #fragment のみ許可）",
           not css_detail, "; ".join(css_detail))
 
-    # 6. network API 不使用
+    # 6. inline <script> は renderer 注入の bundled JS（INTERACTIVE_JS）との
+    #    完全一致のみ許容する fail-closed ゲート（主防御）。
+    #    正規表現の文字列検査は window['fetch'] / createElement('script') 等の
+    #    難読化を見逃すため、許可 script を renderer 生成物 1 種に限定する。
+    #    render_report.py の import に失敗した場合は「script 一切不許可」へ倒す。
+    allowed = bundled_js()
+    allowed_set = {allowed.strip()} if allowed is not None else set()
+    bad_scripts = [f"script#{i + 1}" for i, s in enumerate(parser.scripts)
+                   if s.strip() not in allowed_set]
+    check("inline <script> が renderer 生成の bundled JS と完全一致"
+          "（renderer 生成以外の script は許可されない）",
+          not bad_scripts, "; ".join(bad_scripts[:3]))
+
+    # 6b. network API 不使用（完全一致ゲートの防御多層）
     js_all = "\n".join(parser.scripts)
     m = NETWORK_API.search(js_all)
     check("inline JS が network API を使わない", m is None, m.group(0) if m else "")

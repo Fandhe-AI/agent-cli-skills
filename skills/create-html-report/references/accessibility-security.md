@@ -112,8 +112,11 @@ inline vanilla JavaScript のみ許可（`--interactive` 時など）。
 - データはページ内 `<script type="application/json">` から `JSON.parse(el.textContent)` で読む
 - すべての機能は progressive enhancement（JavaScript 無効でも主要情報が読める）
 
+**validator の機械検査（fail-closed）**: 正規表現の文字列検査は `window['fetch'](...)` や `document.createElement('script')` 等の難読化を見逃すため、validate_report.py は inline `<script>` を **renderer が注入する bundled JS（render_report.py の `INTERACTIVE_JS`）との完全一致のみ許可**する。手書き・改変 script は内容が無害でも不合格。禁止 API の regex 検査は防御多層として併用する。CSS も同様に、`@\69mport` 等の CSS escape 難読化を検査前に Unicode へ正規化（unescape）してから `@import` / `url()` を検査する。
+
 チェック:
 
+- [ ] inline `<script>` が renderer 生成の bundled JS と完全一致している（validator が機械検査する）
 - [ ] 上記禁止 API がソース中に存在しない（validator が機械検査する）
 - [ ] JavaScript を無効化して開いても executive summary・findings・全 data table が読める
 
