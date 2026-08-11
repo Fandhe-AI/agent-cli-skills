@@ -211,14 +211,21 @@ jobs:
           # --- 対象 PR の列挙（--paginate で全ページ列挙 + author 完全一致 + draft 除外）---
           # gh pr list --limit N は固定上限を超えた分が恒久的に漏れる（PR #208 codex P2）ため、
           # REST API を --paginate で全件列挙し、author（user.login）の完全一致で選別する。
-          # 列挙自体の失敗はスイープ全体を fail-closed skip（何も arm しない）。
-          if ! prs=$(gh api "repos/${REPO}/pulls?state=open&per_page=100" \
-            --paginate --slurp --jq '
-              [.[][] | select(.user.login == env.TRUSTED_AUTHOR)
-                | {number, isDraft: .draft,
-                  headRefName: .head.ref, baseRefName: .base.ref}]
-            ' 2>/dev/null); then
+          # gh api の --slurp は --jq と併用できない（PR #208 Bugbot High 対応。併用すると
+          # コマンド自体がエラーになり列挙が常に失敗 = 全 PR が黙って fail-closed skip に
+          # なる）ため、取得（gh api --slurp）と整形（jq）を分離する。
+          # 列挙・整形いずれの失敗もスイープ全体を fail-closed skip（何も arm しない）。
+          if ! prs_raw=$(gh api "repos/${REPO}/pulls?state=open&per_page=100" \
+            --paginate --slurp 2>/dev/null); then
             echo "skip: failed to list open PRs. Not arming anything (fail-closed)."
+            exit 0
+          fi
+          if ! prs=$(jq -c '
+            [.[][] | select(.user.login == env.TRUSTED_AUTHOR)
+              | {number, isDraft: .draft,
+                headRefName: .head.ref, baseRefName: .base.ref}]
+          ' <<<"$prs_raw" 2>/dev/null); then
+            echo "skip: failed to parse PR list. Not arming anything (fail-closed)."
             exit 0
           fi
           count=$(jq 'if type == "array" then length else -1 end' <<<"$prs" 2>/dev/null) \
