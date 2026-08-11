@@ -235,6 +235,12 @@ elif [[ -d "skills" ]]; then
 elif [[ -d ".agents/skills" ]]; then
   # upstream が .agents/skills/ 配下で公開している慣習
   UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
+elif [[ -d ".claude/skills" && ! -L ".claude/skills" ]]; then
+  # upstream が .claude/skills/ を実体スキルルートとして公開している慣習。
+  # 新規スキル（upstream にまだ存在しない）は上の個別パス判定に掛からないため、
+  # 親ディレクトリの存在で判定する。.claude/skills 自体が symlink の場合は
+  # 実体側ルートが上の skills/ / .agents/skills/ 分岐で検出されるため -L で除外する
+  UPSTREAM_SKILL_PATH=".claude/skills/${SKILL_NAME}"
 else
   echo "警告: upstream にスキルルートが見つかりません。skills/ を既定として新規追加します。"
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
