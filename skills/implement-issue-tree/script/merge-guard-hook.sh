@@ -81,45 +81,54 @@
 #   連結せず、個別の Bash 呼び出しに分ければ回避できる。fail-closed の設計思想上、この
 #   over-deny は under-deny より常に安全な方向）。
 #
-#   gh 起動トークンのパス修飾迂回を塞ぐ basename 正規化（PR #195 codex P0 第3ラウンド）:
-#   `contains_subsequence` はトークンと "gh" の完全一致のみを見るため、`/usr/bin/gh pr merge`・
-#   `./gh pr merge`・`../bin/gh pr merge` のようにパス修飾して起動すると "gh" トークンに
-#   一致せず全判定をすり抜けられた（変更前の正規表現は部分一致だったため `/usr/bin/gh pr merge`
-#   内の `gh pr merge` 部分文字列に一致し防げていた回帰）。正規化パイプラインに、
-#   「非空白文字列 + `/` + `gh`」というトークン全体を裸の "gh" へ置き換えるステップを追加し、
-#   パス修飾された起動形をすべて "gh" として扱う（`gh` の直後が空白または文字列末尾であることを
-#   要求するため、`gh-helper`・`ghcr.io/...`のようなパス末尾が偶然 "gh" で終わらない無関係な
-#   トークンは対象外）。
-#
-#   シェルメタ文字を無条件にトークン区切りへ正規化する over-deny 設計（PR #195 codex P0
-#   第4ラウンド）: `contains_subsequence` は空白区切りトークナイザ（`for tok in $s`）を使うため、
-#   `gh pr merge;echo done` / `gh pr merge&&true` / `gh pr merge|cat` のように制御演算子を
-#   空白なしで直後に連結すると、対象トークンが `merge;echo`・`merge&&true`・`merge|cat` となり
-#   "merge" と完全一致せず deny をすり抜けた（変更前の正規表現は "merge" の後方境界を要求して
-#   いなかったため、これらの直接実行形を偶然検出できていた回帰）。
-#
-#   本 hook は deny 専用の best-effort 攻撃面削減であり、誤って deny しても安全側（subagent は
-#   コマンドを言い換えて再実行できるだけで、実害はない）。したがって「正確なシェル構文解析」を
-#   目指すのではなく、**マッチング専用の正規化コピー（`tokenized`）ではシェルメタ文字
-#   （`; & | < > ( ) { } `（バッククォート）・`$`）を無条件に空白へ置換してトークン区切りとして
-#   扱う** over-deny 設計に振り切った。これにより `merge;echo` は `merge` `echo` の2トークンに
-#   分かれ、"merge" トークンとして検出される。
+#   メタ文字空白化 → トークン単位 basename 正規化という合成順序（PR #195 codex P0
+#   第3〜6ラウンド / Bugbot High の集約対応）:
+#   `contains_subsequence` は空白区切りトークンと "gh"・"merge" 等の完全一致のみを見るため、
+#   過去ラウンドで次の迂回クラスが見つかった:
+#     - パス修飾起動（第3ラウンド）: `/usr/bin/gh pr merge`・`./gh pr merge` は "gh" トークンに
+#       一致しない
+#     - メタ文字の空白なし後置（第4〜5ラウンド）: `gh pr merge;echo` はトークンが `merge;echo`
+#       となり "merge" に一致しない
+#     - 合成順序の不備（第6ラウンド）: 旧実装は basename 正規化（sed）をメタ文字空白化より
+#       **前**の段で行っていたため、`/usr/bin/gh&&true pr merge` のようにパス修飾 gh の直後へ
+#       空白なしでメタ文字が続く形は「gh の直後が空白または末尾」の境界条件を満たせず
+#       正規化されず、後段のトークン判定でも `/usr/bin/gh` のまますり抜けた
+#     - 貪欲削除による証拠消失（Bugbot High）: 旧 sed の `[^[:space:]]*/gh` は同一トークン内の
+#       非空白プレフィックス全体を削除して "gh" に置き換えるため、
+#       `query={mergePullRequest(...)};/x/gh` のような glued トークンでは deny 証拠
+#       （mergePullRequest / pulls/<n>/merge 等）ごと正規化で消え、証拠グレップが不成立に
+#       なり許可へ倒れた
+#   根本原因はいずれも「トークン境界が確定する前に文字列置換で basename を触る」設計に
+#   あったため、正規化パイプラインを次の合成順序へ再設計した:
+#     1. glob ブラケット・ブレース（[ ] { }）を除去する（`[m]erge`・`m{erge,}` のように
+#        glob・ブレース展開で実行時に復元されるスペリングを文字レベルで復元する best-effort）
+#     2. シェルメタ文字（; & | < > ( ) `（バッククォート）・$ * ? , と改行）を無条件に空白へ
+#        置換してトークン境界を確定させる（over-deny 設計。`merge;echo` は `merge` `echo` の
+#        2トークンに分かれ "merge" として検出される）
+#     3. 空白区切りの**各トークン単位**で、トークン全体が `*/gh`（非空白プレフィックス + /gh）
+#        に一致する場合のみトークンを "gh" へ置き換える（部分削除はしないため、同一トークン内の
+#        他の文字列が消えることはない。`gh-helper`・`ghcr.io/foo` のような "/gh" で終わらない
+#        トークンは対象外）
+#   さらに deny 証拠の部分文字列照合（pulls/<n>/merge・mergePullRequest 等）は、メタ文字を
+#   保持した `norm` とメタ文字分割済みの `tokenized` の**両方**に対して行い、どちらかで
+#   成立すれば deny する（片方の正規化で証拠が変形しても他方で検出する over-deny 合成）。
 #
 #   この設計が安全な理由（クォート状態を追跡しない over-deny が under-deny を生まないことの
 #   根拠）: 本 hook はコマンド区切り（; & | 等）によるセグメント分割を行わず（前述のとおり
 #   PR #195 の2ラウンドでいずれも P0 の回帰を出したため撤回済み）、正規化済みコマンド全体を
-#   1 単位としてトークンの語順部分列一致で判定する。`tokenized` は `norm` に対して**メタ文字を
-#   トークン区切りへ変換する（＝トークン数を増やす）操作のみ**を行い、既存のトークンを削除・
-#   結合することはない。トークン列への操作が「区切りを増やす」方向にしか働かない以上、
-#   語順部分列一致の対象となるトークン集合は変換前の部分集合を常に含む（真の subsequence
-#   関係は保存されるか、区切りの増加によって新たに成立し得るのみ）。したがって
-#   `tokenized` を経由した判定は `norm` を直接判定するより **deny が増える方向にのみ**働き、
-#   本来 deny すべきコマンドを見逃す（under-deny）方向には決して働かない。GraphQL クエリの
-#   文字列引数中にリテラルの `(` `)` `$` 等が含まれ、それが偶然 "gh"→"pr"→"merge" のような
-#   語順を構成してしまう場合（例: `echo 'gh pr merge のことです'` のような、クォート内に
-#   "gh"・"pr"・"merge" を含む説明文）も deny されるが、これは意図した over-deny であり
-#   best-effort として許容する（ユニットテスト参照）。
-set -u
+#   1 単位としてトークンの語順部分列一致で判定する。`tokenized` は `norm` に対して
+#   (a) トークン区切りを増やす置換（メタ文字→空白）、(b) glob 文字の除去、(c) トークン全体
+#   一致時のみの "gh" への置換、のみを行う。(a) は判定対象のトークン列を細分化する方向、
+#   (b)(c) は検知語（gh / merge 等）への一致を増やす方向にしか働かない。これらの変換は
+#   証拠の部分文字列を変形しうるが、証拠照合は変換を受けない `norm` にも常に並行して行うため、
+#   deny 判定が減る方向には働かない。GraphQL クエリの文字列引数中のリテラルや
+#   `echo 'gh pr merge のことです'` のような説明文が偶然語順を構成する場合も deny されるが、
+#   これは意図した over-deny であり best-effort として許容する（誤 deny の実害は subagent が
+#   コマンドを言い換えて再実行する手間のみ）。
+#
+# set -f はトークン走査（`for tok in $s`）でのパス名展開を無効化する（cwd のファイル名が
+# トークン列へ混入する非決定性を排除。本スクリプトは glob を一切必要としない）。
+set -uf
 
 # deny 応答を出力して終了する。reason は本スクリプト内の固定文言のみを渡す契約
 # （外部入力を埋め込むと JSON 破壊・reason 経由の注入面になるため禁止）。
@@ -171,21 +180,20 @@ if printf '%s' "$cmd" | grep -qE '[$]\{?IFS'; then
   deny "IFS 由来の展開（\$IFS / \${IFS} / \${IFS%?} 等）を含むコマンドは deny（トークン分割難読化を防ぐ best-effort。fail-closed）"
 fi
 
-# --- 正規化: 難読化対策（クォート分割・行継続・IFS 直書き・パス修飾起動等）を潰す --------
-# subagent からのマージ系コマンドはすべて deny（allow 経路なし）。以下の順で正規化してから
-# トークン判定を行う:
+# --- 正規化 第1段（norm）: 文字レベルの難読化（クォート分割・行継続・IFS 直書き）を潰す ---
+# subagent からのマージ系コマンドはすべて deny（allow 経路なし）。以下の順で正規化する:
 #   (1) バックスラッシュ + 改行の行継続を除去
 #   (2) 改行 → 空白
 #   (3) ${IFS} / $IFS（波括弧あり/なし）を空白へ置換（gh${IFS}pr${IFS}merge のトークン分割難読化を潰す）
 #   (4) シングル/ダブルクォート文字の除去（g''h → gh 等のクォート分割難読化を潰す）
 #   (5) 残存する単独バックスラッシュを全除去（g\h pr merge / gh a\lias 等の直接実行形を潰す）
-#   (6) パス修飾された gh 起動トークン（`/usr/bin/gh`・`./gh`・`../bin/gh` 等）を裸の "gh" へ
-#       正規化（`gh` の直前が `/` かつ直後が空白・文字列末尾のトークン全体を対象。
-#       ファイル冒頭コメント「gh 起動トークンのパス修飾迂回を塞ぐ basename 正規化」参照）
-#   (7) 連続空白の圧縮
-# ${IFS} 展開や ANSI-C クォート（$'...'）の「意味的デコード」は文字削除では追えないため、
-# それらは本正規化ではなく前段の「デコード用プリミティブの存在検知 deny」で raw 段階で
-# 弾いている。これらにより既知の直接実行形は塞ぐが、間接実行（eval・base64 復元・
+#   (6) 連続空白の圧縮
+# norm ではトークン境界を変更する置換（メタ文字空白化・basename 正規化）を**行わない**。
+# 証拠の部分文字列照合（pulls/<n>/merge 等）の照合対象を変形させないためであり、トークン
+# 境界に依存する正規化はすべて第2段（tokenized）で行う（合成順序の設計根拠はファイル冒頭の
+# コメント参照）。${IFS} 展開や ANSI-C クォート（$'...'）の「意味的デコード」は文字削除では
+# 追えないため、それらは本正規化ではなく前段の「デコード用プリミティブの存在検知 deny」で
+# raw 段階で弾いている。これらにより既知の直接実行形は塞ぐが、間接実行（eval・base64 復元・
 # 変数間接呼び出し・コマンド置換 $(...) 等）までは文字列照合では防げない（残存リスク。
 # ファイル冒頭コメント・SKILL.md 参照。実強制は「自動マージを行わない」方針とサーバ側
 # branch protection が担う）。
@@ -195,16 +203,48 @@ norm=$(printf '%s\n' "$cmd" \
   | sed -e 's/[$]{IFS}/ /g' -e 's/[$]IFS/ /g' \
   | tr -d "'\"" \
   | tr -d "\\\\" \
-  | sed -E 's#(^|[[:space:]])([^[:space:]]*/)gh([[:space:]]|$)#\1gh\3#g' \
   | tr -s '[:space:]' ' ')
 
-# トークン判定専用の正規化コピー。シェルメタ文字（; & | < > ( ) { } `（バッククォート）・$）を
-# 無条件に空白へ置換し、制御演算子が空白なしで直後に連結された形（`merge;echo`・`merge&&true`・
-# `merge|cat` 等）もトークン境界として分離する（over-deny 設計。安全性の根拠はファイル冒頭の
-# コメント「シェルメタ文字を無条件にトークン区切りへ正規化する over-deny 設計」参照）。
-# REST/GraphQL の URL・mutation 名の部分文字列照合（`pulls/<n>/merge`・`mergePullRequest` 等）は
-# `(` `)` を含む元の文字列が必要なため、こちらではなく `norm` に対して行う。
-tokenized=$(printf '%s' "$norm" | sed -e 's/[;&|<>(){}`$]/ /g' | tr -s '[:space:]' ' ')
+# トークン列（空白区切り）の各トークンについて、トークン全体が「非空白プレフィックス + /gh」
+# に一致する場合のみ "gh" へ置き換える（パス修飾起動の basename 正規化。部分削除はしない —
+# 旧 sed 実装の貪欲プレフィックス削除が同一トークン内の deny 証拠まで消した Bugbot High の
+# 再発防止。ファイル冒頭コメント参照）。メタ文字空白化の**後**に呼ぶ契約（`/usr/bin/gh&&true`
+# のような glued トークンを先に `/usr/bin/gh` と `true` に分離してから basename を見る）。
+normalize_gh_tokens() {
+  local s="$1" tok out=""
+  for tok in $s; do
+    case "$tok" in
+      */gh) tok="gh" ;;
+    esac
+    out="$out $tok"
+  done
+  printf '%s' "$out"
+}
+
+# --- 正規化 第2段（tokenized）: トークン境界の確定 → トークン単位 basename 正規化 ---------
+# 合成順序が本質（ファイル冒頭コメント「メタ文字空白化 → トークン単位 basename 正規化という
+# 合成順序」参照）:
+#   (1) glob ブラケット・ブレース（[ ] { }）を除去（`[m]erge`・`m{erge,}` 等、実行時展開で
+#       復元されるスペリングの文字レベル復元。best-effort）
+#   (2) シェルメタ文字（; & | < > ( ) `（バッククォート）・$ * ? ,）を無条件に空白へ置換し、
+#       制御演算子が空白なしで連結された形（`merge;echo`・`merge&&true`・`/usr/bin/gh&&true`
+#       等）をトークン境界として分離する（over-deny 設計）
+#   (3) 連続空白の圧縮
+#   (4) トークン単位の basename 正規化（normalize_gh_tokens。トークン全体が */gh の場合のみ）
+tokenized=$(printf '%s' "$norm" \
+  | tr -d '[]{}' \
+  | sed -e 's/[;&|<>()`$*?,]/ /g' \
+  | tr -s '[:space:]' ' ')
+tokenized=$(normalize_gh_tokens "$tokenized")
+
+# deny 証拠の部分文字列照合。メタ文字を保持した norm とトークン分割済みの tokenized の両方を
+# 照合し、どちらかで成立すれば真（片方の正規化で証拠が変形しても他方で検出する over-deny 合成。
+# 例: `merges;echo` の glued 境界は tokenized 側で、`pulls/$PR/merge` の `$` 混じり URL は
+# norm 側で検出される）。
+evidence() {
+  printf '%s' "$norm" | grep -qE "$1" && return 0
+  printf '%s' "$tokenized" | grep -qE "$1"
+}
 
 # フラグトークン（`-` で始まるすべてのトークン）を除去したトークン列を返す。
 # 値トークンは孤立して残る（ファイル冒頭の設計注記のとおり、これは語順部分列判定と
@@ -247,16 +287,16 @@ fi
 # gh api 経由のマージ（グローバルオプションの挟み込みで迂回不可）
 if contains_subsequence "$all_nf" gh api; then
   # REST merge: PUT repos/<owner>/<repo>/pulls/<n>/merge
-  if printf '%s' "$norm" | grep -qE 'pulls/[^[:space:]]*/merge'; then
+  if evidence 'pulls/[^[:space:]]*/merge'; then
     deny "subagent からの REST merge（gh api pulls/<n>/merge）は禁止"
   fi
   # REST ブランチマージ: POST repos/<owner>/<repo>/merges
-  if printf '%s' "$norm" | grep -qE '/merges([[:space:]?]|$)'; then
+  if evidence '/merges([[:space:]?]|$)'; then
     deny "subagent からの REST ブランチマージ（gh api repos/<o>/<r>/merges）は禁止"
   fi
   # GraphQL merge / auto-merge 有効化 / ref 直接マージ mutation。
   # mergeBranch は PR を経由せず head ref を base へ直接マージできる迂回経路として塞ぐ。
-  if printf '%s' "$norm" | grep -qE 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
+  if evidence 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
     deny "subagent からの GraphQL merge 系 mutation（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）は禁止"
   fi
 fi
