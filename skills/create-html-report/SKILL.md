@@ -131,6 +131,14 @@ report spec には最低限以下を持たせる。
 
 ### Step 6: renderer で HTML を生成する
 
+まず必須 CLI の `python3` の存在を確認する。
+
+```bash
+command -v python3 >/dev/null || echo "python3 が見つからない"
+```
+
+未導入の場合は処理を中止し、導入方法を案内する（macOS: `brew install python3` / Ubuntu・Debian: `sudo apt install python3` 等。導入後に再実行）。
+
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/scripts/render_report.py" \
   --spec "<report-spec.json>" \

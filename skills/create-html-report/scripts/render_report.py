@@ -667,8 +667,11 @@ def render_heatmap(chart, ids, interactive):
                 color, lum = _viridis((v - vmin) / span)
                 txt = "#ffffff" if lum < 0.55 else "#1a1a1a"
                 out.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{cw - 2:.1f}" height="{ch - 2}" fill="{color}"/>')
+                # セル文字色は輝度に応じた計算色。presentation attribute（fill="..."）は
+                # author CSS の `.chart text { fill: var(--fg) }` に負けるため、
+                # 優先順位で勝つ inline style で適用する（暗色セル上の可読性を保証）。
                 out.append(f'<text x="{x + cw / 2:.1f}" y="{y + ch / 2 + 4:.1f}" text-anchor="middle" '
-                           f'class="cell" fill="{txt}">{fmt(v)}</text>')
+                           f'class="cell" style="fill:{txt}">{fmt(v)}</text>')
     # 色スケール凡例（min/max ラベル付き）
     ly = top + ch * len(rows_lbl) + 18
     lw, seg = 180, 18
