@@ -884,6 +884,11 @@ def render_donut(chart, ids, interactive):
     slices = require_list(chart.get("slices"), f"donut '{chart.get('title')}' の slices")
     if not slices:
         raise SpecError(f"donut '{chart.get('title')}' に slices がない")
+    # SKILL.md の chart 選定規約: donut は 6 分割以下（超える構成比は判読不能になる）。
+    # 規約を spec 段階で強制し、多分割は bar への変更を促す。
+    if len(slices) > 6:
+        raise SpecError(f"donut '{chart.get('title')}' の slices が 6 件を超えている"
+                        f"（{len(slices)} 件）。7 区分以上は bar を使用すること")
     unit = chart.get("unit", "")
     for si, s in enumerate(slices):
         require_dict(s, f"donut '{chart.get('title')}' の slices[{si}]")
@@ -1069,13 +1074,19 @@ def render_gantt(chart, ids, interactive):
         require_dict(t, f"gantt '{chart.get('title')}' の tasks[{ti}]")
         if not t.get("name"):
             raise SpecError(f"gantt tasks[{ti}] に name がない")
-        # status の enum 検証（未指定は planned 扱い）。enum 外を silent に
-        # series-8 色・未翻訳テキストへフォールバックすると "Done" 等の誤記が
-        # 凡例と食い違う灰色バーのまま気付かれないため、spec 段階で弾く。
+        # status の enum 検証と正規化（未指定・明示 null は planned 扱い）。
+        # enum 外を silent に series-8 色・未翻訳テキストへフォールバックすると
+        # "Done" 等の誤記が凡例と食い違う灰色バーのまま気付かれないため、spec 段階で弾く。
+        # ここで task dict へ正規化済み値を確定格納し、描画・データ表は
+        # 以降 t["status"] のみを参照する（"status": null がキーとして存在すると
+        # .get のデフォルトが効かず KeyError になる問題の一元対処）。
         status = t.get("status")
-        if status is not None and status not in GANTT_STATUS:
+        if status is None:
+            status = "planned"
+        elif status not in GANTT_STATUS:
             raise SpecError(f"task '{t.get('name')}' の status は "
                             f"{' / '.join(GANTT_STATUS)} のいずれか: {status!r}")
+        t["status"] = status
         task_id = t.get("id")
         if task_id is not None:
             if task_id in seen_task_ids:
@@ -1140,8 +1151,8 @@ def render_gantt(chart, ids, interactive):
                 continue
             cy_ = y + row_h / 2
             out.append(f'<text x="{left - 8}" y="{cy_ + 4:.1f}" text-anchor="end" class="cat">{esc(t.get("name", ""))}</text>')
-            # status は事前検証済み（enum 外は SpecError）のため直接引ける
-            color, status_ja = GANTT_STATUS[t.get("status", "planned")]
+            # status は事前検証で正規化済み（null → planned・enum 外は SpecError）のため直接引ける
+            color, status_ja = GANTT_STATUS[t["status"]]
             if require_bool(t.get("milestone"), f"task '{t.get('name')}' の milestone"):
                 mx = x(parse_date(t["date"]))
                 s = 8
@@ -1187,13 +1198,13 @@ def render_gantt(chart, ids, interactive):
         if require_bool(t.get("milestone"), f"task '{t.get('name')}' の milestone"):
             rows.append([(t.get("name", ""), False), (t.get("phase", "—"), False),
                          (str(t.get("date")), False), ("—", False), ("—", True),
-                         (GANTT_STATUS[t.get("status", "planned")][1] + "（マイルストーン）", False)])
+                         (GANTT_STATUS[t["status"]][1] + "（マイルストーン）", False)])
         else:
             prog = _gantt_progress(t)
             rows.append([(t.get("name", ""), False), (t.get("phase", "—"), False),
                          (str(t.get("start")), False), (str(t.get("end")), False),
                          (f"{int(round(prog * 100))}%" if prog is not None else "—", True),
-                         (GANTT_STATUS[t.get("status", "planned")][1], False)])
+                         (GANTT_STATUS[t["status"]][1], False)])
     table = data_table(f"{chart['title']}（データ）",
                        ["タスク", "フェーズ", "開始", "終了", "進捗", "ステータス"], rows, interactive)
 
@@ -1383,6 +1394,12 @@ def render_toc(entries):
 def render_assumptions(assumptions):
     if not assumptions:
         return ""
+    # 契約は string[]（references/report-spec.md）。object・数値を str() で
+    # 黙って文字列化せず、要素位置を示して拒否する。
+    for i, a in enumerate(assumptions):
+        if not isinstance(a, str):
+            raise SpecError(f"assumptions[{i}] は string で指定する: "
+                            f"{type(a).__name__} が渡された")
     items = "".join(f"<li>{esc(a)}</li>" for a in assumptions)
     return f'<section id="assumptions"><h2>前提・制約</h2><ul>{items}</ul></section>'
 

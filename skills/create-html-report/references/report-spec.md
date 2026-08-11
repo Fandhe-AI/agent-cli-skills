@@ -179,7 +179,7 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
 ```
 
 - `value` は非負のみ。中央に合計値、凡例に構成比（%）を自動表示
-- part-to-whole 用途のみ。slice が多い場合は bar を検討する
+- part-to-whole 用途のみ。**`slices` は 6 件以下**（7 件以上は SpecError。多区分は bar を使う）
 
 ### radar
 
