@@ -221,16 +221,24 @@ ORIG_DIR="$(pwd)"
 # LOCAL_SKILL_DIR（貢献対象）とは別物。
 # override: 環境変数 CONTRIBUTE_SKILL_DIR が設定済みならそれを検証して使う
 if [[ -n "${CONTRIBUTE_SKILL_DIR:-}" ]]; then
-  if [[ "${CONTRIBUTE_SKILL_DIR}" != "${ORIG_DIR}/skills/contribute-skill" \
-    && "${CONTRIBUTE_SKILL_DIR}" != "${ORIG_DIR}/.agents/skills/contribute-skill" \
-    && "${CONTRIBUTE_SKILL_DIR}" != "${ORIG_DIR}/.claude/skills/contribute-skill" ]]; then
+  # 完全一致判定で3候補それぞれの固定相対パス文字列リテラルを選ぶ。
+  # ${VAR#pattern} 等のパラメータ展開によるプレフィックス除去は使わない
+  # （ORIG_DIR に [ * ? 等の glob 文字が含まれると pattern として解釈され、
+  # 接頭辞を除去し切れず絶対パスのまま検査関数へ渡ってしまうため）。
+  if [[ "${CONTRIBUTE_SKILL_DIR}" == "${ORIG_DIR}/skills/contribute-skill" ]]; then
+    CONTRIBUTE_SKILL_REL="skills/contribute-skill"
+  elif [[ "${CONTRIBUTE_SKILL_DIR}" == "${ORIG_DIR}/.agents/skills/contribute-skill" ]]; then
+    CONTRIBUTE_SKILL_REL=".agents/skills/contribute-skill"
+  elif [[ "${CONTRIBUTE_SKILL_DIR}" == "${ORIG_DIR}/.claude/skills/contribute-skill" ]]; then
+    CONTRIBUTE_SKILL_REL=".claude/skills/contribute-skill"
+  else
     echo "エラー: CONTRIBUTE_SKILL_DIR は ${ORIG_DIR}/skills/contribute-skill / ${ORIG_DIR}/.agents/skills/contribute-skill / ${ORIG_DIR}/.claude/skills/contribute-skill のいずれかを指定してください: ${CONTRIBUTE_SKILL_DIR}"
     exit 1
   fi
   # LOCAL_SKILL_DIR と同じ fail-closed 方針: 末尾要素・中間の親ディレクトリのいずれかが
   # symlink の場合は実体側パスの指定を要求する（assert_no_symlink_components は Step 1 で定義済み）。
-  # CONTRIBUTE_SKILL_DIR は ORIG_DIR からの絶対パスのため、ORIG_DIR を base として検証する。
-  if ! assert_no_symlink_components "${CONTRIBUTE_SKILL_DIR#${ORIG_DIR}/}" "${ORIG_DIR}"; then
+  # 上記で完全一致判定した固定相対パスリテラル（CONTRIBUTE_SKILL_REL）を検査関数へ渡す。
+  if ! assert_no_symlink_components "${CONTRIBUTE_SKILL_REL}" "${ORIG_DIR}"; then
     echo "エラー: CONTRIBUTE_SKILL_DIR の経路に symlink が含まれています。実体側のパスを指定してください: ${SYMLINK_COMPONENT} -> $(readlink "${SYMLINK_COMPONENT}")"
     exit 1
   fi
