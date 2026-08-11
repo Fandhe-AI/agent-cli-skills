@@ -164,23 +164,39 @@ jobs:
           fi
           # G4: ベースブランチに適用される全 ruleset の bypass_actors が 0 件であること。
           # bypass actor（App・チーム・ロール等）が 1 件でも設定されていると、その actor
-          # による merge は G1〜G3 の保護を迂回できるため arm しない。ruleset の列挙・
-          # 詳細取得・解析に失敗した場合（org 管理 ruleset を GITHUB_TOKEN で読めない場合を
-          # 含む）も arm しない（fail-closed）。rid は jq が返す ruleset_id の数値のみ。
-          ruleset_ids=$(jq -r \
-            '[flatten[] | .ruleset_id | select(. != null)] | unique | .[]' \
-            <<<"$rules" 2>/dev/null) || ruleset_ids='__parse_error__'
-          if [ "$ruleset_ids" = "__parse_error__" ]; then
-            echo "skip: could not enumerate rulesets for base branch '${BASE_REF}'." \
+          # による merge は G1〜G3 の保護を迂回できるため arm しない。前段として ruleset の
+          # 列挙が完全であること（G1〜G3 の判定に使った実効ルール全要素に数値 ruleset_id が
+          # あり、ルールが 1 件以上あるのに ID が 0 件という不整合がないこと）を検証する。
+          # ID 欠落・非数値・件数不整合・解析失敗はすべて arm しない側へ倒す（fail-closed）。
+          rules_total=$(jq 'flatten | length' <<<"$rules" 2>/dev/null) || rules_total=''
+          ids_json=$(jq -c '
+            flatten
+            | if all(.ruleset_id | type == "number")
+              then [.[].ruleset_id] | unique
+              else null end
+          ' <<<"$rules" 2>/dev/null) || ids_json='null'
+          ids_count=$(jq 'length' <<<"$ids_json" 2>/dev/null) || ids_count=''
+          if [ "$ids_json" = "null" ] || [ -z "$rules_total" ] || [ -z "$ids_count" ] \
+            || { [ "$rules_total" -gt 0 ] && [ "$ids_count" -eq 0 ]; }; then
+            echo "skip: could not fully enumerate rulesets for base branch '${BASE_REF}'" \
+              "(rules=${rules_total:-unknown}, ruleset_ids=${ids_count:-unknown})." \
               "Not arming (fail-closed)."
             exit 0
           fi
+          # 各 ruleset 詳細の bypass_actors は「配列である」ことを型検証した上で
+          # 空配列の場合のみ通過。欠落・null・非配列・取得失敗（org 管理 ruleset を
+          # GITHUB_TOKEN で読めない場合を含む）はすべて arm しない（fail-closed）。
+          # rid は上の jq が返した数値 ID のみ。
+          ruleset_ids=$(jq -r '.[]' <<<"$ids_json")
           for rid in $ruleset_ids; do
-            bypass_len=$(gh api "repos/${REPO}/rulesets/${rid}" \
-              --jq '.bypass_actors | length' 2>/dev/null) || bypass_len=''
+            bypass_len=$(gh api "repos/${REPO}/rulesets/${rid}" --jq '
+              if (.bypass_actors | type) == "array"
+              then .bypass_actors | length
+              else "not-array" end
+            ' 2>/dev/null) || bypass_len=''
             if [ "$bypass_len" != "0" ]; then
               echo "skip: ruleset ${rid} has bypass actors or its details are unreadable" \
-                "(bypass_actors length=${bypass_len:-unknown}). Not arming (fail-closed)."
+                "(bypass_actors=${bypass_len:-unreadable}). Not arming (fail-closed)."
               exit 0
             fi
           done
