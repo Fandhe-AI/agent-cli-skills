@@ -92,11 +92,18 @@ if [[ -n "${LOCAL_SKILL_DIR:-}" ]]; then
   esac
   # .claude/skills/<name> は skills/<name> への symlink 慣習があるため、symlink が
   # 指定された場合は実体側パスの指定を促す（git log / git diff が symlink 先の内容を
-  # 追跡できず、後続 Step の差分表示が空になるため）
-  if [[ -L "${LOCAL_SKILL_DIR}" ]]; then
-    echo "エラー: LOCAL_SKILL_DIR が symlink です。実体側のパスを指定してください: ${LOCAL_SKILL_DIR} -> $(readlink "${LOCAL_SKILL_DIR}")"
-    exit 1
-  fi
+  # 追跡できず、後続 Step の差分表示が空になるため）。末尾要素だけでなく
+  # 全中間要素（例: .claude → .claude/skills）も累積検査し、親ディレクトリが
+  # symlink のパス指定も fail-closed で拒否する（自動解決側の親 ! -L 検査と対称）
+  local_check_path=""
+  IFS='/' read -r -a local_path_parts <<< "${LOCAL_SKILL_DIR}"
+  for local_part in "${local_path_parts[@]}"; do
+    local_check_path="${local_check_path:+${local_check_path}/}${local_part}"
+    if [[ -L "${local_check_path}" ]]; then
+      echo "エラー: LOCAL_SKILL_DIR の経路に symlink が含まれています。実体側のパスを指定してください: ${local_check_path} -> $(readlink "${local_check_path}")"
+      exit 1
+    fi
+  done
   if [[ ! -d "${LOCAL_SKILL_DIR}" ]]; then
     echo "エラー: 指定された LOCAL_SKILL_DIR が存在しません: ${LOCAL_SKILL_DIR}"
     exit 1

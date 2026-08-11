@@ -59,11 +59,18 @@ if [[ -n "${LOCAL_SKILL_DIR:-}" ]]; then
       exit 1
       ;;
   esac
-  # symlink（.claude/skills/<name> → skills/<name> 慣習）は差分表示が空になるため実体側を要求する
-  if [[ -L "${LOCAL_SKILL_DIR}" ]]; then
-    echo "エラー: LOCAL_SKILL_DIR が symlink です。実体側のパスを指定してください: ${LOCAL_SKILL_DIR} -> $(readlink "${LOCAL_SKILL_DIR}")"
-    exit 1
-  fi
+  # symlink（.claude/skills/<name> → skills/<name> 慣習）は差分表示が空になるため実体側を要求する。
+  # 末尾要素だけでなく全中間要素（例: .claude → .claude/skills）も累積検査し、
+  # 親ディレクトリが symlink のパス指定も fail-closed で拒否する
+  local_check_path=""
+  IFS='/' read -r -a local_path_parts <<< "${LOCAL_SKILL_DIR}"
+  for local_part in "${local_path_parts[@]}"; do
+    local_check_path="${local_check_path:+${local_check_path}/}${local_part}"
+    if [[ -L "${local_check_path}" ]]; then
+      echo "エラー: LOCAL_SKILL_DIR の経路に symlink が含まれています。実体側のパスを指定してください: ${local_check_path} -> $(readlink "${local_check_path}")"
+      exit 1
+    fi
+  done
   if [[ ! -d "${LOCAL_SKILL_DIR}" ]]; then
     echo "エラー: 指定された LOCAL_SKILL_DIR が存在しません: ${LOCAL_SKILL_DIR}"
     exit 1
@@ -94,7 +101,7 @@ fi
 ```
 
 引数が空の場合はパス解決に進まず、`skills/`・`.agents/skills/`・`.claude/skills/`（実ディレクトリのみ。symlink は実体側の候補に現れるため除外）の候補一覧を表示して終了します。Claude はその一覧をユーザーに提示し、スキル名を選んでもらってから再実行を促してください。後続の Step では `${LOCAL_SKILL_DIR}/` を使ってローカルパスを参照します。
-`skills/`・`.agents/skills/`・`.claude/skills/`（実ディレクトリのみ。symlink は実体側でカウント）の**複数にディレクトリが存在する場合は中止**し、環境変数 `LOCAL_SKILL_DIR` に改修対象のパス（`skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` のいずれか）を指定して再実行するよう案内します（silently に `skills/` を優先しません）。環境変数 `LOCAL_SKILL_DIR` が設定済みの場合は、許可された3パスのいずれかであること・symlink でないこと・実在することを検証してから採用し、自動解決をスキップします。いずれにも存在しなければエラーで中止します。
+`skills/`・`.agents/skills/`・`.claude/skills/`（実ディレクトリのみ。symlink は実体側でカウント）の**複数にディレクトリが存在する場合は中止**し、環境変数 `LOCAL_SKILL_DIR` に改修対象のパス（`skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` のいずれか）を指定して再実行するよう案内します（silently に `skills/` を優先しません）。環境変数 `LOCAL_SKILL_DIR` が設定済みの場合は、許可された3パスのいずれかであること・経路の全要素（中間の親ディレクトリ含む）が symlink でないこと・実在することを検証してから採用し、自動解決をスキップします。いずれにも存在しなければエラーで中止します。
 
 ### Step 2: upstream を特定する
 
@@ -422,7 +429,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 ## 注意事項
 
 - **SKILL_NAME は kebab-case のみ許可**：`..` のような値によるパストラバーサルを防ぐため、空判定の直後・パス解決の前に `^[a-z][a-z0-9-]+$` で検証する（security.md A03/A01）
-- **`skills/`・`.agents/skills/`・`.claude/skills/` の複数に実体が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` の3パスのみ受理し（symlink は実体側パスの指定を要求）、任意パス指定によるパストラバーサルを防ぐ。Step 5 で本スキル自身（contribute-skill）の配置を解決する `CONTRIBUTE_SKILL_DIR` も同じ fail-closed 方針を取り、`skills/contribute-skill` と `.agents/skills/contribute-skill` の両方が存在する場合は silently に `skills/` を優先せず中止して環境変数 `CONTRIBUTE_SKILL_DIR` での指定を求める（LOCAL_SKILL_DIR とは非対称にしない）
+- **`skills/`・`.agents/skills/`・`.claude/skills/` の複数に実体が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` の3パスのみ受理し（末尾要素・中間の親ディレクトリのいずれかが symlink なら実体側パスの指定を要求）、任意パス指定によるパストラバーサルを防ぐ。Step 5 で本スキル自身（contribute-skill）の配置を解決する `CONTRIBUTE_SKILL_DIR` も同じ fail-closed 方針を取り、`skills/contribute-skill` と `.agents/skills/contribute-skill` の両方が存在する場合は silently に `skills/` を優先せず中止して環境変数 `CONTRIBUTE_SKILL_DIR` での指定を求める（LOCAL_SKILL_DIR とは非対称にしない）
 - **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → `.claude/skills/<name>` の存在（`-L` で symlink を除外した実ディレクトリのみ。親 `.claude/skills` 自体が symlink の場合も除外し、いずれも解決先の実体が前段で検出される）→ スキルルート親ディレクトリの慣習（`skills/` → `.agents/skills/` → symlink でない `.claude/skills/` の順。新規スキルは個別パスが存在しないためこの親ディレクトリ判定で配置先が決まる）→ 最終デフォルト `skills/`（より一般的な公開レイアウト）
