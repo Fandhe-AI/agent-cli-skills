@@ -13,6 +13,9 @@ skills/                               -- スキル本体（各ディレクトリ
   comment-code/
   create-commit/
   create-html-report/
+    references/                       -- chart 選定・レポート設計・spec schema・a11y/セキュリティ規約
+    samples/                          -- report spec の JSON 例（comparison / gantt / time-series）
+    scripts/                          -- render_report.py（spec→HTML renderer）、validate_report.py（25 項目検証）
   create-issue/
   create-issue-tree/
   create-plan/

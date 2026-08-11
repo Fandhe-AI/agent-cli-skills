@@ -1,223 +1,321 @@
 ---
 name: create-html-report
 description: >
-  比較・分析結果を自己完結 HTML レポートにまとめる。「レポート作って」「HTML レポート」「比較レポート」
-  「グラフで見せて」「見やすくまとめて」で使用。棒グラフ・折れ線グラフ・レーダーチャート（六角形グラフ）を
-  インライン SVG で描画し、外部 CDN 不使用・レスポンシブ対応で単一 HTML ファイルを生成する。
-  表・凡例・軸ラベル・配色一貫・ダークモード対応（prefers-color-scheme）まで単体で完結する。
+  分析・比較・調査結果・進捗・計画を、意思決定しやすい自己完結 HTML レポートとして生成する。
+  「HTML レポート作って」「レポートにまとめて」「比較を可視化」「グラフで見せて」「ガントチャート作って」
+  「ダッシュボード風にまとめて」「見やすくまとめて」で使用。
+  データと伝えたい関係に応じて KPI・表・bar・line・scatter・heatmap・waterfall・donut・radar・gantt
+  から適切な表現を選び、アクセシブル・レスポンシブ・印刷対応の単一 HTML ファイルを生成する。
 model: sonnet
 user-invocable: true
-argument-hint: "<レポート内容の説明> (例: create-html-report 3案のパフォーマンス比較)"
+argument-hint: "<レポートの目的・対象・データ/ファイル> [--interactive] [--output <path>]"
+tools: [Bash, Read, Write]
 ---
 
 # create-html-report
 
-比較・分析結果を、表と多様なグラフ（棒グラフ・折れ線グラフ・レーダーチャート）で見やすくまとめた自己完結 HTML レポートを生成する。
+$ARGUMENTS をもとに、分析結果を「読むだけで要点が分かり、必要なら詳細まで確認できる」自己完結 HTML レポートへ変換する。
+
+最終成果物は原則として単一 `.html` ファイルとする。
 
 ## 使い方
 
-引数でレポート化したい内容（比較対象・データ・目的）を渡す。引数がない場合は Step 1 でユーザーに確認する。
+引数でレポート化したい内容（比較対象・データ・目的）を渡す。引数が曖昧な場合は Step 1 でユーザーに確認する。
 
 - 出力先はユーザー指定がなければ `_/reports/<report-name>.html`
-- 生成する HTML は外部依存なし（CDN・外部フォント・外部画像・外部 JS ライブラリ不使用）の単一ファイル
+- `--interactive` 指定時、または静的表示では扱いにくい大量データの場合のみ inline JavaScript を許可する
+- `--output <path>` で出力先を明示指定できる
+
+## Core contract
+
+必ず以下を満たす。
+
+1. **Insight first** — グラフを作ること自体を目的にしない。最重要な結論・変化・リスク・意思決定材料を先に特定し、その理解を助ける可視化だけを使う。
+2. **Do not invent data** — 不明な値・日付・割合・単位・ステータスを推測で補完しない。欠損は欠損として扱う。必要な仮定を置く場合はレポート内に明示する。
+3. **Self-contained** — 外部 CDN・外部 font・外部 JavaScript library・外部 stylesheet・外部画像へ依存しない。CSS・SVG・必要な JavaScript は HTML 内に含める。データ出典への通常の `<a href="https://...">` は外部依存とみなさない。ページロード時に外部通信してはならない。
+4. **Accessible by default** — 色だけに情報を依存させない。グラフの主要な内容は文章または表でも確認できるようにする。キーボード・screen reader・dark mode・拡大表示を考慮する。
+5. **Progressive enhancement** — 主要な結論とデータは JavaScript なしでも読めるようにする。インタラクションは理解を補助する場合だけ追加する。
+6. **Deterministic rendering** — SVG 座標計算・escaping・テーマ・基本コンポーネントは bundled renderer に任せる。Claude が毎回同じ SVG boilerplate を手作業で再実装しない。
 
 ## フロー
 
-### Step 1: 入力データ・比較対象・レポート趣旨の確認
+### Step 1: Context と入力データを把握する
 
-- 何を比較・分析するレポートか（対象・期間・指標）を確認する
-- 元データの所在を確認する（ユーザー提供のテキスト・既存ファイル・コマンド出力等）
-- レポートの想定読者と目的（意思決定材料か、経過報告か）を確認する
-- 引数なしで曖昧な場合はユーザーに質問してから次に進む
+会話・引数・指定ファイル・既存データから以下を特定する。
 
-### Step 2: レポート構成の設計
+- レポートの目的、想定読者、意思決定したいこと
+- 対象・期間、指標と単位、データソース
+- 比較対象、スケジュール・依存関係、不確実性・欠損値
 
-セクション構成と各セクションで使うグラフ種を選定する。グラフ種は以下の選定基準に従う。
+会話や既存データから十分推定できる場合は質問しない。情報不足でも有用な部分レポートを作れる場合は、勝手に値を補完せず「制約・不足情報」として明示して進める。正しいレポートを作れないほど目的・入力が曖昧な場合だけ最小限の確認を行う。
 
-| データの性質 | 推奨グラフ | 理由 |
-|------------|-----------|------|
-| カテゴリ間の数値比較（部門別・案別など） | 棒グラフ | 離散カテゴリの大小比較に最適 |
-| 時系列・推移（月次・バージョン推移など） | 折れ線グラフ | 連続的な変化の傾向が読み取りやすい |
-| 多軸の特性比較（3〜8軸、案の総合評価など） | レーダーチャート（六角形グラフ） | 複数指標を同時に俯瞰できる |
-| 正確な数値の突合が必要な箇所 | 表（グラフと併記） | グラフは概観、表は正確な値の確認用 |
+### Step 2: narrative を設計する
 
-設計時に以下を決める。
+HTML を書く前に内部的に次を整理する。
 
-- セクション見出しの一覧（例: 概要 → 比較表 → 指標別グラフ → 総合評価レーダーチャート → 結論）
-- 各グラフの系列（対象）と使用する配色。**同じ対象は全グラフで同じ色**に固定する
-- 軸・単位・凡例に必要な情報（タイトル・軸ラベル・単位・凡例テキスト）
+- 最も重要な 1 メッセージ、3〜5 個の key findings
+- 意思決定・推奨事項、findings を裏付けるデータ、詳細確認用の情報
 
-### Step 3: HTML 生成
+情報階層は原則次の順序にする。
 
-以下の設計原則に従い、単一の自己完結 HTML ファイルを生成する。
+1. Title / scope
+2. Executive summary
+3. KPI / key findings
+4. Decision / recommendation（該当する場合）
+5. Main visual analysis
+6. Schedule / risks / dependencies（該当する場合）
+7. Detailed data
+8. Methodology / assumptions
+9. Sources / generated metadata
 
-#### 自己完結の原則
+すべてを1画面のダッシュボードへ押し込まない。重要情報を上に置き、詳細は下へ続ける。
 
-- 外部 CDN・外部フォント・外部画像に依存しない。CSS はすべて `<style>` 内にインラインで記述する
-- グラフは Chart.js 等の外部ライブラリを使わず、**インライン SVG** で描画する。グラフは静的 SVG のみで完結できるため、動的データを含む `<script>` は使用しない
-- フォントは `system-ui` 等の OS 標準フォントスタックを使用する
+### Step 3: データの「関係」から chart type を選ぶ
 
-#### 動的データのエスケープ原則（重要）
+renderer が対応する chart type は `bar` / `line` / `scatter` / `heatmap` / `waterfall` / `donut` / `radar` / `gantt` の8種のみ。chart type ありきで選ばず、伝えたい関係から選定する。
 
-HTML テキストノード・属性値・SVG `<text>`・`aria-label` に埋め込む動的値（ユーザー提供データ・外部データ由来の値）は、挿入前に必ず以下の文字エスケープを行う。
+| 伝えたい関係 | chart type | 補足 |
+|---|---|---|
+| カテゴリ間の大きさ・順位比較 | `bar` | 横棒推奨、0起点の軸 |
+| 時系列の傾向・推移 | `line` | 欠損は gap として表現、架空補完しない |
+| 2変数の相関 | `scatter` | 相関の説明は annotation で補足 |
+| 期間ごとの量・時間×カテゴリの分布 | `heatmap` | 連続値は知覚的に均一な配色を使う |
+| 増減への寄与・累積変化 | `waterfall` | 開始値・終了値・差分を明示 |
+| part-to-whole（構成比） | `donut` | 6分割以下、正確な値は表を併記 |
+| 多変量プロフィール | `radar` | デフォルトにしない（下記参照） |
+| タスクの期間・依存関係・milestone | `gantt` | 依存が密な場合は表を併記 |
 
-| 文字 | エスケープ後 |
-|------|------------|
-| `&` | `&amp;` |
-| `<` | `&lt;` |
-| `>` | `&gt;` |
-| `"` | `&quot;` |
-| `'` | `&#39;` |
+上記に当てはまらない関係（分布・before/after・多系列比較等）は、対応 chart type への安易な代替を避け、data table での表現を優先する。無理に非対応の chart type を模して自作 SVG を追加しない。
 
-エスケープを怠ると HTML インジェクション・XSS のリスクがある。表のセル・グラフの軸ラベル・凡例テキスト・`aria-label` など、動的値を差し込む全箇所で例外なく適用する。`&` を最初に置換すること。順序を誤ると `&amp;lt;` のような二重エスケープになる。
+Radar chart はデフォルトにしない。多軸プロフィールの「形」を俯瞰すること自体に価値があり、軸が少数で同一スケールへ正当に正規化できる場合だけ使用する。
 
-#### レスポンシブの原則
+#### Chart anti-patterns
 
-- 相対単位（`%`・`rem`・`em`）と flexbox / grid でレイアウトする
-- 画像・グラフ・表は `max-width: 100%` を基本とし、幅が広い表やグラフは `overflow-x: auto` のラッパー要素でスクロールさせ、`body` 自体の横スクロールを発生させない
+原則として以下を避ける。
 
-```css
-.table-wrap, .chart-wrap { overflow-x: auto; max-width: 100%; }
-```
+- 3D chart、gauge / speedometer、不要な gradient・過剰な shadow
+- dual-axis chart、10系列以上を重ねた line chart、大量 slice の donut
+- 装飾目的だけの chart、比較目的なのに baseline が不統一な chart
+- 面積や色だけで厳密比較させる chart
 
-#### テーマ対応の原則
+### Step 4: gantt / schedule を使う場合
 
-CSS カスタムプロパティで配色トークンを `:root` に定義し、`prefers-color-scheme: dark` で上書きする。単一テーマのみで作る場合も背景色・文字色は必ず明示する（ブラウザ既定に依存しない）。
+開始日・終了日・milestone・依存関係のある計画には `gantt` を優先する。gantt は次を満たす。
 
-```css
-:root {
-  --bg: #ffffff; --fg: #1a1a1a; --card-bg: #f5f5f7;
-  --series-1: #3b82f6; --series-2: #ef4444; --series-3: #10b981;
-  --grid-line: #d0d0d5;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16161a; --fg: #eaeaec; --card-bg: #222226;
-    --grid-line: #3a3a40;
-  }
-}
-body { background: var(--bg); color: var(--fg); }
-```
+- 左側に task / workstream 名、横軸に実日付、week / month 等の適切な tick
+- phase ごとの grouping、milestone は diamond 等 bar 以外の形で表示
+- progress がある場合は planned bar 上へ progress を重ねる
+- current date が期間内にある場合は today line を表示
+- status は色だけでなく文字・pattern・symbol でも区別
+- dependency arrow が密集する場合は無理に描画せず dependency table を併記
+- mobile では潰さず `.chart-wrap` で横スクロール可能にする
+- SVG と同じ task / start / end / status / progress を表でも確認可能にする
 
-#### dataviz 原則（グラフ実装共通）
+日付が不明な task に架空の日付を与えない。
 
-- 軸ラベル・単位・凡例・タイトルを必ず付ける
-- 3D 表現・過剰な装飾（グラデーション多用・影の乱用）は禁止
-- 系列色は一貫させ、色だけに頼らずラベル・凡例を併記する（色覚多様性への配慮）
-- 正確な数値比較が必要な箇所はグラフに加えて表も併記する
+### Step 5: report spec を作成する
 
-#### 棒グラフの SVG 実装パターン
+HTML を直接組み立てる前に、renderer が扱える中間 report spec（JSON）を作る。仕様は [references/report-spec.md](references/report-spec.md) を参照する。
 
-カテゴリ軸を x、値軸を y として、カテゴリごとに `<rect>` を並べる。
+report spec には最低限以下を持たせる。
 
-```html
-<svg viewBox="0 0 400 220" class="chart" role="img" aria-label="カテゴリ別比較棒グラフ">
-  <!-- 軸線 -->
-  <line x1="40" y1="10" x2="40" y2="180" stroke="var(--grid-line)"/>
-  <line x1="40" y1="180" x2="380" y2="180" stroke="var(--grid-line)"/>
-  <!-- barHeight = (value / maxValue) * plotHeight で算出 -->
-  <rect x="60" y="80" width="30" height="100" fill="var(--series-1)"/>
-  <text x="75" y="195" font-size="10" text-anchor="middle" fill="var(--fg)">案A</text>
-  <text x="75" y="70" font-size="10" text-anchor="middle" fill="var(--fg)">100</text>
-</svg>
-```
+- metadata、title / subtitle、scope、executive summary、findings
+- sections、chart definitions、tables、annotations、assumptions、sources
 
-座標計算の要点: `barY = plotBottom - (value / maxValue) * plotHeight`、`barHeight = plotBottom - barY`。
+各 chart definition には最低限以下を含める。
 
-#### 折れ線グラフの SVG 実装パターン
+- chart type（上記8種のいずれか）、semantic title、takeaway、units
+- series、labels、raw numeric/date data、source、accessibility summary
 
-各点の座標を計算し `<polyline>` の `points` に連結する。
+計算済み SVG 座標を report spec に保存しない。座標計算は renderer の責務とする。project 内の成果物として残す必要がなければ一時ファイルとして扱う。
 
-```html
-<svg viewBox="0 0 400 220" class="chart" role="img" aria-label="推移折れ線グラフ">
-  <line x1="40" y1="10" x2="40" y2="180" stroke="var(--grid-line)"/>
-  <line x1="40" y1="180" x2="380" y2="180" stroke="var(--grid-line)"/>
-  <!-- x_i = 40 + i * stepX, y_i = plotBottom - (value_i / maxValue) * plotHeight -->
-  <polyline points="40,150 140,90 240,110 340,50"
-            fill="none" stroke="var(--series-1)" stroke-width="2"/>
-  <circle cx="340" cy="50" r="3" fill="var(--series-1)"/>
-</svg>
-```
-
-座標計算の要点: `x_i = plotLeft + i * (plotWidth / (n - 1))`、`y_i = plotBottom - (value_i / maxValue) * plotHeight`。
-
-#### レーダーチャート（六角形グラフ）の SVG 実装パターン
-
-N 軸（既定 6 軸）の頂点座標を、中心 `(cx, cy)`・半径 `r`・角度 `θ_i = 2π·i/N − π/2` から算出する。
-
-```html
-<svg viewBox="0 0 300 300" class="chart" role="img" aria-label="総合評価レーダーチャート">
-  <!-- 目盛りの同心多角形（例: r=40,80,120 の3段階） -->
-  <polygon points="..." fill="none" stroke="var(--grid-line)"/>
-  <!-- 軸線: 中心から各頂点へ -->
-  <line x1="150" y1="150" x2="150" y2="30" stroke="var(--grid-line)"/>
-  <!-- データ polygon（半透明 fill）。r=120, value/maxValue(各軸i=0..5) = [0.83, 0.90, 0.70, 0.75, 0.90, 0.65] を θ_i = 2π・i/6 − π/2 の式で算出 -->
-  <polygon points="150,50 244,96 223,192 150,240 56,204 82,111"
-           fill="var(--series-1)" fill-opacity="0.25" stroke="var(--series-1)" stroke-width="2"/>
-  <text x="150" y="20" font-size="10" text-anchor="middle" fill="var(--fg)">品質</text>
-</svg>
-```
-
-座標計算の要点（軸 i、値 `value_i`、最大値 `maxValue`、頂点数 N）:
-
-```
-θ_i = (2 * PI * i / N) - (PI / 2)
-axisX_i = cx + r * cos(θ_i)          # 目盛り最外周（軸ラベル位置）
-axisY_i = cy + r * sin(θ_i)
-pointX_i = cx + r * (value_i / maxValue) * cos(θ_i)   # データ頂点
-pointY_i = cy + r * (value_i / maxValue) * sin(θ_i)
-```
-
-同心多角形は `r` を等分割した半径（例: r/3, 2r/3, r）で同じ角度計算を繰り返して描く。
-
-#### 表の実装
-
-`<table>` に `<caption>` で見出しを付け、数値列は `text-align: right` で右寄せする。幅が広い表は `.table-wrap` でラップして `overflow-x: auto` を効かせる。
-
-### Step 4: 検証
-
-生成した HTML の構文と成果物の存在を確認する。ブラウザで直接開ける場合は目視でも確認する。
+### Step 6: renderer で HTML を生成する
 
 ```bash
-# ファイル存在確認
-ls -la "_/reports/<report-name>.html"
-
-# 簡易構文チェック（開始・終了タグの対応、文字化けの有無）
-# grep -c は「一致した行数」を返すため、同一行に複数タグがあると出現数を見誤る。
-# grep -o でタグ文字列を抽出し wc -l で実際の出現数を数える
-grep -o '<svg\b' "_/reports/<report-name>.html" | wc -l
-grep -o '</svg>' "_/reports/<report-name>.html" | wc -l
+python3 "${CLAUDE_SKILL_DIR}/scripts/render_report.py" \
+  --spec "<report-spec.json>" \
+  --output "<output.html>"
 ```
 
-- `<svg` と `</svg>` の出現数が一致すること（未閉タグがないこと）
-- `<html`・`<head`・`<body` の基本構造が揃っていること
-- 外部 URL（`http://`・`https://`）への参照が一切含まれていないこと（`<link>`・`<script src>` に限らず `<img src>`・CSS `url()`・`@import`・SVG `xlink:href` も含めた包括チェック。自己完結の確認）
+ユーザー指定がなければ出力先は `_/reports/<descriptive-report-name>.html`。必要なら先に出力ディレクトリを作る。
 
-```bash
-grep -nE 'https?://' "_/reports/<report-name>.html"
+renderer は Python 標準ライブラリのみで動作する設計とし、外部 package installation を前提にしない。詳細は [references/report-design.md](references/report-design.md) を参照する。
+
+## HTML information design
+
+### Page shell
+
+必須: `<!doctype html>` / `<html lang="...">` / `<meta charset="utf-8">` / viewport meta / descriptive `<title>` / `<header>` / `<main>` / semantic `<section>` / `<footer>`。
+
+長いレポートでは table of contents を追加する。`Skip to main content` link を設ける。desktop で sticky navigation を使う場合も main content の横幅を狭めすぎず、mobile では通常 flow に戻す。
+
+### Visual hierarchy
+
+- max content width を設定し1カラムを基本とする。KPI や小さな比較のみ responsive grid にする
+- 長文の line length を制限し、section 間に十分な whitespace を取る
+- chart とその説明を一つの visual unit として扱う
+- KPI card だけを大量に並べない。KPI は「ユーザーが最初に知る価値が高い値」に限定する
+
+### Chart unit
+
+各 chart は原則 `figure > figcaption(chart title) > takeaway/explanation > SVG > annotation/source > exact-data table` の構造にする。
+
+chart title は単なる名詞ではなく可能なら主要な傾向を伝える。悪い例: 「売上推移」。良い例: 「売上は4月以降3か月連続で増加」。
+
+### Tables
+
+`<caption>` / `<thead>` / `<tbody>` / `<th scope="col">` を使い、必要に応じて `<th scope="row">` を使う。数値は右寄せし単位と桁数を一貫させる。幅広 table は `.table-wrap { max-width: 100%; overflow-x: auto; }` で囲み、body 全体を横スクロールさせない。
+
+## Data visualisation rules
+
+chart-specific な詳細は [references/chart-selection.md](references/chart-selection.md) を参照する。共通ルール:
+
+- 同じ series / entity はレポート全体で同じ visual identity を使い、色だけで区別しない
+- 必要に応じて direct label・line style・marker・pattern を併用する
+- annotation は短く対象の近くへ配置し、gridline は読取りに必要な分だけ使う
+- axis・unit・period を曖昧にせず、chart の下に source / note を置く
+- key finding は chart だけに閉じ込めず本文にも書く
+
+### Axis integrity
+
+`bar` の量を長さで表す軸は原則0から開始する。`line` / `scatter` は必要に応じて non-zero baseline を使用できるが、誤解を招かない scale とし切り取った範囲が重要なら明示する。
+
+### Missing values
+
+Missing data を 0 に変換しない。`line` では missing interval を gap として表現する。`N/A`・`unknown`・`not measured` が異なる意味なら区別する。
+
+## SVG accessibility
+
+Inline SVG を使う。意味のある chart は原則 `<svg role="img" aria-labelledby="chart-title-id chart-desc-id">` に `<title>` / `<desc>` を対応させる。SVG の情報が直前の文章と data table で完全に重複し screen reader の二重読上げが悪影響になる場合のみ `aria-hidden="true"` を選択してよい。どちらでも重要なデータを SVG だけに存在させない。
+
+## Colour and contrast
+
+CSS custom properties を design token として使う。最低限 `--bg` `--surface` `--fg` `--muted` `--border` `--grid` `--focus` `--series-1`〜 を `:root` に定義し `color-scheme: light dark` と `prefers-color-scheme` に対応する。
+
+カテゴリカル系列には Okabe-Ito パレット（色覚多様性対応の事実上の標準）を使う。
+
+```
+#0072B2 #E69F00 #56B4E9 #009E73 #D55E00 #CC79A7 #F0E442 #000000
 ```
 
-上記コマンドが**何も出力しない**ことを pass 条件とする。出力があれば外部依存が混入しているため修正する。`grep` は不一致（＝正常）の場合に終了コード 1 を返すため、このコマンドを `&&` で後続処理の成功ゲートに直結させないこと。
+4系列以下は青(#0072B2)・オレンジ(#E69F00)・空色(#56B4E9)・朱(#D55E00)を優先する。カテゴリカルは6色以下に抑える。`heatmap` 等の連続値は Viridis / Cividis 系の知覚的に均一な配色を使う（グレースケール印刷でも判別可能）。
 
-### Step 5: 出力先の案内
+contrast の目標: 通常テキスト 4.5:1 以上、large text 3:1 以上、意味を持つ chart element / control は adjacent background と 3:1 以上。
 
-生成したファイルの絶対パスをユーザーに報告する。ブラウザで直接開けることを案内する（例: `open "_/reports/<report-name>.html"`）。
+red / green だけで positive / negative を表現しない。例: 「↑ +12.4% Increase」「↓ -8.1% Decrease」のように symbol / text も併用する。
+
+## Responsive behaviour
+
+- SVG は `viewBox` を持ち `.chart { width: 100%; height: auto; }` とする
+- layout は Grid / Flexbox、font size には `clamp()` を利用してよい
+- wide chart は `.chart-wrap` でラップし、small screen で意味が失われるほど chart を縮小しない
+- mobile では decorative element を減らし、chart label が重なる場合は abbreviated label + table を使う
+
+## Print / PDF-friendly CSS
+
+必ず `@media print` を用意する。印刷時は light background・dark text とし、navigation / interactive controls を非表示にする。URL や chart がページ外へ切れないようにし、cards / figures / table rows の不自然な page break を `break-inside: avoid-page` 等で減らし、shadow・ink-heavy background を除去する。重要情報を閉じた disclosure 内だけに置かない。
+
+## Interaction policy
+
+標準モードでは JavaScript を必須にせず、まず native HTML / CSS（`<details><summary>`・anchor navigation・CSS sticky header）を使う。
+
+`--interactive` が指定された場合、または静的表示では明らかに使いにくい大量データの場合だけ inline vanilla JavaScript を追加できる（table search / sort、series visibility、section collapse、theme override、gantt の detail toggle 等）。
+
+ただし以下を必ず守る。
+
+- 最重要メッセージを見るために click を要求しない、hover-only tooltip を使わない
+- keyboard で操作でき visible focus を消さない
+- JavaScript 無効でも主要情報を読める、animation は原則不要
+
+motion を追加する場合は `prefers-reduced-motion: reduce` で `animation-duration` / `transition-duration` 等を `0.01ms` に短縮する分岐を用意する。
+
+## Security
+
+詳細は [references/accessibility-security.md](references/accessibility-security.md) を参照する。
+
+### Untrusted data
+
+ユーザー入力・外部ファイル・Web 取得データを trusted markup として扱わない。HTML / SVG の text node と attribute に入る文字列は renderer の escaping function（Python では `html.escape(value, quote=True)` 相当）を必ず一元利用する。同じ escape 処理を JavaScript / CSS / URL context に流用しない。untrusted data を `<script>` / `<style>` / event handler attribute / raw URL / raw HTML へ直接埋め込まない。数値は parse 後に有限値であることを確認する。
+
+### JavaScript
+
+inline JavaScript を使う場合、external library・`eval`・`new Function`・untrusted string の `innerHTML` 代入・`onclick="..."` 等の inline handler を禁止する。DOM 挿入は `textContent` / `createElement` を優先し `addEventListener` を使う。`fetch` / `XMLHttpRequest` / `WebSocket` / `EventSource` / `sendBeacon` 等の network access を行わない。
+
+### Links と external dependency
+
+外部リンクを許可するのは原則 source / reference の `<a href>` のみで、URL scheme は `https:` に限定し `javascript:` URL を禁止する。新しい tab で開く場合は `rel="noopener noreferrer"` を付ける。
+
+禁止: `<script src="https://...">`、external stylesheet / font、remote `<img>`、`<iframe src="https://...">`、`<object data="https://...">`、CSS `@import` / `url(https://...)`、remote SVG `<image>` / `<use>`、runtime network request。
+
+## Sensitive data
+
+token・credential・secret・個人情報・非公開内部情報を不用意にレポートへ埋め込まない。入力に secret が見つかった場合は `sk-abc...xyz` のように redaction する。公開可能性が不明な機密情報を含む場合、公開前提の出力先へ書き込まない。
 
 ## 検証
 
-- Step 4 のコマンドをすべて実行し、`<svg>`/`</svg>` タグ数の一致・`grep -nE 'https?://'` の出力なし（外部 URL 参照なし）を確認する
-- ファイルが `_/reports/` 配下（またはユーザー指定先）に実在することを `ls` で確認する
-- グラフごとに軸ラベル・凡例・タイトルが記述されているかを Read で目視確認する
+生成後、必ず validator を実行し、以下の5段階ゲートで完了を確認する（`.claude/rules/verification.md` 準拠）。
+
+1. **特定**: `validate_report.py` の実行と exit code をもって完了とみなす
+2. **実行**:
+   ```bash
+   python3 "${CLAUDE_SKILL_DIR}/scripts/validate_report.py" "<output.html>"
+   ```
+3. **読取**: 出力全体（PASS/FAIL・failure 一覧）と終了コードを確認する
+4. **検証**: failure が0件であることを確認する。failure がある場合は HTML または report spec を修正し、再生成してから validator を再実行する
+5. **宣言**: validator が pass した場合のみ完了を宣言する。「たぶん通る」等の推測で完了主張しない
+
+validator は最低限以下を確認する。
+
+- output file が存在し non-empty、doctype / html / head / body、charset / viewport / title
+- duplicate IDs、SVG opening / closing consistency
+- external resource dependency がない、network API を使っていない
+- unsafe event handler / `javascript:` URL がない
+- meaningful chart に accessible name / description がある
+- data table に caption / headers がある、heading order に重大な問題がない
+- horizontal body overflow を誘発する既知パターンがない、print CSS が存在する
+- source hyperlink と external resource dependency を混同していない
+
+可能なら browser でも目視確認する。browser tool がないことだけを理由に生成を失敗扱いにしない。
 
 ## 注意事項
 
-- 外部 CDN・外部フォント・外部画像・外部 JS ライブラリは一切使用しない（Chart.js 等も不可）。すべてインライン SVG / CSS で完結させる。動的データを含む `<script>` は使用しない
-- 3D 表現・過剰な装飾（不要なグラデーション・影）は使用しない
-- 系列色は同一対象で全グラフを通して一貫させる。色のみに依存せず凡例・ラベルを併記する
-- 幅広の表・グラフは `overflow-x: auto` のコンテナでスクロールさせ、`body` 全体の横スクロールを発生させない
-- レポートに機密情報（トークン・個人情報・内部限定データ）を含める場合は、出力先が公開領域でないことを事前にユーザーへ確認する
-- レポート化対象のデータに機密情報（トークン・個人情報等）や信頼できない外部由来データが含まれ、埋め込み可否が不明な場合は生成を中止し、ユーザーに確認を求める
+- 対応 chart type は `bar` / `line` / `scatter` / `heatmap` / `waterfall` / `donut` / `radar` / `gantt` のみ。非対応の関係性は無理に代替せず data table を使う
+- 外部 CDN・外部フォント・外部画像・外部 JS ライブラリは一切使用しない。ページロード時に外部通信してはならない
+- validator が pass するまで完成扱いにしない
+- レポートに機密情報を含める場合は、出力先が公開領域でないことを事前にユーザーへ確認する
+- レポート化対象のデータに機密情報や信頼できない外部由来データが含まれ、埋め込み可否が不明な場合は生成を中止し、ユーザーに確認を求める
 - 出力先ディレクトリ（`_/reports/` 等）が存在しない場合は `mkdir -p` で作成してから書き出す
+
+## 最終報告
+
+完了時は簡潔に以下を報告する。
+
+- generated report の絶対 path
+- validation result
+- 主要なレポート内容を一文
+- interactive mode を使った場合はその旨
+
+例:
+
+```text
+HTML レポートを生成しました:
+<absolute-path>
+
+Validation: PASS
+内容: 3案の性能・コスト・リスク比較と、実装スケジュールの gantt を含みます。
+```
+
+## 参照ファイル
+
+必要な場合だけ読む。
+
+- [references/chart-selection.md](references/chart-selection.md) — chart type ごとの選択条件・scale・annotation・gantt・heatmap・scatter 等の詳細
+- [references/report-design.md](references/report-design.md) — page layout・design tokens・responsive・print・component implementation
+- [references/report-spec.md](references/report-spec.md) — renderer に渡す JSON report spec の schema と examples
+- [references/accessibility-security.md](references/accessibility-security.md) — WCAG-oriented checklist、SVG/table accessibility、escaping、safe JavaScript policy
+- [samples/comparison.json](samples/comparison.json) — 比較レポートの report spec 例
+- [samples/project-gantt.json](samples/project-gantt.json) — gantt / milestone / dependency を含む例
+- [samples/time-series.json](samples/time-series.json) — 時系列・annotation の例
 
 ## sandbox 環境での実行
 
