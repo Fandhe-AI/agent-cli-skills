@@ -57,6 +57,34 @@ CSS_URL = re.compile(
 # スペースのみの除去では検出を迂回できてしまう。
 URL_IGNORABLE = re.compile(r"[\s\x00-\x1f]+")
 
+# URL / リソース参照を運びうる既知属性の拒否リスト（fail-closed 設計）。
+# href / src / action / xlink:href は個別に検査済み、style / id / class 等は非 URL。
+# それ以外で URL を運べる既知属性は、値のパース差異（srcset のカンマ区切り、
+# <a ping> の空白区切り複数 URL 等）で許可リスト検査をすり抜けやすく、
+# renderer も一切生成しないため、値を見ず「属性の存在自体」を不合格にする。
+# blocklist 的な個別対応ではなく、URL 運搬経路をまとめて閉じるための一覧。
+URL_CARRYING_ATTRS = frozenset({
+    "formaction", "ping", "poster", "cite", "background", "manifest",
+    "longdesc", "srcset", "imagesrcset", "srcdoc", "data", "codebase",
+    "archive", "usemap", "profile", "dynsrc", "lowsrc", "xml:base",
+})
+
+# 存在自体を不合格にする能動コンテンツ / ナビゲーション制御タグ。
+# link / iframe / object / embed / script src は従来どおり。加えて
+# base は文書内の相対 URL 解決基準の書き換え、form は submit 時の外部送信、
+# SVG feImage は filter 経由の外部画像読込の入口になるため、値を問わず禁止する
+# （html.parser はタグ名を小文字化するため feimage で照合する）。
+BANNED_TAGS = ("link", "iframe", "object", "embed", "base", "form", "feimage")
+
+# SVG 内で href / xlink:href によるリソース・要素参照を持ちうるタグ。
+# image / use に加え、SMIL 系（animate / set / animateMotion / mpath）の href も
+# 外部 URL を指せる参照経路のため、同じ許可リスト（画像 data: と #fragment）で検査する。
+SVG_REF_TAGS = ("image", "use", "animate", "set", "animatemotion", "mpath")
+
+# CSS image-set() は url() 形式と裸文字列の双方で URL を運べ、パース差異で
+# url() 許可リスト検査をすり抜けやすい。renderer は生成しないため出現自体を不合格にする。
+CSS_IMAGE_SET = re.compile(r"(?:-webkit-)?image-set\s*\(", re.IGNORECASE)
+
 # class="chart" を持たない SVG を検証対象へ引き戻すための子要素数しきい値。
 # 凡例 swatch 等の装飾 SVG は数要素に収まるため、これ以上はデータ描画とみなす。
 SEMANTIC_SVG_MIN_ELEMS = 6
@@ -69,6 +97,12 @@ def css_unescape(css_text):
     コードポイント範囲外は U+FFFD へ倒す（CSS 仕様と同じ fail 方向）。
     @import / url() 検査は必ず本関数の出力に対して行うこと。
     """
+    # CSS 仕様の入力前処理（CRLF / CR / FF → LF 正規化）を escape 展開より先に行う。
+    # hex escape の継続空白は「1 文字」しか消費しないため、正規化なしでは
+    # `\69` + CRLF で CR のみ消費されて `@i\nmport` となり @import 検査をすり抜ける
+    # （ブラウザは正規化後の LF 1 文字を消費して @import として解釈する）。
+    css_text = css_text.replace("\r\n", "\n").replace("\r", "\n").replace("\f", "\n")
+
     def repl(m):
         if m.group(1) is not None:
             try:
@@ -102,9 +136,12 @@ def css_bad_urls(css_text):
     url(data:text/css,...) は @import 検査の迂回になるため不合格。
     url(image.png) / url(../fonts/a.woff2) のような相対 URL も配布先で
     欠落・意図しないリクエストの原因になるため、http(s) / // と同様に不合格。
+    image-set() は裸文字列でも URL を運べるため出現自体を不合格にする。
     """
     css_text = css_unescape(css_text)
     bad = []
+    if CSS_IMAGE_SET.search(css_text):
+        bad.append("image-set(（出現自体を不許可）")
     n_matched = 0
     for m in CSS_URL.finditer(css_text):
         n_matched += 1
@@ -173,7 +210,13 @@ class ReportParser(HTMLParser):
             self.has_doctype = True
 
     def handle_starttag(self, tag, attrs):
-        ad = dict(attrs)
+        # 重複属性は先勝ちで畳み込む（HTML5 仕様・ブラウザ挙動と一致させる）。
+        # html.parser は重複属性を除去せず list のまま返すため、dict(attrs) の
+        # 後勝ちだと <a href="javascript:..." href="https://ok/"> のような重複で
+        # ブラウザが実際に使う 1 個目の値が検査から漏れて迂回できてしまう。
+        ad = {}
+        for k, v in attrs:
+            ad.setdefault(k, v)
         classes = (ad.get("class") or "").split()
         self.tags_seen.add(tag)
 
@@ -192,27 +235,35 @@ class ReportParser(HTMLParser):
             if URL_IGNORABLE.sub("", v.lower()).startswith("javascript:"):
                 self.bad_js_urls.append(f"<{tag} {key}>")
 
-        # リソース読み込み属性の検査（自己完結契約）。
-        # 能動コンテンツ（link / iframe / object / embed、script src）は、
-        # data: URI や srcdoc / imagesrcset 等の属性経由でも中身の JS / CSS /
-        # HTML が inline 検査（network API・@import・url() 許可リスト）を
-        # 迂回できるため、属性を見ずタグの存在自体を一律不合格にする。
-        # 受動メディア（img / source / track / audio / video / SVG image）は
-        # DATA_URI_ALLOWED の画像 MIME allowlist に一致する data: src のみ許可。
-        # srcset はカンマ区切り複数候補のパース差異で検査をすり抜けやすく、
-        # renderer も生成しないため属性自体を不許可にする。
-        # SVG <image>/<use> は文書内 #fragment 参照も許可。
+        # リソース読み込みの検査（自己完結契約・fail-closed 設計）。
+        # 検査は「タグ拒否 → URL 運搬属性拒否 → 個別許可リスト」の 3 層で閉じる:
+        # 1) 能動コンテンツ / ナビゲーション制御タグ（BANNED_TAGS、script src、
+        #    meta http-equiv=refresh）は、data: URI や srcdoc 等の属性経由でも
+        #    inline 検査（network API・@import・url() 許可リスト）を迂回できる
+        #    ため、属性値を見ずタグの存在自体を一律不合格にする。
+        # 2) URL を運びうる既知属性（URL_CARRYING_ATTRS: formaction / ping /
+        #    poster / srcset 等）は、個別検査済みの href / src / action /
+        #    xlink:href 以外の運搬経路をまとめて塞ぐため、存在自体を不合格にする。
+        # 3) 受動メディア（img / source / track / audio / video）の src は
+        #    DATA_URI_ALLOWED の画像 MIME allowlist に一致する data: のみ許可。
+        #    SVG の参照タグ（SVG_REF_TAGS）は文書内 #fragment 参照も許可。
         # 出典 <a href> は対象外 = 唯一の許可経路（check #9 で https / #fragment に制限）。
         if tag == "script" and "src" in ad:
             self.external_refs.append(f"<script src={ad['src']!r}>")
-        if tag in ("link", "iframe", "object", "embed"):
+        if tag in BANNED_TAGS:
             self.external_refs.append(f"<{tag}> タグ（存在自体を禁止）")
+        # meta http-equiv="refresh" は content 属性の URL でリダイレクトでき、
+        # href / src 系の検査経路を通らないため refresh のみ存在自体を禁止する
+        # （charset / viewport / name 系 meta は従来どおり許可）。
+        if tag == "meta" and (ad.get("http-equiv") or "").strip().lower() == "refresh":
+            self.external_refs.append('<meta http-equiv="refresh">（存在自体を禁止）')
+        for key in ad:
+            if key in URL_CARRYING_ATTRS:
+                self.external_refs.append(f"<{tag} {key}>（属性の存在自体を禁止）")
         if tag in ("img", "source", "track", "audio", "video"):
-            if "srcset" in ad:
-                self.external_refs.append(f"<{tag} srcset={ad['srcset']!r}>")
             if "src" in ad and not DATA_URI_ALLOWED.match(ad.get("src") or ""):
                 self.external_refs.append(f"<{tag} src={ad['src']!r}>")
-        if tag in ("image", "use"):  # SVG 内のリソース参照
+        if tag in SVG_REF_TAGS:  # SVG 内のリソース・要素参照（SMIL 含む）
             for key in ("href", "xlink:href"):
                 v = ad.get(key) or ""
                 if key in ad and not (DATA_URI_ALLOWED.match(v) or FRAGMENT_URL.match(v)):
@@ -344,7 +395,8 @@ def run_checks(path):
     # 5. リソース読み込み属性ゼロ（能動要素は値を問わず不合格。受動メディアは
     #    許可画像 MIME の data: と SVG 文書内 #fragment のみ許可。
     #    相対 URL も自己完結契約違反として不合格。出典 <a href> は #9 で別途検査）
-    check("リソース読み込みがない（link / iframe / object / embed はタグ自体・script src は一律禁止、"
+    check("リソース読み込みがない（link / iframe / object / embed / base / form / feImage / "
+          "meta refresh はタグ自体・script src・URL 運搬属性（formaction / ping / poster 等）は一律禁止、"
           "img 等は画像 data: src と #fragment のみ許可）",
           not parser.external_refs, "; ".join(parser.external_refs[:5]))
     css_all = "\n".join(parser.styles)
@@ -352,7 +404,7 @@ def run_checks(path):
     # @import 検査は CSS escape 正規化後に行う（`@\69mport` 等の難読化対策）
     css_detail = (["@import"] if CSS_IMPORT.search(css_unescape(css_all)) else []) \
         + css_bad[:3] + parser.style_attr_external[:3]
-    check("CSS に @import / 不許可の url() がない（url() は画像 data: と #fragment のみ許可）",
+    check("CSS に @import / image-set() / 不許可の url() がない（url() は画像 data: と #fragment のみ許可）",
           not css_detail, "; ".join(css_detail))
 
     # 6. inline <script> は renderer 注入の bundled JS（INTERACTIVE_JS）との

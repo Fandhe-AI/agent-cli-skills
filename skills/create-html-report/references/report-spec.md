@@ -36,10 +36,10 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/validate_report.py" <out.html>   # 生成�
 | `lang` | — | string | `<html lang>`。既定 `"ja"` |
 | `date` | — | string | レポート基準日（表示用文字列） |
 | `scope` | — | string | 対象・期間の説明 |
-| `interactive` | — | boolean | `true` のときのみ inline JS（テーブルソート・TOC スクロールスパイ）を注入。既定 `false` |
+| `interactive` | — | boolean | `true` のときのみ inline JS（テーブルソート・TOC スクロールスパイ）を注入。既定 `false`。**boolean 厳格**: `true` / `false` のみ許容（`"false"` 等の文字列・数値は SpecError） |
 | `summary` | — | string \| string[] | 要約。配列は段落ごとに `<p>` 化 |
 
-**型契約**: spec の root は JSON object であること。`sections` / `kpis` / `findings` / `sources` / `assumptions` 等の配列フィールドとその要素（section / chart / table / kpi / source は object）が上表・各節の型と異なる場合、renderer は traceback を出さず日本語の SpecError（終了コード 1）で拒否する。
+**型契約**: spec の root は JSON object であること。`sections` / `kpis` / `findings` / `sources` / `assumptions` および各 chart の主要配列フィールド（`categories` / `series` / `x` / `rows` / `cols` / `values` / `items` / `slices` / `axes` / `tasks` / `annotations` / `points` / `dependsOn` 等）とその要素（section / chart / table / kpi / source / series / item / slice / task / annotation は object）が上表・各節の型と異なる場合、renderer は traceback を出さず日本語の SpecError（終了コード 1）で拒否する。文字列を配列の代わりに渡す（例: `"categories": "XY"`）ことはできない。省略可の配列・object フィールドへの**明示 `null` は欠損（未指定）と同義**に正規化される（`annotations: null`・`dependsOn: null`・`meta: null` 等）。
 | `kpis` | — | array | [KPI カード](#kpis) |
 | `findings` | — | array | [主な所見](#findings) |
 | `sections` | — | array | [本文セクション](#sections)。**3 個以上で TOC が自動生成される** |
@@ -58,18 +58,18 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/validate_report.py" <out.html>   # 生成�
 
 | フィールド | 必須 | 意味 |
 |---|---|---|
-| `label` | ✅ | 指標名 |
-| `value` | ✅ | 表示値（整形済み文字列。renderer は再整形しない） |
+| `label` | ✅ | 指標名。**欠落は SpecError** |
+| `value` | ✅ | 表示値（整形済み文字列。renderer は再整形しない）。**欠落は SpecError** |
 | `unit` | — | 単位（値の右に小さく表示） |
 | `delta` | — | 増減の説明文字列 |
-| `trend` | — | `"up"` / `"down"` / `"flat"`。矢印記号（↑↓→）と色を決める。色だけに依存させないため矢印+テキストが必ず付く |
+| `trend` | — | `"up"` / `"down"` / `"flat"` のみ（**enum 外は SpecError**。`"Up"` 等の表記ゆれ不可）。矢印記号（↑↓→）と色を決める。色だけに依存させないため矢印+テキストが必ず付く |
 | `note` | — | 補足文 |
 
 KPI は「読者が最初に知る価値が高い値」に 3〜4 個へ限定する。
 
 ## findings
 
-文字列、または `{"title": "...", "body": "..."}` の配列。`<ol>` で番号付き表示される。
+文字列、または `{"title": "...", "body": "..."}` の配列。`<ol>` で番号付き表示される。要素が string でも object でもない場合（数値・配列等）は SpecError。
 
 ## sections
 
@@ -81,7 +81,7 @@ KPI は「読者が最初に知る価値が高い値」に 3〜4 個へ限定す
 | フィールド | 必須 | 意味 |
 |---|---|---|
 | `id` | — | アンカー ID（省略時 `sec-N`）。TOC・スクロールスパイが参照。下記「sections[].id の契約」に従う |
-| `heading` | ✅ | `<h2>` 見出し |
+| `heading` | ✅ | `<h2>` 見出し。**欠落は SpecError** |
 | `body` | — | string \| string[]。段落として描画 |
 | `charts` | — | chart 定義の配列。body → charts → tables の順で描画 |
 | `tables` | — | chart に紐付かない独立データ表 |
@@ -119,8 +119,8 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
  "series": [{"name": "スコア", "values": [2.9, 4.1]}]}
 ```
 
-- `orientation`: `"horizontal"`（既定・カテゴリ比較向き）/ `"vertical"`（期間比較向き）
-- `mode`: `"grouped"`（既定）/ `"stacked"`。stacked は**負値不可**
+- `orientation`: `"horizontal"`（既定・カテゴリ比較向き）/ `"vertical"`（期間比較向き）。**enum 外は SpecError**（`"Horizontal"` 等の表記ゆれ不可）
+- `mode`: `"grouped"`（既定）/ `"stacked"`。stacked は**負値不可**。**enum 外は SpecError**
 - `values` の `null` は当該バーを描かず、表では「—」
 - 軸は必ず 0 を含む（axis integrity）。単一系列 horizontal は値の直接ラベル付き
 
@@ -134,7 +134,7 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
 
 - `x`: 時点ラベル配列（等間隔配置。多すぎるラベルは自動間引き）
 - `values` の **`null` は gap**（線が途切れる）。0 に変換されない
-- `annotations[].x` は `x` のラベル値、または `x_index`（0 始まり index）で位置指定。`x_index` は **整数かつ `0 <= x_index < len(x)` の範囲内**であること（小数・範囲外は SpecError。renderer は黙って切り捨て・clamp しない）
+- `annotations[].x` は `x` のラベル値、または `x_index`（0 始まり index）で位置指定。`x` がどのラベルとも一致せず `x_index` も未指定の場合は SpecError（annotation を黙って落とさない）。`x_index` は **整数かつ `0 <= x_index < len(x)` の範囲内**であること（小数・範囲外は SpecError。renderer は黙って切り捨て・clamp しない）
 - 系列は色 + 破線パターンで区別（色覚多様性対応）
 
 ### scatter
@@ -167,7 +167,7 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
   {"label": "2026-08", "value": 218, "type": "total"}]}
 ```
 
-- `type`: `"start"` / `"delta"`（増減。負値可）/ `"total"`。start / total は 0 起点、delta は直前の累積から積む
+- `type`: `"start"` / `"delta"`（増減。負値可）/ `"total"` のみ（省略時 `"delta"`）。**enum 外は SpecError**（`"Total"` 等の表記ゆれを silent に delta 扱いしない）。start / total は 0 起点、delta は直前の累積から積む
 - `total` の `value` は**累積の検算値として絶対値を書く**（renderer は与えた値をそのまま 0 起点で描く）
 - 増加・減少・累計は色 + 符号ラベルで区別。累積コネクタ（破線）自動描画
 
@@ -205,15 +205,15 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
 | フィールド | 必須 | 意味 |
 |---|---|---|
 | `today` | — | `YYYY-MM-DD`。**期間内にある場合のみ** today line（破線 + 「本日」ラベル）を描画 |
-| `tasks[].name` | ✅ | タスク名（左列に表示） |
+| `tasks[].name` | ✅ | タスク名（左列に表示）。**欠落は SpecError** |
 | `tasks[].phase` | — | フェーズ名。出現順にグルーピングされ、フェーズ見出し行が挿入される |
 | `tasks[].start` / `end` | ✅（通常タスク） | `YYYY-MM-DD`。`end >= start` 必須（負期間はエラー）。**不明な日付を推測で埋めない**（不明タスクは spec に入れず assumptions に書く） |
-| `tasks[].milestone` | — | `true` で milestone（diamond 表示）。`date` が必須になり `start`/`end` は不要 |
+| `tasks[].milestone` | — | `true` で milestone（diamond 表示）。`date` が必須になり `start`/`end` は不要。**boolean 厳格**: `true` / `false` のみ許容（`"false"` 等の文字列・数値は SpecError） |
 | `tasks[].progress` | — | `0.0..1.0` 厳格（範囲外は clamp せずエラー）。planned bar 上に不透明 overlay で重ねられ、% がテキスト表示される |
 | `tasks[].status` | — | `done` / `in-progress` / `planned` / `at-risk` / `blocked`。色 + **日本語テキストラベル**（完了/進行中/予定/リスク/ブロック）で表示 |
-| `tasks[].id` / `dependsOn` | — | 依存関係。矢印では描かず**依存関係テーブル**として chart 下に自動生成 |
+| `tasks[].id` / `dependsOn` | — | 依存関係。矢印では描かず**依存関係テーブル**として chart 下に自動生成。**`id` の重複は SpecError**（重複を許すと依存先の解決が黙って後勝ちになるため） |
 
-- 日付軸の tick は期間長で自動選択: 120 日以下 → 週（月曜、`M/D`）、超 → 月（`YYYY-MM`）
+- 日付軸の tick は期間長で自動選択: 120 日以下 → 週（月曜、`M/D`）、730 日（約 2 年）以下 → 月（`YYYY-MM`）、超 → 四半期（`YYYY Qn`）
 - SVG と同一の task / start / end / progress / status がデータ表にも必ず出る
 
 ## tables（独立データ表）
@@ -223,7 +223,8 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
  "align": ["", "", "num"], "rows": [["互換性問題", "2週遅延", 3]], "note": "注記"}
 ```
 
-- `rows` のセルは文字列または数値。数値は桁区切り整形され右寄せ
+- `rows` のセルは文字列または数値。数値は桁区切り整形され右寄せ。boolean（`true` / `false`）は数値扱いしない（`1` として整形されず文字列表示）
+- **各行の列数は `columns` の列数と一致必須**（不一致は SpecError）
 - `align` で列ごとに `"num"`（右寄せ）を明示できる。省略時は数値セルのみ右寄せ
 - caption（`title`）と `<th scope>` は renderer が必ず付ける
 
@@ -244,9 +245,13 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
 
 renderer は以下を機械検証し、違反時は日本語の `spec エラー:` で終了コード 1 を返す。
 
-- すべての数値は**有限値**（NaN / Inf 不可）。文字列の数値も parse される
-- 値数の不一致（series の values と categories/x/axes の長さ違い）はエラー
-- stacked bar / donut の負値、radar の範囲外値・`max <= 0`、gantt の `progress` 範囲外・`end < start` はエラー
+- すべての数値は**有限値**（NaN / Inf 不可）。文字列の数値も parse される。値同士の差が浮動小数の上限（約 1.8e308）を超える巨大値の組もエラー
+- **数値フィールドに boolean は不可**（JSON の `true` を数値 1 として描画しない）
+- **boolean フィールドは厳格**（`interactive`・`tasks[].milestone`。`true` / `false` 以外はエラー）
+- **enum フィールドは厳格**（bar `orientation` / `mode`、waterfall `items[].type`、kpi `trend`。一覧外の値・表記ゆれはエラーで、silent に既定値へ倒さない）
+- 値数の不一致（series の values と categories/x/axes の長さ違い、table の行と columns の列数違い）はエラー
+- stacked bar / donut の負値、radar の範囲外値・`max <= 0`、gantt の `progress` 範囲外・`end < start`・`tasks[].id` 重複はエラー
+- 必須フィールドの欠落（`sections[].heading`・`kpis[].label`・`kpis[].value`・gantt `tasks[].name` 等）はエラー
 - 日付は `YYYY-MM-DD` 固定
 - **欠損は `null` で表現する**。0 と欠損は別物として扱われる（line は gap、heatmap は無色セル、表は「—」）
 - spec 由来の全文字列は escape されて挿入される。HTML タグを書いても文字列として表示されるだけで解釈されない

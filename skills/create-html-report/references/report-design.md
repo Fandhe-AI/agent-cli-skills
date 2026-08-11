@@ -55,10 +55,10 @@ semantic 構造の骨格:
   left: -9999px;
 }
 .skip-link:focus {
-  left: 8px; top: 8px;
+  left: 0; top: 0;
   background: var(--surface);
   padding: .5rem 1rem;
-  z-index: 100;
+  z-index: 10;
 }
 ```
 
@@ -83,7 +83,7 @@ semantic 構造の骨格:
 
 layout 原則:
 
-- max content width を設定（`max-width: 72rem` 程度、本文の行長は 60〜75ch）
+- max content width を設定（`max-width: 60rem` 程度、本文の行長は 60〜75ch）
 - 1 カラム基本。KPI・小型比較のみ responsive grid
 - 見出しは `<h1>` 1 個 → `<h2>` section → `<h3>` sub の順序を飛ばさない
 - section 間の whitespace は margin で確保（`margin-block: 3rem` 程度）
@@ -98,18 +98,18 @@ CSS custom properties を `:root` へ一元定義し、component は token の�
   color-scheme: light dark;
 
   /* surface / text */
-  --bg: #ffffff;
-  --surface: #f6f8fa;
-  --fg: #1f2328;
-  --muted: #59636e;
-  --border: #d1d9e0;
-  --grid: #e4e9ee;
-  --focus: #0969da;
+  --bg: #f6f7f8;
+  --surface: #ffffff;
+  --fg: #1a1c1e;
+  --muted: #5b6167;
+  --border: #d5d9dd;
+  --grid: #e4e7ea;
+  --focus: #0b57d0;
+  --link: #0b57d0;
 
-  /* semantic */
-  --positive: #009E73;
-  --negative: #D55E00;
-  --warning: #E69F00;
+  /* semantic（増減表示） */
+  --pos: #0072B2;
+  --neg: #D55E00;
 
   /* categorical series（Okabe-Ito、割当順） */
   --series-1: #0072B2; /* blue */
@@ -119,18 +119,19 @@ CSS custom properties を `:root` へ一元定義し、component は token の�
   --series-5: #009E73; /* bluish green */
   --series-6: #CC79A7; /* reddish purple */
   --series-7: #F0E442; /* yellow */
-  --series-8: #000000; /* black */
+  --series-8: #8A8F94; /* gray（black の代替。dark では #a2a8ae へ調整） */
 
-  /* typography / spacing */
-  --font-body: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
-  --radius: 8px;
-  --space: 1rem;
+  /* gantt status */
+  --status-done: #009E73;
+  --status-active: #0072B2;
+  --status-planned: #8A8F94;
+  --status-risk: #D55E00;
+  --status-blocked: #CC79A7;
 }
 ```
 
 - 色の直書きを component CSS・SVG 属性へ散らさない。SVG も `fill="var(--series-1)"` で token を参照する。
-- `--positive` / `--negative` は Okabe-Ito の green / vermillion を流用し、必ず symbol / text（↑ / ↓、+ / −）を併用する。
+- `--pos` / `--neg` は Okabe-Ito の blue / vermillion を流用し、必ず symbol / text（↑ / ↓、+ / −）を併用する。`--warning` 相当の token は定義しない（注意喚起は `--series-2` の orange とテキスト表現で行う）。
 
 ## Okabe-Ito palette
 
@@ -142,10 +143,10 @@ CSS custom properties を `:root` へ一元定義し、component は token の�
 | 2 | orange | `#E69F00` | 第 2 系列・warning |
 | 3 | sky blue | `#56B4E9` | 第 3 系列 |
 | 4 | vermillion | `#D55E00` | 第 4 系列・negative |
-| 5 | bluish green | `#009E73` | positive |
+| 5 | bluish green | `#009E73` | 第 5 系列・status done |
 | 6 | reddish purple | `#CC79A7` | 第 6 系列 |
 | 7 | yellow | `#F0E442` | 明背景で低 contrast。塗り専用・線や文字に使わない |
-| 8 | black | `#000000` | 基準線・強調（dark mode では白へ反転） |
+| 8 | gray（black の代替） | `#8A8F94` | 基準線・補助・不明 status（dark mode では `#a2a8ae` へ明度調整） |
 
 - 4 系列以下は blue / orange / sky blue / vermillion を優先する。
 - カテゴリカルは 6 色以下。超える場合は small multiples か「その他」集約へ。
@@ -161,14 +162,18 @@ CSS custom properties を `:root` へ一元定義し、component は token の�
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0d1117;
-    --surface: #161b22;
-    --fg: #e6edf3;
-    --muted: #9198a1;
-    --border: #3d444d;
-    --grid: #2a313a;
-    --focus: #4493f8;
-    --series-8: #ffffff; /* black は白へ反転 */
+    --bg: #15171a;
+    --surface: #1f2226;
+    --fg: #e6e8ea;
+    --muted: #9aa1a8;
+    --border: #3a3f45;
+    --grid: #303539;
+    --focus: #8ab4f8;
+    --link: #8ab4f8;
+    --series-8: #a2a8ae; /* gray を明るめへ調整 */
+    /* --pos / --neg は dark 背景でコントラスト比 4.5:1 を割るため明度を上げる */
+    --pos: #4ea3dd;
+    --neg: #ef8a3c;
   }
 }
 ```
@@ -185,10 +190,10 @@ CSS custom properties を `:root` へ一元定義し、component は token の�
 
 ```html
 <div class="kpi-grid">
-  <div class="kpi">
+  <div class="kpi-card">
     <div class="kpi-label">月間売上</div>
     <div class="kpi-value">¥12.4M</div>
-    <div class="kpi-delta kpi-up">↑ +12.4% 前月比</div>
+    <div class="kpi-delta pos">↑ +12.4% 前月比</div>
   </div>
   …
 </div>
@@ -198,18 +203,18 @@ CSS custom properties を `:root` へ一元定義し、component は token の�
 .kpi-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: var(--space);
+  gap: .75rem;
 }
-.kpi {
+.kpi-card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--space);
+  border-radius: 8px;
+  padding: .9rem 1rem;
 }
-.kpi-value { font-size: clamp(1.5rem, 4vw, 2.25rem); font-weight: 700; }
-.kpi-label { color: var(--muted); font-size: .875rem; }
-.kpi-up   { color: var(--positive); }
-.kpi-down { color: var(--negative); }
+.kpi-value { font-size: 1.6em; font-weight: 700; }
+.kpi-label { color: var(--muted); font-size: .82em; }
+.kpi-delta.pos { color: var(--pos); }
+.kpi-delta.neg { color: var(--neg); }
 ```
 
 増減は色 + 矢印 symbol + テキストの 3 重で表現する（色単独禁止）。
@@ -217,7 +222,7 @@ CSS custom properties を `:root` へ一元定義し、component は token の�
 ### Figure / chart unit
 
 ```html
-<figure class="chart-unit">
+<figure class="chart-figure">
   <figcaption>
     <h3>売上は 4 月以降 3 か月連続で増加</h3>
     <p class="takeaway">新規チャネル追加後の 5 月に伸びが加速した。</p>
@@ -232,7 +237,7 @@ CSS custom properties を `:root` へ一元定義し、component は token の�
   </div>
   <p class="source">Source: <a href="https://example.com/data">社内売上 DB</a>（2026-07-01 時点）</p>
   <details>
-    <summary>データを表で見る</summary>
+    <summary>データ表を表示</summary>
     <table>…</table>
   </details>
 </figure>
@@ -270,8 +275,7 @@ CSS custom properties を `:root` へ一元定義し、component は token の�
 .table-wrap { max-width: 100%; overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; }
 caption { text-align: left; font-weight: 600; margin-bottom: .5rem; }
-th, td { padding: .5rem .75rem; border-bottom: 1px solid var(--border); }
-th { text-align: left; }
+th, td { padding: .4rem .6rem; border: 1px solid var(--border); text-align: left; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 ```
 
@@ -295,7 +299,7 @@ th { text-align: left; }
 @media print {
   @page {
     size: A4;
-    margin: 15mm;
+    margin: 14mm;
   }
   :root {
     /* 印刷は常に light 相当へ固定 */
@@ -304,7 +308,7 @@ th { text-align: left; }
     --fg: #000000;
     --muted: #444444;
     --border: #999999;
-    --grid: #cccccc;
+    --grid: #dddddd;
   }
   body { background: #fff; color: #000; }
 
@@ -317,15 +321,15 @@ th { text-align: left; }
      開閉を切り替える（interactive モード）ことで実現する */
 
   /* 不自然な page break を防ぐ */
-  figure, .kpi, tr, h2, h3 { break-inside: avoid-page; }
-  h2, h3 { break-after: avoid-page; }
+  .chart-figure, .kpi-card, tr { break-inside: avoid; }
+  h2 { break-after: avoid; }
 
-  /* SVG の色を保持 */
-  svg { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  /* SVG・chart の色を保持 */
+  * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 
   /* ink 節約 */
   * { box-shadow: none !important; text-shadow: none !important; }
-  .kpi { border: 1px solid #999; background: #fff; }
+  .kpi-card { border: 1px solid #999; background: #fff; }
 
   /* 出典 URL を印字 */
   .source a[href^="https://"]::after {

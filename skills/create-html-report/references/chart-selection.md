@@ -105,7 +105,7 @@ accessibility は [./accessibility-security.md](./accessibility-security.md) を
 - color scale は知覚的に均一な連続系（Viridis / Cividis 系統）を使い、rainbow を使わない。グレースケール印刷でも単調に判別できること。
 - 発散データ（正負・基準との差）は diverging scale とし、中立点を明示的に中央色へ割り当てる。
 - cell 数が少ない（〜100 個程度）場合は cell 内に値を直接記載する。文字色は cell 背景に対し contrast を確保する（明背景に暗字・暗背景に明字を閾値で切替）。
-- color legend（scale bar）と単位を必ず付ける。missing cell は scale 外の別表現（斜線・`–`）にする。
+- color legend（scale bar）と単位を必ず付ける。missing cell は scale 外の別表現（無色セル + `—`）にし、0 に変換しない。
 
 ### Waterfall
 
@@ -121,7 +121,7 @@ accessibility は [./accessibility-security.md](./accessibility-security.md) を
 - 要素 5 個以上・値が近接・時系列比較のいずれかに該当したら horizontal bar か 100% stacked へ切替える。
 - 各 slice に「ラベル + 値（%）」を direct label で付け、legend だけにしない。合計が 100% になることを確認する。
 - donut 中央の空白には合計値・最重要値を置ける。装飾用の空洞にしない。
-- 実装: `stroke-dasharray` による円弧塗り分け（円周 C = 2πr に対し割合分の dash）。JavaScript 不要。
+- 実装: annular sector（扇環）の `<path>` による塗り分け。中央の空白に合計値を表示する。JavaScript 不要。
 - アンチパターン: 複数 donut の並置比較（slope / bar へ）、3D pie、切り離し（exploded）slice、gauge/speedometer への転用。
 
 ### Radar
@@ -155,14 +155,14 @@ Width_i = ((t_end_i − t_start_i) / D_total) × W_usable
 ```
 
 - `T_start` / `D_total` は表示範囲の開始日と総日数。表示範囲は最初の task 開始〜最後の task 終了に前後数日の余白を加える。
-- **tick 選択**: 表示範囲 ≦ 3 か月なら week tick（月曜起点）、3 か月〜2 年なら month tick、2 年超なら quarter tick。tick label は範囲に応じて `M/D`・`YYYY-MM`・`YYYY Q n` を使い分け、年境界では年を明記する。
-- **行構成**: 左列に task 名（長い名前は省略 + `<title>` で全文）。phase ごとに grouping し、phase 見出し行を挟む。行高は一定にし、bar 高は行高の 55〜70%。
-- **milestone**: 期間を持たない点は bar ではなく diamond（rotate 45° の rect か polygon）で描き、ラベルを右横に置く。
-- **progress**: planned bar の上に progress 分の overlay bar（同色の濃色または pattern）を重ねる。%値を bar 内または右端にラベルする。progress 不明の task に 0% を与えない（overlay なし + 表で `–`）。
-- **today line**: current date が表示範囲内にある場合のみ、縦の破線 + `Today (YYYY-MM-DD)` ラベルを描く。範囲外なら描かない。
-- **status**: 色 + 文字/pattern/symbol で区別する（例: done = 塗り + ✓、at-risk = 斜線 pattern + `!`）。legend に全 status を列挙する。
-- **dependency の描き分け**: 依存が少数（〜5 本程度）で交差しないなら arrow を描いてよい。それ以上、または arrow が bar・ラベルと交差して読めなくなるなら **arrow を描かず dependency table（task / depends on / type）を併記**する。中途半端に一部だけ描かない。
-- **table 併記**: SVG と同じ task / start / end / status / progress を持つ table を必ず併記する。これが screen reader・印刷・正確な日付確認の canonical source になる。
+- **tick 選択**: 表示範囲 120 日以下なら week tick（月曜起点、label `M/D`）、730 日（約 2 年）以下なら month tick（月初、label `YYYY-MM`）、2 年超なら quarter tick（四半期初日、label `YYYY Qn`）。month / quarter の label は年を含む。
+- **行構成**: 左列に task 名（列幅は最長名に応じて最大 230px 程度まで自動調整）。phase ごとに grouping し、phase 見出し行を挟む。行高は一定にし、bar 高は行高の 50〜70% 程度（実装は行高 30px に bar 高 16px）。
+- **milestone**: 期間を持たない点は bar ではなく diamond（菱形 path）で描き、status ラベルを右横に置く。
+- **progress**: 半透明の planned bar の上に progress 分の overlay bar（同色・不透明）を重ねる。%値は status ラベルと併せて bar 右横にラベルする（例: `進行中 60%`）。progress 不明の task に 0% を与えない（overlay なし + 表で `—`）。
+- **today line**: spec の today が表示範囲内にある場合のみ、縦の破線 + `本日 YYYY-MM-DD` ラベルを描く。範囲外なら描かない。
+- **status**: 色 + 日本語テキストラベルで区別する（done = 完了、in-progress = 進行中、planned = 予定、at-risk = リスク、blocked = ブロック）。色は status 専用 token（`--status-done` 等）を参照し、bar 右横（milestone は diamond 右横）へラベルを描く。legend に全 status を列挙する。
+- **dependency**: arrow は描かず、**dependency table（タスク / 依存先（先行タスク））を併記**する（arrow が bar・ラベルと交差して読めなくなるのを避ける設計判断。一部だけ描く中途半端を排除）。
+- **table 併記**: SVG と同じタスク / フェーズ / 開始 / 終了 / 進捗 / ステータスを持つ table を必ず併記する。これが screen reader・印刷・正確な日付確認の canonical source になる。
 - 日付不明の task に架空の日付を与えない。未定 task は Gantt から除外し、table に「日付未定」として残す。
 - mobile: `.chart-wrap` で横スクロール。task 名列は最低幅を確保する。
 

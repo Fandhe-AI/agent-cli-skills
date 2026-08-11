@@ -112,7 +112,7 @@ inline vanilla JavaScript のみ許可（`--interactive` 時など）。
 - データはページ内 `<script type="application/json">` から `JSON.parse(el.textContent)` で読む
 - すべての機能は progressive enhancement（JavaScript 無効でも主要情報が読める）
 
-**validator の機械検査（fail-closed）**: 正規表現の文字列検査は `window['fetch'](...)` や `document.createElement('script')` 等の難読化を見逃すため、validate_report.py は inline `<script>` を **renderer が注入する bundled JS（render_report.py の `INTERACTIVE_JS`）との完全一致のみ許可**する。手書き・改変 script は内容が無害でも不合格。禁止 API の regex 検査は防御多層として併用する。CSS も同様に、`@\69mport` 等の CSS escape 難読化を検査前に Unicode へ正規化（unescape）してから `@import` / `url()` を検査する。
+**validator の機械検査（fail-closed）**: 正規表現の文字列検査は `window['fetch'](...)` や `document.createElement('script')` 等の難読化を見逃すため、validate_report.py は inline `<script>` を **renderer が注入する bundled JS（render_report.py の `INTERACTIVE_JS`）との完全一致のみ許可**する。手書き・改変 script は内容が無害でも不合格。禁止 API の regex 検査は防御多層として併用する。CSS も同様に、CSS 仕様の入力前処理（CRLF / CR / FF → LF 正規化）を行った上で `@\69mport` 等の CSS escape 難読化を Unicode へ正規化（unescape）してから `@import` / `url()` / `image-set(` を検査する（正規化なしでは `\69` + CRLF で hex escape の継続空白消費をすり抜けられるため）。HTML の重複属性は HTML5 仕様・ブラウザ挙動に合わせて**先勝ち**で評価する（`<a href="javascript:..." href="https://ok/">` の後勝ち評価による検査迂回を防ぐ）。
 
 チェック:
 
@@ -131,8 +131,10 @@ self-contained 原則。**ページロード時・操作時に一切の外部通
 - external font（`@font-face` の remote `src`、Google Fonts 等）
 - remote `<img src="https://...">`
 - `<iframe>` / `<object>` / `<embed>`（`data:text/html` 等で検査を迂回できる能動コンテンツのため、値を問わず禁止）
-- CSS `@import`（値を問わず一律禁止）/ CSS `url(...)`（許可画像 MIME の `data:`・`#fragment` 以外すべて）
-- SVG の remote `<image href>` / remote `<use href>`
+- `<base>` / `<form>` / `<meta http-equiv="refresh">` / SVG `<feImage>`（相対 URL 基準の書き換え・submit 送信・リダイレクト・filter 経由読込の入口のため、値を問わず存在自体を禁止。`meta` は refresh のみで、`charset` / `viewport` / `name` 系は許可）
+- URL を運びうる既知属性の存在自体（`formaction` / `ping` / `poster` / `cite` / `background` / `manifest` / `longdesc` / `srcset` / `srcdoc` / `data` / `xml:base` 等 — 検査済みの `href` / `src` / `action` / `xlink:href` 以外の URL 運搬経路を fail-closed でまとめて禁止）
+- CSS `@import`（値を問わず一律禁止）/ CSS `url(...)`（許可画像 MIME の `data:`・`#fragment` 以外すべて）/ CSS `image-set(`（裸文字列で URL を運べるため出現自体を禁止）
+- SVG の remote `<image href>` / remote `<use href>`、SMIL 系（`<animate>` / `<set>` / `<animateMotion>` / `<mpath>`）の remote `href` / `xlink:href`
 - `<link rel="preconnect">` / `rel="dns-prefetch"` 等の投機的接続
 - runtime の network request（前節の禁止 API）
 
@@ -145,10 +147,11 @@ self-contained 原則。**ページロード時・操作時に一切の外部通
 
 **相対 URL も禁止**: `<link href="style.css">` / `<img src="image.png">` のような相対参照は、単一ファイル配布でファイル欠落・意図しないリクエストの原因になるため external dependency と同様に禁止する。validate_report.py の判定は次のとおり:
 
-- **能動コンテンツ要素は値を問わず不合格**: `script src` / `link` / `iframe` / `object` / `embed`。`data:` URI でも中身の JS / CSS / HTML が inline 検査（network API・`@import`・`url()` 許可リスト）を迂回できるため
-- **受動メディアは画像 MIME allowlist の `data:` のみ許可**: `img` / `source` / `track` / `audio` / `video` / SVG `image` の `src`・`srcset`・`href` は `data:image/png` / `image/jpeg` / `image/gif` / `image/webp` のみ許可（`image/svg+xml` は `<script>` を内包し得るため不許可）
-- **SVG の文書内 `#fragment` 参照は許可**: `<use href="#id">` / `<image href="#id">` 等
-- **CSS の `url(...)`**（`<style>` ブロック・`style` 属性の双方）も同じ許可リスト（許可画像 MIME の `data:`・`#fragment`）で検査され、`url(image.png)` / `url(../fonts/a.woff2)` / `url(data:text/css,...)` は不合格になる
+- **能動コンテンツ・制御要素は値を問わず不合格**: `script src` / `link` / `iframe` / `object` / `embed` / `base` / `form` / `meta http-equiv="refresh"`（refresh のみ）/ SVG `feImage`。`data:` URI でも中身の JS / CSS / HTML が inline 検査（network API・`@import`・`url()` 許可リスト）を迂回できるため
+- **URL 運搬属性は存在自体で不合格（fail-closed）**: `formaction` / `ping` / `poster` / `cite` / `background` / `manifest` / `longdesc` / `srcset` / `imagesrcset` / `srcdoc` / `data` / `xml:base` 等。検査済みの `href` / `src` / `action` / `xlink:href` 以外で URL を運べる既知属性は、値のパース差異（`srcset` のカンマ区切り・`ping` の空白区切り等）で許可リスト検査をすり抜けやすいため
+- **受動メディアは画像 MIME allowlist の `data:` のみ許可**: `img` / `source` / `track` / `audio` / `video` の `src` は `data:image/png` / `image/jpeg` / `image/gif` / `image/webp` のみ許可（`image/svg+xml` は `<script>` を内包し得るため不許可）
+- **SVG の文書内 `#fragment` 参照は許可**: `<use href="#id">` / `<image href="#id">` 等。SMIL 系（`animate` / `set` / `animateMotion` / `mpath`）の `href` / `xlink:href` も同じ許可リスト（画像 `data:`・`#fragment`）で検査される
+- **CSS の `url(...)`**（`<style>` ブロック・`style` 属性の双方）も同じ許可リスト（許可画像 MIME の `data:`・`#fragment`）で検査され、`url(image.png)` / `url(../fonts/a.woff2)` / `url(data:text/css,...)` は不合格になる。`image-set(` は裸文字列でも URL を運べるため出現自体で不合格
 
 data URI（上記 allowlist の画像埋め込み）は外部依存ではないが、原則 inline SVG を優先する。
 

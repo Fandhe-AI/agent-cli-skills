@@ -85,6 +85,10 @@ def finite(value, ctx="値"):
     """数値を float 化し有限値であることを検証する。None はそのまま返す（欠損許容箇所用）。"""
     if value is None:
         return None
+    # bool は int のサブクラスのため float() を素通りする。JSON の true が
+    # 数値 1 として描画される事故を防ぐため、数値文脈では boolean を拒否する。
+    if isinstance(value, bool):
+        raise SpecError(f"{ctx} が boolean（true/false）で数値ではない: {value!r}")
     try:
         f = float(value)
     except (TypeError, ValueError):
@@ -144,6 +148,19 @@ def require_list(value, ctx):
     return value
 
 
+def require_bool(value, ctx):
+    """boolean フィールドの厳格型ゲート。None（未指定）は False として扱う。
+
+    Python の truthy 判定では "false"（非空文字列）や 1 が True 扱いになり
+    spec の意図と食い違うため、JSON の true / false（bool）以外は SpecError で拒否する。
+    """
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise SpecError(f"{ctx} は true / false（boolean）で指定する: {value!r} が渡された")
+    return value
+
+
 def parse_date(value, ctx="日付"):
     """ISO 形式（YYYY-MM-DD）の日付を parse する。不正なら SpecError。"""
     try:
@@ -179,6 +196,11 @@ def nice_ticks(lo, hi, target=5):
     if lo == hi:
         hi = lo + 1 if lo == 0 else lo + abs(lo) * 0.1
     span = hi - lo
+    # 各値は有限でも差が float 上限（約 1.8e308）を超えると span が inf になり
+    # 後段の 10**floor(log10(...)) が OverflowError で落ちる。SpecError に正規化する。
+    if not math.isfinite(span):
+        raise SpecError(
+            f"軸範囲の計算が浮動小数の上限を超えた（{lo!r}〜{hi!r}）。値のスケールを見直すこと")
     raw = span / max(target, 1)
     mag = 10 ** math.floor(math.log10(raw))
     step = mag
@@ -312,18 +334,28 @@ def chart_desc(chart, fallback):
 # ---------------------------------------------------------------------------
 
 def render_bar(chart, ids, interactive):
-    cats = chart.get("categories") or []
-    series = chart.get("series") or []
+    cats = require_list(chart.get("categories"), f"bar chart '{chart.get('title')}' の categories")
+    series = require_list(chart.get("series"), f"bar chart '{chart.get('title')}' の series")
     if not cats or not series:
         raise SpecError(f"bar chart '{chart.get('title')}' に categories / series がない")
+    # enum 外の値を silent に既定値扱いすると spec の誤記（"Horizontal" 等）が
+    # 意図と違うレイアウトのまま気付かれないため、既定値以外は厳格に拒否する
     orient = chart.get("orientation", "horizontal")
+    if orient not in ("horizontal", "vertical"):
+        raise SpecError(f"bar chart '{chart.get('title')}' の orientation は "
+                        f"horizontal / vertical のいずれか: {orient!r}")
     mode = chart.get("mode", "grouped" if len(series) > 1 else "single")
+    if mode not in ("single", "grouped", "stacked"):
+        raise SpecError(f"bar chart '{chart.get('title')}' の mode は "
+                        f"grouped / stacked のいずれか: {mode!r}")
     unit = chart.get("unit", "")
     ns, nc = len(series), len(cats)
 
     vals = []
-    for s in series:
-        v = [finite(x, f"bar '{s.get('name')}' の値") for x in s.get("values", [])]
+    for si, s in enumerate(series):
+        require_dict(s, f"bar chart '{chart.get('title')}' の series[{si}]")
+        v = [finite(x, f"bar '{s.get('name')}' の値")
+             for x in require_list(s.get("values"), f"bar series '{s.get('name')}' の values")]
         if len(v) != nc:
             raise SpecError(f"bar series '{s.get('name')}' の値数が categories と不一致")
         vals.append(v)
@@ -455,16 +487,18 @@ def render_bar(chart, ids, interactive):
 # ---------------------------------------------------------------------------
 
 def render_line(chart, ids, interactive):
-    xs = chart.get("x") or []
-    series = chart.get("series") or []
+    xs = require_list(chart.get("x"), f"line chart '{chart.get('title')}' の x")
+    series = require_list(chart.get("series"), f"line chart '{chart.get('title')}' の series")
     if not xs or not series:
         raise SpecError(f"line chart '{chart.get('title')}' に x / series がない")
     unit = chart.get("unit", "")
     nc = len(xs)
 
     vals = []
-    for s in series:
-        v = [finite(x, f"line '{s.get('name')}' の値") for x in s.get("values", [])]
+    for si, s in enumerate(series):
+        require_dict(s, f"line chart '{chart.get('title')}' の series[{si}]")
+        v = [finite(x, f"line '{s.get('name')}' の値")
+             for x in require_list(s.get("values"), f"line series '{s.get('name')}' の values")]
         if len(v) != nc:
             raise SpecError(f"line series '{s.get('name')}' の値数が x と不一致")
         vals.append(v)
@@ -523,7 +557,9 @@ def render_line(chart, ids, interactive):
                 out.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}"/>')
 
     # annotation: 指定 x 位置に縦破線 + 短いラベル
-    for a in chart.get("annotations", []):
+    for ai, a in enumerate(require_list(chart.get("annotations"),
+                                        f"line chart '{chart.get('title')}' の annotations")):
+        require_dict(a, f"line chart '{chart.get('title')}' の annotations[{ai}]")
         label = a.get("label", "")
         ax = a.get("x")
         if ax in xs:
@@ -531,7 +567,11 @@ def render_line(chart, ids, interactive):
         else:
             idx = finite(a.get("x_index"), f"annotation '{label}' の x_index")
             if idx is None:
-                continue
+                # x がどのラベルとも一致せず x_index もない annotation を黙って
+                # 落とすと「描いたつもり」の欠落に気付けないため spec 段階で弾く
+                raise SpecError(
+                    f"annotation '{label}' の x {ax!r} が x のラベルに一致しない"
+                    "（一致するラベルを指定するか x_index で位置を指定すること）")
             # x_index は 0 始まりで x 配列の要素を指す（references/report-spec.md）。
             # 小数の黙殺切り捨て・範囲外 index は誤った位置への描画（データの嘘）に
             # なるため、int() で丸めずに SpecError で拒否する。
@@ -566,21 +606,26 @@ def render_line(chart, ids, interactive):
 # ---------------------------------------------------------------------------
 
 def render_scatter(chart, ids, interactive):
-    series = chart.get("series") or []
+    series = require_list(chart.get("series"), f"scatter chart '{chart.get('title')}' の series")
     if not series:
         raise SpecError(f"scatter chart '{chart.get('title')}' に series がない")
     x_label = chart.get("x_label", "X")
     y_label = chart.get("y_label", "Y")
 
     pts_all = []
-    for s in series:
+    for si, s in enumerate(series):
+        require_dict(s, f"scatter chart '{chart.get('title')}' の series[{si}]")
         pts = []
-        for p in s.get("points", []):
+        for pi, p in enumerate(require_list(s.get("points"),
+                                            f"scatter series '{s.get('name')}' の points")):
             label = None
             if isinstance(p, dict):
                 px_, py_, label = p.get("x"), p.get("y"), p.get("label")
-            else:
+            elif isinstance(p, list) and len(p) >= 2:
                 px_, py_ = p[0], p[1]
+            else:
+                raise SpecError(f"scatter series '{s.get('name')}' の points[{pi}] は "
+                                f"object または [x, y] 配列で指定する: {p!r}")
             pts.append((require_finite(px_, "scatter x"), require_finite(py_, "scatter y"), label))
         pts_all.append(pts)
     flat = [p for pts in pts_all for p in pts]
@@ -651,14 +696,15 @@ def _viridis(frac):
 
 
 def render_heatmap(chart, ids, interactive):
-    rows_lbl = chart.get("rows") or []
-    cols_lbl = chart.get("cols") or []
-    values = chart.get("values") or []
+    rows_lbl = require_list(chart.get("rows"), f"heatmap '{chart.get('title')}' の rows")
+    cols_lbl = require_list(chart.get("cols"), f"heatmap '{chart.get('title')}' の cols")
+    values = require_list(chart.get("values"), f"heatmap '{chart.get('title')}' の values")
     if not rows_lbl or not cols_lbl or len(values) != len(rows_lbl):
         raise SpecError(f"heatmap '{chart.get('title')}' の rows / cols / values が不整合")
     unit = chart.get("unit", "")
     grid = []
     for r, row in enumerate(values):
+        row = require_list(row, f"heatmap 行 {rows_lbl[r]!r} の values")
         if len(row) != len(cols_lbl):
             raise SpecError(f"heatmap 行 {rows_lbl[r]!r} の値数が cols と不一致")
         grid.append([finite(v, f"heatmap [{rows_lbl[r]}]") for v in row])
@@ -723,7 +769,7 @@ def render_heatmap(chart, ids, interactive):
 # ---------------------------------------------------------------------------
 
 def render_waterfall(chart, ids, interactive):
-    items = chart.get("items") or []
+    items = require_list(chart.get("items"), f"waterfall '{chart.get('title')}' の items")
     if not items:
         raise SpecError(f"waterfall '{chart.get('title')}' に items がない")
     unit = chart.get("unit", "")
@@ -731,8 +777,13 @@ def render_waterfall(chart, ids, interactive):
     # 累積位置を計算する。start / total は 0 起点、delta は直前の累積からの増減。
     bars = []  # (label, base, top, kind, value)
     cum = 0.0
-    for it in items:
+    for ii, it in enumerate(items):
+        require_dict(it, f"waterfall '{chart.get('title')}' の items[{ii}]")
         kind = it.get("type", "delta")
+        # 未知の type（"Total" 等の誤記）を silent に delta 扱いすると累積が
+        # 意図とずれたまま描画されるため、enum 外は spec 段階で弾く
+        if kind not in ("start", "delta", "total"):
+            raise SpecError(f"waterfall items[].type は start / delta / total のいずれか: {kind!r}")
         v = require_finite(it.get("value"), f"waterfall '{it.get('label')}'")
         if kind in ("start", "total"):
             bars.append((it.get("label", ""), 0.0, v, kind, v))
@@ -826,10 +877,12 @@ def _annular_path(cx, cy, ro, ri, a0, a1):
 
 
 def render_donut(chart, ids, interactive):
-    slices = chart.get("slices") or []
+    slices = require_list(chart.get("slices"), f"donut '{chart.get('title')}' の slices")
     if not slices:
         raise SpecError(f"donut '{chart.get('title')}' に slices がない")
     unit = chart.get("unit", "")
+    for si, s in enumerate(slices):
+        require_dict(s, f"donut '{chart.get('title')}' の slices[{si}]")
     vals = [require_finite(s.get("value"), f"donut '{s.get('label')}'") for s in slices]
     if any(v < 0 for v in vals):
         raise SpecError("donut に負値は使用できない")
@@ -871,8 +924,8 @@ def render_donut(chart, ids, interactive):
 # ---------------------------------------------------------------------------
 
 def render_radar(chart, ids, interactive):
-    axes = chart.get("axes") or []
-    series = chart.get("series") or []
+    axes = require_list(chart.get("axes"), f"radar '{chart.get('title')}' の axes")
+    series = require_list(chart.get("series"), f"radar '{chart.get('title')}' の series")
     if len(axes) < 3 or not series:
         raise SpecError(f"radar '{chart.get('title')}' は 3 軸以上の axes と series が必要")
     vmax = require_finite(chart.get("max", 5), "radar max")
@@ -882,8 +935,10 @@ def render_radar(chart, ids, interactive):
     n = len(axes)
 
     vals = []
-    for s in series:
-        v = [require_finite(x, f"radar '{s.get('name')}' の値") for x in s.get("values", [])]
+    for si, s in enumerate(series):
+        require_dict(s, f"radar '{chart.get('title')}' の series[{si}]")
+        v = [require_finite(x, f"radar '{s.get('name')}' の値")
+             for x in require_list(s.get("values"), f"radar series '{s.get('name')}' の values")]
         if len(v) != n:
             raise SpecError(f"radar series '{s.get('name')}' の値数が axes と不一致")
         if any(x < 0 or x > vmax for x in v):
@@ -943,7 +998,11 @@ GANTT_STATUS = {
 
 
 def _gantt_ticks(t0, t1):
-    """期間長に応じて week（月曜）/ month（1日）の tick を自動選択する。"""
+    """期間長に応じて week（月曜）/ month（1日）/ quarter（四半期初日）の tick を自動選択する。
+
+    閾値は references/chart-selection.md の記載に合わせる:
+    120 日以下 → 週、730 日（約 2 年）以下 → 月、それ超 → 四半期（`YYYY Qn`）。
+    """
     total = (t1 - t0).days
     ticks = []
     if total <= 120:
@@ -951,7 +1010,7 @@ def _gantt_ticks(t0, t1):
         while d <= t1:
             ticks.append((d, f"{d.month}/{d.day}"))
             d += datetime.timedelta(days=7)
-    else:
+    elif total <= 730:
         y, m = t0.year, t0.month
         if t0.day > 1:
             m += 1
@@ -963,6 +1022,21 @@ def _gantt_ticks(t0, t1):
                 break
             ticks.append((d, f"{y}-{m:02d}"))
             m += 1
+    else:
+        # 四半期初日（1/4/7/10 月の 1 日）へ切り上げてから 3 か月刻みで進める
+        y, m = t0.year, t0.month
+        if not (m in (1, 4, 7, 10) and t0.day == 1):
+            m = ((m - 1) // 3 + 1) * 3 + 1
+            if m > 12:
+                y, m = y + 1, m - 12
+        while True:
+            d = datetime.date(y, m, 1)
+            if d > t1:
+                break
+            ticks.append((d, f"{y} Q{(m - 1) // 3 + 1}"))
+            m += 3
+            if m > 12:
+                y, m = y + 1, m - 12
     return ticks
 
 
@@ -979,14 +1053,28 @@ def _gantt_progress(t):
 
 
 def render_gantt(chart, ids, interactive):
-    tasks = chart.get("tasks") or []
+    tasks = require_list(chart.get("tasks"), f"gantt '{chart.get('title')}' の tasks")
     if not tasks:
         raise SpecError(f"gantt '{chart.get('title')}' に tasks がない")
+
+    # 構造の事前検証: 要素型・必須 name・id の一意性をまとめて弾く。
+    # id 重複を許すと dependsOn の解決先（name_by_id）が黙って後勝ちになり
+    # 依存関係テーブルが嘘をつくため、SpecError で拒否する。
+    seen_task_ids = set()
+    for ti, t in enumerate(tasks):
+        require_dict(t, f"gantt '{chart.get('title')}' の tasks[{ti}]")
+        if not t.get("name"):
+            raise SpecError(f"gantt tasks[{ti}] に name がない")
+        task_id = t.get("id")
+        if task_id is not None:
+            if task_id in seen_task_ids:
+                raise SpecError(f"gantt tasks[].id が重複している: {task_id!r}")
+            seen_task_ids.add(task_id)
 
     # 日付範囲: 全タスク・マイルストーンの min/max に前後 2 日のパディング
     dates = []
     for t in tasks:
-        if t.get("milestone"):
+        if require_bool(t.get("milestone"), f"task '{t.get('name')}' の milestone"):
             dates.append(parse_date(t.get("date"), f"milestone '{t.get('name')}' の date"))
         else:
             d_start = parse_date(t.get("start"), f"task '{t.get('name')}' の start")
@@ -1043,7 +1131,7 @@ def render_gantt(chart, ids, interactive):
             out.append(f'<text x="{left - 8}" y="{cy_ + 4:.1f}" text-anchor="end" class="cat">{esc(t.get("name", ""))}</text>')
             status = t.get("status", "planned")
             color, status_ja = GANTT_STATUS.get(status, ("var(--series-8)", str(status)))
-            if t.get("milestone"):
+            if require_bool(t.get("milestone"), f"task '{t.get('name')}' の milestone"):
                 mx = x(parse_date(t["date"]))
                 s = 8
                 out.append(f'<path d="M {mx:.1f} {cy_ - s:.1f} L {mx + s:.1f} {cy_:.1f} '
@@ -1071,7 +1159,10 @@ def render_gantt(chart, ids, interactive):
             tx = x(today)
             out.append(f'<line x1="{tx:.1f}" y1="{top - 4}" x2="{tx:.1f}" y2="{H - 22}" '
                        f'stroke="var(--neg)" stroke-width="1.5" stroke-dasharray="5 3"/>')
-            out.append(f'<text x="{tx + 4:.1f}" y="{H - 8}" class="annot" fill="var(--neg)">本日 {today.isoformat()}</text>')
+            # presentation attribute（fill="..."）は author CSS の
+            # `.chart .annot { fill: var(--muted) }` に負けて常にグレーになるため、
+            # heatmap セルと同様に優先順位で勝つ inline style で適用する
+            out.append(f'<text x="{tx + 4:.1f}" y="{H - 8}" class="annot" style="fill:var(--neg)">本日 {today.isoformat()}</text>')
     out.append("</svg>")
 
     legend = legend_html(
@@ -1082,7 +1173,7 @@ def render_gantt(chart, ids, interactive):
     # SVG と同一データの表（task / start / end / progress / status）
     rows = []
     for t in tasks:
-        if t.get("milestone"):
+        if require_bool(t.get("milestone"), f"task '{t.get('name')}' の milestone"):
             rows.append([(t.get("name", ""), False), (t.get("phase", "—"), False),
                          (str(t.get("date")), False), ("—", False), ("—", True),
                          (GANTT_STATUS.get(t.get("status", "planned"), ("", str(t.get("status"))))[1] + "（マイルストーン）", False)])
@@ -1097,7 +1188,8 @@ def render_gantt(chart, ids, interactive):
 
     # 依存関係は矢印で描かず表で示す（密集時の可読性を優先する設計判断）
     dep_html = ""
-    deps = [(t.get("name", ""), d) for t in tasks for d in t.get("dependsOn", [])]
+    deps = [(t.get("name", ""), d) for t in tasks
+            for d in require_list(t.get("dependsOn"), f"task '{t.get('name')}' の dependsOn")]
     if deps:
         name_by_id = {t.get("id"): t.get("name", "") for t in tasks if t.get("id")}
         dep_rows = [[(n, False), (name_by_id.get(d, str(d)), False)] for n, d in deps]
@@ -1125,18 +1217,27 @@ def render_kpis(kpis):
     if not kpis:
         return ""
     cards = []
-    for k in kpis:
-        finite(k.get("value_num"), "KPI value_num")  # 数値が与えられた場合のみ検証
+    for i, k in enumerate(kpis):
+        # label / value は spec（references/report-spec.md）の必須フィールド。
+        # 欠落を空文字で埋めると「値のない KPI カード」が黙って出るため拒否する。
+        if not k.get("label"):
+            raise SpecError(f"kpis[{i}] に label がない")
+        if k.get("value") is None or k.get("value") == "":
+            raise SpecError(f"kpis[{i}]（label: {k.get('label')}）に value がない")
+        trend = k.get("trend")
+        # enum 外の trend（"Up" 等の誤記）を silent に flat 扱いしない
+        if trend not in (None, "up", "down", "flat"):
+            raise SpecError(f"kpis[{i}]（label: {k.get('label')}）の trend は "
+                            f"up / down / flat のいずれか: {trend!r}")
         delta_html = ""
         if k.get("delta") is not None:
-            trend = k.get("trend", "flat")
             arrow, cls = {"up": ("↑", "pos"), "down": ("↓", "neg")}.get(trend, ("→", "flat"))
             delta_html = f'<span class="kpi-delta {cls}">{arrow} {esc(k["delta"])}</span>'
         note = f'<span class="kpi-note">{esc(k["note"])}</span>' if k.get("note") else ""
         unit = f'<span class="kpi-unit">{esc(k["unit"])}</span>' if k.get("unit") else ""
         cards.append(
-            f'<li class="kpi-card"><span class="kpi-label">{esc(k.get("label", ""))}</span>'
-            f'<span class="kpi-value">{esc(k.get("value", ""))}{unit}</span>{delta_html}{note}</li>'
+            f'<li class="kpi-card"><span class="kpi-label">{esc(k["label"])}</span>'
+            f'<span class="kpi-value">{esc(k["value"])}{unit}</span>{delta_html}{note}</li>'
         )
     return (f'<section id="kpis" aria-label="主要指標">'
             f'<ul class="kpi-grid">{"".join(cards)}</ul></section>')
@@ -1146,11 +1247,15 @@ def render_findings(findings):
     if not findings:
         return ""
     items = []
-    for f in findings:
+    for i, f in enumerate(findings):
         if isinstance(f, dict):
             body = f'<strong>{esc(f.get("title", ""))}</strong> — {esc(f.get("body", ""))}'
-        else:
+        elif isinstance(f, str):
             body = esc(f)
+        else:
+            # 数値・配列等を str() で黙って文字列化せず、契約（string | object）を守らせる
+            raise SpecError(f"findings[{i}] は string または object で指定する: "
+                            f"{type(f).__name__} が渡された")
         items.append(f"<li>{body}</li>")
     return (f'<section id="findings"><h2>主な所見</h2>'
             f'<ol class="findings">{"".join(items)}</ol></section>')
@@ -1166,17 +1271,25 @@ def render_body_text(body):
 
 def render_section_table(tbl, interactive):
     """chart に紐付かない独立データ表。columns / rows は表示文字列のまま受け取る。"""
-    cols = tbl.get("columns") or []
-    aligns = tbl.get("align") or []
+    tname = tbl.get("title", "データ表")
+    cols = require_list(tbl.get("columns"), f"table '{tname}' の columns")
+    aligns = require_list(tbl.get("align"), f"table '{tname}' の align")
     rows = []
-    for r in tbl.get("rows", []):
+    for ri, r in enumerate(require_list(tbl.get("rows"), f"table '{tname}' の rows")):
+        r = require_list(r, f"table '{tname}' の rows[{ri}]")
+        # 列数の不一致は <th scope="col"> とセルの対応が崩れた表になるため拒否する
+        if len(r) != len(cols):
+            raise SpecError(f"table '{tname}' の rows[{ri}] の列数 {len(r)} が "
+                            f"columns の列数 {len(cols)} と一致しない")
         cells = []
         for i, cell in enumerate(r):
-            is_num = (aligns[i] == "num") if i < len(aligns) else isinstance(cell, (int, float))
-            if isinstance(cell, (int, float)):
+            # bool は int のサブクラス。JSON の true を数値 1 として整形しないよう除外する
+            cell_is_num = isinstance(cell, (int, float)) and not isinstance(cell, bool)
+            is_num = (aligns[i] == "num") if i < len(aligns) else cell_is_num
+            if cell_is_num:
                 # 他 renderer と同じ有限値ゲート。json.load は Infinity/NaN を
                 # float として通すため、fmt に渡す前に SpecError で弾く。
-                cell = fmt(finite(cell, f"table '{tbl.get('title', 'データ表')}' のセル値"))
+                cell = fmt(finite(cell, f"table '{tname}' のセル値"))
             else:
                 cell = str(cell)
             cells.append((cell, is_num))
@@ -1209,7 +1322,10 @@ def render_sections(sections, ids, interactive):
                 f"sections[].id が重複している: {sid!r}"
                 "（自動採番 sec-N との衝突を含め、id はページ内で一意にすること）")
         seen_ids.add(sid)
-        heading = sec.get("heading", f"セクション {i}")
+        # heading は spec の必須フィールド。プレースホルダで埋めず欠落を明示的に拒否する
+        heading = sec.get("heading")
+        if not heading:
+            raise SpecError(f"sections[{i - 1}] に heading がない")
         toc_entries.append((sid, heading))
         parts = [f'<section id="{esc(sid)}"><h2>{esc(heading)}</h2>']
         parts.append(render_body_text(sec.get("body")))
@@ -1287,6 +1403,10 @@ CSS = """
     --bg: #15171a; --surface: #1f2226; --fg: #e6e8ea; --muted: #9aa1a8;
     --border: #3a3f45; --grid: #303539; --focus: #8ab4f8; --link: #8ab4f8;
     --series-8: #a2a8ae;
+    /* KPI delta・today ラベル等のテキスト色。light 用の #0072B2 / #D55E00 は
+       dark 背景（#15171a / #1f2226）に対しコントラスト比 4.5:1 を割るため、
+       明度を上げた色に差し替える（#4ea3dd: 6.5/5.8、#ef8a3c: 7.2/6.4）。 */
+    --pos: #4ea3dd; --neg: #ef8a3c;
   }
 }
 * { box-sizing: border-box; }
@@ -1507,11 +1627,12 @@ def build_html(spec):
     for i, s in enumerate(sources):
         require_dict(s, f"sources[{i}]")
     assumptions = require_list(spec.get("assumptions"), "assumptions")
-    if spec.get("meta") is not None:
-        require_dict(spec.get("meta"), "meta")
+    # 明示 null は欠損（未指定）と同義に正規化する。dict 以外は型ゲートで拒否する。
+    meta = spec.get("meta")
+    meta = require_dict(meta, "meta") if meta is not None else {}
 
     ids = Ids()
-    interactive = bool(spec.get("interactive"))
+    interactive = require_bool(spec.get("interactive"), "interactive")
     title = spec.get("title")
     if not title:
         raise SpecError("spec に title がない")
@@ -1530,8 +1651,8 @@ def build_html(spec):
     if spec.get("summary"):
         summary = f'<section id="summary"><h2>要約</h2>{render_body_text(spec["summary"])}</section>'
 
-    generated_at = spec.get("meta", {}).get("generated_at") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    generator = spec.get("meta", {}).get("generator", "create-html-report / render_report.py")
+    generated_at = meta.get("generated_at") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    generator = meta.get("generator", "create-html-report / render_report.py")
 
     doc = [
         "<!doctype html>",
@@ -1590,9 +1711,11 @@ def main(argv=None):
     except SpecError as e:
         print(f"spec エラー: {e}", file=sys.stderr)
         return 1
-    except (AttributeError, TypeError, KeyError, ValueError, IndexError) as e:
+    except (AttributeError, TypeError, KeyError, ValueError, IndexError,
+            OverflowError, ZeroDivisionError) as e:
         # 型ゲートで網羅しきれない構造不備の安全網。traceback を露出させず
         # 「spec 不備は日本語エラー・終了コード 1」の契約に正規化する。
+        # OverflowError / ZeroDivisionError は巨大値・縮退スケールの座標計算で発生し得る。
         print(f"spec エラー: spec の構造が不正で描画できない"
               f"（{type(e).__name__}: {e}）。references/report-spec.md の型契約を確認すること。",
               file=sys.stderr)
