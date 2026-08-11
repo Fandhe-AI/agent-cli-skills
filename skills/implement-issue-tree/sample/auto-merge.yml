@@ -1,0 +1,72 @@
+# implement-issue-tree 用サーバー側 auto-merge workflow のサンプル。
+#
+# 役割: implement-issue-tree のクライアント側（Workflow ランタイム上のエージェント）は
+# auto-merge の予約（arm）を一切行わない（PR #206 の hook carve-out + agent precheck 方式は
+# 認可欠陥・自己申告捏造・即時マージ前提の虚偽が確認され撤回済み）。auto-merge を使う場合は、
+# 本 workflow を消費リポジトリの .github/workflows/auto-merge.yml として配置し、
+# 「誰の・どのブランチの PR を arm するか」の判定と arm 実行をサーバー側（GitHub Actions）へ
+# 委譲する。実際のマージ可否の判定は arm ではなく branch protection / ruleset の
+# required checks・必須レビュー等（サーバー側）が担う。
+#
+# 前提（これらが未設定だと意図しない即時マージ・arm 失敗になる）:
+#   1. リポジトリ設定で auto-merge を許可する（Settings → General → Allow auto-merge）
+#   2. base ブランチに branch protection / ruleset で required status checks を 1 件以上設定する
+#      （必要に応じて必須レビュー・conversation resolution も設定する。マージ判定はこれらが担う）
+#   注意: `gh pr merge --auto` は、対象 PR が既に全要件を満たしている場合は予約ではなく
+#   即時マージになる。required checks が未設定のリポジトリでは arm 直後にそのままマージされ得る
+#   ため、前提 2 を必ず先に設定すること。
+#
+# 認可の考え方:
+#   - arm してよい PR かどうかは `if:` 条件（author の完全一致 + head ブランチの命名規約
+#     prefix）で判定する。author はこのスキルが PR を作成する信頼済み identity
+#     （例: リポジトリ owner のアカウント、専用 bot）に置き換えること。
+#   - head ブランチの命名規約は implement-issue-tree の作業ブランチ形式
+#     `<type>/<イシュー番号>-<short-name>`（type は Conventional Commits の英小文字 type）に
+#     合わせて prefix 一致で判定する。不要な type は削除してよい。
+#
+# インジェクション対策（変更時も維持すること）:
+#   - PR タイトル・本文・ブランチ名・コメント等の未信頼テキストを `${{ }}` で run スクリプトへ
+#     展開しない。run が参照するのは PR 番号（整数）とリポジトリ名のみで、いずれも env 経由で
+#     クォートして渡す。author・ブランチの判定は run ではなく `if:` 式で行う。
+#   - fork からの PR を昇格権限で扱う pull_request_target は使わない（pull_request のまま維持）。
+#
+# permissions は arm に必要な最小構成（contents: write は merge コミット作成、
+# pull-requests: write は auto-merge の有効化に必要）。
+
+name: auto-merge
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  arm:
+    # author はこのスキルの PR 作成 identity に置き換える（例: 'your-owner-login'）。
+    # ブランチ判定は implement-issue-tree の命名規約 `<type>/<N>-<short-name>` の prefix 一致。
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login == 'REPLACE_WITH_TRUSTED_LOGIN' &&
+      (
+        startsWith(github.head_ref, 'feat/') ||
+        startsWith(github.head_ref, 'fix/') ||
+        startsWith(github.head_ref, 'docs/') ||
+        startsWith(github.head_ref, 'refactor/') ||
+        startsWith(github.head_ref, 'test/') ||
+        startsWith(github.head_ref, 'chore/') ||
+        startsWith(github.head_ref, 'style/') ||
+        startsWith(github.head_ref, 'build/') ||
+        startsWith(github.head_ref, 'ci/') ||
+        startsWith(github.head_ref, 'perf/')
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Arm GitHub native auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
