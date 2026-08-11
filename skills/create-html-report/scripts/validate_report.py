@@ -31,8 +31,12 @@ NETWORK_API = re.compile(
     r"\b(fetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts|navigator\.serviceWorker)"
 )
 
-# CSS 内で禁止する外部参照パターン（@import と url(http...)）
-CSS_EXTERNAL = re.compile(r"@import|url\(\s*['\"]?\s*(https?:)?//", re.IGNORECASE)
+# CSS 内で一律禁止する外部読み込み。url(...) は CSS_URL で全件抽出し、
+# リソース属性と同じ許可リスト方式（data: と #fragment のみ）で検査する。
+CSS_IMPORT = re.compile(r"@import", re.IGNORECASE)
+
+# CSS の url(...) トークン抽出（引用符・前後空白を許容）
+CSS_URL = re.compile(r"url\(\s*(['\"]?)([^)'\"]*)\1\s*\)", re.IGNORECASE)
 
 # javascript: URL 判定前に除去する文字（空白と C0 制御文字）。
 # ブラウザは `java\tscript:` や改行・CR 混じりの scheme も実行するため、
@@ -42,6 +46,21 @@ URL_IGNORABLE = re.compile(r"[\s\x00-\x1f]+")
 # class="chart" を持たない SVG を検証対象へ引き戻すための子要素数しきい値。
 # 凡例 swatch 等の装飾 SVG は数要素に収まるため、これ以上はデータ描画とみなす。
 SEMANTIC_SVG_MIN_ELEMS = 6
+
+
+def css_bad_urls(css_text):
+    """CSS 中の url(...) から自己完結契約に違反する参照を抽出する。
+
+    許可は data: URI と文書内 #fragment（SVG gradient / filter 参照等）のみ。
+    url(image.png) / url(../fonts/a.woff2) のような相対 URL も配布先で
+    欠落・意図しないリクエストの原因になるため、http(s) / // と同様に不合格。
+    """
+    bad = []
+    for m in CSS_URL.finditer(css_text):
+        v = m.group(2).strip()
+        if not (DATA_URI.match(v) or FRAGMENT_URL.match(v)):
+            bad.append(f"url({v!r})")
+    return bad
 
 
 def is_chart_svg(s):
@@ -136,7 +155,9 @@ class ReportParser(HTMLParser):
                 v = ad.get(key) or ""
                 if key in ad and not (DATA_URI.match(v) or FRAGMENT_URL.match(v)):
                     self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
-        if "style" in ad and CSS_EXTERNAL.search(ad["style"] or ""):
+        # style 属性内の CSS も <style> ブロックと同じ許可リストで検査する
+        sv = ad.get("style") or ""
+        if "style" in ad and (CSS_IMPORT.search(sv) or css_bad_urls(sv)):
             self.style_attr_external.append(f"<{tag} style=...>")
 
         if tag == "a" and ad.get("href"):
@@ -262,9 +283,11 @@ def run_checks(path):
     check("リソース読み込み属性がない（script src / link href / img src 等は data: と #fragment のみ許可）",
           not parser.external_refs, "; ".join(parser.external_refs[:5]))
     css_all = "\n".join(parser.styles)
-    check("CSS に @import / url(https...) がない",
-          not CSS_EXTERNAL.search(css_all) and not parser.style_attr_external,
-          "; ".join(parser.style_attr_external[:3]))
+    css_bad = css_bad_urls(css_all)
+    css_detail = (["@import"] if CSS_IMPORT.search(css_all) else []) \
+        + css_bad[:3] + parser.style_attr_external[:3]
+    check("CSS に @import / 不許可の url() がない（url() は data: と #fragment のみ許可）",
+          not css_detail, "; ".join(css_detail))
 
     # 6. network API 不使用
     js_all = "\n".join(parser.scripts)
