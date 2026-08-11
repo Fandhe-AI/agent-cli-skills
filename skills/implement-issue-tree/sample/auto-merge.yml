@@ -215,8 +215,8 @@ jobs:
           if ! prs=$(gh api "repos/${REPO}/pulls?state=open&per_page=100" \
             --paginate --slurp --jq '
               [.[][] | select(.user.login == env.TRUSTED_AUTHOR)
-                | {number, headRefName: .head.ref, baseRefName: .base.ref,
-                   isDraft: .draft}]
+                | {number, isDraft: .draft,
+                  headRefName: .head.ref, baseRefName: .base.ref}]
             ' 2>/dev/null); then
             echo "skip: failed to list open PRs. Not arming anything (fail-closed)."
             exit 0
