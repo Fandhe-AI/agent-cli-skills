@@ -2181,9 +2181,15 @@ function mergeExecutePrompt(item, impl, expectedHeadSha, externalApps) {
     `   gh issue view ${item.number} --json state（本文は取得しない）でクローズを確認し、open のままなら gh issue close ${item.number} する。再確認して closed であれば issueClosed: true、クローズできなかった・確認できない場合は issueClosed: false を返す（マージが成功していても虚偽の true を返さない。ホストはクローズ未完了を回復対象として再監視する）。`,
   ]
   return [
-    `PR #${impl.prNumber}（イシュー #${item.number}）のマージ実行担当。マージ条件を自ら再検証し、全て満たす場合にのみ squash merge する。`,
+    // PR #182 codex P0 以降、本プロンプトが gh pr merge を出力するのは常に不可能
+    // （expectedHeadSha は runMergeLoop により ready 到達時つねに空文字へ強制される。
+    // 2132-2135 の設計コメント参照）。冒頭の役割説明は squash merge の実行主体を
+    // 名乗ってはならず、手順 5「gh pr merge は実行しない」と整合させる（Bugbot 指摘:
+    // local-llm-server PR #588 / ideas PR #227。この矛盾は #182 で fail-closed 化した際に
+    // 冒頭文言だけが旧仕様のまま取り残されたもの）。
+    `PR #${impl.prNumber}（イシュー #${item.number}）のマージ可否確認担当。マージ条件を自ら再検証するが、squash merge の実行（gh pr merge）は一切行わない。既に MERGED の場合はイシュークローズ確認のみを行う。`,
     COMMON,
-    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews と gh api .../commits/<sha>/check-runs は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない。--jq を外した実行・別の jq 式への差し替えも行わない）。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。`,
+    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews と gh api .../commits/<sha>/check-runs は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない。--jq を外した実行・別の jq 式への差し替えも行わない）。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。gh pr merge の実行も行わない（手順 5 のとおり常に禁止）。`,
     '手順:',
     `1. gh pr view ${impl.prNumber} --json state,headRefOid,mergeable で現在の状態を取得する。`,
     `   - state が MERGED: マージ済み。手順 5 のイシュークローズ確認のみ行い merged: true / reason: already-merged を返す。`,
@@ -4955,7 +4961,13 @@ async function markBlockedByDeps(item, failedDeps) {
     note,
   })
   // blocked 確定: note に理由を記録する（await して return 前に永続化を保証する）
-  await updateState(item.number, { status: 'blocked', note })
+  // updateState はマージ更新のため、pr を明示しないと過去実行由来の stale な PR 番号が
+  // 状態ファイルに残ったままになる。ここは isActiveMonitoring(item.number) が false の
+  // 分岐（上の early return を通らなかった経路）なので有効な再開対象ではなく、
+  // 次回実行時に isActiveMonitoring が誤って true 判定して未解決の依存を monitor
+  // 再開してしまわないよう pr: 0 で必ずクリアする（下流 ideas PR #227 codex-review P1 /
+  // Cursor Bugbot High 指摘）。
+  await updateState(item.number, { status: 'blocked', note, pr: 0 })
   log(`#${item.number}: ${note}`)
 }
 
@@ -4966,12 +4978,23 @@ const running = new Map()
 // fix / impl の worktree は状態ファイルで追跡・削除されるため残置に数えない。
 // 本ランで新規着手し、まだ完了していないイシュー番号の集合。dispatch の予約計上に使う。
 const newStartActive = new Set()
-// 本ランで monitoring 再開し、まだ完了していないイシュー番号の集合。monitoring 再開は
-// review / pr-create を積み増さないが、Merge ループの fix が routingError 終端する際に
-// fix-routing-error を最大 1 件記録し得る（PR #184 以降）ため、
-// EPHEMERAL_RESERVE_PER_MONITORING_RESUME 分を予約計上する（再開自体は抑止しない —
-// 予約は新規着手側の投入判定を保守的にするだけで、monitoring 再開の実行を止めない）。
+// 本ランで monitoring 再開し、まだ完了していない implement イシュー番号の集合（kind: 'implement'
+// の再開のみ載せる。verify-close の再開は worktree を作らず予約 0 のため載せない——載せると
+// reservedTotal 計算に幽霊予約が乗る。Cursor Bugbot Low 対応 / PR #185 Bugbot Medium と同じ線引き。
+// PR #200 参照）。monitoring 再開は review / pr-create を積み増さないが、Merge ループの fix が
+// routingError 終端する際に fix-routing-error を最大 1 件記録し得る（PR #184 以降）ため、
+// EPHEMERAL_RESERVE_PER_MONITORING_RESUME 分を予約計上する。この予約は新規着手側
+// （implement 候補）の投入判定を保守的にするだけでなく、monitoring 再開自身の開始判定にも
+// 使う（pet-hub PR #1062 codex-review P1 対応。以前は monitoring 再開自身の開始を抑止せず、
+// 上限を無視して残置数を際限なく増やせた）。
 const monitoringResumeActive = new Set()
+// 残置 worktree 上限ゲートにより monitoring 再開を defer したイシューの記録（n → 手動介入を
+// 促す理由文字列）。ラン終了時の interrupted レポート（isActiveMonitoring のまま残る集合）は
+// 既定で「同じ引数で再実行すると monitor から再開する」と案内するが、上限超過が理由で defer
+// した場合はこの文言のままだと誤り（上限を手動解消しない限り再実行しても同じ理由で defer が
+// 繰り返される）。レポートと実態の矛盾を避けるため個別に理由を上書きする
+// （PR #124 Bugbot Medium と同種の不整合防止。pet-hub PR #1062 codex-review P1 対応）。
+const monitoringResumeGateDeferred = new Map()
 while (true) {
   // 空きスロットへ post-order 順に投入する（halted 後は新規着手しない）
   if (!halted) {
@@ -4997,14 +5020,79 @@ while (true) {
       // failedSet は確認しないため、依存未充足のまま再開すると依存順のマージ契約が破れる
       // （codex-review P1 対応）。依存が pending の間はこの while ループが次周回で再評価する。
       if (isActiveMonitoring(n)) {
+        // 残置 worktree 上限ゲートを monitoring 再開にも適用する（pet-hub PR #1062
+        // codex-review P1 対応）。monitoring 再開は review / pr-create を積み増さないが、
+        // Merge ループの fix が routingError 終端する際に fix-routing-error worktree を
+        // 最大 1 件（EPHEMERAL_RESERVE_PER_MONITORING_RESUME）新規作成し得る。修正前は
+        // この積み増しを下の implement 判定 (b) の reservedTotal 計上にのみ使い、
+        // monitoring 再開自身の開始は無条件で許可していたため、キュー内の monitoring 項目を
+        // 順次すべて再開すると上限を無視して残置数を際限なく増やせた（PR #185 が定義した
+        // fail-closed 契約に反する）。下の implement 判定 (b) と同じ「実測＋記録済み積み増し＋
+        // 実行中タスクの残余予約＋自分自身の最大増分」の projected 判定を再開前にも適用し、
+        // 超過が見込まれる場合はこの周回の再開を defer する（恒久停止はしない — 予約は
+        // 実行中タスクの完了で解放されるため、次周回・次回実行で再評価すれば足りる。
+        // running.size === 0 のままこの周回で他に着手できるタスクがなければ while ループは
+        // break し、当該イシューは isActiveMonitoring により「中断（再開可能）」として
+        // 報告される＝データロストなし。ただし通常の「同じ引数で再実行すると再開する」文言は
+        // 上限未解消のままでは defer を繰り返すだけで誤りのため、monitoringResumeGateDeferred へ
+        // 手動介入込みの理由を記録し、ラン終了時の interrupted レポートで上書きする）。
+        //
+        // kind スコープについて: 下の implement 判定 (b) と同じく item.kind === 'implement' に
+        // 限定する。verify-close は isolation: 'worktree' を使わず worktree を一切作らないため
+        // 予約 0 であり、増分 0 の再開候補にまで最大増分 EPHEMERAL_RESERVE_PER_MONITORING_RESUME
+        // を課すと上限付近で親クローズが誤って defer される（PR #185 Bugbot Medium と同じ線引き）。
+        // isActiveMonitoring は savedItems（issue 番号キー）の status/pr のみを見るが、kind は
+        // 今回ツリー形状から再計算されるため、以前 leaf（implement）で monitoring/blocked のまま
+        // 子イシューが増えて次回ランで verify-close ノードへ変わる item は isActiveMonitoring を
+        // 満たしたまま kind: 'verify-close' で到達し得る（runVerifyClose は Merge ループへ入らず
+        // fix-routing-error を積み増さないため、この場合は正しく予約 0 として扱う必要がある）。
+        //
+        // 観測失敗時（residualObserved === false）はこのゲートを素通りし、従来どおり monitoring
+        // 再開は無条件で許可する。これは意図的な設計判断であり見落としではない —
+        // newStartSuppressed も観測失敗時に monitoring 再開を止めない設計（上のコメント参照）と
+        // 揃え、観測不能を理由に既存 PR の再開まで止めない。
+        if (item.kind === 'implement' && maxResidualWorktrees > 0 && residualObserved) {
+          const recordedByIssue = new Map()
+          for (const e of ephemeralWorktrees) {
+            recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+          }
+          let reservedTotal = 0
+          for (const rn of newStartActive) {
+            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
+          }
+          for (const rn of monitoringResumeActive) {
+            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
+          }
+          const projected =
+            residualObservedAtStart + ephemeralWorktrees.length + reservedTotal + EPHEMERAL_RESERVE_PER_MONITORING_RESUME
+          if (projected > maxResidualWorktrees) {
+            const deferReason =
+              `残置 worktree が予約込みで上限 ${maxResidualWorktrees} 件を超過する見込みのため monitoring 再開を defer した` +
+              `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋` +
+              `実行中タスクの残余予約 ${reservedTotal} 件＋再開候補の最大増分 ${EPHEMERAL_RESERVE_PER_MONITORING_RESUME} 件）。` +
+              `不要な worktree を git worktree remove で手動削除してから再実行すること`
+            monitoringResumeGateDeferred.set(n, deferReason)
+            log(`⚠️ #${n}: ${deferReason}`)
+            continue
+          }
+        }
         log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(item.title)}`)
-        monitoringResumeActive.add(n)
+        // monitoringResumeActive には kind: 'implement' の再開のみ載せる（Cursor Bugbot Low 対応。
+        // PR #200 レビュー）。verify-close の再開は上の projected 判定でも予約 0 として扱っている
+        // のに、ここで無条件に add すると reservedTotal 計算（このブロック・下の implement 判定
+        // (b) 双方）が実記録 0 の verify-close イシューにも EPHEMERAL_RESERVE_PER_MONITORING_RESUME
+        // 分の幽霊予約を積み、他の implement 再開・新規着手候補を過剰に defer/抑止しかねない。
+        // newStartActive が verify-close を載せない設計（PR #185 Bugbot Medium）と同じ線引き。
+        if (item.kind === 'implement') monitoringResumeActive.add(n)
         running.set(n, runOne(item))
         continue
       }
       // 残置 worktree 上限超過時（PR #588 codex P1）は新規イシューの着手を抑止する。
-      // monitoring 再開（上の分岐で通過済み。fix-routing-error 最大 1 件のみ積み増し得るが
-      // 予約計上で見込む）は抑止しない。
+      // monitoring 再開（上の分岐で通過済み）はこの newStartSuppressed による恒久停止の対象では
+      // ない — 恒久停止まで課すと、レビュー未収束等で monitoring/blocked のまま長期化した既存 PR
+      // が上限解消（利用者の手動掃除）まで永遠に再開不能になり得るため。ただし fix-routing-error
+      // 最大 1 件の積み増しは上の分岐で projected 判定（周回単位の defer）により個別にゲートする
+      // （pet-hub PR #1062 codex-review P1 対応）。
       // この continue は実装投入（implement / review / pr-create で worktree を積み増す本来の抑止対象）
       // に加え verify-close 等の新規着手も一律に止めるが、worktree を積まない着手まで巻き込むのは
       // 過剰抑止＝安全側であり許容する（queue は毎ラン GitHub の open/closed 実態で再構築されるため
@@ -5133,8 +5221,13 @@ const notStartedNote = halted
     : 'スケジューラ終了時に未着手（キュー未到達）'
 for (const n of notStarted) {
   results.push({ issue: n, status: 'not-started', note: notStartedNote })
-  // 未着手の notStarted は blocked として状態ファイルに記録する
-  await updateState(n, { status: 'blocked', note: notStartedNote })
+  // 未着手の notStarted は blocked として状態ファイルに記録する。
+  // notStarted は isActiveMonitoring(n) が false（有効な再開対象ではない）の集合のため、
+  // updateState のマージ更新特性により過去実行由来の stale な PR 番号を pr: 0 で
+  // 明示的にクリアする。省略すると次回実行時に isActiveMonitoring が誤って true 判定し、
+  // 未解決の依存を monitor 再開してしまう（下流 ideas PR #227 codex-review P1 /
+  // Cursor Bugbot High 指摘）。
+  await updateState(n, { status: 'blocked', note: notStartedNote, pr: 0 })
 }
 for (const n of interrupted) {
   // 状態ファイル上で monitoring / blocked かつ pr > 0: 再開情報が有効なため状態を上書きせず、
@@ -5142,12 +5235,15 @@ for (const n of interrupted) {
   // 実態の矛盾防止）。isActiveMonitoring は blocked（pr 保存済み）も再開対象に含めるため、
   // monitoring 固定で報告すると状態ファイルと食い違う（PR #124 Bugbot Medium 対応）
   const { pr, status } = savedItems[String(n)]
-  results.push({
-    issue: n,
-    status,
-    pr,
-    note: `中断時に ${status}（PR #${pr} 作成済み）。同じ引数で再実行すると monitor から再開する`,
-  })
+  // 残置 worktree 上限ゲートで defer された場合は「同じ引数で再実行すると再開する」という
+  // 既定文言が誤りになる（上限を手動解消しない限り再実行しても defer を繰り返すだけ）ため、
+  // monitoringResumeGateDeferred に記録した手動介入込みの理由で上書きする
+  // （pet-hub PR #1062 codex-review P1 対応）。
+  const deferredReason = monitoringResumeGateDeferred.get(n)
+  const note = deferredReason
+    ? `中断時に ${status}（PR #${pr} 作成済み）。${deferredReason}`
+    : `中断時に ${status}（PR #${pr} 作成済み）。同じ引数で再実行すると monitor から再開する`
+  results.push({ issue: n, status, pr, note })
   log(`#${n}: halt 時も ${status} 状態を維持する（PR #${pr} の再開情報を保持）`)
 }
 if (notStarted.length > 0) {
@@ -5283,18 +5379,23 @@ if (!residualObserved) {
 //   worktree は merged 確定時の掃除・次ラン Recover の再利用対象で、「手動掃除の対象」として
 //   返すと消費側が failed イシューの未マージ成果を削除しかねない。implement を含む本ラン
 //   積み増しの総数は residualWorktrees.addedThisRun が別途返す）。
-// autoMerge（Issue #165）: 本ランで自動マージが有効だったか。false のランでは「マージ待ち PR
-// 一覧（autoMerge 無効による blocked）」を最終レポートで追跡するための判定材料になる。
+// autoMerge（Issue #165 → PR #182 codex P0 → 下流 actions#66 codex-review P1 で再修正）:
+//   常に実効状態（= false 固定）を返す。PR #182 codex P0 以降この実行基盤は autoMerge の値によらず
+//   無条件 fail-closed で新規マージ経路を開かないため、要求値をそのまま返すと「本ランで自動マージが
+//   有効だったか」という消費側の後方互換判定が実態と食い違う（要求 true でも実効は常に無効）。
+// autoMergeRequested（下流 actions#66 codex-review P1）: args.autoMerge の要求値（受理はするが
+//   実効しない）。要求値を追跡したい消費側はこちらを参照する。false のランでは autoMerge と同じく
+//   「マージ待ち PR 一覧（blocked）」を最終レポートで追跡するための判定材料になる点は従来どおり。
 // mergeGuard（PR #182 codex P0）: 自動マージは autoMerge の値によらずこの実行基盤では提供されない
 //   （grant 偽造で偽造不能なマージ認可を hook で検証できないため）。grant / canary /
 //   branch-protection ランタイムゲートは撤去し、hook は deny 専用へ降格した。hookDenyOnly: true は
 //   その方針を返却値として明示する（レポート側で「自動マージ無効・PR はマージ可能状態で人間が
-//   マージ」を案内する材料）。autoMerge:true のランの終端 note には AUTO_MERGE_UNSUPPORTED_REASON が
-//   記録される。
+//   マージ」を案内する材料）。autoMergeRequested:true のランの終端 note には
+//   AUTO_MERGE_UNSUPPORTED_REASON が記録される。
 // residualWorktrees（PR #588 codex P1）: 使い捨て worktree を削除しない設計の下でディスク枯渇を防ぐ
 //   残置上限ゲートの観測結果。observed: false はラン開始時の worktree 観測が成立しなかった（未確定）
 //   ことを示し、この場合 observedAtStart / overLimit は信頼できないため最終レポートで「未観測」を
 //   明示すること。overLimit: true は次ラン開始時に新規着手が停止する見込みで、git worktree remove に
 //   よる手動掃除の案内を最終レポートに含めること。suppressed は本ランで残置上限超過により新規着手を
 //   抑止したか（monitoring 再開は抑止対象外）。limit: 0 は上限なし（チェック無効）。
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled, externalChecks: externalCheckApps, externalChecksConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
+return { parent, baseBranch, parallel: concurrency, autoMerge: false, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalChecksConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
