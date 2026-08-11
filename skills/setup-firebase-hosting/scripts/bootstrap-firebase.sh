@@ -211,22 +211,24 @@ ${add_body}"
   403)
     # 403 は「IAM 権限不足」と「Firebase 利用規約が未承諾」のどちらでも
     # 起こり得て、レスポンス本文だけでは区別できない。決めつけて誤案内
-    # しないよう、testIamPermissions で実際に必要権限を確認してから
-    # メッセージを出し分ける。
-    required_perm="firebase.projects.update"
+    # しないよう、SKILL.md に記載した必要 4 権限すべてを testIamPermissions
+    # で実測し、不足があれば列挙してからメッセージを出し分ける。
+    required_perms="firebase.projects.update resourcemanager.projects.get serviceusage.services.enable serviceusage.services.get"
+    required_perms_csv="$(printf '%s' "${required_perms}" | tr ' ' ',')"
+    # JSON で受けて権限名の完全一致を grep する。value(permissions) は複数
+    # 権限が区切り文字で連結されるため、区切りの仕様に依存しないようにする。
     perm_check_result="$(gcloud projects test-iam-permissions "${PROJECT_ID}" \
-      --permissions="${required_perm}" \
-      --format='value(permissions)' 2>/dev/null || echo "__CHECK_FAILED__")"
+      --permissions="${required_perms_csv}" \
+      --format=json 2>/dev/null || echo "__CHECK_FAILED__")"
     if [ "${perm_check_result}" = "__CHECK_FAILED__" ]; then
       die "Firebase の追加が 403 で拒否されました。
 
-必要権限（${required_perm}）を testIamPermissions で確認しようとしましたが、
-確認コマンド自体が失敗しました。まず以下を手動で実行し、権限があるか
-確認してください:
+必要権限を testIamPermissions で確認しようとしましたが、確認コマンド自体が
+失敗しました。まず以下を手動で実行し、必要 4 権限があるか確認してください:
 
-  gcloud projects test-iam-permissions ${PROJECT_ID} --permissions=${required_perm}
+  gcloud projects test-iam-permissions ${PROJECT_ID} --permissions=${required_perms_csv}
 
-権限が揃っている場合、原因は**Firebase 利用規約が未承諾**である可能性が
+4 権限すべてが返る場合、原因は**Firebase 利用規約が未承諾**である可能性が
 あります。規約の承諾は Firebase コンソールでしかできません（CLI / REST
 API / Terraform では不可能）:
 
@@ -238,13 +240,21 @@ API / Terraform では不可能）:
 
 権限が不足している場合は、実行アカウントに Owner 等の適切なロールを
 付与してから再実行してください。"
-    elif [ "${perm_check_result}" = "${required_perm}" ]; then
+    fi
+    missing_perms=""
+    for perm in ${required_perms}; do
+      if ! printf '%s' "${perm_check_result}" | grep -qF "\"${perm}\""; then
+        missing_perms="${missing_perms}${missing_perms:+ }${perm}"
+      fi
+    done
+    if [ -z "${missing_perms}" ]; then
       die "Firebase の追加が 403 で拒否されました。
 
-必要権限（${required_perm}）は確認できました（testIamPermissions で実測）。
-権限は足りているため、原因は**Firebase 利用規約が未承諾**である可能性が
-高いです。規約の承諾は Firebase コンソールでしかできません（公式ドキュ
-メントに明記。CLI / REST API / Terraform では不可能）:
+必要 4 権限（${required_perms_csv}）はすべて確認できました
+（testIamPermissions で実測）。権限は足りているため、原因は**Firebase
+利用規約が未承諾**である可能性が高いです。規約の承諾は Firebase コンソール
+でしかできません（公式ドキュメントに明記。CLI / REST API / Terraform では
+不可能）:
 
   https://console.firebase.google.com/
 
@@ -257,8 +267,9 @@ Google アカウントにつき 1 回だけの操作です。完了後にこの�
     else
       die "Firebase の追加が 403 で拒否されました。
 
-必要権限（${required_perm}）が不足しています（testIamPermissions で実測。
-現在保持している権限: ${perm_check_result:-なし}）。
+必要 4 権限のうち以下が不足しています（testIamPermissions で実測）:
+
+$(for perm in ${missing_perms}; do echo "  - ${perm}"; done)
 
 実行アカウントに Owner または同等のロールを付与してから再実行してください:
 
