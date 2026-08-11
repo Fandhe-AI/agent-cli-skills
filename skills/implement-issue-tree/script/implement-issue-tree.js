@@ -5047,10 +5047,26 @@ while (true) {
         // 満たしたまま kind: 'verify-close' で到達し得る（runVerifyClose は Merge ループへ入らず
         // fix-routing-error を積み増さないため、この場合は正しく予約 0 として扱う必要がある）。
         //
-        // 観測失敗時（residualObserved === false）はこのゲートを素通りし、従来どおり monitoring
-        // 再開は無条件で許可する。これは意図的な設計判断であり見落としではない —
-        // newStartSuppressed も観測失敗時に monitoring 再開を止めない設計（上のコメント参照）と
-        // 揃え、観測不能を理由に既存 PR の再開まで止めない。
+        // 観測失敗時（residualObserved === false）の扱い（fix-routing-error worktree 新規作成
+        // ideas #230 codex-review P1 対応）: newStartSuppressed は観測失敗時に「新規 worktree を
+        // 作り得る」着手全般を fail-closed で止める設計だが、この kind: 'implement' の monitoring
+        // 再開判定も Merge ループの fix-routing-error worktree を最大 1 件新規作成し得る点は同じ
+        // リスクを持つ（上のコメント参照）。以前は「monitoring 再開は既存 PR の継続だから止めない」
+        // という理由で観測失敗時にこのゲート自体を素通りさせ無条件許可していたが、これは
+        // worktree を新規作成しない一般の monitoring 継続と、fix-routing-error で worktree を
+        // 増やし得るこの kind: 'implement' 経路とを区別できておらず、観測不能な状況でも残置を
+        // 積み増せてしまう fail-open だった。observed が false の間は projected 判定ができないため、
+        // newStartSuppressed と同じ fail-closed 方針に揃え、この周回の再開を defer する
+        // （恒久停止はしない — 次ラン開始時の再観測が成功すれば通常どおり判定できる）。
+        if (item.kind === 'implement' && maxResidualWorktrees > 0 && !residualObserved) {
+          const deferReason =
+            `ラン開始時の worktree 残置観測に失敗しているため monitoring 再開を defer した` +
+            `（観測失敗時は fix-routing-error worktree の新規作成で残置総数を確認できないまま上限を` +
+            `超過し得るため fail-closed で待機する）。git worktree list が実行できる状態を確認してから再実行すること`
+          monitoringResumeGateDeferred.set(n, deferReason)
+          log(`⚠️ #${n}: ${deferReason}`)
+          continue
+        }
         if (item.kind === 'implement' && maxResidualWorktrees > 0 && residualObserved) {
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
