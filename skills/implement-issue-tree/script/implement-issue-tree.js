@@ -776,22 +776,38 @@ const MERGE_VERIFY_SCHEMA = {
   },
 }
 
-// 自動マージ前提確認エージェント（autoMergePrecheckPrompt）の返却スキーマ（Issue #205）。
-// ラン単位で 1 回だけ起動する読み取り専用エージェントが、repo の auto-merge 許可設定と
-// base ブランチの required checks 件数を確定値として返す。この 2 条件を host が厳密再検証し
-// AND を取ったものだけが autoMergeArmable の根拠になる（マージ判定そのものではなく「サーバー側
-// 要件が構成されているか」の事前確認。実マージ可否は GitHub の branch protection / ruleset が
-// 判定するため、本エージェントの結果は arm するか否かの入力にのみ使う）。
+// 自動マージ前提確認エージェント（autoMergePrecheckPrompt）の返却スキーマ（Issue #205 →
+// PR #206 codex-review P1 対応）。ラン単位で 1 回だけ起動する読み取り専用エージェントが、
+// repo の auto-merge 許可設定・base ブランチの required checks 件数・必須レビュー条件・
+// 確定済み外部チェック App の required checks 上でのカバレッジを確定値として返す。これらを
+// host が厳密再検証し AND を取ったものだけが autoMergeArmable の根拠になる（マージ判定そのもの
+// ではなく「サーバー側要件が、このワークフロー自身が課している承認境界（必須レビュー・未解決
+// スレッド解消・外部チェック App）を代替できる形で構成されているか」の事前確認。実マージ可否は
+// GitHub の branch protection / ruleset が判定するため、本エージェントの結果は arm するか否かの
+// 入力にのみ使う）。
+// codex-review P1（PR #206）: 旧版は repo の auto-merge 許可と required checks 件数（>= 1）
+// だけを見ており、その required checks が「必須レビュー」「未解決スレッド解消」「args で指定
+// した外部チェック App」を実際に含むかを確認していなかった。required checks が lint のみの
+// ような構成でも arm できてしまい、monitor が到達する前に GitHub がマージし得る承認境界の
+// 後退だった。本版は pull_request ルールの required_approving_review_count /
+// required_review_thread_resolution と、外部チェック App の integration_id が required checks
+// 側に含まれるかを追加で確認し、いずれか欠落時は autoMergeArmable を false（fail-closed）にする。
 // 自由文の summary 以外は数値・真偽値のみを持たせ、未信頼テキストをホストの分岐条件に
 // 混入させない（jq で正規化済みの値のみ受理する契約はプロンプト側で強制する）。
 const AUTO_MERGE_PRECHECK_SCHEMA = {
   type: 'object',
-  required: ['autoMergeAllowed', 'requiredChecksRuleset', 'requiredChecksClassic', 'requiresReview', 'summary'],
+  required: [
+    'autoMergeAllowed', 'requiredChecksRuleset', 'requiredChecksClassic',
+    'requiredApprovingReviewCount', 'requiredReviewThreadResolution',
+    'externalChecksCovered', 'summary',
+  ],
   properties: {
     autoMergeAllowed: { type: 'boolean', description: 'gh api repos/{owner}/{repo} --jq \'.allow_auto_merge\' の取得値。取得失敗時は false' },
     requiredChecksRuleset: { type: 'integer', description: 'base ブランチの ruleset に設定された required_status_checks の件数（jq で算出した非負整数）。ruleset なし・取得失敗は 0' },
     requiredChecksClassic: { type: 'integer', description: 'base ブランチの classic branch protection の required_status_checks.contexts 件数。未設定・403/404 は 0' },
-    requiresReview: { type: 'boolean', description: '参考情報: base ブランチに pull_request 種別の必須レビュー rule があるか（arm 可否の判定には使わない）' },
+    requiredApprovingReviewCount: { type: 'integer', description: 'base ブランチの pull_request ルールの required_approving_review_count（jq 取得値。ルールなし・取得失敗は 0）' },
+    requiredReviewThreadResolution: { type: 'boolean', description: 'base ブランチの pull_request ルールの required_review_thread_resolution（jq 取得値。ルールなし・取得失敗は false）' },
+    externalChecksCovered: { type: 'boolean', description: '確定済み externalChecks の全 App の integration_id が required checks（ruleset の required_status_checks[].integration_id または classic の checks[].app_id）に含まれているか。externalChecks が 0 件の場合は true（判定対象なし）' },
     summary: { type: 'string', description: '確認したコマンドの実行結果要約（取得失敗があればその旨も記載）' },
   },
 }
@@ -2321,27 +2337,57 @@ function mergeVerifyPrompt(item, impl) {
 }
 
 // 自動マージ前提確認エージェント（Issue #205: autoMerge の認可境界を GitHub サーバー側へ
-// 外部化する設計の precheck）。ラン単位で 1 回だけ起動する読み取り専用エージェントであり、
-// PR 本文・レビューコメント等の未信頼テキストは一切読まない（実行コマンドを固定 4 種類に
-// 限定し、取得値は jq で bool / 件数へ正規化してから返させる。自由文をホストの分岐条件へ
-// 混入させない）。返却値は host 側（呼び出し元）で型を再検証し、autoMergeAllowed === true
-// かつ required checks 合計 >= 1 のときのみ arm 対象とする（このプロンプト自身は判定を行わず
-// 生の観測値を返すだけでよい）。
-function autoMergePrecheckPrompt() {
+// 外部化する設計の precheck。PR #206 codex-review P1 対応で必須レビュー・未解決スレッド解消・
+// 外部チェック App カバレッジの確認を追加）。ラン単位で 1 回だけ起動する読み取り専用
+// エージェントであり、PR 本文・レビューコメント等の未信頼テキストは一切読まない（実行コマンドを
+// 固定種類に限定し、取得値は jq で bool / 件数 / 整数へ正規化してから返させる。自由文をホストの
+// 分岐条件へ混入させない。externalCheckApps は args 入力時に slug 形式へ検証済みの値のみを
+// 渡す契約 — 呼び出し元は externalChecksConfirmed（= externalChecksInput が確定済み）のときにのみ
+// 本関数を呼ぶため、渡される配列は常に検証済み slug である）。返却値は host 側（呼び出し元）で
+// 型を再検証し、以下の全条件の AND のときのみ arm 対象とする（このプロンプト自身は判定を行わず
+// 生の観測値を返すだけでよい）:
+//   - autoMergeAllowed === true
+//   - required checks 合計（ruleset + classic）>= 1
+//   - requiredApprovingReviewCount >= 1（このワークフローの外部レビューゲートをサーバー側が代替）
+//   - requiredReviewThreadResolution === true（このワークフローの未解決スレッド解消ゲートを代替）
+//   - externalChecksCovered === true（externalChecks の全 App がサーバー側 required checks に
+//     含まれる。0 件のときは判定対象なしで true）
+function autoMergePrecheckPrompt(externalCheckApps) {
+  const apps = Array.isArray(externalCheckApps) ? externalCheckApps : []
+  // App ごとの integration_id 取得コマンド（slug は検証済みのためプロンプトへ直接埋め込んでよい。
+  // mergeExecutePrompt の externalCheckRunsCommand と同じ方針）。
+  const appCoverageLines = apps.length
+    ? [
+        `  5. 確定済み externalChecks の App ごとに integration_id を取得する（App 数 = ${apps.length}）:`,
+        ...apps.map((app) => `     gh api "apps/${app}" --jq '.id'`),
+        `  6. ruleset 側の required_status_checks を integration_id 込みで取得する:`,
+        `     gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.integration_id] | map(select(. != null))'`,
+        `  7. classic 側の required_status_checks を app_id 込みで取得する:`,
+        `     gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection/required_status_checks" --jq '[.checks[]?.app_id] | map(select(. != null))'`,
+      ]
+    : []
   return [
-    'この実行基盤の GitHub ネイティブ auto-merge 前提を確認する読み取り専用担当（Issue #205）。',
-    '権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の 4 つのみ:',
+    'この実行基盤の GitHub ネイティブ auto-merge 前提を確認する読み取り専用担当（Issue #205 / PR #206）。',
+    `権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の${apps.length ? '7' : '4'}つのみ:`,
     `  1. gh api repos/{owner}/{repo} --jq '.allow_auto_merge'`,
     `  2. gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?] | length'`,
     `  3. gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection/required_status_checks" --jq '.contexts | length'`,
-    `  4. gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "pull_request")] | length'（requiresReview 算出用の参考情報コマンド）`,
+    `  4. gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "pull_request")][0].parameters // {} | {count: (.required_approving_review_count // 0), resolve: (.required_review_thread_resolution // false)}'（必須レビュー条件の算出用）`,
+    ...appCoverageLines,
     '{owner}/{repo} は gh repo view --json owner,name --jq \'"\\(.owner.login)/\\(.name)"\' で取得すること。上記以外のコマンド（gh pr merge・gh pr review・書き込み系すべて）は実行しない。',
     '手順:',
     '1. コマンド 1 を実行し、取得できた bool をそのまま autoMergeAllowed として返す（取得失敗は false）。',
     '2. コマンド 2 を実行し、取得できた非負整数をそのまま requiredChecksRuleset として返す（ruleset なし・取得失敗は 0）。',
     '3. コマンド 3 を実行し、取得できた非負整数を requiredChecksClassic として返す（403/404・取得失敗は 0。classic protection 未設定は正常なケースであり異常ではない）。',
-    '4. コマンド 4 を実行し、1 件以上あれば requiresReview: true を返す（この値は arm 可否の判定には使われない。スキーマ必須フィールドを埋めるための参考情報。取得失敗は false）。',
-    '返却: autoMergeAllowed（boolean）/ requiredChecksRuleset（整数）/ requiredChecksClassic（整数）/ requiresReview（boolean）/ summary（実行結果の要約）。値の解釈・推測はしない（取得できた生の値のみを返す）。',
+    '4. コマンド 4 を実行し、count を requiredApprovingReviewCount（整数）、resolve を requiredReviewThreadResolution（boolean）として返す（pull_request ルールなし・取得失敗はどちらも既定値 0 / false）。',
+    ...(apps.length
+      ? [
+          `5. コマンド 5 を App ごとに実行し、各 App の integration_id（取得失敗はその App を欠落として扱う）を控える。`,
+          `6. コマンド 6・7 を実行し、それぞれの配列を得る。`,
+          `7. 手順 5 で取得できた ${apps.length} 件の integration_id が、手順 6 と手順 7 の配列の和集合に**すべて**含まれる場合のみ externalChecksCovered: true を返す。1 件でも欠落・取得失敗があれば externalChecksCovered: false を返す（summary にどの App の integration_id が欠落したか slug で明記する）。`,
+        ]
+      : [`5. externalChecks は 0 件のため externalChecksCovered: true を返す（判定対象なし）。`]),
+    '返却: autoMergeAllowed（boolean）/ requiredChecksRuleset（整数）/ requiredChecksClassic（整数）/ requiredApprovingReviewCount（整数）/ requiredReviewThreadResolution（boolean）/ externalChecksCovered（boolean）/ summary（実行結果の要約）。値の解釈・推測はしない（取得できた生の値のみを使う）。',
   ].join('\n')
 }
 
@@ -3043,17 +3089,19 @@ const AUTO_MERGE_ARM_FAILED_REASON =
 const AUTO_MERGE_ARMED_WAITING_REASON =
   'auto-merge 予約（arm）済み。サーバー側の必須要件（必須レビュー等、required checks は既に green）が満たされ次第 GitHub がマージする。'
   + '監視ラウンド予算を使い切ったため一旦停止したが、次回実行の monitoring 再開で引き続き監視する'
-// 自動マージ前提確認（precheck。Issue #205）: ラン単位で 1 回だけ、autoMergeEnabled かつ
-// externalChecksConfirmed（未信頼テキストを読む monitor 起動より前）のときのみ読み取り専用
-// エージェントを起動し、repo の auto-merge 許可と base ブランチの required checks 件数を確認する。
-// 返却値は信頼境界ではないため host 側で型を厳密再検証し、autoMergeAllowed === true かつ
-// required checks 合計 >= 1 のときのみ autoMergeArmable = true とする（取得不能・型不正・
-// 条件未達はすべて false = fail-closed）。この判定は「サーバー側要件が構成されているか」の
+// 自動マージ前提確認（precheck。Issue #205 → PR #206 codex-review P1 対応）: ラン単位で
+// 1 回だけ、autoMergeEnabled かつ externalChecksConfirmed（未信頼テキストを読む monitor 起動
+// より前）のときのみ読み取り専用エージェントを起動し、repo の auto-merge 許可・base ブランチの
+// required checks 件数・必須レビュー条件（承認数・スレッド解消）・確定済み外部チェック App の
+// カバレッジを確認する。返却値は信頼境界ではないため host 側で型を厳密再検証し、以下の全条件の
+// AND のときのみ autoMergeArmable = true とする（取得不能・型不正・条件未達はすべて
+// false = fail-closed）。この判定は「サーバー側要件が、このワークフロー自身の承認境界
+// （必須レビュー・未解決スレッド解消・外部チェック App）を代替できる形で構成されているか」の
 // 事前確認にすぎず、実マージ可否は GitHub の branch protection / ruleset が判定する。
 let autoMergeArmable = false
 let autoMergePrecheckSummary = ''
 if (autoMergeEnabled && externalChecksConfirmed) {
-  const precheck = await agent(autoMergePrecheckPrompt(), {
+  const precheck = await agent(autoMergePrecheckPrompt(externalCheckApps), {
     label: 'automerge:precheck',
     phase: 'Tree',
     model: 'haiku',
@@ -3068,11 +3116,23 @@ if (autoMergeEnabled && externalChecksConfirmed) {
     ? precheck.requiredChecksClassic
     : 0
   const totalRequiredChecks = rulesetChecks + classicChecks
-  autoMergeArmable = allowed && totalRequiredChecks >= 1
+  const requiredApprovingReviewCount =
+    Number.isInteger(precheck?.requiredApprovingReviewCount) && precheck.requiredApprovingReviewCount >= 0
+      ? precheck.requiredApprovingReviewCount
+      : 0
+  const requiredReviewThreadResolution = precheck?.requiredReviewThreadResolution === true
+  const externalChecksCovered = precheck?.externalChecksCovered === true
+  autoMergeArmable =
+    allowed && totalRequiredChecks >= 1
+    && requiredApprovingReviewCount >= 1 && requiredReviewThreadResolution
+    && externalChecksCovered
   autoMergePrecheckSummary = capText(sanitize(precheck?.summary ?? ''))
+  const gateDetail = `repo の auto-merge 許可: ${allowed} / required checks 合計: ${totalRequiredChecks} / `
+    + `必須承認数: ${requiredApprovingReviewCount} / 未解決スレッド解消必須: ${requiredReviewThreadResolution} / `
+    + `外部チェック App カバレッジ: ${externalChecksCovered}`
   log(autoMergeArmable
-    ? `自動マージ前提確認: armable（repo の auto-merge 許可: ${allowed} / required checks 合計: ${totalRequiredChecks}）。PR 作成後に arm する。詳細: ${autoMergePrecheckSummary}`
-    : `⚠️ ${AUTO_MERGE_PRECHECK_FAILED_REASON}（repo の auto-merge 許可: ${allowed} / required checks 合計: ${totalRequiredChecks}）。詳細: ${autoMergePrecheckSummary}`)
+    ? `自動マージ前提確認: armable（${gateDetail}）。PR 作成後に arm する。詳細: ${autoMergePrecheckSummary}`
+    : `⚠️ ${AUTO_MERGE_PRECHECK_FAILED_REASON}（${gateDetail}）。詳細: ${autoMergePrecheckSummary}`)
 } else if (autoMergeEnabled && !externalChecksConfirmed) {
   log(`⚠️ 自動マージ: args.autoMerge: true だが externalChecks が未確定のため precheck を実行せず無効のまま続行する（${EXTERNAL_CHECKS_UNCONFIRMED_REASON}）`)
 }
@@ -4235,7 +4295,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // ここで 1 回だけ arm を試みることで両方の呼び出し元を一元的にカバーする（PR 作成直後・
   // 再開ラン再入のいずれでも fresh context の専用エージェントが起動する）。
   // autoMergeArmable は Workflow スコープのトップレベル変数（ラン単位の precheck 結果。
-  // host 側で repo の auto-merge 許可 + required checks >= 1 を厳密再検証済み）。
+  // host 側で repo の auto-merge 許可・required checks >= 1・必須承認数 >= 1・
+  // 未解決スレッド解消必須・外部チェック App カバレッジを厳密再検証済み。PR #206
+  // codex-review P1 対応）。
   // arm 失敗はイシューを失敗させない（当該 PR を非 armed として続行し、従来の人間マージ
   // 案内へフォールバックする。fail-closed 方向のみ）。armed はメッセージの出し分けにのみ
   // 使い、マージ成立の証拠には一切使わない（merged の確定は既存の merge-exec 申告 +
@@ -4982,8 +5044,23 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // armedWaitingActive は「サーバー側要件の充足待ち」という回復可能な状態（要件が満たされ
     // 次第 GitHub がマージする）のため、blockedIsRecoverable 等と同じく 'blocked'
     // （halt 非カウント・次回実行で monitoring 再開の対象）に含める（Issue #205）。
+    // autoMergeArmed 全般（PR #206 Bugbot High 対応）: armedWaitingActive は「recoveryOnly 経路で
+    // かつ armedWaitRoundsLeft を使い切っていない」1 周回限りのフラグにすぎず、通常監視ループの
+    // timeout（CI が遅い・watch 予算を使い切った）や invalid-monitor-result（monitor エージェント
+    // の異常応答）等、armedWaitingActive を経由しない終端では拾えない。しかし arm 済み PR は
+    // 本ループの状態と無関係に GitHub サーバー側が required checks green 到達後に非同期でマージ
+    // し得るため、armedWaitingActive だけを条件にすると「サーバー側で後からマージされたのに、
+    // このイシューの状態は 'failed'（isActiveMonitoring の再開対象外）のまま放置される」という
+    // 状態不整合が生じる（マージ済みなのにイシューが open のまま検出も回復もされない）。
+    // したがって autoMergeArmed === true の終端は、pr-closed 由来の unrecoverable blocked
+    // （未マージのままクローズされ、arm 済みでも二度とマージされ得ない）を除き、一律 'blocked'
+    // （次回実行の monitoring 再開対象）へ倒す。再開後は mergedButIssueOpen / already-merged
+    // 回復経路が実際の状態を独立確認する。
+    const unrecoverableClosed = lastState === 'blocked' && lastBlockedReason === 'unrecoverable'
     const terminalStatus =
-      !routingErrorDetected && (mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments' || armedWaitingActive)
+      !routingErrorDetected
+      && (mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments' || armedWaitingActive
+        || (autoMergeArmed && !unrecoverableClosed))
         ? 'blocked'
         : 'failed'
     if (lastState === 'blocked') {
@@ -5652,8 +5729,10 @@ if (!residualObserved) {
 //   precheck の前提未達（autoMergeArmable: false）のランでは各 PR は arm されず、実効的には
 //   従来どおりマージ可能状態の blocked で停止するため、autoMerge はその実態を反映する）。
 //   要求値を追跡したい消費側は autoMergeRequested を参照する。
-// autoMergeArmable（Issue #205 新設）: ラン単位の precheck 結果（repo の auto-merge 許可 かつ
-//   base ブランチの required checks >= 1）。autoMerge と同値だが、フィールド名の意味を明示する
+// autoMergeArmable（Issue #205 新設。PR #206 codex-review P1 で判定条件を拡張）: ラン単位の
+//   precheck 結果（repo の auto-merge 許可 かつ base ブランチの required checks >= 1 かつ
+//   必須承認数 >= 1 かつ未解決スレッド解消必須 かつ確定済み外部チェック App のカバレッジ）。
+//   autoMerge と同値だが、フィールド名の意味を明示する
 //   ため両方返す。true でも個々の PR の arm 成否は別（arm はイシュー単位・fail-closed でイシュー
 //   を失敗させない設計のため、arm 失敗した PR は非 armed のまま人間マージ案内へフォールバック
 //   する。各 PR の armed 成否はログ・終端 note を参照）。
