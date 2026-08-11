@@ -10,10 +10,10 @@
 #   3. プロジェクトへ Firebase を追加し、Hosting サイトを作成する
 #   4. CI 用サービスアカウントを作り、Hosting デプロイに必要な最小ロールを付与する
 #   5. サービスアカウント鍵を発行し、GitHub Secret へ登録して手元から消す
-#      （登録成功後、同アカウントの旧鍵を既定で削除して世代交代する。
-#      無効化したい場合は ROTATE_EXISTING_KEYS=false を指定する。この
-#      自動削除は「サービスアカウントの email が本スクリプト専用のものだ」
-#      という前提条件の契約を根拠にしている。他用途と共有すると事故る）
+#      （発行した鍵の ID を GitHub Actions 変数へ記録し、登録成功後に
+#      「記録にある旧鍵」だけを削除して世代交代する。記録に無い鍵は
+#      本スクリプト発行と検証できないため削除せず一覧表示に留める。
+#      無効化したい場合は ROTATE_EXISTING_KEYS=false を指定する）
 #   6. .firebaserc を生成する
 #
 # ## 意図的にやらないこと
@@ -54,6 +54,11 @@ GITHUB_REPO="${GITHUB_REPO:-__OWNER__/__REPO__}"
 DISPLAY_NAME="${DISPLAY_NAME:-${SITE_ID}}"
 SA_ID="${SA_ID:-github-actions-hosting}"
 SECRET_NAME="FIREBASE_SERVICE_ACCOUNT"
+# 本スクリプトが発行した鍵 ID の記録先（GitHub Actions 変数・カンマ区切り）。
+# GCP の SA 鍵にはラベル等のメタデータが無く「本スクリプトが発行した鍵か」を
+# GCP 側だけでは実行時に検証できないため、発行時に鍵 ID をこの変数へ記録し、
+# ローテーション時の削除対象を記録にある鍵だけに限定する。
+KEY_RECORD_VAR="FIREBASE_SA_KEY_IDS"
 
 # 安全弁: 書き換え忘れのまま実行すると、意図しない GCP プロジェクトを
 # 新規作成してしまう（実際にやらかしたので必ず先頭で止める）。
@@ -300,9 +305,10 @@ log "CI 用サービスアカウント ${sa_email} を確認します"
 # 「${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com」という完全一致の email
 # だけが、本スクリプトが作成・管理する専用サービスアカウントを指す契約と
 # する（前提条件に明記）。displayName のような書き換え可能な情報は判定に
-# 使わない。この email を書き換えて既存の共有アカウントを指すように使う
-# ことは契約違反であり、鍵の自動削除（後述 (5)）が誤って他用途の認証を
-# 壊しうる。
+# 使わない。なお鍵の世代交代（後述 (5)）はこの契約だけには依存せず、
+# 発行記録（Actions 変数 ${KEY_RECORD_VAR}）にある鍵のみを削除対象とする
+# ため、SA_ID を誤って既存の共有アカウントへ向けても、そのアカウントが
+# 従来から持つ鍵（記録に無い鍵）は削除されない。
 if gcloud iam service-accounts describe "${sa_email}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
   echo "既に存在するため作成をスキップします"
 else
@@ -329,13 +335,26 @@ log "サービスアカウント鍵を発行し GitHub Secret ${SECRET_NAME} へ
 
 # 再実行のたびに鍵を増やすと GitHub Secret には最新の 1 個しか反映されない
 # のに古い鍵だけがアクティブなまま残り続け、サービスアカウントあたり 10 個
-# という GCP の上限にいずれ達する。ただし削除を先にやると、鍵作成や
-# gh secret set が途中で失敗した場合に GitHub 側が失効済みの鍵しか持たない
-# 状態になり CI デプロイが止まる。そのため
-#   1. 削除対象を「今から作る新しい鍵より前に存在した鍵」に限定して先に記録
-#   2. 新しい鍵を作成し、GitHub Secret への登録まで成功させる
-#   3. 登録が成功した後にだけ、記録しておいた旧鍵を削除する
-# の順で行い、途中失敗時は Secret が有効な鍵を指したまま保たれるようにする。
+# という GCP の上限にいずれ達するため、旧鍵は世代交代（削除）する。ただし
+# 削除対象は「本スクリプトが発行を ${KEY_RECORD_VAR} に記録した鍵」だけに
+# 限定する。記録に無い鍵（手動発行・他ツール発行の可能性がある）は削除せず
+# 一覧表示してユーザー判断に委ねる（fail-safe。設定ミスや SA_ID 衝突で
+# 他用途の認証を破壊しないため）。
+#
+# 順序も途中失敗に備えて決めてある:
+#   1. 発行記録（既存の鍵 ID）と、今より前から存在する鍵の一覧を読み出す
+#   2. 新しい鍵を作成し、**Secret 登録より先に**発行記録へ追記する
+#      （ここで失敗しても、記録に載らなかった鍵は「削除されない」側に
+#      倒れるだけで、誤削除の方向には壊れない）
+#   3. GitHub Secret への登録まで成功させる
+#   4. 登録成功後にだけ、記録にある旧鍵を削除する
+#   5. 削除がすべて成功した後で、発行記録を現行鍵 ID のみへ更新する
+# 途中で失敗しても、GitHub Secret は常に有効な鍵を指したまま保たれる。
+
+# これまでに本スクリプトが発行を記録した鍵 ID（カンマ区切り）。未設定なら空。
+recorded_key_ids="$(gh variable get "${KEY_RECORD_VAR}" --repo "${GITHUB_REPO}" 2>/dev/null || echo "")"
+
+# 今回の実行より前から存在する USER_MANAGED 鍵の一覧（削除候補の母集団）
 existing_keys="$(gcloud iam service-accounts keys list \
   --iam-account="${sa_email}" \
   --project="${PROJECT_ID}" \
@@ -350,6 +369,16 @@ gcloud iam service-accounts keys create "${key_file}" \
   --iam-account="${sa_email}" \
   --project="${PROJECT_ID}"
 
+# 鍵 ID を取り出し、Secret 登録より先に発行記録へ追記する（上記の順序 2）
+new_key_id="$(grep -o '"private_key_id"[[:space:]]*:[[:space:]]*"[^"]*"' "${key_file}" | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"
+if [ -z "${new_key_id}" ]; then
+  die "発行した鍵ファイルから private_key_id を取得できませんでした。
+鍵は作成済みのため、不要であれば手動で削除してください:
+  gcloud iam service-accounts keys list --iam-account=${sa_email} --project=${PROJECT_ID}"
+fi
+gh variable set "${KEY_RECORD_VAR}" --repo "${GITHUB_REPO}" \
+  --body "${recorded_key_ids:+${recorded_key_ids},}${new_key_id}"
+
 gh secret set "${SECRET_NAME}" --repo "${GITHUB_REPO}" < "${key_file}"
 gh variable set FIREBASE_PROJECT_ID --repo "${GITHUB_REPO}" --body "${PROJECT_ID}"
 gh variable set FIREBASE_SITE_ID --repo "${GITHUB_REPO}" --body "${SITE_ID}"
@@ -357,18 +386,43 @@ echo "登録しました（鍵ファイルは削除されます）"
 
 if [ -n "${existing_keys}" ]; then
   # ROTATE_EXISTING_KEYS は「無効化する opt-out」フラグ（既定 true）。
-  # ${sa_email} は前提条件により本スクリプト専用アカウントの完全一致 email
-  # であるという契約なので、既定で世代交代する。この契約を信頼したくない
-  # 場合（例: 手動で鍵を管理したい）は ROTATE_EXISTING_KEYS=false を指定する。
+  # 削除対象は発行記録にある鍵だけなので既定で世代交代する。鍵を完全に
+  # 手動管理したい場合は ROTATE_EXISTING_KEYS=false を指定する。
   if [ "${ROTATE_EXISTING_KEYS:-true}" = "true" ]; then
-    echo "新しい鍵の登録が完了したため、${sa_email} の旧鍵を削除します（世代交代）"
+    echo "新しい鍵の登録が完了したため、発行記録にある旧鍵を削除します（世代交代）"
+    unrecorded_keys=""
     while IFS= read -r key_name; do
       [ -n "${key_name}" ] || continue
-      gcloud iam service-accounts keys delete "${key_name}" \
-        --iam-account="${sa_email}" \
-        --project="${PROJECT_ID}" \
-        --quiet
+      key_id="${key_name##*/}"
+      # 念のための保険。existing_keys は新鍵作成前の一覧なので通常含まれない
+      [ "${key_id}" = "${new_key_id}" ] && continue
+      case ",${recorded_key_ids}," in
+        *",${key_id},"*)
+          gcloud iam service-accounts keys delete "${key_name}" \
+            --iam-account="${sa_email}" \
+            --project="${PROJECT_ID}" \
+            --quiet
+          echo "削除: ${key_id}（発行記録あり）"
+          ;;
+        *)
+          # 記録に無い鍵は本スクリプト発行と検証できないため削除しない
+          unrecorded_keys="${unrecorded_keys}${key_name}
+"
+          ;;
+      esac
     done <<< "${existing_keys}"
+    # 削除がすべて成功した後で発行記録を現行鍵のみへ更新する（上記の順序 5）。
+    # 削除が途中で失敗した場合は記録が残るため、次回実行時に改めて削除される。
+    gh variable set "${KEY_RECORD_VAR}" --repo "${GITHUB_REPO}" --body "${new_key_id}"
+    if [ -n "${unrecorded_keys}" ]; then
+      echo "警告: 発行記録（Actions 変数 ${KEY_RECORD_VAR}）に無い鍵が残っています。"
+      echo "      本スクリプトが発行した鍵と検証できないため自動削除しません。"
+      echo "      内容を確認し、不要であれば手動で削除してください:"
+      printf '%s' "${unrecorded_keys}" | while IFS= read -r key_name; do
+        [ -n "${key_name}" ] || continue
+        echo "        gcloud iam service-accounts keys delete ${key_name} --iam-account=${sa_email} --project=${PROJECT_ID}"
+      done
+    fi
   else
     echo "ROTATE_EXISTING_KEYS=false が指定されているため、旧鍵の削除をスキップします。"
     echo "手動で不要な鍵を整理してください: gcloud iam service-accounts keys list --iam-account=${sa_email} --project=${PROJECT_ID}"

@@ -18,7 +18,7 @@ model: sonnet
 - `gh` CLI（認証済み）
 - Node.js（`npx firebase-tools` を使う）
 - 対象リポジトリが GitHub 上にあること
-- **`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com`（既定 `SA_ID=github-actions-hosting`）は本スクリプトが作成・管理する専用サービスアカウントとし、他用途と共有しないこと。** 鍵の自動ローテーション（後述）はこの完全一致 email を根拠に旧鍵を削除するため、既存の共有アカウントを指すよう `SA_ID` を書き換えて使うと、その用途の認証を誤って壊す可能性がある
+- **`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com`（既定 `SA_ID=github-actions-hosting`）は本スクリプトが作成・管理する専用サービスアカウントとし、他用途と共有しないこと。** なお鍵の自動ローテーション（後述）はこの email 契約だけには依存せず、本スクリプトが発行を GitHub Actions 変数 `FIREBASE_SA_KEY_IDS` へ記録した鍵のみを削除対象とする。記録に無い鍵は削除されず一覧表示に留まる（fail-safe）ため、`SA_ID` を誤って既存の共有アカウントへ向けても、そのアカウントが従来から持つ鍵は削除されない
 
 対象サイトの条件:
 
@@ -106,7 +106,7 @@ bash tools/bootstrap-firebase.sh  # 冪等。再実行しても安全
 2. `firebase` / `firebasehosting` / `cloudresourcemanager` / `serviceusage` / `iam` の API を有効化
 3. Firebase Management API で Firebase を追加。`addFirebase` が 403 の場合は `testIamPermissions` で実際に権限を確認し、権限が足りているか不足しているかで案内を出し分ける（決め打ちしない）。Hosting API でサイトを作成
 4. CI 用サービスアカウントを作成し**最小ロール**を付与（`roles/firebasehosting.admin` + `roles/serviceusage.apiKeysViewer`）
-5. 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後、**同サービスアカウントの旧 USER_MANAGED 鍵を既定で削除**（10 個上限対策の世代交代。登録前に削除すると失敗時に有効な鍵が残らないため、必ず登録成功後に削除する）。この自動削除は「`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com` は本スクリプトが作成・管理する専用アカウントであり、他用途と共有しない」という前提条件（後述）を根拠にしている。無効化したい場合は `ROTATE_EXISTING_KEYS=false` を指定する。最後に**手元の鍵ファイルを削除**（trap で異常終了時も）
+5. 新規鍵を発行 → 鍵 ID を発行記録（Actions 変数 `FIREBASE_SA_KEY_IDS`）へ追記 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後、**発行記録にある旧 USER_MANAGED 鍵のみを削除**（10 個上限対策の世代交代）。GCP の SA 鍵にはラベル等のメタデータが無く「本スクリプトが発行した鍵か」を GCP 側だけでは実行時に検証できないため、発行時に鍵 ID を GitHub 側へ記録し、削除対象を記録にある鍵に限定する。記録に無い鍵（手動発行・他ツール発行の可能性）は削除せず一覧表示してユーザー判断に委ねる（fail-safe）。記録への追記は Secret 登録より先・旧鍵の削除は登録成功後に行い、途中失敗しても Secret が有効な鍵を指したまま保たれる。無効化したい場合は `ROTATE_EXISTING_KEYS=false` を指定する。最後に**手元の鍵ファイルを削除**（trap で異常終了時も）
 6. `gh variable set FIREBASE_PROJECT_ID` / `FIREBASE_SITE_ID`、`.firebaserc` を生成
 
 **Firebase の追加とサイト作成は firebase CLI ではなく REST API を gcloud のトークンで直接叩きます。** firebase CLI は gcloud と別の認証情報を持つため、CLI を使うとブラウザ認証がもう 1 回増えるためです。API 呼び出しには `x-goog-user-project: <PROJECT_ID>` ヘッダが必須です。gcloud のユーザー認証情報はクォータ課金先を持たず、これがないと gcloud 自身のクライアントプロジェクトが consumer とみなされて `403 SERVICE_DISABLED` になります。
