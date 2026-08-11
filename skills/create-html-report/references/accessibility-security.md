@@ -123,12 +123,12 @@ self-contained 原則。**ページロード時・操作時に一切の外部通
 
 **禁止（external dependency）**:
 
-- `<script src="https://...">`（CDN 含む）
-- external stylesheet（`<link rel="stylesheet" href="https://...">`）
+- `<script src>`（CDN・`data:` 含め値を問わず禁止）
+- `<link>` のリソース参照（stylesheet / preload 等。`data:text/css` 経由の `@import` 迂回を防ぐため値を問わず禁止）
 - external font（`@font-face` の remote `src`、Google Fonts 等）
 - remote `<img src="https://...">`
-- `<iframe src="https://...">` / `<object data="https://...">` / `<embed>`
-- CSS `@import`（値を問わず一律禁止）/ CSS `url(...)`（`data:`・`#fragment` 以外すべて）
+- `<iframe>` / `<object>` / `<embed>`（`data:text/html` 等で検査を迂回できる能動コンテンツのため、値を問わず禁止）
+- CSS `@import`（値を問わず一律禁止）/ CSS `url(...)`（許可画像 MIME の `data:`・`#fragment` 以外すべて）
 - SVG の remote `<image href>` / remote `<use href>`
 - `<link rel="preconnect">` / `rel="dns-prefetch"` 等の投機的接続
 - runtime の network request（前節の禁止 API）
@@ -140,9 +140,14 @@ self-contained 原則。**ページロード時・操作時に一切の外部通
 - [ ] 新しい tab で開く場合は `rel="noopener noreferrer"` を付与
 - [ ] tracking parameter 付き URL・短縮 URL を出典として使わない（可能な限り正規 URL）
 
-**相対 URL も禁止**: `<link href="style.css">` / `<img src="image.png">` のような相対参照は、単一ファイル配布でファイル欠落・意図しないリクエストの原因になるため external dependency と同様に禁止する。validate_report.py はリソース読み込み属性（`script src` / `link href` / `img src` / `iframe src` / SVG `image`・`use` の `href` 等）を、`data:` URI と SVG の文書内 `#fragment` 参照（`<use href="#id">` 等）を除き一律不合格にする（`<script src>` は `data:` でも不合格）。CSS の `url(...)`（`<style>` ブロック・`style` 属性の双方）も同じ許可リストで検査され、`url(image.png)` / `url(../fonts/a.woff2)` のような相対参照は不合格になる。
+**相対 URL も禁止**: `<link href="style.css">` / `<img src="image.png">` のような相対参照は、単一ファイル配布でファイル欠落・意図しないリクエストの原因になるため external dependency と同様に禁止する。validate_report.py の判定は次のとおり:
 
-data URI（`data:image/svg+xml` 等の self-contained 埋め込み）は外部依存ではないが、原則 inline SVG を優先する。
+- **能動コンテンツ要素は値を問わず不合格**: `script src` / `link` / `iframe` / `object` / `embed`。`data:` URI でも中身の JS / CSS / HTML が inline 検査（network API・`@import`・`url()` 許可リスト）を迂回できるため
+- **受動メディアは画像 MIME allowlist の `data:` のみ許可**: `img` / `source` / `track` / `audio` / `video` / SVG `image` の `src`・`srcset`・`href` は `data:image/png` / `image/jpeg` / `image/gif` / `image/webp` のみ許可（`image/svg+xml` は `<script>` を内包し得るため不許可）
+- **SVG の文書内 `#fragment` 参照は許可**: `<use href="#id">` / `<image href="#id">` 等
+- **CSS の `url(...)`**（`<style>` ブロック・`style` 属性の双方）も同じ許可リスト（許可画像 MIME の `data:`・`#fragment`）で検査され、`url(image.png)` / `url(../fonts/a.woff2)` / `url(data:text/css,...)` は不合格になる
+
+data URI（上記 allowlist の画像埋め込み）は外部依存ではないが、原則 inline SVG を優先する。
 
 ## Sensitive data redaction
 

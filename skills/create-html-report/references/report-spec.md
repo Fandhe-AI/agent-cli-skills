@@ -132,7 +132,7 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
 
 - `x`: 時点ラベル配列（等間隔配置。多すぎるラベルは自動間引き）
 - `values` の **`null` は gap**（線が途切れる）。0 に変換されない
-- `annotations[].x` は `x` のラベル値、または `x_index`（0 始まり index）で位置指定
+- `annotations[].x` は `x` のラベル値、または `x_index`（0 始まり index）で位置指定。`x_index` は **整数かつ `0 <= x_index < len(x)` の範囲内**であること（小数・範囲外は SpecError。renderer は黙って切り捨て・clamp しない）
 - 系列は色 + 破線パターンで区別（色覚多様性対応）
 
 ### scatter

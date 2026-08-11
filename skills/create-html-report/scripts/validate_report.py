@@ -19,11 +19,14 @@ import sys
 from html.parser import HTMLParser
 
 # 自己完結契約で許可するリソース URL。
-# - data: URI（コンテンツ埋め込み）は外部通信を発生させないため許可
-# - #fragment（SVG <use href="#id"> 等の文書内参照）は SVG 系タグに限り許可
+# - data: URI は「受動的な埋め込みメディア」に限り、下記の画像 MIME allowlist に
+#   一致する場合のみ許可する。image/svg+xml は <script> を内包し得るため不許可。
+#   text/html・text/css 等の能動コンテンツ MIME は、data: 経由で inline 検査
+#   （network API・@import・url() 許可リスト）を迂回できるため不許可。
+# - #fragment（SVG <use href="#id"> 等の文書内参照）は SVG 系タグと CSS url() に限り許可
 # 相対 URL（style.css / image.png 等）は配布先でのファイル欠落・意図しない
 # リクエストの原因になるため、http(s):// と同様に不合格として扱う。
-DATA_URI = re.compile(r"^\s*data:", re.IGNORECASE)
+DATA_URI_ALLOWED = re.compile(r"^\s*data:image/(png|jpeg|gif|webp)[;,]", re.IGNORECASE)
 FRAGMENT_URL = re.compile(r"^\s*#")
 
 # inline JS 内で禁止する network API のパターン
@@ -32,7 +35,7 @@ NETWORK_API = re.compile(
 )
 
 # CSS 内で一律禁止する外部読み込み。url(...) は CSS_URL で全件抽出し、
-# リソース属性と同じ許可リスト方式（data: と #fragment のみ）で検査する。
+# リソース属性と同じ許可リスト方式（許可画像 MIME の data: と #fragment のみ）で検査する。
 CSS_IMPORT = re.compile(r"@import", re.IGNORECASE)
 
 # CSS の url(...) トークン抽出（引用符・前後空白を許容）
@@ -51,14 +54,16 @@ SEMANTIC_SVG_MIN_ELEMS = 6
 def css_bad_urls(css_text):
     """CSS 中の url(...) から自己完結契約に違反する参照を抽出する。
 
-    許可は data: URI と文書内 #fragment（SVG gradient / filter 参照等）のみ。
+    許可は画像 MIME allowlist（DATA_URI_ALLOWED）に一致する data: URI と
+    文書内 #fragment（SVG gradient / filter 参照等）のみ。
+    url(data:text/css,...) は @import 検査の迂回になるため不合格。
     url(image.png) / url(../fonts/a.woff2) のような相対 URL も配布先で
     欠落・意図しないリクエストの原因になるため、http(s) / // と同様に不合格。
     """
     bad = []
     for m in CSS_URL.finditer(css_text):
         v = m.group(2).strip()
-        if not (DATA_URI.match(v) or FRAGMENT_URL.match(v)):
+        if not (DATA_URI_ALLOWED.match(v) or FRAGMENT_URL.match(v)):
             bad.append(f"url({v!r})")
     return bad
 
@@ -137,23 +142,27 @@ class ReportParser(HTMLParser):
                 self.bad_js_urls.append(f"<{tag} {key}>")
 
         # リソース読み込み属性の検査（自己完結契約）。
-        # http(s):// / プロトコル相対 // だけでなく相対 URL も不合格とし、
-        # 許可は data: URI と（SVG <use>/<image> の）文書内 #fragment 参照のみ。
+        # 能動コンテンツ（script src / link / iframe / object / embed）は、
+        # data: URI でも中身の JS / CSS / HTML が inline 検査（network API・
+        # @import・url() 許可リスト）を迂回できるため、値を問わず一律不合格。
+        # 受動メディア（img / source / track / audio / video / SVG image）は
+        # DATA_URI_ALLOWED の画像 MIME allowlist に一致する data: のみ許可。
+        # SVG <image>/<use> は文書内 #fragment 参照も許可。
         # 出典 <a href> は対象外 = 唯一の許可経路（check #9 で https / #fragment に制限）。
         if tag == "script" and "src" in ad:
-            # <script src> は data: でも inline JS 収集（network API 検査）を
-            # 迂回できるため、値を問わず不合格にする。
             self.external_refs.append(f"<script src={ad['src']!r}>")
-        if tag == "link" and "href" in ad and not DATA_URI.match(ad.get("href") or ""):
-            self.external_refs.append(f"<link href={ad['href']!r}>")
-        if tag in ("img", "iframe", "object", "embed", "source", "track", "audio", "video"):
-            for key in ("src", "data", "srcset"):
-                if key in ad and not DATA_URI.match(ad.get(key) or ""):
+        if tag in ("link", "iframe", "object", "embed"):
+            for key in ("href", "src", "data", "srcset"):
+                if key in ad:
                     self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
-        if tag in ("image", "use"):  # SVG 内のリソース参照（文書内 #fragment のみ許可）
+        if tag in ("img", "source", "track", "audio", "video"):
+            for key in ("src", "srcset"):
+                if key in ad and not DATA_URI_ALLOWED.match(ad.get(key) or ""):
+                    self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
+        if tag in ("image", "use"):  # SVG 内のリソース参照
             for key in ("href", "xlink:href"):
                 v = ad.get(key) or ""
-                if key in ad and not (DATA_URI.match(v) or FRAGMENT_URL.match(v)):
+                if key in ad and not (DATA_URI_ALLOWED.match(v) or FRAGMENT_URL.match(v)):
                     self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
         # style 属性内の CSS も <style> ブロックと同じ許可リストで検査する
         sv = ad.get("style") or ""
@@ -278,15 +287,17 @@ def run_checks(path):
     n_open, n_close = len(re.findall(r"<svg\b", raw)), raw.count("</svg>")
     check("<svg> の開閉タグ数が一致", n_open == n_close, f"開 {n_open} / 閉 {n_close}")
 
-    # 5. リソース読み込み属性ゼロ（data: URI / SVG 文書内 #fragment のみ許可。
+    # 5. リソース読み込み属性ゼロ（能動要素は値を問わず不合格。受動メディアは
+    #    許可画像 MIME の data: と SVG 文書内 #fragment のみ許可。
     #    相対 URL も自己完結契約違反として不合格。出典 <a href> は #9 で別途検査）
-    check("リソース読み込み属性がない（script src / link href / img src 等は data: と #fragment のみ許可）",
+    check("リソース読み込み属性がない（script / link / iframe / object / embed は一律禁止、"
+          "img 等は画像 data: と #fragment のみ許可）",
           not parser.external_refs, "; ".join(parser.external_refs[:5]))
     css_all = "\n".join(parser.styles)
     css_bad = css_bad_urls(css_all)
     css_detail = (["@import"] if CSS_IMPORT.search(css_all) else []) \
         + css_bad[:3] + parser.style_attr_external[:3]
-    check("CSS に @import / 不許可の url() がない（url() は data: と #fragment のみ許可）",
+    check("CSS に @import / 不許可の url() がない（url() は画像 data: と #fragment のみ許可）",
           not css_detail, "; ".join(css_detail))
 
     # 6. network API 不使用

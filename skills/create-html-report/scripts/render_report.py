@@ -498,10 +498,23 @@ def render_line(chart, ids, interactive):
     for a in chart.get("annotations", []):
         label = a.get("label", "")
         ax = a.get("x")
-        idx = xs.index(ax) if ax in xs else finite(a.get("x_index"), "annotation x_index")
-        if idx is None:
-            continue
-        axp = px(int(idx))
+        if ax in xs:
+            idx = xs.index(ax)
+        else:
+            idx = finite(a.get("x_index"), f"annotation '{label}' の x_index")
+            if idx is None:
+                continue
+            # x_index は 0 始まりで x 配列の要素を指す（references/report-spec.md）。
+            # 小数の黙殺切り捨て・範囲外 index は誤った位置への描画（データの嘘）に
+            # なるため、int() で丸めずに SpecError で拒否する。
+            if idx != int(idx):
+                raise SpecError(
+                    f"annotation '{label}' の x_index が整数ではない: {a.get('x_index')!r}")
+            idx = int(idx)
+            if not 0 <= idx < nc:
+                raise SpecError(
+                    f"annotation '{label}' の x_index が範囲外: {idx}（0〜{nc - 1} で指定）")
+        axp = px(idx)
         anchor = "start" if axp < CHART_W * 0.6 else "end"
         dx = 5 if anchor == "start" else -5
         out.append(f'<line x1="{axp:.1f}" y1="{top - 4}" x2="{axp:.1f}" y2="{H - bottom}" '
