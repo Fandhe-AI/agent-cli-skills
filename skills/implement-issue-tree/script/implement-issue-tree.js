@@ -5092,6 +5092,13 @@ while (true) {
             continue
           }
         }
+        // 直前の周回までに defer していても今回ゲートを通過したため、古い defer 理由を残さない
+        // （local-llm-server #591 codex-review P1 / issue #201 対応）。削除せずに残すと、この
+        // 再開が今回 halted 等で monitoring/blocked のまま終了した場合、ラン終了時の interrupted
+        // レポートが「同じ引数で再実行しても defer を繰り返すだけ」という古い手動介入案内を
+        // 誤って出し続け、実際には通常の monitor 再開で解決する状況を手動 worktree 削除必須と
+        // 誤案内してしまう（defer が解消した事実を反映していないため）。
+        monitoringResumeGateDeferred.delete(n)
         log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(item.title)}`)
         // monitoringResumeActive には kind: 'implement' の再開のみ載せる（Cursor Bugbot Low 対応。
         // PR #200 レビュー）。verify-close の再開は上の projected 判定でも予約 0 として扱っている
