@@ -66,7 +66,10 @@ skills/
   create-commit/
     SKILL.md                         -- Conventional Commits 形式でコミット作成
   create-html-report/
-    SKILL.md                         -- 比較・分析結果を表・グラフ付きの自己完結 HTML レポートで生成
+    SKILL.md                         -- JSON report spec を Python renderer で自己完結 HTML レポート生成
+    references/                      -- chart 選定・レポート設計・spec schema・a11y/セキュリティ規約
+    samples/                         -- report spec の JSON 例（comparison / gantt / time-series）
+    scripts/                         -- render_report.py（spec→HTML renderer）、validate_report.py（25 項目検証）
   create-issue/
     SKILL.md                         -- GitHub Issue を親子構造で作成
   create-issue-tree/
@@ -123,7 +126,7 @@ skills/
 |--------|------|
 | **comment-code** | コードにコメント・ドキュメンテーションコメント（JSDoc / docstring 等）を追加・補強する。パッケージ・サービス視点での役割境界、呼び出し元・呼び出し先の前提と契約、他ファイル・他サービスからの文脈を記述 |
 | **create-commit** | `git diff` を分析し、Conventional Commits 形式でコミットメッセージを生成・実行する |
-| **create-html-report** | 表・グラフ（棒グラフ・折れ線グラフ・レーダーチャート）付きの自己完結 HTML レポートで比較・分析結果を生成する。外部 CDN 不使用・レスポンシブ・ダークモード対応 |
+| **create-html-report** | JSON report spec を Python renderer で自己完結 HTML レポートに変換。bar / line / scatter / heatmap / waterfall / donut / radar / gantt 対応。外部 CDN 不使用・WCAG アクセシブル・レスポンシブ・ダークモード・印刷対応。25 項目 validator 付き |
 | **create-issue** | タスクを分析し、GitHub Issue を親子構造（sub-issues）で作成する |
 | **create-issue-tree** | タスク要件を Phase 分割して GitHub Issue ツリーを新規作成（4h 粒度分解・Phase 階層化） |
 | **create-plan** | コードベースを調査し、実装計画を `_/local-plans/` に作成する |
