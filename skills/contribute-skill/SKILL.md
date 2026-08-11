@@ -36,8 +36,10 @@ if [[ -z "${SKILL_NAME}" ]]; then
   ls -1 skills/ 2>/dev/null
   ls -1 .agents/skills/ 2>/dev/null
   # .claude/skills/ は skills/ への symlink 慣習と実体配置（例: create-skill / create-agent）が
-  # 併存するため、実ディレクトリのみ列挙する（symlink は実体が上の 2 候補に現れる）
-  find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's|.*/||'
+  # 併存するため、実ディレクトリのみ列挙する（symlink は実体が上の 2 候補に現れる）。
+  # 親の .claude/skills 自体が symlink の場合も配下の実体は symlink 先で列挙されるため、
+  # 親が symlink でないときのみ find する（-type d は親 symlink 経由でも列挙してしまう）
+  [[ ! -L .claude/skills ]] && find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed 's|.*/||'
   echo "（lockfile 由来のスキルは .agents/skills/ のみ、リポジトリ管理スキルは .claude/skills/ のみに存在する場合がある）"
   exit 1   # ユーザーが選んだスキル名を引数に付けて再実行する
 fi
@@ -72,7 +74,8 @@ else
   [[ -d "skills/${SKILL_NAME}" ]] && have_skills=1
   [[ -d ".agents/skills/${SKILL_NAME}" ]] && have_agents=1
   # .claude/skills/<name> は skills/<name> への symlink 慣習があるため実ディレクトリのみ数える
-  [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills/${SKILL_NAME}" ]] && have_claude=1
+  # （親の .claude/skills 自体が symlink の場合も実体は上の 2 候補で検出されるため親にも ! -L を適用）
+  [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills" && ! -L ".claude/skills/${SKILL_NAME}" ]] && have_claude=1
   if (( have_skills + have_agents + have_claude > 1 )); then
     echo "エラー: ${SKILL_NAME} の実体が skills/ / .agents/skills/ / .claude/skills/ の複数に存在します。"
     echo "環境変数 LOCAL_SKILL_DIR にどれかを指定して再実行してください（例: LOCAL_SKILL_DIR=.agents/skills/${SKILL_NAME}）。"
@@ -259,11 +262,12 @@ if [[ -d "skills/${SKILL_NAME}" ]]; then
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
 elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
   UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
-elif [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills/${SKILL_NAME}" ]]; then
+elif [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills" && ! -L ".claude/skills/${SKILL_NAME}" ]]; then
   # upstream が .claude/skills/ 配下に実体を置いている慣習（例: create-skill / create-agent）。
   # .claude/skills/<name> は skills/<name> への symlink 慣習も併存するため、
   # -L で symlink を除外し実ディレクトリの場合のみ採用する
-  # （symlink の場合は解決先の実体が上の 2 分岐で検出される）
+  # （symlink の場合は解決先の実体が上の 2 分岐で検出される）。
+  # 親の .claude/skills 自体が symlink の場合も実体側で検出されるため親にも ! -L を適用する
   UPSTREAM_SKILL_PATH=".claude/skills/${SKILL_NAME}"
 elif [[ -d "skills" ]]; then
   # upstream が skills/ 配下で公開している慣習
@@ -421,7 +425,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 - **`skills/`・`.agents/skills/`・`.claude/skills/` の複数に実体が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` の3パスのみ受理し（symlink は実体側パスの指定を要求）、任意パス指定によるパストラバーサルを防ぐ。Step 5 で本スキル自身（contribute-skill）の配置を解決する `CONTRIBUTE_SKILL_DIR` も同じ fail-closed 方針を取り、`skills/contribute-skill` と `.agents/skills/contribute-skill` の両方が存在する場合は silently に `skills/` を優先せず中止して環境変数 `CONTRIBUTE_SKILL_DIR` での指定を求める（LOCAL_SKILL_DIR とは非対称にしない）
 - **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
-- **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → `.claude/skills/<name>` の存在（`-L` で symlink を除外した実ディレクトリのみ。symlink の場合は解決先の実体が前段で検出される）→ スキルルート親ディレクトリの慣習（`skills/` → `.agents/skills/` → symlink でない `.claude/skills/` の順。新規スキルは個別パスが存在しないためこの親ディレクトリ判定で配置先が決まる）→ 最終デフォルト `skills/`（より一般的な公開レイアウト）
+- **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → `.claude/skills/<name>` の存在（`-L` で symlink を除外した実ディレクトリのみ。親 `.claude/skills` 自体が symlink の場合も除外し、いずれも解決先の実体が前段で検出される）→ スキルルート親ディレクトリの慣習（`skills/` → `.agents/skills/` → symlink でない `.claude/skills/` の順。新規スキルは個別パスが存在しないためこの親ディレクトリ判定で配置先が決まる）→ 最終デフォルト `skills/`（より一般的な公開レイアウト）
 - **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 5 は必ず `${CONTRIBUTE_SKILL_DIR}/script/skills-contribute.sh`（本スキル自身の配置から別途解決したパス。貢献対象のパスである `LOCAL_SKILL_DIR` とは別物）経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
 - **既に同名の branch がある場合**：秒単位スラッグで通常は衝突しないが、万一の場合はユーザーに確認
 

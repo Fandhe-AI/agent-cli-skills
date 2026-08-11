@@ -107,8 +107,10 @@ else
   [[ -d "skills/${SKILL_NAME}" ]] && have_skills=1
   [[ -d ".agents/skills/${SKILL_NAME}" ]] && have_agents=1
   # .claude/skills/<name> は skills/<name> への symlink 慣習があるため実ディレクトリのみ数える
-  # （symlink の場合は実体が上の 2 候補で検出される）
-  [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills/${SKILL_NAME}" ]] && have_claude=1
+  # （symlink の場合は実体が上の 2 候補で検出される）。親の .claude/skills 自体が
+  # symlink の場合も配下の実ディレクトリは symlink 先（実体側候補）で検出されるため、
+  # 末尾要素だけでなく親にも ! -L を適用して重複カウントを防ぐ
+  [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills" && ! -L ".claude/skills/${SKILL_NAME}" ]] && have_claude=1
   if (( have_skills + have_agents + have_claude > 1 )); then
     echo "エラー: ${SKILL_NAME} の実体が skills/ / .agents/skills/ / .claude/skills/ の複数に存在します。"
     echo "環境変数 LOCAL_SKILL_DIR にどれかを指定して再実行してください（例: LOCAL_SKILL_DIR=.agents/skills/${SKILL_NAME} $0 ${SKILL_NAME} ${UPSTREAM_REPO}）。"
@@ -223,11 +225,13 @@ if [[ -d "skills/${SKILL_NAME}" ]]; then
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
 elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
   UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
-elif [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills/${SKILL_NAME}" ]]; then
+elif [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills" && ! -L ".claude/skills/${SKILL_NAME}" ]]; then
   # upstream が .claude/skills/ 配下に実体を置いている慣習（例: create-skill / create-agent）。
   # .claude/skills/<name> は skills/<name> への symlink である慣習も併存するため、
   # -L で symlink を除外し実ディレクトリの場合のみ採用する
-  # （symlink の場合は解決先の実体が上の skills/ / .agents/skills/ 分岐で検出される）
+  # （symlink の場合は解決先の実体が上の skills/ / .agents/skills/ 分岐で検出される）。
+  # 親の .claude/skills 自体が symlink の場合も同様に実体側ルートで検出されるため
+  # 親にも ! -L を適用する
   UPSTREAM_SKILL_PATH=".claude/skills/${SKILL_NAME}"
 elif [[ -d "skills" ]]; then
   # upstream が skills/ 配下で公開している慣習
