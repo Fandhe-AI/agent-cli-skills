@@ -83,8 +83,18 @@ fi
 
 # ローカルスキルのパス確認（override: 環境変数 LOCAL_SKILL_DIR が設定済みならそれを検証して使う）
 if [[ -n "${LOCAL_SKILL_DIR:-}" ]]; then
-  if [[ "${LOCAL_SKILL_DIR}" != "skills/${SKILL_NAME}" && "${LOCAL_SKILL_DIR}" != ".agents/skills/${SKILL_NAME}" ]]; then
-    echo "エラー: LOCAL_SKILL_DIR は skills/${SKILL_NAME} か .agents/skills/${SKILL_NAME} のいずれかを指定してください: ${LOCAL_SKILL_DIR}"
+  case "${LOCAL_SKILL_DIR}" in
+    "skills/${SKILL_NAME}"|".agents/skills/${SKILL_NAME}"|".claude/skills/${SKILL_NAME}") ;;
+    *)
+      echo "エラー: LOCAL_SKILL_DIR は skills/${SKILL_NAME} / .agents/skills/${SKILL_NAME} / .claude/skills/${SKILL_NAME} のいずれかを指定してください: ${LOCAL_SKILL_DIR}"
+      exit 1
+      ;;
+  esac
+  # .claude/skills/<name> は skills/<name> への symlink 慣習があるため、symlink が
+  # 指定された場合は実体側パスの指定を促す（git log / git diff が symlink 先の内容を
+  # 追跡できず、後続 Step の差分表示が空になるため）
+  if [[ -L "${LOCAL_SKILL_DIR}" ]]; then
+    echo "エラー: LOCAL_SKILL_DIR が symlink です。実体側のパスを指定してください: ${LOCAL_SKILL_DIR} -> $(readlink "${LOCAL_SKILL_DIR}")"
     exit 1
   fi
   if [[ ! -d "${LOCAL_SKILL_DIR}" ]]; then
@@ -92,20 +102,25 @@ if [[ -n "${LOCAL_SKILL_DIR:-}" ]]; then
     exit 1
   fi
 else
-  # 自動解決（両方存在する場合は中止して override を促す）
-  have_skills=0; have_agents=0
+  # 自動解決（複数存在する場合は中止して override を促す）
+  have_skills=0; have_agents=0; have_claude=0
   [[ -d "skills/${SKILL_NAME}" ]] && have_skills=1
   [[ -d ".agents/skills/${SKILL_NAME}" ]] && have_agents=1
-  if [[ "${have_skills}" -eq 1 && "${have_agents}" -eq 1 ]]; then
-    echo "エラー: skills/${SKILL_NAME} と .agents/skills/${SKILL_NAME} の両方が存在します。"
-    echo "環境変数 LOCAL_SKILL_DIR にどちらかを指定して再実行してください（例: LOCAL_SKILL_DIR=.agents/skills/${SKILL_NAME} $0 ${SKILL_NAME} ${UPSTREAM_REPO}）。"
+  # .claude/skills/<name> は skills/<name> への symlink 慣習があるため実ディレクトリのみ数える
+  # （symlink の場合は実体が上の 2 候補で検出される）
+  [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills/${SKILL_NAME}" ]] && have_claude=1
+  if (( have_skills + have_agents + have_claude > 1 )); then
+    echo "エラー: ${SKILL_NAME} の実体が skills/ / .agents/skills/ / .claude/skills/ の複数に存在します。"
+    echo "環境変数 LOCAL_SKILL_DIR にどれかを指定して再実行してください（例: LOCAL_SKILL_DIR=.agents/skills/${SKILL_NAME} $0 ${SKILL_NAME} ${UPSTREAM_REPO}）。"
     exit 1
   elif [[ "${have_skills}" -eq 1 ]]; then
     LOCAL_SKILL_DIR="skills/${SKILL_NAME}"
   elif [[ "${have_agents}" -eq 1 ]]; then
     LOCAL_SKILL_DIR=".agents/skills/${SKILL_NAME}"
+  elif [[ "${have_claude}" -eq 1 ]]; then
+    LOCAL_SKILL_DIR=".claude/skills/${SKILL_NAME}"
   else
-    echo "エラー: ローカルスキルが見つかりません: skills/${SKILL_NAME} / .agents/skills/${SKILL_NAME}"
+    echo "エラー: ローカルスキルが見つかりません: skills/${SKILL_NAME} / .agents/skills/${SKILL_NAME} / .claude/skills/${SKILL_NAME}"
     exit 1
   fi
 fi
@@ -208,6 +223,12 @@ if [[ -d "skills/${SKILL_NAME}" ]]; then
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
 elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
   UPSTREAM_SKILL_PATH=".agents/skills/${SKILL_NAME}"
+elif [[ -d ".claude/skills/${SKILL_NAME}" && ! -L ".claude/skills/${SKILL_NAME}" ]]; then
+  # upstream が .claude/skills/ 配下に実体を置いている慣習（例: create-skill / create-agent）。
+  # .claude/skills/<name> は skills/<name> への symlink である慣習も併存するため、
+  # -L で symlink を除外し実ディレクトリの場合のみ採用する
+  # （symlink の場合は解決先の実体が上の skills/ / .agents/skills/ 分岐で検出される）
+  UPSTREAM_SKILL_PATH=".claude/skills/${SKILL_NAME}"
 elif [[ -d "skills" ]]; then
   # upstream が skills/ 配下で公開している慣習
   UPSTREAM_SKILL_PATH="skills/${SKILL_NAME}"
@@ -223,9 +244,9 @@ echo "==> upstream パス: ${UPSTREAM_SKILL_PATH}"
 
 # 削除伝搬のための同期: cp -R は追加・上書きのみで削除を反映しないため、
 # ローカルで削除したファイルが upstream 側に残存してしまう。宛先を消してから作り直す（delete-then-copy）。
-# 安全弁: 削除対象が clone 内の想定スキルパス（2 形態のみ）であることを検証してから rm する
+# 安全弁: 削除対象が clone 内の想定スキルパス（3 形態のみ）であることを検証してから rm する
 case "${UPSTREAM_SKILL_PATH}" in
-  "skills/${SKILL_NAME}"|".agents/skills/${SKILL_NAME}") ;;
+  "skills/${SKILL_NAME}"|".agents/skills/${SKILL_NAME}"|".claude/skills/${SKILL_NAME}") ;;
   *)
     echo "エラー: 想定外の UPSTREAM_SKILL_PATH です: ${UPSTREAM_SKILL_PATH}"
     exit 1
