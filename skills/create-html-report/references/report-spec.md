@@ -37,7 +37,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/validate_report.py" <out.html>   # 生成�
 | `date` | — | string | レポート基準日（表示用文字列） |
 | `scope` | — | string | 対象・期間の説明 |
 | `interactive` | — | boolean | `true` のときのみ inline JS（テーブルソート・TOC スクロールスパイ）を注入。既定 `false`。**boolean 厳格**: `true` / `false` のみ許容（`"false"` 等の文字列・数値は SpecError） |
-| `summary` | — | string \| string[] | 要約。配列は段落ごとに `<p>` 化 |
+| `summary` | — | string \| string[] | 要約。配列は段落ごとに `<p>` 化。string / string 配列以外（数値・object・null 要素混じりの配列等）は SpecError |
 
 **型契約**: spec の root は JSON object であること。`sections` / `kpis` / `findings` / `sources` / `assumptions` および各 chart の主要配列フィールド（`categories` / `series` / `x` / `rows` / `cols` / `values` / `items` / `slices` / `axes` / `tasks` / `annotations` / `points` / `dependsOn` 等）とその要素（section / chart / table / kpi / source / series / item / slice / task / annotation は object）が上表・各節の型と異なる場合、renderer は traceback を出さず日本語の SpecError（終了コード 1）で拒否する。文字列を配列の代わりに渡す（例: `"categories": "XY"`）ことはできない。省略可の配列・object フィールドへの**明示 `null` は欠損（未指定）と同義**に正規化される（`annotations: null`・`dependsOn: null`・`meta: null` 等）。
 | `kpis` | — | array | [KPI カード](#kpis) |
@@ -82,7 +82,7 @@ KPI は「読者が最初に知る価値が高い値」に 3〜4 個へ限定す
 |---|---|---|
 | `id` | — | アンカー ID（省略時 `sec-N`）。TOC・スクロールスパイが参照。下記「sections[].id の契約」に従う |
 | `heading` | ✅ | `<h2>` 見出し。**欠落は SpecError** |
-| `body` | — | string \| string[]。段落として描画 |
+| `body` | — | string \| string[]。段落として描画。string / string 配列以外は SpecError |
 | `charts` | — | chart 定義の配列。body → charts → tables の順で描画 |
 | `tables` | — | chart に紐付かない独立データ表 |
 
@@ -210,7 +210,7 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
 | `tasks[].start` / `end` | ✅（通常タスク） | `YYYY-MM-DD`。`end >= start` 必須（負期間はエラー）。**不明な日付を推測で埋めない**（不明タスクは spec に入れず assumptions に書く） |
 | `tasks[].milestone` | — | `true` で milestone（diamond 表示）。`date` が必須になり `start`/`end` は不要。**boolean 厳格**: `true` / `false` のみ許容（`"false"` 等の文字列・数値は SpecError） |
 | `tasks[].progress` | — | `0.0..1.0` 厳格（範囲外は clamp せずエラー）。planned bar 上に不透明 overlay で重ねられ、% がテキスト表示される |
-| `tasks[].status` | — | `done` / `in-progress` / `planned` / `at-risk` / `blocked`。色 + **日本語テキストラベル**（完了/進行中/予定/リスク/ブロック）で表示 |
+| `tasks[].status` | — | `done` / `in-progress` / `planned` / `at-risk` / `blocked` のみ（未指定は `planned` 扱い。**enum 外は SpecError**。`"Done"` 等の表記ゆれ不可）。色 + **日本語テキストラベル**（完了/進行中/予定/リスク/ブロック）で表示 |
 | `tasks[].id` / `dependsOn` | — | 依存関係。矢印では描かず**依存関係テーブル**として chart 下に自動生成。**`id` の重複は SpecError**（重複を許すと依存先の解決が黙って後勝ちになるため） |
 
 - 日付軸の tick は期間長で自動選択: 120 日以下 → 週（月曜、`M/D`）、730 日（約 2 年）以下 → 月（`YYYY-MM`）、超 → 四半期（`YYYY Qn`）
@@ -248,7 +248,8 @@ renderer は以下を機械検証し、違反時は日本語の `spec エラー:
 - すべての数値は**有限値**（NaN / Inf 不可）。文字列の数値も parse される。値同士の差が浮動小数の上限（約 1.8e308）を超える巨大値の組もエラー
 - **数値フィールドに boolean は不可**（JSON の `true` を数値 1 として描画しない）
 - **boolean フィールドは厳格**（`interactive`・`tasks[].milestone`。`true` / `false` 以外はエラー）
-- **enum フィールドは厳格**（bar `orientation` / `mode`、waterfall `items[].type`、kpi `trend`。一覧外の値・表記ゆれはエラーで、silent に既定値へ倒さない）
+- **enum フィールドは厳格**（bar `orientation` / `mode`、waterfall `items[].type`、kpi `trend`、gantt `tasks[].status`。一覧外の値・表記ゆれはエラーで、silent に既定値へ倒さない）
+- `summary` / `sections[].body` は string または string の配列のみ（それ以外の型・非 string 要素はエラー）
 - 値数の不一致（series の values と categories/x/axes の長さ違い、table の行と columns の列数違い）はエラー
 - stacked bar / donut の負値、radar の範囲外値・`max <= 0`、gantt の `progress` 範囲外・`end < start`・`tasks[].id` 重複はエラー
 - 必須フィールドの欠落（`sections[].heading`・`kpis[].label`・`kpis[].value`・gantt `tasks[].name` 等）はエラー

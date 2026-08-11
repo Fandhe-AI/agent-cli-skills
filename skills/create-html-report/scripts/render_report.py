@@ -508,7 +508,9 @@ def render_line(chart, ids, interactive):
     ticks = nice_ticks(min(flat), max(flat))
     lo, hi = ticks[0], ticks[-1]
 
-    left = max(46, est_w(fmt(ticks[-1]), 12) + 14)
+    # 左余白は全 tick ラベルの最大表示幅で決める。ticks[-1]（最大値）だけを見ると
+    # 負値域の長いラベル（例: -12,000）が viewBox 左端で切れる。
+    left = max(46, max(est_w(fmt(t), 12) for t in ticks) + 14)
     right, top, bottom = 20, 30, 40
     H = 320
     plot_w, plot_h = CHART_W - left - right, H - top - bottom
@@ -635,7 +637,8 @@ def render_scatter(chart, ids, interactive):
     yt = nice_ticks(min(p[1] for p in flat), max(p[1] for p in flat))
     xlo, xhi, ylo, yhi = xt[0], xt[-1], yt[0], yt[-1]
 
-    left = max(50, est_w(fmt(yt[-1]), 12) + 16)
+    # 左余白は Y 軸全 tick ラベルの最大表示幅で決める（負値ラベルの切れ防止）
+    left = max(50, max(est_w(fmt(t), 12) for t in yt) + 16)
     right, top, bottom = 20, 30, 52
     H = 340
     plot_w, plot_h = CHART_W - left - right, H - top - bottom
@@ -795,7 +798,8 @@ def render_waterfall(chart, ids, interactive):
     ticks = nice_ticks(min(all_pts), max(all_pts))
     lo, hi = ticks[0], ticks[-1]
 
-    left = max(50, est_w(fmt(ticks[-1]), 12) + 16)
+    # 左余白は全 tick ラベルの最大表示幅で決める（負値ラベルの切れ防止）
+    left = max(50, max(est_w(fmt(t), 12) for t in ticks) + 16)
     right, top = 16, 30
     labels = [b[0] for b in bars]
     bottom = 34 + (min(80, int(max(est_w(l, 12) for l in labels) * 0.6))
@@ -1065,6 +1069,13 @@ def render_gantt(chart, ids, interactive):
         require_dict(t, f"gantt '{chart.get('title')}' の tasks[{ti}]")
         if not t.get("name"):
             raise SpecError(f"gantt tasks[{ti}] に name がない")
+        # status の enum 検証（未指定は planned 扱い）。enum 外を silent に
+        # series-8 色・未翻訳テキストへフォールバックすると "Done" 等の誤記が
+        # 凡例と食い違う灰色バーのまま気付かれないため、spec 段階で弾く。
+        status = t.get("status")
+        if status is not None and status not in GANTT_STATUS:
+            raise SpecError(f"task '{t.get('name')}' の status は "
+                            f"{' / '.join(GANTT_STATUS)} のいずれか: {status!r}")
         task_id = t.get("id")
         if task_id is not None:
             if task_id in seen_task_ids:
@@ -1129,8 +1140,8 @@ def render_gantt(chart, ids, interactive):
                 continue
             cy_ = y + row_h / 2
             out.append(f'<text x="{left - 8}" y="{cy_ + 4:.1f}" text-anchor="end" class="cat">{esc(t.get("name", ""))}</text>')
-            status = t.get("status", "planned")
-            color, status_ja = GANTT_STATUS.get(status, ("var(--series-8)", str(status)))
+            # status は事前検証済み（enum 外は SpecError）のため直接引ける
+            color, status_ja = GANTT_STATUS[t.get("status", "planned")]
             if require_bool(t.get("milestone"), f"task '{t.get('name')}' の milestone"):
                 mx = x(parse_date(t["date"]))
                 s = 8
@@ -1176,13 +1187,13 @@ def render_gantt(chart, ids, interactive):
         if require_bool(t.get("milestone"), f"task '{t.get('name')}' の milestone"):
             rows.append([(t.get("name", ""), False), (t.get("phase", "—"), False),
                          (str(t.get("date")), False), ("—", False), ("—", True),
-                         (GANTT_STATUS.get(t.get("status", "planned"), ("", str(t.get("status"))))[1] + "（マイルストーン）", False)])
+                         (GANTT_STATUS[t.get("status", "planned")][1] + "（マイルストーン）", False)])
         else:
             prog = _gantt_progress(t)
             rows.append([(t.get("name", ""), False), (t.get("phase", "—"), False),
                          (str(t.get("start")), False), (str(t.get("end")), False),
                          (f"{int(round(prog * 100))}%" if prog is not None else "—", True),
-                         (GANTT_STATUS.get(t.get("status", "planned"), ("", str(t.get("status"))))[1], False)])
+                         (GANTT_STATUS[t.get("status", "planned")][1], False)])
     table = data_table(f"{chart['title']}（データ）",
                        ["タスク", "フェーズ", "開始", "終了", "進捗", "ステータス"], rows, interactive)
 
@@ -1261,11 +1272,26 @@ def render_findings(findings):
             f'<ol class="findings">{"".join(items)}</ol></section>')
 
 
-def render_body_text(body):
-    """本文ブロック。string または string リストを段落として描画する。"""
-    if not body:
+def render_body_text(body, ctx="body"):
+    """本文ブロック。string または string の配列を段落として描画する。
+
+    契約（string | string[]）外の値を str() で黙って文字列化すると
+    object や数値が「{'a': 1}」等の生表現のまま段落に混入するため、
+    型を厳格に検証して SpecError で拒否する。
+    """
+    if body is None:
         return ""
-    paras = body if isinstance(body, list) else [body]
+    if isinstance(body, str):
+        paras = [body]
+    elif isinstance(body, list):
+        for i, p in enumerate(body):
+            if not isinstance(p, str):
+                raise SpecError(f"{ctx}[{i}] は string で指定する: "
+                                f"{type(p).__name__} が渡された")
+        paras = body
+    else:
+        raise SpecError(f"{ctx} は string または string の配列で指定する: "
+                        f"{type(body).__name__} が渡された")
     return "".join(f"<p>{esc(p)}</p>" for p in paras)
 
 
@@ -1328,7 +1354,7 @@ def render_sections(sections, ids, interactive):
             raise SpecError(f"sections[{i - 1}] に heading がない")
         toc_entries.append((sid, heading))
         parts = [f'<section id="{esc(sid)}"><h2>{esc(heading)}</h2>']
-        parts.append(render_body_text(sec.get("body")))
+        parts.append(render_body_text(sec.get("body"), f"sections[{i - 1}].body"))
         for j, chart in enumerate(require_list(sec.get("charts"), f"sections[{i - 1}].charts")):
             require_dict(chart, f"sections[{i - 1}].charts[{j}]")
             ctype = chart.get("type")
@@ -1649,7 +1675,8 @@ def build_html(spec):
     subtitle = f'<p class="subtitle">{esc(spec["subtitle"])}</p>' if spec.get("subtitle") else ""
     summary = ""
     if spec.get("summary"):
-        summary = f'<section id="summary"><h2>要約</h2>{render_body_text(spec["summary"])}</section>'
+        summary = (f'<section id="summary"><h2>要約</h2>'
+                   f'{render_body_text(spec["summary"], "summary")}</section>')
 
     generated_at = meta.get("generated_at") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     generator = meta.get("generator", "create-html-report / render_report.py")
