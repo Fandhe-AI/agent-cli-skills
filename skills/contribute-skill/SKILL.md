@@ -253,7 +253,7 @@ fi
 # ルートへ cd し直す。LOCAL_SKILL_DIR は通常の変数代入では子プロセスへ継承されない
 # （export されていない）ため明示的に渡す。標準出力はそのまま表示しつつ変数へも捕捉する。
 cd "${ORIG_DIR}"
-SCRIPT_OUTPUT=$(LOCAL_SKILL_DIR="${LOCAL_SKILL_DIR}" "${CONTRIBUTE_SKILL_DIR}/script/skills-contribute.sh" "${SKILL_NAME}" "${REPO_SLUG}" | tee /dev/stderr)
+SCRIPT_OUTPUT=$(LOCAL_SKILL_DIR="${LOCAL_SKILL_DIR}" "${CONTRIBUTE_SKILL_DIR}/scripts/skills-contribute.sh" "${SKILL_NAME}" "${REPO_SLUG}" | tee /dev/stderr)
 
 # スクリプトが実際に使った作業 clone・upstream スキルパスを Step 6 以降の唯一の正として採用する。
 # 以下の参考コードで計算され得る UPSTREAM_SKILL_PATH はこの値で上書きする。
@@ -327,7 +327,7 @@ esac
 # 安全弁2: 実体パスでの symlink 境界検証（fail-closed）。安全弁1 の case allowlist は
 # 文字列形式のみの検証であり、clone 内の中間ディレクトリ（skills / .agents 等）が
 # 実行中に symlink へ差し替えられた場合には対応できないため、rm -rf の直前に
-# 以下を実体パスで再確認する（詳細な実装は script/skills-contribute.sh を参照）。
+# 以下を実体パスで再確認する（詳細な実装は scripts/skills-contribute.sh を参照）。
 #   (a) clone ルートから削除対象までの各中間パス要素が symlink でないこと
 #   (b) 削除対象の親ディレクトリの正規パス（pwd -P）が clone ルート配下であること
 #   (c) 検証と削除の間の TOCTOU を閉じるため、検証済みの親ディレクトリへ cd -P した
@@ -447,7 +447,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 - **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → `.claude/skills/<name>` の存在 → スキルルート親ディレクトリの慣習（`skills/` → `.agents/skills/` → `.claude/skills/` の順。新規スキルは個別パスが存在しないためこの親ディレクトリ判定で配置先が決まる）→ 最終デフォルト `skills/`（より一般的な公開レイアウト）。全候補で `assert_no_symlink_components` により経路の全要素（`.claude` 等の最上位親を含む）が symlink でない場合のみ採用し、`.claude` 自体がリポジトリ外を指す symlink でも外部内容が upstream へコピーされない（fail-closed。symlink 経由の実体は前段の実体側候補で検出される）
-- **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 5 は必ず `${CONTRIBUTE_SKILL_DIR}/script/skills-contribute.sh`（本スキル自身の配置から別途解決したパス。貢献対象のパスである `LOCAL_SKILL_DIR` とは別物）経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
+- **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 5 は必ず `${CONTRIBUTE_SKILL_DIR}/scripts/skills-contribute.sh`（本スキル自身の配置から別途解決したパス。貢献対象のパスである `LOCAL_SKILL_DIR` とは別物）経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
 - **既に同名の branch がある場合**：秒単位スラッグで通常は衝突しないが、万一の場合はユーザーに確認
 
 ## sandbox 環境での実行
