@@ -25,11 +25,14 @@
 #         スレッドのあるマージを拒否するため、arm しても解消まで待たされる。classic は
 #         required_conversation_resolution、ruleset は pull_request ルールの
 #         required_review_thread_resolution で判定し、無効・取得不能なら arm しない）
-#     G6. 下記 REQUIRED_EXTERNAL_CHECKS に列挙した外部レビュー App の check context が
-#         **すべて required status checks の contexts に含まれる**こと
-#         （PR #207 codex ラウンド4 P1 対応。implement-issue-tree が externalChecks で要求
-#         する Cursor 等の外部レビュー到着を required checks としてサーバー側マージ条件へ
-#         組み込むための検証。1 つでも欠ければ arm しない）
+#     G6. 下記 REQUIRED_EXTERNAL_CHECKS に列挙した外部レビュー App の「check context 名 +
+#         App ID」の組が、**すべて required status checks に App 束縛付きで含まれる**こと
+#         （PR #207 codex ラウンド4 P1 / ラウンド5 P1 + Bugbot Medium 対応。context 名の
+#         存在だけでは、同名 check を別 App や same-repo の Actions workflow が作成して
+#         偽装できるため、classic は `.checks[].app_id`、ruleset は `integration_id` との
+#         組を完全一致で検証する。App 束縛のない legacy `contexts` エントリや app_id /
+#         integration_id が null・欠落のエントリは充足根拠として受理しない。
+#         1 組でも欠ければ arm しない）
 #     G4. ベースブランチに適用される**全 ruleset の bypass_actors が 0 件**である
 #         （PR #207 codex ラウンド3 P0 対応。bypass actor（App・チーム・ロール等）が
 #         1 件でも設定されていると、その actor による merge は G1〜G3 の保護を迂回できる
@@ -58,7 +61,9 @@
 #   1. リポジトリ設定で auto-merge を許可する（Settings → General → Allow auto-merge）
 #   2. base ブランチに branch protection / ruleset で上記 G1〜G3 と conversation resolution
 #      必須化（G5）を設定し、bypass actor を置かない（G4）。REQUIRED_EXTERNAL_CHECKS に
-#      列挙した外部 App の check context を required status checks に含める（G6）。
+#      列挙した外部 App の check context を、その App に束縛した形（App 指定付き required
+#      check。classic は app_id、ruleset は integration_id）で required status checks に
+#      含める（G6。App 指定なしの legacy contexts では G6 を充足できない）。
 #      classic を使う場合は enforce_admins も有効にする。
 #      注意: classic branch protection の読み取り API（GET /branches/{branch}/protection）は
 #      リポジトリ管理者権限を要求するため、workflow の GITHUB_TOKEN では読めないことがある。
@@ -110,14 +115,23 @@
 name: auto-merge
 
 # G6 の設定変数: implement-issue-tree の externalChecks で要求する外部レビュー App の
-# check context（カンマ区切り）。ここに列挙した context がすべて base ブランチの
-# required status checks に含まれていない限り arm しない（fail-closed）。
-# 消費リポジトリの外部チェック構成（例: Cursor Bugbot の check run 名）に合わせて置き換える。
+# 「<check context 名>:<App ID>」の組（カンマ区切りで複数可）。App ID は check run を
+# 作成する GitHub App の数値 ID。context 名だけの検証では、同名 check を別 App や
+# same-repo の Actions workflow（github-actions App）が作成して偽装できるため、
+# context 名と App ID の組を required status checks の App 束縛
+# （classic は `.checks[].app_id`、ruleset は `integration_id`）と完全一致で検証する。
+# 既定例の 1210556 は Cursor Bugbot（cursor App）の App ID。自リポジトリでの実 ID は
+# 対象 App の check が付いた任意のコミットに対して次で確認できる:
+#   gh api "repos/<owner>/<repo>/commits/<sha>/check-runs" \
+#     --jq '.check_runs[] | {name, app_slug: .app.slug, app_id: .app.id}'
+# 列挙した組がすべて App 束縛付きで required status checks に存在しない限り arm しない
+# （fail-closed）。app_id / integration_id が null・欠落のエントリ（App 束縛のない
+# legacy `contexts` を含む）は充足根拠として受理しない。
 # 外部チェックを使わないリポジトリは空文字にできるが、その場合 G6 は検証対象なしとなり、
 # 外部レビュー（Cursor 等）の到着はサーバー側マージ条件で一切担保されない点に注意すること
 # （externalChecks 相当の担保を required checks で行わない運用の明示的な選択となる）。
 env:
-  REQUIRED_EXTERNAL_CHECKS: "Cursor Bugbot"
+  REQUIRED_EXTERNAL_CHECKS: "Cursor Bugbot:1210556"
 
 # pull_request_target を採用する（base 側 workflow 定義で実行 = PR 内の workflow 改変が無効）。
 # head コードの checkout・実行は絶対に追加しないこと（上記インジェクション対策参照）。
@@ -242,32 +256,44 @@ jobs:
               "'${BASE_REF}' (conversation_resolution=${conv_ok}). Not arming (fail-closed)."
             exit 0
           fi
-          # G6: REQUIRED_EXTERNAL_CHECKS（workflow 冒頭の env。カンマ区切り）に列挙した
-          # 外部レビュー App の check context が、classic / ruleset の required status checks
-          # contexts に**すべて**含まれること（PR #207 codex ラウンド4 P1 対応）。1 つでも
-          # 欠ければ、その外部レビューの到着を待たずにマージが成立し得るため arm しない。
-          # contexts の抽出・解析に失敗した場合も arm しない（fail-closed）。
-          # 空文字（外部チェック不使用の明示選択）の場合のみ検証対象なしとして通過する。
-          required_contexts=$(jq -nc --argjson c "$classic" --argjson r "$rules" '
+          # G6: REQUIRED_EXTERNAL_CHECKS（workflow 冒頭の env。「<context>:<App ID>」の
+          # カンマ区切り）に列挙した各組が、classic / ruleset の required status checks に
+          # 「context 名 + App ID」の完全一致で**すべて**存在すること（PR #207 codex
+          # ラウンド4 P1 / ラウンド5 P1 + Bugbot Medium 対応）。context 名の存在だけでは
+          # 同名 check を別 App・same-repo Actions が作成して偽装できるため、App 束縛
+          # （classic は `.checks[].app_id`、ruleset は `integration_id`）を組で検証する。
+          # app_id / integration_id が null・欠落のエントリ（App 束縛のない legacy
+          # `contexts` を含む）は充足根拠から除外する。1 組でも欠ければ arm しない。
+          # 設定値の書式不正（`:<数値 App ID>` を欠く等）・抽出解析の失敗も arm しない
+          # （fail-closed）。空文字（外部チェック不使用の明示選択）のみ検証対象なしで通過。
+          required_pairs=$(jq -nc --argjson c "$classic" --argjson r "$rules" '
             [
-              (($c.required_status_checks? // {})
-                | (((.checks // []) | map(.context)) + (.contexts // []))),
+              (($c.required_status_checks? // {}) | (.checks // [])
+                | map(select((.app_id | type) == "number")
+                  | {context: .context, app_id: .app_id})),
               ($r | flatten
                 | map(select(.type == "required_status_checks")
-                  | (.parameters.required_status_checks // []) | map(.context))
+                  | (.parameters.required_status_checks // [])
+                  | map(select((.integration_id | type) == "number")
+                    | {context: .context, app_id: .integration_id}))
                 | flatten)
-            ] | flatten | map(select(type == "string")) | unique
-          ' 2>/dev/null) || required_contexts='null'
-          external_ok=$(jq -n --argjson req "$required_contexts" \
+            ] | flatten | map(select((.context | type) == "string")) | unique
+          ' 2>/dev/null) || required_pairs='null'
+          external_ok=$(jq -n --argjson req "$required_pairs" \
             --arg ext "$REQUIRED_EXTERNAL_CHECKS" '
-            ($req | type) == "array"
-            and ($ext | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))
-              | all(. as $name | $req | index($name) != null))
+            ($ext | split(",") | map(gsub("^\\s+|\\s+$"; ""))
+              | map(select(length > 0))) as $entries
+            | ($req | type) == "array"
+            and ($entries | all(test("^.+:[0-9]+$")))
+            and ($entries
+              | map(capture("^(?<ctx>.+):(?<id>[0-9]+)$")
+                | {context: .ctx, app_id: (.id | tonumber)})
+              | all(. as $want | any($req[]; . == $want)))
           ' 2>/dev/null) || external_ok=false
           if [ "$external_ok" != "true" ]; then
-            echo "skip: not all REQUIRED_EXTERNAL_CHECKS (${REQUIRED_EXTERNAL_CHECKS}) are" \
-              "listed in required status checks of base branch '${BASE_REF}'." \
-              "Not arming (fail-closed)."
+            echo "skip: not all REQUIRED_EXTERNAL_CHECKS (${REQUIRED_EXTERNAL_CHECKS})" \
+              "context:app_id pairs are enforced app-bound in required status checks of" \
+              "base branch '${BASE_REF}'. Not arming (fail-closed)."
             exit 0
           fi
           # G4: ベースブランチに適用される全 ruleset の bypass_actors が 0 件であること。
