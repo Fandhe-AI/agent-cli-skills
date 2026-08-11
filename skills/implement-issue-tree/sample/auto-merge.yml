@@ -12,13 +12,24 @@
 #   これらは arm 対象の**絞り込み（誤爆防止）にすぎない**。
 #   本 workflow の認可根拠は「PR 作成主体が生成できない信頼済みシグナル」= ベースブランチの
 #   branch protection / ruleset をサーバー側 API で**実測検証**することに置く。arm 実行前に
-#   次の 4 点がすべて構成済みであることを決定的に検証し、1 つでも欠ければ arm せず終了する
+#   次の 6 点がすべて構成済みであることを決定的に検証し、1 つでも欠ければ arm せず終了する
 #   （fail-closed。API 取得・解析失敗も arm しない）:
 #     G1. required status checks が 1 件以上構成されている
 #     G2. required approving review count >= 1 が構成されている
 #         （GitHub は PR author の自己承認をサーバー側で拒否するため、これが
 #         「PR 作成主体が生成できない非 author 承認」という偽造不能シグナルになる）
 #     G3. dismiss stale reviews（承認後の HEAD 更新で承認を失効させる）が有効である
+#     G5. required conversation resolution（レビュースレッド全解消の必須化）が有効である
+#         （PR #207 codex ラウンド4 P1 対応。これが無効だと、任意 check 1 件 + 承認 1 件で
+#         レビュースレッド未解消のまま即時マージが成立し得る。有効ならサーバー側が未解消
+#         スレッドのあるマージを拒否するため、arm しても解消まで待たされる。classic は
+#         required_conversation_resolution、ruleset は pull_request ルールの
+#         required_review_thread_resolution で判定し、無効・取得不能なら arm しない）
+#     G6. 下記 REQUIRED_EXTERNAL_CHECKS に列挙した外部レビュー App の check context が
+#         **すべて required status checks の contexts に含まれる**こと
+#         （PR #207 codex ラウンド4 P1 対応。implement-issue-tree が externalChecks で要求
+#         する Cursor 等の外部レビュー到着を required checks としてサーバー側マージ条件へ
+#         組み込むための検証。1 つでも欠ければ arm しない）
 #     G4. ベースブランチに適用される**全 ruleset の bypass_actors が 0 件**である
 #         （PR #207 codex ラウンド3 P0 対応。bypass actor（App・チーム・ロール等）が
 #         1 件でも設定されていると、その actor による merge は G1〜G3 の保護を迂回できる
@@ -45,8 +56,10 @@
 #
 # 前提（これらが未設定だと arm されない / arm 失敗になる）:
 #   1. リポジトリ設定で auto-merge を許可する（Settings → General → Allow auto-merge）
-#   2. base ブランチに branch protection / ruleset で上記 G1〜G3 を設定し、bypass actor を
-#      置かない（G4）。classic を使う場合は enforce_admins も有効にする。
+#   2. base ブランチに branch protection / ruleset で上記 G1〜G3 と conversation resolution
+#      必須化（G5）を設定し、bypass actor を置かない（G4）。REQUIRED_EXTERNAL_CHECKS に
+#      列挙した外部 App の check context を required status checks に含める（G6）。
+#      classic を使う場合は enforce_admins も有効にする。
 #      注意: classic branch protection の読み取り API（GET /branches/{branch}/protection）は
 #      リポジトリ管理者権限を要求するため、workflow の GITHUB_TOKEN では読めないことがある。
 #      その場合 classic 側の実測は不成立となり arm されない（fail-closed）。**ruleset での
@@ -95,6 +108,16 @@
 # write 権限を一切要求しない（G4 の読み取り検証専用。arm は GITHUB_TOKEN が行う）。
 
 name: auto-merge
+
+# G6 の設定変数: implement-issue-tree の externalChecks で要求する外部レビュー App の
+# check context（カンマ区切り）。ここに列挙した context がすべて base ブランチの
+# required status checks に含まれていない限り arm しない（fail-closed）。
+# 消費リポジトリの外部チェック構成（例: Cursor Bugbot の check run 名）に合わせて置き換える。
+# 外部チェックを使わないリポジトリは空文字にできるが、その場合 G6 は検証対象なしとなり、
+# 外部レビュー（Cursor 等）の到着はサーバー側マージ条件で一切担保されない点に注意すること
+# （externalChecks 相当の担保を required checks で行わない運用の明示的な選択となる）。
+env:
+  REQUIRED_EXTERNAL_CHECKS: "Cursor Bugbot"
 
 # pull_request_target を採用する（base 側 workflow 定義で実行 = PR 内の workflow 改変が無効）。
 # head コードの checkout・実行は絶対に追加しないこと（上記インジェクション対策参照）。
@@ -199,6 +222,52 @@ jobs:
             echo "skip: base branch '${BASE_REF}' protection not verified" \
               "(required_checks=${checks_ok}, non_author_approvals>=1=${reviews_ok}," \
               "dismiss_stale=${dismiss_ok}). Not arming (fail-closed)."
+            exit 0
+          fi
+          # G5: required conversation resolution（レビュースレッド全解消の必須化）が有効で
+          # あること（PR #207 codex ラウンド4 P1 対応）。無効だと承認 + checks が揃った時点で
+          # レビュースレッド未解消のまま即時マージが成立し得る。有効ならサーバー側が未解消
+          # スレッドのあるマージを拒否するため、arm しても解消まで待たされる。classic は
+          # required_conversation_resolution、ruleset は pull_request ルールの
+          # required_review_thread_resolution で判定し、無効・取得不能・解析失敗は arm しない
+          # （fail-closed）。
+          conv_ok=$(jq -n --argjson c "$classic" --argjson r "$rules" '
+            (($c.required_conversation_resolution? // {}) | .enabled == true)
+            or ($r | flatten | any(
+              .type == "pull_request"
+              and .parameters.required_review_thread_resolution == true))
+          ' 2>/dev/null) || conv_ok=false
+          if [ "$conv_ok" != "true" ]; then
+            echo "skip: required conversation resolution is not enforced on base branch" \
+              "'${BASE_REF}' (conversation_resolution=${conv_ok}). Not arming (fail-closed)."
+            exit 0
+          fi
+          # G6: REQUIRED_EXTERNAL_CHECKS（workflow 冒頭の env。カンマ区切り）に列挙した
+          # 外部レビュー App の check context が、classic / ruleset の required status checks
+          # contexts に**すべて**含まれること（PR #207 codex ラウンド4 P1 対応）。1 つでも
+          # 欠ければ、その外部レビューの到着を待たずにマージが成立し得るため arm しない。
+          # contexts の抽出・解析に失敗した場合も arm しない（fail-closed）。
+          # 空文字（外部チェック不使用の明示選択）の場合のみ検証対象なしとして通過する。
+          required_contexts=$(jq -nc --argjson c "$classic" --argjson r "$rules" '
+            [
+              (($c.required_status_checks? // {})
+                | (((.checks // []) | map(.context)) + (.contexts // []))),
+              ($r | flatten
+                | map(select(.type == "required_status_checks")
+                  | (.parameters.required_status_checks // []) | map(.context))
+                | flatten)
+            ] | flatten | map(select(type == "string")) | unique
+          ' 2>/dev/null) || required_contexts='null'
+          external_ok=$(jq -n --argjson req "$required_contexts" \
+            --arg ext "$REQUIRED_EXTERNAL_CHECKS" '
+            ($req | type) == "array"
+            and ($ext | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))
+              | all(. as $name | $req | index($name) != null))
+          ' 2>/dev/null) || external_ok=false
+          if [ "$external_ok" != "true" ]; then
+            echo "skip: not all REQUIRED_EXTERNAL_CHECKS (${REQUIRED_EXTERNAL_CHECKS}) are" \
+              "listed in required status checks of base branch '${BASE_REF}'." \
+              "Not arming (fail-closed)."
             exit 0
           fi
           # G4: ベースブランチに適用される全 ruleset の bypass_actors が 0 件であること。
