@@ -48,11 +48,24 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
 `.github/workflows/codex-review.yml` を wrapper として追加し、Fandhe-AI/actions の reusable workflow
 `codex-review.yml` を **commit SHA 固定**（`@main` 禁止）で参照する。
 
+参照する SHA は**下記のレビュー済み SHA 定数**を使う。最新 main からの動的取得
+（`gh api repos/Fandhe-AI/actions/commits/main`）は禁止する — 文字列上は commit SHA 固定でも、
+導入のたびに未レビューの最新コードを取り込む「可動 ref の自動追従」と同じであり、
+サプライチェーン対策（レビュー済み SHA 固定）を弱体化する（fandhe-frontend PR #1311 codex P1）。
+
 ```bash
-# 参照する SHA は actions の最新 main から取得する
-sha="$(gh api repos/Fandhe-AI/actions/commits/main --jq .sha)"
-echo "${sha}"
+# レビュー済み SHA 定数（内容精査済み。既存導入リポジトリ fandhe-frontend の
+# .github/workflows/codex-review.yml が参照している SHA と同一）
+sha="fed9c07d98367f77e5e2b63bca38843f46feee96"
 ```
+
+定数の更新手順（新しい SHA を採用したくなった場合）:
+
+1. 旧 SHA → 新 SHA の差分を精査する:
+   `gh api "repos/Fandhe-AI/actions/compare/<旧SHA>...<新SHA>"` または Web UI の compare で、
+   reusable workflow 本体（fork PR 拒否・fail-closed 検証・資格情報スキャン等）の変更内容を確認する
+2. 問題がないと判断してから、本 SKILL.md のこの定数（full SHA）を書き換えるコミットを作成する
+3. 以後の導入は更新後の定数を使う（導入時に動的取得へ戻さない）
 
 - 書き方・fork PR 拒否等の適用条件は Fandhe-AI/actions の `docs/codex-review-runner-exception.md` と、
   既存導入リポジトリ（fandhe-frontend 等）の wrapper を参照して揃える
