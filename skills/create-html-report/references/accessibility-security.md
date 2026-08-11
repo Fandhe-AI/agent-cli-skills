@@ -140,6 +140,8 @@ self-contained 原則。**ページロード時・操作時に一切の外部通
 - [ ] 新しい tab で開く場合は `rel="noopener noreferrer"` を付与
 - [ ] tracking parameter 付き URL・短縮 URL を出典として使わない（可能な限り正規 URL）
 
+**相対 URL も禁止**: `<link href="style.css">` / `<img src="image.png">` のような相対参照は、単一ファイル配布でファイル欠落・意図しないリクエストの原因になるため external dependency と同様に禁止する。validate_report.py はリソース読み込み属性（`script src` / `link href` / `img src` / `iframe src` / SVG `image`・`use` の `href` 等）を、`data:` URI と SVG の文書内 `#fragment` 参照（`<use href="#id">` 等）を除き一律不合格にする（`<script src>` は `data:` でも不合格）。
+
 data URI（`data:image/svg+xml` 等の self-contained 埋め込み）は外部依存ではないが、原則 inline SVG を優先する。
 
 ## Sensitive data redaction

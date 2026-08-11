@@ -25,6 +25,7 @@ import html
 import json
 import math
 import os
+import re
 import sys
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,22 @@ VIRIDIS = [
 ]
 
 CHART_W = 760  # 全チャート共通の viewBox 幅（width:100% で縮尺）
+
+# renderer がページ骨格で固定使用する id の予約レジストリ。
+# build_html（main / summary / kpis / findings / assumptions / sources）と
+# render_toc（toc）が出力する id と同期して管理する。
+# sections[].id がこれらと衝突すると duplicate id の HTML を生成してしまうため、
+# render_sections が SpecError で弾く（validate_report.py の #3 に到達する前に拒否）。
+RESERVED_SECTION_IDS = frozenset(
+    {"main", "toc", "summary", "kpis", "findings", "assumptions", "sources"})
+
+# chart のアクセシビリティ id は Ids クラスが ct-N / cd-N で自動採番する。
+# sections[].id がこの形式だと chart の <title>/<desc> id と衝突し得るため予約扱いにする。
+RESERVED_ID_PATTERN = re.compile(r"^(ct|cd)-\d+$")
+
+# HTML id として許可する形式。空白・引用符等による属性崩れ・アンカー不整合を防ぐため
+# 英字始まり + 英数字と - _ のみに制限する（自動採番 sec-N もこの形式に収まる）。
+VALID_HTML_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 
 class SpecError(Exception):
@@ -1127,8 +1144,25 @@ def render_section_table(tbl, interactive):
 
 def render_sections(sections, ids, interactive):
     html_parts, toc_entries = [], []
+    seen_ids = set()
     for i, sec in enumerate(sections, 1):
         sid = sec.get("id") or f"sec-{i}"
+        # sections[].id の契約検証（references/report-spec.md の「sections[].id の契約」参照）。
+        # 明示指定は形式・予約 id を検査し、自動採番 sec-N を含む全 id で一意性を要求する。
+        if sec.get("id"):
+            if not VALID_HTML_ID.match(sid):
+                raise SpecError(
+                    f"sections[{i - 1}].id が HTML id として不正: {sid!r}"
+                    "（英字始まり・英数字と - _ のみ使用可）")
+            if sid in RESERVED_SECTION_IDS or RESERVED_ID_PATTERN.match(sid):
+                raise SpecError(
+                    f"sections[{i - 1}].id {sid!r} は renderer の予約 id と衝突する"
+                    f"（予約: {', '.join(sorted(RESERVED_SECTION_IDS))} および ct-N / cd-N 形式）")
+        if sid in seen_ids:
+            raise SpecError(
+                f"sections[].id が重複している: {sid!r}"
+                "（自動採番 sec-N との衝突を含め、id はページ内で一意にすること）")
+        seen_ids.add(sid)
         heading = sec.get("heading", f"セクション {i}")
         toc_entries.append((sid, heading))
         parts = [f'<section id="{esc(sid)}"><h2>{esc(heading)}</h2>']

@@ -18,8 +18,13 @@ import re
 import sys
 from html.parser import HTMLParser
 
-# 外部リソース参照とみなす URL scheme（プロトコル相対 // も含む）
-EXTERNAL_URL = re.compile(r"^(https?:)?//", re.IGNORECASE)
+# 自己完結契約で許可するリソース URL。
+# - data: URI（コンテンツ埋め込み）は外部通信を発生させないため許可
+# - #fragment（SVG <use href="#id"> 等の文書内参照）は SVG 系タグに限り許可
+# 相対 URL（style.css / image.png 等）は配布先でのファイル欠落・意図しない
+# リクエストの原因になるため、http(s):// と同様に不合格として扱う。
+DATA_URI = re.compile(r"^\s*data:", re.IGNORECASE)
+FRAGMENT_URL = re.compile(r"^\s*#")
 
 # inline JS 内で禁止する network API のパターン
 NETWORK_API = re.compile(
@@ -69,7 +74,7 @@ class ReportParser(HTMLParser):
         self.styles = []            # <style> の中身
         self.bad_handlers = []      # on* 属性の出現箇所
         self.bad_js_urls = []       # javascript: URL
-        self.external_refs = []     # 外部リソース参照（script src / link / img 等）
+        self.external_refs = []     # 不許可のリソース読み込み属性（script src / link / img 等）
         self.anchor_hrefs = []      # <a href> の値（出典リンク検査用）
         self.style_attr_external = []
         self.title_text = ""
@@ -112,18 +117,24 @@ class ReportParser(HTMLParser):
             if URL_IGNORABLE.sub("", v.lower()).startswith("javascript:"):
                 self.bad_js_urls.append(f"<{tag} {key}>")
 
-        # 外部リソース参照の検査（出典 <a href> は対象外 = 唯一の許可経路）
-        if tag == "script" and ad.get("src"):
+        # リソース読み込み属性の検査（自己完結契約）。
+        # http(s):// / プロトコル相対 // だけでなく相対 URL も不合格とし、
+        # 許可は data: URI と（SVG <use>/<image> の）文書内 #fragment 参照のみ。
+        # 出典 <a href> は対象外 = 唯一の許可経路（check #9 で https / #fragment に制限）。
+        if tag == "script" and "src" in ad:
+            # <script src> は data: でも inline JS 収集（network API 検査）を
+            # 迂回できるため、値を問わず不合格にする。
             self.external_refs.append(f"<script src={ad['src']!r}>")
-        if tag == "link" and EXTERNAL_URL.match(ad.get("href", "")):
+        if tag == "link" and "href" in ad and not DATA_URI.match(ad.get("href") or ""):
             self.external_refs.append(f"<link href={ad['href']!r}>")
         if tag in ("img", "iframe", "object", "embed", "source", "track", "audio", "video"):
             for key in ("src", "data", "srcset"):
-                if EXTERNAL_URL.match(ad.get(key, "")):
+                if key in ad and not DATA_URI.match(ad.get(key) or ""):
                     self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
-        if tag in ("image", "use"):  # SVG 内の外部参照
+        if tag in ("image", "use"):  # SVG 内のリソース参照（文書内 #fragment のみ許可）
             for key in ("href", "xlink:href"):
-                if EXTERNAL_URL.match(ad.get(key, "")):
+                v = ad.get(key) or ""
+                if key in ad and not (DATA_URI.match(v) or FRAGMENT_URL.match(v)):
                     self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
         if "style" in ad and CSS_EXTERNAL.search(ad["style"] or ""):
             self.style_attr_external.append(f"<{tag} style=...>")
@@ -246,8 +257,9 @@ def run_checks(path):
     n_open, n_close = len(re.findall(r"<svg\b", raw)), raw.count("</svg>")
     check("<svg> の開閉タグ数が一致", n_open == n_close, f"開 {n_open} / 閉 {n_close}")
 
-    # 5. 外部リソース依存ゼロ（出典 <a href> は許可）
-    check("外部リソース参照がない（script src / link / remote img 等）",
+    # 5. リソース読み込み属性ゼロ（data: URI / SVG 文書内 #fragment のみ許可。
+    #    相対 URL も自己完結契約違反として不合格。出典 <a href> は #9 で別途検査）
+    check("リソース読み込み属性がない（script src / link href / img src 等は data: と #fragment のみ許可）",
           not parser.external_refs, "; ".join(parser.external_refs[:5]))
     css_all = "\n".join(parser.styles)
     check("CSS に @import / url(https...) がない",

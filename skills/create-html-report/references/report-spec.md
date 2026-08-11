@@ -78,11 +78,19 @@ KPI は「読者が最初に知る価値が高い値」に 3〜4 個へ限定す
 
 | フィールド | 必須 | 意味 |
 |---|---|---|
-| `id` | — | アンカー ID（省略時 `sec-N`）。TOC・スクロールスパイが参照 |
+| `id` | — | アンカー ID（省略時 `sec-N`）。TOC・スクロールスパイが参照。下記「sections[].id の契約」に従う |
 | `heading` | ✅ | `<h2>` 見出し |
 | `body` | — | string \| string[]。段落として描画 |
 | `charts` | — | chart 定義の配列。body → charts → tables の順で描画 |
 | `tables` | — | chart に紐付かない独立データ表 |
+
+### sections[].id の契約
+
+renderer は違反を SpecError として拒否する（duplicate id の HTML を生成しない）。
+
+- **一意性**: `id` はページ内で一意。自動採番 `sec-N`（省略時）との衝突も重複扱い
+- **予約 ID**: renderer がページ骨格で固定使用する `main` / `toc` / `summary` / `kpis` / `findings` / `assumptions` / `sources`、および chart アクセシビリティ用の自動採番形式 `ct-N` / `cd-N` は指定不可
+- **形式**: 英字始まり + 英数字と `-` `_` のみ（空白・引用符・`#` 等は不可）
 
 ## chart 共通フィールド
 
