@@ -131,11 +131,13 @@
 #     （actions/checkout の追加禁止。使ってよいのは gh api / gh pr list / gh pr view の
 #     読み取り呼び出しと jq による判定のみ）。
 #
-# permissions は arm に必要な最小構成（pull-requests: write は auto-merge の有効化
-# = enablePullRequestAutoMerge に必要。contents は read に留める — 本 workflow は
-# コードのビルド・push を行わず、auto-merge 成立時のマージコミット作成は GitHub 側が
-# branch protection の判定の下で行う）。AUTOMERGE_RULESET_TOKEN には write 権限を
-# 一切要求しない（G4 の読み取り検証専用。arm は GITHUB_TOKEN が行う）。
+# permissions は arm に必要な最小構成（pull-requests: write は auto-merge の有効化、
+# contents: write はマージ実行権限として enablePullRequestAutoMerge / マージコミット作成に
+# 必要 — PR #208 Bugbot High 対応: contents を read に落とすと arm が常に権限エラーで
+# 失敗し、スイープは per-PR skip として green 終了するため auto-merge が黙って一切
+# 成立しなくなる。checkout・push は行わないため、これ以上は要求しない）。
+# AUTOMERGE_RULESET_TOKEN には write 権限を一切要求しない
+# （G4 の読み取り検証専用。arm は GITHUB_TOKEN が行う）。
 
 name: auto-merge
 
@@ -167,7 +169,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 # スイープの多重起動を防ぐ（cron 遅延や手動起動との重複時は後発を待機させる）。
