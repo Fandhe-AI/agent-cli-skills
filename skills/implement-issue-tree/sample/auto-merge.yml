@@ -109,8 +109,9 @@
 #      人間マージ運用に留めること。
 #
 # 絞り込み条件（認可根拠ではない。誤爆防止の対象限定のみ。3 条件の AND）:
-#   1. author が上記 TRUSTED_AUTHOR（設定変数）に完全一致すること（gh pr list --author で
-#      サーバー側フィルタし、draft は除外）。
+#   1. author が上記 TRUSTED_AUTHOR（設定変数）に完全一致すること（open PR を REST API の
+#      --paginate で全ページ列挙し user.login の完全一致で選別。--limit 固定の gh pr list だと
+#      上限超過分が恒久的に漏れる — PR #208 codex P2 対応。draft は除外）。
 #   2. head ブランチが implement-issue-tree の作業ブランチ形式
 #      `<type>/<イシュー番号>-<short-name>`（type は Conventional Commits の英小文字 type）に
 #      アンカー付き正規表現（`^<type>/<数字>-<slug>$`）で厳密一致すること。
@@ -207,11 +208,16 @@ jobs:
               "Not arming anything (fail-closed)."
             exit 0
           fi
-          # --- 対象 PR の列挙（サーバー側 author フィルタ + draft 除外）---
+          # --- 対象 PR の列挙（--paginate で全ページ列挙 + author 完全一致 + draft 除外）---
+          # gh pr list --limit N は固定上限を超えた分が恒久的に漏れる（PR #208 codex P2）ため、
+          # REST API を --paginate で全件列挙し、author（user.login）の完全一致で選別する。
           # 列挙自体の失敗はスイープ全体を fail-closed skip（何も arm しない）。
-          if ! prs=$(gh pr list --repo "$REPO" --author "$TRUSTED_AUTHOR" \
-            --state open --limit 100 \
-            --json number,headRefName,baseRefName,isDraft 2>/dev/null); then
+          if ! prs=$(gh api "repos/${REPO}/pulls?state=open&per_page=100" \
+            --paginate --slurp --jq '
+              [.[][] | select(.user.login == env.TRUSTED_AUTHOR)
+                | {number, headRefName: .head.ref, baseRefName: .base.ref,
+                   isDraft: .draft}]
+            ' 2>/dev/null); then
             echo "skip: failed to list open PRs. Not arming anything (fail-closed)."
             exit 0
           fi
