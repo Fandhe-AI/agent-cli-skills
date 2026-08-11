@@ -4,39 +4,55 @@
 # auto-merge の予約（arm）を一切行わない（PR #206 の hook carve-out + agent precheck 方式は
 # 認可欠陥・自己申告捏造・即時マージ前提の虚偽が確認され撤回済み）。auto-merge を使う場合は、
 # 本 workflow を消費リポジトリの .github/workflows/auto-merge.yml として配置し、
-# 「誰の・どのブランチの PR を arm するか」の判定と arm 実行をサーバー側（GitHub Actions）へ
-# 委譲する。実際のマージ可否の判定は arm ではなく branch protection / ruleset の
-# required checks・必須レビュー等（サーバー側）が担う。
+# arm の実行をサーバー側（GitHub Actions）へ委譲する。
 #
-# 前提（これらが未設定だと意図しない即時マージ・arm 失敗になる）:
+# 認可の考え方（PR #207 codex ラウンド2 P0 対応）:
+#   author / ブランチ命名 / Closes マーカーの一致は、いずれも PR 作成主体（共有 gh 認証を
+#   持つエージェント）が自ら満たせる「偽造可能な provenance」であり、認可根拠にならない。
+#   これらは arm 対象の**絞り込み（誤爆防止）にすぎない**。
+#   本 workflow の認可根拠は「PR 作成主体が生成できない信頼済みシグナル」= ベースブランチの
+#   branch protection / ruleset をサーバー側 API で**実測検証**することに置く。arm 実行前に
+#   次の 3 点がすべて構成済みであることを決定的に検証し、1 つでも欠ければ arm せず終了する
+#   （fail-closed。API 取得・解析失敗も arm しない）:
+#     G1. required status checks が 1 件以上構成されている
+#     G2. required approving review count >= 1 が構成されている
+#         （GitHub は PR author の自己承認をサーバー側で拒否するため、これが
+#         「PR 作成主体が生成できない非 author 承認」という偽造不能シグナルになる）
+#     G3. dismiss stale reviews（承認後の HEAD 更新で承認を失効させる）が有効である
+#   この構造では、偽造 PR が仮に arm されても、サーバー側で非 author の人間承認と
+#   required checks が揃わない限りマージされず、人間の承認境界を迂回できない。arm は
+#   「承認とチェックが揃った時点で自動的にマージが完了する」利便性だけを担う。
+#
+# 前提（これらが未設定だと arm されない / arm 失敗になる）:
 #   1. リポジトリ設定で auto-merge を許可する（Settings → General → Allow auto-merge）
-#   2. base ブランチに branch protection / ruleset で required status checks を 1 件以上設定する
-#      （必要に応じて必須レビュー・conversation resolution も設定する。マージ判定はこれらが担う）
-#   注意: `gh pr merge --auto` は、対象 PR が既に全要件を満たしている場合は予約ではなく
-#   即時マージになる。required checks が未設定のリポジトリでは arm 直後にそのままマージされ得る
-#   ため、前提 2 を必ず先に設定すること。
+#   2. base ブランチに branch protection / ruleset で上記 G1〜G3 を設定する。
+#      注意: classic branch protection の読み取り API（GET /branches/{branch}/protection）は
+#      リポジトリ管理者権限を要求するため、workflow の GITHUB_TOKEN では読めないことがある。
+#      その場合 classic 側の実測は不成立となり arm されない（fail-closed）。**ruleset での
+#      構成を推奨**する（GET /rules/branches/{branch} は読み取り権限で実効ルールを取得できる）。
 #
-# 認可の考え方（3 条件の AND。いずれか 1 つでも欠けたら arm しない）:
+# 絞り込み条件（認可根拠ではない。誤爆防止の対象限定のみ。3 条件の AND）:
 #   1. author が「implement-issue-tree の PR 作成専用の automation identity（GitHub App の
 #      bot / machine user）」に完全一致すること。`REPLACE_WITH_AUTOMATION_BOT_LOGIN` を
 #      `your-automation-bot[bot]` のような専用 bot login に置き換える。
 #      【重要】人間の個人アカウント（リポジトリ owner 含む）を指定してはならない。
 #      個人アカウントを指定すると、その人物が手作業で作る通常の PR まで命名規約に一致する
-#      だけで自動マージ対象（arm 対象）になってしまう。専用 identity が未整備の場合は
-#      本 workflow を配置せず、人間マージ運用に留めること。
+#      だけで arm 対象になってしまう。専用 identity が未整備の場合は本 workflow を配置せず、
+#      人間マージ運用に留めること。
 #   2. head ブランチが implement-issue-tree の作業ブランチ形式
 #      `<type>/<イシュー番号>-<short-name>`（type は Conventional Commits の英小文字 type）に
 #      厳密一致すること。`if:` の prefix 判定は早期絞り込みで、確定判定は run 内の
 #      アンカー付き正規表現（`^<type>/<数字>-<slug>$`）が行う。
 #   3. PR 本文に implement-issue-tree 生成物のマーカー「Closes #<N>」（N はブランチ名の
-#      イシュー番号と同一）が行として存在すること。このスキルの PR Create フェーズは
-#      本文へ必ず `Closes #<N>` を書き込むため、これを provenance の突き合わせに使う。
+#      イシュー番号と同一）が行として存在すること。
 #
 # インジェクション対策（変更時も維持すること）:
 #   - PR タイトル・本文・ブランチ名・コメント等の未信頼テキストを `${{ }}` で run スクリプトへ
-#     展開しない。`${{ }}` で env へ渡すのはブランチ名・PR 番号（整数）・リポジトリ名のみで、
-#     いずれも env 経由でクォートして参照する。PR 本文はシェルへ一切展開せず、
-#     `gh pr view --json body --jq` の test() で真偽値だけを取り出して判定する。
+#     展開しない。`${{ }}` で env へ渡すのはブランチ名・base ブランチ名・PR 番号（整数）・
+#     リポジトリ名のみで、いずれも env 経由でクォートして参照する。PR 本文はシェルへ一切
+#     展開せず、`gh pr view --json body --jq` の test() で真偽値だけを取り出して判定する。
+#     branch protection の判定も jq で真偽値のみ取り出し、API レスポンス本文をシェルへ
+#     コマンドとして展開しない。
 #   - fork からの PR を昇格権限で扱う pull_request_target は使わない（pull_request のまま維持）。
 #
 # permissions は arm に必要な最小構成（contents: write は merge コミット作成、
@@ -56,7 +72,7 @@ jobs:
   arm:
     # author は implement-issue-tree 専用の automation identity（bot / machine user）のみ。
     # 人間の個人アカウント（owner 含む）は指定禁止（通常 PR まで arm 対象になるため）。
-    # prefix 判定は早期絞り込みで、確定判定は下の Verify provenance and arm step が行う。
+    # prefix 判定は早期絞り込みで、確定判定は下の Verify branch protection / provenance step が行う。
     if: >-
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login == 'REPLACE_WITH_AUTOMATION_BOT_LOGIN' &&
@@ -74,17 +90,61 @@ jobs:
       )
     runs-on: ubuntu-latest
     steps:
-      # provenance を確定判定してから arm する。判定に使う未信頼テキストは
-      # ブランチ名（env 経由・クォート参照）と PR 本文（gh --jq の test() で真偽値のみ取得）で、
-      # いずれもシェルコマンドとして展開されない。条件を満たさない PR は arm せず正常終了する
+      # 認可根拠 = branch protection の実測（G1〜G3）を先に検証し、通過した場合のみ
+      # 絞り込み（ブランチ名・本文マーカー）を確認して arm する。判定に使う値はすべて
+      # env 経由のクォート参照（ブランチ名・base ブランチ名・PR 番号・リポジトリ名）か
+      # jq で取り出した真偽値のみで、未信頼テキストをシェルコマンドとして展開しない。
+      # 条件を満たさない PR / 保護未構成のベースブランチでは arm せず正常終了する
       # （fail-closed skip。workflow を失敗させない）。
-      - name: Verify provenance and arm auto-merge
+      - name: Verify branch protection and provenance, then arm auto-merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
+          # --- 認可ゲート: base ブランチの branch protection / ruleset を実測検証 ---
+          # classic branch protection（管理者権限がないと 403/404。その場合は {} として扱い、
+          # ruleset 側の実測のみで判定する）と、ruleset の実効ルール
+          # （GET /rules/branches/{branch}。classic を含まないため両方を取得して OR で判定）を
+          # 取得する。取得失敗・解析失敗はすべて「保護なし」= arm しない側へ倒す（fail-closed）。
+          classic=$(gh api "repos/${REPO}/branches/${BASE_REF}/protection" 2>/dev/null) \
+            || classic='{}'
+          rules=$(gh api "repos/${REPO}/rules/branches/${BASE_REF}" --paginate --slurp \
+            2>/dev/null) || rules='[[]]'
+          # G1: required status checks >= 1 件（classic か ruleset のいずれかで構成済み）
+          checks_ok=$(jq -n --argjson c "$classic" --argjson r "$rules" '
+            (($c.required_status_checks? // {})
+              | ((.checks // .contexts // []) | length) > 0)
+            or ($r | flatten | any(
+              .type == "required_status_checks"
+              and ((.parameters.required_status_checks // []) | length) > 0))
+          ' 2>/dev/null) || checks_ok=false
+          # G2: 非 author 必須承認 >= 1（GitHub は author の自己承認をサーバー側で拒否する）
+          reviews_ok=$(jq -n --argjson c "$classic" --argjson r "$rules" '
+            (($c.required_pull_request_reviews? // {})
+              | (.required_approving_review_count // 0) >= 1)
+            or ($r | flatten | any(
+              .type == "pull_request"
+              and (.parameters.required_approving_review_count // 0) >= 1))
+          ' 2>/dev/null) || reviews_ok=false
+          # G3: dismiss stale reviews（承認後の HEAD 更新で承認失効）が有効
+          dismiss_ok=$(jq -n --argjson c "$classic" --argjson r "$rules" '
+            (($c.required_pull_request_reviews? // {})
+              | .dismiss_stale_reviews == true)
+            or ($r | flatten | any(
+              .type == "pull_request"
+              and .parameters.dismiss_stale_reviews_on_push == true))
+          ' 2>/dev/null) || dismiss_ok=false
+          if [ "$checks_ok" != "true" ] || [ "$reviews_ok" != "true" ] \
+            || [ "$dismiss_ok" != "true" ]; then
+            echo "skip: base branch '${BASE_REF}' protection not verified" \
+              "(required_checks=${checks_ok}, non_author_approvals>=1=${reviews_ok}," \
+              "dismiss_stale=${dismiss_ok}). Not arming (fail-closed)."
+            exit 0
+          fi
+          # --- 絞り込み（認可根拠ではない。誤爆防止のみ）---
           # 1. ブランチ名の厳密一致（implement-issue-tree の実装ブランチ命名規約に
           #    アンカー付きで一致し、イシュー番号を抽出できること）
           branch_re='^(feat|fix|docs|refactor|test|chore|style|build|ci|perf)/([0-9]+)-[0-9A-Za-z._-]+$'
