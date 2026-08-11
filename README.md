@@ -80,7 +80,7 @@ skills/
   implement-issue-tree/
     SKILL.md                         -- Issue ツリーを post-order DFS で自動開発
     sample/                          -- 引数例・ツリー例
-    script/                          -- preview-tree.sh、implement-issue-tree.js
+    scripts/                         -- preview-tree.sh、implement-issue-tree.js
   implement-review/
     SKILL.md                         -- コード変更の品質・セキュリティレビュー
   implement-review-pr/

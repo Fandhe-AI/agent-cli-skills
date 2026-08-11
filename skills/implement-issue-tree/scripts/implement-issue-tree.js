@@ -1932,7 +1932,7 @@ function implementPrompt(item, plan) {
 // Workflow ランタイムは agent() 単位の読み取り専用 credential・ツール allowlist を提供せず、
 // スクリプト自身も process / fs / shell を持たない。したがってこの分離自体は「権限の剥奪」では
 // なく「未信頼テキストと破壊的操作のコンテキスト分離」である。注入に従った監視エージェントが
-// gh pr merge を直接実行する経路は、merge-guard hook（script/merge-guard-hook.sh。PreToolUse で
+// gh pr merge を直接実行する経路は、merge-guard hook（scripts/merge-guard-hook.sh。PreToolUse で
 // subagent のマージ系コマンドを無条件 deny する）が best-effort で塞ぐ（承認境界ではない。同一
 // トラストドメインで偽造不能な認可を hook で検証できないため。PR #182 codex P0）。実際にマージを
 // 止めるのは「自動マージを行わない」方針そのもの（autoMerge の値によらず新規マージ経路を開かない

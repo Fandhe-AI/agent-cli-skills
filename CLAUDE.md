@@ -20,7 +20,7 @@ skills/                               -- スキル本体（各ディレクトリ
   implement-issue/
   implement-issue-tree/
     sample/                           -- 引数例・ツリー例
-    script/                           -- preview-tree.sh、implement-issue-tree.js（ツリー確認・自動開発）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
+    scripts/                          -- preview-tree.sh、implement-issue-tree.js（ツリー確認・自動開発）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
   implement-review/
   implement-review-pr/
   init-claude/
@@ -75,7 +75,7 @@ skills/                               -- スキル本体（各ディレクトリ
     anthropic-claude-code-extend      -- 参照スキル（symlink）
     (他 create-commit 等は skills/ への symlink)
   workflows/
-    implement-issue-tree.js           -- イシューツリー自動開発 Workflow（symlink: ../../skills/implement-issue-tree/script/implement-issue-tree.js）
+    implement-issue-tree.js           -- イシューツリー自動開発 Workflow（symlink: ../../skills/implement-issue-tree/scripts/implement-issue-tree.js）
   settings.local.json                 -- ローカル権限設定（git 管理対象外）
   settings.json                       -- hooks 設定（SessionStart リマインダー）
 ```
