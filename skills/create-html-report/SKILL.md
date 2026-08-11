@@ -137,7 +137,7 @@ report spec には最低限以下を持たせる。
 command -v python3 >/dev/null || echo "python3 が見つからない"
 ```
 
-未導入の場合は処理を中止し、導入方法を案内する（macOS: `brew install python3` / Ubuntu・Debian: `sudo apt install python3` 等。導入後に再実行）。
+未導入の場合は処理を中止し、導入方法を案内する（macOS: `brew install python3`。その他の環境: 各環境の公式セットアップ手順または環境管理者に確認する。導入後に再実行。権限昇格を要するコマンドは案内しない）。
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/scripts/render_report.py" \
