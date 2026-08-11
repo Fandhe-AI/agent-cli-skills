@@ -2316,7 +2316,7 @@ function mergeVerifyPrompt(item, impl) {
 
 // 自動マージ前提確認エージェント（Issue #205: autoMerge の認可境界を GitHub サーバー側へ
 // 外部化する設計の precheck）。ラン単位で 1 回だけ起動する読み取り専用エージェントであり、
-// PR 本文・レビューコメント等の未信頼テキストは一切読まない（実行コマンドを固定 3 種類に
+// PR 本文・レビューコメント等の未信頼テキストは一切読まない（実行コマンドを固定 4 種類に
 // 限定し、取得値は jq で bool / 件数へ正規化してから返させる。自由文をホストの分岐条件へ
 // 混入させない）。返却値は host 側（呼び出し元）で型を再検証し、autoMergeAllowed === true
 // かつ required checks 合計 >= 1 のときのみ arm 対象とする（このプロンプト自身は判定を行わず
@@ -2324,16 +2324,17 @@ function mergeVerifyPrompt(item, impl) {
 function autoMergePrecheckPrompt() {
   return [
     'この実行基盤の GitHub ネイティブ auto-merge 前提を確認する読み取り専用担当（Issue #205）。',
-    '権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の 3 つのみ:',
+    '権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の 4 つのみ:',
     `  1. gh api repos/{owner}/{repo} --jq '.allow_auto_merge'`,
     `  2. gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?] | length'`,
     `  3. gh api "repos/{owner}/{repo}/branches/${baseBranch}/protection/required_status_checks" --jq '.contexts | length'`,
+    `  4. gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "pull_request")] | length'（requiresReview 算出用の参考情報コマンド）`,
     '{owner}/{repo} は gh repo view --json owner,name --jq \'"\\(.owner.login)/\\(.name)"\' で取得すること。上記以外のコマンド（gh pr merge・gh pr review・書き込み系すべて）は実行しない。',
     '手順:',
     '1. コマンド 1 を実行し、取得できた bool をそのまま autoMergeAllowed として返す（取得失敗は false）。',
     '2. コマンド 2 を実行し、取得できた非負整数をそのまま requiredChecksRuleset として返す（ruleset なし・取得失敗は 0）。',
     '3. コマンド 3 を実行し、取得できた非負整数を requiredChecksClassic として返す（403/404・取得失敗は 0。classic protection 未設定は正常なケースであり異常ではない）。',
-    `4. 参考情報として gh api "repos/{owner}/{repo}/rules/branches/${baseBranch}" --jq '[.[] | select(.type == "pull_request")] | length' を実行し、1 件以上あれば requiresReview: true を返す（この値は arm 可否の判定には使われない。取得失敗は false）。`,
+    '4. コマンド 4 を実行し、1 件以上あれば requiresReview: true を返す（この値は arm 可否の判定には使われない。スキーマ必須フィールドを埋めるための参考情報。取得失敗は false）。',
     '返却: autoMergeAllowed（boolean）/ requiredChecksRuleset（整数）/ requiredChecksClassic（整数）/ requiresReview（boolean）/ summary（実行結果の要約）。値の解釈・推測はしない（取得できた生の値のみを返す）。',
   ].join('\n')
 }
@@ -3018,6 +3019,17 @@ const AUTO_MERGE_PRECHECK_FAILED_REASON =
   '自動マージの前提が未達のため無効化した（Issue #205）。repo 設定で auto-merge が許可されていない、'
   + 'または base ブランチに required status checks が設定されていない可能性がある。PR はマージ可能状態のまま停止した。'
   + 'repo の auto-merge 許可（Settings → General → Allow auto-merge）と base ブランチの required checks（branch protection / ruleset）を設定してから再実行すること。マージは当面 GitHub 上で人間が行うこと'
+// autoMerge: true かつラン単位の precheck（autoMergeArmable）は前提達成だったが、個別 PR の
+// arm（autoMergeArmPrompt。gh pr merge --auto --squash の予約）自体が失敗したランの停止理由
+// （Issue #205 → PR #206 Bugbot Medium 対応）。precheck 前提未達（AUTO_MERGE_PRECHECK_FAILED_REASON）
+// とは原因が異なる: precheck は repo/branch 設定（auto-merge 許可・required checks）の欠落を指すが、
+// この理由は「前提は満たされているのに、この PR の arm 呼び出しだけが失敗した」ことを指す。
+// 両者を同一メッセージへ落とすとオペレーターへ「repo 設定を直せ」という誤った是正指示が伝わる
+// ため、原因ごとにメッセージを分ける。
+const AUTO_MERGE_ARM_FAILED_REASON =
+  '自動マージの前提（repo の auto-merge 許可・base ブランチの required checks）は満たされているが、'
+  + 'この PR の auto-merge 予約（arm）に失敗した（Issue #205）。PR はマージ可能状態のまま停止した。'
+  + 'gh pr merge --auto --squash を手動実行するか、再実行して arm を再試行すること。マージは当面 GitHub 上で人間が行うこと'
 // autoMerge: true かつ前提達成で arm 済みだが、GitHub サーバー側の要件（必須レビュー等）の
 // 充足待ちで監視ラウンド予算を使い切って停止したランの理由（Issue #205）。armed は
 // メッセージ用途のみで merged 判定には使わないため、この理由は「マージが失敗した」ではなく
@@ -4424,7 +4436,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         ...(autoMergeArmed
           ? []
           : autoMergeEnabled
-            ? ['自動マージの前提が未達（Issue #205）']
+            // autoMergeArmable（ラン単位 precheck）が true なのに autoMergeArmed が false の
+            // ケースは「repo/branch の前提未達」ではなく「この PR の arm 呼び出し自体の失敗」
+            // であり、原因を取り違えないよう別文言にする（Issue #205 → PR #206 Bugbot 対応）。
+            ? [autoMergeArmable ? 'この PR の auto-merge arm に失敗（前提は満たされている。Issue #205）' : '自動マージの前提が未達（Issue #205）']
             : ['自動マージが無効（args.autoMerge が true でない。Issue #165）']),
       ]
       log(autoMergeArmed
@@ -4588,11 +4603,17 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             // を明示的に使う）。
             return await failMergeTerminal(capText(`${AUTO_MERGE_ARMED_WAITING_REASON}（PR のマージ済みクローズ回復のみ試行したが PR はマージ済みではなかった: ${execSummaryText}）`), 'blocked')
           }
-          // 停止理由は recoveryOnly の原因（外部チェック未確定 / 自動マージ無効・前提未達。
-          // Issue #165 / #205）に応じて出し分け、複数該当なら併記する。
+          // 停止理由は recoveryOnly の原因（外部チェック未確定 / 自動マージ無効・前提未達 /
+          // 前提達成だが個別 PR の arm 失敗。Issue #165 / #205）に応じて出し分け、複数該当なら
+          // 併記する。autoMergeArmable（ラン単位 precheck 成功）と autoMergeArmed（この PR の
+          // arm 成功）を混同すると、arm だけが失敗したケースでも「repo 設定の前提未達」という
+          // 誤った是正指示になるため、この分岐で明示的に区別する（Issue #205 → PR #206 Bugbot
+          // Medium 対応。AUTO_MERGE_ARM_FAILED_REASON の定義コメント参照）。
           const recoveryOnlyReason = [
             ...(!externalChecksConfirmed ? [EXTERNAL_CHECKS_UNCONFIRMED_REASON] : []),
-            ...(autoMergeEnabled ? [AUTO_MERGE_PRECHECK_FAILED_REASON] : [AUTO_MERGE_DISABLED_REASON]),
+            ...(autoMergeEnabled
+              ? [autoMergeArmable ? AUTO_MERGE_ARM_FAILED_REASON : AUTO_MERGE_PRECHECK_FAILED_REASON]
+              : [AUTO_MERGE_DISABLED_REASON]),
           ].join('。')
           return await failMergeTerminal(capText(`${recoveryOnlyReason}（PR のマージ済みクローズ回復のみ試行したが PR はマージ済みではなかった: ${execSummaryText}）`), 'blocked')
         } else if (execReason === 'unresolved-threads') {
