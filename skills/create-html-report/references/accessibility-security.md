@@ -126,7 +126,7 @@ self-contained 原則。**ページロード時・操作時に一切の外部通
 
 **禁止（external dependency）**:
 
-- `<script src>`（CDN・`data:` 含め値を問わず禁止）
+- 属性付き `<script>`（`src` は CDN・`data:` 含め値を問わず禁止。SVG 2 の `<script href>` / `xlink:href` も外部 JS を実行できるため、renderer が生成する「属性なし `<script>`」以外は属性の種類を問わず一律禁止）
 - `<link>` のリソース参照（stylesheet / preload 等。`data:text/css` 経由の `@import` 迂回を防ぐため値を問わず禁止）
 - external font（`@font-face` の remote `src`、Google Fonts 等）
 - remote `<img src="https://...">`
@@ -147,7 +147,7 @@ self-contained 原則。**ページロード時・操作時に一切の外部通
 
 **相対 URL も禁止**: `<link href="style.css">` / `<img src="image.png">` のような相対参照は、単一ファイル配布でファイル欠落・意図しないリクエストの原因になるため external dependency と同様に禁止する。validate_report.py の判定は次のとおり:
 
-- **能動コンテンツ・制御要素は値を問わず不合格**: `script src` / `link` / `iframe` / `object` / `embed` / `base` / `form` / `meta http-equiv="refresh"`（refresh のみ）/ SVG `feImage`。`data:` URI でも中身の JS / CSS / HTML が inline 検査（network API・`@import`・`url()` 許可リスト）を迂回できるため
+- **能動コンテンツ・制御要素は値を問わず不合格**: 属性付き `script`（`src` / SVG 2 の `href` / `xlink:href` / `type` 等、属性が 1 つでもあれば不合格）/ `link` / `iframe` / `object` / `embed` / `base` / `form` / `meta http-equiv="refresh"`（refresh のみ）/ SVG `feImage`。`data:` URI でも中身の JS / CSS / HTML が inline 検査（network API・`@import`・`url()` 許可リスト）を迂回できるため
 - **URL 運搬属性は存在自体で不合格（fail-closed）**: `formaction` / `ping` / `poster` / `cite` / `background` / `manifest` / `longdesc` / `srcset` / `imagesrcset` / `srcdoc` / `data` / `xml:base` 等。検査済みの `href` / `src` / `action` / `xlink:href` 以外で URL を運べる既知属性は、値のパース差異（`srcset` のカンマ区切り・`ping` の空白区切り等）で許可リスト検査をすり抜けやすいため
 - **受動メディアは画像 MIME allowlist の `data:` のみ許可**: `img` / `source` / `track` / `audio` / `video` の `src` は `data:image/png` / `image/jpeg` / `image/gif` / `image/webp` のみ許可（`image/svg+xml` は `<script>` を内包し得るため不許可）
 - **SVG の文書内 `#fragment` 参照は許可**: `<use href="#id">` / `<image href="#id">` 等。SMIL 系（`animate` / `set` / `animateMotion` / `mpath`）の `href` / `xlink:href` も同じ許可リスト（画像 `data:`・`#fragment`）で検査される

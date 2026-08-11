@@ -237,7 +237,7 @@ class ReportParser(HTMLParser):
 
         # リソース読み込みの検査（自己完結契約・fail-closed 設計）。
         # 検査は「タグ拒否 → URL 運搬属性拒否 → 個別許可リスト」の 3 層で閉じる:
-        # 1) 能動コンテンツ / ナビゲーション制御タグ（BANNED_TAGS、script src、
+        # 1) 能動コンテンツ / ナビゲーション制御タグ（BANNED_TAGS、属性付き script、
         #    meta http-equiv=refresh）は、data: URI や srcdoc 等の属性経由でも
         #    inline 検査（network API・@import・url() 許可リスト）を迂回できる
         #    ため、属性値を見ずタグの存在自体を一律不合格にする。
@@ -248,8 +248,15 @@ class ReportParser(HTMLParser):
         #    DATA_URI_ALLOWED の画像 MIME allowlist に一致する data: のみ許可。
         #    SVG の参照タグ（SVG_REF_TAGS）は文書内 #fragment 参照も許可。
         # 出典 <a href> は対象外 = 唯一の許可経路（check #9 で https / #fragment に制限）。
-        if tag == "script" and "src" in ad:
-            self.external_refs.append(f"<script src={ad['src']!r}>")
+        # <script> は属性が 1 つでも付いていたら無条件不合格にする（fail-closed）。
+        # src の列挙判定だけでは SVG 2 の <script href> / xlink:href が漏れ、
+        # INTERACTIVE_JS と同一の本文を併記すれば完全一致ゲート（check #6）も
+        # 通過して外部 JS をロード・実行できてしまう。renderer が生成するのは
+        # 「属性なしの <script>」のみのため、src / href / type 等を列挙せず
+        # 属性の有無だけで一律に拒否する。
+        if tag == "script" and ad:
+            self.external_refs.append(
+                f"<script {' '.join(sorted(ad))}>（属性付き script は一律禁止）")
         if tag in BANNED_TAGS:
             self.external_refs.append(f"<{tag}> タグ（存在自体を禁止）")
         # meta http-equiv="refresh" は content 属性の URL でリダイレクトでき、
@@ -396,7 +403,7 @@ def run_checks(path):
     #    許可画像 MIME の data: と SVG 文書内 #fragment のみ許可。
     #    相対 URL も自己完結契約違反として不合格。出典 <a href> は #9 で別途検査）
     check("リソース読み込みがない（link / iframe / object / embed / base / form / feImage / "
-          "meta refresh はタグ自体・script src・URL 運搬属性（formaction / ping / poster 等）は一律禁止、"
+          "meta refresh はタグ自体・属性付き script・URL 運搬属性（formaction / ping / poster 等）は一律禁止、"
           "img 等は画像 data: src と #fragment のみ許可）",
           not parser.external_refs, "; ".join(parser.external_refs[:5]))
     css_all = "\n".join(parser.styles)
