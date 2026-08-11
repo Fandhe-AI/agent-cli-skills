@@ -16,18 +16,27 @@
 #   即時マージになる。required checks が未設定のリポジトリでは arm 直後にそのままマージされ得る
 #   ため、前提 2 を必ず先に設定すること。
 #
-# 認可の考え方:
-#   - arm してよい PR かどうかは `if:` 条件（author の完全一致 + head ブランチの命名規約
-#     prefix）で判定する。author はこのスキルが PR を作成する信頼済み identity
-#     （例: リポジトリ owner のアカウント、専用 bot）に置き換えること。
-#   - head ブランチの命名規約は implement-issue-tree の作業ブランチ形式
-#     `<type>/<イシュー番号>-<short-name>`（type は Conventional Commits の英小文字 type）に
-#     合わせて prefix 一致で判定する。不要な type は削除してよい。
+# 認可の考え方（3 条件の AND。いずれか 1 つでも欠けたら arm しない）:
+#   1. author が「implement-issue-tree の PR 作成専用の automation identity（GitHub App の
+#      bot / machine user）」に完全一致すること。`REPLACE_WITH_AUTOMATION_BOT_LOGIN` を
+#      `your-automation-bot[bot]` のような専用 bot login に置き換える。
+#      【重要】人間の個人アカウント（リポジトリ owner 含む）を指定してはならない。
+#      個人アカウントを指定すると、その人物が手作業で作る通常の PR まで命名規約に一致する
+#      だけで自動マージ対象（arm 対象）になってしまう。専用 identity が未整備の場合は
+#      本 workflow を配置せず、人間マージ運用に留めること。
+#   2. head ブランチが implement-issue-tree の作業ブランチ形式
+#      `<type>/<イシュー番号>-<short-name>`（type は Conventional Commits の英小文字 type）に
+#      厳密一致すること。`if:` の prefix 判定は早期絞り込みで、確定判定は run 内の
+#      アンカー付き正規表現（`^<type>/<数字>-<slug>$`）が行う。
+#   3. PR 本文に implement-issue-tree 生成物のマーカー「Closes #<N>」（N はブランチ名の
+#      イシュー番号と同一）が行として存在すること。このスキルの PR Create フェーズは
+#      本文へ必ず `Closes #<N>` を書き込むため、これを provenance の突き合わせに使う。
 #
 # インジェクション対策（変更時も維持すること）:
 #   - PR タイトル・本文・ブランチ名・コメント等の未信頼テキストを `${{ }}` で run スクリプトへ
-#     展開しない。run が参照するのは PR 番号（整数）とリポジトリ名のみで、いずれも env 経由で
-#     クォートして渡す。author・ブランチの判定は run ではなく `if:` 式で行う。
+#     展開しない。`${{ }}` で env へ渡すのはブランチ名・PR 番号（整数）・リポジトリ名のみで、
+#     いずれも env 経由でクォートして参照する。PR 本文はシェルへ一切展開せず、
+#     `gh pr view --json body --jq` の test() で真偽値だけを取り出して判定する。
 #   - fork からの PR を昇格権限で扱う pull_request_target は使わない（pull_request のまま維持）。
 #
 # permissions は arm に必要な最小構成（contents: write は merge コミット作成、
@@ -45,11 +54,12 @@ permissions:
 
 jobs:
   arm:
-    # author はこのスキルの PR 作成 identity に置き換える（例: 'your-owner-login'）。
-    # ブランチ判定は implement-issue-tree の命名規約 `<type>/<N>-<short-name>` の prefix 一致。
+    # author は implement-issue-tree 専用の automation identity（bot / machine user）のみ。
+    # 人間の個人アカウント（owner 含む）は指定禁止（通常 PR まで arm 対象になるため）。
+    # prefix 判定は早期絞り込みで、確定判定は下の Verify provenance and arm step が行う。
     if: >-
       github.event.pull_request.draft == false &&
-      github.event.pull_request.user.login == 'REPLACE_WITH_TRUSTED_LOGIN' &&
+      github.event.pull_request.user.login == 'REPLACE_WITH_AUTOMATION_BOT_LOGIN' &&
       (
         startsWith(github.head_ref, 'feat/') ||
         startsWith(github.head_ref, 'fix/') ||
@@ -64,9 +74,31 @@ jobs:
       )
     runs-on: ubuntu-latest
     steps:
-      - name: Arm GitHub native auto-merge
+      # provenance を確定判定してから arm する。判定に使う未信頼テキストは
+      # ブランチ名（env 経由・クォート参照）と PR 本文（gh --jq の test() で真偽値のみ取得）で、
+      # いずれもシェルコマンドとして展開されない。条件を満たさない PR は arm せず正常終了する
+      # （fail-closed skip。workflow を失敗させない）。
+      - name: Verify provenance and arm auto-merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-        run: gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          # 1. ブランチ名の厳密一致（implement-issue-tree の実装ブランチ命名規約に
+          #    アンカー付きで一致し、イシュー番号を抽出できること）
+          branch_re='^(feat|fix|docs|refactor|test|chore|style|build|ci|perf)/([0-9]+)-[0-9A-Za-z._-]+$'
+          if [[ ! "$HEAD_REF" =~ $branch_re ]]; then
+            echo "skip: head branch does not match implement-issue-tree convention: $HEAD_REF"
+            exit 0
+          fi
+          issue="${BASH_REMATCH[2]}"
+          # 2. PR 本文にワークフロー生成物マーカー「Closes #<ブランチ内イシュー番号>」が
+          #    行として存在すること（issue は上の正規表現で抽出済みの数字のみ）
+          marker_ok=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body \
+            --jq ".body | test(\"(^|\\n)Closes #${issue}([^0-9]|\$)\")")
+          if [ "$marker_ok" != "true" ]; then
+            echo "skip: PR body lacks marker 'Closes #${issue}'"
+            exit 0
+          fi
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
