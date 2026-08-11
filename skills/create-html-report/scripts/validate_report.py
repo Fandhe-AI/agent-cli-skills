@@ -38,8 +38,11 @@ NETWORK_API = re.compile(
 # リソース属性と同じ許可リスト方式（許可画像 MIME の data: と #fragment のみ）で検査する。
 CSS_IMPORT = re.compile(r"@import", re.IGNORECASE)
 
-# CSS の url(...) トークン抽出（引用符・前後空白を許容）
-CSS_URL = re.compile(r"url\(\s*(['\"]?)([^)'\"]*)\1\s*\)", re.IGNORECASE)
+# CSS の url(...) トークン抽出。引用付き（" / '）と無引用を別分岐でパースする
+# （引用付きは値中の `)` を含み得るため、単一の文字クラスでは正しく抽出できない）。
+# ここでマッチしない url( の出現は css_bad_urls が「解析不能」として不合格にする。
+CSS_URL = re.compile(
+    r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]*))\s*\)""", re.IGNORECASE)
 
 # javascript: URL 判定前に除去する文字（空白と C0 制御文字）。
 # ブラウザは `java\tscript:` や改行・CR 混じりの scheme も実行するため、
@@ -61,10 +64,17 @@ def css_bad_urls(css_text):
     欠落・意図しないリクエストの原因になるため、http(s) / // と同様に不合格。
     """
     bad = []
+    n_matched = 0
     for m in CSS_URL.finditer(css_text):
-        v = m.group(2).strip()
+        n_matched += 1
+        v = next((g for g in m.groups() if g is not None), "").strip()
         if not (DATA_URI_ALLOWED.match(v) or FRAGMENT_URL.match(v)):
             bad.append(f"url({v!r})")
+    # フォールバック: CSS_URL で抽出できなかった url( は解析不能として不合格にする
+    # （regex にマッチしない書式で許可リスト検査をすり抜ける取りこぼしを塞ぐ）
+    n_total = len(re.findall(r"url\(", css_text, re.IGNORECASE))
+    if n_total > n_matched:
+        bad.append(f"解析不能な url( が {n_total - n_matched} 件")
     return bad
 
 
@@ -142,23 +152,25 @@ class ReportParser(HTMLParser):
                 self.bad_js_urls.append(f"<{tag} {key}>")
 
         # リソース読み込み属性の検査（自己完結契約）。
-        # 能動コンテンツ（script src / link / iframe / object / embed）は、
-        # data: URI でも中身の JS / CSS / HTML が inline 検査（network API・
-        # @import・url() 許可リスト）を迂回できるため、値を問わず一律不合格。
+        # 能動コンテンツ（link / iframe / object / embed、script src）は、
+        # data: URI や srcdoc / imagesrcset 等の属性経由でも中身の JS / CSS /
+        # HTML が inline 検査（network API・@import・url() 許可リスト）を
+        # 迂回できるため、属性を見ずタグの存在自体を一律不合格にする。
         # 受動メディア（img / source / track / audio / video / SVG image）は
-        # DATA_URI_ALLOWED の画像 MIME allowlist に一致する data: のみ許可。
+        # DATA_URI_ALLOWED の画像 MIME allowlist に一致する data: src のみ許可。
+        # srcset はカンマ区切り複数候補のパース差異で検査をすり抜けやすく、
+        # renderer も生成しないため属性自体を不許可にする。
         # SVG <image>/<use> は文書内 #fragment 参照も許可。
         # 出典 <a href> は対象外 = 唯一の許可経路（check #9 で https / #fragment に制限）。
         if tag == "script" and "src" in ad:
             self.external_refs.append(f"<script src={ad['src']!r}>")
         if tag in ("link", "iframe", "object", "embed"):
-            for key in ("href", "src", "data", "srcset"):
-                if key in ad:
-                    self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
+            self.external_refs.append(f"<{tag}> タグ（存在自体を禁止）")
         if tag in ("img", "source", "track", "audio", "video"):
-            for key in ("src", "srcset"):
-                if key in ad and not DATA_URI_ALLOWED.match(ad.get(key) or ""):
-                    self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
+            if "srcset" in ad:
+                self.external_refs.append(f"<{tag} srcset={ad['srcset']!r}>")
+            if "src" in ad and not DATA_URI_ALLOWED.match(ad.get("src") or ""):
+                self.external_refs.append(f"<{tag} src={ad['src']!r}>")
         if tag in ("image", "use"):  # SVG 内のリソース参照
             for key in ("href", "xlink:href"):
                 v = ad.get(key) or ""
@@ -290,8 +302,8 @@ def run_checks(path):
     # 5. リソース読み込み属性ゼロ（能動要素は値を問わず不合格。受動メディアは
     #    許可画像 MIME の data: と SVG 文書内 #fragment のみ許可。
     #    相対 URL も自己完結契約違反として不合格。出典 <a href> は #9 で別途検査）
-    check("リソース読み込み属性がない（script / link / iframe / object / embed は一律禁止、"
-          "img 等は画像 data: と #fragment のみ許可）",
+    check("リソース読み込みがない（link / iframe / object / embed はタグ自体・script src は一律禁止、"
+          "img 等は画像 data: src と #fragment のみ許可）",
           not parser.external_refs, "; ".join(parser.external_refs[:5]))
     css_all = "\n".join(parser.styles)
     css_bad = css_bad_urls(css_all)

@@ -123,6 +123,27 @@ def fmt(value):
     return s.rstrip("0").rstrip(".")
 
 
+def require_dict(value, ctx):
+    """spec の入れ子が object（dict）であることを検証する。
+
+    JSON として構文上正しくても構造が契約と異なる spec（root が配列・
+    chart が数値等）で .get() の AttributeError を露出させないための型ゲート。
+    """
+    if not isinstance(value, dict):
+        raise SpecError(f"{ctx} は object（JSON オブジェクト）で指定する: "
+                        f"{type(value).__name__} が渡された")
+    return value
+
+
+def require_list(value, ctx):
+    """spec の配列フィールドの型ゲート。None は空リストとして許容する（省略可フィールド用）。"""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise SpecError(f"{ctx} は配列で指定する: {type(value).__name__} が渡された")
+    return value
+
+
 def parse_date(value, ctx="日付"):
     """ISO 形式（YYYY-MM-DD）の日付を parse する。不正なら SpecError。"""
     try:
@@ -253,8 +274,14 @@ def data_table(caption, columns, rows, interactive=False):
     )
 
 
-def figure_html(chart, svg, legend, table_html):
-    """chart の visual unit: figcaption（takeaway）→ SVG → source/note → details 内データ表。"""
+def figure_html(chart, svg, legend, table_html, interactive):
+    """chart の visual unit: figcaption（takeaway）→ SVG → source/note → details 内データ表。
+
+    exact-data table を包む details の開閉は印刷契約に直結する。閉じた details の
+    中身はブラウザ仕様で印刷されない（print CSS の display:block では展開できない）ため:
+    - interactive モード: 閉じて出力し、beforeprint / afterprint の JS で開閉を切り替える
+    - 標準モード（JS なし）: open 付きで出力し、印刷時も常に表が読める状態を保つ
+    """
     parts = [f'<figure class="chart-figure">']
     parts.append(f"<figcaption>{esc(chart['title'])}</figcaption>")
     parts.append(f'<div class="chart-wrap">{svg}</div>')
@@ -267,8 +294,9 @@ def figure_html(chart, svg, legend, table_html):
         notes.append(f"出典: {esc(chart['source'])}")
     if notes:
         parts.append(f'<p class="chart-note">{" ／ ".join(notes)}</p>')
+    open_attr = "" if interactive else " open"
     parts.append(
-        f'<details class="chart-data"><summary>データ表を表示</summary>{table_html}</details>'
+        f'<details class="chart-data"{open_attr}><summary>データ表を表示</summary>{table_html}</details>'
     )
     parts.append("</figure>")
     return "".join(parts)
@@ -419,7 +447,7 @@ def render_bar(chart, ids, interactive):
     cols = ["項目"] + [f"{s.get('name', '値')}{unit_sfx}" for s in series]
     rows = [[(cats[i], False)] + [(fmt(vals[j][i]), True) for j in range(ns)] for i in range(nc)]
     table = data_table(f"{chart['title']}（データ）", cols, rows, interactive)
-    return figure_html(chart, "".join(out), legend, table)
+    return figure_html(chart, "".join(out), legend, table, interactive)
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +558,7 @@ def render_line(chart, ids, interactive):
     cols = ["時点"] + [f"{s.get('name', '値')}{unit_sfx}" for s in series]
     rows = [[(xs[i], False)] + [(fmt(vals[j][i]), True) for j in range(len(series))] for i in range(nc)]
     table = data_table(f"{chart['title']}（データ）", cols, rows, interactive)
-    return figure_html(chart, "".join(out), legend, table)
+    return figure_html(chart, "".join(out), legend, table, interactive)
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +633,7 @@ def render_scatter(chart, ids, interactive):
         for x, y, label in pts:
             rows.append([(label or sname, False), (sname, False), (fmt(x), True), (fmt(y), True)])
     table = data_table(f"{chart['title']}（データ）", ["項目", "系列", x_label, y_label], rows, interactive)
-    return figure_html(chart, "".join(out), legend, table)
+    return figure_html(chart, "".join(out), legend, table, interactive)
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +715,7 @@ def render_heatmap(chart, ids, interactive):
     trows = [[(rows_lbl[r], False)] + [(fmt(grid[r][c]), True) for c in range(len(cols_lbl))]
              for r in range(len(rows_lbl))]
     table = data_table(f"{chart['title']}（データ）", cols, trows, interactive)
-    return figure_html(chart, "".join(out), "", table)
+    return figure_html(chart, "".join(out), "", table, interactive)
 
 
 # ---------------------------------------------------------------------------
@@ -777,7 +805,7 @@ def render_waterfall(chart, ids, interactive):
             for label, base, topv, kind, v in bars]
     table = data_table(f"{chart['title']}（データ）",
                        ["項目", "区分", f"値{unit_sfx}", f"累計{unit_sfx}"], rows, interactive)
-    return figure_html(chart, "".join(out), legend, table)
+    return figure_html(chart, "".join(out), legend, table, interactive)
 
 
 # ---------------------------------------------------------------------------
@@ -835,7 +863,7 @@ def render_donut(chart, ids, interactive):
     rows = [[(slices[j].get("label", ""), False), (fmt(vals[j]), True),
              (f"{vals[j] / total * 100:.1f}%", True)] for j in range(len(slices))]
     table = data_table(f"{chart['title']}（データ）", ["区分", f"値{unit_sfx}", "構成比"], rows, interactive)
-    return figure_html(chart, "".join(out), legend, table)
+    return figure_html(chart, "".join(out), legend, table, interactive)
 
 
 # ---------------------------------------------------------------------------
@@ -897,7 +925,7 @@ def render_radar(chart, ids, interactive):
     cols = ["軸"] + [s.get("name", "値") for s in series]
     rows = [[(axes[i], False)] + [(fmt(vals[j][i]), True) for j in range(len(series))] for i in range(n)]
     table = data_table(f"{chart['title']}（データ・最大値 {fmt(vmax)}）", cols, rows, interactive)
-    return figure_html(chart, "".join(out), legend, table)
+    return figure_html(chart, "".join(out), legend, table, interactive)
 
 
 # ---------------------------------------------------------------------------
@@ -910,7 +938,7 @@ GANTT_STATUS = {
     "in-progress": ("var(--status-active)", "進行中"),
     "planned": ("var(--status-planned)", "予定"),
     "at-risk": ("var(--status-risk)", "リスク"),
-    "blocked": ("var(--status-risk)", "ブロック"),
+    "blocked": ("var(--status-blocked)", "ブロック"),
 }
 
 
@@ -1047,7 +1075,8 @@ def render_gantt(chart, ids, interactive):
     out.append("</svg>")
 
     legend = legend_html(
-        [(swatch_box(GANTT_STATUS[k][0]), GANTT_STATUS[k][1]) for k in ("done", "in-progress", "planned", "at-risk")]
+        [(swatch_box(GANTT_STATUS[k][0]), GANTT_STATUS[k][1])
+         for k in ("done", "in-progress", "planned", "at-risk", "blocked")]
     )
 
     # SVG と同一データの表（task / start / end / progress / status）
@@ -1073,7 +1102,7 @@ def render_gantt(chart, ids, interactive):
         name_by_id = {t.get("id"): t.get("name", "") for t in tasks if t.get("id")}
         dep_rows = [[(n, False), (name_by_id.get(d, str(d)), False)] for n, d in deps]
         dep_html = data_table("タスク依存関係", ["タスク", "依存先（先行タスク）"], dep_rows, interactive)
-    return figure_html(chart, "".join(out), legend, table + dep_html)
+    return figure_html(chart, "".join(out), legend, table + dep_html, interactive)
 
 
 CHART_RENDERERS = {
@@ -1162,6 +1191,7 @@ def render_sections(sections, ids, interactive):
     html_parts, toc_entries = [], []
     seen_ids = set()
     for i, sec in enumerate(sections, 1):
+        require_dict(sec, f"sections[{i - 1}]")
         sid = sec.get("id") or f"sec-{i}"
         # sections[].id の契約検証（references/report-spec.md の「sections[].id の契約」参照）。
         # 明示指定は形式・予約 id を検査し、自動採番 sec-N を含む全 id で一意性を要求する。
@@ -1183,7 +1213,8 @@ def render_sections(sections, ids, interactive):
         toc_entries.append((sid, heading))
         parts = [f'<section id="{esc(sid)}"><h2>{esc(heading)}</h2>']
         parts.append(render_body_text(sec.get("body")))
-        for chart in sec.get("charts", []):
+        for j, chart in enumerate(require_list(sec.get("charts"), f"sections[{i - 1}].charts")):
+            require_dict(chart, f"sections[{i - 1}].charts[{j}]")
             ctype = chart.get("type")
             renderer = CHART_RENDERERS.get(ctype)
             if renderer is None:
@@ -1191,7 +1222,8 @@ def render_sections(sections, ids, interactive):
             if not chart.get("title"):
                 raise SpecError(f"chart（type={ctype}）に title がない")
             parts.append(renderer(chart, ids, interactive))
-        for tbl in sec.get("tables", []):
+        for j, tbl in enumerate(require_list(sec.get("tables"), f"sections[{i - 1}].tables")):
+            require_dict(tbl, f"sections[{i - 1}].tables[{j}]")
             parts.append(render_section_table(tbl, interactive))
         parts.append("</section>")
         html_parts.append("".join(parts))
@@ -1246,6 +1278,8 @@ CSS = """
   --series-5: #009E73; --series-6: #CC79A7; --series-7: #F0E442; --series-8: #8A8F94;
   --status-done: #009E73; --status-active: #0072B2;
   --status-planned: #8A8F94; --status-risk: #D55E00;
+  /* blocked は at-risk（朱）と区別するため Okabe-Ito の赤紫を割り当てる */
+  --status-blocked: #CC79A7;
   --pos: #0072B2; --neg: #D55E00;
 }
 @media (prefers-color-scheme: dark) {
@@ -1347,8 +1381,9 @@ footer.report-footer .footer-inner { max-width: 60rem; margin-inline: auto; }
   }
   body { background: #ffffff; }
   .skip-link, #toc, .chart-data summary { display: none; }
-  .chart-data[open] summary { display: none; }
-  details.chart-data { display: block; }
+  /* 注: 閉じた details の中身は CSS（display:block 等）では印刷に出せない（ブラウザ仕様）。
+     データ表の印刷可視化は、標準モード = open 属性付き出力、
+     interactive モード = beforeprint / afterprint JS の開閉切替で保証する */
   .chart-figure, .kpi-card, tr { break-inside: avoid; }
   h2 { break-after: avoid; }
   * { box-shadow: none !important; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
@@ -1438,6 +1473,20 @@ INTERACTIVE_JS = """
       if (sec) observer.observe(sec);
     });
   }
+
+  /* 印刷対応: 閉じた <details> の中身はブラウザ仕様で印刷されない（print CSS の
+     display:block では展開できない）ため、beforeprint で閉じているデータ表を
+     すべて開き、afterprint で元の開閉状態へ戻す */
+  var openedForPrint = [];
+  window.addEventListener("beforeprint", function () {
+    openedForPrint = Array.prototype.slice.call(
+      document.querySelectorAll("details.chart-data:not([open])"));
+    openedForPrint.forEach(function (d) { d.open = true; });
+  });
+  window.addEventListener("afterprint", function () {
+    openedForPrint.forEach(function (d) { d.open = false; });
+    openedForPrint = [];
+  });
 })();
 """
 
@@ -1447,13 +1496,28 @@ INTERACTIVE_JS = """
 # ---------------------------------------------------------------------------
 
 def build_html(spec):
+    # 型ゲート: JSON として妥当でも構造が契約と異なる spec を、traceback ではなく
+    # 日本語 SpecError で拒否する（残余の構造不備は main() の安全網が正規化する）
+    require_dict(spec, "spec の root")
+    kpis = require_list(spec.get("kpis"), "kpis")
+    for i, k in enumerate(kpis):
+        require_dict(k, f"kpis[{i}]")
+    findings = require_list(spec.get("findings"), "findings")
+    sources = require_list(spec.get("sources"), "sources")
+    for i, s in enumerate(sources):
+        require_dict(s, f"sources[{i}]")
+    assumptions = require_list(spec.get("assumptions"), "assumptions")
+    if spec.get("meta") is not None:
+        require_dict(spec.get("meta"), "meta")
+
     ids = Ids()
     interactive = bool(spec.get("interactive"))
     title = spec.get("title")
     if not title:
         raise SpecError("spec に title がない")
 
-    sections_html, toc_entries = render_sections(spec.get("sections", []), ids, interactive)
+    sections_html, toc_entries = render_sections(
+        require_list(spec.get("sections"), "sections"), ids, interactive)
 
     meta_bits = []
     if spec.get("date"):
@@ -1488,11 +1552,11 @@ def build_html(spec):
         '<main id="main">',
         render_toc(toc_entries),
         summary,
-        render_kpis(spec.get("kpis")),
-        render_findings(spec.get("findings")),
+        render_kpis(kpis),
+        render_findings(findings),
         sections_html,
-        render_assumptions(spec.get("assumptions")),
-        render_sources(spec.get("sources")),
+        render_assumptions(assumptions),
+        render_sources(sources),
         "</main>",
         '<footer class="report-footer"><div class="footer-inner">',
         f"<p>生成: {esc(generated_at)} ／ generator: {esc(generator)}</p>",
@@ -1525,6 +1589,13 @@ def main(argv=None):
         html_text = build_html(spec)
     except SpecError as e:
         print(f"spec エラー: {e}", file=sys.stderr)
+        return 1
+    except (AttributeError, TypeError, KeyError, ValueError, IndexError) as e:
+        # 型ゲートで網羅しきれない構造不備の安全網。traceback を露出させず
+        # 「spec 不備は日本語エラー・終了コード 1」の契約に正規化する。
+        print(f"spec エラー: spec の構造が不正で描画できない"
+              f"（{type(e).__name__}: {e}）。references/report-spec.md の型契約を確認すること。",
+              file=sys.stderr)
         return 1
 
     out_dir = os.path.dirname(os.path.abspath(args.output))

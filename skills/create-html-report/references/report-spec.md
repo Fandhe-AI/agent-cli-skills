@@ -38,6 +38,8 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/validate_report.py" <out.html>   # 生成�
 | `scope` | — | string | 対象・期間の説明 |
 | `interactive` | — | boolean | `true` のときのみ inline JS（テーブルソート・TOC スクロールスパイ）を注入。既定 `false` |
 | `summary` | — | string \| string[] | 要約。配列は段落ごとに `<p>` 化 |
+
+**型契約**: spec の root は JSON object であること。`sections` / `kpis` / `findings` / `sources` / `assumptions` 等の配列フィールドとその要素（section / chart / table / kpi / source は object）が上表・各節の型と異なる場合、renderer は traceback を出さず日本語の SpecError（終了コード 1）で拒否する。
 | `kpis` | — | array | [KPI カード](#kpis) |
 | `findings` | — | array | [主な所見](#findings) |
 | `sections` | — | array | [本文セクション](#sections)。**3 個以上で TOC が自動生成される** |
@@ -105,7 +107,7 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
 | `note` | — | 注記 |
 | `accessibility_summary` | 推奨 | SVG `<desc>` に入る screen reader 向け要約。**主要な数値と傾向を文章で書く**。省略時は自動生成の汎用文になる |
 
-各 chart は figure 単位（figcaption → SVG → note/出典 → `<details>` 内の exact-data table）で描画され、データ表は renderer が自動生成する。
+各 chart は figure 単位（figcaption → SVG → note/出典 → `<details>` 内の exact-data table）で描画され、データ表は renderer が自動生成する。閉じた `<details>` の中身はブラウザ仕様で印刷されないため、標準モード（`interactive` 未指定/false）では `open` 付きで出力し、interactive モードでは印刷時に JS（beforeprint / afterprint）が自動で開閉する。
 
 ## chart type 別 data 形式
 

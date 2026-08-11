@@ -34,6 +34,7 @@
             {"id": "T3", "name": "クラスタ構築", "phase": "実装", "start": "2026-08-03", "end": "2026-08-14", "progress": 0.8, "status": "in-progress", "dependsOn": ["M1"]},
             {"id": "T4", "name": "インデックス移行", "phase": "実装", "start": "2026-08-10", "end": "2026-09-04", "progress": 0.15, "status": "at-risk", "dependsOn": ["T3"]},
             {"id": "T5", "name": "検索 API 改修", "phase": "実装", "start": "2026-08-17", "end": "2026-09-18", "progress": 0.0, "status": "planned", "dependsOn": ["M1"]},
+            {"id": "T5b", "name": "外部ベンダー接続申請", "phase": "実装", "start": "2026-08-24", "end": "2026-09-11", "progress": 0.0, "status": "blocked", "dependsOn": ["T3"]},
             {"id": "T6", "name": "データ検証", "phase": "検証", "start": "2026-09-07", "end": "2026-09-30", "progress": 0.0, "status": "planned", "dependsOn": ["T4"]},
             {"id": "T7", "name": "負荷試験", "phase": "検証", "start": "2026-09-28", "end": "2026-10-16", "progress": 0.0, "status": "planned", "dependsOn": ["T5", "T6"]},
             {"id": "M2", "name": "移行判定会議", "phase": "検証", "milestone": true, "date": "2026-10-23", "status": "planned"},

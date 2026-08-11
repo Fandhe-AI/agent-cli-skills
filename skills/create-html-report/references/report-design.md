@@ -311,9 +311,10 @@ th { text-align: left; }
   /* navigation・操作 UI を非表示 */
   nav, .skip-link, .controls, button { display: none; }
 
-  /* 折りたたみを展開して印字 */
-  details { display: block; }
-  details > * { display: block; }
+  /* 注: 閉じた <details> の中身は CSS（display:block 等）では印刷に出せない
+     （ブラウザ仕様）。折りたたみの印刷可視化は CSS ではなく、
+     open 属性付きで出力する（JS なし）か、beforeprint / afterprint の JS で
+     開閉を切り替える（interactive モード）ことで実現する */
 
   /* 不自然な page break を防ぐ */
   figure, .kpi, tr, h2, h3 { break-inside: avoid-page; }
@@ -339,7 +340,7 @@ th { text-align: left; }
 ```
 
 - chart・URL がページ外へ切れないことを確認する。A4 幅を超える Gantt は縮小して収めるか、table を canonical にする。
-- 重要情報を閉じた `<details>` の中だけへ置かない（印刷で消える実装を避けるため、上記のように print では展開する）。
+- 重要情報を閉じた `<details>` の中だけへ置かない。閉じた `<details>` は print CSS では展開できないため、JS なしなら `open` 付きで出力し、JS ありなら beforeprint / afterprint で開閉する。
 
 ## prefers-reduced-motion
 
