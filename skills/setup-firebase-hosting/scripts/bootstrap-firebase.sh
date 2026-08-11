@@ -295,12 +295,36 @@ log "Hosting サイト ${SITE_ID} を作成します"
 # 最小の Site ペイロード（{}）を明示的に送る。
 site_result="$(api_post "https://firebasehosting.googleapis.com/v1beta1/projects/${PROJECT_ID}/sites?siteId=${SITE_ID}" '{}' || true)"
 site_status="$(printf '%s' "${site_result}" | sed -n 's/^HTTP_STATUS://p')"
+
+# サイト作成の 409（already exists）は「自プロジェクトに作成済み（冪等成功）」
+# と「別プロジェクトが同じサイト ID を取得済み（このままでは deploy 不能）」の
+# どちらでも返る。サイト ID は全 Firebase で一意のため、自プロジェクト配下に
+# サイトが存在することを GET で確認できた場合のみ冪等成功とみなす。他者取得
+# のまま進めると、SA・Secret を作り終えた後のデプロイで初めて失敗する。
+verify_site_ownership() {
+  local get_result get_status
+  get_result="$(curl -sS -X GET "https://firebasehosting.googleapis.com/v1beta1/projects/${PROJECT_ID}/sites/${SITE_ID}" \
+    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+    -H "x-goog-user-project: ${PROJECT_ID}" \
+    -w '\nHTTP_STATUS:%{http_code}')"
+  get_status="$(printf '%s' "${get_result}" | sed -n 's/^HTTP_STATUS://p')"
+  if [ "${get_status}" = "200" ]; then
+    echo "既にプロジェクト ${PROJECT_ID} 配下に存在するためスキップします（https://${SITE_ID}.web.app）"
+  else
+    die "サイト ID ${SITE_ID} は既に使用されていますが、プロジェクト ${PROJECT_ID} 配下には
+存在を確認できませんでした（取得結果 HTTP ${get_status}）。別のプロジェクトが同じ
+サイト ID を取得している可能性が高いです。サイト ID は全 Firebase で一意のため、
+別の ID で再実行してください:
+  SITE_ID=<別の一意な ID> bash tools/bootstrap-firebase.sh"
+  fi
+}
+
 case "${site_status}" in
   200) echo "作成しました（https://${SITE_ID}.web.app）" ;;
-  409) echo "既に存在するためスキップします（https://${SITE_ID}.web.app）" ;;
+  409) verify_site_ownership ;;
   *)
     if printf '%s' "${site_result}" | grep -qi "already exists"; then
-      echo "既に存在するためスキップします（https://${SITE_ID}.web.app）"
+      verify_site_ownership
     else
       die "Hosting サイトの作成に失敗しました (HTTP ${site_status}):
 ${site_result}
@@ -384,6 +408,20 @@ existing_keys="$(gcloud iam service-accounts keys list \
 max_user_keys=10
 existing_key_count="$(printf '%s\n' "${existing_keys}" | grep -c . || true)"
 if [ "${existing_key_count}" -ge "${max_user_keys}" ]; then
+  # 上限解消のための事前削除も「旧鍵の削除」なので、opt-out
+  # （ROTATE_EXISTING_KEYS=false = 鍵は手動管理する）を必ず尊重する。
+  # opt-out 時は自動削除せず停止して手動整理を案内する。
+  if [ "${ROTATE_EXISTING_KEYS:-true}" != "true" ]; then
+    die "USER_MANAGED 鍵が上限（${max_user_keys} 個）に達しているため新規発行できません。
+ROTATE_EXISTING_KEYS=false が指定されているため、旧鍵の自動削除は行いません。
+以下で鍵を確認し、不要な鍵を手動で削除してから再実行してください:
+
+  gcloud iam service-accounts keys list --iam-account=${sa_email} --project=${PROJECT_ID}
+  gcloud iam service-accounts keys delete <KEY_ID> --iam-account=${sa_email} --project=${PROJECT_ID}
+
+なお現在の GitHub Secret（${SECRET_NAME}）が指す鍵を削除すると CI デプロイが
+止まるため、どの鍵が使用中か不明な場合は全鍵の削除を避けてください。"
+  fi
   echo "USER_MANAGED 鍵が上限（${max_user_keys} 個）に達しているため、発行記録にある旧鍵を先に削除して空きを作ります"
   last_recorded_id="${recorded_key_ids##*,}"
   freed_any=false
@@ -503,12 +541,27 @@ EOF
 echo "${project_root}/.firebaserc"
 
 log "完了しました"
+# プラン表示は (1) で実測した billingEnabled に基づいて出し分ける。
+# ALLOW_BLAZE=true で続行した実行に「Spark = 課金され得ない」と表示すると
+# 事実と異なる安全保証の提示になるため、断定は billingEnabled=False の
+# 場合に限定する。
+if [ "${billing_enabled}" = "False" ]; then
+  plan_note="請求先アカウント未紐付け = Spark"
+  billing_warning=""
+else
+  plan_note="billingEnabled=${billing_enabled}（ALLOW_BLAZE=true で続行）"
+  billing_warning="
+警告: このプロジェクトは Spark（課金され得ない状態）ではありません。
+      使用量に応じて課金が発生し得ます。請求ダッシュボードで上限や
+      予算アラートの設定を確認してください。"
+fi
 cat <<EOF
 
 公開 URL:      https://${SITE_ID}.web.app
-プロジェクト:  ${PROJECT_ID}（請求先アカウント未紐付け = Spark）
+プロジェクト:  ${PROJECT_ID}（${plan_note}）
 GitHub Secret: ${SECRET_NAME}（${GITHUB_REPO}）
 GitHub 変数:   FIREBASE_PROJECT_ID=${PROJECT_ID} / FIREBASE_SITE_ID=${SITE_ID}
+${billing_warning}
 
 次の手順:
   1. .firebaserc の差分をコミットしてください
