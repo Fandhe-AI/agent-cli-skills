@@ -815,6 +815,9 @@ def render_radar(chart, ids, interactive):
     if len(axes) < 3 or not series:
         raise SpecError(f"radar '{chart.get('title')}' は 3 軸以上の axes と series が必要")
     vmax = require_finite(chart.get("max", 5), "radar max")
+    if vmax <= 0:
+        # 0 以下だと v / vmax の正規化が破綻する（0 除算・負スケール）ため spec 段階で弾く
+        raise SpecError(f"radar '{chart.get('title')}' の max は 0 より大きい値が必要: {fmt(vmax)}")
     n = len(axes)
 
     vals = []
@@ -902,6 +905,18 @@ def _gantt_ticks(t0, t1):
     return ticks
 
 
+def _gantt_progress(t):
+    """gantt task の progress を検証して返す（欠損は None）。
+
+    SVG バーとデータ表の両方がこの検証済み値を使う契約——描画側だけ clamp して
+    表と食い違う値を見せない。0.0..1.0 の範囲外は SpecError。
+    """
+    prog = finite(t.get("progress"), f"task '{t.get('name')}' の progress")
+    if prog is not None and not (0.0 <= prog <= 1.0):
+        raise SpecError(f"task '{t.get('name')}' の progress が 0.0..1.0 の範囲外: {prog}")
+    return prog
+
+
 def render_gantt(chart, ids, interactive):
     tasks = chart.get("tasks") or []
     if not tasks:
@@ -913,8 +928,14 @@ def render_gantt(chart, ids, interactive):
         if t.get("milestone"):
             dates.append(parse_date(t.get("date"), f"milestone '{t.get('name')}' の date"))
         else:
-            dates.append(parse_date(t.get("start"), f"task '{t.get('name')}' の start"))
-            dates.append(parse_date(t.get("end"), f"task '{t.get('name')}' の end"))
+            d_start = parse_date(t.get("start"), f"task '{t.get('name')}' の start")
+            d_end = parse_date(t.get("end"), f"task '{t.get('name')}' の end")
+            if d_end < d_start:
+                # 負期間は入力ミス確定。2px の退化バーとして黙って描かず spec 段階で弾く
+                raise SpecError(f"task '{t.get('name')}' の end ({d_end.isoformat()}) が "
+                                f"start ({d_start.isoformat()}) より前")
+            dates.append(d_start)
+            dates.append(d_end)
     t0 = min(dates) - datetime.timedelta(days=2)
     t1 = max(dates) + datetime.timedelta(days=2)
     d_total = (t1 - t0).days or 1
@@ -972,9 +993,8 @@ def render_gantt(chart, ids, interactive):
                 bh = 16
                 out.append(f'<rect x="{x0:.1f}" y="{cy_ - bh / 2:.1f}" width="{max(x1 - x0, 2):.1f}" '
                            f'height="{bh}" rx="3" fill="{color}" fill-opacity="0.45"/>')
-                prog = finite(t.get("progress"), f"task '{t.get('name')}' の progress")
+                prog = _gantt_progress(t)
                 if prog is not None:
-                    prog = min(max(prog, 0.0), 1.0)
                     # planned bar の上に progress overlay（不透明）を重ねる
                     out.append(f'<rect x="{x0:.1f}" y="{cy_ - bh / 2:.1f}" width="{max((x1 - x0) * prog, 0):.1f}" '
                                f'height="{bh}" rx="3" fill="{color}"/>')
@@ -1005,7 +1025,7 @@ def render_gantt(chart, ids, interactive):
                          (str(t.get("date")), False), ("—", False), ("—", True),
                          (GANTT_STATUS.get(t.get("status", "planned"), ("", str(t.get("status"))))[1] + "（マイルストーン）", False)])
         else:
-            prog = finite(t.get("progress"), "progress")
+            prog = _gantt_progress(t)
             rows.append([(t.get("name", ""), False), (t.get("phase", "—"), False),
                          (str(t.get("start")), False), (str(t.get("end")), False),
                          (f"{int(round(prog * 100))}%" if prog is not None else "—", True),

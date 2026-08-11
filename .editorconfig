@@ -13,6 +13,11 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 2
 
+# Python は PEP 8 準拠の 4 スペースインデントだが、括弧開きに揃える継続行
+# （PEP 8 許容のスタイル）が 4 の倍数にならず checker と両立しないため検査しない
+[*.py]
+indent_size = unset
+
 # Markdown は行末スペース 2 つが強制改行の意味を持つため除去しない。
 # インデント幅もリスト継続行・コードブロック内の任意字下げがあるため検査しない
 [*.md]

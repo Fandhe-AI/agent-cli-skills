@@ -178,7 +178,7 @@ KPI は「読者が最初に知る価値が高い値」に 3〜4 個へ限定す
  "series": [{"name": "案B", "values": [4.0, 4.5, 4.5]}]}
 ```
 
-- `axes` は 3 軸以上。`max` は全軸共通の最大値（既定 5）。値は `0..max` 範囲必須（範囲外はエラー）
+- `axes` は 3 軸以上。`max` は全軸共通の最大値（既定 5）で **0 より大きい値必須**（0 以下はエラー）。値は `0..max` 範囲必須（範囲外はエラー）
 - **同一スケールへ正当に正規化できる場合のみ使う**（SKILL.md の anti-pattern 参照）
 
 ### gantt
@@ -197,9 +197,9 @@ KPI は「読者が最初に知る価値が高い値」に 3〜4 個へ限定す
 | `today` | — | `YYYY-MM-DD`。**期間内にある場合のみ** today line（破線 + 「本日」ラベル）を描画 |
 | `tasks[].name` | ✅ | タスク名（左列に表示） |
 | `tasks[].phase` | — | フェーズ名。出現順にグルーピングされ、フェーズ見出し行が挿入される |
-| `tasks[].start` / `end` | ✅（通常タスク） | `YYYY-MM-DD`。**不明な日付を推測で埋めない**（不明タスクは spec に入れず assumptions に書く） |
+| `tasks[].start` / `end` | ✅（通常タスク） | `YYYY-MM-DD`。`end >= start` 必須（負期間はエラー）。**不明な日付を推測で埋めない**（不明タスクは spec に入れず assumptions に書く） |
 | `tasks[].milestone` | — | `true` で milestone（diamond 表示）。`date` が必須になり `start`/`end` は不要 |
-| `tasks[].progress` | — | `0.0..1.0`。planned bar 上に不透明 overlay で重ねられ、% がテキスト表示される |
+| `tasks[].progress` | — | `0.0..1.0` 厳格（範囲外は clamp せずエラー）。planned bar 上に不透明 overlay で重ねられ、% がテキスト表示される |
 | `tasks[].status` | — | `done` / `in-progress` / `planned` / `at-risk` / `blocked`。色 + **日本語テキストラベル**（完了/進行中/予定/リスク/ブロック）で表示 |
 | `tasks[].id` / `dependsOn` | — | 依存関係。矢印では描かず**依存関係テーブル**として chart 下に自動生成 |
 
@@ -236,7 +236,7 @@ renderer は以下を機械検証し、違反時は日本語の `spec エラー:
 
 - すべての数値は**有限値**（NaN / Inf 不可）。文字列の数値も parse される
 - 値数の不一致（series の values と categories/x/axes の長さ違い）はエラー
-- stacked bar / donut の負値、radar の範囲外値はエラー
+- stacked bar / donut の負値、radar の範囲外値・`max <= 0`、gantt の `progress` 範囲外・`end < start` はエラー
 - 日付は `YYYY-MM-DD` 固定
 - **欠損は `null` で表現する**。0 と欠損は別物として扱われる（line は gap、heatmap は無色セル、表は「—」）
 - spec 由来の全文字列は escape されて挿入される。HTML タグを書いても文字列として表示されるだけで解釈されない
