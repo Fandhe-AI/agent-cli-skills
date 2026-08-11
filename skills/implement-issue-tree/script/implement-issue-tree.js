@@ -809,8 +809,14 @@ const AUTO_MERGE_ARM_SCHEMA = {
     armed: { type: 'boolean', description: 'gh pr merge --auto --squash が成功した、または既に auto-merge が有効だった場合のみ true' },
     reason: {
       type: 'string',
-      enum: ['armed', 'already-enabled', 'clean-status', 'not-allowed', 'error'],
-      description: 'armed: 本エージェントが有効化した / already-enabled: 既に有効だった（再開ランの冪等性） / clean-status: PR が既にマージ可能状態でコマンドが不要と判断された / not-allowed: repo/branch 側の制約で有効化できなかった / error: コマンド失敗・取得不能',
+      enum: ['armed', 'already-enabled', 'not-allowed', 'error'],
+      // 'clean-status' は Issue #205 の Bugbot 指摘（BUGBOT_BUG_ID: 507562fc）を受けて廃止した。
+      // 「PR が既にマージ可能状態だからコマンド不要」という判断を許すと、armed: false のまま
+      // auto-merge が有効化されずに終わる（host は armed === true のみを成功とみなすため）。
+      // 再開ランで checks が既に green な状態はよくあるケースであり、そのたびに arm 失敗＝
+      // 人間マージ案内へフォールバックしてしまっていた。command 2（gh pr merge --auto --squash）
+      // は「既に有効」以外は必ず実行させ、スキップの余地を enum レベルで塞ぐ。
+      description: 'armed: 本エージェントが有効化した（PR が既にマージ可能状態でも gh pr merge --auto --squash を実行した結果） / already-enabled: 既に有効だった（再開ランの冪等性） / not-allowed: repo/branch 側の制約で有効化できなかった / error: コマンド失敗・取得不能',
     },
     summary: { type: 'string', description: '実行したコマンドと結果の要約' },
   },
@@ -2358,11 +2364,11 @@ function autoMergeArmPrompt(prNumber) {
     '手順:',
     `1. コマンド 1 を実行し、auto-merge が既に有効か確認する。`,
     `2. 既に有効（true）であれば、armed: true / reason: "already-enabled" を返して終了する（コマンド 2 は実行しない。再開ランでの冪等性のため）。`,
-    `3. 未設定（false）であればコマンド 2 を実行する。成功したら armed: true / reason: "armed" を返す。`,
+    `3. 未設定（false）であれば、PR が既にマージ可能な状態に見える場合を含め、必ずコマンド 2 を実行する（「clean-status だからコマンド不要」という判断はしない。PR が既にマージ可能でも --auto 予約は無害であり、再開ランで checks が既に green な場合ほどこの一歩を省略してはならない。成功したら armed: true / reason: "armed" を返す）。`,
     `4. コマンド 2 が repo/branch 側の制約（auto-merge 未許可等）で失敗した場合は armed: false / reason: "not-allowed" を返す。`,
-    `5. その他のコマンド失敗（PR が既にマージ済み・クローズ済み等で対象外の場合を含む）は armed: false / reason: "error" を返す（reason: "clean-status" は使わない想定だが、コマンド不要と判断した場合のみ使う）。`,
+    `5. その他のコマンド失敗（PR が既にマージ済み・クローズ済み等で対象外の場合を含む）は armed: false / reason: "error" を返す。`,
     '6. いずれの場合も gh pr merge が実際にマージを実行したかどうかは確認しない（このコマンドは --auto 付きのため実行してもマージは即座には成立しない。マージ成立の確認は別エージェントの責務）。',
-    '返却: armed（boolean）/ reason（armed / already-enabled / clean-status / not-allowed / error）/ summary（実行結果の要約）。',
+    '返却: armed（boolean）/ reason（armed / already-enabled / not-allowed / error）/ summary（実行結果の要約）。',
   ].join('\n')
 }
 
