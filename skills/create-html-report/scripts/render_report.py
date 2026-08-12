@@ -890,11 +890,16 @@ def render_donut(chart, ids, interactive):
         raise SpecError(f"donut '{chart.get('title')}' の slices が 6 件を超えている"
                         f"（{len(slices)} 件）。7 区分以上は bar を使用すること")
     unit = chart.get("unit", "")
+    # donut は part-to-whole（構成比）専用のため、各 slice の値は 0 以上を必須とする。
+    # 負値を許すと負の角度の SVG path・100% 超の構成比が生成され chart の契約を破る。
+    vals = []
     for si, s in enumerate(slices):
         require_dict(s, f"donut '{chart.get('title')}' の slices[{si}]")
-    vals = [require_finite(s.get("value"), f"donut '{s.get('label')}'") for s in slices]
-    if any(v < 0 for v in vals):
-        raise SpecError("donut に負値は使用できない")
+        v = require_finite(s.get("value"), f"donut '{s.get('label')}'")
+        if v < 0:
+            raise SpecError(f"donut '{chart.get('title')}' の slices[{si}]"
+                            f"（label: {s.get('label')!r}）に負値は使用できない: {v}")
+        vals.append(v)
     total = sum(vals)
     if total <= 0:
         raise SpecError(f"donut '{chart.get('title')}' の合計が 0 以下")
