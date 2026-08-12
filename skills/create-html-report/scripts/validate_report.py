@@ -498,10 +498,19 @@ class ReportParser(HTMLParser):
         self._stack.append((tag, classes))
 
     def handle_endtag(self, tag):
-        # 閉じタグに対応する開始タグまでスタックを巻き戻す（多少の不整合に耐える）
+        # 閉じタグに対応する開始タグまでスタックを巻き戻す（多少の不整合に耐える）。
+        # 巻き戻しで svg / table の開始タグが除去される場合は追跡状態も同期して
+        # 破棄する（_stack だけ巻き戻すと閉じ済み svg が _svg_stack に残り、後続の
+        # title/desc が誤帰属して accessible name 検査を偽装できる。Bugbot 指摘）
         for i in range(len(self._stack) - 1, -1, -1):
             if self._stack[i][0] == tag:
+                removed = self._stack[i:]
                 del self._stack[i:]
+                for rtag, _ in removed:
+                    if rtag == "svg" and self._svg_stack:
+                        self._svg_stack.pop()
+                    elif rtag == "table":
+                        self._cur_table = None
                 break
         if tag == "script" and self._in == "script":
             self.scripts.append(self._buf)
@@ -512,10 +521,9 @@ class ReportParser(HTMLParser):
         elif tag == "title" and self._in == "title":
             self.title_text = self._buf.strip()
             self._in = None
-        if tag == "svg" and self._svg_stack:
-            self._svg_stack.pop()
-        if tag == "table":
-            self._cur_table = None
+        # svg / table の追跡破棄は上記の巻き戻し同期に一本化している（対応する
+        # 開始タグが _stack に無い迷子の閉じタグでは何も pop しない。開いたままの
+        # 外側 svg の追跡を誤破棄しない fail-safe）
 
     def handle_data(self, data):
         if self._in in ("script", "style", "title"):
