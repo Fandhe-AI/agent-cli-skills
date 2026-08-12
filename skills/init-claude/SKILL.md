@@ -343,12 +343,16 @@ if [ -L "$LINK" ]; then
   # 既存 symlink: ターゲット不一致（stale）または参照先消失（dangling）なら張り替える
   if [ "$(readlink "$LINK")" != "$EXPECTED_TARGET" ] || [ ! -e "$LINK" ]; then
     echo "張り替え前のターゲット: $(readlink "$LINK")"
-    rm "$LINK"   # -L で確認済みの symlink 自体のみ削除。参照先の実体には影響しない
-    mkdir -p <target-repo>/_/dotclaude/workflows
-    ln -s "$EXPECTED_TARGET" <target-repo>/_/dotclaude/workflows/implement-issue-tree.js
-    mv <target-repo>/_/dotclaude/workflows/implement-issue-tree.js "$LINK"
-    rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
-    rmdir <target-repo>/_/dotclaude 2>/dev/null
+    # 新リンクを競合しない一時パスへ先に作成し、成功を確認してから mv で
+    # 既存リンクを置換する（先に rm すると mkdir/ln 失敗時に旧リンクが失われるため）
+    TMP_LINK="<target-repo>/_/dotclaude/workflows/implement-issue-tree.js"
+    if mkdir -p "$(dirname "$TMP_LINK")" && ln -s "$EXPECTED_TARGET" "$TMP_LINK"; then
+      mv "$TMP_LINK" "$LINK"   # 既存 symlink はここで初めて置換される（旧リンクは直前まで生存）
+      rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
+      rmdir <target-repo>/_/dotclaude 2>/dev/null
+    else
+      echo "エラー: 新しい symlink の作成に失敗。既存の symlink は保持される"
+    fi
   fi
 elif [ -e "$LINK" ]; then
   # 実体ファイル: ユーザー資産の可能性があるため上書きせず警告のみ
