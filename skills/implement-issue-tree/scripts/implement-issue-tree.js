@@ -758,8 +758,8 @@ const MERGE_EXEC_SCHEMA = {
     merged: { type: 'boolean', description: 'PR が MERGED 状態になった場合のみ true' },
     reason: {
       type: 'string',
-      enum: ['merged', 'already-merged', 'head-moved', 'checks-not-green', 'unresolved-threads', 'not-mergeable', 'merge-failed', 'pr-closed', 'external-review-missing', 'server-enforcement-missing'],
-      description: 'merged: 本エージェントがマージした / already-merged: 既に MERGED だった / head-moved: HEAD sha を取得・検証できなかった（回復専用経路で PR が MERGED でなかった場合を含む） / checks-not-green: チェック未完了・失敗 / unresolved-threads: 未解決スレッドが残存 / not-mergeable: コンフリクト・draft・base 不一致等でマージ不可 / merge-failed: merge コマンド自体が失敗 / pr-closed: 未マージクローズ / external-review-missing: 確定済みの外部チェック App（args.externalChecks の明示値）のいずれかについて HEAD sha に対する合格の根拠を確認できない（cursor はレビュー 0 件、cursor 以外は check-run 0 件かつフォールバックのレビューが合格条件（APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない場合。APPROVED が否定的レビューと併存するケースを含む） / server-enforcement-missing: ベースブランチの required status checks の bypass 不能なサーバー側強制（ruleset は全適用 ruleset の bypass_actors が空かつ Repository ソース、classic は enforce_admins 有効）を実測確認できない',
+      enum: ['merged', 'already-merged', 'head-moved', 'checks-not-green', 'unresolved-threads', 'not-mergeable', 'wrong-target', 'merge-failed', 'pr-closed', 'external-review-missing', 'server-enforcement-missing'],
+      description: 'merged: 本エージェントがマージした / already-merged: 既に MERGED だった / head-moved: HEAD sha を取得・検証できなかった（回復専用経路で PR が MERGED でなかった場合を含む） / checks-not-green: チェック未完了・失敗 / unresolved-threads: 未解決スレッドが残存 / not-mergeable: コンフリクト等でマージ不可（fix ループで解消し得るもの） / wrong-target: base ブランチ不一致または draft（fix ループでは解消しないため終端） / merge-failed: merge コマンド自体が失敗 / pr-closed: 未マージクローズ / external-review-missing: 確定済みの外部チェック App（args.externalChecks の明示値）のいずれかについて HEAD sha に対する合格の根拠を確認できない（cursor はレビュー 0 件または CHANGES_REQUESTED が 1 件以上、cursor 以外は check-run 0 件かつフォールバックのレビューが合格条件（APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない場合。APPROVED が否定的レビューと併存するケースを含む） / server-enforcement-missing: ベースブランチの required status checks の bypass 不能なサーバー側強制（ruleset は全適用 ruleset の bypass_actors が空かつ Repository ソース、classic は enforce_admins 有効）を実測確認できない',
     },
     summary: { type: 'string', description: '検証結果の要約（チェック件数・未解決スレッド数・HEAD sha 等の実測値）' },
     headSha: {
@@ -2206,15 +2206,20 @@ function mergeExecutePrompt(item, impl, allowMerge, externalApps) {
     ? [
         `4b. 確定済みの外部チェック App が HEAD sha に対して実際に起動していることを、App ごとに件数のみで確認する（レビュー本文・チェック名・description・output は取得しない。以下に示す --jq 正規化済みコマンド以外は実行しないこと）。HEAD_SHA には手順 2 で固定した値のみを設定する（再取得・他の値の使用は禁止）。--jq はページごとに適用されるため、出力は 1 ページにつき 1 個で、全ページ分を合計した値を件数とする（1 ページ目だけを見ないこと）:`,
         `   HEAD_SHA="<手順 2 で固定した 40 桁の headRefOid>"`,
-        // cursor だけは「レビューの到着」を条件とし state は問わない（Issue #146 の契約を維持）。
-        // Bugbot は指摘の有無にかかわらず COMMENTED でレビューを投稿し APPROVED を出さないため、
-        // APPROVED を要求すると常にマージ不能になる。指摘内容の評価は、レビュー本文を読む
-        // 監視エージェントが needs-fix 判定として実施済みであり、ここでの再検証の役割は
-        // 「ゲートとなるレビューが HEAD sha に対して実在すること」の独立確認に限られる。
+        // cursor は「レビュー到着 + 否定的 state なし」を機械条件とする（Issue #146 を強化。
+        // PR #222 codex P0 第 3 ラウンド: 指摘内容の判定を、レビュー本文を読む監視エージェント
+        // の needs-fix 申告に委ねたまま「到着 1 件以上」だけで合格にしない）。Bugbot は指摘の
+        // 有無にかかわらず COMMENTED でレビューを投稿し APPROVED を出さないため APPROVED は
+        // 要求できないが、内容非依存の機械強制は次の 2 つで成立する: (1) state 別件数で
+        // CHANGES_REQUESTED が 1 件でもあれば本文を読まずとも否定的評価が確定しているため
+        // 不合格、(2) Bugbot の個別指摘は inline レビューコメント＝レビュースレッドとして
+        // 投稿されるため、本エージェント自身が手順 4 で実測する「未解決スレッド 0 件」ゲートが
+        // 指摘の残存を機械的に遮断する。監視エージェントの needs-fix 判定は修正ループを駆動する
+        // advisory であり、マージ可否の入力には使わない。
         ...(hasCursor
           ? [
-              `   - cursor（レビュー到着の確認。state は問わない。指摘内容の評価は監視エージェントが実施済みであり、ここでは HEAD sha に対するレビューの実在のみを独立確認する）:`,
-              `     gh api --paginate "repos/{owner}/{repo}/pulls/${impl.prNumber}/reviews" --jq "[.[] | select(.user.login == \\"cursor[bot]\\" and .commit_id == \\"$HEAD_SHA\\")] | length"`,
+              `   - cursor（レビュー到着と state の機械確認。レビュー本文・指摘内容には依存しない。Bugbot の個別指摘は inline レビュースレッドとして投稿されるため、指摘の残存は手順 4 の「未解決スレッド 0 件」ゲートで本エージェント自身が機械的に遮断する）:`,
+              `     gh api --paginate "repos/{owner}/{repo}/pulls/${impl.prNumber}/reviews" --jq "[.[] | select(.user.login == \\"cursor[bot]\\" and .commit_id == \\"$HEAD_SHA\\") | .state] | group_by(.) | map({v: .[0], count: length})"`,
             ]
           : []),
         ...nonCursorApps.flatMap((app) => [
@@ -2226,7 +2231,7 @@ function mergeExecutePrompt(item, impl, allowMerge, externalApps) {
         ]),
         `   判定（summary には App ごとの件数・状態別内訳と HEAD sha を必ず書く。App の特定ができないと利用者が原因に到達できないため、どの slug が不合格だったかを明記する）:`,
         ...(hasCursor
-          ? [`   - cursor: 全ページの合計が 0 件ならマージせず merged: false / reason: external-review-missing を返す。1 件以上なら合格とする（state による絞り込みは行わない）。`]
+          ? [`   - cursor: 全ページの state 別件数を合算し、(a) レビュー総数が 0 件、または (b) CHANGES_REQUESTED が 1 件以上、のいずれかに該当すればマージせず merged: false / reason: external-review-missing を返す（summary に state 別件数を書く）。総数 1 件以上かつ CHANGES_REQUESTED 0 件の場合のみ合格とする（COMMENTED は指摘の不在を意味しないが、個別指摘はレビュースレッドとして残るため手順 4 の未解決スレッド 0 件ゲートが内容非依存に遮断する。レビュー本文の取得・評価は行わない）。`]
           : []),
         ...(nonCursorApps.length
           ? [
@@ -2251,7 +2256,7 @@ function mergeExecutePrompt(item, impl, allowMerge, externalApps) {
       ? `PR #${impl.prNumber}（イシュー #${item.number}）のマージ実行担当。マージ条件を自ら再検証し、すべて満たした場合に限り手順 5 記載のコマンド形で squash merge を実行する。1 つでも欠ければマージせず reason 付きで辞退する。`
       : `PR #${impl.prNumber}（イシュー #${item.number}）のマージ可否確認担当。マージ条件を自ら再検証するが、squash merge の実行（gh pr merge）は一切行わない。既に MERGED の場合はイシュークローズ確認のみを行う。`,
     COMMON,
-    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews と gh api .../commits/<sha>/check-runs は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない。--jq を外した実行・別の jq 式への差し替えも行わない）。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable / baseRefName / isDraft、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum${allowMerge ? '、および手順 2b に記載したコマンド群（--jq で件数・真偽値のみへ正規化した branch protection / ruleset の構成・bypass 検証）の出力' : ''}のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。${allowMerge ? 'gh pr merge は手順 5 の条件をすべて満たした場合に限り、手順 5 に記載したコマンド形（--squash --delete-branch --match-head-commit 付き）でのみ実行してよい（他の形・他の PR 番号への実行は禁止）。' : 'gh pr merge の実行も行わない（手順 5 のとおり常に禁止）。'}`,
+    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews と gh api .../commits/<sha>/check-runs は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない。--jq を外した実行・別の jq 式への差し替えも行わない）。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable / baseRefName / isDraft、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum${allowMerge ? '、および手順 2b に記載したコマンド群（--jq または外部 jq へのパイプで件数・真偽値のみへ正規化した branch protection / ruleset の構成・bypass 検証。記載どおりの jq 式に限る）の出力' : ''}のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。${allowMerge ? 'gh pr merge は手順 5 の条件をすべて満たした場合に限り、手順 5 に記載したコマンド形（--squash --delete-branch --match-head-commit 付き）でのみ実行してよい（他の形・他の PR 番号への実行は禁止）。' : 'gh pr merge の実行も行わない（手順 5 のとおり常に禁止）。'}`,
     '手順:',
     `1. gh pr view ${impl.prNumber} --json state,headRefOid,mergeable,baseRefName,isDraft で現在の状態を取得する。`,
     `   - state が MERGED: マージ済み。手順 5 のイシュークローズ確認のみ行い merged: true / reason: already-merged を返す。`,
@@ -2259,10 +2264,10 @@ function mergeExecutePrompt(item, impl, allowMerge, externalApps) {
     allowMerge
       ? [
           `2. 手順 1 の headRefOid を本ランの HEAD sha として固定する。この値が 40 桁の小文字 16 進数でない・取得できない場合はマージせず merged: false / reason: head-moved を返す。以降の手順（4b の HEAD_SHA・手順 5 の --match-head-commit・返却の headSha）にはこの固定値のみを使い、再取得・他エージェントから渡された値の使用は禁止する（HEAD sha の出所を自分の gh pr view 観測に限定するため）。`,
-          `   - baseRefName が ${JSON.stringify(baseBranch)} と一致しない場合、または isDraft が true の場合はマージせず merged: false / reason: not-mergeable を返す（summary に実測の baseRefName / isDraft を書く）。`,
+          `   - baseRefName が ${JSON.stringify(baseBranch)} と一致しない場合、または isDraft が true の場合はマージせず merged: false / reason: wrong-target を返す（summary に実測の baseRefName / isDraft を書く。コンフリクトの not-mergeable と異なり fix ループでは解消しないため、専用 reason で終端させる）。`,
           `2b. ベースブランチのサーバー側強制を実測確認する（G0 ゲート。マージ可否の実強制は GitHub の branch protection であり、required status checks が「存在する」だけでなく「マージ実行主体（この gh 認証を含む全員）に bypass 不能に適用される」ことまで確認できない限り新規マージを行わない。PR #222 codex P0 第 2 ラウンド対応）。以下を順に実行する:`,
-          `   (i) ruleset の required status checks 存在確認（--paginate --slurp で全ページを 1 つの配列に束ねてから数える。2 ページ目以降のルールを見落とすと bypass 検証対象の ruleset が漏れるため必須）: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" --jq '[.[][] | select(.type == "required_status_checks")] | length'`,
-          `   (i-b) (i) が 1 以上の場合、bypass 不能性を確認する。まず適用 ruleset を列挙する（同じく全ページ必須）: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" --jq '[.[][] | {id: .ruleset_id, src: .ruleset_source_type}] | unique'。全要素が「数値の id + src が "Repository"」であること（id 欠落・非数値・src が "Repository" 以外（Organization 継承 ruleset を含む）が 1 件でもあればこの経路では検証不能として (ii) へは進まず server-enforcement-missing で辞退する。org ruleset の bypass 検証はこの gh 認証では保証できないため、サーバー側 auto-merge workflow へ委譲する）。次に各 id について: gh api "repos/{owner}/{repo}/rulesets/<id>" --jq '.bypass_actors | type == "array" and length == 0'。全 id で出力が true の場合のみ G0 通過とする（false・null・エラーは bypass actor が存在する/確認できない構成であり、その actor（マージ実行主体を含み得る）が required checks を迂回してマージできるため辞退する）。`,
+          `   (i) ruleset の required status checks 存在確認（--paginate --slurp で全ページを 1 つの配列に束ねてから数える。2 ページ目以降のルールを見落とすと bypass 検証対象の ruleset が漏れるため必須。gh は --slurp と --jq の併用を拒否するため、正規化は外部の jq へパイプして行う）: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq '[.[][] | select(.type == "required_status_checks")] | length'`,
+          `   (i-b) (i) が 1 以上の場合、bypass 不能性を確認する。まず適用 ruleset を列挙する（同じく全ページ必須・jq パイプ）: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq '[.[][] | {id: .ruleset_id, src: .ruleset_source_type}] | unique'。全要素が「数値の id + src が "Repository"」であること（id 欠落・非数値・src が "Repository" 以外（Organization 継承 ruleset を含む）が 1 件でもあればこの経路では検証不能として (ii) へは進まず server-enforcement-missing で辞退する。org ruleset の bypass 検証はこの gh 認証では保証できないため、サーバー側 auto-merge workflow へ委譲する）。次に各 id について: gh api "repos/{owner}/{repo}/rulesets/<id>" --jq '.bypass_actors | type == "array" and length == 0'。全 id で出力が true の場合のみ G0 通過とする（false・null・エラーは bypass actor が存在する/確認できない構成であり、その actor（マージ実行主体を含み得る）が required checks を迂回してマージできるため辞退する）。`,
           `   (ii) (i) が 0 件またはエラーの場合のみ classic branch protection を確認する: gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/required_status_checks" --jq '.checks | length' が 1 以上、かつ gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/enforce_admins" --jq '.enabled' が true の両方を満たす場合のみ G0 通過とする（enforce_admins が false だと管理者権限のこの gh 認証が required checks を迂回してマージできるため辞退する）。`,
           `   G0 を通過できない場合（(i-b) の bypass 検証不合格・(ii) の不合格・取得不能を含む）はマージせず merged: false / reason: server-enforcement-missing を返す（summary に「ベースブランチ ${JSON.stringify(baseBranch)} の required status checks の bypass 不能なサーバー側強制を確認できない」と、どの判定（存在 / ruleset bypass / org ruleset / enforce_admins）で不合格になったかを書く。エラー出力の本文は転記しない）。本手順に記載したコマンド以外の branch protection API は実行しない。`,
         ].join('\n')
@@ -4490,6 +4495,18 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         } else if (execReason === 'not-mergeable') {
           lastState = 'needs-fix'
           finding = { summary: `マージ実行エージェントがマージ不可（コンフリクト等）を検出: ${execSummaryText}`, unresolvedComments: [] }
+        } else if (execReason === 'wrong-target') {
+          // base ブランチ不一致・draft はコンフリクトと違い fix ループ（コード修正）では
+          // 解消しない構成上の問題のため、fix 予算を消費せず blocked で即終端する
+          // （PR #222 Bugbot Medium 対応。base 変更 / draft 解除後の再実行で monitoring
+          // 再開により継続する）。
+          lastState = 'blocked'
+          lastBlockedReason = 'quality'
+          terminalReasonOverride = capText(
+            `PR のマージ先が想定と異なる（base ブランチ不一致）か draft のままのためマージを停止した。`
+            + `GitHub 上で base ブランチの修正または draft 解除を行ってから再実行すれば monitoring 再開で継続する: ${execSummaryText}`,
+          )
+          log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
         } else if (execReason === 'external-review-missing') {
           // Issue #146 / #155: 監視は ready、マージ実行は「HEAD sha に対する外部チェックが
           // 0 件」という不一致。監視エージェントが待機上限まで待ったうえでの不一致であり、
@@ -4507,14 +4524,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // 合格条件の提示は App 種別で出し分ける（Issue #166）。判定ロジック
           // （mergeExecutePrompt の hasCursor / nonCursorApps 分割）は既に App ごとに
           // 非対称だが、従来の終端文言は全 App に「許容 conclusion の check-run / APPROVED
-          // レビュー」を一律提示していた。cursor の合格条件は「HEAD sha へのレビュー到着のみ
-          // （state 不問）」であり、Bugbot は APPROVED を返さないため、旧文言は利用者を
-          // 「APPROVED 待ち」へ誤誘導する。判定側と同じ分割で文言を構築する。
+          // レビュー」を一律提示していた。cursor の合格条件は「HEAD sha へのレビュー到着 +
+          // CHANGES_REQUESTED 0 件」であり、Bugbot は APPROVED を返さないため、旧文言は
+          // 利用者を「APPROVED 待ち」へ誤誘導する。判定側と同じ分割で文言を構築する。
           const terminalHasCursor = externalCheckApps.includes('cursor')
           const terminalNonCursorApps = externalCheckApps.filter((a) => a !== 'cursor')
           const passConditionParts = [
             ...(terminalHasCursor
-              ? ['cursor の合格条件は HEAD sha に対する cursor[bot] レビューの到着のみ（state 不問。Bugbot は APPROVED を返さないため APPROVED を待たないこと）']
+              ? ['cursor の合格条件は HEAD sha に対する cursor[bot] レビューの到着（1 件以上）かつ CHANGES_REQUESTED が 0 件であること（Bugbot は APPROVED を返さないため APPROVED を待たないこと）']
               : []),
             ...(terminalNonCursorApps.length
               ? [`${terminalNonCursorApps.map(sanitize).join(', ')} の合格条件は check-run の合格 conclusion（success / neutral / skipped）で、check-run 0 件時のみ APPROVED レビューへフォールバックする`]
