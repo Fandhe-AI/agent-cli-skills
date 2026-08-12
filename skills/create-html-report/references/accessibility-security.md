@@ -132,7 +132,7 @@ self-contained 原則。**ページロード時・操作時に一切の外部通
 - remote `<img src="https://...">`
 - `<iframe>` / `<object>` / `<embed>`（`data:text/html` 等で検査を迂回できる能動コンテンツのため、値を問わず禁止）
 - `<base>` / `<form>` / `<meta http-equiv="refresh">` / SVG `<feImage>`（相対 URL 基準の書き換え・submit 送信・リダイレクト・filter 経由読込の入口のため、値を問わず存在自体を禁止。`meta` は refresh のみで、`charset` / `viewport` / `name` 系は許可）
-- URL を運びうる既知属性の存在自体（`formaction` / `ping` / `poster` / `cite` / `background` / `manifest` / `longdesc` / `srcset` / `srcdoc` / `data` / `xml:base` 等 — 検査済みの `href` / `src` / `action` / `xlink:href` 以外の URL 運搬経路を fail-closed でまとめて禁止）
+- URL を運びうる既知属性の存在自体（`formaction` / `ping` / `poster` / `cite` / `background` / `manifest` / `longdesc` / `srcset` / `imagesrcset` / `srcdoc` / `data` / `xml:base` / `action` 等 — タグ横断で個別検査される `href` / `src` / `xlink:href` 以外の URL 運搬経路を fail-closed でまとめて禁止。`action` は `<form>` タグ自体が禁止のため他タグでは不活性だが、防御多層として存在自体を禁止）
 - CSS `@import`（値を問わず一律禁止）/ CSS `url(...)`（許可画像 MIME の `data:`・`#fragment` 以外すべて）/ CSS `image-set(`（裸文字列で URL を運べるため出現自体を禁止）
 - SVG の remote `<image href>` / remote `<use href>`、SMIL 系（`<animate>` / `<set>` / `<animateMotion>` / `<mpath>`）の remote `href` / `xlink:href`
 - `<link rel="preconnect">` / `rel="dns-prefetch"` 等の投機的接続
@@ -148,10 +148,14 @@ self-contained 原則。**ページロード時・操作時に一切の外部通
 **相対 URL も禁止**: `<link href="style.css">` / `<img src="image.png">` のような相対参照は、単一ファイル配布でファイル欠落・意図しないリクエストの原因になるため external dependency と同様に禁止する。validate_report.py の判定は次のとおり:
 
 - **能動コンテンツ・制御要素は値を問わず不合格**: 属性付き `script`（`src` / SVG 2 の `href` / `xlink:href` / `type` 等、属性が 1 つでもあれば不合格）/ `link` / `iframe` / `object` / `embed` / `base` / `form` / `meta http-equiv="refresh"`（refresh のみ）/ SVG `feImage`。`data:` URI でも中身の JS / CSS / HTML が inline 検査（network API・`@import`・`url()` 許可リスト）を迂回できるため
-- **URL 運搬属性は存在自体で不合格（fail-closed）**: `formaction` / `ping` / `poster` / `cite` / `background` / `manifest` / `longdesc` / `srcset` / `imagesrcset` / `srcdoc` / `data` / `xml:base` 等。検査済みの `href` / `src` / `action` / `xlink:href` 以外で URL を運べる既知属性は、値のパース差異（`srcset` のカンマ区切り・`ping` の空白区切り等）で許可リスト検査をすり抜けやすいため
+- **RAWTEXT / RCDATA 要素（`style` / `script` / `title`）の自己終了タグ形式（`<style/>` 等）は存在自体で不合格**: `html.parser` は「開始 + 即終了」と解釈する一方、実ブラウザは HTML5 パース仕様上 self-closing フラグを無視して終了タグまでの全テキストを内容として解釈するため、`<style/>@import url(...)</style>` が CSS 検査に載らない解析差迂回が成立する。renderer はこの構文を生成しない
+- **URL 運搬属性は存在自体で不合格（fail-closed）**: `formaction` / `ping` / `poster` / `cite` / `background` / `manifest` / `longdesc` / `srcset` / `imagesrcset` / `srcdoc` / `data` / `xml:base` / `action` 等。タグ横断で個別検査される `href` / `src` / `xlink:href` 以外で URL を運べる既知属性は、値のパース差異（`srcset` のカンマ区切り・`ping` の空白区切り等）で許可リスト検査をすり抜けやすいため
 - **受動メディアは画像 MIME allowlist の `data:` のみ許可**: `img` / `source` / `track` / `audio` / `video` の `src` は `data:image/png` / `image/jpeg` / `image/gif` / `image/webp` のみ許可（`image/svg+xml` は `<script>` を内包し得るため不許可）
+- **上記以外のタグの `src` / `href` / `xlink:href` はタグ横断で fail-closed に閉じる**: 受動メディア以外のタグに現れた `src`（`<input type="image" src>` / `<frame src>` 等）は値を問わず存在自体で不合格。SVG 参照タグ・`<a>`・`<script>` 以外のタグに現れた `href` / `xlink:href` は文書内 `#fragment` 参照（SVG gradient / `textPath` の `href="#id"` テンプレート参照等）のみ許可し、それ以外は不合格
 - **SVG の文書内 `#fragment` 参照は許可**: `<use href="#id">` / `<image href="#id">` 等。SMIL 系（`animate` / `set` / `animateMotion` / `mpath`）の `href` / `xlink:href` も同じ許可リスト（画像 `data:`・`#fragment`）で検査される
 - **CSS の `url(...)`**（`<style>` ブロック・`style` 属性の双方）も同じ許可リスト（許可画像 MIME の `data:`・`#fragment`）で検査され、`url(image.png)` / `url(../fonts/a.woff2)` / `url(data:text/css,...)` は不合格になる。`image-set(` は裸文字列でも URL を運べるため出現自体で不合格
+- **SVG presentation 属性の `url(...)`（FuncIRI）も同じ許可リストで検査**: `fill` / `stroke` / `filter` / `mask` / `clip-path` / `cursor` / `marker-*` 等は `style` 属性を経由せずにペイントサーバー・フィルタ・カーソル画像を参照できるため、値に `url(` を含む場合は CSS と同じ許可リスト（画像 `data:`・`#fragment`）で検査される。`fill="url(#grad)"` は許可、`fill="url(https://...)"` は不合格
+- **`<a>` のリンク先検査は `href` と SVG legacy の `xlink:href` の双方が対象**: どちらも「`https:` または `#fragment` のみ」の同一検査に載る（`xlink:href` を収集しないと SVG `<a xlink:href>` がどの検査経路にも載らない）
 
 data URI（上記 allowlist の画像埋め込み）は外部依存ではないが、原則 inline SVG を優先する。
 

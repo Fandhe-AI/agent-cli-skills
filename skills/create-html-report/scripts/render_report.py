@@ -362,11 +362,20 @@ def render_bar(chart, ids, interactive):
 
     # スケール範囲: 量を長さで表すため必ず 0 を含める（axis integrity）
     if mode == "stacked":
-        for row in vals:
+        # stacked は各カテゴリの合計を積み上げの長さで表すため、欠損（null）を
+        # 0 として積むと存在しない合計値を発明する（Do not invent data 規約違反。
+        # データ表は — と表示するため SVG と食い違う）。grouped / line と異なり
+        # stacked では欠損を gap として表現できないため、null は拒否する。
+        for si, row in enumerate(vals):
             for v in row:
-                if v is not None and v < 0:
+                if v is None:
+                    raise SpecError(
+                        f"stacked bar '{chart.get('title')}' の series[{si}]"
+                        f"（{series[si].get('name')!r}）に欠損値（null）がある。"
+                        "stacked は欠損を表現できないため grouped を使用すること")
+                if v < 0:
                     raise SpecError("stacked bar に負値は使用できない")
-        totals = [sum(vals[j][i] or 0 for j in range(ns)) for i in range(nc)]
+        totals = [sum(vals[j][i] for j in range(ns)) for i in range(nc)]
         vmin, vmax = 0, max(totals + [0])
     else:
         flat = [v for row in vals for v in row if v is not None]
@@ -403,7 +412,7 @@ def render_bar(chart, ids, interactive):
             if mode == "stacked":
                 acc = 0.0
                 for j in range(ns):
-                    v = vals[j][i] or 0
+                    v = vals[j][i]  # stacked は入力検証で null を拒否済み（非 None 保証）
                     x0, x1 = x(acc), x(acc + v)
                     out.append(f'<rect x="{x0:.1f}" y="{y0 + 7:.1f}" width="{x1 - x0:.1f}" '
                                f'height="{band - 14}" fill="{SERIES_VARS[j % 8]}"/>')
@@ -456,7 +465,7 @@ def render_bar(chart, ids, interactive):
                 acc = 0.0
                 bw = band * 0.6
                 for j in range(ns):
-                    v = vals[j][i] or 0
+                    v = vals[j][i]  # stacked は入力検証で null を拒否済み（非 None 保証）
                     y0, y1 = y(acc + v), y(acc)
                     out.append(f'<rect x="{cx - bw / 2:.1f}" y="{y0:.1f}" width="{bw:.1f}" '
                                f'height="{y1 - y0:.1f}" fill="{SERIES_VARS[j % 8]}"/>')
