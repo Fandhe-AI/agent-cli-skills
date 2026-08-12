@@ -316,7 +316,7 @@ gh api "repos/<owner>/<repo>/issues/<既存issue番号>/sub_issues" 2>&1 | head 
 LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
 if [ -L "$LINK" ]; then
   echo "symlink 現在のターゲット: $(readlink "$LINK")"
-  # 期待値は .claude/workflows/ から見て2階層上の skills/（../../skills/...）
+  # 期待値は .claude/workflows/ から見て1階層上の .claude/skills/ 経由（../skills/...）
   [ -e "$LINK" ] || echo "警告: dangling symlink（参照先が存在しない）"
 elif [ -e "$LINK" ]; then
   echo "実体ファイルとして存在する（symlink ではない）"
@@ -358,12 +358,18 @@ elif [ -e "$LINK" ]; then
   # 実体ファイル: ユーザー資産の可能性があるため上書きせず警告のみ
   echo "実体ファイルが存在するため symlink 化しない。symlink 化するか確認: ls -la $LINK"
 else
-  # 不在: 新規作成
-  mkdir -p <target-repo>/.claude/workflows/ <target-repo>/_/dotclaude/workflows
-  ln -s "$EXPECTED_TARGET" <target-repo>/_/dotclaude/workflows/implement-issue-tree.js
-  mv <target-repo>/_/dotclaude/workflows/implement-issue-tree.js "$LINK"
-  rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
-  rmdir <target-repo>/_/dotclaude 2>/dev/null
+  # 不在: 新規作成（張り替え分岐と同様に、一時パスへ先に作成し mkdir/ln の成功を
+  # 確認してから mv する。過去の失敗で TMP_LINK が残存している場合は上書きせず案内する）
+  TMP_LINK="<target-repo>/_/dotclaude/workflows/implement-issue-tree.js"
+  if [ -e "$TMP_LINK" ] || [ -L "$TMP_LINK" ]; then
+    echo "エラー: 過去の失敗などで一時リンク $TMP_LINK が残存している。内容を確認し、意図しない参照先でなければ削除してから再実行する: ls -la $TMP_LINK"
+  elif mkdir -p "$(dirname "$TMP_LINK")" && ln -s "$EXPECTED_TARGET" "$TMP_LINK"; then
+    mv "$TMP_LINK" "$LINK"
+    rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
+    rmdir <target-repo>/_/dotclaude 2>/dev/null
+  else
+    echo "エラー: 新しい symlink の作成に失敗。$LINK は未作成のまま"
+  fi
 fi
 
 # 張り替え後もなお dangling な場合（期待ターゲット自体が未 vendored）は
