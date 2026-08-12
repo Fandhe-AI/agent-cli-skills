@@ -1181,7 +1181,10 @@ def render_gantt(chart, ids, interactive):
                            f'L {mx:.1f} {cy_ + s:.1f} L {mx - s:.1f} {cy_:.1f} Z" fill="{color}"/>')
                 out.append(f'<text x="{mx + s + 5:.1f}" y="{cy_ + 4:.1f}" class="status">{esc(status_ja)}</text>')
             else:
-                x0, x1 = x(parse_date(t["start"])), x(parse_date(t["end"]))
+                # end は inclusive（当日いっぱい）として扱い、翌日 0 時までをバー幅にする。
+                # (end - start).days のままだと同日タスクが幅 0 に潰れ、複数日タスクも
+                # 1 日分短く描画される（Bugbot Medium 指摘）
+                x0, x1 = x(parse_date(t["start"])), x(parse_date(t["end"]) + datetime.timedelta(days=1))
                 bh = 16
                 out.append(f'<rect x="{x0:.1f}" y="{cy_ - bh / 2:.1f}" width="{max(x1 - x0, 2):.1f}" '
                            f'height="{bh}" rx="3" fill="{color}" fill-opacity="0.45"/>')
