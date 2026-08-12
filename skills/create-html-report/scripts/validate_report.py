@@ -264,6 +264,7 @@ class ReportParser(HTMLParser):
         self.anchor_hrefs = []      # <a href> の値（出典リンク検査用）
         self.style_attr_external = []
         self.title_text = ""
+        self.unterminated_rawtext = None  # EOF 時に未終端だった rawtext 要素名（close で設定）
         self.meta_charset = False
         self.meta_viewport = False
         self._stack = []            # (tag, classes) の祖先スタック
@@ -516,6 +517,23 @@ class ReportParser(HTMLParser):
         if self._in in ("script", "style", "title"):
             self._buf += data
 
+    def close(self):
+        # EOF 時に script/style/title が未終端のまま残っている場合の fail-closed 処理。
+        # handle_endtag でしか _buf を scripts/styles へ移さないと、閉じタグを欠いた
+        # `<script>fetch(...)` 等が全セキュリティ検査を素通りする（codex P0 指摘）。
+        # 未終端バッファを対応する検査対象へ必ず移したうえで、未終端の事実自体も
+        # unterminated_rawtext に記録し、run_checks 側で無条件に不合格へ倒す。
+        super().close()
+        if self._in in ("script", "style", "title"):
+            self.unterminated_rawtext = self._in
+            if self._in == "script":
+                self.scripts.append(self._buf)
+            elif self._in == "style":
+                self.styles.append(self._buf)
+            else:
+                self.title_text = self._buf.strip()
+            self._in = None
+
 
 # ---------------------------------------------------------------------------
 # チェック本体: (チェック名, ok, 詳細) のリストを返す
@@ -542,6 +560,13 @@ def run_checks(path):
     parser = ReportParser()
     parser.feed(raw)
     parser.close()
+
+    # 1.5. rawtext 要素の未終端検査（fail-closed）。閉じタグのない script/style は
+    # ブラウザ実装依存の解釈になり検査結果の信頼性が保てないため、内容の検査結果に
+    # かかわらず無条件で不合格にする（codex P0: EOF 迂回の遮断）
+    check("script/style/title が EOF まで正しく閉じている",
+          parser.unterminated_rawtext is None,
+          f"未終端の <{parser.unterminated_rawtext}> がある" if parser.unterminated_rawtext else "")
 
     # 2. 文書骨格
     check("doctype 宣言がある", parser.has_doctype)
