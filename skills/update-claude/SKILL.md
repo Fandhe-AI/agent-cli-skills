@@ -58,8 +58,17 @@ cat <target-repo>/CLAUDE.md 2>/dev/null | head -80 || echo "CLAUDE.md なし"
 # skills-lock の確認
 cat <target-repo>/skills-lock.json 2>/dev/null | head -30 || echo "skills-lock.json なし"
 
-# implement-issue-tree workflow の確認
-ls <target-repo>/.claude/workflows/implement-issue-tree.js 2>/dev/null || echo "workflow js なし"
+# implement-issue-tree workflow の確認（-L で symlink 判定し、readlink でターゲットも確認する）
+LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
+EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+if [ -L "$LINK" ]; then
+  echo "symlink ターゲット: $(readlink "$LINK")（期待値: $EXPECTED_TARGET）"
+  [ -e "$LINK" ] || echo "警告: dangling symlink（参照先が存在しない）"
+elif [ -e "$LINK" ]; then
+  echo "実体ファイルとして存在する（symlink ではない）"
+else
+  echo "workflow js なし"
+fi
 ```
 
 `.claude/` が存在しない場合は `init-claude` を案内して処理を中断する。
@@ -128,13 +137,22 @@ gh auth status
 # sub_issues エンドポイントは存在しない）。既存 issue があれば番号を指定して疎通確認する
 # （issue が未作成なら gh auth status のみで前提確認とする）
 gh api "repos/<owner>/<repo>/issues/<既存issue番号>/sub_issues" 2>&1 | head -5
-ls <target-repo>/.claude/workflows/implement-issue-tree.js 2>/dev/null
+
+# workflow js の symlink 検証（ターゲット一致・参照先解決も確認する）
+LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
+EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+if [ -L "$LINK" ]; then
+  echo "symlink ターゲット: $(readlink "$LINK")（期待値: $EXPECTED_TARGET）"
+  [ -e "$LINK" ] || echo "警告: dangling symlink"
+else
+  echo "workflow js: 未配置または非 symlink"
+fi
 ```
 
 - gh auth の認証状態
 - sub_issues API の応答（既存 issue 番号を指定。404 = GitHub Apps が有効でない可能性。
   なお `repos/{owner}/{repo}/sub_issues` というリポジトリ直下のエンドポイントは存在しないため使わない）
-- workflow js の存在
+- workflow js の存在・ターゲット一致（stale でないか）・参照先解決（dangling でないか）
 
 ### Step 3: ギャップ一覧をユーザーに提示して承認を得る
 
@@ -169,6 +187,8 @@ ls <target-repo>/.claude/workflows/implement-issue-tree.js 2>/dev/null
 
 #### implement-issue-tree 前提
 - [ ] workflow js: .claude/workflows/implement-issue-tree.js が存在しない
+- [ ] workflow js: symlink のターゲットが期待値と異なる（stale。旧パスを指したまま）
+- [ ] workflow js: symlink の参照先が消失している（dangling）
 - ...
 
 ### 既存資産（上書き確認が必要な項目）
@@ -265,18 +285,39 @@ named workflow（`{name: "implement-issue-tree"}`）として呼ばない場合�
 
 named workflow として配置する場合は `cp` ではなく**相対 symlink** を使用する。`cp` で配置すると symlink が実体ファイルに置き換わり、`npx skills add` による更新が named workflow に届かなくなる。
 
-```bash
-# .claude/workflows/ への配置（named workflow として使う場合のみ）
-mkdir -p <target-repo>/.claude/workflows/
+symlink は `readlink` で現在のターゲットを検証し、期待ターゲットと異なる場合（stale）・参照先が消失している場合（dangling）は張り替える。実体ファイル（非 symlink）は上書きしない。対象リポに `dotclaude-via-temp` ルールがある場合はそのルールに従い `_/dotclaude/` 経由で配置する（ない場合は `ln -s` 直接作成でも可）。
 
-# 既に symlink が存在する場合はそのままにする（実体ファイルを上書きしない）
-if [ ! -e "<target-repo>/.claude/workflows/implement-issue-tree.js" ]; then
-  # .claude/workflows/ から見た相対パスで symlink を作成する
-  ln -s ../skills/implement-issue-tree/scripts/implement-issue-tree.js \
-        <target-repo>/.claude/workflows/implement-issue-tree.js
+```bash
+# .claude/workflows/ への配置・張り替え（named workflow として使う場合のみ）
+EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
+
+if [ -L "$LINK" ]; then
+  # 既存 symlink: ターゲット不一致（stale）または参照先消失（dangling）なら張り替える
+  if [ "$(readlink "$LINK")" != "$EXPECTED_TARGET" ] || [ ! -e "$LINK" ]; then
+    echo "張り替え前のターゲット: $(readlink "$LINK")"
+    rm "$LINK"   # -L で確認済みの symlink 自体のみ削除。参照先の実体には影響しない
+    mkdir -p <target-repo>/_/dotclaude/workflows
+    ln -s "$EXPECTED_TARGET" <target-repo>/_/dotclaude/workflows/implement-issue-tree.js
+    mv <target-repo>/_/dotclaude/workflows/implement-issue-tree.js "$LINK"
+    rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
+    rmdir <target-repo>/_/dotclaude 2>/dev/null
+  fi
+elif [ -e "$LINK" ]; then
+  # 実体ファイル: ユーザー資産の可能性があるため上書きせず警告のみ
+  echo "実体ファイルが存在するため symlink 化しない。symlink 化するか確認: ls -la $LINK"
 else
-  echo "既に存在する（symlink か実体かを確認: ls -la <target-repo>/.claude/workflows/implement-issue-tree.js）"
+  # 不在: 新規作成
+  mkdir -p <target-repo>/.claude/workflows/ <target-repo>/_/dotclaude/workflows
+  ln -s "$EXPECTED_TARGET" <target-repo>/_/dotclaude/workflows/implement-issue-tree.js
+  mv <target-repo>/_/dotclaude/workflows/implement-issue-tree.js "$LINK"
+  rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
+  rmdir <target-repo>/_/dotclaude 2>/dev/null
 fi
+
+# 張り替え後もなお dangling な場合（期待ターゲット自体が未 vendored）は
+# `npx skills add` の再実行を案内する
+[ -e "$LINK" ] || echo "警告: 張り替え後も参照先が解決しない。npx skills add で再取得を案内"
 ```
 
 sub_issues API が使用できない場合は GitHub Apps の有効化をユーザーに案内する。
@@ -301,8 +342,15 @@ ls <target-repo>/CLAUDE.md
 # skills-lock.json の更新確認
 cat <target-repo>/skills-lock.json 2>/dev/null | head -20
 
-# implement-issue-tree の前提確認
-ls <target-repo>/.claude/workflows/implement-issue-tree.js 2>/dev/null || echo "workflow js: 未配置"
+# implement-issue-tree の前提確認（存在確認だけでなく、ターゲット一致・参照先解決も確認する）
+LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
+EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+if [ -L "$LINK" ]; then
+  echo "symlink ターゲット: $(readlink "$LINK")（期待値: $EXPECTED_TARGET）"
+  [ -e "$LINK" ] && echo "参照先: 解決OK" || echo "参照先: dangling（未解決）"
+else
+  echo "workflow js: 未配置または非 symlink"
+fi
 gh auth status
 ```
 
