@@ -191,7 +191,62 @@ class ReportParser(HTMLParser):
     """検証に必要な構造情報を 1 パスで収集する parser。
 
     判定ロジックは持たず、収集した事実（タグ・属性・階層）を checks 側で評価する。
+
+    RCDATA_CONTENT_ELEMENTS（Python 3.12 で追加された、title / textarea を
+    どこに現れても無条件で RCDATA 扱いする class 変数）を、SVG 内かどうかで
+    切り替える property として上書きする。ブラウザの挙動は文脈で分かれる:
+
+    - SVG 配下（foreign-content）の title/textarea: HTML5 tree builder の
+      仕様上 RCDATA へ切り替えず通常の子要素として解釈し、ネストした
+      <style>/<script> を実際に適用・実行する。html.parser 3.12+ の
+      RCDATA_CONTENT_ELEMENTS はこの namespace を知らず、ここでも RCDATA
+      扱いしてバッファに畳み込むため、CSS/script 検査（styles / scripts
+      への収集）から露出しない fail-open が生じていた（Issue #221、
+      Python 3.12.12 で実測）。→ SVG 内では RCDATA を無効化して通常要素
+      として解析し、ネストした要素を検査に露出させる。
+    - 非 SVG（通常 HTML）の title/textarea: ブラウザは実際に RCDATA として
+      扱い、開始タグが閉じた後の内容はタグとして解釈せず、リテラルな
+      終了タグ文字列（`</title` 等）が現れるまでそのままテキストとして
+      表示する。ここで RCDATA を無効化すると、python は逆に「通常の子要素
+      解析」に切り替わってしまい、ブラウザには存在しない `<style>` 要素を
+      誤って検出（過剰拒否）する一方で、title/textarea の子孫要素の
+      「属性値」に含まれる literal `</title>` でブラウザ側が RCDATA を
+      早期終了させ、後続の実在タグ（`<style>@import ...` 等）を適用・実行
+      するケース（例: `<title><i data-x="</title><style>@import
+      url(https://evil.example/x.css)</style>"></i></title>`）を python は
+      `<i>` 要素の属性値としてまるごと飲み込んでしまい検査から漏らす
+      （Bugbot 指摘、PR #227）。→ 非 SVG では RCDATA を有効なままにし、
+      html.parser のリテラル終了タグ探索（`</`+空白+`title` 相当）でブラウザと
+      同じ位置で cdata を終端させる。
+
+    この文脈依存判定は「現在のタグスタックに svg 祖先が含まれるか」で行う
+    （下記 RCDATA_CONTENT_ELEMENTS property 内の判定式）。html.parser の
+    RCDATA 判定は handle_starttag 呼び出し直後（このタグ自身が _stack に push された後）
+    に行われるため、判定時点の _stack を見れば「このタグの祖先に svg が
+    あるか」を正しく判定できる（このタグ自身は title/textarea であり
+    svg ではないため誤判定なし）。_cur_svg（直近の <svg>...</svg> 区間の
+    フラグ、</svg> で None に戻る）ではなく _stack 全体を走査するのは、
+    入れ子の <svg> の内側 </svg> で _cur_svg が None に戻った後でも、
+    外側の <svg> の中にいる限り RCDATA を無効化し続ける必要があるため
+    （_cur_svg だけで判定すると Issue #221 の脆弱性が入れ子 svg で再発する）。
+
+    さらに、RCDATA_CONTENT_ELEMENTS 自体は Python 3.12+ にしか存在せず
+    3.11 以前ではこの property は no-op になる。バージョン非依存の防御として、
+    handle_starttag で全属性の生の値に `</title` / `</textarea`
+    （大小文字問わず）が含まれる場合は、実際にそのタグが RCDATA 内か
+    どうかに関わらず存在自体を不合格にする（renderer はこの文字列パターンを
+    生成しないため誤検知の実害はない）。
     """
+
+    @property
+    def RCDATA_CONTENT_ELEMENTS(self):
+        # SVG 祖先内では RCDATA を無効化（空タプル）、それ以外では 3.12+ の既定
+        # ("textarea", "title") のままブラウザの RCDATA 挙動に追従する。
+        # __init__ で super().__init__() が _stack より先に走るため、
+        # 生成直後の内部呼び出しに備えて getattr で安全に参照する。
+        if any(t == "svg" for t, _ in getattr(self, "_stack", ())):
+            return ()
+        return ("textarea", "title")
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -238,6 +293,16 @@ class ReportParser(HTMLParser):
         # 成立するため、renderer が生成しないこの構文自体を禁止する
         # （script は check #6 の完全一致ゲートでも落ちるが、意図した防御と
         # して明示的に閉じる）。
+        #
+        # 評価（Issue #221）: top-level の self-closing 形式（<textarea/> 等）
+        # 自体は html.parser が startendtag として処理し RCDATA モードへ
+        # 入らないため、後続の <style>/<script> は通常タグとして既存の
+        # CSS/script 検査に露出する（この経路に迂回はない）。SVG foreign-content
+        # 内の <title>/<textarea> ネストは RCDATA_CONTENT_ELEMENTS の
+        # 文脈依存 property（クラス docstring 参照）で塞いだ。属性値に
+        # literal `</title` 等を仕込む exit-point 差（PR #227, Bugbot 指摘）は
+        # handle_starttag 側のバージョン非依存ガード（同 docstring 参照）で
+        # 別途塞いでいる。
         if tag in ("style", "script", "title"):
             self.external_refs.append(
                 f"<{tag}/>（RAWTEXT/RCDATA 要素の自己終了形式はブラウザとの"
@@ -247,6 +312,28 @@ class ReportParser(HTMLParser):
         self.handle_endtag(tag)
 
     def handle_starttag(self, tag, attrs):
+        # RCDATA exit-point 差のバージョン非依存ガード（クラス docstring 参照、
+        # PR #227 Bugbot 指摘）。RCDATA_CONTENT_ELEMENTS property は Python
+        # 3.12+ にしか存在せず、3.11 以前では常に no-op（title/textarea が
+        # RCDATA 化されないため html.parser 標準の通常要素解析のみ）。
+        # non-SVG の title/textarea を RCDATA のまま維持するバージョンでも、
+        # その子孫要素の属性値に literal `</title` / `</textarea` を仕込むと、
+        # ブラウザの RCDATA スキャンはクォート文脈を無視してその位置で
+        # title/textarea を終了し、後続の実在タグ（<style>/<script> 等）を
+        # 通常要素として適用・実行する。html.parser はこの属性値を最初から
+        # 「まだ閉じていないタグの属性」として quote 文脈込みで解析するため
+        # 位置がずれず、後続タグが丸ごと属性値に飲み込まれて検査から漏れる。
+        # 重複排除前の raw attrs を見るのは、dict 畳み込み後の属性のみ
+        # チェックすると同名属性の 2 個目以降（ブラウザは無視するが検査は
+        # 生バイト列全体を見る必要がある）に紛れ込ませて迂回されるため。
+        for _, av in attrs:
+            low = (av or "").lower()
+            if "</title" in low or "</textarea" in low:
+                self.external_refs.append(
+                    f"<{tag}>（属性値に RCDATA 終了タグ文字列を含む記述は"
+                    "ブラウザとの解析差による検査迂回のため禁止）")
+                break
+
         # 重複属性は先勝ちで畳み込む（HTML5 仕様・ブラウザ挙動と一致させる）。
         # html.parser は重複属性を除去せず list のまま返すため、dict(attrs) の
         # 後勝ちだと <a href="javascript:..." href="https://ok/"> のような重複で
