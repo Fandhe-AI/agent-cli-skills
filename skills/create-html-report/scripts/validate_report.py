@@ -468,13 +468,18 @@ class ReportParser(HTMLParser):
                 "has_desc": False,
                 "classes": classes,
                 "elems": 0,
+                "label_ids": set(),  # この svg 直下階層の title/desc の id 集合
             }
             self._svg_stack.append(cur)
             self.svgs.append(cur)
         if tag == "title" and self._svg_stack:
             self._svg_stack[-1]["has_title"] = True
+            if ad.get("id"):
+                self._svg_stack[-1]["label_ids"].add(ad["id"])
         if tag == "desc" and self._svg_stack:
             self._svg_stack[-1]["has_desc"] = True
+            if ad.get("id"):
+                self._svg_stack[-1]["label_ids"].add(ad["id"])
 
         if tag == "table":
             self._cur_table = {
@@ -651,8 +656,14 @@ def run_checks(path):
     for i, s in enumerate(parser.svgs):
         a = s["attrs"]
         if is_chart_svg(s):
-            ok = (a.get("role") == "img" and a.get("aria-labelledby")
-                  and s["has_title"] and s["has_desc"])
+            # aria-labelledby は空でないだけでなく、全トークンが同一 SVG 内の
+            # title/desc の実在 id を参照していることまで検証する（存在しない
+            # ID の参照は accessible name 不成立。codex P2 指摘）
+            labelledby = a.get("aria-labelledby", "")
+            tokens = labelledby.split()
+            ok = (a.get("role") == "img" and bool(tokens)
+                  and s["has_title"] and s["has_desc"]
+                  and all(t in s["label_ids"] for t in tokens))
         else:
             ok = a.get("aria-hidden") == "true"
         if not ok:
