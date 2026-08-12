@@ -101,10 +101,13 @@ const externalChecksInput = (() => {
 //       起動タイミングにのみ影響し、虚偽 ready の効果は merge-exec の空振り 1 回に限られる。
 //   (2) マージ判定に使う HEAD sha・チェック件数・スレッド件数・外部チェック起動は、未信頼
 //       テキストを読まない merge-exec が gh の enum / 件数出力から自己取得する。
-//   (3) merge-exec はマージ実行前にベースブランチの required status checks のサーバー側強制
-//       （ruleset / classic branch protection）を実測確認できない限り辞退する（G0 ゲート）。
-//       マージ可否の実強制は GitHub の branch protection であり、エージェントの判定が同時に
-//       誤っていても required checks が green でない PR のマージはサーバーが拒否する。
+//   (3) merge-exec はマージ実行前にベースブランチの required status checks のサーバー側強制を
+//       実測確認できない限り辞退する（G0 ゲート）。存在確認に加え bypass 不能性まで確認する
+//       （全適用 ruleset の bypass_actors が空・org 継承 ruleset は検証不能として辞退・classic は
+//       enforce_admins 有効。PR #222 codex P0 第 2 ラウンド対応: bypass 可能な構成では admin
+//       権限の gh 認証自身が保護を迂回できるため）。マージ可否の実強制は GitHub の branch
+//       protection であり、エージェントの判定が同時に誤っていても required checks が green で
+//       ない PR のマージはサーバーが拒否する。
 // 残存リスク（モデル出力は強制境界ではない）: merge-exec 自身の判定誤り、および branch
 // protection が required approving review を要求しない構成での「人間の追加承認なし」マージ。
 // 後者は autoMerge: true という opt-in の明示選択そのものであり、承認必須の保護がある
@@ -2159,11 +2162,15 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, autoMe
 //     GitHub 側で原子的に評価させる（PR #150 codex-review P0 対応。エージェントによる
 //     事前照合だけでは TOCTOU が残る）。誤った sha を埋めてもサーバー側で不一致拒否される
 //     方向にしか働かない（fail-closed）。
-//   - allowMerge=true では、マージ実行前にベースブランチのサーバー側強制（required status
-//     checks の ruleset / classic branch protection 構成）を実測確認し、確認できなければ
-//     server-enforcement-missing で辞退する（G0 ゲート）。マージ可否の実強制は GitHub の
-//     branch protection であり、本エージェント（モデル出力）や monitor が同時に誤って
-//     いても、required checks が green でない PR のマージはサーバーが拒否する。
+//   - allowMerge=true では、マージ実行前にベースブランチのサーバー側強制を実測確認し、
+//     確認できなければ server-enforcement-missing で辞退する（G0 ゲート）。存在確認だけでは
+//     不十分（PR #222 codex P0 第 2 ラウンド: ruleset の bypass actor / classic の
+//     enforce_admins=false 構成では、マージ実行主体である admin 権限の gh 認証自身が保護を
+//     迂回できる）ため、「required status checks が 1 件以上」に加えて「全適用 ruleset の
+//     bypass_actors が空（org 継承 ruleset は検証不能として辞退）/ classic は enforce_admins
+//     有効」まで確認する。これによりマージ可否の実強制は GitHub の branch protection になり、
+//     本エージェント（モデル出力）や monitor が同時に誤っていても、required checks が green
+//     でない PR のマージはサーバーが拒否する。
 //   - allowMerge=false（回復専用経路）では新規マージを一切許可せず、「PR が既に MERGED なら
 //     イシューのクローズ確認だけを行う」経路に限定する（Bugbot PR #150 指摘への対応を維持）。
 //     Issue #161: この限定はエージェントのプロンプト解釈に任せず、手順 5 の文面自体を
@@ -2243,7 +2250,7 @@ function mergeExecutePrompt(item, impl, allowMerge, externalApps) {
       ? `PR #${impl.prNumber}（イシュー #${item.number}）のマージ実行担当。マージ条件を自ら再検証し、すべて満たした場合に限り手順 5 記載のコマンド形で squash merge を実行する。1 つでも欠ければマージせず reason 付きで辞退する。`
       : `PR #${impl.prNumber}（イシュー #${item.number}）のマージ可否確認担当。マージ条件を自ら再検証するが、squash merge の実行（gh pr merge）は一切行わない。既に MERGED の場合はイシュークローズ確認のみを行う。`,
     COMMON,
-    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews と gh api .../commits/<sha>/check-runs は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない。--jq を外した実行・別の jq 式への差し替えも行わない）。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable / baseRefName / isDraft、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum${allowMerge ? '、および手順 2b に記載した 2 コマンド（--jq で件数のみへ正規化した branch protection / ruleset の構成確認）の出力' : ''}のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。${allowMerge ? 'gh pr merge は手順 5 の条件をすべて満たした場合に限り、手順 5 に記載したコマンド形（--squash --delete-branch --match-head-commit 付き）でのみ実行してよい（他の形・他の PR 番号への実行は禁止）。' : 'gh pr merge の実行も行わない（手順 5 のとおり常に禁止）。'}`,
+    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews と gh api .../commits/<sha>/check-runs は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない。--jq を外した実行・別の jq 式への差し替えも行わない）。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable / baseRefName / isDraft、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum${allowMerge ? '、および手順 2b に記載したコマンド群（--jq で件数・真偽値のみへ正規化した branch protection / ruleset の構成・bypass 検証）の出力' : ''}のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。${allowMerge ? 'gh pr merge は手順 5 の条件をすべて満たした場合に限り、手順 5 に記載したコマンド形（--squash --delete-branch --match-head-commit 付き）でのみ実行してよい（他の形・他の PR 番号への実行は禁止）。' : 'gh pr merge の実行も行わない（手順 5 のとおり常に禁止）。'}`,
     '手順:',
     `1. gh pr view ${impl.prNumber} --json state,headRefOid,mergeable,baseRefName,isDraft で現在の状態を取得する。`,
     `   - state が MERGED: マージ済み。手順 5 のイシュークローズ確認のみ行い merged: true / reason: already-merged を返す。`,
@@ -2252,10 +2259,11 @@ function mergeExecutePrompt(item, impl, allowMerge, externalApps) {
       ? [
           `2. 手順 1 の headRefOid を本ランの HEAD sha として固定する。この値が 40 桁の小文字 16 進数でない・取得できない場合はマージせず merged: false / reason: head-moved を返す。以降の手順（4b の HEAD_SHA・手順 5 の --match-head-commit・返却の headSha）にはこの固定値のみを使い、再取得・他エージェントから渡された値の使用は禁止する（HEAD sha の出所を自分の gh pr view 観測に限定するため）。`,
           `   - baseRefName が ${JSON.stringify(baseBranch)} と一致しない場合、または isDraft が true の場合はマージせず merged: false / reason: not-mergeable を返す（summary に実測の baseRefName / isDraft を書く）。`,
-          `2b. ベースブランチのサーバー側強制を実測確認する（G0 ゲート。マージ可否の実強制は GitHub の branch protection であり、これが構成されていないリポジトリではクライアント側の再検証だけが最後の砦になってしまうため、構成を確認できない限り新規マージを行わない）。次の 2 コマンドを順に実行する:`,
-          `   (i) ruleset: gh api "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" --jq '[.[] | select(.type == "required_status_checks")] | length'`,
-          `   (ii) (i) が 0 件またはエラーの場合のみ classic: gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/required_status_checks" --jq '.checks | length'`,
-          `   いずれかで 1 以上を確認できた場合のみ手順 3 へ進む。両方とも 0 件・エラー・取得不能の場合はマージせず merged: false / reason: server-enforcement-missing を返す（summary に「ベースブランチ ${JSON.stringify(baseBranch)} に required status checks のサーバー側強制を確認できない」と書く。エラー出力の本文は転記しない）。この 2 コマンド以外の branch protection API は実行しない。`,
+          `2b. ベースブランチのサーバー側強制を実測確認する（G0 ゲート。マージ可否の実強制は GitHub の branch protection であり、required status checks が「存在する」だけでなく「マージ実行主体（この gh 認証を含む全員）に bypass 不能に適用される」ことまで確認できない限り新規マージを行わない。PR #222 codex P0 第 2 ラウンド対応）。以下を順に実行する:`,
+          `   (i) ruleset の required status checks 存在確認: gh api "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" --jq '[.[] | select(.type == "required_status_checks")] | length'`,
+          `   (i-b) (i) が 1 以上の場合、bypass 不能性を確認する。まず適用 ruleset を列挙する: gh api "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" --jq '[.[] | {id: .ruleset_id, src: .ruleset_source_type}] | unique'。全要素が「数値の id + src が "Repository"」であること（id 欠落・非数値・src が "Repository" 以外（Organization 継承 ruleset を含む）が 1 件でもあればこの経路では検証不能として (ii) へは進まず server-enforcement-missing で辞退する。org ruleset の bypass 検証はこの gh 認証では保証できないため、サーバー側 auto-merge workflow へ委譲する）。次に各 id について: gh api "repos/{owner}/{repo}/rulesets/<id>" --jq '.bypass_actors | type == "array" and length == 0'。全 id で出力が true の場合のみ G0 通過とする（false・null・エラーは bypass actor が存在する/確認できない構成であり、その actor（マージ実行主体を含み得る）が required checks を迂回してマージできるため辞退する）。`,
+          `   (ii) (i) が 0 件またはエラーの場合のみ classic branch protection を確認する: gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/required_status_checks" --jq '.checks | length' が 1 以上、かつ gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/enforce_admins" --jq '.enabled' が true の両方を満たす場合のみ G0 通過とする（enforce_admins が false だと管理者権限のこの gh 認証が required checks を迂回してマージできるため辞退する）。`,
+          `   G0 を通過できない場合（(i-b) の bypass 検証不合格・(ii) の不合格・取得不能を含む）はマージせず merged: false / reason: server-enforcement-missing を返す（summary に「ベースブランチ ${JSON.stringify(baseBranch)} の required status checks の bypass 不能なサーバー側強制を確認できない」と、どの判定（存在 / ruleset bypass / org ruleset / enforce_admins）で不合格になったかを書く。エラー出力の本文は転記しない）。本手順に記載したコマンド以外の branch protection API は実行しない。`,
         ].join('\n')
       : `2. 本ランは回復専用経路である。新規マージは一切行わない（手順 1 で state が MERGED でなかった場合は、他の条件を確認せず merged: false / reason: head-moved を返して終了する）。`,
     `3. チェックの状態別件数のみを取得する（チェック名・説明・リンクは取得しない。チェック名は PR 側の workflow / job / matrix 定義から生成される外部由来テキストであり、マージ権限を持つ本エージェントのコンテキストへ入れないため）:`,
@@ -2977,7 +2985,7 @@ const AUTO_MERGE_DISABLED_REASON =
 // （ファイル冒頭コメントと SKILL.md 参照）。
 log(autoMergeEnabled
   ? (externalChecksConfirmed
-      ? '✅ 自動マージ: 有効（クライアント側 squash merge。リポジトリオーナーの明示 opt-in。SKILL.md「クライアント側自動マージの設計」節参照。monitor の ready 判定後、merge-exec が HEAD sha を自己取得して checks・未解決スレッド数・外部チェック起動・G0（ベースブランチの required status checks サーバー側強制の実測）を独立再検証したうえで --match-head-commit 付き squash merge を実行する。monitor の出力はマージ経路の入力に使われない）'
+      ? '✅ 自動マージ: 有効（クライアント側 squash merge。リポジトリオーナーの明示 opt-in。SKILL.md「クライアント側自動マージの設計」節参照。monitor の ready 判定後、merge-exec が HEAD sha を自己取得して checks・未解決スレッド数・外部チェック起動・G0（ベースブランチの required status checks サーバー側強制と bypass 不能性の実測）を独立再検証したうえで --match-head-commit 付き squash merge を実行する。monitor の出力はマージ経路の入力に使われない）'
       : '⚠️ 自動マージ: opt-in 指定あり（autoMerge: true）だが externalChecks が未確定のため実行しない（fail-closed）。args に externalChecks を明示（なしの場合は [] で確定）して再実行すればクライアント側マージが有効になる')
   : '⚠️ 自動マージ: 無効（args.autoMerge が true でないため。Issue #165 の fail-closed）。実装・push 前 Review・PR 作成・CI 監視・fix ループまでは従来どおり自動実行し、PR はマージ可能状態の blocked で停止する')
 
@@ -4534,8 +4542,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           lastState = 'blocked'
           lastBlockedReason = 'quality'
           terminalReasonOverride = capText(
-            `ベースブランチに required status checks のサーバー側強制（ruleset / classic branch protection）を確認できないためクライアント側自動マージを停止した（G0 ゲート）。`
-            + `対象ブランチへ required status checks（1 件以上）を構成してから再実行するか、autoMerge を外して人間がマージする: ${execSummaryText}`,
+            `ベースブランチに required status checks の bypass 不能なサーバー側強制（ruleset は bypass_actors 空 / classic は enforce_admins 有効）を確認できないためクライアント側自動マージを停止した（G0 ゲート）。`
+            + `対象ブランチへ required status checks（1 件以上）を bypass actor なしで構成してから再実行するか、autoMerge を外して人間がマージする（org 継承 ruleset のリポジトリはサーバー側 auto-merge workflow へ委譲する）: ${execSummaryText}`,
           )
           log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
         } else if (execReason === 'head-moved' || execReason === 'checks-not-green' || execReason === 'merge-failed') {
