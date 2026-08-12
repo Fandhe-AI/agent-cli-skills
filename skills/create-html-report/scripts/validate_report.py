@@ -659,7 +659,9 @@ def run_checks(path):
             # aria-labelledby は空でないだけでなく、全トークンが同一 SVG 内の
             # title/desc の実在 id を参照していることまで検証する（存在しない
             # ID の参照は accessible name 不成立。codex P2 指摘）
-            labelledby = a.get("aria-labelledby", "")
+            # 値なし属性（<svg aria-labelledby>）は html.parser が None を返すため
+            # or "" で正規化する（None.split() のクラッシュ防止。Bugbot 指摘）
+            labelledby = a.get("aria-labelledby") or ""
             tokens = labelledby.split()
             ok = (a.get("role") == "img" and bool(tokens)
                   and s["has_title"] and s["has_desc"]
