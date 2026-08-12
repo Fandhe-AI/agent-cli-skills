@@ -96,7 +96,7 @@ const externalChecksInput = (() => {
 // オーナー）の明示指示により、autoMerge: true + externalChecksConfirmed（externalChecks の明示
 // 確定）の opt-in ランに限りクライアント側 squash merge を再有効化した。ただし PR #182 / #222 の
 // P0（注入された monitor の虚偽出力による未承認マージ誘導）に対しては、リスク受容ではなく
-// 次の構造で対処する（SKILL.md「クライアント側自動マージの設計」節参照）:
+// 次の構造で対処する（SKILL.md および references/automerge-design.md「クライアント側自動マージの設計」節参照）:
 //   (1) monitor の出力（ready / headSha）はマージ経路の入力に一切使わない。ready は merge-exec の
 //       起動タイミングにのみ影響し、虚偽 ready の効果は merge-exec の空振り 1 回に限られる。
 //   (2) マージ判定に使う HEAD sha・チェック件数・スレッド件数・外部チェック起動は、未信頼
@@ -1405,7 +1405,8 @@ async function updateState(issueNumber, patch, options = {}) {
 // （rust-ai-library PR #441 / agent-cli-skills PR #182 codex P0）。その後 2026-08-12 に
 // autoMerge: true + externalChecks 確定の opt-in ランに限り再有効化した（grant 機構は復活
 // させず、opt-in 判定は args パースのみ。monitor 出力のマージ経路からの分離と G0 サーバー側
-// 強制の実測を前提とする。ファイル冒頭コメントと SKILL.md「クライアント側自動マージの設計」節参照）。
+// 強制の実測を前提とする。ファイル冒頭コメントと SKILL.md および references/automerge-design.md
+// 「クライアント側自動マージの設計」節参照）。
 
 // 孤立 worktree 検出（orphan scan）。
 // エージェント作成後・worktreePath 返却前にクラッシュした worktree は状態ファイルにも
@@ -2978,14 +2979,14 @@ if (externalChecksInput !== undefined) {
 // opt-in 再有効化（2026-08-12）後は、autoMerge: true + externalChecks 明示の opt-in で
 // クライアント側マージが実行されるため、再実行手順を案内に含める。
 const AUTO_MERGE_DISABLED_REASON =
-  '自動マージは無効（args.autoMerge が true でない。Issue #165）。PR はマージ可能状態のまま停止した。マージは GitHub 上で人間が行うか、autoMerge: true + externalChecks 明示で再実行してクライアント側マージ（opt-in。SKILL.md「クライアント側自動マージの設計」節参照）を使うか、サーバー側 auto-merge workflow（upstream の docs/implement-issue-tree/auto-merge-sample.yml）+ branch protection に委ねること'
+  '自動マージは無効（args.autoMerge が true でない。Issue #165）。PR はマージ可能状態のまま停止した。マージは GitHub 上で人間が行うか、autoMerge: true + externalChecks 明示で再実行してクライアント側マージ（opt-in。SKILL.md および references/automerge-design.md「クライアント側自動マージの設計」節参照）を使うか、サーバー側 auto-merge workflow（upstream の docs/implement-issue-tree/auto-merge-sample.yml）+ branch protection に委ねること'
 // ラン開始時に自動マージの状態を確定ログへ残す（externalChecks の確定ログと同じ位置）。
 // opt-in 再有効化（2026-08-12。PR #222 codex P0 対応で構造修正）: autoMerge: true +
 // externalChecksConfirmed の opt-in ランに限りクライアント側 squash merge を実行する
 // （ファイル冒頭コメントと SKILL.md 参照）。
 log(autoMergeEnabled
   ? (externalChecksConfirmed
-      ? '✅ 自動マージ: 有効（クライアント側 squash merge。リポジトリオーナーの明示 opt-in。SKILL.md「クライアント側自動マージの設計」節参照。monitor の ready 判定後、merge-exec が HEAD sha を自己取得して checks・未解決スレッド数・外部チェック起動・G0（ベースブランチの required status checks サーバー側強制と bypass 不能性の実測）を独立再検証したうえで --match-head-commit 付き squash merge を実行する。monitor の出力はマージ経路の入力に使われない）'
+      ? '✅ 自動マージ: 有効（クライアント側 squash merge。リポジトリオーナーの明示 opt-in。SKILL.md および references/automerge-design.md「クライアント側自動マージの設計」節参照。monitor の ready 判定後、merge-exec が HEAD sha を自己取得して checks・未解決スレッド数・外部チェック起動・G0（ベースブランチの required status checks サーバー側強制と bypass 不能性の実測）を独立再検証したうえで --match-head-commit 付き squash merge を実行する。monitor の出力はマージ経路の入力に使われない）'
       : '⚠️ 自動マージ: opt-in 指定あり（autoMerge: true）だが externalChecks が未確定のため実行しない（fail-closed）。args に externalChecks を明示（なしの場合は [] で確定）して再実行すればクライアント側マージが有効になる')
   : '⚠️ 自動マージ: 無効（args.autoMerge が true でないため。Issue #165 の fail-closed）。実装・push 前 Review・PR 作成・CI 監視・fix ループまでは従来どおり自動実行し、PR はマージ可能状態の blocked で停止する')
 
