@@ -353,7 +353,7 @@ def render_bar(chart, ids, interactive):
     # report-spec.md は "single" を単一系列専用（値の直接ラベル付き描画）と
     # 公開契約している。複数系列を "single" のまま受理すると grouped と同じ
     # 描画経路に流れて文書と実装が食い違うため、ここで明示的に拒否する
-    # （issue #220 / PR #226 の codex-review 指摘）。
+    # （レビュー指摘に基づく契約整合）。
     if mode == "single" and ns != 1:
         raise SpecError(f"bar chart '{chart.get('title')}' の mode 'single' は "
                         f"単一系列専用（series が{ns}件）。複数系列は 'grouped' を使用すること")
