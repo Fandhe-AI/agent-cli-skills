@@ -60,7 +60,7 @@ cat <target-repo>/skills-lock.json 2>/dev/null | head -30 || echo "skills-lock.j
 
 # implement-issue-tree workflow の確認（-L で symlink 判定し、readlink でターゲットも確認する）
 LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
-EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+EXPECTED_TARGET="../skills/implement-issue-tree/scripts/implement-issue-tree.js"
 if [ -L "$LINK" ]; then
   echo "symlink ターゲット: $(readlink "$LINK")（期待値: $EXPECTED_TARGET）"
   [ -e "$LINK" ] || echo "警告: dangling symlink（参照先が存在しない）"
@@ -140,7 +140,7 @@ gh api "repos/<owner>/<repo>/issues/<既存issue番号>/sub_issues" 2>&1 | head 
 
 # workflow js の symlink 検証（ターゲット一致・参照先解決も確認する）
 LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
-EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+EXPECTED_TARGET="../skills/implement-issue-tree/scripts/implement-issue-tree.js"
 if [ -L "$LINK" ]; then
   echo "symlink ターゲット: $(readlink "$LINK")（期待値: $EXPECTED_TARGET）"
   [ -e "$LINK" ] || echo "警告: dangling symlink"
@@ -289,7 +289,7 @@ symlink は `readlink` で現在のターゲットを検証し、期待ターゲ
 
 ```bash
 # .claude/workflows/ への配置・張り替え（named workflow として使う場合のみ）
-EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+EXPECTED_TARGET="../skills/implement-issue-tree/scripts/implement-issue-tree.js"
 LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
 
 if [ -L "$LINK" ]; then
@@ -348,7 +348,7 @@ cat <target-repo>/skills-lock.json 2>/dev/null | head -20
 
 # implement-issue-tree の前提確認（存在確認だけでなく、ターゲット一致・参照先解決も確認する）
 LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
-EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+EXPECTED_TARGET="../skills/implement-issue-tree/scripts/implement-issue-tree.js"
 if [ -L "$LINK" ]; then
   echo "symlink ターゲット: $(readlink "$LINK")（期待値: $EXPECTED_TARGET）"
   [ -e "$LINK" ] && echo "参照先: 解決OK" || echo "参照先: dangling（未解決）"

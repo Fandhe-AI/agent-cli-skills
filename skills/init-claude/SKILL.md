@@ -336,7 +336,7 @@ named workflow として配置する場合は `cp` ではなく**相対 symlink*
 symlink 配置は `readlink` で現在のターゲットを検証し、期待ターゲットと異なる場合（stale）・参照先が消失している場合（dangling）は張り替える。実体ファイル（非 symlink）は上書きしない。
 
 ```bash
-EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+EXPECTED_TARGET="../skills/implement-issue-tree/scripts/implement-issue-tree.js"
 LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
 
 if [ -L "$LINK" ]; then
@@ -396,7 +396,7 @@ gh auth status
 
 # workflow js の symlink 検証（存在確認だけでなく、ターゲット一致・参照先解決も確認する）
 LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
-EXPECTED_TARGET="../../skills/implement-issue-tree/scripts/implement-issue-tree.js"
+EXPECTED_TARGET="../skills/implement-issue-tree/scripts/implement-issue-tree.js"
 if [ -L "$LINK" ]; then
   echo "symlink ターゲット: $(readlink "$LINK")（期待値: $EXPECTED_TARGET）"
   [ -e "$LINK" ] && echo "参照先: 解決OK" || echo "参照先: dangling（未解決）"
