@@ -191,7 +191,30 @@ class ReportParser(HTMLParser):
     """検証に必要な構造情報を 1 パスで収集する parser。
 
     判定ロジックは持たず、収集した事実（タグ・属性・階層）を checks 側で評価する。
+
+    RCDATA_CONTENT_ELEMENTS を空タプルで上書きし、Python 3.12 で追加された
+    「name space 非対応の RCDATA 切替」（title / textarea をどこに現れても
+    無条件で RCDATA 扱いする）を無効化する。html.parser は SVG の
+    foreign-content 文脈を知らないため、`<svg><title>…</svg>` の内側で
+    ネストした `<style>` / `<script>` を「title の RCDATA 内容の一部」として
+    バッファに畳み込み、CSS/script 検査（styles / scripts への収集）から
+    露出させない。一方ブラウザは HTML5 tree builder の仕様上、SVG 配下の
+    title/textarea では RCDATA へ切り替えず通常の子要素として解釈し、
+    ネストした <style>/<script> を実際に適用・実行する。この解析差により
+    `<svg><title>x<style>@import url(https://evil.example/x.css)</style>
+    </title></svg>` のような入力が CSS 許可リスト検査を素通りし、外部
+    リソース読み込みが fail-open になっていた（Issue #221、
+    Python 3.12.12 で実測）。空タプル上書きで 3.12 未満と同一の
+    （name space 非対応 RCDATA 切替なしの）解析結果に固定し、
+    バージョン依存も解消する。
     """
+
+    # html.parser 3.12+ の RCDATA_CONTENT_ELEMENTS ("textarea", "title") を
+    # 無効化する。クラス変数を空タプルにすると goahead() 内の
+    # `tag in self.RCDATA_CONTENT_ELEMENTS` 判定が常に False になり、
+    # title/textarea は常に通常要素として handle_starttag/handle_data/
+    # handle_endtag の通常経路を通る（3.11 以前と同じ挙動）。
+    RCDATA_CONTENT_ELEMENTS = ()
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -238,6 +261,15 @@ class ReportParser(HTMLParser):
         # 成立するため、renderer が生成しないこの構文自体を禁止する
         # （script は check #6 の完全一致ゲートでも落ちるが、意図した防御と
         # して明示的に閉じる）。
+        #
+        # 評価（Issue #221）: top-level の self-closing 形式（<textarea/> 等）
+        # 自体は html.parser が startendtag として処理し RCDATA モードへ
+        # 入らないため、後続の <style>/<script> は通常タグとして既存の
+        # CSS/script 検査に露出する（この経路に迂回はない）。真に迂回が
+        # 成立していたのは通常の開始タグ側（SVG foreign-content 内の
+        # <title>/<textarea> ネスト、および属性値に `>` を含む exit-point
+        # 差）で、これは RCDATA_CONTENT_ELEMENTS=() の上書き（クラス docstring
+        # 参照）で塞いだ。
         if tag in ("style", "script", "title"):
             self.external_refs.append(
                 f"<{tag}/>（RAWTEXT/RCDATA 要素の自己終了形式はブラウザとの"
