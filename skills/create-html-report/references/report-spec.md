@@ -120,8 +120,8 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
 ```
 
 - `orientation`: `"horizontal"`（既定・カテゴリ比較向き）/ `"vertical"`（期間比較向き）。**enum 外は SpecError**（`"Horizontal"` 等の表記ゆれ不可）
-- `mode`: `"grouped"`（既定）/ `"stacked"`。stacked は**負値不可**。**enum 外は SpecError**
-- `values` の `null` は当該バーを描かず、表では「—」
+- `mode`: `"grouped"`（既定）/ `"stacked"`。stacked は**負値不可・`null`（欠損）不可**。**enum 外は SpecError**
+- `values` の `null` は当該バーを描かず、表では「—」（grouped / 単一系列のみ。stacked は合計を積み上げの長さで表すため欠損を gap として表現できず、`null` を 0 として積むと存在しない合計値を発明する。**stacked の `null` は SpecError** とし、欠損を含むデータは grouped を使う）
 - 軸は必ず 0 を含む（axis integrity）。単一系列 horizontal は値の直接ラベル付き
 
 ### line
@@ -251,10 +251,10 @@ renderer は以下を機械検証し、違反時は日本語の `spec エラー:
 - **enum フィールドは厳格**（bar `orientation` / `mode`、waterfall `items[].type`、kpi `trend`、gantt `tasks[].status`。一覧外の値・表記ゆれはエラーで、silent に既定値へ倒さない）
 - `summary` / `sections[].body` は string または string の配列のみ（それ以外の型・非 string 要素はエラー）
 - 値数の不一致（series の values と categories/x/axes の長さ違い、table の行と columns の列数違い）はエラー
-- stacked bar / donut の負値、radar の範囲外値・`max <= 0`、gantt の `progress` 範囲外・`end < start`・`tasks[].id` 重複はエラー
+- stacked bar / donut の負値、stacked bar の `null`（欠損）、radar の範囲外値・`max <= 0`、gantt の `progress` 範囲外・`end < start`・`tasks[].id` 重複はエラー
 - 必須フィールドの欠落（`sections[].heading`・`kpis[].label`・`kpis[].value`・gantt `tasks[].name` 等）はエラー
 - 日付は `YYYY-MM-DD` 固定
-- **欠損は `null` で表現する**。0 と欠損は別物として扱われる（line は gap、heatmap は無色セル、表は「—」）
+- **欠損は `null` で表現する**。0 と欠損は別物として扱われる（line は gap、heatmap は無色セル、表は「—」）。ただし stacked bar は欠損を表現できないため `null` はエラー（grouped を使う）
 - spec 由来の全文字列は escape されて挿入される。HTML タグを書いても文字列として表示されるだけで解釈されない
 
 ## 最小例

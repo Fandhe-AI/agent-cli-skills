@@ -58,16 +58,25 @@ CSS_URL = re.compile(
 URL_IGNORABLE = re.compile(r"[\s\x00-\x1f]+")
 
 # URL / リソース参照を運びうる既知属性の拒否リスト（fail-closed 設計）。
-# href / src / action / xlink:href は個別に検査済み、style / id / class 等は非 URL。
-# それ以外で URL を運べる既知属性は、値のパース差異（srcset のカンマ区切り、
-# <a ping> の空白区切り複数 URL 等）で許可リスト検査をすり抜けやすく、
-# renderer も一切生成しないため、値を見ず「属性の存在自体」を不合格にする。
+# src / href / xlink:href はタグ横断の許可リスト検査（handle_starttag）で個別検査、
+# style / id / class 等は非 URL。それ以外で URL を運べる既知属性は、値のパース差異
+# （srcset のカンマ区切り、<a ping> の空白区切り複数 URL 等）で許可リスト検査を
+# すり抜けやすく、renderer も一切生成しないため、値を見ず「属性の存在自体」を
+# 不合格にする。action は form タグ自体が禁止で他タグでは不活性だが、
+# renderer が生成しない URL 運搬属性として同様に存在自体を閉じる。
 # blocklist 的な個別対応ではなく、URL 運搬経路をまとめて閉じるための一覧。
 URL_CARRYING_ATTRS = frozenset({
     "formaction", "ping", "poster", "cite", "background", "manifest",
     "longdesc", "srcset", "imagesrcset", "srcdoc", "data", "codebase",
     "archive", "usemap", "profile", "dynsrc", "lowsrc", "xml:base",
+    "action",
 })
+
+# src 属性を（許可画像 MIME の data: URI に限り）持ってよい受動メディアタグ。
+# これ以外のタグの src は値を問わず存在自体を不合格にする（タグ列挙の検査では
+# <input type="image" src> / <frame src> 等の未列挙タグが fail-open になるため、
+# 「src を持てるタグ」側を列挙する許可リスト方式で閉じる）。
+PASSIVE_MEDIA_TAGS = ("img", "source", "track", "audio", "video")
 
 # 存在自体を不合格にする能動コンテンツ / ナビゲーション制御タグ。
 # link / iframe / object / embed / script src は従来どおり。加えて
@@ -75,6 +84,16 @@ URL_CARRYING_ATTRS = frozenset({
 # SVG feImage は filter 経由の外部画像読込の入口になるため、値を問わず禁止する
 # （html.parser はタグ名を小文字化するため feimage で照合する）。
 BANNED_TAGS = ("link", "iframe", "object", "embed", "base", "form", "feimage")
+
+# SVG の presentation 属性のうち url(...)（FuncIRI）でペイントサーバー・
+# フィルタ・カーソル画像等の外部リソースを参照できるもの。style 属性を
+# 経由しない読込経路のため、値に url( を含む場合は CSS と同じ許可リスト
+# （画像 data: と #fragment、css_bad_urls）で検査する。renderer が生成する
+# のは色リテラルと var() 参照のみで url( は生成しない。
+SVG_PAINT_ATTRS = frozenset({
+    "fill", "stroke", "filter", "mask", "clip-path", "cursor",
+    "marker", "marker-start", "marker-mid", "marker-end", "mask-image",
+})
 
 # SVG 内で href / xlink:href によるリソース・要素参照を持ちうるタグ。
 # image / use に加え、SMIL 系（animate / set / animateMotion / mpath）の href も
@@ -209,6 +228,24 @@ class ReportParser(HTMLParser):
         if decl.lower().startswith("doctype"):
             self.has_doctype = True
 
+    def handle_startendtag(self, tag, attrs):
+        # RAWTEXT / RCDATA 要素（style / script / title）の自己終了タグ形式は
+        # 存在自体を不合格にする。html.parser は <style/> を「開始 + 即終了」と
+        # 解釈して内容バッファが空になるが、実ブラウザは HTML5 パース仕様上
+        # self-closing フラグを無視し </style> までの全テキストを CSS として
+        # 解釈・実行する。この解析差により <style/>@import url(...)</style> が
+        # CSS 検査（@import / url() 許可リスト）に一切載らない fail-open が
+        # 成立するため、renderer が生成しないこの構文自体を禁止する
+        # （script は check #6 の完全一致ゲートでも落ちるが、意図した防御と
+        # して明示的に閉じる）。
+        if tag in ("style", "script", "title"):
+            self.external_refs.append(
+                f"<{tag}/>（RAWTEXT/RCDATA 要素の自己終了形式はブラウザとの"
+                "解析差による検査迂回のため禁止）")
+        # 既定実装と同じく開始 + 終了として処理し、状態機械の整合を保つ
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
     def handle_starttag(self, tag, attrs):
         # 重複属性は先勝ちで畳み込む（HTML5 仕様・ブラウザ挙動と一致させる）。
         # html.parser は重複属性を除去せず list のまま返すため、dict(attrs) の
@@ -230,6 +267,8 @@ class ReportParser(HTMLParser):
 
         # javascript: URL の検査（href / src / action / xlink:href）。
         # タブ・改行等の制御文字を挟んだ迂回も判定前に除去して検出する。
+        # action は URL_CARRYING_ATTRS の存在拒否でも不合格になるが、
+        # javascript: の検出報告を別枠で残す防御多層として重複判定を維持する。
         for key in ("href", "src", "action", "xlink:href"):
             v = ad.get(key) or ""
             if URL_IGNORABLE.sub("", v.lower()).startswith("javascript:"):
@@ -242,11 +281,16 @@ class ReportParser(HTMLParser):
         #    inline 検査（network API・@import・url() 許可リスト）を迂回できる
         #    ため、属性値を見ずタグの存在自体を一律不合格にする。
         # 2) URL を運びうる既知属性（URL_CARRYING_ATTRS: formaction / ping /
-        #    poster / srcset 等）は、個別検査済みの href / src / action /
-        #    xlink:href 以外の運搬経路をまとめて塞ぐため、存在自体を不合格にする。
-        # 3) 受動メディア（img / source / track / audio / video）の src は
-        #    DATA_URI_ALLOWED の画像 MIME allowlist に一致する data: のみ許可。
-        #    SVG の参照タグ（SVG_REF_TAGS）は文書内 #fragment 参照も許可。
+        #    poster / srcset / action 等）は、タグ横断で個別検査する src /
+        #    href / xlink:href 以外の運搬経路をまとめて塞ぐため、存在自体を
+        #    不合格にする。
+        # 3) src / href / xlink:href はタグ横断の許可リスト方式:
+        #    - src: 受動メディア（PASSIVE_MEDIA_TAGS）で DATA_URI_ALLOWED の
+        #      画像 MIME data: のみ許可。それ以外のタグは存在自体を不合格
+        #      （<input type="image" src> / <frame src> 等の fail-open を塞ぐ）。
+        #    - href / xlink:href: SVG 参照タグ（SVG_REF_TAGS）は data: 画像と
+        #      文書内 #fragment、その他のタグは #fragment のみ許可
+        #      （SVG gradient / textPath 等の href="#id" テンプレート参照は維持）。
         # 出典 <a href> は対象外 = 唯一の許可経路（check #9 で https / #fragment に制限）。
         # <script> は属性が 1 つでも付いていたら無条件不合格にする（fail-closed）。
         # src の列挙判定だけでは SVG 2 の <script href> / xlink:href が漏れ、
@@ -267,22 +311,51 @@ class ReportParser(HTMLParser):
         for key in ad:
             if key in URL_CARRYING_ATTRS:
                 self.external_refs.append(f"<{tag} {key}>（属性の存在自体を禁止）")
-        if tag in ("img", "source", "track", "audio", "video"):
+        if tag in PASSIVE_MEDIA_TAGS:
             if "src" in ad and not DATA_URI_ALLOWED.match(ad.get("src") or ""):
                 self.external_refs.append(f"<{tag} src={ad['src']!r}>")
+        elif tag != "script" and "src" in ad:
+            # script の src は上の属性付き script 一律拒否で報告済み。
+            # それ以外の未列挙タグ（input / frame / portal 等）の src は
+            # 値を問わず存在自体を不合格にする（fail-closed）。
+            self.external_refs.append(
+                f"<{tag} src>（受動メディア以外の src は存在自体を禁止）")
         if tag in SVG_REF_TAGS:  # SVG 内のリソース・要素参照（SMIL 含む）
             for key in ("href", "xlink:href"):
                 v = ad.get(key) or ""
                 if key in ad and not (DATA_URI_ALLOWED.match(v) or FRAGMENT_URL.match(v)):
                     self.external_refs.append(f"<{tag} {key}={ad[key]!r}>")
+        elif tag not in ("a", "script"):
+            # <a href> は check #9（https / #fragment）、属性付き script は
+            # 一律拒否で検査済み。それ以外のタグの href / xlink:href は
+            # 文書内 #fragment 参照（SVG gradient / textPath 等）のみ許可する。
+            for key in ("href", "xlink:href"):
+                v = ad.get(key) or ""
+                if key in ad and not FRAGMENT_URL.match(v):
+                    self.external_refs.append(
+                        f"<{tag} {key}={ad[key]!r}>（#fragment 以外は禁止）")
         # style 属性内の CSS も <style> ブロックと同じ許可リストで検査する
         # （escape 難読化を塞ぐため、@import 検査は css_unescape 後に行う）
         sv = ad.get("style") or ""
         if "style" in ad and (CSS_IMPORT.search(css_unescape(sv)) or css_bad_urls(sv)):
             self.style_attr_external.append(f"<{tag} style=...>")
+        # SVG presentation 属性（fill / filter / mask / cursor 等）は style を
+        # 経由せず url(...) で外部リソースを参照できるため、値に url( を含む
+        # 場合は CSS と同じ許可リスト（css_bad_urls）で検査する。色リテラル・
+        # var() 参照は url( を含まないため素通しになる（renderer 生成物と整合）。
+        for key in SVG_PAINT_ATTRS.intersection(ad):
+            v = ad.get(key) or ""
+            if "url(" in css_unescape(v).lower() and css_bad_urls(v):
+                self.external_refs.append(f"<{tag} {key}={v!r}>")
 
-        if tag == "a" and ad.get("href"):
-            self.anchor_hrefs.append(ad["href"])
+        # <a> は href に加えて SVG の legacy 属性 xlink:href でもリンク先を
+        # 指定できる。どちらも check #9（https / #fragment のみ）の対象に
+        # 収集する（xlink:href を collect しないと SVG <a xlink:href> が
+        # どの検査経路にも載らない fail-open になる）。
+        if tag == "a":
+            for key in ("href", "xlink:href"):
+                if ad.get(key):
+                    self.anchor_hrefs.append(ad[key])
 
         if tag == "meta":
             if "charset" in ad:
@@ -404,7 +477,7 @@ def run_checks(path):
     #    相対 URL も自己完結契約違反として不合格。出典 <a href> は #9 で別途検査）
     check("リソース読み込みがない（link / iframe / object / embed / base / form / feImage / "
           "meta refresh はタグ自体・属性付き script・URL 運搬属性（formaction / ping / poster 等）は一律禁止、"
-          "img 等は画像 data: src と #fragment のみ許可）",
+          "src / href はタグ横断検査で受動メディアの画像 data: と #fragment のみ許可）",
           not parser.external_refs, "; ".join(parser.external_refs[:5]))
     css_all = "\n".join(parser.styles)
     css_bad = css_bad_urls(css_all)
@@ -439,7 +512,8 @@ def run_checks(path):
     # 8. javascript: URL なし
     check("javascript: URL がない", not parser.bad_js_urls, "; ".join(parser.bad_js_urls[:5]))
 
-    # 9. <a href> は https / ページ内 fragment のみ（出典リンクと外部依存の区別）
+    # 9. <a href> は https / ページ内 fragment のみ（出典リンクと外部依存の区別。
+    #    SVG の <a xlink:href> も同じ収集経路（anchor_hrefs）でここへ載る）
     bad_anchors = [h for h in parser.anchor_hrefs
                    if not (h.startswith("#") or h.lower().startswith("https://"))]
     check("<a href> が https または #fragment のみ",
