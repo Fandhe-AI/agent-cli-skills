@@ -41,7 +41,18 @@ reusable workflow を SHA 固定で呼び出す wrapper）は、PR の base コ�
   可動参照へ緩める変更、`permissions` の拡大、構造検証
   （`.github/scripts/check-skill-structure.sh`）・lint の弱体化
 - **承認境界の後退（P1）**: implement-issue の「計画承認後に実装」、Issue 起票・
-  破壊的操作前のユーザー確認など、既存スキルが持つ人間承認ゲートを外す変更
+  破壊的操作前のユーザー確認など、既存スキルが持つ人間承認ゲートを外す変更。
+  **例外（リポジトリオーナー承認済み設計 2026-08-12）**: implement-issue-tree の
+  opt-in クライアント側自動マージ（`autoMerge: true` + `externalChecks` 確定 +
+  SKILL.md「クライアント側自動マージの設計」節の 3 層 = monitor 出力のマージ経路
+  からの分離・merge-exec の自己取得再検証・G0 サーバー側強制と bypass 不能性の実測）
+  は、人間の都度マージ操作を省く設計としてオーナーが明示承認しており、その**存在
+  自体**は承認境界の後退として指摘しない（merge-guard hook は任意導入・deny 専用の
+  多層防御であり、本リポジトリには未導入。opt-in マージと hook の排他は SKILL.md に
+  文書化済み）。ただしこの例外は設計どおりの実装に限る: 3 層のいずれかを弱める変更、
+  opt-in 条件（ホストの決定的 args パース）を迂回・緩和する変更、G0 の fail-closed を
+  外す変更、未信頼テキストを merge-exec / merge-verify のコンテキストへ持ち込む変更は
+  従来どおり P0 として扱う
 
 ## 2. アーキテクチャ・設計整合の観点
 
