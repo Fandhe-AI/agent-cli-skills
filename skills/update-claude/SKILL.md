@@ -338,9 +338,16 @@ else
   fi
 fi
 
-# 張り替え後もなお dangling な場合（期待ターゲット自体が未 vendored）は
-# `npx skills add` の再実行を案内する
-[ -e "$LINK" ] || echo "警告: 張り替え後も参照先が解決しない。npx skills add で再取得を案内"
+# 設置後チェック: symlink 不在（作成/置換失敗）と dangling（参照先未解決）を区別する
+if [ -L "$LINK" ]; then
+  # symlink としては存在する場合のみ resolve 失敗（dangling）を判定する
+  [ -e "$LINK" ] || echo "警告: 張り替え後もなお dangling（期待ターゲット自体が未 vendored の可能性）。npx skills add で再取得を案内"
+else
+  # symlink 自体が存在しない場合は create/replace 失敗（TMP_LINK 残骸等）が原因のため、
+  # npx skills add の再実行では復旧しない。上記のエラーログを確認して原因を解消してから
+  # 手動で ln -s するか再実行するよう案内する
+  echo "エラー: $LINK に symlink が作成されていない。上記エラーの原因（TMP_LINK 残存・mkdir/ln/mv 失敗等）を解消し、必要なら手動で ln -s $EXPECTED_TARGET $LINK を実行してから再確認する"
+fi
 ```
 
 sub_issues API が使用できない場合は GitHub Apps の有効化をユーザーに案内する。
