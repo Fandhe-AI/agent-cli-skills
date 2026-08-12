@@ -224,11 +224,11 @@ class ReportParser(HTMLParser):
     RCDATA 判定は handle_starttag 呼び出し直後（このタグ自身が _stack に push された後）
     に行われるため、判定時点の _stack を見れば「このタグの祖先に svg が
     あるか」を正しく判定できる（このタグ自身は title/textarea であり
-    svg ではないため誤判定なし）。_cur_svg（直近の <svg>...</svg> 区間の
-    フラグ、</svg> で None に戻る）ではなく _stack 全体を走査するのは、
-    入れ子の <svg> の内側 </svg> で _cur_svg が None に戻った後でも、
-    外側の <svg> の中にいる限り RCDATA を無効化し続ける必要があるため
-    （_cur_svg だけで判定すると Issue #221 の脆弱性が入れ子 svg で再発する）。
+    svg ではないため誤判定なし）。_svg_stack（開いている <svg> の入れ子
+    スタック）ではなく _stack 全体を走査するのは、RCDATA 判定が
+    handle_starttag 直後の呼び出しタイミングに依存し、タグスタックの方が
+    判定時点の祖先関係を直接表すため（svg の追跡自体も入れ子対応の
+    スタック管理であり、内側の </svg> 後も外側の追跡を維持する）。
 
     さらに、RCDATA_CONTENT_ELEMENTS 自体は Python 3.12+ にしか存在せず
     3.11 以前ではこの property は no-op になる。バージョン非依存の防御として、
@@ -270,7 +270,7 @@ class ReportParser(HTMLParser):
         self._stack = []            # (tag, classes) の祖先スタック
         self._in = None             # "script" | "style" | "title" | "svg-title" | "svg-desc"
         self._buf = ""
-        self._cur_svg = None
+        self._svg_stack = []        # 開いている <svg> の入れ子スタック（末尾が現在の svg）
         self._cur_table = None
 
     # -- 補助 ---------------------------------------------------------------
@@ -454,11 +454,14 @@ class ReportParser(HTMLParser):
         if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             self.headings.append(int(tag[1]))
 
-        # SVG 内の子要素数を数える（is_chart_svg の「意味論的 SVG」判定材料）
-        if self._cur_svg is not None and tag != "svg":
-            self._cur_svg["elems"] += 1
+        # SVG 内の子要素数を数える（is_chart_svg の「意味論的 SVG」判定材料）。
+        # 入れ子 svg に備えてスタック管理し、内側の </svg> 後も外側の追跡を維持する
+        # （単一値だと内側を閉じた時点で外側の elems 加算・title/desc 帰属が失われ、
+        # accessible name 検査を要素数不足で迂回できる。codex P2 / Bugbot 指摘）
+        if self._svg_stack and tag != "svg":
+            self._svg_stack[-1]["elems"] += 1
         if tag == "svg":
-            self._cur_svg = {
+            cur = {
                 "attrs": ad,
                 "in_chart_wrap": self._has_ancestor_class("chart-wrap"),
                 "has_title": False,
@@ -466,11 +469,12 @@ class ReportParser(HTMLParser):
                 "classes": classes,
                 "elems": 0,
             }
-            self.svgs.append(self._cur_svg)
-        if tag == "title" and self._cur_svg is not None:
-            self._cur_svg["has_title"] = True
-        if tag == "desc" and self._cur_svg is not None:
-            self._cur_svg["has_desc"] = True
+            self._svg_stack.append(cur)
+            self.svgs.append(cur)
+        if tag == "title" and self._svg_stack:
+            self._svg_stack[-1]["has_title"] = True
+        if tag == "desc" and self._svg_stack:
+            self._svg_stack[-1]["has_desc"] = True
 
         if tag == "table":
             self._cur_table = {
@@ -488,7 +492,7 @@ class ReportParser(HTMLParser):
             self._in, self._buf = "script", ""
         elif tag == "style":
             self._in, self._buf = "style", ""
-        elif tag == "title" and self._cur_svg is None:
+        elif tag == "title" and not self._svg_stack:
             self._in, self._buf = "title", ""
 
         self._stack.append((tag, classes))
@@ -508,8 +512,8 @@ class ReportParser(HTMLParser):
         elif tag == "title" and self._in == "title":
             self.title_text = self._buf.strip()
             self._in = None
-        if tag == "svg":
-            self._cur_svg = None
+        if tag == "svg" and self._svg_stack:
+            self._svg_stack.pop()
         if tag == "table":
             self._cur_table = None
 
