@@ -330,7 +330,7 @@ def chart_desc(chart, fallback):
 
 
 # ---------------------------------------------------------------------------
-# chart renderer: bar（horizontal / vertical・grouped / stacked）
+# chart renderer: bar（horizontal / vertical・single / grouped / stacked）
 # ---------------------------------------------------------------------------
 
 def render_bar(chart, ids, interactive):
@@ -347,7 +347,7 @@ def render_bar(chart, ids, interactive):
     mode = chart.get("mode", "grouped" if len(series) > 1 else "single")
     if mode not in ("single", "grouped", "stacked"):
         raise SpecError(f"bar chart '{chart.get('title')}' の mode は "
-                        f"grouped / stacked のいずれか: {mode!r}")
+                        f"single / grouped / stacked のいずれか: {mode!r}")
     unit = chart.get("unit", "")
     ns, nc = len(series), len(cats)
 

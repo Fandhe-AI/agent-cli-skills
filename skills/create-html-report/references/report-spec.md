@@ -120,9 +120,9 @@ renderer は違反を SpecError として拒否する（duplicate id の HTML �
 ```
 
 - `orientation`: `"horizontal"`（既定・カテゴリ比較向き）/ `"vertical"`（期間比較向き）。**enum 外は SpecError**（`"Horizontal"` 等の表記ゆれ不可）
-- `mode`: `"grouped"`（既定）/ `"stacked"`。stacked は**負値不可・`null`（欠損）不可**。**enum 外は SpecError**
+- `mode`: `"single"`（単一系列時の既定。値の直接ラベル付き描画）/ `"grouped"`（複数系列時の既定）/ `"stacked"`。stacked は**負値不可・`null`（欠損）不可**。**enum 外は SpecError**
 - `values` の `null` は当該バーを描かず、表では「—」（grouped / 単一系列のみ。stacked は合計を積み上げの長さで表すため欠損を gap として表現できず、`null` を 0 として積むと存在しない合計値を発明する。**stacked の `null` は SpecError** とし、欠損を含むデータは grouped を使う）
-- 軸は必ず 0 を含む（axis integrity）。単一系列 horizontal は値の直接ラベル付き
+- 軸は必ず 0 を含む（axis integrity）。単一系列 horizontal（`mode: "single"`）は値の直接ラベル付き
 
 ### line
 
