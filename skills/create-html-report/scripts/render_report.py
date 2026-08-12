@@ -330,7 +330,7 @@ def chart_desc(chart, fallback):
 
 
 # ---------------------------------------------------------------------------
-# chart renderer: bar（horizontal / vertical・grouped / stacked）
+# chart renderer: bar（horizontal / vertical・single / grouped / stacked）
 # ---------------------------------------------------------------------------
 
 def render_bar(chart, ids, interactive):
@@ -347,9 +347,16 @@ def render_bar(chart, ids, interactive):
     mode = chart.get("mode", "grouped" if len(series) > 1 else "single")
     if mode not in ("single", "grouped", "stacked"):
         raise SpecError(f"bar chart '{chart.get('title')}' の mode は "
-                        f"grouped / stacked のいずれか: {mode!r}")
+                        f"single / grouped / stacked のいずれか: {mode!r}")
     unit = chart.get("unit", "")
     ns, nc = len(series), len(cats)
+    # report-spec.md は "single" を単一系列専用（値の直接ラベル付き描画）と
+    # 公開契約している。複数系列を "single" のまま受理すると grouped と同じ
+    # 描画経路に流れて文書と実装が食い違うため、ここで明示的に拒否する
+    # （レビュー指摘に基づく契約整合）。
+    if mode == "single" and ns != 1:
+        raise SpecError(f"bar chart '{chart.get('title')}' の mode 'single' は "
+                        f"単一系列専用（series が{ns}件）。複数系列は 'grouped' を使用すること")
 
     vals = []
     for si, s in enumerate(series):
@@ -428,7 +435,7 @@ def render_bar(chart, ids, interactive):
                     by = y0 + 6 + j * bh
                     out.append(f'<rect x="{x0:.1f}" y="{by:.1f}" width="{max(x1 - x0, 0.5):.1f}" '
                                f'height="{bh - 2:.1f}" fill="{SERIES_VARS[j % 8]}"/>')
-                    if ns == 1:  # 単一系列は直接ラベルで正確な値を示す
+                    if mode == "single":  # single は直接ラベルで正確な値を示す（report-spec.md 契約）
                         anchor_x = x1 + 5 if v >= 0 else x0 - 5
                         anchor = "start" if v >= 0 else "end"
                         out.append(f'<text x="{anchor_x:.1f}" y="{by + bh / 2 + 3:.1f}" '
