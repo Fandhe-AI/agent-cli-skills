@@ -363,12 +363,12 @@ else
   TMP_LINK="<target-repo>/_/dotclaude/workflows/implement-issue-tree.js"
   if [ -e "$TMP_LINK" ] || [ -L "$TMP_LINK" ]; then
     echo "エラー: 過去の失敗などで一時リンク $TMP_LINK が残存している。内容を確認し、意図しない参照先でなければ削除してから再実行する: ls -la $TMP_LINK"
-  elif mkdir -p "$(dirname "$TMP_LINK")" && ln -s "$EXPECTED_TARGET" "$TMP_LINK"; then
+  elif mkdir -p "$(dirname "$TMP_LINK")" && ln -s "$EXPECTED_TARGET" "$TMP_LINK" && mkdir -p "$(dirname "$LINK")"; then
     mv "$TMP_LINK" "$LINK"
     rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
     rmdir <target-repo>/_/dotclaude 2>/dev/null
   else
-    echo "エラー: 新しい symlink の作成に失敗。$LINK は未作成のまま"
+    echo "エラー: 新しい symlink の作成、または配置先ディレクトリの作成に失敗。$LINK は未作成のまま"
   fi
 fi
 
