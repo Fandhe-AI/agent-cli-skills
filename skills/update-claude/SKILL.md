@@ -303,12 +303,18 @@ if [ -L "$LINK" ]; then
     else
       echo "張り替え前のターゲット: $(readlink "$LINK")"
       # 新リンクを競合しない一時パスへ先に作成し、成功を確認してから mv で
-      # 既存リンクを置換する（先に rm すると mkdir/ln 失敗時に旧リンクが失われるため）
+      # 既存リンクを置換する（先に rm すると mkdir/ln 失敗時に旧リンクが失われるため）。
+      # create 分岐と同様、過去の失敗で TMP_LINK が残存している場合は上書きせず案内する
       TMP_LINK="<target-repo>/_/dotclaude/workflows/implement-issue-tree.js"
-      if mkdir -p "$(dirname "$TMP_LINK")" && ln -s "$EXPECTED_TARGET" "$TMP_LINK"; then
-        mv "$TMP_LINK" "$LINK"   # 既存 symlink はここで初めて置換される（旧リンクは直前まで生存）
-        rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
-        rmdir <target-repo>/_/dotclaude 2>/dev/null
+      if [ -e "$TMP_LINK" ] || [ -L "$TMP_LINK" ]; then
+        echo "エラー: 過去の失敗などで一時リンク $TMP_LINK が残存している。内容を確認し、意図しない参照先でなければ削除してから再実行する: ls -la $TMP_LINK"
+      elif mkdir -p "$(dirname "$TMP_LINK")" && ln -s "$EXPECTED_TARGET" "$TMP_LINK"; then
+        if mv "$TMP_LINK" "$LINK"; then   # 既存 symlink はここで初めて置換される（旧リンクは直前まで生存）
+          rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
+          rmdir <target-repo>/_/dotclaude 2>/dev/null
+        else
+          echo "エラー: symlink の置換 (mv) に失敗。一時リンク $TMP_LINK が残存している可能性があるため、内容を確認し必要なら手動で削除してから再実行する: ls -la $TMP_LINK"
+        fi
       else
         echo "エラー: 新しい symlink の作成に失敗。既存の symlink は保持される"
       fi

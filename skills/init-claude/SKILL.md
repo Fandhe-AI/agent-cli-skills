@@ -312,12 +312,18 @@ gh auth status
 # （issue が未作成なら gh auth status のみで前提確認とする）
 gh api "repos/<owner>/<repo>/issues/<既存issue番号>/sub_issues" 2>&1 | head -5
 
-# workflow js の参照確認（-L で symlink か実体かを判定し、readlink でターゲットも確認する）
+# workflow js の参照確認（-L で symlink か実体かを判定し、readlink でターゲットも
+# EXPECTED_TARGET と比較して stale（向き先が期待と異なる）も検出する）
+EXPECTED_TARGET="../skills/implement-issue-tree/scripts/implement-issue-tree.js"
 LINK="<target-repo>/.claude/workflows/implement-issue-tree.js"
 if [ -L "$LINK" ]; then
-  echo "symlink 現在のターゲット: $(readlink "$LINK")"
-  # 期待値は .claude/workflows/ から見て1階層上の .claude/skills/ 経由（../skills/...）
-  [ -e "$LINK" ] || echo "警告: dangling symlink（参照先が存在しない）"
+  CURRENT_TARGET="$(readlink "$LINK")"
+  echo "symlink 現在のターゲット: $CURRENT_TARGET"
+  if [ ! -e "$LINK" ]; then
+    echo "警告: dangling symlink（参照先が存在しない）"
+  elif [ "$CURRENT_TARGET" != "$EXPECTED_TARGET" ]; then
+    echo "警告: stale symlink（期待ターゲット $EXPECTED_TARGET と不一致）"
+  fi
 elif [ -e "$LINK" ]; then
   echo "実体ファイルとして存在する（symlink ではない）"
 else
@@ -350,12 +356,18 @@ if [ -L "$LINK" ]; then
     else
       echo "張り替え前のターゲット: $(readlink "$LINK")"
       # 新リンクを競合しない一時パスへ先に作成し、成功を確認してから mv で
-      # 既存リンクを置換する（先に rm すると mkdir/ln 失敗時に旧リンクが失われるため）
+      # 既存リンクを置換する（先に rm すると mkdir/ln 失敗時に旧リンクが失われるため）。
+      # create 分岐と同様、過去の失敗で TMP_LINK が残存している場合は上書きせず案内する
       TMP_LINK="<target-repo>/_/dotclaude/workflows/implement-issue-tree.js"
-      if mkdir -p "$(dirname "$TMP_LINK")" && ln -s "$EXPECTED_TARGET" "$TMP_LINK"; then
-        mv "$TMP_LINK" "$LINK"   # 既存 symlink はここで初めて置換される（旧リンクは直前まで生存）
-        rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
-        rmdir <target-repo>/_/dotclaude 2>/dev/null
+      if [ -e "$TMP_LINK" ] || [ -L "$TMP_LINK" ]; then
+        echo "エラー: 過去の失敗などで一時リンク $TMP_LINK が残存している。内容を確認し、意図しない参照先でなければ削除してから再実行する: ls -la $TMP_LINK"
+      elif mkdir -p "$(dirname "$TMP_LINK")" && ln -s "$EXPECTED_TARGET" "$TMP_LINK"; then
+        if mv "$TMP_LINK" "$LINK"; then   # 既存 symlink はここで初めて置換される（旧リンクは直前まで生存）
+          rmdir <target-repo>/_/dotclaude/workflows 2>/dev/null
+          rmdir <target-repo>/_/dotclaude 2>/dev/null
+        else
+          echo "エラー: symlink の置換 (mv) に失敗。一時リンク $TMP_LINK が残存している可能性があるため、内容を確認し必要なら手動で削除してから再実行する: ls -la $TMP_LINK"
+        fi
       else
         echo "エラー: 新しい symlink の作成に失敗。既存の symlink は保持される"
       fi
