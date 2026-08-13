@@ -420,13 +420,13 @@ if gcloud iam service-accounts describe "${sa_email}" --project="${PROJECT_ID}" 
     fi
   fi
 else
+  # 管理証跡は create と同時に設定する（作成後の update で設定すると、
+  # その間の失敗で「自分が作った証跡なし SA」が残り、再実行が fail-closed
+  # 停止（ADOPT_EXISTING_SA の要求）になって冪等な再試行が壊れるため）
   gcloud iam service-accounts create "${SA_ID}" \
     --display-name="${sa_display_name}" \
+    --description="${KEY_RECORD_MARKER}" \
     --project="${PROJECT_ID}"
-  # 作成直後に管理証跡を設定する（新規作成した SA は本スクリプトの所有）
-  gcloud iam service-accounts update "${sa_email}" \
-    --project="${PROJECT_ID}" \
-    --description="${KEY_RECORD_MARKER}" >/dev/null
 fi
 
 log "最小ロールを付与します"
