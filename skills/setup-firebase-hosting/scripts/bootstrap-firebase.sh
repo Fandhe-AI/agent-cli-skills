@@ -339,19 +339,53 @@ esac
 
 # --- (4) CI 用サービスアカウント ---
 log "CI 用サービスアカウント ${sa_email} を確認します"
-# 「${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com」という完全一致の email
-# だけが、本スクリプトが作成・管理する専用サービスアカウントを指す契約と
-# する（前提条件に明記）。displayName のような書き換え可能な情報は判定に
-# 使わない。なお鍵の世代交代（後述 (5)）の削除対象は「この SA の
-# description（GCP 側の発行記録）に記録された鍵」だけに限定されるため、
-# SA_ID を誤って既存の共有アカウントへ向けても、そのアカウントが従来から
-# 持つ鍵（記録に無い鍵）は削除されない。
+
+# 本スクリプトの管理対象（発行記録の書き込み・記録にある鍵の世代交代の対象）
+# である証跡。新規作成した SA には作成直後にこのマーカーを description へ
+# 設定し、以降はマーカーの有無で管理対象かを判定する。email の一致だけを
+# 所有権の根拠にはしない（SA_ID の誤指定・名前衝突で既存の共有 SA を管理
+# 対象と誤認し、description の上書きや鍵の削除に進むのを防ぐ）。
+KEY_RECORD_MARKER="firebase-bootstrap-issued-keys="
+
 if gcloud iam service-accounts describe "${sa_email}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
   echo "既に存在するため作成をスキップします"
+  # 既存 SA は管理証跡（マーカー）を検証できた場合のみ管理対象として続行
+  # する。マーカーが無い SA は本スクリプト以外が作成・利用している可能性が
+  # あるため、fail-closed で停止する。本スクリプト専用として引き受ける場合
+  # のみ、明示的な承認フラグ ADOPT_EXISTING_SA=true で採用（マーカー設定）
+  # する。採用時点で存在する鍵は発行記録に無いため自動削除の対象にならない
+  # （fail-safe）。
+  existing_description="$(gcloud iam service-accounts describe "${sa_email}" \
+    --project="${PROJECT_ID}" \
+    --format="value(description)")" || die "サービスアカウント ${sa_email} の情報取得に失敗しました。gcloud の認証・権限を確認してから再実行してください。"
+  if ! printf '%s\n' "${existing_description}" | grep -q "^${KEY_RECORD_MARKER}"; then
+    if [ "${ADOPT_EXISTING_SA:-false}" = "true" ]; then
+      echo "ADOPT_EXISTING_SA=true が指定されたため、この既存 SA を本スクリプトの管理対象として採用します"
+      echo "（description は発行記録用に上書きされます。既存の鍵は記録に無いため自動削除されません）"
+      gcloud iam service-accounts update "${sa_email}" \
+        --project="${PROJECT_ID}" \
+        --description="${KEY_RECORD_MARKER}" >/dev/null
+    else
+      die "既存のサービスアカウント ${sa_email} には本スクリプトの管理証跡
+（description の ${KEY_RECORD_MARKER} 行）がありません。
+本スクリプト以外が作成・利用している SA の可能性があるため、description の
+上書きや鍵の管理（発行記録・世代交代）へは進まず停止します。
+
+- 専用 SA を新しく作る場合: 別の SA_ID を指定して再実行してください
+    SA_ID=<別の ID> PROJECT_ID=$(shq "${PROJECT_ID}") SITE_ID=$(shq "${SITE_ID}") GITHUB_REPO=$(shq "${GITHUB_REPO}") bash $(shq "$0")
+- この SA を本スクリプト専用として引き受ける場合のみ、明示的に承認して再実行してください
+    ADOPT_EXISTING_SA=true PROJECT_ID=$(shq "${PROJECT_ID}") SITE_ID=$(shq "${SITE_ID}") GITHUB_REPO=$(shq "${GITHUB_REPO}") bash $(shq "$0")
+  （description が発行記録用に上書きされます。既存の鍵は記録に無いため自動削除されません）"
+    fi
+  fi
 else
   gcloud iam service-accounts create "${SA_ID}" \
     --display-name="${sa_display_name}" \
     --project="${PROJECT_ID}"
+  # 作成直後に管理証跡を設定する（新規作成した SA は本スクリプトの所有）
+  gcloud iam service-accounts update "${sa_email}" \
+    --project="${PROJECT_ID}" \
+    --description="${KEY_RECORD_MARKER}" >/dev/null
 fi
 
 log "最小ロールを付与します"
@@ -399,11 +433,10 @@ log "サービスアカウント鍵を発行し GitHub Secret ${SECRET_NAME} へ
 #   5. 登録成功後にだけ、記録にある旧鍵を削除する
 #   6. 削除がすべて成功した後で、発行記録を現行鍵 ID のみへ更新する
 
-# 発行記録は description 内の本マーカー行（カンマ区切りの鍵 ID）で持つ。
-# 専用 SA（本スクリプトが作成・管理。前提条件に明記）のため description は
-# 本スクリプトが占有してよい。
-KEY_RECORD_MARKER="firebase-bootstrap-issued-keys="
-
+# 発行記録は description 内のマーカー行（KEY_RECORD_MARKER + カンマ区切りの
+# 鍵 ID）で持つ。ここへ到達するのは (4) で管理証跡を検証済み（新規作成・
+# マーカー確認・明示採用のいずれか）の SA だけなので、description は本
+# スクリプトが占有してよい。
 sa_description="$(gcloud iam service-accounts describe "${sa_email}" \
   --project="${PROJECT_ID}" \
   --format="value(description)")" || die "サービスアカウント ${sa_email} の情報取得に失敗しました。
@@ -652,7 +685,7 @@ ${billing_warning}
 次の手順:
   1. .firebaserc の差分をコミットしてください
   2. デプロイワークフローが対象とするブランチ（リポジトリの既定ブランチ）へ
-     push すると本番（live）チャンネルへ自動デプロイされます
+    push すると本番（live）チャンネルへ自動デプロイされます
   3. PR ではビルド検証（build job）のみ実行され、プレビューデプロイは行われません
 
 独自ドメインを使う場合は、Firebase Hosting のカスタムドメイン設定と

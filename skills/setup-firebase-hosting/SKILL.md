@@ -18,7 +18,7 @@ model: sonnet
 - `gh` CLI（認証済み）
 - Node.js（`npx firebase-tools` を使う）
 - 対象リポジトリが GitHub 上にあること
-- **`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com`（既定 `SA_ID=github-actions-hosting`）は本スクリプトが作成・管理する専用サービスアカウントとし、他用途と共有しないこと（description は発行記録として本スクリプトが占有する）。** なお鍵の自動ローテーション（後述）の削除対象は「この SA の description（GCP 側の発行記録）に記録された鍵」だけに限定される。記録に無い鍵は削除されず一覧表示に留まる（fail-safe）ため、`SA_ID` を誤って既存の共有アカウントへ向けても、そのアカウントが従来から持つ鍵は削除されない
+- **`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com`（既定 `SA_ID=github-actions-hosting`）は本スクリプトが作成・管理する専用サービスアカウントとし、他用途と共有しないこと（description は発行記録として本スクリプトが占有する）。** 管理対象かどうかは email の一致ではなく description の管理証跡（マーカー）で判定する。新規作成した SA には作成直後に証跡を設定し、証跡の無い既存 SA に対しては description の上書き・鍵の管理へ進まず fail-closed で停止する（本スクリプト専用として引き受ける場合のみ `ADOPT_EXISTING_SA=true` で明示的に採用する）。鍵の自動ローテーション（後述）の削除対象は「この SA の description（GCP 側の発行記録）に記録された鍵」だけに限定され、記録に無い鍵は削除されず一覧表示に留まる（fail-safe）
 
 対象サイトの条件:
 
