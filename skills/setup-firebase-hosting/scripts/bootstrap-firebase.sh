@@ -161,14 +161,30 @@ fi
 
 # --- (1) プロジェクト（請求先アカウントは紐付けない） ---
 log "GCP プロジェクト ${PROJECT_ID} を確認します"
-if gcloud projects describe "${PROJECT_ID}" >/dev/null 2>&1; then
+# describe の失敗を一律「不存在」と扱わない。認証期限切れ・権限不足・一時的
+# な API 障害まで不存在扱いにすると、既存プロジェクトに対して create を実行
+# して「ID が一意でない」という誤った案内に到達し、本当の原因（認証・権限）
+# を利用者が特定できなくなるため、不存在（not found）と判別できた場合のみ
+# 作成へ進み、それ以外の失敗は原因を表示して fail-closed で停止する。
+describe_stderr="$(mktemp "${TMPDIR:-/tmp}/gcloud-describe-stderr.XXXXXX")"
+if gcloud projects describe "${PROJECT_ID}" >/dev/null 2>"${describe_stderr}"; then
+  rm -f "${describe_stderr}"
   echo "既に存在するため作成をスキップします"
-else
+elif grep -qiE 'not ?found|does not exist' "${describe_stderr}"; then
+  rm -f "${describe_stderr}"
   echo "新規作成します"
   if ! gcloud projects create "${PROJECT_ID}" --name="${DISPLAY_NAME}"; then
     die "プロジェクト ID ${PROJECT_ID} を作成できませんでした。ID は全 GCP で一意である必要があります。
 別の ID で再実行してください: PROJECT_ID=<別の一意な ID> bash tools/bootstrap-firebase.sh"
   fi
+else
+  describe_err="$(cat "${describe_stderr}")"
+  rm -f "${describe_stderr}"
+  die "プロジェクト ${PROJECT_ID} の確認に失敗しました（不存在とは判別できません）:
+${describe_err}
+
+認証期限切れ・権限不足・一時的な API 障害の可能性があります。
+\`gcloud auth login\` の再実行や権限を確認してから再実行してください。"
 fi
 
 # 請求先アカウントが紐付いていないことを確認する（Spark 前提の生命線）。
