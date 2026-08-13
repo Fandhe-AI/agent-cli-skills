@@ -40,8 +40,9 @@ jobs:
   # js-tests（implement-issue-tree G0 ゲート等の決定的回帰テスト）
   # --------------------------------------------------
   # tests/ 配下の node:test スイートを実行する。package.json・外部依存なしの
-  # 標準ライブラリのみで動く構成のため、runner 同梱の Node（ubuntu-latest は
-  # Node 22 以降。--test の glob 指定は Node 21+ が必要）をそのまま使う。
+  # 標準ライブラリのみで動く構成だが、--test の glob 指定は Node 21+ が必要で
+  # runner 同梱 Node のバージョンは契約されていないため、setup-node で Node 22 を
+  # 明示的に固定する。
   js-tests:
     name: JS unit tests
     runs-on: ubuntu-latest
@@ -55,6 +56,12 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+
+      - name: Setup Node.js
+        # actions/setup-node v4.4.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
 
       - name: Run node:test suite
         run: |
