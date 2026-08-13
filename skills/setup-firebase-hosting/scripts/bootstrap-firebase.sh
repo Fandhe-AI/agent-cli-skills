@@ -514,13 +514,46 @@ gcloud iam service-accounts keys create "${key_file}" \
   --iam-account="${sa_email}" \
   --project="${PROJECT_ID}"
 
+# 作成直後、鍵ファイルの解析（下記の ID 抽出）に入る前に、作成前後の鍵一覧の
+# 差分から今回の鍵を特定してロールバック対象へ登録しておく。抽出が失敗して
+# die した場合でも cleanup が今回の鍵を削除できるようにするため（差分が
+# ちょうど 1 件のときだけ採用する。並行実行等で複数増えていた場合は、他者の
+# 鍵を誤って削除しないよう対象を確定できたときに限る）。
+keys_after_create="$(gcloud iam service-accounts keys list \
+  --iam-account="${sa_email}" \
+  --project="${PROJECT_ID}" \
+  --managed-by=user \
+  --format="value(name)" 2>/dev/null || true)"
+diff_key_name=""
+diff_key_count=0
+while IFS= read -r key_name; do
+  [ -n "${key_name}" ] || continue
+  case "
+${existing_keys}
+" in
+    *"
+${key_name}
+"*) ;;
+    *)
+      diff_key_name="${key_name}"
+      diff_key_count=$((diff_key_count + 1))
+      ;;
+  esac
+done <<< "${keys_after_create}"
+if [ "${diff_key_count}" -eq 1 ]; then
+  rollback_key_name="${diff_key_name}"
+fi
+
 # 鍵 ID を取り出し、Secret 登録より先に発行記録へ追記する（上記の順序 3）
 new_key_id="$(grep -o '"private_key_id"[[:space:]]*:[[:space:]]*"[^"]*"' "${key_file}" | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"
 if [ -z "${new_key_id}" ]; then
+  # rollback_key_name が設定済みなら cleanup（trap EXIT）が今回の鍵を削除する
   die "発行した鍵ファイルから private_key_id を取得できませんでした。
-鍵は作成済みのため、不要であれば手動で削除してください:
+今回の鍵をロールバック削除できなかった場合は、以下で確認し手動で削除してください:
   gcloud iam service-accounts keys list --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")"
 fi
+# 抽出できた ID は Secret へ登録する鍵ファイルそのものに対応する確定情報の
+# ため、以降のロールバック対象はこちらへ更新する
 rollback_key_name="projects/${PROJECT_ID}/serviceAccounts/${sa_email}/keys/${new_key_id}"
 
 # description は 256 文字上限のため、記録は直近 5 世代に丸める。あふれた
@@ -618,7 +651,8 @@ ${billing_warning}
 
 次の手順:
   1. .firebaserc の差分をコミットしてください
-  2. main へ push すると本番（live）チャンネルへ自動デプロイされます
+  2. デプロイワークフローが対象とするブランチ（リポジトリの既定ブランチ）へ
+     push すると本番（live）チャンネルへ自動デプロイされます
   3. PR ではビルド検証（build job）のみ実行され、プレビューデプロイは行われません
 
 独自ドメインを使う場合は、Firebase Hosting のカスタムドメイン設定と

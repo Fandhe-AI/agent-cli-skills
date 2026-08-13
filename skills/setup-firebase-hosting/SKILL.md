@@ -204,6 +204,8 @@ curl -s -o /dev/null -w '%{http_code} redirects=%{num_redirects}\n' -L "$B/about
 
 `.github/workflows/deploy.yml`。以下は Rust + wasm の例です。**ビルド部分は対象プロジェクトに合わせて差し替えてください。**
 
+**デプロイ対象ブランチは対象リポジトリの既定ブランチへ必ず合わせてください（必須の置き換え項目）。** 本スキルの例・説明は既定ブランチを `main` と表記します。`gh repo view <owner>/<repo> --json defaultBranchRef -q .defaultBranchRef.name` で実際の既定ブランチを確認し、`master` 等 `main` 以外の場合は workflow 生成時に例中の `main` / `refs/heads/main`（`on.push.branches`・`deploy` job の `if`・デプロイ step の `if`）をすべて置き換えます。置き換えないと、マージしても本番デプロイが一度も実行されません。
+
 **runner は組織の runner-policy（[Fandhe-AI/actions](https://github.com/Fandhe-AI/actions) の `docs/runner-policy.md`）に従います。public リポジトリは GitHub ホステッド runner（`ubuntu-latest` 等）を使い、`pull_request` で未信頼コードを self-hosted 上で実行しません。** private リポジトリで self-hosted を使う場合も、`pull_request_target` の使用や secret を扱う job との信頼境界には注意し、runner-policy.md の手順に従ってください。
 
 **`build` job と `deploy` job を分離しています。** `pull_request` では PR 側の未信頼コード（`cargo run` / `cargo test`）が実行されるため、この job には write 権限のトークンも Firebase の secret も渡しません（`persist-credentials: false` で `actions/checkout` の資格情報も残しません）。`checks: write` や `FIREBASE_SERVICE_ACCOUNT` を扱う `deploy` job は `push: main` と `workflow_dispatch` のみで実行します。同一 job・同一イベントで未信頼コードと書き込み権限トークンを同居させると、悪意ある PR がビルド中に `GITHUB_TOKEN` や secret を窃取・悪用できてしまうためです。
@@ -215,7 +217,7 @@ name: デプロイ
 
 on:
   push:
-    branches: [main]
+    branches: [main] # 必須: 対象リポジトリの既定ブランチへ置き換える
   pull_request:
   workflow_dispatch:
 
@@ -324,7 +326,7 @@ jobs:
 設計上の要点:
 
 - **PR 起動 workflow には secret・write 権限を渡さない。** `pull_request` イベントで動く job は PR 側の未信頼コードを実行しうるため、`FIREBASE_SERVICE_ACCOUNT` 等の secret や write 権限の `GITHUB_TOKEN` を持たせない。deploy job は `push: main` と `workflow_dispatch` に限定する
-- **live デプロイは `github.ref == 'refs/heads/main'` でもゲートする。** イベント種別の条件だけだと `workflow_dispatch` を非 main ブランチから実行したときに live へデプロイできてしまう。トリガーを絞った後も ref ゲートを防御多層として必ず入れる
+- **live デプロイは `github.ref == 'refs/heads/main'`（既定ブランチの ref）でもゲートする。** イベント種別の条件だけだと `workflow_dispatch` を既定ブランチ以外から実行したときに live へデプロイできてしまう。トリガーを絞った後も ref ゲートを防御多層として必ず入れる（既定ブランチが `main` 以外なら ref も併せて置き換える）
 - **デプロイ先が未設定なら落とす（スキップしない）。** スキップすると「CI は緑なのにサイトが更新されない」状態を検知できません
 - **ドメイン検証は独立した情報源（リポジトリ変数）と突き合わせる。** ビルド出力から期待値を導く検証は、値が誤っていても必ず PASS します。このセッションで唯一「静かに壊れる」性質のバグでした
 - 実装専用リポジトリならパスフィルタは不要。モノレポに置くなら `paths:` で絞ります
