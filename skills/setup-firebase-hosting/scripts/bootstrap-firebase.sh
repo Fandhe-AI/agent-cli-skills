@@ -461,7 +461,9 @@ ROTATE_EXISTING_KEYS=false が指定されているため、旧鍵の自動削�
     --format="value(name)")"
 fi
 
-key_file="$(mktemp -t firebase-sa-key)"
+# mktemp -t はBSD/GNU で挙動が異なる（GNU は XXXXXX 必須で失敗する）ため、
+# テンプレートをフルパスで渡す移植可能な形式を使う
+key_file="$(mktemp "${TMPDIR:-/tmp}/firebase-sa-key.XXXXXX")"
 # 鍵ファイルは必ず消す（異常終了時も含む）
 trap 'rm -f "${key_file}"' EXIT
 

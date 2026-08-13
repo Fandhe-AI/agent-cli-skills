@@ -204,11 +204,9 @@ curl -s -o /dev/null -w '%{http_code} redirects=%{num_redirects}\n' -L "$B/about
 
 **runner は組織の runner-policy（[Fandhe-AI/actions](https://github.com/Fandhe-AI/actions) の `docs/runner-policy.md`）に従います。public リポジトリは GitHub ホステッド runner（`ubuntu-latest` 等）を使い、`pull_request` で未信頼コードを self-hosted 上で実行しません。** private リポジトリで self-hosted を使う場合も、`pull_request_target` の使用や secret を扱う job との信頼境界には注意し、runner-policy.md の手順に従ってください。
 
-**`build` job と `deploy` job を分離しています。** `pull_request` では PR 側の未信頼コード（`cargo run` / `cargo test`）が実行されるため、この job には write 権限のトークンも Firebase の secret も渡しません（`persist-credentials: false` で `actions/checkout` の資格情報も残しません）。ビルド成果物だけを `deploy` job へ artifact 経由で渡し、`pull-requests: write` / `checks: write` や `FIREBASE_SERVICE_ACCOUNT` を扱うのは信頼済みコードだけが動く `deploy` job に限定します。同一 job で未信頼コードと書き込み権限トークンを同居させると、悪意ある PR がビルド中に `GITHUB_TOKEN` や secret を窃取・悪用できてしまうためです。
+**`build` job と `deploy` job を分離しています。** `pull_request` では PR 側の未信頼コード（`cargo run` / `cargo test`）が実行されるため、この job には write 権限のトークンも Firebase の secret も渡しません（`persist-credentials: false` で `actions/checkout` の資格情報も残しません）。`checks: write` や `FIREBASE_SERVICE_ACCOUNT` を扱う `deploy` job は `push: main` と `workflow_dispatch` のみで実行します。同一 job・同一イベントで未信頼コードと書き込み権限トークンを同居させると、悪意ある PR がビルド中に `GITHUB_TOKEN` や secret を窃取・悪用できてしまうためです。
 
-**`deploy` job は PR でも常に base 側（`github.event.pull_request.base.sha`）の `firebase.json` を checkout します。** PR 側の revision を使うと、悪意ある PR が `firebase.json` の predeploy hook 等を通じて write 権限トークンや Firebase secret を窃取できるためです。この結果、**PR で `firebase.json` 等のデプロイ設定を変更してもプレビューには反映されず、マージ後の本番デプロイから反映されます**（セキュア・バイ・デフォルトを優先した意図的な制約です）。
-
-**fork からの PR では `deploy` job 自体をスキップします。** GitHub は fork 由来の PR に Actions secrets を渡さないため、`FIREBASE_SERVICE_ACCOUNT` を要求する `deploy` job は認証エラーで失敗します。プレビューデプロイの対象は同一リポジトリのブランチからの PR のみです。
+**`pull_request` では `build` job のみ実行し、プレビューデプロイは行いません。** PR 起動の workflow に `FIREBASE_SERVICE_ACCOUNT` や write 権限の `GITHUB_TOKEN` を渡すと、悪意ある PR（`firebase.json` の predeploy hook 改変等）による secret 窃取の攻撃面が生まれるためです。この結果、**PR の内容は build job の成功をもって確認し、実際の配信結果はマージ後の本番デプロイで確認します**（セキュア・バイ・デフォルトを優先した意図的な制約です）。プレビューデプロイが必要になった場合も、PR 起動の job には secret・write 権限を渡さない構成（信頼境界の再設計）を先に検討してください。
 
 ```yaml
 name: デプロイ
@@ -281,33 +279,26 @@ jobs:
 
   # secret と書き込み権限トークンを扱う job。未信頼コードは一切実行せず、
   # build job が作った成果物を配信するだけに限定する。
-  # fork 由来の PR には GitHub が Actions secrets を渡さないため、この job を
-  # スキップする（同一リポジトリのブランチからの PR のみプレビュー対象）。
+  # pull_request では実行しない（PR 起動の job には secret・write 権限を
+  # 渡さない）。workflow_dispatch を非 main ブランチから実行しても live へ
+  # デプロイしないよう ref ゲートも掛ける。
   deploy:
     needs: build
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
       # action-hosting-deploy は結果を check-run として作成する。permissions を
       # 明示すると未列挙のスコープは none になるため、checks を落とすと 403
       # （Resource not accessible by integration）でデプロイ前に落ちる。
       checks: write
     steps:
       # firebase.json（Step 3 で作成）を読み込むためリポジトリを checkout する。
-      # PR 側の checkout はデフォルトで PR のマージコミット（未信頼コードを含む）を
-      # 取得してしまう。PR で firebase.json に predeploy hook 等を仕込まれると、
-      # write 権限トークンと Firebase secret を持つこの job で任意コマンドが実行
-      # されてしまうため、必ず base（信頼済み revision）を checkout する。
-      # これにより「PR で firebase.json を変更してもプレビューには反映されず、
-      # マージ後の本番デプロイから反映される」という制約を受け入れる
-      # （セキュア・バイ・デフォルトを優先）。
+      # この job は main（信頼済み revision）でのみ実行される。
       # checkout はデフォルトで作業ディレクトリをクリーンにするので、必ず
       # download-artifact より前に実行する。
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
 
       - name: 成果物をダウンロード
@@ -316,17 +307,10 @@ jobs:
           name: dist
           path: dist/
 
-      - name: プレビューチャンネルへデプロイ（PR）
-        if: github.event_name == 'pull_request'
-        uses: FirebaseExtended/action-hosting-deploy@500ac625ca2dd40cbd15f7659af953801858032a # v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          projectId: ${{ vars.FIREBASE_PROJECT_ID }}
-          expires: 7d
-
       - name: 本番チャンネルへデプロイ（main）
-        if: github.event_name != 'pull_request'
+        # job 側の if と重複するが、防御多層として step 側にも ref ゲートを
+        # 明示する（job の条件が編集で緩められても live 直行を防ぐ）。
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: FirebaseExtended/action-hosting-deploy@500ac625ca2dd40cbd15f7659af953801858032a # v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
@@ -337,13 +321,15 @@ jobs:
 
 設計上の要点:
 
+- **PR 起動 workflow には secret・write 権限を渡さない。** `pull_request` イベントで動く job は PR 側の未信頼コードを実行しうるため、`FIREBASE_SERVICE_ACCOUNT` 等の secret や write 権限の `GITHUB_TOKEN` を持たせない。deploy job は `push: main` と `workflow_dispatch` に限定する
+- **live デプロイは `github.ref == 'refs/heads/main'` でもゲートする。** イベント種別の条件だけだと `workflow_dispatch` を非 main ブランチから実行したときに live へデプロイできてしまう。トリガーを絞った後も ref ゲートを防御多層として必ず入れる
 - **デプロイ先が未設定なら落とす（スキップしない）。** スキップすると「CI は緑なのにサイトが更新されない」状態を検知できません
 - **ドメイン検証は独立した情報源（リポジトリ変数）と突き合わせる。** ビルド出力から期待値を導く検証は、値が誤っていても必ず PASS します。このセッションで唯一「静かに壊れる」性質のバグでした
 - 実装専用リポジトリならパスフィルタは不要。モノレポに置くなら `paths:` で絞ります
 
 ### Step 6: CI 経由で実際にデプロイされることを確認する
 
-**ローカルからの `firebase deploy` が通っても、CI 経路が通る証明にはなりません。** PR を 1 本作り、プレビュー URL が PR にコメントされるところまで見てください。そのうえでマージし、本番チャンネルが更新されることを確認します。
+**ローカルからの `firebase deploy` が通っても、CI 経路が通る証明にはなりません。** PR を 1 本作り、`build` job（ビルド・テスト・出力検証）が緑になることを確認してください。そのうえでマージし、`deploy` job が実行されて本番チャンネルが更新されることを確認します（PR ではプレビューデプロイを行わない構成のため、配信結果の確認はマージ後に行います）。
 
 ```bash
 npx firebase-tools hosting:channel:list --project <project-id> --site <site-id>
