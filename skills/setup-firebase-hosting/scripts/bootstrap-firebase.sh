@@ -612,8 +612,8 @@ ${billing_warning}
 
 次の手順:
   1. .firebaserc の差分をコミットしてください
-  2. main へ push すると .github/workflows/deploy.yml が本番へデプロイします
-  3. PR を作るとプレビューチャンネルへデプロイされ、PR にプレビュー URL が投稿されます
+  2. main へ push すると本番（live）チャンネルへ自動デプロイされます
+  3. PR ではビルド検証（build job）のみ実行され、プレビューデプロイは行われません
 
 独自ドメインを使う場合は、Firebase Hosting のカスタムドメイン設定と
 レジストラでの DNS レコード登録が別途必要です（DNS 側だけは UI 操作が残ります）。
