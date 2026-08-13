@@ -18,7 +18,7 @@ model: sonnet
 - `gh` CLI（認証済み）
 - Node.js（`npx firebase-tools` を使う）
 - 対象リポジトリが GitHub 上にあること
-- **`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com`（既定 `SA_ID=github-actions-hosting`）は本スクリプトが作成・管理する専用サービスアカウントとし、他用途と共有しないこと。** なお鍵の自動ローテーション（後述）はこの email 契約だけには依存せず、本スクリプトが発行を GitHub Actions 変数 `FIREBASE_SA_KEY_IDS` へ記録した鍵のみを削除対象とする。記録に無い鍵は削除されず一覧表示に留まる（fail-safe）ため、`SA_ID` を誤って既存の共有アカウントへ向けても、そのアカウントが従来から持つ鍵は削除されない
+- **`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com`（既定 `SA_ID=github-actions-hosting`）は本スクリプトが作成・管理する専用サービスアカウントとし、他用途と共有しないこと。** なお本スクリプトは既存のサービスアカウント鍵を一切自動削除しない（旧鍵の整理は一覧と削除コマンドの案内に留め、手動操作に委ねる）ため、`SA_ID` を誤って既存の共有アカウントへ向けても、そのアカウントが従来から持つ鍵が破壊されることはない
 
 対象サイトの条件:
 
@@ -106,7 +106,7 @@ bash tools/bootstrap-firebase.sh  # 冪等。再実行しても安全
 2. `firebase` / `firebasehosting` / `cloudresourcemanager` / `serviceusage` / `iam` の API を有効化
 3. Firebase Management API で Firebase を追加。`addFirebase` が 403 の場合は必要 4 権限（`firebase.projects.update` / `resourcemanager.projects.get` / `serviceusage.services.enable` / `serviceusage.services.get`）**すべて**を `testIamPermissions` で実測し、不足があれば不足権限を列挙、すべて揃っていれば規約未承諾の可能性を案内する（決め打ちしない）。Hosting API でサイトを作成。作成が 409（already exists）の場合は自プロジェクト配下にサイトの存在を確認できたときのみ冪等成功とみなし、別プロジェクトが同じサイト ID を取得済みなら別 ID を求めて停止する
 4. CI 用サービスアカウントを作成し**最小ロール**を付与（`roles/firebasehosting.admin` + `roles/serviceusage.apiKeysViewer`）
-5. 新規鍵を発行 → 鍵 ID を発行記録（Actions 変数 `FIREBASE_SA_KEY_IDS`）へ追記 → `gh secret set FIREBASE_SERVICE_ACCOUNT` → 登録成功後、**発行記録にある旧 USER_MANAGED 鍵のみを削除**（10 個上限対策の世代交代）。GCP の SA 鍵にはラベル等のメタデータが無く「本スクリプトが発行した鍵か」を GCP 側だけでは実行時に検証できないため、発行時に鍵 ID を GitHub 側へ記録し、削除対象を記録にある鍵に限定する。記録に無い鍵（手動発行・他ツール発行の可能性）は削除せず一覧表示してユーザー判断に委ねる（fail-safe）。記録への追記は Secret 登録より先・旧鍵の削除は登録成功後に行い、途中失敗しても Secret が有効な鍵を指したまま保たれる。鍵数が GCP 上限（USER_MANAGED 10 個）に達している場合は新規発行自体が失敗するため、発行記録にある旧鍵（最後に記録した鍵 = 現行 Secret が指す可能性が高い鍵を除く）のみを先に削除して空きを作り、記録にある鍵で空きを作れなければ削除せず停止して手動整理を案内する。無効化したい場合は `ROTATE_EXISTING_KEYS=false` を指定する（上限到達時の事前削除にも適用され、その場合は削除せず停止して手動整理を案内する）。最後に**手元の鍵ファイルを削除**（trap で異常終了時も）
+5. 新規鍵を発行 → `gh secret set FIREBASE_SERVICE_ACCOUNT` で登録。**既存鍵の自動削除は一切行わない**。GCP の SA 鍵にはラベル等のメタデータが無く「本スクリプトが発行した鍵か」を GCP 側の信頼できる記録で実行時に検証できず、GitHub 側で編集可能な情報（Actions 変数等）を削除権限の根拠にすると、変数の誤設定・改ざん・トークン侵害が実行者の GCP 権限を通じて有効鍵の失効（稼働中システムの認証破壊）へ波及するため。旧鍵は「現行 Secret が指す鍵 = 削除してはいけない鍵」を明示した上で一覧と削除コマンドを案内し、削除はユーザーの手動操作に委ねる。鍵数が GCP 上限（USER_MANAGED 10 個）に達している場合は新規発行自体が失敗するため、自動削除で空きを作らず手動整理を案内して停止する（fail-closed）。最後に**手元の鍵ファイルを削除**（trap で異常終了時も）
 6. `gh variable set FIREBASE_PROJECT_ID` / `FIREBASE_SITE_ID`、`.firebaserc` を生成
 
 **Firebase の追加とサイト作成は firebase CLI ではなく REST API を gcloud のトークンで直接叩きます。** firebase CLI は gcloud と別の認証情報を持つため、CLI を使うとブラウザ認証がもう 1 回増えるためです。API 呼び出しには `x-goog-user-project: <PROJECT_ID>` ヘッダが必須です。gcloud のユーザー認証情報はクォータ課金先を持たず、これがないと gcloud 自身のクライアントプロジェクトが consumer とみなされて `403 SERVICE_DISABLED` になります。
