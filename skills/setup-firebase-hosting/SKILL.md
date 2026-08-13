@@ -242,10 +242,17 @@ jobs:
           persist-credentials: false
 
       - name: 前提の確認（fail-closed）
+        # 変数は run: へ ${{ }} で直接埋め込まず、env: 経由で環境変数として
+        # 渡す。式展開はシェルの解析前に行われるため、直接埋め込むと変数値に
+        # 仕込まれた文字列（例: `"; <command>; #`）が引用符を脱出して任意
+        # コマンド実行になる（インジェクション）。
+        env:
+          FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+          FIREBASE_SITE_ID: ${{ vars.FIREBASE_SITE_ID }}
         run: |
-          test -n "${{ vars.FIREBASE_PROJECT_ID }}" \
+          test -n "${FIREBASE_PROJECT_ID}" \
             || { echo "FIREBASE_PROJECT_ID が未設定です。tools/bootstrap-firebase.sh を実行してください。"; exit 1; }
-          test -n "${{ vars.FIREBASE_SITE_ID }}" \
+          test -n "${FIREBASE_SITE_ID}" \
             || { echo "FIREBASE_SITE_ID が未設定です。"; exit 1; }
 
       # GitHub ホステッド runner は毎回まっさらな環境のため ~/.cargo/bin が PATH に無い
