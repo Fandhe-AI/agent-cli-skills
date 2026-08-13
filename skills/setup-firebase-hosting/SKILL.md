@@ -273,9 +273,11 @@ jobs:
           # ドメインは「リポジトリ変数」と突き合わせる。出力から推定した値と
           # 比べる検証（sitemap 自身からベース URL を読む等）は、値が誤って
           # いても必ず PASS するため意味がない
-          grep -q "${SITE_BASE_URL}" dist/sitemap.xml \
+          # -F で固定文字列として比較する（既定の正規表現解釈だと URL 中の
+          # `.` が任意文字に一致し、誤ったドメインでも検証を通過し得る）
+          grep -Fq -- "${SITE_BASE_URL}" dist/sitemap.xml \
             || { echo "sitemap.xml に ${SITE_BASE_URL} がありません（ビルドキャッシュが古い可能性）"; exit 1; }
-          ! grep -q "example.com" dist/sitemap.xml \
+          ! grep -Fq -- "example.com" dist/sitemap.xml \
             || { echo "プレースホルダのドメインが残っています"; exit 1; }
           # 別ステップで生成する成果物（wasm 等）の欠落は静的チェックでは
           # 検出できないことが多い。存在を明示的に確認する

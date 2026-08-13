@@ -141,6 +141,24 @@ if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/nu
   die "gcloud にログインしていません。先に \`gcloud auth login\` を実行してください。"
 fi
 
+# GitHub 側の前提（認証・登録先リポジトリ・権限）も、GCP 側へ変更を加える
+# 前にここで検証する。終盤の gh secret set まで検証を遅らせると、認証切れ・
+# リポジトリ名誤り・権限不足が判明した時点で既にプロジェクト作成・API 有効
+# 化・SA 作成・ロール付与が済んでおり、多数の GCP リソースが途中状態で残る
+# ため（鍵自体はロールバックされるが、他リソースは残る）。
+if ! gh auth status >/dev/null 2>&1; then
+  die "gh にログインしていません。先に \`gh auth login\` を実行してください
+（GitHub Secret / 変数の登録に必要です）。"
+fi
+gh_permission="$(gh repo view "${GITHUB_REPO}" --json viewerPermission -q .viewerPermission 2>/dev/null)" || die "GitHub リポジトリ ${GITHUB_REPO} を参照できません。
+リポジトリ名（owner/repo）の誤り、またはアクセス権限の不足の可能性があります。
+\`gh repo view $(shq "${GITHUB_REPO}")\` で確認してから再実行してください。"
+if [ "${gh_permission}" != "ADMIN" ]; then
+  die "GitHub リポジトリ ${GITHUB_REPO} への権限が不足しています（現在: ${gh_permission:-不明}）。
+Actions Secret / 変数の登録（gh secret set / gh variable set）にはリポジトリの
+admin 権限が必要です。権限を確認してから再実行してください。"
+fi
+
 # --- (1) プロジェクト（請求先アカウントは紐付けない） ---
 log "GCP プロジェクト ${PROJECT_ID} を確認します"
 if gcloud projects describe "${PROJECT_ID}" >/dev/null 2>&1; then
