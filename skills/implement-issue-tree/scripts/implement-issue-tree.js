@@ -234,15 +234,13 @@ const maxResidualWorktrees = parseMaxResidualWorktrees(
 // 保証できないため、自動フローの責務を「記録・集約」までに一本化した。resolve は常に人間が
 // GitHub 上で行い、未解決のまま残ったスレッドは blocked → 最終レポートで issue 化承認へ乗せる。
 
-// `typeof args !== 'undefined'` の前置条件は parsedArgs と同じ回帰テスト対応: テストが定義部のみを
-// module として読み込む際（args 未注入）にこの検証で throw しないための素通しで、Workflow ハーネス
-// 実行時（args 注入済み）の検証内容・挙動は従来と同一。
-if (typeof args !== 'undefined' && (!Number.isInteger(parent) || parent <= 0)) {
-  throw new Error('親イシュー番号を args で指定すること（例: {"parent": 1008, "branch": "main", "parallel": 3}）')
-}
+// parent の必須検証（正の整数か）は駆動部冒頭（DRIVER 開始マーカー直後）で行う。
+// 定義部に置くと、テスト import 対応の `typeof args` ガードが「args が値として undefined」の
+// ケースまで素通しして fail-open になるため（Cursor Bugbot 指摘）、テストが import しない
+// 駆動部で無条件に検証する。ハーネス実行では駆動部が必ず走るので従来どおり即時エラーになる。
 
 // 状態ファイルのパス（メインリポルート相対）
-// parent は整数検証済みなのでファイル名として安全に使用できる
+// parent は駆動部冒頭で整数検証され、不正なら以降の処理（本パスの使用を含む）へ進まない
 const STATE_FILE = `_/issue-trees/${parent}.json`
 
 // ============================================================================
@@ -3098,6 +3096,14 @@ function recoverImplementPrompt(item, brief, branch) {
 // classifyMergeExecDispatch / MERGE_EXEC_SCHEMA / MERGE_EXEC_VALID_REASONS）を検証する。
 // このマーカーより下へ export 対象・テスト対象の定義を移動しないこと。
 // ============================================================================
+
+// parent の必須検証。定義部ではなく駆動部冒頭で無条件に行う: 定義部はテスト import 用に
+// `typeof args` ガードで素通しする必要があるが、そのガードは args が「値として undefined」の
+// ケースも素通しして parent=NaN のまま続行を許してしまう。駆動部はハーネス実行時に必ず
+// 実行されるため、ここで検証すれば args の状態によらず不正入力を即時エラーにできる（fail-closed）。
+if (!Number.isInteger(parent) || parent <= 0) {
+  throw new Error('親イシュー番号を args で指定すること（例: {"parent": 1008, "branch": "main", "parallel": 3}）')
+}
 
 // --- Restore フェーズ: 状態ファイルを読み込む ---
 phase('Restore')
