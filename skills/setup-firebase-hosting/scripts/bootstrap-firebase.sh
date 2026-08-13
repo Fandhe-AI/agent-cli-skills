@@ -43,6 +43,13 @@
 #   PROJECT_ID=xxx SITE_ID=yyy GITHUB_REPO=owner/repo bash tools/bootstrap-firebase.sh
 set -euo pipefail
 
+# 案内メッセージへ埋め込む値をシェル安全にクォートする。
+# PROJECT_ID 等の外部（環境変数）由来の値を「コピー実行用コマンド」へ
+# 未クォートで展開すると、悪意ある値（例: GITHUB_REPO='x; command'）を
+# 含む案内をユーザーが貼り付けた時点で任意コマンド実行になるため、
+# コマンド例に値を埋め込む場合は必ず本関数を通す。
+shq() { printf '%q' "$1"; }
+
 # ---- プロジェクト固有の設定（対象リポジトリへコピーしたら書き換える）----
 # GCP プロジェクト。既存ならそのまま使い、無ければ作成する。
 PROJECT_ID="${PROJECT_ID:-__PROJECT_ID__}"
@@ -67,7 +74,7 @@ case "${PROJECT_ID}${SITE_ID}${GITHUB_REPO}" in
     echo "error: スクリプト冒頭のプレースホルダを実際の値へ書き換えてください。" >&2
     echo "       __PROJECT_ID__ / __SITE_ID__ / __OWNER__/__REPO__" >&2
     echo "       環境変数で渡すこともできます:" >&2
-    echo "         PROJECT_ID=xxx SITE_ID=yyy GITHUB_REPO=owner/repo bash $0" >&2
+    echo "         PROJECT_ID=xxx SITE_ID=yyy GITHUB_REPO=owner/repo bash $(shq "$0")" >&2
     exit 1
     ;;
 esac
@@ -130,6 +137,42 @@ ${op_body}"
 GCP 側の処理が続いている可能性があります。しばらくしてから再実行してください。"
 }
 
+# GitHub Actions 変数を fail-closed で読む。「変数が存在しない（not found /
+# 404）」場合のみ空文字で正常継続し、それ以外の失敗（認証切れ・権限不足・
+# 通信障害）では停止する。あらゆる失敗を一律 `|| echo ""` で未設定扱いに
+# すると、これらの障害時にも後段のサービスアカウント鍵発行へ進み、その後の
+# gh variable set / gh secret set が同じ原因で失敗して GCP 側に有効な鍵だけが
+# 残り、再実行のたびに蓄積してしまうため、鍵発行前のここで止める。
+gh_variable_get_or_empty() {
+  local var_name="$1" value gh_stderr gh_status
+  gh_stderr="$(mktemp "${TMPDIR:-/tmp}/gh-var-stderr.XXXXXX")"
+  if value="$(gh variable get "${var_name}" --repo "${GITHUB_REPO}" 2>"${gh_stderr}")"; then
+    rm -f "${gh_stderr}"
+    printf '%s' "${value}"
+    return 0
+  else
+    # else 節の先頭で参照する $? は直前の if 条件（gh コマンド）の終了コード
+    gh_status=$?
+  fi
+  # gh は変数未設定時に "variable <NAME> was not found"（HTTP 404 由来）を
+  # stderr へ出す。この場合だけが「未設定 = 空で続行してよい」ケース。
+  if grep -qiE 'was not found|not found \(HTTP 404\)|HTTP 404' "${gh_stderr}"; then
+    rm -f "${gh_stderr}"
+    return 0
+  fi
+  local err_detail
+  err_detail="$(cat "${gh_stderr}")"
+  rm -f "${gh_stderr}"
+  die "GitHub Actions 変数 ${var_name} の取得に失敗しました（変数未設定の 404 ではありません。終了コード ${gh_status}）:
+${err_detail}
+
+認証切れ・権限不足・通信障害の可能性があります。この状態で続行すると
+鍵発行後の gh variable set / gh secret set も同じ原因で失敗し、GCP 側に
+有効な鍵だけが残るため、鍵を発行する前に停止しました。
+\`gh auth status\` で認証状態と対象リポジトリへの権限を確認してから
+再実行してください。"
+}
+
 # --- (0) 前提ツール ---
 command -v gcloud >/dev/null 2>&1 || die "gcloud が見つかりません。https://cloud.google.com/sdk/docs/install からインストールし、PATH を通してください。"
 command -v gh >/dev/null 2>&1 || die "gh が見つかりません（GitHub Secret の登録に使います）。"
@@ -170,7 +213,7 @@ if [ "${billing_enabled}" != "False" ]; then
 
 意図的に Blaze（従量課金）で進める場合のみ、明示的に承認したことを示す
 環境変数を付けて再実行してください:
-  ALLOW_BLAZE=true PROJECT_ID=${PROJECT_ID} SITE_ID=${SITE_ID} GITHUB_REPO=${GITHUB_REPO} bash $0"
+  ALLOW_BLAZE=true PROJECT_ID=$(shq "${PROJECT_ID}") SITE_ID=$(shq "${SITE_ID}") GITHUB_REPO=$(shq "${GITHUB_REPO}") bash $(shq "$0")"
   fi
 else
   echo "請求先アカウントは未紐付け（Spark プラン）です"
@@ -226,7 +269,7 @@ ${add_body}"
 必要権限を testIamPermissions で確認しようとしましたが、確認コマンド自体が
 失敗しました。まず以下を手動で実行し、必要 4 権限があるか確認してください:
 
-  gcloud projects test-iam-permissions ${PROJECT_ID} --permissions=${required_perms_csv}
+  gcloud projects test-iam-permissions $(shq "${PROJECT_ID}") --permissions=${required_perms_csv}
 
 4 権限すべてが返る場合、原因は**Firebase 利用規約が未承諾**である可能性が
 あります。規約の承諾は Firebase コンソールでしかできません（CLI / REST
@@ -273,7 +316,7 @@ $(for perm in ${missing_perms}; do echo "  - ${perm}"; done)
 
 実行アカウントに Owner または同等のロールを付与してから再実行してください:
 
-  gcloud projects add-iam-policy-binding ${PROJECT_ID} \\
+  gcloud projects add-iam-policy-binding $(shq "${PROJECT_ID}") \\
     --member=\"user:<実行アカウントのメールアドレス>\" \\
     --role=\"roles/owner\""
     fi
@@ -390,7 +433,9 @@ log "サービスアカウント鍵を発行し GitHub Secret ${SECRET_NAME} へ
 # 途中で失敗しても、GitHub Secret は常に有効な鍵を指したまま保たれる。
 
 # これまでに本スクリプトが発行を記録した鍵 ID（カンマ区切り）。未設定なら空。
-recorded_key_ids="$(gh variable get "${KEY_RECORD_VAR}" --repo "${GITHUB_REPO}" 2>/dev/null || echo "")"
+# 取得は fail-closed（未設定の 404 のみ空扱い。認証・権限・通信エラーは
+# gh_variable_get_or_empty 内で die し、set -e により鍵発行前に停止する）。
+recorded_key_ids="$(gh_variable_get_or_empty "${KEY_RECORD_VAR}")"
 
 # 今回の実行より前から存在する USER_MANAGED 鍵の一覧（削除候補の母集団）
 existing_keys="$(gcloud iam service-accounts keys list \
@@ -416,8 +461,8 @@ if [ "${existing_key_count}" -ge "${max_user_keys}" ]; then
 ROTATE_EXISTING_KEYS=false が指定されているため、旧鍵の自動削除は行いません。
 以下で鍵を確認し、不要な鍵を手動で削除してから再実行してください:
 
-  gcloud iam service-accounts keys list --iam-account=${sa_email} --project=${PROJECT_ID}
-  gcloud iam service-accounts keys delete <KEY_ID> --iam-account=${sa_email} --project=${PROJECT_ID}
+  gcloud iam service-accounts keys list --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")
+  gcloud iam service-accounts keys delete <KEY_ID> --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")
 
 なお現在の GitHub Secret（${SECRET_NAME}）が指す鍵を削除すると CI デプロイが
 止まるため、どの鍵が使用中か不明な場合は全鍵の削除を避けてください。"
@@ -446,8 +491,8 @@ ROTATE_EXISTING_KEYS=false が指定されているため、旧鍵の自動削�
 記録に無い鍵は本スクリプトが発行したと検証できないため自動削除しません。
 以下で鍵を確認し、不要な鍵を手動で削除してから再実行してください:
 
-  gcloud iam service-accounts keys list --iam-account=${sa_email} --project=${PROJECT_ID}
-  gcloud iam service-accounts keys delete <KEY_ID> --iam-account=${sa_email} --project=${PROJECT_ID}
+  gcloud iam service-accounts keys list --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")
+  gcloud iam service-accounts keys delete <KEY_ID> --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")
 
 なお現在の GitHub Secret（${SECRET_NAME}）が指す鍵を削除すると CI デプロイが
 止まるため、どの鍵が使用中か不明な場合は全鍵の削除を避けてください。"
@@ -476,7 +521,7 @@ new_key_id="$(grep -o '"private_key_id"[[:space:]]*:[[:space:]]*"[^"]*"' "${key_
 if [ -z "${new_key_id}" ]; then
   die "発行した鍵ファイルから private_key_id を取得できませんでした。
 鍵は作成済みのため、不要であれば手動で削除してください:
-  gcloud iam service-accounts keys list --iam-account=${sa_email} --project=${PROJECT_ID}"
+  gcloud iam service-accounts keys list --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")"
 fi
 gh variable set "${KEY_RECORD_VAR}" --repo "${GITHUB_REPO}" \
   --body "${recorded_key_ids:+${recorded_key_ids},}${new_key_id}"
@@ -522,12 +567,12 @@ if [ -n "${existing_keys}" ]; then
       echo "      内容を確認し、不要であれば手動で削除してください:"
       printf '%s' "${unrecorded_keys}" | while IFS= read -r key_name; do
         [ -n "${key_name}" ] || continue
-        echo "        gcloud iam service-accounts keys delete ${key_name} --iam-account=${sa_email} --project=${PROJECT_ID}"
+        echo "        gcloud iam service-accounts keys delete $(shq "${key_name}") --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")"
       done
     fi
   else
     echo "ROTATE_EXISTING_KEYS=false が指定されているため、旧鍵の削除をスキップします。"
-    echo "手動で不要な鍵を整理してください: gcloud iam service-accounts keys list --iam-account=${sa_email} --project=${PROJECT_ID}"
+    echo "手動で不要な鍵を整理してください: gcloud iam service-accounts keys list --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")"
   fi
 fi
 
