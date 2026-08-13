@@ -1,0 +1,741 @@
+#!/usr/bin/env bash
+# tools/bootstrap-firebase.sh — Firebase Hosting（Spark プラン）への公開環境を
+# コードから一括構築する。GCP コンソールでの UI 操作を発生させないことが目的。
+#
+# 実行するのは 1 回だけ（何度実行しても同じ結果になるよう冪等に書いてある）。
+#
+# ## このスクリプトがやること
+#   1. GCP プロジェクトを確認・作成する（請求先アカウントは紐付けない = Spark 固定）
+#   2. 必要な API を有効化する
+#   3. プロジェクトへ Firebase を追加し、Hosting サイトを作成する
+#   4. CI 用サービスアカウントを作り、Hosting デプロイに必要な最小ロールを付与する
+#   5. サービスアカウント鍵を発行し、GitHub Secret へ登録して手元から消す
+#      （発行した鍵 ID を専用 SA の description（GCP 側の記録）へ記録し、
+#      登録成功後に「記録にある旧鍵」だけを削除して世代交代する。記録に
+#      無い鍵は本スクリプト発行と検証できないため削除せず一覧表示に留める。
+#      無効化したい場合は ROTATE_EXISTING_KEYS=false を指定する）
+#   6. .firebaserc を生成する
+#
+# ## 意図的にやらないこと
+#   - 請求先アカウントの紐付け（紐付けた時点で Spark の「課金され得ない」保証が消える）
+#   - 独自ドメインの設定（DNS レコード登録はレジストラ側の操作になるため）
+#
+# ## 前提
+#   - gcloud CLI / Node.js（npx 経由で firebase-tools を使う）/ gh CLI
+#   - `gcloud auth login` 済みであること（ブラウザ認証。ここだけは自動化できない）
+#
+#   Firebase の追加と Hosting サイト作成は firebase CLI ではなく Firebase
+#   Management API / Hosting API を gcloud のアクセストークンで直接呼ぶ。
+#   firebase CLI は gcloud とは別の認証情報を持つため、CLI を使うと
+#   `firebase login` というブラウザ認証がもう 1 回必要になるのを避けている。
+#
+#   ただし Firebase 利用規約が未承諾の Google アカウントでは addFirebase が
+#   403 を返す（Owner 権限があっても）。規約の承諾は Firebase コンソールで
+#   しかできない仕様のため、その場合は案内して停止する。
+#
+# ## 注意
+#   PROJECT_ID のプロジェクトが存在しない場合は**新規作成する**。設定を
+#   書き換えずに実行すると意図しないプロジェクトができるため、冒頭に
+#   プレースホルダ検出の安全弁を置いてある。
+#
+# ## 使い方
+#   bash tools/bootstrap-firebase.sh
+#   PROJECT_ID=xxx SITE_ID=yyy GITHUB_REPO=owner/repo bash tools/bootstrap-firebase.sh
+set -euo pipefail
+
+# 案内メッセージへ埋め込む値をシェル安全にクォートする。
+# PROJECT_ID 等の外部（環境変数）由来の値を「コピー実行用コマンド」へ
+# 未クォートで展開すると、悪意ある値（例: GITHUB_REPO='x; command'）を
+# 含む案内をユーザーが貼り付けた時点で任意コマンド実行になるため、
+# コマンド例に値を埋め込む場合は必ず本関数を通す。
+shq() { printf '%q' "$1"; }
+
+# ---- プロジェクト固有の設定（対象リポジトリへコピーしたら書き換える）----
+# GCP プロジェクト。既存ならそのまま使い、無ければ作成する。
+PROJECT_ID="${PROJECT_ID:-__PROJECT_ID__}"
+# Hosting サイト ID。公開 URL は https://<SITE_ID>.web.app になる。
+# 1 プロジェクトに複数サイトを置けるため、プロジェクト ID とは独立に決める。
+SITE_ID="${SITE_ID:-__SITE_ID__}"
+# Secret / 変数の登録先リポジトリ（owner/repo）。
+GITHUB_REPO="${GITHUB_REPO:-__OWNER__/__REPO__}"
+DISPLAY_NAME="${DISPLAY_NAME:-${SITE_ID}}"
+SA_ID="${SA_ID:-github-actions-hosting}"
+SECRET_NAME="FIREBASE_SERVICE_ACCOUNT"
+
+# 安全弁: 書き換え忘れのまま実行すると、意図しない GCP プロジェクトを
+# 新規作成してしまう（実際にやらかしたので必ず先頭で止める）。
+case "${PROJECT_ID}${SITE_ID}${GITHUB_REPO}" in
+  *__*)
+    echo "error: スクリプト冒頭のプレースホルダを実際の値へ書き換えてください。" >&2
+    echo "       __PROJECT_ID__ / __SITE_ID__ / __OWNER__/__REPO__" >&2
+    echo "       環境変数で渡すこともできます:" >&2
+    echo "         PROJECT_ID=xxx SITE_ID=yyy GITHUB_REPO=owner/repo bash $(shq "$0")" >&2
+    exit 1
+    ;;
+esac
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+project_root="$(cd -- "${script_dir}/.." >/dev/null 2>&1 && pwd)"
+
+sa_email="${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+# 本スクリプトが新規作成するサービスアカウントの displayName（表示用）。
+sa_display_name="GitHub Actions (Firebase Hosting deploy)"
+
+log() { printf '\n==> %s\n' "$1"; }
+die() { printf '\nerror: %s\n' "$1" >&2; exit 1; }
+
+# Google API を gcloud のアクセストークンで呼ぶ。
+# 出力は呼び出し側で判定する（HTTP ステータスを末尾行に付ける）。
+#
+# x-goog-user-project は必須。gcloud のユーザー認証情報（ADC）はクォータ
+# 課金先プロジェクトを持たないため、これがないと firebase.googleapis.com は
+# gcloud 自身のクライアントプロジェクトを consumer とみなして 403
+# （SERVICE_DISABLED）を返す。
+api_post() {
+  local url="$1" body="${2:-}"
+  curl -sS -X POST "${url}" \
+    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+    -H "x-goog-user-project: ${PROJECT_ID}" \
+    -H "Content-Type: application/json" \
+    -w '\nHTTP_STATUS:%{http_code}' \
+    ${body:+-d "${body}"}
+}
+
+# Firebase Management API の long-running Operation が完了するまで待つ。
+# addFirebase は HTTP 200 を返した時点ではまだプロジェクトへの Firebase
+# 追加が終わっておらず、`done: true` になるまでは後続の Hosting
+# sites.create がプロジェクト未整備のまま呼ばれて失敗し得る。
+# タイムアウト（既定 180 秒）に達したら停止し、再実行を促す。
+wait_for_operation() {
+  local op_name="$1" timeout_sec="${2:-180}" interval_sec="${3:-5}" elapsed=0
+  while (( elapsed < timeout_sec )); do
+    local op_result op_status op_body
+    op_result="$(curl -sS -X GET "https://firebase.googleapis.com/v1beta1/${op_name}" \
+      -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+      -H "x-goog-user-project: ${PROJECT_ID}" \
+      -w '\nHTTP_STATUS:%{http_code}')"
+    op_status="$(printf '%s' "${op_result}" | sed -n 's/^HTTP_STATUS://p')"
+    op_body="$(printf '%s' "${op_result}" | sed '$d')"
+    if [ "${op_status}" = "200" ]; then
+      if printf '%s' "${op_body}" | grep -q '"error"'; then
+        die "operation ${op_name} がエラーで終了しました:
+${op_body}"
+      fi
+      if printf '%s' "${op_body}" | grep -Eq '"done"[[:space:]]*:[[:space:]]*true'; then
+        return 0
+      fi
+    fi
+    sleep "${interval_sec}"
+    elapsed=$((elapsed + interval_sec))
+  done
+  die "operation ${op_name} が ${timeout_sec} 秒以内に完了しませんでした。
+GCP 側の処理が続いている可能性があります。しばらくしてから再実行してください。"
+}
+
+# --- (0) 前提ツール ---
+command -v gcloud >/dev/null 2>&1 || die "gcloud が見つかりません。https://cloud.google.com/sdk/docs/install からインストールし、PATH を通してください。"
+command -v gh >/dev/null 2>&1 || die "gh が見つかりません（GitHub Secret の登録に使います）。"
+command -v curl >/dev/null 2>&1 || die "curl が見つかりません。"
+# Node.js / npx はこのスクリプト自体では使わないが、後続手順（ローカル検証・
+# デプロイの npx firebase-tools）の必須前提のため、GCP リソースを作成した後に
+# 不足が判明して途中状態で止まるのを避けるべく、ここで確認する。
+command -v node >/dev/null 2>&1 || die "node が見つかりません。後続の \`npx firebase-tools\` に必要です。
+https://nodejs.org/ からインストールするか、\`brew install node\` 等で導入してください。"
+command -v npx >/dev/null 2>&1 || die "npx が見つかりません（Node.js に同梱されます）。後続の \`npx firebase-tools\` に必要です。
+Node.js のインストール（https://nodejs.org/ または \`brew install node\`）を確認してください。"
+
+if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null | grep -q .; then
+  die "gcloud にログインしていません。先に \`gcloud auth login\` を実行してください。"
+fi
+
+# GitHub 側の前提（認証・登録先リポジトリ・権限）も、GCP 側へ変更を加える
+# 前にここで検証する。終盤の gh secret set まで検証を遅らせると、認証切れ・
+# リポジトリ名誤り・権限不足が判明した時点で既にプロジェクト作成・API 有効
+# 化・SA 作成・ロール付与が済んでおり、多数の GCP リソースが途中状態で残る
+# ため（鍵自体はロールバックされるが、他リソースは残る）。
+if ! gh auth status >/dev/null 2>&1; then
+  die "gh にログインしていません。先に \`gh auth login\` を実行してください
+（GitHub Secret / 変数の登録に必要です）。"
+fi
+gh_permission="$(gh repo view "${GITHUB_REPO}" --json viewerPermission -q .viewerPermission 2>/dev/null)" || die "GitHub リポジトリ ${GITHUB_REPO} を参照できません。
+リポジトリ名（owner/repo）の誤り、またはアクセス権限の不足の可能性があります。
+\`gh repo view $(shq "${GITHUB_REPO}")\` で確認してから再実行してください。"
+if [ "${gh_permission}" != "ADMIN" ]; then
+  die "GitHub リポジトリ ${GITHUB_REPO} への権限が不足しています（現在: ${gh_permission:-不明}）。
+Actions Secret / 変数の登録（gh secret set / gh variable set）にはリポジトリの
+admin 権限が必要です。権限を確認してから再実行してください。"
+fi
+
+# --- (1) プロジェクト（請求先アカウントは紐付けない） ---
+log "GCP プロジェクト ${PROJECT_ID} を確認します"
+# describe の失敗を一律「不存在」と扱わない。認証期限切れ・権限不足・一時的
+# な API 障害まで不存在扱いにすると、既存プロジェクトに対して create を実行
+# して「ID が一意でない」という誤った案内に到達し、本当の原因（認証・権限）
+# を利用者が特定できなくなるため、不存在（not found）と判別できた場合のみ
+# 作成へ進み、それ以外の失敗は原因を表示して fail-closed で停止する。
+describe_stderr="$(mktemp "${TMPDIR:-/tmp}/gcloud-describe-stderr.XXXXXX")"
+if gcloud projects describe "${PROJECT_ID}" >/dev/null 2>"${describe_stderr}"; then
+  rm -f "${describe_stderr}"
+  echo "既に存在するため作成をスキップします"
+elif grep -qiE 'not ?found|does not exist|may not exist' "${describe_stderr}"; then
+  # 「may not exist」も作成候補に含める: Resource Manager は未使用の
+  # プロジェクト ID に対しても、存在の秘匿のため 403 PERMISSION_DENIED +
+  # 「(or it may not exist)」を返すことが多く、これを除外すると新規 ID の
+  # 作成経路（create-if-missing）が一度も走らない。本当に権限不足で既存
+  # プロジェクトへアクセスできない場合は、直後の create が一意性エラーで
+  # 失敗し、その案内（別 ID の指定）で判別できる。認証切れ（Reauthentication
+  # required 等）はこのパターンに一致しないため引き続き fail-closed になる。
+  rm -f "${describe_stderr}"
+  echo "新規作成します"
+  if ! gcloud projects create "${PROJECT_ID}" --name="${DISPLAY_NAME}"; then
+    die "プロジェクト ID ${PROJECT_ID} を作成できませんでした。ID は全 GCP で一意である必要があります。
+別の ID で再実行してください: PROJECT_ID=<別の一意な ID> bash tools/bootstrap-firebase.sh"
+  fi
+else
+  describe_err="$(cat "${describe_stderr}")"
+  rm -f "${describe_stderr}"
+  die "プロジェクト ${PROJECT_ID} の確認に失敗しました（不存在とは判別できません）:
+${describe_err}
+
+認証期限切れ・権限不足・一時的な API 障害の可能性があります。
+\`gcloud auth login\` の再実行や権限を確認してから再実行してください。"
+fi
+
+# 請求先アカウントが紐付いていないことを確認する（Spark 前提の生命線）。
+# billingEnabled が取得できない（unknown）場合も、紐付いていないと決めつけず
+# fail-closed で停止する。「課金され得ない」という本スクリプトの中核の安全
+# 保証は、判定不能な状態のまま進めた時点で崩れるため。
+billing_enabled="$(gcloud billing projects describe "${PROJECT_ID}" \
+  --format="value(billingEnabled)" 2>/dev/null || echo "unknown")"
+if [ "${billing_enabled}" != "False" ]; then
+  if [ "${ALLOW_BLAZE:-false}" = "true" ]; then
+    echo "警告: 請求先アカウントの状態が Spark 確定ではありません（billingEnabled=${billing_enabled}）。"
+    echo "      ALLOW_BLAZE=true が指定されているため、明示的な承認とみなし続行します。"
+  else
+    die "請求先アカウントの状態が Spark 確定ではありません（billingEnabled=${billing_enabled}）。
+
+このプロジェクトには請求先アカウントが紐付いているか、状態を判定できません
+でした。Spark プランの『課金され得ない』保証は billingEnabled=False の場合
+にしか成立しないため、既定では停止します。
+
+意図的に Blaze（従量課金）で進める場合のみ、明示的に承認したことを示す
+環境変数を付けて再実行してください:
+  ALLOW_BLAZE=true PROJECT_ID=$(shq "${PROJECT_ID}") SITE_ID=$(shq "${SITE_ID}") GITHUB_REPO=$(shq "${GITHUB_REPO}") bash $(shq "$0")"
+  fi
+else
+  echo "請求先アカウントは未紐付け（Spark プラン）です"
+fi
+
+# --- (2) API 有効化 ---
+log "必要な API を有効化します"
+# iam.googleapis.com が無いと、新規プロジェクトでは (4) のサービスアカウント
+# 作成・鍵発行が失敗するか、gcloud が対話的な有効化プロンプトを出して
+# 非対話実行（CI 等）を止めてしまう。
+gcloud services enable \
+  firebase.googleapis.com \
+  firebasehosting.googleapis.com \
+  cloudresourcemanager.googleapis.com \
+  serviceusage.googleapis.com \
+  iam.googleapis.com \
+  --project="${PROJECT_ID}"
+
+# --- (3) Firebase の追加と Hosting サイト作成 ---
+log "プロジェクトへ Firebase を追加します"
+add_result="$(api_post "https://firebase.googleapis.com/v1beta1/projects/${PROJECT_ID}:addFirebase" || true)"
+add_status="$(printf '%s' "${add_result}" | sed -n 's/^HTTP_STATUS://p')"
+case "${add_status}" in
+  200)
+    # addFirebase は Operation（`{"name": "operations/..."}`）を返すのみで、
+    # この時点ではまだ追加が完了していない。done: true になるまで待つ。
+    add_body="$(printf '%s' "${add_result}" | sed '$d')"
+    add_op_name="$(printf '%s' "${add_body}" | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
+    if [ -z "${add_op_name}" ]; then
+      die "addFirebase のレスポンスから operation 名を取得できませんでした:
+${add_body}"
+    fi
+    echo "追加リクエストを受け付けました。完了を待ちます（operation: ${add_op_name}）"
+    wait_for_operation "${add_op_name}"
+    echo "追加しました"
+    ;;
+  409) echo "既に Firebase プロジェクトのためスキップします" ;;
+  403)
+    # 403 は「IAM 権限不足」と「Firebase 利用規約が未承諾」のどちらでも
+    # 起こり得て、レスポンス本文だけでは区別できない。決めつけて誤案内
+    # しないよう、SKILL.md に記載した必要 4 権限すべてを testIamPermissions
+    # で実測し、不足があれば列挙してからメッセージを出し分ける。
+    required_perms="firebase.projects.update resourcemanager.projects.get serviceusage.services.enable serviceusage.services.get"
+    required_perms_csv="$(printf '%s' "${required_perms}" | tr ' ' ',')"
+    # JSON で受けて権限名の完全一致を grep する。value(permissions) は複数
+    # 権限が区切り文字で連結されるため、区切りの仕様に依存しないようにする。
+    perm_check_result="$(gcloud projects test-iam-permissions "${PROJECT_ID}" \
+      --permissions="${required_perms_csv}" \
+      --format=json 2>/dev/null || echo "__CHECK_FAILED__")"
+    if [ "${perm_check_result}" = "__CHECK_FAILED__" ]; then
+      die "Firebase の追加が 403 で拒否されました。
+
+必要権限を testIamPermissions で確認しようとしましたが、確認コマンド自体が
+失敗しました。まず以下を手動で実行し、必要 4 権限があるか確認してください:
+
+  gcloud projects test-iam-permissions $(shq "${PROJECT_ID}") --permissions=${required_perms_csv}
+
+4 権限すべてが返る場合、原因は**Firebase 利用規約が未承諾**である可能性が
+あります。規約の承諾は Firebase コンソールでしかできません（CLI / REST
+API / Terraform では不可能）:
+
+  https://console.firebase.google.com/
+
+  1. 「プロジェクトを追加」
+  2. 「Google Cloud プロジェクトに Firebase を追加」を選び ${PROJECT_ID} を選択
+  3. 利用規約に同意
+
+権限が不足している場合は、実行アカウントに Owner 等の適切なロールを
+付与してから再実行してください。"
+    fi
+    missing_perms=""
+    for perm in ${required_perms}; do
+      if ! printf '%s' "${perm_check_result}" | grep -qF "\"${perm}\""; then
+        missing_perms="${missing_perms}${missing_perms:+ }${perm}"
+      fi
+    done
+    if [ -z "${missing_perms}" ]; then
+      die "Firebase の追加が 403 で拒否されました。
+
+必要 4 権限（${required_perms_csv}）はすべて確認できました
+（testIamPermissions で実測）。権限は足りているため、原因は**Firebase
+利用規約が未承諾**である可能性が高いです。規約の承諾は Firebase コンソール
+でしかできません（公式ドキュメントに明記。CLI / REST API / Terraform では
+不可能）:
+
+  https://console.firebase.google.com/
+
+  1. 「プロジェクトを追加」
+  2. 「Google Cloud プロジェクトに Firebase を追加」を選び ${PROJECT_ID} を選択
+  3. 利用規約に同意
+
+Google アカウントにつき 1 回だけの操作です。完了後にこのスクリプトを
+再実行すると、以降はすべて自動で進みます。"
+    else
+      die "Firebase の追加が 403 で拒否されました。
+
+必要 4 権限のうち以下が不足しています（testIamPermissions で実測）:
+
+$(for perm in ${missing_perms}; do echo "  - ${perm}"; done)
+
+実行アカウントに Owner または同等のロールを付与してから再実行してください:
+
+  gcloud projects add-iam-policy-binding $(shq "${PROJECT_ID}") \\
+    --member=\"user:<実行アカウントのメールアドレス>\" \\
+    --role=\"roles/owner\""
+    fi
+    ;;
+  *)
+    # ALREADY_EXISTS は 400 で返ることもある
+    if printf '%s' "${add_result}" | grep -qi "already"; then
+      echo "既に Firebase プロジェクトのためスキップします"
+    else
+      die "Firebase の追加に失敗しました (HTTP ${add_status}):
+${add_result}"
+    fi
+    ;;
+esac
+
+log "Hosting サイト ${SITE_ID} を作成します"
+# Hosting API は Site リソースの JSON ボディを要求する。空ボディだと
+# Content-Type: application/json のまま本文が無くなり 400 になり得るため
+# 最小の Site ペイロード（{}）を明示的に送る。
+site_result="$(api_post "https://firebasehosting.googleapis.com/v1beta1/projects/${PROJECT_ID}/sites?siteId=${SITE_ID}" '{}' || true)"
+site_status="$(printf '%s' "${site_result}" | sed -n 's/^HTTP_STATUS://p')"
+
+# サイト作成の 409（already exists）は「自プロジェクトに作成済み（冪等成功）」
+# と「別プロジェクトが同じサイト ID を取得済み（このままでは deploy 不能）」の
+# どちらでも返る。サイト ID は全 Firebase で一意のため、自プロジェクト配下に
+# サイトが存在することを GET で確認できた場合のみ冪等成功とみなす。他者取得
+# のまま進めると、SA・Secret を作り終えた後のデプロイで初めて失敗する。
+verify_site_ownership() {
+  local get_result get_status
+  get_result="$(curl -sS -X GET "https://firebasehosting.googleapis.com/v1beta1/projects/${PROJECT_ID}/sites/${SITE_ID}" \
+    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+    -H "x-goog-user-project: ${PROJECT_ID}" \
+    -w '\nHTTP_STATUS:%{http_code}')"
+  get_status="$(printf '%s' "${get_result}" | sed -n 's/^HTTP_STATUS://p')"
+  if [ "${get_status}" = "200" ]; then
+    echo "既にプロジェクト ${PROJECT_ID} 配下に存在するためスキップします（https://${SITE_ID}.web.app）"
+  else
+    die "サイト ID ${SITE_ID} は既に使用されていますが、プロジェクト ${PROJECT_ID} 配下には
+存在を確認できませんでした（取得結果 HTTP ${get_status}）。別のプロジェクトが同じ
+サイト ID を取得している可能性が高いです。サイト ID は全 Firebase で一意のため、
+別の ID で再実行してください:
+  SITE_ID=<別の一意な ID> bash tools/bootstrap-firebase.sh"
+  fi
+}
+
+case "${site_status}" in
+  200) echo "作成しました（https://${SITE_ID}.web.app）" ;;
+  409) verify_site_ownership ;;
+  *)
+    if printf '%s' "${site_result}" | grep -qi "already exists"; then
+      verify_site_ownership
+    else
+      die "Hosting サイトの作成に失敗しました (HTTP ${site_status}):
+${site_result}
+
+サイト ID は全 Firebase で一意です。使用済みなら別の ID で再実行してください:
+  SITE_ID=<別の一意な ID> bash tools/bootstrap-firebase.sh"
+    fi
+    ;;
+esac
+
+# --- (4) CI 用サービスアカウント ---
+log "CI 用サービスアカウント ${sa_email} を確認します"
+
+# 本スクリプトの管理対象（発行記録の書き込み・記録にある鍵の世代交代の対象）
+# である証跡。新規作成した SA には作成直後にこのマーカーを description へ
+# 設定し、以降はマーカーの有無で管理対象かを判定する。email の一致だけを
+# 所有権の根拠にはしない（SA_ID の誤指定・名前衝突で既存の共有 SA を管理
+# 対象と誤認し、description の上書きや鍵の削除に進むのを防ぐ）。
+KEY_RECORD_MARKER="firebase-bootstrap-issued-keys="
+
+if gcloud iam service-accounts describe "${sa_email}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  echo "既に存在するため作成をスキップします"
+  # 既存 SA は管理証跡（マーカー）を検証できた場合のみ管理対象として続行
+  # する。マーカーが無い SA は本スクリプト以外が作成・利用している可能性が
+  # あるため、fail-closed で停止する。本スクリプト専用として引き受ける場合
+  # のみ、明示的な承認フラグ ADOPT_EXISTING_SA=true で採用（マーカー設定）
+  # する。採用時点で存在する鍵は発行記録に無いため自動削除の対象にならない
+  # （fail-safe）。
+  existing_description="$(gcloud iam service-accounts describe "${sa_email}" \
+    --project="${PROJECT_ID}" \
+    --format="value(description)")" || die "サービスアカウント ${sa_email} の情報取得に失敗しました。gcloud の認証・権限を確認してから再実行してください。"
+  if ! printf '%s\n' "${existing_description}" | grep -q "^${KEY_RECORD_MARKER}"; then
+    if [ "${ADOPT_EXISTING_SA:-false}" = "true" ]; then
+      echo "ADOPT_EXISTING_SA=true が指定されたため、この既存 SA を本スクリプトの管理対象として採用します"
+      echo "（description は発行記録用に上書きされます。既存の鍵は記録に無いため自動削除されません）"
+      gcloud iam service-accounts update "${sa_email}" \
+        --project="${PROJECT_ID}" \
+        --description="${KEY_RECORD_MARKER}" >/dev/null
+    else
+      die "既存のサービスアカウント ${sa_email} には本スクリプトの管理証跡
+（description の ${KEY_RECORD_MARKER} 行）がありません。
+本スクリプト以外が作成・利用している SA の可能性があるため、description の
+上書きや鍵の管理（発行記録・世代交代）へは進まず停止します。
+
+- 専用 SA を新しく作る場合: 別の SA_ID を指定して再実行してください
+    SA_ID=<別の ID> PROJECT_ID=$(shq "${PROJECT_ID}") SITE_ID=$(shq "${SITE_ID}") GITHUB_REPO=$(shq "${GITHUB_REPO}") bash $(shq "$0")
+- この SA を本スクリプト専用として引き受ける場合のみ、明示的に承認して再実行してください
+    ADOPT_EXISTING_SA=true PROJECT_ID=$(shq "${PROJECT_ID}") SITE_ID=$(shq "${SITE_ID}") GITHUB_REPO=$(shq "${GITHUB_REPO}") bash $(shq "$0")
+  （description が発行記録用に上書きされます。既存の鍵は記録に無いため自動削除されません）"
+    fi
+  fi
+else
+  # 管理証跡は create と同時に設定する（作成後の update で設定すると、
+  # その間の失敗で「自分が作った証跡なし SA」が残り、再実行が fail-closed
+  # 停止（ADOPT_EXISTING_SA の要求）になって冪等な再試行が壊れるため）
+  gcloud iam service-accounts create "${SA_ID}" \
+    --display-name="${sa_display_name}" \
+    --description="${KEY_RECORD_MARKER}" \
+    --project="${PROJECT_ID}"
+fi
+
+log "最小ロールを付与します"
+# firebasehosting.admin: 本番チャンネル・プレビューチャンネルへのデプロイ
+# serviceusage.apiKeysViewer: firebase CLI がデプロイ時に参照する
+# （Auth も Cloud Run rewrites も使わないため firebaseauth.admin / run.viewer は付けない）
+for role in roles/firebasehosting.admin roles/serviceusage.apiKeysViewer; do
+  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${sa_email}" \
+    --role="${role}" \
+    --condition=None \
+    --quiet >/dev/null
+  echo "付与: ${role}"
+done
+
+# --- (5) 鍵を発行して GitHub Secret へ登録（手元には残さない） ---
+log "サービスアカウント鍵を発行し GitHub Secret ${SECRET_NAME} へ登録します"
+
+# 再実行のたびに鍵を増やすと、GitHub Secret には最新の 1 個しか反映されない
+# のに古い鍵だけがアクティブなまま残り続け、SA あたり USER_MANAGED 10 個
+# という GCP 上限にいずれ達するため、旧鍵は世代交代（削除）する。
+#
+# 削除権限の根拠は GCP 側の記録だけに限定する。SA 鍵自体には「誰が何の
+# ために発行したか」を示すメタデータが無いため、発行した鍵 ID を専用
+# サービスアカウントの description へ記録し、削除対象を「記録にあり、
+# かつこの専用 SA に現存する USER_MANAGED 鍵」だけに限定する。description
+# の書き換えには GCP IAM の書き込み権限（iam.serviceAccounts.update）が
+# 必要で、これは鍵の管理権限と同じ GCP 側の信頼境界にある。GitHub 側で
+# 編集可能な情報（Actions 変数等）は、GitHub 側の誤設定・改ざん・トークン
+# 侵害が実行者の GCP 権限を通じて有効鍵の失効へ波及するため削除根拠に
+# しない。記録に無い鍵（手動発行・他ツール発行の可能性）は削除せず一覧
+# 表示してユーザー判断に委ねる（fail-safe）。世代交代そのものを止めたい
+# 場合は ROTATE_EXISTING_KEYS=false を指定する（鍵は手動管理になる）。
+#
+# 順序も途中失敗に備えて決めてある:
+#   1. 発行記録（description）と、今より前から存在する鍵の一覧を読み出す
+#   2. 鍵数が上限に達している場合のみ、発行記録にある旧鍵（最後に記録した
+#      鍵 = 現行 Secret が指している可能性が高い鍵を除く）を先に削除して
+#      空きを作る。記録にある鍵で空きを作れなければ停止して手動整理を案内
+#   3. 新しい鍵を作成し、Secret 登録より先に発行記録へ追記する。以降
+#      Secret 登録が完了するまでは、異常終了時に今回の鍵を削除して
+#      ロールバックする（今回発行した鍵は確実にこの実行の所有物のため、
+#      失敗のたびに利用不能な有効鍵が蓄積することはない）
+#   4. GitHub Secret への登録まで成功させ、ロールバック対象から外す
+#   5. 登録成功後にだけ、記録にある旧鍵を削除する
+#   6. 削除がすべて成功した後で、発行記録を現行鍵 ID のみへ更新する
+
+# 発行記録は description 内のマーカー行（KEY_RECORD_MARKER + カンマ区切りの
+# 鍵 ID）で持つ。ここへ到達するのは (4) で管理証跡を検証済み（新規作成・
+# マーカー確認・明示採用のいずれか）の SA だけなので、description は本
+# スクリプトが占有してよい。
+sa_description="$(gcloud iam service-accounts describe "${sa_email}" \
+  --project="${PROJECT_ID}" \
+  --format="value(description)")" || die "サービスアカウント ${sa_email} の情報取得に失敗しました。
+この状態で続行すると発行記録を確認できないまま鍵を発行してしまうため停止しました。
+gcloud の認証・権限を確認してから再実行してください。"
+recorded_key_ids="$(printf '%s\n' "${sa_description}" | sed -n "s/^${KEY_RECORD_MARKER}//p" | head -1)"
+
+# 発行記録（カンマ区切りの鍵 ID）を description へ書き戻す
+record_keys() {
+  gcloud iam service-accounts update "${sa_email}" \
+    --project="${PROJECT_ID}" \
+    --description="${KEY_RECORD_MARKER}$1" >/dev/null
+}
+
+# 今回の実行より前から存在する USER_MANAGED 鍵の一覧（削除候補の母集団）
+existing_keys="$(gcloud iam service-accounts keys list \
+  --iam-account="${sa_email}" \
+  --project="${PROJECT_ID}" \
+  --managed-by=user \
+  --format="value(name)")" || die "サービスアカウント鍵の一覧取得に失敗しました。gcloud の認証・権限を確認してから再実行してください。"
+
+# GCP は SA あたり USER_MANAGED 鍵 10 個が上限で、上限に達したままだと新規
+# 発行そのものが失敗し、後段の世代交代（登録成功後の削除）へ到達できず
+# 再実行でも回復できない。上限時は発行記録にある旧鍵を先に削除して空きを
+# 作る（上記の順序 2）。ただし「最後に記録した鍵」は現行の GitHub Secret が
+# 指している可能性が高く、ここで消すと後段の発行・登録が失敗した場合に
+# CI が止まるため残す。記録に無い鍵はここでも削除しない（fail-safe）。
+max_user_keys=10
+existing_key_count="$(printf '%s\n' "${existing_keys}" | grep -c . || true)"
+if [ "${existing_key_count}" -ge "${max_user_keys}" ]; then
+  # 上限解消のための事前削除も「旧鍵の削除」なので、opt-out
+  # （ROTATE_EXISTING_KEYS=false = 鍵は手動管理する）を必ず尊重する。
+  if [ "${ROTATE_EXISTING_KEYS:-true}" != "true" ]; then
+    die "USER_MANAGED 鍵が上限（${max_user_keys} 個）に達しているため新規発行できません。
+ROTATE_EXISTING_KEYS=false が指定されているため、旧鍵の自動削除は行いません。
+以下で鍵を確認し、不要な鍵を手動で削除してから再実行してください:
+
+  gcloud iam service-accounts keys list --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")
+  gcloud iam service-accounts keys delete <KEY_ID> --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")
+
+なお現在の GitHub Secret（${SECRET_NAME}）が指す鍵を削除すると CI デプロイが
+止まるため、どの鍵が使用中か不明な場合は全鍵の削除を避けてください。"
+  fi
+  echo "USER_MANAGED 鍵が上限（${max_user_keys} 個）に達しているため、発行記録にある旧鍵を先に削除して空きを作ります"
+  last_recorded_id="${recorded_key_ids##*,}"
+  freed_any=false
+  while IFS= read -r key_name; do
+    [ -n "${key_name}" ] || continue
+    key_id="${key_name##*/}"
+    [ "${key_id}" = "${last_recorded_id}" ] && continue
+    case ",${recorded_key_ids}," in
+      *",${key_id},"*)
+        gcloud iam service-accounts keys delete "${key_name}" \
+          --iam-account="${sa_email}" \
+          --project="${PROJECT_ID}" \
+          --quiet
+        echo "削除: ${key_id}（発行記録あり・上限解消のため）"
+        freed_any=true
+        ;;
+    esac
+  done <<< "${existing_keys}"
+  if [ "${freed_any}" != "true" ]; then
+    die "USER_MANAGED 鍵が上限（${max_user_keys} 個）に達していますが、発行記録
+（SA description の ${KEY_RECORD_MARKER} 行）から安全に削除できる鍵がありません。
+記録に無い鍵は本スクリプトが発行したと検証できないため自動削除しません。
+以下で鍵を確認し、不要な鍵を手動で削除してから再実行してください:
+
+  gcloud iam service-accounts keys list --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")
+  gcloud iam service-accounts keys delete <KEY_ID> --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")
+
+なお現在の GitHub Secret（${SECRET_NAME}）が指す鍵を削除すると CI デプロイが
+止まるため、どの鍵が使用中か不明な場合は全鍵の削除を避けてください。"
+  fi
+  # 削除後の一覧へ取り直す。後段の世代交代ループが削除済みの鍵を再削除
+  # しようとして失敗（set -e で停止）しないようにするため。
+  existing_keys="$(gcloud iam service-accounts keys list \
+    --iam-account="${sa_email}" \
+    --project="${PROJECT_ID}" \
+    --managed-by=user \
+    --format="value(name)")"
+fi
+
+# mktemp -t はBSD/GNU で挙動が異なる（GNU は XXXXXX 必須で失敗する）ため、
+# テンプレートをフルパスで渡す移植可能な形式を使う
+key_file="$(mktemp "${TMPDIR:-/tmp}/firebase-sa-key.XXXXXX")"
+# 異常終了時の後始末: 鍵ファイルは必ず消す。加えて Secret 登録が完了する
+# 前に終了した場合は、今回発行した鍵そのものを削除してロールバックする
+# （どこにも登録されなかった有効鍵が GCP 側へ残り、失敗のたびに蓄積して
+# 上限へ達するのを防ぐ。今回の鍵は確実にこの実行の所有物なので、過去の
+# 鍵と違い削除の根拠に検証を要しない）。
+rollback_key_name=""
+cleanup() {
+  rm -f "${key_file}"
+  if [ -n "${rollback_key_name}" ]; then
+    echo "Secret 登録が完了しなかったため、今回発行した鍵を削除します（ロールバック）" >&2
+    if ! gcloud iam service-accounts keys delete "${rollback_key_name}" \
+      --iam-account="${sa_email}" \
+      --project="${PROJECT_ID}" \
+      --quiet; then
+      echo "警告: ロールバック削除に失敗しました。以下で手動削除してください:" >&2
+      echo "  gcloud iam service-accounts keys delete $(shq "${rollback_key_name}") --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")" >&2
+    fi
+  fi
+}
+trap cleanup EXIT
+
+gcloud iam service-accounts keys create "${key_file}" \
+  --iam-account="${sa_email}" \
+  --project="${PROJECT_ID}"
+
+# 作成直後、鍵ファイルの解析（下記の ID 抽出）に入る前に、作成前後の鍵一覧の
+# 差分から今回の鍵を特定してロールバック対象へ登録しておく。抽出が失敗して
+# die した場合でも cleanup が今回の鍵を削除できるようにするため（差分が
+# ちょうど 1 件のときだけ採用する。並行実行等で複数増えていた場合は、他者の
+# 鍵を誤って削除しないよう対象を確定できたときに限る）。
+keys_after_create="$(gcloud iam service-accounts keys list \
+  --iam-account="${sa_email}" \
+  --project="${PROJECT_ID}" \
+  --managed-by=user \
+  --format="value(name)" 2>/dev/null || true)"
+diff_key_name=""
+diff_key_count=0
+while IFS= read -r key_name; do
+  [ -n "${key_name}" ] || continue
+  case "
+${existing_keys}
+" in
+    *"
+${key_name}
+"*) ;;
+    *)
+      diff_key_name="${key_name}"
+      diff_key_count=$((diff_key_count + 1))
+      ;;
+  esac
+done <<< "${keys_after_create}"
+if [ "${diff_key_count}" -eq 1 ]; then
+  rollback_key_name="${diff_key_name}"
+fi
+
+# 鍵 ID を取り出し、Secret 登録より先に発行記録へ追記する（上記の順序 3）
+new_key_id="$(grep -o '"private_key_id"[[:space:]]*:[[:space:]]*"[^"]*"' "${key_file}" | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"
+if [ -z "${new_key_id}" ]; then
+  # rollback_key_name が設定済みなら cleanup（trap EXIT）が今回の鍵を削除する
+  die "発行した鍵ファイルから private_key_id を取得できませんでした。
+今回の鍵をロールバック削除できなかった場合は、以下で確認し手動で削除してください:
+  gcloud iam service-accounts keys list --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")"
+fi
+# 抽出できた ID は Secret へ登録する鍵ファイルそのものに対応する確定情報の
+# ため、以降のロールバック対象はこちらへ更新する
+rollback_key_name="projects/${PROJECT_ID}/serviceAccounts/${sa_email}/keys/${new_key_id}"
+
+# description は 256 文字上限のため、記録は直近 5 世代に丸める。あふれた
+# 古い ID は「記録に無い鍵」として手動整理の案内側へ倒れる（fail-safe。
+# 通常はロールバックと世代交代により記録は 1〜2 件に保たれる）。
+new_record="${recorded_key_ids:+${recorded_key_ids},}${new_key_id}"
+new_record="$(printf '%s' "${new_record}" | awk -F, '{ start = (NF > 5) ? NF - 4 : 1; out = ""; for (i = start; i <= NF; i++) out = out (i > start ? "," : "") $i; print out }')"
+record_keys "${new_record}"
+
+gh secret set "${SECRET_NAME}" --repo "${GITHUB_REPO}" < "${key_file}"
+# Secret 登録まで成功したのでロールバック対象から外す（上記の順序 4）
+rollback_key_name=""
+gh variable set FIREBASE_PROJECT_ID --repo "${GITHUB_REPO}" --body "${PROJECT_ID}"
+gh variable set FIREBASE_SITE_ID --repo "${GITHUB_REPO}" --body "${SITE_ID}"
+echo "登録しました（鍵ファイルは削除されます）"
+
+if [ -n "${existing_keys}" ]; then
+  # ROTATE_EXISTING_KEYS は「無効化する opt-out」フラグ（既定 true）。
+  # 削除対象は発行記録にある鍵だけなので既定で世代交代する。鍵を完全に
+  # 手動管理したい場合は ROTATE_EXISTING_KEYS=false を指定する。
+  if [ "${ROTATE_EXISTING_KEYS:-true}" = "true" ]; then
+    echo "新しい鍵の登録が完了したため、発行記録にある旧鍵を削除します（世代交代）"
+    unrecorded_keys=""
+    while IFS= read -r key_name; do
+      [ -n "${key_name}" ] || continue
+      key_id="${key_name##*/}"
+      # 念のための保険。existing_keys は新鍵作成前の一覧なので通常含まれない
+      [ "${key_id}" = "${new_key_id}" ] && continue
+      case ",${recorded_key_ids}," in
+        *",${key_id},"*)
+          gcloud iam service-accounts keys delete "${key_name}" \
+            --iam-account="${sa_email}" \
+            --project="${PROJECT_ID}" \
+            --quiet
+          echo "削除: ${key_id}（発行記録あり）"
+          ;;
+        *)
+          # 記録に無い鍵は本スクリプト発行と検証できないため削除しない
+          unrecorded_keys="${unrecorded_keys}${key_name}
+"
+          ;;
+      esac
+    done <<< "${existing_keys}"
+    # 削除がすべて成功した後で発行記録を現行鍵のみへ更新する（上記の順序 6）。
+    # 削除が途中で失敗した場合は記録が残るため、次回実行時に改めて削除される。
+    record_keys "${new_key_id}"
+    if [ -n "${unrecorded_keys}" ]; then
+      echo "警告: 発行記録（SA description の ${KEY_RECORD_MARKER} 行）に無い鍵が残っています。"
+      echo "      本スクリプトが発行した鍵と検証できないため自動削除しません。"
+      echo "      内容を確認し、不要であれば手動で削除してください:"
+      printf '%s' "${unrecorded_keys}" | while IFS= read -r key_name; do
+        [ -n "${key_name}" ] || continue
+        echo "        gcloud iam service-accounts keys delete $(shq "${key_name}") --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")"
+      done
+    fi
+  else
+    echo "ROTATE_EXISTING_KEYS=false が指定されているため、旧鍵の削除をスキップします。"
+    echo "手動で不要な鍵を整理してください: gcloud iam service-accounts keys list --iam-account=$(shq "${sa_email}") --project=$(shq "${PROJECT_ID}")"
+  fi
+fi
+
+# --- (6) .firebaserc の生成 ---
+log ".firebaserc を生成します"
+cat > "${project_root}/.firebaserc" <<EOF
+{
+  "projects": {
+    "default": "${PROJECT_ID}"
+  }
+}
+EOF
+echo "${project_root}/.firebaserc"
+
+log "完了しました"
+# プラン表示は (1) で実測した billingEnabled に基づいて出し分ける。
+# ALLOW_BLAZE=true で続行した実行に「Spark = 課金され得ない」と表示すると
+# 事実と異なる安全保証の提示になるため、断定は billingEnabled=False の
+# 場合に限定する。
+if [ "${billing_enabled}" = "False" ]; then
+  plan_note="請求先アカウント未紐付け = Spark"
+  billing_warning=""
+else
+  plan_note="billingEnabled=${billing_enabled}（ALLOW_BLAZE=true で続行）"
+  billing_warning="
+警告: このプロジェクトは Spark（課金され得ない状態）ではありません。
+      使用量に応じて課金が発生し得ます。請求ダッシュボードで上限や
+      予算アラートの設定を確認してください。"
+fi
+cat <<EOF
+
+公開 URL:      https://${SITE_ID}.web.app
+プロジェクト:  ${PROJECT_ID}（${plan_note}）
+GitHub Secret: ${SECRET_NAME}（${GITHUB_REPO}）
+GitHub 変数:   FIREBASE_PROJECT_ID=${PROJECT_ID} / FIREBASE_SITE_ID=${SITE_ID}
+${billing_warning}
+
+次の手順:
+  1. .firebaserc の差分をコミットしてください
+  2. デプロイワークフローが対象とするブランチ（リポジトリの既定ブランチ）へ
+    push すると本番（live）チャンネルへ自動デプロイされます
+  3. PR ではビルド検証（build job）のみ実行され、プレビューデプロイは行われません
+
+独自ドメインを使う場合は、Firebase Hosting のカスタムドメイン設定と
+レジストラでの DNS レコード登録が別途必要です（DNS 側だけは UI 操作が残ります）。
+EOF
