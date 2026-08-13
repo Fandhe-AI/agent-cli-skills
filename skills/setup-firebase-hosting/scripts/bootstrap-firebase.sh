@@ -170,7 +170,14 @@ describe_stderr="$(mktemp "${TMPDIR:-/tmp}/gcloud-describe-stderr.XXXXXX")"
 if gcloud projects describe "${PROJECT_ID}" >/dev/null 2>"${describe_stderr}"; then
   rm -f "${describe_stderr}"
   echo "既に存在するため作成をスキップします"
-elif grep -qiE 'not ?found|does not exist' "${describe_stderr}"; then
+elif grep -qiE 'not ?found|does not exist|may not exist' "${describe_stderr}"; then
+  # 「may not exist」も作成候補に含める: Resource Manager は未使用の
+  # プロジェクト ID に対しても、存在の秘匿のため 403 PERMISSION_DENIED +
+  # 「(or it may not exist)」を返すことが多く、これを除外すると新規 ID の
+  # 作成経路（create-if-missing）が一度も走らない。本当に権限不足で既存
+  # プロジェクトへアクセスできない場合は、直後の create が一意性エラーで
+  # 失敗し、その案内（別 ID の指定）で判別できる。認証切れ（Reauthentication
+  # required 等）はこのパターンに一致しないため引き続き fail-closed になる。
   rm -f "${describe_stderr}"
   echo "新規作成します"
   if ! gcloud projects create "${PROJECT_ID}" --name="${DISPLAY_NAME}"; then
