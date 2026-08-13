@@ -30,9 +30,15 @@
 #   これらは arm 対象の**絞り込み（誤爆防止）にすぎない**。
 #   本 workflow の認可根拠は「PR 作成主体が生成できない信頼済みシグナル」= ベースブランチの
 #   branch protection / ruleset をサーバー側 API で**実測検証**することに置く。arm 実行前に
-#   次の 7 点がすべて構成済みであることを決定的に検証し、1 つでも欠ければ arm せず次の PR へ
+#   次の 8 点がすべて構成済みであることを決定的に検証し、1 つでも欠ければ arm せず次の PR へ
 #   進む（fail-closed。API 取得・解析失敗も arm しない）:
 #     G1. required status checks が 1 件以上構成されている
+#     G8. required status checks の strict 適用（マージ前の base 最新化 = up-to-date 必須）が
+#         有効である（消費リポ codex P1 対応。strict でないと、base ブランチがチェック完了後に
+#         更新されても古い base に対して成功した HEAD の auto-merge がそのまま成立し得る。
+#         arm は「要件が揃った時点で自動マージ」であり base 更新後のチェック再実行を保証
+#         しない。classic は required_status_checks.strict、ruleset は required_status_checks
+#         ルールの strict_required_status_checks_policy で判定し、無効・取得不能なら arm しない）
 #     G2. required approving review count >= 1 が構成されている
 #         （GitHub は PR author の自己承認をサーバー側で拒否するため、これが
 #         「PR 作成主体が生成できない非 author 承認」という偽造不能シグナルになる）
@@ -100,8 +106,10 @@
 #
 # 前提（これらが未設定だと arm されない / arm 失敗になる）:
 #   1. リポジトリ設定で auto-merge を許可する（Settings → General → Allow auto-merge）
-#   2. base ブランチに branch protection / ruleset で上記 G1〜G3 と conversation resolution
-#      必須化（G5）を設定し、bypass actor を置かない（G4）。REQUIRED_EXTERNAL_CHECKS に
+#   2. base ブランチに branch protection / ruleset で上記 G1〜G3 と required checks の
+#      strict（up-to-date 必須。classic は「Require branches to be up to date before
+#      merging」、ruleset は strict_required_status_checks_policy。G8）、conversation
+#      resolution 必須化（G5）を設定し、bypass actor を置かない（G4）。REQUIRED_EXTERNAL_CHECKS に
 #      列挙した外部 App の check context を、その App に束縛した形（App 指定付き required
 #      check。classic は app_id、ruleset は integration_id）で required status checks に
 #      含める（G6。App 指定なしの legacy contexts では G6 を充足できない）。
@@ -406,6 +414,26 @@ jobs:
             if [ "$conv_ok" != "true" ]; then
               echo "skip PR #${PR_NUMBER}: required conversation resolution not enforced" \
                 "on base '${BASE_REF}'. Not arming (fail-closed)."
+              continue
+            fi
+            # G8: required status checks の strict 適用（マージ前の base 最新化 =
+            # up-to-date 必須）が有効であること（消費リポ codex P1 対応）。strict でないと
+            # base ブランチがチェック完了後に更新されても、古い base に対して成功した HEAD の
+            # auto-merge がそのまま成立し得る（arm は「要件が揃った時点で自動マージ」であり
+            # base 更新後のチェック再実行を保証しない）。classic は
+            # required_status_checks.strict、ruleset は required_status_checks ルールの
+            # strict_required_status_checks_policy で判定し（複数 ruleset のルールはすべて
+            # 適用され最も厳しい側が勝つため any 判定）、無効・取得不能・解析失敗は arm
+            # しない（fail-closed）。
+            strict_ok=$(jq -n --argjson c "$classic" --argjson r "$rules" '
+              (($c.required_status_checks? // {}) | .strict == true)
+              or ($r | flatten | any(
+                .type == "required_status_checks"
+                and .parameters.strict_required_status_checks_policy == true))
+            ' 2>/dev/null) || strict_ok=false
+            if [ "$strict_ok" != "true" ]; then
+              echo "skip PR #${PR_NUMBER}: strict required status checks (up-to-date)" \
+                "not enforced on base '${BASE_REF}'. Not arming (fail-closed)."
               continue
             fi
             # G6: REQUIRED_EXTERNAL_CHECKS（workflow 冒頭の env。「<context>:<App ID>」の
