@@ -37,6 +37,31 @@ jobs:
         run: bash .github/scripts/check-skill-structure.sh
 
   # --------------------------------------------------
+  # js-tests（implement-issue-tree G0 ゲート等の決定的回帰テスト）
+  # --------------------------------------------------
+  # tests/ 配下の node:test スイートを実行する。package.json・外部依存なしの
+  # 標準ライブラリのみで動く構成のため、runner 同梱の Node（ubuntu-latest は
+  # Node 22 以降。--test の glob 指定は Node 21+ が必要）をそのまま使う。
+  js-tests:
+    name: JS unit tests
+    runs-on: ubuntu-latest
+    # 依存インストールなしの軽量ジョブ。hang 検知の保険として 5 分で打ち切る。
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        # actions/checkout v6.0.3
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Run node:test suite
+        run: |
+          node --version
+          node --test "tests/**/*.test.mjs"
+
+  # --------------------------------------------------
   # lint-docs（ドキュメント／設定ファイル系 lint）
   # --------------------------------------------------
   # npx 直呼びの個別実装から Fandhe-AI/actions の lint-docs reusable workflow

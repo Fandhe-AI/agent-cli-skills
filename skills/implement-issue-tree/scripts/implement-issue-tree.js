@@ -34,10 +34,16 @@ export const meta = {
 // 引数パース・検証・定数設定。このスクリプトのエントリポイント。
 // ============================================================================
 
-// args は string で渡される場合がある（Workflow args は string 防御）
-const parsedArgs = typeof args === 'string'
-  ? (() => { try { return JSON.parse(args) } catch { return args } })()
-  : args
+// args は string で渡される場合がある（Workflow args は string 防御）。
+// `typeof args === 'undefined'` 分岐は回帰テスト用: 本ファイルは Workflow ハーネスが args を
+// 注入して実行するが、tests/implement-issue-tree/g0-gates.test.js は駆動部より上の定義部のみを
+// module として読み込む（DRIVER 開始マーカー参照）。その際 args は存在しないため、未定義参照で
+// ReferenceError にせず undefined として素通しする（args が定義済みのランでは挙動は従来と同一）。
+const parsedArgs = typeof args === 'undefined'
+  ? undefined
+  : typeof args === 'string'
+    ? (() => { try { return JSON.parse(args) } catch { return args } })()
+    : args
 const parent = Number(
   parsedArgs && typeof parsedArgs === 'object' ? (parsedArgs.parent ?? parsedArgs.issue) : parsedArgs,
 )
@@ -80,8 +86,13 @@ const EXTERNAL_CHECK_CONTEXT_RE = /^(?=.{1,255}$)\P{Cc}+$/u
 // 単一引用符内では $ / ` / " / \ が一切解釈されないため、EXTERNAL_CHECK_CONTEXT_RE が
 // 文字種を制限しなくても、値が jq --arg の引数以外の意味を持つことはない。
 const shellSingleQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
-const externalChecksInput = (() => {
-  const raw = parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.externalChecks : undefined
+// args.externalChecks の決定的パーサ（マージゲート入力の信頼境界）。従来は externalChecksInput の
+// 初期化 IIFE だったが、G0 ゲートの回帰テスト（tests/implement-issue-tree/g0-gates.test.js）から
+// 直接検証できるよう純粋関数へ切り出した（ロジックは移動のみで挙動変更なし）。
+// 契約: undefined / null → undefined（確定不能）、[] → []（「外部チェックなし」を人間が確定）、
+// 正常要素 → { app, contexts } へ正規化（旧形式 slug 文字列は contexts: [] の fail-closed 入力）、
+// 形式不正 → throw（既定値へのフォールバック禁止。詳細は上の externalChecks コメント参照）。
+export function parseExternalChecks(raw) {
   if (raw === undefined || raw === null) return undefined
   if (!Array.isArray(raw)) {
     throw new Error('args.externalChecks は配列で指定すること（例: {"externalChecks": [{"app": "cursor", "context": "Cursor Bugbot"}]}。外部チェックなしを確定する場合は [] を指定する）')
@@ -135,7 +146,10 @@ const externalChecksInput = (() => {
     }
   }
   return entries
-})()
+}
+const externalChecksInput = parseExternalChecks(
+  parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.externalChecks : undefined,
+)
 // 自動マージの明示 opt-in の受理（Issue #165）。ただし PR #182 codex P0 を受けて一度、autoMerge の
 // 値によらず自動マージを行わない（無条件 fail-closed）こととした — 2026-08-12 の opt-in 再有効化
 // までの経緯は以下。理由: monitor は未信頼の
@@ -220,7 +234,10 @@ const maxResidualWorktrees = parseMaxResidualWorktrees(
 // 保証できないため、自動フローの責務を「記録・集約」までに一本化した。resolve は常に人間が
 // GitHub 上で行い、未解決のまま残ったスレッドは blocked → 最終レポートで issue 化承認へ乗せる。
 
-if (!Number.isInteger(parent) || parent <= 0) {
+// `typeof args !== 'undefined'` の前置条件は parsedArgs と同じ回帰テスト対応: テストが定義部のみを
+// module として読み込む際（args 未注入）にこの検証で throw しないための素通しで、Workflow ハーネス
+// 実行時（args 注入済み）の検証内容・挙動は従来と同一。
+if (typeof args !== 'undefined' && (!Number.isInteger(parent) || parent <= 0)) {
   throw new Error('親イシュー番号を args で指定すること（例: {"parent": 1008, "branch": "main", "parallel": 3}）')
 }
 
@@ -831,7 +848,9 @@ function normalizeBlockedReason(raw) {
 // マージ実行エージェント（mergeExecutePrompt）の返却スキーマ（Issue #145）。
 // このエージェントはレビュー本文・Issue 本文を一切読まず、checks の結論・HEAD sha・
 // 未解決スレッド「数」のみを自ら再取得して検証し、条件充足時のみ merge / close を実行する。
-const MERGE_EXEC_SCHEMA = {
+// export は G0 ゲート回帰テスト（tests/implement-issue-tree/g0-gates.test.js）が reason enum を
+// 共有定数として参照するため（テスト側で reason 名を二重定義してドリフトさせないため）。
+export const MERGE_EXEC_SCHEMA = {
   type: 'object',
   required: ['merged', 'reason', 'summary', 'issueClosed'],
   properties: {
@@ -861,7 +880,47 @@ const MERGE_EXEC_SCHEMA = {
 
 // MERGE_EXEC_SCHEMA.reason の妥当値集合。schema はモデル出力への契約であり信頼境界ではない
 // ため、ホスト側でも同じ enum で二重検証する（enum 外は systemic failure として扱う）。
-const MERGE_EXEC_VALID_REASONS = new Set(MERGE_EXEC_SCHEMA.properties.reason.enum)
+export const MERGE_EXEC_VALID_REASONS = new Set(MERGE_EXEC_SCHEMA.properties.reason.enum)
+
+// merge-exec の execReason（ホスト側で enum 二重検証済みの reason。enum 外・欠落は '' に正規化
+// 済み）を runMergeLoop の次状態へ写像する純粋関数。従来は runMergeLoop 内の else-if 連鎖に
+// 直書きされていた lastState / lastBlockedReason の割当を、G0 ゲートの回帰テスト
+// （tests/implement-issue-tree/g0-gates.test.js）から決定的に検証できるようここへ切り出した
+// （写像は移動のみで挙動変更なし。終端文言の構築・ログ・fix ループ制御は従来どおり呼び出し元の
+// 各分岐が担う）。
+// currentBlockedReason: 呼び出し時点の lastBlockedReason。写像が blockedReason を確定しない
+// reason（timeout 系・fix ループ系・enum 外）では従来どおり値を変えずに返す。
+// 契約（呼び出し元の分岐コメント参照）:
+//   - unresolved-threads → unresolved-comments（fix ループへ。終端時は blocked・halt 非カウント）
+//   - not-mergeable → needs-fix（コンフリクト等。fix ループで解消し得る）
+//   - wrong-target / external-review-missing / server-enforcement-missing（G0）/
+//     classic-unsupported（G0 (ii)）/ issuer-unbound（G0 (v-b)）→ blocked + quality
+//     （構成変更後の再実行で monitoring 再開により回復可能）
+//   - pr-closed → blocked + unrecoverable（未マージクローズは再監視で回復し得ない）
+//   - head-moved / checks-not-green / merge-failed → timeout（一過性。再監視で解消しうる）
+//   - それ以外（enum 外・''）→ invalid-monitor-result（systemic failure。failed 終端・halt 対象）
+export function classifyMergeExecDispatch(execReason, currentBlockedReason) {
+  switch (execReason) {
+    case 'unresolved-threads':
+      return { lastState: 'unresolved-comments', lastBlockedReason: currentBlockedReason }
+    case 'not-mergeable':
+      return { lastState: 'needs-fix', lastBlockedReason: currentBlockedReason }
+    case 'wrong-target':
+    case 'external-review-missing':
+    case 'server-enforcement-missing':
+    case 'classic-unsupported':
+    case 'issuer-unbound':
+      return { lastState: 'blocked', lastBlockedReason: 'quality' }
+    case 'pr-closed':
+      return { lastState: 'blocked', lastBlockedReason: 'unrecoverable' }
+    case 'head-moved':
+    case 'checks-not-green':
+    case 'merge-failed':
+      return { lastState: 'timeout', lastBlockedReason: currentBlockedReason }
+    default:
+      return { lastState: 'invalid-monitor-result', lastBlockedReason: currentBlockedReason }
+  }
+}
 
 // マージ独立確認エージェント（mergeVerifyPrompt）の返却スキーマ（Issue #160）。
 // merge-exec の merged 自己申告（未検証のモデル出力）を別コンテキストで裏付けるための
@@ -2289,7 +2348,10 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, client
 // allowMerge はホストの決定的コード（args パース）のみから導出され、monitor の出力（ready /
 // headSha）はこのプロンプトのいかなる値にも使われない（起動タイミングにのみ影響する）。
 // grant / nonce 機構は撤去済み（grant 偽造 P0）。
-function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries) {
+// export は G0 ゲート回帰テスト（tests/implement-issue-tree/g0-gates.test.js）がプロンプト契約
+// （G0 判定記述の存在・回復専用経路のマージコマンド不在・context 宣言欠落時の throw ガード）を
+// 決定的に検証するため。
+export function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries) {
   const entries = Array.isArray(externalCheckEntries) ? externalCheckEntries : []
   // 新規マージ経路（allowMerge=true）は「宣言 App 全件が信頼済み context を持つ」ことを
   // ホスト側 recoveryOnly ゲート（externalChecksContextsConfirmed）が保証している。ここでの
@@ -3026,6 +3088,15 @@ function recoverImplementPrompt(item, brief, branch) {
 // セクション 6: 実行: Restore → Tree → State
 // ここから実行フロー。上記の関数・定数を順に使い、状態読込・ツリー取得・
 // 外部チェック判定・依存グラフ/キュー構築・pending 初期化を行う。
+//
+// __IMPLEMENT_ISSUE_TREE_DRIVER_START__（この行はテスト境界マーカー。削除・移動しないこと）
+// この行より上（セクション 1〜5）は定義と決定的な引数パースのみで、外部コマンド・エージェント
+// 起動の副作用を持たない。本ファイルは Workflow ハーネス専用の文法（トップレベル return・注入
+// グローバル args / agent / log / phase）を含むため module としては丸ごと import できず、
+// tests/implement-issue-tree/g0-gates.test.js はこのマーカーより上のみを切り出して import し、
+// export 済みの純粋関数・定数（parseExternalChecks / mergeExecutePrompt /
+// classifyMergeExecDispatch / MERGE_EXEC_SCHEMA / MERGE_EXEC_VALID_REASONS）を検証する。
+// このマーカーより下へ export 対象・テスト対象の定義を移動しないこと。
 // ============================================================================
 
 // --- Restore フェーズ: 状態ファイルを読み込む ---
@@ -4633,7 +4704,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         } else if (execReason === 'unresolved-threads') {
           // 監視は ready、マージ実行は未解決あり、という不一致。fix ループへ回す。
           // 終端したときも 'unresolved-comments' 由来として blocked（halt 非カウント）になる。
-          lastState = 'unresolved-comments'
+          // 状態遷移は classifyMergeExecDispatch（共有の純粋写像。以降の reason 分岐も同じ）に
+          // 委ね、各分岐は終端文言・ログ・fix ループ制御のみを担う。
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
           const conflictSummary = `マージ実行エージェントが未解決スレッドを検出（監視エージェントの ready 判定と不一致）: ${execSummaryText}`
           finding = {
             summary: conflictSummary,
@@ -4654,15 +4727,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           }
           log(`#${item.number}: マージ実行エージェントが未解決スレッドを検出したため fix ループへ回す`)
         } else if (execReason === 'not-mergeable') {
-          lastState = 'needs-fix'
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
           finding = { summary: `マージ実行エージェントがマージ不可（コンフリクト等）を検出: ${execSummaryText}`, unresolvedComments: [] }
         } else if (execReason === 'wrong-target') {
           // base ブランチ不一致・draft はコンフリクトと違い fix ループ（コード修正）では
           // 解消しない構成上の問題のため、fix 予算を消費せず blocked で即終端する
           // （PR #222 Bugbot Medium 対応。base 変更 / draft 解除後の再実行で monitoring
           // 再開により継続する）。
-          lastState = 'blocked'
-          lastBlockedReason = 'quality'
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
           terminalReasonOverride = capText(
             `PR のマージ先が想定と異なる（base ブランチ不一致）か draft のままのためマージを停止した。`
             + `GitHub 上で base ブランチの修正または draft 解除を行ってから再実行すれば monitoring 再開で継続する: ${execSummaryText}`,
@@ -4679,9 +4751,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // slug の誤記や当該 App が本リポジトリで動作していないケースは再実行では解消せず
           // 毎ラン blocked が続くため、終端理由に確定済み slug 一覧と脱出手順を添える。
           // どの slug が 0 件だったかは merge-exec の summary（execSummaryText）に含まれる。
-          lastState = 'blocked'
-          // チェック到着後の再実行でそのまま継続できるため回復可能（Issue #142）。
-          lastBlockedReason = 'quality'
+          // チェック到着後の再実行でそのまま継続できるため回復可能（Issue #142。blocked + quality）。
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
           // 合格条件の提示は App 種別で出し分ける（Issue #166）。判定ロジック
           // （mergeExecutePrompt の hasCursor / nonCursorApps 分割）は既に App ごとに
           // 非対称だが、従来の終端文言は全 App に「許容 conclusion の check-run / APPROVED
@@ -4706,10 +4777,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
         } else if (execReason === 'pr-closed') {
           // 未マージクローズ（人手によるクローズ等）。自力解決不可のため終端する。
-          lastState = 'blocked'
-          // 未マージクローズは同じ PR を再監視しても回復し得ない（Issue #142）。
+          // 未マージクローズは同じ PR を再監視しても回復し得ない（Issue #142。blocked + unrecoverable）。
           // 'quality' に誤分類すると isActiveMonitoring が毎ラン再開し続け halt 防御を迂回する。
-          lastBlockedReason = 'unrecoverable'
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
           lastUnresolvedInfo = lastUnresolvedInfo || capText(`PR が未マージのままクローズされている: ${execSummaryText}`)
         } else if (execReason === 'server-enforcement-missing') {
           // G0 ゲート: ベースブランチに required status checks のサーバー側強制（ruleset）を
@@ -4718,8 +4788,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // 前提を確認できないリポジトリでは新規マージを行わず blocked で終端する（fail-closed。
           // 再監視しても構成は変わらないため同ラン内で再試行しない）。branch protection を
           // 構成してから再実行すれば monitoring 再開で継続する（blocked + pr は再開対象）。
-          lastState = 'blocked'
-          lastBlockedReason = 'quality'
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
           terminalReasonOverride = capText(
             `ベースブランチのサーバー側強制（required status checks の bypass 不能性・strict 適用（base 最新化必須）・レビュースレッド解消の必須化・合格判定対象チェック context の required 化（client-only チェックの不在）・外部チェック App の宣言 context + App ID 組束縛の required 化）を確認できないためクライアント側自動マージを停止した（G0 ゲート）。`
             + `対象ブランチへ ruleset で required status checks（1 件以上・bypass actor なし・strict = マージ前の base 最新化必須。PR で実行される全チェックの context を含める）と required_review_thread_resolution を構成し、args.externalChecks で App を確定している場合は宣言した context の required check を当該 App の App ID（integration_id）束縛付きで追加してから再実行するか、autoMerge を外して人間がマージする（org 継承 ruleset のリポジトリはサーバー側 auto-merge workflow へ委譲する）: ${execSummaryText}`,
@@ -4734,8 +4803,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // admin 権限を要求する（admin 主体を許すと bypass 不能を証明できない）ため、
           // classic 経路に検証可能な通過条件は存在しない（下流 sync PR #2007 codex P0 /
           // PR #236 Bugbot High 対応。再監視しても構成は変わらないため同ラン内で再試行しない）。
-          lastState = 'blocked'
-          lastBlockedReason = 'quality'
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
           terminalReasonOverride = capText(
             `ruleset の required status checks を確認できないため、classic branch protection 経路はクライアント側自動マージ非対応として停止した（G0 (ii)。classic の bypass 不能性は write 権限の実行トークンから証明できず fail-closed で辞退する）。`
             + `ruleset ベースの branch protection（bypass_actors 空 + strict + 宣言 context の integration_id 束縛。read 権限で検証可能）へ移行するか、サーバー側 auto-merge workflow（upstream の docs/implement-issue-tree/auto-merge-sample.yml 参照）へ委譲するか、autoMerge を外して人間がマージする: ${execSummaryText}`,
@@ -4749,8 +4817,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // sync PR #627 codex P0 対応）。commit status は発行元 App 束縛を持たないため合格根拠に
           // せず、宣言 integration_id と一致する App 発行の check-run のみを数える。fail-closed で
           // 終端する（再監視しても required checks の構成は変わらないため同ラン内で再試行しない）。
-          lastState = 'blocked'
-          lastBlockedReason = 'quality'
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
           terminalReasonOverride = capText(
             `ベースブランチの required status checks の発行元束縛を検証できないためクライアント側自動マージを停止した（G0 (v-b)。integration_id 未設定の required check は同名 commit status で偽装可能なため fail-closed で辞退する）。`
             + `required checks を GitHub App 発行の check-run に統一し、ruleset の required status checks 全エントリへ発行元 App の integration_id を設定してから再実行するか、autoMerge を外して人間がマージする（またはサーバー側 auto-merge workflow へ委譲する）: ${execSummaryText}`,
@@ -4760,12 +4827,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // いずれも一過性（監視後の push・チェック未完了・merge コマンドの一時失敗）。
           // 再監視で解消しうるため timeout として次ラウンドへ回す（監視回数の上限で終端する）。
           log(`#${item.number}: マージ実行エージェントがマージを見送った（${execReason}）。再監視する`)
-          lastState = 'timeout'
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
         } else {
           // reason が enum 外・結果が null 等はエージェントのクラッシュ・API エラーと同じ
           // systemic failure として扱う（'failed' 終端・halt カウント対象）。
           log(`⚠️ #${item.number}: マージ実行エージェントが無効な結果を返した`)
-          lastState = 'invalid-monitor-result'
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
         }
       }
     }
