@@ -165,8 +165,11 @@ test('mergeExecutePrompt: 新規マージ経路（allowMerge=true）は G0 の�
   // (iii) レビュースレッド解消のサーバー側強制。
   assert.ok(prompt.includes('required_review_thread_resolution'))
   // (iv) 宣言 context + App ID（integration_id）の組による required 化の照合。
+  // App ID は App ごとに一意な変数（APP_ID_<SLUG>）で束縛される（共有 $APP_ID は使わない）。
   assert.ok(prompt.includes('(iv)'))
-  assert.ok(prompt.includes('--argjson appid "$APP_ID"'))
+  assert.ok(prompt.includes(`APP_ID_CURSOR=$(gh api "apps/cursor" --jq '.id')`))
+  assert.ok(prompt.includes('--argjson appid "$APP_ID_CURSOR"'))
+  assert.ok(!prompt.includes('--argjson appid "$APP_ID"'))
   assert.ok(prompt.includes(`--arg ctx 'Cursor Bugbot'`))
   // (v) client-only チェックの検出（required に含まれない check-run / commit status の件数照合）。
   assert.ok(prompt.includes('(v)'))
@@ -174,6 +177,35 @@ test('mergeExecutePrompt: 新規マージ経路（allowMerge=true）は G0 の�
   // (v-b) required checks の発行元束縛（integration_id の数値必須 + App 発行 check-run の存在）。
   assert.ok(prompt.includes('(v-b)'))
   assert.ok(prompt.includes('integration_id'))
+})
+
+test('mergeExecutePrompt: 複数 App 宣言時は G0 (iv) が App ごとに slug と APP_ID 取得を対で出力する', () => {
+  // 回帰テスト（下流 rust-ai-library PR #456 Bugbot Medium）: 全 context が共有 $APP_ID に
+  // 束縛されると、後続 App の context が先行 App の APP_ID と照合されて正しい ruleset でも
+  // fail する。App ごとに「slug での取得 → その App 専用変数での照合」が対で現れること。
+  const prompt = mergeExecutePrompt(item, impl, true, [
+    { app: 'cursor', contexts: ['Cursor Bugbot'] },
+    { app: 'sonarqubecloud', contexts: ['SonarQubeCloud Code Analysis', 'quality gate'] },
+  ])
+  // App ごとの取得コマンドが slug とセットでインライン出力される。
+  assert.ok(prompt.includes(`APP_ID_CURSOR=$(gh api "apps/cursor" --jq '.id')`))
+  assert.ok(prompt.includes(`APP_ID_SONARQUBECLOUD=$(gh api "apps/sonarqubecloud" --jq '.id')`))
+  // 各 context の照合コマンドが自 App の変数のみを参照する（他 App の変数と混線しない）。
+  const cursorLine = prompt.split('\n').find((l) => l.includes(`--arg ctx 'Cursor Bugbot'`))
+  assert.ok(cursorLine.includes('--argjson appid "$APP_ID_CURSOR"'))
+  for (const ctx of ['SonarQubeCloud Code Analysis', 'quality gate']) {
+    const line = prompt.split('\n').find((l) => l.includes(`--arg ctx '${ctx}'`))
+    assert.ok(line.includes('--argjson appid "$APP_ID_SONARQUBECLOUD"'))
+    assert.ok(!line.includes('$APP_ID_CURSOR'))
+  }
+  // 共有変数 $APP_ID（後続 App が先行 App の値を引きずる形）はどこにも現れない。
+  assert.ok(!prompt.includes('--argjson appid "$APP_ID"'))
+  // slug にハイフンを含む App も一意な変数名（ハイフン→アンダースコア）で束縛される。
+  const hyphenPrompt = mergeExecutePrompt(item, impl, true, [
+    { app: 'my-check-app', contexts: ['my check'] },
+  ])
+  assert.ok(hyphenPrompt.includes(`APP_ID_MY_CHECK_APP=$(gh api "apps/my-check-app" --jq '.id')`))
+  assert.ok(hyphenPrompt.includes('--argjson appid "$APP_ID_MY_CHECK_APP"'))
 })
 
 test('mergeExecutePrompt: G0 の辞退 reason 名は返却スキーマの enum と一致した形でプロンプトに現れる', () => {

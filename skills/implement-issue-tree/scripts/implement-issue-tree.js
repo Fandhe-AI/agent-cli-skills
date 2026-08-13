@@ -2438,13 +2438,21 @@ export function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries)
           `   (iii) レビュースレッド解消のサーバー側強制を確認する: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq '[.[][] | select(.type == "pull_request")] | any(.parameters.required_review_thread_resolution == true)' の出力が true であること。false・取得不能なら辞退する（手順 4 の「未解決スレッド 0 件」はクライアント側の再検証にすぎず、サーバー側で強制されていなければ、共有認証を持つ別エージェントの直接マージで迂回可能になるため）。`,
           ...(apps.length
             ? [
-                `   (iv) 確定済みの外部チェック App が、args.externalChecks で宣言された信頼済み check context と App ID の組でベースブランチの required status checks に含まれることを確認する。App ごとに: まず APP_ID=$(gh api "apps/<slug>" --jq '.id') で App ID を取得し、数値でなければ辞退する。次に宣言 context ごとに以下の式で件数を確認する:`,
-                ...entries.flatMap((e) => [
-                  `   - App ${JSON.stringify(e.app)} の宣言 context ごとに以下を実行する:`,
-                  ...e.contexts.flatMap((ctx) => [
-                    `     * context ${JSON.stringify(ctx)}: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq --argjson appid "$APP_ID" --arg ctx ${shellSingleQuote(ctx)} '[.[][] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | select(.integration_id == $appid and .context == $ctx)] | length'`,
-                  ]),
-                ]),
+                `   (iv) 確定済みの外部チェック App が、args.externalChecks で宣言された信頼済み check context と App ID の組でベースブランチの required status checks に含まれることを確認する。App ごとに独立したブロックとして「その App の slug での App ID 取得 → 直後にその App の宣言 context の照合」を完結させる（App ID の変数名は App ごとに一意で、別 App の App ID を照合に流用しない。取得値が数値でなければその時点で辞退する）:`,
+                ...entries.flatMap((e) => {
+                  // App ごとに一意なシェル変数名で APP_ID を束縛する。複数 App 宣言時に後続 App の
+                  // context が先行 App の APP_ID と照合される取り違え（共有 $APP_ID の再代入漏れ・
+                  // 実行順ずれ）を、変数名の分離で構造的に排除する（下流 rust-ai-library PR #456
+                  // Bugbot Medium 対応）。slug は EXTERNAL_CHECK_APP_SLUG_RE（英小文字・数字・
+                  // ハイフン）検証済みのため、ハイフン→アンダースコア変換は単射で衝突しない。
+                  const appVar = `APP_ID_${e.app.toUpperCase().replace(/-/g, '_')}`
+                  return [
+                    `   - App ${JSON.stringify(e.app)}: まず ${appVar}=$(gh api "apps/${e.app}" --jq '.id') で App ID を取得し、数値でなければ辞退する。次にこの ${appVar} を使って宣言 context ごとに以下の式で件数を確認する:`,
+                    ...e.contexts.flatMap((ctx) => [
+                      `     * context ${JSON.stringify(ctx)}: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq --argjson appid "$${appVar}" --arg ctx ${shellSingleQuote(ctx)} '[.[][] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | select(.integration_id == $appid and .context == $ctx)] | length'`,
+                    ]),
+                  ]
+                }),
                 `   全 App の全宣言 context について出力が 1 以上の場合のみ通過する。0 件・取得不能が 1 つでもあれば辞退する（context のみ一致（integration_id が別）や App ID のみ一致（別 context の required check しかない）は不合格。外部チェックの合格が required check としてサーバー側でマージ条件になっていなければ、手順 4b のクライアント側検証は直接マージで迂回可能になるため。context 名単独は同名偽装が可能で、App ID 単独は同一 App が生成する無関係な context の required 化でも通過してしまうため、偽造不能な App ID と宣言 context の組の完全一致のみを合格とする — 下流 sync PR codex P0 変種 1 対応）。`,
               ]
             : []),
