@@ -57,8 +57,7 @@ const concurrency = (() => {
 //   - 要素は次の 2 形式（指定 App を正とし、観測結果より優先する）:
 //       {"app": "cursor", "context": "Cursor Bugbot"} → App slug + 信頼済み required status check
 //         context の組。複数 context は {"app": ..., "contexts": [...]} で宣言する。G0 ゲートは
-//         この組（ruleset は context + integration_id、classic は context + app_id）の完全一致で
-//         required 化を照合する
+//         この組（context + integration_id）の完全一致で required 化を照合する
 //       "cursor"（文字列。旧形式）→ slug のみ。監視・外部レビュー待機は従来どおり行うが、信頼済み
 //         context が未宣言のためクライアント側自動マージは fail-closed で停止する（autoMerge: true
 //         でもマージせず blocked 終端。同じ GitHub App が複数の check-run context を生成し得るため、
@@ -164,15 +163,18 @@ const externalChecksInput = (() => {
 //       テキストを読まない merge-exec が gh の enum / 件数出力から自己取得する。
 //   (3) merge-exec はマージ実行前にベースブランチの required status checks のサーバー側強制を
 //       実測確認できない限り辞退する（G0 ゲート）。存在確認に加え bypass 不能性まで確認する
-//       （全適用 ruleset の bypass_actors が空・org 継承 ruleset は検証不能として辞退・classic は
-//       enforce_admins 有効かつ bypass_pull_request_allowances が未設定または全リスト空。
-//       PR #222 codex P0 第 2 ラウンド対応: bypass 可能な構成では admin
-//       権限の gh 認証自身が保護を迂回できるため）。加えて required checks の strict 適用
+//       （全適用 ruleset の bypass_actors が空・org 継承 ruleset は検証不能として辞退。
+//       classic branch protection のみのリポジトリは、bypass 不能性の検証に必要な protection
+//       読取自体が admin 権限を要求し write トークンで証明できないため、クライアント側自動
+//       マージ非対応（classic-unsupported）として無条件で辞退する — 下流 sync PR #2007
+//       codex P0 / PR #236 Bugbot High 対応。PR #222 codex P0 第 2 ラウンド対応: bypass
+//       可能な構成では admin 権限の gh 認証自身が保護を迂回できるため）。加えて required
+//       checks の strict 適用
 //       （base 最新化必須）も確認する（strict でないと base 更新後も古いチェック結果で
 //       マージできてしまうため。--match-head-commit は PR HEAD の固定のみで base の
 //       更新・チェック再実行を保証しない）。さらに下流 sync PR codex P0 対応として、
-//       外部チェックの required 化は「宣言 context + App ID の組（ruleset は context +
-//       integration_id、classic は context + app_id）」の完全一致で照合し（App ID の一致だけ
+//       外部チェックの required 化は「宣言 context + App ID の組（context +
+//       integration_id）」の完全一致で照合し（App ID の一致だけ
 //       では同一 App の無関係な context の required 化でも通過してしまうため）、手順 3 で
 //       合格判定の対象になる全チェック context が required に含まれること（client-only
 //       チェックの不在）まで確認する（1 件でも required でないチェックがあると、共有 gh
@@ -831,8 +833,8 @@ const MERGE_EXEC_SCHEMA = {
     merged: { type: 'boolean', description: 'PR が MERGED 状態になった場合のみ true' },
     reason: {
       type: 'string',
-      enum: ['merged', 'already-merged', 'head-moved', 'checks-not-green', 'unresolved-threads', 'not-mergeable', 'wrong-target', 'merge-failed', 'pr-closed', 'external-review-missing', 'server-enforcement-missing', 'classic-role-unprovable'],
-      description: 'merged: 本エージェントがマージした / already-merged: 既に MERGED だった / head-moved: HEAD sha を取得・検証できなかった（回復専用経路で PR が MERGED でなかった場合を含む） / checks-not-green: チェック未完了・失敗 / unresolved-threads: 未解決スレッドが残存 / not-mergeable: コンフリクト等でマージ不可（fix ループで解消し得るもの） / wrong-target: base ブランチ不一致または draft（fix ループでは解消しないため終端） / merge-failed: merge コマンド自体が失敗 / pr-closed: 未マージクローズ / external-review-missing: 確定済みの外部チェック App（args.externalChecks の明示値）のいずれかについて HEAD sha に対する合格の根拠を確認できない（cursor はレビュー 0 件または CHANGES_REQUESTED が 1 件以上、cursor 以外は check-run 0 件かつフォールバックのレビューが合格条件（APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない場合。APPROVED が否定的レビューと併存するケースを含む） / server-enforcement-missing: ベースブランチのサーバー側強制（required status checks の bypass 不能性 = ruleset は全適用 ruleset の bypass_actors が空かつ Repository ソース、classic は enforce_admins 有効かつ required_pull_request_reviews.bypass_pull_request_allowances が未設定（欠落 / null）または users / teams / apps がすべて空。加えて required checks の strict 適用（マージ前の base 最新化必須 = ruleset は strict_required_status_checks_policy / classic は strict）、レビュースレッド解消の必須化、手順 3 で合格判定の対象になる全チェック context の required 化（client-only チェックの不在）、外部チェック確定時は宣言 context + App ID の組（ruleset は context + integration_id、classic は context + app_id）で束縛された required status check の存在）を実測確認できない / classic-role-unprovable: classic branch protection 経路でマージ実行主体（gh api user の login）の実効ロール（collaborators permission の role_name）が write であると証明できない（admin / maintain は branch protection の bypass が可能または設定次第で可能、標準 4 種（admin / maintain / write / read）以外のカスタムロールは bypass 権限の有無を API から証明できないため、write 以外・取得不能はすべて辞退）',
+      enum: ['merged', 'already-merged', 'head-moved', 'checks-not-green', 'unresolved-threads', 'not-mergeable', 'wrong-target', 'merge-failed', 'pr-closed', 'external-review-missing', 'server-enforcement-missing', 'classic-unsupported'],
+      description: 'merged: 本エージェントがマージした / already-merged: 既に MERGED だった / head-moved: HEAD sha を取得・検証できなかった（回復専用経路で PR が MERGED でなかった場合を含む） / checks-not-green: チェック未完了・失敗 / unresolved-threads: 未解決スレッドが残存 / not-mergeable: コンフリクト等でマージ不可（fix ループで解消し得るもの） / wrong-target: base ブランチ不一致または draft（fix ループでは解消しないため終端） / merge-failed: merge コマンド自体が失敗 / pr-closed: 未マージクローズ / external-review-missing: 確定済みの外部チェック App（args.externalChecks の明示値）のいずれかについて HEAD sha に対する合格の根拠を確認できない（cursor はレビュー 0 件または CHANGES_REQUESTED が 1 件以上、cursor 以外は check-run 0 件かつフォールバックのレビューが合格条件（APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない場合。APPROVED が否定的レビューと併存するケースを含む） / server-enforcement-missing: ベースブランチのサーバー側強制（required status checks の bypass 不能性 = 全適用 ruleset の bypass_actors が空かつ Repository ソース。加えて required checks の strict 適用（マージ前の base 最新化必須 = strict_required_status_checks_policy）、レビュースレッド解消の必須化（required_review_thread_resolution）、手順 3 で合格判定の対象になる全チェック context の required 化（client-only チェックの不在）、外部チェック確定時は宣言 context + App ID の組（context + integration_id）で束縛された required status check の存在）を実測確認できない / classic-unsupported: ruleset の required status checks を確認できない（classic branch protection のみで保護されている場合・保護なしの場合を含む）。classic の bypass 不能性（enforce_admins・bypass allowance・実行主体ロール・カスタムロールの bypass 権限）は検証に必要な protection 読取自体が admin 権限を要求し、write 権限の実行トークンから決定的に証明できないため、classic 経路はクライアント側自動マージ非対応として fail-closed で辞退する',
     },
     summary: { type: 'string', description: '検証結果の要約（チェック件数・未解決スレッド数・HEAD sha 等の実測値）' },
     headSha: {
@@ -2241,21 +2243,19 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, client
 //     方向にしか働かない（fail-closed）。
 //   - allowMerge=true では、マージ実行前にベースブランチのサーバー側強制を実測確認し、
 //     確認できなければ server-enforcement-missing で辞退する（G0 ゲート）。存在確認だけでは
-//     不十分（PR #222 codex P0 第 2 ラウンド: ruleset の bypass actor / classic の
-//     enforce_admins=false 構成では、マージ実行主体である admin 権限の gh 認証自身が保護を
-//     迂回できる）ため、「required status checks が 1 件以上」に加えて「全適用 ruleset の
-//     bypass_actors が空（org 継承 ruleset は検証不能として辞退）/ classic は enforce_admins
-//     有効かつ required_pull_request_reviews.bypass_pull_request_allowances が未設定または
-//     users / teams / apps がすべて空（enforce_admins が有効でも allowance 登録主体は PR
-//     レビュー要件を明示的に迂回できるため）」と「required checks の strict 適用（base
-//     最新化必須。strict でないと base 更新後も古いチェック結果でマージできる）」まで
-//     確認する。classic 経路ではさらにマージ実行主体の実効ロールが write であることを
-//     検証する（下流 sync PR #2007 codex P0 対応: enforce_admins / bypass allowance が
-//     安全な値でも、admin / maintain やカスタムリポジトリロールの「Bypass branch
-//     protections」権限を持つ主体は required checks を迂回してマージできる。write 以外・
-//     カスタムロールは bypass 不能を API から証明できないため classic-role-unprovable で
-//     辞退する。ruleset 経路は bypass_actors 空の検査が bypass 主体の不在を保証するため
-//     対象外）。これによりマージ可否の実強制は GitHub の branch protection になり、
+//     不十分（PR #222 codex P0 第 2 ラウンド: bypass actor がいる構成では、マージ実行主体で
+//     ある gh 認証自身が保護を迂回できる）ため、「required status checks が 1 件以上」に
+//     加えて「全適用 ruleset の bypass_actors が空（org 継承 ruleset は検証不能として辞退）」
+//     と「required checks の strict 適用（base 最新化必須。strict でないと base 更新後も
+//     古いチェック結果でマージできる）」まで確認する。classic branch protection のみの
+//     リポジトリはクライアント側自動マージ非対応として無条件で辞退する（classic-unsupported。
+//     下流 sync PR #2007 codex P0 / PR #236 Bugbot High 対応: classic の bypass 不能性
+//     （enforce_admins・bypass allowance・実行主体ロール・カスタムリポジトリロールの
+//     「Bypass branch protections」権限）は write 権限の実行トークンから決定的に証明できず、
+//     検証に必要な protection 読取自体が admin 権限を要求する — admin 主体を許すと bypass
+//     不能を証明できないため、classic 経路に検証可能な通過条件は存在しない。ruleset
+//     （bypass_actors・strict・context 束縛が read 権限で検証可能）への移行またはサーバー側
+//     workflow への委譲で対応する）。これによりマージ可否の実強制は GitHub の branch protection になり、
 //     本エージェント（モデル出力）や monitor が同時に誤っていても、required checks が green
 //     でない PR のマージはサーバーが拒否する。
 //   - allowMerge=false（回復専用経路）では新規マージを一切許可せず、「PR が既に MERGED なら
@@ -2356,7 +2356,7 @@ function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries) {
     // テキスト）の読み込みと delegation を要求するため、マージ権限を持つ本エージェントには
     // 挿入しない（merge-verify と同じ最小指示を使う。PR #222 codex P0 第 6 ラウンド対応）。
     MERGE_CONTEXT_COMMON,
-    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない）。gh api .../commits/<sha>/check-runs は次の 2 形のみ実行してよい: (a) 手順 4b が提示されている場合、そこに記載された --jq 正規化形（状態 enum 別件数）。(b) 手順 2b (v) が提示されている場合（手順 4b の有無にかかわらず。externalChecks なし確定で 4b が存在しないランを含む）、2b (v) に記載された gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/check-runs" | jq --argjson req "$REQ" '[.[].check_runs[].name | select(. as $n | ($req | index($n)) | not)] | length' の固定形（出力は「required に含まれない件数」の非負整数 1 個のみ）。gh api .../commits/<sha>/statuses は手順 2b (v) に記載された gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/statuses" | jq --argjson req "$REQ" '[.[][].context] | unique | map(select(. as $c | ($req | index($c)) | not)) | length' の固定形のみ。いずれも --jq / jq を外した実行・別の jq 式への差し替えは行わない。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable / baseRefName / isDraft、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum${allowMerge ? '、および手順 2b に記載したコマンド群（--jq または外部 jq へのパイプで件数・真偽値のみへ正規化した branch protection / ruleset の構成・bypass 検証、実行主体ロールの検証（gh api user の login と collaborators permission のロール分類 enum。2b (ii-b)）、および上記 (b) と statuses の required context 集合差の件数照合（2b (v)）。記載どおりの jq 式に限る）の出力' : ''}のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。${allowMerge ? 'gh pr merge は手順 5 の条件をすべて満たした場合に限り、手順 5 に記載したコマンド形（--squash --delete-branch --match-head-commit 付き）でのみ実行してよい（他の形・他の PR 番号への実行は禁止）。' : 'gh pr merge の実行も行わない（手順 5 のとおり常に禁止）。'}`,
+    `権限境界: 本エージェントは PR レビューコメント・Bugbot コメント・Issue 本文・チェック名を読まない（gh api .../comments、GraphQL のコメント body 取得、gh issue view の本文表示、素の gh pr checks や --json name / description / link は実行しない）。gh api .../reviews は手順 4b が提示されている場合に限り、そこに記載された「件数・状態 enum のみへ正規化した --jq 出力」の形でのみ実行してよい（手順 4b がない場合は一切実行しない）。gh api .../commits/<sha>/check-runs は次の 2 形のみ実行してよい: (a) 手順 4b が提示されている場合、そこに記載された --jq 正規化形（状態 enum 別件数）。(b) 手順 2b (v) が提示されている場合（手順 4b の有無にかかわらず。externalChecks なし確定で 4b が存在しないランを含む）、2b (v) に記載された gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/check-runs" | jq --argjson req "$REQ" '[.[].check_runs[].name | select(. as $n | ($req | index($n)) | not)] | length' の固定形（出力は「required に含まれない件数」の非負整数 1 個のみ）。gh api .../commits/<sha>/statuses は手順 2b (v) に記載された gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/statuses" | jq --argjson req "$REQ" '[.[][].context] | unique | map(select(. as $c | ($req | index($c)) | not)) | length' の固定形のみ。いずれも --jq / jq を外した実行・別の jq 式への差し替えは行わない。レビュー本文（body）・チェック名（name）・説明（description / output）・タイトル等のテキストフィールドは取得しない。読み取ってよいのは PR の state / headRefOid / mergeable / baseRefName / isDraft、チェックの状態別件数、未解決レビュースレッドの件数、HEAD sha に対する外部チェック App ごとの件数と状態 enum${allowMerge ? '、および手順 2b に記載したコマンド群（--jq または外部 jq へのパイプで件数・真偽値のみへ正規化した ruleset の構成・bypass 検証、および上記 (b) と statuses の required context 集合差の件数照合（2b (v)）。記載どおりの jq 式に限る）の出力' : ''}のみ。コード修正・push・PR 本文編集・レビュースレッドの resolve も行わない。${allowMerge ? 'gh pr merge は手順 5 の条件をすべて満たした場合に限り、手順 5 に記載したコマンド形（--squash --delete-branch --match-head-commit 付き）でのみ実行してよい（他の形・他の PR 番号への実行は禁止）。' : 'gh pr merge の実行も行わない（手順 5 のとおり常に禁止）。'}`,
     '手順:',
     `1. gh pr view ${impl.prNumber} --json state,headRefOid,mergeable,baseRefName,isDraft で現在の状態を取得する。`,
     `   - state が MERGED: マージ済み。手順 5 のイシュークローズ確認のみ行い merged: true / reason: already-merged を返す。`,
@@ -2369,28 +2369,27 @@ function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries) {
           `   (i) ruleset の required status checks 存在確認（--paginate --slurp で全ページを 1 つの配列に束ねてから数える。2 ページ目以降のルールを見落とすと bypass 検証対象の ruleset が漏れるため必須。gh は --slurp と --jq の併用を拒否するため、正規化は外部の jq へパイプして行う）: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq '[.[][] | select(.type == "required_status_checks")] | length'`,
           `   (i-b) (i) が 1 以上の場合、bypass 不能性を確認する。まず適用 ruleset を列挙する（同じく全ページ必須・jq パイプ）: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq '[.[][] | {id: .ruleset_id, src: .ruleset_source_type}] | unique'。全要素が「数値の id + src が "Repository"」であること（id 欠落・非数値・src が "Repository" 以外（Organization 継承 ruleset を含む）が 1 件でもあればこの経路では検証不能として (ii) へは進まず server-enforcement-missing で辞退する。org ruleset の bypass 検証はこの gh 認証では保証できないため、サーバー側 auto-merge workflow へ委譲する）。次に各 id について: gh api "repos/{owner}/{repo}/rulesets/<id>" --jq '.bypass_actors | type == "array" and length == 0'。全 id で出力が true の場合のみ次へ進む — (i-c) 以降の確認を継続し、この時点では G0 通過としない（false・null・エラーは bypass actor が存在する/確認できない構成であり、その actor（マージ実行主体を含み得る）が required checks を迂回してマージできるため辞退する）。`,
           `   (i-c) (i) が 1 以上の場合、required checks の strict 適用（マージ前に base 最新化 = up-to-date を必須とするサーバー側強制）を確認する: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq '[.[][] | select(.type == "required_status_checks")] | any(.parameters.strict_required_status_checks_policy == true)' の出力が true であること。false・取得不能なら辞退する（strict でないと、base ブランチがチェック完了後に更新されても古い base に対して成功した HEAD をそのままマージでき、手順 5 の --match-head-commit は PR HEAD を固定するだけで base の更新・チェック再実行を保証しないため。複数 ruleset のルールはすべて適用され最も厳しい側が勝つため、1 件でも strict=true があればサーバー側で強制される — (iii) の any 判定と同型）。`,
-          `   (ii) (i) が 0 件またはエラーの場合のみ classic branch protection を確認する: gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/required_status_checks" --jq '.checks | length' が 1 以上、かつ gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/required_status_checks" --jq '.strict' が true、かつ gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/enforce_admins" --jq '.enabled' が true、かつ gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection" --jq '.required_pull_request_reviews.bypass_pull_request_allowances as $a | if $a == null then true elif ($a | type) == "object" then ([$a.users // [], $a.teams // [], $a.apps // []] | all(type == "array" and length == 0)) else false end' が true、の 4 つすべてを満たす場合のみ次へ進む（strict が false だと base 更新後も古いチェック結果でマージできてしまい（(i-c) と同じ理由）、enforce_admins が false だと管理者権限のこの gh 認証が required checks を迂回してマージできるため辞退する。4 つ目の式は required_pull_request_reviews.bypass_pull_request_allowances が欠落または null、あるいは users / teams / apps がすべて配列型かつ空の場合のみ true を返す正規化式であり、enforce_admins が有効でもこの allowance に登録された users / teams / apps（マージ実行主体を含み得る）は PR レビュー要件を明示的に迂回できるため、false・非 object・非配列・要素あり・取得不能はいずれも辞退する）。`,
-          `   (ii-b) (ii) を使った場合（classic 経路）は、マージ実行主体の実効ロールが branch protection を bypass し得ないことを確認する（enforce_admins と bypass allowance が安全な値でも、カスタムリポジトリロール等で「Bypass branch protections」権限が付与された主体は required checks を迂回してマージできるため。下流 sync PR codex P0 対応）。まず LOGIN=$(gh api user --jq '.login') で実行ユーザーを取得し、値が英数字とハイフンのみで構成される非空文字列でない・取得エラーの場合は辞退する。次に gh api "repos/{owner}/{repo}/collaborators/$LOGIN/permission" --jq 'if .role_name == "admin" then "admin" elif .role_name == "maintain" then "maintain" elif .role_name == "write" then "write" elif .role_name == "read" then "read" else "custom" end' を実行し、出力が "write" の場合のみ次へ進む。それ以外（admin / maintain は branch protection の bypass 権限を保持または設定次第で保持し得る、custom = 標準 4 種以外のカスタムロールは「Bypass branch protections」権限の有無をこの API から証明できない、read はマージ権限自体を証明できない、取得不能・非ゼロ終了を含む）はマージせず merged: false / reason: classic-role-unprovable を返す（summary には上記の分類 enum 値（admin / maintain / read / custom / 取得不能）のみを書き、カスタムロール名の文字列は取得・転記しない）。ruleset 経路（(i) が 1 以上）ではこの検証は行わない（(i-b) の bypass_actors 空の検査が bypass 主体の不在を ruleset 側で保証する）。`,
-          `   (iii) レビュースレッド解消のサーバー側強制を確認する。ruleset 経路（(i) が 1 以上）: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq '[.[][] | select(.type == "pull_request")] | any(.parameters.required_review_thread_resolution == true)' の出力が true であること。classic 経路（(ii)）: gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/required_conversation_resolution" --jq '.enabled' が true であること。false・取得不能なら辞退する（手順 4 の「未解決スレッド 0 件」はクライアント側の再検証にすぎず、サーバー側で強制されていなければ、共有認証を持つ別エージェントの直接マージで迂回可能になるため）。`,
+          `   (ii) (i) が 0 件またはエラーの場合、クライアント側自動マージは非対応として辞退する: classic branch protection の bypass 不能性（enforce_admins・bypass allowance・マージ実行主体のロール・カスタムリポジトリロールの「Bypass branch protections」権限）は write 権限の実行トークンから決定的に証明できず、検証に必要な repos/{owner}/{repo}/branches/<branch>/protection 系エンドポイントの読取自体が admin（Administration read）権限を要求するため、「証明できないものは fail-closed」原則に従い classic 経路は非対応とする（下流 sync PR codex P0 / PR #236 Bugbot High 対応: admin 主体を許すと bypass 不能を証明できず、write 主体は protection を読めないため、classic 経路に検証可能な通過条件は存在しない）。protection 系エンドポイントは実行せず、マージせず merged: false / reason: classic-unsupported を返す（summary に「ruleset の required status checks を確認できないため classic 経路は非対応」と書く）。ruleset ベースの branch protection（bypass_actors 空 + strict + context 束縛。read 権限で検証可能）への移行、またはサーバー側 auto-merge workflow（upstream の docs/implement-issue-tree/auto-merge-sample.yml）への委譲で対応する。以降の手順（(iii) 〜 (v)・手順 3 以降）は実行しない。`,
+          `   (iii) レビュースレッド解消のサーバー側強制を確認する: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq '[.[][] | select(.type == "pull_request")] | any(.parameters.required_review_thread_resolution == true)' の出力が true であること。false・取得不能なら辞退する（手順 4 の「未解決スレッド 0 件」はクライアント側の再検証にすぎず、サーバー側で強制されていなければ、共有認証を持つ別エージェントの直接マージで迂回可能になるため）。`,
           ...(apps.length
             ? [
-                `   (iv) 確定済みの外部チェック App が、args.externalChecks で宣言された信頼済み check context と App ID の組でベースブランチの required status checks に含まれることを確認する。App ごとに: まず APP_ID=$(gh api "apps/<slug>" --jq '.id') で App ID を取得し、数値でなければ辞退する。次に宣言 context ごとに、手順 (i)/(ii) で判定した経路と同じ側の式で件数を確認する:`,
+                `   (iv) 確定済みの外部チェック App が、args.externalChecks で宣言された信頼済み check context と App ID の組でベースブランチの required status checks に含まれることを確認する。App ごとに: まず APP_ID=$(gh api "apps/<slug>" --jq '.id') で App ID を取得し、数値でなければ辞退する。次に宣言 context ごとに以下の式で件数を確認する:`,
                 ...entries.flatMap((e) => [
                   `   - App ${JSON.stringify(e.app)} の宣言 context ごとに以下を実行する:`,
                   ...e.contexts.flatMap((ctx) => [
-                    `     * context ${JSON.stringify(ctx)} — ruleset 経路: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq --argjson appid "$APP_ID" --arg ctx ${shellSingleQuote(ctx)} '[.[][] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | select(.integration_id == $appid and .context == $ctx)] | length' / classic 経路: gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/required_status_checks" | jq --argjson appid "$APP_ID" --arg ctx ${shellSingleQuote(ctx)} '[.checks[] | select(.app_id == $appid and .context == $ctx)] | length'`,
+                    `     * context ${JSON.stringify(ctx)}: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq --argjson appid "$APP_ID" --arg ctx ${shellSingleQuote(ctx)} '[.[][] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | select(.integration_id == $appid and .context == $ctx)] | length'`,
                   ]),
                 ]),
-                `   全 App の全宣言 context について該当経路の出力が 1 以上の場合のみ通過する。0 件・取得不能が 1 つでもあれば辞退する（context のみ一致（integration_id / app_id が別）や App ID のみ一致（別 context の required check しかない）は不合格。外部チェックの合格が required check としてサーバー側でマージ条件になっていなければ、手順 4b のクライアント側検証は直接マージで迂回可能になるため。context 名単独は同名偽装が可能で、App ID 単独は同一 App が生成する無関係な context の required 化でも通過してしまうため、偽造不能な App ID と宣言 context の組の完全一致のみを合格とする — 下流 sync PR codex P0 変種 1 対応）。`,
+                `   全 App の全宣言 context について出力が 1 以上の場合のみ通過する。0 件・取得不能が 1 つでもあれば辞退する（context のみ一致（integration_id が別）や App ID のみ一致（別 context の required check しかない）は不合格。外部チェックの合格が required check としてサーバー側でマージ条件になっていなければ、手順 4b のクライアント側検証は直接マージで迂回可能になるため。context 名単独は同名偽装が可能で、App ID 単独は同一 App が生成する無関係な context の required 化でも通過してしまうため、偽造不能な App ID と宣言 context の組の完全一致のみを合格とする — 下流 sync PR codex P0 変種 1 対応）。`,
               ]
             : []),
           `   (v) 手順 3 で合格判定の対象になる全チェック（HEAD sha 上の check-run / commit status）の context がベースブランチの required status checks にすべて含まれることを照合する（required でない client-only チェックが 1 件でもあれば、そのチェックはサーバー側のマージ条件ではなく、失敗していても共有 gh 認証を持つ別エージェントの直接マージで迂回できるため辞退する — 下流 sync PR codex P0 変種 2 対応）。判定は jq で「required に含まれない context の件数」のみへ正規化して行い、チェック名・context 文字列そのものは取得・転記しない。以下を 1 回の Bash 実行でまとめて行う（REQ はシェル変数としてのみ扱い、echo・log 等で表示しない。HEAD_SHA には手順 2 で固定した値のみを設定する — 再取得・他の値の使用は禁止）:`,
           `     HEAD_SHA="<手順 2 で固定した 40 桁の headRefOid>"`,
-          `     REQ=$(手順 (i) が 1 以上なら ruleset 経路: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq -c '[.[][] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | unique'、(ii) を使った場合は classic 経路: gh api "repos/{owner}/{repo}/branches/${encodeURIComponent(baseBranch)}/protection/required_status_checks" --jq '[.checks[].context] | unique' の出力を代入する)`,
+          `     REQ=$(gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq -c '[.[][] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | unique' の出力を代入する)`,
           `     gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/check-runs" | jq --argjson req "$REQ" '[.[].check_runs[].name | select(. as $n | ($req | index($n)) | not)] | length'`,
           `     gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/statuses" | jq --argjson req "$REQ" '[.[][].context] | unique | map(select(. as $c | ($req | index($c)) | not)) | length'`,
           `   2 つの出力（required に含まれない check-run 件数・commit status context 件数）がともに 0 の場合のみ通過する。1 以上・取得不能・REQ の取得失敗はいずれも辞退する（fail-closed。「required 側が多い」のは問題ない — 不足チェックは手順 3 とサーバー側の双方が pending として止める）。`,
-          `   G0 を通過できない場合（(i-b) の bypass 検証不合格・(i-c) の strict 適用なし・(ii) の不合格（strict / enforce_admins / bypass allowance を含む）・(iii) のスレッド解消強制なし・(iv) の外部チェック required 化なし（宣言 context + App ID の組の不一致を含む）・(v) の client-only チェック検出・取得不能を含む）はマージせず merged: false / reason: server-enforcement-missing を返す（summary に「ベースブランチ ${JSON.stringify(baseBranch)} のサーバー側強制を確認できない」と、どの判定（存在 / ruleset bypass / org ruleset / strict / enforce_admins / classic bypass allowance / スレッド解消強制 / 外部チェック context+App 束縛 / client-only チェック）で不合格になったかを書く（(v) の不合格では件数のみを書き、context 文字列は書かない）。エラー出力の本文は転記しない）。(ii-b) の不合格のみ例外として server-enforcement-missing ではなく merged: false / reason: classic-role-unprovable を返す（summary は (ii-b) 記載のとおりロール分類 enum のみ）。本手順に記載したコマンド以外の branch protection API・ロール取得 API は実行しない（gh api user / collaborators permission は (ii-b) に記載した --jq 正規化形に限る）。`,
+          `   G0 を通過できない場合（(i-b) の bypass 検証不合格・(i-c) の strict 適用なし・(iii) のスレッド解消強制なし・(iv) の外部チェック required 化なし（宣言 context + App ID の組の不一致を含む）・(v) の client-only チェック検出・取得不能を含む）はマージせず merged: false / reason: server-enforcement-missing を返す（summary に「ベースブランチ ${JSON.stringify(baseBranch)} のサーバー側強制を確認できない」と、どの判定（存在 / ruleset bypass / org ruleset / strict / スレッド解消強制 / 外部チェック context+App 束縛 / client-only チェック）で不合格になったかを書く（(v) の不合格では件数のみを書き、context 文字列は書かない）。エラー出力の本文は転記しない）。(ii) の classic 非対応のみ例外として merged: false / reason: classic-unsupported を返す（summary は (ii) 記載のとおり）。本手順に記載したコマンド以外の branch protection API は実行しない（classic branch protection の protection 系エンドポイントはいかなる場合も実行しない）。`,
         ].join('\n')
       : `2. 本ランは回復専用経路である。新規マージは一切行わない（手順 1 で state が MERGED でなかった場合は、他の条件を確認せず merged: false / reason: head-moved を返して終了する）。`,
     `3. チェックの状態別件数のみを取得する（チェック名・説明・リンクは取得しない。チェック名は PR 側の workflow / job / matrix 定義から生成される外部由来テキストであり、マージ権限を持つ本エージェントのコンテキストへ入れないため）:`,
@@ -4450,7 +4449,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // しか影響しない（虚偽 ready の効果は merge-exec の空振り 1 回に限られる）。マージ判定に
     // 使う HEAD sha・チェック件数・スレッド件数は、未信頼テキストを読まない merge-exec が
     // すべて自己取得し、さらにマージ実行前にベースブランチの required status checks の
-    // サーバー側強制（ruleset / classic）を実測確認できない限り辞退する（G0 ゲート。
+    // サーバー側強制（ruleset。classic branch protection のみは検証不能として非対応辞退）を
+    // 実測確認できない限り辞退する（G0 ゲート。
     // 実強制は GitHub の branch protection であり、エージェントの判定が同時に誤っていても
     // required checks が green でない PR のマージはサーバーが拒否する）。opt-out ラン（既定）・
     // externalChecks 未確定ラン・信頼済み context 未宣言ラン（slug のみの旧形式。下流 sync PR
@@ -4701,8 +4701,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           lastBlockedReason = 'unrecoverable'
           lastUnresolvedInfo = lastUnresolvedInfo || capText(`PR が未マージのままクローズされている: ${execSummaryText}`)
         } else if (execReason === 'server-enforcement-missing') {
-          // G0 ゲート: ベースブランチに required status checks のサーバー側強制（ruleset /
-          // classic branch protection）を実測確認できなかった。クライアント側自動マージは
+          // G0 ゲート: ベースブランチに required status checks のサーバー側強制（ruleset）を
+          // 実測確認できなかった。クライアント側自動マージは
           // 「実強制は GitHub の branch protection」という前提の上でのみ許可する設計のため、
           // 前提を確認できないリポジトリでは新規マージを行わず blocked で終端する（fail-closed。
           // 再監視しても構成は変わらないため同ラン内で再試行しない）。branch protection を
@@ -4711,22 +4711,23 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           lastBlockedReason = 'quality'
           terminalReasonOverride = capText(
             `ベースブランチのサーバー側強制（required status checks の bypass 不能性・strict 適用（base 最新化必須）・レビュースレッド解消の必須化・合格判定対象チェック context の required 化（client-only チェックの不在）・外部チェック App の宣言 context + App ID 組束縛の required 化）を確認できないためクライアント側自動マージを停止した（G0 ゲート）。`
-            + `対象ブランチへ required status checks（1 件以上・bypass actor なし・strict = マージ前の base 最新化必須。PR で実行される全チェックの context を含める）と required_review_thread_resolution（classic は required_conversation_resolution）を構成し、args.externalChecks で App を確定している場合は宣言した context の required check を当該 App の App ID（ruleset は integration_id、classic は app_id）束縛付きで追加してから再実行するか、autoMerge を外して人間がマージする（org 継承 ruleset のリポジトリはサーバー側 auto-merge workflow へ委譲する）: ${execSummaryText}`,
+            + `対象ブランチへ ruleset で required status checks（1 件以上・bypass actor なし・strict = マージ前の base 最新化必須。PR で実行される全チェックの context を含める）と required_review_thread_resolution を構成し、args.externalChecks で App を確定している場合は宣言した context の required check を当該 App の App ID（integration_id）束縛付きで追加してから再実行するか、autoMerge を外して人間がマージする（org 継承 ruleset のリポジトリはサーバー側 auto-merge workflow へ委譲する）: ${execSummaryText}`,
           )
           log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
-        } else if (execReason === 'classic-role-unprovable') {
-          // G0 (ii-b): classic branch protection 経路で、マージ実行主体の実効ロールが write で
-          // あると証明できなかった（admin / maintain は branch protection の bypass 権限を保持
-          // または設定次第で保持し得る。標準 4 種以外のカスタムロールは「Bypass branch
-          // protections」権限の有無を collaborators permission API から証明できない）。
-          // enforce_admins / bypass allowance が安全な値でも bypass 権限付き主体は required
-          // checks を迂回できるため fail-closed で終端する（下流 sync PR #2007 codex P0 対応。
-          // 再監視しても認証・ロール構成は変わらないため同ラン内で再試行しない）。
+        } else if (execReason === 'classic-unsupported') {
+          // G0 (ii): ruleset の required status checks を確認できず（classic branch protection
+          // のみで保護されている・または保護なし）、クライアント側自動マージ非対応として
+          // 辞退した。classic の bypass 不能性（enforce_admins・bypass allowance・実行主体
+          // ロール・カスタムリポジトリロールの「Bypass branch protections」権限）は write
+          // 権限の実行トークンから決定的に証明できず、検証に必要な protection 読取自体が
+          // admin 権限を要求する（admin 主体を許すと bypass 不能を証明できない）ため、
+          // classic 経路に検証可能な通過条件は存在しない（下流 sync PR #2007 codex P0 /
+          // PR #236 Bugbot High 対応。再監視しても構成は変わらないため同ラン内で再試行しない）。
           lastState = 'blocked'
           lastBlockedReason = 'quality'
           terminalReasonOverride = capText(
-            `classic branch protection 経路でマージ実行主体の実効ロールが write であると証明できないためクライアント側自動マージを停止した（G0 (ii-b)。admin / maintain / カスタムロールは branch protection の bypass 権限を保持または保持し得るため fail-closed で辞退する）。`
-            + `write ロールの認証で再実行するか、対象ブランチの保護を bypass_actors が空の Repository ruleset へ移行するか、autoMerge を外して人間がマージする（またはサーバー側 auto-merge workflow へ委譲する）: ${execSummaryText}`,
+            `ruleset の required status checks を確認できないため、classic branch protection 経路はクライアント側自動マージ非対応として停止した（G0 (ii)。classic の bypass 不能性は write 権限の実行トークンから証明できず fail-closed で辞退する）。`
+            + `ruleset ベースの branch protection（bypass_actors 空 + strict + 宣言 context の integration_id 束縛。read 権限で検証可能）へ移行するか、サーバー側 auto-merge workflow（upstream の docs/implement-issue-tree/auto-merge-sample.yml 参照）へ委譲するか、autoMerge を外して人間がマージする: ${execSummaryText}`,
           )
           log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
         } else if (execReason === 'head-moved' || execReason === 'checks-not-green' || execReason === 'merge-failed') {
