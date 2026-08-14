@@ -27,8 +27,11 @@ Workflow の返却値（`done`・`failures`・`notStarted`）を確認し、`fai
 ```bash
 # 構文検証（このファイルはトップレベル await・トップレベル export を含む Workflow harness
 # 専用スクリプトのため、単純な node --check では harness 側の実行コンテキストを再現できず
-# 構文エラー扱いになる。async 関数でラップして export を除去したうえで検証する）
-sed 's/^export const meta/const meta/' scripts/implement-issue-tree.js > /tmp/iit-body.js
+# 構文エラー扱いになる。async 関数でラップしたうえで検証する。トップレベル export は
+# meta 以外にも parseExternalChecks・MERGE_EXEC_SCHEMA・MERGE_EXEC_VALID_REASONS・
+# classifyMergeExecDispatch・mergeExecutePrompt 等が存在し、関数本体の中に export を
+# 残すと node --check が構文エラーになるため、行頭 "export " を全件除去する）
+sed -E 's/^export //' scripts/implement-issue-tree.js > /tmp/iit-body.js
 { echo 'async function __wrap(){'; cat /tmp/iit-body.js; echo '}'; } > /tmp/iit-wrapped.mjs
 node --check /tmp/iit-wrapped.mjs
 
