@@ -1,5 +1,31 @@
 name: Update external sources
 
+# --------------------------------------------------------------------------
+# 外部 action の SHA 検証記録（検証日: 2026-08-16）
+# --------------------------------------------------------------------------
+# 本ファイルで uses に指定した全 SHA について、正規のリリースタグ / 正当な
+# upstream コミットと一致することを GitHub API で実測確認した。検証方法と結果:
+#
+#   actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+#     `GET /repos/actions/checkout/git/ref/tags/v6.0.3` → annotated tag object
+#     9f698171ed81b15d1823a05fc7211befd50c8ae0 を取得し、
+#     `GET /repos/actions/checkout/git/tags/9f69817...` で dereference した結果の
+#     commit SHA が df4cb1c... と一致。すなわち正規リリース v6.0.3 のタグ pin。
+#
+#   actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+#     `GET /repos/actions/setup-node/git/ref/tags/v6.4.0` → lightweight tag が
+#     直接 commit 48b55a0... を指しており一致。すなわち正規リリース v6.4.0 の
+#     タグ pin。
+#
+#   Fandhe-AI/actions@fed9c07d98367f77e5e2b63bca38843f46feee96
+#     `GET /repos/Fandhe-AI/actions/compare/fed9c07...main` → status "ahead",
+#     ahead_by=7, behind_by=0。すなわち fed9c07 は main の祖先であり、
+#     main は 7 コミット先行。タグ未公開のため main 追従の SHA pin となる。
+#
+# 上記 2 つの actions/* はブランチ追従ではなくリリースタグ pin である。
+# 追従元として `# main` と記載するのは事実に反するため記載しない。
+# --------------------------------------------------------------------------
+
 on:
   schedule:
     - cron: '0 0 * * *'   # 00:00 UTC = 09:00 JST
@@ -26,19 +52,44 @@ jobs:
   # --------------------------------------------------
   # submodule 参照の更新 (Fandhe-AI/actions/submodule-update)
   # --------------------------------------------------
-  # 現時点で本リポジトリに .gitmodules は無いが、将来 submodule を
-  # 追加した際にそのまま機能するよう team-hub と同一構成で用意する。
+  # 前提の確認事項: .gitmodules を持たないリポジトリでは本ジョブは実質 no-op に
+  # なる。一方、既に submodule を持つリポジトリ（docs / spec を特定コミットへ
+  # pin 固定している構成など）では、日次の submodule 自動更新が pin 運用と
+  # 衝突しうる。本テンプレートを採用する際は当該リポジトリの submodule 運用
+  # ポリシーを必ず確認し、pin 固定運用なら本ジョブを無効化するか
+  # workflow_dispatch 限定へ変更すること。
   submodule:
     name: Update submodule references
     if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "submodule"]'), inputs.target) }}
-    runs-on: ubuntu-latest
+    # 実行ランナーはリポジトリ変数 UPDATE_EXTERNAL_RUNNER で上書きできる。
+    # self-hosted ランナー必須のリポジトリは、Settings > Secrets and variables >
+    # Actions > Variables に UPDATE_EXTERNAL_RUNNER を追加し、値に自リポジトリの
+    # ランナーラベル（例: self-hosted）を設定するだけで規約を満たせる。
+    # 未設定のリポジトリは従来どおり GitHub ホステッドの ubuntu-latest で動く。
+    runs-on: ${{ vars.UPDATE_EXTERNAL_RUNNER || 'ubuntu-latest' }}
+    # 外部取得・submodule 更新・PR 作成の実処理量に見合う上限。ネットワーク
+    # ハングやリモート応答待ちでランナーを占有し続けるのを防ぐ。
+    timeout-minutes: 10
+    # 書き込みは下記ステップの PAT で行う。GITHUB_TOKEN へのフォールバックは
+    # 廃止済みのため、この permissions は PAT 不使用の派生構成向けの保険。
     permissions:
       contents: write
       pull-requests: write
     steps:
+      # PAT 未設定のまま後続へ進むと checkout の token が空文字となり、
+      # actions/checkout は暗黙に GITHUB_TOKEN へフォールバックする。それでは
+      # fail-open のままなので、checkout より前に明示的に fail-closed させる。
+      - name: Verify PAT is configured
+        env:
+          PAT: ${{ secrets.SUBMODULE_PAT }}
+        run: |
+          if [ -z "${PAT}" ]; then
+            echo "::error::SUBMODULE_PAT が未設定。GITHUB_TOKEN へのフォールバックは廃止済み（bot 作成 PR が pull_request workflow を発火させず必須チェック未実行で恒久 BLOCKED になるため。PR #176 の実障害）。リポジトリ or org の Secrets に SUBMODULE_PAT を登録すること。"
+            exit 1
+          fi
+
       - name: Checkout
-        # actions/checkout v6.0.3
-        # PAT 未設定時は GITHUB_TOKEN にフォールバック（auto-merge 後の CI 未発火に注意）。
+        # actions/checkout v6.0.3（リリースタグ pin。SHA 検証記録はファイル冒頭）
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           # base-branch が main 固定のため、workflow_dispatch で非 main ブランチから
@@ -46,13 +97,16 @@ jobs:
           ref: main
           submodules: recursive
           fetch-depth: 0
-          token: ${{ secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SUBMODULE_PAT }}
 
       - name: Update submodules and open PR
-        # Fandhe-AI/actions はタグ未作成のため最新コミット SHA に固定する。
+        # main
+        # Fandhe-AI/actions はタグ未公開のため main 追従の最新コミット SHA に固定
+        # する（fed9c07 が main の祖先であることを compare API で確認済み。
+        # 検証記録はファイル冒頭）。
         uses: Fandhe-AI/actions/submodule-update@fed9c07d98367f77e5e2b63bca38843f46feee96
         with:
-          token: ${{ secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SUBMODULE_PAT }}
           base-branch: main
           branch-prefix: chore/submodule-update
           commit-message: 'chore: submodule を最新に更新'
@@ -70,40 +124,76 @@ jobs:
   skills:
     name: Update agent skills
     if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "skill"]'), inputs.target) }}
-    runs-on: ubuntu-latest
+    # 実行ランナーはリポジトリ変数 UPDATE_EXTERNAL_RUNNER で上書きできる。
+    # self-hosted ランナー必須のリポジトリは、Settings > Secrets and variables >
+    # Actions > Variables に UPDATE_EXTERNAL_RUNNER を追加し、値に自リポジトリの
+    # ランナーラベル（例: self-hosted）を設定するだけで規約を満たせる。
+    # 未設定のリポジトリは従来どおり GitHub ホステッドの ubuntu-latest で動く。
+    runs-on: ${{ vars.UPDATE_EXTERNAL_RUNNER || 'ubuntu-latest' }}
+    # npx skills のダウンロード・全スキル更新・PR 作成の実処理量に見合う上限。
+    # submodule ジョブより取得対象が多いため長めに取る。
+    timeout-minutes: 15
+    # 書き込みは下記ステップの PAT で行う。GITHUB_TOKEN へのフォールバックは
+    # 廃止済みのため、この permissions は PAT 不使用の派生構成向けの保険。
     permissions:
       contents: write
       pull-requests: write
     steps:
+      # PAT 未設定のまま後続へ進むと checkout の token が空文字となり、
+      # actions/checkout は暗黙に GITHUB_TOKEN へフォールバックする。それでは
+      # fail-open のままなので、checkout より前に明示的に fail-closed させる。
+      - name: Verify PAT is configured
+        env:
+          PAT: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT }}
+        run: |
+          if [ -z "${PAT}" ]; then
+            echo "::error::SKILLS_PAT / SUBMODULE_PAT がいずれも未設定。GITHUB_TOKEN へのフォールバックは廃止済み（bot 作成 PR が pull_request workflow を発火させず必須チェック未実行で恒久 BLOCKED になるため。PR #176 の実障害）。リポジトリ or org の Secrets に SKILLS_PAT を登録すること。"
+            exit 1
+          fi
+
       - name: Checkout
-        # actions/checkout v6.0.3
-        # SKILLS_PAT 未設定時は org 共通の SUBMODULE_PAT を流用する。GITHUB_TOKEN まで
-        # フォールバックすると bot 作成 PR が pull_request workflow を発火させず
-        # 必須チェック未実行で BLOCKED になる（PR #176 の障害）。
+        # actions/checkout v6.0.3（リリースタグ pin。SHA 検証記録はファイル冒頭）
+        # SKILLS_PAT 未設定時は org 共通の SUBMODULE_PAT を流用する。GITHUB_TOKEN
+        # までフォールバックすると bot 作成 PR が pull_request workflow を発火させず
+        # 必須チェック未実行で BLOCKED になる（PR #176 の障害）ため、
+        # フォールバック連鎖は PAT 2 種で打ち止めとし、未設定なら上記ガードで落とす。
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           # base-branch が main 固定のため、workflow_dispatch で非 main ブランチから
           # 起動された場合でも常に main を checkout し、他ブランチのツリー混入を防ぐ。
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT }}
 
       - name: Setup Node.js
-        # actions/setup-node v6.4.0。skills-update が使う npx skills のため node を固定する。
+        # actions/setup-node v6.4.0（リリースタグ pin。SHA 検証記録はファイル冒頭）
+        # skills-update が使う npx skills のため node を固定する。
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: '20'
+          # メジャー指定 '20' は解決先パッチ版が日々変動し再現性がないため、
+          # 実在するパッチ版へ固定する。20.20.2 は Node.js 20 系 (LTS Iron) の
+          # 最新パッチであり、actions/node-versions の versions-manifest.json に
+          # 収録済みで setup-node が解決可能であることを実測確認済み（2026-08-16）。
+          node-version: '20.20.2'
 
       - name: Update skills and open PR
-        # Fandhe-AI/actions はタグ未作成のため最新コミット SHA に固定する。
+        # main
+        # Fandhe-AI/actions はタグ未公開のため main 追従の最新コミット SHA に固定
+        # する（fed9c07 が main の祖先であることを compare API で確認済み。
+        # 検証記録はファイル冒頭）。
         uses: Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96
         with:
-          token: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT }}
           base-branch: main
           branch-prefix: chore/skills-update
           commit-message: 'chore: エージェントスキルを最新に更新'
           pr-title: 'chore: エージェントスキルを最新に更新'
           pr-labels: 'dependencies,automated'
+          # skills CLI のバージョン固定。latest 追従だと上流リリースで挙動が
+          # 無告知に変わるため明示する。1.5.22 は固定時点の npm latest と同一
+          # （`npm view skills version` → 1.5.22 を 2026-08-16 に実測）であり、
+          # 本変更は挙動を変えずに「固定」だけを行う意図である。
+          skills-version: '1.5.22'
           # auto-merge の ON/OFF。未設定 (null/空) を有効と解釈する非対称設計のため、
           # 未設定時は明示的に 'false' へフォールバックしオプトイン運用とする。
           auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}
