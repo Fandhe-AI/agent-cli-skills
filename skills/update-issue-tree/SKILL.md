@@ -46,13 +46,22 @@ TREE_EDGES_FILE=$(mktemp -t update-issue-tree-edges.XXXXXX)
 # PARENT 直下の sub-issues を取得（ページネーション対応）し、エッジを記録して返す。
 # gh api が失敗した場合（認証・通信エラー等）は空応答を「sub-issue なし」と
 # 誤解釈しないよう、その場で非ゼロ終了する（呼び出し元は $? を検査すること）。
+# RECORD_EDGES（第2引数、既定 true）: Step 1 の初回ツリー構築でのみ true のまま呼び出し、
+# TREE_EDGES_FILE へエッジを記録する。Step 3 の付け替え確認 GET はこの関数を再利用するが
+# 都度 false を渡す。true のまま流用すると、確認 GET の結果が Step 1 のツリースナップショット
+# （41-43 行のコメント参照）に追記されてしまい、「TREE_EDGES_FILE は Step 1 の取得結果を
+# 正本とする」という不変条件を Step 3 自身が壊すため。
 fetch_sub_issues() {
   local PARENT="${1}"
+  local RECORD_EDGES="${2:-true}"
   local PAGE=1
+  local RESULT COUNT
   while true; do
     RESULT=$(gh api \
       "repos/{owner}/{repo}/issues/${PARENT}/sub_issues?per_page=100&page=${PAGE}") || return 1
-    echo "${RESULT}" | jq -r --arg parent "${PARENT}" '.[] | "\($parent) \(.number)"' >> "${TREE_EDGES_FILE}"
+    if [ "${RECORD_EDGES}" = "true" ]; then
+      echo "${RESULT}" | jq -r --arg parent "${PARENT}" '.[] | "\($parent) \(.number)"' >> "${TREE_EDGES_FILE}"
+    fi
     echo "${RESULT}"
     COUNT=$(echo "${RESULT}" | jq 'length')
     if [ "${COUNT}" -lt 100 ]; then break; fi
@@ -78,8 +87,10 @@ build_tree() {
     build_tree "${CHILD}" || return 1
   done
 }
-build_tree "${ROOT_NUMBER}"
+build_tree "${ROOT_NUMBER}" || exit 1
 ```
+
+`build_tree` が失敗（`fetch_sub_issues` の非ゼロ終了）した場合は Step 2 以降へ進まない。取得済みの不完全な `TREE_EDGES_FILE` を正本として親子判定を行うと、閉じた親の下の残置 issue を誤検出したり、Step 3 の付け替え判定が誤って `NEW_PARENT_IS_CURRENT` / `OLD_PARENT_IS_CURRENT` を確定させたりする恐れがあるため、ツリー取得の失敗はランを中断させて手動確認に回す。
 
 各 issue の `state`（open / closed）・ラベル・タイトルを記録してツリーマップを作成する。`TREE_EDGES_FILE` は Step 3 完了まで保持する（削除しない）。
 
@@ -169,17 +180,20 @@ fi
 # 付け替え後の確認: 新親の sub_issues に対象番号が現れ、旧親から消えていること。
 # Step 1 の fetch_sub_issues（per_page=100 ページ走査）を再利用し、gh api の終了コードも
 # 個別に検査する（認証・通信エラー等で空応答になった場合を「消えた」と誤判定しない）。
+# 第2引数に false を渡し TREE_EDGES_FILE への記録を無効化する（この確認 GET は
+# Step 1 のツリースナップショットを汚染しないよう読み取り専用で呼び出す。詳細は
+# fetch_sub_issues 定義のコメントを参照）。
 # 代入を `if ! VAR=$(cmd)` の条件式内で行う（`VAR=$(cmd)` を単独の行に置くと、
 # set -e 下では fetch_sub_issues 失敗時にこの行自体でシェルが即終了し、
 # 直後の `if [ $? -ne 0 ]` に到達できず FAILED_REASSIGNMENTS_LOG へ記録されない）。
-if ! NEW_PARENT_SUB_ISSUES=$(fetch_sub_issues "${NEW_PARENT}"); then
+if ! NEW_PARENT_SUB_ISSUES=$(fetch_sub_issues "${NEW_PARENT}" false); then
   echo "${ISSUE_NUMBER}: GET sub_issues for new parent #${NEW_PARENT} failed (confirmation skipped)" >> "${FAILED_REASSIGNMENTS_LOG}"
 else
   echo "${NEW_PARENT_SUB_ISSUES}" | jq -s 'add | .[].number' | grep -qx "${ISSUE_NUMBER}" \
     || echo "${ISSUE_NUMBER}: not found under new parent #${NEW_PARENT} after reassignment" >> "${FAILED_REASSIGNMENTS_LOG}"
 fi
 
-if ! OLD_PARENT_SUB_ISSUES=$(fetch_sub_issues "${OLD_PARENT}"); then
+if ! OLD_PARENT_SUB_ISSUES=$(fetch_sub_issues "${OLD_PARENT}" false); then
   echo "${ISSUE_NUMBER}: GET sub_issues for old parent #${OLD_PARENT} failed (confirmation skipped)" >> "${FAILED_REASSIGNMENTS_LOG}"
 else
   echo "${OLD_PARENT_SUB_ISSUES}" | jq -s 'add | .[].number' | grep -qx "${ISSUE_NUMBER}" \
