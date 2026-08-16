@@ -31,7 +31,20 @@ if (markerIndex < 0) {
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-defs-'))
 const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
-writeFileSync(slicePath, definitionPart)
+// 実装スクリプトは Workflow ランタイムの制約により `export const meta` 以外の top-level export を
+// 持てない（他に export があると起動時に SyntaxError: Unexpected keyword 'export' となり
+// スクリプト全体が実行不能になる）。そのため定義部は非 export のまま置き、テスト側で
+// 切り出したスライスへ export 文を付与して module として読み込む。
+const SLICE_EXPORTS = [
+  'parseExternalChecks',
+  'mergeExecutePrompt',
+  'classifyMergeExecDispatch',
+  'planForcedThreadRescan',
+  'reconcileRescueRoundState',
+  'MERGE_EXEC_SCHEMA',
+  'MERGE_EXEC_VALID_REASONS',
+]
+writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
 // args 未注入の import。駆動部の副作用がマーカーより上に混入していればここで失敗する。
 const mod = await import(pathToFileURL(slicePath).href)
@@ -287,4 +300,37 @@ test('classifyMergeExecDispatch: enum 外・欠落 reason は invalid-monitor-re
       `reason ${String(reason)} の遷移`,
     )
   }
+})
+
+// Workflow ランタイムは `export const meta` だけを特別扱いし、残りをスクリプト本体（module では
+// なく async 関数ボディ相当）として評価する。そのため meta 以外の top-level export が 1 つでもあると
+// 起動時に SyntaxError: Unexpected keyword 'export' となり、スキル全体が実行不能になる。
+// この回帰は #239 でテスト用 export を追加した際に混入し、下流 22 リポへ配布されるまで
+// 検知されなかった（起動しない限り誰も踏まないため）。
+//
+// 検査は正規表現による近似ではなく、ランタイムと同じ評価形態での構文解析で行う。行頭以外に
+// 置かれた `const x = 1; export function f() {}` のような形も、近似では取りこぼすが実際には
+// 同じ SyntaxError になるため、パースそのものを契約とする。
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+
+test('スクリプトが Workflow ランタイムの評価形態で構文解析できる（meta 以外の top-level export 禁止）', () => {
+  // meta 宣言の `export` だけをランタイムと同様に取り除く。残りに export が生きていれば必ず落ちる。
+  const withoutMeta = source.replace(/^export const meta\b/, 'const meta')
+  assert.notEqual(withoutMeta, source, '先頭の `export const meta` 宣言が見つからない')
+
+  // 近似検査。パースが落ちたときに該当行を指し示す診断用で、契約そのものではない。
+  const suspects = withoutMeta
+    .split('\n')
+    .map((line, index) => ({ line, lineNumber: index + 1 }))
+    .filter(({ line }) => /(^|[;{}()]\s*)export\b/.test(line))
+    .map(({ line, lineNumber }) => `${lineNumber}: ${line.trim().slice(0, 80)}`)
+
+  assert.doesNotThrow(
+    () => new AsyncFunction(withoutMeta),
+    (error) => error instanceof SyntaxError,
+    `Workflow ランタイムがスクリプトを受理しない。meta 以外の top-level export を置くと起動時に `
+      + `SyntaxError となりスキルが実行不能になる。テストから使いたい定義は export せずに置き、`
+      + `スライスへ export 文を付与する SLICE_EXPORTS 方式で読み込むこと。`
+      + `疑わしい行: ${suspects.length > 0 ? suspects.join(' / ') : '(検出なし)'}`,
+  )
 })
