@@ -650,7 +650,9 @@ function normalizeBlockedReason(raw) {
 // マージ実行エージェント（mergeExecutePrompt）の返却スキーマ（Issue #145）。このエージェントは
 // レビュー本文・Issue 本文を一切読まず、checks の結論・HEAD sha・未解決スレッド「数」のみを
 // 自ら再取得して検証し、条件充足時のみ merge / close を実行する。
-// export は g0-gates.test.mjs が reason enum を共有定数として参照するため（二重定義ドリフト防止）。
+// 非 export のまま定義する（Workflow ランタイムは meta 以外の top-level export を受理せず、
+// あると起動時 SyntaxError になる）。g0-gates.test.mjs はマーカーより上を切り出したスライスへ
+// export 文を付与して reason enum を共有定数として参照する（二重定義ドリフト防止）。
 const MERGE_EXEC_SCHEMA = {
   type: 'object',
   required: ['merged', 'reason', 'summary', 'issueClosed'],
@@ -1873,7 +1875,8 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, client
 // externalCheckEntries: 確定済み宣言（{ app, contexts } 配列。ホストの決定的パースで検証済み）。
 //   App ごとに件数ベースで独立検証し G0 (iv) が context + App ID の完全一致で照合。
 // allowMerge は args パースのみから導出。true = 新規マージ経路、false = 回復専用経路。
-// export は G0 ゲート回帰テスト（tests/g0-gates.test.mjs）がプロンプト契約を検証するため。
+// 非 export のまま定義する（理由は MERGE_EXEC_SCHEMA 側の注記と同じ）。G0 ゲート回帰テスト
+// （tests/g0-gates.test.mjs）はスライスへ付与した export 文経由でプロンプト契約を検証する。
 function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries) {
   const entries = Array.isArray(externalCheckEntries) ? externalCheckEntries : []
   // allowMerge=true の前提（宣言 App 全件が信頼済み context を持つ）はホスト側ゲートが保証済み。
@@ -2470,10 +2473,12 @@ function recoverImplementPrompt(item, brief, branch) {
 // この行より上（セクション 1〜5）は定義と決定的な引数パースのみで、外部コマンド・エージェント
 // 起動の副作用を持たない。本ファイルは Workflow ハーネス専用の文法（トップレベル return・注入
 // グローバル args / agent / log / phase）を含むため module としては丸ごと import できず、
-// skills/implement-issue-tree/tests/g0-gates.test.mjs はこのマーカーより上のみを切り出して import し、
-// export 済みの純粋関数・定数（parseExternalChecks / mergeExecutePrompt /
-// classifyMergeExecDispatch / MERGE_EXEC_SCHEMA / MERGE_EXEC_VALID_REASONS）を検証する。
-// このマーカーより下へ export 対象・テスト対象の定義を移動しないこと。
+// skills/implement-issue-tree/tests/g0-gates.test.mjs はこのマーカーより上のみを切り出し、
+// スライスへ export 文（SLICE_EXPORTS）を付与してから import する。実装側は非 export のまま
+// 置く必要がある（Workflow ランタイムは meta 以外の top-level export を受理しない）。
+// 検証対象は純粋関数・定数（parseExternalChecks / mergeExecutePrompt /
+// classifyMergeExecDispatch / MERGE_EXEC_SCHEMA / MERGE_EXEC_VALID_REASONS）。
+// このマーカーより下へテスト対象の定義を移動しないこと。
 // ============================================================================
 
 // parent の必須検証。定義部の `typeof args` ガードは parent=NaN の続行を許すため、ハーネス

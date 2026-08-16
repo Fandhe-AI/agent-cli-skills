@@ -308,10 +308,13 @@ test('classifyMergeExecDispatch: enum 外・欠落 reason は invalid-monitor-re
 // この回帰は #239 でテスト用 export を追加した際に混入し、下流 22 リポへ配布されるまで
 // 検知されなかった（起動しない限り誰も踏まないため）。テストで機械的に固定する。
 test('スクリプトの top-level export は meta 1 個だけ（Workflow ランタイム制約）', () => {
+  // `export ` の前方一致では ` export function`（先頭空白）や `export{...}`（空白なし）を
+  // 取りこぼす。いずれも Workflow ランタイムでは同じ SyntaxError を起こすため、識別子境界
+  // （\b）で検出して検査漏れを塞ぐ。
   const topLevelExports = source
     .split('\n')
     .map((line, index) => ({ line, lineNumber: index + 1 }))
-    .filter(({ line }) => line.startsWith('export '))
+    .filter(({ line }) => /^\s*export\b/.test(line))
 
   assert.deepEqual(
     topLevelExports.map(({ line, lineNumber }) => `${lineNumber}: ${line}`),
