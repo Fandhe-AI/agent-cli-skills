@@ -52,8 +52,11 @@ jobs:
   # --------------------------------------------------
   # submodule 参照の更新 (Fandhe-AI/actions/submodule-update)
   # --------------------------------------------------
-  # 前提の確認事項: .gitmodules を持たないリポジトリでは本ジョブは実質 no-op に
-  # なる。一方、既に submodule を持つリポジトリ（docs / spec を特定コミットへ
+  # 前提の確認事項: .gitmodules を持たないリポジトリでは、先頭の存在判定ステップが
+  # 以降の全ステップ（PAT 検証・checkout・更新）を skip し、本ジョブは成功で終わる。
+  # 更新対象が無いだけの既定構成を日次で失敗させないための明示的な skip であり、
+  # 「更新対象が無ければ何もしない」契約はここで担保される。
+  # 一方、既に submodule を持つリポジトリ（docs / spec を特定コミットへ
   # pin 固定している構成など）では、日次の submodule 自動更新が pin 運用と
   # 衝突しうる。本テンプレートを採用する際は当該リポジトリの submodule 運用
   # ポリシーを必ず確認し、pin 固定運用なら本ジョブを無効化するか
@@ -85,16 +88,77 @@ jobs:
     # 外部取得・submodule 更新・PR 作成の実処理量に見合う上限。ネットワーク
     # ハングやリモート応答待ちでランナーを占有し続けるのを防ぐ。
     timeout-minutes: 10
-    # 書き込みは下記ステップの PAT で行う。GITHUB_TOKEN へのフォールバックは
-    # 廃止済みのため、この permissions は PAT 不使用の派生構成向けの保険。
+    # 書き込み（push / PR 作成）は下記ステップの PAT で行う。書き込み用の
+    # GITHUB_TOKEN フォールバックは廃止済みのため、この permissions は PAT
+    # 不使用の派生構成向けの保険。なお先頭の存在判定ステップは GITHUB_TOKEN の
+    # contents: read だけを使う読み取り専用処理であり、廃止した書き込み用
+    # フォールバックには当たらない（詳細は当該ステップの注記）。
     permissions:
       contents: write
       pull-requests: write
     steps:
+      # .gitmodules の有無を checkout より前に判定する。無ければ以降の全ステップを
+      # skip し、ジョブは失敗ではなく成功で終える（更新対象が無いだけの既定構成を
+      # 日次で失敗させないため）。
+      #
+      # checkout 後に判定できない理由: それでは PAT 検証を checkout より後ろへ
+      # 動かすことになり、actions/checkout が token 空文字時に暗黙で GITHUB_TOKEN
+      # へフォールバックする分だけ fail-closed が名目だけになる。よって checkout
+      # せずに Contents API で直接参照する。
+      #
+      # ここで GITHUB_TOKEN を使うのは存在判定という読み取り専用用途に限られ、
+      # fail-open ではない。廃止したのは push / PR 作成に使う「書き込み用の
+      # GITHUB_TOKEN フォールバック」であり、本ステップはそれに当たらない。
+      # .gitmodules が存在する場合は従来どおり PAT 必須のまま。
+      #
+      # ref=main は下の Checkout の `ref:` および submodule-update の base-branch と
+      # 一致させること（判定対象と更新対象がずれると誤 skip / 誤実行になる）。
+      - name: Detect .gitmodules
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        # 他ステップと同様、self-hosted / Windows 割り当て時の既定 PowerShell を
+        # 避けるため POSIX シェルを明示する。
+        shell: bash
+        run: |
+          set -uo pipefail
+          # gh api は HTTP エラーを一律 exit 1 に潰すため、404（対象なし）と
+          # 通信・権限エラーを区別できない。HTTP status を直接取る curl を使う。
+          curl_status=0
+          http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${REPO}/contents/.gitmodules?ref=main") || curl_status=$?
+          if [ "${curl_status}" -ne 0 ]; then
+            echo "::error::.gitmodules の存在確認に失敗（curl 終了コード ${curl_status}）。"
+            exit 1
+          fi
+          # 200 / 404 のみを判定結果として受理する allowlist 方式。403・5xx 等を
+          # 「.gitmodules 無し」と誤読して黙って skip すると、本来動くべき更新が
+          # 無告知に止まるため、想定外 status は必ず失敗させる。
+          case "${http_code}" in
+            200)
+              echo "present=true" >> "${GITHUB_OUTPUT}"
+              echo "::notice::.gitmodules を検出。submodule 更新を実行する。"
+              ;;
+            404)
+              echo "present=false" >> "${GITHUB_OUTPUT}"
+              echo "::notice::.gitmodules 無しのため submodule 更新は no-op（skip）。"
+              ;;
+            *)
+              echo "::error::.gitmodules の存在確認が想定外の HTTP ${http_code} を返した。"
+              exit 1
+              ;;
+          esac
+
       # PAT 未設定のまま後続へ進むと checkout の token が空文字となり、
       # actions/checkout は暗黙に GITHUB_TOKEN へフォールバックする。それでは
       # fail-open のままなので、checkout より前に明示的に fail-closed させる。
+      # 更新対象が存在する場合にのみ要求する（対象なしは上の判定で skip 済み）。
       - name: Verify PAT is configured
+        if: steps.detect.outputs.present == 'true'
         env:
           PAT: ${{ secrets.SUBMODULE_PAT }}
         # self-hosted ランナー（特に Windows 割り当て時）の既定シェルは
@@ -112,17 +176,20 @@ jobs:
           fi
 
       - name: Checkout
+        if: steps.detect.outputs.present == 'true'
         # actions/checkout v6.0.3（リリースタグ pin。SHA 検証記録はファイル冒頭）
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           # base-branch が main 固定のため、workflow_dispatch で非 main ブランチから
           # 起動された場合でも常に main を checkout し、他ブランチのツリー混入を防ぐ。
+          # 上の Detect .gitmodules の ref=main と一致させること。
           ref: main
           submodules: recursive
           fetch-depth: 0
           token: ${{ secrets.SUBMODULE_PAT }}
 
       - name: Update submodules and open PR
+        if: steps.detect.outputs.present == 'true'
         # Fandhe-AI/actions はタグ未公開のため main 追従の最新コミット SHA に固定
         # する（fed9c07 が main の祖先であることを compare API で確認済み。
         # 検証記録はファイル冒頭）。行末の `# main` が追従元ブランチを示す。
@@ -143,6 +210,15 @@ jobs:
   # --------------------------------------------------
   # Skills の更新 (Fandhe-AI/actions/skills-update)
   # --------------------------------------------------
+  # submodule ジョブのような「対象なしなら skip」の事前判定を本ジョブに入れて
+  # いないのは意図的である。submodule では .gitmodules の不在が「更新対象なし」の
+  # 完全な述語になる（git が走査する対象そのものが無い）。一方 skills には同等の
+  # 事前判定材料が無い。skills-lock.json の不在は「更新対象なし」を意味せず、
+  # skills-update 側は lock 不在時に `::warning::skills-lock.json が見つかりません`
+  # を出して `{}` を before として処理を続行し、`npx skills` は導入済みスキル
+  # ディレクトリを対象に更新する。したがって skills-lock.json で門番すると、
+  # 本来成功する更新を無告知の skip に変えてしまう（fail-open の別形態）。
+  # 対称性より「黙って止まらないこと」を優先し、本ジョブは PAT 必須のままとする。
   skills:
     name: Update agent skills
     if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "skill"]'), inputs.target) }}
