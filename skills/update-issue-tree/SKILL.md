@@ -38,13 +38,15 @@ update-issue-tree 42
 ```bash
 ROOT_NUMBER="<ルート issue 番号>"
 
-# ルート直下の sub-issues を取得（ページネーション対応）
+# ルート直下の sub-issues を取得（ページネーション対応）。
+# gh api が失敗した場合（認証・通信エラー等）は空応答を「sub-issue なし」と
+# 誤解釈しないよう、その場で非ゼロ終了する（呼び出し元は $? を検査すること）。
 fetch_sub_issues() {
   local PARENT="${1}"
   local PAGE=1
   while true; do
     RESULT=$(gh api \
-      "repos/{owner}/{repo}/issues/${PARENT}/sub_issues?per_page=100&page=${PAGE}")
+      "repos/{owner}/{repo}/issues/${PARENT}/sub_issues?per_page=100&page=${PAGE}") || return 1
     echo "${RESULT}"
     COUNT=$(echo "${RESULT}" | jq 'length')
     if [ "${COUNT}" -lt 100 ]; then break; fi
@@ -76,14 +78,27 @@ fetch_sub_issues "${ROOT_NUMBER}"
 
 closed 親の下に残置されている open issue を、対応する open Phase 親へ移動する。
 
-対象 issue が Step 1 で取得済みのツリーマップ上で `OLD_PARENT` の直下に**居るか**をまず確認する（`GET .../sub_issues` を新規に叩き直さない。ページネーションを再度踏むため、Step 1 の全件取得結果を正とする）。
+Step 3 のループへ入る前に、失敗記録用のログファイルを一度だけ初期化する（未初期化のまま `>>` すると空リダイレクトになり DELETE/POST の失敗を記録できず、シェルによっては `set -e` 下で中断し得る）。
 
-- 直下に**居る場合**: DELETE を実行する。失敗したら POST へ進まず、その issue を失敗リストへ記録して次の issue へ進む（`OLD_PARENT_IS_CURRENT=true` の分岐）
-- 直下に**居ない場合**（前回ラン途中断等で既に外れている）: DELETE を skip して POST のみ実行する（`OLD_PARENT_IS_CURRENT=false` の分岐。冪等な修復）
+```bash
+# Step 3 の per-issue ループ開始前に一度だけ実行する
+FAILED_REASSIGNMENTS_LOG=$(mktemp -t update-issue-tree-failed.XXXXXX)
+```
+
+対象 issue が Step 1 で取得済みのツリーマップ上で `OLD_PARENT` の直下に**居るか**、および既に `NEW_PARENT` の直下に**居るか**をまず確認する（`GET .../sub_issues` を新規に叩き直さない。ページネーションを再度踏むため、Step 1 の全件取得結果を正とする）。
+
+- 既に `NEW_PARENT` 直下に**居る場合**: 前回ランで DELETE/POST とも完了済みとみなし、DELETE・POST の両方を skip して次の issue へ進む（`NEW_PARENT_IS_CURRENT=true` の分岐。再実行を失敗扱いしない冪等な早期終了）
+- `NEW_PARENT` 直下に**居らず**、`OLD_PARENT` 直下に**居る場合**: DELETE を実行する。失敗したら POST へ進まず、その issue を失敗リストへ記録して次の issue へ進む（`OLD_PARENT_IS_CURRENT=true` の分岐）
+- `NEW_PARENT` 直下にも `OLD_PARENT` 直下にも**居ない場合**（前回ラン途中断等で DELETE のみ完了し POST 未実行）: DELETE を skip して POST のみ実行する（`OLD_PARENT_IS_CURRENT=false` の分岐。冪等な修復）
 
 ```bash
 # sub_issue_id は issue 番号ではなく database id を渡す（GitHub sub-issues API 仕様）
 ISSUE_ID=$(gh api "repos/{owner}/{repo}/issues/${ISSUE_NUMBER}" --jq '.id')
+
+if [ "${NEW_PARENT_IS_CURRENT}" = "true" ]; then
+  # Step 1 のツリーマップ上で既に新親配下 → 前回ランで完了済み。DELETE/POST とも不要
+  continue
+fi
 
 if [ "${OLD_PARENT_IS_CURRENT}" = "true" ]; then
   # 既存の親から外す。sub_issues API はエンドポイントが追加/削除で非対称。
@@ -112,12 +127,27 @@ if ! gh api \
   continue
 fi
 
-# 付け替え後の確認: 新親の sub_issues に対象番号が現れ、旧親から消えていること
-gh api "repos/{owner}/{repo}/issues/${NEW_PARENT}/sub_issues" --jq '.[].number' | grep -qx "${ISSUE_NUMBER}" \
-  || echo "${ISSUE_NUMBER}: not found under new parent #${NEW_PARENT} after reassignment" >> "${FAILED_REASSIGNMENTS_LOG}"
-gh api "repos/{owner}/{repo}/issues/${OLD_PARENT}/sub_issues" --jq '.[].number' | grep -qx "${ISSUE_NUMBER}" \
-  && echo "${ISSUE_NUMBER}: still present under old parent #${OLD_PARENT} after reassignment" >> "${FAILED_REASSIGNMENTS_LOG}"
+# 付け替え後の確認: 新親の sub_issues に対象番号が現れ、旧親から消えていること。
+# Step 1 の fetch_sub_issues（per_page=100 ページ走査）を再利用し、gh api の終了コードも
+# 個別に検査する（認証・通信エラー等で空応答になった場合を「消えた」と誤判定しない）。
+NEW_PARENT_SUB_ISSUES=$(fetch_sub_issues "${NEW_PARENT}")
+if [ $? -ne 0 ]; then
+  echo "${ISSUE_NUMBER}: GET sub_issues for new parent #${NEW_PARENT} failed (confirmation skipped)" >> "${FAILED_REASSIGNMENTS_LOG}"
+else
+  echo "${NEW_PARENT_SUB_ISSUES}" | jq -s 'add | .[].number' | grep -qx "${ISSUE_NUMBER}" \
+    || echo "${ISSUE_NUMBER}: not found under new parent #${NEW_PARENT} after reassignment" >> "${FAILED_REASSIGNMENTS_LOG}"
+fi
+
+OLD_PARENT_SUB_ISSUES=$(fetch_sub_issues "${OLD_PARENT}")
+if [ $? -ne 0 ]; then
+  echo "${ISSUE_NUMBER}: GET sub_issues for old parent #${OLD_PARENT} failed (confirmation skipped)" >> "${FAILED_REASSIGNMENTS_LOG}"
+else
+  echo "${OLD_PARENT_SUB_ISSUES}" | jq -s 'add | .[].number' | grep -qx "${ISSUE_NUMBER}" \
+    && echo "${ISSUE_NUMBER}: still present under old parent #${OLD_PARENT} after reassignment" >> "${FAILED_REASSIGNMENTS_LOG}"
+fi
 ```
+
+Step 3 完了後、`${FAILED_REASSIGNMENTS_LOG}` の内容を確認し、失敗・要確認として記録された issue をユーザーへ報告する。
 
 ### Step 4: 孤児 issue を再配置する
 
