@@ -43,8 +43,20 @@ const SLICE_EXPORTS = [
   'reconcileRescueRoundState',
   'MERGE_EXEC_SCHEMA',
   'MERGE_EXEC_VALID_REASONS',
+  'implementPrompt',
+  'fixPrompt',
+  'recoverImplementPrompt',
 ]
-writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
+// fixPrompt は boundaryNonce()（未信頼データの境界トークン生成）を内部で使う。本番では
+// ensureBoundaryNonceSeed() が agent() 経由で乱数 seed を注入してから呼ばれるが、agent は
+// このスライスに未注入のため、テスト専用の setter を同一モジュールスコープへ追記して
+// 非 export の module-scope let（boundaryNonceSeed）へ疑似乱数値を直接注入する。
+const TEST_ONLY_SETTER =
+  'export function __setBoundaryNonceSeedForTest(v) { boundaryNonceSeed = v }\n'
+writeFileSync(
+  slicePath,
+  `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n${TEST_ONLY_SETTER}`,
+)
 
 // args 未注入の import。駆動部の副作用がマーカーより上に混入していればここで失敗する。
 const mod = await import(pathToFileURL(slicePath).href)
@@ -54,6 +66,9 @@ const {
   classifyMergeExecDispatch,
   MERGE_EXEC_SCHEMA,
   MERGE_EXEC_VALID_REASONS,
+  implementPrompt,
+  fixPrompt,
+  recoverImplementPrompt,
 } = mod
 
 // mergeExecutePrompt へ渡す最小フィクスチャ（プロンプトは番号のみを参照する）。
@@ -324,3 +339,39 @@ test('classifyMergeExecDispatch: enum 外・欠落 reason は invalid-monitor-re
 // 判定ロジックの実装は lib/workflow-script-contract.mjs の単一箇所に置き、CI テストと
 // 履歴実測 CLI（references/verification.md 参照）の双方がそれを使う。本ファイルでは
 // パーステストを重複させない。
+
+// ---------------------------------------------------------------------------
+// commitlint 事前確認指示（Issue #290: scope にイシュー番号を置くと commitlint の
+// scope-enum で必ず落ちる問題への対策）。実装コミット・fix コミット双方のプロンプトが
+// 同じ確認手順を出力することを軽量に固定する回帰テスト。
+// ---------------------------------------------------------------------------
+
+const COMMITLINT_MARKERS = ['commitlint', 'scope-enum', 'scope にイシュー番号を置かない', 'Refs #']
+
+test('implementPrompt: commitlint 事前確認の指示（scope にイシュー番号を置かない）を含む', () => {
+  const prompt = implementPrompt(item, { steps: ['noop'] })
+  for (const marker of COMMITLINT_MARKERS) {
+    assert.ok(prompt.includes(marker), `implementPrompt に "${marker}" が含まれない`)
+  }
+})
+
+test('recoverImplementPrompt: commitlint 事前確認の指示を含む', () => {
+  const prompt = recoverImplementPrompt(item, { done: [], remaining: [], broken: [] }, 'fix/42-noop')
+  for (const marker of COMMITLINT_MARKERS) {
+    assert.ok(prompt.includes(marker), `recoverImplementPrompt に "${marker}" が含まれない`)
+  }
+})
+
+test('fixPrompt: pushAfterFix の両分岐で commitlint 事前確認の指示を含む', () => {
+  // fixPrompt は boundaryNonce() を内部で使うため、テスト専用 setter で seed を注入する
+  // （本番では ensureBoundaryNonceSeed() がラン開始時に 1 回だけ行う）。
+  mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
+  const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
+  const implWithBranch = { ...impl, branch: 'fix/42-noop' }
+  const pushPrompt = fixPrompt(item, implWithBranch, finding, true)
+  const noPushPrompt = fixPrompt(item, implWithBranch, finding, false)
+  for (const marker of COMMITLINT_MARKERS) {
+    assert.ok(pushPrompt.includes(marker), `pushAfterFix=true の fixPrompt に "${marker}" が含まれない`)
+    assert.ok(noPushPrompt.includes(marker), `pushAfterFix=false の fixPrompt に "${marker}" が含まれない`)
+  }
+})
