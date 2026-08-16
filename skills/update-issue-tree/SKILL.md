@@ -38,7 +38,12 @@ update-issue-tree 42
 ```bash
 ROOT_NUMBER="<ルート issue 番号>"
 
-# ルート直下の sub-issues を取得（ページネーション対応）。
+# ツリーマップの正本。"PARENT CHILD" を 1 行ずつ記録する（issue 番号同士の親子エッジ）。
+# Step 3 の NEW_PARENT_IS_CURRENT / OLD_PARENT_IS_CURRENT はこのファイルを参照して
+# 判定する（API を叩き直さない。ページネーションを再度踏まないため）。
+TREE_EDGES_FILE=$(mktemp -t update-issue-tree-edges.XXXXXX)
+
+# PARENT 直下の sub-issues を取得（ページネーション対応）し、エッジを記録して返す。
 # gh api が失敗した場合（認証・通信エラー等）は空応答を「sub-issue なし」と
 # 誤解釈しないよう、その場で非ゼロ終了する（呼び出し元は $? を検査すること）。
 fetch_sub_issues() {
@@ -47,6 +52,7 @@ fetch_sub_issues() {
   while true; do
     RESULT=$(gh api \
       "repos/{owner}/{repo}/issues/${PARENT}/sub_issues?per_page=100&page=${PAGE}") || return 1
+    echo "${RESULT}" | jq -r --arg parent "${PARENT}" '.[] | "\($parent) \(.number)"' >> "${TREE_EDGES_FILE}"
     echo "${RESULT}"
     COUNT=$(echo "${RESULT}" | jq 'length')
     if [ "${COUNT}" -lt 100 ]; then break; fi
@@ -54,11 +60,19 @@ fetch_sub_issues() {
   done
 }
 
-# ルートから再帰的にツリーを構築
-fetch_sub_issues "${ROOT_NUMBER}"
+# ルートから再帰的にツリー全階層を構築する（子の子も辿る）。
+build_tree() {
+  local PARENT="${1}"
+  local CHILDREN
+  CHILDREN=$(fetch_sub_issues "${PARENT}" | jq -s 'add | .[].number') || return 1
+  for CHILD in ${CHILDREN}; do
+    build_tree "${CHILD}" || return 1
+  done
+}
+build_tree "${ROOT_NUMBER}"
 ```
 
-各 issue の `state`（open / closed）・ラベル・タイトルを記録してツリーマップを作成する。
+各 issue の `state`（open / closed）・ラベル・タイトルを記録してツリーマップを作成する。`TREE_EDGES_FILE` は Step 3 完了まで保持する（削除しない）。
 
 ### Step 2: 棚卸し対象を特定する
 
@@ -85,7 +99,7 @@ Step 3 のループへ入る前に、失敗記録用のログファイルを一�
 FAILED_REASSIGNMENTS_LOG=$(mktemp -t update-issue-tree-failed.XXXXXX)
 ```
 
-対象 issue が Step 1 で取得済みのツリーマップ上で `OLD_PARENT` の直下に**居るか**、および既に `NEW_PARENT` の直下に**居るか**をまず確認する（`GET .../sub_issues` を新規に叩き直さない。ページネーションを再度踏むため、Step 1 の全件取得結果を正とする）。
+対象 issue が Step 1 で取得済みのツリーマップ（`TREE_EDGES_FILE`）上で `OLD_PARENT` の直下に**居るか**、および既に `NEW_PARENT` の直下に**居るか**をまず確認する（`GET .../sub_issues` を新規に叩き直さない。ページネーションを再度踏むため、Step 1 の全件取得結果を正とする）。
 
 - 既に `NEW_PARENT` 直下に**居る場合**: 前回ランで DELETE/POST とも完了済みとみなし、DELETE・POST の両方を skip して次の issue へ進む（`NEW_PARENT_IS_CURRENT=true` の分岐。再実行を失敗扱いしない冪等な早期終了）
 - `NEW_PARENT` 直下に**居らず**、`OLD_PARENT` 直下に**居る場合**: DELETE を実行する。失敗したら POST へ進まず、その issue を失敗リストへ記録して次の issue へ進む（`OLD_PARENT_IS_CURRENT=true` の分岐）
@@ -94,6 +108,22 @@ FAILED_REASSIGNMENTS_LOG=$(mktemp -t update-issue-tree-failed.XXXXXX)
 ```bash
 # sub_issue_id は issue 番号ではなく database id を渡す（GitHub sub-issues API 仕様）
 ISSUE_ID=$(gh api "repos/{owner}/{repo}/issues/${ISSUE_NUMBER}" --jq '.id')
+
+# NEW_PARENT_IS_CURRENT / OLD_PARENT_IS_CURRENT は Step 1 の TREE_EDGES_FILE から
+# 都度算出する（未初期化のまま参照しない。前回イテレーションの値を持ち越さない）。
+# TREE_EDGES_FILE 自体が読めない場合（想定外の破損・削除等）は判定不能として
+# fail-closed し、DELETE・POST とも実行せず失敗リストへ記録して次の issue へ進む。
+NEW_PARENT_IS_CURRENT=false
+OLD_PARENT_IS_CURRENT=false
+if [ ! -r "${TREE_EDGES_FILE}" ]; then
+  echo "${ISSUE_NUMBER}: TREE_EDGES_FILE unreadable, parent membership undetermined (fail-closed, skip)" >> "${FAILED_REASSIGNMENTS_LOG}"
+  continue
+fi
+if grep -qx "${NEW_PARENT} ${ISSUE_NUMBER}" "${TREE_EDGES_FILE}"; then
+  NEW_PARENT_IS_CURRENT=true
+elif grep -qx "${OLD_PARENT} ${ISSUE_NUMBER}" "${TREE_EDGES_FILE}"; then
+  OLD_PARENT_IS_CURRENT=true
+fi
 
 if [ "${NEW_PARENT_IS_CURRENT}" = "true" ]; then
   # Step 1 のツリーマップ上で既に新親配下 → 前回ランで完了済み。DELETE/POST とも不要
@@ -130,16 +160,17 @@ fi
 # 付け替え後の確認: 新親の sub_issues に対象番号が現れ、旧親から消えていること。
 # Step 1 の fetch_sub_issues（per_page=100 ページ走査）を再利用し、gh api の終了コードも
 # 個別に検査する（認証・通信エラー等で空応答になった場合を「消えた」と誤判定しない）。
-NEW_PARENT_SUB_ISSUES=$(fetch_sub_issues "${NEW_PARENT}")
-if [ $? -ne 0 ]; then
+# 代入を `if ! VAR=$(cmd)` の条件式内で行う（`VAR=$(cmd)` を単独の行に置くと、
+# set -e 下では fetch_sub_issues 失敗時にこの行自体でシェルが即終了し、
+# 直後の `if [ $? -ne 0 ]` に到達できず FAILED_REASSIGNMENTS_LOG へ記録されない）。
+if ! NEW_PARENT_SUB_ISSUES=$(fetch_sub_issues "${NEW_PARENT}"); then
   echo "${ISSUE_NUMBER}: GET sub_issues for new parent #${NEW_PARENT} failed (confirmation skipped)" >> "${FAILED_REASSIGNMENTS_LOG}"
 else
   echo "${NEW_PARENT_SUB_ISSUES}" | jq -s 'add | .[].number' | grep -qx "${ISSUE_NUMBER}" \
     || echo "${ISSUE_NUMBER}: not found under new parent #${NEW_PARENT} after reassignment" >> "${FAILED_REASSIGNMENTS_LOG}"
 fi
 
-OLD_PARENT_SUB_ISSUES=$(fetch_sub_issues "${OLD_PARENT}")
-if [ $? -ne 0 ]; then
+if ! OLD_PARENT_SUB_ISSUES=$(fetch_sub_issues "${OLD_PARENT}"); then
   echo "${ISSUE_NUMBER}: GET sub_issues for old parent #${OLD_PARENT} failed (confirmation skipped)" >> "${FAILED_REASSIGNMENTS_LOG}"
 else
   echo "${OLD_PARENT_SUB_ISSUES}" | jq -s 'add | .[].number' | grep -qx "${ISSUE_NUMBER}" \
