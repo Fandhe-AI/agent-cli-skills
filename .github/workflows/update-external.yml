@@ -144,6 +144,22 @@ jobs:
               echo "::notice::.gitmodules を検出。submodule 更新を実行する。"
               ;;
             404)
+              # 404 は「.gitmodules が無い」と「ref main 自体が存在しない」の
+              # 両方で返る。後者を no-op と誤読すると、既定ブランチが main では
+              # ないリポジトリで更新が黙って止まる（従来は checkout が
+              # `couldn't find remote ref main` で明示的に失敗していた）。
+              # 応答本文の文字列照合は脆いため、ref の解決可否を別途問い合わせて
+              # 判別し、解決できない場合は skip せず失敗させる。
+              ref_status=0
+              ref_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "${GITHUB_API_URL}/repos/${REPO}/commits/main") || ref_status=$?
+              if [ "${ref_status}" -ne 0 ] || [ "${ref_code}" != "200" ]; then
+                echo "::error::ref main を解決できない（curl ${ref_status} / HTTP ${ref_code}）。"
+                exit 1
+              fi
               echo "present=false" >> "${GITHUB_OUTPUT}"
               echo "::notice::.gitmodules 無しのため submodule 更新は no-op（skip）。"
               ;;
