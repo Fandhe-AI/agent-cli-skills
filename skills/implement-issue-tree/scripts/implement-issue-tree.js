@@ -743,7 +743,7 @@ export function planForcedThreadRescan(monitorsLeft, rescueUsed) {
   return { monitorsLeft, rescueUsed, granted: false }
 }
 
-// planForcedThreadRescan が延長した「救済ラウンド」の結果を終端分類へ写像する判定。
+// planForcedThreadRescan が延長した「救済ラウンド」の結果をどう終端させるかの判定。
 // 同じくハーネス非依存の純粋関数として切り出す（tests/merge-loop-rescan.test.mjs）。
 //
 // 呼び出し文脈: 予算枯渇時に 1 枠だけ延長して走らせた再走査ラウンドの monitor 結果を
@@ -751,24 +751,30 @@ export function planForcedThreadRescan(monitorsLeft, rescueUsed) {
 //
 // 解決する問題: 延長した枠は残り予算ゼロなので、その回の結果がそのまま終端 state になる。
 // 救済ラウンドが 'timeout'（＝スレッド内容を観測できないまま監視上限に到達）で返ると
-// lastState が 'unresolved-comments' から 'timeout' へ上書きされ、terminalStatus が
-// blocked（halt 非カウント・次ラン monitoring 再開）から failed（halt カウント・再開対象外）
-// へ化ける。延長を入れる前の同じケースは blocked で終端していたため、これは救済機構が
-// 持ち込んだ回帰である（Fandhe-AI/rust-ai-library#681 の Bugbot 指摘）。
+// terminalStatus が blocked（halt 非カウント・次ラン monitoring 再開）から failed
+// （halt カウント・再開対象外）へ化ける。延長を入れる前の同じケースは blocked で終端して
+// いたため、これは救済機構が持ち込んだ回帰である（Fandhe-AI/rust-ai-library#681）。
+//
+// lastState を 'unresolved-comments' へ書き換える方法を採らない理由: その値は fix ループを
+// 起動する状態でもあるため、書き換えると制御が fix 分岐へ流れ、timeout の finding で fix が
+// 走って monitorsLeft が積み増され、狙った blocked 終端に到達しない。無効な fix 結果は既定の
+// failed 終端になり、直そうとした halt カウント回帰がそのまま再現する
+// （Fandhe-AI/agent-cli-skills#246 への Bugbot High 指摘）。よって state は 'timeout' の
+// まま触らず、「即座にループを抜けて終端 status だけを品質ブロックへ分類する」指示を返す。
 //
 // 契約:
-//   - 救済ラウンド直後かつ結果が 'timeout' のときだけ 'unresolved-comments' へ戻す。
+//   - 救済ラウンド直後かつ結果が 'timeout' のときだけ terminate / qualityBlock を立てる。
 //     救済は「未解決スレッドの内容を取り直すための追加試行」であり、観測に失敗しても
 //     「未解決スレッドが残っている」という元の品質ブロックの事実は変わらない
-//   - 'ready' / 'needs-fix' / 'blocked' 等の有意な結果は上書きしない（観測が成立した
-//     以上、その判定を尊重する）
+//   - 'ready' / 'needs-fix' / 'blocked' 等の有意な結果では何もしない（観測が成立した以上、
+//     その判定と通常の分岐処理を尊重する）
 //   - pending は常に false へ落とす（救済は 1 回限りで、次ラウンド以降へ持ち越さない）
-// 戻り値の lastState / rescuePending は呼び出し元の同名変数へそのまま代入して使う。
+// 戻り値の rescuePending は呼び出し元の同名変数へそのまま代入して使う。
 export function reconcileRescueRoundState(lastState, rescuePending) {
   if (rescuePending && lastState === 'timeout') {
-    return { lastState: 'unresolved-comments', rescuePending: false, restored: true }
+    return { terminate: true, qualityBlock: true, rescuePending: false }
   }
-  return { lastState, rescuePending: false, restored: false }
+  return { terminate: false, qualityBlock: false, rescuePending: false }
 }
 
 // マージ独立確認エージェント（mergeVerifyPrompt）の返却スキーマ（Issue #160）。merge-exec の
@@ -3430,9 +3436,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // 判定は planForcedThreadRescan（純粋関数・回帰テスト対象）に委ねる。
   let forceThreadRescanBudgetUsed = false
   // 直前に救済延長した枠を消費中かを示す。延長した回は残り予算ゼロのため、その結果が
-  // そのまま終端 state になる。timeout（観測不能）で終わった場合に元の品質ブロックへ
-  // 戻す判定は reconcileRescueRoundState（純粋関数・回帰テスト対象）に委ねる。
+  // そのまま終端 state になる。timeout（観測不能）で終わった場合の扱いは
+  // reconcileRescueRoundState（純粋関数・回帰テスト対象）に委ねる。
   let rescueRoundPending = false
+  // 救済ラウンドが観測に失敗して終端したことを示す。lastState は 'timeout' のまま残す
+  // （実際に観測できなかったのは事実であり、終端理由の記録としては正しい）が、終端 status
+  // の分類だけは元の未解決スレッド由来の品質ブロックとして blocked にする。
+  let rescueTimeoutQualityBlock = false
   // 一過性 reason（head-moved / checks-not-green / merge-failed）で merge-exec がマージを見送った
   // 直近の理由（sanitize 済み）。timeout 終端時の note に残し「CI green・理由不明」を防ぐ。
   let lastExecDeferralNote = ''
@@ -3481,16 +3491,19 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       log(`#${item.number}: 監視エージェントが非推奨の state: merged を返した。ready として扱いマージ実行エージェントで再検証する`)
       lastState = 'ready'
     }
-    // 救済延長した枠で走ったラウンドは、観測に失敗（timeout）しても元の品質ブロック
-    // （unresolved-comments）へ戻す。延長枠は残り予算ゼロで即終端するため、ここで写像しないと
-    // blocked が failed へ化けて halt にカウントされる（rust-ai-library#681 の Bugbot 指摘）。
+    // 救済延長した枠で走ったラウンドが観測に失敗（timeout）した場合は、fix 分岐へ入れず
+    // ここで終端させ、終端 status だけを品質ブロックへ分類する。延長枠は残り予算ゼロで
+    // 即終端するため、ここで分類しないと blocked が failed へ化けて halt にカウントされる
+    // （rust-ai-library#681）。lastState を書き換えないのは、'unresolved-comments' が fix
+    // 起動状態でもあり、書き換えると fix が走って狙った終端に届かないため（#246 の指摘）。
     if (rescueRoundPending) {
       const reconciled = reconcileRescueRoundState(lastState, rescueRoundPending)
-      if (reconciled.restored) {
-        log(`#${item.number}: 救済ラウンドが timeout で終わったため、未解決スレッド由来の品質ブロック（unresolved-comments）として終端させる`)
-      }
-      lastState = reconciled.lastState
       rescueRoundPending = reconciled.rescuePending
+      if (reconciled.terminate) {
+        rescueTimeoutQualityBlock = reconciled.qualityBlock
+        log(`#${item.number}: 救済ラウンドがスレッド内容を観測できないまま timeout したため、未解決スレッド由来の品質ブロックとして終端させる（次回実行で monitoring 再開の対象）`)
+        break
+      }
     }
     // 強制再走査フラグは monitor が手順 5 の走査を実行したラウンド（unresolved-comments / ready）
     // で解除する。needs-fix / timeout / blocked では持ち越す（走査未実施の可能性が残るため）。
@@ -3952,10 +3965,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // 分類すると halt 防御を回避する）。mergedButIssueOpen は回復可能なため 'blocked'。blocked は
     // blockedReason 'quality' のときだけ 'blocked' 終端（'unrecoverable' を blocked + pr で終端
     // すると毎ラン再開で halt 防御を迂回するため 'failed' へ落とす）。'unresolved-comments' は
-    // 定義上つねに品質ブロック。
+    // 定義上つねに品質ブロック。rescueTimeoutQualityBlock は救済ラウンドが観測に失敗した
+    // ケースで、lastState は 'timeout' のままだが実体は未解決スレッド由来の品質ブロック
+    // （救済機構を入れる前は 'unresolved-comments' として blocked 終端していた）。
     const blockedIsRecoverable = lastState === 'blocked' && lastBlockedReason === 'quality'
     const terminalStatus =
-      !routingErrorDetected && (mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments')
+      !routingErrorDetected
+      && (mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments' || rescueTimeoutQualityBlock)
         ? 'blocked'
         : 'failed'
     if (lastState === 'blocked') {
