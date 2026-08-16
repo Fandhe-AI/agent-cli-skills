@@ -76,21 +76,47 @@ fetch_sub_issues "${ROOT_NUMBER}"
 
 closed 親の下に残置されている open issue を、対応する open Phase 親へ移動する。
 
+対象 issue が Step 1 で取得済みのツリーマップ上で `OLD_PARENT` の直下に**居るか**をまず確認する（`GET .../sub_issues` を新規に叩き直さない。ページネーションを再度踏むため、Step 1 の全件取得結果を正とする）。
+
+- 直下に**居る場合**: DELETE を実行する。失敗したら POST へ進まず、その issue を失敗リストへ記録して次の issue へ進む（`OLD_PARENT_IS_CURRENT=true` の分岐）
+- 直下に**居ない場合**（前回ラン途中断等で既に外れている）: DELETE を skip して POST のみ実行する（`OLD_PARENT_IS_CURRENT=false` の分岐。冪等な修復）
+
 ```bash
 # sub_issue_id は issue 番号ではなく database id を渡す（GitHub sub-issues API 仕様）
 ISSUE_ID=$(gh api "repos/{owner}/{repo}/issues/${ISSUE_NUMBER}" --jq '.id')
 
-# 既存の親から外す（sub_issues API の DELETE）
-gh api \
-  --method DELETE \
-  "repos/{owner}/{repo}/issues/${OLD_PARENT}/sub_issues" \
-  -F "sub_issue_id=${ISSUE_ID}"
+if [ "${OLD_PARENT_IS_CURRENT}" = "true" ]; then
+  # 既存の親から外す。sub_issues API はエンドポイントが追加/削除で非対称。
+  #   追加: POST .../issues/{n}/sub_issues  （複数形）
+  #   削除: DELETE .../issues/{n}/sub_issue （単数形。GitHub 仕様であり揃えてはならない）
+  # 複数形のまま DELETE すると 404 になり、旧親から外れないまま次の POST が
+  # 422 (Sub issue may only have one parent) で必ず失敗する。
+  if ! gh api \
+    --method DELETE \
+    "repos/{owner}/{repo}/issues/${OLD_PARENT}/sub_issue" \
+    -F "sub_issue_id=${ISSUE_ID}"; then
+    # gh api のエラーは stdout に出るため、grep ではなく終了コードで成否判定する。
+    # DELETE 失敗時は POST へ進まず、失敗リストへ記録して次の issue へ進む
+    # （ラン全体を止めると復旧が難しくなるため per-issue skip とする）
+    echo "${ISSUE_NUMBER}: DELETE from #${OLD_PARENT} failed" >> "${FAILED_REASSIGNMENTS_LOG}"
+    continue
+  fi
+fi
 
-# 新しい親へ紐付ける
-gh api \
+# 新しい親へ紐付ける。追加は複数形 sub_issues（DELETE と非対称）
+if ! gh api \
   --method POST \
   "repos/{owner}/{repo}/issues/${NEW_PARENT}/sub_issues" \
-  -F "sub_issue_id=${ISSUE_ID}"
+  -F "sub_issue_id=${ISSUE_ID}"; then
+  echo "${ISSUE_NUMBER}: POST to #${NEW_PARENT} failed" >> "${FAILED_REASSIGNMENTS_LOG}"
+  continue
+fi
+
+# 付け替え後の確認: 新親の sub_issues に対象番号が現れ、旧親から消えていること
+gh api "repos/{owner}/{repo}/issues/${NEW_PARENT}/sub_issues" --jq '.[].number' | grep -qx "${ISSUE_NUMBER}" \
+  || echo "${ISSUE_NUMBER}: not found under new parent #${NEW_PARENT} after reassignment" >> "${FAILED_REASSIGNMENTS_LOG}"
+gh api "repos/{owner}/{repo}/issues/${OLD_PARENT}/sub_issues" --jq '.[].number' | grep -qx "${ISSUE_NUMBER}" \
+  && echo "${ISSUE_NUMBER}: still present under old parent #${OLD_PARENT} after reassignment" >> "${FAILED_REASSIGNMENTS_LOG}"
 ```
 
 ### Step 4: 孤児 issue を再配置する
@@ -233,6 +259,9 @@ EOF
 | phase ラベル同期 | N 件 |
 | 新 Phase 親の新設 | N 件 |
 | 4h 超 issue の sub-issue 分解 | N 件 |
+| 付け替え失敗（要手動対応） | N 件 |
+
+付け替え失敗が 1 件でもある場合、「完了」とは報告せず、失敗した issue 番号と理由を明記した上で要対応事項として提示する。
 
 ### 現在の Phase 別サマリー
 | Phase | 親 issue | open 件数 |
@@ -262,6 +291,15 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
   --jq '.[] | {number: .number, labels: [.labels[].name]}'
 ```
 
+## よくある失敗
+
+| 問題 | 回避策 |
+|------|--------|
+| sub_issues の DELETE を複数形パス（`.../sub_issues`）で叩いて 404 になる | 削除のみ単数形 `.../sub_issue`。追加は複数形 `.../sub_issues`（GitHub 仕様。単複を揃えようとして戻さない）。旧親から外れないまま POST すると `Sub issue may only have one parent`（422）で必ず失敗する |
+| `gh api` のエラー出力を grep して成否判定する | `gh api` のエラーは stdout に出るため grep では判定できない。`if ! gh api ...; then` で終了コードにより成否判定する |
+| `sub_issue_id` に issue 番号をそのまま渡す | `sub_issue_id` は database id。`gh api "repos/{owner}/{repo}/issues/<number>" --jq '.id'` で取得してから渡す |
+| DELETE 失敗を握りつぶして「棚卸し完了」と報告する | 失敗した issue は失敗リストへ記録し、Step 9 の完了レポートに必ず件数を出す。失敗リストが空でない限り「完了」と報告しない |
+
 ## 注意事項
 
 - **棚卸し前に変更内容をユーザーに提示して確認を取る**（Step 2 参照）
@@ -269,7 +307,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）
 - `--no-verify` は絶対に使用しない
 - **`gh issue create` は `--json` 非対応**。issue URL を stdout に出力するため、`| grep -oE '[0-9]+$'` で末尾の番号を抽出する
-- **sub_issues API（POST / DELETE）の `sub_issue_id` は issue 番号ではなく database id**（GitHub 仕様）。`gh api "repos/{owner}/{repo}/issues/<number>" --jq '.id'` で id を取得してから渡す。番号をそのまま渡すと誤った issue を操作する／404 になる
+- **sub_issue_id は issue 番号ではなく database id**（GitHub 仕様）。追加は `POST .../issues/{n}/sub_issues`、削除は `DELETE .../issues/{n}/sub_issue` とエンドポイントのパスが単複で非対称（追加が複数形、削除が単数形）。いずれも `sub_issue_id` には `gh api "repos/{owner}/{repo}/issues/<number>" --jq '.id'` で取得した id を渡す。番号をそのまま渡すと誤った issue を操作する／404 になる
 - 孤児 issue の Phase が判断できない場合は推測せずにユーザーへ確認する
-- sub_issues の DELETE API で付け替えを行う際、操作対象の issue 番号を必ず確認してから実行する
+- 付け替え（Step 3）で単数形 DELETE パスを使う際、操作対象の issue 番号を必ず確認してから実行する。DELETE が失敗した場合は POST を実行せず、失敗として記録する（複数形パスでの DELETE 誤用に戻さない）
 - ツリー更新後は implement-issue-tree が post-order DFS で正しく消化できる構造になっているか確認する
