@@ -124,7 +124,10 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
     詳細は `.claude/rules/ruleset-policy.md`）: **[<集約ジョブ>, （集約できない別 workflow の常時チェック）,
     codex-review / codex]** の最小集合
   - 自動マージ（implement-issue-tree の `autoMerge: true`）を使う場合、required_status_checks の
-    各エントリに発行元 App の `integration_id` を束縛する（未束縛だと G0 が `issuer-unbound` で辞退する）
+    各エントリに発行元 App の `integration_id` を束縛する（未束縛だと G0 が `issuer-unbound` で辞退する）。
+    **ruleset を PUT で更新した後は必ず下記「検証」の 3 軸スイープを実行する**（`PUT` は
+    `required_status_checks.parameters` を丸ごと置換するため束縛が落ち得る。複数リポへ一括適用する
+    場合は全リポで実行する）
 - 必須チェック選定の注意（重要な落とし穴）:
   - 直近 PR の check runs で「**常に報告される**」チェックのみ選ぶ。workflow レベル paths フィルタで
     実行されないことがあるチェックは入れない（マージが永久ブロックされる）。ジョブレベル条件の skipped は可
@@ -154,6 +157,37 @@ gh pr checks "$(gh pr list --repo "${repo}" --state merged --limit 1 --json numb
 # Step 4: ruleset とマージ設定
 gh api "repos/${repo}/rulesets" --jq '.[] | {id, name, enforcement}'
 gh api "repos/${repo}" --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, delete_branch_on_merge, allow_auto_merge}'
+
+# Step 4-a: 一括更新後の 3 軸スイープ（strict / bypass_actors / integration_id 残存）
+# PUT した ruleset 単体ではなく branch target の全 ruleset を掃く（org 継承は source_type でルーティング）。
+# コマンド全文・判定表は .claude/rules/ruleset-policy.md の「一括更新後の検証」節を参照
+org="${repo%%/*}"
+gh api "repos/${repo}/rulesets" \
+  --jq '.[] | select(.target == "branch") | [(.id|tostring), .name, (.source_type // "unknown")] | @tsv' |
+while IFS=$'\t' read -r id name src; do
+  case "${src}" in
+    Repository)   path="repos/${repo}/rulesets/${id}" ;;
+    Organization) path="orgs/${org}/rulesets/${id}" ;;
+    *)            echo "UNKNOWN source_type: ${name} (${src}) — 手動確認"; continue ;;
+  esac
+  gh api "${path}" --jq '{
+    name: .name, enforcement: .enforcement, bypass: (.bypass_actors | length),
+    strict: ([.rules[]? | select(.type=="required_status_checks") | .parameters.strict_required_status_checks_policy] | first),
+    total:   ([.rules[]? | select(.type=="required_status_checks") | .parameters.required_status_checks[]?] | length),
+    unbound: [.rules[]? | select(.type=="required_status_checks") | .parameters.required_status_checks[]? | select(.integration_id == null) | .context]
+  }'
+done
+
+# Step 4-b: classic branch protection を別枠で掃く（defaultBranchRef 解決・@uri エンコード・HTTP status 分岐）
+db=$(gh repo view "${repo}" --json defaultBranchRef --jq '.defaultBranchRef.name')
+db_enc=$(printf '%s' "${db}" | jq -sRr '@uri')
+code=$(gh api -i "repos/${repo}/branches/${db_enc}/protection" 2>/dev/null | awk 'NR==1{print $2}')
+case "${code}" in
+  200) gh api "repos/${repo}/branches/${db_enc}/protection" --jq \
+         '{strict: (.required_status_checks.strict // "none"), unbound: [.required_status_checks.checks[]? | select(.app_id == null) | .context]}' ;;
+  404) echo "classic BP なし（${db}）" ;;
+  *)   echo "判定不能 (HTTP ${code:-?}) — Administration: read 権限を確認。green と扱わない" ;;
+esac
 ```
 
 最終確認として、導入後に小さな PR を 1 件流し、codex-review の実行・必須チェックの報告・
@@ -175,6 +209,8 @@ Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須�
 | 参考ファイルの取り違え（別リポジトリ用 AGENTS.md の混入）を codex が検出 | Step 2: 対象リポジトリ固有の具体項目に落とし込む |
 | AGENTS.md の P1 定義と CI ゲート実挙動（P1 でも fail）の矛盾を codex が指摘 | Step 2: P1 定義をゲート実挙動と矛盾させない |
 | GITHUB_TOKEN read 化で暗黙 write 依存の workflow が壊れる | Step 4: 全 workflow の permissions 明示を確認してから適用する |
+| ruleset を PUT したら `integration_id` 束縛が落ち、自動マージが静かに止まる（strict と bypass だけ見ると全 green に見える） | Step 4-a: PUT 後に 3 軸スイープ（`select(.integration_id==null)`）を実行する |
+| 旧 ruleset / classic BP の掃き漏らしで未束縛・strict=true が残る | Step 4-a/4-b: 全 branch ruleset を列挙して掃き、classic BP は `defaultBranchRef` 解決 + status 分岐で別枠確認する |
 
 ## 注意事項
 
