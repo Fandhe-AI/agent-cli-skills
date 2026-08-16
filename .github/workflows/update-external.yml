@@ -224,6 +224,12 @@ jobs:
           auto-merge: ${{ vars.SUBMODULE_AUTO_MERGE || 'false' }}
           auto-merge-allowlist: ${{ vars.SUBMODULE_AUTO_MERGE_ALLOWLIST }}
           auto-merge-strategy: squash
+          # action 側の既定は 'true'。その場合、リポジトリの Allow auto-merge が
+          # 無効などで `gh pr merge --auto` が失敗すると、必須チェックの完了を待たず
+          # 即時マージへフォールバックする。安全性を branch protection が常に正しく
+          # 設定されていることだけに依存させる fail-open な構成になるため明示的に
+          # 無効化する（auto-merge が使えない環境では、マージせず人間へ委ねる）。
+          auto-merge-immediate-fallback: 'false'
 
   # --------------------------------------------------
   # Skills の更新 (Fandhe-AI/actions/skills-update)
@@ -297,11 +303,15 @@ jobs:
         # skills-update が使う npx skills のため node を固定する。
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          # メジャー指定 '20' は解決先パッチ版が日々変動し再現性がないため、
-          # 実在するパッチ版へ固定する。20.20.2 は Node.js 20 系 (LTS Iron) の
-          # 最新パッチであり、actions/node-versions の versions-manifest.json に
-          # 収録済みで setup-node が解決可能であることを実測確認済み（2026-08-16）。
-          node-version: '20.20.2'
+          # メジャー指定は解決先パッチ版が日々変動し再現性がないため、実在する
+          # パッチ版へ固定する。24.19.0 は Node.js 24 系 (LTS Krypton) の最新パッチ
+          # （nodejs.org/dist/index.json で 2026-08-03 リリースを実測確認、2026-08-16）。
+          #
+          # 20 系 (Iron) は 2026-08-16 時点で EOL に達しておりセキュリティ修正を
+          # 受けられない。外部パッケージを取得・実行し書き込み権限付き PAT で PR を
+          # 作成する定期ジョブで EOL ランタイムを使わないため、サポート中の LTS へ
+          # 更新した。メジャー更新時は EOL 到達前に同様の更新を行うこと。
+          node-version: '24.19.0'
 
       - name: Update skills and open PR
         # Fandhe-AI/actions はタグ未公開のため main 追従の最新コミット SHA に固定
@@ -327,3 +337,6 @@ jobs:
           auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}
           auto-merge-allowlist: ${{ vars.SKILLS_AUTO_MERGE_ALLOWLIST }}
           auto-merge-strategy: squash
+          # 即時マージへのフォールバックを無効化する理由は submodule ジョブ側の
+          # 注記を参照（必須チェックを待たないマージ経路を作らないため）。
+          auto-merge-immediate-fallback: 'false'
