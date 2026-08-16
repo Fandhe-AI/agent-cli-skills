@@ -367,7 +367,7 @@ gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証し�
 **全チェックが pass に見えるのにマージが進まない場合（cancel された run の残存 check）:**
 
 - **フローから観測できる症状**（自動検知は存在しないため、実装されていない挙動は書かない）: `gh pr checks` は全 pass、`mergeable` は `MERGEABLE`、コンフリクトも未解決スレッドもないのに、merge-exec が進まず再監視が繰り返され監視予算だけが減る。この状態では `mergeStateStatus` が `BLOCKED` のまま動かない。**`mergeStateStatus` は現在どのエージェントも取得していない**ため、運用者が `gh pr view <N> --json mergeStateStatus` で確認する。
-- **原因**: 同一 head sha に対し concurrency で複数 run が走ると、cancel された run が失敗結論の check run を残す。`gh pr checks` は同名 check の最新のみを表示するため全 pass に見えるが、branch protection の required check 判定は残存 check を拾って BLOCKED になる。2026-08-16 の全リポ一斉反映で下流リポの同期 PR が実際にこれで停止した。
+- **原因**: 同一 head sha に対し concurrency で複数 run が走ると、cancel された run が失敗結論の check run を残す。`gh pr checks` は同名 check の最新のみを表示するため全 pass に見えるが、branch protection の required check 判定は残存 check を拾って BLOCKED になる。同一の変更を多数のリポジトリへ同時投入する運用（後述「一斉同期・大量 PR 投入時の運用ガード」）では concurrency 競合の発生頻度が上がるため、この状態に遭遇しやすい。
 - **検知コマンド（エージェントが実行してよいものと、人間の診断専用を明確に分ける）**:
 
 ```bash
@@ -375,6 +375,7 @@ gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証し�
 # --jq はページごとに適用されるため group_by をページ単位で行うとページ跨ぎの重複を見逃す
 # （同名チェックが 2 ページに分かれて 1 件ずつ載ると各ページの重複件数が 0 になり得る）。
 # 名前一覧をパイプへ流してシェル側（sort | uniq -d）で全ページ分を集約する
+# （(B) と異なり shell 側で集約するため --slurp は不要）
 gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=100" \
   --jq '.check_runs[].name' | sort | uniq -d | wc -l
 # → 出力は整数 1 行のみ（チェック名はパイプ内で集約され出力に現れない）。1 以上なら重複あり
@@ -384,13 +385,19 @@ gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=
 # (B) 人間の診断専用。重複の内訳をチェック名つきで確認する
 # チェック名は PR 側の workflow / job 定義から生成される未信頼テキストのため、
 # monitor / merge-exec のコンテキストでは実行しない（権限境界の維持）
+# `--paginate` の `--jq` は取得したページごとに個別適用されるため、group_by をそのまま
+# 使うとページ単位の集計になり、同名 check-run が別ページに 1 件ずつ分かれて存在する場合に
+# 検知できない（各ページ内では件数 1 の group にしかならず、実際は重複していても取りこぼす）。
+# `--slurp` を付けると全ページを外側の配列として受け取れるが、gh api は `--slurp` と `--jq` の
+# 併用を拒否する（`the --slurp option is not supported with --jq or --template`）ため、
+# `--jq` は使わず `--slurp` の生 JSON 出力を外部の `jq` へパイプし、平坦化してから group_by する
+# ことでページ跨ぎでも全件を一度に集約してから判定する。
 # まず check 名だけで group_by し、件数 2 以上の group（=実際に重複している名前）に絞り込んでから、
-# その中で conclusion 別の内訳を出す。name=conclusion のペアで group_by すると
-# 同名 2 件が cancelled/success のように conclusion 違いで割れ、各 group が件数 1 になって
-# 重複そのものを取りこぼす（--paginate は全ページを配列として結合してから --jq へ渡すため、
-# ページ跨ぎでも group_by 前に全件が揃っている）
-gh api --paginate "repos/OWNER/REPO/commits/<sha>/check-runs?per_page=100" \
-  --jq '[.check_runs[] | {name, conclusion}]
+# その中で conclusion 別の内訳を出す（name=conclusion のペアで group_by すると、同名 2 件が
+# cancelled/success のように conclusion 違いで割れて各 group が件数 1 になり、重複そのものを
+# 取りこぼすため、必ず name のみで group_by する）
+gh api --paginate --slurp "repos/OWNER/REPO/commits/<sha>/check-runs?per_page=100" \
+  | jq -r '[.[] | .check_runs[] | {name, conclusion}]
         | group_by(.name)
         | map(select(length >= 2))
         | map("\(.[0].name): " + ([.[] | .conclusion] | sort | group_by(.) | map("\(.[0]) x\(length)") | join(", ")))
@@ -489,7 +496,7 @@ open のサブイシューが残っている場合、または受入基準が未
 | 新規 CI 導入リポのラベル不足 | CI を新規導入したリポでは `dependencies` / `automated` ラベルが無く `gh pr create --label` が exit 1 になり、PR がそもそも作られない | 投入前にラベルを作成する |
 | flaky の誤判定 | 差分と無関係なテストが落ちる | 「main で同じジョブが green」「差分が当該テストに影響しえない（変更パスを実測）」の 2 点を確認してから rerun する。前者は `gh run list --branch main` を単独では使わない（別 workflow の成功や skip されたジョブが紛れ込み、肝心の failing job が実は main でも失敗・未実行のまま green と誤認し得る）。失敗した PR 上の workflow ファイル名と job 名を特定したうえで、`gh run list --branch main --workflow <workflow-file> --json databaseId,conclusion --limit 1 --jq '.[0].databaseId'` で直近 run の ID を取得し、`gh api repos/OWNER/REPO/actions/runs/<run-id>/jobs --jq '.jobs[] | select(.name == "<job名>") | .conclusion'` で同一 job 名の conclusion が `success` であることを実測する。推測で flaky 扱いにしない |
 
-**推奨投入単位**: 1 バッチあたり 5 リポジトリ以下に分割し、前バッチの run がすべて完了（`gh run list` で `in_progress` / `queued` が 0）してから次バッチを投入する（22 リポなら 5 バッチ）。これは「注意事項」にある `parallel` の並列度指針（並列度を上げるほど CI キューが逼迫する）のリポジトリ横断版にあたる。
+**推奨投入単位**: 1 バッチあたり 5 リポジトリ以下に分割し、前バッチの run がすべて完了（`gh run list` で `in_progress` / `queued` が 0）してから次バッチを投入する（バッチ数は `ceil(対象リポジトリ数 / 5)` で導出する）。これは「注意事項」にある `parallel` の並列度指針（並列度を上げるほど CI キューが逼迫する）のリポジトリ横断版にあたる。
 
 一斉投入時に BLOCKED が出た場合は Step 6 の「全チェックが pass に見えるのにマージが進まない場合」の分岐を参照する。
 
