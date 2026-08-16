@@ -62,11 +62,26 @@ jobs:
     name: Update submodule references
     if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "submodule"]'), inputs.target) }}
     # 実行ランナーはリポジトリ変数 UPDATE_EXTERNAL_RUNNER で上書きできる。
-    # self-hosted ランナー必須のリポジトリは、Settings > Secrets and variables >
-    # Actions > Variables に UPDATE_EXTERNAL_RUNNER を追加し、値に自リポジトリの
-    # ランナーラベル（例: self-hosted）を設定するだけで規約を満たせる。
+    # Settings > Secrets and variables > Actions > Variables に追加する。
+    #
+    # 【値の書式】必ず JSON リテラルで指定する。
+    #   複数ラベル: ["self-hosted","Linux"]   ← self-hosted 必須リポの推奨値
+    #   単一ラベル: "ubuntu-22.04"            ← 前後の二重引用符ごと設定する
+    #
+    # 素の `self-hosted`（引用符なし）は JSON として不正であり、fromJSON が
+    # 失敗して workflow 全体が起動しなくなるため設定してはならない。
+    #
+    # 複数ラベルを推奨する理由: 単一の `self-hosted` ラベルは OS を限定しない。
+    # Windows ランナーへ割り当てられると後続 run が既定の PowerShell で実行され、
+    # POSIX シェル構文（`if [ -z ... ]`）や composite action が前提とする bash が
+    # 壊れる。OS ラベルを併記して Linux ランナーへ確定させる。
+    #
     # 未設定のリポジトリは従来どおり GitHub ホステッドの ubuntu-latest で動く。
-    runs-on: ${{ vars.UPDATE_EXTERNAL_RUNNER || 'ubuntu-latest' }}
+    # `||` を fromJSON の外（文字列側）に置いているのは、配列値の真偽判定が
+    # GitHub Actions 式仕様として明文化されておらず、`vars.X && fromJSON(vars.X)
+    # || 'ubuntu-latest'` 形式だと self-hosted 指定が黙って ubuntu-latest へ
+    # フォールバックする（fail-open する）恐れがあるため。
+    runs-on: ${{ fromJSON(vars.UPDATE_EXTERNAL_RUNNER || '"ubuntu-latest"') }}
     # 外部取得・submodule 更新・PR 作成の実処理量に見合う上限。ネットワーク
     # ハングやリモート応答待ちでランナーを占有し続けるのを防ぐ。
     timeout-minutes: 10
@@ -82,9 +97,17 @@ jobs:
       - name: Verify PAT is configured
         env:
           PAT: ${{ secrets.SUBMODULE_PAT }}
+        # self-hosted ランナー（特に Windows 割り当て時）の既定シェルは
+        # PowerShell であり、下記の POSIX シェル構文が解釈できない。
+        # 呼び出す composite action も bash 前提のため明示的に固定する。
+        shell: bash
         run: |
           if [ -z "${PAT}" ]; then
-            echo "::error::SUBMODULE_PAT が未設定。GITHUB_TOKEN へのフォールバックは廃止済み（bot 作成 PR が pull_request workflow を発火させず必須チェック未実行で恒久 BLOCKED になるため。PR #176 の実障害）。リポジトリ or org の Secrets に SUBMODULE_PAT を登録すること。"
+            msg="SUBMODULE_PAT が未設定。GITHUB_TOKEN へのフォールバックは廃止済み"
+            msg="${msg}（bot 作成 PR が pull_request workflow を発火させず"
+            msg="${msg}必須チェック未実行で恒久 BLOCKED になるため。PR #176 の実障害）。"
+            msg="${msg}リポジトリ or org の Secrets に SUBMODULE_PAT を登録すること。"
+            echo "::error::${msg}"
             exit 1
           fi
 
@@ -124,11 +147,12 @@ jobs:
     name: Update agent skills
     if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "skill"]'), inputs.target) }}
     # 実行ランナーはリポジトリ変数 UPDATE_EXTERNAL_RUNNER で上書きできる。
-    # self-hosted ランナー必須のリポジトリは、Settings > Secrets and variables >
-    # Actions > Variables に UPDATE_EXTERNAL_RUNNER を追加し、値に自リポジトリの
-    # ランナーラベル（例: self-hosted）を設定するだけで規約を満たせる。
+    # 値の書式・推奨値・fromJSON を使う理由は submodule ジョブ側の注記を参照。
+    # 要点のみ再掲すると、必ず JSON リテラル（複数ラベルなら
+    # ["self-hosted","Linux"]、単一ラベルなら "ubuntu-22.04"）を設定する。
+    # 素の `self-hosted` は JSON として不正で workflow 全体が起動しなくなる。
     # 未設定のリポジトリは従来どおり GitHub ホステッドの ubuntu-latest で動く。
-    runs-on: ${{ vars.UPDATE_EXTERNAL_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(vars.UPDATE_EXTERNAL_RUNNER || '"ubuntu-latest"') }}
     # npx skills のダウンロード・全スキル更新・PR 作成の実処理量に見合う上限。
     # submodule ジョブより取得対象が多いため長めに取る。
     timeout-minutes: 15
@@ -144,9 +168,18 @@ jobs:
       - name: Verify PAT is configured
         env:
           PAT: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT }}
+        # self-hosted ランナー（特に Windows 割り当て時）の既定シェルは
+        # PowerShell であり、下記の POSIX シェル構文が解釈できない。
+        # 呼び出す composite action も bash 前提のため明示的に固定する。
+        shell: bash
         run: |
           if [ -z "${PAT}" ]; then
-            echo "::error::SKILLS_PAT / SUBMODULE_PAT がいずれも未設定。GITHUB_TOKEN へのフォールバックは廃止済み（bot 作成 PR が pull_request workflow を発火させず必須チェック未実行で恒久 BLOCKED になるため。PR #176 の実障害）。リポジトリ or org の Secrets に SKILLS_PAT を登録すること。"
+            msg="SKILLS_PAT / SUBMODULE_PAT がいずれも未設定。GITHUB_TOKEN への"
+            msg="${msg}フォールバックは廃止済み（bot 作成 PR が pull_request"
+            msg="${msg} workflow を発火させず必須チェック未実行で恒久 BLOCKED に"
+            msg="${msg}なるため。PR #176 の実障害）。リポジトリ or org の Secrets に"
+            msg="${msg} SKILLS_PAT を登録すること。"
+            echo "::error::${msg}"
             exit 1
           fi
 
