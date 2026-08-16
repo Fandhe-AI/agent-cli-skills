@@ -72,6 +72,7 @@ skills/                               -- スキル本体（各ディレクトリ
     code-comment-style.md             -- コード内コメント・ドキュメンテーションコメント規約
     verification.md                   -- 完了ゲート規約（証拠なき完了宣言の禁止・5段階検証）
     debugging.md                      -- 根本原因デバッグ規約（修正前の原因調査・3回失敗でエスカレーション）
+    ruleset-policy.md                 -- ブランチ ruleset 方針（strict 必ず false・required check の App 束縛）
   skills/                             -- skills/ へのシンボリックリンク（一部実ディレクトリ）
     create-skill/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
     create-agent/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
@@ -157,6 +158,7 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `reference-template.md` | reference-researcher / skill-author | reference 型スキルの reference/*.md と README 索引の書式規約 |
 | `verification.md` | implement-issue / implement-issue-tree / implement-review / implement-review-pr / create-pr | 完了ゲート（証拠なき完了宣言の禁止・5段階検証） |
 | `debugging.md` | implement-issue / implement-issue-tree / sub-investigator | 根本原因デバッグ（修正前の原因調査・3回失敗でエスカレーション） |
+| `ruleset-policy.md` | setup-repo-guards / implement-issue-tree / ruleset を変更する全作業 | ブランチ ruleset 方針（`strict_required_status_checks_policy` は必ず false・required check の `integration_id` 束縛・条件付きチェックを required にしない） |
 
 ## Current Skills (26)
 
