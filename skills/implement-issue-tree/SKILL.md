@@ -190,7 +190,12 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 
 4. 対象リポジトリの CLAUDE.md・rules・テスト実行規約に従いビルド・lint・テストを通す。テストが失敗した場合は根本原因を調査してから修正する（`.claude/rules/debugging.md` の4フェーズを順に踏む。同一箇所で3回失敗したらアーキテクチャ問題と判断し、該当イシューを `blocked` として記録してユーザーに状況を報告する）
 5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む
-6. 実装が完了したら `create-commit` スキルに従い Conventional Commits で**実装コミットを 1 つ**作成する
+6. 実装が完了したら `create-commit` スキルに従い Conventional Commits で**実装コミットを 1 つ**作成する。
+   コミット前に対象リポの commitlint 設定（`commitlint.config.*` / `.commitlintrc*` / `package.json` の
+   `commitlint` フィールド）を**読み取って** `type-enum` / `scope-enum` を確認し、許可された値のみを使う。
+   該当する scope が無ければ scope ごと省略する（`feat: 実装内容`）。**scope にイシュー番号を置かない**
+   （`scope-enum` を設定したリポでは必ず落ち、Review 3 巡を消費した後の push で初めて検出される）。
+   イシューとの紐付けは footer の `Refs #<N>` と PR 本文の `Closes #<N>` で行う
 7. **push・PR 作成はここでは行わない**。ローカルブランチにコミットを積んだ状態で終了し、後続の Review フェーズへ渡す
 
 ```bash
@@ -198,7 +203,14 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 git fetch origin && git checkout -B feat/<N>-<short-name> origin/<base-branch>
 
 # 実装コミット（push しない）
-git commit -m "feat(#<N>): 実装内容"
+# scope はイシュー番号ではなく変更対象のモジュール・ディレクトリ名。
+# 対象リポの commitlint の scope-enum に該当する値が無ければ scope ごと省略する。
+git commit -m "$(cat <<'EOF'
+feat(<module>): 実装内容
+
+Refs #<N>
+EOF
+)"
 # → push・PR 作成は Review 全通過後に行う
 ```
 
@@ -407,6 +419,7 @@ open のサブイシューが残っている場合、または受入基準が未
 | 状態ファイルが壊れたまま再実行して重複 PR を作成する | パースエラー時は即停止。`cat _/issue-trees/<N>.json` で確認してから再実行する |
 | 中断後に手動で worktree を削除してから再実行する | 再実行時に Recover phase が自動処理するため手動削除は不要。手動削除してしまうと Recover が残骸なしと判定し、中断前の作業を引き継がずに Plan から新規実行する |
 | レビュースレッドを自動フローで resolve する | resolve mutation はどのエージェント・どの経路にも存在しない（自動 resolve 機能は全面撤去）。修正済み・対象外を問わず、resolve は常に人間が GitHub 上で行う。自動フローは記録までで停止し blocked → 最終レポートへ（人間操作ゲート） |
+| 実装コミットの scope にイシュー番号を置く（例: `feat` の scope に `42` を入れる） | `scope-enum` を持つリポでは commitlint が必ず落ちる。Review 3 巡を消費した後の push で初めて検出され、`--no-verify` は禁止のため回避もできない。scope はモジュール・ディレクトリ名にするか省略し、イシューの紐付けは `Refs #<N>` / `Closes #<N>` で行う |
 | P0/P1 相当・セキュリティ指摘を対象外扱いにする | fix エージェントは単独で対象外と判定して記録のみで済ませてはならない。修正するか、ユーザーまたは指摘者の承認を得るまで `blocked` として扱う（安全側ガード） |
 
 ## モデル / effort 割り当て

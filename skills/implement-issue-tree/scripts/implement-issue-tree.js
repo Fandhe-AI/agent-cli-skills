@@ -1727,6 +1727,7 @@ function implementPrompt(item, plan) {
     '4. 完了条件: 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して pass すること。フォーマッタ・静的解析があればコミット前に通す。',
     '5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む。',
     '6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。',
+    '   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み取り、type-enum / scope-enum に適合する値のみを使う。該当する scope が無ければ scope を省略する。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。',
     // push・PR 作成は Review 通過後（Review 収束失敗時は CI を一切起動しない）。
     '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
     '   （push と PR 作成は後続の Review が全通過した後に別エージェントが行う）',
@@ -2166,12 +2167,17 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
         `   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
         `   マージコンフリクトの解消が必要な場合は git merge ${baseBranch}（ローカル）を実行して解消する。`,
       ]
+  // fix commit も impl commit と同じ commitlint 制約を受けるため、コミット前チェックの
+  // 文言を pushAfterFix の両分岐で共通化する（Issue #290: scope-enum リポでの落ちを防ぐ）。
+  const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み取り、type-enum / scope-enum に適合する値のみを使う。該当する scope が無ければ scope を省略する。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
   const commitAndPushInstructions = pushAfterFix
     ? [
         `4. create-commit スキルに従いコミットし、git push origin HEAD:refs/heads/${branch} で反映する。`,
+        commitlintCheckInstruction,
       ]
     : [
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
+        commitlintCheckInstruction,
         `   コミット後に git branch -f ${branch} HEAD でローカルブランチの先端を更新する`,
         `   （detached HEAD 作業後のブランチ先端を確実に更新するため）。`,
       ]
@@ -2466,6 +2472,7 @@ function recoverImplementPrompt(item, brief, branch) {
     '4. 完了条件: 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して pass すること。フォーマッタ・静的解析があればコミット前に通す。',
     '5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む。',
     '6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。',
+    '   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み取り、type-enum / scope-enum に適合する値のみを使う。該当する scope が無ければ scope を省略する。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。',
     '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
     '   （push と PR 作成は後続の Review が全通過した後に別エージェントが行う）',
     '   実装の過程で現スコープ外と判断した事項は返却フィールド outOfScope に 1 項目 1 要素の配列として列挙する（summary には含めなくてよい）。',
