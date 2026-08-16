@@ -31,7 +31,20 @@ if (markerIndex < 0) {
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-defs-'))
 const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
-writeFileSync(slicePath, definitionPart)
+// 実装スクリプトは Workflow ランタイムの制約により `export const meta` 以外の top-level export を
+// 持てない（他に export があると起動時に SyntaxError: Unexpected keyword 'export' となり
+// スクリプト全体が実行不能になる）。そのため定義部は非 export のまま置き、テスト側で
+// 切り出したスライスへ export 文を付与して module として読み込む。
+const SLICE_EXPORTS = [
+  'parseExternalChecks',
+  'mergeExecutePrompt',
+  'classifyMergeExecDispatch',
+  'planForcedThreadRescan',
+  'reconcileRescueRoundState',
+  'MERGE_EXEC_SCHEMA',
+  'MERGE_EXEC_VALID_REASONS',
+]
+writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
 // args 未注入の import。駆動部の副作用がマーカーより上に混入していればここで失敗する。
 const mod = await import(pathToFileURL(slicePath).href)
@@ -287,4 +300,23 @@ test('classifyMergeExecDispatch: enum 外・欠落 reason は invalid-monitor-re
       `reason ${String(reason)} の遷移`,
     )
   }
+})
+
+// Workflow ランタイムは `export const meta` だけを特別扱いし、残りをスクリプト本体（module では
+// なく関数ボディ相当）として評価する。そのため meta 以外の top-level export が 1 つでもあると
+// 起動時に SyntaxError: Unexpected keyword 'export' となり、スキル全体が実行不能になる。
+// この回帰は #239 でテスト用 export を追加した際に混入し、下流 22 リポへ配布されるまで
+// 検知されなかった（起動しない限り誰も踏まないため）。テストで機械的に固定する。
+test('スクリプトの top-level export は meta 1 個だけ（Workflow ランタイム制約）', () => {
+  const topLevelExports = source
+    .split('\n')
+    .map((line, index) => ({ line, lineNumber: index + 1 }))
+    .filter(({ line }) => line.startsWith('export '))
+
+  assert.deepEqual(
+    topLevelExports.map(({ line, lineNumber }) => `${lineNumber}: ${line}`),
+    ['1: export const meta = {'],
+    'meta 以外の top-level export は Workflow の起動を不能にする。テストから使いたい定義は '
+      + 'export せずに置き、スライスへ export 文を付与する SLICE_EXPORTS 方式で読み込むこと',
+  )
 })

@@ -72,7 +72,7 @@ const shellSingleQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 // 直接検証できるよう純粋関数化。契約: undefined / null → undefined（確定不能）、[] → []
 // （「外部チェックなし」を人間が確定）、正常要素 → { app, contexts } へ正規化（旧形式 slug は
 // contexts: [] の fail-closed 入力）、形式不正 → throw（フォールバック禁止）。
-export function parseExternalChecks(raw) {
+function parseExternalChecks(raw) {
   if (raw === undefined || raw === null) return undefined
   if (!Array.isArray(raw)) {
     throw new Error('args.externalChecks は配列で指定すること（例: {"externalChecks": [{"app": "cursor", "context": "Cursor Bugbot"}]}。外部チェックなしを確定する場合は [] を指定する）')
@@ -651,7 +651,7 @@ function normalizeBlockedReason(raw) {
 // レビュー本文・Issue 本文を一切読まず、checks の結論・HEAD sha・未解決スレッド「数」のみを
 // 自ら再取得して検証し、条件充足時のみ merge / close を実行する。
 // export は g0-gates.test.mjs が reason enum を共有定数として参照するため（二重定義ドリフト防止）。
-export const MERGE_EXEC_SCHEMA = {
+const MERGE_EXEC_SCHEMA = {
   type: 'object',
   required: ['merged', 'reason', 'summary', 'issueClosed'],
   properties: {
@@ -680,7 +680,7 @@ export const MERGE_EXEC_SCHEMA = {
 }
 
 // MERGE_EXEC_SCHEMA.reason の妥当値集合。ホスト側でも二重検証する（enum 外は systemic failure）。
-export const MERGE_EXEC_VALID_REASONS = new Set(MERGE_EXEC_SCHEMA.properties.reason.enum)
+const MERGE_EXEC_VALID_REASONS = new Set(MERGE_EXEC_SCHEMA.properties.reason.enum)
 
 // merge-exec の execReason（ホスト側 enum 二重検証済み。enum 外・欠落は '' に正規化済み）を
 // runMergeLoop の次状態へ写像する純粋関数。g0-gates.test.mjs から決定的に検証できるよう切り出した
@@ -695,7 +695,7 @@ export const MERGE_EXEC_VALID_REASONS = new Set(MERGE_EXEC_SCHEMA.properties.rea
 //   - pr-closed → blocked + unrecoverable（未マージクローズは再監視で回復し得ない）
 //   - head-moved / checks-not-green / merge-failed → timeout（一過性。再監視で解消しうる）
 //   - それ以外（enum 外・''）→ invalid-monitor-result（systemic failure。failed 終端・halt 対象）
-export function classifyMergeExecDispatch(execReason, currentBlockedReason) {
+function classifyMergeExecDispatch(execReason, currentBlockedReason) {
   switch (execReason) {
     case 'unresolved-threads':
       return { lastState: 'unresolved-comments', lastBlockedReason: currentBlockedReason }
@@ -736,7 +736,7 @@ export function classifyMergeExecDispatch(execReason, currentBlockedReason) {
 //     予算が延び続けず、2 回目以降は従来どおり残り予算のみで進み尽きれば終端する
 //     （ラッチを消費するのは実際に延長した回だけ。残枠がある回はラッチを温存する）
 // 戻り値の monitorsLeft / rescueUsed は呼び出し元の同名変数へそのまま代入して使う。
-export function planForcedThreadRescan(monitorsLeft, rescueUsed) {
+function planForcedThreadRescan(monitorsLeft, rescueUsed) {
   if (!rescueUsed && monitorsLeft < 1) {
     return { monitorsLeft: 1, rescueUsed: true, granted: true }
   }
@@ -770,7 +770,7 @@ export function planForcedThreadRescan(monitorsLeft, rescueUsed) {
 //     その判定と通常の分岐処理を尊重する）
 //   - pending は常に false へ落とす（救済は 1 回限りで、次ラウンド以降へ持ち越さない）
 // 戻り値の rescuePending は呼び出し元の同名変数へそのまま代入して使う。
-export function reconcileRescueRoundState(lastState, rescuePending) {
+function reconcileRescueRoundState(lastState, rescuePending) {
   if (rescuePending && lastState === 'timeout') {
     return { terminate: true, qualityBlock: true, rescuePending: false }
   }
@@ -1874,7 +1874,7 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, client
 //   App ごとに件数ベースで独立検証し G0 (iv) が context + App ID の完全一致で照合。
 // allowMerge は args パースのみから導出。true = 新規マージ経路、false = 回復専用経路。
 // export は G0 ゲート回帰テスト（tests/g0-gates.test.mjs）がプロンプト契約を検証するため。
-export function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries) {
+function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries) {
   const entries = Array.isArray(externalCheckEntries) ? externalCheckEntries : []
   // allowMerge=true の前提（宣言 App 全件が信頼済み context を持つ）はホスト側ゲートが保証済み。
   // この throw は多層防御で、context なし宣言が新規マージ経路へ紛れ込む退行を決定的に遮断する。
