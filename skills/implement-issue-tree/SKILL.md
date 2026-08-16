@@ -23,6 +23,7 @@ CI リソース節約のため「push 前 review」設計を採用している�
 ## 前提条件
 
 - `gh` CLI がインストールされ、認証済みであること（`gh auth status` で確認）
+- `jq` CLI がインストールされていること（`command -v jq` で確認）。「全チェックが pass に見えるのにマージが進まない場合（cancel された run の残存 check）」節の人間の診断専用コマンド (B) は `gh api --paginate --slurp` の生 JSON を外部の `jq` へパイプして平坦化・集約するため、`gh --jq` だけでは代替できない。未導入の場合はそのコマンドを実行せず（rerun もせず）`blocked` として扱う
 - git working tree が clean であること（`git status` で確認）
 - マージ先ブランチが CI green の状態であること（`autoMerge` 運用ではランの完了後にも確認する。後述の strict = false 前提により、古い base に対して成功したチェックのままマージされ得るため）
 - （`autoMerge: true` で使う場合）ベースブランチの ruleset で **required status checks の strict（マージ前の base 最新化必須 = `strict_required_status_checks_policy`）を `false` にしていること**。`true` だと 1 件マージするたびに他の open PR の base が陳腐化し、並列ラン（`parallel >= 2`）が収束しない。G0 は strict を要件にしないため `false` でも自動マージは成立する（references/automerge-design.md の「strict を G0 の要件にしない理由」節）
@@ -385,6 +386,9 @@ gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=
 # (B) 人間の診断専用。重複の内訳をチェック名つきで確認する
 # チェック名は PR 側の workflow / job 定義から生成される未信頼テキストのため、
 # monitor / merge-exec のコンテキストでは実行しない（権限境界の維持）
+# 前提: 外部の `jq` CLI が必要（`gh --jq` はページ単位適用のためここでは使えない）。
+# 事前に `command -v jq` で存在確認し、なければ実行せず `blocked` とする
+command -v jq >/dev/null || { echo "jq が見つからないため診断を中断し blocked とする" >&2; exit 1; }
 # `--paginate` の `--jq` は取得したページごとに個別適用されるため、group_by をそのまま
 # 使うとページ単位の集計になり、同名 check-run が別ページに 1 件ずつ分かれて存在する場合に
 # 検知できない（各ページ内では件数 1 の group にしかならず、実際は重複していても取りこぼす）。
