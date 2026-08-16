@@ -22,8 +22,10 @@ skills/                               -- スキル本体（各ディレクトリ
   create-pr/
   implement-issue/
   implement-issue-tree/
+    references/                       -- 自動マージ設計・検証手順・復旧・レポート書式
     sample/                           -- 引数例・ツリー例
     scripts/                          -- preview-tree.sh、implement-issue-tree.js（ツリー確認・自動開発）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
+    tests/                            -- node:test 回帰テスト（G0 ゲート・merge ループ・Workflow 起動可否）、lib/ に起動可否契約の実装
   implement-review/
   implement-review-pr/
   init-claude/
