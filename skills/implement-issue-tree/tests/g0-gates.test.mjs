@@ -173,8 +173,6 @@ test('mergeExecutePrompt: 新規マージ経路（allowMerge=true）は G0 の�
   // (i-b) ruleset の bypass 不能性（bypass_actors 空 + Repository ソース）。
   assert.ok(prompt.includes('bypass_actors'))
   assert.ok(prompt.includes('"Repository"'))
-  // (i-c) required checks の strict 適用（base 最新化必須）。
-  assert.ok(prompt.includes('strict_required_status_checks_policy'))
   // (iii) レビュースレッド解消のサーバー側強制。
   assert.ok(prompt.includes('required_review_thread_resolution'))
   // (iv) 宣言 context + App ID（integration_id）の組による required 化の照合。
@@ -190,6 +188,25 @@ test('mergeExecutePrompt: 新規マージ経路（allowMerge=true）は G0 の�
   // (v-b) required checks の発行元束縛（integration_id の数値必須 + App 発行 check-run の存在）。
   assert.ok(prompt.includes('(v-b)'))
   assert.ok(prompt.includes('integration_id'))
+})
+
+test('mergeExecutePrompt: G0 は strict 適用を要件にしない（並列ランを止めるため意図的な非要件）', () => {
+  // 回帰テスト: strict_required_status_checks_policy を G0 の合格条件に戻すと、
+  // 1 件マージするたびに他の open PR の base が陳腐化し、parallel >= 2 のランが
+  // 収束しなくなる（全 PR が BLOCKED のまま相互に進めない）。
+  // strict は鮮度制御であって bypass 不能性の制御ではないため、要件から外しても
+  // 「サーバーが同条件で拒否する」という G0 の主張は成立する。
+  // 詳細: references/automerge-design.md「strict を G0 の要件にしない理由」節。
+  const prompt = mergeExecutePrompt(item, impl, true, [{ app: 'cursor', contexts: ['Cursor Bugbot'] }])
+  // jq の合格判定（`... == true`）としては現れないこと。非要件である旨の記述は残るため、
+  // 識別子そのものの不在ではなく「真偽比較による判定」の不在を検査する。
+  assert.ok(!prompt.includes('strict_required_status_checks_policy == true'))
+  assert.ok(!prompt.includes('strict_required_status_checks_policy=true'))
+  // 非要件であることが明示され、後続の読み手が「抜け漏れ」と誤読して復活させないこと。
+  assert.ok(prompt.includes('(i-c)'))
+  assert.ok(prompt.includes('意図的な非要件'))
+  // 不合格理由の列挙からも strict が消えていること（存在しないゲート名を summary に書かせない）。
+  assert.ok(!prompt.includes('(i-c) の strict 適用なし'))
 })
 
 test('mergeExecutePrompt: 複数 App 宣言時は G0 (iv) が App ごとに slug と APP_ID 取得を対で出力する', () => {

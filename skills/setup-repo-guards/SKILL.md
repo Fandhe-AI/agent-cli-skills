@@ -118,8 +118,13 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
   - deletion 禁止 / non_fast_forward（force push 禁止）
   - pull_request: required_approving_review_count 0（人間 approver 不在の AI 運用。レビューゲートは
     codex の必須チェックで担保）・required_review_thread_resolution true・allowed_merge_methods ["squash"]
-  - required_status_checks（strict false）: **[<集約ジョブ>, （集約できない別 workflow の常時チェック）,
+  - required_status_checks（**strict false は必須**。true にすると 1 件マージするたびに他の open PR の
+    base が陳腐化し、implement-issue-tree の並列ランが収束しなくなる。strict は鮮度制御であって
+    bypass 不能性の制御ではないため、false でもクライアント側自動マージの G0 は通過する。
+    詳細は `.claude/rules/ruleset-policy.md`）: **[<集約ジョブ>, （集約できない別 workflow の常時チェック）,
     codex-review / codex]** の最小集合
+  - 自動マージ（implement-issue-tree の `autoMerge: true`）を使う場合、required_status_checks の
+    各エントリに発行元 App の `integration_id` を束縛する（未束縛だと G0 が `issuer-unbound` で辞退する）
 - 必須チェック選定の注意（重要な落とし穴）:
   - 直近 PR の check runs で「**常に報告される**」チェックのみ選ぶ。workflow レベル paths フィルタで
     実行されないことがあるチェックは入れない（マージが永久ブロックされる）。ジョブレベル条件の skipped は可
