@@ -156,3 +156,68 @@ test('ラッチ変数は while ループの外で 1 回だけ宣言される', (
   assert.notEqual(whileIndex, -1, '監視ループの while が見つからない（構造変更時は本テストも更新すること）')
   assert.ok(declIndex < whileIndex, 'ラッチ変数は while より前で宣言されていなければならない')
 })
+
+// ---------------------------------------------------------------------------
+// 救済ラウンドの終端分類（Fandhe-AI/rust-ai-library#681 の Bugbot 指摘）
+//
+// 対象バグ: 予算枯渇時に延長した救済ラウンドが 'timeout' を返すと lastState が
+// 'unresolved-comments' から 'timeout' へ上書きされ、terminalStatus が blocked
+// （halt 非カウント・次ラン monitoring 再開）から failed（halt カウント・再開対象外）へ
+// 化けていた。救済機構を入れる前の同じケースは blocked で終端していたため回帰である。
+// ---------------------------------------------------------------------------
+
+test('reconcileRescueRoundState: 救済ラウンドの timeout は品質ブロックへ戻す', () => {
+  const r = mod.reconcileRescueRoundState('timeout', true)
+  assert.equal(r.lastState, 'unresolved-comments', 'timeout のままだと failed 終端になり halt にカウントされる')
+  assert.equal(r.rescuePending, false)
+  assert.equal(r.restored, true)
+})
+
+test('reconcileRescueRoundState: 観測が成立した結果は上書きしない', () => {
+  // 救済の目的はスレッド内容の取り直し。observation が成立した以上その判定を尊重する。
+  for (const state of ['ready', 'needs-fix', 'blocked', 'unresolved-comments', 'invalid-monitor-result']) {
+    const r = mod.reconcileRescueRoundState(state, true)
+    assert.equal(r.lastState, state, `${state} を書き換えてはならない`)
+    assert.equal(r.restored, false)
+    assert.equal(r.rescuePending, false)
+  }
+})
+
+test('reconcileRescueRoundState: 救済ラウンド外の timeout は失敗のまま残す', () => {
+  // 残枠があった回の timeout まで品質ブロックへ写像すると、実際の監視失敗を隠してしまう。
+  const r = mod.reconcileRescueRoundState('timeout', false)
+  assert.equal(r.lastState, 'timeout')
+  assert.equal(r.restored, false)
+  assert.equal(r.rescuePending, false)
+})
+
+test('救済ラウンドの pending は granted のときだけ立つ', () => {
+  const branchStart = driverPart.indexOf('if (finding.unresolvedComments.length === 0) {')
+  assert.notEqual(branchStart, -1)
+  const rest = driverPart.slice(branchStart)
+  const continueMatch = /\n[ \t]*continue[ \t]*\n/.exec(rest)
+  assert.notEqual(continueMatch, null)
+  const branchBody = rest.slice(0, continueMatch.index)
+  // granted 以外で立てると、残枠のある回の timeout まで品質ブロックへ化ける。
+  assert.match(branchBody, /if \(rescan\.granted\) rescueRoundPending = true/)
+})
+
+test('救済ラウンドの写像が monitor 結果の直後に配線されている', () => {
+  const callIndex = driverPart.indexOf('reconcileRescueRoundState(lastState, rescueRoundPending)')
+  assert.notEqual(callIndex, -1, '救済ラウンドの写像呼び出しが見つからない（構造変更時は本テストも更新すること）')
+  // lastState の確定より後、かつ forceThreadRescan の解除より前でなければならない。
+  const assignIndex = driverPart.indexOf('lastState = MERGE_VALID_STATES.has(m?.state)')
+  const clearIndex = driverPart.indexOf('if (forceThreadRescan && (lastState ===')
+  assert.ok(assignIndex !== -1 && clearIndex !== -1)
+  assert.ok(assignIndex < callIndex, '写像は monitor 結果の確定より後でなければならない')
+  assert.ok(callIndex < clearIndex, '写像は forceThreadRescan の解除より前でなければならない')
+  assert.match(driverPart.slice(callIndex - 200, callIndex + 300), /lastState = reconciled\.lastState/)
+})
+
+test('救済 pending 変数は while ループの外で 1 回だけ宣言される', () => {
+  const declarations = driverPart.match(/let rescueRoundPending\b/g) ?? []
+  assert.equal(declarations.length, 1)
+  const declIndex = driverPart.indexOf('let rescueRoundPending')
+  const whileIndex = driverPart.indexOf('while (!merged && monitorsLeft > 0) {')
+  assert.ok(declIndex < whileIndex, '救済 pending は while より前で宣言されていなければならない')
+})
