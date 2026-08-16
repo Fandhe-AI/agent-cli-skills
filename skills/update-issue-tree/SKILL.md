@@ -61,10 +61,19 @@ fetch_sub_issues() {
 }
 
 # ルートから再帰的にツリー全階層を構築する（子の子も辿る）。
+# fetch_sub_issues の出力を jq へ直接パイプしない: パイプの終了ステータスは
+# 最終コマンド（jq）のものになり、pipefail 未設定のシェルではページ途中の
+# gh api 失敗（fetch_sub_issues の非ゼロ終了）が無視される。先行ページ分の
+# 出力が既に jq に渡っているため jq 自体は成功し、CHILDREN が不完全なまま
+# 再帰が継続してしまう。代入を条件式に置き、fetch_sub_issues の終了コードを
+# 個別に検査してから jq へ渡す。
 build_tree() {
   local PARENT="${1}"
-  local CHILDREN
-  CHILDREN=$(fetch_sub_issues "${PARENT}" | jq -s 'add | .[].number') || return 1
+  local RAW CHILDREN
+  if ! RAW=$(fetch_sub_issues "${PARENT}"); then
+    return 1
+  fi
+  CHILDREN=$(echo "${RAW}" | jq -s 'add | .[].number')
   for CHILD in ${CHILDREN}; do
     build_tree "${CHILD}" || return 1
   done
