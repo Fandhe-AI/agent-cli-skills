@@ -384,21 +384,36 @@ gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=
 # (B) 人間の診断専用。重複の内訳をチェック名つきで確認する
 # チェック名は PR 側の workflow / job 定義から生成される未信頼テキストのため、
 # monitor / merge-exec のコンテキストでは実行しない（権限境界の維持）
+# まず check 名だけで group_by し、件数 2 以上の group（=実際に重複している名前）に絞り込んでから、
+# その中で conclusion 別の内訳を出す。name=conclusion のペアで group_by すると
+# 同名 2 件が cancelled/success のように conclusion 違いで割れ、各 group が件数 1 になって
+# 重複そのものを取りこぼす（--paginate は全ページを配列として結合してから --jq へ渡すため、
+# ページ跨ぎでも group_by 前に全件が揃っている）
 gh api --paginate "repos/OWNER/REPO/commits/<sha>/check-runs?per_page=100" \
-  --jq '[.check_runs[] | "\(.name)=\(.conclusion)"] | sort | group_by(.) | map("\(.[0]) x\(length)") | join("\n")'
+  --jq '[.check_runs[] | {name, conclusion}]
+        | group_by(.name)
+        | map(select(length >= 2))
+        | map("\(.[0].name): " + ([.[] | .conclusion] | sort | group_by(.) | map("\(.[0]) x\(length)") | join(", ")))
+        | join("\n")'
 ```
 
 - **対処（前提を先に実測してからコマンドを実行する）**:
-  - 前提 1: 対象 run の `conclusion` が `cancelled` であることを実測する。
-  - 前提 2: 上記 (A) の重複件数が 1 以上であることを実測する。
+  - 前提 1: 上記 (A) の重複件数が 1 以上であることを実測する。
+  - 前提 2: rerun 対象を一意に決めるため、(B) で重複している check 名（例: `ci/build`）を確認したうえで、その名前を発行した cancelled run を job 一覧から特定する（下記コマンド）。同名 check を発行し得る cancelled run が複数見つかり一意に絞り込めない場合は rerun せず、`blocked`（quality）として最終レポートへ回す（誤った run を rerun すると無関係な job まで再実行し、原因不明のまま状態を変える）。
   - 上記 2 点を満たさないまま rerun しない（rerun は CI を再起動するため、「Review 通過後に CI を 1 回だけ起動する」設計に反する）。
 
 ```bash
-# cancelled な run を特定する
+# cancelled な run を head sha で列挙する（conclusion=cancelled のみに絞る）
 gh api --paginate "repos/OWNER/REPO/actions/runs?head_sha=<sha>&per_page=100" \
   --jq '.workflow_runs[] | select(.conclusion == "cancelled") | .id'
 
-# 全 job を回して残存 check を上書きする（--failed は付けない）
+# 各 cancelled run が発行した job 名を確認し、(B) で特定した重複 check 名と突き合わせる
+# （check-run の名前は `<job名>` または `<job名> / <ステップ>` 形式で job に対応するため、
+# jobs API の name で同定できる。複数 run の job 名が同じ重複 check 名にヒットする場合は一意化不可）
+gh api --paginate "repos/OWNER/REPO/actions/runs/<cancelled-run-id>/jobs?per_page=100" \
+  --jq '.jobs[].name'
+
+# 一意に対応付けられた run に限り、全 job を回して残存 check を上書きする（--failed は付けない）
 gh run rerun <run-id> -R OWNER/REPO
 ```
 
@@ -472,7 +487,7 @@ open のサブイシューが残っている場合、または受入基準が未
 |------|------|------|
 | 並列負荷による OOM | リンク中に `ld terminated with signal 9 [Killed]` | runner のメモリ逼迫が原因のため、混雑中に rerun しても同じ結果になる。キューが空くまで待つ |
 | 新規 CI 導入リポのラベル不足 | CI を新規導入したリポでは `dependencies` / `automated` ラベルが無く `gh pr create --label` が exit 1 になり、PR がそもそも作られない | 投入前にラベルを作成する |
-| flaky の誤判定 | 差分と無関係なテストが落ちる | 「main で同じジョブが green（`gh run list --branch main` で実測）」「差分が当該テストに影響しえない（変更パスを実測）」の 2 点を確認してから rerun する。推測で flaky 扱いにしない |
+| flaky の誤判定 | 差分と無関係なテストが落ちる | 「main で同じジョブが green」「差分が当該テストに影響しえない（変更パスを実測）」の 2 点を確認してから rerun する。前者は `gh run list --branch main` を単独では使わない（別 workflow の成功や skip されたジョブが紛れ込み、肝心の failing job が実は main でも失敗・未実行のまま green と誤認し得る）。失敗した PR 上の workflow ファイル名と job 名を特定したうえで、`gh run list --branch main --workflow <workflow-file> --json databaseId,conclusion --limit 1 --jq '.[0].databaseId'` で直近 run の ID を取得し、`gh api repos/OWNER/REPO/actions/runs/<run-id>/jobs --jq '.jobs[] | select(.name == "<job名>") | .conclusion'` で同一 job 名の conclusion が `success` であることを実測する。推測で flaky 扱いにしない |
 
 **推奨投入単位**: 1 バッチあたり 5 リポジトリ以下に分割し、前バッチの run がすべて完了（`gh run list` で `in_progress` / `queued` が 0）してから次バッチを投入する（22 リポなら 5 バッチ）。これは「注意事項」にある `parallel` の並列度指針（並列度を上げるほど CI キューが逼迫する）のリポジトリ横断版にあたる。
 
