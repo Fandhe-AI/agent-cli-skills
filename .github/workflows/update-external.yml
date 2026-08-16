@@ -297,6 +297,14 @@ jobs:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT }}
+          # 既定の true は書き込み PAT を .git/config の資格情報として残すため、
+          # 後続で走る外部 npm パッケージ (`npx skills`) とその依存が本リポへの
+          # push 権限を握れてしまう。skills-update は push 前に origin を自前の
+          # AUTH_URL へ張り替える実装（pin 先 action.yml の Commit and push branch
+          # ステップで実測確認）なので、資格情報を残さなくても push は成立する。
+          # submodule ジョブ側は private submodule の fetch に checkout の資格情報を
+          # 使うため既定のままとする（対称化しないこと）。
+          persist-credentials: false
 
       - name: Setup Node.js
         # actions/setup-node v6.4.0（リリースタグ pin。SHA 検証記録はファイル冒頭）
@@ -320,6 +328,12 @@ jobs:
         uses: Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96 # main
         with:
           token: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT }}
+          # source-token 省略時は token（書き込み PAT）が流用され、`npx skills` 実行
+          # 環境の GH_TOKEN / GITHUB_TOKEN と git の insteadOf 設定へ注入される。
+          # スキルソースは全て public のため取得に書き込み権限は不要で、read-only の
+          # github.token を明示して資格情報の境界を絞る。private ソースを増やす場合は
+          # ここを専用の read-only PAT に差し替えること。
+          source-token: ${{ github.token }}
           base-branch: main
           branch-prefix: chore/skills-update
           commit-message: 'chore: エージェントスキルを最新に更新'
