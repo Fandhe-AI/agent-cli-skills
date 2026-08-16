@@ -100,11 +100,10 @@ jobs:
           token: ${{ secrets.SUBMODULE_PAT }}
 
       - name: Update submodules and open PR
-        # main
         # Fandhe-AI/actions はタグ未公開のため main 追従の最新コミット SHA に固定
         # する（fed9c07 が main の祖先であることを compare API で確認済み。
-        # 検証記録はファイル冒頭）。
-        uses: Fandhe-AI/actions/submodule-update@fed9c07d98367f77e5e2b63bca38843f46feee96
+        # 検証記録はファイル冒頭）。行末の `# main` が追従元ブランチを示す。
+        uses: Fandhe-AI/actions/submodule-update@fed9c07d98367f77e5e2b63bca38843f46feee96 # main
         with:
           token: ${{ secrets.SUBMODULE_PAT }}
           base-branch: main
@@ -177,11 +176,10 @@ jobs:
           node-version: '20.20.2'
 
       - name: Update skills and open PR
-        # main
         # Fandhe-AI/actions はタグ未公開のため main 追従の最新コミット SHA に固定
         # する（fed9c07 が main の祖先であることを compare API で確認済み。
-        # 検証記録はファイル冒頭）。
-        uses: Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96
+        # 検証記録はファイル冒頭）。行末の `# main` が追従元ブランチを示す。
+        uses: Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96 # main
         with:
           token: ${{ secrets.SKILLS_PAT || secrets.SUBMODULE_PAT }}
           base-branch: main
@@ -193,6 +191,8 @@ jobs:
           # 無告知に変わるため明示する。1.5.22 は固定時点の npm latest と同一
           # （`npm view skills version` → 1.5.22 を 2026-08-16 に実測）であり、
           # 本変更は挙動を変えずに「固定」だけを行う意図である。
+          # input 名は pin 先 SHA の action.yml で実在確認済み（未知の input は
+          # 警告のみで job が緑のまま素通りし固定が無効化されるため要検証）。
           skills-version: '1.5.22'
           # auto-merge の ON/OFF。未設定 (null/空) を有効と解釈する非対称設計のため、
           # 未設定時は明示的に 'false' へフォールバックしオプトイン運用とする。
