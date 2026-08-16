@@ -22,8 +22,10 @@ name: Update external sources
 #     ahead_by=7, behind_by=0。すなわち fed9c07 は main の祖先であり、
 #     main は 7 コミット先行。タグ未公開のため main 追従の SHA pin となる。
 #
-# 上記 2 つの actions/* はブランチ追従ではなくリリースタグ pin である。
-# 追従元として `# main` と記載するのは事実に反するため記載しない。
+# 上記 2 つの actions/* はブランチ追従ではなくリリースタグ pin であるため、
+# uses 行末の注記は追従元タグ（`# v6.0.3` / `# v6.4.0`）とする。ここへ `# main` と
+# 書くと「main の先頭を追いかけて SHA を更新する」という誤った更新方針を示唆する。
+# `# main` を付けるのはタグ未公開で実際に main 追従となる Fandhe-AI/actions の 2 行のみ。
 # --------------------------------------------------------------------------
 
 on:
@@ -88,14 +90,13 @@ jobs:
     # 外部取得・submodule 更新・PR 作成の実処理量に見合う上限。ネットワーク
     # ハングやリモート応答待ちでランナーを占有し続けるのを防ぐ。
     timeout-minutes: 10
-    # 書き込み（push / PR 作成）は下記ステップの PAT で行う。書き込み用の
-    # GITHUB_TOKEN フォールバックは廃止済みのため、この permissions は PAT
-    # 不使用の派生構成向けの保険。なお先頭の存在判定ステップは GITHUB_TOKEN の
-    # contents: read だけを使う読み取り専用処理であり、廃止した書き込み用
-    # フォールバックには当たらない（詳細は当該ステップの注記）。
+    # 最小権限。書き込み（push / PR 作成）は下記ステップへ明示的に渡す PAT だけで
+    # 行うため、GITHUB_TOKEN に write は与えない。write を与えると composite action
+    # を含む全ステップから書き込み可能な github.token が参照でき、PAT の fail-closed
+    # ガードを迂回できる余分な資格情報経路になる。read が要るのは先頭の存在判定
+    # ステップ（Contents API の読み取り）だけ。
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     steps:
       # .gitmodules の有無を checkout より前に判定する。無ければ以降の全ステップを
       # skip し、ジョブは失敗ではなく成功で終える（更新対象が無いだけの既定構成を
@@ -122,7 +123,7 @@ jobs:
         # 避けるため POSIX シェルを明示する。
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           # gh api は HTTP エラーを一律 exit 1 に潰すため、404（対象なし）と
           # 通信・権限エラーを区別できない。HTTP status を直接取る curl を使う。
           curl_status=0
@@ -182,6 +183,7 @@ jobs:
         # 呼び出す composite action も bash 前提のため明示的に固定する。
         shell: bash
         run: |
+          set -euo pipefail
           if [ -z "${PAT}" ]; then
             msg="SUBMODULE_PAT が未設定。GITHUB_TOKEN へのフォールバックは廃止済み"
             msg="${msg}（bot 作成 PR が pull_request workflow を発火させず"
@@ -194,7 +196,7 @@ jobs:
       - name: Checkout
         if: steps.detect.outputs.present == 'true'
         # actions/checkout v6.0.3（リリースタグ pin。SHA 検証記録はファイル冒頭）
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # base-branch が main 固定のため、workflow_dispatch で非 main ブランチから
           # 起動された場合でも常に main を checkout し、他ブランチのツリー混入を防ぐ。
@@ -248,11 +250,11 @@ jobs:
     # npx skills のダウンロード・全スキル更新・PR 作成の実処理量に見合う上限。
     # submodule ジョブより取得対象が多いため長めに取る。
     timeout-minutes: 15
-    # 書き込みは下記ステップの PAT で行う。GITHUB_TOKEN へのフォールバックは
-    # 廃止済みのため、この permissions は PAT 不使用の派生構成向けの保険。
+    # 最小権限。理由は submodule ジョブ側の注記を参照（書き込みは PAT のみで行い、
+    # GITHUB_TOKEN に write を与えると PAT の fail-closed ガードを迂回できる経路が
+    # 増えるため）。read が要るのは先頭の存在判定ステップだけ。
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     steps:
       # PAT 未設定のまま後続へ進むと checkout の token が空文字となり、
       # actions/checkout は暗黙に GITHUB_TOKEN へフォールバックする。それでは
@@ -265,6 +267,7 @@ jobs:
         # 呼び出す composite action も bash 前提のため明示的に固定する。
         shell: bash
         run: |
+          set -euo pipefail
           if [ -z "${PAT}" ]; then
             msg="SKILLS_PAT / SUBMODULE_PAT がいずれも未設定。GITHUB_TOKEN への"
             msg="${msg}フォールバックは廃止済み（bot 作成 PR が pull_request"
@@ -281,7 +284,7 @@ jobs:
         # までフォールバックすると bot 作成 PR が pull_request workflow を発火させず
         # 必須チェック未実行で BLOCKED になる（PR #176 の障害）ため、
         # フォールバック連鎖は PAT 2 種で打ち止めとし、未設定なら上記ガードで落とす。
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # base-branch が main 固定のため、workflow_dispatch で非 main ブランチから
           # 起動された場合でも常に main を checkout し、他ブランチのツリー混入を防ぐ。
@@ -292,7 +295,7 @@ jobs:
       - name: Setup Node.js
         # actions/setup-node v6.4.0（リリースタグ pin。SHA 検証記録はファイル冒頭）
         # skills-update が使う npx skills のため node を固定する。
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           # メジャー指定 '20' は解決先パッチ版が日々変動し再現性がないため、
           # 実在するパッチ版へ固定する。20.20.2 は Node.js 20 系 (LTS Iron) の
