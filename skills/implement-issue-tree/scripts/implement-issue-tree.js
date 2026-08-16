@@ -748,8 +748,16 @@ function planForcedThreadRescan(monitorsLeft, rescueUsed) {
 // planForcedThreadRescan が延長した「救済ラウンド」の結果をどう終端させるかの判定。
 // 同じくハーネス非依存の純粋関数として切り出す（tests/merge-loop-rescan.test.mjs）。
 //
-// 呼び出し文脈: 予算枯渇時に 1 枠だけ延長して走らせた再走査ラウンドの monitor 結果を
-// 受け取り、そのラウンド直後に 1 度だけ呼ばれる。
+// 呼び出し文脈: 監視ループ（runMergeLoop）が退出した後、lastState が確定した単一地点
+// （break / continue / while 条件 false のすべてが通る choke point）で 1 度だけ呼ばれる。
+// ループ内の各ラウンド末尾（monitor 結果の直後）では呼ばない: 同一ラウンドの merge-exec が
+// 'unresolved-threads' 以外の reason（head-moved / checks-not-green / merge-failed）を返すと
+// classifyMergeExecDispatch が lastState を monitor 判定後に 'timeout' へ上書きするため、
+// monitor 直後に判定すると merge-exec 由来の写像を見逃す（agent-cli-skills#248 の P1）。
+//
+// 対象範囲: monitor 自身が 'timeout' を返した場合だけでなく、同一救済ラウンドの merge-exec
+// 写像由来の 'timeout' も含む。救済ラウンド外（呼び出し元の rescueRoundActive が false）の
+// 'timeout' は分類を変えない（実失敗を隠さないため、従来どおり既定の failed 終端のまま）。
 //
 // 解決する問題: 延長した枠は残り予算ゼロなので、その回の結果がそのまま終端 state になる。
 // 救済ラウンドが 'timeout'（＝スレッド内容を観測できないまま監視上限に到達）で返ると
@@ -762,18 +770,20 @@ function planForcedThreadRescan(monitorsLeft, rescueUsed) {
 // 走って monitorsLeft が積み増され、狙った blocked 終端に到達しない。無効な fix 結果は既定の
 // failed 終端になり、直そうとした halt カウント回帰がそのまま再現する
 // （Fandhe-AI/agent-cli-skills#246 への Bugbot High 指摘）。よって state は 'timeout' の
-// まま触らず、「即座にループを抜けて終端 status だけを品質ブロックへ分類する」指示を返す。
+// まま触らず、「終端 status だけを品質ブロックへ分類する」指示を返す（break は呼び出し元の
+// 責務ではなく、choke point 到達時点で既にループは退出済みのため不要）。
 //
 // 契約:
-//   - 救済ラウンド直後かつ結果が 'timeout' のときだけ terminate / qualityBlock を立てる。
-//     救済は「未解決スレッドの内容を取り直すための追加試行」であり、観測に失敗しても
-//     「未解決スレッドが残っている」という元の品質ブロックの事実は変わらない
+//   - 救済ラウンド中（rescueRoundActive）かつ結果が 'timeout' のときだけ terminate /
+//     qualityBlock を立てる。救済は「未解決スレッドの内容を取り直すための追加試行」であり、
+//     観測に失敗しても「未解決スレッドが残っている」という元の品質ブロックの事実は変わらない
 //   - 'ready' / 'needs-fix' / 'blocked' 等の有意な結果では何もしない（観測が成立した以上、
 //     その判定と通常の分岐処理を尊重する）
 //   - pending は常に false へ落とす（救済は 1 回限りで、次ラウンド以降へ持ち越さない）
-// 戻り値の rescuePending は呼び出し元の同名変数へそのまま代入して使う。
-function reconcileRescueRoundState(lastState, rescuePending) {
-  if (rescuePending && lastState === 'timeout') {
+// 戻り値の rescuePending は呼び出し元の rescueRoundActive へそのまま代入して使う
+// （フィールド名自体は既存呼び出し元との互換のため rescuePending のまま据え置く）。
+function reconcileRescueRoundState(lastState, rescueRoundActive) {
+  if (rescueRoundActive && lastState === 'timeout') {
     return { terminate: true, qualityBlock: true, rescuePending: false }
   }
   return { terminate: false, qualityBlock: false, rescuePending: false }
@@ -3440,10 +3450,23 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // 毎ラウンド初期化されラッチが機能せず、merge-exec が空一覧を返し続ける間ループが無限化する）。
   // 判定は planForcedThreadRescan（純粋関数・回帰テスト対象）に委ねる。
   let forceThreadRescanBudgetUsed = false
-  // 直前に救済延長した枠を消費中かを示す。延長した回は残り予算ゼロのため、その結果が
-  // そのまま終端 state になる。timeout（観測不能）で終わった場合の扱いは
-  // reconcileRescueRoundState（純粋関数・回帰テスト対象）に委ねる。
+  // 「次」ラウンドを救済ラウンドとして開始する予約。planForcedThreadRescan が枠を延長した回に
+  // 一度だけ true になり、ラウンド先頭（monitorsLeft-- の直後）で rescueRoundActive へ移送されて
+  // 直ちに false へ戻る（同一ラウンド内では二重に消費しない）。
   let rescueRoundPending = false
+  // 「今」走っているラウンドが救済ラウンドであるかを示す。予約 → active の 2 段構えにした理由:
+  // monitor 結果の直後（旧実装）で pending をここへ消費してしまうと、同じラウンドの merge-exec が
+  // 返す reason（head-moved 等）を classifyMergeExecDispatch が timeout へ写像した場合に pending が
+  // 既に false のため救済ラウンドとして判定されず failed 終端に落ちる
+  // （agent-cli-skills#248 の P1）。そのため判定自体はラウンド内では行わず、merge-exec の写像まで
+  // 確定したループ退出後の単一地点（choke point）で reconcileRescueRoundState に 1 度だけ渡す。
+  // 救済ラウンドは必ず monitorsLeft === 0 で走る（planForcedThreadRescan は枠 0 のときだけ 1 を
+  // 返し、ループ先頭で即減算されるため）。よって break を挟まなくても当該ラウンドで while 条件が
+  // false になり確実に退出する（例外は fix 分岐が monitorsLeft を積み増す場合のみ。fix 分岐は
+  // lastState が 'unresolved-comments' / 'needs-fix' のときだけ入り 'timeout' では入らないため
+  // 該当しない。かつ次ラウンド先頭で rescueRoundActive は必ずクリアされるため、後続ラウンドの
+  // timeout が品質ブロックへ誤って化けることもない）。
+  let rescueRoundActive = false
   // 救済ラウンドが観測に失敗して終端したことを示す。lastState は 'timeout' のまま残す
   // （実際に観測できなかったのは事実であり、終端理由の記録としては正しい）が、終端 status
   // の分類だけは元の未解決スレッド由来の品質ブロックとして blocked にする。
@@ -3484,6 +3507,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   }
   while (!merged && monitorsLeft > 0) {
     monitorsLeft--
+    // 予約されていた救済ラウンドを「今ラウンド」へ移す（予約は必ず消費する）。判定自体は
+    // ラウンド内では行わず、merge-exec の写像まで確定したループ退出後に 1 回だけ評価する
+    // （agent-cli-skills#248）。
+    rescueRoundActive = rescueRoundPending
+    rescueRoundPending = false
     // 直前ラウンドの fix による outOfScopeComments 分類（未検証の自己申告）は monitor へ一切
     // 渡さない。monitor は毎ラウンド GraphQL から自ら収集したスレッド内容のみで独立判定する。
     const m = await agent(monitorPrompt(item, impl, externalCheckApps, externalChecksConfirmed, autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, forceThreadRescan), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA })
@@ -3495,20 +3523,6 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     if (lastState === 'merged') {
       log(`#${item.number}: 監視エージェントが非推奨の state: merged を返した。ready として扱いマージ実行エージェントで再検証する`)
       lastState = 'ready'
-    }
-    // 救済延長した枠で走ったラウンドが観測に失敗（timeout）した場合は、fix 分岐へ入れず
-    // ここで終端させ、終端 status だけを品質ブロックへ分類する。延長枠は残り予算ゼロで
-    // 即終端するため、ここで分類しないと blocked が failed へ化けて halt にカウントされる
-    // （rust-ai-library#681）。lastState を書き換えないのは、'unresolved-comments' が fix
-    // 起動状態でもあり、書き換えると fix が走って狙った終端に届かないため（#246 の指摘）。
-    if (rescueRoundPending) {
-      const reconciled = reconcileRescueRoundState(lastState, rescueRoundPending)
-      rescueRoundPending = reconciled.rescuePending
-      if (reconciled.terminate) {
-        rescueTimeoutQualityBlock = reconciled.qualityBlock
-        log(`#${item.number}: 救済ラウンドがスレッド内容を観測できないまま timeout したため、未解決スレッド由来の品質ブロックとして終端させる（次回実行で monitoring 再開の対象）`)
-        break
-      }
     }
     // 強制再走査フラグは monitor が手順 5 の走査を実行したラウンド（unresolved-comments / ready）
     // で解除する。needs-fix / timeout / blocked では持ち越す（走査未実施の可能性が残るため）。
@@ -3973,6 +3987,22 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // 定義上つねに品質ブロック。rescueTimeoutQualityBlock は救済ラウンドが観測に失敗した
     // ケースで、lastState は 'timeout' のままだが実体は未解決スレッド由来の品質ブロック
     // （救済機構を入れる前は 'unresolved-comments' として blocked 終端していた）。
+    // 救済ラウンドの終端分類はここ（break / continue / while 条件 false のすべてが通る唯一の
+    // choke point）で 1 回だけ評価する。monitor 由来の timeout に加え、同一ラウンドの merge-exec
+    // 由来の timeout 写像（head-moved / checks-not-green / merge-failed）も対象に含めるため、
+    // ラウンド内では判定しない（agent-cli-skills#248）。lastState は書き換えない（'unresolved-
+    // comments' は fix 起動状態でもあり、書き換えると狙った blocked 終端に届かない。#246 の指摘）。
+    const reconciled = reconcileRescueRoundState(lastState, rescueRoundActive)
+    // 戻り値の rescuePending は常に false（純粋関数の契約）。ここで代入するのは、この関数が
+    // choke point であり続ける限り「予約を消費したら必ず false へ戻す」契約を呼び出し側の
+    // 変数上でも読める形にしておくため（値は以降参照しないが return より前の局所変数として残す）。
+    rescueRoundActive = reconciled.rescuePending
+    // mergedButIssueOpen は「マージ済みだがイシュー未クローズ」の再試行経路で lastState を
+    // timeout にするため、救済の観測失敗と取り違えた文言をログへ出さない（分類は元から blocked）。
+    if (reconciled.terminate && !mergedButIssueOpen) {
+      rescueTimeoutQualityBlock = reconciled.qualityBlock
+      log(`#${item.number}: 救済ラウンドがスレッド内容を観測できないまま timeout したため、未解決スレッド由来の品質ブロックとして終端させる（次回実行で monitoring 再開の対象）`)
+    }
     const blockedIsRecoverable = lastState === 'blocked' && lastBlockedReason === 'quality'
     const terminalStatus =
       !routingErrorDetected
