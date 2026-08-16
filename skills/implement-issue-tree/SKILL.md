@@ -372,9 +372,12 @@ gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証し�
 
 ```bash
 # (A) エージェントが実行してよい形。同名 check-run の重複「件数」のみを返し、チェック名は出力しない
+# --jq はページごとに適用されるため group_by をページ単位で行うとページ跨ぎの重複を見逃す
+# （同名チェックが 2 ページに分かれて 1 件ずつ載ると各ページの重複件数が 0 になり得る）。
+# 名前一覧をパイプへ流してシェル側（sort | uniq -d）で全ページ分を集約する
 gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=100" \
-  --jq '[.check_runs[] | {n: .name, c: .conclusion}] | group_by(.n) | map(select(length > 1)) | length'
-# → --jq はページごとに適用されるため出力はページ数ぶんになる。全ページを合計し、1 以上なら重複あり
+  --jq '.check_runs[].name' | sort | uniq -d | wc -l
+# → 出力は整数 1 行のみ（チェック名はパイプ内で集約され出力に現れない）。1 以上なら重複あり
 ```
 
 ```bash
