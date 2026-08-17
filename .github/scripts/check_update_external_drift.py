@@ -5,10 +5,11 @@
 --------------------
 下流リポジトリの ``.github/workflows/update-external.yml`` が、上流 reusable
 workflow（``Fandhe-AI/actions/.github/workflows/update-external.yml``）の薄い
-wrapper として健全に保たれているかを 4 つの軸で実測し、Markdown レポートを返す。
+wrapper として健全に保たれているか、かつその定期実行自体が生きているかを
+5 つの軸で実測し、Markdown レポートを返す。
 ``.github/workflows/update-external-drift.yml`` から日次で呼ばれる。
 
-なぜ「マーカーの grep」ではなく 4 軸なのか（イシュー #260 / #261）
+なぜ「マーカーの grep」ではなく 5 軸なのか（イシュー #260 / #261 / #304）
 ------------------------------------------------------------------
 #260 の当初案は ``persist-credentials`` / ``source-token`` /
 ``auto-merge-immediate-fallback`` / ``skills-version`` / ``node-version`` /
@@ -21,10 +22,16 @@ pin SHA を**各下流ファイルから**抽出する設計だった。#261 で
 1 ファイルの検査へ畳み、下流側は「wrapper であること」「pin が新しいこと」
 「vendor しているのに CI が無い状態でないこと」を見る 3 軸へ再定義した。
 
+#304 では、ファイル内容が正しくても GitHub が「一定期間リポジトリ活動が無い」
+scheduled workflow を自動無効化する（``disabled_inactivity``）ことが判明した。
+軸 1-4 はファイル内容しか見ないためこの停止を検出できず、無告知で同期が
+止まる。軸 5 はこの穴を埋める。
+
   軸 1  wrapper か否か          … 手管理ファイルへの逆戻り（LEGACY）を検知
   軸 2  pin の鮮度              … 上流を強化しても pin が古いと届かない
   軸 3  同期 CI の欠落          … skills を vendor しているのに workflow が無い
   軸 4  上流 reusable の劣化    … 旧マーカーの意図。18 リポ分の grep が 1 ファイルへ
+  軸 5  定期実行の生存          … ファイルは正しいのに schedule が無告知停止した状態を検知
 
 設計上の約束
 ------------
@@ -33,9 +40,10 @@ pin SHA を**各下流ファイルから**抽出する設計だった。#261 で
   （終了コード 1）。個別リポの取得失敗は ``UNKNOWN`` として集計に残し、
   黙って除外しない。
 - **純粋関数と I/O の分離。** 判定ロジック（``classify_workflow`` /
-  ``evaluate_pin`` / ``check_upstream_markers``）は GitHub API に触れない
-  純粋関数として切り出し、``test_check_update_external_drift.py`` が
-  fixture に対して直接実行できるようにしてある。
+  ``evaluate_pin`` / ``check_upstream_markers`` / ``evaluate_schedule``）は
+  GitHub API に触れない純粋関数として切り出し、
+  ``test_check_update_external_drift.py`` が fixture に対して直接実行できる
+  ようにしてある。
 """
 
 from __future__ import annotations
@@ -46,6 +54,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import yaml
 
@@ -72,6 +81,18 @@ EXCLUDED_REPOS: dict[str, str] = {
 UPSTREAM_REPO = "Fandhe-AI/actions"
 UPSTREAM_WORKFLOW_PATH = ".github/workflows/update-external.yml"
 WORKFLOW_PATH = ".github/workflows/update-external.yml"
+
+# Actions API（``actions/workflows/{workflow_id}``）に渡すファイル名。上の
+# ``WORKFLOW_PATH`` はリポジトリ内の相対パス（contents API 用）だが、Actions API
+# は ``owner/repo/path`` ではなくファイル名（またはリポジトリ内での相対パス）を
+# workflow_id の代わりに受け付ける。両者は現状同じ文字列だが、コメント上の混同を
+# 避けるため意味の異なる用途ごとに定数を分けてある。
+WORKFLOW_FILENAME = "update-external.yml"
+
+# リポジトリ名を Actions API のパスへ埋め込む前の検証（OWASP A03）。
+# ``gh repo list`` 由来で通常は安全な文字列のみだが、想定外の文字が来た場合に
+# 別エンドポイントへ化けないよう構造的に保証する。
+_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # レポートを集約する固定タイトルの issue。日次で新規 issue を作らず、
 # 常にこの 1 件を更新する。
@@ -158,6 +179,22 @@ def has_workflow_call(spec: dict) -> bool:
     return on == "workflow_call"
 
 
+def has_schedule_trigger(spec: dict) -> bool:
+    """``on:`` に ``schedule`` トリガを持つかを判定する（軸 5 の対象判定）。
+
+    ``workflow_dispatch`` のみの wrapper は軸 5 の対象外（構造的に schedule が
+    無いので「定期実行の生存」を問うこと自体が無意味）。``workflow_on`` を経由
+    することで、裸の ``on`` が PyYAML により ``True`` キーへ落ちるケース
+    （軸 1 の ``has_workflow_call`` と同じ事情）も取りこぼさない。
+    """
+    on = workflow_on(spec)
+    if isinstance(on, dict):
+        return "schedule" in on
+    if isinstance(on, list):
+        return "schedule" in on
+    return on == "schedule"
+
+
 # ---------------------------------------------------------------------------
 # 軸 1: wrapper か否かの分類（純粋関数）
 # ---------------------------------------------------------------------------
@@ -207,10 +244,22 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
         spec = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         # パースできない = 検査不能。green には倒さない。
-        return {"kind": KIND_UNPARSEABLE, "pin": None, "reason": f"YAML パース失敗: {exc}"}
+        return {
+            "kind": KIND_UNPARSEABLE, "pin": None,
+            "reason": f"YAML パース失敗: {exc}", "has_schedule": False,
+        }
 
     if not isinstance(spec, dict):
-        return {"kind": KIND_UNPARSEABLE, "pin": None, "reason": "YAML マッピングではない"}
+        return {
+            "kind": KIND_UNPARSEABLE, "pin": None,
+            "reason": "YAML マッピングではない", "has_schedule": False,
+        }
+
+    # 軸 5 の対象判定はここで一度だけ行い、以降の全ての return に含める。
+    # kind 分岐（LEGACY / WRAPPER / REUSABLE-DEFINITION 等）と独立した情報
+    # だが、呼び出し側（scan）が「kind による早期 continue の前に軸 5 を
+    # 判定する」契約を守れるよう、戻り値のスキーマを揃えておく。
+    has_schedule = has_schedule_trigger(spec)
 
     if is_upstream and has_workflow_call(spec):
         return {
@@ -218,11 +267,15 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
             "pin": None,
             "reason": f"{UPSTREAM_REPO} の on: workflow_call を持つ reusable 定義本体"
             "のため検査対象外",
+            "has_schedule": has_schedule,
         }
 
     jobs = spec.get("jobs")
     if not isinstance(jobs, dict):
-        return {"kind": KIND_UNPARSEABLE, "pin": None, "reason": "jobs セクションが無い"}
+        return {
+            "kind": KIND_UNPARSEABLE, "pin": None,
+            "reason": "jobs セクションが無い", "has_schedule": has_schedule,
+        }
 
     # **YAML 原文への正規表現ではなくパース済みの jobs.<job>.uses を見る。**
     # 原文 grep だと、コメントアウトされた `uses:` 行や導入手順を貼っただけの
@@ -245,6 +298,7 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
             "pin": None,
             "reason": "上流 reusable workflow を job-level の uses で参照していない"
             "（手管理テンプレートのまま）",
+            "has_schedule": has_schedule,
         }
 
 
@@ -255,9 +309,10 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
             "kind": KIND_WRAPPER_UNPINNED,
             "pin": ref,
             "reason": f"reusable への参照が SHA 固定されていない（@{ref}）",
+            "has_schedule": has_schedule,
         }
 
-    return {"kind": KIND_WRAPPER, "pin": ref, "reason": ""}
+    return {"kind": KIND_WRAPPER, "pin": ref, "reason": "", "has_schedule": has_schedule}
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +564,131 @@ def check_upstream_markers(text: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# 軸 5: 定期実行の生存（純粋関数）
+# ---------------------------------------------------------------------------
+
+SCHED_OK = "SCHED_OK"
+SCHED_DISABLED = "SCHED_DISABLED"
+SCHED_STALE = "SCHED_STALE"
+SCHED_UNKNOWN = "SCHED_UNKNOWN"
+
+# 実測（2026-08-17）の健全なギャップは約 19 時間。検知ジョブと update-external の
+# cron の間には約 3 時間のずれがある。N=3 だと「2 回連続で日次実行が飛んだ」状態
+# を green に読んでしまう実測ケースがあったため N=2 を既定にする。偽陽性
+# （レポートに 1 行増えるだけ）より偽陰性（無告知停止の見逃し）のコストが高い
+# という非対称性が根拠（詳細: docs/update-external-schedule.md）。
+SCHEDULE_STALE_DAYS_DEFAULT = 2
+
+# GitHub の scheduled workflow 自動無効化の理由別 state。値は Actions API の
+# ``workflow.state`` フィールドがそのまま返す文字列。
+_SCHED_DISABLED_STATES = {
+    "disabled_inactivity": "無活動により自動無効化された",
+    "disabled_manually": "手動で無効化された",
+    "disabled_fork": "fork のため schedule トリガが動作しない",
+}
+
+
+def _parse_ts(value: object) -> datetime | None:
+    """ISO 8601 タイムスタンプを aware な ``datetime`` へ変換する。
+
+    Actions API はエンドポイントによって形式が異なる（実測: workflow オブジェクト
+    は ``2026-06-14T17:59:22.000+09:00``、runs は ``2026-08-14T02:00:09Z``）。
+    ``datetime.fromisoformat`` は Python 3.11+ で ``Z`` サフィックスを解釈できるが、
+    本番実行の Python バージョンに依存させないため事前に ``+00:00`` へ置換する。
+
+    パース失敗（``ValueError``）や、naive な文字列（``tzinfo is None``。
+    aware な ``now`` との比較が ``TypeError`` になり fail-closed のメッセージを
+    出せないままスキャンを落としてしまう）は ``None`` に落とし、呼び出し側で
+    ``SCHED_UNKNOWN`` として扱わせる。例外は絶対に外へ投げない。
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt
+
+
+def evaluate_schedule(
+    state: str,
+    last_run_iso: str | None,
+    created_at_iso: str | None,
+    now: datetime,
+    threshold_days: int,
+) -> dict:
+    """workflow の schedule トリガが生きているかを判定する（軸 5 の核心）。
+
+    GitHub API に一切触れない純粋関数。``now`` を引数で受けてテストを決定的に
+    する（``datetime.now()`` を内部で呼ばない）。
+
+    判定は ``state`` と「直近の schedule 実行からの経過日数」の**両方**を使う。
+    ``state`` 単独では検出できない実例（``template-articles`` は ``state`` が
+    ``active`` のまま schedule が約 3.7 日止まっていた、2026-08-17 実測）が
+    軸 5 導入の根拠であるため、``active`` であることは「乖離が無い」の必要条件
+    でしかない。
+
+    戻り値は ``{"state", "detail"}``。``detail`` には最終実行タイムスタンプと
+    経過日数を必ず含める（読み手がしきい値を信用せず自分で判断できるように
+    するため。docs/update-external-schedule.md 参照）。
+    """
+    if state in _SCHED_DISABLED_STATES:
+        return {
+            "state": SCHED_DISABLED,
+            "detail": f"{_SCHED_DISABLED_STATES[state]}（state={state}）",
+        }
+    if state != "active":
+        return {"state": SCHED_UNKNOWN, "detail": f"想定外の state（{state!r}）"}
+
+    if last_run_iso is not None:
+        last_run = _parse_ts(last_run_iso)
+        if last_run is None:
+            return {
+                "state": SCHED_UNKNOWN,
+                "detail": f"最終 schedule 実行のタイムスタンプを解析できない（{last_run_iso!r}）",
+            }
+        delta_days = (now - last_run).total_seconds() / 86400
+        detail = (
+            f"最終 schedule 実行: {last_run_iso}（{delta_days:.1f} 日経過、"
+            f"しきい値 {threshold_days} 日）"
+        )
+        if delta_days >= threshold_days:
+            return {"state": SCHED_STALE, "detail": detail}
+        return {"state": SCHED_OK, "detail": detail}
+
+    # schedule 実行が 1 件も見つからない（Actions API が total_count == 0 を
+    # 返した）。Actions の実行履歴には保持期間があるため、これは「一度も
+    # 実行されていない」ことの証明にはならない。ここでは断定せず、workflow の
+    # 導入直後かどうかを ``created_at`` で猶予判定する。
+    if created_at_iso is None:
+        return {"state": SCHED_UNKNOWN, "detail": "workflow の created_at が取得できない"}
+    created_at = _parse_ts(created_at_iso)
+    if created_at is None:
+        return {
+            "state": SCHED_UNKNOWN,
+            "detail": f"workflow の created_at を解析できない（{created_at_iso!r}）",
+        }
+    delta_days = (now - created_at).total_seconds() / 86400
+    if delta_days < threshold_days:
+        return {
+            "state": SCHED_OK,
+            "detail": f"導入から {delta_days:.1f} 日（猶予期間中。直近の schedule 実行は未確認）",
+        }
+    return {
+        "state": SCHED_STALE,
+        "detail": (
+            f"直近の schedule 実行を確認できない（workflow 導入から "
+            f"{delta_days:.1f} 日経過、しきい値 {threshold_days} 日）"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # I/O レイヤ（ここから下は GitHub API に触れる）
 # ---------------------------------------------------------------------------
 
@@ -654,6 +834,55 @@ def get_claude_skills_tree_mode(repo: str, token: str) -> str:
     return f"{skills.get('mode')} ({skills.get('type')})"
 
 
+def fetch_schedule_health(repo: str, token: str) -> tuple[str, object]:
+    """Actions API から軸 5 の判定に必要な情報を取得する。
+
+    戻り値は ``("ok", {"state", "created_at", "last_run"})`` /
+    ``("forbidden", 理由)`` / ``("error", 理由)`` の 3 値。403 だけを別値に
+    しているのは、``scan()`` が「軸 5 候補の全リポジトリが 403」を
+    ``SUBMODULE_PAT`` の Actions: read 権限不足による系統的失敗として検出する
+    ため（他の失敗と畳むと原因が読み取れない ``UNKNOWN`` の山になる）。
+
+    ``state`` が ``active`` のときだけ実行履歴 API を追加で叩く。``disabled_*``
+    のときは呼んでも意味がなく、API 消費を無駄に増やすだけのため。
+    """
+    status, body = gh_get_with_status(
+        f"repos/{repo}/actions/workflows/{WORKFLOW_FILENAME}", token
+    )
+    if status == 403:
+        return "forbidden", "workflow メタデータ取得が HTTP 403"
+    if status != 200:
+        return "error", f"workflow メタデータ取得が HTTP {status}"
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return "error", "workflow メタデータの JSON 解析に失敗"
+
+    wf_state = data.get("state")
+    created_at = data.get("created_at")
+
+    last_run_iso = None
+    if wf_state == "active":
+        r_status, r_body = gh_get_with_status(
+            f"repos/{repo}/actions/workflows/{WORKFLOW_FILENAME}/runs"
+            "?event=schedule&per_page=1",
+            token,
+        )
+        if r_status == 403:
+            return "forbidden", "schedule 実行履歴取得が HTTP 403"
+        if r_status != 200:
+            return "error", f"schedule 実行履歴取得が HTTP {r_status}"
+        try:
+            runs_data = json.loads(r_body)
+        except json.JSONDecodeError:
+            return "error", "schedule 実行履歴の JSON 解析に失敗"
+        runs = runs_data.get("workflow_runs") or []
+        if runs:
+            last_run_iso = runs[0].get("created_at")
+
+    return "ok", {"state": wf_state, "created_at": created_at, "last_run": last_run_iso}
+
+
 # ---------------------------------------------------------------------------
 # スキャン本体
 # ---------------------------------------------------------------------------
@@ -676,10 +905,23 @@ class ScanResult:
     findings: list[Finding] = field(default_factory=list)
     unknowns: list[Finding] = field(default_factory=list)
     scanned: int = 0
+    # 軸 5: 定期実行の生存。schedule_ok は乖離なしの下流リポ、schedule_candidates
+    # は軸 5 の対象件数（has_schedule な wrapper/legacy）、schedule_forbidden は
+    # Actions API が 403 を返した件数（全候補 403 なら scan() が ScanError にする）。
+    schedule_ok: list[str] = field(default_factory=list)
+    schedule_candidates: int = 0
+    schedule_forbidden: int = 0
 
 
-def scan(org: str, token: str) -> ScanResult:
+def scan(
+    org: str,
+    token: str,
+    schedule_stale_days: int = SCHEDULE_STALE_DAYS_DEFAULT,
+) -> ScanResult:
     result = ScanResult()
+    # 軸 5 の「経過日数」判定を 1 スキャン内で決定的にする（ループの途中で
+    # now が進み、同じスキャン内で境界を跨いで判定がぶれることを避ける）。
+    scan_now = datetime.now(timezone.utc)
 
     # --- 上流 main SHA の解決（失敗はスキャン全体の失敗）---
     upstream_sha = str(
@@ -746,6 +988,16 @@ def scan(org: str, token: str) -> ScanResult:
             result.excluded.append((repo, EXCLUDED_REPOS[name]))
             continue
 
+        if not _REPO_NAME_RE.match(name):
+            # `gh repo list` 由来で通常はここに来ないが、来た場合に不正な
+            # 文字列をそのまま API パスへ埋め込んで別エンドポイントへ化けるのを
+            # 構造的に防ぐ（OWASP A03）。検査不能として扱い、黙って除外しない。
+            result.unknowns.append(
+                Finding(repo, "UNKNOWN", f"リポジトリ名が想定外の文字を含む: {name!r}")
+            )
+            print(f"::warning::{repo}: リポジトリ名が想定外の文字を含むため検査をスキップ")
+            continue
+
         result.scanned += 1
         status, text = gh_get_with_status(
             f"repos/{repo}/contents/{WORKFLOW_PATH}", token, raw=True
@@ -754,6 +1006,48 @@ def scan(org: str, token: str) -> ScanResult:
         if status == 200:
             info = classify_workflow(text, is_upstream=(repo == UPSTREAM_REPO))
             kind = info["kind"]
+
+            # --- 軸 5: 定期実行の生存 ---
+            # kind による早期 continue（LEGACY / UNPARSEABLE / WRAPPER_UNPINNED
+            # 等）の**前**に実行する。LEGACY でも schedule トリガを持つリポは
+            # 軸 5 の対象であり（手管理のままでも同期自体は動いている場合と、
+            # 同期どころか schedule 自体が死んでいる場合は障害の種類も直し方も
+            # 違うため、1 リポが軸 1 と軸 5 の両方で報告されるのは意図どおり）、
+            # REUSABLE-DEFINITION（上流本体・schedule 概念が無い）と
+            # UNPARSEABLE（YAML として schedule の有無を判定できない）だけを除く。
+            if kind not in (KIND_REUSABLE_DEFINITION, KIND_UNPARSEABLE) and info["has_schedule"]:
+                result.schedule_candidates += 1
+                sched_outcome, sched_payload = fetch_schedule_health(repo, token)
+                if sched_outcome == "forbidden":
+                    result.schedule_forbidden += 1
+                    result.unknowns.append(Finding(repo, "SCHED_UNKNOWN", sched_payload))
+                    print(f"::warning::{repo}: {sched_payload}")
+                elif sched_outcome == "error":
+                    result.unknowns.append(Finding(repo, "SCHED_UNKNOWN", sched_payload))
+                    print(f"::warning::{repo}: {sched_payload}")
+                else:
+                    verdict = evaluate_schedule(
+                        sched_payload["state"],
+                        sched_payload["last_run"],
+                        sched_payload["created_at"],
+                        scan_now,
+                        schedule_stale_days,
+                    )
+                    if verdict["state"] == SCHED_OK:
+                        result.schedule_ok.append(repo)
+                    elif verdict["state"] == SCHED_DISABLED:
+                        result.findings.append(
+                            Finding(repo, "SCHEDULE-DISABLED", verdict["detail"])
+                        )
+                    elif verdict["state"] == SCHED_STALE:
+                        result.findings.append(
+                            Finding(repo, "SCHEDULE-STALE", verdict["detail"])
+                        )
+                    else:
+                        result.unknowns.append(
+                            Finding(repo, "SCHED_UNKNOWN", verdict["detail"])
+                        )
+                        print(f"::warning::{repo}: {verdict['detail']}")
 
             if kind == KIND_REUSABLE_DEFINITION:
                 # 軸 1 の自動除外。リポ名のハードコードに頼らない構造判定。
@@ -835,6 +1129,16 @@ def scan(org: str, token: str) -> ScanResult:
         result.unknowns.append(Finding(repo, "UNKNOWN", msg))
         print(f"::warning::{repo}: {msg}")
 
+    # 軸 5 候補の全件が 403 なら、個別 UNKNOWN の山として見せず PAT のスコープ
+    # 不足という系統的原因として ScanError にする（`SUBMODULE_PAT` の
+    # Actions: read 権限不足を名指しする）。候補の一部だけが 403 の場合は
+    # 正常系（他リポの判定）を巻き込まないよう UNKNOWN に留める。
+    if result.schedule_candidates > 0 and result.schedule_forbidden == result.schedule_candidates:
+        raise ScanError(
+            "軸 5（定期実行の生存）の候補リポジトリ全件で Actions API が 403 を返した。"
+            "`SUBMODULE_PAT` に Actions: read 権限が必要"
+        )
+
     return result
 
 
@@ -849,9 +1153,11 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
     ``$GITHUB_STEP_SUMMARY`` と報告 issue の本文で同じものを使う。乖離 0 件でも
     「0 件だった」と明記する（出力が無いことと 0 件であることを混同させない）。
 
-    長さの上限: 全 119 リポが最長の SYNC-CI-ABSENT 行になった最悪ケースで
-    23,502 文字を実測（2026-08-17）。GitHub issue 本文の上限 65,536 文字に対し
-    十分な余裕があるため切り詰めは行わない。
+    長さの上限: 軸 5 追加により 1 リポが軸 1-3 と軸 5 の両方で findings 行を
+    持ちうる（例: SYNC-CI-ABSENT かつ SCHEDULE-STALE）ため、全 119 リポが
+    最長行 × 2 件になった合成の最悪ケースで 43,513 文字を実測
+    （2026-08-18、軸 5 追加後に再計測）。GitHub issue 本文の上限 65,536 文字に
+    対し十分な余裕があるため切り詰めは行わない。
     """
     marker_fail = [m for m in result.upstream_markers if not m["ok"]]
     drift = len(result.findings) + len(marker_fail)
@@ -863,21 +1169,32 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
     lines.append(f"- 検査対象リポジトリ: {result.scanned} 件（非アーカイブ全件）")
     lines.append(f"- 乖離: **{drift} 件**（下流 {len(result.findings)} / 上流マーカー {len(marker_fail)}）")
     lines.append(f"- 検査不能 (UNKNOWN): **{len(result.unknowns)} 件**")
+    lines.append(
+        f"- 軸 5 対象（schedule トリガあり）: {result.schedule_candidates} 件"
+        f"・生存確認 (schedule_ok): {len(result.schedule_ok)} 件"
+    )
     if run_url:
         lines.append(f"- 実行: {run_url}")
     lines.append("")
 
     # 乖離 0 件でも必ず明示する（「出力が無い」と「0 件だった」を混同させない）。
-    lines.append("### 軸 1-3: 下流リポジトリ")
+    lines.append("### 軸 1-3・5: 下流リポジトリ")
     lines.append("")
     if result.findings:
         lines.append("| リポジトリ | 分類 | 詳細 |")
         lines.append("| --- | --- | --- |")
         for f in sorted(result.findings, key=lambda x: (x.category, x.repo)):
             lines.append(f"| `{f.repo}` | {f.category} | {f.detail} |")
+        if any(f.category in ("SCHEDULE-DISABLED", "SCHEDULE-STALE") for f in result.findings):
+            lines.append("")
+            lines.append(
+                "軸 5（定期実行の生存）の乖離が見つかった。復旧手順は "
+                "`docs/update-external-schedule.md` を参照。"
+            )
     else:
         lines.append("乖離 **0 件**。全ての下流リポジトリが最新 pin の wrapper、"
-                     "または skills を vendor していない。")
+                     "または skills を vendor していない。schedule トリガを持つ"
+                     "wrapper は全て直近実行を確認できている。")
     lines.append("")
 
     lines.append("### 軸 4: 上流 reusable workflow の強化マーカー")
@@ -1042,8 +1359,29 @@ def main() -> int:
         )
         return 1
 
+    # 軸 5 のしきい値。不正値・0 以下を既定へ黙ってフォールバックさせない
+    # （運用ミスで緩い値のまま走り続けるのを避ける。A05 設定ミス対策）。
+    schedule_stale_days_raw = os.environ.get("SCHEDULE_STALE_DAYS", "")
+    if schedule_stale_days_raw:
+        try:
+            schedule_stale_days = int(schedule_stale_days_raw)
+        except ValueError:
+            print(
+                f"::error::SCHEDULE_STALE_DAYS の値が不正（{schedule_stale_days_raw!r}）。"
+                "整数を指定すること。"
+            )
+            return 1
+        if schedule_stale_days <= 0:
+            print(
+                f"::error::SCHEDULE_STALE_DAYS は正の整数にすること"
+                f"（指定値: {schedule_stale_days}）。"
+            )
+            return 1
+    else:
+        schedule_stale_days = SCHEDULE_STALE_DAYS_DEFAULT
+
     try:
-        result = scan(org, read_token)
+        result = scan(org, read_token, schedule_stale_days)
     except ScanError as exc:
         print(f"::error::スキャンに失敗した（乖離 0 件と区別できないため失敗扱い）: {exc}")
         return 1
