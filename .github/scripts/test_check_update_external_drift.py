@@ -27,6 +27,7 @@ from check_update_external_drift import (  # noqa: E402
     KIND_LEGACY,
     KIND_REUSABLE_DEFINITION,
     KIND_WRAPPER,
+    KIND_WRAPPER_HYBRID,
     KIND_WRAPPER_UNPINNED,
     PIN_BEHIND,
     PIN_CURRENT,
@@ -39,6 +40,8 @@ from check_update_external_drift import (  # noqa: E402
 
 UPSTREAM_SHA = "fed9c07d98367f77e5e2b63bca38843f46feee96"
 OLD_PIN = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+# compare が 429 を返す pin。「検査できなかった」であって「壊れた pin」ではない。
+RATE_LIMITED_PIN = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 # --- fixture: 上流 reusable workflow を SHA 固定で呼ぶ薄い wrapper ---------
 FIXTURE_WRAPPER = """
@@ -209,6 +212,53 @@ class TestAxis1Classification(unittest.TestCase):
         info = classify_workflow(FIXTURE_LEGACY)
         self.assertEqual(info["kind"], KIND_LEGACY)
 
+    def test_reusable_uses_inside_comment_is_still_legacy(self):
+        # 原文への正規表現だと、導入手順を貼っただけのコメントにマッチして
+        # 手管理 workflow が WRAPPER と誤認される。その SHA がたまたま最新なら
+        # wrappers_ok に入り LEGACY 検知をまるごと迂回してしまう。
+        # 判定はパース済みの jobs.<job>.uses だけを見ること。
+        commented = FIXTURE_LEGACY.replace(
+            "jobs:",
+            "# 移行手順:\n"
+            "#     uses: Fandhe-AI/actions/.github/workflows/update-external.yml@"
+            + UPSTREAM_SHA
+            + " # main\njobs:",
+        )
+        self.assertIn(
+            "Fandhe-AI/actions/.github/workflows/update-external.yml", commented
+        )  # 原文 grep なら WRAPPER になる
+        info = classify_workflow(commented)
+        self.assertEqual(info["kind"], KIND_LEGACY)
+        self.assertIsNone(info["pin"])
+
+    def test_step_level_uses_is_not_a_wrapper(self):
+        # reusable workflow の呼び出しは job-level uses のみ。step の uses に
+        # 同じ文字列があっても wrapper ではない。
+        stepwise = """
+name: Update external sources
+on:
+  workflow_dispatch:
+jobs:
+  bogus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: Fandhe-AI/actions/.github/workflows/update-external.yml@{sha}
+""".format(sha=UPSTREAM_SHA)
+        self.assertEqual(classify_workflow(stepwise)["kind"], KIND_LEGACY)
+
+    def test_hybrid_wrapper_is_drift(self):
+        # reusable を呼ぶ job と、composite action を直接呼ぶ手管理 job が併存。
+        # 薄い wrapper になっておらず上流の強化が一部にしか届かない。
+        hybrid = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
+  legacy-skills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96
+"""
+        info = classify_workflow(hybrid)
+        self.assertEqual(info["kind"], KIND_WRAPPER_HYBRID)
+        self.assertIn("legacy-skills", info["reason"])
+
     def test_reusable_definition_is_excluded(self):
         # リポ名のハードコードなしで除外できること（on: が True キーに落ちても）。
         info = classify_workflow(FIXTURE_REUSABLE_DEFINITION)
@@ -322,6 +372,9 @@ class TestScanEndToEnd(unittest.TestCase):
                 pin = path.split("/compare/")[1].split("...")[0]
                 if pin == OLD_PIN:
                     return 200, '{"status":"ahead","ahead_by":7,"behind_by":0}'
+                if pin == RATE_LIMITED_PIN:
+                    # レート制限。pin が壊れている証拠にはならない。
+                    return 429, ""
                 return 404, ""
             for name, cfg in repos.items():
                 prefix = f"repos/Fandhe-AI/{name}/"
@@ -408,6 +461,27 @@ class TestScanEndToEnd(unittest.TestCase):
         report = cud.render_report(result, "https://example.invalid/run/1")
         self.assertIn("乖離: **4 件**", report)
         self.assertIn("検査不能 (UNKNOWN): **1 件**", report)
+
+    def test_compare_error_is_unknown_not_unreachable(self):
+        # compare が 429。到達不能な pin (乖離) ではなく UNKNOWN として扱う。
+        result = self._run_scan({
+            "rate-limited": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=RATE_LIMITED_PIN)),
+            },
+        })
+        self.assertEqual(result.findings, [])
+        self.assertEqual(len(result.unknowns), 1)
+        self.assertIn("HTTP 429", result.unknowns[0].detail)
+        self.assertTrue(cud.has_drift(result))  # UNKNOWN が残る間は close しない
+
+    def test_compare_404_is_unreachable_pin_drift(self):
+        # 404 は「その SHA が上流に存在しない」= 到達不能な pin。乖離として扱う。
+        result = self._run_scan({
+            "ghost-pin": {"workflow": (200, FIXTURE_WRAPPER.format(pin="c" * 40))},
+        })
+        self.assertEqual(result.unknowns, [])
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].category, "PIN-UNREACHABLE")
 
     def test_zero_drift_report_says_zero(self):
         result = self._run_scan({

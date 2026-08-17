@@ -76,12 +76,9 @@ WORKFLOW_PATH = ".github/workflows/update-external.yml"
 # 常にこの 1 件を更新する。
 REPORT_ISSUE_TITLE = "chore(ci): update-external の乖離検知レポート"
 
-# ``uses: Fandhe-AI/actions/.github/workflows/update-external.yml@<ref>``
-# ref は SHA 固定を期待するが、``@main`` 等の未 pin も検出したいのでここでは
-# ref を貪欲に取らず非空白として捕捉し、40 桁 hex かは後段で判定する。
-_REUSABLE_USES_RE = re.compile(
-    r"uses:\s*Fandhe-AI/actions/\.github/workflows/update-external\.yml@(\S+)"
-)
+# 下流 wrapper の job-level ``uses`` が指すべき参照先（``@<ref>`` を除いた部分）。
+REUSABLE_WORKFLOW_REF = f"{UPSTREAM_REPO}/{UPSTREAM_WORKFLOW_PATH}"
+
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -152,8 +149,25 @@ def has_workflow_call(spec: dict) -> bool:
 KIND_REUSABLE_DEFINITION = "REUSABLE-DEFINITION"
 KIND_WRAPPER = "WRAPPER"
 KIND_WRAPPER_UNPINNED = "WRAPPER-UNPINNED"
+KIND_WRAPPER_HYBRID = "WRAPPER-HYBRID"
 KIND_LEGACY = "LEGACY"
 KIND_UNPARSEABLE = "UNPARSEABLE"
+
+
+def _split_job_uses(value: object) -> str | None:
+    """job-level ``uses`` が上流 reusable workflow を指していれば ref を返す。
+
+    ``uses: <owner>/<repo>/<path>@<ref>`` を ``@`` の**最後**の出現で割る
+    （path 側に ``@`` は現れないが ref 側にも現れないため右端割りが安全）。
+    行末の ``# main`` 等のコメントは PyYAML が既に除去している。
+    """
+    text = norm(value)
+    if "@" not in text:
+        return None
+    path, _, ref = text.rpartition("@")
+    if path != REUSABLE_WORKFLOW_REF:
+        return None
+    return ref.strip()
 
 
 def classify_workflow(text: str) -> dict:
@@ -182,15 +196,57 @@ def classify_workflow(text: str) -> dict:
             "reason": "on: workflow_call を持つ reusable 定義本体のため検査対象外",
         }
 
-    match = _REUSABLE_USES_RE.search(text)
-    if not match:
+    jobs = spec.get("jobs")
+    if not isinstance(jobs, dict):
+        return {"kind": KIND_UNPARSEABLE, "pin": None, "reason": "jobs セクションが無い"}
+
+    # **YAML 原文への正規表現ではなくパース済みの jobs.<job>.uses を見る。**
+    # 原文 grep だと、コメントアウトされた `uses:` 行や導入手順を貼っただけの
+    # コメントブロックにマッチして手管理 workflow が WRAPPER と誤認される。
+    # その SHA がたまたま最新なら wrappers_ok に入り、軸 1 の LEGACY 検知を
+    # まるごと迂回してしまう。reusable workflow の正しい呼び出し位置は
+    # job-level の `uses` だけなので、そこだけを見る。
+    ref: str | None = None
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        path_ref = _split_job_uses(job.get("uses"))
+        if path_ref is not None:
+            ref = path_ref
+            break
+
+    # 直接 composite action を呼ぶ「手管理ジョブ」が残っていないか。薄い wrapper
+    # なら reusable を呼ぶ job だけで完結するはずで、両方あるのは移行途中の
+    # ハイブリッド。上流の強化が一部のジョブにしか届かないため乖離として扱う。
+    hand_managed = sorted(
+        name
+        for name, job in jobs.items()
+        if isinstance(job, dict)
+        and any(
+            norm(step.get("uses")).startswith(
+                (SKILLS_ACTION_PREFIX, SUBMODULE_ACTION_PREFIX)
+            )
+            for step in _steps(job)
+        )
+    )
+
+    if ref is None:
         return {
             "kind": KIND_LEGACY,
             "pin": None,
-            "reason": "上流 reusable workflow を参照していない（手管理テンプレートのまま）",
+            "reason": "上流 reusable workflow を job-level の uses で参照していない"
+            "（手管理テンプレートのまま）",
         }
 
-    ref = match.group(1)
+    if hand_managed:
+        return {
+            "kind": KIND_WRAPPER_HYBRID,
+            "pin": ref if _SHA40_RE.match(ref) else None,
+            "reason": "reusable を呼ぶ job がある一方で、composite action を直接呼ぶ"
+            f"手管理ジョブが残っている（{', '.join(hand_managed)}）。"
+            "薄い wrapper になっておらず上流の強化が一部にしか届かない",
+        }
+
     if not _SHA40_RE.match(ref):
         # reusable は参照しているが ref が 40 桁 hex ではない（``@main`` 等）。
         # LEGACY とは原因も直し方も違うので別種別として報告する。
@@ -627,27 +683,39 @@ def scan(org: str, token: str) -> ScanResult:
 
     # pin ごとの compare 結果キャッシュ。19 個の wrapper が同じ pin を共有する
     # ことが多く、リポごとに compare を叩くとレート制限を無駄に消費する。
-    compare_cache: dict[str, dict | None] = {}
+    #
+    # 戻り値は ``("ok", data)`` / ``("absent", None)`` / ``("error", 理由)`` の
+    # 3 値。**404 とそれ以外の失敗を畳まない。** 404 は「その SHA が上流に存在
+    # しない」という判定結果（到達不能な pin = 乖離）だが、403 / 429 / 5xx や
+    # 200 応答の JSON 解析失敗は単に検査できなかっただけで、pin が壊れている
+    # 証拠にはならない。両者を None に畳むと、レート制限や一時障害が
+    # PIN-UNREACHABLE として報告され「個別取得失敗は UNKNOWN」という本スキルの
+    # 契約と食い違う（乖離を捏造する側に倒れる）。
+    compare_cache: dict[str, tuple[str, object]] = {}
 
-    def compare_pin(pin: str) -> dict | None:
+    def compare_pin(pin: str) -> tuple[str, object]:
         if pin in compare_cache:
             return compare_cache[pin]
         st, body = gh_get_with_status(
             f"repos/{UPSTREAM_REPO}/compare/{pin}...main", token
         )
-        value: dict | None = None
+        outcome: tuple[str, object]
         if st == 200:
             try:
                 data = json.loads(body)
-                value = {
+                outcome = ("ok", {
                     "status": data.get("status"),
                     "ahead_by": data.get("ahead_by"),
                     "behind_by": data.get("behind_by"),
-                }
+                })
             except json.JSONDecodeError:
-                value = None
-        compare_cache[pin] = value
-        return value
+                outcome = ("error", "compare の 200 応答を JSON として解析できない")
+        elif st == 404:
+            outcome = ("absent", None)
+        else:
+            outcome = ("error", f"compare の取得が HTTP {st}")
+        compare_cache[pin] = outcome
+        return outcome
 
     for name in repos:
         repo = f"{org}/{name}"
@@ -678,15 +746,21 @@ def scan(org: str, token: str) -> ScanResult:
                 print(f"::warning::{repo}: {info['reason']}")
                 continue
 
-            if kind == KIND_WRAPPER_UNPINNED:
-                result.findings.append(
-                    Finding(repo, "WRAPPER-UNPINNED", info["reason"])
-                )
+            if kind in (KIND_WRAPPER_UNPINNED, KIND_WRAPPER_HYBRID):
+                result.findings.append(Finding(repo, kind, info["reason"]))
                 continue
 
             # --- 軸 2: pin の鮮度 ---
             pin = info["pin"]
-            verdict = evaluate_pin(pin, upstream_sha, compare_pin(pin))
+            outcome, payload = compare_pin(pin)
+            if outcome == "error":
+                # 検査できなかっただけ。壊れた pin として乖離を捏造しない。
+                msg = f"pin `{pin[:12]}` の鮮度を確認できない（{payload}）"
+                result.unknowns.append(Finding(repo, "UNKNOWN", msg))
+                print(f"::warning::{repo}: {msg}")
+                continue
+
+            verdict = evaluate_pin(pin, upstream_sha, payload)
             if verdict["state"] == PIN_CURRENT:
                 result.wrappers_ok.append(repo)
             elif verdict["state"] == PIN_BEHIND:
