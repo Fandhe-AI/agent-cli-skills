@@ -9,6 +9,15 @@
 // 修正は (A) を「取得 → 終了コード検証 → 出力形式検証 → 件数算出」の 4 段へ作り直し、出力語彙を
 // `UNDETERMINED` / `dup=<D> bad=<B>` の 2 形に固定し、対処側にゼロ件分岐を追加した。
 //
+// 追加修正（Issue #338 P1 の codex-review 指摘）: 旧 (A) は `bad` を cancelled / failure /
+// timed_out の 3 conclusion のみに限定していたため、`pending`（未完了）・`action_required`・
+// `startup_failure`・`stale` を含む重複が bad=0 になり「正常な重複（再実行）」と誤診断され得た。
+// 特に success + pending の重複では、その pending 自体が mergeStateStatus=BLOCKED の直接原因
+// たり得るのに、別原因の調査へ進んでしまう。`success` 以外を正常扱いしない分類へ変更し、
+// `pending`（未完了）は bad とは別の `pend` フィールドで検知して「待機・判定不能」に倒し、
+// それ以外の非 success conclusion は `bad` として通常の CI 失敗経路へ倒す。出力語彙は
+// `dup=<D> bad=<B> pend=<P>` の 3 値へ拡張した。
+//
 // 3 群構成:
 //   群 A（SKILL.md 記述の固定）: UNDETERMINED・dup=・bad=・ゼロ件分岐・終了コード検証の記載を固定。
 //   群 B（旧文言の再発防止）: 「1 以上なら重複あり」が 0 回であることを固定。
@@ -54,8 +63,13 @@ test('群A: 「対処」は判定不能（前提 0）を rerun せず blocked �
 })
 
 test('群A: 「対処」は conclusion（bad）を含めて重複を判定する', () => {
-  assert.match(skillMd, /D >= 1 かつ B >= 1/)
-  assert.match(skillMd, /D >= 1 かつ B = 0/)
+  assert.match(skillMd, /D >= 1 かつ P = 0 かつ B >= 1/)
+  assert.match(skillMd, /D >= 1 かつ B = 0 かつ P = 0/)
+})
+
+test('群A: 「対処」は pending（未完了）を含む重複を正常な再実行と断定しない（Issue #338 P1）', () => {
+  assert.match(skillMd, /D >= 1 かつ P >= 1/)
+  assert.match(skillMd, /pending.*BLOCKED.*直接原因/)
 })
 
 test('群A: (A)/(B) の権限境界（チェック名をエージェントの文脈へ出さない）は維持される', () => {
@@ -101,7 +115,7 @@ function runAwk(rows) {
   }).trim()
 }
 
-test('群C: 重複あり・cancelled 混在で dup=2 bad=1 を返す', () => {
+test('群C: 重複あり・cancelled 混在で dup=2 bad=1 pend=0 を返す', () => {
   // ci/build は cancelled + success（重複かつ結論に cancelled を含む）。
   // ci/test は success x2（重複だが結論は健全）。ci/lint は単発（重複なし）。
   const rows = [
@@ -112,33 +126,65 @@ test('群C: 重複あり・cancelled 混在で dup=2 bad=1 を返す', () => {
     'ci/lint\tsuccess',
     '',
   ].join('\n')
-  assert.equal(runAwk(rows), 'dup=2 bad=1')
+  assert.equal(runAwk(rows), 'dup=2 bad=1 pend=0')
 })
 
-test('群C: 重複はあるが結論が健全な場合は dup=1 bad=0 を返す（前提1の D>=1 B=0 分岐に対応）', () => {
+test('群C: 重複はあるが結論が健全な場合は dup=1 bad=0 pend=0 を返す（前提1の D>=1 B=0 P=0 分岐に対応）', () => {
   const rows = [
     'ci/build\tsuccess',
     'ci/build\tsuccess',
     'ci/lint\tsuccess',
     '',
   ].join('\n')
-  assert.equal(runAwk(rows), 'dup=1 bad=0')
+  assert.equal(runAwk(rows), 'dup=1 bad=0 pend=0')
 })
 
-test('群C: 重複なしの場合は dup=0 bad=0 を返す', () => {
+test('群C: 重複なしの場合は dup=0 bad=0 pend=0 を返す', () => {
   const rows = [
     'ci/build\tsuccess',
     'ci/lint\tsuccess',
     '',
   ].join('\n')
-  assert.equal(runAwk(rows), 'dup=0 bad=0')
+  assert.equal(runAwk(rows), 'dup=0 bad=0 pend=0')
 })
 
-test('群C: pending（conclusion 欠落）は bad に数えない', () => {
+test('群C: pending（conclusion 欠落）は bad に数えず pend に数える（Issue #338 P1: 旧実装は bad=0 のみで見分けがつかなかった）', () => {
   const rows = [
     'ci/build\tpending',
     'ci/build\tpending',
     '',
   ].join('\n')
-  assert.equal(runAwk(rows), 'dup=1 bad=0')
+  assert.equal(runAwk(rows), 'dup=1 bad=0 pend=1')
+})
+
+test('群C: success + pending の重複は「正常な重複」に丸め込まず pend=1 で検知する（Issue #338 P1 の指摘シナリオそのもの）', () => {
+  const rows = [
+    'ci/build\tsuccess',
+    'ci/build\tpending',
+    '',
+  ].join('\n')
+  assert.equal(runAwk(rows), 'dup=1 bad=0 pend=1')
+})
+
+test('群C: action_required / startup_failure / stale は bad に数える（success 以外を正常扱いしない）', () => {
+  const rows = [
+    'ci/build\taction_required',
+    'ci/build\tsuccess',
+    'ci/deploy\tstartup_failure',
+    'ci/deploy\tsuccess',
+    'ci/lint\tstale',
+    'ci/lint\tsuccess',
+    '',
+  ].join('\n')
+  assert.equal(runAwk(rows), 'dup=3 bad=3 pend=0')
+})
+
+test('群C: 同一重複名に bad な結論と pending が両方含まれる場合は B・P 双方が立つ', () => {
+  const rows = [
+    'ci/build\tfailure',
+    'ci/build\tpending',
+    'ci/build\tsuccess',
+    '',
+  ].join('\n')
+  assert.equal(runAwk(rows), 'dup=1 bad=1 pend=1')
 })
