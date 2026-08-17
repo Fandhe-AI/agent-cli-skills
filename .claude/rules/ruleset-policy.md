@@ -55,15 +55,15 @@ strict はセキュリティ要件ではない。「チェックが現在の bas
 
 | リポジトリ | 判定 | 理由 | 判断 |
 |-----------|------|------|------|
-| `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は上記節の (c) の代替確認を必須とする |
+| `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は上記節の 3. の代替確認を必須とする |
 | `Fandhe-AI/life-plan-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
 | `Fandhe-AI/local-server` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
 | `Fandhe-AI/pronunciation-vocab-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
-| `Fandhe-AI/automation-app` | 補償策不成立 | `push:` トリガを持つ workflow は存在する（`deploy-api.yml` 等）が、いずれも `paths` フィルタ付きで実測 head の変更内容では起動しなかった（`push_total == 0`） | 補償策 適用外（現状の head では）。`autoMerge: true` は非推奨。使う場合は上記節の (c) の代替確認を必須とする。他 4 リポと異なり、`paths` に該当する変更が push された head では補償策が成立し得るため、再測の意義が高い |
+| `Fandhe-AI/automation-app` | 補償策不成立 | `push:` トリガを持つ workflow は存在する（`deploy-api.yml` 等）が、いずれも `paths` フィルタ付きで実測 head の変更内容では起動しなかった（`push_total == 0`） | 補償策 適用外（現状の head では）。`autoMerge: true` は非推奨。使う場合は上記節の 3. の代替確認を必須とする。他 4 リポと異なり、`paths` に該当する変更が push された head では補償策が成立し得るため、再測の意義が高い |
 
 リポジトリ構成は変わるため、この記録は測定日時点のスナップショットであり、`autoMerge`
 運用を開始・再開するたびに再測する。該当 5 リポへの push トリガ CI 追加（判定表の
-不成立時の扱い (a)）は別リポジトリの構成変更であり本リポジトリの変更では実施できない
+不成立時の扱い 1.）は別リポジトリの構成変更であり本リポジトリの変更では実施できない
 （追跡は Issue で行う）。
 
 ## strict 以外の必須構成（自動マージ opt-in 時）
