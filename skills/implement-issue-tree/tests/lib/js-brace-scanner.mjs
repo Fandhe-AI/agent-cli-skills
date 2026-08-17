@@ -125,11 +125,14 @@ const BRACE_KIND_LITERAL = 'literal'
 // 識別子の先頭・継続文字判定。ASCII の `[A-Za-z_$]` に加え、Unicode の「文字」
 // （`\p{L}`）・「文字として扱う数」（`\p{Nl}`。ローマ数字等）を許容する
 // （PR #351 codex-review 指摘: `const π = 1` のような非 ASCII 識別子）。
-const IDENT_START_RE = /[A-Za-z_$\p{L}\p{Nl}]/u
-// 継続文字は先頭文字の集合に加え、10 進数字（`\p{Nd}`。Unicode 数字も含む）を許容する。
-// 数値リテラル自体は ASCII の `[0-9]` のみで構成されるため `isNumberLike` 判定は
-// 変更しない（JS の数値リテラル構文が ASCII 限定のため、この拡張とは独立）。
-const IDENT_CONT_RE = /[A-Za-z0-9_$\p{L}\p{Nl}\p{Nd}]/u
+// 先頭文字と継続文字は旧実装（ASCII `[A-Za-z0-9_$]`）と対称に同じ文字集合を使う
+// （旧実装は先頭・継続とも同一の正規表現だった）。ASCII 数字を開始文字集合から落とすと
+// 数値リテラルの先頭文字が識別子分岐に入らず「その他の記号」分岐に落ち、prevSignificant
+// が operator のままになって直後の `/` を正規表現の開始と誤認し得る
+// （`isNumberLike` 判定は識別子分岐の内部にしか無く、分岐に入らなければ意味を持たない）。
+// 数値リテラル構文自体は ASCII 限定のため `isNumberLike` 判定（`/^[0-9]/`）は変更しない。
+const IDENT_START_RE = /[A-Za-z0-9_$\p{L}\p{Nl}\p{Nd}]/u
+const IDENT_CONT_RE = IDENT_START_RE
 
 /**
  * `text[openBraceIndex]` を起点として、対応する閉じ波括弧の index を字句認識つきで求める。
@@ -516,12 +519,29 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       continue
     }
 
-    // 三項演算子 `?`。オプショナルチェイニング `?.` とその後続の nullish 合体 `??` は
-    // 三項演算子ではないため深さを増やさない（`a?.b`・`a ?? b` を誤カウントしない）。
-    // 現在のフレーム（stack の最上段。code フレーム・subst フレームいずれも
-    // ternaryDepth を持つ）の深さを増やすことで、対応する `:` をこのフレーム内で
+    // nullish 合体 `??`・nullish 代入 `??=`。三項演算子ではないため深さを増やさない。
+    // 2 文字トークンをここで丸ごと消費することが必須: 1 文字先読みで `?` 単体の分岐へ
+    // 進ませてしまうと、走査が 1 個目の '?' を「三項演算子ではない」と判定してスキップ
+    // した次のループで 2 個目の '?' に到達し、その時点の 1 文字先読み（隣が空白等）では
+    // `?.`/`??` に該当しないため誤って ternaryDepth を増やしてしまう
+    // （`a ?? b` の 2 個目の '?' がこの誤判定の対象になり得る）。
+    if (ch === '?' && text[i + 1] === '?') {
+      i += text[i + 2] === '=' ? 3 : 2
+      prevSignificant = 'operator'
+      lastWord = null
+      afterDot = false
+      afterArrow = false
+      afterControlParen = false
+      afterStatementColon = false
+      continue
+    }
+
+    // 三項演算子 `?`。オプショナルチェイニング `?.` は三項演算子ではないため深さを
+    // 増やさない（`a?.b` を誤カウントしない）。`??`/`??=` は上の分岐で既に消費済みの
+    // ためここには来ない。現在のフレーム（stack の最上段。code フレーム・subst フレーム
+    // いずれも ternaryDepth を持つ）の深さを増やすことで、対応する `:` をこのフレーム内で
     // 独立して数える（フレーム跨ぎで消費されないようにする。上記コメント項目 9 参照）。
-    if (ch === '?' && text[i + 1] !== '.' && text[i + 1] !== '?') {
+    if (ch === '?' && text[i + 1] !== '.') {
       stack[stack.length - 1].ternaryDepth++
       i++
       prevSignificant = 'operator' // 三項演算子の then 節という値を期待する位置
