@@ -923,27 +923,45 @@ def has_drift(result: ScanResult) -> bool:
     return drift_count(result) > 0 or len(result.unknowns) > 0
 
 
-def find_report_issue(repo: str, token: str) -> int | None:
-    """固定タイトルの open issue を探す。
+def find_report_issue(repo: str, token: str) -> tuple[int | None, str]:
+    """固定タイトルの報告 issue を open / closed の**両方**から探す。
 
-    ``gh issue list --search`` は曖昧検索であり、いずれ別の issue を掴んで
-    誤って書き換える。番号とタイトルを取得して Python 側で**完全一致**させる。
+    戻り値は ``(番号, 状態)``。見つからない場合は ``(None, "")``。
+
+    **closed も探すのが要点。** open だけを見ると、乖離が解消して close した後に
+    乖離が再発したとき既存 issue を発見できず、同じタイトルの issue が新規作成
+    される。「常にこの 1 件を更新する」という契約が壊れ、再発のたびに重複 issue が
+    積み上がる。closed が見つかった場合は reopen して使い回す。
+
+    ``--search`` は曖昧検索なので、これは **候補を server 側で絞る用途にだけ**
+    使い、どれを掴むかは Python 側の**完全一致**で決める。`--state all` を
+    件数上限だけで引くと古い固定 issue を取りこぼすため、絞り込みと完全一致の
+    両方を使う。
     """
     proc = _run(
-        ["gh", "issue", "list", "--repo", repo, "--state", "open",
-         "--limit", "200", "--json", "number,title"],
+        ["gh", "issue", "list", "--repo", repo, "--state", "all",
+         "--search", f"{REPORT_ISSUE_TITLE} in:title",
+         "--limit", "200", "--json", "number,title,state"],
         token,
     )
     if proc.returncode != 0:
         raise ScanError(f"issue 一覧の取得に失敗: {proc.stdout.strip()} {proc.stderr.strip()}")
-    for issue in json.loads(proc.stdout or "[]"):
-        if issue.get("title") == REPORT_ISSUE_TITLE:
-            return issue.get("number")
-    return None
+
+    matches = [
+        issue
+        for issue in json.loads(proc.stdout or "[]")
+        if issue.get("title") == REPORT_ISSUE_TITLE
+    ]
+    if not matches:
+        return None, ""
+    # 万一重複が生まれていても open を優先し、次いで番号の小さい（= 最初に作られた）
+    # ものを正とする。日替わりで掴む issue が変わらないよう順序を決め打ちする。
+    matches.sort(key=lambda i: (str(i.get("state", "")).upper() != "OPEN", i.get("number", 0)))
+    return matches[0].get("number"), str(matches[0].get("state", "")).upper()
 
 
 def sync_report_issue(repo: str, token: str, body_file: str, has_drift: bool) -> str:
-    number = find_report_issue(repo, token)
+    number, state = find_report_issue(repo, token)
 
     if has_drift:
         if number is None:
@@ -955,16 +973,27 @@ def sync_report_issue(repo: str, token: str, body_file: str, has_drift: bool) ->
             if proc.returncode != 0:
                 raise ScanError(f"issue 作成に失敗: {proc.stdout} {proc.stderr}")
             return f"issue を新規作成: {proc.stdout.strip()}"
+
+        reopened = ""
+        if state == "CLOSED":
+            # 乖離が再発した。新規作成せず既存 issue を再利用する。
+            proc = _run(["gh", "issue", "reopen", str(number), "--repo", repo], token)
+            if proc.returncode != 0:
+                raise ScanError(f"issue の再オープンに失敗: {proc.stdout} {proc.stderr}")
+            reopened = "（乖離が再発したため再オープン）"
+
         proc = _run(
             ["gh", "issue", "edit", str(number), "--repo", repo, "--body-file", body_file],
             token,
         )
         if proc.returncode != 0:
             raise ScanError(f"issue 更新に失敗: {proc.stdout} {proc.stderr}")
-        return f"issue #{number} の本文を更新"
+        return f"issue #{number} の本文を更新{reopened}"
 
     if number is None:
         return "乖離 0 件・報告 issue も無し（何もしない）"
+    if state == "CLOSED":
+        return f"乖離 0 件・報告 issue #{number} は既に closed（何もしない）"
 
     _run(
         ["gh", "issue", "comment", str(number), "--repo", repo,

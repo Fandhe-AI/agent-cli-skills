@@ -16,6 +16,7 @@ PyYAML だけは検査対象そのものが YAML 構造走査であり代替不�
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 import unittest
@@ -537,6 +538,110 @@ class TestScanEndToEnd(unittest.TestCase):
         result.upstream_markers = [{"marker": "dummy", "ok": False, "detail": "劣化"}]
         self.assertEqual(cud.drift_count(result), 1)
         self.assertTrue(cud.has_drift(result))
+
+
+class TestReportIssueLifecycle(unittest.TestCase):
+    """報告 issue は「常に 1 件を更新する」契約。新規作成を繰り返さない。"""
+
+    def _fake_run(self, issues: list[dict]):
+        """``_run`` の代替。呼ばれた gh コマンドを記録して返す。"""
+        calls: list[list[str]] = []
+
+        class Proc:
+            def __init__(self, stdout=""):
+                self.returncode = 0
+                self.stdout = stdout
+                self.stderr = ""
+
+        def fake(args, token=None):
+            calls.append(args)
+            if args[:3] == ["gh", "issue", "list"]:
+                return Proc(json.dumps(issues))
+            return Proc("https://example.invalid/issues/1")
+
+        return fake, calls
+
+    def _sync(self, issues: list[dict], has_drift: bool):
+        fake, calls = self._fake_run(issues)
+        orig = cud._run
+        cud._run = fake
+        try:
+            msg = cud.sync_report_issue("o/r", "tok", "body.md", has_drift)
+        finally:
+            cud._run = orig
+        verbs = [a[2] for a in calls if a[:2] == ["gh", "issue"]]
+        return msg, verbs
+
+    def test_searches_closed_issues_too(self):
+        # --state all で引かないと closed の固定 issue を見つけられない。
+        fake, calls = self._fake_run([])
+        orig = cud._run
+        cud._run = fake
+        try:
+            cud.find_report_issue("o/r", "tok")
+        finally:
+            cud._run = orig
+        self.assertIn("--state", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--state") + 1], "all")
+
+    def test_reopens_closed_issue_instead_of_creating_new(self):
+        # 乖離の再発。close 済みの既存 issue を reopen して使い回す。
+        msg, verbs = self._sync(
+            [{"number": 42, "title": cud.REPORT_ISSUE_TITLE, "state": "CLOSED"}],
+            has_drift=True,
+        )
+        self.assertIn("reopen", verbs)
+        self.assertIn("edit", verbs)
+        self.assertNotIn("create", verbs)
+        self.assertIn("#42", msg)
+
+    def test_updates_open_issue_without_reopen(self):
+        msg, verbs = self._sync(
+            [{"number": 42, "title": cud.REPORT_ISSUE_TITLE, "state": "OPEN"}],
+            has_drift=True,
+        )
+        self.assertIn("edit", verbs)
+        self.assertNotIn("reopen", verbs)
+        self.assertNotIn("create", verbs)
+
+    def test_creates_only_when_no_issue_exists(self):
+        msg, verbs = self._sync([], has_drift=True)
+        self.assertIn("create", verbs)
+
+    def test_ignores_titles_that_are_not_exact_matches(self):
+        # --search は曖昧検索。掴む issue は Python 側の完全一致で決める。
+        msg, verbs = self._sync(
+            [{"number": 7, "title": cud.REPORT_ISSUE_TITLE + " (旧)", "state": "OPEN"}],
+            has_drift=True,
+        )
+        self.assertIn("create", verbs)
+
+    def test_closes_open_issue_when_clean(self):
+        msg, verbs = self._sync(
+            [{"number": 42, "title": cud.REPORT_ISSUE_TITLE, "state": "OPEN"}],
+            has_drift=False,
+        )
+        self.assertIn("comment", verbs)
+        self.assertIn("close", verbs)
+
+    def test_already_closed_issue_is_left_alone(self):
+        msg, verbs = self._sync(
+            [{"number": 42, "title": cud.REPORT_ISSUE_TITLE, "state": "CLOSED"}],
+            has_drift=False,
+        )
+        self.assertNotIn("close", verbs)
+        self.assertNotIn("comment", verbs)
+
+    def test_prefers_open_when_duplicates_exist(self):
+        msg, verbs = self._sync(
+            [
+                {"number": 9, "title": cud.REPORT_ISSUE_TITLE, "state": "CLOSED"},
+                {"number": 42, "title": cud.REPORT_ISSUE_TITLE, "state": "OPEN"},
+            ],
+            has_drift=True,
+        )
+        self.assertIn("#42", msg)
+        self.assertNotIn("reopen", verbs)
 
 
 if __name__ == "__main__":
