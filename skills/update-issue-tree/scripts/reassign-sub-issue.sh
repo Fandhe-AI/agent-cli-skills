@@ -32,6 +32,10 @@
 #
 # cross-repository sub-issue（対象 issue の親が別リポジトリにある場合）は対象外。
 # 実測した現在の親が別リポジトリなら exit 2 で fail-closed に停止する（下記参照）。
+# exit 2 は gh/jq 不在・未認証・issue 取得失敗（解消可能な前提不備）とも共有するため、
+# このケースだけ stderr に `reason=cross-repository-parent` の安定マーカー行を追加で出す
+# （呼び出し側が exit 2 の中で「中断すべきか」「記録して次へ進むべきか」を機械的に判定
+# できるようにするため。skills/update-issue-tree/SKILL.md の終了コード表を参照）。
 #
 # 終了コードと stdout 最終行（result=<state> ...）は skills/update-issue-tree/SKILL.md の
 # 「付け替えスクリプトの呼び出し規約」節を正とする。呼び出し側は非ゼロ終了を 1 件も握り潰さず、
@@ -199,6 +203,12 @@ if [[ -n "${PARENT_URL}" ]]; then
     # 対象 issue の GET / DELETE / POST を含む全 API パスを切り替えるため、親リポジトリに
     # 同番号の無関係な issue があるとそれを操作してしまう
     echo "対処: 親リポジトリ側で手動で取り外してから再実行する（本スクリプトでは対応しない）" >&2
+    # exit 2 は gh/jq 不在・未認証・issue 取得失敗（解消可能）とこのケース（恒久的に
+    # 対象外）の両方で使われ、終了コード単独では呼び出し側が区別できない（Issue #335
+    # codex-review 指摘）。人間可読メッセージの文言に依存させず機械可読に判定できるよう、
+    # stderr に安定したマーカー行を出す。SKILL.md の終了コード表・Step 3/4 はこの行の
+    # 有無で (a) 解消可能な前提不備 / (b) 恒久的な対象外を判定する
+    echo "reason=cross-repository-parent" >&2
     exit 2
   fi
   CURRENT_PARENT=$(printf '%s' "${PARENT_URL}" | grep -oE '[0-9]+$' || true)

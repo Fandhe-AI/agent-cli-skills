@@ -175,6 +175,32 @@ test('ケース16: 親が別リポジトリ → exit 2、DELETE も POST も呼�
   assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が呼ばれていないこと')
 })
 
+test('ケース16c: 親が別リポジトリ → stderr に reason=cross-repository-parent マーカーが出る（Issue #335 codex-review 指摘の再発防止固定）', () => {
+  // exit 2 は gh/jq 不在・未認証・issue 取得失敗（解消可能な前提不備）とも共有するため、
+  // このケース（恒久的に対象外）だけを終了コード単独では区別できない。呼び出し側が
+  // SKILL.md の記述どおり (a)/(b) を機械的に判定できるよう、安定したマーカー行を固定する
+  const r = run(['--issue', '22', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentRepo: 'other/repo',
+  })
+  assert.equal(r.status, 2)
+  assert.ok(
+    /^reason=cross-repository-parent$/m.test(r.stderr),
+    'stderr に reason=cross-repository-parent マーカー行があること',
+  )
+})
+
+test('ケース9/ケース11: 解消可能な前提不備（exit 2 (a)）では reason=cross-repository-parent マーカーが出ない', () => {
+  // (b) 専用マーカーが (a) 側へ誤って漏れると、呼び出し側が恒久的な対象外と誤判定し
+  // 棚卸し対象から不要に除外してしまう
+  const r = run(['--issue', '22', '--new-parent', '7'], { getFail: true })
+  assert.equal(r.status, 2)
+  assert.ok(
+    !/reason=cross-repository-parent/.test(r.stderr),
+    '解消可能な前提不備で cross-repository 専用マーカーが出ていないこと',
+  )
+})
+
 test('ケース16b: 親が別リポジトリで停止する際、stderr が --repo の付け替えを勧めていない（Issue #332 / PR #314 P0 の再発防止固定）', () => {
   // c4c27b9 で「--repo を親リポジトリへ変えて再実行する」という危険な案内を削除した。
   // 将来の善意の編集でこの案内が復活しないよう、stderr に --repo が出現しないことを固定する
