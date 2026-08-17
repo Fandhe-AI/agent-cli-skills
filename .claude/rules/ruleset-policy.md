@@ -29,10 +29,56 @@ strict はセキュリティ要件ではない。「チェックが現在の bas
 - strict = false で残るリスクは「古い base に対して成功したチェックのままマージされ、
   マージ後の base が壊れ得る」ことのみ。テキストコンフリクトは merge-exec が `mergeable` を
   自己取得して `CONFLICTING` を検出し `not-mergeable` で終端するため通らない。
-  意味的コンフリクトは**ラン完了後にベースブランチの CI が green であることを確認**して補う
+  意味的コンフリクトは**ラン完了後にベースブランチの CI が green であることを確認**して補う。
+  **ただしこの補償はマージ先ブランチへの push で CI が起動するリポジトリでのみ成立する**
+  （成立確認の手順・判定表は
+  `skills/implement-issue-tree/references/automerge-design.md` の
+  「補償策の成立確認（base CI プローブ）」節を参照。下記「補償策が成立しないリポジトリ
+  （実測記録）」も参照）
 - 「マージが古い base で通ってしまう」を理由に strict を戻さない。戻すと並列ランが止まる
 - PUT 実行後は必ず「一括更新後の検証（3 軸 + classic BP）」節のスイープを実行し、
   strict 以外に落ちたフィールドがないことを実測する（classic BP の `strict` 確認は同節の手順 B が対応する）
+
+### 補償策が成立しないリポジトリ（実測記録）
+
+測定日: 2026-08-17。測定コマンド: `skills/implement-issue-tree/references/automerge-design.md`
+の「補償策の成立確認（base CI プローブ）」節のプローブ手順（既定ブランチは
+`defaultBranchRef` から解決、head sha は HTTP status で存在確認、`event == "push"` の
+件数のみを読む）。判定不能は green にも不成立にも倒さず、判定不能のまま記録して再測する。
+
+実測時点で 5 リポジトリすべて既定ブランチの head に `push` イベントの run が 0 件
+（`push_total == 0`）であり、判定表の「補償策不成立」に該当した（503 等の判定不能は
+発生せず、いずれも決定的に判定できた）。加えて `.github/workflows/*.yml` の
+`push:` トリガ有無を横断確認し、「push トリガ workflow が構造的に無い」場合と
+「push トリガ workflow はあるが `paths` フィルタでこの head では起動しなかった」場合を
+区別した（前者はどの head でも恒久的に補償策不成立、後者は該当 push があれば成立し得る）。
+
+**注記（`.yml`/`.yaml` 拡張子）**: この測定時点の横断確認は `.github/workflows/*.yml` のみを
+対象にしており、GitHub Actions が同様に認識する `.yaml` 拡張子の workflow ファイルは確認して
+いない（自動マージ設計側の必須 workflow 集合の決め方も同じ理由で `*.yml`/`*.yaml` 両方の確認
+を要求するよう修正済み。`skills/implement-issue-tree/references/automerge-design.md` 参照）。
+5 リポいずれかに `.yaml` 拡張子の workflow ファイルが存在する場合、この表の判定は再測が必要
+になり得る。
+
+**注記（プローブ仕様変更との整合性）**: この記録は「意味的コンフリクト検出に必須な
+workflow 集合の被覆確認（`required_missing`）」と「取得上限 100 件到達チェック」を
+プローブへ追加する前に取得したものである。両追加は `push_total >= 1` の場合の判定を
+より厳格化する変更（必須 workflow が欠けていれば green ではなく補償策不成立へ倒す）
+であり、`push_total == 0` の判定（補償策不成立）自体は変更の影響を受けない。5 リポ
+すべて `push_total == 0` のため、この表の判定はプローブ仕様変更後も再測なしで有効である。
+
+| リポジトリ | 判定 | 理由 | 判断 |
+|-----------|------|------|------|
+| `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は上記節の 3. の代替確認を必須とする |
+| `Fandhe-AI/life-plan-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
+| `Fandhe-AI/local-server` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
+| `Fandhe-AI/pronunciation-vocab-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
+| `Fandhe-AI/automation-app` | 補償策不成立 | `push:` トリガを持つ workflow は存在する（`deploy-api.yml` 等）が、いずれも `paths` フィルタ付きで実測 head の変更内容では起動しなかった（`push_total == 0`） | 補償策 適用外（現状の head では）。`autoMerge: true` は非推奨。使う場合は上記節の 3. の代替確認を必須とする。他 4 リポと異なり、`paths` に該当する変更が push された head では補償策が成立し得るため、再測の意義が高い |
+
+リポジトリ構成は変わるため、この記録は測定日時点のスナップショットであり、`autoMerge`
+運用を開始・再開するたびに再測する。該当 5 リポへの push トリガ CI 追加（判定表の
+不成立時の扱い 1.）は別リポジトリの構成変更であり本リポジトリの変更では実施できない
+（追跡は Issue で行う）。
 
 ## strict 以外の必須構成（自動マージ opt-in 時）
 
