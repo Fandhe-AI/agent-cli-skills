@@ -77,6 +77,10 @@ WORKFLOW_PATH = ".github/workflows/update-external.yml"
 # 常にこの 1 件を更新する。
 REPORT_ISSUE_TITLE = "chore(ci): update-external の乖離検知レポート"
 
+# ``gh repo list`` の取得上限。到達したら打ち切られた可能性があるため
+# fail-closed で止める（``list_target_repos``）。2026-08-17 時点の実測は 119 件。
+REPO_LIST_LIMIT = 500
+
 # 下流 wrapper の job-level ``uses`` が指すべき参照先（``@<ref>`` を除いた部分）。
 REUSABLE_WORKFLOW_REF = f"{UPSTREAM_REPO}/{UPSTREAM_WORKFLOW_PATH}"
 
@@ -578,7 +582,7 @@ def list_target_repos(org: str, token: str) -> list[str]:
     proc = _run(
         [
             "gh", "repo", "list", org,
-            "--limit", "500",
+            "--limit", str(REPO_LIST_LIMIT),
             "--json", "name,isArchived",
             "--jq", ".[] | select(.isArchived | not) | .name",
         ],
@@ -591,6 +595,15 @@ def list_target_repos(org: str, token: str) -> list[str]:
     names = [n.strip() for n in proc.stdout.splitlines() if n.strip()]
     if not names:
         raise ScanError("リポジトリ列挙が 0 件を返した（列挙失敗と区別できないため失敗扱い）")
+    if len(names) >= REPO_LIST_LIMIT:
+        # 上限に達した = 打ち切られた可能性がある。残りが黙って検査対象外になると
+        # 「非アーカイブ全件を見た」という主張が崩れ、漏れたリポの乖離が
+        # 「0 件」に化ける。列挙の完全性を確認できない以上 fail-closed で止める。
+        raise ScanError(
+            f"リポジトリ列挙が上限 {REPO_LIST_LIMIT} 件に達した。"
+            "全件を列挙できたか確認できないため失敗扱いにする"
+            "（REPO_LIST_LIMIT を引き上げるかページネーションへ切り替えること）"
+        )
     return sorted(names)
 
 

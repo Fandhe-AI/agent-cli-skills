@@ -537,6 +537,45 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertTrue(cud.has_drift(result))
 
 
+class TestRepoEnumeration(unittest.TestCase):
+    """列挙の不完全さを「乖離 0 件」に化けさせない。"""
+
+    def _with_stdout(self, stdout: str):
+        class Proc:
+            returncode = 0
+            stderr = ""
+            def __init__(self, out): self.stdout = out
+        orig = cud._run
+        cud._run = lambda args, token=None: Proc(stdout)
+        return orig
+
+    def test_hitting_the_limit_is_fail_closed(self):
+        # 上限ちょうど = 打ち切られた可能性。残りが黙って検査対象外になる。
+        names = "\n".join(f"repo-{i}" for i in range(cud.REPO_LIST_LIMIT))
+        orig = self._with_stdout(names)
+        try:
+            with self.assertRaises(cud.ScanError) as ctx:
+                cud.list_target_repos("Fandhe-AI", "tok")
+            self.assertIn(str(cud.REPO_LIST_LIMIT), str(ctx.exception))
+        finally:
+            cud._run = orig
+
+    def test_empty_enumeration_is_fail_closed(self):
+        orig = self._with_stdout("")
+        try:
+            with self.assertRaises(cud.ScanError):
+                cud.list_target_repos("Fandhe-AI", "tok")
+        finally:
+            cud._run = orig
+
+    def test_normal_enumeration_is_sorted(self):
+        orig = self._with_stdout("zeta\nalpha\n")
+        try:
+            self.assertEqual(cud.list_target_repos("Fandhe-AI", "tok"), ["alpha", "zeta"])
+        finally:
+            cud._run = orig
+
+
 class TestReportIssueLifecycle(unittest.TestCase):
     """報告 issue は「常に 1 件を更新する」契約。新規作成を繰り返さない。"""
 
