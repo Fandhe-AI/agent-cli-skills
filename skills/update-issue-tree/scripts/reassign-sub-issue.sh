@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# reassign-sub-issue.sh — 1 件の sub-issue を安全に付け替える（DELETE→POST の 2 段操作を集約）
+#
+# 呼び出し元: skills/update-issue-tree/SKILL.md Step 3（closed 親下の残置 open issue の付け替え）・
+#            Step 4（孤児 issue の再配置。--old-parent を省略して呼ぶ）
+#
+# 背景: SKILL.md 本文に「DELETE→POST」を素の gh api 呼び出しとして並べる旧方式（PR #295）は、
+#       手順書のコードフェンスがブロックごとに独立シェルで実行され得るため、状態変数の受け渡しが
+#       構造的に壊れやすかった（DELETE 失敗を検知できず POST へ進む・冪等性判定が実行より後に
+#       走る等）。このスクリプトへ切り出すことで単一プロセスに閉じ込め、そのクラスの欠陥を消す
+#       （Issue #297 参照）。
+#
+# 現在の親の解決方法（実装着手前の実測で判明した事実）:
+#   GET /repos/{owner}/{repo}/issues/{n} のレスポンスに `parent_issue_url` フィールドが含まれ、
+#   対象 issue の現在の親を追加のページング呼び出しなしで直接判別できる（親なしなら null）。
+#   これにより「新親配下の全件取得で存在確認する」「旧親配下の全件取得で所属確認する」という
+#   listing ベースの冪等性判定は不要になった。冪等性判定・第三の親の検知は、この 1 フィールドの
+#   実測値を先に確定させてから分岐する（3.3 節の処理順序どおり、判定を DELETE/POST の実行より
+#   必ず先に行う）。--old-parent は advisory 扱いとし、実測した現在の親と食い違う場合は
+#   警告を出しつつ実測値を優先する（誤った旧親を渡されて別 issue の親子関係を壊す事故を防ぐ）。
+#
+# 使い方:
+#   ./reassign-sub-issue.sh --issue <対象 issue 番号> --new-parent <新親 issue 番号> \
+#     [--old-parent <旧親 issue 番号>] [--repo <owner/name>]
+#
+# 終了コードと stdout 最終行（result=<state> ...）は skills/update-issue-tree/SKILL.md の
+# 「付け替えスクリプトの呼び出し規約」節を正とする。呼び出し側は非ゼロ終了を 1 件も握り潰さず、
+# 完了レポートの「要確認事項」へ記載すること。
+#
+# 前提:
+#   - gh CLI がインストールされ認証済みであること
+#   - カレントディレクトリがリポジトリ内であること（--repo 省略時、gh の {owner}/{repo} 展開に依存）
+
+set -euo pipefail
+
+NUM_RE='^[1-9][0-9]*$'
+REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+
+usage() {
+  cat >&2 <<'EOF'
+使い方: reassign-sub-issue.sh --issue <n> --new-parent <n> [--old-parent <n>] [--repo <owner/name>]
+EOF
+}
+
+ISSUE=""
+NEW_PARENT=""
+OLD_PARENT=""
+REPO_ARG=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --issue|--new-parent|--old-parent|--repo)
+      # 各フラグは値を 1 つ取る名前付き引数。位置引数にしない理由: 中央の引数が
+      # 省略可という形は、旧親省略のつもりが新親の位置にずれる取り違えを招き、
+      # 別 issue の親子関係を破壊する事故につながる（計画 3.1 参照）
+      if [[ $# -lt 2 ]]; then
+        echo "エラー: $1 には値が必要" >&2
+        usage
+        exit 1
+      fi
+      case "$1" in
+        --issue) ISSUE="$2" ;;
+        --new-parent) NEW_PARENT="$2" ;;
+        --old-parent) OLD_PARENT="$2" ;;
+        --repo) REPO_ARG="$2" ;;
+      esac
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "エラー: 不明な引数 $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "${ISSUE}" || -z "${NEW_PARENT}" ]]; then
+  echo "エラー: --issue と --new-parent は必須" >&2
+  usage
+  exit 1
+fi
+
+if ! [[ "${ISSUE}" =~ ${NUM_RE} ]]; then
+  echo "エラー: --issue は正の整数で指定する（例: 42）" >&2
+  exit 1
+fi
+if ! [[ "${NEW_PARENT}" =~ ${NUM_RE} ]]; then
+  echo "エラー: --new-parent は正の整数で指定する（例: 42）" >&2
+  exit 1
+fi
+if [[ -n "${OLD_PARENT}" ]] && ! [[ "${OLD_PARENT}" =~ ${NUM_RE} ]]; then
+  echo "エラー: --old-parent は正の整数で指定する（例: 42）" >&2
+  exit 1
+fi
+
+if [[ -n "${REPO_ARG}" ]]; then
+  if ! [[ "${REPO_ARG}" =~ ${REPO_RE} ]]; then
+    echo "エラー: --repo は owner/name 形式で指定する" >&2
+    exit 1
+  fi
+  # gh api に -R フラグは無いため、検証済みの owner/name を全 API パスへそのまま埋め込む。
+  # ここで REPO_PATH を一度だけ確定し、以降は必ずこの変数経由で組み立てる
+  # （取り違えると黙って別リポを操作する）
+  REPO_PATH="${REPO_ARG}"
+else
+  # gh api の {owner}/{repo} は gh 自身が cwd の git remote から解決するプレースホルダ
+  REPO_PATH="{owner}/{repo}"
+fi
+
+if ! command -v gh &> /dev/null; then
+  echo "エラー: gh CLI がインストールされていません" >&2
+  exit 2
+fi
+
+if ! command -v jq &> /dev/null; then
+  echo "エラー: jq がインストールされていません" >&2
+  exit 2
+fi
+
+if ! gh auth status &> /dev/null; then
+  echo "エラー: gh CLI が認証されていません。gh auth login を実行してください" >&2
+  exit 2
+fi
+
+# result=<state> issue=<n> new_parent=<n> old_parent=<n|-> の形式で最終行を出す。
+# SKILL.md 側はこの 1 行から完了レポートの内訳（付け替え N 件 / 孤児の再配置 N 件）を集計する
+emit_result() {
+  local state="$1"
+  local old_parent_out="${2:--}"
+  echo "result=${state} issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${old_parent_out}"
+}
+
+# 対象 issue の database id（sub_issues API が要求する識別子。issue 番号ではない）と
+# 現在の親を 1 回の GET で確定する
+if ! ISSUE_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>&1); then
+  echo "エラー: イシュー #${ISSUE} の取得に失敗した" >&2
+  echo "${ISSUE_JSON}" >&2
+  exit 2
+fi
+
+ISSUE_ID=$(printf '%s' "${ISSUE_JSON}" | jq -r '.id')
+if ! [[ "${ISSUE_ID}" =~ ^[0-9]+$ ]]; then
+  echo "エラー: イシュー #${ISSUE} の database id を解決できない" >&2
+  exit 2
+fi
+
+PARENT_URL=$(printf '%s' "${ISSUE_JSON}" | jq -r '.parent_issue_url // empty')
+CURRENT_PARENT=""
+if [[ -n "${PARENT_URL}" ]]; then
+  CURRENT_PARENT=$(printf '%s' "${PARENT_URL}" | grep -oE '[0-9]+$' || true)
+fi
+
+if [[ -n "${OLD_PARENT}" && -n "${CURRENT_PARENT}" && "${OLD_PARENT}" != "${CURRENT_PARENT}" ]]; then
+  echo "警告: 実測した現在の親 #${CURRENT_PARENT} が指定された --old-parent #${OLD_PARENT} と異なる。実測値を優先する" >&2
+fi
+
+# 冪等性判定を DELETE/POST の実行より先に確定する（#295 で「判定が実行より後で 1 巡遅れる」と
+# 指摘された欠陥の回避）。既に新親配下なら DELETE も POST も撃たない
+if [[ "${CURRENT_PARENT}" == "${NEW_PARENT}" ]]; then
+  emit_result "already-attached" "${CURRENT_PARENT}"
+  exit 0
+fi
+
+if [[ -z "${CURRENT_PARENT}" ]]; then
+  # 孤児（どの親にも属していない）: DELETE を飛ばして POST のみ
+  if ! POST_OUT=$(gh api --method POST "repos/${REPO_PATH}/issues/${NEW_PARENT}/sub_issues" -F "sub_issue_id=${ISSUE_ID}" 2>&1); then
+    echo "${POST_OUT}" >&2
+    if printf '%s' "${POST_OUT}" | grep -qi "only have one parent"; then
+      exit 6
+    fi
+    exit 4
+  fi
+else
+  # DELETE のパスは単数形 sub_issue（複数形 sub_issues を渡すと 404 になり、旧親から
+  # 外れないまま POST して「Sub issue may only have one parent」で必ず失敗する。GitHub 側の
+  # 仕様上の単複非対称。POST 側は複数形 sub_issues のまま）
+  if ! DEL_OUT=$(gh api --method DELETE "repos/${REPO_PATH}/issues/${CURRENT_PARENT}/sub_issue" -F "sub_issue_id=${ISSUE_ID}" 2>&1); then
+    echo "エラー: 旧親 #${CURRENT_PARENT} からの取り外しに失敗した" >&2
+    echo "${DEL_OUT}" >&2
+    # DELETE 失敗時は POST へ絶対に進まない（#295 で「DELETE 失敗検知なしに POST へ進む」と
+    # 指摘された欠陥の回避。fail-closed）
+    exit 3
+  fi
+
+  if ! POST_OUT=$(gh api --method POST "repos/${REPO_PATH}/issues/${NEW_PARENT}/sub_issues" -F "sub_issue_id=${ISSUE_ID}" 2>&1); then
+    echo "エラー: 新親 #${NEW_PARENT} への紐付けに失敗した" >&2
+    echo "${POST_OUT}" >&2
+    if printf '%s' "${POST_OUT}" | grep -qi "only have one parent"; then
+      # DELETE と POST の間に第三者が親を付け替えた等のレース。ここでのみ到達し得る防御的経路
+      exit 6
+    fi
+    exit 4
+  fi
+fi
+
+# 事後確認は必ず取り直す。DELETE/POST 前に取得した ISSUE_JSON を使い回さない
+# （#295 の「スナップショットの追記型再利用による汚染」の回避）
+if ! VERIFY_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>&1); then
+  echo "エラー: 事後確認のための再取得に失敗した" >&2
+  echo "${VERIFY_JSON}" >&2
+  exit 5
+fi
+
+VERIFY_PARENT_URL=$(printf '%s' "${VERIFY_JSON}" | jq -r '.parent_issue_url // empty')
+VERIFY_PARENT=""
+if [[ -n "${VERIFY_PARENT_URL}" ]]; then
+  VERIFY_PARENT=$(printf '%s' "${VERIFY_PARENT_URL}" | grep -oE '[0-9]+$' || true)
+fi
+
+if [[ "${VERIFY_PARENT}" != "${NEW_PARENT}" ]]; then
+  echo "エラー: 事後確認で新親 #${NEW_PARENT} 配下に見つからない（実測 parent=#${VERIFY_PARENT:-なし}）" >&2
+  exit 5
+fi
+
+if [[ -z "${CURRENT_PARENT}" ]]; then
+  emit_result "posted-only" "-"
+else
+  emit_result "reassigned" "${CURRENT_PARENT}"
+fi
+exit 0

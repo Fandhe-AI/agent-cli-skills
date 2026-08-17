@@ -75,42 +75,63 @@ fetch_sub_issues "${ROOT_NUMBER}"
 ### Step 3: closed 親下の残置 open issue を付け替える
 
 closed 親の下に残置されている open issue を、対応する open Phase 親へ移動する。
+「旧親から DELETE → 新親へ POST」の 2 段操作と、その前後の冪等性判定・事後確認は
+`scripts/reassign-sub-issue.sh` に集約されている（Issue #297。旧方式は SKILL.md 本文に
+素の `gh api` を並べていたため、DELETE 失敗検知なしに POST へ進む等の欠陥があった）。
 
 ```bash
-# sub_issue_id は issue 番号ではなく database id を渡す（GitHub sub-issues API 仕様）
-ISSUE_ID=$(gh api "repos/{owner}/{repo}/issues/${ISSUE_NUMBER}" --jq '.id')
-
-# 既存の親から外す（sub_issues API の DELETE）
-# 単複が非対称: 削除は単数形 sub_issue のみ有効。複数形 sub_issues を渡すと 404 になる
-gh api \
-  --method DELETE \
-  "repos/{owner}/{repo}/issues/${OLD_PARENT}/sub_issue" \
-  -F "sub_issue_id=${ISSUE_ID}"
-
-# 新しい親へ紐付ける（追加は複数形 sub_issues のまま）
-gh api \
-  --method POST \
-  "repos/{owner}/{repo}/issues/${NEW_PARENT}/sub_issues" \
-  -F "sub_issue_id=${ISSUE_ID}"
+skills/update-issue-tree/scripts/reassign-sub-issue.sh \
+  --issue "${ISSUE_NUMBER}" \
+  --old-parent "${OLD_PARENT}" \
+  --new-parent "${NEW_PARENT}"
+echo "exit=$?"
 ```
+
+**引数**
+
+| 引数 | 必須 | 意味 |
+|------|------|------|
+| `--issue` | 必須 | 付け替え対象の issue 番号 |
+| `--new-parent` | 必須 | 付け替え先の issue 番号 |
+| `--old-parent` | 任意 | 現在の親（advisory。実測した現在の親と食い違う場合は実測値を優先する） |
+| `--repo` | 任意 | `owner/name`。省略時は cwd の git remote から解決 |
+
+**終了コードと `result=` 行**
+
+stdout 最終行が `result=<state> issue=<n> new_parent=<n> old_parent=<n|->` の形式で
+機械可読な内訳を返す。**非ゼロ終了は 1 件も握り潰さず、Step 9 の完了レポートの
+「要確認事項」へ必ず記載する。**
+
+| 終了コード | `state` | 意味 | 呼び出し側の扱い |
+|-----------|---------|------|----------------|
+| 0 | `reassigned` | DELETE→POST を実施 | 「付け替え」件数へ計上 |
+| 0 | `already-attached` | 既に新親配下（no-op） | 件数へ計上しない |
+| 0 | `posted-only` | 旧親配下になく POST のみ | 「孤児の再配置」件数へ計上（Step 4 と同一スクリプト） |
+| 1 | — | 引数・使い方エラー | 実行者の誤り。修正して再実行 |
+| 2 | — | 前提不備（`gh`/`jq` 不在・未認証・issue 取得不可） | 中断して原因を解消。要確認事項へ記載 |
+| 3 | — | DELETE 失敗。**POST は実行していない** | 要確認事項へ記載。旧親配下のまま |
+| 4 | — | POST 失敗 | 要確認事項へ記載。宙ぶらりん状態の可能性あり |
+| 5 | — | 事後確認で新親配下に見つからない | 要確認事項へ記載。手動で実状態を確認 |
+| 6 | — | 第三の親配下と判明（レース） | 要確認事項へ記載。正しい旧親番号で再実行 |
 
 ### Step 4: 孤児 issue を再配置する
 
-どの親にも紐付いていない孤児 issue を適切な Phase 親へ紐付ける。  
+どの親にも紐付いていない孤児 issue を適切な Phase 親へ紐付ける。
+`--old-parent` を省略して同じスクリプトを呼ぶ（DELETE を飛ばして POST のみ実行される）。
 Phase が不明な issue はタイトル・本文を読んで判断し、判断できない場合はユーザーに確認する。
 
 ```bash
-# sub_issue_id は database id を渡す（issue 番号ではない）
-ORPHAN_ID=$(gh api "repos/{owner}/{repo}/issues/${ORPHAN_NUMBER}" --jq '.id')
-gh api \
-  --method POST \
-  "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
-  -F "sub_issue_id=${ORPHAN_ID}"
+skills/update-issue-tree/scripts/reassign-sub-issue.sh \
+  --issue "${ORPHAN_NUMBER}" \
+  --new-parent "${PHASE_NUMBER}"
+echo "exit=$?"
 ```
 
 ### Step 5: 必要に応じて新 Phase 親を新設する
 
 既存 Phase に収まらない新規タスクが多い場合、新 Phase 親 issue を作成してルートへ紐付ける。
+（この POST は `reassign-sub-issue.sh` を使わない。たった今作成した、親を持たないことが
+自明な issue への単発 POST であり、DELETE パス・冪等性判定の対象外のため）
 
 ```bash
 # phase ラベルが存在しないリポジトリでは issue 作成が失敗するため、必ず事前作成する
@@ -157,6 +178,8 @@ gh issue edit "${ISSUE_NUMBER}" --remove-label "phase:0"
 ### Step 7: 4h 超の issue を sub-issue に分解する
 
 棚卸し中に 4h 超と判断した issue は、create-issue-tree と同じ粒度基準で sub-issue に分解する。
+（この POST も `reassign-sub-issue.sh` を使わない。理由は Step 5 と同じ: 新規作成した
+親なし issue への単発 POST）
 
 ```bash
 # phase ラベルが存在しない場合に備えて事前作成する（作成済みなら no-op）
@@ -244,10 +267,16 @@ EOF
 - #N: タイトル — 確認理由
 ```
 
+「closed 親下の残置 issue 付け替え」「孤児 issue の再配置」の件数は、Step 3 / Step 4 で
+`reassign-sub-issue.sh` を呼んだ回数分の `result=` 行（`reassigned` / `posted-only`）から集計する。
+非ゼロ終了（exit 1〜6）は 1 件も件数へ含めず、必ず「要確認事項」へ理由付きで記載する。
+
 ## 検証
 
 - ルート issue 本文の Phase 別表が更新されていることを確認する
 - closed Phase 親の下に open issue が残置されていないことを確認する
+- Step 3 / Step 4 で呼んだ `reassign-sub-issue.sh` の各回について、`echo "exit=$?"` の値と
+  `result=` 行を確認する。非ゼロ終了があれば Step 9 の要確認事項へ反映されているか確認する
 
 ```bash
 # 全 sub-issues の state を確認
@@ -267,16 +296,17 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
 
 | 問題 | 回避策 |
 |------|--------|
-| 付け替えの DELETE が 404 になり、続く POST が 422 で失敗する | 削除のパスだけ単数形 `sub_issue`。複数形 `sub_issues` は 404 になり、旧親から外れないまま POST するため `Sub issue may only have one parent` で必ず失敗する |
+| 付け替えの DELETE が 404 になり、続く POST が 422 で失敗する | 削除のパスだけ単数形 `sub_issue`。複数形 `sub_issues` は 404 になり、旧親から外れないまま POST するため `Sub issue may only have one parent` で必ず失敗する（`reassign-sub-issue.sh` は DELETE 失敗時に POST へ進まないため、この連鎖失敗自体は起きない。手動で `gh api` を直接叩く場合の注意として記載を残す） |
 
 ## 注意事項
 
 - **棚卸し前に変更内容をユーザーに提示して確認を取る**（Step 2 参照）
-- ページネーション: sub-issues が 100 件を超える場合は `per_page=100&page=N` でページングして全件取得する
+- ページネーション: sub-issues が 100 件を超える場合は `per_page=100&page=N` でページングして全件取得する（Step 1 のツリー全体取得に適用。`reassign-sub-issue.sh` は対象 issue の `parent_issue_url` を直接参照するため、付け替え判定自体にはページネーションが不要）
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）
 - `--no-verify` は絶対に使用しない
 - **`gh issue create` は `--json` 非対応**。issue URL を stdout に出力するため、`| grep -oE '[0-9]+$'` で末尾の番号を抽出する
-- **sub_issues API（POST / DELETE）の `sub_issue_id` は issue 番号ではなく database id**（GitHub 仕様）。`gh api "repos/{owner}/{repo}/issues/<number>" --jq '.id'` で id を取得してから渡す。番号をそのまま渡すと誤った issue を操作する／404 になる
+- **sub_issues API（POST / DELETE）の `sub_issue_id` は issue 番号ではなく database id**（GitHub 仕様）。`gh api "repos/{owner}/{repo}/issues/<number>" --jq '.id'` で id を取得してから渡す。番号をそのまま渡すと誤った issue を操作する／404 になる（`reassign-sub-issue.sh` はこれを内部で解決するため、Step 3/4 で手動取得する必要はない）
 - 孤児 issue の Phase が判断できない場合は推測せずにユーザーへ確認する
 - sub_issues の DELETE API（付け替え時に旧親から外す操作）はパスが単数形 `sub_issue` である点に注意し、操作対象の issue 番号を必ず確認してから実行する
 - ツリー更新後は implement-issue-tree が post-order DFS で正しく消化できる構造になっているか確認する
+- Step 3 / Step 4 の付け替え処理は `scripts/reassign-sub-issue.sh` を使う。SKILL.md 本文へ素の `gh api` DELETE/POST を書き戻さない（状態変数の受け渡しがコードフェンス境界で壊れるクラスの欠陥に戻るため。詳細は `scripts/reassign-sub-issue.sh` 冒頭コメントと Issue #297 を参照）

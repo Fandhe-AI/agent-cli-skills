@@ -31,6 +31,8 @@ skills/                               -- スキル本体（各ディレクトリ
   init-claude/
   update-docs/
   update-issue-tree/
+    scripts/                          -- reassign-sub-issue.sh（closed 親下の残置 open issue 付け替え・孤児再配置。DELETE→POST を単一プロセスで冪等に実行）
+    tests/                            -- node:test 回帰テスト（DELETE 失敗時に POST が呼ばれないこと等）、lib/ に gh スタブ
   update-claude/
   setup-repo-guards/
   project-init/
