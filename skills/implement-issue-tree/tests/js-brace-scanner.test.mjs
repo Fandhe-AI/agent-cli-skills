@@ -193,6 +193,76 @@ test('正規表現側: ブロックコメント直後の /re/ はコメント前
   assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
 })
 
+test('正規表現側: throw /}/.test(x) は正規表現として扱われる（PR #351 codex 指摘）', () => {
+  // throw が REGEX_PRECEDING_KEYWORDS に無いと、throw 直後の /}/ を除算側と誤判定し、
+  // 正規表現内の } を対象ブロックの終端として誤って返し得た。
+  const src = '{ throw /}/.test(x) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
+// オブジェクトリテラル vs ブロック文（`}` 直後の / 判定）
+// ---------------------------------------------------------------------------
+
+test('除算側: オブジェクトリテラル {} の直後の / は正規表現と誤認されない（PR #351 codex 指摘）', () => {
+  // 通常コード用 } を無条件 OPERATOR にすると、代入直後のオブジェクトリテラル {} の
+  // 直後にある / を正規表現の開始と誤認し、後続の } を早期に終端と誤って返し得た。
+  const src = '{ x = {} / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 分割代入 const { a } = obj の直後は文位置として扱われる（対比ケース）', () => {
+  const src = '{ const { a } = obj; y = a / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: if (c) {} の直後の /re/ は正規表現として扱われる（ブロック文は VALUE を残さない）', () => {
+  const src = '{ if (c) {} /re/.test(s) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: else {} の直後の /re/ は正規表現として扱われる', () => {
+  const src = '{ if (c) {} else {} /re/.test(s) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: アロー関数本体 () => {} の直後の /re/ は正規表現として扱われる', () => {
+  const src = '{ const f = () => {}; /re/.test(s) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: return { a: 1 } の直後の / は正規表現と誤認されない', () => {
+  const src = '{ function f() { return { a: 1 } / 2 } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
+// 制御構文キーワードとプロパティ名の区別（`.catch` 等）
+// ---------------------------------------------------------------------------
+
+test('除算側: p.catch(fn) は制御構文と誤分類されない（Cursor Bugbot 指摘）', () => {
+  // `(` の直前語のみで制御構文判定すると、`obj.catch(...)` のようなプロパティ呼び出しを
+  // catch ヘッダーと誤認し、対応する ) で VALUE ではなく OPERATOR のままになり、
+  // 後続の / を正規表現と誤読して } を早期に終端と誤って返し得た。
+  const src = '{ p.catch(fn) / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: obj.if(x) は制御構文と誤分類されない（PR #351 codex 指摘）', () => {
+  const src = '{ obj.if(x) / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: 本物の catch (e) の直後は文位置のまま（対比ケース）', () => {
+  const src = '{ try {} catch (e) { /re/.test(String(e)) } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 空白を挟んだ p . catch(fn) もプロパティ呼び出しとして扱われる', () => {
+  const src = '{ p . catch(fn) / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
 // ---------------------------------------------------------------------------
 // 契約
 // ---------------------------------------------------------------------------
