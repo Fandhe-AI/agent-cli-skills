@@ -389,7 +389,7 @@ if [ "${status}" -ne 0 ] || [ -z "${rows}" ]; then
 else
   printf '%s\n' "${rows}" | awk -F'\t' '
     { n[$1]++
-      if ($2 == "success") { }
+      if ($2 == "success" || $2 == "neutral" || $2 == "skipped") { }
       else if ($2 == "pending") pend[$1] = 1
       else bad[$1] = 1 }
     END { d = 0; b = 0; p = 0
@@ -399,14 +399,16 @@ fi
 # → 出力は次の 2 形のみ（チェック名・エラー本文は出力に現れない）:
 #    `UNDETERMINED`               … 判定不能。「重複なし」ではない
 #    `dup=<D> bad=<B> pend=<P>`   … 取得成功。D = 重複した check 名の数、
-#                                     B = そのうち結論が `success` でも `pending`（未完了）でもない
-#                                     ものを含む数（cancelled / failure / timed_out /
-#                                     action_required / startup_failure / stale 等、
-#                                     `success` を正常扱いする以外は全て bad へ倒す fail-closed
-#                                     分類）、P = そのうち結論が `pending`（未完了。実際の
-#                                     conclusion が null で in-progress/queued 中）を含む数
+#                                     B = そのうち結論が `success` / `neutral` / `skipped`
+#                                     （いずれも required status checks 上は合格・非ブロック扱い）
+#                                     でも `pending`（未完了）でもないものを含む数（cancelled /
+#                                     failure / timed_out / action_required / startup_failure /
+#                                     stale 等、`success`・`neutral`・`skipped` を正常扱いする
+#                                     以外は全て bad へ倒す fail-closed 分類）、P = そのうち
+#                                     結論が `pending`（未完了。実際の conclusion が null で
+#                                     in-progress/queued 中）を含む数
 # → 読み方: **取得に成功したうえで** D が 0 なら重複なし。D >= 1 でも B = 0 かつ P = 0 の
-#    場合のみ「重複はすべて正常な再実行（success 同士）」と読める。B・P は排他ではなく、
+#    場合のみ「重複はすべて正常な再実行（success/neutral/skipped 同士）」と読める。B・P は排他ではなく、
 #    同じ重複名の中に bad な結論と pending な結論が両方含まれる場合は B・P 双方が 1 になる。
 #    上記 2 形（正規表現 `^UNDETERMINED$` / `^dup=[0-9]+ bad=[0-9]+ pend=[0-9]+$`）以外の
 #    出力も判定不能として扱う
@@ -443,7 +445,7 @@ gh api --paginate --slurp "repos/OWNER/REPO/commits/<sha>/check-runs?per_page=10
   - 前提 1（重複と結論の実測）: (A) が `dup=<D> bad=<B> pend=<P>` を返し、D・B・P を実測する。
     - **D >= 1 かつ P >= 1** の場合: 重複の中に `pending`（未完了）の check-run が残っている。この pending 自体が `mergeStateStatus=BLOCKED` の直接原因になり得るため、「重複はすべて正常な再実行」と断定して原因調査を別方向へ進めてはならない。rerun せず、pending の完了を待って再監視する（判断・実行の主体はラン運用者／ホスト側。原因不明のまま前提 2 の rerun フローへ進めない）。
     - **D >= 1 かつ P = 0 かつ B >= 1** の場合のみ、前提 2（rerun 対象の一意化）へ進む。
-    - **D >= 1 かつ B = 0 かつ P = 0** の場合、重複はすべて正常な再実行（`success` 同士）由来であり「cancel された run の残存 check」ではない。rerun せず、BLOCKED の別原因（required check の context 名不一致・未解決レビュースレッド・ruleset 構成など。`.claude/rules/ruleset-policy.md` の 3 軸スイープ）へ調査を移す。
+    - **D >= 1 かつ B = 0 かつ P = 0** の場合、重複はすべて正常な再実行（`success`/`neutral`/`skipped` 同士）由来であり「cancel された run の残存 check」ではない。rerun せず、BLOCKED の別原因（required check の context 名不一致・未解決レビュースレッド・ruleset 構成など。`.claude/rules/ruleset-policy.md` の 3 軸スイープ）へ調査を移す。
   - 前提 2（rerun 対象の一意化）: (B) で重複している check 名を確認し、その名前を発行した cancelled run を job 一覧から特定する（下記コマンド）。
     - cancelled run が**複数**見つかり一意に絞り込めない場合: rerun せず `blocked`（quality）として最終レポートへ回す（誤った run を rerun すると無関係な job まで再実行し、原因不明のまま状態を変える）。
     - cancelled run が **0 件**の場合: rerun 対象が存在しない。B >= 1 の残存は cancel ではなく failure / timed_out / action_required / startup_failure / stale 等の非 cancel 由来であり、通常の CI 失敗として扱う（rerun せず、監視フローの needs-fix 経路で原因を特定して修正する）。cancel 起因と決めつけて `gh run rerun` しない。
@@ -525,7 +527,8 @@ open のサブイシューが残っている場合、または受入基準が未
 | P0/P1 相当・セキュリティ指摘を対象外扱いにする | fix エージェントは単独で対象外と判定して記録のみで済ませてはならない。修正するか、ユーザーまたは指摘者の承認を得るまで `blocked` として扱う（安全側ガード） |
 | 全チェックが pass に見えるので CI 起因を除外し、PR の差分を疑って調査を続ける | 同名 check-run の重複件数を実測する（Step 6 の該当分岐）。cancel された run の残存 check が BLOCKED の原因になり得る |
 | (A) の出力を検証せず `0` を「重複なし」と読む | 取得失敗・空出力・形式不一致は `UNDETERMINED`。CI 由来を除外せず `blocked`（quality）に倒す |
-| 重複の bad を cancelled / failure / timed_out のみに限定し、pending・action_required・startup_failure・stale を「正常な重複」に含める | `success` 以外は正常扱いしない。pending（未完了）は別枠の `pend` で検知し、それ自体が BLOCKED の原因になり得るため rerun 対象探索へ進まず待機する |
+| 重複の bad を cancelled / failure / timed_out のみに限定し、pending・action_required・startup_failure・stale を「正常な重複」に含める | `success`・`neutral`・`skipped`（required status checks 上は合格・非ブロック扱い）以外は正常扱いしない。pending（未完了）は別枠の `pend` で検知し、それ自体が BLOCKED の原因になり得るため rerun 対象探索へ進まず待機する |
+| `neutral`・`skipped` を bad（通常の CI 失敗）として rerun 対象探索へ進める | `neutral`・`skipped` は GitHub の required status checks 判定で合格扱いになる conclusion であり fail-closed 対象ではない。`success`・`neutral`・`skipped` の重複は正常な再実行として扱い、BLOCKED の別原因を疑う |
 | 差分と無関係なテスト失敗を確認せず flaky と決めつけて rerun する | main での同ジョブ green と差分スコープの 2 点を実測してから rerun する（下記「一斉同期・大量 PR 投入時の運用ガード」参照） |
 
 ## 一斉同期・大量 PR 投入時の運用ガード

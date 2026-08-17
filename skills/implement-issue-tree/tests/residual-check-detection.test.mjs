@@ -18,6 +18,13 @@
 // それ以外の非 success conclusion は `bad` として通常の CI 失敗経路へ倒す。出力語彙は
 // `dup=<D> bad=<B> pend=<P>` の 3 値へ拡張した。
 //
+// 再修正（Issue #338 PR #354 の codex-review / Bugbot 指摘）: 上記の「success 以外を bad」
+// 分類は `neutral`・`skipped` という、GitHub の required status checks 判定では合格・
+// 非ブロック扱いになる 2 つの conclusion まで bad に含めてしまい、success+neutral や
+// skipped+skipped の健全な重複を「通常の CI 失敗」と誤診断していた。正常集合を
+// `success` / `neutral` / `skipped` の 3 conclusion に拡張し、それ以外（cancelled /
+// failure / timed_out / action_required / startup_failure / stale 等）のみを bad とする。
+//
 // 3 群構成:
 //   群 A（SKILL.md 記述の固定）: UNDETERMINED・dup=・bad=・ゼロ件分岐・終了コード検証の記載を固定。
 //   群 B（旧文言の再発防止）: 「1 以上なら重複あり」が 0 回であることを固定。
@@ -187,4 +194,32 @@ test('群C: 同一重複名に bad な結論と pending が両方含まれる場
     '',
   ].join('\n')
   assert.equal(runAwk(rows), 'dup=1 bad=1 pend=1')
+})
+
+test('群C: success + neutral の重複は bad に数えない（Issue #338 P1 の codex-review / Bugbot 指摘シナリオ）', () => {
+  const rows = [
+    'codex-review\tsuccess',
+    'codex-review\tneutral',
+    '',
+  ].join('\n')
+  assert.equal(runAwk(rows), 'dup=1 bad=0 pend=0')
+})
+
+test('群C: skipped + skipped の重複は bad に数えない（Issue #338 P1 の codex-review / Bugbot 指摘シナリオ）', () => {
+  const rows = [
+    'ci/optional\tskipped',
+    'ci/optional\tskipped',
+    '',
+  ].join('\n')
+  assert.equal(runAwk(rows), 'dup=1 bad=0 pend=0')
+})
+
+test('群C: success + skipped + neutral の 3 重複も bad=0 で健全と判定する', () => {
+  const rows = [
+    'ci/build\tsuccess',
+    'ci/build\tskipped',
+    'ci/build\tneutral',
+    '',
+  ].join('\n')
+  assert.equal(runAwk(rows), 'dup=1 bad=0 pend=0')
 })
