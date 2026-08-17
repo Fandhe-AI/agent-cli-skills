@@ -598,6 +598,12 @@ class TestScanEndToEnd(unittest.TestCase):
                 prefix = f"repos/Fandhe-AI/{name}/actions/workflows/{cud.WORKFLOW_FILENAME}"
                 if not path.startswith(prefix):
                     continue
+                # sched タプルは (state, created_at, runs_status, last_run[, conclusions])。
+                # 5 要素目の conclusions は直近 schedule 実行の conclusion を新しい順に
+                # 並べたもので、省略時は全件 "success" とみなす。scan() 経由の
+                # エンドツーエンドテストでも本番と同じ形の workflow_runs を返さないと、
+                # evaluate_schedule の SCHED_FAILING 判定（conclusion を消費する経路）を
+                # 一度も通らないまま緑になるため、キーごと欠落させない。
                 sched = cfg.get(
                     "sched",
                     ("active", "2020-01-01T00:00:00Z", 200, "2026-08-17T00:00:00Z"),
@@ -613,8 +619,18 @@ class TestScanEndToEnd(unittest.TestCase):
                         return runs_status, ""
                     if last_run is None:
                         return 200, '{"workflow_runs":[]}'
+                    conclusions = (
+                        sched[4]
+                        if len(sched) > 4
+                        else ["success"] * cud.SCHED_FAILING_STREAK_MIN
+                    )
                     return 200, json.dumps(
-                        {"workflow_runs": [{"created_at": last_run}]}
+                        {
+                            "workflow_runs": [
+                                {"created_at": last_run, "conclusion": c}
+                                for c in conclusions
+                            ]
+                        }
                     )
                 # workflow メタデータ本体
                 state, created_at = sched[0], sched[1]
@@ -804,6 +820,42 @@ class TestScanEndToEnd(unittest.TestCase):
         cats = self._findings_by_repo(result)
         self.assertEqual(len(cats["disabled-schedule"]), 1)
         self.assertEqual(cats["disabled-schedule"][0][0], "SCHEDULE-DISABLED")
+
+    def test_schedule_failing_wrapper_is_flagged(self):
+        # 発火は新しい（19 時間前）が直近 2 件が連続失敗 → SCHEDULE-FAILING。
+        # last_run だけを見る実装では SCHEDULE-OK に倒れるケースを、scan() 経由
+        # （フェイク Actions API が conclusion を返す経路）で押さえる。
+        result = self._run_scan({
+            "failing-schedule": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "sched": (
+                    "active", "2020-01-01T00:00:00Z", 200, self._ago(0.8),
+                    ["failure", "failure"],
+                ),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        self.assertEqual(len(cats["failing-schedule"]), 1)
+        self.assertEqual(cats["failing-schedule"][0][0], "SCHEDULE-FAILING")
+        # detail には連続失敗の conclusion が列挙される（読み手がしきい値を
+        # 信用せず自分で判断できるようにするため）。
+        self.assertIn("failure", cats["failing-schedule"][0][1])
+
+    def test_schedule_single_failure_is_not_flagged(self):
+        # 単発の flaky failure は過検知しない（直近 2 件が「全て」失敗のときのみ）。
+        result = self._run_scan({
+            "flaky-schedule": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "sched": (
+                    "active", "2020-01-01T00:00:00Z", 200, self._ago(0.8),
+                    ["failure", "success"],
+                ),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        categories = {c for c, _ in cats.get("flaky-schedule", [])}
+        self.assertNotIn("SCHEDULE-FAILING", categories)
+        self.assertIn("Fandhe-AI/flaky-schedule", result.wrappers_ok)
 
     def test_legacy_repo_with_stale_schedule_reports_two_findings(self):
         # LEGACY（軸 1）と SCHEDULE-STALE（軸 5）は原因も直し方も違うため、
