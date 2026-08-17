@@ -28,7 +28,6 @@ from check_update_external_drift import (  # noqa: E402
     KIND_LEGACY,
     KIND_REUSABLE_DEFINITION,
     KIND_WRAPPER,
-    KIND_WRAPPER_HYBRID,
     KIND_WRAPPER_UNPINNED,
     PIN_BEHIND,
     PIN_CURRENT,
@@ -183,16 +182,6 @@ jobs:
 """
 
 
-# --- fixture: reusable を呼ぶ job と、composite action を直接呼ぶ手管理 job の併存。
-#     移行途中のハイブリッド。上流の強化が一部のジョブにしか届かない。
-FIXTURE_WRAPPER_HYBRID = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
-  legacy-skills:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96
-"""
-
-
 def markers_map(text: str) -> dict[str, dict]:
     return {m["marker"]: m for m in check_upstream_markers(text)}
 
@@ -257,45 +246,9 @@ jobs:
 """.format(sha=UPSTREAM_SHA)
         self.assertEqual(classify_workflow(stepwise)["kind"], KIND_LEGACY)
 
-    def test_hybrid_wrapper_is_drift(self):
-        # reusable を呼ぶ job と、composite action を直接呼ぶ手管理 job が併存。
-        # 薄い wrapper になっておらず上流の強化が一部にしか届かない。
-        info = classify_workflow(FIXTURE_WRAPPER_HYBRID)
-        self.assertEqual(info["kind"], KIND_WRAPPER_HYBRID)
-        self.assertIn("legacy-skills", info["reason"])
 
-    def test_extra_run_job_is_hybrid_not_wrapper(self):
-        # 既知の composite action を使わない追加 job（run: だけ・ローカル action・
-        # 別 action）も余剰として捕まえる。allowlist 方式だとすり抜けて、
-        # pin が最新なら wrappers_ok に入ってしまう。
-        with_run_job = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
-  homegrown-sync:
-    runs-on: ubuntu-latest
-    steps:
-      - run: npx skills update && git push
-"""
-        info = classify_workflow(with_run_job)
-        self.assertEqual(info["kind"], KIND_WRAPPER_HYBRID)
-        self.assertIn("homegrown-sync", info["reason"])
 
-    def test_extra_local_action_job_is_hybrid(self):
-        with_local = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
-  local-sync:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: ./.github/actions/sync-skills
-"""
-        self.assertEqual(
-            classify_workflow(with_local)["kind"], KIND_WRAPPER_HYBRID
-        )
 
-    def test_multiple_reusable_calls_stay_wrapper(self):
-        # 全 job が上流 reusable の呼び出しなら余剰ではない（偽陽性を出さない）。
-        two_calls = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
-  update-external-2:
-    uses: Fandhe-AI/actions/.github/workflows/update-external.yml@{sha}
-""".format(sha=UPSTREAM_SHA)
-        self.assertEqual(classify_workflow(two_calls)["kind"], KIND_WRAPPER)
 
     def test_reusable_definition_is_excluded(self):
         # 上流本体でのみ除外される（on: が True キーへ落ちても検出できること）。
@@ -368,6 +321,23 @@ class TestAxis4JobScoped(unittest.TestCase):
         renamed = FIXTURE_UPSTREAM_OK.replace("  skills:", "  agent-skill-sync:")
         m = markers_map(renamed)[self.MARKER_PC]
         self.assertTrue(m["ok"], m["detail"])
+
+    def test_lookalike_action_is_not_accepted(self):
+        # 前方一致だと skills-update-malicious まで正規 action として認識される。
+        # `@` より前のパスの完全一致で同定すること。
+        lookalike = FIXTURE_UPSTREAM_OK.replace(
+            "Fandhe-AI/actions/skills-update@", "Fandhe-AI/actions/skills-update-malicious@"
+        )
+        mm = markers_map(lookalike)
+        self.assertFalse(mm["skills ジョブの同定"]["ok"])
+
+    def test_lookalike_checkout_is_not_accepted(self):
+        lookalike = FIXTURE_UPSTREAM_OK.replace(
+            "      - name: Checkout\n        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10\n        with:\n          persist-credentials: false",
+            "      - name: Checkout\n        uses: actions/checkout-wrapper@df4cb1c069e1874edd31b4311f1884172cec0e10\n        with:\n          persist-credentials: false",
+        )
+        mm = markers_map(lookalike)
+        self.assertFalse(mm["skills ジョブの persist-credentials: false"]["ok"])
 
     def test_degraded_upstream_flags_every_marker(self):
         mm = markers_map(FIXTURE_UPSTREAM_DEGRADED)
@@ -473,8 +443,6 @@ class TestScanEndToEnd(unittest.TestCase):
             "vendored-symlink": {"workflow": (404, ""), "lock": 200, "tree": "120000"},
             # ファイル無し + lock 無し → 対象外（乖離ではない）
             "unrelated": {"workflow": (404, ""), "lock": 404},
-            # 軸 1: 移行途中のハイブリッド → WRAPPER-HYBRID として乖離
-            "hybrid-wrapper": {"workflow": (200, FIXTURE_WRAPPER_HYBRID)},
             # 下流が workflow_call を足しても除外されない（偽陰性の防止）
             "sneaky-workflow-call": {"workflow": (200, FIXTURE_REUSABLE_DEFINITION)},
             # 検査不能 → UNKNOWN（黙って green にしない）
@@ -490,8 +458,6 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertIn("7 コミット遅れている", cats["stale-wrapper"][1])
         self.assertEqual(cats["legacy-repo"][0], "LEGACY")
         self.assertEqual(cats["sneaky-workflow-call"][0], "LEGACY")
-        self.assertEqual(cats["hybrid-wrapper"][0], "WRAPPER-HYBRID")
-        self.assertIn("legacy-skills", cats["hybrid-wrapper"][1])
 
         self.assertEqual(cats["vendored-no-ci"][0], "SYNC-CI-ABSENT")
         self.assertIn("040000", cats["vendored-no-ci"][1])
@@ -515,9 +481,7 @@ class TestScanEndToEnd(unittest.TestCase):
 
         # レポートは乖離 0 件でも全量を出す契約。ここでは 4 件出ることを確認する。
         report = cud.render_report(result, "https://example.invalid/run/1")
-        self.assertIn("乖離: **6 件**", report)
-        # 分類名がレポート本文まで到達すること（scan → render_report の経路）。
-        self.assertIn("WRAPPER-HYBRID", report)
+        self.assertIn("乖離: **5 件**", report)
         self.assertIn("検査不能 (UNKNOWN): **1 件**", report)
 
     def test_compare_error_is_unknown_not_unreachable(self):

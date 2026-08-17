@@ -62,9 +62,10 @@ EXCLUDED_REPOS: dict[str, str] = {
 }
 
 # ``Fandhe-AI/actions`` の ``update-external.yml`` は reusable 定義本体であり
-# wrapper ではない。ただしリポ名のハードコードでは除外しない。将来 reusable 定義が
-# 別リポへ移っても・別リポが reusable を定義しても正しく扱えるよう、
-# ``on: workflow_call`` を持つことを**構造的に判定**して除外する。
+# wrapper ではない。除外はリポ名だけに頼らず、``UPSTREAM_REPO`` であることと
+# ``on: workflow_call`` を持つことの **AND** で判定する（``classify_workflow``）。
+# 構造条件だけにすると下流が ``workflow_call`` を足すだけで検査を逃れられ、
+# リポ名だけにすると構造的な根拠が無くなるため。
 # （軸 4 は別途この定義本体そのものを検査対象にしている。）
 
 # 下流 wrapper が参照すべき上流 reusable workflow。
@@ -86,10 +87,22 @@ _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 # **ジョブ名（jobs.skills / jobs.submodule）では引かない。** ジョブ名は
 # リネーム可能な表層であり、この軸の主張は「構造的に skills ジョブを特定して
 # その checkout を見ている」ことにあるため、実際に呼ぶ action で同定する。
-SKILLS_ACTION_PREFIX = "Fandhe-AI/actions/skills-update"
-SUBMODULE_ACTION_PREFIX = "Fandhe-AI/actions/submodule-update"
-CHECKOUT_ACTION_PREFIX = "actions/checkout"
-SETUP_NODE_ACTION_PREFIX = "actions/setup-node"
+# **前方一致では同定しない。** startswith だと
+# `Fandhe-AI/actions/skills-update-malicious@main` や `actions/checkout-wrapper@main`
+# のような別 action まで正規 action として認識してしまう。`@` より前のパスを
+# 完全一致で比較する（`_uses_action`）。
+SKILLS_ACTION = "Fandhe-AI/actions/skills-update"
+SUBMODULE_ACTION = "Fandhe-AI/actions/submodule-update"
+CHECKOUT_ACTION = "actions/checkout"
+SETUP_NODE_ACTION = "actions/setup-node"
+
+
+def _uses_action(value: object, action_path: str) -> bool:
+    """``uses`` の値が指定 action（``@ref`` を除いたパス）と完全一致するか。"""
+    text = norm(value)
+    if not text:
+        return False
+    return text.split("@", 1)[0] == action_path
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +162,6 @@ def has_workflow_call(spec: dict) -> bool:
 KIND_REUSABLE_DEFINITION = "REUSABLE-DEFINITION"
 KIND_WRAPPER = "WRAPPER"
 KIND_WRAPPER_UNPINNED = "WRAPPER-UNPINNED"
-KIND_WRAPPER_HYBRID = "WRAPPER-HYBRID"
 KIND_LEGACY = "LEGACY"
 KIND_UNPARSEABLE = "UNPARSEABLE"
 
@@ -223,21 +235,6 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
             ref = path_ref
             break
 
-    # 薄い wrapper なら**全ての job** が上流 reusable の呼び出しであるはず。
-    # それ以外の job が 1 つでもあれば移行途中のハイブリッドであり、上流の強化が
-    # 一部にしか届かない。
-    #
-    # 既知の composite action（skills-update / submodule-update）を直接呼ぶ job
-    # だけを探す実装にしていたが、それだと `run:` やローカル action・別 action で
-    # 同期処理を行う追加 job がすり抜け、pin が最新なら wrappers_ok に入って
-    # しまう。allowlist を増やす方向ではなく「reusable 呼び出し以外は全て余剰」と
-    # 定義を反転させ、未知の手段による追加 job も漏れなく捕まえる。
-    extra_jobs = sorted(
-        name
-        for name, job in jobs.items()
-        if not (isinstance(job, dict) and _split_job_uses(job.get("uses")) is not None)
-    )
-
     if ref is None:
         return {
             "kind": KIND_LEGACY,
@@ -246,14 +243,6 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
             "（手管理テンプレートのまま）",
         }
 
-    if extra_jobs:
-        return {
-            "kind": KIND_WRAPPER_HYBRID,
-            "pin": ref if _SHA40_RE.match(ref) else None,
-            "reason": "reusable を呼ぶ job がある一方で、それ以外の job が残っている"
-            f"（{', '.join(extra_jobs)}）。薄い wrapper になっておらず"
-            "上流の強化が一部にしか届かない",
-        }
 
     if not _SHA40_RE.match(ref):
         # reusable は参照しているが ref が 40 桁 hex ではない（``@main`` 等）。
@@ -355,7 +344,7 @@ def _steps(job: object) -> list[dict]:
     return [s for s in steps if isinstance(s, dict)]
 
 
-def _find_job_by_action(jobs: dict, prefix: str) -> tuple[str | None, dict | None]:
+def _find_job_by_action(jobs: dict, action_path: str) -> tuple[str | None, dict | None]:
     """指定の composite action を呼ぶステップを含むジョブを探す。
 
     ジョブ名ではなく呼び出す action で同定する。軸 4 の主張は「skills ジョブの
@@ -364,14 +353,14 @@ def _find_job_by_action(jobs: dict, prefix: str) -> tuple[str | None, dict | Non
     """
     for name, job in jobs.items():
         for step in _steps(job):
-            if norm(step.get("uses")).startswith(prefix):
+            if _uses_action(step.get("uses"), action_path):
                 return name, job
     return None, None
 
 
-def _find_step_by_action(job: dict | None, prefix: str) -> dict | None:
+def _find_step_by_action(job: dict | None, action_path: str) -> dict | None:
     for step in _steps(job):
-        if norm(step.get("uses")).startswith(prefix):
+        if _uses_action(step.get("uses"), action_path):
             return step
     return None
 
@@ -411,24 +400,24 @@ def check_upstream_markers(text: str) -> list[dict]:
         add("jobs セクション", False, "jobs セクションが見つからない")
         return results
 
-    skills_name, skills_job = _find_job_by_action(jobs, SKILLS_ACTION_PREFIX)
-    submodule_name, submodule_job = _find_job_by_action(jobs, SUBMODULE_ACTION_PREFIX)
+    skills_name, skills_job = _find_job_by_action(jobs, SKILLS_ACTION)
+    submodule_name, submodule_job = _find_job_by_action(jobs, SUBMODULE_ACTION)
 
     if skills_job is None:
         add(
             "skills ジョブの同定",
             False,
-            f"{SKILLS_ACTION_PREFIX} を呼ぶジョブが見つからない",
+            f"{SKILLS_ACTION} を呼ぶジョブが見つからない",
         )
     else:
         add(
             "skills ジョブの同定",
             True,
-            f"ジョブ `{skills_name}` が {SKILLS_ACTION_PREFIX} を呼ぶ",
+            f"ジョブ `{skills_name}` が {SKILLS_ACTION} を呼ぶ",
         )
 
     # --- (1) skills ジョブの persist-credentials: false（ジョブ単位判定）---
-    skills_checkout = _find_step_by_action(skills_job, CHECKOUT_ACTION_PREFIX)
+    skills_checkout = _find_step_by_action(skills_job, CHECKOUT_ACTION)
     if skills_checkout is None:
         add(
             "skills ジョブの persist-credentials: false",
@@ -440,7 +429,7 @@ def check_upstream_markers(text: str) -> list[dict]:
         ok = value == "false"
         sub_note = ""
         if submodule_job is not None:
-            sub_checkout = _find_step_by_action(submodule_job, CHECKOUT_ACTION_PREFIX)
+            sub_checkout = _find_step_by_action(submodule_job, CHECKOUT_ACTION)
             sub_value = _with(sub_checkout).get("persist-credentials")
             sub_note = (
                 f"（参考: submodule ジョブ `{submodule_name}` は "
@@ -455,7 +444,7 @@ def check_upstream_markers(text: str) -> list[dict]:
         )
 
     # --- (2) skills ジョブの source-token 明示 ---
-    skills_step = _find_step_by_action(skills_job, SKILLS_ACTION_PREFIX)
+    skills_step = _find_step_by_action(skills_job, SKILLS_ACTION)
     source_token = norm(_with(skills_step).get("source-token"))
     add(
         "skills ジョブの source-token 明示",
@@ -466,7 +455,7 @@ def check_upstream_markers(text: str) -> list[dict]:
     # --- (3) auto-merge-immediate-fallback: 'false'（submodule / skills 両方）---
     for label, step, job_name in (
         ("skills", skills_step, skills_name),
-        ("submodule", _find_step_by_action(submodule_job, SUBMODULE_ACTION_PREFIX), submodule_name),
+        ("submodule", _find_step_by_action(submodule_job, SUBMODULE_ACTION), submodule_name),
     ):
         marker = f"{label} ジョブの auto-merge-immediate-fallback: 'false'"
         if step is None:
@@ -489,7 +478,7 @@ def check_upstream_markers(text: str) -> list[dict]:
         add("skills-version の固定", True, skills_version)
 
     # --- (5) node-version が LTS のフル指定 ---
-    setup_node = _find_step_by_action(skills_job, SETUP_NODE_ACTION_PREFIX)
+    setup_node = _find_step_by_action(skills_job, SETUP_NODE_ACTION)
     node_version = norm(_with(setup_node).get("node-version"))
     if not node_version:
         add("node-version の LTS フル指定", False, "setup-node の node-version が未指定")
@@ -754,7 +743,7 @@ def scan(org: str, token: str) -> ScanResult:
                 print(f"::warning::{repo}: {info['reason']}")
                 continue
 
-            if kind in (KIND_WRAPPER_UNPINNED, KIND_WRAPPER_HYBRID):
+            if kind == KIND_WRAPPER_UNPINNED:
                 result.findings.append(Finding(repo, kind, info["reason"]))
                 continue
 
