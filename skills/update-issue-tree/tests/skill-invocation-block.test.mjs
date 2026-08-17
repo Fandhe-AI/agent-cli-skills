@@ -81,7 +81,16 @@ function runBlock(block, cwd, preludeOpts) {
   let stdout = ''
   let stderr = ''
   try {
-    stdout = execFileSync('bash', [file], { cwd, encoding: 'utf8' })
+    // env を明示的に最小化する: process.env をそのまま継承すると、実行環境に
+    // 偶然 REASSIGN_SCRIPT が設定されていた場合、Step 3 の「未検出→exit 1」
+    // テスト（presetScript: false）が外部値を拾って別の失敗モードに化ける
+    // おそれがある（Issue #335 レビュー指摘）。PATH のみを引き継いだ最小
+    // env で bash 実行を隔離する。
+    stdout = execFileSync('bash', [file], {
+      cwd,
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '' },
+    })
   } catch (err) {
     // execFileSync は非ゼロ終了で throw する。この throw 自体が「ブロックの
     // 終了ステータスが非ゼロで返る」ことの直接証拠であり、本テストの主張の核。
