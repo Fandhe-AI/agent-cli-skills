@@ -122,8 +122,27 @@ bash "${REASSIGN_SCRIPT}" \
   --issue "${ISSUE_NUMBER}" \
   --old-parent "${OLD_PARENT}" \
   --new-parent "${NEW_PARENT}"
-echo "exit=$?"
+# echo を最後のコマンドにするとブロックの終了ステータスが常に 0 になり、
+# 実行基盤が「最終ステータス」で成否を判定した場合に非ゼロ終了を見落とす。
+# 直後に $? を退避してから出力し、非ゼロは呼び出し元へ伝播する（Issue #335）。
+# このブロックの上に set -euo pipefail を追加してはならない。set -e があると
+# 失敗した bash ... の時点でシェルが即終了し、$? の退避に到達せず、より
+# 発見しづらい形でバグが再発する（代替が必要な場合のみ
+# REASSIGN_STATUS=0; bash ... || REASSIGN_STATUS=$? の形にする）。
+REASSIGN_STATUS=$?
+echo "exit=${REASSIGN_STATUS}"
+if (( REASSIGN_STATUS != 0 )); then
+  # このブロックは 1 件分の呼び出しであり、非ゼロ終了は当該 1 件の失敗として
+  # ブロックの終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ
+  # 記録したうえで、exit 2 以外は次の 1 件の呼び出しへ進む（exit 2 のみ
+  # 原因解消まで中断）
+  exit "${REASSIGN_STATUS}"
+fi
 ```
+
+このブロックは**1 件分の呼び出し**であり、非ゼロ終了は**当該 1 件の失敗**としてブロックの
+終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ記録したうえで、exit 2 以外は
+次の 1 件の呼び出しへ進む（exit 2 のみ原因解消まで中断）。
 
 **引数**
 
@@ -168,8 +187,18 @@ Phase が不明な issue はタイトル・本文を読んで判断し、判断�
 bash "${REASSIGN_SCRIPT}" \
   --issue "${ORPHAN_NUMBER}" \
   --new-parent "${PHASE_NUMBER}"
-echo "exit=$?"
+# Step 3 と非対称にしない（呼び出し方だけでなく、終了ステータス伝播も揃える。
+# 理由は Step 3 のコメントと同一。Issue #335）
+REASSIGN_STATUS=$?
+echo "exit=${REASSIGN_STATUS}"
+if (( REASSIGN_STATUS != 0 )); then
+  exit "${REASSIGN_STATUS}"
+fi
 ```
+
+このブロックも Step 3 と同じく**1 件分の呼び出し**である。非ゼロ終了は**当該 1 件の失敗**として
+ブロックの終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ記録したうえで、
+exit 2 以外は次の 1 件の呼び出しへ進む（exit 2 のみ原因解消まで中断）。
 
 ### Step 5: 必要に応じて新 Phase 親を新設する
 
@@ -321,8 +350,10 @@ EOF
 
 - ルート issue 本文の Phase 別表が更新されていることを確認する
 - closed Phase 親の下に open issue が残置されていないことを確認する
-- Step 3 / Step 4 で呼んだ `reassign-sub-issue.sh` の各回について、`echo "exit=$?"` の値と
-  `result=` 行を確認する。非ゼロ終了があれば Step 9 の要確認事項へ反映されているか確認する
+- Step 3 / Step 4 で呼んだ `reassign-sub-issue.sh` の各回について、`echo "exit=${REASSIGN_STATUS}"`
+  の値と `result=` 行を確認する。非ゼロ終了があれば Step 9 の要確認事項へ反映されているか確認する。
+  加えて、非ゼロ時はコードブロック自体の終了ステータスが非ゼロで返ること（`echo` を最後の
+  コマンドにして握り潰していないこと）も確認する
 
 ```bash
 # 全 sub-issues の state を確認
