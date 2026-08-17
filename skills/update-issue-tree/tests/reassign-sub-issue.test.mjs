@@ -136,13 +136,30 @@ test('ケース9: 事前 GET 自体が失敗（前提不備）→ exit 2', () =>
   assert.equal(r.status, 2)
 })
 
-test('ケース10: POST が "only have one parent" で失敗 → exit 6（第三の親のレース検知）', () => {
+test('ケース10: DELETE 後の POST が "only have one parent" → exit 8（部分変更を無変更と誤認させない）', () => {
+  // DELETE は成功しているため旧親からは外れている。無変更を意味する exit 6 / 7 と
+  // 同じコードにすると、呼び出し側が「触っていない」と誤認して復旧を誤る（PR #314 Bugbot Medium）
   const r = run(['--issue', '17', '--old-parent', '5', '--new-parent', '7'], {
     parentBefore: '5',
     postExit: 1,
     postBody: 'Validation Failed: Sub issue may only have one parent',
   })
-  assert.equal(r.status, 6)
+  assert.equal(r.status, 8)
+  const c = calls(r.logPath)
+  assert.ok(c.some((l) => l.includes('--method DELETE')), 'DELETE は実行済みであること')
+})
+
+test('ケース15: 孤児経路の POST が "only have one parent" → exit 7（DELETE 未実行で無変更）', () => {
+  // 事前実測では孤児だったが POST 時点で別の親が付いていたレース。DELETE を 1 度も
+  // 撃っていないためツリーは無変更であり、exit 8（部分変更）とは復旧手順が異なる
+  const r = run(['--issue', '21', '--new-parent', '7'], {
+    parentBefore: '',
+    postExit: 1,
+    postBody: 'Validation Failed: Sub issue may only have one parent',
+  })
+  assert.equal(r.status, 7)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
 })
 
 test('ケース11: gh auth status が非ゼロ → exit 2、API 呼び出し無し', () => {

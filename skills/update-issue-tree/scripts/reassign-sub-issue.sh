@@ -204,7 +204,10 @@ if [[ -z "${CURRENT_PARENT}" ]]; then
   if ! POST_OUT=$(gh api --method POST "repos/${REPO_PATH}/issues/${NEW_PARENT}/sub_issues" -F "sub_issue_id=${ISSUE_ID}" 2>&1); then
     echo "${POST_OUT}" >&2
     if printf '%s' "${POST_OUT}" | grep -qi "only have one parent"; then
-      exit 6
+      # 事前の実測では孤児だったが POST 時点で別の親が付いていたレース。DELETE は 1 度も
+      # 撃っていないため**ツリーは無変更**。exit 6（承認不一致・無変更）とは区別する
+      echo "エラー: POST 時点で別の親が付いていた（レース）。DELETE は実行していないためツリーは無変更" >&2
+      exit 7
     fi
     exit 4
   fi
@@ -224,8 +227,12 @@ else
     echo "エラー: 新親 #${NEW_PARENT} への紐付けに失敗した" >&2
     echo "${POST_OUT}" >&2
     if printf '%s' "${POST_OUT}" | grep -qi "only have one parent"; then
-      # DELETE と POST の間に第三者が親を付け替えた等のレース。ここでのみ到達し得る防御的経路
-      exit 6
+      # DELETE と POST の間に第三者が親を付け替えた等のレース。**DELETE は成功済み**のため
+      # ツリーは部分変更（旧親から外れ、新親にも付いていない）。無変更を意味する
+      # exit 6 / exit 7 と混同すると誤った復旧をされるため専用コードにする
+      echo "エラー: DELETE 後の POST 時点で別の親が付いていた（レース）。#${ISSUE} は #${CURRENT_PARENT} から外れた状態で残っている" >&2
+      echo "対処: 実状態を確認し、必要なら手で紐付け直す。同一コマンドの再実行では回復しない" >&2
+      exit 8
     fi
     exit 4
   fi
