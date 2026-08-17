@@ -372,14 +372,33 @@ gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証し�
 - **検知コマンド（エージェントが実行してよいものと、人間の診断専用を明確に分ける）**:
 
 ```bash
-# (A) エージェントが実行してよい形。同名 check-run の重複「件数」のみを返し、チェック名は出力しない
-# --jq はページごとに適用されるため group_by をページ単位で行うとページ跨ぎの重複を見逃す
-# （同名チェックが 2 ページに分かれて 1 件ずつ載ると各ページの重複件数が 0 になり得る）。
-# 名前一覧をパイプへ流してシェル側（sort | uniq -d）で全ページ分を集約する
-# （(B) と異なり shell 側で集約するため --slurp は不要）
-gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=100" \
-  --jq '.check_runs[].name' | sort | uniq -d | wc -l
-# → 出力は整数 1 行のみ（チェック名はパイプ内で集約され出力に現れない）。1 以上なら重複あり
+# (A) エージェントが実行してよい形。取得成否を先に確定してから「件数」のみを返す。
+# gh api は HTTP エラーの JSON 本文も stdout へ出す仕様のため、パイプ直結だと認証失敗・404・
+# レート制限の出力が uniq -d にヒットせず「重複なし（0）」に化ける
+# （.claude/rules/ruleset-policy.md 手順 B と同じ罠）。
+# そのため (1) 取得を独立させて終了コードを見る (2) 出力の空判定を行う (3) 集計は shell 側で
+# 行う、の 3 段に分ける（--jq はページごとに適用されるため group_by をページ単位で行うと
+# ページ跨ぎの重複を見逃す。名前+結論の一覧をシェル側 awk で全ページ分集約する）
+rows=$(gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+  --jq '.check_runs[] | [.name, (.conclusion // "pending")] | @tsv' 2>/dev/null)
+status=$?
+if [ "${status}" -ne 0 ] || [ -z "${rows}" ]; then
+  # 取得失敗、または check-run が 1 件も返らない。この節は「全チェックが pass に見える」状態
+  # でのみ参照するため、0 件は前提と矛盾する = 取得できていない可能性が高く、判定不能として扱う
+  echo "UNDETERMINED"
+else
+  printf '%s\n' "${rows}" | awk -F'\t' '
+    { n[$1]++; if ($2 == "cancelled" || $2 == "failure" || $2 == "timed_out") bad[$1] = 1 }
+    END { d = 0; b = 0
+          for (k in n) if (n[k] >= 2) { d++; if (k in bad) b++ }
+          printf "dup=%d bad=%d\n", d, b }'
+fi
+# → 出力は次の 2 形のみ（チェック名・エラー本文は出力に現れない）:
+#    `UNDETERMINED`      … 判定不能。「重複なし」ではない
+#    `dup=<D> bad=<B>`   … 取得成功。D = 重複した check 名の数、
+#                            B = そのうち結論に cancelled / failure / timed_out を含む数
+# → 読み方: **取得に成功したうえで** D が 0 なら重複なし。上記 2 形（正規表現
+#    `^UNDETERMINED$` / `^dup=[0-9]+ bad=[0-9]+$`）以外の出力も判定不能として扱う
 ```
 
 ```bash
@@ -408,10 +427,13 @@ gh api --paginate --slurp "repos/OWNER/REPO/commits/<sha>/check-runs?per_page=10
         | join("\n")'
 ```
 
-- **対処（前提を先に実測してからコマンドを実行する）**:
-  - 前提 1: 上記 (A) の重複件数が 1 以上であることを実測する。
-  - 前提 2: rerun 対象を一意に決めるため、(B) で重複している check 名（例: `ci/build`）を確認したうえで、その名前を発行した cancelled run を job 一覧から特定する（下記コマンド）。同名 check を発行し得る cancelled run が複数見つかり一意に絞り込めない場合は rerun せず、`blocked`（quality）として最終レポートへ回す（誤った run を rerun すると無関係な job まで再実行し、原因不明のまま状態を変える）。
-  - 上記 2 点を満たさないまま rerun しない（rerun は CI を再起動するため、「Review 通過後に CI を 1 回だけ起動する」設計に反する）。
+- **対処（前提を先に実測してからコマンドを実行する。判断・実行の主体は**ラン運用者／ホスト側**であり、monitor / merge-exec エージェントではない。(B) は人間の診断専用のため、このフロー全体がエージェント自律では完結しない）**:
+  - 前提 0（判定不能の扱い）: (A) が `UNDETERMINED` を返した、または上記 2 形以外を返した場合は**判定不能**。rerun せず `blocked`（quality）として最終レポートへ回す。判定不能を「重複なし」と読んで CI 由来を除外してはならない（認証失効・レート制限・sha 誤りが典型原因。人間が原因を確認する場合は stderr を捨てずに同じ gh api を再実行する）。
+  - 前提 1（重複と結論の実測）: (A) が `dup=<D> bad=<B>` を返し、**D >= 1 かつ B >= 1** であることを実測する。D >= 1 かつ B = 0 の場合、重複はすべて正常な再実行（両方 success 等）由来であり「cancel された run の残存 check」ではない。rerun せず、BLOCKED の別原因（required check の context 名不一致・未解決レビュースレッド・ruleset 構成など。`.claude/rules/ruleset-policy.md` の 3 軸スイープ）へ調査を移す。
+  - 前提 2（rerun 対象の一意化）: (B) で重複している check 名を確認し、その名前を発行した cancelled run を job 一覧から特定する（下記コマンド）。
+    - cancelled run が**複数**見つかり一意に絞り込めない場合: rerun せず `blocked`（quality）として最終レポートへ回す（誤った run を rerun すると無関係な job まで再実行し、原因不明のまま状態を変える）。
+    - cancelled run が **0 件**の場合: rerun 対象が存在しない。B >= 1 の残存は cancel ではなく failure / timed_out 由来であり、通常の CI 失敗として扱う（rerun せず、監視フローの needs-fix 経路で原因を特定して修正する）。cancel 起因と決めつけて `gh run rerun` しない。
+  - 上記を満たさないまま rerun しない（rerun は CI を再起動するため、「Review 通過後に CI を 1 回だけ起動する」設計に反する）。
 
 ```bash
 # cancelled な run を head sha で列挙する（conclusion=cancelled のみに絞る）
@@ -488,6 +510,7 @@ open のサブイシューが残っている場合、または受入基準が未
 | 実装コミットの scope にイシュー番号を置く（例: `feat` の scope に `42` を入れる） | `scope-enum` を持つリポでは commitlint が必ず落ちる。Review 3 巡を消費した後の push で初めて検出され、`--no-verify` は禁止のため回避もできない。scope はモジュール・ディレクトリ名にするか省略し、イシューの紐付けは `Refs #<N>` / `Closes #<N>` で行う |
 | P0/P1 相当・セキュリティ指摘を対象外扱いにする | fix エージェントは単独で対象外と判定して記録のみで済ませてはならない。修正するか、ユーザーまたは指摘者の承認を得るまで `blocked` として扱う（安全側ガード） |
 | 全チェックが pass に見えるので CI 起因を除外し、PR の差分を疑って調査を続ける | 同名 check-run の重複件数を実測する（Step 6 の該当分岐）。cancel された run の残存 check が BLOCKED の原因になり得る |
+| (A) の出力を検証せず `0` を「重複なし」と読む | 取得失敗・空出力・形式不一致は `UNDETERMINED`。CI 由来を除外せず `blocked`（quality）に倒す |
 | 差分と無関係なテスト失敗を確認せず flaky と決めつけて rerun する | main での同ジョブ green と差分スコープの 2 点を実測してから rerun する（下記「一斉同期・大量 PR 投入時の運用ガード」参照） |
 
 ## 一斉同期・大量 PR 投入時の運用ガード
