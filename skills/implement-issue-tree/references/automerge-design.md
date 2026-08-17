@@ -111,8 +111,9 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
 - **双方向で検証不能になること**: 前提条件「マージ先ブランチが CI green」はランの入口条件でもあるため、push CI が無いリポでは*ラン前の前提確認*も*ラン後の補償確認*も同じ理由で成立しない。「実行されていない」を「green」と読み替えてはならない。
 - **必須 workflow 集合の決め方**: 呼び出し側が事前に対象リポジトリの `.github/workflows/*.yml` を確認し、`on.push` を持ち意味的コンフリクトを検出できる workflow（ビルド・テスト等のジョブを含む workflow。常時起動するだけの軽量ドキュメント用 workflow は含めない）の**ファイル先頭 `name:` の値**（Actions UI・`gh run list --json workflowName` の `workflowName` に表示される workflow レベルの名前であり、workflow 内の個々の job 名ではない。yaml のファイル名でもない）を必須集合として列挙する。この列挙はプローブが自動導出しない（`paths` フィルタの評価はプローブの外で人間または呼び出し側が行う）。必須集合が空・未指定のリポジトリはプローブ対象外とし判定不能として扱う。
-- **`workflowName` は同名衝突があり得る識別子**: GitHub Actions は複数の workflow ファイルが同一の `name:` を持つことを許容する仕様のため、`workflowName` のみで必須集合と観測結果を突き合わせると、必須 workflow とは無関係な同名の軽量 workflow が成功しただけで `required_missing` が空になり green と誤判定し得る（本来必須の workflow が `paths` フィルタ等で未起動でも検出できない）。そのためプローブは判定の直前に**対象リポジトリの全 active workflow を `name` → `path` で列挙し、必須集合の各名前がちょうど 1 つの `path` にのみ対応することを確認する**。1 つでも複数 `path` に対応する名前があれば `workflowName` による同定が意味をなさないため、その名前を含む判定は実行せず判定不能として扱う（fail-closed。復旧は該当 workflow の `name:` を一意な値へ変更すること）。
-- **プローブ手順**: 既定ブランチは `gh repo view --json defaultBranchRef` で解決する（`main` 決め打ち禁止）。ブランチ名は `jq -sRr '@uri'` でエンコードしてから API パスへ展開する（`release/1.0` 等の `/` 対策）。head sha の存在確認は終了コードではなく HTTP status で行う（`gh api` はエラーも stdout に出すため）。続いて `gh api repos/<repo>/actions/workflows --paginate --jq '[.workflows[] | select(.state == "active") | {name, path}]'` で active workflow の `name`→`path` 対応を取得し、名前の重複（同名で異なる `path` を持つ組）を検出する。必須集合のいずれかがこの重複名に含まれる場合はその時点で判定不能として次のリポへ進む（`gh run list` を呼ぶ前に fail-closed）。次に `gh run list -R <repo> -c <head> -L 100 --json workflowName,status,conclusion,event` を取得し、応答が配列であることを検証したうえで**配列長が取得上限 100 件に到達していないことも検証する**（到達時は取得できた分だけを集計すると取得範囲外の失敗・未完了 run を見落とすため、判定不能として扱う。件数を上げる場合もこの上限チェック自体は必須のまま残す）。続いて `event == "push"` の件数と `workflowName` 集合のみを読む（`workflowName` 等の自由文はシェルへ展開せず jq 内の比較に閉じる。比較対象は呼び出し側が `--arg` で渡す必須集合の文字列のみ）。`while` / `for` ループはインライン実行不可の環境があるため 1 ファイルにしてから `bash <file> <repo>:<workflow1>,<workflow2>...` で実行する（`ruleset-policy.md` 手順 A / 手順 B と同型）。1 リポの判定不能で全体を止めない（`exit` ではなく `continue` で次のリポへ進む）。
+- **`workflowName` は同名衝突があり得る識別子**: GitHub Actions は複数の workflow ファイルが同一の `name:` を持つことを許容する仕様のため、`workflowName` のみで必須集合と観測結果を突き合わせると、必須 workflow とは無関係な同名の軽量 workflow が成功しただけで `required_missing` が空になり green と誤判定し得る（本来必須の workflow が `paths` フィルタ等で未起動でも検出できない）。そのためプローブは判定の直前に**対象リポジトリの全 active workflow を `name` → `path` で列挙し、必須集合の各名前がちょうど 1 つの `path` にのみ対応することを確認する**。対応する `path` が 0 件（該当名の active workflow が存在しない）でも複数件（同名衝突）でも、`workflowName` による同定が意味をなさない点は同じであるため、いずれも判定不能として扱う（fail-closed。0 件の復旧は必須集合の名前指定を見直すこと、複数件の復旧は該当 workflow の `name:` を一意な値へ変更すること）。
+- **`--paginate` と `--jq` の併用は 1 回の `jq` 呼び出しに集約する**: `gh api --paginate --jq '<filter>'` は `--jq` のフィルタを**ページごとに独立して適用**し、結果を JSON 値として連結出力する仕様のため、`group_by(.name)` のようにページを跨いで集約する必要がある処理をそのまま渡すと、同名 workflow が別ページに分かれた場合に検出できない（ページ内でしか重複を見ない）。そのため、workflow 一覧の取得は `--paginate --slurp` で全ページの生レスポンスを 1 つの配列へ集約してから `--jq` で `.[].workflows[]` を展開する（`--slurp` は `--paginate` と組み合わせたときにページ単位ではなく全体を 1 回の `jq` 実行に渡す）。
+- **プローブ手順**: 既定ブランチは `gh repo view --json defaultBranchRef` で解決する（`main` 決め打ち禁止）。ブランチ名は `jq -sRr '@uri'` でエンコードしてから API パスへ展開する（`release/1.0` 等の `/` 対策）。head sha の存在確認は終了コードではなく HTTP status で行う（`gh api` はエラーも stdout に出すため）。続いて `gh api repos/<repo>/actions/workflows --paginate --slurp --jq '[.[].workflows[] | select(.state == "active") | {name, path}]'` で全ページを集約した active workflow の `name`→`path` 対応を取得し、必須集合の各名前について対応する `path` の件数を数える。1 件ちょうどでない名前（0 件・複数件のいずれも）が 1 つでもあればその時点で判定不能として次のリポへ進む（`gh run list` を呼ぶ前に fail-closed）。次に `gh run list -R <repo> -c <head> -L 100 --json workflowName,status,conclusion,event` を取得し、応答が配列であることを検証したうえで**配列長が取得上限 100 件に到達していないことも検証する**（到達時は取得できた分だけを集計すると取得範囲外の失敗・未完了 run を見落とすため、判定不能として扱う。件数を上げる場合もこの上限チェック自体は必須のまま残す）。続いて `event == "push"` の件数と `workflowName` 集合のみを読む（`workflowName` 等の自由文はシェルへ展開せず jq 内の比較に閉じる。比較対象は呼び出し側が `--arg` で渡す必須集合の文字列のみ）。`while` / `for` ループはインライン実行不可の環境があるため 1 ファイルにしてから `bash <file> <repo>:<workflow1>,<workflow2>...` で実行する（`ruleset-policy.md` 手順 A / 手順 B と同型）。1 リポの判定不能で全体を止めない（`exit` ではなく `continue` で次のリポへ進む）。
 
   ```bash
   #!/usr/bin/env bash
@@ -148,19 +149,27 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
     fi
 
     # workflowName は同名衝突があり得る識別子（複数 workflow ファイルが同一 name: を
-    # 持てる仕様）。必須集合のいずれかが name 重複に含まれる場合、run list の
-    # workflowName 突き合わせ自体が同定根拠にならないため、ここで fail-closed する。
-    workflows=$(gh api "repos/${repo}/actions/workflows" --paginate \
-                  --jq '[.workflows[] | select(.state == "active") | {name, path}]' 2>/dev/null)
+    # 持てる仕様）。必須集合の各名前が active workflow のちょうど 1 path に対応する
+    # ことを確認する（0 件・複数件のいずれも run list の workflowName 突き合わせが
+    # 同定根拠にならないため fail-closed）。--paginate と --jq を素朴に組み合わせると
+    # jq フィルタがページ単位で適用され、ページを跨いだ同名重複を検出できない
+    # （group_by(.name) がページ内でしか集約されない）。そのため --slurp で全ページの
+    # 生レスポンスを 1 配列に集約してから 1 回の jq 呼び出しで展開する。
+    workflows=$(gh api "repos/${repo}/actions/workflows" --paginate --slurp \
+                  --jq '[.[].workflows[] | select(.state == "active") | {name, path}]' 2>/dev/null)
     if ! printf '%s' "${workflows}" | jq -e 'type == "array"' >/dev/null 2>&1; then
       echo "${repo}: 判定不能 — workflow 一覧を取得できない"; continue
     fi
-    dup_hit=$(printf '%s' "${workflows}" | jq -r --arg req "${required_csv}" '
+    bad_hit=$(printf '%s' "${workflows}" | jq -r --arg req "${required_csv}" '
       ($req | split(",") | map(gsub("^\\s+|\\s+$";""))) as $required |
-      (group_by(.name) | map(select(length > 1) | .[0].name)) as $dupNames |
-      ($required - ($required - $dupNames)) | join(",")')
-    if [ -n "${dup_hit}" ]; then
-      echo "${repo}: 判定不能 — 必須 workflow 名が複数 path に対応（同名衝突）: ${dup_hit}"; continue
+      (group_by(.name) | map({name: .[0].name, count: length})) as $counts |
+      [
+        $required[] | . as $n |
+        (([$counts[] | select(.name == $n) | .count][0]) // 0) as $c |
+        select($c != 1) | "\($n):\($c)"
+      ] | join(",")')
+    if [ -n "${bad_hit}" ]; then
+      echo "${repo}: 判定不能 — 必須 workflow 名が active workflow のちょうど1 path に対応しない（0件=未存在 / 複数件=同名衝突）: ${bad_hit}"; continue
     fi
 
     runs=$(gh run list -R "${repo}" -c "${head}" -L 100 \
