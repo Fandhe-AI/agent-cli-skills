@@ -107,18 +107,30 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
 **補償策の成立確認（base CI プローブ）**
 
-上記の補償策は「マージ先ブランチへの push で CI が起動する」ことに暗黙依存している。push トリガの workflow が無い、または `on.pull_request` 相当の `paths` フィルタで該当 head では起動しないリポジトリでは、この依存が満たされず補償策が構造的に成立しない。
+上記の補償策は「マージ先ブランチへの push で CI が起動する」ことに暗黙依存している。push トリガの workflow が無い、`on.pull_request` 相当の `paths` フィルタで該当 head では起動しない、または**起動した push run が意味的コンフリクトを検出できない workflow（常時起動する軽量ドキュメント用 workflow 等）に限られ、本来必要なテスト workflow が含まれない**リポジトリでは、この依存が満たされず補償策が構造的に成立しない。「push イベントの run が 1 件でもあれば green」という判定は、後者のケース（必要な workflow が起動せず、無関係な軽量 workflow のみ成功）を green と誤判定してしまうため、判定は **push run の存在だけでなく、意味的コンフリクト検出に必須な workflow 集合が実際に起動し尽くしたことの被覆確認**を要件に含める。
 
 - **双方向で検証不能になること**: 前提条件「マージ先ブランチが CI green」はランの入口条件でもあるため、push CI が無いリポでは*ラン前の前提確認*も*ラン後の補償確認*も同じ理由で成立しない。「実行されていない」を「green」と読み替えてはならない。
-- **プローブ手順**: 既定ブランチは `gh repo view --json defaultBranchRef` で解決する（`main` 決め打ち禁止）。ブランチ名は `jq -sRr '@uri'` でエンコードしてから API パスへ展開する（`release/1.0` 等の `/` 対策）。head sha の存在確認は終了コードではなく HTTP status で行う（`gh api` はエラーも stdout に出すため）。`gh run list -R <repo> -c <head> -L 100 --json workflowName,status,conclusion,event` を取得し、応答が配列であることを検証してから `event == "push"` の件数のみを読む（`workflowName` 等の自由文はシェルへ展開しない）。`while` / `for` ループはインライン実行不可の環境があるため 1 ファイルにしてから `bash <file> <repo>...` で実行する（`ruleset-policy.md` 手順 A / 手順 B と同型）。1 リポの判定不能で全体を止めない（`exit` ではなく `continue` で次のリポへ進む）。
+- **必須 workflow 集合の決め方**: 呼び出し側が事前に対象リポジトリの `.github/workflows/*.yml` を確認し、`on.push` を持ち意味的コンフリクトを検出できる workflow（ビルド・テスト等のジョブを含む workflow。常時起動するだけの軽量ドキュメント用 workflow は含めない）の**ファイル先頭 `name:` の値**（Actions UI・`gh run list --json workflowName` の `workflowName` に表示される workflow レベルの名前であり、workflow 内の個々の job 名ではない。yaml のファイル名でもない）を必須集合として列挙する。この列挙はプローブが自動導出しない（`paths` フィルタの評価はプローブの外で人間または呼び出し側が行う）。必須集合が空・未指定のリポジトリはプローブ対象外とし判定不能として扱う。
+- **プローブ手順**: 既定ブランチは `gh repo view --json defaultBranchRef` で解決する（`main` 決め打ち禁止）。ブランチ名は `jq -sRr '@uri'` でエンコードしてから API パスへ展開する（`release/1.0` 等の `/` 対策）。head sha の存在確認は終了コードではなく HTTP status で行う（`gh api` はエラーも stdout に出すため）。`gh run list -R <repo> -c <head> -L 100 --json workflowName,status,conclusion,event` を取得し、応答が配列であることを検証したうえで**配列長が取得上限 100 件に到達していないことも検証する**（到達時は取得できた分だけを集計すると取得範囲外の失敗・未完了 run を見落とすため、判定不能として扱う。件数を上げる場合もこの上限チェック自体は必須のまま残す）。続いて `event == "push"` の件数と `workflowName` 集合のみを読む（`workflowName` 等の自由文はシェルへ展開せず jq 内の比較に閉じる。比較対象は呼び出し側が `--arg` で渡す必須集合の文字列のみ）。`while` / `for` ループはインライン実行不可の環境があるため 1 ファイルにしてから `bash <file> <repo>:<workflow1>,<workflow2>...` で実行する（`ruleset-policy.md` 手順 A / 手順 B と同型）。1 リポの判定不能で全体を止めない（`exit` ではなく `continue` で次のリポへ進む）。
 
   ```bash
   #!/usr/bin/env bash
-  # base CI プローブ: 既定ブランチ head で CI が起動しているかを判定する。
-  # 引数は "owner/repo" の並び。1 リポの判定不能で全体を止めない（continue で継続）。
+  # base CI プローブ: 既定ブランチ head で「意味的コンフリクト検出に必須な workflow 集合」
+  # が push イベントで起動し尽くし、かつ全件が失敗・未完了・判定不能なしで完了しているかを
+  # 判定する。引数は "owner/repo:workflowName1,workflowName2" の並び（コロンの後に必須
+  # workflow の name: 値をカンマ区切り・空白なしで列挙する。必須集合は呼び出し側が
+  # .github/workflows/*.yml を事前確認して決め打つ — 常時起動する軽量ドキュメント用
+  # workflow のみを根拠に green 判定しないため）。1 リポの判定不能で全体を止めない
+  # （continue で継続）。
   set -uo pipefail
 
-  for repo in "$@"; do
+  for entry in "$@"; do
+    repo="${entry%%:*}"
+    required_csv="${entry#*:}"
+    if [ "${required_csv}" = "${entry}" ] || [ -z "${required_csv}" ]; then
+      echo "${repo}: 判定不能 — 必須 workflow 集合が未指定（\"owner/repo:name1,name2\" 形式で明示すること）"; continue
+    fi
+
     db=$(gh repo view "${repo}" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)
     case "${db}" in
       ""|*" "*) echo "${repo}: 判定不能 — defaultBranchRef を取得できない"; continue ;;
@@ -139,11 +151,23 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
     if ! printf '%s' "${runs}" | jq -e 'type == "array"' >/dev/null 2>&1; then
       echo "${repo}: 判定不能 — run list の応答が配列でない"; continue
     fi
+    total_count=$(printf '%s' "${runs}" | jq 'length' 2>/dev/null)
+    if ! printf '%s' "${total_count}" | grep -Eq '^[0-9]+$'; then
+      echo "${repo}: 判定不能 — 取得件数を数値として読めない"; continue
+    fi
+    if [ "${total_count}" -ge 100 ]; then
+      echo "${repo}: 判定不能 — run list が取得上限 100 件に到達（切り捨ての可能性。ページングで全件取得するか件数を上げて再測する）"; continue
+    fi
 
-    printf '%s' "${runs}" | jq --arg r "${repo}" --arg b "${db}" --arg h "${head:0:8}" '
-      [.[] | select(.event == "push")] as $p | {
+    printf '%s' "${runs}" | jq --arg r "${repo}" --arg b "${db}" --arg h "${head:0:8}" --arg req "${required_csv}" '
+      ($req | split(",") | map(gsub("^\\s+|\\s+$";""))) as $required |
+      [.[] | select(.event == "push")] as $p |
+      ($p | map(.workflowName)) as $seen |
+      ($required - $seen) as $missing |
+      {
         repo: $r, branch: $b, head: $h,
         push_total: ($p | length),
+        required_missing: $missing,
         incomplete: ([$p[] | select(.status != "completed")] | length),
         failed:     ([$p[] | select(.status == "completed" and .conclusion != null
                        and ((.conclusion | IN("failure","cancelled","timed_out","action_required","startup_failure","stale")))
@@ -156,18 +180,27 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
   done
   ```
 
+  実行例（`Fandhe-AI/agent-cli-skills` で実測。本リポは `.github/workflows/ci.yml` のみが `on.push` を持ち、workflow レベルの `name:` は `CI` の1本のため必須集合は `CI`）:
+
+  ```
+  $ bash probe.sh "Fandhe-AI/agent-cli-skills:CI"
+  {"repo":"Fandhe-AI/agent-cli-skills","branch":"main","head":"0f946618","push_total":1,"required_missing":[],"incomplete":0,"failed":0,"unknown":0}
+  ```
+
   判定は以下の表に従う。
 
   | 条件 | 判定 | 意味 |
   |------|------|------|
-  | `push_total >= 1` かつ `failed == 0` かつ `incomplete == 0` かつ `unknown == 0` | green | 補償策が成立し、base は健全 |
+  | `push_total >= 1` かつ `required_missing == []` かつ `failed == 0` かつ `incomplete == 0` かつ `unknown == 0` | green | 必須 workflow が全件起動し尽くし、かつ全件が健全に完了。補償策が成立し base は健全 |
   | `push_total >= 1` かつ `incomplete >= 1` | 未完了 | 完了を待って再測する（green と扱わない） |
   | `push_total >= 1` かつ `failed >= 1` | red | 補償策は成立するが base が壊れている |
   | `push_total >= 1` かつ `unknown >= 1` | 判定不能 | 合否に分類できない conclusion が混在。green へ倒さない |
+  | `push_total >= 1` かつ `required_missing != []`（他条件が green でも） | 補償策不成立 | push run はあるが必須 workflow の一部が起動していない（軽量 workflow のみ成功等）。green へ倒さない |
   | `push_total == 0` | 補償策不成立 | push トリガ workflow が無い / `paths` フィルタで除外された |
+  | 取得件数が 100 件に到達 | 判定不能 | 取得範囲外に失敗・未完了 run がある可能性を排除できない |
   | 権限・API 障害で判定に到達できない | 判定不能 | 記録して再測する（green にも不成立にも倒さない） |
 
-  `failed` は `cancelled` / `timed_out` / `action_required` / `startup_failure` / `stale` を失敗側に数える（SKILL.md の CI 全 green 判定と同じ分類。success / skipped / neutral のみを合格とする）。`-L 100` の上限に達した場合は切り捨ての可能性があるため、判定不能として扱うか件数を上げて再測する。
+  `failed` は `cancelled` / `timed_out` / `action_required` / `startup_failure` / `stale` を失敗側に数える（SKILL.md の CI 全 green 判定と同じ分類。success / skipped / neutral のみを合格とする）。`required_missing` は必須集合から実際に push イベントで観測された `workflowName` 集合を差し引いた残りであり、空配列であることは「必須 workflow が全件起動した」ことの直接証拠になる（個々の workflow ごとの conclusion 追跡は不要 — 全体の `failed`/`incomplete`/`unknown` が 0 であれば、起動した必須 workflow を含む push run 全件が健全に完了したことを意味する）。
 - **不成立時の扱い（3 択・順に推奨）**:
   1. マージ先ブランチへ push トリガの最低限のビルド/テストを追加する（`paths` フィルタで除外されないことをプローブで実測確認する）。これが本則。
   2. `autoMerge: true` を使わない（マージ可能状態で停止し人間がマージする）。補償策不成立のリポでは既定の非 opt-in 運用を推奨とする。
