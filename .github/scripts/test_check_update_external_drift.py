@@ -551,7 +551,7 @@ class TestRepoEnumeration(unittest.TestCase):
 
     def test_hitting_the_limit_is_fail_closed(self):
         # 上限ちょうど = 打ち切られた可能性。残りが黙って検査対象外になる。
-        names = "\n".join(f"repo-{i}" for i in range(cud.REPO_LIST_LIMIT))
+        names = "\n".join(f"repo-{i}\tfalse" for i in range(cud.REPO_LIST_LIMIT))
         orig = self._with_stdout(names)
         try:
             with self.assertRaises(cud.ScanError) as ctx:
@@ -568,8 +568,30 @@ class TestRepoEnumeration(unittest.TestCase):
         finally:
             cud._run = orig
 
+    def test_limit_check_counts_rows_not_post_filter_names(self):
+        # --limit は API 取得件数（フィルタ前）の上限。窓にアーカイブ済みが
+        # 混じるとフィルタ後の件数は上限を下回るため、フィルタ後で判定すると
+        # 実際には打ち切られているのにガードが発火しない。
+        rows = [f"repo-{i}\ttrue" for i in range(cud.REPO_LIST_LIMIT // 2)]
+        rows += [f"repo-{i}\tfalse" for i in range(cud.REPO_LIST_LIMIT - len(rows))]
+        self.assertEqual(len(rows), cud.REPO_LIST_LIMIT)
+        # フィルタ後は上限の半分しかないが、取得行数は上限ちょうど。
+        orig = self._with_stdout("\n".join(rows))
+        try:
+            with self.assertRaises(cud.ScanError):
+                cud.list_target_repos("Fandhe-AI", "tok")
+        finally:
+            cud._run = orig
+
+    def test_archived_repos_are_filtered_out(self):
+        orig = self._with_stdout("live\tfalse\ndead\ttrue\n")
+        try:
+            self.assertEqual(cud.list_target_repos("Fandhe-AI", "tok"), ["live"])
+        finally:
+            cud._run = orig
+
     def test_normal_enumeration_is_sorted(self):
-        orig = self._with_stdout("zeta\nalpha\n")
+        orig = self._with_stdout("zeta\tfalse\nalpha\tfalse\n")
         try:
             self.assertEqual(cud.list_target_repos("Fandhe-AI", "tok"), ["alpha", "zeta"])
         finally:

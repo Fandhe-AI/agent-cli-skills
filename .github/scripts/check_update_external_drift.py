@@ -584,7 +584,13 @@ def list_target_repos(org: str, token: str) -> list[str]:
             "gh", "repo", "list", org,
             "--limit", str(REPO_LIST_LIMIT),
             "--json", "name,isArchived",
-            "--jq", ".[] | select(.isArchived | not) | .name",
+            # **アーカイブ除外を jq 側で行わない。** `--limit` は API 取得件数
+            # （フィルタ前）の上限であり、窓の中にアーカイブ済みリポが混じると
+            # フィルタ後の件数は上限を下回る。フィルタ後の件数で打ち切り判定を
+            # すると、実際には打ち切られているのにガードが発火せず、残りの
+            # 非アーカイブリポが未検査のまま「乖離 0 件」に化ける。
+            # 取得行そのものを数えるため、フィルタは Python 側で行う。
+            "--jq", '.[] | [.name, (.isArchived | tostring)] | @tsv',
         ],
         token,
     )
@@ -592,18 +598,25 @@ def list_target_repos(org: str, token: str) -> list[str]:
         raise ScanError(
             f"リポジトリ列挙に失敗: {proc.stdout.strip()} {proc.stderr.strip()}"
         )
-    names = [n.strip() for n in proc.stdout.splitlines() if n.strip()]
-    if not names:
+    rows = [line for line in proc.stdout.splitlines() if line.strip()]
+    if not rows:
         raise ScanError("リポジトリ列挙が 0 件を返した（列挙失敗と区別できないため失敗扱い）")
-    if len(names) >= REPO_LIST_LIMIT:
-        # 上限に達した = 打ち切られた可能性がある。残りが黙って検査対象外になると
-        # 「非アーカイブ全件を見た」という主張が崩れ、漏れたリポの乖離が
-        # 「0 件」に化ける。列挙の完全性を確認できない以上 fail-closed で止める。
+    # 打ち切り判定は**取得行数**（フィルタ前）で行う。上限に達していたら
+    # 残りが黙って検査対象外になり「非アーカイブ全件を見た」という主張が崩れる。
+    if len(rows) >= REPO_LIST_LIMIT:
         raise ScanError(
             f"リポジトリ列挙が上限 {REPO_LIST_LIMIT} 件に達した。"
             "全件を列挙できたか確認できないため失敗扱いにする"
             "（REPO_LIST_LIMIT を引き上げるかページネーションへ切り替えること）"
         )
+
+    names: list[str] = []
+    for line in rows:
+        name, _, archived = line.partition("\t")
+        if archived.strip().lower() != "true":
+            names.append(name.strip())
+    if not names:
+        raise ScanError("非アーカイブのリポジトリが 0 件（列挙失敗と区別できないため失敗扱い）")
     return sorted(names)
 
 
