@@ -145,6 +145,12 @@ trap 'rm -f "${GH_ERR_FILE}"' EXIT
 if ! ISSUE_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>"${GH_ERR_FILE}"); then
   echo "エラー: イシュー #${ISSUE} の取得に失敗した" >&2
   cat "${GH_ERR_FILE}" >&2
+  # gh api は失敗時も stdout に詳細なエラー本文（JSON）を返すことがある。
+  # stderr の簡潔なメッセージだけでは診断情報が失われるため、stdout 側に
+  # 内容があれば併せて表示する（ISSUE_JSON は失敗時も stdout 由来の値を保持する）
+  if [[ -n "${ISSUE_JSON:-}" ]]; then
+    echo "${ISSUE_JSON}" >&2
+  fi
   exit 2
 fi
 
@@ -160,8 +166,14 @@ if [[ -n "${PARENT_URL}" ]]; then
   CURRENT_PARENT=$(printf '%s' "${PARENT_URL}" | grep -oE '[0-9]+$' || true)
 fi
 
-if [[ -n "${OLD_PARENT}" && -n "${CURRENT_PARENT}" && "${OLD_PARENT}" != "${CURRENT_PARENT}" ]]; then
-  echo "警告: 実測した現在の親 #${CURRENT_PARENT} が指定された --old-parent #${OLD_PARENT} と異なる。実測値を優先する" >&2
+if [[ -n "${OLD_PARENT}" ]]; then
+  if [[ -n "${CURRENT_PARENT}" && "${OLD_PARENT}" != "${CURRENT_PARENT}" ]]; then
+    echo "警告: 実測した現在の親 #${CURRENT_PARENT} が指定された --old-parent #${OLD_PARENT} と異なる。実測値を優先する" >&2
+  elif [[ -z "${CURRENT_PARENT}" ]]; then
+    # --old-parent 指定時に実測した現在の親が空（孤児）の非対称ケース。挙動自体
+    # （実測値優先で POST-only 経路へ進む）は正しいが、不整合の事実を伏せない
+    echo "警告: 指定された --old-parent #${OLD_PARENT} に反し、実測した現在の親は無い（孤児）。実測値を優先し POST のみを実行する" >&2
+  fi
 fi
 
 # 冪等性判定を DELETE/POST の実行より先に確定する（#295 で「判定が実行より後で 1 巡遅れる」と
@@ -208,6 +220,9 @@ fi
 if ! VERIFY_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>"${GH_ERR_FILE}"); then
   echo "エラー: 事後確認のための再取得に失敗した" >&2
   cat "${GH_ERR_FILE}" >&2
+  if [[ -n "${VERIFY_JSON:-}" ]]; then
+    echo "${VERIFY_JSON}" >&2
+  fi
   exit 5
 fi
 

@@ -89,7 +89,10 @@ for CANDIDATE in \
   "skills/update-issue-tree/scripts/reassign-sub-issue.sh" \
   ".agents/skills/update-issue-tree/scripts/reassign-sub-issue.sh" \
   ".claude/skills/update-issue-tree/scripts/reassign-sub-issue.sh"; do
-  if [[ -x "${CANDIDATE}" ]]; then
+  # 存在確認は -f のみで行う（-x にすると、npx skills add 等の vendoring で
+  # 実行ビットが落ちたファイルを「存在しない」と誤検知し、3 レイアウトいずれにも
+  # 見つからないという誤ったエラーメッセージになる）
+  if [[ -f "${CANDIDATE}" ]]; then
     REASSIGN_SCRIPT="${CANDIDATE}"
     break
   fi
@@ -98,8 +101,13 @@ if [[ -z "${REASSIGN_SCRIPT:-}" ]]; then
   echo "エラー: reassign-sub-issue.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
   exit 1
 fi
+if [[ ! -x "${REASSIGN_SCRIPT}" ]]; then
+  echo "警告: ${REASSIGN_SCRIPT} に実行権限がない（vendoring で実行ビットが失われた可能性）。bash 経由で実行する" >&2
+fi
 
-"${REASSIGN_SCRIPT}" \
+# 実行ビットの有無に関わらず bash 経由で起動する（上記の理由により、
+# 直接実行 "${REASSIGN_SCRIPT}" に依存すると Permission denied になり得るため）
+bash "${REASSIGN_SCRIPT}" \
   --issue "${ISSUE_NUMBER}" \
   --old-parent "${OLD_PARENT}" \
   --new-parent "${NEW_PARENT}"
