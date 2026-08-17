@@ -1255,9 +1255,32 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
                 "`docs/update-external-schedule.md` を参照。"
             )
     else:
-        lines.append("乖離 **0 件**。全ての下流リポジトリが最新 pin の wrapper、"
-                     "または skills を vendor していない。schedule トリガを持つ"
-                     "wrapper は全て直近実行を確認できている。")
+        # 軸 5 の生存確認を「全件確認済み」と断定してよいのは、候補が漏れなく
+        # schedule_ok へ入っており、かつ schedule 系の UNKNOWN が 1 件も無い場合に
+        # 限る。findings が空でも unknowns に SCHED_UNKNOWN（Actions API の 5xx、
+        # 部分的な 403、想定外 state、タイムスタンプ解析失敗）が残っていれば、
+        # 集計値（schedule_ok: 1/2 等）と本文が矛盾する。検査できていないものを
+        # 「確認済み」と読ませない（fail-closed の表示版）。
+        sched_unknown = sum(
+            1 for u in result.unknowns if u.category == "SCHED_UNKNOWN"
+        )
+        sched_all_confirmed = (
+            result.schedule_candidates == len(result.schedule_ok)
+            and sched_unknown == 0
+        )
+        base = ("乖離 **0 件**。全ての下流リポジトリが最新 pin の wrapper、"
+                "または skills を vendor していない。")
+        if sched_all_confirmed:
+            lines.append(base + "schedule トリガを持つ wrapper は全て直近実行を"
+                                "確認できている。")
+        else:
+            lines.append(
+                base
+                + f"ただし**検査不能あり**: schedule 候補 {result.schedule_candidates} 件中 "
+                f"{len(result.schedule_ok)} 件のみ生存を確認できた"
+                f"（schedule 系 UNKNOWN {sched_unknown} 件）。"
+                "残りは「乖離なし」ではなく「未確認」である。"
+            )
     lines.append("")
 
     lines.append("### 軸 4: 上流 reusable workflow の強化マーカー")

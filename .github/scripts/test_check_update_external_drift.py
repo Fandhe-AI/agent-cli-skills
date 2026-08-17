@@ -554,8 +554,13 @@ class TestScanEndToEnd(unittest.TestCase):
         "tree": mode, "sched": (state, created_at, runs_status, last_run) または
         (status_code だけの forbidden/error シミュレーション用タプル)}}``。
         ``sched`` を指定しないリポは軸 5 の Actions API 応答として
-        ``("active", "2020-01-01T00:00:00Z", 200, "2026-08-17T00:00:00Z")``
-        （直近実行あり・健全）を既定にする。
+        ``("active", "2020-01-01T00:00:00Z", 200, _ago(0))``（直近実行あり・健全）
+        を既定にする。**最終実行の既定値は固定日付にしない。** ``scan()`` は
+        ``datetime.now(timezone.utc)`` と比較して ``SCHEDULE_STALE_DAYS``（既定 2）
+        を超えたら SCHEDULE-STALE を出すため、固定日付を置くと実時間がその日付から
+        2 日を過ぎた時点で、既定の健全 schedule に依存する全 E2E テスト
+        （``test_all_four_axes`` / 乖離 0 件 / compare・unknown 系）が一斉に落ちる
+        時限爆弾になる（PR #347 Cursor Bugbot 指摘）。
         """
         def fake(path: str, token: str, raw: bool = False):
             # **分岐順に注意**: `repos/…/actions/workflows/update-external.yml` は
@@ -606,7 +611,15 @@ class TestScanEndToEnd(unittest.TestCase):
                 # 一度も通らないまま緑になるため、キーごと欠落させない。
                 sched = cfg.get(
                     "sched",
-                    ("active", "2020-01-01T00:00:00Z", 200, "2026-08-17T00:00:00Z"),
+                    # 最終実行は「今」からの相対値にする。固定日付だと実時間の経過で
+                    # SCHEDULE-STALE へ倒れ、既定の健全 schedule に依存する全 E2E
+                    # テストが一斉に落ちる（上記 docstring 参照）。
+                    (
+                        "active",
+                        "2020-01-01T00:00:00Z",
+                        200,
+                        TestScanEndToEnd._ago(0),
+                    ),
                 )
                 if sched[0] == "forbidden_meta":
                     return 403, ""
@@ -763,9 +776,37 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertIn("乖離: **0 件**", report)
         self.assertIn("乖離 **0 件**", report)
         self.assertIn("検査不能なリポジトリは **0 件**", report)
+        # 候補が全件 schedule_ok で SCHED_UNKNOWN も無いときだけ「全て確認できている」
+        # と断定してよい。
+        self.assertIn("全て直近実行を確認できている", report)
         # 乖離も UNKNOWN も無いときだけ issue を close してよい。
         self.assertEqual(cud.drift_count(result), 0)
         self.assertFalse(cud.has_drift(result))
+
+    def test_zero_drift_with_schedule_unknown_does_not_claim_all_confirmed(self):
+        # 候補 2 件のうち 1 件が Actions API 500。乖離は 0 件だが、生存を確認できたのは
+        # 1 件だけ。「schedule トリガを持つ wrapper は全て直近実行を確認できている」と
+        # 断定すると集計値（schedule_ok: 1/2）と矛盾するため、検査不能を明示する。
+        result = self._run_scan({
+            "ok-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))},
+            "api-500": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "sched": ("active", "2020-01-01T00:00:00Z", 500, None),
+            },
+        })
+        self.assertEqual(result.findings, [])
+        self.assertEqual(result.schedule_candidates, 2)
+        self.assertEqual(len(result.schedule_ok), 1)
+        self.assertEqual(
+            [u.category for u in result.unknowns], ["SCHED_UNKNOWN"]
+        )
+        report = cud.render_report(result)
+        self.assertIn("乖離 **0 件**", report)
+        self.assertNotIn("全て直近実行を確認できている", report)
+        self.assertIn("検査不能あり", report)
+        self.assertIn("schedule 候補 2 件中 1 件", report)
+        # UNKNOWN が残る間は issue を close しない（既存契約）。
+        self.assertTrue(cud.has_drift(result))
 
     def test_unknown_alone_keeps_issue_open(self):
         # 乖離 0 件だが検査不能が 1 件。「解消した」と言えないので close しない。
