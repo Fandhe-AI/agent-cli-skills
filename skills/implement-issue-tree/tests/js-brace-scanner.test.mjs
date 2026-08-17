@@ -394,6 +394,29 @@ test('除算側: break outer; のラベルは識別子として通常どおり�
 })
 
 // ---------------------------------------------------------------------------
+// break/continue/debugger 直後の裸ブロック { } の誤分類（PR #351 Cursor Bugbot 指摘）
+// ---------------------------------------------------------------------------
+// break/continue/debugger は REGEX_PRECEDING_KEYWORDS に追加済みだが BLOCK_INTRO_KEYWORDS
+// には未追加だと、ASI で文が終端した直後に続く裸 `{ ... }`（新しい文としてのブロック）が
+// オブジェクトリテラルと誤分類される。誤分類された `{ ... }` の対応する `}` の直後の走査
+// 状態が VALUE のままになり、続く正規表現リテラル（`}` を含み得る）を除算と誤認する。
+
+test('ブロック側: break 直後（ASI）の裸 { } はオブジェクトリテラルではなくブロック文として扱われる（PR #351 Cursor Bugbot 指摘）', () => {
+  const src = '{ while (1) { break\n{ y }\n/}/.test(s) } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('ブロック側: continue 直後（ASI）の裸 { } はオブジェクトリテラルではなくブロック文として扱われる（PR #351 Cursor Bugbot 指摘）', () => {
+  const src = '{ while (1) { continue\n{ y }\n/}/.test(s) } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('ブロック側: debugger 直後（ASI）の裸 { } はオブジェクトリテラルではなくブロック文として扱われる（PR #351 Cursor Bugbot 指摘）', () => {
+  const src = '{ debugger\n{ y }\n/}/.test(s) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
 // Unicode 識別子の結合文字・ZWNJ/ZWJ・非 BMP 文字（PR #351 codex-review 指摘）
 // ---------------------------------------------------------------------------
 

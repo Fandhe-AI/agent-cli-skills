@@ -151,8 +151,17 @@ const CONTROL_KEYWORDS = new Set(['if', 'while', 'for', 'switch', 'catch', 'with
 // `do { ... } while (...)`）であり、オブジェクトリテラルではない。`else`/`do` は
 // REGEX_PRECEDING_KEYWORDS にも含まれるため `{` 到達時点で prevSignificant が
 // OPERATOR になっており、素朴な「OPERATOR ならリテラル」判定だとオブジェクトリテラル
-// と誤分類してしまう。この 2 語は明示的にブロックへ倒す。
-const BLOCK_INTRO_KEYWORDS = new Set(['else', 'do'])
+// と誤分類してしまう。
+// `break`/`continue`/`debugger` も同じ理由でここに必要（PR #351 Cursor Bugbot 指摘）:
+// これらは ASI でその場の文が終端し得るオペランドなしの文であり、REGEX_PRECEDING_KEYWORDS
+// にも含まれるため、直後に改行だけを挟んでブロック文の裸 `{`（`break\n{ y }` のように
+// break の文が ASI で終端し、新しい文として続くブロック）が来ると、`lastWord` が
+// break/continue/debugger のまま prevSignificant が OPERATOR になっている状態で `{` へ
+// 到達する。この 3 語を欠いたままだと素朴な「OPERATOR ならリテラル」判定でオブジェクト
+// リテラルと誤分類し、対応する `}` の直後を VALUE（本来は文位置 = OPERATOR であるべき）
+// にしてしまう。結果として後続の正規表現リテラル（`}` を含み得る）を除算と誤認し、
+// 内部の `}` を早期にブロック終端として数える/正規表現走査自体が未終端エラーになり得る。
+const BLOCK_INTRO_KEYWORDS = new Set(['else', 'do', 'break', 'continue', 'debugger'])
 
 // 通常コードの `{` に対応する `}` を通過した直後の走査状態。
 // - 'block': ブロック文の終端。直後は文位置（OPERATOR）。
@@ -524,8 +533,11 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
     if (ch === '{') {
       // オブジェクトリテラル/分割代入パターンか、ブロック文かを判定する。
       // 優先順位: 1) 制御文ヘッダー直後 → ブロック、2) アロー関数直後 → ブロック、
-      // 3) `else`/`do` 直後 → ブロック（この2語は REGEX_PRECEDING_KEYWORDS にも含まれ
-      // prevSignificant が OPERATOR になるため 4) より先に判定する必要がある）、
+      // 3) `else`/`do`/`break`/`continue`/`debugger` 直後 → ブロック（これらは
+      // REGEX_PRECEDING_KEYWORDS にも含まれ prevSignificant が OPERATOR になるため
+      // 4) より先に判定する必要がある。break/continue/debugger は ASI で文が終端し
+      // 得るため、直後に改行だけを挟んで続く裸 `{` は新しい文のブロックであり得る。
+      // PR #351 Cursor Bugbot 指摘）、
       // 4) 文位置のコロン（`case`/`default`/ラベル文の `:`）直後 → ブロック（JS の文法上、
       // 文位置の裸 `{` は常にブロック文であり、式としてのオブジェクトリテラルは文位置には
       // 現れ得ないため。三項演算子の `:` はこの分岐に来ない — 下記 `:` 分岐参照）、
