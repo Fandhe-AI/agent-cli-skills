@@ -448,7 +448,7 @@ gh api --paginate --slurp "repos/OWNER/REPO/commits/<sha>/check-runs?per_page=10
     - **D >= 1 かつ B = 0 かつ P = 0** の場合、重複はすべて正常な再実行（`success`/`neutral`/`skipped` 同士）由来であり「cancel された run の残存 check」ではない。rerun せず、BLOCKED の別原因（required check の context 名不一致・未解決レビュースレッド・ruleset 構成など。`.claude/rules/ruleset-policy.md` の 3 軸スイープ）へ調査を移す。
   - 前提 2（rerun 対象の一意化）: (B) で重複している check 名を確認し、その名前を発行した cancelled run を job 一覧から特定する（下記コマンド）。
     - cancelled run が**複数**見つかり一意に絞り込めない場合: rerun せず `blocked`（quality）として最終レポートへ回す（誤った run を rerun すると無関係な job まで再実行し、原因不明のまま状態を変える）。
-    - cancelled run が **0 件**の場合: rerun 対象が存在しない。B >= 1 の残存は cancel ではなく failure / timed_out / action_required / startup_failure / stale 等の非 cancel 由来であり、通常の CI 失敗として扱う（rerun せず、監視フローの needs-fix 経路で原因を特定して修正する）。cancel 起因と決めつけて `gh run rerun` しない。
+    - cancelled run が **0 件**の場合: rerun 対象が存在しない。B >= 1 の残存は cancel ではなく failure / timed_out / action_required / startup_failure / stale 等の非 cancel 由来である。この残存も cancel 残存と同じ masking を受ける点に注意する — `gh pr checks` は同名 check の最新結論のみを表示するため（前掲「原因」節参照）、より新しい success / neutral / skipped の陰に隠れた古い failure / timed_out 等は `gh pr checks` の出力に現れず、通常の可視 CI 失敗としては検知できない。監視フローの needs-fix 経路（`gh pr checks` ベースの CI 失敗検知）に任せると見逃されるため、rerun はせず `blocked`（quality）として最終レポートへ回す。原因調査が必要な場合は (A)/(B) の生の check-runs 出力（`gh pr checks` ではなく）を根拠に、当該 check-run を発行した run をラン運用者が個別に特定・対処する。cancel 起因と決めつけて `gh run rerun` しない。
   - 上記を満たさないまま rerun しない（rerun は CI を再起動するため、「Review 通過後に CI を 1 回だけ起動する」設計に反する）。
 
 ```bash
