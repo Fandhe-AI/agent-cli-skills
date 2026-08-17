@@ -175,6 +175,17 @@ test('ケース16: 親が別リポジトリ → exit 2、DELETE も POST も呼�
   assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が呼ばれていないこと')
 })
 
+test('ケース16b: 親が別リポジトリで停止する際、stderr が --repo の付け替えを勧めていない（Issue #332 / PR #314 P0 の再発防止固定）', () => {
+  // c4c27b9 で「--repo を親リポジトリへ変えて再実行する」という危険な案内を削除した。
+  // 将来の善意の編集でこの案内が復活しないよう、stderr に --repo が出現しないことを固定する
+  const r = run(['--issue', '22', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentRepo: 'other/repo',
+  })
+  assert.equal(r.status, 2)
+  assert.ok(!/--repo/.test(r.stderr), 'stderr が --repo の付け替えを勧めていないこと')
+})
+
 test('ケース17: 別リポの親の番号が --new-parent と一致しても already-attached と誤判定しない', () => {
   // 別リポの #7 配下にあるだけで、本リポの #7 には付いていない
   const r = run(['--issue', '23', '--new-parent', '7'], {
