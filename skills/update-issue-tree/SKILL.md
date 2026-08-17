@@ -150,7 +150,9 @@ Phase が不明な issue はタイトル・本文を読んで判断し、判断�
 解決を先に実行する）。
 
 ```bash
-"${REASSIGN_SCRIPT}" \
+# Step 3 と同じく bash 経由で起動する（vendoring で実行ビットが落ちている場合に
+# ここだけ Permission denied で落ちる非対称を作らないため）
+bash "${REASSIGN_SCRIPT}" \
   --issue "${ORPHAN_NUMBER}" \
   --new-parent "${PHASE_NUMBER}"
 echo "exit=$?"
