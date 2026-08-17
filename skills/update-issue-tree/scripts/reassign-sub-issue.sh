@@ -26,6 +26,13 @@
 #   ./reassign-sub-issue.sh --issue <対象 issue 番号> --new-parent <新親 issue 番号> \
 #     [--old-parent <旧親 issue 番号>] [--repo <owner/name>]
 #
+# --repo は対象 issue（--issue）の所在を指す。親（--old-parent / --new-parent）の所在では
+# ない。--repo は対象 issue の GET だけでなく DELETE / POST を含む全 API パスを切り替える
+# ため、親リポジトリの値を入れると親リポジトリ側の同番号 issue を誤操作する（PR #314 P0）。
+#
+# cross-repository sub-issue（対象 issue の親が別リポジトリにある場合）は対象外。
+# 実測した現在の親が別リポジトリなら exit 2 で fail-closed に停止する（下記参照）。
+#
 # 終了コードと stdout 最終行（result=<state> ...）は skills/update-issue-tree/SKILL.md の
 # 「付け替えスクリプトの呼び出し規約」節を正とする。呼び出し側は非ゼロ終了を 1 件も握り潰さず、
 # 完了レポートの「要確認事項」へ記載すること。
@@ -42,6 +49,7 @@ REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
 usage() {
   cat >&2 <<'EOF'
 使い方: reassign-sub-issue.sh --issue <n> --new-parent <n> [--old-parent <n>] [--repo <owner/name>]
+  --repo は対象 issue（--issue）の所在。親（--old-parent / --new-parent）の所在ではない。
 EOF
 }
 
@@ -182,8 +190,10 @@ if [[ -n "${PARENT_URL}" ]]; then
   # 対象リポジトリの同定には、追加の API を叩かずに済む対象 issue 自身の repository_url を使う
   # （--repo 省略時の REPO_PATH は {owner}/{repo} プレースホルダのため比較に使えない）。
   if [[ "${PARENT_URL%/issues/*}" != "${SELF_REPO_URL}" ]]; then
-    # 別リポジトリの親からの取り外しは本スクリプトの対応範囲外。誤ったリポジトリへ
-    # DELETE を撃つ前に fail-closed で停止する
+    # cross-repository sub-issue はスキルの契約として対象外（SKILL.md 前提条件を参照。
+    # Issue #332）。親リポジトリへの書き込みは本スキルの前提条件（対象リポジトリへの
+    # 書き込み権限）の外側にあるため、誤ったリポジトリへ DELETE を撃つ前に
+    # fail-closed で停止する
     echo "エラー: 現在の親が別リポジトリにある（${PARENT_URL}）。本スクリプトは同一リポジトリ内の付け替えのみを扱う" >&2
     # --repo を親リポジトリへ変えて再実行する案内はしない。--repo は親の所在だけでなく
     # 対象 issue の GET / DELETE / POST を含む全 API パスを切り替えるため、親リポジトリに
