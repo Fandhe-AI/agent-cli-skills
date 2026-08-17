@@ -32,11 +32,19 @@ from check_update_external_drift import (  # noqa: E402
     PIN_BEHIND,
     PIN_CURRENT,
     PIN_UNREACHABLE,
+    SCHED_DISABLED,
+    SCHED_FAILING,
+    SCHED_OK,
+    SCHED_STALE,
+    SCHED_UNKNOWN,
     check_upstream_markers,
     classify_workflow,
     evaluate_pin,
+    evaluate_schedule,
+    has_schedule_trigger,
     norm,
 )
+from datetime import datetime, timedelta, timezone
 
 UPSTREAM_SHA = "fed9c07d98367f77e5e2b63bca38843f46feee96"
 OLD_PIN = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -370,6 +378,162 @@ class TestAxis4JobScoped(unittest.TestCase):
         self.assertFalse(m["ok"], m["detail"])
 
 
+class TestScheduleTriggerDetection(unittest.TestCase):
+    """``has_schedule_trigger`` — 軸 5 の対象判定（wrapper かどうかは問わない）。"""
+
+    def test_wrapper_with_schedule_is_true(self):
+        spec_text = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)
+        import yaml as _yaml
+        self.assertTrue(has_schedule_trigger(_yaml.safe_load(spec_text)))
+
+    def test_dispatch_only_wrapper_is_false(self):
+        import yaml as _yaml
+        self.assertFalse(has_schedule_trigger(_yaml.safe_load(FIXTURE_WRAPPER_UNPINNED)))
+
+    def test_legacy_with_schedule_is_true(self):
+        import yaml as _yaml
+        self.assertTrue(has_schedule_trigger(_yaml.safe_load(FIXTURE_LEGACY)))
+
+
+class TestAxis5Schedule(unittest.TestCase):
+    """``evaluate_schedule`` — GitHub API に触れない純粋関数を fixture で検証する。"""
+
+    NOW = datetime(2026, 8, 17, 19, 3, tzinfo=timezone.utc)
+
+    def _iso(self, delta: timedelta) -> str:
+        return (self.NOW - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def test_disabled_inactivity(self):
+        v = evaluate_schedule("disabled_inactivity", None, "2020-01-01T00:00:00Z", self.NOW, 2)
+        self.assertEqual(v["state"], SCHED_DISABLED)
+        self.assertIn("disabled_inactivity", v["detail"])
+
+    def test_disabled_manually(self):
+        v = evaluate_schedule("disabled_manually", None, "2020-01-01T00:00:00Z", self.NOW, 2)
+        self.assertEqual(v["state"], SCHED_DISABLED)
+        self.assertIn("disabled_manually", v["detail"])
+
+    def test_disabled_fork(self):
+        v = evaluate_schedule("disabled_fork", None, "2020-01-01T00:00:00Z", self.NOW, 2)
+        self.assertEqual(v["state"], SCHED_DISABLED)
+        self.assertIn("disabled_fork", v["detail"])
+
+    def test_disabled_reasons_have_distinct_detail(self):
+        # 3 種の disabled state が同じ文言に潰れていないこと。
+        details = {
+            evaluate_schedule(s, None, "2020-01-01T00:00:00Z", self.NOW, 2)["detail"]
+            for s in ("disabled_inactivity", "disabled_manually", "disabled_fork")
+        }
+        self.assertEqual(len(details), 3)
+
+    def test_active_stale_3_days(self):
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(days=3)), None, self.NOW, 2
+        )
+        self.assertEqual(v["state"], SCHED_STALE)
+        self.assertIn("3.0 日経過", v["detail"])
+
+    def test_active_ok_12_hours(self):
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(hours=12)), None, self.NOW, 2
+        )
+        self.assertEqual(v["state"], SCHED_OK)
+
+    def test_no_run_recent_created_at_is_ok_grace_period(self):
+        v = evaluate_schedule(
+            "active", None, self._iso(timedelta(days=1)), self.NOW, 2
+        )
+        self.assertEqual(v["state"], SCHED_OK)
+
+    def test_no_run_old_created_at_is_stale_without_claiming_never_run(self):
+        v = evaluate_schedule(
+            "active", None, self._iso(timedelta(days=30)), self.NOW, 2
+        )
+        self.assertEqual(v["state"], SCHED_STALE)
+        self.assertIn("直近の schedule 実行を確認できない", v["detail"])
+        self.assertNotIn("一度も実行されていない", v["detail"])
+
+    def test_timezone_offset_and_z_are_equivalent(self):
+        # 実測: workflow オブジェクトは +09:00、runs は Z。同じ経過日数なら
+        # 同じ判定になること。
+        z = evaluate_schedule("active", "2026-08-14T02:00:09Z", None, self.NOW, 2)
+        offset = evaluate_schedule(
+            "active", "2026-08-14T11:00:09+09:00", None, self.NOW, 2
+        )
+        self.assertEqual(z["state"], offset["state"])
+        self.assertEqual(z["state"], SCHED_STALE)
+
+    def test_naive_timestamp_is_unknown_not_exception(self):
+        v = evaluate_schedule("active", "2026-08-14T02:00:09", None, self.NOW, 2)
+        self.assertEqual(v["state"], SCHED_UNKNOWN)
+
+    def test_invalid_string_is_unknown_not_exception(self):
+        v = evaluate_schedule("active", "not-a-date", None, self.NOW, 2)
+        self.assertEqual(v["state"], SCHED_UNKNOWN)
+
+    def test_unexpected_state_is_unknown(self):
+        v = evaluate_schedule("deleted", None, "2020-01-01T00:00:00Z", self.NOW, 2)
+        self.assertEqual(v["state"], SCHED_UNKNOWN)
+
+    def test_threshold_boundary_just_under_is_ok(self):
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(days=1, hours=21, minutes=36)), None, self.NOW, 2
+        )
+        # 1.9 日 (1日21.6時間) < N=2 → OK
+        self.assertEqual(v["state"], SCHED_OK)
+
+    def test_threshold_boundary_just_over_is_stale(self):
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(days=2, hours=2, minutes=24)), None, self.NOW, 2
+        )
+        # 2.1 日 > N=2 → STALE
+        self.assertEqual(v["state"], SCHED_STALE)
+
+    def test_missing_created_at_when_no_run_is_unknown(self):
+        v = evaluate_schedule("active", None, None, self.NOW, 2)
+        self.assertEqual(v["state"], SCHED_UNKNOWN)
+
+    def test_fresh_run_with_consecutive_failures_is_failing_not_ok(self):
+        # イシュー #304 レビュー指摘: schedule は発火しているがジョブ内部が
+        # 連日失敗しているケース。発火の timestamp だけでは SCHED_OK に誤判定される。
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(hours=12)), None, self.NOW, 2,
+            recent_conclusions=["failure", "failure"],
+        )
+        self.assertEqual(v["state"], SCHED_FAILING)
+        self.assertIn("連続失敗", v["detail"])
+
+    def test_fresh_run_with_single_failure_is_still_ok(self):
+        # 単発の flaky failure は連続失敗と区別し、過検知しない。
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(hours=12)), None, self.NOW, 2,
+            recent_conclusions=["failure"],
+        )
+        self.assertEqual(v["state"], SCHED_OK)
+
+    def test_fresh_run_with_mixed_conclusions_is_ok(self):
+        # 直近の一部が成功していれば「連続失敗」ではないため OK のまま。
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(hours=12)), None, self.NOW, 2,
+            recent_conclusions=["failure", "success"],
+        )
+        self.assertEqual(v["state"], SCHED_OK)
+
+    def test_stale_run_with_failures_stays_stale_not_failing(self):
+        # 経過日数超過（STALE）が既に検出済みの場合は conclusion を見ずに STALE
+        # を優先する（STALE と FAILING の二重報告をしない）。
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(days=3)), None, self.NOW, 2,
+            recent_conclusions=["failure", "failure"],
+        )
+        self.assertEqual(v["state"], SCHED_STALE)
+
+    def test_no_recent_conclusions_defaults_to_ok(self):
+        # recent_conclusions 未指定（既存呼び出し互換）は従来どおり OK 判定。
+        v = evaluate_schedule("active", self._iso(timedelta(hours=12)), None, self.NOW, 2)
+        self.assertEqual(v["state"], SCHED_OK)
+
+
 class TestScanEndToEnd(unittest.TestCase):
     """``scan()`` を偽の GitHub API に当て、軸 1-4 を通しで確認する。
 
@@ -378,13 +542,35 @@ class TestScanEndToEnd(unittest.TestCase):
     HTTP status のシナリオを与える。
     """
 
-    def _fake_api(self, repos: dict[str, dict]):
+    @staticmethod
+    def _fake_api(repos: dict[str, dict]):
         """``gh_get_with_status`` の代替を返す。
 
+        ``staticmethod`` にしてあるのは、``TestScheduleSystemicForbidden`` が
+        インスタンス化せずに ``TestScanEndToEnd._fake_api(...)`` として直接
+        再利用するため（``self`` を一切参照しない純粋なファクトリ関数）。
+
         ``repos`` は ``{リポ名: {"workflow": (status, text), "lock": status,
-        "tree": mode}}``。
+        "tree": mode, "sched": (state, created_at, runs_status, last_run) または
+        (status_code だけの forbidden/error シミュレーション用タプル)}}``。
+        ``sched`` を指定しないリポは軸 5 の Actions API 応答として
+        ``("active", "2020-01-01T00:00:00Z", 200, _ago(0))``（直近実行あり・健全）
+        を既定にする。**最終実行の既定値は固定日付にしない。** ``scan()`` は
+        ``datetime.now(timezone.utc)`` と比較して ``SCHEDULE_STALE_DAYS``（既定 2）
+        を超えたら SCHEDULE-STALE を出すため、固定日付を置くと実時間がその日付から
+        2 日を過ぎた時点で、既定の健全 schedule に依存する全 E2E テスト
+        （``test_all_four_axes`` / 乖離 0 件 / compare・unknown 系）が一斉に落ちる
+        時限爆弾になる（PR #347 Cursor Bugbot 指摘）。
         """
         def fake(path: str, token: str, raw: bool = False):
+            # **分岐順に注意**: `repos/…/actions/workflows/update-external.yml` は
+            # `.github/workflows/update-external.yml`（cud.WORKFLOW_PATH）の
+            # `endswith` には一致しない（"actions/workflows/update-external.yml"
+            # は ".github/workflows/update-external.yml" で終わらない）ため、
+            # 先に判定しても contents API の分岐と衝突しない。ここでは明確化の
+            # ため意図的に先頭で分岐する。
+            if "/actions/workflows/" in path:
+                return _fake_actions_api(path, repos)
             if path.startswith(f"repos/{cud.UPSTREAM_REPO}/contents/"):
                 return 200, FIXTURE_UPSTREAM_OK
             if path.startswith(f"repos/{cud.UPSTREAM_REPO}/compare/"):
@@ -411,17 +597,80 @@ class TestScanEndToEnd(unittest.TestCase):
                     return 200, ('{"tree":[{"path":"skills","type":"tree","mode":"'
                                  + mode + '"}]}')
             raise AssertionError(f"想定外の API 呼び出し: {path}")
+
+        def _fake_actions_api(path: str, repos: dict[str, dict]):
+            for name, cfg in repos.items():
+                prefix = f"repos/Fandhe-AI/{name}/actions/workflows/{cud.WORKFLOW_FILENAME}"
+                if not path.startswith(prefix):
+                    continue
+                # sched タプルは (state, created_at, runs_status, last_run[, conclusions])。
+                # 5 要素目の conclusions は直近 schedule 実行の conclusion を新しい順に
+                # 並べたもので、省略時は全件 "success" とみなす。scan() 経由の
+                # エンドツーエンドテストでも本番と同じ形の workflow_runs を返さないと、
+                # evaluate_schedule の SCHED_FAILING 判定（conclusion を消費する経路）を
+                # 一度も通らないまま緑になるため、キーごと欠落させない。
+                sched = cfg.get(
+                    "sched",
+                    # 最終実行は「今」からの相対値にする。固定日付だと実時間の経過で
+                    # SCHEDULE-STALE へ倒れ、既定の健全 schedule に依存する全 E2E
+                    # テストが一斉に落ちる（上記 docstring 参照）。
+                    (
+                        "active",
+                        "2020-01-01T00:00:00Z",
+                        200,
+                        TestScanEndToEnd._ago(0),
+                    ),
+                )
+                if sched[0] == "forbidden_meta":
+                    return 403, ""
+                if sched[0] == "forbidden_runs" and "/runs" in path:
+                    return 403, ""
+                if "/runs" in path:
+                    runs_status = sched[2]
+                    last_run = sched[3]
+                    if runs_status != 200:
+                        return runs_status, ""
+                    if last_run is None:
+                        return 200, '{"workflow_runs":[]}'
+                    conclusions = (
+                        sched[4]
+                        if len(sched) > 4
+                        else ["success"] * cud.SCHED_FAILING_STREAK_MIN
+                    )
+                    return 200, json.dumps(
+                        {
+                            "workflow_runs": [
+                                {"created_at": last_run, "conclusion": c}
+                                for c in conclusions
+                            ]
+                        }
+                    )
+                # workflow メタデータ本体
+                state, created_at = sched[0], sched[1]
+                return 200, json.dumps({"state": state, "created_at": created_at})
+            raise AssertionError(f"想定外の Actions API 呼び出し: {path}")
+
         return fake
 
-    def _run_scan(self, repos: dict[str, dict]):
+    def _run_scan(self, repos: dict[str, dict], schedule_stale_days: int = 2):
         orig = (cud.gh_get_with_status, cud.gh_json, cud.list_target_repos)
         cud.gh_get_with_status = self._fake_api(repos)
         cud.gh_json = lambda path, token, jq=None: UPSTREAM_SHA
         cud.list_target_repos = lambda org, token: sorted(repos)
         try:
-            return cud.scan("Fandhe-AI", "fake-token")
+            return cud.scan("Fandhe-AI", "fake-token", schedule_stale_days)
         finally:
             (cud.gh_get_with_status, cud.gh_json, cud.list_target_repos) = orig
+
+    @staticmethod
+    def _findings_by_repo(result) -> dict[str, list[tuple[str, str]]]:
+        """1 リポが複数 findings を持ちうる（軸 5 の追加で LEGACY かつ
+        SCHEDULE-STALE のような 2 件出得る）。repo 名をキーにした単一タプルの
+        dict だと後勝ちで静かに 1 件が落ちるため、リストへ集約する。"""
+        cats: dict[str, list[tuple[str, str]]] = {}
+        for f in result.findings:
+            cats.setdefault(f.repo.split("/")[1], []).append((f.category, f.detail))
+        return cats
 
     def test_all_four_axes(self):
         result = self._run_scan({
@@ -451,21 +700,26 @@ class TestScanEndToEnd(unittest.TestCase):
             "yadori": {"workflow": (200, FIXTURE_LEGACY)},
         })
 
-        cats = {f.repo.split("/")[1]: (f.category, f.detail) for f in result.findings}
+        cats = self._findings_by_repo(result)
 
         self.assertEqual(result.wrappers_ok, ["Fandhe-AI/fresh-wrapper"])
-        self.assertEqual(cats["stale-wrapper"][0], "PIN-STALE")
-        self.assertIn("7 コミット遅れている", cats["stale-wrapper"][1])
-        self.assertEqual(cats["legacy-repo"][0], "LEGACY")
-        self.assertEqual(cats["sneaky-workflow-call"][0], "LEGACY")
+        self.assertEqual(len(cats["stale-wrapper"]), 1)
+        self.assertEqual(cats["stale-wrapper"][0][0], "PIN-STALE")
+        self.assertIn("7 コミット遅れている", cats["stale-wrapper"][0][1])
+        self.assertEqual(len(cats["legacy-repo"]), 1)
+        self.assertEqual(cats["legacy-repo"][0][0], "LEGACY")
+        self.assertEqual(len(cats["sneaky-workflow-call"]), 1)
+        self.assertEqual(cats["sneaky-workflow-call"][0][0], "LEGACY")
 
-        self.assertEqual(cats["vendored-no-ci"][0], "SYNC-CI-ABSENT")
-        self.assertIn("040000", cats["vendored-no-ci"][1])
-        self.assertIn("#256", cats["vendored-no-ci"][1])
+        self.assertEqual(len(cats["vendored-no-ci"]), 1)
+        self.assertEqual(cats["vendored-no-ci"][0][0], "SYNC-CI-ABSENT")
+        self.assertIn("040000", cats["vendored-no-ci"][0][1])
+        self.assertIn("#256", cats["vendored-no-ci"][0][1])
 
-        self.assertEqual(cats["vendored-symlink"][0], "SYNC-CI-ABSENT")
-        self.assertIn("120000", cats["vendored-symlink"][1])
-        self.assertNotIn("#256", cats["vendored-symlink"][1])
+        self.assertEqual(len(cats["vendored-symlink"]), 1)
+        self.assertEqual(cats["vendored-symlink"][0][0], "SYNC-CI-ABSENT")
+        self.assertIn("120000", cats["vendored-symlink"][0][1])
+        self.assertNotIn("#256", cats["vendored-symlink"][0][1])
 
         self.assertNotIn("actions", cats)
         self.assertNotIn("unrelated", cats)
@@ -479,7 +733,16 @@ class TestScanEndToEnd(unittest.TestCase):
         # 軸 4 は健全な fixture を上流としているため全マーカー適合。
         self.assertTrue(all(m["ok"] for m in result.upstream_markers))
 
-        # レポートは乖離 0 件でも全量を出す契約。ここでは 4 件出ることを確認する。
+        # 軸 5: schedule トリガを持つ 3 リポ（fresh-wrapper / stale-wrapper /
+        # legacy-repo）が候補になり、既定の健全な sched fixture で全て OK。
+        self.assertEqual(result.schedule_candidates, 3)
+        self.assertEqual(result.schedule_forbidden, 0)
+        self.assertEqual(
+            set(result.schedule_ok),
+            {"Fandhe-AI/fresh-wrapper", "Fandhe-AI/stale-wrapper", "Fandhe-AI/legacy-repo"},
+        )
+
+        # レポートは乖離 0 件でも全量を出す契約。ここでは 5 件出ることを確認する。
         report = cud.render_report(result, "https://example.invalid/run/1")
         self.assertIn("乖離: **5 件**", report)
         self.assertIn("検査不能 (UNKNOWN): **1 件**", report)
@@ -513,9 +776,37 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertIn("乖離: **0 件**", report)
         self.assertIn("乖離 **0 件**", report)
         self.assertIn("検査不能なリポジトリは **0 件**", report)
+        # 候補が全件 schedule_ok で SCHED_UNKNOWN も無いときだけ「全て確認できている」
+        # と断定してよい。
+        self.assertIn("全て直近実行を確認できている", report)
         # 乖離も UNKNOWN も無いときだけ issue を close してよい。
         self.assertEqual(cud.drift_count(result), 0)
         self.assertFalse(cud.has_drift(result))
+
+    def test_zero_drift_with_schedule_unknown_does_not_claim_all_confirmed(self):
+        # 候補 2 件のうち 1 件が Actions API 500。乖離は 0 件だが、生存を確認できたのは
+        # 1 件だけ。「schedule トリガを持つ wrapper は全て直近実行を確認できている」と
+        # 断定すると集計値（schedule_ok: 1/2）と矛盾するため、検査不能を明示する。
+        result = self._run_scan({
+            "ok-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))},
+            "api-500": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "sched": ("active", "2020-01-01T00:00:00Z", 500, None),
+            },
+        })
+        self.assertEqual(result.findings, [])
+        self.assertEqual(result.schedule_candidates, 2)
+        self.assertEqual(len(result.schedule_ok), 1)
+        self.assertEqual(
+            [u.category for u in result.unknowns], ["SCHED_UNKNOWN"]
+        )
+        report = cud.render_report(result)
+        self.assertIn("乖離 **0 件**", report)
+        self.assertNotIn("全て直近実行を確認できている", report)
+        self.assertIn("検査不能あり", report)
+        self.assertIn("schedule 候補 2 件中 1 件", report)
+        # UNKNOWN が残る間は issue を close しない（既存契約）。
+        self.assertTrue(cud.has_drift(result))
 
     def test_unknown_alone_keeps_issue_open(self):
         # 乖離 0 件だが検査不能が 1 件。「解消した」と言えないので close しない。
@@ -535,6 +826,157 @@ class TestScanEndToEnd(unittest.TestCase):
         result.upstream_markers = [{"marker": "dummy", "ok": False, "detail": "劣化"}]
         self.assertEqual(cud.drift_count(result), 1)
         self.assertTrue(cud.has_drift(result))
+
+    # --- 軸 5 の scan() 組み込み ---------------------------------------
+
+    @staticmethod
+    def _ago(days: float) -> str:
+        return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+    def test_schedule_stale_wrapper_is_flagged(self):
+        # ファイル内容は最新 pin で健全（軸 1+2 は乖離なし）だが、直近の
+        # schedule 実行が 5 日前 → 軸 5 のみが乖離を報告する。
+        result = self._run_scan({
+            "stale-schedule": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "sched": ("active", "2020-01-01T00:00:00Z", 200, self._ago(5)),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        self.assertEqual(len(cats["stale-schedule"]), 1)
+        self.assertEqual(cats["stale-schedule"][0][0], "SCHEDULE-STALE")
+        # 軸 1+2（ファイル内容）は最新 pin の wrapper として健全 → wrappers_ok
+        # にも計上される。軸 5 の乖離と軸 1+2 の健全は独立に共存する。
+        self.assertIn("Fandhe-AI/stale-schedule", result.wrappers_ok)
+
+    def test_schedule_disabled_inactivity_is_flagged(self):
+        result = self._run_scan({
+            "disabled-schedule": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "sched": ("disabled_inactivity", "2020-01-01T00:00:00Z", 200, None),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        self.assertEqual(len(cats["disabled-schedule"]), 1)
+        self.assertEqual(cats["disabled-schedule"][0][0], "SCHEDULE-DISABLED")
+
+    def test_schedule_failing_wrapper_is_flagged(self):
+        # 発火は新しい（19 時間前）が直近 2 件が連続失敗 → SCHEDULE-FAILING。
+        # last_run だけを見る実装では SCHEDULE-OK に倒れるケースを、scan() 経由
+        # （フェイク Actions API が conclusion を返す経路）で押さえる。
+        result = self._run_scan({
+            "failing-schedule": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "sched": (
+                    "active", "2020-01-01T00:00:00Z", 200, self._ago(0.8),
+                    ["failure", "failure"],
+                ),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        self.assertEqual(len(cats["failing-schedule"]), 1)
+        self.assertEqual(cats["failing-schedule"][0][0], "SCHEDULE-FAILING")
+        # detail には連続失敗の conclusion が列挙される（読み手がしきい値を
+        # 信用せず自分で判断できるようにするため）。
+        self.assertIn("failure", cats["failing-schedule"][0][1])
+
+    def test_schedule_single_failure_is_not_flagged(self):
+        # 単発の flaky failure は過検知しない（直近 2 件が「全て」失敗のときのみ）。
+        result = self._run_scan({
+            "flaky-schedule": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "sched": (
+                    "active", "2020-01-01T00:00:00Z", 200, self._ago(0.8),
+                    ["failure", "success"],
+                ),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        categories = {c for c, _ in cats.get("flaky-schedule", [])}
+        self.assertNotIn("SCHEDULE-FAILING", categories)
+        self.assertIn("Fandhe-AI/flaky-schedule", result.wrappers_ok)
+
+    def test_legacy_repo_with_stale_schedule_reports_two_findings(self):
+        # LEGACY（軸 1）と SCHEDULE-STALE（軸 5）は原因も直し方も違うため、
+        # 同一リポで 2 findings が出るのが意図どおり。
+        result = self._run_scan({
+            "legacy-and-stale": {
+                "workflow": (200, FIXTURE_LEGACY),
+                "sched": ("active", "2020-01-01T00:00:00Z", 200, self._ago(5)),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        categories = {c for c, _ in cats["legacy-and-stale"]}
+        self.assertEqual(categories, {"LEGACY", "SCHEDULE-STALE"})
+        self.assertEqual(len(cats["legacy-and-stale"]), 2)
+
+    def test_dispatch_only_wrapper_is_not_a_schedule_candidate(self):
+        # workflow_dispatch のみの wrapper は軸 5 の対象外。SCHEDULE-* が
+        # 出ないだけでなく、Actions API も一切呼ばれない（候補外の構造判定）。
+        result = self._run_scan({
+            "dispatch-only": {"workflow": (200, FIXTURE_WRAPPER_UNPINNED)},
+        })
+        cats = self._findings_by_repo(result)
+        categories = {c for c, _ in cats.get("dispatch-only", [])}
+        self.assertNotIn("SCHEDULE-STALE", categories)
+        self.assertNotIn("SCHEDULE-DISABLED", categories)
+        self.assertEqual(result.schedule_candidates, 0)
+
+    def test_partial_actions_forbidden_is_unknown_not_scan_error(self):
+        # 候補の一部だけが 403。正常系（他リポの判定）を巻き込まず UNKNOWN に
+        # 留め、ScanError にはしない。
+        result = self._run_scan({
+            "healthy-wrapper": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+            },
+            "actions-forbidden": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "sched": ("forbidden_meta",),
+            },
+        })
+        self.assertEqual(result.schedule_forbidden, 1)
+        self.assertEqual(result.schedule_candidates, 2)
+        unknown_repos = {f.repo for f in result.unknowns}
+        self.assertIn("Fandhe-AI/actions-forbidden", unknown_repos)
+        self.assertIn("Fandhe-AI/healthy-wrapper", result.schedule_ok)
+
+
+class TestScheduleSystemicForbidden(unittest.TestCase):
+    """軸 5 候補の全件が 403 の場合は個別 UNKNOWN ではなく ScanError にする。"""
+
+    def _run_scan(self, repos: dict[str, dict]):
+        orig = (cud.gh_get_with_status, cud.gh_json, cud.list_target_repos)
+        cud.gh_get_with_status = TestScanEndToEnd._fake_api(repos)
+        cud.gh_json = lambda path, token, jq=None: UPSTREAM_SHA
+        cud.list_target_repos = lambda org, token: sorted(repos)
+        try:
+            return cud.scan("Fandhe-AI", "fake-token")
+        finally:
+            (cud.gh_get_with_status, cud.gh_json, cud.list_target_repos) = orig
+
+    def test_all_candidates_forbidden_raises_scan_error(self):
+        with self.assertRaises(cud.ScanError) as ctx:
+            self._run_scan({
+                "wrapper-a": {
+                    "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                    "sched": ("forbidden_meta",),
+                },
+                "wrapper-b": {
+                    "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                    "sched": ("forbidden_meta",),
+                },
+            })
+        self.assertIn("Actions: read", str(ctx.exception))
+
+    def test_no_candidates_does_not_raise(self):
+        # 軸 5 の対象（schedule トリガあり）が 0 件なら 403 の分母も 0。
+        # 0/0 を「全件 403」と誤判定しないこと。
+        result = self._run_scan({
+            "dispatch-only": {"workflow": (200, FIXTURE_WRAPPER_UNPINNED)},
+        })
+        self.assertEqual(result.schedule_candidates, 0)
 
 
 class TestRepoEnumeration(unittest.TestCase):

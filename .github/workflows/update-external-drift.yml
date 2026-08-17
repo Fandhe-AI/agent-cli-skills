@@ -29,6 +29,9 @@ name: Update external drift check
 #   軸 2  pin の鮮度            … 上流を強化しても pin が古いと届かない
 #   軸 3  同期 CI の欠落        … skills を vendor しているのに workflow が無い
 #   軸 4  上流 reusable の劣化  … 旧マーカーの意図。18 リポ分の grep が 1 ファイルへ
+#   軸 5  定期実行の生存        … ファイルは正しいのに schedule が無告知停止した
+#                                 状態を検知（イシュー #304。詳細は
+#                                 docs/update-external-schedule.md）
 #
 # --------------------------------------------------------------------------
 # fail-closed
@@ -77,6 +80,10 @@ jobs:
 
       # PAT 不在を「乖離 0 件」に化けさせない。スクリプト側でも同じガードを
       # 持っているが、ここで先に落として意図を workflow の読み手にも明示する。
+      # 軸 5（定期実行の生存）は他リポの Actions メタデータ・実行履歴を読むため、
+      # 既存の Contents 読み取りスコープに加えて Actions: read も必要になる
+      # （軸 1-4 はこのスコープを一度も行使していない）。不足時は systemic 403
+      # として scan() が ScanError で fail-closed する（イシュー #304）。
       - name: Verify SUBMODULE_PAT is configured
         env:
           PAT: ${{ secrets.SUBMODULE_PAT }}
@@ -122,6 +129,11 @@ jobs:
           ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_BODY_FILE: ${{ runner.temp }}/drift-report.md
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # 軸 5 のしきい値（日）。スクリプト側の既定は 2（根拠は
+          # docs/update-external-schedule.md）。暫定的な緩和が必要になったとき
+          # にスクリプト本体を触らず調整できるよう、ワークフロー側からも
+          # 明示的に渡す。
+          SCHEDULE_STALE_DAYS: '2'
         shell: bash
         run: |
           set -euo pipefail
