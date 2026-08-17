@@ -24,6 +24,7 @@ CI リソース節約のため「push 前 review」設計を採用している�
 
 - `gh` CLI がインストールされ、認証済みであること（`gh auth status` で確認）
 - `jq` CLI がインストールされていること（`command -v jq` で確認）。「全チェックが pass に見えるのにマージが進まない場合（cancel された run の残存 check）」節の人間の診断専用コマンド (B) は `gh api --paginate --slurp` の生 JSON を外部の `jq` へパイプして平坦化・集約するため、`gh --jq` だけでは代替できない。未導入の場合はそのコマンドを実行せず（rerun もせず）`blocked` として扱う
+- `awk` CLI がインストールされていること（`command -v awk` で確認）。同節のエージェント実行可能コマンド (A) は `--jq` がページ単位にしか適用できないため、ページ跨ぎの重複を集約する際にシェル側 `awk` へ依存する。未導入の場合はそのコマンドを実行せず `UNDETERMINED`（判定不能）として扱う
 - git working tree が clean であること（`git status` で確認）
 - マージ先ブランチが CI green の状態であること（`autoMerge` 運用ではランの完了後にも確認する。後述の strict = false 前提により、古い base に対して成功したチェックのままマージされ得るため）。**この確認はマージ先ブランチへの push で CI が起動することに依存する**。push トリガの workflow が無い、または `paths` フィルタで該当 head では起動しないリポジトリでは前提確認・完了後確認のいずれも検証不能であり、`autoMerge: true` は非推奨とする。成立可否の確認手順（`defaultBranchRef` から既定ブランチを解決するプローブ）と不成立時の扱いは references/automerge-design.md の「補償策の成立確認（base CI プローブ）」節を参照
 - （`autoMerge: true` で使う場合）ベースブランチの ruleset で **required status checks の strict（マージ前の base 最新化必須 = `strict_required_status_checks_policy`）を `false` にしていること**。`true` だと 1 件マージするたびに他の open PR の base が陳腐化し、並列ラン（`parallel >= 2`）が収束しない。G0 は strict を要件にしないため `false` でも自動マージは成立する（references/automerge-design.md の「strict を G0 の要件にしない理由」節）
@@ -382,7 +383,10 @@ gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証し�
 rows=$(gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=100" \
   --jq '.check_runs[] | [.name, (.conclusion // "pending")] | @tsv' 2>/dev/null)
 status=$?
-if [ "${status}" -ne 0 ] || [ -z "${rows}" ]; then
+if ! command -v awk >/dev/null; then
+  # awk 前提条件が未導入。集計不能なため判定不能として扱う（実行はしない）
+  echo "UNDETERMINED"
+elif [ "${status}" -ne 0 ] || [ -z "${rows}" ]; then
   # 取得失敗、または check-run が 1 件も返らない。この節は「全チェックが pass に見える」状態
   # でのみ参照するため、0 件は前提と矛盾する = 取得できていない可能性が高く、判定不能として扱う
   echo "UNDETERMINED"
