@@ -6,4 +6,8 @@
 .DS_Store
 *.pem
 
+# Python bytecode cache（.github/scripts の検証スクリプトをローカル実行すると生成される）
+__pycache__/
+*.pyc
+
 _/
