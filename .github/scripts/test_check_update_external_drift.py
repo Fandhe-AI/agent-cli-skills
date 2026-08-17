@@ -182,6 +182,16 @@ jobs:
 """
 
 
+# --- fixture: reusable を呼ぶ job と、composite action を直接呼ぶ手管理 job の併存。
+#     移行途中のハイブリッド。上流の強化が一部のジョブにしか届かない。
+FIXTURE_WRAPPER_HYBRID = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
+  legacy-skills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96
+"""
+
+
 def markers_map(text: str) -> dict[str, dict]:
     return {m["marker"]: m for m in check_upstream_markers(text)}
 
@@ -249,13 +259,7 @@ jobs:
     def test_hybrid_wrapper_is_drift(self):
         # reusable を呼ぶ job と、composite action を直接呼ぶ手管理 job が併存。
         # 薄い wrapper になっておらず上流の強化が一部にしか届かない。
-        hybrid = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
-  legacy-skills:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96
-"""
-        info = classify_workflow(hybrid)
+        info = classify_workflow(FIXTURE_WRAPPER_HYBRID)
         self.assertEqual(info["kind"], KIND_WRAPPER_HYBRID)
         self.assertIn("legacy-skills", info["reason"])
 
@@ -435,6 +439,8 @@ class TestScanEndToEnd(unittest.TestCase):
             "vendored-symlink": {"workflow": (404, ""), "lock": 200, "tree": "120000"},
             # ファイル無し + lock 無し → 対象外（乖離ではない）
             "unrelated": {"workflow": (404, ""), "lock": 404},
+            # 軸 1: 移行途中のハイブリッド → WRAPPER-HYBRID として乖離
+            "hybrid-wrapper": {"workflow": (200, FIXTURE_WRAPPER_HYBRID)},
             # 下流が workflow_call を足しても除外されない（偽陰性の防止）
             "sneaky-workflow-call": {"workflow": (200, FIXTURE_REUSABLE_DEFINITION)},
             # 検査不能 → UNKNOWN（黙って green にしない）
@@ -450,6 +456,8 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertIn("7 コミット遅れている", cats["stale-wrapper"][1])
         self.assertEqual(cats["legacy-repo"][0], "LEGACY")
         self.assertEqual(cats["sneaky-workflow-call"][0], "LEGACY")
+        self.assertEqual(cats["hybrid-wrapper"][0], "WRAPPER-HYBRID")
+        self.assertIn("legacy-skills", cats["hybrid-wrapper"][1])
 
         self.assertEqual(cats["vendored-no-ci"][0], "SYNC-CI-ABSENT")
         self.assertIn("040000", cats["vendored-no-ci"][1])
@@ -473,7 +481,9 @@ class TestScanEndToEnd(unittest.TestCase):
 
         # レポートは乖離 0 件でも全量を出す契約。ここでは 4 件出ることを確認する。
         report = cud.render_report(result, "https://example.invalid/run/1")
-        self.assertIn("乖離: **5 件**", report)
+        self.assertIn("乖離: **6 件**", report)
+        # 分類名がレポート本文まで到達すること（scan → render_report の経路）。
+        self.assertIn("WRAPPER-HYBRID", report)
         self.assertIn("検査不能 (UNKNOWN): **1 件**", report)
 
     def test_compare_error_is_unknown_not_unreachable(self):
