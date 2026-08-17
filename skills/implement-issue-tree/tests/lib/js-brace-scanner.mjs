@@ -78,6 +78,39 @@
 // 判定し、直後の `{` を常にブロックとして扱う（JS の文法上、文位置の裸 `{` は常に
 // ブロック文であり、式としてのオブジェクトリテラルは文位置には現れ得ないため）。
 //
+// 追加バグ その4（PR #351 codex-review 未解決スレッド。8. の残課題と新規指摘）:
+//   10. `break` / `continue` / `debugger` は（`case`/`default` ラベル以外の）オペランドを
+//       取らない文であり、ASI（自動セミコロン挿入）でその場の文が終端し得る
+//       （`break\n/re/.test(s)` のように改行のみで区切られるケース）。8. までの実装は
+//       これらを REGEX_PRECEDING_KEYWORDS にも `else` 分岐にも含めておらず、素朴な
+//       識別子読み取り経路（else 分岐）に落ちて prevSignificant が VALUE になっていた。
+//       文の終端後という文位置（OPERATOR）であるべきところが VALUE のままになるため、
+//       直後の `/` を正規表現の開始ではなく除算と誤認し得た。
+//   11. 8. の Unicode 拡張は `\p{L}`（文字）・`\p{Nl}`・`\p{Nd}` のみを対象にしており、
+//       次の 2 点が未対応だった。
+//       a. 結合文字（`\p{Mn}`（Nonspacing_Mark）・`\p{Mc}`（Spacing_Mark））・ZWNJ
+//          （U+200C）・ZWJ（U+200D）は ECMAScript の IdentifierPart に含まれる継続文字
+//          だが、開始文字判定にも継続文字判定にも入っておらず「その他の記号」分岐に
+//          落ちて prevSignificant が OPERATOR のままになり得た（結合文字直後の `/` を
+//          正規表現の開始と誤認）。
+//       b. 走査が UTF-16 コード単位単位（`text[i]` 1 文字ずつ）だったため、非 BMP の
+//          `\p{L}` 文字（サロゲートペア。例: 数学用英字アルファベット U+1D49C）は
+//          上位/下位サロゲートを個別に正規表現テストしてしまい、単独のサロゲートは
+//          いずれの Unicode プロパティにも一致しないため識別子として認識されなかった
+//          （`/u` フラグを付けても、テスト対象の文字列自体が完全なコードポイントを
+//          成していなければ意味を持たない）。
+// 10. は `break`・`continue`・`debugger` を REGEX_PRECEDING_KEYWORDS に追加して解消する
+// （これらの語の後は次の式が独立した新しい文の可能性があるため、意味的な理由は
+// 「値を期待する語の直後」ではなく「文が終端し得る位置」だが、求める走査状態
+// （prevSignificant = OPERATOR）は同じであるため同じ集合で表現できる）。
+// 11-a は継続文字専用の追加集合 `IDENT_EXTRA_CONT_RE`（`\p{Mn}\p{Mc}` + ZWNJ/ZWJ）を
+// 定義し、`\p{Mn}\p{Mc}` は ECMAScript の IdentifierStart に含まれないため開始文字判定
+// には加えず、継続文字判定にのみ合成する。11-b は識別子の読み取りを UTF-16 コード単位
+// ではなく `String.prototype.codePointAt` によるコードポイント単位に変更する
+// （`readCodePointAt` ヘルパー。サロゲートペアを 1 文字として `IDENT_START_RE`/
+// `IDENT_CONT_RE` へ渡し、一致した場合はコードポイントの UTF-16 長（1 または 2）だけ
+// 前進する）。
+//
 // ファイル名が `*.test.mjs` に一致しないため `node --test` の glob には拾われない
 // （tests/lib/workflow-script-contract.mjs と同じ配置規約）。
 //
@@ -96,9 +129,14 @@ const FRAME_SUBST = 'subst'
 // 直後の `/` を正規表現リテラルの開始と判定するキーワード（直前の意味のあるトークンが
 // これらの語のとき、走査状態は OPERATOR = 値を期待する位置になる）。
 // 例: `return /}/.test(s)` の `/` は除算ではなく正規表現の開始。
+// `break`/`continue`/`debugger` はオペランドを取らない文であり、ASI により
+// その場で文が終端し得る（`break\n/re/.test(s)` 等）。求める走査状態
+// （prevSignificant = OPERATOR）は他の語と同じであるため同じ集合に含める
+// （上記コメント項目 10 参照）。
 const REGEX_PRECEDING_KEYWORDS = new Set([
   'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void',
   'case', 'do', 'else', 'yield', 'await', 'throw',
+  'break', 'continue', 'debugger',
 ])
 
 // 開き `(` の直前語がこれらの制御構文キーワードのとき、対応する閉じ `)` は
@@ -132,7 +170,28 @@ const BRACE_KIND_LITERAL = 'literal'
 // （`isNumberLike` 判定は識別子分岐の内部にしか無く、分岐に入らなければ意味を持たない）。
 // 数値リテラル構文自体は ASCII 限定のため `isNumberLike` 判定（`/^[0-9]/`）は変更しない。
 const IDENT_START_RE = /[A-Za-z0-9_$\p{L}\p{Nl}\p{Nd}]/u
-const IDENT_CONT_RE = IDENT_START_RE
+
+// 継続文字にのみ許容する追加集合（PR #351 codex-review 指摘、上記コメント項目 11-a）。
+// `\p{Mn}`（Nonspacing_Mark）・`\p{Mc}`（Spacing_Mark。結合文字）・U+200C（ZWNJ）・
+// U+200D（ZWJ）は ECMAScript の IdentifierPart に含まれるが IdentifierStart には
+// 含まれないため、開始文字集合（IDENT_START_RE）には加えず継続文字集合にのみ合成する。
+const IDENT_CONT_RE = /[A-Za-z0-9_$\p{L}\p{Nl}\p{Nd}\p{Mn}\p{Mc}\u200C\u200D]/u
+
+/**
+ * `text[i]` を起点とする 1 コードポイント分の文字列を返す（サロゲートペアなら 2
+ * UTF-16 コード単位、それ以外は 1 コード単位）。`text[i]` を直接正規表現テストすると
+ * 非 BMP 文字（サロゲートペア）の上位/下位サロゲートが個別にテストされてしまい、
+ * いずれの Unicode プロパティにも一致しないため識別子として認識できない
+ * （上記コメント項目 11-b 参照）。`i` が `text.length` 以上、または非 UTF-16 データ等で
+ * `codePointAt` が `undefined` を返す場合は空文字列を返す（呼び出し側は空文字列を
+ * どの文字集合にも一致しないものとして扱えばよい）。
+ *
+ * @returns {string} 1 コードポイント分の文字列（0〜2 UTF-16 コード単位）。
+ */
+function readCodePointAt(text, i) {
+  const codePoint = text.codePointAt(i)
+  return codePoint === undefined ? '' : String.fromCodePoint(codePoint)
+}
 
 /**
  * `text[openBraceIndex]` を起点として、対応する閉じ波括弧の index を字句認識つきで求める。
@@ -324,13 +383,20 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
     }
 
     // 識別子・キーワード・数値リテラル。旧実装の逆走査（readWordBackward）と同じ文字集合
-    // （ASCII 英数字・`_`・`$` に加え、Unicode の文字・文字扱いの数を許容する
-    // IDENT_START_RE/IDENT_CONT_RE。PR #351 codex 指摘の非 ASCII 識別子対応）の連続を
-    // 1 トークンとして前進読み取りする。先頭が数字ならキーワード判定はせず数値リテラル
-    // （常に VALUE）として扱う。
-    if (IDENT_START_RE.test(ch)) {
-      let j = i
-      while (j < text.length && IDENT_CONT_RE.test(text[j])) j++
+    // （ASCII 英数字・`_`・`$` に加え、Unicode の文字・文字扱いの数・結合文字・ZWNJ/ZWJ を
+    // 許容する IDENT_START_RE/IDENT_CONT_RE。PR #351 codex 指摘の非 ASCII 識別子対応）の
+    // 連続を 1 トークンとして前進読み取りする。先頭が数字ならキーワード判定はせず数値
+    // リテラル（常に VALUE）として扱う。開始・継続とも `readCodePointAt` でコードポイント
+    // 単位に読み取る（上記コメント項目 11-b。UTF-16 コード単位単位のテストでは非 BMP
+    // 文字のサロゲートペアを個別にテストしてしまい識別子として認識できないため）。
+    const startCp = readCodePointAt(text, i)
+    if (IDENT_START_RE.test(startCp)) {
+      let j = i + startCp.length
+      for (;;) {
+        const contCp = readCodePointAt(text, j)
+        if (contCp === '' || !IDENT_CONT_RE.test(contCp)) break
+        j += contCp.length
+      }
       const word = text.slice(i, j)
       const isNumberLike = /^[0-9]/.test(word)
       i = j

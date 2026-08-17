@@ -368,6 +368,67 @@ test('除算側: nullish 代入 a ??= b はコロン対応を汚染しない（P
 })
 
 // ---------------------------------------------------------------------------
+// ASI で終端する文（break/continue/debugger）後の正規表現（PR #351 codex 指摘）
+// ---------------------------------------------------------------------------
+
+test('正規表現側: break の直後（改行のみで区切られる ASI）の /re/ は正規表現として扱われる（PR #351 codex 指摘）', () => {
+  // break はオペランドを取らない文であり、旧実装は break を素朴な識別子として VALUE 扱い
+  // していたため、直後の / を除算と誤認し得た（正規表現内の } を早期に終端と誤って返す）。
+  const src = '{ while (1) { break\n/}/.test(s) } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: continue の直後の /re/ は正規表現として扱われる（PR #351 codex 指摘）', () => {
+  const src = '{ while (1) { continue\n/}/.test(s) } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: debugger の直後の /re/ は正規表現として扱われる（PR #351 codex 指摘）', () => {
+  const src = '{ debugger\n/}/.test(s) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: break outer; のラベルは識別子として通常どおり読める（対比ケース）', () => {
+  const src = '{ outer: while (1) { break outer; } y = a / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
+// Unicode 識別子の結合文字・ZWNJ/ZWJ・非 BMP 文字（PR #351 codex-review 指摘）
+// ---------------------------------------------------------------------------
+
+test('除算側: 結合文字を含む識別子 (á = a + U+0301) は演算子として誤扱いされない（PR #351 codex 指摘）', () => {
+  // 'á' を基底文字 'a' + 結合文字 U+0301（COMBINING ACUTE ACCENT）で表す（NFD 分解形）。
+  // 結合文字が識別子の継続文字として認識されないと、変数名の途中で走査が切れ、
+  // 直後の / を誤って正規表現の開始と判定し得る。
+  const combining = '́'
+  const src = `{ const a${combining} = 1; y = a${combining} / 2 }`
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: ZWNJ/ZWJ を含む識別子は演算子として誤扱いされない（PR #351 codex 指摘）', () => {
+  const zwnj = '‌'
+  const zwj = '‍'
+  const src = `{ const a${zwnj}b${zwj}c = 1; y = a${zwnj}b${zwj}c / 2 }`
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 非 BMP 文字を含む識別子 (𝒜 = U+1D49C) は演算子として誤扱いされない（PR #351 codex 指摘）', () => {
+  // U+1D49C（MATHEMATICAL SCRIPT CAPITAL A）はサロゲートペア（2 UTF-16 コード単位）。
+  // コード単位単位の走査だと上位/下位サロゲートを個別にテストしてしまい、
+  // いずれの Unicode プロパティにも一致せず識別子として認識できない。
+  const astral = '\u{1D49C}'
+  const src = `{ const ${astral} = 1; y = ${astral} / 2 }`
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 非 BMP 文字を含む識別子直後に } が続いても正しく走査できる（サロゲート境界の回帰）', () => {
+  const astral = '\u{1D49C}'
+  const src = `{ const ${astral} = {}; y = ${astral} / 2 }`
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
 // 数値リテラル先頭文字（識別子判定の Unicode 拡張との対称性）
 // ---------------------------------------------------------------------------
 
