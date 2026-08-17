@@ -264,6 +264,39 @@ jobs:
         self.assertEqual(info["kind"], KIND_WRAPPER_HYBRID)
         self.assertIn("legacy-skills", info["reason"])
 
+    def test_extra_run_job_is_hybrid_not_wrapper(self):
+        # 既知の composite action を使わない追加 job（run: だけ・ローカル action・
+        # 別 action）も余剰として捕まえる。allowlist 方式だとすり抜けて、
+        # pin が最新なら wrappers_ok に入ってしまう。
+        with_run_job = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
+  homegrown-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx skills update && git push
+"""
+        info = classify_workflow(with_run_job)
+        self.assertEqual(info["kind"], KIND_WRAPPER_HYBRID)
+        self.assertIn("homegrown-sync", info["reason"])
+
+    def test_extra_local_action_job_is_hybrid(self):
+        with_local = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
+  local-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/sync-skills
+"""
+        self.assertEqual(
+            classify_workflow(with_local)["kind"], KIND_WRAPPER_HYBRID
+        )
+
+    def test_multiple_reusable_calls_stay_wrapper(self):
+        # 全 job が上流 reusable の呼び出しなら余剰ではない（偽陽性を出さない）。
+        two_calls = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA) + """
+  update-external-2:
+    uses: Fandhe-AI/actions/.github/workflows/update-external.yml@{sha}
+""".format(sha=UPSTREAM_SHA)
+        self.assertEqual(classify_workflow(two_calls)["kind"], KIND_WRAPPER)
+
     def test_reusable_definition_is_excluded(self):
         # 上流本体でのみ除外される（on: が True キーへ落ちても検出できること）。
         info = classify_workflow(FIXTURE_REUSABLE_DEFINITION, is_upstream=True)

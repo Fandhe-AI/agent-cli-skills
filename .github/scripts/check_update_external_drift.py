@@ -223,19 +223,19 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
             ref = path_ref
             break
 
-    # 直接 composite action を呼ぶ「手管理ジョブ」が残っていないか。薄い wrapper
-    # なら reusable を呼ぶ job だけで完結するはずで、両方あるのは移行途中の
-    # ハイブリッド。上流の強化が一部のジョブにしか届かないため乖離として扱う。
-    hand_managed = sorted(
+    # 薄い wrapper なら**全ての job** が上流 reusable の呼び出しであるはず。
+    # それ以外の job が 1 つでもあれば移行途中のハイブリッドであり、上流の強化が
+    # 一部にしか届かない。
+    #
+    # 既知の composite action（skills-update / submodule-update）を直接呼ぶ job
+    # だけを探す実装にしていたが、それだと `run:` やローカル action・別 action で
+    # 同期処理を行う追加 job がすり抜け、pin が最新なら wrappers_ok に入って
+    # しまう。allowlist を増やす方向ではなく「reusable 呼び出し以外は全て余剰」と
+    # 定義を反転させ、未知の手段による追加 job も漏れなく捕まえる。
+    extra_jobs = sorted(
         name
         for name, job in jobs.items()
-        if isinstance(job, dict)
-        and any(
-            norm(step.get("uses")).startswith(
-                (SKILLS_ACTION_PREFIX, SUBMODULE_ACTION_PREFIX)
-            )
-            for step in _steps(job)
-        )
+        if not (isinstance(job, dict) and _split_job_uses(job.get("uses")) is not None)
     )
 
     if ref is None:
@@ -246,13 +246,13 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
             "（手管理テンプレートのまま）",
         }
 
-    if hand_managed:
+    if extra_jobs:
         return {
             "kind": KIND_WRAPPER_HYBRID,
             "pin": ref if _SHA40_RE.match(ref) else None,
-            "reason": "reusable を呼ぶ job がある一方で、composite action を直接呼ぶ"
-            f"手管理ジョブが残っている（{', '.join(hand_managed)}）。"
-            "薄い wrapper になっておらず上流の強化が一部にしか届かない",
+            "reason": "reusable を呼ぶ job がある一方で、それ以外の job が残っている"
+            f"（{', '.join(extra_jobs)}）。薄い wrapper になっておらず"
+            "上流の強化が一部にしか届かない",
         }
 
     if not _SHA40_RE.match(ref):
