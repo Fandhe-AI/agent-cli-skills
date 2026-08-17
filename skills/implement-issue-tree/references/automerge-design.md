@@ -299,16 +299,21 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
   判定は以下の表に従う。
 
-  | 条件 | 判定 | 意味 |
+  各行は上から順に評価し、最初に条件が一致した行の判定を採用する（下の行の条件は
+  「それより上のすべての行の条件が成立しなかった」ことを前提とする。特に `red` 行は
+  `required_missing != []` の場合には成立せず、その場合は下の「補償策不成立」行が
+  先に一致するため、`required_missing` が空でない状態のまま `red` 判定になることはない）。
+
+  | 条件（上から順に評価） | 判定 | 意味 |
   |------|------|------|
-  | `push_total >= 1` かつ `required_missing == []` かつ `failed == 0` かつ `incomplete == 0` かつ `unknown == 0` | green | 必須 workflow が全件起動し尽くし、かつ全件が健全に完了。補償策が成立し base は健全 |
-  | `push_total >= 1` かつ `incomplete >= 1` | 未完了 | 完了を待って再測する（green と扱わない） |
-  | `push_total >= 1` かつ `failed >= 1` | red | 補償策は成立するが base が壊れている |
-  | `push_total >= 1` かつ `unknown >= 1` | 判定不能 | 合否に分類できない conclusion が混在。green へ倒さない |
-  | `push_total >= 1` かつ `required_missing != []`（他条件が green でも） | 補償策不成立 | push run はあるが必須 workflow の一部が起動していない（軽量 workflow のみ成功等）。green へ倒さない |
   | `push_total == 0` | 補償策不成立 | push トリガ workflow が無い / `paths` フィルタで除外された |
   | 取得件数が 100 件に到達 | 判定不能 | 取得範囲外に失敗・未完了 run がある可能性を排除できない |
   | 権限・API 障害で判定に到達できない | 判定不能 | 記録して再測する（green にも不成立にも倒さない） |
+  | `push_total >= 1` かつ `required_missing != []` | 補償策不成立 | push run はあるが必須 workflow の一部が起動していない（軽量 workflow のみ成功等）。`failed`/`incomplete`/`unknown` の値によらずこの行が優先し、green にも red にも倒さない |
+  | `push_total >= 1` かつ `required_missing == []` かつ `incomplete >= 1` | 未完了 | 完了を待って再測する（green と扱わない） |
+  | `push_total >= 1` かつ `required_missing == []` かつ `unknown >= 1` | 判定不能 | 合否に分類できない conclusion が混在。green へ倒さない |
+  | `push_total >= 1` かつ `required_missing == []` かつ `failed >= 1` | red | 必須 workflow は全件起動しており補償策は成立するが、base が壊れている |
+  | `push_total >= 1` かつ `required_missing == []` かつ `failed == 0` かつ `incomplete == 0` かつ `unknown == 0` | green | 必須 workflow が全件起動し尽くし、かつ全件が健全に完了。補償策が成立し base は健全 |
 
   `failed` は `cancelled` / `timed_out` / `action_required` / `startup_failure` / `stale` を失敗側に数える。**合格（green への算入）は `success` のみに限定する**。`neutral` / `skipped` は失敗側にも算入しないが合格側にも入れず `unknown` 側へ計上する（意味的コンフリクト検出の補償策としては「本当に実行され成功した」ことの確認が目的であり、`neutral`/`skipped` は「実行されたが判定不能」を意味するため green へ倒さない。SKILL.md の CI 全 green 判定が任意チェックの `skipped`/`neutral` を許容するのとは前提が異なる — こちらは必須 workflow の健全完了を確認する補償策であるため厳格側に倒す）。`required_missing` は必須集合の各 workflow を、実際に push イベントで観測された run の `workflowDatabaseId` 集合と id 突き合わせした結果、対応する run が見つからなかった名前の一覧であり、空配列であることは「必須 workflow（同定済みの id が一致する run に限る）が全件起動した」ことの直接証拠になる（個々の workflow ごとの conclusion 追跡は不要 — 全体の `failed`/`incomplete`/`unknown` が 0 であれば、起動した必須 workflow を含む push run 全件が `success` で完了したことを意味する）。
 - **不成立時の扱い（3 択・順に推奨）**:

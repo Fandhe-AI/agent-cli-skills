@@ -41,7 +41,7 @@ strict はセキュリティ要件ではない。「チェックが現在の bas
 
 ### 補償策が成立しないリポジトリ（実測記録）
 
-測定日: 2026-08-18。測定コマンド: `skills/implement-issue-tree/references/automerge-design.md`
+測定日: 2026-08-17。測定コマンド: `skills/implement-issue-tree/references/automerge-design.md`
 の「補償策の成立確認（base CI プローブ）」節のプローブ手順（既定ブランチは
 `defaultBranchRef` から解決、head sha は HTTP status で存在確認、`event == "push"` の
 件数のみを読む）。判定不能は green にも不成立にも倒さず、判定不能のまま記録して再測する。
