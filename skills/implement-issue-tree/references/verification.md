@@ -46,7 +46,7 @@ for CANDIDATE in "skills/implement-issue-tree" ".agents/skills/implement-issue-t
   fi
 done
 if [ -z "${IIT_SKILL_DIR}" ]; then
-  echo "エラー: implement-issue-tree のスキルディレクトリが見つかりません（skills/ / .agents/skills/ / .claude/skills/ のいずれにも存在しません）" >&2
+  echo "エラー: implement-issue-tree のスキルディレクトリが見つからない（skills/ / .agents/skills/ / .claude/skills/ のいずれにも存在しない）" >&2
   exit 1
 fi
 
