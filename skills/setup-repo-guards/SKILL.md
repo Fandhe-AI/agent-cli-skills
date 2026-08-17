@@ -211,6 +211,7 @@ Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須�
 | GITHUB_TOKEN read 化で暗黙 write 依存の workflow が壊れる | Step 4: 全 workflow の permissions 明示を確認してから適用する |
 | ruleset を PUT したら `integration_id` 束縛が落ち、自動マージが静かに止まる（strict と bypass だけ見ると全 green に見える） | Step 4-a: PUT 後に 3 軸スイープ（`select(.integration_id==null)`）を実行する |
 | 旧 ruleset / classic BP の掃き漏らしで未束縛・strict=true が残る | Step 4-a/4-b: 全 branch ruleset を列挙して掃き、classic BP は `defaultBranchRef` 解決 + status 分岐で別枠確認する |
+| AGENTS.md に自動マージの G0 契約を書く際 strict を要件として列挙し、実装より強い契約が codex P0 の根拠になる | Step 2: G0 契約を書くなら strict は「意図的な非要件」と明記する（`.claude/rules/ruleset-policy.md`） |
 
 ## 注意事項
 
