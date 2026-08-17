@@ -23,6 +23,7 @@ CI リソース節約のため「push 前 review」設計を採用している�
 ## 前提条件
 
 - `gh` CLI がインストールされ、認証済みであること（`gh auth status` で確認）
+- `jq` CLI がインストールされていること（`command -v jq` で確認）。「全チェックが pass に見えるのにマージが進まない場合（cancel された run の残存 check）」節の人間の診断専用コマンド (B) は `gh api --paginate --slurp` の生 JSON を外部の `jq` へパイプして平坦化・集約するため、`gh --jq` だけでは代替できない。未導入の場合はそのコマンドを実行せず（rerun もせず）`blocked` として扱う
 - git working tree が clean であること（`git status` で確認）
 - マージ先ブランチが CI green の状態であること（`autoMerge` 運用ではランの完了後にも確認する。後述の strict = false 前提により、古い base に対して成功したチェックのままマージされ得るため）
 - （`autoMerge: true` で使う場合）ベースブランチの ruleset で **required status checks の strict（マージ前の base 最新化必須 = `strict_required_status_checks_policy`）を `false` にしていること**。`true` だと 1 件マージするたびに他の open PR の base が陳腐化し、並列ラン（`parallel >= 2`）が収束しない。G0 は strict を要件にしないため `false` でも自動マージは成立する（references/automerge-design.md の「strict を G0 の要件にしない理由」節）
@@ -364,6 +365,71 @@ gh api graphql -f query='
 gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証した HEAD sha>
 ```
 
+**全チェックが pass に見えるのにマージが進まない場合（cancel された run の残存 check）:**
+
+- **フローから観測できる症状**（自動検知は存在しないため、実装されていない挙動は書かない）: `gh pr checks` は全 pass、`mergeable` は `MERGEABLE`、コンフリクトも未解決スレッドもないのに、merge-exec が進まず再監視が繰り返され監視予算だけが減る。この状態では `mergeStateStatus` が `BLOCKED` のまま動かない。**`mergeStateStatus` は現在どのエージェントも取得していない**ため、運用者が `gh pr view <N> --json mergeStateStatus` で確認する。
+- **原因**: 同一 head sha に対し concurrency で複数 run が走ると、cancel された run が失敗結論の check run を残す。`gh pr checks` は同名 check の最新のみを表示するため全 pass に見えるが、branch protection の required check 判定は残存 check を拾って BLOCKED になる。同一の変更を多数のリポジトリへ同時投入する運用（後述「一斉同期・大量 PR 投入時の運用ガード」）では concurrency 競合の発生頻度が上がるため、この状態に遭遇しやすい。
+- **検知コマンド（エージェントが実行してよいものと、人間の診断専用を明確に分ける）**:
+
+```bash
+# (A) エージェントが実行してよい形。同名 check-run の重複「件数」のみを返し、チェック名は出力しない
+# --jq はページごとに適用されるため group_by をページ単位で行うとページ跨ぎの重複を見逃す
+# （同名チェックが 2 ページに分かれて 1 件ずつ載ると各ページの重複件数が 0 になり得る）。
+# 名前一覧をパイプへ流してシェル側（sort | uniq -d）で全ページ分を集約する
+# （(B) と異なり shell 側で集約するため --slurp は不要）
+gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+  --jq '.check_runs[].name' | sort | uniq -d | wc -l
+# → 出力は整数 1 行のみ（チェック名はパイプ内で集約され出力に現れない）。1 以上なら重複あり
+```
+
+```bash
+# (B) 人間の診断専用。重複の内訳をチェック名つきで確認する
+# チェック名は PR 側の workflow / job 定義から生成される未信頼テキストのため、
+# monitor / merge-exec のコンテキストでは実行しない（権限境界の維持）
+# 前提: 外部の `jq` CLI が必要（`gh --jq` はページ単位適用のためここでは使えない）。
+# 事前に `command -v jq` で存在確認し、なければ実行せず `blocked` とする
+command -v jq >/dev/null || { echo "jq が見つからないため診断を中断し blocked とする" >&2; exit 1; }
+# `--paginate` の `--jq` は取得したページごとに個別適用されるため、group_by をそのまま
+# 使うとページ単位の集計になり、同名 check-run が別ページに 1 件ずつ分かれて存在する場合に
+# 検知できない（各ページ内では件数 1 の group にしかならず、実際は重複していても取りこぼす）。
+# `--slurp` を付けると全ページを外側の配列として受け取れるが、gh api は `--slurp` と `--jq` の
+# 併用を拒否する（`the --slurp option is not supported with --jq or --template`）ため、
+# `--jq` は使わず `--slurp` の生 JSON 出力を外部の `jq` へパイプし、平坦化してから group_by する
+# ことでページ跨ぎでも全件を一度に集約してから判定する。
+# まず check 名だけで group_by し、件数 2 以上の group（=実際に重複している名前）に絞り込んでから、
+# その中で conclusion 別の内訳を出す（name=conclusion のペアで group_by すると、同名 2 件が
+# cancelled/success のように conclusion 違いで割れて各 group が件数 1 になり、重複そのものを
+# 取りこぼすため、必ず name のみで group_by する）
+gh api --paginate --slurp "repos/OWNER/REPO/commits/<sha>/check-runs?per_page=100" \
+  | jq -r '[.[] | .check_runs[] | {name, conclusion}]
+        | group_by(.name)
+        | map(select(length >= 2))
+        | map("\(.[0].name): " + ([.[] | .conclusion] | sort | group_by(.) | map("\(.[0]) x\(length)") | join(", ")))
+        | join("\n")'
+```
+
+- **対処（前提を先に実測してからコマンドを実行する）**:
+  - 前提 1: 上記 (A) の重複件数が 1 以上であることを実測する。
+  - 前提 2: rerun 対象を一意に決めるため、(B) で重複している check 名（例: `ci/build`）を確認したうえで、その名前を発行した cancelled run を job 一覧から特定する（下記コマンド）。同名 check を発行し得る cancelled run が複数見つかり一意に絞り込めない場合は rerun せず、`blocked`（quality）として最終レポートへ回す（誤った run を rerun すると無関係な job まで再実行し、原因不明のまま状態を変える）。
+  - 上記 2 点を満たさないまま rerun しない（rerun は CI を再起動するため、「Review 通過後に CI を 1 回だけ起動する」設計に反する）。
+
+```bash
+# cancelled な run を head sha で列挙する（conclusion=cancelled のみに絞る）
+gh api --paginate "repos/OWNER/REPO/actions/runs?head_sha=<sha>&per_page=100" \
+  --jq '.workflow_runs[] | select(.conclusion == "cancelled") | .id'
+
+# 各 cancelled run が発行した job 名を確認し、(B) で特定した重複 check 名と突き合わせる
+# （check-run の名前は `<job名>` または `<job名> / <ステップ>` 形式で job に対応するため、
+# jobs API の name で同定できる。複数 run の job 名が同じ重複 check 名にヒットする場合は一意化不可）
+gh api --paginate "repos/OWNER/REPO/actions/runs/<cancelled-run-id>/jobs?per_page=100" \
+  --jq '.jobs[].name'
+
+# 一意に対応付けられた run に限り、全 job を回して残存 check を上書きする（--failed は付けない）
+gh run rerun <run-id> -R OWNER/REPO
+```
+
+- **完了ゲート整合**: rerun したこと自体は green の証拠にならない。再実行後に改めて全チェックの結論を列挙し、`failure` / `cancelled` / `timed_out` が 0 件・`pending` / `queued` / `in_progress` が 0 件・チェック総数 1 件以上を確認してから合格と判断する（`.claude/rules/verification.md` の 5 段階ゲート）。解消しない場合は推測で進めず `blocked` として最終レポートへ回す。
+
 CI 失敗・外部チェック指摘・コンフリクト・未解決レビュースレッドがある場合は、修正エージェント（fix）が detached HEAD で対象ブランチを取得して指摘を反映し再 push する。修正エージェントも worktree 隔離で動作するため、他の並列イシューのブランチに干渉しない。fix 対象外と判断したコメントは references/out-of-scope-support.md の「実装対象外（out-of-scope）の扱い」節の手順に従い PR 本文へ記録する（自動フローは記録までで停止し、resolve はどのエージェント・どの経路でも実行しない。resolve は人間が GitHub 上で行い、未解決のまま残ったスレッドは blocked → 最終レポートで issue 化承認・手動 resolve を判断する）。fix エージェントは修正済みの指摘のスレッドも resolve しない（スレッドの解決状態は変更しない）。監視（monitor）は通常予算として最大 7 回まで実行する（後述の「強制スレッド再走査の救済ラウンド」で 1 回だけ延長されるため、実行全体の絶対上限は初期予算 + 1 の 8 回。詳細は同節を参照）。push なしが 2 回連続したイシューは `blocked` として記録する。監視エージェントが `blocked` を返す場合は `blockedReason`（`quality` / `unrecoverable`）の付与を必須とし、ホスト側でも enum を二重検証する。省略・enum 外は `unrecoverable` として扱う（fail-safe）。`quality`（再監視・再実行で解消し得る）のみ状態ファイルへ `blocked` で終端して次回ランの monitoring 再開対象とし、`unrecoverable`（PR の未マージクローズ等）は `failed` で終端して再開対象から外す。修正（fix）の上限は Review と共有（上限 6）。詳細は Review ステップ参照。
 
 **修正上限（6 回）到達時の分類（Issue #141）:** 上限到達で `blocked` へ落ちる際は、上限に達した時点で観測していた状態で再開可否を分類する。`unresolved-comments`（未解決スレッドが実在する）は人間の resolve で解消し得るため `quality`（`blocked` 終端・monitoring 再開対象）、`needs-fix`（CI 失敗等）は修正予算が尽きているため `unrecoverable`（`failed` 終端・再開対象外）とする。後者を再開可能にすると、`fixCount` が上限のまま復元されたランが「即 blocked」を毎回繰り返し、`blocked` は halt の連続カウントに乗らないため停止防御も働かない。
@@ -421,6 +487,22 @@ open のサブイシューが残っている場合、または受入基準が未
 | レビュースレッドを自動フローで resolve する | resolve mutation はどのエージェント・どの経路にも存在しない（自動 resolve 機能は全面撤去）。修正済み・対象外を問わず、resolve は常に人間が GitHub 上で行う。自動フローは記録までで停止し blocked → 最終レポートへ（人間操作ゲート） |
 | 実装コミットの scope にイシュー番号を置く（例: `feat` の scope に `42` を入れる） | `scope-enum` を持つリポでは commitlint が必ず落ちる。Review 3 巡を消費した後の push で初めて検出され、`--no-verify` は禁止のため回避もできない。scope はモジュール・ディレクトリ名にするか省略し、イシューの紐付けは `Refs #<N>` / `Closes #<N>` で行う |
 | P0/P1 相当・セキュリティ指摘を対象外扱いにする | fix エージェントは単独で対象外と判定して記録のみで済ませてはならない。修正するか、ユーザーまたは指摘者の承認を得るまで `blocked` として扱う（安全側ガード） |
+| 全チェックが pass に見えるので CI 起因を除外し、PR の差分を疑って調査を続ける | 同名 check-run の重複件数を実測する（Step 6 の該当分岐）。cancel された run の残存 check が BLOCKED の原因になり得る |
+| 差分と無関係なテスト失敗を確認せず flaky と決めつけて rerun する | main での同ジョブ green と差分スコープの 2 点を実測してから rerun する（下記「一斉同期・大量 PR 投入時の運用ガード」参照） |
+
+## 一斉同期・大量 PR 投入時の運用ガード
+
+同一の変更を多数のリポジトリへ同時に投入する運用（skill 同期など）では、差分内容と無関係な CI 由来の失敗が出る。以下は誤診しやすい 3 類型と切り分け手順。
+
+| 事象 | 症状 | 対処 |
+|------|------|------|
+| 並列負荷による OOM | リンク中に `ld terminated with signal 9 [Killed]` | runner のメモリ逼迫が原因のため、混雑中に rerun しても同じ結果になる。キューが空くまで待つ |
+| 新規 CI 導入リポのラベル不足 | CI を新規導入したリポでは `dependencies` / `automated` ラベルが無く `gh pr create --label` が exit 1 になり、PR がそもそも作られない | 投入前にラベルを作成する |
+| flaky の誤判定 | 差分と無関係なテストが落ちる | 「main で同じジョブが green」「差分が当該テストに影響しえない（変更パスを実測）」の 2 点を確認してから rerun する。前者は `gh run list --branch main` を単独では使わない（別 workflow の成功や skip されたジョブが紛れ込み、肝心の failing job が実は main でも失敗・未実行のまま green と誤認し得る）。失敗した PR 上の workflow ファイル名と job 名を特定したうえで、`gh run list --branch main --workflow <workflow-file> --json databaseId,conclusion --limit 1 --jq '.[0].databaseId'` で直近 run の ID を取得し、`gh api repos/OWNER/REPO/actions/runs/<run-id>/jobs --jq '.jobs[] | select(.name == "<job名>") | .conclusion'` で同一 job 名の conclusion が `success` であることを実測する。推測で flaky 扱いにしない |
+
+**推奨投入単位**: 1 バッチあたり 5 リポジトリ以下に分割し、前バッチの run がすべて完了（`gh run list` で `in_progress` / `queued` が 0）してから次バッチを投入する（バッチ数は `ceil(対象リポジトリ数 / 5)` で導出する）。これは「注意事項」にある `parallel` の並列度指針（並列度を上げるほど CI キューが逼迫する）のリポジトリ横断版にあたる。
+
+一斉投入時に BLOCKED が出た場合は Step 6 の「全チェックが pass に見えるのにマージが進まない場合」の分岐を参照する。
 
 ## モデル / effort 割り当て
 
@@ -467,6 +549,7 @@ open のサブイシューが残っている場合、または受入基準が未
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
 - **merged 終端は独立確認を通過した場合のみ**確定する。merge-exec の `merged: true` は `reason`（`merged` / `already-merged`）との整合を必須とし（不整合は systemic failure として `failed` 終端）、さらに読み取り専用の merge-verify エージェントで `state=MERGED` と監視時点 HEAD sha の一致を独立確認できた場合にのみ merged として扱う。確認不能・不一致は `blocked`（quality）で fail-closed し、実際にマージ済みなら次回ランの monitoring 再開（already-merged 経路）で回復する（Issue #160）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
+- CI が全 green に見えるのにマージが進まない場合は、cancel された run の残存 check を疑い Step 6 の「全チェックが pass に見えるのにマージが進まない場合」の分岐に従って切り分ける（`mergeStateStatus` は自動フローでは取得していない）
 - **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。continue / discard いずれの worktree 削除も WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する
 
 ## sandbox 環境での実行
