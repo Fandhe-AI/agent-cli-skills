@@ -92,10 +92,10 @@ meta 宣言の `export` のみを除去し、残りの `export` はランタイ�
 
 **履歴コミットに対する回帰検知能力の実証（一回限りの手動実行。CI テストではない）**:
 
-**上流リポジトリ専用。** `git show <sha>:skills/...` は上流リポジトリの git 履歴を参照するため、
-理由は後述のとおり下流の vendoring 先では実行できない。下流では実行しないこと。パイプ先は上記の
-解決スニペットで束縛した `IIT_SKILL_DIR` を使う（本ブロック単独で実行する場合は先に上記スニペットを
-実行して `IIT_SKILL_DIR` を束縛しておくこと）。
+**上流リポジトリ専用。** `git show <sha>:skills/...` は上流リポジトリの git 履歴を参照するコマンドで
+あり、下流の vendoring 先には git 履歴が配布されないため実行できない。下流では実行しないこと。
+パイプ先は上記の解決スニペットで束縛した `IIT_SKILL_DIR` を使う（本ブロック単独で実行する場合は先に
+上記スニペットを実行して `IIT_SKILL_DIR` を束縛しておくこと）。
 
 ```bash
 git show efae3ab:skills/implement-issue-tree/scripts/implement-issue-tree.js \
