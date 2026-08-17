@@ -134,11 +134,17 @@ emit_result() {
   echo "result=${state} issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${old_parent_out}"
 }
 
+# JSON を jq でパースする GET 呼び出しは stdout/stderr を分離して取得する（2>&1 で
+# マージすると、gh が stderr へ何か出力しただけで JSON パースが壊れ、本来成功している
+# 呼び出しが偽陽性で中断する。エラー本文の表示用途は err ファイル側に閉じ込める）
+GH_ERR_FILE=$(mktemp)
+trap 'rm -f "${GH_ERR_FILE}"' EXIT
+
 # 対象 issue の database id（sub_issues API が要求する識別子。issue 番号ではない）と
 # 現在の親を 1 回の GET で確定する
-if ! ISSUE_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>&1); then
+if ! ISSUE_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>"${GH_ERR_FILE}"); then
   echo "エラー: イシュー #${ISSUE} の取得に失敗した" >&2
-  echo "${ISSUE_JSON}" >&2
+  cat "${GH_ERR_FILE}" >&2
   exit 2
 fi
 
@@ -199,9 +205,9 @@ fi
 
 # 事後確認は必ず取り直す。DELETE/POST 前に取得した ISSUE_JSON を使い回さない
 # （#295 の「スナップショットの追記型再利用による汚染」の回避）
-if ! VERIFY_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>&1); then
+if ! VERIFY_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>"${GH_ERR_FILE}"); then
   echo "エラー: 事後確認のための再取得に失敗した" >&2
-  echo "${VERIFY_JSON}" >&2
+  cat "${GH_ERR_FILE}" >&2
   exit 5
 fi
 

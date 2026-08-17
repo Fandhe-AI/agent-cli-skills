@@ -79,8 +79,27 @@ closed 親の下に残置されている open issue を、対応する open Phas
 `scripts/reassign-sub-issue.sh` に集約されている（Issue #297。旧方式は SKILL.md 本文に
 素の `gh api` を並べていたため、DELETE 失敗検知なしに POST へ進む等の欠陥があった）。
 
+このスキルの配置ルートは導入形態（本リポジトリのソース／`npx skills add` による
+vendoring／`.claude/skills/` symlink 経由）で異なる。呼び出し前に 3 レイアウトを順に確認し、
+実在するものを採用する（implement-issue-tree の `scriptPath` 3 レイアウト・contribute-skill の
+`LOCAL_SKILL_DIR` 解決と同じ考え方）。
+
 ```bash
-skills/update-issue-tree/scripts/reassign-sub-issue.sh \
+for CANDIDATE in \
+  "skills/update-issue-tree/scripts/reassign-sub-issue.sh" \
+  ".agents/skills/update-issue-tree/scripts/reassign-sub-issue.sh" \
+  ".claude/skills/update-issue-tree/scripts/reassign-sub-issue.sh"; do
+  if [[ -x "${CANDIDATE}" ]]; then
+    REASSIGN_SCRIPT="${CANDIDATE}"
+    break
+  fi
+done
+if [[ -z "${REASSIGN_SCRIPT:-}" ]]; then
+  echo "エラー: reassign-sub-issue.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
+  exit 1
+fi
+
+"${REASSIGN_SCRIPT}" \
   --issue "${ISSUE_NUMBER}" \
   --old-parent "${OLD_PARENT}" \
   --new-parent "${NEW_PARENT}"
@@ -112,16 +131,18 @@ stdout 最終行が `result=<state> issue=<n> new_parent=<n> old_parent=<n|->` �
 | 3 | — | DELETE 失敗。**POST は実行していない** | 要確認事項へ記載。旧親配下のまま |
 | 4 | — | POST 失敗 | 要確認事項へ記載。宙ぶらりん状態の可能性あり |
 | 5 | — | 事後確認で新親配下に見つからない | 要確認事項へ記載。手動で実状態を確認 |
-| 6 | — | 第三の親配下と判明（レース） | 要確認事項へ記載。正しい旧親番号で再実行 |
+| 6 | — | 第三の親配下と判明（レース） | 要確認事項へ記載。同じコマンドで再実行する（`--old-parent` は advisory のため値の修正は不要。再実行時にスクリプトが現在の親を実測し直して DELETE→POST を行う） |
 
 ### Step 4: 孤児 issue を再配置する
 
 どの親にも紐付いていない孤児 issue を適切な Phase 親へ紐付ける。
 `--old-parent` を省略して同じスクリプトを呼ぶ（DELETE を飛ばして POST のみ実行される）。
 Phase が不明な issue はタイトル・本文を読んで判断し、判断できない場合はユーザーに確認する。
+`REASSIGN_SCRIPT` は Step 3 で解決済みの値をそのまま使う（未解決なら Step 3 と同じ 3 レイアウト
+解決を先に実行する）。
 
 ```bash
-skills/update-issue-tree/scripts/reassign-sub-issue.sh \
+"${REASSIGN_SCRIPT}" \
   --issue "${ORPHAN_NUMBER}" \
   --new-parent "${PHASE_NUMBER}"
 echo "exit=$?"
