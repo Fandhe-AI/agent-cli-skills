@@ -1,0 +1,128 @@
+name: Update external drift check
+
+# --------------------------------------------------------------------------
+# 下流 update-external.yml の乖離検知（イシュー #260）
+# --------------------------------------------------------------------------
+# 配布経路が確立しても、下流が手で編集すれば乖離は再発する。本 workflow は
+# Fandhe-AI 配下の全非アーカイブリポジトリを日次で走査し、乖離を可視化する。
+#
+# 判定ロジックは .github/scripts/check_update_external_drift.py に置いてある。
+# シェルに書かなかったのは 2 つの理由による:
+#   1. `gh repo list ... | while read` のパイプはサブシェルを作るため、ループ内で
+#      加算したカウンタが外へ出ない（過去に同じ罠を踏んだ実装がある）
+#   2. 軸 4 の「ジョブ単位判定」は YAML の構造を辿る必要があり、grep では
+#      submodule ジョブの既定 true と skills ジョブの false を区別できない
+# スクリプト側は純粋関数として判定ロジックを切り出してあり、
+# .github/scripts/test_check_update_external_drift.py が fixture で検証する。
+#
+# --------------------------------------------------------------------------
+# なぜマーカーを再定義したか（#260 → #261 の前提変化）
+# --------------------------------------------------------------------------
+# #260 の当初案は persist-credentials / source-token /
+# auto-merge-immediate-fallback / skills-version / node-version / pin SHA を
+# **各下流ファイルから**抽出する設計だった。#261 で下流 19 リポが上流 reusable
+# workflow の薄い wrapper へ移行した結果、これらの設定は下流ファイルにもう存在
+# せず上流が集中管理する。旧マーカーのまま検査すると全リポが「全項目未適合」に
+# 誤判定される。旧マーカーの意図は軸 4 として上流 1 ファイルの検査へ畳んだ。
+#
+#   軸 1  wrapper か否か        … 手管理ファイルへの逆戻り (LEGACY) を検知
+#   軸 2  pin の鮮度            … 上流を強化しても pin が古いと届かない
+#   軸 3  同期 CI の欠落        … skills を vendor しているのに workflow が無い
+#   軸 4  上流 reusable の劣化  … 旧マーカーの意図。18 リポ分の grep が 1 ファイルへ
+#
+# --------------------------------------------------------------------------
+# fail-closed
+# --------------------------------------------------------------------------
+# 「乖離 0 件」と「検査できなかった」を絶対に混同させない。リポ列挙の失敗・
+# PAT 不在・上流 SHA の解決失敗はいずれもジョブを失敗させる。個別リポの取得失敗は
+# ::warning を出しつつ UNKNOWN として集計に残し、黙って除外して「全リポ green」に
+# 見せることはしない。乖離が見つかったこと自体ではジョブは失敗させない（報告が仕事）。
+
+on:
+  schedule:
+    # 03:00 UTC = 12:00 JST。update-external の日次実行（00:00 UTC）から 3 時間
+    # ずらしてある。同時刻に走らせると、更新 PR の作成中・マージ中という過渡状態を
+    # 測ってしまい、実際には健全な pin を「古い」と誤報しかねない。
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+# 最小権限。他リポジトリの読み取りは GITHUB_TOKEN では不足するため下記の
+# SUBMODULE_PAT で行い、GITHUB_TOKEN には報告 issue の書き込み権限だけを与える。
+# contents: read は actions/checkout（本リポのスクリプト取得）に必要。
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: update-external-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: Detect update-external drift
+    runs-on: ubuntu-latest
+    # 全非アーカイブリポ（約 120）への Contents API 走査 + compare。pin は
+    # 重複排除してあるため API 数は概ねリポ数に比例する。ネットワークハングで
+    # ランナーを占有し続けないよう上限を置く。
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        # actions/checkout v6.0.3
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      # PAT 不在を「乖離 0 件」に化けさせない。スクリプト側でも同じガードを
+      # 持っているが、ここで先に落として意図を workflow の読み手にも明示する。
+      - name: Verify SUBMODULE_PAT is configured
+        env:
+          PAT: ${{ secrets.SUBMODULE_PAT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PAT}" ]; then
+            msg="組織シークレット SUBMODULE_PAT (visibility: all) が未設定。"
+            msg="${msg}既定の GITHUB_TOKEN は自リポジトリにしかアクセスできず、"
+            msg="${msg}他リポを検査できない。この状態で続行すると「乖離 0 件」と"
+            msg="${msg}「検査できなかった」が区別できなくなるため fail-closed で停止する。"
+            echo "::error::${msg}"
+            exit 1
+          fi
+
+      - name: Setup Python
+        # actions/setup-python v6.0.0
+        # SHA 検証: `GET /repos/actions/setup-python/git/ref/tags/v6.0.0` の
+        # object が type=commit・sha=e797f83... を直接指しており一致（lightweight
+        # tag）。すなわち正規リリース v6.0.0 のタグ pin（2026-08-17 実測）。
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 軸 4 のジョブ単位判定は YAML の構造走査が前提。runner イメージ同梱の
+          # PyYAML 有無は契約されていないため明示的に入れる。
+          python3 -m pip install --disable-pip-version-check --quiet 'PyYAML==6.0.2'
+          python3 -c "import yaml; print('PyYAML', yaml.__version__)"
+
+      - name: Scan for drift
+        env:
+          TARGET_ORG: Fandhe-AI
+          REPORT_REPO: ${{ github.repository }}
+          # 他リポジトリの読み取り専用トークン。
+          READ_TOKEN: ${{ secrets.SUBMODULE_PAT }}
+          # 報告 issue の作成・更新・クローズは自リポジトリへの書き込みなので
+          # GITHUB_TOKEN で足りる。PAT をプロセス全体の GH_TOKEN に置いて
+          # issue 書き込みまで相乗りさせない（資格情報の境界を分ける）。
+          ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT_BODY_FILE: ${{ runner.temp }}/drift-report.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check_update_external_drift.py
