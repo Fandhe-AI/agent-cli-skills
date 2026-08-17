@@ -42,9 +42,17 @@
 #   側の変更が必要で、`8dea43ee40a7137f47fa974df2f297d1938ac48c` 時点の
 #   `on.workflow_call.inputs`（11 件）にも timeout 系は未追加であることを
 #   contents API で実測確認済み（2026-08-18）。上流が inputs を追加して pin SHA を
-#   更新するまで、本 wrapper 側で `with:` に未知の timeout input を書いても
-#   reusable workflow 側は警告のみで無視し job は緑のまま通る（Fandhe-AI/actions PR #80 の
-#   `skills-version` と同型の危険）ため、先行して書き込まない
+#   更新するまで、本 wrapper 側で `with:` に timeout 系の input を先行して書かない。
+#   reusable workflow（`uses: <owner>/<repo>/.github/workflows/<file>.yml@<sha>`）は
+#   呼び先の `on.workflow_call.inputs` に無いキーを `with:` へ渡されると、ジョブ起動前に
+#   `Invalid input, <name> is not defined in the referenced workflow` で失敗する。
+#   つまり先行記述は「黙って無視される」のではなく**同期の全ジョブを止める**。
+#   なお「未知の input を渡しても警告のみで job は緑のまま通る」という挙動は
+#   composite action（`uses: <owner>/<repo>/<action>@<sha>`）側のものであり、
+#   Fandhe-AI/actions PR #80 が `skills-version` について述べているのもその文脈である
+#   （同 PR 本文は composite action へ渡す未知 input を対象としている）。呼び出し形態が
+#   異なるため本ファイルには適用されない。混同すると「危険だが検出できない」と
+#   誤解して、実際には起動時に即検出される失敗を過度に恐れることになる
 # - タグ未公開（0 tags / 0 releases）のため SHA 固定が必須で、Dependabot による自動更新は
 #   効かない。上流更新時は本記録ごと手で差し替える
 #
