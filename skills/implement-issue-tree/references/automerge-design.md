@@ -105,5 +105,74 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
 **strict = false で残るリスクと補い方**: 「古い base に対して成功したチェック結果のままマージされ、マージ後の base が壊れ得る」（意味的コンフリクト）。テキストコンフリクトは merge-exec の手順 1 が `mergeable` を自己取得して `CONFLICTING` を検出し `not-mergeable` で終端するため、この経路では通らない。意味的コンフリクトについては、**ラン完了後にベースブランチの CI が green であることを確認する**運用で補う（本スキルの前提条件「マージ先ブランチが CI green」は次のランの入力条件でもある）。
 
+**補償策の成立確認（base CI プローブ）**
+
+上記の補償策は「マージ先ブランチへの push で CI が起動する」ことに暗黙依存している。push トリガの workflow が無い、または `on.pull_request` 相当の `paths` フィルタで該当 head では起動しないリポジトリでは、この依存が満たされず補償策が構造的に成立しない。
+
+- **双方向で検証不能になること**: 前提条件「マージ先ブランチが CI green」はランの入口条件でもあるため、push CI が無いリポでは*ラン前の前提確認*も*ラン後の補償確認*も同じ理由で成立しない。「実行されていない」を「green」と読み替えてはならない。
+- **プローブ手順**: 既定ブランチは `gh repo view --json defaultBranchRef` で解決する（`main` 決め打ち禁止）。ブランチ名は `jq -sRr '@uri'` でエンコードしてから API パスへ展開する（`release/1.0` 等の `/` 対策）。head sha の存在確認は終了コードではなく HTTP status で行う（`gh api` はエラーも stdout に出すため）。`gh run list -R <repo> -c <head> -L 100 --json workflowName,status,conclusion,event` を取得し、応答が配列であることを検証してから `event == "push"` の件数のみを読む（`workflowName` 等の自由文はシェルへ展開しない）。`while` / `for` ループはインライン実行不可の環境があるため 1 ファイルにしてから `bash <file> <repo>...` で実行する（`ruleset-policy.md` 手順 A / 手順 B と同型）。1 リポの判定不能で全体を止めない（`exit` ではなく `continue` で次のリポへ進む）。
+
+  ```bash
+  #!/usr/bin/env bash
+  # base CI プローブ: 既定ブランチ head で CI が起動しているかを判定する。
+  # 引数は "owner/repo" の並び。1 リポの判定不能で全体を止めない（continue で継続）。
+  set -uo pipefail
+
+  for repo in "$@"; do
+    db=$(gh repo view "${repo}" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)
+    case "${db}" in
+      ""|*" "*) echo "${repo}: 判定不能 — defaultBranchRef を取得できない"; continue ;;
+    esac
+    db_enc=$(printf '%s' "${db}" | jq -sRr '@uri')
+
+    code=$(gh api -i "repos/${repo}/commits/${db_enc}" 2>/dev/null | awk 'NR==1{print $2}')
+    if [ "${code}" != "200" ]; then
+      echo "${repo}: 判定不能 (HTTP ${code:-?}) — head sha を取得できない"; continue
+    fi
+    head=$(gh api "repos/${repo}/commits/${db_enc}" --jq '.sha' 2>/dev/null)
+    if ! printf '%s' "${head}" | grep -Eq '^[0-9a-f]{40}$'; then
+      echo "${repo}: 判定不能 — head sha が 40 桁 hex でない"; continue
+    fi
+
+    runs=$(gh run list -R "${repo}" -c "${head}" -L 100 \
+            --json workflowName,status,conclusion,event 2>/dev/null)
+    if ! printf '%s' "${runs}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      echo "${repo}: 判定不能 — run list の応答が配列でない"; continue
+    fi
+
+    printf '%s' "${runs}" | jq --arg r "${repo}" --arg b "${db}" --arg h "${head:0:8}" '
+      [.[] | select(.event == "push")] as $p | {
+        repo: $r, branch: $b, head: $h,
+        push_total: ($p | length),
+        incomplete: ([$p[] | select(.status != "completed")] | length),
+        failed:     ([$p[] | select(.status == "completed" and .conclusion != null
+                       and ((.conclusion | IN("failure","cancelled","timed_out","action_required","startup_failure","stale")))
+                     )] | length),
+        unknown:    ([$p[] | select(.status == "completed"
+                       and ((.conclusion // "") | IN("success","skipped","neutral",
+                            "failure","cancelled","timed_out","action_required","startup_failure","stale") | not)
+                     )] | length)
+      }'
+  done
+  ```
+
+  判定は以下の表に従う。
+
+  | 条件 | 判定 | 意味 |
+  |------|------|------|
+  | `push_total >= 1` かつ `failed == 0` かつ `incomplete == 0` かつ `unknown == 0` | green | 補償策が成立し、base は健全 |
+  | `push_total >= 1` かつ `incomplete >= 1` | 未完了 | 完了を待って再測する（green と扱わない） |
+  | `push_total >= 1` かつ `failed >= 1` | red | 補償策は成立するが base が壊れている |
+  | `push_total >= 1` かつ `unknown >= 1` | 判定不能 | 合否に分類できない conclusion が混在。green へ倒さない |
+  | `push_total == 0` | 補償策不成立 | push トリガ workflow が無い / `paths` フィルタで除外された |
+  | 権限・API 障害で判定に到達できない | 判定不能 | 記録して再測する（green にも不成立にも倒さない） |
+
+  `failed` は `cancelled` / `timed_out` / `action_required` / `startup_failure` / `stale` を失敗側に数える（SKILL.md の CI 全 green 判定と同じ分類。success / skipped / neutral のみを合格とする）。`-L 100` の上限に達した場合は切り捨ての可能性があるため、判定不能として扱うか件数を上げて再測する。
+- **不成立時の扱い（3 択・順に推奨）**:
+  1. マージ先ブランチへ push トリガの最低限のビルド/テストを追加する（`paths` フィルタで除外されないことをプローブで実測確認する）。これが本則。
+  2. `autoMerge: true` を使わない（マージ可能状態で停止し人間がマージする）。補償策不成立のリポでは既定の非 opt-in 運用を推奨とする。
+  3. やむを得ず `autoMerge: true` を使う場合は「補償策 適用外」であることを記録したうえで、ラン完了後に **base を最新化した状態での検証を最低 1 回** 実施する（例: マージ後の base から一時ブランチを切って PR CI を 1 回起動し、意味的コンフリクトの有無を確認する）。実施も記録もしない運用は選択肢に含めない。
+- **実測記録の陳腐化に関する注意**: リポジトリ構成は変わるため、判断は測定日付とセットで記録し、`autoMerge` 運用を開始・再開するたびに再測する。
+
 サーバー側 auto-merge 運用ではさらに **repo 設定で auto-merge を許可**する（Settings → General → Allow auto-merge）。なお upstream（Fandhe-AI/agent-cli-skills）の `https://github.com/Fandhe-AI/agent-cli-skills/blob/main/docs/implement-issue-tree/auto-merge-sample.yml`（`docs/implement-issue-tree/auto-merge-sample.yml`）は上記のうち **required checks >= 1・非 author 必須承認 >= 1・dismiss stale reviews・適用全 ruleset の bypass actor ゼロ・required conversation resolution 有効・`REQUIRED_EXTERNAL_CHECKS`（外部レビュー App の check context 名 + App ID の組）の required checks への App 束縛付き包含、の 6 点を arm 前に API で実測検証し、未構成・検証不能なら arm しない（fail-closed）**（strict 適用を検証していた G8 は撤回済み。前節「strict を G0 の要件にしない理由」参照）。classic branch protection は `enforce_admins` が有効かつ明示 bypass 経路（`bypass_pull_request_allowances` / `restrictions` の users / teams / apps）が存在しない場合のみ認可入力として採用し（G7。キー欠落または null = 未設定の正常応答のため通過（`restrictions` は未設定時 null が正常応答）、object は全リストが空配列の場合のみ通過）、また読み取り API が管理者権限を要求し workflow の `GITHUB_TOKEN` では読めないことがあるため、**ruleset での構成（bypass actor なし）を推奨**する（実効ルール API は読み取り権限で取得できる）。ruleset 運用ではさらにリポジトリ secret **`AUTOMERGE_RULESET_TOKEN`**（Administration: read のみの fine-grained PAT / GitHub App token。write 不要。org 継承 ruleset を使う場合は組織レベルの Administration: read も併せて付与）の設定が必要で、ruleset が 1 件以上適用されるのに未構成だと G4（ruleset 詳細の bypass actor 検証）が検証不能となり一切 arm されない（fail-closed）。適用 ruleset が 0 件（classic のみで G1〜G3 充足。enforce_admins 必須）の運用ではこの secret は不要（G4 は空充足で通過）。なお workflow のトリガーは `schedule`（cron）+ `workflow_dispatch` のみの cron スイープ方式とし、`pull_request` / `pull_request_target` は使わない（PR イベントを契機に secrets 付きジョブを起動する構造自体を排除する。「自動マージのサーバー側委譲と merge-guard hook」節参照）。加えてリポジトリ設定変数 **`TRUSTED_AUTHOR`**（automation identity の login。未設定ならスイープは何もしない）・**`AUTOMERGE_OPTIN`**（文字列 `true` を設定しない限り job ごとスキップされる明示 opt-in ゲート）・**`AUTOMERGE_RUNNER`**（runner ラベル。フォールバックなしのため未設定では job が起動しない）の 3 つの設定が必要で、いずれか未設定なら動かない（fail-closed）。workflow 内でリポジトリのコードを checkout・実行してはならない。
 
