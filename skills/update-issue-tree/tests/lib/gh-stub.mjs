@@ -2,8 +2,14 @@
 // 差し替えるスタブを生成する。テストは実行ログ（$GH_CALL_LOG）に対して直接アサートすることで、
 // 「DELETE が失敗したら POST が 1 件も呼ばれない」等の呼び出し順序・回数の契約を検証する。
 //
-// スタブは対象 issue への GET を 1 回目=事前確認・2 回目以降=事後確認として区別する
-// （reassign-sub-issue.sh は必ず「事前 GET → [DELETE] → [POST] → 事後 GET」の順で呼ぶため）。
+// ルーティングはパスベース（Issue #333）。スクリプトは必ず対象 issue の GET を最初に撃つため、
+// スタブが最初に受けた api GET のパスを「対象 issue のパス」として一時ファイルへ記録し、以降
+// 同じパスの GET は従来どおり「1 回目=事前確認・2 回目以降=事後確認」として応答する。記録済み
+// パスと一致しない GET は新親の事前検証（DELETE 前に撃たれる新設の GET。Issue #333 Step 2）と
+// みなし、newParentGetFail / newParentRepo で応答する。
+// 記録は失敗分岐の**前**に行う。先に失敗分岐へ入ると対象パスが記録されないまま exit し、
+// 同一 fixture で新親 GET が続くケース（例: getFail: true と newParentGetFail の組み合わせを
+// 将来追加する場合）で新親 GET が誤って対象パスとして記録されてしまう
 
 import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -28,6 +34,8 @@ function shQuote(value) {
  * @param {string} [fixture.deleteBody] DELETE 失敗時に stderr へ出す本文
  * @param {number} [fixture.postExit] POST の終了コード
  * @param {string} [fixture.postBody] POST 失敗時に stderr へ出す本文（"only have one parent" 判定に使う）
+ * @param {boolean} [fixture.newParentGetFail] 新親 GET を非ゼロ終了させる（存在しない番号の再現）
+ * @param {string} [fixture.newParentRepo] 新親の repository_url の owner/repo（既定 'o/r' = 対象 issue と同一。'other/repo' で転送済み issue を再現）
  */
 export function createGhStub(fixture = {}) {
   const f = {
@@ -45,6 +53,8 @@ export function createGhStub(fixture = {}) {
     deleteBody: '',
     postExit: 0,
     postBody: '',
+    newParentGetFail: false,
+    newParentRepo: 'o/r',
     ...fixture,
   }
   if (f.parentAfter === undefined) f.parentAfter = f.parentBefore
@@ -54,11 +64,16 @@ export function createGhStub(fixture = {}) {
   const ghPath = join(dir, 'gh')
   const logPath = join(dir, 'calls.log')
   const getCountPath = join(dir, 'get_count')
+  const targetPathPath = join(dir, 'target_path')
   writeFileSync(getCountPath, '0')
+  writeFileSync(targetPathPath, '')
 
   const authBranch = f.authFail ? 'exit 1' : 'exit 0'
   const getFailBranch = f.getFail ? "echo 'stub: get failed' >&2; exit 1" : ':'
   const verifyGetFailBranch = f.verifyGetFail ? "echo 'stub: verify get failed' >&2; exit 1" : ':'
+  const newParentGetFailBranch = f.newParentGetFail
+    ? "echo 'stub: new parent get failed' >&2; exit 1"
+    : ':'
 
   const script = `#!/usr/bin/env bash
 # 生成スタブ。実 gh の代わりに PATH の先頭へ差し込んで使う（テスト専用・実行ビット付き）
@@ -95,7 +110,23 @@ if [[ "\${path}" == *"/sub_issues" && "\${method}" == "POST" ]]; then
   exit ${f.postExit}
 fi
 
-# GET issue（事前確認 1 回目 / 事後確認 2 回目以降）
+# 対象 issue のパスをまだ記録していなければ、この GET が対象 issue の GET（スクリプトは
+# 必ず対象 issue の GET を最初に撃つ）。失敗分岐より前に記録することで、getFail 時にも
+# 対象パスが確定した状態で exit する
+target_path=$(cat ${shQuote(targetPathPath)})
+if [[ -z "\${target_path}" ]]; then
+  printf '%s' "\${path}" > ${shQuote(targetPathPath)}
+  target_path="\${path}"
+fi
+
+if [[ "\${path}" != "\${target_path}" ]]; then
+  # 記録済みの対象パスと一致しない GET = 新親の事前検証（Issue #333 Step 2）
+  ${newParentGetFailBranch}
+  printf '{"repository_url": "https://api.github.com/repos/%s"}\\n' ${shQuote(f.newParentRepo)}
+  exit 0
+fi
+
+# 対象 issue の GET（1 回目=事前確認・2 回目以降=事後確認）
 count=$(cat ${shQuote(getCountPath)})
 count=$((count + 1))
 echo "\${count}" > ${shQuote(getCountPath)}
