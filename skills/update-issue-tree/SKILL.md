@@ -32,7 +32,9 @@ update-issue-tree 42
   親リポジトリへの書き込みは本スキルの前提条件（対象リポジトリへの書き込み権限）の
   外側にあり、誤ったリポジトリの同番号 issue を操作する事故（PR #314 の P0）を構造的に
   防ぐため。この契約の実装は `scripts/reassign-sub-issue.sh` の **exit 2 による
-  fail-closed**（下記 Step 3 の終了コード表を参照）
+  fail-closed**（下記 Step 3 の終了コード表を参照）。exit 2 は gh/jq 不在・未認証・issue
+  取得失敗（解消可能な前提不備）とも共有するため、このケースだけ stderr に
+  `reason=cross-repository-parent` の安定マーカー行が追加で出る（終了コード表参照）
 - 本スクリプトが対象 issue を処理できるのは、その `parent_issue_url` が null（どの親にも
   紐付いていない）状態になってからである。cross-repository の親リンクの取り外しは
   **親リポジトリ側の操作**であり、そのリポジトリへの書き込み権限を持つ担当者が行う。
@@ -122,8 +124,33 @@ bash "${REASSIGN_SCRIPT}" \
   --issue "${ISSUE_NUMBER}" \
   --old-parent "${OLD_PARENT}" \
   --new-parent "${NEW_PARENT}"
-echo "exit=$?"
+# echo を最後のコマンドにするとブロックの終了ステータスが常に 0 になり、
+# 実行基盤が「最終ステータス」で成否を判定した場合に非ゼロ終了を見落とす。
+# 直後に $? を退避してから出力し、非ゼロは呼び出し元へ伝播する（Issue #335）。
+# このブロックの上に set -euo pipefail を追加してはならない。set -e があると
+# 失敗した bash ... の時点でシェルが即終了し、$? の退避に到達せず、より
+# 発見しづらい形でバグが再発する（代替が必要な場合のみ
+# REASSIGN_STATUS=0; bash ... || REASSIGN_STATUS=$? の形にする）。
+REASSIGN_STATUS=$?
+echo "exit=${REASSIGN_STATUS}"
+if (( REASSIGN_STATUS != 0 )); then
+  # このブロックは 1 件分の呼び出しであり、非ゼロ終了は当該 1 件の失敗として
+  # ブロックの終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ
+  # 記録したうえで、exit 2 のうち (a) 解消可能な前提不備（gh/jq 不在・未認証・
+  # issue 取得失敗）のみ原因解消まで中断し、(b) 恒久的な対象外（cross-repository
+  # 親等）は棚卸し対象から除外して次の 1 件の呼び出しへ進む（終了コード表参照）。
+  # (a)/(b) はどちらも exit 2 で終了コード単独では区別できないため、stderr に
+  # `reason=cross-repository-parent` があるか grep して判定する（無ければ (a)）
+  exit "${REASSIGN_STATUS}"
+fi
 ```
+
+このブロックは**1 件分の呼び出し**であり、非ゼロ終了は**当該 1 件の失敗**としてブロックの
+終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ記録したうえで、exit 2 は
+**(a) 解消可能な前提不備**（`gh`/`jq` 不在・未認証・issue 取得失敗）のみ原因解消まで中断し、
+**(b) 恒久的な対象外**（cross-repository 親等）は要確認事項へ記載して棚卸し対象から除外し、
+次の 1 件の呼び出しへ進む（終了コード表を参照）。(a)/(b) の判定は stderr に
+`reason=cross-repository-parent` が出ているかで機械的に行う（無ければ (a)）。
 
 **引数**
 
@@ -146,7 +173,7 @@ stdout 最終行が `result=<state> issue=<n> new_parent=<n> old_parent=<n|->` �
 | 0 | `already-attached` | 既に新親配下（no-op） | 件数へ計上しない |
 | 0 | `posted-only` | 旧親配下になく POST のみ | 「孤児の再配置」件数へ計上（Step 4 と同一スクリプト） |
 | 1 | — | 引数・使い方エラー | 実行者の誤り。修正して再実行 |
-| 2 | — | 前提不備。2 類型が混在する: (a) 解消して再実行できるもの（`gh`/`jq` 不在・未認証・issue 取得失敗）と、(b) **恒久的に対象外**の cross-repository 親（同一コマンドの再実行では解決しない。親リポジトリ側で親リンクが外れるまで本スキルでは処理できない） | (a) は原因を解消して再実行。(b) は要確認事項へ記載し、棚卸し対象から除外する（Step 2 参照） |
+| 2 | — | 前提不備。2 類型が混在し、**stderr のマーカー行で機械的に判定する**: `reason=cross-repository-parent` が出ていれば (b)、無ければ (a)。(a) 解消して再実行できるもの（`gh`/`jq` 不在・未認証・issue 取得失敗）と、(b) **恒久的に対象外**の cross-repository 親（同一コマンドの再実行では解決しない。親リポジトリ側で親リンクが外れるまで本スキルでは処理できない） | (a) は原因を解消して再実行。(b) は要確認事項へ記載し、棚卸し対象から除外する（Step 2 参照） |
 | 3 | — | DELETE 失敗。**POST は実行していない** | 要確認事項へ記載。旧親配下のまま |
 | 4 | — | POST 失敗 | 要確認事項へ記載。宙ぶらりん状態の可能性あり |
 | 5 | — | 事後確認で新親配下に見つからない（別リポジトリの親配下にある場合を含む） | 要確認事項へ記載。手動で実状態を確認 |
@@ -168,8 +195,20 @@ Phase が不明な issue はタイトル・本文を読んで判断し、判断�
 bash "${REASSIGN_SCRIPT}" \
   --issue "${ORPHAN_NUMBER}" \
   --new-parent "${PHASE_NUMBER}"
-echo "exit=$?"
+# Step 3 と非対称にしない（呼び出し方だけでなく、終了ステータス伝播も揃える。
+# 理由は Step 3 のコメントと同一。Issue #335）
+REASSIGN_STATUS=$?
+echo "exit=${REASSIGN_STATUS}"
+if (( REASSIGN_STATUS != 0 )); then
+  exit "${REASSIGN_STATUS}"
+fi
 ```
+
+このブロックも Step 3 と同じく**1 件分の呼び出し**である。非ゼロ終了は**当該 1 件の失敗**として
+ブロックの終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ記録したうえで、
+exit 2 の扱いも Step 3 と同一（(a) 解消可能な前提不備のみ原因解消まで中断、
+(b) 恒久的な対象外は要確認事項へ記載して次の 1 件の呼び出しへ進む。判定は stderr の
+`reason=cross-repository-parent` マーカーで機械的に行う。終了コード表を参照）。
 
 ### Step 5: 必要に応じて新 Phase 親を新設する
 
@@ -321,8 +360,10 @@ EOF
 
 - ルート issue 本文の Phase 別表が更新されていることを確認する
 - closed Phase 親の下に open issue が残置されていないことを確認する
-- Step 3 / Step 4 で呼んだ `reassign-sub-issue.sh` の各回について、`echo "exit=$?"` の値と
-  `result=` 行を確認する。非ゼロ終了があれば Step 9 の要確認事項へ反映されているか確認する
+- Step 3 / Step 4 で呼んだ `reassign-sub-issue.sh` の各回について、`echo "exit=${REASSIGN_STATUS}"`
+  の値と `result=` 行を確認する。非ゼロ終了があれば Step 9 の要確認事項へ反映されているか確認する。
+  加えて、非ゼロ時はコードブロック自体の終了ステータスが非ゼロで返ること（`echo` を最後の
+  コマンドにして握り潰していないこと）も確認する
 
 ```bash
 # 全 sub-issues の state を確認
