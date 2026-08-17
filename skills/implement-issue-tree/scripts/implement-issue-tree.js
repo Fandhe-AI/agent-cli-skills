@@ -907,13 +907,16 @@ const REVIEW_SCHEMA = {
   type: 'object',
   required: ['state', 'summary', 'highestSeverity'],
   properties: {
-    state: { type: 'string', enum: ['ok', 'needs-fix'] },
+    // blocked: レビュー対象コードではなく環境（比較基準 ref の解決失敗等）に起因して
+    // レビューを実施できなかった場合の専用状態。needs-fix（コード指摘）とは呼び出し元の
+    // 扱いが異なり、fix エージェントを起動せず即座に fail-closed 終端する（Issue #315）。
+    state: { type: 'string', enum: ['ok', 'needs-fix', 'blocked'] },
     highestSeverity: {
       type: 'string',
       enum: ['none', 'low', 'medium', 'high', 'critical'],
-      description: '全指摘のうち最も高い重要度。指摘なし（state=ok）は none。最終 Review ラウンドで low/none なら通過扱いにするため必須。',
+      description: '全指摘のうち最も高い重要度。指摘なし（state=ok）は none。blocked の場合も none。最終 Review ラウンドで low/none なら通過扱いにするため必須。',
     },
-    summary: { type: 'string', description: 'ok の場合は確認内容の要約。needs-fix の場合は全指摘を重要度付きで列挙' },
+    summary: { type: 'string', description: 'ok の場合は確認内容の要約。needs-fix の場合は全指摘を重要度付きで列挙。blocked の場合は解決できなかった理由' },
     // Review は読み取り専用（判定のみ）で worktree に成果物を残さないため、
     // 呼び出し元が返却直後に削除する。impl / fix の worktree（未 push の実装コミットを
     // 保持する唯一の場所）とは扱いが異なる点に注意。
@@ -1652,8 +1655,12 @@ function reviewPrompt(item, impl) {
     `   （ブランチ名は ${JSON.stringify(branch)} — 変数展開不要、そのまま使用する）`,
     `   ref 解決確認: git rev-parse --verify --quiet refs/remotes/origin/${baseBranch} が失敗した場合、`,
     `   git fetch origin ${baseBranch} を 1 回だけ試みる。それでも解決できなければレビューを`,
-    `   実施せず state: "needs-fix" / highestSeverity: "critical" とし、summary に`,
+    `   実施せず state: "blocked" / highestSeverity: "none" とし、summary に`,
     `   「比較基準 origin/${baseBranch} を解決できない」と明記して終端する（fail-closed）。`,
+    `   （state: "blocked" は環境要因でレビュー自体が実施不能だったことを表す専用状態。`,
+    `   コード指摘を表す needs-fix とは呼び出し元の扱いが異なり、fix エージェントは起動されず`,
+    `   即座に終端する。needs-fix / highestSeverity: critical は使わない — 無関係なコードへの`,
+    `   修正試行を誘発するため）。`,
     `2. implement-review スキルに従い、git diff origin/${baseBranch}...HEAD のローカル diff を対象に品質・セキュリティレビューを実施する。`,
     `   （origin/${baseBranch}（remote-tracking ref）基準。3 点ドットのため比較点はブランチの分岐点に固定され、fetch 不要・ラン中に origin が進んでも比較点は不変）`,
     '   レビュー観点:',
@@ -1666,7 +1673,7 @@ function reviewPrompt(item, impl) {
     '   重要: 重要度は厳密に判定すること。Low は「動作に影響しない様式・命名・重複・行数・コメント等の改善提案」に限る。',
     '   実バグ・誤った挙動・セキュリティ・認可・データ不整合・エッジケースの欠落は最低でも medium とする（最終ラウンドで Low のみは通過扱いになるため）。',
     '5. pwd の結果を worktreePath として返す（呼び出し元がラン終了時の残骸一覧に記録するため。自動削除はされない）。',
-    '返却: state（"ok" または "needs-fix"）/ highestSeverity / summary / worktreePath（pwd の結果）。',
+    '返却: state（"ok" / "needs-fix" / "blocked"）/ highestSeverity / summary / worktreePath（pwd の結果）。',
   ].join('\n')
 }
 
@@ -3239,6 +3246,15 @@ async function runImplement(item) {
         reviewPassed = true
         log(`#${item.number}: Review 通過 — ${sanitize(r.summary ?? '')}`)
         break
+      }
+      if (r?.state === 'blocked') {
+        // 環境要因（比較基準 ref の解決失敗等）でレビュー自体が実施不能だった。コード指摘では
+        // ないため fix エージェントを起動せず（無関係なコードへの修正試行で修正予算を消費させ
+        // ないため）、即座に fail-closed 終端する（Issue #315）。push 前のため pr: 0。
+        const reason = `Review が環境要因でブロックされた: ${sanitize(r.summary ?? '')}`
+        await updateState(item.number, { status: 'blocked', pr: 0, fixCount, note: reason })
+        recordFailure({ issue: item.number, reason, status: 'blocked' })
+        return false
       }
       // needs-fix または r が無効（安全側に倒して fix 相当とみなす）
       lastReviewSummary = r?.summary ?? 'review エージェントが異常終了した'

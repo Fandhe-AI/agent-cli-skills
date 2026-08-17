@@ -38,6 +38,12 @@ const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join
 // （base 名を 'main' のままにすると、正しい実装もハードコードも同じ文字列を出力し判別できない）。
 // 別の一時ファイル・別の import URL へ切り出すため、args 未定義前提の g0-gates.test.mjs 等とは
 // 別モジュール実体になり競合しない（node --test はテストファイルごとに別プロセスで実行される）。
+// 注（PR #345 Cursor Bugbot 指摘への回答）: 未宣言のベア識別子 `args` は、静的 import・動的
+// import・ファイルの先後を問わず、モジュールのレキシカルスコープに束縛が無ければ最終的に
+// globalThis のプロパティ探索へフォールバックする（Node の ESM でも変わらない）。このファイルの
+// 「群A」テスト自体が `origin/develop`（'main' ではない）に一致することをアサートしており、
+// 実行結果（`node --test` 群A 全 pass）が baseBranch が正しく 'develop' に解決されている実測
+// 証拠になっている。
 globalThis.args = { parent: 1, branch: 'develop' }
 
 const source = readFileSync(SCRIPT_PATH, 'utf8')
