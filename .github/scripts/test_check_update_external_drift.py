@@ -33,6 +33,7 @@ from check_update_external_drift import (  # noqa: E402
     PIN_CURRENT,
     PIN_UNREACHABLE,
     SCHED_DISABLED,
+    SCHED_FAILING,
     SCHED_OK,
     SCHED_STALE,
     SCHED_UNKNOWN,
@@ -491,6 +492,46 @@ class TestAxis5Schedule(unittest.TestCase):
     def test_missing_created_at_when_no_run_is_unknown(self):
         v = evaluate_schedule("active", None, None, self.NOW, 2)
         self.assertEqual(v["state"], SCHED_UNKNOWN)
+
+    def test_fresh_run_with_consecutive_failures_is_failing_not_ok(self):
+        # イシュー #304 レビュー指摘: schedule は発火しているがジョブ内部が
+        # 連日失敗しているケース。発火の timestamp だけでは SCHED_OK に誤判定される。
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(hours=12)), None, self.NOW, 2,
+            recent_conclusions=["failure", "failure"],
+        )
+        self.assertEqual(v["state"], SCHED_FAILING)
+        self.assertIn("連続失敗", v["detail"])
+
+    def test_fresh_run_with_single_failure_is_still_ok(self):
+        # 単発の flaky failure は連続失敗と区別し、過検知しない。
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(hours=12)), None, self.NOW, 2,
+            recent_conclusions=["failure"],
+        )
+        self.assertEqual(v["state"], SCHED_OK)
+
+    def test_fresh_run_with_mixed_conclusions_is_ok(self):
+        # 直近の一部が成功していれば「連続失敗」ではないため OK のまま。
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(hours=12)), None, self.NOW, 2,
+            recent_conclusions=["failure", "success"],
+        )
+        self.assertEqual(v["state"], SCHED_OK)
+
+    def test_stale_run_with_failures_stays_stale_not_failing(self):
+        # 経過日数超過（STALE）が既に検出済みの場合は conclusion を見ずに STALE
+        # を優先する（STALE と FAILING の二重報告をしない）。
+        v = evaluate_schedule(
+            "active", self._iso(timedelta(days=3)), None, self.NOW, 2,
+            recent_conclusions=["failure", "failure"],
+        )
+        self.assertEqual(v["state"], SCHED_STALE)
+
+    def test_no_recent_conclusions_defaults_to_ok(self):
+        # recent_conclusions 未指定（既存呼び出し互換）は従来どおり OK 判定。
+        v = evaluate_schedule("active", self._iso(timedelta(hours=12)), None, self.NOW, 2)
+        self.assertEqual(v["state"], SCHED_OK)
 
 
 class TestScanEndToEnd(unittest.TestCase):

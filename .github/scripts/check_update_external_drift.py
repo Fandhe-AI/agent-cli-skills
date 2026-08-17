@@ -84,14 +84,18 @@ WORKFLOW_PATH = ".github/workflows/update-external.yml"
 
 # Actions API（``actions/workflows/{workflow_id}``）に渡すファイル名。上の
 # ``WORKFLOW_PATH`` はリポジトリ内の相対パス（contents API 用）だが、Actions API
-# は ``owner/repo/path`` ではなくファイル名（またはリポジトリ内での相対パス）を
-# workflow_id の代わりに受け付ける。両者は現状同じ文字列だが、コメント上の混同を
-# 避けるため意味の異なる用途ごとに定数を分けてある。
+# の ``workflow_id`` パラメータは workflow の数値 ID か**ワークフローファイルの
+# ベース名**のみを受け付ける仕様であり（GitHub REST 仕様上、任意のディレクトリを
+# 含む相対パスは保証されていない）、`.github/workflows/` 配下という前提のため
+# 両者は現状同じ文字列になる。コメント上の混同を避けるため意味の異なる用途ごとに
+# 定数を分けてある。
 WORKFLOW_FILENAME = "update-external.yml"
 
-# リポジトリ名を Actions API のパスへ埋め込む前の検証（OWASP A03）。
-# ``gh repo list`` 由来で通常は安全な文字列のみだが、想定外の文字が来た場合に
-# 別エンドポイントへ化けないよう構造的に保証する。
+# リポジトリ名を GitHub API のパス（contents API・Actions API 双方）へ埋め込む
+# 前の検証（OWASP A03）。``gh repo list`` 由来で通常は安全な文字列のみだが、
+# 想定外の文字が来た場合に別エンドポイントへ化けないよう構造的に保証する。
+# scan() 内で ``result.scanned += 1`` より前に置いてあるため、軸 5 専用ではなく
+# 軸 1-4（contents API によるファイル取得）もまとめて保護している。
 _REPO_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # レポートを集約する固定タイトルの issue。日次で新規 issue を作らず、
@@ -570,7 +574,23 @@ def check_upstream_markers(text: str) -> list[dict]:
 SCHED_OK = "SCHED_OK"
 SCHED_DISABLED = "SCHED_DISABLED"
 SCHED_STALE = "SCHED_STALE"
+SCHED_FAILING = "SCHED_FAILING"
 SCHED_UNKNOWN = "SCHED_UNKNOWN"
+
+# schedule 実行の ``conclusion`` のうち「実行はされたが成果物として失敗」を表す値。
+# ``None``（実行中）や ``success`` はここに含めない。復旧手順ドキュメント
+# （docs/update-external-schedule.md 手順4）が復旧確認の根拠として ``conclusion``
+# を使っているのに対し、検知ロジック側は #304 当初実装では発火（timestamp）しか
+# 見ておらず、「発火はしているがジョブ内部が権限エラー等で連日失敗」というケース
+# （軸 1-4 はファイル内容しか見ないため green に見える）を取りこぼしていた。
+_FAILING_CONCLUSIONS = {"failure", "timed_out", "startup_failure", "cancelled", "action_required"}
+
+# 直近何件の schedule 実行が「全て失敗」であれば SCHED_FAILING と判定するか。
+# 1 件だけで判定すると単発の flaky failure を過検知するため、連続失敗の実測
+# （＝一時的な障害ではない）を要求する。偽陽性（レポートに 1 行増えるだけ）より
+# 偽陰性（無告知停止の見逃し）のコストが高いという #304 と同じ非対称性から、
+# 極端に大きくはしない。
+SCHED_FAILING_STREAK_MIN = 2
 
 # 実測（2026-08-17）の健全なギャップは約 19 時間。検知ジョブと update-external の
 # cron の間には約 3 時間のずれがある。N=3 だと「2 回連続で日次実行が飛んだ」状態
@@ -621,6 +641,7 @@ def evaluate_schedule(
     created_at_iso: str | None,
     now: datetime,
     threshold_days: int,
+    recent_conclusions: list[str | None] | None = None,
 ) -> dict:
     """workflow の schedule トリガが生きているかを判定する（軸 5 の核心）。
 
@@ -632,6 +653,15 @@ def evaluate_schedule(
     ``active`` のまま schedule が約 3.7 日止まっていた、2026-08-17 実測）が
     軸 5 導入の根拠であるため、``active`` であることは「乖離が無い」の必要条件
     でしかない。
+
+    ``recent_conclusions`` は直近の schedule 実行の ``conclusion`` を新しい順に
+    並べたもの（``fetch_schedule_health`` が渡す）。**発火の新しさだけでは
+    「同期が動いている」ことの証明にならない。** schedule トリガ自体は生きて
+    毎日発火していても、ジョブ内部が権限エラー等で連日失敗し続けていれば
+    ``last_run_iso`` は最新のタイムスタンプを返すため、conclusion を見なければ
+    SCHED_OK に誤判定される。直近 ``SCHED_FAILING_STREAK_MIN`` 件が全て
+    ``_FAILING_CONCLUSIONS`` に該当する場合のみ SCHED_FAILING とし、単発の
+    flaky failure を過検知しない。
 
     戻り値は ``{"state", "detail"}``。``detail`` には最終実行タイムスタンプと
     経過日数を必ず含める（読み手がしきい値を信用せず自分で判断できるように
@@ -659,6 +689,18 @@ def evaluate_schedule(
         )
         if delta_days >= threshold_days:
             return {"state": SCHED_STALE, "detail": detail}
+
+        # 発火は新しいが、直近の実行結果が連続失敗なら OK に倒さない。
+        if (
+            recent_conclusions
+            and len(recent_conclusions) >= SCHED_FAILING_STREAK_MIN
+            and all(c in _FAILING_CONCLUSIONS for c in recent_conclusions)
+        ):
+            return {
+                "state": SCHED_FAILING,
+                "detail": detail + f"。直近 {len(recent_conclusions)} 件の schedule 実行が"
+                f"連続失敗（conclusion: {', '.join(str(c) for c in recent_conclusions)}）",
+            }
         return {"state": SCHED_OK, "detail": detail}
 
     # schedule 実行が 1 件も見つからない（Actions API が total_count == 0 を
@@ -837,7 +879,7 @@ def get_claude_skills_tree_mode(repo: str, token: str) -> str:
 def fetch_schedule_health(repo: str, token: str) -> tuple[str, object]:
     """Actions API から軸 5 の判定に必要な情報を取得する。
 
-    戻り値は ``("ok", {"state", "created_at", "last_run"})`` /
+    戻り値は ``("ok", {"state", "created_at", "last_run", "recent_conclusions"})`` /
     ``("forbidden", 理由)`` / ``("error", 理由)`` の 3 値。403 だけを別値に
     しているのは、``scan()`` が「軸 5 候補の全リポジトリが 403」を
     ``SUBMODULE_PAT`` の Actions: read 権限不足による系統的失敗として検出する
@@ -845,6 +887,12 @@ def fetch_schedule_health(repo: str, token: str) -> tuple[str, object]:
 
     ``state`` が ``active`` のときだけ実行履歴 API を追加で叩く。``disabled_*``
     のときは呼んでも意味がなく、API 消費を無駄に増やすだけのため。
+
+    ``recent_conclusions`` は直近 ``SCHED_FAILING_STREAK_MIN`` 件の schedule
+    実行の ``conclusion`` を新しい順に並べたもの。発火の timestamp だけでは
+    「schedule トリガ自体は生きているがジョブ内部が連日失敗している」状態を
+    区別できない（``evaluate_schedule`` の docstring 参照）ため、``per_page`` を
+    1 件から必要最小限（``SCHED_FAILING_STREAK_MIN``）へ広げて取得する。
     """
     status, body = gh_get_with_status(
         f"repos/{repo}/actions/workflows/{WORKFLOW_FILENAME}", token
@@ -862,10 +910,11 @@ def fetch_schedule_health(repo: str, token: str) -> tuple[str, object]:
     created_at = data.get("created_at")
 
     last_run_iso = None
+    recent_conclusions: list[str | None] = []
     if wf_state == "active":
         r_status, r_body = gh_get_with_status(
             f"repos/{repo}/actions/workflows/{WORKFLOW_FILENAME}/runs"
-            "?event=schedule&per_page=1",
+            f"?event=schedule&per_page={SCHED_FAILING_STREAK_MIN}",
             token,
         )
         if r_status == 403:
@@ -879,8 +928,14 @@ def fetch_schedule_health(repo: str, token: str) -> tuple[str, object]:
         runs = runs_data.get("workflow_runs") or []
         if runs:
             last_run_iso = runs[0].get("created_at")
+            recent_conclusions = [r.get("conclusion") for r in runs]
 
-    return "ok", {"state": wf_state, "created_at": created_at, "last_run": last_run_iso}
+    return "ok", {
+        "state": wf_state,
+        "created_at": created_at,
+        "last_run": last_run_iso,
+        "recent_conclusions": recent_conclusions,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1032,6 +1087,7 @@ def scan(
                         sched_payload["created_at"],
                         scan_now,
                         schedule_stale_days,
+                        sched_payload.get("recent_conclusions"),
                     )
                     if verdict["state"] == SCHED_OK:
                         result.schedule_ok.append(repo)
@@ -1042,6 +1098,10 @@ def scan(
                     elif verdict["state"] == SCHED_STALE:
                         result.findings.append(
                             Finding(repo, "SCHEDULE-STALE", verdict["detail"])
+                        )
+                    elif verdict["state"] == SCHED_FAILING:
+                        result.findings.append(
+                            Finding(repo, "SCHEDULE-FAILING", verdict["detail"])
                         )
                     else:
                         result.unknowns.append(
@@ -1185,7 +1245,10 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
         lines.append("| --- | --- | --- |")
         for f in sorted(result.findings, key=lambda x: (x.category, x.repo)):
             lines.append(f"| `{f.repo}` | {f.category} | {f.detail} |")
-        if any(f.category in ("SCHEDULE-DISABLED", "SCHEDULE-STALE") for f in result.findings):
+        if any(
+            f.category in ("SCHEDULE-DISABLED", "SCHEDULE-STALE", "SCHEDULE-FAILING")
+            for f in result.findings
+        ):
             lines.append("")
             lines.append(
                 "軸 5（定期実行の生存）の乖離が見つかった。復旧手順は "
