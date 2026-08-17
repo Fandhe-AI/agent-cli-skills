@@ -31,6 +31,7 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { findMatchingBraceEnd } from './lib/js-brace-scanner.mjs'
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -238,7 +239,13 @@ test('救済ラウンドの pending は granted のときだけ立つ', () => {
 
 // brace 走査で監視ループの閉じ位置を求める。コメント文字列（「即座にループを抜けて」等）へ
 // 依存すると、コメント編集だけで回帰検知が黙って無効化されるため、構造そのものを走査する。
-function findMatchingBraceEnd(text, openBraceIndex) {
+// 字句認識つき実装は tests/lib/js-brace-scanner.mjs（Issue #336）。ここでは import した
+// findMatchingBraceEnd をそのまま使う。
+//
+// naiveFindMatchingBraceEnd は下の負のコントロール専用としてのみ使う（本番判定には使わない）。
+// 字句を一切区別せずすべての `{` / `}` をカウントする旧実装そのものであり、これがないと
+// 新しい注入テストは旧実装に対しても green になってしまい、Issue #336 の目的を果たさない。
+function naiveFindMatchingBraceEnd(text, openBraceIndex) {
   let depth = 0
   for (let i = openBraceIndex; i < text.length; i++) {
     if (text[i] === '{') depth++
@@ -377,5 +384,86 @@ for (const reason of ['head-moved', 'checks-not-green', 'merge-failed']) {
       rescueTimeoutQualityBlock: reconciled.qualityBlock,
     })
     assert.equal(terminalStatus, 'failed')
+  })
+}
+
+// ---------------------------------------------------------------------------
+// 片側波括弧混入時の境界不変性（Issue #336 受け入れ条件 1・2）
+//
+// 上流 Fandhe-AI/brain-training-app #81 の codex-review 指摘: 旧 naive 実装は文字列・コメント・
+// テンプレートリテラルの区別なくすべての `{`/`}` をカウントしていたため、対象ループ（テンプレート
+// リテラル・日本語コメントを多用する）に片側だけの波括弧を含む文字列・コメントが 1 行入るだけで
+// loopEndIndex が実体と乖離し得た。ここでは字句走査への置き換えにより、そのような混入があっても
+// 境界判定が不変であることを機械検証する。
+// ---------------------------------------------------------------------------
+
+test('lexer 非依存の不変条件: 監視ループの閉じ括弧はインデント2の行頭にある', () => {
+  // lexer を一切使わない検証。字句走査自身のバグを含む、あらゆる原因の mis-scan を捕捉する
+  // 保険として、下の注入テストでも変異後の経路に必ず同じ形の錨アサーションを置く。
+  assert.equal(driverPart.slice(loopEndIndex - 3, loopEndIndex + 1), '\n  }')
+})
+
+// 注入位置はループ本体内でなければならない。裸の indexOf('monitorsLeft--') はループより前の
+// 出現に当たり得てオフセット計算が非自明な理由で狂うため、fromIndex 付きで探す
+// （293〜299 行の構造アサーションと同じ探索パターン）。
+const MONITORS_LEFT_DECR = 'monitorsLeft--'
+const braceInjectionPos = driverPart.indexOf(MONITORS_LEFT_DECR, loopOpenBraceIndex) + MONITORS_LEFT_DECR.length
+assert.ok(
+  braceInjectionPos > loopOpenBraceIndex && braceInjectionPos < loopEndIndex,
+  '注入位置はループ本体内でなければならない',
+)
+
+// 4 キャリア（行コメント・ブロックコメント・シングルクォート文字列・テンプレートリテラル）×
+// 2 フィクスチャ（正味 } が 1 個多い / 正味 { が 1 個多い）。`{` と `}` を両方入れて相殺すると
+// naive 走査も偶然一致してしまい負のコントロールが無意味化するため、各キャリアは片側のみを含む。
+// 波括弧以外の典型的な lexer トラップ（コメント内アポストロフィ・ブロックコメント内の裸クォート・
+// テンプレートの `${...}` ネスト）も同梱する。
+const BRACE_INJECTION_CARRIERS = [
+  {
+    name: '行コメント',
+    a: "\n      // don't crash on apostrophe; 片側の閉じ括弧のみ }\n",
+    b: '\n      // 片側の開き括弧のみ {\n',
+  },
+  {
+    name: 'ブロックコメント',
+    a: '\n      /* ブロックコメント内の裸のクォート " と閉じ括弧のみ } */\n',
+    b: '\n      /* ブロックコメント内の裸のクォート " と開き括弧のみ { */\n',
+  },
+  {
+    name: 'シングルクォート文字列',
+    a: "\n      const _injStr = '}' // 文字列キャリア\n",
+    b: "\n      const _injStr = '{' // 文字列キャリア\n",
+  },
+  {
+    name: 'テンプレートリテラル',
+    a: '\n      const _injTpl = `${JSON.stringify({ a: 1 })} と文字列としての }`\n',
+    b: '\n      const _injTpl = `${JSON.stringify({ a: 1 })} と文字列としての {`\n',
+  },
+]
+
+function assertBraceInjectionInvariant(injected) {
+  const braceDelta = injected.split('{').length - injected.split('}').length
+  assert.notEqual(braceDelta, 0, '注入文字列は片側の波括弧のみを含み、相殺してはならない（負のコントロールを無意味化するため）')
+  const mutated = driverPart.slice(0, braceInjectionPos) + injected + driverPart.slice(braceInjectionPos)
+  const got = findMatchingBraceEnd(mutated, loopOpenBraceIndex)
+  // (a) 正: 字句走査は挿入長ぶんだけずれた「同じ閉じ括弧」を指す。
+  assert.equal(got, loopEndIndex + injected.length, '字句走査は挿入長ぶんだけずれた同じ閉じ括弧を指さなければならない')
+  // (b) lexer 非依存の錨: 変異後の結果もインデント 2 の閉じ括弧行に着地する。
+  assert.equal(mutated.slice(got - 3, got + 1), '\n  }', '変異後もインデント2の閉じ括弧行に着地しなければならない')
+  // (c) 負のコントロール: naive 走査では結果が変わる（＝このフィクスチャが旧実装で落ちる証拠）。
+  assert.notEqual(
+    naiveFindMatchingBraceEnd(mutated, loopOpenBraceIndex),
+    got,
+    'naive 走査ではこのフィクスチャで結果が変わらなければならない（旧実装が回帰を見逃していた証拠）',
+  )
+}
+
+for (const carrier of BRACE_INJECTION_CARRIERS) {
+  test(`片側波括弧の混入（${carrier.name}・正味 } が1個多い）でも境界判定は不変`, () => {
+    assertBraceInjectionInvariant(carrier.a)
+  })
+
+  test(`片側波括弧の混入（${carrier.name}・正味 { が1個多い）でも境界判定は不変`, () => {
+    assertBraceInjectionInvariant(carrier.b)
   })
 }
