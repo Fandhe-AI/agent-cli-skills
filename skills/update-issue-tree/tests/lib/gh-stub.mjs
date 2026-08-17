@@ -7,9 +7,14 @@
 // 同じパスの GET は従来どおり「1 回目=事前確認・2 回目以降=事後確認」として応答する。記録済み
 // パスと一致しない GET は新親の事前検証（DELETE 前に撃たれる新設の GET。Issue #333 Step 2）と
 // みなし、newParentGetFail / newParentRepo で応答する。
-// 記録は失敗分岐の**前**に行う。先に失敗分岐へ入ると対象パスが記録されないまま exit し、
-// 同一 fixture で新親 GET が続くケース（例: getFail: true と newParentGetFail の組み合わせを
-// 将来追加する場合）で新親 GET が誤って対象パスとして記録されてしまう
+// 記録は失敗分岐の**前**に行う。記録がスタブの応答内容から独立していることで、「1 回目の GET
+// のパス = 対象 issue のパス」という不変条件が fixture の組み合わせによらず保たれる。
+// 記録を失敗分岐の後ろへ動かすと、対象 issue の GET を失敗させる fixture では対象パスが
+// 記録されないまま次の GET が来た場合にそれが対象パスとして記録され、ルーティングが崩れる。
+// 現在のスクリプトでは対象 issue の GET 失敗時に exit 2 で終了するため、その組み合わせは
+// 実際には到達しない。ここで守っているのは「将来スクリプトが対象 GET の失敗から回復して
+// 続行するようになっても、スタブ側のルーティング前提が壊れない」という耐性であり、
+// 特定の fixture 組み合わせを想定した記述ではない
 
 import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -36,6 +41,7 @@ function shQuote(value) {
  * @param {string} [fixture.postBody] POST 失敗時に stderr へ出す本文（"only have one parent" 判定に使う）
  * @param {boolean} [fixture.newParentGetFail] 新親 GET を非ゼロ終了させる（存在しない番号の再現）
  * @param {string} [fixture.newParentRepo] 新親の repository_url の owner/repo（既定 'o/r' = 対象 issue と同一。'other/repo' で転送済み issue を再現）
+ * @param {boolean} [fixture.newParentIsPullRequest] 新親 GET のレスポンスへ `.pull_request` を含める（issues API が PR も返す仕様の再現）
  */
 export function createGhStub(fixture = {}) {
   const f = {
@@ -55,6 +61,10 @@ export function createGhStub(fixture = {}) {
     postBody: '',
     newParentGetFail: false,
     newParentRepo: 'o/r',
+    // issues API は PR も返す（issue と PR は番号空間を共有する）。true にすると
+    // 新親 GET のレスポンスへ `.pull_request` を含め、--new-parent に PR 番号を
+    // 渡したケースを再現する
+    newParentIsPullRequest: false,
     ...fixture,
   }
   if (f.parentAfter === undefined) f.parentAfter = f.parentBefore
@@ -122,7 +132,7 @@ fi
 if [[ "\${path}" != "\${target_path}" ]]; then
   # 記録済みの対象パスと一致しない GET = 新親の事前検証（Issue #333 Step 2）
   ${newParentGetFailBranch}
-  printf '{"repository_url": "https://api.github.com/repos/%s"}\\n' ${shQuote(f.newParentRepo)}
+  printf '{"repository_url": "https://api.github.com/repos/%s"%s}\\n' ${shQuote(f.newParentRepo)} ${shQuote(f.newParentIsPullRequest ? ', "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/77"}' : '')}
   exit 0
 fi
 

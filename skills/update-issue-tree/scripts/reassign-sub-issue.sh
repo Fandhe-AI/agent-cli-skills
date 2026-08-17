@@ -285,6 +285,19 @@ if [[ "${NEW_PARENT_REPO_URL}" != "${SELF_REPO_URL}" ]]; then
   exit 2
 fi
 
+# 新親が Pull Request でないことを確認する。GitHub の `GET /repos/{o}/{r}/issues/{n}` は
+# **PR も返す**（issue と PR は番号空間を共有し、PR のレスポンスには `.pull_request` が付く）。
+# そのため --new-parent に PR 番号を渡すと、直前の存在確認も同一リポジトリ確認も通過して
+# しまう。旧親がある経路ではこの後 DELETE が成功したうえで sub_issues への POST が失敗し、
+# 対象 issue が旧親から外れたまま新親にも付かない部分変更（実害は exit 8 相当）に陥る。
+# これは本スクリプトが予防対象としている孤児化そのものであり、判別に使う `.pull_request` は
+# 既に取得済みの NEW_PARENT_JSON に含まれているため追加の API 呼び出しなしで弾ける。
+if printf '%s' "${NEW_PARENT_JSON}" | jq -e 'has("pull_request")' >/dev/null 2>&1; then
+  echo "エラー: 新親 #${NEW_PARENT} は issue ではなく Pull Request である。sub-issue の親には指定できない" >&2
+  echo "対処: 親として使う issue の番号を指定して再実行する（issue と PR は番号空間を共有するため取り違えやすい）" >&2
+  exit 2
+fi
+
 if [[ -z "${CURRENT_PARENT}" ]]; then
   # 孤児（どの親にも属していない）: DELETE を飛ばして POST のみ
   if ! POST_OUT=$(gh api --method POST "repos/${REPO_PATH}/issues/${NEW_PARENT}/sub_issues" -F "sub_issue_id=${ISSUE_ID}" 2>&1); then
