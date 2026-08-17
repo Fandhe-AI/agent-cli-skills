@@ -236,7 +236,7 @@ Implement 完了後・push 前に、worktree 隔離で独立 Review エージェ
 
 レビュー条件:
 - `git checkout --detach <branch>` でローカルブランチを detached HEAD として取得する（`origin/<branch>` は push 前のため存在しない）
-- `git diff origin/<base-branch>...HEAD` でローカル diff を確認する（`origin/<base-branch>`（remote-tracking ref）が比較基準。3 点ドットのため比較点は `merge-base(origin/<base-branch>, HEAD)` ＝ブランチの分岐点に固定され、fetch 不要・ラン中に origin が進んでも比較点は不変。解決できない場合のみ `git fetch origin <base-branch>` を 1 回試み、それでも解決できなければレビューを実施せず `needs-fix` / `critical` で fail-closed 終端する）
+- `git diff origin/<base-branch>...HEAD` でローカル diff を確認する（`origin/<base-branch>`（remote-tracking ref）が比較基準。3 点ドットのため比較点は `merge-base(origin/<base-branch>, HEAD)` ＝ブランチの分岐点に固定され、fetch 不要・ラン中に origin が進んでも比較点は不変。解決できない場合のみ `git fetch origin <base-branch>` を 1 回試み、それでも解決できなければレビューを実施せず `state: "blocked"` / `highestSeverity: "none"` で fail-closed 終端する。`blocked` は環境要因でレビュー自体が実施不能だったことを表す専用状態で、コード指摘を表す `needs-fix` とは呼び出し元の扱いが異なり fix エージェントを起動せず即座に終端する — `needs-fix` / `critical` は使わない。無関係なコードへの修正試行で修正予算を消費させないため）
 - **Low（要改善）含む指摘が 1 件でも `needs-fix`**。指摘なしなら `ok`
 
 `ok` の場合は push + PR 作成（Step 4.5）を経て Merge ステップへ進む。`needs-fix` の場合は fix エージェントで**ローカルに再コミット**し再レビューする（push しない）。**Review は最大 3 回**実施し、最終回（残り 0 回）の `needs-fix` では再レビューできないため fix を行わず収束失敗とする（修正後に必ず再レビューする原則を守るため。fix は実質最大 2 回）。3 回で収束しない場合は**push も PR 作成も行わず** `blocked` として記録して次のイシューへ進む。
