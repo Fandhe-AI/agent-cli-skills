@@ -53,6 +53,13 @@ strict はセキュリティ要件ではない。「チェックが現在の bas
 「push トリガ workflow はあるが `paths` フィルタでこの head では起動しなかった」場合を
 区別した（前者はどの head でも恒久的に補償策不成立、後者は該当 push があれば成立し得る）。
 
+**注記（`.yml`/`.yaml` 拡張子）**: この測定時点の横断確認は `.github/workflows/*.yml` のみを
+対象にしており、GitHub Actions が同様に認識する `.yaml` 拡張子の workflow ファイルは確認して
+いない（自動マージ設計側の必須 workflow 集合の決め方も同じ理由で `*.yml`/`*.yaml` 両方の確認
+を要求するよう修正済み。`skills/implement-issue-tree/references/automerge-design.md` 参照）。
+5 リポいずれかに `.yaml` 拡張子の workflow ファイルが存在する場合、この表の判定は再測が必要
+になり得る。
+
 **注記（プローブ仕様変更との整合性）**: この記録は「意味的コンフリクト検出に必須な
 workflow 集合の被覆確認（`required_missing`）」と「取得上限 100 件到達チェック」を
 プローブへ追加する前に取得したものである。両追加は `push_total >= 1` の場合の判定を
