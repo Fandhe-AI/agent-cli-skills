@@ -210,7 +210,20 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
     # 「ラン完了後の base CI green」補償策そのものを無効化する）。ここでは
     # continue で次のリポへ進むのみとし、その場での取り直しはしない
     # （同じ競合が再発し得るため、呼び出し側が改めてプローブ全体を再実行する）。
+    # 再取得自体が認証切れ・ネットワーク断・レート制限で失敗した場合、stderr を
+    # 捨てたままだと recheck が空文字や非 SHA になり得る。それを head と単純比較
+    # すると API 障害を「base head 更新のレース」と誤分類し、運用者を再測定へ
+    # 誘導してしまう（実際の障害の是正から遠ざける）。そこで冒頭の head 取得と
+    # 同様に HTTP status での成否確認 → 40 桁 hex 形式の検証を先に行い、
+    # 「API 障害」と「実際の SHA 不一致」を別メッセージで区別する。
+    recheck_code=$(gh api -i "repos/${repo}/commits/${db_enc}" 2>/dev/null | awk 'NR==1{print $2}')
+    if [ "${recheck_code}" != "200" ]; then
+      echo "${repo}: 判定不能 — 集計中の head 再取得に失敗（HTTP ${recheck_code:-?}）。base 更新のレースと区別できないため判定不能とする"; continue
+    fi
     recheck=$(gh api "repos/${repo}/commits/${db_enc}" --jq '.sha' 2>/dev/null)
+    if ! printf '%s' "${recheck}" | grep -Eq '^[0-9a-f]{40}$'; then
+      echo "${repo}: 判定不能 — 集計中の head 再取得が 40 桁 hex を返さない（API 応答異常）"; continue
+    fi
     if [ "${recheck}" != "${head}" ]; then
       echo "${repo}: 判定不能 — 集計中に base head が更新された（旧: ${head:0:8} / 新: ${recheck:0:8}）"; continue
     fi
