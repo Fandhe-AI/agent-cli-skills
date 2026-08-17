@@ -166,6 +166,25 @@ fi
 PARENT_URL=$(printf '%s' "${ISSUE_JSON}" | jq -r '.parent_issue_url // empty')
 CURRENT_PARENT=""
 if [[ -n "${PARENT_URL}" ]]; then
+  # sub-issue はリポジトリを跨いで紐付けられる。parent_issue_url は
+  # https://api.github.com/repos/<owner>/<repo>/issues/<n> の形で親の owner/repo を含むため、
+  # 番号だけを取り出すと (a) 別リポの親に対して本リポ宛の DELETE を撃って失敗する
+  # (b) 番号が偶然 --new-parent と一致すると already-attached と誤判定する、の 2 つが起きる。
+  # 対象リポジトリの同定には、追加の API を叩かずに済む対象 issue 自身の repository_url を使う
+  # （--repo 省略時の REPO_PATH は {owner}/{repo} プレースホルダのため比較に使えない）。
+  PARENT_REPO_URL="${PARENT_URL%/issues/*}"
+  SELF_REPO_URL=$(printf '%s' "${ISSUE_JSON}" | jq -r '.repository_url // empty')
+  if [[ -z "${SELF_REPO_URL}" ]]; then
+    echo "エラー: イシュー #${ISSUE} の repository_url を解決できない" >&2
+    exit 2
+  fi
+  if [[ "${PARENT_REPO_URL}" != "${SELF_REPO_URL}" ]]; then
+    # 別リポジトリの親からの取り外しは本スクリプトの対応範囲外。誤ったリポジトリへ
+    # DELETE を撃つ前に fail-closed で停止する
+    echo "エラー: 現在の親が別リポジトリにある（${PARENT_URL}）。本スクリプトは同一リポジトリ内の付け替えのみを扱う" >&2
+    echo "対処: 親リポジトリ側で手動で取り外すか、--repo を親リポジトリに合わせて実行する" >&2
+    exit 2
+  fi
   CURRENT_PARENT=$(printf '%s' "${PARENT_URL}" | grep -oE '[0-9]+$' || true)
 fi
 

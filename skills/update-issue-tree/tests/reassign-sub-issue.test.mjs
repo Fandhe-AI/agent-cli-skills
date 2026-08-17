@@ -162,6 +162,29 @@ test('ケース15: 孤児経路の POST が "only have one parent" → exit 7（
   assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
 })
 
+test('ケース16: 親が別リポジトリ → exit 2、DELETE も POST も呼ばれない', () => {
+  // sub-issue はリポジトリを跨いで紐付けられる。番号だけを見ると本リポ宛の DELETE を
+  // 撃って失敗する（PR #314 codex P1）
+  const r = run(['--issue', '22', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentRepo: 'other/repo',
+  })
+  assert.equal(r.status, 2)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が呼ばれていないこと')
+  assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が呼ばれていないこと')
+})
+
+test('ケース17: 別リポの親の番号が --new-parent と一致しても already-attached と誤判定しない', () => {
+  // 別リポの #7 配下にあるだけで、本リポの #7 には付いていない
+  const r = run(['--issue', '23', '--new-parent', '7'], {
+    parentBefore: '7',
+    parentRepo: 'other/repo',
+  })
+  assert.equal(r.status, 2)
+  assert.ok(!r.stdout.includes('already-attached'), 'already-attached を返していないこと')
+})
+
 test('ケース11: gh auth status が非ゼロ → exit 2、API 呼び出し無し', () => {
   const r = run(['--issue', '1', '--new-parent', '2'], {
     authFail: true,
