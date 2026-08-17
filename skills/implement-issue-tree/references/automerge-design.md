@@ -112,8 +112,8 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 - **双方向で検証不能になること**: 前提条件「マージ先ブランチが CI green」はランの入口条件でもあるため、push CI が無いリポでは*ラン前の前提確認*も*ラン後の補償確認*も同じ理由で成立しない。「実行されていない」を「green」と読み替えてはならない。
 - **必須 workflow 集合の決め方**: 呼び出し側が事前に対象リポジトリの `.github/workflows/*.yml` を確認し、`on.push` を持ち意味的コンフリクトを検出できる workflow（ビルド・テスト等のジョブを含む workflow。常時起動するだけの軽量ドキュメント用 workflow は含めない）の**ファイル先頭 `name:` の値**（Actions UI・`gh run list --json workflowName` の `workflowName` に表示される workflow レベルの名前であり、workflow 内の個々の job 名ではない。yaml のファイル名でもない）を必須集合として列挙する。この列挙はプローブが自動導出しない（`paths` フィルタの評価はプローブの外で人間または呼び出し側が行う）。必須集合が空・未指定のリポジトリはプローブ対象外とし判定不能として扱う。
 - **`workflowName` は同名衝突があり得る識別子**: GitHub Actions は複数の workflow ファイルが同一の `name:` を持つことを許容する仕様のため、`workflowName` のみで必須集合と観測結果を突き合わせると、必須 workflow とは無関係な同名の軽量 workflow が成功しただけで `required_missing` が空になり green と誤判定し得る（本来必須の workflow が `paths` フィルタ等で未起動でも検出できない）。そのためプローブは判定の直前に**対象リポジトリの全 active workflow を `name` → `path` で列挙し、必須集合の各名前がちょうど 1 つの `path` にのみ対応することを確認する**。対応する `path` が 0 件（該当名の active workflow が存在しない）でも複数件（同名衝突）でも、`workflowName` による同定が意味をなさない点は同じであるため、いずれも判定不能として扱う（fail-closed。0 件の復旧は必須集合の名前指定を見直すこと、複数件の復旧は該当 workflow の `name:` を一意な値へ変更すること）。
-- **`--paginate` と `--jq` の併用は 1 回の `jq` 呼び出しに集約する**: `gh api --paginate --jq '<filter>'` は `--jq` のフィルタを**ページごとに独立して適用**し、結果を JSON 値として連結出力する仕様のため、`group_by(.name)` のようにページを跨いで集約する必要がある処理をそのまま渡すと、同名 workflow が別ページに分かれた場合に検出できない（ページ内でしか重複を見ない）。そのため、workflow 一覧の取得は `--paginate --slurp` で全ページの生レスポンスを 1 つの配列へ集約してから `--jq` で `.[].workflows[]` を展開する（`--slurp` は `--paginate` と組み合わせたときにページ単位ではなく全体を 1 回の `jq` 実行に渡す）。
-- **プローブ手順**: 既定ブランチは `gh repo view --json defaultBranchRef` で解決する（`main` 決め打ち禁止）。ブランチ名は `jq -sRr '@uri'` でエンコードしてから API パスへ展開する（`release/1.0` 等の `/` 対策）。head sha の存在確認は終了コードではなく HTTP status で行う（`gh api` はエラーも stdout に出すため）。続いて `gh api repos/<repo>/actions/workflows --paginate --slurp --jq '[.[].workflows[] | select(.state == "active") | {name, path}]'` で全ページを集約した active workflow の `name`→`path` 対応を取得し、必須集合の各名前について対応する `path` の件数を数える。1 件ちょうどでない名前（0 件・複数件のいずれも）が 1 つでもあればその時点で判定不能として次のリポへ進む（`gh run list` を呼ぶ前に fail-closed）。次に `gh run list -R <repo> -c <head> -L 100 --json workflowName,status,conclusion,event` を取得し、応答が配列であることを検証したうえで**配列長が取得上限 100 件に到達していないことも検証する**（到達時は取得できた分だけを集計すると取得範囲外の失敗・未完了 run を見落とすため、判定不能として扱う。件数を上げる場合もこの上限チェック自体は必須のまま残す）。続いて `event == "push"` の件数と `workflowName` 集合のみを読む（`workflowName` 等の自由文はシェルへ展開せず jq 内の比較に閉じる。比較対象は呼び出し側が `--arg` で渡す必須集合の文字列のみ）。`while` / `for` ループはインライン実行不可の環境があるため 1 ファイルにしてから `bash <file> <repo>:<workflow1>,<workflow2>...` で実行する（`ruleset-policy.md` 手順 A / 手順 B と同型）。1 リポの判定不能で全体を止めない（`exit` ではなく `continue` で次のリポへ進む）。
+- **`--paginate` と `--jq` の併用は 1 回の `jq` 呼び出しに集約する**: `gh api --paginate --jq '<filter>'` は `--jq` のフィルタを**ページごとに独立して適用**し、結果を JSON 値として連結出力する仕様のため、`group_by(.name)` のようにページを跨いで集約する必要がある処理をそのまま渡すと、同名 workflow が別ページに分かれた場合に検出できない（ページ内でしか重複を見ない）。そのため、workflow 一覧の取得は `--paginate --slurp` で全ページの生レスポンスを 1 つの配列へ集約し、その**生 JSON を外部の `jq` へパイプ**して `.[].workflows[]` を展開する。`gh api` は `--slurp` と `--jq` の併用を拒否する（`the --slurp option is not supported with --jq or --template`）ため、`--paginate --slurp --jq '<filter>'` と書くと 1 リポも判定できない。`2>/dev/null` でエラーを捨てていると全リポが判定不能へ倒れ、fail-closed なので危険側ではないものの補償策が丸ごと無効化される。外部 `jq` に依存するため、実行前に `command -v jq` で存在確認して不在なら判定不能とする（同じ制約と対処は `../SKILL.md` の「(B) 人間の診断専用」ブロックにも記載がある）。
+- **プローブ手順**: 既定ブランチは `gh repo view --json defaultBranchRef` で解決する（`main` 決め打ち禁止）。ブランチ名は `jq -sRr '@uri'` でエンコードしてから API パスへ展開する（`release/1.0` 等の `/` 対策）。head sha の存在確認は終了コードではなく HTTP status で行う（`gh api` はエラーも stdout に出すため）。続いて `gh api repos/<repo>/actions/workflows --paginate --slurp | jq '[.[].workflows[] | select(.state == "active") | {name, path}]'` で全ページを集約した active workflow の `name`→`path` 対応を取得し（`--slurp` と `--jq` は併用不可のため外部 `jq` へパイプする。`jq` 不在時は判定不能）、必須集合の各名前について対応する `path` の件数を数える。1 件ちょうどでない名前（0 件・複数件のいずれも）が 1 つでもあればその時点で判定不能として次のリポへ進む（`gh run list` を呼ぶ前に fail-closed）。次に `gh run list -R <repo> -c <head> -L 100 --json workflowName,status,conclusion,event` を取得し、応答が配列であることを検証したうえで**配列長が取得上限 100 件に到達していないことも検証する**（到達時は取得できた分だけを集計すると取得範囲外の失敗・未完了 run を見落とすため、判定不能として扱う。件数を上げる場合もこの上限チェック自体は必須のまま残す）。続いて `event == "push"` の件数と `workflowName` 集合のみを読む（`workflowName` 等の自由文はシェルへ展開せず jq 内の比較に閉じる。比較対象は呼び出し側が `--arg` で渡す必須集合の文字列のみ）。`while` / `for` ループはインライン実行不可の環境があるため 1 ファイルにしてから `bash <file> <repo>:<workflow1>,<workflow2>...` で実行する（`ruleset-policy.md` 手順 A / 手順 B と同型）。1 リポの判定不能で全体を止めない（`exit` ではなく `continue` で次のリポへ進む）。
 
   ```bash
   #!/usr/bin/env bash
@@ -125,6 +125,12 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
   # workflow のみを根拠に green 判定しないため）。1 リポの判定不能で全体を止めない
   # （continue で継続）。
   set -uo pipefail
+
+  # 外部 jq への依存を先に確認する。本スクリプトは workflow 一覧の集約に
+  # `gh api --paginate --slurp | jq` を使う（gh は --slurp と --jq を併用できない）。
+  # jq が無いと全リポが「判定不能」になり、補償策が丸ごと無効化されたことに
+  # 気づけないため、ここで止める（SKILL.md の (B) 診断コマンドと同じ扱い）。
+  command -v jq >/dev/null || { echo "jq が見つからないためプローブを中断する" >&2; exit 1; }
 
   for entry in "$@"; do
     repo="${entry%%:*}"
@@ -155,8 +161,13 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
     # jq フィルタがページ単位で適用され、ページを跨いだ同名重複を検出できない
     # （group_by(.name) がページ内でしか集約されない）。そのため --slurp で全ページの
     # 生レスポンスを 1 配列に集約してから 1 回の jq 呼び出しで展開する。
-    workflows=$(gh api "repos/${repo}/actions/workflows" --paginate --slurp \
-                  --jq '[.[].workflows[] | select(.state == "active") | {name, path}]' 2>/dev/null)
+    # --slurp は --jq と併用できない（gh が
+    # "the --slurp option is not supported with --jq or --template" で拒否する）ため、
+    # gh 側は生 JSON を出すだけにして外部の jq へパイプする。併用形のまま
+    # 2>/dev/null を付けると全リポが「判定不能」へ倒れ、fail-closed ではあるが
+    # 補償策そのものが無効化される。
+    workflows=$(gh api "repos/${repo}/actions/workflows" --paginate --slurp 2>/dev/null \
+                  | jq '[.[].workflows[] | select(.state == "active") | {name, path}]' 2>/dev/null)
     if ! printf '%s' "${workflows}" | jq -e 'type == "array"' >/dev/null 2>&1; then
       echo "${repo}: 判定不能 — workflow 一覧を取得できない"; continue
     fi
@@ -185,7 +196,8 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
       echo "${repo}: 判定不能 — run list が取得上限 100 件に到達（切り捨ての可能性。ページングで全件取得するか件数を上げて再測する）"; continue
     fi
 
-    printf '%s' "${runs}" | jq --arg r "${repo}" --arg b "${db}" --arg h "${head:0:8}" --arg req "${required_csv}" '
+    # -c で 1 リポ 1 行にする（複数リポを並べたときに目視で差分を追えるようにするため）。
+    printf '%s' "${runs}" | jq -c --arg r "${repo}" --arg b "${db}" --arg h "${head:0:8}" --arg req "${required_csv}" '
       ($req | split(",") | map(gsub("^\\s+|\\s+$";""))) as $required |
       [.[] | select(.event == "push")] as $p |
       ($p | map(.workflowName)) as $seen |
@@ -211,6 +223,16 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
   ```
   $ bash probe.sh "Fandhe-AI/agent-cli-skills:CI"
   {"repo":"Fandhe-AI/agent-cli-skills","branch":"main","head":"0f946618","push_total":1,"required_missing":[],"incomplete":0,"failed":0,"unknown":0}
+  ```
+
+  fail-closed 経路も同じスクリプトで実測している（`gh run list` へ到達する前に打ち切られる）:
+
+  ```
+  $ bash probe.sh "Fandhe-AI/agent-cli-skills:NoSuchWorkflow"
+  Fandhe-AI/agent-cli-skills: 判定不能 — 必須 workflow 名が active workflow のちょうど1 path に対応しない（0件=未存在 / 複数件=同名衝突）: NoSuchWorkflow:0
+
+  $ bash probe.sh "Fandhe-AI/agent-cli-skills"
+  Fandhe-AI/agent-cli-skills: 判定不能 — 必須 workflow 集合が未指定（"owner/repo:name1,name2" 形式で明示すること）
   ```
 
   判定は以下の表に従う。
