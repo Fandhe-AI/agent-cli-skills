@@ -237,6 +237,60 @@ test('除算側: return { a: 1 } の直後の / は正規表現と誤認され�
 })
 
 // ---------------------------------------------------------------------------
+// 関数式・アロー関数本体終端後の / の除算/正規表現判定
+// （github-actions/codex-review 新規指摘。threadId PRRT_kwDORuXFg86Z7FGO）
+// ---------------------------------------------------------------------------
+// アロー関数式・関数式はそれ自体が式の値であり、本体ブロック `{}` は BLOCK 種別のまま
+// （オブジェクトリテラルではない）だが、対応する `}` の直後は文位置（OPERATOR）ではなく
+// 式の値（VALUE）である。旧実装は BLOCK 種別の `}` を無条件で OPERATOR 扱いしていたため、
+// `function(){} / 2` の `/` を正規表現の開始と誤認し、正規表現走査が未終端エラーになり得た。
+
+test('除算側: アロー関数式 () => {} の直後（セミコロンなし）の / は正規表現と誤認されない（github-actions 新規指摘）', () => {
+  const src = '{ x = () => {} / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 関数式 function(){} の直後（セミコロンなし）の / は正規表現と誤認されない（github-actions 新規指摘）', () => {
+  const src = '{ x = function(){} / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 名前付き関数式 function f(){} の直後の / は正規表現と誤認されない（対比ケース: 式位置なら名前があっても式）', () => {
+  const src = '{ x = function f(){} / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: async 関数式 async function(){} の直後の / は正規表現と誤認されない（async の statement-start 透過の回帰）', () => {
+  const src = '{ x = async function(){} / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: async アロー関数 async () => {} の直後の / は正規表現と誤認されない', () => {
+  const src = '{ x = async () => {} / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: 文位置の関数宣言 function foo(){} の直後（セミコロンなし）の /re/ は正規表現として扱われる（対比ケース: 宣言は文位置のまま）', () => {
+  const src = '{ function foo(){}\n/re/.test(s) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: async 関数宣言 async function foo(){} の直後の /re/ は正規表現として扱われる（対比ケース）', () => {
+  const src = '{ async function foo(){}\n/re/.test(s) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 連続する関数宣言 function foo(){} function bar(){} は互いに文位置のまま（対比ケース）', () => {
+  const src = '{ function foo(){} function bar(){} y = a / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: switch (x) { case 1: function f(){} } のような文位置の関数宣言も文位置のまま（対比ケース）', () => {
+  const src = '{ switch (x) { case 1: function f(){}\n/re/.test(s) } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
 // 制御構文キーワードとプロパティ名の区別（`.catch` 等）
 // ---------------------------------------------------------------------------
 
@@ -390,6 +444,33 @@ test('正規表現側: debugger の直後の /re/ は正規表現として扱わ
 
 test('除算側: break outer; のラベルは識別子として通常どおり読める（対比ケース）', () => {
   const src = '{ outer: while (1) { break outer; } y = a / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
+// ラベル付き break/continue の restricted production（Cursor Bugbot 新規指摘。
+// HEAD sha cf55f2e。PR #351 コメント項目 12 参照）
+// ---------------------------------------------------------------------------
+// `break`/`continue` とラベルの間に LineTerminator が無い場合、ASI は発生せず
+// `break outer` 全体が 1 文として完結する。ラベルを素朴な識別子として読み、
+// prevSignificant を VALUE にしてしまうと、直後（同一行でもラベルの後にセミコロンが
+// 無く直接続く場合）の `/` を除算と誤認し得る。
+
+test('正規表現側: break outer（セミコロンなし、改行なしで /}/ が続く）は正規表現として扱われる（Cursor Bugbot 新規指摘）', () => {
+  const src = '{ outer: while (1) { break outer\n/}/.test(s) } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: continue outer（セミコロンなし、改行なしで /}/ が続く）は正規表現として扱われる（Cursor Bugbot 新規指摘）', () => {
+  const src = '{ outer: while (1) { continue outer\n/}/.test(s) } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: break\\nouter（break とラベルの間に改行）は ASI で別文になり通常の識別子として読める（対比ケース）', () => {
+  // break と outer の間に LineTerminator があるため restricted production は適用されず、
+  // ASI で 'break;' が完結し、'inner' は新しい文（ラベル文 inner: ...）の先頭になる
+  // （外側の while と同じ 'outer' ラベルを再宣言すると SyntaxError になるため 'inner' を使う）。
+  const src = '{ outer: while (1) { break\ninner: y = a / 2 } }'
   assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
 })
 

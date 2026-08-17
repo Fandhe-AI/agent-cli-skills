@@ -111,6 +111,26 @@
 // `IDENT_CONT_RE` へ渡し、一致した場合はコードポイントの UTF-16 長（1 または 2）だけ
 // 前進する）。
 //
+// 追加バグ その5（PR #351 Cursor Bugbot 新規指摘。HEAD sha cf55f2e）:
+//   12. `break`/`continue` はラベル付き形式（`break outer;`）を取り得る。ECMAScript の
+//       restricted production により、`break`/`continue` とラベルの間に LineTerminator が
+//       無い場合はラベル付き break/continue 文（1 文）として扱われ、ASI は発生しない。
+//       10. の修正で `break`/`continue` を REGEX_PRECEDING_KEYWORDS に加えたことで
+//       裸の `break\n/re/` は正しく扱えるようになったが、素朴な識別子読み取り（else 分岐）は
+//       ラベル自体を通常の識別子として扱ってしまい、`lastWord` がラベル名（例 `outer`）に
+//       上書きされ `prevSignificant` が VALUE になっていた。ASI 後の位置と誤って同じ状態に
+//       なるため、`break outer\n/}/.test(s)` のような同一行のラベル付き break 直後の `/` を
+//       除算と誤認し、正規表現内の `}` でブロックが早期に閉じ得た。
+// 12. は `break`/`continue` を読んだ直後（`lastWord` が 'break'/'continue' のまま）に
+// LineTerminator を 1 つも挟まずに続く識別子を「ラベル」と判定し、通常の識別子読み取りとは
+// 区別して扱う。ラベルを消費した後の状態は、restricted production が適用されなかった場合と
+// 同じ「文が完結した直後の文位置」（`prevSignificant = 'operator'`、`lastWord = null`）にする
+// （`break outer;` 全体で 1 文が終わるため、`break` 単体後の ASI 経路と得たい走査状態は同じ）。
+// LineTerminator の有無は、直前の意味のあるトークン（`break`/`continue`）を読んでから現在
+// までに空白・ブロックコメント内に改行を 1 個以上通過したかを `sawNewlineAfterLastWord` で
+// 追跡して判定する（行コメントは改行の手前で止まるだけで、その改行自体は次ループの空白
+// 分岐が拾うため個別対応は不要）。
+//
 // ファイル名が `*.test.mjs` に一致しないため `node --test` の glob には拾われない
 // （tests/lib/workflow-script-contract.mjs と同じ配置規約）。
 //
@@ -186,6 +206,13 @@ const IDENT_START_RE = /[A-Za-z0-9_$\p{L}\p{Nl}\p{Nd}]/u
 // 含まれないため、開始文字集合（IDENT_START_RE）には加えず継続文字集合にのみ合成する。
 const IDENT_CONT_RE = /[A-Za-z0-9_$\p{L}\p{Nl}\p{Nd}\p{Mn}\p{Mc}\u200C\u200D]/u
 
+// ECMAScript の LineTerminator（`\n`・`\r`・U+2028 LINE SEPARATOR・U+2029 PARAGRAPH
+// SEPARATOR）の判定。restricted production（break/continue のラベル、後置 ++/-- 等）は
+// `\n` だけでなくこの 4 種すべてを LineTerminator として扱う仕様のため、`\n` のみを
+// チェックすると `\r` 単体や U+2028/U+2029 区切りの入力で判定を誤り得る
+// （上記コメント項目 12 参照）。
+const LINE_TERMINATOR_RE = /[\n\r\u2028\u2029]/
+
 /**
  * `text[i]` を起点とする 1 コードポイント分の文字列を返す（サロゲートペアなら 2
  * UTF-16 コード単位、それ以外は 1 コード単位）。`text[i]` を直接正規表現テストすると
@@ -225,7 +252,12 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
   // されるため、`c ? { a: 1 } : {}` のように三項演算子の分岐にオブジェクトリテラルが
   // 入れ子になっても、内側の `key: value` の `:` が外側の三項演算子の対応関係を誤って
   // 消費しない（グローバル 1 変数で数えるとこの誤消費が起こり得る）。
-  const stack = [{ type: FRAME_CODE, kind: BRACE_KIND_BLOCK, ternaryDepth: 0 }]
+  // `forceValue` はこのフレームに対応する `}` を通過した直後の走査状態を、`kind`
+  // （BLOCK/LITERAL）による既定ルールより優先して VALUE に強制するかどうか（上記
+  // コメント項目 13 参照）。関数式・アロー関数の本体ブロックのように、ブロック自体は
+  // BLOCK 種別のまま（オブジェクトリテラルではない）だが、その関数全体が式の値である
+  // ケースに使う。既定は false（既存の kind ベースのルールをそのまま使う）。
+  const stack = [{ type: FRAME_CODE, kind: BRACE_KIND_BLOCK, ternaryDepth: 0, forceValue: false }]
   let i = openBraceIndex + 1
 
   // 直前の意味のあるトークンの分類。'operator'（値を期待する位置。走査開始直後の
@@ -257,12 +289,44 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
   // （JS の文法上、文位置の裸 `{` は常にブロック文であり、式としてのオブジェクトリテラルは
   // 文位置には現れ得ないため）。
   let afterStatementColon = false
+  // 直前の意味のあるトークンの後が「文の先頭位置」かどうか（上記コメント項目 13 参照）。
+  // `function` キーワードを FunctionDeclaration（文位置）か FunctionExpression（式位置）か
+  // 判定するために使う。両者は `prevSignificant` だけでは区別できない（`;` の直後・
+  // ブロック開始直後のどちらも文位置だが、その他の演算子直後の式位置と同じく
+  // `prevSignificant = 'operator'` になるため）。既定 true（走査開始位置は文位置）で、
+  // 文の先頭になり得る位置（`;`・ブロック文の `{` 直後・ブロック文の `}` 直後）でのみ
+  // 明示的に true に戻し、それ以外のトークンを読むたびに false へリセットする。
+  // `async` は例外的に、直前が文位置なら通過後も文位置のまま保持する（`async function`
+  // 宣言を式と誤判定しないため）。
+  let atStatementStart = true
+  // `function` キーワードを読んだ直後、対応する本体 `{` に到達するまで保持する
+  // 「この関数は式位置で宣言されたか」の判定結果。本体の `{` に到達した時点で消費して
+  // null に戻す（`null` は「保留中の function キーワードが無い」ことを表す）。
+  // 制限事項: 名前・引数リストの間に別の `{`（デフォルト引数のオブジェクトリテラル/
+  // 分割代入パターン等、例 `function f(x = {}) {}`）が挟まると、その `{` で先に消費・
+  // クリアされてしまい、本来の本体 `{` には反映されない。この場合は forceValue が
+  // 立たず、`kind` ベースの既定ルール（BLOCK → OPERATOR）にフォールバックするのみで、
+  // 誤ってエラーになったり無限ループしたりはしない（安全側の劣化に留まる）。
+  let pendingFunctionIsExpression = null
+  // 直近の意味のあるトークンが `break`/`continue` だった場合、それを読んでから現在地点
+  // までの間に LineTerminator を 1 つ以上通過したかどうか。ラベル付き break/continue
+  // 文の restricted production（`break`/`continue` とラベルの間に改行を挟めない）を
+  // 判定するために使う（上記コメント項目 12 参照）。空白の読み飛ばしとブロックコメント
+  // 内の改行の両方で true にする。`break`/`continue` 以外のトークンを読んだ直後は
+  // 意味を持たないため、`break`/`continue` を読むたびに false へリセットする。
+  let sawNewlineAfterLastWord = false
 
   while (i < text.length) {
     const ch = text[i]
 
     // 空白はトークン境界に影響しないため、走査状態を一切更新せず読み飛ばす。
+    // ただし LineTerminator の通過だけは sawNewlineAfterLastWord で記録する
+    // （ラベル付き break/continue の restricted production 判定に使う）。ECMAScript の
+    // LineTerminator は `\n`・`\r`・U+2028（LINE SEPARATOR）・U+2029（PARAGRAPH SEPARATOR）
+    // の 4 種であり、`\n` だけを見ると `\r` 単体や U+2028/U+2029 で区切られた
+    // restricted production を誤判定し得る（LINE_TERMINATOR_RE で判定する）。
     if (/\s/.test(ch)) {
+      if (LINE_TERMINATOR_RE.test(ch)) sawNewlineAfterLastWord = true
       i++
       continue
     }
@@ -270,6 +334,8 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
     // 行コメント。次の改行まで読み飛ばす。改行なしで EOF に達しても未終端エラーにはしない
     // （行コメントは改行または EOF のどちらでも正当に終端する）。走査状態は更新しない
     // （コメント前の直前トークンがそのまま「意味のある直前トークン」であり続ける）。
+    // 行コメント自体が跨ぐ改行（コメント終端の改行）は消費せず残すため、次ループの
+    // 空白分岐が拾って sawNewlineAfterLastWord を更新する（個別対応は不要）。
     if (ch === '/' && text[i + 1] === '/') {
       i += 2
       while (i < text.length && text[i] !== '\n') i++
@@ -278,12 +344,15 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
 
     // ブロックコメント。`*/` まで読み飛ばす。未検出なら未終端として throw。
     // 走査状態は更新しない（`/* c */ /re/` の 2 個目の `/` はコメント直前ではなく
-    // コメントより前の直前トークンで判定する）。
+    // コメントより前の直前トークンで判定する）。コメント内部に改行が含まれる場合は
+    // sawNewlineAfterLastWord を更新する（`break /* \n */ outer` のような書き方でも
+    // restricted production の判定が崩れないようにするため）。
     if (ch === '/' && text[i + 1] === '*') {
       const end = text.indexOf('*/', i + 2)
       if (end === -1) {
         throw new Error(`未終端のブロックコメント（開始位置 ${i}）`)
       }
+      if (LINE_TERMINATOR_RE.test(text.slice(i, end + 2))) sawNewlineAfterLastWord = true
       i = end + 2
       continue
     }
@@ -318,6 +387,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -333,6 +403,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -378,6 +449,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
         afterArrow = false
         afterControlParen = false
         afterStatementColon = false
+        atStatementStart = false
         continue
       }
       // 除算演算子。演算子自身の直後は値を期待する位置に戻る。
@@ -388,6 +460,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -409,12 +482,32 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       const word = text.slice(i, j)
       const isNumberLike = /^[0-9]/.test(word)
       i = j
+      // `function`/`async` の判定に使う、このトークンを読む直前の状態を確保する
+      // （`afterDot`/`atStatementStart` 自体はこのブロック内で上書きされるため、判定は
+      // このコピーで行う。上記コメント項目 13 参照）。
+      const wasStatementStart = atStatementStart
+      const wasAfterDot = afterDot
       if (afterDot) {
         // `.` 直後の識別子はプロパティ/メソッド名であり、綴りが制御構文キーワード・
         // 正規表現先行キーワードと一致していても文法上の意味は持たない
         // （`obj.catch(...)`・`obj.if(...)`・`arr.with(...)` 等）。常に VALUE として扱い、
         // `lastWord` も設定しない（後続の `(` が制御構文と誤認されないようにするため）。
         prevSignificant = 'value'
+        lastWord = null
+      } else if (
+        !isNumberLike &&
+        (lastWord === 'break' || lastWord === 'continue') &&
+        !sawNewlineAfterLastWord
+      ) {
+        // ラベル付き break/continue 文（上記コメント項目 12 参照）。ECMAScript の
+        // restricted production により `break`/`continue` とラベルの間に LineTerminator が
+        // 無ければ、この識別子は独立した文の先頭ではなく同じ break/continue 文のラベルで
+        // あり、ASI は発生しない。`break outer;` 全体で 1 文が完結するため、ラベルを
+        // 消費した直後の走査状態は「文が完結した直後の文位置」（break/continue 単体を
+        // 読んだ直後と同じ OPERATOR）にする。`lastWord` は null にリセットする
+        // （ラベルはキーワードではなく、後続の `(` 制御構文判定・`{` ブロック判定のいずれの
+        // 対象語にもならないため）。
+        prevSignificant = 'operator'
         lastWord = null
       } else if (lastWord === 'for' && word === 'await') {
         // `for await (const x of xs)` の特別扱い（PR #351 codex 指摘）。`await` 自体は
@@ -427,14 +520,31 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       } else if (!isNumberLike && REGEX_PRECEDING_KEYWORDS.has(word)) {
         prevSignificant = 'operator'
         lastWord = word
+        // break/continue を読んだ直後からの LineTerminator 通過状態を数え直す
+        // （上記コメント項目 12 の restricted production 判定はこの語基準で行うため）。
+        sawNewlineAfterLastWord = false
       } else {
         prevSignificant = 'value'
         lastWord = isNumberLike ? null : word
+      }
+      if (!wasAfterDot && !isNumberLike && word === 'function') {
+        // `function` キーワードを読んだ時点の文位置状態で FunctionDeclaration（文位置）か
+        // FunctionExpression（式位置）かを判定し、対応する本体 `{` に引き継ぐための保留
+        // 状態として記録する（上記コメント項目 13 参照）。この後の `(` 引数リスト・
+        // 関数名などのトークンは通常どおり処理を続け、対応する `{` を push する時点で
+        // `pendingFunctionIsExpression` を消費する。
+        pendingFunctionIsExpression = !wasStatementStart
       }
       afterDot = false
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      // `async` は `function` キーワードの直前に置かれ得る（`async function foo() {}`）。
+      // `async` 自体は式にも文にもなり得ないため、直前が文位置ならその文位置を保持したまま
+      // 通過させ、続く `function` が正しく宣言と判定されるようにする（`afterDot` 経由の
+      // プロパティ名 `obj.async` はここには来ないので誤爆しない）。それ以外の識別子は
+      // 通過後は必ず文位置ではなくなる（識別子 1 個で文が完結することはない）。
+      atStatementStart = !wasAfterDot && !isNumberLike && word === 'async' ? wasStatementStart : false
       continue
     }
 
@@ -448,6 +558,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -464,6 +575,10 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       // 判定に使えないため、この専用フラグで引き継ぐ）。
       afterControlParen = kind === 'control'
       afterStatementColon = false
+      // 制御文ヘッダーの終端（`if (c)` 等）の直後は、続くトークンが単一の Statement
+      // （通常は `{` だが、ブレースなしの単文も許される。`function` キーワードを含む）と
+      // なる文位置。呼び出し/グループ化の終端（VALUE）は逆に式の途中なので文位置ではない。
+      atStatementStart = kind === 'control'
       continue
     }
 
@@ -475,6 +590,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -486,6 +602,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -499,6 +616,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -515,6 +633,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -527,6 +646,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = true
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -553,7 +673,16 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
           : prevSignificant === 'operator'
             ? BRACE_KIND_LITERAL
             : BRACE_KIND_BLOCK
-      stack.push({ type: FRAME_CODE, kind, ternaryDepth: 0 })
+      // このフレームの `}` 通過直後に、`kind` の既定ルールより優先して VALUE を強制するか
+      // どうか（上記コメント項目 13 参照）。アロー関数本体（`afterArrow`）は本体が常に
+      // ブロックであっても、アロー関数式自体は常に値であるため無条件で強制する。
+      // `function` キーワードの本体は、対応する `pendingFunctionIsExpression`（式位置で
+      // 宣言された場合のみ true）で判定する。両者とも、このブロックに対応する `{` を
+      // 消費した時点で `pendingFunctionIsExpression` をクリアする（次の無関係な `{` に
+      // 誤って引き継がれないようにするため）。
+      const forceValue = afterArrow || pendingFunctionIsExpression === true
+      pendingFunctionIsExpression = null
+      stack.push({ type: FRAME_CODE, kind, ternaryDepth: 0, forceValue })
       i++
       prevSignificant = 'operator' // ブロック/オブジェクトリテラルの中は値を期待する位置
       lastWord = null
@@ -561,6 +690,10 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      // ブロック文（`kind === BLOCK`）の内部は新しい文の先頭。オブジェクトリテラル/
+      // 分割代入パターン（`kind === LITERAL`）の内部はプロパティキー等の式位置であり、
+      // 文の先頭ではない。
+      atStatementStart = kind === BRACE_KIND_BLOCK
       continue
     }
 
@@ -580,6 +713,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
         afterArrow = false
         afterControlParen = false
         afterStatementColon = false
+        atStatementStart = false
         continue
       }
       if (stack.length === 0) {
@@ -587,13 +721,21 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       }
       i++
       // ブロック文の終端なら文位置（OPERATOR）、オブジェクトリテラル/分割代入パターンの
-      // 終端なら式の値（VALUE）。
-      prevSignificant = popped.kind === BRACE_KIND_LITERAL ? 'value' : 'operator'
+      // 終端なら式の値（VALUE）。ただし `popped.forceValue`（アロー関数本体・式位置の
+      // `function` 本体）が立っていれば、`kind` の既定ルールより優先して VALUE にする
+      // （上記コメント項目 13 参照。ブロック自体は BLOCK 種別のままだが、その関数全体は
+      // 式の値であるケース）。
+      prevSignificant = popped.forceValue || popped.kind === BRACE_KIND_LITERAL ? 'value' : 'operator'
       lastWord = null
       afterDot = false
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      // ブロック文が forceValue なしで終端した場合のみ、次のトークンは新しい文の先頭
+      // （`function foo(){} function bar(){}` のように次の宣言が続き得る）。オブジェクト
+      // リテラルの終端、または forceValue により式の値として終端した場合は文の先頭ではない
+      // （`function(){} / 2` の `/` が除算であるべきなのはこのため）。
+      atStatementStart = popped.kind === BRACE_KIND_BLOCK && !popped.forceValue
       continue
     }
 
@@ -611,6 +753,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -628,6 +771,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = false
+      atStatementStart = false
       continue
     }
 
@@ -656,11 +800,31 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterArrow = false
       afterControlParen = false
       afterStatementColon = isStatementColon
+      // 文位置のコロン（`case`/`default`/ラベル文）の直後は新しい Statement の先頭
+      // （`case 1: function foo(){}` のような裸の function 宣言もあり得る）。三項演算子や
+      // オブジェクトリテラルの `key:` は式の途中のままなので文の先頭ではない。
+      atStatementStart = isStatementColon
       continue
     }
 
-    // 上記以外の記号（二項演算子 `+ - * % < > 等`、`, ; = ! & | ~ ^` 等）。
-    // いずれも直後に値を期待する OPERATOR 位置として扱う。
+    // ';' は文の区切り。直後は常に新しい文の先頭（`function` の宣言/式判定に必要な
+    // 数少ない「真の文位置」の 1 つ。上記コメント項目 13 参照）であり、他の二項演算子
+    // （`+ - * % < >` `, = ! & | ~ ^` 等。値を期待する OPERATOR 位置ではあるが文の先頭
+    // ではない）とは区別して扱う。
+    if (ch === ';') {
+      i++
+      prevSignificant = 'operator'
+      lastWord = null
+      afterDot = false
+      afterArrow = false
+      afterControlParen = false
+      afterStatementColon = false
+      atStatementStart = true
+      continue
+    }
+
+    // 上記以外の記号（二項演算子 `+ - * % < > 等`、`, = ! & | ~ ^` 等）。
+    // いずれも直後に値を期待する OPERATOR 位置として扱う（文の先頭ではない）。
     i++
     prevSignificant = 'operator'
     lastWord = null
@@ -668,6 +832,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
     afterArrow = false
     afterControlParen = false
     afterStatementColon = false
+    atStatementStart = false
   }
 
   return -1
