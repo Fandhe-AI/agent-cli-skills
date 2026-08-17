@@ -25,12 +25,34 @@ Workflow の返却値（`done`・`failures`・`notStarted`）を確認し、`fai
 `scripts/implement-issue-tree.js` を変更した場合、以下でランタイムに受理される（起動可能である）
 ことを機械検証する。判定ロジックの実装は `tests/lib/workflow-script-contract.mjs` の 1 箇所に
 集約されており、CI（`workflow-loadability.test.mjs`）と本節の手動実測コマンドの双方が同じ実装を
-使う（実装が分岐して片方だけ stale 化する事故を防ぐ）。
+使う（実装が分岐して片方だけ stale 化する事故を防ぐ）。`workflow-loadability.test.mjs` が
+CI で実行されるのは上流リポジトリ（`Fandhe-AI/agent-cli-skills`）の `js-tests` ジョブ
+（`node --test "skills/**/*.test.mjs"`）に限られる契約であり、下流の vendoring 先には
+配布物として同梱されるのみで CI 登録は行わない（下流で新規に CI ジョブを設定する必要はない）。
+
+スキルの配置は導入形態で 3 レイアウトに分かれる（詳細は `../SKILL.md` の「使い方」参照）。
+以下のコマンドは配置を優先順位付きで解決してから実行するため、いずれのレイアウトでもそのまま
+使える:
 
 ```bash
-node --test skills/implement-issue-tree/tests/workflow-loadability.test.mjs
-node skills/implement-issue-tree/tests/lib/workflow-script-contract.mjs \
-  skills/implement-issue-tree/scripts/implement-issue-tree.js
+# スキルディレクトリを導入形態非依存に解決する（優先順位: skills/ → .agents/skills/ → .claude/skills/）。
+# 上流リポジトリでは skills/ と .claude/skills/（symlink）の両方が存在し得るため、
+# 複数一致時も中止せず先勝ちで解決する。
+IIT_SKILL_DIR=""
+for CANDIDATE in "skills/implement-issue-tree" ".agents/skills/implement-issue-tree" ".claude/skills/implement-issue-tree"; do
+  if [ -f "${CANDIDATE}/tests/lib/workflow-script-contract.mjs" ]; then
+    IIT_SKILL_DIR="${CANDIDATE}"
+    break
+  fi
+done
+if [ -z "${IIT_SKILL_DIR}" ]; then
+  echo "エラー: implement-issue-tree のスキルディレクトリが見つかりません（skills/ / .agents/skills/ / .claude/skills/ のいずれにも存在しません）" >&2
+  exit 1
+fi
+
+node --test "${IIT_SKILL_DIR}/tests/workflow-loadability.test.mjs"
+node "${IIT_SKILL_DIR}/tests/lib/workflow-script-contract.mjs" \
+  "${IIT_SKILL_DIR}/scripts/implement-issue-tree.js"
 ```
 
 **stale だった旧手順について**: かつて本節には `sed -E 's/^export //' scripts/implement-issue-tree.js`
@@ -70,13 +92,18 @@ meta 宣言の `export` のみを除去し、残りの `export` はランタイ�
 
 **履歴コミットに対する回帰検知能力の実証（一回限りの手動実行。CI テストではない）**:
 
+**上流リポジトリ専用。** `git show <sha>:skills/...` は上流リポジトリの git 履歴を参照するため、
+理由は後述のとおり下流の vendoring 先では実行できない。下流では実行しないこと。パイプ先は上記の
+解決スニペットで束縛した `IIT_SKILL_DIR` を使う（本ブロック単独で実行する場合は先に上記スニペットを
+実行して `IIT_SKILL_DIR` を束縛しておくこと）。
+
 ```bash
 git show efae3ab:skills/implement-issue-tree/scripts/implement-issue-tree.js \
-  | node skills/implement-issue-tree/tests/lib/workflow-script-contract.mjs -
+  | node "${IIT_SKILL_DIR}/tests/lib/workflow-script-contract.mjs" -
 # 期待: oversize-hard（528,837 B > 524,288）と parse-error の 2 違反、exit 1
 
 git show 1b5a647:skills/implement-issue-tree/scripts/implement-issue-tree.js \
-  | node skills/implement-issue-tree/tests/lib/workflow-script-contract.mjs -
+  | node "${IIT_SKILL_DIR}/tests/lib/workflow-script-contract.mjs" -
 # 期待: parse-error のみ（379,538 B でサイズは通る）、exit 1
 ```
 
