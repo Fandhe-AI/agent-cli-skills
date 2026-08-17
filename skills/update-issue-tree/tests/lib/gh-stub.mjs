@@ -22,7 +22,8 @@ function shQuote(value) {
  * @param {string} [fixture.issueId] GET が返す database id
  * @param {string} [fixture.parentBefore] 事前 GET が返す現在の親 issue 番号（'' = 親なし）
  * @param {string} [fixture.parentAfter] 事後 GET が返す親 issue 番号（未指定なら parentBefore を継続）
- * @param {string} [fixture.parentRepo] 親が属する owner/repo（既定 'o/r' = 対象 issue と同一）
+ * @param {string} [fixture.parentRepo] 事前 GET が返す親の owner/repo（既定 'o/r' = 対象 issue と同一）
+ * @param {string} [fixture.parentRepoAfter] 事後 GET が返す親の owner/repo（未指定なら parentRepo を継続）
  * @param {number} [fixture.deleteExit] DELETE の終了コード
  * @param {string} [fixture.deleteBody] DELETE 失敗時に stderr へ出す本文
  * @param {number} [fixture.postExit] POST の終了コード
@@ -39,6 +40,7 @@ export function createGhStub(fixture = {}) {
     // 親が属するリポジトリ。既定は対象 issue と同一（repository_url の o/r と一致）。
     // 'other/repo' 等を渡すと cross-repository sub-issue を再現できる
     parentRepo: 'o/r',
+    parentRepoAfter: undefined,
     deleteExit: 0,
     deleteBody: '',
     postExit: 0,
@@ -46,6 +48,7 @@ export function createGhStub(fixture = {}) {
     ...fixture,
   }
   if (f.parentAfter === undefined) f.parentAfter = f.parentBefore
+  if (f.parentRepoAfter === undefined) f.parentRepoAfter = f.parentRepo
 
   const dir = mkdtempSync(join(tmpdir(), 'reassign-gh-stub-'))
   const ghPath = join(dir, 'gh')
@@ -100,13 +103,15 @@ echo "\${count}" > ${shQuote(getCountPath)}
 if [[ "\${count}" -eq 1 ]]; then
   ${getFailBranch}
   parent=${shQuote(f.parentBefore)}
+  prepo=${shQuote(f.parentRepo)}
 else
   ${verifyGetFailBranch}
   parent=${shQuote(f.parentAfter)}
+  prepo=${shQuote(f.parentRepoAfter)}
 fi
 
 if [[ -n "\${parent}" ]]; then
-  printf '{"id": ${f.issueId}, "repository_url": "https://api.github.com/repos/o/r", "parent_issue_url": "https://api.github.com/repos/${f.parentRepo}/issues/%s"}\\n' "\${parent}"
+  printf '{"id": ${f.issueId}, "repository_url": "https://api.github.com/repos/o/r", "parent_issue_url": "https://api.github.com/repos/%s/issues/%s"}\\n' "\${prepo}" "\${parent}"
 else
   printf '{"id": ${f.issueId}, "repository_url": "https://api.github.com/repos/o/r", "parent_issue_url": null}\\n'
 fi

@@ -185,6 +185,18 @@ test('ケース17: 別リポの親の番号が --new-parent と一致しても a
   assert.ok(!r.stdout.includes('already-attached'), 'already-attached を返していないこと')
 })
 
+test('ケース18: 事後確認で親が別リポジトリ → exit 5（成功として報告しない）', () => {
+  // POST 後の競合で対象が other/repo の同番号 issue へ移された状況。番号だけを見ると
+  // VERIFY_PARENT == NEW_PARENT となり誤ったツリー状態を成功報告する（PR #314 codex P1）
+  const r = run(['--issue', '24', '--new-parent', '7'], {
+    parentBefore: '',
+    parentAfter: '7',
+    parentRepoAfter: 'other/repo',
+  })
+  assert.equal(r.status, 5)
+  assert.ok(!r.stdout.includes('result=posted-only'), '成功の result= 行を出していないこと')
+})
+
 test('ケース11: gh auth status が非ゼロ → exit 2、API 呼び出し無し', () => {
   const r = run(['--issue', '1', '--new-parent', '2'], {
     authFail: true,

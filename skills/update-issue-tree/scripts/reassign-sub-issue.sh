@@ -163,6 +163,15 @@ if ! [[ "${ISSUE_ID}" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+# 対象リポジトリの同定に使う。事前判定と事後確認の双方が参照するため、親の有無に関わらず
+# ここで一度だけ解決する（--repo 省略時の REPO_PATH は {owner}/{repo} プレースホルダのため
+# 比較に使えない。対象 issue 自身の repository_url なら追加の API 呼び出しも要らない）
+SELF_REPO_URL=$(printf '%s' "${ISSUE_JSON}" | jq -r '.repository_url // empty')
+if [[ -z "${SELF_REPO_URL}" ]]; then
+  echo "エラー: イシュー #${ISSUE} の repository_url を解決できない" >&2
+  exit 2
+fi
+
 PARENT_URL=$(printf '%s' "${ISSUE_JSON}" | jq -r '.parent_issue_url // empty')
 CURRENT_PARENT=""
 if [[ -n "${PARENT_URL}" ]]; then
@@ -172,13 +181,7 @@ if [[ -n "${PARENT_URL}" ]]; then
   # (b) 番号が偶然 --new-parent と一致すると already-attached と誤判定する、の 2 つが起きる。
   # 対象リポジトリの同定には、追加の API を叩かずに済む対象 issue 自身の repository_url を使う
   # （--repo 省略時の REPO_PATH は {owner}/{repo} プレースホルダのため比較に使えない）。
-  PARENT_REPO_URL="${PARENT_URL%/issues/*}"
-  SELF_REPO_URL=$(printf '%s' "${ISSUE_JSON}" | jq -r '.repository_url // empty')
-  if [[ -z "${SELF_REPO_URL}" ]]; then
-    echo "エラー: イシュー #${ISSUE} の repository_url を解決できない" >&2
-    exit 2
-  fi
-  if [[ "${PARENT_REPO_URL}" != "${SELF_REPO_URL}" ]]; then
+  if [[ "${PARENT_URL%/issues/*}" != "${SELF_REPO_URL}" ]]; then
     # 別リポジトリの親からの取り外しは本スクリプトの対応範囲外。誤ったリポジトリへ
     # DELETE を撃つ前に fail-closed で停止する
     echo "エラー: 現在の親が別リポジトリにある（${PARENT_URL}）。本スクリプトは同一リポジトリ内の付け替えのみを扱う" >&2
@@ -271,6 +274,14 @@ fi
 VERIFY_PARENT_URL=$(printf '%s' "${VERIFY_JSON}" | jq -r '.parent_issue_url // empty')
 VERIFY_PARENT=""
 if [[ -n "${VERIFY_PARENT_URL}" ]]; then
+  # 事前判定と同じくリポジトリ部分まで照合する。番号だけを見ると、POST 後の競合で対象が
+  # 別リポジトリの同番号 issue（例: other/repo#7）へ移されていても VERIFY_PARENT == NEW_PARENT
+  # となり、誤ったツリー状態を成功として報告してしまう
+  if [[ "${VERIFY_PARENT_URL%/issues/*}" != "${SELF_REPO_URL}" ]]; then
+    echo "エラー: 事後確認で対象が別リポジトリの親配下にある（${VERIFY_PARENT_URL}）。新親 #${NEW_PARENT} への紐付けは成立していない" >&2
+    echo "対処: 実状態を手で確認する" >&2
+    exit 5
+  fi
   VERIFY_PARENT=$(printf '%s' "${VERIFY_PARENT_URL}" | grep -oE '[0-9]+$' || true)
 fi
 
