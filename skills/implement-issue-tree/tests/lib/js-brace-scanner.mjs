@@ -9,6 +9,25 @@
 // 正規表現リテラルを字句として認識してスキップすることで、この誤判定のクラスを構造的に
 // なくす。
 //
+// 追加バグ（PR #351 レビュー指摘）: 正規表現 vs 除算の判定を「`/` の直前 1 文字だけ」を
+// 逆走査して決める heuristic は、次の 3 クラスを構造的に誤判定する。
+//   1. 制御文ヘッダーの閉じ `)`（`if (c) /re/` 等）と、呼び出し/グループ化の閉じ `)`
+//      （`foo() / 2` 等）はどちらも直前文字が `)` だが意味が逆（前者は正規表現側、
+//      後者は除算側）であり、1 文字の逆走査では区別できない。
+//   2. 逆走査は空白のみスキップしコメントを読み飛ばさないため、ブロックコメント直後
+//      （`/* c */ /re/` の `*/` の `/`）を誤って除算側と判定し得る。
+//   3. 後置 `++`/`--`（`x++ / y`）の末尾文字 `+`/`-` は前置演算子の記号と区別が付かず、
+//      正規表現側と誤判定し得る。
+// 本モジュールは「`/` の直前 1 文字を逆走査する」のをやめ、メインループが前進走査で
+// 通過する各トークンごとに「直前の意味のあるトークンが式の値（VALUE: 識別子・数値・
+// 文字列・テンプレート・呼び出し/グループの `)`・`]`・後置 `++`/`--` 等）か、
+// 値を期待する演算子/文位置（OPERATOR: 二項演算子・制御文ヘッダーの `)`・前置 `++`/`--`
+// 等）か」を状態として持ち回る（`prevSignificant`）。コメントは元々読み飛ばすだけで
+// この状態を更新しないため 2. は構造的に発生しない。`(` を push する際に直前語が
+// if/while/for/switch/catch かどうかを記録し、対応する `)` で当該情報を pop して
+// VALUE/OPERATOR を判定することで 1. を解消する。`++`/`--` は直前が VALUE なら後置
+// （結果は VALUE）、そうでなければ前置（依然 OPERATOR）として分岐することで 3. を解消する。
+//
 // ファイル名が `*.test.mjs` に一致しないため `node --test` の glob には拾われない
 // （tests/lib/workflow-script-contract.mjs と同じ配置規約）。
 //
@@ -24,51 +43,19 @@
 const FRAME_CODE = 'code'
 const FRAME_SUBST = 'subst'
 
-// 正規表現リテラルの直前に来ると「正規表現」側と判定する予約語。
-// これらの直後の `/` は除算ではなく正規表現の開始（例: `return /}/.test(s)`）。
+// 直後の `/` を正規表現リテラルの開始と判定するキーワード（直前の意味のあるトークンが
+// これらの語のとき、走査状態は OPERATOR = 値を期待する位置になる）。
+// 例: `return /}/.test(s)` の `/` は除算ではなく正規表現の開始。
 const REGEX_PRECEDING_KEYWORDS = new Set([
   'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void',
   'case', 'do', 'else', 'yield', 'await',
 ])
 
-// 正規表現リテラルの直前に来ると「正規表現」側と判定する記号（列挙した文字そのもの、または
-// 走査開始位置）。除算のオペランド（識別子・数値・`)`・`]`・文字列/テンプレート終端）の後は
-// 除算側と判定する。
-const REGEX_PRECEDING_PUNCTUATION = new Set([
-  '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';',
-  '+', '-', '*', '%', '~', '^', '<', '>',
-])
-
-/**
- * text[i] から始まる識別子/キーワードトークンを後方に読み取る（直前トークン判定用）。
- * text[i] が識別子構成文字でなければ null を返す。
- */
-function readWordBackward(text, i) {
-  let end = i
-  while (end >= 0 && /[A-Za-z0-9_$]/.test(text[end])) end--
-  if (end === i) return null
-  return text.slice(end + 1, i + 1)
-}
-
-/**
- * `/` の直前の有意トークン（空白を除く）から、この `/` が正規表現リテラルの開始か
- * 除算演算子かを判定する。コメント開始判定（`//` `/*`）は呼び出し側で先に済ませてある前提。
- */
-function isRegexContext(text, slashIndex) {
-  let i = slashIndex - 1
-  while (i >= 0 && /\s/.test(text[i])) i--
-  if (i < 0) return true // 走査開始位置（先頭）は正規表現側
-  const ch = text[i]
-  const word = readWordBackward(text, i)
-  if (word !== null) {
-    // 識別子・数値の直後は原則除算。ただし正規表現前置キーワードは例外。
-    return REGEX_PRECEDING_KEYWORDS.has(word)
-  }
-  if (ch === ')' || ch === ']') return false // 除算のオペランド
-  if (REGEX_PRECEDING_PUNCTUATION.has(ch)) return true
-  // 上記以外（未知の記号）は安全側として除算に倒す。
-  return false
-}
+// 開き `(` の直前語がこれらの制御構文キーワードのとき、対応する閉じ `)` は
+// 「制御文ヘッダーの終端」（例: `if (cond)` の後は文位置 = OPERATOR 状態）であり、
+// `foo(...)` のような呼び出し/グループ化の閉じ `)`（結果は式の値 = VALUE 状態）とは
+// 区別しなければならない。両者は直前 1 文字だけを見る旧実装では区別不能だった。
+const CONTROL_KEYWORDS = new Set(['if', 'while', 'for', 'switch', 'catch'])
 
 /**
  * `text[openBraceIndex]` を起点として、対応する閉じ波括弧の index を字句認識つきで求める。
@@ -88,11 +75,28 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
   const stack = [FRAME_CODE]
   let i = openBraceIndex + 1
 
+  // 直前の意味のあるトークンの分類。'operator'（値を期待する位置。走査開始直後の
+  // 文位置もここに含める）または 'value'（式の値が確定した直後の位置）。
+  let prevSignificant = 'operator'
+  // `(` の対応関係を追跡するスタック。各要素は対応する `)` が「制御文ヘッダーの終端」
+  // なら 'control'、「呼び出し/グループ化の終端（値）」なら 'value'。
+  const parenStack = []
+  // 直近に読み取った識別子/キーワード（`(` が制御構文キーワード直後かの判定に使う）。
+  // 識別子/キーワード以外のトークンを読むたびに null へリセットする。
+  let lastWord = null
+
   while (i < text.length) {
     const ch = text[i]
 
+    // 空白はトークン境界に影響しないため、走査状態を一切更新せず読み飛ばす。
+    if (/\s/.test(ch)) {
+      i++
+      continue
+    }
+
     // 行コメント。次の改行まで読み飛ばす。改行なしで EOF に達しても未終端エラーにはしない
-    // （行コメントは改行または EOF のどちらでも正当に終端する）。
+    // （行コメントは改行または EOF のどちらでも正当に終端する）。走査状態は更新しない
+    // （コメント前の直前トークンがそのまま「意味のある直前トークン」であり続ける）。
     if (ch === '/' && text[i + 1] === '/') {
       i += 2
       while (i < text.length && text[i] !== '\n') i++
@@ -100,6 +104,8 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
     }
 
     // ブロックコメント。`*/` まで読み飛ばす。未検出なら未終端として throw。
+    // 走査状態は更新しない（`/* c */ /re/` の 2 個目の `/` はコメント直前ではなく
+    // コメントより前の直前トークンで判定する）。
     if (ch === '/' && text[i + 1] === '*') {
       const end = text.indexOf('*/', i + 2)
       if (end === -1) {
@@ -133,6 +139,8 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
         throw new Error(`未終端の文字列リテラル（開始位置 ${i}）`)
       }
       i = j
+      prevSignificant = 'value'
+      lastWord = null
       continue
     }
 
@@ -142,48 +150,123 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
     // skipTemplateLiteralPart で地の文の読み飛ばしへ戻る）。
     if (ch === '`') {
       i = skipTemplateLiteralPart(text, i + 1, stack)
+      prevSignificant = 'value'
+      lastWord = null
       continue
     }
 
-    // 正規表現リテラル（コメント判定は上で済んでいるため、ここに来る `/` はコメントではない）。
-    if (ch === '/' && isRegexContext(text, i)) {
-      let j = i + 1
-      let inClass = false
-      let closed = false
-      while (j < text.length) {
-        if (text[j] === '\\') {
-          j += 2
-          continue
-        }
-        if (text[j] === '\n') break // 未終端（正規表現リテラルは改行をまたがない）
-        if (text[j] === '[') {
-          inClass = true
+    // 正規表現リテラル / 除算演算子（コメント判定は上で済んでいるため、ここに来る `/` は
+    // コメントではない）。直前の意味のあるトークンが OPERATOR 位置（値を期待する位置）
+    // なら正規表現の開始、VALUE 位置（値が確定した直後）なら除算演算子。
+    if (ch === '/') {
+      if (prevSignificant === 'operator') {
+        let j = i + 1
+        let inClass = false
+        let closed = false
+        while (j < text.length) {
+          if (text[j] === '\\') {
+            j += 2
+            continue
+          }
+          if (text[j] === '\n') break // 未終端（正規表現リテラルは改行をまたがない）
+          if (text[j] === '[') {
+            inClass = true
+            j++
+            continue
+          }
+          if (text[j] === ']') {
+            inClass = false
+            j++
+            continue
+          }
+          if (text[j] === '/' && !inClass) {
+            closed = true
+            j++
+            break
+          }
           j++
-          continue
         }
-        if (text[j] === ']') {
-          inClass = false
-          j++
-          continue
+        if (!closed) {
+          throw new Error(`未終端の正規表現リテラル（開始位置 ${i}）`)
         }
-        if (text[j] === '/' && !inClass) {
-          closed = true
-          j++
-          break
-        }
-        j++
+        // フラグ文字（例: /re/g の 'g'）は通常のコード文字として扱ってよいため読み飛ばし不要。
+        i = j
+        prevSignificant = 'value'
+        lastWord = null
+        continue
       }
-      if (!closed) {
-        throw new Error(`未終端の正規表現リテラル（開始位置 ${i}）`)
-      }
-      // フラグ文字（例: /re/g の 'g'）は通常のコード文字として扱ってよいため読み飛ばし不要。
+      // 除算演算子。演算子自身の直後は値を期待する位置に戻る。
+      i++
+      prevSignificant = 'operator'
+      lastWord = null
+      continue
+    }
+
+    // 識別子・キーワード・数値リテラル。旧実装の逆走査（readWordBackward）と同じ文字集合
+    // `[A-Za-z0-9_$]` の連続を 1 トークンとして前進読み取りする。先頭が数字ならキーワード
+    // 判定はせず数値リテラル（常に VALUE）として扱う。
+    if (/[A-Za-z0-9_$]/.test(ch)) {
+      let j = i
+      while (j < text.length && /[A-Za-z0-9_$]/.test(text[j])) j++
+      const word = text.slice(i, j)
+      const isNumberLike = /^[0-9]/.test(word)
       i = j
+      if (!isNumberLike && REGEX_PRECEDING_KEYWORDS.has(word)) {
+        prevSignificant = 'operator'
+        lastWord = word
+      } else {
+        prevSignificant = 'value'
+        lastWord = isNumberLike ? null : word
+      }
+      continue
+    }
+
+    if (ch === '(') {
+      const isControl = lastWord !== null && CONTROL_KEYWORDS.has(lastWord)
+      parenStack.push(isControl ? 'control' : 'value')
+      i++
+      prevSignificant = 'operator' // 括弧の中は値を期待する位置から始まる
+      lastWord = null
+      continue
+    }
+
+    if (ch === ')') {
+      const kind = parenStack.length > 0 ? parenStack.pop() : 'value'
+      i++
+      // 制御文ヘッダーの終端なら文位置（OPERATOR）、呼び出し/グループ化の終端なら値（VALUE）。
+      prevSignificant = kind === 'control' ? 'operator' : 'value'
+      lastWord = null
+      continue
+    }
+
+    if (ch === '[') {
+      i++
+      prevSignificant = 'operator' // 添字/配列リテラルの中は値を期待する位置
+      lastWord = null
+      continue
+    }
+
+    if (ch === ']') {
+      i++
+      prevSignificant = 'value' // 添字アクセス・配列リテラルの結果は値
+      lastWord = null
+      continue
+    }
+
+    // 前置/後置の `++` / `--`。直前が VALUE なら後置（結果は依然 VALUE）、
+    // そうでなければ前置（オペランドはこの後に続くため依然 OPERATOR）。
+    if ((ch === '+' && text[i + 1] === '+') || (ch === '-' && text[i + 1] === '-')) {
+      i += 2
+      prevSignificant = prevSignificant === 'value' ? 'value' : 'operator'
+      lastWord = null
       continue
     }
 
     if (ch === '{') {
       stack.push(FRAME_CODE)
       i++
+      prevSignificant = 'operator' // ブロック/オブジェクトリテラルの中は値を期待する位置
+      lastWord = null
       continue
     }
 
@@ -197,16 +280,24 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
         // 外側にいる。そのためテンプレートのリテラル部を専用に読み飛ばす必要がある。
         i++
         i = skipTemplateLiteralPart(text, i, stack)
+        prevSignificant = 'value'
+        lastWord = null
         continue
       }
       if (stack.length === 0) {
         return i
       }
       i++
+      prevSignificant = 'operator' // コードブロックを閉じた直後は文位置
+      lastWord = null
       continue
     }
 
+    // 上記以外の記号（二項演算子 `+ - * % < > 等`、`, ; : = ! & | ? ~ ^ .` 等）。
+    // いずれも直後に値を期待する OPERATOR 位置として扱う。
     i++
+    prevSignificant = 'operator'
+    lastWord = null
   }
 
   return -1

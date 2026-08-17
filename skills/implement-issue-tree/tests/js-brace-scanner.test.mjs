@@ -161,6 +161,38 @@ test('除算側: x[0] / y は正規表現と誤認されない（直前が "]"�
   assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
 })
 
+test('正規表現側: 制御文ヘッダーの閉じ ) の直後の /}/ は正規表現として扱われる（PR #351 codex 指摘）', () => {
+  // 直前 1 文字だけを見る旧実装は、直前が ')' なら常に除算側と判定していたため、
+  // if (...) の後という文位置（正規表現側）を呼び出し/グループ化の ')'（除算側）と
+  // 誤分類し、正規表現内の } を対象ブロックの終端として誤って返し得た。
+  const src = '{ if (ok) /}/.test(s) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 制御文ではない呼び出しの ) 直後は除算のまま（対比ケース）', () => {
+  const src = '{ if (ok) foo() / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 後置 x++ / y は正規表現と誤認されない（PR #351 codex 指摘）', () => {
+  // REGEX_PRECEDING_PUNCTUATION に '+' が含まれるため、旧実装は後置 ++ の末尾文字 '+' を
+  // 前置演算子の記号と区別できず正規表現側と誤判定し、未終端エラーになり得た。
+  const src = '{ x++ / y }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: 前置 ++x の直後に続く演算子位置は変わらない（対比ケース）', () => {
+  const src = '{ typeof ++x }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: ブロックコメント直後の /re/ はコメント前の文脈で判定される（Cursor Bugbot 指摘）', () => {
+  // 逆走査は空白のみスキップしコメントを読み飛ばさないため、旧実装は '*/' の直後の '/' を
+  // 直前文字 '/' から誤って除算側と判定し得た（正規表現内の } を早期に終端と誤認）。
+  const src = '{ return /* c */ /}/.test(s) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
 // ---------------------------------------------------------------------------
 // 契約
 // ---------------------------------------------------------------------------
