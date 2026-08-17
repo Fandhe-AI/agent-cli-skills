@@ -170,15 +170,22 @@ def _split_job_uses(value: object) -> str | None:
     return ref.strip()
 
 
-def classify_workflow(text: str) -> dict:
+def classify_workflow(text: str, is_upstream: bool = False) -> dict:
     """``update-external.yml`` の本文を分類する。
 
     戻り値は ``{"kind", "pin", "reason"}``。``kind`` は上の ``KIND_*``。
 
-    分類順序に意味がある。**先に ``workflow_call`` を見る**のは、reusable 定義
-    本体（``Fandhe-AI/actions`` 自身）を wrapper 判定より前に除外するため。
-    定義本体は自分自身への ``uses:`` を持たないので LEGACY へ落ち、リポ名を
-    ハードコードしない限り誤って乖離報告されてしまう。
+    ``is_upstream`` は「このリポジトリが reusable 定義を提供する上流本体
+    （``UPSTREAM_REPO``）か」。定義本体は自分自身への ``uses:`` を持たないため、
+    素直に判定すると LEGACY へ落ちて乖離として誤報される。
+
+    除外条件は **``is_upstream`` と ``workflow_call`` の AND** にしてある。
+    ``workflow_call`` 単独を除外条件にすると、下流リポジトリが
+    ``update-external.yml`` に ``workflow_call`` を足しただけで検査対象から
+    消え、wrapper を参照していなくても LEGACY にならない（全下流を wrapper
+    として監視するという契約に対する偽陰性）。逆にリポ名だけを条件にすると
+    構造的な根拠がなくなる。両方を要求すれば、上流が移設されたときは
+    ``UPSTREAM_REPO`` の更新だけで追随でき、下流の偽陰性も生まれない。
     """
     try:
         spec = yaml.safe_load(text)
@@ -189,11 +196,12 @@ def classify_workflow(text: str) -> dict:
     if not isinstance(spec, dict):
         return {"kind": KIND_UNPARSEABLE, "pin": None, "reason": "YAML マッピングではない"}
 
-    if has_workflow_call(spec):
+    if is_upstream and has_workflow_call(spec):
         return {
             "kind": KIND_REUSABLE_DEFINITION,
             "pin": None,
-            "reason": "on: workflow_call を持つ reusable 定義本体のため検査対象外",
+            "reason": f"{UPSTREAM_REPO} の on: workflow_call を持つ reusable 定義本体"
+            "のため検査対象外",
         }
 
     jobs = spec.get("jobs")
@@ -729,7 +737,7 @@ def scan(org: str, token: str) -> ScanResult:
         )
 
         if status == 200:
-            info = classify_workflow(text)
+            info = classify_workflow(text, is_upstream=(repo == UPSTREAM_REPO))
             kind = info["kind"]
 
             if kind == KIND_REUSABLE_DEFINITION:

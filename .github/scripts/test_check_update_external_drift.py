@@ -260,13 +260,24 @@ jobs:
         self.assertIn("legacy-skills", info["reason"])
 
     def test_reusable_definition_is_excluded(self):
-        # リポ名のハードコードなしで除外できること（on: が True キーに落ちても）。
-        info = classify_workflow(FIXTURE_REUSABLE_DEFINITION)
+        # 上流本体でのみ除外される（on: が True キーへ落ちても検出できること）。
+        info = classify_workflow(FIXTURE_REUSABLE_DEFINITION, is_upstream=True)
         self.assertEqual(info["kind"], KIND_REUSABLE_DEFINITION)
 
     def test_real_upstream_definition_is_excluded(self):
-        info = classify_workflow(FIXTURE_UPSTREAM_OK)
+        info = classify_workflow(FIXTURE_UPSTREAM_OK, is_upstream=True)
         self.assertEqual(info["kind"], KIND_REUSABLE_DEFINITION)
+
+    def test_downstream_workflow_call_is_not_excluded(self):
+        # 下流が update-external.yml に workflow_call を足しただけで検査対象から
+        # 消えてはならない（全下流を wrapper として監視する契約への偽陰性）。
+        info = classify_workflow(FIXTURE_REUSABLE_DEFINITION, is_upstream=False)
+        self.assertEqual(info["kind"], KIND_LEGACY)
+
+    def test_upstream_without_workflow_call_is_not_excluded(self):
+        # 上流リポでも workflow_call が無ければ除外しない（AND 条件であること）。
+        info = classify_workflow(FIXTURE_LEGACY, is_upstream=True)
+        self.assertEqual(info["kind"], KIND_LEGACY)
 
 
 class TestAxis2Pin(unittest.TestCase):
@@ -424,6 +435,8 @@ class TestScanEndToEnd(unittest.TestCase):
             "vendored-symlink": {"workflow": (404, ""), "lock": 200, "tree": "120000"},
             # ファイル無し + lock 無し → 対象外（乖離ではない）
             "unrelated": {"workflow": (404, ""), "lock": 404},
+            # 下流が workflow_call を足しても除外されない（偽陰性の防止）
+            "sneaky-workflow-call": {"workflow": (200, FIXTURE_REUSABLE_DEFINITION)},
             # 検査不能 → UNKNOWN（黙って green にしない）
             "forbidden": {"workflow": (403, "")},
             # 除外リスト（イシュー #263）
@@ -436,6 +449,7 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertEqual(cats["stale-wrapper"][0], "PIN-STALE")
         self.assertIn("7 コミット遅れている", cats["stale-wrapper"][1])
         self.assertEqual(cats["legacy-repo"][0], "LEGACY")
+        self.assertEqual(cats["sneaky-workflow-call"][0], "LEGACY")
 
         self.assertEqual(cats["vendored-no-ci"][0], "SYNC-CI-ABSENT")
         self.assertIn("040000", cats["vendored-no-ci"][1])
@@ -459,7 +473,7 @@ class TestScanEndToEnd(unittest.TestCase):
 
         # レポートは乖離 0 件でも全量を出す契約。ここでは 4 件出ることを確認する。
         report = cud.render_report(result, "https://example.invalid/run/1")
-        self.assertIn("乖離: **4 件**", report)
+        self.assertIn("乖離: **5 件**", report)
         self.assertIn("検査不能 (UNKNOWN): **1 件**", report)
 
     def test_compare_error_is_unknown_not_unreachable(self):
