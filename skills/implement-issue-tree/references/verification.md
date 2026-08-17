@@ -224,11 +224,13 @@ grep -vE '^\s*#' scripts/merge-guard-hook.sh | grep -nE -- "--auto --squash|carv
 `reviewPrompt()`（push 前 Review）または `fixPrompt()` の push 前分岐（Review ループの修正）を変更した場合、比較基準が `origin/<base-branch>`（remote-tracking ref）の 3 点ドット diff に統一されていること・3 拠点（SKILL.md / reviewPrompt / fixPrompt push 前分岐）が乖離していないことを確認する。ローカル base ref を比較基準にすると、ローカルが origin より遅れているだけで無関係な祖先コミットの差分までレビュー対象に混入する（#297 実測: diff 417 行中 387 行がノイズとなり 3 巡で収束失敗）。3 点ドット `A...HEAD` は `merge-base(A, HEAD)` からの差分のため、`A` に `origin/<base-branch>` を渡すと比較点はブランチの分岐点に固定され、ラン中に origin が進んでも fetch なしで比較点が動かない。
 
 ```bash
-# 1. script 内の git コマンドで ${baseBranch} を使う箇所が全て origin/ 付きであること
-#    （素の "git diff" だけを見る grep は行全体に origin/ が含まれていれば別サイトの
-#    未修飾比較を見落とすため、コマンド位置で ${baseBranch} を捕捉する）
-grep -nE 'git [a-z-]+[^`]*\$\{baseBranch\}' skills/implement-issue-tree/scripts/implement-issue-tree.js
-# → 全ヒットが `origin/${baseBranch}` を伴うこと（`${baseBranch}` 単体の git コマンドが 0 件）
+# 1. script 内の比較・分岐点操作系 git コマンドで ${baseBranch} を使う箇所が全て origin/ 付きであること
+#    （git fetch origin ${baseBranch} は origin/${baseBranch} を「更新する」側の正当な未修飾形の
+#    ため、比較・分岐点操作の対象になり得る動詞（diff/merge/checkout/rebase/rev-parse）だけに
+#    絞ってから、origin/ 付きヒットを除外した残りが 0 件であることを確認する）
+grep -nE 'git (diff|merge|checkout|rebase|rev-parse)[^`]*\$\{baseBranch\}' skills/implement-issue-tree/scripts/implement-issue-tree.js | grep -vF 'origin/${baseBranch}'
+# → 出力 0 件（`fetch` は上記の動詞集合に含めないため、正常運用の `git fetch origin ${baseBranch}` を
+#   誤検出しない。何かヒットした場合はローカル base 基準への revert）
 
 # 2. SKILL.md の <base-branch> プレースホルダも同様に origin/ 付きであること
 grep -n '<base-branch>\|<base>' skills/implement-issue-tree/SKILL.md
@@ -250,5 +252,5 @@ node --test skills/implement-issue-tree/tests/review-diff-base.test.mjs
 | C | 先行マージで origin が進行後・**fetch 前** | `feature.txt` のみ（比較点は分岐点で固定） |
 | D | 先行マージ後・**fetch 後**（`origin/<base>` が別 sha へ更新済み） | `feature.txt` のみ（merge-base は不変） |
 
-期待結果: 手順 1 は「origin/ なし単体の git コマンド」が 0 件（ヒット自体は `git fetch origin ${baseBranch}` 等で複数出るのが正常運用であり、それらが全て `origin/${baseBranch}` を伴うことを確認する。目視で「単体」ヒットの有無を確認するか、`grep -vF "origin/\${baseBranch}"` で除外した残りが 0 件であることを確認する）。手順 2 は「`<base-branch>` の全出現が `origin/<base-branch>` を伴う」こと（目視確認。プレースホルダの生出現自体は 0 件にはならない）。手順 3 が 500,000 B 未満。手順 4 の `node --test` が全 pass・fail 0（群 A の「origin/ なし」負のアサーションでハードコード回帰を、群 B で SKILL.md との乖離を、群 C で A〜D のシナリオを実測固定する）。ref 解決不能時（`refs/remotes/origin/<base-branch>` が存在せず、フォールバックの `git fetch origin <base-branch>` も失敗する場合）は Review を実施せず `state: "blocked"` / `highestSeverity: "none"` で fail-closed 終端し、summary に理由を明記すること（`grep -n "比較基準 origin" skills/implement-issue-tree/scripts/implement-issue-tree.js` でプロンプト文言にヒットすることを確認する）。`state: "blocked"` はコード指摘（needs-fix）と区別される専用状態で、呼び出し元は fix エージェントを起動せず即座に終端する（`grep -n "r?.state === 'blocked'" skills/implement-issue-tree/scripts/implement-issue-tree.js` でループ制御にヒットすることを確認する）。
+期待結果: 手順 1 のコマンド出力が 0 件（比較・分岐点操作系動詞（diff/merge/checkout/rebase/rev-parse）で `${baseBranch}` を使う箇所が全て `origin/${baseBranch}` を伴うことを意味する。`git fetch origin ${baseBranch}` は動詞集合の対象外のため誤検出しない）。手順 2 は「`<base-branch>` の全出現が `origin/<base-branch>` を伴う」こと（目視確認。プレースホルダの生出現自体は 0 件にはならない）。手順 3 が 500,000 B 未満。手順 4 の `node --test` が全 pass・fail 0（群 A の「origin/ なし」負のアサーションでハードコード回帰を、群 B で SKILL.md との乖離を、群 C で A〜D のシナリオを実測固定する）。ref 解決不能時（`refs/remotes/origin/<base-branch>` が存在せず、フォールバックの `git fetch origin <base-branch>` も失敗する場合）は Review を実施せず `state: "blocked"` / `highestSeverity: "none"` で fail-closed 終端し、summary に理由を明記すること（`grep -n "比較基準 origin" skills/implement-issue-tree/scripts/implement-issue-tree.js` でプロンプト文言にヒットすることを確認する）。`state: "blocked"` はコード指摘（needs-fix）と区別される専用状態で、呼び出し元は fix エージェントを起動せず即座に終端する（`grep -n "r?.state === 'blocked'" skills/implement-issue-tree/scripts/implement-issue-tree.js` でループ制御にヒットすることを確認する）。
 
