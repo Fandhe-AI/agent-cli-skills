@@ -173,7 +173,7 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
                        and ((.conclusion | IN("failure","cancelled","timed_out","action_required","startup_failure","stale")))
                      )] | length),
         unknown:    ([$p[] | select(.status == "completed"
-                       and ((.conclusion // "") | IN("success","skipped","neutral",
+                       and ((.conclusion // "") | IN("success",
                             "failure","cancelled","timed_out","action_required","startup_failure","stale") | not)
                      )] | length)
       }'
@@ -200,7 +200,7 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
   | 取得件数が 100 件に到達 | 判定不能 | 取得範囲外に失敗・未完了 run がある可能性を排除できない |
   | 権限・API 障害で判定に到達できない | 判定不能 | 記録して再測する（green にも不成立にも倒さない） |
 
-  `failed` は `cancelled` / `timed_out` / `action_required` / `startup_failure` / `stale` を失敗側に数える（SKILL.md の CI 全 green 判定と同じ分類。success / skipped / neutral のみを合格とする）。`required_missing` は必須集合から実際に push イベントで観測された `workflowName` 集合を差し引いた残りであり、空配列であることは「必須 workflow が全件起動した」ことの直接証拠になる（個々の workflow ごとの conclusion 追跡は不要 — 全体の `failed`/`incomplete`/`unknown` が 0 であれば、起動した必須 workflow を含む push run 全件が健全に完了したことを意味する）。
+  `failed` は `cancelled` / `timed_out` / `action_required` / `startup_failure` / `stale` を失敗側に数える。**合格（green への算入）は `success` のみに限定する**。`neutral` / `skipped` は失敗側にも算入しないが合格側にも入れず `unknown` 側へ計上する（意味的コンフリクト検出の補償策としては「本当に実行され成功した」ことの確認が目的であり、`neutral`/`skipped` は「実行されたが判定不能」を意味するため green へ倒さない。SKILL.md の CI 全 green 判定が任意チェックの `skipped`/`neutral` を許容するのとは前提が異なる — こちらは必須 workflow の健全完了を確認する補償策であるため厳格側に倒す）。`required_missing` は必須集合から実際に push イベントで観測された `workflowName` 集合を差し引いた残りであり、空配列であることは「必須 workflow が全件起動した」ことの直接証拠になる（個々の workflow ごとの conclusion 追跡は不要 — 全体の `failed`/`incomplete`/`unknown` が 0 であれば、起動した必須 workflow を含む push run 全件が `success` で完了したことを意味する）。
 - **不成立時の扱い（3 択・順に推奨）**:
   1. マージ先ブランチへ push トリガの最低限のビルド/テストを追加する（`paths` フィルタで除外されないことをプローブで実測確認する）。これが本則。
   2. `autoMerge: true` を使わない（マージ可能状態で停止し人間がマージする）。補償策不成立のリポでは既定の非 opt-in 運用を推奨とする。
