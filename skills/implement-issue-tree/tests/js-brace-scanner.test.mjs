@@ -264,6 +264,95 @@ test('除算側: 空白を挟んだ p . catch(fn) もプロパティ呼び出し
 })
 
 // ---------------------------------------------------------------------------
+// for await / with（PR #351 codex-review 指摘: 制御構文ヘッダーの未網羅）
+// ---------------------------------------------------------------------------
+
+test('正規表現側: for await (const x of xs) の直後の /}/ は正規表現として扱われる（PR #351 codex 指摘）', () => {
+  // 旧実装は CONTROL_KEYWORDS の直前語判定が 'await' になり、'for' が見えなくなるため
+  // 対応する ) を呼び出し/グループ化の終端（VALUE）と誤判定していた。
+  const src = '{ for await (const x of xs) /}/.test(x) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: with (obj) の直後の /}/ は正規表現として扱われる（PR #351 codex 指摘）', () => {
+  // 旧実装は CONTROL_KEYWORDS に 'with' が未登録だった。
+  const src = '{ with (obj) /}/.test(x) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: Array.prototype.with 呼び出しは制御構文と誤分類されない（.catch と同型の回帰）', () => {
+  // 'with' を CONTROL_KEYWORDS へ追加しても、`.` 直後のプロパティ名としての 'with'
+  // （`arr.with(0, 1)` 等、ES2023 Array.prototype.with）は afterDot 経路で除外される必要がある。
+  const src = '{ arr.with(0, 1) / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
+// 非 ASCII 識別子（PR #351 codex-review 指摘）
+// ---------------------------------------------------------------------------
+
+test('除算側: 非 ASCII 識別子 (const π = 1; π / 2) は演算子として誤扱いされない（PR #351 codex 指摘）', () => {
+  // 旧実装は識別子判定が [A-Za-z0-9_$] のみで、Unicode 識別子が「その他の記号」分岐に
+  // 入り prevSignificant が operator のままになるため、直後の / を正規表現の開始と
+  // 誤認し未終端エラーになり得た。
+  const src = '{ const π = 1; y = π / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
+// case / default / ラベル文の {（Cursor Bugbot 指摘）
+// ---------------------------------------------------------------------------
+
+test('switch (x) { の直後は文位置として扱われる（sWN の前提条件）', () => {
+  const src = '{ switch (x) { case 1: break } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: case 1: { ... } はブロック文として扱われる（Cursor Bugbot 指摘）', () => {
+  // 旧実装は ':' を素朴に OPERATOR 扱いするため、直後の { を（switch の case ヘッダーの
+  // 直後という文位置にもかかわらず）オブジェクトリテラルと誤分類していた。
+  // /}/ を使い、誤分類（block 文脈のはずが LITERAL → 直後の } の prevSignificant が
+  // value になり /}/ を除算と誤読）を確実に検出できる形にする（/re/ のように }  を
+  // 含まない正規表現では誤分類でも最終結果が一致してしまい検出できない）。
+  const src = '{ switch (x) { case 1: { y() } /}/.test(z) break } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: default: { ... } はブロック文として扱われる（Cursor Bugbot 指摘）', () => {
+  const src = '{ switch (x) { default: { y() } /}/.test(z) } }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('正規表現側: ラベル文 outer: { ... } はブロック文として扱われる（Cursor Bugbot 指摘）', () => {
+  const src = '{ outer: { y() } /}/.test(z) }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: 三項演算子 c ? { a: 1 } : {} はオブジェクトリテラルのまま（フレーム跨ぎのコロン誤対応の回帰）', () => {
+  // ternary の '?'/':' 対応を単一のグローバルカウンタで数えると、内側のオブジェクトリテラル
+  // { a: 1 } の key: value の ':' がこのカウンタを誤って消費してしまい、外側の本物の三項
+  // ':' が「消費済み（深さ0）」に見えて文位置のコロンと誤認され得る。誤認されると直後の
+  // 空オブジェクト {} が（本来の LITERAL ではなく）BLOCK として push され、pop 後の
+  // prevSignificant が value ではなく operator になり、続く `/ 2` の `/` を正規表現の
+  // 開始と誤読して閉じる `/` が見つからず未終端エラーを投げる
+  // （このソースは 1 行のため、誤読された正規表現走査は改行前に閉じ `/` を発見できない）。
+  // ternary の深さをフレーム単位で保持していれば、内側の { a: 1 } は独立した深さ 0 の
+  // フレームとして push/pop されるため外側の深さを消費せず、この誤読は起こらない。
+  const src = '{ x = c ? { a: 1 } : {} / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: オプショナルチェイニング a?.b は三項演算子として誤カウントされない', () => {
+  const src = '{ x = a?.b / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+test('除算側: nullish 合体 a ?? b は三項演算子として誤カウントされない', () => {
+  const src = '{ x = (a ?? b) / 2 }'
+  assert.equal(findMatchingBraceEnd(src, 0), src.length - 1)
+})
+
+// ---------------------------------------------------------------------------
 // 契約
 // ---------------------------------------------------------------------------
 

@@ -49,6 +49,35 @@
 // 識別子を「メンバー名」として扱い、制御キーワード/正規表現先行キーワードの判定対象
 // から除外する（`afterDot` で追跡）ことで解消する。
 //
+// 追加バグ その3（PR #351 codex-review 未解決スレッド）:
+//   7. `with` が CONTROL_KEYWORDS に無く、`with (obj) /}/.test(x)` の `)` が呼び出し/
+//      グループ化の終端（VALUE）と誤判定され得た。`for await (const x of xs) /}/.test(x)`
+//      も同様に、直前語判定が `await`（`for` ではない）になるため誤判定され得た。
+//   8. 識別子判定が `[A-Za-z0-9_$]` の ASCII 限定だったため、`const π = 1; π / 2` のような
+//      非 ASCII 識別子（Unicode IdentifierPart）が「その他の記号」分岐に落ち、
+//      prevSignificant が OPERATOR のままになって `/` を正規表現の開始と誤認し得た。
+//   9. 通常コードの `:`（`case`/`default`/ラベル文の文位置コロン）を無条件 OPERATOR
+//      扱いしていたため、直後の `{` が「値を期待する位置」の判定経路に入り、ブロック文
+//      であるべき `case 1: { ... }` をオブジェクトリテラルと誤分類し得た。
+// 7. は CONTROL_KEYWORDS に `with` を追加し、識別子読み取り時に直前語が `for` かつ今回の
+// 語が `await` なら `lastWord` を `for` のまま保持する（`afterDot` が false の場合のみ。
+// `arr.with(0, 1)` のようなメンバー呼び出しは afterDot 経由で除外済みのため影響しない）
+// ことで解消する。8. は識別子先頭・継続の文字判定を Unicode プロパティエスケープ
+// （`\p{L}`（文字）・`\p{Nl}`（文字として扱う数）・`\p{Nd}`（10 進数字。継続文字のみ）・
+// `_`・`$`）へ拡張して解消する。数値リテラル判定（`isNumberLike`）は元の ASCII `[0-9]`
+// 判定のまま変更しない（JS の数値リテラル構文自体が ASCII 限定のため）。
+// 9. は「文位置のコロン」（case/default/ラベル文）と「式位置のコロン」（オブジェクト
+// リテラルの key: value・三項演算子の `? :`）を区別する。三項演算子の深さ（`?` の
+// 個数 − 対応する `:` の個数）を**現在のフレームに紐付けて**保持する
+// （`x = c ? { a: 1 } : {}` のように三項演算子の分岐内にオブジェクトリテラルが入れ子に
+// なる場合、そのリテラルの `{`/`}` で新しいフレームが push/pop されるため、深さを
+// グローバル 1 変数で数えると内側の `key: value` の `:` が外側の三項演算子のカウントを
+// 誤って消費してしまう。フレーム単位にすることで両者が独立して数えられる）。
+// 現在のフレームの三項深度が 0 のときに読む `:` は、フレームが `code`/`BLOCK` 種別
+// （＝現在オブジェクトリテラル/分割代入パターンの内部にいない）なら文位置のコロンと
+// 判定し、直後の `{` を常にブロックとして扱う（JS の文法上、文位置の裸 `{` は常に
+// ブロック文であり、式としてのオブジェクトリテラルは文位置には現れ得ないため）。
+//
 // ファイル名が `*.test.mjs` に一致しないため `node --test` の glob には拾われない
 // （tests/lib/workflow-script-contract.mjs と同じ配置規約）。
 //
@@ -78,7 +107,7 @@ const REGEX_PRECEDING_KEYWORDS = new Set([
 // 区別しなければならない。両者は直前 1 文字だけを見る旧実装では区別不能だった。
 // ただし `obj.catch(...)`・`obj.if(...)` のようにこれらと同じ綴りのプロパティ/メソッド名
 // が `.` の直後に来た場合は制御構文ではない（`afterDot` で判定し除外する）。
-const CONTROL_KEYWORDS = new Set(['if', 'while', 'for', 'switch', 'catch'])
+const CONTROL_KEYWORDS = new Set(['if', 'while', 'for', 'switch', 'catch', 'with'])
 
 // `{` の直前語がこれらのとき、対応する `{` は常にブロック文（`else { ... }` /
 // `do { ... } while (...)`）であり、オブジェクトリテラルではない。`else`/`do` は
@@ -92,6 +121,15 @@ const BLOCK_INTRO_KEYWORDS = new Set(['else', 'do'])
 // - 'literal': オブジェクトリテラル/分割代入パターンの終端。直後は式の値（VALUE）。
 const BRACE_KIND_BLOCK = 'block'
 const BRACE_KIND_LITERAL = 'literal'
+
+// 識別子の先頭・継続文字判定。ASCII の `[A-Za-z_$]` に加え、Unicode の「文字」
+// （`\p{L}`）・「文字として扱う数」（`\p{Nl}`。ローマ数字等）を許容する
+// （PR #351 codex-review 指摘: `const π = 1` のような非 ASCII 識別子）。
+const IDENT_START_RE = /[A-Za-z_$\p{L}\p{Nl}]/u
+// 継続文字は先頭文字の集合に加え、10 進数字（`\p{Nd}`。Unicode 数字も含む）を許容する。
+// 数値リテラル自体は ASCII の `[0-9]` のみで構成されるため `isNumberLike` 判定は
+// 変更しない（JS の数値リテラル構文が ASCII 限定のため、この拡張とは独立）。
+const IDENT_CONT_RE = /[A-Za-z0-9_$\p{L}\p{Nl}\p{Nd}]/u
 
 /**
  * `text[openBraceIndex]` を起点として、対応する閉じ波括弧の index を字句認識つきで求める。
@@ -111,7 +149,12 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
   // 通常コードのフレームは種別（'block' か 'literal'）を持つ。走査開始位置の `{` は
   // 呼び出し側が「コードブロックの範囲」を求める用途で使う想定のため 'block' で push する
   // （既存呼び出し元との後方互換: 対応する `}` の直後は常に文位置 = OPERATOR だった）。
-  const stack = [{ type: FRAME_CODE, kind: BRACE_KIND_BLOCK }]
+  // ternaryDepth はフレーム単位で保持する（三項演算子 `?` の未対応個数）。オブジェクト
+  // リテラル・ブロックの `{`/`}` で新しいフレームが push/pop されるたび独立してリセット
+  // されるため、`c ? { a: 1 } : {}` のように三項演算子の分岐にオブジェクトリテラルが
+  // 入れ子になっても、内側の `key: value` の `:` が外側の三項演算子の対応関係を誤って
+  // 消費しない（グローバル 1 変数で数えるとこの誤消費が起こり得る）。
+  const stack = [{ type: FRAME_CODE, kind: BRACE_KIND_BLOCK, ternaryDepth: 0 }]
   let i = openBraceIndex + 1
 
   // 直前の意味のあるトークンの分類。'operator'（値を期待する位置。走査開始直後の
@@ -138,6 +181,11 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
   // 直前に読み取った意味のあるトークンが「制御文ヘッダーを終端する `)`」かどうか。
   // true の間に読む次の `{` は常にブロック文（`if (c) {` 等）。
   let afterControlParen = false
+  // 直前に読み取った意味のあるトークンが「文位置のコロン」（`case`/`default`/ラベル文の
+  // `:`。三項演算子の `:` ではない）かどうか。true の間に読む次の `{` は常にブロック文
+  // （JS の文法上、文位置の裸 `{` は常にブロック文であり、式としてのオブジェクトリテラルは
+  // 文位置には現れ得ないため）。
+  let afterStatementColon = false
 
   while (i < text.length) {
     const ch = text[i]
@@ -198,6 +246,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
@@ -212,6 +261,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
@@ -256,6 +306,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
         afterDot = false
         afterArrow = false
         afterControlParen = false
+        afterStatementColon = false
         continue
       }
       // 除算演算子。演算子自身の直後は値を期待する位置に戻る。
@@ -265,25 +316,36 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
     // 識別子・キーワード・数値リテラル。旧実装の逆走査（readWordBackward）と同じ文字集合
-    // `[A-Za-z0-9_$]` の連続を 1 トークンとして前進読み取りする。先頭が数字ならキーワード
-    // 判定はせず数値リテラル（常に VALUE）として扱う。
-    if (/[A-Za-z0-9_$]/.test(ch)) {
+    // （ASCII 英数字・`_`・`$` に加え、Unicode の文字・文字扱いの数を許容する
+    // IDENT_START_RE/IDENT_CONT_RE。PR #351 codex 指摘の非 ASCII 識別子対応）の連続を
+    // 1 トークンとして前進読み取りする。先頭が数字ならキーワード判定はせず数値リテラル
+    // （常に VALUE）として扱う。
+    if (IDENT_START_RE.test(ch)) {
       let j = i
-      while (j < text.length && /[A-Za-z0-9_$]/.test(text[j])) j++
+      while (j < text.length && IDENT_CONT_RE.test(text[j])) j++
       const word = text.slice(i, j)
       const isNumberLike = /^[0-9]/.test(word)
       i = j
       if (afterDot) {
         // `.` 直後の識別子はプロパティ/メソッド名であり、綴りが制御構文キーワード・
         // 正規表現先行キーワードと一致していても文法上の意味は持たない
-        // （`obj.catch(...)`・`obj.if(...)` 等）。常に VALUE として扱い、`lastWord` も
-        // 設定しない（後続の `(` が制御構文と誤認されないようにするため）。
+        // （`obj.catch(...)`・`obj.if(...)`・`arr.with(...)` 等）。常に VALUE として扱い、
+        // `lastWord` も設定しない（後続の `(` が制御構文と誤認されないようにするため）。
         prevSignificant = 'value'
         lastWord = null
+      } else if (lastWord === 'for' && word === 'await') {
+        // `for await (const x of xs)` の特別扱い（PR #351 codex 指摘）。`await` 自体は
+        // CONTROL_KEYWORDS に含まれないため、`lastWord` をそのまま `await` に更新すると
+        // 続く `(` の isControl 判定で `for` が見えなくなる。直前語が `for`（かつ afterDot
+        // でない = メンバーアクセス経由ではない）のときに限り `lastWord` を `for` のまま
+        // 保持し、`for await (` 全体を `for (` と同様に制御文ヘッダーとして扱う。
+        prevSignificant = 'operator'
+        // lastWord は 'for' のまま変更しない。
       } else if (!isNumberLike && REGEX_PRECEDING_KEYWORDS.has(word)) {
         prevSignificant = 'operator'
         lastWord = word
@@ -294,6 +356,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
@@ -306,6 +369,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
@@ -321,6 +385,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       // 終端した直後の `{` は常にブロック（`lastWord` は既に null にリセット済みで
       // 判定に使えないため、この専用フラグで引き継ぐ）。
       afterControlParen = kind === 'control'
+      afterStatementColon = false
       continue
     }
 
@@ -331,6 +396,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
@@ -341,6 +407,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
@@ -353,6 +420,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
@@ -368,6 +436,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = true
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
@@ -379,6 +448,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = true
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
@@ -387,28 +457,35 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       // 優先順位: 1) 制御文ヘッダー直後 → ブロック、2) アロー関数直後 → ブロック、
       // 3) `else`/`do` 直後 → ブロック（この2語は REGEX_PRECEDING_KEYWORDS にも含まれ
       // prevSignificant が OPERATOR になるため 4) より先に判定する必要がある）、
-      // 4) 値を期待する位置（OPERATOR。`=` `,` `:` `(` `[` `return` 等の直後）→
-      // オブジェクトリテラル、5) それ以外（VALUE。`function foo() {` の `)` 直後や
+      // 4) 文位置のコロン（`case`/`default`/ラベル文の `:`）直後 → ブロック（JS の文法上、
+      // 文位置の裸 `{` は常にブロック文であり、式としてのオブジェクトリテラルは文位置には
+      // 現れ得ないため。三項演算子の `:` はこの分岐に来ない — 下記 `:` 分岐参照）、
+      // 5) 値を期待する位置（OPERATOR。`=` `,` `(` `[` `return` `?`/三項演算子の `:` 等の
+      // 直後）→ オブジェクトリテラル、6) それ以外（VALUE。`function foo() {` の `)` 直後や
       // 識別子直後などの文位置）→ ブロック（安全側のデフォルト）。
       const kind =
-        afterControlParen || afterArrow || (lastWord !== null && BLOCK_INTRO_KEYWORDS.has(lastWord))
+        afterControlParen ||
+        afterArrow ||
+        afterStatementColon ||
+        (lastWord !== null && BLOCK_INTRO_KEYWORDS.has(lastWord))
           ? BRACE_KIND_BLOCK
           : prevSignificant === 'operator'
             ? BRACE_KIND_LITERAL
             : BRACE_KIND_BLOCK
-      stack.push({ type: FRAME_CODE, kind })
+      stack.push({ type: FRAME_CODE, kind, ternaryDepth: 0 })
       i++
       prevSignificant = 'operator' // ブロック/オブジェクトリテラルの中は値を期待する位置
       lastWord = null
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
     if (ch === '}') {
       const popped = stack.pop()
-      if (popped === FRAME_SUBST) {
+      if (popped.type === FRAME_SUBST) {
         // テンプレートの式展開ブロックを閉じただけ。テンプレート走査へ戻る必要があるが、
         // ここでは深さを追っているだけなので、次の文字からメインループを継続すれば
         // 次の '`' 判定で自然にテンプレート本体（リテラル部）の走査に戻る。
@@ -421,6 +498,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
         afterDot = false
         afterArrow = false
         afterControlParen = false
+        afterStatementColon = false
         continue
       }
       if (stack.length === 0) {
@@ -434,10 +512,56 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
       afterDot = false
       afterArrow = false
       afterControlParen = false
+      afterStatementColon = false
       continue
     }
 
-    // 上記以外の記号（二項演算子 `+ - * % < > 等`、`, ; : = ! & | ? ~ ^` 等）。
+    // 三項演算子 `?`。オプショナルチェイニング `?.` とその後続の nullish 合体 `??` は
+    // 三項演算子ではないため深さを増やさない（`a?.b`・`a ?? b` を誤カウントしない）。
+    // 現在のフレーム（stack の最上段。code フレーム・subst フレームいずれも
+    // ternaryDepth を持つ）の深さを増やすことで、対応する `:` をこのフレーム内で
+    // 独立して数える（フレーム跨ぎで消費されないようにする。上記コメント項目 9 参照）。
+    if (ch === '?' && text[i + 1] !== '.' && text[i + 1] !== '?') {
+      stack[stack.length - 1].ternaryDepth++
+      i++
+      prevSignificant = 'operator' // 三項演算子の then 節という値を期待する位置
+      lastWord = null
+      afterDot = false
+      afterArrow = false
+      afterControlParen = false
+      afterStatementColon = false
+      continue
+    }
+
+    // コロン `:`。現在のフレームに未対応の `?` が残っていれば（ternaryDepth > 0）三項
+    // 演算子の else 節を導くコロンであり、対応する `?` を 1 個消費する（式位置のまま。
+    // 直後の `{` は通常どおり prevSignificant === 'operator' を根拠に判定される）。
+    // 残っていなければ、オブジェクトリテラルの `key: value` かどうかをフレーム種別で
+    // 判定する: 現在のフレームが code フレームかつ種別が BLOCK（＝オブジェクトリテラル/
+    // 分割代入パターンの内部ではなく文位置にいる）なら、このコロンは `case`/`default`/
+    // ラベル文の文位置コロンであり、直後の `{` は常にブロック文として扱う
+    // （`afterStatementColon` で引き継ぐ。上記コメント項目 9 参照）。
+    // それ以外（LITERAL フレーム内の key: value・subst フレーム直下等）は通常どおり
+    // 「値を期待する位置」として扱う（既存の素朴な OPERATOR 判定と同じ挙動を維持）。
+    if (ch === ':') {
+      const frame = stack[stack.length - 1]
+      let isStatementColon = false
+      if (frame.ternaryDepth > 0) {
+        frame.ternaryDepth--
+      } else if (frame.type === FRAME_CODE && frame.kind === BRACE_KIND_BLOCK) {
+        isStatementColon = true
+      }
+      i++
+      prevSignificant = 'operator'
+      lastWord = null
+      afterDot = false
+      afterArrow = false
+      afterControlParen = false
+      afterStatementColon = isStatementColon
+      continue
+    }
+
+    // 上記以外の記号（二項演算子 `+ - * % < > 等`、`, ; = ! & | ~ ^` 等）。
     // いずれも直後に値を期待する OPERATOR 位置として扱う。
     i++
     prevSignificant = 'operator'
@@ -445,6 +569,7 @@ export function findMatchingBraceEnd(text, openBraceIndex) {
     afterDot = false
     afterArrow = false
     afterControlParen = false
+    afterStatementColon = false
   }
 
   return -1
@@ -468,7 +593,9 @@ function skipTemplateLiteralPart(text, i, stack) {
       return i + 1 // テンプレート全体の終端。stack は subst pop 済みで code フレームへ復帰。
     }
     if (text[i] === '$' && text[i + 1] === '{') {
-      stack.push(FRAME_SUBST)
+      // subst フレームにも ternaryDepth を持たせる（`${a ? b : c}` のように `${...}` 直下に
+      // 三項演算子が現れ得るため。code フレームと同様に独立してカウントする必要がある）。
+      stack.push({ type: FRAME_SUBST, ternaryDepth: 0 })
       return i + 2 // 次の式展開ブロックへ。メインループが '{'/'}' を通常どおり数える。
     }
     if (text[i] === '\n') {
