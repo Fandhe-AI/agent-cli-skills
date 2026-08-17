@@ -25,6 +25,14 @@
 // `success` / `neutral` / `skipped` の 3 conclusion に拡張し、それ以外（cancelled /
 // failure / timed_out / action_required / startup_failure / stale 等）のみを bad とする。
 //
+// 再修正（Issue #338 PR #354 の Bugbot 指摘）: awk の `command -v` 存在チェックが
+// `gh api` fetch の**後**（結果を変数へ代入する行の下）に置かれており、awk 不在でも
+// fetch 自体は実行されてしまっていた。「前提が満たされない場合は実行しない」という
+// 契約に反し、(B) の `jq` ゲート（fetch 前に command -v で確認）とも不整合で、
+// レート制限下で無駄な API 呼び出しを発生させ得た。awk の存在チェックを fetch より
+// 前段（if/else の外側）へ移動し、不在時は `gh api` 自体を実行せず `UNDETERMINED` を
+// 返すよう修正した。
+//
 // 3 群構成:
 //   群 A（SKILL.md 記述の固定）: UNDETERMINED・dup=・bad=・ゼロ件分岐・終了コード検証の記載を固定。
 //   群 B（旧文言の再発防止）: 「1 以上なら重複あり」が 0 回であることを固定。
@@ -85,6 +93,25 @@ test('群A: (A)/(B) の権限境界（チェック名をエージェントの文
 
 test('群A: 「よくある失敗」表に判定不能の誤読パターンが追加されている', () => {
   assert.match(skillMd, /\(A\) の出力を検証せず `0` を「重複なし」と読む/)
+})
+
+test('群A: 前提条件節が awk の command -v 確認と不在時の扱いを明記する（Issue #338 P1）', () => {
+  assert.match(skillMd, /`awk` CLI がインストールされていること（`command -v awk` で確認）/)
+  assert.match(skillMd, /未導入の場合はそのコマンドを実行せず `UNDETERMINED`（判定不能）として扱う/)
+})
+
+test('群A: (A) の awk 存在チェックは gh api fetch より先に実行される（Issue #338 PR #354 Bugbot 指摘: awk gate runs after fetch）', () => {
+  const startMarker = '# (A) エージェントが実行してよい形'
+  const startIdx = skillMd.indexOf(startMarker)
+  assert.ok(startIdx >= 0, '(A) セクションが見つからない')
+  const commandVIdx = skillMd.indexOf('command -v awk', startIdx)
+  const ghApiIdx = skillMd.indexOf('gh api --paginate "repos/{owner}/{repo}/commits', startIdx)
+  assert.ok(commandVIdx >= 0, 'command -v awk が見つからない')
+  assert.ok(ghApiIdx >= 0, 'gh api fetch 行が見つからない')
+  assert.ok(
+    commandVIdx < ghApiIdx,
+    'awk 存在チェックは gh api fetch より前になければならない（不在時に fetch 自体を実行しないため）',
+  )
 })
 
 // ---------------------------------------------------------------------------

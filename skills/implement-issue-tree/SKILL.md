@@ -380,13 +380,16 @@ gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証し�
 # そのため (1) 取得を独立させて終了コードを見る (2) 出力の空判定を行う (3) 集計は shell 側で
 # 行う、の 3 段に分ける（--jq はページごとに適用されるため group_by をページ単位で行うと
 # ページ跨ぎの重複を見逃す。名前+結論の一覧をシェル側 awk で全ページ分集約する）
+if ! command -v awk >/dev/null; then
+  # awk 前提条件が未導入。集計不能なため判定不能として扱う（fetch 自体を実行しない。
+  # (B) の command -v jq ゲートと同じく前提確認を fetch より先に行う — レート制限下で
+  # 無駄な gh api 呼び出しを発生させないため）
+  echo "UNDETERMINED"
+else
 rows=$(gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=100" \
   --jq '.check_runs[] | [.name, (.conclusion // "pending")] | @tsv' 2>/dev/null)
 status=$?
-if ! command -v awk >/dev/null; then
-  # awk 前提条件が未導入。集計不能なため判定不能として扱う（実行はしない）
-  echo "UNDETERMINED"
-elif [ "${status}" -ne 0 ] || [ -z "${rows}" ]; then
+if [ "${status}" -ne 0 ] || [ -z "${rows}" ]; then
   # 取得失敗、または check-run が 1 件も返らない。この節は「全チェックが pass に見える」状態
   # でのみ参照するため、0 件は前提と矛盾する = 取得できていない可能性が高く、判定不能として扱う
   echo "UNDETERMINED"
@@ -399,6 +402,7 @@ else
     END { d = 0; b = 0; p = 0
           for (k in n) if (n[k] >= 2) { d++; if (k in bad) b++; if (k in pend) p++ }
           printf "dup=%d bad=%d pend=%d\n", d, b, p }'
+fi
 fi
 # → 出力は次の 2 形のみ（チェック名・エラー本文は出力に現れない）:
 #    `UNDETERMINED`               … 判定不能。「重複なし」ではない
