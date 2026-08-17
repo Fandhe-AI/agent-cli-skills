@@ -386,9 +386,17 @@ if ! command -v awk >/dev/null; then
   # 無駄な gh api 呼び出しを発生させないため）
   echo "UNDETERMINED"
 else
-rows=$(gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=100" \
-  --jq '.check_runs[] | [.name, (.conclusion // "pending")] | @tsv' 2>/dev/null)
-status=$?
+# `rows=$(gh api ...)` を独立した単純コマンドのまま実行すると、呼び出し元 shell で
+# `set -e`（errexit）が有効な場合に gh api の非ゼロ終了（認証失敗・404・レート制限等）で
+# shell がここで即終了し、次行の status=$? および UNDETERMINED 分岐へ到達できない
+# （if/then/else の条件式に置かれたコマンドは errexit の対象外という shell の仕様を利用し、
+# 代入自体を条件式へ移すことで errexit 下でも必ず失敗分岐を実行できる形にする）。
+if rows=$(gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+  --jq '.check_runs[] | [.name, (.conclusion // "pending")] | @tsv' 2>/dev/null); then
+  status=0
+else
+  status=$?
+fi
 if [ "${status}" -ne 0 ] || [ -z "${rows}" ]; then
   # 取得失敗、または check-run が 1 件も返らない。この節は「全チェックが pass に見える」状態
   # でのみ参照するため、0 件は前提と矛盾する = 取得できていない可能性が高く、判定不能として扱う

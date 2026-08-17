@@ -33,6 +33,16 @@
 // 前段（if/else の外側）へ移動し、不在時は `gh api` 自体を実行せず `UNDETERMINED` を
 // 返すよう修正した。
 //
+// 再修正（Issue #338 PR #354 の codex-review 指摘）: `rows=$(gh api ...)` が独立した
+// 単純コマンドのまま置かれていたため、呼び出し元 shell で `set -e`（errexit）が有効な
+// 場合、`gh api` の非ゼロ終了（認証失敗・404・レート制限等）で shell がその行で即終了し、
+// 次行の `status=$?` および `UNDETERMINED` 分岐へ到達できなかった。「出力は 2 形のみ」
+// 「取得失敗は判定不能として fail-closed」という契約が実行環境（呼び出し元の errexit
+// 設定）によって破られ得た。代入自体を `if rows=$(gh api ...); then ... else ...; fi`
+// の条件式へ移し（条件式に置かれたコマンドは errexit の対象外という shell の仕様を
+// 利用）、errexit 下でも必ず失敗分岐（`status=$?` の捕捉 → `UNDETERMINED`）を実行できる
+// 形にした。
+//
 // 3 群構成:
 //   群 A（SKILL.md 記述の固定）: UNDETERMINED・dup=・bad=・ゼロ件分岐・終了コード検証の記載を固定。
 //   群 B（旧文言の再発防止）: 「1 以上なら重複あり」が 0 回であることを固定。
@@ -114,12 +124,21 @@ test('群A: (A) の awk 存在チェックは gh api fetch より先に実行さ
   )
 })
 
+test('群A: (A) は rows=$(gh api ...) の代入を if の条件式へ置き errexit 下でも失敗分岐へ到達する（Issue #338 P1）', () => {
+  assert.match(skillMd, /if rows=\$\(gh api --paginate "repos\/\{owner\}\/\{repo\}\/commits/)
+})
+
 // ---------------------------------------------------------------------------
 // 群 B: 旧文言の再発防止
 // ---------------------------------------------------------------------------
 test('群B: 旧文言「1 以上なら重複あり」は 0 回（判定不能を重複なしと誤読させない）', () => {
   const matches = skillMd.match(/1 以上なら重複あり/g)
   assert.equal(matches, null)
+})
+
+test('群B: rows=$(gh api ...) が if の条件式に含まれず独立した単純コマンドのまま残る箇所は 0 件（errexit 下で失敗分岐へ到達できなくなる退行を防ぐ）', () => {
+  const bareAssignment = skillMd.match(/\nrows=\$\(gh api/g)
+  assert.equal(bareAssignment, null)
 })
 
 // ---------------------------------------------------------------------------
