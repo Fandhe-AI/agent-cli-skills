@@ -154,16 +154,45 @@ test('ケース11: gh auth status が非ゼロ → exit 2、API 呼び出し無�
   assert.ok(!c.some((l) => l.startsWith('api')), 'auth 失敗後は api 系呼び出しが無いこと')
 })
 
-test('ケース12: --old-parent が実測値と食い違う（advisory）→ 実測値を優先して reassigned', () => {
-  // 実際の現在の親は #9（parentBefore）。呼び出し側は誤って --old-parent 5 を渡す
+test('ケース12: --old-parent が実測値と食い違う → exit 6 で fail-closed、DELETE も POST も呼ばれない', () => {
+  // 実際の現在の親は #9（parentBefore）。呼び出し側は Step 2 で #5 からの付け替えを承認している。
+  // #9 は承認されていない親であり、そこから外すと承認外の親子関係を壊すため停止する（PR #314 codex P1）
   const r = run(['--issue', '18', '--old-parent', '5', '--new-parent', '7'], {
     parentBefore: '9',
     parentAfter: '7',
   })
-  assert.equal(r.status, 0)
-  assert.match(r.stdout.trim(), /^result=reassigned issue=18 new_parent=7 old_parent=9$/)
+  assert.equal(r.status, 6)
   const c = calls(r.logPath)
-  // DELETE は実測した現在の親 #9 に対して発行されること（誤った #5 ではない）
-  assert.ok(c.some((l) => l.includes('/issues/9/sub_issue') && l.includes('--method DELETE')))
-  assert.ok(!c.some((l) => l.includes('/issues/5/sub_issue')))
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
+  assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が 1 件も呼ばれていないこと')
+  // 実測した親を呼び出し側へ提示できること（承認の取り直しに必要）
+  assert.match(r.stderr, /#9/)
+})
+
+test('ケース13: 孤児として承認されたが実測では親が居る → exit 6 で fail-closed', () => {
+  // --old-parent 省略 = 「この issue は孤児である」ことを承認した意味。実測で #9 配下に
+  // あるなら、その親子関係は承認されていない
+  const r = run(['--issue', '19', '--new-parent', '7'], {
+    parentBefore: '9',
+    parentAfter: '7',
+  })
+  assert.equal(r.status, 6)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
+  assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が 1 件も呼ばれていないこと')
+  assert.match(r.stderr, /#9/)
+})
+
+test('ケース14: --old-parent 指定だが実測は孤児 → 破壊が起きないため続行し posted-only', () => {
+  // 承認された操作（#5 から外して #7 へ付ける）の部分集合。DELETE 対象が存在しないだけで
+  // 承認外の親子関係は壊れないため、警告のうえ POST のみ実行する
+  const r = run(['--issue', '20', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '',
+    parentAfter: '7',
+  })
+  assert.equal(r.status, 0)
+  assert.match(r.stdout.trim(), /^result=posted-only issue=20 new_parent=7 old_parent=-$/)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が呼ばれていないこと')
+  assert.ok(c.some((l) => l.includes('--method POST')), 'POST が呼ばれていること')
 })

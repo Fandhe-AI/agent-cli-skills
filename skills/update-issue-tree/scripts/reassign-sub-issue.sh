@@ -16,8 +16,11 @@
 #   これにより「新親配下の全件取得で存在確認する」「旧親配下の全件取得で所属確認する」という
 #   listing ベースの冪等性判定は不要になった。冪等性判定・第三の親の検知は、この 1 フィールドの
 #   実測値を先に確定させてから分岐する（3.3 節の処理順序どおり、判定を DELETE/POST の実行より
-#   必ず先に行う）。--old-parent は advisory 扱いとし、実測した現在の親と食い違う場合は
-#   警告を出しつつ実測値を優先する（誤った旧親を渡されて別 issue の親子関係を壊す事故を防ぐ）。
+#   必ず先に行う）。--old-parent と実測値が食い違う場合、および --old-parent 省略（孤児として
+#   承認）なのに実測では親が居る場合は、承認されていない親子関係を壊さないため exit 6 で
+#   fail-closed に停止する（何も変更しない）。呼び出し側は実測した親を改めてユーザーへ提示して
+#   承認を取り直したうえで再実行する。実測で親が居ないのに --old-parent が指定された場合だけは、
+#   承認された操作の部分集合（DELETE 不要の POST のみ）となり破壊が起きないため警告して続行する。
 #
 # 使い方:
 #   ./reassign-sub-issue.sh --issue <対象 issue 番号> --new-parent <新親 issue 番号> \
@@ -166,14 +169,11 @@ if [[ -n "${PARENT_URL}" ]]; then
   CURRENT_PARENT=$(printf '%s' "${PARENT_URL}" | grep -oE '[0-9]+$' || true)
 fi
 
-if [[ -n "${OLD_PARENT}" ]]; then
-  if [[ -n "${CURRENT_PARENT}" && "${OLD_PARENT}" != "${CURRENT_PARENT}" ]]; then
-    echo "警告: 実測した現在の親 #${CURRENT_PARENT} が指定された --old-parent #${OLD_PARENT} と異なる。実測値を優先する" >&2
-  elif [[ -z "${CURRENT_PARENT}" ]]; then
-    # --old-parent 指定時に実測した現在の親が空（孤児）の非対称ケース。挙動自体
-    # （実測値優先で POST-only 経路へ進む）は正しいが、不整合の事実を伏せない
-    echo "警告: 指定された --old-parent #${OLD_PARENT} に反し、実測した現在の親は無い（孤児）。実測値を優先し POST のみを実行する" >&2
-  fi
+if [[ -n "${OLD_PARENT}" && -z "${CURRENT_PARENT}" ]]; then
+  # --old-parent 指定時に実測した現在の親が空（孤児）の非対称ケース。承認された操作
+  # （旧親から外して新親へ付ける）の部分集合であり、承認外の親子関係を壊さないため続行する。
+  # ただし不整合の事実は伏せない
+  echo "警告: 指定された --old-parent #${OLD_PARENT} に反し、実測した現在の親は無い（孤児）。POST のみを実行する" >&2
 fi
 
 # 冪等性判定を DELETE/POST の実行より先に確定する（#295 で「判定が実行より後で 1 巡遅れる」と
@@ -181,6 +181,22 @@ fi
 if [[ "${CURRENT_PARENT}" == "${NEW_PARENT}" ]]; then
   emit_result "already-attached" "${CURRENT_PARENT}"
   exit 0
+fi
+
+# 承認境界のガード（fail-closed）。呼び出し側（SKILL.md Step 2）はユーザーへ「#X から #Y へ
+# 付け替える」と提示して承認を得ている。実測した現在の親がその承認内容と食い違う場合、
+# ここで DELETE を撃つと**承認されていない親子関係を壊す**ため、何も変更せずに停止する。
+# 状態が動いていた場合は、実測した親を改めてユーザーへ提示して承認を取り直す（PR #314 codex P1）
+if [[ -n "${CURRENT_PARENT}" ]]; then
+  if [[ -z "${OLD_PARENT}" ]]; then
+    echo "エラー: 孤児として指定されたが、実測では #${CURRENT_PARENT} 配下にある。承認外の親子関係を壊さないため中止する" >&2
+    echo "対処: 現在の親 #${CURRENT_PARENT} をユーザーへ提示して承認を得たうえで --old-parent ${CURRENT_PARENT} を付けて再実行する" >&2
+    exit 6
+  elif [[ "${OLD_PARENT}" != "${CURRENT_PARENT}" ]]; then
+    echo "エラー: 実測した現在の親 #${CURRENT_PARENT} が指定された --old-parent #${OLD_PARENT} と異なる。承認外の親子関係を壊さないため中止する" >&2
+    echo "対処: 現在の親 #${CURRENT_PARENT} をユーザーへ提示して承認を得たうえで --old-parent ${CURRENT_PARENT} で再実行する" >&2
+    exit 6
+  fi
 fi
 
 if [[ -z "${CURRENT_PARENT}" ]]; then
