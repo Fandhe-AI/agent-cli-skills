@@ -417,6 +417,28 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertIn("乖離: **0 件**", report)
         self.assertIn("乖離 **0 件**", report)
         self.assertIn("検査不能なリポジトリは **0 件**", report)
+        # 乖離も UNKNOWN も無いときだけ issue を close してよい。
+        self.assertEqual(cud.drift_count(result), 0)
+        self.assertFalse(cud.has_drift(result))
+
+    def test_unknown_alone_keeps_issue_open(self):
+        # 乖離 0 件だが検査不能が 1 件。「解消した」と言えないので close しない。
+        result = self._run_scan({
+            "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))},
+            "forbidden": {"workflow": (403, "")},
+        })
+        self.assertEqual(cud.drift_count(result), 0)
+        self.assertEqual(len(result.unknowns), 1)
+        self.assertTrue(cud.has_drift(result))
+
+    def test_upstream_marker_failure_alone_is_drift(self):
+        # 下流が全て健全でも、上流 reusable が劣化していれば乖離として扱う。
+        result = self._run_scan({
+            "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))},
+        })
+        result.upstream_markers = [{"marker": "dummy", "ok": False, "detail": "劣化"}]
+        self.assertEqual(cud.drift_count(result), 1)
+        self.assertTrue(cud.has_drift(result))
 
 
 if __name__ == "__main__":

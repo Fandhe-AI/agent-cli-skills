@@ -826,6 +826,21 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 
+def drift_count(result: ScanResult) -> int:
+    """乖離件数（下流の findings + 上流マーカーの不適合）。"""
+    return len(result.findings) + len([m for m in result.upstream_markers if not m["ok"]])
+
+
+def has_drift(result: ScanResult) -> bool:
+    """報告 issue を open のままにすべきか。
+
+    UNKNOWN が 1 件でも残っている間は「乖離が解消した」と言えない。検査できて
+    いないリポジトリを 0 件扱いして issue を close すると、まさにこのスキルが
+    避けたい「検査不能を green に倒す」ことになるため close 条件に含める。
+    """
+    return drift_count(result) > 0 or len(result.unknowns) > 0
+
+
 def find_report_issue(repo: str, token: str) -> int | None:
     """固定タイトルの open issue を探す。
 
@@ -916,18 +931,15 @@ def main() -> int:
     else:
         print(report)
 
-    marker_fail = [m for m in result.upstream_markers if not m["ok"]]
-    drift = len(result.findings) + len(marker_fail)
-
-    # UNKNOWN が残っている間は「解消した」と言えない。close 判定に含める。
-    has_drift = drift > 0 or len(result.unknowns) > 0
+    drift = drift_count(result)
+    open_issue = has_drift(result)
 
     if report_repo:
         body_file = os.environ.get("REPORT_BODY_FILE", "drift-report.md")
         with open(body_file, "w", encoding="utf-8") as fh:
             fh.write(report)
         try:
-            print(sync_report_issue(report_repo, issue_token, body_file, has_drift))
+            print(sync_report_issue(report_repo, issue_token, body_file, open_issue))
         except ScanError as exc:
             print(f"::error::報告 issue の同期に失敗: {exc}")
             return 1

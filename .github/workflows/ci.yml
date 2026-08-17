@@ -69,6 +69,41 @@ jobs:
           node --test "skills/**/*.test.mjs"
 
   # --------------------------------------------------
+  # py-tests（update-external 乖離検知の判定ロジック回帰テスト）
+  # --------------------------------------------------
+  # .github/scripts/check_update_external_drift.py の純粋関数（分類・pin 比較・
+  # 軸 4 のジョブ単位判定）を fixture に対して実行する（イシュー #260）。
+  # 検知ワークフロー本体は日次 schedule で走るため、壊れても PR 時点では気づけない。
+  # 特に「submodule ジョブの既定 true を誤検知しない」というジョブ単位判定は
+  # ファイル全体 grep への退行が起きやすく、退行しても検知ジョブは緑のまま
+  # 誤ったレポートを出し続ける。ここで PR ごとに固定する。
+  py-tests:
+    name: Python unit tests
+    runs-on: ubuntu-latest
+    # PyYAML の取得と unittest のみ。hang 検知の保険として 5 分で打ち切る。
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        # actions/checkout v6.0.3
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        # actions/setup-python v6.0.0
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c
+        with:
+          python-version: '3.12'
+
+      - name: Run drift checker unit tests
+        run: |
+          # runner イメージ同梱の PyYAML 有無は契約されていないため明示的に入れる。
+          python3 -m pip install --disable-pip-version-check --quiet 'PyYAML==6.0.2'
+          python3 .github/scripts/test_check_update_external_drift.py
+
+  # --------------------------------------------------
   # lint-docs（ドキュメント／設定ファイル系 lint）
   # --------------------------------------------------
   # npx 直呼びの個別実装から Fandhe-AI/actions の lint-docs reusable workflow
