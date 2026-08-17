@@ -1630,19 +1630,32 @@ function planPrompt(item) {
 // 独立 Review フェーズのプロンプト（push 前ローカル diff レビュー版）。worktree は .git を
 // 共有するため impl のローカルブランチを detach で参照できる。判定のみで修正は fix へ委譲。
 // Low 含む指摘が 1 件でもあれば needs-fix（安全側）。impl.branch は sanitizeBranch 検証済みを渡す。
+//
+// 比較基準は origin/<base>（remote-tracking ref）の 3 点ドット diff で固定する（Issue #315）。
+// 3 点ドット `A...HEAD` は merge-base(A, HEAD) からの差分のため、A に origin/<base> を渡すと
+// 比較点はブランチの分岐点に固定され、ラン中に origin が進んでも動かない（fetch 不要で
+// 安定する）。ローカル base ref を比較基準にすると、ローカルが origin より遅れているだけで
+// 無関係な祖先コミットの差分までレビュー対象に混入する（#297 で diff 417 行中 387 行がノイズ
+// となり収束失敗した実例）。ブランチ作成時点の SHA を固定する代替案は、push 後の fix 経路で
+// `git merge origin/<base>` により base を正当に取り込んだ場合に、その取り込み分を再びノイズ
+// として検出してしまうため採らない（3 点ドットは merge-base が前進するため自動的に正しくなる）。
 function reviewPrompt(item, impl) {
   const branch = sanitizeBranch(impl.branch)
   return [
     `イシュー #${item.number}（ブランチ ${branch}）のコードレビュー担当エージェント（push 前ローカル diff レビュー）。`,
     COMMON,
     '本エージェントは判定のみを行い、コードの変更・コミット・push は行わない。',
-    'push 前の段階であり origin に対象ブランチはまだ存在しない。git fetch は不要。',
+    '対象ブランチは push 前のため origin には存在しない。base の remote-tracking ref は既存のものを使う。',
     '手順:',
     `1. git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
     `   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
     `   （ブランチ名は ${JSON.stringify(branch)} — 変数展開不要、そのまま使用する）`,
-    `2. implement-review スキルに従い、git diff ${baseBranch}...HEAD のローカル diff を対象に品質・セキュリティレビューを実施する。`,
-    `   （origin/${baseBranch} ではなくローカルの ${baseBranch} ブランチと比較する。fetch 不要）`,
+    `   ref 解決確認: git rev-parse --verify --quiet refs/remotes/origin/${baseBranch} が失敗した場合、`,
+    `   git fetch origin ${baseBranch} を 1 回だけ試みる。それでも解決できなければレビューを`,
+    `   実施せず state: "needs-fix" / highestSeverity: "critical" とし、summary に`,
+    `   「比較基準 origin/${baseBranch} を解決できない」と明記して終端する（fail-closed）。`,
+    `2. implement-review スキルに従い、git diff origin/${baseBranch}...HEAD のローカル diff を対象に品質・セキュリティレビューを実施する。`,
+    `   （origin/${baseBranch}（remote-tracking ref）基準。3 点ドットのため比較点はブランチの分岐点に固定され、fetch 不要・ラン中に origin が進んでも比較点は不変）`,
     '   レビュー観点:',
     '   - 実装品質（設計・可読性・エッジケース・テストカバレッジ）',
     '   - OWASP Top 10 セキュリティ（インジェクション・認証・秘密情報露出等）',
@@ -2165,7 +2178,10 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
         `1. 本エージェントは隔離された git worktree 内で動作する。push 前のローカル修正のため fetch は不要。`,
         `   git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
         `   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
-        `   マージコンフリクトの解消が必要な場合は git merge ${baseBranch}（ローカル）を実行して解消する。`,
+        `   マージコンフリクトの解消が必要な場合は git merge origin/${baseBranch} を実行して解消する`,
+        `   （ローカルの ${baseBranch} ではなく origin/${baseBranch} を使う。ローカル base が origin より`,
+        `   進んでいる場合にローカル限定コミットがブランチへ混入し、次ラウンドの Review がそれを`,
+        `   ブランチの変更として誤検出する再発経路を防ぐため。Issue #315）。`,
       ]
   // fix commit も impl commit と同じ commitlint 制約を受けるため、コミット前チェックの
   // 文言を pushAfterFix の両分岐で共通化する（Issue #290: scope-enum リポでの落ちを防ぐ）。
