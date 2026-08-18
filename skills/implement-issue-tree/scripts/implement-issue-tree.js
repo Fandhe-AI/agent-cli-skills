@@ -1431,6 +1431,10 @@ async function updateState(issueNumber, patch, options = {}) {
     }
     return { mergeOk, cleanupOk }
   })
+  // 削除成功が確認できたパスのみ confirmedRemovedPaths へ登録する（バイト軸実測し直しの du
+  // フィルタ専用。sweepEligiblePaths は「試みた」時点で登録済みのため流用しない。上のコメント
+  // 参照）。cleanupWorktreePath が空文字（削除対象なし）の場合は登録不要。
+  if (cleanupWorktreePath && result?.cleanupOk === true) confirmedRemovedPaths.add(cleanupWorktreePath)
   // AND 判定（分割前と同じ戻り値契約。どちらが失敗したかは上のログで判別できる）。
   return result?.mergeOk === true && result?.cleanupOk === true
 }
@@ -1612,6 +1616,16 @@ function findMainWorktreePath(entries) {
 //    が未コミット変更ごと消える fail-destructive になる。削除を試みた地点でのみ登録すれば、
 //    書き込み失敗時は候補に残って再試行され、未試行の worktree は構造的に候補にならない。
 const sweepEligiblePaths = new Set()
+
+// バイト軸のラン中実測し直し（remeasureResidualBytesIfDue）専用の「削除成功が確認できた」
+// パス集合。sweepEligiblePaths は「削除を試みた」時点（updateState 冒頭・削除成否確定前）で
+// 登録される choke point のため、locked・権限不足等で削除が失敗しても登録済みのままになる
+// （sweepClosedWorktrees の最終リトライ候補としてはこれが正しい設計）。しかし
+// remeasureResidualBytesIfDue の du 対象フィルタに同じ集合を使うと、実体が残っている削除失敗
+// パスまで測定対象から除外され、実ディスク使用量を過小評価する fail-open になる（codex-review
+// 指摘）。この集合は updateState 内の掃除エージェントが ok:true（削除成功・対象なしを含む）を
+// 返した場合にのみ追加し、du フィルタはこちらだけを参照する。
+const confirmedRemovedPaths = new Set()
 
 // 本ランで新規作成された worktree の記録簿（残置上限ゲートの「本ラン積み増し」実測）。
 // 使い捨て（review / pr-create）・fix-routing-error・実装 worktree（implement）を記録する。
@@ -4645,12 +4659,15 @@ async function remeasureResidualBytesIfDue() {
   if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return
   if (ephemeralWorktrees.length - byteRemeasureAtLedgerCount < BYTE_REMEASURE_LEDGER_INTERVAL) return
   // ephemeralWorktrees は追記専用の台帳のため、cleanupWorktree（updateState）で削除を試みた
-  // パス（sweepEligiblePaths に登録済み）を含んだままになる。既に削除試行済みのパスを du
-  // 対象へ含めると、初回の merge cleanup 以降ずっと「対象パスが存在しない」で測定失敗し続け、
-  // 上の fail-closed（測定失敗 → newStartSuppressed）と組み合わさって毎回恒久停止してしまう
-  // （Cursor Bugbot Medium 指摘）。削除試行済みパスは対象から除外する。
+  // パスを含んだままになる。削除成功が確認できた（confirmedRemovedPaths）パスを du 対象へ
+  // 含めると、初回の merge cleanup 以降ずっと「対象パスが存在しない」で測定失敗し続け、上の
+  // fail-closed（測定失敗 → newStartSuppressed）と組み合わさって毎回恒久停止してしまう
+  // （Cursor Bugbot Medium 指摘）。除外は confirmedRemovedPaths（削除成功確認済み）に限る —
+  // sweepEligiblePaths（削除を試みただけで成否未確定）で除外すると、locked・権限不足等で
+  // 削除が失敗し実体が残っている worktree まで測定対象から漏れ、実ディスク使用量を過小評価する
+  // fail-open になる（codex-review 指摘）。
   const targetPaths = [...residualPathsAtStart, ...ephemeralWorktrees.map((e) => e.path)].filter(
-    (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !sweepEligiblePaths.has(p),
+    (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !confirmedRemovedPaths.has(p),
   )
   const kib = targetPaths.length > 0 ? await measureResidualWorktreeBytes(targetPaths) : 0
   // 間引きカウンタは測定成否に関わらず進める。失敗のたびに毎周回リトライすると agent 呼び出し
