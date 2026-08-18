@@ -34,6 +34,7 @@ const slicePath = join(sliceDir, 'implement-issue-tree-residual-cap-defs.mjs')
 const SLICE_EXPORTS = [
   'parseMaxResidualWorktrees',
   'DEFAULT_MAX_RESIDUAL_WORKTREES',
+  'LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES',
   'parseMaxResidualWorktreeBytes',
   'DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES',
   'EPHEMERAL_KIND_MAX',
@@ -45,6 +46,7 @@ const mod = await import(pathToFileURL(slicePath).href)
 const {
   parseMaxResidualWorktrees,
   DEFAULT_MAX_RESIDUAL_WORKTREES,
+  LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES,
   parseMaxResidualWorktreeBytes,
   DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES,
   EPHEMERAL_KIND_MAX,
@@ -68,6 +70,31 @@ test('負値・非整数・文字列・NaN は fail-closed で throw する（�
   assert.throws(() => parseMaxResidualWorktrees(1.5))
   assert.throws(() => parseMaxResidualWorktrees('20'))
   assert.throws(() => parseMaxResidualWorktrees(NaN))
+})
+
+// --- bytesAxisDisabled フォールバック（codex-review 指摘・PR #390 第 2 ラウンド）---
+// 件数軸既定 100 の根拠は本リポジトリ 1 件のみの実測であり、リポジトリ非依存の絶対閾値である
+// バイト軸が併用されている前提で許容される。利用者がバイト軸のみを明示オプトアウト
+// （maxResidualWorktreeBytes: 0）し件数軸を未指定のままにした場合、この補強が働かないため
+// 件数軸自体を安全側の旧既定値へ自動的に引き下げる。
+
+test('LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES は 20（旧既定値のまま不変）', () => {
+  assert.equal(LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES, 20)
+})
+
+test('bytesAxisDisabled が true のとき、未指定・null は旧既定 20 を返す（バイト軸オプトアウト時の安全側フォールバック）', () => {
+  assert.equal(parseMaxResidualWorktrees(undefined, true), LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES)
+  assert.equal(parseMaxResidualWorktrees(null, true), LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES)
+})
+
+test('bytesAxisDisabled が false・未指定のときは従来どおり既定 100 のまま（回帰なし）', () => {
+  assert.equal(parseMaxResidualWorktrees(undefined, false), DEFAULT_MAX_RESIDUAL_WORKTREES)
+  assert.equal(parseMaxResidualWorktrees(undefined), DEFAULT_MAX_RESIDUAL_WORKTREES)
+})
+
+test('bytesAxisDisabled が true でも利用者が明示指定した値は上書きしない', () => {
+  assert.equal(parseMaxResidualWorktrees(5, true), 5)
+  assert.equal(parseMaxResidualWorktrees(0, true), 0)
 })
 
 test('EPHEMERAL_RESERVE_PER_NEW_START は EPHEMERAL_KIND_MAX の合計から導出され 6 のまま不変', () => {
@@ -146,11 +173,31 @@ test('バイト軸はラン開始時の残置 0 件でもメイン worktree 測�
   // 旧実装は `maxResidualWorktreeBytes > 0 && residual.paths.length > 0` を条件にしていたため、
   // 開始時残置 0 件のランではバイト軸の測定自体がスキップされていた。修正後は
   // `maxResidualWorktreeBytes > 0` のみを条件にし、mainWorktreePath の独立測定で
-  // perWorktreeByteReserve を確定する。
+  // perWorktreeByteReserve を確定する。mainKib の測定は measureMainWorktreeContentBytes へ
+  // 委譲する（共有 .git object store を除外した working tree 相当のみを floor に使うため。
+  // PR #390 codex-review P1・Cursor Bugbot High: 素の du 値は object store 全量を含み過大予約
+  // になっていた）。
   assert.doesNotMatch(source, /if \(maxResidualWorktreeBytes > 0 && residual\.paths\.length > 0\)/)
   assert.match(source, /if \(maxResidualWorktreeBytes > 0\) {/)
-  assert.match(source, /mainWorktreePath \? await measureResidualWorktreeBytes\(\[mainWorktreePath\]\)/)
+  assert.match(source, /mainWorktreePath \? await measureMainWorktreeContentBytes\(mainWorktreePath\)/)
   assert.match(source, /perWorktreeByteReserve = Math\.max\(mainKib \* 1024, avgResidualBytes\)/)
+})
+
+test('measureMainWorktreeContentBytes はメイン worktree 全体から .git を差し引いた working tree 相当を返す構造になっている（.git object store の過大予約防止）', () => {
+  assert.match(source, /async function measureMainWorktreeContentBytes\(mainPath\)/)
+  assert.match(source, /const gitPath = sanitizeWorktreePath\(`\$\{mainPath\}\/\.git`\)/)
+  assert.match(source, /return Math\.max\(0, totalKib - gitKib\)/)
+})
+
+test('measureResidualWorktreeBytes はプロンプトへ渡す前に sanitizeWorktreePath で全パスを検証し、UNTRUSTED_POLICY を含める（codex-review P0 対応）', () => {
+  assert.match(source, /const sanitizedPaths = paths\.map\(\(p\) => sanitizeWorktreePath/)
+  assert.match(source, /if \(sanitizedPaths\.some\(\(p\) => p === ''\)\) {/)
+  // measureResidualWorktreeBytes のプロンプト配列に UNTRUSTED_POLICY が直接含まれることを確認する
+  // （du -sk の呼び出し指示より前の行に存在する = このプロンプトの一部であることの軽量確認）。
+  const fnStart = source.indexOf('async function measureResidualWorktreeBytes(paths)')
+  const fnBody = source.slice(fnStart, fnStart + 3000)
+  assert.match(fnBody, /UNTRUSTED_POLICY,/)
+  assert.match(fnBody, /xargs -0 du -sk/)
 })
 
 test('新規着手・monitoring 再開の両方が perWorktreeByteReserve による projected バイト判定を持つ', () => {
@@ -187,4 +234,24 @@ test('容量軸のラン中再評価: 開始時残置 0 件でも 1 worktree あ
     suppressedAtIssue !== null && suppressedAtIssue <= 2,
     `1 worktree ≈1.5GiB のとき 2 GiB 上限は 1〜2 イシュー目で抑止されるべきだが suppressedAtIssue=${suppressedAtIssue}`,
   )
+})
+
+// --- バイト軸のラン中「実測し直し」（codex-review 指摘 5・PR #390 第 2 ラウンド）---
+// perWorktreeByteReserve は開始時に確定する floor 値であり、ビルド成果物等でラン中に 1
+// worktree が floor を超えて成長した場合、projection（floor × 台帳件数）だけでは実際の
+// ディスク消費を過小評価し得る。台帳の積み増しが一定件数に達するたびに実測し直し、
+// 実測超過を独立に検知して新規着手を止める構造になっていることをソース存在確認する。
+
+test('ラン中の実測し直し（remeasureResidualBytesIfDue）が dispatch ループの毎周回冒頭で呼ばれる', () => {
+  assert.match(source, /async function remeasureResidualBytesIfDue\(\)/)
+  assert.match(source, /const BYTE_REMEASURE_LEDGER_INTERVAL = 3/)
+  assert.match(source, /await remeasureResidualBytesIfDue\(\)/)
+})
+
+test('実測し直しは残置パス一覧＋台帳パスの合計を測定し、上限超過時に newStartSuppressed を立てる', () => {
+  const fnStart = source.indexOf('async function remeasureResidualBytesIfDue()')
+  const fnEnd = source.indexOf('\nwhile (true) {', fnStart)
+  const fnBody = source.slice(fnStart, fnEnd)
+  assert.match(fnBody, /residualPathsAtStart, \.\.\.ephemeralWorktrees\.map\(\(e\) => e\.path\)/)
+  assert.match(fnBody, /actualBytes > maxResidualWorktreeBytes && !newStartSuppressed/)
 })
