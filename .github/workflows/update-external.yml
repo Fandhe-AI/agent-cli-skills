@@ -109,10 +109,16 @@ jobs:
       # 本リポジトリは `.claude/rules/ruleset-policy.md` が正しい構成の実例として挙げる
       # branch ruleset `main-protection`（active・bypass_actors 0・required checks
       # 12 件・全件 integration_id 束縛済み）を持ち、classic BP は 404（ruleset 運用）。
-      # イシュー #359 は「wrapper 導入済みリポのうち branch protection が無いもの」を
-      # fail-closed 化するかの決定を範囲とし、本リポは構造的に保護ありのため対象外
-      # （棚卸し結果は docs/skills-auto-merge-fleet-audit.md 参照）。組織変数追従を維持する。
-      skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}
+      # ただしこれは ruleset の**構造**が green であることの確認に留まり、
+      # `docs/update-external-rollout.md` が組織変数追従の許容条件として明記する
+      # 「実際に同期 PR が required checks 完了待ちで BLOCKED になることの実測」は
+      # 未確認（2026-08-19 実測。docs/skills-auto-merge-fleet-audit.md 4.2 節参照）。
+      # 構造的検証と PR レベル実測は別軸であり、前者だけでは後者の代替にならないため、
+      # PR レベル実測が完了するまで本リポジトリも fail-closed（'false'）へ倒す
+      # （イシュー #359 codex-review 指摘への是正。BLOCKED を実測できた時点で
+      # 組織変数追従へ戻す）。同期は将来 open PR として作成され続け、
+      # human review でのマージ待ちになる（#342 の 4 リポと同じ運用）。
+      skills-auto-merge: 'false'
       skills-auto-merge-allowlist: ${{ vars.SKILLS_AUTO_MERGE_ALLOWLIST }}
     secrets:
       # 未登録の secret は空文字となり、共通側のガードが checkout 前に fail-closed で止める。

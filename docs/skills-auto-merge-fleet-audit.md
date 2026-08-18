@@ -5,16 +5,21 @@ fail-closed 化した（`docs/update-external-rollout.md` 参照）。本ドキ�
 `update-external.yml` wrapper を持つ既存リポ**を同じ観点で棚卸しし、方針を決定した記録。
 
 **イシュー #359 のタイトルは「wrapper 導入済みリポのうち branch protection が無いものの
-skills-auto-merge を fail-closed にするか決める」であり、対象は構造的に保護が無いリポに
-限定される。** 4 節の実測どおり棚卸し対象 25 リポ中 24 リポは branch ruleset で
-構造的に保護されており（`agent-cli-skills` 自身も含む。同リポは
-`.claude/rules/ruleset-policy.md` が正しい構成の実例として挙げる `main-protection`
-そのものを持つ）、この 24 リポはイシューの対象外である。実際に保護が無いのは
-`template-articles` の 1 リポのみであり、本イシューの適用対象はこの 1 リポに絞られる。
-**本エージェントの書き込み対象は `agent-cli-skills` 自身に限られるが、同リポは上記のとおり
-保護ありのためイシューの対象外であり、本 PR での wrapper 変更は行っていない
-（組織変数追従を維持）。`template-articles` への適用は本 worktree の外側にある別リポジトリ
-への書き込みであり、後続担当へ引き継ぐ（「7. 実施状況」参照）。**
+skills-auto-merge を fail-closed にするか決める」であり、当初の対象は構造的に保護が無いリポに
+限定される想定だった。** しかし本監査で採用する判定基準は `docs/update-external-rollout.md` が
+組織変数追従（`skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}`）を許容する条件
+として明記する「実際に同期 PR が required checks の完了を待って `BLOCKED` になることの実測」
+であり、これは ruleset 構造の実測（`.claude/rules/ruleset-policy.md` の 3 軸 + classic BP）とは
+**別軸**である（4 節・4.2 節参照）。4 節の実測どおり棚卸し対象 25 リポ中 24 リポは branch
+ruleset で構造的に保護されているが、この構造的 green は PR レベル実測の代替にならない。
+25 リポのうち PR レベルの `BLOCKED` を実際に確認できたのは `team-hub-spec`（#342 実測時の
+PR #58）の 1 リポのみであり、`agent-cli-skills` 自身を含む残り 24 リポは PR レベル実測が
+**未確認**のまま組織変数追従で運用されている状態にある。
+**本エージェントの書き込み対象は `agent-cli-skills` 自身に限られる。同リポは branch ruleset
+構造こそ green だが PR レベル実測は未確認であるため、本 PR で wrapper を
+`skills-auto-merge: 'false'` へ明示的に fail-closed 化した（#342 の 4 リポと同型の対応）。
+`template-articles`（構造的にも保護なし）を含むそれ以外の 24 リポへの適用は本 worktree の
+外側にある別リポジトリへの書き込みであり、後続担当へ引き継ぐ（「7. 実施状況」参照）。**
 
 測定日: 2026-08-19。
 
@@ -30,10 +35,14 @@ skills-auto-merge を fail-closed にするか決める」であり、対象は�
 
 **この 3 点により、組織変数追従のまま branch protection / ruleset を持たないリポは、
 上流スキル同期 PR がレビューもサーバー側ゲートも経ずに既定ブランチへ自動マージされる状態にある
-（イシュー #342 の 4 リポで実際に踏んだ事故と同型）。** これはメカニズムとしての懸念であり、
-4 節の実測どおり実際にこの状態に該当したのは棚卸し対象 25 リポ中 `template-articles` の
-1 リポのみだった（イシュー本文・実装計画が前提としていた「保護なしが多数」という想定は
-実測で裏付けられず、逆に大半が既に保護ありだった。詳細は 4 節）。
+（イシュー #342 の 4 リポで実際に踏んだ事故と同型）。** ruleset 構造だけを見ると、
+4 節の実測どおりこの状態に該当するのは棚卸し対象 25 リポ中 `template-articles` の 1 リポの
+みであり、イシュー本文・実装計画が前提としていた「保護なしが多数」という想定は実測で
+裏付けられず、逆に大半が既に構造的には保護ありだった（詳細は 4 節）。**しかし
+`docs/update-external-rollout.md` が要求する PR レベルの `BLOCKED` 実測まで基準に含めると、
+25 リポ中 24 リポ（構造的に保護ありの `agent-cli-skills` を含む）がこの実測条件を
+満たしていない。** 構造的 green は必要条件であって十分条件ではないため、この 24 リポも
+無審査自動マージの懸念から完全には除外できない（4.2 節・5 節）。
 
 ## 2. 列挙（動的列挙が正）
 
@@ -54,9 +63,10 @@ skills-auto-merge を fail-closed にするか決める」であり、対象は�
 `template-articles` `template-frontend-react_router` `template-ideas`
 `yadori`
 
-（`agent-cli-skills` 自身も `VARS_FOLLOW` である。本リポは 4 節のとおり ruleset 構造が
-保護ありと決定的に測定でき、5 節の判定基準によりイシューの対象外（現状維持）である。
-4.2 節の PR レベル確認が判定不能だった点は、この判定を変えない理由を 5 節に記載した。）
+（`agent-cli-skills` 自身も `VARS_FOLLOW` だった。本リポは 4 節のとおり ruleset 構造が
+保護ありと決定的に測定できるが、5 節の判定基準（PR レベル `BLOCKED` 実測）は満たさない。
+本 PR で本リポの wrapper を `skills-auto-merge: 'false'` へ fail-closed 化した理由は
+5 節・6 節に記載した。）
 
 ## 3. 判定基準
 
@@ -221,88 +231,76 @@ gh pr list -R "Fandhe-AI/<repo>" --state open --search "エージェントスキ
 確認対象の open PR が存在しなかった。）**したがって 23 リポについて「自動マージ済み」と
 断定せず、PR レベルの状態は観測不能だったに留める。**
 
-**この PR レベルの観測不能を、3〜4.1 節で構造的に保護ありと判定した 24 リポ
-（`agent-cli-skills` を含む）の再分類根拠にはしない。** `ruleset-policy.md` の
-「判定不能を green に倒さない」方針は *保護構成そのものが測定できない場合*
-（403 等の API エラー）を指し、本節のように構成は `active`/`bypass:0`/`total>=1`/
-`unbound:[]` と決定的に測定できているが「たまたま観測窓に open な同期 PR が無かった」
-場合には当てはまらない。加えて `docs/update-external-rollout.md` の 3 条件
-（BLOCKED 実測含む）は「`'false'` から組織変数追従へ**切り替える**」場合の条件として
-明文化されたものであり、既に組織変数追従で運用中の保護ありリポを事後的に fail-closed へ
-**戻す**根拠として転用すると、`ruleset-policy.md` が `agent-cli-skills` 自身を正しい構成の
-実例として使っている記述と矛盾する。5 節の方針決定はこの区別を反映し、適用対象を
-`template-articles`（構造的に保護なしと判定された唯一のリポ）に限定する。
+**この PR レベルの観測不能は、3〜4.1 節で構造的に保護ありと判定した 24 リポ
+（`agent-cli-skills` を含む）を「組織変数追従を継続してよい」根拠にはしない。**
+`ruleset-policy.md` の 3 軸 + classic BP と `docs/update-external-rollout.md` の
+`BLOCKED` 実測は**別軸の検証**であり、片方が green でも他方の未確認を埋め合わせない。
+`ruleset-policy.md` が `agent-cli-skills` の `main-protection` を正しい構成の実例として
+使っている記述は ruleset 構造という軸についての評価であって、`update-external-rollout.md`
+が要求する PR レベル実測という別軸の要件を免除するものではないため、両者の間に矛盾はない。
+`docs/update-external-rollout.md` の 3 条件（BLOCKED 実測含む）は「`'false'` から組織変数
+追従へ切り替える」場合の許容条件として明文化されたものであり、逆方向（未実測のまま組織変数
+追従を続ける）を正当化する規定ではない。**したがって 3〜4.1 節の構造的 green だけでは
+PR レベル実測条件を満たしたことにならず、`template-articles` に加えて `agent-cli-skills`
+自身も含む 24 リポは「PR レベル実測が完了するまでの暫定 fail-closed」対象とする。**
+本エージェントが書き込める `agent-cli-skills` については本 PR で実際に適用した（6 節）。
+残り 23 リポへの適用は本エージェントの書き込み範囲外であり、7 節のとおり後続担当へ引き継ぐ
+（`ruleset-policy.md` が定義する「保護ありの正しい構成」という評価自体は撤回しない。
+撤回するのは「保護ありなら PR レベル実測なしで組織変数追従を継続してよい」という本ドキュメントの
+旧結論のみである）。
 
 ## 5. 方針決定
 
-イシュー本文の受入条件 a / b を踏まえ、**案 a（wrapper で `skills-auto-merge: 'false'` を
-明示）を適用する方針を決定した。適用対象はイシューのタイトルどおり「branch protection が
-無いもの」に限定する。4・4.1 節の構造的実測で保護なしと判定できたのは `template-articles`
-の 1 リポのみであり、これが唯一の適用対象である。**
-
-**4.2 節で追加確認を試みた「個別 PR レベルの `BLOCKED` 実測」は、
-`docs/update-external-rollout.md` が「`'false'` から組織変数追従へ切り替える」場合の
-条件として明文化したものであり、既に構造的に保護されている 24 リポ（`agent-cli-skills`
-を含む）を保護なし扱いへ再分類する根拠にはならない。** 特に `agent-cli-skills` 自身は
-`.claude/rules/ruleset-policy.md` が正しい構成の実例として名指しする `main-protection`
-（active・bypass_actors 0・required checks 12 件・全件 `integration_id` 束縛）を持ち、
-同ルールの前提そのものである。この 24 リポを「判定不能」として fail-closed 側へ倒すと、
-`ruleset-policy.md` が実例として保証する構成を、それを定義した本リポ自身の運用が信頼しない
-という矛盾を生む。4.2 節の実測結果（PR レベルでの観測不能）は記録として残すが、
-**5〜7 節の適用範囲の判断には用いない**（P0/P1 是正時の拡大解釈を本節で修正する）。
+イシュー本文の受入条件 a / b、および `docs/update-external-rollout.md` が組織変数追従の
+許容条件として明記する PR レベル `BLOCKED` 実測を踏まえ、**案 a（wrapper で
+`skills-auto-merge: 'false'` を明示）を適用する方針に決定した。適用対象は当初想定していた
+「構造的に保護が無いリポ（`template-articles` のみ）」から拡張し、`docs/update-external-rollout.md`
+の許容条件（PR レベル `BLOCKED` 実測）を満たしていない 25 リポ中 24 リポ全件
+（`agent-cli-skills` 自身を含む）とする。** ruleset 構造の green（4・4.1 節）は
+`ruleset-policy.md` が定義する別軸の検証であり、`update-external-rollout.md` が要求する
+PR レベル実測の免除条件ではない（4.2 節で区別を記載）。25 リポ中 PR レベル実測を満たすのは
+`team-hub-spec`（#342 実測時の PR #58 の `BLOCKED` 確認）のみであり、この 1 リポだけを
+組織変数追従の継続対象とする。
 
 - 案 a は #342 と同一の前例があり、変更が wrapper 1 行 + コメントに閉じ、可逆で、他の運用
-  （手動マージ・schedule 実行そのもの）を壊さない。`template-articles` 1 リポへの適用に
-  絞ってもこの利点は変わらない。
+  （手動マージ・schedule 実行そのもの）を壊さない。適用対象を 24 リポへ拡張してもこの利点は
+  変わらない。**トレードオフとして、対象リポでは今後スキル同期 PR が自動マージされず
+  open のまま蓄積し、人間によるレビュー・マージ待ちになる（#342 の 4 リポと同じ運用形態）。**
+  PR レベル `BLOCKED` 実測が確認でき次第、当該リポは個別に組織変数追従へ戻せる。
 - 案 b（branch protection / ruleset の新設）は required check の設計
   （PR で必ず実行される context の選定・`integration_id` 束縛・条件付きチェック除外）を
-  要し、`ruleset-policy.md` の制約上オーナー判断を伴う構成変更になる。
-  `template-articles` 1 リポであっても即断できないため、**新設は行わず、後続イシューとして
-  起票する候補として記録するに留める**（本イシューでは着手しない）。
+  要し、`ruleset-policy.md` の制約上オーナー判断を伴う構成変更になる。`template-articles`
+  1 リポであっても即断できないため、**新設は行わず、後続イシューとして起票する候補として
+  記録するに留める**（本イシューでは着手しない）。
 - **案 c（組織変数 `SKILLS_AUTO_MERGE` を `false` へ戻す、または
   `SKILLS_AUTO_MERGE_ALLOWLIST` を明示して対象を絞る）も評価した。** 1 箇所の変更でフリート
   全体に効き、個別リポでの drift（新規リポが無審査で追従してしまう再発）を構造的に防げる点で
-  筋が良い。しかし組織変数の変更は保護ありかつ組織変数追従の既存運用（`agent-cli-skills`・
-  `team-hub-spec` 等。`.claude/rules/ruleset-policy.md` が要求する運用そのもの）に影響する
-  組織レベルの状態変更であり、このイシューの決定範囲・本エージェントの書き込み対象
-  （`agent-cli-skills` へのローカルコミット・push のみ。組織設定・他リポジトリへの書き込みは
-  対象外）を超える。**適用しない。将来 `SKILLS_AUTO_MERGE_ALLOWLIST` を allowlist 運用に
-  切り替える案として記録するに留める。**
+  筋が良い。しかし組織変数の変更は組織レベルの状態変更であり、このイシューの決定範囲・
+  本エージェントの書き込み対象（`agent-cli-skills` へのローカルコミット・push のみ。組織設定・
+  他リポジトリへの書き込みは対象外）を超える。**適用しない。将来
+  `SKILLS_AUTO_MERGE_ALLOWLIST` を allowlist 運用に切り替える案として記録するに留める。**
 
-## 6. 適用すべき変更内容（`template-articles` のみ・本 worktree の外側で後続担当が実施）
+## 6. 適用すべき変更内容
 
-3〜4.1 節の構造的実測を踏まえ、保護なしと判定された `template-articles` の
-`.github/workflows/update-external.yml` にある
-`skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}` を、
+### 6.1 `agent-cli-skills`（本 PR で適用済み）
+
+5 節の方針どおり、本リポジトリの `.github/workflows/update-external.yml` の
+`skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}` を
+`skills-auto-merge: 'false'` へ、PR レベル `BLOCKED` 実測が未確認である理由を記した
+コメント付きで置換した（適用済みの差分は当該ファイルを参照）。branch ruleset 構造は
+引き続き `main-protection` として green であり、この変更は `ruleset-policy.md` が
+実例として使う構成の評価を撤回するものではない。
+
+### 6.2 `template-articles` ほか 23 リポ（本 worktree の外側・後続担当が実施）
+
+`template-articles`（構造的にも保護なし）を含む残り 23 リポについても、
+`.github/workflows/update-external.yml` の
+`skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}` を
 `docs/update-external-rollout.md` のテンプレートと同型のコメント +
-`skills-auto-merge: 'false'` へ置換する変更を**方針として決定した**（差分案は下記）。
-**`agent-cli-skills` 自身は構造的に保護ありのためイシューの対象外であり、本 PR での適用は
-行っていない（wrapper は組織変数追従のまま維持）。** `template-articles` は本 worktree の
-外側にある別リポジトリへの書き込みであり、本エージェントの実行範囲（本リポジトリへの
-ローカルコミット・push のみ）を超えるため未適用のまま引き継ぐ。適用の実施状況は
-「7. 実施状況」を参照。
-
-## 7. 実施状況（本イシューのスコープ境界）
-
-**本タスク（実装エージェント）は本リポジトリ（`agent-cli-skills`）以外への push・書き込み・
-PR 作成・イシューコメントを行わない契約下にある。** したがって:
-
-- `template-articles` への実際の変更適用（PR 作成・マージ）
-- 案 c（組織変数の変更）の実施
-- 案 b（branch protection 新設）の起票・実施
-- 本イシュー #359 への判定結果コメント
-
-はいずれも `outOfScope` として本エージェントの返却に記録し、実施しない。
-本リポジトリ（`agent-cli-skills`）は構造的に保護ありのためイシューの対象外と判定し、
-wrapper への変更は行っていない（6 節参照）。実装計画の Step 5/7/8（対象リポへの適用・
-本リポ PR 作成・イシューコメント）は、棚卸しと判定の記録（本ドキュメント）をもって
-部分的に代替し、`template-articles` への適用は後続の担当（該当リポジトリへの push/PR
-作成が許可されたエージェント、またはユーザー自身）に委ねる。
-
-**追跡先はイシュー #359 とする。** 本 PR は #359 を `Closes` せず `Refs` で参照するに留め、
-`template-articles` への適用・案 b／案 c の要否判断が完了するまで #359 を open のまま残す。
-後続担当は #359 のコメントで適用状況（PR URL・適用済み差分・未適用の理由）を追記し、
-適用が完了した時点で #359 を close する運用とする。
+`skills-auto-merge: 'false'` へ置換する変更を**方針として決定した**（`template-articles`
+向けの差分案は下記）。これらは本 worktree の外側にある別リポジトリへの書き込みであり、
+本エージェントの実行範囲（本リポジトリへのローカルコミット・push のみ）を超えるため
+未適用のまま引き継ぐ。適用の実施状況は「7. 実施状況」を参照。
 
 `template-articles` へ適用すべき差分（参考・未適用。ruleset/classic BP とも不在が理由）:
 
@@ -318,10 +316,32 @@ wrapper への変更は行っていない（6 節参照）。実装計画の Ste
 +      skills-auto-merge: 'false'
 ```
 
-`template-articles` 以外の 24 リポ（`agent-cli-skills` を含む）は 4・4.1 節の構造的実測が
-green（ruleset `active`・`bypass_actors` 0・required checks 1 件以上・`unbound` 空）であり、
-5 節の判定基準に照らしてイシューの対象外（現状の組織変数追従を維持）である。4.2 節に記録した
-PR レベルの観測不能はこの判定を変えない（5 節参照）。
+`template-articles` 以外の 22 リポ（`team-hub-spec` を除く `VARS_FOLLOW` 24 リポから
+`agent-cli-skills` を除いたもの）も同型の変更を要する。個別リポの ruleset 構造は green の
+ため、コメント文言はリポジトリごとに「branch ruleset は保護あり（`main-protection` 等）だが
+PR レベル `BLOCKED` 実測が未確認」である旨に差し替える（6.1 節のコメントを参照）。
+
+## 7. 実施状況（本イシューのスコープ境界）
+
+**本タスク（実装エージェント）は本リポジトリ（`agent-cli-skills`）以外への push・書き込み・
+PR 作成・イシューコメントを行わない契約下にある。** したがって:
+
+- `template-articles` ほか 23 リポへの実際の変更適用（PR 作成・マージ）
+- 案 c（組織変数の変更）の実施
+- 案 b（branch protection 新設）の起票・実施
+- 本イシュー #359 への判定結果コメント
+
+はいずれも `outOfScope` として本エージェントの返却に記録し、実施しない。
+本リポジトリ（`agent-cli-skills`）自身については、5・6.1 節の方針どおり wrapper を
+fail-closed 化する変更を本 PR で適用済みである。実装計画の Step 5/7/8（対象リポへの適用・
+本リポ PR 作成・イシューコメント）は、棚卸しと判定の記録（本ドキュメント）+ 本リポ自身への
+適用（6.1 節）をもって部分的に代替し、残り 23 リポへの適用は後続の担当（該当リポジトリへの
+push/PR 作成が許可されたエージェント、またはユーザー自身）に委ねる。
+
+**追跡先はイシュー #359 とする。** 本 PR は #359 を `Closes` せず `Refs` で参照するに留め、
+残り 23 リポへの適用・案 b／案 c の要否判断が完了するまで #359 を open のまま残す。
+後続担当は #359 のコメントで適用状況（PR URL・適用済み差分・未適用の理由）を追記し、
+適用が完了した時点で #359 を close する運用とする。
 
 ## 8. 関連ドキュメント
 
