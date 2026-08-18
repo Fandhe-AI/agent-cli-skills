@@ -110,7 +110,12 @@ npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}"
   # 中途半端な状態のまま残り得る。次スキルの `git add skills-lock.json`（Step 7）が
   # この残置変更を承認済みの変更と一緒に stage してしまわないよう、Step 6 の却下時と
   # 同じ手順で当該スキル分のみを即座にリバートしてから skip する。
-  git checkout -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+  # 2つのパスを1つの `git checkout --` に渡すとアトミックに扱われ、どちらか一方が
+  # 「追跡対象なし」（初回具現化・untracked のみの書き込み時）で pathspec エラーになると
+  # コマンド全体が失敗し、もう一方（skills-lock.json）も復元されないまま continue してしまう。
+  # 必ず1コマンド1パスで分離し、一方の失敗が他方の復元を阻害しないようにする。
+  git checkout -- skills-lock.json
+  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
   git clean -fd ".agents/skills/${SKILL_NAME}/"
   echo "警告: 固定版を外した再実行はせず、当該スキルの変更をリバートして skip します。"
   continue
@@ -147,7 +152,12 @@ git diff skills-lock.json ".agents/skills/${SKILL_NAME}/"
 # git checkout -- <file> は HEAD ではなく「index（ステージ）」の内容を作業ツリーへ復元する。
 # 前スキルの承認変更は git add で既に index に載っているため、checkout 後の作業ツリーにも
 # 引き継がれ、承認済み computedHash が消えることはない。
-git checkout -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+# 2つのパスを1つの `git checkout --` に渡すとアトミックに扱われ、どちらか一方が
+# 「追跡対象なし」（初回具現化・untracked のみの書き込み時）で pathspec エラーになると
+# コマンド全体が失敗し、もう一方（skills-lock.json）も復元されない。必ず1コマンド1パスで
+# 分離し、一方の失敗が他方の復元を阻害しないようにする。
+git checkout -- skills-lock.json
+git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
 # npx が新規作成した未追跡ファイルも削除（Step 4 の clean ガードで実行前は clean を保証済み）
 # ${SKILL_NAME} は kebab-case 検証済みのため、対象は当該スキルディレクトリ配下に限定される
 git clean -fd ".agents/skills/${SKILL_NAME}/"
