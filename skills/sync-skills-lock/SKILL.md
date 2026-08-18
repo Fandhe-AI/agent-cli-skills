@@ -18,7 +18,7 @@ model: sonnet
 ## 前提条件
 
 - `gh` CLI がインストールされ、認証済みであること
-- `node` / `npx` が利用可能であること（`npx skills add` を使用するため）
+- `node` / `npx` が利用可能であること（`npx skills add` を使用するため）。`skills` CLI は固定版（`SKILLS_CLI_VERSION`）で実行する。値と更新手順は「skills CLI のバージョン固定と更新手順」節を参照
 - `file` CLI が利用可能であること（未追跡バイナリファイルの種別表示に使用。未導入の環境では
   種別が `file コマンド未検出` として表示され、承認前にサイズ・git blob ハッシュのみで
   判断することになる。macOS / 主要 Linux ディストリビューションには標準搭載されている）
@@ -94,8 +94,35 @@ if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]]; then
   continue
 fi
 
-# CLI に computedHash を更新させる（--yes で確認プロンプトをスキップ）
-npx skills add "${SOURCE}" --skill "${SKILL_NAME}" --yes
+# skills CLI (vercel-labs/skills) は固定版でのみ実行する（未固定 npx はレジストリ
+# 最新版の無検証即時実行になり、差分確認・承認より前に走る supply chain 経路になる）。
+# 1つ目の --yes は npx 自体のインストール確認プロンプトのスキップ、末尾の --yes は
+# skills CLI へ渡す確認プロンプトのスキップで、別物（位置で区別される）。
+SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更新手順は下記節を参照
+
+# CLI に computedHash を更新させる。固定版が解決できない場合（該当版の不存在・
+# レジストリ障害）は npx が非ゼロ終了する。その場合は当該スキルを中止（skip）し、
+# 固定版を外した再実行はしない（fail-closed。暗黙の最新版フォールバックはしない）。
+# ここでの fail-closed は「他スキルへの処理を止めない」という Step 1/3 の他の skip
+# 分岐と同じ意味であり、「script 全体を停止する」という意味ではない
+# （`scripts/skills-lock-update.sh` 単体実行時の set -euo pipefail による停止とは別軸。
+# 詳細は下記「skills CLI のバージョン固定と更新手順」節の fail-closed 記述を参照）。
+npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --yes || {
+  echo "警告: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害・ダウンロード中断等、原因は問わない）。"
+  # 失敗が部分書き込み後に発生した場合、skills-lock.json / .agents/skills/${SKILL_NAME}/ が
+  # 中途半端な状態のまま残り得る。次スキルの `git add skills-lock.json`（Step 7）が
+  # この残置変更を承認済みの変更と一緒に stage してしまわないよう、Step 6 の却下時と
+  # 同じ手順で当該スキル分のみを即座にリバートしてから skip する。
+  # 2つのパスを1つの `git checkout --` に渡すとアトミックに扱われ、どちらか一方が
+  # 「追跡対象なし」（初回具現化・untracked のみの書き込み時）で pathspec エラーになると
+  # コマンド全体が失敗し、もう一方（skills-lock.json）も復元されないまま continue してしまう。
+  # 必ず1コマンド1パスで分離し、一方の失敗が他方の復元を阻害しないようにする。
+  git checkout -- skills-lock.json
+  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+  git clean -fd ".agents/skills/${SKILL_NAME}/"
+  echo "警告: 固定版を外した再実行はせず、当該スキルの変更をリバートして skip します。"
+  continue
+}
 ```
 
 `npx skills add` は以下を行う:
@@ -186,7 +213,12 @@ fi
 # git checkout -- <file> は HEAD ではなく「index（ステージ）」の内容を作業ツリーへ復元する。
 # 前スキルの承認変更は git add で既に index に載っているため、checkout 後の作業ツリーにも
 # 引き継がれ、承認済み computedHash が消えることはない。
-git checkout -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+# 2つのパスを1つの `git checkout --` に渡すとアトミックに扱われ、どちらか一方が
+# 「追跡対象なし」（初回具現化・untracked のみの書き込み時）で pathspec エラーになると
+# コマンド全体が失敗し、もう一方（skills-lock.json）も復元されない。必ず1コマンド1パスで
+# 分離し、一方の失敗が他方の復元を阻害しないようにする。
+git checkout -- skills-lock.json
+git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
 # npx が新規作成した未追跡ファイルも削除（Step 4 の clean ガードで実行前は clean を保証済み）
 # ${SKILL_NAME} は kebab-case 検証済みのため、対象は当該スキルディレクトリ配下に限定される
 git clean -fd ".agents/skills/${SKILL_NAME}/"
@@ -220,6 +252,24 @@ EOF
 
 ユーザーにコミットしてよいか確認する。承認済みスキルが1つもなかった場合（全却下・差分なし）はコミットせずその旨を伝える。
 
+## skills CLI のバージョン固定と更新手順
+
+**Why**: `npx skills add` をバージョン未固定で実行すると、npx はローカルキャッシュに無い場合レジストリのその時点の最新版を確認なしで即時取得・実行する。`skills`（vercel-labs/skills）パッケージが乗っ取られた場合、これは任意コード実行の経路になる。しかもこの実行は Step 5 の差分確認・Step 6 のユーザー承認より**前**に走るため、source の `Fandhe-AI/<repo>` 完全一致検証では防げない。exact 版（`X.Y.Z`。dist-tag・`^`/`~` レンジは禁止）への固定が信頼アンカーになる。
+
+**固定版の決め方**:
+1. `npm view skills version` で現在の latest を確認する
+2. `npm view skills repository.url` が `vercel-labs/skills` であることを確認する
+3. `npm view skills time --json` 等で公開日時が不自然でないことを確認する
+4. upstream リポジトリの該当タグ間の差分・リリースノートを確認し、問題なければ採用する
+
+**更新手順**:
+1. `scripts/skills-lock-update.sh` の `SKILLS_CLI_VERSION` と、本ファイルの Step 4 フェンス内の `SKILLS_CLI_VERSION` を**同一コミット**で更新する（値は完全一致させる）
+2. `node --test skills/sync-skills-lock/tests/` で両ファイルの一致を検証する
+3. 1 スキルで実際に実行し、差分が正常であることを確認する
+4. `chore(sync-skills-lock): skills CLI を X.Y.Z へ更新` でコミットする
+
+**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了する。黙って最新版へフォールバックする経路は存在せず、dist-tag・レンジ指定への書き換えも禁止する。この失敗時の停止範囲は実行経路によって異なる: `scripts/skills-lock-update.sh` を単体実行した場合はスクリプト全体が `set -euo pipefail` により即座に停止する。一方、本ファイルの Step 4 フェンス（複数スキルをループで処理する経路）では、`npx` の失敗を検出したら Step 6 の却下時と同じ手順（`git checkout --` / `git clean -fd`）で当該スキル分の部分書き込みをリバートしてから skip（`continue`）して次スキルへ進む — Step 1/3 の他の skip 分岐と同じ制御フローであり、ループ全体を停止させるものではない。リバートを挟まずに skip すると、失敗が部分書き込み後に発生した場合の残置変更を次スキルの `git add`（Step 7）が承認済み変更と一緒に stage してしまい得るため必須の手順である。
+
 ## 注意事項
 
 - **全スキル sync での途中却下**: 1スキルずつ承認・stage を行うため、途中で却下しても承認済みスキルの stage は保持される。全スキル処理後に一括コミットする
@@ -229,6 +279,8 @@ EOF
 - **`npx skills add --yes` は上書き確認をスキップする**: upstream に破壊的変更がある場合は `git diff` で内容を必ず確認すること
 - **新スキルの取扱い**: ローカルに存在するが upstream に未登録のスキル（`contribute-skill`, `sync-skills-lock` 自身など）は、upstream マージ後に登録する。マージ前に `computedHash` を勝手に書き込まない
 - **Step 5 のプレビューは index を変更しない**: 未追跡ファイルの表示に `git add -N`（intent-to-add）ではなく `git diff --no-index` を使う。Step 6 の拒否経路が index からの `git checkout --` で承認済み他スキルの hash を復元する設計に依存しており、i-t-a エントリの混入はその復元設計と干渉するため
+- **skills CLI は固定版で実行する**: `npx skills add` はバージョン未固定で実行しない。固定版の決め方・更新手順は「skills CLI のバージョン固定と更新手順」節を参照
+
 ## sandbox 環境での実行
 
 このスキルはネットワーク越しの GitHub 操作（`npx skills add` による上流リポジトリの取得等）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する。ネットワーク遮断を解除できない環境では実行できない。

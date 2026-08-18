@@ -367,6 +367,171 @@ test('群G: 旧カンマ区切り形式は JSON 不正として fail-closed し 
 })
 
 // ---------------------------------------------------------------------------
+// 群 H（Issue #364・実行レベル）: 集計対象を必須 workflow の run に限定する
+// ---------------------------------------------------------------------------
+// 背景: 必須集合に含まれない workflow（`paths` フィルタ付き等）が `skipped`/`neutral` で
+// 完了しても、集計対象が全 push run（$p）のままだと unknown が正になり green へ倒れない
+// （Cursor Bugbot Medium・Fandhe-AI/automation-app#2018 由来）。集計は必須 workflow の
+// run（$rp）に限定し、必須外 run の結果は判定に影響させない。ただし必須 workflow 自身が
+// skipped/neutral の場合は従来どおり unknown へ倒す（厳格側の設計は必須集合内で維持）。
+function writeGhMockWithExtraRun(dir, extraRun) {
+  const callLog = join(dir, 'gh-calls.log')
+  const ghMock = join(dir, 'gh')
+  writeFileSync(
+    ghMock,
+    `#!/usr/bin/env bash
+echo "$@" >> "${callLog}"
+args="$*"
+case "\${args}" in
+  *"-i repos/owner/repo/commits/main"*)
+    printf 'HTTP/2.0 200 OK\\r\\n\\r\\n{"sha":"${HEAD_SHA}"}\\n'
+    ;;
+  *"repos/owner/repo/commits/main --jq .sha"*)
+    echo "${HEAD_SHA}"
+    ;;
+  *"repos/owner/repo/actions/workflows --paginate --slurp"*)
+    echo '[{"workflows":[{"name":"Build, Test","path":".github/workflows/bt.yml","id":111,"state":"active"},{"name":"Docs","path":".github/workflows/docs.yml","id":222,"state":"active"}]}]'
+    ;;
+  *"run list -R owner/repo -c ${HEAD_SHA}"*)
+    echo '[{"workflowName":"Build, Test","workflowDatabaseId":111,"status":"completed","conclusion":"success","event":"push","headBranch":"main"},${extraRun}]'
+    ;;
+  *)
+    echo "UNMOCKED gh call: \${args}" >&2
+    exit 1
+    ;;
+esac
+`,
+    { mode: 0o755 },
+  )
+  return { callLog, ghMock }
+}
+
+test('群H: 必須外 workflow の skipped は判定に影響しない（green 維持）', { skip: !hasJq() }, () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'base-ci-probe-h-green-'))
+  try {
+    writeGhMockWithExtraRun(
+      tmpDir,
+      '{"workflowName":"Docs","workflowDatabaseId":222,"status":"completed","conclusion":"skipped","event":"push","headBranch":"main"}',
+    )
+    const scriptPath = join(tmpDir, 'probe.sh')
+    writeFileSync(scriptPath, scriptBody, 'utf8')
+
+    const stdout = execFileSync(
+      'bash',
+      [scriptPath, 'owner/repo@main:["Build, Test"]'],
+      { encoding: 'utf8', env: { ...process.env, PATH: `${tmpDir}:${process.env.PATH}` } },
+    )
+
+    const line = stdout.trim().split('\n').pop()
+    const result = JSON.parse(line)
+    assert.deepEqual(result.required_missing, [], `required_missing が空でない: ${line}`)
+    assert.equal(result.failed, 0, `failed が想定と異なる: ${line}`)
+    assert.equal(result.incomplete, 0, `incomplete が想定と異なる: ${line}`)
+    assert.equal(
+      result.unknown,
+      0,
+      `必須外 workflow の skipped が集計に混入し unknown が正になっている: ${line}`,
+    )
+    assert.equal(result.push_total, 2, `push_total（全 push run）が想定と異なる: ${line}`)
+    assert.equal(
+      result.required_push_total,
+      1,
+      `required_push_total（必須 run のみ）が想定と異なる: ${line}`,
+    )
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('群H: 必須 workflow 自身の skipped は unknown 維持（厳格側の設計を緩めない）', { skip: !hasJq() }, () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'base-ci-probe-h-strict-'))
+  try {
+    const callLog = join(tmpDir, 'gh-calls.log')
+    const ghMock = join(tmpDir, 'gh')
+    writeFileSync(
+      ghMock,
+      `#!/usr/bin/env bash
+echo "$@" >> "${callLog}"
+args="$*"
+case "\${args}" in
+  *"-i repos/owner/repo/commits/main"*)
+    printf 'HTTP/2.0 200 OK\\r\\n\\r\\n{"sha":"${HEAD_SHA}"}\\n'
+    ;;
+  *"repos/owner/repo/commits/main --jq .sha"*)
+    echo "${HEAD_SHA}"
+    ;;
+  *"repos/owner/repo/actions/workflows --paginate --slurp"*)
+    echo '[{"workflows":[{"name":"Build, Test","path":".github/workflows/bt.yml","id":111,"state":"active"}]}]'
+    ;;
+  *"run list -R owner/repo -c ${HEAD_SHA}"*)
+    echo '[{"workflowName":"Build, Test","workflowDatabaseId":111,"status":"completed","conclusion":"skipped","event":"push","headBranch":"main"}]'
+    ;;
+  *)
+    echo "UNMOCKED gh call: \${args}" >&2
+    exit 1
+    ;;
+esac
+`,
+      { mode: 0o755 },
+    )
+    const scriptPath = join(tmpDir, 'probe.sh')
+    writeFileSync(scriptPath, scriptBody, 'utf8')
+
+    const stdout = execFileSync(
+      'bash',
+      [scriptPath, 'owner/repo@main:["Build, Test"]'],
+      { encoding: 'utf8', env: { ...process.env, PATH: `${tmpDir}:${process.env.PATH}` } },
+    )
+
+    const line = stdout.trim().split('\n').pop()
+    const result = JSON.parse(line)
+    assert.ok(
+      result.unknown >= 1,
+      `必須 workflow 自身の skipped が unknown へ計上されず green へ倒れている: ${line}`,
+    )
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 群 H（静的契約）: $rp（必須 run 部分集合）への走査限定と required_push_total の出力
+// ---------------------------------------------------------------------------
+test('群H: failed/incomplete/unknown の走査が $rp[] を参照する（$p[] 走査への退行検出）', () => {
+  assert.match(
+    scriptBody,
+    /\[\$rp\[\] \| select\(\.status != "completed"\)\]/,
+    'incomplete の集計が $rp[] を走査していない',
+  )
+  assert.doesNotMatch(
+    scriptBody,
+    /\[\$p\[\] \| select\(\.status != "completed"\)\]/,
+    'incomplete の集計が退行して $p[] を走査している（必須外 run が混入する）',
+  )
+})
+
+test('群H: 必須 run 部分集合 $rp が $req_ids（必須集合の id）との突き合わせで抽出される', () => {
+  assert.match(
+    scriptBody,
+    /\$rp/,
+    '必須 run 部分集合 $rp が見つからない',
+  )
+  assert.match(
+    scriptBody,
+    /IN\(\$req_ids\[\]\)/,
+    '$rp の抽出に IN($req_ids[]) 相当の id 突き合わせが見つからない',
+  )
+})
+
+test('群H: 出力に required_push_total が含まれる', () => {
+  assert.match(
+    scriptBody,
+    /required_push_total:/,
+    '出力オブジェクトに required_push_total フィールドが見つからない',
+  )
+})
+
+// ---------------------------------------------------------------------------
 // SKILL.md 側の前提条件記述の追随
 // ---------------------------------------------------------------------------
 const skillMd = readFileSync(SKILL_MD_PATH, 'utf8')

@@ -12,6 +12,24 @@
 
 set -euo pipefail
 
+# skills CLI (vercel-labs/skills) の固定実行バージョン。
+# exact 版のみ許可（dist-tag・レンジ禁止）。npx はバージョン未固定だと
+# ローカルキャッシュに無い場合レジストリの最新版を確認なしで即実行するため、
+# レジストリ乗っ取り時に任意コード実行を許す経路になる。この実行は
+# skills-lock.json の差分確認・ユーザー承認より前に走るため、source の
+# Fandhe-AI 完全一致検証（下記）では防げない。exact 版固定が信頼アンカー。
+# 更新手順は SKILL.md の「skills CLI のバージョン固定と更新手順」節を参照。
+# SKILL.md 側のフェンスと同時更新し、tests/version-pin.test.mjs が両者の
+# 一致を検証する。
+readonly SKILLS_CLI_VERSION="1.5.22"   # 実装時に latest を再確認して確定（npm view skills version）
+
+# dist-tag（latest 等）・レンジ指定（^, ~ 等）の混入をコード上でも防ぐ形式ガード。
+# 不一致時は最新版へ暗黙フォールバックせず fail-closed で停止する。
+if [[ ! "${SKILLS_CLI_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "エラー: SKILLS_CLI_VERSION は exact semver（X.Y.Z）のみ許可: ${SKILLS_CLI_VERSION}" >&2
+  exit 1
+fi
+
 SKILL_NAME="${1:-}"
 SOURCE_REPO="${2:-}"
 
@@ -102,8 +120,12 @@ if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]]; then
 fi
 
 # npx skills add で CLI に computedHash を更新させる
-# --yes / -y で確認プロンプトをスキップ
-npx skills add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes
+# --yes（1つ目）は npx 自体のインストール確認プロンプトを非対話でスキップする
+# ものであり、skills CLI へ渡す --yes（末尾）とは別物（位置で区別される）。
+# skills@${SKILLS_CLI_VERSION} で exact 版のみ解決させ、該当版が存在しない・
+# レジストリ到達不能の場合は npx が非ゼロ終了し set -euo pipefail で即停止する
+# （fail-closed。最新版への暗黙フォールバック経路は存在しない）。
+npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes
 
 echo ""
 echo "==> 更新完了。変更内容:"

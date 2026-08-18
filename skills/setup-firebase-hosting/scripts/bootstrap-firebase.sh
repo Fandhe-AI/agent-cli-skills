@@ -137,11 +137,12 @@ command -v gcloud >/dev/null 2>&1 || die "gcloud が見つかりません。http
 command -v gh >/dev/null 2>&1 || die "gh が見つかりません（GitHub Secret の登録に使います）。"
 command -v curl >/dev/null 2>&1 || die "curl が見つかりません。"
 # Node.js / npx はこのスクリプト自体では使わないが、後続手順（ローカル検証・
-# デプロイの npx firebase-tools）の必須前提のため、GCP リソースを作成した後に
-# 不足が判明して途中状態で止まるのを避けるべく、ここで確認する。
-command -v node >/dev/null 2>&1 || die "node が見つかりません。後続の \`npx firebase-tools\` に必要です。
+# デプロイの npx firebase-tools。SKILL.md の固定版 FIREBASE_TOOLS_VERSION で
+# 実行する）の必須前提のため、GCP リソースを作成した後に不足が判明して
+# 途中状態で止まるのを避けるべく、ここで確認する。
+command -v node >/dev/null 2>&1 || die "node が見つかりません。後続の（SKILL.md の固定版 FIREBASE_TOOLS_VERSION による）\`npx firebase-tools\` に必要です。
 https://nodejs.org/ からインストールするか、\`brew install node\` 等で導入してください。"
-command -v npx >/dev/null 2>&1 || die "npx が見つかりません（Node.js に同梱されます）。後続の \`npx firebase-tools\` に必要です。
+command -v npx >/dev/null 2>&1 || die "npx が見つかりません（Node.js に同梱されます）。後続の（SKILL.md の固定版 FIREBASE_TOOLS_VERSION による）\`npx firebase-tools\` に必要です。
 Node.js のインストール（https://nodejs.org/ または \`brew install node\`）を確認してください。"
 
 if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null | grep -q .; then
