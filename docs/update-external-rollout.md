@@ -120,6 +120,7 @@ jobs:
       #   - required status checks が 1 件以上登録されている
       #   - 実際に PR が required checks の完了を待って BLOCKED になることを確認した
       # 詳細は agent-cli-skills の .claude/rules/ruleset-policy.md を参照。
+      # 既存 wrapper 導入済みリポの棚卸し結果は docs/skills-auto-merge-fleet-audit.md（#359）を参照。
       skills-auto-merge: 'false'
       skills-auto-merge-allowlist: ${{ vars.SKILLS_AUTO_MERGE_ALLOWLIST }}
     secrets:
