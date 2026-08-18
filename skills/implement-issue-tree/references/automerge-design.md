@@ -116,21 +116,24 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 上記の補償策は「マージ先ブランチへの push で CI が起動する」ことに暗黙依存している。push トリガの workflow が無い、`on.pull_request` 相当の `paths` フィルタで該当 head では起動しない、または**起動した push run が意味的コンフリクトを検出できない workflow（常時起動する軽量ドキュメント用 workflow 等）に限られ、本来必要なテスト workflow が含まれない**リポジトリでは、この依存が満たされず補償策が構造的に成立しない。「push イベントの run が 1 件でもあれば green」という判定は、後者のケース（必要な workflow が起動せず、無関係な軽量 workflow のみ成功）を green と誤判定してしまうため、判定は **push run の存在だけでなく、意味的コンフリクト検出に必須な workflow 集合が実際に起動し尽くしたことの被覆確認**を要件に含める。
 
 - **双方向で検証不能になること**: 前提条件「マージ先ブランチが CI green」はランの入口条件でもあるため、push CI が無いリポでは*ラン前の前提確認*も*ラン後の補償確認*も同じ理由で成立しない。「実行されていない」を「green」と読み替えてはならない。
-- **必須 workflow 集合の決め方**: 呼び出し側が事前に対象リポジトリの `.github/workflows/*.yml` と `.github/workflows/*.yaml`（GitHub Actions は両拡張子を等しく認識する。`*.yml` のみの確認だと `.yaml` 拡張子の workflow を見落とし必須集合が過小になり得る）を確認し、`on.push` を持ち意味的コンフリクトを検出できる workflow（ビルド・テスト等のジョブを含む workflow。常時起動するだけの軽量ドキュメント用 workflow は含めない）の**ファイル先頭 `name:` の値**（Actions UI・`gh run list --json workflowName` の `workflowName` に表示される workflow レベルの名前であり、workflow 内の個々の job 名ではない。yaml のファイル名でもない）を必須集合として列挙する。あわせて `on.push.branches` / `on.push.branches-ignore` が**対象ブランチ**を含むかを確認する（`branches: [main]` に固定された workflow は `release/1.0` 等の対象ブランチでは起動しないため、必須集合は対象ブランチ基準で選び直す。既定ブランチ用に決めた必須集合をそのまま流用しない）。この列挙はプローブが自動導出しない（`paths` フィルタの評価はプローブの外で人間または呼び出し側が行う）。必須集合が空・未指定のリポジトリはプローブ対象外とし判定不能として扱う。
+- **必須 workflow 集合の決め方**: 呼び出し側が事前に対象リポジトリの `.github/workflows/*.yml` と `.github/workflows/*.yaml`（GitHub Actions は両拡張子を等しく認識する。`*.yml` のみの確認だと `.yaml` 拡張子の workflow を見落とし必須集合が過小になり得る）を確認し、`on.push` を持ち意味的コンフリクトを検出できる workflow（ビルド・テスト等のジョブを含む workflow。常時起動するだけの軽量ドキュメント用 workflow は含めない）の**ファイル先頭 `name:` の値**（Actions UI・`gh run list --json workflowName` の `workflowName` に表示される workflow レベルの名前であり、workflow 内の個々の job 名ではない。yaml のファイル名でもない）を必須集合として列挙する。あわせて `on.push.branches` / `on.push.branches-ignore` が**対象ブランチ**を含むかを確認する（`branches: [main]` に固定された workflow は `release/1.0` 等の対象ブランチでは起動しないため、必須集合は対象ブランチ基準で選び直す。既定ブランチ用に決めた必須集合をそのまま流用しない）。この列挙はプローブが自動導出しない（`paths` フィルタの評価はプローブの外で人間または呼び出し側が行う）。必須集合が空・未指定のリポジトリはプローブ対象外とし判定不能として扱う。**必須集合は JSON 配列で渡す**（Issue #363）。GitHub Actions の workflow レベル `name:` にはカンマを含められるため（例: `name: Build, Test`）、カンマ区切り文字列では区切り文字と衝突し、存在しない複数名へ誤分割される。JSON 配列（例: `["CI","Build, Test"]`）であればカンマ入りの名前も 1 要素として保持できる。旧カンマ区切り形式は**受理しない**（フォールバック解釈もしない。判定不能として拒否し新形式へ誘導する）。
 - **`workflowName` は同名衝突があり得る識別子**: GitHub Actions は複数の workflow ファイルが同一の `name:` を持つことを許容する仕様のため、`workflowName` のみで必須集合と観測結果を突き合わせると、必須 workflow とは無関係な同名の軽量 workflow が成功しただけで `required_missing` が空になり green と誤判定し得る（本来必須の workflow が `paths` フィルタ等で未起動でも検出できない）。そのためプローブは判定の直前に**対象リポジトリの全 active workflow を `name` → `path` で列挙し、必須集合の各名前がちょうど 1 つの `path` にのみ対応することを確認する**。対応する `path` が 0 件（該当名の active workflow が存在しない）でも複数件（同名衝突）でも、`workflowName` による同定が意味をなさない点は同じであるため、いずれも判定不能として扱う（fail-closed。0 件の復旧は必須集合の名前指定を見直すこと、複数件の復旧は該当 workflow の `name:` を一意な値へ変更すること）。ただしこの 1:1 検証は「現在の active workflow 構成において名前が曖昧でない」ことしか保証しない。run 側の突き合わせを引き続き `workflowName` の文字列一致だけで行うと、対象 workflow が過去に無効化・改名され、無効化前は同じ名前を持っていた**別の**workflow の run（現在は active workflow 一覧に存在しない）まで一致してしまい得る（なりすまし）。そのためプローブは 1:1 検証で確定した名前を対応する `id`（workflow データベース ID。改名を跨いでも同一 workflow を指す安定な識別子）へ解決し、run 側は `workflowDatabaseId` との id 一致で同定する（後述のプローブ手順・スクリプト参照）。
 - **`--paginate` と `--jq` の併用は 1 回の `jq` 呼び出しに集約する**: `gh api --paginate --jq '<filter>'` は `--jq` のフィルタを**ページごとに独立して適用**し、結果を JSON 値として連結出力する仕様のため、`group_by(.name)` のようにページを跨いで集約する必要がある処理をそのまま渡すと、同名 workflow が別ページに分かれた場合に検出できない（ページ内でしか重複を見ない）。そのため、workflow 一覧の取得は `--paginate --slurp` で全ページの生レスポンスを 1 つの配列へ集約し、その**生 JSON を外部の `jq` へパイプ**して `.[].workflows[]` を展開する。`gh api` は `--slurp` と `--jq` の併用を拒否する（`the --slurp option is not supported with --jq or --template`）ため、`--paginate --slurp --jq '<filter>'` と書くと 1 リポも判定できない。`2>/dev/null` でエラーを捨てていると全リポが判定不能へ倒れ、fail-closed なので危険側ではないものの補償策が丸ごと無効化される。外部 `jq` に依存するため、実行前に `command -v jq` で存在確認して不在なら判定不能とする（同じ制約と対処は `../SKILL.md` の「(B) 人間の診断専用」ブロックにも記載がある）。
-- **プローブ手順**: 対象ブランチはエントリの `@<branch>`（`implement-issue-tree` の `args.branch` と同一値を明示する）で指定する。**省略時のみ** `gh repo view --json defaultBranchRef` で既定ブランチへフォールバックする（`main` 決め打ち禁止は既定ブランチ解決時も同様）。ブランチ名は `jq -sRr '@uri'` でエンコードしてから API パスへ展開する（`release/1.0` 等の `/` 対策）。head sha の存在確認は終了コードではなく HTTP status で行う（`gh api` はエラーも stdout に出すため）。続いて `gh api repos/<repo>/actions/workflows --paginate --slurp | jq '[.[].workflows[] | select(.state == "active") | {name, path, id}]'` で全ページを集約した active workflow の `name`→`path`→`id` 対応を取得し（`--slurp` と `--jq` は併用不可のため外部 `jq` へパイプする。`jq` 不在時は判定不能。**パイプの終了ステータスも確認する**。`set -o pipefail` 下でも、代入結果を使う前に明示チェックしないと、先行ページだけで有効な JSON 配列が生成された場合に後続ページの取得失敗を見逃し、ページを跨ぐ同名 workflow を検出できないまま通過し得る）、必須集合の各名前について対応する `path` の件数を数える。1 件ちょうどでない名前（0 件・複数件のいずれも）が 1 つでもあればその時点で判定不能として次のリポへ進む（`gh run list` を呼ぶ前に fail-closed）。1 件に確定した名前は対応する `id`（workflow データベース ID）へ解決し、以降の run 突き合わせの同定根拠として使う（`workflowName` の文字列一致のみだと、無効化・改名された別 workflow が過去に同じ名前を持っていた場合の run まで拾い得るため — 詳細は次項）。次に `gh run list -R <repo> -c <head> -L 100 --json workflowName,workflowDatabaseId,status,conclusion,event,headBranch` を取得し、応答が配列であることを検証したうえで**配列長が取得上限 100 件に到達していないことも検証する**（到達時は取得できた分だけを集計すると取得範囲外の失敗・未完了 run を見落とすため、判定不能として扱う。件数を上げる場合もこの上限チェック自体は必須のまま残す）。`gh run list -c <head>` は commit SHA のみで絞り込み、headBranch を見ないため、同じ SHA を指す feature branch・別ブランチ・tag への push run も混入し得る（feature branch 上で必須 workflow が成功した後、その SHA が base へ fast-forward されても base push が paths 条件等で起動しなかった場合、feature-branch 側の run だけで required_missing が空かつ全件 success となり、base CI 未実行にもかかわらず green と誤判定される）。そのため push run の絞り込みは **`event == "push"` かつ `headBranch == <対象ブランチ名>`** を必須条件とし、この 2 条件を満たす run について**必須 workflow の充足は `workflowDatabaseId` を前段で解決した `id` と突き合わせて判定する**（`workflowName` は表示・ログ用の補助情報に留め、同定根拠には使わない。値はシェルへ展開せず jq 内の比較に閉じる。比較対象は呼び出し側が `--arg` で渡す必須集合の文字列と、そこから解決した `id` の JSON のみ）。**集計の直前に対象ブランチの head sha を再取得し、プローブ冒頭で取得した head と一致することを確認する**（workflow 一覧取得・run list 取得の間に base が更新されると、古い head の run がすべて成功していても現在の base に未検証の新しいコミットがある状態を green と誤判定し得るため。不一致は判定不能として次のリポへ進む。取り直して再測はしない — その場で再取得すると同じ競合が再発し得るため、呼び出し側が改めてプローブを実行する）。`while` / `for` ループはインライン実行不可の環境があるため 1 ファイルにしてから `bash <file> <repo>[@<branch>]:<workflow1>,<workflow2>...` で実行する（`ruleset-policy.md` 手順 A / 手順 B と同型）。1 リポの判定不能で全体を止めない（`exit` ではなく `continue` で次のリポへ進む）。
+- **プローブ手順**: 対象ブランチはエントリの `@<branch>`（`implement-issue-tree` の `args.branch` と同一値を明示する）で指定する。**省略時のみ** `gh repo view --json defaultBranchRef` で既定ブランチへフォールバックする（`main` 決め打ち禁止は既定ブランチ解決時も同様）。ブランチ名は `jq -sRr '@uri'` でエンコードしてから API パスへ展開する（`release/1.0` 等の `/` 対策）。head sha の存在確認は終了コードではなく HTTP status で行う（`gh api` はエラーも stdout に出すため）。続いて `gh api repos/<repo>/actions/workflows --paginate --slurp | jq '[.[].workflows[] | select(.state == "active") | {name, path, id}]'` で全ページを集約した active workflow の `name`→`path`→`id` 対応を取得し（`--slurp` と `--jq` は併用不可のため外部 `jq` へパイプする。`jq` 不在時は判定不能。**パイプの終了ステータスも確認する**。`set -o pipefail` 下でも、代入結果を使う前に明示チェックしないと、先行ページだけで有効な JSON 配列が生成された場合に後続ページの取得失敗を見逃し、ページを跨ぐ同名 workflow を検出できないまま通過し得る）、必須集合の各名前について対応する `path` の件数を数える。1 件ちょうどでない名前（0 件・複数件のいずれも）が 1 つでもあればその時点で判定不能として次のリポへ進む（`gh run list` を呼ぶ前に fail-closed）。1 件に確定した名前は対応する `id`（workflow データベース ID）へ解決し、以降の run 突き合わせの同定根拠として使う（`workflowName` の文字列一致のみだと、無効化・改名された別 workflow が過去に同じ名前を持っていた場合の run まで拾い得るため — 詳細は次項）。次に `gh run list -R <repo> -c <head> -L 100 --json workflowName,workflowDatabaseId,status,conclusion,event,headBranch` を取得し、応答が配列であることを検証したうえで**配列長が取得上限 100 件に到達していないことも検証する**（到達時は取得できた分だけを集計すると取得範囲外の失敗・未完了 run を見落とすため、判定不能として扱う。件数を上げる場合もこの上限チェック自体は必須のまま残す）。`gh run list -c <head>` は commit SHA のみで絞り込み、headBranch を見ないため、同じ SHA を指す feature branch・別ブランチ・tag への push run も混入し得る（feature branch 上で必須 workflow が成功した後、その SHA が base へ fast-forward されても base push が paths 条件等で起動しなかった場合、feature-branch 側の run だけで required_missing が空かつ全件 success となり、base CI 未実行にもかかわらず green と誤判定される）。そのため push run の絞り込みは **`event == "push"` かつ `headBranch == <対象ブランチ名>`** を必須条件とし、この 2 条件を満たす run について**必須 workflow の充足は `workflowDatabaseId` を前段で解決した `id` と突き合わせて判定する**（`workflowName` は表示・ログ用の補助情報に留め、同定根拠には使わない。値はシェルへ展開せず jq 内の比較に閉じる。比較対象は呼び出し側が `--arg` で渡す必須集合の文字列と、そこから解決した `id` の JSON のみ）。**集計の直前に対象ブランチの head sha を再取得し、プローブ冒頭で取得した head と一致することを確認する**（workflow 一覧取得・run list 取得の間に base が更新されると、古い head の run がすべて成功していても現在の base に未検証の新しいコミットがある状態を green と誤判定し得るため。不一致は判定不能として次のリポへ進む。取り直して再測はしない — その場で再取得すると同じ競合が再発し得るため、呼び出し側が改めてプローブを実行する）。`while` / `for` ループはインライン実行不可の環境があるため 1 ファイルにしてから `bash <file> '<repo>[@<branch>]:["workflow1","workflow2"]'` で実行する（`ruleset-policy.md` 手順 A / 手順 B と同型。必須 workflow 集合は JSON 配列で渡す — Issue #363。呼び出し側はシェルの引用符でエントリ全体をクォートすること）。1 リポの判定不能で全体を止めない（`exit` ではなく `continue` で次のリポへ進む）。
 
   ```bash
   #!/usr/bin/env bash
   # base CI プローブ: 対象（マージ先）ブランチ head で「意味的コンフリクト検出に必須な
   # workflow 集合」が push イベントで起動し尽くし、かつ全件が失敗・未完了・判定不能なしで
-  # 完了しているかを判定する。引数は "owner/repo[@branch]:workflowName1,workflowName2" の
-  # 並び（コロンの後に必須 workflow の name: 値をカンマ区切り・空白なしで列挙する。必須集合は
-  # 呼び出し側が .github/workflows/*.yml と *.yaml の両方を事前確認して決め打つ — 常時起動する
-  # 軽量ドキュメント用 workflow のみを根拠に green 判定しないため）。`@branch` は対象ブランチ
-  # （`implement-issue-tree` の `args.branch` と同一値）を明示する。省略時のみ既定ブランチへ
-  # フォールバックする（後方互換: 既存の "owner/repo:workflow" 形式はそのまま動く）。1 リポの
+  # 完了しているかを判定する。引数は 'owner/repo[@branch]:["workflowName1","workflowName2"]' の
+  # 並び（コロンの後に必須 workflow の name: 値を JSON 配列で列挙する — Issue #363。
+  # GitHub Actions の workflow 名にはカンマを含められるため、カンマ区切り文字列では区切りと
+  # 衝突し誤分割される。必須集合は呼び出し側が .github/workflows/*.yml と *.yaml の両方を
+  # 事前確認して決め打つ — 常時起動する軽量ドキュメント用 workflow のみを根拠に green 判定
+  # しないため）。`@branch` は対象ブランチ（`implement-issue-tree` の `args.branch` と同一値）
+  # を明示する。省略時のみ既定ブランチへフォールバックする（後方互換: 既存の
+  # "owner/repo:[...]" 形式はそのまま動く。ただし旧カンマ区切り "owner/repo:workflow" 形式は
+  # JSON として不正なため判定不能で拒否する — 黙って誤分割する経路を残さない）。1 リポの
   # 判定不能で全体を止めない（continue で継続）。
   set -uo pipefail
 
@@ -142,9 +145,17 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
   for entry in "$@"; do
     target="${entry%%:*}"       # owner/repo[@branch]
-    required_csv="${entry#*:}"
-    if [ "${required_csv}" = "${entry}" ] || [ -z "${required_csv}" ]; then
-      echo "${target}: 判定不能 — 必須 workflow 集合が未指定（\"owner/repo[@branch]:name1,name2\" 形式で明示すること）"; continue
+    required_json="${entry#*:}"
+    if [ "${required_json}" = "${entry}" ] || [ -z "${required_json}" ]; then
+      echo "${target}: 判定不能 — 必須 workflow 集合が未指定（'owner/repo[@branch]:[\"name1\",\"name2\"]' 形式で明示すること）"; continue
+    fi
+
+    # 必須集合は JSON 配列（要素 1 個以上・全要素が非空文字列）のみを受理する。
+    # 旧カンマ区切り形式（例: "CI,Lint"）は JSON として不正なため、ここで判定不能へ
+    # 落ちて gh API を一切呼ばずに終端する（fail-closed。カンマ入りの workflow 名を
+    # 存在しない複数名へ黙って誤分割する経路を残さないため — Issue #363）。
+    if ! printf '%s' "${required_json}" | jq -e 'type == "array" and length >= 1 and all(.[]; type == "string" and length > 0)' >/dev/null 2>&1; then
+      echo "${target}: 判定不能 — 必須 workflow 集合が JSON 配列でない（旧カンマ区切り形式は受理しない。'[\"name1\",\"name2\"]' 形式で指定すること）"; continue
     fi
 
     # リポジトリ名に @ は使えず、git の refname は : を含められないため、
@@ -219,14 +230,14 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
     if ! printf '%s' "${workflows}" | jq -e 'type == "array"' >/dev/null 2>&1; then
       echo "${repo}@${branch}: 判定不能 — workflow 一覧を取得できない"; continue
     fi
-    bad_hit=$(printf '%s' "${workflows}" | jq -r --arg req "${required_csv}" '
-      ($req | split(",") | map(gsub("^\\s+|\\s+$";""))) as $required |
+    bad_hit=$(printf '%s' "${workflows}" | jq -r --argjson req "${required_json}" '
+      $req as $required |
       (group_by(.name) | map({name: .[0].name, count: length})) as $counts |
       [
         $required[] | . as $n |
         (([$counts[] | select(.name == $n) | .count][0]) // 0) as $c |
         select($c != 1) | "\($n):\($c)"
-      ] | join(",")')
+      ] | join(" / ")')
     if [ -n "${bad_hit}" ]; then
       echo "${repo}@${branch}: 判定不能 — 必須 workflow 名が active workflow のちょうど1 path に対応しない（0件=未存在 / 複数件=同名衝突）: ${bad_hit}"; continue
     fi
@@ -238,9 +249,9 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
     # 前は同じ名前で存在した別 workflow の run を含む）まで拾い、その run が
     # たまたま成功していれば green を偽装できてしまう（同名だが別 workflow という
     # なりすまし）。id 束縛によりこの偽装経路を塞ぐ。
-    required_map=$(printf '%s' "${workflows}" | jq -c --arg req "${required_csv}" '
+    required_map=$(printf '%s' "${workflows}" | jq -c --argjson req "${required_json}" '
       . as $wfs |
-      ($req | split(",") | map(gsub("^\\s+|\\s+$";""))) as $required |
+      $req as $required |
       [ $required[] | . as $n | { name: $n, id: ($wfs[] | select(.name == $n) | .id) } ]')
 
     runs=$(gh run list -R "${repo}" -c "${head}" -L 100 \
@@ -314,41 +325,45 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
   done
   ```
 
-  実行例（`Fandhe-AI/agent-cli-skills` で実測。本リポは `.github/workflows/ci.yml` のみが `on.push` を持ち、workflow レベルの `name:` は `CI` の1本のため必須集合は `CI`）。フォールバック形（`@branch` 省略、既定ブランチ `main` を検査）:
+  実行例（`Fandhe-AI/agent-cli-skills` で実測。本リポは `.github/workflows/ci.yml` のみが `on.push` を持ち、workflow レベルの `name:` は `CI` の1本のため必須集合は JSON 配列 `["CI"]`。必須集合の入力形式は Issue #363 で JSON 配列へ変更済み）。フォールバック形（`@branch` 省略、既定ブランチ `main` を検査）:
 
   ```
-  $ bash probe.sh "Fandhe-AI/agent-cli-skills:CI"
-  {"repo":"Fandhe-AI/agent-cli-skills","branch":"main","head":"242f5dc8","push_total":1,"required_missing":[],"incomplete":0,"failed":0,"unknown":0}
+  $ bash probe.sh 'Fandhe-AI/agent-cli-skills:["CI"]'
+  {"repo":"Fandhe-AI/agent-cli-skills","branch":"main","head":"1dacc6b6","push_total":1,"required_missing":[],"incomplete":0,"failed":0,"unknown":0}
   ```
 
-  対象ブランチ明示形（`@branch` で非既定ブランチを検査。本リポの `ci.yml` は `push: branches: [main]` のため非既定ブランチでは push run が起動せず `push_total: 0` = 補償策不成立になる。旧プローブ（既定ブランチ決め打ち）なら誤って `main` を測り green を返していたはずの経路であり、Issue #362 の誤判定が実際に是正されたことの証拠）:
+  対象ブランチ明示形（`@branch` で非既定ブランチを検査。本リポの `ci.yml` は `push: branches: [main]` のため非既定ブランチでは push run が起動せず `push_total: 0` = 補償策不成立になる）:
 
   ```
-  $ bash probe.sh "Fandhe-AI/agent-cli-skills@feat/342-update-external-rollout:CI"
-  {"repo":"Fandhe-AI/agent-cli-skills","branch":"feat/342-update-external-rollout","head":"cf62087d","push_total":0,"required_missing":["CI"],"incomplete":0,"failed":0,"unknown":0}
+  $ bash probe.sh 'Fandhe-AI/agent-cli-skills@fix/352-post-failure-compensation:["CI"]'
+  {"repo":"Fandhe-AI/agent-cli-skills","branch":"fix/352-post-failure-compensation","head":"01db07b0","push_total":0,"required_missing":["CI"],"incomplete":0,"failed":0,"unknown":0}
   ```
 
   fail-closed 経路も同じスクリプトで実測している（`gh run list` へ到達する前に打ち切られる）:
 
   ```
-  $ bash probe.sh "Fandhe-AI/agent-cli-skills:NoSuchWorkflow"
+  $ bash probe.sh 'Fandhe-AI/agent-cli-skills:["NoSuchWorkflow"]'
   Fandhe-AI/agent-cli-skills@main: 判定不能 — 必須 workflow 名が active workflow のちょうど1 path に対応しない（0件=未存在 / 複数件=同名衝突）: NoSuchWorkflow:0
 
-  $ bash probe.sh "Fandhe-AI/agent-cli-skills"
-  Fandhe-AI/agent-cli-skills: 判定不能 — 必須 workflow 集合が未指定（"owner/repo[@branch]:name1,name2" 形式で明示すること）
+  $ bash probe.sh 'Fandhe-AI/agent-cli-skills'
+  Fandhe-AI/agent-cli-skills: 判定不能 — 必須 workflow 集合が未指定（'owner/repo[@branch]:["name1","name2"]' 形式で明示すること）
 
-  $ bash probe.sh "Fandhe-AI/agent-cli-skills@feat/342-update-external-rollout"
-  Fandhe-AI/agent-cli-skills@feat/342-update-external-rollout: 判定不能 — 必須 workflow 集合が未指定（"owner/repo[@branch]:name1,name2" 形式で明示すること）
-
-  $ bash probe.sh "Fandhe-AI/agent-cli-skills@no/such/branch:CI"
+  $ bash probe.sh 'Fandhe-AI/agent-cli-skills@no/such/branch:["CI"]'
   Fandhe-AI/agent-cli-skills@no/such/branch: 判定不能 (HTTP 422) — head sha を取得できない
+  ```
+
+  旧カンマ区切り形式は JSON として不正なため判定不能で拒否される（gh API を呼ぶ前に終端する。カンマ入りの名前を存在しない複数名へ誤分割する経路がないことの直接証拠）:
+
+  ```
+  $ bash probe.sh 'Fandhe-AI/agent-cli-skills:CI,Lint'
+  Fandhe-AI/agent-cli-skills: 判定不能 — 必須 workflow 集合が JSON 配列でない（旧カンマ区切り形式は受理しない。'["name1","name2"]' 形式で指定すること）
   ```
 
   集計直前の head 再確認による判定不能も実測している（`recheck` を強制的に不一致させたスクリプトで検証。実運用ではこの分岐は base head が本当に更新された場合にのみ通る）:
 
   ```
-  $ bash probe_forced_mismatch.sh "Fandhe-AI/agent-cli-skills:CI"
-  Fandhe-AI/agent-cli-skills@main: 判定不能 — 集計中に base head が更新された（旧: 242f5dc8 / 新: deadbeef）
+  $ bash probe_forced_mismatch.sh 'Fandhe-AI/agent-cli-skills:["CI"]'
+  Fandhe-AI/agent-cli-skills@main: 判定不能 — 集計中に base head が更新された（旧: 1dacc6b6 / 新: deadbeef）
   ```
 
   判定は以下の表に従う。
