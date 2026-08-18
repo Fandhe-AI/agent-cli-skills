@@ -1169,12 +1169,20 @@ const ORPHAN_COUNT_SCHEMA = {
 // Issue #348 案 B）専用。du -sk は macOS 標準 du でも動く（-b は GNU 限定のため使わない）。
 const ORPHAN_BYTES_SCHEMA = {
   type: 'object',
-  required: ['kib'],
+  required: ['kib', 'err'],
   properties: {
     kib: {
       type: 'integer',
       minimum: 0,
       description: '対象パス全件に du -sk を実行した第1列（KiB）の単純合計（存在しないパスは 0 として加算）',
+    },
+    err: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        '測定スクリプト出力の ERR 値そのまま（du の非 0 終了・出力欠損の件数。jq 展開の失敗も 1 と' +
+        'して計上する）。ホスト側は err === 0 のみ測定成功として受理する（エージェントが ERR>0 の' +
+        '部分合計を kib として返しても受理しない fail-closed の二重化。PR #390 codex-review P1）。',
     },
     missing: {
       type: 'integer',
@@ -1567,7 +1575,8 @@ async function measureResidualWorktreeBytes(paths) {
           '組み立て直したりせず）実行する。このスクリプト自体がパスごとの存在確認・クォート・' +
           '合算を行うため、対象パスの内容をコマンドとして解釈したり、自分の判断で分岐を追加した' +
           'りしないこと:',
-        "   jq -j '.[] | . + \"\\u0000\"' " + tmpFile + " | { total=0; missing=0; err=0; " +
+        "   if ! jq -j '.[] | . + \"\\u0000\"' " + tmpFile + ' > ' + tmpFile + '.nul; then ' +
+          'echo "TOTAL=0 MISSING=0 ERR=1"; else { total=0; missing=0; err=0; ' +
           'while IFS= read -r -d "" p; do ' +
           'if [ ! -e "$p" ]; then missing=$((missing+1)); continue; fi; ' +
           'duout=$(du -sk -- "$p" 2>/dev/null); durc=$?; ' +
@@ -1575,19 +1584,20 @@ async function measureResidualWorktreeBytes(paths) {
           'sz=$(printf %s "$duout" | cut -f1); ' +
           'if [ -z "$sz" ]; then err=$((err+1)); continue; fi; ' +
           'total=$((total+sz)); ' +
-          'done; echo "TOTAL=$total MISSING=$missing ERR=$err"; }',
+          'done; echo "TOTAL=$total MISSING=$missing ERR=$err"; } < ' + tmpFile + '.nul; fi',
         '   （-j は jq -r と異なり要素ごとの追加改行を出さないため NUL 区切りが崩れない。' +
           '`[ ! -e "$p" ]` で真になったパスは並行実行中の cleanup で既に削除された可能性があり、' +
           '0 バイトとして加算せず missing としてのみ数える（存在しないパスの容量は 0 として扱う' +
           'のが正しい — fail-open ではない）。一方 du 自体が失敗した場合（権限不足等の実エラー）' +
           'は err に計上し、値は合算しない。du の終了コードは cut へ直結せず個別に検査する — ' +
           'パイプ直結だと終了状態が cut のものになり、du が非 0 終了でも部分出力があると成功扱いに' +
-          'なる fail-open が生じるため）。',
-        '3. 出力の ERR が 0 より大きい場合は、他の値で補わずタスク全体を失敗として報告する' +
-          '（合計を 0 や欠損値で埋めない。実エラーのみ fail-closed とする）。',
-        '4. ERR が 0 の場合、TOTAL を kib として、MISSING を missing として返す（missing は' +
-          '観測の透明性のための任意フィールドであり、成否判定には使わない）。',
-        `5. rm -f ${tmpFile} で一時ファイルを削除する（測定成否に関わらず実施）。`,
+          'なる fail-open が生じるため。jq の展開も while ループへ直結せず一時ファイル経由で終了' +
+          'コードを検査する — 直結だと jq 未導入・JSON 破損の非 0 終了が「入力 0 件の正常測定」' +
+          '（TOTAL=0 ERR=0）に化けて容量ゲートを素通りするため、失敗時は ERR=1 を出力する）。',
+        '3. 出力の TOTAL を kib、MISSING を missing、ERR を err として、観測値のまま返す' +
+          '（ERR が 0 より大きくても kib を 0 や別の値で補わない。測定の成否判定はホスト側が' +
+          ' err の値で行う）。',
+        `4. rm -f ${tmpFile} ${tmpFile}.nul で一時ファイルを削除する（測定成否に関わらず実施）。`,
       ].join('\n'),
       {
         label: 'worktree:residual-bytes',
@@ -1598,6 +1608,14 @@ async function measureResidualWorktreeBytes(paths) {
       },
     )
     if (!(Number.isInteger(v?.kib) && v.kib >= 0)) return null
+    // err はエージェント返却値の必須フィールド（ORPHAN_BYTES_SCHEMA）。ホスト側でも 0 を明示
+    // 検証する — エージェントが ERR>0 の部分合計を kib として返しても受理しない fail-closed の
+    // 二重化（PR #390 codex-review P1: schema が kib しか必須にしないと、プロンプト解釈の揺れで
+    // 過小評価値が測定成功として通る）
+    if (!(Number.isInteger(v?.err) && v.err === 0)) {
+      log(`⚠️ 残置 worktree ディスク使用量測定で ${v?.err ?? '不明'} 件の測定エラーが報告された（合計値を受理せず観測失敗として扱う）`)
+      return null
+    }
     if (Number.isInteger(v?.missing) && v.missing > 0) {
       log(`残置 worktree ディスク使用量測定: 並行 cleanup 等により ${v.missing} 件のパスが測定時点で既に存在しなかった（0 として扱った）`)
     }

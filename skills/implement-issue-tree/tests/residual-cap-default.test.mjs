@@ -343,7 +343,28 @@ test('measureResidualWorktreeBytes は存在しないパスを ENOENT 耐性で 
   assert.match(fnBody, /\[ ! -e "\$p" \]/)
   assert.match(fnBody, /missing=\$\(\(missing\+1\)\)/)
   assert.match(fnBody, /err=\$\(\(err\+1\)\)/)
-  assert.match(fnBody, /ERR が 0 より大きい場合は/)
+  // ERR>0 の扱いはエージェントの自己申告（旧文言「ERR が 0 より大きい場合は…失敗として報告」）
+  // ではなく、観測値をそのまま返させてホスト側の err === 0 検証で fail-closed にする
+  // （PR #390 codex-review P1: schema が kib しか必須にしないと部分合計が成功として通る）
+  assert.match(fnBody, /ERR を err として、観測値のまま返す/)
+  assert.match(fnBody, /Number\.isInteger\(v\?\.err\) && v\.err === 0/)
+})
+
+test('measureResidualWorktreeBytes は du の終了コードと jq の展開失敗を個別に検出する（fail-open 防止）', () => {
+  const fnStart = source.indexOf('async function measureResidualWorktreeBytes(paths)')
+  const fnEnd = source.indexOf('\n\n// メイン worktree の', fnStart)
+  const fnBody = source.slice(fnStart, fnEnd)
+  // du | cut のパイプ直結は終了状態が cut のものになる fail-open（PR #390 codex-review P1）
+  assert.match(fnBody, /duout=\$\(du -sk -- "\$p" 2>\/dev\/null\); durc=\$\?;/)
+  assert.doesNotMatch(fnBody, /du -sk -- "\$p" 2>\/dev\/null \| cut/)
+  // jq を while ループへ直結すると jq の非 0 終了が「入力 0 件の正常測定」に化ける
+  // （PR #390 codex-review P1）。一時ファイル経由で終了コードを検査し ERR=1 へ倒す
+  assert.match(fnBody, /if ! jq -j/)
+  assert.match(fnBody, /TOTAL=0 MISSING=0 ERR=1/)
+})
+
+test('ORPHAN_BYTES_SCHEMA は err を必須フィールドとして要求する', () => {
+  assert.match(source, /required: \['kib', 'err'\]/)
 })
 
 test('ORPHAN_BYTES_SCHEMA は missing を任意フィールドとして持ち、成否判定に使わないと明記する', () => {
