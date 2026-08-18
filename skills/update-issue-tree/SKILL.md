@@ -35,10 +35,13 @@ update-issue-tree 42
   fail-closed**（下記 Step 3 の終了コード表を参照）。exit 2 は gh/jq 不在・未認証・issue
   取得失敗（解消可能な前提不備）とも共有するため、このケースだけ stderr に
   `reason=cross-repository-parent` の安定マーカー行が追加で出る（終了コード表参照）
-- 本スクリプトが対象 issue を処理できるのは、その `parent_issue_url` が null（どの親にも
+- 対象 issue の親が**別リポジトリ**にある場合、`scripts/reassign-sub-issue.sh` がその issue を
+  処理できるのは、親リポジトリ側で親リンクが取り外され `parent_issue_url` が null（どの親にも
   紐付いていない）状態になってからである。cross-repository の親リンクの取り外しは
-  **親リポジトリ側の操作**であり、そのリポジトリへの書き込み権限を持つ担当者が行う。
-  本スキルの範囲外
+  **親リポジトリ側の操作**であり、そのリポジトリへの書き込み権限を持つ担当者が行う。本スキルの範囲外
+- **同一リポジトリ内での親の付け替えは本スキルの中核機能であり、上記の null 要求の対象外**である。
+  Step 3 は承認済みの旧親を `--old-parent` に渡して DELETE→POST を実行するため、事前に
+  `parent_issue_url` を null にしておく必要はない（孤児の再配置は Step 4 が `--old-parent` 省略で扱う）
 
 ## フロー
 
