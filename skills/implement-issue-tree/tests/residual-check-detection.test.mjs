@@ -289,7 +289,7 @@ test('群C: success + skipped + neutral の 3 重複も bad=0 で健全と判定
 // 通過してしまう）。ここでは偽の `gh` を PATH の先頭へ置いてスニペット本体を bash で実行し、
 // 出力（2 形のいずれか）と `gh api` の呼び出し有無を実測する。
 // ---------------------------------------------------------------------------
-import { mkdtempSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, existsSync, chmodSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 /**
@@ -340,13 +340,20 @@ function runSnippet({ mode = 'success', withAwk = true, errexit = false } = {}) 
   // スニペットが使う printf / echo / [ は bash 組み込みのため PATH に依存しない
   const path = withAwk ? `${dir}:${process.env.PATH}` : dir
   const script = errexit ? `set -e\n${shellSnippet}` : shellSnippet
-  // bash は絶対パスで起動する。withAwk=false では PATH を偽 gh のディレクトリのみに
-  // 絞るため、PATH 解決に頼ると bash 自体が見つからず ENOENT になる
-  const stdout = execFileSync('/bin/bash', ['-c', script], {
-    encoding: 'utf8',
-    env: { ...process.env, PATH: path, HEAD_SHA: 'deadbeef' },
-  }).trim()
-  return { stdout, ghCalled: existsSync(calledMarker) }
+  try {
+    // bash は絶対パスで起動する。withAwk=false では PATH を偽 gh のディレクトリのみに
+    // 絞るため、PATH 解決に頼ると bash 自体が見つからず ENOENT になる
+    const stdout = execFileSync('/bin/bash', ['-c', script], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: path, HEAD_SHA: 'deadbeef' },
+    }).trim()
+    // 痕跡の判定は一時ディレクトリを消す前に済ませる（下の finally で消えるため）。
+    return { stdout, ghCalled: existsSync(calledMarker) }
+  } finally {
+    // 最後の組み合わせテストだけで 12 回走るため、後始末しないと一時領域を食い続ける。
+    // self-hosted runner のように workspace が永続する環境では回を追って蓄積する。
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 test('群D: 取得成功時は dup=/bad=/pend= 形式を返す（gh は呼ばれる）', () => {
