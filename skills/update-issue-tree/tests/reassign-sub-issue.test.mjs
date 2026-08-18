@@ -27,7 +27,9 @@ function run(args, fixture) {
   let stderr = ''
   try {
     stdout = execFileSync(SCRIPT_PATH, args, {
-      env: { ...process.env, ...stub.env },
+      // RECOVERY_RECHECK_DELAY_SEC=0: 補償復旧の反映遅延再確認（Issue #352 追加分）が
+      // 挟む sleep をテストではゼロにし、決定性・速度を保つ（本番既定値は変えない）
+      env: { ...process.env, ...stub.env, RECOVERY_RECHECK_DELAY_SEC: '0' },
       encoding: 'utf8',
     })
   } catch (err) {
@@ -233,6 +235,39 @@ test('ケース32: 孤児経路（DELETE なし）の POST が非ゼロ（一般
   assert.equal(c.filter((l) => l.startsWith('api') && !l.includes('--method')).length, 2, '対象 issue の事前 GET + 新親の事前検証 GET の 2 件のみであること（復旧のための追加 GET が無いこと）')
   assert.equal(c.filter((l) => l.includes('--method POST')).length, 1, '補償 POST は撃たれていないこと（1 回目の POST のみ）')
   assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
+})
+
+test('ケース33: DELETE 後の POST 失敗 → 復旧の再取得では旧親配下に見えるが、反映遅延の再確認で実は孤児だった → 復旧成立とみなさず exit 8 reason=recovery-state-unknown（Issue #352 codex-review 追加指摘 PR #391。1 回の読み取りだけで restored 確定しないことの回帰）', () => {
+  const r = run(['--issue', '40', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    // 2 回目 GET（復旧のための再取得）は旧親配下、3 回目 GET（反映遅延の再確認）では
+    // 実は孤児だったことが判明する、という過渡状態を再現する
+    parentAfter: '5',
+    parentAfter2: '',
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  const c = calls(r.logPath)
+  assert.equal(c.filter((l) => l.includes('--method POST')).length, 1, '補償 POST は撃たれていないこと（1 回目の POST のみ。復旧成立と誤認して即終端していないことの裏返し）')
+})
+
+test('ケース34: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST も失敗 → 失敗後の再取得で実は第三者が別の親を設定済み → exit 8 reason=compensation-post-failed-third-party-parent（cursor[bot] Medium 指摘 PR #391）', () => {
+  const r = run(['--issue', '41', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '', // 復旧のための再取得 GET は孤児を返す
+    parentAfter2: '9', // 補償 POST 失敗後の再取得 GET は第三者が設定した親 #9 を返す
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+    compPostExit: 1,
+    compPostBody: '503 Service Unavailable',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=compensation-post-failed-third-party-parent/)
+  assert.match(r.stderr, /#9/)
+  const posts = calls(r.logPath).filter((l) => l.includes('--method POST'))
+  assert.equal(posts.length, 2, '補償 POST は試みられていること（1 回目の新親 POST + 補償 POST）')
 })
 
 test('ケース15: 孤児経路の POST が "only have one parent" → exit 7（DELETE 未実行で無変更）', () => {
