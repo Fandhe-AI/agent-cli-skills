@@ -60,7 +60,7 @@ GIT_SSL_NO_VERIFY=1 gh pr create --draft --base main
 |--------|------|------|
 | `create-html-report` | 不要 | renderer は純ローカルの Python（`_/reports/` 配下へ出力、ネットワーク呼び出しなし） |
 | `implement-review` | 一部要 | 読み取り専用レビュー本体（`git diff` ベース）はローカル完結。out-of-scope の Issue 起票・コメント投稿（`gh`）のみ任意でネットワークを要する |
-| `implement-issue` | 一部要 | 計画作成・実装・テスト実行はローカル完結。`gh issue view` と `git push` のみネットワークを要する |
+| `implement-issue` | 一部要 | 計画作成・実装・テスト実行はローカル完結。`gh issue view` はユーザーからの Issue 本文直接受け取りで代替可能なため任意ステップとなり、`git push` と合わせてこの2つのみネットワークを要する |
 | `project-view-status` | 要（本スキルは read-only） | `gh project view` / `item-list` / `field-list` の読み取りのみで構成。書き込み系サブコマンドを含まない |
 | `implement-review-pr` | 要（本スキルは read-only） | 既定は `gh pr view` / `gh pr checks` の読み取り。`gh pr review` の投稿は任意ステップ |
 | `create-issue` | 要（本スキルは主に API 経由） | `gh issue create` / `gh api .../sub_issues` |
@@ -80,8 +80,8 @@ GIT_SSL_NO_VERIFY=1 gh pr create --draft --base main
 ## 実測記録
 
 測定日: 2026-08-18。目的: 読み取り専用フロー（`implement-review` の中核である `git diff` ベースの
-レビュー）がネットワーク遮断下でも完走し、かつワークスペース外への書き込みを一切発生させないことを
-実測で確認する（Issue #367 AC4）。
+レビュー）がネットワーク遮断下でも完走し、かつワークスペース内（ワークツリー配下）に新規・更新
+ファイルを発生させないことを実測で確認する（Issue #367 AC4）。
 
 HTTPS プロキシの黒穴化だけでは不十分（本リポジトリの origin は SSH のため、SSH transport は
 `HTTPS_PROXY` を無視して素通りし偽陽性になる）。HTTPS と SSH の両経路を同時に塞いだ。
@@ -108,7 +108,10 @@ echo "gh exit=$?"
 - `env ${DENY} git fetch origin main` → 失敗（非 0。SSH 到達不能で遮断が効いていることを確認）
 - `env ${DENY} gh api rate_limit` → 失敗（非 0。プロキシ接続拒否）
 - 上記 (1) の前後で `git status --porcelain` の差分なし、かつ `find . -path ./.git -prune -o -newer <mark> -print`
-  が空（ワークスペース内外を問わず新規・更新ファイルなし）
+  が空（ワークスペース内（ワークツリー配下）に限り新規・更新ファイルなし。ワークスペース外は未観測）
 
 限界の明示: 本測定は「ネットワーク遮断相当」の模擬であり、Claude Code sandbox 実装そのものの測定では
-ない。プロキシ変数や SSH コマンドの扱いは環境依存のため、運用開始・再開のたびに再測が望ましい。
+ない。プロキシ変数や SSH コマンドの扱いは環境依存のため、運用開始・再開のたびに再測が望ましい。加えて
+上記の `git status` / `find .` はいずれもカレントワークツリー配下のみを観測するため、ワークスペース外
+（ホームディレクトリ・システム領域等）への書き込みの有無はこの実測の対象外であり、「全域確認」を
+主張するものではない。
