@@ -177,16 +177,40 @@ reassign_one() {
   return "${status}"
 }
 
-# 計画配列の未宣言ガード（fail-closed）。
-# bash では未定義配列の "${REASSIGN_PLAN[@]}" は空に展開されるため、Step 2 を実行し忘れても
-# ループが 0 回で回り、承認済みの対象があってもエラーなく完走して完了報告まで進んでしまう。
-# 「対象なし（空配列を宣言済み）」と「計画未設定（未宣言）」を declare -p で区別し、
-# 後者は停止する。declare -p は宣言されていれば空配列でも成功する。
-if ! declare -p REASSIGN_PLAN >/dev/null 2>&1; then
-  echo "エラー: REASSIGN_PLAN が未宣言（Step 2 の付け替え計画が構築されていない）。" >&2
-  echo "対象 0 件と区別できないため停止する。対象が無い場合も REASSIGN_PLAN=() と明示すること" >&2
-  exit 1
-fi
+# 計画配列の存在と型を検証する（fail-closed）。Step 3 / Step 4 の両方が呼ぶ。
+#
+# 2 段階で検査する:
+#   1. 宣言されているか — bash では未定義配列の "${ARR[@]}" が空へ展開されるため、
+#      Step 2 を実行し忘れてもループが 0 回で回り、承認済みの対象があってもエラーなく
+#      完走して完了報告まで進む。declare -p は宣言済みなら空配列でも成功するため、
+#      「対象なし（空配列）」と「計画未設定（未宣言）」を正しく区別できる
+#   2. 添字配列か — declare -p は同名の**スカラー変数**が宣言済みでも成功する。
+#      その場合 "${ARR[@]}" はスカラー値 1 個へ展開され、計画として構築していない値が
+#      1 件の付け替え指示として実行されてしまう（実測: REASSIGN_PLAN="123 1 2" は
+#      ガードを通過し、ループが 1 回まわる）。属性が添字配列（declare -a）であることまで
+#      確認する。連想配列（declare -A）はループが添字順を前提にするため受け付けない
+require_plan_array() {
+  local name="$1" attrs
+  if ! declare -p "${name}" >/dev/null 2>&1; then
+    echo "エラー: ${name} が未宣言（Step 2 の計画が構築されていない）。" >&2
+    echo "対象 0 件と区別できないため停止する。対象が無い場合も ${name}=() と明示すること" >&2
+    return 1
+  fi
+  # declare -p の 2 番目のフィールドが属性（例: -a / -ar / -- / -A）。
+  # 添字配列は小文字 a、連想配列は大文字 A で区別される
+  attrs=$(declare -p "${name}" | awk '{print $2}')
+  case "${attrs}" in
+    -*a*) return 0 ;;
+    *)
+      echo "エラー: ${name} が添字配列ではない（属性: ${attrs}）。" >&2
+      echo "スカラーや連想配列を計画として実行しないため停止する。${name}=( ... ) で宣言すること" >&2
+      return 1
+      ;;
+  esac
+}
+
+# 計画配列の存在・型ガード（fail-closed）。詳細は require_plan_array の定義を参照
+require_plan_array REASSIGN_PLAN || exit 1
 
 # 呼び出し側ループ。契約の主体はここにある——「(b) 恒久的な対象外は次の 1 件へ進み、
 # (a) 解消可能な前提不備は原因解消まで中断する」を実際に実現するのはこのループである。
@@ -300,12 +324,8 @@ Phase が不明な issue はタイトル・本文を読んで判断し、判断�
 # Step 3 で定義した reassign_one をそのまま再利用する（呼び出し方・stderr の扱い・
 # 終了ステータスの意味づけを Step 3 と非対称にしない。Issue #335 / #372）。
 # 孤児は旧親を持たないため --old-parent を渡さない（DELETE を飛ばして POST のみ実行される）。
-# Step 3 と同じ未宣言ガード（fail-closed）。理由は Step 3 のコメントと同一
-if ! declare -p ORPHAN_PLAN >/dev/null 2>&1; then
-  echo "エラー: ORPHAN_PLAN が未宣言（Step 2 の孤児再配置計画が構築されていない）。" >&2
-  echo "対象 0 件と区別できないため停止する。対象が無い場合も ORPHAN_PLAN=() と明示すること" >&2
-  exit 1
-fi
+# Step 3 と同じガードを同じ関数で行う（非対称を作らない）
+require_plan_array ORPHAN_PLAN || exit 1
 
 SKIPPED_ORPHANS=()
 for ENTRY in "${ORPHAN_PLAN[@]}"; do

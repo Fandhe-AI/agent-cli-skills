@@ -59,9 +59,20 @@ function makeStub(tmp, exitCode, stderrText = '') {
   // 素通りさせず、bash 経由の起動がその状態でも機能することを実測する。
 }
 
-function prelude({ presetScript = true, plan = ['123 1 2'], orphans = ['456 3'], declarePlans = true } = {}) {
+function prelude({
+  presetScript = true,
+  plan = ['123 1 2'],
+  orphans = ['456 3'],
+  declarePlans = true,
+  scalarPlans = false,
+} = {}) {
   const lines = []
-  if (declarePlans) {
+  if (scalarPlans) {
+    // 配列ではなくスカラーとして宣言する。declare -p はこの場合も成功するため、
+    // 存在検査だけのガードは素通りしてしまう（PR #374 codex P1 第 2 ラウンド）。
+    lines.push(`REASSIGN_PLAN=${JSON.stringify(plan[0] ?? '123 1 2')}`)
+    lines.push(`ORPHAN_PLAN=${JSON.stringify(orphans[0] ?? '456 3')}`)
+  } else if (declarePlans) {
     lines.push(`REASSIGN_PLAN=(${plan.map((e) => JSON.stringify(e)).join(' ')})`)
     lines.push(`ORPHAN_PLAN=(${orphans.map((e) => JSON.stringify(e)).join(' ')})`)
   }
@@ -75,11 +86,32 @@ function prelude({ presetScript = true, plan = ['123 1 2'], orphans = ['456 3'],
 // 関数定義を前置する必要がある。SKILL.md 側の構造（Step 3 で定義・Step 4 で再利用）を
 // テストが暗黙に壊さないよう、定義部だけを Step 3 のブロックから切り出して前置する。
 function functionDefinition(step3Block) {
-  const start = step3Block.indexOf('reassign_one() {')
-  if (start < 0) throw new Error('Step 3 ブロックに reassign_one の定義が見つからない')
-  const end = step3Block.indexOf('\n}\n', start)
-  if (end < 0) throw new Error('reassign_one 定義の終端が見つからない')
-  return step3Block.slice(start, end + 3)
+  // Step 3 は複数の関数（reassign_one / require_plan_array）を定義する。関数が増えても
+  // 取りこぼさないよう、行頭の `name() {` から対応する行頭 `}` までを走査してすべて集める。
+  const lines = step3Block.split('\n')
+  const defs = []
+  let current = null
+  for (const line of lines) {
+    if (current === null && /^[A-Za-z_][A-Za-z0-9_]*\(\) \{$/.test(line)) {
+      current = [line]
+      continue
+    }
+    if (current !== null) {
+      current.push(line)
+      if (line === '}') {
+        defs.push(current.join('\n'))
+        current = null
+      }
+    }
+  }
+  if (current !== null) throw new Error('関数定義の終端 `}` が見つからない')
+  const names = defs.map((d) => d.slice(0, d.indexOf('(')))
+  for (const required of ['reassign_one', 'require_plan_array']) {
+    if (!names.includes(required)) {
+      throw new Error(`Step 3 ブロックに ${required} の定義が見つからない（実際: ${names.join(', ')}）`)
+    }
+  }
+  return defs.join('\n') + '\n'
 }
 
 // execFileSync ではなく spawnSync を使う。execFileSync は成功時に stdout しか返さず、
@@ -289,3 +321,25 @@ test('Step 2 に REASSIGN_PLAN / ORPHAN_PLAN の構築手順が掲載されて�
   assert.match(step2, /ORPHAN_PLAN=\(/, 'Step 2 に ORPHAN_PLAN の宣言例が必要')
   assert.match(step2, /空配列として宣言/, '対象 0 件でも宣言する契約の明示が必要')
 })
+
+// `declare -p` は同名のスカラー変数が宣言済みでも成功する。その場合 "${ARR[@]}" は
+// スカラー値 1 個へ展開され、計画として構築していない値が 1 件の付け替え指示として
+// 実行される（実測: REASSIGN_PLAN="123 1 2" は存在検査だけのガードを通過し、
+// ループが 1 回まわってスクリプトが呼ばれる）。属性が添字配列であることまで検査する。
+for (const { label, block, prefix } of cases) {
+  test(`${label}: 計画変数がスカラーなら exit 1 で停止しスクリプトを呼ばない（PR #374 P1 第2R）`, () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'update-issue-tree-block-'))
+    try {
+      const path = join(tmp, STUB_RELATIVE)
+      mkdirSync(dirname(path), { recursive: true })
+      const counter = join(tmp, 'calls.txt')
+      writeFileSync(path, `#!/usr/bin/env bash\nprintf 'called\\n' >> ${JSON.stringify(counter)}\nexit 0\n`)
+      const r = runBlock(block, tmp, { scalarPlans: true }, prefix)
+      assert.equal(r.status, 1, 'スカラー宣言をガードが通してはならない')
+      assert.match(r.stderr, /添字配列ではない/)
+      assert.equal(existsSync(counter), false, 'ガード通過前にスクリプトが呼ばれてはならない')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+}
