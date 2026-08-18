@@ -105,7 +105,14 @@ SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更
 # （`scripts/skills-lock-update.sh` 単体実行時の set -euo pipefail による停止とは別軸。
 # 詳細は下記「skills CLI のバージョン固定と更新手順」節の fail-closed 記述を参照）。
 npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --yes || {
-  echo "警告: skills@${SKILLS_CLI_VERSION} の解決に失敗しました（該当版の不存在・レジストリ障害等）。固定版を外した再実行はせず、当該スキルを skip します。"
+  echo "警告: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害・ダウンロード中断等、原因は問わない）。"
+  # 失敗が部分書き込み後に発生した場合、skills-lock.json / .agents/skills/${SKILL_NAME}/ が
+  # 中途半端な状態のまま残り得る。次スキルの `git add skills-lock.json`（Step 7）が
+  # この残置変更を承認済みの変更と一緒に stage してしまわないよう、Step 6 の却下時と
+  # 同じ手順で当該スキル分のみを即座にリバートしてから skip する。
+  git checkout -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+  git clean -fd ".agents/skills/${SKILL_NAME}/"
+  echo "警告: 固定版を外した再実行はせず、当該スキルの変更をリバートして skip します。"
   continue
 }
 ```
@@ -190,7 +197,7 @@ EOF
 3. 1 スキルで実際に実行し、差分が正常であることを確認する
 4. `chore(sync-skills-lock): skills CLI を X.Y.Z へ更新` でコミットする
 
-**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了する。黙って最新版へフォールバックする経路は存在せず、dist-tag・レンジ指定への書き換えも禁止する。この失敗時の停止範囲は実行経路によって異なる: `scripts/skills-lock-update.sh` を単体実行した場合はスクリプト全体が `set -euo pipefail` により即座に停止する。一方、本ファイルの Step 4 フェンス（複数スキルをループで処理する経路）では、`npx` の失敗を検出したら当該スキルのみを skip（`continue`）して次スキルへ進む — Step 1/3 の他の skip 分岐と同じ制御フローであり、ループ全体を停止させるものではない。
+**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了する。黙って最新版へフォールバックする経路は存在せず、dist-tag・レンジ指定への書き換えも禁止する。この失敗時の停止範囲は実行経路によって異なる: `scripts/skills-lock-update.sh` を単体実行した場合はスクリプト全体が `set -euo pipefail` により即座に停止する。一方、本ファイルの Step 4 フェンス（複数スキルをループで処理する経路）では、`npx` の失敗を検出したら Step 6 の却下時と同じ手順（`git checkout --` / `git clean -fd`）で当該スキル分の部分書き込みをリバートしてから skip（`continue`）して次スキルへ進む — Step 1/3 の他の skip 分岐と同じ制御フローであり、ループ全体を停止させるものではない。リバートを挟まずに skip すると、失敗が部分書き込み後に発生した場合の残置変更を次スキルの `git add`（Step 7）が承認済み変更と一緒に stage してしまい得るため必須の手順である。
 
 ## 注意事項
 
