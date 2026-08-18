@@ -3545,6 +3545,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     })
     return false
   }
+  // __MERGE_MONITOR_LOOP_START__ — merge-loop-rescan.test.mjs が監視ループ本体を切り出す境界。
+  // このマーカー対は回帰検査の走査境界であり、削除・改名するとテストが明示的に throw する
+  // （出現回数もテストで 1 回に固定している）。ループを移動する場合はマーカーも一緒に動かす。
   while (!merged && monitorsLeft > 0) {
     monitorsLeft--
     // 予約されていた救済ラウンドを「今ラウンド」へ移す（予約は必ず消費する）。判定自体は
@@ -4008,6 +4011,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     }
     // timeout は次ラウンドで再監視する
   }
+  // __MERGE_MONITOR_LOOP_END__
   if (!merged) {
     // routing error は専用の基底 note を使う。追跡情報の合成・保存は failMergeTerminal に
     // 一本化済みのため、どちらの基底 reason でも契約を満たす。
