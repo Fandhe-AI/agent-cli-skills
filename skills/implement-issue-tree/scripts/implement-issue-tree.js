@@ -5319,18 +5319,30 @@ const residualCountOverLimit = maxResidualWorktrees > 0 && residualTotalAtEnd > 
 // overLimit を決めると、バイト上限を超過（またはバイト軸起因の suppressed）でも overLimit が
 // false のままになり、「次ランは止まらない」という誤ったシグナルを消費側へ返す
 // （PR #390 Cursor Bugbot Medium 指摘）。
-const residualBytesTotalAtEnd = residualBytesObserved
-  ? projectResidualBytes({
-      baselineBytes: residualBytesAtStart,
-      ledgerLength: ephemeralWorktrees.length,
-      baselineLedgerCount: byteBaselineLedgerCount,
-      reservedUnits: 0,
-      extraReserveUnits: 0,
-      perWorktreeByteReserve,
-    })
-  : 0
+// 判定は projection（直近基準＋floor 予約）ではなく終了時点の実測で行う — 最後の再計測後に
+// 基準へ取り込み済みの実行中 worktree がビルド成果物等で増大した増分は、台帳件数にも
+// projection にも現れないため、見積りでは実使用量の上限超過を捉えられない（PR #390
+// codex-review P1: overLimit の過少報告）。実測失敗時は「次ラン開始時の観測も失敗して
+// fail-closed 停止する見込み」であり、overLimit の返却契約（次ラン停止見込み）に照らして
+// true 側へ倒し、bytesAtEndObserved: false で正常な非超過と区別できるようにする。
+let residualBytesAtEnd = null
+let residualBytesEndObserved = false
+if (maxResidualWorktreeBytes > 0 && residualBytesObserved) {
+  const endTargetPaths = [...residualPathsAtStart, ...ephemeralWorktrees.map((e) => e.path)].filter(
+    (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !confirmedRemovedPaths.has(p),
+  )
+  const endKib = endTargetPaths.length > 0 ? await measureResidualWorktreeBytes(endTargetPaths) : 0
+  if (endKib !== null) {
+    residualBytesAtEnd = endKib * 1024
+    residualBytesEndObserved = true
+  } else {
+    log('⚠️ ラン終了時の残置 worktree ディスク使用量の実測に失敗した。容量上限の充足を確認できないため、次ラン開始時は観測失敗の fail-closed で新規着手が停止する見込み（overLimit: true として報告する）')
+  }
+}
 const residualBytesOverLimit =
-  maxResidualWorktreeBytes > 0 && residualBytesObserved && residualBytesTotalAtEnd > maxResidualWorktreeBytes
+  maxResidualWorktreeBytes > 0 &&
+  residualBytesObserved &&
+  (residualBytesEndObserved ? residualBytesAtEnd > maxResidualWorktreeBytes : true)
 // overLimit は「次ラン開始時に新規着手が停止する見込み」の統合シグナル（件数・バイトの OR）
 const residualOverLimit = residualCountOverLimit || residualBytesOverLimit
 if (!residualObserved) {
@@ -5341,7 +5353,9 @@ if (!residualObserved) {
   log(`⚠️ ラン終了時の残置 worktree 総数が上限の 8 割超（${residualTotalAtEnd} 件 / 上限 ${maxResidualWorktrees} 件）。不要な worktree の手動削除を検討すること`)
 }
 if (residualBytesOverLimit) {
-  log(`⚠️ ラン終了時の残置 worktree ディスク使用量見積りが容量上限を超過（見積り ${Math.round(residualBytesTotalAtEnd / (1024 * 1024))} MiB / 上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB）。次ラン開始時に新規着手が停止する見込み。git worktree remove で手動掃除すること`)
+  if (residualBytesEndObserved) {
+    log(`⚠️ ラン終了時の残置 worktree ディスク使用量が容量上限を超過（実測 ${Math.round(residualBytesAtEnd / (1024 * 1024))} MiB / 上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB）。次ラン開始時に新規着手が停止する見込み。git worktree remove で手動掃除すること`)
+  }
 }
 
 // externalChecks 系フィールドも返す（マージゲートの前提条件をレポート側で検証するため）。
@@ -5353,4 +5367,4 @@ if (residualBytesOverLimit) {
 // residualWorktrees: 残置上限ゲートの観測結果（observed: false = 観測不成立、overLimit: true =
 //   件数・バイトいずれかの軸で次ラン新規着手停止見込み（Bugbot Medium 対応: 件数軸のみだと
 //   バイト超過時に誤って false を返す）、suppressed = 本ランの抑止有無、limit: 0 = 上限なし）。
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
+return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
