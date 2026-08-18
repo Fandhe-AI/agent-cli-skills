@@ -341,7 +341,7 @@ required status checks をサーバー側で強制していることを**実測�
 | `mcp_hub-spec` | 同上 | 同上 |
 | `team-hub-spec` | 組織既定のまま | ruleset `main-protection` が `active`・`bypass_actors` 0・required checks 4 件。同期 PR #58 が実際に `BLOCKED` で待機しており、サーバー側強制が働くことを実測済み |
 
-**既に自動マージされた 3 件は revert しない。** 内容は正当な上流スキル更新であり、revert の方が
+**既に自動マージされた 4 件は revert しない。** 内容は正当な上流スキル更新であり、revert の方が
 破壊的である。ただし**レビューを経ずにマージされた事実は記録に残す**:
 `mcp_hub-spec#109` / `hobby-keyboard#49` / `automation-spec#76` / `aliz-corporate-web#11`。
 
