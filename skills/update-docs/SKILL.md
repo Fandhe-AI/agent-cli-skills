@@ -79,72 +79,113 @@ N に含めるかどうかはこの内訳で決まる（系統 B という区分
 
 | 区分 | 実体の所在 | N に含めるか | 記載先 |
 |------|-----------|------------|--------|
-| B1 | `skills/<name>/`（`.claude/skills/<name>` は symlink） | 含める（系統 A の列挙で既に計上済み。B1 を理由に N を増減させない） | `## Current Skills (N)` |
-| B2 | `.claude/skills/<name>/` が実ディレクトリで、`skills/<name>/` にも `skills-lock.json` にも該当しない | 含めない | 「リポジトリ管理スキル（.claude/skills/ に配置）」 |
-| B3 | `.agents/skills/<name>/` が実体で、`.claude/skills/<name>` がその実体を指す symlink であることを検証済み | 含めない | 「参照スキル（.claude/skills/ に配置）」 |
+| B1 | `skills/<name>/`（`.claude/skills/<name>` は symlink で、解決先が `skills/<name>` の実パスと一致することを検証済み） | 含める（系統 A の列挙で既に計上済み。B1 を理由に N を増減させない） | `## Current Skills (N)` |
+| B2 | `.claude/skills/<name>/` が `SKILL.md` を持つ実ディレクトリで、`skills/<name>/` にも `skills-lock.json` にも該当しない | 含めない | 「リポジトリ管理スキル（.claude/skills/ に配置）」 |
+| B3 | `.agents/skills/<name>/` が `SKILL.md` を持つ実体で、`.claude/skills/<name>` がその実体を指す symlink であることを検証済み | 含めない | 「参照スキル（.claude/skills/ に配置）」 |
 | B4 | 誤配置・判定不能（`skills-lock.json` 掲載の実ディレクトリ、symlink 先不一致・非 symlink、`jq` 不在でタイブレーク未実施 等） | 含めない | CLAUDE.md には記載しない（stderr へ警告のみ。手動対応が必要な構成問題として扱う） |
 
-B2・B3 の抽出コマンド（実体が `skills/` に無いものだけを残す）。いずれも「注意事項」の
-タイブレークをコマンド自体に組み込んだ自己完結スクリプトとし、抽出コマンドと注意事項の
-記述が食い違わないようにする。両コマンドとも**判定できない・条件を満たさないケースは
-B2/B3 から除外して stderr へ警告する（fail-closed）**。除外分は B4 として扱い、
-下記の件数整合式で回収する:
+B1・B2・B3 の抽出コマンド（シェル関数として定義する。「検証」節でも**同一の関数**を呼び出すため、
+コマンド本体はここに一度だけ記述する）。いずれも「注意事項」のタイブレークを関数自体に組み込んだ
+自己完結スクリプトとし、抽出コマンドと注意事項の記述が食い違わないようにする。全コマンドとも
+**判定できない・条件を満たさないケースは B1/B2/B3 から除外して stderr へ警告する（fail-closed）**。
+除外分は B4 として扱い、下記の件数整合式で回収する:
 
 ```bash
-# B2: リポジトリ管理スキル
-# タイブレーク: 1) skills/<name> に実体がある → 除外（配布スキル。B1 側で計上済み）
-#               2) skills-lock.json があるのに jq が使えない → 判定不能。除外し stderr へ警告
-#                  （fail-closed。誤って B2 に含めない。B4 として扱う）
-#               3) jq の終了ステータスで判定: 0=掲載あり→symlink 化されていない誤配置として
-#                  B4 扱い（update-docs は構成を変更しない）／1=掲載なし→B2 継続／
-#                  0・1 以外=jq 実行時エラー（不正な JSON 等）→判定不能として B4 扱い
-#                  （0/1 以外を「掲載なし」と誤読しないことが fail-closed の要）
-#               4) 残った実ディレクトリのみを B2 として出力
-find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
-  while read -r n; do
-    [ -d "skills/${n}" ] && continue
-    if [ -f skills-lock.json ]; then
-      if ! command -v jq >/dev/null 2>&1; then
-        echo "WARN: jq が見つからないため ${n} の skills-lock.json タイブレークを判定できない（B4 扱い。jq を導入するか手動確認する）" >&2
-        continue
-      fi
-      jq -e --arg n "${n}" '.skills[$n] != null' skills-lock.json >/dev/null 2>&1
-      jq_status=$?
-      # jq の終了ステータスは 0=真（掲載あり）/ 1=偽（掲載なし）/ それ以外=実行時
-      # エラー（不正な JSON 等）の3値。0/1 以外を「掲載なし」と誤読すると
-      # 壊れた skills-lock.json のときに誤配置スキルが素通りして B2 に混入する
-      # ため、エラーは fail-closed で B4 に倒す（jq 不在時と同じ扱い）。
-      if [ "${jq_status}" = "0" ]; then
-        echo "WARN: ${n} は .claude/skills/ が実ディレクトリのまま skills-lock.json に掲載されている（symlink 化検討対象。B4 扱い）" >&2
-        continue
-      elif [ "${jq_status}" != "1" ]; then
-        echo "WARN: skills-lock.json の解析に失敗した（jq exit=${jq_status}）ため ${n} のタイブレークを判定できない（B4 扱い）" >&2
-        continue
-      fi
-    fi
-    printf '%s\n' "${n}"
-  done
-
-# B3: 参照スキル
-# タイブレーク: 1) skills/<name> に実体がある → 除外（配布スキル。B1 側で計上済み）
-#               2) .claude/skills/<name> が symlink で、その解決先が .agents/skills/<name> と
-#                  一致する → B3 として出力
-#               3) symlink でない、または解決先が一致しない → 除外し stderr へ警告（B4 扱い）
-find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
-  while read -r n; do
-    [ -d "skills/${n}" ] && continue
-    if [ -L ".claude/skills/${n}" ]; then
+# B1: 配布スキル（.claude/skills/<name> が skills/<name> を指す symlink であることを検証）
+# タイブレーク: 1) .claude/skills/<name> が symlink でない → B1 に含めない（symlink 化されて
+#                  いない、または実ディレクトリ配置。B2 側の判定に委ねる。警告なし）
+#               2) symlink の解決先（`cd -P` で正規化した絶対パス）が skills/<name> の実パスと
+#                  一致する → B1 として出力
+#               3) symlink だが解決先が一致しない（例: .agents/skills/ 等への誤配置）→
+#                  除外し stderr へ警告（B4 扱い）
+extract_b1() {
+  ls -d skills/*/SKILL.md 2>/dev/null | sed -E 's#skills/##; s#/SKILL\.md##' | sort -u |
+    while read -r n; do
+      [ -L ".claude/skills/${n}" ] || continue
       actual=$(cd ".claude/skills/${n}" 2>/dev/null && pwd -P)
-      expected=$(cd ".agents/skills/${n}" 2>/dev/null && pwd -P)
+      expected=$(cd "skills/${n}" 2>/dev/null && pwd -P)
       if [ -n "${actual}" ] && [ "${actual}" = "${expected}" ]; then
         printf '%s\n' "${n}"
         continue
       fi
-      echo "WARN: .claude/skills/${n} は symlink だがリンク先が .agents/skills/${n} と一致しない（B4 扱い）" >&2
-    else
-      echo "WARN: .agents/skills/${n} に実体があるが .claude/skills/${n} が symlink ではない（B4 扱い）" >&2
-    fi
-  done
+      echo "WARN: .claude/skills/${n} は symlink だがリンク先が skills/${n} と一致しない（B4 扱い）" >&2
+    done
+}
+
+# B2: リポジトリ管理スキル
+# タイブレーク: 1) .claude/skills/<name>/SKILL.md が無い → スキルではない（対象外。full 集合にも
+#                  含まれないため B4 にも計上しない）
+#               2) skills/<name> に実体がある → 除外（配布スキル。B1 側で計上済み）
+#               3) skills-lock.json があるのに jq が使えない → 判定不能。除外し stderr へ警告
+#                  （fail-closed。誤って B2 に含めない。B4 として扱う）
+#               4) jq の終了ステータスで判定: 0=掲載あり→symlink 化されていない誤配置として
+#                  B4 扱い（update-docs は構成を変更しない）／1=掲載なし→B2 継続／
+#                  0・1 以外=jq 実行時エラー（不正な JSON 等）→判定不能として B4 扱い
+#                  （0/1 以外を「掲載なし」と誤読しないことが fail-closed の要）
+#               5) 残った実ディレクトリのみを B2 として出力
+extract_b2() {
+  find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
+    while read -r n; do
+      if [ ! -f ".claude/skills/${n}/SKILL.md" ]; then
+        echo "WARN: .claude/skills/${n} に SKILL.md が無くスキルではない（対象外。B4 にも計上しない）" >&2
+        continue
+      fi
+      [ -d "skills/${n}" ] && continue
+      if [ -f skills-lock.json ]; then
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "WARN: jq が見つからないため ${n} の skills-lock.json タイブレークを判定できない（B4 扱い。jq を導入するか手動確認する）" >&2
+          continue
+        fi
+        jq -e --arg n "${n}" '.skills[$n] != null' skills-lock.json >/dev/null 2>&1
+        jq_status=$?
+        # jq の終了ステータスは 0=真（掲載あり）/ 1=偽（掲載なし）/ それ以外=実行時
+        # エラー（不正な JSON 等）の3値。0/1 以外を「掲載なし」と誤読すると
+        # 壊れた skills-lock.json のときに誤配置スキルが素通りして B2 に混入する
+        # ため、エラーは fail-closed で B4 に倒す（jq 不在時と同じ扱い）。
+        if [ "${jq_status}" = "0" ]; then
+          echo "WARN: ${n} は .claude/skills/ が実ディレクトリのまま skills-lock.json に掲載されている（symlink 化検討対象。B4 扱い）" >&2
+          continue
+        elif [ "${jq_status}" != "1" ]; then
+          echo "WARN: skills-lock.json の解析に失敗した（jq exit=${jq_status}）ため ${n} のタイブレークを判定できない（B4 扱い）" >&2
+          continue
+        fi
+      fi
+      printf '%s\n' "${n}"
+    done
+}
+
+# B3: 参照スキル
+# タイブレーク: 1) .agents/skills/<name>/SKILL.md が無い → スキルではない（対象外。full 集合にも
+#                  含まれないため B4 にも計上しない）
+#               2) skills/<name> に実体がある → 除外（配布スキル。B1 側で計上済み）
+#               3) .claude/skills/<name> が symlink で、その解決先が .agents/skills/<name> と
+#                  一致する → B3 として出力
+#               4) symlink でない、または解決先が一致しない → 除外し stderr へ警告（B4 扱い）
+extract_b3() {
+  find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
+    while read -r n; do
+      if [ ! -f ".agents/skills/${n}/SKILL.md" ]; then
+        echo "WARN: .agents/skills/${n} に SKILL.md が無くスキルではない（対象外。B4 にも計上しない）" >&2
+        continue
+      fi
+      [ -d "skills/${n}" ] && continue
+      if [ -L ".claude/skills/${n}" ]; then
+        actual=$(cd ".claude/skills/${n}" 2>/dev/null && pwd -P)
+        expected=$(cd ".agents/skills/${n}" 2>/dev/null && pwd -P)
+        if [ -n "${actual}" ] && [ "${actual}" = "${expected}" ]; then
+          printf '%s\n' "${n}"
+          continue
+        fi
+        echo "WARN: .claude/skills/${n} は symlink だがリンク先が .agents/skills/${n} と一致しない（B4 扱い）" >&2
+      else
+        echo "WARN: .agents/skills/${n} に実体があるが .claude/skills/${n} が symlink ではない（B4 扱い）" >&2
+      fi
+    done
+}
+
+# 実行例（Step 3 でのカウント用途。標準出力がそのまま各セクションの掲載一覧になる）
+extract_b2
+extract_b3
 ```
 
 分類の原則は**実体の所在を第一基準**とする。`skills-lock.json` の `skills` キーの掲載一覧は
@@ -231,31 +272,38 @@ ls -d skills/*/SKILL.md | wc -l
 - `_/.last-update-docs` が最新コミットの hash で更新されていること
 
 系統 B（B2・B3）を更新した場合は、以下も**新規実行**して確認する（既存ログ・前回結果の
-流用は不可。`.claude/rules/verification.md` の 5 段階ゲートに従う）。B2・B3 は
-「Step 3」に記載した抽出コマンドと**同一のもの**を実行する（コマンドの重複記載による
-食い違いを避けるため、ここでは再掲しない）。stderr（`WARN:` 行）は人間向けの理由説明として
+流用は不可。`.claude/rules/verification.md` の 5 段階ゲートに従う）。`extract_b1`・`extract_b2`・
+`extract_b3` は「Step 3」で定義した関数と**同一のもの**を呼び出す（コマンドの重複記載による
+食い違いを避けるため、ここでは関数本体を再掲せず、Step 3 の bash ブロックを事前に
+source またはコピーしてから以下を実行する）。stderr（`WARN:` 行）は人間向けの理由説明として
 保持しつつ、B4 の**件数**は次の名前集合の差分で算出する（stderr の行数を数えない。
 同一名が B2・B3 双方の理由で除外されると行数は二重計上され、逆にどちらのループの走査対象
-にもならない別ターゲット symlink は 1 行も出ないため取りこぼす）:
+にもならない別ターゲット symlink は 1 行も出ないため取りこぼす）。各変数は `sed '/^$/d'` で
+空行を必ず除去してから保持する（`comm` は空文字列の変数を「空行 1 件を含む集合」として
+比較するため、空行を残したまま `comm -12` にかけると、双方が空集合のケースで空行同士が
+一致し「重複あり」の誤検出になる）:
 
 ```bash
 # B1・B2・B3・全列挙（B）を名前集合として求め、B4 = B − (B1 ∪ B2 ∪ B3) を算出する
-b1=$(comm -12 \
-  <(ls -d skills/*/SKILL.md 2>/dev/null | sed -E 's#skills/##; s#/SKILL\.md##' | sort -u) \
-  <(find .claude/skills -mindepth 1 -maxdepth 1 -type l 2>/dev/null | sed -E 's#.*/##' | sort -u))
-b2=$(<Step 3 の B2 抽出コマンドの標準出力を sort -u したもの>)
-b3=$(<Step 3 の B3 抽出コマンドの標準出力を sort -u したもの>)
+# （extract_b1 / extract_b2 / extract_b3 は Step 3 で定義した関数）
+b1=$(extract_b1 2>/dev/null | sort -u | sed '/^$/d')
+b2=$(extract_b2 2>/dev/null | sort -u | sed '/^$/d')
+b3=$(extract_b3 2>/dev/null | sort -u | sed '/^$/d')
 full=$(find -L .claude/skills .agents/skills -mindepth 1 -maxdepth 1 -type d \
-  -exec test -f '{}/SKILL.md' ';' -print 2>/dev/null | sed -E 's#.*/##' | sort -u)
+  -exec test -f '{}/SKILL.md' ';' -print 2>/dev/null | sed -E 's#.*/##' | sort -u | sed '/^$/d')
 
 union=$(printf '%s\n%s\n%s\n' "${b1}" "${b2}" "${b3}" | sed '/^$/d' | sort -u)
-b4=$(comm -23 <(printf '%s\n' "${full}") <(printf '%s\n' "${union}"))
+b4=$(comm -23 <(printf '%s\n' "${full}" | sed '/^$/d') <(printf '%s\n' "${union}" | sed '/^$/d'))
 printf '%s\n' "${b4}"   # B4 の名前一覧（空なら B4=0）
 
-# B1/B2/B3 が互いに排他か（重複があれば以下のいずれかが空でない出力を返す）
-comm -12 <(printf '%s\n' "${b1}" | sort -u) <(printf '%s\n' "${b2}" | sort -u)
-comm -12 <(printf '%s\n' "${b1}" | sort -u) <(printf '%s\n' "${b3}" | sort -u)
-comm -12 <(printf '%s\n' "${b2}" | sort -u) <(printf '%s\n' "${b3}" | sort -u)
+# B1/B2/B3 が互いに排他か（重複があれば以下のいずれかが空でない出力を返す）。
+# `printf '%s\n' "${b1}"` は b1 が空文字列でも改行 1 行を出力してしまうため、
+# process substitution 側でも毎回 `sed '/^$/d'` を通す（変数へ保持した時点で
+# 空行を除いていても、展開のたびに空行が復活しうる。ここを省くと双方が
+# 空集合のケースで空行同士が一致し「重複あり」の誤検出になる）
+comm -12 <(printf '%s\n' "${b1}" | sed '/^$/d') <(printf '%s\n' "${b2}" | sed '/^$/d')
+comm -12 <(printf '%s\n' "${b1}" | sed '/^$/d') <(printf '%s\n' "${b3}" | sed '/^$/d')
+comm -12 <(printf '%s\n' "${b2}" | sed '/^$/d') <(printf '%s\n' "${b3}" | sed '/^$/d')
 ```
 
 - B2 の出力（stdout）が `CLAUDE.md` の「リポジトリ管理スキル（.claude/skills/ に配置）」節と一致すること
