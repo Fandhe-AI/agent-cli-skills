@@ -5,10 +5,14 @@
 //
 // npx の実クローン処理は行わず、PATH 先頭に置いた npx / gh のスタブへ差し替える。
 // スタブの挙動は TEST_NPX_SCENARIO で切り替える:
-//   - 'new-file'  : skills-lock.json を更新し、.agents/skills/<skill>/ 配下に
-//                   新規（未追跡）ファイルを作成する（upstream にファイルが増えたケースの再現）
-//   - 'edit-only' : skills-lock.json と既存の追跡ファイルのみ変更し、新規ファイルは作らない
-//                   （既存動作の非退行確認）
+//   - 'new-file'     : skills-lock.json を更新し、.agents/skills/<skill>/ 配下に
+//                      新規（未追跡）ファイルを作成する（upstream にファイルが増えたケースの再現）
+//   - 'edit-only'    : skills-lock.json と既存の追跡ファイルのみ変更し、新規ファイルは作らない
+//                      （既存動作の非退行確認）
+//   - 'newline-file' : ファイル名に改行を含む未追跡ファイルを作成する
+//                      （git ls-files の改行区切り出力で分割される回帰の再現）
+//   - 'empty-file'   : 中身が空（0 byte）の未追跡ファイルを作成する
+//                      （git diff --no-index が差分を出さず名前も分からなくなる回帰の再現）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -60,6 +64,14 @@ PYEOF
 if [[ "\${TEST_NPX_SCENARIO:-}" == "new-file" ]]; then
   # upstream にファイルが増えたケース: npx 実行前は clean だったため、これは必ず未追跡になる
   echo "brand new upstream file" > "\${skill_dir}/NEW_FILE.md"
+fi
+if [[ "\${TEST_NPX_SCENARIO:-}" == "newline-file" ]]; then
+  # 改行を含むファイル名の未追跡ファイル（-z / NUL 区切り処理の回帰確認用）
+  printf 'newline file content\\n' > "\${skill_dir}/weird"\$'\\n'"name.md"
+fi
+if [[ "\${TEST_NPX_SCENARIO:-}" == "empty-file" ]]; then
+  # 中身が空（0 byte）の未追跡ファイル（git diff --no-index が差分を出さないケースの確認用）
+  : > "\${skill_dir}/EMPTY_FILE.md"
 fi
 exit 0
 `
@@ -160,6 +172,50 @@ test('ケース2: 追跡ファイルの変更のみの場合、「新規（未�
 
     // 未追跡ファイルが無いため、拒否経路（git clean -fdn）の対象も空になる
     assert.deepEqual(cleanDryRunList(ctx.repoDir), [])
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース3: ファイル名に改行を含む未追跡ファイルでも、内容が省略されずに表示される（-z / NUL 区切りの回帰確認）', () => {
+  const ctx = setupRepo('newline-file')
+  try {
+    const out = runScript(ctx)
+
+    assert.match(out, /新規（未追跡）ファイル/, '未追跡ファイルの見出しが出力されること')
+    assert.match(
+      out,
+      /newline file content/,
+      '改行を含むファイル名の未追跡ファイルでも内容の diff が表示されること（改行区切り処理だと' +
+        '存在しないパスへ分割され || true で握り潰されるため表示されない）',
+    )
+
+    // tracked diff も従来どおり表示されること（非退行）
+    assert.match(out, /SKILL\.md/, 'tracked ファイルの diff も表示されること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース4: 中身が空の新規ファイルでも、ファイル名がプレビューに明示される', () => {
+  const ctx = setupRepo('empty-file')
+  try {
+    const out = runScript(ctx)
+
+    assert.match(out, /新規（未追跡）ファイル/, '未追跡ファイルの見出しが出力されること')
+    assert.match(
+      out,
+      /EMPTY_FILE\.md/,
+      '空ファイルでも git diff --no-index の見出しだけに頼らずファイル名が明示されること',
+    )
+
+    // プレビューの未追跡集合と git clean -fdn（拒否経路の対象集合）が一致することを確認する
+    assert.deepEqual(
+      cleanDryRunList(ctx.repoDir),
+      [`.agents/skills/${SKILL_NAME}/EMPTY_FILE.md`],
+    )
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })

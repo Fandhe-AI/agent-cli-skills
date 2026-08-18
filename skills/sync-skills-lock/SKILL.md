@@ -121,18 +121,28 @@ git diff -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
 # この集合は Step 7（承認・git add）が新規に取り込む集合、Step 6（拒否・git clean -fd）が
 # 削除する集合と同一（.gitignore 対象を除く非追跡ファイル）であり、
 # 「プレビュー = 承認 = 拒否」の 3 経路が同じ対象を扱うことを保証する。
-UNTRACKED=$(git ls-files --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/")
-if [[ -n "${UNTRACKED}" ]]; then
-  echo "==> 新規（未追跡）ファイル:"
-  while IFS= read -r f; do
-    # --no-index は index を変更しない（git add -N は使わない。Step 6 の拒否経路が
-    # index からの git checkout -- で承認済み他スキルの hash を復元する設計に依存しており、
-    # intent-to-add エントリの混入はその復元設計と干渉するため）。
-    # 差分ありのとき exit 1 を返す仕様のため、表示専用のこの呼び出しに限り || true で
-    # set -e の中断を避ける。
-    git diff --no-index -- /dev/null "${f}" || true
-  done <<< "${UNTRACKED}"
-else
+# git ls-files の既定出力は改行区切りのため、ファイル名自体に改行を含む未追跡ファイルが
+# あると 1 パスが複数の存在しないパスへ分割される。分割後の各 git diff は失敗し || true で
+# 握り潰される一方、Step 7 の git add は実ファイルをそのまま取り込むため、内容を表示しない
+# まま承認できてしまう（-z / NUL 区切りで防ぐ）。
+UNTRACKED_COUNT=0
+while IFS= read -r -d '' f; do
+  if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
+    echo "==> 新規（未追跡）ファイル:"
+  fi
+  UNTRACKED_COUNT=$((UNTRACKED_COUNT + 1))
+  # 空ファイルは git diff --no-index が差分を出力しないため、diff の見出しだけでは
+  # どのファイルが追加されるか分からない。先に printf でファイル名自体を明示してから
+  # 内容の diff を表示する（0 byte のファイルでも名前は必ず見える）。
+  printf '%s\n' "--- ${f} ---"
+  # --no-index は index を変更しない（git add -N は使わない。Step 6 の拒否経路が
+  # index からの git checkout -- で承認済み他スキルの hash を復元する設計に依存しており、
+  # intent-to-add エントリの混入はその復元設計と干渉するため）。
+  # 差分ありのとき exit 1 を返す仕様のため、表示専用のこの呼び出しに限り || true で
+  # set -e の中断を避ける。
+  git diff --no-index -- /dev/null "${f}" || true
+done < <(git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/")
+if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
   echo "==> 新規（未追跡）ファイル: なし"
 fi
 ```
