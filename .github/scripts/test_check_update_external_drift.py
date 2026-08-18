@@ -54,6 +54,9 @@ RATE_LIMITED_PIN = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 # compare は ahead（コミット数では遅れている）だが、pin 側ファイルの内容が
 # main と完全一致する pin（イシュー #343 の実効差分ゲート用）。
 EQUIV_PIN = "dddddddddddddddddddddddddddddddddddddddd"
+# compare は成功するが pin 本文の取得だけが 5xx になる pin。実効差分ゲートが
+# 「検査不能」を PIN-STALE へ倒していないことを固定する（イシュー #343 P1）。
+CONTENT_ERROR_PIN = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 # --- fixture: 上流 reusable workflow を SHA 固定で呼ぶ薄い wrapper ---------
 FIXTURE_WRAPPER = """
@@ -938,6 +941,9 @@ class TestScanEndToEnd(unittest.TestCase):
                     return 200, FIXTURE_UPSTREAM_OLD
                 if path.endswith(f"?ref={EQUIV_PIN}"):
                     return 200, FIXTURE_UPSTREAM_OK
+                if path.endswith(f"?ref={CONTENT_ERROR_PIN}"):
+                    # 一時的な API 障害。実効差分の有無は判定できない。
+                    return 503, ""
                 if "?ref=" not in path:
                     # ``?ref=`` なしはこの fixture では per-repo 走査が
                     # UPSTREAM_REPO 自身（"actions"）を下流候補として叩く
@@ -952,6 +958,8 @@ class TestScanEndToEnd(unittest.TestCase):
                     return 200, '{"status":"ahead","ahead_by":7,"behind_by":0}'
                 if pin == EQUIV_PIN:
                     return 200, '{"status":"ahead","ahead_by":3,"behind_by":0}'
+                if pin == CONTENT_ERROR_PIN:
+                    return 200, '{"status":"ahead","ahead_by":5,"behind_by":0}'
                 if pin == RATE_LIMITED_PIN:
                     # レート制限。pin が壊れている証拠にはならない。
                     return 429, ""
@@ -1155,6 +1163,23 @@ class TestScanEndToEnd(unittest.TestCase):
         cats = self._findings_by_repo(result)
         self.assertEqual(cats["stale-wrapper"][0][0], "PIN-STALE")
         self.assertEqual(result.pins_equivalent, [])
+
+    def test_pin_content_fetch_error_is_unknown_not_stale(self):
+        # compare は成功して PIN_BEHIND だが、pin 本文の取得が 503。実効差分の
+        # 有無を確認できないため、PIN-STALE（乖離）ではなく UNKNOWN に倒す
+        # （イシュー #343 Review P1 指摘。compare 取得失敗と同じ契約）。
+        result = self._run_scan({
+            "content-error": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=CONTENT_ERROR_PIN)),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        self.assertNotIn("content-error", cats)
+        self.assertEqual(
+            [f.repo for f in result.unknowns], ["Fandhe-AI/content-error"]
+        )
+        # 乖離としては数えない（未確認を乖離に化けさせない）。
+        self.assertEqual(cud.drift_count(result), 0)
 
     def test_compare_error_is_unknown_not_unreachable(self):
         # compare が 429。到達不能な pin (乖離) ではなく UNKNOWN として扱う。

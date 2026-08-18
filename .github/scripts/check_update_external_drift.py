@@ -1390,9 +1390,17 @@ def scan(
     # しか無いのが実態（E1〜E4 の実測）のため、リポ数ぶん叩かずに済む。
     # 戻り値は「取得できたテキスト」または取得失敗時 ``None``（``evaluate_pin_impact``
     # が fail-closed で「等価でない」に倒す）。
-    pin_content_cache: dict[str, str | None] = {}
+    #
+    # 戻り値は ``compare_pin`` と同じ 3 値契約 ``("ok", text)`` /
+    # ``("absent", None)`` / ``("error", 理由)``。**404 とそれ以外の失敗を
+    # 畳まない**（イシュー #343 Review P1 指摘）。404 は「その pin に
+    # workflow ファイルが存在しない」という判定結果だが、403 / 429 / 5xx は
+    # 単に検査できなかっただけで実効差分の証拠にならない。両者を None に畳むと
+    # 一時的な API 障害が PIN-STALE として報告され、`compare_pin` 側の
+    # 「個別取得失敗は UNKNOWN」という契約と食い違う（乖離を捏造する側に倒れる）。
+    pin_content_cache: dict[str, tuple[str, str | None]] = {}
 
-    def fetch_pin_workflow(pin: str) -> str | None:
+    def fetch_pin_workflow(pin: str) -> tuple[str, str | None]:
         if pin in pin_content_cache:
             return pin_content_cache[pin]
         st, body = gh_get_with_status(
@@ -1400,9 +1408,14 @@ def scan(
             token,
             raw=True,
         )
-        text = body if st == 200 else None
-        pin_content_cache[pin] = text
-        return text
+        if st == 200:
+            outcome: tuple[str, str | None] = ("ok", body)
+        elif st == 404:
+            outcome = ("absent", None)
+        else:
+            outcome = ("error", f"HTTP {st}")
+        pin_content_cache[pin] = outcome
+        return outcome
 
     for name in repos:
         repo = f"{org}/{name}"
@@ -1512,16 +1525,28 @@ def scan(
                 # コミット数では遅れていても、pin 側ファイルの内容が main と
                 # 完全一致するなら実行上は等価（イシュー #343、reusable
                 # workflow の解決規則は evaluate_pin_impact の docstring 参照）。
-                # 取得失敗時は fetch_pin_workflow が None を返し、
-                # evaluate_pin_impact が fail-closed で PIN-STALE 側に倒す。
-                pin_text = fetch_pin_workflow(pin)
-                impact = evaluate_pin_impact(pin_text, upstream_text)
+                # 取得できなかった（403 / 429 / 5xx 等）場合は実効差分の有無を
+                # 判定できない。乖離として報告せず UNKNOWN へ回す
+                # （イシュー #343 Review P1 指摘。compare 取得失敗と同じ扱い）。
+                # ``"error"`` のとき第 2 要素は本文ではなく失敗理由を持つ。
+                pin_outcome, pin_payload = fetch_pin_workflow(pin)
+                if pin_outcome == "error":
+                    msg = (
+                        f"pin `{pin[:12]}` の実効差分を確認できない"
+                        f"（pin 側ファイルの取得に失敗: {pin_payload}）"
+                    )
+                    result.unknowns.append(Finding(repo, "UNKNOWN", msg))
+                    print(f"::warning::{repo}: {msg}")
+                    continue
+                impact = evaluate_pin_impact(pin_payload, upstream_text)
                 if impact["equivalent"]:
                     result.pins_equivalent.append((repo, pin, impact["pin_blob"]))
                 else:
                     detail = f"`{pin[:12]}` — {verdict['detail']}"
-                    if pin_text is None:
-                        detail += "（実効差分の有無は未確認: pin 側ファイルを取得できなかった）"
+                    if pin_outcome == "absent":
+                        # pin の時点に workflow ファイルが無い。実効差分の
+                        # 有無以前に、その SHA を指す pin 自体が壊れている。
+                        detail += "（pin 側に workflow ファイルが存在しない）"
                     result.findings.append(Finding(repo, "PIN-STALE", detail))
             else:
                 result.findings.append(
