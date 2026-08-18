@@ -63,20 +63,26 @@ jobs:
 
       # PAT 不在は「対象 0 件」に化ける（走査もブランチ作成もできず黙って
       # 何もしないまま終わる）ため、乖離検知と同じ理由で先に fail-closed で
-      # 落とす。schedule 実行では常に非 dry-run で書き込みを行うため、
-      # Contents: write / Pull requests: write（対象リポ側）も必要になるが、
-      # スコープ不足は個別リポの PUT/POST が 403/422 を返した時点で
-      # bump_update_external_pin.py がそのリポを失敗として報告する
-      # （復旧手順は docs/update-external-pin.md 参照）。
-      - name: Verify SUBMODULE_PAT is configured
+      # 落とす。
+      #
+      # この経路専用の PAT を要求し、組織共有の SUBMODULE_PAT へフォールバック
+      # しない（イシュー #343 Review P1 指摘）。この workflow は日次 schedule で
+      # 組織内の複数リポジトリへブランチ・workflow ファイル・PR を書き込むため、
+      # 既存の共有資格情報を転用すると共有 PAT の実効的な用途面が広がる。
+      # 必要権限は対象リポジトリのみに絞った Contents: write /
+      # Pull requests: write / Workflows: write（復旧手順は
+      # docs/update-external-pin.md 参照）。
+      - name: Verify WORKFLOW_PIN_PAT is configured
         env:
-          PAT: ${{ secrets.SUBMODULE_PAT }}
+          PAT: ${{ secrets.WORKFLOW_PIN_PAT }}
         shell: bash
         run: |
           set -euo pipefail
           if [ -z "${PAT}" ]; then
-            msg="組織シークレット SUBMODULE_PAT (visibility: all) が未設定。"
-            msg="${msg}他リポジトリの読み取り・書き込みができないため fail-closed で停止する。"
+            msg="シークレット WORKFLOW_PIN_PAT が未設定。"
+            msg="${msg}pin bump 専用 PAT（対象リポジトリのみ・Contents: write / "
+            msg="${msg}Pull requests: write / Workflows: write）を設定すること。"
+            msg="${msg}共有の SUBMODULE_PAT へのフォールバックは意図的に設けていない。"
             echo "::error::${msg}"
             exit 1
           fi
@@ -97,7 +103,7 @@ jobs:
       - name: Bump downstream pins
         env:
           TARGET_ORG: Fandhe-AI
-          READ_TOKEN: ${{ secrets.SUBMODULE_PAT }}
+          READ_TOKEN: ${{ secrets.WORKFLOW_PIN_PAT }}
           # schedule 実行は常に非 dry-run（実際に PR を作る）。workflow_dispatch
           # は入力の dry-run（既定 true）に従う。
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry-run && 'true' || 'false') }}

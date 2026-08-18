@@ -28,7 +28,7 @@ skills-update の配布対象外**（配布されるのは `.agents/skills/**` �
 | E4 | `.github/workflows/update-external.yml` の blob SHA | `0655187f` → `a32cc04879ef5db2e9760470bd7e85edae2822b5`／`8dea43ee` → `828b5d6ea5d9d80d419ead5e60989cfb27d1b104`／main → `828b5d6e…`（`8dea43ee` と同一） |
 | E5 | 上流 reusable workflow 内の全 `uses:` | すべて絶対参照 + 40 桁 SHA 固定。`./` によるローカル参照は 0 件 |
 | E6 | `Fandhe-AI/actions` の tags / releases | 0 件（Dependabot による SHA 追従は原理的に不可） |
-| E7 | 組織シークレット | `SUBMODULE_PAT`（visibility: all）と `CARGO_REGISTRY_TOKEN` のみ。pin 更新専用 PAT は存在しない |
+| E7 | 組織シークレット | `SUBMODULE_PAT`（visibility: all）と `CARGO_REGISTRY_TOKEN` のみ。pin 更新専用 PAT `WORKFLOW_PIN_PAT` は未作成のため、この workflow は登録するまで fail-closed で停止する |
 
 ### E4 + E5 から導かれる中核の性質
 
@@ -147,21 +147,29 @@ evaluate_pin_impact(pin_text, main_text) -> {"equivalent", "reason", "pin_blob",
 
 ## PAT 権限
 
-`SUBMODULE_PAT` が `.github/workflows/**` を書けるかは実行するまで判定できない
-（E7・#259 でも「`workflows` スコープ付き PAT が必要」と残課題化されている）。
+この workflow は専用シークレット **`WORKFLOW_PIN_PAT` を必須**とし、組織共有の
+`SUBMODULE_PAT` へはフォールバックしない（イシュー #343 Review P1 指摘）。日次 schedule で
+組織内の複数リポジトリへブランチ・`.github/workflows/**`・PR を書き込む新しい経路であり、
+既存の共有資格情報を転用すると `SUBMODULE_PAT` の実効的な用途面が広がるため。#251 で
+スコープを狭めた方向とも逆行する。
+
+### 導入手順（この workflow を有効化する前に必要）
+
+1. pin bump 専用の fine-grained PAT を発行する。権限は `Contents: write` /
+   `Pull requests: write` / `Workflows: write`、対象リポジトリは pin 追従の対象に絞る
+   （組織全体へ広げない）
+2. 本リポジトリのシークレット `WORKFLOW_PIN_PAT` として登録する
+3. **既存 `SUBMODULE_PAT` のスコープは広げない**
+
+`WORKFLOW_PIN_PAT` が未設定の間、この workflow は最初のステップで fail-closed に停止する
+（「対象 0 件」の成功に化けない）。
 
 ### PAT 権限が不足していた場合
 
 `bump_update_external_pin.py` の `PUT` が 403 / 422 を返すと、そのリポの
-bump は失敗として報告され（作成済みブランチは削除される）、他リポの処理は継続する
-（1 リポの失敗が全体を止めない）。この場合の復旧手順:
-
-1. pin bump 専用の fine-grained PAT を `Workflows: write` / `Contents: write` /
-   `Pull requests: write` で発行し、組織シークレット `WORKFLOW_PIN_PAT` として登録する
-2. `update-external-pin-bump.yml` の `READ_TOKEN` を `secrets.WORKFLOW_PIN_PAT` へ
-   切り替える（フォールバックとして `secrets.SUBMODULE_PAT` を残してもよい）
-3. **既存 `SUBMODULE_PAT` のスコープは広げない。** #251 で狭めた方向と逆行するため、
-   pin bump 専用の別 PAT を用意する
+bump は失敗として報告され（この実行が作成したブランチのみ削除される）、他リポの処理は
+継続する（1 リポの失敗が全体を止めない）。`WORKFLOW_PIN_PAT` の権限・対象リポジトリ
+の割り当てを見直して再実行する。
 
 実効差分ゲート（C′）自体はこの PAT 権限に依存しない（読み取りのみ）ため、A が
 権限不足で止まっても受入条件のうち「レポートのノイズ削減」は独立に成立する。
@@ -186,7 +194,9 @@ bump は失敗として報告され（作成済みブランチは削除される
 - 乖離検知 CI の再実行と `PIN-STALE` 件数の実測（変更前 22 件 → 実効差分ゲート適用後の
   期待値・根拠は pin 側 blob sha と main 側 blob sha の比較）
 - `update-external-pin-bump.yml` の `dry-run=true` 実行と対象一覧・契約ゲート結果の確認
-- 1 リポへの `dry-run=false` 実行による `SUBMODULE_PAT` の Workflows: write 権限プローブ
+- 専用 PAT `WORKFLOW_PIN_PAT` の発行とシークレット登録（未登録の間、この workflow は
+  最初のステップで fail-closed に停止する。「PAT 権限」節の導入手順を参照）
+- 1 リポへの `dry-run=false` 実行による `WORKFLOW_PIN_PAT` の Workflows: write 権限プローブ
   （403/422 なら「PAT 権限が不足していた場合」の手順へ）
 
 ## スコープ外

@@ -271,28 +271,46 @@ class TestParseOnlyRepo(unittest.TestCase):
         self.assertIsNone(bump.parse_only_repo("Fandhe-AI/repo/extra"))
 
 
+def _cmp(total_commits, files):
+    """compare API 応答の最小形（``classify_reused_branch`` が読む項目のみ）。"""
+    return {"total_commits": total_commits, "files": files}
+
+
+def _pin_file(additions=1, deletions=1, status="modified", filename=None):
+    return {
+        "filename": cud.WORKFLOW_PATH if filename is None else filename,
+        "status": status,
+        "additions": additions,
+        "deletions": deletions,
+    }
+
+
 class TestClassifyReusedBranch(unittest.TestCase):
-    """422（ref 既存）時の所有関係判定（イシュー #343 Review P0 指摘）。
+    """422（ref 既存）時の所有関係判定（イシュー #343 Review P0/P1 指摘）。
 
     ``apply_bump`` は ``ref_status == 422`` のとき、default branch の元本文
-    （``old_text``）と既存ブランチの現在の本文を ``classify_reused_branch``
-    へ渡して再利用可否を決める。ここではその純粋関数だけを検証する
-    （ブランチ取得自体は API 呼び出しのためこのテストの対象外）。
+    （``old_text``）・既存ブランチの現在の本文・base からの compare 応答を
+    ``classify_reused_branch`` へ渡して再利用可否を決める。本文一致だけでは
+    「同じブランチに別ファイルの変更や追加コミットが載っている」ケースを
+    検出できないため、差分の形（コミット数・変更ファイル・変更行数）も
+    判定に含める（Review P1 指摘）。ここではその純粋関数だけを検証する。
     """
 
     def test_branch_already_has_new_sha_is_already_bumped(self):
         # 前回 run が PUT まで成功し、PR 作成以降で失敗した残骸。
         branch_text = WRAPPER_TEXT.replace(UPSTREAM_SHA, NEW_SHA)
         self.assertEqual(
-            bump.classify_reused_branch(WRAPPER_TEXT, branch_text, NEW_SHA),
+            bump.classify_reused_branch(
+                WRAPPER_TEXT, branch_text, NEW_SHA, _cmp(1, [_pin_file()])
+            ),
             "already-bumped",
         )
 
     def test_branch_still_at_base_is_unbumped_retry(self):
         # 前回 run が ref 作成のみ成功し PUT 前に失敗した残骸。
-        # ブランチの内容は default branch の元本文と完全一致する。
+        # base と 0 コミット差で、本文も default branch の元本文と完全一致する。
         self.assertEqual(
-            bump.classify_reused_branch(WRAPPER_TEXT, WRAPPER_TEXT, NEW_SHA),
+            bump.classify_reused_branch(WRAPPER_TEXT, WRAPPER_TEXT, NEW_SHA, _cmp(0, [])),
             "unbumped-retry",
         )
 
@@ -300,7 +318,9 @@ class TestClassifyReusedBranch(unittest.TestCase):
         # このスクリプトが書いた内容とは断定できない場合は fail-closed。
         unrelated_text = "name: unrelated\non:\n  push: {}\njobs: {}\n"
         self.assertEqual(
-            bump.classify_reused_branch(WRAPPER_TEXT, unrelated_text, NEW_SHA),
+            bump.classify_reused_branch(
+                WRAPPER_TEXT, unrelated_text, NEW_SHA, _cmp(1, [_pin_file()])
+            ),
             "foreign",
         )
 
@@ -310,7 +330,74 @@ class TestClassifyReusedBranch(unittest.TestCase):
         other_sha = "2" * 39 + "b"
         branch_text = WRAPPER_TEXT.replace(UPSTREAM_SHA, other_sha)
         self.assertEqual(
-            bump.classify_reused_branch(WRAPPER_TEXT, branch_text, NEW_SHA),
+            bump.classify_reused_branch(
+                WRAPPER_TEXT, branch_text, NEW_SHA, _cmp(1, [_pin_file()])
+            ),
+            "foreign",
+        )
+
+    # --- 差分の形による所有関係検証（Review P1 指摘） ---
+
+    def test_extra_file_in_diff_is_foreign(self):
+        # workflow 本文は期待どおりでも、同じブランチに別ファイルの変更が
+        # 載っていれば本スクリプトの生成物ではない。
+        branch_text = WRAPPER_TEXT.replace(UPSTREAM_SHA, NEW_SHA)
+        self.assertEqual(
+            bump.classify_reused_branch(
+                WRAPPER_TEXT, branch_text, NEW_SHA,
+                _cmp(1, [_pin_file(), _pin_file(filename="README.md")]),
+            ),
+            "foreign",
+        )
+
+    def test_extra_commit_in_diff_is_foreign(self):
+        # 変更ファイルが workflow 1 件でも、コミットが 2 件以上あれば
+        # 追加コミットが混入している。
+        branch_text = WRAPPER_TEXT.replace(UPSTREAM_SHA, NEW_SHA)
+        self.assertEqual(
+            bump.classify_reused_branch(
+                WRAPPER_TEXT, branch_text, NEW_SHA, _cmp(2, [_pin_file()])
+            ),
+            "foreign",
+        )
+
+    def test_multi_line_change_is_foreign(self):
+        # pin の書き換えは +1/-1 行。それ以外の行数は本スクリプトの生成物
+        # ではない（同じ workflow ファイルへの別の編集）。
+        branch_text = WRAPPER_TEXT.replace(UPSTREAM_SHA, NEW_SHA)
+        self.assertEqual(
+            bump.classify_reused_branch(
+                WRAPPER_TEXT, branch_text, NEW_SHA,
+                _cmp(1, [_pin_file(additions=5, deletions=2)]),
+            ),
+            "foreign",
+        )
+
+    def test_zero_commit_with_files_is_foreign(self):
+        # 0 コミットなのに変更ファイルがある応答は矛盾しており信頼しない。
+        self.assertEqual(
+            bump.classify_reused_branch(
+                WRAPPER_TEXT, WRAPPER_TEXT, NEW_SHA, _cmp(0, [_pin_file()])
+            ),
+            "foreign",
+        )
+
+    def test_compare_unavailable_is_foreign(self):
+        # compare を取得できないのは「検査不能」であって「無関係ではない」
+        # ではない。fail-closed で foreign に倒す。
+        branch_text = WRAPPER_TEXT.replace(UPSTREAM_SHA, NEW_SHA)
+        self.assertEqual(
+            bump.classify_reused_branch(WRAPPER_TEXT, branch_text, NEW_SHA, None),
+            "foreign",
+        )
+
+    def test_missing_total_commits_is_foreign(self):
+        # ``total_commits`` を欠く応答も検査不能として扱う。
+        branch_text = WRAPPER_TEXT.replace(UPSTREAM_SHA, NEW_SHA)
+        self.assertEqual(
+            bump.classify_reused_branch(
+                WRAPPER_TEXT, branch_text, NEW_SHA, {"files": [_pin_file()]}
+            ),
             "foreign",
         )
 

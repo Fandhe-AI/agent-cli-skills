@@ -291,15 +291,29 @@ class BumpTarget:
     blob_sha: str  # 現行ファイルの blob sha（PUT の sha パラメータに必要）
 
 
-def classify_reused_branch(old_text: str, branch_text: str, new_sha: str) -> str:
-    """422（ref 既存）で再利用しようとしているブランチの所有関係を、内容だけで判定する。
+def classify_reused_branch(
+    old_text: str, branch_text: str, new_sha: str, compare: dict | None
+) -> str:
+    """422（ref 既存）で再利用しようとしているブランチの所有関係を判定する。
 
-    ブランチ名は新 SHA から決定的に生成される（``branch_name``）ため、同名の
-    無関係なブランチが偶然存在する可能性は低いが、それでも中身を見ずに
-    再利用・削除すると無関係なコミットの混入やブランチ消失を招く（イシュー
-    #343 Review P0 指摘）。ネットワークに触れない純粋関数として切り出し、
-    ``apply_bump`` はここへ「default branch の元本文」「ブランチの現在の本文」
-    を渡すだけにする。
+    ブランチ名は新 SHA から決定的に生成される（``branch_name``）ため、既存 PR
+    の冪等判定（head ブランチ名で検索）が成立する。その代償として同名の無関係な
+    ブランチが存在し得るため、再利用の前に**内容だけでなく差分の形そのもの**を
+    検証する（イシュー #343 Review P1 指摘: workflow ファイルの本文一致だけでは、
+    同じブランチに別ファイルの変更や追加コミットが載っていても検出できない）。
+
+    引数 ``compare`` は ``GET /repos/{repo}/compare/{default_branch}...{branch}``
+    の応答（JSON を dict にしたもの）。取得できなかった場合は ``None`` を渡す。
+    検査不能は「所有関係を確認できない」であって「無関係ではない」ではないため、
+    いずれも fail-closed で ``"foreign"`` に倒す。
+
+    所有関係の判定は 2 段階で行う。
+
+    1. **差分の形**（``compare``）: base からの差分が「0 コミット・0 ファイル」か
+       「1 コミット・``WORKFLOW_PATH`` 1 ファイルのみ・+1/-1 行」のいずれかである
+       こと。本スクリプトが作る差分は Contents API の PUT 1 回による単一コミットで、
+       変更行は ``uses:`` の pin 1 行だけなので、この 2 形だけが自分の残骸であり得る。
+    2. **内容**（``branch_text``）: 上記を満たしたうえで、本文が期待どおりか。
 
     戻り値:
     - ``"already-bumped"``: ブランチは既にこの ``new_sha`` へ bump 済み
@@ -307,18 +321,47 @@ def classify_reused_branch(old_text: str, branch_text: str, new_sha: str) -> str
       呼び出し側は PUT をスキップして PR 作成へ進んでよい（cursor Bugbot
       指摘「Reused branch blocks bump retries」の再発防止 — ここでブロック
       すると retry のたびに 422 → 中断を繰り返し、収束しない）。
-    - ``"unbumped-retry"``: ブランチの内容が default branch の元本文と完全一致。
-      前回 run が ref 作成のみ成功し PUT 前に失敗した残骸。この run が
-      改めて PUT してよい（ただし blob sha はブランチ側から取り直す必要が
-      ある。default branch 側の blob sha とは異なり得るため）。
-    - ``"foreign"``: どちらでもない。このスクリプトが書いた内容とは断定できない
-      ため、呼び出し側は書き込みも削除も行わず中断する（fail-closed）。
+    - ``"unbumped-retry"``: ブランチが base と完全一致。前回 run が ref 作成のみ
+      成功し PUT 前に失敗した残骸。この run が改めて PUT してよい（ただし blob
+      sha はブランチ側から取り直す必要がある。default branch 側の blob sha とは
+      異なり得るため）。
+    - ``"foreign"``: どちらでもない、または検査不能。このスクリプトが書いた内容
+      とは断定できないため、呼び出し側は書き込みも削除も行わず中断する。
     """
+    if not isinstance(compare, dict):
+        return "foreign"
+
+    files = compare.get("files")
+    files = files if isinstance(files, list) else []
+    # ``total_commits`` はページング上限（250 件）で切り詰められる ``commits``
+    # 配列と違い、常に全件数を返す。件数判定には必ずこちらを使う。
+    total_commits = compare.get("total_commits")
+    if not isinstance(total_commits, int):
+        return "foreign"
+
+    if total_commits == 0:
+        # base と同一の ref。PUT 前に落ちた残骸であり得る。
+        if files:
+            return "foreign"
+        return "unbumped-retry" if branch_text == old_text else "foreign"
+
+    if total_commits != 1 or len(files) != 1:
+        return "foreign"
+    f = files[0]
+    if not isinstance(f, dict):
+        return "foreign"
+    if f.get("filename") != cud.WORKFLOW_PATH:
+        return "foreign"
+    if f.get("status") != "modified":
+        return "foreign"
+    # pin の書き換えは 1 行の置換なので +1/-1 に限る。これ以外は本スクリプトの
+    # 生成物ではない。
+    if f.get("additions") != 1 or f.get("deletions") != 1:
+        return "foreign"
+
     info = cud.classify_workflow(branch_text)
     if info["kind"] == cud.KIND_WRAPPER and info["pin"] == new_sha:
         return "already-bumped"
-    if branch_text == old_text:
-        return "unbumped-retry"
     return "foreign"
 
 
@@ -609,12 +652,29 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
                 f"既存ブランチ `{branch}` の内容取得が HTTP {branch_status}。"
                 "所有関係を検証できないため中断（ブランチには一切触れない）",
             )
-        reuse = classify_reused_branch(target.old_text, branch_body, new_sha)
+        # 差分の形（コミット数・変更ファイル・変更行数）まで検証するため、
+        # 本文だけでなく compare 応答も渡す（イシュー #343 Review P1 指摘）。
+        cmp_status, cmp_body = cud.gh_get_with_status(
+            f"repos/{target.repo}/compare/{default_branch}...{branch}", token,
+        )
+        compare_payload: dict | None = None
+        if cmp_status == 200:
+            try:
+                parsed = json.loads(cmp_body)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                compare_payload = parsed
+        reuse = classify_reused_branch(
+            target.old_text, branch_body, new_sha, compare_payload
+        )
         if reuse == "foreign":
             return BumpOutcome(
                 target.repo, "failed",
-                f"branch `{branch}` は既存だが本スクリプトが書き込んだ内容と一致しない。"
-                "所有関係を検証できないため中断（上書きも削除もしない。手動確認が必要）",
+                f"branch `{branch}` は既存だが、本スクリプトが作る差分の形"
+                "（base と同一、または `uses:` 1 行のみを変える単一コミット）と一致しない、"
+                "もしくは compare を取得できず検証不能。"
+                "所有関係を確認できないため中断（上書きも削除もしない。手動確認が必要）",
             )
         if reuse == "already-bumped":
             # PUT は不要。前回 run が PUT まで成功し PR 作成以降で失敗した
@@ -796,9 +856,15 @@ def main() -> int:
     only_raw = os.environ.get("ONLY_REPO", "").strip()
 
     if not token:
+        # イシュー #343 Review P1 指摘: 組織共有の SUBMODULE_PAT を、この
+        # 新しい「組織横断でブランチ・workflow ファイル・PR を書き込む」
+        # 経路へ転用しない。対象リポジトリと必要権限だけに絞った専用 PAT を
+        # 必須とし、共有 PAT へのフォールバックは設けない（最小権限）。
         print(
-            "::error::組織シークレット SUBMODULE_PAT (visibility: all) が未設定。"
-            "他リポジトリの読み取り・書き込みができないため fail-closed で停止する。"
+            "::error::シークレット WORKFLOW_PIN_PAT が未設定。"
+            "pin bump 専用 PAT（対象リポジトリのみ・Contents: write / "
+            "Pull requests: write / Workflows: write）を設定すること。"
+            "共有の SUBMODULE_PAT へのフォールバックは意図的に設けていない。"
         )
         return 1
 
