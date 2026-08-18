@@ -35,11 +35,15 @@ function shQuote(value) {
  * @param {string} [fixture.parentAfter] 対象 issue の 2 回目 GET（成功経路の事後確認 / 失敗経路の
  *   補償復旧のための実状態再取得のいずれか。両者は排他的なシナリオのため 1 フィールドで足りる）
  *   が返す親 issue 番号（未指定なら parentBefore を継続）
- * @param {string} [fixture.parentAfter2] 対象 issue の 3 回目以降の GET（補償復旧 POST 後の事後
- *   確認）が返す親 issue 番号（未指定なら parentAfter を継続）
+ * @param {string} [fixture.parentAfter2] 対象 issue の 3 回目の GET（補償復旧 POST 後の事後
+ *   確認、または補償 POST 失敗後の実状態確認）が返す親 issue 番号（未指定なら parentAfter を継続）
+ * @param {string} [fixture.parentAfter3] 対象 issue の 4 回目以降の GET（Issue #352 の
+ *   confirm_stable_old_parent が撃つ反映遅延の再確認・偽陰性の再確認）が返す親 issue 番号
+ *   （未指定なら parentAfter2 を継続）
  * @param {string} [fixture.parentRepo] 事前 GET が返す親の owner/repo（既定 'o/r' = 対象 issue と同一）
  * @param {string} [fixture.parentRepoAfter] 事後 GET（2 回目）が返す親の owner/repo（未指定なら parentRepo を継続）
- * @param {string} [fixture.parentRepoAfter2] 3 回目以降の GET が返す親の owner/repo（未指定なら parentRepoAfter を継続）
+ * @param {string} [fixture.parentRepoAfter2] 3 回目の GET が返す親の owner/repo（未指定なら parentRepoAfter を継続）
+ * @param {string} [fixture.parentRepoAfter3] 4 回目以降の GET が返す親の owner/repo（未指定なら parentRepoAfter2 を継続）
  * @param {number} [fixture.deleteExit] DELETE の終了コード
  * @param {string} [fixture.deleteBody] DELETE 失敗時に stderr へ出す本文
  * @param {number} [fixture.postExit] 1 回目の POST（新親への付け替え）の終了コード
@@ -59,11 +63,13 @@ export function createGhStub(fixture = {}) {
     parentBefore: '',
     parentAfter: undefined,
     parentAfter2: undefined,
+    parentAfter3: undefined,
     // 親が属するリポジトリ。既定は対象 issue と同一（repository_url の o/r と一致）。
     // 'other/repo' 等を渡すと cross-repository sub-issue を再現できる
     parentRepo: 'o/r',
     parentRepoAfter: undefined,
     parentRepoAfter2: undefined,
+    parentRepoAfter3: undefined,
     deleteExit: 0,
     deleteBody: '',
     postExit: 0,
@@ -82,6 +88,8 @@ export function createGhStub(fixture = {}) {
   if (f.parentRepoAfter === undefined) f.parentRepoAfter = f.parentRepo
   if (f.parentAfter2 === undefined) f.parentAfter2 = f.parentAfter
   if (f.parentRepoAfter2 === undefined) f.parentRepoAfter2 = f.parentRepoAfter
+  if (f.parentAfter3 === undefined) f.parentAfter3 = f.parentAfter2
+  if (f.parentRepoAfter3 === undefined) f.parentRepoAfter3 = f.parentRepoAfter2
 
   const dir = mkdtempSync(join(tmpdir(), 'reassign-gh-stub-'))
   const ghPath = join(dir, 'gh')
@@ -163,8 +171,10 @@ if [[ "\${path}" != "\${target_path}" ]]; then
 fi
 
 # 対象 issue の GET（1 回目=事前確認・2 回目=事後確認 or 補償復旧のための実状態再取得・
-# 3 回目以降=補償復旧 POST 後の事後確認。2 回目は成功経路の事後確認と失敗経路の復旧再取得の
-# 両方を兼ねる（両シナリオは排他的なため verifyGetFail / parentAfter を共用できる）
+# 3 回目=補償復旧 POST 後の事後確認 or 補償 POST 失敗後の実状態確認・4 回目以降=
+# confirm_stable_old_parent（Issue #352）が撃つ反映遅延・偽陰性の再確認。2 回目は
+# 成功経路の事後確認と失敗経路の復旧再取得の両方を兼ねる（両シナリオは排他的なため
+# verifyGetFail / parentAfter を共用できる）
 count=$(cat ${shQuote(getCountPath)})
 count=$((count + 1))
 echo "\${count}" > ${shQuote(getCountPath)}
@@ -177,9 +187,12 @@ elif [[ "\${count}" -eq 2 ]]; then
   ${verifyGetFailBranch}
   parent=${shQuote(f.parentAfter)}
   prepo=${shQuote(f.parentRepoAfter)}
-else
+elif [[ "\${count}" -eq 3 ]]; then
   parent=${shQuote(f.parentAfter2)}
   prepo=${shQuote(f.parentRepoAfter2)}
+else
+  parent=${shQuote(f.parentAfter3)}
+  prepo=${shQuote(f.parentRepoAfter3)}
 fi
 
 if [[ -n "\${parent}" ]]; then

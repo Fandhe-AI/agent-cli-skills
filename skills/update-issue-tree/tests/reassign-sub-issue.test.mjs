@@ -302,6 +302,23 @@ test('ケース36: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST
   assert.doesNotMatch(r.stderr, /reason=compensation-post-failed-third-party-parent/)
 })
 
+test('ケース36b: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST がエラー応答 → 失敗後の再取得では旧親配下に見えるが、反映遅延を考慮した再確認では実は孤児だった → 1 回の読み取りだけで restored 確定しない（codex-review P1 指摘 PR #391。偽陰性経路にも再確認を必須化する回帰）', () => {
+  const r = run(['--issue', '46', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '', // 復旧のための再取得 GET は孤児を返す
+    parentAfter2: '5', // 補償 POST 失敗後の再取得 GET は旧親 #5 配下に見える（過渡状態の可能性）
+    parentAfter3: '', // 反映遅延を考慮した再確認では実は孤児のまま（過渡状態だった）
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+    compPostExit: 1,
+    compPostBody: '503 Service Unavailable',
+  })
+  assert.notEqual(r.status, 10, '1 回の読み取りだけで restored を確定しないこと')
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  assert.doesNotMatch(r.stdout, /result=restored/, '再確認で不安定と判明した場合は result=restored を出力しないこと')
+})
+
 test('ケース37: DELETE 後の POST 失敗 → 補償 POST 成功後の確認 GET で「別リポジトリ」の第三者親が実測される → exit 8 reason=recovery-state-unknown、「実測 parent=なし」と誤報しない（cursor[bot] Medium 指摘 PR #391。compensation-verify の same-repo 判定を親の存在判定から分離する回帰）', () => {
   const r = run(['--issue', '44', '--old-parent', '5', '--new-parent', '7'], {
     parentBefore: '5',
