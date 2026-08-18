@@ -1575,17 +1575,24 @@ async function measureResidualWorktreeBytes(paths) {
           '組み立て直したりせず）実行する。このスクリプト自体がパスごとの存在確認・クォート・' +
           '合算を行うため、対象パスの内容をコマンドとして解釈したり、自分の判断で分岐を追加した' +
           'りしないこと:',
-        "   if ! jq -j '.[] | . + \"\\u0000\"' " + tmpFile + ' > ' + tmpFile + '.nul; then ' +
+        "   if ! jq -r '.[]' " + tmpFile + ' > ' + tmpFile + '.lines; then ' +
           'echo "TOTAL=0 MISSING=0 ERR=1"; else { total=0; missing=0; err=0; ' +
-          'while IFS= read -r -d "" p; do ' +
+          'while IFS= read -r p; do ' +
           'if [ ! -e "$p" ]; then missing=$((missing+1)); continue; fi; ' +
           'if duout=$(du -sk -- "$p" 2>/dev/null); then ' +
           'sz=$(printf %s "$duout" | cut -f1); ' +
           'if [ -z "$sz" ]; then err=$((err+1)); continue; fi; ' +
           'total=$((total+sz)); ' +
           'else err=$((err+1)); fi; ' +
-          'done; echo "TOTAL=$total MISSING=$missing ERR=$err"; } < ' + tmpFile + '.nul; fi',
-        '   （-j は jq -r と異なり要素ごとの追加改行を出さないため NUL 区切りが崩れない。' +
+          'done; echo "TOTAL=$total MISSING=$missing ERR=$err"; } < ' + tmpFile + '.lines; fi',
+        '   （対象パスは sanitizeWorktreePath の許可文字集合（英数字・`/`・`-`・`_`・`.`・' +
+          'スペースのみ）に強制済みで改行を含み得ないため、NUL 区切りではなく改行区切り' +
+          '（jq -r + IFS= read -r、`read` に `-d` オプションを使わない）で安全に処理できる。' +
+          '`read -r -d \'\'`（NUL 区切り読み取り）は Bash 拡張であり POSIX sh（dash 等）には無く、' +
+          '`read: Illegal option -d` で while ループが即座に終了し `TOTAL=0 MISSING=0 ERR=0`' +
+          '（測定 0 件の正常終了）に化けて容量ゲートを素通りする fail-open を招く' +
+          '（PR #390 codex-review 指摘: 実行シェルが bash か不明な環境で発生し得る）。' +
+          '改行区切りへ統一することでシェル実装に依存せず POSIX sh でも同じ結果になる。' +
           '`[ ! -e "$p" ]` で真になったパスは並行実行中の cleanup で既に削除された可能性があり、' +
           '0 バイトとして加算せず missing としてのみ数える（存在しないパスの容量は 0 として扱う' +
           'のが正しい — fail-open ではない）。一方 du 自体が失敗した場合（権限不足等の実エラー）' +
@@ -1599,7 +1606,7 @@ async function measureResidualWorktreeBytes(paths) {
         '3. 出力の TOTAL を kib、MISSING を missing、ERR を err として、観測値のまま返す' +
           '（ERR が 0 より大きくても kib を 0 や別の値で補わない。測定の成否判定はホスト側が' +
           ' err の値で行う）。',
-        `4. rm -f ${tmpFile} ${tmpFile}.nul で一時ファイルを削除する（測定成否に関わらず実施）。`,
+        `4. rm -f ${tmpFile} ${tmpFile}.lines で一時ファイルを削除する（測定成否に関わらず実施）。`,
       ].join('\n'),
       {
         label: 'worktree:residual-bytes',
@@ -2998,8 +3005,11 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
 // 1 worktree あたりの容量見積り（perWorktreeByteReserve）を確定して外側スコープに保持する。
 let residualBytesObserved = false // バイト軸が成立したか（false のまま新規着手を抑止＝fail-closed）
 let residualBytesAtStart = 0 // 直近確定したバイト軸の基準値（開始時実測、以後はラン中実測し直しの
-// たびに更新される「現在」の実測合計バイト数。変数名は開始時観測の名残だが、以後の projection は
-// 全箇所がこの値を「最新の実測基準」として参照する契約に統一する）
+// たびに更新される「現在」の実測合計バイト数。projection は全箇所がこの値を「最新の実測基準」
+// として参照する。レポートへは bytesLastMeasured として公開する（PR #390 codex-review P2:
+// 変数名が「開始時」のまま可変値を保持するのは命名・契約に反するとの指摘）。
+let residualBytesAtRunStart = 0 // ラン開始時に確定した唯一の観測値。以後のラン中実測し直しでは
+// 更新しない不変値（レポートの bytesAtStart はこちらを公開する）。
 let perWorktreeByteReserve = 0 // 新規 1 worktree あたりの安全側容量予約（バイト）。0 は未確定
 // byteBaselineLedgerCount: residualBytesAtStart を確定した時点の ephemeralWorktrees.length。
 // projection は「(ephemeralWorktrees.length - byteBaselineLedgerCount) 件分だけ」を積み増しと
@@ -3171,6 +3181,7 @@ let lastByteRemeasureOutcome = { failed: false, exceeded: false }
       } else {
         residualBytesObserved = true
         residualBytesAtStart = kib * 1024
+        residualBytesAtRunStart = residualBytesAtStart // ラン開始時の唯一の確定値。以後は更新しない
         const avgResidualBytes =
           verifiedResidualPaths.length > 0 ? Math.ceil(residualBytesAtStart / verifiedResidualPaths.length) : 0
         perWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes)
@@ -5292,4 +5303,4 @@ if (!residualObserved) {
 // mergeGuard: hook は deny 専用（opt-in マージと併用不可）。
 // residualWorktrees: 残置上限ゲートの観測結果（observed: false = 観測不成立、overLimit: true =
 //   次ラン新規着手停止見込み、suppressed = 本ランの抑止有無、limit: 0 = 上限なし）。
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtStart, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
+return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }

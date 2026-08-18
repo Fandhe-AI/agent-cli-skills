@@ -199,7 +199,7 @@ test('measureResidualWorktreeBytes はプロンプトへ渡す前に sanitizeWor
   const fnStart = source.indexOf('async function measureResidualWorktreeBytes(paths)')
   const fnBody = source.slice(fnStart, fnStart + 3000)
   assert.match(fnBody, /UNTRUSTED_POLICY,/)
-  assert.match(fnBody, /jq -j '\.\[\] \| \. \+ /)
+  assert.match(fnBody, /jq -r '\.\[\]'/)
 })
 
 test('新規着手・monitoring 再開の両方が projectResidualBytes による projected バイト判定を持つ', () => {
@@ -363,7 +363,7 @@ test('measureResidualWorktreeBytes は du の終了コードと jq の展開失�
   assert.doesNotMatch(fnBody, /durc=\$\?/)
   // jq を while ループへ直結すると jq の非 0 終了が「入力 0 件の正常測定」に化ける
   // （PR #390 codex-review P1）。一時ファイル経由で終了コードを検査し ERR=1 へ倒す
-  assert.match(fnBody, /if ! jq -j/)
+  assert.match(fnBody, /if ! jq -r/)
   assert.match(fnBody, /TOTAL=0 MISSING=0 ERR=1/)
 })
 
