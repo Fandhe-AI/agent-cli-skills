@@ -3016,6 +3016,13 @@ let byteBaselineLedgerCount = 0
 // 台帳パスの合計を実際に du し直し、上限超過を検知した時点で新規着手を止める。
 const BYTE_REMEASURE_LEDGER_INTERVAL = 3 // 使い捨て worktree がこの件数積み増されるごとに実測
 let byteRemeasureAtLedgerCount = 0 // 直近の実測時点の ephemeralWorktrees.length（間引き用）
+// 台帳件数に依存しない実測契機（PR #390 codex-review P1 第 4 ラウンド）: 台帳が増えない間も
+// 実行中 worktree はビルド成果物等で成長し得るため、台帳増分ゲートだけでは floor 予約の
+// 過小評価を補えない。新規着手（implement）の直前にも必ず実測し直す。測定コストは
+// 「同一 dispatch 周回内は 1 回」の間引きで有界化する（周回は待機中タスクの完了ごとにしか
+// 進まないため、周回内で実消費は実質変化しない）。
+let dispatchIterationSeq = 0 // dispatch ループの周回番号
+let byteRemeasureAtIterationSeq = -1 // 直近に実測を行った周回番号（周回内 1 回の間引き用）
 {
   const runStartOrphanEntries = await scanOrphanWorktrees()
   const mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
@@ -4729,8 +4736,17 @@ const monitoringResumeGateDeferred = new Map()
 // BYTE_REMEASURE_LEDGER_INTERVAL コメント参照）。既に newStartSuppressed が立っていれば
 // 追加の抑止はしない（projection 経路で既に停止済み）。
 async function remeasureResidualBytesIfDue() {
-  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return
   if (ephemeralWorktrees.length - byteRemeasureAtLedgerCount < BYTE_REMEASURE_LEDGER_INTERVAL) return
+  await remeasureResidualBytesNow()
+}
+// 実測本体（間引きは「同一 dispatch 周回内 1 回」のみ）。台帳増分による間引きは
+// remeasureResidualBytesIfDue 側が担い、新規着手直前の呼び出しはこちらを直接使う
+// （台帳が増えない間の worktree 成長を着手判定へ反映するため。PR #390 codex-review P1
+// 第 4 ラウンド）。
+async function remeasureResidualBytesNow() {
+  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return
+  if (byteRemeasureAtIterationSeq === dispatchIterationSeq) return
+  byteRemeasureAtIterationSeq = dispatchIterationSeq
   // ephemeralWorktrees は追記専用の台帳のため、cleanupWorktree（updateState）で削除を試みた
   // パスを含んだままになる。削除成功が確認できた（confirmedRemovedPaths）パスを du 対象へ
   // 含めると、初回の merge cleanup 以降ずっと「対象パスが存在しない」で測定失敗し続け、上の
@@ -4799,6 +4815,7 @@ async function remeasureResidualBytesIfDue() {
   }
 }
 while (true) {
+  dispatchIterationSeq += 1
   // ラン中に積み増された worktree の実容量を間引き付きで実測し直す（floor 予約の過小評価を補う）
   await remeasureResidualBytesIfDue()
   // 空きスロットへ post-order 順に投入する（halted 後は新規着手しない）
@@ -4989,10 +5006,21 @@ while (true) {
           log(`⚠️ ${newStartSuppressed.reason}`)
           continue
         }
+        // 新規着手（implement）の直前は台帳増分ゲートを介さず必ず実測し直す（PR #390
+        // codex-review P1 第 4 ラウンド: 台帳が 3 件増えない間も実行中 worktree はビルド成果物
+        // 等で成長し得るため、floor 予約 projection だけでは容量超過後の着手を止められない
+        // fail-open が残る。同一周回内は 1 回に間引かれるため測定コストは周回数で有界）。
+        // 実測失敗・実測超過は remeasureResidualBytesNow 内で newStartSuppressed を立てるため、
+        // 直後に再確認して停止へ倒す。
+        if (item.kind === 'implement') {
+          await remeasureResidualBytesNow()
+          if (newStartSuppressed) continue
+        }
         // (a) 実測超過 → 恒久停止（perWorktreeByteReserve は安全側の下限見積りのため過小評価は
         //     しない。台帳は単調増加のため latch でよい）。residualBytesAtStart は直近の実測
-        //     基準（remeasureResidualBytesIfDue が更新）を指すため、projectResidualBytes が
-        //     floor 予約を基準以降の増分にのみ課す（K8Dc 対応時の二重計上防止）。
+        //     基準（remeasureResidualBytesIfDue / remeasureResidualBytesNow が更新）を指すため、
+        //     projectResidualBytes が floor 予約を基準以降の増分にのみ課す（K8Dc 対応時の
+        //     二重計上防止）。
         const projectedBytesA = projectResidualBytes({
           baselineBytes: residualBytesAtStart,
           ledgerLength: ephemeralWorktrees.length,

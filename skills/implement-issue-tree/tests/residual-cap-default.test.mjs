@@ -371,6 +371,23 @@ test('ORPHAN_BYTES_SCHEMA は err を必須フィールドとして要求する'
   assert.match(source, /required: \['kib', 'err'\]/)
 })
 
+test('バイト軸は新規着手直前に台帳増分によらず実測し直す（PR #390 P1 第 4 ラウンド）', () => {
+  // 実測本体（Now）が分離され、新規着手（implement）の直前で直接呼ばれること
+  assert.match(source, /async function remeasureResidualBytesNow\(\)/)
+  assert.match(
+    source,
+    /if \(item\.kind === 'implement'\) \{\n\s*await remeasureResidualBytesNow\(\)\n\s*if \(newStartSuppressed\) continue\n\s*\}/,
+  )
+  // 測定コストの有界化: 同一 dispatch 周回内は 1 回に間引く
+  assert.match(source, /byteRemeasureAtIterationSeq === dispatchIterationSeq/)
+  assert.match(source, /dispatchIterationSeq \+= 1/)
+  // 台帳増分ゲート（IfDue）は毎周回のループ先頭経路として残る
+  assert.match(
+    source,
+    /ephemeralWorktrees\.length - byteRemeasureAtLedgerCount < BYTE_REMEASURE_LEDGER_INTERVAL/,
+  )
+})
+
 test('ORPHAN_BYTES_SCHEMA は missing を任意フィールドとして持ち、成否判定に使わないと明記する', () => {
   assert.match(source, /missing: \{\s*type: 'integer'/)
 })
