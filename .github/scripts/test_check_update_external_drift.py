@@ -53,6 +53,11 @@ OLD_PIN = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 LATEST_TAG_RESPONSE: tuple[int, str] = (
     200, '{"object": {"sha": "' + UPSTREAM_SHA + '", "type": "commit"}}'
 )
+# annotated tag の peel（`git/tags/{sha}`）の既定応答。annotated タグ経路を検証する
+# テストだけが差し替える（既定の LATEST_TAG_RESPONSE は lightweight のため未使用）。
+LATEST_TAG_PEEL_RESPONSE: tuple[int, str] = (
+    200, '{"object": {"sha": "' + UPSTREAM_SHA + '", "type": "commit"}}'
+)
 # compare が 429 を返す pin。「検査できなかった」であって「壊れた pin」ではない。
 
 # --- fixture: 上流 reusable workflow を SHA 固定で呼ぶ薄い wrapper ---------
@@ -843,6 +848,9 @@ class TestScanEndToEnd(unittest.TestCase):
                 # モジュール変数 LATEST_TAG_RESPONSE を差し替えて stale / 取得失敗を作る
                 # （_fake_api は staticmethod のため self を参照できない）。
                 return LATEST_TAG_RESPONSE
+            if path.startswith(f"repos/{cud.UPSTREAM_REPO}/git/tags/"):
+                # annotated tag の peel。個別テストが LATEST_TAG_PEEL_RESPONSE を差し替える
+                return LATEST_TAG_PEEL_RESPONSE
             for name, cfg in repos.items():
                 prefix = f"repos/Fandhe-AI/{name}/"
                 if not path.startswith(prefix):
@@ -1060,6 +1068,62 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertEqual(result.unknowns, [])
         self.assertEqual(len(result.findings), 1)
         self.assertEqual(result.findings[0].category, "LATEST-TAG-STALE")
+
+    def test_latest_tag_missing_is_drift_not_unknown(self):
+        # 404 は「タグが存在しない」という確定的観測。全下流の @latest 参照が
+        # 解決不能のため、一時失敗の UNKNOWN ではなく finding として報告する。
+        global LATEST_TAG_RESPONSE
+        orig = LATEST_TAG_RESPONSE
+        LATEST_TAG_RESPONSE = (404, "")
+        try:
+            result = self._run_scan({
+                "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
+            })
+        finally:
+            LATEST_TAG_RESPONSE = orig
+        self.assertEqual(result.unknowns, [])
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].category, "LATEST-TAG-MISSING")
+        self.assertTrue(cud.has_drift(result))
+
+    def test_latest_tag_annotated_is_peeled_before_compare(self):
+        # annotated tag では ref の SHA はタグオブジェクトの SHA。peel して得た
+        # コミット SHA が main 先頭なら健全（peel せず比較すると恒久 STALE 誤報）。
+        global LATEST_TAG_RESPONSE
+        orig = LATEST_TAG_RESPONSE
+        tag_obj_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        LATEST_TAG_RESPONSE = (
+            200, '{"object": {"sha": "' + tag_obj_sha + '", "type": "tag"}}'
+        )
+        try:
+            result = self._run_scan({
+                "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
+            })
+        finally:
+            LATEST_TAG_RESPONSE = orig
+        self.assertEqual(result.findings, [])
+        self.assertEqual(result.unknowns, [])
+
+    def test_latest_tag_peel_failure_is_unknown(self):
+        # peel の取得失敗は「比較できなかった」であり乖離の証拠ではない。
+        global LATEST_TAG_RESPONSE, LATEST_TAG_PEEL_RESPONSE
+        orig = LATEST_TAG_RESPONSE
+        orig_peel = LATEST_TAG_PEEL_RESPONSE
+        LATEST_TAG_RESPONSE = (
+            200, '{"object": {"sha": "'
+            + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" + '", "type": "tag"}}'
+        )
+        LATEST_TAG_PEEL_RESPONSE = (500, "")
+        try:
+            result = self._run_scan({
+                "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
+            })
+        finally:
+            LATEST_TAG_RESPONSE = orig
+            LATEST_TAG_PEEL_RESPONSE = orig_peel
+        self.assertEqual(result.findings, [])
+        self.assertEqual(len(result.unknowns), 1)
+        self.assertIn("コミット SHA を解決できない", result.unknowns[0].detail)
 
     def test_zero_drift_report_says_zero(self):
         result = self._run_scan({

@@ -1204,26 +1204,59 @@ def scan(
     repos = list_target_repos(org, token)
 
     # --- 軸 2: `latest` タグの鮮度（スキャンあたり 1 回）---
-    # 取得できないこと自体は乖離の証拠にならないため UNKNOWN へ倒す（403 / 429 /
-    # 5xx を STALE として報告すると乖離を捏造する側に倒れる）。
+    # 一時的な取得失敗（403 / 429 / 5xx 等）は乖離の証拠にならないため UNKNOWN へ
+    # 倒す（STALE として報告すると乖離を捏造する側に倒れる）。ただし 404 は
+    # 「タグそのものが存在しない」という確定的な観測であり、全下流の `@latest`
+    # 参照が解決不能になっている状態のため、UNKNOWN ではなく finding として報告する
+    # （PR #389 Bugbot Medium。旧 pin 比較経路でも 404 は finding だった）。
     tag_status, tag_body = gh_get_with_status(
         f"repos/{UPSTREAM_REPO}/git/ref/tags/{EXPECTED_REF}", token
     )
     if tag_status == 200:
         try:
-            tag_sha = str(json.loads(tag_body).get("object", {}).get("sha", "")).strip()
+            tag_obj = json.loads(tag_body).get("object", {}) or {}
         except json.JSONDecodeError:
-            tag_sha = ""
-        if _SHA40_RE.match(tag_sha):
+            tag_obj = {}
+        tag_sha = str(tag_obj.get("sha", "")).strip()
+        tag_type = str(tag_obj.get("type", "")).strip()
+        # annotated tag の場合、ref が返す SHA はタグオブジェクトの SHA であり
+        # コミット SHA ではない。そのまま main と比較すると恒久的に STALE を誤報
+        # するため、git/tags/{sha} で 1 段 peel してコミット SHA へ解決する
+        # （PR #389 Bugbot Medium。move-latest-tag.yml は lightweight tag しか
+        # 作らないが、手動で annotated tag に置き換えられた場合の誤報を防ぐ）。
+        if tag_type == "tag" and _SHA40_RE.match(tag_sha):
+            peel_status, peel_body = gh_get_with_status(
+                f"repos/{UPSTREAM_REPO}/git/tags/{tag_sha}", token
+            )
+            if peel_status == 200:
+                try:
+                    peeled = json.loads(peel_body).get("object", {}) or {}
+                except json.JSONDecodeError:
+                    peeled = {}
+                tag_sha = str(peeled.get("sha", "")).strip()
+                tag_type = str(peeled.get("type", "")).strip()
+            else:
+                tag_sha = ""
+                tag_type = ""
+        if tag_type == "commit" and _SHA40_RE.match(tag_sha):
             tag_verdict = evaluate_latest_tag(tag_sha, upstream_sha)
             if tag_verdict["state"] == TAG_STALE:
                 result.findings.append(
                     Finding(UPSTREAM_REPO, "LATEST-TAG-STALE", tag_verdict["detail"])
                 )
         else:
-            msg = f"{EXPECTED_REF} タグの応答から SHA を取り出せない"
+            msg = f"{EXPECTED_REF} タグの応答からコミット SHA を解決できない"
             result.unknowns.append(Finding(UPSTREAM_REPO, "UNKNOWN", msg))
             print(f"::warning::{UPSTREAM_REPO}: {msg}")
+    elif tag_status == 404:
+        result.findings.append(
+            Finding(
+                UPSTREAM_REPO,
+                "LATEST-TAG-MISSING",
+                f"{EXPECTED_REF} タグが存在しない（HTTP 404）。全下流の `@{EXPECTED_REF}` "
+                "参照が解決不能になっている。move-latest-tag.yml とタグの手動削除を疑う",
+            )
+        )
     else:
         msg = f"{EXPECTED_REF} タグの取得が HTTP {tag_status}"
         result.unknowns.append(Finding(UPSTREAM_REPO, "UNKNOWN", msg))
