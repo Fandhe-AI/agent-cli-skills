@@ -16,7 +16,7 @@ model: sonnet
 
 - `gcloud` CLI（未導入なら `brew install --cask google-cloud-sdk`。PATH は `/opt/homebrew/share/google-cloud-sdk/bin`）
 - `gh` CLI（認証済み）
-- Node.js（`npx firebase-tools` を使う）
+- Node.js（`npx firebase-tools` を使う）。`firebase-tools` は固定版（`FIREBASE_TOOLS_VERSION`）で実行する。値と更新手順は「firebase-tools のバージョン固定と更新手順」節を参照
 - 対象リポジトリが GitHub 上にあること
 - **`${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com`（既定 `SA_ID=github-actions-hosting`）は本スクリプトが作成・管理する専用サービスアカウントとし、他用途と共有しないこと（description は発行記録として本スクリプトが占有する）。** 管理対象かどうかは email の一致ではなく description の管理証跡（マーカー）で判定する。新規作成した SA には作成直後に証跡を設定し、証跡の無い既存 SA に対しては description の上書き・鍵の管理へ進まず fail-closed で停止する（本スクリプト専用として引き受ける場合のみ `ADOPT_EXISTING_SA=true` で明示的に採用する）。鍵の自動ローテーション（後述）の削除対象は「この SA の description（GCP 側の発行記録）に記録された鍵」だけに限定され、記録に無い鍵は削除されず一覧表示に留まる（fail-safe）
 
@@ -184,7 +184,14 @@ fn main() {
 `firebase emulators:start` は**本番と同じ superstatic エンジン**で `firebase.json` を解釈します。デプロイ前にここで確定できます。
 
 ```bash
-npx firebase-tools emulators:start --only hosting --project demo-<name>
+# firebase-tools は固定版でのみ実行する（未固定 npx はレジストリ乗っ取り時の
+# 任意コード実行経路になる）。正の定義箇所・更新手順は下記
+# 「firebase-tools のバージョン固定と更新手順」節を参照。
+FIREBASE_TOOLS_VERSION="15.27.0"   # 正の定義箇所。更新手順は下記節を参照
+npx --yes "firebase-tools@${FIREBASE_TOOLS_VERSION}" emulators:start --only hosting --project demo-<name> || {
+  echo "エラー: firebase-tools@${FIREBASE_TOOLS_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害等、原因は問わない）。未固定 npx firebase-tools へのフォールバックは行わない。原因を確認してから再実行する。" >&2
+  exit 1
+}
 ```
 
 `curl` で確認する項目:
@@ -345,10 +352,35 @@ jobs:
 **ローカルからの `firebase deploy` が通っても、CI 経路が通る証明にはなりません。** PR を 1 本作り、`build` job（ビルド・テスト・出力検証）が緑になることを確認してください。そのうえでマージし、`deploy` job が実行されて本番チャンネルが更新されることを確認します（PR ではプレビューデプロイを行わない構成のため、配信結果の確認はマージ後に行います）。
 
 ```bash
-npx firebase-tools hosting:channel:list --project <project-id> --site <site-id>
+# 固定版は Step 4 と同一値（FIREBASE_TOOLS_VERSION）。コードフェンスは独立シェルで
+# 実行され得るため、このフェンス内でも代入を実行行に先行させる。
+FIREBASE_TOOLS_VERSION="15.27.0"   # 正の定義箇所は「firebase-tools のバージョン固定と更新手順」節
+npx --yes "firebase-tools@${FIREBASE_TOOLS_VERSION}" hosting:channel:list --project <project-id> --site <site-id> || {
+  echo "エラー: firebase-tools@${FIREBASE_TOOLS_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害等、原因は問わない）。未固定 npx firebase-tools へのフォールバックは行わない。原因を確認してから再実行する。" >&2
+  exit 1
+}
 ```
 
 `live` の Last Release Time が CI 実行時刻に更新されていれば完了です。
+
+## firebase-tools のバージョン固定と更新手順
+
+**Why**: `npx firebase-tools` をバージョン未固定で実行すると、npx はローカルキャッシュに無い場合レジストリのその時点の最新版を確認なしで即時取得・実行する。`firebase-tools`（firebase/firebase-tools）パッケージが乗っ取られた場合、これは任意コード実行の経路になる。exact 版（`X.Y.Z`。dist-tag・`^`/`~` レンジは禁止）への固定が信頼アンカーになる。
+
+**固定版の決め方**:
+1. `npm view firebase-tools version` で現在の latest を確認する
+2. `npm view firebase-tools repository.url` が `firebase/firebase-tools` であることを確認する
+3. `npm view firebase-tools time --json` 等で公開日時が不自然でないことを確認する
+
+**更新手順**:
+1. Step 4 フェンス・Step 6 フェンスの両方の `FIREBASE_TOOLS_VERSION` を**同一コミット**で更新する（値は完全一致させる。実行フェンスが独立シェルで実行され得るため両フェンスに代入が必要）
+2. `node --test skills/setup-firebase-hosting/tests/*.mjs` で exact semver・全出現一致・実行行の固定を検証する
+3. 1 リポジトリで実際に実行し、差分が正常であることを確認する
+4. `chore(setup-firebase-hosting): firebase-tools を X.Y.Z へ更新` でコミットする
+
+**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害等どの原因でも）は `npx` が非ゼロ終了し停止する。未固定 `npx firebase-tools` へのフォールバック再試行は行わない。
+
+**参考**: `bootstrap-firebase.sh`（Step 1 で実行するスクリプト）は Firebase 追加・サイト作成を firebase CLI ではなく REST API を `gcloud` のトークンで直接叩く設計であり、npx 実行行は持たない（本節の対象外）。
 
 ## よくある失敗と原因
 
