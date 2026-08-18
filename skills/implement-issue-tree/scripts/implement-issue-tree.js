@@ -5302,13 +5302,35 @@ if (disposableWorktrees.length > 0) {
 // 開始時観測の上界の見積もり（掃除分を差し引かず過大側 = fail-closed 方向）。8 割で早期警告。
 const residualAddedThisRun = ephemeralWorktrees.length
 const residualTotalAtEnd = residualObservedAtStart + residualAddedThisRun
-const residualOverLimit = maxResidualWorktrees > 0 && residualTotalAtEnd > maxResidualWorktrees
+const residualCountOverLimit = maxResidualWorktrees > 0 && residualTotalAtEnd > maxResidualWorktrees
+// バイト軸のラン終了時判定: 直近の実測基準（remeasure で最新化済み）＋基準以降の積み増しの
+// floor 予約を上界見積もりとして使う（ラン中の投入判定と同じ projection 式）。件数軸だけで
+// overLimit を決めると、バイト上限を超過（またはバイト軸起因の suppressed）でも overLimit が
+// false のままになり、「次ランは止まらない」という誤ったシグナルを消費側へ返す
+// （PR #390 Cursor Bugbot Medium 指摘）。
+const residualBytesTotalAtEnd = residualBytesObserved
+  ? projectResidualBytes({
+      baselineBytes: residualBytesAtStart,
+      ledgerLength: ephemeralWorktrees.length,
+      baselineLedgerCount: byteBaselineLedgerCount,
+      reservedUnits: 0,
+      extraReserveUnits: 0,
+      perWorktreeByteReserve,
+    })
+  : 0
+const residualBytesOverLimit =
+  maxResidualWorktreeBytes > 0 && residualBytesObserved && residualBytesTotalAtEnd > maxResidualWorktreeBytes
+// overLimit は「次ラン開始時に新規着手が停止する見込み」の統合シグナル（件数・バイトの OR）
+const residualOverLimit = residualCountOverLimit || residualBytesOverLimit
 if (!residualObserved) {
   log('⚠️ ラン開始時の残置 worktree 観測が成立しなかったため、残置総数の上限判定は未確定（未観測）。git worktree list で手動確認すること')
-} else if (residualOverLimit) {
+} else if (residualCountOverLimit) {
   log(`⚠️ ラン終了時の残置 worktree 総数が上限を超過（${residualTotalAtEnd} 件 / 上限 ${maxResidualWorktrees} 件。開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${residualAddedThisRun} 件）。次ラン開始時に新規着手が停止する見込み。git worktree remove で手動掃除すること`)
 } else if (maxResidualWorktrees > 0 && residualTotalAtEnd >= Math.ceil(maxResidualWorktrees * 0.8)) {
   log(`⚠️ ラン終了時の残置 worktree 総数が上限の 8 割超（${residualTotalAtEnd} 件 / 上限 ${maxResidualWorktrees} 件）。不要な worktree の手動削除を検討すること`)
+}
+if (residualBytesOverLimit) {
+  log(`⚠️ ラン終了時の残置 worktree ディスク使用量見積りが容量上限を超過（見積り ${Math.round(residualBytesTotalAtEnd / (1024 * 1024))} MiB / 上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB）。次ラン開始時に新規着手が停止する見込み。git worktree remove で手動掃除すること`)
 }
 
 // externalChecks 系フィールドも返す（マージゲートの前提条件をレポート側で検証するため）。
@@ -5318,5 +5340,6 @@ if (!residualObserved) {
 // autoMergeRequested: args.autoMerge の要求値（「マージ待ち PR 一覧」追跡の判定材料）。
 // mergeGuard: hook は deny 専用（opt-in マージと併用不可）。
 // residualWorktrees: 残置上限ゲートの観測結果（observed: false = 観測不成立、overLimit: true =
-//   次ラン新規着手停止見込み、suppressed = 本ランの抑止有無、limit: 0 = 上限なし）。
+//   件数・バイトいずれかの軸で次ラン新規着手停止見込み（Bugbot Medium 対応: 件数軸のみだと
+//   バイト超過時に誤って false を返す）、suppressed = 本ランの抑止有無、limit: 0 = 上限なし）。
 return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
