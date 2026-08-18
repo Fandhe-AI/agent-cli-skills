@@ -69,10 +69,12 @@ jobs:
           node --test "skills/**/*.test.mjs"
 
   # --------------------------------------------------
-  # py-tests（update-external 乖離検知の判定ロジック回帰テスト）
+  # py-tests（update-external 乖離検知・pin bump の判定ロジック回帰テスト）
   # --------------------------------------------------
   # .github/scripts/check_update_external_drift.py の純粋関数（分類・pin 比較・
-  # 軸 4 のジョブ単位判定）を fixture に対して実行する（イシュー #260）。
+  # 軸 4 のジョブ単位判定・実効差分ゲート）と、bump_update_external_pin.py の
+  # 純粋関数（uses: 行の置換・入力契約ゲート）を fixture に対して実行する
+  # （イシュー #260 / #343）。
   # 検知ワークフロー本体は日次 schedule で走るため、壊れても PR 時点では気づけない。
   # 特に「submodule ジョブの既定 true を誤検知しない」というジョブ単位判定は
   # ファイル全体 grep への退行が起きやすく、退行しても検知ジョブは緑のまま
@@ -102,6 +104,7 @@ jobs:
           # runner イメージ同梱の PyYAML 有無は契約されていないため明示的に入れる。
           python3 -m pip install --disable-pip-version-check --quiet 'PyYAML==6.0.2'
           python3 .github/scripts/test_check_update_external_drift.py
+          python3 .github/scripts/test_bump_update_external_pin.py
 
   # --------------------------------------------------
   # lint-docs（ドキュメント／設定ファイル系 lint）

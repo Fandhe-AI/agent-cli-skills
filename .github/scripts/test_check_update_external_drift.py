@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 import sys
 import unittest
 
@@ -50,6 +51,12 @@ UPSTREAM_SHA = "fed9c07d98367f77e5e2b63bca38843f46feee96"
 OLD_PIN = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 # compare が 429 を返す pin。「検査できなかった」であって「壊れた pin」ではない。
 RATE_LIMITED_PIN = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+# compare は ahead（コミット数では遅れている）だが、pin 側ファイルの内容が
+# main と完全一致する pin（イシュー #343 の実効差分ゲート用）。
+EQUIV_PIN = "dddddddddddddddddddddddddddddddddddddddd"
+# compare は成功するが pin 本文の取得だけが 5xx になる pin。実効差分ゲートが
+# 「検査不能」を PIN-STALE へ倒していないことを固定する（イシュー #343 P1）。
+CONTENT_ERROR_PIN = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 # --- fixture: 上流 reusable workflow を SHA 固定で呼ぶ薄い wrapper ---------
 FIXTURE_WRAPPER = """
@@ -190,6 +197,15 @@ jobs:
 """
 
 
+# --- fixture: 実効差分ゲート用。main（FIXTURE_UPSTREAM_OK）とは内容が異なる
+#     旧版の上流ファイル。OLD_PIN が指す内容としてこれを使うことで、
+#     「PIN_BEHIND かつ実効差分あり = PIN-STALE のまま」の経路を固定する
+#     （実効差分ゲート導入で誤って equivalent 側へ倒れていないことの回帰）。
+FIXTURE_UPSTREAM_OLD = FIXTURE_UPSTREAM_OK.replace(
+    "skills-version: '1.5.22'", "skills-version: '1.5.20'"
+)
+
+
 def markers_map(text: str) -> dict[str, dict]:
     return {m["marker"]: m for m in check_upstream_markers(text)}
 
@@ -305,6 +321,75 @@ class TestAxis2Pin(unittest.TestCase):
     def test_pin_404_is_unreachable_not_green(self):
         v = evaluate_pin(OLD_PIN, UPSTREAM_SHA, None)
         self.assertEqual(v["state"], PIN_UNREACHABLE)
+
+
+class TestPinImpactGate(unittest.TestCase):
+    """実効差分ゲート（イシュー #343）の純粋関数を検証する。"""
+
+    def test_git_blob_sha_matches_git_hash_object(self):
+        # ``git hash-object`` の出力と一致することをその場で ground truth として
+        # 取り直す（固定値だと本ファイルの編集のたびに乖離して的外れな失敗に
+        # なるため、比較対象そのものを都度計算する）。非 ASCII（日本語コメント）を
+        # 含む本番ファイルで検証することで、文字数とバイト数の取り違えを
+        # 踏む実装を確実に落とす。
+        path = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "workflows" / "update-external.yml"
+        )
+        text = path.read_text(encoding="utf-8")
+        proc = subprocess.run(
+            ["git", "hash-object", str(path)],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(cud.git_blob_sha(text), proc.stdout.strip())
+
+    def test_git_blob_sha_byte_length_not_char_length(self):
+        # マルチバイト文字（日本語）を含む短い文字列で、文字数ではなくバイト数を
+        # 使っていることを直接確認する。
+        text = "あ"  # UTF-8 で 3 バイト、str の len() は 1
+        import hashlib
+
+        expected = hashlib.sha1(b"blob 3\0" + text.encode("utf-8")).hexdigest()
+        self.assertEqual(cud.git_blob_sha(text), expected)
+
+    def test_has_local_uses_detects_dot_slash(self):
+        self.assertTrue(cud.has_local_uses("jobs:\n  x:\n    uses: ./local.yml\n"))
+        self.assertTrue(cud.has_local_uses("    uses: './local.yml'\n"))
+
+    def test_has_local_uses_false_for_absolute_ref(self):
+        self.assertFalse(
+            cud.has_local_uses(
+                "uses: Fandhe-AI/actions/.github/workflows/update-external.yml@"
+                + UPSTREAM_SHA
+            )
+        )
+
+    def test_impact_equivalent_on_exact_match(self):
+        v = cud.evaluate_pin_impact(FIXTURE_UPSTREAM_OK, FIXTURE_UPSTREAM_OK)
+        self.assertTrue(v["equivalent"])
+        self.assertEqual(v["pin_blob"], v["main_blob"])
+
+    def test_impact_not_equivalent_on_content_diff(self):
+        v = cud.evaluate_pin_impact(FIXTURE_UPSTREAM_OLD, FIXTURE_UPSTREAM_OK)
+        self.assertFalse(v["equivalent"])
+        self.assertNotEqual(v["pin_blob"], v["main_blob"])
+
+    def test_impact_not_equivalent_when_fetch_failed(self):
+        v = cud.evaluate_pin_impact(None, FIXTURE_UPSTREAM_OK)
+        self.assertFalse(v["equivalent"])
+        self.assertIsNone(v["pin_blob"])
+
+    def test_impact_not_equivalent_when_pin_side_has_local_uses(self):
+        local_ref = FIXTURE_UPSTREAM_OK + "\n  x:\n    uses: ./local.yml\n"
+        # pin/main とも同一内容でも、ローカル参照があれば前提条件チェックで
+        # 等価と判定しない（将来 E5 の前提が崩れた場合の安全側フォールバック）。
+        v = cud.evaluate_pin_impact(local_ref, local_ref)
+        self.assertFalse(v["equivalent"])
+
+    def test_impact_not_equivalent_when_only_main_side_has_local_uses(self):
+        local_ref = FIXTURE_UPSTREAM_OK + "\n  x:\n    uses: ./local.yml\n"
+        v = cud.evaluate_pin_impact(FIXTURE_UPSTREAM_OK, local_ref)
+        self.assertFalse(v["equivalent"])
 
 
 class TestAxis4JobScoped(unittest.TestCase):
@@ -841,11 +926,40 @@ class TestScanEndToEnd(unittest.TestCase):
             if "/actions/workflows/" in path:
                 return _fake_actions_api(path, repos)
             if path.startswith(f"repos/{cud.UPSTREAM_REPO}/contents/"):
-                return 200, FIXTURE_UPSTREAM_OK
+                # ``?ref=`` で軸 4 の main 取得（scan() 冒頭・1 回だけ）と
+                # 実効差分ゲートの pin 取得（PIN_BEHIND 判定後・pin ごと）を
+                # 区別する。区別しないと両者が同じ FIXTURE_UPSTREAM_OK を返し、
+                # 「pin の内容が main と一致する」が常に真になって
+                # PIN-STALE が一切出なくなる（fixture の衝突）。
+                if path.endswith("?ref=main") or path.endswith(f"?ref={UPSTREAM_SHA}"):
+                    # イシュー #343 Review 指摘の TOCTOU 修正で scan() は
+                    # ``?ref=main`` ではなく ``?ref={upstream_sha}``（この
+                    # fixture では固定値 UPSTREAM_SHA）で軸 4 の本文を取得する。
+                    # 呼び出し側の実装差し替えに追従して両方一致させる。
+                    return 200, FIXTURE_UPSTREAM_OK
+                if path.endswith(f"?ref={OLD_PIN}"):
+                    return 200, FIXTURE_UPSTREAM_OLD
+                if path.endswith(f"?ref={EQUIV_PIN}"):
+                    return 200, FIXTURE_UPSTREAM_OK
+                if path.endswith(f"?ref={CONTENT_ERROR_PIN}"):
+                    # 一時的な API 障害。実効差分の有無は判定できない。
+                    return 503, ""
+                if "?ref=" not in path:
+                    # ``?ref=`` なしはこの fixture では per-repo 走査が
+                    # UPSTREAM_REPO 自身（"actions"）を下流候補として叩く
+                    # ケース（軸 1 の KIND_REUSABLE_DEFINITION 除外テスト用）。
+                    # 実効差分ゲートの pin 取得とは無関係な経路のため、
+                    # 従来どおり FIXTURE_UPSTREAM_OK を返す。
+                    return 200, FIXTURE_UPSTREAM_OK
+                raise AssertionError(f"想定外の pin content 取得: {path}")
             if path.startswith(f"repos/{cud.UPSTREAM_REPO}/compare/"):
                 pin = path.split("/compare/")[1].split("...")[0]
                 if pin == OLD_PIN:
                     return 200, '{"status":"ahead","ahead_by":7,"behind_by":0}'
+                if pin == EQUIV_PIN:
+                    return 200, '{"status":"ahead","ahead_by":3,"behind_by":0}'
+                if pin == CONTENT_ERROR_PIN:
+                    return 200, '{"status":"ahead","ahead_by":5,"behind_by":0}'
                 if pin == RATE_LIMITED_PIN:
                     # レート制限。pin が壊れている証拠にはならない。
                     return 429, ""
@@ -1034,6 +1148,57 @@ class TestScanEndToEnd(unittest.TestCase):
         report = cud.render_report(result, "https://example.invalid/run/1")
         self.assertIn("乖離: **6 件**", report)
         self.assertIn("検査不能 (UNKNOWN): **1 件**", report)
+
+    def test_pin_behind_but_content_equivalent_is_not_a_finding(self):
+        # EQUIV_PIN は compare 上 3 コミット遅れているが、pin 側ファイルの内容が
+        # main（FIXTURE_UPSTREAM_OK）と一致する。PIN-STALE として findings へは
+        # 積まず、pins_equivalent へ根拠（pin・blob sha）付きで積む。
+        result = self._run_scan({
+            "equiv-wrapper": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=EQUIV_PIN)),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        self.assertNotIn("equiv-wrapper", cats)
+        self.assertEqual(len(result.pins_equivalent), 1)
+        repo, pin, blob = result.pins_equivalent[0]
+        self.assertEqual(repo, "Fandhe-AI/equiv-wrapper")
+        self.assertEqual(pin, EQUIV_PIN)
+        self.assertEqual(blob, cud.git_blob_sha(FIXTURE_UPSTREAM_OK))
+        # 乖離としては数えない（実効差分が無いため）。
+        self.assertEqual(cud.drift_count(result), 0)
+        report = cud.render_report(result)
+        self.assertIn("実効差分なしの pin: **1 件**", report)
+        self.assertIn("Fandhe-AI/equiv-wrapper", report)
+
+    def test_pin_behind_with_real_content_diff_stays_pin_stale(self):
+        # 回帰確認: 実効差分ゲート導入後も、内容が実際に異なる pin（OLD_PIN /
+        # FIXTURE_UPSTREAM_OLD）は従来どおり PIN-STALE のまま。
+        result = self._run_scan({
+            "stale-wrapper": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=OLD_PIN)),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        self.assertEqual(cats["stale-wrapper"][0][0], "PIN-STALE")
+        self.assertEqual(result.pins_equivalent, [])
+
+    def test_pin_content_fetch_error_is_unknown_not_stale(self):
+        # compare は成功して PIN_BEHIND だが、pin 本文の取得が 503。実効差分の
+        # 有無を確認できないため、PIN-STALE（乖離）ではなく UNKNOWN に倒す
+        # （イシュー #343 Review P1 指摘。compare 取得失敗と同じ契約）。
+        result = self._run_scan({
+            "content-error": {
+                "workflow": (200, FIXTURE_WRAPPER.format(pin=CONTENT_ERROR_PIN)),
+            },
+        })
+        cats = self._findings_by_repo(result)
+        self.assertNotIn("content-error", cats)
+        self.assertEqual(
+            [f.repo for f in result.unknowns], ["Fandhe-AI/content-error"]
+        )
+        # 乖離としては数えない（未確認を乖離に化けさせない）。
+        self.assertEqual(cud.drift_count(result), 0)
 
     def test_compare_error_is_unknown_not_unreachable(self):
         # compare が 429。到達不能な pin (乖離) ではなく UNKNOWN として扱う。

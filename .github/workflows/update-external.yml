@@ -56,6 +56,15 @@
 # - タグ未公開（0 tags / 0 releases）のため SHA 固定が必須で、Dependabot による自動更新は
 #   効かない。上流更新時は本記録ごと手で差し替える
 #
+# pin 追従の自動化（イシュー #343）:
+# 上記の pin bump は .github/workflows/update-external-pin-bump.yml が日次で
+# 自動化しており、上流 update-external.yml の内容に実効差分がある場合のみ
+# bump PR を自動生成する（実効差分ゲート: pin 側と main 側のファイル内容が
+# 完全一致すればコミット数で遅れていても乖離として扱わない）。本コメントの
+# 「参照 SHA の検証記録」は自動編集の対象外——最新の検証記録は各 bump PR の
+# 本文に記録される。採否の経緯・却下した代替案は docs/update-external-pin.md
+# を参照。
+#
 # runner 選択の根拠:
 # 移行前は `runs-on: ${{ fromJSON(vars.UPDATE_EXTERNAL_RUNNER || '"ubuntu-latest"') }}` だった。
 # この組織変数は org・リポジトリのいずれにも未設定であることを `gh variable list` で実測して
