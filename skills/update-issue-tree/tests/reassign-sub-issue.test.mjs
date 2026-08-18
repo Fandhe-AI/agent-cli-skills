@@ -84,7 +84,7 @@ test('ケース4: 孤児（--old-parent 省略）→ exit 0 posted-only、POST �
   assert.ok(c.some((l) => l.includes('--method POST')), 'POST が呼ばれていること')
 })
 
-test('ケース5: 正常な付け替え → exit 0 reassigned、呼び出し順が GET→DELETE→POST→GET', () => {
+test('ケース5: 正常な付け替え → exit 0 reassigned、呼び出し順が GET→GET(新親)→DELETE→POST→GET', () => {
   const r = run(['--issue', '12', '--old-parent', '5', '--new-parent', '7'], {
     parentBefore: '5',
     parentAfter: '7',
@@ -97,7 +97,8 @@ test('ケース5: 正常な付け替え → exit 0 reassigned、呼び出し順�
     if (l.includes('--method POST')) return 'POST'
     return 'GET'
   })
-  assert.deepEqual(kinds, ['GET', 'DELETE', 'POST', 'GET'])
+  // 2 件目の GET が Issue #333 で追加した新親の事前検証（DELETE の前に撃つ）
+  assert.deepEqual(kinds, ['GET', 'GET', 'DELETE', 'POST', 'GET'])
 })
 
 test('ケース6: DELETE が非ゼロ（404） → exit 3、POST は 1 件も呼ばれない（受入条件の核）', () => {
@@ -284,4 +285,101 @@ test('ケース14: --old-parent 指定だが実測は孤児 → 破壊が起き�
   const c = calls(r.logPath)
   assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が呼ばれていないこと')
   assert.ok(c.some((l) => l.includes('--method POST')), 'POST が呼ばれていること')
+})
+
+// --- Issue #333: DELETE 前の --new-parent 事前検証 ---
+
+test('ケース19: --new-parent が --issue と同一（自己参照）→ exit 1、API 呼び出しゼロ', () => {
+  const r = run(['--issue', '30', '--new-parent', '30'], {})
+  assert.equal(r.status, 1)
+  assert.deepEqual(calls(r.logPath), [])
+})
+
+test('ケース20: 新親 GET が失敗（存在しない番号）→ exit 2、DELETE も POST も呼ばれない（AC4 の核）', () => {
+  const r = run(['--issue', '31', '--old-parent', '5', '--new-parent', '999'], {
+    parentBefore: '5',
+    newParentGetFail: true,
+  })
+  assert.equal(r.status, 2)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
+  assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が 1 件も呼ばれていないこと')
+})
+
+test('ケース21: 新親が別リポジトリ → exit 2、DELETE も POST も呼ばれない', () => {
+  const r = run(['--issue', '32', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    newParentRepo: 'other/repo',
+  })
+  assert.equal(r.status, 2)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
+  assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が 1 件も呼ばれていないこと')
+})
+
+test('ケース22: 孤児経路（--old-parent 省略）で新親 GET が失敗 → exit 2、POST も呼ばれない（経路の非対称が無いこと）', () => {
+  const r = run(['--issue', '33', '--new-parent', '999'], {
+    parentBefore: '',
+    newParentGetFail: true,
+  })
+  assert.equal(r.status, 2)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
+  assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が 1 件も呼ばれていないこと')
+})
+
+test('ケース25: 新親が Pull Request → exit 2、DELETE も POST も呼ばれない', () => {
+  // issues API は PR も返す（issue と PR は番号空間を共有する）。存在確認・同一リポジトリ確認
+  // だけでは PR を弾けず、DELETE 成功後に POST が失敗して孤児化する。判別は取得済み JSON の
+  // `.pull_request` で行うため追加の API 呼び出しは発生しない。
+  const r = run(['--issue', '35', '--old-parent', '5', '--new-parent', '77'], {
+    parentBefore: '5',
+    newParentIsPullRequest: true,
+  })
+  assert.equal(r.status, 2)
+  assert.match(r.stderr, /Pull Request/)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
+  assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が 1 件も呼ばれていないこと')
+})
+
+test('ケース26: 孤児経路でも新親が Pull Request → exit 2、POST も呼ばれない（経路の非対称が無いこと）', () => {
+  const r = run(['--issue', '36', '--new-parent', '77'], {
+    parentBefore: '',
+    newParentIsPullRequest: true,
+  })
+  assert.equal(r.status, 2)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method DELETE')), 'DELETE が 1 件も呼ばれていないこと')
+  assert.ok(!c.some((l) => l.includes('--method POST')), 'POST が 1 件も呼ばれていないこと')
+})
+
+test('ケース27: 新親が通常の issue（.pull_request 無し）なら従来どおり付け替えが成立する（過検知していないこと）', () => {
+  const r = run(['--issue', '37', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '7',
+  })
+  assert.equal(r.status, 0)
+  const c = calls(r.logPath)
+  assert.ok(c.some((l) => l.includes('--method DELETE')), 'DELETE が呼ばれていること')
+  assert.ok(c.some((l) => l.includes('--method POST')), 'POST が呼ばれていること')
+})
+
+test('ケース23: already-attached 経路では新親 GET を追加で撃たない（AC3 の追加コスト回避）', () => {
+  const r = run(['--issue', '34', '--old-parent', '5', '--new-parent', '5'], {
+    parentBefore: '5',
+  })
+  assert.equal(r.status, 0)
+  assert.match(r.stdout.trim(), /^result=already-attached issue=34 new_parent=5 old_parent=5$/)
+  const c = calls(r.logPath).filter((l) => l.startsWith('api'))
+  assert.equal(c.length, 1, 'api 呼び出しが GET 1 件のみであること')
+})
+
+test('ケース24: 承認不一致（exit 6）経路でも新親 GET を撃たない', () => {
+  const r = run(['--issue', '35', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '9',
+  })
+  assert.equal(r.status, 6)
+  const c = calls(r.logPath).filter((l) => l.startsWith('api'))
+  assert.equal(c.length, 1, 'api 呼び出しが GET 1 件のみであること')
 })
