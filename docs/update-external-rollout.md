@@ -282,13 +282,30 @@ SUBMODULE_AUTO_MERGE=true visibility=all
 `skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}`）。5 リポだけ挙動を変える理由が
 無いためそのままにした。
 
-上流ログには次の警告が出ている。今回の 3 リポは required check を持たないため実害は出て
-いないが、必須チェックを持つリポでは意味を持つ。既存 22 リポにも共通する事象であり、
-本イシューの対象外として別途扱う。
+**`auto-merge に GITHUB_TOKEN を使用しています` の警告は出ていない。** 上流スクリプトには
+この警告の分岐が存在するが、実行ログの `##[warning]` は 5 リポとも 0 件であり、分岐は
+発火していない（PR 作成に PAT が使われている）。
 
-> `auto-merge に GITHUB_TOKEN を使用しています。生成 PR が後続 workflow (CI) を発火しない
-> ため、必須チェック付き auto-merge がキューに残り続けるか、未検証のまま merge される
-> 恐れがあります。`
+```
+$ gh run view <run-id> --repo Fandhe-AI/<repo> --log | grep -oE '##\[(notice|warning|error)\].*' | sort -u
+##[notice].gitmodules 無しのため submodule 更新は no-op（skip）。
+##[notice]allowlist 未指定 → 全スキルを自動マージ対象とします
+##[notice]auto-merge フラグの値域チェックを通過した。
+##[notice]auto-merge を有効化しました: <pr-url>
+##[notice]close-superseded フラグの値域チェックを通過した。
+##[notice]PR を作成しました: <pr-url>
+##[notice]target の値域チェックを通過した。
+```
+
+必須チェックを持つ `team-hub-spec` の同期 PR
+[#58](https://github.com/Fandhe-AI/team-hub-spec/pull/58) でも CI は正常に起動しており
+（`EditorConfig (strict)` / `PoC rustfmt --check` / `Broken link check (lychee)` が success）、
+「生成 PR が後続 CI を発火しない」事象は観測されていない。
+
+ログを読むときの注意: runner は `run:` ステップの**スクリプト本文を実行前にエコー**する
+（ANSI エスケープ `ESC[36;1m` 前置）。この行には未発火の分岐の `echo "::warning::..."` も
+そのまま現れるため、本文エコーを実出力と読み違えると「警告が出た」と誤読する。実際に
+出力されたものだけを見るには `##[notice]` / `##[warning]` / `##[error]` で絞る。
 
 ### 残作業
 
@@ -314,8 +331,7 @@ SUBMODULE_AUTO_MERGE=true visibility=all
 - wrapper の pin 自動追従 → #343
 - `enable-submodule` 要否のポリシー判断 → 本イシューが明示的に対象外と宣言
 - 5 リポの既存 CI・lint 設定の修正
-- 既存 22 リポの pin 追従（#343）と、`auto-merge に GITHUB_TOKEN を使用` 警告への対処
-  （既存 22 リポにも共通する事象のため別途扱う）
+- 既存 22 リポの pin 追従（#343）
 
 （本ドキュメント起草時にスコープ外としていた項目のうち、**5 リポへの書き込み**（ラベル作成・
 wrapper 導入・PR 作成とマージ・workflow 初回実行）と **#342 へのコメント投稿**は後続フェーズと
