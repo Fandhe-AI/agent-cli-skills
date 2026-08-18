@@ -18,7 +18,7 @@ PR #58）の 1 リポのみであり、`agent-cli-skills` 自身を含む残り 
 **本エージェントの書き込み対象は `agent-cli-skills` 自身に限られる。同リポは branch ruleset
 構造こそ green だが PR レベル実測は未確認であるため、本 PR で wrapper を
 `skills-auto-merge: 'false'` へ明示的に fail-closed 化した（#342 の 4 リポと同型の対応）。
-`template-articles`（構造的にも保護なし）を含むそれ以外の 24 リポへの適用は本 worktree の
+`template-articles`（構造的にも保護なし）を含むそれ以外の 23 リポへの適用は本 worktree の
 外側にある別リポジトリへの書き込みであり、後続担当へ引き継ぐ（「7. 実施状況」参照）。**
 
 測定日: 2026-08-19。
@@ -291,7 +291,7 @@ PR レベル実測の免除条件ではない（4.2 節で区別を記載）。2
 引き続き `main-protection` として green であり、この変更は `ruleset-policy.md` が
 実例として使う構成の評価を撤回するものではない。
 
-### 6.2 `template-articles` ほか 23 リポ（本 worktree の外側・後続担当が実施）
+### 6.2 `template-articles` ほか 22 リポ（本 worktree の外側・後続担当が実施）
 
 `template-articles`（構造的にも保護なし）を含む残り 23 リポについても、
 `.github/workflows/update-external.yml` の
@@ -326,7 +326,7 @@ PR レベル `BLOCKED` 実測が未確認」である旨に差し替える（6.1
 **本タスク（実装エージェント）は本リポジトリ（`agent-cli-skills`）以外への push・書き込み・
 PR 作成・イシューコメントを行わない契約下にある。** したがって:
 
-- `template-articles` ほか 23 リポへの実際の変更適用（PR 作成・マージ）
+- `template-articles` ほか 22 リポへの実際の変更適用（PR 作成・マージ）
 - 案 c（組織変数の変更）の実施
 - 案 b（branch protection 新設）の起票・実施
 - 本イシュー #359 への判定結果コメント
