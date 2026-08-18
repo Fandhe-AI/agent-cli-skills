@@ -56,7 +56,21 @@ function extractBullets(sectionText) {
   return bullets
 }
 
-test('前提条件節: parent_issue_url の null 要求は同一 bullet 内に cross-repository 限定の条件を伴う', () => {
+// bullet 全体ではなく「。」区切りの文（継続行の改行は連結して 1 文として扱う）単位で判定する。
+// Issue #366 の元の文言は、bullet 全体としては 'cross-repository' という語を含んでいたが、
+// それは null 要求を述べる文とは別の文（親リンク取り外しの実施者を説明する文）に登場して
+// いただけで、null 要求の文自体は無条件だった。bullet 単位の部分一致では両文が同じ bullet に
+// あるだけで「限定されている」と誤判定してしまうため、null 要求を述べる文の内部にスコープ語
+// （cross-repository 限定）または免除語（明示的な対象外）があるかどうかで判定する。
+function extractSentences(bullet) {
+  return bullet
+    .replace(/\n\s*/g, '')
+    .split('。')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+test('前提条件節: parent_issue_url の null 要求は同一文内に cross-repository 限定の条件を伴う', () => {
   const section = extractPrerequisitesSection()
   const bullets = extractBullets(section)
   assert.ok(bullets.length > 0, '前提条件節から bullet を 1 件も抽出できなかった')
@@ -75,12 +89,25 @@ test('前提条件節: parent_issue_url の null 要求は同一 bullet 内に c
   )
 
   for (const bullet of nullMentioningBullets) {
-    const isCrossRepoScoped = bullet.includes('別リポジトリ') || bullet.includes('cross-repository')
-    const isExplicitExemption = bullet.includes('必要はない') || bullet.includes('対象外')
-    assert.ok(
-      isCrossRepoScoped || isExplicitExemption,
-      `null 要求が cross-repository 限定でも明示的な免除でもない bullet（Issue #366 の再発）:\n${bullet}`
+    // null 要求そのものを述べている文（parent_issue_url と null の両方を含む文）だけを
+    // 対象にする。bullet 内の他の文（例: 実施者の説明）に cross-repository が登場しているだけ
+    // では、null 要求自体が限定されているとはみなさない。
+    const nullRequirementSentences = extractSentences(bullet).filter(
+      (s) => s.includes('parent_issue_url') && s.includes('null')
     )
+    assert.ok(
+      nullRequirementSentences.length > 0,
+      `parent_issue_url と null の両方を含む bullet だが、両方を含む文が抽出できない（文分割ロジックの不備の可能性）:\n${bullet}`
+    )
+
+    for (const sentence of nullRequirementSentences) {
+      const isCrossRepoScoped = sentence.includes('別リポジトリ') || sentence.includes('cross-repository')
+      const isExplicitExemption = sentence.includes('必要はない') || sentence.includes('対象外')
+      assert.ok(
+        isCrossRepoScoped || isExplicitExemption,
+        `null 要求を述べる文が cross-repository 限定でも明示的な免除でもない（Issue #366 の再発）:\n${sentence}`
+      )
+    }
   }
 })
 
