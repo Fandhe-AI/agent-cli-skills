@@ -173,7 +173,19 @@ emit_result() {
 confirm_stable_parent() {
   local label="$1"
   local expected="$2"
-  sleep "${RECOVERY_RECHECK_DELAY_SEC:-2}"
+  # 待機秒数は使用前に非負整数へ検証し、sleep の失敗も捕捉する — set -e 下で無条件実行すると、
+  # 不正値・実行失敗の非 0 終了が呼び出し元の exit 8 / reason=recovery-state-unknown への変換より
+  # 先にスクリプトを即終了させ、終了コード契約外の exit 1 になるため（codex-review P1 指摘
+  # PR #391）。検証・実行の失敗は状態不明（return 1）として既存の fail-closed 経路へ流す
+  local recheck_delay="${RECOVERY_RECHECK_DELAY_SEC:-2}"
+  if ! [[ "${recheck_delay}" =~ ^[0-9]+$ ]]; then
+    echo "エラー: RECOVERY_RECHECK_DELAY_SEC が非負整数でない（値: ${recheck_delay}）。${label}を実施できず状態不明のまま終端する" >&2
+    return 1
+  fi
+  if ! sleep "${recheck_delay}"; then
+    echo "エラー: ${label}のための待機（sleep ${recheck_delay}）に失敗した。状態不明のまま終端する" >&2
+    return 1
+  fi
   local recheck_json
   if ! recheck_json=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>"${GH_ERR_FILE}"); then
     echo "エラー: ${label}のための再取得に失敗した。#${ISSUE} が #${expected} 配下で安定しているか未確認のまま終端する" >&2
@@ -184,7 +196,12 @@ confirm_stable_parent() {
   # cross-repo 判定時のみ recheck_parent を空にすると、実際には別リポジトリの
   # 第三者親配下にあるのに「実測 parent=なし」＝孤児と誤報する）
   local recheck_parent_url recheck_parent recheck_same_repo=1
-  recheck_parent_url=$(printf '%s' "${recheck_json}" | jq -r '.parent_issue_url // empty')
+  # jq 解析は set -e で即終了させず明示捕捉する — GET が終了コード 0 でも空・不正 JSON を
+  # 返した場合、素の代入だと契約外の exit 1 で終端するため（codex-review P1 指摘 PR #391）
+  if ! recheck_parent_url=$(printf '%s' "${recheck_json}" | jq -r '.parent_issue_url // empty'); then
+    echo "エラー: ${label}の応答 JSON を解析できない。#${ISSUE} が #${expected} 配下で安定しているか未確認のまま終端する" >&2
+    return 1
+  fi
   recheck_parent=""
   if [[ -n "${recheck_parent_url}" ]]; then
     recheck_parent=$(printf '%s' "${recheck_parent_url}" | grep -oE '[0-9]+$' || true)
@@ -237,7 +254,13 @@ recover_after_post_failure() {
   fi
 
   local recovery_parent_url recovery_parent recovery_same_repo=1
-  recovery_parent_url=$(printf '%s' "${RECOVERY_JSON}" | jq -r '.parent_issue_url // empty')
+  # jq 解析失敗は状態不明として exit 8 へ統一する（codex-review P1 指摘 PR #391。素の代入だと
+  # set -e で契約外の exit 1 になり、DELETE 済みの部分変更が残ったことが呼び出し元へ伝わらない）
+  if ! recovery_parent_url=$(printf '%s' "${RECOVERY_JSON}" | jq -r '.parent_issue_url // empty'); then
+    echo "エラー: 復旧のための実状態応答 JSON を解析できない。#${ISSUE} の親子状態は未確認" >&2
+    echo "reason=recovery-state-unknown" >&2
+    exit 8
+  fi
   recovery_parent=""
   if [[ -n "${recovery_parent_url}" ]]; then
     recovery_parent=$(printf '%s' "${recovery_parent_url}" | grep -oE '[0-9]+$' || true)
@@ -280,7 +303,12 @@ recover_after_post_failure() {
         # を空にすると third-party-parent を見逃し「実測でも孤児」と誤報告してしまう
         # （codex-review P1 指摘 PR #391。CI 失敗の直接原因）
         local comp_fail_parent_url comp_fail_parent comp_fail_same_repo=1
-        comp_fail_parent_url=$(printf '%s' "${COMP_FAIL_JSON}" | jq -r '.parent_issue_url // empty')
+        # jq 解析失敗は状態不明として exit 8 へ統一する（codex-review P1 指摘 PR #391）
+        if ! comp_fail_parent_url=$(printf '%s' "${COMP_FAIL_JSON}" | jq -r '.parent_issue_url // empty'); then
+          echo "エラー: 補償 POST 失敗後の実状態応答 JSON を解析できない。#${ISSUE} が孤児のままかは未確認" >&2
+          echo "reason=recovery-state-unknown" >&2
+          exit 8
+        fi
         comp_fail_parent=""
         if [[ -n "${comp_fail_parent_url}" ]]; then
           comp_fail_parent=$(printf '%s' "${comp_fail_parent_url}" | grep -oE '[0-9]+$' || true)
@@ -363,7 +391,12 @@ recover_after_post_failure() {
     # 空にすると、実際には別リポジトリの第三者親配下にあるのに「実測 parent=なし」と
     # 誤報し、孤児と紐付いていない状態を「孤児」として報告してしまう）
     local rv_parent_url rv_parent rv_same_repo=1
-    rv_parent_url=$(printf '%s' "${RECOVERY_VERIFY_JSON}" | jq -r '.parent_issue_url // empty')
+    # jq 解析失敗は状態不明として exit 8 へ統一する（codex-review P1 指摘 PR #391）
+    if ! rv_parent_url=$(printf '%s' "${RECOVERY_VERIFY_JSON}" | jq -r '.parent_issue_url // empty'); then
+      echo "エラー: 補償復旧後の確認応答 JSON を解析できない。#${ISSUE} の親子状態は未確認" >&2
+      echo "reason=recovery-state-unknown" >&2
+      exit 8
+    fi
     rv_parent=""
     if [[ -n "${rv_parent_url}" ]]; then
       rv_parent=$(printf '%s' "${rv_parent_url}" | grep -oE '[0-9]+$' || true)
