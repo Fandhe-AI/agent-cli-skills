@@ -189,7 +189,8 @@ fn main() {
 # 「firebase-tools のバージョン固定と更新手順」節を参照。
 FIREBASE_TOOLS_VERSION="15.27.0"   # 正の定義箇所。更新手順は下記節を参照
 npx --yes "firebase-tools@${FIREBASE_TOOLS_VERSION}" emulators:start --only hosting --project demo-<name> || {
-  echo "警告: firebase-tools@${FIREBASE_TOOLS_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害等、原因は問わない）。未固定 npx firebase-tools へのフォールバックは行わない。原因を確認してから再実行する。"
+  echo "エラー: firebase-tools@${FIREBASE_TOOLS_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害等、原因は問わない）。未固定 npx firebase-tools へのフォールバックは行わない。原因を確認してから再実行する。" >&2
+  exit 1
 }
 ```
 
@@ -355,7 +356,8 @@ jobs:
 # 実行され得るため、このフェンス内でも代入を実行行に先行させる。
 FIREBASE_TOOLS_VERSION="15.27.0"   # 正の定義箇所は「firebase-tools のバージョン固定と更新手順」節
 npx --yes "firebase-tools@${FIREBASE_TOOLS_VERSION}" hosting:channel:list --project <project-id> --site <site-id> || {
-  echo "警告: firebase-tools@${FIREBASE_TOOLS_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害等、原因は問わない）。未固定 npx firebase-tools へのフォールバックは行わない。原因を確認してから再実行する。"
+  echo "エラー: firebase-tools@${FIREBASE_TOOLS_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害等、原因は問わない）。未固定 npx firebase-tools へのフォールバックは行わない。原因を確認してから再実行する。" >&2
+  exit 1
 }
 ```
 
@@ -372,7 +374,7 @@ npx --yes "firebase-tools@${FIREBASE_TOOLS_VERSION}" hosting:channel:list --proj
 
 **更新手順**:
 1. Step 4 フェンス・Step 6 フェンスの両方の `FIREBASE_TOOLS_VERSION` を**同一コミット**で更新する（値は完全一致させる。実行フェンスが独立シェルで実行され得るため両フェンスに代入が必要）
-2. `node --test skills/setup-firebase-hosting/tests/` で exact semver・全出現一致・実行行の固定を検証する
+2. `node --test skills/setup-firebase-hosting/tests/*.mjs` で exact semver・全出現一致・実行行の固定を検証する
 3. 1 リポジトリで実際に実行し、差分が正常であることを確認する
 4. `chore(setup-firebase-hosting): firebase-tools を X.Y.Z へ更新` でコミットする
 

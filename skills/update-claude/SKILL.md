@@ -251,7 +251,8 @@ cd <target-repo>
 # 「skills CLI のバージョン固定と更新手順」節を参照。
 SKILLS_CLI_VERSION="1.5.23"   # 正の定義箇所。更新手順は下記節を参照
 npx --yes "skills@${SKILLS_CLI_VERSION}" add Fandhe-AI/agent-cli-skills || {
-  echo "警告: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害等、原因は問わない）。未固定 npx skills add へのフォールバックは行わない。原因を確認してから再実行する。"
+  echo "エラー: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害等、原因は問わない）。未固定 npx skills add へのフォールバックは行わない。原因を確認してから再実行する。" >&2
+  exit 1
 }
 ```
 
@@ -388,10 +389,12 @@ sub_issues API が使用できない場合は GitHub Apps の有効化をユー�
 
 **更新手順**:
 1. Step 4-3 フェンス内の `SKILLS_CLI_VERSION` を更新する（このスキル内での正の定義箇所はここ 1 箇所のみ）
-2. `node --test skills/update-claude/tests/` で exact semver・実行行の固定を検証する
+2. `node --test skills/update-claude/tests/*.mjs` で exact semver・実行行の固定を検証する
 3. 1 リポジトリで実際に実行し、差分が正常であることを確認する
 4. `chore(update-claude): skills CLI を X.Y.Z へ更新` でコミットする
 5. 同じ `skills` CLI を固定する `init-claude` / `sync-skills-lock` の同名節も同時更新することを推奨する（値の同期は必須ではないが、乖離した場合はどちらかの節にその旨を記録する）
+
+**既知の乖離（記録）**: 本節の `SKILLS_CLI_VERSION` の値（`1.5.23`）は、`sync-skills-lock/SKILL.md`・`sync-skills-lock/scripts/skills-lock-update.sh` が固定する `SKILLS_CLI_VERSION` の値（`1.5.22`）と異なる（`init-claude` は本節と同一の値で同期済み）。各スキルは独立した固定版として運用しており同期は必須ではないため、意図的な乖離として記録する。次回いずれかを更新する際は、この乖離が解消したか維持されたかを本行で更新する。
 
 **fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害等どの原因でも）は `npx` が非ゼロ終了し停止する。未固定 `npx skills add` へのフォールバック再試行は行わない。
 
