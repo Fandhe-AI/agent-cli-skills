@@ -149,6 +149,27 @@ jobs:
   `gh api orgs/Fandhe-AI/actions/secrets` で実測）。`SKILLS_PAT` は組織に未登録のため
   上流が `SUBMODULE_PAT` へフォールバックする。
 
+### プレースホルダの置換（導入直前・全 5 リポ共通）
+
+上記テンプレートの `<SHA>`（59・100・137 行目相当の実測日付コメント・`uses:` 行・pin コメント）
+と `<YYYY-MM-DD>`（59 行目）は実測値へのプレースホルダであり、配置前に必ず置換する。
+「テンプレートの機械検証」節の実測値は検証時点のスナップショットであり、導入実行時点では
+陳腐化し得るため、導入手順 2・3 の PUT/コミット直前に以下を実行して**その時点の実測値**へ
+置換する（検証時点の値を使い回さない）。
+
+1. `SHA=$(gh api repos/Fandhe-AI/actions/commits/main --jq '.sha')` で最新 SHA を取得する。
+2. `DATE=$(date -u +%Y-%m-%d)` で置換用日付を取得する。
+3. `gh api repos/Fandhe-AI/actions/compare/main...${SHA}` で `ahead_by: 0` を再確認する
+   （導入直前に SHA を取り直したため到達性の再確認も必須）。
+4. テンプレート中の `<SHA>` を全箇所（実測日付コメント・`uses:` 行・pin コメント）
+   `${SHA}` へ、`<YYYY-MM-DD>` を `${DATE}` へ置換してから、リポごとの wrapper 内容を確定する。
+5. 置換後の内容を `.github/scripts/check_update_external_drift.py` の `classify_workflow`
+   に通し、`kind == 'WRAPPER'` かつ `pin == "${SHA}"` かつ `has_schedule == True` を、
+   置換漏れがないことの機械的な確認として実行してから PUT / コミットへ進む。
+
+置換漏れ（`<SHA>` や `<YYYY-MM-DD>` が残ったまま配置）は reusable workflow の解決失敗
+（初回実行・日次同期の即時失敗）に直結するため、上記 5 を経ずに導入手順 2・3 へ進まない。
+
 ## 導入手順（実行担当は本ドキュメント作成後の別フェーズ）
 
 1. **ラベル作成**（5 リポ共通、冪等）: `dependencies` / `automated` ラベルを対象 5 リポの
@@ -160,9 +181,11 @@ jobs:
    `pr-labels: 'dependencies,automated'` をハードコードしているため、未作成だと
    同期 PR 作成が失敗する。
 2. **ruleset の無い 4 リポ**（`aliz-corporate-web` / `automation-spec` /
-   `hobby-keyboard` / `mcp_hub-spec`）: `PUT /repos/{o}/{r}/contents/.github/workflows/update-external.yml`
-   で `main` へ直接コミット。
-3. **`team-hub-spec`**: `main-protection` ruleset により直接 push 不可。ブランチを切り
+   `hobby-keyboard` / `mcp_hub-spec`）: 上記「プレースホルダの置換」を実行して確定した
+   wrapper 内容で `PUT /repos/{o}/{r}/contents/.github/workflows/update-external.yml`
+   を実行し `main` へ直接コミットする。
+3. **`team-hub-spec`**: `main-protection` ruleset により直接 push 不可。上記「プレース
+   ホルダの置換」を実行して確定した wrapper 内容でブランチを切り
    `PUT contents` → `gh pr create` → 必須チェック 4 件（`EditorConfig (strict)` /
    `PoC rustfmt --check` / `Broken link check (lychee)` / `Cursor Bugbot`）の green を
    `gh pr checks --watch` で確認 → `gh pr merge --squash`。ruleset の緩和・bypass 付与は
@@ -171,33 +194,43 @@ jobs:
 4. **初回実行**: 各リポで対象を明示して実行・監視する（作業ディレクトリの
    `origin`（`agent-cli-skills`）へ誤って起動・参照しないよう、以下いずれの
    コマンドにも `--repo Fandhe-AI/<REPO>` を必ず付ける）。`aliz-corporate-web` のみ
-   4-1 を 2 回に分けて段階的に確認する（他 4 リポは `target=all` で 1 回）。
-   1. `target` を明示して dispatch する
-      （`gh workflow run` はこの時点では run ID を返さないため、次段で新規 run を
-      run 一覧から特定する）。
+   4-1〜4-2 を 2 回に分けて段階的に確認する（他 4 リポは `target=all` で 1 回）。
+   1. dispatch 直前に既存 run ID 集合を記録する（BEFORE 集合）:
+      `gh run list --repo Fandhe-AI/<REPO> --workflow update-external.yml --limit 20 --json databaseId --jq '[.[].databaseId] | sort'`
+      の出力を保存する。
+   2. `target` を明示して dispatch する
+      （`gh workflow run` はこの時点では run ID を返さないため、次段で BEFORE 集合との
+      差分から新規 run を特定する）。
       - `aliz-corporate-web`: まず
         `gh workflow run update-external.yml --repo Fandhe-AI/aliz-corporate-web -f target=skill`
-        で skills 経路のみを先に確定し、本手順 4-2〜4-4 を完走させて結論を記録する。
+        で skills 経路のみを先に確定し、本手順 4-3〜4-6 を完走させて結論を記録する。
         成功を確認したうえで改めて
         `gh workflow run update-external.yml --repo Fandhe-AI/aliz-corporate-web -f target=all`
-        を dispatch し、4-2〜4-4 をもう一度通す（submodule ジョブの失敗有無を切り分けて
-        観測するため、いきなり `all` を実行しない）。
+        を dispatch し（このとき BEFORE 集合も取り直す）、4-3〜4-6 をもう一度通す
+        （submodule ジョブの失敗有無を切り分けて観測するため、いきなり `all` を実行しない）。
       - 他 4 リポ: `gh workflow run update-external.yml --repo Fandhe-AI/<REPO> -f target=all`
         で 1 回のみ dispatch する。
-   2. dispatch 直後は一覧反映が遅延し得るため、
-      `gh run list --repo Fandhe-AI/<REPO> --workflow update-external.yml --limit 10 --json databaseId,event,status,createdAt`
-      をポーリングする。`--limit 1` は使わない（dispatch と手順 4-2 の間に schedule や
-      別の手動実行が挟まると目的の run が最新 1 件から押し出されて取りこぼされるため）。
-      取得した最大 10 件の中から `event == "workflow_dispatch"` かつ手順 4-1 の実行時刻
-      以降に `createdAt` を持つ run を探し、現れるまでポーリングを繰り返してから対象 run の
-      `databaseId` を確定する（queued のまま古い run を拾わないための識別）。該当 run が
-      10 件の中に見つからない場合は取りこぼしと判断し、`--limit` を広げて再検索する。
-   3. run ID を特定したら
+   3. dispatch 直後は一覧反映が遅延し得るため、
+      `gh run list --repo Fandhe-AI/<REPO> --workflow update-external.yml --limit 20 --json databaseId,event,status,createdAt`
+      をポーリングする。`--limit 1` は使わない（同時期に別の手動実行や schedule が挟まると
+      目的の run が押し出されて取りこぼされるため）。取得した最大 20 件のうち
+      `event == "workflow_dispatch"` かつ **BEFORE 集合に含まれない**（= 手順 4-1 の
+      ID 差分）run を候補とする。作成時刻 (`createdAt`) だけを判定条件にせず、必ず ID 差分
+      と `event == "workflow_dispatch"` の両方で絞り込む（時刻だけでは同時多発の別手動実行を
+      排除できないため）。
+      - 候補が 0 件: まだ一覧に反映されていないと判断し、ポーリングを継続する
+        （`--limit` を広げても 0 件が続く場合は取りこぼしと判断し再検索する）。
+      - 候補が 1 件: その `databaseId` を対象 run として確定する。
+      - 候補が 2 件以上: 同時期に別の workflow_dispatch が発生し一意に識別できない状態
+        （例: 手動での並行実行）と判断し、**推測で1件を選ばず fail-closed で停止する**。
+        `docs/update-external-schedule.md` の切り分け手順には進まず、候補 run ID 一覧と
+        状況をそのままイシューへ記録し、人間の判断を仰ぐ。
+   4. run ID を特定したら
       `gh run watch <databaseId> --repo Fandhe-AI/<REPO> --exit-status` で完了
       （`status == completed`）まで待機する。単発の `gh run list --limit 1` を一度
       呼ぶだけで結論とせず、`status` が `completed` になったことを確認してから
       `conclusion` を読む。
-   4. 完了後に
+   5. 完了後に
       `gh run view <databaseId> --repo Fandhe-AI/<REPO> --json conclusion,url` で
       最終結論を取得する。「成功 + 同期 PR あり」「成功だが差分なしで PR なし」は
       いずれも正常終了として扱う。失敗時は `docs/update-external-schedule.md` の
