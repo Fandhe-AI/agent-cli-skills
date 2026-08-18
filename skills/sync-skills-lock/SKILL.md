@@ -135,12 +135,24 @@ while IFS= read -r -d '' f; do
   # どのファイルが追加されるか分からない。先に printf でファイル名自体を明示してから
   # 内容の diff を表示する（0 byte のファイルでも名前は必ず見える）。
   printf '%s\n' "--- ${f} ---"
-  # --no-index は index を変更しない（git add -N は使わない。Step 6 の拒否経路が
-  # index からの git checkout -- で承認済み他スキルの hash を復元する設計に依存しており、
-  # intent-to-add エントリの混入はその復元設計と干渉するため）。
-  # 差分ありのとき exit 1 を返す仕様のため、表示専用のこの呼び出しに限り || true で
-  # set -e の中断を避ける。
-  git diff --no-index -- /dev/null "${f}" || true
+  # バイナリファイルは git diff --no-index が "Binary files ... differ" としか出力せず、
+  # 追加される中身を一切提示しない。numstat の追加/削除行数が両方 "-" になる出力で
+  # バイナリ判定し、内容の代わりに種別・サイズ・ハッシュを明示することで、中身を
+  # 確認できないまま承認（Step 7 の git add）だけが通ってしまう非対称を防ぐ。
+  NUMSTAT="$(git diff --no-index --numstat -- /dev/null "${f}" 2>/dev/null || true)"
+  if [[ "${NUMSTAT}" == -$'\t'-$'\t'* ]]; then
+    FILE_SIZE="$(wc -c < "${f}" | tr -d '[:space:]')"
+    FILE_TYPE="$(file -b -- "${f}" 2>/dev/null || echo "unknown")"
+    FILE_HASH="$(git hash-object -- "${f}")"
+    printf '%s\n' "==> バイナリファイル（内容は表示されません）: type=${FILE_TYPE} size=${FILE_SIZE}bytes git-blob-sha1=${FILE_HASH}"
+  else
+    # --no-index は index を変更しない（git add -N は使わない。Step 6 の拒否経路が
+    # index からの git checkout -- で承認済み他スキルの hash を復元する設計に依存しており、
+    # intent-to-add エントリの混入はその復元設計と干渉するため）。
+    # 差分ありのとき exit 1 を返す仕様のため、表示専用のこの呼び出しに限り || true で
+    # set -e の中断を避ける。
+    git diff --no-index -- /dev/null "${f}" || true
+  fi
 done < <(git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/")
 if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
   echo "==> 新規（未追跡）ファイル: なし"

@@ -13,6 +13,9 @@
 //                      （git ls-files の改行区切り出力で分割される回帰の再現）
 //   - 'empty-file'   : 中身が空（0 byte）の未追跡ファイルを作成する
 //                      （git diff --no-index が差分を出さず名前も分からなくなる回帰の再現）
+//   - 'binary-file'  : NUL バイトを含むバイナリの未追跡ファイルを作成する
+//                      （git diff --no-index が "Binary files ... differ" しか出さず、
+//                        内容未確認のまま git add で取り込まれてしまう回帰の再現）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -72,6 +75,10 @@ fi
 if [[ "\${TEST_NPX_SCENARIO:-}" == "empty-file" ]]; then
   # 中身が空（0 byte）の未追跡ファイル（git diff --no-index が差分を出さないケースの確認用）
   : > "\${skill_dir}/EMPTY_FILE.md"
+fi
+if [[ "\${TEST_NPX_SCENARIO:-}" == "binary-file" ]]; then
+  # NUL バイトを含むバイナリファイル（git diff --no-index が内容を出さないケースの確認用）
+  printf 'binary\\x00marker\\x00content' > "\${skill_dir}/IMAGE.bin"
 fi
 exit 0
 `
@@ -215,6 +222,36 @@ test('ケース4: 中身が空の新規ファイルでも、ファイル名が�
     assert.deepEqual(
       cleanDryRunList(ctx.repoDir),
       [`.agents/skills/${SKILL_NAME}/EMPTY_FILE.md`],
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース5: バイナリの未追跡ファイルは種別・サイズ・ハッシュが明示され、内容未確認のまま通過しない', () => {
+  const ctx = setupRepo('binary-file')
+  try {
+    const out = runScript(ctx)
+
+    assert.match(out, /新規（未追跡）ファイル/, '未追跡ファイルの見出しが出力されること')
+    assert.match(out, /IMAGE\.bin/, 'バイナリファイル名が出力に含まれること')
+    assert.match(
+      out,
+      /バイナリファイル（内容は表示されません）: type=.+ size=\d+bytes git-blob-sha1=[0-9a-f]{40}/,
+      'git diff --no-index の "Binary files ... differ" だけに頼らず、種別・サイズ・' +
+        'git blob ハッシュが明示されること',
+    )
+    assert.doesNotMatch(
+      out,
+      /Binary files .* differ/,
+      '内容未確認のまま "Binary files ... differ" だけが出て終わらないこと',
+    )
+
+    // プレビューの未追跡集合と git clean -fdn（拒否経路の対象集合）が一致することを確認する
+    assert.deepEqual(
+      cleanDryRunList(ctx.repoDir),
+      [`.agents/skills/${SKILL_NAME}/IMAGE.bin`],
     )
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
