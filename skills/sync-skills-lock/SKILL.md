@@ -107,16 +107,44 @@ npx skills add "${SOURCE}" --skill "${SKILL_NAME}" --yes
 
 #### Step 5: 当該スキルの差分を表示する
 
+`git diff` は未追跡ファイルを表示しない。Step 4 の clean ガード（`git status --porcelain`）により
+`npx skills add` 実行前の当該ディレクトリは必ず clean であるため、**upstream 側でファイルが増えた
+ケースでは、その新規ファイルは例外なく未追跡になる**。tracked diff だけを見せて Step 6 の承認判断へ
+進むと、その内容を一切確認しないまま承認できてしまうため、tracked 差分と未追跡ファイルの内容を分けて
+両方提示する。
+
 ```bash
-# 当該スキルにスコープした差分のみ表示する
-git diff skills-lock.json ".agents/skills/${SKILL_NAME}/"
+# 当該スキルにスコープした tracked 差分を表示する
+git diff -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+
+# 未追跡ファイルを列挙し、内容を diff 形式で表示する。
+# この集合は Step 7（承認・git add）が新規に取り込む集合、Step 6（拒否・git clean -fd）が
+# 削除する集合と同一（.gitignore 対象を除く非追跡ファイル）であり、
+# 「プレビュー = 承認 = 拒否」の 3 経路が同じ対象を扱うことを保証する。
+UNTRACKED=$(git ls-files --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/")
+if [[ -n "${UNTRACKED}" ]]; then
+  echo "==> 新規（未追跡）ファイル:"
+  while IFS= read -r f; do
+    # --no-index は index を変更しない（git add -N は使わない。Step 6 の拒否経路が
+    # index からの git checkout -- で承認済み他スキルの hash を復元する設計に依存しており、
+    # intent-to-add エントリの混入はその復元設計と干渉するため）。
+    # 差分ありのとき exit 1 を返す仕様のため、表示専用のこの呼び出しに限り || true で
+    # set -e の中断を避ける。
+    git diff --no-index -- /dev/null "${f}" || true
+  done <<< "${UNTRACKED}"
+else
+  echo "==> 新規（未追跡）ファイル: なし"
+fi
 ```
 
-変更点を確認し、更新された `computedHash` の内容をユーザーに提示する。
+変更点を確認し、更新された `computedHash` の内容と未追跡ファイルの中身を合わせてユーザーに提示する。
 
 #### Step 6: ユーザーに当該スキルの承認を求める
 
-差分がある場合のみ、ユーザーに「この更新を適用してよいか」を確認する。
+差分がある場合のみ、ユーザーに「この更新を適用してよいか」を確認する。Step 5 のプレビュー
+（`git ls-files --others --exclude-standard`）・本 Step の拒否（`git clean -fd`）・Step 7 の承認
+（`git add`）は同じ集合（追跡ファイルの変更 + 非 ignore の未追跡ファイル）を対象とする。
+`.gitignore` 対象はいずれの経路でも扱わない。
 
 **却下された場合**は当該スキルのみ即座にリバートして**次スキルへ continue**する（全体を中止しない）:
 
@@ -138,7 +166,7 @@ Step 4 の clean ガードにより `npx` 実行前の当該ディレクトリ�
 #### Step 7: 承認されたスキルを stage する（ループ内で積み上げる）
 
 ```bash
-# 当該スキルのファイルのみをステージング
+# 当該スキルのファイルのみをステージング（tracked 変更 + Step 5 で提示した未追跡ファイル）
 git add skills-lock.json ".agents/skills/${SKILL_NAME}/"
 ```
 
@@ -167,6 +195,7 @@ EOF
 - **source 完全一致検証（必須）**: `source` を `OWNER/REPO` へ正規化した上で `Fandhe-AI/<repo>` に完全一致しないエントリは skip する（`contribute-skill` と同じ安全弁）。前方一致では `../` を含む値が通過してしまうため、完全一致の正規表現で検証する。`skills-lock.json` の改ざんや誤設定から防御するため
 - **`npx skills add --yes` は上書き確認をスキップする**: upstream に破壊的変更がある場合は `git diff` で内容を必ず確認すること
 - **新スキルの取扱い**: ローカルに存在するが upstream に未登録のスキル（`contribute-skill`, `sync-skills-lock` 自身など）は、upstream マージ後に登録する。マージ前に `computedHash` を勝手に書き込まない
+- **Step 5 のプレビューは index を変更しない**: 未追跡ファイルの表示に `git add -N`（intent-to-add）ではなく `git diff --no-index` を使う。Step 6 の拒否経路が index からの `git checkout --` で承認済み他スキルの hash を復元する設計に依存しており、i-t-a エントリの混入はその復元設計と干渉するため
 ## sandbox 環境での実行
 
 このスキルはネットワーク越しの GitHub 操作（`npx skills add` による上流リポジトリの取得等）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する。ネットワーク遮断を解除できない環境では実行できない。
@@ -185,6 +214,25 @@ git status --porcelain skills-lock.json
 
 - コミットに sync 対象スキルの `computedHash` 更新が含まれること
 - ステージ・未ステージに残留変更がないこと
+
+### 未追跡ファイル可視化の手動回帰確認
+
+upstream にファイルが増えたケース（Step 5 のプレビュー拡張が効いているか）は、npx を実行せずに
+未追跡ファイルを模擬して確認できる。
+
+```bash
+# 1. clean な状態で検証用ファイルを作成し、npx が新規ファイルを増やした直後の状態を再現する
+touch ".agents/skills/${SKILL_NAME}/__preview_regression_check__.md"
+
+# 2. Step 5 のプレビュー部（上記コマンド）を実行し、検証用ファイルの内容（0 byte でも
+#    「新規（未追跡）ファイル:」の一覧に名前が出ること）が表示されることを確認する
+
+# 3. git clean -fdn（dry-run）の一覧とプレビューの未追跡一覧が一致することを確認する
+git clean -fdn -- ".agents/skills/${SKILL_NAME}/"
+
+# 4. 検証用ファイルを削除して原状復帰する
+rm ".agents/skills/${SKILL_NAME}/__preview_regression_check__.md"
+```
 
 ## 既存スキルとの関係
 

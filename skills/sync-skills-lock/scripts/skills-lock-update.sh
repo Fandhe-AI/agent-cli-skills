@@ -107,11 +107,34 @@ npx skills add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes
 
 echo ""
 echo "==> 更新完了。変更内容:"
-# install ツリーの上書きも確認するため、skills-lock.json と当該スキルの install ツリー両方を diff する
-git diff skills-lock.json ".agents/skills/${SKILL_NAME}/"
+# install ツリーの上書きも確認するため、skills-lock.json と当該スキルの install ツリー両方を diff する。
+# git diff は未追跡ファイルを表示しない。スクリプト冒頭の clean ガード（porcelain）により
+# npx 実行前の install ツリーは必ず clean のため、npx が新規作成したファイルは
+# 例外なく未追跡になる。tracked diff だけでは upstream 側のファイル増加を一切見せずに
+# 承認判断（呼び出し元の git add）へ進んでしまうため、未追跡分を別途列挙・表示する。
+git diff -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+
+# 承認（呼び出し元の git add、-f なし）が新規に取り込む集合、拒否（git clean -fd、-x なし）が
+# 削除する集合と同一のもの（.gitignore 対象を除く非追跡ファイル）を列挙し、
+# 中身が見えないまま承認 / 拒否のどちらか一方だけが通過する非対称を無くす。
+UNTRACKED=$(git ls-files --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/")
+echo ""
+if [[ -n "${UNTRACKED}" ]]; then
+  echo "==> 新規（未追跡）ファイル — 承認時に git add で取り込まれる集合:"
+  while IFS= read -r f; do
+    # --no-index は index を変更しない（git add -N は使わない。呼び出し元の拒否経路が
+    # index からの git checkout -- で承認済み他スキルの hash を復元する設計に依存しており、
+    # intent-to-add エントリを混入させるとその復元設計と干渉するため）。
+    # 差分ありのとき exit 1 を返す仕様のため、表示専用のこの呼び出しに限り || true で
+    # set -e の中断を避ける（clean ガード等の fail-closed 判定には影響しない）。
+    git diff --no-index -- /dev/null "${f}" || true
+  done <<< "${UNTRACKED}"
+else
+  echo "==> 新規（未追跡）ファイル: なし"
+fi
 
 echo ""
 echo "コミットするには:"
 echo "  git add skills-lock.json"
-echo "  git add .agents/skills/${SKILL_NAME}/"
+echo "  git add .agents/skills/${SKILL_NAME}/  # 上記の未追跡ファイルもここで取り込まれる"
 echo "  git commit -m 'chore(skills-lock): ${SKILL_NAME} の computedHash を upstream と同期'"
