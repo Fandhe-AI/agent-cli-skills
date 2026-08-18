@@ -305,19 +305,28 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
     # workflow に解決済み）と突き合わせる。名前一致のみだと、無効化・改名された
     # 別 workflow の過去 run が同じ `workflowName` を持っていた場合にそれを本物と
     # 誤認し得る（なりすまし）。id 束縛によりこの経路を塞ぐ。
+    # 集計は必須 workflow の run（$rp）に限定する（必須外の skipped/neutral/失敗は
+    # 補償策の合否と無関係のため除外。push_total は push CI の構造的不在検出のため
+    # 全 run（$p）を数える — Issue #364）。$rp は $req_ids（必須集合の id 集合）との
+    # workflowDatabaseId 突き合わせで抽出する。必須集合自身の run が skipped/neutral
+    # で完了した場合は $rp 内で引き続き unknown に計上し green へ倒さない（厳格側の
+    # 設計は必須集合の内側で維持する）。
     printf '%s' "${runs}" | jq -c --arg r "${repo}" --arg b "${branch}" --arg h "${head:0:8}" --argjson reqmap "${required_map}" '
       [.[] | select(.event == "push" and .headBranch == $b)] as $p |
-      ($p | map(.workflowDatabaseId)) as $seen_ids |
+      ($reqmap | map(.id)) as $req_ids |
+      [$p[] | select(.workflowDatabaseId | IN($req_ids[]))] as $rp |
+      ($rp | map(.workflowDatabaseId)) as $seen_ids |
       ($reqmap | map(select(([.id] - $seen_ids) | length > 0) | .name)) as $missing |
       {
         repo: $r, branch: $b, head: $h,
         push_total: ($p | length),
+        required_push_total: ($rp | length),
         required_missing: $missing,
-        incomplete: ([$p[] | select(.status != "completed")] | length),
-        failed:     ([$p[] | select(.status == "completed" and .conclusion != null
+        incomplete: ([$rp[] | select(.status != "completed")] | length),
+        failed:     ([$rp[] | select(.status == "completed" and .conclusion != null
                        and ((.conclusion | IN("failure","cancelled","timed_out","action_required","startup_failure","stale")))
                      )] | length),
-        unknown:    ([$p[] | select(.status == "completed"
+        unknown:    ([$rp[] | select(.status == "completed"
                        and ((.conclusion // "") | IN("success",
                             "failure","cancelled","timed_out","action_required","startup_failure","stale") | not)
                      )] | length)
@@ -329,14 +338,14 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
   ```
   $ bash probe.sh 'Fandhe-AI/agent-cli-skills:["CI"]'
-  {"repo":"Fandhe-AI/agent-cli-skills","branch":"main","head":"1dacc6b6","push_total":1,"required_missing":[],"incomplete":0,"failed":0,"unknown":0}
+  {"repo":"Fandhe-AI/agent-cli-skills","branch":"main","head":"b1edb268","push_total":1,"required_push_total":1,"required_missing":[],"incomplete":0,"failed":0,"unknown":0}
   ```
 
   対象ブランチ明示形（`@branch` で非既定ブランチを検査。本リポの `ci.yml` は `push: branches: [main]` のため非既定ブランチでは push run が起動せず `push_total: 0` = 補償策不成立になる）:
 
   ```
   $ bash probe.sh 'Fandhe-AI/agent-cli-skills@fix/352-post-failure-compensation:["CI"]'
-  {"repo":"Fandhe-AI/agent-cli-skills","branch":"fix/352-post-failure-compensation","head":"01db07b0","push_total":0,"required_missing":["CI"],"incomplete":0,"failed":0,"unknown":0}
+  {"repo":"Fandhe-AI/agent-cli-skills","branch":"fix/352-post-failure-compensation","head":"b140607f","push_total":0,"required_push_total":0,"required_missing":["CI"],"incomplete":0,"failed":0,"unknown":0}
   ```
 
   fail-closed 経路も同じスクリプトで実測している（`gh run list` へ到達する前に打ち切られる）:
@@ -380,16 +389,18 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
   | 条件（上から順に評価） | 判定 | 意味 |
   |------|------|------|
-  | `push_total == 0` | 補償策不成立 | push トリガ workflow が無い / `paths` フィルタで除外された |
+  | `push_total == 0` | 補償策不成立 | push トリガ workflow が無い / `paths` フィルタで除外された（`push_total` は必須外を含む push run 全件で判定する。「push CI の構造的不在」検出はこの全件基準でのみ意味を持つ） |
   | 取得件数が 100 件に到達 | 判定不能 | 取得範囲外に失敗・未完了 run がある可能性を排除できない |
   | 権限・API 障害で判定に到達できない | 判定不能 | 記録して再測する（green にも不成立にも倒さない） |
   | `push_total >= 1` かつ `required_missing != []` | 補償策不成立 | push run はあるが必須 workflow の一部が起動していない（軽量 workflow のみ成功等）。`failed`/`incomplete`/`unknown` の値によらずこの行が優先し、green にも red にも倒さない |
-  | `push_total >= 1` かつ `required_missing == []` かつ `incomplete >= 1` | 未完了 | 完了を待って再測する（green と扱わない） |
-  | `push_total >= 1` かつ `required_missing == []` かつ `incomplete == 0` かつ `failed >= 1` | red | 必須 workflow は全件起動しており補償策は成立するが、base が壊れている。`unknown` が同時に正でもこの行が優先する（実測された失敗を合否不明へ丸めない） |
-  | `push_total >= 1` かつ `required_missing == []` かつ `incomplete == 0` かつ `failed == 0` かつ `unknown >= 1` | 判定不能 | 合否に分類できない conclusion が混在し、かつ実測された失敗はない。green へ倒さない |
-  | `push_total >= 1` かつ `required_missing == []` かつ `failed == 0` かつ `incomplete == 0` かつ `unknown == 0` | green | 必須 workflow が全件起動し尽くし、かつ全件が健全に完了。補償策が成立し base は健全 |
+  | `push_total >= 1` かつ `required_missing == []` かつ `incomplete >= 1` | 未完了 | 必須 workflow の run（`required_push_total` 件）に未完了が残る。完了を待って再測する（green と扱わない） |
+  | `push_total >= 1` かつ `required_missing == []` かつ `incomplete == 0` かつ `failed >= 1` | red | 必須 workflow は全件起動しており補償策は成立するが、必須 workflow の run に失敗が含まれ base が壊れている。`unknown` が同時に正でもこの行が優先する（実測された失敗を合否不明へ丸めない） |
+  | `push_total >= 1` かつ `required_missing == []` かつ `incomplete == 0` かつ `failed == 0` かつ `unknown >= 1` | 判定不能 | 必須 workflow の run に合否分類できない conclusion（`neutral`/`skipped` 等）が混在し、かつ実測された失敗はない。green へ倒さない |
+  | `push_total >= 1` かつ `required_missing == []` かつ `failed == 0` かつ `incomplete == 0` かつ `unknown == 0` | green | 必須 workflow が全件起動し尽くし、その run（`required_push_total` 件）全件が健全に完了。**必須外 run の結果（skipped/neutral/失敗を問わず）は判定に影響しない**。補償策が成立し base は健全 |
 
-  `failed` は `cancelled` / `timed_out` / `action_required` / `startup_failure` / `stale` を失敗側に数える。**合格（green への算入）は `success` のみに限定する**。`neutral` / `skipped` は失敗側にも算入しないが合格側にも入れず `unknown` 側へ計上する（意味的コンフリクト検出の補償策としては「本当に実行され成功した」ことの確認が目的であり、`neutral`/`skipped` は「実行されたが判定不能」を意味するため green へ倒さない。SKILL.md の CI 全 green 判定が任意チェックの `skipped`/`neutral` を許容するのとは前提が異なる — こちらは必須 workflow の健全完了を確認する補償策であるため厳格側に倒す）。`required_missing` は必須集合の各 workflow を、実際に push イベントで観測された run の `workflowDatabaseId` 集合と id 突き合わせした結果、対応する run が見つからなかった名前の一覧であり、空配列であることは「必須 workflow（同定済みの id が一致する run に限る）が全件起動した」ことの直接証拠になる（個々の workflow ごとの conclusion 追跡は不要 — 全体の `failed`/`incomplete`/`unknown` が 0 であれば、起動した必須 workflow を含む push run 全件が `success` で完了したことを意味する）。
+  **集計対象は前段で `id` 解決した必須 workflow の run（`$rp`）に限る。** `failed`/`incomplete`/`unknown` はいずれも `$rp` のみを走査し、必須集合に含まれない run（必須外の `paths` フィルタ付き軽量 workflow 等）は `push_total`（全 push run件数。構造的不在検出専用）を除き集計に含めない。これにより、必須外の workflow が `skipped`/`neutral` で完了しても green 判定を妨げない（Cursor Bugbot 指摘対応・Issue #364）。一方、**必須 workflow 自身**の run が `skipped`/`neutral` で完了した場合は `$rp` 内で引き続き `unknown` に計上し、厳格側の判定（green へ倒さない）を維持する。`push_total`（全 push run。`$p` の件数）と `required_push_total`（必須 run のみ。`$rp` の件数）は出力レベルで区別する。
+
+  `failed` は `cancelled` / `timed_out` / `action_required` / `startup_failure` / `stale` を失敗側に数える。**合格（green への算入）は `success` のみに限定する**。`neutral` / `skipped` は失敗側にも算入しないが合格側にも入れず `unknown` 側へ計上する（意味的コンフリクト検出の補償策としては「本当に実行され成功した」ことの確認が目的であり、`neutral`/`skipped` は「実行されたが判定不能」を意味するため green へ倒さない。SKILL.md の CI 全 green 判定が任意チェックの `skipped`/`neutral` を許容するのとは前提が異なる — こちらは必須 workflow の健全完了を確認する補償策であるため厳格側に倒す）。`required_missing` は必須集合の各 workflow を、実際に push イベントで観測された run の `workflowDatabaseId` 集合と id 突き合わせした結果、対応する run が見つからなかった名前の一覧であり、空配列であることは「必須 workflow（同定済みの id が一致する run に限る）が全件起動した」ことの直接証拠になる（個々の workflow ごとの conclusion 追跡は不要 — 必須 run の `failed`/`incomplete`/`unknown` が 0 であれば、起動した必須 workflow の run 全件が `success` で完了したことを意味する）。
 - **不成立時の扱い（3 択・順に推奨）**:
   1. マージ先ブランチへ push トリガの最低限のビルド/テストを追加する（`paths` フィルタで除外されないことをプローブで実測確認する）。これが本則。
   2. `autoMerge: true` を使わない（マージ可能状態で停止し人間がマージする）。補償策不成立のリポでは既定の非 opt-in 運用を推奨とする。
