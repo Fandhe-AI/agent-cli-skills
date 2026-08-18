@@ -27,13 +27,36 @@ applies_to: create-pr, implement-issue, implement-review, implement-review-pr, s
 - `.env`・`.env.local`・`*.env` ファイルのコミット混入
 - `GITHUB_TOKEN`・`GH_TOKEN`・API キーの直書き
 - パスワード・秘密鍵の変数への代入（`password=`・`secret=`・`token=` 等）
+- 認証情報を埋め込んだ接続文字列（`scheme://user:pass@host`）・JWT
+- 構造化ファイル（`config.yml`・`settings.json`・`*.tf`・k8s manifest 等）に直接書かれた実値
 
-検出コマンド例:
+検出コマンド例（`create-commit` Step 2 と同じ正規表現。ERE で書く）:
 
 ```bash
-git diff --staged | grep -E '(token|secret|password|api_key)\s*=' | grep -v '#'
+# 追加行のみを対象にする。`grep -v '^\+\+\+'` は BRE で `\+` が量指定子と解釈される
+# 実装（GNU grep / ugrep）で構文エラーになり、`|| echo "検出なし"` と組むと fail-open に
+# なるため、必ず `-E` を付けて `grep -vE '^\+\+\+'` と書く。
+# 鍵名は `[a-z_]*token` のように接頭辞を問わない形にする。`access_?token` 等を個別に
+# 列挙すると `GITHUB_TOKEN` / `GH_TOKEN`（上のチェック対象に明記した名前）を取りこぼす
+git diff --staged --diff-filter=ACMR | grep -E '^\+' | grep -vE '^\+\+\+' \
+  | grep -iE '(password|passwd|secret|client_secret|api_?key|[a-z_]*token|aws_secret_access_key|private_?key)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}'
+
 git status --short | grep -E '\.env'
 ```
+
+除外パターン（`grep -vE` によるプレースホルダ・環境変数参照の除去）も同じ経路で fail-open する。
+除外側が構文エラーになると、検出済みの行が消えたうえで非ゼロ終了し「検出なし」になる。
+**検出側・除外側の双方を既知サンプルで自己テストしてから本検査を走らせる**（実装は
+`skills/create-commit/SKILL.md` Step 2 (a)。パターンは変数へ一度だけ定義し、自己テストと
+本検査で同じ文字列を共有する）。
+
+**パターン照合は網羅的な検出ではない。** 任意の変数名に代入された認証情報、値の形式に規則性が
+無い自社発行トークン、除外パターンに偶然一致する実値は原理的に拾えない。したがって
+**パターンが何も検出しなかった場合でも、staged 差分の追加行を秘密情報の観点で目視レビューする**
+（手順の詳細は `skills/create-commit/SKILL.md` の Step 2 (b)）。
+
+GitHub の secret scanning / push protection を有効化している場合、それは push 時点の**追加の**
+防御線であり、この手順の代替にはならない（ローカルコミット時点では働かない）。
 
 発見した場合は**コミット・PR 作成を中止**し、ユーザーに警告する。
 
