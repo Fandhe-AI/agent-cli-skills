@@ -259,14 +259,31 @@ recover_after_post_failure() {
       echo "reason=recovery-state-unknown" >&2
       exit 8
     fi
-    local rv_parent_url rv_parent
+    # 同一リポジトリ判定は「親の存在判定」から分離する（cursor[bot] Medium 指摘 PR #391。
+    # comp_fail_parent と同じ欠陥がここにもあった: cross-repo 判定時のみ rv_parent を
+    # 空にすると、実際には別リポジトリの第三者親配下にあるのに「実測 parent=なし」と
+    # 誤報し、孤児と紐付いていない状態を「孤児」として報告してしまう）
+    local rv_parent_url rv_parent rv_same_repo=1
     rv_parent_url=$(printf '%s' "${RECOVERY_VERIFY_JSON}" | jq -r '.parent_issue_url // empty')
     rv_parent=""
-    if [[ -n "${rv_parent_url}" && "${rv_parent_url%/issues/*}" == "${SELF_REPO_URL}" ]]; then
+    if [[ -n "${rv_parent_url}" ]]; then
       rv_parent=$(printf '%s' "${rv_parent_url}" | grep -oE '[0-9]+$' || true)
+      if [[ "${rv_parent_url%/issues/*}" != "${SELF_REPO_URL}" ]]; then
+        rv_same_repo=0
+      fi
     fi
-    if [[ "${rv_parent}" != "${CURRENT_PARENT}" ]]; then
-      echo "エラー: 補償復旧後の確認で旧親 #${CURRENT_PARENT} 配下に見つからない（実測 parent=#${rv_parent:-なし}）。状態を手で確認する" >&2
+    if [[ "${rv_same_repo}" -ne 1 || "${rv_parent}" != "${CURRENT_PARENT}" ]]; then
+      if [[ -n "${rv_parent}" ]]; then
+        local rv_scope
+        if [[ "${rv_same_repo}" -eq 1 ]]; then
+          rv_scope="同一リポジトリの #${rv_parent}"
+        else
+          rv_scope="別リポジトリの ${rv_parent_url}"
+        fi
+        echo "エラー: 補償復旧後の確認で旧親 #${CURRENT_PARENT} 配下ではなく ${rv_scope} 配下だった（補償復旧と前後して第三者が付け替えた可能性）。状態を手で確認する" >&2
+      else
+        echo "エラー: 補償復旧後の確認で旧親 #${CURRENT_PARENT} 配下に見つからない（実測 parent=なし）。状態を手で確認する" >&2
+      fi
       echo "reason=recovery-state-unknown" >&2
       exit 8
     fi
@@ -290,14 +307,30 @@ recover_after_post_failure() {
       echo "reason=recovery-state-unknown" >&2
       exit 8
     fi
-    local recheck_parent_url recheck_parent
+    # 同一リポジトリ判定は「親の存在判定」から分離する（cursor[bot] Medium 指摘 PR #391。
+    # 上の補償復旧後確認と同じ欠陥: cross-repo 判定時のみ recheck_parent を空にすると、
+    # 実際には別リポジトリの第三者親配下にあるのに「実測 parent=なし」＝孤児と誤報する）
+    local recheck_parent_url recheck_parent recheck_same_repo=1
     recheck_parent_url=$(printf '%s' "${RECHECK_JSON}" | jq -r '.parent_issue_url // empty')
     recheck_parent=""
-    if [[ -n "${recheck_parent_url}" && "${recheck_parent_url%/issues/*}" == "${SELF_REPO_URL}" ]]; then
+    if [[ -n "${recheck_parent_url}" ]]; then
       recheck_parent=$(printf '%s' "${recheck_parent_url}" | grep -oE '[0-9]+$' || true)
+      if [[ "${recheck_parent_url%/issues/*}" != "${SELF_REPO_URL}" ]]; then
+        recheck_same_repo=0
+      fi
     fi
-    if [[ "${recheck_parent}" != "${CURRENT_PARENT}" ]]; then
-      echo "エラー: 反映遅延を考慮した再確認で旧親 #${CURRENT_PARENT} 配下から外れていた（実測 parent=#${recheck_parent:-なし}）。直前の読み取りは DELETE 反映前の過渡状態だった可能性が高く、復旧成立とはみなさず停止する" >&2
+    if [[ "${recheck_same_repo}" -ne 1 || "${recheck_parent}" != "${CURRENT_PARENT}" ]]; then
+      if [[ -n "${recheck_parent}" ]]; then
+        local recheck_scope
+        if [[ "${recheck_same_repo}" -eq 1 ]]; then
+          recheck_scope="同一リポジトリの #${recheck_parent}"
+        else
+          recheck_scope="別リポジトリの ${recheck_parent_url}"
+        fi
+        echo "エラー: 反映遅延を考慮した再確認で旧親 #${CURRENT_PARENT} 配下ではなく ${recheck_scope} 配下だった（第三者が付け替えた可能性）。復旧成立とはみなさず停止する" >&2
+      else
+        echo "エラー: 反映遅延を考慮した再確認で旧親 #${CURRENT_PARENT} 配下から外れていた（実測 parent=なし）。直前の読み取りは DELETE 反映前の過渡状態だった可能性が高く、復旧成立とはみなさず停止する" >&2
+      fi
       echo "reason=recovery-state-unknown" >&2
       exit 8
     fi

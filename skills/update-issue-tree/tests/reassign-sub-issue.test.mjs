@@ -302,6 +302,38 @@ test('ケース36: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST
   assert.doesNotMatch(r.stderr, /reason=compensation-post-failed-third-party-parent/)
 })
 
+test('ケース37: DELETE 後の POST 失敗 → 補償 POST 成功後の確認 GET で「別リポジトリ」の第三者親が実測される → exit 8 reason=recovery-state-unknown、「実測 parent=なし」と誤報しない（cursor[bot] Medium 指摘 PR #391。compensation-verify の same-repo 判定を親の存在判定から分離する回帰）', () => {
+  const r = run(['--issue', '44', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '', // 復旧のための再取得は孤児 → 補償 POST を撃つ
+    parentAfter2: '9',
+    parentRepoAfter2: 'other/repo', // 補償 POST 成功後の確認では実は別リポジトリの第三者親配下
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  assert.match(r.stderr, /別リポジトリの.*other\/repo.*issues\/9/, '別リポジトリの第三者親であることが stderr から読み取れること')
+  assert.doesNotMatch(r.stderr, /parent=なし/, 'cross-repo の実測親を「parent=なし」（孤児）と誤報しないこと')
+})
+
+test('ケース38: DELETE 後の POST 失敗 → 復旧の再取得では旧親配下に見えるが、反映遅延の再確認では「別リポジトリ」の第三者親が実測される → exit 8 reason=recovery-state-unknown、「実測 parent=なし」と誤報しない（cursor[bot] Medium 指摘 PR #391。delayed-recheck の same-repo 判定を親の存在判定から分離する回帰）', () => {
+  const r = run(['--issue', '45', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '5', // 復旧のための再取得は旧親配下に見える → 反映遅延の再確認へ進む
+    parentAfter2: '9',
+    parentRepoAfter2: 'other/repo', // 再確認では実は別リポジトリの第三者親配下
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  assert.match(r.stderr, /別リポジトリの.*other\/repo.*issues\/9/, '別リポジトリの第三者親であることが stderr から読み取れること')
+  assert.doesNotMatch(r.stderr, /parent=なし/, 'cross-repo の実測親を「parent=なし」（孤児）と誤報しないこと')
+  const c = calls(r.logPath)
+  assert.equal(c.filter((l) => l.includes('--method POST')).length, 1, '補償 POST は撃たれていないこと（recheck 分岐は復旧成立済みとみなした場合のみ通る経路のため）')
+})
+
 test('ケース15: 孤児経路の POST が "only have one parent" → exit 7（DELETE 未実行で無変更）', () => {
   // 事前実測では孤児だったが POST 時点で別の親が付いていたレース。DELETE を 1 度も
   // 撃っていないためツリーは無変更であり、exit 8（部分変更）とは復旧手順が異なる
