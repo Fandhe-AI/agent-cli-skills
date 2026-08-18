@@ -205,6 +205,13 @@ confirm_stable_parent() {
   recheck_parent=""
   if [[ -n "${recheck_parent_url}" ]]; then
     recheck_parent=$(printf '%s' "${recheck_parent_url}" | grep -oE '[0-9]+$' || true)
+    # 「URL なし（孤児）」と「URL はあるが番号を抽出できない（解析不能）」を区別する。
+    # 後者を空のまま通すと孤児と誤認され、実際には親が存在し得る状態で後続の書き込みを
+    # 許してしまう（codex-review P1 指摘 PR #391。fail-open）
+    if [[ -z "${recheck_parent}" ]]; then
+      echo "エラー: ${label}の parent_issue_url から親 issue 番号を抽出できない（解析不能な応答形式）。#${ISSUE} の親子状態は未確認のまま終端する" >&2
+      return 1
+    fi
     if [[ "${recheck_parent_url%/issues/*}" != "${SELF_REPO_URL}" ]]; then
       recheck_same_repo=0
     fi
@@ -264,6 +271,14 @@ recover_after_post_failure() {
   recovery_parent=""
   if [[ -n "${recovery_parent_url}" ]]; then
     recovery_parent=$(printf '%s' "${recovery_parent_url}" | grep -oE '[0-9]+$' || true)
+    # 非空 URL から番号を抽出できない場合は孤児と誤認せず状態不明で停止する（codex-review
+    # P1 指摘 PR #391。空のまま通すと孤児分岐へ入り、実際には親が存在し得る状態で旧親への
+    # 補償 POST という承認外の書き込みを実行してしまう fail-open）
+    if [[ -z "${recovery_parent}" ]]; then
+      echo "エラー: parent_issue_url から親 issue 番号を抽出できない（解析不能な応答形式: ${recovery_parent_url}）。#${ISSUE} の親子状態は未確認" >&2
+      echo "reason=recovery-state-unknown" >&2
+      exit 8
+    fi
     if [[ "${recovery_parent_url%/issues/*}" != "${SELF_REPO_URL}" ]]; then
       recovery_same_repo=0
     fi
@@ -312,6 +327,13 @@ recover_after_post_failure() {
         comp_fail_parent=""
         if [[ -n "${comp_fail_parent_url}" ]]; then
           comp_fail_parent=$(printf '%s' "${comp_fail_parent_url}" | grep -oE '[0-9]+$' || true)
+          # 非空 URL の番号抽出不能は孤児と誤認せず状態不明で停止する（codex-review P1
+          # 指摘 PR #391）
+          if [[ -z "${comp_fail_parent}" ]]; then
+            echo "エラー: parent_issue_url から親 issue 番号を抽出できない（解析不能な応答形式: ${comp_fail_parent_url}）。#${ISSUE} が孤児のままかは未確認" >&2
+            echo "reason=recovery-state-unknown" >&2
+            exit 8
+          fi
           if [[ "${comp_fail_parent_url%/issues/*}" != "${SELF_REPO_URL}" ]]; then
             comp_fail_same_repo=0
           fi
@@ -400,6 +422,13 @@ recover_after_post_failure() {
     rv_parent=""
     if [[ -n "${rv_parent_url}" ]]; then
       rv_parent=$(printf '%s' "${rv_parent_url}" | grep -oE '[0-9]+$' || true)
+      # 非空 URL の番号抽出不能は孤児と誤認せず状態不明で停止する（codex-review P1
+      # 指摘 PR #391）
+      if [[ -z "${rv_parent}" ]]; then
+        echo "エラー: parent_issue_url から親 issue 番号を抽出できない（解析不能な応答形式: ${rv_parent_url}）。#${ISSUE} の親子状態は未確認" >&2
+        echo "reason=recovery-state-unknown" >&2
+        exit 8
+      fi
       if [[ "${rv_parent_url%/issues/*}" != "${SELF_REPO_URL}" ]]; then
         rv_same_repo=0
       fi
