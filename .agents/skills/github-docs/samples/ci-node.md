@@ -54,3 +54,5 @@ jobs:
 - `npm ci` は `package-lock.json` に基づくクリーンインストールで CI 環境に適している
 - `pull_request` トリガーのデフォルトアクティビティタイプは `opened`, `synchronize`, `reopened`
 - フォークからの PR では `GITHUB_TOKEN` が読み取り専用になるため、シークレットを使う処理は別途対応が必要
+
+<!-- sync-gate 実測用の一時変更。この PR はマージせず close する -->
