@@ -18,7 +18,7 @@ model: sonnet
 ## 前提条件
 
 - `gh` CLI がインストールされ、認証済みであること
-- `node` / `npx` が利用可能であること（`npx skills add` を使用するため）
+- `node` / `npx` が利用可能であること（`npx skills add` を使用するため）。`skills` CLI は固定版（`SKILLS_CLI_VERSION`、現在 `1.5.22`）で実行する。詳細は「skills CLI のバージョン固定と更新手順」節を参照
 - ルート直下の `skills-lock.json` が存在すること
 - **実行前に `skills-lock.json` に未コミットの変更がないこと**（ステージ済み・未ステージ問わず）。本スキルの実行中に発生する変更は sync 由来のみとなり、`git add skills-lock.json` で全体をステージしても無関係な変更が混入しない
 - **対象スキルの `.agents/skills/<name>/` に未コミット変更がないこと**。`npx skills add` は `.agents/skills/<name>/` を upstream の最新版で上書きするため、そのディレクトリに WIP が存在すると即座に失われる。`git checkout` で戻せるのは「最後にコミットされた状態」のみであり、npx 実行前の未コミット編集は復元できない。**未追跡ファイルとして存在する WIP も対象**であり、`git status --porcelain` で検出する
@@ -91,8 +91,14 @@ if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]]; then
   continue
 fi
 
-# CLI に computedHash を更新させる（--yes で確認プロンプトをスキップ）
-npx skills add "${SOURCE}" --skill "${SKILL_NAME}" --yes
+# skills CLI (vercel-labs/skills) は固定版でのみ実行する（未固定 npx はレジストリ
+# 最新版の無検証即時実行になり、差分確認・承認より前に走る supply chain 経路になる）。
+# 1つ目の --yes は npx 自体のインストール確認プロンプトのスキップ、末尾の --yes は
+# skills CLI へ渡す確認プロンプトのスキップで、別物（位置で区別される）。
+SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更新手順は下記節を参照
+
+# CLI に computedHash を更新させる
+npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --yes
 ```
 
 `npx skills add` は以下を行う:
@@ -159,6 +165,24 @@ EOF
 
 ユーザーにコミットしてよいか確認する。承認済みスキルが1つもなかった場合（全却下・差分なし）はコミットせずその旨を伝える。
 
+## skills CLI のバージョン固定と更新手順
+
+**Why**: `npx skills add` をバージョン未固定で実行すると、npx はローカルキャッシュに無い場合レジストリのその時点の最新版を確認なしで即時取得・実行する。`skills`（vercel-labs/skills）パッケージが乗っ取られた場合、これは任意コード実行の経路になる。しかもこの実行は Step 5 の差分確認・Step 6 のユーザー承認より**前**に走るため、source の `Fandhe-AI/<repo>` 完全一致検証では防げない。exact 版（`X.Y.Z`。dist-tag・`^`/`~` レンジは禁止）への固定が信頼アンカーになる。
+
+**固定版の決め方**:
+1. `npm view skills version` で現在の latest を確認する
+2. `npm view skills repository.url` が `vercel-labs/skills` であることを確認する
+3. `npm view skills time --json` 等で公開日時が不自然でないことを確認する
+4. upstream リポジトリの該当タグ間の差分・リリースノートを確認し、問題なければ採用する
+
+**更新手順**:
+1. `scripts/skills-lock-update.sh` の `SKILLS_CLI_VERSION` と、本ファイルの Step 4 フェンス内の `SKILLS_CLI_VERSION` を**同一コミット**で更新する（値は完全一致させる）
+2. `node --test skills/sync-skills-lock/tests/` で両ファイルの一致を検証する
+3. 1 スキルで実際に実行し、差分が正常であることを確認する
+4. `chore(sync-skills-lock): skills CLI を X.Y.Z へ更新` でコミットする
+
+**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了し、`scripts/skills-lock-update.sh` は `set -euo pipefail` により即座に停止する。黙って最新版へフォールバックする経路は存在しない。dist-tag・レンジ指定への書き換えは禁止する。
+
 ## 注意事項
 
 - **全スキル sync での途中却下**: 1スキルずつ承認・stage を行うため、途中で却下しても承認済みスキルの stage は保持される。全スキル処理後に一括コミットする
@@ -167,6 +191,7 @@ EOF
 - **source 完全一致検証（必須）**: `source` を `OWNER/REPO` へ正規化した上で `Fandhe-AI/<repo>` に完全一致しないエントリは skip する（`contribute-skill` と同じ安全弁）。前方一致では `../` を含む値が通過してしまうため、完全一致の正規表現で検証する。`skills-lock.json` の改ざんや誤設定から防御するため
 - **`npx skills add --yes` は上書き確認をスキップする**: upstream に破壊的変更がある場合は `git diff` で内容を必ず確認すること
 - **新スキルの取扱い**: ローカルに存在するが upstream に未登録のスキル（`contribute-skill`, `sync-skills-lock` 自身など）は、upstream マージ後に登録する。マージ前に `computedHash` を勝手に書き込まない
+- **skills CLI は固定版で実行する**: `npx skills add` はバージョン未固定で実行しない。固定版の決め方・更新手順は「skills CLI のバージョン固定と更新手順」節を参照
 ## sandbox 環境での実行
 
 このスキルはネットワーク越しの GitHub 操作（`npx skills add` による上流リポジトリの取得等）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する。ネットワーク遮断を解除できない環境では実行できない。
