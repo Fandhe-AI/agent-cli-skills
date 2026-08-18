@@ -157,19 +157,26 @@ emit_result() {
   echo "result=${state} issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${old_parent_out}"
 }
 
-# 実測で旧親配下に見えた場合でも、DELETE の反映遅延による過渡状態を見ている可能性を
-# 排除できない。短い間隔を空けて再取得し、2 回連続で同じ結果（旧親配下）が得られて
-# 初めて安定した状態として確定する（codex-review P1 指摘 PR #391）。呼び出し文脈が
-# 異なる2箇所（補償 POST 失敗直後の確認 / 実測で既に旧親配下だった場合の確認）で
-# 同一ロジックが必要になるため共通化した。安定確認できれば戻り値 0（stdout 出力なし）、
-# できなければ戻り値 1 とし、原因を stderr へ出力する（呼び出し元は exit 8 で終端する）。
-# 引数 $1: ログメッセージに使う文脈ラベル（例: "補償復旧後の確認"）
-confirm_stable_old_parent() {
+# 実測で期待した親配下に見えた場合でも、DELETE/POST の反映遅延による過渡状態を見ている
+# 可能性を排除できない。短い間隔を空けて再取得し、2 回連続で同じ結果が得られて初めて
+# 安定した状態として確定する（codex-review P1 指摘 PR #391）。呼び出し文脈が異なる複数箇所
+# （補償 POST 失敗直後の確認 / 実測で既に旧親配下だった場合の確認 / 新親への偽陰性確認）で
+# 同一ロジックが必要になるため共通化した。期待どおりで安定確認できれば戻り値 0（stdout
+# 出力なし）。
+# 期待値とは異なるが実測が本来の新親 #NEW_PARENT だった場合は戻り値 2 とし、情報行のみ
+# stderr へ出す（呼び出し元はこれを「元の POST が偽陰性で実際には成功していた」ことを
+# 意味する成功終端として扱う。cursor[bot] Medium 指摘 PR #391 — 旧親への復旧確認・偽陰性
+# 確認のいずれでも、実測が新親であることを第三者による割り込みと誤ラベルしていた）。
+# それ以外の不一致（第三者の別親・孤児への転落）は戻り値 1 とし、原因を stderr へ出力する
+# （呼び出し元は exit 8 で終端する）。
+# 引数 $1: ログメッセージに使う文脈ラベル（例: "補償復旧後の確認"） 引数 $2: 期待する親 issue 番号
+confirm_stable_parent() {
   local label="$1"
+  local expected="$2"
   sleep "${RECOVERY_RECHECK_DELAY_SEC:-2}"
   local recheck_json
   if ! recheck_json=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>"${GH_ERR_FILE}"); then
-    echo "エラー: ${label}のための再取得に失敗した。#${ISSUE} が旧親 #${CURRENT_PARENT} 配下で安定しているか未確認のまま終端する" >&2
+    echo "エラー: ${label}のための再取得に失敗した。#${ISSUE} が #${expected} 配下で安定しているか未確認のまま終端する" >&2
     cat "${GH_ERR_FILE}" >&2
     return 1
   fi
@@ -185,21 +192,25 @@ confirm_stable_old_parent() {
       recheck_same_repo=0
     fi
   fi
-  if [[ "${recheck_same_repo}" -ne 1 || "${recheck_parent}" != "${CURRENT_PARENT}" ]]; then
-    if [[ -n "${recheck_parent}" ]]; then
-      local recheck_scope
-      if [[ "${recheck_same_repo}" -eq 1 ]]; then
-        recheck_scope="同一リポジトリの #${recheck_parent}"
-      else
-        recheck_scope="別リポジトリの ${recheck_parent_url}"
-      fi
-      echo "エラー: ${label}で旧親 #${CURRENT_PARENT} 配下ではなく ${recheck_scope} 配下だった（第三者が付け替えた可能性）。復旧成立とはみなさず停止する" >&2
-    else
-      echo "エラー: ${label}で旧親 #${CURRENT_PARENT} 配下から外れていた（実測 parent=なし）。直前の読み取りは DELETE 反映前の過渡状態だった可能性が高く、復旧成立とはみなさず停止する" >&2
-    fi
-    return 1
+  if [[ "${recheck_same_repo}" -eq 1 && "${recheck_parent}" == "${expected}" ]]; then
+    return 0
   fi
-  return 0
+  if [[ "${expected}" != "${NEW_PARENT}" && "${recheck_same_repo}" -eq 1 && "${recheck_parent}" == "${NEW_PARENT}" ]]; then
+    echo "情報: ${label}で期待した #${expected} ではなく本来の新親 #${NEW_PARENT} 配下にあることが判明した（元の POST が偽陰性で実際には成功していた可能性）" >&2
+    return 2
+  fi
+  if [[ -n "${recheck_parent}" ]]; then
+    local recheck_scope
+    if [[ "${recheck_same_repo}" -eq 1 ]]; then
+      recheck_scope="同一リポジトリの #${recheck_parent}"
+    else
+      recheck_scope="別リポジトリの ${recheck_parent_url}"
+    fi
+    echo "エラー: ${label}で期待した #${expected} 配下ではなく ${recheck_scope} 配下だった（第三者が付け替えた可能性）。復旧成立とはみなさず停止する" >&2
+  else
+    echo "エラー: ${label}で期待した #${expected} 配下から外れていた（実測 parent=なし）。直前の読み取りは反映前の過渡状態だった可能性が高く、復旧成立とはみなさず停止する" >&2
+  fi
+  return 1
 }
 
 # DELETE 成功後の POST 失敗（旧親から外れ新親にも付かない部分変更）に対する補償復旧
@@ -267,6 +278,23 @@ recover_after_post_failure() {
             comp_fail_same_repo=0
           fi
         fi
+        if [[ -n "${comp_fail_parent}" && "${comp_fail_same_repo}" -eq 1 && "${comp_fail_parent}" == "${NEW_PARENT}" ]]; then
+          # 補償 POST はエラー応答だったが、実測では本来の新親 #NEW_PARENT に既に付いている。
+          # これは元の POST（新親への付け替え）が偽陰性で実際には成功していたことを意味し、
+          # 第三者の割り込みではない。下の third-party-parent 分岐で誤ラベルしないよう、
+          # 先にこの成功ケースを判定する（cursor[bot] Medium 指摘 PR #391 「New parent
+          # misread as failure」）。1 回の読み取りだけでは過渡状態の可能性を排除できないため
+          # 共通関数で再確認してから確定する
+          echo "情報: 旧親 #${CURRENT_PARENT} への補償復旧 POST はエラー応答だったが、実測では本来の新親 #${NEW_PARENT} に既に付いていた（元の POST が偽陰性だった可能性。反映遅延を考慮し再確認する）" >&2
+          local nfp_rc=0
+          confirm_stable_parent "補償 POST 失敗後の新親偽陰性確認" "${NEW_PARENT}" || nfp_rc=$?
+          if [[ "${nfp_rc}" -eq 0 ]]; then
+            emit_result "reassigned" "${CURRENT_PARENT}"
+            exit 0
+          fi
+          echo "reason=recovery-state-unknown" >&2
+          exit 8
+        fi
         if [[ -n "${comp_fail_parent}" && "${comp_fail_same_repo}" -eq 1 && "${comp_fail_parent}" == "${CURRENT_PARENT}" ]]; then
           # 補償 POST はエラー応答だったが、実測では既に旧親 #CURRENT_PARENT 配下にある
           # （応答が偽陰性だった、または反映が追いついた）。この場合を third-party-parent
@@ -278,9 +306,16 @@ recover_after_post_failure() {
           # PR #391。通常の DELETE 経路（下の recovery_parent 分岐）と同じ安定確認を
           # 共通関数で適用し、2 回連続で旧親配下が観測できて初めて確定する）
           echo "情報: 旧親 #${CURRENT_PARENT} への補償復旧 POST はエラー応答だったが、実測では既に旧親配下に復旧していた（応答が偽陰性だった可能性。反映遅延を考慮し再確認する）" >&2
-          if confirm_stable_old_parent "補償 POST 失敗後の偽陰性確認"; then
+          local cfp_rc=0
+          confirm_stable_parent "補償 POST 失敗後の偽陰性確認" "${CURRENT_PARENT}" || cfp_rc=$?
+          if [[ "${cfp_rc}" -eq 0 ]]; then
             echo "result=restored issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${CURRENT_PARENT}"
             exit 10
+          elif [[ "${cfp_rc}" -eq 2 ]]; then
+            # 反映遅延の再確認で、実は本来の新親 #NEW_PARENT に付いていたことが判明した
+            # （元の POST の偽陰性がここで初めて見える経路。cursor[bot] Medium 指摘 PR #391）
+            emit_result "reassigned" "${CURRENT_PARENT}"
+            exit 0
           fi
           echo "reason=recovery-state-unknown" >&2
           exit 8
@@ -326,6 +361,15 @@ recover_after_post_failure() {
         rv_same_repo=0
       fi
     fi
+    if [[ "${rv_same_repo}" -eq 1 && "${rv_parent}" == "${NEW_PARENT}" ]]; then
+      # 補償 POST は成功応答だったが、事後確認では旧親ではなく本来の新親 #NEW_PARENT に
+      # 付いていた。旧親への補償 POST と競合するタイミングで、元の POST の偽陰性が遅れて
+      # 反映された可能性がある。第三者の割り込みではなく本来の目的が達成された状態のため、
+      # third-party 誤ラベルを避けて成功終端する（cursor[bot] Medium 指摘 PR #391）
+      echo "情報: 補償復旧後の確認で旧親ではなく本来の新親 #${NEW_PARENT} 配下にあることが判明した（元の POST が偽陰性で実際には成功していた可能性）" >&2
+      emit_result "reassigned" "${CURRENT_PARENT}"
+      exit 0
+    fi
     if [[ "${rv_same_repo}" -ne 1 || "${rv_parent}" != "${CURRENT_PARENT}" ]]; then
       if [[ -n "${rv_parent}" ]]; then
         local rv_scope
@@ -354,7 +398,14 @@ recover_after_post_failure() {
     # ここで「復旧済み」と確定させると誤報になる（codex-review P1 指摘 PR #391）。
     # 短い間隔を空けて再取得し、2 回連続で同じ結果（旧親配下）が得られて初めて安定した
     # 状態として確定する（共通関数化。上の補償 POST 失敗後の偽陰性確認と同一ロジック）
-    if ! confirm_stable_old_parent "反映遅延を考慮した再確認"; then
+    local sop_rc=0
+    confirm_stable_parent "反映遅延を考慮した再確認" "${CURRENT_PARENT}" || sop_rc=$?
+    if [[ "${sop_rc}" -eq 2 ]]; then
+      # 再確認で、実は本来の新親 #NEW_PARENT に付いていたことが判明した（元の POST の
+      # 偽陰性がここで初めて見える経路。cursor[bot] Medium 指摘 PR #391）
+      emit_result "reassigned" "${CURRENT_PARENT}"
+      exit 0
+    elif [[ "${sop_rc}" -ne 0 ]]; then
       echo "reason=recovery-state-unknown" >&2
       exit 8
     fi
