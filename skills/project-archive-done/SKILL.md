@@ -116,4 +116,4 @@ Status が "Done" のアイテムが一覧から消えていれば完了。ア�
 
 ## sandbox 環境での実行
 
-このスキルはネットワーク越しの GitHub 操作（`gh project item-archive`）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する（`docs/sandbox-tls.md` 参照）。ネットワーク遮断を解除できない環境では実行できない。
+このスキルはネットワーク越しの GitHub 操作（`gh project item-archive`）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する。ネットワーク遮断を解除できない環境では実行できない。

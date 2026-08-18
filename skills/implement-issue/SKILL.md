@@ -178,4 +178,4 @@ EOF
 
 ## sandbox 環境での実行
 
-計画作成・実装・テスト実行・Step 7 のコミット作成までは sandbox 環境で実行できる（ワークスペース内書き込みのみで、ネットワーク越しの操作を行わない）。`gh issue view` によるイシュー取得は Step 1 の代替経路（Issue 本文の直接受け取り）を使えば省略できる。「実装対象外（out-of-scope）の扱い」節の追跡ステップ（`gh issue list` による既存 Issue 検索、`gh issue comment` によるコメント追加、`create-issue-tree` / `create-issue` による新規起票）も選択した場合はネットワークを要する。本スキルのフロー内でネットワークを要するのは `gh issue view` とこれら out-of-scope 追跡の任意ステップのみで、いずれも省略可能である（本スキルのフローに `git push` は含まれない。コミット後にリモートへ反映する場合は別途 `create-pr` 等の後続スキルを使う）。これらを実行する場合はコマンド単位で sandbox 無効にする（`docs/sandbox-tls.md` 参照）。
+計画作成・実装・テスト実行・Step 7 のコミット作成までは sandbox 環境で実行できる（ワークスペース内書き込みのみで、ネットワーク越しの操作を行わない）。`gh issue view` によるイシュー取得は Step 1 の代替経路（Issue 本文の直接受け取り）を使えば省略できる。「実装対象外（out-of-scope）の扱い」節の追跡ステップ（`gh issue list` による既存 Issue 検索、`gh issue comment` によるコメント追加、`create-issue-tree` / `create-issue` による新規起票）も選択した場合はネットワークを要する。本スキルのフロー内でネットワークを要するのは `gh issue view` とこれら out-of-scope 追跡の任意ステップのみで、いずれも省略可能である（本スキルのフローに `git push` は含まれない。コミット後にリモートへ反映する場合は別途 `create-pr` 等の後続スキルを使う）。これらを実行する場合はコマンド単位で sandbox 無効にする。

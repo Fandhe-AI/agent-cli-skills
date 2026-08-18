@@ -112,4 +112,4 @@ Step 5 のレポート出力に以下が含まれていれば完了:
 
 ## sandbox 環境での実行
 
-Step 1〜3 の `gh project view` / `gh project item-list` / `gh project field-list` はいずれも GitHub API への読み取りであり、ネットワークを要する。該当コマンド単位で sandbox 無効にして実行する（`docs/sandbox-tls.md` 参照）。本スキルは書き込みを一切行わない（プロジェクトへの変更なし・ワークスペース外への書き込みなし）。Step 4〜5 の集計・レポート生成はローカル処理であり、ネットワークを要しない。
+Step 1〜3 の `gh project view` / `gh project item-list` / `gh project field-list` はいずれも GitHub API への読み取りであり、ネットワークを要する。該当コマンド単位で sandbox 無効にして実行する。本スキルは書き込みを一切行わない（プロジェクトへの変更なし・ワークスペース外への書き込みなし）。Step 4〜5 の集計・レポート生成はローカル処理であり、ネットワークを要しない。
