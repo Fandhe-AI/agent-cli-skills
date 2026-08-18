@@ -104,7 +104,15 @@ jobs:
       # 明示的に 'false' へフォールバックしオプトイン運用とする。
       submodule-auto-merge: ${{ vars.SUBMODULE_AUTO_MERGE || 'false' }}
       submodule-auto-merge-allowlist: ${{ vars.SUBMODULE_AUTO_MERGE_ALLOWLIST }}
-      skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}
+      # 組織変数 vars.SKILLS_AUTO_MERGE は実測で 'true'（visibility: all）であり、
+      # allowlist 未指定と組み合わさると「全スキルを自動マージ対象」と判定される。
+      # 本リポジトリの branch ruleset 構造は保護あり（active/bypass:0/total:12/unbound:[]）
+      # だが、上流スキル同期 PR が required checks 完了を待って実際に BLOCKED になることは
+      # 測定日時点で確認対象の open な同期 PR が無く未確認（PR レベルの状態は観測不能）。
+      # `docs/update-external-rollout.md` の組織変数追従への切替条件（PR レベルの BLOCKED
+      # 確認必須）を満たさないため fail-closed の 'false' を明示する。詳細は
+      # docs/skills-auto-merge-fleet-audit.md（イシュー #359）4.2/5/6 節を参照。
+      skills-auto-merge: 'false'
       skills-auto-merge-allowlist: ${{ vars.SKILLS_AUTO_MERGE_ALLOWLIST }}
     secrets:
       # 未登録の secret は空文字となり、共通側のガードが checkout 前に fail-closed で止める。

@@ -42,7 +42,9 @@ fail-closed 化した（`docs/update-external-rollout.md` 参照）。本ドキ�
 `yadori`
 
 （`agent-cli-skills` 自身も `VARS_FOLLOW` である。本リポは ruleset 構造は保護ありだが、
-4.2 節の PR レベル確認は他 23 リポと同様に判定不能であり、fail-closed 対象に含まれる。）
+4.2 節の PR レベル確認は他 24 リポと同様に判定不能であり、fail-closed 対象に含まれる。
+本リポジトリは本エージェントの書き込み対象内であるため、6 節のとおり本 PR で
+`skills-auto-merge: 'false'` を実際に適用済み。）
 
 ## 3. 判定基準
 
@@ -217,7 +219,10 @@ gh pr list -R "Fandhe-AI/<repo>" --state open --search "エージェントスキ
 イシュー本文の受入条件 a / b、および 4.2 節の PR レベル実測結果を踏まえ、**案 a
 （wrapper で `skills-auto-merge: 'false'` を明示）を適用する方針を決定した。適用対象は
 PR レベルでサーバー側強制を確認できた `team-hub-spec` を除く `VARS_FOLLOW` 24 リポ
-（`template-articles` を含む）。**
+（`template-articles` を含む）。このうち本リポジトリ自身（`agent-cli-skills`）は
+このドキュメントを含む本 PR で実際に適用済み（`.github/workflows/update-external.yml`。
+「6. 適用すべき変更内容」参照）。残り 23 リポは本 worktree からの書き込み対象外の
+別リポジトリであり、後続担当への引き継ぎとする（「7. 実施状況」参照）。**
 
 - 案 a は #342 と同一の前例があり、変更が wrapper 1 行 + コメントに閉じ、可逆で、他の運用
   （手動マージ・schedule 実行そのもの）を壊さない。24 リポへ一律適用してもリポごとの
@@ -236,31 +241,51 @@ PR レベルでサーバー側強制を確認できた `team-hub-spec` を除く
   実行権限（ローカルコミットのみ・push/PR 作成不可）を超える。**適用しない。将来
   `SKILLS_AUTO_MERGE_ALLOWLIST` を allowlist 運用に切り替える案として記録するに留める。**
 
-## 6. 適用すべき変更内容（未適用・後続担当への引き継ぎ）
+## 6. 適用すべき変更内容（`agent-cli-skills` は本 PR で適用済み・残り 23 リポは後続担当への引き継ぎ）
 
 4.2 節の PR レベル実測を踏まえ、`team-hub-spec` を除く `VARS_FOLLOW` 24 リポ
 （`template-articles` を含む全件）の `.github/workflows/update-external.yml` にある
 `skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}` を、
 `docs/update-external-rollout.md` のテンプレートと同型のコメント +
 `skills-auto-merge: 'false'` へ置換する変更を**方針として決定した**（差分案は下記）。
-**本エージェントはこの差分をいずれのリポジトリへも実際には適用していない**
-（push・他リポジトリへの書き込み・PR 作成の権限を持たないため）。適用の実施状況は
-「7. 実施状況」を参照。
+**このうち `agent-cli-skills` 自身は本ドキュメントと同じ PR の一部として
+`.github/workflows/update-external.yml` へ実際に適用済み**（本リポジトリは本エージェントの
+書き込み対象内であり、push 権限の欠如を理由に未適用とすることはできないため）。
+**残り 23 リポ（`agent-cli-skills` を除く）は本 worktree の外側にある別リポジトリへの
+書き込みであり、本エージェントの実行範囲（本リポジトリへのローカルコミット・push のみ）を
+超えるため未適用のまま引き継ぐ。** 適用の実施状況は「7. 実施状況」を参照。
 
 ## 7. 実施状況（本イシューのスコープ境界）
 
-**本タスク（実装エージェント）は push・他リポジトリへの書き込み・PR 作成・イシューコメントを
-行わない契約下にある。** したがって:
+**本タスク（実装エージェント）は本リポジトリ（`agent-cli-skills`）以外への push・書き込み・
+PR 作成・イシューコメントを行わない契約下にある。** したがって:
 
-- 24 リポへの実際の変更適用（PR 作成・マージ）
+- `agent-cli-skills` を除く 23 リポへの実際の変更適用（PR 作成・マージ）
 - 案 c（組織変数の変更）の実施
 - 案 b（branch protection 新設）の起票・実施
 - 本イシュー #359 への判定結果コメント
 
-はいずれも `outOfScope` として本エージェントの返却に記録し、実施しない。
-実装計画の Step 5/7/8（25 リポへの横断適用・本リポ PR 作成・イシューコメント）は
-本ドキュメント作成をもって代替し、適用は後続の担当（push/PR 作成が許可されたエージェント、
+はいずれも `outOfScope` として本エージェントの返却に記録し、実施しない
+（`agent-cli-skills` への適用自体は 6 節のとおり本 PR 内で実施済みであり対象外ではない）。
+実装計画の Step 5/7/8（25 リポへの横断適用・本リポ PR 作成・イシューコメント）は、
+`agent-cli-skills` 分の実適用 + 本ドキュメント作成をもって部分的に代替し、残り 23 リポへの
+適用は後続の担当（該当リポジトリへの push/PR 作成が許可されたエージェント、
 またはユーザー自身）に委ねる。
+
+`agent-cli-skills` に実際に適用した差分（`.github/workflows/update-external.yml`）:
+
+```diff
+-      skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}
++      # 組織変数 vars.SKILLS_AUTO_MERGE は実測で 'true'（visibility: all）であり、
++      # allowlist 未指定と組み合わさると「全スキルを自動マージ対象」と判定される。
++      # 本リポジトリの branch ruleset 構造は保護あり（active/bypass:0/total:12/unbound:[]）
++      # だが、上流スキル同期 PR が required checks 完了を待って実際に BLOCKED になることは
++      # 測定日時点で確認対象の open な同期 PR が無く未確認（PR レベルの状態は観測不能）。
++      # `docs/update-external-rollout.md` の組織変数追従への切替条件（PR レベルの BLOCKED
++      # 確認必須）を満たさないため fail-closed の 'false' を明示する。詳細は
++      # docs/skills-auto-merge-fleet-audit.md（イシュー #359）4.2/5/6 節を参照。
++      skills-auto-merge: 'false'
+```
 
 `template-articles` へ適用すべき差分（参考・未適用。ruleset/classic BP とも不在が理由）:
 
@@ -276,7 +301,8 @@ PR レベルでサーバー側強制を確認できた `team-hub-spec` を除く
 +      skills-auto-merge: 'false'
 ```
 
-他 23 リポ（`agent-cli-skills` / `agent-reference-skills` / `articles` / `automation` /
+残り 22 リポ（`agent-cli-skills`・`template-articles` を除く。
+`agent-reference-skills` / `articles` / `automation` /
 `automation-app` / `baby-tasks-app` / `brain-training-app` / `desktop-automation-app` /
 `fandhe-backend` / `fandhe-frontend` / `fandhe-multi-platform` / `ideas` / `life-plan-app` /
 `local-llm-server` / `local-server` / `mirror-ui` / `pet-hub` / `pronunciation-vocab-app` /
