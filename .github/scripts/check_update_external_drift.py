@@ -1317,8 +1317,17 @@ def scan(
     result.upstream_sha = upstream_sha
 
     # --- 軸 4: 上流 reusable workflow 自身の検査 ---
+    #
+    # イシュー #343 Review 指摘（TOCTOU）: ここを ``ref=main`` で取得すると、
+    # 上の commits/main 呼び出しから本呼び出しまでの間に main が動いた場合、
+    # ``upstream_sha``（結果に記録し ``evaluate_pin``/``evaluate_pin_impact`` が
+    # 軸 2 拡張の実効差分判定に使う SHA）と本文の内容が食い違う。以降の
+    # ``evaluate_pin_impact(pin_text, upstream_text)`` は upstream_text を
+    # 「upstream_sha 時点の内容」として扱うため、ref を upstream_sha に固定して
+    # 両者を一致させる（bump_update_external_pin.py の main() と同じ理由・
+    # 同じ修正）。
     status, upstream_text = gh_get_with_status(
-        f"repos/{UPSTREAM_REPO}/contents/{UPSTREAM_WORKFLOW_PATH}?ref=main",
+        f"repos/{UPSTREAM_REPO}/contents/{UPSTREAM_WORKFLOW_PATH}?ref={upstream_sha}",
         token,
         raw=True,
     )

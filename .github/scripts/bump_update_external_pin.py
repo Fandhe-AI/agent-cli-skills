@@ -268,7 +268,12 @@ class BumpTarget:
 class BumpOutcome:
     repo: str
     action: str  # "created" / "skipped-existing-pr" / "skipped-contract" /
-    # "skipped-replace-error" / "failed"
+    # "skipped-replace-error" / "skipped-scan-error" / "failed"
+    # "skipped-scan-error" は API 障害等で検査そのものができなかったケース
+    # （404 によるファイル不在等の正当な対象外とは区別する）。main() はこの
+    # action を「検査不能」として扱い、run 全体を失敗させる（イシュー #343
+    # Review 指摘: 検査不能を候補 0 件の成功扱いに畳んで自動追従の停止を
+    # 見逃さないため）。
     detail: str
 
 
@@ -338,8 +343,21 @@ def find_bump_candidates(
         status, text = cud.gh_get_with_status(
             f"repos/{repo}/contents/{cud.WORKFLOW_PATH}", token, raw=True
         )
+        if status == 404:
+            continue  # ファイル無し = このリポは wrapper で管理されていない。対象外
         if status != 200:
-            continue  # ファイル無し・取得不能はそもそも bump 対象ではない
+            # イシュー #343 Review 指摘: 404（ファイル無し）と 403/429/5xx
+            # （検査不能）を同一の continue で畳むと、API 障害で全対象を検査
+            # できなくても候補 0 件のまま成功扱いになり、自動追従の停止に
+            # 気づけない。404 以外は理由を記録した上でこのリポをスキップし、
+            # main() 側で「検査不能があった run は失敗させる」判定に使う。
+            skipped.append(
+                BumpOutcome(
+                    repo, "skipped-scan-error",
+                    f"wrapper ファイル取得が HTTP {status}。検査不能",
+                )
+            )
+            continue
 
         info = cud.classify_workflow(text)
         if info["kind"] != cud.KIND_WRAPPER:
@@ -347,14 +365,40 @@ def find_bump_candidates(
 
         pin = info["pin"]
         outcome, payload = compare_pin(pin)
+        if outcome == "absent":
+            continue  # pin が上流に存在しない（compare 404）= 乖離検知側で扱う範囲
         if outcome != "ok":
-            continue  # compare できない = 乖離検知側で UNKNOWN 扱いの範囲。触らない
+            # 403/429/5xx や JSON 解析失敗は「compare できない」だけで、pin が
+            # 壊れている証拠にはならない（check_update_external_drift.py の
+            # compare_pin と同じ理由）。検査不能として記録し、run 全体を
+            # 失敗させる判定材料にする（イシュー #343 Review 指摘）。
+            skipped.append(
+                BumpOutcome(
+                    repo, "skipped-scan-error",
+                    f"pin `{pin[:12]}` の compare 取得が失敗: {payload}",
+                )
+            )
+            continue
 
         verdict = cud.evaluate_pin(pin, upstream_sha, payload)
         if verdict["state"] != cud.PIN_BEHIND:
             continue  # 最新 pin・到達不能・異常はここでは扱わない（乖離検知が報告する）
 
         pin_text = fetch_pin_workflow(pin)
+        if pin_text is None:
+            # イシュー #343 Review 指摘: fetch_pin_workflow が 403/429/5xx で
+            # None を返した場合、evaluate_pin_impact(None, upstream_text) は
+            # fail-closed で equivalent=False を返す。これは「実効差分あり」
+            # と区別が付かず、そのまま bump・PR 作成へ進んでしまう。取得不能を
+            # 検査不能として記録し、pin_text と upstream_text の不一致を実際に
+            # 確認できた場合のみ書き込み対象にする。
+            skipped.append(
+                BumpOutcome(
+                    repo, "skipped-scan-error",
+                    f"pin `{pin[:12]}` の workflow 本文取得に失敗。検査不能なため bump しない",
+                )
+            )
+            continue
         impact = cud.evaluate_pin_impact(pin_text, upstream_text)
         if impact["equivalent"]:
             continue  # 実効差分なし。bump する意味が無い
@@ -529,19 +573,20 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
         f"repos/{target.repo}/pulls", pr_payload, token
     )
     if pr_status != 201:
-        # PUT（ファイル更新）は成功済みのため、この実行で作成した（201）
-        # ブランチはここで削除しないと新 SHA へ更新済みのコミットを持つ
-        # open PR の無いブランチが残る。422 で再利用したブランチは、
-        # この実行が作成したものではない可能性があるため削除しない
-        # （上記「4. ファイル更新」と同じ理由。イシュー #343 Review 指摘）。
-        detail_suffix = ""
-        if created_ref_this_run:
-            _delete_ref_best_effort(target.repo, branch, token)
-        else:
-            detail_suffix = f"（branch `{branch}` はこの実行が作成したものではないため削除せず残置。手動確認推奨）"
+        # 「4. ファイル更新」の 422 分岐とは異なり、ここでは直前の PUT が
+        # 200/201 で成功済み——つまり ``branch`` は所有関係にかかわらず
+        # 「この実行が今まさに書き込んだ内容」を head に持つ。422（既存
+        # ブランチ再利用）であっても、それが他所有の進行中ブランチだったと
+        # したら PUT 自体が意図しない上書きになっているため、この時点では
+        # 削除を差し控える理由（＝他所有ブランチの誤削除防止）がすでに
+        # 成立しない。削除せずに残すと以降の run が同じブランチ名へ ref 作成
+        # → 422 → PR 未作成のまま滞留し、contents conflict で PR を作れなく
+        # なる（cursor Bugbot 指摘・イシュー #343 Review）。そのため PUT
+        # 成功後は created_ref_this_run を問わず削除する。
+        _delete_ref_best_effort(target.repo, branch, token)
         return BumpOutcome(
             target.repo, "failed",
-            f"PR 作成が HTTP {pr_status}: {pr_body_resp}{detail_suffix}",
+            f"PR 作成が HTTP {pr_status}: {pr_body_resp}",
         )
 
     try:
@@ -664,7 +709,14 @@ def main() -> int:
         targets = [t for t in targets if t.repo == want]
 
     for s in skipped:
-        print(f"::warning::{s.repo}: [{s.action}] {s.detail}")
+        level = "error" if s.action == "skipped-scan-error" else "warning"
+        print(f"::{level}::{s.repo}: [{s.action}] {s.detail}")
+
+    # イシュー #343 Review 指摘: 候補走査で API 障害等により検査できなかった
+    # リポがあっても、targets が正当に 0 件のケースと区別が付かないまま
+    # 素通りすると「候補 0 件 = 乖離なし」に見えてしまい、自動追従の停止に
+    # 気づけない。検査不能が 1 件でもあれば run を失敗させる。
+    scan_errors = [s for s in skipped if s.action == "skipped-scan-error"]
 
     print(f"bump 対象候補: {len(targets)} 件（上流 main: {upstream_sha[:12]}）")
 
@@ -692,6 +744,13 @@ def main() -> int:
     failed = [o for o in outcomes if o.action == "failed"]
     if failed:
         print(f"::error::{len(failed)} 件のリポジトリで bump に失敗した（上記ログ参照）")
+        return 1
+
+    if scan_errors:
+        print(
+            f"::error::{len(scan_errors)} 件のリポジトリで検査不能（API 障害等）だった"
+            "（上記ログ参照）。自動追従の停止を検知できないため run を失敗させる"
+        )
         return 1
 
     return 0

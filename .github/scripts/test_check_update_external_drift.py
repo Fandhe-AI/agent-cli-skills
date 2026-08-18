@@ -928,7 +928,11 @@ class TestScanEndToEnd(unittest.TestCase):
                 # 区別する。区別しないと両者が同じ FIXTURE_UPSTREAM_OK を返し、
                 # 「pin の内容が main と一致する」が常に真になって
                 # PIN-STALE が一切出なくなる（fixture の衝突）。
-                if path.endswith("?ref=main"):
+                if path.endswith("?ref=main") or path.endswith(f"?ref={UPSTREAM_SHA}"):
+                    # イシュー #343 Review 指摘の TOCTOU 修正で scan() は
+                    # ``?ref=main`` ではなく ``?ref={upstream_sha}``（この
+                    # fixture では固定値 UPSTREAM_SHA）で軸 4 の本文を取得する。
+                    # 呼び出し側の実装差し替えに追従して両方一致させる。
                     return 200, FIXTURE_UPSTREAM_OK
                 if path.endswith(f"?ref={OLD_PIN}"):
                     return 200, FIXTURE_UPSTREAM_OLD
