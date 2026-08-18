@@ -417,6 +417,37 @@ test('remeasureResidualBytesNow は全ての exit で構造化された { failed
   assert.doesNotMatch(fnBody, /\breturn\s*\n/)
 })
 
+// --- recordEphemeralWorktree が path: '' で計上した検証不可エントリは、実測し直しの du 対象
+// からは除外されるが、それを「測定済みとして基準へ取り込む」（byteBaselineLedgerCount へ含める）
+// と、実体が巨大でもバイト軸から恒久的に不可視になる（CI codex-review fail 対象・
+// PRRT_kwDORuXFg86aPIh5）。未検証エントリが 1 件でもあれば measureResidualWorktreeBytes を
+// 呼ばず kib を null（測定失敗）にし、byteBaselineLedgerCount を更新させない（= 常に
+// unbaselinedLedgerCount へ残り続け、解消されるまで perWorktreeByteReserve の floor 予約が
+// 積み増され続ける）ことをソース確認する。
+
+test('実測し直しは検証不可（空パス）エントリが台帳に残る間、測定を試みず fail-closed で基準更新を止める', () => {
+  const fnStart = source.indexOf('async function remeasureResidualBytesNow()')
+  const fnEnd = source.indexOf('\nwhile (true) {', fnStart)
+  const fnBody = source.slice(fnStart, fnEnd)
+  assert.ok(fnStart >= 0 && fnEnd > fnStart, 'remeasureResidualBytesNow 本体を特定できること')
+  // 未検証エントリの検出
+  assert.match(
+    fnBody,
+    /const unverifiedEphemeralCount = ephemeralWorktrees\.filter\(/,
+  )
+  // 未検証エントリが 1 件でもあれば measureResidualWorktreeBytes を呼ばず kib は null
+  assert.match(
+    fnBody,
+    /const kib =\s*\n?\s*unverifiedEphemeralCount > 0 \? null : /,
+  )
+  // kib===null の早期 return より前で byteBaselineLedgerCount への代入が起きないこと
+  // （成功時の代入 `byteBaselineLedgerCount = ephemeralWorktrees.length` は kib===null 分岐の
+  // 後にのみ存在する = 未検証エントリが残る限り基準が更新されない）
+  const nullReturnIdx = fnBody.indexOf('if (kib === null)')
+  const baselineAssignIdx = fnBody.indexOf('byteBaselineLedgerCount = ephemeralWorktrees.length')
+  assert.ok(nullReturnIdx >= 0 && baselineAssignIdx > nullReturnIdx)
+})
+
 test('monitoring 再開ゲートは remeasureResidualBytesNow の戻り値のみで defer 判定し、newStartSuppressed の identity 比較を使わない', () => {
   const anchor = 'monitoring 再開の直前にも実測し直す'
   const start = source.indexOf(anchor)

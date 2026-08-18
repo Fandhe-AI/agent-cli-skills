@@ -4776,12 +4776,27 @@ async function remeasureResidualBytesNow() {
   // sweepEligiblePaths（削除を試みただけで成否未確定）で除外すると、locked・権限不足等で
   // 削除が失敗し実体が残っている worktree まで測定対象から漏れ、実ディスク使用量を過小評価する
   // fail-open になる（codex-review 指摘）。
+  // recordEphemeralWorktree はパスを検証できなかった生成も path: '' で台帳へ計上する（件数を
+  // 過小評価しないため）。この空パス・検証不可プレースホルダを du 対象から単純に除外すると、
+  // 下の byteRemeasureAtLedgerCount / byteBaselineLedgerCount が ephemeralWorktrees.length を
+  // そのまま「測定済み」扱いにしてしまい、実体が計測されないまま以後の projection の
+  // 積み増し対象からも恒久的に外れる（実ディスク使用量がバイト軸から不可視になり、件数軸の
+  // 上限までフェイルオープンで新規着手を許し得る。CI codex-review 指摘・PR #390）。
+  // ラン開始時観測（3140 行付近）が検証不可パス混在時に測定全体を失敗扱いにするのと同じ
+  // fail-closed 方針を、ラン中の実測し直しにも適用する: 未検証エントリが 1 件でもあれば
+  // 部分測定で済ませず全体を測定失敗として扱う。
+  const unverifiedEphemeralCount = ephemeralWorktrees.filter(
+    (e) => typeof e.path !== 'string' || e.path === '' || e.path.startsWith('(検証不可:'),
+  ).length
   const targetPaths = [...residualPathsAtStart, ...ephemeralWorktrees.map((e) => e.path)].filter(
     (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !confirmedRemovedPaths.has(p),
   )
-  const kib = targetPaths.length > 0 ? await measureResidualWorktreeBytes(targetPaths) : 0
+  const kib =
+    unverifiedEphemeralCount > 0 ? null : targetPaths.length > 0 ? await measureResidualWorktreeBytes(targetPaths) : 0
   // 間引きカウンタは測定成否に関わらず進める。失敗のたびに毎周回リトライすると agent 呼び出し
-  // コストが際限なく積み上がる。
+  // コストが際限なく積み上がる。未検証エントリが残る間は kib が常に null になり続けるため、
+  // byteBaselineLedgerCount も更新されず（下の kib===null 分岐で早期 return）、未測定分は
+  // projection の積み増し対象から外れたまま放置されない（fail-closed を維持する）。
   byteRemeasureAtLedgerCount = ephemeralWorktrees.length
   if (kib === null) {
     // projection（perWorktreeByteReserve）は開始時に確定した安全側の「下限」floor 値であり、
@@ -4800,7 +4815,8 @@ async function remeasureResidualBytesNow() {
     if (!newStartSuppressed) {
       newStartSuppressed = {
         reason:
-          `残置 worktree のディスク使用量のラン中実測し直しに失敗した（対象 ${targetPaths.length} 件）。` +
+          `残置 worktree のディスク使用量のラン中実測し直しに失敗した（対象 ${targetPaths.length} 件、` +
+          `うちパス検証不可 ${unverifiedEphemeralCount} 件）。` +
           `perWorktreeByteReserve による見積りは開始時の下限 floor 値であり実使用量の上界ではない` +
           `ため、実測できない状態で projection のみへフォールバックすると floor を超える成長を` +
           `検知できないまま容量上限を超過し得る（fail-open防止）。ディスク枯渇防止のため以降の` +
