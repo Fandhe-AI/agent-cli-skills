@@ -491,6 +491,24 @@ jobs:
         self.assertFalse(m["ok"], m["detail"])
         self.assertIn("全 6 件中 1 件が未固定", m["detail"])
 
+    def test_upstream_action_sha_non_string_job_name_does_not_crash(self):
+        # `jobs:` の YAML キーは `yaml.safe_load` が非文字列（数値等）を
+        # 許容する。非文字列 job_name をそのまま `_sanitize_for_detail` へ
+        # 渡すと `str.replace` が `AttributeError` で落ち、drift check 全体が
+        # 例外終了して fail-closed 契約に反する（PR #355 レビュー指摘）。
+        non_string_job = FIXTURE_UPSTREAM_OK.replace(
+            "jobs:\n  submodule:",
+            "jobs:\n  1:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: Untrusted job\n"
+            "        uses: owner/repo@main\n"
+            "  submodule:",
+        )
+        m = markers_map(non_string_job)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"], m["detail"])
+        self.assertIn("`1`", m["detail"])
+
     def test_upstream_action_sha_self_repo_dollar_slash_is_exempt(self):
         # GitHub の自リポジトリ構文 `$/...`（2026-07 以降の推奨記法）は `./`
         # と同じく実行中コミットへ本質的に固定され `@ref` を持たない。

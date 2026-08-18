@@ -457,6 +457,13 @@ def _stringify_uses(value: object) -> str:
     後段の ``_classify_uses_pin`` に判定を委ねる——非文字列は
     ``_SHA40_RE`` に一致しようがなく必然的に未固定へ落ちるため、
     「fail-closed で不正値も報告に出す」という契約が自然に満たされる。
+
+    同じ理由で ``jobs`` の YAML キー（``job_name``）も非文字列（``yaml.safe_load``
+    は ``1:`` のような非文字列キーを許容する）があり得るため、
+    ``_collect_all_uses`` はこの関数を ``job_name`` の正規化にも流用する
+    （PR #355 レビュー指摘: 非文字列 ``job_name`` を素通しすると、後段の
+    ``_sanitize_for_detail`` の ``str.replace`` 呼び出しが ``AttributeError`` で
+    落ち、drift check 全体が例外終了して fail-closed 契約に反する）。
     """
     if isinstance(value, str):
         return value
@@ -481,9 +488,13 @@ def _collect_all_uses(jobs: dict) -> list[tuple[str, str, str]]:
     ``_stringify_uses`` のドキュメント参照）。
     """
     collected: list[tuple[str, str, str]] = []
-    for job_name, job in jobs.items():
+    for raw_job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
+        # `jobs.<id>` の YAML キーも非文字列（数値・真偽値等）があり得るため、
+        # 後段（`_sanitize_for_detail` 等）へ渡す前にここで文字列化しておく
+        # （`_stringify_uses` の docstring 参照）。
+        job_name = _stringify_uses(raw_job_name)
         # reusable workflow 呼び出し（`jobs.<id>.uses`）。イシュー #302 の要件は
         # 「全 uses」であり、このジョブ形式を対象から外す理由が無い。
         if "uses" in job:
