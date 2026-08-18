@@ -329,7 +329,11 @@ function runSnippet({ mode = 'success', withAwk = true, errexit = false } = {}) 
     empty: `exit 0`,
   }
   const gh = join(dir, 'gh')
-  writeFileSync(gh, `#!/bin/sh\ntouch ${JSON.stringify(calledMarker)}\n${bodies[mode]}\n`)
+  // 呼び出し痕跡はリダイレクトで残す。`touch` のような外部コマンドを使うと、withAwk=false で
+  // PATH を一時ディレクトリのみに絞ったケースで `touch` 自体が解決できず痕跡が書かれない。
+  // その状態では「awk 不在なら gh を呼ばない」という否定アサーションが、実際に gh が
+  // 呼ばれていても通ってしまう（PR #354 Bugbot Medium）。`>` は sh の構文であり PATH に依存しない。
+  writeFileSync(gh, `#!/bin/sh\n: > ${JSON.stringify(calledMarker)}\n${bodies[mode]}\n`)
   chmodSync(gh, 0o755)
 
   // withAwk=false のときは PATH を偽 gh のディレクトリのみにして awk を解決不能にする。
