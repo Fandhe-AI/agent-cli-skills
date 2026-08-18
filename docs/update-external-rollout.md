@@ -151,8 +151,12 @@ jobs:
 
 ## 導入手順（実行担当は本ドキュメント作成後の別フェーズ）
 
-1. **ラベル作成**（5 リポ共通、冪等）: `dependencies` / `automated` ラベルを
-   `gh label create` で作成する。上流 composite の `gh pr create` が
+1. **ラベル作成**（5 リポ共通、冪等）: `dependencies` / `automated` ラベルを対象 5 リポの
+   それぞれで `gh label create dependencies ... --repo Fandhe-AI/<REPO>` /
+   `gh label create automated ... --repo Fandhe-AI/<REPO>` のように作成する。実行担当の
+   作業ディレクトリが本ドキュメント配置先の `agent-cli-skills` であることを踏まえ、
+   `--repo` を必ず明示する（省略すると作業ディレクトリの `origin` = `agent-cli-skills`
+   自身にラベルを作成してしまう）。上流 composite の `gh pr create` が
    `pr-labels: 'dependencies,automated'` をハードコードしているため、未作成だと
    同期 PR 作成が失敗する。
 2. **ruleset の無い 4 リポ**（`aliz-corporate-web` / `automation-spec` /
@@ -164,12 +168,28 @@ jobs:
    `gh pr checks --watch` で確認 → `gh pr merge --squash`。ruleset の緩和・bypass 付与は
    行わない（`.claude/rules/ruleset-policy.md`）。必須チェックが構造的に埋まらない場合は
    マージせず状況をイシューへ記録して停止する。
-4. **初回実行**: 各リポで `gh workflow run update-external.yml` を実行し、
-   `gh run list --workflow update-external.yml --limit 1 --json databaseId,event,status,conclusion,url`
-   で結論を取得する。「成功 + 同期 PR あり」「成功だが差分なしで PR なし」はいずれも
-   正常終了として扱う。失敗時は `docs/update-external-schedule.md` の
-   「SCHEDULE-FAILING の復旧手順」の切り分け表に従う。同一箇所で 3 回失敗したら
-   `.claude/rules/debugging.md` に従いエスカレーションする。
+4. **初回実行**: 各リポで対象を明示して実行・監視する（作業ディレクトリの
+   `origin`（`agent-cli-skills`）へ誤って起動・参照しないよう、以下いずれの
+   コマンドにも `--repo Fandhe-AI/<REPO>` を必ず付ける）。
+   1. `gh workflow run update-external.yml --repo Fandhe-AI/<REPO>` で dispatch する
+      （`gh workflow run` はこの時点では run ID を返さないため、次段で新規 run を
+      run 一覧から特定する）。
+   2. dispatch 直後は一覧反映が遅延し得るため、
+      `gh run list --repo Fandhe-AI/<REPO> --workflow update-external.yml --limit 1 --json databaseId,event,status,createdAt`
+      をポーリングし、`event == "workflow_dispatch"` かつ手順 4-1 の実行時刻以降に
+      `createdAt` を持つ run が現れるまで待ってから対象 run の `databaseId` を確定する
+      （queued のまま古い run を拾わないための識別）。
+   3. run ID を特定したら
+      `gh run watch <databaseId> --repo Fandhe-AI/<REPO> --exit-status` で完了
+      （`status == completed`）まで待機する。単発の `gh run list --limit 1` を一度
+      呼ぶだけで結論とせず、`status` が `completed` になったことを確認してから
+      `conclusion` を読む。
+   4. 完了後に
+      `gh run view <databaseId> --repo Fandhe-AI/<REPO> --json conclusion,url` で
+      最終結論を取得する。「成功 + 同期 PR あり」「成功だが差分なしで PR なし」は
+      いずれも正常終了として扱う。失敗時は `docs/update-external-schedule.md` の
+      「SCHEDULE-FAILING の復旧手順」の切り分け表に従う。同一箇所で 3 回失敗したら
+      `.claude/rules/debugging.md` に従いエスカレーションする。
 5. **乖離検知の再実行**（`team-hub-spec` の PR マージ完了後）:
    `gh workflow run update-external-drift.yml --repo Fandhe-AI/agent-cli-skills` を実行し、
    レポート issue（#341）本文で `SYNC-CI-ABSENT` が 0 件であることを確認する。判定ゲートは
