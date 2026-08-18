@@ -181,8 +181,12 @@ confirm_stable_parent() {
   # 事実上停止し、DELETE 済みの部分変更状態を報告できないまま処理が止まる（codex-review
   # P1 指摘 PR #391 第 4 ラウンド）。再確認待機に 60 秒超の値は運用上あり得ないため、
   # 範囲外は状態不明（return 1）の fail-closed 経路へ流す
+  # 検証は算術比較ではなく文字列表現（最大 2 桁）で行う — `18446744073709551616` のような
+  # 巨大な数字列は Bash の算術比較で整数オーバーフローし `> 60` の上限検証を素通りするため
+  # （codex-review P1 指摘 PR #391 第 5 ラウンド）。2 桁以内へ字句で制限すればオーバーフロー
+  # 経路そのものが存在しない
   local recheck_delay="${RECOVERY_RECHECK_DELAY_SEC:-2}"
-  if ! [[ "${recheck_delay}" =~ ^[0-9]+$ ]] || (( recheck_delay > 60 )); then
+  if ! [[ "${recheck_delay}" =~ ^[0-9]{1,2}$ ]] || (( recheck_delay > 60 )); then
     echo "エラー: RECOVERY_RECHECK_DELAY_SEC が 0〜60 の整数でない（値: ${recheck_delay}）。${label}を実施できず状態不明のまま終端する" >&2
     return 1
   fi
