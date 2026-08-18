@@ -394,6 +394,104 @@ def evaluate_pin(pin: str, upstream_sha: str, compare: dict | None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 軸 2 拡張: 実効差分ゲート（純粋関数、イシュー #343）
+# ---------------------------------------------------------------------------
+# `evaluate_pin` は compare API の「コミット数」で PIN_BEHIND を判定するが、
+# reusable workflow は `uses: <owner>/<repo>/<path>@<sha>` で解決された
+# **そのファイルだけ**を実行し、そこから呼ぶ composite action は各ステップの
+# `uses:` で別 SHA に固定されている（ローカル `./` 参照を使わない限り）。
+# つまり「pin 側のファイル内容が main 側と一致する」なら、コミット数で何件
+# 遅れていようと実行結果は main と等価であり、PIN-STALE として報告する意味が
+# 無い。この等価性判定を PIN_BEHIND の**後段**に挟み、実効差分の無い pin だけを
+# ノイズから除く（#341 で 22 件中 4 件がこれに該当することを実測済み）。
+
+PIN_EQUIVALENT = "equivalent"
+
+_LOCAL_USES_RE = re.compile(r"^\s*uses:\s*['\"]?\./", re.MULTILINE)
+
+
+def git_blob_sha(text: str) -> str:
+    """Git の blob SHA（``git hash-object`` と同一の値）を計算する。
+
+    ``sha1("blob " + <UTF-8 バイト長> + "\\0" + <UTF-8 バイト列>)``。
+    **長さは文字数ではなくバイト数。** 本リポの workflow ファイルは日本語コメントを
+    含み、``len(text)``（str の文字数）をそのまま使うと非 ASCII 文字を含む行で
+    実際のバイト長からずれ、GitHub API が返す ``.sha``（contents API の blob sha は
+    常にこの定義）と一致しなくなる。レポートに引用する証拠がここで狂うと、
+    「実効差分なし」の主張そのものが検証不能になるため、必ずエンコード後の
+    ``bytes`` に対して計算する。
+    """
+    import hashlib
+
+    data = text.encode("utf-8")
+    header = f"blob {len(data)}\0".encode("utf-8")
+    return hashlib.sha1(header + data).hexdigest()
+
+
+def has_local_uses(text: str) -> bool:
+    """workflow 本文が ``./`` で始まるローカル action/workflow 参照を持つか。
+
+    ``evaluate_pin_impact`` の前提条件チェック。E5 の実測（上流 reusable
+    workflow 内の全 ``uses:`` が絶対参照 + SHA 固定で、``./`` によるローカル
+    参照が 0 件）が崩れると「pin 側ファイルの内容が main 側と一致する」だけでは
+    実行等価性を主張できなくなる（ローカル参照はチェックアウトされた作業ツリーの
+    ref に依存し、同一ファイル内容でも解決先が変わり得るため）。将来この前提が
+    崩れた場合に自動で安全側（等価と判定しない）へ倒すためのゲート。
+    """
+    return bool(_LOCAL_USES_RE.search(text))
+
+
+def evaluate_pin_impact(pin_text: str | None, main_text: str) -> dict:
+    """pin が指す workflow ファイルの内容が main と実行上等価かを判定する。
+
+    戻り値は ``{"equivalent", "reason", "pin_blob", "main_blob"}``。
+    fail-closed: 判断がつかない場合は必ず ``equivalent: False`` に倒す
+    （「等価と誤認して乖離を見逃す」より「等価でないと過報告する」側が安全）。
+
+    判定順序:
+      1. ``pin_text is None``（取得失敗）→ 等価でない
+      2. どちらかに ``./`` ローカル参照がある → 等価でない（``has_local_uses`` 参照）
+      3. 生テキストが完全一致 → 等価
+      4. それ以外 → 等価でない
+
+    **比較は生テキストの完全一致で行い、blob sha は証拠表示のためだけに使う。**
+    改行コード正規化や ``strip()`` は行わない — 空白差分だけで PIN-STALE に
+    倒れるのは安全側（見逃しではなく過検知）だが、逆に正規化で「等価」に
+    倒すと実際には差分のあるファイルを見逃す方向に働くため、正規化はしない。
+    """
+    if pin_text is None:
+        return {
+            "equivalent": False,
+            "reason": "pin 側ファイルの取得に失敗しており実効差分を確認できない",
+            "pin_blob": None,
+            "main_blob": git_blob_sha(main_text),
+        }
+
+    if has_local_uses(pin_text) or has_local_uses(main_text):
+        return {
+            "equivalent": False,
+            "reason": "ローカル (./) 参照を含むため内容一致だけでは実行等価性を主張できない",
+            "pin_blob": git_blob_sha(pin_text),
+            "main_blob": git_blob_sha(main_text),
+        }
+
+    if pin_text == main_text:
+        return {
+            "equivalent": True,
+            "reason": "pin 側ファイルの内容が main と完全一致（実行上等価）",
+            "pin_blob": git_blob_sha(pin_text),
+            "main_blob": git_blob_sha(main_text),
+        }
+
+    return {
+        "equivalent": False,
+        "reason": "pin 側ファイルの内容が main と異なる（実効差分あり）",
+        "pin_blob": git_blob_sha(pin_text),
+        "main_blob": git_blob_sha(main_text),
+    }
+
+
+# ---------------------------------------------------------------------------
 # 軸 4: 上流 reusable workflow 自身の劣化検知（純粋関数）
 # ---------------------------------------------------------------------------
 
@@ -966,6 +1064,11 @@ class ScanResult:
     schedule_ok: list[str] = field(default_factory=list)
     schedule_candidates: int = 0
     schedule_forbidden: int = 0
+    # 軸 2 拡張: PIN_BEHIND だが実効差分ゲート（evaluate_pin_impact）で等価と
+    # 判定された pin。findings には積まない（乖離ではない）が、コミット数では
+    # 遅れて見えるという事実は捨てず、レポートの別バケットで根拠付きで示す。
+    # 要素は (repo, pin_sha, pin_blob_sha)。
+    pins_equivalent: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def scan(
@@ -1036,6 +1139,24 @@ def scan(
             outcome = ("error", f"compare の取得が HTTP {st}")
         compare_cache[pin] = outcome
         return outcome
+
+    # pin ごとの上流ファイル内容キャッシュ（実効差分ゲート用）。pin は 2〜3 種類
+    # しか無いのが実態（E1〜E4 の実測）のため、リポ数ぶん叩かずに済む。
+    # 戻り値は「取得できたテキスト」または取得失敗時 ``None``（``evaluate_pin_impact``
+    # が fail-closed で「等価でない」に倒す）。
+    pin_content_cache: dict[str, str | None] = {}
+
+    def fetch_pin_workflow(pin: str) -> str | None:
+        if pin in pin_content_cache:
+            return pin_content_cache[pin]
+        st, body = gh_get_with_status(
+            f"repos/{UPSTREAM_REPO}/contents/{UPSTREAM_WORKFLOW_PATH}?ref={pin}",
+            token,
+            raw=True,
+        )
+        text = body if st == 200 else None
+        pin_content_cache[pin] = text
+        return text
 
     for name in repos:
         repo = f"{org}/{name}"
@@ -1141,9 +1262,21 @@ def scan(
             if verdict["state"] == PIN_CURRENT:
                 result.wrappers_ok.append(repo)
             elif verdict["state"] == PIN_BEHIND:
-                result.findings.append(
-                    Finding(repo, "PIN-STALE", f"`{pin[:12]}` — {verdict['detail']}")
-                )
+                # --- 軸 2 拡張: 実効差分ゲート ---
+                # コミット数では遅れていても、pin 側ファイルの内容が main と
+                # 完全一致するなら実行上は等価（イシュー #343、reusable
+                # workflow の解決規則は evaluate_pin_impact の docstring 参照）。
+                # 取得失敗時は fetch_pin_workflow が None を返し、
+                # evaluate_pin_impact が fail-closed で PIN-STALE 側に倒す。
+                pin_text = fetch_pin_workflow(pin)
+                impact = evaluate_pin_impact(pin_text, upstream_text)
+                if impact["equivalent"]:
+                    result.pins_equivalent.append((repo, pin, impact["pin_blob"]))
+                else:
+                    detail = f"`{pin[:12]}` — {verdict['detail']}"
+                    if pin_text is None:
+                        detail += "（実効差分の有無は未確認: pin 側ファイルを取得できなかった）"
+                    result.findings.append(Finding(repo, "PIN-STALE", detail))
             else:
                 result.findings.append(
                     Finding(
@@ -1228,6 +1361,12 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
     lines.append(f"- 上流 main SHA: `{result.upstream_sha}`")
     lines.append(f"- 検査対象リポジトリ: {result.scanned} 件（非アーカイブ全件）")
     lines.append(f"- 乖離: **{drift} 件**（下流 {len(result.findings)} / 上流マーカー {len(marker_fail)}）")
+    lines.append(
+        f"- 実効差分なしの pin: **{len(result.pins_equivalent)} 件**"
+        "（コミット数では上流 main に遅れているが、pin 側の "
+        f"`{UPSTREAM_WORKFLOW_PATH}` の内容が main と一致するため乖離として"
+        "数えていない。イシュー #343）"
+    )
     lines.append(f"- 検査不能 (UNKNOWN): **{len(result.unknowns)} 件**")
     lines.append(
         f"- 軸 5 対象（schedule トリガあり）: {result.schedule_candidates} 件"
@@ -1268,8 +1407,8 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
             result.schedule_candidates == len(result.schedule_ok)
             and sched_unknown == 0
         )
-        base = ("乖離 **0 件**。全ての下流リポジトリが最新 pin の wrapper、"
-                "または skills を vendor していない。")
+        base = ("乖離 **0 件**。全ての下流リポジトリが最新 pin または"
+                "実効差分なしの pin の wrapper、または skills を vendor していない。")
         if sched_all_confirmed:
             lines.append(base + "schedule トリガを持つ wrapper は全て直近実行を"
                                 "確認できている。")
@@ -1308,6 +1447,18 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
     lines.append("")
     lines.append(f"**最新 pin の wrapper ({len(result.wrappers_ok)} 件)**: "
                  + (", ".join(f"`{r}`" for r in result.wrappers_ok) or "なし"))
+    lines.append("")
+    # 最新 pin ではないため上のバケットへは混ぜない。コミット数では遅れて
+    # 見える理由（main の blob sha と一致）を各行に根拠として明示する。
+    lines.append(f"**実効差分なしの pin ({len(result.pins_equivalent)} 件)**:")
+    if result.pins_equivalent:
+        for repo, pin, pin_blob in sorted(result.pins_equivalent):
+            lines.append(
+                f"- `{repo}` — pin `{pin[:12]}` / blob `{pin_blob[:12]}` が"
+                f" main `{result.upstream_sha[:12]}` の blob と一致"
+            )
+    else:
+        lines.append("- なし")
     lines.append("")
     lines.append(f"**workflow なし・skills 未 vendor ({len(result.no_workflow_ok)} 件)**: "
                  + (", ".join(f"`{r}`" for r in result.no_workflow_ok) or "なし"))
