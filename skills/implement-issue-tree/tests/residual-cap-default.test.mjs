@@ -40,6 +40,7 @@ const SLICE_EXPORTS = [
   'EPHEMERAL_KIND_MAX',
   'EPHEMERAL_RESERVE_PER_NEW_START',
   'projectResidualBytes',
+  'clampPerWorktreeByteReserve',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
@@ -53,6 +54,7 @@ const {
   EPHEMERAL_KIND_MAX,
   EPHEMERAL_RESERVE_PER_NEW_START,
   projectResidualBytes,
+  clampPerWorktreeByteReserve,
 } = mod
 
 test('既定値は 100（未指定・null のいずれも DEFAULT_MAX_RESIDUAL_WORKTREES を返す）', () => {
@@ -182,7 +184,10 @@ test('バイト軸はラン開始時の残置 0 件でもメイン worktree 測�
   assert.doesNotMatch(source, /if \(maxResidualWorktreeBytes > 0 && residual\.paths\.length > 0\)/)
   assert.match(source, /if \(maxResidualWorktreeBytes > 0\) {/)
   assert.match(source, /mainWorktreePath \? await measureMainWorktreeContentBytes\(mainWorktreePath\)/)
-  assert.match(source, /perWorktreeByteReserve = Math\.max\(mainKib \* 1024, avgResidualBytes\)/)
+  assert.match(source, /rawPerWorktreeByteReserve = Math\.max\(mainKib \* 1024, avgResidualBytes\)/)
+  // クランプ適用を確認する（Issue #348 codex-review High 対応: mainKib の過大評価で
+  // 1 件目着手候補が予約のみで恒久停止する回帰を防ぐ）。
+  assert.match(source, /perWorktreeByteReserve = clampPerWorktreeByteReserve\(/)
 })
 
 test('measureMainWorktreeContentBytes はメイン worktree 全体から .git を差し引いた working tree 相当を返す構造になっている（.git object store の過大予約防止）', () => {
@@ -326,6 +331,83 @@ test('projectResidualBytes: baselineLedgerCount が ledgerLength を上回って
     perWorktreeByteReserve: 4 * 1024 * 1024,
   })
   assert.equal(p, 500 * 1024 * 1024)
+})
+
+// --- clampPerWorktreeByteReserve 回帰（Issue #348 codex-review High）---
+// mainKib（メイン worktree 全体 − .git）は gitignored なビルド成果物・依存関係を全量含み
+// 得るため、クランプ無しだと残置 0 件・実行中タスク 0 件の 1 件目着手候補ですら
+// `EPHEMERAL_RESERVE_PER_NEW_START × perWorktreeByteReserve` が容量上限を超え、
+// 予約起因の defer を経由せずそのまま恒久停止する（1 ラン 0 件という Issue #348 より
+// 重い回帰）。クランプがこの経路を塞ぐことと、正当な圧迫時には引き続き latch することの
+// 両方を固定する。
+
+test('clampPerWorktreeByteReserve: 上限超過時は maxResidualWorktreeBytes / reservePerNewStart へ切り詰める', () => {
+  const maxResidualWorktreeBytes = 2 * 1024 * 1024 * 1024 // 既定 2 GiB
+  const reservePerNewStart = EPHEMERAL_RESERVE_PER_NEW_START // 既定 6
+  // 27 GB のメイン worktree（node_modules 等の gitignored 成果物込み）を模す実測値。
+  const rawValue = 27 * 1024 * 1024 * 1024
+  const clamped = clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reservePerNewStart)
+  assert.equal(clamped, Math.floor(maxResidualWorktreeBytes / reservePerNewStart))
+  assert.ok(clamped < rawValue)
+})
+
+test('clampPerWorktreeByteReserve: 上限内なら実測値をそのまま通す（過小評価しない）', () => {
+  const maxResidualWorktreeBytes = 2 * 1024 * 1024 * 1024
+  const reservePerNewStart = EPHEMERAL_RESERVE_PER_NEW_START
+  const rawValue = 10 * 1024 * 1024 // 10 MiB（本リポジトリ相当の小さい実測値）
+  const clamped = clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reservePerNewStart)
+  assert.equal(clamped, rawValue)
+})
+
+test('回帰証明: クランプ済み perWorktreeByteReserve なら baseline 0・reservedUnits 0 の 1 件目候補は projection が上限を超えない（着手できる）', () => {
+  const maxResidualWorktreeBytes = 2 * 1024 * 1024 * 1024
+  const reservePerNewStart = EPHEMERAL_RESERVE_PER_NEW_START
+  const rawPerWorktreeByteReserve = 27 * 1024 * 1024 * 1024 // 過大なメイン worktree 実測値
+  const perWorktreeByteReserve = clampPerWorktreeByteReserve(
+    rawPerWorktreeByteReserve,
+    maxResidualWorktreeBytes,
+    reservePerNewStart,
+  )
+  // dispatch ループ (b) 分岐と同じ形の projection: baseline 0・台帳増分 0・実行中タスク予約 0・
+  // 候補自身の最大増分のみ。
+  const projectedBytes = projectResidualBytes({
+    baselineBytes: 0,
+    ledgerLength: 0,
+    baselineLedgerCount: 0,
+    reservedUnits: 0,
+    extraReserveUnits: reservePerNewStart,
+    perWorktreeByteReserve,
+  })
+  assert.ok(
+    projectedBytes <= maxResidualWorktreeBytes,
+    `クランプ後も projection (${projectedBytes}) が上限 (${maxResidualWorktreeBytes}) を超えており、` +
+      '1 件目候補が予約のみで恒久停止する回帰が再発している',
+  )
+})
+
+test('クランプ後も正当な容量圧迫（baseline が既に上限近傍）は引き続き latch する（fail-open への振れ過ぎ防止）', () => {
+  const maxResidualWorktreeBytes = 2 * 1024 * 1024 * 1024
+  const reservePerNewStart = EPHEMERAL_RESERVE_PER_NEW_START
+  const rawPerWorktreeByteReserve = 27 * 1024 * 1024 * 1024
+  const perWorktreeByteReserve = clampPerWorktreeByteReserve(
+    rawPerWorktreeByteReserve,
+    maxResidualWorktreeBytes,
+    reservePerNewStart,
+  )
+  // baseline 自体が既に上限の 90% を占めている状態（実残置ディスク圧が実在するケース）。
+  const nearLimitBaseline = Math.floor(maxResidualWorktreeBytes * 0.9)
+  const projectedBytes = projectResidualBytes({
+    baselineBytes: nearLimitBaseline,
+    ledgerLength: 0,
+    baselineLedgerCount: 0,
+    reservedUnits: 0,
+    extraReserveUnits: reservePerNewStart,
+    perWorktreeByteReserve,
+  })
+  assert.ok(
+    projectedBytes > maxResidualWorktreeBytes,
+    'baseline が既に上限近傍のケースまでクランプで通してしまうと、実容量圧迫時の fail-closed が壊れる',
+  )
 })
 
 // --- K-YX 回帰（Cursor Bugbot High）: 実測 du が並行 cleanup とのパス削除競合に耐えること ---

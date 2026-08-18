@@ -1635,14 +1635,23 @@ async function measureResidualWorktreeBytes(paths) {
   }
 }
 
-// メイン worktree の「新規 linked worktree が実際に消費するであろう容量」を測定する。
-// メイン worktree のディレクトリ全体を du すると、共有 .git object store（全履歴・全ブランチの
-// commit/blob/tree）まで合算されてしまう。linked worktree は object store を共有し `.git` は
-// 参照ファイル 1 個のみ（実体は数百バイト）でこれを再消費しないため、素の du 値を
-// perWorktreeByteReserve の下限に使うと大規模リポジトリで数倍〜数十倍の過大予約になる
-// （PR #390 codex-review P1・Cursor Bugbot High 指摘）。ここでは「全体 − .git」の差分を
-// 安全側の下限（working tree 相当）として返す。両方の測定が成立した場合のみ差分を返し、
-// どちらかが失敗した場合は null（呼び出し側は既存の測定失敗と同じ fail-closed 分岐へ倒す）。
+// メイン worktree の「新規 linked worktree が実際に消費するであろう容量」の見積りに使う
+// 値を測定する。メイン worktree のディレクトリ全体を du すると、共有 .git object store
+// （全履歴・全ブランチの commit/blob/tree）まで合算されてしまう。linked worktree は
+// object store を共有し `.git` は参照ファイル 1 個のみ（実体は数百バイト）でこれを再消費
+// しないため、素の du 値を perWorktreeByteReserve の下限に使うと大規模リポジトリで
+// 数倍〜数十倍の過大予約になる（PR #390 codex-review P1・Cursor Bugbot High 指摘）。
+// ここでは「全体 − .git」の差分を返す。
+// 注意: この差分は「working tree 相当」を意図しているが、実際には du が捉える
+// gitignored なビルド成果物・依存関係（node_modules・.venv・dist・ビルドキャッシュ等）も
+// 全量含む。新規 linked worktree は checkout 直後はこれらを持たないため、この値は
+// 「安全側の下限」ではなく状況によっては過大評価になり得る（Issue #348 codex-review
+// High 指摘）。呼び出し側（perWorktreeByteReserve 確定箇所）がこの過大評価の影響を
+// `maxResidualWorktreeBytes / EPHEMERAL_RESERVE_PER_NEW_START` でクランプし、1 件目の
+// 新規着手候補が予約のみで恒久停止しないようにする。実消費の超過検知はクランプに
+// 依存せず、実測ベースの再測定（remeasureResidualBytesNow 等）が別途担う。
+// 両方の測定が成立した場合のみ差分を返し、どちらかが失敗した場合は null（呼び出し側は
+// 既存の測定失敗と同じ fail-closed 分岐へ倒す）。
 async function measureMainWorktreeContentBytes(mainPath) {
   if (typeof mainPath !== 'string' || mainPath === '') return null
   const totalKib = await measureResidualWorktreeBytes([mainPath])
@@ -2827,6 +2836,27 @@ function projectResidualBytes({ baselineBytes, ledgerLength, baselineLedgerCount
   return baselineBytes + (unbaselinedLedgerCount + reservedUnits + extraReserveUnits) * perWorktreeByteReserve
 }
 
+// perWorktreeByteReserve（1 worktree あたりの speculative 容量予約 floor 値）に上限クランプを
+// かける（Issue #348 codex-review High 指摘）。measureMainWorktreeContentBytes はメイン
+// worktree の「全体 − .git」を返すが、これは gitignored なビルド成果物・依存関係
+// （node_modules・.venv・dist 等）を全量含み得るため、新規 linked worktree が checkout 直後に
+// 実際に消費する容量より大幅に大きくなり得る。クランプ無しだと、残置 0 件・実行中タスク 0 件
+// （reservedUnits === 0）の 1 件目着手候補ですら
+// `EPHEMERAL_RESERVE_PER_NEW_START × rawValue` が maxResidualWorktreeBytes を超え、
+// 予約起因の defer（`reservedUnits > 0` 分岐）を経由せずそのまま恒久停止 latch に落ちる
+// ——実残置ディスク圧が皆無でも 1 ラン 0 件で止まる、Issue #348 が解消しようとした
+// 「頭打ち」より重い回帰になる。
+// この値は実際のディスク枯渇防止を担う唯一の値ではない — `remeasureResidualBytesNow`
+// （新規着手直前に毎回実測）・`remeasureResidualBytesIfDue`（間引き付きラン中再実測）・
+// (a) 実測超過 latch が実消費を直接測って超過を検知する。クランプは「実測に基づかない
+// speculative な事前予約」の上限であり、実測ベースの fail-closed ガードを弱めない。
+// クランプ値は「1 件目の新規着手候補が予約のみで恒久停止しない」ことを保証する最大値
+// `maxResidualWorktreeBytes / reservePerNewStart` とする（呼び出し側は
+// `maxResidualWorktreeBytes > 0` の分岐内でのみ呼ぶため除数は常に正）。
+function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reservePerNewStart) {
+  return Math.min(rawValue, Math.floor(maxResidualWorktreeBytes / reservePerNewStart))
+}
+
 // ============================================================================
 // セクション 6: 実行: Restore → Tree → State
 // ここから実行フロー。上記の関数・定数を順に使い、状態読込・ツリー取得・
@@ -3202,7 +3232,23 @@ let lastByteRemeasureOutcome = { failed: false, exceeded: false }
         residualBytesAtRunStart = residualBytesAtStart // ラン開始時の唯一の確定値。以後は更新しない
         const avgResidualBytes =
           verifiedResidualPaths.length > 0 ? Math.ceil(residualBytesAtStart / verifiedResidualPaths.length) : 0
-        perWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes)
+        const rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes)
+        // クランプの設計根拠は clampPerWorktreeByteReserve 定義側のコメントを参照
+        // （Issue #348 codex-review High 指摘: mainKib が gitignored なビルド成果物を含み
+        // 過大評価になり得るため、1 件目の着手候補が予約のみで恒久停止しないよう上限を課す）。
+        perWorktreeByteReserve = clampPerWorktreeByteReserve(
+          rawPerWorktreeByteReserve,
+          maxResidualWorktreeBytes,
+          EPHEMERAL_RESERVE_PER_NEW_START,
+        )
+        if (perWorktreeByteReserve < rawPerWorktreeByteReserve) {
+          log(
+            `⚠️ 1 worktree あたりの容量予約見積り ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB は` +
+              `容量上限に対して過大なため ${Math.round(perWorktreeByteReserve / (1024 * 1024))} MiB へクランプした` +
+              `（メイン worktree に gitignored なビルド成果物・依存関係が含まれる場合に起こり得る）。` +
+              `実消費の超過検知は実測ベースの再測定・latch が別途担う`,
+          )
+        }
 
         const bytes = residualBytesAtStart
         if (bytes > maxResidualWorktreeBytes) {
