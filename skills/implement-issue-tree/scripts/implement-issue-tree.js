@@ -1579,19 +1579,21 @@ async function measureResidualWorktreeBytes(paths) {
           'echo "TOTAL=0 MISSING=0 ERR=1"; else { total=0; missing=0; err=0; ' +
           'while IFS= read -r -d "" p; do ' +
           'if [ ! -e "$p" ]; then missing=$((missing+1)); continue; fi; ' +
-          'duout=$(du -sk -- "$p" 2>/dev/null); durc=$?; ' +
-          'if [ "$durc" -ne 0 ]; then err=$((err+1)); continue; fi; ' +
+          'if duout=$(du -sk -- "$p" 2>/dev/null); then ' +
           'sz=$(printf %s "$duout" | cut -f1); ' +
           'if [ -z "$sz" ]; then err=$((err+1)); continue; fi; ' +
           'total=$((total+sz)); ' +
+          'else err=$((err+1)); fi; ' +
           'done; echo "TOTAL=$total MISSING=$missing ERR=$err"; } < ' + tmpFile + '.nul; fi',
         '   （-j は jq -r と異なり要素ごとの追加改行を出さないため NUL 区切りが崩れない。' +
           '`[ ! -e "$p" ]` で真になったパスは並行実行中の cleanup で既に削除された可能性があり、' +
           '0 バイトとして加算せず missing としてのみ数える（存在しないパスの容量は 0 として扱う' +
           'のが正しい — fail-open ではない）。一方 du 自体が失敗した場合（権限不足等の実エラー）' +
-          'は err に計上し、値は合算しない。du の終了コードは cut へ直結せず個別に検査する — ' +
-          'パイプ直結だと終了状態が cut のものになり、du が非 0 終了でも部分出力があると成功扱いに' +
-          'なる fail-open が生じるため。jq の展開も while ループへ直結せず一時ファイル経由で終了' +
+          'は err に計上し、値は合算しない。du の終了状態は cut へのパイプ直結ではなく if の' +
+          '条件式で検査する — パイプ直結だと終了状態が cut のものになり du の非 0 終了が部分出力で' +
+          '成功扱いになる fail-open が生じ、`duout=$(du ...)` の素の代入は errexit が有効なシェル' +
+          'では失敗時にその場で終了して err 計上・結果出力へ到達しないため。' +
+          'jq の展開も while ループへ直結せず一時ファイル経由で終了' +
           'コードを検査する — 直結だと jq 未導入・JSON 破損の非 0 終了が「入力 0 件の正常測定」' +
           '（TOTAL=0 ERR=0）に化けて容量ゲートを素通りするため、失敗時は ERR=1 を出力する）。',
         '3. 出力の TOTAL を kib、MISSING を missing、ERR を err として、観測値のまま返す' +

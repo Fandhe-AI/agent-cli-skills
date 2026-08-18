@@ -354,9 +354,13 @@ test('measureResidualWorktreeBytes は du の終了コードと jq の展開失�
   const fnStart = source.indexOf('async function measureResidualWorktreeBytes(paths)')
   const fnEnd = source.indexOf('\n\n// メイン worktree の', fnStart)
   const fnBody = source.slice(fnStart, fnEnd)
-  // du | cut のパイプ直結は終了状態が cut のものになる fail-open（PR #390 codex-review P1）
-  assert.match(fnBody, /duout=\$\(du -sk -- "\$p" 2>\/dev\/null\); durc=\$\?;/)
+  // du | cut のパイプ直結は終了状態が cut のものになる fail-open（PR #390 codex-review P1）。
+  // また `duout=$(du ...); durc=$?` の素の代入は errexit 下で失敗時に即終了し err 計上へ到達
+  // しないため、終了状態は if の条件式で検査する（PR #390 codex-review P1 第 3 ラウンド）
+  assert.match(fnBody, /if duout=\$\(du -sk -- "\$p" 2>\/dev\/null\); then/)
+  assert.match(fnBody, /else err=\$\(\(err\+1\)\); fi;/)
   assert.doesNotMatch(fnBody, /du -sk -- "\$p" 2>\/dev\/null \| cut/)
+  assert.doesNotMatch(fnBody, /durc=\$\?/)
   // jq を while ループへ直結すると jq の非 0 終了が「入力 0 件の正常測定」に化ける
   // （PR #390 codex-review P1）。一時ファイル経由で終了コードを検査し ERR=1 へ倒す
   assert.match(fnBody, /if ! jq -j/)
