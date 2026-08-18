@@ -20,7 +20,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -59,11 +59,12 @@ function makeStub(tmp, exitCode, stderrText = '') {
   // 素通りさせず、bash 経由の起動がその状態でも機能することを実測する。
 }
 
-function prelude({ presetScript = true, plan = ['123 1 2'], orphans = ['456 3'] } = {}) {
-  const lines = [
-    `REASSIGN_PLAN=(${plan.map((e) => JSON.stringify(e)).join(' ')})`,
-    `ORPHAN_PLAN=(${orphans.map((e) => JSON.stringify(e)).join(' ')})`,
-  ]
+function prelude({ presetScript = true, plan = ['123 1 2'], orphans = ['456 3'], declarePlans = true } = {}) {
+  const lines = []
+  if (declarePlans) {
+    lines.push(`REASSIGN_PLAN=(${plan.map((e) => JSON.stringify(e)).join(' ')})`)
+    lines.push(`ORPHAN_PLAN=(${orphans.map((e) => JSON.stringify(e)).join(' ')})`)
+  }
   if (presetScript) {
     lines.push(`REASSIGN_SCRIPT='${STUB_RELATIVE}'`)
   }
@@ -240,4 +241,51 @@ test('両ブロックとも if/fi で返り値を判定していない（$? が 
     )
     assert.match(code, /\|\|\s*status=\$\?/, `${label}: || status=$? による明示的な退避が必要`)
   }
+})
+
+// ---------------------------------------------------------------------------
+// 計画配列の未宣言ガード（PR #374 codex P1）
+// ---------------------------------------------------------------------------
+// bash では未定義配列の "${REASSIGN_PLAN[@]}" が空へ展開されるため、Step 2 を実行し
+// 忘れてもループが 0 回で回り、承認済みの対象があってもエラーなく完走して完了報告まで
+// 進んでしまう。「対象なし（空配列を宣言済み）」と「計画未設定（未宣言）」は意味が
+// 異なるため、後者は fail-closed で停止しなければならない。
+for (const { label, block, prefix } of cases) {
+  test(`${label}: 計画配列が未宣言なら exit 1 で停止する（0 件完走との区別。PR #374 P1）`, () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'update-issue-tree-block-'))
+    try {
+      makeStub(tmp, 0)
+      const r = runBlock(block, tmp, { declarePlans: false }, prefix)
+      assert.equal(r.status, 1, '未宣言のまま 0 件完走してはならない')
+      assert.match(r.stderr, /未宣言/)
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test(`${label}: 空配列を宣言済みなら正常に 0 件で完走する（対象なしは正常系）`, () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'update-issue-tree-block-'))
+    try {
+      const path = join(tmp, STUB_RELATIVE)
+      mkdirSync(dirname(path), { recursive: true })
+      const counter = join(tmp, 'calls.txt')
+      writeFileSync(path, `#!/usr/bin/env bash\nprintf 'called\\n' >> ${JSON.stringify(counter)}\nexit 0\n`)
+      const r = runBlock(block, tmp, { plan: [], orphans: [] }, prefix)
+      assert.equal(r.status, 0)
+      // スクリプトが 1 度も呼ばれていないこと（= ループが 0 回で正常終了）
+      assert.equal(existsSync(counter), false, '対象 0 件でスクリプトが呼ばれてはならない')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+}
+
+// Step 2 が計画配列の構築手順を掲載していること（ガードだけ足して構築手順が無いと、
+// 実行者は「どう作ればよいか」が分からず結局 fail-closed で止まり続ける）。
+test('Step 2 に REASSIGN_PLAN / ORPHAN_PLAN の構築手順が掲載されている（PR #374 P1）', () => {
+  const text = readFileSync(SKILL_MD, 'utf8')
+  const step2 = text.slice(text.indexOf('### Step 2:'), text.indexOf('### Step 3:'))
+  assert.match(step2, /REASSIGN_PLAN=\(/, 'Step 2 に REASSIGN_PLAN の宣言例が必要')
+  assert.match(step2, /ORPHAN_PLAN=\(/, 'Step 2 に ORPHAN_PLAN の宣言例が必要')
+  assert.match(step2, /空配列として宣言/, '対象 0 件でも宣言する契約の明示が必要')
 })

@@ -85,6 +85,28 @@ fetch_sub_issues "${ROOT_NUMBER}"
 
 棚卸し対象の一覧をユーザーに提示し、方針確認を取ってから変更を実行する。
 
+**承認された対象を Step 3 / Step 4 が読む 2 つの計画配列へ落とす。** 配列は必ず宣言する
+（対象 0 件でも空配列として宣言する）。未宣言のまま Step 3 / Step 4 へ進むと
+`"${REASSIGN_PLAN[@]}"` が空展開され、承認済みの対象があってもエラーなく 0 件で完走して
+完了報告まで進んでしまうため、両ステップの冒頭で宣言の有無を検査して fail-closed で停止する。
+
+```bash
+# 承認された「closed 親下の付け替え」対象。要素は "<issue> <old-parent> <new-parent>"。
+# 空白区切りの 1 行 1 件にするのは、Step 3 のループが read で分割して受け取るため。
+# issue 番号は全て 10 進の正整数であり、空白・改行を含まないことを Step 1 の取得時に保証する。
+REASSIGN_PLAN=(
+  # "123 456 789"
+)
+
+# 承認された「孤児の再配置」対象。要素は "<orphan-issue> <phase-parent>"。
+ORPHAN_PLAN=(
+  # "234 789"
+)
+```
+
+対象が 0 件の場合も上記のとおり**空配列として宣言する**。「対象なし（空配列）」と
+「計画未設定（未宣言）」は意味が異なり、後者は Step 2 の実行漏れであって正常系ではない。
+
 ### Step 3: closed 親下の残置 open issue を付け替える
 
 closed 親の下に残置されている open issue を、対応する open Phase 親へ移動する。
@@ -155,9 +177,20 @@ reassign_one() {
   return "${status}"
 }
 
+# 計画配列の未宣言ガード（fail-closed）。
+# bash では未定義配列の "${REASSIGN_PLAN[@]}" は空に展開されるため、Step 2 を実行し忘れても
+# ループが 0 回で回り、承認済みの対象があってもエラーなく完走して完了報告まで進んでしまう。
+# 「対象なし（空配列を宣言済み）」と「計画未設定（未宣言）」を declare -p で区別し、
+# 後者は停止する。declare -p は宣言されていれば空配列でも成功する。
+if ! declare -p REASSIGN_PLAN >/dev/null 2>&1; then
+  echo "エラー: REASSIGN_PLAN が未宣言（Step 2 の付け替え計画が構築されていない）。" >&2
+  echo "対象 0 件と区別できないため停止する。対象が無い場合も REASSIGN_PLAN=() と明示すること" >&2
+  exit 1
+fi
+
 # 呼び出し側ループ。契約の主体はここにある——「(b) 恒久的な対象外は次の 1 件へ進み、
 # (a) 解消可能な前提不備は原因解消まで中断する」を実際に実現するのはこのループである。
-# ISSUE_NUMBER / OLD_PARENT / NEW_PARENT は Step 2 で決めた付け替え計画から供給する。
+# ISSUE_NUMBER / OLD_PARENT / NEW_PARENT は Step 2 で構築した REASSIGN_PLAN から供給する。
 SKIPPED=()
 for ENTRY in "${REASSIGN_PLAN[@]}"; do
   # ENTRY は "<issue> <old-parent> <new-parent>" 形式。
@@ -267,6 +300,13 @@ Phase が不明な issue はタイトル・本文を読んで判断し、判断�
 # Step 3 で定義した reassign_one をそのまま再利用する（呼び出し方・stderr の扱い・
 # 終了ステータスの意味づけを Step 3 と非対称にしない。Issue #335 / #372）。
 # 孤児は旧親を持たないため --old-parent を渡さない（DELETE を飛ばして POST のみ実行される）。
+# Step 3 と同じ未宣言ガード（fail-closed）。理由は Step 3 のコメントと同一
+if ! declare -p ORPHAN_PLAN >/dev/null 2>&1; then
+  echo "エラー: ORPHAN_PLAN が未宣言（Step 2 の孤児再配置計画が構築されていない）。" >&2
+  echo "対象 0 件と区別できないため停止する。対象が無い場合も ORPHAN_PLAN=() と明示すること" >&2
+  exit 1
+fi
+
 SKIPPED_ORPHANS=()
 for ENTRY in "${ORPHAN_PLAN[@]}"; do
   # ENTRY は "<orphan-issue> <phase-parent>" 形式
