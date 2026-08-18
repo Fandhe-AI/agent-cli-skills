@@ -95,8 +95,10 @@ B2/B3 から除外して stderr へ警告する（fail-closed）**。除外分�
 # タイブレーク: 1) skills/<name> に実体がある → 除外（配布スキル。B1 側で計上済み）
 #               2) skills-lock.json があるのに jq が使えない → 判定不能。除外し stderr へ警告
 #                  （fail-closed。誤って B2 に含めない。B4 として扱う）
-#               3) skills-lock.json の skills キーに名前がある → 除外し stderr へ警告
-#                  （symlink 化されていない誤配置。update-docs は構成を変更しない。B4 として扱う）
+#               3) jq の終了ステータスで判定: 0=掲載あり→symlink 化されていない誤配置として
+#                  B4 扱い（update-docs は構成を変更しない）／1=掲載なし→B2 継続／
+#                  0・1 以外=jq 実行時エラー（不正な JSON 等）→判定不能として B4 扱い
+#                  （0/1 以外を「掲載なし」と誤読しないことが fail-closed の要）
 #               4) 残った実ディレクトリのみを B2 として出力
 find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
   while read -r n; do
@@ -106,8 +108,17 @@ find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/#
         echo "WARN: jq が見つからないため ${n} の skills-lock.json タイブレークを判定できない（B4 扱い。jq を導入するか手動確認する）" >&2
         continue
       fi
-      if jq -e --arg n "${n}" '.skills[$n] != null' skills-lock.json >/dev/null 2>&1; then
+      jq -e --arg n "${n}" '.skills[$n] != null' skills-lock.json >/dev/null 2>&1
+      jq_status=$?
+      # jq の終了ステータスは 0=真（掲載あり）/ 1=偽（掲載なし）/ それ以外=実行時
+      # エラー（不正な JSON 等）の3値。0/1 以外を「掲載なし」と誤読すると
+      # 壊れた skills-lock.json のときに誤配置スキルが素通りして B2 に混入する
+      # ため、エラーは fail-closed で B4 に倒す（jq 不在時と同じ扱い）。
+      if [ "${jq_status}" = "0" ]; then
         echo "WARN: ${n} は .claude/skills/ が実ディレクトリのまま skills-lock.json に掲載されている（symlink 化検討対象。B4 扱い）" >&2
+        continue
+      elif [ "${jq_status}" != "1" ]; then
+        echo "WARN: skills-lock.json の解析に失敗した（jq exit=${jq_status}）ため ${n} のタイブレークを判定できない（B4 扱い）" >&2
         continue
       fi
     fi
@@ -148,18 +159,25 @@ find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/#
 
 **件数整合式（プレースホルダー。対象リポジトリで都度実測する）**: 系統 A・B1・B2・B3・B4 の
 件数は対象リポジトリの構成変更のたびに変わるため、`SKILL.md` 本文には固定値を持たない。
-各系統の抽出コマンドを実行し、次の 2 本の等式が実測値で成立することを確認する。B4（stderr
-の `WARN:` 件数）を含めない `B1 + B2 + B3 = B` は、B2・B3 コマンドが fail-closed で除外した
-項目がある限り成立しない。B4 は「除外はしたがどの区分にも入らない」ケースの受け皿であり、
-この等式でのみ回収する。
+各系統の抽出コマンドを実行し、次の 2 本の等式が実測値で成立することを確認する。
+
+**B4 は stderr の `WARN:` 件数を数えるのではなく、名前集合の差分で求める**
+（`B4 = B − (B1 ∪ B2 ∪ B3)`、名前ベースの `comm` で算出）。件数の単純合算では、
+同じ名前が B2・B3 双方のループで異なる理由により WARN される場合（例: `skills-lock.json`
+掲載かつ symlink 化もされていない実ディレクトリ型リポジトリの誤配置スキル）に二重計上され、
+逆に「B2 にも B3 にも該当せず、かつどちらのループの走査対象にもならない」ケース
+（`.claude/skills/<name>` が `skills/<name>` でも `.agents/skills/<name>` でもない
+別ターゲットへの symlink 等）は WARN 自体が出ないため取りこぼす。名前集合の差分であれば
+これらのケースも機械的に B4 として回収でき、`WARN:` はあくまで人間向けの理由説明として
+併用する（下記「検証」節の実行手順を参照）。
 
 | 等式 | 意味 |
 |------|------|
-| `B1 + B2 + B3 + B4 = B（-L 付き全列挙）` | 系統 B の内訳（B1/B2/B3/B4）が全列挙件数と一致する |
+| `B1 + B2 + B3 + B4 = B（-L 付き全列挙）` | 系統 B の内訳（B1/B2/B3/B4）が全列挙件数と一致する（`B4 = B − (B1 ∪ B2 ∪ B3)` の名前集合差分で算出。B1/B2/B3 が互いに排他であることも合わせて確認する） |
 | `A − B1 = B1 に現れない配布スキル数` | 系統 A のうち `.claude/skills/` に symlink されていない配布スキルの件数 |
 
 等式が成立しない場合は、B2・B3 の抽出コマンド（タイブレーク含む）またはカウント方法に
-誤りがある。B4 が 1 件以上出た場合は、報告された `WARN:` の内容に従って手動で構成を
+誤りがある。B4 が 1 件以上出た場合は、対応する `WARN:` の内容に従って手動で構成を
 確認する（symlink 化・タイブレーク再実施等。update-docs 自身は構成を変更しない）。具体的な
 数値例（実測スナップショット）は `skills/update-docs/references/measurement-example.md` を
 参照（本リポジトリ専用の値であり、他リポジトリでの期待値ではない）。
@@ -215,21 +233,38 @@ ls -d skills/*/SKILL.md | wc -l
 系統 B（B2・B3）を更新した場合は、以下も**新規実行**して確認する（既存ログ・前回結果の
 流用は不可。`.claude/rules/verification.md` の 5 段階ゲートに従う）。B2・B3 は
 「Step 3」に記載した抽出コマンドと**同一のもの**を実行する（コマンドの重複記載による
-食い違いを避けるため、ここでは再掲しない）。stderr（`WARN:` 行）も破棄せずに保持し、
-B4 件数として数える。
+食い違いを避けるため、ここでは再掲しない）。stderr（`WARN:` 行）は人間向けの理由説明として
+保持しつつ、B4 の**件数**は次の名前集合の差分で算出する（stderr の行数を数えない。
+同一名が B2・B3 双方の理由で除外されると行数は二重計上され、逆にどちらのループの走査対象
+にもならない別ターゲット symlink は 1 行も出ないため取りこぼす）:
 
 ```bash
-# 全列挙（B）との件数差が説明できるか
-find -L .claude/skills .agents/skills -mindepth 1 -maxdepth 1 -type d \
-  -exec test -f '{}/SKILL.md' ';' -print 2>/dev/null | sed -E 's#.*/##' | sort -u | wc -l
+# B1・B2・B3・全列挙（B）を名前集合として求め、B4 = B − (B1 ∪ B2 ∪ B3) を算出する
+b1=$(comm -12 \
+  <(ls -d skills/*/SKILL.md 2>/dev/null | sed -E 's#skills/##; s#/SKILL\.md##' | sort -u) \
+  <(find .claude/skills -mindepth 1 -maxdepth 1 -type l 2>/dev/null | sed -E 's#.*/##' | sort -u))
+b2=$(<Step 3 の B2 抽出コマンドの標準出力を sort -u したもの>)
+b3=$(<Step 3 の B3 抽出コマンドの標準出力を sort -u したもの>)
+full=$(find -L .claude/skills .agents/skills -mindepth 1 -maxdepth 1 -type d \
+  -exec test -f '{}/SKILL.md' ';' -print 2>/dev/null | sed -E 's#.*/##' | sort -u)
+
+union=$(printf '%s\n%s\n%s\n' "${b1}" "${b2}" "${b3}" | sed '/^$/d' | sort -u)
+b4=$(comm -23 <(printf '%s\n' "${full}") <(printf '%s\n' "${union}"))
+printf '%s\n' "${b4}"   # B4 の名前一覧（空なら B4=0）
+
+# B1/B2/B3 が互いに排他か（重複があれば以下のいずれかが空でない出力を返す）
+comm -12 <(printf '%s\n' "${b1}" | sort -u) <(printf '%s\n' "${b2}" | sort -u)
+comm -12 <(printf '%s\n' "${b1}" | sort -u) <(printf '%s\n' "${b3}" | sort -u)
+comm -12 <(printf '%s\n' "${b2}" | sort -u) <(printf '%s\n' "${b3}" | sort -u)
 ```
 
 - B2 の出力（stdout）が `CLAUDE.md` の「リポジトリ管理スキル（.claude/skills/ に配置）」節と一致すること
 - B3 の出力（stdout）が `CLAUDE.md` の「参照スキル（.claude/skills/ に配置）」節と一致すること
-- B1（系統 A で計上済み）+ B2 + B3 + B4（B2・B3 の stderr `WARN:` 件数の合計）の件数が、
-  `-L` 付き全列挙の件数と一致し、差分が SKILL.md の記述だけから再現できること
-  （`-L` 付き列挙と `-L` 無し抽出の件数差の説明）
-- B4 が 1 件以上出た場合、`WARN:` の内容を確認し、CLAUDE.md のどのセクションにも
+- B1/B2/B3 の排他性チェック（`comm -12` 3本）がいずれも空出力であること（重複があれば
+  B2・B3 抽出コマンドのタイブレークに誤りがある）
+- B1（系統 A で計上済み）+ B2 + B3 + B4（名前集合差分で算出した件数）が、`-L` 付き全列挙の
+  件数と一致すること
+- `b4` が空でない場合、対応する `WARN:` 行の内容を確認し、CLAUDE.md のどのセクションにも
   含めないこと（B4 は記載対象外）
 
 ## 注意事項
