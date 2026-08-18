@@ -170,15 +170,28 @@ jobs:
    マージせず状況をイシューへ記録して停止する。
 4. **初回実行**: 各リポで対象を明示して実行・監視する（作業ディレクトリの
    `origin`（`agent-cli-skills`）へ誤って起動・参照しないよう、以下いずれの
-   コマンドにも `--repo Fandhe-AI/<REPO>` を必ず付ける）。
-   1. `gh workflow run update-external.yml --repo Fandhe-AI/<REPO>` で dispatch する
+   コマンドにも `--repo Fandhe-AI/<REPO>` を必ず付ける）。`aliz-corporate-web` のみ
+   4-1 を 2 回に分けて段階的に確認する（他 4 リポは `target=all` で 1 回）。
+   1. `target` を明示して dispatch する
       （`gh workflow run` はこの時点では run ID を返さないため、次段で新規 run を
       run 一覧から特定する）。
+      - `aliz-corporate-web`: まず
+        `gh workflow run update-external.yml --repo Fandhe-AI/aliz-corporate-web -f target=skill`
+        で skills 経路のみを先に確定し、本手順 4-2〜4-4 を完走させて結論を記録する。
+        成功を確認したうえで改めて
+        `gh workflow run update-external.yml --repo Fandhe-AI/aliz-corporate-web -f target=all`
+        を dispatch し、4-2〜4-4 をもう一度通す（submodule ジョブの失敗有無を切り分けて
+        観測するため、いきなり `all` を実行しない）。
+      - 他 4 リポ: `gh workflow run update-external.yml --repo Fandhe-AI/<REPO> -f target=all`
+        で 1 回のみ dispatch する。
    2. dispatch 直後は一覧反映が遅延し得るため、
-      `gh run list --repo Fandhe-AI/<REPO> --workflow update-external.yml --limit 1 --json databaseId,event,status,createdAt`
-      をポーリングし、`event == "workflow_dispatch"` かつ手順 4-1 の実行時刻以降に
-      `createdAt` を持つ run が現れるまで待ってから対象 run の `databaseId` を確定する
-      （queued のまま古い run を拾わないための識別）。
+      `gh run list --repo Fandhe-AI/<REPO> --workflow update-external.yml --limit 10 --json databaseId,event,status,createdAt`
+      をポーリングする。`--limit 1` は使わない（dispatch と手順 4-2 の間に schedule や
+      別の手動実行が挟まると目的の run が最新 1 件から押し出されて取りこぼされるため）。
+      取得した最大 10 件の中から `event == "workflow_dispatch"` かつ手順 4-1 の実行時刻
+      以降に `createdAt` を持つ run を探し、現れるまでポーリングを繰り返してから対象 run の
+      `databaseId` を確定する（queued のまま古い run を拾わないための識別）。該当 run が
+      10 件の中に見つからない場合は取りこぼしと判断し、`--limit` を広げて再検索する。
    3. run ID を特定したら
       `gh run watch <databaseId> --repo Fandhe-AI/<REPO> --exit-status` で完了
       （`status == completed`）まで待機する。単発の `gh run list --limit 1` を一度
