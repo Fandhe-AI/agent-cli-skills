@@ -151,7 +151,11 @@ while IFS= read -r -d '' f; do
       FILE_TYPE="file コマンド未検出"
     fi
     FILE_HASH="$(git hash-object -- "${f}")"
-    printf '%s\n' "==> バイナリファイル（内容は表示されません）: type=${FILE_TYPE} size=${FILE_SIZE}bytes git-blob-sha1=${FILE_HASH}"
+    # object format は repository 設定依存（既定 sha1 / 拡張 sha256）で出力桁数が変わる
+    # （sha1: 40 桁 / sha256: 64 桁）。固定表記 "git-blob-sha1" だと sha256 リポジトリで
+    # 実際のアルゴリズムと表示が食い違うため、表記自体をアルゴリズム非依存にする。
+    OBJECT_FORMAT="$(git rev-parse --show-object-format 2>/dev/null || echo unknown)"
+    printf '%s\n' "==> バイナリファイル（内容は表示されません）: type=${FILE_TYPE} size=${FILE_SIZE}bytes git-blob-hash(${OBJECT_FORMAT})=${FILE_HASH}"
   else
     # --no-index は index を変更しない（git add -N は使わない。Step 6 の拒否経路が
     # index からの git checkout -- で承認済み他スキルの hash を復元する設計に依存しており、

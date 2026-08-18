@@ -238,7 +238,9 @@ test('ケース5: バイナリの未追跡ファイルは種別・サイズ・�
     assert.match(out, /IMAGE\.bin/, 'バイナリファイル名が出力に含まれること')
     assert.match(
       out,
-      /バイナリファイル（内容は表示されません）: type=.+ size=\d+bytes git-blob-sha1=[0-9a-f]{40}/,
+      // object format は repository 設定依存（既定 sha1: 40 桁 / 拡張 sha256: 64 桁）で
+      // 出力桁数が変わるため、アルゴリズム名・桁数を固定せず表記の形だけを検証する。
+      /バイナリファイル（内容は表示されません）: type=.+ size=\d+bytes git-blob-hash\([a-z0-9]+\)=[0-9a-f]{40,64}/,
       'git diff --no-index の "Binary files ... differ" だけに頼らず、種別・サイズ・' +
         'git blob ハッシュが明示されること',
     )
