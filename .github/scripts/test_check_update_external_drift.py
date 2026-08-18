@@ -3,7 +3,7 @@
 
 このワークフローは「検出できること」が仕事なので、ジョブが緑になるだけでは
 何も証明しない。ここでは GitHub API に触れない純粋関数
-（``classify_workflow`` / ``evaluate_pin`` / ``check_upstream_markers``）を
+（``classify_workflow`` / ``evaluate_latest_tag`` / ``check_upstream_markers``）を
 インラインの fixture へ直接当て、各分類・pin 比較・軸 4 のジョブ単位判定が
 意図どおりに転ぶことを実測する。
 
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import subprocess
 import sys
 import unittest
 
@@ -29,10 +28,9 @@ from check_update_external_drift import (  # noqa: E402
     KIND_LEGACY,
     KIND_REUSABLE_DEFINITION,
     KIND_WRAPPER,
-    KIND_WRAPPER_UNPINNED,
-    PIN_BEHIND,
-    PIN_CURRENT,
-    PIN_UNREACHABLE,
+    KIND_WRAPPER_BADREF,
+    TAG_CURRENT,
+    TAG_STALE,
     SCHED_DISABLED,
     SCHED_FAILING,
     SCHED_OK,
@@ -40,7 +38,7 @@ from check_update_external_drift import (  # noqa: E402
     SCHED_UNKNOWN,
     check_upstream_markers,
     classify_workflow,
-    evaluate_pin,
+    evaluate_latest_tag,
     evaluate_schedule,
     has_schedule_trigger,
     norm,
@@ -49,14 +47,18 @@ from datetime import datetime, timedelta, timezone
 
 UPSTREAM_SHA = "fed9c07d98367f77e5e2b63bca38843f46feee96"
 OLD_PIN = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+# 上流 `latest` タグの既定応答（軸 2 = タグの鮮度）。健全状態を既定にし、
+# stale / 取得失敗を検証するテストだけがこの値を差し替える。
+LATEST_TAG_RESPONSE: tuple[int, str] = (
+    200, '{"object": {"sha": "' + UPSTREAM_SHA + '", "type": "commit"}}'
+)
+# annotated tag の peel（`git/tags/{sha}`）の既定応答。annotated タグ経路を検証する
+# テストだけが差し替える（既定の LATEST_TAG_RESPONSE は lightweight のため未使用）。
+LATEST_TAG_PEEL_RESPONSE: tuple[int, str] = (
+    200, '{"object": {"sha": "' + UPSTREAM_SHA + '", "type": "commit"}}'
+)
 # compare が 429 を返す pin。「検査できなかった」であって「壊れた pin」ではない。
-RATE_LIMITED_PIN = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-# compare は ahead（コミット数では遅れている）だが、pin 側ファイルの内容が
-# main と完全一致する pin（イシュー #343 の実効差分ゲート用）。
-EQUIV_PIN = "dddddddddddddddddddddddddddddddddddddddd"
-# compare は成功するが pin 本文の取得だけが 5xx になる pin。実効差分ゲートが
-# 「検査不能」を PIN-STALE へ倒していないことを固定する（イシュー #343 P1）。
-CONTENT_ERROR_PIN = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 # --- fixture: 上流 reusable workflow を SHA 固定で呼ぶ薄い wrapper ---------
 FIXTURE_WRAPPER = """
@@ -197,15 +199,6 @@ jobs:
 """
 
 
-# --- fixture: 実効差分ゲート用。main（FIXTURE_UPSTREAM_OK）とは内容が異なる
-#     旧版の上流ファイル。OLD_PIN が指す内容としてこれを使うことで、
-#     「PIN_BEHIND かつ実効差分あり = PIN-STALE のまま」の経路を固定する
-#     （実効差分ゲート導入で誤って equivalent 側へ倒れていないことの回帰）。
-FIXTURE_UPSTREAM_OLD = FIXTURE_UPSTREAM_OK.replace(
-    "skills-version: '1.5.22'", "skills-version: '1.5.20'"
-)
-
-
 def markers_map(text: str) -> dict[str, dict]:
     return {m["marker"]: m for m in check_upstream_markers(text)}
 
@@ -222,14 +215,20 @@ class TestNorm(unittest.TestCase):
 
 
 class TestAxis1Classification(unittest.TestCase):
-    def test_wrapper_pinned(self):
-        info = classify_workflow(FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))
+    def test_wrapper_latest_is_ok(self):
+        info = classify_workflow(FIXTURE_WRAPPER.format(pin="latest"))
         self.assertEqual(info["kind"], KIND_WRAPPER)
+        self.assertEqual(info["pin"], "latest")
+
+    def test_wrapper_sha_pin_is_drift_not_legacy(self):
+        # SHA pin へ戻すのは方針からの退行。LEGACY とは直し方が違うので別種別。
+        info = classify_workflow(FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))
+        self.assertEqual(info["kind"], KIND_WRAPPER_BADREF)
         self.assertEqual(info["pin"], UPSTREAM_SHA)
 
-    def test_wrapper_unpinned_is_drift_not_legacy(self):
+    def test_wrapper_branch_ref_is_drift_not_legacy(self):
         info = classify_workflow(FIXTURE_WRAPPER_UNPINNED)
-        self.assertEqual(info["kind"], KIND_WRAPPER_UNPINNED)
+        self.assertEqual(info["kind"], KIND_WRAPPER_BADREF)
         self.assertEqual(info["pin"], "main")
 
     def test_legacy(self):
@@ -295,101 +294,18 @@ jobs:
         self.assertEqual(info["kind"], KIND_LEGACY)
 
 
-class TestAxis2Pin(unittest.TestCase):
-    def test_pin_current_by_equality(self):
-        v = evaluate_pin(UPSTREAM_SHA, UPSTREAM_SHA, None)
-        self.assertEqual(v["state"], PIN_CURRENT)
+class TestAxis2LatestTag(unittest.TestCase):
+    def test_tag_current(self):
+        v = evaluate_latest_tag(UPSTREAM_SHA, UPSTREAM_SHA)
+        self.assertEqual(v["state"], TAG_CURRENT)
 
-    def test_pin_current_by_identical_status(self):
-        v = evaluate_pin(OLD_PIN, UPSTREAM_SHA,
-                         {"status": "identical", "ahead_by": 0, "behind_by": 0})
-        self.assertEqual(v["state"], PIN_CURRENT)
-
-    def test_pin_behind_reports_ahead_by(self):
-        # compare(base=pin, head=main) の ahead_by は「main が pin より先行した数」
-        # = pin が遅れている数。behind_by ではない。
-        v = evaluate_pin(OLD_PIN, UPSTREAM_SHA,
-                         {"status": "ahead", "ahead_by": 7, "behind_by": 0})
-        self.assertEqual(v["state"], PIN_BEHIND)
-        self.assertEqual(v["behind"], 7)
-
-    def test_pin_diverged_is_unreachable(self):
-        v = evaluate_pin(OLD_PIN, UPSTREAM_SHA,
-                         {"status": "diverged", "ahead_by": 3, "behind_by": 2})
-        self.assertEqual(v["state"], PIN_UNREACHABLE)
-
-    def test_pin_404_is_unreachable_not_green(self):
-        v = evaluate_pin(OLD_PIN, UPSTREAM_SHA, None)
-        self.assertEqual(v["state"], PIN_UNREACHABLE)
-
-
-class TestPinImpactGate(unittest.TestCase):
-    """実効差分ゲート（イシュー #343）の純粋関数を検証する。"""
-
-    def test_git_blob_sha_matches_git_hash_object(self):
-        # ``git hash-object`` の出力と一致することをその場で ground truth として
-        # 取り直す（固定値だと本ファイルの編集のたびに乖離して的外れな失敗に
-        # なるため、比較対象そのものを都度計算する）。非 ASCII（日本語コメント）を
-        # 含む本番ファイルで検証することで、文字数とバイト数の取り違えを
-        # 踏む実装を確実に落とす。
-        path = (
-            pathlib.Path(__file__).resolve().parent.parent
-            / "workflows" / "update-external.yml"
-        )
-        text = path.read_text(encoding="utf-8")
-        proc = subprocess.run(
-            ["git", "hash-object", str(path)],
-            capture_output=True, text=True, check=True,
-        )
-        self.assertEqual(cud.git_blob_sha(text), proc.stdout.strip())
-
-    def test_git_blob_sha_byte_length_not_char_length(self):
-        # マルチバイト文字（日本語）を含む短い文字列で、文字数ではなくバイト数を
-        # 使っていることを直接確認する。
-        text = "あ"  # UTF-8 で 3 バイト、str の len() は 1
-        import hashlib
-
-        expected = hashlib.sha1(b"blob 3\0" + text.encode("utf-8")).hexdigest()
-        self.assertEqual(cud.git_blob_sha(text), expected)
-
-    def test_has_local_uses_detects_dot_slash(self):
-        self.assertTrue(cud.has_local_uses("jobs:\n  x:\n    uses: ./local.yml\n"))
-        self.assertTrue(cud.has_local_uses("    uses: './local.yml'\n"))
-
-    def test_has_local_uses_false_for_absolute_ref(self):
-        self.assertFalse(
-            cud.has_local_uses(
-                "uses: Fandhe-AI/actions/.github/workflows/update-external.yml@"
-                + UPSTREAM_SHA
-            )
-        )
-
-    def test_impact_equivalent_on_exact_match(self):
-        v = cud.evaluate_pin_impact(FIXTURE_UPSTREAM_OK, FIXTURE_UPSTREAM_OK)
-        self.assertTrue(v["equivalent"])
-        self.assertEqual(v["pin_blob"], v["main_blob"])
-
-    def test_impact_not_equivalent_on_content_diff(self):
-        v = cud.evaluate_pin_impact(FIXTURE_UPSTREAM_OLD, FIXTURE_UPSTREAM_OK)
-        self.assertFalse(v["equivalent"])
-        self.assertNotEqual(v["pin_blob"], v["main_blob"])
-
-    def test_impact_not_equivalent_when_fetch_failed(self):
-        v = cud.evaluate_pin_impact(None, FIXTURE_UPSTREAM_OK)
-        self.assertFalse(v["equivalent"])
-        self.assertIsNone(v["pin_blob"])
-
-    def test_impact_not_equivalent_when_pin_side_has_local_uses(self):
-        local_ref = FIXTURE_UPSTREAM_OK + "\n  x:\n    uses: ./local.yml\n"
-        # pin/main とも同一内容でも、ローカル参照があれば前提条件チェックで
-        # 等価と判定しない（将来 E5 の前提が崩れた場合の安全側フォールバック）。
-        v = cud.evaluate_pin_impact(local_ref, local_ref)
-        self.assertFalse(v["equivalent"])
-
-    def test_impact_not_equivalent_when_only_main_side_has_local_uses(self):
-        local_ref = FIXTURE_UPSTREAM_OK + "\n  x:\n    uses: ./local.yml\n"
-        v = cud.evaluate_pin_impact(FIXTURE_UPSTREAM_OK, local_ref)
-        self.assertFalse(v["equivalent"])
+    def test_tag_stale_reports_both_shas(self):
+        # move-latest-tag.yml が止まると latest が古いコミットに据え置かれ、
+        # 全下流が静かに古い実装で動き続ける。これを乖離として報告する。
+        v = evaluate_latest_tag(OLD_PIN, UPSTREAM_SHA)
+        self.assertEqual(v["state"], TAG_STALE)
+        self.assertIn(OLD_PIN[:12], v["detail"])
+        self.assertIn(UPSTREAM_SHA[:12], v["detail"])
 
 
 class TestAxis4JobScoped(unittest.TestCase):
@@ -736,7 +652,7 @@ class TestScheduleTriggerDetection(unittest.TestCase):
     """``has_schedule_trigger`` — 軸 5 の対象判定（wrapper かどうかは問わない）。"""
 
     def test_wrapper_with_schedule_is_true(self):
-        spec_text = FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)
+        spec_text = FIXTURE_WRAPPER.format(pin="latest")
         import yaml as _yaml
         self.assertTrue(has_schedule_trigger(_yaml.safe_load(spec_text)))
 
@@ -926,44 +842,15 @@ class TestScanEndToEnd(unittest.TestCase):
             if "/actions/workflows/" in path:
                 return _fake_actions_api(path, repos)
             if path.startswith(f"repos/{cud.UPSTREAM_REPO}/contents/"):
-                # ``?ref=`` で軸 4 の main 取得（scan() 冒頭・1 回だけ）と
-                # 実効差分ゲートの pin 取得（PIN_BEHIND 判定後・pin ごと）を
-                # 区別する。区別しないと両者が同じ FIXTURE_UPSTREAM_OK を返し、
-                # 「pin の内容が main と一致する」が常に真になって
-                # PIN-STALE が一切出なくなる（fixture の衝突）。
-                if path.endswith("?ref=main") or path.endswith(f"?ref={UPSTREAM_SHA}"):
-                    # イシュー #343 Review 指摘の TOCTOU 修正で scan() は
-                    # ``?ref=main`` ではなく ``?ref={upstream_sha}``（この
-                    # fixture では固定値 UPSTREAM_SHA）で軸 4 の本文を取得する。
-                    # 呼び出し側の実装差し替えに追従して両方一致させる。
-                    return 200, FIXTURE_UPSTREAM_OK
-                if path.endswith(f"?ref={OLD_PIN}"):
-                    return 200, FIXTURE_UPSTREAM_OLD
-                if path.endswith(f"?ref={EQUIV_PIN}"):
-                    return 200, FIXTURE_UPSTREAM_OK
-                if path.endswith(f"?ref={CONTENT_ERROR_PIN}"):
-                    # 一時的な API 障害。実効差分の有無は判定できない。
-                    return 503, ""
-                if "?ref=" not in path:
-                    # ``?ref=`` なしはこの fixture では per-repo 走査が
-                    # UPSTREAM_REPO 自身（"actions"）を下流候補として叩く
-                    # ケース（軸 1 の KIND_REUSABLE_DEFINITION 除外テスト用）。
-                    # 実効差分ゲートの pin 取得とは無関係な経路のため、
-                    # 従来どおり FIXTURE_UPSTREAM_OK を返す。
-                    return 200, FIXTURE_UPSTREAM_OK
-                raise AssertionError(f"想定外の pin content 取得: {path}")
-            if path.startswith(f"repos/{cud.UPSTREAM_REPO}/compare/"):
-                pin = path.split("/compare/")[1].split("...")[0]
-                if pin == OLD_PIN:
-                    return 200, '{"status":"ahead","ahead_by":7,"behind_by":0}'
-                if pin == EQUIV_PIN:
-                    return 200, '{"status":"ahead","ahead_by":3,"behind_by":0}'
-                if pin == CONTENT_ERROR_PIN:
-                    return 200, '{"status":"ahead","ahead_by":5,"behind_by":0}'
-                if pin == RATE_LIMITED_PIN:
-                    # レート制限。pin が壊れている証拠にはならない。
-                    return 429, ""
-                return 404, ""
+                return 200, FIXTURE_UPSTREAM_OK
+            if path == f"repos/{cud.UPSTREAM_REPO}/git/ref/tags/latest":
+                # 既定は「タグが main の先頭を指している」健全状態。個別テストは
+                # モジュール変数 LATEST_TAG_RESPONSE を差し替えて stale / 取得失敗を作る
+                # （_fake_api は staticmethod のため self を参照できない）。
+                return LATEST_TAG_RESPONSE
+            if path.startswith(f"repos/{cud.UPSTREAM_REPO}/git/tags/"):
+                # annotated tag の peel。個別テストが LATEST_TAG_PEEL_RESPONSE を差し替える
+                return LATEST_TAG_PEEL_RESPONSE
             for name, cfg in repos.items():
                 prefix = f"repos/Fandhe-AI/{name}/"
                 if not path.startswith(prefix):
@@ -1057,11 +944,11 @@ class TestScanEndToEnd(unittest.TestCase):
 
     def test_all_four_axes(self):
         result = self._run_scan({
-            # 軸 1+2: 最新 pin の wrapper → 乖離なし
+            # 軸 1: @latest 参照の wrapper → 乖離なし
             "fresh-wrapper": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
             },
-            # 軸 2: 旧 pin → behind 件数付きで乖離
+            # 軸 1: SHA pin へ戻した wrapper → 方針からの退行として乖離
             "stale-wrapper": {
                 "workflow": (200, FIXTURE_WRAPPER.format(pin=OLD_PIN)),
             },
@@ -1088,8 +975,8 @@ class TestScanEndToEnd(unittest.TestCase):
 
         self.assertEqual(result.wrappers_ok, ["Fandhe-AI/fresh-wrapper"])
         self.assertEqual(len(cats["stale-wrapper"]), 1)
-        self.assertEqual(cats["stale-wrapper"][0][0], "PIN-STALE")
-        self.assertIn("7 コミット遅れている", cats["stale-wrapper"][0][1])
+        self.assertEqual(cats["stale-wrapper"][0][0], KIND_WRAPPER_BADREF)
+        self.assertIn("@latest ではない", cats["stale-wrapper"][0][1])
         self.assertEqual(len(cats["legacy-repo"]), 1)
         self.assertEqual(cats["legacy-repo"][0][0], "LEGACY")
         self.assertEqual(len(cats["sneaky-workflow-call"]), 1)
@@ -1149,81 +1036,98 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertIn("乖離: **6 件**", report)
         self.assertIn("検査不能 (UNKNOWN): **1 件**", report)
 
-    def test_pin_behind_but_content_equivalent_is_not_a_finding(self):
-        # EQUIV_PIN は compare 上 3 コミット遅れているが、pin 側ファイルの内容が
-        # main（FIXTURE_UPSTREAM_OK）と一致する。PIN-STALE として findings へは
-        # 積まず、pins_equivalent へ根拠（pin・blob sha）付きで積む。
-        result = self._run_scan({
-            "equiv-wrapper": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=EQUIV_PIN)),
-            },
-        })
-        cats = self._findings_by_repo(result)
-        self.assertNotIn("equiv-wrapper", cats)
-        self.assertEqual(len(result.pins_equivalent), 1)
-        repo, pin, blob = result.pins_equivalent[0]
-        self.assertEqual(repo, "Fandhe-AI/equiv-wrapper")
-        self.assertEqual(pin, EQUIV_PIN)
-        self.assertEqual(blob, cud.git_blob_sha(FIXTURE_UPSTREAM_OK))
-        # 乖離としては数えない（実効差分が無いため）。
-        self.assertEqual(cud.drift_count(result), 0)
-        report = cud.render_report(result)
-        self.assertIn("実効差分なしの pin: **1 件**", report)
-        self.assertIn("Fandhe-AI/equiv-wrapper", report)
-
-    def test_pin_behind_with_real_content_diff_stays_pin_stale(self):
-        # 回帰確認: 実効差分ゲート導入後も、内容が実際に異なる pin（OLD_PIN /
-        # FIXTURE_UPSTREAM_OLD）は従来どおり PIN-STALE のまま。
-        result = self._run_scan({
-            "stale-wrapper": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=OLD_PIN)),
-            },
-        })
-        cats = self._findings_by_repo(result)
-        self.assertEqual(cats["stale-wrapper"][0][0], "PIN-STALE")
-        self.assertEqual(result.pins_equivalent, [])
-
-    def test_pin_content_fetch_error_is_unknown_not_stale(self):
-        # compare は成功して PIN_BEHIND だが、pin 本文の取得が 503。実効差分の
-        # 有無を確認できないため、PIN-STALE（乖離）ではなく UNKNOWN に倒す
-        # （イシュー #343 Review P1 指摘。compare 取得失敗と同じ契約）。
-        result = self._run_scan({
-            "content-error": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=CONTENT_ERROR_PIN)),
-            },
-        })
-        cats = self._findings_by_repo(result)
-        self.assertNotIn("content-error", cats)
-        self.assertEqual(
-            [f.repo for f in result.unknowns], ["Fandhe-AI/content-error"]
-        )
-        # 乖離としては数えない（未確認を乖離に化けさせない）。
-        self.assertEqual(cud.drift_count(result), 0)
-
-    def test_compare_error_is_unknown_not_unreachable(self):
-        # compare が 429。到達不能な pin (乖離) ではなく UNKNOWN として扱う。
-        result = self._run_scan({
-            "rate-limited": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=RATE_LIMITED_PIN)),
-            },
-        })
+    def test_latest_tag_fetch_error_is_unknown_not_drift(self):
+        # タグ取得が 429。乖離の証拠にはならないため UNKNOWN として扱う。
+        global LATEST_TAG_RESPONSE
+        orig = LATEST_TAG_RESPONSE
+        LATEST_TAG_RESPONSE = (429, "")
+        try:
+            result = self._run_scan({
+                "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
+            })
+        finally:
+            LATEST_TAG_RESPONSE = orig
         self.assertEqual(result.findings, [])
         self.assertEqual(len(result.unknowns), 1)
         self.assertIn("HTTP 429", result.unknowns[0].detail)
         self.assertTrue(cud.has_drift(result))  # UNKNOWN が残る間は close しない
 
-    def test_compare_404_is_unreachable_pin_drift(self):
-        # 404 は「その SHA が上流に存在しない」= 到達不能な pin。乖離として扱う。
-        result = self._run_scan({
-            "ghost-pin": {"workflow": (200, FIXTURE_WRAPPER.format(pin="c" * 40))},
-        })
+    def test_latest_tag_behind_main_is_drift(self):
+        # move-latest-tag.yml が止まって latest が古いコミットのままなら乖離。
+        global LATEST_TAG_RESPONSE
+        orig = LATEST_TAG_RESPONSE
+        LATEST_TAG_RESPONSE = (
+            200, '{"object": {"sha": "' + OLD_PIN + '", "type": "commit"}}'
+        )
+        try:
+            result = self._run_scan({
+                "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
+            })
+        finally:
+            LATEST_TAG_RESPONSE = orig
         self.assertEqual(result.unknowns, [])
         self.assertEqual(len(result.findings), 1)
-        self.assertEqual(result.findings[0].category, "PIN-UNREACHABLE")
+        self.assertEqual(result.findings[0].category, "LATEST-TAG-STALE")
+
+    def test_latest_tag_missing_is_drift_not_unknown(self):
+        # 404 は「タグが存在しない」という確定的観測。全下流の @latest 参照が
+        # 解決不能のため、一時失敗の UNKNOWN ではなく finding として報告する。
+        global LATEST_TAG_RESPONSE
+        orig = LATEST_TAG_RESPONSE
+        LATEST_TAG_RESPONSE = (404, "")
+        try:
+            result = self._run_scan({
+                "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
+            })
+        finally:
+            LATEST_TAG_RESPONSE = orig
+        self.assertEqual(result.unknowns, [])
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].category, "LATEST-TAG-MISSING")
+        self.assertTrue(cud.has_drift(result))
+
+    def test_latest_tag_annotated_is_peeled_before_compare(self):
+        # annotated tag では ref の SHA はタグオブジェクトの SHA。peel して得た
+        # コミット SHA が main 先頭なら健全（peel せず比較すると恒久 STALE 誤報）。
+        global LATEST_TAG_RESPONSE
+        orig = LATEST_TAG_RESPONSE
+        tag_obj_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        LATEST_TAG_RESPONSE = (
+            200, '{"object": {"sha": "' + tag_obj_sha + '", "type": "tag"}}'
+        )
+        try:
+            result = self._run_scan({
+                "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
+            })
+        finally:
+            LATEST_TAG_RESPONSE = orig
+        self.assertEqual(result.findings, [])
+        self.assertEqual(result.unknowns, [])
+
+    def test_latest_tag_peel_failure_is_unknown(self):
+        # peel の取得失敗は「比較できなかった」であり乖離の証拠ではない。
+        global LATEST_TAG_RESPONSE, LATEST_TAG_PEEL_RESPONSE
+        orig = LATEST_TAG_RESPONSE
+        orig_peel = LATEST_TAG_PEEL_RESPONSE
+        LATEST_TAG_RESPONSE = (
+            200, '{"object": {"sha": "'
+            + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" + '", "type": "tag"}}'
+        )
+        LATEST_TAG_PEEL_RESPONSE = (500, "")
+        try:
+            result = self._run_scan({
+                "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
+            })
+        finally:
+            LATEST_TAG_RESPONSE = orig
+            LATEST_TAG_PEEL_RESPONSE = orig_peel
+        self.assertEqual(result.findings, [])
+        self.assertEqual(len(result.unknowns), 1)
+        self.assertIn("コミット SHA を解決できない", result.unknowns[0].detail)
 
     def test_zero_drift_report_says_zero(self):
         result = self._run_scan({
-            "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))},
+            "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
         })
         report = cud.render_report(result)
         self.assertIn("乖離: **0 件**", report)
@@ -1241,9 +1145,9 @@ class TestScanEndToEnd(unittest.TestCase):
         # 1 件だけ。「schedule トリガを持つ wrapper は全て直近実行を確認できている」と
         # 断定すると集計値（schedule_ok: 1/2）と矛盾するため、検査不能を明示する。
         result = self._run_scan({
-            "ok-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))},
+            "ok-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
             "api-500": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
                 "sched": ("active", "2020-01-01T00:00:00Z", 500, None),
             },
         })
@@ -1264,7 +1168,7 @@ class TestScanEndToEnd(unittest.TestCase):
     def test_unknown_alone_keeps_issue_open(self):
         # 乖離 0 件だが検査不能が 1 件。「解消した」と言えないので close しない。
         result = self._run_scan({
-            "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))},
+            "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
             "forbidden": {"workflow": (403, "")},
         })
         self.assertEqual(cud.drift_count(result), 0)
@@ -1274,7 +1178,7 @@ class TestScanEndToEnd(unittest.TestCase):
     def test_upstream_marker_failure_alone_is_drift(self):
         # 下流が全て健全でも、上流 reusable が劣化していれば乖離として扱う。
         result = self._run_scan({
-            "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA))},
+            "fresh-wrapper": {"workflow": (200, FIXTURE_WRAPPER.format(pin="latest"))},
         })
         result.upstream_markers = [{"marker": "dummy", "ok": False, "detail": "劣化"}]
         self.assertEqual(cud.drift_count(result), 1)
@@ -1293,7 +1197,7 @@ class TestScanEndToEnd(unittest.TestCase):
         # schedule 実行が 5 日前 → 軸 5 のみが乖離を報告する。
         result = self._run_scan({
             "stale-schedule": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
                 "sched": ("active", "2020-01-01T00:00:00Z", 200, self._ago(5)),
             },
         })
@@ -1307,7 +1211,7 @@ class TestScanEndToEnd(unittest.TestCase):
     def test_schedule_disabled_inactivity_is_flagged(self):
         result = self._run_scan({
             "disabled-schedule": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
                 "sched": ("disabled_inactivity", "2020-01-01T00:00:00Z", 200, None),
             },
         })
@@ -1321,7 +1225,7 @@ class TestScanEndToEnd(unittest.TestCase):
         # （フェイク Actions API が conclusion を返す経路）で押さえる。
         result = self._run_scan({
             "failing-schedule": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
                 "sched": (
                     "active", "2020-01-01T00:00:00Z", 200, self._ago(0.8),
                     ["failure", "failure"],
@@ -1339,7 +1243,7 @@ class TestScanEndToEnd(unittest.TestCase):
         # 単発の flaky failure は過検知しない（直近 2 件が「全て」失敗のときのみ）。
         result = self._run_scan({
             "flaky-schedule": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
                 "sched": (
                     "active", "2020-01-01T00:00:00Z", 200, self._ago(0.8),
                     ["failure", "success"],
@@ -1382,10 +1286,10 @@ class TestScanEndToEnd(unittest.TestCase):
         # 留め、ScanError にはしない。
         result = self._run_scan({
             "healthy-wrapper": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
             },
             "actions-forbidden": {
-                "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
                 "sched": ("forbidden_meta",),
             },
         })
@@ -1413,11 +1317,11 @@ class TestScheduleSystemicForbidden(unittest.TestCase):
         with self.assertRaises(cud.ScanError) as ctx:
             self._run_scan({
                 "wrapper-a": {
-                    "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                    "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
                     "sched": ("forbidden_meta",),
                 },
                 "wrapper-b": {
-                    "workflow": (200, FIXTURE_WRAPPER.format(pin=UPSTREAM_SHA)),
+                    "workflow": (200, FIXTURE_WRAPPER.format(pin="latest")),
                     "sched": ("forbidden_meta",),
                 },
             })

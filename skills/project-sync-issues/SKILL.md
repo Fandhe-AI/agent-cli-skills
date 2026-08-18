@@ -96,7 +96,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Sync project status
-        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main
+        uses: Fandhe-AI/actions/project-sync@latest
         with:
           project-number: '<number>'
           project-owner: '<owner>'
@@ -131,7 +131,7 @@ jobs:
           owner: '<owner>'
 
       - name: Sync project status
-        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main
+        uses: Fandhe-AI/actions/project-sync@latest
         with:
           project-number: '<number>'
           project-owner: '<owner>'
@@ -144,7 +144,7 @@ Status オプション名がデフォルト（Todo / In Progress / In Review / D
 
 ```yaml
       - name: Sync project status
-        uses: Fandhe-AI/actions/project-sync@a85f9d283bfdbe7ff76823d2ca766222a268ee10 # main
+        uses: Fandhe-AI/actions/project-sync@latest
         with:
           project-number: '<number>'
           project-owner: '<owner>'

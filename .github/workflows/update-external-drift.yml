@@ -26,7 +26,9 @@ name: Update external drift check
 # 誤判定される。旧マーカーの意図は軸 4 として上流 1 ファイルの検査へ畳んだ。
 #
 #   軸 1  wrapper か否か        … 手管理ファイルへの逆戻り (LEGACY) を検知
-#   軸 2  pin の鮮度            … 上流を強化しても pin が古いと届かない
+#   軸 2  latest タグの鮮度    … 参照は `@latest` に統一済み。タグを動かす
+#                                 move-latest-tag.yml が止まると全下流が静かに
+#                                 古い実装で動き続けるため、タグ自体の鮮度を見る
 #   軸 3  同期 CI の欠落        … skills を vendor しているのに workflow が無い
 #   軸 4  上流 reusable の劣化  … 旧マーカーの意図。18 リポ分の grep が 1 ファイルへ
 #                                 （#302: 上流内の全 uses が SHA 固定かも検査。

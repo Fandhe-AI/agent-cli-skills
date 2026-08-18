@@ -4,7 +4,7 @@
 
 本リポジトリで作業するすべての AI エージェント・人間レビュアーが共通で用いるレビュー観点集。
 Codex による PR 自動レビュー（`.github/workflows/codex-review.yml`。Fandhe-AI/actions の
-reusable workflow を SHA 固定で呼び出す wrapper）は、PR の base コミットの本ファイルを
+reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コミットの本ファイルを
 レビュー基準として読む。運用ガイドの正は `CLAUDE.md`、著作規約の詳細は
 `.claude/rules/`（特に `skill-authoring.md` / `security.md`）を参照し、本書は重複させず
 レビュー判定基準に絞る。
@@ -37,9 +37,14 @@ reusable workflow を SHA 固定で呼び出す wrapper）は、PR の base コ�
 - **TLS 検証無効化の拡大（P1）**: `GIT_SSL_NO_VERIFY=1` は sandbox 環境の
   ワークアラウンド（`docs/sandbox-tls.md`）に限定する。無条件・恒常的な使用を促す
   記述への変更は P1
-- **CI・ワークフローの改変（P1）**: reusable workflow 呼び出しの SHA 固定を `@main` 等の
-  可動参照へ緩める変更、`permissions` の拡大、構造検証
-  （`.github/scripts/check-skill-structure.sh`）・lint の弱体化
+- **CI・ワークフローの改変（P1）**: **第三者の** action・reusable workflow 呼び出しの
+  SHA 固定を可動参照へ緩める変更、`permissions` の拡大、構造検証
+  （`.github/scripts/check-skill-structure.sh`）・lint の弱体化。
+  **`Fandhe-AI/actions`（組織内の上流リポジトリ）への参照は例外で、可変タグ `@latest` を
+  使う**（2026-08-18・オーナー判断。pin の手動更新コストを避けるための組織方針であり、
+  `@latest` への統一・SHA pin の除去を指摘しない）。`latest` は上流の
+  `move-latest-tag.yml` が main への push ごとに付け替え、その鮮度は本リポの
+  `update-external-drift.yml`（軸 2）が日次で実測する
 - **承認境界の後退（P1）**: implement-issue の「計画承認後に実装」、Issue 起票・
   破壊的操作前のユーザー確認など、既存スキルが持つ人間承認ゲートを外す変更。
   **例外基準（一般則）**: opt-in の自動マージ経路は、差分とスキル文書から**独立して

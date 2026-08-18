@@ -10,14 +10,13 @@
 # （Fandhe-AI/agent-cli-skills イシュー #261）。移行前ファイルが直接ピンしていた
 # `submodule-update@fed9c07d98367f77e5e2b63bca38843f46feee96` は、以後 reusable workflow 側が集中管理する。
 #
-# 参照 SHA の検証記録（2026-08-17 実測）:
-# - 到達性: `gh api repos/Fandhe-AI/actions/compare/main...8dea43ee40a7137f47fa974df2f297d1938ac48c`
-#   → `{"status":"identical","ahead_by":0,"behind_by":0}`。upstream main の祖先であることを
-#   確認した（実測時点では main の tip そのもの）。以後 main が進めば status は behind へ
-#   変わるが、`ahead_by: 0` が保たれる限り祖先である事実は変わらない
-# - コミット: feat(update-external): 古い日次更新 PR の自動 close をオプトインで追加 (#80)
-#   （2026-08-17T06:30:27Z）
-# - 入力契約: 同 SHA の `.github/workflows/update-external.yml` を contents API で取得し
+# 参照 ref は可変タグ `@latest`（2026-08-18・オーナー判断で SHA pin から移行）:
+# - `latest` は上流の `.github/workflows/move-latest-tag.yml` が main への push ごとに
+#   付け替える。呼び出し側での参照更新は発生しない
+# - タグが古いコミットへ据え置かれる（= mover の故障）と全下流が静かに古い実装で動き
+#   続けるため、本リポの日次乖離検知（`update-external-drift.yml` の軸 2）が
+#   `latest` と上流 main の一致を毎日実測する
+# - 入力契約: 移行時点の `.github/workflows/update-external.yml` を contents API で取得し
 #   `on.workflow_call` を確認。inputs 11 件（target / runner-json / base-branch /
 #   enable-submodule / enable-skills / submodule-auto-merge{,-allowlist} /
 #   skills-auto-merge{,-allowlist} / submodule-close-superseded / skills-close-superseded）・
@@ -39,10 +38,9 @@
 #   根本修正（`submodule-timeout-minutes` / `skills-timeout-minutes` を
 #   `workflow_call` の input として追加する、または固定値を引き上げる）は
 #   本ファイルではなく上流 `Fandhe-AI/actions/.github/workflows/update-external.yml`
-#   側の変更が必要で、`8dea43ee40a7137f47fa974df2f297d1938ac48c` 時点の
-#   `on.workflow_call.inputs`（11 件）にも timeout 系は未追加であることを
-#   contents API で実測確認済み（2026-08-18）。上流が inputs を追加して pin SHA を
-#   更新するまで、本 wrapper 側で `with:` に timeout 系の input を先行して書かない。
+#   側の変更が必要で、2026-08-18 時点の上流 main の `on.workflow_call.inputs`（11 件）にも
+#   timeout 系は未追加であることを contents API で実測確認済み。上流が inputs を追加する
+#   まで、本 wrapper 側で `with:` に timeout 系の input を先行して書かない。
 #   reusable workflow（`uses: <owner>/<repo>/.github/workflows/<file>.yml@<sha>`）は
 #   呼び先の `on.workflow_call.inputs` に無いキーを `with:` へ渡されると、ジョブ起動前に
 #   `Invalid input, <name> is not defined in the referenced workflow` で失敗する。
@@ -53,17 +51,10 @@
 #   （同 PR 本文は composite action へ渡す未知 input を対象としている）。呼び出し形態が
 #   異なるため本ファイルには適用されない。混同すると「危険だが検出できない」と
 #   誤解して、実際には起動時に即検出される失敗を過度に恐れることになる
-# - タグ未公開（0 tags / 0 releases）のため SHA 固定が必須で、Dependabot による自動更新は
-#   効かない。上流更新時は本記録ごと手で差し替える
-#
-# pin 追従の自動化（イシュー #343）:
-# 上記の pin bump は .github/workflows/update-external-pin-bump.yml が日次で
-# 自動化しており、上流 update-external.yml の内容に実効差分がある場合のみ
-# bump PR を自動生成する（実効差分ゲート: pin 側と main 側のファイル内容が
-# 完全一致すればコミット数で遅れていても乖離として扱わない）。本コメントの
-# 「参照 SHA の検証記録」は自動編集の対象外——最新の検証記録は各 bump PR の
-# 本文に記録される。採否の経緯・却下した代替案は docs/update-external-pin.md
-# を参照。
+# - `@latest` は SHA pin が持っていた変更の隔離を失う。上流が `workflow_call` の inputs を
+#   破壊的に変更すると、次回起動時に全呼び出し側が
+#   `Invalid input, <name> is not defined in the referenced workflow` で失敗する。
+#   これは pin の手動更新コストを避けるために受容したトレードオフである
 #
 # runner 選択の根拠:
 # 移行前は `runs-on: ${{ fromJSON(vars.UPDATE_EXTERNAL_RUNNER || '"ubuntu-latest"') }}` だった。
@@ -99,8 +90,8 @@ concurrency:
 
 jobs:
   update-external:
-    # Fandhe-AI/actions はタグ未公開のため main 追従の最新コミット SHA に固定する
-    uses: Fandhe-AI/actions/.github/workflows/update-external.yml@8dea43ee40a7137f47fa974df2f297d1938ac48c # main
+    # Fandhe-AI/actions は可変タグ latest（main へ自動追従）で参照する
+    uses: Fandhe-AI/actions/.github/workflows/update-external.yml@latest
     permissions:
       contents: read
     with:
