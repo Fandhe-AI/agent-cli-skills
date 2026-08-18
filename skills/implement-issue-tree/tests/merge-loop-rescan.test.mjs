@@ -278,6 +278,125 @@ test('監視ループの境界マーカーは実装スクリプト内にそれ�
   assert.equal(source.split(LOOP_END_MARKER).length - 1, 1, `${LOOP_END_MARKER} は 1 か所だけでなければならない`)
 })
 
+test('救済ラウンドの終端分類はループ退出後・単一地点で 1 回だけ評価される', () => {
+  // reconcileRescueRoundState の呼び出しは driverPart 内でちょうど 1 回。呼び出し形（引数名）を
+  // 固定した正規表現だと、#246/#248 と同じ形の regression（旧引数名 rescueRoundPending でのラウンド
+  // 内再呼び出し等）が紛れ込んでも「別の呼び出し」としてカウントから漏れ、1 のままテストが通って
+  // しまう。裸の呼び出し（開き括弧まで）で数えることで、本 Issue が守るべき不変条件
+  // 「呼び出しは 1 か所だけ」を引数の綴りに関係なく検証する。
+  const allCalls = driverPart.match(/reconcileRescueRoundState\(/g) ?? []
+  assert.equal(allCalls.length, 1, '救済ラウンドの判定呼び出しは driverPart 内で 1 か所だけでなければならない')
+  const callIndex = driverPart.indexOf('reconcileRescueRoundState(lastState, rescueRoundActive)')
+  assert.notEqual(callIndex, -1, '判定呼び出しの引数形（lastState, rescueRoundActive）が見つからない')
+  // ループの外（閉じ括弧より後）かつ terminalStatus の算出より前でなければならない
+  // （merge-exec 由来の timeout 写像まで確定した lastState を見て判定する必要があるため）。
+  assert.ok(callIndex > loopEndIndex, '判定はループ退出後（choke point）でなければならない')
+  const terminalStatusIndex = driverPart.indexOf('const terminalStatus =')
+  assert.notEqual(terminalStatusIndex, -1, '終端 status の判定が見つからない（構造変更時は本テストも更新すること）')
+  assert.ok(callIndex < terminalStatusIndex, '判定は terminalStatus の算出より前でなければならない')
+  // 同じブロックに qualityBlock フラグの配線があること。
+  const block = driverPart.slice(callIndex, terminalStatusIndex)
+  assert.match(block, /rescueTimeoutQualityBlock = reconciled\.qualityBlock/)
+  // lastState への再代入が残っていると fix 起動状態への書き換えが復活する（#246 の欠陥の再発防止）。
+  assert.doesNotMatch(block, /lastState = reconciled/)
+})
+
+test('救済ラウンドの予約はラウンド先頭（monitorsLeft-- の直後）で active へ移送される', () => {
+  const handoffActiveIndex = driverPart.indexOf('rescueRoundActive = rescueRoundPending')
+  const handoffClearIndex = driverPart.indexOf('rescueRoundPending = false', handoffActiveIndex)
+  assert.notEqual(handoffActiveIndex, -1, '予約の移送（active への代入）が見つからない')
+  assert.notEqual(handoffClearIndex, -1, '予約の移送後にクリアする代入が見つからない')
+  // ループの内側（開始 index と loopEndIndex の間）にあること。
+  assert.ok(handoffActiveIndex > loopOpenBraceIndex && handoffActiveIndex < loopEndIndex, '移送はループ内でなければならない')
+  assert.ok(handoffClearIndex < loopEndIndex, '移送後のクリアもループ内でなければならない')
+  // monitorsLeft-- の直後（ラウンド先頭）に位置すること。同ラウンド内の他の処理より前でなければ
+  // 予約消費前に別の分岐が rescueRoundActive を参照してしまう。
+  const decrIndex = driverPart.indexOf('monitorsLeft--', loopOpenBraceIndex)
+  assert.notEqual(decrIndex, -1)
+  assert.ok(decrIndex < handoffActiveIndex, '移送は monitorsLeft-- より後でなければならない')
+  const monitorCallIndex = driverPart.indexOf('const m = await agent(monitorPrompt(', loopOpenBraceIndex)
+  assert.notEqual(monitorCallIndex, -1)
+  assert.ok(handoffClearIndex < monitorCallIndex, '移送は monitor 呼び出しより前（ラウンド先頭）でなければならない')
+})
+
+test('救済 timeout フラグが終端 status の blocked 分類に配線されている', () => {
+  const idx = driverPart.indexOf('const terminalStatus =')
+  assert.notEqual(idx, -1, '終端 status の判定が見つからない（構造変更時は本テストも更新すること）')
+  const expr = driverPart.slice(idx, idx + 400)
+  assert.match(expr, /rescueTimeoutQualityBlock/, 'フラグを立てても分類へ配線されていなければ blocked にならない')
+  assert.match(expr, /'blocked'/)
+})
+
+test('救済 pending / active / 品質ブロックフラグは while ループの外で 1 回だけ宣言される', () => {
+  for (const name of ['rescueRoundPending', 'rescueRoundActive', 'rescueTimeoutQualityBlock']) {
+    const declarations = driverPart.match(new RegExp(`let ${name}\\b`, 'g')) ?? []
+    assert.equal(declarations.length, 1, `${name} の宣言は 1 か所でなければならない`)
+    const declIndex = driverPart.indexOf(`let ${name}`)
+    assert.ok(declIndex < whileIndex, `${name} は while より前で宣言されていなければならない`)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 合成シナリオ（Issue #248 の本題）: 純粋関数単体では検知できない「救済ラウンド中に
+// merge-exec 由来の timeout 写像が発生する」合成経路の回帰検証。
+// 模擬ラウンド: rescueRoundActive = true / monitor が 'ready' を返す /
+// classifyMergeExecDispatch(reason, undefined) で lastState を 'timeout' へ写像 /
+// monitorsLeft === 0 でループ退出 / reconcileRescueRoundState(lastState, rescueRoundActive) を評価。
+// ---------------------------------------------------------------------------
+
+// 実装の terminalStatus 算出式（L3977 付近）と同じ式をここで意図的に再実装し、qualityBlock が
+// 実際に 'blocked' 終端へ届くところまで検証する（配線だけでなく最終判定結果を担保するため）。
+// この複製は実装式との乖離（ドリフト）に対して無防備 —— 実装側が式を変更してもこの関数までは
+// 追随しないため、乖離検知は上の「救済 timeout フラグが終端 status の blocked 分類に配線されて
+// いる」テスト（driverPart のソース走査で rescueTimeoutQualityBlock / 'blocked' の実在を見る）が
+// 担う。両テストは相補的であり、どちらか一方だけでは今回の合成回帰（#248）を検知できない。
+function computeTerminalStatus({ routingErrorDetected, mergedButIssueOpen, lastState, lastBlockedReason, rescueTimeoutQualityBlock }) {
+  const blockedIsRecoverable = lastState === 'blocked' && lastBlockedReason === 'quality'
+  return !routingErrorDetected
+    && (mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments' || rescueTimeoutQualityBlock)
+    ? 'blocked'
+    : 'failed'
+}
+
+for (const reason of ['head-moved', 'checks-not-green', 'merge-failed']) {
+  test(`合成シナリオ: 救済ラウンド中の merge-exec reason '${reason}' 写像は blocked 終端になる`, () => {
+    // monitor は 'ready' を返した想定（監視自体は成立したが、merge-exec が一過性理由でマージを
+    // 見送った）。classifyMergeExecDispatch が lastState を 'timeout' へ上書きする。
+    const dispatched = classifyMergeExecDispatch(reason, undefined)
+    assert.equal(dispatched.lastState, 'timeout')
+    // 救済ラウンド中（rescueRoundActive: true）でこの timeout を判定する。
+    const reconciled = mod.reconcileRescueRoundState(dispatched.lastState, true)
+    assert.equal(reconciled.terminate, true)
+    assert.equal(reconciled.qualityBlock, true)
+    const terminalStatus = computeTerminalStatus({
+      routingErrorDetected: false,
+      mergedButIssueOpen: false,
+      lastState: dispatched.lastState,
+      lastBlockedReason: dispatched.lastBlockedReason,
+      rescueTimeoutQualityBlock: reconciled.qualityBlock,
+    })
+    assert.equal(terminalStatus, 'blocked', 'monitor 直後消費の旧実装ではここが failed に化けていた（#248 の P1）')
+  })
+
+  test(`対称ケース: 救済ラウンド外での merge-exec reason '${reason}' 写像は failed のまま`, () => {
+    const dispatched = classifyMergeExecDispatch(reason, undefined)
+    assert.equal(dispatched.lastState, 'timeout')
+    // 救済ラウンド外（rescueRoundActive: false）では品質ブロックへ写像してはならない
+    // （実際の一過性失敗を隠さないため）。
+    const reconciled = mod.reconcileRescueRoundState(dispatched.lastState, false)
+    assert.equal(reconciled.terminate, false)
+    assert.equal(reconciled.qualityBlock, false)
+    const terminalStatus = computeTerminalStatus({
+      routingErrorDetected: false,
+      mergedButIssueOpen: false,
+      lastState: dispatched.lastState,
+      lastBlockedReason: dispatched.lastBlockedReason,
+      rescueTimeoutQualityBlock: reconciled.qualityBlock,
+    })
+    assert.equal(terminalStatus, 'failed')
+  })
+}
+
 // ---------------------------------------------------------------------------
 // 片側波括弧混入時の境界不変性（Issue #336 受け入れ条件 1・2）
 //
