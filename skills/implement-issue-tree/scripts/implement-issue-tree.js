@@ -4889,6 +4889,26 @@ while (true) {
           continue
         }
         if (item.kind === 'implement' && maxResidualWorktreeBytes > 0 && residualBytesObserved) {
+          // monitoring 再開の直前にも実測し直す。remeasureResidualBytesIfDue は台帳増分による
+          // 間引き条件でしか実測し直さないため、台帳が BYTE_REMEASURE_LEDGER_INTERVAL に達しておらず
+          // 新規着手候補も無い間は、既存 worktree がビルド成果物等で成長しても古い
+          // residualBytesAtStart 基準のまま projection を通してしまい、容量上限を超過していても
+          // 再開判定が通って fix-routing-error worktree を追加作成し得た（PR #390 codex-review P1:
+          // monitoring 再開前にも現在のディスク使用量を実測する）。新規着手側（下方の
+          // remeasureResidualBytesNow 呼び出し）と同じ関数を直接呼び、戻り値ではなく
+          // residualBytesAtStart / newStartSuppressed への副作用で成否・超過を判定する。
+          const suppressedBeforeResumeRemeasure = newStartSuppressed
+          await remeasureResidualBytesNow()
+          if (newStartSuppressed && newStartSuppressed !== suppressedBeforeResumeRemeasure) {
+            // この呼び出しで新規に検出された実測失敗・容量超過。新規着手停止（latch）とは独立に
+            // monitoring 再開はこの周回のみ defer する（予約解放や掃除で次周回に再評価され得る）。
+            const deferReason =
+              `残置 worktree の容量をラン中に実測し直した結果に基づき monitoring 再開を defer した` +
+              `（${newStartSuppressed.reason}）`
+            monitoringResumeGateDeferred.set(n, deferReason)
+            log(`⚠️ #${n}: ${deferReason}`)
+            continue
+          }
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
             recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
