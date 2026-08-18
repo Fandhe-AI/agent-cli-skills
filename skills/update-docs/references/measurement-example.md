@@ -13,14 +13,15 @@
 | 系統 | 件数 | 内容 |
 |------|------|------|
 | A | 26 | 配布可能スキル（`## Current Skills (26)` と一致） |
-| B（全列挙） | 29 | B1(24) + B2(2) + B3(3) |
+| B（全列挙） | 29 | B1(24) + B2(2) + B3(3) + B4(0) |
 | B1 | 24 | `skills/` に実体があり系統 A で計上済み。`skills/` にあって B1 に現れないのは `contribute-skill`・`sync-skills-lock` の 2 件（26 − 24 = 2） |
-| B2 | 2 | `create-agent`・`create-skill` |
-| B3 | 3 | `anthropic-claude-code`・`anthropic-claude-code-extend`・`github-docs` |
+| B2 | 2 | `create-agent`・`create-skill`（`skills-lock.json` タイブレークで除外された項目なし） |
+| B3 | 3 | `anthropic-claude-code`・`anthropic-claude-code-extend`・`github-docs`（いずれも `.claude/skills/<name>` が `.agents/skills/<name>` を指す symlink であることを検証済み） |
+| B4 | 0 | 誤配置・判定不能は無し（`jq` は利用可能、symlink 先の不一致も無し） |
 
 ## 整合式の読み方
 
-- `B1 + B2 + B3 = B（全列挙）` → `24 + 2 + 3 = 29`
+- `B1 + B2 + B3 + B4 = B（全列挙）` → `24 + 2 + 3 + 0 = 29`
 - `A − B1 = B1 に現れない配布スキル数` → `26 − 24 = 2`
 
 この 2 本の等式が、対象リポジトリの実測値でも成立することを確認するのが `SKILL.md` の

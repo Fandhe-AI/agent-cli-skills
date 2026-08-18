@@ -80,57 +80,89 @@ N に含めるかどうかはこの内訳で決まる（系統 B という区分
 | 区分 | 実体の所在 | N に含めるか | 記載先 |
 |------|-----------|------------|--------|
 | B1 | `skills/<name>/`（`.claude/skills/<name>` は symlink） | 含める（系統 A の列挙で既に計上済み。B1 を理由に N を増減させない） | `## Current Skills (N)` |
-| B2 | `.claude/skills/<name>/` が実ディレクトリ | 含めない | 「リポジトリ管理スキル（.claude/skills/ に配置）」 |
-| B3 | `.agents/skills/<name>/` が実体（`.claude/skills/<name>` は symlink） | 含めない | 「参照スキル（.claude/skills/ に配置）」 |
+| B2 | `.claude/skills/<name>/` が実ディレクトリで、`skills/<name>/` にも `skills-lock.json` にも該当しない | 含めない | 「リポジトリ管理スキル（.claude/skills/ に配置）」 |
+| B3 | `.agents/skills/<name>/` が実体で、`.claude/skills/<name>` がその実体を指す symlink であることを検証済み | 含めない | 「参照スキル（.claude/skills/ に配置）」 |
+| B4 | 誤配置・判定不能（`skills-lock.json` 掲載の実ディレクトリ、symlink 先不一致・非 symlink、`jq` 不在でタイブレーク未実施 等） | 含めない | CLAUDE.md には記載しない（stderr へ警告のみ。手動対応が必要な構成問題として扱う） |
 
-B2・B3 の抽出コマンド（実体が `skills/` に無いものだけを残す）。B2 は「注意事項」の
-実ディレクトリ型リポジトリのタイブレーク（`skills-lock.json` の `skills` キー掲載分を除外）
-まで含めた自己完結スクリプトとし、抽出コマンドと注意事項の記述が食い違わないようにする:
+B2・B3 の抽出コマンド（実体が `skills/` に無いものだけを残す）。いずれも「注意事項」の
+タイブレークをコマンド自体に組み込んだ自己完結スクリプトとし、抽出コマンドと注意事項の
+記述が食い違わないようにする。両コマンドとも**判定できない・条件を満たさないケースは
+B2/B3 から除外して stderr へ警告する（fail-closed）**。除外分は B4 として扱い、
+下記の件数整合式で回収する:
 
 ```bash
 # B2: リポジトリ管理スキル
-# タイブレーク: 1) skills/<name> に実体がある → 除外（配布スキル）
-#               2) skills-lock.json の skills キーに名前がある → 除外し stderr へ警告
-#                  （symlink 化されていない誤配置。update-docs は構成を変更しない）
-#               3) 残った実ディレクトリのみを B2 として出力
+# タイブレーク: 1) skills/<name> に実体がある → 除外（配布スキル。B1 側で計上済み）
+#               2) skills-lock.json があるのに jq が使えない → 判定不能。除外し stderr へ警告
+#                  （fail-closed。誤って B2 に含めない。B4 として扱う）
+#               3) skills-lock.json の skills キーに名前がある → 除外し stderr へ警告
+#                  （symlink 化されていない誤配置。update-docs は構成を変更しない。B4 として扱う）
+#               4) 残った実ディレクトリのみを B2 として出力
 find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
   while read -r n; do
     [ -d "skills/${n}" ] && continue
-    if [ -f skills-lock.json ] && jq -e --arg n "${n}" '.skills[$n] != null' skills-lock.json >/dev/null 2>&1; then
-      echo "WARN: ${n} は .claude/skills/ が実ディレクトリのまま skills-lock.json に掲載されている（symlink 化検討対象。B2 から除外）" >&2
-      continue
+    if [ -f skills-lock.json ]; then
+      if ! command -v jq >/dev/null 2>&1; then
+        echo "WARN: jq が見つからないため ${n} の skills-lock.json タイブレークを判定できない（B4 扱い。jq を導入するか手動確認する）" >&2
+        continue
+      fi
+      if jq -e --arg n "${n}" '.skills[$n] != null' skills-lock.json >/dev/null 2>&1; then
+        echo "WARN: ${n} は .claude/skills/ が実ディレクトリのまま skills-lock.json に掲載されている（symlink 化検討対象。B4 扱い）" >&2
+        continue
+      fi
     fi
     printf '%s\n' "${n}"
   done
 
 # B3: 参照スキル
+# タイブレーク: 1) skills/<name> に実体がある → 除外（配布スキル。B1 側で計上済み）
+#               2) .claude/skills/<name> が symlink で、その解決先が .agents/skills/<name> と
+#                  一致する → B3 として出力
+#               3) symlink でない、または解決先が一致しない → 除外し stderr へ警告（B4 扱い）
 find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
-  while read -r n; do [ -d "skills/${n}" ] || printf '%s\n' "${n}"; done
+  while read -r n; do
+    [ -d "skills/${n}" ] && continue
+    if [ -L ".claude/skills/${n}" ]; then
+      actual=$(cd ".claude/skills/${n}" 2>/dev/null && pwd -P)
+      expected=$(cd ".agents/skills/${n}" 2>/dev/null && pwd -P)
+      if [ -n "${actual}" ] && [ "${actual}" = "${expected}" ]; then
+        printf '%s\n' "${n}"
+        continue
+      fi
+      echo "WARN: .claude/skills/${n} は symlink だがリンク先が .agents/skills/${n} と一致しない（B4 扱い）" >&2
+    else
+      echo "WARN: .agents/skills/${n} に実体があるが .claude/skills/${n} が symlink ではない（B4 扱い）" >&2
+    fi
+  done
 ```
 
 分類の原則は**実体の所在を第一基準**とする。`skills-lock.json` の `skills` キーの掲載一覧は
 上流リポジトリでは参照スキルのみ、消費側リポジトリでは配布スキル全件を指し、リポジトリの
 役割によって意味が反転するため、実体の所在だけで判別できない曖昧ケースのタイブレークにのみ
 使う（詳細は「注意事項」の実ディレクトリ型リポジトリの節を参照。上記 B2 コマンドはこの
-タイブレークを実装済みであり、`jq` が無い環境ではタイブレーク 2 の判定をスキップした上で
-その旨を報告する）。
+タイブレークを実装済みであり、`jq` が無い環境ではタイブレーク判定自体を行わず B4 として
+除外・報告する。フェイルクローズにより、判定できないケースを誤って B2 に含めることはない）。
 
 - `CLAUDE.md` の「リポジトリ管理スキル（.claude/skills/ に配置）」「参照スキル（.claude/skills/ に配置）」の各セクションを B2・B3 で更新する
 - セクションが存在しない場合は新規作成する
 
-**件数整合式（プレースホルダー。対象リポジトリで都度実測する）**: 系統 A・B1・B2・B3 の
+**件数整合式（プレースホルダー。対象リポジトリで都度実測する）**: 系統 A・B1・B2・B3・B4 の
 件数は対象リポジトリの構成変更のたびに変わるため、`SKILL.md` 本文には固定値を持たない。
-各系統の抽出コマンドを実行し、次の 2 本の等式が実測値で成立することを確認する。
+各系統の抽出コマンドを実行し、次の 2 本の等式が実測値で成立することを確認する。B4（stderr
+の `WARN:` 件数）を含めない `B1 + B2 + B3 = B` は、B2・B3 コマンドが fail-closed で除外した
+項目がある限り成立しない。B4 は「除外はしたがどの区分にも入らない」ケースの受け皿であり、
+この等式でのみ回収する。
 
 | 等式 | 意味 |
 |------|------|
-| `B1 + B2 + B3 = B（-L 付き全列挙）` | 系統 B の内訳（B1/B2/B3）が全列挙件数と一致する |
+| `B1 + B2 + B3 + B4 = B（-L 付き全列挙）` | 系統 B の内訳（B1/B2/B3/B4）が全列挙件数と一致する |
 | `A − B1 = B1 に現れない配布スキル数` | 系統 A のうち `.claude/skills/` に symlink されていない配布スキルの件数 |
 
 等式が成立しない場合は、B2・B3 の抽出コマンド（タイブレーク含む）またはカウント方法に
-誤りがある。具体的な数値例（実測スナップショット）は
-`skills/update-docs/references/measurement-example.md` を参照（本リポジトリ専用の値であり、
-他リポジトリでの期待値ではない）。
+誤りがある。B4 が 1 件以上出た場合は、報告された `WARN:` の内容に従って手動で構成を
+確認する（symlink 化・タイブレーク再実施等。update-docs 自身は構成を変更しない）。具体的な
+数値例（実測スナップショット）は `skills/update-docs/references/measurement-example.md` を
+参照（本リポジトリ専用の値であり、他リポジトリでの期待値ではない）。
 
 #### Repository Structure の更新
 
@@ -181,32 +213,24 @@ ls -d skills/*/SKILL.md | wc -l
 - `_/.last-update-docs` が最新コミットの hash で更新されていること
 
 系統 B（B2・B3）を更新した場合は、以下も**新規実行**して確認する（既存ログ・前回結果の
-流用は不可。`.claude/rules/verification.md` の 5 段階ゲートに従う）。
+流用は不可。`.claude/rules/verification.md` の 5 段階ゲートに従う）。B2・B3 は
+「Step 3」に記載した抽出コマンドと**同一のもの**を実行する（コマンドの重複記載による
+食い違いを避けるため、ここでは再掲しない）。stderr（`WARN:` 行）も破棄せずに保持し、
+B4 件数として数える。
 
 ```bash
-# B2: リポジトリ管理スキルの抽出結果（skills-lock.json によるタイブレークを含む。上記と同一コマンド）
-find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
-  while read -r n; do
-    [ -d "skills/${n}" ] && continue
-    if [ -f skills-lock.json ] && jq -e --arg n "${n}" '.skills[$n] != null' skills-lock.json >/dev/null 2>&1; then
-      continue
-    fi
-    printf '%s\n' "${n}"
-  done
-
-# B3: 参照スキルの抽出結果
-find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
-  while read -r n; do [ -d "skills/${n}" ] || printf '%s\n' "${n}"; done
-
 # 全列挙（B）との件数差が説明できるか
 find -L .claude/skills .agents/skills -mindepth 1 -maxdepth 1 -type d \
   -exec test -f '{}/SKILL.md' ';' -print 2>/dev/null | sed -E 's#.*/##' | sort -u | wc -l
 ```
 
-- B2 の出力が `CLAUDE.md` の「リポジトリ管理スキル（.claude/skills/ に配置）」節と一致すること
-- B3 の出力が `CLAUDE.md` の「参照スキル（.claude/skills/ に配置）」節と一致すること
-- B1（系統 A で計上済み）+ B2 + B3 の件数が、`-L` 付き全列挙の件数と一致し、差分が
-  SKILL.md の記述だけから再現できること（`-L` 付き列挙と `-L` 無し抽出の件数差の説明）
+- B2 の出力（stdout）が `CLAUDE.md` の「リポジトリ管理スキル（.claude/skills/ に配置）」節と一致すること
+- B3 の出力（stdout）が `CLAUDE.md` の「参照スキル（.claude/skills/ に配置）」節と一致すること
+- B1（系統 A で計上済み）+ B2 + B3 + B4（B2・B3 の stderr `WARN:` 件数の合計）の件数が、
+  `-L` 付き全列挙の件数と一致し、差分が SKILL.md の記述だけから再現できること
+  （`-L` 付き列挙と `-L` 無し抽出の件数差の説明）
+- B4 が 1 件以上出た場合、`WARN:` の内容を確認し、CLAUDE.md のどのセクションにも
+  含めないこと（B4 は記載対象外）
 
 ## 注意事項
 
@@ -215,10 +239,16 @@ find -L .claude/skills .agents/skills -mindepth 1 -maxdepth 1 -type d \
 - `_/.last-update-docs` が `.gitignore` に追加されているか確認する
 - **`.claude/skills/` の実ディレクトリ抽出（用途が異なる点に注意）**: `find .claude/skills -maxdepth 1 -mindepth 1 -type d`（`-L` を付けない）は「symlink ではない実ディレクトリ = そのリポジトリ固有の管理スキル」だけを狙って抽出するコマンドであり、上記「系統 B」の全列挙（`-L` 付き）とは目的が異なる。全列挙が必要な場面では必ず `-L` 付きの版を使う。symlink を除外することがこの抽出の条件そのものであり、両者は矛盾ではなく用途の使い分けである
 - **`github-docs` 等の扱い**: `find -type d`（`-L` なし）はシンボリックリンクを除外するため、`github-docs`・`anthropic-claude-code` 等は「リポジトリ管理スキル」節の対象からは自動的に外れる。ただしこれは B2 からの除外であって `CLAUDE.md` からの除外ではない。これらは系統 B の内訳では B3（参照スキル）に分類され、「参照スキル（.claude/skills/ に配置）」節に記載する
-- **実ディレクトリ型リポジトリでの振る舞い**: `.claude/skills/<name>` が symlink ではなく実ディレクトリで配置されているリポジトリ（`.claude/skills` が実ディレクトリ運用の消費側リポジトリ等）では、`-L` 無しの抽出が外部取り込みスキルまで拾ってしまい「リポジトリ管理スキル」節が過大になり得る。実ディレクトリか否かだけで判定せず、次の順でタイブレークする:
+- **実ディレクトリ型リポジトリでの振る舞い**: `.claude/skills/<name>` が symlink ではなく実ディレクトリで配置されているリポジトリ（`.claude/skills` が実ディレクトリ運用の消費側リポジトリ等）では、`-L` 無しの抽出が外部取り込みスキルまで拾ってしまい「リポジトリ管理スキル」節が過大になり得る。実ディレクトリか否かだけで判定せず、次の順でタイブレークする（B2 抽出コマンドはこのタイブレークを実装済み）:
   1. 実体が `skills/<name>/` にもある → 配布スキル（系統 A・B1）。リポジトリ管理スキルではない
-  2. `skills-lock.json` の `skills` キーに名前がある → 外部から取り込んだスキルが symlink 化されていない誤配置。リポジトリ管理スキルではなく、symlink 化を検討すべき構成上の問題として報告する（update-docs 自身は構成を変更しない）
-  3. 上記いずれにも該当しない実ディレクトリのみをリポジトリ管理スキル（B2）として扱う
+  2. `skills-lock.json` があるのに `jq` が使えない → 判定不能。`jq` 不在時にタイブレーク自体をスキップして誤って B2 に含めることは fail-closed 原則に反するため、B4（判定不能）として除外し stderr へ警告する
+  3. `skills-lock.json` の `skills` キーに名前がある → 外部から取り込んだスキルが symlink 化されていない誤配置。リポジトリ管理スキルではなく、symlink 化を検討すべき構成上の問題として B4 で報告する（update-docs 自身は構成を変更しない）
+  4. 上記いずれにも該当しない実ディレクトリのみをリポジトリ管理スキル（B2）として扱う
+- **B3 の symlink 検証**: `.agents/skills/<name>` に実体があるだけでは B3 に分類しない。
+  `.claude/skills/<name>` が symlink であり、かつその解決先（`cd -P` で正規化した絶対パス）が
+  `.agents/skills/<name>` の解決先と一致することまで確認する。symlink でない・別の場所を指す
+  symlink・symlink 自体が存在しない場合は「参照スキルとして未リンク／誤配置」であり B4 として
+  除外し stderr へ警告する（誤って B3 に含めない）
 - **空出力の扱い**: `2>/dev/null` はディレクトリ不在（例: `.agents/skills` が無いリポジトリ）を許容する目的に限る。空出力を即座に「0 件」と判断せず、対象ディレクトリ自体の存在を先に確認する
 
 ## コード内コメントの観点（任意）
