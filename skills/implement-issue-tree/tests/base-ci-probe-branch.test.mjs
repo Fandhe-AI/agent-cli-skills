@@ -133,6 +133,68 @@ test('群C: 引数形式の説明が owner/repo[@branch] 形式を明示する',
 })
 
 // ---------------------------------------------------------------------------
+// 群 D（Issue #362 追補・PR #378 指摘対応）: "@" 明示かつ branch 空は fail-closed
+// ---------------------------------------------------------------------------
+test('群D: @ の後が空（owner/repo@:workflow）は defaultBranchRef へフォールバックせず判定不能で終端する', () => {
+  assert.match(
+    scriptBody,
+    /branch_explicit=1[\s\S]*?if \[ "\$\{branch_explicit\}" = 1 \] && \[ -z "\$\{branch\}" \]; then/,
+    'branch_explicit を用いた「@ 明示かつ branch 空」の fail-closed 分岐が見つからない',
+  )
+
+  // 実行レベルでも固定する: この分岐が defaultBranchRef フォールバック（else 節）より
+  // 前で continue するため、"owner/repo@:workflow" 系の入力では gh repo view が
+  // 一切呼ばれないことをモック gh で検証する（fail-open 退行の直接検出）。
+  const tmpDir = mkdtempSync(join(tmpdir(), 'base-ci-probe-fc-'))
+  try {
+    const callLog = join(tmpDir, 'gh-calls.log')
+    const ghMock = join(tmpDir, 'gh')
+    writeFileSync(
+      ghMock,
+      `#!/usr/bin/env bash
+echo "$@" >> "${callLog}"
+exit 1
+`,
+      { mode: 0o755 },
+    )
+    const scriptPath = join(tmpDir, 'probe.sh')
+    writeFileSync(scriptPath, scriptBody, 'utf8')
+
+    let stdout = ''
+    try {
+      stdout = execFileSync('bash', [scriptPath, 'owner/repo@:workflow1'], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${tmpDir}:${process.env.PATH}` },
+      })
+    } catch (err) {
+      // jq 不在等で早期 exit する環境もあるため、stdout があればそれを使う。
+      stdout = err.stdout ?? ''
+    }
+
+    assert.match(stdout, /判定不能/, '空ブランチ入力が判定不能として報告されていない')
+    assert.doesNotMatch(
+      stdout,
+      /defaultBranchRef/,
+      '空ブランチ入力で defaultBranchRef フォールバック側の出力が発生している',
+    )
+
+    let callLogContent = ''
+    try {
+      callLogContent = readFileSync(callLog, 'utf8')
+    } catch {
+      callLogContent = ''
+    }
+    assert.doesNotMatch(
+      callLogContent,
+      /repo view/,
+      '空ブランチ入力で gh repo view（defaultBranchRef 解決）が呼ばれている',
+    )
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
 // SKILL.md 側の前提条件記述の追随
 // ---------------------------------------------------------------------------
 const skillMd = readFileSync(SKILL_MD_PATH, 'utf8')

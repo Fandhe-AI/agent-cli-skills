@@ -153,14 +153,21 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
     # ため、%%/# の等価トリックではなく case による明示分岐にして目視・テストで
     # 確認できる形にする。
     case "${target}" in
-      *@*) repo="${target%%@*}"; branch="${target#*@}" ;;
-      *)   repo="${target}";     branch="" ;;
+      *@*) repo="${target%%@*}"; branch="${target#*@}"; branch_explicit=1 ;;
+      *)   repo="${target}";     branch="";              branch_explicit=0 ;;
     esac
     case "${repo}" in
       */*/*|*/) echo "${target}: 判定不能 — owner/repo 形式でない"; continue ;;
       */*) : ;;
       *) echo "${target}: 判定不能 — owner/repo 形式でない"; continue ;;
     esac
+
+    # "@" が明示されたのに branch が空（"owner/repo@:workflow" 等）は、指定対象を
+    # 検査できないまま既定ブランチへ fail-open フォールバックしてはならない。
+    # 明示指定の有無を branch_explicit で保持し、空なら判定不能で終端する。
+    if [ "${branch_explicit}" = 1 ] && [ -z "${branch}" ]; then
+      echo "${target}: 判定不能 — @ の後にブランチ名が空（既定ブランチへフォールバックしない）"; continue
+    fi
 
     if [ -n "${branch}" ]; then
       # 対象ブランチが明示指定された場合は gh repo view を呼ばない（API 呼び出し
