@@ -118,35 +118,78 @@ if [[ ! -x "${REASSIGN_SCRIPT}" ]]; then
   echo "警告: ${REASSIGN_SCRIPT} に実行権限がない（vendoring で実行ビットが失われた可能性）。bash 経由で実行する" >&2
 fi
 
-# 実行ビットの有無に関わらず bash 経由で起動する（上記の理由により、
-# 直接実行 "${REASSIGN_SCRIPT}" に依存すると Permission denied になり得るため）
-bash "${REASSIGN_SCRIPT}" \
-  --issue "${ISSUE_NUMBER}" \
-  --old-parent "${OLD_PARENT}" \
-  --new-parent "${NEW_PARENT}"
-# echo を最後のコマンドにするとブロックの終了ステータスが常に 0 になり、
-# 実行基盤が「最終ステータス」で成否を判定した場合に非ゼロ終了を見落とす。
-# 直後に $? を退避してから出力し、非ゼロは呼び出し元へ伝播する（Issue #335）。
-# このブロックの上に set -euo pipefail を追加してはならない。set -e があると
-# 失敗した bash ... の時点でシェルが即終了し、$? の退避に到達せず、より
-# 発見しづらい形でバグが再発する（代替が必要な場合のみ
-# REASSIGN_STATUS=0; bash ... || REASSIGN_STATUS=$? の形にする）。
-REASSIGN_STATUS=$?
-echo "exit=${REASSIGN_STATUS}"
-if (( REASSIGN_STATUS != 0 )); then
-  # このブロックは 1 件分の呼び出しであり、非ゼロ終了は当該 1 件の失敗として
-  # ブロックの終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ
-  # 記録したうえで、exit 2 のうち (a) 解消可能な前提不備（gh/jq 不在・未認証・
-  # issue 取得失敗）のみ原因解消まで中断し、(b) 恒久的な対象外（cross-repository
-  # 親等）は棚卸し対象から除外して次の 1 件の呼び出しへ進む（終了コード表参照）。
-  # (a)/(b) はどちらも exit 2 で終了コード単独では区別できないため、stderr に
-  # `reason=cross-repository-parent` があるか grep して判定する（無ければ (a)）
-  exit "${REASSIGN_STATUS}"
+# 1 件分の呼び出しを関数に閉じ込める。Step 4（孤児の再配置）も同じ関数を使うことで、
+# 呼び出し方だけでなく stderr の扱い・終了ステータスの意味づけまで対称にする（Issue #335 / #372）。
+#
+# 返り値の契約:
+#   0       … 成功（result= 行の state を読んで件数へ計上する）
+#   9       … 恒久的に対象外（cross-repository 親）。呼び出し側は要確認事項へ記録して次の 1 件へ進む
+#   その他   … スクリプトの終了コードをそのまま返す（1〜8。終了コード表を参照）
+#
+# 9 を使う理由: スクリプト自身は 0〜8 しか返さないため衝突しない。exit 2 は
+# (a) 解消可能な前提不備と (b) 恒久的な対象外が混在しており、終了コード単独では区別できない。
+# 判定は stderr の `reason=cross-repository-parent` マーカー行で機械的に行うが、
+# **stderr を捕捉していなければ呼び出し側はこの判定を実行できない**。そのためファイルへ
+# 捕捉し、判定した後に必ず再出力する（診断情報を握り潰さない）。
+reassign_one() {
+  local err status
+  err=$(mktemp) || return 2
+  # 実行ビットの有無に関わらず bash 経由で起動する（上記の理由により、
+  # 直接実行 "${REASSIGN_SCRIPT}" に依存すると Permission denied になり得るため）
+  bash "${REASSIGN_SCRIPT}" "$@" 2>"${err}"
+  # echo を最後のコマンドにすると終了ステータスが常に 0 になり、実行基盤が
+  # 「最終ステータス」で成否を判定した場合に非ゼロ終了を見落とす。
+  # 直後に $? を退避してから出力する（Issue #335）。
+  # この関数の中や上で set -euo pipefail を使ってはならない。set -e があると
+  # 失敗した bash ... の時点でシェルが即終了し、$? の退避に到達せず、より
+  # 発見しづらい形でバグが再発する。
+  status=$?
+  # 捕捉した stderr は必ず再出力する（判定のために捕捉しただけであり、隠さない）
+  cat "${err}" >&2
+  echo "exit=${status}"
+  if (( status == 2 )) && grep -qF 'reason=cross-repository-parent' "${err}"; then
+    rm -f "${err}"
+    return 9
+  fi
+  rm -f "${err}"
+  return "${status}"
+}
+
+# 呼び出し側ループ。契約の主体はここにある——「(b) 恒久的な対象外は次の 1 件へ進み、
+# (a) 解消可能な前提不備は原因解消まで中断する」を実際に実現するのはこのループである。
+# ISSUE_NUMBER / OLD_PARENT / NEW_PARENT は Step 2 で決めた付け替え計画から供給する。
+SKIPPED=()
+for ENTRY in "${REASSIGN_PLAN[@]}"; do
+  # ENTRY は "<issue> <old-parent> <new-parent>" 形式。
+  # zsh は未クォートの展開を単語分割しないため、read で明示的に分割する
+  IFS=' ' read -r ISSUE_NUMBER OLD_PARENT NEW_PARENT <<< "${ENTRY}"
+  # `if reassign_one ...; then ... fi` の形にしてはならない。条件が偽で else が無い場合、
+  # `fi` の直後の $? は 0 になり（実測済み）、失敗が「成功」として読まれて
+  # (a)/(b) の判定も中断もすべて素通りする。`|| status=$?` で明示的に退避する。
+  status=0
+  reassign_one --issue "${ISSUE_NUMBER}" \
+               --old-parent "${OLD_PARENT}" \
+               --new-parent "${NEW_PARENT}" || status=$?
+  if (( status == 0 )); then
+    continue
+  fi
+  if (( status == 9 )); then
+    # (b) cross-repository 親。棚卸し対象から除外して次へ（Step 9 の要確認事項へ記載）
+    SKIPPED+=("${ISSUE_NUMBER}")
+    continue
+  fi
+  # (a) を含むそれ以外は握り潰さず中断する。原因を解消してから再実行する
+  echo "エラー: #${ISSUE_NUMBER} の付け替えが exit ${status} で失敗した。中断する" >&2
+  exit "${status}"
+done
+if (( ${#SKIPPED[@]} > 0 )); then
+  echo "対象外（cross-repository 親）: ${SKIPPED[*]}" >&2
 fi
 ```
 
-このブロックは**1 件分の呼び出し**であり、非ゼロ終了は**当該 1 件の失敗**としてブロックの
-終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ記録したうえで、exit 2 は
+`reassign_one` は**1 件分の呼び出し**であり、非ゼロ終了は**当該 1 件の失敗**として
+関数の返り値へ伝播する。判定に必要な stderr は関数内で捕捉したうえで必ず再出力するため、
+診断情報は失われない。呼び出し側ループは Step 9 の要確認事項へ記録したうえで、exit 2 は
 **(a) 解消可能な前提不備**（`gh`/`jq` 不在・未認証・issue 取得失敗）のみ原因解消まで中断し、
 **(b) 恒久的な対象外**（cross-repository 親等）は要確認事項へ記載して棚卸し対象から除外し、
 次の 1 件の呼び出しへ進む（終了コード表を参照）。(a)/(b) の判定は stderr に
@@ -181,6 +224,13 @@ stdout 最終行が `result=<state> issue=<n> new_parent=<n> old_parent=<n|->` �
 | 7 | — | POST 時点で別の親が付いていたレース。**DELETE 未実行のため無変更** | 要確認事項へ記載。実測し直して承認を取り直したうえで再実行する | **無変更**（DELETE 未実行） |
 | 8 | — | DELETE 後の POST で親重複レース。**部分変更**（旧親から外れ、新親にも付いていない） | 要確認事項へ記載。**無変更ではない。** 実状態を確認し必要なら手で紐付け直す。同一コマンドの再実行では回復しない | **部分変更**（旧親から外れ、新親にも付いていない） |
 
+**スクリプト自身は 0〜8 しか返さない。** Step 3 / Step 4 の `reassign_one` ラッパは、
+これに加えて **9 = 恒久的に対象外（cross-repository 親）** を返す（Issue #372）。
+9 はスクリプトの終了コードではなく、ラッパが stderr の `reason=cross-repository-parent`
+マーカーを判定して合成する値であり、呼び出し側ループが「棚卸し対象から除外して次の 1 件へ進む」
+のシグナルとして使う。マーカーの判定にはスクリプトの stderr が必要なため、
+ラッパは stderr をファイルへ捕捉したうえで**必ず再出力する**（診断情報は握り潰さない）。
+
 exit 4 は「経路による」で止めず、実際の内訳（孤児経路の POST 失敗 = 無変更 / DELETE 後の
 POST 失敗 = 部分変更）まで確認する。
 
@@ -214,25 +264,35 @@ Phase が不明な issue はタイトル・本文を読んで判断し、判断�
 解決を先に実行する）。
 
 ```bash
-# Step 3 と同じく bash 経由で起動する（vendoring で実行ビットが落ちている場合に
-# ここだけ Permission denied で落ちる非対称を作らないため）
-bash "${REASSIGN_SCRIPT}" \
-  --issue "${ORPHAN_NUMBER}" \
-  --new-parent "${PHASE_NUMBER}"
-# Step 3 と非対称にしない（呼び出し方だけでなく、終了ステータス伝播も揃える。
-# 理由は Step 3 のコメントと同一。Issue #335）
-REASSIGN_STATUS=$?
-echo "exit=${REASSIGN_STATUS}"
-if (( REASSIGN_STATUS != 0 )); then
-  exit "${REASSIGN_STATUS}"
+# Step 3 で定義した reassign_one をそのまま再利用する（呼び出し方・stderr の扱い・
+# 終了ステータスの意味づけを Step 3 と非対称にしない。Issue #335 / #372）。
+# 孤児は旧親を持たないため --old-parent を渡さない（DELETE を飛ばして POST のみ実行される）。
+SKIPPED_ORPHANS=()
+for ENTRY in "${ORPHAN_PLAN[@]}"; do
+  # ENTRY は "<orphan-issue> <phase-parent>" 形式
+  IFS=' ' read -r ORPHAN_NUMBER PHASE_NUMBER <<< "${ENTRY}"
+  # Step 3 と同じ理由で `if ...; then ... fi` は使わない（`fi` 直後の $? は 0 になる）
+  status=0
+  reassign_one --issue "${ORPHAN_NUMBER}" --new-parent "${PHASE_NUMBER}" || status=$?
+  if (( status == 0 )); then
+    continue
+  fi
+  if (( status == 9 )); then
+    SKIPPED_ORPHANS+=("${ORPHAN_NUMBER}")
+    continue
+  fi
+  echo "エラー: #${ORPHAN_NUMBER} の再配置が exit ${status} で失敗した。中断する" >&2
+  exit "${status}"
+done
+if (( ${#SKIPPED_ORPHANS[@]} > 0 )); then
+  echo "対象外（cross-repository 親）: ${SKIPPED_ORPHANS[*]}" >&2
 fi
 ```
 
-このブロックも Step 3 と同じく**1 件分の呼び出し**である。非ゼロ終了は**当該 1 件の失敗**として
-ブロックの終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ記録したうえで、
-exit 2 の扱いも Step 3 と同一（(a) 解消可能な前提不備のみ原因解消まで中断、
-(b) 恒久的な対象外は要確認事項へ記載して次の 1 件の呼び出しへ進む。判定は stderr の
-`reason=cross-repository-parent` マーカーで機械的に行う。終了コード表を参照）。
+Step 3 と同一の関数・同一のループ構造であり、exit 2 の扱いも同じ
+（(a) 解消可能な前提不備のみ原因解消まで中断、(b) 恒久的な対象外は要確認事項へ記載して
+次の 1 件へ進む。判定は関数が捕捉した stderr の `reason=cross-repository-parent` マーカーで
+機械的に行い、返り値 9 として呼び出し側へ伝える。終了コード表を参照）。
 
 ### Step 5: 必要に応じて新 Phase 親を新設する
 
