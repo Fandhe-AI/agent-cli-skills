@@ -278,9 +278,10 @@ auto-merge がその完了を待っている状態であり、失敗ではない
 避ける目的で明示した（要否の判断自体はスコープ外のまま）。段階確認の方針どおり
 `target=skill` で skills 経路を先に走らせている。
 
-### 自動マージは既存の組織方針によるもの
+### 自動マージ: 保護の無い 4 リポで fail-closed 化した（PR #356 codex-review P0）
 
-3 リポの同期 PR はいずれも作成直後に自動マージされた。
+初回実行で作られた同期 PR は、`team-hub-spec` を除く 4 リポで**作成直後に自動マージされた**。
+原因は組織変数:
 
 ```
 $ gh api orgs/Fandhe-AI/actions/variables --jq '.variables[] | "\(.name)=\(.value) visibility=\(.visibility)"'
@@ -289,42 +290,38 @@ SKILLS_AUTO_MERGE=true visibility=all
 SUBMODULE_AUTO_MERGE=true visibility=all
 ```
 
-`SKILLS_AUTO_MERGE=true` かつ allowlist 未指定で、上流が「allowlist 未指定 → 全スキルを
-自動マージ対象とします」と判定する。**本イシューで導入した挙動ではなく、wrapper 導入済みの
-既存 22 リポと同一の組織方針**である（wrapper の該当行は全リポ共通で
-`skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}`）。5 リポだけ挙動を変える理由が
-無いためそのままにした。
+`SKILLS_AUTO_MERGE=true` かつ allowlist 未指定のため、上流が「allowlist 未指定 → 全スキルを
+自動マージ対象とします」と判定する。
 
-**`auto-merge に GITHUB_TOKEN を使用しています` の警告は出ていない。** 上流スクリプトには
-この警告の分岐が存在するが、実行ログの `##[warning]` は 5 リポとも 0 件であり、分岐は
-発火していない（PR 作成に PAT が使われている）。
+当初これを「wrapper 導入済みの既存 22 リポと同一の組織方針だから 5 リポだけ変える理由が無い」
+として据え置いたが、**その判断は誤りだった**。4 リポには branch ruleset も classic branch
+protection も無く（`branches/main/protection` が HTTP 404）、マージ前に bypass 不能な
+required status checks をサーバー側で強制していることを**実測できない**。この状態の自動マージは
+`.claude/rules/security.md` / AGENTS.md が要求する承認境界を満たさない。
 
-```
-$ gh run view <run-id> --repo Fandhe-AI/<repo> --log | grep -oE '##\[(notice|warning|error)\].*' | sort -u
-##[notice].gitmodules 無しのため submodule 更新は no-op（skip）。
-##[notice]allowlist 未指定 → 全スキルを自動マージ対象とします
-##[notice]auto-merge フラグの値域チェックを通過した。
-##[notice]auto-merge を有効化しました: <pr-url>
-##[notice]close-superseded フラグの値域チェックを通過した。
-##[notice]PR を作成しました: <pr-url>
-##[notice]target の値域チェックを通過した。
-```
+決定的なのは、**この自動マージ面を持ち込んだのは本イシューの導入自体**だという点である。
+導入前、これら 4 リポには同期 CI が存在せず自動マージ面もゼロだった。「既存の組織方針」は
+他の 22 リポを説明する言葉であって、この 4 リポには当てはまらない。したがって
+`skills-auto-merge: 'false'` の明示は方針変更ではなく、**導入によって生じた承認境界の後退を
+元に戻す措置**である。
 
-必須チェックを持つ `team-hub-spec` の同期 PR
-[#58](https://github.com/Fandhe-AI/team-hub-spec/pull/58) でも CI は正常に起動しており
-（`EditorConfig (strict)` / `PoC rustfmt --check` / `Broken link check (lychee)` が success）、
-「生成 PR が後続 CI を発火しない」事象は観測されていない。
+| リポジトリ | `skills-auto-merge` | 根拠 |
+|-----------|--------------------|------|
+| `aliz-corporate-web` | **`'false'` を明示** | ruleset なし・classic BP 404。サーバー側強制を実測できない |
+| `automation-spec` | 同上 | 同上 |
+| `hobby-keyboard` | 同上 | 同上 |
+| `mcp_hub-spec` | 同上 | 同上 |
+| `team-hub-spec` | 組織既定のまま | ruleset `main-protection` が `active`・`bypass_actors` 0・required checks 4 件。同期 PR #58 が実際に `BLOCKED` で待機しており、サーバー側強制が働くことを実測済み |
 
-ログを読むときの注意: runner は `run:` ステップの**スクリプト本文を実行前にエコー**する
-（ANSI エスケープ `ESC[36;1m` 前置）。この行には未発火の分岐の `echo "::warning::..."` も
-そのまま現れるため、本文エコーを実出力と読み違えると「警告が出た」と誤読する。実際に
-出力されたものだけを見るには `##[notice]` / `##[warning]` / `##[error]` で絞る。
+**既に自動マージされた 3 件は revert しない。** 内容は正当な上流スキル更新であり、revert の方が
+破壊的である。ただし**レビューを経ずにマージされた事実は記録に残す**:
+`mcp_hub-spec#109` / `hobby-keyboard#49` / `automation-spec#76` / `aliz-corporate-web#11`。
 
-### 段階確認（`aliz-corporate-web`）
+**運用上の帰結**: 自動マージを止めた 4 リポにはレビュアーも CI も無いため、日次の同期 PR が
+open のまま溜まる。上流には `skills-close-superseded`（最新日付ブランチ以外を close する）が
+あり、必要ならこれを有効化できる。どちらを採るかはリポジトリ所有者の判断に委ねる。
 
-リスク対処のとおり `target=skill` で skills 経路を先に確定させてから `target=all` を実行した。
-`target=all` 実行でも `Update submodule references` は `skipped` であり、`enable-submodule: false`
-が両経路で一貫して効いている。
+**既存 22 リポについては本イシューの対象外**とし、イシュー #359 で洗い出す。
 
 ### 乖離検知 CI の再実行（受け入れ条件 6）
 
