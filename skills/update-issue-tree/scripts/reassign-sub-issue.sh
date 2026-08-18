@@ -405,7 +405,22 @@ recover_after_post_failure() {
       exit 8
     fi
 
-    echo "情報: #${ISSUE} を旧親 #${CURRENT_PARENT} へ補償復旧した（本来の目的だった #${NEW_PARENT} への付け替えは未達）" >&2
+    # 補償 POST の成功応答 + 直後の GET 1 回だけでは、DELETE の反映遅延で旧親配下に
+    # 見えている過渡状態を排除できない。直後に孤児化または新親への遅延反映が起きても
+    # restored と誤報するため、他の成功判定経路（補償 POST 失敗後・POST 偽陰性・補償不要）
+    # と同じ共通関数で安定確認してから確定する（codex-review P1 指摘 PR #391。成功応答
+    # 経路だけ契約が非対称だった）
+    local pvr_rc=0
+    confirm_stable_parent "補償復旧後の安定確認" "${CURRENT_PARENT}" || pvr_rc=$?
+    if [[ "${pvr_rc}" -eq 2 ]]; then
+      # 安定確認中に本来の新親 #NEW_PARENT への遅延反映が見えた（元の POST の偽陰性）
+      emit_result "reassigned" "${CURRENT_PARENT}"
+      exit 0
+    elif [[ "${pvr_rc}" -ne 0 ]]; then
+      echo "reason=recovery-state-unknown" >&2
+      exit 8
+    fi
+    echo "情報: #${ISSUE} を旧親 #${CURRENT_PARENT} へ補償復旧した（本来の目的だった #${NEW_PARENT} への付け替えは未達。反映遅延を考慮し再確認済み）" >&2
     echo "result=restored issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${CURRENT_PARENT}"
     exit 10
   fi
