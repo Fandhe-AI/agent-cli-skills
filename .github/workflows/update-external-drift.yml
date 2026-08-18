@@ -29,6 +29,8 @@ name: Update external drift check
 #   軸 2  pin の鮮度            … 上流を強化しても pin が古いと届かない
 #   軸 3  同期 CI の欠落        … skills を vendor しているのに workflow が無い
 #   軸 4  上流 reusable の劣化  … 旧マーカーの意図。18 リポ分の grep が 1 ファイルへ
+#                                 （#302: 上流内の全 uses が SHA 固定かも検査。
+#                                 `@main` 等の可動参照への退行を検知。鮮度は対象外）
 #   軸 5  定期実行の生存        … ファイルは正しいのに schedule が無告知停止した
 #                                 状態を検知（イシュー #304。詳細は
 #                                 docs/update-external-schedule.md）

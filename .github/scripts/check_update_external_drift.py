@@ -31,6 +31,8 @@ scheduled workflow を自動無効化する（``disabled_inactivity``）こと�
   軸 2  pin の鮮度              … 上流を強化しても pin が古いと届かない
   軸 3  同期 CI の欠落          … skills を vendor しているのに workflow が無い
   軸 4  上流 reusable の劣化    … 旧マーカーの意図。18 リポ分の grep が 1 ファイルへ
+                                （#302 でマーカーを 1 件追加。上流内の全 uses が
+                                 SHA 固定か＝可動参照への退行検知。鮮度は対象外）
   軸 5  定期実行の生存          … ファイルは正しいのに schedule が無告知停止した状態を検知
 
 設計上の約束
@@ -435,6 +437,148 @@ def _with(step: dict | None) -> dict:
     return w if isinstance(w, dict) else {}
 
 
+# マーカー (6) 用の分類。``_classify_uses_pin`` の戻り値としてのみ使う内部値
+# （他モジュールへの公開契約にはしない。冒頭 4 マーカーの ``PIN_*`` 等と違い
+# レポートの列挙値としては現れず、``check_upstream_markers`` 内で detail 文字列へ
+# 畳んでから外へ出すため）。
+_USES_PIN_OK = "ok"
+_USES_PIN_UNPINNED = "unpinned"
+_USES_PIN_EXEMPT = "exempt"
+
+
+def _stringify_uses(value: object) -> str:
+    """``uses`` の値を分類・表示用の文字列へ正規化する。
+
+    正規の ``uses`` は非空文字列だが、YAML の型崩れ（数値・真偽値・``null``・
+    空文字列等）を分母から黙って落とすと、その異常値が「未固定一覧」にも
+    「固定済みの分母」にも入らず ``check_upstream_markers`` が
+    「全て 40 桁 SHA 固定」と誤判定し得る（イシュー #302 レビュー指摘）。
+    ここで非文字列も必ず文字列化して ``_collect_all_uses`` の戻り値に含め、
+    後段の ``_classify_uses_pin`` に判定を委ねる——非文字列は
+    ``_SHA40_RE`` に一致しようがなく必然的に未固定へ落ちるため、
+    「fail-closed で不正値も報告に出す」という契約が自然に満たされる。
+
+    同じ理由で ``jobs`` の YAML キー（``job_name``）も非文字列（``yaml.safe_load``
+    は ``1:`` のような非文字列キーを許容する）があり得るため、
+    ``_collect_all_uses`` はこの関数を ``job_name`` の正規化にも流用する
+    （PR #355 レビュー指摘: 非文字列 ``job_name`` を素通しすると、後段の
+    ``_sanitize_for_detail`` の ``str.replace`` 呼び出しが ``AttributeError`` で
+    落ち、drift check 全体が例外終了して fail-closed 契約に反する）。
+    """
+    if isinstance(value, str):
+        return value
+    return repr(value)
+
+
+def _collect_all_uses(jobs: dict) -> list[tuple[str, str, str]]:
+    """``jobs`` 配下の全 ``uses``（job-level + step-level）を平坦化して集める。
+
+    マーカー (6)（上流 action の SHA 固定）の入力。YAML を構造走査するのは、
+    原文への正規表現だと実際の上流ファイル冒頭コメントに実在する
+    ``# uses: ...@<SHA>`` のような手順メモ行まで拾ってしまうため
+    （軸 1 の ``classify_workflow`` が同じ理由でパース済み構造を見ているのと
+    同じ設計判断）。戻り値は ``(ジョブ名, ステップ表示名, uses 文字列)`` の
+    タプル列。ステップ表示名は ``name`` が無ければ ``uses`` 自体で代替する
+    （detail に埋めたとき人間が該当箇所を特定できることを優先し、
+    索引番号だけの表示は避ける）。
+
+    収集条件は「``uses`` キーが存在するか」であり、値の型・非空性では
+    絞り込まない（絞り込むと非文字列・空文字列の異常値が分母からも
+    未固定一覧からも消え、fail-closed 契約に反して green に見えてしまう。
+    ``_stringify_uses`` のドキュメント参照）。
+    """
+    collected: list[tuple[str, str, str]] = []
+    for raw_job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        # `jobs.<id>` の YAML キーも非文字列（数値・真偽値等）があり得るため、
+        # 後段（`_sanitize_for_detail` 等）へ渡す前にここで文字列化しておく
+        # （`_stringify_uses` の docstring 参照）。
+        job_name = _stringify_uses(raw_job_name)
+        # reusable workflow 呼び出し（`jobs.<id>.uses`）。イシュー #302 の要件は
+        # 「全 uses」であり、このジョブ形式を対象から外す理由が無い。
+        if "uses" in job:
+            collected.append((job_name, job_name, _stringify_uses(job.get("uses"))))
+        for step in _steps(job):
+            if "uses" not in step:
+                continue
+            step_uses = _stringify_uses(step.get("uses"))
+            step_name = step.get("name")
+            display = step_name if isinstance(step_name, str) and step_name else step_uses
+            collected.append((job_name, display, step_uses))
+    return collected
+
+
+def _classify_uses_pin(uses: str) -> str:
+    """1 件の ``uses`` 値が SHA 固定されているかを分類する。
+
+    ``check_upstream_markers`` のマーカー (6) から呼ばれる。分類根拠（非ゴール
+    を含む）:
+
+    - ``./`` で始まるローカル action は同一リポ内参照であり ``@ref`` の概念が
+      無いので検査対象外（exempt）。可動参照へ退行するリスクが構造的に無い。
+      ``$/`` で始まる文字列は GitHub Actions の ``uses`` 構文として非対応
+      （公式にサポートされる同一リポジトリ参照は ``./...`` のみ）であり、
+      「本質的に固定されている」という前提が成立しない。免除すると不正値を
+      green 扱いにする偽陰性になるため（PR #355 レビュー指摘）、``$/`` は
+      exempt に含めず、``@`` を含まない他の値と同様に未固定として扱う。
+    - ``docker://`` はこの関数では SHA 形式を判定できないため fail-closed で
+      未固定扱いにする。上流に現存しないため誤報にはならず、将来出現したときに
+      人間のレビューを促す（本ファイル冒頭の「fail-closed」設計方針と同じ）。
+    - それ以外は ``@`` の**最後**の出現で右側を ref として取り出し
+      （``_split_job_uses`` と同じ ``rsplit`` 相当の理由——パス側に ``@`` は
+      現れないが逆はあり得るため）、既存の ``_SHA40_RE``（小文字 40 桁 hex）に
+      厳密一致するかで判定する。大文字混じりは意図的に fail にする（表記ゆれの
+      通過を許すと退行検知としての意味が薄れる）。
+    - **鮮度は見ない（非ゴール）。** 「形式が 40 桁 hex か」だけを判定し、
+      「その SHA が古い」は判定しない。pin の鮮度は軸 2 の役割であり、この
+      reusable workflow が内部で pin する composite action
+      （skills-update / submodule-update）の SHA は、上流側に bump 慣習が
+      無く本リポからは鮮度判定できない（workflow 本体の SHA と内部 pin は別物）。
+    """
+    text = uses.strip()
+    if text.startswith("./"):
+        return _USES_PIN_EXEMPT
+    if text.startswith("docker://"):
+        return _USES_PIN_UNPINNED
+    if "@" not in text:
+        return _USES_PIN_UNPINNED
+    _, _, ref = text.rpartition("@")
+    if _SHA40_RE.match(ref.strip()):
+        return _USES_PIN_OK
+    return _USES_PIN_UNPINNED
+
+
+def _sanitize_for_detail(text: str) -> str:
+    """detail に埋め込む値を Markdown 表セルへ安全に埋め込める形へ潰す。
+
+    detail はリモート（上流ファイル）由来の文字列（``uses`` だけでなく
+    ``jobs.<id>`` の YAML キーである job_name や ``step.name`` 由来の
+    display も含む）をほぼ逐語で含む。この値は ``render_report`` が
+    Markdown 表の 1 セルへそのまま差し込むため、``|`` が残っていると表の
+    列がずれ、改行が残っていると行が壊れる。上流編集者が悪意を持って
+    ``uses``・ジョブ名・ステップ名のいずれかに ``|`` や改行を仕込めば、
+    報告 issue の Markdown 構造を壊す・誤情報を注入する経路になり得る
+    （OWASP A03 相当）。3 箇所すべてでここを通してから detail へ渡す。
+
+    呼び出し側（マーカー (6)）は job_name・step_name・uses_str の全てを
+    バッククォートで囲んでコードスパンとして埋め込む（PR #355 レビュー
+    指摘: 以前は uses_str だけコードスパンの外に生のまま出力しており、
+    上流編集者が uses 文字列へ Markdown 構文を仕込めばコードスパンの
+    保護なしにそのまま注入され得た）。バッククォート自体がここでも
+    素通しだと、上流編集者がジョブ名・ステップ名・uses にバッククォート
+    を仕込むことでコードスパンを途中終了させ、以降の文字列を通常の
+    Markdown として解釈させられる（コードスパン脱出による Markdown
+    injection）。``|`` と同様にバッククォートも表示用の記号へ置換して
+    無害化する。
+    """
+    escaped = text.replace("|", "\\|").replace("`", "'")
+    collapsed = re.sub(r"\s+", " ", escaped).strip()
+    if len(collapsed) > 120:
+        collapsed = collapsed[:120] + "…"
+    return collapsed
+
+
 def check_upstream_markers(text: str) -> list[dict]:
     """上流 reusable workflow の強化マーカーが劣化していないかを検査する。
 
@@ -446,6 +590,12 @@ def check_upstream_markers(text: str) -> list[dict]:
     正しく、ファイル全体の grep では skills ジョブの ``false`` と混ざって誤判定
     する（#260 本文が明示している要件）。ここでは skills ジョブの checkout の
     ``with.persist-credentials`` だけを見て、submodule ジョブ側には何も要求しない。
+
+    マーカー (6)（#302）は上記 (1)〜(5) と異なり skills / submodule ジョブに
+    限定せず、``jobs`` 配下の全 ``uses``（job-level + step-level）を対象に
+    ``@ref`` が 40 桁 SHA かどうかだけを見る。判定できるのは**可動参照への退行**
+    （``@main`` 等）であり、**pin の鮮度は対象外**（古い SHA でも形式が hex なら
+    ok。鮮度は軸 2 の役割）。
     """
     results: list[dict] = []
 
@@ -563,6 +713,83 @@ def check_upstream_markers(text: str) -> list[dict]:
             f"{node_version}"
             + ("" if major % 2 == 0 else "（奇数メジャーは LTS 系列ではない）"),
         )
+
+    # --- (6) 上流 action の SHA 固定（イシュー #302）------------------------
+    # `@main` 等の可動参照への退行を検知する。skills / submodule ジョブに限定
+    # せず `jobs` 全体を対象にする（要件が「全 uses」であるため。既存 (1)〜(5)
+    # のようにジョブ名・action で絞り込まない）。
+    #
+    # 分母を必ず出す。`uses` が 1 件も無い上流は検査対象として構造的に異常
+    # であり、`unbound == 0` を無条件に green と読ませない
+    # （`.claude/rules/ruleset-policy.md` が同じ罠を「total と unbound を
+    # 併記し、空配列の join で両者を混同しない」と教訓化している。ここでも
+    # `N == 0` を「全て SHA 固定」と誤読しないよう、0 件は明示的に fail にする）。
+    all_uses = _collect_all_uses(jobs)
+    total = len(all_uses)
+    if total == 0:
+        add(
+            "上流 action の SHA 固定",
+            False,
+            "uses が 1 件も無い（検査対象として異常。fail-closed で不適合とする）",
+        )
+    else:
+        # `./` ローカル action は _classify_uses_pin が exempt（検査対象外）
+        # として分類する。exempt は「SHA 固定を確認できた」わけではなく
+        # 「@ref の概念が無く判定不能」なだけなので、分母 total には含めた
+        # まま unpinned から除外しても ok（固定確認済み）とは数えない。
+        # unpinned が空でも exempt が混ざっていれば「全 N 件すべて SHA
+        # 固定」と言い切るのは誤表示になる（PR #355 レビュー指摘: ok /
+        # exempt / unpinned を分離集計する）。
+        exempt_count = sum(
+            1
+            for _job_name, _step_name, uses_str in all_uses
+            if _classify_uses_pin(uses_str) == _USES_PIN_EXEMPT
+        )
+        unpinned = [
+            (job_name, step_name, uses_str)
+            for job_name, step_name, uses_str in all_uses
+            if _classify_uses_pin(uses_str) == _USES_PIN_UNPINNED
+        ]
+        if not unpinned:
+            ok_count = total - exempt_count
+            if exempt_count:
+                add(
+                    "上流 action の SHA 固定",
+                    True,
+                    f"全 {total} 件中 {ok_count} 件が 40 桁 SHA 固定"
+                    f"（{exempt_count} 件はローカル action で対象外）",
+                )
+            else:
+                add(
+                    "上流 action の SHA 固定", True, f"全 {total} 件すべて 40 桁 SHA 固定"
+                )
+        else:
+            # 列挙は先頭 5 件で打ち切るが、打ち切っても総件数は必ず数値で出す
+            # （「他 K 件」）。Markdown 表破壊防止のため job_name・step_name・
+            # uses_str の 3 者すべてを `_sanitize_for_detail` に通したうえで
+            # コードスパン（バッククォート）へ入れる（job_name は
+            # `jobs.<id>` の YAML キー、step_name は `step.name`（display）
+            # 由来で、どちらも上流編集者が自由に設定できる文字列のため
+            # uses と同じ脅威モデルが成立する）。uses_str をコードスパンの
+            # 外に生で出すと、値自体が Markdown 構文なら保護なしにそのまま
+            # 注入され得るため、他 2 者と同様にバッククォートで囲む
+            # （PR #355 レビュー指摘）。
+            shown = unpinned[:5]
+            entries = [
+                f"`{_sanitize_for_detail(job_name)}`/"
+                f"`{_sanitize_for_detail(step_name)}`: "
+                f"`{_sanitize_for_detail(uses_str)}`"
+                for job_name, step_name, uses_str in shown
+            ]
+            remaining = len(unpinned) - len(shown)
+            suffix = f"、他 {remaining} 件" if remaining > 0 else ""
+            add(
+                "上流 action の SHA 固定",
+                False,
+                f"全 {total} 件中 {len(unpinned)} 件が未固定: "
+                + "; ".join(entries)
+                + suffix,
+            )
 
     return results
 

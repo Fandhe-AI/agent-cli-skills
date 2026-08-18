@@ -112,6 +112,14 @@ if [[ -n "${OLD_PARENT}" ]] && ! [[ "${OLD_PARENT}" =~ ${NUM_RE} ]]; then
   exit 1
 fi
 
+# 自己参照（--new-parent が --issue と同一）は API を 1 件も叩かずに確定できる純粋な
+# 引数の誤り。DELETE を撃つ前に潰す事前検証の一種だが、他の検証（新親の存在・同一リポ
+# ジトリ）と異なり gh 呼び出しを要しないため、ここ（引数検証ブロック）に置く（Issue #333）
+if [[ "${NEW_PARENT}" == "${ISSUE}" ]]; then
+  echo "エラー: --new-parent に --issue 自身は指定できない（自己参照）" >&2
+  exit 1
+fi
+
 if [[ -n "${REPO_ARG}" ]]; then
   if ! [[ "${REPO_ARG}" =~ ${REPO_RE} ]]; then
     echo "エラー: --repo は owner/name 形式で指定する" >&2
@@ -242,6 +250,52 @@ if [[ -n "${CURRENT_PARENT}" ]]; then
     echo "対処: 現在の親 #${CURRENT_PARENT} をユーザーへ提示して承認を得たうえで --old-parent ${CURRENT_PARENT} で再実行する" >&2
     exit 6
   fi
+fi
+
+# 新親の事前検証（DELETE を撃つ前の最後の関門）。ここまでの分岐（already-attached・
+# 承認境界ガード）は既に通過しており、この先は必ず DELETE または POST を伴う。新親が
+# 存在しない・別リポジトリにある場合、DELETE だけ成功して POST が失敗すると対象 issue が
+# 孤児化する（不可逆）ため、DELETE の**前**に新親を GET して判定する（Issue #333 AC1/AC2）。
+# 孤児経路（CURRENT_PARENT が空、DELETE を伴わない）にも通す。DELETE が無いため孤児化
+# リスク自体は無いが、「事前に判定できる拒否条件は必ず無変更で終端する」契約を経路によらず
+# 統一するため（SKILL.md 参照）
+if ! NEW_PARENT_JSON=$(gh api "repos/${REPO_PATH}/issues/${NEW_PARENT}" 2>"${GH_ERR_FILE}"); then
+  echo "エラー: 新親 #${NEW_PARENT} の取得に失敗した（存在しない番号の可能性）" >&2
+  cat "${GH_ERR_FILE}" >&2
+  if [[ -n "${NEW_PARENT_JSON:-}" ]]; then
+    echo "${NEW_PARENT_JSON}" >&2
+  fi
+  exit 2
+fi
+
+NEW_PARENT_REPO_URL=$(printf '%s' "${NEW_PARENT_JSON}" | jq -r '.repository_url // empty')
+if [[ -z "${NEW_PARENT_REPO_URL}" ]]; then
+  echo "エラー: 新親 #${NEW_PARENT} の repository_url を解決できない" >&2
+  exit 2
+fi
+
+if [[ "${NEW_PARENT_REPO_URL}" != "${SELF_REPO_URL}" ]]; then
+  # 既存の旧親側 cross-repo ガード（現 L184 相当）と同じ完全一致比較。転送済み issue は
+  # GET がリダイレクトされ別リポジトリのレスポンスを返すため、レスポンス側の実測値でしか
+  # 判定できない（--repo 等の静的な値からは導けない）
+  echo "エラー: 新親 #${NEW_PARENT} が別リポジトリにある（${NEW_PARENT_REPO_URL}）。本スクリプトは同一リポジトリ内の付け替えのみを扱う" >&2
+  # --repo を新親リポジトリへ変えて再実行する案内はしない。--repo は対象 issue の
+  # GET/DELETE/POST を含む全 API パスを切り替えるため、同番号の無関係な issue を
+  # 操作させる危険な案内になる（PR #314 codex P0 の再発防止と同じ理由）
+  exit 2
+fi
+
+# 新親が Pull Request でないことを確認する。GitHub の `GET /repos/{o}/{r}/issues/{n}` は
+# **PR も返す**（issue と PR は番号空間を共有し、PR のレスポンスには `.pull_request` が付く）。
+# そのため --new-parent に PR 番号を渡すと、直前の存在確認も同一リポジトリ確認も通過して
+# しまう。旧親がある経路ではこの後 DELETE が成功したうえで sub_issues への POST が失敗し、
+# 対象 issue が旧親から外れたまま新親にも付かない部分変更（実害は exit 8 相当）に陥る。
+# これは本スクリプトが予防対象としている孤児化そのものであり、判別に使う `.pull_request` は
+# 既に取得済みの NEW_PARENT_JSON に含まれているため追加の API 呼び出しなしで弾ける。
+if printf '%s' "${NEW_PARENT_JSON}" | jq -e 'has("pull_request")' >/dev/null 2>&1; then
+  echo "エラー: 新親 #${NEW_PARENT} は issue ではなく Pull Request である。sub-issue の親には指定できない" >&2
+  echo "対処: 親として使う issue の番号を指定して再実行する（issue と PR は番号空間を共有するため取り違えやすい）" >&2
+  exit 2
 fi
 
 if [[ -z "${CURRENT_PARENT}" ]]; then
