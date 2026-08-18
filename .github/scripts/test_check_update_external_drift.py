@@ -414,7 +414,19 @@ jobs:
         )
         m = markers_map(exempt)["上流 action の SHA 固定"]
         self.assertTrue(m["ok"], m["detail"])
-        self.assertIn("全 6 件すべて 40 桁 SHA 固定", m["detail"])
+        # exempt（`./` ローカル action）が混ざる場合は「全 N 件すべて SHA
+        # 固定」と言い切らず、ok / exempt を分離して表示する
+        # （PR #355 レビュー指摘: 誤表示の是正）。
+        self.assertIn("全 6 件中 5 件が 40 桁 SHA 固定", m["detail"])
+        self.assertIn("1 件はローカル action で対象外", m["detail"])
+
+    def test_upstream_action_sha_all_pinned_without_exempt_says_all(self):
+        # exempt が 0 件のときは従来通り「全 N 件すべて SHA 固定」と簡潔に
+        # 表示する（exempt が無いのに ok/exempt 分離表記を出すと冗長）。
+        m = markers_map(FIXTURE_UPSTREAM_OK)["上流 action の SHA 固定"]
+        self.assertTrue(m["ok"], m["detail"])
+        self.assertIn("全 5 件すべて 40 桁 SHA 固定", m["detail"])
+        self.assertNotIn("対象外", m["detail"])
 
     def test_upstream_action_sha_docker_ref_is_fail_closed(self):
         # `docker://` は SHA 形式を判定できないため fail-closed で未固定扱い。
@@ -560,6 +572,36 @@ jobs:
         self.assertNotIn("bad | injected row", m["detail"])
         self.assertIn("evil \\| job", m["detail"])
         self.assertIn("bad \\| injected row", m["detail"])
+
+    def test_upstream_action_sha_detail_neutralizes_backtick_code_span_escape(self):
+        # job_name・step_name・uses はいずれもバッククォートで囲んで
+        # コードスパンとして detail へ埋め込む。値自体にバッククォートが
+        # 混ざっていると、コードスパンを途中終了させて以降を通常の
+        # Markdown として解釈させられる（コードスパン脱出による Markdown
+        # injection）。バッククォートが無害化され、注入した Markdown 構文
+        # （リンク記法）がそのまま解釈可能な形で残らないことを確認する
+        # （PR #355 レビュー指摘）。
+        backticked = FIXTURE_UPSTREAM_OK.replace(
+            "jobs:\n  submodule:",
+            'jobs:\n  "evil` [click](javascript:1) `job":\n'
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            '      - name: "bad` step"\n'
+            "        uses: owner/repo`@main\n"
+            "  submodule:",
+        )
+        m = markers_map(backticked)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        # 値に仕込んだバッククォートが無害化され、コードスパンのデリミタと
+        # して解釈され得るバッククォートは detail 中に固定 3 個
+        # （job_name/step_name/uses それぞれの開始・終了 = 6 個…ではなく、
+        # 隣接するセルの終端が次セルの開始と重ならないため実際は 6 個）
+        # ちょうどしか残らない（＝値由来の追加バッククォートが 0 個）こと
+        # を確認する。
+        self.assertEqual(m["detail"].count("`"), 6)
+        self.assertIn("evil' [click](javascript:1) 'job", m["detail"])
+        self.assertIn("bad' step", m["detail"])
+        self.assertIn("owner/repo'@main", m["detail"])
 
     def test_upstream_action_sha_truncates_to_five_with_total_count(self):
         # 未固定エントリが 5 件を超えても、列挙は先頭 5 件で打ち切りつつ

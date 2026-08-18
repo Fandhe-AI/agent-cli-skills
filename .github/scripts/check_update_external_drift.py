@@ -560,8 +560,19 @@ def _sanitize_for_detail(text: str) -> str:
     ``uses``・ジョブ名・ステップ名のいずれかに ``|`` や改行を仕込めば、
     報告 issue の Markdown 構造を壊す・誤情報を注入する経路になり得る
     （OWASP A03 相当）。3 箇所すべてでここを通してから detail へ渡す。
+
+    呼び出し側（マーカー (6)）は job_name・step_name・uses_str の全てを
+    バッククォートで囲んでコードスパンとして埋め込む（PR #355 レビュー
+    指摘: 以前は uses_str だけコードスパンの外に生のまま出力しており、
+    上流編集者が uses 文字列へ Markdown 構文を仕込めばコードスパンの
+    保護なしにそのまま注入され得た）。バッククォート自体がここでも
+    素通しだと、上流編集者がジョブ名・ステップ名・uses にバッククォート
+    を仕込むことでコードスパンを途中終了させ、以降の文字列を通常の
+    Markdown として解釈させられる（コードスパン脱出による Markdown
+    injection）。``|`` と同様にバッククォートも表示用の記号へ置換して
+    無害化する。
     """
-    escaped = text.replace("|", "\\|")
+    escaped = text.replace("|", "\\|").replace("`", "'")
     collapsed = re.sub(r"\s+", " ", escaped).strip()
     if len(collapsed) > 120:
         collapsed = collapsed[:120] + "…"
@@ -722,25 +733,52 @@ def check_upstream_markers(text: str) -> list[dict]:
             "uses が 1 件も無い（検査対象として異常。fail-closed で不適合とする）",
         )
     else:
+        # `./` ローカル action は _classify_uses_pin が exempt（検査対象外）
+        # として分類する。exempt は「SHA 固定を確認できた」わけではなく
+        # 「@ref の概念が無く判定不能」なだけなので、分母 total には含めた
+        # まま unpinned から除外しても ok（固定確認済み）とは数えない。
+        # unpinned が空でも exempt が混ざっていれば「全 N 件すべて SHA
+        # 固定」と言い切るのは誤表示になる（PR #355 レビュー指摘: ok /
+        # exempt / unpinned を分離集計する）。
+        exempt_count = sum(
+            1
+            for _job_name, _step_name, uses_str in all_uses
+            if _classify_uses_pin(uses_str) == _USES_PIN_EXEMPT
+        )
         unpinned = [
             (job_name, step_name, uses_str)
             for job_name, step_name, uses_str in all_uses
             if _classify_uses_pin(uses_str) == _USES_PIN_UNPINNED
         ]
         if not unpinned:
-            add("上流 action の SHA 固定", True, f"全 {total} 件すべて 40 桁 SHA 固定")
+            ok_count = total - exempt_count
+            if exempt_count:
+                add(
+                    "上流 action の SHA 固定",
+                    True,
+                    f"全 {total} 件中 {ok_count} 件が 40 桁 SHA 固定"
+                    f"（{exempt_count} 件はローカル action で対象外）",
+                )
+            else:
+                add(
+                    "上流 action の SHA 固定", True, f"全 {total} 件すべて 40 桁 SHA 固定"
+                )
         else:
             # 列挙は先頭 5 件で打ち切るが、打ち切っても総件数は必ず数値で出す
             # （「他 K 件」）。Markdown 表破壊防止のため job_name・step_name・
-            # uses_str の 3 者すべてを `_sanitize_for_detail` に通す
-            # （job_name は `jobs.<id>` の YAML キー、step_name は
-            # `step.name`（display）由来で、どちらも上流編集者が自由に
-            # 設定できる文字列のため uses と同じ脅威モデルが成立する）。
+            # uses_str の 3 者すべてを `_sanitize_for_detail` に通したうえで
+            # コードスパン（バッククォート）へ入れる（job_name は
+            # `jobs.<id>` の YAML キー、step_name は `step.name`（display）
+            # 由来で、どちらも上流編集者が自由に設定できる文字列のため
+            # uses と同じ脅威モデルが成立する）。uses_str をコードスパンの
+            # 外に生で出すと、値自体が Markdown 構文なら保護なしにそのまま
+            # 注入され得るため、他 2 者と同様にバッククォートで囲む
+            # （PR #355 レビュー指摘）。
             shown = unpinned[:5]
             entries = [
                 f"`{_sanitize_for_detail(job_name)}`/"
                 f"`{_sanitize_for_detail(step_name)}`: "
-                f"{_sanitize_for_detail(uses_str)}"
+                f"`{_sanitize_for_detail(uses_str)}`"
                 for job_name, step_name, uses_str in shown
             ]
             remaining = len(unpinned) - len(shown)
