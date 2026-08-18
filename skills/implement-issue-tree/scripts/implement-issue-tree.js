@@ -1636,8 +1636,16 @@ function planPrompt(item) {
 //
 // 比較基準は origin/<base>（remote-tracking ref）の 3 点ドット diff で固定する（Issue #315）。
 // 3 点ドット `A...HEAD` は merge-base(A, HEAD) からの差分のため、A に origin/<base> を渡すと
-// 比較点はブランチの分岐点に固定され、ラン中に origin が進んでも動かない（fetch 不要で
-// 安定する）。ローカル base ref を比較基準にすると、ローカルが origin より遅れているだけで
+// 比較点はブランチの分岐点に固定され、**ラン中に origin が進んでも動かない**。
+// ただしこの安定性が成り立つのは remote-tracking ref が分岐点を含む程度に新しい場合に限る。
+// ref が古いと merge-base が実際の分岐点より手前に落ち、base 側の無関係なコミットが再び
+// レビュー対象へ混入する（Issue #361。特に 0b-b のリモートブランチ回復経路は対象ブランチ
+// だけを fetch するため base が取り残されやすい）。そのため「一度取得済みなら以後 fetch 不要」
+// ではなく、**レビュー直前に毎回 base を取得する**。取得は保存先を明示した refspec で行う
+// — `git fetch origin <base>` のように取得元だけを与えた形は FETCH_HEAD を更新するだけで、
+// refs/remotes/origin/<base> の作成・更新を保証しない（remote.origin.fetch が既定でない
+// クローン・single-branch クローンで実際に作られず、fetch 成功後の解決に失敗して
+// 実施可能なレビューを blocked で落とす）。ローカル base ref を比較基準にすると、ローカルが origin より遅れているだけで
 // 無関係な祖先コミットの差分までレビュー対象に混入する（#297 で diff 417 行中 387 行がノイズ
 // となり収束失敗した実例）。ブランチ作成時点の SHA を固定する代替案は、push 後の fix 経路で
 // `git merge origin/<base>` により base を正当に取り込んだ場合に、その取り込み分を再びノイズ
@@ -1648,21 +1656,28 @@ function reviewPrompt(item, impl) {
     `イシュー #${item.number}（ブランチ ${branch}）のコードレビュー担当エージェント（push 前ローカル diff レビュー）。`,
     COMMON,
     '本エージェントは判定のみを行い、コードの変更・コミット・push は行わない。',
-    '対象ブランチは push 前のため origin には存在しない。base の remote-tracking ref は既存のものを使う。',
+    '対象ブランチは push 前のため origin には存在しない。base の remote-tracking ref はレビュー直前に毎回取得し直す。',
     '手順:',
     `1. git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
     `   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
     `   （ブランチ名は ${JSON.stringify(branch)} — 変数展開不要、そのまま使用する）`,
-    `   ref 解決確認: git rev-parse --verify --quiet refs/remotes/origin/${baseBranch} が失敗した場合、`,
-    `   git fetch origin ${baseBranch} を 1 回だけ試みる。それでも解決できなければレビューを`,
-    `   実施せず state: "blocked" / highestSeverity: "none" とし、summary に`,
-    `   「比較基準 origin/${baseBranch} を解決できない」と明記して終端する（fail-closed）。`,
+    `   比較基準の最新化（必須・ref の存在有無で分岐しない）:`,
+    `   git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} を 1 回実行する。`,
+    `   （保存先（コロン以降の refs/remotes/... 部分）を省いてはならない。取得元のブランチ名だけを`,
+    `   与えた形は FETCH_HEAD を更新するだけで refs/remotes/origin/${baseBranch} の作成・更新を`,
+    `   保証しないため、fetch が成功しても続く解決に失敗し得る）`,
+    `   fetch が失敗した場合、および fetch 後に`,
+    `   git rev-parse --verify --quiet refs/remotes/origin/${baseBranch} が解決できない場合は、`,
+    `   既存 ref を安全とみなさずレビューを実施せず state: "blocked" / highestSeverity: "none" とし、`,
+    `   summary に「比較基準 origin/${baseBranch} を解決できない」と明記して終端する（fail-closed）。`,
+    `   （既存 ref が古いまま残っていると merge-base が実際の分岐点より手前に落ち、base 側の`,
+    `   無関係なコミットがレビュー対象へ混入する。ref があることは新しいことを意味しない）`,
     `   （state: "blocked" は環境要因でレビュー自体が実施不能だったことを表す専用状態。`,
     `   コード指摘を表す needs-fix とは呼び出し元の扱いが異なり、fix エージェントは起動されず`,
     `   即座に終端する。needs-fix / highestSeverity: critical は使わない — 無関係なコードへの`,
     `   修正試行を誘発するため）。`,
     `2. implement-review スキルに従い、git diff origin/${baseBranch}...HEAD のローカル diff を対象に品質・セキュリティレビューを実施する。`,
-    `   （origin/${baseBranch}（remote-tracking ref）基準。3 点ドットのため比較点はブランチの分岐点に固定され、fetch 不要・ラン中に origin が進んでも比較点は不変）`,
+    `   （origin/${baseBranch}（直前に取得し直した remote-tracking ref）基準。3 点ドットのため比較点はブランチの分岐点に固定され、以降ラン中に origin が進んでも比較点は不変）`,
     '   レビュー観点:',
     '   - 実装品質（設計・可読性・エッジケース・テストカバレッジ）',
     '   - OWASP Top 10 セキュリティ（インジェクション・認証・秘密情報露出等）',
@@ -1735,6 +1750,10 @@ function implementPrompt(item, plan) {
     `      ブランチ名は命名規約に一致するもの（<type>/${item.number}-<short-name> の形式）のみを対象とする。`,
     `      — セキュリティ注意: git ls-remote の出力をそのままシェルに展開しない。ブランチ名は isValidBranchName の規則（英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）に適合するものだけを使用すること。`,
     `      リモートブランチが見つかった場合: git fetch origin <branch> && git checkout -B <branch> origin/<branch> でブランチを取得する。`,
+    `      あわせて git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} も実行し、base の remote-tracking ref を最新化する。`,
+    `      （この経路は手順 2 の git fetch origin をスキップするため、base だけが古いまま残る。`,
+    `      その状態で後続の Review が git diff origin/${baseBranch}...HEAD を取ると、base 側の無関係な`,
+    `      コミットが差分へ混入する。Issue #361）`,
     `      これは「前回 push 成功・PR 作成失敗」で残ったブランチの回復を目的とする（origin/${baseBranch} から新規作成し直さない）。`,
     `      push 済みコミットをそのまま引き継いで計画と照合し、未実装部分があれば補って実装を続行する。`,
     `      branch としてそのブランチ名を返す（prNumber は 0 のまま。PR 作成は後続の PR Create フェーズが行う）。`,
@@ -2179,13 +2198,13 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
   // push しない Review fix では detach で取得し、修正コミット後に `git branch -f` で先端更新する。
   const checkoutInstructions = pushAfterFix
     ? [
-        `1. 本エージェントは隔離された git worktree 内で動作する。ブランチ ${branch} は他の worktree で checkout 済みの可能性があるため、git fetch origin && git checkout --detach origin/${branch} で detached HEAD として取得して作業する。マージコンフリクトの解消が必要な場合は git merge origin/${baseBranch} を実行して解消する。`,
+        `1. 本エージェントは隔離された git worktree 内で動作する。ブランチ ${branch} は他の worktree で checkout 済みの可能性があるため、git fetch origin && git checkout --detach origin/${branch} で detached HEAD として取得して作業する。マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で base を最新化してから git merge origin/${baseBranch} を実行して解消する（保存先を明示した refspec を使う。Issue #361）。`,
       ]
     : [
         `1. 本エージェントは隔離された git worktree 内で動作する。push 前のローカル修正のため fetch は不要。`,
         `   git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
         `   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
-        `   マージコンフリクトの解消が必要な場合は git merge origin/${baseBranch} を実行して解消する`,
+        `   マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で base を最新化してから git merge origin/${baseBranch} を実行して解消する（Issue #361）`,
         `   （ローカルの ${baseBranch} ではなく origin/${baseBranch} を使う。ローカル base が origin より`,
         `   進んでいる場合にローカル限定コミットがブランチへ混入し、次ラウンドの Review がそれを`,
         `   ブランチの変更として誤検出する再発経路を防ぐため。Issue #315）。`,
@@ -2357,7 +2376,7 @@ function recoverPrompt(item, branch, oldWorktree) {
                 `   - 解決失敗（worktree 実在・HEAD 不定）の場合はこの手順を飛ばすこと。`,
               ]
             : []),
-          `   a. git fetch origin ${baseBranch} で origin/${baseBranch} を最新化する。`,
+          `   a. git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で origin/${baseBranch} を最新化する（保存先を明示した refspec を使う。Issue #361）。`,
           `   b. 対象ブランチと origin/${baseBranch} の差分を読む:`,
           `      git diff origin/${baseBranch}...${oldWorktree ? '<解決した対象ブランチ名>' : branchJson} を実行する。`,
           `      （--quiet で差分が空か確認してから diff を取得する。差分がない場合は空 branch と判断）`,

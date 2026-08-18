@@ -213,3 +213,133 @@ test('群C: 先行マージ（別イシューの PR マージ相当）で origin
   const afterFetch = git(workDir, ['diff', 'origin/main...HEAD', '--name-only']).split('\n').filter(Boolean)
   assert.deepEqual(afterFetch, ['feature.txt'], 'fetch 後: origin/main の remote-tracking ref が別 sha（another-feature.txt 込み）へ更新されても、merge-base(origin/main, feature) は分岐点のまま変わらない')
 })
+
+// ---------------------------------------------------------------------------
+// 群 D: base の最新化契約（Issue #361）
+// ---------------------------------------------------------------------------
+// 背景: #315 の修正（比較基準を origin/<base> へ統一）に対し、下流 5 リポの同期 PR で
+// codex / Cursor Bugbot から 2 系統の指摘が出た。
+//   系統 A: fetch する条件が「ref を解決できない場合だけ」なので、ref が存在していて古い
+//           ケースでは更新されず、merge-base が実際の分岐点より手前に落ちて base 側の
+//           無関係なコミットが差分へ混入する（#315 が解こうとした不具合が回復経路で残る）。
+//   系統 B: `git fetch origin <base>` のように取得元だけを与えた refspec は FETCH_HEAD を
+//           更新するだけで refs/remotes/origin/<base> の作成・更新を保証しないため、
+//           fetch が成功しても続く解決に失敗し、実施可能なレビューを blocked で落とす。
+// 両者は逆方向を向く（「必ず fetch して fail-closed」vs「fetch 成功でも blocked になる」）ため、
+// 別々に直すと「必ず fetch → ref は作られない → 必ず blocked」という最悪の組み合わせになる。
+// 解は 1 つ: **無条件 fetch + 保存先を明示した refspec + 失敗時 fail-closed**。
+// この群はその 3 点が同時に成立し続けることを固定する。
+
+test('群D: reviewPrompt は保存先を明示した refspec で base を取得する', () => {
+  assert.match(output, /git fetch origin develop:refs\/remotes\/origin\/develop/)
+})
+
+test('群D: reviewPrompt の base 取得は条件付きでない（ref 不在時のみ fetch する旧形式の検出）', () => {
+  // 旧実装: 「rev-parse ... が失敗した場合、git fetch origin <base> を 1 回だけ試みる」
+  assert.doesNotMatch(output, /が失敗した場合、[\s\S]{0,40}git fetch origin develop を 1 回だけ試みる/)
+})
+
+test('群D: reviewPrompt は「fetch 不要」という旧説明を含まない（revert 検出）', () => {
+  assert.doesNotMatch(output, /fetch 不要/)
+})
+
+test('群D: reviewPrompt は fetch 失敗と fetch 後の解決失敗の両方で blocked へ倒す', () => {
+  assert.match(output, /fetch が失敗した場合/)
+  assert.match(output, /fetch 後に[\s\S]{0,200}解決できない場合/)
+  assert.match(output, /state: "blocked"/)
+})
+
+// implementPrompt / fixPrompt は駆動部の下にあり import できないため、他の群と同じ流儀で
+// ソース走査により固定する。0b-b（残存リモートブランチの回復）は手順 2 の `git fetch origin` を
+// スキップするため、この経路だけ base が古いまま取り残される固有の穴があった。
+test('群D: 0b-b のリモートブランチ回復経路でも base を refspec 付きで取得する', () => {
+  assert.match(
+    source,
+    /git fetch origin <branch> && git checkout -B <branch> origin\/<branch>[\s\S]{0,400}git fetch origin \$\{baseBranch\}:refs\/remotes\/origin\/\$\{baseBranch\}/,
+  )
+})
+
+test('群D: base を対象とする fetch は全箇所で保存先明示 refspec を使う', () => {
+  // `git fetch origin ${baseBranch}` の直後がコロンでない出現を許さない。
+  // `git fetch origin &&`（全 ref を既定 refspec で取得する形）は対象外。
+  const bare = source.match(/git fetch origin \$\{baseBranch\}(?!:)/g) ?? []
+  assert.deepEqual(
+    bare,
+    [],
+    `保存先を明示しない base fetch が ${bare.length} 件残っている（FETCH_HEAD しか更新されず ref 解決に失敗し得る）`,
+  )
+})
+
+test('群D: SKILL.md も保存先明示 refspec と無条件取得を記載する', () => {
+  assert.match(skillMd, /git fetch origin <base-branch>:refs\/remotes\/origin\/<base-branch>/)
+  assert.match(skillMd, /必ず 1 回実行/)
+  assert.doesNotMatch(skillMd, /fetch 不要/)
+})
+
+// --- git セマンティクスの実測（系統 B が実在することの証拠） ---
+// remote.origin.fetch を持たない remote（custom refspec 設定・手動 remote 追加で実際に起きる）
+// を作り、bare refspec と保存先明示 refspec の挙動差を実測する。
+function buildNoRefspecFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'implement-issue-tree-refspec-'))
+  const bareDir = join(root, 'origin.git')
+  const seedDir = join(root, 'seed')
+  const workDir = join(root, 'work')
+  mkdirSync(bareDir)
+  git(bareDir, ['init', '--bare', '--initial-branch=main', '.'])
+
+  mkdirSync(seedDir)
+  git(seedDir, ['init', '--initial-branch=main', '.'])
+  writeFileSync(join(seedDir, 'base.txt'), 'base\n')
+  git(seedDir, ['add', '.'])
+  git(seedDir, ['commit', '-m', 'base'])
+  git(seedDir, ['remote', 'add', 'origin', bareDir])
+  git(seedDir, ['push', 'origin', 'main'])
+
+  // remote.origin.fetch を設定せずに remote を登録する（`git remote add` は既定で
+  // refspec を書き込むため、url だけを直接 config へ書く）。
+  mkdirSync(workDir)
+  git(workDir, ['init', '--initial-branch=main', '.'])
+  git(workDir, ['config', 'remote.origin.url', bareDir])
+  return { workDir }
+}
+
+test('群D: refspec を省いた fetch は remote-tracking ref を作らない（系統 B の実測）', () => {
+  const { workDir } = buildNoRefspecFixture()
+  git(workDir, ['fetch', 'origin', 'main'])
+  // fetch 自体は成功する（FETCH_HEAD は書かれる）
+  assert.doesNotThrow(() => git(workDir, ['rev-parse', '--verify', 'FETCH_HEAD']))
+  // しかし比較基準として使う remote-tracking ref は作られない
+  assert.throws(
+    () => git(workDir, ['rev-parse', '--verify', 'refs/remotes/origin/main']),
+    /.*/,
+    'refspec を省いた fetch で remote-tracking ref が作られてしまった（前提が変わった可能性）',
+  )
+})
+
+test('群D: 保存先を明示した refspec なら remote-tracking ref が作られる（修正の妥当性）', () => {
+  const { workDir } = buildNoRefspecFixture()
+  git(workDir, ['fetch', 'origin', 'main:refs/remotes/origin/main'])
+  const sha = git(workDir, ['rev-parse', '--verify', 'refs/remotes/origin/main'])
+  assert.match(sha, /^[0-9a-f]{40}$/)
+})
+
+test('群D: 古い remote-tracking ref は明示 refspec の再 fetch で前進する（系統 A の実測）', () => {
+  const { workDir } = buildNoRefspecFixture()
+  git(workDir, ['fetch', 'origin', 'main:refs/remotes/origin/main'])
+  const before = git(workDir, ['rev-parse', 'refs/remotes/origin/main'])
+
+  // 別の作業者が origin/main を進める（先行 PR のマージ相当）
+  const bareUrl = git(workDir, ['config', '--get', 'remote.origin.url'])
+  const other = mkdtempSync(join(tmpdir(), 'implement-issue-tree-refspec-other-'))
+  git(other, ['clone', bareUrl, '.'])
+  writeFileSync(join(other, 'advance.txt'), 'advance\n')
+  git(other, ['add', '.'])
+  git(other, ['commit', '-m', 'advance'])
+  git(other, ['push', 'origin', 'main'])
+
+  // 「ref は存在するので fetch しない」旧挙動では before のまま据え置かれる。
+  // 無条件 + 明示 refspec の新挙動では前進する。
+  git(workDir, ['fetch', 'origin', 'main:refs/remotes/origin/main'])
+  const after = git(workDir, ['rev-parse', 'refs/remotes/origin/main'])
+  assert.notEqual(after, before, '既存 ref があると再 fetch されず古いままになる（系統 A の再現）')
+})
