@@ -19,6 +19,9 @@ model: sonnet
 
 - `gh` CLI がインストールされ、認証済みであること
 - `node` / `npx` が利用可能であること（`npx skills add` を使用するため）
+- `file` CLI が利用可能であること（未追跡バイナリファイルの種別表示に使用。未導入の環境では
+  種別が `file コマンド未検出` として表示され、承認前にサイズ・git blob ハッシュのみで
+  判断することになる。macOS / 主要 Linux ディストリビューションには標準搭載されている）
 - ルート直下の `skills-lock.json` が存在すること
 - **実行前に `skills-lock.json` に未コミットの変更がないこと**（ステージ済み・未ステージ問わず）。本スキルの実行中に発生する変更は sync 由来のみとなり、`git add skills-lock.json` で全体をステージしても無関係な変更が混入しない
 - **対象スキルの `.agents/skills/<name>/` に未コミット変更がないこと**。`npx skills add` は `.agents/skills/<name>/` を upstream の最新版で上書きするため、そのディレクトリに WIP が存在すると即座に失われる。`git checkout` で戻せるのは「最後にコミットされた状態」のみであり、npx 実行前の未コミット編集は復元できない。**未追跡ファイルとして存在する WIP も対象**であり、`git status --porcelain` で検出する
@@ -142,7 +145,11 @@ while IFS= read -r -d '' f; do
   NUMSTAT="$(git diff --no-index --numstat -- /dev/null "${f}" 2>/dev/null || true)"
   if [[ "${NUMSTAT}" == -$'\t'-$'\t'* ]]; then
     FILE_SIZE="$(wc -c < "${f}" | tr -d '[:space:]')"
-    FILE_TYPE="$(file -b -- "${f}" 2>/dev/null || echo "unknown")"
+    if command -v file >/dev/null 2>&1; then
+      FILE_TYPE="$(file -b -- "${f}" 2>/dev/null || echo "unknown")"
+    else
+      FILE_TYPE="file コマンド未検出"
+    fi
     FILE_HASH="$(git hash-object -- "${f}")"
     printf '%s\n' "==> バイナリファイル（内容は表示されません）: type=${FILE_TYPE} size=${FILE_SIZE}bytes git-blob-sha1=${FILE_HASH}"
   else

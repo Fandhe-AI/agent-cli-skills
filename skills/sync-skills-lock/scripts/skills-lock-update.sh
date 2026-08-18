@@ -139,7 +139,11 @@ while IFS= read -r -d '' f; do
   NUMSTAT="$(git diff --no-index --numstat -- /dev/null "${f}" 2>/dev/null || true)"
   if [[ "${NUMSTAT}" == -$'\t'-$'\t'* ]]; then
     FILE_SIZE="$(wc -c < "${f}" | tr -d '[:space:]')"
-    FILE_TYPE="$(file -b -- "${f}" 2>/dev/null || echo "unknown")"
+    if command -v file >/dev/null 2>&1; then
+      FILE_TYPE="$(file -b -- "${f}" 2>/dev/null || echo "unknown")"
+    else
+      FILE_TYPE="file コマンド未検出"
+    fi
     FILE_HASH="$(git hash-object -- "${f}")"
     printf '%s\n' "==> バイナリファイル（内容は表示されません）: type=${FILE_TYPE} size=${FILE_SIZE}bytes git-blob-sha1=${FILE_HASH}"
   else
