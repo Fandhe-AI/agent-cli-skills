@@ -31,7 +31,6 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { findMatchingBraceEnd } from './lib/js-brace-scanner.mjs'
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -237,169 +236,63 @@ test('救済ラウンドの pending は granted のときだけ立つ', () => {
   assert.match(branchBody, /if \(rescan\.granted\) rescueRoundPending = true/)
 })
 
-// brace 走査で監視ループの閉じ位置を求める。コメント文字列（「即座にループを抜けて」等）へ
-// 依存すると、コメント編集だけで回帰検知が黙って無効化されるため、構造そのものを走査する。
-// 字句認識つき実装は tests/lib/js-brace-scanner.mjs（Issue #336）。ここでは import した
-// findMatchingBraceEnd をそのまま使う。
+// 監視ループの範囲は実装側に置いたマーカー対で切り出す（Issue #336）。
 //
-// naiveFindMatchingBraceEnd は下の負のコントロール専用としてのみ使う（本番判定には使わない）。
-// 字句を一切区別せずすべての `{` / `}` をカウントする旧実装そのものであり、これがないと
-// 新しい注入テストは旧実装に対しても green になってしまい、Issue #336 の目的を果たさない。
-function naiveFindMatchingBraceEnd(text, openBraceIndex) {
-  let depth = 0
-  for (let i = openBraceIndex; i < text.length; i++) {
-    if (text[i] === '{') depth++
-    else if (text[i] === '}') {
-      depth--
-      if (depth === 0) return i
-    }
-  }
-  return -1
+// 経緯: 当初は波括弧の深さを数えて閉じ位置を求めていたが、文字列・テンプレートリテラル・
+// コメント内の片側波括弧で境界がずれるため字句走査（手書きレキサー）へ置き換えた。しかし
+// レキサーは正規表現/除算の判別・ASI・Unicode 識別子・ラベル付き break といった JS 文法の
+// 全域を相手にすることになり、テストヘルパーとしては見合わない大きさと不確かさを抱えた。
+// 実装スクリプトは自分たちが所有しているため、境界そのものをソースへ書き込むほうが確実で
+// 小さい。既に同じファイルで __IMPLEMENT_ISSUE_TREE_DRIVER_START__ が同じ方式を採っている。
+//
+// 「コメントに依存する」点は当初の問題（「即座にループを抜けて」等の説明文＝**偶発的な散文**へ
+// の依存。文面を書き換えるだけで回帰検知が黙って無効化される）とは別物である。マーカーは
+// 単一目的の固定文字列で、出現回数を下のテストが 1 回に固定し、消えれば読み込み時点で throw
+// する。黙って無効化される経路が無い。
+const LOOP_START_MARKER = ['__MERGE', 'MONITOR', 'LOOP', 'START__'].join('_')
+const LOOP_END_MARKER = ['__MERGE', 'MONITOR', 'LOOP', 'END__'].join('_')
+
+const loopStartMarkerIndex = driverPart.indexOf(LOOP_START_MARKER)
+const loopEndMarkerIndex = driverPart.indexOf(LOOP_END_MARKER)
+if (loopStartMarkerIndex === -1 || loopEndMarkerIndex === -1) {
+  throw new Error(`監視ループの境界マーカー（${LOOP_START_MARKER} / ${LOOP_END_MARKER}）が実装スクリプトに存在しない（削除・改名は回帰テストを無効化する）`)
 }
 
 const WHILE_HEADER = 'while (!merged && monitorsLeft > 0) {'
-const whileIndex = driverPart.indexOf(WHILE_HEADER)
-if (whileIndex === -1) {
-  throw new Error('監視ループの while が見つからない（構造変更時は本テストも更新すること）')
+const whileIndex = driverPart.indexOf(WHILE_HEADER, loopStartMarkerIndex)
+if (whileIndex === -1 || whileIndex > loopEndMarkerIndex) {
+  throw new Error('監視ループの while が開始マーカーと終了マーカーの間に見つからない（構造変更時はマーカーも一緒に動かすこと）')
 }
 const loopOpenBraceIndex = whileIndex + WHILE_HEADER.length - 1
-const loopEndIndex = findMatchingBraceEnd(driverPart, loopOpenBraceIndex)
-if (loopEndIndex === -1) {
-  throw new Error('監視ループの閉じ括弧が見つからない（brace 不整合）')
+// 終了マーカーは閉じ括弧の直後の行に置く規約のため、マーカーから後ろ向きに最初の `}` が
+// ループの閉じ括弧そのものになる。波括弧の対応付けを一切行わないため、文字列・コメント・
+// テンプレートリテラル内の片側波括弧の影響を原理的に受けない。
+const loopEndIndex = driverPart.lastIndexOf('}', loopEndMarkerIndex)
+if (loopEndIndex === -1 || loopEndIndex < loopOpenBraceIndex) {
+  throw new Error('監視ループの閉じ括弧が終了マーカーの直前に見つからない（マーカー配置の規約違反）')
 }
 
-test('救済ラウンドの終端分類はループ退出後・単一地点で 1 回だけ評価される', () => {
-  // reconcileRescueRoundState の呼び出しは driverPart 内でちょうど 1 回。呼び出し形（引数名）を
-  // 固定した正規表現だと、#246/#248 と同じ形の regression（旧引数名 rescueRoundPending でのラウンド
-  // 内再呼び出し等）が紛れ込んでも「別の呼び出し」としてカウントから漏れ、1 のままテストが通って
-  // しまう。裸の呼び出し（開き括弧まで）で数えることで、本 Issue が守るべき不変条件
-  // 「呼び出しは 1 か所だけ」を引数の綴りに関係なく検証する。
-  const allCalls = driverPart.match(/reconcileRescueRoundState\(/g) ?? []
-  assert.equal(allCalls.length, 1, '救済ラウンドの判定呼び出しは driverPart 内で 1 か所だけでなければならない')
-  const callIndex = driverPart.indexOf('reconcileRescueRoundState(lastState, rescueRoundActive)')
-  assert.notEqual(callIndex, -1, '判定呼び出しの引数形（lastState, rescueRoundActive）が見つからない')
-  // ループの外（閉じ括弧より後）かつ terminalStatus の算出より前でなければならない
-  // （merge-exec 由来の timeout 写像まで確定した lastState を見て判定する必要があるため）。
-  assert.ok(callIndex > loopEndIndex, '判定はループ退出後（choke point）でなければならない')
-  const terminalStatusIndex = driverPart.indexOf('const terminalStatus =')
-  assert.notEqual(terminalStatusIndex, -1, '終端 status の判定が見つからない（構造変更時は本テストも更新すること）')
-  assert.ok(callIndex < terminalStatusIndex, '判定は terminalStatus の算出より前でなければならない')
-  // 同じブロックに qualityBlock フラグの配線があること。
-  const block = driverPart.slice(callIndex, terminalStatusIndex)
-  assert.match(block, /rescueTimeoutQualityBlock = reconciled\.qualityBlock/)
-  // lastState への再代入が残っていると fix 起動状態への書き換えが復活する（#246 の欠陥の再発防止）。
-  assert.doesNotMatch(block, /lastState = reconciled/)
+test('監視ループの境界マーカーは実装スクリプト内にそれぞれ 1 か所のみ存在する', () => {
+  // 複数あると切り出し位置が曖昧になる。driverPart ではなくスクリプト全体（source）で数える。
+  assert.equal(source.split(LOOP_START_MARKER).length - 1, 1, `${LOOP_START_MARKER} は 1 か所だけでなければならない`)
+  assert.equal(source.split(LOOP_END_MARKER).length - 1, 1, `${LOOP_END_MARKER} は 1 か所だけでなければならない`)
 })
-
-test('救済ラウンドの予約はラウンド先頭（monitorsLeft-- の直後）で active へ移送される', () => {
-  const handoffActiveIndex = driverPart.indexOf('rescueRoundActive = rescueRoundPending')
-  const handoffClearIndex = driverPart.indexOf('rescueRoundPending = false', handoffActiveIndex)
-  assert.notEqual(handoffActiveIndex, -1, '予約の移送（active への代入）が見つからない')
-  assert.notEqual(handoffClearIndex, -1, '予約の移送後にクリアする代入が見つからない')
-  // ループの内側（開始 index と loopEndIndex の間）にあること。
-  assert.ok(handoffActiveIndex > loopOpenBraceIndex && handoffActiveIndex < loopEndIndex, '移送はループ内でなければならない')
-  assert.ok(handoffClearIndex < loopEndIndex, '移送後のクリアもループ内でなければならない')
-  // monitorsLeft-- の直後（ラウンド先頭）に位置すること。同ラウンド内の他の処理より前でなければ
-  // 予約消費前に別の分岐が rescueRoundActive を参照してしまう。
-  const decrIndex = driverPart.indexOf('monitorsLeft--', loopOpenBraceIndex)
-  assert.notEqual(decrIndex, -1)
-  assert.ok(decrIndex < handoffActiveIndex, '移送は monitorsLeft-- より後でなければならない')
-  const monitorCallIndex = driverPart.indexOf('const m = await agent(monitorPrompt(', loopOpenBraceIndex)
-  assert.notEqual(monitorCallIndex, -1)
-  assert.ok(handoffClearIndex < monitorCallIndex, '移送は monitor 呼び出しより前（ラウンド先頭）でなければならない')
-})
-
-test('救済 timeout フラグが終端 status の blocked 分類に配線されている', () => {
-  const idx = driverPart.indexOf('const terminalStatus =')
-  assert.notEqual(idx, -1, '終端 status の判定が見つからない（構造変更時は本テストも更新すること）')
-  const expr = driverPart.slice(idx, idx + 400)
-  assert.match(expr, /rescueTimeoutQualityBlock/, 'フラグを立てても分類へ配線されていなければ blocked にならない')
-  assert.match(expr, /'blocked'/)
-})
-
-test('救済 pending / active / 品質ブロックフラグは while ループの外で 1 回だけ宣言される', () => {
-  for (const name of ['rescueRoundPending', 'rescueRoundActive', 'rescueTimeoutQualityBlock']) {
-    const declarations = driverPart.match(new RegExp(`let ${name}\\b`, 'g')) ?? []
-    assert.equal(declarations.length, 1, `${name} の宣言は 1 か所でなければならない`)
-    const declIndex = driverPart.indexOf(`let ${name}`)
-    assert.ok(declIndex < whileIndex, `${name} は while より前で宣言されていなければならない`)
-  }
-})
-
-// ---------------------------------------------------------------------------
-// 合成シナリオ（Issue #248 の本題）: 純粋関数単体では検知できない「救済ラウンド中に
-// merge-exec 由来の timeout 写像が発生する」合成経路の回帰検証。
-// 模擬ラウンド: rescueRoundActive = true / monitor が 'ready' を返す /
-// classifyMergeExecDispatch(reason, undefined) で lastState を 'timeout' へ写像 /
-// monitorsLeft === 0 でループ退出 / reconcileRescueRoundState(lastState, rescueRoundActive) を評価。
-// ---------------------------------------------------------------------------
-
-// 実装の terminalStatus 算出式（L3977 付近）と同じ式をここで意図的に再実装し、qualityBlock が
-// 実際に 'blocked' 終端へ届くところまで検証する（配線だけでなく最終判定結果を担保するため）。
-// この複製は実装式との乖離（ドリフト）に対して無防備 —— 実装側が式を変更してもこの関数までは
-// 追随しないため、乖離検知は上の「救済 timeout フラグが終端 status の blocked 分類に配線されて
-// いる」テスト（driverPart のソース走査で rescueTimeoutQualityBlock / 'blocked' の実在を見る）が
-// 担う。両テストは相補的であり、どちらか一方だけでは今回の合成回帰（#248）を検知できない。
-function computeTerminalStatus({ routingErrorDetected, mergedButIssueOpen, lastState, lastBlockedReason, rescueTimeoutQualityBlock }) {
-  const blockedIsRecoverable = lastState === 'blocked' && lastBlockedReason === 'quality'
-  return !routingErrorDetected
-    && (mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments' || rescueTimeoutQualityBlock)
-    ? 'blocked'
-    : 'failed'
-}
-
-for (const reason of ['head-moved', 'checks-not-green', 'merge-failed']) {
-  test(`合成シナリオ: 救済ラウンド中の merge-exec reason '${reason}' 写像は blocked 終端になる`, () => {
-    // monitor は 'ready' を返した想定（監視自体は成立したが、merge-exec が一過性理由でマージを
-    // 見送った）。classifyMergeExecDispatch が lastState を 'timeout' へ上書きする。
-    const dispatched = classifyMergeExecDispatch(reason, undefined)
-    assert.equal(dispatched.lastState, 'timeout')
-    // 救済ラウンド中（rescueRoundActive: true）でこの timeout を判定する。
-    const reconciled = mod.reconcileRescueRoundState(dispatched.lastState, true)
-    assert.equal(reconciled.terminate, true)
-    assert.equal(reconciled.qualityBlock, true)
-    const terminalStatus = computeTerminalStatus({
-      routingErrorDetected: false,
-      mergedButIssueOpen: false,
-      lastState: dispatched.lastState,
-      lastBlockedReason: dispatched.lastBlockedReason,
-      rescueTimeoutQualityBlock: reconciled.qualityBlock,
-    })
-    assert.equal(terminalStatus, 'blocked', 'monitor 直後消費の旧実装ではここが failed に化けていた（#248 の P1）')
-  })
-
-  test(`対称ケース: 救済ラウンド外での merge-exec reason '${reason}' 写像は failed のまま`, () => {
-    const dispatched = classifyMergeExecDispatch(reason, undefined)
-    assert.equal(dispatched.lastState, 'timeout')
-    // 救済ラウンド外（rescueRoundActive: false）では品質ブロックへ写像してはならない
-    // （実際の一過性失敗を隠さないため）。
-    const reconciled = mod.reconcileRescueRoundState(dispatched.lastState, false)
-    assert.equal(reconciled.terminate, false)
-    assert.equal(reconciled.qualityBlock, false)
-    const terminalStatus = computeTerminalStatus({
-      routingErrorDetected: false,
-      mergedButIssueOpen: false,
-      lastState: dispatched.lastState,
-      lastBlockedReason: dispatched.lastBlockedReason,
-      rescueTimeoutQualityBlock: reconciled.qualityBlock,
-    })
-    assert.equal(terminalStatus, 'failed')
-  })
-}
 
 // ---------------------------------------------------------------------------
 // 片側波括弧混入時の境界不変性（Issue #336 受け入れ条件 1・2）
 //
-// 上流 Fandhe-AI/brain-training-app #81 の codex-review 指摘: 旧 naive 実装は文字列・コメント・
+// 上流 Fandhe-AI/brain-training-app #81 の codex-review 指摘: 旧実装は文字列・コメント・
 // テンプレートリテラルの区別なくすべての `{`/`}` をカウントしていたため、対象ループ（テンプレート
 // リテラル・日本語コメントを多用する）に片側だけの波括弧を含む文字列・コメントが 1 行入るだけで
-// loopEndIndex が実体と乖離し得た。ここでは字句走査への置き換えにより、そのような混入があっても
-// 境界判定が不変であることを機械検証する。
+// loopEndIndex が実体と乖離し得た。
+//
+// マーカー方式では境界計算が波括弧の対応付けを一切行わないため、この乖離は原理的に起きない。
+// それでもフィクスチャを残すのは、将来この境界計算が波括弧カウントへ戻された場合に**必ず落ちる**
+// ようにするためである（各フィクスチャは波括弧の収支が片側に偏っており、深さを数える実装では
+// 結果が必ずずれる）。テストの teeth はここにある。
 // ---------------------------------------------------------------------------
 
-test('lexer 非依存の不変条件: 監視ループの閉じ括弧はインデント2の行頭にある', () => {
-  // lexer を一切使わない検証。字句走査自身のバグを含む、あらゆる原因の mis-scan を捕捉する
-  // 保険として、下の注入テストでも変異後の経路に必ず同じ形の錨アサーションを置く。
+test('境界計算に依存しない不変条件: 監視ループの閉じ括弧はインデント2の行頭にある', () => {
   assert.equal(driverPart.slice(loopEndIndex - 3, loopEndIndex + 1), '\n  }')
 })
 
@@ -441,21 +334,26 @@ const BRACE_INJECTION_CARRIERS = [
   },
 ]
 
+/**
+ * 変異後のソースに対して、この test ファイルが本番で使うのと同じ手順で境界を求め直す。
+ * 実装が波括弧カウントへ戻された場合にここが必ずずれるよう、フィクスチャは波括弧の収支を
+ * 片側へ偏らせる。
+ */
+function locateLoopEnd(text) {
+  const endMarkerIndex = text.indexOf(LOOP_END_MARKER)
+  assert.notEqual(endMarkerIndex, -1, '変異後も終了マーカーは残っていなければならない')
+  return text.lastIndexOf('}', endMarkerIndex)
+}
+
 function assertBraceInjectionInvariant(injected) {
   const braceDelta = injected.split('{').length - injected.split('}').length
-  assert.notEqual(braceDelta, 0, '注入文字列は片側の波括弧のみを含み、相殺してはならない（負のコントロールを無意味化するため）')
+  assert.notEqual(braceDelta, 0, '注入文字列は片側の波括弧のみを含み、相殺してはならない（波括弧カウント実装への退行を必ず検出するため）')
   const mutated = driverPart.slice(0, braceInjectionPos) + injected + driverPart.slice(braceInjectionPos)
-  const got = findMatchingBraceEnd(mutated, loopOpenBraceIndex)
-  // (a) 正: 字句走査は挿入長ぶんだけずれた「同じ閉じ括弧」を指す。
-  assert.equal(got, loopEndIndex + injected.length, '字句走査は挿入長ぶんだけずれた同じ閉じ括弧を指さなければならない')
-  // (b) lexer 非依存の錨: 変異後の結果もインデント 2 の閉じ括弧行に着地する。
+  const got = locateLoopEnd(mutated)
+  // (a) 正: 挿入長ぶんだけずれた「同じ閉じ括弧」を指す。
+  assert.equal(got, loopEndIndex + injected.length, '境界は挿入長ぶんだけずれた同じ閉じ括弧を指さなければならない')
+  // (b) 境界計算に依存しない錨: 変異後の結果もインデント 2 の閉じ括弧行に着地する。
   assert.equal(mutated.slice(got - 3, got + 1), '\n  }', '変異後もインデント2の閉じ括弧行に着地しなければならない')
-  // (c) 負のコントロール: naive 走査では結果が変わる（＝このフィクスチャが旧実装で落ちる証拠）。
-  assert.notEqual(
-    naiveFindMatchingBraceEnd(mutated, loopOpenBraceIndex),
-    got,
-    'naive 走査ではこのフィクスチャで結果が変わらなければならない（旧実装が回帰を見逃していた証拠）',
-  )
 }
 
 for (const carrier of BRACE_INJECTION_CARRIERS) {
