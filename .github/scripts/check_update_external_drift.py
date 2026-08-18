@@ -61,16 +61,20 @@ from datetime import datetime, timezone
 import yaml
 
 # ---------------------------------------------------------------------------
-# 除外設定（なぜ除外なのかを issue 番号付きで明示する）
+# 除外設定（なぜ除外なのかを恒久的な根拠付きで明示する。issue 番号は根拠にしない）
 # ---------------------------------------------------------------------------
 
-# yadori はイシュー #263 によりスコープ外。#263 の決着まで検査対象に含めない。
-# （リポ名で除外してよいのは「スコープ外」という運用判断だけであり、
-#   「そもそも wrapper ではない」という構造的事実はハードコードに頼らず
-#   下の workflow_call 自動判定で扱う。）
-EXCLUDED_REPOS: dict[str, str] = {
-    "yadori": "イシュー #263 によりスコープ外",
-}
+# リポ名による除外は現在 0 件。
+#
+# ここへ追加してよいのは「スコープ外」という**運用判断**だけであり、「そもそも wrapper では
+# ない」という構造的事実はハードコードに頼らず下の workflow_call 自動判定で扱う。
+#
+# **未解決 issue を根拠に追加してはならない。** issue が閉じても除外は残り続け、当該リポの
+# 乖離を恒久的に検知できなくなる（実例: `yadori` はイシュー #263 を根拠に除外していたが、
+# #263 は close 済みで yadori は PR Fandhe-AI/yadori#665 により wrapper へ移行済みだった。
+# 除外を解除するまで検知対象外のままだった)。除外が必要な場合は archived・reusable 定義本体の
+# ような**観測可能で恒久的な条件**を使い、可能ならリポ名ではなく構造条件で判定する。
+EXCLUDED_REPOS: dict[str, str] = {}
 
 # ``Fandhe-AI/actions`` の ``update-external.yml`` は reusable 定義本体であり
 # wrapper ではない。除外はリポ名だけに頼らず、``UPSTREAM_REPO`` であることと
@@ -1072,10 +1076,12 @@ def list_target_repos(org: str, token: str) -> list[str]:
 def get_claude_skills_tree_mode(repo: str, token: str) -> str:
     """``.claude/skills`` の git tree mode を返す。
 
-    ``120000`` = symlink / ``040000`` = 実ディレクトリ。後者はイシュー #256 の
-    対象で、そのまま同期 CI を入れると日次で必ず失敗する。SYNC-CI-ABSENT を
-    報告するとき、単に「CI を入れればよい」のか「先に #256 の解消が要るのか」を
-    読み手が区別できるように併記する。
+    ``120000`` = symlink / ``040000`` = 実ディレクトリ。
+
+    **どちらでも同期 CI は成立する。** 実ディレクトリだと日次で失敗するという当初の想定は
+    3 リポジトリでの実測で否定された（`.claude/rules/skill-vendoring-layout.md`）。
+    したがってこの値は SYNC-CI-ABSENT の報告へ**情報として併記するだけ**であり、
+    導入可否の判断には使わない。
     """
     status, body = gh_get_with_status(f"repos/{repo}/git/trees/HEAD", token)
     if status != 200:
@@ -1395,18 +1401,14 @@ def scan(
                 print(f"::warning::{repo}: {msg}")
                 continue
             mode = get_claude_skills_tree_mode(repo, token)
-            note = ""
-            if mode.startswith("040000"):
-                note = (
-                    "。**イシュー #256 の対象**（実ディレクトリのため、"
-                    "そのまま同期 CI を入れると日次で失敗する）"
-                )
             result.findings.append(
                 Finding(
                     repo,
                     "SYNC-CI-ABSENT",
                     f"skills-lock.json はあるが update-external.yml が無い。"
-                    f"`.claude/skills` の tree mode = {mode}{note}",
+                    f"`.claude/skills` の tree mode = {mode}"
+                    f"（配置差は同期可否を左右しない。"
+                    f"`.claude/rules/skill-vendoring-layout.md` 参照）",
                 )
             )
             continue

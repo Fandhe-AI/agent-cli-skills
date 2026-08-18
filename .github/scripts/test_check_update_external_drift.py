@@ -955,9 +955,10 @@ class TestScanEndToEnd(unittest.TestCase):
             "legacy-repo": {"workflow": (200, FIXTURE_LEGACY)},
             # 軸 1: reusable 定義本体 → 除外
             "actions": {"workflow": (200, FIXTURE_UPSTREAM_OK)},
-            # 軸 3: ファイル無し + lock あり + 実ディレクトリ → SYNC-CI-ABSENT + #256
+            # 軸 3: ファイル無し + lock あり + 実ディレクトリ → SYNC-CI-ABSENT
+            # （tree mode は情報として併記するだけで、導入可否の判断には使わない）
             "vendored-no-ci": {"workflow": (404, ""), "lock": 200, "tree": "040000"},
-            # 軸 3: ファイル無し + lock あり + symlink → SYNC-CI-ABSENT（#256 対象外）
+            # 軸 3: ファイル無し + lock あり + symlink → SYNC-CI-ABSENT（扱いは同じ）
             "vendored-symlink": {"workflow": (404, ""), "lock": 200, "tree": "120000"},
             # ファイル無し + lock 無し → 対象外（乖離ではない）
             "unrelated": {"workflow": (404, ""), "lock": 404},
@@ -965,7 +966,7 @@ class TestScanEndToEnd(unittest.TestCase):
             "sneaky-workflow-call": {"workflow": (200, FIXTURE_REUSABLE_DEFINITION)},
             # 検査不能 → UNKNOWN（黙って green にしない）
             "forbidden": {"workflow": (403, "")},
-            # 除外リスト（イシュー #263）
+            # 旧・恒久除外リポ。除外解除により通常判定へ戻る（LEGACY として検知される）
             "yadori": {"workflow": (200, FIXTURE_LEGACY)},
         })
 
@@ -983,37 +984,55 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertEqual(len(cats["vendored-no-ci"]), 1)
         self.assertEqual(cats["vendored-no-ci"][0][0], "SYNC-CI-ABSENT")
         self.assertIn("040000", cats["vendored-no-ci"][0][1])
-        self.assertIn("#256", cats["vendored-no-ci"][0][1])
+        # 実ディレクトリでも「導入すると失敗する」という判断を書かない（イシュー #344）。
+        # 解決済み issue 番号を根拠にした但し書きは導入を不必要に止める誤誘導になる。
+        self.assertNotIn("#256", cats["vendored-no-ci"][0][1])
+        self.assertNotIn("日次で失敗", cats["vendored-no-ci"][0][1])
 
         self.assertEqual(len(cats["vendored-symlink"]), 1)
         self.assertEqual(cats["vendored-symlink"][0][0], "SYNC-CI-ABSENT")
         self.assertIn("120000", cats["vendored-symlink"][0][1])
         self.assertNotIn("#256", cats["vendored-symlink"][0][1])
 
+        # tree mode 以外の本文は両者で同一であること（配置差で扱いを変えていない）
+        self.assertEqual(
+            cats["vendored-no-ci"][0][1].replace("040000", "MODE"),
+            cats["vendored-symlink"][0][1].replace("120000", "MODE"),
+        )
+
         self.assertNotIn("actions", cats)
         self.assertNotIn("unrelated", cats)
-        self.assertNotIn("yadori", cats)
         self.assertIn("Fandhe-AI/unrelated", result.no_workflow_ok)
 
+        # yadori の恒久除外を解除した（イシュー #344）。通常判定へ戻り LEGACY として検知される
+        self.assertEqual(len(cats["yadori"]), 1)
+        self.assertEqual(cats["yadori"][0][0], "LEGACY")
+
         excluded = {r.split("/")[1] for r, _ in result.excluded}
-        self.assertEqual(excluded, {"actions", "yadori"})
+        self.assertEqual(excluded, {"actions"})
 
         self.assertEqual([f.repo for f in result.unknowns], ["Fandhe-AI/forbidden"])
         # 軸 4 は健全な fixture を上流としているため全マーカー適合。
         self.assertTrue(all(m["ok"] for m in result.upstream_markers))
 
-        # 軸 5: schedule トリガを持つ 3 リポ（fresh-wrapper / stale-wrapper /
-        # legacy-repo）が候補になり、既定の健全な sched fixture で全て OK。
-        self.assertEqual(result.schedule_candidates, 3)
+        # 軸 5: schedule トリガを持つ 4 リポ（fresh-wrapper / stale-wrapper /
+        # legacy-repo / yadori）が候補になり、既定の健全な sched fixture で全て OK。
+        # yadori は恒久除外の解除（イシュー #344）により軸 5 の対象へも戻る。
+        self.assertEqual(result.schedule_candidates, 4)
         self.assertEqual(result.schedule_forbidden, 0)
         self.assertEqual(
             set(result.schedule_ok),
-            {"Fandhe-AI/fresh-wrapper", "Fandhe-AI/stale-wrapper", "Fandhe-AI/legacy-repo"},
+            {
+                "Fandhe-AI/fresh-wrapper",
+                "Fandhe-AI/stale-wrapper",
+                "Fandhe-AI/legacy-repo",
+                "Fandhe-AI/yadori",
+            },
         )
 
-        # レポートは乖離 0 件でも全量を出す契約。ここでは 5 件出ることを確認する。
+        # レポートは乖離 0 件でも全量を出す契約。除外解除で yadori の LEGACY が 1 件増え 6 件。
         report = cud.render_report(result, "https://example.invalid/run/1")
-        self.assertIn("乖離: **5 件**", report)
+        self.assertIn("乖離: **6 件**", report)
         self.assertIn("検査不能 (UNKNOWN): **1 件**", report)
 
     def test_compare_error_is_unknown_not_unreachable(self):
@@ -1412,6 +1431,26 @@ class TestReportIssueLifecycle(unittest.TestCase):
         self.assertIn("#42", msg)
         self.assertNotIn("reopen", verbs)
 
+
+
+class ExcludedReposPolicyTest(unittest.TestCase):
+    """除外リストが issue 番号を根拠に増えていないことを固定する（イシュー #344）。
+
+    未解決 issue を根拠にリポ名を除外すると、issue が閉じても除外だけが残り、当該リポの
+    乖離を恒久的に検知できなくなる（実例: yadori / イシュー #263）。除外は archived や
+    reusable 定義本体のような観測可能で恒久的な条件に限る。
+    """
+
+    def test_excluded_repos_has_no_issue_number_rationale(self) -> None:
+        for repo, reason in cud.EXCLUDED_REPOS.items():
+            self.assertNotRegex(
+                reason,
+                r"#\d+",
+                f"{repo}: 除外理由に issue 番号を書かない（issue が閉じても除外が残る）",
+            )
+
+    def test_yadori_is_not_permanently_excluded(self) -> None:
+        self.assertNotIn("yadori", cud.EXCLUDED_REPOS)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
