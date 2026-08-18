@@ -35,12 +35,20 @@ applies_to: create-pr, implement-issue, implement-review, implement-review-pr, s
 ```bash
 # 追加行のみを対象にする。`grep -v '^\+\+\+'` は BRE で `\+` が量指定子と解釈される
 # 実装（GNU grep / ugrep）で構文エラーになり、`|| echo "検出なし"` と組むと fail-open に
-# なるため、必ず `-E` を付けて `grep -vE '^\+\+\+'` と書く
+# なるため、必ず `-E` を付けて `grep -vE '^\+\+\+'` と書く。
+# 鍵名は `[a-z_]*token` のように接頭辞を問わない形にする。`access_?token` 等を個別に
+# 列挙すると `GITHUB_TOKEN` / `GH_TOKEN`（上のチェック対象に明記した名前）を取りこぼす
 git diff --staged --diff-filter=ACMR | grep -E '^\+' | grep -vE '^\+\+\+' \
-  | grep -iE '(password|passwd|secret|client_secret|api_?key|access_?token|auth_?token|aws_secret_access_key|private_?key)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}'
+  | grep -iE '(password|passwd|secret|client_secret|api_?key|[a-z_]*token|aws_secret_access_key|private_?key)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}'
 
 git status --short | grep -E '\.env'
 ```
+
+除外パターン（`grep -vE` によるプレースホルダ・環境変数参照の除去）も同じ経路で fail-open する。
+除外側が構文エラーになると、検出済みの行が消えたうえで非ゼロ終了し「検出なし」になる。
+**検出側・除外側の双方を既知サンプルで自己テストしてから本検査を走らせる**（実装は
+`skills/create-commit/SKILL.md` Step 2 (a)。パターンは変数へ一度だけ定義し、自己テストと
+本検査で同じ文字列を共有する）。
 
 **パターン照合は網羅的な検出ではない。** 任意の変数名に代入された認証情報、値の形式に規則性が
 無い自社発行トークン、除外パターンに偶然一致する実値は原理的に拾えない。したがって
