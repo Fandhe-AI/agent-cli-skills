@@ -183,9 +183,17 @@ extract_b3() {
     done
 }
 
-# 実行例（Step 3 でのカウント用途。標準出力がそのまま各セクションの掲載一覧になる）
-extract_b2
-extract_b3
+```
+
+このブロックは `extract_b1`・`extract_b2`・`extract_b3` の**関数定義のみ**を含み、
+実行は含まない（「検証」節がこのブロックをそのまま `source` する前提のため。関数呼び出しを
+ここに含めると、source した時点で listing の副作用が走り、検証時の出力と混同される）。
+Step 3 でのカウント用途には、このブロックを読み込んだ**別のシェル**で
+`extract_b2` と `extract_b3` を呼び出す（標準出力がそのまま各セクションの掲載一覧になる）:
+
+```bash
+extract_b2   # リポジトリ管理スキルの掲載一覧
+extract_b3   # 参照スキルの掲載一覧
 ```
 
 分類の原則は**実体の所在を第一基準**とする。`skills-lock.json` の `skills` キーの掲載一覧は
@@ -286,9 +294,13 @@ source またはコピーしてから以下を実行する）。stderr（`WARN:`
 ```bash
 # B1・B2・B3・全列挙（B）を名前集合として求め、B4 = B − (B1 ∪ B2 ∪ B3) を算出する
 # （extract_b1 / extract_b2 / extract_b3 は Step 3 で定義した関数）
-b1=$(extract_b1 2>/dev/null | sort -u | sed '/^$/d')
-b2=$(extract_b2 2>/dev/null | sort -u | sed '/^$/d')
-b3=$(extract_b3 2>/dev/null | sort -u | sed '/^$/d')
+# stderr（WARN:）はリダイレクトしない。ここで 2>/dev/null を付けると
+# 「WARN は人間向けの理由説明として保持する」という方針に反して破棄されてしまう。
+# $(...) はデフォルトで標準出力のみを捕捉するため、変数への代入はこのままで安全であり、
+# WARN 行はコマンド実行時にそのまま端末（実際の stderr）へ表示される。
+b1=$(extract_b1 | sort -u | sed '/^$/d')
+b2=$(extract_b2 | sort -u | sed '/^$/d')
+b3=$(extract_b3 | sort -u | sed '/^$/d')
 full=$(find -L .claude/skills .agents/skills -mindepth 1 -maxdepth 1 -type d \
   -exec test -f '{}/SKILL.md' ';' -print 2>/dev/null | sed -E 's#.*/##' | sort -u | sed '/^$/d')
 
