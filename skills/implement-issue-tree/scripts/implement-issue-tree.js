@@ -3023,6 +3023,13 @@ let byteRemeasureAtLedgerCount = 0 // 直近の実測時点の ephemeralWorktree
 // 進まないため、周回内で実消費は実質変化しない）。
 let dispatchIterationSeq = 0 // dispatch ループの周回番号
 let byteRemeasureAtIterationSeq = -1 // 直近に実測を行った周回番号（周回内 1 回の間引き用）
+// 直近の実測呼び出し（同一周回内の間引き適用後）が実際に検出した failed/exceeded。
+// newStartSuppressed は「一度立てたら理由文字列を上書きしない」latch のため、monitoring 再開側の
+// 判定に newStartSuppressed の identity 比較を使うと、latch が既に立っている状態で 2 回目以降の
+// 実測失敗・超過が起きても「値が変わらない」ため検出漏れになる（PR #390 cursor Bugbot High /
+// codex-review P1: Remeasure failure miss for resume）。この呼び出し自体が failed/exceeded と
+// 判定したかどうかを newStartSuppressed の状態から独立に保持し、呼び出し元へ返す。
+let lastByteRemeasureOutcome = { failed: false, exceeded: false }
 {
   const runStartOrphanEntries = await scanOrphanWorktrees()
   const mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
@@ -4744,8 +4751,11 @@ async function remeasureResidualBytesIfDue() {
 // （台帳が増えない間の worktree 成長を着手判定へ反映するため。PR #390 codex-review P1
 // 第 4 ラウンド）。
 async function remeasureResidualBytesNow() {
-  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return
-  if (byteRemeasureAtIterationSeq === dispatchIterationSeq) return
+  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return { failed: false, exceeded: false }
+  // 同一周回内 2 回目以降の呼び出し（新規着手直前・monitoring 再開直前の双方から呼ばれ得る）は
+  // 実測を省略するが、この周回で確定した最新の failed/exceeded を返す（newStartSuppressed の
+  // identity 比較に依存しない。呼び出し元は戻り値のみで判定すること）。
+  if (byteRemeasureAtIterationSeq === dispatchIterationSeq) return lastByteRemeasureOutcome
   byteRemeasureAtIterationSeq = dispatchIterationSeq
   // ephemeralWorktrees は追記専用の台帳のため、cleanupWorktree（updateState）で削除を試みた
   // パスを含んだままになる。削除成功が確認できた（confirmedRemovedPaths）パスを du 対象へ
@@ -4771,6 +4781,11 @@ async function remeasureResidualBytesNow() {
     // 失敗として fail-closed で返す契約のため、ここでの再測定失敗も同じ fail-closed 側へ倒し
     // 新規着手を恒久停止する（実行中のイシューと monitoring 再開は継続。手動削除・再実行で
     // 復帰する運用は開始時観測失敗時の既存の抑止と揃える）。
+    // newStartSuppressed は「一度立てたら理由文字列を上書きしない」latch のため、2 回目以降の
+    // 実測失敗では下の if を通らず何もしない。しかし lastByteRemeasureOutcome は latch の状態に
+    // 関わらず必ず「今回失敗した」ことを反映する（monitoring 再開側が identity 比較なしで
+    // 検出できるようにするため。PR #390 cursor Bugbot High / codex-review P1）。
+    lastByteRemeasureOutcome = { failed: true, exceeded: false }
     if (!newStartSuppressed) {
       newStartSuppressed = {
         reason:
@@ -4784,7 +4799,7 @@ async function remeasureResidualBytesNow() {
       }
       log(`⚠️ ${newStartSuppressed.reason}`)
     }
-    return
+    return lastByteRemeasureOutcome
   }
   const actualBytes = kib * 1024
   log(`残置 worktree ディスク使用量を実測し直した: ${Math.round(actualBytes / (1024 * 1024))} MiB（対象 ${targetPaths.length} 件）`)
@@ -4799,6 +4814,9 @@ async function remeasureResidualBytesNow() {
   // `(ephemeralWorktrees.length - byteBaselineLedgerCount) 件分だけ` を積み増しとみなす。
   residualBytesAtStart = actualBytes
   byteBaselineLedgerCount = ephemeralWorktrees.length
+  // lastByteRemeasureOutcome は latch（newStartSuppressed）の有無に関わらず、今回の実測結果を
+  // そのまま反映する（下の if は latch 未設定時のみ理由文字列を立てるが、戻り値は独立に真実を返す）。
+  lastByteRemeasureOutcome = { failed: false, exceeded: actualBytes > maxResidualWorktreeBytes }
   if (actualBytes > maxResidualWorktreeBytes && !newStartSuppressed) {
     newStartSuppressed = {
       reason:
@@ -4813,6 +4831,7 @@ async function remeasureResidualBytesNow() {
     }
     log(`⚠️ ${newStartSuppressed.reason}`)
   }
+  return lastByteRemeasureOutcome
 }
 while (true) {
   dispatchIterationSeq += 1
@@ -4895,16 +4914,25 @@ while (true) {
           // residualBytesAtStart 基準のまま projection を通してしまい、容量上限を超過していても
           // 再開判定が通って fix-routing-error worktree を追加作成し得た（PR #390 codex-review P1:
           // monitoring 再開前にも現在のディスク使用量を実測する）。新規着手側（下方の
-          // remeasureResidualBytesNow 呼び出し）と同じ関数を直接呼び、戻り値ではなく
-          // residualBytesAtStart / newStartSuppressed への副作用で成否・超過を判定する。
-          const suppressedBeforeResumeRemeasure = newStartSuppressed
-          await remeasureResidualBytesNow()
-          if (newStartSuppressed && newStartSuppressed !== suppressedBeforeResumeRemeasure) {
-            // この呼び出しで新規に検出された実測失敗・容量超過。新規着手停止（latch）とは独立に
+          // remeasureResidualBytesNow 呼び出し）と同じ関数を直接呼ぶ。判定は戻り値
+          // （failed/exceeded）のみで行い、newStartSuppressed の identity 比較には依存しない。
+          // newStartSuppressed は一度立てたら理由文字列を上書きしない latch のため、既に latch が
+          // 立っている状態で 2 回目以降の実測失敗・超過が起きても値そのものは変化せず、identity
+          // 比較では検出漏れになる（PR #390 cursor Bugbot High "Remeasure failure miss for
+          // resume" / codex-review P1 第 5 ラウンド）。
+          const remeasureOutcome = await remeasureResidualBytesNow()
+          if (remeasureOutcome.failed || remeasureOutcome.exceeded) {
+            // この呼び出しが検出した実測失敗・容量超過。新規着手停止（latch）とは独立に
             // monitoring 再開はこの周回のみ defer する（予約解放や掃除で次周回に再評価され得る）。
-            const deferReason =
-              `残置 worktree の容量をラン中に実測し直した結果に基づき monitoring 再開を defer した` +
-              `（${newStartSuppressed.reason}）`
+            const deferReason = remeasureOutcome.failed
+              ? `残置 worktree のディスク使用量のラン中実測し直しに失敗したため monitoring 再開を` +
+                `defer した（実測できない状態のまま再開すると fix-routing-error worktree を` +
+                `追加作成し容量上限を超過し得るため fail-closed で待機する）。原因を解消してから` +
+                `再実行すること`
+              : `残置 worktree の容量をラン中に実測し直したところ上限 ` +
+                `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過したため monitoring ` +
+                `再開を defer した。不要な worktree を git worktree remove で手動削除してから` +
+                `再実行すること`
             monitoringResumeGateDeferred.set(n, deferReason)
             log(`⚠️ #${n}: ${deferReason}`)
             continue
