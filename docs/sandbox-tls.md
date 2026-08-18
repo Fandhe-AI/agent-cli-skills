@@ -48,6 +48,7 @@ GIT_SSL_NO_VERIFY=1 gh pr create --draft --base main
 | `不要` | ネットワーク越しの操作を行わない |
 | `一部要` | 主要フローはネットワーク不要。一部の任意ステップのみネットワークを要する |
 | `要（本スキルは read-only）` | 全ステップがネットワーク越しの操作だが、すべて読み取りで書き込みを行わない |
+| `要（既定フローは read-only、任意ステップで書き込みあり）` | 既定フロー（省略可能なオプション実行を除く）はすべて読み取りだが、明示的に選択した任意ステップでは書き込みを行うコマンドが存在する |
 | `要（本スキルは主に API 経由）` | ネットワーク越しの GitHub API 呼び出し（書き込みを含む）を主に使う |
 | `要` | `git push` 等、リモートへの書き込みを含む |
 
@@ -62,7 +63,7 @@ GIT_SSL_NO_VERIFY=1 gh pr create --draft --base main
 | `implement-review` | 一部要 | 読み取り専用レビュー本体（`git diff` ベース）はローカル完結。out-of-scope の Issue 起票・コメント投稿（`gh`）のみ任意でネットワークを要する |
 | `implement-issue` | 一部要 | 計画作成・実装・テスト実行はローカル完結。`gh issue view` はユーザーからの Issue 本文直接受け取りで代替可能なため任意ステップとなり、`git push` と合わせてこの2つのみネットワークを要する |
 | `project-view-status` | 要（本スキルは read-only） | `gh project view` / `item-list` / `field-list` の読み取りのみで構成。書き込み系サブコマンドを含まない |
-| `implement-review-pr` | 要（本スキルは read-only） | 既定は `gh pr view` / `gh pr checks` の読み取り。`gh pr review` の投稿は任意ステップ |
+| `implement-review-pr` | 要（既定フローは read-only、任意ステップで書き込みあり） | 既定は `gh pr view` / `gh pr checks` の読み取り。任意ステップとして `gh pr review --approve/--request-changes/--comment` による書き込みも可能で、`project-view-status` のような純粋な read-only スキルとは区別する |
 | `create-issue` | 要（本スキルは主に API 経由） | `gh issue create` / `gh api .../sub_issues` |
 | `create-pr` | 要 | `git push` + `gh pr create` |
 | `contribute-skill` | 要 | fork・push・PR 作成 |
