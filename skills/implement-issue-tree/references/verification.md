@@ -239,7 +239,7 @@ grep -n '<base-branch>\|<base>' skills/implement-issue-tree/SKILL.md
 # 3. サイズ確認（Workflow 起動可否の実測は Issue #277 節を参照）
 wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
 
-# 4. 決定的回帰テスト（群 A: reviewPrompt 契約 / 群 B: SKILL.md ↔ script の乖離防止（fixPrompt 含む）/ 群 C: git セマンティクス）
+# 4. 決定的回帰テスト（群 A: reviewPrompt 契約 / 群 B: SKILL.md ↔ script の乖離防止（fixPrompt 含む）/ 群 C: git セマンティクス / 群 D: base 最新化契約（Issue #361））
 node --test skills/implement-issue-tree/tests/review-diff-base.test.mjs
 ```
 
@@ -252,5 +252,13 @@ node --test skills/implement-issue-tree/tests/review-diff-base.test.mjs
 | C | 先行マージで origin が進行後・**fetch 前** | `feature.txt` のみ（比較点は分岐点で固定） |
 | D | 先行マージ後・**fetch 後**（`origin/<base>` が別 sha へ更新済み） | `feature.txt` のみ（merge-base は不変） |
 
-期待結果: 手順 1 のコマンド出力が 0 件（比較・分岐点操作系動詞（diff/merge/checkout/rebase/rev-parse）で `${baseBranch}` を使う箇所が全て `origin/${baseBranch}` を伴うことを意味する。`git fetch origin ${baseBranch}` は動詞集合の対象外のため誤検出しない）。手順 2 は「`<base-branch>` の全出現が `origin/<base-branch>` を伴う」こと（目視確認。プレースホルダの生出現自体は 0 件にはならない）。手順 3 が 500,000 B 未満。手順 4 の `node --test` が全 pass・fail 0（群 A の「origin/ なし」負のアサーションでハードコード回帰を、群 B で SKILL.md との乖離を、群 C で A〜D のシナリオを実測固定する）。ref 解決不能時（`refs/remotes/origin/<base-branch>` が存在せず、フォールバックの `git fetch origin <base-branch>` も失敗する場合）は Review を実施せず `state: "blocked"` / `highestSeverity: "none"` で fail-closed 終端し、summary に理由を明記すること（`grep -n "比較基準 origin" skills/implement-issue-tree/scripts/implement-issue-tree.js` でプロンプト文言にヒットすることを確認する）。`state: "blocked"` はコード指摘（needs-fix）と区別される専用状態で、呼び出し元は fix エージェントを起動せず即座に終端する（`grep -n "r?.state === 'blocked'" skills/implement-issue-tree/scripts/implement-issue-tree.js` でループ制御にヒットすることを確認する）。
+群 D の実測シナリオ（`remote.origin.fetch` を持たない remote を作って挙動差を測る）:
+
+| 観測 | 状況 | 結果 |
+|---|---|---|
+| D-1 | `git fetch origin <base>`（保存先を省いた refspec） | `FETCH_HEAD` は書かれるが `refs/remotes/origin/<base>` は**作られない** |
+| D-2 | `git fetch origin <base>:refs/remotes/origin/<base>` | `refs/remotes/origin/<base>` が作られる |
+| D-3 | 既存 ref がある状態で origin が進行後に D-2 を再実行 | ref が前進する（「ref があるので fetch しない」旧挙動では据え置かれる） |
+
+期待結果: 手順 1 のコマンド出力が 0 件（比較・分岐点操作系動詞（diff/merge/checkout/rebase/rev-parse）で `${baseBranch}` を使う箇所が全て `origin/${baseBranch}` を伴うことを意味する。`git fetch origin ${baseBranch}` は動詞集合の対象外のため誤検出しない）。手順 2 は「`<base-branch>` の全出現が `origin/<base-branch>` を伴う」こと（目視確認。プレースホルダの生出現自体は 0 件にはならない）。手順 3 が 500,000 B 未満。手順 4 の `node --test` が全 pass・fail 0（群 A の「origin/ なし」負のアサーションでハードコード回帰を、群 B で SKILL.md との乖離を、群 C で A〜D のシナリオを実測固定する）。base 最新化の失敗時（レビュー直前に**無条件で**実行する `git fetch origin <base-branch>:refs/remotes/origin/<base-branch>` が失敗した場合、またはその後も `refs/remotes/origin/<base-branch>` を解決できない場合。既存 ref が残っていても安全とみなさない）は Review を実施せず `state: "blocked"` / `highestSeverity: "none"` で fail-closed 終端し、summary に理由を明記すること（`grep -n "比較基準 origin" skills/implement-issue-tree/scripts/implement-issue-tree.js` でプロンプト文言にヒットすることを確認する）。`state: "blocked"` はコード指摘（needs-fix）と区別される専用状態で、呼び出し元は fix エージェントを起動せず即座に終端する（`grep -n "r?.state === 'blocked'" skills/implement-issue-tree/scripts/implement-issue-tree.js` でループ制御にヒットすることを確認する）。
 
