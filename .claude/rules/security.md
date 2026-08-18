@@ -27,13 +27,28 @@ applies_to: create-pr, implement-issue, implement-review, implement-review-pr, s
 - `.env`・`.env.local`・`*.env` ファイルのコミット混入
 - `GITHUB_TOKEN`・`GH_TOKEN`・API キーの直書き
 - パスワード・秘密鍵の変数への代入（`password=`・`secret=`・`token=` 等）
+- 認証情報を埋め込んだ接続文字列（`scheme://user:pass@host`）・JWT
+- 構造化ファイル（`config.yml`・`settings.json`・`*.tf`・k8s manifest 等）に直接書かれた実値
 
-検出コマンド例:
+検出コマンド例（`create-commit` Step 2 と同じ正規表現。ERE で書く）:
 
 ```bash
-git diff --staged | grep -E '(token|secret|password|api_key)\s*=' | grep -v '#'
+# 追加行のみを対象にする。`grep -v '^\+\+\+'` は BRE で `\+` が量指定子と解釈される
+# 実装（GNU grep / ugrep）で構文エラーになり、`|| echo "検出なし"` と組むと fail-open に
+# なるため、必ず `-E` を付けて `grep -vE '^\+\+\+'` と書く
+git diff --staged --diff-filter=ACMR | grep -E '^\+' | grep -vE '^\+\+\+' \
+  | grep -iE '(password|passwd|secret|client_secret|api_?key|access_?token|auth_?token|aws_secret_access_key|private_?key)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}'
+
 git status --short | grep -E '\.env'
 ```
+
+**パターン照合は網羅的な検出ではない。** 任意の変数名に代入された認証情報、値の形式に規則性が
+無い自社発行トークン、除外パターンに偶然一致する実値は原理的に拾えない。したがって
+**パターンが何も検出しなかった場合でも、staged 差分の追加行を秘密情報の観点で目視レビューする**
+（手順の詳細は `skills/create-commit/SKILL.md` の Step 2 (b)）。
+
+GitHub の secret scanning / push protection を有効化している場合、それは push 時点の**追加の**
+防御線であり、この手順の代替にはならない（ローカルコミット時点では働かない）。
 
 発見した場合は**コミット・PR 作成を中止**し、ユーザーに警告する。
 
