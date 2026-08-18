@@ -472,6 +472,27 @@ jobs:
         self.assertIn("\\|", m["detail"])
         self.assertNotIn("main | injected", m["detail"])
 
+    def test_upstream_action_sha_detail_escapes_pipe_in_job_and_step_name(self):
+        # detail は uses だけでなく job_name（`jobs.<id>` の YAML キー）と
+        # display（`step.name`）も埋め込む。両方とも上流編集者が自由に
+        # 設定できる文字列であり、`|` や改行を仕込むと Markdown 表破壊・
+        # 誤情報注入が成立する（uses と同じ脅威モデル）。
+        job_and_step_piped = FIXTURE_UPSTREAM_OK.replace(
+            "jobs:\n  submodule:",
+            'jobs:\n  "evil | job":\n'
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            '      - name: "bad | injected row"\n'
+            "        uses: owner/repo@main\n"
+            "  submodule:",
+        )
+        m = markers_map(job_and_step_piped)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        self.assertNotIn("evil | job", m["detail"])
+        self.assertNotIn("bad | injected row", m["detail"])
+        self.assertIn("evil \\| job", m["detail"])
+        self.assertIn("bad \\| injected row", m["detail"])
+
     def test_upstream_action_sha_truncates_to_five_with_total_count(self):
         # 未固定エントリが 5 件を超えても、列挙は先頭 5 件で打ち切りつつ
         # 総件数（分母 N と未固定数）は必ず数値で出す。

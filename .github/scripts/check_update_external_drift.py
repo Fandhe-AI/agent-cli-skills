@@ -512,15 +512,17 @@ def _classify_uses_pin(uses: str) -> str:
     return _USES_PIN_UNPINNED
 
 
-def _sanitize_uses_for_detail(text: str) -> str:
-    """未固定 ``uses`` の値を Markdown 表セルへ安全に埋め込める形へ潰す。
+def _sanitize_for_detail(text: str) -> str:
+    """detail に埋め込む値を Markdown 表セルへ安全に埋め込める形へ潰す。
 
-    detail はリモート（上流ファイル）由来の文字列をほぼ逐語で含む。この値は
-    ``render_report`` が Markdown 表の 1 セルへそのまま差し込むため、``|`` が
-    残っていると表の列がずれ、改行が残っていると行が壊れる。上流編集者が
-    悪意を持って ``uses`` に ``|`` や改行を仕込めば、報告 issue の Markdown 構造を
-    壊す・誤情報を注入する経路になり得る（OWASP A03 相当）。ここで無害化してから
-    detail へ渡す。
+    detail はリモート（上流ファイル）由来の文字列（``uses`` だけでなく
+    ``jobs.<id>`` の YAML キーである job_name や ``step.name`` 由来の
+    display も含む）をほぼ逐語で含む。この値は ``render_report`` が
+    Markdown 表の 1 セルへそのまま差し込むため、``|`` が残っていると表の
+    列がずれ、改行が残っていると行が壊れる。上流編集者が悪意を持って
+    ``uses``・ジョブ名・ステップ名のいずれかに ``|`` や改行を仕込めば、
+    報告 issue の Markdown 構造を壊す・誤情報を注入する経路になり得る
+    （OWASP A03 相当）。3 箇所すべてでここを通してから detail へ渡す。
     """
     escaped = text.replace("|", "\\|")
     collapsed = re.sub(r"\s+", " ", escaped).strip()
@@ -692,12 +694,16 @@ def check_upstream_markers(text: str) -> list[dict]:
             add("上流 action の SHA 固定", True, f"全 {total} 件すべて 40 桁 SHA 固定")
         else:
             # 列挙は先頭 5 件で打ち切るが、打ち切っても総件数は必ず数値で出す
-            # （「他 K 件」）。Markdown 表破壊防止のため各エントリは
-            # `_sanitize_uses_for_detail` を通す。
+            # （「他 K 件」）。Markdown 表破壊防止のため job_name・step_name・
+            # uses_str の 3 者すべてを `_sanitize_for_detail` に通す
+            # （job_name は `jobs.<id>` の YAML キー、step_name は
+            # `step.name`（display）由来で、どちらも上流編集者が自由に
+            # 設定できる文字列のため uses と同じ脅威モデルが成立する）。
             shown = unpinned[:5]
             entries = [
-                f"`{job_name}`/`{step_name}`: "
-                f"{_sanitize_uses_for_detail(uses_str)}"
+                f"`{_sanitize_for_detail(job_name)}`/"
+                f"`{_sanitize_for_detail(step_name)}`: "
+                f"{_sanitize_for_detail(uses_str)}"
                 for job_name, step_name, uses_str in shown
             ]
             remaining = len(unpinned) - len(shown)
