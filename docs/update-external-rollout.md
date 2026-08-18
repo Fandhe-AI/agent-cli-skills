@@ -151,18 +151,25 @@ jobs:
 
 ### プレースホルダの置換（導入直前・全 5 リポ共通）
 
-上記テンプレートの `<SHA>`（59・100・137 行目相当の実測日付コメント・`uses:` 行・pin コメント）
-と `<YYYY-MM-DD>`（59 行目）は実測値へのプレースホルダであり、配置前に必ず置換する。
-「テンプレートの機械検証」節の実測値は検証時点のスナップショットであり、導入実行時点では
-陳腐化し得るため、導入手順 2・3 の PUT/コミット直前に以下を実行して**その時点の実測値**へ
-置換する（検証時点の値を使い回さない）。
+上記テンプレート（コードブロック内、47〜113 行目相当）に含まれる実プレースホルダは
+`<YYYY-MM-DD>`（59 行目・検証記録コメントの見出し）と `<SHA>`（60 行目・検証記録コメント内の
+`compare/main...<SHA>` 参照／100 行目・`uses:` 行）の計 3 箇所のみである。配置前に必ず置換する。
+
+**137 行目は置換対象ではない。** 「テンプレートの機械検証」節（125〜150 行目）に記載した
+`0bd2cf930f5c78732abd539dfd468aa8c1363e15` はテンプレートの `<SHA>` プレースホルダではなく、
+2026-08-18 の検証実行時点で得た**実測値そのもの**（既に解決済みの具体的な SHA）を記録した
+スナップショットである。プレースホルダと誤認して 137 行目を書き換えると、検証時点の実測記録
+が導入実行時点の値で上書きされ、過去の検証がいつ・どの SHA に対して行われたかの記録が失われる。
+置換対象はテンプレートのコードブロック内（59・60・100 行目）に限定し、「テンプレートの機械検証」
+節（125〜150 行目）には一切手を加えない。
 
 1. `SHA=$(gh api repos/Fandhe-AI/actions/commits/main --jq '.sha')` で最新 SHA を取得する。
 2. `DATE=$(date -u +%Y-%m-%d)` で置換用日付を取得する。
 3. `gh api repos/Fandhe-AI/actions/compare/main...${SHA}` で `ahead_by: 0` を再確認する
    （導入直前に SHA を取り直したため到達性の再確認も必須）。
-4. テンプレート中の `<SHA>` を全箇所（実測日付コメント・`uses:` 行・pin コメント）
-   `${SHA}` へ、`<YYYY-MM-DD>` を `${DATE}` へ置換してから、リポごとの wrapper 内容を確定する。
+4. テンプレートのコードブロック内（59・60・100 行目のみ。「テンプレートの機械検証」節の
+   137 行目は対象外）にある `<SHA>` を全箇所 `${SHA}` へ、`<YYYY-MM-DD>`（59 行目）を
+   `${DATE}` へ置換してから、リポごとの wrapper 内容を確定する。
 5. 置換後の内容を `.github/scripts/check_update_external_drift.py` の `classify_workflow`
    に通し、`kind == 'WRAPPER'` かつ `pin == "${SHA}"` かつ `has_schedule == True` を、
    置換漏れがないことの機械的な確認として実行してから PUT / コミットへ進む。
@@ -186,9 +193,12 @@ jobs:
    を実行し `main` へ直接コミットする。
 3. **`team-hub-spec`**: `main-protection` ruleset により直接 push 不可。上記「プレース
    ホルダの置換」を実行して確定した wrapper 内容でブランチを切り
-   `PUT contents` → `gh pr create` → 必須チェック 4 件（`EditorConfig (strict)` /
-   `PoC rustfmt --check` / `Broken link check (lychee)` / `Cursor Bugbot`）の green を
-   `gh pr checks --watch` で確認 → `gh pr merge --squash`。ruleset の緩和・bypass 付与は
+   `PUT contents` → `gh pr create --repo Fandhe-AI/team-hub-spec` → 必須チェック 4 件
+   （`EditorConfig (strict)` / `PoC rustfmt --check` / `Broken link check (lychee)` /
+   `Cursor Bugbot`）の green を `gh pr checks --repo Fandhe-AI/team-hub-spec --watch` で
+   確認 → `gh pr merge --repo Fandhe-AI/team-hub-spec --squash`。手順 1 と同じ理由
+   （作業ディレクトリの `origin` が `agent-cli-skills` 自身であるため）で、これら
+   `gh pr` コマンドにも `--repo` を必ず明示する。ruleset の緩和・bypass 付与は
    行わない（`.claude/rules/ruleset-policy.md`）。必須チェックが構造的に埋まらない場合は
    マージせず状況をイシューへ記録して停止する。
 4. **初回実行**: 各リポで対象を明示して実行・監視する（作業ディレクトリの
