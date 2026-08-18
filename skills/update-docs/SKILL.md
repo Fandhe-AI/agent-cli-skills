@@ -52,23 +52,70 @@ ls -d skills/*/SKILL.md | sed 's|skills/||;s|/SKILL.md||' | sort
 - スキル数のカウントを更新: `## Current Skills (N)`（N は系統 A のみ）
 - カンマ区切りのスキル名一覧を更新
 
-**系統 B: `.claude/skills/` / `.agents/skills/` 配下のスキル（カウント対象外）**
+**系統 B: `.claude/skills/` / `.agents/skills/` 配下のスキルの全列挙（列挙対象。カウントの扱いは内訳による）**
+
+下記の `-L` 付き find は「`.claude/skills/` と `.agents/skills/` から見える全スキル」を
+取りこぼしなく列挙するためのコマンドであり、後述「注意事項」にある `-L` 無しの
+`find .claude/skills ... -type d`（実ディレクトリだけの抽出。用途が異なる）とは別物。
+用途の違いは「注意事項」節を参照。
 
 ```bash
 # -L で symlink を追従し、.claude/skills/（symlink）と .agents/skills/（実体）の
-# 両レイアウトを網羅する。SKILL.md を持つディレクトリ名を抽出し重複排除する。
+# 両レイアウトを網羅する。SKILL.md を持つディレクトリのみを抽出し重複排除する。
 # （npx skills add は .agents/skills/ に実体を置き .claude/skills/ から symlink する）
-find -L .claude/skills .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+find -L .claude/skills .agents/skills -mindepth 1 -maxdepth 1 -type d \
+  -exec test -f '{}/SKILL.md' ';' -print 2>/dev/null \
   | sed -E 's#.*/##' | sort -u
 ```
 
 `find -L` で symlink を追従するため、`.claude/skills/` 配下が symlink でも、また
 スキル実体が `.agents/skills/` 側にある場合でも取りこぼさない（`-type d` 単独だと
-symlink エントリを除外してしまうため `-L` が必須）。
+symlink エントリを除外してしまうため `-L` が必須）。`-exec test -f '{}/SKILL.md' ';'`
+はシェル再展開を経由しないため、ディレクトリ名に空白等が含まれても安全。
 
-- `CLAUDE.md` の「リポジトリ管理スキル（.claude/skills/ に配置）」セクションを更新する
-- 系統 B のスキルは `## Current Skills (N)` のカウント N に含めない
+系統 B の各エントリは**実体の所在**でさらに 3 分類され、`## Current Skills (N)` の
+N に含めるかどうかはこの内訳で決まる（系統 B という区分自体がカウントの可否を
+決めるわけではない）。
+
+| 区分 | 実体の所在 | N に含めるか | 記載先 |
+|------|-----------|------------|--------|
+| B1 | `skills/<name>/`（`.claude/skills/<name>` は symlink） | 含める（系統 A の列挙で既に計上済み。B1 を理由に N を増減させない） | `## Current Skills (N)` |
+| B2 | `.claude/skills/<name>/` が実ディレクトリ | 含めない | 「リポジトリ管理スキル（.claude/skills/ に配置）」 |
+| B3 | `.agents/skills/<name>/` が実体（`.claude/skills/<name>` は symlink） | 含めない | 「参照スキル（.claude/skills/ に配置）」 |
+
+B2・B3 の抽出コマンド（実体が `skills/` に無いものだけを残す）:
+
+```bash
+# B2: リポジトリ管理スキル
+find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
+  while read -r n; do [ -d "skills/${n}" ] || printf '%s\n' "${n}"; done
+
+# B3: 参照スキル
+find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
+  while read -r n; do [ -d "skills/${n}" ] || printf '%s\n' "${n}"; done
+```
+
+分類の原則は**実体の所在を第一基準**とする。`skills-lock.json` の `skills` キーの掲載一覧は
+上流リポジトリでは参照スキルのみ、消費側リポジトリでは配布スキル全件を指し、リポジトリの
+役割によって意味が反転するため、実体の所在だけで判別できない曖昧ケースのタイブレークにのみ
+使う（詳細は「注意事項」の実ディレクトリ型リポジトリの節を参照）。
+
+- `CLAUDE.md` の「リポジトリ管理スキル（.claude/skills/ に配置）」「参照スキル（.claude/skills/ に配置）」の各セクションを B2・B3 で更新する
 - セクションが存在しない場合は新規作成する
+
+**実測記録（`Fandhe-AI/agent-cli-skills`・2026-08-18）**: 以下は本リポジトリでの実測値である。
+消費側リポジトリでは構成が異なるため、実行時に必ず再測して自リポジトリの値を用いること。
+
+| 系統 | 件数 | 内容 |
+|------|------|------|
+| A | 26 | 配布可能スキル（`## Current Skills (26)` と一致） |
+| B（全列挙） | 29 | B1(24) + B2(2) + B3(3) |
+| B1 | 24 | `skills/` に実体があり系統 A で計上済み。`skills/` にあって B1 に現れないのは `contribute-skill`・`sync-skills-lock` の 2 件（26 − 24 = 2） |
+| B2 | 2 | `create-agent`・`create-skill` |
+| B3 | 3 | `anthropic-claude-code`・`anthropic-claude-code-extend`・`github-docs` |
+
+24 + 2 + 3 = 29（B の全列挙件数と一致）、26 − 24 = 2（B1 に現れない配布スキル数）で
+件数差が説明できることを確認する。
 
 #### Repository Structure の更新
 
@@ -118,13 +165,40 @@ ls -d skills/*/SKILL.md | wc -l
 - スキル名一覧に追加・削除したスキルが反映されていること
 - `_/.last-update-docs` が最新コミットの hash で更新されていること
 
+系統 B（B2・B3）を更新した場合は、以下も**新規実行**して確認する（既存ログ・前回結果の
+流用は不可。`.claude/rules/verification.md` の 5 段階ゲートに従う）。
+
+```bash
+# B2: リポジトリ管理スキルの抽出結果
+find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
+  while read -r n; do [ -d "skills/${n}" ] || printf '%s\n' "${n}"; done
+
+# B3: 参照スキルの抽出結果
+find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
+  while read -r n; do [ -d "skills/${n}" ] || printf '%s\n' "${n}"; done
+
+# 全列挙（B）との件数差が説明できるか
+find -L .claude/skills .agents/skills -mindepth 1 -maxdepth 1 -type d \
+  -exec test -f '{}/SKILL.md' ';' -print 2>/dev/null | sed -E 's#.*/##' | sort -u | wc -l
+```
+
+- B2 の出力が `CLAUDE.md` の「リポジトリ管理スキル（.claude/skills/ に配置）」節と一致すること
+- B3 の出力が `CLAUDE.md` の「参照スキル（.claude/skills/ に配置）」節と一致すること
+- B1（系統 A で計上済み）+ B2 + B3 の件数が、`-L` 付き全列挙の件数と一致し、差分が
+  SKILL.md の記述だけから再現できること（`-L` 付き列挙と `-L` 無し抽出の件数差の説明）
+
 ## 注意事項
 
 - `CLAUDE.md` のみが更新対象。個別スキルの `SKILL.md` や `references/` は対象外
 - 自動生成ファイルは更新対象外
 - `_/.last-update-docs` が `.gitignore` に追加されているか確認する
-- **`.claude/skills/` の実ディレクトリ**: `find .claude/skills -maxdepth 1 -mindepth 1 -type d` で列挙し、`## Current Skills (N)` のカウントには含めない。「リポジトリ管理スキル」セクションに別管理する
-- **symlink vs 実ディレクトリ**: `find -type d` はシンボリックリンクを除くため `github-docs` 等は自動除外される
+- **`.claude/skills/` の実ディレクトリ抽出（用途が異なる点に注意）**: `find .claude/skills -maxdepth 1 -mindepth 1 -type d`（`-L` を付けない）は「symlink ではない実ディレクトリ = そのリポジトリ固有の管理スキル」だけを狙って抽出するコマンドであり、上記「系統 B」の全列挙（`-L` 付き）とは目的が異なる。全列挙が必要な場面では必ず `-L` 付きの版を使う。symlink を除外することがこの抽出の条件そのものであり、両者は矛盾ではなく用途の使い分けである
+- **`github-docs` 等の扱い**: `find -type d`（`-L` なし）はシンボリックリンクを除外するため、`github-docs`・`anthropic-claude-code` 等は「リポジトリ管理スキル」節の対象からは自動的に外れる。ただしこれは B2 からの除外であって `CLAUDE.md` からの除外ではない。これらは系統 B の内訳では B3（参照スキル）に分類され、「参照スキル（.claude/skills/ に配置）」節に記載する
+- **実ディレクトリ型リポジトリでの振る舞い**: `.claude/skills/<name>` が symlink ではなく実ディレクトリで配置されているリポジトリ（`.claude/skills` が実ディレクトリ運用の消費側リポジトリ等）では、`-L` 無しの抽出が外部取り込みスキルまで拾ってしまい「リポジトリ管理スキル」節が過大になり得る。実ディレクトリか否かだけで判定せず、次の順でタイブレークする:
+  1. 実体が `skills/<name>/` にもある → 配布スキル（系統 A・B1）。リポジトリ管理スキルではない
+  2. `skills-lock.json` の `skills` キーに名前がある → 外部から取り込んだスキルが symlink 化されていない誤配置。リポジトリ管理スキルではなく、symlink 化を検討すべき構成上の問題として報告する（update-docs 自身は構成を変更しない）
+  3. 上記いずれにも該当しない実ディレクトリのみをリポジトリ管理スキル（B2）として扱う
+- **空出力の扱い**: `2>/dev/null` はディレクトリ不在（例: `.agents/skills` が無いリポジトリ）を許容する目的に限る。空出力を即座に「0 件」と判断せず、対象ディレクトリ自体の存在を先に確認する
 
 ## コード内コメントの観点（任意）
 
