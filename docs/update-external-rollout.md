@@ -6,9 +6,10 @@
 （A / B / C の評価）と 5 リポへの導入手順・実測結果を記録する。
 
 `.claude/skills` が実ディレクトリ（tree mode `040000`）である場合の checkout 失敗
-（イシュー #256）は本ドキュメントの対象外。実際の導入実行では 4 リポの初回 run が
-`Update agent skills` まで success しており、この事象の再燃は観測されていない
-（「実施記録」節を参照）。
+（イシュー #256）は本ドキュメントの対象外。実際の導入実行では、この記録の時点で完了して
+いる **3 リポ**（`mcp_hub-spec` / `hobby-keyboard` / `automation-spec`）の初回 run が
+`Update agent skills` まで success しており、この 3 リポでは事象の再燃を観測していない。
+`aliz-corporate-web` と `team-hub-spec` は実行中のため未判定（「実施記録」節を参照）。
 
 ## 対象リポジトリ
 
@@ -118,10 +119,20 @@ jobs:
 
 固定した設計判断:
 
-- `enable-submodule` / `enable-skills` は渡さない（既定 `true`）。`.gitmodules` を
-  持たない 4 リポでは submodule ジョブは checkout 前の存在判定で no-op になる。
-  `.gitmodules` を持つ `aliz-corporate-web` の `enable-submodule` 要否はイシューが
-  明示的にスコープ外としているため、既定のまま導入して観測に留める。
+- `enable-skills` は渡さない（既定 `true`）。
+- `enable-submodule` は**リポジトリで分かれる**（テンプレートそのままではない唯一の差分）:
+  - `.gitmodules` を持たない 4 リポ（`automation-spec` / `hobby-keyboard` / `mcp_hub-spec` /
+    `team-hub-spec`）は渡さない（既定 `true`）。submodule ジョブは checkout 前の存在判定で
+    no-op になるため明示不要。
+  - `.gitmodules` を持つ `aliz-corporate-web` のみ **`enable-submodule: false` を明示する**。
+    起草時は「要否はスコープ外なので既定のまま観測に留める」としていたが、既定 `true` のまま
+    導入すると**評価していない submodule 更新 PR が初回実行で作られてしまう**（観測ではなく
+    副作用の発生）。要否の判断をスコープ外に保ったまま副作用を出さないため、明示的に無効化して
+    導入した。有効化が必要になった時点で別イシューとして扱う。
+
+  したがって配置したファイルは、テンプレートのプレースホルダ置換だけでは
+  `aliz-corporate-web` 分を再現できない。同リポは上記 1 行を `runner-json` の直後へ加えた
+  ものを配置している（実測: 同リポの初回 run で `Update submodule references` が `skipped`）。
 - `cron` は本リポの既存 wrapper と同じ `0 0 * * *` に統一する（ずらさない）。
 - `base-branch` は渡さない（既定 `main` = 5 リポとも既定ブランチ）。
 - auto-merge は組織変数を解決して `'false'` フォールバック（既存運用と同一）。
@@ -306,8 +317,10 @@ SUBMODULE_AUTO_MERGE=true visibility=all
 - 既存 22 リポの pin 追従（#343）と、`auto-merge に GITHUB_TOKEN を使用` 警告への対処
   （既存 22 リポにも共通する事象のため別途扱う）
 
-（本ドキュメント起草時にスコープ外としていた「5 リポへの実際の書き込み・乖離検知 CI の
-再実行・#342 へのコメント投稿」は、後続フェーズとして実施済み。「実施記録」節を参照）
+（本ドキュメント起草時にスコープ外としていた項目のうち、**5 リポへの書き込み**（ラベル作成・
+wrapper 導入・PR 作成とマージ・workflow 初回実行）と **#342 へのコメント投稿**は後続フェーズと
+して実施済み。**乖離検知 CI の再実行**は `aliz-corporate-web` / `team-hub-spec` の初回実行完了
+待ちで未実施であり、「実施記録」節の「残作業」に残っている）
 
 ## 関連
 
