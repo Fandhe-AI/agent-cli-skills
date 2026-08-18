@@ -157,6 +157,98 @@ emit_result() {
   echo "result=${state} issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${old_parent_out}"
 }
 
+# DELETE 成功後の POST 失敗（旧親から外れ新親にも付かない部分変更）に対する補償復旧
+# （Issue #352）。#333 は「事前に判定できる拒否条件」を DELETE 前に潰したが、DELETE と
+# POST の間のレース・一時的な 5xx は事前判定できない残余として残っていた。ここで諦めて
+# exit すると孤児化が確定するため、実状態を再取得してから安全に判断できる範囲でのみ
+# 旧親へ戻す。呼び出し元（DELETE 経路の POST 失敗ブロック）は必ず ISSUE / NEW_PARENT /
+# CURRENT_PARENT / ISSUE_ID / REPO_PATH / SELF_REPO_URL / GH_ERR_FILE / POST_OUT を
+# 設定済みの状態でこの関数を呼ぶ。関数は必ず exit するため呼び出し元へは戻らない
+recover_after_post_failure() {
+  if printf '%s' "${POST_OUT}" | grep -qi "only have one parent"; then
+    # メッセージ文字列は GitHub 側の表現変更に追随できず脆いため、分岐の根拠にはしない。
+    # 「第三者による付け替えの可能性が高い」というヒントに格下げし、実測値で確定させる
+    echo "情報: エラーメッセージから第三者による付け替えの可能性が示唆されている（実測値で確定させる）" >&2
+  fi
+
+  if ! RECOVERY_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>"${GH_ERR_FILE}"); then
+    echo "エラー: 復旧のための実状態再取得に失敗した。#${ISSUE} は #${CURRENT_PARENT} から外れたまま孤児で残っている可能性がある" >&2
+    cat "${GH_ERR_FILE}" >&2
+    # 状態不明のまま補償 POST を撃つと、実は既に別の親が付いている場合に承認外の
+    # 親子関係を壊しかねない。fail-closed のため補償を試みずに終端する
+    echo "reason=recovery-state-unknown" >&2
+    exit 8
+  fi
+
+  local recovery_parent_url recovery_parent recovery_same_repo=1
+  recovery_parent_url=$(printf '%s' "${RECOVERY_JSON}" | jq -r '.parent_issue_url // empty')
+  recovery_parent=""
+  if [[ -n "${recovery_parent_url}" ]]; then
+    recovery_parent=$(printf '%s' "${recovery_parent_url}" | grep -oE '[0-9]+$' || true)
+    if [[ "${recovery_parent_url%/issues/*}" != "${SELF_REPO_URL}" ]]; then
+      recovery_same_repo=0
+    fi
+  fi
+
+  if [[ "${recovery_same_repo}" -eq 1 && "${recovery_parent}" == "${NEW_PARENT}" ]]; then
+    # POST は偽陰性だった（応答は失敗扱いでも実際には成立していた）。本来の目的
+    # （新親への付け替え）は達成済みのため、通常の成功終端と同じ扱いにする
+    emit_result "reassigned" "${CURRENT_PARENT}"
+    exit 0
+  fi
+
+  if [[ "${recovery_same_repo}" -eq 1 && -z "${recovery_parent}" ]]; then
+    # 実測でも孤児（想定どおり DELETE のみ成立し POST が未達）。承認済みの操作の
+    # 逆操作（旧親へ戻す）は承認範囲内であるため、ここでのみ補償 POST を撃つ
+    if ! COMP_POST_OUT=$(gh api --method POST "repos/${REPO_PATH}/issues/${CURRENT_PARENT}/sub_issues" -F "sub_issue_id=${ISSUE_ID}" 2>&1); then
+      echo "エラー: 旧親 #${CURRENT_PARENT} への補償復旧 POST も失敗した。#${ISSUE} は孤児のまま残っている" >&2
+      echo "${COMP_POST_OUT}" >&2
+      echo "reason=compensation-post-failed" >&2
+      exit 8
+    fi
+
+    # 補償 POST の成功応答だけを信頼しない。事後確認は必ず取り直す（#295 の設計哲学を
+    # 復旧経路にも一貫させる）
+    if ! RECOVERY_VERIFY_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>"${GH_ERR_FILE}"); then
+      echo "エラー: 補償復旧後の確認取得に失敗した" >&2
+      cat "${GH_ERR_FILE}" >&2
+      echo "reason=recovery-state-unknown" >&2
+      exit 8
+    fi
+    local rv_parent_url rv_parent
+    rv_parent_url=$(printf '%s' "${RECOVERY_VERIFY_JSON}" | jq -r '.parent_issue_url // empty')
+    rv_parent=""
+    if [[ -n "${rv_parent_url}" && "${rv_parent_url%/issues/*}" == "${SELF_REPO_URL}" ]]; then
+      rv_parent=$(printf '%s' "${rv_parent_url}" | grep -oE '[0-9]+$' || true)
+    fi
+    if [[ "${rv_parent}" != "${CURRENT_PARENT}" ]]; then
+      echo "エラー: 補償復旧後の確認で旧親 #${CURRENT_PARENT} 配下に見つからない（実測 parent=#${rv_parent:-なし}）。状態を手で確認する" >&2
+      echo "reason=recovery-state-unknown" >&2
+      exit 8
+    fi
+
+    echo "情報: #${ISSUE} を旧親 #${CURRENT_PARENT} へ補償復旧した（本来の目的だった #${NEW_PARENT} への付け替えは未達）" >&2
+    echo "result=restored issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${CURRENT_PARENT}"
+    exit 10
+  fi
+
+  if [[ "${recovery_same_repo}" -eq 1 && "${recovery_parent}" == "${CURRENT_PARENT}" ]]; then
+    # 実測で既に旧親配下（DELETE が実は不成立だった、または応答後に反映が追いついた等）。
+    # ツリーは原状に復しているため、補償 POST を撃たずにそのまま復旧成立として終端する
+    echo "情報: #${ISSUE} は実測で既に旧親 #${CURRENT_PARENT} 配下にあった（補償 POST は不要）" >&2
+    echo "result=restored issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${CURRENT_PARENT}"
+    exit 10
+  fi
+
+  # 実測で第三者が別の親を設定済み（同一リポジトリの別 issue、または別リポジトリへの
+  # 転送）。承認外の親子関係を壊さないため、旧親へ戻すことも新親へ POST し直すことも
+  # せず書き込みなしで停止する（fail-closed）
+  echo "エラー: DELETE 後の POST 失敗を受けて実状態を再取得したところ、第三者が別の親を設定済みだった（parent_issue_url=${recovery_parent_url}）。承認外の親子関係を壊さないため補償せず停止する" >&2
+  echo "対処: 実測した親をユーザーへ提示して承認を得たうえで再実行する" >&2
+  echo "reason=third-party-parent" >&2
+  exit 11
+}
+
 # JSON を jq でパースする GET 呼び出しは stdout/stderr を分離して取得する（2>&1 で
 # マージすると、gh が stderr へ何か出力しただけで JSON パースが壊れ、本来成功している
 # 呼び出しが偽陽性で中断する。エラー本文の表示用途は err ファイル側に閉じ込める）
@@ -325,15 +417,10 @@ else
   if ! POST_OUT=$(gh api --method POST "repos/${REPO_PATH}/issues/${NEW_PARENT}/sub_issues" -F "sub_issue_id=${ISSUE_ID}" 2>&1); then
     echo "エラー: 新親 #${NEW_PARENT} への紐付けに失敗した" >&2
     echo "${POST_OUT}" >&2
-    if printf '%s' "${POST_OUT}" | grep -qi "only have one parent"; then
-      # DELETE と POST の間に第三者が親を付け替えた等のレース。**DELETE は成功済み**のため
-      # ツリーは部分変更（旧親から外れ、新親にも付いていない）。無変更を意味する
-      # exit 6 / exit 7 と混同すると誤った復旧をされるため専用コードにする
-      echo "エラー: DELETE 後の POST 時点で別の親が付いていた（レース）。#${ISSUE} は #${CURRENT_PARENT} から外れた状態で残っている" >&2
-      echo "対処: 実状態を確認し、必要なら手で紐付け直す。同一コマンドの再実行では回復しない" >&2
-      exit 8
-    fi
-    exit 4
+    # DELETE は既に成立済みのため、ここで即終端すると孤児化が確定してしまう。
+    # 実状態を再取得してから安全に判断できる範囲でのみ旧親へ戻す（Issue #352）。
+    # 関数は必ず exit する（0 / 8 / 10 / 11 のいずれか）ため、この if ブロックには戻らない
+    recover_after_post_failure
   fi
 fi
 
