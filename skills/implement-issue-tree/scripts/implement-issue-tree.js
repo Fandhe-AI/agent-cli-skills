@@ -3054,7 +3054,14 @@ let lastByteRemeasureOutcome = { failed: false, exceeded: false }
 {
   const runStartOrphanEntries = await scanOrphanWorktrees()
   const mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
-  for (const entry of runStartOrphanEntries) {
+  // メイン worktree を特定できないスキャン（isMain 転記の不整合・観測失敗）では孤立記録を
+  // 全体として見送る（fail-closed）。isMain とパス一致の両除外が効かない状態で続行すると、
+  // baseBranch 以外の issue 命名ブランチを checkout したメイン worktree を孤立として状態
+  // ファイルへ記録し、後続の削除候補生成へ載せ得るため（PR #390 codex-review P1）
+  if (!mainWorktreePath && runStartOrphanEntries.length > 0) {
+    log('⚠️ メイン worktree を特定できなかったため、開始時の孤立 worktree 追跡記録をこのランでは見送る（fail-closed）')
+  }
+  for (const entry of mainWorktreePath ? runStartOrphanEntries : []) {
     if (entry?.isMain) continue
     const p = sanitizeWorktreePath(entry?.path ?? '')
     if (!p || (mainWorktreePath && p === mainWorktreePath)) continue
@@ -5260,7 +5267,12 @@ if (orphanEntriesAtEnd.length > 0) {
   } catch (e) {
     log(`⚠️ 孤立 worktree のスイープ判定用に状態ファイルを再読込できなかった（${e?.message ?? e}）。孤立分の削除は見送る`)
   }
-  for (const entry of orphanEntriesAtEnd) {
+  // メイン worktree を特定できないスキャンでは孤立の記録・削除候補生成を全体として見送る
+  // （fail-closed。開始時スキャンの同種ガードと対。PR #390 codex-review P1）
+  if (!mainWorktreePathAtEnd) {
+    log('⚠️ メイン worktree を特定できなかったため、終了時の孤立 worktree 記録・削除候補生成をこのランでは見送る（fail-closed）')
+  }
+  for (const entry of mainWorktreePathAtEnd ? orphanEntriesAtEnd : []) {
     if (entry?.isMain) continue
     const p = sanitizeWorktreePath(entry?.path ?? '')
     // 使い捨て worktree はラン終了時まで実在する。孤立スキャンに混ぜると次回 Recover が実装残骸と
@@ -5328,15 +5340,25 @@ const residualCountOverLimit = maxResidualWorktrees > 0 && residualTotalAtEnd > 
 let residualBytesAtEnd = null
 let residualBytesEndObserved = false
 if (maxResidualWorktreeBytes > 0 && residualBytesObserved) {
-  const endTargetPaths = [...residualPathsAtStart, ...ephemeralWorktrees.map((e) => e.path)].filter(
-    (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !confirmedRemovedPaths.has(p),
+  // 未検証パス（空文字・検証不可マーカー）は黙って filter 除外しない — 除外して残りだけを
+  // 合算すると、実体を検証できなかった新規 worktree が大容量でも bytesAtEnd と overLimit が
+  // 過少報告され「正常な非超過」という誤った契約値を返す（PR #390 codex-review P1）。
+  // 1 件でも含まれていたら測定不成立（bytesEndObserved: false → overLimit: true）へ倒す
+  const rawEndPaths = [...residualPathsAtStart, ...ephemeralWorktrees.map((e) => e.path)]
+  const hasUnverifiedEndPath = rawEndPaths.some(
+    (p) => typeof p !== 'string' || p === '' || p.startsWith('(検証不可:'),
   )
-  const endKib = endTargetPaths.length > 0 ? await measureResidualWorktreeBytes(endTargetPaths) : 0
-  if (endKib !== null) {
-    residualBytesAtEnd = endKib * 1024
-    residualBytesEndObserved = true
+  if (hasUnverifiedEndPath) {
+    log('⚠️ ラン終了時の測定対象に検証不可な worktree パスが含まれるため測定不成立として扱う（overLimit: true で報告する。fail-closed）')
   } else {
-    log('⚠️ ラン終了時の残置 worktree ディスク使用量の実測に失敗した。容量上限の充足を確認できないため、次ラン開始時は観測失敗の fail-closed で新規着手が停止する見込み（overLimit: true として報告する）')
+    const endTargetPaths = rawEndPaths.filter((p) => !confirmedRemovedPaths.has(p))
+    const endKib = endTargetPaths.length > 0 ? await measureResidualWorktreeBytes(endTargetPaths) : 0
+    if (endKib !== null) {
+      residualBytesAtEnd = endKib * 1024
+      residualBytesEndObserved = true
+    } else {
+      log('⚠️ ラン終了時の残置 worktree ディスク使用量の実測に失敗した。容量上限の充足を確認できないため、次ラン開始時は観測失敗の fail-closed で新規着手が停止する見込み（overLimit: true として報告する）')
+    }
   }
 }
 const residualBytesOverLimit =
