@@ -1504,6 +1504,9 @@ function branchMatchesIssue(branch, issueNumber) {
 // null を返す。countResidualWorktrees の「(検証不可)」計上と同じ理由: 0 は fail-open
 // （過小評価）になるため、呼び出し側は null を観測失敗として fail-closed 側の分岐へ倒す契約
 // とする。
+// この関数の呼び出しごとに一時ファイル名を一意化するための単調カウンタ（同一ラン内の重複回避。
+// 別ランとの衝突回避は boundaryNonce のラン固有 seed が担う）。
+let residualByteMeasureCallSeq = 0
 async function measureResidualWorktreeBytes(paths) {
   if (!Array.isArray(paths) || paths.length === 0) return 0
   // sanitizeWorktreePath の許可文字集合（英数字・'/'・'-'・'_'・'.'・スペースのみ、絶対パス、
@@ -1525,6 +1528,16 @@ async function measureResidualWorktreeBytes(paths) {
     // 廃し、ヒアドキュメントでファイルへ書き出してから jq + xargs -0 で NUL 区切りに機械的に
     // 展開する決定的パイプラインへ置き換える（codex-review 指摘: 自然言語での per-path
     // クォート指示だけに依存しない）。
+    // 一時ファイル名は固定パス（/tmp/wt-residual-paths.json）にせず、boundaryNonce で
+    // 呼び出しごとに一意化する。固定パスだと同一ホストで並行実行される別ランの measure
+    // タスクが書き込みタイミングで衝突し、他ランのパス集合や中途半端な内容を du してしまう
+    // （Cursor Bugbot Medium 指摘）。boundaryNonce はラン固有の乱数 seed で鍵付けされるため、
+    // 別プロセス（別ラン）が同じ material を渡しても別ファイル名になる。
+    residualByteMeasureCallSeq += 1
+    const tmpNonce = boundaryNonce(
+      `residual-bytes-tmp:${residualByteMeasureCallSeq}:${JSON.stringify(sanitizedPaths)}`,
+    )
+    const tmpFile = `/tmp/wt-residual-paths-${tmpNonce}.json`
     const v = await agent(
       [
         '残置 worktree のディスク使用量測定タスク（読み取り専用。削除・変更は一切行わない）。',
@@ -1535,15 +1548,19 @@ async function measureResidualWorktreeBytes(paths) {
         untrustedJson(JSON.stringify(sanitizedPaths), 'git-worktree-list'),
         '手順:',
         '1. 上記 <untrusted-data> タグの内側テキスト（JSON 配列そのもの。タグは含めない）を、' +
-          '一重引用符のヒアドキュメント（例: cat <<\'PATHSEOF\' > /tmp/wt-residual-paths.json）で' +
-          'そのままファイルへ書き出す。自分でパス文字列をコマンド行へ組み立てない。',
-        '2. jq -r \'.[] | . + "\\u0000"\' /tmp/wt-residual-paths.json | xargs -0 du -sk -- を実行し、' +
-          '各行の第1列（KiB）を取得する（-b は使わない。GNU 限定オプションで、配布先が macOS 等の' +
-          '非 GNU du だと失敗する）。',
+          `一重引用符のヒアドキュメント（例: cat <<'PATHSEOF' > ${tmpFile}）で` +
+          'そのままファイルへ書き出す（このファイル名は本タスク専用の使い捨てパスであり、他の' +
+          'プロセス・他のランと共有しない。自分でパス文字列をコマンド行へ組み立てない）。',
+        `2. jq -j '.[] | . + "\\u0000"' ${tmpFile} | xargs -0 du -sk -- を実行し、` +
+          '各行の第1列（KiB）を取得する（-r は使わない。jq -r は値に加えて要素ごとに改行も' +
+          '出力するため、NUL 区切りの直後に改行が混入し xargs -0 が2件目以降のパス先頭に' +
+          '改行を誤って含めてしまう。-j はこの追加改行を出さない。-b は使わない。GNU 限定' +
+          'オプションで、配布先が macOS 等の非 GNU du だと失敗する）。',
         '3. 全パスの値を単純合計する（推測・丸めをしない）。',
         '4. 1 件でも jq / xargs / du が失敗・非0終了・パスが存在しない場合は、他の値で補わず',
         '   タスク全体を失敗として報告する（合計を 0 や欠損値で埋めない）。',
-        '5. 合計値を kib として返す。',
+        `5. rm -f ${tmpFile} で一時ファイルを削除する（測定成否に関わらず実施）。`,
+        '6. 合計値を kib として返す。',
       ].join('\n'),
       {
         label: 'worktree:residual-bytes',
@@ -4627,16 +4644,40 @@ const monitoringResumeGateDeferred = new Map()
 async function remeasureResidualBytesIfDue() {
   if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return
   if (ephemeralWorktrees.length - byteRemeasureAtLedgerCount < BYTE_REMEASURE_LEDGER_INTERVAL) return
+  // ephemeralWorktrees は追記専用の台帳のため、cleanupWorktree（updateState）で削除を試みた
+  // パス（sweepEligiblePaths に登録済み）を含んだままになる。既に削除試行済みのパスを du
+  // 対象へ含めると、初回の merge cleanup 以降ずっと「対象パスが存在しない」で測定失敗し続け、
+  // 上の fail-closed（測定失敗 → newStartSuppressed）と組み合わさって毎回恒久停止してしまう
+  // （Cursor Bugbot Medium 指摘）。削除試行済みパスは対象から除外する。
   const targetPaths = [...residualPathsAtStart, ...ephemeralWorktrees.map((e) => e.path)].filter(
-    (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:'),
+    (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !sweepEligiblePaths.has(p),
   )
   const kib = targetPaths.length > 0 ? await measureResidualWorktreeBytes(targetPaths) : 0
   // 間引きカウンタは測定成否に関わらず進める。失敗のたびに毎周回リトライすると agent 呼び出し
-  // コストが際限なく積み上がる（projection によるフォールバックは引き続き機能するため
-  // fail-open にはならない）。
+  // コストが際限なく積み上がる。
   byteRemeasureAtLedgerCount = ephemeralWorktrees.length
   if (kib === null) {
-    log('⚠️ 残置 worktree のディスク使用量のラン中実測し直しに失敗した（projection による予約判定にフォールバックする）')
+    // projection（perWorktreeByteReserve）は開始時に確定した安全側の「下限」floor 値であり、
+    // 実使用量の上界ではない。ビルド成果物等で実消費が floor を超えて成長した場合、それを
+    // 検知できるのはこの実測し直しだけであり、projection への単純フォールバックは
+    // 「floor を超える成長を検知できないまま新規着手が続き得る」fail-open になる
+    // （codex-review 指摘）。measureResidualWorktreeBytes 自体は 1 件でも失敗すれば全体を
+    // 失敗として fail-closed で返す契約のため、ここでの再測定失敗も同じ fail-closed 側へ倒し
+    // 新規着手を恒久停止する（実行中のイシューと monitoring 再開は継続。手動削除・再実行で
+    // 復帰する運用は開始時観測失敗時の既存の抑止と揃える）。
+    if (!newStartSuppressed) {
+      newStartSuppressed = {
+        reason:
+          `残置 worktree のディスク使用量のラン中実測し直しに失敗した（対象 ${targetPaths.length} 件）。` +
+          `perWorktreeByteReserve による見積りは開始時の下限 floor 値であり実使用量の上界ではない` +
+          `ため、実測できない状態で projection のみへフォールバックすると floor を超える成長を` +
+          `検知できないまま容量上限を超過し得る（fail-open防止）。ディスク枯渇防止のため以降の` +
+          `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。原因を解消` +
+          `してから再実行すること`,
+        paths: residualPathsAtStart,
+      }
+      log(`⚠️ ${newStartSuppressed.reason}`)
+    }
     return
   }
   const actualBytes = kib * 1024
