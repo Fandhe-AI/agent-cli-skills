@@ -85,68 +85,115 @@ fetch_sub_issues "${ROOT_NUMBER}"
 
 棚卸し対象の一覧をユーザーに提示し、方針確認を取ってから変更を実行する。
 
+**承認された対象を Step 3 / Step 4 が読む 2 つの計画配列へ落とす。** 配列は必ず宣言する
+（対象 0 件でも空配列として宣言する）。未宣言のまま Step 3 / Step 4 へ進むと
+`"${REASSIGN_PLAN[@]}"` が空展開され、承認済みの対象があってもエラーなく 0 件で完走して
+完了報告まで進んでしまうため、両ステップの冒頭で宣言の有無を検査して fail-closed で停止する。
+
+```bash
+# 承認された「closed 親下の付け替え」対象。要素は "<issue> <old-parent> <new-parent>"。
+# 空白区切りの 1 行 1 件にするのは、Step 3 のループが read で分割して受け取るため。
+# issue 番号は全て 10 進の正整数であり、空白・改行を含まないことを Step 1 の取得時に保証する。
+REASSIGN_PLAN=(
+  # "123 456 789"
+)
+
+# 承認された「孤児の再配置」対象。要素は "<orphan-issue> <phase-parent>"。
+ORPHAN_PLAN=(
+  # "234 789"
+)
+```
+
+対象が 0 件の場合も上記のとおり**空配列として宣言する**。「対象なし（空配列）」と
+「計画未設定（未宣言）」は意味が異なり、後者は Step 2 の実行漏れであって正常系ではない。
+
 ### Step 3: closed 親下の残置 open issue を付け替える
 
 closed 親の下に残置されている open issue を、対応する open Phase 親へ移動する。
 「旧親から DELETE → 新親へ POST」の 2 段操作と、その前後の冪等性判定・事後確認は
 `scripts/reassign-sub-issue.sh` に集約されている（Issue #297。旧方式は SKILL.md 本文に
 素の `gh api` を並べていたため、DELETE 失敗検知なしに POST へ進む等の欠陥があった）。
+その呼び出し側で必要な共有処理（計画配列の存在・型検証、1 件呼び出しの終了ステータス解釈）は
+`scripts/reassign-lib.sh` に切り出してあり、Step 3 / Step 4 がそれぞれ source して使う。
+
+**各コードフェンスは独立したシェルで実行され得る**（`reassign-sub-issue.sh` の設計前提と同じ）。
+そのため共有処理をどちらかのフェンス内で定義して他方が再利用する構成にはしない。Step 4 の
+実行時に関数定義が継承されず `command not found` となり、孤児の再配置が一切実行されないため
+（Issue #372 / PR #374 codex-review P1 第 3 ラウンド）。両 Step のフェンスは同一の前置きで
+`reassign-lib.sh` を自己完結的に解決・source する。
 
 このスキルの配置ルートは導入形態（本リポジトリのソース／`npx skills add` による
-vendoring／`.claude/skills/` symlink 経由）で異なる。呼び出し前に 3 レイアウトを順に確認し、
+vendoring／`.claude/skills/` symlink 経由）で異なる。source 前に 3 レイアウトを順に確認し、
 実在するものを採用する（implement-issue-tree の `scriptPath` 3 レイアウト・contribute-skill の
-`LOCAL_SKILL_DIR` 解決と同じ考え方）。
+`LOCAL_SKILL_DIR` 解決と同じ考え方）。`reassign-sub-issue.sh` のパスはここでは指定しない——
+ライブラリが自身の実体位置から兄弟として解決するため、どの導入形態でも対の実体が必ず組み合う。
 
 ```bash
+# reassign-lib.sh を 3 レイアウトから解決して source する。
+# **この前置きは Step 3 / Step 4 の両フェンスが同一の内容で持つ。** 手順書のコードフェンスは
+# ブロックごとに独立シェルで実行され得るため、片方のフェンスで定義した関数・変数がもう一方へ
+# 継承される保証がない（Issue #372 / PR #374 codex-review P1）。
+REASSIGN_LIB=""
 for CANDIDATE in \
-  "skills/update-issue-tree/scripts/reassign-sub-issue.sh" \
-  ".agents/skills/update-issue-tree/scripts/reassign-sub-issue.sh" \
-  ".claude/skills/update-issue-tree/scripts/reassign-sub-issue.sh"; do
+  "skills/update-issue-tree/scripts/reassign-lib.sh" \
+  ".agents/skills/update-issue-tree/scripts/reassign-lib.sh" \
+  ".claude/skills/update-issue-tree/scripts/reassign-lib.sh"; do
   # 存在確認は -f のみで行う（-x にすると、npx skills add 等の vendoring で
   # 実行ビットが落ちたファイルを「存在しない」と誤検知し、3 レイアウトいずれにも
   # 見つからないという誤ったエラーメッセージになる）
   if [[ -f "${CANDIDATE}" ]]; then
-    REASSIGN_SCRIPT="${CANDIDATE}"
+    REASSIGN_LIB="${CANDIDATE}"
     break
   fi
 done
-if [[ -z "${REASSIGN_SCRIPT:-}" ]]; then
-  echo "エラー: reassign-sub-issue.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
+if [[ -z "${REASSIGN_LIB}" ]]; then
+  echo "エラー: reassign-lib.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
   exit 1
 fi
-if [[ ! -x "${REASSIGN_SCRIPT}" ]]; then
-  echo "警告: ${REASSIGN_SCRIPT} に実行権限がない（vendoring で実行ビットが失われた可能性）。bash 経由で実行する" >&2
-fi
+# ライブラリは対の reassign-sub-issue.sh の存在まで確認したうえで、reassign_one /
+# require_plan_array と REASSIGN_SCRIPT を定義する。欠落していれば非ゼロを返すので中断する。
+# このフェンスで set -euo pipefail を使ってはならない（理由は reassign-lib.sh 冒頭のコメント参照。
+# set -e があると reassign_one 内の `status=$?` 退避に到達せず、Issue #335 の欠陥が再発する）
+source "${REASSIGN_LIB}" || exit 1
 
-# 実行ビットの有無に関わらず bash 経由で起動する（上記の理由により、
-# 直接実行 "${REASSIGN_SCRIPT}" に依存すると Permission denied になり得るため）
-bash "${REASSIGN_SCRIPT}" \
-  --issue "${ISSUE_NUMBER}" \
-  --old-parent "${OLD_PARENT}" \
-  --new-parent "${NEW_PARENT}"
-# echo を最後のコマンドにするとブロックの終了ステータスが常に 0 になり、
-# 実行基盤が「最終ステータス」で成否を判定した場合に非ゼロ終了を見落とす。
-# 直後に $? を退避してから出力し、非ゼロは呼び出し元へ伝播する（Issue #335）。
-# このブロックの上に set -euo pipefail を追加してはならない。set -e があると
-# 失敗した bash ... の時点でシェルが即終了し、$? の退避に到達せず、より
-# 発見しづらい形でバグが再発する（代替が必要な場合のみ
-# REASSIGN_STATUS=0; bash ... || REASSIGN_STATUS=$? の形にする）。
-REASSIGN_STATUS=$?
-echo "exit=${REASSIGN_STATUS}"
-if (( REASSIGN_STATUS != 0 )); then
-  # このブロックは 1 件分の呼び出しであり、非ゼロ終了は当該 1 件の失敗として
-  # ブロックの終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ
-  # 記録したうえで、exit 2 のうち (a) 解消可能な前提不備（gh/jq 不在・未認証・
-  # issue 取得失敗）のみ原因解消まで中断し、(b) 恒久的な対象外（cross-repository
-  # 親等）は棚卸し対象から除外して次の 1 件の呼び出しへ進む（終了コード表参照）。
-  # (a)/(b) はどちらも exit 2 で終了コード単独では区別できないため、stderr に
-  # `reason=cross-repository-parent` があるか grep して判定する（無ければ (a)）
-  exit "${REASSIGN_STATUS}"
+# 計画配列の存在・型ガード（fail-closed）。詳細は reassign-lib.sh の require_plan_array を参照
+require_plan_array REASSIGN_PLAN || exit 1
+
+# 呼び出し側ループ。契約の主体はここにある——「(b) 恒久的な対象外は次の 1 件へ進み、
+# (a) 解消可能な前提不備は原因解消まで中断する」を実際に実現するのはこのループである。
+# ISSUE_NUMBER / OLD_PARENT / NEW_PARENT は Step 2 で構築した REASSIGN_PLAN から供給する。
+SKIPPED=()
+for ENTRY in "${REASSIGN_PLAN[@]}"; do
+  # ENTRY は "<issue> <old-parent> <new-parent>" 形式。
+  # zsh は未クォートの展開を単語分割しないため、read で明示的に分割する
+  IFS=' ' read -r ISSUE_NUMBER OLD_PARENT NEW_PARENT <<< "${ENTRY}"
+  # `if reassign_one ...; then ... fi` の形にしてはならない。条件が偽で else が無い場合、
+  # `fi` の直後の $? は 0 になり（実測済み）、失敗が「成功」として読まれて
+  # (a)/(b) の判定も中断もすべて素通りする。`|| status=$?` で明示的に退避する。
+  status=0
+  reassign_one --issue "${ISSUE_NUMBER}" \
+               --old-parent "${OLD_PARENT}" \
+               --new-parent "${NEW_PARENT}" || status=$?
+  if (( status == 0 )); then
+    continue
+  fi
+  if (( status == 9 )); then
+    # (b) cross-repository 親。棚卸し対象から除外して次へ（Step 9 の要確認事項へ記載）
+    SKIPPED+=("${ISSUE_NUMBER}")
+    continue
+  fi
+  # (a) を含むそれ以外は握り潰さず中断する。原因を解消してから再実行する
+  echo "エラー: #${ISSUE_NUMBER} の付け替えが exit ${status} で失敗した。中断する" >&2
+  exit "${status}"
+done
+if (( ${#SKIPPED[@]} > 0 )); then
+  echo "対象外（cross-repository 親）: ${SKIPPED[*]}" >&2
 fi
 ```
 
-このブロックは**1 件分の呼び出し**であり、非ゼロ終了は**当該 1 件の失敗**としてブロックの
-終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ記録したうえで、exit 2 は
+`reassign_one` は**1 件分の呼び出し**であり、非ゼロ終了は**当該 1 件の失敗**として
+関数の返り値へ伝播する。判定に必要な stderr は関数内で捕捉したうえで必ず再出力するため、
+診断情報は失われない。呼び出し側ループは Step 9 の要確認事項へ記録したうえで、exit 2 は
 **(a) 解消可能な前提不備**（`gh`/`jq` 不在・未認証・issue 取得失敗）のみ原因解消まで中断し、
 **(b) 恒久的な対象外**（cross-repository 親等）は要確認事項へ記載して棚卸し対象から除外し、
 次の 1 件の呼び出しへ進む（終了コード表を参照）。(a)/(b) の判定は stderr に
@@ -181,6 +228,13 @@ stdout 最終行が `result=<state> issue=<n> new_parent=<n> old_parent=<n|->` �
 | 7 | — | POST 時点で別の親が付いていたレース。**DELETE 未実行のため無変更** | 要確認事項へ記載。実測し直して承認を取り直したうえで再実行する | **無変更**（DELETE 未実行） |
 | 8 | — | DELETE 後の POST で親重複レース。**部分変更**（旧親から外れ、新親にも付いていない） | 要確認事項へ記載。**無変更ではない。** 実状態を確認し必要なら手で紐付け直す。同一コマンドの再実行では回復しない | **部分変更**（旧親から外れ、新親にも付いていない） |
 
+**スクリプト自身は 0〜8 しか返さない。** `reassign-lib.sh` の `reassign_one` ラッパは、
+これに加えて **9 = 恒久的に対象外（cross-repository 親）** を返す（Issue #372）。
+9 はスクリプトの終了コードではなく、ラッパが stderr の `reason=cross-repository-parent`
+マーカーを判定して合成する値であり、呼び出し側ループが「棚卸し対象から除外して次の 1 件へ進む」
+のシグナルとして使う。マーカーの判定にはスクリプトの stderr が必要なため、
+ラッパは stderr をファイルへ捕捉したうえで**必ず再出力する**（診断情報は握り潰さない）。
+
 exit 4 は「経路による」で止めず、実際の内訳（孤児経路の POST 失敗 = 無変更 / DELETE 後の
 POST 失敗 = 部分変更）まで確認する。
 
@@ -210,29 +264,68 @@ sub-issue を受け付けない状態など）は従来どおり exit 4 / exit 7
 どの親にも紐付いていない孤児 issue を適切な Phase 親へ紐付ける。
 `--old-parent` を省略して同じスクリプトを呼ぶ（DELETE を飛ばして POST のみ実行される）。
 Phase が不明な issue はタイトル・本文を読んで判断し、判断できない場合はユーザーに確認する。
-`REASSIGN_SCRIPT` は Step 3 で解決済みの値をそのまま使う（未解決なら Step 3 と同じ 3 レイアウト
-解決を先に実行する）。
+
+**このフェンスは Step 3 の実行結果に依存せず単体で実行できる。** フェンスは独立シェルで
+実行され得るため、Step 3 が定義した関数・変数を継承しない前提で書く（Issue #372 /
+PR #374 codex-review P1 第 3 ラウンド）。前置きは Step 3 と同一である。
 
 ```bash
-# Step 3 と同じく bash 経由で起動する（vendoring で実行ビットが落ちている場合に
-# ここだけ Permission denied で落ちる非対称を作らないため）
-bash "${REASSIGN_SCRIPT}" \
-  --issue "${ORPHAN_NUMBER}" \
-  --new-parent "${PHASE_NUMBER}"
-# Step 3 と非対称にしない（呼び出し方だけでなく、終了ステータス伝播も揃える。
-# 理由は Step 3 のコメントと同一。Issue #335）
-REASSIGN_STATUS=$?
-echo "exit=${REASSIGN_STATUS}"
-if (( REASSIGN_STATUS != 0 )); then
-  exit "${REASSIGN_STATUS}"
+# reassign-lib.sh を 3 レイアウトから解決して source する。
+# **この前置きは Step 3 / Step 4 の両フェンスが同一の内容で持つ。** 手順書のコードフェンスは
+# ブロックごとに独立シェルで実行され得るため、片方のフェンスで定義した関数・変数がもう一方へ
+# 継承される保証がない（Issue #372 / PR #374 codex-review P1）。
+REASSIGN_LIB=""
+for CANDIDATE in \
+  "skills/update-issue-tree/scripts/reassign-lib.sh" \
+  ".agents/skills/update-issue-tree/scripts/reassign-lib.sh" \
+  ".claude/skills/update-issue-tree/scripts/reassign-lib.sh"; do
+  # 存在確認は -f のみで行う（-x にすると、npx skills add 等の vendoring で
+  # 実行ビットが落ちたファイルを「存在しない」と誤検知し、3 レイアウトいずれにも
+  # 見つからないという誤ったエラーメッセージになる）
+  if [[ -f "${CANDIDATE}" ]]; then
+    REASSIGN_LIB="${CANDIDATE}"
+    break
+  fi
+done
+if [[ -z "${REASSIGN_LIB}" ]]; then
+  echo "エラー: reassign-lib.sh が見つからない（3 レイアウトいずれにも存在しない）" >&2
+  exit 1
+fi
+# ライブラリは対の reassign-sub-issue.sh の存在まで確認したうえで、reassign_one /
+# require_plan_array と REASSIGN_SCRIPT を定義する。欠落していれば非ゼロを返すので中断する。
+# このフェンスで set -euo pipefail を使ってはならない（理由は reassign-lib.sh 冒頭のコメント参照。
+# set -e があると reassign_one 内の `status=$?` 退避に到達せず、Issue #335 の欠陥が再発する）
+source "${REASSIGN_LIB}" || exit 1
+
+# Step 3 と同じガードを同じ関数で行う（非対称を作らない）
+require_plan_array ORPHAN_PLAN || exit 1
+
+SKIPPED_ORPHANS=()
+for ENTRY in "${ORPHAN_PLAN[@]}"; do
+  # ENTRY は "<orphan-issue> <phase-parent>" 形式
+  IFS=' ' read -r ORPHAN_NUMBER PHASE_NUMBER <<< "${ENTRY}"
+  # Step 3 と同じ理由で `if ...; then ... fi` は使わない（`fi` 直後の $? は 0 になる）
+  status=0
+  reassign_one --issue "${ORPHAN_NUMBER}" --new-parent "${PHASE_NUMBER}" || status=$?
+  if (( status == 0 )); then
+    continue
+  fi
+  if (( status == 9 )); then
+    SKIPPED_ORPHANS+=("${ORPHAN_NUMBER}")
+    continue
+  fi
+  echo "エラー: #${ORPHAN_NUMBER} の再配置が exit ${status} で失敗した。中断する" >&2
+  exit "${status}"
+done
+if (( ${#SKIPPED_ORPHANS[@]} > 0 )); then
+  echo "対象外（cross-repository 親）: ${SKIPPED_ORPHANS[*]}" >&2
 fi
 ```
 
-このブロックも Step 3 と同じく**1 件分の呼び出し**である。非ゼロ終了は**当該 1 件の失敗**として
-ブロックの終了ステータスへ伝播する。呼び出し側は Step 9 の要確認事項へ記録したうえで、
-exit 2 の扱いも Step 3 と同一（(a) 解消可能な前提不備のみ原因解消まで中断、
-(b) 恒久的な対象外は要確認事項へ記載して次の 1 件の呼び出しへ進む。判定は stderr の
-`reason=cross-repository-parent` マーカーで機械的に行う。終了コード表を参照）。
+Step 3 と同一の関数・同一のループ構造であり、exit 2 の扱いも同じ
+（(a) 解消可能な前提不備のみ原因解消まで中断、(b) 恒久的な対象外は要確認事項へ記載して
+次の 1 件へ進む。判定は関数が捕捉した stderr の `reason=cross-repository-parent` マーカーで
+機械的に行い、返り値 9 として呼び出し側へ伝える。終了コード表を参照）。
 
 ### Step 5: 必要に応じて新 Phase 親を新設する
 
