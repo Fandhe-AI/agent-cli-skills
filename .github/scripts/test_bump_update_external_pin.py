@@ -64,6 +64,32 @@ jobs:
     runs-on: ubuntu-latest
 """
 
+UPSTREAM_WITH_NEW_REQUIRED_INPUT = """
+name: Update external sources (reusable)
+on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: false
+      runner-json:
+        type: string
+        required: false
+      new-required-flag:
+        type: string
+        required: true
+    secrets:
+      SUBMODULE_PAT:
+        required: false
+      SKILLS_PAT:
+        required: false
+      NEW_REQUIRED_SECRET:
+        required: true
+jobs:
+  submodule:
+    runs-on: ubuntu-latest
+"""
+
 
 class TestReplaceJobUsesRef(unittest.TestCase):
     def test_replaces_only_the_uses_line(self):
@@ -140,10 +166,22 @@ class TestWorkflowCallContract(unittest.TestCase):
         self.assertEqual(contract["inputs"], {"target", "runner-json"})
         self.assertEqual(contract["secrets"], {"SUBMODULE_PAT", "SKILLS_PAT"})
 
+    def test_all_optional_contract_has_no_required_keys(self):
+        contract = bump.workflow_call_contract(UPSTREAM_WITH_CONTRACT)
+        self.assertEqual(contract["required_inputs"], set())
+        self.assertEqual(contract["required_secrets"], set())
+
+    def test_extracts_required_keys(self):
+        contract = bump.workflow_call_contract(UPSTREAM_WITH_NEW_REQUIRED_INPUT)
+        self.assertEqual(contract["required_inputs"], {"new-required-flag"})
+        self.assertEqual(contract["required_secrets"], {"NEW_REQUIRED_SECRET"})
+
     def test_missing_workflow_call_returns_empty_sets(self):
         contract = bump.workflow_call_contract("name: x\non:\n  push:\n")
         self.assertEqual(contract["inputs"], set())
         self.assertEqual(contract["secrets"], set())
+        self.assertEqual(contract["required_inputs"], set())
+        self.assertEqual(contract["required_secrets"], set())
 
 
 class TestCheckWrapperContract(unittest.TestCase):
@@ -165,6 +203,32 @@ class TestCheckWrapperContract(unittest.TestCase):
     def test_non_reusable_job_is_ignored(self):
         other_job = "jobs:\n  x:\n    runs-on: ubuntu-latest\n    with:\n      foo: bar\n"
         violations = bump.check_wrapper_contract(other_job, {"inputs": set(), "secrets": set()})
+        self.assertEqual(violations, [])
+
+    def test_new_required_input_not_supplied_by_wrapper_is_a_violation(self):
+        # イシュー #343 Review 指摘の回帰テスト: 新 SHA で required: true に
+        # なった input を wrapper が渡していない片方向欠落を検出できること。
+        contract = bump.workflow_call_contract(UPSTREAM_WITH_NEW_REQUIRED_INPUT)
+        violations = bump.check_wrapper_contract(WRAPPER_TEXT, contract)
+        self.assertTrue(any("new-required-flag" in v for v in violations))
+
+    def test_new_required_secret_not_supplied_by_wrapper_is_a_violation(self):
+        contract = bump.workflow_call_contract(UPSTREAM_WITH_NEW_REQUIRED_INPUT)
+        violations = bump.check_wrapper_contract(WRAPPER_TEXT, contract)
+        self.assertTrue(any("NEW_REQUIRED_SECRET" in v for v in violations))
+
+    def test_required_key_supplied_by_wrapper_has_no_violation(self):
+        # 必須キーであっても wrapper が渡していれば違反にならない。
+        contract = bump.workflow_call_contract(UPSTREAM_WITH_CONTRACT)
+        violations = bump.check_wrapper_contract(WRAPPER_TEXT, contract)
+        self.assertEqual(violations, [])
+
+    def test_contract_without_required_keys_field_skips_required_check(self):
+        # 後方互換: {"inputs": set(...), "secrets": set(...)} のみの契約
+        # （required_inputs/required_secrets 無し）では方向 2 の判定を
+        # 素通りし、方向 1（契約外キー）の判定のみ効く。
+        contract = {"inputs": {"target", "runner-json"}, "secrets": {"SUBMODULE_PAT", "SKILLS_PAT"}}
+        violations = bump.check_wrapper_contract(WRAPPER_TEXT, contract)
         self.assertEqual(violations, [])
 
 

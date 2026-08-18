@@ -101,38 +101,86 @@ def replace_job_uses_ref(text: str, new_sha: str) -> tuple[str | None, str | Non
     return new_text, None
 
 
-def workflow_call_contract(upstream_text: str) -> dict:
-    """上流 reusable workflow 本文から ``workflow_call`` の inputs/secrets 名を取り出す。
+_EMPTY_CONTRACT: dict = {
+    "inputs": set(),
+    "secrets": set(),
+    "required_inputs": set(),
+    "required_secrets": set(),
+}
 
-    戻り値は ``{"inputs": set[str], "secrets": set[str]}``。パース失敗・
-    ``workflow_call`` が無い場合は空集合を返す（fail-closed。契約が空なら
-    ``check_wrapper_contract`` は wrapper の全 ``with``/``secrets`` キーを
-    「契約外」として検出し、bump をスキップする側に倒れる）。
+
+def _required_keys(entries: dict) -> set[str]:
+    """``workflow_call.inputs``/``secrets`` マッピングから ``required: true`` のキーだけを抽出する。
+
+    GitHub Actions の仕様では ``required`` 省略時のデフォルトは ``false``
+    （明示的に ``true`` と書かれたキーのみ必須）。値がマッピングでない
+    エントリ（不正な YAML）は必須扱いにしない（fail-closed 方向は
+    「契約に無いキー」側の判定に委ねる。ここで誤検出すると存在しない
+    必須違反を作ってしまう）。
+    """
+    required: set[str] = set()
+    for key, entry in entries.items():
+        if isinstance(entry, dict) and entry.get("required") is True:
+            required.add(key)
+    return required
+
+
+def workflow_call_contract(upstream_text: str) -> dict:
+    """上流 reusable workflow 本文から ``workflow_call`` の inputs/secrets 契約を取り出す。
+
+    戻り値は ``{"inputs": set[str], "secrets": set[str],
+    "required_inputs": set[str], "required_secrets": set[str]}``。
+    ``required_*`` は ``required: true`` が明示されたキーのみ（イシュー #343
+    Review 指摘: 新 SHA で追加された必須 input/secrets を wrapper が渡して
+    いないと、GitHub はジョブ起動前に "Required input <name> is not
+    supplied" で失敗し、対象リポ全体の同期が一斉停止する。この片方向欠落を
+    ``check_wrapper_contract`` 側で検出するための土台）。
+    パース失敗・``workflow_call`` が無い場合は全集合空を返す（fail-closed。
+    ``inputs``/``secrets`` が空なら ``check_wrapper_contract`` は wrapper の
+    全 ``with``/``secrets`` キーを「契約外」として検出し、bump をスキップ
+    する側に倒れる。``required_*`` が空なら必須欠落判定は素通りするが、
+    それは「契約自体が読めない」ケースであり既存の契約外キー判定が
+    fail-closed を担保する）。
     """
     try:
         spec = yaml.safe_load(upstream_text)
     except yaml.YAMLError:
-        return {"inputs": set(), "secrets": set()}
+        return dict(_EMPTY_CONTRACT)
     if not isinstance(spec, dict):
-        return {"inputs": set(), "secrets": set()}
+        return dict(_EMPTY_CONTRACT)
 
     on = cud.workflow_on(spec)
     wc = on.get("workflow_call") if isinstance(on, dict) else None
     if not isinstance(wc, dict):
-        return {"inputs": set(), "secrets": set()}
+        return dict(_EMPTY_CONTRACT)
 
-    inputs = set(wc["inputs"].keys()) if isinstance(wc.get("inputs"), dict) else set()
-    secrets = set(wc["secrets"].keys()) if isinstance(wc.get("secrets"), dict) else set()
-    return {"inputs": inputs, "secrets": secrets}
+    inputs_spec = wc.get("inputs") if isinstance(wc.get("inputs"), dict) else {}
+    secrets_spec = wc.get("secrets") if isinstance(wc.get("secrets"), dict) else {}
+    return {
+        "inputs": set(inputs_spec.keys()),
+        "secrets": set(secrets_spec.keys()),
+        "required_inputs": _required_keys(inputs_spec),
+        "required_secrets": _required_keys(secrets_spec),
+    }
 
 
 def check_wrapper_contract(wrapper_text: str, contract: dict) -> list[str]:
-    """wrapper が渡す ``with:`` / ``secrets:`` キーが新 SHA の契約内かを確認する。
+    """wrapper が渡す ``with:`` / ``secrets:`` キーが新 SHA の契約と両方向で整合するかを確認する。
 
-    契約外キーの一覧を返す（空リスト = 契約違反なし）。reusable workflow の
-    呼び出しは、呼び先の ``on.workflow_call.inputs``/``secrets`` に無いキーを
-    渡されるとジョブ起動前に失敗する仕様のため、ここで事前に検出して
-    bump 対象から外す（``docs/update-external-pin.md`` 参照）。
+    契約違反の一覧を返す（空リスト = 違反なし）。reusable workflow の呼び出しは
+    次の 2 方向どちらでもジョブ起動前に失敗する仕様のため、両方向を検証する
+    （片方向のみだと防げない失敗シナリオがある。イシュー #343 Review 指摘）:
+
+    1. wrapper が渡すキーが呼び先の ``on.workflow_call.inputs``/``secrets``
+       に無い（契約外キー）→ "Invalid input, <name> is not defined..."
+    2. 新 SHA で ``required: true`` になった input/secrets を wrapper の
+       ``with:``/``secrets:`` が渡していない（必須キー欠落）→
+       "Required input <name> is not supplied"
+
+    ``contract`` に ``required_inputs``/``required_secrets`` が無い場合
+    （テスト等で ``{"inputs": set(...), "secrets": set(...)}`` のみを渡す
+    呼び出し）は空集合扱いとし、方向 2 の判定は素通りする（後方互換。
+    方向 1 の判定は従来どおり必ず効く）。
     """
     try:
         spec = yaml.safe_load(wrapper_text)
@@ -145,6 +193,9 @@ def check_wrapper_contract(wrapper_text: str, contract: dict) -> list[str]:
     if not isinstance(jobs, dict):
         return ["jobs セクションが無い"]
 
+    required_inputs = contract.get("required_inputs", set())
+    required_secrets = contract.get("required_secrets", set())
+
     violations: list[str] = []
     for job in jobs.values():
         if not isinstance(job, dict):
@@ -156,10 +207,20 @@ def check_wrapper_contract(wrapper_text: str, contract: dict) -> list[str]:
         for key in with_:
             if key not in contract["inputs"]:
                 violations.append(f"with.{key} は新 SHA の workflow_call.inputs 契約に無い")
+        for key in required_inputs:
+            if key not in with_:
+                violations.append(
+                    f"with.{key} は新 SHA で必須 (required: true) になったが wrapper が渡していない"
+                )
         secrets_ = job.get("secrets") if isinstance(job.get("secrets"), dict) else {}
         for key in secrets_:
             if key not in contract["secrets"]:
                 violations.append(f"secrets.{key} は新 SHA の workflow_call.secrets 契約に無い")
+        for key in required_secrets:
+            if key not in secrets_:
+                violations.append(
+                    f"secrets.{key} は新 SHA で必須 (required: true) になったが wrapper が渡していない"
+                )
     return violations
 
 
@@ -438,6 +499,15 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
         f"repos/{target.repo}/pulls", pr_payload, token
     )
     if pr_status != 201:
+        # PUT（ファイル更新）は成功済みのため、ここで削除しないと新 SHA へ
+        # 更新済みのコミットを持つ open PR の無いブランチが残る。次回実行時、
+        # find_bump_candidates は乖離判定を default branch の内容から行うため
+        # このブランチの存在自体は再判定に影響しないが、apply_bump の
+        # 「既存 open PR 確認」（冪等チェック）はこのブランチを見ないため
+        # 再実行のたびに ref 作成が 422 を返すだけの残骸になる。PUT 失敗時と
+        # 同様に削除して次回実行をクリーンな状態に保つ（イシュー #343
+        # Review 指摘）。
+        _delete_ref_best_effort(target.repo, branch, token)
         return BumpOutcome(target.repo, "failed", f"PR 作成が HTTP {pr_status}: {pr_body_resp}")
 
     try:
