@@ -145,6 +145,19 @@ git diff -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
 # そのまま取り込むため、内容を表示しないまま承認できてしまう（-z / NUL 区切りで防ぐ）。
 UNTRACKED_COUNT=0
 echo ""
+# git ls-files をプロセス置換（`< <(...)`）へ直接つなぐと、`set -euo pipefail` は
+# その終了コードを検査しない。`git ls-files` が失敗（破損 index・権限エラー等）しても
+# while は単に0回実行され UNTRACKED_COUNT=0 のまま「新規（未追跡）ファイル: なし」と
+# 誤表示し、実際には存在する未追跡ファイルの内容を確認しないまま呼び出し元が
+# git add で承認してしまう（このスクリプトが防ごうとしている非対称そのもの）。
+# 通常のコマンド置換で一時ファイルへ書き出し、`if ! ...` で明示的に終了コードを検査する
+# ことで fail-closed にする。
+UNTRACKED_LIST_FILE="$(mktemp)"
+trap 'rm -f "${UNTRACKED_LIST_FILE}"' EXIT
+if ! git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" > "${UNTRACKED_LIST_FILE}"; then
+  echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。内容未確認のまま承認できてしまうため中止します。" >&2
+  exit 1
+fi
 while IFS= read -r -d '' f; do
   if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
     echo "==> 新規（未追跡）ファイル — 承認時に git add で取り込まれる集合:"
@@ -180,7 +193,7 @@ while IFS= read -r -d '' f; do
     # set -e の中断を避ける（clean ガード等の fail-closed 判定には影響しない）。
     git diff --no-index -- /dev/null "${f}" || true
   fi
-done < <(git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/")
+done < "${UNTRACKED_LIST_FILE}"
 if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
   echo "==> 新規（未追跡）ファイル: なし"
 fi

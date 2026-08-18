@@ -16,6 +16,14 @@
 //   - 'binary-file'  : NUL バイトを含むバイナリの未追跡ファイルを作成する
 //                      （git diff --no-index が "Binary files ... differ" しか出さず、
 //                        内容未確認のまま git add で取り込まれてしまう回帰の再現）
+//   - 'new-subdir'   : upstream が新規サブディレクトリごとファイルを追加するケースを再現する
+//                      （git ls-files はファイルパスを個々に返すが、git clean -fdn は親
+//                        ディレクトリをまとめて1行で報告するため、SKILL.md 手動回帰確認の
+//                        照合手順が行単位の完全一致では機能しないことを検証する）
+//   - 'ls-files-fail': `.agents/skills/<skill>/` を git のワークツリー外へ差し替え、
+//                      git ls-files がエラー終了するケースを再現する（プロセス置換の終了コードが
+//                      検査されず fail-open になる回帰の再現。テストは非ゼロ終了と
+//                      「新規（未追跡）ファイル: なし」が出力されないことの両方を検証する）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -24,6 +32,11 @@ import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+// git ls-files を意図的に失敗させる回帰確認（'ls-files-fail' シナリオ）で、実 git へ
+// 委譲するために使う絶対パス。PATH の先頭を書き換えた後に `git` で解決すると自己参照に
+// なるため、テスト起動時（PATH 上書き前）に一度だけ解決する。
+const REAL_GIT = execFileSync('/bin/bash', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -80,6 +93,12 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "binary-file" ]]; then
   # NUL バイトを含むバイナリファイル（git diff --no-index が内容を出さないケースの確認用）
   printf 'binary\\x00marker\\x00content' > "\${skill_dir}/IMAGE.bin"
 fi
+if [[ "\${TEST_NPX_SCENARIO:-}" == "new-subdir" ]]; then
+  # upstream が新規サブディレクトリごとファイルを追加するケース
+  # （git clean -fdn は個々のファイルではなく親ディレクトリをまとめて1行で報告する）
+  mkdir -p "\${skill_dir}/references"
+  echo "brand new upstream reference doc" > "\${skill_dir}/references/new.md"
+fi
 exit 0
 `
   writeFileSync(join(binDir, 'npx'), npxBody)
@@ -112,6 +131,28 @@ exit 0
   sh('git add -A && git commit -q -m init', repoDir)
 
   return { repoDir, binDir, scenario }
+}
+
+// 'ls-files-fail' 回帰確認専用: `git ls-files --others ...`（未追跡ファイル列挙）のみを
+// 失敗させ、他の git 呼び出し（Step 4 の clean チェック・Step 5 の tracked diff 等）は
+// 実 git へ委譲する `git` ラッパーを PATH 先頭の binDir へ追加する。
+// pathspec 一致等の粗い偽装ではなく `--others` の有無で判定することで、スクリプトが
+// 未追跡ファイル列挙にだけ `git ls-files` を使っている実装を維持したまま、
+// 意図した呼び出し箇所だけを的確に失敗させる。
+function addGitLsFilesFailure(binDir) {
+  const gitWrapper = `#!/usr/bin/env bash
+if [[ "\${1:-}" == "ls-files" ]]; then
+  for a in "\$@"; do
+    if [[ "\${a}" == "--others" ]]; then
+      echo "fatal: simulated git ls-files failure (index corrupt)" >&2
+      exit 128
+    fi
+  done
+fi
+exec "${REAL_GIT}" "\$@"
+`
+  writeFileSync(join(binDir, 'git'), gitWrapper)
+  chmodSync(join(binDir, 'git'), 0o755)
 }
 
 function runScript({ repoDir, binDir, scenario }) {
@@ -254,6 +295,69 @@ test('ケース5: バイナリの未追跡ファイルは種別・サイズ・�
     assert.deepEqual(
       cleanDryRunList(ctx.repoDir),
       [`.agents/skills/${SKILL_NAME}/IMAGE.bin`],
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース6: upstream が新規サブディレクトリごとファイルを追加した場合、プレビューはファイルの' +
+  'フルパスを列挙し、git clean -fdn とは粒度が一致しない（前方一致でのみ照合できる）', () => {
+  const ctx = setupRepo('new-subdir')
+  try {
+    const out = runScript(ctx)
+
+    assert.match(out, /新規（未追跡）ファイル/, '未追跡ファイルの見出しが出力されること')
+    // プレビューは git ls-files ベースのため、ディレクトリではなく個々のファイルの
+    // フルパスをそのまま列挙する（SKILL.md の手動回帰確認手順3が要求する挙動）
+    assert.match(
+      out,
+      /references\/new\.md/,
+      'サブディレクトリ配下のファイルもフルパスで一覧に出ること',
+    )
+    assert.match(out, /brand new upstream reference doc/, 'ファイル内容の diff も表示されること')
+
+    // git clean -fdn は新規ディレクトリを個々のファイルではなく親ディレクトリ1行で
+    // 報告する。行単位の完全一致ではプレビューと照合できないことを実測で示す
+    // （SKILL.md 手順3が「一致」ではなく「前方一致」を要求する根拠）。
+    const cleanList = cleanDryRunList(ctx.repoDir)
+    assert.deepEqual(cleanList, [`.agents/skills/${SKILL_NAME}/references/`])
+    assert.notDeepEqual(cleanList, [`.agents/skills/${SKILL_NAME}/references/new.md`])
+    // 前方一致では照合できる
+    assert.ok(
+      cleanList.some((dir) => `.agents/skills/${SKILL_NAME}/references/new.md`.startsWith(dir)),
+      'プレビューのファイルパスは git clean -fdn の報告した親ディレクトリで始まること',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース7: git ls-files が失敗した場合、fail-open で「なし」と誤表示せずスクリプトが' +
+  '非ゼロ終了する', () => {
+  const ctx = setupRepo('new-file')
+  addGitLsFilesFailure(ctx.binDir)
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /git ls-files が失敗し/,
+          '専用のエラーメッセージで停止すること',
+        )
+        assert.doesNotMatch(
+          combined,
+          /新規（未追跡）ファイル: なし/,
+          '実際には未追跡ファイルが存在するのに「なし」と誤表示しないこと' +
+            '（process substitution の終了コードが検査されない fail-open 回帰の再現）',
+        )
+        return true
+      },
     )
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })

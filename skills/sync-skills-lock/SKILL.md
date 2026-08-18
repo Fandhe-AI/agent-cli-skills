@@ -156,9 +156,19 @@ git diff -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
 # 握り潰される一方、Step 7 の git add は実ファイルをそのまま取り込むため、内容を表示しない
 # まま承認できてしまう（-z / NUL 区切りで防ぐ）。
 UNTRACKED_COUNT=0
+# git ls-files をプロセス置換へ直接つなぐと、set -euo pipefail はその終了コードを
+# 検査しない。失敗（破損 index・権限エラー等）しても while は0回実行され「なし」と
+# 誤表示するため、一時ファイルへ書き出し if ! ... で明示的に終了コードを検査する
+# （scripts/skills-lock-update.sh と同一のガード）。
+UNTRACKED_LIST_FILE="$(mktemp)"
+trap 'rm -f "${UNTRACKED_LIST_FILE}"' EXIT
+if ! git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" > "${UNTRACKED_LIST_FILE}"; then
+  echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。中止します。" >&2
+  exit 1
+fi
 while IFS= read -r -d '' f; do
   if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
-    echo "==> 新規（未追跡）ファイル:"
+    echo "==> 新規（未追跡）ファイル — 承認時に git add で取り込まれる集合:"
   fi
   UNTRACKED_COUNT=$((UNTRACKED_COUNT + 1))
   # 空ファイルは git diff --no-index が差分を出力しないため、diff の見出しだけでは
@@ -191,7 +201,7 @@ while IFS= read -r -d '' f; do
     # set -e の中断を避ける。
     git diff --no-index -- /dev/null "${f}" || true
   fi
-done < <(git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/")
+done < "${UNTRACKED_LIST_FILE}"
 if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
   echo "==> 新規（未追跡）ファイル: なし"
 fi
@@ -303,20 +313,35 @@ git status --porcelain skills-lock.json
 ### 未追跡ファイル可視化の手動回帰確認
 
 upstream にファイルが増えたケース（Step 5 のプレビュー拡張が効いているか）は、npx を実行せずに
-未追跡ファイルを模擬して確認できる。
+未追跡ファイルを模擬して確認できる。フラットファイルの追加と、upstream が新規サブディレクトリ
+ごと追加する典型ケース（`references/` 等）の両方を確認する。**両ケースで手順3の照合方法が異なる**
+点に注意する（後述）。
 
 ```bash
-# 1. clean な状態で検証用ファイルを作成し、npx が新規ファイルを増やした直後の状態を再現する
+# 1a. clean な状態で検証用ファイル（フラット）を作成し、npx が新規ファイルを増やした直後の状態を再現する
 touch ".agents/skills/${SKILL_NAME}/__preview_regression_check__.md"
 
-# 2. Step 5 のプレビュー部（上記コマンド）を実行し、検証用ファイルの内容（0 byte でも
-#    「新規（未追跡）ファイル:」の一覧に名前が出ること）が表示されることを確認する
+# 1b. 新規サブディレクトリごと追加されるケースも作成する
+mkdir -p ".agents/skills/${SKILL_NAME}/__preview_regression_dir__"
+touch ".agents/skills/${SKILL_NAME}/__preview_regression_dir__/new.md"
 
-# 3. git clean -fdn（dry-run）の一覧とプレビューの未追跡一覧が一致することを確認する
+# 2. Step 5 のプレビュー部（上記コマンド）を実行し、両方の検証用ファイルの内容（0 byte でも
+#    「新規（未追跡）ファイル — 承認時に git add で取り込まれる集合:」の一覧に、サブディレクトリ
+#    配下のファイルも含めてフルパスで名前が出ること）が表示されることを確認する
+#    （プレビューは git ls-files ベースのため、ディレクトリではなく個々のファイルパスを列挙する）
+
+# 3. git clean -fdn（dry-run）の一覧と照合する。
+#    フラットファイルはプレビューの行と `git clean -fdn` の行が完全一致する。
+#    新規サブディレクトリは `git clean -fdn` が個々のファイルではなく親ディレクトリを
+#    まとめて1行（`Would remove <dir>/`）で報告するため、行単位の完全一致では照合できない。
+#    この場合はプレビューの各ファイルパスが `git clean -fdn` のいずれかの出力行（ファイル
+#    自身、またはその祖先ディレクトリ）で始まることを確認する（前方一致で照合する）。
+#    完全一致を要求すると、正常に動作しているプレビューを「壊れている」と誤診断する。
 git clean -fdn -- ".agents/skills/${SKILL_NAME}/"
 
-# 4. 検証用ファイルを削除して原状復帰する
+# 4. 検証用ファイル・ディレクトリを削除して原状復帰する
 rm ".agents/skills/${SKILL_NAME}/__preview_regression_check__.md"
+rm -rf ".agents/skills/${SKILL_NAME}/__preview_regression_dir__"
 ```
 
 ## 既存スキルとの関係
