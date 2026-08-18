@@ -39,6 +39,7 @@ const SLICE_EXPORTS = [
   'DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES',
   'EPHEMERAL_KIND_MAX',
   'EPHEMERAL_RESERVE_PER_NEW_START',
+  'projectResidualBytes',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
@@ -51,6 +52,7 @@ const {
   DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES,
   EPHEMERAL_KIND_MAX,
   EPHEMERAL_RESERVE_PER_NEW_START,
+  projectResidualBytes,
 } = mod
 
 test('既定値は 100（未指定・null のいずれも DEFAULT_MAX_RESIDUAL_WORKTREES を返す）', () => {
@@ -197,15 +199,12 @@ test('measureResidualWorktreeBytes はプロンプトへ渡す前に sanitizeWor
   const fnStart = source.indexOf('async function measureResidualWorktreeBytes(paths)')
   const fnBody = source.slice(fnStart, fnStart + 3000)
   assert.match(fnBody, /UNTRUSTED_POLICY,/)
-  assert.match(fnBody, /xargs -0 du -sk/)
+  assert.match(fnBody, /jq -j '\.\[\] \| \. \+ /)
 })
 
-test('新規着手・monitoring 再開の両方が perWorktreeByteReserve による projected バイト判定を持つ', () => {
-  assert.match(
-    source,
-    /residualBytesAtStart \+ ephemeralWorktrees\.length \* perWorktreeByteReserve > maxResidualWorktreeBytes/,
-  )
-  const projectedByteOccurrences = source.match(/const projectedBytes =/g) ?? []
+test('新規着手・monitoring 再開の両方が projectResidualBytes による projected バイト判定を持つ', () => {
+  assert.match(source, /projectedBytesA = projectResidualBytes\(\{/)
+  const projectedByteOccurrences = source.match(/const projectedBytes = projectResidualBytes\(\{/g) ?? []
   assert.ok(
     projectedByteOccurrences.length >= 2,
     'projectedBytes 系の計算式（新規着手・monitoring 再開の双方）が見つからない',
@@ -254,4 +253,99 @@ test('実測し直しは残置パス一覧＋台帳パスの合計を測定し�
   const fnBody = source.slice(fnStart, fnEnd)
   assert.match(fnBody, /residualPathsAtStart, \.\.\.ephemeralWorktrees\.map\(\(e\) => e\.path\)/)
   assert.match(fnBody, /actualBytes > maxResidualWorktreeBytes && !newStartSuppressed/)
+})
+
+// --- K8Dc 回帰: ラン中実測し直しが以後の projection の基準を更新すること（PR #390 codex-review
+// 指摘・CI fail 対象）。従来は actualBytes を上限超過の即時判定にのみ使い破棄していたため、
+// 実測が上限直下でも以後の projection は開始時の古い residualBytesAtStart のまま更新されず、
+// 容量超過の新規着手を許す fail-open になっていた。remeasureResidualBytesIfDue が
+// residualBytesAtStart と byteBaselineLedgerCount を同一代入で更新することをソース確認する。
+
+test('実測し直し成功時に residualBytesAtStart と byteBaselineLedgerCount を同一箇所で更新する（K8Dc 対応）', () => {
+  const fnStart = source.indexOf('async function remeasureResidualBytesIfDue()')
+  const fnEnd = source.indexOf('\nwhile (true) {', fnStart)
+  const fnBody = source.slice(fnStart, fnEnd)
+  assert.match(fnBody, /residualBytesAtStart = actualBytes/)
+  assert.match(fnBody, /byteBaselineLedgerCount = ephemeralWorktrees\.length/)
+  // 更新順序: actualBytes 算出後・kib === null の早期 return より後（成功時のみ更新される）
+  const nullReturnIdx = fnBody.indexOf('if (kib === null)')
+  const baselineUpdateIdx = fnBody.indexOf('residualBytesAtStart = actualBytes')
+  assert.ok(nullReturnIdx >= 0 && baselineUpdateIdx > nullReturnIdx)
+})
+
+// --- projectResidualBytes（K8Dc 対応で切り出した純粋関数）の回帰テスト ---
+// 基準確定後に台帳が増えていない場合、projection は基準値そのものと一致すべき（二重計上なし）。
+
+test('projectResidualBytes: 台帳増分 0・予約 0 なら projection は baselineBytes と一致する', () => {
+  const p = projectResidualBytes({
+    baselineBytes: 500 * 1024 * 1024,
+    ledgerLength: 10,
+    baselineLedgerCount: 10,
+    reservedUnits: 0,
+    extraReserveUnits: 0,
+    perWorktreeByteReserve: 4 * 1024 * 1024,
+  })
+  assert.equal(p, 500 * 1024 * 1024)
+})
+
+test('projectResidualBytes: 基準確定済みの台帳分は二重計上しない（K8Dc 回帰の核心）', () => {
+  const perWorktree = 4 * 1024 * 1024
+  // 基準確定時点で台帳が既に 10 件（baselineBytes にその実消費が反映済み）。
+  // ledgerLength をそのまま乗じる旧実装なら 10 件分を再度予約し過大評価になる。
+  const p = projectResidualBytes({
+    baselineBytes: 500 * 1024 * 1024,
+    ledgerLength: 10,
+    baselineLedgerCount: 10,
+    reservedUnits: 2,
+    extraReserveUnits: 1,
+    perWorktreeByteReserve: perWorktree,
+  })
+  assert.equal(p, 500 * 1024 * 1024 + (0 + 2 + 1) * perWorktree)
+})
+
+test('projectResidualBytes: 基準以降に積み増された台帳分のみ floor 予約する', () => {
+  const perWorktree = 4 * 1024 * 1024
+  const p = projectResidualBytes({
+    baselineBytes: 500 * 1024 * 1024,
+    ledgerLength: 13, // 基準確定後に 3 件積み増された
+    baselineLedgerCount: 10,
+    reservedUnits: 0,
+    extraReserveUnits: 0,
+    perWorktreeByteReserve: perWorktree,
+  })
+  assert.equal(p, 500 * 1024 * 1024 + 3 * perWorktree)
+})
+
+test('projectResidualBytes: baselineLedgerCount が ledgerLength を上回っても負の予約にならない（防御的 clamp）', () => {
+  const p = projectResidualBytes({
+    baselineBytes: 500 * 1024 * 1024,
+    ledgerLength: 5,
+    baselineLedgerCount: 10,
+    reservedUnits: 0,
+    extraReserveUnits: 0,
+    perWorktreeByteReserve: 4 * 1024 * 1024,
+  })
+  assert.equal(p, 500 * 1024 * 1024)
+})
+
+// --- K-YX 回帰（Cursor Bugbot High）: 実測 du が並行 cleanup とのパス削除競合に耐えること ---
+// 従来は「存在しないパス」も measureResidualWorktreeBytes 全体の失敗として扱っていたため、
+// 並行 runOne の cleanup が remeasure 測定中にパスを削除すると 1 件の欠落で全体が失敗し、
+// newStartSuppressed（fail-closed）が恒久化して新規着手が止まっていた。存在しないパスは
+// 0 として扱い（missing カウント）、実エラー（du 失敗等）のみを fail-closed 対象とする
+// ことをプロンプト・スキーマの両方でソース確認する。
+
+test('measureResidualWorktreeBytes は存在しないパスを ENOENT 耐性で 0 扱いし、実エラーのみ fail-closed にする', () => {
+  const fnStart = source.indexOf('async function measureResidualWorktreeBytes(paths)')
+  const fnEnd = source.indexOf('\n\n// メイン worktree の', fnStart)
+  const fnBody = source.slice(fnStart, fnEnd)
+  assert.ok(fnStart >= 0 && fnEnd > fnStart, 'measureResidualWorktreeBytes の関数境界を検出できない')
+  assert.match(fnBody, /\[ ! -e "\$p" \]/)
+  assert.match(fnBody, /missing=\$\(\(missing\+1\)\)/)
+  assert.match(fnBody, /err=\$\(\(err\+1\)\)/)
+  assert.match(fnBody, /ERR が 0 より大きい場合は/)
+})
+
+test('ORPHAN_BYTES_SCHEMA は missing を任意フィールドとして持ち、成否判定に使わないと明記する', () => {
+  assert.match(source, /missing: \{\s*type: 'integer'/)
 })

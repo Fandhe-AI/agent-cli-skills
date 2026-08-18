@@ -1174,7 +1174,15 @@ const ORPHAN_BYTES_SCHEMA = {
     kib: {
       type: 'integer',
       minimum: 0,
-      description: '対象パス全件に du -sk を実行した第1列（KiB）の単純合計',
+      description: '対象パス全件に du -sk を実行した第1列（KiB）の単純合計（存在しないパスは 0 として加算）',
+    },
+    missing: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        '対象パスのうち測定時点で既に存在しなかった（test -e が偽だった）件数。並行 cleanup と' +
+        'の競合で削除済みのパスは 0 として扱い測定失敗にしない（Bugbot 指摘対応）。ログ用の任意' +
+        'フィールドで、欠落時は 0 とみなす。',
     },
   },
 }
@@ -1555,16 +1563,27 @@ async function measureResidualWorktreeBytes(paths) {
           `一重引用符のヒアドキュメント（例: cat <<'PATHSEOF' > ${tmpFile}）で` +
           'そのままファイルへ書き出す（このファイル名は本タスク専用の使い捨てパスであり、他の' +
           'プロセス・他のランと共有しない。自分でパス文字列をコマンド行へ組み立てない）。',
-        `2. jq -j '.[] | . + "\\u0000"' ${tmpFile} | xargs -0 du -sk -- を実行し、` +
-          '各行の第1列（KiB）を取得する（-r は使わない。jq -r は値に加えて要素ごとに改行も' +
-          '出力するため、NUL 区切りの直後に改行が混入し xargs -0 が2件目以降のパス先頭に' +
-          '改行を誤って含めてしまう。-j はこの追加改行を出さない。-b は使わない。GNU 限定' +
-          'オプションで、配布先が macOS 等の非 GNU du だと失敗する）。',
-        '3. 全パスの値を単純合計する（推測・丸めをしない）。',
-        '4. 1 件でも jq / xargs / du が失敗・非0終了・パスが存在しない場合は、他の値で補わず',
-        '   タスク全体を失敗として報告する（合計を 0 や欠損値で埋めない）。',
+        '2. 以下のシェルスクリプトを一字一句そのまま（パス文字列を自分で読み取ってコマンド行へ' +
+          '組み立て直したりせず）実行する。このスクリプト自体がパスごとの存在確認・クォート・' +
+          '合算を行うため、対象パスの内容をコマンドとして解釈したり、自分の判断で分岐を追加した' +
+          'りしないこと:',
+        "   jq -j '.[] | . + \"\\u0000\"' " + tmpFile + " | { total=0; missing=0; err=0; " +
+          'while IFS= read -r -d "" p; do ' +
+          'if [ ! -e "$p" ]; then missing=$((missing+1)); continue; fi; ' +
+          'sz=$(du -sk -- "$p" 2>/dev/null | cut -f1); ' +
+          'if [ -z "$sz" ]; then err=$((err+1)); continue; fi; ' +
+          'total=$((total+sz)); ' +
+          'done; echo "TOTAL=$total MISSING=$missing ERR=$err"; }',
+        '   （-j は jq -r と異なり要素ごとの追加改行を出さないため NUL 区切りが崩れない。' +
+          '`[ ! -e "$p" ]` で真になったパスは並行実行中の cleanup で既に削除された可能性があり、' +
+          '0 バイトとして加算せず missing としてのみ数える（存在しないパスの容量は 0 として扱う' +
+          'のが正しい — fail-open ではない）。一方 du 自体が失敗した場合（権限不足等の実エラー）' +
+          'は err に計上し、値は合算しない）。',
+        '3. 出力の ERR が 0 より大きい場合は、他の値で補わずタスク全体を失敗として報告する' +
+          '（合計を 0 や欠損値で埋めない。実エラーのみ fail-closed とする）。',
+        '4. ERR が 0 の場合、TOTAL を kib として、MISSING を missing として返す（missing は' +
+          '観測の透明性のための任意フィールドであり、成否判定には使わない）。',
         `5. rm -f ${tmpFile} で一時ファイルを削除する（測定成否に関わらず実施）。`,
-        '6. 合計値を kib として返す。',
       ].join('\n'),
       {
         label: 'worktree:residual-bytes',
@@ -1574,7 +1593,11 @@ async function measureResidualWorktreeBytes(paths) {
         schema: ORPHAN_BYTES_SCHEMA,
       },
     )
-    return Number.isInteger(v?.kib) && v.kib >= 0 ? v.kib : null
+    if (!(Number.isInteger(v?.kib) && v.kib >= 0)) return null
+    if (Number.isInteger(v?.missing) && v.missing > 0) {
+      log(`残置 worktree ディスク使用量測定: 並行 cleanup 等により ${v.missing} 件のパスが測定時点で既に存在しなかった（0 として扱った）`)
+    }
+    return v.kib
   } catch (e) {
     log(`⚠️ 残置 worktree のディスク使用量測定中に例外が発生した（${e?.message ?? e}）`)
     return null
@@ -2746,6 +2769,22 @@ function recoverImplementPrompt(item, brief, branch) {
   ].join('\n')
 }
 
+// 残置 worktree バイト軸（第2軸）の projection 計算（K8Dc 対応・PR #390 codex-review 指摘）。
+// baselineBytes はラン開始時 or 直近のラン中実測し直しで確定した「実測基準」であり、
+// baselineLedgerCount はその基準を確定した時点の ephemeralWorktrees.length（台帳長）。
+// 基準確定時点までの台帳増分は baselineBytes に実測値として既に含まれているため、
+// floor 予約（perWorktreeByteReserve）は基準以降の増分（ledgerLength - baselineLedgerCount）
+// にのみ課す。ここを ledgerLength をそのまま使うと、基準確定済みの worktree 分を
+// perWorktreeByteReserve で再度予約する二重計上になり、実消費を大幅に上回る過大予約で
+// 新規着手が恒久停止し得る（1335bc8→83187ed の回帰と対称の失敗モード）。
+// reservedUnits は呼び出し側で「実行中タスクの残余予約」を worktree 件数換算して渡す
+// （newStartActive / monitoringResumeActive の EPHEMERAL_RESERVE_PER_* から導出済みの値）。
+// extraReserveUnits は判定対象自身の最大増分（候補が実際に新規着手・再開した場合の見積り）。
+function projectResidualBytes({ baselineBytes, ledgerLength, baselineLedgerCount, reservedUnits, extraReserveUnits, perWorktreeByteReserve }) {
+  const unbaselinedLedgerCount = Math.max(0, ledgerLength - baselineLedgerCount)
+  return baselineBytes + (unbaselinedLedgerCount + reservedUnits + extraReserveUnits) * perWorktreeByteReserve
+}
+
 // ============================================================================
 // セクション 6: 実行: Restore → Tree → State
 // ここから実行フロー。上記の関数・定数を順に使い、状態読込・ツリー取得・
@@ -2934,8 +2973,18 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
 // 4576 行以降）と同じ形で「実測＋予約」の安全側見積りをバイト軸にも及ぼすため、ラン開始時に
 // 1 worktree あたりの容量見積り（perWorktreeByteReserve）を確定して外側スコープに保持する。
 let residualBytesObserved = false // バイト軸が成立したか（false のまま新規着手を抑止＝fail-closed）
-let residualBytesAtStart = 0 // ラン開始時点の残置 worktree 実測合計バイト数
+let residualBytesAtStart = 0 // 直近確定したバイト軸の基準値（開始時実測、以後はラン中実測し直しの
+// たびに更新される「現在」の実測合計バイト数。変数名は開始時観測の名残だが、以後の projection は
+// 全箇所がこの値を「最新の実測基準」として参照する契約に統一する）
 let perWorktreeByteReserve = 0 // 新規 1 worktree あたりの安全側容量予約（バイト）。0 は未確定
+// byteBaselineLedgerCount: residualBytesAtStart を確定した時点の ephemeralWorktrees.length。
+// projection は「(ephemeralWorktrees.length - byteBaselineLedgerCount) 件分だけ」を積み増しと
+// みなして perWorktreeByteReserve を掛ける。ここを ephemeralWorktrees.length のみで計算すると、
+// 実測し直しで residualBytesAtStart を最新値へ更新した後も基準時点で既に台帳に載っていた
+// worktree 分を再度 floor 予約で二重計上し、実消費を大幅に上回る過大予約で新規着手が恒久停止
+// し得る（K8Dc 対応時の回帰・PR #390 codex-review 指摘。実測基準の更新と台帳オフセットの更新は
+// 必ず同一代入文で atomically に行うこと。片方だけ更新すると二重計上または過小評価に振れる）。
+let byteBaselineLedgerCount = 0
 // perWorktreeByteReserve はラン開始時に確定する安全側の「下限」floor 値であり、ビルド成果物・
 // 依存関係インストール等でラン中に 1 worktree が floor を超えて成長した場合、projection
 // （floor × 台帳件数）は実際のディスク消費を過小評価し得る（PR #390 codex-review 指摘 5）。
@@ -4699,6 +4748,17 @@ async function remeasureResidualBytesIfDue() {
   }
   const actualBytes = kib * 1024
   log(`残置 worktree ディスク使用量を実測し直した: ${Math.round(actualBytes / (1024 * 1024))} MiB（対象 ${targetPaths.length} 件）`)
+  // 実測値を以後の projection の基準へ反映する（K8Dc 対応・PR #390 codex-review 指摘: 従来は
+  // actualBytes を上限超過の即時判定にのみ使い破棄していたため、以後の新規着手・monitoring
+  // 再開判定は開始時の古い residualBytesAtStart のまま更新されず、実測が上限直下でも古い
+  // 過小 projection に戻って容量超過の新規着手を許す fail-open になっていた）。
+  // residualBytesAtStart と byteBaselineLedgerCount は必ず同一代入として更新する（片方だけ
+  // 更新すると、以後の projection が「基準時点で既に測定済みの worktree」分を
+  // perWorktreeByteReserve で再度予約する二重計上になり、実消費を大幅に上回る過大予約で
+  // 新規着手が恒久停止し得る）。この後の projection は
+  // `(ephemeralWorktrees.length - byteBaselineLedgerCount) 件分だけ` を積み増しとみなす。
+  residualBytesAtStart = actualBytes
+  byteBaselineLedgerCount = ephemeralWorktrees.length
   if (actualBytes > maxResidualWorktreeBytes && !newStartSuppressed) {
     newStartSuppressed = {
       reason:
@@ -4799,15 +4859,23 @@ while (true) {
           for (const rn of monitoringResumeActive) {
             reservedUnits += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
           }
-          const projectedBytes =
-            residualBytesAtStart +
-            (ephemeralWorktrees.length + reservedUnits + EPHEMERAL_RESERVE_PER_MONITORING_RESUME) * perWorktreeByteReserve
+          // residualBytesAtStart は直近の実測基準（開始時 or ラン中実測し直し）を指す。
+          // projectResidualBytes が基準以降の台帳増分にのみ floor 予約を課す
+          // （K8Dc 対応: ephemeralWorktrees.length を素で使うと基準確定済み分を二重計上する）。
+          const projectedBytes = projectResidualBytes({
+            baselineBytes: residualBytesAtStart,
+            ledgerLength: ephemeralWorktrees.length,
+            baselineLedgerCount: byteBaselineLedgerCount,
+            reservedUnits,
+            extraReserveUnits: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+            perWorktreeByteReserve,
+          })
           if (projectedBytes > maxResidualWorktreeBytes) {
             const deferReason =
               `残置 worktree が予約込みで容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過する` +
-              `見込みのため monitoring 再開を defer した（開始時 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋` +
-              `本ラン積み増し・実行中タスク予約・再開候補分の見積り合計 ` +
-              `${Math.round(((ephemeralWorktrees.length + reservedUnits + EPHEMERAL_RESERVE_PER_MONITORING_RESUME) * perWorktreeByteReserve) / (1024 * 1024))} MiB）。` +
+              `見込みのため monitoring 再開を defer した（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋` +
+              `基準以降の積み増し・実行中タスク予約・再開候補分の見積り合計 ` +
+              `${Math.round((projectedBytes - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
               `不要な worktree を git worktree remove で手動削除してから再実行すること`
             monitoringResumeGateDeferred.set(n, deferReason)
             log(`⚠️ #${n}: ${deferReason}`)
@@ -4898,13 +4966,23 @@ while (true) {
           continue
         }
         // (a) 実測超過 → 恒久停止（perWorktreeByteReserve は安全側の下限見積りのため過小評価は
-        //     しない。台帳は単調増加のため latch でよい）
-        if (residualBytesAtStart + ephemeralWorktrees.length * perWorktreeByteReserve > maxResidualWorktreeBytes) {
+        //     しない。台帳は単調増加のため latch でよい）。residualBytesAtStart は直近の実測
+        //     基準（remeasureResidualBytesIfDue が更新）を指すため、projectResidualBytes が
+        //     floor 予約を基準以降の増分にのみ課す（K8Dc 対応時の二重計上防止）。
+        const projectedBytesA = projectResidualBytes({
+          baselineBytes: residualBytesAtStart,
+          ledgerLength: ephemeralWorktrees.length,
+          baselineLedgerCount: byteBaselineLedgerCount,
+          reservedUnits: 0,
+          extraReserveUnits: 0,
+          perWorktreeByteReserve,
+        })
+        if (projectedBytesA > maxResidualWorktreeBytes) {
           newStartSuppressed = {
             reason:
               `残置 worktree がラン中の積み増しで容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過` +
-              `（開始時 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋本ラン積み増し見積り ` +
-              `${Math.round((ephemeralWorktrees.length * perWorktreeByteReserve) / (1024 * 1024))} MiB）。` +
+              `（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋基準以降の積み増し見積り ` +
+              `${Math.round((projectedBytesA - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
               `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
               `不要な worktree を git worktree remove で手動削除してから再実行すること`,
             paths: residualPathsAtStart,
@@ -4927,16 +5005,23 @@ while (true) {
           for (const rn of monitoringResumeActive) {
             reservedUnits += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
           }
-          const projectedBytes =
-            residualBytesAtStart +
-            (ephemeralWorktrees.length + reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START) * perWorktreeByteReserve
+          // residualBytesAtStart は直近の実測基準を指すため、projectResidualBytes が
+          // floor 予約を基準以降の増分にのみ課す（K8Dc 対応時の二重計上防止）。
+          const projectedBytes = projectResidualBytes({
+            baselineBytes: residualBytesAtStart,
+            ledgerLength: ephemeralWorktrees.length,
+            baselineLedgerCount: byteBaselineLedgerCount,
+            reservedUnits,
+            extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
+            perWorktreeByteReserve,
+          })
           if (projectedBytes > maxResidualWorktreeBytes) {
             if (reservedUnits > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
             newStartSuppressed = {
               reason:
                 `残置 worktree が予約込みで容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過する見込み` +
-                `（開始時 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋本ラン積み増し・` +
-                `着手候補分の見積り合計 ${Math.round(((ephemeralWorktrees.length + reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START) * perWorktreeByteReserve) / (1024 * 1024))} MiB）。` +
+                `（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋基準以降の積み増し・` +
+                `着手候補分の見積り合計 ${Math.round((projectedBytes - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
                 `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
                 `不要な worktree を git worktree remove で手動削除してから再実行すること`,
               paths: residualPathsAtStart,
