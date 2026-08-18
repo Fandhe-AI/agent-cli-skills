@@ -205,12 +205,20 @@ jobs:
    `origin`（`agent-cli-skills`）へ誤って起動・参照しないよう、以下いずれの
    コマンドにも `--repo Fandhe-AI/<REPO>` を必ず付ける）。`aliz-corporate-web` のみ
    4-1〜4-2 を 2 回に分けて段階的に確認する（他 4 リポは `target=all` で 1 回）。
-   1. dispatch 直前に既存 run ID 集合を記録する（BEFORE 集合）:
+   1. dispatch 直前に既存 run ID 集合と自分の actor を記録する（BEFORE 集合 / ACTOR）:
       `gh run list --repo Fandhe-AI/<REPO> --workflow update-external.yml --limit 20 --json databaseId --jq '[.[].databaseId] | sort'`
-      の出力を保存する。
+      と `ACTOR=$(gh api user --jq '.login')` の出力を保存する。`ACTOR` は dispatch を
+      実行する認証主体（`gh auth status` のユーザー）のログイン名であり、次段の候補
+      run を「自分が起動した run」だけに絞り込む相関キーとして使う。取得できない
+      （空文字・エラー）場合は、この認証状態自体が信頼できないと判断し、以降の
+      dispatch を実行せず状況をイシューへ記録して停止する（fail-closed）。
+      `gh run list` の `--json` はこの相関に使う `actor` フィールドを持たない
+      （`gh run list --json bogus` のエラー出力で確認可能なフィールド一覧に `actor`
+      は含まれない）ため、次段の候補特定は `gh run list` ではなく actor 指定付きの
+      REST API（`gh api`）を使う。
    2. `target` を明示して dispatch する
       （`gh workflow run` はこの時点では run ID を返さないため、次段で BEFORE 集合との
-      差分から新規 run を特定する）。
+      差分と ACTOR 一致から新規 run を特定する）。
       - `aliz-corporate-web`: まず
         `gh workflow run update-external.yml --repo Fandhe-AI/aliz-corporate-web -f target=skill`
         で skills 経路のみを先に確定し、本手順 4-3〜4-6 を完走させて結論を記録する。
@@ -220,21 +228,40 @@ jobs:
         （submodule ジョブの失敗有無を切り分けて観測するため、いきなり `all` を実行しない）。
       - 他 4 リポ: `gh workflow run update-external.yml --repo Fandhe-AI/<REPO> -f target=all`
         で 1 回のみ dispatch する。
-   3. dispatch 直後は一覧反映が遅延し得るため、
-      `gh run list --repo Fandhe-AI/<REPO> --workflow update-external.yml --limit 20 --json databaseId,event,status,createdAt`
-      をポーリングする。`--limit 1` は使わない（同時期に別の手動実行や schedule が挟まると
-      目的の run が押し出されて取りこぼされるため）。取得した最大 20 件のうち
-      `event == "workflow_dispatch"` かつ **BEFORE 集合に含まれない**（= 手順 4-1 の
-      ID 差分）run を候補とする。作成時刻 (`createdAt`) だけを判定条件にせず、必ず ID 差分
-      と `event == "workflow_dispatch"` の両方で絞り込む（時刻だけでは同時多発の別手動実行を
-      排除できないため）。
-      - 候補が 0 件: まだ一覧に反映されていないと判断し、ポーリングを継続する
-        （`--limit` を広げても 0 件が続く場合は取りこぼしと判断し再検索する）。
-      - 候補が 1 件: その `databaseId` を対象 run として確定する。
-      - 候補が 2 件以上: 同時期に別の workflow_dispatch が発生し一意に識別できない状態
-        （例: 手動での並行実行）と判断し、**推測で1件を選ばず fail-closed で停止する**。
-        `docs/update-external-schedule.md` の切り分け手順には進まず、候補 run ID 一覧と
-        状況をそのままイシューへ記録し、人間の判断を仰ぐ。
+   3. dispatch 直後は一覧反映が遅延し得るため、REST API を actor・event 指定付きで
+      ポーリングする（`gh run list` の `--json` は手順 4-1 の注記のとおり `actor` を
+      持たないため使わない）:
+      `gh api "repos/Fandhe-AI/<REPO>/actions/workflows/update-external.yml/runs?event=workflow_dispatch&actor=${ACTOR}&per_page=20" --jq '[.workflow_runs[] | {id,status,created_at}]'`。
+      `actor` はサーバー側で絞り込まれるため、`ACTOR` が実際の起動主体と一致しない
+      場合（例: GitHub App/bot 経由の dispatch で、`gh api user` のログインに
+      実効 actor と異なる別名が付くケース）は候補が常に 0 件になり得る。この場合は
+      「一覧未反映」と誤認せず、`ACTOR` の解決自体が信頼できないと判断して以下の
+      0 件ポーリングの上限に達した時点で fail-closed とする（推測で ID 差分のみに
+      緩めて再絞り込みはしない）。取得した最大 20 件のうち `.id` が **BEFORE 集合に
+      含まれない**（= 手順 4-1 の ID 差分）run を候補とする（`event`/`actor` は既に
+      クエリパラメータで絞り込み済み）。作成時刻 (`created_at`) だけを判定条件に
+      せず、必ず ID 差分とサーバー側の actor/event 絞り込みの両方を経由する（ID 差分
+      だけでは、自分より先に一覧へ反映された別ユーザーの dispatch を誤って候補に
+      含め、その run を対象として確定し得るため）。
+      - 候補が 0 件: まだ一覧に反映されていないと判断し、ポーリングを継続する。
+        **上限 10 回（1 回あたり間隔 5 秒以上、合計 50 秒以上）を超えて 0 件が続く
+        場合は取りこぼしまたは actor 不一致と判断し、それ以上ポーリングを続けず
+        fail-closed で停止する**（無期限のポーリングは行わない）。停止時は BEFORE
+        集合・`ACTOR`・直近の取得結果をそのままイシューへ記録し、人間の判断を仰ぐ。
+      - 候補が 1 件: 直ちには確定しない。**5 秒以上間隔を空けて同じ絞り込みを再実行
+        し、直近 2 回連続で同一の `id` 1 件のみが候補になったこと**（安定確認）を
+        確認してから、その `id` を対象 run として確定する。1 回目と 2 回目で候補の
+        `id` が変わった、または 2 回目に候補が 2 件以上になった場合は安定していない
+        と判断し、上記 0 件の上限を共有カウントとして候補が 0 件または 1 件で安定
+        するまでポーリングを継続する（反映タイミングのずれにより、1 回のポーリング
+        では自分の run がまだ一覧に現れていないだけの可能性があるため、単発の 1 件
+        確認では確定しない）。上限に達しても安定しない場合は同様に fail-closed で
+        停止する。
+      - 候補が 2 件以上（安定確認時を含む）: 同一 actor による同時期の別
+        workflow_dispatch が発生し一意に識別できない状態（例: 同一トークンでの
+        並行実行）と判断し、**推測で1件を選ばず fail-closed で停止する**。
+        `docs/update-external-schedule.md` の切り分け手順には進まず、候補 run ID
+        一覧と状況をそのままイシューへ記録し、人間の判断を仰ぐ。
    4. run ID を特定したら
       `gh run watch <databaseId> --repo Fandhe-AI/<REPO> --exit-status` で完了
       （`status == completed`）まで待機する。単発の `gh run list --limit 1` を一度
