@@ -410,20 +410,34 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
     branch = branch_name(new_sha)
 
     # 1. 既存 open PR 確認（冪等）。
+    #
+    # イシュー #343 Review 指摘: 403/5xx や JSON 解析失敗を「既存 PR なし」と
+    # 同一視して処理を続けると、実際には存在する既存 PR を見落として
+    # ブランチ再作成・ファイル更新・PR 作成を試み、最終的に
+    # ``_delete_ref_best_effort`` が既存 PR の head ブランチを削除し得る。
+    # 一覧 API が 200 以外を返した時点で fail-closed に倒し、このリポの
+    # bump を中断する（次回実行で再判定される）。
     status, body = cud.gh_get_with_status(
         f"repos/{target.repo}/pulls?head={target.repo.split('/')[0]}:{branch}&state=open",
         token,
     )
-    if status == 200:
-        try:
-            existing = json.loads(body)
-        except json.JSONDecodeError:
-            existing = []
-        if existing:
-            return BumpOutcome(
-                target.repo, "skipped-existing-pr",
-                f"branch `{branch}` に open PR #{existing[0].get('number')} が既に存在",
-            )
+    if status != 200:
+        return BumpOutcome(
+            target.repo, "failed",
+            f"既存 PR 確認が HTTP {status}。安全のため中断（既存 PR 誤削除を避けるため fail-closed）",
+        )
+    try:
+        existing = json.loads(body)
+    except json.JSONDecodeError:
+        return BumpOutcome(
+            target.repo, "failed",
+            "既存 PR 確認の応答を JSON として解析できない。安全のため中断",
+        )
+    if existing:
+        return BumpOutcome(
+            target.repo, "skipped-existing-pr",
+            f"branch `{branch}` に open PR #{existing[0].get('number')} が既に存在",
+        )
 
     if dry_run:
         return BumpOutcome(
@@ -449,6 +463,15 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
     if ref_status not in (201, 422):
         return BumpOutcome(target.repo, "failed", f"ブランチ作成が HTTP {ref_status}: {ref_body}")
 
+    # イシュー #343 Review 指摘: 422（既存ブランチ再利用）はこの実行で
+    # 作成したブランチとは限らない（前回失敗の残骸のこともあれば、既存 PR
+    # の head ブランチが手順1の確認をすり抜けて再利用されるケースもあり
+    # 得る）。以降の失敗経路での ``_delete_ref_best_effort`` は、この実行が
+    # 実際に ref を作成した（201）場合のみ実行する。422 の場合は削除せず、
+    # 失敗メッセージで手動確認を促す（残骸クリーンアップより誤削除防止を
+    # 優先する）。
+    created_ref_this_run = ref_status == 201
+
     # 4. ファイル更新。
     commit_message = (
         f"chore(ci): update-external の pin を {new_sha[:12]} へ更新\n\n"
@@ -467,14 +490,21 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
     )
     if put_status not in (200, 201):
         # 403/422（PAT の Workflows: write 不足）はここで名指しして失敗させる。
-        # ブランチだけ残ると次回実行が 422 スキップに化けて気づけないため、
-        # 作成したブランチを削除してから失敗を返す。
-        _delete_ref_best_effort(target.repo, branch, token)
+        # この実行で作成した（201）ブランチだけ残ると次回実行が 422 スキップに
+        # 化けて気づけないため削除する。422 で再利用したブランチは、この
+        # 実行が作成したものではない（既存 PR の head 等の可能性がある）ため
+        # 削除しない。
+        detail_suffix = ""
+        if created_ref_this_run:
+            _delete_ref_best_effort(target.repo, branch, token)
+        else:
+            detail_suffix = f"（branch `{branch}` はこの実行が作成したものではないため削除せず残置。手動確認推奨）"
         hint = ""
         if put_status in (403, 422):
             hint = "（PAT に Workflows: write 権限が必要な可能性。docs/update-external-pin.md 参照）"
         return BumpOutcome(
-            target.repo, "failed", f"ファイル更新が HTTP {put_status}{hint}: {put_body}"
+            target.repo, "failed",
+            f"ファイル更新が HTTP {put_status}{hint}: {put_body}{detail_suffix}",
         )
 
     # 5. PR 作成。
@@ -499,16 +529,20 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
         f"repos/{target.repo}/pulls", pr_payload, token
     )
     if pr_status != 201:
-        # PUT（ファイル更新）は成功済みのため、ここで削除しないと新 SHA へ
-        # 更新済みのコミットを持つ open PR の無いブランチが残る。次回実行時、
-        # find_bump_candidates は乖離判定を default branch の内容から行うため
-        # このブランチの存在自体は再判定に影響しないが、apply_bump の
-        # 「既存 open PR 確認」（冪等チェック）はこのブランチを見ないため
-        # 再実行のたびに ref 作成が 422 を返すだけの残骸になる。PUT 失敗時と
-        # 同様に削除して次回実行をクリーンな状態に保つ（イシュー #343
-        # Review 指摘）。
-        _delete_ref_best_effort(target.repo, branch, token)
-        return BumpOutcome(target.repo, "failed", f"PR 作成が HTTP {pr_status}: {pr_body_resp}")
+        # PUT（ファイル更新）は成功済みのため、この実行で作成した（201）
+        # ブランチはここで削除しないと新 SHA へ更新済みのコミットを持つ
+        # open PR の無いブランチが残る。422 で再利用したブランチは、
+        # この実行が作成したものではない可能性があるため削除しない
+        # （上記「4. ファイル更新」と同じ理由。イシュー #343 Review 指摘）。
+        detail_suffix = ""
+        if created_ref_this_run:
+            _delete_ref_best_effort(target.repo, branch, token)
+        else:
+            detail_suffix = f"（branch `{branch}` はこの実行が作成したものではないため削除せず残置。手動確認推奨）"
+        return BumpOutcome(
+            target.repo, "failed",
+            f"PR 作成が HTTP {pr_status}: {pr_body_resp}{detail_suffix}",
+        )
 
     try:
         pr_number = json.loads(pr_body_resp).get("number")
@@ -609,8 +643,14 @@ def main() -> int:
         print(f"::error::上流 main SHA の解決結果が不正: {upstream_sha!r}")
         return 1
 
+    # イシュー #343 Review 指摘: ここを ``ref=main`` で再取得すると、上の
+    # commits/main 呼び出しから本呼び出しまでの間に main が動いた場合、
+    # ``upstream_sha``（pin 対象として書き込む SHA）と本文の内容が食い違う
+    # （TOCTOU）。以降 ``find_bump_candidates``/``check_wrapper_contract`` は
+    # この本文を「``upstream_sha`` 時点の内容」として実効差分・契約判定に
+    # 使うため、ref を ``upstream_sha`` に固定して両者を一致させる。
     status, upstream_text = cud.gh_get_with_status(
-        f"repos/{cud.UPSTREAM_REPO}/contents/{cud.UPSTREAM_WORKFLOW_PATH}?ref=main",
+        f"repos/{cud.UPSTREAM_REPO}/contents/{cud.UPSTREAM_WORKFLOW_PATH}?ref={upstream_sha}",
         token, raw=True,
     )
     if status != 200:
@@ -634,7 +674,16 @@ def main() -> int:
         if not dry_run and applied >= limit:
             print(f"::notice::BUMP_LIMIT={limit} に到達。残り {len(targets) - applied} 件は次回実行へ持ち越し")
             break
-        outcome = apply_bump(target, upstream_sha, token, dry_run)
+        # イシュー #343 Review 指摘: apply_bump 内の cud.gh_json 呼び出し
+        # （default_branch・base sha 解決）は API 失敗時に ``cud.ScanError``
+        # を送出する。ここで捕捉しないと 1 リポの API 失敗がループ全体を
+        # 中断させ、以降の bump 対象リポが一切処理されなくなる（1 リポの
+        # 失敗が他へ波及しない設計意図に反する）。捕捉して failed 扱いに
+        # 変換し、次のリポへ処理を続ける。
+        try:
+            outcome = apply_bump(target, upstream_sha, token, dry_run)
+        except cud.ScanError as exc:
+            outcome = BumpOutcome(target.repo, "failed", f"予期しない API 失敗で中断: {exc}")
         outcomes.append(outcome)
         print(f"{outcome.repo}: [{outcome.action}] {outcome.detail}")
         if outcome.action == "created":
