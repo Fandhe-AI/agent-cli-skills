@@ -1570,7 +1570,9 @@ async function measureResidualWorktreeBytes(paths) {
         "   jq -j '.[] | . + \"\\u0000\"' " + tmpFile + " | { total=0; missing=0; err=0; " +
           'while IFS= read -r -d "" p; do ' +
           'if [ ! -e "$p" ]; then missing=$((missing+1)); continue; fi; ' +
-          'sz=$(du -sk -- "$p" 2>/dev/null | cut -f1); ' +
+          'duout=$(du -sk -- "$p" 2>/dev/null); durc=$?; ' +
+          'if [ "$durc" -ne 0 ]; then err=$((err+1)); continue; fi; ' +
+          'sz=$(printf %s "$duout" | cut -f1); ' +
           'if [ -z "$sz" ]; then err=$((err+1)); continue; fi; ' +
           'total=$((total+sz)); ' +
           'done; echo "TOTAL=$total MISSING=$missing ERR=$err"; }',
@@ -1578,7 +1580,9 @@ async function measureResidualWorktreeBytes(paths) {
           '`[ ! -e "$p" ]` で真になったパスは並行実行中の cleanup で既に削除された可能性があり、' +
           '0 バイトとして加算せず missing としてのみ数える（存在しないパスの容量は 0 として扱う' +
           'のが正しい — fail-open ではない）。一方 du 自体が失敗した場合（権限不足等の実エラー）' +
-          'は err に計上し、値は合算しない）。',
+          'は err に計上し、値は合算しない。du の終了コードは cut へ直結せず個別に検査する — ' +
+          'パイプ直結だと終了状態が cut のものになり、du が非 0 終了でも部分出力があると成功扱いに' +
+          'なる fail-open が生じるため）。',
         '3. 出力の ERR が 0 より大きい場合は、他の値で補わずタスク全体を失敗として報告する' +
           '（合計を 0 や欠損値で埋めない。実エラーのみ fail-closed とする）。',
         '4. ERR が 0 の場合、TOTAL を kib として、MISSING を missing として返す（missing は' +
