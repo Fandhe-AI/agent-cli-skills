@@ -128,12 +128,63 @@ test('両軸は独立に検証される（件数軸の値はバイト軸の検�
 test('バイト測定の呼び出しと OR 判定・latch 保持がスクリプト全体に存在する', () => {
   assert.match(source, /measureResidualWorktreeBytes/)
   assert.match(source, /residualGateActive/)
-  // 件数軸の途中経過再評価（3b/3c）・monitoring 再開の projected 判定はバイト軸を対象にしない
-  // 設計（du の実行コストを dispatch ループの毎周回では払わない）。該当箇所の比較式に
-  // maxResidualWorktreeBytes が現れていないことを軽量に確認する。
+  // 件数軸の途中経過再評価（3b/3c）・monitoring 再開の projected 判定は、比較式そのものは
+  // 件数軸単独のまま維持する（可読性・過去の回帰固定のため）。該当行に maxResidualWorktreeBytes
+  // が同居しないことを軽量に確認する。
   assert.match(source, /residualObservedAtStart \+ ephemeralWorktrees\.length > maxResidualWorktrees\b/)
   assert.doesNotMatch(
     source,
     /residualObservedAtStart \+ ephemeralWorktrees\.length > maxResidualWorktrees.*maxResidualWorktreeBytes/,
+  )
+})
+
+// --- バイト軸のラン中再評価（Issue #348 codex-review 指摘・PR #390。measureResidualWorktreeBytes
+// の追加呼び出しなしで perWorktreeByteReserve による安全側予約を dispatch ループの新規着手・
+// monitoring 再開の両方に及ぼす）---
+
+test('バイト軸はラン開始時の残置 0 件でもメイン worktree 測定で予約を確定できる構造になっている（開始時 0 件だと軸が丸ごと働かなかった穴の再発防止）', () => {
+  // 旧実装は `maxResidualWorktreeBytes > 0 && residual.paths.length > 0` を条件にしていたため、
+  // 開始時残置 0 件のランではバイト軸の測定自体がスキップされていた。修正後は
+  // `maxResidualWorktreeBytes > 0` のみを条件にし、mainWorktreePath の独立測定で
+  // perWorktreeByteReserve を確定する。
+  assert.doesNotMatch(source, /if \(maxResidualWorktreeBytes > 0 && residual\.paths\.length > 0\)/)
+  assert.match(source, /if \(maxResidualWorktreeBytes > 0\) {/)
+  assert.match(source, /mainWorktreePath \? await measureResidualWorktreeBytes\(\[mainWorktreePath\]\)/)
+  assert.match(source, /perWorktreeByteReserve = Math\.max\(mainKib \* 1024, avgResidualBytes\)/)
+})
+
+test('新規着手・monitoring 再開の両方が perWorktreeByteReserve による projected バイト判定を持つ', () => {
+  assert.match(
+    source,
+    /residualBytesAtStart \+ ephemeralWorktrees\.length \* perWorktreeByteReserve > maxResidualWorktreeBytes/,
+  )
+  const projectedByteOccurrences = source.match(/const projectedBytes =/g) ?? []
+  assert.ok(
+    projectedByteOccurrences.length >= 2,
+    'projectedBytes 系の計算式（新規着手・monitoring 再開の双方）が見つからない',
+  )
+})
+
+test('容量軸のラン中再評価: 開始時残置 0 件でも 1 worktree あたりの予約が大きいと件数上限より先に新規着手を止める', () => {
+  // 実装の projected バイト計算式（(a) 恒久 latch の単純形。予約 reservedUnits=0 の近似）を
+  // そのまま模倣する。1 worktree ≈ 1.5 GiB（既定 2 GiB 上限に対し数件で到達する大きさ）の
+  // 配布先で、件数軸だけなら 100/6 ≈ 16 イシュー着手できるはずが、バイト軸により
+  // 数イシュー以内で止まることを固定する（Issue #348 codex-review 指摘の核心シナリオ）。
+  const maxResidualWorktreeBytes = DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES // 2 GiB
+  const perWorktreeByteReserve = 1.5 * 1024 * 1024 * 1024 // 1 worktree ≈ 1.5 GiB
+  const residualBytesAtStart = 0 // 開始時残置 0 件（旧実装ではバイト軸が丸ごと不成立になっていたケース）
+  let ephemeralCount = 0
+  let suppressedAtIssue = null
+  for (let issue = 1; issue <= 10; issue++) {
+    const projected = residualBytesAtStart + (ephemeralCount + EPHEMERAL_RESERVE_PER_NEW_START) * perWorktreeByteReserve
+    if (projected > maxResidualWorktreeBytes) {
+      suppressedAtIssue = issue
+      break
+    }
+    ephemeralCount += 1 // 1 イシューあたり最低 1 worktree（implement）を積み増す近似
+  }
+  assert.ok(
+    suppressedAtIssue !== null && suppressedAtIssue <= 2,
+    `1 worktree ≈1.5GiB のとき 2 GiB 上限は 1〜2 イシュー目で抑止されるべきだが suppressedAtIssue=${suppressedAtIssue}`,
   )
 })
