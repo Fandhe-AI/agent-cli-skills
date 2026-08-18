@@ -2,7 +2,9 @@
 
 イシュー #342 では新規導入 5 リポのうち保護なし 4 リポを `skills-auto-merge: 'false'` 明示で
 fail-closed 化した（`docs/update-external-rollout.md` 参照）。本ドキュメントは **#342 以前から
-`update-external.yml` wrapper を持つ既存リポ**を同じ観点で棚卸しし、方針を決定・適用した記録。
+`update-external.yml` wrapper を持つ既存リポ**を同じ観点で棚卸しし、方針を決定した記録。
+**方針の決定までがこのドキュメントのスコープであり、リポジトリへの実際の変更適用は
+未実施（「7. 実施状況」参照）。**
 
 測定日: 2026-08-19。
 
@@ -48,6 +50,7 @@ fail-closed 化した（`docs/update-external-rollout.md` 参照）。本ドキ�
 
 | 軸 | green 条件 |
 |----|-----------|
+| 既定ブランチへの適用 | ruleset の `conditions.ref_name` が既定ブランチにマッチする、または既定ブランチの effective rules（`GET /repos/{o}/{r}/rules/branches/{branch}`）に当該 ruleset の `required_status_checks` が現れる |
 | ruleset ソース | `source_type == "Repository"`（Organization 継承は本監査では未出現） |
 | enforcement | `active` |
 | bypass_actors | 全 branch ruleset で `0` |
@@ -56,6 +59,16 @@ fail-closed 化した（`docs/update-external-rollout.md` 参照）。本ドキ�
 
 全軸 green なら「保護あり」、1 つでも欠ける・判定不能（403 等）なら「保護なし」として
 fail-closed 側へ倒す（`ruleset-policy.md` の方針どおり、判定不能を green に倒さない）。
+
+**既定ブランチへの適用軸について（P1 是正）**: 単に `repos/{repo}/rulesets` で branch target の
+ruleset が列挙される・`total >= 1` であることだけでは「既定ブランチが保護されている」ことの
+証明にならない。ruleset は `conditions.ref_name` で任意のブランチ（例: `release/*` のみ）を
+対象にでき、既定ブランチに一切適用されない ruleset が存在しても列挙上は区別できないため、
+既定ブランチ以外だけを保護する ruleset を「保護あり」と誤判定しうる。本監査ではこれを避けるため、
+リポジトリごとに (a) 各 branch ruleset の `conditions.ref_name.include`/`exclude` が既定ブランチ
+（`~DEFAULT_BRANCH` / `~ALL` / `refs/heads/<default>` 一致 / 一致するパターン）にマッチするかを
+判定し、(b) 既定ブランチの effective rules エンドポイントが返す `required_status_checks` の
+`total`/`unbound` と突き合わせた（4 節「再監査」参照）。
 
 **適用範囲の限定（既知の簡略化）**: 本監査は上記の構造的実測（ruleset 設定）までを行い、
 `team-hub-spec`（#342 実測時に同期 PR #58 の `BLOCKED` を確認済み）のような
@@ -112,6 +125,52 @@ fail-closed 側へ倒す（`ruleset-policy.md` の方針どおり、判定不能
 `template-articles` は**まだ無審査自動マージを踏んでいないが、次回 schedule 実行で
 踏み得る状態**にあった。
 
+### 4.1 既定ブランチ適用の再検証（P1 是正・再測定日: 2026-08-19）
+
+上記表は branch target の ruleset を列挙しただけで、各 ruleset が実際に既定ブランチへ
+適用されるか（`conditions.ref_name` が既定ブランチにマッチするか）を個別確認していなかった。
+25 リポ全件について、(a) 各 branch ruleset の `conditions.ref_name` が既定ブランチにマッチする
+ものだけを抽出し bypass_actors / enforcement を再集計、(b) 既定ブランチの effective rules
+エンドポイント（`GET /repos/{o}/{r}/rules/branches/{branch}`）で `required_status_checks` の
+`total`/`unbound` を独立に取得、の 2 経路で再測定した。
+
+結果、25 リポすべてで両経路が一致し、3 節の判定は変わらなかった。
+
+| リポジトリ | 既定ブランチにマッチする ruleset 数 | effective required_status_checks (total/unbound) |
+|---|---:|---|
+| `agent-cli-skills` | 1 | 12/[] |
+| `agent-reference-skills` | 1 | 9/[] |
+| `articles` | 1 | 8/[] |
+| `automation` | 1 | 14/[] |
+| `automation-app` | 1 | 30/[] |
+| `baby-tasks-app` | 1 | 6/[] |
+| `brain-training-app` | 1 | 8/[] |
+| `desktop-automation-app` | 1 | 9/[] |
+| `fandhe-backend` | 1 | 18/[] |
+| `fandhe-frontend` | 1 | 25/[] |
+| `fandhe-multi-platform` | 1 | 9/[] |
+| `ideas` | 1 | 8/[] |
+| `life-plan-app` | 1 | 8/[] |
+| `local-llm-server` | 1 | 21/[] |
+| `local-server` | 1 | 8/[] |
+| `mirror-ui` | 1 | 7/[] |
+| `pet-hub` | 1 | 9/[] |
+| `pronunciation-vocab-app` | 1 | 3/[] |
+| `rust-ai-library` | 1 | 15/[] |
+| `team-hub` | 1 | 23/[] |
+| `team-hub-spec` | 1 | 4/[] |
+| `template-articles` | **0** | **0/[]** |
+| `template-frontend-react_router` | 1 | 12/[] |
+| `template-ideas` | 1 | 8/[] |
+| `yadori` | 1 | 12/[] |
+
+`template-articles` のみ既定ブランチにマッチする ruleset が 0 件（effective
+`required_status_checks` も 0 件）であり、他 24 リポは既定ブランチにマッチする ruleset が
+1 件存在し、その `required_status_checks` が effective rules 上でも `total >= 1`・
+`unbound` 空で一致した。**この再検証により「25 リポ中 24 リポが保護あり、
+`template-articles` のみ保護なし」という 4 節の結論は既定ブランチ基準で裏付けられた
+（誤判定は検出されなかった）。**
+
 ## 5. 方針決定
 
 イシュー本文の受入条件 a / b のうち、**案 a（wrapper で `skills-auto-merge: 'false'` を明示）を
@@ -134,12 +193,14 @@ fail-closed 側へ倒す（`ruleset-policy.md` の方針どおり、判定不能
   超える。**適用しない。将来 `SKILLS_AUTO_MERGE_ALLOWLIST` を allowlist 運用に切り替える案として
   記録するに留める。**
 
-## 6. 適用内容
+## 6. 適用すべき変更内容（未適用・後続担当への引き継ぎ）
 
 `template-articles` の `.github/workflows/update-external.yml` の
 `skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}` を、`docs/update-external-rollout.md`
-のテンプレートと同型のコメント + `skills-auto-merge: 'false'` へ置換する変更を用意した
-（本ドキュメントおよびリポジトリ横断の適用は「7. 実施状況」を参照）。
+のテンプレートと同型のコメント + `skills-auto-merge: 'false'` へ置換する変更を**方針として
+決定した**（差分案は下記）。**本エージェントはこの差分を `template-articles` へ実際には
+適用していない**（push・他リポジトリへの書き込み・PR 作成の権限を持たないため）。
+適用の実施状況は「7. 実施状況」を参照。
 
 ## 7. 実施状況（本イシューのスコープ境界）
 
