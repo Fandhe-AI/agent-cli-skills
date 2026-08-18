@@ -329,3 +329,35 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
 サーバー側 auto-merge 運用ではさらに **repo 設定で auto-merge を許可**する（Settings → General → Allow auto-merge）。なお upstream（Fandhe-AI/agent-cli-skills）の `https://github.com/Fandhe-AI/agent-cli-skills/blob/main/docs/implement-issue-tree/auto-merge-sample.yml`（`docs/implement-issue-tree/auto-merge-sample.yml`）は上記のうち **required checks >= 1・非 author 必須承認 >= 1・dismiss stale reviews・適用全 ruleset の bypass actor ゼロ・required conversation resolution 有効・`REQUIRED_EXTERNAL_CHECKS`（外部レビュー App の check context 名 + App ID の組）の required checks への App 束縛付き包含、の 6 点を arm 前に API で実測検証し、未構成・検証不能なら arm しない（fail-closed）**（strict 適用を検証していた G8 は撤回済み。前節「strict を G0 の要件にしない理由」参照）。classic branch protection は `enforce_admins` が有効かつ明示 bypass 経路（`bypass_pull_request_allowances` / `restrictions` の users / teams / apps）が存在しない場合のみ認可入力として採用し（G7。キー欠落または null = 未設定の正常応答のため通過（`restrictions` は未設定時 null が正常応答）、object は全リストが空配列の場合のみ通過）、また読み取り API が管理者権限を要求し workflow の `GITHUB_TOKEN` では読めないことがあるため、**ruleset での構成（bypass actor なし）を推奨**する（実効ルール API は読み取り権限で取得できる）。ruleset 運用ではさらにリポジトリ secret **`AUTOMERGE_RULESET_TOKEN`**（Administration: read のみの fine-grained PAT / GitHub App token。write 不要。org 継承 ruleset を使う場合は組織レベルの Administration: read も併せて付与）の設定が必要で、ruleset が 1 件以上適用されるのに未構成だと G4（ruleset 詳細の bypass actor 検証）が検証不能となり一切 arm されない（fail-closed）。適用 ruleset が 0 件（classic のみで G1〜G3 充足。enforce_admins 必須）の運用ではこの secret は不要（G4 は空充足で通過）。なお workflow のトリガーは `schedule`（cron）+ `workflow_dispatch` のみの cron スイープ方式とし、`pull_request` / `pull_request_target` は使わない（PR イベントを契機に secrets 付きジョブを起動する構造自体を排除する。「自動マージのサーバー側委譲と merge-guard hook」節参照）。加えてリポジトリ設定変数 **`TRUSTED_AUTHOR`**（automation identity の login。未設定ならスイープは何もしない）・**`AUTOMERGE_OPTIN`**（文字列 `true` を設定しない限り job ごとスキップされる明示 opt-in ゲート）・**`AUTOMERGE_RUNNER`**（runner ラベル。フォールバックなしのため未設定では job が起動しない）の 3 つの設定が必要で、いずれか未設定なら動かない（fail-closed）。workflow 内でリポジトリのコードを checkout・実行してはならない。
 
+
+### 救済ラウンドの終端分類
+
+merge 監視ループ（`runMergeLoop`）は「強制スレッド再走査の救済ラウンド」機構を持つ（SKILL.md の「強制スレッド再走査の救済ラウンド」節参照）。本節はその終端分類の判定表と設計根拠を記録する。実装は `reconcileRescueRoundState(lastState, rescueRoundActive, timeoutExecReason)`（`scripts/implement-issue-tree.js`）、回帰テストは `tests/merge-loop-rescan.test.mjs`。
+
+**経緯（3 段階）**:
+
+1. **Fandhe-AI/rust-ai-library#681**: 救済ラウンドが `timeout` で終端すると `terminalStatus` が `blocked`（halt 非カウント）から `failed`（halt カウント）へ化ける回帰を発見。救済機構を入れる前は `blocked` だった。
+2. **Fandhe-AI/agent-cli-skills#246**: 1. の初回修正が `lastState` を `'unresolved-comments'` へ書き換える方式を採り、これが fix ループを誤って起動させる欠陥を Bugbot High が指摘。修正は `lastState` を書き換えず「終端 status だけを品質ブロックへ分類する」指示を返す設計へ改めた。
+3. **agent-cli-skills#248**: 判定タイミングがラウンド末尾（monitor 結果の直後）だったため、同一ラウンドで merge-exec が返す一過性 reason（`head-moved` / `checks-not-green` / `merge-failed`）を `classifyMergeExecDispatch` が `lastState` を `timeout` へ写像するケースを判定が見逃していた。修正は判定地点を「予約 → 今ラウンドの `active` フラグへ移送」した上で、ループ退出後の単一 choke point（`break` / `continue` / `while` 条件 `false` のすべてが通る）へ移した。この時点の分類は**出所を問わず timeout を一律 `blocked`** としていた。
+4. **agent-cli-skills#365（本節が記録する変更）**: 3. の「一律 `blocked`」が新たな回帰を生んだ。恒常的な merge-exec 失敗（特に `merge-failed`）が halt 連続カウントに一切算入されず、同じ救済経路へ再入し続けて halt 防御を迂回する（P1）。#248 は「判定地点（choke point）」の修正であり、#365 は choke point 自体は維持したまま「判定内容（timeout の出所別分類）」を変更する。
+
+**timeout の出所と判定表**:
+
+| 出所 | 発生経路 | `timeoutExecReason` | 終端分類 |
+|------|---------|---------------------|---------|
+| monitor 由来 | 監視エージェント自身が `timeout` を返す（merge-exec は起動しない） | `''`（空） | `blocked`（halt 非カウント。次回ラン monitoring 再開対象） |
+| merge-exec 由来 | monitor が `ready` → merge-exec が `head-moved` / `checks-not-green` / `merge-failed` → `classifyMergeExecDispatch` が `timeout` へ写像 | `'head-moved'` / `'checks-not-green'` / `'merge-failed'`（分岐条件のリテラル） | 既定の `failed`（halt カウント対象） |
+| （救済ラウンド外） | `rescueRoundActive === false` | 問わない | 分類を変えない（既定の `failed` のまま。実失敗を隠さない） |
+
+`timeoutExecReason` が想定外の非空値を持つ場合も merge-exec 由来（`failed`）側へ倒す（fail-closed。halt 防御を弱める方向のフォールバックを作らない）。
+
+**設計根拠**:
+
+- **monitor 由来を `blocked` に留める理由**: 救済は「未解決スレッドの内容を取り直すための追加試行」であり、観測に失敗しても「未解決スレッドが残っている」という元の品質ブロックの事実は変わらない（rust-ai-library#681 / #246 が固定した挙動）。
+- **merge-exec 由来を `failed` へ戻す理由**: 救済ラウンドの再走査自体は成立しており（`forceThreadRescan` は monitor が `unresolved-comments` / `ready` を返した時点で解除済み）、未解決スレッドが残っているとは断定できない。実体はマージ操作そのものの失敗である。
+- **3 reason を一律 `failed` にする理由（パリティであり新しい厳格化ではない）**: 救済ラウンド**外**の同じ reason は現状すでに、監視予算が尽きた時点で `failed` 終端になる。救済ラウンド内だけ `blocked` へ倒すと、恒常的な merge 失敗ほど halt 防御から逃れやすくなるという逆転が生じる。一律 `failed` は非救済ラウンドとの対称性（パリティ）であり、`tests/merge-loop-rescan.test.mjs` の「対称ケース」テストが両者の結果一致を検証する。
+- **運用上の変化（明記する）**: monitor の楽観的 `ready` と merge-exec の `checks-not-green` が食い違うケースは、救済ラウンドで起きた場合に限り、#365 以前は次回ラン自動再開（`blocked`）だったが #365 以降は `failed` 終端になる。追跡は失われない — `lastExecDeferralNote`（一過性 reason の直近の見送り理由）が終端 note へ運ばれる。
+
+**配線（`timeoutExecReason` の受け渡し）**:
+
+`roundTimeoutExecReason`（ループ外で宣言・ラウンド先頭で `''` へリセット）が出所を運ぶ。宣言をループ外に置く理由は `forceThreadRescanBudgetUsed`（延長ラッチ・ラウンドを跨いで**保持する**契約）と同じ「ループ内宣言だと毎ラウンド初期化される」ためではなく、choke point・一過性 reason 分岐・ラウンド先頭リセットの 3 箇所すべてから同一変数を参照・代入する必要があるという JS のスコープ上の都合にすぎない。むしろ意味は逆で、この変数は**ラウンドを跨いで保持してはならない**（リセットを落とすと前ラウンドの merge-exec 由来 reason が今ラウンドの monitor 由来 timeout へ漏れ、`blocked` が静かに `failed` へ化ける）。一過性 reason 分岐（`head-moved` / `checks-not-green` / `merge-failed`）は分岐条件の**リテラル** `execReason` のみを代入し、エージェント自己申告の自由テキスト（`execSummaryText`）は代入しない（A03 インジェクション対策。分類入力に未検証文字列を混入させない）。`tests/merge-loop-rescan.test.mjs` の構造アサーションがリセット位置・代入内容の両方を固定する。
