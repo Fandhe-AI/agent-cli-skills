@@ -257,5 +257,82 @@ class TestParseOnlyRepo(unittest.TestCase):
         self.assertIsNone(bump.parse_only_repo("Fandhe-AI/repo/extra"))
 
 
+class TestClassifyReusedBranch(unittest.TestCase):
+    """422（ref 既存）時の所有関係判定（イシュー #343 Review P0 指摘）。
+
+    ``apply_bump`` は ``ref_status == 422`` のとき、default branch の元本文
+    （``old_text``）と既存ブランチの現在の本文を ``classify_reused_branch``
+    へ渡して再利用可否を決める。ここではその純粋関数だけを検証する
+    （ブランチ取得自体は API 呼び出しのためこのテストの対象外）。
+    """
+
+    def test_branch_already_has_new_sha_is_already_bumped(self):
+        # 前回 run が PUT まで成功し、PR 作成以降で失敗した残骸。
+        branch_text = WRAPPER_TEXT.replace(UPSTREAM_SHA, NEW_SHA)
+        self.assertEqual(
+            bump.classify_reused_branch(WRAPPER_TEXT, branch_text, NEW_SHA),
+            "already-bumped",
+        )
+
+    def test_branch_still_at_base_is_unbumped_retry(self):
+        # 前回 run が ref 作成のみ成功し PUT 前に失敗した残骸。
+        # ブランチの内容は default branch の元本文と完全一致する。
+        self.assertEqual(
+            bump.classify_reused_branch(WRAPPER_TEXT, WRAPPER_TEXT, NEW_SHA),
+            "unbumped-retry",
+        )
+
+    def test_unrelated_branch_content_is_foreign(self):
+        # このスクリプトが書いた内容とは断定できない場合は fail-closed。
+        unrelated_text = "name: unrelated\non:\n  push: {}\njobs: {}\n"
+        self.assertEqual(
+            bump.classify_reused_branch(WRAPPER_TEXT, unrelated_text, NEW_SHA),
+            "foreign",
+        )
+
+    def test_branch_with_different_pin_than_target_is_foreign(self):
+        # 別の（この run が狙う new_sha とは異なる）SHA へ既に書き換わって
+        # いる場合も、この run にとっては所有関係を確認できないため foreign。
+        other_sha = "2" * 39 + "b"
+        branch_text = WRAPPER_TEXT.replace(UPSTREAM_SHA, other_sha)
+        self.assertEqual(
+            bump.classify_reused_branch(WRAPPER_TEXT, branch_text, NEW_SHA),
+            "foreign",
+        )
+
+
+class TestScopeByOnlyRepo(unittest.TestCase):
+    """ONLY_REPO 指定時の targets/skipped 絞り込み（cursor Bugbot 指摘）。
+
+    絞り込み前は targets のみが絞られ skipped が org 全体のまま残っていた
+    ため、無関係な他リポの API エラーが単一リポ限定の run を巻き込んで
+    失敗させ得た。skipped も同じリポへ絞られることを確認する。
+    """
+
+    def test_targets_and_skipped_are_both_scoped(self):
+        targets = [
+            bump.BumpTarget("Fandhe-AI/a", "0" * 40, "old", "new", "blob"),
+            bump.BumpTarget("Fandhe-AI/b", "0" * 40, "old", "new", "blob"),
+        ]
+        skipped = [
+            bump.BumpOutcome("Fandhe-AI/a", "skipped-scan-error", "対象リポの障害"),
+            bump.BumpOutcome("Fandhe-AI/b", "skipped-scan-error", "無関係な他リポの障害"),
+        ]
+        scoped_targets, scoped_skipped = bump.scope_by_only_repo(
+            targets, skipped, ("Fandhe-AI", "a")
+        )
+        self.assertEqual([t.repo for t in scoped_targets], ["Fandhe-AI/a"])
+        self.assertEqual([s.repo for s in scoped_skipped], ["Fandhe-AI/a"])
+
+    def test_no_match_yields_empty_lists(self):
+        targets = [bump.BumpTarget("Fandhe-AI/a", "0" * 40, "old", "new", "blob")]
+        skipped = [bump.BumpOutcome("Fandhe-AI/b", "skipped-scan-error", "他リポの障害")]
+        scoped_targets, scoped_skipped = bump.scope_by_only_repo(
+            targets, skipped, ("Fandhe-AI", "c")
+        )
+        self.assertEqual(scoped_targets, [])
+        self.assertEqual(scoped_skipped, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

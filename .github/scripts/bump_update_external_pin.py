@@ -256,12 +256,63 @@ def parse_only_repo(only: str) -> tuple[str, str] | None:
 # ---------------------------------------------------------------------------
 
 
+def scope_by_only_repo(
+    targets: list, skipped: list, only_repo: tuple[str, str]
+) -> tuple[list, list]:
+    """``ONLY_REPO`` 指定時に ``targets``/``skipped`` を対象リポだけへ絞り込む。
+
+    cursor Bugbot 指摘（イシュー #343 Review）: ``targets`` だけ絞って
+    ``skipped`` を絞らないと、``main()`` の ``scan_errors``（org 全体の
+    検査不能を run 失敗の判定に使う）が無関係な他リポの一時的な API エラー
+    まで拾ってしまい、単一リポ限定の run がそれに巻き込まれて失敗する。
+    両方を同じ ``want`` で絞り込むことで、ONLY_REPO の走査結果を本当に
+    その 1 リポだけへ閉じ込める。
+    """
+    want = f"{only_repo[0]}/{only_repo[1]}"
+    return (
+        [t for t in targets if t.repo == want],
+        [s for s in skipped if s.repo == want],
+    )
+
+
 @dataclass
 class BumpTarget:
     repo: str
     old_pin: str
+    old_text: str  # 置換前の wrapper 本文（default branch の内容）。422 時の所有関係検証に使う
     new_text: str
     blob_sha: str  # 現行ファイルの blob sha（PUT の sha パラメータに必要）
+
+
+def classify_reused_branch(old_text: str, branch_text: str, new_sha: str) -> str:
+    """422（ref 既存）で再利用しようとしているブランチの所有関係を、内容だけで判定する。
+
+    ブランチ名は新 SHA から決定的に生成される（``branch_name``）ため、同名の
+    無関係なブランチが偶然存在する可能性は低いが、それでも中身を見ずに
+    再利用・削除すると無関係なコミットの混入やブランチ消失を招く（イシュー
+    #343 Review P0 指摘）。ネットワークに触れない純粋関数として切り出し、
+    ``apply_bump`` はここへ「default branch の元本文」「ブランチの現在の本文」
+    を渡すだけにする。
+
+    戻り値:
+    - ``"already-bumped"``: ブランチは既にこの ``new_sha`` へ bump 済み
+      （前回 run が PUT まで成功したが PR 作成 or その後で失敗した残骸）。
+      呼び出し側は PUT をスキップして PR 作成へ進んでよい（cursor Bugbot
+      指摘「Reused branch blocks bump retries」の再発防止 — ここでブロック
+      すると retry のたびに 422 → 中断を繰り返し、収束しない）。
+    - ``"unbumped-retry"``: ブランチの内容が default branch の元本文と完全一致。
+      前回 run が ref 作成のみ成功し PUT 前に失敗した残骸。この run が
+      改めて PUT してよい（ただし blob sha はブランチ側から取り直す必要が
+      ある。default branch 側の blob sha とは異なり得るため）。
+    - ``"foreign"``: どちらでもない。このスクリプトが書いた内容とは断定できない
+      ため、呼び出し側は書き込みも削除も行わず中断する（fail-closed）。
+    """
+    info = cud.classify_workflow(branch_text)
+    if info["kind"] == cud.KIND_WRAPPER and info["pin"] == new_sha:
+        return "already-bumped"
+    if branch_text == old_text:
+        return "unbumped-retry"
+    return "foreign"
 
 
 @dataclass
@@ -439,7 +490,7 @@ def find_bump_candidates(
             )
             continue
 
-        targets.append(BumpTarget(repo, pin, new_text, blob_sha))
+        targets.append(BumpTarget(repo, pin, text, new_text, blob_sha))
 
     return targets, skipped
 
@@ -499,7 +550,7 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
     if not isinstance(base_sha, str) or not cud._SHA40_RE.match(base_sha):
         return BumpOutcome(target.repo, "failed", f"base sha を解決できない: {base_sha!r}")
 
-    # 3. ブランチ作成。422 = 既存（前回失敗の残骸等）→ そのブランチを使い回す。
+    # 3. ブランチ作成。422 = 既存（前回失敗の残骸等）。
     ref_payload = json.dumps({"ref": f"refs/heads/{branch}", "sha": base_sha})
     ref_status, ref_body = _gh_api_post_status(
         f"repos/{target.repo}/git/refs", ref_payload, token
@@ -507,49 +558,100 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
     if ref_status not in (201, 422):
         return BumpOutcome(target.repo, "failed", f"ブランチ作成が HTTP {ref_status}: {ref_body}")
 
-    # イシュー #343 Review 指摘: 422（既存ブランチ再利用）はこの実行で
+    # イシュー #343 Review P0 指摘: 422（既存ブランチ再利用）はこの実行で
     # 作成したブランチとは限らない（前回失敗の残骸のこともあれば、既存 PR
     # の head ブランチが手順1の確認をすり抜けて再利用されるケースもあり
-    # 得る）。以降の失敗経路での ``_delete_ref_best_effort`` は、この実行が
-    # 実際に ref を作成した（201）場合のみ実行する。422 の場合は削除せず、
-    # 失敗メッセージで手動確認を促す（残骸クリーンアップより誤削除防止を
-    # 優先する）。
+    # 得る）。ブランチ名は new_sha から決定的に生成されるため無関係な衝突は
+    # 起きにくいが、それでも中身を確認せずに書き込み・削除すると無関係な
+    # コミット混入やブランチ消失を招く。ここでは削除は一切この実行が
+    # 実際に ref を作成した（201）場合に限定し（``created_ref_this_run``）、
+    # 422 の場合はブランチ内容を取得して ``classify_reused_branch`` で
+    # 所有関係を検証できたときだけ再利用する。検証できなければ書き込みも
+    # 削除もせず fail-closed で中断する。
     created_ref_this_run = ref_status == 201
+    blob_sha_for_put = target.blob_sha
+    skip_put = False
 
-    # 4. ファイル更新。
-    commit_message = (
-        f"chore(ci): update-external の pin を {new_sha[:12]} へ更新\n\n"
-        f"上流 `{cud.UPSTREAM_WORKFLOW_PATH}` の内容が旧 pin `{target.old_pin[:12]}` から"
-        "変化しており、実効差分ゲート（イシュー #343）で乖離ありと判定された。\n\n"
-        "Refs #343"
-    )
-    put_payload = json.dumps({
-        "message": commit_message,
-        "content": _b64encode(target.new_text),
-        "sha": target.blob_sha,
-        "branch": branch,
-    })
-    put_status, put_body = _gh_api_put_status(
-        f"repos/{target.repo}/contents/{cud.WORKFLOW_PATH}", put_payload, token
-    )
-    if put_status not in (200, 201):
-        # 403/422（PAT の Workflows: write 不足）はここで名指しして失敗させる。
-        # この実行で作成した（201）ブランチだけ残ると次回実行が 422 スキップに
-        # 化けて気づけないため削除する。422 で再利用したブランチは、この
-        # 実行が作成したものではない（既存 PR の head 等の可能性がある）ため
-        # 削除しない。
-        detail_suffix = ""
-        if created_ref_this_run:
-            _delete_ref_best_effort(target.repo, branch, token)
-        else:
-            detail_suffix = f"（branch `{branch}` はこの実行が作成したものではないため削除せず残置。手動確認推奨）"
-        hint = ""
-        if put_status in (403, 422):
-            hint = "（PAT に Workflows: write 権限が必要な可能性。docs/update-external-pin.md 参照）"
-        return BumpOutcome(
-            target.repo, "failed",
-            f"ファイル更新が HTTP {put_status}{hint}: {put_body}{detail_suffix}",
+    if ref_status == 422:
+        branch_status, branch_body = cud.gh_get_with_status(
+            f"repos/{target.repo}/contents/{cud.WORKFLOW_PATH}?ref={branch}", token, raw=True,
         )
+        if branch_status != 200:
+            return BumpOutcome(
+                target.repo, "failed",
+                f"既存ブランチ `{branch}` の内容取得が HTTP {branch_status}。"
+                "所有関係を検証できないため中断（ブランチには一切触れない）",
+            )
+        reuse = classify_reused_branch(target.old_text, branch_body, new_sha)
+        if reuse == "foreign":
+            return BumpOutcome(
+                target.repo, "failed",
+                f"branch `{branch}` は既存だが本スクリプトが書き込んだ内容と一致しない。"
+                "所有関係を検証できないため中断（上書きも削除もしない。手動確認が必要）",
+            )
+        if reuse == "already-bumped":
+            # PUT は不要。前回 run が PUT まで成功し PR 作成以降で失敗した
+            # 残骸。ここで中断すると retry のたびに 422 → 中断を繰り返し
+            # 収束しない（cursor Bugbot 指摘「Reused branch blocks bump
+            # retries」の再発防止）。PR 作成へそのまま進む。
+            skip_put = True
+        else:  # "unbumped-retry"
+            # 前回 run が ref 作成のみ成功して PUT 前に失敗した残骸。
+            # ブランチは default branch 時点のまま止まっているため、この
+            # run が改めて PUT する。書き込み対象の blob sha はブランチ側
+            # から取り直す（default branch 側の blob sha とは異なり得る）。
+            blob_status2, blob_body2 = cud.gh_get_with_status(
+                f"repos/{target.repo}/contents/{cud.WORKFLOW_PATH}?ref={branch}", token, raw=False,
+            )
+            if blob_status2 != 200:
+                return BumpOutcome(
+                    target.repo, "failed", f"既存ブランチの blob sha 取得が HTTP {blob_status2}"
+                )
+            try:
+                blob_sha_for_put = json.loads(blob_body2).get("sha", "")
+            except json.JSONDecodeError:
+                blob_sha_for_put = ""
+            if not blob_sha_for_put:
+                return BumpOutcome(
+                    target.repo, "failed", "既存ブランチの blob sha を JSON から取得できない"
+                )
+
+    # 4. ファイル更新（``already-bumped`` の場合は不要なのでスキップ）。
+    if not skip_put:
+        commit_message = (
+            f"chore(ci): update-external の pin を {new_sha[:12]} へ更新\n\n"
+            f"上流 `{cud.UPSTREAM_WORKFLOW_PATH}` の内容が旧 pin `{target.old_pin[:12]}` から"
+            "変化しており、実効差分ゲート（イシュー #343）で乖離ありと判定された。\n\n"
+            "Refs #343"
+        )
+        put_payload = json.dumps({
+            "message": commit_message,
+            "content": _b64encode(target.new_text),
+            "sha": blob_sha_for_put,
+            "branch": branch,
+        })
+        put_status, put_body = _gh_api_put_status(
+            f"repos/{target.repo}/contents/{cud.WORKFLOW_PATH}", put_payload, token
+        )
+        if put_status not in (200, 201):
+            # 403/422（PAT の Workflows: write 不足）はここで名指しして失敗させる。
+            # 削除はこの実行が実際に ref を作成した（201）場合のみ行う。422 で
+            # 再利用したブランチ（所有関係は検証済みだが、それでも「削除して
+            # よい」とは別の判断）は削除せず、失敗メッセージで手動確認を促す
+            # （残骸クリーンアップより誤削除防止を優先する。イシュー #343
+            # Review P0 指摘）。
+            detail_suffix = ""
+            if created_ref_this_run:
+                _delete_ref_best_effort(target.repo, branch, token)
+            else:
+                detail_suffix = f"（branch `{branch}` はこの実行が作成したものではないため削除せず残置。手動確認推奨）"
+            hint = ""
+            if put_status in (403, 422):
+                hint = "（PAT に Workflows: write 権限が必要な可能性。docs/update-external-pin.md 参照）"
+            return BumpOutcome(
+                target.repo, "failed",
+                f"ファイル更新が HTTP {put_status}{hint}: {put_body}{detail_suffix}",
+            )
 
     # 5. PR 作成。
     pr_body = (
@@ -573,17 +675,23 @@ def apply_bump(target: BumpTarget, new_sha: str, token: str, dry_run: bool) -> B
         f"repos/{target.repo}/pulls", pr_payload, token
     )
     if pr_status != 201:
-        # 「4. ファイル更新」の 422 分岐とは異なり、ここでは直前の PUT が
-        # 200/201 で成功済み——つまり ``branch`` は所有関係にかかわらず
-        # 「この実行が今まさに書き込んだ内容」を head に持つ。422（既存
-        # ブランチ再利用）であっても、それが他所有の進行中ブランチだったと
-        # したら PUT 自体が意図しない上書きになっているため、この時点では
-        # 削除を差し控える理由（＝他所有ブランチの誤削除防止）がすでに
-        # 成立しない。削除せずに残すと以降の run が同じブランチ名へ ref 作成
-        # → 422 → PR 未作成のまま滞留し、contents conflict で PR を作れなく
-        # なる（cursor Bugbot 指摘・イシュー #343 Review）。そのため PUT
-        # 成功後は created_ref_this_run を問わず削除する。
-        _delete_ref_best_effort(target.repo, branch, token)
+        # イシュー #343 Review P0 指摘: 「4. ファイル更新」の失敗経路と同じ
+        # 理由で、削除はこの実行が実際に ref を作成した（201）場合のみに
+        # 限定する。422 で再利用したブランチは ``classify_reused_branch`` で
+        # 所有関係を確認済みだが、それは「書き込んでよい」の判断であって
+        # 「削除してよい」の判断ではない——他 run・他プロセスが同じブランチへ
+        # 並行して触れている可能性を排除できないため、誤削除防止を優先する。
+        #
+        # これにより「以降の run が同じブランチ名へ ref 作成 → 422 →
+        # PR 未作成のまま滞留する」問題（cursor Bugbot 指摘「Reused branch
+        # blocks bump retries」）は削除では解決しない。代わりに、この
+        # ブランチは既に new_sha へ bump 済みの内容を持つため、次回 run は
+        # 422 → ``classify_reused_branch`` が ``"already-bumped"`` と判定して
+        # PUT をスキップし、そのまま PR 作成へ進む（上の 3-4 節）。つまり
+        # retry の収束は「削除して作り直す」ではなく「内容が既にゴールと
+        # 一致していれば PUT を省略する」ことで担保する。
+        if created_ref_this_run:
+            _delete_ref_best_effort(target.repo, branch, token)
         return BumpOutcome(
             target.repo, "failed",
             f"PR 作成が HTTP {pr_status}: {pr_body_resp}",
@@ -705,8 +813,7 @@ def main() -> int:
     targets, skipped = find_bump_candidates(org, token, upstream_sha, upstream_text)
 
     if only_repo is not None:
-        want = f"{only_repo[0]}/{only_repo[1]}"
-        targets = [t for t in targets if t.repo == want]
+        targets, skipped = scope_by_only_repo(targets, skipped, only_repo)
 
     for s in skipped:
         level = "error" if s.action == "skipped-scan-error" else "warning"
