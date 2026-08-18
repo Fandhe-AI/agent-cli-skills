@@ -5361,9 +5361,12 @@ if (maxResidualWorktreeBytes > 0 && residualBytesObserved) {
     }
   }
 }
+// residualBytesObserved を必須条件にしない — 開始時の du 失敗等で容量観測が不成立のケースも
+// 「次ラン開始時に観測失敗の fail-closed で新規着手が停止する見込み」であり、終了時測定失敗と
+// 同じく true 側へ倒す（PR #390 codex-review P1: 開始時観測失敗だけが false に漏れ、契約と
+// 逆の値を消費側へ返していた）。false になるのは終了時実測が成立し非超過の場合のみ
 const residualBytesOverLimit =
   maxResidualWorktreeBytes > 0 &&
-  residualBytesObserved &&
   (residualBytesEndObserved ? residualBytesAtEnd > maxResidualWorktreeBytes : true)
 // overLimit は「次ラン開始時に新規着手が停止する見込み」の統合シグナル（件数・バイトの OR）
 const residualOverLimit = residualCountOverLimit || residualBytesOverLimit
