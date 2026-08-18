@@ -43,11 +43,21 @@
 // 利用）、errexit 下でも必ず失敗分岐（`status=$?` の捕捉 → `UNDETERMINED`）を実行できる
 // 形にした。
 //
-// 3 群構成:
+// 追加（Issue #338 PR #354 の codex-review P2 指摘）: 群 A は `UNDETERMINED` や `status=$?`
+// といった文字列が SKILL.md の**どこかに**存在することしか見ておらず、説明コメントに語が
+// 残るだけで通過してしまう。今回の変更の中心契約（取得失敗・空出力・awk 不在を必ず
+// `UNDETERMINED` に倒す／errexit 下でも失敗分岐へ到達する）を実行ベースで固定するため、
+// (A) のシェル本体を抽出し、偽の `gh` を置いた PATH で実際に走らせる群 D を追加した。
+//
+// 4 群構成:
 //   群 A（SKILL.md 記述の固定）: UNDETERMINED・dup=・bad=・ゼロ件分岐・終了コード検証の記載を固定。
 //   群 B（旧文言の再発防止）: 「1 以上なら重複あり」が 0 回であることを固定。
 //   群 C（集計ロジックの決定性）: SKILL.md から (A) の awk 式を抽出し、fixture 行を流して
 //     dup/bad の算出が決定的であることを実測する（doc と挙動の乖離を同時に防ぐ）。
+//   群 D（シェル本体の契約）: SKILL.md から (A) のシェルスニペット全体を抽出し、偽の `gh` を
+//     PATH の先頭に置いて bash で実行する。取得成功／非ゼロ終了／空出力／awk 不在 ×
+//     errexit 有無の各ケースで、出力が定義済み 2 形のいずれかであることと、
+//     awk 不在時に `gh api` を呼ばないことを実測する。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -268,4 +278,120 @@ test('群C: success + skipped + neutral の 3 重複も bad=0 で健全と判定
     '',
   ].join('\n')
   assert.equal(runAwk(rows), 'dup=1 bad=0 pend=0')
+})
+
+// ---------------------------------------------------------------------------
+// 群 D: シェル本体の契約（SKILL.md から (A) のシェルスニペット全体を抽出して実行）
+//
+// 群 C は awk 集計式だけを取り出して流しており、(A) の中心契約である
+// 「取得失敗・空出力・awk 不在を必ず UNDETERMINED に倒す」「errexit 下でも失敗分岐へ到達する」
+// を実行ベースでは固定していなかった（群 A の文字列一致は、説明コメントに該当語が残るだけで
+// 通過してしまう）。ここでは偽の `gh` を PATH の先頭へ置いてスニペット本体を bash で実行し、
+// 出力（2 形のいずれか）と `gh api` の呼び出し有無を実測する。
+// ---------------------------------------------------------------------------
+import { mkdtempSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+
+/**
+ * SKILL.md の (A) コードブロックからシェル本体を抽出する。
+ * 末尾の「→ 出力は次の 2 形のみ」以降は読み方の説明コメントであり実行対象ではないため落とす。
+ */
+function extractShellSnippet(markdown) {
+  const startMarker = '# (A) エージェントが実行してよい形'
+  const startIdx = markdown.indexOf(startMarker)
+  if (startIdx < 0) {
+    throw new Error('(A) のシェルスニペット開始位置が SKILL.md に見つからない')
+  }
+  const endMarker = '# → 出力は次の 2 形のみ'
+  const endIdx = markdown.indexOf(endMarker, startIdx)
+  if (endIdx < 0) {
+    throw new Error('(A) のシェルスニペット終端（出力形式の説明コメント）が見つからない')
+  }
+  return markdown.slice(startIdx, endIdx)
+}
+
+const shellSnippet = extractShellSnippet(skillMd)
+
+/**
+ * 偽の `gh` を置いた一時 PATH を作り、(A) のスニペットを bash で実行する。
+ * mode: 'success' | 'fail' | 'empty'、withAwk: false なら PATH から awk を落とす、
+ * errexit: true なら呼び出し元 shell の `set -e` 有効状態を再現する。
+ */
+function runSnippet({ mode = 'success', withAwk = true, errexit = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'iit-residual-'))
+  const calledMarker = join(dir, 'gh-called')
+  const bodies = {
+    // 正常系: 重複 1 件（ci/build が cancelled + success）を含む TSV
+    success: `printf 'ci/build\\tcancelled\\nci/build\\tsuccess\\nci/lint\\tsuccess\\n'\nexit 0`,
+    // 取得失敗: gh api は HTTP エラーの JSON 本文も stdout へ出す（この罠こそが (A) 改修の動機）
+    fail: `printf '{"message":"Bad credentials","status":"401"}\\n'\nexit 1`,
+    // 空出力: check-run が 1 件も返らない（この節の前提と矛盾するため判定不能へ倒す）
+    empty: `exit 0`,
+  }
+  const gh = join(dir, 'gh')
+  writeFileSync(gh, `#!/bin/sh\ntouch ${JSON.stringify(calledMarker)}\n${bodies[mode]}\n`)
+  chmodSync(gh, 0o755)
+
+  // withAwk=false のときは PATH を偽 gh のディレクトリのみにして awk を解決不能にする。
+  // スニペットが使う printf / echo / [ は bash 組み込みのため PATH に依存しない
+  const path = withAwk ? `${dir}:${process.env.PATH}` : dir
+  const script = errexit ? `set -e\n${shellSnippet}` : shellSnippet
+  // bash は絶対パスで起動する。withAwk=false では PATH を偽 gh のディレクトリのみに
+  // 絞るため、PATH 解決に頼ると bash 自体が見つからず ENOENT になる
+  const stdout = execFileSync('/bin/bash', ['-c', script], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: path, HEAD_SHA: 'deadbeef' },
+  }).trim()
+  return { stdout, ghCalled: existsSync(calledMarker) }
+}
+
+test('群D: 取得成功時は dup=/bad=/pend= 形式を返す（gh は呼ばれる）', () => {
+  const { stdout, ghCalled } = runSnippet({ mode: 'success' })
+  assert.equal(stdout, 'dup=1 bad=1 pend=0')
+  assert.equal(ghCalled, true)
+})
+
+test('群D: gh api が非ゼロ終了したら UNDETERMINED（エラー本文を重複判定へ流さない）', () => {
+  const { stdout, ghCalled } = runSnippet({ mode: 'fail' })
+  assert.equal(stdout, 'UNDETERMINED')
+  assert.equal(ghCalled, true)
+})
+
+test('群D: errexit（set -e）下でも gh api 失敗が UNDETERMINED に倒れる（Issue #338 P1）', () => {
+  const { stdout } = runSnippet({ mode: 'fail', errexit: true })
+  assert.equal(stdout, 'UNDETERMINED')
+})
+
+test('群D: 空出力は「重複なし」ではなく UNDETERMINED', () => {
+  const { stdout } = runSnippet({ mode: 'empty' })
+  assert.equal(stdout, 'UNDETERMINED')
+})
+
+test('群D: errexit 下の空出力も UNDETERMINED', () => {
+  const { stdout } = runSnippet({ mode: 'empty', errexit: true })
+  assert.equal(stdout, 'UNDETERMINED')
+})
+
+test('群D: awk 不在なら gh api を呼ばずに UNDETERMINED（前提確認を fetch より先に行う契約）', () => {
+  const { stdout, ghCalled } = runSnippet({ mode: 'success', withAwk: false })
+  assert.equal(stdout, 'UNDETERMINED')
+  assert.equal(ghCalled, false, 'awk 不在時に gh api を呼んではならない（無駄な API 消費の防止）')
+})
+
+test('群D: errexit 下の awk 不在も gh api を呼ばずに UNDETERMINED', () => {
+  const { stdout, ghCalled } = runSnippet({ mode: 'success', withAwk: false, errexit: true })
+  assert.equal(stdout, 'UNDETERMINED')
+  assert.equal(ghCalled, false)
+})
+
+test('群D: 出力は必ず定義済み 2 形のいずれかに一致する（形式外の出力を作らない）', () => {
+  const shapes = /^(UNDETERMINED|dup=[0-9]+ bad=[0-9]+ pend=[0-9]+)$/
+  for (const mode of ['success', 'fail', 'empty']) {
+    for (const errexit of [false, true]) {
+      for (const withAwk of [true, false]) {
+        const { stdout } = runSnippet({ mode, errexit, withAwk })
+        assert.match(stdout, shapes, `mode=${mode} errexit=${errexit} withAwk=${withAwk}`)
+      }
+    }
+  }
 })
