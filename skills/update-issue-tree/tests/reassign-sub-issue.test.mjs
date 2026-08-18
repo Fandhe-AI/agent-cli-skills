@@ -221,6 +221,20 @@ test('ケース31: DELETE 後の POST 失敗（偽陰性）→ 実測すると�
   assert.equal(c.filter((l) => l.includes('--method POST')).length, 1, '補償 POST は撃たれていないこと（1 回目の POST のみ）')
 })
 
+test('ケース31b: DELETE 後の POST 失敗 → 復旧のための実状態再取得 GET は新親配下を返すが、反映遅延の再確認では不安定（別状態）と判明 → 1 回の読み取りだけで reassigned 確定しない → exit 8 reason=recovery-state-unknown（codex-review P1 指摘 PR #391。ケース31 の成功判定経路にも安定確認を適用する回帰）', () => {
+  const r = run(['--issue', '33', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '7', // 復旧のための再取得 GET は新親配下に見える（過渡状態の可能性）
+    parentAfter2: '', // 反映遅延を考慮した再確認では実は孤児だった（不安定）
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  const c = calls(r.logPath)
+  assert.equal(c.filter((l) => l.includes('--method POST')).length, 1, '補償 POST は撃たれていないこと（1 回目の POST のみ）')
+})
+
 test('ケース32: 孤児経路（DELETE なし）の POST が非ゼロ（一般エラー）→ exit 4、復旧ルーチンは発動しない（Issue #352。無変更のため補償対象外。経路の非対称固定）', () => {
   // DELETE を 1 度も撃っていない孤児経路は、DELETE 成功後の POST 失敗と異なり孤児化リスク
   // 自体が無い（対象は元から孤児）。補償復旧ルーチンは DELETE 経路の POST 失敗ブロックにのみ
@@ -360,6 +374,19 @@ test('ケース41: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST
   assert.equal(r.status, 0)
   assert.match(r.stdout.trim(), /^result=reassigned issue=52 new_parent=7 old_parent=5$/)
   assert.doesNotMatch(r.stderr, /reason=recovery-state-unknown/)
+})
+
+test('ケース41b: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST 成功 → 事後確認では本来の新親 #7 に付いているように見えるが、反映遅延の再確認では不安定（別状態）と判明 → 1 回の読み取りだけで reassigned 確定しない → exit 8 reason=recovery-state-unknown（codex-review P1 指摘 PR #391。ケース41 の成功判定経路にも安定確認を適用する回帰）', () => {
+  const r = run(['--issue', '52', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '', // 復旧のための再取得 GET は孤児を返す
+    parentAfter2: '7', // 補償 POST 成功後の確認では本来の新親 #7 配下に見える（過渡状態の可能性）
+    parentAfter3: '', // 反映遅延を考慮した再確認では実は孤児だった（不安定）
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
 })
 
 test('ケース42: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST も失敗 → 失敗後の再取得では旧親 #5 配下に見えるが、反映遅延の再確認では実は本来の新親 #7 に付いていた → exit 0 reassigned（cursor[bot] Medium 指摘 PR #391「New parent misread as failure」の回帰。偽陰性確認の再確認自体で新親が判明する経路）', () => {

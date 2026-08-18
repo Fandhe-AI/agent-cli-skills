@@ -247,10 +247,20 @@ recover_after_post_failure() {
   fi
 
   if [[ "${recovery_same_repo}" -eq 1 && "${recovery_parent}" == "${NEW_PARENT}" ]]; then
-    # POST は偽陰性だった（応答は失敗扱いでも実際には成立していた）。本来の目的
-    # （新親への付け替え）は達成済みのため、通常の成功終端と同じ扱いにする
-    emit_result "reassigned" "${CURRENT_PARENT}"
-    exit 0
+    # POST は偽陰性だった可能性がある（応答は失敗扱いでも実際には成立していたかも
+    # しれない）。ただしこの 1 回の読み取りだけでは DELETE/POST の反映遅延による
+    # 過渡状態を見ている可能性を排除できない。他の成功判定経路と非対称に即時確定
+    # させず、共通関数で安定確認してから成功終端する（codex-review P1 指摘 PR #391。
+    # CI 失敗の直接原因）
+    local rfp_rc=0
+    confirm_stable_parent "復旧確認での新親偽陰性確認" "${NEW_PARENT}" || rfp_rc=$?
+    if [[ "${rfp_rc}" -eq 0 ]]; then
+      # 本来の目的（新親への付け替え）は達成済みのため、通常の成功終端と同じ扱いにする
+      emit_result "reassigned" "${CURRENT_PARENT}"
+      exit 0
+    fi
+    echo "reason=recovery-state-unknown" >&2
+    exit 8
   fi
 
   if [[ "${recovery_same_repo}" -eq 1 && -z "${recovery_parent}" ]]; then
@@ -365,10 +375,19 @@ recover_after_post_failure() {
       # 補償 POST は成功応答だったが、事後確認では旧親ではなく本来の新親 #NEW_PARENT に
       # 付いていた。旧親への補償 POST と競合するタイミングで、元の POST の偽陰性が遅れて
       # 反映された可能性がある。第三者の割り込みではなく本来の目的が達成された状態のため、
-      # third-party 誤ラベルを避けて成功終端する（cursor[bot] Medium 指摘 PR #391）
-      echo "情報: 補償復旧後の確認で旧親ではなく本来の新親 #${NEW_PARENT} 配下にあることが判明した（元の POST が偽陰性で実際には成功していた可能性）" >&2
-      emit_result "reassigned" "${CURRENT_PARENT}"
-      exit 0
+      # third-party 誤ラベルを避けて成功終端する（cursor[bot] Medium 指摘 PR #391）。
+      # ただしこの 1 回の読み取りだけでは反映遅延による過渡状態を排除できないため、他の
+      # 成功判定経路と同様に共通関数で安定確認してから確定する（codex-review P1 指摘
+      # PR #391。CI 失敗の直接原因）
+      echo "情報: 補償復旧後の確認で旧親ではなく本来の新親 #${NEW_PARENT} 配下にあることが判明した（元の POST が偽陰性で実際には成功していた可能性。反映遅延を考慮し再確認する）" >&2
+      local pvfp_rc=0
+      confirm_stable_parent "補償 POST 成功後の新親偽陰性確認" "${NEW_PARENT}" || pvfp_rc=$?
+      if [[ "${pvfp_rc}" -eq 0 ]]; then
+        emit_result "reassigned" "${CURRENT_PARENT}"
+        exit 0
+      fi
+      echo "reason=recovery-state-unknown" >&2
+      exit 8
     fi
     if [[ "${rv_same_repo}" -ne 1 || "${rv_parent}" != "${CURRENT_PARENT}" ]]; then
       if [[ -n "${rv_parent}" ]]; then
