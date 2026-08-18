@@ -459,6 +459,55 @@ jobs:
         self.assertFalse(m["ok"])
         self.assertIn("x.yml@main", m["detail"])
 
+    def test_upstream_action_sha_non_string_uses_counted_as_unpinned(self):
+        # `uses: 123`（非文字列）は分母からも未固定一覧からも黙って除外されて
+        # はならない。除外すると、他の全 uses が SHA 固定済みのとき
+        # 「全て 40 桁 SHA 固定」と誤判定される（イシュー #302 レビュー指摘）。
+        non_string = FIXTURE_UPSTREAM_OK.replace(
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+            "      - name: Malformed uses\n"
+            "        uses: 123\n"
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+        )
+        m = markers_map(non_string)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"], m["detail"])
+        self.assertIn("全 6 件中 1 件が未固定", m["detail"])
+
+    def test_upstream_action_sha_empty_string_uses_counted_as_unpinned(self):
+        # `uses: ""`（空文字列）も同様に分母へ含め、未固定として報告する。
+        # `uses` が非空文字列の場合だけ 1 件も無い上流と同じ扱い（除外）に
+        # 倒すと、「原因の異なる異常」（空文字列 vs uses 皆無）を区別できない。
+        empty_uses = FIXTURE_UPSTREAM_OK.replace(
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+            "      - name: Empty uses\n"
+            '        uses: ""\n'
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+        )
+        m = markers_map(empty_uses)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"], m["detail"])
+        self.assertIn("全 6 件中 1 件が未固定", m["detail"])
+
+    def test_upstream_action_sha_self_repo_dollar_slash_is_exempt(self):
+        # GitHub の自リポジトリ構文 `$/...`（2026-07 以降の推奨記法）は `./`
+        # と同じく実行中コミットへ本質的に固定され `@ref` を持たない。
+        # `@` を含まないという理由だけで未固定扱いにしてはならない
+        # （Cursor Bugbot 指摘）。
+        self_repo = FIXTURE_UPSTREAM_OK.replace(
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+            "      - name: Self-repo helper\n"
+            "        uses: $/.github/actions/foo\n"
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+        )
+        m = markers_map(self_repo)["上流 action の SHA 固定"]
+        self.assertTrue(m["ok"], m["detail"])
+        self.assertIn("全 6 件すべて 40 桁 SHA 固定", m["detail"])
+
     def test_upstream_action_sha_detail_escapes_pipe_for_markdown(self):
         # detail は render_report で Markdown 表の 1 セルへそのまま差し込まれる。
         # `|` を含む uses 相当の文字列がエスケープされていることを確認する

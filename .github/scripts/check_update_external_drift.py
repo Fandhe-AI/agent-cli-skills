@@ -446,6 +446,23 @@ _USES_PIN_UNPINNED = "unpinned"
 _USES_PIN_EXEMPT = "exempt"
 
 
+def _stringify_uses(value: object) -> str:
+    """``uses`` の値を分類・表示用の文字列へ正規化する。
+
+    正規の ``uses`` は非空文字列だが、YAML の型崩れ（数値・真偽値・``null``・
+    空文字列等）を分母から黙って落とすと、その異常値が「未固定一覧」にも
+    「固定済みの分母」にも入らず ``check_upstream_markers`` が
+    「全て 40 桁 SHA 固定」と誤判定し得る（イシュー #302 レビュー指摘）。
+    ここで非文字列も必ず文字列化して ``_collect_all_uses`` の戻り値に含め、
+    後段の ``_classify_uses_pin`` に判定を委ねる——非文字列は
+    ``_SHA40_RE`` に一致しようがなく必然的に未固定へ落ちるため、
+    「fail-closed で不正値も報告に出す」という契約が自然に満たされる。
+    """
+    if isinstance(value, str):
+        return value
+    return repr(value)
+
+
 def _collect_all_uses(jobs: dict) -> list[tuple[str, str, str]]:
     """``jobs`` 配下の全 ``uses``（job-level + step-level）を平坦化して集める。
 
@@ -457,6 +474,11 @@ def _collect_all_uses(jobs: dict) -> list[tuple[str, str, str]]:
     タプル列。ステップ表示名は ``name`` が無ければ ``uses`` 自体で代替する
     （detail に埋めたとき人間が該当箇所を特定できることを優先し、
     索引番号だけの表示は避ける）。
+
+    収集条件は「``uses`` キーが存在するか」であり、値の型・非空性では
+    絞り込まない（絞り込むと非文字列・空文字列の異常値が分母からも
+    未固定一覧からも消え、fail-closed 契約に反して green に見えてしまう。
+    ``_stringify_uses`` のドキュメント参照）。
     """
     collected: list[tuple[str, str, str]] = []
     for job_name, job in jobs.items():
@@ -464,13 +486,12 @@ def _collect_all_uses(jobs: dict) -> list[tuple[str, str, str]]:
             continue
         # reusable workflow 呼び出し（`jobs.<id>.uses`）。イシュー #302 の要件は
         # 「全 uses」であり、このジョブ形式を対象から外す理由が無い。
-        job_uses = job.get("uses")
-        if isinstance(job_uses, str) and job_uses.strip():
-            collected.append((job_name, job_name, job_uses))
+        if "uses" in job:
+            collected.append((job_name, job_name, _stringify_uses(job.get("uses"))))
         for step in _steps(job):
-            step_uses = step.get("uses")
-            if not (isinstance(step_uses, str) and step_uses.strip()):
+            if "uses" not in step:
                 continue
+            step_uses = _stringify_uses(step.get("uses"))
             step_name = step.get("name")
             display = step_name if isinstance(step_name, str) and step_name else step_uses
             collected.append((job_name, display, step_uses))
@@ -483,8 +504,11 @@ def _classify_uses_pin(uses: str) -> str:
     ``check_upstream_markers`` のマーカー (6) から呼ばれる。分類根拠（非ゴール
     を含む）:
 
-    - ``./`` で始まるローカル action は同一リポ内パスであり ``@ref`` の概念が
-      無いので検査対象外（exempt）。可動参照へ退行するリスクが構造的に無い。
+    - ``./`` で始まるローカル action、および GitHub の自リポジトリ構文
+      ``$/`` で始まる action（2026-07 以降の推奨記法。実行中コミットへ
+      本質的に固定され ``@ref`` を持たない）は同一リポ内参照であり ``@ref``
+      の概念が無いので検査対象外（exempt）。可動参照へ退行するリスクが
+      構造的に無い。
     - ``docker://`` はこの関数では SHA 形式を判定できないため fail-closed で
       未固定扱いにする。上流に現存しないため誤報にはならず、将来出現したときに
       人間のレビューを促す（本ファイル冒頭の「fail-closed」設計方針と同じ）。
@@ -500,7 +524,7 @@ def _classify_uses_pin(uses: str) -> str:
       無く本リポからは鮮度判定できない（workflow 本体の SHA と内部 pin は別物）。
     """
     text = uses.strip()
-    if text.startswith("./"):
+    if text.startswith("./") or text.startswith("$/"):
         return _USES_PIN_EXEMPT
     if text.startswith("docker://"):
         return _USES_PIN_UNPINNED
