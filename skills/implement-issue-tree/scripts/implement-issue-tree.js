@@ -4924,7 +4924,6 @@ while (true) {
           }
         }
         // 今回ゲートを通過したため古い defer 理由を残さない（残すと interrupted レポートが
-        // 解消済みの手動介入案内を誤って出し続ける。issue #201）。（残すと interrupted レポートが
         // 解消済みの手動介入案内を誤って出し続ける。issue #201）。
         monitoringResumeGateDeferred.delete(n)
         log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(item.title)}`)
