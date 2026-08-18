@@ -1657,8 +1657,19 @@ async function measureMainWorktreeContentBytes(mainPath) {
 // orphan scan のエントリ群からメインリポ自身の worktree パスを特定する。isMain フラグと先頭
 // エントリのパスを二重照合し、ミスラベルがあってもメインリポを削除候補から確実に除外する。
 function findMainWorktreePath(entries) {
-  const flagged = entries.find((e) => e?.isMain)
-  const raw = flagged?.path ?? entries[0]?.path ?? ''
+  // entries はエージェントによる git worktree list --porcelain の転記結果であり、isMain は
+  // 未検証の自己申告値。無条件に isMain 優先で選ぶと、転記誤りで小さい linked worktree が
+  // isMain: true になった場合に perWorktreeByteReserve が過小確定し、並列投入時の予約不足で
+  // 容量上限を超え得る（PR #390 codex-review P1）。--porcelain の先頭レコード＝メインという
+  // 出力契約を正とし、isMain フラグは先頭エントリとの照合にのみ使う。不一致（先頭以外に
+  // isMain が立っている・先頭に立っていない）は転記の信頼性が崩れているため観測失敗
+  // （空文字 → 呼び出し側の fail-closed 分岐）として扱う。
+  if (!Array.isArray(entries) || entries.length === 0) return ''
+  const flaggedIndexes = entries
+    .map((e, i) => (e?.isMain ? i : -1))
+    .filter((i) => i >= 0)
+  if (flaggedIndexes.length !== 1 || flaggedIndexes[0] !== 0) return ''
+  const raw = entries[0]?.path ?? ''
   return sanitizeWorktreePath(typeof raw === 'string' ? raw : '')
 }
 
