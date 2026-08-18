@@ -18,7 +18,7 @@ model: sonnet
 ## 前提条件
 
 - `gh` CLI がインストールされ、認証済みであること
-- `node` / `npx` が利用可能であること（`npx skills add` を使用するため）。`skills` CLI は固定版（`SKILLS_CLI_VERSION`、現在 `1.5.22`）で実行する。詳細は「skills CLI のバージョン固定と更新手順」節を参照
+- `node` / `npx` が利用可能であること（`npx skills add` を使用するため）。`skills` CLI は固定版（`SKILLS_CLI_VERSION`）で実行する。値と更新手順は「skills CLI のバージョン固定と更新手順」節を参照
 - ルート直下の `skills-lock.json` が存在すること
 - **実行前に `skills-lock.json` に未コミットの変更がないこと**（ステージ済み・未ステージ問わず）。本スキルの実行中に発生する変更は sync 由来のみとなり、`git add skills-lock.json` で全体をステージしても無関係な変更が混入しない
 - **対象スキルの `.agents/skills/<name>/` に未コミット変更がないこと**。`npx skills add` は `.agents/skills/<name>/` を upstream の最新版で上書きするため、そのディレクトリに WIP が存在すると即座に失われる。`git checkout` で戻せるのは「最後にコミットされた状態」のみであり、npx 実行前の未コミット編集は復元できない。**未追跡ファイルとして存在する WIP も対象**であり、`git status --porcelain` で検出する
@@ -97,7 +97,9 @@ fi
 # skills CLI へ渡す確認プロンプトのスキップで、別物（位置で区別される）。
 SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更新手順は下記節を参照
 
-# CLI に computedHash を更新させる
+# CLI に computedHash を更新させる。固定版が解決できない場合（該当版の不存在・
+# レジストリ障害）は npx が非ゼロ終了する。その場合は当該スキルを中止（skip）し、
+# 固定版を外した再実行はしない（fail-closed。暗黙の最新版フォールバックはしない）。
 npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --yes
 ```
 

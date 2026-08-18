@@ -88,3 +88,46 @@ test('scripts/skills-lock-update.sh は SKILLS_CLI_VERSION の形式ガードを
     '形式ガード（正規表現チェック）が見つからない'
   )
 })
+
+// #374 P1 R3（update-issue-tree の教訓）: コードフェンスはそれぞれ独立シェルで
+// 実行され得るため、SKILLS_CLI_VERSION の代入が npx 実行行と別フェンスに
+// 分離されると、実行時に貼り付ける単位（npx 実行行を含むフェンス単体）では
+// 変数未定義（空文字列 = 未固定 skills@ への退行）になり得る。この退行は
+// 上の「未固定の npx skills add が残っていない」テストでは検知できない
+// （正規表現は文字列 `skills@${SKILLS_CLI_VERSION}` の存在だけを見ており、
+// その変数が同一フェンス内で定義済みかは見ていないため）。
+// このテストは SKILL.md の ```bash フェンスを個別に抽出し、npx 実行行を
+// 含むフェンスの中に、その行より前で SKILLS_CLI_VERSION= 代入があることを
+// 直接検証する。
+function extractBashFences(content) {
+  const fences = []
+  const re = /```bash\n([\s\S]*?)```/g
+  let m
+  while ((m = re.exec(content)) !== null) {
+    fences.push(m[1])
+  }
+  return fences
+}
+
+test('SKILL.md: npx skills 実行行を含むフェンス自体に SKILLS_CLI_VERSION の代入が先行して存在する', () => {
+  const content = readFileSync(SKILL_MD_PATH, 'utf8')
+  const fences = extractBashFences(content)
+  const execFences = fences.filter((fence) =>
+    fence.split('\n').some((line) => /^\s*npx\b/.test(line) && /\bskills\b/.test(line))
+  )
+  assert.ok(execFences.length > 0, 'npx skills 実行行を含むフェンスが見つからない')
+  for (const fence of execFences) {
+    const lines = fence.split('\n')
+    const execIdx = lines.findIndex((line) => /^\s*npx\b/.test(line) && /\bskills\b/.test(line))
+    const assignIdx = lines.findIndex((line) => /^\s*SKILLS_CLI_VERSION=/.test(line))
+    assert.notEqual(
+      assignIdx,
+      -1,
+      'npx 実行行と同一フェンス内に SKILLS_CLI_VERSION= 代入が無い（フェンス分離による未定義変数の退行リスク）'
+    )
+    assert.ok(
+      assignIdx < execIdx,
+      'SKILLS_CLI_VERSION= 代入が npx 実行行より後にある（実行時に未定義になる）'
+    )
+  }
+})
