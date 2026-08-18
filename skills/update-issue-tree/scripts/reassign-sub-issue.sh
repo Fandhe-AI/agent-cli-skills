@@ -208,14 +208,37 @@ recover_after_post_failure() {
       # 報告する（cursor[bot] Medium 指摘 PR #391。再取得自体が失敗した場合は状態不明の
       # まま孤児と断定せず reason=compensation-post-failed のみで終端する）
       if COMP_FAIL_JSON=$(gh api "repos/${REPO_PATH}/issues/${ISSUE}" 2>"${GH_ERR_FILE}"); then
-        local comp_fail_parent_url comp_fail_parent
+        # リポジトリ一致は「同一リポジトリの親か」の判定にのみ使い、「親が存在するか」の
+        # 判定からは分離する。空でない parent_issue_url は同一・別リポジトリを問わず
+        # 「孤児ではない」ことを意味するため、別リポジトリという理由だけで comp_fail_parent
+        # を空にすると third-party-parent を見逃し「実測でも孤児」と誤報告してしまう
+        # （codex-review P1 指摘 PR #391。CI 失敗の直接原因）
+        local comp_fail_parent_url comp_fail_parent comp_fail_same_repo=1
         comp_fail_parent_url=$(printf '%s' "${COMP_FAIL_JSON}" | jq -r '.parent_issue_url // empty')
         comp_fail_parent=""
-        if [[ -n "${comp_fail_parent_url}" && "${comp_fail_parent_url%/issues/*}" == "${SELF_REPO_URL}" ]]; then
+        if [[ -n "${comp_fail_parent_url}" ]]; then
           comp_fail_parent=$(printf '%s' "${comp_fail_parent_url}" | grep -oE '[0-9]+$' || true)
+          if [[ "${comp_fail_parent_url%/issues/*}" != "${SELF_REPO_URL}" ]]; then
+            comp_fail_same_repo=0
+          fi
+        fi
+        if [[ -n "${comp_fail_parent}" && "${comp_fail_same_repo}" -eq 1 && "${comp_fail_parent}" == "${CURRENT_PARENT}" ]]; then
+          # 補償 POST はエラー応答だったが、実測では既に旧親 #CURRENT_PARENT 配下にある
+          # （応答が偽陰性だった、または反映が追いついた）。この場合を third-party-parent
+          # として報告すると、実際には承認済みの復旧が成立しているのに誤って部分変更・
+          # 要確認扱いにしてしまう（cursor[bot] Medium 指摘 PR #391 の逆方向ケース）
+          echo "情報: 旧親 #${CURRENT_PARENT} への補償復旧 POST はエラー応答だったが、実測では既に旧親配下に復旧していた（応答が偽陰性だった可能性）" >&2
+          echo "result=restored issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${CURRENT_PARENT}"
+          exit 10
         fi
         if [[ -n "${comp_fail_parent}" ]]; then
-          echo "エラー: #${ISSUE} は孤児ではなく、実測では #${comp_fail_parent} 配下にある（補償 POST 失敗の間に第三者が付け替えた可能性）。承認外の親子関係を壊さないためこのまま停止する" >&2
+          local comp_fail_scope
+          if [[ "${comp_fail_same_repo}" -eq 1 ]]; then
+            comp_fail_scope="同一リポジトリの #${comp_fail_parent}"
+          else
+            comp_fail_scope="別リポジトリの ${comp_fail_parent_url}"
+          fi
+          echo "エラー: #${ISSUE} は孤児ではなく、実測では ${comp_fail_scope} 配下にある（補償 POST 失敗の間に第三者が付け替えた可能性）。承認外の親子関係を壊さないためこのまま停止する" >&2
           echo "reason=compensation-post-failed-third-party-parent" >&2
           exit 8
         fi
