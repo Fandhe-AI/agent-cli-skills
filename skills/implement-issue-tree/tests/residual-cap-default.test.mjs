@@ -391,3 +391,43 @@ test('バイト軸は新規着手直前に台帳増分によらず実測し直�
 test('ORPHAN_BYTES_SCHEMA は missing を任意フィールドとして持ち、成否判定に使わないと明記する', () => {
   assert.match(source, /missing: \{\s*type: 'integer'/)
 })
+
+// --- monitoring 再開の実測失敗・超過検出は remeasureResidualBytesNow の戻り値のみで行うこと
+// （PR #390 cursor Bugbot High "Remeasure failure miss for resume" / codex-review P1 第 5
+// ラウンド）。newStartSuppressed は一度立てたら理由文字列を上書きしない latch であるため、
+// 「呼び出し前後の newStartSuppressed の identity 比較」で検出しようとすると、latch が既に
+// 立っている状態での 2 回目以降の実測失敗・超過が検出漏れになる。
+
+test('remeasureResidualBytesNow は全ての exit で構造化された { failed, exceeded } を返す（bare return 禁止）', () => {
+  const fnStart = source.indexOf('async function remeasureResidualBytesNow()')
+  const fnEnd = source.indexOf('\nwhile (true) {', fnStart)
+  const fnBody = source.slice(fnStart, fnEnd)
+  assert.ok(fnStart >= 0 && fnEnd > fnStart, 'remeasureResidualBytesNow 本体を特定できること')
+  // ガード節（無効・未観測）の早期 return
+  assert.match(fnBody, /return \{ failed: false, exceeded: false \}/)
+  // 同一周回内 2 回目以降の間引き return は直近周回の結果を返す
+  assert.match(fnBody, /return lastByteRemeasureOutcome/)
+  // 測定失敗（kib === null）の return
+  assert.match(fnBody, /lastByteRemeasureOutcome = \{ failed: true, exceeded: false \}/)
+  // 測定成功時の return（超過有無を反映）
+  assert.match(fnBody, /lastByteRemeasureOutcome = \{ failed: false, exceeded: actualBytes > maxResidualWorktreeBytes \}/)
+  // 値を返さない bare `return`（改行または `}` が直後に続く形）が本体に残っていないこと。
+  // 将来ここへ bare return が再混入すると、呼び出し元の `remeasureOutcome.failed` 参照が
+  // `TypeError: Cannot read properties of undefined` になり monitoring 再開ゲートが例外で落ちる。
+  assert.doesNotMatch(fnBody, /\breturn\s*\n/)
+})
+
+test('monitoring 再開ゲートは remeasureResidualBytesNow の戻り値のみで defer 判定し、newStartSuppressed の identity 比較を使わない', () => {
+  const anchor = 'monitoring 再開の直前にも実測し直す'
+  const start = source.indexOf(anchor)
+  assert.ok(start >= 0, 'monitoring 再開の実測し直しブロックを特定できること')
+  const blockEnd = source.indexOf('\n          const recordedByIssue = new Map()', start)
+  assert.ok(blockEnd > start, 'ブロック終端（予約計上ロジックの開始）を特定できること')
+  const block = source.slice(start, blockEnd)
+  // 戻り値を保持して失敗・超過の両方を判定すること
+  assert.match(block, /const remeasureOutcome = await remeasureResidualBytesNow\(\)/)
+  assert.match(block, /if \(remeasureOutcome\.failed \|\| remeasureOutcome\.exceeded\)/)
+  // 旧実装（identity 比較）が復活していないこと（バグの再発防止の核心的な回帰検出）
+  assert.doesNotMatch(block, /suppressedBeforeResumeRemeasure/)
+  assert.doesNotMatch(block, /newStartSuppressed !== /)
+})
