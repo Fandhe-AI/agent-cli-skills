@@ -19,6 +19,9 @@ model: sonnet
 
 - `gh` CLI がインストールされ、認証済みであること
 - `node` / `npx` が利用可能であること（`npx skills add` を使用するため）。`skills` CLI は固定版（`SKILLS_CLI_VERSION`）で実行する。値と更新手順は「skills CLI のバージョン固定と更新手順」節を参照
+- `file` CLI が利用可能であること（未追跡バイナリファイルの種別表示に使用。未導入の環境では
+  種別が `file コマンド未検出` として表示され、承認前にサイズ・git blob ハッシュのみで
+  判断することになる。macOS / 主要 Linux ディストリビューションには標準搭載されている）
 - ルート直下の `skills-lock.json` が存在すること
 - **実行前に `skills-lock.json` に未コミットの変更がないこと**（ステージ済み・未ステージ問わず）。本スキルの実行中に発生する変更は sync 由来のみとなり、`git add skills-lock.json` で全体をステージしても無関係な変更が混入しない
 - **対象スキルの `.agents/skills/<name>/` に未コミット変更がないこと**。`npx skills add` は `.agents/skills/<name>/` を upstream の最新版で上書きするため、そのディレクトリに WIP が存在すると即座に失われる。`git checkout` で戻せるのは「最後にコミットされた状態」のみであり、npx 実行前の未コミット編集は復元できない。**未追跡ファイルとして存在する WIP も対象**であり、`git status --porcelain` で検出する
@@ -134,16 +137,84 @@ npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}"
 
 #### Step 5: 当該スキルの差分を表示する
 
+`git diff` は未追跡ファイルを表示しない。Step 4 の clean ガード（`git status --porcelain`）により
+`npx skills add` 実行前の当該ディレクトリは必ず clean であるため、**upstream 側でファイルが増えた
+ケースでは、その新規ファイルは例外なく未追跡になる**。tracked diff だけを見せて Step 6 の承認判断へ
+進むと、その内容を一切確認しないまま承認できてしまうため、tracked 差分と未追跡ファイルの内容を分けて
+両方提示する。
+
 ```bash
-# 当該スキルにスコープした差分のみ表示する
-git diff skills-lock.json ".agents/skills/${SKILL_NAME}/"
+# 当該スキルにスコープした tracked 差分を表示する
+git diff -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+
+# 未追跡ファイルを列挙し、内容を diff 形式で表示する。
+# この集合は Step 7（承認・git add）が新規に取り込む集合、Step 6（拒否・git clean -fd）が
+# 削除する集合と同一（.gitignore 対象を除く非追跡ファイル）であり、
+# 「プレビュー = 承認 = 拒否」の 3 経路が同じ対象を扱うことを保証する。
+# git ls-files の既定出力は改行区切りのため、ファイル名自体に改行を含む未追跡ファイルが
+# あると 1 パスが複数の存在しないパスへ分割される。分割後の各 git diff は失敗し || true で
+# 握り潰される一方、Step 7 の git add は実ファイルをそのまま取り込むため、内容を表示しない
+# まま承認できてしまう（-z / NUL 区切りで防ぐ）。
+UNTRACKED_COUNT=0
+# git ls-files をプロセス置換へ直接つなぐと、set -euo pipefail はその終了コードを
+# 検査しない。失敗（破損 index・権限エラー等）しても while は0回実行され「なし」と
+# 誤表示するため、一時ファイルへ書き出し if ! ... で明示的に終了コードを検査する
+# （scripts/skills-lock-update.sh と同一のガード）。
+UNTRACKED_LIST_FILE="$(mktemp)"
+trap 'rm -f "${UNTRACKED_LIST_FILE}"' EXIT
+if ! git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" > "${UNTRACKED_LIST_FILE}"; then
+  echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。中止します。" >&2
+  exit 1
+fi
+while IFS= read -r -d '' f; do
+  if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
+    echo "==> 新規（未追跡）ファイル — 承認時に git add で取り込まれる集合:"
+  fi
+  UNTRACKED_COUNT=$((UNTRACKED_COUNT + 1))
+  # 空ファイルは git diff --no-index が差分を出力しないため、diff の見出しだけでは
+  # どのファイルが追加されるか分からない。先に printf でファイル名自体を明示してから
+  # 内容の diff を表示する（0 byte のファイルでも名前は必ず見える）。
+  printf '%s\n' "--- ${f} ---"
+  # バイナリファイルは git diff --no-index が "Binary files ... differ" としか出力せず、
+  # 追加される中身を一切提示しない。numstat の追加/削除行数が両方 "-" になる出力で
+  # バイナリ判定し、内容の代わりに種別・サイズ・ハッシュを明示することで、中身を
+  # 確認できないまま承認（Step 7 の git add）だけが通ってしまう非対称を防ぐ。
+  NUMSTAT="$(git diff --no-index --numstat -- /dev/null "${f}" 2>/dev/null || true)"
+  if [[ "${NUMSTAT}" == -$'\t'-$'\t'* ]]; then
+    FILE_SIZE="$(wc -c < "${f}" | tr -d '[:space:]')"
+    if command -v file >/dev/null 2>&1; then
+      FILE_TYPE="$(file -b -- "${f}" 2>/dev/null || echo "unknown")"
+    else
+      FILE_TYPE="file コマンド未検出"
+    fi
+    FILE_HASH="$(git hash-object -- "${f}")"
+    # object format は repository 設定依存（既定 sha1 / 拡張 sha256）で出力桁数が変わる
+    # （sha1: 40 桁 / sha256: 64 桁）。固定表記 "git-blob-sha1" だと sha256 リポジトリで
+    # 実際のアルゴリズムと表示が食い違うため、表記自体をアルゴリズム非依存にする。
+    OBJECT_FORMAT="$(git rev-parse --show-object-format 2>/dev/null || echo unknown)"
+    printf '%s\n' "==> バイナリファイル（内容は表示されません）: type=${FILE_TYPE} size=${FILE_SIZE}bytes git-blob-hash(${OBJECT_FORMAT})=${FILE_HASH}"
+  else
+    # --no-index は index を変更しない（git add -N は使わない。Step 6 の拒否経路が
+    # index からの git checkout -- で承認済み他スキルの hash を復元する設計に依存しており、
+    # intent-to-add エントリの混入はその復元設計と干渉するため）。
+    # 差分ありのとき exit 1 を返す仕様のため、表示専用のこの呼び出しに限り || true で
+    # set -e の中断を避ける。
+    git diff --no-index -- /dev/null "${f}" || true
+  fi
+done < "${UNTRACKED_LIST_FILE}"
+if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
+  echo "==> 新規（未追跡）ファイル: なし"
+fi
 ```
 
-変更点を確認し、更新された `computedHash` の内容をユーザーに提示する。
+変更点を確認し、更新された `computedHash` の内容と未追跡ファイルの中身を合わせてユーザーに提示する。
 
 #### Step 6: ユーザーに当該スキルの承認を求める
 
-差分がある場合のみ、ユーザーに「この更新を適用してよいか」を確認する。
+差分がある場合のみ、ユーザーに「この更新を適用してよいか」を確認する。Step 5 のプレビュー
+（`git ls-files --others --exclude-standard`）・本 Step の拒否（`git clean -fd`）・Step 7 の承認
+（`git add`）は同じ集合（追跡ファイルの変更 + 非 ignore の未追跡ファイル）を対象とする。
+`.gitignore` 対象はいずれの経路でも扱わない。
 
 **却下された場合**は当該スキルのみ即座にリバートして**次スキルへ continue**する（全体を中止しない）:
 
@@ -170,7 +241,7 @@ Step 4 の clean ガードにより `npx` 実行前の当該ディレクトリ�
 #### Step 7: 承認されたスキルを stage する（ループ内で積み上げる）
 
 ```bash
-# 当該スキルのファイルのみをステージング
+# 当該スキルのファイルのみをステージング（tracked 変更 + Step 5 で提示した未追跡ファイル）
 git add skills-lock.json ".agents/skills/${SKILL_NAME}/"
 ```
 
@@ -217,6 +288,7 @@ EOF
 - **source 完全一致検証（必須）**: `source` を `OWNER/REPO` へ正規化した上で `Fandhe-AI/<repo>` に完全一致しないエントリは skip する（`contribute-skill` と同じ安全弁）。前方一致では `../` を含む値が通過してしまうため、完全一致の正規表現で検証する。`skills-lock.json` の改ざんや誤設定から防御するため
 - **`npx skills add --yes` は上書き確認をスキップする**: upstream に破壊的変更がある場合は `git diff` で内容を必ず確認すること
 - **新スキルの取扱い**: ローカルに存在するが upstream に未登録のスキル（`contribute-skill`, `sync-skills-lock` 自身など）は、upstream マージ後に登録する。マージ前に `computedHash` を勝手に書き込まない
+- **Step 5 のプレビューは index を変更しない**: 未追跡ファイルの表示に `git add -N`（intent-to-add）ではなく `git diff --no-index` を使う。Step 6 の拒否経路が index からの `git checkout --` で承認済み他スキルの hash を復元する設計に依存しており、i-t-a エントリの混入はその復元設計と干渉するため
 - **skills CLI は固定版で実行する**: `npx skills add` はバージョン未固定で実行しない。固定版の決め方・更新手順は「skills CLI のバージョン固定と更新手順」節を参照
 
 ## sandbox 環境での実行
@@ -237,6 +309,40 @@ git status --porcelain skills-lock.json
 
 - コミットに sync 対象スキルの `computedHash` 更新が含まれること
 - ステージ・未ステージに残留変更がないこと
+
+### 未追跡ファイル可視化の手動回帰確認
+
+upstream にファイルが増えたケース（Step 5 のプレビュー拡張が効いているか）は、npx を実行せずに
+未追跡ファイルを模擬して確認できる。フラットファイルの追加と、upstream が新規サブディレクトリ
+ごと追加する典型ケース（`references/` 等）の両方を確認する。**両ケースで手順3の照合方法が異なる**
+点に注意する（後述）。
+
+```bash
+# 1a. clean な状態で検証用ファイル（フラット）を作成し、npx が新規ファイルを増やした直後の状態を再現する
+touch ".agents/skills/${SKILL_NAME}/__preview_regression_check__.md"
+
+# 1b. 新規サブディレクトリごと追加されるケースも作成する
+mkdir -p ".agents/skills/${SKILL_NAME}/__preview_regression_dir__"
+touch ".agents/skills/${SKILL_NAME}/__preview_regression_dir__/new.md"
+
+# 2. Step 5 のプレビュー部（上記コマンド）を実行し、両方の検証用ファイルの内容（0 byte でも
+#    「新規（未追跡）ファイル — 承認時に git add で取り込まれる集合:」の一覧に、サブディレクトリ
+#    配下のファイルも含めてフルパスで名前が出ること）が表示されることを確認する
+#    （プレビューは git ls-files ベースのため、ディレクトリではなく個々のファイルパスを列挙する）
+
+# 3. git clean -fdn（dry-run）の一覧と照合する。
+#    フラットファイルはプレビューの行と `git clean -fdn` の行が完全一致する。
+#    新規サブディレクトリは `git clean -fdn` が個々のファイルではなく親ディレクトリを
+#    まとめて1行（`Would remove <dir>/`）で報告するため、行単位の完全一致では照合できない。
+#    この場合はプレビューの各ファイルパスが `git clean -fdn` のいずれかの出力行（ファイル
+#    自身、またはその祖先ディレクトリ）で始まることを確認する（前方一致で照合する）。
+#    完全一致を要求すると、正常に動作しているプレビューを「壊れている」と誤診断する。
+git clean -fdn -- ".agents/skills/${SKILL_NAME}/"
+
+# 4. 検証用ファイル・ディレクトリを削除して原状復帰する
+rm ".agents/skills/${SKILL_NAME}/__preview_regression_check__.md"
+rm -rf ".agents/skills/${SKILL_NAME}/__preview_regression_dir__"
+```
 
 ## 既存スキルとの関係
 
