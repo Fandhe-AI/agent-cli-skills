@@ -439,6 +439,275 @@ class TestAxis4JobScoped(unittest.TestCase):
         # node-version: 20（引用符なし int）はメジャーのみ指定として落ちる。
         self.assertFalse(mm["node-version の LTS フル指定"]["ok"])
 
+    def test_upstream_action_sha_pin_ok_denominator(self):
+        # 健全 fixture は 5 件の uses（submodule: checkout + submodule-update、
+        # skills: checkout + setup-node + skills-update）を持ち、全て 40 桁 SHA。
+        # 実装前に実測で確認した値（`check_upstream_markers` を直接叩いて確認済み）
+        # に依拠する。分母を出さないと「N == 0 で green」の誤読を検出できない。
+        m = markers_map(FIXTURE_UPSTREAM_OK)["上流 action の SHA 固定"]
+        self.assertTrue(m["ok"], m["detail"])
+        self.assertIn("全 5 件すべて 40 桁 SHA 固定", m["detail"])
+
+    def test_upstream_action_sha_regression_to_movable_ref(self):
+        # 1 件だけ @main へ退行させると不適合になり、detail に該当 uses が出る。
+        regressed = FIXTURE_UPSTREAM_OK.replace(
+            "Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96",
+            "Fandhe-AI/actions/skills-update@main",
+        )
+        m = markers_map(regressed)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        self.assertIn("全 5 件中 1 件が未固定", m["detail"])
+        self.assertIn("skills-update@main", m["detail"])
+
+    def test_upstream_action_sha_degraded_fixture_stays_pinned(self):
+        # FIXTURE_UPSTREAM_DEGRADED の uses は全て 40 桁 hex のまま（劣化させて
+        # いるのは persist-credentials 等の他マーカーのみ）。このマーカーだけは
+        # ok に転ぶことを確認し、既存の test_degraded_upstream_flags_every_marker
+        # にこのマーカーの assertFalse を足さないことの根拠を固定する。
+        m = markers_map(FIXTURE_UPSTREAM_DEGRADED)["上流 action の SHA 固定"]
+        self.assertTrue(m["ok"], m["detail"])
+
+    def test_upstream_action_sha_zero_uses_is_not_green(self):
+        # `uses` が 1 件も無い上流（jobs はあるが run: のみ）は「全て SHA 固定」
+        # に見えてはならない。分母 0 を green と誤読させない fail-closed 経路。
+        no_uses = """
+name: Update external sources (reusable)
+on:
+  workflow_call: {}
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello
+"""
+        m = markers_map(no_uses)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        self.assertIn("uses が 1 件も無い", m["detail"])
+
+    def test_upstream_action_sha_local_action_is_exempt(self):
+        # `./` で始まるローカル action は @ref の概念が無いので exempt。
+        exempt = FIXTURE_UPSTREAM_OK.replace(
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+            "      - name: Local helper\n"
+            "        uses: ./.github/actions/foo\n"
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+        )
+        m = markers_map(exempt)["上流 action の SHA 固定"]
+        self.assertTrue(m["ok"], m["detail"])
+        # exempt（`./` ローカル action）が混ざる場合は「全 N 件すべて SHA
+        # 固定」と言い切らず、ok / exempt を分離して表示する
+        # （PR #355 レビュー指摘: 誤表示の是正）。
+        self.assertIn("全 6 件中 5 件が 40 桁 SHA 固定", m["detail"])
+        self.assertIn("1 件はローカル action で対象外", m["detail"])
+
+    def test_upstream_action_sha_all_pinned_without_exempt_says_all(self):
+        # exempt が 0 件のときは従来通り「全 N 件すべて SHA 固定」と簡潔に
+        # 表示する（exempt が無いのに ok/exempt 分離表記を出すと冗長）。
+        m = markers_map(FIXTURE_UPSTREAM_OK)["上流 action の SHA 固定"]
+        self.assertTrue(m["ok"], m["detail"])
+        self.assertIn("全 5 件すべて 40 桁 SHA 固定", m["detail"])
+        self.assertNotIn("対象外", m["detail"])
+
+    def test_upstream_action_sha_docker_ref_is_fail_closed(self):
+        # `docker://` は SHA 形式を判定できないため fail-closed で未固定扱い。
+        docker_ref = FIXTURE_UPSTREAM_OK.replace(
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+            "      - name: Docker step\n"
+            "        uses: docker://alpine:3\n"
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+        )
+        m = markers_map(docker_ref)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        self.assertIn("docker://alpine:3", m["detail"])
+
+    def test_upstream_action_sha_ignores_uses_in_comments(self):
+        # YAML コメント行に uses: foo@main を含めても構造走査なら不適合にならない
+        # （grep 実装への退行を検知するテスト。実上流ファイルの先頭コメントに
+        # 実在するパターンを模している）。
+        commented = "# 移行手順: uses: foo/bar@main\n" + FIXTURE_UPSTREAM_OK
+        m = markers_map(commented)["上流 action の SHA 固定"]
+        self.assertTrue(m["ok"], m["detail"])
+
+    def test_upstream_action_sha_uppercase_hex_fails(self):
+        # 大文字混じり hex は厳密な _SHA40_RE 不一致で fail にする。
+        uppercase = FIXTURE_UPSTREAM_OK.replace(
+            "Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96",
+            "Fandhe-AI/actions/skills-update@FED9C07D98367F77E5E2B63BCA38843F46FEEE96",
+        )
+        m = markers_map(uppercase)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+
+    def test_upstream_action_sha_job_level_uses_is_checked(self):
+        # job-level uses（reusable workflow 呼び出し）も検査対象になること。
+        job_level = FIXTURE_UPSTREAM_OK.replace(
+            "jobs:\n  submodule:",
+            "jobs:\n  extra:\n"
+            "    uses: owner/repo/.github/workflows/x.yml@main\n"
+            "  submodule:",
+        )
+        m = markers_map(job_level)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        self.assertIn("x.yml@main", m["detail"])
+
+    def test_upstream_action_sha_non_string_uses_counted_as_unpinned(self):
+        # `uses: 123`（非文字列）は分母からも未固定一覧からも黙って除外されて
+        # はならない。除外すると、他の全 uses が SHA 固定済みのとき
+        # 「全て 40 桁 SHA 固定」と誤判定される（イシュー #302 レビュー指摘）。
+        non_string = FIXTURE_UPSTREAM_OK.replace(
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+            "      - name: Malformed uses\n"
+            "        uses: 123\n"
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+        )
+        m = markers_map(non_string)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"], m["detail"])
+        self.assertIn("全 6 件中 1 件が未固定", m["detail"])
+
+    def test_upstream_action_sha_empty_string_uses_counted_as_unpinned(self):
+        # `uses: ""`（空文字列）も同様に分母へ含め、未固定として報告する。
+        # `uses` が非空文字列の場合だけ 1 件も無い上流と同じ扱い（除外）に
+        # 倒すと、「原因の異なる異常」（空文字列 vs uses 皆無）を区別できない。
+        empty_uses = FIXTURE_UPSTREAM_OK.replace(
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+            "      - name: Empty uses\n"
+            '        uses: ""\n'
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+        )
+        m = markers_map(empty_uses)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"], m["detail"])
+        self.assertIn("全 6 件中 1 件が未固定", m["detail"])
+
+    def test_upstream_action_sha_non_string_job_name_does_not_crash(self):
+        # `jobs:` の YAML キーは `yaml.safe_load` が非文字列（数値等）を
+        # 許容する。非文字列 job_name をそのまま `_sanitize_for_detail` へ
+        # 渡すと `str.replace` が `AttributeError` で落ち、drift check 全体が
+        # 例外終了して fail-closed 契約に反する（PR #355 レビュー指摘）。
+        non_string_job = FIXTURE_UPSTREAM_OK.replace(
+            "jobs:\n  submodule:",
+            "jobs:\n  1:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: Untrusted job\n"
+            "        uses: owner/repo@main\n"
+            "  submodule:",
+        )
+        m = markers_map(non_string_job)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"], m["detail"])
+        self.assertIn("`1`", m["detail"])
+
+    def test_upstream_action_sha_dollar_slash_is_not_exempt(self):
+        # `$/...` は GitHub Actions の `uses` 構文としてサポートされない
+        # （公式にサポートされる同一リポジトリ参照は `./...` のみ）。
+        # 「本質的に固定されている」という前提が成立しないため免除せず、
+        # `@` を含まない他の値と同様に未固定として扱う
+        # （PR #355 レビュー指摘: 偽陰性の是正）。
+        self_repo = FIXTURE_UPSTREAM_OK.replace(
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+            "      - name: Self-repo helper\n"
+            "        uses: $/.github/actions/foo\n"
+            "      - name: Setup Node.js\n"
+            "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+        )
+        m = markers_map(self_repo)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"], m["detail"])
+        self.assertIn("全 6 件中 1 件が未固定", m["detail"])
+
+    def test_upstream_action_sha_detail_escapes_pipe_for_markdown(self):
+        # detail は render_report で Markdown 表の 1 セルへそのまま差し込まれる。
+        # `|` を含む uses 相当の文字列がエスケープされていることを確認する
+        # （上流編集者による Markdown 表破壊の防止）。
+        piped = FIXTURE_UPSTREAM_OK.replace(
+            "Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96",
+            "Fandhe-AI/actions/skills-update@main | injected",
+        )
+        m = markers_map(piped)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        self.assertIn("\\|", m["detail"])
+        self.assertNotIn("main | injected", m["detail"])
+
+    def test_upstream_action_sha_detail_escapes_pipe_in_job_and_step_name(self):
+        # detail は uses だけでなく job_name（`jobs.<id>` の YAML キー）と
+        # display（`step.name`）も埋め込む。両方とも上流編集者が自由に
+        # 設定できる文字列であり、`|` や改行を仕込むと Markdown 表破壊・
+        # 誤情報注入が成立する（uses と同じ脅威モデル）。
+        job_and_step_piped = FIXTURE_UPSTREAM_OK.replace(
+            "jobs:\n  submodule:",
+            'jobs:\n  "evil | job":\n'
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            '      - name: "bad | injected row"\n'
+            "        uses: owner/repo@main\n"
+            "  submodule:",
+        )
+        m = markers_map(job_and_step_piped)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        self.assertNotIn("evil | job", m["detail"])
+        self.assertNotIn("bad | injected row", m["detail"])
+        self.assertIn("evil \\| job", m["detail"])
+        self.assertIn("bad \\| injected row", m["detail"])
+
+    def test_upstream_action_sha_detail_neutralizes_backtick_code_span_escape(self):
+        # job_name・step_name・uses はいずれもバッククォートで囲んで
+        # コードスパンとして detail へ埋め込む。値自体にバッククォートが
+        # 混ざっていると、コードスパンを途中終了させて以降を通常の
+        # Markdown として解釈させられる（コードスパン脱出による Markdown
+        # injection）。バッククォートが無害化され、注入した Markdown 構文
+        # （リンク記法）がそのまま解釈可能な形で残らないことを確認する
+        # （PR #355 レビュー指摘）。
+        backticked = FIXTURE_UPSTREAM_OK.replace(
+            "jobs:\n  submodule:",
+            'jobs:\n  "evil` [click](javascript:1) `job":\n'
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            '      - name: "bad` step"\n'
+            "        uses: owner/repo`@main\n"
+            "  submodule:",
+        )
+        m = markers_map(backticked)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        # 値に仕込んだバッククォートが無害化され、コードスパンのデリミタと
+        # して解釈され得るバッククォートは detail 中に固定 3 個
+        # （job_name/step_name/uses それぞれの開始・終了 = 6 個…ではなく、
+        # 隣接するセルの終端が次セルの開始と重ならないため実際は 6 個）
+        # ちょうどしか残らない（＝値由来の追加バッククォートが 0 個）こと
+        # を確認する。
+        self.assertEqual(m["detail"].count("`"), 6)
+        self.assertIn("evil' [click](javascript:1) 'job", m["detail"])
+        self.assertIn("bad' step", m["detail"])
+        self.assertIn("owner/repo'@main", m["detail"])
+
+    def test_upstream_action_sha_truncates_to_five_with_total_count(self):
+        # 未固定エントリが 5 件を超えても、列挙は先頭 5 件で打ち切りつつ
+        # 総件数（分母 N と未固定数）は必ず数値で出す。
+        many_unpinned = """
+name: Update external sources (reusable)
+on:
+  workflow_call: {}
+jobs:
+  many:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: owner/repo1@main
+      - uses: owner/repo2@main
+      - uses: owner/repo3@main
+      - uses: owner/repo4@main
+      - uses: owner/repo5@main
+      - uses: owner/repo6@main
+"""
+        m = markers_map(many_unpinned)["上流 action の SHA 固定"]
+        self.assertFalse(m["ok"])
+        self.assertIn("全 6 件中 6 件が未固定", m["detail"])
+        self.assertIn("他 1 件", m["detail"])
+
     def test_naive_grep_would_pass_degraded_but_job_scope_catches_it(self):
         # submodule ジョブにだけ persist-credentials: false を書いた偽陽性ケース。
         # ファイル全体 grep なら「false がある」で通ってしまうが、skills ジョブの
