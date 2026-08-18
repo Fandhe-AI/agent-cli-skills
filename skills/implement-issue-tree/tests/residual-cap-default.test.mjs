@@ -34,6 +34,8 @@ const slicePath = join(sliceDir, 'implement-issue-tree-residual-cap-defs.mjs')
 const SLICE_EXPORTS = [
   'parseMaxResidualWorktrees',
   'DEFAULT_MAX_RESIDUAL_WORKTREES',
+  'parseMaxResidualWorktreeBytes',
+  'DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES',
   'EPHEMERAL_KIND_MAX',
   'EPHEMERAL_RESERVE_PER_NEW_START',
 ]
@@ -43,6 +45,8 @@ const mod = await import(pathToFileURL(slicePath).href)
 const {
   parseMaxResidualWorktrees,
   DEFAULT_MAX_RESIDUAL_WORKTREES,
+  parseMaxResidualWorktreeBytes,
+  DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES,
   EPHEMERAL_KIND_MAX,
   EPHEMERAL_RESERVE_PER_NEW_START,
 } = mod
@@ -82,9 +86,54 @@ test('キャパシティ算術: 既定値・最悪積み増し 6 件/イシュ�
 test('fail-closed 分岐（スキャン失敗時の新規着手抑止）がスクリプト全体に存在する', () => {
   // 上限引き上げが観測失敗時の抑止ロジックを消していないことのソース存在確認（軽量な退行検知）。
   // この分岐はスケジューラ（駆動部）側にあり DRIVER_MARKER より下のためスクリプト全文で確認する。
+  // バイト軸（Issue #348 案 B）追加により条件は件数軸単独の判定から OR 判定
+  // （residualGateActive）へ拡張されているため、その形へ合わせて確認する。
   assert.match(
     source,
-    /if \(!scanFailureDetail && maxResidualWorktrees > 0\) {/,
+    /if \(!scanFailureDetail && residualGateActive\) {/,
   )
   assert.match(source, /newStartSuppressed/)
+})
+
+// --- バイト軸（maxResidualWorktreeBytes。Issue #348 案 B・PR #390 codex-review 指摘対応）---
+// 件数軸だけでは配布先リポジトリのファイル量に依存する実バイト消費を捉えられないため、
+// リポジトリ非依存の絶対閾値を独立した第2軸として併用する。検証・既定値・0 の意味・
+// throw 条件は件数軸の parseMaxResidualWorktrees と同型のため、同じ観点で固定する。
+
+test('バイト軸の既定値は 2 GiB（未指定・null のいずれも DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES を返す）', () => {
+  assert.equal(DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES, 2 * 1024 * 1024 * 1024)
+  assert.equal(parseMaxResidualWorktreeBytes(undefined), 2 * 1024 * 1024 * 1024)
+  assert.equal(parseMaxResidualWorktreeBytes(null), 2 * 1024 * 1024 * 1024)
+})
+
+test('バイト軸の 0 はこの軸のみの明示オプトアウトとして通り、正の整数はそのまま返る', () => {
+  assert.equal(parseMaxResidualWorktreeBytes(0), 0)
+  assert.equal(parseMaxResidualWorktreeBytes(1024), 1024)
+})
+
+test('バイト軸の負値・非整数・文字列・NaN は fail-closed で throw する（誤記拒否の維持）', () => {
+  assert.throws(() => parseMaxResidualWorktreeBytes(-1))
+  assert.throws(() => parseMaxResidualWorktreeBytes(1.5))
+  assert.throws(() => parseMaxResidualWorktreeBytes('2147483648'))
+  assert.throws(() => parseMaxResidualWorktreeBytes(NaN))
+})
+
+test('両軸は独立に検証される（件数軸の値はバイト軸の検証・既定値に影響しない）', () => {
+  // 件数軸を明示オプトアウト（0）にしても、バイト軸は独立に既定値のまま検証されること
+  // （件数軸 0 がバイト軸の fail-closed まで無効化する fail-open を防ぐ）。
+  assert.equal(parseMaxResidualWorktrees(0), 0)
+  assert.equal(parseMaxResidualWorktreeBytes(undefined), DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES)
+})
+
+test('バイト測定の呼び出しと OR 判定・latch 保持がスクリプト全体に存在する', () => {
+  assert.match(source, /measureResidualWorktreeBytes/)
+  assert.match(source, /residualGateActive/)
+  // 件数軸の途中経過再評価（3b/3c）・monitoring 再開の projected 判定はバイト軸を対象にしない
+  // 設計（du の実行コストを dispatch ループの毎周回では払わない）。該当箇所の比較式に
+  // maxResidualWorktreeBytes が現れていないことを軽量に確認する。
+  assert.match(source, /residualObservedAtStart \+ ephemeralWorktrees\.length > maxResidualWorktrees\b/)
+  assert.doesNotMatch(
+    source,
+    /residualObservedAtStart \+ ephemeralWorktrees\.length > maxResidualWorktrees.*maxResidualWorktreeBytes/,
+  )
 })

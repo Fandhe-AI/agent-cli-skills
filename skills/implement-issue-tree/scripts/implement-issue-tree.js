@@ -162,14 +162,33 @@ const autoMergeEnabled = (() => {
 // fix-routing-error ×1。EPHEMERAL_KIND_MAX の合計から導出）のため、既定 100 なら開始時
 // 残置 0 でも (100 / 6) ≈ 15 イシュー/ラン に着手できる。
 // 旧既定値 20 では 1 ラン 3 件で頭打ちになっていた（2 ラン分の実測・Issue #348）。
+// 件数 100 件という既定値の根拠は本リポジトリ 1 件のみの実測（≈ 3.4 MB/件）であり、本スキルは
+// 配布先ごとに追跡ファイル量が異なる多数のリポジトリで使われる。件数だけを緩和すると、
+// 1 件あたりのチェックアウトサイズが本リポジトリより大きい配布先では旧既定比で最大 5 倍の
+// ディスクを消費するまで着手を止めない（codex-review 指摘・PR #390）。そのため件数軸を
+// リポジトリ非依存の絶対値である DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES（既定 2 GiB。Issue #348
+// 案 B）と併用する第2軸として補強する。100 件 × 3.4 MB ≈ 340 MB は 2 GiB を大きく下回るが、
+// 1 件あたりのサイズがより大きい配布先ではバイト軸が件数上限より先に発火し、件数軸だけでは
+// 検出できない過大消費を独立に止める（両軸は AND ではなく OR で評価し、どちらか一方でも
+// 超過すれば新規着手を止める＝安全側）。
 // parseMaxResidualWorktrees（下方で定義。関数宣言はホイストされるが本 const は評価順が要る
 // ため呼び出し直前のここに置く）が参照する。
 const DEFAULT_MAX_RESIDUAL_WORKTREES = 100
+// 残置 worktree ディスク使用量の上限（バイト、既定 2 GiB）。件数軸とは独立した第2軸
+// （Issue #348 案 B）。配布先リポジトリのファイル量に依存せず、絶対的なディスク消費量で
+// DoS を防ぐ。件数軸と同じく 0 は「このバイト軸のみ」明示オプトアウト（件数軸の
+// fail-closed には影響しない。両軸は独立に検証・無効化できる）。
+const DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES = 2 * 1024 * 1024 * 1024 // 2 GiB
 // 残置 worktree 総数の上限（Issue #142 後続）。使い捨て worktree は削除しない設計のため、
 // ラン開始時の残置総数が上限超過なら新規着手を止めて手動介入を促す（削除は一切行わない
 // fail-closed ゲート）。検証・既定値・0 の意味は parseMaxResidualWorktrees 参照。
 const maxResidualWorktrees = parseMaxResidualWorktrees(
   parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.maxResidualWorktrees : undefined,
+)
+// 残置 worktree ディスク使用量の上限（バイト）。検証・既定値・0 の意味は
+// parseMaxResidualWorktreeBytes 参照。
+const maxResidualWorktreeBytes = parseMaxResidualWorktreeBytes(
+  parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.maxResidualWorktreeBytes : undefined,
 )
 // Issue #119: レビュースレッドの resolve はこのワークフローのどのエージェント・どの経路でも
 // 実行しない（自動 resolve 機能は全面撤去）。未信頼データを読むエージェントに resolve 権限を
@@ -441,6 +460,24 @@ function parseMaxResidualWorktrees(raw) {
       `args.maxResidualWorktrees は 0 以上の整数で指定すること（0 は上限なし＝チェック無効。` +
         `既定は ${DEFAULT_MAX_RESIDUAL_WORKTREES}。残置 worktree のディスク枯渇防止ゲートの入力の` +
         `ため誤記は fail-closed で拒否する）: ${String(raw).slice(0, 50)}`,
+    )
+  }
+  return raw
+}
+
+// args.maxResidualWorktreeBytes の検証・数値化（バイト単位）。件数軸（maxResidualWorktrees）
+// とは独立した第2軸のため専用の検証を持つ（Issue #348 案 B。codex-review 指摘・PR #390）。
+//   - 未指定 → 既定 DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES（2 GiB） / 0 → このバイト軸のみ
+//     無効化（件数軸の fail-closed には影響しない） / 正の整数 → その値（バイト） /
+//     それ以外 → throw（fail-closed）
+function parseMaxResidualWorktreeBytes(raw) {
+  if (raw === undefined || raw === null) return DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) {
+    throw new Error(
+      `args.maxResidualWorktreeBytes は 0 以上の整数（バイト数）で指定すること（0 はこの` +
+        `バイト軸のみ上限なし＝無効化。件数軸 maxResidualWorktrees の fail-closed は維持される。` +
+        `既定は ${DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES}（2 GiB）。残置 worktree のディスク枯渇` +
+        `防止ゲートの入力のため誤記は fail-closed で拒否する）: ${String(raw).slice(0, 50)}`,
     )
   }
   return raw
@@ -1107,6 +1144,20 @@ const ORPHAN_COUNT_SCHEMA = {
   },
 }
 
+// 残置 worktree ディスク使用量（KiB）の返却スキーマ。maxResidualWorktreeBytes ゲート（第2軸・
+// Issue #348 案 B）専用。du -sk は macOS 標準 du でも動く（-b は GNU 限定のため使わない）。
+const ORPHAN_BYTES_SCHEMA = {
+  type: 'object',
+  required: ['kib'],
+  properties: {
+    kib: {
+      type: 'integer',
+      minimum: 0,
+      description: '対象パス全件に du -sk を実行した第1列（KiB）の単純合計',
+    },
+  },
+}
+
 // ============================================================================
 // セクション 4: 状態ファイル操作
 // _/issue-trees/<parent>.json への読み書きを担う。並列実行時の競合を防ぐため
@@ -1423,6 +1474,43 @@ async function countWorktreeRecords() {
 // だと手動作成ブランチが誤って結びつく余地があるため、先頭からの形式一致を要求する。
 function branchMatchesIssue(branch, issueNumber) {
   return new RegExp(`^[a-z]+/${issueNumber}-`).test(branch)
+}
+
+// 残置 worktree のディスク使用量（KiB）を測定する。maxResidualWorktreeBytes ゲート
+// （第2軸・Issue #348 案 B）専用の観測値。件数軸だけでは配布先リポジトリのファイル量に
+// 依存する実バイト消費を捉えられないため、リポジトリ非依存の絶対閾値として独立に使う。
+// 測定不能（コマンド失敗・1 件でも du が非0終了）は 0 で補わず null を返す。
+// countResidualWorktrees の「(検証不可)」計上と同じ理由: 0 は fail-open（過小評価）に
+// なるため、呼び出し側は null を観測失敗として fail-closed 側の分岐へ倒す契約とする。
+async function measureResidualWorktreeBytes(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return 0
+  try {
+    const v = await agent(
+      [
+        '残置 worktree のディスク使用量測定タスク（読み取り専用。削除・変更は一切行わない）。',
+        `対象パス（${paths.length} 件、1 行 1 パス）:`,
+        ...paths.map((p) => `- ${p}`),
+        '手順:',
+        '1. 各パスに対して du -sk <path> を実行し、出力の第1列（KiB）を取得する（-b は使わない。',
+        '   GNU 限定オプションで、配布先が macOS 等の非 GNU du だと失敗する）。',
+        '2. 全パスの値を単純合計する（推測・丸めをしない）。',
+        '3. 1 件でも du が失敗・非0終了・パスが存在しない場合は、他の値で補わず',
+        '   タスク全体を失敗として報告する（合計を 0 や欠損値で埋めない）。',
+        '4. 合計値を kib として返す。',
+      ].join('\n'),
+      {
+        label: 'worktree:residual-bytes',
+        phase: 'State',
+        model: 'haiku',
+        effort: 'low',
+        schema: ORPHAN_BYTES_SCHEMA,
+      },
+    )
+    return Number.isInteger(v?.kib) && v.kib >= 0 ? v.kib : null
+  } catch (e) {
+    log(`⚠️ 残置 worktree のディスク使用量測定中に例外が発生した（${e?.message ?? e}）`)
+    return null
+  }
 }
 
 // orphan scan のエントリ群からメインリポ自身の worktree パスを特定する。isMain フラグと先頭
@@ -2775,10 +2863,15 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
   // 使い捨て worktree は自動削除しない設計のため、複数ラン累積の残置総数に上限を設けて
   // ディスク枯渇（DoS）を防ぐ。メイン worktree のみ除外した物理総数を観測する（使用中も数える）。
   // 観測成立の判定は 2 段構え: ① 空チェック（length 0 は観測不成立）、② 完全性照合
-  // （LLM 転記の脱落検出のため countWorktreeRecords と件数照合。ゲート有効時のみ）。
-  // 観測不成立はゲート有効なら新規着手を抑止する（fail-closed。monitoring 再開は対象外）。
+  // （LLM 転記の脱落検出のため countWorktreeRecords と件数照合。いずれかの軸が有効なとき）。
+  // 観測不成立はいずれかの軸が有効なら新規着手を抑止する（fail-closed。monitoring 再開は対象外）。
+  // 件数軸（maxResidualWorktrees）とバイト軸（maxResidualWorktreeBytes、Issue #348 案 B）は
+  // 独立に検証・無効化できる第2軸で、判定は OR（どちらか一方でも超過すれば着手を止める＝
+  // 安全側）。件数だけでは配布先リポジトリのファイル量に依存する実バイト消費を捉えられない
+  // ため、リポジトリ非依存の絶対閾値で補強する（PR #390 codex-review 指摘への対応）。
+  const residualGateActive = maxResidualWorktrees > 0 || maxResidualWorktreeBytes > 0
   let scanFailureDetail = runStartOrphanEntries.length === 0 ? 'git worktree list を取得できず' : ''
-  if (!scanFailureDetail && maxResidualWorktrees > 0) {
+  if (!scanFailureDetail && residualGateActive) {
     const independentCount = await countWorktreeRecords()
     if (independentCount === null) {
       scanFailureDetail = `一覧転記の完全性を照合する独立レコードカウントを取得できず（一覧側 ${runStartOrphanEntries.length} 件）`
@@ -2787,19 +2880,21 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
     }
   }
   if (scanFailureDetail) {
-    if (maxResidualWorktrees > 0) {
+    if (residualGateActive) {
       newStartSuppressed = {
         reason:
           `ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。` +
-          `残置総数を確認できないため、ディスク枯渇防止の上限ゲート（上限 ${maxResidualWorktrees} 件）を` +
+          `残置総数を確認できないため、ディスク枯渇防止の上限ゲート` +
+          `（件数上限 ${maxResidualWorktrees > 0 ? `${maxResidualWorktrees} 件` : 'なし'}・` +
+          `容量上限 ${maxResidualWorktreeBytes > 0 ? `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB` : 'なし'}）を` +
           `適用できず、新規イシューの着手を停止した（fail-closed。monitoring 再開は継続する）。` +
           `git worktree list が実行できる状態を確認してから再実行すること`,
         paths: [],
       }
       log(`⚠️ ${newStartSuppressed.reason}`)
     } else {
-      // 上限なしの明示オプトアウト時は観測失敗でも抑止しない（ゲート無効の意思表示が優先）。
-      log(`⚠️ ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。上限ゲートは無効（maxResidualWorktrees: 0）のため続行する`)
+      // 両軸とも明示オプトアウト時は観測失敗でも抑止しない（ゲート無効の意思表示が優先）。
+      log(`⚠️ ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。上限ゲートは無効（maxResidualWorktrees: 0 / maxResidualWorktreeBytes: 0）のため続行する`)
     }
   } else {
     residualObserved = true
@@ -2810,7 +2905,7 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
     if (maxResidualWorktrees > 0 && residual.count > maxResidualWorktrees) {
       newStartSuppressed = {
         reason:
-          `残置 worktree が上限 ${maxResidualWorktrees} 件を超過（実測 ${residual.count} 件）。` +
+          `残置 worktree が件数上限 ${maxResidualWorktrees} 件を超過（実測 ${residual.count} 件）。` +
           `ディスク枯渇防止のため新規イシューの着手を停止した。git worktree list で確認し、` +
           `不要な worktree を git worktree remove で手動削除してから再実行すること`,
         paths: residual.paths,
@@ -2823,6 +2918,51 @@ let newStartSuppressed = null // 上限超過による新規着手抑止の理�
       log(`⚠️ 残置 worktree が ${residual.count} 件（上限 ${maxResidualWorktrees} 件の 8 割超）。不要な worktree の手動削除を検討すること`)
     } else {
       log(`残置 worktree 観測: ${residual.count} 件（上限 ${maxResidualWorktrees > 0 ? `${maxResidualWorktrees} 件` : 'なし'}）`)
+    }
+
+    // --- バイト軸（第2軸）の観測。件数軸で既に抑止済みでも、ラン開始時の実測値として
+    // 観測・記録は行う（レポートの透明性のため）。ただし新規抑止の決定は最初に発火した軸を
+    // 優先し、既に newStartSuppressed が立っていれば上書きしない。
+    if (maxResidualWorktreeBytes > 0 && residual.paths.length > 0) {
+      const kib = await measureResidualWorktreeBytes(residual.paths)
+      if (kib === null) {
+        const detail = `残置 worktree のディスク使用量を測定できず（対象 ${residual.paths.length} 件）`
+        if (!newStartSuppressed) {
+          newStartSuppressed = {
+            reason:
+              `ラン開始時の worktree 残置ディスク使用量観測に失敗した（${detail}）。` +
+              `容量を確認できないため、ディスク枯渇防止の容量上限ゲート` +
+              `（上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB）を適用できず、` +
+              `新規イシューの着手を停止した（fail-closed）。du が実行できる状態を確認してから再実行すること`,
+            paths: residual.paths,
+          }
+          log(`⚠️ ${newStartSuppressed.reason}`)
+        } else {
+          log(`⚠️ ${detail}（既に件数上限で着手を停止済みのため追加の抑止はしない）`)
+        }
+      } else {
+        const bytes = kib * 1024
+        if (bytes > maxResidualWorktreeBytes) {
+          const detail =
+            `残置 worktree が容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過` +
+            `（実測 ${Math.round(bytes / (1024 * 1024))} MiB）`
+          if (!newStartSuppressed) {
+            newStartSuppressed = {
+              reason:
+                `${detail}。ディスク枯渇防止のため新規イシューの着手を停止した。git worktree list で確認し、` +
+                `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+              paths: residual.paths,
+            }
+            log(`⚠️ ${newStartSuppressed.reason}`)
+          } else {
+            log(`⚠️ ${detail}（既に件数上限で着手を停止済み）`)
+          }
+        } else if (bytes >= Math.ceil(maxResidualWorktreeBytes * 0.8)) {
+          log(`⚠️ 残置 worktree のディスク使用量が ${Math.round(bytes / (1024 * 1024))} MiB（容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB の 8 割超）。不要な worktree の手動削除を検討すること`)
+        } else {
+          log(`残置 worktree ディスク使用量観測: ${Math.round(bytes / (1024 * 1024))} MiB（容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB）`)
+        }
+      }
     }
   }
 }
