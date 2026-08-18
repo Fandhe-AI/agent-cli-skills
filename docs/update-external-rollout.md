@@ -6,10 +6,9 @@
 （A / B / C の評価）と 5 リポへの導入手順・実測結果を記録する。
 
 `.claude/skills` が実ディレクトリ（tree mode `040000`）である場合の checkout 失敗
-（イシュー #256）は本ドキュメントの対象外。実際の導入実行では、この記録の時点で完了して
-いる **3 リポ**（`mcp_hub-spec` / `hobby-keyboard` / `automation-spec`）の初回 run が
-`Update agent skills` まで success しており、この 3 リポでは事象の再燃を観測していない。
-`aliz-corporate-web` と `team-hub-spec` は実行中のため未判定（「実施記録」節を参照）。
+（イシュー #256）は本ドキュメントの対象外。実際の導入実行では **5 リポすべて**の初回 run が
+`Update agent skills` まで success しており、この事象の再燃は観測していない
+（「実施記録」節を参照）。
 
 ## 対象リポジトリ
 
@@ -38,7 +37,7 @@
 - 案 A の残リスク（低活動 3 リポで schedule が自動無効化され得る）は、#304 が採用した
   「軸 5 で検知 → `docs/update-external-schedule.md` の復旧手順で人手再有効化」で担保する。
 
-この評価結果はイシュー #342 へコメントとして記録する（後続の push/PR 作成担当が実施）。
+この評価結果はイシュー #342 へコメントとして記録済み（2026-08-18）。
 
 ## 導入する wrapper（共通テンプレート）
 
@@ -252,8 +251,13 @@ SUBMODULE_PAT visibility=all
 | `mcp_hub-spec` | 作成済 | `fc2d67d8`（main 直接） | [32087993215](https://github.com/Fandhe-AI/mcp_hub-spec/actions/runs/32087993215) success | [#109](https://github.com/Fandhe-AI/mcp_hub-spec/pull/109) MERGED |
 | `hobby-keyboard` | 作成済 | `69a75e7c`（main 直接） | [32087990615](https://github.com/Fandhe-AI/hobby-keyboard/actions/runs/32087990615) success | [#49](https://github.com/Fandhe-AI/hobby-keyboard/pull/49) MERGED |
 | `automation-spec` | 作成済 | `e95f01e2`（main 直接） | [32087988457](https://github.com/Fandhe-AI/automation-spec/actions/runs/32087988457) success | [#76](https://github.com/Fandhe-AI/automation-spec/pull/76) MERGED |
-| `aliz-corporate-web` | 作成済 | `7966d371`（main 直接） | [32087996118](https://github.com/Fandhe-AI/aliz-corporate-web/actions/runs/32087996118) | 実行中に付き別途追記 |
-| `team-hub-spec` | 作成済 | [PR #57](https://github.com/Fandhe-AI/team-hub-spec/pull/57) | PR マージ後に実行 | — |
+| `aliz-corporate-web` | 作成済 | `7966d371`（main 直接） | [32087996118](https://github.com/Fandhe-AI/aliz-corporate-web/actions/runs/32087996118) success（`target=skill`） | [#11](https://github.com/Fandhe-AI/aliz-corporate-web/pull/11) MERGED |
+| `team-hub-spec` | 作成済 | [PR #57](https://github.com/Fandhe-AI/team-hub-spec/pull/57) MERGED | [32088353084](https://github.com/Fandhe-AI/team-hub-spec/actions/runs/32088353084) success | [#58](https://github.com/Fandhe-AI/team-hub-spec/pull/58) OPEN（auto-merge 予約済み・必須チェック待ち） |
+
+**5 リポすべてで初回実行が success し、同期 PR が作成された**（受け入れ条件 4 を充足）。
+`team-hub-spec` の #58 だけが open なのは、同リポのみ必須チェック 4 件を持つため
+auto-merge がその完了を待っている状態であり、失敗ではない（`EditorConfig (strict)` /
+`PoC rustfmt --check` / `Broken link check (lychee)` は既に success）。
 
 `team-hub-spec` のみ branch ruleset（`main-protection`・active・bypass 0・required check 4 件）
 があるため PR 経由にした。残り 4 リポは ruleset も classic branch protection も無い
@@ -307,13 +311,15 @@ $ gh run view <run-id> --repo Fandhe-AI/<repo> --log | grep -oE '##\[(notice|war
 そのまま現れるため、本文エコーを実出力と読み違えると「警告が出た」と誤読する。実際に
 出力されたものだけを見るには `##[notice]` / `##[warning]` / `##[error]` で絞る。
 
+### 段階確認（`aliz-corporate-web`）
+
+リスク対処のとおり `target=skill` で skills 経路を先に確定させてから `target=all` を実行した。
+`target=all` 実行でも `Update submodule references` は `skipped` であり、`enable-submodule: false`
+が両経路で一貫して効いている。
+
 ### 残作業
 
-- `aliz-corporate-web` の初回実行完了と同期 PR の確認（`target=skill` → `target=all`）
-- `team-hub-spec` PR #57 のマージと初回実行
-- 乖離検知 CI の再実行と `SYNC-CI-ABSENT == 0` の確認
-
-いずれもイシュー #342 へ実測値付きで追記する。
+- 乖離検知 CI の再実行と `SYNC-CI-ABSENT == 0` の確認（実測値はイシュー #342 へ追記する）
 
 ## リスクと対処
 
@@ -322,7 +328,7 @@ $ gh run view <run-id> --repo Fandhe-AI/<repo> --log | grep -oE '##\[(notice|war
 | 同期 PR が下流の lint（`team-hub-spec` の editorconfig / lychee、`mcp_hub-spec` の markdownlint）で赤になる | 同期 PR がマージできない | 受入条件は「PR が作成されること」。事象を記録し後続イシューを起票する |
 | `team-hub-spec` で `Cursor Bugbot` が起動しない | 導入 PR が恒久的にマージ不能 | ruleset を緩めず、状況をイシューへ記録して停止・エスカレーションする |
 | 低活動 3 リポで schedule が自動無効化される | 同期が止まる | 軸 5 が検知 → `docs/update-external-schedule.md` の復旧手順。導入直後は猶予判定で偽陽性なし |
-| `aliz-corporate-web` の submodule ジョブ失敗 | 日次 run が赤 → 将来 SCHEDULE-FAILING | `target=skill` で skills 経路を先に確定 → `target=all` で観測 → 失敗時は記録 + 後続イシュー（`enable-submodule` の要否判断はスコープ外） |
+| `aliz-corporate-web` の submodule ジョブ失敗 | 日次 run が赤 → 将来 SCHEDULE-FAILING | **解消済み（対処不要）**。同リポは `enable-submodule: false` を明示して導入したため submodule ジョブは常に `skipped` になり、失敗経路自体が無い（実測: 初回 run・`target=all` run とも `Update submodule references = skipped`）。将来 `enable-submodule` を有効化する別イシューを立てる際に、このリスクを再評価する |
 | 導入直後に `PIN-STALE` として再登場 | レポート件数は `SYNC-CI-ABSENT` 単独では減らない | 判定ゲートは `SYNC-CI-ABSENT == 0` のみ。pin 追従は #343 |
 
 ## スコープ外
@@ -333,10 +339,9 @@ $ gh run view <run-id> --repo Fandhe-AI/<repo> --log | grep -oE '##\[(notice|war
 - 5 リポの既存 CI・lint 設定の修正
 - 既存 22 リポの pin 追従（#343）
 
-（本ドキュメント起草時にスコープ外としていた項目のうち、**5 リポへの書き込み**（ラベル作成・
-wrapper 導入・PR 作成とマージ・workflow 初回実行）と **#342 へのコメント投稿**は後続フェーズと
-して実施済み。**乖離検知 CI の再実行**は `aliz-corporate-web` / `team-hub-spec` の初回実行完了
-待ちで未実施であり、「実施記録」節の「残作業」に残っている）
+（本ドキュメント起草時にスコープ外としていた「5 リポへの実際の書き込み・乖離検知 CI の再実行・
+イシュー #342 へのコメント投稿」は、後続フェーズとしてすべて実施した。各項目の実測値は
+「実施記録」節を正とする）
 
 ## 関連
 
