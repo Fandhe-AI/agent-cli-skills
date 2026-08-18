@@ -33,7 +33,7 @@ GIT_SSL_NO_VERIFY=1 gh pr create --draft --base main
 
 ## スキルごとの判定値
 
-各スキルの SKILL.md 末尾「sandbox 環境での実行」節（または同等の注意事項）は、次の 5 判定値のいずれか 1 つを
+各スキルの SKILL.md 末尾「sandbox 環境での実行」節（または同等の注意事項）は、次の 6 判定値のいずれか 1 つを
 自スキルの性質として宣言します。判定は次の 2 点のみで行い、それ以外を根拠にしません。
 
 - (a) ネットワーク到達性を要するか（`git fetch` / `git push` / `gh ...` 等を呼ぶか）
@@ -76,6 +76,14 @@ GIT_SSL_NO_VERIFY=1 gh pr create --draft --base main
 | `project-update-items` | 要（本スキルは主に API 経由） | `gh project item-edit` |
 | `project-sync-issues` | 要（本スキルは主に API 経由） | 同期 workflow 生成・一括補正 |
 | `project-archive-done` | 要（本スキルは主に API 経由） | `gh project item-archive` |
+| `comment-code` | 不要 | ファイル読解・コメント追記のみで完結。`gh` / `git push` 等のネットワーク越し操作を行わない |
+| `create-commit` | 不要 | `git status` / `git diff` / `git commit` 等ローカル操作のみで完結（`git push` を含まない） |
+| `create-plan` | 不要 | コードベース調査と `_/local-plans/` へのファイル作成のみで完結 |
+| `update-docs` | 不要 | 差分検出と CLAUDE.md 更新はローカルの `git log` / ファイル I/O のみで完結 |
+| `create-issue-tree` | 要（本スキルは主に API 経由） | `gh issue create` / `gh label create` / `gh api .../sub_issues` で Issue ツリーを新規作成 |
+| `update-issue-tree` | 要（本スキルは主に API 経由） | `gh issue create` / `gh issue edit` / `gh api .../sub_issues`（`scripts/reassign-sub-issue.sh` 経由含む）でツリーを更新 |
+| `init-claude` | 一部要 | `.claude/` 体系のスキャフォールドはローカル完結。Step 4「implement-issue-tree の動作前提を確認する」の `gh auth status` / `gh api .../sub_issues`（読み取りのみ）のみネットワークを要する |
+| `update-claude` | 一部要 | 既存 `.claude/` の調査・差分診断・追補はローカル完結。Step 2-6「implement-issue-tree 前提診断」の `gh auth status` / `gh api .../sub_issues`（読み取りのみ）のみネットワークを要する |
 | `setup-firebase-hosting` | 一部要 | `bootstrap-firebase.sh`（GCP/Firebase 認証）はネットワーク必須。`firebase.json` 作成・ローカル検証はネットワーク不要（既存の記述のまま） |
 
 ## 実測記録

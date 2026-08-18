@@ -327,4 +327,4 @@ Validation: PASS
 
 ## sandbox 環境での実行
 
-このスキルは sandbox 環境で実行できる。renderer（`scripts/render_report.py`）は純ローカルの Python 処理であり、ネットワーク越しの操作を行わない。出力先の `_/reports/` はワークスペース内であり、ワークスペース外への書き込みも行わない。
+このスキルは sandbox 環境で実行できる。renderer（`scripts/render_report.py`）は純ローカルの Python 処理であり、ネットワーク越しの操作を行わない。既定の出力先 `_/reports/` はワークスペース内だが、`--output <path>` に絶対パスや `../` を含む相対パスを指定した場合はワークスペース外へも書き込み得る（ワークスペース内に限定する制約は設けていない）。ワークスペース外への書き込みの有無は sandbox 可否を左右しない（`docs/sandbox-tls.md` の判定基準を参照）ため、判定は `不要`。
