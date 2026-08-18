@@ -9,7 +9,13 @@
 // 誤り）。修正（案 A 採用）はプローブの引数形式を `owner/repo[@branch]:workflow1,workflow2...`
 // へ拡張し、`@branch` 省略時のみ既定ブランチへフォールバックするようにした。
 //
-// 3 群構成:
+// 群F・群G（Issue #363）: 必須 workflow 集合の入力形式をカンマ区切り文字列から JSON 配列へ
+// 変更する回帰テスト。GitHub Actions の workflow レベル `name:` にはカンマを含められるため
+// （例: `name: Build, Test`）、カンマ区切りでは区切り文字と衝突し存在しない複数名へ誤分割
+// される。入力形式は `owner/repo[@branch]:["workflowName1","workflowName2"]` へ変更し、
+// 旧カンマ区切り形式は判定不能として拒否する（フォールバック解釈もしない）。
+//
+// 群構成:
 //   群 A（構造の固定）: 節内の ```bash ブロックがちょうど 1 個で決定的に抽出できること。
 //   群 B（シェル構文の健全性）: 抽出ブロックが `bash -n` を通ること（case/クォートの編集ミス検出）。
 //   群 C（契約の固定）: `@<branch>` 明示分岐の存在・`defaultBranchRef` の全出現がフォールバック
@@ -135,7 +141,7 @@ test('群C: 引数形式の説明が owner/repo[@branch] 形式を明示する',
 // ---------------------------------------------------------------------------
 // 群 D（Issue #362 追補・PR #378 指摘対応）: "@" 明示かつ branch 空は fail-closed
 // ---------------------------------------------------------------------------
-test('群D: @ の後が空（owner/repo@:workflow）は defaultBranchRef へフォールバックせず判定不能で終端する', () => {
+test('群D: @ の後が空（owner/repo@:["workflow"]）は defaultBranchRef へフォールバックせず判定不能で終端する', () => {
   assert.match(
     scriptBody,
     /branch_explicit=1[\s\S]*?if \[ "\$\{branch_explicit\}" = 1 \] && \[ -z "\$\{branch\}" \]; then/,
@@ -162,7 +168,7 @@ exit 1
 
     let stdout = ''
     try {
-      stdout = execFileSync('bash', [scriptPath, 'owner/repo@:workflow1'], {
+      stdout = execFileSync('bash', [scriptPath, 'owner/repo@:["workflow1"]'], {
         encoding: 'utf8',
         env: { ...process.env, PATH: `${tmpDir}:${process.env.PATH}` },
       })
@@ -208,6 +214,156 @@ test('群E: 非 ASCII 検知の LC_ALL=C は printf ではなく grep に付与�
     /\| LC_ALL=C grep -q '\[\^ -~\]'/,
     'LC_ALL=C grep による非 ASCII 検知（`[^ -~]`）が見つからない',
   )
+})
+
+// ---------------------------------------------------------------------------
+// 群 F（Issue #363・静的契約）: 必須 workflow 集合が JSON 配列で受け渡しされる
+// ---------------------------------------------------------------------------
+test('群F: 必須集合への split(",") が残っていない', () => {
+  assert.doesNotMatch(
+    scriptBody,
+    /split\(","\)/,
+    'スクリプト内に必須集合への split(",") が残っている（カンマ入り workflow 名が誤分割される）',
+  )
+})
+
+test('群F: 必須集合は --argjson req "${required_json}" で jq へ渡される', () => {
+  const occurrences = [...scriptBody.matchAll(/--argjson req "\$\{required_json\}"/g)]
+  assert.ok(
+    occurrences.length >= 2,
+    `--argjson req "\${required_json}" の束縛が想定数（bad_hit・required_map の 2 箇所）に満たない: ${occurrences.length}`,
+  )
+})
+
+test('群F: 必須集合の JSON 配列妥当性検証ブロックがある（型・要素数・非空文字列）', () => {
+  assert.match(
+    scriptBody,
+    /type == "array" and length >= 1 and all\(\.\[\]; type == "string" and length > 0\)/,
+    'JSON 配列検証（type==array・length>=1・全要素が非空文字列）が見つからない',
+  )
+})
+
+test('群F: 節の散文・ヘッダコメントが JSON 配列形式を明示する', () => {
+  assert.match(
+    section,
+    /\["workflowName1","workflowName2"\]/,
+    '節の散文にプローブ引数の JSON 配列形式の例が見つからない',
+  )
+  assert.match(
+    scriptBody,
+    /\["workflowName1","workflowName2"\]/,
+    'ヘッダコメントに JSON 配列形式の引数例が見つからない',
+  )
+  assert.match(
+    section,
+    /旧カンマ区切り形式は受理しない/,
+    '節の散文に旧カンマ区切り形式を受理しない旨の記述が見つからない',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// 群 G（Issue #363・実行レベル）: gh をモックした green 経路 / 旧形式 fail-closed
+// ---------------------------------------------------------------------------
+function hasJq() {
+  try {
+    execFileSync('bash', ['-c', 'command -v jq'], { encoding: 'utf8' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const HEAD_SHA = 'a'.repeat(40)
+
+function writeGhMock(dir) {
+  const callLog = join(dir, 'gh-calls.log')
+  const ghMock = join(dir, 'gh')
+  writeFileSync(
+    ghMock,
+    `#!/usr/bin/env bash
+echo "$@" >> "${callLog}"
+args="$*"
+case "\${args}" in
+  *"-i repos/owner/repo/commits/main"*)
+    printf 'HTTP/2.0 200 OK\\r\\n\\r\\n{"sha":"${HEAD_SHA}"}\\n'
+    ;;
+  *"repos/owner/repo/commits/main --jq .sha"*)
+    echo "${HEAD_SHA}"
+    ;;
+  *"repos/owner/repo/actions/workflows --paginate --slurp"*)
+    echo '[{"workflows":[{"name":"Build, Test","path":".github/workflows/bt.yml","id":111,"state":"active"}]}]'
+    ;;
+  *"run list -R owner/repo -c ${HEAD_SHA}"*)
+    echo '[{"workflowName":"Build, Test","workflowDatabaseId":111,"status":"completed","conclusion":"success","event":"push","headBranch":"main"}]'
+    ;;
+  *)
+    echo "UNMOCKED gh call: \${args}" >&2
+    exit 1
+    ;;
+esac
+`,
+    { mode: 0o755 },
+  )
+  return { callLog, ghMock }
+}
+
+test('群G: カンマ入り workflow 名の green 経路（"Build, Test" が 2 名へ誤分割されない）', { skip: !hasJq() }, () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'base-ci-probe-g-green-'))
+  try {
+    writeGhMock(tmpDir)
+    const scriptPath = join(tmpDir, 'probe.sh')
+    writeFileSync(scriptPath, scriptBody, 'utf8')
+
+    const stdout = execFileSync(
+      'bash',
+      [scriptPath, 'owner/repo@main:["Build, Test"]'],
+      { encoding: 'utf8', env: { ...process.env, PATH: `${tmpDir}:${process.env.PATH}` } },
+    )
+
+    const line = stdout.trim().split('\n').pop()
+    const result = JSON.parse(line)
+    assert.deepEqual(
+      result.required_missing,
+      [],
+      `カンマ入り workflow 名が誤分割され required_missing が空でない: ${line}`,
+    )
+    assert.equal(result.push_total, 1, `push_total が想定と異なる: ${line}`)
+    assert.equal(result.failed, 0, `failed が想定と異なる: ${line}`)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('群G: 旧カンマ区切り形式は JSON 不正として fail-closed し gh API を一切呼ばない', { skip: !hasJq() }, () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'base-ci-probe-g-legacy-'))
+  try {
+    const { callLog } = writeGhMock(tmpDir)
+    const scriptPath = join(tmpDir, 'probe.sh')
+    writeFileSync(scriptPath, scriptBody, 'utf8')
+
+    const stdout = execFileSync(
+      'bash',
+      [scriptPath, 'owner/repo@main:CI,Lint'],
+      { encoding: 'utf8', env: { ...process.env, PATH: `${tmpDir}:${process.env.PATH}` } },
+    )
+
+    assert.match(stdout, /判定不能/, '旧カンマ区切り形式が判定不能として報告されていない')
+    assert.match(stdout, /JSON 配列でない/, '判定不能理由が JSON 配列不正を示していない')
+
+    let callLogContent = ''
+    try {
+      callLogContent = readFileSync(callLog, 'utf8')
+    } catch {
+      callLogContent = ''
+    }
+    assert.equal(
+      callLogContent,
+      '',
+      `旧カンマ区切り形式の拒否前に gh API が呼ばれている: ${callLogContent}`,
+    )
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
 })
 
 // ---------------------------------------------------------------------------
