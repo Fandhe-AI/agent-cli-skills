@@ -100,7 +100,14 @@ SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更
 # CLI に computedHash を更新させる。固定版が解決できない場合（該当版の不存在・
 # レジストリ障害）は npx が非ゼロ終了する。その場合は当該スキルを中止（skip）し、
 # 固定版を外した再実行はしない（fail-closed。暗黙の最新版フォールバックはしない）。
-npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --yes
+# ここでの fail-closed は「他スキルへの処理を止めない」という Step 1/3 の他の skip
+# 分岐と同じ意味であり、「script 全体を停止する」という意味ではない
+# （`scripts/skills-lock-update.sh` 単体実行時の set -euo pipefail による停止とは別軸。
+# 詳細は下記「skills CLI のバージョン固定と更新手順」節の fail-closed 記述を参照）。
+npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --yes || {
+  echo "警告: skills@${SKILLS_CLI_VERSION} の解決に失敗しました（該当版の不存在・レジストリ障害等）。固定版を外した再実行はせず、当該スキルを skip します。"
+  continue
+}
 ```
 
 `npx skills add` は以下を行う:
@@ -183,7 +190,7 @@ EOF
 3. 1 スキルで実際に実行し、差分が正常であることを確認する
 4. `chore(sync-skills-lock): skills CLI を X.Y.Z へ更新` でコミットする
 
-**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了し、`scripts/skills-lock-update.sh` は `set -euo pipefail` により即座に停止する。黙って最新版へフォールバックする経路は存在しない。dist-tag・レンジ指定への書き換えは禁止する。
+**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了する。黙って最新版へフォールバックする経路は存在せず、dist-tag・レンジ指定への書き換えも禁止する。この失敗時の停止範囲は実行経路によって異なる: `scripts/skills-lock-update.sh` を単体実行した場合はスクリプト全体が `set -euo pipefail` により即座に停止する。一方、本ファイルの Step 4 フェンス（複数スキルをループで処理する経路）では、`npx` の失敗を検出したら当該スキルのみを skip（`continue`）して次スキルへ進む — Step 1/3 の他の skip 分岐と同じ制御フローであり、ループ全体を停止させるものではない。
 
 ## 注意事項
 
