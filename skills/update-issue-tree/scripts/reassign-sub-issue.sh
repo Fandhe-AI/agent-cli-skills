@@ -400,11 +400,16 @@ recover_after_post_failure() {
           exit 8
         fi
         echo "エラー: #${ISSUE} は実測でも孤児のまま残っている" >&2
-      else
-        echo "エラー: 補償復旧 POST 失敗後の実状態再取得にも失敗した。#${ISSUE} が孤児のままかは未確認" >&2
-        cat "${GH_ERR_FILE}" >&2
+        echo "reason=compensation-post-failed" >&2
+        exit 8
       fi
-      echo "reason=compensation-post-failed" >&2
+      # 再取得自体が失敗した場合、孤児か否かを一切測定できていない。この分岐を
+      # reason=compensation-post-failed で終端すると、呼び出し元が「親子関係を
+      # 確認済みの孤児」と誤認しうる（cursor[bot] Medium 指摘 PR #391）。
+      # 上の JSON 解析失敗パスと同じ reason=recovery-state-unknown に統一する
+      echo "エラー: 補償復旧 POST 失敗後の実状態再取得にも失敗した。#${ISSUE} が孤児のままかは未確認" >&2
+      cat "${GH_ERR_FILE}" >&2
+      echo "reason=recovery-state-unknown" >&2
       exit 8
     fi
 

@@ -195,6 +195,21 @@ test('ケース29: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST
   assert.equal(posts.length, 2, '補償 POST も試みられていること')
 })
 
+test('ケース29b: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST も失敗 → 失敗後の実状態再取得 GET も失敗 → exit 8 reason=recovery-state-unknown（孤児か否か未測定のまま reason=compensation-post-failed を出さない。cursor[bot] Medium 指摘 PR #391）', () => {
+  const r = run(['--issue', '31', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '',
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+    compPostExit: 1,
+    compPostBody: '503 Service Unavailable',
+    thirdGetFail: true,
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  assert.doesNotMatch(r.stderr, /reason=compensation-post-failed(?!-third-party-parent)/)
+})
+
 test('ケース30: DELETE 後の POST 失敗 → 復旧のための実状態再取得 GET も失敗（状態不明）→ exit 8 reason=recovery-state-unknown、補償 POST は撃たれない（Issue #352）', () => {
   const r = run(['--issue', '32', '--old-parent', '5', '--new-parent', '7'], {
     parentBefore: '5',

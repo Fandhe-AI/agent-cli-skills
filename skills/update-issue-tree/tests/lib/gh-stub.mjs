@@ -30,6 +30,8 @@ function shQuote(value) {
  * @param {boolean} [fixture.authFail] gh auth status を失敗させる
  * @param {boolean} [fixture.getFail] 事前 GET（1 回目）を失敗させる
  * @param {boolean} [fixture.verifyGetFail] 事後 GET（2 回目）を失敗させる
+ * @param {boolean} [fixture.thirdGetFail] 3 回目の GET（補償 POST 後の事後確認、または補償
+ *   POST 失敗後の実状態再取得）を失敗させる
  * @param {string} [fixture.issueId] GET が返す database id
  * @param {string} [fixture.parentBefore] 事前 GET が返す現在の親 issue 番号（'' = 親なし）
  * @param {string} [fixture.parentAfter] 対象 issue の 2 回目 GET（成功経路の事後確認 / 失敗経路の
@@ -59,6 +61,7 @@ export function createGhStub(fixture = {}) {
     authFail: false,
     getFail: false,
     verifyGetFail: false,
+    thirdGetFail: false,
     issueId: '999',
     parentBefore: '',
     parentAfter: undefined,
@@ -104,6 +107,7 @@ export function createGhStub(fixture = {}) {
   const authBranch = f.authFail ? 'exit 1' : 'exit 0'
   const getFailBranch = f.getFail ? "echo 'stub: get failed' >&2; exit 1" : ':'
   const verifyGetFailBranch = f.verifyGetFail ? "echo 'stub: verify get failed' >&2; exit 1" : ':'
+  const thirdGetFailBranch = f.thirdGetFail ? "echo 'stub: third get failed' >&2; exit 1" : ':'
   const newParentGetFailBranch = f.newParentGetFail
     ? "echo 'stub: new parent get failed' >&2; exit 1"
     : ':'
@@ -188,6 +192,7 @@ elif [[ "\${count}" -eq 2 ]]; then
   parent=${shQuote(f.parentAfter)}
   prepo=${shQuote(f.parentRepoAfter)}
 elif [[ "\${count}" -eq 3 ]]; then
+  ${thirdGetFailBranch}
   parent=${shQuote(f.parentAfter2)}
   prepo=${shQuote(f.parentRepoAfter2)}
 else
