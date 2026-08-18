@@ -63,7 +63,9 @@ RE_ASSIGN_OK='\$\{|\$\(|%[A-Za-z_]+%|process\.env|os\.environ|ENV\[|getenv|<[A-Z
 {
   printf '+++ b/x\n+password: Hunter2Hunter2Hunter2\n' \
     | grep -E '^\+' | grep -vE '^\+\+\+' | grep -qiE "${RE_ASSIGN}" \
-  && printf '+GITHUB_TOKEN=dummy6f1a9c3e8b2d47f05a9e1c8b3d\n' | grep -qiE "${RE_ASSIGN}" \
+  && tok="notarealvalue""0123456789abcdef" \
+  && printf '+GITHUB_TOKEN=%s\n' "${tok}" | grep -qiE "${RE_ASSIGN}" \
+  && printf '+GITHUB_TOKEN=%s\n' "${tok}" | grep -vE "${RE_ASSIGN_OK}" | grep -q . \
   && printf '+db: postgres://u:p@h:5432/d\n' | grep -qE "${RE_HIGH}" \
   && printf '+t: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27u\n' \
     | grep -qE "${RE_HIGH}" \
