@@ -515,11 +515,13 @@ def _classify_uses_pin(uses: str) -> str:
     ``check_upstream_markers`` のマーカー (6) から呼ばれる。分類根拠（非ゴール
     を含む）:
 
-    - ``./`` で始まるローカル action、および GitHub の自リポジトリ構文
-      ``$/`` で始まる action（2026-07 以降の推奨記法。実行中コミットへ
-      本質的に固定され ``@ref`` を持たない）は同一リポ内参照であり ``@ref``
-      の概念が無いので検査対象外（exempt）。可動参照へ退行するリスクが
-      構造的に無い。
+    - ``./`` で始まるローカル action は同一リポ内参照であり ``@ref`` の概念が
+      無いので検査対象外（exempt）。可動参照へ退行するリスクが構造的に無い。
+      ``$/`` で始まる文字列は GitHub Actions の ``uses`` 構文として非対応
+      （公式にサポートされる同一リポジトリ参照は ``./...`` のみ）であり、
+      「本質的に固定されている」という前提が成立しない。免除すると不正値を
+      green 扱いにする偽陰性になるため（PR #355 レビュー指摘）、``$/`` は
+      exempt に含めず、``@`` を含まない他の値と同様に未固定として扱う。
     - ``docker://`` はこの関数では SHA 形式を判定できないため fail-closed で
       未固定扱いにする。上流に現存しないため誤報にはならず、将来出現したときに
       人間のレビューを促す（本ファイル冒頭の「fail-closed」設計方針と同じ）。
@@ -535,7 +537,7 @@ def _classify_uses_pin(uses: str) -> str:
       無く本リポからは鮮度判定できない（workflow 本体の SHA と内部 pin は別物）。
     """
     text = uses.strip()
-    if text.startswith("./") or text.startswith("$/"):
+    if text.startswith("./"):
         return _USES_PIN_EXEMPT
     if text.startswith("docker://"):
         return _USES_PIN_UNPINNED

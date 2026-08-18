@@ -509,11 +509,12 @@ jobs:
         self.assertFalse(m["ok"], m["detail"])
         self.assertIn("`1`", m["detail"])
 
-    def test_upstream_action_sha_self_repo_dollar_slash_is_exempt(self):
-        # GitHub の自リポジトリ構文 `$/...`（2026-07 以降の推奨記法）は `./`
-        # と同じく実行中コミットへ本質的に固定され `@ref` を持たない。
-        # `@` を含まないという理由だけで未固定扱いにしてはならない
-        # （Cursor Bugbot 指摘）。
+    def test_upstream_action_sha_dollar_slash_is_not_exempt(self):
+        # `$/...` は GitHub Actions の `uses` 構文としてサポートされない
+        # （公式にサポートされる同一リポジトリ参照は `./...` のみ）。
+        # 「本質的に固定されている」という前提が成立しないため免除せず、
+        # `@` を含まない他の値と同様に未固定として扱う
+        # （PR #355 レビュー指摘: 偽陰性の是正）。
         self_repo = FIXTURE_UPSTREAM_OK.replace(
             "      - name: Setup Node.js\n"
             "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
@@ -523,8 +524,8 @@ jobs:
             "        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
         )
         m = markers_map(self_repo)["上流 action の SHA 固定"]
-        self.assertTrue(m["ok"], m["detail"])
-        self.assertIn("全 6 件すべて 40 桁 SHA 固定", m["detail"])
+        self.assertFalse(m["ok"], m["detail"])
+        self.assertIn("全 6 件中 1 件が未固定", m["detail"])
 
     def test_upstream_action_sha_detail_escapes_pipe_for_markdown(self):
         # detail は render_report で Markdown 表の 1 セルへそのまま差し込まれる。
