@@ -334,13 +334,17 @@ PIN_ANOMALY = "anomaly"
 def evaluate_pin(pin: str, upstream_sha: str, compare: dict | None) -> dict:
     """wrapper の pin SHA が上流 main に対してどの位置にあるかを判定する。
 
-    ``compare`` は ``GET /repos/{o}/{r}/compare/{pin}...main`` の結果
-    （``{"status", "ahead_by", "behind_by"}``）。SHA が解決できず 404 になった
-    場合は ``None`` を渡す。
+    ``compare`` は ``GET /repos/{o}/{r}/compare/{pin}...{upstream_sha}`` の結果
+    （``{"status", "ahead_by", "behind_by"}``）。head は可変の ``main`` ブランチ
+    名ではなく、呼び出し側が固定取得した ``upstream_sha`` を渡す（イシュー #343
+    Review 指摘: head を ``main`` のままにすると、呼び出し元が別途固定取得した
+    ``upstream_sha``・``upstream_text`` とこの compare 結果の基準点がずれ得る
+    TOCTOU になる）。SHA が解決できず 404 になった場合は ``None`` を渡す。
 
     **``ahead_by`` の向きに注意。** compare は ``base...head`` で head が base より
-    何コミット先行しているかを ``ahead_by`` に入れる。ここでは base=pin・head=main
-    なので、``ahead_by`` は「main が pin より先行している数」= **pin が遅れている数**
+    何コミット先行しているかを ``ahead_by`` に入れる。ここでは base=pin・
+    head=upstream_sha（実質的に main の固定スナップショット）なので、
+    ``ahead_by`` は「upstream_sha が pin より先行している数」= **pin が遅れている数**
     である（``behind_by`` ではない）。本リポの ``update-external.yml`` 冒頭にある
     実測記録 ``compare/fed9c07...main → status "ahead", ahead_by=7, behind_by=0``
     が同じ読み方を裏づけている。
@@ -1355,8 +1359,14 @@ def scan(
     def compare_pin(pin: str) -> tuple[str, object]:
         if pin in compare_cache:
             return compare_cache[pin]
+        # イシュー #343 Review 指摘: head を可変の ``main`` にすると、上で
+        # ``upstream_text`` を固定取得した ``upstream_sha`` と、ここで
+        # 取得する ahead_by/behind_by の基準点がずれ得る（この呼び出しまでの
+        # 間に main が進む TOCTOU）。``evaluate_pin``/``evaluate_pin_impact``
+        # は ``upstream_sha`` 時点のスナップショットとして両者を突き合わせる
+        # ため、head も同じ ``upstream_sha`` に固定する。
         st, body = gh_get_with_status(
-            f"repos/{UPSTREAM_REPO}/compare/{pin}...main", token
+            f"repos/{UPSTREAM_REPO}/compare/{pin}...{upstream_sha}", token
         )
         outcome: tuple[str, object]
         if st == 200:

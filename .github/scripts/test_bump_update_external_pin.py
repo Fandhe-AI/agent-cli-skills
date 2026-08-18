@@ -182,6 +182,20 @@ class TestWorkflowCallContract(unittest.TestCase):
         self.assertEqual(contract["secrets"], set())
         self.assertEqual(contract["required_inputs"], set())
         self.assertEqual(contract["required_secrets"], set())
+        self.assertFalse(contract["ok"])
+
+    def test_extracted_contract_is_marked_ok(self):
+        contract = bump.workflow_call_contract(UPSTREAM_WITH_CONTRACT)
+        self.assertTrue(contract["ok"])
+
+    def test_yaml_parse_failure_is_not_ok(self):
+        contract = bump.workflow_call_contract("jobs: [unclosed")
+        self.assertFalse(contract["ok"])
+        self.assertEqual(contract["inputs"], set())
+
+    def test_non_mapping_yaml_is_not_ok(self):
+        contract = bump.workflow_call_contract("- a\n- b\n")
+        self.assertFalse(contract["ok"])
 
 
 class TestCheckWrapperContract(unittest.TestCase):

@@ -106,6 +106,7 @@ _EMPTY_CONTRACT: dict = {
     "secrets": set(),
     "required_inputs": set(),
     "required_secrets": set(),
+    "ok": False,
 }
 
 
@@ -135,12 +136,17 @@ def workflow_call_contract(upstream_text: str) -> dict:
     いないと、GitHub はジョブ起動前に "Required input <name> is not
     supplied" で失敗し、対象リポ全体の同期が一斉停止する。この片方向欠落を
     ``check_wrapper_contract`` 側で検出するための土台）。
-    パース失敗・``workflow_call`` が無い場合は全集合空を返す（fail-closed。
-    ``inputs``/``secrets`` が空なら ``check_wrapper_contract`` は wrapper の
-    全 ``with``/``secrets`` キーを「契約外」として検出し、bump をスキップ
-    する側に倒れる。``required_*`` が空なら必須欠落判定は素通りするが、
-    それは「契約自体が読めない」ケースであり既存の契約外キー判定が
-    fail-closed を担保する）。
+    戻り値には ``"ok": bool`` を含む。``ok`` が ``False`` なのは「パース失敗」
+    「マッピングでない」「``workflow_call`` が無い/マッピングでない」のいずれか
+    ＝**契約そのものを解析できなかった**ケースであり、この場合
+    ``inputs``/``secrets``/``required_*`` はすべて空集合を返す（イシュー #343
+    Review 指摘: この空集合を「新 SHA は reusable workflow だが inputs/secrets
+    契約が空」という**有効な契約**と区別せずに ``check_wrapper_contract`` へ
+    渡すと、``with:``/``secrets:`` を一切渡さない wrapper では violations が
+    常に空になり、実際には reusable workflow でない・契約を解析できない SHA
+    への bump がそのまま素通りしてしまう。呼び出し側（``find_bump_candidates``）
+    は ``ok`` が ``False`` の場合、``check_wrapper_contract`` の結果を待たず
+    ``skipped-contract`` として bump をスキップしなければならない）。
     """
     try:
         spec = yaml.safe_load(upstream_text)
@@ -161,6 +167,7 @@ def workflow_call_contract(upstream_text: str) -> dict:
         "secrets": set(secrets_spec.keys()),
         "required_inputs": _required_keys(inputs_spec),
         "required_secrets": _required_keys(secrets_spec),
+        "ok": True,
     }
 
 
@@ -349,8 +356,13 @@ def find_bump_candidates(
     def compare_pin(pin: str) -> tuple[str, object]:
         if pin in compare_cache:
             return compare_cache[pin]
+        # イシュー #343 Review 指摘: head を可変の ``main`` にすると、呼び出し元
+        # main() が固定取得した ``upstream_sha``/``upstream_text`` と、ここで
+        # 取得する ahead_by/behind_by の基準点がずれ得る（呼び出しまでの間に
+        # main が進む TOCTOU）。head も同じ ``upstream_sha`` に固定する
+        # （check_update_external_drift.scan() の compare_pin と同じ修正）。
         st, body = cud.gh_get_with_status(
-            f"repos/{cud.UPSTREAM_REPO}/compare/{pin}...main", token
+            f"repos/{cud.UPSTREAM_REPO}/compare/{pin}...{upstream_sha}", token
         )
         outcome: tuple[str, object]
         if st == 200:
@@ -460,6 +472,21 @@ def find_bump_candidates(
             continue
 
         contract = workflow_call_contract(upstream_text)
+        if not contract.get("ok", True):
+            # イシュー #343 Review 指摘: 契約が解析不能（パース失敗・
+            # マッピングでない・workflow_call 不在）な場合、空集合の契約を
+            # そのまま check_wrapper_contract に渡すと with:/secrets: を
+            # 渡さない wrapper では violations が空になり素通りしてしまう。
+            # 「有効な空契約」と区別し、ここで明示的にスキップする。
+            skipped.append(
+                BumpOutcome(
+                    repo, "skipped-contract",
+                    "新 SHA の workflow_call 契約を解析できない"
+                    "（パース失敗/マッピングでない/workflow_call 不在）。"
+                    "fail-closed のためスキップ",
+                )
+            )
+            continue
         violations = check_wrapper_contract(new_text, contract)
         if violations:
             skipped.append(
