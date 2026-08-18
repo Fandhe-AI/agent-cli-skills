@@ -42,3 +42,5 @@ gh api --paginate repos/OWNER/REPO/issues --jq '.[].title'
 - プライベートリソースへのアクセス権がない場合は `403` ではなく `404` が返る（リソース存在の秘匿）
 - Fine-grained PAT が推奨。Classic PAT は非推奨（リポジトリ単位の権限制御ができない）
 - レート制限: 認証済み 5,000 req/時間、`GITHUB_TOKEN` は 1,000 req/時間
+
+<!-- sync-gate 実測用の一時変更。この PR はマージせず close する -->
