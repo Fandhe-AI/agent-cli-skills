@@ -83,12 +83,25 @@ N に含めるかどうかはこの内訳で決まる（系統 B という区分
 | B2 | `.claude/skills/<name>/` が実ディレクトリ | 含めない | 「リポジトリ管理スキル（.claude/skills/ に配置）」 |
 | B3 | `.agents/skills/<name>/` が実体（`.claude/skills/<name>` は symlink） | 含めない | 「参照スキル（.claude/skills/ に配置）」 |
 
-B2・B3 の抽出コマンド（実体が `skills/` に無いものだけを残す）:
+B2・B3 の抽出コマンド（実体が `skills/` に無いものだけを残す）。B2 は「注意事項」の
+実ディレクトリ型リポジトリのタイブレーク（`skills-lock.json` の `skills` キー掲載分を除外）
+まで含めた自己完結スクリプトとし、抽出コマンドと注意事項の記述が食い違わないようにする:
 
 ```bash
 # B2: リポジトリ管理スキル
+# タイブレーク: 1) skills/<name> に実体がある → 除外（配布スキル）
+#               2) skills-lock.json の skills キーに名前がある → 除外し stderr へ警告
+#                  （symlink 化されていない誤配置。update-docs は構成を変更しない）
+#               3) 残った実ディレクトリのみを B2 として出力
 find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
-  while read -r n; do [ -d "skills/${n}" ] || printf '%s\n' "${n}"; done
+  while read -r n; do
+    [ -d "skills/${n}" ] && continue
+    if [ -f skills-lock.json ] && jq -e --arg n "${n}" '.skills[$n] != null' skills-lock.json >/dev/null 2>&1; then
+      echo "WARN: ${n} は .claude/skills/ が実ディレクトリのまま skills-lock.json に掲載されている（symlink 化検討対象。B2 から除外）" >&2
+      continue
+    fi
+    printf '%s\n' "${n}"
+  done
 
 # B3: 参照スキル
 find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
@@ -98,24 +111,26 @@ find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/#
 分類の原則は**実体の所在を第一基準**とする。`skills-lock.json` の `skills` キーの掲載一覧は
 上流リポジトリでは参照スキルのみ、消費側リポジトリでは配布スキル全件を指し、リポジトリの
 役割によって意味が反転するため、実体の所在だけで判別できない曖昧ケースのタイブレークにのみ
-使う（詳細は「注意事項」の実ディレクトリ型リポジトリの節を参照）。
+使う（詳細は「注意事項」の実ディレクトリ型リポジトリの節を参照。上記 B2 コマンドはこの
+タイブレークを実装済みであり、`jq` が無い環境ではタイブレーク 2 の判定をスキップした上で
+その旨を報告する）。
 
 - `CLAUDE.md` の「リポジトリ管理スキル（.claude/skills/ に配置）」「参照スキル（.claude/skills/ に配置）」の各セクションを B2・B3 で更新する
 - セクションが存在しない場合は新規作成する
 
-**実測記録（`Fandhe-AI/agent-cli-skills`・2026-08-18）**: 以下は本リポジトリでの実測値である。
-消費側リポジトリでは構成が異なるため、実行時に必ず再測して自リポジトリの値を用いること。
+**件数整合式（プレースホルダー。対象リポジトリで都度実測する）**: 系統 A・B1・B2・B3 の
+件数は対象リポジトリの構成変更のたびに変わるため、`SKILL.md` 本文には固定値を持たない。
+各系統の抽出コマンドを実行し、次の 2 本の等式が実測値で成立することを確認する。
 
-| 系統 | 件数 | 内容 |
-|------|------|------|
-| A | 26 | 配布可能スキル（`## Current Skills (26)` と一致） |
-| B（全列挙） | 29 | B1(24) + B2(2) + B3(3) |
-| B1 | 24 | `skills/` に実体があり系統 A で計上済み。`skills/` にあって B1 に現れないのは `contribute-skill`・`sync-skills-lock` の 2 件（26 − 24 = 2） |
-| B2 | 2 | `create-agent`・`create-skill` |
-| B3 | 3 | `anthropic-claude-code`・`anthropic-claude-code-extend`・`github-docs` |
+| 等式 | 意味 |
+|------|------|
+| `B1 + B2 + B3 = B（-L 付き全列挙）` | 系統 B の内訳（B1/B2/B3）が全列挙件数と一致する |
+| `A − B1 = B1 に現れない配布スキル数` | 系統 A のうち `.claude/skills/` に symlink されていない配布スキルの件数 |
 
-24 + 2 + 3 = 29（B の全列挙件数と一致）、26 − 24 = 2（B1 に現れない配布スキル数）で
-件数差が説明できることを確認する。
+等式が成立しない場合は、B2・B3 の抽出コマンド（タイブレーク含む）またはカウント方法に
+誤りがある。具体的な数値例（実測スナップショット）は
+`skills/update-docs/references/measurement-example.md` を参照（本リポジトリ専用の値であり、
+他リポジトリでの期待値ではない）。
 
 #### Repository Structure の更新
 
@@ -169,9 +184,15 @@ ls -d skills/*/SKILL.md | wc -l
 流用は不可。`.claude/rules/verification.md` の 5 段階ゲートに従う）。
 
 ```bash
-# B2: リポジトリ管理スキルの抽出結果
+# B2: リポジトリ管理スキルの抽出結果（skills-lock.json によるタイブレークを含む。上記と同一コマンド）
 find .claude/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
-  while read -r n; do [ -d "skills/${n}" ] || printf '%s\n' "${n}"; done
+  while read -r n; do
+    [ -d "skills/${n}" ] && continue
+    if [ -f skills-lock.json ] && jq -e --arg n "${n}" '.skills[$n] != null' skills-lock.json >/dev/null 2>&1; then
+      continue
+    fi
+    printf '%s\n' "${n}"
+  done
 
 # B3: 参照スキルの抽出結果
 find .agents/skills -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -E 's#.*/##' | sort |
