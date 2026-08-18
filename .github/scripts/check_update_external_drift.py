@@ -19,7 +19,7 @@ pin SHA を**各下流ファイルから**抽出する設計だった。#261 で
 「全項目未適合」に誤判定される。
 
 そこで旧マーカーの**意図**（強化設定が劣化していないこと）は軸 4 として上流
-1 ファイルの検査へ畳み、下流側は「wrapper であること」「pin が新しいこと」
+1 ファイルの検査へ畳み、下流側は「wrapper であること」「参照が `@latest` であること」
 「vendor しているのに CI が無い状態でないこと」を見る 3 軸へ再定義した。
 
 #304 では、ファイル内容が正しくても GitHub が「一定期間リポジトリ活動が無い」
@@ -28,11 +28,14 @@ scheduled workflow を自動無効化する（``disabled_inactivity``）こと�
 止まる。軸 5 はこの穴を埋める。
 
   軸 1  wrapper か否か          … 手管理ファイルへの逆戻り（LEGACY）を検知
-  軸 2  pin の鮮度              … 上流を強化しても pin が古いと届かない
+  軸 2  latest タグの鮮度       … 参照は `@latest` に統一済み。タグを動かす
+                                move-latest-tag.yml が止まると全下流が静かに
+                                古い実装で動き続けるため、タグ自体の鮮度を見る
   軸 3  同期 CI の欠落          … skills を vendor しているのに workflow が無い
   軸 4  上流 reusable の劣化    … 旧マーカーの意図。18 リポ分の grep が 1 ファイルへ
                                 （#302 でマーカーを 1 件追加。上流内の全 uses が
-                                 SHA 固定か＝可動参照への退行検知。鮮度は対象外）
+                                 SHA 固定か＝可動参照への退行検知。鮮度は対象外。
+                                 上流自身への `@latest` 参照は方針どおりのため exempt）
   軸 5  定期実行の生存          … ファイルは正しいのに schedule が無告知停止した状態を検知
 
 設計上の約束
@@ -42,7 +45,7 @@ scheduled workflow を自動無効化する（``disabled_inactivity``）こと�
   （終了コード 1）。個別リポの取得失敗は ``UNKNOWN`` として集計に残し、
   黙って除外しない。
 - **純粋関数と I/O の分離。** 判定ロジック（``classify_workflow`` /
-  ``evaluate_pin`` / ``check_upstream_markers`` / ``evaluate_schedule``）は
+  ``evaluate_latest_tag`` / ``check_upstream_markers`` / ``evaluate_schedule``）は
   GitHub API に触れない純粋関数として切り出し、
   ``test_check_update_external_drift.py`` が fixture に対して直接実行できる
   ようにしてある。
@@ -116,6 +119,11 @@ REPO_LIST_LIMIT = 500
 REUSABLE_WORKFLOW_REF = f"{UPSTREAM_REPO}/{UPSTREAM_WORKFLOW_PATH}"
 
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# 下流 wrapper が上流 reusable workflow を参照するときの期待 ref。
+# SHA pin ではなく可変タグ `latest` に統一する（オーナー判断・2026-08-18）。
+# `latest` は上流の move-latest-tag.yml が main への push ごとに付け替える。
+EXPECTED_REF = "latest"
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 # 軸 4 でジョブを同定するための composite action 接頭辞。
@@ -212,7 +220,7 @@ def has_schedule_trigger(spec: dict) -> bool:
 # 分類の種別。``excluded`` が真のものは乖離として数えない。
 KIND_REUSABLE_DEFINITION = "REUSABLE-DEFINITION"
 KIND_WRAPPER = "WRAPPER"
-KIND_WRAPPER_UNPINNED = "WRAPPER-UNPINNED"
+KIND_WRAPPER_BADREF = "WRAPPER-BADREF"
 KIND_LEGACY = "LEGACY"
 KIND_UNPARSEABLE = "UNPARSEABLE"
 
@@ -312,13 +320,13 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
         }
 
 
-    if not _SHA40_RE.match(ref):
-        # reusable は参照しているが ref が 40 桁 hex ではない（``@main`` 等）。
-        # LEGACY とは原因も直し方も違うので別種別として報告する。
+    if ref != EXPECTED_REF:
+        # reusable は参照しているが ref が `@latest` ではない（SHA pin へ戻した、
+        # `@main` を直接指した等）。LEGACY とは原因も直し方も違うので別種別で報告する。
         return {
-            "kind": KIND_WRAPPER_UNPINNED,
+            "kind": KIND_WRAPPER_BADREF,
             "pin": ref,
-            "reason": f"reusable への参照が SHA 固定されていない（@{ref}）",
+            "reason": f"reusable への参照が @{EXPECTED_REF} ではない（@{ref}）",
             "has_schedule": has_schedule,
         }
 
@@ -326,178 +334,32 @@ def classify_workflow(text: str, is_upstream: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 軸 2: pin の鮮度（純粋関数）
+# 軸 2: `latest` タグの鮮度（純粋関数）
 # ---------------------------------------------------------------------------
+#
+# 下流 wrapper は上流を可変タグ ``@latest`` で参照する（オーナー判断・2026-08-18）。
+# 参照が固定 SHA ではなくなったため、リポジトリごとの「pin が何コミット遅れているか」
+# という判定は概念ごと消える。代わりに、**タグを動かす主体が生きているか**を 1 スキャン
+# あたり 1 回だけ検査する。上流の ``move-latest-tag.yml`` が壊れて ``latest`` が古い
+# コミットに据え置かれると、全下流が静かに古い実装で動き続けるため（= SHA pin 時代へ
+# の無告知の退行）、これは検知しないと気付けない種類の乖離である。
 
-PIN_CURRENT = "current"
-PIN_BEHIND = "behind"
-PIN_UNREACHABLE = "unreachable"
-PIN_ANOMALY = "anomaly"
+TAG_CURRENT = "current"
+TAG_STALE = "stale"
 
 
-def evaluate_pin(pin: str, upstream_sha: str, compare: dict | None) -> dict:
-    """wrapper の pin SHA が上流 main に対してどの位置にあるかを判定する。
+def evaluate_latest_tag(tag_sha: str, upstream_sha: str) -> dict:
+    """``latest`` タグが上流 main の先頭を指しているかを判定する。
 
-    ``compare`` は ``GET /repos/{o}/{r}/compare/{pin}...{upstream_sha}`` の結果
-    （``{"status", "ahead_by", "behind_by"}``）。head は可変の ``main`` ブランチ
-    名ではなく、呼び出し側が固定取得した ``upstream_sha`` を渡す（イシュー #343
-    Review 指摘: head を ``main`` のままにすると、呼び出し元が別途固定取得した
-    ``upstream_sha``・``upstream_text`` とこの compare 結果の基準点がずれ得る
-    TOCTOU になる）。SHA が解決できず 404 になった場合は ``None`` を渡す。
-
-    **``ahead_by`` の向きに注意。** compare は ``base...head`` で head が base より
-    何コミット先行しているかを ``ahead_by`` に入れる。ここでは base=pin・
-    head=upstream_sha（実質的に main の固定スナップショット）なので、
-    ``ahead_by`` は「upstream_sha が pin より先行している数」= **pin が遅れている数**
-    である（``behind_by`` ではない）。本リポの ``update-external.yml`` 冒頭にある
-    実測記録 ``compare/fed9c07...main → status "ahead", ahead_by=7, behind_by=0``
-    が同じ読み方を裏づけている。
-
-    ``status`` が ``ahead`` 以外のときに素通ししないよう、全ケースを列挙する。
-    特に ``diverged`` と 404 は「squash マージで消えた PR ブランチの SHA を掴んで
-    いる」到達不能な pin であり、乖離として扱う。
+    取得失敗（403 / 5xx 等）はこの関数へ渡さず呼び出し側で UNKNOWN にする。
+    ここは「取得できた 2 つの SHA を比べるだけ」の純粋関数に保つ。
     """
-    if pin == upstream_sha:
-        return {"state": PIN_CURRENT, "behind": 0, "detail": "上流 main と一致"}
-
-    if compare is None:
-        return {
-            "state": PIN_UNREACHABLE,
-            "behind": None,
-            "detail": "pin SHA が上流で解決できない（compare が 404）。"
-            "squash マージ等で消えたコミットを指している可能性がある",
-        }
-
-    status = compare.get("status")
-    ahead_by = compare.get("ahead_by")
-    behind_by = compare.get("behind_by")
-
-    if status == "identical":
-        return {"state": PIN_CURRENT, "behind": 0, "detail": "上流 main と同一"}
-    if status == "ahead":
-        # base=pin から見て head=main が ahead。すなわち pin が ahead_by だけ遅れている。
-        return {
-            "state": PIN_BEHIND,
-            "behind": ahead_by,
-            "detail": f"上流 main に {ahead_by} コミット遅れている",
-        }
-    if status == "diverged":
-        return {
-            "state": PIN_UNREACHABLE,
-            "behind": None,
-            "detail": f"pin が上流 main の祖先ではない（diverged / "
-            f"ahead_by={ahead_by}, behind_by={behind_by}）。到達不能な pin",
-        }
-    if status == "behind":
-        # pin が main の子孫。main へ入っていないコミットを指しており異常。
-        return {
-            "state": PIN_ANOMALY,
-            "behind": None,
-            "detail": f"pin が上流 main より先行している（behind / behind_by={behind_by}）。"
-            "main へ未マージのコミットを指している",
-        }
+    if tag_sha == upstream_sha:
+        return {"state": TAG_CURRENT, "detail": "latest は上流 main の先頭を指している"}
     return {
-        "state": PIN_ANOMALY,
-        "behind": None,
-        "detail": f"compare の status が想定外（{status!r}）",
-    }
-
-
-# ---------------------------------------------------------------------------
-# 軸 2 拡張: 実効差分ゲート（純粋関数、イシュー #343）
-# ---------------------------------------------------------------------------
-# `evaluate_pin` は compare API の「コミット数」で PIN_BEHIND を判定するが、
-# reusable workflow は `uses: <owner>/<repo>/<path>@<sha>` で解決された
-# **そのファイルだけ**を実行し、そこから呼ぶ composite action は各ステップの
-# `uses:` で別 SHA に固定されている（ローカル `./` 参照を使わない限り）。
-# つまり「pin 側のファイル内容が main 側と一致する」なら、コミット数で何件
-# 遅れていようと実行結果は main と等価であり、PIN-STALE として報告する意味が
-# 無い。この等価性判定を PIN_BEHIND の**後段**に挟み、実効差分の無い pin だけを
-# ノイズから除く（#341 で 22 件中 4 件がこれに該当することを実測済み）。
-
-PIN_EQUIVALENT = "equivalent"
-
-_LOCAL_USES_RE = re.compile(r"^\s*uses:\s*['\"]?\./", re.MULTILINE)
-
-
-def git_blob_sha(text: str) -> str:
-    """Git の blob SHA（``git hash-object`` と同一の値）を計算する。
-
-    ``sha1("blob " + <UTF-8 バイト長> + "\\0" + <UTF-8 バイト列>)``。
-    **長さは文字数ではなくバイト数。** 本リポの workflow ファイルは日本語コメントを
-    含み、``len(text)``（str の文字数）をそのまま使うと非 ASCII 文字を含む行で
-    実際のバイト長からずれ、GitHub API が返す ``.sha``（contents API の blob sha は
-    常にこの定義）と一致しなくなる。レポートに引用する証拠がここで狂うと、
-    「実効差分なし」の主張そのものが検証不能になるため、必ずエンコード後の
-    ``bytes`` に対して計算する。
-    """
-    import hashlib
-
-    data = text.encode("utf-8")
-    header = f"blob {len(data)}\0".encode("utf-8")
-    return hashlib.sha1(header + data).hexdigest()
-
-
-def has_local_uses(text: str) -> bool:
-    """workflow 本文が ``./`` で始まるローカル action/workflow 参照を持つか。
-
-    ``evaluate_pin_impact`` の前提条件チェック。E5 の実測（上流 reusable
-    workflow 内の全 ``uses:`` が絶対参照 + SHA 固定で、``./`` によるローカル
-    参照が 0 件）が崩れると「pin 側ファイルの内容が main 側と一致する」だけでは
-    実行等価性を主張できなくなる（ローカル参照はチェックアウトされた作業ツリーの
-    ref に依存し、同一ファイル内容でも解決先が変わり得るため）。将来この前提が
-    崩れた場合に自動で安全側（等価と判定しない）へ倒すためのゲート。
-    """
-    return bool(_LOCAL_USES_RE.search(text))
-
-
-def evaluate_pin_impact(pin_text: str | None, main_text: str) -> dict:
-    """pin が指す workflow ファイルの内容が main と実行上等価かを判定する。
-
-    戻り値は ``{"equivalent", "reason", "pin_blob", "main_blob"}``。
-    fail-closed: 判断がつかない場合は必ず ``equivalent: False`` に倒す
-    （「等価と誤認して乖離を見逃す」より「等価でないと過報告する」側が安全）。
-
-    判定順序:
-      1. ``pin_text is None``（取得失敗）→ 等価でない
-      2. どちらかに ``./`` ローカル参照がある → 等価でない（``has_local_uses`` 参照）
-      3. 生テキストが完全一致 → 等価
-      4. それ以外 → 等価でない
-
-    **比較は生テキストの完全一致で行い、blob sha は証拠表示のためだけに使う。**
-    改行コード正規化や ``strip()`` は行わない — 空白差分だけで PIN-STALE に
-    倒れるのは安全側（見逃しではなく過検知）だが、逆に正規化で「等価」に
-    倒すと実際には差分のあるファイルを見逃す方向に働くため、正規化はしない。
-    """
-    if pin_text is None:
-        return {
-            "equivalent": False,
-            "reason": "pin 側ファイルの取得に失敗しており実効差分を確認できない",
-            "pin_blob": None,
-            "main_blob": git_blob_sha(main_text),
-        }
-
-    if has_local_uses(pin_text) or has_local_uses(main_text):
-        return {
-            "equivalent": False,
-            "reason": "ローカル (./) 参照を含むため内容一致だけでは実行等価性を主張できない",
-            "pin_blob": git_blob_sha(pin_text),
-            "main_blob": git_blob_sha(main_text),
-        }
-
-    if pin_text == main_text:
-        return {
-            "equivalent": True,
-            "reason": "pin 側ファイルの内容が main と完全一致（実行上等価）",
-            "pin_blob": git_blob_sha(pin_text),
-            "main_blob": git_blob_sha(main_text),
-        }
-
-    return {
-        "equivalent": False,
-        "reason": "pin 側ファイルの内容が main と異なる（実効差分あり）",
-        "pin_blob": git_blob_sha(pin_text),
-        "main_blob": git_blob_sha(main_text),
+        "state": TAG_STALE,
+        "detail": f"latest が `{tag_sha[:12]}` を指しており、上流 main の先頭 "
+        f"`{upstream_sha[:12]}` と一致しない。move-latest-tag.yml の失敗を疑う",
     }
 
 
@@ -644,6 +506,11 @@ def _classify_uses_pin(uses: str) -> str:
     """
     text = uses.strip()
     if text.startswith("./"):
+        return _USES_PIN_EXEMPT
+    # 自リポジトリ（上流本体）への参照は方針上 `@latest` を使う。SHA 固定を要求すると
+    # 方針そのものが未固定として毎回報告されるため exempt にする。`@latest` 以外の ref
+    # （SHA pin へ戻す・`@main` を直接指す）は下の一般判定へ落ちる。
+    if text.startswith(f"{UPSTREAM_REPO}/") and text.rpartition("@")[2].strip() == EXPECTED_REF:
         return _USES_PIN_EXEMPT
     if text.startswith("docker://"):
         return _USES_PIN_UNPINNED
@@ -1301,11 +1168,6 @@ class ScanResult:
     schedule_ok: list[str] = field(default_factory=list)
     schedule_candidates: int = 0
     schedule_forbidden: int = 0
-    # 軸 2 拡張: PIN_BEHIND だが実効差分ゲート（evaluate_pin_impact）で等価と
-    # 判定された pin。findings には積まない（乖離ではない）が、コミット数では
-    # 遅れて見えるという事実は捨てず、レポートの別バケットで根拠付きで示す。
-    # 要素は (repo, pin_sha, pin_blob_sha)。
-    pins_equivalent: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def scan(
@@ -1327,17 +1189,8 @@ def scan(
     result.upstream_sha = upstream_sha
 
     # --- 軸 4: 上流 reusable workflow 自身の検査 ---
-    #
-    # イシュー #343 Review 指摘（TOCTOU）: ここを ``ref=main`` で取得すると、
-    # 上の commits/main 呼び出しから本呼び出しまでの間に main が動いた場合、
-    # ``upstream_sha``（結果に記録し ``evaluate_pin``/``evaluate_pin_impact`` が
-    # 軸 2 拡張の実効差分判定に使う SHA）と本文の内容が食い違う。以降の
-    # ``evaluate_pin_impact(pin_text, upstream_text)`` は upstream_text を
-    # 「upstream_sha 時点の内容」として扱うため、ref を upstream_sha に固定して
-    # 両者を一致させる（bump_update_external_pin.py の main() と同じ理由・
-    # 同じ修正）。
     status, upstream_text = gh_get_with_status(
-        f"repos/{UPSTREAM_REPO}/contents/{UPSTREAM_WORKFLOW_PATH}?ref={upstream_sha}",
+        f"repos/{UPSTREAM_REPO}/contents/{UPSTREAM_WORKFLOW_PATH}?ref=main",
         token,
         raw=True,
     )
@@ -1350,78 +1203,31 @@ def scan(
 
     repos = list_target_repos(org, token)
 
-    # pin ごとの compare 結果キャッシュ。19 個の wrapper が同じ pin を共有する
-    # ことが多く、リポごとに compare を叩くとレート制限を無駄に消費する。
-    #
-    # 戻り値は ``("ok", data)`` / ``("absent", None)`` / ``("error", 理由)`` の
-    # 3 値。**404 とそれ以外の失敗を畳まない。** 404 は「その SHA が上流に存在
-    # しない」という判定結果（到達不能な pin = 乖離）だが、403 / 429 / 5xx や
-    # 200 応答の JSON 解析失敗は単に検査できなかっただけで、pin が壊れている
-    # 証拠にはならない。両者を None に畳むと、レート制限や一時障害が
-    # PIN-UNREACHABLE として報告され「個別取得失敗は UNKNOWN」という本スキルの
-    # 契約と食い違う（乖離を捏造する側に倒れる）。
-    compare_cache: dict[str, tuple[str, object]] = {}
-
-    def compare_pin(pin: str) -> tuple[str, object]:
-        if pin in compare_cache:
-            return compare_cache[pin]
-        # イシュー #343 Review 指摘: head を可変の ``main`` にすると、上で
-        # ``upstream_text`` を固定取得した ``upstream_sha`` と、ここで
-        # 取得する ahead_by/behind_by の基準点がずれ得る（この呼び出しまでの
-        # 間に main が進む TOCTOU）。``evaluate_pin``/``evaluate_pin_impact``
-        # は ``upstream_sha`` 時点のスナップショットとして両者を突き合わせる
-        # ため、head も同じ ``upstream_sha`` に固定する。
-        st, body = gh_get_with_status(
-            f"repos/{UPSTREAM_REPO}/compare/{pin}...{upstream_sha}", token
-        )
-        outcome: tuple[str, object]
-        if st == 200:
-            try:
-                data = json.loads(body)
-                outcome = ("ok", {
-                    "status": data.get("status"),
-                    "ahead_by": data.get("ahead_by"),
-                    "behind_by": data.get("behind_by"),
-                })
-            except json.JSONDecodeError:
-                outcome = ("error", "compare の 200 応答を JSON として解析できない")
-        elif st == 404:
-            outcome = ("absent", None)
+    # --- 軸 2: `latest` タグの鮮度（スキャンあたり 1 回）---
+    # 取得できないこと自体は乖離の証拠にならないため UNKNOWN へ倒す（403 / 429 /
+    # 5xx を STALE として報告すると乖離を捏造する側に倒れる）。
+    tag_status, tag_body = gh_get_with_status(
+        f"repos/{UPSTREAM_REPO}/git/ref/tags/{EXPECTED_REF}", token
+    )
+    if tag_status == 200:
+        try:
+            tag_sha = str(json.loads(tag_body).get("object", {}).get("sha", "")).strip()
+        except json.JSONDecodeError:
+            tag_sha = ""
+        if _SHA40_RE.match(tag_sha):
+            tag_verdict = evaluate_latest_tag(tag_sha, upstream_sha)
+            if tag_verdict["state"] == TAG_STALE:
+                result.findings.append(
+                    Finding(UPSTREAM_REPO, "LATEST-TAG-STALE", tag_verdict["detail"])
+                )
         else:
-            outcome = ("error", f"compare の取得が HTTP {st}")
-        compare_cache[pin] = outcome
-        return outcome
-
-    # pin ごとの上流ファイル内容キャッシュ（実効差分ゲート用）。pin は 2〜3 種類
-    # しか無いのが実態（E1〜E4 の実測）のため、リポ数ぶん叩かずに済む。
-    # 戻り値は「取得できたテキスト」または取得失敗時 ``None``（``evaluate_pin_impact``
-    # が fail-closed で「等価でない」に倒す）。
-    #
-    # 戻り値は ``compare_pin`` と同じ 3 値契約 ``("ok", text)`` /
-    # ``("absent", None)`` / ``("error", 理由)``。**404 とそれ以外の失敗を
-    # 畳まない**（イシュー #343 Review P1 指摘）。404 は「その pin に
-    # workflow ファイルが存在しない」という判定結果だが、403 / 429 / 5xx は
-    # 単に検査できなかっただけで実効差分の証拠にならない。両者を None に畳むと
-    # 一時的な API 障害が PIN-STALE として報告され、`compare_pin` 側の
-    # 「個別取得失敗は UNKNOWN」という契約と食い違う（乖離を捏造する側に倒れる）。
-    pin_content_cache: dict[str, tuple[str, str | None]] = {}
-
-    def fetch_pin_workflow(pin: str) -> tuple[str, str | None]:
-        if pin in pin_content_cache:
-            return pin_content_cache[pin]
-        st, body = gh_get_with_status(
-            f"repos/{UPSTREAM_REPO}/contents/{UPSTREAM_WORKFLOW_PATH}?ref={pin}",
-            token,
-            raw=True,
-        )
-        if st == 200:
-            outcome: tuple[str, str | None] = ("ok", body)
-        elif st == 404:
-            outcome = ("absent", None)
-        else:
-            outcome = ("error", f"HTTP {st}")
-        pin_content_cache[pin] = outcome
-        return outcome
+            msg = f"{EXPECTED_REF} タグの応答から SHA を取り出せない"
+            result.unknowns.append(Finding(UPSTREAM_REPO, "UNKNOWN", msg))
+            print(f"::warning::{UPSTREAM_REPO}: {msg}")
+    else:
+        msg = f"{EXPECTED_REF} タグの取得が HTTP {tag_status}"
+        result.unknowns.append(Finding(UPSTREAM_REPO, "UNKNOWN", msg))
+        print(f"::warning::{UPSTREAM_REPO}: {msg}")
 
     for name in repos:
         repo = f"{org}/{name}"
@@ -1509,59 +1315,13 @@ def scan(
                 print(f"::warning::{repo}: {info['reason']}")
                 continue
 
-            if kind == KIND_WRAPPER_UNPINNED:
+            if kind == KIND_WRAPPER_BADREF:
                 result.findings.append(Finding(repo, kind, info["reason"]))
                 continue
 
-            # --- 軸 2: pin の鮮度 ---
-            pin = info["pin"]
-            outcome, payload = compare_pin(pin)
-            if outcome == "error":
-                # 検査できなかっただけ。壊れた pin として乖離を捏造しない。
-                msg = f"pin `{pin[:12]}` の鮮度を確認できない（{payload}）"
-                result.unknowns.append(Finding(repo, "UNKNOWN", msg))
-                print(f"::warning::{repo}: {msg}")
-                continue
-
-            verdict = evaluate_pin(pin, upstream_sha, payload)
-            if verdict["state"] == PIN_CURRENT:
-                result.wrappers_ok.append(repo)
-            elif verdict["state"] == PIN_BEHIND:
-                # --- 軸 2 拡張: 実効差分ゲート ---
-                # コミット数では遅れていても、pin 側ファイルの内容が main と
-                # 完全一致するなら実行上は等価（イシュー #343、reusable
-                # workflow の解決規則は evaluate_pin_impact の docstring 参照）。
-                # 取得できなかった（403 / 429 / 5xx 等）場合は実効差分の有無を
-                # 判定できない。乖離として報告せず UNKNOWN へ回す
-                # （イシュー #343 Review P1 指摘。compare 取得失敗と同じ扱い）。
-                # ``"error"`` のとき第 2 要素は本文ではなく失敗理由を持つ。
-                pin_outcome, pin_payload = fetch_pin_workflow(pin)
-                if pin_outcome == "error":
-                    msg = (
-                        f"pin `{pin[:12]}` の実効差分を確認できない"
-                        f"（pin 側ファイルの取得に失敗: {pin_payload}）"
-                    )
-                    result.unknowns.append(Finding(repo, "UNKNOWN", msg))
-                    print(f"::warning::{repo}: {msg}")
-                    continue
-                impact = evaluate_pin_impact(pin_payload, upstream_text)
-                if impact["equivalent"]:
-                    result.pins_equivalent.append((repo, pin, impact["pin_blob"]))
-                else:
-                    detail = f"`{pin[:12]}` — {verdict['detail']}"
-                    if pin_outcome == "absent":
-                        # pin の時点に workflow ファイルが無い。実効差分の
-                        # 有無以前に、その SHA を指す pin 自体が壊れている。
-                        detail += "（pin 側に workflow ファイルが存在しない）"
-                    result.findings.append(Finding(repo, "PIN-STALE", detail))
-            else:
-                result.findings.append(
-                    Finding(
-                        repo,
-                        "PIN-UNREACHABLE" if verdict["state"] == PIN_UNREACHABLE else "PIN-ANOMALY",
-                        f"`{pin[:12]}` — {verdict['detail']}",
-                    )
-                )
+            # 参照は `@latest`。リポジトリ単位で見る鮮度はもう存在しない
+            # （タグの鮮度は軸 2 としてスキャンあたり 1 回だけ検査する）。
+            result.wrappers_ok.append(repo)
             continue
 
         if status == 404:
@@ -1634,12 +1394,6 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
     lines.append(f"- 上流 main SHA: `{result.upstream_sha}`")
     lines.append(f"- 検査対象リポジトリ: {result.scanned} 件（非アーカイブ全件）")
     lines.append(f"- 乖離: **{drift} 件**（下流 {len(result.findings)} / 上流マーカー {len(marker_fail)}）")
-    lines.append(
-        f"- 実効差分なしの pin: **{len(result.pins_equivalent)} 件**"
-        "（コミット数では上流 main に遅れているが、pin 側の "
-        f"`{UPSTREAM_WORKFLOW_PATH}` の内容が main と一致するため乖離として"
-        "数えていない。イシュー #343）"
-    )
     lines.append(f"- 検査不能 (UNKNOWN): **{len(result.unknowns)} 件**")
     lines.append(
         f"- 軸 5 対象（schedule トリガあり）: {result.schedule_candidates} 件"
@@ -1680,8 +1434,8 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
             result.schedule_candidates == len(result.schedule_ok)
             and sched_unknown == 0
         )
-        base = ("乖離 **0 件**。全ての下流リポジトリが最新 pin または"
-                "実効差分なしの pin の wrapper、または skills を vendor していない。")
+        base = ("乖離 **0 件**。全ての下流リポジトリが最新 pin の wrapper、"
+                "または skills を vendor していない。")
         if sched_all_confirmed:
             lines.append(base + "schedule トリガを持つ wrapper は全て直近実行を"
                                 "確認できている。")
@@ -1720,18 +1474,6 @@ def render_report(result: ScanResult, run_url: str = "") -> str:
     lines.append("")
     lines.append(f"**最新 pin の wrapper ({len(result.wrappers_ok)} 件)**: "
                  + (", ".join(f"`{r}`" for r in result.wrappers_ok) or "なし"))
-    lines.append("")
-    # 最新 pin ではないため上のバケットへは混ぜない。コミット数では遅れて
-    # 見える理由（main の blob sha と一致）を各行に根拠として明示する。
-    lines.append(f"**実効差分なしの pin ({len(result.pins_equivalent)} 件)**:")
-    if result.pins_equivalent:
-        for repo, pin, pin_blob in sorted(result.pins_equivalent):
-            lines.append(
-                f"- `{repo}` — pin `{pin[:12]}` / blob `{pin_blob[:12]}` が"
-                f" main `{result.upstream_sha[:12]}` の blob と一致"
-            )
-    else:
-        lines.append("- なし")
     lines.append("")
     lines.append(f"**workflow なし・skills 未 vendor ({len(result.no_workflow_ok)} 件)**: "
                  + (", ".join(f"`{r}`" for r in result.no_workflow_ok) or "なし"))

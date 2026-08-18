@@ -101,7 +101,7 @@ concurrency:
 jobs:
   update-external:
     # Fandhe-AI/actions はタグ未公開のため main 追従の最新コミット SHA に固定する
-    uses: Fandhe-AI/actions/.github/workflows/update-external.yml@<SHA> # main
+    uses: Fandhe-AI/actions/.github/workflows/update-external.yml@latest
     permissions:
       contents: read
     with:
@@ -257,7 +257,7 @@ CARGO_REGISTRY_TOKEN visibility=all
 SUBMODULE_PAT visibility=all
 ```
 
-**pin SHA は本ドキュメント起草時の `0bd2cf93...` から変わっている。** `Fandhe-AI/actions#84`
+**（2026-08-18 追記: 参照は `@latest` へ移行済み。以下は移行前の記録）** **pin SHA は本ドキュメント起草時の `0bd2cf93...` から変わっている。** `Fandhe-AI/actions#84`
 （reusable workflow への `skills` input 追加）をマージしたため、導入には実行時点の main tip
 である `db80e625...` を使った。同 SHA の `on.workflow_call` は **inputs 12 件**・secrets 2 件
 （いずれも `required: false`）であり、上のテンプレートのコメントもこの実測値へ直してある
@@ -383,15 +383,15 @@ run [32088779994](https://github.com/Fandhe-AI/agent-cli-skills/actions/runs/320
 | `team-hub-spec` で `Cursor Bugbot` が起動しない | 導入 PR が恒久的にマージ不能 | ruleset を緩めず、状況をイシューへ記録して停止・エスカレーションする |
 | 低活動 3 リポで schedule が自動無効化される | 同期が止まる | 軸 5 が検知 → `docs/update-external-schedule.md` の復旧手順。導入直後は猶予判定で偽陽性なし |
 | `aliz-corporate-web` の submodule ジョブ失敗 | 日次 run が赤 → 将来 SCHEDULE-FAILING | **解消済み（対処不要）**。同リポは `enable-submodule: false` を明示して導入したため submodule ジョブは常に `skipped` になり、失敗経路自体が無い（実測: 初回 run・`target=all` run とも `Update submodule references = skipped`）。将来 `enable-submodule` を有効化する別イシューを立てる際に、このリスクを再評価する |
-| 導入直後に `PIN-STALE` として再登場 | レポート件数は `SYNC-CI-ABSENT` 単独では減らない | 判定ゲートは `SYNC-CI-ABSENT == 0` のみ。pin 追従は #343 |
+| 導入直後に `PIN-STALE` として再登場 | レポート件数は `SYNC-CI-ABSENT` 単独では減らない | 判定ゲートは `SYNC-CI-ABSENT == 0` のみ。**解消済み**: 参照を `@latest` へ統一したため pin の鮮度という概念自体が無くなった（2026-08-18） |
 
 ## スコープ外
 
 - `SYNC-CI-ABSENT` の判定文言（#256 但し書き）の陳腐化修正 → #344
-- wrapper の pin 自動追従 → #343
+- wrapper の pin 自動追従 → #343（**取り下げ**。2026-08-18・オーナー判断で `@latest` へ移行し、追従の仕組み自体が不要になった）
 - `enable-submodule` 要否のポリシー判断 → 本イシューが明示的に対象外と宣言
 - 5 リポの既存 CI・lint 設定の修正
-- 既存 22 リポの pin 追従（#343）
+- 既存 22 リポの pin 追従（#343 → `@latest` 化として別途実施）
 
 （本ドキュメント起草時にスコープ外としていた「5 リポへの実際の書き込み・乖離検知 CI の再実行・
 イシュー #342 へのコメント投稿」は、後続フェーズとしてすべて実施した。各項目の実測値は
@@ -403,7 +403,7 @@ run [32088779994](https://github.com/Fandhe-AI/agent-cli-skills/actions/runs/320
 - イシュー #256 — `.claude/skills` 実ディレクトリでの checkout 失敗
 - イシュー #304 — `docs/update-external-schedule.md`（軸 5・復旧手順）
 - イシュー #341 — 乖離検知レポート issue
-- イシュー #343 — pin 自動追従
+- イシュー #343 — pin 自動追従（取り下げ。`@latest` へ移行）
 - イシュー #344 — `SYNC-CI-ABSENT` 判定文言の陳腐化修正
 - `.claude/rules/ruleset-policy.md` — ブランチ ruleset 方針
 - `.claude/rules/debugging.md` — 根本原因デバッグ規約
