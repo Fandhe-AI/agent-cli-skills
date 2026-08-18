@@ -219,7 +219,17 @@ def check_wrapper_contract(wrapper_text: str, contract: dict) -> list[str]:
                 violations.append(
                     f"with.{key} は新 SHA で必須 (required: true) になったが wrapper が渡していない"
                 )
-        secrets_ = job.get("secrets") if isinstance(job.get("secrets"), dict) else {}
+        # ``secrets: inherit`` は mapping ではなく文字列。呼び出し元の secrets を
+        # そのまま渡す有効な形式であり、必須 secret を「渡していない」と静的に
+        # 断定できない（イシュー #343 Review P1 指摘: これを ``{}`` に畳むと、
+        # 上流契約に required な secret が 1 つでもあるだけで全 wrapper が
+        # ``skipped-contract`` になり pin が永久に更新されない）。
+        # inherit のときは secrets 側の両方向チェックをまるごとスキップする
+        # （余剰キーの検査も、inherit には個別キーが無いため対象が存在しない）。
+        raw_secrets = job.get("secrets")
+        if isinstance(raw_secrets, str) and cud.norm(raw_secrets) == "inherit":
+            continue
+        secrets_ = raw_secrets if isinstance(raw_secrets, dict) else {}
         for key in secrets_:
             if key not in contract["secrets"]:
                 violations.append(f"secrets.{key} は新 SHA の workflow_call.secrets 契約に無い")

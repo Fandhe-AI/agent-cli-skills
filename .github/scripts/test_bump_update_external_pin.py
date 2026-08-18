@@ -43,6 +43,23 @@ jobs:
       SKILLS_PAT: ${{{{ secrets.SKILLS_PAT }}}}
 """.format(pin=UPSTREAM_SHA)
 
+# ``secrets: inherit`` を使う wrapper。mapping ではなく文字列であり、呼び出し元の
+# secrets をそのまま渡す有効な形式（イシュー #343 Review P1 指摘）。
+WRAPPER_SECRETS_INHERIT = """
+name: Update external sources
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  update-external:
+    uses: Fandhe-AI/actions/.github/workflows/update-external.yml@{pin} # main
+    with:
+      target: all
+      runner-json: '"ubuntu-latest"'
+    secrets: inherit
+""".format(pin=UPSTREAM_SHA)
+
 UPSTREAM_WITH_CONTRACT = """
 name: Update external sources (reusable)
 on:
@@ -399,6 +416,40 @@ class TestClassifyReusedBranch(unittest.TestCase):
                 WRAPPER_TEXT, branch_text, NEW_SHA, {"files": [_pin_file()]}
             ),
             "foreign",
+        )
+
+
+class TestSecretsInherit(unittest.TestCase):
+    """``secrets: inherit`` を必須 secret の欠落として誤判定しないこと。
+
+    mapping しか見ずに ``{}`` へ畳むと、上流契約に ``required: true`` の secret が
+    1 つでもあるだけで全 wrapper が ``skipped-contract`` になり、pin が永久に
+    更新されなくなる（イシュー #343 Review P1 指摘）。
+    """
+
+    def test_inherit_does_not_report_missing_required_secret(self):
+        contract = bump.workflow_call_contract(UPSTREAM_WITH_NEW_REQUIRED_INPUT)
+        # 前提: この契約には required な secret が実在する（fixture の退化防止）。
+        self.assertIn("NEW_REQUIRED_SECRET", contract["required_secrets"])
+        violations = bump.check_wrapper_contract(WRAPPER_SECRETS_INHERIT, contract)
+        self.assertEqual(
+            [v for v in violations if v.startswith("secrets.")], []
+        )
+
+    def test_inherit_still_reports_missing_required_input(self):
+        # secrets 側だけをスキップする。inputs 側の必須欠落は従来どおり検出する。
+        contract = bump.workflow_call_contract(UPSTREAM_WITH_NEW_REQUIRED_INPUT)
+        violations = bump.check_wrapper_contract(WRAPPER_SECRETS_INHERIT, contract)
+        self.assertTrue(
+            any(v.startswith("with.new-required-flag") for v in violations), violations
+        )
+
+    def test_mapping_secrets_still_reports_missing_required_secret(self):
+        # 回帰確認: mapping で渡す wrapper では必須 secret の欠落を従来どおり検出する。
+        contract = bump.workflow_call_contract(UPSTREAM_WITH_NEW_REQUIRED_INPUT)
+        violations = bump.check_wrapper_contract(WRAPPER_TEXT, contract)
+        self.assertTrue(
+            any(v.startswith("secrets.NEW_REQUIRED_SECRET") for v in violations), violations
         )
 
 
