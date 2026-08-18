@@ -175,7 +175,7 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
       # 空白・タブ・制御文字・非 ASCII を含むブランチ名は fail-closed で判定不能
       # とする（LC_ALL=C の非印字検出。git は非 ASCII ブランチ名を許容するが、
       # このプローブでは同定の確実性を優先し判定不能側へ倒す）。
-      if LC_ALL=C printf '%s' "${branch}" | grep -q '[^ -~]' || printf '%s' "${branch}" | grep -q '[[:space:]]'; then
+      if printf '%s' "${branch}" | LC_ALL=C grep -q '[^ -~]' || printf '%s' "${branch}" | grep -q '[[:space:]]'; then
         echo "${target}: 判定不能 — ブランチ名に空白・非印字・非 ASCII 文字を含む"; continue
       fi
     else
