@@ -177,9 +177,13 @@ confirm_stable_parent() {
   # 不正値・実行失敗の非 0 終了が呼び出し元の exit 8 / reason=recovery-state-unknown への変換より
   # 先にスクリプトを即終了させ、終了コード契約外の exit 1 になるため（codex-review P1 指摘
   # PR #391）。検証・実行の失敗は状態不明（return 1）として既存の fail-closed 経路へ流す
+  # 上限 60 秒: 非負整数の検証だけでは、継承環境の極端な値（例: 999999999）で sleep が
+  # 事実上停止し、DELETE 済みの部分変更状態を報告できないまま処理が止まる（codex-review
+  # P1 指摘 PR #391 第 4 ラウンド）。再確認待機に 60 秒超の値は運用上あり得ないため、
+  # 範囲外は状態不明（return 1）の fail-closed 経路へ流す
   local recheck_delay="${RECOVERY_RECHECK_DELAY_SEC:-2}"
-  if ! [[ "${recheck_delay}" =~ ^[0-9]+$ ]]; then
-    echo "エラー: RECOVERY_RECHECK_DELAY_SEC が非負整数でない（値: ${recheck_delay}）。${label}を実施できず状態不明のまま終端する" >&2
+  if ! [[ "${recheck_delay}" =~ ^[0-9]+$ ]] || (( recheck_delay > 60 )); then
+    echo "エラー: RECOVERY_RECHECK_DELAY_SEC が 0〜60 の整数でない（値: ${recheck_delay}）。${label}を実施できず状態不明のまま終端する" >&2
     return 1
   fi
   if ! sleep "${recheck_delay}"; then
