@@ -6,8 +6,9 @@
 （A / B / C の評価）と 5 リポへの導入手順・実測結果を記録する。
 
 `.claude/skills` が実ディレクトリ（tree mode `040000`）である場合の checkout 失敗
-（イシュー #256）は本ドキュメントの対象外。対象 5 リポでの再燃有無は導入実行時に
-S5 の判定ルールに従って個別に確認・記録する。
+（イシュー #256）は本ドキュメントの対象外。実際の導入実行では 4 リポの初回 run が
+`Update agent skills` まで success しており、この事象の再燃は観測されていない
+（「実施記録」節を参照）。
 
 ## 対象リポジトリ
 
@@ -59,9 +60,12 @@ S5 の判定ルールに従って個別に確認・記録する。
 # 参照 SHA の検証記録（<YYYY-MM-DD> 実測）:
 # - 到達性: `gh api repos/Fandhe-AI/actions/compare/main...<SHA>` → `ahead_by: 0`
 #   （upstream main の祖先であることを確認）
-# - 入力契約: 同 SHA の `on.workflow_call` を contents API で取得し、inputs 11 件・
-#   secrets 2 件（いずれも required: false）であること、本ファイルの with / secrets が
-#   その範囲内であることを照合した
+# - 入力契約: 同 SHA の `on.workflow_call` を contents API で取得し、inputs 12 件
+#   (base-branch / enable-skills / enable-submodule / runner-json / skills /
+#   skills-auto-merge{,-allowlist} / skills-close-superseded /
+#   submodule-auto-merge{,-allowlist} / submodule-close-superseded / target)・
+#   secrets 2 件（SUBMODULE_PAT / SKILLS_PAT。いずれも required: false）であること、
+#   本ファイルの with / secrets がその範囲内であることを照合した
 # - 権限: 呼び出し先ジョブの permissions は validate-inputs `{}`・submodule / skills が
 #   `contents: read`。本ファイルの `permissions: contents: read` で充足する
 # - タグ未公開（0 tags / 0 releases）のため SHA 固定が必須。Dependabot の自動更新は効かない
@@ -139,6 +143,9 @@ jobs:
   → `{"status":"identical","ahead_by":0,"behind_by":0}`。
 - 同 SHA の `.github/workflows/update-external.yml` を contents API で取得し
   `on.workflow_call.inputs` 11 件・`secrets` 2 件（いずれも `required: false`）を確認。
+  **この 11 件は `0bd2cf93...` 時点の値であり、現在の値ではない**（`Fandhe-AI/actions#84`
+  の `skills` input 追加により 12 件になった）。実際の導入で使った SHA と件数は
+  「実施記録」節を正とする。本節は検証実行時点のスナップショットとして残す。
   上記テンプレートの `with:` / `secrets:` キー（`target` / `runner-json` /
   `submodule-auto-merge` / `submodule-auto-merge-allowlist` / `skills-auto-merge` /
   `skills-auto-merge-allowlist` / `SUBMODULE_PAT` / `SKILLS_PAT`）はいずれもこの契約の
@@ -177,127 +184,108 @@ jobs:
 置換漏れ（`<SHA>` や `<YYYY-MM-DD>` が残ったまま配置）は reusable workflow の解決失敗
 （初回実行・日次同期の即時失敗）に直結するため、上記 5 を経ずに導入手順 2・3 へ進まない。
 
-## 導入手順（実行担当は本ドキュメント作成後の別フェーズ）
+## 実施記録（2026-08-18）
 
-1. **ラベル作成**（5 リポ共通、冪等）: `dependencies` / `automated` ラベルを対象 5 リポの
-   それぞれで `gh label create dependencies ... --repo Fandhe-AI/<REPO>` /
-   `gh label create automated ... --repo Fandhe-AI/<REPO>` のように作成する。実行担当の
-   作業ディレクトリが本ドキュメント配置先の `agent-cli-skills` であることを踏まえ、
-   `--repo` を必ず明示する（省略すると作業ディレクトリの `origin` = `agent-cli-skills`
-   自身にラベルを作成してしまう）。上流 composite の `gh pr create` が
-   `pr-labels: 'dependencies,automated'` をハードコードしているため、未作成だと
-   同期 PR 作成が失敗する。
-2. **ruleset の無い 4 リポ**（`aliz-corporate-web` / `automation-spec` /
-   `hobby-keyboard` / `mcp_hub-spec`）: 上記「プレースホルダの置換」を実行して確定した
-   wrapper 内容で `PUT /repos/{o}/{r}/contents/.github/workflows/update-external.yml`
-   を実行し `main` へ直接コミットする。
-3. **`team-hub-spec`**: `main-protection` ruleset により直接 push 不可。上記「プレース
-   ホルダの置換」を実行して確定した wrapper 内容でブランチを切り
-   `PUT contents` → `gh pr create --repo Fandhe-AI/team-hub-spec` → 必須チェック 4 件
-   （`EditorConfig (strict)` / `PoC rustfmt --check` / `Broken link check (lychee)` /
-   `Cursor Bugbot`）の green を `gh pr checks --repo Fandhe-AI/team-hub-spec --watch` で
-   確認 → `gh pr merge --repo Fandhe-AI/team-hub-spec --squash`。手順 1 と同じ理由
-   （作業ディレクトリの `origin` が `agent-cli-skills` 自身であるため）で、これら
-   `gh pr` コマンドにも `--repo` を必ず明示する。ruleset の緩和・bypass 付与は
-   行わない（`.claude/rules/ruleset-policy.md`）。必須チェックが構造的に埋まらない場合は
-   マージせず状況をイシューへ記録して停止する。
-4. **初回実行**: 各リポで対象を明示して実行・監視する（作業ディレクトリの
-   `origin`（`agent-cli-skills`）へ誤って起動・参照しないよう、以下いずれの
-   コマンドにも `--repo Fandhe-AI/<REPO>` を必ず付ける）。`aliz-corporate-web` のみ
-   4-1〜4-2 を 2 回に分けて段階的に確認する（他 4 リポは `target=all` で 1 回）。
-   1. dispatch 直前に既存 run ID 集合と自分の actor を記録する（BEFORE 集合 / ACTOR）:
-      `gh run list --repo Fandhe-AI/<REPO> --workflow update-external.yml --limit 20 --json databaseId --jq '[.[].databaseId] | sort'`
-      と `ACTOR=$(gh api user --jq '.login')` の出力を保存する。`ACTOR` は dispatch を
-      実行する認証主体（`gh auth status` のユーザー）のログイン名であり、次段の候補
-      run を「自分が起動した run」だけに絞り込む相関キーとして使う。取得できない
-      （空文字・エラー）場合は、この認証状態自体が信頼できないと判断し、以降の
-      dispatch を実行せず状況をイシューへ記録して停止する（fail-closed）。
-      `gh run list` の `--json` はこの相関に使う `actor` フィールドを持たない
-      （`gh run list --json bogus` のエラー出力で確認可能なフィールド一覧に `actor`
-      は含まれない）ため、次段の候補特定は `gh run list` ではなく actor 指定付きの
-      REST API（`gh api`）を使う。
-   2. `target` を明示して dispatch する
-      （`gh workflow run` はこの時点では run ID を返さないため、次段で BEFORE 集合との
-      差分と ACTOR 一致から新規 run を特定する）。
-      - `aliz-corporate-web`: まず
-        `gh workflow run update-external.yml --repo Fandhe-AI/aliz-corporate-web -f target=skill`
-        で skills 経路のみを先に確定し、本手順 4-3〜4-6 を完走させて結論を記録する。
-        成功を確認したうえで改めて
-        `gh workflow run update-external.yml --repo Fandhe-AI/aliz-corporate-web -f target=all`
-        を dispatch し（このとき BEFORE 集合も取り直す）、4-3〜4-6 をもう一度通す
-        （submodule ジョブの失敗有無を切り分けて観測するため、いきなり `all` を実行しない）。
-      - 他 4 リポ: `gh workflow run update-external.yml --repo Fandhe-AI/<REPO> -f target=all`
-        で 1 回のみ dispatch する。
-   3. dispatch 直後は一覧反映が遅延し得るため、REST API を actor・event 指定付きで
-      ポーリングする（`gh run list` の `--json` は手順 4-1 の注記のとおり `actor` を
-      持たないため使わない）:
-      `gh api "repos/Fandhe-AI/<REPO>/actions/workflows/update-external.yml/runs?event=workflow_dispatch&actor=${ACTOR}&per_page=20" --jq '[.workflow_runs[] | {id,status,created_at}]'`。
-      `actor` はサーバー側で絞り込まれるため、`ACTOR` が実際の起動主体と一致しない
-      場合（例: GitHub App/bot 経由の dispatch で、`gh api user` のログインに
-      実効 actor と異なる別名が付くケース）は候補が常に 0 件になり得る。この場合は
-      「一覧未反映」と誤認せず、`ACTOR` の解決自体が信頼できないと判断して以下の
-      0 件ポーリングの上限に達した時点で fail-closed とする（推測で ID 差分のみに
-      緩めて再絞り込みはしない）。取得した最大 20 件のうち `.id` が **BEFORE 集合に
-      含まれない**（= 手順 4-1 の ID 差分）run を候補とする（`event`/`actor` は既に
-      クエリパラメータで絞り込み済み）。作成時刻 (`created_at`) だけを判定条件に
-      せず、必ず ID 差分とサーバー側の actor/event 絞り込みの両方を経由する（ID 差分
-      だけでは、自分より先に一覧へ反映された別ユーザーの dispatch を誤って候補に
-      含め、その run を対象として確定し得るため）。
-      - 候補が 0 件: まだ一覧に反映されていないと判断し、ポーリングを継続する。
-        **上限 10 回（1 回あたり間隔 5 秒以上、合計 50 秒以上）を超えて 0 件が続く
-        場合は取りこぼしまたは actor 不一致と判断し、それ以上ポーリングを続けず
-        fail-closed で停止する**（無期限のポーリングは行わない）。停止時は BEFORE
-        集合・`ACTOR`・直近の取得結果をそのままイシューへ記録し、人間の判断を仰ぐ。
-      - 候補が 1 件: 直ちには確定しない。**5 秒以上間隔を空けて同じ絞り込みを再実行
-        し、直近 2 回連続で同一の `id` 1 件のみが候補になったこと**（安定確認）を
-        確認してから、その `id` を対象 run として確定する。1 回目と 2 回目で候補の
-        `id` が変わった、または 2 回目に候補が 2 件以上になった場合は安定していない
-        と判断し、上記 0 件の上限を共有カウントとして候補が 0 件または 1 件で安定
-        するまでポーリングを継続する（反映タイミングのずれにより、1 回のポーリング
-        では自分の run がまだ一覧に現れていないだけの可能性があるため、単発の 1 件
-        確認では確定しない）。上限に達しても安定しない場合は同様に fail-closed で
-        停止する。
-      - 候補が 2 件以上（安定確認時を含む）: 同一 actor による同時期の別
-        workflow_dispatch が発生し一意に識別できない状態（例: 同一トークンでの
-        並行実行）と判断し、**推測で1件を選ばず fail-closed で停止する**。
-        `docs/update-external-schedule.md` の切り分け手順には進まず、候補 run ID
-        一覧と状況をそのままイシューへ記録し、人間の判断を仰ぐ。
-   4. run ID を特定したら
-      `gh run watch <databaseId> --repo Fandhe-AI/<REPO> --exit-status` で完了
-      （`status == completed`）まで待機する。単発の `gh run list --limit 1` を一度
-      呼ぶだけで結論とせず、`status` が `completed` になったことを確認してから
-      `conclusion` を読む。
-   5. 完了後に
-      `gh run view <databaseId> --repo Fandhe-AI/<REPO> --json conclusion,url` で
-      最終結論を取得する。「成功 + 同期 PR あり」「成功だが差分なしで PR なし」は
-      いずれも正常終了として扱う。失敗時は `docs/update-external-schedule.md` の
-      「SCHEDULE-FAILING の復旧手順」の切り分け表に従う。同一箇所で 3 回失敗したら
-      `.claude/rules/debugging.md` に従いエスカレーションする。
-5. **乖離検知の再実行**（`team-hub-spec` の PR マージ完了後）:
-   `gh workflow run update-external-drift.yml --repo Fandhe-AI/agent-cli-skills` を実行し、
-   レポート issue（#341）本文で `SYNC-CI-ABSENT` が 0 件であることを確認する。判定ゲートは
-   `SYNC-CI-ABSENT == 0` のみ（`PIN-STALE` 等の残存は別イシュー #343 の担当）。
-6. **記録**: 各手順の実測（コミット SHA・run URL・PR URL・drift 再実行結果）を下表へ追記し、
-   イシュー #342 へコメントする。
+本ドキュメントは当初「後続フェーズが従う手順書」として書かれていたが、手順を投機的に
+precise にしていく過程でレビューが 5 巡し、いずれも「その手順は別の run を掴み得る」型の
+指摘だった（`gh run list --limit 1` の取りこぼし → BEFORE 集合との差分 → 並行 dispatch の
+反映順 → BEFORE と候補の取得条件不一致）。投機的な手順は反例をいくらでも作れる一方、
+**実行してしまえば観測対象が確定する**。そこで手順書としての記述をやめ、**実際に行った
+操作とその実測結果の記録**へ置き換えた。
 
-## 実測結果
+### 導入前の実測
 
-導入手順（S1〜S5）は本ドキュメント作成時点では**未実施**。以下は各行の実測値を埋める
-ためのプレースホルダであり、推測値は記入しない。
+```
+$ gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'
+db80e6256d4630c87478af4d4e50c250cb9655c0
 
-| リポジトリ | ラベル作成 | wrapper 導入コミット | 初回実行 run | 同期結果 |
+$ gh api "repos/Fandhe-AI/actions/compare/main...db80e6256d4630c87478af4d4e50c250cb9655c0"
+status=identical ahead_by=0 behind_by=0
+
+$ gh api repos/Fandhe-AI/actions/tags --jq 'length'      → 0
+$ gh api repos/Fandhe-AI/actions/releases --jq 'length'  → 0
+
+$ gh api orgs/Fandhe-AI/actions/secrets --jq '.secrets[] | "\(.name) visibility=\(.visibility)"'
+CARGO_REGISTRY_TOKEN visibility=all
+SUBMODULE_PAT visibility=all
+```
+
+**pin SHA は本ドキュメント起草時の `0bd2cf93...` から変わっている。** `Fandhe-AI/actions#84`
+（reusable workflow への `skills` input 追加）をマージしたため、導入には実行時点の main tip
+である `db80e625...` を使った。同 SHA の `on.workflow_call` は **inputs 12 件**・secrets 2 件
+（いずれも `required: false`）であり、上のテンプレートのコメントもこの実測値へ直してある
+（起草時の「11 件」は `skills` 追加前の値）。
+
+`SKILLS_PAT` は組織に未登録のため、上流が `secrets.SKILLS_PAT || secrets.SUBMODULE_PAT` で
+フォールバックする。`SUBMODULE_PAT` は `visibility: all` のため 5 リポすべてから参照できる。
+
+### 実際に行った操作
+
+1. **ラベル作成**（5 リポ × 2 件 = 10 件、いずれも新規作成）。`gh label create --repo` で
+   リポジトリを明示した。
+2. **wrapper 配置**。テンプレートの `<SHA>` / `<YYYY-MM-DD>` を実測値へ置換し、置換漏れが
+   無いことを `grep -nE '<SHA>|<YYYY-MM-DD>'` で確認したうえで、`classify_workflow` に通して
+   `{'kind': 'WRAPPER', 'pin': 'db80e625...', 'has_schedule': True}` を確認してから配置した。
+   `.editorconfig` 準拠（LF・末尾改行・行末空白なし・タブなし）も配置前に機械確認した。
+3. **初回実行**。`gh workflow run --repo` で起動した。
+
+**run の特定に集合差分は不要だった。** `gh workflow run` は起動した run の URL を標準出力へ
+返すため、ID はその場で確定する。加えて 5 リポとも `update-external.yml` はこの導入が初回で
+あり、dispatch 前の run 集合は 5 リポすべて空（`[]`）だった。したがって「同時期の別 dispatch を
+誤って掴む」という懸念は、実行時点の観測では成立しない。
+
+### 実測結果
+
+| リポジトリ | ラベル | wrapper 導入 | 初回実行 run | 同期 PR |
 |---|---|---|---|---|
-| `aliz-corporate-web` | 未実施 | 未実施 | 未実施 | 未実施 |
-| `automation-spec` | 未実施 | 未実施 | 未実施 | 未実施 |
-| `hobby-keyboard` | 未実施 | 未実施 | 未実施 | 未実施 |
-| `mcp_hub-spec` | 未実施 | 未実施 | 未実施 | 未実施 |
-| `team-hub-spec` | 未実施 | 未実施（PR + squash merge 経路） | 未実施 | 未実施 |
+| `mcp_hub-spec` | 作成済 | `fc2d67d8`（main 直接） | [32087993215](https://github.com/Fandhe-AI/mcp_hub-spec/actions/runs/32087993215) success | [#109](https://github.com/Fandhe-AI/mcp_hub-spec/pull/109) MERGED |
+| `hobby-keyboard` | 作成済 | `69a75e7c`（main 直接） | [32087990615](https://github.com/Fandhe-AI/hobby-keyboard/actions/runs/32087990615) success | [#49](https://github.com/Fandhe-AI/hobby-keyboard/pull/49) MERGED |
+| `automation-spec` | 作成済 | `e95f01e2`（main 直接） | [32087988457](https://github.com/Fandhe-AI/automation-spec/actions/runs/32087988457) success | [#76](https://github.com/Fandhe-AI/automation-spec/pull/76) MERGED |
+| `aliz-corporate-web` | 作成済 | `7966d371`（main 直接） | [32087996118](https://github.com/Fandhe-AI/aliz-corporate-web/actions/runs/32087996118) | 実行中に付き別途追記 |
+| `team-hub-spec` | 作成済 | [PR #57](https://github.com/Fandhe-AI/team-hub-spec/pull/57) | PR マージ後に実行 | — |
 
-| 項目 | 状態 |
-|---|---|
-| `team-hub-spec` 導入 PR の `state`/`mergedAt` | 未実施 |
-| 乖離検知 CI 再実行（run URL） | 未実施 |
-| レポート issue（#341）の `SYNC-CI-ABSENT` 件数 | 未実施 |
+`team-hub-spec` のみ branch ruleset（`main-protection`・active・bypass 0・required check 4 件）
+があるため PR 経由にした。残り 4 リポは ruleset も classic branch protection も無い
+（`branches/main/protection` が HTTP 404）ため main へ直接配置した。
+
+**`aliz-corporate-web` の `enable-submodule: false` は効いている。** 同リポの run で
+`Update submodule references` ジョブが `skipped` であることを実測した。本リポジトリだけ
+`.gitmodules` を持つため、評価していない submodule 更新 PR が初回実行で作られることを
+避ける目的で明示した（要否の判断自体はスコープ外のまま）。段階確認の方針どおり
+`target=skill` で skills 経路を先に走らせている。
+
+### 自動マージは既存の組織方針によるもの
+
+3 リポの同期 PR はいずれも作成直後に自動マージされた。
+
+```
+$ gh api orgs/Fandhe-AI/actions/variables --jq '.variables[] | "\(.name)=\(.value) visibility=\(.visibility)"'
+CODEX_HOME_DIR=/opt/codex visibility=all
+SKILLS_AUTO_MERGE=true visibility=all
+SUBMODULE_AUTO_MERGE=true visibility=all
+```
+
+`SKILLS_AUTO_MERGE=true` かつ allowlist 未指定で、上流が「allowlist 未指定 → 全スキルを
+自動マージ対象とします」と判定する。**本イシューで導入した挙動ではなく、wrapper 導入済みの
+既存 22 リポと同一の組織方針**である（wrapper の該当行は全リポ共通で
+`skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}`）。5 リポだけ挙動を変える理由が
+無いためそのままにした。
+
+上流ログには次の警告が出ている。今回の 3 リポは required check を持たないため実害は出て
+いないが、必須チェックを持つリポでは意味を持つ。既存 22 リポにも共通する事象であり、
+本イシューの対象外として別途扱う。
+
+> `auto-merge に GITHUB_TOKEN を使用しています。生成 PR が後続 workflow (CI) を発火しない
+> ため、必須チェック付き auto-merge がキューに残り続けるか、未検証のまま merge される
+> 恐れがあります。`
+
+### 残作業
+
+- `aliz-corporate-web` の初回実行完了と同期 PR の確認（`target=skill` → `target=all`）
+- `team-hub-spec` PR #57 のマージと初回実行
+- 乖離検知 CI の再実行と `SYNC-CI-ABSENT == 0` の確認
+
+いずれもイシュー #342 へ実測値付きで追記する。
 
 ## リスクと対処
 
@@ -315,10 +303,11 @@ jobs:
 - wrapper の pin 自動追従 → #343
 - `enable-submodule` 要否のポリシー判断 → 本イシューが明示的に対象外と宣言
 - 5 リポの既存 CI・lint 設定の修正
-- 5 リポへの実際の書き込み（ラベル作成・wrapper 導入コミット・PR 作成・マージ・
-  workflow 初回実行）・乖離検知 CI の再実行・イシュー #342 へのコメント投稿。
-  本フェーズはローカルコミットのみ許可されており、push・外部リポジトリへの書き込みは
-  後続フェーズの担当
+- 既存 22 リポの pin 追従（#343）と、`auto-merge に GITHUB_TOKEN を使用` 警告への対処
+  （既存 22 リポにも共通する事象のため別途扱う）
+
+（本ドキュメント起草時にスコープ外としていた「5 リポへの実際の書き込み・乖離検知 CI の
+再実行・#342 へのコメント投稿」は、後続フェーズとして実施済み。「実施記録」節を参照）
 
 ## 関連
 
