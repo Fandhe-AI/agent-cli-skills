@@ -84,6 +84,16 @@ workflow 集合の入力形式をカンマ区切り文字列から JSON 配列�
 すべて `push_total == 0` のため、この表の判定は入力形式変更後も再測不要である。再測・新規
 測定を行う場合は新形式（JSON 配列）でプローブを実行すること。
 
+**注記（集計対象の必須集合限定・Issue #364）**: この記録取得後、プローブの `failed`/
+`incomplete`/`unknown` の集計対象を「対象ブランチへの push run 全件（`$p`）」から
+「必須 workflow 集合の run のみ（`$rp`。`workflowDatabaseId` を必須集合の `id` と突き合わせて
+抽出）」へ限定し、必須 run 件数を示す `required_push_total` を出力へ追加した（必須外の
+`paths` フィルタ付き軽量 workflow 等が `skipped`/`neutral` で完了しても green 判定を妨げない
+ようにするため）。`push_total`（対象ブランチへの push run 全件。構造的不在検出専用）の意味は
+変更していない。5 リポすべて `push_total == 0`（push run 自体が 0 件で `$p` も `$rp` も
+空集合）であり、集計対象の限定は `push_total >= 1` の場合の判定にのみ影響するため、この表の
+判定はこの変更後も再測不要である。
+
 | リポジトリ | 判定 | 理由 | 判断 |
 |-----------|------|------|------|
 | `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は上記節の 3. の代替確認を必須とする |
