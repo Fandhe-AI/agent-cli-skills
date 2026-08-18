@@ -155,6 +155,16 @@ const autoMergeEnabled = (() => {
   }
   return raw
 })()
+// 残置 worktree 上限ゲートの既定値（Issue #348）。linked worktree は object store を共有し
+// working tree 分のみディスクを消費する（本リポジトリ実測 1 件 ≈ 3.4 MB）ため、100 件でも
+// ディスク消費は ≈ 340 MB に留まる。1 イシュー消化あたりの積み増し最大数は
+// EPHEMERAL_RESERVE_PER_NEW_START（= 6: implement ×1 + review ×3 + pr-create ×1 +
+// fix-routing-error ×1。EPHEMERAL_KIND_MAX の合計から導出）のため、既定 100 なら開始時
+// 残置 0 でも (100 / 6) ≈ 15 イシュー/ラン に着手できる。
+// 旧既定値 20 では 1 ラン 3 件で頭打ちになっていた（2 ラン分の実測・Issue #348）。
+// parseMaxResidualWorktrees（下方で定義。関数宣言はホイストされるが本 const は評価順が要る
+// ため呼び出し直前のここに置く）が参照する。
+const DEFAULT_MAX_RESIDUAL_WORKTREES = 100
 // 残置 worktree 総数の上限（Issue #142 後続）。使い捨て worktree は削除しない設計のため、
 // ラン開始時の残置総数が上限超過なら新規着手を止めて手動介入を促す（削除は一切行わない
 // fail-closed ゲート）。検証・既定値・0 の意味は parseMaxResidualWorktrees 参照。
@@ -420,15 +430,17 @@ function assertInt(val, label) {
 // args.maxResidualWorktrees の検証・数値化。使い捨て worktree は自動削除しない設計（Issue #142）
 // のため、ラン開始時の残置総数に上限を設けてディスク枯渇（DoS）を防ぐ。安全側の閾値のため
 // 寛容フォールバックはしない。
-//   - 未指定 → 既定 20 / 0 → 上限なし（明示オプトアウト。「上限 0 件」は実運用で無意味なため
-//     無効化に割り当て） / 正の整数 → その値 / それ以外 → throw（fail-closed）
+//   - 未指定 → 既定 DEFAULT_MAX_RESIDUAL_WORKTREES / 0 → 上限なし（明示オプトアウト。
+//     「上限 0 件」は実運用で無意味なため無効化に割り当て） / 正の整数 → その値 /
+//     それ以外 → throw（fail-closed）
 // assertInt は 0 を弾くため流用できず、0 を許容する専用検証をここに置く。
 function parseMaxResidualWorktrees(raw) {
-  if (raw === undefined || raw === null) return 20
+  if (raw === undefined || raw === null) return DEFAULT_MAX_RESIDUAL_WORKTREES
   if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) {
     throw new Error(
       `args.maxResidualWorktrees は 0 以上の整数で指定すること（0 は上限なし＝チェック無効。` +
-        `既定は 20。残置 worktree のディスク枯渇防止ゲートの入力のため誤記は fail-closed で拒否する）: ${String(raw).slice(0, 50)}`,
+        `既定は ${DEFAULT_MAX_RESIDUAL_WORKTREES}。残置 worktree のディスク枯渇防止ゲートの入力の` +
+        `ため誤記は fail-closed で拒否する）: ${String(raw).slice(0, 50)}`,
     )
   }
   return raw
