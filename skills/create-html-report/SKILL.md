@@ -327,4 +327,4 @@ Validation: PASS
 
 ## sandbox 環境での実行
 
-このスキルは sandbox 環境では実行できない。ネットワークアクセス・ファイルシステムへの書き込みが必要なため、通常の Claude Code セッションで実行すること。
+このスキルは sandbox 環境で実行できる。renderer（`scripts/render_report.py`）は純ローカルの Python 処理であり、ネットワーク越しの操作を行わない。出力先の `_/reports/` はワークスペース内であり、ワークスペース外への書き込みも行わない。
