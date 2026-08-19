@@ -25,7 +25,7 @@ model: sonnet
 - ルート直下の `skills-lock.json` が存在すること
 - **実行前に `skills-lock.json` に未コミットの変更がないこと**（ステージ済み・未ステージ問わず）。本スキルの実行中に発生する変更は sync 由来のみとなり、`git add skills-lock.json` で全体をステージしても無関係な変更が混入しない
 - **対象スキルの `.agents/skills/<name>/` に未コミット変更がないこと**。`npx skills add` は `.agents/skills/<name>/` を upstream の最新版で上書きするため、そのディレクトリに WIP が存在すると即座に失われる。`git checkout` で戻せるのは「最後にコミットされた状態」のみであり、npx 実行前の未コミット編集は復元できない。**未追跡ファイルとして存在する WIP も対象**であり、`git status --porcelain` で検出する
-- **消費側リポジトリが commit 済み local patch を持つ場合**: vendored skill（`.agents/skills/` 配下）へ commit 済みの local patch を適用しているリポジトリは、その検証・再適用の入口として repository-owned checker `scripts/check-skill-local-patches.sh`（無引数 = check / `apply` の 2 モード）と台帳 `.agents/skills/LOCAL-PATCHES.md` を持つ。commit 済み patch は上記 clean ガードでは保護できないため、checker が存在する場合は同期の前後（Step 4 の pre-check・Step 5.5 の apply + 最終検証）での成功が必須（非 0 は fail-closed で同期・stage しない）。台帳があるのに checker が無い状態も検証不能として fail-closed で停止する
+- **消費側リポジトリが commit 済み local patch を持つ場合**: vendored skill（`.agents/skills/` 配下）へ commit 済みの local patch を適用しているリポジトリは、その検証・再適用の入口として repository-owned checker `scripts/check-skill-local-patches.sh`（無引数 = check / `apply` の 2 モード）と台帳 `.agents/skills/LOCAL-PATCHES.md` を持つ。commit 済み patch は上記 clean ガードでは保護できないため、checker が存在する場合は同期の前後（Step 4 の pre-check・Step 5.5 の apply + 最終検証）での成功が必須（非 0 は fail-closed で同期・stage しない）。台帳があるのに checker が無い状態も検証不能として fail-closed で停止する。checker（apply）の書き込み先は当該スキルディレクトリ・`skills-lock.json`・durable patch 置き場 `scripts/local-patches/` に限る契約とし、範囲外の変更は Step 5.5 の機械検証で fail-closed に検出する
 
 ## フロー
 
@@ -229,16 +229,46 @@ fi
 
 #### Step 5.5: local patch を再適用して最終検証する（checker を持つリポジトリのみ）
 
-`npx skills add` の上書きで消費側リポジトリの local patch が worktree から消えているため、**stage より前に**再適用と最終検証を行う。両方が成功した場合のみ Step 6 以降へ進める。
+`npx skills add` の上書きで消費側リポジトリの local patch が worktree から消えているため、**stage より前に**再適用と最終検証を行う。checker（apply）は当該スキルディレクトリのほか durable patch（`scripts/local-patches/`）も変更・stage し得るため、(1) 却下・失敗時の厳密復元用に apply 前の index を snapshot し、(2) apply 後は変更集合が契約範囲（`skills-lock.json`・当該スキル・`scripts/local-patches/`）に収まることを機械検証する。すべて成功した場合のみ Step 6 以降へ進める。
 
 ```bash
 if [[ -f scripts/check-skill-local-patches.sh ]]; then
-  # local patch の再適用(--3way fallback や index 復元により、patch 対象 file や durable patch が
-  # stage されることがある。skills-lock.json と他 skill の stage 済み index は変更されない)
-  bash scripts/check-skill-local-patches.sh apply
+  # 却下・失敗時の厳密復元用に、apply 前の index(= 承認済み積上げ)を tree として保存する。
+  # 却下手順(Step 6 の checker 版)は git read-tree でこの snapshot へ index を丸ごと戻すため、
+  # apply が stage した変更だけが正確に取り除かれ、承認済みの他スキル分は保持される
+  # (Step 4 の pre-check が unmerged index を fail-closed で弾くため write-tree は成立する)
+  PRE_APPLY_TREE="$(git write-tree)"
 
-  # 再適用後の最終検証(worktree / index / durable patch)
-  bash scripts/check-skill-local-patches.sh
+  # 契約範囲外の path の dirty 集合(staged / unstaged / 未追跡)。apply 前後で比較し、
+  # 新たな範囲外変更を fail-closed で検出する。rename(R)の旧 path 行は status prefix を
+  # 持たず sed を素通りするが、前後の等価比較には影響しない(差が出れば fail 側に倒れる)
+  outside_paths() {
+    git status --porcelain -z | tr '\0' '\n' | sed -e 's/^.. //' \
+      | grep -v -e '^skills-lock\.json$' -e "^\.agents/skills/${SKILL_NAME}/" -e '^scripts/local-patches/' \
+      | sort -u || true
+  }
+  PRE_OUTSIDE="$(outside_paths)"
+
+  # local patch の再適用(--3way fallback や index 復元により、patch 対象 file や durable patch が
+  # stage されることがある)。非 0 は fail-closed で停止する
+  if ! bash scripts/check-skill-local-patches.sh apply; then
+    echo "エラー: local patch の再適用に失敗しました。Step 6 の却下手順(checker 版)で同期前へ戻してください(fail-closed)。"
+    exit 1
+  fi
+
+  # 再適用後の最終検証(worktree / index / durable patch)。非 0 は fail-closed で停止する
+  if ! bash scripts/check-skill-local-patches.sh; then
+    echo "エラー: 再適用後の最終検証に失敗しました。Step 6 の却下手順(checker 版)で同期前へ戻してください(fail-closed)。"
+    exit 1
+  fi
+
+  # 変更集合が契約範囲に収まることを検証する。範囲外の変更が新たに生じていれば、内容を
+  # 提示しないまま後続 commit に混入し得るため fail-closed で停止する(実行前から存在した
+  # 無関係な dirty は前後比較で相殺されるため、誤検知しない)
+  if [[ "$(outside_paths)" != "${PRE_OUTSIDE}" ]]; then
+    echo "エラー: checker が契約範囲外の path を変更しました。Step 6 の却下手順(checker 版)で戻し、checker 側を修正してください(fail-closed)。"
+    exit 1
+  fi
 fi
 ```
 
@@ -251,10 +281,12 @@ fi
 （`git add`）は同じ集合（追跡ファイルの変更 + 非 ignore の未追跡ファイル）を対象とする。
 `.gitignore` 対象はいずれの経路でも扱わない。
 
-**checker を持つリポジトリの場合、承認の対象は Step 5.5 完了後の最終 diff**（upstream 更新 + local patch 再適用を含む commit 候補）であり、次で確認する:
+**checker を持つリポジトリの場合、承認の対象は Step 5.5 完了後の最終 diff**（upstream 更新 + local patch 再適用を含む commit 候補。durable patch `scripts/local-patches/` を含む）であり、次で確認する。`git diff HEAD` は未追跡ファイルを表示しないため、未追跡分は Step 5 と同じ手順（`git ls-files -z --others --exclude-standard` で列挙し、`git diff --no-index` / バイナリ判定で内容表示）を契約範囲の path に対して再実行し、tracked 差分と合わせて提示する:
 
 ```bash
-git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
+# 未追跡分の列挙(内容表示は Step 5 のプレビュー手順を同じ path 集合で再実行する)
+git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ | tr '\0' '\n'
 ```
 
 **却下された場合**は当該スキルのみ即座にリバートして**次スキルへ continue**する（全体を中止しない）:
@@ -279,21 +311,36 @@ Step 4 の clean ガードにより `npx` 実行前の当該ディレクトリ�
 
 このリバートは「次スキルの `npx skills add` 実行前」に行うため、`skills-lock.json` から戻るのは当該スキル分のみである。`git checkout --` は HEAD ではなく index から復元するため、承認済みの他スキルの hash は index にも作業ツリーにも保持されており、影響を受けない。
 
-**checker を持つリポジトリの却下は次を使う**（Step 5.5 の apply が当該スキルの file を index へ stage している可能性があるため、`git checkout --`（index → worktree）では戻らない。当該スキルディレクトリは index・worktree とも HEAD へ戻し、`skills-lock.json` は従来どおり index（= 承認済み積上げ）から worktree へ戻す）:
+**checker を持つリポジトリの却下は次を使う**（Step 5.5 の apply が当該スキルや durable patch の file を index へ stage している可能性があるため、`git checkout --`（index → worktree）だけでは戻らない。Step 5.5 で保存した `PRE_APPLY_TREE` へ index を丸ごと復元してから、worktree を index から戻す）:
 
 ```bash
-git restore --source=HEAD --staged --worktree -- ".agents/skills/${SKILL_NAME}/"
+# index を apply 前(= 承認済み積上げ)へ丸ごと復元する。apply が stage した変更だけが
+# 取り除かれ、承認済みの他スキル分・durable patch の既存 stage はそのまま保持される
+git read-tree "${PRE_APPLY_TREE}"
+
+# worktree を復元済みの index から戻す。初回具現化などで追跡対象が無い path は
+# pathspec エラーになるため path ごとに分離し、その失敗のみ無視する(戻す対象自体が無い)
 git checkout -- skills-lock.json
-git clean -fd ".agents/skills/${SKILL_NAME}/"
+git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+git checkout -- scripts/local-patches/ 2>/dev/null || true
+
+# npx・apply が新規作成した未追跡ファイルを削除する
+git clean -fd ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
 ```
 
-対象は kebab-case 検証済みの当該スキルディレクトリ配下と `skills-lock.json` のみで、承認済みの他スキルの stage・durable patch(`scripts/local-patches/` 等)には影響しない。
+対象は kebab-case 検証済みの当該スキルディレクトリ配下・`skills-lock.json`・durable patch（`scripts/local-patches/`）のみで、承認済みの他スキルの stage には影響しない（index snapshot が承認済み積上げそのものを保持しているため）。
 
 #### Step 7: 承認されたスキルを stage する（ループ内で積み上げる）
 
 ```bash
 # 当該スキルのファイルのみをステージング（tracked 変更 + Step 5 で提示した未追跡ファイル）
 git add skills-lock.json ".agents/skills/${SKILL_NAME}/"
+
+# checker を持つリポジトリは、承認対象(Step 6 の最終 diff)に含めた durable patch の
+# 変更も同じ承認単位で stage する
+if [[ -f scripts/check-skill-local-patches.sh && -d scripts/local-patches/ ]]; then
+  git add scripts/local-patches/
+fi
 ```
 
 `skills-lock.json` は単一 JSON ファイルのため行単位での部分ステージは現実的でない。しかし Step 1 の事前ガードで実行開始時の clean 状態を保証しているため、ファイル全体をステージしても sync 由来の変更のみが含まれ、無関係な編集が混入することはない。このコマンドをループ内で実行することで、複数スキルの全スキル sync でも処理した全スキルが過不足なく stage に積み上がる。**checker を持つリポジトリでは Step 5.5(apply + final check)の成功が stage の前提**であり、`computedHash` は npx が書いた upstream 版の値のまま変更しない(local patch で hash を更新しない)。
@@ -341,7 +388,7 @@ EOF
 - **新スキルの取扱い**: ローカルに存在するが upstream に未登録のスキル（`contribute-skill`, `sync-skills-lock` 自身など）は、upstream マージ後に登録する。マージ前に `computedHash` を勝手に書き込まない
 - **Step 5 のプレビューは index を変更しない**: 未追跡ファイルの表示に `git add -N`（intent-to-add）ではなく `git diff --no-index` を使う。Step 6 の拒否経路が index からの `git checkout --` で承認済み他スキルの hash を復元する設計に依存しており、i-t-a エントリの混入はその復元設計と干渉するため
 - **skills CLI は固定版で実行する**: `npx skills add` はバージョン未固定で実行しない。固定版の決め方・更新手順は「skills CLI のバージョン固定と更新手順」節を参照
-- **local patch の保護（checker を持つリポジトリでは必須）**: npx 前の checker（Step 4）→ 承認前の再適用 + 最終検証（Step 5.5）→ 成功時のみ stage（Step 7）の順を省略しない。checker 非 0・台帳（`.agents/skills/LOCAL-PATCHES.md`）のみ存在は fail-closed で停止し、local patch が欠けた状態を stage・commit しない。`computedHash` は upstream 版の値を維持する
+- **local patch の保護（checker を持つリポジトリでは必須）**: npx 前の checker（Step 4）→ 承認前の再適用 + 最終検証 + 契約範囲検証（Step 5.5）→ 成功時のみ stage（Step 7）の順を省略しない。checker 非 0・台帳（`.agents/skills/LOCAL-PATCHES.md`）のみ存在は fail-closed で停止し、local patch が欠けた状態を stage・commit しない。apply が変更し得る durable patch（`scripts/local-patches/`）は承認（Step 6 の最終 diff + 未追跡列挙）・stage（Step 7）・却下（`PRE_APPLY_TREE` からの index 復元）のすべてで同じ集合として扱う。`computedHash` は upstream 版の値を維持する
 
 ## sandbox 環境での実行
 

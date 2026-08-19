@@ -220,34 +220,74 @@ if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
 fi
 
 if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
+  # 却下・失敗時の厳密復元用に、apply 前の index(= 承認済み積上げ)を tree として保存する。
+  # git read-tree でこの snapshot へ index を丸ごと戻すと、apply が stage した変更だけが
+  # 正確に取り除かれ、承認済みの他スキル分・durable patch の既存 stage は保持される
+  # (同期前 check が unmerged index を fail-closed で弾いているため write-tree は成立する)
+  PRE_APPLY_TREE="$(git write-tree)"
+
+  # 契約範囲(skills-lock.json / 当該スキル / durable patch)外の dirty path 集合
+  # (staged / unstaged / 未追跡)。apply 前後で比較し、新たな範囲外変更を fail-closed で
+  # 検出する。rename(R)の旧 path 行は status prefix を持たず sed を素通りするが、
+  # 前後の等価比較には影響しない(差が出れば fail 側に倒れる)
+  outside_paths() {
+    git status --porcelain -z | tr '\0' '\n' | sed -e 's/^.. //' \
+      | grep -v -e '^skills-lock\.json$' -e "^\.agents/skills/${SKILL_NAME}/" -e '^scripts/local-patches/' \
+      | sort -u || true
+  }
+  PRE_OUTSIDE="$(outside_paths)"
+
+  # 却下・失敗時の復元手順(stdout へ出す。エラー経路では >&2 で呼ぶ)。
+  # PRE_APPLY_TREE は本 process 終了後に環境から消えるため、値そのものを展開して案内する
+  restore_help() {
+    echo "同期前へ戻すには(index を apply 前 snapshot へ復元し、worktree を index から戻す):"
+    echo "  git read-tree ${PRE_APPLY_TREE}"
+    echo "  git checkout -- skills-lock.json"
+    echo "  git checkout -- \".agents/skills/${SKILL_NAME}/\" 2>/dev/null || true"
+    echo "  git checkout -- scripts/local-patches/ 2>/dev/null || true"
+    echo "  git clean -fd \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/"
+  }
+
   echo ""
-  echo "==> local patch を再適用(--3way fallback や index 復元により対象 file が stage されることがある)"
+  echo "==> local patch を再適用(--3way fallback や index 復元により対象 file・durable patch が stage されることがある)"
   if ! bash scripts/check-skill-local-patches.sh apply; then
     echo "エラー: local patch の再適用に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
-    echo "同期前へ戻すには:" >&2
-    echo "  git restore --source=HEAD --staged --worktree -- \".agents/skills/${SKILL_NAME}/\"" >&2
-    echo "  git checkout -- skills-lock.json" >&2
-    echo "  git clean -fd \".agents/skills/${SKILL_NAME}/\"" >&2
+    restore_help >&2
     exit 1
   fi
   echo ""
   echo "==> 再適用後の最終検証"
   if ! bash scripts/check-skill-local-patches.sh; then
-    echo "エラー: 再適用後の最終検証に失敗しました。stage・commit へ進まないでください(fail-closed。復旧 command は上記と同じ)。" >&2
+    echo "エラー: 再適用後の最終検証に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
+    restore_help >&2
     exit 1
   fi
+
+  # 変更集合が契約範囲に収まることを検証する。範囲外の変更が新たに生じていれば、内容を
+  # 提示しないまま後続 commit に混入し得るため fail-closed で停止する(実行前から存在した
+  # 無関係な dirty は前後比較で相殺されるため、誤検知しない)
+  if [[ "$(outside_paths)" != "${PRE_OUTSIDE}" ]]; then
+    echo "エラー: checker が契約範囲外の path を変更しました。内容未提示のまま commit に混入し得るため停止します(fail-closed)。" >&2
+    restore_help >&2
+    exit 1
+  fi
+
   echo ""
-  echo "==> 更新完了。commit 候補の最終差分(upstream 更新 + local patch 再適用):"
-  git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+  echo "==> 更新完了。commit 候補の最終差分(upstream 更新 + local patch 再適用。durable patch を含む):"
+  git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
   echo ""
-  echo "却下する場合(当該スキルを同期前へ戻す。他スキルの stage 済み変更には影響しない):"
-  echo "  git restore --source=HEAD --staged --worktree -- \".agents/skills/${SKILL_NAME}/\""
-  echo "  git checkout -- skills-lock.json"
-  echo "  git clean -fd \".agents/skills/${SKILL_NAME}/\""
+  echo "==> 契約範囲内の未追跡ファイル(git diff HEAD には表示されない。承認前に上記の未追跡プレビューと同じ手順で内容を確認する):"
+  git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ | tr '\0' '\n'
+  echo ""
+  echo "却下する場合(当該スキルと durable patch を同期前へ戻す。他スキルの stage 済み変更には影響しない):"
+  restore_help
 fi
 
 echo ""
 echo "コミットするには:"
 echo "  git add skills-lock.json"
 echo "  git add .agents/skills/${SKILL_NAME}/  # 上記の未追跡ファイルもここで取り込まれる"
+if [[ "${LOCAL_PATCH_GUARD}" == true && -d scripts/local-patches/ ]]; then
+  echo "  git add scripts/local-patches/  # 承認対象に含めた durable patch の変更も同じ承認単位で stage する"
+fi
 echo "  git commit -m 'chore(skills-lock): ${SKILL_NAME} の computedHash を upstream と同期'"
