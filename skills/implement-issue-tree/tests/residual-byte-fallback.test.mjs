@@ -133,15 +133,29 @@ test('シェルメタ文字・相対パス・".." 混入パスは sanitizeWorktr
   assert.equal(buildPhysicalByteMeasureTargets(dotDotCase, 2).ok, false)
 })
 
-test('重複パスは重複除去される', () => {
+test('メイン以外に重複パスがあれば ok:false（件数一致だけでは他パスの取りこぼしを検出できないため）', () => {
+  // independentCount === entries.length（3 === 3）は「行数」が一致することしか保証しない。
+  // 物理レコードが本来 main/A/B の 3 件でも、転記時に B を誤って A の重複で埋めれば
+  // この件数一致は崩れないため、重複を検出したら測定失敗として扱い、A だけを du した
+  // 過小値で byteBaselineLedgerCount を更新して B を projection から落とす fail-open を防ぐ。
   const entries = [
     { path: '/repo', branch: 'main', isMain: true },
     { path: '/tmp/wt-a', branch: 'feat/1-a', isMain: false },
-    { path: '/tmp/wt-a', branch: 'feat/1-a', isMain: false }, // 同一 worktree の重複記録を模す
+    { path: '/tmp/wt-a', branch: 'feat/1-a', isMain: false }, // 本来は別 worktree（例: B）のはずが重複記載
+  ]
+  const result = buildPhysicalByteMeasureTargets(entries, 3)
+  assert.equal(result.ok, false)
+})
+
+test('メイン以外に重複が無ければ通常どおり測定を継続する（ok:true）', () => {
+  const entries = [
+    { path: '/repo', branch: 'main', isMain: true },
+    { path: '/tmp/wt-a', branch: 'feat/1-a', isMain: false },
+    { path: '/tmp/wt-b', branch: 'feat/1-b', isMain: false },
   ]
   const result = buildPhysicalByteMeasureTargets(entries, 3)
   assert.equal(result.ok, true)
-  assert.deepEqual(result.paths, ['/tmp/wt-a'])
+  assert.deepEqual(result.paths, ['/tmp/wt-a', '/tmp/wt-b'])
 })
 
 // --- 駆動部の配線固定（dead code 化防止）---

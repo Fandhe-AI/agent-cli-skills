@@ -2896,7 +2896,15 @@ function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reserve
 //     許すため（countResidualWorktrees と同じ理由）
 //   - 残り全レコードの path を sanitizeWorktreePath で検証し、1 件でも失格なら
 //     { ok: false }（部分測定で済ませず全体を測定失敗として扱う。fail-closed）
-//   - 全件検証通過なら重複除去した絶対パス配列を { ok: true, paths } で返す
+//   - 重複除去前後で件数が変わる（= メイン以外に同一パスの重複記載がある）場合も
+//     { ok: false } とする。independentCount === entries.length は「転記された行数」が
+//     一致することしか保証せず、転記時に別の実在パス（例: B）を誤って別パス（例: A）の
+//     重複で埋めた場合でも件数一致は崩れない。素朴に Set で重複除去すると、その実在するが
+//     取りこぼされた worktree（B）を測定せず、重複計上されたパス（A）だけを du した過小値で
+//     byteBaselineLedgerCount を更新してしまい、以後の projection から B が恒久的に外れる
+//     fail-open になる（codex-review P1・Issue #404 追加指摘）。重複が実在すれば安全側
+//     （測定失敗 → 新規着手停止）に倒し、重複が無ければ通常どおり測定を継続する。
+//   - 重複が無ければ絶対パス配列を { ok: true, paths } で返す
 function buildPhysicalByteMeasureTargets(entries, independentCount) {
   const list = Array.isArray(entries) ? entries : []
   if (list.length === 0) {
@@ -2920,7 +2928,17 @@ function buildPhysicalByteMeasureTargets(entries, independentCount) {
     }
     paths.push(p)
   }
-  return { ok: true, paths: [...new Set(paths)] }
+  const uniquePaths = [...new Set(paths)]
+  if (uniquePaths.length !== paths.length) {
+    return {
+      ok: false,
+      detail:
+        `メイン以外のレコードに重複パスがある（${paths.length} 件中ユニーク ${uniquePaths.length} 件）。` +
+        `件数一致（independentCount === entries.length）だけでは転記時の別パス取りこぼしを検出できないため、` +
+        `重複除去せず測定失敗として扱う`,
+    }
+  }
+  return { ok: true, paths: uniquePaths }
 }
 
 // ============================================================================
