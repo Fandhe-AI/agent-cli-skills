@@ -171,7 +171,14 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   # 依存しない = dirty なバイナリの上書きも検出する。範囲内は HEAD のまま固定されるため
   # 同期による正当な変更では digest が動かない)。index 側は ls-files -s の blob hash で捉える。
   # 基準(PRE_OUTSIDE)は checker の初回実行(同期前 check)より前に取得する。check の後に
-  # 取得すると、check mode が行った範囲外変更が基準へ取り込まれ検出できなくなる
+  # 取得すると、check mode が行った範囲外変更が基準へ取り込まれ検出できなくなる。
+  #
+  # 【検出範囲の限界(重要)】この digest は Git が追跡・列挙できる対象(非 ignore の
+  # worktree / index)に限られる。.gitignore 対象・.git/ 配下(config・hooks 等)・
+  # リポジトリ外への書き込みは検出できない。同一権限で任意コードを実行した後の
+  # tree 比較は書き込み制限の「保証」にはならず、信頼アンカーはあくまで実行前の
+  # ユーザーによる checker 内容レビュー + blob hash 承認である。本検証はその上に
+  # 重ねる best-effort の追加防御(defense-in-depth)として扱うこと
   OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
   outside_state() {
     local tmp_index_dir wt_tree idx_digest
@@ -231,8 +238,11 @@ fi
 # 同期開始前へ復元してから停止する（部分書き込み・checker 由来の stage の残留防止）
 npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes || {
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
+    # snapshot 未設定のまま read-tree すると「現 index からの誤復元」になるため空値は弾く。
+    # skills-lock.json は必須の追跡ファイルであり、checkout 失敗は実復元漏れなので握り潰さない
+    : "${PRE_SYNC_TREE:?同期開始前 snapshot が未設定のため復元できません}"
     git read-tree "${PRE_SYNC_TREE}"
-    git checkout -- skills-lock.json 2>/dev/null || true
+    git checkout -- skills-lock.json
     git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
     git checkout -- scripts/local-patches/ 2>/dev/null || true
     git clean -fd ".agents/skills/${SKILL_NAME}/" scripts/local-patches/

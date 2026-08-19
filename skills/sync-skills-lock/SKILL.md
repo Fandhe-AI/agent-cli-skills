@@ -25,7 +25,7 @@ model: sonnet
 - ルート直下の `skills-lock.json` が存在すること
 - **実行前に `skills-lock.json` に未コミットの変更がないこと**（ステージ済み・未ステージ問わず）。本スキルの実行中に発生する変更は sync 由来のみとなり、`git add skills-lock.json` で全体をステージしても無関係な変更が混入しない
 - **対象スキルの `.agents/skills/<name>/` に未コミット変更がないこと**。`npx skills add` は `.agents/skills/<name>/` を upstream の最新版で上書きするため、そのディレクトリに WIP が存在すると即座に失われる。`git checkout` で戻せるのは「最後にコミットされた状態」のみであり、npx 実行前の未コミット編集は復元できない。**未追跡ファイルとして存在する WIP も対象**であり、`git status --porcelain` で検出する
-- **消費側リポジトリが commit 済み local patch を持つ場合**: vendored skill（`.agents/skills/` 配下）へ commit 済みの local patch を適用しているリポジトリは、その検証・再適用の入口として repository-owned checker `scripts/check-skill-local-patches.sh`（無引数 = check / `apply` の 2 モード）と台帳 `.agents/skills/LOCAL-PATCHES.md` を持つ。commit 済み patch は上記 clean ガードでは保護できないため、checker が存在する場合は同期の前後（Step 4 の pre-check・Step 5.5 の apply + 最終検証）での成功が必須（非 0 は fail-closed で同期・stage しない）。台帳があるのに checker が無い状態も検証不能として fail-closed で停止する。checker（apply）の書き込み先は当該スキルディレクトリ・`skills-lock.json`・durable patch 置き場 `scripts/local-patches/` に限る契約とし、範囲外の変更は Step 5.5 の機械検証で fail-closed に検出する。checker は消費側が配置する実行可能コードのため「存在するだけ」では実行せず、HEAD に commit 済みで worktree と一致し、かつユーザーへ由来・内容を提示して blob hash 単位の明示承認を得た場合のみ実行する（Step 4 で機械検証）
+- **消費側リポジトリが commit 済み local patch を持つ場合**: vendored skill（`.agents/skills/` 配下）へ commit 済みの local patch を適用しているリポジトリは、その検証・再適用の入口として repository-owned checker `scripts/check-skill-local-patches.sh`（無引数 = check / `apply` の 2 モード）と台帳 `.agents/skills/LOCAL-PATCHES.md` を持つ。commit 済み patch は上記 clean ガードでは保護できないため、checker が存在する場合は同期の前後（Step 4 の pre-check・Step 5.5 の apply + 最終検証）での成功が必須（非 0 は fail-closed で同期・stage しない）。台帳があるのに checker が無い状態も検証不能として fail-closed で停止する。checker（apply）の書き込み先は当該スキルディレクトリ・`skills-lock.json`・durable patch 置き場 `scripts/local-patches/` に限る契約とし、範囲外の変更は各実行直後の digest 比較で fail-closed に検出する（検出範囲は Git が追跡・列挙する対象に限る best-effort であり、書き込み制限の保証ではない。保証はユーザーによる checker 内容レビュー + blob hash 承認が担う。詳細は Step 4 の「検出範囲の限界」コメント）。checker は消費側が配置する実行可能コードのため「存在するだけ」では実行せず、HEAD に commit 済みで worktree と一致し、かつユーザーへ由来・内容を提示して blob hash 単位の明示承認を得た場合のみ実行する（Step 4 で機械検証）
 
 ## フロー
 
@@ -139,7 +139,14 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # = dirty なバイナリの上書きも検出する。範囲内は HEAD のまま固定されるため同期による
   # 正当な変更では digest が動かない)。index 側は ls-files -s の blob hash で捉える。
   # 基準(PRE_OUTSIDE)は checker の初回実行(同期前 check)より前に取得する。check の後に
-  # 取得すると、check mode が行った範囲外変更が基準へ取り込まれ検出できなくなる
+  # 取得すると、check mode が行った範囲外変更が基準へ取り込まれ検出できなくなる。
+  #
+  # 【検出範囲の限界(重要)】この digest は Git が追跡・列挙できる対象(非 ignore の
+  # worktree / index)に限られる。.gitignore 対象・.git/ 配下(config・hooks 等)・
+  # リポジトリ外への書き込みは検出できない。同一権限で任意コードを実行した後の
+  # tree 比較は書き込み制限の「保証」にはならず、信頼アンカーはあくまで実行前の
+  # ユーザーによる checker 内容レビュー + blob hash 承認である。本検証はその上に
+  # 重ねる best-effort の追加防御(defense-in-depth)として扱うこと
   OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
   outside_state() {
     local tmp_index_dir wt_tree idx_digest
@@ -220,9 +227,12 @@ npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}"
     # checker を持つリポジトリでは、同期前 check(check mode)が契約範囲(durable patch 含む)を
     # 変更・stage している可能性がある。Step 4 冒頭で取得した PRE_SYNC_TREE で index を
     # 丸ごと同期開始前へ戻してから(前スキルの承認済み積上げは snapshot に含まれるため保持)、
-    # 契約範囲の worktree を復元する
+    # 契約範囲の worktree を復元する。snapshot 未設定のまま read-tree すると「現 index からの
+    # 誤復元」になるため空値は弾く。skills-lock.json は必須の追跡ファイルであり、
+    # checkout 失敗は実復元漏れなので握り潰さない
+    : "${PRE_SYNC_TREE:?Step 4 で表示された同期開始前 snapshot を設定してから実行する}"
     git read-tree "${PRE_SYNC_TREE}"
-    git checkout -- skills-lock.json 2>/dev/null || true
+    git checkout -- skills-lock.json
     git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
     git checkout -- scripts/local-patches/ 2>/dev/null || true
     git clean -fd ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
