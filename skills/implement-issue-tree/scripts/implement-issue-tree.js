@@ -3122,7 +3122,11 @@ await initAllPending(queue.filter((q) => q.state === 'open'))
 let residualObserved = false // 観測が成立したか（scan 失敗時は false のまま新規着手を抑止＝fail-closed。レポートで「未観測」を明示）
 let residualObservedAtStart = 0 // メイン worktree のみ除外した物理総数（使用中含む。第 5 ラウンド対応）
 let residualPathsAtStart = [] // 停止時レポート用の残置パス一覧
-let newStartSuppressed = null // 上限超過による新規着手抑止の理由（null なら抑止しない。monitoring 再開は抑止しない）
+let newStartSuppressed = null // 上限超過による新規着手抑止の理由（null なら抑止しない）。monitoring 再開の
+// 抑止はこの latch とは独立に判定する — dispatch ループ側（5085 行付近・5122 行付近）が
+// residualObserved / residualBytesObserved の観測フラグと projection で implement の monitoring
+// 再開のみ判定する。観測失敗時は implement の monitoring 再開も fail-closed で defer し、
+// 観測成立・上限超過見込み時は projection 判定で defer され得る（恒久停止ではなく周回ごと再評価）。
 // --- バイト軸（第2軸）のラン中再評価用状態（Issue #348 codex-review 指摘対応。PR #390）。
 // ラン開始時の 1 回測定だけでは、開始時点で残置 0 件のときに新規着手 100 件分の容量増加を
 // 一切計上できず、件数軸と独立に容量上限を大幅超過し得る。件数軸（newStartActive の予約計上・
@@ -3205,7 +3209,9 @@ let lastByteRemeasureOutcome = { failed: false, exceeded: false }
   // ディスク枯渇（DoS）を防ぐ。メイン worktree のみ除外した物理総数を観測する（使用中も数える）。
   // 観測成立の判定は 2 段構え: ① 空チェック（length 0 は観測不成立）、② 完全性照合
   // （LLM 転記の脱落検出のため countWorktreeRecords と件数照合。いずれかの軸が有効なとき）。
-  // 観測不成立はいずれかの軸が有効なら新規着手を抑止する（fail-closed。monitoring 再開は対象外）。
+  // 観測不成立はいずれかの軸が有効なら新規着手を抑止する（fail-closed）。implement の monitoring
+  // 再開も dispatch 側で fail-closed に defer する（5085 行付近・5122 行付近の観測フラグゲート参照。
+  // verify-close の monitoring 再開は対象外 — kind は implement に限定）。
   // 件数軸（maxResidualWorktrees）とバイト軸（maxResidualWorktreeBytes、Issue #348 案 B）は
   // 独立に検証・無効化できる第2軸で、判定は OR（どちらか一方でも超過すれば着手を止める＝
   // 安全側）。件数だけでは配布先リポジトリのファイル量に依存する実バイト消費を捉えられない
@@ -3228,7 +3234,7 @@ let lastByteRemeasureOutcome = { failed: false, exceeded: false }
           `残置総数を確認できないため、ディスク枯渇防止の上限ゲート` +
           `（件数上限 ${maxResidualWorktrees > 0 ? `${maxResidualWorktrees} 件` : 'なし'}・` +
           `容量上限 ${maxResidualWorktreeBytes > 0 ? `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB` : 'なし'}）を` +
-          `適用できず、新規イシューの着手を停止した（fail-closed。monitoring 再開は継続する）。` +
+          `適用できず、新規イシューの着手を停止し、implement の monitoring 再開も defer した（fail-closed）。` +
           `git worktree list が実行できる状態を確認してから再実行すること`,
         paths: [],
       }
@@ -3303,7 +3309,8 @@ let lastByteRemeasureOutcome = { failed: false, exceeded: false }
               `ラン開始時の worktree 残置ディスク使用量観測に失敗した（${detail}）。` +
               `容量を確認できないため、ディスク枯渇防止の容量上限ゲート` +
               `（上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB）を適用できず、` +
-              `新規イシューの着手を停止した（fail-closed）。du が実行できる状態を確認してから再実行すること`,
+              `新規イシューの着手を停止し、implement の monitoring 再開も defer した（fail-closed）。` +
+              `du が実行できる状態を確認してから再実行すること`,
             paths: residual.paths,
           }
           log(`⚠️ ${newStartSuppressed.reason}`)
