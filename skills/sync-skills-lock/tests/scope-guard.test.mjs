@@ -130,6 +130,29 @@
 //   - 'ignored-delete-success'    : PR #412 レビュー指摘（第12巡・P0-2）の回帰。npx が
 //                                   既存 ignored ファイルを削除して正常終了する。削除も
 //                                   「変化」としてバックアップから書き戻されることを検証する
+//   - 'config-lock-residue'       : PR #412 codex P1 指摘の回帰。npx が永続 lock
+//                                   （.git/config.lock）を残して正常終了する。
+//                                   `.git/*.lock` のワイルドカード prune では署名から
+//                                   漏れていたケースで、prune を .git/index.lock の
+//                                   完全一致へ限定したことで検出できることを検証する
+//   - 'skip-worktree-flip'        : PR #412 codex P1 指摘の回帰。npx がスコープ外の
+//                                   tracked ファイルへ `git update-index --skip-worktree`
+//                                   を付ける（.git/index のみが変わり、ツリー署名・
+//                                   porcelain のどちらにも現れない。index の論理状態
+//                                   比較（index_state_signature）でのみ検出できる）
+//   - 'midrun-nested-symlink'     : PR #412 Bugbot High 指摘の回帰。事前走査（0 件）を
+//                                   通過した後、npx が実行中に許可先配下へリポジトリ外
+//                                   向き symlink を作成してリンク先へ書き込む（TOCTOU。
+//                                   実行後の find -type l 再走査が検出し、許可先配下への
+//                                   削除系操作をスキップして停止することを検証する）
+//   - 'restore-parent-symlink-swap': PR #412 Bugbot Medium 指摘の回帰。既存 ignored
+//                                   ファイルの中間ディレクトリを npx がリポジトリ外向き
+//                                   symlink へ置換する。復元の makedirs がリンク先
+//                                   （リポジトリ外）へディレクトリを作らないことを検証する
+//   - 'restore-parent-dir-deleted': 非退行。npx が既存 ignored ファイルを中間ディレクトリ
+//                                   ごと削除する。復元が中間ディレクトリを 1 階層ずつ
+//                                   検証しながら再作成して書き戻すことを検証する
+//                                   （make_parent_dirs の正常系）
 //   - 'first-install'             : 非退行。実行前に .agents ツリー自体が存在しない
 //                                   初回インストールで、npx が .agents/skills/<name>
 //                                   を新規作成しても誤検知せず完走することを検証する
@@ -309,6 +332,41 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "ignored-delete-success" ]]; then
   rm ".agents/skills/${SKILL_NAME}/.DS_Store"
 fi
 
+if [[ "\${TEST_NPX_SCENARIO:-}" == "config-lock-residue" ]]; then
+  # 永続 lock の残置を再現する（.git/*.lock のワイルドカード prune では署名から
+  # 漏れていたケース。index.lock のみの完全一致 prune で検出できることを検証）。
+  : > ".git/config.lock"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "skip-worktree-flip" ]]; then
+  # スコープ外の tracked ファイルへ skip-worktree ビットを立てる。.git/index のみが
+  # 変わるため、index の論理状態比較（index_state_signature）でのみ検出できる。
+  git update-index --skip-worktree "${OUT_OF_SCOPE_FILE}"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "midrun-nested-symlink" ]]; then
+  # 事前走査（0 件）通過後、実行中に許可先配下へ外向き symlink を作成して
+  # リンク先へ書き込む（TOCTOU の再現。実行後再走査だけが検出できる）。
+  mkdir -p "${externalTargetDir}"
+  ln -s "${externalTargetDir}" "\${skill_dir}/evil-link"
+  echo "leaked via nested link" > "\${skill_dir}/evil-link/leaked.md"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "restore-parent-symlink-swap" ]]; then
+  # 既存 ignored ファイル（meta/sub/.DS_Store）の中間ディレクトリごと削除し、
+  # meta をリポジトリ外向き symlink へ置換する。復元の makedirs がリンクを辿ると
+  # リンク先（リポジトリ外）に sub/ が作られてしまうケースの再現。
+  rm -rf "\${skill_dir}/meta"
+  mkdir -p "${externalTargetDir}"
+  ln -s "${externalTargetDir}" "\${skill_dir}/meta"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "restore-parent-dir-deleted" ]]; then
+  # 既存 ignored ファイルを中間ディレクトリごと削除する（symlink なし）。復元が
+  # 中間ディレクトリを再作成して書き戻す正常系の再現。
+  rm -rf "\${skill_dir}/meta"
+fi
+
 if [[ "\${TEST_NPX_SCENARIO:-}" == "agents-dir-chmod" ]]; then
   # 実行前から存在する .agents ディレクトリ自身の chmod のみ（配下・内容は不変）。
   # git はディレクトリの mode を追跡しないため porcelain には現れない。
@@ -425,7 +483,9 @@ exec "${realGit}" "\$@"
   // 'dir-chmod-out-of-scope' 用: スコープ外ディレクトリを clean な追跡状態で用意する
   // （ディレクトリの chmod は porcelain に現れないため、dirty 化は不要。追跡ファイルを
   // 1つ置くことでディレクトリ自体を確実に具現化してからコミットする）。
-  if (scenario === 'dir-chmod-out-of-scope') {
+  // 'skip-worktree-flip' も同じ形（clean な追跡ファイル）を使う: skip-worktree ビットは
+  // porcelain・ツリー署名のどちらにも現れず、index の論理状態比較だけが検出できる。
+  if (scenario === 'dir-chmod-out-of-scope' || scenario === 'skip-worktree-flip') {
     const outOfScopePath = join(repoDir, ...OUT_OF_SCOPE_FILE.split('/'))
     mkdirSync(dirname(outOfScopePath), { recursive: true })
     writeFileSync(outOfScopePath, 'baseline content\n')
@@ -460,6 +520,22 @@ exec "${realGit}" "\$@"
     writeFileSync(
       join(repoDir, '.agents', 'skills', SKILL_NAME, '.DS_Store'),
       'pre-existing finder metadata\n',
+    )
+  }
+
+  // 'restore-parent-symlink-swap' / 'restore-parent-dir-deleted' 用: 既存 ignored
+  // ファイルを中間ディレクトリ（meta/sub/）付きで許可先配下へ置く。npx スタブが
+  // meta を削除（+ 外向き symlink へ置換）した後の復元経路で、makedirs 相当が
+  // リポジトリ外へディレクトリを作らないこと / 正当な再作成が機能することを検証する。
+  if (
+    scenario === 'restore-parent-symlink-swap' ||
+    scenario === 'restore-parent-dir-deleted'
+  ) {
+    writeFileSync(join(repoDir, '.gitignore'), '.DS_Store\n')
+    mkdirSync(join(repoDir, '.agents', 'skills', SKILL_NAME, 'meta', 'sub'), { recursive: true })
+    writeFileSync(
+      join(repoDir, '.agents', 'skills', SKILL_NAME, 'meta', 'sub', '.DS_Store'),
+      'pre-existing nested finder metadata\n',
     )
   }
 
@@ -1413,6 +1489,205 @@ test('ケース25: npx が既存 ignored ファイルを削除した場合もバ
     assert.equal(
       readFileSync(dsStore, 'utf8'),
       'pre-existing finder metadata\n',
+      '書き戻された内容が実行前バックアップと一致すること',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース26: npx が永続 lock（.git/config.lock）を残した場合、シグネチャ比較で検出する' +
+  '（PR #412 codex P1 の回帰。.git/*.lock のワイルドカード prune では検出不能だった）', () => {
+  const ctx = setupRepo('config-lock-residue')
+  const configLock = join(ctx.repoDir, '.git', 'config.lock')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /スコープ外/, 'スコープ外検出のエラーメッセージが出ること')
+        assert.match(
+          combined,
+          /状態シグネチャ/,
+          '.git 配下は porcelain に現れないため、シグネチャ不一致として検出された旨の' +
+            '案内が出ること（永続 lock が署名対象に含まれていることの検証）',
+        )
+        return true
+      },
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+
+    // 残置された lock は自動削除せず、確認できる状態のまま残す
+    assert.ok(existsSync(configLock), '.git/config.lock は削除されず残存すること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース27: npx が tracked ファイルへ skip-worktree ビットを立てた場合、index の' +
+  '論理状態比較で検出する（PR #412 codex P1 の回帰。.git/index の prune の背後に隠れる）', () => {
+  const ctx = setupRepo('skip-worktree-flip')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /スコープ外/,
+          'スコープ外検出のエラーメッセージが出ること' +
+            '（skip-worktree は .git/index のみを変え、ツリー署名・porcelain の' +
+            'どちらにも現れないため、index の論理状態比較だけが検出できる）',
+        )
+        return true
+      },
+    )
+
+    // skip-worktree ビットが実際に立っていること（検出対象が実在した証拠。
+    // スコープ外の状態は自動リバートされないため、ビットは残存する）
+    const tag = sh(`git ls-files -v -- "${OUT_OF_SCOPE_FILE}"`, ctx.repoDir).trim()
+    assert.match(tag, /^S /, 'skip-worktree ビット（タグ S）が立ったまま残存すること')
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース28: npx が実行中に許可先配下へ外向き symlink を作成した場合、実行後の再走査が' +
+  '検出して許可先配下への削除系操作をスキップする（PR #412 Bugbot High の回帰。TOCTOU）', () => {
+  const ctx = setupRepo('midrun-nested-symlink')
+  const nestedLink = join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, 'evil-link')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /実行中に許可先.*配下へシンボリックリンクを作成しました/,
+          '実行後の find -type l 再走査が実行中作成の symlink を検出すること' +
+            '（事前走査は 0 件を保証済みのため、事後に見つかる symlink は npx の作成物）',
+        )
+        assert.match(
+          combined,
+          /evil-link/,
+          '検出された symlink のパスが列挙されること',
+        )
+        assert.match(
+          combined,
+          /ignored 削除・既存 ignored の復元は行いません/,
+          '許可先配下への削除系操作をスキップした旨が案内されること',
+        )
+        assert.match(
+          combined,
+          /バックアップは .* に相対パス構造で残っています/,
+          'バックアップ dir の保全と所在が案内されること',
+        )
+        return true
+      },
+    )
+
+    // リンク先（リポジトリ外）へ書かれたファイルが削除・変更されていないこと
+    assert.equal(
+      readFileSync(join(ctx.externalTargetDir, 'leaked.md'), 'utf8'),
+      'leaked via nested link\n',
+      'symlink のリンク先（リポジトリ外）のファイルが削除・変更されず残ること',
+    )
+
+    // symlink 自体も自動除去されず、確認できる状態のまま残ること
+    assert.equal(
+      readlinkSync(nestedLink),
+      ctx.externalTargetDir,
+      '実行中に作成された symlink が自動除去されず残存すること（対処は人間の判断に委ねる）',
+    )
+
+    // skills-lock.json は checkout でリバートされ clean であること
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース29: 復元先の中間ディレクトリが外向き symlink へ置換された場合、リポジトリ外に' +
+  'ディレクトリが作られない（PR #412 Bugbot Medium の回帰）', () => {
+  const ctx = setupRepo('restore-parent-symlink-swap')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /実行中に許可先.*配下へシンボリックリンクを作成しました/,
+          '中間ディレクトリの symlink 置換が実行後の再走査で検出されること',
+        )
+        return true
+      },
+    )
+
+    // 旧実装では復元の os.makedirs が symlink を辿り、リンク先（リポジトリ外）に
+    // sub/ を作ってしまっていた。保全経路（復元スキップ）+ make_parent_dirs の
+    // 事前検証の双方により、リポジトリ外にはディレクトリもファイルも作られない。
+    assert.equal(
+      existsSync(join(ctx.externalTargetDir, 'sub')),
+      false,
+      'リンク先（リポジトリ外）に中間ディレクトリが作成されないこと',
+    )
+    assert.equal(
+      existsSync(join(ctx.externalTargetDir, 'sub', '.DS_Store')),
+      false,
+      'リンク先（リポジトリ外）に復元ファイルが書き込まれないこと',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース30: npx が既存 ignored ファイルを中間ディレクトリごと削除した場合、復元が' +
+  '中間ディレクトリを再作成して書き戻す（make_parent_dirs の正常系・非退行）', () => {
+  const ctx = setupRepo('restore-parent-dir-deleted')
+  const nestedDsStore = join(
+    ctx.repoDir, '.agents', 'skills', SKILL_NAME, 'meta', 'sub', '.DS_Store',
+  )
+  try {
+    const out = runScript(ctx)
+    assert.match(out, /更新完了/, '復元は警告扱いで、同期自体は完走すること')
+
+    // 削除された中間ディレクトリごと再作成され、内容がバックアップと一致すること
+    // （1 階層ずつの lstat 付き os.mkdir が正当な復元を妨げないことの検証）
+    assert.ok(
+      existsSync(nestedDsStore),
+      '中間ディレクトリごと削除された既存 ignored ファイルが書き戻されること',
+    )
+    assert.equal(
+      readFileSync(nestedDsStore, 'utf8'),
+      'pre-existing nested finder metadata\n',
       '書き戻された内容が実行前バックアップと一致すること',
     )
   } finally {

@@ -174,10 +174,10 @@ for spec in sys.argv[2:]:
 
 def pruned(rel):
     # prune はパス区切りをまたがない per-segment glob で照合する。素の fnmatch は
-    # `*` が `/` もまたいで一致するため、`.git/*.lock` のような浅い階層向けの
-    # パターンが `.git/hooks/x.lock`（署名対象へ残したい深い階層）まで巻き込んで
-    # しまう。セグメント数の一致を要求してから各セグメントを個別に照合し、
-    # 除外が意図した深さの外へ広がらないようにする。
+    # `*` が `/` もまたいで一致するため、`.git/MERGE_*` のような浅い階層向けの
+    # パターンが `.git/hooks/` 配下の同名ファイル（署名対象へ残したい深い階層）
+    # まで巻き込んでしまう。セグメント数の一致を要求してから各セグメントを個別に
+    # 照合し、除外が意図した深さの外へ広がらないようにする。
     segs = rel.split(os.sep)
     for pat in prunes:
         pat_segs = pat.split("/")
@@ -306,12 +306,18 @@ PYEOF
 #     変動し得る領域のみ — 前後シグネチャの間に走る git 操作は
 #     `git status --porcelain -z -uall`（実行後スナップショット取得）だけであり、
 #     status が触るのは index の stat cache 更新（.git/index）とその一時 lock
-#     （.git/index.lock 等）のみ。リバート用の git checkout / git clean は
+#     （.git/index.lock）のみ。リバート用の git checkout / git clean は
 #     実行後シグネチャ取得より後の失敗経路でしか呼ばれないため、署名比較に影響しない。
 #     以前は objects・refs・packed-refs・HEAD・logs・worktrees 等も prune していたが、
 #     npx がこれらへ書き込む（履歴・参照の改変）とスコープ外検査を丸ごと迂回できて
-#     しまうため（PR #412 P0 指摘）、実測で避けられない index・lock 以外はすべて
-#     署名対象に含める。代償として、同期実行中にこのリポジトリで並行 git 操作
+#     しまうため（PR #412 P0 指摘）、実測で避けられない index・index.lock 以外は
+#     すべて署名対象に含める。lock の prune を `.git/*.lock` のワイルドカードに
+#     すると、npx が残した永続 lock（.git/config.lock・.git/HEAD.lock 等）まで
+#     検査から漏れるため（PR #412 codex P1 指摘）、自プロセスの git status が
+#     作り得る .git/index.lock だけを完全一致で prune する。
+#     prune した .git/index の背後で npx が index の論理状態を改変するケースは、
+#     index_state_signature（下記）の前後比較が受け持つ。
+#     代償として、同期実行中にこのリポジトリで並行 git 操作
 #     （他 worktree 含む）を行うとシグネチャ不一致（誤検知）として停止し得る
 #     （SKILL.md の注意事項に明記。fail-closed 側に倒す設計判断）
 #   - REPO_SIG_OMITS — 実行前に存在しなかった場合の .agents / .agents/skills
@@ -331,13 +337,37 @@ REPO_SIG_OMITS=()
 # npx 実行前の判定ブロックで prune へ切り替える。前後 2 回の呼び出しで同一で
 # なければならない（REPO_SIG_OMITS と同じ理由）。
 SKILL_DIR_SIG_SPEC="prune-under:.agents/skills/${SKILL_NAME}"
+
+# index の論理状態のシグネチャ。.git/index はファイルとしては prune せざるを得ない
+# （自プロセスの git status が stat cache を正当に更新するため）が、その背後で npx が
+# エントリの追加・削除・blob 差し替えや skip-worktree / assume-unchanged ビットの
+# 付与を行っても検出できなくなる（PR #412 codex P1 指摘。特に skip-worktree を
+# 立てられると、以後その tracked ファイルの変更が git status から恒久的に隠れる）。
+# stat cache と独立な論理状態 — `git ls-files --stage`（mode・object・stage・パス）と
+# `git ls-files -v`（状態タグ。skip-worktree は S、assume-unchanged は小文字）— を
+# sha256 へまとめ、repo_state_signature の出力へ連結して前後比較する。git status の
+# stat cache 更新はどちらの出力も変えないため、自プロセス起因の誤検知はない。
+# 取得失敗は「変化なしと確認できない」ため非ゼロで返し、呼び出し側の fail-closed
+# （sentinel 比較）へ倒す。
+index_state_signature() {
+  local staged tags digest
+  staged="$(git ls-files --stage)" || return 1
+  tags="$(git ls-files -v)" || return 1
+  digest="$(printf '%s\n--\n%s\n' "${staged}" "${tags}" \
+    | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')" || return 1
+  printf '%s\n' "${digest}"
+}
+
 repo_state_signature() {
-  path_state . \
+  local tree_sig index_sig
+  tree_sig="$(path_state . \
     "prune:skills-lock.json" \
     "${SKILL_DIR_SIG_SPEC}" \
     "prune:.git/index" \
-    "prune:.git/*.lock" \
-    ${REPO_SIG_OMITS[@]+"${REPO_SIG_OMITS[@]}"}
+    "prune:.git/index.lock" \
+    ${REPO_SIG_OMITS[@]+"${REPO_SIG_OMITS[@]}"})" || return 1
+  index_sig="$(index_state_signature)" || return 1
+  printf '%s:index:%s\n' "${tree_sig}" "${index_sig}"
 }
 
 # git status --porcelain -z の1レコード（"XY PATH\0"）からスコープ内（skills-lock.json /
@@ -424,7 +454,10 @@ PYEOF
 # 事前の symlink 走査（npx 実行前）により対象は regular file のみである前提。
 # 復元先が npx により symlink 化されている可能性に備え、書き込み前に unlink し、
 # 親ディレクトリの realpath が許可先内に収まることを検証する（リンク先への
-# 書き込み防止）。バックアップとの比較・復元は mode 比較を含むため、stat の
+# 書き込み防止）。親ディレクトリの再作成は make_parent_dirs（存在する最深の
+# 祖先の containment 検証 + 1 階層ずつの lstat 付き os.mkdir）で行い、
+# os.makedirs が中間 symlink を辿ってリポジトリ外へディレクトリを作る経路を
+# 残さない。バックアップとの比較・復元は mode 比較を含むため、stat の
 # 出力書式差（BSD/GNU）を避けて python3 の os.lstat に統一する。
 restore_preexisting_ignored() {
   # バックアップ対象が無ければ（初回インストール・既存 ignored なし）何もしない。
@@ -444,6 +477,38 @@ def fail(msg):
     # fail-closed（バックアップ dir の保全 + 手動復旧の案内）に扱わせる。
     print(f"restore_preexisting_ignored: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+def make_parent_dirs(parent):
+    # os.makedirs を先に呼ぶと、中間ディレクトリが外向き symlink へ置換されて
+    # いた場合にリンク先（リポジトリ外）へディレクトリを作ってしまう — 作成
+    # 自体がスコープ逸脱であり、後段の containment チェックで停止しても外側の
+    # dir は残る（PR #412 Bugbot Medium 指摘）。そこで先に「存在する最深の祖先」
+    # の realpath が許可先の内側か、許可先へ至る素の経路上（root の祖先）にある
+    # ことを検証し、さらに作成は 1 階層ずつ lstat で symlink・非ディレクトリで
+    # ないことを確認しながら os.mkdir で行う（symlink を辿る経路を残さない。
+    # 実行後の配下 symlink 走査が先に停止させるため通常は到達しない防御多層）。
+    anc = parent
+    while anc and not os.path.lexists(anc):
+        anc = os.path.dirname(anc)
+    if anc:
+        real_anc = os.path.realpath(anc)
+        if not (
+            real_anc == root
+            or real_anc.startswith(root + os.sep)
+            or root.startswith(real_anc + os.sep)
+        ):
+            fail(f"復元先の祖先が許可先の外を指しています: {parent}")
+    cur = ""
+    for part in parent.split(os.sep):
+        cur = os.path.join(cur, part) if cur else part
+        try:
+            cst = os.lstat(cur)
+        except FileNotFoundError:
+            os.mkdir(cur)
+            continue
+        if not stat.S_ISDIR(cst.st_mode):
+            fail(f"復元先の中間経路がディレクトリではありません（symlink 等）: {cur}")
 
 
 with open(os.environ["IGNORED_BASELINE_FILE"], "rb") as f:
@@ -482,7 +547,7 @@ for raw in paths:
             continue
         parent = os.path.dirname(text)
         if parent:
-            os.makedirs(parent, exist_ok=True)
+            make_parent_dirs(parent)
             real_parent = os.path.realpath(parent)
             # 親ディレクトリが symlink 化されているとリンク先（リポジトリ外を
             # 含む）へ書き込んでしまうため、realpath の包含を検証してから書く。
@@ -518,17 +583,18 @@ PYEOF
 # （Issue #413）は -fdx ではなく remove_new_ignored_in_scope（実行前インベントリ
 # との突き合わせ）で解消する（既存 ignored ファイルの巻き添え削除防止）。
 # 実行後再検証（verify_scope_path_after_run）が許可先経路の symlink 化・非
-# ディレクトリ化を検出した場合（SCOPE_PATH_COMPROMISED=1）は、checkout・clean・
-# ignored 削除のパス走査がリンク先（リポジトリ外を含む）へ向かい得るため、
-# skills-lock.json の復元のみ行い、許可先配下への削除系操作は一切行わず案内に留める
-# （symlink を通じた外部削除の防止。fail-closed）。
+# ディレクトリ化を検出した場合、または実行後の配下 symlink 走査が npx 実行中に
+# 作られた symlink を検出した場合（いずれも SCOPE_PATH_COMPROMISED=1）は、
+# checkout・clean・ignored 削除のパス走査がリンク先（リポジトリ外を含む）へ
+# 向かい得るため、skills-lock.json の復元のみ行い、許可先配下への削除系操作は
+# 一切行わず案内に留める（symlink を通じた外部削除の防止。fail-closed）。
 revert_in_scope() {
   git checkout -- skills-lock.json 2>/dev/null || true
   if [[ "${SCOPE_PATH_COMPROMISED}" -ne 0 ]]; then
     # symlink 越しの走査を避けるため既存 ignored の復元も行わない。復元素材を
     # 失わないよう、バックアップ dir は削除せず保全して手動復旧に委ねる。
     IGNORED_BACKUP_KEEP=1
-    echo "警告: 許可先経路が symlink 等へ置換されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除・既存 ignored の復元は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。既存 ignored ファイルのバックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。" >&2
+    echo "警告: 許可先経路またはその配下が symlink 等へ置換・作成されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除・既存 ignored の復元は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。既存 ignored ファイルのバックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。" >&2
     return 0
   fi
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
@@ -624,9 +690,10 @@ IGNORED_BACKUP_DIR="$(mktemp -d)"
 IGNORED_BACKUP_KEEP=0
 trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"; if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi' EXIT
 
-# npx 実行後の許可先経路 再検証（verify_scope_path_after_run）の結果フラグ。
-# 1 のとき revert_in_scope は許可先配下への削除系操作を行わない（symlink 越しの
-# リポジトリ外削除の防止）。npx 実行直後に一度だけ更新する。
+# npx 実行後の許可先経路 再検証（verify_scope_path_after_run）と許可先配下の
+# 実行後 symlink 走査の結果フラグ。1 のとき revert_in_scope は許可先配下への
+# 削除系操作を行わない（symlink 越しのリポジトリ外削除の防止）。npx 実行直後に
+# 一度だけ更新する。
 SCOPE_PATH_COMPROMISED=0
 
 # npx 実行前の許可先配下の全ファイルインベントリ（.gitignore 対象を含む。
@@ -780,6 +847,28 @@ fi
 if ! verify_scope_path_after_run; then
   SCOPE_PATH_COMPROMISED=1
   NPX_STATUS=1
+fi
+
+# 許可先配下の実行後 symlink 走査（PR #412 Bugbot High 指摘: TOCTOU）。事前走査は
+# npx 実行前の 0 件しか保証せず、npx が実行中に配下へ作った外向き symlink とそれ
+# 経由の書き込みは、配下を署名から除外している前後比較にも、経路 3 要素しか見ない
+# verify_scope_path_after_run にも現れない。事後に見つかる symlink はすべて npx
+# 実行中の作成物であり、これを残したまま checkout・clean・ignored 削除・復元を
+# 走らせるとリンク先（リポジトリ外を含む）への削除・書き込みになり得るため、
+# 1 件でも検出したら経路妥協（SCOPE_PATH_COMPROMISED）と同じ保全経路へ倒す。
+# 走査自体の失敗も「symlink なしと確認できない」であって「なし」ではないため
+# 同様に倒す（fail-closed）。
+if [[ "${SCOPE_PATH_COMPROMISED}" -eq 0 && -d ".agents/skills/${SKILL_NAME}" ]]; then
+  if ! SCOPE_POST_SYMLINKS="$(find ".agents/skills/${SKILL_NAME}" -type l)"; then
+    echo "エラー: npx 実行後の許可先配下 symlink 走査（find）に失敗しました。リンク先（リポジトリ外を含む）への書き込み経路が無いことを確認できないため、許可先配下への自動復旧を行わず停止します（fail-closed）。" >&2
+    SCOPE_PATH_COMPROMISED=1
+    NPX_STATUS=1
+  elif [[ -n "${SCOPE_POST_SYMLINKS}" ]]; then
+    echo "エラー: npx が実行中に許可先（.agents/skills/${SKILL_NAME}）配下へシンボリックリンクを作成しました。リンク先（リポジトリ外を含む）へ書き込んだ可能性があり、symlink 越しの走査を避けるため許可先配下への自動復旧は行いません。リンク先の内容とリポジトリ外への書き込み有無を手動確認してください（fail-closed）:" >&2
+    printf '%s\n' "${SCOPE_POST_SYMLINKS}" >&2
+    SCOPE_PATH_COMPROMISED=1
+    NPX_STATUS=1
+  fi
 fi
 
 # CLI がバージョン更新等で --agent universal を認識できなくなった場合、
