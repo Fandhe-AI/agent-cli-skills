@@ -331,6 +331,23 @@ filter_out_of_scope() {
   done < "${infile}"
 }
 
+# スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更をリバートする。
+# npx 失敗・スコープ外検出・実行後 git status 取得失敗のすべての異常終端経路が
+# 共有する（PR #412 P1: どの異常経路でも生成済みのスコープ内変更を残置しない契約）。
+# 2つのパスを1つの `git checkout --` に渡すとアトミックに扱われ、どちらか一方が
+# 「追跡対象なし」（初回具現化・untracked のみの書き込み時）で pathspec エラーになると
+# コマンド全体が失敗し、もう一方（skills-lock.json）も復元されないまま抜けてしまう
+# ため、必ず1コマンド1パスで分離する。git clean -fd はディレクトリが存在しない場合に
+# 非ゼロ終了するため、存在確認してから呼ぶ（set -e 下で無条件に呼ぶと呼び出し元の
+# 案内メッセージより先にスクリプトが停止し得る）。
+revert_in_scope() {
+  git checkout -- skills-lock.json 2>/dev/null || true
+  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+  if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
+    git clean -fd ".agents/skills/${SKILL_NAME}/" || true
+  fi
+}
+
 echo "==> skills-lock.json を更新中: ${SKILL_NAME} (source: ${SOURCE_REPO})"
 echo ""
 
@@ -472,13 +489,23 @@ fi
 # 検知せず先へ進むと「同期したつもりで何も更新されていない」まま完了扱いに
 # なるため、明示的にエラー化する（NPX_STATUS -eq 0 のときのみ意味を持つ判定。
 # 上の TEE_STATUS チェックで NPX_STATUS が強制失敗化されていればここは通らない）。
+# この分岐で直接 exit すると実行後スナップショット・シグネチャ比較・スコープ内
+# リバートをすべて迂回する（PR #412 P1 指摘）。「Invalid agents」は CLI の出力文言に
+# 過ぎず、将来版が部分書き込みの後に同じ文言を出しても no-op とは限らないため、
+# NPX_STATUS=1 を設定して下の共通失敗経路へ合流させ、「成功・失敗いずれの経路でも
+# 事後検査へ必ず到達」の契約を守る（NPX_NOOP_DETECTED は重複する汎用メッセージの
+# 抑止にのみ使い、検査・リバートの経路は変えない）。
+NPX_NOOP_DETECTED=0
 if [[ "${NPX_STATUS}" -eq 0 ]] && grep -q "Invalid agents" "${NPX_OUTPUT_FILE}"; then
   echo "エラー: skills CLI が --agent universal を認識せず、何も実行していません（exit 0 の no-op）。SKILLS_CLI_VERSION 更新時は SKILL.md の「skills CLI のバージョン固定と更新手順」節に従い universal の有効性を再確認してください。" >&2
-  exit 1
+  NPX_NOOP_DETECTED=1
+  NPX_STATUS=1
 fi
 
 if [[ "${NPX_STATUS}" -ne 0 ]]; then
-  echo "エラー: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害・ダウンロード中断等、原因は問いません）。" >&2
+  if [[ "${NPX_NOOP_DETECTED}" -eq 0 ]]; then
+    echo "エラー: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害・ダウンロード中断等、原因は問いません）。" >&2
+  fi
   # 失敗が部分書き込み後に発生した場合、skills-lock.json / .agents/skills/${SKILL_NAME}/
   # に加えてスコープ外（他エージェントツリー等）にも残置され得るため、失敗経路でも
   # 実行後スナップショットを取ってスコープ外残留を検査する（下の成功経路と同一ロジック。
@@ -501,23 +528,31 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
   # 次にこのディレクトリを扱う呼び出し元（SKILL.md の全スキル sync ループ等）が、
   # この失敗による残置差分を承認済みの変更や「既存の dirty 状態」と混同しないよう、
   # スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）分のみ即座にリバート
-  # してから exit 1 で終端する。2つのパスを1つの `git checkout --` に渡すとアトミックに
-  # 扱われ、どちらか一方が「追跡対象なし」（初回具現化・untracked のみの書き込み時）で
-  # pathspec エラーになるとコマンド全体が失敗し、もう一方（skills-lock.json）も復元
-  # されないまま抜けてしまうため、必ず1コマンド1パスで分離する。
-  git checkout -- skills-lock.json 2>/dev/null || true
-  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-  if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
-    git clean -fd ".agents/skills/${SKILL_NAME}/" || true
-  fi
+  # してから exit 1 で終端する。
+  revert_in_scope
   echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。固定版を外した再実行はしません。" >&2
   exit 1
 fi
 
 # npx 実行後のスナップショット。前後のスコープ外差分を見るため、取得条件は
-# SNAP_BEFORE と完全に揃える。
+# SNAP_BEFORE と完全に揃える。取得失敗時にその場で exit すると、npx が生成済みの
+# スコープ内変更を残置したままスコープ外シグネチャ検査も行われない（PR #412 P1
+# 指摘）。状態シグネチャは git 非依存（python3 の走査）で取得できるため、可能な
+# 範囲で事後検査（スコープ外残置疑いの報告）を行い、スコープ内をリバートしてから
+# fail-closed で非ゼロ終了する。
 if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; then
-  echo "エラー: npx 実行後の git status 取得に失敗しました。スコープ外書き込みの検出ができないため中止します。" >&2
+  echo "エラー: npx 実行後の git status 取得に失敗しました。porcelain レコードでの前後比較ができません。" >&2
+  if REPO_STATE_AFTER="$(repo_state_signature)"; then
+    if [[ "${REPO_STATE_BEFORE}" != "${REPO_STATE_AFTER}" ]]; then
+      echo "エラー: スコープ外（skills-lock.json / .agents/skills/${SKILL_NAME}/ 以外）へも書き込まれた可能性があります（状態シグネチャ不一致）。git status / git diff で手動確認してください（削除はしていません）。" >&2
+    fi
+  else
+    # シグネチャも取れない場合は「変化なし」と確認できないため、残置の可能性ありと
+    # して案内する（fail-closed。green 側へ倒さない）。
+    echo "エラー: 実行後の状態シグネチャ取得にも失敗しました。スコープ外残置の可能性を排除できません。git status / git diff で手動確認してください（fail-closed）。" >&2
+  fi
+  revert_in_scope
+  echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
   exit 1
 fi
 
@@ -553,15 +588,7 @@ if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
   echo "  git checkout -- <path>   （変更前が clean だった追跡ファイルの場合）" >&2
   echo "  git clean -fd <path>     （変更前に存在しなかった未追跡ファイルの場合）" >&2
   echo "を実行してください。" >&2
-  # スコープ内リバート。git checkout -- は「対象なし」で失敗し得る（初回具現化・
-  # 未追跡のみの書き込み時）ため || true で許容する。git clean -fd はディレクトリが
-  # 存在しない場合に非ゼロ終了するため、存在確認してから呼ぶ（set -e 下で無条件に
-  # 呼ぶとこのエラーメッセージより先にスクリプトが停止し得る）。
-  git checkout -- skills-lock.json 2>/dev/null || true
-  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-  if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
-    git clean -fd ".agents/skills/${SKILL_NAME}/" || true
-  fi
+  revert_in_scope
   exit 1
 fi
 

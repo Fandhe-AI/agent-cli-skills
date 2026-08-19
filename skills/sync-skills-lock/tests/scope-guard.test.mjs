@@ -70,6 +70,19 @@
 //                                   検出できないため、「実行前に存在した場合は署名
 //                                   対象」の条件付き omit でこれを検出できることを
 //                                   検証する
+//   - 'invalid-agents-partial-write' : PR #412 レビュー指摘（第5巡・P1）の回帰。
+//                                   スコープ内 + スコープ外へ部分書き込みした後に
+//                                   「Invalid agents」文言を出して exit 0 する CLI 版を
+//                                   再現する（no-op 文言への依存は部分書き込みに対して
+//                                   fail-open。no-op 検知分岐が直接 exit せず共通失敗
+//                                   経路へ合流し、事後のスコープ外検出・スコープ内
+//                                   リバートへ必ず到達することを検証する）
+//   - 'post-status-failure'       : PR #412 レビュー指摘（第5巡・P1）の回帰。npx は
+//                                   スコープ内書き込みに成功するが、実行後の
+//                                   `git status --porcelain -z -uall`（2 回目の -uall
+//                                   呼び出し）だけを git スタブで失敗させる。この経路
+//                                   でもスコープ内リバートが走り非ゼロ終了することを
+//                                   検証する
 //   - 'first-install'             : 非退行。実行前に .agents ツリー自体が存在しない
 //                                   初回インストールで、npx が .agents/skills/<name>
 //                                   を新規作成しても誤検知せず完走することを検証する
@@ -192,6 +205,15 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "git-metadata-write" ]]; then
   printf '[alias]\\n\\tpwned = status\\n' >> ".git/config"
 fi
 
+if [[ "\${TEST_NPX_SCENARIO:-}" == "invalid-agents-partial-write" ]]; then
+  # 部分書き込み（上のスコープ内書き込みに加えてスコープ外へも書く）の後に
+  # 「Invalid agents」文言を出して exit 0 する CLI 版を再現する。文言だけを見て
+  # 直接 exit すると、この残置がまったく検査・リバートされない（fail-open）。
+  echo "npx overwrote this content during noop-claim" > "${OUT_OF_SCOPE_FILE}"
+  echo "Invalid agents: universal"
+  exit 0
+fi
+
 if [[ "\${TEST_NPX_SCENARIO:-}" == "agents-dir-chmod" ]]; then
   # 実行前から存在する .agents ディレクトリ自身の chmod のみ（配下・内容は不変）。
   # git はディレクトリの mode を追跡しないため porcelain には現れない。
@@ -222,6 +244,36 @@ exec "\${REAL_TEE}" "\$@"
 `
   writeFileSync(join(binDir, 'tee'), teeBody)
   chmodSync(join(binDir, 'tee'), 0o755)
+
+  // git スタブ。既定は実物 git（テストプロセスの PATH で解決した絶対パス）へ
+  // そのまま exec する。TEST_NPX_SCENARIO=='post-status-failure' のときのみ、
+  // `-uall` を含む status 呼び出し（スクリプトの前後スナップショット取得は
+  // この 2 回だけ）の 2 回目（= npx 実行後）を失敗させ、実行後 git status の
+  // 取得失敗を再現する（PR #412 第5巡 P1 の回帰）。リバート用の
+  // git checkout / git clean は実物へ素通しされるため、この経路でスコープ内
+  // リバートが実際に機能するかを end-to-end で検証できる。
+  const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+  const gitCountFile = join(binDir, 'git-uall-count')
+  const gitBody = `#!/usr/bin/env bash
+if [[ "\${TEST_NPX_SCENARIO:-}" == "post-status-failure" ]]; then
+  has_uall=0
+  for a in "\$@"; do
+    if [[ "\$a" == "-uall" ]]; then has_uall=1; fi
+  done
+  if [[ "\$has_uall" -eq 1 ]]; then
+    n="\$(cat "${gitCountFile}" 2>/dev/null || echo 0)"
+    n=\$((n + 1))
+    printf '%s\\n' "\$n" > "${gitCountFile}"
+    if [[ "\$n" -ge 2 ]]; then
+      echo "fatal: simulated post-run status failure" >&2
+      exit 128
+    fi
+  fi
+fi
+exec "${realGit}" "\$@"
+`
+  writeFileSync(join(binDir, 'git'), gitBody)
+  chmodSync(join(binDir, 'git'), 0o755)
 
   sh('git init -q', repoDir)
   sh('git config user.email test@example.com', repoDir)
@@ -258,6 +310,7 @@ exec "\${REAL_TEE}" "\$@"
   if (
     scenario === 'content-overwrite-dirty' ||
     scenario === 'npx-failure-out-of-scope' ||
+    scenario === 'invalid-agents-partial-write' ||
     scenario === 'mode-change-dirty'
   ) {
     const outOfScopePath = join(repoDir, ...OUT_OF_SCOPE_FILE.split('/'))
@@ -764,6 +817,90 @@ test('ケース13: 実行前から存在する .agents ディレクトリ自身�
     // スコープ外の chmod は自動リバートせず、変更後の mode（700）のまま残す
     const mode = statSync(agentsDir).mode & 0o777
     assert.equal(mode, 0o700, '.agents の chmod が自動リバートされず残存すること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース15: 部分書き込み後に「Invalid agents」文言を出す npx でも、no-op 検知が' +
+  '事後検査・リバートを迂回しない（PR #412 第5巡 P1 の回帰）', () => {
+  const ctx = setupRepo('invalid-agents-partial-write')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /Invalid agents/, 'no-op 検知のエラーメッセージ自体は出ること')
+        assert.match(
+          combined,
+          /スコープ外/,
+          'no-op 文言があっても事後のスコープ外検査へ到達し、残置が報告されること' +
+            '（no-op 文言だけを信じて直接 exit すると、この検出が丸ごと迂回される）',
+        )
+        assert.match(
+          combined,
+          /other-skill\/NOTES\.md/,
+          '部分書き込みされたスコープ外パスが列挙されること',
+        )
+        return true
+      },
+    )
+
+    // no-op 文言つき部分書き込みでも、スコープ内は共通失敗経路でリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+
+    // スコープ外は自動リバートせず、確認用に上書き後の内容のまま残す
+    assert.equal(
+      readFileSync(join(ctx.repoDir, ...OUT_OF_SCOPE_FILE.split('/')), 'utf8'),
+      'npx overwrote this content during noop-claim\n',
+      'スコープ外の残置は削除されず確認可能な状態で残ること',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース16: npx 成功後の git status 取得失敗でもスコープ内リバートが走り、' +
+  '非ゼロ終了する（PR #412 第5巡 P1 の回帰。生成済み変更の残置防止）', () => {
+  const ctx = setupRepo('post-status-failure')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /実行後の git status 取得に失敗/,
+          'status 取得失敗のエラーメッセージが出ること',
+        )
+        assert.match(
+          combined,
+          /リバートしました/,
+          'status 取得失敗経路でもスコープ内リバートの実施が案内されること',
+        )
+        return true
+      },
+    )
+
+    // status 取得失敗経路でも、npx が書き込み済みのスコープ内は残置されず clean
+    // （検証側は実物 git を直接使う。スタブは runScript の PATH にのみ入る）
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })
