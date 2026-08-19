@@ -336,19 +336,17 @@ fi
 preview_untracked ".agents/skills/${SKILL_NAME}/"
 
 if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
-  # 却下・失敗時の厳密復元用に、apply 前の index(= 承認済み積上げ)を tree として保存する。
-  # git read-tree でこの snapshot へ index を丸ごと戻すと、apply が stage した変更だけが
-  # 正確に取り除かれ、承認済みの他スキル分・durable patch の既存 stage は保持される
-  # (同期前 check が unmerged index を fail-closed で弾いているため write-tree は成立する)
-  # snapshot hash は本 process にしか存在しないため、後からの復旧に備えて値を必ず表示する
-  PRE_APPLY_TREE="$(git write-tree)"
-  echo "PRE_APPLY_TREE=${PRE_APPLY_TREE}  # 却下・復旧(git read-tree)で使う snapshot hash。控えておくこと"
+  # 却下・失敗時の復元は「checker 初回実行より前」に取得済みの PRE_SYNC_TREE(同期開始前の
+  # index snapshot)を使う。npx 後にここで snapshot を取り直すと、復元先が「raw upstream +
+  # 同期前 check の stage」になり、「同期前へ戻す」という契約に反する(local patch が外れた
+  # 状態が残る)。PRE_SYNC_TREE への read-tree は、この同期(pre-check・npx・apply)で生じた
+  # 契約範囲の index 変更だけを取り除き、承認済みの他スキル分は snapshot に含まれるため保持される
 
   # 却下・失敗時の復元手順(stdout へ出す。エラー経路では >&2 で呼ぶ)。
-  # PRE_APPLY_TREE は本 process 終了後に環境から消えるため、値そのものを展開して案内する
+  # PRE_SYNC_TREE は本 process 終了後に環境から消えるため、値そのものを展開して案内する
   restore_help() {
-    echo "同期前へ戻すには(index を apply 前 snapshot へ復元し、worktree を index から戻す):"
-    echo "  git read-tree ${PRE_APPLY_TREE}"
+    echo "同期前へ戻すには(index を同期開始前 snapshot へ復元し、worktree を index から戻す):"
+    echo "  git read-tree ${PRE_SYNC_TREE}"
     echo "  git checkout -- skills-lock.json"
     echo "  git checkout -- \".agents/skills/${SKILL_NAME}/\" 2>/dev/null || true"
     echo "  git checkout -- scripts/local-patches/ 2>/dev/null || true"

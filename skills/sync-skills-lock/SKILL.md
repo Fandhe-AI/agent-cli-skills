@@ -345,14 +345,11 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   : "${PRE_OUTSIDE:?Step 4 で表示された基準 digest を設定してから実行する}"
   : "${CHECKER_APPROVED_HASH:?ユーザー承認済みの checker blob hash を設定してから実行する}"
 
-  # 却下・失敗時の厳密復元用に、apply 前の index(= 承認済み積上げ)を tree として保存する。
-  # 却下手順(Step 6 の checker 版)は git read-tree でこの snapshot へ index を丸ごと戻すため、
-  # apply が stage した変更だけが正確に取り除かれ、承認済みの他スキル分は保持される
-  # (Step 4 の pre-check が unmerged index を fail-closed で弾くため write-tree は成立する)
-  # snapshot hash は shell 変数にしか存在しないため、後からの復旧に備えて値を必ず表示する
-  # (Step 6 の却下手順はこの値を使う)
-  PRE_APPLY_TREE="$(git write-tree)"
-  echo "PRE_APPLY_TREE=${PRE_APPLY_TREE}  # 却下・復旧(git read-tree)で使う snapshot hash。控えておくこと"
+  # 却下・失敗時の復元は Step 4 で「checker 初回実行より前」に取得・表示済みの
+  # PRE_SYNC_TREE(同期開始前の index snapshot)を使う。ここで snapshot を取り直しては
+  # ならない — npx 後の index を基準にすると、復元先が「raw upstream + 同期前 check の
+  # stage」になり、「同期前へ戻す」という契約に反する(local patch が外れた状態が残る)
+  : "${PRE_SYNC_TREE:?Step 4 で表示された同期開始前 snapshot を設定してから実行する}"
 
   # 範囲外 digest の基準(PRE_OUTSIDE)・outside_state・verify_outside_and_checker は
   # Step 4 で checker の初回実行より前に定義・取得済みのものを同一 shell セッションで
@@ -364,7 +361,7 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   bash scripts/check-skill-local-patches.sh apply || apply_rc=$?
   if ! verify_outside_and_checker; then exit 1; fi
   if [[ "${apply_rc}" -ne 0 ]]; then
-    echo "エラー: local patch の再適用に失敗しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_APPLY_TREE})で同期前へ戻してください(fail-closed)。"
+    echo "エラー: local patch の再適用に失敗しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_SYNC_TREE})で同期前へ戻してください(fail-closed)。"
     exit 1
   fi
 
@@ -373,7 +370,7 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   bash scripts/check-skill-local-patches.sh || check_rc=$?
   if ! verify_outside_and_checker; then exit 1; fi
   if [[ "${check_rc}" -ne 0 ]]; then
-    echo "エラー: 再適用後の最終検証に失敗しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_APPLY_TREE})で同期前へ戻してください(fail-closed)。"
+    echo "エラー: 再適用後の最終検証に失敗しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_SYNC_TREE})で同期前へ戻してください(fail-closed)。"
     exit 1
   fi
 fi
@@ -420,16 +417,16 @@ Step 4 の clean ガードにより `npx` 実行前の当該ディレクトリ�
 
 このリバートは「次スキルの `npx skills add` 実行前」に行うため、`skills-lock.json` から戻るのは当該スキル分のみである。`git checkout --` は HEAD ではなく index から復元するため、承認済みの他スキルの hash は index にも作業ツリーにも保持されており、影響を受けない。
 
-**checker を持つリポジトリの却下は次を使う**（Step 5.5 の apply が当該スキルや durable patch の file を index へ stage している可能性があるため、`git checkout --`（index → worktree）だけでは戻らない。Step 5.5 で保存した `PRE_APPLY_TREE` へ index を丸ごと復元してから、worktree を index から戻す）:
+**checker を持つリポジトリの却下は次を使う**（同期前 check・Step 5.5 の apply が当該スキルや durable patch の file を index へ stage している可能性があるため、`git checkout --`（index → worktree）だけでは戻らない。Step 4 で checker 初回実行より前に保存した `PRE_SYNC_TREE`（同期開始前の index snapshot）へ index を丸ごと復元してから、worktree を index から戻す。npx 後に取得した snapshot を使ってはならない — 復元先が raw upstream 状態になり「同期前へ戻す」契約に反する）:
 
 ```bash
-# index を apply 前(= 承認済み積上げ)へ丸ごと復元する。apply が stage した変更だけが
-# 取り除かれ、承認済みの他スキル分・durable patch の既存 stage はそのまま保持される。
-# PRE_APPLY_TREE は Step 5.5 が表示した snapshot hash。shell を跨いで変数が消えている
+# index を同期開始前(= 承認済み積上げ)へ丸ごと復元する。この同期(pre-check・npx・apply)で
+# 生じた契約範囲の stage だけが取り除かれ、承認済みの他スキル分は snapshot に含まれるため保持される。
+# PRE_SYNC_TREE は Step 4 が表示した同期開始前の snapshot hash。shell を跨いで変数が消えている
 # 場合は表示済みの値を代入してから実行する。未設定のまま read-tree すると
-# 「post-apply の index のまま worktree だけ戻す」誤復元になるため、空値は必ず弾く
-: "${PRE_APPLY_TREE:?Step 5.5 の snapshot hash を設定してから実行する(未設定のまま復元しない)}"
-git read-tree "${PRE_APPLY_TREE}"
+# 「現 index のまま worktree だけ戻す」誤復元になるため、空値は必ず弾く
+: "${PRE_SYNC_TREE:?Step 4 の同期開始前 snapshot hash を設定してから実行する(未設定のまま復元しない)}"
+git read-tree "${PRE_SYNC_TREE}"
 
 # worktree を復元済みの index から戻す。初回具現化などで追跡対象が無い path は
 # pathspec エラーになるため path ごとに分離し、その失敗のみ無視する(戻す対象自体が無い)
@@ -501,7 +498,7 @@ EOF
 - **新スキルの取扱い**: ローカルに存在するが upstream に未登録のスキル（`contribute-skill`, `sync-skills-lock` 自身など）は、upstream マージ後に登録する。マージ前に `computedHash` を勝手に書き込まない
 - **Step 5 のプレビューは index を変更しない**: 未追跡ファイルの表示に `git add -N`（intent-to-add）ではなく `git diff --no-index` を使う。Step 6 の拒否経路が index からの `git checkout --` で承認済み他スキルの hash を復元する設計に依存しており、i-t-a エントリの混入はその復元設計と干渉するため
 - **skills CLI は固定版で実行する**: `npx skills add` はバージョン未固定で実行しない。固定版の決め方・更新手順は「skills CLI のバージョン固定と更新手順」節を参照
-- **local patch の保護（checker を持つリポジトリでは必須）**: npx 前の checker（Step 4）→ 承認前の再適用 + 最終検証 + 契約範囲検証（Step 5.5）→ 成功時のみ stage（Step 7）の順を省略しない。checker 非 0・台帳（`.agents/skills/LOCAL-PATCHES.md`）のみ存在は fail-closed で停止し、local patch が欠けた状態を stage・commit しない。apply が変更し得る durable patch（`scripts/local-patches/`）は承認（Step 6 の最終 diff + 未追跡プレビュー再実行）・stage（Step 7）・却下（`PRE_APPLY_TREE` からの index 復元）のすべてで同じ集合として扱い、未 stage の WIP が同 directory に残る状態では同期を開始しない（Step 4 で fail-closed）。`computedHash` は upstream 版の値を維持する
+- **local patch の保護（checker を持つリポジトリでは必須）**: npx 前の checker（Step 4）→ 承認前の再適用 + 最終検証 + 契約範囲検証（Step 5.5）→ 成功時のみ stage（Step 7）の順を省略しない。checker 非 0・台帳（`.agents/skills/LOCAL-PATCHES.md`）のみ存在は fail-closed で停止し、local patch が欠けた状態を stage・commit しない。apply が変更し得る durable patch（`scripts/local-patches/`）は承認（Step 6 の最終 diff + 未追跡プレビュー再実行）・stage（Step 7）・却下（`PRE_SYNC_TREE` からの index 復元）のすべてで同じ集合として扱い、未 stage の WIP が同 directory に残る状態では同期を開始しない（Step 4 で fail-closed）。`computedHash` は upstream 版の値を維持する
 
 ## sandbox 環境での実行
 
