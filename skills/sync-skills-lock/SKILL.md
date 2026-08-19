@@ -133,8 +133,52 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
     echo "エラー: scripts/local-patches/ に未 stage の変更・未追跡ファイルがあります。承認・却下経路が巻き込むため同期しません(fail-closed)。"
     exit 1
   fi
-  if ! bash scripts/check-skill-local-patches.sh; then
-    echo "エラー: 同期前の local patch 検証に失敗しました。修復してから再実行してください(fail-closed)。"
+  # 契約範囲(skills-lock.json / 当該スキル / durable patch)外の状態 digest。worktree 側は
+  # 「HEAD を基底にした一時 index へ範囲外のみ git add -A」した tree hash で捉える
+  # (未追跡・削除を含む全ファイルが実 blob hash で比較され、diff の表示文字列に依存しない
+  # = dirty なバイナリの上書きも検出する。範囲内は HEAD のまま固定されるため同期による
+  # 正当な変更では digest が動かない)。index 側は ls-files -s の blob hash で捉える。
+  # 基準(PRE_OUTSIDE)は checker の初回実行(同期前 check)より前に取得する。check の後に
+  # 取得すると、check mode が行った範囲外変更が基準へ取り込まれ検出できなくなる
+  OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
+  outside_state() {
+    local tmp_index_dir wt_tree idx_digest
+    tmp_index_dir="$(mktemp -d)"
+    GIT_INDEX_FILE="${tmp_index_dir}/index" git read-tree HEAD
+    GIT_INDEX_FILE="${tmp_index_dir}/index" git add -A -- "${OUTSIDE_PATHSPEC[@]}"
+    wt_tree="$(GIT_INDEX_FILE="${tmp_index_dir}/index" git write-tree)"
+    rm -rf "${tmp_index_dir}"
+    idx_digest="$(git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" | git hash-object --stdin)"
+    echo "${wt_tree}:${idx_digest}"
+  }
+  PRE_OUTSIDE="$(outside_state)"
+
+  # checker の「すべての」実行(同期前 check / Step 5.5 の apply・最終 check)の直後に、
+  # 実行結果に関わらず範囲外 digest と checker 自身の blob hash を再検証する。範囲外を
+  # 書き換えて非 0 終了するケース・checker 自身を未承認コードへ置換するケースを、次の
+  # 実行より前に fail-closed で検出するため
+  verify_outside_and_checker() {
+    if [[ "$(git hash-object -- scripts/check-skill-local-patches.sh 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
+      echo "エラー: checker 自身が書き換えられました。未承認コードのため以後実行しません(fail-closed)。"
+      return 1
+    fi
+    if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
+      echo "エラー: checker が契約範囲外の path を変更しました(fail-closed)。"
+      echo "git status --porcelain で範囲外の変更を特定し、tracked は git restore -- <path> / index は git restore --staged -- <path> で手動復旧してください(契約範囲用の却下手順では範囲外は戻りません)。checker 側の修正も必要です。"
+      return 1
+    fi
+    return 0
+  }
+
+  echo "==> 同期前の local patch 検証(check)"
+  pre_check_rc=0
+  bash scripts/check-skill-local-patches.sh || pre_check_rc=$?
+  if ! verify_outside_and_checker; then
+    echo "(npx は実行していません)"
+    exit 1
+  fi
+  if [[ "${pre_check_rc}" -ne 0 ]]; then
+    echo "エラー: 同期前の local patch 検証に失敗しました。修復してから再実行してください(fail-closed。npx は実行していません)。"
     exit 1
   fi
 elif [[ -f .agents/skills/LOCAL-PATCHES.md ]]; then
@@ -274,39 +318,9 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   PRE_APPLY_TREE="$(git write-tree)"
   echo "PRE_APPLY_TREE=${PRE_APPLY_TREE}  # 却下・復旧(git read-tree)で使う snapshot hash。控えておくこと"
 
-  # 契約範囲外の状態 digest。worktree 側は「HEAD を基底にした一時 index へ範囲外のみ
-  # git add -A」した tree hash で捉える(未追跡・削除を含む全ファイルが実 blob hash で
-  # 比較され、diff の表示文字列に依存しない = dirty なバイナリの上書きも検出する。
-  # 範囲内は HEAD のまま固定されるため apply による正当な変更では digest が動かない)。
-  # index 側は ls-files -s の blob hash で捉える(stage 状態の変更も検出する)
-  OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
-  outside_state() {
-    local tmp_index_dir wt_tree idx_digest
-    tmp_index_dir="$(mktemp -d)"
-    GIT_INDEX_FILE="${tmp_index_dir}/index" git read-tree HEAD
-    GIT_INDEX_FILE="${tmp_index_dir}/index" git add -A -- "${OUTSIDE_PATHSPEC[@]}"
-    wt_tree="$(GIT_INDEX_FILE="${tmp_index_dir}/index" git write-tree)"
-    rm -rf "${tmp_index_dir}"
-    idx_digest="$(git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" | git hash-object --stdin)"
-    echo "${wt_tree}:${idx_digest}"
-  }
-  PRE_OUTSIDE="$(outside_state)"
-
-  # checker の各実行の「直後」に、実行結果(成功・失敗)に関わらず範囲外 digest と
-  # checker 自身の blob hash を再検証する。apply が範囲外を書き換えて非 0 終了した場合や、
-  # checker 自身を未承認コードへ置換した場合を、次の実行・停止より前に検出するため
-  verify_outside_and_checker() {
-    if [[ "$(git hash-object -- scripts/check-skill-local-patches.sh 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
-      echo "エラー: checker 自身が書き換えられました。未承認コードのため以後実行しません(fail-closed)。"
-      return 1
-    fi
-    if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
-      echo "エラー: checker が契約範囲外の path を変更しました(fail-closed)。"
-      echo "git status --porcelain で範囲外の変更を特定し、tracked は git restore -- <path> / index は git restore --staged -- <path> で手動復旧してください(Step 6 の却下手順は契約範囲しか戻しません)。checker 側の修正も必要です。"
-      return 1
-    fi
-    return 0
-  }
+  # 範囲外 digest の基準(PRE_OUTSIDE)・outside_state・verify_outside_and_checker は
+  # Step 4 で checker の初回実行より前に定義・取得済みのものを同一 shell セッションで
+  # そのまま使う(ここで取り直すと、同期前 check 以降の範囲外変更が基準へ取り込まれてしまう)
 
   # local patch の再適用(--3way fallback や index 復元により、patch 対象 file や durable patch が
   # stage されることがある)
