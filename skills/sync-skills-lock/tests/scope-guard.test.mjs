@@ -112,6 +112,24 @@
 //                                   npx が .agents 自体をリポジトリ外向き symlink として
 //                                   作成する。実行後再検証が fail-closed で拒否し、
 //                                   リンク先への削除を行わないことを検証する
+//   - 'preexisting-symlink-in-scope': PR #412 レビュー指摘（第12巡・P0-1）の回帰。許可先
+//                                   ディレクトリ配下に実行前からリポジトリ外向き symlink が
+//                                   存在するレイアウトを再現する（許可先配下は prune-under で
+//                                   署名から除外されるため、npx がリンクを辿った外部書き込みは
+//                                   前後比較に現れない。npx 実行前の find -type l 走査だけが
+//                                   拒否できることを検証する）
+//   - 'ignored-overwrite-success' : PR #412 レビュー指摘（第12巡・P0-2）の回帰。npx が
+//                                   実行前から存在した ignored ファイル（.DS_Store）を
+//                                   上書きして正常終了する。成功経路でバックアップとの
+//                                   比較が変更を検出し、元の内容へ復元されたうえで同期
+//                                   自体は完走することを検証する
+//   - 'ignored-overwrite-on-failure': PR #412 レビュー指摘（第12巡・P0-2）の回帰。npx が
+//                                   既存 ignored ファイルを上書きした後に非ゼロ終了する。
+//                                   失敗経路（revert_in_scope）でもバックアップから復元
+//                                   されることを検証する
+//   - 'ignored-delete-success'    : PR #412 レビュー指摘（第12巡・P0-2）の回帰。npx が
+//                                   既存 ignored ファイルを削除して正常終了する。削除も
+//                                   「変化」としてバックアップから書き戻されることを検証する
 //   - 'first-install'             : 非退行。実行前に .agents ツリー自体が存在しない
 //                                   初回インストールで、npx が .agents/skills/<name>
 //                                   を新規作成しても誤検知せず完走することを検証する
@@ -275,6 +293,22 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "midrun-symlink-swap" ]]; then
   echo "leaked outside repo" > "\${skill_dir}/leaked.md"
 fi
 
+if [[ "\${TEST_NPX_SCENARIO:-}" == "ignored-overwrite-success" || "\${TEST_NPX_SCENARIO:-}" == "ignored-overwrite-on-failure" ]]; then
+  # 実行前から存在した ignored ファイル（.DS_Store）の内容だけを上書きする。
+  # 許可先配下は署名から除外されるため、シグネチャ比較には現れないケース。
+  echo "npx clobbered ignored metadata" > ".agents/skills/${SKILL_NAME}/.DS_Store"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "ignored-overwrite-on-failure" ]]; then
+  exit 1
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "ignored-delete-success" ]]; then
+  # 実行前から存在した ignored ファイルの削除を再現する（porcelain・シグネチャの
+  # どちらにも現れず、実行前バックアップとの比較でのみ検出できる）。
+  rm ".agents/skills/${SKILL_NAME}/.DS_Store"
+fi
+
 if [[ "\${TEST_NPX_SCENARIO:-}" == "agents-dir-chmod" ]]; then
   # 実行前から存在する .agents ディレクトリ自身の chmod のみ（配下・内容は不変）。
   # git はディレクトリの mode を追跡しないため porcelain には現れない。
@@ -416,12 +450,27 @@ exec "${realGit}" "\$@"
   // 許可先配下へ置き、abort 時のリバートで巻き添え削除されない（実行前インベントリで
   // 保全される）ことを検証できるようにする（PR #412 Bugbot Medium 指摘）。
   // ignored のため per-skill clean ガード（porcelain）は通過する。
-  if (scenario === 'ignored-residue-on-failure') {
+  if (
+    scenario === 'ignored-residue-on-failure' ||
+    scenario === 'ignored-overwrite-success' ||
+    scenario === 'ignored-overwrite-on-failure' ||
+    scenario === 'ignored-delete-success'
+  ) {
     writeFileSync(join(repoDir, '.gitignore'), '*.log\n.DS_Store\n')
     writeFileSync(
       join(repoDir, '.agents', 'skills', SKILL_NAME, '.DS_Store'),
       'pre-existing finder metadata\n',
     )
+  }
+
+  // 'preexisting-symlink-in-scope' 用: 許可先ディレクトリ配下（ルート 3 要素の lstat
+  // 検証では見えない深さ）にリポジトリ外向き symlink を置いてコミットする。許可先
+  // 配下は prune-under で署名から除外されるため、npx 実行前の find -type l 走査だけが
+  // このレイアウトを拒否できる。
+  if (scenario === 'preexisting-symlink-in-scope') {
+    const externalTarget = join(binDir, 'external-skill-store')
+    mkdirSync(externalTarget, { recursive: true })
+    symlinkSync(externalTarget, join(repoDir, '.agents', 'skills', SKILL_NAME, 'evil-link'))
   }
 
   sh('git add -A && git commit -q -m init', repoDir)
@@ -1163,7 +1212,7 @@ test('ケース20: npx が実行中に許可先を外向き symlink へ置換し
         )
         assert.match(
           combined,
-          /ignored 削除は行いません/,
+          /ignored 削除・既存 ignored の復元は行いません/,
           'symlink 検出時は許可先配下への削除系操作をスキップした旨が案内されること',
         )
         return true
@@ -1230,6 +1279,142 @@ test('ケース21: 初回インストールで npx が .agents 自体を外向�
     // skills-lock.json は checkout でリバートされ clean であること
     const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
     assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース22: 許可先配下に実行前から symlink がある場合、npx を実行する前に拒否して' +
+  '非ゼロ終了する（PR #412 第12巡 P0-1 の回帰）', () => {
+  const ctx = setupRepo('preexisting-symlink-in-scope')
+  const linkPath = join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, 'evil-link')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /配下に既存のシンボリックリンク/,
+          '許可先配下の symlink を検出したエラーメッセージが出ること',
+        )
+        assert.match(
+          combined,
+          /evil-link/,
+          '検出された symlink のパスが列挙されること',
+        )
+        return true
+      },
+    )
+
+    // npx が実行されていないこと（実行されると argv ログが必ず書かれる）。
+    // 配下の symlink 越しの書き込みはどの前後比較にも現れないため、実行前拒否だけが
+    // 防御になる。
+    assert.equal(
+      existsSync(ctx.argvLogFile),
+      false,
+      'npx が一度も実行されていないこと（find -type l 走査が npx より前に走る）',
+    )
+
+    // symlink 自体は削除・置換されず、確認できる状態のまま残ること
+    assert.equal(
+      readlinkSync(linkPath),
+      join(ctx.binDir, 'external-skill-store'),
+      'symlink は自動で置き換えられず残存すること（対処は人間の判断に委ねる）',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース23: npx が既存 ignored ファイルを上書きして正常終了した場合、成功経路で' +
+  'バックアップから復元されて同期は完走する（PR #412 第12巡 P0-2 の回帰）', () => {
+  const ctx = setupRepo('ignored-overwrite-success')
+  const dsStore = join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, '.DS_Store')
+  try {
+    const out = runScript(ctx)
+    assert.match(out, /更新完了/, '復元は警告扱いで、同期自体は完走すること')
+
+    // 上書きされた既存 ignored ファイルが実行前バックアップの内容へ戻っていること
+    // （許可先配下は署名から除外されるため、シグネチャ比較ではこの上書きを検出できず、
+    // バックアップとの直接比較だけが検出・復元の手段になる）
+    assert.equal(
+      readFileSync(dsStore, 'utf8'),
+      'pre-existing finder metadata\n',
+      'npx に上書きされた既存 ignored ファイルがバックアップから復元されること',
+    )
+
+    // スコープ内の正当な同期結果（SKILL.md の更新）は復元に巻き込まれず残ること
+    assert.equal(
+      readFileSync(join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, 'SKILL.md'), 'utf8'),
+      'updated upstream content\n',
+      '同期本体の書き込みは復元の影響を受けないこと',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース24: npx が既存 ignored ファイルを上書きした後に失敗した場合、失敗経路の' +
+  'リバートでもバックアップから復元される（PR #412 第12巡 P0-2 の回帰）', () => {
+  const ctx = setupRepo('ignored-overwrite-on-failure')
+  const dsStore = join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, '.DS_Store')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /実行が失敗しました/, 'npx 失敗の警告が出ること')
+        return true
+      },
+    )
+
+    // 失敗経路（revert_in_scope）でも既存 ignored ファイルが復元されること
+    // （checkout / git clean / 新規 ignored 削除はいずれも既存 ignored に触れないため、
+    // バックアップからの復元だけが破壊された内容を戻せる）
+    assert.equal(
+      readFileSync(dsStore, 'utf8'),
+      'pre-existing finder metadata\n',
+      '失敗経路でも既存 ignored ファイルがバックアップから復元されること',
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース25: npx が既存 ignored ファイルを削除した場合もバックアップから書き戻される' +
+  '（PR #412 第12巡 P0-2 の回帰。削除も「変化」として復元対象）', () => {
+  const ctx = setupRepo('ignored-delete-success')
+  const dsStore = join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, '.DS_Store')
+  try {
+    const out = runScript(ctx)
+    assert.match(out, /更新完了/, '復元は警告扱いで、同期自体は完走すること')
+
+    // 削除された既存 ignored ファイルがバックアップから書き戻されていること
+    assert.ok(
+      existsSync(dsStore),
+      '削除された既存 ignored ファイルがバックアップから書き戻されること',
+    )
+    assert.equal(
+      readFileSync(dsStore, 'utf8'),
+      'pre-existing finder metadata\n',
+      '書き戻された内容が実行前バックアップと一致すること',
+    )
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })

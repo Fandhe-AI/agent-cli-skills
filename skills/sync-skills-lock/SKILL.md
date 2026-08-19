@@ -384,7 +384,8 @@ filter_out_of_scope() {
 # Medium 指摘）。実行前インベントリ（SCOPE_INVENTORY_FILE。find -print0 の NUL 区切り
 # 全ファイル一覧）に存在しないパスに限り、許可先配下であることを再検証したうえで
 # 個別削除する。実行前から存在した ignored ファイルは内容が書き換えられていても
-# 削除しない（保全。要確認の報告はシグネチャ比較・手動確認に委ねる）。パス名に
+# 削除しない（保全。変更・削除の検出と復元は restore_preexisting_ignored が
+# 実行前バックアップとの比較で行う）。パス名に
 # スペース・改行を含み得る前提で、一覧の受け渡しは全経路 NUL 区切りで行う。
 # npx が新規作成した「ignored ファイルのみを含む空ディレクトリ」は best-effort で
 # 残り得るが、ファイル残置と異なり後続処理の誤認を生まないため許容する。
@@ -427,6 +428,99 @@ PYEOF
   return "${rc}"
 }
 
+# 実行前から許可先配下に存在した ignored ファイル（.DS_Store 等）を、npx 実行前の
+# バックアップ（IGNORED_BACKUP_DIR。相対パス構造・mode を保持）と比較し、変化
+# （内容・mode・種別の変更、削除）があればバックアップから復元する。許可先配下は
+# npx の正当な書き込み先だが、ignored ファイルは同期対象外であり npx が変更して
+# よい理由がないため、変更を検出したら復元して警告する（処理自体は継続してよい
+# 契約。復元の失敗のみ呼び出し側で非ゼロ終了へ倒す）。許可先配下は
+# repo_state_signature の prune-under で署名から除外されるため、この変化は
+# シグネチャ比較では検出できず、バックアップとの直接比較だけが検出手段になる。
+# 事前の symlink 走査（npx 実行前）により対象は regular file のみである前提。
+# 復元先が npx により symlink 化されている可能性に備え、書き込み前に unlink し、
+# 親ディレクトリの realpath が許可先内に収まることを検証する（リンク先への
+# 書き込み防止）。バックアップとの比較・復元は mode 比較を含むため、stat の
+# 出力書式差（BSD/GNU）を避けて python3 の os.lstat に統一する。
+restore_preexisting_ignored() {
+  # バックアップ対象が無ければ（初回インストール・既存 ignored なし）何もしない。
+  [[ -s "${IGNORED_BASELINE_FILE}" ]] || return 0
+  SKILL_DIR=".agents/skills/${SKILL_NAME}" IGNORED_BACKUP_DIR="${IGNORED_BACKUP_DIR}" IGNORED_BASELINE_FILE="${IGNORED_BASELINE_FILE}" python3 - <<'PYEOF'
+import os, shutil, stat, sys
+
+skill_dir = os.environ["SKILL_DIR"]
+prefix = skill_dir + "/"
+backup_dir = os.environ["IGNORED_BACKUP_DIR"]
+root = os.path.realpath(skill_dir)
+
+
+def fail(msg):
+    # 復元に失敗したまま正常終了すると、破壊された既存 ignored ファイルが
+    # 「復元済み」として扱われてしまうため、必ず非ゼロ終了して呼び出し側で
+    # fail-closed（バックアップ dir の保全 + 手動復旧の案内）に扱わせる。
+    print(f"restore_preexisting_ignored: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+with open(os.environ["IGNORED_BASELINE_FILE"], "rb") as f:
+    paths = [p for p in f.read().split(b"\0") if p]
+
+for raw in paths:
+    text = raw.decode("utf-8", "surrogateescape")
+    # 復元は kebab-case 検証済みの許可先配下に厳密に限定する（自前で列挙した
+    # 一覧でも、prefix 一致と `..` セグメント不在を自衛的に再検証する）。
+    if not text.startswith(prefix) or ".." in text.split("/"):
+        continue
+    backup = os.path.join(backup_dir, text)
+    try:
+        bst = os.lstat(backup)
+        changed = False
+        reason = ""
+        try:
+            cst = os.lstat(text)
+            if not stat.S_ISREG(cst.st_mode):
+                changed, reason = True, "種別が変化"
+            elif stat.S_IMODE(cst.st_mode) != stat.S_IMODE(bst.st_mode):
+                changed, reason = True, "mode が変化"
+            else:
+                with open(backup, "rb") as f1, open(text, "rb") as f2:
+                    while True:
+                        c1 = f1.read(1 << 20)
+                        c2 = f2.read(1 << 20)
+                        if c1 != c2:
+                            changed, reason = True, "内容が変化"
+                            break
+                        if not c1:
+                            break
+        except FileNotFoundError:
+            changed, reason = True, "削除されていた"
+        if not changed:
+            continue
+        parent = os.path.dirname(text)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+            real_parent = os.path.realpath(parent)
+            # 親ディレクトリが symlink 化されているとリンク先（リポジトリ外を
+            # 含む）へ書き込んでしまうため、realpath の包含を検証してから書く。
+            if real_parent != root and not real_parent.startswith(root + os.sep):
+                fail(f"復元先の親ディレクトリが許可先の外を指しています: {text}")
+        try:
+            # 復元先自体が symlink 化されていた場合にリンク先へ書かないよう、
+            # 既存エントリを外してから regular file として書き戻す。
+            os.unlink(text)
+        except FileNotFoundError:
+            pass
+        shutil.copyfile(backup, text)
+        os.chmod(text, stat.S_IMODE(bst.st_mode))
+        print(
+            f"警告: npx が実行前から存在した ignored ファイルを変更したため"
+            f"（{reason}）、バックアップから復元しました: {text}",
+            file=sys.stderr,
+        )
+    except OSError as e:
+        fail(f"{text} の復元に失敗: {e}")
+PYEOF
+}
+
 # スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更をリバートする。
 # npx 失敗・スコープ外検出・実行後 git status 取得失敗のすべての異常終端経路が
 # 共有する（PR #412 P1: どの異常経路でも生成済みのスコープ内変更を残置しない契約）。
@@ -447,13 +541,26 @@ PYEOF
 revert_in_scope() {
   git checkout -- skills-lock.json 2>/dev/null || true
   if [[ "${SCOPE_PATH_COMPROMISED}" -ne 0 ]]; then
-    echo "警告: 許可先経路が symlink 等へ置換されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。" >&2
+    # symlink 越しの走査を避けるため既存 ignored の復元も行わない。復元素材を
+    # 失わないよう、バックアップ dir は削除せず保全して手動復旧に委ねる。
+    IGNORED_BACKUP_KEEP=1
+    echo "警告: 許可先経路が symlink 等へ置換されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除・既存 ignored の復元は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。既存 ignored ファイルのバックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。" >&2
     return 0
   fi
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
   if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
     git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
     remove_new_ignored_in_scope || true
+  fi
+  # 既存 ignored の変更・削除はここでバックアップから戻す（checkout / clean /
+  # remove_new_ignored_in_scope はいずれも既存 ignored に触れないため、この復元が
+  # 唯一の回復経路）。復元自体が失敗した場合はバックアップ dir を保全して案内し、
+  # IGNORED_RESTORE_FAILED で呼び出し元へ伝える（手動復旧を要するため、npx 失敗
+  # 経路でも skip（continue）せずループ全体を exit 1 で停止させる）。
+  if ! restore_preexisting_ignored; then
+    IGNORED_RESTORE_FAILED=1
+    IGNORED_BACKUP_KEEP=1
+    echo "エラー: 実行前から存在した ignored ファイルの復元に失敗しました。バックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。手動で復旧してください。" >&2
   fi
 }
 
@@ -489,6 +596,12 @@ SNAP_FILTERED_BEFORE="$(mktemp)"
 SNAP_FILTERED_AFTER="$(mktemp)"
 NPX_OUTPUT_FILE="$(mktemp)"
 SCOPE_INVENTORY_FILE="$(mktemp)"
+IGNORED_BASELINE_FILE="$(mktemp)"
+# 既存 ignored ファイルの実行前バックアップ先（相対パス構造・mode を保持）。
+# 復元失敗時は IGNORED_BACKUP_KEEP=1 で削除を抑止し、手動復旧の素材として残す。
+IGNORED_BACKUP_DIR="$(mktemp -d)"
+IGNORED_BACKUP_KEEP=0
+IGNORED_RESTORE_FAILED=0
 
 # npx 実行後の許可先経路 再検証（verify_scope_path_after_run）の結果フラグ。
 # 1 のとき revert_in_scope は許可先配下への削除系操作を行わない（symlink 越しの
@@ -504,10 +617,45 @@ SCOPE_PATH_COMPROMISED=0
 # 許可先が不存在（初回インストール）の場合は空インベントリ（npx が作るものはすべて
 # 新規）とする。
 if [[ -e ".agents/skills/${SKILL_NAME}" ]]; then
+  # 許可先配下の既存 symlink の事前拒否。repo_state_signature は prune-under で
+  # 許可先配下を署名から除外するため、配下に実行前から symlink があると、npx が
+  # リンクを辿ってリポジトリ外へ書き込んでも前後比較のどの検査にも現れない
+  # （ルート 3 要素の lstat 検証は経路自身しか見ず、配下は守れない）。1 件でも
+  # あれば npx 未実行のまま fail-closed で中止する。この拒否により、後段の既存
+  # ignored バックアップ・復元は対象を regular file のみと仮定できる。走査自体の
+  # 失敗も「symlink なしと確認できない」であって「なし」ではないため中止する。
+  # レイアウト自体の異常で人間の確認を要するため、skip（continue）ではなく
+  # ループ全体を exit 1 で停止する（事前 lstat 検査と同じ扱い。npx 未実行のため残置なし）。
+  if ! SCOPE_PREEXISTING_SYMLINKS="$(find ".agents/skills/${SKILL_NAME}" -type l)"; then
+    echo "エラー: 許可先配下の symlink 走査（find）に失敗しました。リポジトリ外への書き込み経路が無いことを確認できないため中止します（fail-closed）。" >&2
+    exit 1
+  fi
+  if [[ -n "${SCOPE_PREEXISTING_SYMLINKS}" ]]; then
+    echo "エラー: 許可先（.agents/skills/${SKILL_NAME}）配下に既存のシンボリックリンクがあります。npx がリンクを辿ってリポジトリ外へ書き込んでも、配下を署名から除外している前後比較では検出できないため中止します（fail-closed）。以下を実体ファイルへ置き換えるか削除してから再実行してください:" >&2
+    printf '%s\n' "${SCOPE_PREEXISTING_SYMLINKS}" >&2
+    exit 1
+  fi
   if ! find ".agents/skills/${SKILL_NAME}" -print0 > "${SCOPE_INVENTORY_FILE}"; then
     echo "エラー: npx 実行前の許可先インベントリ取得（find）に失敗しました。リバート時に既存 ignored ファイルを誤削除しないための基準を確保できないため中止します。" >&2
     exit 1
   fi
+  # 既存 ignored ファイル（実行前時点）の列挙とバックアップ。実行前インベントリは
+  # パス一覧のみで内容を持たないため、npx が既存 ignored を上書き・削除しても
+  # そのままでは復元も検出もできない（許可先配下は署名から除外され、シグネチャ
+  # 比較にも現れない）。内容・mode を相対パス構造ごと退避し（cp -p）、実行後に
+  # restore_preexisting_ignored が比較・復元する。列挙・バックアップの失敗は
+  # 復元素材を確保できないため npx 未実行のまま中止する（fail-closed）。
+  if ! git ls-files -z --others --ignored --exclude-standard -- ".agents/skills/${SKILL_NAME}/" > "${IGNORED_BASELINE_FILE}"; then
+    echo "エラー: npx 実行前の既存 ignored ファイル列挙（git ls-files）に失敗しました。上書き・削除からの復元素材を確保できないため中止します（fail-closed）。" >&2
+    exit 1
+  fi
+  while IFS= read -r -d '' IGNORED_PATH; do
+    if ! mkdir -p "${IGNORED_BACKUP_DIR}/${IGNORED_PATH%/*}" \
+      || ! cp -p -- "${IGNORED_PATH}" "${IGNORED_BACKUP_DIR}/${IGNORED_PATH}"; then
+      echo "エラー: 既存 ignored ファイルのバックアップに失敗しました: ${IGNORED_PATH} — 上書き・削除からの復元素材を確保できないため中止します（fail-closed）。" >&2
+      exit 1
+    fi
+  done < "${IGNORED_BASELINE_FILE}"
 fi
 
 if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_BEFORE}"; then
@@ -638,12 +786,15 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
   # この残置変更を承認済みの変更と一緒に stage してしまわないよう、Step 6 の却下時と
   # 同じ手順で当該スキル分のみを即座にリバートしてから skip する。
   revert_in_scope
-  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}"
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
+  if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi
   # universal 無効の no-op は以降の全スキルでも再現するため、skip（continue）ではなく
   # ループ全体を停止する（事後検査・リバートは上で完了済み）。許可先経路の
   # symlink 化（SCOPE_PATH_COMPROMISED）もレイアウト自体の異常で人間の確認を要する
   # ため、同様にループ全体を停止する（事前 lstat 検査の exit 1 と同じ扱い）。
-  if [[ "${NPX_NOOP_DETECTED}" -eq 1 || "${SCOPE_PATH_COMPROMISED}" -eq 1 ]]; then
+  # 既存 ignored の復元失敗（IGNORED_RESTORE_FAILED）も手動復旧を要するため停止する
+  # （バックアップ dir は revert_in_scope が保全済み）。
+  if [[ "${NPX_NOOP_DETECTED}" -eq 1 || "${SCOPE_PATH_COMPROMISED}" -eq 1 || "${IGNORED_RESTORE_FAILED}" -eq 1 ]]; then
     exit 1
   fi
   echo "警告: 固定版を外した再実行はせず、当該スキルの変更をリバートして skip します。"
@@ -670,7 +821,8 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
   fi
   revert_in_scope
   echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
-  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}"
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
+  if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi
   exit 1
 fi
 
@@ -711,11 +863,26 @@ if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
   echo "  git clean -fd <path>     （変更前に存在しなかった未追跡ファイルの場合）" >&2
   echo "を実行してください。" >&2
   revert_in_scope
-  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}"
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
+  if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi
   exit 1
 fi
 
-rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}"
+# 成功経路でも既存 ignored ファイル（.DS_Store 等）の変更・削除を実行前バックアップ
+# との比較で検査する。許可先配下は署名から除外されるためシグネチャ比較には現れず、
+# この比較だけが検出手段になる。変化があればバックアップから復元して警告し、同期
+# 自体は継続する（ignored ファイルは同期対象外で、復元すれば成果物に影響しないため）。
+# 復元に失敗した場合のみバックアップ dir を保全し、手動復旧を要するためループ全体を
+# exit 1 で停止する（fail-closed）。
+if ! restore_preexisting_ignored; then
+  IGNORED_BACKUP_KEEP=1
+  echo "エラー: 実行前から存在した ignored ファイルの復元に失敗しました。バックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。手動で復旧してください。" >&2
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
+  exit 1
+fi
+
+rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
+if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi
 ```
 
 `npx skills add` は以下を行う:
@@ -885,20 +1052,21 @@ EOF
 1. **一次防御（`--agent universal`）**: Step 4 の npx 呼び出しに `--agent universal` を付け、書き込み先を union ストア（`.agents/skills/<name>/`）と `skills-lock.json` のみへ限定する。個別 agent 指定（`claude-code` 等）は `.agents/skills/` を経由せず対象ツリーへ直接コピーしレイアウトを変えてしまうため使わない
 2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、リポジトリルート全体（除外はスコープ内と、`.git` のうちこのフロー自身が前後スナップショット間に実行する `git status` で変動し得る `.git/index`・一時 lock〔`.git/*.lock`〕のみ。`.git/objects`・`.git/refs`・`packed-refs`・`HEAD`・`logs`・`worktrees`・`modules` を含む残り全域と `.git/config`・`.git/hooks/` 等の永続 Git メタデータは署名対象に含め、履歴・参照の改変やフック仕込み・設定改変も検出する。`.agents` / `.agents/skills` 自身は実行前に存在した場合のみ署名対象で、実行前に不存在だった場合に限り自身のメタデータを omit して初回インストールの正当な親作成を許容する）の状態シグネチャを `repo_state_signature`（`path_state` を起点 `.` へ適用。python3。通常ファイルは mode + 内容の sha256、シンボリックリンクは mode + リンク先の sha256、ディレクトリ・gitlink は自身の mode + 配下全エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本にまとめ、前後で比較する。git status に現れたパスだけをシグネチャ化する方式では、git がディレクトリの mode を追跡しない以上、スコープ外ディレクトリの chmod や `.gitignore` 対象ファイルの上書きを原理的に検出できないため、走査は status 由来のパス集合ではなく作業ツリー全体に対して行う（PR #412 P1 指摘群の同一クラス解消）。ステータス+パスの記録だけでなく全体シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
 
-両層の前提として、npx 実行前に許可先経路（`.agents` / `.agents/skills` / `.agents/skills/<name>`）の各要素を lstat 検証し、存在する要素が symlink または非ディレクトリなら npx を実行せず fail-closed で停止する（Step 4 フェンス冒頭）。スコープ外検査は許可先を「パス文字列」で走査除外するため、経路が実行前からリポジトリ外を指す symlink だと npx のリンク先への書き込みがどの検査にも現れない（PR #412 P0 指摘）。存在しない要素のみ、初回インストールの正当な新規作成として許容する。
+両層の前提として、npx 実行前に許可先経路（`.agents` / `.agents/skills` / `.agents/skills/<name>`）の各要素を lstat 検証し、存在する要素が symlink または非ディレクトリなら npx を実行せず fail-closed で停止する（Step 4 フェンス冒頭）。スコープ外検査は許可先を「パス文字列」で走査除外するため、経路が実行前からリポジトリ外を指す symlink だと npx のリンク先への書き込みがどの検査にも現れない（PR #412 P0 指摘）。存在しない要素のみ、初回インストールの正当な新規作成として許容する。加えて許可先**配下**も npx 実行前に `find -type l` で走査し、既存の symlink が 1 件でもあれば npx を実行せず fail-closed で停止する（許可先配下は `prune-under` により署名から除外されるため、配下の既存 symlink を npx が辿ってリポジトリ外へ書き込んでも前後シグネチャ比較には現れない。事前拒否だけが防御になる）。さらに許可先配下の**既存 ignored ファイル**（`.DS_Store` 等）は npx 実行前に一時バックアップディレクトリへ内容・mode ごと退避し（`cp -p`・相対パス構造を保持）、実行後にバックアップと比較して変更・削除を検出したらバックアップから復元する（成功経路では警告のうえ処理継続、失敗経路では `revert_in_scope` に組み込んで復元。復元自体が失敗した場合のみバックアップディレクトリを保全して非ゼロ終了する）。
 
 この事前検査は開始時点しか見ない（TOCTOU）ため、さらに 2 つの防御を重ねる（PR #412 P0 指摘・第7巡）:
 
 1. **許可先要素自身の署名（`prune-under`）**: 状態シグネチャは既存の許可先ディレクトリを「エントリごと除外」するのではなく、配下のみ除外して要素自身（種別・mode・symlink のリンク先）は前後で署名する（`SKILL_DIR_SIG_SPEC` の `prune-under`。実行前に不存在だった初回インストールのみ `prune` で全除外する）。npx が**実行中に**許可先を外向き symlink へ置換すると、前後シグネチャの不一致として検出される
 2. **実行後の再検証（`verify_scope_path_after_run`）**: npx 実行後（事後シグネチャ取得前）に許可先経路の全要素を再度 lstat し、存在する要素が symlink・非ディレクトリなら fail-closed で停止する。初回インストールで npx が `.agents` 自体を外向き symlink として作成したケース（親要素の omit / 許可先の prune によりシグネチャに現れない経路）もこれが拒否する。検出時（`SCOPE_PATH_COMPROMISED=1`）の `revert_in_scope` は `skills-lock.json` の復元のみ行い、許可先配下への `git checkout` / `git clean` / ignored 削除は一切行わない — symlink を通じてリンク先（リポジトリ外）のファイルを削除・書き換える事故を避けるため、リンク先の内容とリポジトリ外への書き込み有無の手動確認を案内して非ゼロ終了する（ループ全体を停止する）
 
-**検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、porcelain スナップショット比較（判定軸 1）**単独**では ignore されたパスへの書き込みを検出できない。しかし状態シグネチャ比較（判定軸 2）は `.gitignore` 対象を含む作業ツリー全体を走査して内容ハッシュへ取り込むため、ignore されたパスへの書き込みもシグネチャ不一致として検出できる（porcelain 由来の報告一覧に該当パスが載らないだけで、検出・停止自体は機能する）。シグネチャ比較はほかに、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容・パーミッションだけ上書きするケース、およびディレクトリ・gitlink（未初期化 submodule 含む）が異なる状態へ書き換わるケースも検出できる。`.git` 配下も `.git/index` と一時 lock（`.git/*.lock`）を除く全域（`objects`・`refs`・`packed-refs`・`HEAD`・`logs`・`worktrees`・`modules`・`config`・`hooks` 等）が署名対象であり、履歴・参照の改変も検出できる（旧実装ではこれらを prune しており検出不能だった。Issue #413 で追跡し PR #412 で解消）。スコープ内リバート（`revert_in_scope`）は、npx 実行前に取得した許可先配下の全ファイルインベントリ（`find -print0`。ignored 含む・NUL 区切り）との突き合わせで「npx が新規作成した `.gitignore` 対象ファイル」のみを個別削除するため、`.agents/skills/<name>/` 配下へ書き込まれた ignored ファイルも異常終了時に残置されない（Issue #413 の残項目として解消）一方、**実行前から存在した ignored ファイル（`.DS_Store` 等）は削除されず保全される**（`git clean -fdx` は既存 ignored ファイルまで巻き添え削除するため使わない。PR #412 Bugbot Medium 指摘。既存 ignored ファイルの内容が npx に書き換えられた可能性の確認はシグネチャ比較の報告と手動確認に委ね、削除はしない）。実際に残る制約は次の 2 点である: (1) prune している `.git/index`・`.git/*.lock` 自体への書き込みは検出できない（このフロー自身の `git status` が npx 実行後に必ず index を更新するため、署名対象へ含めると常に誤検知になる）。(2) `.git` の大半を署名対象にした代償として、同期実行中の並行 git 操作（他 worktree 含む）がシグネチャ不一致（誤検知）として同期を停止させ得る（注意事項参照。fail-closed 側に倒す設計判断）。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
+**検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、porcelain スナップショット比較（判定軸 1）**単独**では ignore されたパスへの書き込みを検出できない。しかし状態シグネチャ比較（判定軸 2）は `.gitignore` 対象を含む作業ツリー全体を走査して内容ハッシュへ取り込むため、ignore されたパスへの書き込みもシグネチャ不一致として検出できる（porcelain 由来の報告一覧に該当パスが載らないだけで、検出・停止自体は機能する）。シグネチャ比較はほかに、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容・パーミッションだけ上書きするケース、およびディレクトリ・gitlink（未初期化 submodule 含む）が異なる状態へ書き換わるケースも検出できる。`.git` 配下も `.git/index` と一時 lock（`.git/*.lock`）を除く全域（`objects`・`refs`・`packed-refs`・`HEAD`・`logs`・`worktrees`・`modules`・`config`・`hooks` 等）が署名対象であり、履歴・参照の改変も検出できる（旧実装ではこれらを prune しており検出不能だった。Issue #413 で追跡し PR #412 で解消）。スコープ内リバート（`revert_in_scope`）は、npx 実行前に取得した許可先配下の全ファイルインベントリ（`find -print0`。ignored 含む・NUL 区切り）との突き合わせで「npx が新規作成した `.gitignore` 対象ファイル」のみを個別削除するため、`.agents/skills/<name>/` 配下へ書き込まれた ignored ファイルも異常終了時に残置されない（Issue #413 の残項目として解消）一方、**実行前から存在した ignored ファイル（`.DS_Store` 等）は削除されず保全される**（`git clean -fdx` は既存 ignored ファイルまで巻き添え削除するため使わない。PR #412 Bugbot Medium 指摘）。既存 ignored ファイルを npx が上書き・削除したケースは、許可先配下が署名から除外されている以上シグネチャ比較には現れないため、npx 実行前に取得する内容・mode 込みのバックアップ（`IGNORED_BACKUP_DIR`）との比較で検出し、`restore_preexisting_ignored` がバックアップから復元する（成功経路では警告して継続、失敗経路では `revert_in_scope` の一部として復元。復元失敗時はバックアップディレクトリを保全して非ゼロ終了する）。この復元が regular file のみを前提にできるのは、npx 実行前の許可先配下 symlink 走査（`find -type l`）が既存 symlink を fail-closed で拒否しているためである。実際に残る制約は次の 2 点である: (1) prune している `.git/index`・`.git/*.lock` 自体への書き込みは検出できない（このフロー自身の `git status` が npx 実行後に必ず index を更新するため、署名対象へ含めると常に誤検知になる）。(2) `.git` の大半を署名対象にした代償として、同期実行中の並行 git 操作（他 worktree 含む）がシグネチャ不一致（誤検知）として同期を停止させ得る（注意事項参照。fail-closed 側に倒す設計判断）。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
 
 ## 注意事項
 
 - **全スキル sync での途中却下**: 1スキルずつ承認・stage を行うため、途中で却下しても承認済みスキルの stage は保持される。全スキル処理後に一括コミットする
 - **同期実行中はこのリポジトリでの並行 git 操作（他 worktree 含む）を行わないこと**: 状態シグネチャは `.git` 配下を `.git/index`・一時 lock を除き署名対象に含めるため、fetch・commit・checkout 等の並行操作は `refs`・`objects`・`logs`・`worktrees` を変動させ、シグネチャ不一致（誤検知）として同期を停止させ得る。検出漏れ（fail-open）ではなく停止（fail-closed）側に倒す設計であり、誤検知した場合は並行操作を止めて再実行する
-- **許可先経路が symlink の場合は実行できない**: `.agents` / `.agents/skills` / `.agents/skills/<name>` のいずれかが symlink または非ディレクトリだと、Step 4 冒頭の実体検証が npx 実行前に fail-closed で停止する（symlink 越しのリポジトリ外書き込みはスコープ外検査に現れないため）。実体ディレクトリへ置き換えてから再実行する。npx が**実行中に**許可先を symlink へ置換した場合（初回インストールで symlink として作成した場合を含む）も、許可先要素自身の署名（`prune-under`）と実行後再検証（`verify_scope_path_after_run`）が fail-closed で停止し、このとき許可先配下への `git clean` 等の削除系操作は行わない（symlink 越しのリンク先削除を避けるため。「書き込みスコープの制限」節を参照）
+- **許可先経路が symlink の場合は実行できない**: `.agents` / `.agents/skills` / `.agents/skills/<name>` のいずれかが symlink または非ディレクトリだと、Step 4 冒頭の実体検証が npx 実行前に fail-closed で停止する（symlink 越しのリポジトリ外書き込みはスコープ外検査に現れないため）。実体ディレクトリへ置き換えてから再実行する。npx が**実行中に**許可先を symlink へ置換した場合（初回インストールで symlink として作成した場合を含む）も、許可先要素自身の署名（`prune-under`）と実行後再検証（`verify_scope_path_after_run`）が fail-closed で停止し、このとき許可先配下への `git clean` 等の削除系操作は行わない（symlink 越しのリンク先削除を避けるため。「書き込みスコープの制限」節を参照）。許可先**配下**に既存の symlink がある場合も、npx 実行前の `find -type l` 走査が fail-closed で停止する（配下は署名から除外されており、リンク先への書き込みがどの検査にも現れないため）。該当 symlink を実体ファイルへ置き換えるか削除してから再実行する
+- **既存 ignored ファイルの変更は自動復元される**: 許可先配下に実行前から存在した ignored ファイル（`.DS_Store` 等）を npx が上書き・削除した場合、実行前バックアップとの比較で検出し、内容・mode をバックアップから復元する（成功経路では警告のうえ同期は継続）。復元に失敗した場合はバックアップディレクトリ（パスはエラーメッセージに表示）を残して停止するため、そこから手動で復旧する
 - **スコープ外書き込みを検出した場合はループ全体が停止する**: 「書き込みスコープの制限」節を参照。`continue` ではなく `exit 1` のため、承認・stage 済みの他スキル分が index に残ったまま処理が止まる。手動で `git status` を確認し、コミットするか `git reset` するかを判断する
 - **`skills-lock.json` は実行前 clean 前提で全体をステージする**: 単一 JSON ファイルのため部分ステージは現実的でない。Step 1 の事前ガードで clean を保証し、sync 由来以外の変更の混入を防ぐ
 - **ルートの `skills-lock.json` のみを編集**: submodule 配下は手を付けない

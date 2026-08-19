@@ -369,7 +369,8 @@ filter_out_of_scope() {
 # Medium 指摘）。実行前インベントリ（SCOPE_INVENTORY_FILE。find -print0 の NUL 区切り
 # 全ファイル一覧）に存在しないパスに限り、許可先配下であることを再検証したうえで
 # 個別削除する。実行前から存在した ignored ファイルは内容が書き換えられていても
-# 削除しない（保全。要確認の報告はシグネチャ比較・手動確認に委ねる）。パス名に
+# 削除しない（保全。変更・削除の検出と復元は restore_preexisting_ignored が
+# 実行前バックアップとの比較で行う）。パス名に
 # スペース・改行を含み得る前提で、一覧の受け渡しは全経路 NUL 区切りで行う。
 # npx が新規作成した「ignored ファイルのみを含む空ディレクトリ」は best-effort で
 # 残り得るが、ファイル残置と異なり後続処理の誤認を生まないため許容する。
@@ -412,6 +413,99 @@ PYEOF
   return "${rc}"
 }
 
+# 実行前から許可先配下に存在した ignored ファイル（.DS_Store 等）を、npx 実行前の
+# バックアップ（IGNORED_BACKUP_DIR。相対パス構造・mode を保持）と比較し、変化
+# （内容・mode・種別の変更、削除）があればバックアップから復元する。許可先配下は
+# npx の正当な書き込み先だが、ignored ファイルは同期対象外であり npx が変更して
+# よい理由がないため、変更を検出したら復元して警告する（処理自体は継続してよい
+# 契約。復元の失敗のみ呼び出し側で非ゼロ終了へ倒す）。許可先配下は
+# repo_state_signature の prune-under で署名から除外されるため、この変化は
+# シグネチャ比較では検出できず、バックアップとの直接比較だけが検出手段になる。
+# 事前の symlink 走査（npx 実行前）により対象は regular file のみである前提。
+# 復元先が npx により symlink 化されている可能性に備え、書き込み前に unlink し、
+# 親ディレクトリの realpath が許可先内に収まることを検証する（リンク先への
+# 書き込み防止）。バックアップとの比較・復元は mode 比較を含むため、stat の
+# 出力書式差（BSD/GNU）を避けて python3 の os.lstat に統一する。
+restore_preexisting_ignored() {
+  # バックアップ対象が無ければ（初回インストール・既存 ignored なし）何もしない。
+  [[ -s "${IGNORED_BASELINE_FILE}" ]] || return 0
+  SKILL_DIR=".agents/skills/${SKILL_NAME}" IGNORED_BACKUP_DIR="${IGNORED_BACKUP_DIR}" IGNORED_BASELINE_FILE="${IGNORED_BASELINE_FILE}" python3 - <<'PYEOF'
+import os, shutil, stat, sys
+
+skill_dir = os.environ["SKILL_DIR"]
+prefix = skill_dir + "/"
+backup_dir = os.environ["IGNORED_BACKUP_DIR"]
+root = os.path.realpath(skill_dir)
+
+
+def fail(msg):
+    # 復元に失敗したまま正常終了すると、破壊された既存 ignored ファイルが
+    # 「復元済み」として扱われてしまうため、必ず非ゼロ終了して呼び出し側で
+    # fail-closed（バックアップ dir の保全 + 手動復旧の案内）に扱わせる。
+    print(f"restore_preexisting_ignored: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+with open(os.environ["IGNORED_BASELINE_FILE"], "rb") as f:
+    paths = [p for p in f.read().split(b"\0") if p]
+
+for raw in paths:
+    text = raw.decode("utf-8", "surrogateescape")
+    # 復元は kebab-case 検証済みの許可先配下に厳密に限定する（自前で列挙した
+    # 一覧でも、prefix 一致と `..` セグメント不在を自衛的に再検証する）。
+    if not text.startswith(prefix) or ".." in text.split("/"):
+        continue
+    backup = os.path.join(backup_dir, text)
+    try:
+        bst = os.lstat(backup)
+        changed = False
+        reason = ""
+        try:
+            cst = os.lstat(text)
+            if not stat.S_ISREG(cst.st_mode):
+                changed, reason = True, "種別が変化"
+            elif stat.S_IMODE(cst.st_mode) != stat.S_IMODE(bst.st_mode):
+                changed, reason = True, "mode が変化"
+            else:
+                with open(backup, "rb") as f1, open(text, "rb") as f2:
+                    while True:
+                        c1 = f1.read(1 << 20)
+                        c2 = f2.read(1 << 20)
+                        if c1 != c2:
+                            changed, reason = True, "内容が変化"
+                            break
+                        if not c1:
+                            break
+        except FileNotFoundError:
+            changed, reason = True, "削除されていた"
+        if not changed:
+            continue
+        parent = os.path.dirname(text)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+            real_parent = os.path.realpath(parent)
+            # 親ディレクトリが symlink 化されているとリンク先（リポジトリ外を
+            # 含む）へ書き込んでしまうため、realpath の包含を検証してから書く。
+            if real_parent != root and not real_parent.startswith(root + os.sep):
+                fail(f"復元先の親ディレクトリが許可先の外を指しています: {text}")
+        try:
+            # 復元先自体が symlink 化されていた場合にリンク先へ書かないよう、
+            # 既存エントリを外してから regular file として書き戻す。
+            os.unlink(text)
+        except FileNotFoundError:
+            pass
+        shutil.copyfile(backup, text)
+        os.chmod(text, stat.S_IMODE(bst.st_mode))
+        print(
+            f"警告: npx が実行前から存在した ignored ファイルを変更したため"
+            f"（{reason}）、バックアップから復元しました: {text}",
+            file=sys.stderr,
+        )
+    except OSError as e:
+        fail(f"{text} の復元に失敗: {e}")
+PYEOF
+}
+
 # スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更をリバートする。
 # npx 失敗・スコープ外検出・実行後 git status 取得失敗のすべての異常終端経路が
 # 共有する（PR #412 P1: どの異常経路でも生成済みのスコープ内変更を残置しない契約）。
@@ -431,13 +525,24 @@ PYEOF
 revert_in_scope() {
   git checkout -- skills-lock.json 2>/dev/null || true
   if [[ "${SCOPE_PATH_COMPROMISED}" -ne 0 ]]; then
-    echo "警告: 許可先経路が symlink 等へ置換されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。" >&2
+    # symlink 越しの走査を避けるため既存 ignored の復元も行わない。復元素材を
+    # 失わないよう、バックアップ dir は削除せず保全して手動復旧に委ねる。
+    IGNORED_BACKUP_KEEP=1
+    echo "警告: 許可先経路が symlink 等へ置換されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除・既存 ignored の復元は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。既存 ignored ファイルのバックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。" >&2
     return 0
   fi
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
   if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
     git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
     remove_new_ignored_in_scope || true
+  fi
+  # 既存 ignored の変更・削除はここでバックアップから戻す（checkout / clean /
+  # remove_new_ignored_in_scope はいずれも既存 ignored に触れないため、この復元が
+  # 唯一の回復経路）。復元自体が失敗した場合はバックアップ dir を保全して案内する
+  # （この関数の呼び出し元はすべて exit 1 で終端するため、非ゼロ終了の契約は保たれる）。
+  if ! restore_preexisting_ignored; then
+    IGNORED_BACKUP_KEEP=1
+    echo "エラー: 実行前から存在した ignored ファイルの復元に失敗しました。バックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。手動で復旧してください。" >&2
   fi
 }
 
@@ -512,7 +617,12 @@ SNAP_FILTERED_AFTER="$(mktemp)"
 NPX_OUTPUT_FILE="$(mktemp)"
 UNTRACKED_LIST_FILE="$(mktemp)"
 SCOPE_INVENTORY_FILE="$(mktemp)"
-trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}" "${SCOPE_INVENTORY_FILE}"' EXIT
+IGNORED_BASELINE_FILE="$(mktemp)"
+# 既存 ignored ファイルの実行前バックアップ先（相対パス構造・mode を保持）。
+# 復元失敗時は IGNORED_BACKUP_KEEP=1 で削除を抑止し、手動復旧の素材として残す。
+IGNORED_BACKUP_DIR="$(mktemp -d)"
+IGNORED_BACKUP_KEEP=0
+trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"; if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi' EXIT
 
 # npx 実行後の許可先経路 再検証（verify_scope_path_after_run）の結果フラグ。
 # 1 のとき revert_in_scope は許可先配下への削除系操作を行わない（symlink 越しの
@@ -528,10 +638,43 @@ SCOPE_PATH_COMPROMISED=0
 # 許可先が不存在（初回インストール）の場合は空インベントリ（npx が作るものはすべて
 # 新規）とする。
 if [[ -e ".agents/skills/${SKILL_NAME}" ]]; then
+  # 許可先配下の既存 symlink の事前拒否。repo_state_signature は prune-under で
+  # 許可先配下を署名から除外するため、配下に実行前から symlink があると、npx が
+  # リンクを辿ってリポジトリ外へ書き込んでも前後比較のどの検査にも現れない
+  # （ルート 3 要素の lstat 検証は経路自身しか見ず、配下は守れない）。1 件でも
+  # あれば npx 未実行のまま fail-closed で中止する。この拒否により、後段の既存
+  # ignored バックアップ・復元は対象を regular file のみと仮定できる。走査自体の
+  # 失敗も「symlink なしと確認できない」であって「なし」ではないため中止する。
+  if ! SCOPE_PREEXISTING_SYMLINKS="$(find ".agents/skills/${SKILL_NAME}" -type l)"; then
+    echo "エラー: 許可先配下の symlink 走査（find）に失敗しました。リポジトリ外への書き込み経路が無いことを確認できないため中止します（fail-closed）。" >&2
+    exit 1
+  fi
+  if [[ -n "${SCOPE_PREEXISTING_SYMLINKS}" ]]; then
+    echo "エラー: 許可先（.agents/skills/${SKILL_NAME}）配下に既存のシンボリックリンクがあります。npx がリンクを辿ってリポジトリ外へ書き込んでも、配下を署名から除外している前後比較では検出できないため中止します（fail-closed）。以下を実体ファイルへ置き換えるか削除してから再実行してください:" >&2
+    printf '%s\n' "${SCOPE_PREEXISTING_SYMLINKS}" >&2
+    exit 1
+  fi
   if ! find ".agents/skills/${SKILL_NAME}" -print0 > "${SCOPE_INVENTORY_FILE}"; then
     echo "エラー: npx 実行前の許可先インベントリ取得（find）に失敗しました。リバート時に既存 ignored ファイルを誤削除しないための基準を確保できないため中止します。" >&2
     exit 1
   fi
+  # 既存 ignored ファイル（実行前時点）の列挙とバックアップ。実行前インベントリは
+  # パス一覧のみで内容を持たないため、npx が既存 ignored を上書き・削除しても
+  # そのままでは復元も検出もできない（許可先配下は署名から除外され、シグネチャ
+  # 比較にも現れない）。内容・mode を相対パス構造ごと退避し（cp -p）、実行後に
+  # restore_preexisting_ignored が比較・復元する。列挙・バックアップの失敗は
+  # 復元素材を確保できないため npx 未実行のまま中止する（fail-closed）。
+  if ! git ls-files -z --others --ignored --exclude-standard -- ".agents/skills/${SKILL_NAME}/" > "${IGNORED_BASELINE_FILE}"; then
+    echo "エラー: npx 実行前の既存 ignored ファイル列挙（git ls-files）に失敗しました。上書き・削除からの復元素材を確保できないため中止します（fail-closed）。" >&2
+    exit 1
+  fi
+  while IFS= read -r -d '' IGNORED_PATH; do
+    if ! mkdir -p "${IGNORED_BACKUP_DIR}/${IGNORED_PATH%/*}" \
+      || ! cp -p -- "${IGNORED_PATH}" "${IGNORED_BACKUP_DIR}/${IGNORED_PATH}"; then
+      echo "エラー: 既存 ignored ファイルのバックアップに失敗しました: ${IGNORED_PATH} — 上書き・削除からの復元素材を確保できないため中止します（fail-closed）。" >&2
+      exit 1
+    fi
+  done < "${IGNORED_BASELINE_FILE}"
 fi
 
 # npx 実行前のリポジトリ全体スナップショット（スコープ外書き込み検出の起点）。
@@ -744,6 +887,17 @@ if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
   echo "  git clean -fd <path>     （変更前に存在しなかった未追跡ファイルの場合）" >&2
   echo "を実行してください。" >&2
   revert_in_scope
+  exit 1
+fi
+
+# 成功経路でも既存 ignored ファイル（.DS_Store 等）の変更・削除を実行前バックアップ
+# との比較で検査する。許可先配下は署名から除外されるためシグネチャ比較には現れず、
+# この比較だけが検出手段になる。変化があればバックアップから復元して警告し、同期
+# 自体は継続する（ignored ファイルは同期対象外で、復元すれば成果物に影響しないため）。
+# 復元に失敗した場合のみバックアップ dir を保全して非ゼロ終了する（fail-closed）。
+if ! restore_preexisting_ignored; then
+  IGNORED_BACKUP_KEEP=1
+  echo "エラー: 実行前から存在した ignored ファイルの復元に失敗しました。バックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。手動で復旧してください。" >&2
   exit 1
 fi
 
