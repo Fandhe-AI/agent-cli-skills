@@ -91,6 +91,9 @@ fi
 # 要素のみ、初回インストールで npx が正当に新規作成するケースとして許容する
 # （後段の REPO_SIG_OMITS の条件付き omit と同じ判定基準）。-d は symlink を辿るが、
 # 直前の -L 判定で symlink を先に排除しているため実体の種別だけを見る。
+# この検査は開始時点のレイアウトのみを保証する（TOCTOU）。npx が実行中に許可先を
+# 置換するケースは、許可先要素自身の署名（SKILL_DIR_SIG_SPEC の prune-under）と
+# 実行後の再検証（verify_scope_path_after_run）が受け持つ。
 for SCOPE_PATH_COMPONENT in ".agents" ".agents/skills" ".agents/skills/${SKILL_NAME}"; do
   if [[ -L "${SCOPE_PATH_COMPONENT}" ]]; then
     echo "エラー: ${SCOPE_PATH_COMPONENT} がシンボリックリンクです。npx の書き込みがリンク先（リポジトリ外を含む）へ向かい、スコープ外書き込み検査で検出できないため中止します（fail-closed）。実体ディレクトリへ置き換えてから再実行してください。" >&2
@@ -114,6 +117,12 @@ done
 #                 （例: .git/MERGE_* は .git 直下にのみ一致し .git/hooks/ 配下の
 #                 同名ファイルには一致しない）。npx が書き換えてよいスコープ内と、
 #                 .git のうち通常の git 操作で変動し得る領域の限定除外に使う
+#   prune-under:<rel> — <rel> 自身のメタデータ（種別・mode・symlink のリンク先）は
+#                 記録するが、配下へは降下せず記録もしない（完全一致のみで glob
+#                 不可）。既存の許可先ディレクトリに使う: 配下（npx の正当な書き込み
+#                 先）は除外しつつ、要素自身のディレクトリ→symlink 置換・chmod は
+#                 前後シグネチャの不一致として検出する（PR #412 P0 指摘: エントリ
+#                 ごと prune すると npx 実行中の symlink 置換が署名に現れない）
 #   omit:<rel>  — <rel> 自身のメタデータ（存在・mode）は記録しないが配下は走査する
 #                 （実行前に存在しなかった親ディレクトリを npx が正当に新規作成する
 #                 ケースの許容に使う。完全一致のみで glob 不可）
@@ -145,13 +154,17 @@ import fnmatch, hashlib, os, stat, sys
 
 path = sys.argv[1]
 
-# 除外指定（prune: 走査ごと除外 / omit: 自身のメタデータのみ不記録）を解釈する。
+# 除外指定（prune: 走査ごと除外 / prune-under: 自身は記録し配下のみ除外 /
+# omit: 自身のメタデータのみ不記録）を解釈する。
 prunes = []
+prune_unders = set()
 omits = set()
 for spec in sys.argv[2:]:
     label, _, rel = spec.partition(":")
     if label == "prune" and rel:
         prunes.append(rel)
+    elif label == "prune-under" and rel:
+        prune_unders.add(rel)
     elif label == "omit" and rel:
         omits.add(rel)
     else:
@@ -231,7 +244,10 @@ try:
                 rel = os.path.relpath(dp, path)
                 if pruned(rel):
                     continue
-                kept.append(dname)
+                # prune-under は自身のエントリ（下の記録処理）は残しつつ降下だけを
+                # 止める（kept へ入れない = os.walk がこの配下へ降りない）。
+                if rel not in prune_unders:
+                    kept.append(dname)
                 if rel in omits:
                     continue
                 dst = os.lstat(dp)
@@ -277,7 +293,15 @@ PYEOF
 
 # リポジトリルート全体の状態シグネチャ（スコープ外書き込み検出の実体）。
 # 除外は次の 3 種のみ:
-#   - スコープ内 — skills-lock.json / .agents/skills/${SKILL_NAME}（npx の正当な書き込み先）
+#   - スコープ内 — skills-lock.json / .agents/skills/${SKILL_NAME}（npx の正当な書き込み先）。
+#     ただし許可先ディレクトリ自身の除外方法は SKILL_DIR_SIG_SPEC（npx 実行前に一度
+#     だけ確定）で切り替える: 既存なら prune-under（配下のみ除外・要素自身の種別・
+#     mode・symlink 先は署名）にして、npx が実行中に許可先を外向き symlink へ置換して
+#     リンク先へ書く TOCTOU を前後シグネチャ不一致として検出する（PR #412 P0 指摘。
+#     事前の lstat 検査は開始時点しか見ない）。実行前に不存在（初回インストール）の
+#     場合のみ prune（エントリごと除外）にして正当な新規作成を誤検知にしない — この
+#     場合の symlink 置換・symlink としての新規作成は、npx 実行後の許可先経路
+#     再検証（verify_scope_path_after_run）が fail-closed で拒否する
 #   - .git のうち、このスクリプト自身が前後スナップショット間に実行する git コマンドで
 #     変動し得る領域のみ — 前後シグネチャの間に走る git 操作は
 #     `git status --porcelain -z -uall`（実行後スナップショット取得）だけであり、
@@ -303,10 +327,14 @@ PYEOF
 # 空配列の "${arr[@]}" 展開は bash 3.2 の set -u で unbound になるため
 # ${arr[@]+...} 形式で参照する。
 REPO_SIG_OMITS=()
+# 既定は prune-under（既存許可先向け）。初回インストール（実行前に不存在）の場合のみ
+# npx 実行前の判定ブロックで prune へ切り替える。前後 2 回の呼び出しで同一で
+# なければならない（REPO_SIG_OMITS と同じ理由）。
+SKILL_DIR_SIG_SPEC="prune-under:.agents/skills/${SKILL_NAME}"
 repo_state_signature() {
   path_state . \
     "prune:skills-lock.json" \
-    "prune:.agents/skills/${SKILL_NAME}" \
+    "${SKILL_DIR_SIG_SPEC}" \
     "prune:.git/index" \
     "prune:.git/*.lock" \
     ${REPO_SIG_OMITS[@]+"${REPO_SIG_OMITS[@]}"}
@@ -335,6 +363,55 @@ filter_out_of_scope() {
   done < "${infile}"
 }
 
+# npx が新規作成した .gitignore 対象ファイルのみを許可先配下から削除する
+# （revert_in_scope の補助）。`git clean -fdx` は npx 実行前から許可先配下に存在した
+# ignored ファイル（.DS_Store 等）まで削除してしまうため使わない（PR #412 Bugbot
+# Medium 指摘）。実行前インベントリ（SCOPE_INVENTORY_FILE。find -print0 の NUL 区切り
+# 全ファイル一覧）に存在しないパスに限り、許可先配下であることを再検証したうえで
+# 個別削除する。実行前から存在した ignored ファイルは内容が書き換えられていても
+# 削除しない（保全。要確認の報告はシグネチャ比較・手動確認に委ねる）。パス名に
+# スペース・改行を含み得る前提で、一覧の受け渡しは全経路 NUL 区切りで行う。
+# npx が新規作成した「ignored ファイルのみを含む空ディレクトリ」は best-effort で
+# 残り得るが、ファイル残置と異なり後続処理の誤認を生まないため許容する。
+# ls-files の出力は pipe ではなく一時ファイルで python3 へ渡す（ヒアドキュメントで
+# プログラムを与える python3 は stdin をヒアドキュメントに占有されるため、pipe との
+# 併用ができない — 併用すると読み手のいない pipe への書き込みで SIGPIPE になる）。
+remove_new_ignored_in_scope() {
+  local ignored_list rc=0
+  ignored_list="$(mktemp)" || return 1
+  if git ls-files -z --others --ignored --exclude-standard -- ".agents/skills/${SKILL_NAME}/" > "${ignored_list}" 2>/dev/null; then
+    SKILL_DIR=".agents/skills/${SKILL_NAME}" INVENTORY_FILE="${SCOPE_INVENTORY_FILE}" IGNORED_LIST_FILE="${ignored_list}" python3 - <<'PYEOF' || rc=1
+import os
+
+skill_dir = os.environ["SKILL_DIR"]
+prefix = skill_dir + "/"
+with open(os.environ["INVENTORY_FILE"], "rb") as f:
+    inventory = {p for p in f.read().split(b"\0") if p}
+with open(os.environ["IGNORED_LIST_FILE"], "rb") as f:
+    ignored_paths = [p for p in f.read().split(b"\0") if p]
+
+for raw in ignored_paths:
+    text = raw.decode("utf-8", "surrogateescape")
+    # 削除は kebab-case 検証済みの許可先配下に厳密に限定する（ls-files の出力を
+    # 信用しきらず、prefix 一致と `..` セグメント不在を自衛的に再検証する）。
+    if not text.startswith(prefix) or ".." in text.split("/"):
+        continue
+    if raw in inventory:
+        continue  # 実行前から存在した ignored ファイルは保全する
+    try:
+        if os.path.isdir(text) and not os.path.islink(text):
+            continue  # ディレクトリ自体は削除対象にしない（ファイル・symlink のみ）
+        os.unlink(text)
+    except FileNotFoundError:
+        pass
+PYEOF
+  else
+    rc=1
+  fi
+  rm -f "${ignored_list}"
+  return "${rc}"
+}
+
 # スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更をリバートする。
 # npx 失敗・スコープ外検出・実行後 git status 取得失敗のすべての異常終端経路が
 # 共有する（PR #412 P1: どの異常経路でも生成済みのスコープ内変更を残置しない契約）。
@@ -343,18 +420,48 @@ filter_out_of_scope() {
 # コマンド全体が失敗し、もう一方（skills-lock.json）も復元されないまま抜けてしまう
 # ため、必ず1コマンド1パスで分離する。git clean はディレクトリが存在しない場合に
 # 非ゼロ終了するため、存在確認してから呼ぶ（set -e 下で無条件に呼ぶと呼び出し元の
-# 案内メッセージより先にスクリプトが停止し得る）。-x を付けるのは、npx が
-# .agents/skills/${SKILL_NAME}/ 配下へ書いた .gitignore 対象ファイルが -fd では
-# 削除されず異常終了後もスコープ内に残置されるため（Issue #413）。pathspec を
-# kebab-case 検証済みの当該スキルディレクトリへ厳密に限定しているため、-x でも
-# 削除対象がスコープ外の ignored ファイルへ広がることはない（skills-lock.json 側は
-# checkout で戻る）。
+# 案内メッセージより先にスクリプトが停止し得る）。.gitignore 対象の残置
+# （Issue #413）は -fdx ではなく remove_new_ignored_in_scope（実行前インベントリ
+# との突き合わせ）で解消する（既存 ignored ファイルの巻き添え削除防止）。
+# 実行後再検証（verify_scope_path_after_run）が許可先経路の symlink 化・非
+# ディレクトリ化を検出した場合（SCOPE_PATH_COMPROMISED=1）は、checkout・clean・
+# ignored 削除のパス走査がリンク先（リポジトリ外を含む）へ向かい得るため、
+# skills-lock.json の復元のみ行い、許可先配下への削除系操作は一切行わず案内に留める
+# （symlink を通じた外部削除の防止。fail-closed）。
 revert_in_scope() {
   git checkout -- skills-lock.json 2>/dev/null || true
+  if [[ "${SCOPE_PATH_COMPROMISED}" -ne 0 ]]; then
+    echo "警告: 許可先経路が symlink 等へ置換されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。" >&2
+    return 0
+  fi
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
   if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
-    git clean -fdx -- ".agents/skills/${SKILL_NAME}/" || true
+    git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
+    remove_new_ignored_in_scope || true
   fi
+}
+
+# npx 実行後の許可先経路の再検証（PR #412 P0 指摘: TOCTOU）。事前の lstat 検査は
+# 開始時点しか見ないため、npx が実行中に許可先（またはその親）を外向き symlink へ
+# 置換した・初回インストールで .agents 自体を symlink として作成したケースは、
+# 事後に全パス要素を再度 lstat しなければ検出できない（存在する要素はすべて実体の
+# ディレクトリであることを要求し、symlink・非ディレクトリは fail-closed で拒否）。
+# 併せて既存許可先は prune-under により要素自身が前後シグネチャへ署名されるため、
+# 置換自体もシグネチャ不一致として検出される（この関数はその場合の原因特定と、
+# 初回インストール（prune でシグネチャに現れない）の防御を担う）。
+verify_scope_path_after_run() {
+  local component
+  for component in ".agents" ".agents/skills" ".agents/skills/${SKILL_NAME}"; do
+    if [[ -L "${component}" ]]; then
+      echo "エラー: npx 実行後の再検証で ${component} がシンボリックリンクになっています。npx が実行中に許可先を symlink へ置換し、リンク先（リポジトリ外を含む）へ書き込んだ可能性があります。リンク先の内容とリポジトリ外への書き込み有無を手動確認してください（fail-closed）。" >&2
+      return 1
+    fi
+    if [[ -e "${component}" && ! -d "${component}" ]]; then
+      echo "エラー: npx 実行後の再検証で ${component} がディレクトリではありません。npx の書き込み先として想定外の実体のため、手動確認が必要です（fail-closed）。" >&2
+      return 1
+    fi
+  done
+  return 0
 }
 
 echo "==> skills-lock.json を更新中: ${SKILL_NAME} (source: ${SOURCE_REPO})"
@@ -404,7 +511,28 @@ SNAP_FILTERED_BEFORE="$(mktemp)"
 SNAP_FILTERED_AFTER="$(mktemp)"
 NPX_OUTPUT_FILE="$(mktemp)"
 UNTRACKED_LIST_FILE="$(mktemp)"
-trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}"' EXIT
+SCOPE_INVENTORY_FILE="$(mktemp)"
+trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}" "${SCOPE_INVENTORY_FILE}"' EXIT
+
+# npx 実行後の許可先経路 再検証（verify_scope_path_after_run）の結果フラグ。
+# 1 のとき revert_in_scope は許可先配下への削除系操作を行わない（symlink 越しの
+# リポジトリ外削除の防止）。npx 実行直後に一度だけ更新する。
+SCOPE_PATH_COMPROMISED=0
+
+# npx 実行前の許可先配下の全ファイルインベントリ（.gitignore 対象を含む。
+# find -print0 の NUL 区切り）。revert_in_scope（remove_new_ignored_in_scope）が
+# 「npx が新規作成した ignored ファイル」だけを選別削除するための基準になる
+# （実行前から存在した ignored ファイルの巻き添え削除防止。PR #412 Bugbot Medium
+# 指摘）。取得に失敗すると選別基準を失い、リバートが既存 ignored ファイルを誤削除
+# し得るため fail-closed で中止する（この時点では npx 未実行のため残置なし）。
+# 許可先が不存在（初回インストール）の場合は空インベントリ（npx が作るものはすべて
+# 新規）とする。
+if [[ -e ".agents/skills/${SKILL_NAME}" ]]; then
+  if ! find ".agents/skills/${SKILL_NAME}" -print0 > "${SCOPE_INVENTORY_FILE}"; then
+    echo "エラー: npx 実行前の許可先インベントリ取得（find）に失敗しました。リバート時に既存 ignored ファイルを誤削除しないための基準を確保できないため中止します。" >&2
+    exit 1
+  fi
+fi
 
 # npx 実行前のリポジトリ全体スナップショット（スコープ外書き込み検出の起点）。
 # -z は改行等を含むパスでも1レコード1件を保つため、後段の filter_out_of_scope が
@@ -433,6 +561,14 @@ if [[ ! -e ".agents" && ! -L ".agents" ]]; then
 fi
 if [[ ! -e ".agents/skills" && ! -L ".agents/skills" ]]; then
   REPO_SIG_OMITS+=("omit:.agents/skills")
+fi
+# 許可先ディレクトリ自身も同じ基準で確定する: 既存なら prune-under（既定値）のまま
+# 要素自身を署名し、npx 実行中のディレクトリ→symlink 置換（TOCTOU）を前後不一致で
+# 検出する。実行前に不存在（初回インストール）の場合のみ prune へ切り替え、npx に
+# よる正当な新規作成を誤検知にしない（このケースの symlink 化は実行後の
+# verify_scope_path_after_run が拒否する）。
+if [[ ! -e ".agents/skills/${SKILL_NAME}" && ! -L ".agents/skills/${SKILL_NAME}" ]]; then
+  SKILL_DIR_SIG_SPEC="prune:.agents/skills/${SKILL_NAME}"
 fi
 
 # リポジトリ全体の状態シグネチャは「その時点のディスク内容・モード」を読むため、
@@ -493,6 +629,16 @@ if [[ "${TEE_STATUS}" -ne 0 ]]; then
   NPX_STATUS=1
 fi
 
+# 許可先経路の実行後再検証（PR #412 P0 指摘: 実行中の symlink 置換 / 初回
+# インストールでの symlink 作成）。事後シグネチャ取得より前にここで一度だけ判定し、
+# 検出時は共通失敗経路へ合流させる（revert_in_scope は SCOPE_PATH_COMPROMISED を
+# 見て許可先配下への削除系操作を行わず、リポジトリ外書き込みの可能性の手動確認を
+# 案内する）。
+if ! verify_scope_path_after_run; then
+  SCOPE_PATH_COMPROMISED=1
+  NPX_STATUS=1
+fi
+
 # CLI がバージョン更新等で --agent universal を認識できなくなった場合、
 # エラー表示のうえ exit 0 の no-op になる（実測: skills@1.5.22 で確認済み）。
 # 検知せず先へ進むと「同期したつもりで何も更新されていない」まま完了扱いに
@@ -505,14 +651,14 @@ fi
 # 事後検査へ必ず到達」の契約を守る（NPX_NOOP_DETECTED は重複する汎用メッセージの
 # 抑止にのみ使い、検査・リバートの経路は変えない）。
 NPX_NOOP_DETECTED=0
-if [[ "${NPX_STATUS}" -eq 0 ]] && grep -q "Invalid agents" "${NPX_OUTPUT_FILE}"; then
+if [[ "${NPX_STATUS}" -eq 0 && "${SCOPE_PATH_COMPROMISED}" -eq 0 ]] && grep -q "Invalid agents" "${NPX_OUTPUT_FILE}"; then
   echo "エラー: skills CLI が --agent universal を認識せず、何も実行していません（exit 0 の no-op）。SKILLS_CLI_VERSION 更新時は SKILL.md の「skills CLI のバージョン固定と更新手順」節に従い universal の有効性を再確認してください。" >&2
   NPX_NOOP_DETECTED=1
   NPX_STATUS=1
 fi
 
 if [[ "${NPX_STATUS}" -ne 0 ]]; then
-  if [[ "${NPX_NOOP_DETECTED}" -eq 0 ]]; then
+  if [[ "${NPX_NOOP_DETECTED}" -eq 0 && "${SCOPE_PATH_COMPROMISED}" -eq 0 ]]; then
     echo "エラー: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害・ダウンロード中断等、原因は問いません）。" >&2
   fi
   # 失敗が部分書き込み後に発生した場合、skills-lock.json / .agents/skills/${SKILL_NAME}/

@@ -94,10 +94,24 @@
 //                                   オブジェクト領域を prune していた旧実装では porcelain・
 //                                   シグネチャのどちらにも現れず検出不能だった。prune を
 //                                   index・lock のみへ縮小したことで検出できることを検証）
-//   - 'ignored-residue-on-failure': Issue #413 残項目の回帰。npx がスコープ内へ
-//                                   .gitignore 対象ファイルを書いた後に非ゼロ終了する。
-//                                   revert_in_scope の `git clean -fdx` により異常終了時も
-//                                   ignored ファイルがスコープ内に残置されないことを検証
+//   - 'ignored-residue-on-failure': Issue #413 残項目 + PR #412 Bugbot Medium の回帰。
+//                                   npx がスコープ内へ .gitignore 対象ファイルを書いた後に
+//                                   非ゼロ終了する。異常終了時に npx が新規作成した
+//                                   ignored ファイルは残置されない一方、実行前から存在
+//                                   した ignored ファイル（.DS_Store 等）は実行前
+//                                   インベントリとの突き合わせで保全されることを検証
+//   - 'midrun-symlink-swap'       : PR #412 レビュー指摘（第7巡・P0）の回帰。事前の
+//                                   lstat 検査を通過した後、npx が実行中に許可先
+//                                   ディレクトリごとリポジトリ外向き symlink へ置換して
+//                                   リンク先へ書き込む（TOCTOU。実行後再検証 +
+//                                   許可先要素自身の署名（prune-under）で検出し、
+//                                   git clean がリンク先を削除しないことを検証する）
+//   - 'first-install-symlink-agents': PR #412 レビュー指摘（第7巡・P0）の回帰。初回
+//                                   インストール（実行前に .agents 不存在 = 親要素が
+//                                   omit / 許可先が prune でシグネチャに現れない）で、
+//                                   npx が .agents 自体をリポジトリ外向き symlink として
+//                                   作成する。実行後再検証が fail-closed で拒否し、
+//                                   リンク先への削除を行わないことを検証する
 //   - 'first-install'             : 非退行。実行前に .agents ツリー自体が存在しない
 //                                   初回インストールで、npx が .agents/skills/<name>
 //                                   を新規作成しても誤検知せず完走することを検証する
@@ -134,6 +148,9 @@ function setupRepo(scenario) {
   const repoDir = mkdtempSync(join(tmpdir(), 'sync-skills-lock-scope-test-'))
   const binDir = mkdtempSync(join(tmpdir(), 'sync-skills-lock-scope-bin-'))
   const argvLogFile = join(binDir, 'npx-argv.log')
+  // 'midrun-symlink-swap' / 'first-install-symlink-agents' で symlink の指す先になる
+  // リポジトリ外の実ディレクトリ（ここへの書き込み・削除の有無を検証する）。
+  const externalTargetDir = join(binDir, 'external-target')
 
   writeFileSync(join(binDir, 'gh'), '#!/usr/bin/env bash\nexit 0\n')
   chmodSync(join(binDir, 'gh'), 0o755)
@@ -152,6 +169,12 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "invalid-agents" ]]; then
 fi
 
 skill_dir=".agents/skills/${SKILL_NAME}"
+if [[ "\${TEST_NPX_SCENARIO:-}" == "first-install-symlink-agents" ]]; then
+  # 初回インストールで npx が .agents 自体をリポジトリ外向き symlink として作成する
+  # ケースを再現する（以降の generic 書き込みは symlink 経由でリンク先へ落ちる）。
+  mkdir -p "${externalTargetDir}/skills"
+  ln -s "${externalTargetDir}" ".agents"
+fi
 # 'first-install' シナリオでは実行前に .agents ツリーが存在しないため、実物の
 # npx skills add と同様に親ディレクトリごと作成する（既存時は no-op）。
 mkdir -p "\${skill_dir}"
@@ -243,6 +266,15 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "ignored-residue-on-failure" ]]; then
   exit 1
 fi
 
+if [[ "\${TEST_NPX_SCENARIO:-}" == "midrun-symlink-swap" ]]; then
+  # 事前 lstat 検査（実行前）を通過した後、実行中に許可先ディレクトリごと
+  # リポジトリ外向き symlink へ置換し、リンク先へ書き込む（TOCTOU の再現）。
+  rm -rf "\${skill_dir}"
+  mkdir -p "${externalTargetDir}"
+  ln -s "${externalTargetDir}" "\${skill_dir}"
+  echo "leaked outside repo" > "\${skill_dir}/leaked.md"
+fi
+
 if [[ "\${TEST_NPX_SCENARIO:-}" == "agents-dir-chmod" ]]; then
   # 実行前から存在する .agents ディレクトリ自身の chmod のみ（配下・内容は不変）。
   # git はディレクトリの mode を追跡しないため porcelain には現れない。
@@ -308,10 +340,15 @@ exec "${realGit}" "\$@"
   sh('git config user.email test@example.com', repoDir)
   sh('git config user.name test', repoDir)
 
-  // 'first-install' 用: 実行前に .agents ツリー自体が存在しない状態を再現するため、
-  // union ストアの事前作成をスキップする（npx スタブが mkdir -p で新規作成する）。
-  // 'symlink-scope-path' も実ディレクトリの事前作成をスキップする（下で symlink を作る）。
-  if (scenario !== 'first-install' && scenario !== 'symlink-scope-path') {
+  // 'first-install' / 'first-install-symlink-agents' 用: 実行前に .agents ツリー自体が
+  // 存在しない状態を再現するため、union ストアの事前作成をスキップする（npx スタブが
+  // 新規作成する）。'symlink-scope-path' も実ディレクトリの事前作成をスキップする
+  // （下で symlink を作る）。
+  if (
+    scenario !== 'first-install' &&
+    scenario !== 'first-install-symlink-agents' &&
+    scenario !== 'symlink-scope-path'
+  ) {
     mkdirSync(join(repoDir, '.agents', 'skills', SKILL_NAME), { recursive: true })
     writeFileSync(
       join(repoDir, '.agents', 'skills', SKILL_NAME, 'SKILL.md'),
@@ -348,7 +385,7 @@ exec "${realGit}" "\$@"
     writeFileSync(outOfScopePath, 'baseline content\n')
     sh('git add -A && git commit -q -m init', repoDir)
     writeFileSync(outOfScopePath, 'pre-existing wip edit (uncommitted)\n')
-    return { repoDir, binDir, scenario, argvLogFile }
+    return { repoDir, binDir, scenario, argvLogFile, externalTargetDir }
   }
 
   // 'dir-chmod-out-of-scope' 用: スコープ外ディレクトリを clean な追跡状態で用意する
@@ -359,7 +396,7 @@ exec "${realGit}" "\$@"
     mkdirSync(dirname(outOfScopePath), { recursive: true })
     writeFileSync(outOfScopePath, 'baseline content\n')
     sh('git add -A && git commit -q -m init', repoDir)
-    return { repoDir, binDir, scenario, argvLogFile }
+    return { repoDir, binDir, scenario, argvLogFile, externalTargetDir }
   }
 
   // 'symlink-scope-path' 用: 許可先 .agents/skills/<name> をリポジトリ外
@@ -373,10 +410,18 @@ exec "${realGit}" "\$@"
     symlinkSync(externalTarget, join(repoDir, '.agents', 'skills', SKILL_NAME))
   }
 
-  // 'ignored-residue-on-failure' 用: *.log を ignore する .gitignore をコミットに含め、
-  // npx スタブが書く debug.log がスコープ内の .gitignore 対象ファイルになるようにする。
+  // 'ignored-residue-on-failure' 用: *.log / .DS_Store を ignore する .gitignore を
+  // コミットに含め、npx スタブが書く debug.log がスコープ内の .gitignore 対象ファイルに
+  // なるようにする。加えて「実行前から存在した ignored ファイル」（.DS_Store）を
+  // 許可先配下へ置き、abort 時のリバートで巻き添え削除されない（実行前インベントリで
+  // 保全される）ことを検証できるようにする（PR #412 Bugbot Medium 指摘）。
+  // ignored のため per-skill clean ガード（porcelain）は通過する。
   if (scenario === 'ignored-residue-on-failure') {
-    writeFileSync(join(repoDir, '.gitignore'), '*.log\n')
+    writeFileSync(join(repoDir, '.gitignore'), '*.log\n.DS_Store\n')
+    writeFileSync(
+      join(repoDir, '.agents', 'skills', SKILL_NAME, '.DS_Store'),
+      'pre-existing finder metadata\n',
+    )
   }
 
   sh('git add -A && git commit -q -m init', repoDir)
@@ -398,7 +443,7 @@ exec "${realGit}" "\$@"
     writeFileSync(join(repoDir, '.claude', 'wip-dir', 'notes.md'), 'pre-existing nested wip\n')
   }
 
-  return { repoDir, binDir, scenario, argvLogFile }
+  return { repoDir, binDir, scenario, argvLogFile, externalTargetDir }
 }
 
 function runScript({ repoDir, binDir, scenario }) {
@@ -1050,8 +1095,8 @@ test('ケース18: .git/refs 配下への ref ファイル追加を全体シグ�
   }
 })
 
-test('ケース19: npx 異常終了時、スコープ内へ書かれた .gitignore 対象ファイルも残置されない' +
-  '（Issue #413 残項目の回帰。revert_in_scope の git clean -fdx 検証）', () => {
+test('ケース19: npx 異常終了時、npx 新規作成の .gitignore 対象ファイルは残置されず、' +
+  '実行前から存在した ignored ファイルは保全される（Issue #413 + Bugbot Medium の回帰）', () => {
   const ctx = setupRepo('ignored-residue-on-failure')
   const ignoredResidue = join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, 'debug.log')
   try {
@@ -1065,11 +1110,20 @@ test('ケース19: npx 異常終了時、スコープ内へ書かれた .gitigno
       },
     )
 
-    // -fd（-x なし）だと .gitignore 対象の debug.log だけがリバートをすり抜けて残る
+    // 素の git clean -fd だと .gitignore 対象の debug.log だけがリバートをすり抜けて
+    // 残る（npx 新規作成分はインベントリ突き合わせの個別削除が担う）
     assert.equal(
       existsSync(ignoredResidue),
       false,
-      'スコープ内へ書かれた .gitignore 対象ファイルが -fdx により削除されていること',
+      'npx が新規作成した .gitignore 対象ファイルがリバートで削除されていること',
+    )
+
+    // 実行前から存在した ignored ファイルは実行前インベントリで保全される
+    // （git clean -fdx だとここで巻き添え削除される。PR #412 Bugbot Medium 指摘）
+    assert.equal(
+      readFileSync(join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, '.DS_Store'), 'utf8'),
+      'pre-existing finder metadata\n',
+      '実行前から存在した ignored ファイル（.DS_Store）が abort 時に保全されること',
     )
 
     // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
@@ -1080,6 +1134,102 @@ test('ケース19: npx 異常終了時、スコープ内へ書かれた .gitigno
       ctx.repoDir,
     ).trim()
     assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース20: npx が実行中に許可先を外向き symlink へ置換した場合、実行後再検証が拒否し、' +
+  'git clean がリンク先を削除しない（PR #412 第7巡 P0 の回帰。TOCTOU）', () => {
+  const ctx = setupRepo('midrun-symlink-swap')
+  const skillDirPath = join(ctx.repoDir, '.agents', 'skills', SKILL_NAME)
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /実行後の再検証で .* がシンボリックリンクになっています/,
+          '実行後再検証が symlink 置換を検出したエラーメッセージが出ること' +
+            '（事前 lstat 検査は開始時点しか見ないため、この経路の防御は実行後再検証が担う）',
+        )
+        assert.match(
+          combined,
+          /手動確認/,
+          'リポジトリ外書き込みの可能性の手動確認が案内されること',
+        )
+        assert.match(
+          combined,
+          /ignored 削除は行いません/,
+          'symlink 検出時は許可先配下への削除系操作をスキップした旨が案内されること',
+        )
+        return true
+      },
+    )
+
+    // リンク先（リポジトリ外）へ書かれたファイルが git clean 等で削除されていないこと
+    // （symlink 越しの外部削除の防止。残置内容は人間の手動確認に委ねる）
+    assert.equal(
+      readFileSync(join(ctx.externalTargetDir, 'leaked.md'), 'utf8'),
+      'leaked outside repo\n',
+      'symlink のリンク先（リポジトリ外）のファイルが削除・変更されず残ること',
+    )
+
+    // 置換された symlink 自体も自動で除去されず、確認できる状態のまま残ること
+    assert.equal(
+      readlinkSync(skillDirPath),
+      ctx.externalTargetDir,
+      '許可先を置換した symlink が自動除去されず残存すること（対処は人間の判断に委ねる）',
+    )
+
+    // skills-lock.json は checkout でリバートされ clean であること
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース21: 初回インストールで npx が .agents 自体を外向き symlink として作成した場合、' +
+  '実行後再検証が拒否する（PR #412 第7巡 P0 の回帰。omit/prune はシグネチャに現れない経路）', () => {
+  const ctx = setupRepo('first-install-symlink-agents')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /実行後の再検証で \.agents がシンボリックリンクになっています/,
+          '実行後再検証が .agents の symlink 作成を検出したエラーメッセージが出ること' +
+            '（初回インストールでは .agents が omit・許可先が prune のためシグネチャに' +
+            '現れず、実行後再検証だけが防御になる）',
+        )
+        return true
+      },
+    )
+
+    // リンク先（リポジトリ外）へ symlink 経由で書かれたファイルが削除されていないこと
+    assert.ok(
+      existsSync(join(ctx.externalTargetDir, 'skills', SKILL_NAME, 'SKILL.md')),
+      'symlink 経由でリンク先に書かれたファイルが削除されず残ること（手動確認に委ねる）',
+    )
+
+    // .agents の symlink 自体も自動で除去されず残ること
+    assert.equal(
+      readlinkSync(join(ctx.repoDir, '.agents')),
+      ctx.externalTargetDir,
+      'npx が作成した .agents symlink が自動除去されず残存すること',
+    )
+
+    // skills-lock.json は checkout でリバートされ clean であること
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })
