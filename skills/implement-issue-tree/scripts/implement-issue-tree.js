@@ -4931,9 +4931,15 @@ async function remeasureResidualBytesNow() {
     const fallback = buildPhysicalByteMeasureTargets(physicalEntries, independentCount)
     if (fallback.ok) {
       // 物理一覧は測定専用の差し替えであり、削除経路（sweepEligiblePaths・cleanup）へは流さない
-      // （buildPhysicalByteMeasureTargets のコメント参照）。confirmedRemovedPaths による除外は
-      // 台帳ベースの経路と同じ理由（削除成功確認済みパスの測定対象化を避ける）で維持する。
-      targetPaths = fallback.paths.filter((p) => !confirmedRemovedPaths.has(p))
+      // （buildPhysicalByteMeasureTargets のコメント参照）。ここで confirmedRemovedPaths による
+      // 除外は行わない — fallback.paths は `git worktree list --porcelain` を直接読んだ「今この
+      // 瞬間に存在する worktree」の確定スナップショットであり、台帳ベースの経路（過去に同名パス
+      // の削除が成功したことしか証明しない confirmedRemovedPaths で未来のパスを予測的に除外す
+      // る）とは性質が異なる。並行ランや手動操作で同じパスに worktree が再作成された場合、この
+      // 物理一覧には実在するにもかかわらず confirmedRemovedPaths で除外すると実ディスク使用量を
+      // 過小評価する fail-open になる（codex-review P1 / Cursor Bugbot Medium、Issue #404 追加
+      // 指摘）。物理フォールバック時は一覧に含まれる全パスをそのまま測定する。
+      targetPaths = fallback.paths
       log(
         `残置 worktree バイト実測: 台帳に未検証エントリ ${unverifiedEphemeralCount} 件があるため` +
           `物理一覧 ${targetPaths.length} 件へフォールバックして実測する`,
