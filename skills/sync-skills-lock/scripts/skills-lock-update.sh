@@ -82,6 +82,32 @@ if ! gh auth status &>/dev/null; then
   exit 1
 fi
 
+# linked worktree の実行拒否（PR #412 codex P0 指摘）: linked worktree
+# （git worktree add で作られた作業ツリー）では .git が gitdir を指す通常ファイルで、
+# 実 Git ディレクトリ（.git/worktrees/<name>/ と common dir 側の refs・logs・config・
+# objects）は作業ツリーの外にある。repo_state_signature の走査（path_state .）は
+# 作業ツリー内しか対象にせず、index_state_signature も index の論理状態しか補わない
+# ため、npx が git update-ref 等で共有リポジトリの参照・設定を改変しても porcelain・
+# ツリー署名・index 署名のすべてが前後一致し成功扱いになる。メイン worktree でのみ
+# 成立する「--absolute-git-dir と --git-common-dir の一致」を一次根拠に判定し、
+# 不一致（linked worktree のほか、実 Git ディレクトリが署名対象に収まらない
+# submodule 等の変則構成すべて）は npx 未実行のまま fail-closed で拒否する。
+# --git-common-dir は相対パスを返し得る（--path-format=absolute は git 2.31+ のため
+# 使わない）ので、cd + pwd -P で双方を物理パスへ正規化してから比較する。
+# rev-parse・正規化の失敗も「メイン worktree と確認できない」であって
+# 「メインである」ではないため中止する。
+if ! GIT_DIR_ABS="$(git rev-parse --absolute-git-dir)" \
+  || ! GIT_COMMON_DIR_RAW="$(git rev-parse --git-common-dir)" \
+  || ! GIT_DIR_PHYS="$(cd "${GIT_DIR_ABS}" && pwd -P)" \
+  || ! GIT_COMMON_DIR_PHYS="$(cd "${GIT_COMMON_DIR_RAW}" && pwd -P)"; then
+  echo "エラー: Git ディレクトリの解決（git rev-parse --absolute-git-dir / --git-common-dir）に失敗しました。メイン worktree での実行と確認できないため中止します（fail-closed）。" >&2
+  exit 1
+fi
+if [[ "${GIT_DIR_PHYS}" != "${GIT_COMMON_DIR_PHYS}" ]]; then
+  echo "エラー: linked worktree（git worktree add で作られた作業ツリー）では実 Git ディレクトリ（.git/worktrees/<name>/ と共有側の refs・logs・config・objects）が状態署名の対象外になり、npx による共有リポジトリの改変を検出できないため実行を拒否します（fail-closed）。メイン worktree で実行し直してください。" >&2
+  exit 1
+fi
+
 # 許可先経路の実体検証（PR #412 P0 指摘）: スコープ外検査（porcelain 比較・状態
 # シグネチャ比較）は .agents/skills/${SKILL_NAME} を「パス文字列」で走査除外する。
 # この経路上のいずれかの要素が実行前から symlink だと、npx がリンク先（リポジトリ外を

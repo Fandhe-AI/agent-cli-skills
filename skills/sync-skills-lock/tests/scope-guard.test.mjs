@@ -158,6 +158,12 @@
 //                                   を新規作成しても誤検知せず完走することを検証する
 //                                   （.agents / .agents/skills は実行前に不存在だった
 //                                   場合のみ omit される）
+//   - 'linked-worktree'           : PR #412 codex P0 指摘の回帰。git worktree add で
+//                                   作った linked worktree 内でスクリプトを実行する
+//                                   （実 Git ディレクトリが状態署名の対象外になり、
+//                                   npx による共有リポジトリの参照改変を検出できない
+//                                   ため、npx を実行する前に worktree 検証が拒否する
+//                                   ことを検証する。npx スタブは呼ばれない）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -571,14 +577,16 @@ exec "${realGit}" "\$@"
   return { repoDir, binDir, scenario, argvLogFile, externalTargetDir }
 }
 
-function runScript({ repoDir, binDir, scenario }) {
+// cwdOverride は 'linked-worktree' シナリオ専用: メイン worktree（repoDir）ではなく
+// git worktree add で作った作業ツリーからスクリプトを実行するために使う。
+function runScript({ repoDir, binDir, scenario }, cwdOverride) {
   const env = {
     ...process.env,
     PATH: `${binDir}:${process.env.PATH}`,
     TEST_NPX_SCENARIO: scenario,
   }
   return execFileSync('bash', [SCRIPT_PATH, SKILL_NAME, SOURCE_REPO], {
-    cwd: repoDir,
+    cwd: cwdOverride ?? repoDir,
     env,
     encoding: 'utf8',
   })
@@ -1689,6 +1697,50 @@ test('ケース30: npx が既存 ignored ファイルを中間ディレクトリ
       readFileSync(nestedDsStore, 'utf8'),
       'pre-existing nested finder metadata\n',
       '書き戻された内容が実行前バックアップと一致すること',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース31: linked worktree（git worktree add）での実行は npx を呼ぶ前に拒否して' +
+  '非ゼロ終了する（PR #412 codex P0 の回帰）', () => {
+  const ctx = setupRepo('linked-worktree')
+  const worktreeDir = join(ctx.binDir, 'linked-wt')
+  try {
+    // メイン worktree の HEAD から linked worktree を作る。skills-lock.json /
+    // .agents ツリーはコミット済みのため checkout に含まれ、clean ガード・
+    // 許可先経路の lstat 検証はいずれも通過し得る状態になる（worktree 検証
+    // だけが拒否できるレイアウト）。
+    sh(`git worktree add -q "${worktreeDir}" HEAD`, ctx.repoDir)
+    assert.throws(
+      () => runScript(ctx, worktreeDir),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /linked worktree/,
+          'linked worktree を拒否した旨のエラーメッセージが出ること',
+        )
+        assert.match(
+          combined,
+          /メイン worktree で実行し直して/,
+          '復旧手順（メイン worktree での再実行）が案内されること',
+        )
+        return true
+      },
+    )
+
+    // npx が実行されていないこと（実行されると argv ログが必ず書かれる）。
+    // linked worktree では実 Git ディレクトリ（共有側の refs 等）が状態署名の
+    // 対象外になり、npx による改変が前後比較に現れないため、実行前拒否だけが
+    // 防御になる。
+    assert.equal(
+      existsSync(ctx.argvLogFile),
+      false,
+      'npx が一度も実行されていないこと（worktree 検証が npx より前に走る）',
     )
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
