@@ -36,6 +36,12 @@
 //                                   のみを変更し内容は変えない（porcelain の記録・
 //                                   内容ハッシュのいずれも前後不変に見え、モードを
 //                                   含む状態シグネチャ比較でのみ検出できるケース）
+//   - 'tee-failure'               : PR #412 CI 失敗指摘（P1）の回帰。npx 自体は
+//                                   exit 0 で成功するが、その出力を保存する tee が
+//                                   非ゼロ終了する（ディスク容量不足等）。
+//                                   NPX_OUTPUT_FILE が不完全なまま「Invalid agents」
+//                                   no-op 検知をすり抜けて誤って成功扱いになって
+//                                   いないことを検証する。
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -126,6 +132,20 @@ exit 0
 `
   writeFileSync(join(binDir, 'npx'), npxBody)
   chmodSync(join(binDir, 'npx'), 0o755)
+
+  // tee スタブ。既定は `command -p tee`（ユーザー PATH に依存しない標準ユーティリティ
+  // 探索）へ委譲して実物と同じ動作にする。TEST_NPX_SCENARIO=='tee-failure' のときのみ、
+  // 入力を破棄したうえで非ゼロ終了し、ディスク容量不足等での tee 失敗を再現する
+  // （Issue #410 CI 失敗指摘の回帰）。
+  const teeBody = `#!/usr/bin/env bash
+if [[ "\${TEST_NPX_SCENARIO:-}" == "tee-failure" ]]; then
+  cat > /dev/null
+  exit 1
+fi
+exec command -p tee "\$@"
+`
+  writeFileSync(join(binDir, 'tee'), teeBody)
+  chmodSync(join(binDir, 'tee'), 0o755)
 
   sh('git init -q', repoDir)
   sh('git config user.email test@example.com', repoDir)
@@ -386,6 +406,50 @@ test('ケース6: npx が非ゼロ終了しても事後のスコープ外検査�
       ctx.repoDir,
     ).trim()
     assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース8: npx が成功しても tee が失敗した場合、fail-closed で失敗扱いになる' +
+  '（PR #412 CI 失敗指摘の P1 回帰。PIPESTATUS[1] 未確認による誤成功の防止）', () => {
+  const ctx = setupRepo('tee-failure')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /tee が失敗しました/,
+          'tee 失敗を検知したエラーメッセージが出ること',
+        )
+        assert.match(
+          combined,
+          /実行が失敗しました/,
+          'npx 自体は exit 0 でも、tee 失敗により NPX_STATUS が失敗へ強制されること',
+        )
+        assert.doesNotMatch(
+          combined,
+          /Invalid agents を認識せず/,
+          '不完全な NPX_OUTPUT_FILE を前提にした no-op 判定を経由しないこと',
+        )
+        return true
+      },
+    )
+
+    // tee 失敗経路でもスコープ内（skills-lock.json / .agents/skills/<name>/）は
+    // 即座にリバートされ clean であること（npx 自体は scope-in へ書き込み済みのため、
+    // リバートされずに残ると「tee は失敗したのに部分的に成功扱いのまま」になる）
+    const lockDiff2 = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff2, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff2 = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff2, '', '.agents/skills/<name>/ はリバートされ clean であること')
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })

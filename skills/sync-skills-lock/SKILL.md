@@ -216,14 +216,34 @@ filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_
 # .agents/skills を経由せず .claude/skills/ 等へ直接コピーしレイアウトを変えるため
 # 使わない（実測: スクラッチリポジトリで --agent universal のみ .agents/skills/
 # 以外へ書き込みが無いことを確認済み）。npx の出力を tee で NPX_OUTPUT_FILE へも
-# 保存し、後段の「Invalid agents」no-op 検出に使う。
+# 保存し、後段の「Invalid agents」no-op 検出に使う。PIPESTATUS は pipeline 直後の
+# 「次のコマンド実行前」にしか正しい値を保持しない。変数代入も1個のコマンドと
+# 数えられるため、`NPX_STATUS=...; TEE_STATUS=...` のように2つの代入に分けると、
+# 1つ目の代入自体がその時点の PIPESTATUS を（要素数1・値0の配列へ）上書きして
+# しまい、2つ目の代入が参照する PIPESTATUS[1] は `set -u` 下で unbound variable
+# エラーになる（実測: bash 5.3 で再現）。配列全体を単一の代入
+# `arr=("${PIPESTATUS[@]}")` でスナップショットし、添字アクセスはそのコピーに対して
+# 行う。npx（[0]）・tee（[1]）両方を読む理由: tee がディスク容量不足等で非ゼロ終了
+# すると NPX_OUTPUT_FILE が空・不完全なまま残り得るが、npx 自体は成功（exit 0）
+# し得るため、tee 側の失敗は npx の終了コードだけを見る分岐からは検出できない
+# （Issue #410 CI 失敗指摘）。TEE_STATUS が非ゼロなら、その不完全な NPX_OUTPUT_FILE
+# を前提にした「Invalid agents」no-op 判定を信頼せず、NPX_STATUS を強制的に失敗へ
+# 倒して以降の失敗経路（事後スコープ外検査・スコープ内リバート・skip）へ合流させる。
 npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --agent universal --yes 2>&1 | tee "${NPX_OUTPUT_FILE}"
-NPX_STATUS="${PIPESTATUS[0]}"
+PIPE_EXIT_SNAPSHOT=("${PIPESTATUS[@]}")
+NPX_STATUS="${PIPE_EXIT_SNAPSHOT[0]}"
+TEE_STATUS="${PIPE_EXIT_SNAPSHOT[1]}"
+
+if [[ "${TEE_STATUS}" -ne 0 ]]; then
+  echo "警告: npx の出力を ${NPX_OUTPUT_FILE} へ保存する tee が失敗しました（終了コード ${TEE_STATUS}。ディスク容量不足等）。出力ファイルが不完全なため、npx 自体の終了コード（${NPX_STATUS}）に関わらず失敗として扱います。"
+  NPX_STATUS=1
+fi
 
 # CLI がバージョン更新等で --agent universal を認識できなくなった場合、
 # エラー表示のうえ exit 0 の no-op になる（実測: skills@1.5.22 で確認済み）。
 # 検知しないまま先へ進むと「同期したつもりで何も更新されていない」まま完了扱いに
-# なるため、npx 自体の終了コードとは別に明示的な失敗として扱う。
+# なるため、npx 自体の終了コードとは別に明示的な失敗として扱う（上の TEE_STATUS
+# チェックで NPX_STATUS が強制失敗化されていればここは通らない）。
 if [[ "${NPX_STATUS}" -eq 0 ]] && grep -q "Invalid agents" "${NPX_OUTPUT_FILE}"; then
   echo "エラー: skills CLI が --agent universal を認識せず、何も実行していません（exit 0 の no-op）。SKILLS_CLI_VERSION 更新時は「skills CLI のバージョン固定と更新手順」節に従い universal の有効性を再確認してください。" >&2
   rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}" "${NPX_OUTPUT_FILE}"
