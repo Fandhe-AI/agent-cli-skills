@@ -164,11 +164,24 @@
 //                                   npx による共有リポジトリの参照改変を検出できない
 //                                   ため、npx を実行する前に worktree 検証が拒否する
 //                                   ことを検証する。npx スタブは呼ばれない）
+//   - 'separate-git-dir'          : PR #412 Bugbot High 指摘の回帰。.git を作業ツリー外の
+//                                   実ディレクトリへ移し gitfile（gitdir: 参照）に
+//                                   差し替えた構成（git clone --separate-git-dir 相当）で
+//                                   実行する（git-dir と common-dir は一致するため
+//                                   linked worktree 検証は通過するが、実 Git ディレクトリが
+//                                   署名対象外になるため、npx を実行する前に
+//                                   「作業ツリー直下の .git 実体ディレクトリ」検証が
+//                                   拒否することを検証する。npx スタブは呼ばれない）
+//   - 'git-dir-symlink'           : PR #412 Bugbot High 指摘の回帰。.git を作業ツリー外の
+//                                   実ディレクトリへの symlink に置換した構成で実行する
+//                                   （'separate-git-dir' と同じ検出不能構成。lstat 検証が
+//                                   npx を実行する前に拒否することを検証する。
+//                                   npx スタブは呼ばれない）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync, statSync, symlinkSync, readlinkSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync, statSync, symlinkSync, readlinkSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1741,6 +1754,90 @@ test('ケース31: linked worktree（git worktree add）での実行は npx を�
       existsSync(ctx.argvLogFile),
       false,
       'npx が一度も実行されていないこと（worktree 検証が npx より前に走る）',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース32: separate-git-dir（.git が gitfile）での実行は npx を呼ぶ前に拒否して' +
+  '非ゼロ終了する（PR #412 Bugbot High の回帰）', () => {
+  const ctx = setupRepo('separate-git-dir')
+  try {
+    // git clone --separate-git-dir 相当の構成を再現する: .git 実体を作業ツリー外
+    // （binDir 配下）へ移し、gitdir 参照の gitfile に差し替える。git-dir と
+    // common-dir はどちらも外部ディレクトリを指して一致するため linked worktree
+    // 検証は通過し、「作業ツリー直下の .git 実体ディレクトリ」検証だけが拒否できる。
+    const externalGitDir = join(ctx.binDir, 'external-git-store')
+    renameSync(join(ctx.repoDir, '.git'), externalGitDir)
+    writeFileSync(join(ctx.repoDir, '.git'), `gitdir: ${externalGitDir}\n`)
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /作業ツリー直下の \.git 実体ディレクトリであることを確認できません/,
+          '実 Git ディレクトリの所在検証で拒否した旨のエラーメッセージが出ること',
+        )
+        assert.match(
+          combined,
+          /通常構成のメイン worktree で実行し直して/,
+          '復旧手順（通常構成での再実行）が案内されること',
+        )
+        return true
+      },
+    )
+
+    // npx が実行されていないこと（実行されると argv ログが必ず書かれる）。
+    // 外部 Git ディレクトリは状態署名の走査対象に入らないため、実行前拒否だけが
+    // 防御になる。
+    assert.equal(
+      existsSync(ctx.argvLogFile),
+      false,
+      'npx が一度も実行されていないこと（所在検証が npx より前に走る）',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース33: .git が実体ディレクトリへの symlink の構成での実行は npx を呼ぶ前に' +
+  '拒否して非ゼロ終了する（PR #412 Bugbot High の回帰）', () => {
+  const ctx = setupRepo('git-dir-symlink')
+  try {
+    // .git 実体を作業ツリー外へ移し、.git をそこへの symlink に置換する。
+    // git は symlink 経由でも動作し git-dir と common-dir は一致するため、
+    // lstat 検証（symlink 拒否）だけがこのレイアウトを npx 実行前に拒否できる。
+    const externalGitDir = join(ctx.binDir, 'external-git-store')
+    renameSync(join(ctx.repoDir, '.git'), externalGitDir)
+    symlinkSync(externalGitDir, join(ctx.repoDir, '.git'))
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /作業ツリー直下の \.git 実体ディレクトリであることを確認できません/,
+          '実 Git ディレクトリの所在検証で拒否した旨のエラーメッセージが出ること',
+        )
+        assert.match(
+          combined,
+          /通常構成のメイン worktree で実行し直して/,
+          '復旧手順（通常構成での再実行）が案内されること',
+        )
+        return true
+      },
+    )
+
+    assert.equal(
+      existsSync(ctx.argvLogFile),
+      false,
+      'npx が一度も実行されていないこと（所在検証が npx より前に走る）',
     )
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })

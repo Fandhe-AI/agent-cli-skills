@@ -25,7 +25,7 @@ model: sonnet
 - ルート直下の `skills-lock.json` が存在すること
 - **実行前に `skills-lock.json` に未コミットの変更がないこと**（ステージ済み・未ステージ問わず）。本スキルの実行中に発生する変更は sync 由来のみとなり、`git add skills-lock.json` で全体をステージしても無関係な変更が混入しない
 - **対象スキルの `.agents/skills/<name>/` に未コミット変更がないこと**。`npx skills add` は `.agents/skills/<name>/` を upstream の最新版で上書きするため、そのディレクトリに WIP が存在すると即座に失われる。`git checkout` で戻せるのは「最後にコミットされた状態」のみであり、npx 実行前の未コミット編集は復元できない。**未追跡ファイルとして存在する WIP も対象**であり、`git status --porcelain` で検出する
-- **メイン worktree で実行すること**。linked worktree（`git worktree add` で作られた作業ツリー）では `.git` が gitdir を指す通常ファイルになり、実 Git ディレクトリ（`.git/worktrees/<name>/` と共有側の `refs`・`logs`・`config`・objects）が状態署名の対象外になるため、Step 4 フェンスが npx 実行前に `git rev-parse --absolute-git-dir` / `--git-common-dir` の不一致で検出して fail-closed で拒否する
+- **通常構成のメイン worktree で実行すること**。linked worktree（`git worktree add` で作られた作業ツリー）では `.git` が gitdir を指す通常ファイルになり、実 Git ディレクトリ（`.git/worktrees/<name>/` と共有側の `refs`・`logs`・`config`・objects）が状態署名の対象外になるため、Step 4 フェンスが npx 実行前に `git rev-parse --absolute-git-dir` / `--git-common-dir` の不一致で検出して fail-closed で拒否する。同様に、実 Git ディレクトリが作業ツリー外にある構成（`git clone --separate-git-dir`・submodule checkout・`.git` が symlink）も、「実 Git ディレクトリ = 作業ツリー直下の `.git` 実体ディレクトリ」の検証（`--show-toplevel` との厳密一致 + lstat）で npx 実行前に fail-closed で拒否する
 
 ## フロー
 
@@ -120,6 +120,30 @@ if ! GIT_DIR_ABS="$(git rev-parse --absolute-git-dir)" \
 fi
 if [[ "${GIT_DIR_PHYS}" != "${GIT_COMMON_DIR_PHYS}" ]]; then
   echo "エラー: linked worktree（git worktree add で作られた作業ツリー）では実 Git ディレクトリ（.git/worktrees/<name>/ と共有側の refs・logs・config・objects）が状態署名の対象外になり、npx による共有リポジトリの改変を検出できないため実行を拒否します（fail-closed）。メイン worktree で実行し直してください。" >&2
+  exit 1
+fi
+
+# git-dir と common-dir の一致は linked worktree を除外するだけで、「実 Git
+# ディレクトリが署名対象の作業ツリー内にある」ことまでは保証しない
+# （PR #412 Bugbot High 指摘）。git clone --separate-git-dir（.git が gitdir を
+# 指す gitfile）・submodule checkout（.git/modules/<name>/ を指す gitfile）・
+# .git が symlink の構成では両者が一致したまま実体が作業ツリー外にあり、
+# path_state の走査（起点 .）が refs・hooks・objects を含まないため、npx の
+# 改変が porcelain・ツリー署名・index 署名のすべてをすり抜ける。そこで実 Git
+# ディレクトリが「作業ツリー直下の .git 実体ディレクトリ」であることまで検証
+# する: toplevel を上と同じ手法（cd + pwd -P）で物理パスへ正規化し、
+# (1) GIT_DIR_PHYS が <toplevel>/.git と厳密一致、(2) <toplevel>/.git を lstat
+# して symlink ではなく directory であること（gitfile = 通常ファイル・symlink
+# はいずれも拒否）、の両方を要求する。不成立は npx 未実行のまま中止する。
+if ! TOPLEVEL_RAW="$(git rev-parse --show-toplevel)" \
+  || ! TOPLEVEL_PHYS="$(cd "${TOPLEVEL_RAW}" && pwd -P)"; then
+  echo "エラー: 作業ツリールートの解決（git rev-parse --show-toplevel）に失敗しました。実 Git ディレクトリが作業ツリー内の .git ディレクトリであることを確認できないため中止します（fail-closed）。" >&2
+  exit 1
+fi
+if [[ "${GIT_DIR_PHYS}" != "${TOPLEVEL_PHYS}/.git" ]] \
+  || [[ -L "${TOPLEVEL_PHYS}/.git" ]] \
+  || [[ ! -d "${TOPLEVEL_PHYS}/.git" ]]; then
+  echo "エラー: 実 Git ディレクトリが作業ツリー直下の .git 実体ディレクトリであることを確認できません（git clone --separate-git-dir・submodule・.git の symlink 等）。実 Git ディレクトリが状態署名の対象外になり、npx による改変を検出できないため実行を拒否します（fail-closed）。通常構成のメイン worktree で実行し直してください。" >&2
   exit 1
 fi
 
@@ -1170,7 +1194,7 @@ EOF
 1. **一次防御（`--agent universal`）**: Step 4 の npx 呼び出しに `--agent universal` を付け、書き込み先を union ストア（`.agents/skills/<name>/`）と `skills-lock.json` のみへ限定する。個別 agent 指定（`claude-code` 等）は `.agents/skills/` を経由せず対象ツリーへ直接コピーしレイアウトを変えてしまうため使わない
 2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、リポジトリルート全体（除外はスコープ内と、`.git` のうちこのフロー自身が前後スナップショット間に実行する `git status` で変動し得る `.git/index`・その一時 lock〔`.git/index.lock` の完全一致のみ。`.git/config.lock`・`.git/HEAD.lock` 等の永続 lock の残置は署名対象で、シグネチャ不一致として検出される〕のみ。`.git/objects`・`.git/refs`・`packed-refs`・`HEAD`・`logs`・`worktrees`・`modules` を含む残り全域と `.git/config`・`.git/hooks/` 等の永続 Git メタデータは署名対象に含め、履歴・参照の改変やフック仕込み・設定改変も検出する。`.agents` / `.agents/skills` 自身は実行前に存在した場合のみ署名対象で、実行前に不存在だった場合に限り自身のメタデータを omit して初回インストールの正当な親作成を許容する）の状態シグネチャを `repo_state_signature`（`path_state` を起点 `.` へ適用。python3。通常ファイルは mode + 内容の sha256、シンボリックリンクは mode + リンク先の sha256、ディレクトリ・gitlink は自身の mode + 配下全エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本にまとめ、前後で比較する。`repo_state_signature` はさらに index の論理状態（`git ls-files --stage` + `git ls-files -v`。エントリ・skip-worktree / assume-unchanged ビット）の sha256 を連結し、prune している `.git/index` の背後での index 改変も前後不一致として検出する（PR #412 codex P1 指摘）。git status に現れたパスだけをシグネチャ化する方式では、git がディレクトリの mode を追跡しない以上、スコープ外ディレクトリの chmod や `.gitignore` 対象ファイルの上書きを原理的に検出できないため、走査は status 由来のパス集合ではなく作業ツリー全体に対して行う（PR #412 P1 指摘群の同一クラス解消）。ステータス+パスの記録だけでなく全体シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
 
-両層の前提として、まず実行場所がメイン worktree であることを npx 実行前に検証する（`git rev-parse --absolute-git-dir` と `--git-common-dir` を物理パスへ正規化して比較し、不一致なら fail-closed で停止する。linked worktree では実 Git ディレクトリ〔`.git/worktrees/<name>/` と共有側の `refs`・`logs`・`config`・objects〕が作業ツリー外にあり `repo_state_signature` の走査対象に入らないため、npx が `git update-ref` 等で共有リポジトリを改変しても前後の全検査が一致してしまう。PR #412 codex P0 指摘）。次に許可先経路（`.agents` / `.agents/skills` / `.agents/skills/<name>`）の各要素を lstat 検証し、存在する要素が symlink または非ディレクトリなら npx を実行せず fail-closed で停止する（Step 4 フェンス冒頭）。スコープ外検査は許可先を「パス文字列」で走査除外するため、経路が実行前からリポジトリ外を指す symlink だと npx のリンク先への書き込みがどの検査にも現れない（PR #412 P0 指摘）。存在しない要素のみ、初回インストールの正当な新規作成として許容する。加えて許可先**配下**も npx 実行前に `find -type l` で走査し、既存の symlink が 1 件でもあれば npx を実行せず fail-closed で停止する（許可先配下は `prune-under` により署名から除外されるため、配下の既存 symlink を npx が辿ってリポジトリ外へ書き込んでも前後シグネチャ比較には現れない。事前拒否だけが防御になる）。さらに許可先配下の**既存 ignored ファイル**（`.DS_Store` 等）は npx 実行前に一時バックアップディレクトリへ内容・mode ごと退避し（`cp -p`・相対パス構造を保持）、実行後にバックアップと比較して変更・削除を検出したらバックアップから復元する（成功経路では警告のうえ処理継続、失敗経路では `revert_in_scope` に組み込んで復元。復元自体が失敗した場合のみバックアップディレクトリを保全して非ゼロ終了する）。
+両層の前提として、まず実行場所がメイン worktree であることを npx 実行前に検証する（`git rev-parse --absolute-git-dir` と `--git-common-dir` を物理パスへ正規化して比較し、不一致なら fail-closed で停止する。linked worktree では実 Git ディレクトリ〔`.git/worktrees/<name>/` と共有側の `refs`・`logs`・`config`・objects〕が作業ツリー外にあり `repo_state_signature` の走査対象に入らないため、npx が `git update-ref` 等で共有リポジトリを改変しても前後の全検査が一致してしまう。PR #412 codex P0 指摘）。この一致比較は linked worktree を除外するだけで実 Git ディレクトリの所在までは保証しないため、続けて「実 Git ディレクトリが作業ツリー直下の `.git` 実体ディレクトリである」ことも検証する（`--show-toplevel` を物理パスへ正規化して `--absolute-git-dir` の物理パスと `<toplevel>/.git` の厳密一致を要求し、さらに `<toplevel>/.git` を lstat して symlink ではなく directory であることを要求する。`git clone --separate-git-dir`・submodule checkout・`.git` が symlink の構成では git-dir と common-dir が一致したまま実体が作業ツリー外にあり、同じ検出不能に陥る。PR #412 Bugbot High 指摘）。次に許可先経路（`.agents` / `.agents/skills` / `.agents/skills/<name>`）の各要素を lstat 検証し、存在する要素が symlink または非ディレクトリなら npx を実行せず fail-closed で停止する（Step 4 フェンス冒頭）。スコープ外検査は許可先を「パス文字列」で走査除外するため、経路が実行前からリポジトリ外を指す symlink だと npx のリンク先への書き込みがどの検査にも現れない（PR #412 P0 指摘）。存在しない要素のみ、初回インストールの正当な新規作成として許容する。加えて許可先**配下**も npx 実行前に `find -type l` で走査し、既存の symlink が 1 件でもあれば npx を実行せず fail-closed で停止する（許可先配下は `prune-under` により署名から除外されるため、配下の既存 symlink を npx が辿ってリポジトリ外へ書き込んでも前後シグネチャ比較には現れない。事前拒否だけが防御になる）。さらに許可先配下の**既存 ignored ファイル**（`.DS_Store` 等）は npx 実行前に一時バックアップディレクトリへ内容・mode ごと退避し（`cp -p`・相対パス構造を保持）、実行後にバックアップと比較して変更・削除を検出したらバックアップから復元する（成功経路では警告のうえ処理継続、失敗経路では `revert_in_scope` に組み込んで復元。復元自体が失敗した場合のみバックアップディレクトリを保全して非ゼロ終了する）。
 
 この事前検査は開始時点しか見ない（TOCTOU）ため、さらに 3 つの防御を重ねる（PR #412 P0 指摘・第7巡、および Bugbot High 指摘）:
 
@@ -1185,6 +1209,7 @@ EOF
 - **全スキル sync での途中却下**: 1スキルずつ承認・stage を行うため、途中で却下しても承認済みスキルの stage は保持される。全スキル処理後に一括コミットする
 - **同期実行中はこのリポジトリでの並行 git 操作（他 worktree 含む）を行わないこと**: 状態シグネチャは `.git` 配下を `.git/index`・一時 lock を除き署名対象に含めるため、fetch・commit・checkout 等の並行操作は `refs`・`objects`・`logs`・`worktrees` を変動させ、シグネチャ不一致（誤検知）として同期を停止させ得る。検出漏れ（fail-open）ではなく停止（fail-closed）側に倒す設計であり、誤検知した場合は並行操作を止めて再実行する
 - **linked worktree では実行できない**: `git worktree add` で作られた作業ツリーでは `.git` が gitdir を指す通常ファイルで、実 Git ディレクトリ（`.git/worktrees/<name>/` と共有側の `refs`・`logs`・`config`・objects）が状態署名の走査対象外になるため、Step 4 冒頭の worktree 検証（`--absolute-git-dir` と `--git-common-dir` の物理パス比較）が npx 実行前に fail-closed で停止する。メイン worktree で実行し直す
+- **実 Git ディレクトリが作業ツリー外にある構成でも実行できない**: `git clone --separate-git-dir`（`.git` が gitdir を指す gitfile）・submodule checkout・`.git` が symlink の構成では、git-dir と common-dir が一致したまま実体が作業ツリー外にあり linked worktree と同じ検出不能に陥るため、Step 4 冒頭の追加検証（`--show-toplevel` の物理パスとの厳密一致 + `<toplevel>/.git` の lstat）が npx 実行前に fail-closed で停止する。`.git` が実体ディレクトリの通常構成で実行し直す
 - **許可先経路が symlink の場合は実行できない**: `.agents` / `.agents/skills` / `.agents/skills/<name>` のいずれかが symlink または非ディレクトリだと、Step 4 冒頭の実体検証が npx 実行前に fail-closed で停止する（symlink 越しのリポジトリ外書き込みはスコープ外検査に現れないため）。実体ディレクトリへ置き換えてから再実行する。npx が**実行中に**許可先を symlink へ置換した場合（初回インストールで symlink として作成した場合を含む）も、許可先要素自身の署名（`prune-under`）と実行後再検証（`verify_scope_path_after_run`）が fail-closed で停止し、このとき許可先配下への `git clean` 等の削除系操作は行わない（symlink 越しのリンク先削除を避けるため。「書き込みスコープの制限」節を参照）。許可先**配下**に既存の symlink がある場合も、npx 実行前の `find -type l` 走査が fail-closed で停止する（配下は署名から除外されており、リンク先への書き込みがどの検査にも現れないため）。npx が**実行中に**配下へ symlink を作成した場合も、npx 実行後の再走査（`find -type l`）が検出して同じ保全経路（許可先配下への削除系操作・復元をスキップし、バックアップを保全して停止）へ倒す。該当 symlink を実体ファイルへ置き換えるか削除してから再実行する
 - **既存 ignored ファイルの変更は自動復元される**: 許可先配下に実行前から存在した ignored ファイル（`.DS_Store` 等）を npx が上書き・削除した場合、実行前バックアップとの比較で検出し、内容・mode をバックアップから復元する（成功経路では警告のうえ同期は継続）。復元に失敗した場合はバックアップディレクトリ（パスはエラーメッセージに表示）を残して停止するため、そこから手動で復旧する
 - **スコープ外書き込みを検出した場合はループ全体が停止する**: 「書き込みスコープの制限」節を参照。`continue` ではなく `exit 1` のため、承認・stage 済みの他スキル分が index に残ったまま処理が止まる。手動で `git status` を確認し、コミットするか `git reset` するかを判断する

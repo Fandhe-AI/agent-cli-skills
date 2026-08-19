@@ -108,6 +108,30 @@ if [[ "${GIT_DIR_PHYS}" != "${GIT_COMMON_DIR_PHYS}" ]]; then
   exit 1
 fi
 
+# git-dir と common-dir の一致は linked worktree を除外するだけで、「実 Git
+# ディレクトリが署名対象の作業ツリー内にある」ことまでは保証しない
+# （PR #412 Bugbot High 指摘）。git clone --separate-git-dir（.git が gitdir を
+# 指す gitfile）・submodule checkout（.git/modules/<name>/ を指す gitfile）・
+# .git が symlink の構成では両者が一致したまま実体が作業ツリー外にあり、
+# path_state の走査（起点 .）が refs・hooks・objects を含まないため、npx の
+# 改変が porcelain・ツリー署名・index 署名のすべてをすり抜ける。そこで実 Git
+# ディレクトリが「作業ツリー直下の .git 実体ディレクトリ」であることまで検証
+# する: toplevel を上と同じ手法（cd + pwd -P）で物理パスへ正規化し、
+# (1) GIT_DIR_PHYS が <toplevel>/.git と厳密一致、(2) <toplevel>/.git を lstat
+# して symlink ではなく directory であること（gitfile = 通常ファイル・symlink
+# はいずれも拒否）、の両方を要求する。不成立は npx 未実行のまま中止する。
+if ! TOPLEVEL_RAW="$(git rev-parse --show-toplevel)" \
+  || ! TOPLEVEL_PHYS="$(cd "${TOPLEVEL_RAW}" && pwd -P)"; then
+  echo "エラー: 作業ツリールートの解決（git rev-parse --show-toplevel）に失敗しました。実 Git ディレクトリが作業ツリー内の .git ディレクトリであることを確認できないため中止します（fail-closed）。" >&2
+  exit 1
+fi
+if [[ "${GIT_DIR_PHYS}" != "${TOPLEVEL_PHYS}/.git" ]] \
+  || [[ -L "${TOPLEVEL_PHYS}/.git" ]] \
+  || [[ ! -d "${TOPLEVEL_PHYS}/.git" ]]; then
+  echo "エラー: 実 Git ディレクトリが作業ツリー直下の .git 実体ディレクトリであることを確認できません（git clone --separate-git-dir・submodule・.git の symlink 等）。実 Git ディレクトリが状態署名の対象外になり、npx による改変を検出できないため実行を拒否します（fail-closed）。通常構成のメイン worktree で実行し直してください。" >&2
+  exit 1
+fi
+
 # 許可先経路の実体検証（PR #412 P0 指摘）: スコープ外検査（porcelain 比較・状態
 # シグネチャ比較）は .agents/skills/${SKILL_NAME} を「パス文字列」で走査除外する。
 # この経路上のいずれかの要素が実行前から symlink だと、npx がリンク先（リポジトリ外を
