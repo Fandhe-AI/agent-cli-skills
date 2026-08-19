@@ -109,12 +109,16 @@ SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更
 # （本スキルは既に file CLI 等の前提を持つが、python3 は主要 Linux / macOS に
 # 標準搭載されている）で種別・モード・内容を単一の signature へまとめる。
 # 通常ファイルは内容の sha256、シンボリックリンクはリンク先文字列の sha256、
-# それ以外（ディレクトリ・gitlink）は配下の各エントリを再帰的に種別判定し、
+# それ以外（ディレクトリ・gitlink）は配下の各エントリ（ファイルに加え dirnames
+# 自身・ディレクトリ向け symlink も含む）を再帰的に種別判定し、
 # 通常ファイルは内容の sha256・シンボリックリンクはリンク先文字列の sha256
 # （トップレベルと同じ規則を再帰適用）・パーミッションを相対パスとあわせて
 # 正規化して集約した sha256 とする。npx が同サイズ・同 mtime のまま内容だけ
 # 書き換えて配下ファイルを上書きするケース（PR #412 P1 指摘: サイズ・mtime のみ
-# では検出できない）を、内容ハッシュで検出する。stat コマンドの出力書式は環境
+# では検出できない）を、内容ハッシュで検出する。dirnames 自身も lstat して
+# 記録するため、配下ディレクトリの chmod やディレクトリ向け symlink のリンク先・
+# mode 変更（followlinks=False では filenames 経由で列挙されず、記録しないと
+# 見逃す）も検出できる（PR #412 P1 指摘）。stat コマンドの出力書式は環境
 # （BSD/GNU）で異なるため、シェルの `stat` は使わず python3 の os.lstat に統一する。
 path_state() {
   local path="$1"
@@ -151,6 +155,27 @@ else:
     entries = []
     for dirpath, dirnames, filenames in os.walk(path):
         dirnames.sort()
+        for dname in dirnames:
+            # dirnames 自体（配下ディレクトリ・ディレクトリ向け symlink）を lstat して
+            # entries へ含める。os.walk は filenames 経由で列挙しないため、ここで
+            # 記録しないと配下ディレクトリの mode 変更やディレクトリ向け symlink の
+            # リンク先・mode 変更がシグネチャに反映されない（PR #412 P1 指摘）。
+            # followlinks=False のため symlink to directory は dirnames に入るが
+            # os.walk 自身はその配下へ再帰しない（二重取り込みなし）。
+            dp = os.path.join(dirpath, dname)
+            rel = os.path.relpath(dp, path)
+            try:
+                dst = os.lstat(dp)
+                dmode = oct(stat.S_IMODE(dst.st_mode))
+                if stat.S_ISLNK(dst.st_mode):
+                    content_hash = hashlib.sha256(
+                        os.readlink(dp).encode("utf-8", "surrogateescape")
+                    ).hexdigest()
+                    entries.append(f"{rel}:{dmode}:dirlink:{content_hash}")
+                else:
+                    entries.append(f"{rel}:{dmode}:dir")
+            except OSError as e:
+                entries.append(f"{rel}:ERROR:{e}")
         for name in sorted(filenames):
             p = os.path.join(dirpath, name)
             rel = os.path.relpath(p, path)

@@ -91,12 +91,16 @@ fi
 # 本スクリプトは既に python3 に依存している（変更前 computedHash の表示）ため、
 # 同じ依存で種別・モード・内容を単一の signature へまとめる。通常ファイルは
 # 内容の sha256、シンボリックリンクはリンク先文字列の sha256、それ以外
-# （ディレクトリ・gitlink）は配下の各エントリを再帰的に種別判定し、通常ファイルは
+# （ディレクトリ・gitlink）は配下の各エントリ（ファイルに加え dirnames 自身・
+# ディレクトリ向け symlink も含む）を再帰的に種別判定し、通常ファイルは
 # 内容の sha256・シンボリックリンクはリンク先文字列の sha256（トップレベルと同じ
 # 規則を再帰適用）・パーミッションを相対パスとあわせて正規化して集約した sha256
 # とする。npx が同サイズ・同 mtime のまま内容だけ書き換えて配下ファイルを上書きする
 # ケース（PR #412 P1 指摘: サイズ・mtime のみでは検出できない）を、内容ハッシュで
-# 検出する。gitlink（未初期化 submodule 等、os.walk がそもそも降りられない特殊な
+# 検出する。dirnames 自身も lstat して記録するため、配下ディレクトリの chmod や
+# ディレクトリ向け symlink のリンク先・mode 変更（followlinks=False では
+# filenames 経由で列挙されず、記録しないと見逃す）も検出できる（PR #412 P1 指摘）。
+# gitlink（未初期化 submodule 等、os.walk がそもそも降りられない特殊な
 # 空ディレクトリ相当）は配下が存在せず entries が空集合のままになり得るが、
 # kind（S_IFMT の値。gitlink はディレクトリと同じ S_IFDIR で lstat される）と
 # 空集合の sha256 は既存の「ディレクトリの空フォルダ」と区別が付かない。この
@@ -140,6 +144,27 @@ else:
     entries = []
     for dirpath, dirnames, filenames in os.walk(path):
         dirnames.sort()
+        for dname in dirnames:
+            # dirnames 自体（配下ディレクトリ・ディレクトリ向け symlink）を lstat して
+            # entries へ含める。os.walk は filenames 経由で列挙しないため、ここで
+            # 記録しないと配下ディレクトリの mode 変更やディレクトリ向け symlink の
+            # リンク先・mode 変更がシグネチャに反映されない（PR #412 P1 指摘）。
+            # followlinks=False のため symlink to directory は dirnames に入るが
+            # os.walk 自身はその配下へ再帰しない（二重取り込みなし）。
+            dp = os.path.join(dirpath, dname)
+            rel = os.path.relpath(dp, path)
+            try:
+                dst = os.lstat(dp)
+                dmode = oct(stat.S_IMODE(dst.st_mode))
+                if stat.S_ISLNK(dst.st_mode):
+                    content_hash = hashlib.sha256(
+                        os.readlink(dp).encode("utf-8", "surrogateescape")
+                    ).hexdigest()
+                    entries.append(f"{rel}:{dmode}:dirlink:{content_hash}")
+                else:
+                    entries.append(f"{rel}:{dmode}:dir")
+            except OSError as e:
+                entries.append(f"{rel}:ERROR:{e}")
         for name in sorted(filenames):
             p = os.path.join(dirpath, name)
             rel = os.path.relpath(p, path)
