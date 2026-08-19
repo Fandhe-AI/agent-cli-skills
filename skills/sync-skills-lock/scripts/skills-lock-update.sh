@@ -83,20 +83,35 @@ if ! gh auth status &>/dev/null; then
 fi
 
 # git status --porcelain -z の1レコード（"XY PATH\0"）からスコープ内（skills-lock.json /
-# .agents/skills/${SKILL_NAME}/ 配下）を除いたレコードだけを NUL 区切りで書き出す。
-# これは Step 4 実行前後のスナップショット差分（scope-guard）専用のフィルタで、
-# 未追跡ファイルのプレビュー表示（既存の git ls-files -z 経路。下部で継続使用）とは別物。
+# .agents/skills/${SKILL_NAME}/ 配下）を除いたレコードだけを NUL 区切りで outfile へ、
+# 対応する内容ハッシュ（同じ順序）を hashfile へ書き出す。これは Step 4 実行前後の
+# スナップショット差分（scope-guard）専用のフィルタで、未追跡ファイルのプレビュー表示
+# （既存の git ls-files -z 経路。下部で継続使用）とは別物。
 # ステータス文字の後の空白1文字を含む固定長プレフィックス（3文字）を切り落とすことで
-# パスを取り出す。C-quote（改行等を含むパスのダブルクォート化）の影響を受けない。
+# パスを取り出す。C-quote（改行等を含むパスのダブルクォート化）の影響を受けない
+# （-z 出力は raw byte のパスであり、path をそのままファイルアクセスに使ってよい）。
+#
+# ステータス文字列＋パスの一致だけでは、実行前から M（追跡・変更済み）や
+# ??（未追跡）だったスコープ外ファイルを npx が「同じパス・同じステータス文字の
+# まま」内容だけ上書きしても検出できない（Issue #410 second-round 指摘）。
+# git hash-object でファイルの実内容ハッシュを併せて記録し、前後比較へ加えることで
+# この内容だけの上書きも検出する。
 filter_out_of_scope() {
-  local infile="$1" outfile="$2" record path
+  local infile="$1" outfile="$2" hashfile="$3" record path hash
   : > "${outfile}"
+  : > "${hashfile}"
   while IFS= read -r -d '' record; do
     path="${record:3}"
     if [[ "${path}" == "skills-lock.json" || "${path}" == ".agents/skills/${SKILL_NAME}/"* ]]; then
       continue
     fi
     printf '%s\0' "${record}" >> "${outfile}"
+    if [[ -e "${path}" ]]; then
+      hash="$(git hash-object -- "${path}" 2>/dev/null || printf 'HASH_ERROR')"
+    else
+      hash="MISSING"
+    fi
+    printf '%s\0' "${hash}" >> "${hashfile}"
   done < "${infile}"
 }
 
@@ -145,9 +160,11 @@ SNAP_BEFORE="$(mktemp)"
 SNAP_AFTER="$(mktemp)"
 SNAP_FILTERED_BEFORE="$(mktemp)"
 SNAP_FILTERED_AFTER="$(mktemp)"
+SNAP_FILTERED_BEFORE_HASH="$(mktemp)"
+SNAP_FILTERED_AFTER_HASH="$(mktemp)"
 NPX_OUTPUT_FILE="$(mktemp)"
 UNTRACKED_LIST_FILE="$(mktemp)"
-trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}"' EXIT
+trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}"' EXIT
 
 # npx 実行前のリポジトリ全体スナップショット（スコープ外書き込み検出の起点）。
 # -z は改行等を含むパスでも1レコード1件を保つため、後段の filter_out_of_scope が
@@ -162,30 +179,77 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_BEFORE}";
   exit 1
 fi
 
+# 内容ハッシュは「その時点のディスク内容」を読むため、SNAP_BEFORE のフィルタ・ハッシュ化は
+# 必ず npx を呼ぶ前にここで確定させる。npx 実行後（事後検査の直前）にまとめて filter_out_of_scope
+# を呼ぶと、SNAP_BEFORE のパス集合はステータス比較には正しく使えても、ハッシュだけは npx が
+# 上書きした後の内容を読んでしまい「変更前ハッシュ」のつもりが実質「変更後ハッシュ」と一致して
+# しまう（実行前から M・?? だったスコープ外ファイルの内容だけの上書きを見逃す。事後 filter を
+# 前後とも npx の後にまとめて呼んだ最初の実装で実測した回帰）。
+filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_BEFORE_HASH}"
+
 # npx skills add で CLI に computedHash を更新させる
 # --yes（1つ目）は npx 自体のインストール確認プロンプトを非対話でスキップする
 # ものであり、skills CLI へ渡す --yes（末尾）とは別物（位置で区別される）。
 # skills@${SKILLS_CLI_VERSION} で exact 版のみ解決させ、該当版が存在しない・
-# レジストリ到達不能の場合は npx が非ゼロ終了し set -euo pipefail で即停止する
-# （fail-closed。最新版への暗黙フォールバック経路は存在しない）。
+# レジストリ到達不能の場合は npx が非ゼロ終了する（fail-closed。最新版への暗黙
+# フォールバック経路は存在しない）。
 # --agent universal は書き込み先を union ストア（.agents/skills/<name>/）+
 # skills-lock.json のみに限定する一次防御。個別 agent 指定（claude-code 等）は
 # .agents/skills を経由せず .claude/skills/ 等へ直接コピーしレイアウトを変えるため
 # 使わない（実測: スクラッチリポジトリで --agent universal のみ .agents/skills/
 # 以外へ書き込みが無いことを確認済み）。npx の出力は tee で NPX_OUTPUT_FILE へも
-# 保存し、後段の「Invalid agents」no-op 検出に使う。パイプの非ゼロ終了は
-# `set -euo pipefail` の pipefail によりそのままスクリプト全体を停止させる
-# （fail-closed。この行を `if` 条件に入れると errexit がこの行では働かなくなるため、
-# npx 呼び出し自体は bare のまま1行を維持する。tests/version-pin.test.mjs の静的抽出
-# も行頭 npx の1物理行を前提にしているため、バックスラッシュ継続で複数行に分けない）。
+# 保存し、後段の「Invalid agents」no-op 検出に使う。
+#
+# 終了コードの扱い: この行を素の `set -euo pipefail` 下に置くと、npx が非ゼロ終了
+# した瞬間に pipefail でスクリプトが即停止し、下の事後スナップショット取得・
+# スコープ外検査（この行より後の NPX_STATUS 分岐）に到達できない。npx が部分的に
+# スコープ外へ書き込んだ後に失敗した場合、その残置がまったく検出されないまま停止して
+# しまうため、この行の前後だけ errexit を無効化し、pipeline の終了コードを PIPESTATUS
+# 経由で変数へ保存して明示的に分岐する（成功・失敗いずれの経路でも下の事後検査へ
+# 必ず到達させる）。
+# npx 呼び出し自体は bare のまま1行を維持する（tests/version-pin.test.mjs の静的抽出
+# が行頭 npx の1物理行を前提にしているため、バックスラッシュ継続で複数行に分けない）。
+set +e
 npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --agent universal --yes 2>&1 | tee "${NPX_OUTPUT_FILE}"
+NPX_STATUS="${PIPESTATUS[0]}"
+set -e
 
 # CLI がバージョン更新等で --agent universal を認識できなくなった場合、
 # エラー表示のうえ exit 0 の no-op になる（実測: skills@1.5.22 で確認済み）。
 # 検知せず先へ進むと「同期したつもりで何も更新されていない」まま完了扱いに
-# なるため、明示的にエラー化する。
-if grep -q "Invalid agents" "${NPX_OUTPUT_FILE}"; then
+# なるため、明示的にエラー化する（NPX_STATUS -eq 0 のときのみ意味を持つ判定）。
+if [[ "${NPX_STATUS}" -eq 0 ]] && grep -q "Invalid agents" "${NPX_OUTPUT_FILE}"; then
   echo "エラー: skills CLI が --agent universal を認識せず、何も実行していません（exit 0 の no-op）。SKILLS_CLI_VERSION 更新時は SKILL.md の「skills CLI のバージョン固定と更新手順」節に従い universal の有効性を再確認してください。" >&2
+  exit 1
+fi
+
+if [[ "${NPX_STATUS}" -ne 0 ]]; then
+  echo "エラー: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害・ダウンロード中断等、原因は問いません）。" >&2
+  # 失敗が部分書き込み後に発生した場合、skills-lock.json / .agents/skills/${SKILL_NAME}/
+  # に加えてスコープ外（他エージェントツリー等）にも残置され得るため、失敗経路でも
+  # 実行後スナップショットを取ってスコープ外残留を検査する（下の成功経路と同一ロジック。
+  # ここで検査しないと、次にこのディレクトリを扱う処理がスコープ外の残置差分を
+  # 「元から存在した dirty 状態」として誤認しかねない）。
+  git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}" || true
+  filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_AFTER_HASH}"
+  if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
+    || ! cmp -s "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}"; then
+    echo "エラー: 失敗した npx 実行がスコープ外へも書き込んだ可能性があります。以下を確認してください（削除はしていません）:" >&2
+    while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_AFTER}"
+  fi
+  # 次にこのディレクトリを扱う呼び出し元（SKILL.md の全スキル sync ループ等）が、
+  # この失敗による残置差分を承認済みの変更や「既存の dirty 状態」と混同しないよう、
+  # スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）分のみ即座にリバート
+  # してから exit 1 で終端する。2つのパスを1つの `git checkout --` に渡すとアトミックに
+  # 扱われ、どちらか一方が「追跡対象なし」（初回具現化・untracked のみの書き込み時）で
+  # pathspec エラーになるとコマンド全体が失敗し、もう一方（skills-lock.json）も復元
+  # されないまま抜けてしまうため、必ず1コマンド1パスで分離する。
+  git checkout -- skills-lock.json 2>/dev/null || true
+  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+  if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
+    git clean -fd ".agents/skills/${SKILL_NAME}/" || true
+  fi
+  echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。固定版を外した再実行はしません。" >&2
   exit 1
 fi
 
@@ -196,14 +260,17 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
   exit 1
 fi
 
-filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}"
-filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}"
+filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_AFTER_HASH}"
 
 # フィルタ後（スコープ外のみ）のスナップショットが前後で一致しなければ、
 # --agent universal が抑止しているはずのスコープ外書き込みが発生したことになる
 # （一次防御を突破した場合の多層防御）。git の porcelain -z 出力順は決定的なため
-# ソート不要で cmp -s のバイト列比較のみで判定できる。
-if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}"; then
+# ソート不要で cmp -s のバイト列比較のみで判定できる。ステータス文字列＋パスの
+# レコード（SNAP_FILTERED_*）に加え、内容ハッシュ（SNAP_FILTERED_*_HASH）も比較する。
+# 実行前から M・?? だったスコープ外ファイルは、npx が内容だけ上書きしてもレコード側
+# は不変のままになり得るため、ハッシュ側の不一致だけがそれを検出できる。
+if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
+  || ! cmp -s "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}"; then
   echo "エラー: npx skills add がスコープ外（skills-lock.json / .agents/skills/${SKILL_NAME}/ 以外）へ書き込みました。" >&2
   echo "==> 実行前のスコープ外状態:" >&2
   while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_BEFORE}"

@@ -16,12 +16,21 @@
 // npx の実クローン処理は行わず、preview-untracked.test.mjs と同じ方式で
 // PATH 先頭に置いた npx / gh のスタブへ差し替える。シナリオは TEST_NPX_SCENARIO で
 // 切り替える:
-//   - 'out-of-scope-write' : スコープ内変更に加えて .claude/skills/dummy-skill/SKILL.md
-//                            （他エージェントツリー相当）と .cursor/rules/x.md
-//                            （任意の別ツリー）を作成する
-//   - 'invalid-agents'     : npx が「Invalid agents: ...」を出力して exit 0 する
-//                            （CLI バージョン更新で universal が無効化された場合の
-//                            silent no-op を再現する）
+//   - 'out-of-scope-write'        : スコープ内変更に加えて .claude/skills/dummy-skill/SKILL.md
+//                                   （他エージェントツリー相当）と .cursor/rules/x.md
+//                                   （任意の別ツリー）を作成する
+//   - 'invalid-agents'            : npx が「Invalid agents: ...」を出力して exit 0 する
+//                                   （CLI バージョン更新で universal が無効化された場合の
+//                                   silent no-op を再現する）
+//   - 'content-overwrite-dirty'   : PR #412 レビュー指摘（P1）の回帰。実行前から M
+//                                   （追跡・変更済み）だったスコープ外ファイルの内容
+//                                   だけを、パス・ステータス文字を変えずに上書きする
+//                                   （porcelain の記録だけでは検出できず、内容ハッシュ
+//                                   比較でのみ検出できるケース）
+//   - 'npx-failure-out-of-scope'  : PR #412 レビュー指摘（P1）の回帰。スコープ外へ
+//                                   部分書き込みしたのち npx 自体が非ゼロ終了する
+//                                   （失敗経路でも事後のスコープ外検査に到達する
+//                                   ことを検証する）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -38,6 +47,9 @@ const SCRIPT_PATH = join(
 
 const SKILL_NAME = 'dummy-skill'
 const SOURCE_REPO = 'Fandhe-AI/dummy-source'
+// 'content-overwrite-dirty' / 'npx-failure-out-of-scope' シナリオで使う、
+// 実行前から追跡・変更済み（M）にしておくスコープ外ファイルのパス。
+const OUT_OF_SCOPE_FILE = '.claude/skills/other-skill/NOTES.md'
 
 function sh(cmd, cwd, env) {
   return execFileSync('bash', ['-c', cmd], { cwd, env, encoding: 'utf8' })
@@ -86,6 +98,19 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "out-of-scope-write" ]]; then
   mkdir -p ".cursor/rules"
   echo "leaked into cursor tree" > ".cursor/rules/x.md"
 fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "content-overwrite-dirty" ]]; then
+  # 実行前から M（追跡・変更済み）だったスコープ外ファイルを、パス・ステータス文字は
+  # 変えずに内容だけ上書きする（porcelain のレコードだけでは前後不変に見えるケース）。
+  echo "npx overwrote this content" > "${OUT_OF_SCOPE_FILE}"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "npx-failure-out-of-scope" ]]; then
+  # スコープ内書き込み（上の python ブロック）に加えてスコープ外へも部分書き込み
+  # したのち、npx 自体が失敗するケースを再現する。
+  echo "npx overwrote this content during failure" > "${OUT_OF_SCOPE_FILE}"
+  exit 1
+fi
 exit 0
 `
   writeFileSync(join(binDir, 'npx'), npxBody)
@@ -115,6 +140,19 @@ exit 0
       2,
     ) + '\n',
   )
+  // 'content-overwrite-dirty' / 'npx-failure-out-of-scope' 用: スコープ外ファイルを
+  // baseline content でコミットしてから、コミット後に別内容へ書き換えて
+  // 「実行前から M（追跡・変更済み）だった」状態を再現する。npx スタブは同じパス・
+  // 同じ M ステータスのまま内容だけをさらに上書きする。
+  if (scenario === 'content-overwrite-dirty' || scenario === 'npx-failure-out-of-scope') {
+    const outOfScopePath = join(repoDir, ...OUT_OF_SCOPE_FILE.split('/'))
+    mkdirSync(dirname(outOfScopePath), { recursive: true })
+    writeFileSync(outOfScopePath, 'baseline content\n')
+    sh('git add -A && git commit -q -m init', repoDir)
+    writeFileSync(outOfScopePath, 'pre-existing wip edit (uncommitted)\n')
+    return { repoDir, binDir, scenario, argvLogFile }
+  }
+
   sh('git add -A && git commit -q -m init', repoDir)
 
   return { repoDir, binDir, scenario, argvLogFile }
@@ -220,6 +258,79 @@ test('ケース4: スコープ内のみの書き込みでは誤検出せず、�
     const out = runScript(ctx)
     assert.doesNotMatch(out, /スコープ外/, 'スコープ内のみの変更を誤検出しないこと')
     assert.match(out, /updated upstream content/, 'tracked diff は従来どおり表示されること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース5: 実行前から dirty だったスコープ外ファイルの内容だけの上書きを、' +
+  '内容ハッシュ比較で検出する（PR #412 P1 の回帰）', () => {
+  const ctx = setupRepo('content-overwrite-dirty')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /スコープ外/, 'スコープ外検出のエラーメッセージが出ること')
+        assert.match(
+          combined,
+          /other-skill\/NOTES\.md/,
+          '内容だけ上書きされたスコープ外ファイルのパスが列挙されること' +
+            '（ステータス文字列・パスは前後で不変のため、これは内容ハッシュ比較でのみ検出できる）',
+        )
+        return true
+      },
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース6: npx が非ゼロ終了しても事後のスコープ外検査へ到達する' +
+  '（PR #412 P1 の回帰。failure 経路でも fail-closed）', () => {
+  const ctx = setupRepo('npx-failure-out-of-scope')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /実行が失敗しました/, 'npx 失敗の警告が出ること')
+        assert.match(
+          combined,
+          /スコープ外へも書き込んだ可能性/,
+          'npx 失敗経路でも事後のスコープ外検査が実行され、残置が報告されること',
+        )
+        assert.match(
+          combined,
+          /other-skill\/NOTES\.md/,
+          '失敗経路での残置パスが列挙されること',
+        )
+        return true
+      },
+    )
+
+    // 失敗経路でもスコープ内（skills-lock.json / .agents/skills/<name>/）は
+    // 即座にリバートされ clean であること
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })
