@@ -100,6 +100,36 @@ fi
 # skills CLI へ渡す確認プロンプトのスキップで、別物（位置で区別される）。
 SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更新手順は下記節を参照
 
+# git status --porcelain -z の1レコード（"XY PATH\0"）からスコープ内
+# （skills-lock.json / .agents/skills/${SKILL_NAME}/ 配下）を除いたレコードだけを
+# NUL 区切りで書き出す。固定長プレフィックス（ステータス2文字+空白1文字=3文字）を
+# 切り落としてパスを取り出すため、C-quote（改行等を含むパスのダブルクォート化）の
+# 影響を受けない。
+filter_out_of_scope() {
+  local infile="$1" outfile="$2" record path
+  : > "${outfile}"
+  while IFS= read -r -d '' record; do
+    path="${record:3}"
+    if [[ "${path}" == "skills-lock.json" || "${path}" == ".agents/skills/${SKILL_NAME}/"* ]]; then
+      continue
+    fi
+    printf '%s\0' "${record}" >> "${outfile}"
+  done < "${infile}"
+}
+
+# npx 実行前後のスナップショット比較（スコープ外書き込みの多層防御）用の一時ファイル。
+# -uall は新規ディレクトリの collapse（`?? .agents/` への丸め）を防ぐため必須。
+# status.renames=false でユーザー環境の git config に依存せず rename 検出を無効化する。
+SNAP_BEFORE="$(mktemp)"
+SNAP_AFTER="$(mktemp)"
+SNAP_FILTERED_BEFORE="$(mktemp)"
+SNAP_FILTERED_AFTER="$(mktemp)"
+NPX_OUTPUT_FILE="$(mktemp)"
+if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_BEFORE}"; then
+  echo "エラー: npx 実行前の git status 取得に失敗しました。スコープ外書き込みの検出ができないため中止します。" >&2
+  exit 1
+fi
+
 # CLI に computedHash を更新させる。固定版が解決できない場合（該当版の不存在・
 # レジストリ障害）は npx が非ゼロ終了する。その場合は当該スキルを中止（skip）し、
 # 固定版を外した再実行はしない（fail-closed。暗黙の最新版フォールバックはしない）。
@@ -107,10 +137,38 @@ SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更
 # 分岐と同じ意味であり、「script 全体を停止する」という意味ではない
 # （`scripts/skills-lock-update.sh` 単体実行時の set -euo pipefail による停止とは別軸。
 # 詳細は下記「skills CLI のバージョン固定と更新手順」節の fail-closed 記述を参照）。
-npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --yes || {
+# --agent universal は書き込み先を union ストア（.agents/skills/<name>/）+
+# skills-lock.json のみに限定する一次防御。個別 agent 指定（claude-code 等）は
+# .agents/skills を経由せず .claude/skills/ 等へ直接コピーしレイアウトを変えるため
+# 使わない（実測: スクラッチリポジトリで --agent universal のみ .agents/skills/
+# 以外へ書き込みが無いことを確認済み）。npx の出力を tee で NPX_OUTPUT_FILE へも
+# 保存し、後段の「Invalid agents」no-op 検出に使う。
+npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --agent universal --yes 2>&1 | tee "${NPX_OUTPUT_FILE}"
+NPX_STATUS="${PIPESTATUS[0]}"
+
+# CLI がバージョン更新等で --agent universal を認識できなくなった場合、
+# エラー表示のうえ exit 0 の no-op になる（実測: skills@1.5.22 で確認済み）。
+# 検知しないまま先へ進むと「同期したつもりで何も更新されていない」まま完了扱いに
+# なるため、npx 自体の終了コードとは別に明示的な失敗として扱う。
+if [[ "${NPX_STATUS}" -eq 0 ]] && grep -q "Invalid agents" "${NPX_OUTPUT_FILE}"; then
+  echo "エラー: skills CLI が --agent universal を認識せず、何も実行していません（exit 0 の no-op）。SKILLS_CLI_VERSION 更新時は「skills CLI のバージョン固定と更新手順」節に従い universal の有効性を再確認してください。" >&2
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}"
+  exit 1
+fi
+
+if [[ "${NPX_STATUS}" -ne 0 ]]; then
   echo "警告: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害・ダウンロード中断等、原因は問わない）。"
-  # 失敗が部分書き込み後に発生した場合、skills-lock.json / .agents/skills/${SKILL_NAME}/ が
-  # 中途半端な状態のまま残り得る。次スキルの `git add skills-lock.json`（Step 7）が
+  # 失敗が部分書き込み後に発生した場合、skills-lock.json / .agents/skills/${SKILL_NAME}/ に
+  # 加えてスコープ外（他エージェントツリー等）にも残置され得るため、失敗経路でも
+  # 実行後スナップショットを取ってスコープ外残留を検査する（下の成功経路と同一ロジック）。
+  git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}" || true
+  filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}"
+  filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}"
+  if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}"; then
+    echo "エラー: 失敗した npx 実行がスコープ外へも書き込んだ可能性があります。以下を確認してください（削除はしていません）:" >&2
+    while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_AFTER}"
+  fi
+  # 次スキルの `git add skills-lock.json`（Step 7）が
   # この残置変更を承認済みの変更と一緒に stage してしまわないよう、Step 6 の却下時と
   # 同じ手順で当該スキル分のみを即座にリバートしてから skip する。
   # 2つのパスを1つの `git checkout --` に渡すとアトミックに扱われ、どちらか一方が
@@ -119,10 +177,52 @@ npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}"
   # 必ず1コマンド1パスで分離し、一方の失敗が他方の復元を阻害しないようにする。
   git checkout -- skills-lock.json
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-  git clean -fd ".agents/skills/${SKILL_NAME}/"
+  git clean -fd ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
   echo "警告: 固定版を外した再実行はせず、当該スキルの変更をリバートして skip します。"
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}"
   continue
-}
+fi
+
+# npx 実行後のスナップショット。前後のスコープ外差分を見るため、取得条件は
+# SNAP_BEFORE と完全に揃える。
+if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; then
+  echo "エラー: npx 実行後の git status 取得に失敗しました。スコープ外書き込みの検出ができないため中止します。" >&2
+  exit 1
+fi
+
+filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}"
+filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}"
+
+# フィルタ後（スコープ外のみ）のスナップショットが前後で一致しなければ、
+# --agent universal が抑止しているはずのスコープ外書き込みが発生したことになる
+# （一次防御を突破した場合の多層防御）。他の skip 分岐と異なり、ここは continue
+# ではなく exit 1 でループ全体を停止する。スコープ外の汚染は自動リバートされない
+# ため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が
+# 問題視している状態そのものになる。この時点までに承認・stage 済みの他スキル分は
+# index に残ったままになるため、停止後は `git status` で確認し、必要な分だけ
+# `git commit` するか `git reset` で戻すかを判断すること。
+if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}"; then
+  echo "エラー: npx skills add がスコープ外（skills-lock.json / .agents/skills/${SKILL_NAME}/ 以外）へ書き込みました。" >&2
+  echo "==> 実行前のスコープ外状態:" >&2
+  while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_BEFORE}"
+  echo "==> 実行後のスコープ外状態:" >&2
+  while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_AFTER}"
+  echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はこれからリバートします。" >&2
+  echo "スコープ外は既存の WIP を巻き込む恐れがあるため自動リバートしません。" >&2
+  echo "上記パスの内容を git status / git diff で確認し、必要なら手動で" >&2
+  echo "  git checkout -- <path>   （変更前が clean だった追跡ファイルの場合）" >&2
+  echo "  git clean -fd <path>     （変更前に存在しなかった未追跡ファイルの場合）" >&2
+  echo "を実行してください。" >&2
+  git checkout -- skills-lock.json 2>/dev/null || true
+  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+  if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
+    git clean -fd ".agents/skills/${SKILL_NAME}/" || true
+  fi
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}"
+  exit 1
+fi
+
+rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}"
 ```
 
 `npx skills add` は以下を行う:
@@ -134,6 +234,8 @@ npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}"
 **重要な副作用**: `npx skills add` はインストール済みファイルを最新の upstream 版で上書きする。upstream との同期が目的のため、これは意図した動作である。上記の per-skill clean ガードは `git status --porcelain` を使い、ステージ済み・未ステージ・**未追跡ファイルも含めて**検出する。WIP がある場合は npx 実行前に skip するため、未コミット編集の消失は防止される。
 
 **注意**: clean ガードを通過したスキルについては、npx が即座に `skills-lock.json` と `.agents/skills/<name>/` を書き換える。ユーザー承認（Step 6）の前に変更が確定するため、承認しない場合は Step 6 の案内に従いリバートが必要。
+
+**書き込みスコープの制限（`--agent universal`）**: `npx skills add` はエージェント/パス制限なしで実行すると、検出した各エージェント向けツリー（`.claude/skills/` 等）へも書き込み得る（Issue #410）。しかし clean ガード・Step 5 のプレビュー・Step 6 のリバート・Step 7 の `git add` はいずれも `skills-lock.json` と `.agents/skills/<name>/` のみを対象としており、スコープ外への書き込みが発生すると WIP 上書き・レビュー迂回・「clean 報告後の dirty 残留」が起き得る。`--agent universal` により書き込みは `.agents/skills/<name>/` と `skills-lock.json` に限定され、他エージェントツリー（`.claude/skills/` 等）へは書かない（実測: スクラッチリポジトリで確認済み）。万一 CLI のバージョン更新等でこの前提が崩れて書き込まれた場合も、npx 実行前後のスナップショット比較で fail-closed に停止する（多層防御）。
 
 #### Step 5: 当該スキルの差分を表示する
 
@@ -275,14 +377,27 @@ EOF
 **更新手順**:
 1. `scripts/skills-lock-update.sh` の `SKILLS_CLI_VERSION` と、本ファイルの Step 4 フェンス内の `SKILLS_CLI_VERSION` を**同一コミット**で更新する（値は完全一致させる）
 2. `node --test skills/sync-skills-lock/tests/` で両ファイルの一致を検証する
-3. 1 スキルで実際に実行し、差分が正常であることを確認する
-4. `chore(sync-skills-lock): skills CLI を X.Y.Z へ更新` でコミットする
+3. **`universal` が新版でも有効な agent id であることを確認する**。無効値へ変わっていた場合、CLI はエラー表示のうえ `exit 0` の no-op になる（実測: `skills@1.5.22` で確認済み）ため、気付かずに運用すると「同期したつもりで何も更新されていない」状態になる。確認方法: スクラッチリポジトリで 1 スキルを実際に `--agent universal` で実行し、出力に `Invalid agents` が出ないこと、および `.agents/skills/<name>/` が実際に更新されることを確認する
+4. 1 スキルで実際に実行し、差分が正常であること・書き込みが `.agents/skills/<name>/` と `skills-lock.json` のみに限定されていること（`git status --porcelain` に `.claude/` 等の他ツリーが現れないこと）を確認する
+5. `chore(sync-skills-lock): skills CLI を X.Y.Z へ更新` でコミットする
 
-**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了する。黙って最新版へフォールバックする経路は存在せず、dist-tag・レンジ指定への書き換えも禁止する。この失敗時の停止範囲は実行経路によって異なる: `scripts/skills-lock-update.sh` を単体実行した場合はスクリプト全体が `set -euo pipefail` により即座に停止する。一方、本ファイルの Step 4 フェンス（複数スキルをループで処理する経路）では、`npx` の失敗を検出したら Step 6 の却下時と同じ手順（`git checkout --` / `git clean -fd`）で当該スキル分の部分書き込みをリバートしてから skip（`continue`）して次スキルへ進む — Step 1/3 の他の skip 分岐と同じ制御フローであり、ループ全体を停止させるものではない。リバートを挟まずに skip すると、失敗が部分書き込み後に発生した場合の残置変更を次スキルの `git add`（Step 7）が承認済み変更と一緒に stage してしまい得るため必須の手順である。
+**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了する。黙って最新版へフォールバックする経路は存在せず、dist-tag・レンジ指定への書き換えも禁止する。この失敗時の停止範囲は実行経路によって異なる: `scripts/skills-lock-update.sh` を単体実行した場合はスクリプト全体が `set -euo pipefail` により即座に停止する。一方、本ファイルの Step 4 フェンス（複数スキルをループで処理する経路）では、`npx` の失敗を検出したら Step 6 の却下時と同じ手順（`git checkout --` / `git clean -fd`）で当該スキル分の部分書き込みをリバートしてから skip（`continue`）して次スキルへ進む — Step 1/3 の他の skip 分岐と同じ制御フローであり、ループ全体を停止させるものではない。リバートを挟まずに skip すると、失敗が部分書き込み後に発生した場合の残置変更を次スキルの `git add`（Step 7）が承認済み変更と一緒に stage してしまい得るため必須の手順である。**スコープ外書き込みの検出（`exit 1`）はこれとは別の停止経路であり、`continue` ではなくループ全体を止める**（詳細は次項「書き込みスコープの制限」を参照）。
+
+## 書き込みスコープの制限（`--agent universal` とスコープ外検出）
+
+`npx skills add` にエージェント/パス制限を付けずに実行すると、CLI が検出した各エージェント向けツリー（`.claude/skills/` 等）へも書き込み得る（Issue #410）。しかし clean ガード（前提条件節・Step 4）・プレビュー（Step 5）・リバート（Step 6）・承認 `git add`（Step 7）はいずれも `skills-lock.json` と `.agents/skills/<name>/` のみを対象としているため、スコープ外への書き込みが発生すると (1) WIP 上書き、(2) レビュー（プレビュー）迂回、(3) 「clean と報告した後の dirty 残留」が起き得る。
+
+2 層で防ぐ:
+
+1. **一次防御（`--agent universal`）**: Step 4 の npx 呼び出しに `--agent universal` を付け、書き込み先を union ストア（`.agents/skills/<name>/`）と `skills-lock.json` のみへ限定する。個別 agent 指定（`claude-code` 等）は `.agents/skills/` を経由せず対象ツリーへ直接コピーしレイアウトを変えてしまうため使わない
+2. **多層防御（実行前後スナップショット比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
+
+**検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、ignore されたパスへの書き込みは検出できない（承認経路の `git add`（`-f` なし）が ignore 対象を取り込まないのと対称であり、この非対称自体は許容する）。また、npx 実行前から dirty だった追跡ファイルを npx が同一ステータスのまま上書きした場合も porcelain 差分では検出できない。ただしスコープ外ツリーは通常 clean（tracked）であり、一次防御（`--agent universal`）が書き込み自体を抑止するため、この残余リスクは小さい。
 
 ## 注意事項
 
 - **全スキル sync での途中却下**: 1スキルずつ承認・stage を行うため、途中で却下しても承認済みスキルの stage は保持される。全スキル処理後に一括コミットする
+- **スコープ外書き込みを検出した場合はループ全体が停止する**: 「書き込みスコープの制限」節を参照。`continue` ではなく `exit 1` のため、承認・stage 済みの他スキル分が index に残ったまま処理が止まる。手動で `git status` を確認し、コミットするか `git reset` するかを判断する
 - **`skills-lock.json` は実行前 clean 前提で全体をステージする**: 単一 JSON ファイルのため部分ステージは現実的でない。Step 1 の事前ガードで clean を保証し、sync 由来以外の変更の混入を防ぐ
 - **ルートの `skills-lock.json` のみを編集**: submodule 配下は手を付けない
 - **source 完全一致検証（必須）**: `source` を `OWNER/REPO` へ正規化した上で `Fandhe-AI/<repo>` に完全一致しないエントリは skip する（`contribute-skill` と同じ安全弁）。前方一致では `../` を含む値が通過してしまうため、完全一致の正規表現で検証する。`skills-lock.json` の改ざんや誤設定から防御するため

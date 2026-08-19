@@ -82,6 +82,24 @@ if ! gh auth status &>/dev/null; then
   exit 1
 fi
 
+# git status --porcelain -z の1レコード（"XY PATH\0"）からスコープ内（skills-lock.json /
+# .agents/skills/${SKILL_NAME}/ 配下）を除いたレコードだけを NUL 区切りで書き出す。
+# これは Step 4 実行前後のスナップショット差分（scope-guard）専用のフィルタで、
+# 未追跡ファイルのプレビュー表示（既存の git ls-files -z 経路。下部で継続使用）とは別物。
+# ステータス文字の後の空白1文字を含む固定長プレフィックス（3文字）を切り落とすことで
+# パスを取り出す。C-quote（改行等を含むパスのダブルクォート化）の影響を受けない。
+filter_out_of_scope() {
+  local infile="$1" outfile="$2" record path
+  : > "${outfile}"
+  while IFS= read -r -d '' record; do
+    path="${record:3}"
+    if [[ "${path}" == "skills-lock.json" || "${path}" == ".agents/skills/${SKILL_NAME}/"* ]]; then
+      continue
+    fi
+    printf '%s\0' "${record}" >> "${outfile}"
+  done < "${infile}"
+}
+
 echo "==> skills-lock.json を更新中: ${SKILL_NAME} (source: ${SOURCE_REPO})"
 echo ""
 
@@ -119,13 +137,95 @@ if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]]; then
   exit 1
 fi
 
+# 一時ファイルは npx 実行前後のスナップショット比較に使うため、npx を呼ぶより前に
+# すべて用意し、単一の trap へまとめて登録する（trap は後勝ちのため、複数箇所に
+# 分散させると先に登録した分の掃除が消える）。UNTRACKED_LIST_FILE はこの後の
+# 未追跡ファイル一覧化（プレビュー表示）でも使うため、ここでまとめて確保する。
+SNAP_BEFORE="$(mktemp)"
+SNAP_AFTER="$(mktemp)"
+SNAP_FILTERED_BEFORE="$(mktemp)"
+SNAP_FILTERED_AFTER="$(mktemp)"
+NPX_OUTPUT_FILE="$(mktemp)"
+UNTRACKED_LIST_FILE="$(mktemp)"
+trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}"' EXIT
+
+# npx 実行前のリポジトリ全体スナップショット（スコープ外書き込み検出の起点）。
+# -z は改行等を含むパスでも1レコード1件を保つため、後段の filter_out_of_scope が
+# C-quote に影響されず判定できる。-uall は新規ディレクトリの collapse
+# （`?? .agents/` のような1行への丸め）を防ぐために必須（丸められると
+# ディレクトリ配下の個々のパスがスコープ判定の対象に現れない）。
+# status.renames=false で rename 検出を明示的に無効化し、2フィールド
+# （新パス + 旧パス）のレコードが混入しない形にそろえる（既定でも通常は無効だが、
+# ユーザー環境の git config 依存にしない）。
+if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_BEFORE}"; then
+  echo "エラー: npx 実行前の git status 取得に失敗しました。スコープ外書き込みの検出ができないため中止します。" >&2
+  exit 1
+fi
+
 # npx skills add で CLI に computedHash を更新させる
 # --yes（1つ目）は npx 自体のインストール確認プロンプトを非対話でスキップする
 # ものであり、skills CLI へ渡す --yes（末尾）とは別物（位置で区別される）。
 # skills@${SKILLS_CLI_VERSION} で exact 版のみ解決させ、該当版が存在しない・
 # レジストリ到達不能の場合は npx が非ゼロ終了し set -euo pipefail で即停止する
 # （fail-closed。最新版への暗黙フォールバック経路は存在しない）。
-npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes
+# --agent universal は書き込み先を union ストア（.agents/skills/<name>/）+
+# skills-lock.json のみに限定する一次防御。個別 agent 指定（claude-code 等）は
+# .agents/skills を経由せず .claude/skills/ 等へ直接コピーしレイアウトを変えるため
+# 使わない（実測: スクラッチリポジトリで --agent universal のみ .agents/skills/
+# 以外へ書き込みが無いことを確認済み）。npx の出力は tee で NPX_OUTPUT_FILE へも
+# 保存し、後段の「Invalid agents」no-op 検出に使う。パイプの非ゼロ終了は
+# `set -euo pipefail` の pipefail によりそのままスクリプト全体を停止させる
+# （fail-closed。この行を `if` 条件に入れると errexit がこの行では働かなくなるため、
+# npx 呼び出し自体は bare のまま1行を維持する。tests/version-pin.test.mjs の静的抽出
+# も行頭 npx の1物理行を前提にしているため、バックスラッシュ継続で複数行に分けない）。
+npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --agent universal --yes 2>&1 | tee "${NPX_OUTPUT_FILE}"
+
+# CLI がバージョン更新等で --agent universal を認識できなくなった場合、
+# エラー表示のうえ exit 0 の no-op になる（実測: skills@1.5.22 で確認済み）。
+# 検知せず先へ進むと「同期したつもりで何も更新されていない」まま完了扱いに
+# なるため、明示的にエラー化する。
+if grep -q "Invalid agents" "${NPX_OUTPUT_FILE}"; then
+  echo "エラー: skills CLI が --agent universal を認識せず、何も実行していません（exit 0 の no-op）。SKILLS_CLI_VERSION 更新時は SKILL.md の「skills CLI のバージョン固定と更新手順」節に従い universal の有効性を再確認してください。" >&2
+  exit 1
+fi
+
+# npx 実行後のスナップショット。前後のスコープ外差分を見るため、取得条件は
+# SNAP_BEFORE と完全に揃える。
+if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; then
+  echo "エラー: npx 実行後の git status 取得に失敗しました。スコープ外書き込みの検出ができないため中止します。" >&2
+  exit 1
+fi
+
+filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}"
+filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}"
+
+# フィルタ後（スコープ外のみ）のスナップショットが前後で一致しなければ、
+# --agent universal が抑止しているはずのスコープ外書き込みが発生したことになる
+# （一次防御を突破した場合の多層防御）。git の porcelain -z 出力順は決定的なため
+# ソート不要で cmp -s のバイト列比較のみで判定できる。
+if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}"; then
+  echo "エラー: npx skills add がスコープ外（skills-lock.json / .agents/skills/${SKILL_NAME}/ 以外）へ書き込みました。" >&2
+  echo "==> 実行前のスコープ外状態:" >&2
+  while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_BEFORE}"
+  echo "==> 実行後のスコープ外状態:" >&2
+  while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_AFTER}"
+  echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はこれからリバートします。" >&2
+  echo "スコープ外は既存の WIP を巻き込む恐れがあるため自動リバートしません。" >&2
+  echo "上記パスの内容を git status / git diff で確認し、必要なら手動で" >&2
+  echo "  git checkout -- <path>   （変更前が clean だった追跡ファイルの場合）" >&2
+  echo "  git clean -fd <path>     （変更前に存在しなかった未追跡ファイルの場合）" >&2
+  echo "を実行してください。" >&2
+  # スコープ内リバート。git checkout -- は「対象なし」で失敗し得る（初回具現化・
+  # 未追跡のみの書き込み時）ため || true で許容する。git clean -fd はディレクトリが
+  # 存在しない場合に非ゼロ終了するため、存在確認してから呼ぶ（set -e 下で無条件に
+  # 呼ぶとこのエラーメッセージより先にスクリプトが停止し得る）。
+  git checkout -- skills-lock.json 2>/dev/null || true
+  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+  if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
+    git clean -fd ".agents/skills/${SKILL_NAME}/" || true
+  fi
+  exit 1
+fi
 
 echo ""
 echo "==> 更新完了。変更内容:"
@@ -151,9 +251,8 @@ echo ""
 # 誤表示し、実際には存在する未追跡ファイルの内容を確認しないまま呼び出し元が
 # git add で承認してしまう（このスクリプトが防ごうとしている非対称そのもの）。
 # 通常のコマンド置換で一時ファイルへ書き出し、`if ! ...` で明示的に終了コードを検査する
-# ことで fail-closed にする。
-UNTRACKED_LIST_FILE="$(mktemp)"
-trap 'rm -f "${UNTRACKED_LIST_FILE}"' EXIT
+# ことで fail-closed にする。UNTRACKED_LIST_FILE 自体は npx 実行前のスナップショット
+# 取得と同時に mktemp 済み（単一 trap にまとめるため）。
 if ! git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" > "${UNTRACKED_LIST_FILE}"; then
   echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。内容未確認のまま承認できてしまうため中止します。" >&2
   exit 1
