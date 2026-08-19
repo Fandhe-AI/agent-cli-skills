@@ -1441,6 +1441,22 @@ class TestReportIssueLifecycle(unittest.TestCase):
         self.assertIn("--state", calls[0])
         self.assertEqual(calls[0][calls[0].index("--state") + 1], "all")
 
+    def test_search_query_quotes_title_as_phrase(self):
+        # 未クォートだとタイトル中の "(ci):" が GitHub search の qualifier 構文と
+        # 誤解釈され 0 件になり、run のたびに新規 issue が量産される（#402）。
+        # タイトル全体をフレーズとしてダブルクォートで囲むことで qualifier
+        # 誤解釈を防ぐ。
+        fake, calls = self._fake_run([])
+        orig = cud._run
+        cud._run = fake
+        try:
+            cud.find_report_issue("o/r", "tok")
+        finally:
+            cud._run = orig
+        search_idx = calls[0].index("--search")
+        query = calls[0][search_idx + 1]
+        self.assertEqual(query, f'"{cud.REPORT_ISSUE_TITLE}" in:title')
+
     def test_reopens_closed_issue_instead_of_creating_new(self):
         # 乖離の再発。close 済みの既存 issue を reopen して使い回す。
         msg, verbs = self._sync(

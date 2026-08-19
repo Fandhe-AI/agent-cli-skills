@@ -1554,10 +1554,17 @@ def find_report_issue(repo: str, token: str) -> tuple[int | None, str]:
     使い、どれを掴むかは Python 側の**完全一致**で決める。`--state all` を
     件数上限だけで引くと古い固定 issue を取りこぼすため、絞り込みと完全一致の
     両方を使う。
+
+    タイトル全体を ``"..."`` でダブルクォートしフレーズとして渡す。未クォートだと
+    GitHub search がタイトル中の ``(ci):`` を qualifier 構文（例: `ci:` 相当）と
+    誤解釈し 0 件を返す。0 件 → ``sync_report_issue`` が既存を発見できず run の
+    たびに新規作成、という経路で報告 issue の重複が量産された（#402）。
+    このため ``REPORT_ISSUE_TITLE`` にダブルクォートを含めてはならない
+    （含めるとフレーズ境界が壊れ、この検索が再び 0 件に戻る）。
     """
     proc = _run(
         ["gh", "issue", "list", "--repo", repo, "--state", "all",
-         "--search", f"{REPORT_ISSUE_TITLE} in:title",
+         "--search", f'"{REPORT_ISSUE_TITLE}" in:title',
          "--limit", "200", "--json", "number,title,state"],
         token,
     )
