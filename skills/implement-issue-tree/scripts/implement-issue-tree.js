@@ -628,14 +628,19 @@ const TREE_SCHEMA = {
 // worktreePath を追加: 中断後にユーザーが残骸 worktree を特定・掃除できるようにする
 // prNumber は push 前 review フローではこの時点で未作成（0）のため必須から外す。
 // PR 作成は Review 通過後の push + pr-create ステップで行う。
+// worktreePath を required 化（Issue #404）: 省略はツール呼び出し層の schema 検証リトライで
+// ほぼ防げる。省略時は recordEphemeralWorktree が path: '' で台帳計上し、
+// remeasureResidualBytesNow のバイト実測ゲートが恒久停止し得たため、モデル側の申告漏れを
+// 入口で減らす。「pwd を確定できない場合のみ空文字」の契約は残す（空文字はホスト側の物理一覧
+// フォールバックが受け止めるため required 化しても穴にならない）。
 const IMPL_SCHEMA = {
   type: 'object',
-  required: ['branch', 'summary'],
+  required: ['branch', 'summary', 'worktreePath'],
   properties: {
     prNumber: { type: 'number', description: 'push 前 review フローでは常に 0（PR はまだ作成しない）' },
     branch: { type: 'string' },
     summary: { type: 'string' },
-    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
+    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' },
     // out-of-scope 項目専用フィールド。summary の文字列マッチ抽出は誤混入を招いたため（#92）、
     // 専用フィールド化して PR 作成フェーズが推測抽出せずに済むようにした。
     outOfScope: {
@@ -907,13 +912,14 @@ const MERGE_VERIFY_SCHEMA = {
   },
 }
 
+// worktreePath を required 化（Issue #404）。理由は IMPL_SCHEMA と同じ。
 const FIX_SCHEMA = {
   type: 'object',
-  required: ['pushed', 'summary'],
+  required: ['pushed', 'summary', 'worktreePath'],
   properties: {
     pushed: { type: 'boolean' },
     summary: { type: 'string' },
-    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
+    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' },
     routingError: {
       type: 'boolean',
       description:
@@ -983,24 +989,26 @@ const PLAN_SCHEMA = {
 // CI を一切起動しない Review を全て通過してから、ここで初めて push・PR 作成を行う。
 // prNumber: 0 は PR 作成失敗（branch push は成功している可能性あり）。
 // 既存 open PR を再利用した場合（Issue #135）はその PR 番号を返す。
+// worktreePath を required 化（Issue #404）。理由は IMPL_SCHEMA と同じ。
 const PR_CREATE_SCHEMA = {
   type: 'object',
-  required: ['prNumber', 'summary'],
+  required: ['prNumber', 'summary', 'worktreePath'],
   properties: {
     prNumber: { type: 'number', description: '作成した PR 番号。既存 open PR を再利用した場合はその番号。作成も再利用もできなければ 0' },
     summary: { type: 'string' },
     // pr-create の worktree は push 完了時点で origin に成果が存在するため保持価値がない。
     // 呼び出し元が返却直後に削除して残骸の蓄積を防ぐ（イシュー close 時まで残さない）。
-    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
+    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' },
   },
 }
 
 // 独立 Review フェーズのスキーマ。
 // Low（要改善）含む指摘が 1 件でもあれば needs-fix。指摘なしなら ok。
 // Review エージェントは修正を行わず判定のみ担う（修正は fix エージェントの責務）。
+// worktreePath を required 化（Issue #404）。理由は IMPL_SCHEMA と同じ。
 const REVIEW_SCHEMA = {
   type: 'object',
-  required: ['state', 'summary', 'highestSeverity'],
+  required: ['state', 'summary', 'highestSeverity', 'worktreePath'],
   properties: {
     // blocked: レビュー対象コードではなく環境（比較基準 ref の解決失敗等）に起因して
     // レビューを実施できなかった場合の専用状態。needs-fix（コード指摘）とは呼び出し元の
@@ -1015,7 +1023,7 @@ const REVIEW_SCHEMA = {
     // Review は読み取り専用（判定のみ）で worktree に成果物を残さないため、
     // 呼び出し元が返却直後に削除する。impl / fix の worktree（未 push の実装コミットを
     // 保持する唯一の場所）とは扱いが異なる点に注意。
-    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。空文字でも可' },
+    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' },
   },
 }
 
@@ -2855,6 +2863,64 @@ function projectResidualBytes({ baselineBytes, ledgerLength, baselineLedgerCount
 // `maxResidualWorktreeBytes > 0` の分岐内でのみ呼ぶため除数は常に正）。
 function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reservePerNewStart) {
   return Math.min(rawValue, Math.floor(maxResidualWorktreeBytes / reservePerNewStart))
+}
+
+// バイト軸の台帳（ephemeralWorktrees）に未検証エントリ（worktreePath 省略・空文字によるパス
+// 検証不可）が生じたとき、remeasureResidualBytesNow の測定対象を物理一覧
+// （git worktree list --porcelain）へ切り替えるための構成関数（Issue #404）。
+//
+// 背景: エージェントが worktreePath を省略・空文字で返すと recordEphemeralWorktree が
+// path: '' で台帳へ計上する（件数の過小評価を防ぐ既存の fail-closed 設計）。従来の
+// remeasureResidualBytesNow はこの空パスエントリが 1 件でも残っていれば測定を即座に
+// 失敗させ、newStartSuppressed latch を立てて新規着手全体（verify-close を含む）を恒久停止
+// させていた。review / pr-create / fix 系 worktree は隔離 worktree 内で detach するため
+// branch 照合（branchMatchesIssue）で自己申告パス欠落分を補完できず、命名規約
+// （wf_<runId>-<n>）による突き合わせもホストが runId を決定的に取得できないため使えない。
+// そこで「未検証エントリの帰属を特定する」のではなく、「その時点の物理一覧を測定対象へ
+// 丸ごと差し替える」ことで実測を継続する。物理一覧は並行ラン・手動 worktree も含み得るため
+// 過大側（過剰停止側）にしかずれず、ディスク枯渇防止というゲートの目的に対して安全方向。
+//
+// 呼び出し元契約: このパスは**測定専用**。返却する paths を削除経路（sweepEligiblePaths・
+// cleanup・git worktree remove）へ流し込んではならない（recovery.md の「自己申告パス由来の
+// 削除は所有権を証明できず廃止済み」という既存方針を維持するため）。
+//
+// entries: scanOrphanWorktrees() の返却（git worktree list --porcelain の転記配列）。
+// independentCount: countWorktreeRecords() の返却（entries.length の独立照合値）。
+//
+// 契約（countResidualWorktrees の設計原則を踏襲）:
+//   - entries が空配列 → { ok: false }（一覧取得不成立。フォールバックも成立しない）
+//   - independentCount が entries.length と一致する非負整数でない → { ok: false }
+//     （LLM 転記の脱落疑い。件数照合なしに物理一覧を信用しない）
+//   - メイン worktree の除外は内容（isMain フラグ）ではなく位置（--porcelain の仕様上、
+//     先頭レコードは必ずメイン worktree）で行う。内容依存の除外は転記細工による過小計上を
+//     許すため（countResidualWorktrees と同じ理由）
+//   - 残り全レコードの path を sanitizeWorktreePath で検証し、1 件でも失格なら
+//     { ok: false }（部分測定で済ませず全体を測定失敗として扱う。fail-closed）
+//   - 全件検証通過なら重複除去した絶対パス配列を { ok: true, paths } で返す
+function buildPhysicalByteMeasureTargets(entries, independentCount) {
+  const list = Array.isArray(entries) ? entries : []
+  if (list.length === 0) {
+    return { ok: false, detail: '物理一覧が空（git worktree list --porcelain の取得不成立）' }
+  }
+  if (!(Number.isInteger(independentCount) && independentCount >= 0)) {
+    return { ok: false, detail: '独立レコードカウントを取得できなかった' }
+  }
+  if (independentCount !== list.length) {
+    return {
+      ok: false,
+      detail: `独立レコードカウント（${independentCount}）と一覧件数（${list.length}）が不一致（転記脱落の疑い）`,
+    }
+  }
+  const paths = []
+  for (let i = 1; i < list.length; i++) {
+    const raw = typeof list[i]?.path === 'string' ? list[i].path : ''
+    const p = sanitizeWorktreePath(raw)
+    if (!p) {
+      return { ok: false, detail: `位置 ${i} のパスを検証できなかった（許可文字集合外または欠落）` }
+    }
+    paths.push(p)
+  }
+  return { ok: true, paths: [...new Set(paths)] }
 }
 
 // ============================================================================
@@ -4846,20 +4912,41 @@ async function remeasureResidualBytesNow() {
   // そのまま「測定済み」扱いにしてしまい、実体が計測されないまま以後の projection の
   // 積み増し対象からも恒久的に外れる（実ディスク使用量がバイト軸から不可視になり、件数軸の
   // 上限までフェイルオープンで新規着手を許し得る。CI codex-review 指摘・PR #390）。
-  // ラン開始時観測（3140 行付近）が検証不可パス混在時に測定全体を失敗扱いにするのと同じ
-  // fail-closed 方針を、ラン中の実測し直しにも適用する: 未検証エントリが 1 件でもあれば
-  // 部分測定で済ませず全体を測定失敗として扱う。
+  // 従来は未検証エントリ（worktreePath 省略・空文字によるパス検証不可）が 1 件でもあれば
+  // 即座に測定失敗（kib = null）とし、newStartSuppressed latch で新規着手全体
+  // （worktree を作らない verify-close を含む）を恒久停止させていた。回復可能な自己申告
+  // フィールドの欠落がホスト側の恒久停止に直結する問題（Issue #404）のため、未検証エントリが
+  // あるときはまず buildPhysicalByteMeasureTargets で物理一覧へのフォールバックを試みる。
+  // フォールバックも成立しない（一覧取得不成立・件数不一致・パス検証不可）場合のみ、従来どおり
+  // fail-closed（kib = null → 新規着手停止）へ倒す。
   const unverifiedEphemeralCount = ephemeralWorktrees.filter(
     (e) => typeof e.path !== 'string' || e.path === '' || e.path.startsWith('(検証不可:'),
   ).length
-  const targetPaths = [...residualPathsAtStart, ...ephemeralWorktrees.map((e) => e.path)].filter(
+  let targetPaths = [...residualPathsAtStart, ...ephemeralWorktrees.map((e) => e.path)].filter(
     (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !confirmedRemovedPaths.has(p),
   )
-  const kib =
-    unverifiedEphemeralCount > 0 ? null : targetPaths.length > 0 ? await measureResidualWorktreeBytes(targetPaths) : 0
+  let fallbackDetail = ''
+  if (unverifiedEphemeralCount > 0) {
+    const [physicalEntries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
+    const fallback = buildPhysicalByteMeasureTargets(physicalEntries, independentCount)
+    if (fallback.ok) {
+      // 物理一覧は測定専用の差し替えであり、削除経路（sweepEligiblePaths・cleanup）へは流さない
+      // （buildPhysicalByteMeasureTargets のコメント参照）。confirmedRemovedPaths による除外は
+      // 台帳ベースの経路と同じ理由（削除成功確認済みパスの測定対象化を避ける）で維持する。
+      targetPaths = fallback.paths.filter((p) => !confirmedRemovedPaths.has(p))
+      log(
+        `残置 worktree バイト実測: 台帳に未検証エントリ ${unverifiedEphemeralCount} 件があるため` +
+          `物理一覧 ${targetPaths.length} 件へフォールバックして実測する`,
+      )
+    } else {
+      fallbackDetail = fallback.detail
+    }
+  }
+  const measurementFailed = unverifiedEphemeralCount > 0 && fallbackDetail !== ''
+  const kib = measurementFailed ? null : targetPaths.length > 0 ? await measureResidualWorktreeBytes(targetPaths) : 0
   // 間引きカウンタは測定成否に関わらず進める。失敗のたびに毎周回リトライすると agent 呼び出し
-  // コストが際限なく積み上がる。未検証エントリが残る間は kib が常に null になり続けるため、
-  // byteBaselineLedgerCount も更新されず（下の kib===null 分岐で早期 return）、未測定分は
+  // コストが際限なく積み上がる。フォールバックも失敗し続ける間は kib が常に null になり続ける
+  // ため、byteBaselineLedgerCount も更新されず（下の kib===null 分岐で早期 return）、未測定分は
   // projection の積み増し対象から外れたまま放置されない（fail-closed を維持する）。
   byteRemeasureAtLedgerCount = ephemeralWorktrees.length
   if (kib === null) {
@@ -4880,7 +4967,8 @@ async function remeasureResidualBytesNow() {
       newStartSuppressed = {
         reason:
           `残置 worktree のディスク使用量のラン中実測し直しに失敗した（対象 ${targetPaths.length} 件、` +
-          `うちパス検証不可 ${unverifiedEphemeralCount} 件）。` +
+          `台帳に未検証エントリ ${unverifiedEphemeralCount} 件・物理一覧フォールバックも失敗: ` +
+          `${fallbackDetail || '不明'}）。` +
           `perWorktreeByteReserve による見積りは開始時の下限 floor 値であり実使用量の上界ではない` +
           `ため、実測できない状態で projection のみへフォールバックすると floor を超える成長を` +
           `検知できないまま容量上限を超過し得る（fail-open防止）。ディスク枯渇防止のため以降の` +

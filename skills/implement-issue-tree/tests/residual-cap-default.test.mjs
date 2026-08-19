@@ -517,10 +517,11 @@ test('実測し直しは検証不可（空パス）エントリが台帳に残�
     fnBody,
     /const unverifiedEphemeralCount = ephemeralWorktrees\.filter\(/,
   )
-  // 未検証エントリが 1 件でもあれば measureResidualWorktreeBytes を呼ばず kib は null
+  // 未検証エントリが 1 件でもあり、かつ物理一覧フォールバック（Issue #404）も失敗した場合のみ
+  // measureResidualWorktreeBytes を呼ばず kib は null（フォールバック成立時は実測を継続する）
   assert.match(
     fnBody,
-    /const kib =\s*\n?\s*unverifiedEphemeralCount > 0 \? null : /,
+    /const kib = measurementFailed \? null : /,
   )
   // kib===null の早期 return より前で byteBaselineLedgerCount への代入が起きないこと
   // （成功時の代入 `byteBaselineLedgerCount = ephemeralWorktrees.length` は kib===null 分岐の
