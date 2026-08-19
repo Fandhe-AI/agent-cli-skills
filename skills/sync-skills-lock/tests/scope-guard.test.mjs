@@ -31,11 +31,16 @@
 //                                   部分書き込みしたのち npx 自体が非ゼロ終了する
 //                                   （失敗経路でも事後のスコープ外検査に到達する
 //                                   ことを検証する）
+//   - 'mode-change-dirty'         : PR #412 レビュー指摘（第3巡・P1）の回帰。実行前
+//                                   から M だったスコープ外ファイルのパーミッション
+//                                   のみを変更し内容は変えない（porcelain の記録・
+//                                   内容ハッシュのいずれも前後不変に見え、モードを
+//                                   含む状態シグネチャ比較でのみ検出できるケース）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -111,6 +116,12 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "npx-failure-out-of-scope" ]]; then
   echo "npx overwrote this content during failure" > "${OUT_OF_SCOPE_FILE}"
   exit 1
 fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "mode-change-dirty" ]]; then
+  # 実行前から M（追跡・変更済み）だったスコープ外ファイルの内容は変えず、
+  # パーミッションのみを変更する（chmod 等での実行可能スクリプトコピーを再現）。
+  chmod 755 "${OUT_OF_SCOPE_FILE}"
+fi
 exit 0
 `
   writeFileSync(join(binDir, 'npx'), npxBody)
@@ -140,11 +151,15 @@ exit 0
       2,
     ) + '\n',
   )
-  // 'content-overwrite-dirty' / 'npx-failure-out-of-scope' 用: スコープ外ファイルを
-  // baseline content でコミットしてから、コミット後に別内容へ書き換えて
-  // 「実行前から M（追跡・変更済み）だった」状態を再現する。npx スタブは同じパス・
-  // 同じ M ステータスのまま内容だけをさらに上書きする。
-  if (scenario === 'content-overwrite-dirty' || scenario === 'npx-failure-out-of-scope') {
+  // 'content-overwrite-dirty' / 'npx-failure-out-of-scope' / 'mode-change-dirty' 用:
+  // スコープ外ファイルを baseline content でコミットしてから、コミット後に別内容へ
+  // 書き換えて「実行前から M（追跡・変更済み）だった」状態を再現する。npx スタブは
+  // 同じパス・同じ M ステータスのまま内容またはパーミッションをさらに上書きする。
+  if (
+    scenario === 'content-overwrite-dirty' ||
+    scenario === 'npx-failure-out-of-scope' ||
+    scenario === 'mode-change-dirty'
+  ) {
     const outOfScopePath = join(repoDir, ...OUT_OF_SCOPE_FILE.split('/'))
     mkdirSync(dirname(outOfScopePath), { recursive: true })
     writeFileSync(outOfScopePath, 'baseline content\n')
@@ -292,6 +307,46 @@ test('ケース5: 実行前から dirty だったスコープ外ファイルの�
       ctx.repoDir,
     ).trim()
     assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース7: 実行前から dirty だったスコープ外ファイルのパーミッションのみの変更を、' +
+  '状態シグネチャ比較で検出する（PR #412 第3巡 P1 の回帰）', () => {
+  const ctx = setupRepo('mode-change-dirty')
+  const outOfScopePath = join(ctx.repoDir, ...OUT_OF_SCOPE_FILE.split('/'))
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /スコープ外/, 'スコープ外検出のエラーメッセージが出ること')
+        assert.match(
+          combined,
+          /other-skill\/NOTES\.md/,
+          'パーミッションのみ変更されたスコープ外ファイルのパスが列挙されること' +
+            '（ステータス文字列・パス・内容は前後で不変のため、これは状態シグネチャ' +
+            '（モード込み）比較でのみ検出できる）',
+        )
+        return true
+      },
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+
+    // スコープ外ファイルは自動リバートせず、変更後のパーミッション（755）のまま残す
+    const mode = statSync(outOfScopePath).mode & 0o777
+    assert.equal(mode, 0o755, 'パーミッション変更が自動リバートされず残存すること')
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })

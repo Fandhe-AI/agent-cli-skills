@@ -100,20 +100,75 @@ fi
 # skills CLI へ渡す確認プロンプトのスキップで、別物（位置で区別される）。
 SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更新手順は下記節を参照
 
+# 単一パスの状態シグネチャ（種別 + パーミッション + 内容）を1行で返す。
+# git hash-object はファイル内容のみを見るため、既存の追跡・未追跡ファイルに対する
+# パーミッションのみの変更（chmod 等。実行可能スクリプトのコピー等で起こり得る）を
+# 検出できない。またディレクトリ・gitlink（未初期化 submodule 含む）では
+# hash-object 自体が失敗し、定数 "HASH_ERROR" しか返せないため、異なる状態の
+# ディレクトリ同士を区別できない（Issue #410 third-round 指摘）。python3
+# （本スキルは既に file CLI 等の前提を持つが、python3 は主要 Linux / macOS に
+# 標準搭載されている）で種別・モード・内容を単一の signature へまとめる。
+# 通常ファイルは内容の sha256、シンボリックリンクはリンク先文字列の sha256、
+# それ以外（ディレクトリ・gitlink）は配下の相対パス・パーミッション・サイズ・
+# mtime を正規化して集約した sha256 とする。stat コマンドの出力書式は環境
+# （BSD/GNU）で異なるため、シェルの `stat` は使わず python3 の os.lstat に統一する。
+path_state() {
+  local path="$1"
+  python3 - "${path}" <<'PYEOF'
+import hashlib, os, stat, sys
+
+path = sys.argv[1]
+try:
+    st = os.lstat(path)
+except OSError:
+    print("MISSING")
+    sys.exit(0)
+
+mode = oct(stat.S_IMODE(st.st_mode))
+kind = stat.S_IFMT(st.st_mode)
+h = hashlib.sha256()
+
+if stat.S_ISLNK(st.st_mode):
+    h.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+elif stat.S_ISREG(st.st_mode):
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+else:
+    # ディレクトリ・gitlink 等。配下の相対パス・パーミッション・サイズ・mtime を
+    # ソートして正規化し、走査順に依存せず決定的な signature にする。
+    entries = []
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames.sort()
+        for name in sorted(filenames):
+            p = os.path.join(dirpath, name)
+            rel = os.path.relpath(p, path)
+            try:
+                fst = os.lstat(p)
+                entries.append(f"{rel}:{oct(stat.S_IMODE(fst.st_mode))}:{fst.st_size}:{fst.st_mtime_ns}")
+            except OSError as e:
+                entries.append(f"{rel}:ERROR:{e}")
+    entries.sort()
+    for entry in entries:
+        h.update(entry.encode("utf-8", "surrogateescape"))
+        h.update(b"\n")
+
+print(f"{kind}:{mode}:{h.hexdigest()}")
+PYEOF
+}
+
 # git status --porcelain -z の1レコード（"XY PATH\0"）からスコープ内
 # （skills-lock.json / .agents/skills/${SKILL_NAME}/ 配下）を除いたレコードだけを
-# outfile へ NUL 区切りで、対応する内容ハッシュ（同じ順序）を hashfile へ書き出す。
-# 固定長プレフィックス（ステータス2文字+空白1文字=3文字）を切り落としてパスを
-# 取り出すため、C-quote（改行等を含むパスのダブルクォート化）の影響を受けない
-# （-z 出力は raw byte のパスであり、path をそのままファイルアクセスに使ってよい）。
-#
-# ステータス文字列＋パスの一致だけでは、実行前から M（追跡・変更済み）や
-# ??（未追跡）だったスコープ外ファイルを npx が「同じパス・同じステータス文字の
-# まま」内容だけ上書きしても検出できない（Issue #410 second-round 指摘）。
-# git hash-object でファイルの実内容ハッシュを併せて記録し、前後比較へ加えることで
-# この内容だけの上書きも検出する。
+# outfile へ NUL 区切りで、対応する状態シグネチャ（同じ順序、path_state の出力）を
+# hashfile へ書き出す。固定長プレフィックス（ステータス2文字+空白1文字=3文字）を
+# 切り落としてパスを取り出すため、C-quote（改行等を含むパスのダブルクォート化）の
+# 影響を受けない（-z 出力は raw byte のパスであり、path をそのままファイルアクセス
+# に使ってよい）。
 filter_out_of_scope() {
-  local infile="$1" outfile="$2" hashfile="$3" record path hash
+  local infile="$1" outfile="$2" hashfile="$3" record path
   : > "${outfile}"
   : > "${hashfile}"
   while IFS= read -r -d '' record; do
@@ -122,12 +177,7 @@ filter_out_of_scope() {
       continue
     fi
     printf '%s\0' "${record}" >> "${outfile}"
-    if [[ -e "${path}" ]]; then
-      hash="$(git hash-object -- "${path}" 2>/dev/null || printf 'HASH_ERROR')"
-    else
-      hash="MISSING"
-    fi
-    printf '%s\0' "${hash}" >> "${hashfile}"
+    printf '%s\0' "$(path_state "${path}")" >> "${hashfile}"
   done < "${infile}"
 }
 
@@ -146,11 +196,12 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_BEFORE}";
   exit 1
 fi
 
-# 内容ハッシュは「その時点のディスク内容」を読むため、SNAP_BEFORE のフィルタ・ハッシュ化は
-# 必ず npx を呼ぶ前にここで確定させる。npx 実行後にまとめて filter_out_of_scope を呼ぶと、
-# SNAP_BEFORE のパス集合はステータス比較には正しく使えても、ハッシュだけは npx が上書きした
-# 後の内容を読んでしまい「変更前ハッシュ」のつもりが実質「変更後ハッシュ」と一致してしまう
-# （実行前から M・?? だったスコープ外ファイルの内容だけの上書きを見逃す）。
+# path_state の状態シグネチャは「その時点のディスク内容・モード」を読むため、
+# SNAP_BEFORE のフィルタ・シグネチャ化は必ず npx を呼ぶ前にここで確定させる。npx
+# 実行後にまとめて filter_out_of_scope を呼ぶと、SNAP_BEFORE のパス集合はステータス
+# 比較には正しく使えても、シグネチャだけは npx が上書きした後の内容を読んでしまい
+# 「変更前」のつもりが実質「変更後」と一致してしまう（実行前から M・?? だった
+# スコープ外ファイルの内容・モードだけの上書きを見逃す）。
 filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_BEFORE_HASH}"
 
 # CLI に computedHash を更新させる。固定版が解決できない場合（該当版の不存在・
@@ -218,9 +269,10 @@ filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_AF
 # フィルタ後（スコープ外のみ）のスナップショットが前後で一致しなければ、
 # --agent universal が抑止しているはずのスコープ外書き込みが発生したことになる
 # （一次防御を突破した場合の多層防御）。ステータス+パスのレコード（SNAP_FILTERED_*）
-# に加え、内容ハッシュ（SNAP_FILTERED_*_HASH）も比較する。実行前から M・?? だった
-# スコープ外ファイルは、npx が内容だけ上書きしてもレコード側は不変のままになり得る
-# ため、ハッシュ側の不一致だけがそれを検出できる。他の skip 分岐と異なり、ここは
+# に加え、状態シグネチャ（SNAP_FILTERED_*_HASH、path_state の出力）も比較する。
+# 実行前から M・?? だったスコープ外ファイルは、npx が内容・モードだけ上書きしても
+# レコード側は不変のままになり得るため、シグネチャ側の不一致だけがそれを検出できる。
+# 他の skip 分岐と異なり、ここは
 # continue ではなく exit 1 でループ全体を停止する。スコープ外の汚染は自動リバート
 # されないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この
 # issue が問題視している状態そのものになる。この時点までに承認・stage 済みの他
@@ -416,9 +468,9 @@ EOF
 2 層で防ぐ:
 
 1. **一次防御（`--agent universal`）**: Step 4 の npx 呼び出しに `--agent universal` を付け、書き込み先を union ストア（`.agents/skills/<name>/`）と `skills-lock.json` のみへ限定する。個別 agent 指定（`claude-code` 等）は `.agents/skills/` を経由せず対象ツリーへ直接コピーしレイアウトを変えてしまうため使わない
-2. **多層防御（実行前後スナップショット比較 + 内容ハッシュ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、その各パスの内容を `git hash-object` でハッシュ化したものも前後で比較する（`filter_out_of_scope` がステータス+パスのレコードと内容ハッシュを同時に出力する）。ステータス+パスの記録だけでなく内容ハッシュも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
+2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、その各パスの種別・パーミッション・内容を `path_state`（python3。通常ファイルは内容の sha256、シンボリックリンクはリンク先の sha256、ディレクトリ・gitlink は配下の相対パス・パーミッション・サイズ・mtime を集約した sha256）で1本のシグネチャ化したものも前後で比較する（`filter_out_of_scope` がステータス+パスのレコードと状態シグネチャを同時に出力する）。ステータス+パスの記録だけでなく状態シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
 
-**検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、ignore されたパスへの書き込みは検出できない（承認経路の `git add`（`-f` なし）が ignore 対象を取り込まないのと対称であり、この非対称自体は許容する）。内容ハッシュ比較により、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容だけ上書きするケースは検出できるようになった。ただし内容ハッシュはファイルの中身のみを見るため、パーミッションのみの変更（内容は不変のまま実行属性等だけ変わるケース）は依然として検出できない。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
+**検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、ignore されたパスへの書き込みは検出できない（承認経路の `git add`（`-f` なし）が ignore 対象を取り込まないのと対称であり、この非対称自体は許容する）。状態シグネチャ比較により、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容・パーミッションだけ上書きするケース、およびディレクトリ・gitlink（未初期化 submodule 含む）が異なる状態へ書き換わるケースも検出できる。残る限界は、ファイルの mtime を秒未満まで保持しない環境等での稀な取り違え（sha256 が内容・種別・サイズを含むため実質的なリスクは小さい）と、上記の `.gitignore` 対象の非対称のみである。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
 
 ## 注意事項
 
