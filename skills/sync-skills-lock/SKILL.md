@@ -356,20 +356,26 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
     git restore "${restore_targets[@]}" --source="${PRE_SYNC_TREE}" -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
     git restore "${restore_targets[@]}" --source="${PRE_SYNC_TREE}" -- scripts/local-patches/ 2>/dev/null || true
     # 復元後検証(fail-closed): 契約パスの index が PRE_SYNC_TREE と一致し、worktree 復元
-    # モードでは worktree 側にも差分・未追跡が残っていない(未追跡は上で退避済み)ことを
-    # 実測してから成功を表示する。pathspec miss や restore の失敗を「復元対象なし」として
-    # 成功扱いすると、新規 staged ファイルの残留(Step 7 の git add への混入経路)を見逃すため
+    # モードでは worktree 側も PRE_SYNC_TREE と一致し未追跡も残っていない(未追跡は上で
+    # 退避済み)ことを実測してから成功を表示する。pathspec miss や restore の失敗を
+    # 「復元対象なし」として成功扱いすると、新規 staged ファイルの残留(Step 7 の git add
+    # への混入経路)を見逃すため。worktree 側の判定基準は HEAD ではなく PRE_SYNC_TREE:
+    # HEAD 基準の git status --porcelain を使うと、同期前から存在した正当な staged 変更
+    # (scripts/local-patches/ で許容している「staged のみの変更」)が復元完了後も常に
+    # 非空として現れ、PRE_SYNC_TREE と完全一致した正しい復元を誤報してしまう
     local verify_ok=1
     if ! git diff --cached --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/; then
       verify_ok=0
-    elif [[ "${restore_targets[*]}" == *--worktree* ]] \
-      && [[ -n "$(git status --porcelain -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/)" ]]; then
-      verify_ok=0
+    elif [[ "${restore_targets[*]}" == *--worktree* ]]; then
+      if ! git diff --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
+        || [[ -n "$(git ls-files --others --exclude-standard -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/)" ]]; then
+        verify_ok=0
+      fi
     fi
     if [[ "${verify_ok}" -eq 1 ]]; then
       echo "契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元しました(範囲外 path の index・worktree には触れていません)。"
     else
-      echo "エラー: 契約範囲の復元後検証で差分が残っています。git status --porcelain -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/ で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed。復元完了とは扱いません)。"
+      echo "エラー: 契約範囲の復元後検証で差分が残っています。git diff --cached ${PRE_SYNC_TREE} -- <契約パス> / git diff ${PRE_SYNC_TREE} -- <契約パス> / git ls-files --others -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed。復元完了とは扱いません)。"
     fi
   }
 
@@ -1456,10 +1462,20 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
 
   # 実行対象は worktree の checker ではなく、承認済み blob(CHECKER_APPROVED_HASH)を
   # 取り出した一時ファイル。shell セッションを跨いで CHECKER_EXEC が失われていても、
-  # 承認済み hash から決定的に再作成できる(worktree の checker 差し替えの影響を受けない)
+  # 承認済み hash から決定的に再作成できる(worktree の checker 差し替えの影響を受けない)。
+  # 取り出しは Step 4 と同じ fail-closed: cat-file の失敗を成功扱いすると空の一時ファイル
+  # が残り、bash の exit 0 no-op が「検証成功」に化ける。終了コードに加えて、取り出した
+  # 内容の hash が承認済み hash と一致することまで確認し、失敗時は npx 上書き後の状態を
+  # 残さないよう契約範囲を復元してから停止する
   if [[ -z "${CHECKER_EXEC:-}" || ! -f "${CHECKER_EXEC}" ]]; then
     CHECKER_EXEC="$(mktemp)"
-    git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}"
+    if ! git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}" \
+      || [[ ! -s "${CHECKER_EXEC}" ]] \
+      || [[ "$(git hash-object -- "${CHECKER_EXEC}")" != "${CHECKER_APPROVED_HASH}" ]]; then
+      echo "エラー: 承認済み checker blob(${CHECKER_APPROVED_HASH})の取り出しに失敗しました。契約範囲を復元して停止します(fail-closed)。"
+      restore_contract_scope
+      exit 1
+    fi
   fi
 
   # local patch の再適用(--3way fallback や index 復元により、patch 対象 file や durable patch が
@@ -1568,13 +1584,15 @@ git restore --staged --worktree --source="${PRE_SYNC_TREE}" -- skills-lock.json 
 git restore --staged --worktree --source="${PRE_SYNC_TREE}" -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
 git restore --staged --worktree --source="${PRE_SYNC_TREE}" -- scripts/local-patches/ 2>/dev/null || true
 
-# 復元後検証(fail-closed): 契約パスの index が同期開始前と一致し、worktree にも差分・
-# 未追跡が残っていない(未追跡は上で退避済み)ことを実測してから完了と扱う。空出力 +
-# diff --cached の終了コード 0 のみを成功とし、残留があれば手動復旧してから先へ進む
+# 復元後検証(fail-closed): 契約パスの index・worktree が同期開始前(PRE_SYNC_TREE)と一致し、
+# 未追跡も残っていない(未追跡は上で退避済み)ことを実測してから完了と扱う。判定基準は
+# HEAD ではなく PRE_SYNC_TREE(HEAD 基準の git status --porcelain だと、同期前から存在した
+# 正当な staged 変更が復元完了後も非空として現れ、正しい復元を誤報する)
 git diff --cached --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
-  && [[ -z "$(git status --porcelain -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/)" ]] \
+  && git diff --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
+  && [[ -z "$(git ls-files --others --exclude-standard -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/)" ]] \
   && echo "復元完了(検証済み)" \
-  || echo "エラー: 復元後検証で契約範囲に差分が残っています。git status --porcelain -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed)。"
+  || echo "エラー: 復元後検証で契約範囲に差分が残っています。git diff --cached ${PRE_SYNC_TREE} -- <契約パス> / git diff ${PRE_SYNC_TREE} -- <契約パス> / git ls-files --others -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed)。"
 ```
 
 対象は kebab-case 検証済みの当該スキルディレクトリ配下・`skills-lock.json`・durable patch（`scripts/local-patches/`）のみで、承認済みの他スキルの stage にも範囲外 path の index にも影響しない。Step 4・5.5 の**失敗経路**では同じ復元を `restore_contract_scope` が自動実行するため、この手動フェンスはユーザー却下時にのみ使う。
