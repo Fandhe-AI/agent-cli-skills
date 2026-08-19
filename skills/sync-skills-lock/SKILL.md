@@ -100,135 +100,189 @@ fi
 # skills CLI へ渡す確認プロンプトのスキップで、別物（位置で区別される）。
 SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更新手順は下記節を参照
 
-# 単一パスの状態シグネチャ（種別 + パーミッション + 内容）を1行で返す。
-# git hash-object はファイル内容のみを見るため、既存の追跡・未追跡ファイルに対する
-# パーミッションのみの変更（chmod 等。実行可能スクリプトのコピー等で起こり得る）を
-# 検出できない。またディレクトリ・gitlink（未初期化 submodule 含む）では
-# hash-object 自体が失敗し、定数 "HASH_ERROR" しか返せないため、異なる状態の
-# ディレクトリ同士を区別できない（Issue #410 third-round 指摘）。python3
-# （本スキルは既に file CLI 等の前提を持つが、python3 は主要 Linux / macOS に
-# 標準搭載されている）で種別・モード・内容を単一の signature へまとめる。
-# 通常ファイルは内容の sha256、シンボリックリンクはリンク先文字列の sha256、
-# それ以外（ディレクトリ・gitlink）は配下の各エントリ（ファイルに加え dirnames
-# 自身・ディレクトリ向け symlink も含む）を再帰的に種別判定し、
-# 通常ファイルは内容の sha256・シンボリックリンクはリンク先文字列の sha256
-# （トップレベルと同じ規則を再帰適用）・パーミッションを相対パスとあわせて
-# 正規化して集約した sha256 とする。npx が同サイズ・同 mtime のまま内容だけ
-# 書き換えて配下ファイルを上書きするケース（PR #412 P1 指摘: サイズ・mtime のみ
-# では検出できない）を、内容ハッシュで検出する。dirnames 自身も lstat して
-# 記録するため、配下ディレクトリの chmod やディレクトリ向け symlink のリンク先・
-# mode 変更（followlinks=False では filenames 経由で列挙されず、記録しないと
-# 見逃す）も検出できる（PR #412 P1 指摘）。stat コマンドの出力書式は環境
-# （BSD/GNU）で異なるため、シェルの `stat` は使わず python3 の os.lstat に統一する。
+# 作業ツリーの状態シグネチャ（種別 + パーミッション + 内容）を1行で返す。
+# 第1引数のパスを起点に、通常ファイルは内容の sha256、シンボリックリンクは
+# リンク先文字列の sha256（リンク先の解決はしない）、ディレクトリ・gitlink は
+# 自身の mode に加えて配下全エントリ（サブディレクトリの mode・ディレクトリ向け
+# symlink のリンク先と mode・ファイルの mode と内容ハッシュ）をバイト列ソートで
+# 決定的に再帰集約した sha256 を返す。存在しないパスは "MISSING"（それ自体が
+# 1つの状態であり、エラーではない）。第2引数以降で走査の除外を指定できる:
+#   prune:<rel> — 起点からの相対パス <rel> をエントリごと走査から除外する
+#                 （npx が書き換えてよいスコープ内と、.git の内部状態に使う）
+#   omit:<rel>  — <rel> 自身のメタデータ（存在・mode）は記録しないが配下は走査する
+#                 （初回インストールで npx が正当に新規作成する親ディレクトリに使う）
+#
+# PR #412 の P1 指摘群（porcelain に現れない状態変化の見逃し: 配下ファイルの
+# 内容上書き・ディレクトリと dirlink の変更・ディレクトリの chmod）は、いずれも
+# 「git status に現れたパスだけを個別にシグネチャ化する」構造に起因する同一クラス。
+# git はディレクトリの mode を追跡しないため、スコープ外ディレクトリの chmod は
+# status の前後どちらにも現れず、status 由来のパス集合をどれだけ精緻にハッシュ
+# しても原理的に検出できない。そのためこのシグネチャは status 由来のパスではなく
+# リポジトリルート全体（.git とスコープ内のみ除外）へ適用する。.gitignore 対象の
+# ファイルも同じ理由（porcelain に現れない）で走査対象に含める。対象は skills
+# 配布リポジトリで作業ツリーが小さく、全走査 + 全ハッシュを前後 2 回行っても
+# 実用上問題ない。python3 は主要 Linux / macOS に標準搭載されている。stat
+# コマンドの出力書式は環境（BSD/GNU）で異なるため、シェルの `stat` は使わず
+# python3 の os.lstat に統一する。取得エラー（lstat・open・走査失敗）は
+# 「読めなかっただけ」を「変化なし」と誤認する fail-open 経路になるため、
+# 握り潰さず即座に非ゼロ終了して呼び出し側で fail-closed に扱う。
 path_state() {
   local path="$1"
-  python3 - "${path}" <<'PYEOF'
+  shift
+  python3 - "${path}" "$@" <<'PYEOF'
 import hashlib, os, stat, sys
 
 path = sys.argv[1]
+
+# 除外指定（prune: 走査ごと除外 / omit: 自身のメタデータのみ不記録）を解釈する。
+prunes = set()
+omits = set()
+for spec in sys.argv[2:]:
+    label, _, rel = spec.partition(":")
+    if label == "prune" and rel:
+        prunes.add(rel)
+    elif label == "omit" and rel:
+        omits.add(rel)
+    else:
+        print(f"path_state: 不正な除外指定: {spec}", file=sys.stderr)
+        sys.exit(1)
+
+
+def fail(err):
+    # 部分的なシグネチャを出力したまま正常終了すると、呼び出し側が欠損に気付けない。
+    # ファイル内容は出力せず（秘密情報混入防止）、エラー要因のみ stderr へ出して
+    # 非ゼロ終了する。
+    print(f"path_state: 状態取得に失敗: {err}", file=sys.stderr)
+    sys.exit(1)
+
+
+def file_hash(p):
+    fh = hashlib.sha256()
+    with open(p, "rb") as f:
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            fh.update(chunk)
+    return fh.hexdigest()
+
+
 try:
     st = os.lstat(path)
-except OSError:
+except FileNotFoundError:
     print("MISSING")
     sys.exit(0)
+except OSError as e:
+    fail(e)
 
 mode = oct(stat.S_IMODE(st.st_mode))
 kind = stat.S_IFMT(st.st_mode)
 h = hashlib.sha256()
 
-if stat.S_ISLNK(st.st_mode):
-    h.update(os.readlink(path).encode("utf-8", "surrogateescape"))
-elif stat.S_ISREG(st.st_mode):
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(1 << 20)
-            if not chunk:
-                break
-            h.update(chunk)
-else:
-    # ディレクトリ・gitlink 等。配下の各エントリを相対パス・パーミッション・
-    # 内容（種別に応じたハッシュ）でソートして正規化し、走査順に依存せず
-    # 決定的な signature にする。os.walk はデフォルトでシンボリックリンクの
-    # 指すディレクトリへは降りない（followlinks=False）ため、配下のシンボリック
-    # リンク自体は filenames 経由で列挙され、リンク先ディレクトリの中身が
-    # 二重に取り込まれることはない。
-    entries = []
-    for dirpath, dirnames, filenames in os.walk(path):
-        dirnames.sort()
-        for dname in dirnames:
-            # dirnames 自体（配下ディレクトリ・ディレクトリ向け symlink）を lstat して
-            # entries へ含める。os.walk は filenames 経由で列挙しないため、ここで
-            # 記録しないと配下ディレクトリの mode 変更やディレクトリ向け symlink の
-            # リンク先・mode 変更がシグネチャに反映されない（PR #412 P1 指摘）。
-            # followlinks=False のため symlink to directory は dirnames に入るが
-            # os.walk 自身はその配下へ再帰しない（二重取り込みなし）。
-            dp = os.path.join(dirpath, dname)
-            rel = os.path.relpath(dp, path)
-            try:
+try:
+    if stat.S_ISLNK(st.st_mode):
+        h.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+    elif stat.S_ISREG(st.st_mode):
+        h.update(file_hash(path).encode("ascii"))
+    else:
+        # ディレクトリ・gitlink 等。配下の各エントリを相対パス・パーミッション・
+        # 内容（種別に応じたハッシュ）でソートして正規化し、走査順に依存せず
+        # 決定的な signature にする。os.walk は既定（followlinks=False）で
+        # symlink の指す先へは降りないため、ディレクトリ向け symlink は dirnames
+        # として自身（リンク先文字列・mode）だけを記録し、リンク先ディレクトリの
+        # 中身が二重に取り込まれることはない。
+        entries = []
+        for dirpath, dirnames, filenames in os.walk(path, onerror=fail):
+            kept = []
+            for dname in sorted(dirnames):
+                # dirnames 自体（配下ディレクトリ・ディレクトリ向け symlink）を
+                # lstat して entries へ含める。os.walk は filenames 経由で列挙
+                # しないため、ここで記録しないと配下ディレクトリの mode 変更や
+                # ディレクトリ向け symlink のリンク先・mode 変更がシグネチャに
+                # 反映されない（PR #412 P1 指摘）。
+                dp = os.path.join(dirpath, dname)
+                rel = os.path.relpath(dp, path)
+                if rel in prunes:
+                    continue
+                kept.append(dname)
+                if rel in omits:
+                    continue
                 dst = os.lstat(dp)
                 dmode = oct(stat.S_IMODE(dst.st_mode))
                 if stat.S_ISLNK(dst.st_mode):
-                    content_hash = hashlib.sha256(
+                    target_hash = hashlib.sha256(
                         os.readlink(dp).encode("utf-8", "surrogateescape")
                     ).hexdigest()
-                    entries.append(f"{rel}:{dmode}:dirlink:{content_hash}")
+                    entries.append(f"{rel}:{dmode}:dirlink:{target_hash}")
                 else:
                     entries.append(f"{rel}:{dmode}:dir")
-            except OSError as e:
-                entries.append(f"{rel}:ERROR:{e}")
-        for name in sorted(filenames):
-            p = os.path.join(dirpath, name)
-            rel = os.path.relpath(p, path)
-            try:
+            # prune した名前を降下対象からも外す（os.walk は dirnames の
+            # in-place 更新で走査対象を制御する仕様）。
+            dirnames[:] = kept
+            for name in sorted(filenames):
+                p = os.path.join(dirpath, name)
+                rel = os.path.relpath(p, path)
+                if rel in prunes or rel in omits:
+                    continue
                 fst = os.lstat(p)
                 fmode = oct(stat.S_IMODE(fst.st_mode))
                 if stat.S_ISLNK(fst.st_mode):
-                    content_hash = hashlib.sha256(
+                    target_hash = hashlib.sha256(
                         os.readlink(p).encode("utf-8", "surrogateescape")
                     ).hexdigest()
-                    entries.append(f"{rel}:{fmode}:link:{content_hash}")
+                    entries.append(f"{rel}:{fmode}:link:{target_hash}")
                 elif stat.S_ISREG(fst.st_mode):
-                    fh = hashlib.sha256()
-                    with open(p, "rb") as inner:
-                        while True:
-                            chunk = inner.read(1 << 20)
-                            if not chunk:
-                                break
-                            fh.update(chunk)
-                    entries.append(f"{rel}:{fmode}:reg:{fh.hexdigest()}")
+                    entries.append(f"{rel}:{fmode}:reg:{file_hash(p)}")
                 else:
-                    # 配下のさらに特殊なファイル種別（デバイスファイル等）は
-                    # 内容ハッシュが定義できないため種別のみ記録する。
+                    # デバイスファイル等の特殊な種別は内容ハッシュが定義できない
+                    # ため種別・mode のみ記録する。
                     entries.append(f"{rel}:{fmode}:other")
-            except OSError as e:
-                entries.append(f"{rel}:ERROR:{e}")
-    entries.sort()
-    for entry in entries:
-        h.update(entry.encode("utf-8", "surrogateescape"))
-        h.update(b"\n")
+        entries.sort()
+        for entry in entries:
+            h.update(entry.encode("utf-8", "surrogateescape"))
+            h.update(b"\n")
+except OSError as e:
+    fail(e)
 
 print(f"{kind}:{mode}:{h.hexdigest()}")
 PYEOF
 }
 
+# リポジトリルート全体の状態シグネチャ（スコープ外書き込み検出の実体）。
+# 除外は次の 3 種のみ:
+#   - .git             — index・ODB は git status 自身が npx と無関係に更新し得る
+#   - スコープ内        — skills-lock.json / .agents/skills/${SKILL_NAME}（npx の正当な書き込み先）
+#   - .agents / .agents/skills の自身のメタデータ — 初回インストール時に npx が
+#     正当に新規作成する親ディレクトリのため自身は不問（omit）。配下の走査は
+#     継続するため、同居する他スキルのツリー（スコープ外）は引き続き保護される
+repo_state_signature() {
+  path_state . \
+    "prune:.git" \
+    "prune:skills-lock.json" \
+    "prune:.agents/skills/${SKILL_NAME}" \
+    "omit:.agents" \
+    "omit:.agents/skills"
+}
+
 # git status --porcelain -z の1レコード（"XY PATH\0"）からスコープ内
 # （skills-lock.json / .agents/skills/${SKILL_NAME}/ 配下）を除いたレコードだけを
-# outfile へ NUL 区切りで、対応する状態シグネチャ（同じ順序、path_state の出力）を
-# hashfile へ書き出す。固定長プレフィックス（ステータス2文字+空白1文字=3文字）を
+# outfile へ NUL 区切りで書き出す。検出の主体はリポジトリ全体の状態シグネチャ
+# （repo_state_signature）であり、このレコード列は status レベルの前後比較と、
+# 検出時の報告（どのパスが git status 上で変化したか）に使う。ディレクトリの
+# chmod 等 status に現れない変化はこの一覧に載らず、シグネチャ不一致としてのみ
+# 検出される。固定長プレフィックス（ステータス2文字+空白1文字=3文字）を
 # 切り落としてパスを取り出すため、C-quote（改行等を含むパスのダブルクォート化）の
 # 影響を受けない（-z 出力は raw byte のパスであり、path をそのままファイルアクセス
 # に使ってよい）。
 filter_out_of_scope() {
-  local infile="$1" outfile="$2" hashfile="$3" record path
+  local infile="$1" outfile="$2" record path
   : > "${outfile}"
-  : > "${hashfile}"
   while IFS= read -r -d '' record; do
     path="${record:3}"
     if [[ "${path}" == "skills-lock.json" || "${path}" == ".agents/skills/${SKILL_NAME}/"* ]]; then
       continue
     fi
     printf '%s\0' "${record}" >> "${outfile}"
-    printf '%s\0' "$(path_state "${path}")" >> "${hashfile}"
   done < "${infile}"
 }
 
@@ -239,21 +293,23 @@ SNAP_BEFORE="$(mktemp)"
 SNAP_AFTER="$(mktemp)"
 SNAP_FILTERED_BEFORE="$(mktemp)"
 SNAP_FILTERED_AFTER="$(mktemp)"
-SNAP_FILTERED_BEFORE_HASH="$(mktemp)"
-SNAP_FILTERED_AFTER_HASH="$(mktemp)"
 NPX_OUTPUT_FILE="$(mktemp)"
 if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_BEFORE}"; then
   echo "エラー: npx 実行前の git status 取得に失敗しました。スコープ外書き込みの検出ができないため中止します。" >&2
   exit 1
 fi
 
-# path_state の状態シグネチャは「その時点のディスク内容・モード」を読むため、
-# SNAP_BEFORE のフィルタ・シグネチャ化は必ず npx を呼ぶ前にここで確定させる。npx
-# 実行後にまとめて filter_out_of_scope を呼ぶと、SNAP_BEFORE のパス集合はステータス
-# 比較には正しく使えても、シグネチャだけは npx が上書きした後の内容を読んでしまい
-# 「変更前」のつもりが実質「変更後」と一致してしまう（実行前から M・?? だった
-# スコープ外ファイルの内容・モードだけの上書きを見逃す）。
-filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_BEFORE_HASH}"
+filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}"
+
+# リポジトリ全体の状態シグネチャは「その時点のディスク内容・モード」を読むため、
+# 必ず npx を呼ぶ前にここで確定させる。npx 実行後に取得すると「変更前」のつもりが
+# 実質「変更後」と一致してしまい、実行前から M・?? だったスコープ外ファイルの
+# 内容・モードだけの上書きを見逃す。取得失敗時はスコープ外書き込みを検出できない
+# ため fail-closed で中止する（この時点では npx 未実行のため残置なし）。
+if ! REPO_STATE_BEFORE="$(repo_state_signature)"; then
+  echo "エラー: npx 実行前の状態シグネチャ取得に失敗しました。スコープ外書き込みの検出ができないため中止します。" >&2
+  exit 1
+fi
 
 # CLI に computedHash を更新させる。固定版が解決できない場合（該当版の不存在・
 # レジストリ障害）は npx が非ゼロ終了する。その場合は当該スキルを中止（skip）し、
@@ -297,7 +353,7 @@ fi
 # チェックで NPX_STATUS が強制失敗化されていればここは通らない）。
 if [[ "${NPX_STATUS}" -eq 0 ]] && grep -q "Invalid agents" "${NPX_OUTPUT_FILE}"; then
   echo "エラー: skills CLI が --agent universal を認識せず、何も実行していません（exit 0 の no-op）。SKILLS_CLI_VERSION 更新時は「skills CLI のバージョン固定と更新手順」節に従い universal の有効性を再確認してください。" >&2
-  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}" "${NPX_OUTPUT_FILE}"
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}"
   exit 1
 fi
 
@@ -307,11 +363,18 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
   # 加えてスコープ外（他エージェントツリー等）にも残置され得るため、失敗経路でも
   # 実行後スナップショットを取ってスコープ外残留を検査する（下の成功経路と同一ロジック）。
   git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}" || true
-  filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_AFTER_HASH}"
+  filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}"
+  # 実行後シグネチャの取得失敗は「変化なしと確認できない」であって「変化なし」では
+  # ないため、比較不能な sentinel を入れて必ず不一致（= 残置疑いの報告）へ倒す。
+  if ! REPO_STATE_AFTER="$(repo_state_signature)"; then
+    echo "エラー: npx 実行後の状態シグネチャ取得に失敗しました。変化なしと確認できないため、スコープ外残置ありとして扱います（fail-closed）。" >&2
+    REPO_STATE_AFTER="(signature-error)"
+  fi
   if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
-    || ! cmp -s "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}"; then
+    || [[ "${REPO_STATE_BEFORE}" != "${REPO_STATE_AFTER}" ]]; then
     echo "エラー: 失敗した npx 実行がスコープ外へも書き込んだ可能性があります。以下を確認してください（削除はしていません）:" >&2
     while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_AFTER}"
+    echo "  （ディレクトリの chmod 等、git status に現れない変化は上記一覧に載りません。状態シグネチャの不一致として検出されています）" >&2
   fi
   # 次スキルの `git add skills-lock.json`（Step 7）が
   # この残置変更を承認済みの変更と一緒に stage してしまわないよう、Step 6 の却下時と
@@ -324,7 +387,7 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
   git clean -fd ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
   echo "警告: 固定版を外した再実行はせず、当該スキルの変更をリバートして skip します。"
-  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}" "${NPX_OUTPUT_FILE}"
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}"
   continue
 fi
 
@@ -335,14 +398,22 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
   exit 1
 fi
 
-filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_AFTER_HASH}"
+filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}"
 
-# フィルタ後（スコープ外のみ）のスナップショットが前後で一致しなければ、
-# --agent universal が抑止しているはずのスコープ外書き込みが発生したことになる
-# （一次防御を突破した場合の多層防御）。ステータス+パスのレコード（SNAP_FILTERED_*）
-# に加え、状態シグネチャ（SNAP_FILTERED_*_HASH、path_state の出力）も比較する。
-# 実行前から M・?? だったスコープ外ファイルは、npx が内容・モードだけ上書きしても
-# レコード側は不変のままになり得るため、シグネチャ側の不一致だけがそれを検出できる。
+# 実行後シグネチャの取得失敗は「変化なしと確認できない」であって「変化なし」では
+# ないため、比較不能な sentinel を入れて必ず不一致（= 検出・リバート・停止）へ倒す。
+if ! REPO_STATE_AFTER="$(repo_state_signature)"; then
+  echo "エラー: npx 実行後の状態シグネチャ取得に失敗しました。変化なしと確認できないため、スコープ外書き込みありとして扱います（fail-closed）。" >&2
+  REPO_STATE_AFTER="(signature-error)"
+fi
+
+# スコープ外の状態が前後で一致しなければ、--agent universal が抑止しているはずの
+# スコープ外書き込みが発生したことになる（一次防御を突破した場合の多層防御）。
+# 判定は 2 軸: (1) porcelain レコード（SNAP_FILTERED_*）と (2) リポジトリ全体の
+# 状態シグネチャ（REPO_STATE_*、repo_state_signature の出力）。実行前から M・??
+# だったスコープ外ファイルの内容・モードだけの上書きや、ディレクトリの chmod・
+# ディレクトリ向け symlink の変更・.gitignore 対象ファイルの上書きは porcelain
+# レコードに現れないため、シグネチャ側の不一致だけがそれを検出できる。
 # 他の skip 分岐と異なり、ここは
 # continue ではなく exit 1 でループ全体を停止する。スコープ外の汚染は自動リバート
 # されないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この
@@ -350,12 +421,13 @@ filter_out_of_scope "${SNAP_AFTER}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_AF
 # スキル分は index に残ったままになるため、停止後は `git status` で確認し、必要な
 # 分だけ `git commit` するか `git reset` で戻すかを判断すること。
 if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
-  || ! cmp -s "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}"; then
+  || [[ "${REPO_STATE_BEFORE}" != "${REPO_STATE_AFTER}" ]]; then
   echo "エラー: npx skills add がスコープ外（skills-lock.json / .agents/skills/${SKILL_NAME}/ 以外）へ書き込みました。" >&2
   echo "==> 実行前のスコープ外状態:" >&2
   while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_BEFORE}"
   echo "==> 実行後のスコープ外状態:" >&2
   while IFS= read -r -d '' rec; do printf '  %s\n' "${rec}" >&2; done < "${SNAP_FILTERED_AFTER}"
+  echo "（ディレクトリの chmod 等、git status に現れない変化は上記一覧に載りません。その場合は状態シグネチャの不一致として検出されています）" >&2
   echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はこれからリバートします。" >&2
   echo "スコープ外は既存の WIP を巻き込む恐れがあるため自動リバートしません。" >&2
   echo "上記パスの内容を git status / git diff で確認し、必要なら手動で" >&2
@@ -367,11 +439,11 @@ if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
   if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
     git clean -fd ".agents/skills/${SKILL_NAME}/" || true
   fi
-  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}" "${NPX_OUTPUT_FILE}"
+  rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}"
   exit 1
 fi
 
-rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${SNAP_FILTERED_BEFORE_HASH}" "${SNAP_FILTERED_AFTER_HASH}" "${NPX_OUTPUT_FILE}"
+rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}"
 ```
 
 `npx skills add` は以下を行う:
@@ -539,7 +611,7 @@ EOF
 2 層で防ぐ:
 
 1. **一次防御（`--agent universal`）**: Step 4 の npx 呼び出しに `--agent universal` を付け、書き込み先を union ストア（`.agents/skills/<name>/`）と `skills-lock.json` のみへ限定する。個別 agent 指定（`claude-code` 等）は `.agents/skills/` を経由せず対象ツリーへ直接コピーしレイアウトを変えてしまうため使わない
-2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、その各パスの種別・パーミッション・内容を `path_state`（python3。通常ファイルは内容の sha256、シンボリックリンクはリンク先の sha256、ディレクトリ・gitlink は配下の各エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本のシグネチャ化したものも前後で比較する（`filter_out_of_scope` がステータス+パスのレコードと状態シグネチャを同時に出力する）。ステータス+パスの記録だけでなく状態シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
+2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、リポジトリルート全体（`.git` とスコープ内のみ除外）の状態シグネチャを `repo_state_signature`（`path_state` を起点 `.` へ適用。python3。通常ファイルは mode + 内容の sha256、シンボリックリンクは mode + リンク先の sha256、ディレクトリ・gitlink は自身の mode + 配下全エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本にまとめ、前後で比較する。git status に現れたパスだけをシグネチャ化する方式では、git がディレクトリの mode を追跡しない以上、スコープ外ディレクトリの chmod や `.gitignore` 対象ファイルの上書きを原理的に検出できないため、走査は status 由来のパス集合ではなく作業ツリー全体に対して行う（PR #412 P1 指摘群の同一クラス解消）。ステータス+パスの記録だけでなく全体シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
 
 **検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、ignore されたパスへの書き込みは検出できない（承認経路の `git add`（`-f` なし）が ignore 対象を取り込まないのと対称であり、この非対称自体は許容する）。状態シグネチャ比較により、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容・パーミッションだけ上書きするケース、およびディレクトリ・gitlink（未初期化 submodule 含む）が異なる状態へ書き換わるケースも検出できる。残る限界は、ファイルの mtime を秒未満まで保持しない環境等での稀な取り違え（sha256 が内容・種別・サイズを含むため実質的なリスクは小さい）と、上記の `.gitignore` 対象の非対称のみである。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
 

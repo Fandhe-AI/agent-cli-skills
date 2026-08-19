@@ -42,11 +42,27 @@
 //                                   NPX_OUTPUT_FILE が不完全なまま「Invalid agents」
 //                                   no-op 検知をすり抜けて誤って成功扱いになって
 //                                   いないことを検証する。
+//   - 'dir-chmod-out-of-scope'    : PR #412 レビュー指摘（P1）の回帰。スコープ外
+//                                   ディレクトリの chmod のみを行う。git は
+//                                   ディレクトリの mode を追跡しないため porcelain
+//                                   の前後どちらにも現れず、リポジトリ全体の状態
+//                                   シグネチャ（repo_state_signature）比較でのみ
+//                                   検出できるケース
+//   - 'dir-symlink-retarget'      : PR #412 レビュー指摘（P1）の回帰。実行前から
+//                                   未追跡（??）だったディレクトリ向け symlink の
+//                                   リンク先だけを付け替える（porcelain レコードは
+//                                   前後とも同一の「?? パス」のままで、シグネチャ
+//                                   比較でのみ検出できるケース）
+//   - 'nested-content-overwrite'  : PR #412 レビュー指摘（P1）の回帰。実行前から
+//                                   未追跡だったディレクトリ配下のファイル内容だけを
+//                                   上書きする（porcelain レコードは前後とも同一の
+//                                   「?? パス」のままで、配下ファイルの内容ハッシュを
+//                                   含む全体シグネチャ比較でのみ検出できるケース）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync, statSync, symlinkSync, readlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -128,6 +144,25 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "mode-change-dirty" ]]; then
   # パーミッションのみを変更する（chmod 等での実行可能スクリプトコピーを再現）。
   chmod 755 "${OUT_OF_SCOPE_FILE}"
 fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "dir-chmod-out-of-scope" ]]; then
+  # スコープ外ディレクトリ自身の chmod のみ（配下・内容は不変）。git は
+  # ディレクトリの mode を追跡しないため porcelain には一切現れない。
+  chmod 700 ".claude/skills/other-skill"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "dir-symlink-retarget" ]]; then
+  # 実行前から ?? だったディレクトリ向け symlink のリンク先だけを付け替える
+  # （porcelain レコードは「?? .claude/wip-link」のまま前後不変）。
+  rm ".claude/wip-link"
+  ln -s "wip-target-b" ".claude/wip-link"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "nested-content-overwrite" ]]; then
+  # 実行前から未追跡だったディレクトリ配下のファイル内容だけを上書きする
+  # （porcelain レコードは「?? .claude/wip-dir/notes.md」のまま前後不変）。
+  echo "npx overwrote nested wip" > ".claude/wip-dir/notes.md"
+fi
 exit 0
 `
   writeFileSync(join(binDir, 'npx'), npxBody)
@@ -195,7 +230,35 @@ exec "\${REAL_TEE}" "\$@"
     return { repoDir, binDir, scenario, argvLogFile }
   }
 
+  // 'dir-chmod-out-of-scope' 用: スコープ外ディレクトリを clean な追跡状態で用意する
+  // （ディレクトリの chmod は porcelain に現れないため、dirty 化は不要。追跡ファイルを
+  // 1つ置くことでディレクトリ自体を確実に具現化してからコミットする）。
+  if (scenario === 'dir-chmod-out-of-scope') {
+    const outOfScopePath = join(repoDir, ...OUT_OF_SCOPE_FILE.split('/'))
+    mkdirSync(dirname(outOfScopePath), { recursive: true })
+    writeFileSync(outOfScopePath, 'baseline content\n')
+    sh('git add -A && git commit -q -m init', repoDir)
+    return { repoDir, binDir, scenario, argvLogFile }
+  }
+
   sh('git add -A && git commit -q -m init', repoDir)
+
+  // 'dir-symlink-retarget' 用: コミット後に未追跡（??）のディレクトリ向け symlink を
+  // 作り「実行前から ?? だった」状態を再現する。npx スタブはリンク先だけを
+  // wip-target-b へ付け替える（porcelain レコードは前後不変）。
+  if (scenario === 'dir-symlink-retarget') {
+    mkdirSync(join(repoDir, '.claude', 'wip-target-a'), { recursive: true })
+    mkdirSync(join(repoDir, '.claude', 'wip-target-b'), { recursive: true })
+    symlinkSync('wip-target-a', join(repoDir, '.claude', 'wip-link'))
+  }
+
+  // 'nested-content-overwrite' 用: コミット後に未追跡ディレクトリ配下のファイルを
+  // 作り「実行前から ?? だった」状態を再現する。npx スタブは同じパスの内容だけを
+  // 上書きする（porcelain レコードは前後不変）。
+  if (scenario === 'nested-content-overwrite') {
+    mkdirSync(join(repoDir, '.claude', 'wip-dir'), { recursive: true })
+    writeFileSync(join(repoDir, '.claude', 'wip-dir', 'notes.md'), 'pre-existing nested wip\n')
+  }
 
   return { repoDir, binDir, scenario, argvLogFile }
 }
@@ -457,6 +520,130 @@ test('ケース8: npx が成功しても tee が失敗した場合、fail-closed
       ctx.repoDir,
     ).trim()
     assert.equal(treeDiff2, '', '.agents/skills/<name>/ はリバートされ clean であること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース9: スコープ外ディレクトリ自身の chmod を全体シグネチャ比較で検出する' +
+  '（PR #412 P1 の回帰。porcelain にはディレクトリの mode 変更が一切現れない）', () => {
+  const ctx = setupRepo('dir-chmod-out-of-scope')
+  const outOfScopeDir = join(ctx.repoDir, '.claude', 'skills', 'other-skill')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /スコープ外/, 'スコープ外検出のエラーメッセージが出ること')
+        assert.match(
+          combined,
+          /状態シグネチャ/,
+          'git status に現れない変化がシグネチャ不一致として検出された旨の案内が出ること' +
+            '（ディレクトリの chmod は porcelain の前後どちらにも現れないため、' +
+            'status 由来のパス集合をハッシュする方式では原理的に検出できない）',
+        )
+        return true
+      },
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+
+    // スコープ外は自動リバートせず、変更後の mode（700）のまま残す
+    const mode = statSync(outOfScopeDir).mode & 0o777
+    assert.equal(mode, 0o700, 'ディレクトリの chmod が自動リバートされず残存すること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース10: 実行前から未追跡だったディレクトリ向け symlink のリンク先変更を' +
+  '全体シグネチャ比較で検出する（PR #412 P1 の回帰）', () => {
+  const ctx = setupRepo('dir-symlink-retarget')
+  const linkPath = join(ctx.repoDir, '.claude', 'wip-link')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /スコープ外/,
+          'スコープ外検出のエラーメッセージが出ること' +
+            '（porcelain レコードは「?? .claude/wip-link」のまま前後不変のため、' +
+            'これはリンク先文字列を含むシグネチャ比較でのみ検出できる）',
+        )
+        return true
+      },
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+
+    // スコープ外の symlink は自動リバートせず、付け替え後のリンク先のまま残す
+    assert.equal(
+      readlinkSync(linkPath),
+      'wip-target-b',
+      'symlink のリンク先変更が自動リバートされず残存すること',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース11: 実行前から未追跡だったディレクトリ配下のファイル内容だけの上書きを' +
+  '全体シグネチャ比較で検出する（PR #412 P1 の回帰）', () => {
+  const ctx = setupRepo('nested-content-overwrite')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /スコープ外/, 'スコープ外検出のエラーメッセージが出ること')
+        assert.match(
+          combined,
+          /wip-dir\/notes\.md/,
+          '内容だけ上書きされた未追跡ファイルのパスが列挙されること' +
+            '（porcelain レコードは「?? .claude/wip-dir/notes.md」のまま前後不変のため、' +
+            '検出自体は配下ファイルの内容ハッシュを含むシグネチャ比較が担う）',
+        )
+        return true
+      },
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+
+    // スコープ外は自動リバートせず、上書き後の内容のまま残す
+    assert.equal(
+      readFileSync(join(ctx.repoDir, '.claude', 'wip-dir', 'notes.md'), 'utf8'),
+      'npx overwrote nested wip\n',
+      '上書きされた内容が自動リバートされず残存すること（確認用に保全される）',
+    )
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })

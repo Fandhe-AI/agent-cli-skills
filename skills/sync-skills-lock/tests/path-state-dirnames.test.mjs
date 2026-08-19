@@ -8,8 +8,9 @@
 //   - 配下ディレクトリの chmod（パーミッション変更）
 //   - ディレクトリを指す symlink のリンク先変更・mode 変更
 // のいずれも porcelain 記録・状態シグネチャの両方が前後不変に見え、fail-closed
-// 検出をすり抜け得た（scope-guard.test.mjs のシナリオはファイル単位の変更のみを
-// カバーしており、この dirnames 経路は別途このテストで直接カバーする）。
+// 検出をすり抜け得た（scope-guard.test.mjs のケース9〜11 が実運用経路（スクリプト
+// 全体 + npx スタブ）で同クラスを検証し、このテストは path_state() 単体の
+// シグネチャ性質を直接検証する）。
 //
 // scope-guard.test.mjs のように git status / npx スタブ経由で再現するには
 // gitlink（submodule）の構築が必要で高コストなため、ここでは path_state() 関数
