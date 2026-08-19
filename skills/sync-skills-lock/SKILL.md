@@ -107,10 +107,14 @@ SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更
 # symlink のリンク先と mode・ファイルの mode と内容ハッシュ）をバイト列ソートで
 # 決定的に再帰集約した sha256 を返す。存在しないパスは "MISSING"（それ自体が
 # 1つの状態であり、エラーではない）。第2引数以降で走査の除外を指定できる:
-#   prune:<rel> — 起点からの相対パス <rel> をエントリごと走査から除外する
-#                 （npx が書き換えてよいスコープ内と、.git の内部状態に使う）
+#   prune:<rel> — 起点からの相対パス <rel> をエントリごと走査から除外する。
+#                 パス区切りをまたがない per-segment glob（fnmatch）を使える
+#                 （例: .git/MERGE_* は .git 直下にのみ一致し .git/hooks/ 配下の
+#                 同名ファイルには一致しない）。npx が書き換えてよいスコープ内と、
+#                 .git のうち通常の git 操作で変動し得る領域の限定除外に使う
 #   omit:<rel>  — <rel> 自身のメタデータ（存在・mode）は記録しないが配下は走査する
-#                 （初回インストールで npx が正当に新規作成する親ディレクトリに使う）
+#                 （実行前に存在しなかった親ディレクトリを npx が正当に新規作成する
+#                 ケースの許容に使う。完全一致のみで glob 不可）
 #
 # PR #412 の P1 指摘群（porcelain に現れない状態変化の見逃し: 配下ファイルの
 # 内容上書き・ディレクトリと dirlink の変更・ディレクトリの chmod）は、いずれも
@@ -118,7 +122,9 @@ SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更
 # git はディレクトリの mode を追跡しないため、スコープ外ディレクトリの chmod は
 # status の前後どちらにも現れず、status 由来のパス集合をどれだけ精緻にハッシュ
 # しても原理的に検出できない。そのためこのシグネチャは status 由来のパスではなく
-# リポジトリルート全体（.git とスコープ内のみ除外）へ適用する。.gitignore 対象の
+# リポジトリルート全体（スコープ内と、.git のうち git 操作で変動し得る領域のみ
+# 除外。.git/config・.git/hooks/ 等の永続メタデータは署名対象）へ適用する。
+# .gitignore 対象の
 # ファイルも同じ理由（porcelain に現れない）で走査対象に含める。対象は skills
 # 配布リポジトリで作業ツリーが小さく、全走査 + 全ハッシュを前後 2 回行っても
 # 実用上問題ない。python3 は主要 Linux / macOS に標準搭載されている。stat
@@ -130,22 +136,38 @@ path_state() {
   local path="$1"
   shift
   python3 - "${path}" "$@" <<'PYEOF'
-import hashlib, os, stat, sys
+import fnmatch, hashlib, os, stat, sys
 
 path = sys.argv[1]
 
 # 除外指定（prune: 走査ごと除外 / omit: 自身のメタデータのみ不記録）を解釈する。
-prunes = set()
+prunes = []
 omits = set()
 for spec in sys.argv[2:]:
     label, _, rel = spec.partition(":")
     if label == "prune" and rel:
-        prunes.add(rel)
+        prunes.append(rel)
     elif label == "omit" and rel:
         omits.add(rel)
     else:
         print(f"path_state: 不正な除外指定: {spec}", file=sys.stderr)
         sys.exit(1)
+
+
+def pruned(rel):
+    # prune はパス区切りをまたがない per-segment glob で照合する。素の fnmatch は
+    # `*` が `/` もまたいで一致するため、`.git/*.lock` のような浅い階層向けの
+    # パターンが `.git/hooks/x.lock`（署名対象へ残したい深い階層）まで巻き込んで
+    # しまう。セグメント数の一致を要求してから各セグメントを個別に照合し、
+    # 除外が意図した深さの外へ広がらないようにする。
+    segs = rel.split(os.sep)
+    for pat in prunes:
+        pat_segs = pat.split("/")
+        if len(pat_segs) == len(segs) and all(
+            fnmatch.fnmatchcase(s, p) for s, p in zip(segs, pat_segs)
+        ):
+            return True
+    return False
 
 
 def fail(err):
@@ -202,7 +224,7 @@ try:
                 # 反映されない（PR #412 P1 指摘）。
                 dp = os.path.join(dirpath, dname)
                 rel = os.path.relpath(dp, path)
-                if rel in prunes:
+                if pruned(rel):
                     continue
                 kept.append(dname)
                 if rel in omits:
@@ -222,7 +244,7 @@ try:
             for name in sorted(filenames):
                 p = os.path.join(dirpath, name)
                 rel = os.path.relpath(p, path)
-                if rel in prunes or rel in omits:
+                if pruned(rel) or rel in omits:
                     continue
                 fst = os.lstat(p)
                 fmode = oct(stat.S_IMODE(fst.st_mode))
@@ -250,18 +272,55 @@ PYEOF
 
 # リポジトリルート全体の状態シグネチャ（スコープ外書き込み検出の実体）。
 # 除外は次の 3 種のみ:
-#   - .git             — index・ODB は git status 自身が npx と無関係に更新し得る
-#   - スコープ内        — skills-lock.json / .agents/skills/${SKILL_NAME}（npx の正当な書き込み先）
-#   - .agents / .agents/skills の自身のメタデータ — 初回インストール時に npx が
-#     正当に新規作成する親ディレクトリのため自身は不問（omit）。配下の走査は
-#     継続するため、同居する他スキルのツリー（スコープ外）は引き続き保護される
+#   - スコープ内 — skills-lock.json / .agents/skills/${SKILL_NAME}（npx の正当な書き込み先）
+#   - .git のうち通常の git 操作で npx と無関係に変動し得る領域のみ — このスクリプト
+#     自身が呼ぶ git status（index の stat cache 更新）や、fetch・commit・merge 等の
+#     並行操作で変わる index・ODB（objects）・refs 系・reflog・一時状態ファイル・
+#     lock。`.git` を丸ごと prune すると .git/config・.git/hooks/ の書き換え
+#     （フック仕込み・設定改変）まで署名から漏れるため（PR #412 P1 指摘）、変動が
+#     避けられない領域だけを限定列挙し、config・hooks・info 等の永続メタデータは
+#     署名対象に残す
+#   - REPO_SIG_OMITS — 実行前に存在しなかった場合の .agents / .agents/skills
+#     （npx 実行前スナップショットの直前に一度だけ確定する）。既存なら omit せず
+#     種別・mode・symlink 先を通常どおり署名するため、既存親ディレクトリの chmod や
+#     ディレクトリ→symlink 置換は検出される（PR #412 P1 指摘）。不存在だった場合
+#     のみ omit し、初回インストールで npx が親ディレクトリを正当に新規作成する
+#     ケースを誤検知にしない。omit でも配下の走査は継続するため、同居する他スキルの
+#     ツリー（スコープ外）は引き続き保護される
+#
+# REPO_SIG_OMITS は前後 2 回の呼び出しで同一でなければならない（実行後の存在有無で
+# 再判定すると、初回インストールの正当な新規作成が前後不一致＝誤検知になる）。
+# 空配列の "${arr[@]}" 展開は bash 3.2 の set -u で unbound になるため
+# ${arr[@]+...} 形式で参照する。
+REPO_SIG_OMITS=()
 repo_state_signature() {
   path_state . \
-    "prune:.git" \
     "prune:skills-lock.json" \
     "prune:.agents/skills/${SKILL_NAME}" \
-    "omit:.agents" \
-    "omit:.agents/skills"
+    "prune:.git/index" \
+    "prune:.git/*.lock" \
+    "prune:.git/objects" \
+    "prune:.git/refs" \
+    "prune:.git/packed-refs" \
+    "prune:.git/logs" \
+    "prune:.git/HEAD" \
+    "prune:.git/FETCH_HEAD" \
+    "prune:.git/ORIG_HEAD" \
+    "prune:.git/MERGE_*" \
+    "prune:.git/AUTO_MERGE" \
+    "prune:.git/CHERRY_PICK_HEAD" \
+    "prune:.git/REVERT_HEAD" \
+    "prune:.git/REBASE_HEAD" \
+    "prune:.git/BISECT_*" \
+    "prune:.git/COMMIT_EDITMSG" \
+    "prune:.git/sequencer" \
+    "prune:.git/rebase-merge" \
+    "prune:.git/rebase-apply" \
+    "prune:.git/gc.log" \
+    "prune:.git/shallow" \
+    "prune:.git/worktrees" \
+    "prune:.git/modules" \
+    ${REPO_SIG_OMITS[@]+"${REPO_SIG_OMITS[@]}"}
 }
 
 # git status --porcelain -z の1レコード（"XY PATH\0"）からスコープ内
@@ -300,6 +359,20 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_BEFORE}";
 fi
 
 filter_out_of_scope "${SNAP_BEFORE}" "${SNAP_FILTERED_BEFORE}"
+
+# .agents / .agents/skills の omit（自身のメタデータ不記録）は「npx 実行前に存在
+# したか」で決める。既存なら通常どおり署名対象にして chmod・ディレクトリ→symlink
+# 置換を検出し（PR #412 P1 指摘）、不存在だった場合のみ omit して初回インストール
+# での正当な親ディレクトリ新規作成を誤検知にしない。判定は npx 実行前のここで
+# 一度だけ行い、前後の両シグネチャで同じ除外集合を使う（実行後に再判定すると
+# 初回作成が前後不一致になる）。-e は壊れた symlink で偽になるため -L も併せて
+# 見る（symlink 自体は「存在」として署名対象に含める）。
+if [[ ! -e ".agents" && ! -L ".agents" ]]; then
+  REPO_SIG_OMITS+=("omit:.agents")
+fi
+if [[ ! -e ".agents/skills" && ! -L ".agents/skills" ]]; then
+  REPO_SIG_OMITS+=("omit:.agents/skills")
+fi
 
 # リポジトリ全体の状態シグネチャは「その時点のディスク内容・モード」を読むため、
 # 必ず npx を呼ぶ前にここで確定させる。npx 実行後に取得すると「変更前」のつもりが
@@ -611,7 +684,7 @@ EOF
 2 層で防ぐ:
 
 1. **一次防御（`--agent universal`）**: Step 4 の npx 呼び出しに `--agent universal` を付け、書き込み先を union ストア（`.agents/skills/<name>/`）と `skills-lock.json` のみへ限定する。個別 agent 指定（`claude-code` 等）は `.agents/skills/` を経由せず対象ツリーへ直接コピーしレイアウトを変えてしまうため使わない
-2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、リポジトリルート全体（`.git` とスコープ内のみ除外）の状態シグネチャを `repo_state_signature`（`path_state` を起点 `.` へ適用。python3。通常ファイルは mode + 内容の sha256、シンボリックリンクは mode + リンク先の sha256、ディレクトリ・gitlink は自身の mode + 配下全エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本にまとめ、前後で比較する。git status に現れたパスだけをシグネチャ化する方式では、git がディレクトリの mode を追跡しない以上、スコープ外ディレクトリの chmod や `.gitignore` 対象ファイルの上書きを原理的に検出できないため、走査は status 由来のパス集合ではなく作業ツリー全体に対して行う（PR #412 P1 指摘群の同一クラス解消）。ステータス+パスの記録だけでなく全体シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
+2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、リポジトリルート全体（除外はスコープ内と、`.git` のうち通常の git 操作で変動し得る領域〔index・objects・refs・reflog・一時状態ファイル・lock 等〕のみ。`.git/config`・`.git/hooks/` 等の永続 Git メタデータは署名対象に含め、フック仕込み・設定改変も検出する。`.agents` / `.agents/skills` 自身は実行前に存在した場合のみ署名対象で、実行前に不存在だった場合に限り自身のメタデータを omit して初回インストールの正当な親作成を許容する）の状態シグネチャを `repo_state_signature`（`path_state` を起点 `.` へ適用。python3。通常ファイルは mode + 内容の sha256、シンボリックリンクは mode + リンク先の sha256、ディレクトリ・gitlink は自身の mode + 配下全エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本にまとめ、前後で比較する。git status に現れたパスだけをシグネチャ化する方式では、git がディレクトリの mode を追跡しない以上、スコープ外ディレクトリの chmod や `.gitignore` 対象ファイルの上書きを原理的に検出できないため、走査は status 由来のパス集合ではなく作業ツリー全体に対して行う（PR #412 P1 指摘群の同一クラス解消）。ステータス+パスの記録だけでなく全体シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
 
 **検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、ignore されたパスへの書き込みは検出できない（承認経路の `git add`（`-f` なし）が ignore 対象を取り込まないのと対称であり、この非対称自体は許容する）。状態シグネチャ比較により、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容・パーミッションだけ上書きするケース、およびディレクトリ・gitlink（未初期化 submodule 含む）が異なる状態へ書き換わるケースも検出できる。残る限界は、ファイルの mtime を秒未満まで保持しない環境等での稀な取り違え（sha256 が内容・種別・サイズを含むため実質的なリスクは小さい）と、上記の `.gitignore` 対象の非対称のみである。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
 

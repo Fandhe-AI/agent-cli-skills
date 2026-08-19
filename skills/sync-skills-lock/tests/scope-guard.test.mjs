@@ -58,6 +58,23 @@
 //                                   上書きする（porcelain レコードは前後とも同一の
 //                                   「?? パス」のままで、配下ファイルの内容ハッシュを
 //                                   含む全体シグネチャ比較でのみ検出できるケース）
+//   - 'git-metadata-write'        : PR #412 レビュー指摘（第4巡・P1）の回帰。
+//                                   .git/hooks/ へのフックファイル追加と .git/config
+//                                   の書き換えを行う。`.git` を丸ごと prune すると
+//                                   永続 Git メタデータの改変（フック仕込み・設定
+//                                   改変）が署名から漏れるため、変動し得る領域のみの
+//                                   限定 prune でこれを検出できることを検証する
+//   - 'agents-dir-chmod'          : PR #412 レビュー指摘（第4巡・P1）の回帰。実行前
+//                                   から存在する .agents ディレクトリ自身の chmod
+//                                   のみを行う。.agents 自身を無条件 omit すると
+//                                   検出できないため、「実行前に存在した場合は署名
+//                                   対象」の条件付き omit でこれを検出できることを
+//                                   検証する
+//   - 'first-install'             : 非退行。実行前に .agents ツリー自体が存在しない
+//                                   初回インストールで、npx が .agents/skills/<name>
+//                                   を新規作成しても誤検知せず完走することを検証する
+//                                   （.agents / .agents/skills は実行前に不存在だった
+//                                   場合のみ omit される）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -107,6 +124,9 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "invalid-agents" ]]; then
 fi
 
 skill_dir=".agents/skills/${SKILL_NAME}"
+# 'first-install' シナリオでは実行前に .agents ツリーが存在しないため、実物の
+# npx skills add と同様に親ディレクトリごと作成する（既存時は no-op）。
+mkdir -p "\${skill_dir}"
 echo "updated upstream content" > "\${skill_dir}/SKILL.md"
 python3 - <<'PYEOF'
 import json
@@ -163,6 +183,20 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "nested-content-overwrite" ]]; then
   # （porcelain レコードは「?? .claude/wip-dir/notes.md」のまま前後不変）。
   echo "npx overwrote nested wip" > ".claude/wip-dir/notes.md"
 fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "git-metadata-write" ]]; then
+  # 永続 Git メタデータへの改変（フック仕込み + 設定書き換え）を再現する。
+  # .git 配下は porcelain に一切現れないため、シグネチャ比較でのみ検出できる。
+  printf '#!/bin/sh\\necho pwned\\n' > ".git/hooks/post-checkout"
+  chmod 755 ".git/hooks/post-checkout"
+  printf '[alias]\\n\\tpwned = status\\n' >> ".git/config"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "agents-dir-chmod" ]]; then
+  # 実行前から存在する .agents ディレクトリ自身の chmod のみ（配下・内容は不変）。
+  # git はディレクトリの mode を追跡しないため porcelain には現れない。
+  chmod 700 ".agents"
+fi
 exit 0
 `
   writeFileSync(join(binDir, 'npx'), npxBody)
@@ -193,11 +227,15 @@ exec "\${REAL_TEE}" "\$@"
   sh('git config user.email test@example.com', repoDir)
   sh('git config user.name test', repoDir)
 
-  mkdirSync(join(repoDir, '.agents', 'skills', SKILL_NAME), { recursive: true })
-  writeFileSync(
-    join(repoDir, '.agents', 'skills', SKILL_NAME, 'SKILL.md'),
-    'original content\n',
-  )
+  // 'first-install' 用: 実行前に .agents ツリー自体が存在しない状態を再現するため、
+  // union ストアの事前作成をスキップする（npx スタブが mkdir -p で新規作成する）。
+  if (scenario !== 'first-install') {
+    mkdirSync(join(repoDir, '.agents', 'skills', SKILL_NAME), { recursive: true })
+    writeFileSync(
+      join(repoDir, '.agents', 'skills', SKILL_NAME, 'SKILL.md'),
+      'original content\n',
+    )
+  }
   writeFileSync(
     join(repoDir, 'skills-lock.json'),
     JSON.stringify(
@@ -643,6 +681,108 @@ test('ケース11: 実行前から未追跡だったディレクトリ配下の�
       readFileSync(join(ctx.repoDir, '.claude', 'wip-dir', 'notes.md'), 'utf8'),
       'npx overwrote nested wip\n',
       '上書きされた内容が自動リバートされず残存すること（確認用に保全される）',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース12: .git/hooks/ へのフック追加と .git/config の書き換えを全体シグネチャ比較で' +
+  '検出する（PR #412 第4巡 P1 の回帰。.git 丸ごと prune では署名から漏れる）', () => {
+  const ctx = setupRepo('git-metadata-write')
+  const hookPath = join(ctx.repoDir, '.git', 'hooks', 'post-checkout')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /スコープ外/, 'スコープ外検出のエラーメッセージが出ること')
+        assert.match(
+          combined,
+          /状態シグネチャ/,
+          '.git 配下は porcelain に一切現れないため、シグネチャ不一致として検出された旨の' +
+            '案内が出ること（config・hooks が署名対象に含まれていることの検証）',
+        )
+        return true
+      },
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+
+    // 改変された Git メタデータは自動リバートせず、確認できる状態のまま残す
+    assert.ok(existsSync(hookPath), '追加されたフックファイルは削除されず残存すること')
+    assert.match(
+      readFileSync(join(ctx.repoDir, '.git', 'config'), 'utf8'),
+      /pwned/,
+      '.git/config の書き換えが自動リバートされず残存すること（確認用に保全される）',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース13: 実行前から存在する .agents ディレクトリ自身の chmod を全体シグネチャ比較で' +
+  '検出する（PR #412 第4巡 P1 の回帰。無条件 omit では検出できない）', () => {
+  const ctx = setupRepo('agents-dir-chmod')
+  const agentsDir = join(ctx.repoDir, '.agents')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /スコープ外/, 'スコープ外検出のエラーメッセージが出ること')
+        assert.match(
+          combined,
+          /状態シグネチャ/,
+          'ディレクトリの chmod は porcelain に現れないため、シグネチャ不一致として' +
+            '検出された旨の案内が出ること（既存 .agents が署名対象であることの検証）',
+        )
+        return true
+      },
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+
+    // スコープ外の chmod は自動リバートせず、変更後の mode（700）のまま残す
+    const mode = statSync(agentsDir).mode & 0o777
+    assert.equal(mode, 0o700, '.agents の chmod が自動リバートされず残存すること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース14: 初回インストール（実行前に .agents 不存在）で npx が親ディレクトリを' +
+  '新規作成しても誤検知せず完走する（条件付き omit の非退行）', () => {
+  const ctx = setupRepo('first-install')
+  try {
+    const out = runScript(ctx)
+    assert.doesNotMatch(
+      out,
+      /スコープ外/,
+      '実行前に不存在だった .agents / .agents/skills の新規作成を誤検知しないこと',
+    )
+    assert.ok(
+      existsSync(join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, 'SKILL.md')),
+      'npx が新規作成した union ストアのファイルが残ること',
     )
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
