@@ -215,14 +215,29 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   # npx 失敗時はこの snapshot で契約範囲全体を同期開始前へ戻す
   PRE_SYNC_TREE="$(git write-tree)"
 
+  # 契約範囲(当該スキル / skills-lock.json / durable patch)を同期開始前へ戻す共通処理。
+  # checker(check mode 含む)は契約範囲を変更・stage し得るため、pre-check 失敗・検証失敗・
+  # npx 失敗のすべての失敗経路で、部分変更を残さず PRE_SYNC_TREE へ復元してから終了する
+  restore_contract_scope() {
+    : "${PRE_SYNC_TREE:?同期開始前 snapshot が未設定のため復元できません}"
+    git read-tree "${PRE_SYNC_TREE}"
+    git checkout -- skills-lock.json
+    git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+    git checkout -- scripts/local-patches/ 2>/dev/null || true
+    git clean -fd ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
+    echo "契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元しました。" >&2
+  }
+
   echo "==> 同期前の local patch 検証(check)"
   pre_check_rc=0
   bash scripts/check-skill-local-patches.sh || pre_check_rc=$?
   if ! verify_outside_and_checker; then
+    restore_contract_scope
     echo "(npx は実行していません)" >&2
     exit 1
   fi
   if [[ "${pre_check_rc}" -ne 0 ]]; then
+    restore_contract_scope
     echo "エラー: 同期前の local patch 検証に失敗しました。状態を修復してから再実行してください(fail-closed。npx は実行していません)。" >&2
     exit 1
   fi
@@ -238,15 +253,10 @@ fi
 # 同期開始前へ復元してから停止する（部分書き込み・checker 由来の stage の残留防止）
 npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes || {
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
-    # snapshot 未設定のまま read-tree すると「現 index からの誤復元」になるため空値は弾く。
-    # skills-lock.json は必須の追跡ファイルであり、checkout 失敗は実復元漏れなので握り潰さない
-    : "${PRE_SYNC_TREE:?同期開始前 snapshot が未設定のため復元できません}"
-    git read-tree "${PRE_SYNC_TREE}"
-    git checkout -- skills-lock.json
-    git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-    git checkout -- scripts/local-patches/ 2>/dev/null || true
-    git clean -fd ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
-    echo "エラー: npx skills add が失敗したため、契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元して停止します(fail-closed)。" >&2
+    # pre-check 失敗時と同じ共通処理で契約範囲を同期開始前へ復元する(部分書き込み・
+    # checker 由来の stage の残留防止。空 snapshot は関数内の :? で弾かれる)
+    restore_contract_scope
+    echo "エラー: npx skills add が失敗したため、契約範囲を復元して停止します(fail-closed)。" >&2
   else
     echo "エラー: npx skills add が失敗しました(fail-closed)。部分書き込みが残っている場合は skills-lock.json と .agents/skills/${SKILL_NAME}/ をリバートしてください。" >&2
   fi

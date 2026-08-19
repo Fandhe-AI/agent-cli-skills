@@ -163,9 +163,21 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
 
   # checker の「初回実行より前」に index snapshot を取得する。同期前 check(check mode)も
   # 契約上、契約範囲(当該スキル / skills-lock.json / durable patch)を変更・stage し得るため、
-  # npx 失敗時はこの snapshot で契約範囲全体を同期開始前へ戻す(Step 4 の npx 失敗時リバート参照)
+  # すべての失敗経路(pre-check 失敗・検証失敗・npx 失敗)と Step 6 の却下で、この snapshot で
+  # 契約範囲全体を同期開始前へ戻す
   PRE_SYNC_TREE="$(git write-tree)"
-  echo "PRE_SYNC_TREE=${PRE_SYNC_TREE}  # npx 失敗時の契約範囲復元に使う snapshot hash"
+  echo "PRE_SYNC_TREE=${PRE_SYNC_TREE}  # 失敗・却下時の契約範囲復元に使う snapshot hash。控えておくこと"
+
+  # 契約範囲を同期開始前へ戻す共通処理。部分変更(checker の stage 含む)を残して終了しない
+  restore_contract_scope() {
+    : "${PRE_SYNC_TREE:?同期開始前 snapshot が未設定のため復元できません}"
+    git read-tree "${PRE_SYNC_TREE}"
+    git checkout -- skills-lock.json
+    git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+    git checkout -- scripts/local-patches/ 2>/dev/null || true
+    git clean -fd ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
+    echo "契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元しました。"
+  }
 
   # checker の「すべての」実行(同期前 check / Step 5.5 の apply・最終 check)の直後に、
   # 実行結果に関わらず範囲外 digest と checker 自身の blob hash を再検証する。範囲外を
@@ -188,10 +200,12 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   pre_check_rc=0
   bash scripts/check-skill-local-patches.sh || pre_check_rc=$?
   if ! verify_outside_and_checker; then
+    restore_contract_scope
     echo "(npx は実行していません)"
     exit 1
   fi
   if [[ "${pre_check_rc}" -ne 0 ]]; then
+    restore_contract_scope
     echo "エラー: 同期前の local patch 検証に失敗しました。修復してから再実行してください(fail-closed。npx は実行していません)。"
     exit 1
   fi
