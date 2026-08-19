@@ -119,6 +119,27 @@ if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]]; then
   exit 1
 fi
 
+# 消費側リポジトリが vendored skill へ commit 済み local patch を適用している場合
+# (台帳: .agents/skills/LOCAL-PATCHES.md)、commit 済み patch は上の clean チェックを
+# 通過してしまうため、npx より前に repository-owned checker(無引数 = check mode)を
+# 必須にし、npx 後は stage より前に再適用(apply) + 最終検証を行う。
+# checker 非 0、および台帳があるのに checker が無い状態は fail-closed で停止する
+LOCAL_PATCH_GUARD=false
+if [[ -f scripts/check-skill-local-patches.sh ]]; then
+  LOCAL_PATCH_GUARD=true
+elif [[ -f .agents/skills/LOCAL-PATCHES.md ]]; then
+  echo "エラー: .agents/skills/LOCAL-PATCHES.md があるのに scripts/check-skill-local-patches.sh がありません。local patch を検証できないため同期を開始しません(fail-closed)。" >&2
+  exit 1
+fi
+
+if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
+  echo "==> 同期前の local patch 検証(check)"
+  if ! bash scripts/check-skill-local-patches.sh; then
+    echo "エラー: 同期前の local patch 検証に失敗しました。状態を修復してから再実行してください(fail-closed。npx は実行していません)。" >&2
+    exit 1
+  fi
+fi
+
 # npx skills add で CLI に computedHash を更新させる
 # --yes（1つ目）は npx 自体のインストール確認プロンプトを非対話でスキップする
 # ものであり、skills CLI へ渡す --yes（末尾）とは別物（位置で区別される）。
@@ -196,6 +217,33 @@ while IFS= read -r -d '' f; do
 done < "${UNTRACKED_LIST_FILE}"
 if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
   echo "==> 新規（未追跡）ファイル: なし"
+fi
+
+if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
+  echo ""
+  echo "==> local patch を再適用(--3way fallback や index 復元により対象 file が stage されることがある)"
+  if ! bash scripts/check-skill-local-patches.sh apply; then
+    echo "エラー: local patch の再適用に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
+    echo "同期前へ戻すには:" >&2
+    echo "  git restore --source=HEAD --staged --worktree -- \".agents/skills/${SKILL_NAME}/\"" >&2
+    echo "  git checkout -- skills-lock.json" >&2
+    echo "  git clean -fd \".agents/skills/${SKILL_NAME}/\"" >&2
+    exit 1
+  fi
+  echo ""
+  echo "==> 再適用後の最終検証"
+  if ! bash scripts/check-skill-local-patches.sh; then
+    echo "エラー: 再適用後の最終検証に失敗しました。stage・commit へ進まないでください(fail-closed。復旧 command は上記と同じ)。" >&2
+    exit 1
+  fi
+  echo ""
+  echo "==> 更新完了。commit 候補の最終差分(upstream 更新 + local patch 再適用):"
+  git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
+  echo ""
+  echo "却下する場合(当該スキルを同期前へ戻す。他スキルの stage 済み変更には影響しない):"
+  echo "  git restore --source=HEAD --staged --worktree -- \".agents/skills/${SKILL_NAME}/\""
+  echo "  git checkout -- skills-lock.json"
+  echo "  git clean -fd \".agents/skills/${SKILL_NAME}/\""
 fi
 
 echo ""
