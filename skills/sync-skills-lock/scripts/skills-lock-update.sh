@@ -82,6 +82,16 @@ if ! gh auth status &>/dev/null; then
   exit 1
 fi
 
+# python3 の存在確認（PR #412 codex P1 指摘）: 状態署名（path_state /
+# index_state_signature）と復元処理（restore_preexisting_ignored 等）が python3 を
+# 必須実行する。無いまま進むと npx 実行後の検査・復元の途中で command-not-found に
+# なり、スコープ外検査が中途半端なまま停止する（fail-open 経路）。npx 実行より
+# 前のこの段階で fail-closed に停止する。
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "エラー: python3 が見つかりません。状態署名・復元処理で python3 が必要です。導入してから再実行してください（fail-closed）。" >&2
+  exit 1
+fi
+
 # linked worktree の実行拒否（PR #412 codex P0 指摘）: linked worktree
 # （git worktree add で作られた作業ツリー）では .git が gitdir を指す通常ファイルで、
 # 実 Git ディレクトリ（.git/worktrees/<name>/ と common dir 側の refs・logs・config・

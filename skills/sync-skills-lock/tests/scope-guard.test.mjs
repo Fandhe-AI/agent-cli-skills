@@ -1978,3 +1978,61 @@ test('ケース35: npx が実行中に skills-lock.json を外向き symlink へ
     rmSync(ctx.binDir, { recursive: true, force: true })
   }
 })
+
+test('ケース36: python3 が PATH に無い場合は npx を呼ぶ前に拒否して非ゼロ終了する' +
+  '（PR #412 codex P1 の回帰）', () => {
+  const ctx = setupRepo('missing-python3')
+  // python3 だけが欠けた PATH を組む: スクリプトが python3 チェックへ到達するまでに
+  // 必要な実コマンド（bash: スタブ群の shebang `/usr/bin/env bash` が PATH から解決 /
+  // jq: skills-lock.json の source 照合）のみを symlink した専用 dir を用意し、
+  // PATH をスタブ dir + この dir に限定する（既存 PATH を含めると実 python3 が
+  // 解決されてしまい、不在ケースを再現できない）。
+  const restrictedBin = mkdtempSync(join(tmpdir(), 'sync-skills-lock-nopy-bin-'))
+  try {
+    for (const cmd of ['bash', 'jq']) {
+      const real = execFileSync('bash', ['-c', `command -v ${cmd}`], { encoding: 'utf8' }).trim()
+      symlinkSync(real, join(restrictedBin, cmd))
+    }
+    const env = {
+      ...process.env,
+      PATH: `${ctx.binDir}:${restrictedBin}`,
+      TEST_NPX_SCENARIO: ctx.scenario,
+    }
+    assert.throws(
+      () => execFileSync('bash', [SCRIPT_PATH, SKILL_NAME, SOURCE_REPO], {
+        cwd: ctx.repoDir,
+        env,
+        encoding: 'utf8',
+      }),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /python3 が見つかりません/,
+          'python3 不在を明示したエラーメッセージが出ること',
+        )
+        assert.match(
+          combined,
+          /導入してから再実行して/,
+          '復旧手順（python3 の導入）が案内されること',
+        )
+        return true
+      },
+    )
+
+    // npx が実行されていないこと（実行されると argv ログが必ず書かれる）。
+    // python3 不在のまま npx が走ると、実行後の状態署名・復元処理が途中で
+    // command-not-found になり、スコープ外検査が中途半端なまま停止するため、
+    // 実行前拒否だけが防御になる。
+    assert.equal(
+      existsSync(ctx.argvLogFile),
+      false,
+      'npx が一度も実行されていないこと（python3 チェックが npx より前に走る）',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+    rmSync(restrictedBin, { recursive: true, force: true })
+  }
+})

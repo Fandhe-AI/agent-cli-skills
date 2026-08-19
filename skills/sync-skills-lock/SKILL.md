@@ -19,6 +19,7 @@ model: sonnet
 
 - `gh` CLI がインストールされ、認証済みであること
 - `node` / `npx` が利用可能であること（`npx skills add` を使用するため）。`skills` CLI は固定版（`SKILLS_CLI_VERSION`）で実行する。値と更新手順は「skills CLI のバージョン固定と更新手順」節を参照
+- `python3` が利用可能であること（状態署名〔`path_state` / `index_state_signature`〕と復元処理〔既存 ignored ファイルの比較・復元等〕で使用。主要 Linux / macOS には標準搭載されている。無い環境では Step 4 フェンスが npx 実行前に fail-closed で停止するため、導入してから再実行すること）
 - `file` CLI が利用可能であること（未追跡バイナリファイルの種別表示に使用。未導入の環境では
   種別が `file コマンド未検出` として表示され、承認前にサイズ・git blob ハッシュのみで
   判断することになる。macOS / 主要 Linux ディストリビューションには標準搭載されている）
@@ -93,6 +94,17 @@ fi
 if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]]; then
   echo "警告: .agents/skills/${SKILL_NAME}/ に未コミット変更（未追跡含む）があります。npx の上書きで失われるため skip します。"
   continue
+fi
+
+# python3 の存在確認（PR #412 codex P1 指摘）: 状態署名（path_state /
+# index_state_signature）と復元処理（restore_preexisting_ignored 等）が python3 を
+# 必須実行する。無いまま進むと npx 実行後の検査・復元の途中で command-not-found に
+# なり、スコープ外検査が中途半端なまま停止する（fail-open 経路）。python3 の不在は
+# スキル単位の事情ではなく環境全体の条件のため、skip（continue）ではなくループ全体を
+# npx 実行前に exit 1 で停止する（fail-closed。この時点では npx 未実行のため残置なし）。
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "エラー: python3 が見つかりません。状態署名・復元処理で python3 が必要です。導入してから再実行してください（fail-closed）。" >&2
+  exit 1
 fi
 
 # linked worktree の実行拒否（PR #412 codex P0 指摘）: linked worktree
