@@ -313,13 +313,30 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
       fi
     fi
     # 複数パスを 1 コマンドへ渡すと pathspec 不一致 1 件で全体が失敗するため 1 コマンド
-    # 1 パスで分離する。skills-lock.json は同期開始前 tree に必ず存在する(Step 1 の clean
-    # ガードが tracked かつ clean を要求済み)ため失敗を握り潰さない。他 2 パスは同期開始前に
-    # 存在しない場合があり、その pathspec 不一致は復元不要を意味するため許容する
-    git restore "${restore_targets[@]}" --source="${PRE_SYNC_TREE}" -- skills-lock.json
+    # 1 パスで分離する。pathspec は index に対しても照合されるため、PRE_SYNC_TREE 取得後に
+    # 新規作成・stage されたファイルは tree に無くても no-overlay で index(・worktree)から
+    # 取り除かれる(実測済み)。pathspec 不一致(tree にも index にも無い)は復元対象なしを
+    # 意味するため許容するが、真の失敗(権限エラー等)と区別が付かないため、成功可否は
+    # コマンドの終了コードではなく下の復元後検証で fail-closed に判定する
+    git restore "${restore_targets[@]}" --source="${PRE_SYNC_TREE}" -- skills-lock.json 2>/dev/null || true
     git restore "${restore_targets[@]}" --source="${PRE_SYNC_TREE}" -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
     git restore "${restore_targets[@]}" --source="${PRE_SYNC_TREE}" -- scripts/local-patches/ 2>/dev/null || true
-    echo "契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元しました(範囲外 path の index・worktree には触れていません)。"
+    # 復元後検証(fail-closed): 契約パスの index が PRE_SYNC_TREE と一致し、worktree 復元
+    # モードでは worktree 側にも差分・未追跡が残っていない(未追跡は上で退避済み)ことを
+    # 実測してから成功を表示する。pathspec miss や restore の失敗を「復元対象なし」として
+    # 成功扱いすると、新規 staged ファイルの残留(Step 7 の git add への混入経路)を見逃すため
+    local verify_ok=1
+    if ! git diff --cached --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/; then
+      verify_ok=0
+    elif [[ "${restore_targets[*]}" == *--worktree* ]] \
+      && [[ -n "$(git status --porcelain -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/)" ]]; then
+      verify_ok=0
+    fi
+    if [[ "${verify_ok}" -eq 1 ]]; then
+      echo "契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元しました(範囲外 path の index・worktree には触れていません)。"
+    else
+      echo "エラー: 契約範囲の復元後検証で差分が残っています。git status --porcelain -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/ で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed。復元完了とは扱いません)。"
+    fi
   }
 
   # checker の「すべての」実行(同期前 check / Step 5.5 の apply・最終 check)の直後に、
@@ -1160,15 +1177,20 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
   # 次スキルの `git add skills-lock.json`（Step 7）が
   # この残置変更を承認済みの変更と一緒に stage してしまわないよう、Step 6 の却下時と
   # 同じ手順で当該スキル分のみを即座にリバートしてから skip する。
-  revert_in_scope
   if [[ -f scripts/check-skill-local-patches.sh ]]; then
     # checker を持つリポジトリでは、同期前 check(check mode)が契約範囲(durable patch 含む)を
     # 変更・stage している可能性があり、index からの worktree 復元しか行わない
     # revert_in_scope だけでは同期開始前へ戻らない。契約パス限定の restore_contract_scope で
     # index も同期開始前へ戻す(前スキルの承認済み積上げは PRE_SYNC_TREE に含まれるため保持。
-    # 許可先経路・skills-lock.json の妥協検出時は関数内で index のみの復元へ切り替わる)
+    # 許可先経路・skills-lock.json の妥協検出時は関数内で index のみの復元へ切り替わる)。
+    # 呼び出しは revert_in_scope より「前」でなければならない: revert_in_scope の
+    # git clean -fd を先に走らせると、restore_contract_scope が退避するはずの契約範囲内の
+    # 未追跡ファイル(checker が移動・新規作成した唯一のコピーであり得る)が削除される。
+    # 復元後の revert_in_scope は契約パスの checkout / clean が実質 no-op になり、ignored
+    # ファイルの選別削除・既存 ignored の復元・妥協検出時の保全案内だけが働く
     restore_contract_scope
   fi
+  revert_in_scope
   rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
   if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi
   # universal 無効の no-op は以降の全スキルでも再現するため、skip（continue）ではなく
@@ -1202,6 +1224,11 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
     # シグネチャも取れない場合は「変化なし」と確認できないため、残置の可能性ありと
     # して案内する（fail-closed。green 側へ倒さない）。
     echo "エラー: 実行後の状態シグネチャ取得にも失敗しました。スコープ外残置の可能性を排除できません。git status / git diff で手動確認してください（fail-closed）。" >&2
+  fi
+  if [[ -f scripts/check-skill-local-patches.sh ]]; then
+    # 同期前 check の staged 契約変更を残さない(fail-closed 契約)。git clean -fd による
+    # 未追跡削除より先に退避を効かせるため revert_in_scope より前に呼ぶ(NPX_STATUS 分岐と同じ)
+    restore_contract_scope
   fi
   revert_in_scope
   echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
@@ -1246,6 +1273,11 @@ if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
   echo "  git checkout -- <path>   （変更前が clean だった追跡ファイルの場合）" >&2
   echo "  git clean -fd <path>     （変更前に存在しなかった未追跡ファイルの場合）" >&2
   echo "を実行してください。" >&2
+  if [[ -f scripts/check-skill-local-patches.sh ]]; then
+    # 同期前 check の staged 契約変更を残さない(fail-closed 契約)。git clean -fd による
+    # 未追跡削除より先に退避を効かせるため revert_in_scope より前に呼ぶ(NPX_STATUS 分岐と同じ)
+    restore_contract_scope
+  fi
   revert_in_scope
   rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
   if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi
@@ -1261,6 +1293,11 @@ fi
 if ! restore_preexisting_ignored; then
   IGNORED_BACKUP_KEEP=1
   echo "エラー: 実行前から存在した ignored ファイルの復元に失敗しました。バックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。手動で復旧してください。" >&2
+  if [[ -f scripts/check-skill-local-patches.sh ]]; then
+    # 失敗終端では同期前 check の staged 契約変更も残さない(fail-closed 契約。
+    # npx の同期結果ごと同期開始前へ戻し、部分状態のまま Step 7 の git add へ進む経路を断つ)
+    restore_contract_scope
+  fi
   rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
   exit 1
 fi
@@ -1477,11 +1514,21 @@ echo "未追跡ファイルの退避先: ${CONTRACT_UNTRACKED_BACKUP_DIR}"
 # 契約パス限定で index + worktree を同期開始前へ復元する。この同期(pre-check・npx・apply)で
 # 生じた契約範囲の stage だけが取り除かれ、承認済みの他スキル分・範囲外 path の index は
 # 一切変更されない。git restore は no-overlay が既定のため、同期開始前 tree に無い tracked
-# ファイルは契約パス内に限り index・worktree から取り除かれる。初回具現化などで snapshot に
-# 対象が無い path は pathspec エラーになるため path ごとに分離し、その失敗のみ無視する
-git restore --staged --worktree --source="${PRE_SYNC_TREE}" -- skills-lock.json
+# ファイルは契約パス内に限り index・worktree から取り除かれる(pathspec は index にも照合
+# されるため、snapshot 後に新規作成・stage されたファイルも取り除かれる)。tree にも index
+# にも無い pathspec の不一致エラーのみ復元対象なしとして無視できるが、真の失敗と区別が
+# 付かないため path ごとに分離したうえで、成功可否は下の復元後検証で判定する
+git restore --staged --worktree --source="${PRE_SYNC_TREE}" -- skills-lock.json 2>/dev/null || true
 git restore --staged --worktree --source="${PRE_SYNC_TREE}" -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
 git restore --staged --worktree --source="${PRE_SYNC_TREE}" -- scripts/local-patches/ 2>/dev/null || true
+
+# 復元後検証(fail-closed): 契約パスの index が同期開始前と一致し、worktree にも差分・
+# 未追跡が残っていない(未追跡は上で退避済み)ことを実測してから完了と扱う。空出力 +
+# diff --cached の終了コード 0 のみを成功とし、残留があれば手動復旧してから先へ進む
+git diff --cached --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
+  && [[ -z "$(git status --porcelain -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/)" ]] \
+  && echo "復元完了(検証済み)" \
+  || echo "エラー: 復元後検証で契約範囲に差分が残っています。git status --porcelain -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed)。"
 ```
 
 対象は kebab-case 検証済みの当該スキルディレクトリ配下・`skills-lock.json`・durable patch（`scripts/local-patches/`）のみで、承認済みの他スキルの stage にも範囲外 path の index にも影響しない。Step 4・5.5 の**失敗経路**では同じ復元を `restore_contract_scope` が自動実行するため、この手動フェンスはユーザー却下時にのみ使う。
