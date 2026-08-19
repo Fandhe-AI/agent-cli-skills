@@ -177,11 +177,24 @@
 //                                   （'separate-git-dir' と同じ検出不能構成。lstat 検証が
 //                                   npx を実行する前に拒否することを検証する。
 //                                   npx スタブは呼ばれない）
+//   - 'lockfile-symlink-preexisting': PR #412 codex P0 指摘の回帰。skills-lock.json が
+//                                   実行前からリポジトリ外向き symlink になっている
+//                                   （symlink としてコミット済みのため clean ガードは
+//                                   通過する）レイアウトを再現する。skills-lock.json は
+//                                   署名の prune・porcelain フィルタの双方から除外される
+//                                   ため、npx 実行前の lstat 検証だけが拒否できることを
+//                                   検証する（npx スタブは呼ばれない）
+//   - 'midrun-lockfile-symlink-swap': PR #412 codex P0 指摘の回帰。事前の lstat 検査を
+//                                   通過した後、npx が実行中に skills-lock.json を
+//                                   リポジトリ外向き symlink へ置換する（TOCTOU。実行後の
+//                                   再検証（verify_lock_file_after_run）が検出し、復元が
+//                                   リンク先へ書き込まず symlink を除去して regular file を
+//                                   書き戻すことを検証する）
 // git / jq / python3 は実物を使用する（ネットワーク不使用）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync, statSync, symlinkSync, readlinkSync, renameSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync, statSync, lstatSync, symlinkSync, readlinkSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -391,6 +404,14 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "agents-dir-chmod" ]]; then
   # git はディレクトリの mode を追跡しないため porcelain には現れない。
   chmod 700 ".agents"
 fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "midrun-lockfile-symlink-swap" ]]; then
+  # 事前 lstat 検査（実行前）を通過した後、実行中に skills-lock.json をリポジトリ外
+  # 向き symlink へ置換する（TOCTOU の再現。skills-lock.json は署名・porcelain の
+  # 双方からパスで除外されるため、実行後の lstat 再検証だけが検出できる）。
+  rm -f skills-lock.json
+  ln -s "${externalTargetDir}/victim-lock.json" skills-lock.json
+fi
 exit 0
 `
   writeFileSync(join(binDir, 'npx'), npxBody)
@@ -481,6 +502,22 @@ exec "${realGit}" "\$@"
       2,
     ) + '\n',
   )
+  // 'lockfile-symlink-preexisting' 用: skills-lock.json をリポジトリ外の実ファイルへ
+  // 向けた symlink に置き換える（リンク先は有効な lock JSON。source 照合・computedHash
+  // 表示は symlink を辿って通過し、clean ガードも symlink としてコミットするため通過
+  // する）。lstat 検証（npx 実行前）だけがこのレイアウトを拒否できる。
+  // 'midrun-lockfile-symlink-swap' 用: npx スタブが置換後のリンク先にする外部実ファイル
+  // （victim-lock.json）を用意し、リンク先が書き換えられないことを検証できるようにする。
+  if (scenario === 'lockfile-symlink-preexisting') {
+    const externalLock = join(binDir, 'external-lock.json')
+    renameSync(join(repoDir, 'skills-lock.json'), externalLock)
+    symlinkSync(externalLock, join(repoDir, 'skills-lock.json'))
+  }
+  if (scenario === 'midrun-lockfile-symlink-swap') {
+    mkdirSync(externalTargetDir, { recursive: true })
+    writeFileSync(join(externalTargetDir, 'victim-lock.json'), 'external victim content\n')
+  }
+
   // 'content-overwrite-dirty' / 'npx-failure-out-of-scope' / 'mode-change-dirty' 用:
   // スコープ外ファイルを baseline content でコミットしてから、コミット後に別内容へ
   // 書き換えて「実行前から M（追跡・変更済み）だった」状態を再現する。npx スタブは
@@ -1839,6 +1876,103 @@ test('ケース33: .git が実体ディレクトリへの symlink の構成で�
       false,
       'npx が一度も実行されていないこと（所在検証が npx より前に走る）',
     )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース34: skills-lock.json が実行前から外向き symlink の場合は npx を呼ぶ前に' +
+  '拒否して非ゼロ終了する（PR #412 codex P0 の回帰）', () => {
+  const ctx = setupRepo('lockfile-symlink-preexisting')
+  const externalLock = join(ctx.binDir, 'external-lock.json')
+  try {
+    const externalBefore = readFileSync(externalLock, 'utf8')
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /skills-lock\.json がシンボリックリンクです/,
+          'skills-lock.json の lstat 検証で拒否した旨のエラーメッセージが出ること',
+        )
+        assert.match(
+          combined,
+          /実体ファイルへ置き換えてから再実行して/,
+          '復旧手順（実体ファイルへの置き換え）が案内されること',
+        )
+        return true
+      },
+    )
+
+    // npx が実行されていないこと（実行されると argv ログが必ず書かれる）。
+    // skills-lock.json は署名の prune・porcelain フィルタの双方から除外されるため、
+    // symlink 越しのリンク先書き込みはどの検査にも現れず、実行前拒否だけが防御になる。
+    assert.equal(
+      existsSync(ctx.argvLogFile),
+      false,
+      'npx が一度も実行されていないこと（lstat 検証が npx より前に走る）',
+    )
+
+    // リンク先（リポジトリ外）の実ファイルが変更されていないこと
+    assert.equal(
+      readFileSync(externalLock, 'utf8'),
+      externalBefore,
+      'リンク先（リポジトリ外）のファイルが変更されないこと',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース35: npx が実行中に skills-lock.json を外向き symlink へ置換した場合、実行後の' +
+  '再検証が検出し、リンク先へ書き込まずに regular file を復元する' +
+  '（PR #412 codex P0 の回帰。TOCTOU）', () => {
+  const ctx = setupRepo('midrun-lockfile-symlink-swap')
+  const victimLock = join(ctx.externalTargetDir, 'victim-lock.json')
+  const lockPath = join(ctx.repoDir, 'skills-lock.json')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /skills-lock\.json がシンボリックリンクになっています/,
+          '実行後の再検証（verify_lock_file_after_run）が実行中の置換を検出すること',
+        )
+        return true
+      },
+    )
+
+    // リンク先（リポジトリ外）の実ファイルが書き換え・削除されていないこと
+    // （素の git checkout はリンク先へ書き込み得るため、rm → checkout の順で復元する）
+    assert.equal(
+      readFileSync(victimLock, 'utf8'),
+      'external victim content\n',
+      'symlink のリンク先（リポジトリ外）のファイルが書き換え・削除されないこと',
+    )
+
+    // skills-lock.json は symlink が除去され、index の内容が regular file として
+    // 書き戻されていること
+    assert.equal(
+      lstatSync(lockPath).isSymbolicLink(),
+      false,
+      'skills-lock.json の symlink が除去され regular file へ復元されること',
+    )
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+
+    // 許可先（.agents/skills/<name>/）もリバートされ clean であること
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })

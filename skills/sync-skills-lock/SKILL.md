@@ -171,6 +171,24 @@ for SCOPE_PATH_COMPONENT in ".agents" ".agents/skills" ".agents/skills/${SKILL_N
   fi
 done
 
+# skills-lock.json の実体検証（PR #412 codex P0 指摘）: skills-lock.json は状態
+# シグネチャの prune と porcelain フィルタの双方で「パス文字列」により除外されるため、
+# 実行前から外向き symlink だと npx がリンク先（リポジトリ外を含む）へ書き込んでも
+# どの検査にも現れない。存在する場合は lstat で regular file であることを要求する
+# （symlink・ディレクトリ等は npx 未実行のまま fail-closed で中止）。不存在は初回
+# 生成として許容する。-f は symlink を辿るため、-L 判定で symlink を先に排除する。
+# レイアウト自体の異常で人間の確認を要するため、skip（continue）ではなくループ全体を
+# exit 1 で停止する。この検査も開始時点のみを保証する（TOCTOU）。npx が実行中に
+# 置換するケースは実行後の再検証（verify_lock_file_after_run）が受け持つ。
+if [[ -L "skills-lock.json" ]]; then
+  echo "エラー: skills-lock.json がシンボリックリンクです。npx の書き込みがリンク先（リポジトリ外を含む）へ向かい、スコープ外書き込み検査で検出できないため中止します（fail-closed）。実体ファイルへ置き換えてから再実行してください。" >&2
+  exit 1
+fi
+if [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
+  echo "エラー: skills-lock.json が regular file ではありません。npx の書き込み先として想定外の実体のため中止します（fail-closed）。" >&2
+  exit 1
+fi
+
 # skills CLI (vercel-labs/skills) は固定版でのみ実行する（未固定 npx はレジストリ
 # 最新版の無検証即時実行になり、差分確認・承認より前に走る supply chain 経路になる）。
 # 1つ目の --yes は npx 自体のインストール確認プロンプトのスキップ、末尾の --yes は
@@ -656,9 +674,26 @@ PYEOF
 # checkout・clean・ignored 削除のパス走査がリンク先（リポジトリ外を含む）へ
 # 向かい得るため、skills-lock.json の復元のみ行い、許可先配下への削除系操作は
 # 一切行わず案内に留める（symlink を通じた外部削除の防止。fail-closed）。
+# skills-lock.json 自体が npx 実行中に symlink へ置換されたケース
+# （LOCK_FILE_COMPROMISED=1）では、素の git checkout がリンク先（リポジトリ外を
+# 含む）へ書き込み得るため、先に rm で symlink 自体を除去（リンク先は辿らない）
+# してから checkout で index の内容を regular file として書き戻す。symlink 以外の
+# 想定外実体（ディレクトリ等）は rm -f で除去できず checkout も安全に働かないため、
+# 一切触らず手動復旧を案内する。
 # SKILL_NAME はループの現在値を呼び出し時に参照する。
 revert_in_scope() {
-  git checkout -- skills-lock.json 2>/dev/null || true
+  if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
+    if [[ -L "skills-lock.json" ]]; then
+      rm -f skills-lock.json
+      git checkout -- skills-lock.json 2>/dev/null || true
+    elif [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
+      echo "警告: skills-lock.json が想定外の実体（ディレクトリ等）に置換されているため自動復元しません。実体を確認・除去してから git checkout -- skills-lock.json で復元してください。" >&2
+    else
+      git checkout -- skills-lock.json 2>/dev/null || true
+    fi
+  else
+    git checkout -- skills-lock.json 2>/dev/null || true
+  fi
   if [[ "${SCOPE_PATH_COMPROMISED}" -ne 0 ]]; then
     # symlink 越しの走査を避けるため既存 ignored の復元も行わない。復元素材を
     # 失わないよう、バックアップ dir は削除せず保全して手動復旧に委ねる。
@@ -706,6 +741,24 @@ verify_scope_path_after_run() {
   return 0
 }
 
+# npx 実行後の skills-lock.json の実体再検証（PR #412 codex P0 指摘: TOCTOU）。
+# skills-lock.json は署名の prune と porcelain フィルタの双方からパスで除外される
+# ため、npx が実行中に外向き symlink へ置換してリンク先へ書き込んでもどの検査にも
+# 現れない。実行後に lstat し、存在するのに regular file でなければ fail-closed で
+# 拒否する（事前検証時の不存在→生成のケースも regular file であることを要求する。
+# 実行後の不存在は改変ではなく npx の書き込み不発のため、ここでは不問とする）。
+verify_lock_file_after_run() {
+  if [[ -L "skills-lock.json" ]]; then
+    echo "エラー: npx 実行後の再検証で skills-lock.json がシンボリックリンクになっています。npx が実行中に置換し、リンク先（リポジトリ外を含む）へ書き込んだ可能性があります。リンク先の内容とリポジトリ外への書き込み有無を手動確認してください（fail-closed）。" >&2
+    return 1
+  fi
+  if [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
+    echo "エラー: npx 実行後の再検証で skills-lock.json が regular file ではありません。npx の書き込み先として想定外の実体のため、手動確認が必要です（fail-closed）。" >&2
+    return 1
+  fi
+  return 0
+}
+
 # npx 実行前後のスナップショット比較（スコープ外書き込みの多層防御）用の一時ファイル。
 # -uall は新規ディレクトリの collapse（`?? .agents/` への丸め）を防ぐため必須。
 # status.renames=false でユーザー環境の git config に依存せず rename 検出を無効化する。
@@ -727,6 +780,10 @@ IGNORED_RESTORE_FAILED=0
 # 削除系操作を行わない（symlink 越しのリポジトリ外削除の防止）。npx 実行直後に
 # 一度だけ更新する。
 SCOPE_PATH_COMPROMISED=0
+# skills-lock.json の実行後 再検証（verify_lock_file_after_run）の結果フラグ。
+# 1 のとき revert_in_scope は素の git checkout でリンク先へ書き込まないよう、
+# symlink を rm で除去してから復元する。npx 実行直後に一度だけ更新する。
+LOCK_FILE_COMPROMISED=0
 
 # npx 実行前の許可先配下の全ファイルインベントリ（.gitignore 対象を含む。
 # find -print0 の NUL 区切り）。revert_in_scope（remove_new_ignored_in_scope）が
@@ -862,6 +919,14 @@ if ! verify_scope_path_after_run; then
   NPX_STATUS=1
 fi
 
+# skills-lock.json の実行後 再検証（PR #412 codex P0 指摘: 実行中の symlink 置換）。
+# 検出時は共通失敗経路へ合流させる（revert_in_scope は LOCK_FILE_COMPROMISED を見て
+# symlink を rm で除去してから checkout し、リンク先への書き込みを避ける）。
+if ! verify_lock_file_after_run; then
+  LOCK_FILE_COMPROMISED=1
+  NPX_STATUS=1
+fi
+
 # 許可先配下の実行後 symlink 走査（PR #412 Bugbot High 指摘: TOCTOU）。事前走査は
 # npx 実行前の 0 件しか保証せず、npx が実行中に配下へ作った外向き symlink とそれ
 # 経由の書き込みは、配下を署名から除外している前後比較にも、経路 3 要素しか見ない
@@ -904,7 +969,7 @@ if [[ "${NPX_STATUS}" -eq 0 && "${SCOPE_PATH_COMPROMISED}" -eq 0 ]] && grep -q "
 fi
 
 if [[ "${NPX_STATUS}" -ne 0 ]]; then
-  if [[ "${NPX_NOOP_DETECTED}" -eq 0 && "${SCOPE_PATH_COMPROMISED}" -eq 0 ]]; then
+  if [[ "${NPX_NOOP_DETECTED}" -eq 0 && "${SCOPE_PATH_COMPROMISED}" -eq 0 && "${LOCK_FILE_COMPROMISED}" -eq 0 ]]; then
     echo "警告: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害・ダウンロード中断等、原因は問わない）。"
   fi
   # 失敗が部分書き込み後に発生した場合、skills-lock.json / .agents/skills/${SKILL_NAME}/ に
@@ -935,8 +1000,9 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
   # symlink 化（SCOPE_PATH_COMPROMISED）もレイアウト自体の異常で人間の確認を要する
   # ため、同様にループ全体を停止する（事前 lstat 検査の exit 1 と同じ扱い）。
   # 既存 ignored の復元失敗（IGNORED_RESTORE_FAILED）も手動復旧を要するため停止する
-  # （バックアップ dir は revert_in_scope が保全済み）。
-  if [[ "${NPX_NOOP_DETECTED}" -eq 1 || "${SCOPE_PATH_COMPROMISED}" -eq 1 || "${IGNORED_RESTORE_FAILED}" -eq 1 ]]; then
+  # （バックアップ dir は revert_in_scope が保全済み）。skills-lock.json の置換
+  # （LOCK_FILE_COMPROMISED）もリンク先への書き込み有無の手動確認を要するため停止する。
+  if [[ "${NPX_NOOP_DETECTED}" -eq 1 || "${SCOPE_PATH_COMPROMISED}" -eq 1 || "${LOCK_FILE_COMPROMISED}" -eq 1 || "${IGNORED_RESTORE_FAILED}" -eq 1 ]]; then
     exit 1
   fi
   echo "警告: 固定版を外した再実行はせず、当該スキルの変更をリバートして skip します。"
@@ -1194,13 +1260,14 @@ EOF
 1. **一次防御（`--agent universal`）**: Step 4 の npx 呼び出しに `--agent universal` を付け、書き込み先を union ストア（`.agents/skills/<name>/`）と `skills-lock.json` のみへ限定する。個別 agent 指定（`claude-code` 等）は `.agents/skills/` を経由せず対象ツリーへ直接コピーしレイアウトを変えてしまうため使わない
 2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、リポジトリルート全体（除外はスコープ内と、`.git` のうちこのフロー自身が前後スナップショット間に実行する `git status` で変動し得る `.git/index`・その一時 lock〔`.git/index.lock` の完全一致のみ。`.git/config.lock`・`.git/HEAD.lock` 等の永続 lock の残置は署名対象で、シグネチャ不一致として検出される〕のみ。`.git/objects`・`.git/refs`・`packed-refs`・`HEAD`・`logs`・`worktrees`・`modules` を含む残り全域と `.git/config`・`.git/hooks/` 等の永続 Git メタデータは署名対象に含め、履歴・参照の改変やフック仕込み・設定改変も検出する。`.agents` / `.agents/skills` 自身は実行前に存在した場合のみ署名対象で、実行前に不存在だった場合に限り自身のメタデータを omit して初回インストールの正当な親作成を許容する）の状態シグネチャを `repo_state_signature`（`path_state` を起点 `.` へ適用。python3。通常ファイルは mode + 内容の sha256、シンボリックリンクは mode + リンク先の sha256、ディレクトリ・gitlink は自身の mode + 配下全エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本にまとめ、前後で比較する。`repo_state_signature` はさらに index の論理状態（`git ls-files --stage` + `git ls-files -v`。エントリ・skip-worktree / assume-unchanged ビット）の sha256 を連結し、prune している `.git/index` の背後での index 改変も前後不一致として検出する（PR #412 codex P1 指摘）。git status に現れたパスだけをシグネチャ化する方式では、git がディレクトリの mode を追跡しない以上、スコープ外ディレクトリの chmod や `.gitignore` 対象ファイルの上書きを原理的に検出できないため、走査は status 由来のパス集合ではなく作業ツリー全体に対して行う（PR #412 P1 指摘群の同一クラス解消）。ステータス+パスの記録だけでなく全体シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
 
-両層の前提として、まず実行場所がメイン worktree であることを npx 実行前に検証する（`git rev-parse --absolute-git-dir` と `--git-common-dir` を物理パスへ正規化して比較し、不一致なら fail-closed で停止する。linked worktree では実 Git ディレクトリ〔`.git/worktrees/<name>/` と共有側の `refs`・`logs`・`config`・objects〕が作業ツリー外にあり `repo_state_signature` の走査対象に入らないため、npx が `git update-ref` 等で共有リポジトリを改変しても前後の全検査が一致してしまう。PR #412 codex P0 指摘）。この一致比較は linked worktree を除外するだけで実 Git ディレクトリの所在までは保証しないため、続けて「実 Git ディレクトリが作業ツリー直下の `.git` 実体ディレクトリである」ことも検証する（`--show-toplevel` を物理パスへ正規化して `--absolute-git-dir` の物理パスと `<toplevel>/.git` の厳密一致を要求し、さらに `<toplevel>/.git` を lstat して symlink ではなく directory であることを要求する。`git clone --separate-git-dir`・submodule checkout・`.git` が symlink の構成では git-dir と common-dir が一致したまま実体が作業ツリー外にあり、同じ検出不能に陥る。PR #412 Bugbot High 指摘）。次に許可先経路（`.agents` / `.agents/skills` / `.agents/skills/<name>`）の各要素を lstat 検証し、存在する要素が symlink または非ディレクトリなら npx を実行せず fail-closed で停止する（Step 4 フェンス冒頭）。スコープ外検査は許可先を「パス文字列」で走査除外するため、経路が実行前からリポジトリ外を指す symlink だと npx のリンク先への書き込みがどの検査にも現れない（PR #412 P0 指摘）。存在しない要素のみ、初回インストールの正当な新規作成として許容する。加えて許可先**配下**も npx 実行前に `find -type l` で走査し、既存の symlink が 1 件でもあれば npx を実行せず fail-closed で停止する（許可先配下は `prune-under` により署名から除外されるため、配下の既存 symlink を npx が辿ってリポジトリ外へ書き込んでも前後シグネチャ比較には現れない。事前拒否だけが防御になる）。さらに許可先配下の**既存 ignored ファイル**（`.DS_Store` 等）は npx 実行前に一時バックアップディレクトリへ内容・mode ごと退避し（`cp -p`・相対パス構造を保持）、実行後にバックアップと比較して変更・削除を検出したらバックアップから復元する（成功経路では警告のうえ処理継続、失敗経路では `revert_in_scope` に組み込んで復元。復元自体が失敗した場合のみバックアップディレクトリを保全して非ゼロ終了する）。
+両層の前提として、まず実行場所がメイン worktree であることを npx 実行前に検証する（`git rev-parse --absolute-git-dir` と `--git-common-dir` を物理パスへ正規化して比較し、不一致なら fail-closed で停止する。linked worktree では実 Git ディレクトリ〔`.git/worktrees/<name>/` と共有側の `refs`・`logs`・`config`・objects〕が作業ツリー外にあり `repo_state_signature` の走査対象に入らないため、npx が `git update-ref` 等で共有リポジトリを改変しても前後の全検査が一致してしまう。PR #412 codex P0 指摘）。この一致比較は linked worktree を除外するだけで実 Git ディレクトリの所在までは保証しないため、続けて「実 Git ディレクトリが作業ツリー直下の `.git` 実体ディレクトリである」ことも検証する（`--show-toplevel` を物理パスへ正規化して `--absolute-git-dir` の物理パスと `<toplevel>/.git` の厳密一致を要求し、さらに `<toplevel>/.git` を lstat して symlink ではなく directory であることを要求する。`git clone --separate-git-dir`・submodule checkout・`.git` が symlink の構成では git-dir と common-dir が一致したまま実体が作業ツリー外にあり、同じ検出不能に陥る。PR #412 Bugbot High 指摘）。次に許可先経路（`.agents` / `.agents/skills` / `.agents/skills/<name>`）の各要素を lstat 検証し、存在する要素が symlink または非ディレクトリなら npx を実行せず fail-closed で停止する（Step 4 フェンス冒頭）。スコープ外検査は許可先を「パス文字列」で走査除外するため、経路が実行前からリポジトリ外を指す symlink だと npx のリンク先への書き込みがどの検査にも現れない（PR #412 P0 指摘）。存在しない要素のみ、初回インストールの正当な新規作成として許容する。`skills-lock.json` も同じ段階で lstat 検証する: 状態シグネチャの `prune` と porcelain フィルタの双方でパス文字列により除外されるため、実行前から外向き symlink だと npx のリンク先への書き込みがどの検査にも現れない（PR #412 codex P0 指摘）。存在する場合は regular file であることを要求し、symlink・非 regular file なら npx を実行せず fail-closed で停止する（不存在は初回生成として許容する）。加えて許可先**配下**も npx 実行前に `find -type l` で走査し、既存の symlink が 1 件でもあれば npx を実行せず fail-closed で停止する（許可先配下は `prune-under` により署名から除外されるため、配下の既存 symlink を npx が辿ってリポジトリ外へ書き込んでも前後シグネチャ比較には現れない。事前拒否だけが防御になる）。さらに許可先配下の**既存 ignored ファイル**（`.DS_Store` 等）は npx 実行前に一時バックアップディレクトリへ内容・mode ごと退避し（`cp -p`・相対パス構造を保持）、実行後にバックアップと比較して変更・削除を検出したらバックアップから復元する（成功経路では警告のうえ処理継続、失敗経路では `revert_in_scope` に組み込んで復元。復元自体が失敗した場合のみバックアップディレクトリを保全して非ゼロ終了する）。
 
-この事前検査は開始時点しか見ない（TOCTOU）ため、さらに 3 つの防御を重ねる（PR #412 P0 指摘・第7巡、および Bugbot High 指摘）:
+この事前検査は開始時点しか見ない（TOCTOU）ため、さらに 4 つの防御を重ねる（PR #412 P0 指摘・第7巡、Bugbot High 指摘、および codex P0 指摘）:
 
 1. **許可先要素自身の署名（`prune-under`）**: 状態シグネチャは既存の許可先ディレクトリを「エントリごと除外」するのではなく、配下のみ除外して要素自身（種別・mode・symlink のリンク先）は前後で署名する（`SKILL_DIR_SIG_SPEC` の `prune-under`。実行前に不存在だった初回インストールのみ `prune` で全除外する）。npx が**実行中に**許可先を外向き symlink へ置換すると、前後シグネチャの不一致として検出される
 2. **実行後の再検証（`verify_scope_path_after_run`）**: npx 実行後（事後シグネチャ取得前）に許可先経路の全要素を再度 lstat し、存在する要素が symlink・非ディレクトリなら fail-closed で停止する。初回インストールで npx が `.agents` 自体を外向き symlink として作成したケース（親要素の omit / 許可先の prune によりシグネチャに現れない経路）もこれが拒否する。検出時（`SCOPE_PATH_COMPROMISED=1`）の `revert_in_scope` は `skills-lock.json` の復元のみ行い、許可先配下への `git checkout` / `git clean` / ignored 削除は一切行わない — symlink を通じてリンク先（リポジトリ外）のファイルを削除・書き換える事故を避けるため、リンク先の内容とリポジトリ外への書き込み有無の手動確認を案内して非ゼロ終了する（ループ全体を停止する）
 3. **実行後の配下 symlink 走査**: npx 実行後（`verify_scope_path_after_run` に続けて）に許可先**配下**を再度 `find -type l` で走査する。事前走査は実行前の 0 件しか保証せず、npx が**実行中に**配下へ作った外向き symlink とそれ経由の書き込みは、配下を署名から除外している前後比較にも経路 3 要素しか見ない再検証にも現れない（PR #412 Bugbot High 指摘）。事後に見つかる symlink はすべて npx 実行中の作成物であるため、1 件でも検出したら（走査自体の失敗も同様に）`SCOPE_PATH_COMPROMISED=1` の保全経路へ倒す: 許可先配下への `git checkout` / `git clean` / ignored 削除 / 既存 ignored の復元をすべてスキップし、`skills-lock.json` の復元のみ行い、検出パスとバックアップディレクトリを明示して非ゼロ終了する（手動復旧を案内。ループ全体を停止する）
+4. **実行後の `skills-lock.json` 再検証（`verify_lock_file_after_run`）**: npx 実行後（`verify_scope_path_after_run` に続けて）に `skills-lock.json` を再度 lstat し、存在するのに regular file でなければ fail-closed で停止する（実行前の不存在→生成のケースも regular file を要求する）。npx が**実行中に** `skills-lock.json` を外向き symlink へ置換してリンク先へ書き込んでも、同パスは署名の `prune` と porcelain フィルタの双方から除外されているためどの検査にも現れない（PR #412 codex P0 指摘）。検出時（`LOCK_FILE_COMPROMISED=1`）の `revert_in_scope` は素の `git checkout -- skills-lock.json`（リンク先へ書き込み得る）を行わず、`rm` で symlink 自体を除去（リンク先は辿らない）してから checkout で index の内容を regular file として書き戻す。symlink 以外の想定外実体（ディレクトリ等）は一切触らず手動復旧を案内して非ゼロ終了する（ループ全体を停止する）
 
 **検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、porcelain スナップショット比較（判定軸 1）**単独**では ignore されたパスへの書き込みを検出できない。しかし状態シグネチャ比較（判定軸 2）は `.gitignore` 対象を含む作業ツリー全体を走査して内容ハッシュへ取り込むため、ignore されたパスへの書き込みもシグネチャ不一致として検出できる（porcelain 由来の報告一覧に該当パスが載らないだけで、検出・停止自体は機能する）。シグネチャ比較はほかに、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容・パーミッションだけ上書きするケース、およびディレクトリ・gitlink（未初期化 submodule 含む）が異なる状態へ書き換わるケースも検出できる。`.git` 配下も `.git/index` と `.git/index.lock` を除く全域（`objects`・`refs`・`packed-refs`・`HEAD`・`logs`・`worktrees`・`modules`・`config`・`hooks`、`.git/config.lock` 等の永続 lock を含む）が署名対象であり、履歴・参照の改変も検出できる（旧実装ではこれらを prune しており検出不能だった。Issue #413 で追跡し PR #412 で解消）。スコープ内リバート（`revert_in_scope`）は、npx 実行前に取得した許可先配下の全ファイルインベントリ（`find -print0`。ignored 含む・NUL 区切り）との突き合わせで「npx が新規作成した `.gitignore` 対象ファイル」のみを個別削除するため、`.agents/skills/<name>/` 配下へ書き込まれた ignored ファイルも異常終了時に残置されない（Issue #413 の残項目として解消）一方、**実行前から存在した ignored ファイル（`.DS_Store` 等）は削除されず保全される**（`git clean -fdx` は既存 ignored ファイルまで巻き添え削除するため使わない。PR #412 Bugbot Medium 指摘）。既存 ignored ファイルを npx が上書き・削除したケースは、許可先配下が署名から除外されている以上シグネチャ比較には現れないため、npx 実行前に取得する内容・mode 込みのバックアップ（`IGNORED_BACKUP_DIR`）との比較で検出し、`restore_preexisting_ignored` がバックアップから復元する（成功経路では警告して継続、失敗経路では `revert_in_scope` の一部として復元。復元失敗時はバックアップディレクトリを保全して非ゼロ終了する）。この復元が regular file のみを前提にできるのは、npx 実行前の許可先配下 symlink 走査（`find -type l`）が既存 symlink を fail-closed で拒否しているためである。実際に残る制約は次の 2 点である: (1) prune している `.git/index`・`.git/index.lock` の**ファイルとしての**書き込みは検出できない（このフロー自身の `git status` が npx 実行後に必ず index を更新するため、署名対象へ含めると常に誤検知になる）。ただし index の**論理状態**（エントリの追加・削除・blob 差し替え、skip-worktree / assume-unchanged ビット）は `git ls-files --stage` + `git ls-files -v` の前後比較（`index_state_signature`）が検出するため、残る盲点は stat cache 相当の情報と `.git/index.lock` 自体に限られる（PR #412 codex P1 指摘の解消）。(2) `.git` の大半を署名対象にした代償として、同期実行中の並行 git 操作（他 worktree 含む）がシグネチャ不一致（誤検知）として同期を停止させ得る（注意事項参照。fail-closed 側に倒す設計判断）。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
 
@@ -1213,6 +1280,7 @@ EOF
 - **許可先経路が symlink の場合は実行できない**: `.agents` / `.agents/skills` / `.agents/skills/<name>` のいずれかが symlink または非ディレクトリだと、Step 4 冒頭の実体検証が npx 実行前に fail-closed で停止する（symlink 越しのリポジトリ外書き込みはスコープ外検査に現れないため）。実体ディレクトリへ置き換えてから再実行する。npx が**実行中に**許可先を symlink へ置換した場合（初回インストールで symlink として作成した場合を含む）も、許可先要素自身の署名（`prune-under`）と実行後再検証（`verify_scope_path_after_run`）が fail-closed で停止し、このとき許可先配下への `git clean` 等の削除系操作は行わない（symlink 越しのリンク先削除を避けるため。「書き込みスコープの制限」節を参照）。許可先**配下**に既存の symlink がある場合も、npx 実行前の `find -type l` 走査が fail-closed で停止する（配下は署名から除外されており、リンク先への書き込みがどの検査にも現れないため）。npx が**実行中に**配下へ symlink を作成した場合も、npx 実行後の再走査（`find -type l`）が検出して同じ保全経路（許可先配下への削除系操作・復元をスキップし、バックアップを保全して停止）へ倒す。該当 symlink を実体ファイルへ置き換えるか削除してから再実行する
 - **既存 ignored ファイルの変更は自動復元される**: 許可先配下に実行前から存在した ignored ファイル（`.DS_Store` 等）を npx が上書き・削除した場合、実行前バックアップとの比較で検出し、内容・mode をバックアップから復元する（成功経路では警告のうえ同期は継続）。復元に失敗した場合はバックアップディレクトリ（パスはエラーメッセージに表示）を残して停止するため、そこから手動で復旧する
 - **スコープ外書き込みを検出した場合はループ全体が停止する**: 「書き込みスコープの制限」節を参照。`continue` ではなく `exit 1` のため、承認・stage 済みの他スキル分が index に残ったまま処理が止まる。手動で `git status` を確認し、コミットするか `git reset` するかを判断する
+- **`skills-lock.json` が symlink・非 regular file の場合は実行できない**: `skills-lock.json` は署名の `prune` と porcelain フィルタの双方から除外されるため、symlink だとリンク先（リポジトリ外を含む）への書き込みがどの検査にも現れない。Step 4 冒頭の実体検証が npx 実行前に fail-closed で停止する（実体ファイルへ置き換えてから再実行する）。npx が**実行中に**置換した場合も実行後の再検証（`verify_lock_file_after_run`）が停止し、復元は symlink を `rm` で除去してから `git checkout` で書き戻す（リンク先への書き込みを避けるため。「書き込みスコープの制限」節を参照）
 - **`skills-lock.json` は実行前 clean 前提で全体をステージする**: 単一 JSON ファイルのため部分ステージは現実的でない。Step 1 の事前ガードで clean を保証し、sync 由来以外の変更の混入を防ぐ
 - **ルートの `skills-lock.json` のみを編集**: submodule 配下は手を付けない
 - **source 完全一致検証（必須）**: `source` を `OWNER/REPO` へ正規化した上で `Fandhe-AI/<repo>` に完全一致しないエントリは skip する（`contribute-skill` と同じ安全弁）。前方一致では `../` を含む値が通過してしまうため、完全一致の正規表現で検証する。`skills-lock.json` の改ざんや誤設定から防御するため

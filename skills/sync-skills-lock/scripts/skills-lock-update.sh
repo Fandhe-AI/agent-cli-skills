@@ -155,6 +155,23 @@ for SCOPE_PATH_COMPONENT in ".agents" ".agents/skills" ".agents/skills/${SKILL_N
   fi
 done
 
+# skills-lock.json の実体検証（PR #412 codex P0 指摘）: skills-lock.json は状態
+# シグネチャの prune と porcelain フィルタの双方で「パス文字列」により除外されるため、
+# 実行前から外向き symlink だと npx がリンク先（リポジトリ外を含む）へ書き込んでも
+# どの検査にも現れない。存在する場合は lstat で regular file であることを要求する
+# （symlink・ディレクトリ等は npx 未実行のまま fail-closed で中止）。不存在は初回
+# 生成として許容する。-f は symlink を辿るため、-L 判定で symlink を先に排除する。
+# この検査も開始時点のみを保証する（TOCTOU）。npx が実行中に置換するケースは
+# 実行後の再検証（verify_lock_file_after_run）が受け持つ。
+if [[ -L "skills-lock.json" ]]; then
+  echo "エラー: skills-lock.json がシンボリックリンクです。npx の書き込みがリンク先（リポジトリ外を含む）へ向かい、スコープ外書き込み検査で検出できないため中止します（fail-closed）。実体ファイルへ置き換えてから再実行してください。" >&2
+  exit 1
+fi
+if [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
+  echo "エラー: skills-lock.json が regular file ではありません。npx の書き込み先として想定外の実体のため中止します（fail-closed）。" >&2
+  exit 1
+fi
+
 # 作業ツリーの状態シグネチャ（種別 + パーミッション + 内容）を1行で返す。
 # 第1引数のパスを起点に、通常ファイルは内容の sha256、シンボリックリンクは
 # リンク先文字列の sha256（リンク先の解決はしない）、ディレクトリ・gitlink は
@@ -638,8 +655,25 @@ PYEOF
 # checkout・clean・ignored 削除のパス走査がリンク先（リポジトリ外を含む）へ
 # 向かい得るため、skills-lock.json の復元のみ行い、許可先配下への削除系操作は
 # 一切行わず案内に留める（symlink を通じた外部削除の防止。fail-closed）。
+# skills-lock.json 自体が npx 実行中に symlink へ置換されたケース
+# （LOCK_FILE_COMPROMISED=1）では、素の git checkout がリンク先（リポジトリ外を
+# 含む）へ書き込み得るため、先に rm で symlink 自体を除去（リンク先は辿らない）
+# してから checkout で index の内容を regular file として書き戻す。symlink 以外の
+# 想定外実体（ディレクトリ等）は rm -f で除去できず checkout も安全に働かないため、
+# 一切触らず手動復旧を案内する。
 revert_in_scope() {
-  git checkout -- skills-lock.json 2>/dev/null || true
+  if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
+    if [[ -L "skills-lock.json" ]]; then
+      rm -f skills-lock.json
+      git checkout -- skills-lock.json 2>/dev/null || true
+    elif [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
+      echo "警告: skills-lock.json が想定外の実体（ディレクトリ等）に置換されているため自動復元しません。実体を確認・除去してから git checkout -- skills-lock.json で復元してください。" >&2
+    else
+      git checkout -- skills-lock.json 2>/dev/null || true
+    fi
+  else
+    git checkout -- skills-lock.json 2>/dev/null || true
+  fi
   if [[ "${SCOPE_PATH_COMPROMISED}" -ne 0 ]]; then
     # symlink 越しの走査を避けるため既存 ignored の復元も行わない。復元素材を
     # 失わないよう、バックアップ dir は削除せず保全して手動復旧に委ねる。
@@ -682,6 +716,24 @@ verify_scope_path_after_run() {
       return 1
     fi
   done
+  return 0
+}
+
+# npx 実行後の skills-lock.json の実体再検証（PR #412 codex P0 指摘: TOCTOU）。
+# skills-lock.json は署名の prune と porcelain フィルタの双方からパスで除外される
+# ため、npx が実行中に外向き symlink へ置換してリンク先へ書き込んでもどの検査にも
+# 現れない。実行後に lstat し、存在するのに regular file でなければ fail-closed で
+# 拒否する（事前検証時の不存在→生成のケースも regular file であることを要求する。
+# 実行後の不存在は改変ではなく npx の書き込み不発のため、ここでは不問とする）。
+verify_lock_file_after_run() {
+  if [[ -L "skills-lock.json" ]]; then
+    echo "エラー: npx 実行後の再検証で skills-lock.json がシンボリックリンクになっています。npx が実行中に置換し、リンク先（リポジトリ外を含む）へ書き込んだ可能性があります。リンク先の内容とリポジトリ外への書き込み有無を手動確認してください（fail-closed）。" >&2
+    return 1
+  fi
+  if [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
+    echo "エラー: npx 実行後の再検証で skills-lock.json が regular file ではありません。npx の書き込み先として想定外の実体のため、手動確認が必要です（fail-closed）。" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -745,6 +797,10 @@ trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_F
 # 削除系操作を行わない（symlink 越しのリポジトリ外削除の防止）。npx 実行直後に
 # 一度だけ更新する。
 SCOPE_PATH_COMPROMISED=0
+# skills-lock.json の実行後 再検証（verify_lock_file_after_run）の結果フラグ。
+# 1 のとき revert_in_scope は素の git checkout でリンク先へ書き込まないよう、
+# symlink を rm で除去してから復元する。npx 実行直後に一度だけ更新する。
+LOCK_FILE_COMPROMISED=0
 
 # npx 実行前の許可先配下の全ファイルインベントリ（.gitignore 対象を含む。
 # find -print0 の NUL 区切り）。revert_in_scope（remove_new_ignored_in_scope）が
@@ -899,6 +955,14 @@ if ! verify_scope_path_after_run; then
   NPX_STATUS=1
 fi
 
+# skills-lock.json の実行後 再検証（PR #412 codex P0 指摘: 実行中の symlink 置換）。
+# 検出時は共通失敗経路へ合流させる（revert_in_scope は LOCK_FILE_COMPROMISED を見て
+# symlink を rm で除去してから checkout し、リンク先への書き込みを避ける）。
+if ! verify_lock_file_after_run; then
+  LOCK_FILE_COMPROMISED=1
+  NPX_STATUS=1
+fi
+
 # 許可先配下の実行後 symlink 走査（PR #412 Bugbot High 指摘: TOCTOU）。事前走査は
 # npx 実行前の 0 件しか保証せず、npx が実行中に配下へ作った外向き symlink とそれ
 # 経由の書き込みは、配下を署名から除外している前後比較にも、経路 3 要素しか見ない
@@ -940,7 +1004,7 @@ if [[ "${NPX_STATUS}" -eq 0 && "${SCOPE_PATH_COMPROMISED}" -eq 0 ]] && grep -q "
 fi
 
 if [[ "${NPX_STATUS}" -ne 0 ]]; then
-  if [[ "${NPX_NOOP_DETECTED}" -eq 0 && "${SCOPE_PATH_COMPROMISED}" -eq 0 ]]; then
+  if [[ "${NPX_NOOP_DETECTED}" -eq 0 && "${SCOPE_PATH_COMPROMISED}" -eq 0 && "${LOCK_FILE_COMPROMISED}" -eq 0 ]]; then
     echo "エラー: skills@${SKILLS_CLI_VERSION} の実行が失敗しました（該当版の不存在・レジストリ障害・ダウンロード中断等、原因は問いません）。" >&2
   fi
   # 失敗が部分書き込み後に発生した場合、skills-lock.json / .agents/skills/${SKILL_NAME}/
