@@ -83,6 +83,21 @@
 //                                   呼び出し）だけを git スタブで失敗させる。この経路
 //                                   でもスコープ内リバートが走り非ゼロ終了することを
 //                                   検証する
+//   - 'symlink-scope-path'        : PR #412 レビュー指摘（第6巡・P0）の回帰。実行前から
+//                                   .agents/skills/<name> がリポジトリ外を指す symlink に
+//                                   なっているレイアウトを再現する（スコープ外検査は
+//                                   許可先をパス文字列で走査除外するため、symlink 越しの
+//                                   リポジトリ外書き込みはどの検査にも現れない。npx を
+//                                   実行する前に lstat 検証で拒否することを検証する）
+//   - 'git-refs-write'            : PR #412 レビュー指摘（第6巡・P0）の回帰。.git/refs
+//                                   配下へ ref ファイルを追加する（.git の参照・
+//                                   オブジェクト領域を prune していた旧実装では porcelain・
+//                                   シグネチャのどちらにも現れず検出不能だった。prune を
+//                                   index・lock のみへ縮小したことで検出できることを検証）
+//   - 'ignored-residue-on-failure': Issue #413 残項目の回帰。npx がスコープ内へ
+//                                   .gitignore 対象ファイルを書いた後に非ゼロ終了する。
+//                                   revert_in_scope の `git clean -fdx` により異常終了時も
+//                                   ignored ファイルがスコープ内に残置されないことを検証
 //   - 'first-install'             : 非退行。実行前に .agents ツリー自体が存在しない
 //                                   初回インストールで、npx が .agents/skills/<name>
 //                                   を新規作成しても誤検知せず完走することを検証する
@@ -214,6 +229,20 @@ if [[ "\${TEST_NPX_SCENARIO:-}" == "invalid-agents-partial-write" ]]; then
   exit 0
 fi
 
+if [[ "\${TEST_NPX_SCENARIO:-}" == "git-refs-write" ]]; then
+  # .git の参照領域への書き込み（履歴・参照の改変）を再現する。porcelain には一切
+  # 現れず、refs を prune していた旧実装ではシグネチャにも現れなかったケース。
+  mkdir -p ".git/refs/heads"
+  printf '%s\\n' "0000000000000000000000000000000000000000" > ".git/refs/heads/injected-evil"
+fi
+
+if [[ "\${TEST_NPX_SCENARIO:-}" == "ignored-residue-on-failure" ]]; then
+  # スコープ内へ .gitignore 対象ファイル（*.log）を書いた後に npx 自体が失敗する。
+  # revert_in_scope が -x なしの git clean だとこのファイルだけ残置される。
+  echo "npx debug output" > ".agents/skills/${SKILL_NAME}/debug.log"
+  exit 1
+fi
+
 if [[ "\${TEST_NPX_SCENARIO:-}" == "agents-dir-chmod" ]]; then
   # 実行前から存在する .agents ディレクトリ自身の chmod のみ（配下・内容は不変）。
   # git はディレクトリの mode を追跡しないため porcelain には現れない。
@@ -281,7 +310,8 @@ exec "${realGit}" "\$@"
 
   // 'first-install' 用: 実行前に .agents ツリー自体が存在しない状態を再現するため、
   // union ストアの事前作成をスキップする（npx スタブが mkdir -p で新規作成する）。
-  if (scenario !== 'first-install') {
+  // 'symlink-scope-path' も実ディレクトリの事前作成をスキップする（下で symlink を作る）。
+  if (scenario !== 'first-install' && scenario !== 'symlink-scope-path') {
     mkdirSync(join(repoDir, '.agents', 'skills', SKILL_NAME), { recursive: true })
     writeFileSync(
       join(repoDir, '.agents', 'skills', SKILL_NAME, 'SKILL.md'),
@@ -330,6 +360,23 @@ exec "${realGit}" "\$@"
     writeFileSync(outOfScopePath, 'baseline content\n')
     sh('git add -A && git commit -q -m init', repoDir)
     return { repoDir, binDir, scenario, argvLogFile }
+  }
+
+  // 'symlink-scope-path' 用: 許可先 .agents/skills/<name> をリポジトリ外
+  // （binDir 配下の実ディレクトリ）へ向けた symlink として作成し、コミットして
+  // per-skill clean ガードを通過する状態にする。スコープ外検査は許可先をパス文字列で
+  // 走査除外するため、このレイアウトは lstat 検証（npx 実行前）だけが拒否できる。
+  if (scenario === 'symlink-scope-path') {
+    const externalTarget = join(binDir, 'external-skill-store')
+    mkdirSync(externalTarget, { recursive: true })
+    mkdirSync(join(repoDir, '.agents', 'skills'), { recursive: true })
+    symlinkSync(externalTarget, join(repoDir, '.agents', 'skills', SKILL_NAME))
+  }
+
+  // 'ignored-residue-on-failure' 用: *.log を ignore する .gitignore をコミットに含め、
+  // npx スタブが書く debug.log がスコープ内の .gitignore 対象ファイルになるようにする。
+  if (scenario === 'ignored-residue-on-failure') {
+    writeFileSync(join(repoDir, '.gitignore'), '*.log\n')
   }
 
   sh('git add -A && git commit -q -m init', repoDir)
@@ -921,6 +968,118 @@ test('ケース14: 初回インストール（実行前に .agents 不存在）�
       existsSync(join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, 'SKILL.md')),
       'npx が新規作成した union ストアのファイルが残ること',
     )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース17: .agents/skills/<name> がリポジトリ外向き symlink の場合、npx を実行する前に' +
+  '拒否して非ゼロ終了する（PR #412 第6巡 P0 の回帰）', () => {
+  const ctx = setupRepo('symlink-scope-path')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(
+          combined,
+          /シンボリックリンク/,
+          '許可先経路が symlink である旨のエラーメッセージが出ること',
+        )
+        return true
+      },
+    )
+
+    // npx が実行されていないこと（実行されると argv ログが必ず書かれる）。
+    // symlink 越しの書き込みはスコープ外検査に現れないため、実行前拒否だけが防御になる。
+    assert.equal(
+      existsSync(ctx.argvLogFile),
+      false,
+      'npx が一度も実行されていないこと（lstat 検証が npx より前に走る）',
+    )
+
+    // symlink 自体は削除・置換されず、確認できる状態のまま残ること
+    assert.equal(
+      readlinkSync(join(ctx.repoDir, '.agents', 'skills', SKILL_NAME)),
+      join(ctx.binDir, 'external-skill-store'),
+      'symlink は自動で置き換えられず残存すること（対処は人間の判断に委ねる）',
+    )
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース18: .git/refs 配下への ref ファイル追加を全体シグネチャ比較で検出する' +
+  '（PR #412 第6巡 P0 の回帰。refs を prune していた旧実装では検出不能）', () => {
+  const ctx = setupRepo('git-refs-write')
+  const injectedRef = join(ctx.repoDir, '.git', 'refs', 'heads', 'injected-evil')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /スコープ外/, 'スコープ外検出のエラーメッセージが出ること')
+        assert.match(
+          combined,
+          /状態シグネチャ/,
+          '.git 配下は porcelain に一切現れないため、シグネチャ不一致として検出された旨の' +
+            '案内が出ること（refs が署名対象に含まれていることの検証）',
+        )
+        return true
+      },
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
+
+    // 追加された ref ファイルは自動リバートせず、確認できる状態のまま残す
+    assert.ok(existsSync(injectedRef), '追加された ref ファイルは削除されず残存すること')
+  } finally {
+    rmSync(ctx.repoDir, { recursive: true, force: true })
+    rmSync(ctx.binDir, { recursive: true, force: true })
+  }
+})
+
+test('ケース19: npx 異常終了時、スコープ内へ書かれた .gitignore 対象ファイルも残置されない' +
+  '（Issue #413 残項目の回帰。revert_in_scope の git clean -fdx 検証）', () => {
+  const ctx = setupRepo('ignored-residue-on-failure')
+  const ignoredResidue = join(ctx.repoDir, '.agents', 'skills', SKILL_NAME, 'debug.log')
+  try {
+    assert.throws(
+      () => runScript(ctx),
+      (err) => {
+        assert.notEqual(err.status, 0, '非ゼロ終了すること（fail-closed）')
+        const combined = `${err.stdout ?? ''}${err.stderr ?? ''}`
+        assert.match(combined, /実行が失敗しました/, 'npx 失敗の警告が出ること')
+        return true
+      },
+    )
+
+    // -fd（-x なし）だと .gitignore 対象の debug.log だけがリバートをすり抜けて残る
+    assert.equal(
+      existsSync(ignoredResidue),
+      false,
+      'スコープ内へ書かれた .gitignore 対象ファイルが -fdx により削除されていること',
+    )
+
+    // スコープ内（skills-lock.json / .agents/skills/<name>/）はリバートされ clean
+    const lockDiff = sh(`git status --porcelain -- skills-lock.json`, ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })

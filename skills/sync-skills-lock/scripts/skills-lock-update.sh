@@ -82,6 +82,26 @@ if ! gh auth status &>/dev/null; then
   exit 1
 fi
 
+# 許可先経路の実体検証（PR #412 P0 指摘）: スコープ外検査（porcelain 比較・状態
+# シグネチャ比較）は .agents/skills/${SKILL_NAME} を「パス文字列」で走査除外する。
+# この経路上のいずれかの要素が実行前から symlink だと、npx がリンク先（リポジトリ外を
+# 含む）へ書いた内容は除外側に吸われてどの検査にも現れない。そのため npx 実行前に
+# 各要素を lstat し、存在するものはすべて実体のディレクトリであることを要求する
+# （symlink・非ディレクトリは fail-closed で中止。npx は実行しない）。存在しない
+# 要素のみ、初回インストールで npx が正当に新規作成するケースとして許容する
+# （後段の REPO_SIG_OMITS の条件付き omit と同じ判定基準）。-d は symlink を辿るが、
+# 直前の -L 判定で symlink を先に排除しているため実体の種別だけを見る。
+for SCOPE_PATH_COMPONENT in ".agents" ".agents/skills" ".agents/skills/${SKILL_NAME}"; do
+  if [[ -L "${SCOPE_PATH_COMPONENT}" ]]; then
+    echo "エラー: ${SCOPE_PATH_COMPONENT} がシンボリックリンクです。npx の書き込みがリンク先（リポジトリ外を含む）へ向かい、スコープ外書き込み検査で検出できないため中止します（fail-closed）。実体ディレクトリへ置き換えてから再実行してください。" >&2
+    exit 1
+  fi
+  if [[ -e "${SCOPE_PATH_COMPONENT}" && ! -d "${SCOPE_PATH_COMPONENT}" ]]; then
+    echo "エラー: ${SCOPE_PATH_COMPONENT} がディレクトリではありません。npx の書き込み先として想定外の実体のため中止します（fail-closed）。" >&2
+    exit 1
+  fi
+done
+
 # 作業ツリーの状態シグネチャ（種別 + パーミッション + 内容）を1行で返す。
 # 第1引数のパスを起点に、通常ファイルは内容の sha256、シンボリックリンクは
 # リンク先文字列の sha256（リンク先の解決はしない）、ディレクトリ・gitlink は
@@ -258,13 +278,18 @@ PYEOF
 # リポジトリルート全体の状態シグネチャ（スコープ外書き込み検出の実体）。
 # 除外は次の 3 種のみ:
 #   - スコープ内 — skills-lock.json / .agents/skills/${SKILL_NAME}（npx の正当な書き込み先）
-#   - .git のうち通常の git 操作で npx と無関係に変動し得る領域のみ — このスクリプト
-#     自身が呼ぶ git status（index の stat cache 更新）や、fetch・commit・merge 等の
-#     並行操作で変わる index・ODB（objects）・refs 系・reflog・一時状態ファイル・
-#     lock。`.git` を丸ごと prune すると .git/config・.git/hooks/ の書き換え
-#     （フック仕込み・設定改変）まで署名から漏れるため（PR #412 P1 指摘）、変動が
-#     避けられない領域だけを限定列挙し、config・hooks・info 等の永続メタデータは
-#     署名対象に残す
+#   - .git のうち、このスクリプト自身が前後スナップショット間に実行する git コマンドで
+#     変動し得る領域のみ — 前後シグネチャの間に走る git 操作は
+#     `git status --porcelain -z -uall`（実行後スナップショット取得）だけであり、
+#     status が触るのは index の stat cache 更新（.git/index）とその一時 lock
+#     （.git/index.lock 等）のみ。リバート用の git checkout / git clean は
+#     実行後シグネチャ取得より後の失敗経路でしか呼ばれないため、署名比較に影響しない。
+#     以前は objects・refs・packed-refs・HEAD・logs・worktrees 等も prune していたが、
+#     npx がこれらへ書き込む（履歴・参照の改変）とスコープ外検査を丸ごと迂回できて
+#     しまうため（PR #412 P0 指摘）、実測で避けられない index・lock 以外はすべて
+#     署名対象に含める。代償として、同期実行中にこのリポジトリで並行 git 操作
+#     （他 worktree 含む）を行うとシグネチャ不一致（誤検知）として停止し得る
+#     （SKILL.md の注意事項に明記。fail-closed 側に倒す設計判断）
 #   - REPO_SIG_OMITS — 実行前に存在しなかった場合の .agents / .agents/skills
 #     （npx 実行前スナップショットの直前に一度だけ確定する）。既存なら omit せず
 #     種別・mode・symlink 先を通常どおり署名するため、既存親ディレクトリの chmod や
@@ -284,27 +309,6 @@ repo_state_signature() {
     "prune:.agents/skills/${SKILL_NAME}" \
     "prune:.git/index" \
     "prune:.git/*.lock" \
-    "prune:.git/objects" \
-    "prune:.git/refs" \
-    "prune:.git/packed-refs" \
-    "prune:.git/logs" \
-    "prune:.git/HEAD" \
-    "prune:.git/FETCH_HEAD" \
-    "prune:.git/ORIG_HEAD" \
-    "prune:.git/MERGE_*" \
-    "prune:.git/AUTO_MERGE" \
-    "prune:.git/CHERRY_PICK_HEAD" \
-    "prune:.git/REVERT_HEAD" \
-    "prune:.git/REBASE_HEAD" \
-    "prune:.git/BISECT_*" \
-    "prune:.git/COMMIT_EDITMSG" \
-    "prune:.git/sequencer" \
-    "prune:.git/rebase-merge" \
-    "prune:.git/rebase-apply" \
-    "prune:.git/gc.log" \
-    "prune:.git/shallow" \
-    "prune:.git/worktrees" \
-    "prune:.git/modules" \
     ${REPO_SIG_OMITS[@]+"${REPO_SIG_OMITS[@]}"}
 }
 
@@ -337,14 +341,19 @@ filter_out_of_scope() {
 # 2つのパスを1つの `git checkout --` に渡すとアトミックに扱われ、どちらか一方が
 # 「追跡対象なし」（初回具現化・untracked のみの書き込み時）で pathspec エラーになると
 # コマンド全体が失敗し、もう一方（skills-lock.json）も復元されないまま抜けてしまう
-# ため、必ず1コマンド1パスで分離する。git clean -fd はディレクトリが存在しない場合に
+# ため、必ず1コマンド1パスで分離する。git clean はディレクトリが存在しない場合に
 # 非ゼロ終了するため、存在確認してから呼ぶ（set -e 下で無条件に呼ぶと呼び出し元の
-# 案内メッセージより先にスクリプトが停止し得る）。
+# 案内メッセージより先にスクリプトが停止し得る）。-x を付けるのは、npx が
+# .agents/skills/${SKILL_NAME}/ 配下へ書いた .gitignore 対象ファイルが -fd では
+# 削除されず異常終了後もスコープ内に残置されるため（Issue #413）。pathspec を
+# kebab-case 検証済みの当該スキルディレクトリへ厳密に限定しているため、-x でも
+# 削除対象がスコープ外の ignored ファイルへ広がることはない（skills-lock.json 側は
+# checkout で戻る）。
 revert_in_scope() {
   git checkout -- skills-lock.json 2>/dev/null || true
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
   if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
-    git clean -fd ".agents/skills/${SKILL_NAME}/" || true
+    git clean -fdx -- ".agents/skills/${SKILL_NAME}/" || true
   fi
 }
 

@@ -94,6 +94,27 @@ if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]]; then
   continue
 fi
 
+# 許可先経路の実体検証（PR #412 P0 指摘）: スコープ外検査（porcelain 比較・状態
+# シグネチャ比較）は .agents/skills/${SKILL_NAME} を「パス文字列」で走査除外する。
+# この経路上のいずれかの要素が実行前から symlink だと、npx がリンク先（リポジトリ外を
+# 含む）へ書いた内容は除外側に吸われてどの検査にも現れない。そのため npx 実行前に
+# 各要素を lstat し、存在するものはすべて実体のディレクトリであることを要求する
+# （symlink・非ディレクトリは fail-closed で中止。npx は実行しない）。存在しない
+# 要素のみ、初回インストールで npx が正当に新規作成するケースとして許容する
+# （後段の REPO_SIG_OMITS の条件付き omit と同じ判定基準）。symlink 化された経路は
+# レイアウト自体の異常であり人間の確認を要するため、skip（continue）ではなく
+# ループ全体を exit 1 で停止する（この時点では npx 未実行のため残置なし）。
+for SCOPE_PATH_COMPONENT in ".agents" ".agents/skills" ".agents/skills/${SKILL_NAME}"; do
+  if [[ -L "${SCOPE_PATH_COMPONENT}" ]]; then
+    echo "エラー: ${SCOPE_PATH_COMPONENT} がシンボリックリンクです。npx の書き込みがリンク先（リポジトリ外を含む）へ向かい、スコープ外書き込み検査で検出できないため中止します（fail-closed）。実体ディレクトリへ置き換えてから再実行してください。" >&2
+    exit 1
+  fi
+  if [[ -e "${SCOPE_PATH_COMPONENT}" && ! -d "${SCOPE_PATH_COMPONENT}" ]]; then
+    echo "エラー: ${SCOPE_PATH_COMPONENT} がディレクトリではありません。npx の書き込み先として想定外の実体のため中止します（fail-closed）。" >&2
+    exit 1
+  fi
+done
+
 # skills CLI (vercel-labs/skills) は固定版でのみ実行する（未固定 npx はレジストリ
 # 最新版の無検証即時実行になり、差分確認・承認より前に走る supply chain 経路になる）。
 # 1つ目の --yes は npx 自体のインストール確認プロンプトのスキップ、末尾の --yes は
@@ -273,13 +294,18 @@ PYEOF
 # リポジトリルート全体の状態シグネチャ（スコープ外書き込み検出の実体）。
 # 除外は次の 3 種のみ:
 #   - スコープ内 — skills-lock.json / .agents/skills/${SKILL_NAME}（npx の正当な書き込み先）
-#   - .git のうち通常の git 操作で npx と無関係に変動し得る領域のみ — このスクリプト
-#     自身が呼ぶ git status（index の stat cache 更新）や、fetch・commit・merge 等の
-#     並行操作で変わる index・ODB（objects）・refs 系・reflog・一時状態ファイル・
-#     lock。`.git` を丸ごと prune すると .git/config・.git/hooks/ の書き換え
-#     （フック仕込み・設定改変）まで署名から漏れるため（PR #412 P1 指摘）、変動が
-#     避けられない領域だけを限定列挙し、config・hooks・info 等の永続メタデータは
-#     署名対象に残す
+#   - .git のうち、このフロー自身が前後スナップショット間に実行する git コマンドで
+#     変動し得る領域のみ — 前後シグネチャの間に走る git 操作は
+#     `git status --porcelain -z -uall`（実行後スナップショット取得）だけであり、
+#     status が触るのは index の stat cache 更新（.git/index）とその一時 lock
+#     （.git/index.lock 等）のみ。リバート用の git checkout / git clean は
+#     実行後シグネチャ取得より後の失敗経路でしか呼ばれないため、署名比較に影響しない。
+#     以前は objects・refs・packed-refs・HEAD・logs・worktrees 等も prune していたが、
+#     npx がこれらへ書き込む（履歴・参照の改変）とスコープ外検査を丸ごと迂回できて
+#     しまうため（PR #412 P0 指摘）、実測で避けられない index・lock 以外はすべて
+#     署名対象に含める。代償として、同期実行中にこのリポジトリで並行 git 操作
+#     （他 worktree 含む）を行うとシグネチャ不一致（誤検知）として停止し得る
+#     （注意事項に明記。fail-closed 側に倒す設計判断）
 #   - REPO_SIG_OMITS — 実行前に存在しなかった場合の .agents / .agents/skills
 #     （npx 実行前スナップショットの直前に一度だけ確定する）。既存なら omit せず
 #     種別・mode・symlink 先を通常どおり署名するため、既存親ディレクトリの chmod や
@@ -299,27 +325,6 @@ repo_state_signature() {
     "prune:.agents/skills/${SKILL_NAME}" \
     "prune:.git/index" \
     "prune:.git/*.lock" \
-    "prune:.git/objects" \
-    "prune:.git/refs" \
-    "prune:.git/packed-refs" \
-    "prune:.git/logs" \
-    "prune:.git/HEAD" \
-    "prune:.git/FETCH_HEAD" \
-    "prune:.git/ORIG_HEAD" \
-    "prune:.git/MERGE_*" \
-    "prune:.git/AUTO_MERGE" \
-    "prune:.git/CHERRY_PICK_HEAD" \
-    "prune:.git/REVERT_HEAD" \
-    "prune:.git/REBASE_HEAD" \
-    "prune:.git/BISECT_*" \
-    "prune:.git/COMMIT_EDITMSG" \
-    "prune:.git/sequencer" \
-    "prune:.git/rebase-merge" \
-    "prune:.git/rebase-apply" \
-    "prune:.git/gc.log" \
-    "prune:.git/shallow" \
-    "prune:.git/worktrees" \
-    "prune:.git/modules" \
     ${REPO_SIG_OMITS[@]+"${REPO_SIG_OMITS[@]}"}
 }
 
@@ -351,14 +356,19 @@ filter_out_of_scope() {
 # 2つのパスを1つの `git checkout --` に渡すとアトミックに扱われ、どちらか一方が
 # 「追跡対象なし」（初回具現化・untracked のみの書き込み時）で pathspec エラーになると
 # コマンド全体が失敗し、もう一方（skills-lock.json）も復元されないまま抜けてしまう
-# ため、必ず1コマンド1パスで分離する。git clean -fd はディレクトリが存在しない場合に
+# ため、必ず1コマンド1パスで分離する。git clean はディレクトリが存在しない場合に
 # 非ゼロ終了するため、存在確認してから呼ぶ（set -e 下で無条件に呼ぶと呼び出し元の
-# 案内メッセージより先に停止し得る）。SKILL_NAME はループの現在値を呼び出し時に参照する。
+# 案内メッセージより先に停止し得る）。-x を付けるのは、npx が
+# .agents/skills/${SKILL_NAME}/ 配下へ書いた .gitignore 対象ファイルが -fd では
+# 削除されず異常終了後もスコープ内に残置されるため（Issue #413）。pathspec を
+# kebab-case 検証済みの当該スキルディレクトリへ厳密に限定しているため、-x でも
+# 削除対象がスコープ外の ignored ファイルへ広がることはない（skills-lock.json 側は
+# checkout で戻る）。SKILL_NAME はループの現在値を呼び出し時に参照する。
 revert_in_scope() {
   git checkout -- skills-lock.json 2>/dev/null || true
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
   if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
-    git clean -fd ".agents/skills/${SKILL_NAME}/" || true
+    git clean -fdx -- ".agents/skills/${SKILL_NAME}/" || true
   fi
 }
 
@@ -723,13 +733,17 @@ EOF
 2 層で防ぐ:
 
 1. **一次防御（`--agent universal`）**: Step 4 の npx 呼び出しに `--agent universal` を付け、書き込み先を union ストア（`.agents/skills/<name>/`）と `skills-lock.json` のみへ限定する。個別 agent 指定（`claude-code` 等）は `.agents/skills/` を経由せず対象ツリーへ直接コピーしレイアウトを変えてしまうため使わない
-2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、リポジトリルート全体（除外はスコープ内と、`.git` のうち通常の git 操作で変動し得る領域〔index・objects・refs・reflog・一時状態ファイル・lock 等〕のみ。`.git/config`・`.git/hooks/` 等の永続 Git メタデータは署名対象に含め、フック仕込み・設定改変も検出する。`.agents` / `.agents/skills` 自身は実行前に存在した場合のみ署名対象で、実行前に不存在だった場合に限り自身のメタデータを omit して初回インストールの正当な親作成を許容する）の状態シグネチャを `repo_state_signature`（`path_state` を起点 `.` へ適用。python3。通常ファイルは mode + 内容の sha256、シンボリックリンクは mode + リンク先の sha256、ディレクトリ・gitlink は自身の mode + 配下全エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本にまとめ、前後で比較する。git status に現れたパスだけをシグネチャ化する方式では、git がディレクトリの mode を追跡しない以上、スコープ外ディレクトリの chmod や `.gitignore` 対象ファイルの上書きを原理的に検出できないため、走査は status 由来のパス集合ではなく作業ツリー全体に対して行う（PR #412 P1 指摘群の同一クラス解消）。ステータス+パスの記録だけでなく全体シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
+2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、リポジトリルート全体（除外はスコープ内と、`.git` のうちこのフロー自身が前後スナップショット間に実行する `git status` で変動し得る `.git/index`・一時 lock〔`.git/*.lock`〕のみ。`.git/objects`・`.git/refs`・`packed-refs`・`HEAD`・`logs`・`worktrees`・`modules` を含む残り全域と `.git/config`・`.git/hooks/` 等の永続 Git メタデータは署名対象に含め、履歴・参照の改変やフック仕込み・設定改変も検出する。`.agents` / `.agents/skills` 自身は実行前に存在した場合のみ署名対象で、実行前に不存在だった場合に限り自身のメタデータを omit して初回インストールの正当な親作成を許容する）の状態シグネチャを `repo_state_signature`（`path_state` を起点 `.` へ適用。python3。通常ファイルは mode + 内容の sha256、シンボリックリンクは mode + リンク先の sha256、ディレクトリ・gitlink は自身の mode + 配下全エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本にまとめ、前後で比較する。git status に現れたパスだけをシグネチャ化する方式では、git がディレクトリの mode を追跡しない以上、スコープ外ディレクトリの chmod や `.gitignore` 対象ファイルの上書きを原理的に検出できないため、走査は status 由来のパス集合ではなく作業ツリー全体に対して行う（PR #412 P1 指摘群の同一クラス解消）。ステータス+パスの記録だけでなく全体シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
 
-**検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、porcelain スナップショット比較（判定軸 1）**単独**では ignore されたパスへの書き込みを検出できない。しかし状態シグネチャ比較（判定軸 2）は `.gitignore` 対象を含む作業ツリー全体を走査して内容ハッシュへ取り込むため、ignore されたパスへの書き込みもシグネチャ不一致として検出できる（porcelain 由来の報告一覧に該当パスが載らないだけで、検出・停止自体は機能する）。シグネチャ比較はほかに、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容・パーミッションだけ上書きするケース、およびディレクトリ・gitlink（未初期化 submodule 含む）が異なる状態へ書き換わるケースも検出できる。実際に残る制約は次の 2 点である（いずれも Issue #413 で追跡）: (1) シグネチャの走査から prune している `.git` 配下の変動領域（`.git/objects`・`.git/refs`・`.git/worktrees`・`.git/modules` 等）への書き込みは検出できない。(2) スコープ外検出時のスコープ内リバート（`revert_in_scope`）が使う `git clean -fd` は `-x` を付けないため、`.agents/skills/<name>/` 配下へ書き込まれた `.gitignore` 対象ファイルはリバート後も残置される。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
+両層の前提として、npx 実行前に許可先経路（`.agents` / `.agents/skills` / `.agents/skills/<name>`）の各要素を lstat 検証し、存在する要素が symlink または非ディレクトリなら npx を実行せず fail-closed で停止する（Step 4 フェンス冒頭）。スコープ外検査は許可先を「パス文字列」で走査除外するため、経路が実行前からリポジトリ外を指す symlink だと npx のリンク先への書き込みがどの検査にも現れない（PR #412 P0 指摘）。存在しない要素のみ、初回インストールの正当な新規作成として許容する。
+
+**検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、porcelain スナップショット比較（判定軸 1）**単独**では ignore されたパスへの書き込みを検出できない。しかし状態シグネチャ比較（判定軸 2）は `.gitignore` 対象を含む作業ツリー全体を走査して内容ハッシュへ取り込むため、ignore されたパスへの書き込みもシグネチャ不一致として検出できる（porcelain 由来の報告一覧に該当パスが載らないだけで、検出・停止自体は機能する）。シグネチャ比較はほかに、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容・パーミッションだけ上書きするケース、およびディレクトリ・gitlink（未初期化 submodule 含む）が異なる状態へ書き換わるケースも検出できる。`.git` 配下も `.git/index` と一時 lock（`.git/*.lock`）を除く全域（`objects`・`refs`・`packed-refs`・`HEAD`・`logs`・`worktrees`・`modules`・`config`・`hooks` 等）が署名対象であり、履歴・参照の改変も検出できる（旧実装ではこれらを prune しており検出不能だった。Issue #413 で追跡し PR #412 で解消）。スコープ内リバート（`revert_in_scope`）は `git clean -fdx` を使うため、`.agents/skills/<name>/` 配下へ書き込まれた `.gitignore` 対象ファイルも異常終了時に残置されない（同 Issue の残項目として解消）。実際に残る制約は次の 2 点である: (1) prune している `.git/index`・`.git/*.lock` 自体への書き込みは検出できない（このフロー自身の `git status` が npx 実行後に必ず index を更新するため、署名対象へ含めると常に誤検知になる）。(2) `.git` の大半を署名対象にした代償として、同期実行中の並行 git 操作（他 worktree 含む）がシグネチャ不一致（誤検知）として同期を停止させ得る（注意事項参照。fail-closed 側に倒す設計判断）。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
 
 ## 注意事項
 
 - **全スキル sync での途中却下**: 1スキルずつ承認・stage を行うため、途中で却下しても承認済みスキルの stage は保持される。全スキル処理後に一括コミットする
+- **同期実行中はこのリポジトリでの並行 git 操作（他 worktree 含む）を行わないこと**: 状態シグネチャは `.git` 配下を `.git/index`・一時 lock を除き署名対象に含めるため、fetch・commit・checkout 等の並行操作は `refs`・`objects`・`logs`・`worktrees` を変動させ、シグネチャ不一致（誤検知）として同期を停止させ得る。検出漏れ（fail-open）ではなく停止（fail-closed）側に倒す設計であり、誤検知した場合は並行操作を止めて再実行する
+- **許可先経路が symlink の場合は実行できない**: `.agents` / `.agents/skills` / `.agents/skills/<name>` のいずれかが symlink または非ディレクトリだと、Step 4 冒頭の実体検証が npx 実行前に fail-closed で停止する（symlink 越しのリポジトリ外書き込みはスコープ外検査に現れないため）。実体ディレクトリへ置き換えてから再実行する
 - **スコープ外書き込みを検出した場合はループ全体が停止する**: 「書き込みスコープの制限」節を参照。`continue` ではなく `exit 1` のため、承認・stage 済みの他スキル分が index に残ったまま処理が止まる。手動で `git status` を確認し、コミットするか `git reset` するかを判断する
 - **`skills-lock.json` は実行前 clean 前提で全体をステージする**: 単一 JSON ファイルのため部分ステージは現実的でない。Step 1 の事前ガードで clean を保証し、sync 由来以外の変更の混入を防ぐ
 - **ルートの `skills-lock.json` のみを編集**: submodule 配下は手を付けない
