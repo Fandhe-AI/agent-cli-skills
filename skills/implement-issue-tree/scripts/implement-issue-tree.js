@@ -1655,9 +1655,12 @@ async function measureResidualWorktreeBytes(paths) {
 // 全量含む。新規 linked worktree は checkout 直後はこれらを持たないため、この値は
 // 「安全側の下限」ではなく状況によっては過大評価になり得る（Issue #348 codex-review
 // High 指摘）。呼び出し側（perWorktreeByteReserve 確定箇所）がこの過大評価の影響を
-// `maxResidualWorktreeBytes / EPHEMERAL_RESERVE_PER_NEW_START` でクランプし、1 件目の
-// 新規着手候補が予約のみで恒久停止しないようにする。実消費の超過検知はクランプに
-// 依存せず、実測ベースの再測定（remeasureResidualBytesNow 等）が別途担う。
+// `maxResidualWorktreeBytes / (EPHEMERAL_RESERVE_PER_NEW_START × BYTE_RESERVE_CANDIDATE_BUDGET_DIVISOR)`
+// でクランプし、1 件目の新規着手候補が予約のみで恒久停止しないようにする（詳細・分割数の
+// 理由は clampPerWorktreeByteReserve 定義側のコメント参照。PR #406: 割らずに
+// `EPHEMERAL_RESERVE_PER_NEW_START` のみで割ると baselineBytes が正の値になった以降の
+// 着手が恒久停止する回帰があった）。実消費の超過検知はクランプに依存せず、実測ベースの
+// 再測定（remeasureResidualBytesNow 等）が別途担う。
 // 両方の測定が成立した場合のみ差分を返し、どちらかが失敗した場合は null（呼び出し側は
 // 既存の測定失敗と同じ fail-closed 分岐へ倒す）。
 async function measureMainWorktreeContentBytes(mainPath) {
@@ -2844,6 +2847,22 @@ function projectResidualBytes({ baselineBytes, ledgerLength, baselineLedgerCount
   return baselineBytes + (unbaselinedLedgerCount + reservedUnits + extraReserveUnits) * perWorktreeByteReserve
 }
 
+// 1 件の新規着手候補の speculative バイト予約（clampPerWorktreeByteReserve が返す値 ×
+// reservePerNewStart）が消費してよい maxResidualWorktreeBytes の割合を決める分割数
+// （PR #406 対応。既定 2 = 予約は上限の最大 1/2 まで）。呼び出し側での「1件目候補は
+// 予約のみで恒久停止しない」性質は割る前の budget を使う限り値に依存せず保たれるが、
+// 大きくするほど baselineBytes 用の headroom が狭まり、正常時（baseline がまだ小さい状態）
+// でも 2 件目以降の新規着手が停止しやすくなる。1 に固定すると本来の目的（残置が既に存在
+// する状態でも新規着手が停止しないこと）が再度失われる。値そのものは正確性の要件ではなく
+// 運用上の判断のため、ここに理由込みで固定値として宣言する。
+// 副作用: perWorktreeByteReserve が半分になる分、projectResidualBytes の (a) 恒久 latch
+// 分岐（基準確定後に台帳が積み増された未 baseline 分 unbaselinedLedgerCount）が同じバイト量に
+// 到達するまでに必要な worktree 件数は約 2 倍になる（divisor=1 相当なら 6 件で到達する量に
+// 12 件必要）。ただし新規着手（implement）の直前は remeasureResidualBytesNow が毎回実測し直し
+// baselineBytes と byteBaselineLedgerCount を同時に更新するため、通常運用では
+// unbaselinedLedgerCount は 0 に保たれ、この遅延は実質的に効かない。
+const BYTE_RESERVE_CANDIDATE_BUDGET_DIVISOR = 2
+
 // perWorktreeByteReserve（1 worktree あたりの speculative 容量予約 floor 値）に上限クランプを
 // かける（Issue #348 codex-review High 指摘）。measureMainWorktreeContentBytes はメイン
 // worktree の「全体 − .git」を返すが、これは gitignored なビルド成果物・依存関係
@@ -2858,11 +2877,24 @@ function projectResidualBytes({ baselineBytes, ledgerLength, baselineLedgerCount
 // （新規着手直前に毎回実測）・`remeasureResidualBytesIfDue`（間引き付きラン中再実測）・
 // (a) 実測超過 latch が実消費を直接測って超過を検知する。クランプは「実測に基づかない
 // speculative な事前予約」の上限であり、実測ベースの fail-closed ガードを弱めない。
-// クランプ値は「1 件目の新規着手候補が予約のみで恒久停止しない」ことを保証する最大値
-// `maxResidualWorktreeBytes / reservePerNewStart` とする（呼び出し側は
-// `maxResidualWorktreeBytes > 0` の分岐内でのみ呼ぶため除数は常に正）。
+//
+// クランプ値は `maxResidualWorktreeBytes / reservePerNewStart` ではなく、それをさらに
+// BYTE_RESERVE_CANDIDATE_BUDGET_DIVISOR で割った値とする（PR #390 の初版・Cursor Bugbot High
+// "Byte reserve clamp blocks later starts" 対応）。単純に `/ reservePerNewStart` だと、
+// 1 件の新規着手候補の speculative 予約（`reservePerNewStart × クランプ値`）だけで
+// maxResidualWorktreeBytes を丸ごと使い切る値になる。これは baselineBytes（残置の実測基準）が
+// 0 の 1 件目着手には正しく収まるが、baselineBytes が正の値になった以降（残置が既に存在する・
+// ラン中実測し直しで基準が更新された等、実運用では通常の状態）は
+// `projectResidualBytes` の結果が baselineBytes 分だけ必ず上限を超え、以後の新規着手が
+// 予約起因の defer を経由せず恒久停止する（クランプの本来の目的だった「頭打ち防止」より重い
+// 回帰）。除数へ BYTE_RESERVE_CANDIDATE_BUDGET_DIVISOR を掛けることで 1 件の候補予約が
+// 消費する総量を budget の一部（既定 1/2）に抑え、残りを baselineBytes の headroom として
+// 空けておく。呼び出し側は `maxResidualWorktreeBytes > 0` の分岐内でのみ呼ぶため除数は常に正。
 function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reservePerNewStart) {
-  return Math.min(rawValue, Math.floor(maxResidualWorktreeBytes / reservePerNewStart))
+  return Math.min(
+    rawValue,
+    Math.floor(maxResidualWorktreeBytes / (reservePerNewStart * BYTE_RESERVE_CANDIDATE_BUDGET_DIVISOR)),
+  )
 }
 
 // バイト軸の台帳（ephemeralWorktrees）に未検証エントリ（worktreePath 省略・空文字によるパス
