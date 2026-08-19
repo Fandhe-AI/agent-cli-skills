@@ -4987,12 +4987,30 @@ async function remeasureResidualBytesNow() {
     // 関わらず必ず「今回失敗した」ことを反映する（monitoring 再開側が identity 比較なしで
     // 検出できるようにするため。PR #390 cursor Bugbot High / codex-review P1）。
     lastByteRemeasureOutcome = { failed: true, exceeded: false }
+    // 失敗原因の帰属を実際の失敗箇所ごとに分岐させる（Cursor Bugbot Low 指摘・Issue #404
+    // 追加指摘）。従来は kib === null に到達した経路をすべて「物理一覧フォールバック失敗」で
+    // 固定文言化しており、次の 2 ケースを誤って同じ理由文へ丸め込んでいた:
+    //   (a) フォールバック自体は成立した（fallback.ok）が、その後の du
+    //       （measureResidualWorktreeBytes）が失敗した場合 — fallbackDetail は '' のままのため
+    //       `${fallbackDetail || '不明'}` が常に「不明」を埋めてしまい、実際は一覧取得ではなく
+    //       du 側の失敗であることが分からなくなる。
+    //   (b) 未検証エントリが 0 件でフォールバックへ分岐すらしていない場合（通常経路の du 失敗）
+    //       — 「物理一覧フォールバックも失敗」という文言自体が事実と異なる（フォールバックは
+    //       試みてすらいない）。
+    // 永続化される reason はオペレーターが原因箇所（一覧取得側 / du 側）を切り分けるための
+    // 一次情報のため、実際に失敗した段階を正しく指す文言を組み立てる。
+    const failureCauseDetail = measurementFailed
+      ? `台帳に未検証エントリ ${unverifiedEphemeralCount} 件・物理一覧フォールバックも失敗: ${fallbackDetail || '不明'}`
+      : unverifiedEphemeralCount > 0
+        ? `台帳に未検証エントリ ${unverifiedEphemeralCount} 件のため物理一覧 ${targetPaths.length} 件へ` +
+          `フォールバックして測定対象は確定したが、ディスク使用量の実測（du）自体が失敗した`
+        : `台帳に未検証エントリはなく物理一覧フォールバックも発生していないが、` +
+          `ディスク使用量の実測（du）自体が失敗した`
     if (!newStartSuppressed) {
       newStartSuppressed = {
         reason:
           `残置 worktree のディスク使用量のラン中実測し直しに失敗した（対象 ${targetPaths.length} 件、` +
-          `台帳に未検証エントリ ${unverifiedEphemeralCount} 件・物理一覧フォールバックも失敗: ` +
-          `${fallbackDetail || '不明'}）。` +
+          `${failureCauseDetail}）。` +
           `perWorktreeByteReserve による見積りは開始時の下限 floor 値であり実使用量の上界ではない` +
           `ため、実測できない状態で projection のみへフォールバックすると floor を超える成長を` +
           `検知できないまま容量上限を超過し得る（fail-open防止）。ディスク枯渇防止のため以降の` +
