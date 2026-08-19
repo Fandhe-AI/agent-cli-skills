@@ -229,7 +229,7 @@ fi
 # フォールバック経路は存在しない）。local patch guard 時は、同期前 check が契約範囲を
 # 変更・stage していた可能性があるため、失敗時に PRE_SYNC_TREE で契約範囲全体を
 # 同期開始前へ復元してから停止する（部分書き込み・checker 由来の stage の残留防止）
-if ! npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes; then
+npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes || {
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     git read-tree "${PRE_SYNC_TREE}"
     git checkout -- skills-lock.json 2>/dev/null || true
@@ -241,7 +241,7 @@ if ! npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SK
     echo "エラー: npx skills add が失敗しました(fail-closed)。部分書き込みが残っている場合は skills-lock.json と .agents/skills/${SKILL_NAME}/ をリバートしてください。" >&2
   fi
   exit 1
-fi
+}
 
 echo ""
 echo "==> 更新完了。変更内容:"
