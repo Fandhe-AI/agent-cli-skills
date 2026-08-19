@@ -103,8 +103,11 @@ fi
 if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # durable patch 置き場は承認時に directory ごと stage し、却下時に index からの復元 +
   # git clean の対象になるため、未 stage の WIP・未追跡ファイルが残っていると巻き込まれて
-  # 失われる。staged のみの変更(= 本ループ内で承認済みに積み上がった分)は許容する
-  if git status --porcelain -- scripts/local-patches/ | grep -q '^.[^ ]'; then
+  # 失われる。staged のみの変更(= 本ループ内で承認済みに積み上がった分)は許容する。
+  # producer(git status)を grep -q へ直接 pipe すると、-q の早期終了による SIGPIPE で
+  # pipefail 下のパイプラインが偽になり WIP を見逃し得るため、一旦変数へ取得してから判定する
+  LOCAL_PATCHES_STATUS="$(git status --porcelain -- scripts/local-patches/)"
+  if grep -q '^.[^ ]' <<<"${LOCAL_PATCHES_STATUS}"; then
     echo "エラー: scripts/local-patches/ に未 stage の変更・未追跡ファイルがあります。承認・却下経路が巻き込むため同期しません(fail-closed)。"
     exit 1
   fi
@@ -249,18 +252,21 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   PRE_APPLY_TREE="$(git write-tree)"
   echo "PRE_APPLY_TREE=${PRE_APPLY_TREE}  # 却下・復旧(git read-tree)で使う snapshot hash。控えておくこと"
 
-  # 契約範囲外の状態 digest(変更 path 名 + tracked の worktree/index 内容 + 未追跡の内容)。
-  # path 名の集合比較だけでは「実行前から dirty だった範囲外 file への上書き・stage 状態の
-  # 変更」を見逃すため、内容まで含めた hash を apply 前後で比較する
+  # 契約範囲外の状態 digest。worktree 側は「HEAD を基底にした一時 index へ範囲外のみ
+  # git add -A」した tree hash で捉える(未追跡・削除を含む全ファイルが実 blob hash で
+  # 比較され、diff の表示文字列に依存しない = dirty なバイナリの上書きも検出する。
+  # 範囲内は HEAD のまま固定されるため apply による正当な変更では digest が動かない)。
+  # index 側は ls-files -s の blob hash で捉える(stage 状態の変更も検出する)
   OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
   outside_state() {
-    {
-      git status --porcelain -z -- "${OUTSIDE_PATHSPEC[@]}"
-      git diff -- "${OUTSIDE_PATHSPEC[@]}"
-      git diff --cached -- "${OUTSIDE_PATHSPEC[@]}"
-      git ls-files -z --others --exclude-standard -- "${OUTSIDE_PATHSPEC[@]}" \
-        | while IFS= read -r -d '' f; do git hash-object -- "$f"; done
-    } | git hash-object --stdin
+    local tmp_index_dir wt_tree idx_digest
+    tmp_index_dir="$(mktemp -d)"
+    GIT_INDEX_FILE="${tmp_index_dir}/index" git read-tree HEAD
+    GIT_INDEX_FILE="${tmp_index_dir}/index" git add -A -- "${OUTSIDE_PATHSPEC[@]}"
+    wt_tree="$(GIT_INDEX_FILE="${tmp_index_dir}/index" git write-tree)"
+    rm -rf "${tmp_index_dir}"
+    idx_digest="$(git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" | git hash-object --stdin)"
+    echo "${wt_tree}:${idx_digest}"
   }
   PRE_OUTSIDE="$(outside_state)"
 

@@ -135,8 +135,11 @@ fi
 if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   # durable patch 置き場は承認時に directory ごと stage し、却下時に index からの復元 +
   # git clean の対象になるため、未 stage の WIP・未追跡ファイルが残っていると巻き込まれて
-  # 失われる。staged のみの変更(= 呼び出し元ループで承認済みに積み上がった分)は許容する
-  if git status --porcelain -- scripts/local-patches/ | grep -q '^.[^ ]'; then
+  # 失われる。staged のみの変更(= 呼び出し元ループで承認済みに積み上がった分)は許容する。
+  # producer(git status)を grep -q へ直接 pipe すると、-q の早期終了による SIGPIPE で
+  # pipefail 下のパイプラインが偽になり WIP を見逃し得るため、一旦変数へ取得してから判定する
+  LOCAL_PATCHES_STATUS="$(git status --porcelain -- scripts/local-patches/)"
+  if grep -q '^.[^ ]' <<<"${LOCAL_PATCHES_STATUS}"; then
     echo "エラー: scripts/local-patches/ に未 stage の変更・未追跡ファイルがあります。承認・却下経路が巻き込むため同期を開始しません(fail-closed)。" >&2
     exit 1
   fi
@@ -175,7 +178,9 @@ git diff -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
 # 通常プレビュー(当該スキルのみ)と、local patch guard 時の最終確認(当該スキル +
 # scripts/local-patches/)の両方から呼ばれ、同一の表示・fail-closed 挙動を共有する。
 UNTRACKED_LIST_FILE=""
-trap 'rm -f "${UNTRACKED_LIST_FILE}"' EXIT
+# 変数が空(初回呼び出し前)のまま rm へ渡すと、-f でも「空の operand」エラーで
+# 非 0 終了し set -e で停止するため、空値は rm 自体を実行しない
+trap '[[ -z "${UNTRACKED_LIST_FILE}" ]] || rm -f "${UNTRACKED_LIST_FILE}"' EXIT
 preview_untracked() {
 UNTRACKED_COUNT=0
 echo ""
@@ -186,7 +191,7 @@ echo ""
 # git add で承認してしまう（このスクリプトが防ごうとしている非対称そのもの）。
 # 通常のコマンド置換で一時ファイルへ書き出し、`if ! ...` で明示的に終了コードを検査する
 # ことで fail-closed にする。
-rm -f "${UNTRACKED_LIST_FILE}"
+if [[ -n "${UNTRACKED_LIST_FILE}" ]]; then rm -f "${UNTRACKED_LIST_FILE}"; fi
 UNTRACKED_LIST_FILE="$(mktemp)"
 if ! git ls-files -z --others --exclude-standard -- "$@" > "${UNTRACKED_LIST_FILE}"; then
   echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。内容未確認のまま承認できてしまうため中止します。" >&2
@@ -244,19 +249,21 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   PRE_APPLY_TREE="$(git write-tree)"
   echo "PRE_APPLY_TREE=${PRE_APPLY_TREE}  # 却下・復旧(git read-tree)で使う snapshot hash。控えておくこと"
 
-  # 契約範囲(skills-lock.json / 当該スキル / durable patch)外の状態 digest
-  # (変更 path 名 + tracked の worktree/index 内容 + 未追跡の内容)。path 名の集合比較
-  # だけでは「実行前から dirty だった範囲外 file への上書き・stage 状態の変更」を
-  # 見逃すため、内容まで含めた hash を apply 前後で比較する
+  # 契約範囲(skills-lock.json / 当該スキル / durable patch)外の状態 digest。
+  # worktree 側は「HEAD を基底にした一時 index へ範囲外のみ git add -A」した tree hash で
+  # 捉える(未追跡・削除を含む全ファイルが実 blob hash で比較され、diff の表示文字列に
+  # 依存しない = dirty なバイナリの上書きも検出する。範囲内は HEAD のまま固定されるため
+  # apply による正当な変更では digest が動かない)。index 側は ls-files -s の blob hash で捉える
   OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
   outside_state() {
-    {
-      git status --porcelain -z -- "${OUTSIDE_PATHSPEC[@]}"
-      git diff -- "${OUTSIDE_PATHSPEC[@]}"
-      git diff --cached -- "${OUTSIDE_PATHSPEC[@]}"
-      git ls-files -z --others --exclude-standard -- "${OUTSIDE_PATHSPEC[@]}" \
-        | while IFS= read -r -d '' f; do git hash-object -- "$f"; done
-    } | git hash-object --stdin
+    local tmp_index_dir wt_tree idx_digest
+    tmp_index_dir="$(mktemp -d)"
+    GIT_INDEX_FILE="${tmp_index_dir}/index" git read-tree HEAD
+    GIT_INDEX_FILE="${tmp_index_dir}/index" git add -A -- "${OUTSIDE_PATHSPEC[@]}"
+    wt_tree="$(GIT_INDEX_FILE="${tmp_index_dir}/index" git write-tree)"
+    rm -rf "${tmp_index_dir}"
+    idx_digest="$(git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" | git hash-object --stdin)"
+    echo "${wt_tree}:${idx_digest}"
   }
   PRE_OUTSIDE="$(outside_state)"
 
