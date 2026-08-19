@@ -152,6 +152,13 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
     echo "${wt_tree}:${idx_digest}"
   }
   PRE_OUTSIDE="$(outside_state)"
+  echo "PRE_OUTSIDE=${PRE_OUTSIDE}  # 範囲外検証の基準 digest。Step 5.5 まで同一 shell で保持する(失われたら再設定に使う)"
+
+  # checker の「初回実行より前」に index snapshot を取得する。同期前 check(check mode)も
+  # 契約上、契約範囲(当該スキル / skills-lock.json / durable patch)を変更・stage し得るため、
+  # npx 失敗時はこの snapshot で契約範囲全体を同期開始前へ戻す(Step 4 の npx 失敗時リバート参照)
+  PRE_SYNC_TREE="$(git write-tree)"
+  echo "PRE_SYNC_TREE=${PRE_SYNC_TREE}  # npx 失敗時の契約範囲復元に使う snapshot hash"
 
   # checker の「すべての」実行(同期前 check / Step 5.5 の apply・最終 check)の直後に、
   # 実行結果に関わらず範囲外 digest と checker 自身の blob hash を再検証する。範囲外を
@@ -209,9 +216,21 @@ npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}"
   # 「追跡対象なし」（初回具現化・untracked のみの書き込み時）で pathspec エラーになると
   # コマンド全体が失敗し、もう一方（skills-lock.json）も復元されないまま continue してしまう。
   # 必ず1コマンド1パスで分離し、一方の失敗が他方の復元を阻害しないようにする。
-  git checkout -- skills-lock.json
-  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-  git clean -fd ".agents/skills/${SKILL_NAME}/"
+  if [[ -f scripts/check-skill-local-patches.sh ]]; then
+    # checker を持つリポジトリでは、同期前 check(check mode)が契約範囲(durable patch 含む)を
+    # 変更・stage している可能性がある。Step 4 冒頭で取得した PRE_SYNC_TREE で index を
+    # 丸ごと同期開始前へ戻してから(前スキルの承認済み積上げは snapshot に含まれるため保持)、
+    # 契約範囲の worktree を復元する
+    git read-tree "${PRE_SYNC_TREE}"
+    git checkout -- skills-lock.json 2>/dev/null || true
+    git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+    git checkout -- scripts/local-patches/ 2>/dev/null || true
+    git clean -fd ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
+  else
+    git checkout -- skills-lock.json
+    git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+    git clean -fd ".agents/skills/${SKILL_NAME}/"
+  fi
   echo "警告: 固定版を外した再実行はせず、当該スキルの変更をリバートして skip します。"
   continue
 }
@@ -309,6 +328,13 @@ fi
 
 ```bash
 if [[ -f scripts/check-skill-local-patches.sh ]]; then
+  # Step 4 と同一 shell セッションの前提を機械検証する。セッションが切れて失われた場合は、
+  # outside_state / verify_outside_and_checker(いずれも純粋関数)を Step 4 のとおり再定義し、
+  # PRE_OUTSIDE / CHECKER_APPROVED_HASH には Step 4 が表示・承認した値を設定してから進む。
+  # 値が不明なまま進んではならない(fail-closed で中止し、Step 6 の却下手順で戻す)
+  : "${PRE_OUTSIDE:?Step 4 で表示された基準 digest を設定してから実行する}"
+  : "${CHECKER_APPROVED_HASH:?ユーザー承認済みの checker blob hash を設定してから実行する}"
+
   # 却下・失敗時の厳密復元用に、apply 前の index(= 承認済み積上げ)を tree として保存する。
   # 却下手順(Step 6 の checker 版)は git read-tree でこの snapshot へ index を丸ごと戻すため、
   # apply が stage した変更だけが正確に取り除かれ、承認済みの他スキル分は保持される

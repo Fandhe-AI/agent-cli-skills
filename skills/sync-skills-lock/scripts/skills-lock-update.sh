@@ -203,6 +203,11 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     return 0
   }
 
+  # checker の「初回実行より前」に index snapshot を取得する。同期前 check(check mode)も
+  # 契約上、契約範囲(当該スキル / skills-lock.json / durable patch)を変更・stage し得るため、
+  # npx 失敗時はこの snapshot で契約範囲全体を同期開始前へ戻す
+  PRE_SYNC_TREE="$(git write-tree)"
+
   echo "==> 同期前の local patch 検証(check)"
   pre_check_rc=0
   bash scripts/check-skill-local-patches.sh || pre_check_rc=$?
@@ -220,9 +225,23 @@ fi
 # --yes（1つ目）は npx 自体のインストール確認プロンプトを非対話でスキップする
 # ものであり、skills CLI へ渡す --yes（末尾）とは別物（位置で区別される）。
 # skills@${SKILLS_CLI_VERSION} で exact 版のみ解決させ、該当版が存在しない・
-# レジストリ到達不能の場合は npx が非ゼロ終了し set -euo pipefail で即停止する
-# （fail-closed。最新版への暗黙フォールバック経路は存在しない）。
-npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes
+# レジストリ到達不能の場合は npx が非ゼロ終了する（fail-closed。最新版への暗黙
+# フォールバック経路は存在しない）。local patch guard 時は、同期前 check が契約範囲を
+# 変更・stage していた可能性があるため、失敗時に PRE_SYNC_TREE で契約範囲全体を
+# 同期開始前へ復元してから停止する（部分書き込み・checker 由来の stage の残留防止）
+if ! npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --yes; then
+  if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
+    git read-tree "${PRE_SYNC_TREE}"
+    git checkout -- skills-lock.json 2>/dev/null || true
+    git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+    git checkout -- scripts/local-patches/ 2>/dev/null || true
+    git clean -fd ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
+    echo "エラー: npx skills add が失敗したため、契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元して停止します(fail-closed)。" >&2
+  else
+    echo "エラー: npx skills add が失敗しました(fail-closed)。部分書き込みが残っている場合は skills-lock.json と .agents/skills/${SKILL_NAME}/ をリバートしてください。" >&2
+  fi
+  exit 1
+fi
 
 echo ""
 echo "==> 更新完了。変更内容:"
