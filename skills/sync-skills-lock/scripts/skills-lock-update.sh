@@ -127,6 +127,28 @@ fi
 LOCAL_PATCH_GUARD=false
 if [[ -f scripts/check-skill-local-patches.sh ]]; then
   LOCAL_PATCH_GUARD=true
+  # checker は導入先リポジトリが配置する実行可能コードであり、「存在するだけ」で実行しては
+  # ならない(未信頼な checkout・未レビュー PR の任意コードが、差分提示・承認より前に
+  # ユーザー権限で走る経路になる)。実行は次の両方を満たす場合に限る(fail-closed):
+  #   (1) HEAD に commit 済みで、worktree の内容が HEAD の blob と一致する
+  #       (未追跡・未コミット変更の checker は拒否 = レビューを経ていないコードを実行しない)
+  #   (2) ユーザーが由来(git log -1)と内容(git show)をレビューし、その blob hash を
+  #       CHECKER_APPROVED_HASH で明示承認している(承認は hash 単位。内容が変われば再承認)
+  # なお checker 自体は契約範囲外 path のため、apply がこれを書き換えた場合は
+  # outside_state の前後 digest 比較でも fail-closed に検出される
+  CHECKER_WORKTREE_HASH="$(git hash-object -- scripts/check-skill-local-patches.sh)"
+  CHECKER_HEAD_HASH="$(git rev-parse HEAD:scripts/check-skill-local-patches.sh 2>/dev/null || true)"
+  if [[ -z "${CHECKER_HEAD_HASH}" || "${CHECKER_WORKTREE_HASH}" != "${CHECKER_HEAD_HASH}" ]]; then
+    echo "エラー: scripts/check-skill-local-patches.sh が HEAD に commit 済みの内容と一致しません(未 commit・未追跡・未コミット変更)。任意コード実行を防ぐため同期を開始しません(fail-closed)。" >&2
+    exit 1
+  fi
+  if [[ "${CHECKER_APPROVED_HASH:-}" != "${CHECKER_WORKTREE_HASH}" ]]; then
+    echo "エラー: checker はユーザーがレビュー・承認した内容のみ実行できます。由来と内容を確認のうえ、blob hash を明示して再実行してください(fail-closed):" >&2
+    echo "  git log -1 -- scripts/check-skill-local-patches.sh   # 由来(最終 commit)の確認" >&2
+    echo "  git show HEAD:scripts/check-skill-local-patches.sh   # 実行される内容の確認" >&2
+    echo "  CHECKER_APPROVED_HASH=${CHECKER_WORKTREE_HASH} $0 ${SKILL_NAME} ${SOURCE_REPO}" >&2
+    exit 1
+  fi
 elif [[ -f .agents/skills/LOCAL-PATCHES.md ]]; then
   echo "エラー: .agents/skills/LOCAL-PATCHES.md があるのに scripts/check-skill-local-patches.sh がありません。local patch を検証できないため同期を開始しません(fail-closed)。" >&2
   exit 1

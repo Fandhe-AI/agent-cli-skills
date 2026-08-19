@@ -25,7 +25,7 @@ model: sonnet
 - ルート直下の `skills-lock.json` が存在すること
 - **実行前に `skills-lock.json` に未コミットの変更がないこと**（ステージ済み・未ステージ問わず）。本スキルの実行中に発生する変更は sync 由来のみとなり、`git add skills-lock.json` で全体をステージしても無関係な変更が混入しない
 - **対象スキルの `.agents/skills/<name>/` に未コミット変更がないこと**。`npx skills add` は `.agents/skills/<name>/` を upstream の最新版で上書きするため、そのディレクトリに WIP が存在すると即座に失われる。`git checkout` で戻せるのは「最後にコミットされた状態」のみであり、npx 実行前の未コミット編集は復元できない。**未追跡ファイルとして存在する WIP も対象**であり、`git status --porcelain` で検出する
-- **消費側リポジトリが commit 済み local patch を持つ場合**: vendored skill（`.agents/skills/` 配下）へ commit 済みの local patch を適用しているリポジトリは、その検証・再適用の入口として repository-owned checker `scripts/check-skill-local-patches.sh`（無引数 = check / `apply` の 2 モード）と台帳 `.agents/skills/LOCAL-PATCHES.md` を持つ。commit 済み patch は上記 clean ガードでは保護できないため、checker が存在する場合は同期の前後（Step 4 の pre-check・Step 5.5 の apply + 最終検証）での成功が必須（非 0 は fail-closed で同期・stage しない）。台帳があるのに checker が無い状態も検証不能として fail-closed で停止する。checker（apply）の書き込み先は当該スキルディレクトリ・`skills-lock.json`・durable patch 置き場 `scripts/local-patches/` に限る契約とし、範囲外の変更は Step 5.5 の機械検証で fail-closed に検出する
+- **消費側リポジトリが commit 済み local patch を持つ場合**: vendored skill（`.agents/skills/` 配下）へ commit 済みの local patch を適用しているリポジトリは、その検証・再適用の入口として repository-owned checker `scripts/check-skill-local-patches.sh`（無引数 = check / `apply` の 2 モード）と台帳 `.agents/skills/LOCAL-PATCHES.md` を持つ。commit 済み patch は上記 clean ガードでは保護できないため、checker が存在する場合は同期の前後（Step 4 の pre-check・Step 5.5 の apply + 最終検証）での成功が必須（非 0 は fail-closed で同期・stage しない）。台帳があるのに checker が無い状態も検証不能として fail-closed で停止する。checker（apply）の書き込み先は当該スキルディレクトリ・`skills-lock.json`・durable patch 置き場 `scripts/local-patches/` に限る契約とし、範囲外の変更は Step 5.5 の機械検証で fail-closed に検出する。checker は消費側が配置する実行可能コードのため「存在するだけ」では実行せず、HEAD に commit 済みで worktree と一致し、かつユーザーへ由来・内容を提示して blob hash 単位の明示承認を得た場合のみ実行する（Step 4 で機械検証）
 
 ## フロー
 
@@ -101,6 +101,23 @@ fi
 # checker 非 0、および台帳があるのに checker が無い状態は、fail-closed で npx を
 # 実行しない(同期を開始しない)
 if [[ -f scripts/check-skill-local-patches.sh ]]; then
+  # checker は導入先リポジトリが配置する実行可能コードであり、「存在するだけ」で実行しては
+  # ならない(未信頼な checkout・未レビュー PR の任意コードが、差分提示・承認より前に
+  # ユーザー権限で走る経路になる)。実行前に次の両方を満たすことを確認する(fail-closed):
+  #   (1) HEAD に commit 済みで、worktree の内容が HEAD の blob と一致する
+  #       (未追跡・未コミット変更の checker は拒否 = レビューを経ていないコードを実行しない)
+  #   (2) ユーザーへ由来と内容を提示し、この blob hash に対する実行の明示承認を得ている
+  #       (承認は hash 単位で本フロー全体に有効。内容が変われば再承認。
+  #        提示: git log -1 -- scripts/check-skill-local-patches.sh /
+  #              git show HEAD:scripts/check-skill-local-patches.sh)
+  CHECKER_HASH="$(git hash-object -- scripts/check-skill-local-patches.sh)"
+  if [[ "${CHECKER_HASH}" != "$(git rev-parse HEAD:scripts/check-skill-local-patches.sh 2>/dev/null || true)" ]]; then
+    echo "エラー: checker が HEAD に commit 済みの内容と一致しません(未 commit・未追跡・未コミット変更)。任意コード実行を防ぐため同期しません(fail-closed)。"
+    exit 1
+  fi
+  # ここでユーザー承認(上記 (2))が未取得なら、取得してから先へ進む。未承認のまま
+  # checker を実行してはならない
+
   # durable patch 置き場は承認時に directory ごと stage し、却下時に index からの復元 +
   # git clean の対象になるため、未 stage の WIP・未追跡ファイルが残っていると巻き込まれて
   # 失われる。staged のみの変更(= 本ループ内で承認済みに積み上がった分)は許容する。
