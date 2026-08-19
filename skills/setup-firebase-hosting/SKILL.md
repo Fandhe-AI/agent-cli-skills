@@ -244,7 +244,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -291,7 +291,7 @@ jobs:
           # test -f dist/static/wasm/<name>_bg.wasm || { echo "wasm がありません"; exit 1; }
 
       - name: 成果物をアップロード
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
           path: dist/
@@ -317,12 +317,12 @@ jobs:
       # この job は main（信頼済み revision）でのみ実行される。
       # checkout はデフォルトで作業ディレクトリをクリーンにするので、必ず
       # download-artifact より前に実行する。
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
       - name: 成果物をダウンロード
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
           path: dist/
@@ -331,7 +331,7 @@ jobs:
         # job 側の if と重複するが、防御多層として step 側にも ref ゲートを
         # 明示する（job の条件が編集で緩められても live 直行を防ぐ）。
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        uses: FirebaseExtended/action-hosting-deploy@500ac625ca2dd40cbd15f7659af953801858032a # v0
+        uses: FirebaseExtended/action-hosting-deploy@500ac625ca2dd40cbd15f7659af953801858032a # v0.11.0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}

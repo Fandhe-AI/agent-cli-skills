@@ -44,7 +44,11 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   使う**（2026-08-18・オーナー判断。pin の手動更新コストを避けるための組織方針であり、
   `@latest` への統一・SHA pin の除去を指摘しない）。`latest` は上流の
   `move-latest-tag.yml` が main への push ごとに付け替え、その鮮度は本リポの
-  `update-external-drift.yml`（軸 2）が日次で実測する
+  `update-external-drift.yml`（軸 2）が日次で実測する。**SHA pin の行末注記は由来を
+  正確に示す**（2026-08-19・オーナー判断）: リリースタグから導出した SHA には由来タグを
+  `# vX.Y.Z`（SHA と一致する正確なリリースタグ）で注記し、`# v4` 等の可動メジャータグや
+  `# main` をタグ由来 SHA に書かない（誤った更新方針の示唆になる）。main 追従の SHA pin
+  のみ `# main` とする。`@latest` 参照は ref 自体が由来を示すため注記不要
 - **承認境界の後退（P1）**: implement-issue の「計画承認後に実装」、Issue 起票・
   破壊的操作前のユーザー確認など、既存スキルが持つ人間承認ゲートを外す変更。
   **例外基準（一般則）**: opt-in の自動マージ経路は、差分とスキル文書から**独立して
