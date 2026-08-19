@@ -91,9 +91,20 @@ fi
 # 本スクリプトは既に python3 に依存している（変更前 computedHash の表示）ため、
 # 同じ依存で種別・モード・内容を単一の signature へまとめる。通常ファイルは
 # 内容の sha256、シンボリックリンクはリンク先文字列の sha256、それ以外
-# （ディレクトリ・gitlink）は配下の相対パス・パーミッション・サイズ・mtime を
-# 正規化して集約した sha256 とする。stat コマンドの出力書式は環境（BSD/GNU）で
-# 異なるため、シェルの `stat` は使わず python3 の os.lstat に統一する。
+# （ディレクトリ・gitlink）は配下の各エントリを再帰的に種別判定し、通常ファイルは
+# 内容の sha256・シンボリックリンクはリンク先文字列の sha256（トップレベルと同じ
+# 規則を再帰適用）・パーミッションを相対パスとあわせて正規化して集約した sha256
+# とする。npx が同サイズ・同 mtime のまま内容だけ書き換えて配下ファイルを上書きする
+# ケース（PR #412 P1 指摘: サイズ・mtime のみでは検出できない）を、内容ハッシュで
+# 検出する。gitlink（未初期化 submodule 等、os.walk がそもそも降りられない特殊な
+# 空ディレクトリ相当）は配下が存在せず entries が空集合のままになり得るが、
+# kind（S_IFMT の値。gitlink はディレクトリと同じ S_IFDIR で lstat される）と
+# 空集合の sha256 は既存の「ディレクトリの空フォルダ」と区別が付かない。この
+# 区別はスコープ外書き込み検出という用途では不要（gitlink 配下の変化はどのみち
+# git 側の別コミット参照で管理され、このシグネチャの役割は「npx 実行前後で
+# このパス配下が変化したか」の検出のみで足りる）。stat コマンドの出力書式は
+# 環境（BSD/GNU）で異なるため、シェルの `stat` は使わず python3 の os.lstat に
+# 統一する。
 path_state() {
   local path="$1"
   python3 - "${path}" <<'PYEOF'
@@ -120,8 +131,12 @@ elif stat.S_ISREG(st.st_mode):
                 break
             h.update(chunk)
 else:
-    # ディレクトリ・gitlink 等。配下の相対パス・パーミッション・サイズ・mtime を
-    # ソートして正規化し、走査順に依存せず決定的な signature にする。
+    # ディレクトリ・gitlink 等。配下の各エントリを相対パス・パーミッション・
+    # 内容（種別に応じたハッシュ）でソートして正規化し、走査順に依存せず
+    # 決定的な signature にする。os.walk はデフォルトでシンボリックリンクの
+    # 指すディレクトリへは降りない（followlinks=False）ため、配下のシンボリック
+    # リンク自体は filenames 経由で列挙され、リンク先ディレクトリの中身が
+    # 二重に取り込まれることはない。
     entries = []
     for dirpath, dirnames, filenames in os.walk(path):
         dirnames.sort()
@@ -130,7 +145,25 @@ else:
             rel = os.path.relpath(p, path)
             try:
                 fst = os.lstat(p)
-                entries.append(f"{rel}:{oct(stat.S_IMODE(fst.st_mode))}:{fst.st_size}:{fst.st_mtime_ns}")
+                fmode = oct(stat.S_IMODE(fst.st_mode))
+                if stat.S_ISLNK(fst.st_mode):
+                    content_hash = hashlib.sha256(
+                        os.readlink(p).encode("utf-8", "surrogateescape")
+                    ).hexdigest()
+                    entries.append(f"{rel}:{fmode}:link:{content_hash}")
+                elif stat.S_ISREG(fst.st_mode):
+                    fh = hashlib.sha256()
+                    with open(p, "rb") as inner:
+                        while True:
+                            chunk = inner.read(1 << 20)
+                            if not chunk:
+                                break
+                            fh.update(chunk)
+                    entries.append(f"{rel}:{fmode}:reg:{fh.hexdigest()}")
+                else:
+                    # 配下のさらに特殊なファイル種別（デバイスファイル等）は
+                    # 内容ハッシュが定義できないため種別のみ記録する。
+                    entries.append(f"{rel}:{fmode}:other")
             except OSError as e:
                 entries.append(f"{rel}:ERROR:{e}")
     entries.sort()

@@ -134,15 +134,22 @@ exit 0
   chmodSync(join(binDir, 'npx'), 0o755)
 
   // tee スタブ。既定は `command -p tee`（ユーザー PATH に依存しない標準ユーティリティ
-  // 探索）へ委譲して実物と同じ動作にする。TEST_NPX_SCENARIO=='tee-failure' のときのみ、
-  // 入力を破棄したうえで非ゼロ終了し、ディスク容量不足等での tee 失敗を再現する
-  // （Issue #410 CI 失敗指摘の回帰）。
+  // 探索）で実物 tee の絶対パスを解決してから exec する（実物と同じ動作）。
+  // TEST_NPX_SCENARIO=='tee-failure' のときのみ、入力を破棄したうえで非ゼロ終了し、
+  // ディスク容量不足等での tee 失敗を再現する（Issue #410 CI 失敗指摘の回帰）。
+  // `exec command -p tee "$@"` は使わない: POSIX では `command` は special builtin
+  // ではないため、`exec` に builtin 名をそのまま渡すと厳密な POSIX 準拠シェルは
+  // それを外部実行ファイル名として PATH 探索し `exec: command: not found` で失敗する
+  // （bash は非 POSIX モードでは慣習的に許容するが、CI 環境で実際に発生した回帰）。
+  // `command -v` で実物 tee の絶対パスを先に文字列として解決し、その絶対パスを
+  // exec することで builtin 名を exec の引数に渡す経路自体を無くす。
   const teeBody = `#!/usr/bin/env bash
 if [[ "\${TEST_NPX_SCENARIO:-}" == "tee-failure" ]]; then
   cat > /dev/null
   exit 1
 fi
-exec command -p tee "\$@"
+REAL_TEE="\$(command -p -v tee)"
+exec "\${REAL_TEE}" "\$@"
 `
   writeFileSync(join(binDir, 'tee'), teeBody)
   chmodSync(join(binDir, 'tee'), 0o755)

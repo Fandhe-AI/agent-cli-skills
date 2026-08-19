@@ -109,8 +109,12 @@ SKILLS_CLI_VERSION="1.5.22"   # scripts/skills-lock-update.sh と同一値。更
 # （本スキルは既に file CLI 等の前提を持つが、python3 は主要 Linux / macOS に
 # 標準搭載されている）で種別・モード・内容を単一の signature へまとめる。
 # 通常ファイルは内容の sha256、シンボリックリンクはリンク先文字列の sha256、
-# それ以外（ディレクトリ・gitlink）は配下の相対パス・パーミッション・サイズ・
-# mtime を正規化して集約した sha256 とする。stat コマンドの出力書式は環境
+# それ以外（ディレクトリ・gitlink）は配下の各エントリを再帰的に種別判定し、
+# 通常ファイルは内容の sha256・シンボリックリンクはリンク先文字列の sha256
+# （トップレベルと同じ規則を再帰適用）・パーミッションを相対パスとあわせて
+# 正規化して集約した sha256 とする。npx が同サイズ・同 mtime のまま内容だけ
+# 書き換えて配下ファイルを上書きするケース（PR #412 P1 指摘: サイズ・mtime のみ
+# では検出できない）を、内容ハッシュで検出する。stat コマンドの出力書式は環境
 # （BSD/GNU）で異なるため、シェルの `stat` は使わず python3 の os.lstat に統一する。
 path_state() {
   local path="$1"
@@ -138,8 +142,12 @@ elif stat.S_ISREG(st.st_mode):
                 break
             h.update(chunk)
 else:
-    # ディレクトリ・gitlink 等。配下の相対パス・パーミッション・サイズ・mtime を
-    # ソートして正規化し、走査順に依存せず決定的な signature にする。
+    # ディレクトリ・gitlink 等。配下の各エントリを相対パス・パーミッション・
+    # 内容（種別に応じたハッシュ）でソートして正規化し、走査順に依存せず
+    # 決定的な signature にする。os.walk はデフォルトでシンボリックリンクの
+    # 指すディレクトリへは降りない（followlinks=False）ため、配下のシンボリック
+    # リンク自体は filenames 経由で列挙され、リンク先ディレクトリの中身が
+    # 二重に取り込まれることはない。
     entries = []
     for dirpath, dirnames, filenames in os.walk(path):
         dirnames.sort()
@@ -148,7 +156,25 @@ else:
             rel = os.path.relpath(p, path)
             try:
                 fst = os.lstat(p)
-                entries.append(f"{rel}:{oct(stat.S_IMODE(fst.st_mode))}:{fst.st_size}:{fst.st_mtime_ns}")
+                fmode = oct(stat.S_IMODE(fst.st_mode))
+                if stat.S_ISLNK(fst.st_mode):
+                    content_hash = hashlib.sha256(
+                        os.readlink(p).encode("utf-8", "surrogateescape")
+                    ).hexdigest()
+                    entries.append(f"{rel}:{fmode}:link:{content_hash}")
+                elif stat.S_ISREG(fst.st_mode):
+                    fh = hashlib.sha256()
+                    with open(p, "rb") as inner:
+                        while True:
+                            chunk = inner.read(1 << 20)
+                            if not chunk:
+                                break
+                            fh.update(chunk)
+                    entries.append(f"{rel}:{fmode}:reg:{fh.hexdigest()}")
+                else:
+                    # 配下のさらに特殊なファイル種別（デバイスファイル等）は
+                    # 内容ハッシュが定義できないため種別のみ記録する。
+                    entries.append(f"{rel}:{fmode}:other")
             except OSError as e:
                 entries.append(f"{rel}:ERROR:{e}")
     entries.sort()
@@ -488,7 +514,7 @@ EOF
 2 層で防ぐ:
 
 1. **一次防御（`--agent universal`）**: Step 4 の npx 呼び出しに `--agent universal` を付け、書き込み先を union ストア（`.agents/skills/<name>/`）と `skills-lock.json` のみへ限定する。個別 agent 指定（`claude-code` 等）は `.agents/skills/` を経由せず対象ツリーへ直接コピーしレイアウトを変えてしまうため使わない
-2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、その各パスの種別・パーミッション・内容を `path_state`（python3。通常ファイルは内容の sha256、シンボリックリンクはリンク先の sha256、ディレクトリ・gitlink は配下の相対パス・パーミッション・サイズ・mtime を集約した sha256）で1本のシグネチャ化したものも前後で比較する（`filter_out_of_scope` がステータス+パスのレコードと状態シグネチャを同時に出力する）。ステータス+パスの記録だけでなく状態シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
+2. **多層防御（実行前後スナップショット比較 + 状態シグネチャ比較）**: Step 4 の npx 実行直前・直後に `git status --porcelain -z -uall` でリポジトリ全体のスナップショットを取り、スコープ内（`skills-lock.json` / `.agents/skills/<name>/`）を除いた差分を比較する。加えて、その各パスの種別・パーミッション・内容を `path_state`（python3。通常ファイルは内容の sha256、シンボリックリンクはリンク先の sha256、ディレクトリ・gitlink は配下の各エントリを再帰的に相対パス・パーミッション・内容ハッシュで集約した sha256）で1本のシグネチャ化したものも前後で比較する（`filter_out_of_scope` がステータス+パスのレコードと状態シグネチャを同時に出力する）。ステータス+パスの記録だけでなく状態シグネチャも一致して初めて「変化なし」と判定し、どちらかに差分があれば `--agent universal` が抑止しているはずの書き込みが発生したことを意味し、スコープ内をリバートしたうえで `exit 1` によりループ全体を停止する。**他の skip 分岐（`continue`）とは異なり、この検出はループを継続しない**: スコープ外の汚染は自動リバートされないため、続行すると最終報告が「clean」でも実際は dirty 残留となり、この issue が問題視する状態そのものになるため。停止時点までに承認・stage 済みの他スキル分は index に残ったままになるので、操作者は `git status` で確認したうえで、必要な分だけ `git commit` するか `git reset` で戻すかを判断する
 
 **検出の限界**: `git status --porcelain` は `.gitignore` 対象を報告しないため、ignore されたパスへの書き込みは検出できない（承認経路の `git add`（`-f` なし）が ignore 対象を取り込まないのと対称であり、この非対称自体は許容する）。状態シグネチャ比較により、npx 実行前から M（追跡・変更済み）や ??（未追跡）だったスコープ外ファイルをステータス文字列・パスとも変えずに内容・パーミッションだけ上書きするケース、およびディレクトリ・gitlink（未初期化 submodule 含む）が異なる状態へ書き換わるケースも検出できる。残る限界は、ファイルの mtime を秒未満まで保持しない環境等での稀な取り違え（sha256 が内容・種別・サイズを含むため実質的なリスクは小さい）と、上記の `.gitignore` 対象の非対称のみである。この残余リスクは、一次防御（`--agent universal`）が書き込み自体を抑止していることと合わせて小さいと判断する。
 
