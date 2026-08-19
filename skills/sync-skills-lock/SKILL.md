@@ -115,8 +115,13 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
     echo "エラー: checker が HEAD に commit 済みの内容と一致しません(未 commit・未追跡・未コミット変更)。任意コード実行を防ぐため同期しません(fail-closed)。"
     exit 1
   fi
-  # ここでユーザー承認(上記 (2))が未取得なら、取得してから先へ進む。未承認のまま
-  # checker を実行してはならない
+  echo "CHECKER_HASH=${CHECKER_HASH}  # 実行承認の対象となる blob hash。由来・内容と合わせてユーザーへ提示する"
+  # ユーザー承認(上記 (2))を得たら、承認された hash を CHECKER_APPROVED_HASH に設定する。
+  # 承認は変数の設定によってのみ成立し、未設定・不一致のまま checker を実行する経路は無い
+  if [[ "${CHECKER_APPROVED_HASH:-}" != "${CHECKER_HASH}" ]]; then
+    echo "エラー: checker はユーザー承認済みの blob hash(CHECKER_APPROVED_HASH)と一致する場合のみ実行できます。承認を得てから再実行してください(fail-closed)。"
+    exit 1
+  fi
 
   # durable patch 置き場は承認時に directory ごと stage し、却下時に index からの復元 +
   # git clean の対象になるため、未 stage の WIP・未追跡ファイルが残っていると巻き込まれて
@@ -287,24 +292,38 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   }
   PRE_OUTSIDE="$(outside_state)"
 
+  # checker の各実行の「直後」に、実行結果(成功・失敗)に関わらず範囲外 digest と
+  # checker 自身の blob hash を再検証する。apply が範囲外を書き換えて非 0 終了した場合や、
+  # checker 自身を未承認コードへ置換した場合を、次の実行・停止より前に検出するため
+  verify_outside_and_checker() {
+    if [[ "$(git hash-object -- scripts/check-skill-local-patches.sh 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
+      echo "エラー: checker 自身が書き換えられました。未承認コードのため以後実行しません(fail-closed)。"
+      return 1
+    fi
+    if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
+      echo "エラー: checker が契約範囲外の path を変更しました(fail-closed)。"
+      echo "git status --porcelain で範囲外の変更を特定し、tracked は git restore -- <path> / index は git restore --staged -- <path> で手動復旧してください(Step 6 の却下手順は契約範囲しか戻しません)。checker 側の修正も必要です。"
+      return 1
+    fi
+    return 0
+  }
+
   # local patch の再適用(--3way fallback や index 復元により、patch 対象 file や durable patch が
-  # stage されることがある)。非 0 は fail-closed で停止する
-  if ! bash scripts/check-skill-local-patches.sh apply; then
+  # stage されることがある)
+  apply_rc=0
+  bash scripts/check-skill-local-patches.sh apply || apply_rc=$?
+  if ! verify_outside_and_checker; then exit 1; fi
+  if [[ "${apply_rc}" -ne 0 ]]; then
     echo "エラー: local patch の再適用に失敗しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_APPLY_TREE})で同期前へ戻してください(fail-closed)。"
     exit 1
   fi
 
-  # 再適用後の最終検証(worktree / index / durable patch)。非 0 は fail-closed で停止する
-  if ! bash scripts/check-skill-local-patches.sh; then
+  # 再適用後の最終検証(worktree / index / durable patch)
+  check_rc=0
+  bash scripts/check-skill-local-patches.sh || check_rc=$?
+  if ! verify_outside_and_checker; then exit 1; fi
+  if [[ "${check_rc}" -ne 0 ]]; then
     echo "エラー: 再適用後の最終検証に失敗しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_APPLY_TREE})で同期前へ戻してください(fail-closed)。"
-    exit 1
-  fi
-
-  # 変更集合が契約範囲に収まることを検証する。範囲外の変更(内容・stage 状態を含む)が
-  # 新たに生じていれば、内容を提示しないまま後続 commit に混入し得るため fail-closed で
-  # 停止する(実行前から存在した無関係な dirty は前後の digest が同一なら相殺される)
-  if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
-    echo "エラー: checker が契約範囲外の path を変更しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_APPLY_TREE})で戻し、checker 側を修正してください(fail-closed)。"
     exit 1
   fi
 fi

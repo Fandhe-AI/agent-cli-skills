@@ -300,26 +300,46 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     echo "  git clean -fd \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/"
   }
 
+  # checker の各実行の「直後」に、実行結果(成功・失敗)に関わらず範囲外 digest と
+  # checker 自身の blob hash を再検証する。apply が範囲外を書き換えて非 0 終了した場合や、
+  # checker 自身を未承認コードへ置換した場合を、次の実行・停止より前に検出するため。
+  # 範囲外の破壊は restore_help(契約範囲のみ復元)では戻らないため、手動復旧の案内を出す
+  verify_outside_and_checker() {
+    if [[ "$(git hash-object -- scripts/check-skill-local-patches.sh 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
+      echo "エラー: checker 自身が書き換えられました。未承認コードのため以後実行しません(fail-closed)。" >&2
+      return 1
+    fi
+    if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
+      echo "エラー: checker が契約範囲外の path を変更しました(fail-closed)。" >&2
+      echo "git status --porcelain で範囲外の変更を特定し、tracked は git restore -- <path> / index は git restore --staged -- <path> で手動復旧してください(下記の復元手順は契約範囲しか戻しません)。checker 側の修正も必要です。" >&2
+      return 1
+    fi
+    return 0
+  }
+
   echo ""
   echo "==> local patch を再適用(--3way fallback や index 復元により対象 file・durable patch が stage されることがある)"
-  if ! bash scripts/check-skill-local-patches.sh apply; then
+  apply_rc=0
+  bash scripts/check-skill-local-patches.sh apply || apply_rc=$?
+  if ! verify_outside_and_checker; then
+    restore_help >&2
+    exit 1
+  fi
+  if [[ "${apply_rc}" -ne 0 ]]; then
     echo "エラー: local patch の再適用に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
     restore_help >&2
     exit 1
   fi
   echo ""
   echo "==> 再適用後の最終検証"
-  if ! bash scripts/check-skill-local-patches.sh; then
-    echo "エラー: 再適用後の最終検証に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
+  check_rc=0
+  bash scripts/check-skill-local-patches.sh || check_rc=$?
+  if ! verify_outside_and_checker; then
     restore_help >&2
     exit 1
   fi
-
-  # 変更集合が契約範囲に収まることを検証する。範囲外の変更(内容・stage 状態を含む)が
-  # 新たに生じていれば、内容を提示しないまま後続 commit に混入し得るため fail-closed で
-  # 停止する(実行前から存在した無関係な dirty は前後の digest が同一なら相殺される)
-  if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
-    echo "エラー: checker が契約範囲外の path を変更しました。内容未提示のまま commit に混入し得るため停止します(fail-closed)。" >&2
+  if [[ "${check_rc}" -ne 0 ]]; then
+    echo "エラー: 再適用後の最終検証に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
     restore_help >&2
     exit 1
   fi
