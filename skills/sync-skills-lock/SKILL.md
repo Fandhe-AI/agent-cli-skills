@@ -101,6 +101,13 @@ fi
 # checker 非 0、および台帳があるのに checker が無い状態は、fail-closed で npx を
 # 実行しない(同期を開始しない)
 if [[ -f scripts/check-skill-local-patches.sh ]]; then
+  # durable patch 置き場は承認時に directory ごと stage し、却下時に index からの復元 +
+  # git clean の対象になるため、未 stage の WIP・未追跡ファイルが残っていると巻き込まれて
+  # 失われる。staged のみの変更(= 本ループ内で承認済みに積み上がった分)は許容する
+  if git status --porcelain -- scripts/local-patches/ | grep -q '^.[^ ]'; then
+    echo "エラー: scripts/local-patches/ に未 stage の変更・未追跡ファイルがあります。承認・却下経路が巻き込むため同期しません(fail-closed)。"
+    exit 1
+  fi
   if ! bash scripts/check-skill-local-patches.sh; then
     echo "エラー: 同期前の local patch 検証に失敗しました。修復してから再実行してください(fail-closed)。"
     exit 1
@@ -237,36 +244,44 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # 却下手順(Step 6 の checker 版)は git read-tree でこの snapshot へ index を丸ごと戻すため、
   # apply が stage した変更だけが正確に取り除かれ、承認済みの他スキル分は保持される
   # (Step 4 の pre-check が unmerged index を fail-closed で弾くため write-tree は成立する)
+  # snapshot hash は shell 変数にしか存在しないため、後からの復旧に備えて値を必ず表示する
+  # (Step 6 の却下手順はこの値を使う)
   PRE_APPLY_TREE="$(git write-tree)"
+  echo "PRE_APPLY_TREE=${PRE_APPLY_TREE}  # 却下・復旧(git read-tree)で使う snapshot hash。控えておくこと"
 
-  # 契約範囲外の path の dirty 集合(staged / unstaged / 未追跡)。apply 前後で比較し、
-  # 新たな範囲外変更を fail-closed で検出する。rename(R)の旧 path 行は status prefix を
-  # 持たず sed を素通りするが、前後の等価比較には影響しない(差が出れば fail 側に倒れる)
-  outside_paths() {
-    git status --porcelain -z | tr '\0' '\n' | sed -e 's/^.. //' \
-      | grep -v -e '^skills-lock\.json$' -e "^\.agents/skills/${SKILL_NAME}/" -e '^scripts/local-patches/' \
-      | sort -u || true
+  # 契約範囲外の状態 digest(変更 path 名 + tracked の worktree/index 内容 + 未追跡の内容)。
+  # path 名の集合比較だけでは「実行前から dirty だった範囲外 file への上書き・stage 状態の
+  # 変更」を見逃すため、内容まで含めた hash を apply 前後で比較する
+  OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
+  outside_state() {
+    {
+      git status --porcelain -z -- "${OUTSIDE_PATHSPEC[@]}"
+      git diff -- "${OUTSIDE_PATHSPEC[@]}"
+      git diff --cached -- "${OUTSIDE_PATHSPEC[@]}"
+      git ls-files -z --others --exclude-standard -- "${OUTSIDE_PATHSPEC[@]}" \
+        | while IFS= read -r -d '' f; do git hash-object -- "$f"; done
+    } | git hash-object --stdin
   }
-  PRE_OUTSIDE="$(outside_paths)"
+  PRE_OUTSIDE="$(outside_state)"
 
   # local patch の再適用(--3way fallback や index 復元により、patch 対象 file や durable patch が
   # stage されることがある)。非 0 は fail-closed で停止する
   if ! bash scripts/check-skill-local-patches.sh apply; then
-    echo "エラー: local patch の再適用に失敗しました。Step 6 の却下手順(checker 版)で同期前へ戻してください(fail-closed)。"
+    echo "エラー: local patch の再適用に失敗しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_APPLY_TREE})で同期前へ戻してください(fail-closed)。"
     exit 1
   fi
 
   # 再適用後の最終検証(worktree / index / durable patch)。非 0 は fail-closed で停止する
   if ! bash scripts/check-skill-local-patches.sh; then
-    echo "エラー: 再適用後の最終検証に失敗しました。Step 6 の却下手順(checker 版)で同期前へ戻してください(fail-closed)。"
+    echo "エラー: 再適用後の最終検証に失敗しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_APPLY_TREE})で同期前へ戻してください(fail-closed)。"
     exit 1
   fi
 
-  # 変更集合が契約範囲に収まることを検証する。範囲外の変更が新たに生じていれば、内容を
-  # 提示しないまま後続 commit に混入し得るため fail-closed で停止する(実行前から存在した
-  # 無関係な dirty は前後比較で相殺されるため、誤検知しない)
-  if [[ "$(outside_paths)" != "${PRE_OUTSIDE}" ]]; then
-    echo "エラー: checker が契約範囲外の path を変更しました。Step 6 の却下手順(checker 版)で戻し、checker 側を修正してください(fail-closed)。"
+  # 変更集合が契約範囲に収まることを検証する。範囲外の変更(内容・stage 状態を含む)が
+  # 新たに生じていれば、内容を提示しないまま後続 commit に混入し得るため fail-closed で
+  # 停止する(実行前から存在した無関係な dirty は前後の digest が同一なら相殺される)
+  if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
+    echo "エラー: checker が契約範囲外の path を変更しました。Step 6 の却下手順(checker 版。snapshot: ${PRE_APPLY_TREE})で戻し、checker 側を修正してください(fail-closed)。"
     exit 1
   fi
 fi
@@ -285,8 +300,10 @@ fi
 
 ```bash
 git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
-# 未追跡分の列挙(内容表示は Step 5 のプレビュー手順を同じ path 集合で再実行する)
-git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ | tr '\0' '\n'
+# 未追跡分は Step 5 のプレビュー処理(一時ファイル + NUL 区切り + 空/バイナリ判定。
+# git ls-files の失敗は fail-closed で中止)を、pathspec を
+# ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ の 2 つへ広げて再実行し、
+# 名前の列挙だけでなく内容(git diff --no-index / バイナリは種別・サイズ・hash)まで提示する
 ```
 
 **却下された場合**は当該スキルのみ即座にリバートして**次スキルへ continue**する（全体を中止しない）:
@@ -315,7 +332,11 @@ Step 4 の clean ガードにより `npx` 実行前の当該ディレクトリ�
 
 ```bash
 # index を apply 前(= 承認済み積上げ)へ丸ごと復元する。apply が stage した変更だけが
-# 取り除かれ、承認済みの他スキル分・durable patch の既存 stage はそのまま保持される
+# 取り除かれ、承認済みの他スキル分・durable patch の既存 stage はそのまま保持される。
+# PRE_APPLY_TREE は Step 5.5 が表示した snapshot hash。shell を跨いで変数が消えている
+# 場合は表示済みの値を代入してから実行する。未設定のまま read-tree すると
+# 「post-apply の index のまま worktree だけ戻す」誤復元になるため、空値は必ず弾く
+: "${PRE_APPLY_TREE:?Step 5.5 の snapshot hash を設定してから実行する(未設定のまま復元しない)}"
 git read-tree "${PRE_APPLY_TREE}"
 
 # worktree を復元済みの index から戻す。初回具現化などで追跡対象が無い path は
@@ -388,7 +409,7 @@ EOF
 - **新スキルの取扱い**: ローカルに存在するが upstream に未登録のスキル（`contribute-skill`, `sync-skills-lock` 自身など）は、upstream マージ後に登録する。マージ前に `computedHash` を勝手に書き込まない
 - **Step 5 のプレビューは index を変更しない**: 未追跡ファイルの表示に `git add -N`（intent-to-add）ではなく `git diff --no-index` を使う。Step 6 の拒否経路が index からの `git checkout --` で承認済み他スキルの hash を復元する設計に依存しており、i-t-a エントリの混入はその復元設計と干渉するため
 - **skills CLI は固定版で実行する**: `npx skills add` はバージョン未固定で実行しない。固定版の決め方・更新手順は「skills CLI のバージョン固定と更新手順」節を参照
-- **local patch の保護（checker を持つリポジトリでは必須）**: npx 前の checker（Step 4）→ 承認前の再適用 + 最終検証 + 契約範囲検証（Step 5.5）→ 成功時のみ stage（Step 7）の順を省略しない。checker 非 0・台帳（`.agents/skills/LOCAL-PATCHES.md`）のみ存在は fail-closed で停止し、local patch が欠けた状態を stage・commit しない。apply が変更し得る durable patch（`scripts/local-patches/`）は承認（Step 6 の最終 diff + 未追跡列挙）・stage（Step 7）・却下（`PRE_APPLY_TREE` からの index 復元）のすべてで同じ集合として扱う。`computedHash` は upstream 版の値を維持する
+- **local patch の保護（checker を持つリポジトリでは必須）**: npx 前の checker（Step 4）→ 承認前の再適用 + 最終検証 + 契約範囲検証（Step 5.5）→ 成功時のみ stage（Step 7）の順を省略しない。checker 非 0・台帳（`.agents/skills/LOCAL-PATCHES.md`）のみ存在は fail-closed で停止し、local patch が欠けた状態を stage・commit しない。apply が変更し得る durable patch（`scripts/local-patches/`）は承認（Step 6 の最終 diff + 未追跡プレビュー再実行）・stage（Step 7）・却下（`PRE_APPLY_TREE` からの index 復元）のすべてで同じ集合として扱い、未 stage の WIP が同 directory に残る状態では同期を開始しない（Step 4 で fail-closed）。`computedHash` は upstream 版の値を維持する
 
 ## sandbox 環境での実行
 

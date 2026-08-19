@@ -133,6 +133,13 @@ elif [[ -f .agents/skills/LOCAL-PATCHES.md ]]; then
 fi
 
 if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
+  # durable patch 置き場は承認時に directory ごと stage し、却下時に index からの復元 +
+  # git clean の対象になるため、未 stage の WIP・未追跡ファイルが残っていると巻き込まれて
+  # 失われる。staged のみの変更(= 呼び出し元ループで承認済みに積み上がった分)は許容する
+  if git status --porcelain -- scripts/local-patches/ | grep -q '^.[^ ]'; then
+    echo "エラー: scripts/local-patches/ に未 stage の変更・未追跡ファイルがあります。承認・却下経路が巻き込むため同期を開始しません(fail-closed)。" >&2
+    exit 1
+  fi
   echo "==> 同期前の local patch 検証(check)"
   if ! bash scripts/check-skill-local-patches.sh; then
     echo "エラー: 同期前の local patch 検証に失敗しました。状態を修復してから再実行してください(fail-closed。npx は実行していません)。" >&2
@@ -164,6 +171,12 @@ git diff -- skills-lock.json ".agents/skills/${SKILL_NAME}/"
 # 未追跡ファイルがあると 1 パスが複数の存在しないパスへ分割される。分割後の
 # 各 git diff は失敗し || true で握り潰される一方、後続の git add は実ファイルを
 # そのまま取り込むため、内容を表示しないまま承認できてしまう（-z / NUL 区切りで防ぐ）。
+# 未追跡ファイルのプレビュー(列挙 + 内容表示)。引数の pathspec 群を対象に実行する。
+# 通常プレビュー(当該スキルのみ)と、local patch guard 時の最終確認(当該スキル +
+# scripts/local-patches/)の両方から呼ばれ、同一の表示・fail-closed 挙動を共有する。
+UNTRACKED_LIST_FILE=""
+trap 'rm -f "${UNTRACKED_LIST_FILE}"' EXIT
+preview_untracked() {
 UNTRACKED_COUNT=0
 echo ""
 # git ls-files をプロセス置換（`< <(...)`）へ直接つなぐと、`set -euo pipefail` は
@@ -173,9 +186,9 @@ echo ""
 # git add で承認してしまう（このスクリプトが防ごうとしている非対称そのもの）。
 # 通常のコマンド置換で一時ファイルへ書き出し、`if ! ...` で明示的に終了コードを検査する
 # ことで fail-closed にする。
+rm -f "${UNTRACKED_LIST_FILE}"
 UNTRACKED_LIST_FILE="$(mktemp)"
-trap 'rm -f "${UNTRACKED_LIST_FILE}"' EXIT
-if ! git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" > "${UNTRACKED_LIST_FILE}"; then
+if ! git ls-files -z --others --exclude-standard -- "$@" > "${UNTRACKED_LIST_FILE}"; then
   echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。内容未確認のまま承認できてしまうため中止します。" >&2
   exit 1
 fi
@@ -218,24 +231,34 @@ done < "${UNTRACKED_LIST_FILE}"
 if [[ "${UNTRACKED_COUNT}" -eq 0 ]]; then
   echo "==> 新規（未追跡）ファイル: なし"
 fi
+}
+
+preview_untracked ".agents/skills/${SKILL_NAME}/"
 
 if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   # 却下・失敗時の厳密復元用に、apply 前の index(= 承認済み積上げ)を tree として保存する。
   # git read-tree でこの snapshot へ index を丸ごと戻すと、apply が stage した変更だけが
   # 正確に取り除かれ、承認済みの他スキル分・durable patch の既存 stage は保持される
   # (同期前 check が unmerged index を fail-closed で弾いているため write-tree は成立する)
+  # snapshot hash は本 process にしか存在しないため、後からの復旧に備えて値を必ず表示する
   PRE_APPLY_TREE="$(git write-tree)"
+  echo "PRE_APPLY_TREE=${PRE_APPLY_TREE}  # 却下・復旧(git read-tree)で使う snapshot hash。控えておくこと"
 
-  # 契約範囲(skills-lock.json / 当該スキル / durable patch)外の dirty path 集合
-  # (staged / unstaged / 未追跡)。apply 前後で比較し、新たな範囲外変更を fail-closed で
-  # 検出する。rename(R)の旧 path 行は status prefix を持たず sed を素通りするが、
-  # 前後の等価比較には影響しない(差が出れば fail 側に倒れる)
-  outside_paths() {
-    git status --porcelain -z | tr '\0' '\n' | sed -e 's/^.. //' \
-      | grep -v -e '^skills-lock\.json$' -e "^\.agents/skills/${SKILL_NAME}/" -e '^scripts/local-patches/' \
-      | sort -u || true
+  # 契約範囲(skills-lock.json / 当該スキル / durable patch)外の状態 digest
+  # (変更 path 名 + tracked の worktree/index 内容 + 未追跡の内容)。path 名の集合比較
+  # だけでは「実行前から dirty だった範囲外 file への上書き・stage 状態の変更」を
+  # 見逃すため、内容まで含めた hash を apply 前後で比較する
+  OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
+  outside_state() {
+    {
+      git status --porcelain -z -- "${OUTSIDE_PATHSPEC[@]}"
+      git diff -- "${OUTSIDE_PATHSPEC[@]}"
+      git diff --cached -- "${OUTSIDE_PATHSPEC[@]}"
+      git ls-files -z --others --exclude-standard -- "${OUTSIDE_PATHSPEC[@]}" \
+        | while IFS= read -r -d '' f; do git hash-object -- "$f"; done
+    } | git hash-object --stdin
   }
-  PRE_OUTSIDE="$(outside_paths)"
+  PRE_OUTSIDE="$(outside_state)"
 
   # 却下・失敗時の復元手順(stdout へ出す。エラー経路では >&2 で呼ぶ)。
   # PRE_APPLY_TREE は本 process 終了後に環境から消えるため、値そのものを展開して案内する
@@ -263,10 +286,10 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     exit 1
   fi
 
-  # 変更集合が契約範囲に収まることを検証する。範囲外の変更が新たに生じていれば、内容を
-  # 提示しないまま後続 commit に混入し得るため fail-closed で停止する(実行前から存在した
-  # 無関係な dirty は前後比較で相殺されるため、誤検知しない)
-  if [[ "$(outside_paths)" != "${PRE_OUTSIDE}" ]]; then
+  # 変更集合が契約範囲に収まることを検証する。範囲外の変更(内容・stage 状態を含む)が
+  # 新たに生じていれば、内容を提示しないまま後続 commit に混入し得るため fail-closed で
+  # 停止する(実行前から存在した無関係な dirty は前後の digest が同一なら相殺される)
+  if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
     echo "エラー: checker が契約範囲外の path を変更しました。内容未提示のまま commit に混入し得るため停止します(fail-closed)。" >&2
     restore_help >&2
     exit 1
@@ -276,8 +299,8 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   echo "==> 更新完了。commit 候補の最終差分(upstream 更新 + local patch 再適用。durable patch を含む):"
   git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
   echo ""
-  echo "==> 契約範囲内の未追跡ファイル(git diff HEAD には表示されない。承認前に上記の未追跡プレビューと同じ手順で内容を確認する):"
-  git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ | tr '\0' '\n'
+  echo "==> 契約範囲内の未追跡ファイル(git diff HEAD には表示されない。apply が新規作成した durable patch 等を含めて内容まで提示する):"
+  preview_untracked ".agents/skills/${SKILL_NAME}/" scripts/local-patches/
   echo ""
   echo "却下する場合(当該スキルと durable patch を同期前へ戻す。他スキルの stage 済み変更には影響しない):"
   restore_help
