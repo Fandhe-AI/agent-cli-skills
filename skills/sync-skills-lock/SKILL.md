@@ -26,7 +26,7 @@ model: sonnet
 - ルート直下の `skills-lock.json` が存在すること
 - **実行前に `skills-lock.json` に未コミットの変更がないこと**（ステージ済み・未ステージ問わず）。本スキルの実行中に発生する変更は sync 由来のみとなり、`git add skills-lock.json` で全体をステージしても無関係な変更が混入しない
 - **対象スキルの `.agents/skills/<name>/` に未コミット変更がないこと**。`npx skills add` は `.agents/skills/<name>/` を upstream の最新版で上書きするため、そのディレクトリに WIP が存在すると即座に失われる。`git checkout` で戻せるのは「最後にコミットされた状態」のみであり、npx 実行前の未コミット編集は復元できない。**未追跡ファイルとして存在する WIP も対象**であり、`git status --porcelain` で検出する
-- **消費側リポジトリが commit 済み local patch を持つ場合**: vendored skill（`.agents/skills/` 配下）へ commit 済みの local patch を適用しているリポジトリは、その検証・再適用の入口として repository-owned checker `scripts/check-skill-local-patches.sh`（無引数 = check / `apply` の 2 モード）と台帳 `.agents/skills/LOCAL-PATCHES.md` を持つ。commit 済み patch は上記 clean ガードでは保護できないため、checker が存在する場合は同期の前後（Step 4 の pre-check・Step 5.5 の apply + 最終検証）での成功が必須（非 0 は fail-closed で同期・stage しない）。台帳があるのに checker が無い状態も検証不能として fail-closed で停止する。checker（apply）の書き込み先は当該スキルディレクトリ・`skills-lock.json`・durable patch 置き場 `scripts/local-patches/` に限る契約とし、範囲外の変更は各実行直後の digest 比較で fail-closed に検出する（検出範囲は Git が追跡・列挙する対象に限る best-effort であり、書き込み制限の保証ではない。保証はユーザーによる checker 内容レビュー + blob hash 承認が担う。詳細は Step 4 の「検出範囲の限界」コメント）。checker は消費側が配置する実行可能コードのため「存在するだけ」では実行せず、HEAD に commit 済みで worktree と一致し、かつユーザーへ由来・内容を提示して blob hash 単位の明示承認を得た場合のみ実行する（Step 4 で機械検証）
+- **消費側リポジトリが commit 済み local patch を持つ場合**: vendored skill（`.agents/skills/` 配下）へ commit 済みの local patch を適用しているリポジトリは、その検証・再適用の入口として repository-owned checker `scripts/check-skill-local-patches.sh`（無引数 = check / `apply` の 2 モード）と台帳 `.agents/skills/LOCAL-PATCHES.md` を持つ。commit 済み patch は上記 clean ガードでは保護できないため、checker が存在する場合は同期の前後（Step 4 の pre-check・Step 5.5 の apply + 最終検証）での成功が必須（非 0 は fail-closed で同期・stage しない）。台帳があるのに checker が無い状態も検証不能として fail-closed で停止する。checker（apply）の書き込み先は当該スキルディレクトリ・`skills-lock.json`・durable patch 置き場 `scripts/local-patches/` に限る契約とし、範囲外の変更は各実行直後の digest 比較で fail-closed に検出する（検出範囲は Git が追跡・列挙する対象に限る best-effort であり、書き込み制限の保証ではない。保証はユーザーによる checker 内容レビュー + blob hash 承認が担う。詳細は Step 4 の「検出範囲の限界」コメント）。checker は消費側が配置する実行可能コードのため「存在するだけ」では実行せず、symlink ではない regular file（HEAD 側 mode も 100644/100755）であり、HEAD に commit 済みで worktree と一致し、かつユーザーへ由来・内容を提示して blob hash 単位の明示承認を得た場合のみ実行する（Step 4 で機械検証）。実行対象は worktree のファイルではなく承認済み HEAD blob を取り出した一時ファイル（`CHECKER_EXEC`）とし、hash 確認後に worktree の checker を差し替える TOCTOU 経路を断つ
 - **通常構成のメイン worktree で実行すること**。linked worktree（`git worktree add` で作られた作業ツリー）では `.git` が gitdir を指す通常ファイルになり、実 Git ディレクトリ（`.git/worktrees/<name>/` と共有側の `refs`・`logs`・`config`・objects）が状態署名の対象外になるため、Step 4 フェンスが npx 実行前に `git rev-parse --absolute-git-dir` / `--git-common-dir` の不一致で検出して fail-closed で拒否する。同様に、実 Git ディレクトリが作業ツリー外にある構成（`git clone --separate-git-dir`・submodule checkout・`.git` が symlink）も、「実 Git ディレクトリ = 作業ツリー直下の `.git` 実体ディレクトリ」の検証（`--show-toplevel` との厳密一致 + lstat）で npx 実行前に fail-closed で拒否する
 
 ## フロー
@@ -210,25 +210,56 @@ fi
 if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # checker は導入先リポジトリが配置する実行可能コードであり、「存在するだけ」で実行しては
   # ならない(未信頼な checkout・未レビュー PR の任意コードが、差分提示・承認より前に
-  # ユーザー権限で走る経路になる)。実行前に次の両方を満たすことを確認する(fail-closed):
-  #   (1) HEAD に commit 済みで、worktree の内容が HEAD の blob と一致する
+  # ユーザー権限で走る経路になる)。実行前に次のすべてを満たすことを確認する(fail-closed):
+  #   (1) worktree の checker が symlink ではない regular file である(git hash-object は
+  #       symlink のリンク先内容を読むため、-L を先に拒否しないと「HEAD と同内容の外部
+  #       ファイルへの symlink」が (2) の一致検証をすり抜ける)
+  #   (2) HEAD に commit 済みで、worktree の内容が HEAD の blob と一致する
   #       (未追跡・未コミット変更の checker は拒否 = レビューを経ていないコードを実行しない)
-  #   (2) ユーザーへ由来と内容を提示し、この blob hash に対する実行の明示承認を得ている
+  #   (3) HEAD 側のエントリ mode が 100644 / 100755 の regular file である
+  #       (120000 = symlink エントリの blob はリンク先文字列であり、実行対象にできない)
+  #   (4) ユーザーへ由来と内容を提示し、この blob hash に対する実行の明示承認を得ている
   #       (承認は hash 単位で本フロー全体に有効。内容が変われば再承認。
   #        提示: git log -1 -- scripts/check-skill-local-patches.sh /
   #              git show HEAD:scripts/check-skill-local-patches.sh)
+  # 実行は worktree のファイルではなく、承認済み HEAD blob を取り出した一時ファイル
+  # (CHECKER_EXEC)に対して行う。hash 確認後〜bash 実行の間に worktree の checker を
+  # 差し替える TOCTOU 経路を、実行対象を承認済み blob へ固定することで断つ
+  if [[ -L scripts/check-skill-local-patches.sh ]]; then
+    echo "エラー: checker がシンボリックリンクです。リンク先差し替えで HEAD 一致検証をすり抜けられるため同期しません(fail-closed)。実体ファイルへ置き換えてから再実行する。"
+    exit 1
+  fi
+  if [[ ! -f scripts/check-skill-local-patches.sh ]]; then
+    echo "エラー: checker が regular file ではありません。実行対象にできないため同期しません(fail-closed)。"
+    exit 1
+  fi
+  CHECKER_HEAD_MODE="$(git ls-tree HEAD -- scripts/check-skill-local-patches.sh 2>/dev/null | awk '{print $1}')"
+  if [[ "${CHECKER_HEAD_MODE}" != "100644" && "${CHECKER_HEAD_MODE}" != "100755" ]]; then
+    echo "エラー: HEAD の checker が regular file ではありません(mode: ${CHECKER_HEAD_MODE:-エントリなし})。symlink 等は実行対象にできないため同期しません(fail-closed)。"
+    exit 1
+  fi
   CHECKER_HASH="$(git hash-object -- scripts/check-skill-local-patches.sh)"
   if [[ "${CHECKER_HASH}" != "$(git rev-parse HEAD:scripts/check-skill-local-patches.sh 2>/dev/null || true)" ]]; then
     echo "エラー: checker が HEAD に commit 済みの内容と一致しません(未 commit・未追跡・未コミット変更)。任意コード実行を防ぐため同期しません(fail-closed)。"
     exit 1
   fi
   echo "CHECKER_HASH=${CHECKER_HASH}  # 実行承認の対象となる blob hash。由来・内容と合わせてユーザーへ提示する"
-  # ユーザー承認(上記 (2))を得たら、承認された hash を CHECKER_APPROVED_HASH に設定する。
+  # ユーザー承認(上記 (4))を得たら、承認された hash を CHECKER_APPROVED_HASH に設定する。
   # 承認は変数の設定によってのみ成立し、未設定・不一致のまま checker を実行する経路は無い
   if [[ "${CHECKER_APPROVED_HASH:-}" != "${CHECKER_HASH}" ]]; then
     echo "エラー: checker はユーザー承認済みの blob hash(CHECKER_APPROVED_HASH)と一致する場合のみ実行できます。承認を得てから再実行してください(fail-closed)。"
     exit 1
   fi
+  # 承認済み HEAD blob を一時ファイルへ取り出す。以後の checker 実行(同期前 check /
+  # Step 5.5 の apply・最終 check)はすべてこのファイルを使い、worktree の checker は
+  # 実行しない。取り出し失敗のまま進むと空ファイルの bash 実行(exit 0 の no-op)が
+  # 「検証成功」に化けるため fail-closed で停止する
+  CHECKER_EXEC="$(mktemp)"
+  if ! git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}"; then
+    echo "エラー: 承認済み checker blob(${CHECKER_APPROVED_HASH})の取り出しに失敗しました。同期しません(fail-closed)。"
+    exit 1
+  fi
+  echo "CHECKER_EXEC=${CHECKER_EXEC}  # 実行対象(承認済み blob の取り出し先)。Step 5.5 まで同一 shell で保持する(失われたら承認済み hash から再作成する)"
 
   # durable patch 置き場は承認時に directory ごと stage し、却下時に index からの復元 +
   # git clean の対象になるため、未 stage の WIP・未追跡ファイルが残っていると巻き込まれて
@@ -296,7 +327,10 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
       echo "許可先経路または skills-lock.json の妥協を検出しているため、契約範囲の復元は index のみ行います。worktree 側は案内済みの手順で手動復旧してください。"
     else
       untracked_list="$(mktemp)"
-      if ! git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ > "${untracked_list}"; then
+      # skills-lock.json も退避対象に含める。通常は tracked のため列挙されないが、checker が
+      # git rm --cached 等で未追跡化して内容変更した後に失敗すると、退避なしの git restore が
+      # その唯一の内容を上書きしてしまう
+      if ! git ls-files -z --others --exclude-standard -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ > "${untracked_list}"; then
         echo "警告: 契約範囲内の未追跡ファイル列挙に失敗しました。未追跡分は退避できていない可能性があるため、復元後に git status で確認してください。"
       fi
       CONTRACT_UNTRACKED_BACKUP_DIR="$(mktemp -d)"
@@ -344,8 +378,9 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # 書き換えて非 0 終了するケース・checker 自身を未承認コードへ置換するケースを、次の
   # 実行より前に fail-closed で検出するため
   verify_outside_and_checker() {
-    if [[ "$(git hash-object -- scripts/check-skill-local-patches.sh 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
-      echo "エラー: checker 自身が書き換えられました。未承認コードのため以後実行しません(fail-closed)。"
+    if [[ -L scripts/check-skill-local-patches.sh ]] \
+      || [[ "$(git hash-object -- scripts/check-skill-local-patches.sh 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
+      echo "エラー: checker 自身が書き換えられました(symlink 化を含む)。未承認の状態のため以後実行しません(fail-closed)。"
       return 1
     fi
     if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
@@ -358,7 +393,8 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
 
   echo "==> 同期前の local patch 検証(check)"
   pre_check_rc=0
-  bash scripts/check-skill-local-patches.sh || pre_check_rc=$?
+  # 実行対象は worktree のファイルではなく、承認済み blob を取り出した CHECKER_EXEC
+  bash "${CHECKER_EXEC}" || pre_check_rc=$?
   if ! verify_outside_and_checker; then
     restore_contract_scope
     echo "(npx は実行していません)"
@@ -1418,10 +1454,18 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # Step 4 で checker の初回実行より前に定義・取得済みのものを同一 shell セッションで
   # そのまま使う(ここで取り直すと、同期前 check 以降の範囲外変更が基準へ取り込まれてしまう)
 
+  # 実行対象は worktree の checker ではなく、承認済み blob(CHECKER_APPROVED_HASH)を
+  # 取り出した一時ファイル。shell セッションを跨いで CHECKER_EXEC が失われていても、
+  # 承認済み hash から決定的に再作成できる(worktree の checker 差し替えの影響を受けない)
+  if [[ -z "${CHECKER_EXEC:-}" || ! -f "${CHECKER_EXEC}" ]]; then
+    CHECKER_EXEC="$(mktemp)"
+    git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}"
+  fi
+
   # local patch の再適用(--3way fallback や index 復元により、patch 対象 file や durable patch が
   # stage されることがある)
   apply_rc=0
-  bash scripts/check-skill-local-patches.sh apply || apply_rc=$?
+  bash "${CHECKER_EXEC}" apply || apply_rc=$?
   if ! verify_outside_and_checker; then
     # 範囲外の破壊は verify_outside_and_checker の案内どおり手動復旧として残しつつ、
     # 契約範囲(部分適用された patch・checker 由来の index 変更)は Step 4 で定義済みの
@@ -1439,7 +1483,7 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
 
   # 再適用後の最終検証(worktree / index / durable patch)
   check_rc=0
-  bash scripts/check-skill-local-patches.sh || check_rc=$?
+  bash "${CHECKER_EXEC}" || check_rc=$?
   if ! verify_outside_and_checker; then
     restore_contract_scope
     exit 1
@@ -1504,7 +1548,9 @@ Step 4 の clean ガードにより `npx` 実行前の当該ディレクトリ�
 # (checker が契約ディレクトリ内へ移動・新規作成したファイルの唯一のコピーであり得るため。
 # 退避先を確認し、不要と判断してから手動で削除する)
 CONTRACT_UNTRACKED_BACKUP_DIR="$(mktemp -d)"
-git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
+# skills-lock.json も対象に含める(checker が git rm --cached 等で未追跡化して内容変更した
+# 場合、その唯一の内容を退避せずに restore で上書きしないため。通常は tracked で列挙されない)
+git ls-files -z --others --exclude-standard -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
   | while IFS= read -r -d '' p; do
       mkdir -p "${CONTRACT_UNTRACKED_BACKUP_DIR}/$(dirname "${p}")"
       mv -- "${p}" "${CONTRACT_UNTRACKED_BACKUP_DIR}/${p}"

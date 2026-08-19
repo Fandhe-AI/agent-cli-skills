@@ -794,13 +794,34 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   LOCAL_PATCH_GUARD=true
   # checker は導入先リポジトリが配置する実行可能コードであり、「存在するだけ」で実行しては
   # ならない(未信頼な checkout・未レビュー PR の任意コードが、差分提示・承認より前に
-  # ユーザー権限で走る経路になる)。実行は次の両方を満たす場合に限る(fail-closed):
-  #   (1) HEAD に commit 済みで、worktree の内容が HEAD の blob と一致する
+  # ユーザー権限で走る経路になる)。実行は次のすべてを満たす場合に限る(fail-closed):
+  #   (1) worktree の checker が symlink ではない regular file である(git hash-object は
+  #       symlink のリンク先内容を読むため、-L を先に拒否しないと「HEAD と同内容の外部
+  #       ファイルへの symlink」が (2) の一致検証をすり抜ける)
+  #   (2) HEAD に commit 済みで、worktree の内容が HEAD の blob と一致する
   #       (未追跡・未コミット変更の checker は拒否 = レビューを経ていないコードを実行しない)
-  #   (2) ユーザーが由来(git log -1)と内容(git show)をレビューし、その blob hash を
+  #   (3) HEAD 側のエントリ mode が 100644 / 100755 の regular file である
+  #       (120000 = symlink エントリの blob はリンク先文字列であり、実行対象にできない)
+  #   (4) ユーザーが由来(git log -1)と内容(git show)をレビューし、その blob hash を
   #       CHECKER_APPROVED_HASH で明示承認している(承認は hash 単位。内容が変われば再承認)
+  # 実行は worktree のファイルではなく、承認済み HEAD blob を取り出した一時ファイル
+  # (CHECKER_EXEC)に対して行う。hash 確認後〜bash 実行の間に worktree の checker を
+  # 差し替える TOCTOU 経路を、実行対象を承認済み blob へ固定することで断つ。
   # なお checker 自体は契約範囲外 path のため、apply がこれを書き換えた場合は
   # outside_state の前後 digest 比較でも fail-closed に検出される
+  if [[ -L scripts/check-skill-local-patches.sh ]]; then
+    echo "エラー: scripts/check-skill-local-patches.sh がシンボリックリンクです。リンク先差し替えで HEAD 一致検証をすり抜けられるため同期を開始しません(fail-closed)。実体ファイルへ置き換えてから再実行してください。" >&2
+    exit 1
+  fi
+  if [[ ! -f scripts/check-skill-local-patches.sh ]]; then
+    echo "エラー: scripts/check-skill-local-patches.sh が regular file ではありません。実行対象にできないため同期を開始しません(fail-closed)。" >&2
+    exit 1
+  fi
+  CHECKER_HEAD_MODE="$(git ls-tree HEAD -- scripts/check-skill-local-patches.sh 2>/dev/null | awk '{print $1}')"
+  if [[ "${CHECKER_HEAD_MODE}" != "100644" && "${CHECKER_HEAD_MODE}" != "100755" ]]; then
+    echo "エラー: HEAD の scripts/check-skill-local-patches.sh が regular file ではありません(mode: ${CHECKER_HEAD_MODE:-エントリなし})。symlink 等は実行対象にできないため同期を開始しません(fail-closed)。" >&2
+    exit 1
+  fi
   CHECKER_WORKTREE_HASH="$(git hash-object -- scripts/check-skill-local-patches.sh)"
   CHECKER_HEAD_HASH="$(git rev-parse HEAD:scripts/check-skill-local-patches.sh 2>/dev/null || true)"
   if [[ -z "${CHECKER_HEAD_HASH}" || "${CHECKER_WORKTREE_HASH}" != "${CHECKER_HEAD_HASH}" ]]; then
@@ -812,6 +833,17 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
     echo "  git log -1 -- scripts/check-skill-local-patches.sh   # 由来(最終 commit)の確認" >&2
     echo "  git show HEAD:scripts/check-skill-local-patches.sh   # 実行される内容の確認" >&2
     echo "  CHECKER_APPROVED_HASH=${CHECKER_WORKTREE_HASH} $0 ${SKILL_NAME} ${SOURCE_REPO}" >&2
+    exit 1
+  fi
+  # 承認済み HEAD blob を一時ファイルへ取り出す。以後の checker 実行(同期前 check /
+  # apply / 最終 check)はすべてこのファイルを使い、worktree の checker は実行しない。
+  # 取り出し失敗のまま進むと空ファイルの bash 実行(exit 0 の no-op)が「検証成功」に
+  # 化けるため fail-closed で停止する。この trap は後段の単一 trap(mktemp 群の掃除)に
+  # 置き換わるが、そちらにも CHECKER_EXEC の削除を含めてあるため掃除は途切れない
+  CHECKER_EXEC="$(mktemp)"
+  trap '[[ -z "${CHECKER_EXEC:-}" ]] || rm -f "${CHECKER_EXEC}"' EXIT
+  if ! git cat-file blob "${CHECKER_HEAD_HASH}" > "${CHECKER_EXEC}"; then
+    echo "エラー: 承認済み checker blob(${CHECKER_HEAD_HASH})の取り出しに失敗しました。同期を開始しません(fail-closed)。" >&2
     exit 1
   fi
 elif [[ -f .agents/skills/LOCAL-PATCHES.md ]]; then
@@ -863,8 +895,9 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   # fail-closed で検出するため。範囲外の破壊は契約範囲用の復元手順では戻らないため、
   # 手動復旧の案内を出す
   verify_outside_and_checker() {
-    if [[ "$(git hash-object -- scripts/check-skill-local-patches.sh 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
-      echo "エラー: checker 自身が書き換えられました。未承認コードのため以後実行しません(fail-closed)。" >&2
+    if [[ -L scripts/check-skill-local-patches.sh ]] \
+      || [[ "$(git hash-object -- scripts/check-skill-local-patches.sh 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
+      echo "エラー: checker 自身が書き換えられました(symlink 化を含む)。未承認の状態のため以後実行しません(fail-closed)。" >&2
       return 1
     fi
     if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
@@ -904,7 +937,10 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
       echo "許可先経路または skills-lock.json の妥協を検出しているため、契約範囲の復元は index のみ行います。worktree 側は案内済みの手順で手動復旧してください。" >&2
     else
       untracked_list="$(mktemp)"
-      if ! git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ > "${untracked_list}"; then
+      # skills-lock.json も退避対象に含める。通常は tracked のため列挙されないが、checker が
+      # git rm --cached 等で未追跡化して内容変更した後に失敗すると、退避なしの git restore が
+      # その唯一の内容を上書きしてしまう
+      if ! git ls-files -z --others --exclude-standard -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ > "${untracked_list}"; then
         echo "警告: 契約範囲内の未追跡ファイル列挙に失敗しました。未追跡分は退避できていない可能性があるため、復元後に git status で確認してください。" >&2
       fi
       CONTRACT_UNTRACKED_BACKUP_DIR="$(mktemp -d)"
@@ -950,7 +986,8 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
 
   echo "==> 同期前の local patch 検証(check)"
   pre_check_rc=0
-  bash scripts/check-skill-local-patches.sh || pre_check_rc=$?
+  # 実行対象は worktree のファイルではなく、承認済み blob を取り出した CHECKER_EXEC
+  bash "${CHECKER_EXEC}" || pre_check_rc=$?
   if ! verify_outside_and_checker; then
     restore_contract_scope
     echo "(npx は実行していません)" >&2
@@ -979,7 +1016,7 @@ IGNORED_BASELINE_FILE="$(mktemp)"
 # 復元失敗時は IGNORED_BACKUP_KEEP=1 で削除を抑止し、手動復旧の素材として残す。
 IGNORED_BACKUP_DIR="$(mktemp -d)"
 IGNORED_BACKUP_KEEP=0
-trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"; if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi' EXIT
+trap 'rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${UNTRACKED_LIST_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"; if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi; [[ -z "${CHECKER_EXEC:-}" ]] || rm -f "${CHECKER_EXEC}"' EXIT
 
 # npx 実行後の許可先経路 再検証（verify_scope_path_after_run）と許可先配下の
 # 実行後 symlink 走査の結果フラグ。1 のとき revert_in_scope は許可先配下への
@@ -1416,8 +1453,9 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     echo "  git restore --staged --worktree --source=${PRE_SYNC_TREE} -- skills-lock.json"
     echo "  git restore --staged --worktree --source=${PRE_SYNC_TREE} -- \".agents/skills/${SKILL_NAME}/\" 2>/dev/null || true"
     echo "  git restore --staged --worktree --source=${PRE_SYNC_TREE} -- scripts/local-patches/ 2>/dev/null || true"
-    echo "  # 契約範囲内に未追跡ファイルが残る場合は、削除前に内容を確認して退避を判断する:"
-    echo "  git ls-files --others --exclude-standard -- \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/"
+    echo "  # 契約範囲内に未追跡ファイルが残る場合は、削除前に内容を確認して退避を判断する"
+    echo "  # (skills-lock.json は checker による未追跡化があり得るため含める):"
+    echo "  git ls-files --others --exclude-standard -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/"
     echo "  # 復元後は契約範囲に staged・worktree 差分が残っていないことを確認する(空出力が成功):"
     echo "  git status --porcelain -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/"
   }
@@ -1425,7 +1463,7 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   echo ""
   echo "==> local patch を再適用(--3way fallback や index 復元により対象 file・durable patch が stage されることがある)"
   apply_rc=0
-  bash scripts/check-skill-local-patches.sh apply || apply_rc=$?
+  bash "${CHECKER_EXEC}" apply || apply_rc=$?
   if ! verify_outside_and_checker; then
     # 範囲外の破壊は上の案内どおり手動復旧として残しつつ、契約範囲(部分適用された patch・
     # checker 由来の index 変更)は自動復元してから終了する(「すべての失敗経路で同期開始前へ
@@ -1441,7 +1479,7 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   echo ""
   echo "==> 再適用後の最終検証"
   check_rc=0
-  bash scripts/check-skill-local-patches.sh || check_rc=$?
+  bash "${CHECKER_EXEC}" || check_rc=$?
   if ! verify_outside_and_checker; then
     restore_contract_scope
     exit 1
