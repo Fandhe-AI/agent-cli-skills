@@ -1282,6 +1282,11 @@ fi
 # なら、その不完全な NPX_OUTPUT_FILE を前提にした「Invalid agents」no-op 判定を
 # 信頼せず、NPX_STATUS を強制的に失敗へ倒して以降の失敗経路（事後スコープ外検査・
 # スコープ内リバート）へ必ず合流させる。
+# 復元を無条件 set -e にしている理由（Issue #417）: 本スクリプトはファイル先頭
+# （このファイルの set -euo pipefail 宣言）で errexit を常時有効にする前提を自ら
+# 宣言しているため、SKILL.md の Step 4 フェンス（呼び出し元シェルの errexit 状態を
+# 保存し、元々有効だった場合のみ条件付きで復元する）と異なり、無条件 set -e で
+# 復元しても呼び出し元シェルの状態を意図せず変えることはなく正しい。
 set +e
 npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE_REPO}" --skill "${SKILL_NAME}" --agent universal --yes 2>&1 | tee "${NPX_OUTPUT_FILE}"
 PIPE_EXIT_SNAPSHOT=("${PIPESTATUS[@]}")
