@@ -698,6 +698,14 @@ PYEOF
 # 実行前に確定済みの一覧を使うため安全）はこのモードでも従来どおり実行する。
 revert_in_scope() {
   local skip_clean="${1:-0}"
+  # 呼び出し元が「復元を完全実行したか」を個別の原因フラグ（CONTRACT_UNTRACKED_
+  # BACKUP_FAILED / SCOPE_PATH_COMPROMISED 等）の寄せ集めではなくこの単一フラグで
+  # 判定できるよう、保全のため checkout / clean / 復元のいずれかをスキップした
+  # 経路で必ず 1 を立てる（codex P1 指摘・PR #420: 原因フラグの個別参照では
+  # SCOPE_PATH_COMPROMISED 経路のようにフラグが 0 のままスキップされる変種を
+  # 取りこぼし、「リバートしました」の虚偽表示になる。スキップ経路が今後増えても
+  # この関数内で 1 を立てれば表示分岐が漏れない）。呼び出しごとに 0 へ戻す。
+  REVERT_IN_SCOPE_SKIPPED=0
   if [[ "${CONTRACT_UNTRACKED_BACKUP_FAILED:-0}" -eq 1 ]]; then
     # restore_contract_scope が契約範囲内の未追跡ファイル退避に失敗し、fail-closed で
     # index のみ復元（worktree は意図的に未復元）へ降格した直後の呼び出し。ここで
@@ -709,6 +717,7 @@ revert_in_scope() {
     # worktree はそのまま残す。既存 ignored の復元だけは untracked backup の失敗と
     # 無関係（別のバックアップ機構）のため従来どおり実行する。
     echo "警告: 契約範囲内の未追跡ファイル退避が失敗したため、skills-lock.json / .agents/skills/${SKILL_NAME}/ の checkout・git clean は行いません（index のみ復元済みの worktree を上書きしないための保全）。git status --porcelain -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" で内容を確認し、必要なら手動で復旧してください（fail-closed）。" >&2
+    REVERT_IN_SCOPE_SKIPPED=1
   else
     if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
       if [[ -L "skills-lock.json" ]]; then
@@ -716,6 +725,8 @@ revert_in_scope() {
         git checkout -- skills-lock.json 2>/dev/null || true
       elif [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
         echo "警告: skills-lock.json が想定外の実体（ディレクトリ等）に置換されているため自動復元しません。実体を確認・除去してから git checkout -- skills-lock.json で復元してください。" >&2
+        # skills-lock.json の復元をスキップしたため完全復元ではない
+        REVERT_IN_SCOPE_SKIPPED=1
       else
         git checkout -- skills-lock.json 2>/dev/null || true
       fi
@@ -727,11 +738,17 @@ revert_in_scope() {
       # 失わないよう、バックアップ dir は削除せず保全して手動復旧に委ねる。
       IGNORED_BACKUP_KEEP=1
       echo "警告: 許可先経路またはその配下が symlink 等へ置換・作成されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除・既存 ignored の復元は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。既存 ignored ファイルのバックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。" >&2
+      # codex P1 指摘（PR #420）: この経路は CONTRACT_UNTRACKED_BACKUP_FAILED が
+      # 0 のまま checkout・clean をスキップして return するため、原因フラグの個別
+      # 参照で表示分岐すると「リバートしました」の虚偽表示になる。ここでも必ず立てる
+      REVERT_IN_SCOPE_SKIPPED=1
       return 0
     fi
     git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
     if [[ "${skip_clean}" == "1" ]]; then
       echo "警告: 未追跡ファイル一覧を安全に取得できなかったため、.agents/skills/${SKILL_NAME}/ 配下の git clean は実行していません（checker / npx が作成した未追跡ファイルを誤って削除しないための保全。データ喪失防止を優先）。npx / checker による書き込み・未追跡ファイルが残っている可能性があるため、次を手動で確認してください: git status --porcelain -- \".agents/skills/${SKILL_NAME}/\"（内容を確認したうえで不要なもののみ git clean -fd \".agents/skills/${SKILL_NAME}/\" で削除する）。" >&2
+      # git clean をスキップし未追跡が残り得るため完全復元ではない
+      REVERT_IN_SCOPE_SKIPPED=1
     elif [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
       git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
       remove_new_ignored_in_scope || true
@@ -1477,15 +1494,17 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
     restore_contract_scope || true
   fi
   revert_in_scope
-  # revert_in_scope は CONTRACT_UNTRACKED_BACKUP_FAILED=1 の場合、worktree の
-  # checkout・git clean を意図的にスキップし index のみ復元した状態で return する
-  # （関数内の警告 echo 済み）。ここで無条件に「リバートしました」と表示すると、
-  # 実際には未退避の worktree 変更が残っているにもかかわらず復元完了したかのように
-  # 見え、利用者が復旧不要と誤認する（Bugbot 指摘 / Issue #418 再発）。
-  if [[ "${CONTRACT_UNTRACKED_BACKUP_FAILED:-0}" -ne 1 ]]; then
+  # revert_in_scope は保全のため checkout・git clean・復元の一部をスキップして
+  # return することがある（CONTRACT_UNTRACKED_BACKUP_FAILED / SCOPE_PATH_COMPROMISED
+  # 等。いずれも関数内の警告 echo 済み）。ここで無条件に「リバートしました」と
+  # 表示すると、実際には未復元の worktree 変更が残っているにもかかわらず復元完了
+  # したかのように見え、利用者が復旧不要と誤認する（Bugbot 指摘 / Issue #418 再発、
+  # codex P1 指摘 / PR #420 の変種）。個別の原因フラグの寄せ集めではなく、関数が
+  # スキップ有無を一元通知する REVERT_IN_SCOPE_SKIPPED のみで分岐する。
+  if [[ "${REVERT_IN_SCOPE_SKIPPED:-0}" -ne 1 ]]; then
     echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。固定版を外した再実行はしません。" >&2
   else
-    echo "固定版を外した再実行はしません（スコープ内の worktree は上記警告のとおり index のみ復元済みで、手動復旧が必要です）。" >&2
+    echo "固定版を外した再実行はしません（スコープ内は上記警告のとおり一部未復元で、手動復旧が必要です）。" >&2
   fi
   exit 1
 fi
@@ -1513,11 +1532,15 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
     restore_contract_scope || true
   fi
   revert_in_scope
-  # 上の分岐と同じ理由（Bugbot 指摘 / Issue #418 再発）: CONTRACT_UNTRACKED_BACKUP_FAILED=1
-  # のとき revert_in_scope は checkout・git clean をスキップしており worktree は
-  # 未復元のまま残るため、無条件の「リバートしました」表示はしない。
-  if [[ "${CONTRACT_UNTRACKED_BACKUP_FAILED:-0}" -ne 1 ]]; then
+  # 上の分岐と同じ理由（Bugbot 指摘 / Issue #418 再発、codex P1 指摘 / PR #420 の
+  # 変種）: revert_in_scope が保全のため checkout・git clean・復元の一部をスキップ
+  # した場合（CONTRACT_UNTRACKED_BACKUP_FAILED / SCOPE_PATH_COMPROMISED 等）、
+  # worktree は未復元のまま残るため、無条件の「リバートしました」表示はしない。
+  # 個別の原因フラグではなく REVERT_IN_SCOPE_SKIPPED のみで分岐する。
+  if [[ "${REVERT_IN_SCOPE_SKIPPED:-0}" -ne 1 ]]; then
     echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
+  else
+    echo "スコープ内は上記警告のとおり一部未復元です。手動復旧してください。" >&2
   fi
   exit 1
 fi

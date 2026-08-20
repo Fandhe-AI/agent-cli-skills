@@ -1117,8 +1117,10 @@ revert_in_scope() {
   # 呼び出し内で保全のため checkout・clean をスキップした場合のみ 1 を立てる
   # （Bugbot Medium 指摘・Issue #418 系: post-npx の呼び出し元がこの値を見ずに
   # 「スコープ内の変更はリバートしました」と無条件表示すると、worktree に未退避の
-  # 変更が残っているのに復元済みと誤認させる。呼び出しごとに 0 へ戻し、このモードに
-  # 入った場合のみ 1 にする）。
+  # 変更が残っているのに復元済みと誤認させる。codex P1 指摘・PR #420: 個別の原因
+  # フラグの寄せ集めで表示分岐すると SCOPE_PATH_COMPROMISED 経路のような変種を
+  # 取りこぼすため、スキップの有無はこの単一フラグへ一元化する。呼び出しごとに
+  # 0 へ戻し、checkout / clean / 復元のいずれかをスキップした経路で必ず 1 にする）。
   REVERT_IN_SCOPE_SKIPPED=0
   if [[ "${CONTRACT_UNTRACKED_BACKUP_FAILED:-0}" -eq 1 ]]; then
     # restore_contract_scope が契約範囲内の未追跡ファイル退避に失敗し、fail-closed で
@@ -1139,6 +1141,8 @@ revert_in_scope() {
         git checkout -- skills-lock.json 2>/dev/null || true
       elif [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
         echo "警告: skills-lock.json が想定外の実体（ディレクトリ等）に置換されているため自動復元しません。実体を確認・除去してから git checkout -- skills-lock.json で復元してください。" >&2
+        # skills-lock.json の復元をスキップしたため完全復元ではない
+        REVERT_IN_SCOPE_SKIPPED=1
       else
         git checkout -- skills-lock.json 2>/dev/null || true
       fi
@@ -1150,11 +1154,16 @@ revert_in_scope() {
       # 失わないよう、バックアップ dir は削除せず保全して手動復旧に委ねる。
       IGNORED_BACKUP_KEEP=1
       echo "警告: 許可先経路またはその配下が symlink 等へ置換・作成されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除・既存 ignored の復元は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。既存 ignored ファイルのバックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。" >&2
+      # codex P1 指摘（PR #420）: この経路は CONTRACT_UNTRACKED_BACKUP_FAILED が
+      # 0 のまま checkout・clean をスキップして return するため、ここでも必ず立てる
+      REVERT_IN_SCOPE_SKIPPED=1
       return 0
     fi
     git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
     if [[ "${skip_clean}" == "1" ]]; then
       echo "警告: 未追跡ファイル一覧を安全に取得できなかったため、.agents/skills/${SKILL_NAME}/ 配下の git clean は実行していません（checker / npx が作成した未追跡ファイルを誤って削除しないための保全。データ喪失防止を優先）。npx / checker による書き込み・未追跡ファイルが残っている可能性があるため、次を手動で確認してください: git status --porcelain -- \".agents/skills/${SKILL_NAME}/\"（内容を確認したうえで不要なもののみ git clean -fd \".agents/skills/${SKILL_NAME}/\" で削除する）。" >&2
+      # git clean をスキップし未追跡が残り得るため完全復元ではない
+      REVERT_IN_SCOPE_SKIPPED=1
     elif [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
       git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
       remove_new_ignored_in_scope || true
