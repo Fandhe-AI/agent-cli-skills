@@ -60,6 +60,14 @@ function findStep6RejectFence(fences) {
   )
 }
 
+function findStep6CheckerRejectFence(fences) {
+  // checker を持つリポジトリ向けの却下フェンス（PRE_SYNC_TREE からの契約範囲復元）。
+  // git restore --source="${PRE_SYNC_TREE}" と復元後検証の完了メッセージを両方含む。
+  return fences.find(
+    (fence) => /PRE_SYNC_TREE/.test(fence) && /復元完了\(検証済み\)/.test(fence)
+  )
+}
+
 test('SKILL.md: Step 4 フェンスは set +e より前に errexit 状態（$-）を保存する', () => {
   const content = readFileSync(SKILL_MD_PATH, 'utf8')
   const fence = findStep4Fence(extractBashFences(content))
@@ -113,6 +121,44 @@ test('SKILL.md: Step 6 却下フェンスは git clean -fd の前にディレク
   assert.notEqual(cleanIdx, -1, 'git clean -fd 行が見つからない')
   const guardIdx = lines.findIndex((l, i) => i < cleanIdx && /\[\[ -d ".agents\/skills\/\$\{SKILL_NAME\}" \]\]/.test(l))
   assert.notEqual(guardIdx, -1, 'git clean -fd より前にディレクトリ存在確認（[[ -d ... ]]）が無い（ディレクトリ不在時に非ゼロ終了し abort し得る）')
+})
+
+test('SKILL.md: Step 6 却下フェンス（checker 非経由）の残留検出は warning のみで完了扱いにせず exit 1 で停止する（Issue #417 P0 の回帰ピン留め）', () => {
+  const content = readFileSync(SKILL_MD_PATH, 'utf8')
+  const fence = findStep6RejectFence(extractBashFences(content))
+  assert.ok(fence, 'Step 6 却下フェンス（checker 非経由）が見つからない')
+  const lines = fence.split('\n')
+  // 残留検出の if 条件（porcelain / diff --quiet / ls-files --others の複合判定）を探し、
+  // その then 節が echo のみで完了扱いにせず exit 1 で停止することを確認する。
+  const ifIdx = lines.findIndex((l) => /git status --porcelain/.test(l))
+  assert.notEqual(ifIdx, -1, '残留検出の if 条件（git status --porcelain）が見つからない')
+  const thenIdx = lines.findIndex((l, i) => i > ifIdx && /^\s*then\s*$/.test(l))
+  const bodyEnd = lines.findIndex((l, i) => i > (thenIdx === -1 ? ifIdx : thenIdx) && /^\s*fi\s*$/.test(l))
+  assert.notEqual(bodyEnd, -1, '残留検出 if ブロックの fi が見つからない')
+  const body = lines.slice(ifIdx, bodyEnd + 1).join('\n')
+  assert.match(
+    body,
+    /exit 1/,
+    '残留検出の分岐が exit 1 を含まない（echo のみで完了扱いのまま次スキルへ進み得る。Issue #417 P0 の回帰）'
+  )
+})
+
+test('SKILL.md: Step 6 却下フェンス（checker 経由・PRE_SYNC_TREE 復元）の復元後検証も残留検出時に exit 1 で停止する（Issue #417 P0 と対称の回帰ピン留め）', () => {
+  const content = readFileSync(SKILL_MD_PATH, 'utf8')
+  const fence = findStep6CheckerRejectFence(extractBashFences(content))
+  assert.ok(fence, 'Step 6 却下フェンス（checker 経由・PRE_SYNC_TREE 復元）が見つからない')
+  const lines = fence.split('\n')
+  const ifIdx = lines.findIndex((l) => /^if git diff --cached --quiet "\$\{PRE_SYNC_TREE\}"/.test(l))
+  assert.notEqual(ifIdx, -1, '復元後検証の if 条件が見つからない')
+  const elseIdx = lines.findIndex((l, i) => i > ifIdx && /^\s*else\s*$/.test(l))
+  const fiIdx = lines.findIndex((l, i) => i > ifIdx && /^\s*fi\s*$/.test(l))
+  assert.ok(elseIdx !== -1 && fiIdx !== -1 && elseIdx < fiIdx, '復元後検証 if の else/fi が見つからない')
+  const elseBody = lines.slice(elseIdx, fiIdx + 1).join('\n')
+  assert.match(
+    elseBody,
+    /exit 1/,
+    '復元後検証の失敗分岐（else）が exit 1 を含まない（echo のみで完了扱いのまま次スキルへ進み得る）'
+  )
 })
 
 test('挙動: Step 4 フェンスの保存・条件付き復元は呼び出し元の errexit 状態を変えない', () => {
