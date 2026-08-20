@@ -399,6 +399,14 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
       echo "契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元しました(範囲外 path の index・worktree には触れていません)。"
     else
       echo "エラー: 契約範囲の復元後検証で差分が残っています。git diff --cached ${PRE_SYNC_TREE} -- <契約パス> / git diff ${PRE_SYNC_TREE} -- <契約パス> / git ls-files --others -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed。復元完了とは扱いません)。"
+      # 呼び出し元が失敗を検知できるよう非ゼロを返す（Bugbot Medium 指摘: 従来は
+      # echo するだけで成功扱いのまま返っていたため、呼び出し元が fail-closed に
+      # 分岐できなかった）。呼び出し文は `restore_contract_scope || true` の形で
+      # この非ゼロを吸収し、set -e/pipefail の下で本関数の呼び出し文自体が
+      # 呼び出し元の revert_in_scope・案内 echo をスキップして異常終了する
+      # （cleanup が一部欠落する回帰）ことを防ぐ。継続後の可否判定が必要な
+      # 呼び出し元（Step 4 npx 失敗経路）は戻り値を明示的に変数へ拾う。
+      return 1
     fi
   }
 
@@ -425,12 +433,12 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # 実行対象は worktree のファイルではなく、承認済み blob を取り出した CHECKER_EXEC
   bash "${CHECKER_EXEC}" || pre_check_rc=$?
   if ! verify_outside_and_checker; then
-    restore_contract_scope
+    restore_contract_scope || true
     echo "(npx は実行していません)"
     exit 1
   fi
   if [[ "${pre_check_rc}" -ne 0 ]]; then
-    restore_contract_scope
+    restore_contract_scope || true
     echo "エラー: 同期前の local patch 検証に失敗しました。修復してから再実行してください(fail-closed。npx は実行していません)。"
     exit 1
   fi
@@ -1260,6 +1268,7 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
   # 次スキルの `git add skills-lock.json`（Step 7）が
   # この残置変更を承認済みの変更と一緒に stage してしまわないよう、Step 6 の却下時と
   # 同じ手順で当該スキル分のみを即座にリバートしてから skip する。
+  CONTRACT_RESTORE_VERIFY_FAILED=0
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # checker を持つリポジトリでは、同期前 check(check mode)が契約範囲(durable patch 含む)を
     # 変更・stage している可能性があり、index からの worktree 復元しか行わない
@@ -1270,8 +1279,14 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
     # git clean -fd を先に走らせると、restore_contract_scope が退避するはずの契約範囲内の
     # 未追跡ファイル(checker が移動・新規作成した唯一のコピーであり得る)が削除される。
     # 復元後の revert_in_scope は契約パスの checkout / clean が実質 no-op になり、ignored
-    # ファイルの選別削除・既存 ignored の復元・妥協検出時の保全案内だけが働く
-    restore_contract_scope
+    # ファイルの選別削除・既存 ignored の復元・妥協検出時の保全案内だけが働く。
+    # 戻り値を明示的に拾う（Bugbot Medium 指摘: この分岐は他の失敗経路と異なり
+    # 条件次第で continue し得るため、restore_contract_scope の復元後検証が失敗した
+    # 場合に「契約範囲が半端に復元されたまま次スキルの npx へ進む」ことを防ぐには、
+    # 下の exit 1 判定へ明示的に合流させる必要がある）。
+    if ! restore_contract_scope; then
+      CONTRACT_RESTORE_VERIFY_FAILED=1
+    fi
   fi
   revert_in_scope
   rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
@@ -1285,7 +1300,10 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
   # （LOCK_FILE_COMPROMISED）もリンク先への書き込み有無の手動確認を要するため停止する。
   # スコープ外書き込みの検出（NPX_STATUS_OUT_OF_SCOPE_DIRT）も、上のスコープ外書き込み
   # 検出（多層防御）と同じ停止経路であり、continue（skip）ではなくループ全体を止める。
-  if [[ "${NPX_NOOP_DETECTED}" -eq 1 || "${SCOPE_PATH_COMPROMISED}" -eq 1 || "${LOCK_FILE_COMPROMISED}" -eq 1 || "${IGNORED_RESTORE_FAILED}" -eq 1 || "${NPX_STATUS_OUT_OF_SCOPE_DIRT}" -eq 1 ]]; then
+  # 契約範囲の復元後検証失敗（CONTRACT_RESTORE_VERIFY_FAILED）も同様: 半端に復元された
+  # 契約範囲のまま次スキルの npx を続けると、その npx が汚染された前提状態の上で動く
+  # ため continue せずループ全体を止める（Bugbot Medium 指摘）。
+  if [[ "${NPX_NOOP_DETECTED}" -eq 1 || "${SCOPE_PATH_COMPROMISED}" -eq 1 || "${LOCK_FILE_COMPROMISED}" -eq 1 || "${IGNORED_RESTORE_FAILED}" -eq 1 || "${NPX_STATUS_OUT_OF_SCOPE_DIRT}" -eq 1 || "${CONTRACT_RESTORE_VERIFY_FAILED}" -eq 1 ]]; then
     exit 1
   fi
   echo "警告: 固定版を外した再実行はせず、当該スキルの変更をリバートして skip します。"
@@ -1313,7 +1331,7 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 同期前 check の staged 契約変更を残さない(fail-closed 契約)。git clean -fd による
     # 未追跡削除より先に退避を効かせるため revert_in_scope より前に呼ぶ(NPX_STATUS 分岐と同じ)
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   revert_in_scope
   echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
@@ -1361,7 +1379,7 @@ if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 同期前 check の staged 契約変更を残さない(fail-closed 契約)。git clean -fd による
     # 未追跡削除より先に退避を効かせるため revert_in_scope より前に呼ぶ(NPX_STATUS 分岐と同じ)
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   revert_in_scope
   rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
@@ -1381,7 +1399,7 @@ if ! restore_preexisting_ignored; then
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 失敗終端では同期前 check の staged 契約変更も残さない(fail-closed 契約。
     # npx の同期結果ごと同期開始前へ戻し、部分状態のまま Step 7 の git add へ進む経路を断つ)
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   # 他の post-npx 失敗経路と同じくスコープ内をリバートする。checker が無い
   # リポジトリでは、ここで revert_in_scope を呼ばないと npx による skills-lock.json /
@@ -1524,7 +1542,7 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
       || [[ ! -s "${CHECKER_EXEC}" ]] \
       || [[ "$(git hash-object -- "${CHECKER_EXEC}")" != "${CHECKER_APPROVED_HASH}" ]]; then
       echo "エラー: 承認済み checker blob(${CHECKER_APPROVED_HASH})の取り出しに失敗しました。契約範囲を復元して停止します(fail-closed)。"
-      restore_contract_scope
+      restore_contract_scope || true
       exit 1
     fi
   fi
@@ -1539,12 +1557,12 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
     # restore_contract_scope で自動復元してから終了する(「すべての失敗経路で同期開始前へ
     # 戻す」契約。以下の 3 失敗分岐も同じ。shell セッションが切れて関数が失われている
     # 場合は Step 4 のとおり再定義してから実行する)
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
   if [[ "${apply_rc}" -ne 0 ]]; then
     echo "エラー: local patch の再適用に失敗しました。stage・commit へ進まないでください(fail-closed)。"
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
 
@@ -1552,12 +1570,12 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   check_rc=0
   bash "${CHECKER_EXEC}" || check_rc=$?
   if ! verify_outside_and_checker; then
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
   if [[ "${check_rc}" -ne 0 ]]; then
     echo "エラー: 再適用後の最終検証に失敗しました。stage・commit へ進まないでください(fail-closed)。"
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
 fi
@@ -1638,15 +1656,25 @@ git restore --staged --worktree --source="${PRE_SYNC_TREE}" -- scripts/local-pat
 # 復元後検証(fail-closed): 契約パスの index・worktree が同期開始前(PRE_SYNC_TREE)と一致し、
 # 未追跡も残っていない(未追跡は上で退避済み)ことを実測してから完了と扱う。判定基準は
 # HEAD ではなく PRE_SYNC_TREE(HEAD 基準の git status --porcelain だと、同期前から存在した
-# 正当な staged 変更が復元完了後も非空として現れ、正しい復元を誤報する)
-git diff --cached --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
+# 正当な staged 変更が復元完了後も非空として現れ、正しい復元を誤報する)。
+# 検証に失敗した場合はループ全体を exit 1 で停止する（Bugbot Medium 指摘: 従来はここで
+# echo するだけで完了扱いのまま次スキルへ continue していたため、「却下時は fail-closed」
+# というコメント上の意図に反し、半端に復元された契約範囲（skills-lock.json・当該スキル・
+# durable patch のいずれかに raw upstream + 同期前 check の stage が混在した状態）のまま
+# 次スキルの npx が走り得た）。この却下フェンスは Step 4・5.5 の自動失敗経路と異なり
+# ループの外側でユーザーが実行する手動手順のため、`revert_in_scope` の「次スキルへ
+# continue」という既定動作とは切り離し、検証失敗時だけ明示的に停止する。
+if git diff --cached --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
   && git diff --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
-  && [[ -z "$(git ls-files --others --exclude-standard -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/)" ]] \
-  && echo "復元完了(検証済み)" \
-  || echo "エラー: 復元後検証で契約範囲に差分が残っています。git diff --cached ${PRE_SYNC_TREE} -- <契約パス> / git diff ${PRE_SYNC_TREE} -- <契約パス> / git ls-files --others -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed)。"
+  && [[ -z "$(git ls-files --others --exclude-standard -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/)" ]]; then
+  echo "復元完了(検証済み)"
+else
+  echo "エラー: 復元後検証で契約範囲に差分が残っています。git diff --cached ${PRE_SYNC_TREE} -- <契約パス> / git diff ${PRE_SYNC_TREE} -- <契約パス> / git ls-files --others -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してから再実行してください(fail-closed。この却下は完了とは扱わず、ループ全体を停止します)。"
+  exit 1
+fi
 ```
 
-対象は kebab-case 検証済みの当該スキルディレクトリ配下・`skills-lock.json`・durable patch（`scripts/local-patches/`）のみで、承認済みの他スキルの stage にも範囲外 path の index にも影響しない。Step 4・5.5 の**失敗経路**では同じ復元を `restore_contract_scope` が自動実行するため、この手動フェンスはユーザー却下時にのみ使う。
+対象は kebab-case 検証済みの当該スキルディレクトリ配下・`skills-lock.json`・durable patch（`scripts/local-patches/`）のみで、承認済みの他スキルの stage にも範囲外 path の index にも影響しない。Step 4・5.5 の**失敗経路**では同じ復元を `restore_contract_scope` が自動実行するため、この手動フェンスはユーザー却下時にのみ使う。却下の復元後検証（上記フェンス）が失敗した場合は、この却下自体を完了扱いにせずループ全体を `exit 1` で停止する（「却下された場合は次スキルへ continue する」という上記の既定動作は、復元後検証が成功した場合にのみ成立する）。
 
 #### Step 7: 承認されたスキルを stage する（ループ内で積み上げる）
 

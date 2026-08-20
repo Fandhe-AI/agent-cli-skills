@@ -1003,6 +1003,18 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
       echo "契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元しました(範囲外 path の index・worktree には触れていません)。" >&2
     else
       echo "エラー: 契約範囲の復元後検証で差分が残っています。git diff --cached ${PRE_SYNC_TREE} -- <契約パス> / git diff ${PRE_SYNC_TREE} -- <契約パス> / git ls-files --others -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed。復元完了とは扱いません)。" >&2
+      # 呼び出し元が失敗を検知できるよう非ゼロを返す（Bugbot Medium 指摘: 従来は
+      # echo するだけで成功扱いのまま返っていたため、呼び出し元が fail-closed に
+      # 分岐できなかった）。全呼び出し箇所は本関数の呼び出し文を
+      # `restore_contract_scope || true` の形にしてこの非ゼロを吸収している —
+      # 本体は set -euo pipefail 下にあり、素の呼び出し文のまま非ゼロを返すと
+      # 呼び出し元の revert_in_scope・後続の exit 1 の直前に置かれた案内 echo が
+      # 実行されずスクリプトがその場で異常終了してしまう（cleanup が一部
+      # スキップされる回帰）。`|| true` により本関数の失敗はここで吸収しつつ、
+      # 呼び出し元は元から本関数の直後で無条件に exit 1 する設計のため、
+      # 最終的な fail-closed の結果（非ゼロ終了・スコープ内リバート実行）は
+      # 変わらない。
+      return 1
     fi
   }
 
@@ -1011,12 +1023,12 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   # 実行対象は worktree のファイルではなく、承認済み blob を取り出した CHECKER_EXEC
   bash "${CHECKER_EXEC}" || pre_check_rc=$?
   if ! verify_outside_and_checker; then
-    restore_contract_scope
+    restore_contract_scope || true
     echo "(npx は実行していません)" >&2
     exit 1
   fi
   if [[ "${pre_check_rc}" -ne 0 ]]; then
-    restore_contract_scope
+    restore_contract_scope || true
     echo "エラー: 同期前の local patch 検証に失敗しました。状態を修復してから再実行してください(fail-closed。npx は実行していません)。" >&2
     exit 1
   fi
@@ -1288,7 +1300,7 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
     # 移動・新規作成した唯一のコピーであり得る)が削除される。復元後の revert_in_scope は
     # 契約パスの checkout / clean が実質 no-op になり、ignored ファイルの選別削除・
     # 既存 ignored の復元・妥協検出時の保全案内だけが働く
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   revert_in_scope
   echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。固定版を外した再実行はしません。" >&2
@@ -1315,7 +1327,7 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 同期前 check の staged 契約変更を残さない(fail-closed 契約)。git clean -fd による
     # 未追跡削除より先に退避を効かせるため revert_in_scope より前に呼ぶ(NPX_STATUS 分岐と同じ)
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   revert_in_scope
   echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
@@ -1357,7 +1369,7 @@ if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 同期前 check の staged 契約変更を残さない(fail-closed 契約)。git clean -fd による
     # 未追跡削除より先に退避を効かせるため revert_in_scope より前に呼ぶ(NPX_STATUS 分岐と同じ)
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   revert_in_scope
   exit 1
@@ -1374,7 +1386,7 @@ if ! restore_preexisting_ignored; then
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 失敗終端では同期前 check の staged 契約変更も残さない(fail-closed 契約。
     # npx の同期結果ごと同期開始前へ戻し、部分状態のまま git add へ進む経路を断つ)
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   # 他の post-npx 失敗経路と同じくスコープ内をリバートする。checker が無い
   # リポジトリでは、ここで revert_in_scope を呼ばないと npx による skills-lock.json /
@@ -1428,7 +1440,7 @@ if ! git ls-files -z --others --exclude-standard -- "$@" > "${UNTRACKED_LIST_FIL
   # revert_in_scope を挟まないとスコープ内（skills-lock.json /
   # .agents/skills/${SKILL_NAME}/）の worktree 変更が残置される。
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   revert_in_scope
   exit 1
@@ -1510,12 +1522,12 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 範囲外の破壊は上の案内どおり手動復旧として残しつつ、契約範囲(部分適用された patch・
     # checker 由来の index 変更)は自動復元してから終了する(「すべての失敗経路で同期開始前へ
     # 戻す」契約。以下の 3 失敗分岐も同じ)
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
   if [[ "${apply_rc}" -ne 0 ]]; then
     echo "エラー: local patch の再適用に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
   echo ""
@@ -1523,12 +1535,12 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   check_rc=0
   bash "${CHECKER_EXEC}" || check_rc=$?
   if ! verify_outside_and_checker; then
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
   if [[ "${check_rc}" -ne 0 ]]; then
     echo "エラー: 再適用後の最終検証に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
 
