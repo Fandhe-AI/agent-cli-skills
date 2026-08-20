@@ -905,17 +905,43 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   # ユーザーによる checker 内容レビュー + blob hash 承認である。本検証はその上に
   # 重ねる best-effort の追加防御(defense-in-depth)として扱うこと
   OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
+  # 内部コマンド（git read-tree / git add / git write-tree / git ls-files / git
+  # hash-object）はいずれも `local` 代入・`$(...)` 経由で呼ぶため、失敗しても
+  # `set -e` が必ずこの関数の呼び出し元（`$(outside_state)` を `[[ ]]` の条件式内で
+  # 使う verify_outside_and_checker 等）まで伝播するとは限らない（`[[ ]]` の条件式は
+  # errexit の伝播対象外であり、内部でコマンドが早期に失敗して空文字のまま関数を
+  # 抜けても、その非ゼロ終了は握り潰されて文字列比較にしか使われない）。空 digest
+  # 同士が偶然一致すると「契約範囲外の変更なし」と誤判定し得るため（Bugbot Medium
+  # 指摘）、失敗時は他の呼び出し・他の成功時 digest と絶対に一致しない一意な
+  # エラーマーカーを出力したうえで明示的に非ゼロを返す。PID（$BASHPID。呼び出しごとに
+  # 新しいサブシェルが fork されるため呼び出し間で重複しない）とナノ秒時刻を組み合わせ、
+  # date が使えない環境向けに $RANDOM を二重フォールバックにする。
   outside_state() {
-    local tmp_index_dir wt_tree idx_digest
-    tmp_index_dir="$(mktemp -d)"
-    GIT_INDEX_FILE="${tmp_index_dir}/index" git read-tree HEAD
-    GIT_INDEX_FILE="${tmp_index_dir}/index" git add -A -- "${OUTSIDE_PATHSPEC[@]}"
-    wt_tree="$(GIT_INDEX_FILE="${tmp_index_dir}/index" git write-tree)"
+    local tmp_index_dir wt_tree idx_digest rc=0
+    tmp_index_dir="$(mktemp -d)" || rc=1
+    if [[ "${rc}" -eq 0 ]] && ! GIT_INDEX_FILE="${tmp_index_dir}/index" git read-tree HEAD; then
+      rc=1
+    fi
+    if [[ "${rc}" -eq 0 ]] && ! GIT_INDEX_FILE="${tmp_index_dir}/index" git add -A -- "${OUTSIDE_PATHSPEC[@]}"; then
+      rc=1
+    fi
+    if [[ "${rc}" -eq 0 ]]; then
+      wt_tree="$(GIT_INDEX_FILE="${tmp_index_dir}/index" git write-tree)" || rc=1
+    fi
     rm -rf "${tmp_index_dir}"
-    idx_digest="$(git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" | git hash-object --stdin)"
+    if [[ "${rc}" -eq 0 ]]; then
+      idx_digest="$(git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" | git hash-object --stdin)" || rc=1
+    fi
+    if [[ "${rc}" -ne 0 ]]; then
+      echo "(outside-state-error:${BASHPID:-$$}:$(date +%s%N 2>/dev/null || echo "${RANDOM}${RANDOM}"))"
+      return 1
+    fi
     echo "${wt_tree}:${idx_digest}"
   }
-  PRE_OUTSIDE="$(outside_state)"
+  if ! PRE_OUTSIDE="$(outside_state)"; then
+    echo "エラー: 契約範囲外の基準 digest（PRE_OUTSIDE）の取得に失敗しました。以後の範囲外書き込み検出ができないため同期を開始しません(fail-closed。checker は未実行です)。" >&2
+    exit 1
+  fi
 
   # checker の「すべての」実行(同期前 check / apply / 最終 check)の直後に、実行結果に
   # 関わらず範囲外 digest と checker 自身の blob hash を再検証する。範囲外を書き換えて
@@ -928,7 +954,18 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
       echo "エラー: checker 自身が書き換えられました(symlink 化を含む)。未承認の状態のため以後実行しません(fail-closed)。" >&2
       return 1
     fi
-    if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
+    # outside_state の失敗は「変化なしと確認できない」であって「変化なし」ではない
+    # ため、戻り値を明示的に検査する（[[ ]] の条件式内で `$(outside_state)` を直接
+    # 使うと、内部コマンドの失敗による非ゼロ終了が握り潰され空文字列同士の比較に
+    # 落ちてしまう。関数自体が一意なエラーマーカーを返す設計にしてあるためこの
+    # 比較でも安全側に倒れるが、ここでは戻り値も明示的に見て二重に fail-closed を
+    # 担保する）。
+    local outside_now
+    if ! outside_now="$(outside_state)"; then
+      echo "エラー: 契約範囲外の digest 取得に失敗しました。変化なしと確認できないため、範囲外書き込みありとして扱います(fail-closed)。" >&2
+      return 1
+    fi
+    if [[ "${outside_now}" != "${PRE_OUTSIDE}" ]]; then
       echo "エラー: checker が契約範囲外の path を変更しました(fail-closed)。" >&2
       echo "git status --porcelain で範囲外の変更を特定し、tracked は git restore -- <path> / index は git restore --staged -- <path> で手動復旧してください(契約範囲用の復元手順では範囲外は戻りません)。checker 側の修正も必要です。" >&2
       return 1
