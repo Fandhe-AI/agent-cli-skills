@@ -696,6 +696,63 @@ PYEOF
 # 留める）。checkout（tracked のみが対象で未追跡ファイルには触れない）と
 # restore_preexisting_ignored（npx 実行前バックアップからの復元。列挙ではなく
 # 実行前に確定済みの一覧を使うため安全）はこのモードでも従来どおり実行する。
+#
+# Issue #422: 未追跡集合の「列挙自体」（git ls-files --others 等）が失敗し、1 件も
+# 退避できていない（＝何が未退避か分からない）モードに限り、checkout が上書きし得る
+# worktree の現状を git 非依存の cp でまるごと保全してから tracked の checkout を
+# 行えるようにするための下ごしらえ。壊れている git には一切頼らず、ファイルシステム
+# 操作（cp -p / cp -RP）のみで skills-lock.json と .agents/skills/${SKILL_NAME}/ を
+# mktemp -d 先へ複製する。呼び出し元（revert_in_scope）は、この関数が成功した場合に
+# 限り checkout を実行し、失敗した場合は従来どおり checkout ごと丸ごとスキップする
+# （fail-closed。cp が失敗した状態で checkout すると、退避されていない worktree
+# 内容が無音に上書きされ得るため）。
+contract_worktree_backup() {
+  local dir
+  if ! dir="$(mktemp -d)"; then
+    echo "エラー: worktree 保全用の退避先ディレクトリ作成に失敗しました。" >&2
+    return 1
+  fi
+  local ok=1
+  if [[ -e "skills-lock.json" ]]; then
+    if [[ -L "skills-lock.json" ]]; then
+      # symlink はリンク先（リポジトリ外を含む）を辿らないよう対象外にする
+      # （SCOPE_PATH_COMPROMISED / LOCK_FILE_COMPROMISED と同じ fail-closed 判断。
+      # 呼び出し元はこれらのフラグが 0 のときのみこの関数を呼ぶため通常到達しないが、
+      # 二重の防御として保持する）。
+      echo "エラー: skills-lock.json がシンボリックリンクのため保全できません。" >&2
+      ok=0
+    elif [[ -f "skills-lock.json" ]]; then
+      cp -p -- "skills-lock.json" "${dir}/skills-lock.json" || ok=0
+    fi
+  fi
+  if [[ "${ok}" -eq 1 && -e ".agents/skills/${SKILL_NAME}" ]]; then
+    if [[ -L ".agents/skills/${SKILL_NAME}" ]]; then
+      echo "エラー: .agents/skills/${SKILL_NAME}/ がシンボリックリンクのため保全できません。" >&2
+      ok=0
+    elif [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
+      # -RP: シンボリックリンクを辿らずリンク自体を複製する（配下に symlink が
+      # 混在していてもリンク先へは書き込み・読み取りしない）
+      if ! mkdir -p "${dir}/.agents/skills"; then
+        ok=0
+      elif ! cp -RP -- ".agents/skills/${SKILL_NAME}" "${dir}/.agents/skills/${SKILL_NAME}"; then
+        ok=0
+      fi
+    fi
+  fi
+  if [[ "${ok}" -eq 1 ]]; then
+    CONTRACT_WORKTREE_BACKUP_DIR="${dir}"
+    return 0
+  fi
+  # 部分コピーが残っている場合はデータ保全を優先し、削除せず退避先を保全する。
+  # 何もコピーされていない（空のまま）場合のみ退避先ディレクトリを掃除する。
+  if [[ -z "$(find "${dir}" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+    rmdir "${dir}" 2>/dev/null || true
+  else
+    echo "エラー: worktree の保全が一部失敗しましたが、退避できた分は ${dir} に残しています。" >&2
+  fi
+  return 1
+}
+
 revert_in_scope() {
   local skip_clean="${1:-0}"
   # 呼び出し元が「復元を完全実行したか」を個別の原因フラグ（CONTRACT_UNTRACKED_
@@ -713,10 +770,30 @@ revert_in_scope() {
     # PRE_SYNC_TREE へ戻されている）を worktree へ書き戻し、restore_contract_scope が
     # 守ろうとした未退避の worktree 内容（checker / npx が作成した唯一のコピーで
     # あり得る）を無音に上書きしてしまう（Bugbot 指摘: Index restore enables later
-    # overwrite / Issue #418 の再発）。checkout・git clean は丸ごとスキップし、
-    # worktree はそのまま残す。既存 ignored の復元だけは untracked backup の失敗と
-    # 無関係（別のバックアップ機構）のため従来どおり実行する。
-    echo "警告: 契約範囲内の未追跡ファイル退避が失敗したため、skills-lock.json / .agents/skills/${SKILL_NAME}/ の checkout・git clean は行いません（index のみ復元済みの worktree を上書きしないための保全）。git status --porcelain -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" で内容を確認し、必要なら手動で復旧してください（fail-closed）。" >&2
+    # overwrite / Issue #418 の再発）。既存 ignored の復元だけは untracked backup の
+    # 失敗と無関係（別のバックアップ機構）のため、このブロックの外側で従来どおり実行する。
+    #
+    # Issue #422: ただし「未追跡集合の列挙自体」が失敗し 1 件も退避できていない
+    # モード（個別 mv 失敗と異なり、何が未退避か分からないだけで worktree の現状
+    # 自体は破損していない）に限り、checkout 前に git 非依存の cp で worktree を
+    # まるごと保全できれば、tracked 分（skills-lock.json / .agents/skills 配下）の
+    # checkout は行ってよい。これにより checker が無いリポジトリ（preview_untracked
+    # ケース7）と同じ「tracked はリバートされる」挙動に揃える。妥協検出
+    # （SCOPE_PATH_COMPROMISED / LOCK_FILE_COMPROMISED）がある場合は、checkout 先の
+    # パス自体の信頼性が崩れているため、この救済経路には進まない。
+    if [[ "${CONTRACT_UNTRACKED_ENUM_FAILED:-0}" -eq 1 \
+      && "${SCOPE_PATH_COMPROMISED:-0}" -eq 0 \
+      && "${LOCK_FILE_COMPROMISED:-0}" -eq 0 ]] \
+      && contract_worktree_backup; then
+      # 1 コマンド 1 パスで分離する理由は他の checkout 呼び出しと同じ
+      # （revert_in_scope 冒頭のコメント参照）。git clean は未追跡集合が依然
+      # 不明なままのため、この経路でも実行しない。
+      git checkout -- skills-lock.json 2>/dev/null || true
+      git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+      echo "警告: 契約範囲内の未追跡ファイル列挙が失敗したため、checkout 前の worktree 内容を ${CONTRACT_WORKTREE_BACKUP_DIR} へ複製してから skills-lock.json / .agents/skills/${SKILL_NAME}/ の tracked 分のみ checkout しました（git clean は実行していません）。git status --porcelain -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" で残留未追跡を確認し、必要なら手動で後始末してください（fail-closed。完全復元ではありません）。" >&2
+    else
+      echo "警告: 契約範囲内の未追跡ファイル退避が失敗したため、skills-lock.json / .agents/skills/${SKILL_NAME}/ の checkout・git clean は行いません（index のみ復元済みの worktree を上書きしないための保全）。git status --porcelain -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" で内容を確認し、必要なら手動で復旧してください（fail-closed）。" >&2
+    fi
     REVERT_IN_SCOPE_SKIPPED=1
   else
     if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
@@ -1071,6 +1148,13 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # なる(Issue #418)。retreat 対象を 1 件ずつ処理し、失敗があれば worktree 復元を
     # 行わず index のみへ降格する(revert_in_scope の非破壊モードと同じ判断)
     local backup_failed=0 failed_paths=()
+    # Issue #422: backup_failed のうち「列挙自体（mktemp / git ls-files / mktemp -d）が
+    # 失敗し 1 件も退避していない」モードだけを区別するフラグ。個別ファイルの mv 失敗
+    # （enum_failed=0 のまま backup_failed=1 になる）とは異なり、この場合は「未追跡集合が
+    # 何か」自体が不明なため git clean は依然として行えないが、「worktree の現状自体は
+    # 壊れていない」ため revert_in_scope が cp 退避を挟んで tracked の checkout を
+    # 救済できる（revert_in_scope 側の CONTRACT_UNTRACKED_ENUM_FAILED 分岐参照）
+    local enum_failed=0
     # npx 実行後検証が許可先経路・skills-lock.json の妥協(symlink 化等)を検出している場合、
     # worktree への書き込み・未追跡退避のパス走査がリンク先(リポジトリ外を含む)へ向かい得る
     # ため index のみ復元する(worktree 側は revert_in_scope が手動復旧を案内済み)。
@@ -1082,6 +1166,7 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
       if ! untracked_list="$(mktemp)"; then
         echo "エラー: 未追跡ファイル列挙用の一時ファイル作成に失敗しました。退避の完全性を確認できないため index のみ復元します。" >&2
         backup_failed=1
+        enum_failed=1
       fi
       # skills-lock.json も退避対象に含める。通常は tracked のため列挙されないが、checker が
       # git rm --cached 等で未追跡化して内容変更した後に失敗すると、退避なしの git restore が
@@ -1093,11 +1178,13 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
         # 失敗として扱う(revert_in_scope 導入時と同じ fail-closed 判断)
         echo "エラー: 契約範囲内の未追跡ファイル列挙に失敗しました。退避の完全性を確認できないため index のみ復元します。" >&2
         backup_failed=1
+        enum_failed=1
       fi
       if [[ "${backup_failed}" -eq 0 ]]; then
         if ! CONTRACT_UNTRACKED_BACKUP_DIR="$(mktemp -d)"; then
           echo "エラー: 未追跡ファイルの退避先ディレクトリ作成に失敗しました。index のみ復元します。" >&2
           backup_failed=1
+          enum_failed=1
         fi
       fi
       if [[ "${backup_failed}" -eq 0 ]]; then
@@ -1149,6 +1236,7 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # enables later overwrite）。revert_in_scope 側でこの global を見て checkout /
     # clean を丸ごとスキップし、退避が失敗した worktree を意図的に未復元のまま残す。
     CONTRACT_UNTRACKED_BACKUP_FAILED="${backup_failed}"
+    CONTRACT_UNTRACKED_ENUM_FAILED="${enum_failed}"
     # 複数パスを 1 コマンドへ渡すと pathspec 不一致 1 件で全体が失敗するため 1 コマンド
     # 1 パスで分離する(revert_in_scope と同じ理由)。pathspec は index に対しても照合される
     # ため、PRE_SYNC_TREE 取得後に新規作成・stage されたファイルは tree に無くても
