@@ -939,7 +939,17 @@ PYEOF
 # 想定外実体（ディレクトリ等）は rm -f で除去できず checkout も安全に働かないため、
 # 一切触らず手動復旧を案内する。
 # SKILL_NAME はループの現在値を呼び出し時に参照する。
+# 第1引数（既定 0）を 1 にすると git clean -fd / remove_new_ignored_in_scope を
+# 一切実行しない「非破壊モード」になる（codex P0 指摘: preview_untracked の
+# git ls-files 失敗時など、未追跡集合を安全に列挙できなかった状態でこの関数を
+# 呼ぶと、checker / npx が作成した「唯一のコピーであり得る」未追跡ファイルを
+# バックアップなしで git clean -fd が削除してしまう。列挙が壊れている以上、
+# 何を消してよいか判定できないため、削除系操作は一切行わず手動復旧の案内に
+# 留める）。checkout（tracked のみが対象で未追跡ファイルには触れない）と
+# restore_preexisting_ignored（npx 実行前バックアップからの復元。列挙ではなく
+# 実行前に確定済みの一覧を使うため安全）はこのモードでも従来どおり実行する。
 revert_in_scope() {
+  local skip_clean="${1:-0}"
   if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
     if [[ -L "skills-lock.json" ]]; then
       rm -f skills-lock.json
@@ -960,7 +970,9 @@ revert_in_scope() {
     return 0
   fi
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-  if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
+  if [[ "${skip_clean}" == "1" ]]; then
+    echo "警告: 未追跡ファイル一覧を安全に取得できなかったため、.agents/skills/${SKILL_NAME}/ 配下の git clean は実行していません（checker / npx が作成した未追跡ファイルを誤って削除しないための保全。データ喪失防止を優先）。npx / checker による書き込み・未追跡ファイルが残っている可能性があるため、次を手動で確認してください: git status --porcelain -- \".agents/skills/${SKILL_NAME}/\"（内容を確認したうえで不要なもののみ git clean -fd \".agents/skills/${SKILL_NAME}/\" で削除する）。" >&2
+  elif [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
     git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
     remove_new_ignored_in_scope || true
   fi

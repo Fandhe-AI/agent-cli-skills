@@ -687,7 +687,17 @@ PYEOF
 # してから checkout で index の内容を regular file として書き戻す。symlink 以外の
 # 想定外実体（ディレクトリ等）は rm -f で除去できず checkout も安全に働かないため、
 # 一切触らず手動復旧を案内する。
+# 第1引数（既定 0）を 1 にすると git clean -fd / remove_new_ignored_in_scope を
+# 一切実行しない「非破壊モード」になる（codex P0 指摘: preview_untracked の
+# git ls-files 失敗時など、未追跡集合を安全に列挙できなかった状態でこの関数を
+# 呼ぶと、checker / npx が作成した「唯一のコピーであり得る」未追跡ファイルを
+# バックアップなしで git clean -fd が削除してしまう。列挙が壊れている以上、
+# 何を消してよいか判定できないため、削除系操作は一切行わず手動復旧の案内に
+# 留める）。checkout（tracked のみが対象で未追跡ファイルには触れない）と
+# restore_preexisting_ignored（npx 実行前バックアップからの復元。列挙ではなく
+# 実行前に確定済みの一覧を使うため安全）はこのモードでも従来どおり実行する。
 revert_in_scope() {
+  local skip_clean="${1:-0}"
   if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
     if [[ -L "skills-lock.json" ]]; then
       rm -f skills-lock.json
@@ -708,7 +718,9 @@ revert_in_scope() {
     return 0
   fi
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-  if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
+  if [[ "${skip_clean}" == "1" ]]; then
+    echo "警告: 未追跡ファイル一覧を安全に取得できなかったため、.agents/skills/${SKILL_NAME}/ 配下の git clean は実行していません（checker / npx が作成した未追跡ファイルを誤って削除しないための保全。データ喪失防止を優先）。npx / checker による書き込み・未追跡ファイルが残っている可能性があるため、次を手動で確認してください: git status --porcelain -- \".agents/skills/${SKILL_NAME}/\"（内容を確認したうえで不要なもののみ git clean -fd \".agents/skills/${SKILL_NAME}/\" で削除する）。" >&2
+  elif [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
     git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
     remove_new_ignored_in_scope || true
   fi
@@ -1434,15 +1446,23 @@ echo ""
 # 上書きで前回分を破棄するため、呼び出しごとの mktemp・rm は不要。
 if ! git ls-files -z --others --exclude-standard -- "$@" > "${UNTRACKED_LIST_FILE}"; then
   echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。内容未確認のまま承認できてしまうため中止します。" >&2
-  # 他の post-npx 失敗経路（NPX_STATUS 分岐等）と同じ復旧を行う。npx / apply が
-  # 成功した後にここで停止すると、restore_contract_scope を挟まずに終了すると
-  # local-patch checker がある場合の契約範囲 index が同期開始前へ戻らず、
-  # revert_in_scope を挟まないとスコープ内（skills-lock.json /
-  # .agents/skills/${SKILL_NAME}/）の worktree 変更が残置される。
+  # 他の post-npx 失敗経路（NPX_STATUS 分岐等）と同じく tracked 分の契約範囲は
+  # 復元するが、破壊的な cleanup（git clean -fd）は行わない（codex P0 指摘の
+  # 再修正: git ls-files が壊れている以上、restore_contract_scope 自身の未追跡
+  # バックアップ列挙・git clean -fd が対象とする「新規未追跡集合」のどちらも
+  # 安全に確定できない。この状態で revert_in_scope（無引数）の git clean -fd を
+  # 実行すると、checker / npx が作成した「唯一のコピーであり得る」未追跡
+  # ファイルをバックアップなしで削除しデータ喪失になり得る。restore_contract_scope
+  # は git restore（tracked 限定。未追跡には触れない）が主体で、未追跡バックアップ
+  # 部分は列挙失敗時に警告するだけで削除は行わないため、`|| true` で呼んでも
+  # 安全。revert_in_scope は第2引数 1（skip_clean）で clean 系を一切スキップし、
+  # checkout（tracked のみ）と restore_preexisting_ignored（実行前バックアップ
+  # からの復元。列挙非依存）のみ行う。
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     restore_contract_scope || true
   fi
-  revert_in_scope
+  revert_in_scope 1
+  echo "エラー: 未追跡ファイルの一覧化ができなかったため、.agents/skills/${SKILL_NAME}/ 配下の破壊的な後始末（git clean -fd）はスキップしました。npx / checker の書き込み・未追跡ファイルが残っている可能性があります。git status --porcelain -- \".agents/skills/${SKILL_NAME}/\" で確認し、内容を確認したうえで不要なもののみ手動で git clean -fd \".agents/skills/${SKILL_NAME}/\" してください（fail-closed）。" >&2
   exit 1
 fi
 while IFS= read -r -d '' f; do
