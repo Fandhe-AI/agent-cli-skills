@@ -1659,15 +1659,27 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   # ユーザー却下時の復元手順(stdout へ出す。失敗経路は restore_contract_scope が自動復元
   # するため使わない)。PRE_SYNC_TREE は本 process 終了後に環境から消えるため、値そのものを
   # 展開して案内する
+  # 案内の順序は SKILL.md の却下フェンスと同じ retreat-first(先に未追跡を退避 → 退避が
+  # 全件成功した場合にのみ worktree 復元)。restore を先に案内すると、checker が
+  # git rm --cached で未追跡化・書き換えた skills-lock.json 等の「唯一のコピー」が
+  # 退避されないまま snapshot の内容で無音に上書きされる(Issue #418 と同じ欠陥が
+  # 案内文経由で再現する)
   restore_help() {
-    echo "同期前へ戻すには(契約パス限定で index + worktree を同期開始前 snapshot へ復元する。範囲外 path の index・worktree には触れない):"
+    echo "同期前へ戻すには(契約パス限定で index + worktree を同期開始前 snapshot へ復元する。範囲外 path の index・worktree には触れない。必ず 1. 退避 → 2. 復元の順で実行する):"
+    echo "  # 1. 復元より先に、契約範囲内の未追跡ファイルを退避する(checker が git rm --cached 等で"
+    echo "  #    未追跡化・書き換えた skills-lock.json 等の「唯一のコピー」であり得るため、退避せず"
+    echo "  #    git restore --worktree へ進むと snapshot の内容で無音に上書きされデータ喪失になる):"
+    echo "  backup_dir=\"\$(mktemp -d)\" || exit 1  # 退避先の作成に失敗したら復元へ進まない(fail-closed)"
+    echo "  untracked_list=\"\$(mktemp)\" || exit 1"
+    echo "  git ls-files -z --others --exclude-standard -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/ > \"\${untracked_list}\" || exit 1  # 列挙に失敗したら復元へ進まない(fail-closed)"
+    echo "  while IFS= read -r -d '' p; do mkdir -p \"\${backup_dir}/\$(dirname \"\${p}\")\" && mv -- \"\${p}\" \"\${backup_dir}/\${p}\" || { echo \"退避失敗: \${p}\" >&2; exit 1; }; done < \"\${untracked_list}\"; rm -f \"\${untracked_list}\""
+    echo "  echo \"未追跡ファイルの退避先: \${backup_dir}\""
+    echo "  # 2. 退避が全件成功した場合にのみ index + worktree を復元する(1 件でも退避に失敗した"
+    echo "  #    場合は worktree 復元を行わず、SKILL.md の却下フェンスに従って手動復旧する):"
     echo "  git restore --staged --worktree --source=${PRE_SYNC_TREE} -- skills-lock.json"
     echo "  git restore --staged --worktree --source=${PRE_SYNC_TREE} -- \".agents/skills/${SKILL_NAME}/\" 2>/dev/null || true"
     echo "  git restore --staged --worktree --source=${PRE_SYNC_TREE} -- scripts/local-patches/ 2>/dev/null || true"
-    echo "  # 契約範囲内に未追跡ファイルが残る場合は、削除前に内容を確認して退避を判断する"
-    echo "  # (skills-lock.json は checker による未追跡化があり得るため含める):"
-    echo "  git ls-files --others --exclude-standard -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/"
-    echo "  # 復元後は契約範囲が同期開始前 snapshot と一致し未追跡も無いことを確認する"
+    echo "  # 3. 復元後は契約範囲が同期開始前 snapshot と一致し未追跡も無いことを確認する"
     echo "  # (基準は HEAD ではなく snapshot。git status だと同期前からの正当な staged 変更が誤検出される):"
     echo "  git diff --cached ${PRE_SYNC_TREE} -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/  # 空出力が成功"
     echo "  git diff ${PRE_SYNC_TREE} -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" scripts/local-patches/  # 空出力が成功"
