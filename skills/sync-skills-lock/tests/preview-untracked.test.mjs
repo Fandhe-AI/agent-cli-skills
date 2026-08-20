@@ -342,7 +342,10 @@ test('ケース6: upstream が新規サブディレクトリごとファイル�
 })
 
 test('ケース7: git ls-files が失敗した場合、fail-open で「なし」と誤表示せずスクリプトが' +
-  '非ゼロ終了する', () => {
+  '非ゼロ終了し、npx 成功分のスコープ内書き込みもリバートされる（Bugbot Medium 指摘: ' +
+  'preview_untracked の git ls-files 失敗が revert_in_scope を挟まず exit 1 するだけだと、' +
+  'npx が既に成功させた skills-lock.json / .agents/skills/<name>/ の書き込みが worktree に' +
+  '残置される）', () => {
   const ctx = setupRepo('new-file')
   addGitLsFilesFailure(ctx.binDir)
   try {
@@ -365,6 +368,18 @@ test('ケース7: git ls-files が失敗した場合、fail-open で「なし」
         return true
       },
     )
+
+    // npx 自体（skills-lock.json の computedHash 更新・SKILL.md の上書き）は
+    // preview_untracked より前に成功済みのため、revert_in_scope を挟まずに exit 1
+    // するだけだとこの書き込みが worktree に残る。修正後はスコープ内がリバートされ
+    // clean であること（新規未追跡ファイル NEW_FILE.md は git clean で削除される）。
+    const lockDiff = sh('git status --porcelain -- skills-lock.json', ctx.repoDir).trim()
+    assert.equal(lockDiff, '', 'skills-lock.json はリバートされ clean であること')
+    const treeDiff = sh(
+      `git status --porcelain -- ".agents/skills/${SKILL_NAME}/"`,
+      ctx.repoDir,
+    ).trim()
+    assert.equal(treeDiff, '', '.agents/skills/<name>/ はリバートされ clean であること')
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })

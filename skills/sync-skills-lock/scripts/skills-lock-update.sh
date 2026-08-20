@@ -142,6 +142,22 @@ if [[ "${GIT_DIR_PHYS}" != "${TOPLEVEL_PHYS}/.git" ]] \
   exit 1
 fi
 
+# カレントディレクトリが作業ツリールートであることの検証（Bugbot Medium 指摘）:
+# 上のブロックは GIT_DIR が <toplevel>/.git であることまでしか確認しない。
+# repo_state_signature は path_state の起点を「.」（cwd）にしているため、
+# サブディレクトリから実行すると .git（hooks・refs・config・objects）が起点の
+# 走査対象から外れ、上の worktree 検証をすべて満たしたまま npx による .git 改変を
+# 検出できなくなる。pwd -P を toplevel と同じ手法で物理パス化し、厳密一致しない
+# 場合は npx 未実行のまま中止する。
+if ! CWD_PHYS="$(pwd -P)"; then
+  echo "エラー: カレントディレクトリの物理パス解決（pwd -P）に失敗しました。作業ツリールートでの実行と確認できないため中止します（fail-closed）。" >&2
+  exit 1
+fi
+if [[ "${CWD_PHYS}" != "${TOPLEVEL_PHYS}" ]]; then
+  echo "エラー: カレントディレクトリ（${CWD_PHYS}）が作業ツリールート（${TOPLEVEL_PHYS}）と一致しません。repo_state_signature はカレントディレクトリを起点に走査するため、サブディレクトリから実行すると .git（hooks・refs・config・objects）が署名対象外になり npx による改変を検出できません。作業ツリールートで実行し直してください（fail-closed）。" >&2
+  exit 1
+fi
+
 # 許可先経路の実体検証（PR #412 P0 指摘）: スコープ外検査（porcelain 比較・状態
 # シグネチャ比較）は .agents/skills/${SKILL_NAME} を「パス文字列」で走査除外する。
 # この経路上のいずれかの要素が実行前から symlink だと、npx がリンク先（リポジトリ外を
@@ -1360,6 +1376,14 @@ if ! restore_preexisting_ignored; then
     # npx の同期結果ごと同期開始前へ戻し、部分状態のまま git add へ進む経路を断つ)
     restore_contract_scope
   fi
+  # 他の post-npx 失敗経路と同じくスコープ内をリバートする。checker が無い
+  # リポジトリでは、ここで revert_in_scope を呼ばないと npx による skills-lock.json /
+  # .agents/skills/${SKILL_NAME}/ への書き込みが worktree に残ったまま停止し、
+  # 次回実行時の「実行前 clean」ガードに引っかかって当該スキルが skip され続ける。
+  # revert_in_scope は内部で restore_preexisting_ignored を再試行するが、失敗が
+  # 続いても IGNORED_BACKUP_KEEP=1 で警告するだけで非ゼロ終了はしない
+  # （呼び出し元のこの分岐がすでに exit 1 を担保しているため）。
+  revert_in_scope
   exit 1
 fi
 
@@ -1398,6 +1422,15 @@ echo ""
 # 上書きで前回分を破棄するため、呼び出しごとの mktemp・rm は不要。
 if ! git ls-files -z --others --exclude-standard -- "$@" > "${UNTRACKED_LIST_FILE}"; then
   echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。内容未確認のまま承認できてしまうため中止します。" >&2
+  # 他の post-npx 失敗経路（NPX_STATUS 分岐等）と同じ復旧を行う。npx / apply が
+  # 成功した後にここで停止すると、restore_contract_scope を挟まずに終了すると
+  # local-patch checker がある場合の契約範囲 index が同期開始前へ戻らず、
+  # revert_in_scope を挟まないとスコープ内（skills-lock.json /
+  # .agents/skills/${SKILL_NAME}/）の worktree 変更が残置される。
+  if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
+    restore_contract_scope
+  fi
+  revert_in_scope
   exit 1
 fi
 while IFS= read -r -d '' f; do
