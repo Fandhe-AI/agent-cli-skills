@@ -1082,7 +1082,13 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
       rm -f "${untracked_list:-}"
       if [[ "${moved}" -eq 1 ]]; then
         echo "契約範囲内の未追跡ファイルは削除せず ${CONTRACT_UNTRACKED_BACKUP_DIR} に相対パス構造で退避しました。内容を確認し、不要なら手動で削除してください。" >&2
-      elif [[ "${backup_failed}" -eq 0 ]]; then
+      elif [[ -n "${CONTRACT_UNTRACKED_BACKUP_DIR:-}" ]]; then
+        # backup_failed=1 かつ moved=0(退避先ディレクトリ作成には成功したが最初の
+        # ファイルの mkdir/mv で失敗した)場合も、空のまま残る退避先ディレクトリを掃除する。
+        # CONTRACT_UNTRACKED_BACKUP_DIR は mktemp -d 自体が失敗した経路(未追跡ファイル
+        # 列挙用の一時ファイル作成失敗・git ls-files 失敗・mktemp -d 失敗)では未設定の
+        # ままのため、set -u 下での unbound variable エラーを避けるため -n で存在確認
+        # してから参照する
         rmdir "${CONTRACT_UNTRACKED_BACKUP_DIR}" 2>/dev/null || true
       fi
       if [[ "${backup_failed}" -eq 1 ]]; then
