@@ -891,6 +891,12 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
     CHECKER_RUN_VERIFY_FAILED=0
     if [[ -z "${CHECKER_EXEC:-}" || ! -f "${CHECKER_EXEC}" \
       || "$(git hash-object -- "${CHECKER_EXEC}" 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
+      # 置換前の一時ファイルを明示的に削除してから再代入する（Bugbot Medium / codex
+      # P2 指摘: 再代入するだけだと EXIT trap は最後に代入された CHECKER_EXEC しか
+      # 回収できず、途中で作られた旧一時ファイルが /tmp に残る。checker の apply に
+      # よる自己書換えという通常ケースでもこの分岐は毎回通るため、mktemp の直前に
+      # 確実に削除する）。
+      [[ -z "${CHECKER_EXEC:-}" ]] || rm -f "${CHECKER_EXEC}"
       CHECKER_EXEC="$(mktemp)"
       if ! git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}" \
         || [[ ! -s "${CHECKER_EXEC}" ]] \

@@ -302,6 +302,11 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
     CHECKER_RUN_VERIFY_FAILED=0
     if [[ -z "${CHECKER_EXEC:-}" || ! -f "${CHECKER_EXEC}" \
       || "$(git hash-object -- "${CHECKER_EXEC}" 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
+      # 置換前の一時ファイルを明示的に削除してから再代入する（Bugbot Medium / codex
+      # P2 指摘: 再代入するだけだと旧一時ファイルが /tmp に残る。checker の apply に
+      # よる自己書換えという通常ケースでもこの分岐は毎回通るため、mktemp の直前に
+      # 確実に削除する）。
+      [[ -z "${CHECKER_EXEC:-}" ]] || rm -f "${CHECKER_EXEC}"
       CHECKER_EXEC="$(mktemp)"
       if ! git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}" \
         || [[ ! -s "${CHECKER_EXEC}" ]] \
@@ -350,8 +355,17 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # エラーマーカーを出力したうえで明示的に非ゼロを返す。PID（$BASHPID。呼び出しごとに
   # 新しいサブシェルが fork されるため呼び出し間で重複しない）とナノ秒時刻を組み合わせ、
   # date が使えない環境向けに $RANDOM を二重フォールバックにする。
+  # git ls-files | git hash-object のような素のパイプラインは、このフェンスが
+  # pipefail を有効化していない限り末尾コマンドの終了状態しか見ない（Bugbot
+  # Medium / codex P1 指摘）。git ls-files だけが失敗しても空 stdin が正常に
+  # hash 化されて rc=0 のままになり、上の fail-closed 分岐（エラーマーカー）を
+  # 通らない。scripts/skills-lock-update.sh はファイル先頭の `set -euo pipefail`
+  # で保護されているため同型の記述でも安全だが、このフェンス単体では保証がないため、
+  # パイプラインを使わず producer（git ls-files）の出力を一時ファイルへ書き出して
+  # から終了コードを個別に検査し、その後 git hash-object をファイル入力で実行する
+  # 形に分離する。
   outside_state() {
-    local tmp_index_dir wt_tree idx_digest rc=0
+    local tmp_index_dir wt_tree idx_digest idx_list_file rc=0
     tmp_index_dir="$(mktemp -d)" || rc=1
     if [[ "${rc}" -eq 0 ]] && ! GIT_INDEX_FILE="${tmp_index_dir}/index" git read-tree HEAD; then
       rc=1
@@ -363,9 +377,17 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
       wt_tree="$(GIT_INDEX_FILE="${tmp_index_dir}/index" git write-tree)" || rc=1
     fi
     rm -rf "${tmp_index_dir}"
+    idx_list_file=""
     if [[ "${rc}" -eq 0 ]]; then
-      idx_digest="$(git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" | git hash-object --stdin)" || rc=1
+      idx_list_file="$(mktemp)" || rc=1
     fi
+    if [[ "${rc}" -eq 0 ]] && ! git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" > "${idx_list_file}"; then
+      rc=1
+    fi
+    if [[ "${rc}" -eq 0 ]]; then
+      idx_digest="$(git hash-object --stdin < "${idx_list_file}")" || rc=1
+    fi
+    [[ -z "${idx_list_file}" ]] || rm -f "${idx_list_file}"
     if [[ "${rc}" -ne 0 ]]; then
       echo "(outside-state-error:${BASHPID:-$$}:$(date +%s%N 2>/dev/null || echo "${RANDOM}${RANDOM}"))"
       return 1
