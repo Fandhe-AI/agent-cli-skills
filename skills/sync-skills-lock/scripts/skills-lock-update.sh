@@ -760,6 +760,11 @@ revert_in_scope() {
   # （この関数の呼び出し元はすべて exit 1 で終端するため、非ゼロ終了の契約は保たれる）。
   if ! restore_preexisting_ignored; then
     IGNORED_BACKUP_KEEP=1
+    # codex P1 指摘（PR #420・3 巡目）: 復元失敗もフラグ契約の「復元をスキップした
+    # （完全実行できなかった）経路」に含まれる。ここで立てないと npx 失敗・status
+    # 取得失敗の呼び出し元が、既存 ignored が未復元のまま「変更はリバートしました」と
+    # 表示してしまう
+    REVERT_IN_SCOPE_SKIPPED=1
     echo "エラー: 実行前から存在した ignored ファイルの復元に失敗しました。バックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。手動で復旧してください。" >&2
   fi
 }
