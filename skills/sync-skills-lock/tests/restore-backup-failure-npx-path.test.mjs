@@ -159,6 +159,13 @@ test('npx 失敗パス(revert_in_scope 到達)でも、退避(mv)失敗時は wo
       /契約範囲を同期開始前.*へ復元しました/,
       '退避失敗時は無条件の復元成功メッセージを出力しない',
     )
+
+    assert.doesNotMatch(
+      stdout,
+      /スコープ内（skills-lock\.json \/ \.agents\/skills\/[^）]+）の変更はリバートしました/,
+      '退避失敗で checkout・git clean をスキップしたにもかかわらず「リバートしました」と' +
+        '無条件表示しない（Issue #418 再発の回帰。実際には未退避の worktree 変更が残る）',
+    )
   } finally {
     rmSync(ctx.repoDir, { recursive: true, force: true })
     rmSync(ctx.binDir, { recursive: true, force: true })

@@ -1477,7 +1477,16 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
     restore_contract_scope || true
   fi
   revert_in_scope
-  echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。固定版を外した再実行はしません。" >&2
+  # revert_in_scope は CONTRACT_UNTRACKED_BACKUP_FAILED=1 の場合、worktree の
+  # checkout・git clean を意図的にスキップし index のみ復元した状態で return する
+  # （関数内の警告 echo 済み）。ここで無条件に「リバートしました」と表示すると、
+  # 実際には未退避の worktree 変更が残っているにもかかわらず復元完了したかのように
+  # 見え、利用者が復旧不要と誤認する（Bugbot 指摘 / Issue #418 再発）。
+  if [[ "${CONTRACT_UNTRACKED_BACKUP_FAILED:-0}" -ne 1 ]]; then
+    echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。固定版を外した再実行はしません。" >&2
+  else
+    echo "固定版を外した再実行はしません（スコープ内の worktree は上記警告のとおり index のみ復元済みで、手動復旧が必要です）。" >&2
+  fi
   exit 1
 fi
 
@@ -1504,7 +1513,12 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
     restore_contract_scope || true
   fi
   revert_in_scope
-  echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
+  # 上の分岐と同じ理由（Bugbot 指摘 / Issue #418 再発）: CONTRACT_UNTRACKED_BACKUP_FAILED=1
+  # のとき revert_in_scope は checkout・git clean をスキップしており worktree は
+  # 未復元のまま残るため、無条件の「リバートしました」表示はしない。
+  if [[ "${CONTRACT_UNTRACKED_BACKUP_FAILED:-0}" -ne 1 ]]; then
+    echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
+  fi
   exit 1
 fi
 
