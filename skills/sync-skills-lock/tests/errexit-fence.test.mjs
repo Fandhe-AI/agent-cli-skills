@@ -198,6 +198,73 @@ test('挙動: Step 4 フェンスの保存・条件付き復元は呼び出し�
   assert.ok(stateEnabled.includes('e'), `errexit 有効開始のはずが復元されなかった: $-=${stateEnabled}`)
 })
 
+test('SKILL.md: Step 6 却下フェンス（checker 非経由）は git status / git ls-files の command substitution 失敗を明示的に検知して fail-closed する（Issue #417 P0 CI 指摘の回帰ピン留め）', () => {
+  const content = readFileSync(SKILL_MD_PATH, 'utf8')
+  const fence = findStep6RejectFence(extractBashFences(content))
+  assert.ok(fence, 'Step 6 却下フェンス（checker 非経由）が見つからない')
+  // `[[ -n "$(cmd)" ]]` は cmd の終了コードを見ないため、削除前の未追跡判定・最終残留
+  // 検出のいずれも command substitution を if の条件式として実行し、失敗時に明示的な
+  // エラーメッセージ付きで exit 1 することを確認する（出力を変数へ一度だけ代入してから
+  // 内容判定する構造。同じ command substitution を条件式内で2回評価する旧実装ではない）。
+  assert.match(
+    fence,
+    /if\s+!\s+\w+="\$\(git ls-files -z --others --exclude-standard -- skills-lock\.json\)";\s*then/,
+    '削除前の git ls-files 呼び出しが command substitution の失敗を検知する形（if ! VAR="$(...)"; then）になっていない'
+  )
+  assert.match(
+    fence,
+    /if\s+!\s+\w+="\$\(git status --porcelain -- "\.agents\/skills\/\$\{SKILL_NAME\}\/"\)";\s*then/,
+    '最終検証の git status 呼び出しが command substitution の失敗を検知する形になっていない'
+  )
+  // 失敗検知の直後に fail-closed で exit 1 すること（値が空のまま「残留なし」に
+  // フォールスルーしない）。
+  const lines = fence.split('\n')
+  const lockCheckIdx = lines.findIndex((l) => /if\s+!\s+\w+="\$\(git ls-files -z --others --exclude-standard -- skills-lock\.json\)";\s*then/.test(l))
+  assert.notEqual(lockCheckIdx, -1)
+  const lockCheckFiIdx = lines.findIndex((l, i) => i > lockCheckIdx && /^\s*fi\s*$/.test(l))
+  assert.match(lines.slice(lockCheckIdx, lockCheckFiIdx + 1).join('\n'), /exit 1/, '削除前 git ls-files 失敗検知の分岐が exit 1 を含まない')
+})
+
+test('挙動: Step 6 却下フェンス（checker 非経由）は git status --porcelain が異常終了した場合、空出力を「残留なし」と誤判定せず exit 1 で停止する（Issue #417 P0 CI 指摘の回帰）', () => {
+  const content = readFileSync(SKILL_MD_PATH, 'utf8')
+  const fence = findStep6RejectFence(extractBashFences(content))
+  assert.ok(fence, 'Step 6 却下フェンスが見つからない')
+
+  const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+  const tmp = mkdtempSync(join(tmpdir(), 'errexit-fence-step6-statusfail-'))
+  const binDir = join(tmp, 'bin')
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: tmp })
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: tmp })
+    execFileSync('git', ['config', 'user.name', 'test'], { cwd: tmp })
+    writeFileSync(join(tmp, 'skills-lock.json'), '{"initial":true}\n')
+
+    // git status --porcelain -- <当該スキルディレクトリ> の呼び出しだけを異常終了させ、
+    // 他の git 呼び出し（checkout / clean / diff / ls-files）は実 git へ委譲する擬似 git を
+    // 用意する。これにより「コマンド自体が失敗して空出力になったケース」を再現する。
+    execFileSync('mkdir', ['-p', binDir])
+    writeFileSync(
+      join(binDir, 'git'),
+      `#!/bin/bash\nif [[ "$1" == "status" && "$2" == "--porcelain" ]]; then\n  echo "fake permission error" >&2\n  exit 128\nfi\nexec '${realGit}' "$@"\n`
+    )
+    execFileSync('chmod', ['+x', join(binDir, 'git')])
+
+    const script = `set -euo pipefail\ncd '${tmp}'\nSKILL_NAME='test-fence-skill'\nPATH='${binDir}:'"$PATH"\n${fence}\necho DONE\n`
+    let threw = false
+    let stderr = ''
+    try {
+      execFileSync('bash', ['-c', script], { encoding: 'utf8' })
+    } catch (err) {
+      threw = true
+      stderr = String(err.stderr ?? '')
+    }
+    assert.ok(threw, 'git status --porcelain が異常終了したにもかかわらず、フェンスが exit 1 せず完走した（空出力を「残留なし」と誤判定した可能性。Issue #417 P0 CI 指摘の回帰）')
+    assert.match(stderr, /fail-closed/, 'git status 失敗時の fail-closed エラーメッセージが出力されていない')
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 test('挙動: Step 6 却下フェンスは初回生成相当の状態でも set -e 下で abort せず完走する', () => {
   const content = readFileSync(SKILL_MD_PATH, 'utf8')
   const fence = findStep6RejectFence(extractBashFences(content))

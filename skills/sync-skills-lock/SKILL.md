@@ -1757,7 +1757,15 @@ git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
 # を持つリポジトリ向けの却下フェンス（下記「checker を持つリポジトリの却下は次を使う」節）が
 # 同種のファイルを削除せず一時ディレクトリへ退避するのは、checker（apply）が既存内容を
 # 書き換えた唯一のコピーである可能性があるためで、事情が異なる（この経路にはその可能性がない）。
-if [[ -n "$(git ls-files -z --others --exclude-standard -- skills-lock.json)" ]]; then
+# `[[ -n "$(cmd)" ]]` は cmd の終了コードを見ず出力の空/非空だけを見るため、権限・index
+# 異常等で cmd 自体が失敗して空出力になった場合「残留なし」と誤判定し得る（Issue #417
+# P0 指摘）。command substitution は if の条件式として実行し、失敗時は変数を空のまま
+# fail-closed で停止してから、内容の空・非空を判定する
+if ! LOCK_UNTRACKED_CHECK="$(git ls-files -z --others --exclude-standard -- skills-lock.json)"; then
+  echo "エラー: skills-lock.json の未追跡判定(git ls-files)に失敗しました。空出力を「未追跡なし」と誤判定しないため停止します(fail-closed)。権限・index 異常等の原因を解消してから再実行してください。" >&2
+  exit 1
+fi
+if [[ -n "${LOCK_UNTRACKED_CHECK}" ]]; then
   rm -f skills-lock.json
 fi
 # npx が新規作成した未追跡ファイルも削除（Step 4 の clean ガードで実行前は clean を保証済み）。
@@ -1781,9 +1789,21 @@ fi
 # 一緒に stage され得るため、warning のみで継続してはならない（Issue #417。checker を
 # 持つリポジトリ向けの却下フェンス（同期開始前 snapshot からの復元）と同じ fail-closed
 # 扱いに揃える）
-if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]] \
+# `[[ -n "$(git status ...)" ]]` / `[[ -n "$(git ls-files ...)" ]]` は command substitution
+# の終了コードを見ないため、権限・index 異常等でコマンド自体が失敗して空出力になった場合
+# 「残留なし」と誤判定し得る（Issue #417 P0 指摘。CI codex-review 指摘と同一の穴）。
+# 各出力を個別代入し、取得失敗を明示的に検知してから内容判定へ進む
+if ! FINAL_STATUS_OUT="$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")"; then
+  echo "エラー: ${SKILL_NAME} 配下の残留確認(git status)に失敗しました。空出力を「残留なし」と誤判定しないため停止します(fail-closed)。原因を解消してから再実行してください。" >&2
+  exit 1
+fi
+if ! FINAL_LOCK_UNTRACKED_OUT="$(git ls-files -z --others --exclude-standard -- skills-lock.json)"; then
+  echo "エラー: skills-lock.json の未追跡残留確認(git ls-files)に失敗しました。空出力を「残留なし」と誤判定しないため停止します(fail-closed)。原因を解消してから再実行してください。" >&2
+  exit 1
+fi
+if [[ -n "${FINAL_STATUS_OUT}" ]] \
   || ! git diff --quiet -- skills-lock.json \
-  || [[ -n "$(git ls-files -z --others --exclude-standard -- skills-lock.json)" ]]; then
+  || [[ -n "${FINAL_LOCK_UNTRACKED_OUT}" ]]; then
   echo "エラー: 却下リバートが完了していません（${SKILL_NAME} 配下の残留変更、または skills-lock.json の worktree 差分・未追跡残留）。git status を確認し、手動復旧してから再実行してください（fail-closed。次スキルへは進めません）。" >&2
   exit 1
 fi
