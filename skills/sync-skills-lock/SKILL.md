@@ -1745,6 +1745,21 @@ git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-
 # 検証ブロックで確認する — || true は成功扱いではなく確認を先送りするだけ）
 git checkout -- skills-lock.json 2>/dev/null || true
 git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+# skills-lock.json が npx の初回生成で未追跡のまま残っている場合、上の checkout は
+# 「追跡対象なし」で何もせず(|| true が吸収)ファイルは削除されない。Step 4 の事前
+# clean ガードにより実行前の未追跡 skills-lock.json は無いことが保証されているため、
+# ここで未追跡のまま見つかる skills-lock.json は今回の npx が生成したものに限られ、
+# 安全に削除できる。削除しないと直後の検証(git ls-files --others)が必ず残留を検出し、
+# 「却下時は当該スキルのみリバートして次スキルへ continue」という契約を満たせないまま
+# 必ず exit 1 になる(Issue #417 P1 指摘)。
+# この経路は checker を持たない(このフェンスは checker 非経由の単純リバート専用)ため、
+# 未追跡 skills-lock.json の唯一の出所は npx の初回生成であり削除して問題ない。checker
+# を持つリポジトリ向けの却下フェンス（下記「checker を持つリポジトリの却下は次を使う」節）が
+# 同種のファイルを削除せず一時ディレクトリへ退避するのは、checker（apply）が既存内容を
+# 書き換えた唯一のコピーである可能性があるためで、事情が異なる（この経路にはその可能性がない）。
+if [[ -n "$(git ls-files -z --others --exclude-standard -- skills-lock.json)" ]]; then
+  rm -f skills-lock.json
+fi
 # npx が新規作成した未追跡ファイルも削除（Step 4 の clean ガードで実行前は clean を保証済み）。
 # ${SKILL_NAME} は kebab-case 検証済みのため、対象は当該スキルディレクトリ配下に限定される。
 # git clean はディレクトリが存在しない場合に非ゼロ終了するため、revert_in_scope と同じく

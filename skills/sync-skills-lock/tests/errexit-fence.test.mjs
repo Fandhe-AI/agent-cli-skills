@@ -21,7 +21,7 @@
 //      回帰シナリオ）
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -160,9 +160,19 @@ test('挙動: Step 6 却下フェンスは初回生成相当の状態でも set 
     execFileSync('git', ['config', 'user.name', 'test'], { cwd: tmp })
     // 初回生成相当: skills-lock.json は未追跡（tracked にしない）、スキル
     // ディレクトリは存在しない。SKILL_NAME はテスト専用の kebab-case 値を使う。
+    // skills-lock.json は実際にファイルとして作成しておく（未追跡「ファイルが
+    // 存在する」経路を再現しないと、削除処理の欠落を検出できない。Issue #417 P1 指摘:
+    // 従来のテストはこのファイルを作成しておらず、git ls-files --others が常に
+    // 空集合を返すため経路自体を再現できていなかった）。
+    writeFileSync(join(tmp, 'skills-lock.json'), '{"initial":true}\n')
     const script = `set -euo pipefail\ncd '${tmp}'\nSKILL_NAME='test-fence-skill'\n${fence}\necho DONE\n`
     const out = execFileSync('bash', ['-c', script], { encoding: 'utf8' })
     assert.match(out, /DONE/, 'Step 6 却下フェンスが set -e 下で完走しなかった（abort した可能性）')
+    assert.equal(
+      existsSync(join(tmp, 'skills-lock.json')),
+      false,
+      '未追跡の skills-lock.json が却下リバート後も残留している（次スキルの承認時に一緒に stage され得る）'
+    )
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
