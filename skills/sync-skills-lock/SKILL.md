@@ -498,6 +498,15 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
         echo "未退避のファイルを手動で退避してから、git restore --worktree --source=${PRE_SYNC_TREE} -- <path> で契約範囲の worktree を復旧してください。"
       fi
     fi
+    # revert_in_scope（この関数の直後に必ず呼ばれる）が backup_failed を検知できる
+    # よう、global へも反映する。backup_failed=1 のとき restore_targets は
+    # (--staged) へ降格して worktree には触れないが、`git restore --staged` 自体は
+    # tracked な契約パスの index を PRE_SYNC_TREE へ戻すため、この後 revert_in_scope
+    # が無条件に `git checkout -- <契約パス>` を実行すると、その index を worktree へ
+    # 書き戻して未退避の worktree 内容を上書きしてしまう（Bugbot 指摘: Index restore
+    # enables later overwrite）。revert_in_scope 側でこの global を見て checkout /
+    # clean を丸ごとスキップし、退避が失敗した worktree を意図的に未復元のまま残す。
+    CONTRACT_UNTRACKED_BACKUP_FAILED="${backup_failed}"
     # 複数パスを 1 コマンドへ渡すと pathspec 不一致 1 件で全体が失敗するため 1 コマンド
     # 1 パスで分離する。pathspec は index に対しても照合されるため、PRE_SYNC_TREE 取得後に
     # 新規作成・stage されたファイルは tree に無くても no-overlay で index(・worktree)から
@@ -1104,31 +1113,44 @@ PYEOF
 # 実行前に確定済みの一覧を使うため安全）はこのモードでも従来どおり実行する。
 revert_in_scope() {
   local skip_clean="${1:-0}"
-  if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
-    if [[ -L "skills-lock.json" ]]; then
-      rm -f skills-lock.json
-      git checkout -- skills-lock.json 2>/dev/null || true
-    elif [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
-      echo "警告: skills-lock.json が想定外の実体（ディレクトリ等）に置換されているため自動復元しません。実体を確認・除去してから git checkout -- skills-lock.json で復元してください。" >&2
+  if [[ "${CONTRACT_UNTRACKED_BACKUP_FAILED:-0}" -eq 1 ]]; then
+    # restore_contract_scope が契約範囲内の未追跡ファイル退避に失敗し、fail-closed で
+    # index のみ復元（worktree は意図的に未復元）へ降格した直後の呼び出し。ここで
+    # 通常どおり `git checkout -- <契約パス>` を実行すると、その index（すでに
+    # PRE_SYNC_TREE へ戻されている）を worktree へ書き戻し、restore_contract_scope が
+    # 守ろうとした未退避の worktree 内容（checker / npx が作成した唯一のコピーで
+    # あり得る）を無音に上書きしてしまう（Bugbot 指摘: Index restore enables later
+    # overwrite / Issue #418 の再発）。checkout・git clean は丸ごとスキップし、
+    # worktree はそのまま残す。既存 ignored の復元だけは untracked backup の失敗と
+    # 無関係（別のバックアップ機構）のため従来どおり実行する。
+    echo "警告: 契約範囲内の未追跡ファイル退避が失敗したため、skills-lock.json / .agents/skills/${SKILL_NAME}/ の checkout・git clean は行いません（index のみ復元済みの worktree を上書きしないための保全）。git status --porcelain -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" で内容を確認し、必要なら手動で復旧してください（fail-closed）。" >&2
+  else
+    if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
+      if [[ -L "skills-lock.json" ]]; then
+        rm -f skills-lock.json
+        git checkout -- skills-lock.json 2>/dev/null || true
+      elif [[ -e "skills-lock.json" && ! -f "skills-lock.json" ]]; then
+        echo "警告: skills-lock.json が想定外の実体（ディレクトリ等）に置換されているため自動復元しません。実体を確認・除去してから git checkout -- skills-lock.json で復元してください。" >&2
+      else
+        git checkout -- skills-lock.json 2>/dev/null || true
+      fi
     else
       git checkout -- skills-lock.json 2>/dev/null || true
     fi
-  else
-    git checkout -- skills-lock.json 2>/dev/null || true
-  fi
-  if [[ "${SCOPE_PATH_COMPROMISED}" -ne 0 ]]; then
-    # symlink 越しの走査を避けるため既存 ignored の復元も行わない。復元素材を
-    # 失わないよう、バックアップ dir は削除せず保全して手動復旧に委ねる。
-    IGNORED_BACKUP_KEEP=1
-    echo "警告: 許可先経路またはその配下が symlink 等へ置換・作成されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除・既存 ignored の復元は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。既存 ignored ファイルのバックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。" >&2
-    return 0
-  fi
-  git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-  if [[ "${skip_clean}" == "1" ]]; then
-    echo "警告: 未追跡ファイル一覧を安全に取得できなかったため、.agents/skills/${SKILL_NAME}/ 配下の git clean は実行していません（checker / npx が作成した未追跡ファイルを誤って削除しないための保全。データ喪失防止を優先）。npx / checker による書き込み・未追跡ファイルが残っている可能性があるため、次を手動で確認してください: git status --porcelain -- \".agents/skills/${SKILL_NAME}/\"（内容を確認したうえで不要なもののみ git clean -fd \".agents/skills/${SKILL_NAME}/\" で削除する）。" >&2
-  elif [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
-    git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
-    remove_new_ignored_in_scope || true
+    if [[ "${SCOPE_PATH_COMPROMISED}" -ne 0 ]]; then
+      # symlink 越しの走査を避けるため既存 ignored の復元も行わない。復元素材を
+      # 失わないよう、バックアップ dir は削除せず保全して手動復旧に委ねる。
+      IGNORED_BACKUP_KEEP=1
+      echo "警告: 許可先経路またはその配下が symlink 等へ置換・作成されているため、.agents/skills/${SKILL_NAME}/ への checkout・git clean・ignored 削除・既存 ignored の復元は行いません（リンク先への削除・書き込みを避けるため）。symlink の指す先と許可先の内容を手動確認し、symlink を除去してから復旧してください。既存 ignored ファイルのバックアップは ${IGNORED_BACKUP_DIR} に相対パス構造で残っています。" >&2
+      return 0
+    fi
+    git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
+    if [[ "${skip_clean}" == "1" ]]; then
+      echo "警告: 未追跡ファイル一覧を安全に取得できなかったため、.agents/skills/${SKILL_NAME}/ 配下の git clean は実行していません（checker / npx が作成した未追跡ファイルを誤って削除しないための保全。データ喪失防止を優先）。npx / checker による書き込み・未追跡ファイルが残っている可能性があるため、次を手動で確認してください: git status --porcelain -- \".agents/skills/${SKILL_NAME}/\"（内容を確認したうえで不要なもののみ git clean -fd \".agents/skills/${SKILL_NAME}/\" で削除する）。" >&2
+    elif [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
+      git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
+      remove_new_ignored_in_scope || true
+    fi
   fi
   # 既存 ignored の変更・削除はここでバックアップから戻す（checkout / clean /
   # remove_new_ignored_in_scope はいずれも既存 ignored に触れないため、この復元が
