@@ -117,7 +117,11 @@ test('SKILL.md: Step 6 却下フェンスは git clean -fd の前にディレク
   const fence = findStep6RejectFence(extractBashFences(content))
   assert.ok(fence, 'Step 6 却下フェンスが見つからない')
   const lines = fence.split('\n')
-  const cleanIdx = lines.findIndex((l) => /git clean -fd/.test(l))
+  // 行頭（空白許容）から始まる実コマンドのみを対象にする。`.test(l)` の無条件部分一致だと
+  // 実コマンドより前にある `# git clean は...` 等のコメント行にも一致し、cleanIdx が
+  // コメント位置を指してしまい、後段の「存在確認が git clean より前にある」という検証が
+  // 実際のコマンド配置を評価できなくなる（codex P2 指摘）。
+  const cleanIdx = lines.findIndex((l) => /^\s*git clean -fd(?:\s|$)/.test(l))
   assert.notEqual(cleanIdx, -1, 'git clean -fd 行が見つからない')
   const guardIdx = lines.findIndex((l, i) => i < cleanIdx && /\[\[ -d ".agents\/skills\/\$\{SKILL_NAME\}" \]\]/.test(l))
   assert.notEqual(guardIdx, -1, 'git clean -fd より前にディレクトリ存在確認（[[ -d ... ]]）が無い（ディレクトリ不在時に非ゼロ終了し abort し得る）')
