@@ -284,6 +284,41 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   fi
   echo "CHECKER_EXEC=${CHECKER_EXEC}  # 実行対象(承認済み blob の取り出し先)。Step 5.5 まで同一 shell で保持する(失われたら承認済み hash から再作成する)"
 
+  # checker を実行する唯一の経路（codex P1 指摘: CHECKER_EXEC はただの一時ファイルで
+  # あり、直前の実行〔特に apply は checker 自身のコードを実行するため自己書換えも
+  # 可能〕による置換・改変〔TOCTOU〕が、検証されないまま次の実行へ紛れ込み得る。
+  # 起動時に1度取り出した後は再検証せず bash に渡していたため、同期前 check の直後に
+  # CHECKER_EXEC が残置・置換された場合、承認済み blob と異なるコードが Step 5.5 の
+  # apply・最終検証で実行される経路が残っていた）。呼び出しごとに毎回
+  # `git hash-object` でハッシュを再検証し、不一致・不在なら承認済み blob から
+  # 無条件に書き直してから実行する。検証と実行を1関数に閉じ込めることで、呼び出し
+  # 箇所（同期前 check・Step 5.5 の apply・最終検証）が増えても検証漏れが構造的に
+  # 起きないようにする。Step 5.5 で shell セッションが切れて本関数が失われている
+  # 場合は、他の Step 4 定義関数（outside_state 等）と同様にこの定義を再実行してから
+  # 使う。戻り値の扱い: 「取り出し・検証自体の失敗」と「checker が実行された結果の
+  # 非ゼロ終了」を呼び出し元が区別できるよう、前者は CHECKER_RUN_VERIFY_FAILED=1 を
+  # 立ててから非ゼロを返す（checker 自身の exit code と衝突しない専用シグナル）。
+  run_checker() {
+    CHECKER_RUN_VERIFY_FAILED=0
+    if [[ -z "${CHECKER_EXEC:-}" || ! -f "${CHECKER_EXEC}" \
+      || "$(git hash-object -- "${CHECKER_EXEC}" 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
+      # 置換前の一時ファイルを明示的に削除してから再代入する（Bugbot Medium / codex
+      # P2 指摘: 再代入するだけだと旧一時ファイルが /tmp に残る。checker の apply に
+      # よる自己書換えという通常ケースでもこの分岐は毎回通るため、mktemp の直前に
+      # 確実に削除する）。
+      [[ -z "${CHECKER_EXEC:-}" ]] || rm -f "${CHECKER_EXEC}"
+      CHECKER_EXEC="$(mktemp)"
+      if ! git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}" \
+        || [[ ! -s "${CHECKER_EXEC}" ]] \
+        || [[ "$(git hash-object -- "${CHECKER_EXEC}")" != "${CHECKER_APPROVED_HASH}" ]]; then
+        echo "エラー: 承認済み checker blob(${CHECKER_APPROVED_HASH})の取り出し・検証に失敗しました(fail-closed)。"
+        CHECKER_RUN_VERIFY_FAILED=1
+        return 1
+      fi
+    fi
+    bash "${CHECKER_EXEC}" "$@"
+  }
+
   # durable patch 置き場は承認時に directory ごと stage し、却下時に index からの復元 +
   # git clean の対象になるため、未 stage の WIP・未追跡ファイルが残っていると巻き込まれて
   # 失われる。staged のみの変更(= 本ループ内で承認済みに積み上がった分)は許容する。
@@ -309,17 +344,60 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # ユーザーによる checker 内容レビュー + blob hash 承認である。本検証はその上に
   # 重ねる best-effort の追加防御(defense-in-depth)として扱うこと
   OUTSIDE_PATHSPEC=(. ":(exclude)skills-lock.json" ":(exclude).agents/skills/${SKILL_NAME}" ":(exclude)scripts/local-patches")
+  # 内部コマンド（git read-tree / git add / git write-tree / git ls-files / git
+  # hash-object）はいずれも `local` 代入・`$(...)` 経由で呼ぶため、失敗しても
+  # `set -e` が必ずこの関数の呼び出し元（`$(outside_state)` を `[[ ]]` の条件式内で
+  # 使う verify_outside_and_checker 等）まで伝播するとは限らない（`[[ ]]` の条件式は
+  # errexit の伝播対象外であり、内部でコマンドが早期に失敗して空文字のまま関数を
+  # 抜けても、その非ゼロ終了は握り潰されて文字列比較にしか使われない）。空 digest
+  # 同士が偶然一致すると「契約範囲外の変更なし」と誤判定し得るため（Bugbot Medium
+  # 指摘）、失敗時は他の呼び出し・他の成功時 digest と絶対に一致しない一意な
+  # エラーマーカーを出力したうえで明示的に非ゼロを返す。PID（$BASHPID。呼び出しごとに
+  # 新しいサブシェルが fork されるため呼び出し間で重複しない）とナノ秒時刻を組み合わせ、
+  # date が使えない環境向けに $RANDOM を二重フォールバックにする。
+  # git ls-files | git hash-object のような素のパイプラインは、このフェンスが
+  # pipefail を有効化していない限り末尾コマンドの終了状態しか見ない（Bugbot
+  # Medium / codex P1 指摘）。git ls-files だけが失敗しても空 stdin が正常に
+  # hash 化されて rc=0 のままになり、上の fail-closed 分岐（エラーマーカー）を
+  # 通らない。scripts/skills-lock-update.sh はファイル先頭の `set -euo pipefail`
+  # で保護されているため同型の記述でも安全だが、このフェンス単体では保証がないため、
+  # パイプラインを使わず producer（git ls-files）の出力を一時ファイルへ書き出して
+  # から終了コードを個別に検査し、その後 git hash-object をファイル入力で実行する
+  # 形に分離する。
   outside_state() {
-    local tmp_index_dir wt_tree idx_digest
-    tmp_index_dir="$(mktemp -d)"
-    GIT_INDEX_FILE="${tmp_index_dir}/index" git read-tree HEAD
-    GIT_INDEX_FILE="${tmp_index_dir}/index" git add -A -- "${OUTSIDE_PATHSPEC[@]}"
-    wt_tree="$(GIT_INDEX_FILE="${tmp_index_dir}/index" git write-tree)"
+    local tmp_index_dir wt_tree idx_digest idx_list_file rc=0
+    tmp_index_dir="$(mktemp -d)" || rc=1
+    if [[ "${rc}" -eq 0 ]] && ! GIT_INDEX_FILE="${tmp_index_dir}/index" git read-tree HEAD; then
+      rc=1
+    fi
+    if [[ "${rc}" -eq 0 ]] && ! GIT_INDEX_FILE="${tmp_index_dir}/index" git add -A -- "${OUTSIDE_PATHSPEC[@]}"; then
+      rc=1
+    fi
+    if [[ "${rc}" -eq 0 ]]; then
+      wt_tree="$(GIT_INDEX_FILE="${tmp_index_dir}/index" git write-tree)" || rc=1
+    fi
     rm -rf "${tmp_index_dir}"
-    idx_digest="$(git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" | git hash-object --stdin)"
+    idx_list_file=""
+    if [[ "${rc}" -eq 0 ]]; then
+      idx_list_file="$(mktemp)" || rc=1
+    fi
+    if [[ "${rc}" -eq 0 ]] && ! git ls-files -s -z -- "${OUTSIDE_PATHSPEC[@]}" > "${idx_list_file}"; then
+      rc=1
+    fi
+    if [[ "${rc}" -eq 0 ]]; then
+      idx_digest="$(git hash-object --stdin < "${idx_list_file}")" || rc=1
+    fi
+    [[ -z "${idx_list_file}" ]] || rm -f "${idx_list_file}"
+    if [[ "${rc}" -ne 0 ]]; then
+      echo "(outside-state-error:${BASHPID:-$$}:$(date +%s%N 2>/dev/null || echo "${RANDOM}${RANDOM}"))"
+      return 1
+    fi
     echo "${wt_tree}:${idx_digest}"
   }
-  PRE_OUTSIDE="$(outside_state)"
+  if ! PRE_OUTSIDE="$(outside_state)"; then
+    echo "エラー: 契約範囲外の基準 digest（PRE_OUTSIDE）の取得に失敗しました。以後の範囲外書き込み検出ができないため同期を開始しません(fail-closed。checker は未実行です)。"
+    exit 1
+  fi
   echo "PRE_OUTSIDE=${PRE_OUTSIDE}  # 範囲外検証の基準 digest。Step 5.5 まで同一 shell で保持する(失われたら再設定に使う)"
 
   # checker の「初回実行より前」に index snapshot を取得する。同期前 check(check mode)も
@@ -420,7 +498,18 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
       echo "エラー: checker 自身が書き換えられました(symlink 化を含む)。未承認の状態のため以後実行しません(fail-closed)。"
       return 1
     fi
-    if [[ "$(outside_state)" != "${PRE_OUTSIDE}" ]]; then
+    # outside_state の失敗は「変化なしと確認できない」であって「変化なし」ではない
+    # ため、戻り値を明示的に検査する（[[ ]] の条件式内で `$(outside_state)` を直接
+    # 使うと、内部コマンドの失敗による非ゼロ終了が握り潰され空文字列同士の比較に
+    # 落ちてしまう。関数自体が一意なエラーマーカーを返す設計にしてあるためこの
+    # 比較でも安全側に倒れるが、ここでは戻り値も明示的に見て二重に fail-closed を
+    # 担保する）。
+    local outside_now
+    if ! outside_now="$(outside_state)"; then
+      echo "エラー: 契約範囲外の digest 取得に失敗しました。変化なしと確認できないため、範囲外書き込みありとして扱います(fail-closed)。"
+      return 1
+    fi
+    if [[ "${outside_now}" != "${PRE_OUTSIDE}" ]]; then
       echo "エラー: checker が契約範囲外の path を変更しました(fail-closed)。"
       echo "git status --porcelain で範囲外の変更を特定し、tracked は git restore -- <path> / index は git restore --staged -- <path> で手動復旧してください(契約範囲用の却下手順では範囲外は戻りません)。checker 側の修正も必要です。"
       return 1
@@ -430,8 +519,14 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
 
   echo "==> 同期前の local patch 検証(check)"
   pre_check_rc=0
-  # 実行対象は worktree のファイルではなく、承認済み blob を取り出した CHECKER_EXEC
-  bash "${CHECKER_EXEC}" || pre_check_rc=$?
+  # 実行対象は worktree のファイルではなく、承認済み blob を毎回再検証してから取り出す
+  # CHECKER_EXEC（run_checker）
+  run_checker || pre_check_rc=$?
+  if [[ "${CHECKER_RUN_VERIFY_FAILED}" -eq 1 ]]; then
+    restore_contract_scope || true
+    echo "(npx は実行していません)"
+    exit 1
+  fi
   if ! verify_outside_and_checker; then
     restore_contract_scope || true
     echo "(npx は実行していません)"
@@ -1470,6 +1565,18 @@ UNTRACKED_LIST_FILE="$(mktemp)"
 trap 'rm -f "${UNTRACKED_LIST_FILE}"' EXIT
 if ! git ls-files -z --others --exclude-standard -- ".agents/skills/${SKILL_NAME}/" > "${UNTRACKED_LIST_FILE}"; then
   echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。中止します。" >&2
+  # scripts/skills-lock-update.sh の同一経路（preview_untracked）と揃える（Bugbot
+  # Medium 指摘: 従来はここで exit 1 するだけで、npx が成功させた契約範囲（tracked 分）
+  # の復元も行われなかった）。ただし git ls-files が壊れている以上「何が npx の新規
+  # 作成物か」を安全に確定できないため、破壊的な git clean -fd は行わない（codex P0
+  # 指摘の再発防止）。tracked 分の非破壊的な復元（restore_contract_scope || true →
+  # revert_in_scope 1〔非破壊モード。git clean -fd / remove_new_ignored_in_scope を
+  # スキップする〕）だけを行い、未追跡ファイルは手動確認へ委ねる。
+  if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
+    restore_contract_scope || true
+  fi
+  revert_in_scope 1
+  echo "エラー: 未追跡ファイルの一覧化ができなかったため、.agents/skills/${SKILL_NAME}/ 配下の破壊的な後始末（git clean -fd）はスキップしました。npx / checker の書き込み・未追跡ファイルが残っている可能性があります。git status --porcelain -- \".agents/skills/${SKILL_NAME}/\" で確認し、内容を確認したうえで不要なもののみ手動で git clean -fd \".agents/skills/${SKILL_NAME}/\" してください（fail-closed）。" >&2
   exit 1
 fi
 while IFS= read -r -d '' f; do
@@ -1524,8 +1631,8 @@ fi
 ```bash
 if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # Step 4 と同一 shell セッションの前提を機械検証する。セッションが切れて失われた場合は、
-  # outside_state / verify_outside_and_checker / restore_contract_scope(いずれも Step 4 で
-  # 定義した関数)を Step 4 のとおり再定義し、
+  # outside_state / verify_outside_and_checker / restore_contract_scope / run_checker
+  # (いずれも Step 4 で定義した関数)を Step 4 のとおり再定義し、
   # PRE_OUTSIDE / CHECKER_APPROVED_HASH には Step 4 が表示・承認した値を設定してから進む。
   # 値が不明なまま進んではならない(fail-closed で中止し、Step 6 の却下手順で戻す)
   : "${PRE_OUTSIDE:?Step 4 で表示された基準 digest を設定してから実行する}"
@@ -1542,27 +1649,22 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # そのまま使う(ここで取り直すと、同期前 check 以降の範囲外変更が基準へ取り込まれてしまう)
 
   # 実行対象は worktree の checker ではなく、承認済み blob(CHECKER_APPROVED_HASH)を
-  # 取り出した一時ファイル。shell セッションを跨いで CHECKER_EXEC が失われていても、
-  # 承認済み hash から決定的に再作成できる(worktree の checker 差し替えの影響を受けない)。
-  # 取り出しは Step 4 と同じ fail-closed: cat-file の失敗を成功扱いすると空の一時ファイル
-  # が残り、bash の exit 0 no-op が「検証成功」に化ける。終了コードに加えて、取り出した
-  # 内容の hash が承認済み hash と一致することまで確認し、失敗時は npx 上書き後の状態を
-  # 残さないよう契約範囲を復元してから停止する
-  if [[ -z "${CHECKER_EXEC:-}" || ! -f "${CHECKER_EXEC}" ]]; then
-    CHECKER_EXEC="$(mktemp)"
-    if ! git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}" \
-      || [[ ! -s "${CHECKER_EXEC}" ]] \
-      || [[ "$(git hash-object -- "${CHECKER_EXEC}")" != "${CHECKER_APPROVED_HASH}" ]]; then
-      echo "エラー: 承認済み checker blob(${CHECKER_APPROVED_HASH})の取り出しに失敗しました。契約範囲を復元して停止します(fail-closed)。"
-      restore_contract_scope || true
-      exit 1
-    fi
-  fi
+  # 毎回再検証してから取り出す一時ファイル(run_checker。Step 4 で定義済み)。checker
+  # の各実行（同期前 check・apply・最終検証）の直前に必ずハッシュを再検証するため
+  # （codex P1 指摘: verify-then-execute の隣接。apply は checker 自身のコードを実行
+  # するため一時ファイルを自己書換えし得るが、直後の最終検証は run_checker が再検証
+  # してから承認済み blob へ書き戻すので、書き換えられた内容がそのまま実行されることは
+  # ない）、ここで個別に取り出し・検証するコードは不要（呼び出しごとに run_checker が
+  # 行う）。
 
   # local patch の再適用(--3way fallback や index 復元により、patch 対象 file や durable patch が
   # stage されることがある)
   apply_rc=0
-  bash "${CHECKER_EXEC}" apply || apply_rc=$?
+  run_checker apply || apply_rc=$?
+  if [[ "${CHECKER_RUN_VERIFY_FAILED}" -eq 1 ]]; then
+    restore_contract_scope || true
+    exit 1
+  fi
   if ! verify_outside_and_checker; then
     # 範囲外の破壊は verify_outside_and_checker の案内どおり手動復旧として残しつつ、
     # 契約範囲(部分適用された patch・checker 由来の index 変更)は Step 4 で定義済みの
@@ -1580,7 +1682,11 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
 
   # 再適用後の最終検証(worktree / index / durable patch)
   check_rc=0
-  bash "${CHECKER_EXEC}" || check_rc=$?
+  run_checker || check_rc=$?
+  if [[ "${CHECKER_RUN_VERIFY_FAILED}" -eq 1 ]]; then
+    restore_contract_scope || true
+    exit 1
+  fi
   if ! verify_outside_and_checker; then
     restore_contract_scope || true
     exit 1
