@@ -71,7 +71,6 @@ SKILL.md との二重管理になり乖離します。
 
 | スキル | 判定 | 根拠 |
 |--------|------|------|
-| `create-html-report` | 不要（既定フローはワークスペース内完結、任意の出力先指定でワークスペース外へ書き込み得る） | renderer は純ローカルの Python でネットワーク呼び出しはない。既定出力先 `_/reports/` はワークスペース内だが、`--output <path>` に絶対パスや `../` を含む相対パスを指定した場合はワークスペース外へも書き込み得るため、単純な `不要` ではなくこの判定値を使う |
 | `implement-review` | 一部要 | 読み取り専用レビュー本体（`git diff` ベース）はローカル完結。out-of-scope の Issue 起票・コメント投稿（`gh`）のみ任意でネットワークを要する |
 | `implement-issue` | 一部要 | 計画作成・実装・テスト実行・コミット作成（Step 7 まで）はローカル完結。`gh issue view` はユーザーからの Issue 本文直接受け取りで代替可能なため任意ステップとなる。実装対象外（out-of-scope）追跡（`gh issue list` / `gh issue comment` / `create-issue-tree` / `create-issue` 経由の起票）を選択した場合も同様にネットワークを要する任意ステップ（本スキルのフローに `git push` は含まれない） |
 | `project-view-status` | 要（本スキルは read-only） | Step 1〜3 の `gh project view` / `item-list` / `field-list` はいずれも読み取りで書き込み系サブコマンドを含まない。Step 4〜5（集計・レポート生成）はローカル処理でネットワークを要しないが、本スキル全体を通じて書き込みは一切行わない |
@@ -96,7 +95,8 @@ SKILL.md との二重管理になり乖離します。
 | `update-issue-tree` | 要（本スキルは主に API 経由） | `gh issue create` / `gh issue edit` / `gh api .../sub_issues`（`scripts/reassign-sub-issue.sh` 経由含む）でツリーを更新 |
 | `init-claude` | 要 | `.claude/` 体系の生成自体（Step 1〜3 の大半）はローカル完結だが、Step 3 の Skills 導入は `npx skills add Fandhe-AI/agent-cli-skills` の実行が主要フローに含まれ省略不可（任意ステップではない）。加えて Step 4「implement-issue-tree の動作前提を確認する」で `gh auth status` / `gh api .../sub_issues`（読み取りのみ）も要する |
 | `update-claude` | 要 | 既存 `.claude/` の調査・差分診断はローカル完結だが、Step 4-3「不足スキルを補完する」で不足スキルがある場合 `npx skills add Fandhe-AI/agent-cli-skills` の実行が主要フローに含まれ省略不可（任意ステップではない）。加えて Step 2-6「implement-issue-tree 前提診断」で `gh auth status` / `gh api .../sub_issues`（読み取りのみ）も要する |
-| `setup-firebase-hosting` | 一部要 | `bootstrap-firebase.sh`（GCP/Firebase 認証）はネットワーク必須。`firebase.json` 作成・ローカル検証はネットワーク不要（既存の記述のまま） |
+
+**注記:** `create-html-report` / `setup-firebase-hosting` は [Fandhe-AI/agent-util-skills](https://github.com/Fandhe-AI/agent-util-skills) へ移設しました。該当スキルの要件は同リポジトリの `docs/skill-network-requirements.md` を参照してください。
 
 ## 実測記録
 

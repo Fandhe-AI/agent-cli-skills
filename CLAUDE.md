@@ -12,10 +12,6 @@ Claude Code 向けの CLI ワークフロースキル集。コミット・PR・I
 skills/                               -- スキル本体（各ディレクトリに SKILL.md）
   comment-code/
   create-commit/
-  create-html-report/
-    references/                       -- chart 選定・レポート設計・spec schema・a11y/セキュリティ規約
-    samples/                          -- report spec の JSON 例（comparison / gantt / time-series）
-    scripts/                          -- render_report.py（spec→HTML renderer）、validate_report.py（25 項目検証）
   create-issue/
   create-issue-tree/
   create-plan/
@@ -42,8 +38,6 @@ skills/                               -- スキル本体（各ディレクトリ
   project-update-items/
   project-sync-issues/
   project-archive-done/
-  setup-firebase-hosting/
-    scripts/                           -- bootstrap-firebase.sh（GCP/Firebase 環境構築スクリプト）
   contribute-skill/
   sync-skills-lock/
 .claude/
@@ -166,11 +160,11 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `ruleset-policy.md` | setup-repo-guards / implement-issue-tree / ruleset を変更する全作業 | ブランチ ruleset 方針（`strict_required_status_checks_policy` は必ず false・required check の `integration_id` 束縛・条件付きチェックを required にしない・一括更新後の 3 軸 + classic BP 検証） |
 | `skill-vendoring-layout.md` | downstream リポジトリの構成を触る全作業 | スキル配置方針（`.claude/skills` の symlink / 実ディレクトリ混在を許容・配置統一の移行はしない・同期除外は対象限定入力で行う） |
 
-## Current Skills (26)
+## Current Skills (24)
 
-### 開発ワークフロー (14)
+### 開発ワークフロー (12)
 
-comment-code, create-commit, create-html-report, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, setup-firebase-hosting, update-docs, update-issue-tree
+comment-code, create-commit, create-issue, create-issue-tree, create-plan, create-pr, implement-issue, implement-issue-tree, implement-review, implement-review-pr, update-docs, update-issue-tree
 
 ### GitHub Projects 管理 (7)
 
