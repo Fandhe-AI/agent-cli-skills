@@ -1271,11 +1271,17 @@ fi
 # （下の NPX_STATUS 分岐）に到達できず、`skills-lock.json` / スキルツリーの
 # 部分書き込みが検査もリバートもされないまま残置される（Bugbot High 指摘）。
 # npx 行の前後だけ errexit を無効化し、pipeline の終了コードを PIPESTATUS から
-# 読んでから元に戻す。
+# 読んでから元の状態（`$-`）を保存し、元々有効だった場合のみ戻す。本フェンスは
+# scripts/skills-lock-update.sh と異なり、errexit が無効なエージェント対話シェルへ
+# コピペ実行され得る。無条件 `set -e` で復元すると呼び出し元シェルへ errexit を
+# 新規に有効化してしまい、同一シェルで後続する Step 6 却下コマンド等がガードの
+# 無い非ゼロ終了で途中 abort し得るため、元々有効だった場合のみ再有効化する
+# （Issue #417）。
+case $- in *e*) ERREXIT_WAS_ON=1 ;; *) ERREXIT_WAS_ON=0 ;; esac
 set +e
 npx --yes "skills@${SKILLS_CLI_VERSION}" add "${SOURCE}" --skill "${SKILL_NAME}" --agent universal --yes 2>&1 | tee "${NPX_OUTPUT_FILE}"
 PIPE_EXIT_SNAPSHOT=("${PIPESTATUS[@]}")
-set -e
+if [[ "${ERREXIT_WAS_ON}" -eq 1 ]]; then set -e; fi
 NPX_STATUS="${PIPE_EXIT_SNAPSHOT[0]}"
 TEE_STATUS="${PIPE_EXIT_SNAPSHOT[1]}"
 
@@ -1729,11 +1735,28 @@ git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-
 # 「追跡対象なし」（初回具現化・untracked のみの書き込み時）で pathspec エラーになると
 # コマンド全体が失敗し、もう一方（skills-lock.json）も復元されない。必ず1コマンド1パスで
 # 分離し、一方の失敗が他方の復元を阻害しないようにする。
-git checkout -- skills-lock.json
+
+# skills-lock.json は初回生成（未追跡）だと pathspec エラーで非ゼロ終了するため、
+# revert_in_scope（行 1046-1084）と同じく || true で吸収する。errexit 有効シェルで
+# 実行された場合でもここで途中 abort しない（Issue #417。復元の成否はこの直後の
+# 検証ブロックで確認する — || true は成功扱いではなく確認を先送りするだけ）
+git checkout -- skills-lock.json 2>/dev/null || true
 git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-# npx が新規作成した未追跡ファイルも削除（Step 4 の clean ガードで実行前は clean を保証済み）
-# ${SKILL_NAME} は kebab-case 検証済みのため、対象は当該スキルディレクトリ配下に限定される
-git clean -fd ".agents/skills/${SKILL_NAME}/"
+# npx が新規作成した未追跡ファイルも削除（Step 4 の clean ガードで実行前は clean を保証済み）。
+# ${SKILL_NAME} は kebab-case 検証済みのため、対象は当該スキルディレクトリ配下に限定される。
+# git clean はディレクトリが存在しない場合に非ゼロ終了するため、revert_in_scope と同じく
+# 存在確認してから呼ぶ（errexit 有効シェルでの途中 abort 防止。Issue #417）
+if [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
+  git clean -fd -- ".agents/skills/${SKILL_NAME}/"
+fi
+# 上記 || true / 存在確認ガードは失敗を握り潰し得るため、却下リバートが実際に完了したかを
+# ここで実測してから次スキルへ進む。スキルディレクトリ配下が clean（porcelain 空）かつ
+# skills-lock.json の worktree が index と一致（git diff --quiet は worktree vs index 比較
+# であり、他スキルの承認済み stage 分には影響されない）していなければ fail-closed で警告する
+if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]] \
+  || ! git diff --quiet -- skills-lock.json; then
+  echo "警告: 却下リバートが完了していません。git status を確認し、手動復旧してから次スキルへ進んでください（fail-closed）。" >&2
+fi
 ```
 
 Step 4 の clean ガードにより `npx` 実行前の当該ディレクトリは clean（未追跡含む）であることが保証されているため、`git clean` で削除される未追跡ファイルは `npx` が作成したものに限られる。`git clean` の対象は kebab-case 検証済みの `${SKILL_NAME}` 配下のみに限定されており、リポジトリ全体には影響しない。
@@ -1841,7 +1864,7 @@ EOF
 4. 1 スキルで実際に実行し、差分が正常であること・書き込みが `.agents/skills/<name>/` と `skills-lock.json` のみに限定されていること（`git status --porcelain` に `.claude/` 等の他ツリーが現れないこと）を確認する
 5. `chore(sync-skills-lock): skills CLI を X.Y.Z へ更新` でコミットする
 
-**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了する。黙って最新版へフォールバックする経路は存在せず、dist-tag・レンジ指定への書き換えも禁止する。`npx` の失敗経路でも成功経路と同じスコープ外書き込み検査（後述の「多層防御」）を必ず実行する。両実行経路とも、`npx` 行だけ errexit を無効化（`set +e`/`set -e`）して終了コードを `PIPESTATUS` から保存し、成功・失敗いずれの経路でも事後のスコープ外検査を必ず実行する（`set -e`/`pipefail` の下でこの無効化を欠くと、`npx` の非ゼロ終了でパイプラインごとその場で異常終了し、事後検査・リバートに到達できないまま部分書き込みが残置される。Bugbot High 指摘）。`scripts/skills-lock-update.sh` を単体実行した場合はスクリプト全体を `exit 1` で停止する（この行の前後だけ `set +e`/`set -e` を挟む理由は同スクリプト内のコメント参照）。一方、本ファイルの Step 4 フェンス（複数スキルをループで処理する経路）では、`npx` の失敗を検出したら事後検査のうえ Step 6 の却下時と同じ手順（`git checkout --` / `git clean -fd`）で当該スキル分の部分書き込みをリバートしてから skip（`continue`）して次スキルへ進む — Step 1/3 の他の skip 分岐と同じ制御フローであり、ループ全体を停止させるものではない。事後検査・リバートを挟まずに skip すると、失敗が部分書き込み後に発生した場合の残置変更（スコープ内は次スキルの `git add`（Step 7）が承認済み変更と一緒に stage してしまう、スコープ外は後続処理から「元から存在した dirty 状態」と誤認され得る）を防げないため、両方とも必須の手順である。**スコープ外書き込みの検出（`exit 1`）はこれとは別の停止経路であり、`continue` ではなくループ全体を止める**（詳細は次項「書き込みスコープの制限」を参照）。この停止経路は成功経路（`NPX_STATUS -eq 0`）だけでなく `npx` **失敗**経路にも及ぶ: 失敗後の事後検査でスコープ外差分・状態シグネチャ不一致を検出した場合も、成功経路と同じ判定基準で `NPX_STATUS_OUT_OF_SCOPE_DIRT=1` を立ててループ全体を `exit 1` で停止し、`continue` で次スキルへ進まない（そのまま skip すると未リバートのスコープ外差分が「元から存在した dirty 状態」と誤認され得るため。Bugbot High 指摘）。
+**fail-closed**: 固定版が解決できない場合（該当版の不存在・レジストリ障害）は `npx` が非ゼロ終了する。黙って最新版へフォールバックする経路は存在せず、dist-tag・レンジ指定への書き換えも禁止する。`npx` の失敗経路でも成功経路と同じスコープ外書き込み検査（後述の「多層防御」）を必ず実行する。両実行経路とも、`npx` 行だけ errexit を無効化（`set +e`/`set -e`）して終了コードを `PIPESTATUS` から保存し、成功・失敗いずれの経路でも事後のスコープ外検査を必ず実行する（`set -e`/`pipefail` の下でこの無効化を欠くと、`npx` の非ゼロ終了でパイプラインごとその場で異常終了し、事後検査・リバートに到達できないまま部分書き込みが残置される。Bugbot High 指摘）。ただし復元方法は経路ごとに異なる: 本ファイルの Step 4 フェンス側は呼び出し元シェルの errexit 状態（`$-`）を保存し、元々有効だった場合のみ `set -e` で再有効化する条件付き復元であり、無条件 `set -e` は行わない（このフェンスは errexit が無効なエージェント対話シェルへコピペ実行され得るため、無条件復元だと呼び出し元シェルへ errexit を新規有効化してしまい、同一シェルで後続する Step 6 却下コマンド等がガードの無い非ゼロ終了で途中 abort し得る。Issue #417）。一方 `scripts/skills-lock-update.sh` はファイル先頭で `set -euo pipefail` を自ら宣言しており errexit 常時有効の前提が成立するため、同スクリプト側は無条件 `set -e` 復元のままで正しい（詳細は同スクリプト内コメント参照）。`scripts/skills-lock-update.sh` を単体実行した場合はスクリプト全体を `exit 1` で停止する（この行の前後だけ `set +e`/`set -e` を挟む理由は同スクリプト内のコメント参照）。一方、本ファイルの Step 4 フェンス（複数スキルをループで処理する経路）では、`npx` の失敗を検出したら事後検査のうえ Step 6 の却下時と同じ手順（`git checkout --` / `git clean -fd`）で当該スキル分の部分書き込みをリバートしてから skip（`continue`）して次スキルへ進む — Step 1/3 の他の skip 分岐と同じ制御フローであり、ループ全体を停止させるものではない。事後検査・リバートを挟まずに skip すると、失敗が部分書き込み後に発生した場合の残置変更（スコープ内は次スキルの `git add`（Step 7）が承認済み変更と一緒に stage してしまう、スコープ外は後続処理から「元から存在した dirty 状態」と誤認され得る）を防げないため、両方とも必須の手順である。**スコープ外書き込みの検出（`exit 1`）はこれとは別の停止経路であり、`continue` ではなくループ全体を止める**（詳細は次項「書き込みスコープの制限」を参照）。この停止経路は成功経路（`NPX_STATUS -eq 0`）だけでなく `npx` **失敗**経路にも及ぶ: 失敗後の事後検査でスコープ外差分・状態シグネチャ不一致を検出した場合も、成功経路と同じ判定基準で `NPX_STATUS_OUT_OF_SCOPE_DIRT=1` を立ててループ全体を `exit 1` で停止し、`continue` で次スキルへ進まない（そのまま skip すると未リバートのスコープ外差分が「元から存在した dirty 状態」と誤認され得るため。Bugbot High 指摘）。
 
 ## 書き込みスコープの制限（`--agent universal` とスコープ外検出）
 
