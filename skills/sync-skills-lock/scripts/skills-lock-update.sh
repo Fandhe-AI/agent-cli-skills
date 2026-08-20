@@ -142,6 +142,22 @@ if [[ "${GIT_DIR_PHYS}" != "${TOPLEVEL_PHYS}/.git" ]] \
   exit 1
 fi
 
+# カレントディレクトリが作業ツリールートであることの検証（Bugbot Medium 指摘）:
+# 上のブロックは GIT_DIR が <toplevel>/.git であることまでしか確認しない。
+# repo_state_signature は path_state の起点を「.」（cwd）にしているため、
+# サブディレクトリから実行すると .git（hooks・refs・config・objects）が起点の
+# 走査対象から外れ、上の worktree 検証をすべて満たしたまま npx による .git 改変を
+# 検出できなくなる。pwd -P を toplevel と同じ手法で物理パス化し、厳密一致しない
+# 場合は npx 未実行のまま中止する。
+if ! CWD_PHYS="$(pwd -P)"; then
+  echo "エラー: カレントディレクトリの物理パス解決（pwd -P）に失敗しました。作業ツリールートでの実行と確認できないため中止します（fail-closed）。" >&2
+  exit 1
+fi
+if [[ "${CWD_PHYS}" != "${TOPLEVEL_PHYS}" ]]; then
+  echo "エラー: カレントディレクトリ（${CWD_PHYS}）が作業ツリールート（${TOPLEVEL_PHYS}）と一致しません。repo_state_signature はカレントディレクトリを起点に走査するため、サブディレクトリから実行すると .git（hooks・refs・config・objects）が署名対象外になり npx による改変を検出できません。作業ツリールートで実行し直してください（fail-closed）。" >&2
+  exit 1
+fi
+
 # 許可先経路の実体検証（PR #412 P0 指摘）: スコープ外検査（porcelain 比較・状態
 # シグネチャ比較）は .agents/skills/${SKILL_NAME} を「パス文字列」で走査除外する。
 # この経路上のいずれかの要素が実行前から symlink だと、npx がリンク先（リポジトリ外を
@@ -671,7 +687,17 @@ PYEOF
 # してから checkout で index の内容を regular file として書き戻す。symlink 以外の
 # 想定外実体（ディレクトリ等）は rm -f で除去できず checkout も安全に働かないため、
 # 一切触らず手動復旧を案内する。
+# 第1引数（既定 0）を 1 にすると git clean -fd / remove_new_ignored_in_scope を
+# 一切実行しない「非破壊モード」になる（codex P0 指摘: preview_untracked の
+# git ls-files 失敗時など、未追跡集合を安全に列挙できなかった状態でこの関数を
+# 呼ぶと、checker / npx が作成した「唯一のコピーであり得る」未追跡ファイルを
+# バックアップなしで git clean -fd が削除してしまう。列挙が壊れている以上、
+# 何を消してよいか判定できないため、削除系操作は一切行わず手動復旧の案内に
+# 留める）。checkout（tracked のみが対象で未追跡ファイルには触れない）と
+# restore_preexisting_ignored（npx 実行前バックアップからの復元。列挙ではなく
+# 実行前に確定済みの一覧を使うため安全）はこのモードでも従来どおり実行する。
 revert_in_scope() {
+  local skip_clean="${1:-0}"
   if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
     if [[ -L "skills-lock.json" ]]; then
       rm -f skills-lock.json
@@ -692,7 +718,9 @@ revert_in_scope() {
     return 0
   fi
   git checkout -- ".agents/skills/${SKILL_NAME}/" 2>/dev/null || true
-  if [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
+  if [[ "${skip_clean}" == "1" ]]; then
+    echo "警告: 未追跡ファイル一覧を安全に取得できなかったため、.agents/skills/${SKILL_NAME}/ 配下の git clean は実行していません（checker / npx が作成した未追跡ファイルを誤って削除しないための保全。データ喪失防止を優先）。npx / checker による書き込み・未追跡ファイルが残っている可能性があるため、次を手動で確認してください: git status --porcelain -- \".agents/skills/${SKILL_NAME}/\"（内容を確認したうえで不要なもののみ git clean -fd \".agents/skills/${SKILL_NAME}/\" で削除する）。" >&2
+  elif [[ -d ".agents/skills/${SKILL_NAME}/" ]]; then
     git clean -fd -- ".agents/skills/${SKILL_NAME}/" || true
     remove_new_ignored_in_scope || true
   fi
@@ -987,6 +1015,18 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
       echo "契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元しました(範囲外 path の index・worktree には触れていません)。" >&2
     else
       echo "エラー: 契約範囲の復元後検証で差分が残っています。git diff --cached ${PRE_SYNC_TREE} -- <契約パス> / git diff ${PRE_SYNC_TREE} -- <契約パス> / git ls-files --others -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed。復元完了とは扱いません)。" >&2
+      # 呼び出し元が失敗を検知できるよう非ゼロを返す（Bugbot Medium 指摘: 従来は
+      # echo するだけで成功扱いのまま返っていたため、呼び出し元が fail-closed に
+      # 分岐できなかった）。全呼び出し箇所は本関数の呼び出し文を
+      # `restore_contract_scope || true` の形にしてこの非ゼロを吸収している —
+      # 本体は set -euo pipefail 下にあり、素の呼び出し文のまま非ゼロを返すと
+      # 呼び出し元の revert_in_scope・後続の exit 1 の直前に置かれた案内 echo が
+      # 実行されずスクリプトがその場で異常終了してしまう（cleanup が一部
+      # スキップされる回帰）。`|| true` により本関数の失敗はここで吸収しつつ、
+      # 呼び出し元は元から本関数の直後で無条件に exit 1 する設計のため、
+      # 最終的な fail-closed の結果（非ゼロ終了・スコープ内リバート実行）は
+      # 変わらない。
+      return 1
     fi
   }
 
@@ -995,12 +1035,12 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   # 実行対象は worktree のファイルではなく、承認済み blob を取り出した CHECKER_EXEC
   bash "${CHECKER_EXEC}" || pre_check_rc=$?
   if ! verify_outside_and_checker; then
-    restore_contract_scope
+    restore_contract_scope || true
     echo "(npx は実行していません)" >&2
     exit 1
   fi
   if [[ "${pre_check_rc}" -ne 0 ]]; then
-    restore_contract_scope
+    restore_contract_scope || true
     echo "エラー: 同期前の local patch 検証に失敗しました。状態を修復してから再実行してください(fail-closed。npx は実行していません)。" >&2
     exit 1
   fi
@@ -1272,7 +1312,7 @@ if [[ "${NPX_STATUS}" -ne 0 ]]; then
     # 移動・新規作成した唯一のコピーであり得る)が削除される。復元後の revert_in_scope は
     # 契約パスの checkout / clean が実質 no-op になり、ignored ファイルの選別削除・
     # 既存 ignored の復元・妥協検出時の保全案内だけが働く
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   revert_in_scope
   echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。固定版を外した再実行はしません。" >&2
@@ -1299,7 +1339,7 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 同期前 check の staged 契約変更を残さない(fail-closed 契約)。git clean -fd による
     # 未追跡削除より先に退避を効かせるため revert_in_scope より前に呼ぶ(NPX_STATUS 分岐と同じ)
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   revert_in_scope
   echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
@@ -1341,7 +1381,7 @@ if ! cmp -s "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" \
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 同期前 check の staged 契約変更を残さない(fail-closed 契約)。git clean -fd による
     # 未追跡削除より先に退避を効かせるため revert_in_scope より前に呼ぶ(NPX_STATUS 分岐と同じ)
-    restore_contract_scope
+    restore_contract_scope || true
   fi
   revert_in_scope
   exit 1
@@ -1358,8 +1398,16 @@ if ! restore_preexisting_ignored; then
   if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 失敗終端では同期前 check の staged 契約変更も残さない(fail-closed 契約。
     # npx の同期結果ごと同期開始前へ戻し、部分状態のまま git add へ進む経路を断つ)
-    restore_contract_scope
+    restore_contract_scope || true
   fi
+  # 他の post-npx 失敗経路と同じくスコープ内をリバートする。checker が無い
+  # リポジトリでは、ここで revert_in_scope を呼ばないと npx による skills-lock.json /
+  # .agents/skills/${SKILL_NAME}/ への書き込みが worktree に残ったまま停止し、
+  # 次回実行時の「実行前 clean」ガードに引っかかって当該スキルが skip され続ける。
+  # revert_in_scope は内部で restore_preexisting_ignored を再試行するが、失敗が
+  # 続いても IGNORED_BACKUP_KEEP=1 で警告するだけで非ゼロ終了はしない
+  # （呼び出し元のこの分岐がすでに exit 1 を担保しているため）。
+  revert_in_scope
   exit 1
 fi
 
@@ -1398,6 +1446,23 @@ echo ""
 # 上書きで前回分を破棄するため、呼び出しごとの mktemp・rm は不要。
 if ! git ls-files -z --others --exclude-standard -- "$@" > "${UNTRACKED_LIST_FILE}"; then
   echo "エラー: git ls-files が失敗し、未追跡ファイルの一覧化を確認できません。内容未確認のまま承認できてしまうため中止します。" >&2
+  # 他の post-npx 失敗経路（NPX_STATUS 分岐等）と同じく tracked 分の契約範囲は
+  # 復元するが、破壊的な cleanup（git clean -fd）は行わない（codex P0 指摘の
+  # 再修正: git ls-files が壊れている以上、restore_contract_scope 自身の未追跡
+  # バックアップ列挙・git clean -fd が対象とする「新規未追跡集合」のどちらも
+  # 安全に確定できない。この状態で revert_in_scope（無引数）の git clean -fd を
+  # 実行すると、checker / npx が作成した「唯一のコピーであり得る」未追跡
+  # ファイルをバックアップなしで削除しデータ喪失になり得る。restore_contract_scope
+  # は git restore（tracked 限定。未追跡には触れない）が主体で、未追跡バックアップ
+  # 部分は列挙失敗時に警告するだけで削除は行わないため、`|| true` で呼んでも
+  # 安全。revert_in_scope は第2引数 1（skip_clean）で clean 系を一切スキップし、
+  # checkout（tracked のみ）と restore_preexisting_ignored（実行前バックアップ
+  # からの復元。列挙非依存）のみ行う。
+  if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
+    restore_contract_scope || true
+  fi
+  revert_in_scope 1
+  echo "エラー: 未追跡ファイルの一覧化ができなかったため、.agents/skills/${SKILL_NAME}/ 配下の破壊的な後始末（git clean -fd）はスキップしました。npx / checker の書き込み・未追跡ファイルが残っている可能性があります。git status --porcelain -- \".agents/skills/${SKILL_NAME}/\" で確認し、内容を確認したうえで不要なもののみ手動で git clean -fd \".agents/skills/${SKILL_NAME}/\" してください（fail-closed）。" >&2
   exit 1
 fi
 while IFS= read -r -d '' f; do
@@ -1477,12 +1542,12 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # 範囲外の破壊は上の案内どおり手動復旧として残しつつ、契約範囲(部分適用された patch・
     # checker 由来の index 変更)は自動復元してから終了する(「すべての失敗経路で同期開始前へ
     # 戻す」契約。以下の 3 失敗分岐も同じ)
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
   if [[ "${apply_rc}" -ne 0 ]]; then
     echo "エラー: local patch の再適用に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
   echo ""
@@ -1490,12 +1555,12 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   check_rc=0
   bash "${CHECKER_EXEC}" || check_rc=$?
   if ! verify_outside_and_checker; then
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
   if [[ "${check_rc}" -ne 0 ]]; then
     echo "エラー: 再適用後の最終検証に失敗しました。stage・commit へ進まないでください(fail-closed)。" >&2
-    restore_contract_scope
+    restore_contract_scope || true
     exit 1
   fi
 
