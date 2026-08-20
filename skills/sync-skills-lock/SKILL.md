@@ -1724,7 +1724,10 @@ git diff HEAD -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-
 # 名前の列挙だけでなく内容(git diff --no-index / バイナリは種別・サイズ・hash)まで提示する
 ```
 
-**却下された場合**は当該スキルのみ即座にリバートして**次スキルへ continue**する（全体を中止しない）:
+**却下された場合**は当該スキルのみ即座にリバートして**次スキルへ continue**する（全体を中止しない）。
+ただし直後の検証でリバート未完了を検出した場合は、この skip 継続の対象外としてループ全体を
+`exit 1` で停止する（fail-closed。未完了のまま次スキルへ進むと、残留した却下対象の変更が
+次スキルの承認時に一緒に stage され得るため。Issue #417）:
 
 ```bash
 # 当該スキルの変更のみをリバート（追跡ファイル）。
@@ -1751,11 +1754,23 @@ if [[ -d ".agents/skills/${SKILL_NAME}" ]]; then
 fi
 # 上記 || true / 存在確認ガードは失敗を握り潰し得るため、却下リバートが実際に完了したかを
 # ここで実測してから次スキルへ進む。スキルディレクトリ配下が clean（porcelain 空）かつ
-# skills-lock.json の worktree が index と一致（git diff --quiet は worktree vs index 比較
-# であり、他スキルの承認済み stage 分には影響されない）していなければ fail-closed で警告する
+# skills-lock.json が clean（tracked/untracked 双方）でなければ fail-closed でループ全体を
+# 停止する。
+# - `git diff --quiet` は worktree vs index の比較（他スキルの承認済み stage 分には影響
+#   されない）であり、tracked な残留変更を検出する
+# - ただし `git diff --quiet` は untracked ファイルを無視するため、これだけでは
+#   skills-lock.json が初回生成（未追跡）のまま残置されたケースを見逃す（`|| true` が
+#   吸収する pathspec エラーと同じ穴。Bugbot 指摘）。`git ls-files --others` で untracked
+#   の残留も別途検出する
+# 却下リバートが未完了のまま次スキルへ進むと、残留した却下対象の変更が次スキルの承認時に
+# 一緒に stage され得るため、warning のみで継続してはならない（Issue #417。checker を
+# 持つリポジトリ向けの却下フェンス（同期開始前 snapshot からの復元）と同じ fail-closed
+# 扱いに揃える）
 if [[ -n "$(git status --porcelain -- ".agents/skills/${SKILL_NAME}/")" ]] \
-  || ! git diff --quiet -- skills-lock.json; then
-  echo "警告: 却下リバートが完了していません。git status を確認し、手動復旧してから次スキルへ進んでください（fail-closed）。" >&2
+  || ! git diff --quiet -- skills-lock.json \
+  || [[ -n "$(git ls-files -z --others --exclude-standard -- skills-lock.json)" ]]; then
+  echo "エラー: 却下リバートが完了していません（${SKILL_NAME} 配下の残留変更、または skills-lock.json の worktree 差分・未追跡残留）。git status を確認し、手動復旧してから再実行してください（fail-closed。次スキルへは進めません）。" >&2
+  exit 1
 fi
 ```
 
