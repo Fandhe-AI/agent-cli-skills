@@ -284,6 +284,36 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   fi
   echo "CHECKER_EXEC=${CHECKER_EXEC}  # 実行対象(承認済み blob の取り出し先)。Step 5.5 まで同一 shell で保持する(失われたら承認済み hash から再作成する)"
 
+  # checker を実行する唯一の経路（codex P1 指摘: CHECKER_EXEC はただの一時ファイルで
+  # あり、直前の実行〔特に apply は checker 自身のコードを実行するため自己書換えも
+  # 可能〕による置換・改変〔TOCTOU〕が、検証されないまま次の実行へ紛れ込み得る。
+  # 起動時に1度取り出した後は再検証せず bash に渡していたため、同期前 check の直後に
+  # CHECKER_EXEC が残置・置換された場合、承認済み blob と異なるコードが Step 5.5 の
+  # apply・最終検証で実行される経路が残っていた）。呼び出しごとに毎回
+  # `git hash-object` でハッシュを再検証し、不一致・不在なら承認済み blob から
+  # 無条件に書き直してから実行する。検証と実行を1関数に閉じ込めることで、呼び出し
+  # 箇所（同期前 check・Step 5.5 の apply・最終検証）が増えても検証漏れが構造的に
+  # 起きないようにする。Step 5.5 で shell セッションが切れて本関数が失われている
+  # 場合は、他の Step 4 定義関数（outside_state 等）と同様にこの定義を再実行してから
+  # 使う。戻り値の扱い: 「取り出し・検証自体の失敗」と「checker が実行された結果の
+  # 非ゼロ終了」を呼び出し元が区別できるよう、前者は CHECKER_RUN_VERIFY_FAILED=1 を
+  # 立ててから非ゼロを返す（checker 自身の exit code と衝突しない専用シグナル）。
+  run_checker() {
+    CHECKER_RUN_VERIFY_FAILED=0
+    if [[ -z "${CHECKER_EXEC:-}" || ! -f "${CHECKER_EXEC}" \
+      || "$(git hash-object -- "${CHECKER_EXEC}" 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
+      CHECKER_EXEC="$(mktemp)"
+      if ! git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}" \
+        || [[ ! -s "${CHECKER_EXEC}" ]] \
+        || [[ "$(git hash-object -- "${CHECKER_EXEC}")" != "${CHECKER_APPROVED_HASH}" ]]; then
+        echo "エラー: 承認済み checker blob(${CHECKER_APPROVED_HASH})の取り出し・検証に失敗しました(fail-closed)。"
+        CHECKER_RUN_VERIFY_FAILED=1
+        return 1
+      fi
+    fi
+    bash "${CHECKER_EXEC}" "$@"
+  }
+
   # durable patch 置き場は承認時に directory ごと stage し、却下時に index からの復元 +
   # git clean の対象になるため、未 stage の WIP・未追跡ファイルが残っていると巻き込まれて
   # 失われる。staged のみの変更(= 本ループ内で承認済みに積み上がった分)は許容する。
@@ -467,8 +497,14 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
 
   echo "==> 同期前の local patch 検証(check)"
   pre_check_rc=0
-  # 実行対象は worktree のファイルではなく、承認済み blob を取り出した CHECKER_EXEC
-  bash "${CHECKER_EXEC}" || pre_check_rc=$?
+  # 実行対象は worktree のファイルではなく、承認済み blob を毎回再検証してから取り出す
+  # CHECKER_EXEC（run_checker）
+  run_checker || pre_check_rc=$?
+  if [[ "${CHECKER_RUN_VERIFY_FAILED}" -eq 1 ]]; then
+    restore_contract_scope || true
+    echo "(npx は実行していません)"
+    exit 1
+  fi
   if ! verify_outside_and_checker; then
     restore_contract_scope || true
     echo "(npx は実行していません)"
@@ -1573,8 +1609,8 @@ fi
 ```bash
 if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # Step 4 と同一 shell セッションの前提を機械検証する。セッションが切れて失われた場合は、
-  # outside_state / verify_outside_and_checker / restore_contract_scope(いずれも Step 4 で
-  # 定義した関数)を Step 4 のとおり再定義し、
+  # outside_state / verify_outside_and_checker / restore_contract_scope / run_checker
+  # (いずれも Step 4 で定義した関数)を Step 4 のとおり再定義し、
   # PRE_OUTSIDE / CHECKER_APPROVED_HASH には Step 4 が表示・承認した値を設定してから進む。
   # 値が不明なまま進んではならない(fail-closed で中止し、Step 6 の却下手順で戻す)
   : "${PRE_OUTSIDE:?Step 4 で表示された基準 digest を設定してから実行する}"
@@ -1591,35 +1627,22 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
   # そのまま使う(ここで取り直すと、同期前 check 以降の範囲外変更が基準へ取り込まれてしまう)
 
   # 実行対象は worktree の checker ではなく、承認済み blob(CHECKER_APPROVED_HASH)を
-  # 取り出した一時ファイル。shell セッションを跨いで CHECKER_EXEC が失われていても、
-  # 承認済み hash から決定的に再作成できる(worktree の checker 差し替えの影響を受けない)。
-  # 取り出しは Step 4 と同じ fail-closed: cat-file の失敗を成功扱いすると空の一時ファイル
-  # が残り、bash の exit 0 no-op が「検証成功」に化ける。終了コードに加えて、取り出した
-  # 内容の hash が承認済み hash と一致することまで確認し、失敗時は npx 上書き後の状態を
-  # 残さないよう契約範囲を復元してから停止する。
-  # 「CHECKER_EXEC が既に存在する場合」もハッシュを毎回再検証する（Bugbot Medium 指摘:
-  # 従来はファイルが存在するだけで無条件に再利用し、ハッシュ検証はファイルが無い場合
-  # にしか適用されていなかった。CHECKER_EXEC は一時ファイルであり、Step 4〜5.5 の間に
-  # 残置・置換（TOCTOU・他プロセスによる上書き等）された場合、その内容が承認済み blob
-  # と一致するか確認しないまま `bash "${CHECKER_EXEC}"` へ渡ってしまう）。存在確認に
-  # 加えてハッシュ不一致も「取り出しをやり直す」条件に含め、既存ファイルの内容が
-  # 承認済み hash と異なる場合は無条件に破棄して承認済み blob から書き直す。
-  if [[ -z "${CHECKER_EXEC:-}" || ! -f "${CHECKER_EXEC}" \
-    || "$(git hash-object -- "${CHECKER_EXEC}" 2>/dev/null || echo missing)" != "${CHECKER_APPROVED_HASH}" ]]; then
-    CHECKER_EXEC="$(mktemp)"
-    if ! git cat-file blob "${CHECKER_APPROVED_HASH}" > "${CHECKER_EXEC}" \
-      || [[ ! -s "${CHECKER_EXEC}" ]] \
-      || [[ "$(git hash-object -- "${CHECKER_EXEC}")" != "${CHECKER_APPROVED_HASH}" ]]; then
-      echo "エラー: 承認済み checker blob(${CHECKER_APPROVED_HASH})の取り出しに失敗しました。契約範囲を復元して停止します(fail-closed)。"
-      restore_contract_scope || true
-      exit 1
-    fi
-  fi
+  # 毎回再検証してから取り出す一時ファイル(run_checker。Step 4 で定義済み)。checker
+  # の各実行（同期前 check・apply・最終検証）の直前に必ずハッシュを再検証するため
+  # （codex P1 指摘: verify-then-execute の隣接。apply は checker 自身のコードを実行
+  # するため一時ファイルを自己書換えし得るが、直後の最終検証は run_checker が再検証
+  # してから承認済み blob へ書き戻すので、書き換えられた内容がそのまま実行されることは
+  # ない）、ここで個別に取り出し・検証するコードは不要（呼び出しごとに run_checker が
+  # 行う）。
 
   # local patch の再適用(--3way fallback や index 復元により、patch 対象 file や durable patch が
   # stage されることがある)
   apply_rc=0
-  bash "${CHECKER_EXEC}" apply || apply_rc=$?
+  run_checker apply || apply_rc=$?
+  if [[ "${CHECKER_RUN_VERIFY_FAILED}" -eq 1 ]]; then
+    restore_contract_scope || true
+    exit 1
+  fi
   if ! verify_outside_and_checker; then
     # 範囲外の破壊は verify_outside_and_checker の案内どおり手動復旧として残しつつ、
     # 契約範囲(部分適用された patch・checker 由来の index 変更)は Step 4 で定義済みの
@@ -1637,7 +1660,11 @@ if [[ -f scripts/check-skill-local-patches.sh ]]; then
 
   # 再適用後の最終検証(worktree / index / durable patch)
   check_rc=0
-  bash "${CHECKER_EXEC}" || check_rc=$?
+  run_checker || check_rc=$?
+  if [[ "${CHECKER_RUN_VERIFY_FAILED}" -eq 1 ]]; then
+    restore_contract_scope || true
+    exit 1
+  fi
   if ! verify_outside_and_checker; then
     restore_contract_scope || true
     exit 1
