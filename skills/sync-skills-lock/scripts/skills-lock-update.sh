@@ -1027,6 +1027,15 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
   restore_contract_scope() {
     : "${PRE_SYNC_TREE:?同期開始前 snapshot が未設定のため復元できません}"
     local restore_targets=(--staged --worktree) untracked_list moved=0 p
+    # 退避(mkdir -p / mv)自体の失敗を検査するためのフラグ。呼び出し文は全箇所
+    # `restore_contract_scope || true` の形であり、bash の仕様上 `||` の右辺・左辺の
+    # コマンド文脈で呼ばれた関数内では set -e が抑止される(本体は set -euo pipefail
+    # 下だが、この関数内の mkdir/mv の失敗は自動では中断にならない)。検査なしに
+    # git restore --worktree へ進むと、checker が未追跡化・新規作成した「唯一の
+    # コピー」が退避されないまま PRE_SYNC_TREE の内容で無音に上書きされ、データ喪失に
+    # なる(Issue #418)。retreat 対象を 1 件ずつ処理し、失敗があれば worktree 復元を
+    # 行わず index のみへ降格する(revert_in_scope の非破壊モードと同じ判断)
+    local backup_failed=0 failed_paths=()
     # npx 実行後検証が許可先経路・skills-lock.json の妥協(symlink 化等)を検出している場合、
     # worktree への書き込み・未追跡退避のパス走査がリンク先(リポジトリ外を含む)へ向かい得る
     # ため index のみ復元する(worktree 側は revert_in_scope が手動復旧を案内済み)。
@@ -1035,24 +1044,59 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
       restore_targets=(--staged)
       echo "許可先経路または skills-lock.json の妥協を検出しているため、契約範囲の復元は index のみ行います。worktree 側は案内済みの手順で手動復旧してください。" >&2
     else
-      untracked_list="$(mktemp)"
+      if ! untracked_list="$(mktemp)"; then
+        echo "エラー: 未追跡ファイル列挙用の一時ファイル作成に失敗しました。退避の完全性を確認できないため index のみ復元します。" >&2
+        backup_failed=1
+      fi
       # skills-lock.json も退避対象に含める。通常は tracked のため列挙されないが、checker が
       # git rm --cached 等で未追跡化して内容変更した後に失敗すると、退避なしの git restore が
       # その唯一の内容を上書きしてしまう
-      if ! git ls-files -z --others --exclude-standard -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ > "${untracked_list}"; then
-        echo "警告: 契約範囲内の未追跡ファイル列挙に失敗しました。未追跡分は退避できていない可能性があるため、復元後に git status で確認してください。" >&2
+      if [[ "${backup_failed}" -eq 0 ]] \
+        && ! git ls-files -z --others --exclude-standard -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ > "${untracked_list}"; then
+        # 列挙自体が失敗した場合、退避の完全性を確認できないまま worktree 復元へ
+        # 進むと未列挙の未追跡ファイルが無音に上書きされ得るため、警告に留めず
+        # 失敗として扱う(revert_in_scope 導入時と同じ fail-closed 判断)
+        echo "エラー: 契約範囲内の未追跡ファイル列挙に失敗しました。退避の完全性を確認できないため index のみ復元します。" >&2
+        backup_failed=1
       fi
-      CONTRACT_UNTRACKED_BACKUP_DIR="$(mktemp -d)"
-      while IFS= read -r -d '' p; do
-        mkdir -p "${CONTRACT_UNTRACKED_BACKUP_DIR}/$(dirname "${p}")"
-        mv -- "${p}" "${CONTRACT_UNTRACKED_BACKUP_DIR}/${p}"
-        moved=1
-      done < "${untracked_list}"
-      rm -f "${untracked_list}"
+      if [[ "${backup_failed}" -eq 0 ]]; then
+        if ! CONTRACT_UNTRACKED_BACKUP_DIR="$(mktemp -d)"; then
+          echo "エラー: 未追跡ファイルの退避先ディレクトリ作成に失敗しました。index のみ復元します。" >&2
+          backup_failed=1
+        fi
+      fi
+      if [[ "${backup_failed}" -eq 0 ]]; then
+        while IFS= read -r -d '' p; do
+          if ! mkdir -p "${CONTRACT_UNTRACKED_BACKUP_DIR}/$(dirname "${p}")" \
+            || ! mv -- "${p}" "${CONTRACT_UNTRACKED_BACKUP_DIR}/${p}"; then
+            # 退避に失敗したファイルはスキップし、残りのファイルの退避は継続する
+            # (保全できるコピーを最大化する)。1 件でも失敗すれば worktree 復元は
+            # 行わない
+            backup_failed=1
+            failed_paths+=("${p}")
+            continue
+          fi
+          moved=1
+        done < "${untracked_list}"
+      fi
+      rm -f "${untracked_list:-}"
       if [[ "${moved}" -eq 1 ]]; then
         echo "契約範囲内の未追跡ファイルは削除せず ${CONTRACT_UNTRACKED_BACKUP_DIR} に相対パス構造で退避しました。内容を確認し、不要なら手動で削除してください。" >&2
-      else
+      elif [[ "${backup_failed}" -eq 0 ]]; then
         rmdir "${CONTRACT_UNTRACKED_BACKUP_DIR}" 2>/dev/null || true
+      fi
+      if [[ "${backup_failed}" -eq 1 ]]; then
+        # 退避の完全性を確認できない以上、worktree への git restore は行わない
+        # (未退避の唯一のコピーを上書きするおそれがあるため)。index のみ復元へ降格する
+        restore_targets=(--staged)
+        echo "エラー: 契約範囲内の未追跡ファイルの退避に失敗しました。worktree の復元は行いません(fail-closed)。" >&2
+        if [[ "${#failed_paths[@]}" -gt 0 ]]; then
+          echo "退避できなかったパス: ${failed_paths[*]}" >&2
+        fi
+        if [[ "${moved}" -eq 1 ]]; then
+          echo "退避済み分は ${CONTRACT_UNTRACKED_BACKUP_DIR} に残しています。" >&2
+        fi
+        echo "未退避のファイルを手動で退避してから、git restore --worktree --source=${PRE_SYNC_TREE} -- <path> で契約範囲の worktree を復旧してください。" >&2
       fi
     fi
     # 複数パスを 1 コマンドへ渡すと pathspec 不一致 1 件で全体が失敗するため 1 コマンド
@@ -1074,7 +1118,12 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     # (scripts/local-patches/ で許容している「staged のみの変更」)が復元完了後も常に
     # 非空として現れ、PRE_SYNC_TREE と完全一致した正しい復元を誤報してしまう
     local verify_ok=1
-    if ! git diff --cached --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/; then
+    if [[ "${backup_failed}" -eq 1 ]]; then
+      # 退避に失敗している以上、index 側が PRE_SYNC_TREE と一致していても
+      # 「復元完了」ではない(worktree は意図的に未復元のまま残しているため)。
+      # 無条件の成功メッセージを出さず、常に fail-closed の非ゼロで終了する
+      verify_ok=0
+    elif ! git diff --cached --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/; then
       verify_ok=0
     elif [[ "${restore_targets[*]}" == *--worktree* ]]; then
       if ! git diff --quiet "${PRE_SYNC_TREE}" -- skills-lock.json ".agents/skills/${SKILL_NAME}/" scripts/local-patches/ \
@@ -1084,8 +1133,8 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
     fi
     if [[ "${verify_ok}" -eq 1 ]]; then
       echo "契約範囲を同期開始前(PRE_SYNC_TREE=${PRE_SYNC_TREE})へ復元しました(範囲外 path の index・worktree には触れていません)。" >&2
-    else
-      echo "エラー: 契約範囲の復元後検証で差分が残っています。git diff --cached ${PRE_SYNC_TREE} -- <契約パス> / git diff ${PRE_SYNC_TREE} -- <契約パス> / git ls-files --others -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed。復元完了とは扱いません)。" >&2
+    elif [[ "${backup_failed}" -eq 1 ]]; then
+      echo "エラー: 未追跡ファイルの退避に失敗したため、契約範囲の復元は index のみで停止しました(worktree は未復元。fail-closed)。" >&2
       # 呼び出し元が失敗を検知できるよう非ゼロを返す（Bugbot Medium 指摘: 従来は
       # echo するだけで成功扱いのまま返っていたため、呼び出し元が fail-closed に
       # 分岐できなかった）。全呼び出し箇所は本関数の呼び出し文を
@@ -1097,6 +1146,9 @@ if [[ "${LOCAL_PATCH_GUARD}" == true ]]; then
       # 呼び出し元は元から本関数の直後で無条件に exit 1 する設計のため、
       # 最終的な fail-closed の結果（非ゼロ終了・スコープ内リバート実行）は
       # 変わらない。
+      return 1
+    else
+      echo "エラー: 契約範囲の復元後検証で差分が残っています。git diff --cached ${PRE_SYNC_TREE} -- <契約パス> / git diff ${PRE_SYNC_TREE} -- <契約パス> / git ls-files --others -- <契約パス> で残留を確認し、git restore --staged --worktree --source=${PRE_SYNC_TREE} -- <path> で手動復旧してください(fail-closed。復元完了とは扱いません)。" >&2
       return 1
     fi
   }
