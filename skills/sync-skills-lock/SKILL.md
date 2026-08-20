@@ -1113,6 +1113,13 @@ PYEOF
 # 実行前に確定済みの一覧を使うため安全）はこのモードでも従来どおり実行する。
 revert_in_scope() {
   local skip_clean="${1:-0}"
+  # 呼び出し元が「実際に checkout / clean が走ったか」を判定できるよう、この
+  # 呼び出し内で保全のため checkout・clean をスキップした場合のみ 1 を立てる
+  # （Bugbot Medium 指摘・Issue #418 系: post-npx の呼び出し元がこの値を見ずに
+  # 「スコープ内の変更はリバートしました」と無条件表示すると、worktree に未退避の
+  # 変更が残っているのに復元済みと誤認させる。呼び出しごとに 0 へ戻し、このモードに
+  # 入った場合のみ 1 にする）。
+  REVERT_IN_SCOPE_SKIPPED=0
   if [[ "${CONTRACT_UNTRACKED_BACKUP_FAILED:-0}" -eq 1 ]]; then
     # restore_contract_scope が契約範囲内の未追跡ファイル退避に失敗し、fail-closed で
     # index のみ復元（worktree は意図的に未復元）へ降格した直後の呼び出し。ここで
@@ -1124,6 +1131,7 @@ revert_in_scope() {
     # worktree はそのまま残す。既存 ignored の復元だけは untracked backup の失敗と
     # 無関係（別のバックアップ機構）のため従来どおり実行する。
     echo "警告: 契約範囲内の未追跡ファイル退避が失敗したため、skills-lock.json / .agents/skills/${SKILL_NAME}/ の checkout・git clean は行いません（index のみ復元済みの worktree を上書きしないための保全）。git status --porcelain -- skills-lock.json \".agents/skills/${SKILL_NAME}/\" で内容を確認し、必要なら手動で復旧してください（fail-closed）。" >&2
+    REVERT_IN_SCOPE_SKIPPED=1
   else
     if [[ "${LOCK_FILE_COMPROMISED}" -ne 0 ]]; then
       if [[ -L "skills-lock.json" ]]; then
@@ -1528,7 +1536,14 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
     restore_contract_scope || true
   fi
   revert_in_scope
-  echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
+  # revert_in_scope が CONTRACT_UNTRACKED_BACKUP_FAILED を検知して checkout・clean を
+  # 保全のためスキップした場合、worktree には未退避の変更が残っている（「リバート
+  # しました」は虚偽になる）。REVERT_IN_SCOPE_SKIPPED で分岐し、その場合は
+  # revert_in_scope 自身が案内済みの警告と重複させず、完了を意味する文言は出さない
+  # （Bugbot Medium 指摘: Stale revert success after backup skip / Issue #418 系）。
+  if [[ "${REVERT_IN_SCOPE_SKIPPED:-0}" -ne 1 ]]; then
+    echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
+  fi
   rm -f "${SNAP_BEFORE}" "${SNAP_AFTER}" "${SNAP_FILTERED_BEFORE}" "${SNAP_FILTERED_AFTER}" "${NPX_OUTPUT_FILE}" "${SCOPE_INVENTORY_FILE}" "${IGNORED_BASELINE_FILE}"
   if [[ "${IGNORED_BACKUP_KEEP}" -eq 0 ]]; then rm -rf "${IGNORED_BACKUP_DIR}"; fi
   exit 1
