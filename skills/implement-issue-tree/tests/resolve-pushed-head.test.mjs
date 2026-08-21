@@ -92,10 +92,14 @@ test('fixPrompt(pushAfterFix=true): resolve の前提条件は「リモート he
     prompt.includes('リモート head'),
     'resolve の前提条件として「リモート head」への反映を要求する文言がない',
   )
-  // push なしラウンドの経路: fetch + merge-base --is-ancestor による実測確認。
+  // push なしラウンドの経路: 明示 refspec の fetch + merge-base --is-ancestor による実測確認。
+  // 取得元のみの `git fetch origin <branch>` は FETCH_HEAD を更新するだけで検査対象の
+  // refs/remotes/origin/<branch> の更新を保証せず、直後の merge-base --is-ancestor が古い
+  // 追跡 ref を検査して未反映の修正への resolve を許し得る（PR #426 の cursor Medium /
+  // codex P1 指摘。Issue #361 と同じ性質）。
   assert.ok(
-    prompt.includes(`git fetch origin ${impl.branch}`),
-    'push なしラウンドの resolve 前に git fetch でリモート head を取得する指示がない',
+    prompt.includes(`git fetch origin ${impl.branch}:refs/remotes/origin/${impl.branch}`),
+    'push なしラウンドの resolve 前の fetch が保存先を明示した refspec になっていない（FETCH_HEAD のみ更新の fetch では追跡 ref の鮮度を保証できない）',
   )
   assert.ok(
     prompt.includes('merge-base --is-ancestor'),
