@@ -2613,6 +2613,36 @@ function resolvedThreadsLogLine(issueNumber, pushed, resolvedTids) {
     : `#${issueNumber}: fix エージェントが push なしラウンドで、過去ラウンド push 済み（リモート head 反映済み）の修正対応スレッドとして resolve を報告した（threadId: ${ids}）`
 }
 
+// fix の resolve 自己申告のうち「noPushRounds の進捗」として認める件数を数える純粋関数
+// （runMergeLoop から呼ばれ advanceNoPushRounds の入力になる）。進捗と認めるのは monitor が
+// 未解決と報告した threadId（finding.unresolvedComments 由来）のうち未計上の新規分のみ:
+// 無条件に数えると再申告・一覧外 threadId の捏造で noPushRounds 防御が形骸化するため。
+// 計上分は claimedResolvedThreadIds（呼び出し元がループ外で保持する Set）へ副作用で記録して
+// 再計上を防ぐ。resolve の実効性自体は次周回 monitor がサーバー実値で独立確認する。
+function countNewlyResolvedThreads(resolvedTids, unresolvedComments, claimedResolvedThreadIds) {
+  const reported = new Set(
+    (Array.isArray(unresolvedComments) ? unresolvedComments : [])
+      .map((c) => sanitizeThreadId(c?.threadId ?? ''))
+      .filter((v) => v),
+  )
+  let count = 0
+  for (const tid of resolvedTids) {
+    if (!reported.has(tid) || claimedResolvedThreadIds.has(tid)) continue
+    claimedResolvedThreadIds.add(tid)
+    count++
+  }
+  return count
+}
+
+// noPushRounds（push なし連続ラウンド数）の遷移を決める純粋関数。push 成功、または push なし
+// でも新規スレッド resolve（countNewlyResolvedThreads 検証済み件数）があれば進捗ありとして
+// リセットし、resolve も push も無いラウンドのみを no-progress と数える。push なし 2 連続の
+// 2 回目で resolve 成功したのに quality-blocked 終端する退行（ideas#281 の cursor Medium
+// 指摘）を防ぐ。停止性は monitorsLeft（7 + 救済 1）と fixCount（上限 6）が別途保証する。
+function advanceNoPushRounds(noPushRounds, pushed, newlyResolvedCount) {
+  return pushed || newlyResolvedCount > 0 ? 0 : noPushRounds + 1
+}
+
 function closePrompt(item) {
   return [
     `親イシュー #${item.number}「${untrusted(item.title, 'issue-title')}」の完了検証とクローズの担当。配下の子イシューは本ワークフローで処理済み。`,
@@ -4108,6 +4138,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   let lastState = 'timeout'
   let fixCount = initialFixCount
   let noPushRounds = 0
+  // fix の resolve 自己申告のうち noPushRounds の進捗として計上済みの threadId。ラウンドを
+  // 跨いだ同一 threadId の再計上（虚偽・重複申告での進捗偽装）を防ぐ（countNewlyResolvedThreads
+  // が副作用で追記する）。monitor の一覧は最大 20 件・fixCount 上限 6 のため肥大しない。
+  const claimedResolvedThreadIds = new Set()
   // fix 中の worktree 誤配置検出フラグ。最終 updateState で routing 専用 note を記録するために使う。
   let routingErrorDetected = false
   // PR マージ済みだがイシュークローズ未確認か。クローズ未完了として記録し、次回の monitoring
@@ -4634,11 +4668,19 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 次周回 monitor の reviewThreads 走査がサーバー側の実値で独立確認する。ログは f.pushed の
       // 真偽で実行条件（push 成功直後 / 過去ラウンド push 済み分の反映確認後）を区別して記録する
       // （一律「resolve した」では未 push 修正への resolve と区別できない。resolvedThreadsLogLine 参照）。
+      // newlyResolvedThisRound のみ例外的に noPushRounds の進捗判定へ流用する（monitor 報告済み
+      // かつ未計上の threadId に限る検証付き。countNewlyResolvedThreads 参照）。
+      let newlyResolvedThisRound = 0
       if (Array.isArray(f.resolvedThreadIds)) {
         const resolvedTids = f.resolvedThreadIds
           .slice(0, 20)
           .map((v) => sanitizeThreadId(v))
           .filter((v) => v)
+        newlyResolvedThisRound = countNewlyResolvedThreads(
+          resolvedTids,
+          finding?.unresolvedComments,
+          claimedResolvedThreadIds,
+        )
         if (resolvedTids.length > 0) {
           log(resolvedThreadsLogLine(item.number, f.pushed === true, resolvedTids))
         }
@@ -4698,19 +4740,22 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // outOfScopeSeen）を更新し旧 worktree を削除する（中断・再起動後も復元でき記録が失われない）。
       // 非終端の updateState はこの fix 直後の 1 箇所で足りる。
       await updateState(item.number, { fixCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments }, { cleanupWorktree: oldWorktreePath })
+      // push 成功、または push なしでも新規スレッド resolve があれば進捗ありとしてリセット
+      // する（判定根拠と停止性は advanceNoPushRounds のコメント参照）。
+      noPushRounds = advanceNoPushRounds(noPushRounds, f.pushed === true, newlyResolvedThisRound)
       if (!f.pushed) {
-        // 「修正済みで push 不要」の場合があるため即 blocked にせず 1 回だけ再監視する。
-        // 2 回連続で push なしなら進展がないため blocked とする
-        noPushRounds++
-        if (noPushRounds >= 2) {
+        if (newlyResolvedThisRound > 0) {
+          log(`PR #${impl.prNumber} の修正エージェントは push 不要だが新規スレッド resolve（${newlyResolvedThisRound} 件）を報告、進捗ありとしてマージ条件を再判定する`)
+        } else if (noPushRounds >= 2) {
+          // 「修正済みで push 不要」の場合があるため 1 回は再監視し、resolve も push も無い
+          // ラウンドが 2 回連続なら進展がないため blocked とする。
           lastState = 'blocked'
           // 進展なしだが、レビュー対応後の再実行で継続できるため回復可能（Issue #142）。
           lastBlockedReason = 'quality'
           break
+        } else {
+          log(`PR #${impl.prNumber} の修正エージェントは push 不要と判断、マージ条件を再判定する`)
         }
-        log(`PR #${impl.prNumber} の修正エージェントは push 不要と判断、マージ条件を再判定する`)
-      } else {
-        noPushRounds = 0
       }
       if (monitorsLeft < 1) monitorsLeft = 1
     } else if (lastState === 'blocked' || lastState === 'invalid-monitor-result') {
