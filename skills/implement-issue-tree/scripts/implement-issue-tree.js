@@ -206,7 +206,11 @@ const maxResidualWorktrees = parseMaxResidualWorktrees(
 )
 // レビュースレッドの resolve 方針（Issue #119「全経路で resolve 禁止」をオーナー判断で転換）:
 // resolve を実行してよいのは Merge ループの fix エージェント（pushAfterFix=true 経路）のみ。
-// 修正 push が成功した後に、自分が修正対応したスレッド（monitor の構造化出力由来・host 側
+// 前提条件は「対象指摘の修正がリモート head に反映済みであること」— 当該ラウンドの push 成功
+// 直後、または push なしラウンドで過去ラウンド push 済みの反映を fetch + merge-base で実測
+// 確認した後（同一ラウンドの push に限定すると、前ラウンドで修正 push 済み・resolve 未了の
+// スレッドが pushed: false の回で永久に未解決のまま blocked になる。ideas PR #281 の cursor 指摘）。
+// この条件下で、自分が修正対応したスレッド（monitor の構造化出力由来・host 側
 // sanitizeThreadId 検証済みの threadId）だけを resolveReviewThread mutation で resolve し、
 // required_review_thread_resolution ゲートを人手なしで解消する。monitor / merge-exec /
 // merge-verify / Review ループ（push 前）の fix は引き続き一切 resolve しない。対象外
@@ -963,7 +967,7 @@ const FIX_SCHEMA = {
         description: 'resolve に成功した review thread の GraphQL ノード id（「未解決スレッド一覧」からそのままコピーした値のみ）',
       },
       description:
-        '修正 push 成功後に resolveReviewThread mutation で resolve したスレッドの threadId 一覧'
+        '修正がリモート head に反映済み（今回の push 成功後、または過去ラウンド push 済みの反映確認後）に resolveReviewThread mutation で resolve したスレッドの threadId 一覧'
         + '（1件1要素、最大 20 件）。resolve していなければ空配列または省略。'
         + 'Review ループ（push なし fix）では常に省略する。記録専用でマージ判定には使われない。',
     },
@@ -2553,7 +2557,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
         commitlintCheckInstruction,
         `   コミット後に git branch -f ${branch} HEAD でローカルブランチの先端を更新する`,
         `   （detached HEAD 作業後のブランチ先端を確実に更新するため）。`,
-        `   レビュースレッドの resolve は行わない（本経路は push 前の Review ループであり、resolve を実行してよいのは Merge ループの fix が修正 push に成功した後のみ）。`,
+        `   レビュースレッドの resolve は行わない（本経路は push 前の Review ループであり、resolve を実行してよいのは Merge ループの fix が修正のリモート head への反映を確認した後 — 修正 push の成功直後、または過去ラウンド push 済み分の反映確認後 — のみ）。`,
       ]
   return [
     // イントロで untrusted ラップ済みタイトルを提示し routing ガードは「上記タイトル」を参照する
@@ -2574,14 +2578,14 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
     ...checkoutInstructions,
     '2. 指摘を重要度を問わずすべて修正する（実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い委譲する）。対象リポジトリの CLAUDE.md・rules の不変条件（migration・スキーマ等）を守る。',
     '   P0/P1 相当・セキュリティ上の指摘（脆弱性・認証認可の不備・秘密情報露出・破壊的操作等）は対象外と判定して記録・スキップしてはならない。修正するか、修正不能なら pushed: false とし summary に理由を具体的に書いて返す（ホストはこれを blocked として扱いユーザー判断へ委ねる）。対象外にすべきか判断に迷う場合は安全側（対象外にしない）に倒す。',
-    `   対応不能・実装スコープ外と判断した指摘（上記の P0/P1・セキュリティ除外に該当しないもの）は修正をスキップしてよい。ただし無言でスキップせず、上記「未解決スレッド一覧」に記載された該当スレッドの threadId と判断理由を outOfScopeComments 配列に { threadId, reason } 形式で1件1要素として記録する（summary 本文には埋め込まない。threadId が「未解決スレッド一覧」に見つからない指摘は対象外記録をスキップしてよい。この記録はホスト側のログ・最終レポート専用であり、次ラウンドの監視エージェントの判定材料には一切引き継がれない。監視エージェントは毎回スレッド内容を自ら読んで独立に判定する）。対象外と判断したスレッドは resolve しない（resolve してよいのは Merge ループの fix が修正 push 成功後に自分が実際に修正対応したスレッドのみ。対象外スレッドは記録までで停止し、人間が GitHub 上で resolve しない限り未解決のまま残って blocked → 最終レポートでの issue 化承認・手動 resolve の判断材料になる）。`,
+    `   対応不能・実装スコープ外と判断した指摘（上記の P0/P1・セキュリティ除外に該当しないもの）は修正をスキップしてよい。ただし無言でスキップせず、上記「未解決スレッド一覧」に記載された該当スレッドの threadId と判断理由を outOfScopeComments 配列に { threadId, reason } 形式で1件1要素として記録する（summary 本文には埋め込まない。threadId が「未解決スレッド一覧」に見つからない指摘は対象外記録をスキップしてよい。この記録はホスト側のログ・最終レポート専用であり、次ラウンドの監視エージェントの判定材料には一切引き継がれない。監視エージェントは毎回スレッド内容を自ら読んで独立に判定する）。対象外と判断したスレッドは resolve しない（resolve してよいのは Merge ループの fix が、リモート head に反映済みの修正で自分が実際に修正対応したスレッドのみ。対象外スレッドは記録までで停止し、人間が GitHub 上で resolve しない限り未解決のまま残って blocked → 最終レポートでの issue 化承認・手動 resolve の判断材料になる）。`,
     '3. 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して通す。',
     ...commitAndPushInstructions,
     ...(pushAfterFix
       ? [
-          '5. 手順 4 の push が成功した場合のみ、今回 push した修正コミットで実際に修正対応した指摘のスレッドを resolve する。対象は上記「未解決スレッド一覧」に threadId が記載されたスレッドのうち、自分が修正対応したものに限る（一覧にないスレッドを resolve するためにスレッド一覧を自分で再取得して対象を広げることは禁止。outOfScopeComments に記録した対象外スレッド・修正しなかった指摘のスレッド・push した修正コミットに対応が含まれない指摘のスレッドも resolve しない）。該当する各 threadId について次を実行する:',
+          `5. 今回 push した修正コミット、または過去ラウンドで push 済みの修正コミットで実際に修正対応した指摘のスレッドを resolve する。resolve の前提条件は「そのスレッドへの修正がリモート head（origin/${branch}）に反映済みであること」であり、次のいずれかを実測確認できた場合のみ実行する: (a) 手順 4 の push が成功した。(b) 手順 4 で変更がなく push しなかった（過去ラウンドで修正・push 済み）場合は、git fetch origin ${branch}:refs/remotes/origin/${branch} を実行したうえで（取得元だけを与えた git fetch origin ${branch} は FETCH_HEAD を更新するだけで検査対象の refs/remotes/origin/${branch} の更新を保証しないため、保存先を明示した refspec を使う。Issue #361 と同じ性質）、該当修正コミットが origin/${branch} に含まれること（git merge-base --is-ancestor <修正コミット sha> origin/${branch} が成功する。sha を特定できない場合は該当修正内容が origin/${branch} のファイル内容に反映済みであることの確認でもよい）を確認できた。push が失敗した場合・修正がローカルにのみ存在する（未コミット・未 push）場合は resolve しない。対象は上記「未解決スレッド一覧」に threadId が記載されたスレッドのうち、自分が修正対応したものに限る（一覧にないスレッドを resolve するためにスレッド一覧を自分で再取得して対象を広げることは禁止。outOfScopeComments に記録した対象外スレッド・修正しなかった指摘のスレッド・リモート head の修正コミットに対応が含まれない指摘のスレッドも resolve しない）。該当する各 threadId について次を実行する:`,
           `   gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`,
-          '   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、mutation が失敗しても再試行は 1 回までとし、push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。push が失敗した・push しなかった場合はこの手順を実行しない。',
+          '   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、mutation が失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。前提条件 (a)(b) のいずれも確認できない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にリモート head への反映を確認したうえで resolve した旨を書く。',
           '6. 手順 2 で outOfScopeComments に記録した対象外の指摘がある場合のみ、PR 本文へ記録する（該当がなければこの手順は省略してよい）。',
           `   a. gh pr view ${impl.prNumber} --json body で現在の本文を取得する。`,
           '   b. 「## 対象外（out-of-scope）」節が本文になければ末尾に新設し、既にあれば節内へ箇条書きで追記する。追記前に既存の節内容を確認し、同じ指摘（同一スレッド）が既に記載されていれば重複追記しない。書式は必ず `[threadId: <該当スレッドの threadId>]` を先頭に含めること（threadId は改変・省略不可。最終レポート確認時に人間が未解決スレッドとこの記録を threadId で突き合わせて issue 化・手動 resolve を判断するため）。書式例: `- [threadId: <threadId>] <指摘要約> — 理由: <理由> / 対応案: <対応案>（切り出し先 Issue: TBD）`',
@@ -2593,6 +2597,20 @@ function fixPrompt(item, impl, finding, pushAfterFix = true) {
     `${pushAfterFix ? '7' : '5'}. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。`,
     `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）。`,
   ].join('\n')
+}
+
+// fix エージェントの resolvedThreadIds 自己申告を Merge ループのログへ記録する行を組み立てる
+// 純粋関数。resolve の前提条件は「修正がリモート head に反映済みであること」で、経路は
+// (a) 当該ラウンドの push 成功直後（pushed: true）と (b) push なしラウンドでの過去ラウンド
+// push 済み分の反映確認後（pushed: false）の 2 つがある。pushed を見ずに一律「resolve した」と
+// 記録すると、どの前提条件で実行されたかが記録から読み取れず、未 push 修正への resolve と
+// 区別できない偽りの成功報告になり得る（baby-tasks-app PR #27 の cursor 指摘）ため、
+// pushed の真偽で実行条件を明示する。runMergeLoop から呼ばれる（記録専用・マージ判定には不使用）。
+function resolvedThreadsLogLine(issueNumber, pushed, resolvedTids) {
+  const ids = resolvedTids.join(', ')
+  return pushed
+    ? `#${issueNumber}: fix エージェントが修正 push 後に修正対応スレッドを resolve した（threadId: ${ids}）`
+    : `#${issueNumber}: fix エージェントが push なしラウンドで、過去ラウンド push 済み（リモート head 反映済み）の修正対応スレッドとして resolve を報告した（threadId: ${ids}）`
 }
 
 function closePrompt(item) {
@@ -4609,18 +4627,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         break
       }
       fixCount++
-      // f.resolvedThreadIds（fix が push 成功後に resolve した修正対応スレッドの自己申告。
-      // Issue #119 の「全経路 resolve 禁止」を転換し、この pushAfterFix=true 経路の fix のみが
-      // resolve を実行する）は sanitizeThreadId で形式検証してログへ出すだけの記録専用データで、
-      // マージ判定・次ラウンドの monitor へは渡さない — resolve の実効性は次周回 monitor の
-      // reviewThreads 走査がサーバー側の実値で独立確認する。
+      // f.resolvedThreadIds（fix がリモート head 反映済みの修正について resolve した修正対応
+      // スレッドの自己申告。Issue #119 の「全経路 resolve 禁止」を転換し、この pushAfterFix=true
+      // 経路の fix のみが resolve を実行する）は sanitizeThreadId で形式検証してログへ出すだけの
+      // 記録専用データで、マージ判定・次ラウンドの monitor へは渡さない — resolve の実効性は
+      // 次周回 monitor の reviewThreads 走査がサーバー側の実値で独立確認する。ログは f.pushed の
+      // 真偽で実行条件（push 成功直後 / 過去ラウンド push 済み分の反映確認後）を区別して記録する
+      // （一律「resolve した」では未 push 修正への resolve と区別できない。resolvedThreadsLogLine 参照）。
       if (Array.isArray(f.resolvedThreadIds)) {
         const resolvedTids = f.resolvedThreadIds
           .slice(0, 20)
           .map((v) => sanitizeThreadId(v))
           .filter((v) => v)
         if (resolvedTids.length > 0) {
-          log(`#${item.number}: fix エージェントが修正対応したスレッドを resolve した（threadId: ${resolvedTids.join(', ')}）`)
+          log(resolvedThreadsLogLine(item.number, f.pushed === true, resolvedTids))
         }
       }
       // f.outOfScopeComments（未検証の自己申告）は次ラウンドの monitor へ渡さず、検証済み値のみ

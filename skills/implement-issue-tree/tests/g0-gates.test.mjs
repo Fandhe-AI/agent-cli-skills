@@ -391,7 +391,7 @@ test('fixPrompt: pushAfterFix の両分岐で commitlint 事前確認の指示�
 // resolveReviewThread mutation の指示行の有無が「resolve 実行主体か」の判定基準。
 const RESOLVE_MUTATION_MARKER = 'resolveReviewThread'
 
-test('fixPrompt: pushAfterFix=true は push 成功後の resolveReviewThread mutation 指示と resolvedThreadIds 報告を含む', () => {
+test('fixPrompt: pushAfterFix=true はリモート head 反映済み前提の resolveReviewThread mutation 指示と resolvedThreadIds 報告を含む', () => {
   mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
   const finding = { summary: 'テスト用の指摘', unresolvedComments: [{ threadId: 'PRRT_abc123', text: '指摘テキスト' }] }
   const prompt = fixPrompt(item, { ...impl, branch: 'fix/42-noop' }, finding, true)
@@ -401,8 +401,10 @@ test('fixPrompt: pushAfterFix=true は push 成功後の resolveReviewThread mut
     'resolve mutation のコマンド形が期待どおりでない',
   )
   assert.ok(prompt.includes('resolvedThreadIds'), 'resolve 済み threadId の報告フィールド（resolvedThreadIds）の指示がない')
-  // push 成功が前提であること・対象を monitor 由来の一覧へ限定することを文言として固定する。
-  assert.ok(prompt.includes('push が成功した場合のみ'), 'resolve が push 成功後に限定されていない')
+  // resolve の前提条件（修正がリモート head に反映済み: 今回 push 成功、または過去ラウンド
+  // push 済み分の反映確認。ideas PR #281 の cursor 指摘での是正）と、対象を monitor 由来の
+  // 一覧へ限定することを文言として固定する。詳細は resolve-pushed-head.test.mjs を参照。
+  assert.ok(prompt.includes('リモート head'), 'resolve の前提条件（リモート head への反映済み）がない')
   assert.ok(prompt.includes('スレッド一覧を自分で再取得して対象を広げることは禁止'), 'resolve 対象の一覧限定（自前再取得の禁止）がない')
 })
 
