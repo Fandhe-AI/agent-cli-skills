@@ -9,9 +9,15 @@
 // 二度と走らず、noPushRounds >= 2 で blocked 終端 → required_review_thread_resolution により
 // 自動マージが恒久ブロックされる（この方針転換が解消しようとした失敗モードそのものの再発）。
 // 是正後の前提条件は「対象指摘の修正がリモート head（origin/<branch>）に反映済みであること」:
-// (a) 当該ラウンドの push 成功、または (b) push なしラウンドで過去 push 分の反映を
-// git fetch + merge-base --is-ancestor 等で実測確認できた場合のみ resolve を許可する。
-// 未 push（未コミット・ローカルのみ）の修正に対する resolve は引き続き禁止。
+// (a) 当該ラウンドの push 成功、または (b) push なしラウンドでホストが決定的に算出した許可
+// リスト（permittedNoPushResolveIds）に含まれる場合のみ resolve を許可する。
+//
+// 追記（Issue #430。AGENTS.md 例外(b)契約）: (b) の反映確認を fix 自身の git fetch +
+// merge-base --is-ancestor 実行と自己申告に委ねる旧設計は、fix 申告 sha を信頼境界に置いて
+// しまうため撤回した。現在は resolveProof（ホストが monitor の compareStatus 観測から
+// applyResolveProofObservation で決定的に積み上げる状態）と computePermittedNoPushResolveIds
+// が算出した許可リストのみを fix へ渡し、fix は自前確認で対象を広げられない。未 push
+// （未コミット・ローカルのみ）の修正は許可リストに現れないため resolve 対象にならない。
 //
 // 対象バグ2（Low・Fandhe-AI/baby-tasks-app PR #27 reviewThread PRRT_kwDOTqyUz86a_8bW）:
 // runMergeLoop の fix 結果処理が f.pushed を確認せず resolvedThreadIds を一律
@@ -76,47 +82,31 @@ function mergeLoopFixPrompt() {
 // 指摘 1: push なしラウンド（過去ラウンドで修正 push 済み）でも resolve が許可されること
 // ---------------------------------------------------------------------------
 
-test('fixPrompt(pushAfterFix=true): resolve の前提条件は「リモート head への反映済み」であり同一ラウンドの push に限定しない', () => {
+test('fixPrompt(pushAfterFix=true): resolve (b) はホスト決定的照合済みの許可リストのみを対象とし、fix 自身の反映確認は行わない（Issue #430）', () => {
   const prompt = mergeLoopFixPrompt()
-  // 旧文言（同一ラウンド push への限定・push なし時の全面禁止）が残っていないこと。
+  // 旧文言（fix 自身が git fetch + merge-base --is-ancestor で反映確認する経路）が残っていないこと。
+  // AGENTS.md の例外(b)契約により、fix 申告 sha を照合対象に使う経路は禁止されている。
   assert.ok(
-    !prompt.includes('push が失敗した・push しなかった場合はこの手順を実行しない'),
-    'push なしラウンドで resolve を全面禁止する旧文言が残っている（修正済みスレッドが永久に未解決のまま blocked になる再発経路）',
+    !prompt.includes('merge-base --is-ancestor'),
+    'fix 自身が反映確認する旧経路（merge-base --is-ancestor）の指示が残っている（ホスト決定的照合への転換が未完了）',
   )
   assert.ok(
-    !prompt.includes('手順 4 の push が成功した場合のみ'),
-    'resolve を同一ラウンドの push 成功に限定する旧文言が残っている',
+    !prompt.includes(`git fetch origin ${impl.branch}:refs/remotes/origin/${impl.branch}`),
+    'resolve (b) の手順に fix 自身の fetch 指示が残っている（自前確認は禁止のはず）',
   )
-  // 新しい前提条件: リモート head への反映済み。
-  assert.ok(
-    prompt.includes('リモート head'),
-    'resolve の前提条件として「リモート head」への反映を要求する文言がない',
-  )
-  // push なしラウンドの経路: 明示 refspec の fetch + merge-base --is-ancestor による実測確認。
-  // 取得元のみの `git fetch origin <branch>` は FETCH_HEAD を更新するだけで検査対象の
-  // refs/remotes/origin/<branch> の更新を保証せず、直後の merge-base --is-ancestor が古い
-  // 追跡 ref を検査して未反映の修正への resolve を許し得る（PR #426 の cursor Medium /
-  // codex P1 指摘。Issue #361 と同じ性質）。
-  assert.ok(
-    prompt.includes(`git fetch origin ${impl.branch}:refs/remotes/origin/${impl.branch}`),
-    'push なしラウンドの resolve 前の fetch が保存先を明示した refspec になっていない（FETCH_HEAD のみ更新の fetch では追跡 ref の鮮度を保証できない）',
-  )
-  assert.ok(
-    prompt.includes('merge-base --is-ancestor'),
-    '過去ラウンド push 済みの修正コミットが origin ブランチに含まれることを実測確認する指示（merge-base --is-ancestor）がない',
-  )
+  // 新しい前提条件: ホストが算出した許可リストのみを対象にする。
+  assert.ok(prompt.includes('許可リスト'), 'resolve (b) の許可リストに関する文言がない')
+  assert.ok(prompt.includes('自前確認'), '自前確認（git fetch・merge-base 等）の対象拡大禁止文言がない')
 })
 
-test('fixPrompt(pushAfterFix=true): 未 push（未コミット・ローカルのみ）の修正に対する resolve は引き続き禁止される', () => {
-  const prompt = mergeLoopFixPrompt()
-  assert.ok(
-    prompt.includes('push が失敗した場合'),
-    'push 失敗時に resolve を実行しない旨の文言がない',
-  )
-  assert.ok(
-    prompt.includes('未コミット・未 push'),
-    'ローカルにのみ存在する修正（未コミット・未 push）を resolve 対象から除外する文言がない',
-  )
+test('fixPrompt(pushAfterFix=true): 許可リストの内容がプロンプトへそのまま反映され、空なら (b) の resolve を禁止する', () => {
+  mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
+  const promptWithIds = fixPrompt(item, impl, finding, true, ['PRRT_permitted1', 'PRRT_permitted2'])
+  assert.ok(promptWithIds.includes('PRRT_permitted1, PRRT_permitted2'), '許可リストの threadId がプロンプトに反映されていない')
+
+  mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
+  const promptEmpty = fixPrompt(item, impl, finding, true, [])
+  assert.ok(promptEmpty.includes('(空'), '許可リストが空のとき、その旨がプロンプトに明示されない')
 })
 
 test('fixPrompt(pushAfterFix=false): Review ループは引き続き resolve を一切行わない', () => {
@@ -137,7 +127,7 @@ test('resolvedThreadsLogLine: pushed=true は「push 後の resolve」として�
   assert.ok(line.includes('PRRT_abc123, PRRT_def456'), 'threadId 一覧がログ行に含まれない')
 })
 
-test('resolvedThreadsLogLine: pushed=false は「過去ラウンド push 済み（リモート head 反映済み）」の自己申告として記録する', () => {
+test('resolvedThreadsLogLine: pushed=false は「過去ラウンド push 済み（リモート head 反映済み）」のホスト決定的照合済みとして記録する', () => {
   const line = resolvedThreadsLogLine(42, false, ['PRRT_abc123'])
   assert.ok(line.includes('#42'), 'イシュー番号がログ行に含まれない')
   assert.ok(line.includes('push なし'), 'push なしラウンドの resolve であることがログ行から読み取れない')
