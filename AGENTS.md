@@ -73,12 +73,16 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   （monitor / merge-exec / merge-verify / Review ループは実行しない）、(b) resolve は
   対象修正がリモート head（`origin/<branch>`）に反映済みであることを前提とする。成立
   経路は次の 2 つに限る — 当該ラウンドの push が成功した場合、または push しなかった
-  ラウンド（過去ラウンドで push 済み）では明示 refspec
-  （`<branch>:refs/remotes/origin/<branch>`）の `git fetch` に続けて
-  `git merge-base --is-ancestor <修正コミット sha> origin/<branch>` により該当修正の
-  反映を実測確認した場合に限る。修正コミット sha は host が保持する値を用い、fix の
-  自己申告や未信頼なレビュー本文の記述から推定しない。**sha を確定できない場合は
-  fail-closed とし resolve しない**（「ファイル内容への反映確認でも可」という代替経路は
+  ラウンド（過去ラウンドで push 済み）では、**ホストが保持・検証した sha**（fix が
+  申告した修正コミット sha をホストが形式検証したうえで保持した値。未信頼なレビュー
+  本文の記述から推定しない）に対し、**ホスト側が実行する決定的照合** — 明示 refspec
+  （`<branch>:refs/remotes/origin/<branch>`）の `git fetch` に続く
+  `git merge-base --is-ancestor <host 保持 sha> origin/<branch>` によるリモート head
+  反映確認 — が成立した場合に限る。fix エージェントの自己判断・自己申告のみでこの
+  代替経路を成立させてはならない。ホスト側照合が**未実装・実行不能・不成立の場合、
+  または sha を確定できない場合は resolve を実行しない（fail-closed）**。ホスト側照合の
+  実装は Issue #430 で行い、実装されるまで代替経路は成立しない（当面は push 成功後の
+  経路のみ有効）（「ファイル内容への反映確認でも可」という代替経路は
   誰がどの範囲を照合するかが未定義になり、未信頼テキストを読む fix の自己判断だけで
   別の既存変更を対象修正と誤認して `required_review_thread_resolution` ゲートを解除し
   得るため認めない）。未コミット・未 push の修正（ローカルにのみ存在する修正）に対する
