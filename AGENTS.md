@@ -63,7 +63,7 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   (5) 以上の設計がスキル文書に明記され、差分が設計どおりかをレビューで検証できる。
   これらの要件のいずれかを弱める変更、opt-in 条件を迂回・緩和する変更、fail-closed を
   外す変更、未信頼テキストをマージ実行・検証コンテキストへ持ち込む変更は P0 として扱う。
-  **例外（2026-08-20・オーナー判断。(b) は 2026-08-21・#427 の判断で更新）**:
+  **例外（2026-08-20・オーナー判断。(b) は 2026-08-21・#427 の判断で更新、#430 で実装済み）**:
   implement-issue-tree の Merge ループ fix エージェントによる「対応済みレビュー
   スレッド resolve」（`resolveReviewThread` mutation）は、要件 (2) の限定的例外として
   受容する。未信頼テキスト（レビュー本文）を読む fix の自己判断が
@@ -73,29 +73,34 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   （monitor / merge-exec / merge-verify / Review ループは実行しない）、(b) resolve は
   対象修正がリモート head（`origin/<branch>`）に反映済みであることを前提とする。成立
   経路は次の 2 つに限る — 当該ラウンドの push が成功した場合、または push しなかった
-  ラウンド（過去ラウンドで push 済み）では、**ホストが自ら観測した push の結果**
-  （ホストが当該 fix ラウンドの push 完了時に `git rev-parse` / `git ls-remote` 等の
-  決定的コマンドで直接取得・保持したコミット sha）に対し、**ホスト側が実行する決定的
-  照合** — 明示 refspec（`<branch>:refs/remotes/origin/<branch>`）の `git fetch` に続く
-  `git merge-base --is-ancestor <host 観測 sha> origin/<branch>` によるリモート head
-  反映確認 — が成立した場合に限る。**fix エージェントの申告 sha はいかなる形式検証を
-  経ても信頼境界に置かず、照合対象に使わない**（既存の任意の祖先 sha を「修正
-  コミット」と申告すれば ancestry 照合を通過できてしまうため。未信頼なレビュー本文の
-  記述からの推定も同様に禁止）。対象レビュースレッドと修正コミットの対応も、
-  エージェント出力に依存せず決定的に立証できる場合に限り成立する（立証手段の実装は
-  Issue #430。立証できない場合は resolve しない = fail-closed）。fix エージェントの
+  ラウンド（過去ラウンドで push 済み）では、**ホストが自ら観測した push の結果**に対し
+  **ホスト側が実行する決定的照合**が成立した場合に限る。Workflow ランタイムはホスト
+  コードから直接シェル・ファイルシステムへアクセスできないため（spawn したエージェントの
+  みが触れる）、観測は merge-verify と同型の未信頼テキストを一切読まない読み取り専用
+  エージェント（monitor。Merge ループの各ラウンド、fix 起動より前に必ず実行）が
+  `gh api .../compare/<host提供prevSha>...<今回headSha>` の結果（`compareStatus` /
+  `changedFiles`）のみを返し、**比較・許可判定はホストの決定的コード**
+  （`applyResolveProofObservation` / `computePermittedNoPushResolveIds`。詳細は
+  `skills/implement-issue-tree/references/automerge-design.md`「resolve 前提のホスト側
+  決定的照合」）が行う形で実装した。`compareStatus: ahead` かつ直前ラウンドで実際に
+  push が成功していた場合のみリモート head への反映（ancestry）を認定し、`behind` /
+  `diverged`（force-push 等）・取得不能は fail-closed で許可状態を全体リセットする。
+  **fix エージェントの申告 sha はいかなる形式検証を経ても信頼境界に置かず、照合対象に
+  使わない**（既存の任意の祖先 sha を「修正コミット」と申告すれば ancestry 照合を
+  通過できてしまうため。未信頼なレビュー本文の記述からの推定も同様に禁止）。対象
+  レビュースレッドと修正コミットの対応は、GraphQL `reviewThreads.path` が host 実測済み
+  push の `changedFiles` に含まれることを上界とする決定的照合（path 一致）で立証し、
+  立証できないスレッドは許可リストに含めない（fail-closed）。fix エージェントの
   自己判断・自己申告のみでこの代替経路を成立させてはならない。ホスト側照合が
-  **未実装・実行不能・不成立の場合、または sha を確定できない場合は resolve を実行
-  しない（fail-closed）**。ホスト側照合の実装は Issue #430 で行い、実装されるまで
-  代替経路は成立しない（当面は push 成功後の
-  経路のみ有効）（「ファイル内容への反映確認でも可」という代替経路は
-  誰がどの範囲を照合するかが未定義になり、未信頼テキストを読む fix の自己判断だけで
-  別の既存変更を対象修正と誤認して `required_review_thread_resolution` ゲートを解除し
-  得るため認めない）。未コミット・未 push の修正（ローカルにのみ存在する修正）に対する
-  resolve は前提を満たさず禁止、(c) 対象は monitor の構造化出力由来で host が
-  `sanitizeThreadId` 検証した threadId に限定（fix がスレッド一覧を自前再取得して対象を
-  広げない）、(d) out-of-scope 判断のスレッドは resolve せず人間に委ねる。この (a)〜(d)
-  を弱める変更・resolve 主体や対象を拡大する変更は引き続き P0 として指摘する
+  **不成立の場合、または sha を確定できない場合は resolve を実行しない（fail-closed）**
+  （「ファイル内容への反映確認でも可」という旧代替経路は誰がどの範囲を照合するかが
+  未定義になり、未信頼テキストを読む fix の自己判断だけで別の既存変更を対象修正と
+  誤認して `required_review_thread_resolution` ゲートを解除し得るため廃止した）。
+  未コミット・未 push の修正（ローカルにのみ存在する修正）に対する resolve は前提を
+  満たさず禁止、(c) 対象は monitor の構造化出力由来で host が `sanitizeThreadId` 検証
+  した threadId に限定（fix がスレッド一覧を自前再取得して対象を広げない）、(d)
+  out-of-scope 判断のスレッドは resolve せず人間に委ねる。この (a)〜(d) を弱める
+  変更・resolve 主体や対象を拡大する変更は引き続き P0 として指摘する
 
 ## 2. アーキテクチャ・設計整合の観点
 

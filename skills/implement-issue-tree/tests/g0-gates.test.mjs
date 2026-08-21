@@ -401,11 +401,11 @@ test('fixPrompt: pushAfterFix=true はリモート head 反映済み前提の re
     'resolve mutation のコマンド形が期待どおりでない',
   )
   assert.ok(prompt.includes('resolvedThreadIds'), 'resolve 済み threadId の報告フィールド（resolvedThreadIds）の指示がない')
-  // resolve の前提条件（修正がリモート head に反映済み: 今回 push 成功、または過去ラウンド
-  // push 済み分の反映確認。ideas PR #281 の cursor 指摘での是正）と、対象を monitor 由来の
-  // 一覧へ限定することを文言として固定する。詳細は resolve-pushed-head.test.mjs を参照。
-  assert.ok(prompt.includes('リモート head'), 'resolve の前提条件（リモート head への反映済み）がない')
-  assert.ok(prompt.includes('スレッド一覧を自分で再取得して対象を広げることは禁止'), 'resolve 対象の一覧限定（自前再取得の禁止）がない')
+  // resolve の前提条件: (a) 今回 push 成功、または (b) ホストが決定的に算出した許可リスト
+  // （resolveProof。Issue #430）。fix 自身の反映確認・一覧再取得での対象拡大は禁止する文言を
+  // 固定する。詳細は resolve-pushed-head.test.mjs を参照。
+  assert.ok(prompt.includes('許可リスト'), 'resolve (b) の許可リストに関する文言がない')
+  assert.ok(prompt.includes('自前確認'), 'resolve 対象の自前拡大禁止の文言がない')
 })
 
 test('fixPrompt: pushAfterFix=false（Review ループ）は resolveReviewThread mutation を含まない', () => {
