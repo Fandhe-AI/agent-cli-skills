@@ -127,7 +127,7 @@ test('resolvedThreadsLogLine: pushed=true は「push 後の resolve」として�
   assert.ok(line.includes('PRRT_abc123, PRRT_def456'), 'threadId 一覧がログ行に含まれない')
 })
 
-test('resolvedThreadsLogLine: pushed=false は「過去ラウンド push 済み（リモート head 反映済み）」の自己申告として記録する', () => {
+test('resolvedThreadsLogLine: pushed=false は「過去ラウンド push 済み（リモート head 反映済み）」のホスト決定的照合済みとして記録する', () => {
   const line = resolvedThreadsLogLine(42, false, ['PRRT_abc123'])
   assert.ok(line.includes('#42'), 'イシュー番号がログ行に含まれない')
   assert.ok(line.includes('push なし'), 'push なしラウンドの resolve であることがログ行から読み取れない')

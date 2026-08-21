@@ -76,15 +76,25 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   ラウンド（過去ラウンドで push 済み）では、**ホストが自ら観測した push の結果**に対し
   **ホスト側が実行する決定的照合**が成立した場合に限る。Workflow ランタイムはホスト
   コードから直接シェル・ファイルシステムへアクセスできないため（spawn したエージェントの
-  みが触れる）、観測は merge-verify と同型の未信頼テキストを一切読まない読み取り専用
-  エージェント（monitor。Merge ループの各ラウンド、fix 起動より前に必ず実行）が
-  `gh api .../compare/<host提供prevSha>...<今回headSha>` の結果（`compareStatus` /
-  `changedFiles`）のみを返し、**比較・許可判定はホストの決定的コード**
+  みが触れる）、観測は Merge ループの各ラウンド・fix 起動より前に必ず実行される monitor
+  に相乗りさせて `gh api .../compare/<host提供prevSha>...<今回headSha>` の結果
+  （`compareStatus` / `changedFiles`）を取得する。**monitor はレビュー本文等の未信頼
+  テキストを読むエージェントであり merge-verify（未信頼テキスト不読）と同型ではない**
+  ——これは #430 のスコープ内での既知の妥協である。緩和策: host へ渡す値は
+  `sanitizeSha`（40 桁 hex）・`compareStatus` の enum・`sanitizeRepoRelPath` 通過済み
+  path のみで自由文は一切通さず、**比較・許可判定はホストの決定的コード**
   （`applyResolveProofObservation` / `computePermittedNoPushResolveIds`。詳細は
   `skills/implement-issue-tree/references/automerge-design.md`「resolve 前提のホスト側
-  決定的照合」）が行う形で実装した。`compareStatus: ahead` かつ直前ラウンドで実際に
-  push が成功していた場合のみリモート head への反映（ancestry）を認定し、`behind` /
-  `diverged`（force-push 等）・取得不能は fail-closed で許可状態を全体リセットする。
+  決定的照合」）が行う。残存リスク: 注入されたレビュー本文の影響を受けた monitor が
+  虚偽の `ahead` + 都合の良い `changedFiles` を返せば許可対象が広がり得るが、
+  `lastRoundPushed`（実際に push が成功したラウンドの直後のみ信用）・境界 (c)（monitor
+  自身が返す未解決一覧に限定）・fix 自身の「修正対応した」という判断・次周回 monitor の
+  サーバー実値による独立再検出の 4 重で範囲が絞られる。未信頼テキストを一切読まない
+  専用の proof エージェントを分離する方が強い設計だが、スクリプトのバイト予算制約により
+  本 Issue のスコープでは見送った（follow-up 課題）。`compareStatus: ahead` かつ直前
+  ラウンドで実際に push が成功していた場合のみリモート head への反映（ancestry）を認定し、
+  `behind` / `diverged`（force-push 等）・取得不能は fail-closed で許可状態を全体
+  リセットする。
   **fix エージェントの申告 sha はいかなる形式検証を経ても信頼境界に置かず、照合対象に
   使わない**（既存の任意の祖先 sha を「修正コミット」と申告すれば ancestry 照合を
   通過できてしまうため。未信頼なレビュー本文の記述からの推定も同様に禁止）。対象

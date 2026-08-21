@@ -48,9 +48,13 @@ opt-in ランのクライアント側マージは、PR #182 / PR #222 codex P0�
    エージェント出力に依存せず決定的に立証できること。
 
 **実装（`skills/implement-issue-tree/scripts/implement-issue-tree.js`）**: Merge ループの
-各ラウンド、fix 起動より前に monitor（`monitorPrompt`）が読み取り専用の観測値のみを返す。
-monitor は未信頼のレビュー本文・PR 本文・タイトルを取得しないため、この観測値は
-merge-verify と同型の「未信頼テキストを一切読まない最小観測」である:
+各ラウンド、fix 起動より前に必ず実行される monitor（`monitorPrompt`）に観測を相乗りさせる。
+**monitor はレビュー本文等の未信頼テキストを読むエージェントであり、merge-verify（未信頼
+テキストを一切読まない）とは異なる**——本来はこの観測専用に merge-verify と同型の未信頼
+テキスト不読エージェントを新設するのが強い設計だが、`implement-issue-tree.js` のバイト
+予算（後述）の制約により本 Issue のスコープでは見送り、既存の monitor 呼び出しへ相乗り
+させた（残存リスクは本節末尾で述べる）。host へ渡らせる値は次の狭い形のみに限定し、
+自由文フィールドは持たせない:
 
 | 観測値 | 内容 |
 |---|---|
@@ -93,13 +97,26 @@ fix 自身の `git fetch` + `merge-base --is-ancestor` 実行指示・「ファ�
 ログ）へ渡す。リスト外の申告は警告ログのみに留め、進捗計上・成功記録から除外する（fix が
 プロンプト指示を守らずリスト外を申告しても、host 側の記録・判定は汚染されない）。
 
-**残存リスク**: path 一致は「そのファイルを変更した push があった」ことの上界であり
-「その変更が当該指摘を実際に修正した」ことの証明ではない（`変更した ≠ 修正した`）。実効性は
-これに加えて (c)（monitor 由来の threadId 限定）・fix 自身の「修正対応した」という自己申告的
-判断がさらに絞り込む点、および次周回 monitor がサーバー実値で unresolved を独立に再検出する
-点で補われる。観測間（monitor 呼び出しの間）に第三者が push すると `ahead` 連鎖が壊れず
-誤って files 集合が広がり得るが、これは単一 writer（本ワークフロー）が対象ブランチを専有する
-運用を前提とした残存リスクであり、path 対応それ自体を無効化するものではない。
+**残存リスク**:
+
+- **観測エージェントが未信頼テキストを読む**: 上述のとおり monitor に相乗りさせたため、
+  注入されたレビュー本文の影響を受けた monitor が虚偽の `compareStatus: ahead` と
+  都合の良い `changedFiles` を返せば、ホストはそれをそのまま実測値として信用し許可対象が
+  広がり得る（`sanitizeSha` / enum / `sanitizeRepoRelPath` はいずれも「値の形式」しか
+  検証せず「値の真偽」は検証しない）。緩和は多重防御のみ: (1) `lastRoundPushed` — 直前
+  ラウンドで fix が実際に `pushed: true` を報告していない限り `ahead` は一切信用しない、
+  (2) 境界 (c) — 許可判定は monitor 自身が返す未解決一覧に限定され、一覧外へは広がらない、
+  (3) fix 自身の「修正対応した」という判断がさらに絞る、(4) 次周回 monitor が
+  サーバー実値で unresolved を独立に再検出する。未信頼テキストを一切読まない専用の
+  proof エージェント（merge-verify と同型の新設）が本来の強い設計だが、
+  `implement-issue-tree.js` のバイト予算制約により本 Issue のスコープでは見送った
+  （follow-up 課題）。
+- path 一致は「そのファイルを変更した push があった」ことの上界であり「その変更が当該
+  指摘を実際に修正した」ことの証明ではない（`変更した ≠ 修正した`）。上記 (2)(3)(4) が
+  同様に補う。
+- 観測間（monitor 呼び出しの間）に第三者が push すると `ahead` 連鎖が壊れず誤って files
+  集合が広がり得るが、これは単一 writer（本ワークフロー）が対象ブランチを専有する運用を
+  前提とした残存リスクであり、path 対応それ自体を無効化するものではない。
 
 **auto-merge のサーバー側委譲（upstream の `docs/implement-issue-tree/auto-merge-sample.yml`）**: auto-merge のサンプル workflow は**意図的に vendored 配布しない**（skills/ 配下ではなく upstream（Fandhe-AI/agent-cli-skills）の `docs/implement-issue-tree/auto-merge-sample.yml` に置かれ、`npx skills add` で消費リポジトリへ自動コピーされない）。各リポジトリの runner 方針・信頼 author・opt-in variable は相反し得るため（public は GitHub ホステッド必須 / private は self-hosted 必須 等）、導入する場合は upstream（Fandhe-AI/agent-cli-skills）の `https://github.com/Fandhe-AI/agent-cli-skills/blob/main/docs/implement-issue-tree/auto-merge-sample.yml` を参照し、自リポジトリの方針に合わせて runner（`AUTOMERGE_RUNNER`）・信頼 author（`TRUSTED_AUTHOR`）・opt-in variable（`AUTOMERGE_OPTIN`）を設定した上で `.github/workflows/auto-merge.yml` へ**手動配置**する。この workflow は **`schedule`（cron。既定 15 分間隔）+ `workflow_dispatch` のみ**をトリガーとする **cron スイープ方式**で動作し、リポジトリ設定変数 **`TRUSTED_AUTHOR`**（PR 作成専用 automation identity の login。未設定なら何もせず終了）の open PR をサーバー側 REST API（`--paginate` 全ページ列挙 + `user.login` 完全一致選別。`--limit` 固定だと上限超過分が恒久的に漏れるため — PR #208 codex P2 対応）から列挙し、各 PR に対して arm（`GITHUB_TOKEN` での `gh pr merge --auto --squash` 実行）の前に**認可ゲートと絞り込みの 2 段判定**を行う。**PR イベント系トリガー（`pull_request` / `pull_request_target`）を一切使わない理由（消費リポ codex ラウンド P0/P1 対応）**: `pull_request` は same-repo PR で **PR head 側の workflow ファイルを secrets 付きで実行する**ため `AUTOMERGE_RULESET_TOKEN` 窃取経路になり、`pull_request_target`（PR #207 Bugbot High 対応で一度採用）も checkout 禁止を守る限り窃取は防げるものの「PR という PR 作成主体が起こせる事象を契機に secrets（`AUTOMERGE_RULESET_TOKEN`・write 権限 `GITHUB_TOKEN`）を持つジョブが起動する」構造自体が残り、組織 CI 規約（secrets 露出トリガーの追加は P0/P1）に抵触し将来の保守変更で未信頼 PR データが混入する余地も残る。cron スイープでは**実行契機・実行コンテキストのいずれにも PR 由来の値が一切含まれず**（イベント payload に PR が存在しない）、この問題クラス自体が構造的に排除される。arm の遅延は最大でポーリング間隔に収まる。workflow 内では**リポジトリのコードを一切 checkout・実行しない**（`actions/checkout` の追加禁止。サンプルは `gh api` / `gh pr list` / `gh pr view` の読み取り呼び出しと jq の判定のみで構成し、`runs-on: ${{ vars.AUTOMERGE_RUNNER }}`（runner は repo variable で指定し**フォールバックなし** — 消費リポ codex P1 対応。runner 方針は public / private で正反対のため既定値の直書きはどちらかの規約に必ず違反する。public リポはリポジトリ設定変数 `AUTOMERGE_RUNNER=ubuntu-latest`、Fandhe-AI の private リポ（GitHub ホステッド指定が CI 規約違反の組織方針）は `AUTOMERGE_RUNNER=self-hosted` を設定し、未設定では job が起動しない = fail-closed）+ `timeout-minutes: 10` を明示し、さらに job レベルの明示 opt-in ゲート `if: ${{ vars.AUTOMERGE_OPTIN == 'true' }}` を置く（消費リポ codex P0 対応。repo variable は admin のみ設定可能で PR 作成主体には偽造不能なサーバー側 opt-in シグナルとなり、設定しない限り workflow は何もしない）。**認可ゲート（PR #207 codex ラウンド2 P0 対応）**: author 一致・命名規則ブランチ・`Closes #N` マーカーは、いずれも共有 `gh` 認証を持つ PR 作成主体（プロンプトインジェクションを受けたエージェント含む）が自ら満たせる**偽造可能な provenance であり、認可根拠にならない**。そこで workflow 自身が arm 前にベースブランチの branch protection / ruleset を GitHub API で**実測検証**し、(G1) **required status checks が 1 件以上**構成済み、(G2) **required approving review count >= 1** 構成済み（GitHub は PR author の自己承認をサーバー側で拒否するため、これが「PR 作成主体が生成できない非 author 承認」という偽造不能シグナルになる）、(G3) **dismiss stale reviews（承認後 HEAD 更新で承認失効）が有効**、(G4) **ベースブランチに適用される全 ruleset の bypass actor がゼロ**（PR #207 codex ラウンド3 P0 対応。`bypass_actors` が 1 件でもあればその actor による merge が G1〜G3 の保護を迂回できるため、まず ruleset の列挙が完全であること — 実効ルール全要素に数値 `ruleset_id` と既知の `ruleset_source_type`（Repository / Organization）があり、ルールがあるのに ID が 0 件という不整合がないこと — を検証した上で、ソース種別ごとに詳細取得先をルーティング（Repository → `repos/{owner}/{repo}/rulesets/{id}`、Organization → `orgs/{org}/rulesets/{id}` — 消費リポ Bugbot High 対応。org 継承 ruleset の ID を repo 側エンドポイントで引くと 404 になり、repo 側のみの実装では org ruleset 適用ブランチが恒久的に検証不能 = 一切 arm されなかった）し、各 ruleset 詳細の `bypass_actors` が**配列型かつ空**であることを確認する。ID 欠落・非配列・null・未知ソース種別・取得失敗はすべて arm しない（org ruleset の詳細取得には token に組織レベルの Administration: read が別途必要で、無い場合も fail-closed だが原因をログで明示する）。ruleset 詳細の `bypass_actors` は Administration: read 権限がないと応答に含まれず、workflow の `GITHUB_TOKEN`（contents / pull-requests write のみ）では取得できないため — PR #207 Bugbot High 対応。`GITHUB_TOKEN` のままでは推奨構成の ruleset 保護下で G4 が常に検証不能となり一切 arm されない — G4 の詳細取得**のみ**リポジトリ secret **`AUTOMERGE_RULESET_TOKEN`**（fine-grained PAT / GitHub App token。必要権限は **Administration: read のみで write 不要**。arm 実行は従来どおり `GITHUB_TOKEN` が行う権限分離構成）で行う。token を要求するのは **ruleset 由来の実効ルールが 1 件以上あるときのみ**で、適用 ruleset が 0 件（classic branch protection のみで G1〜G3 充足）なら G4 は検証対象なしの空充足として token 不要で通過する（PR #207 Bugbot Medium 対応。ただし実効ルール API の取得自体に失敗した場合は「0 件」と区別して arm しない）。ruleset が 1 件以上あるのに secret 未構成（空）の場合は G4 を検証不能とみなし arm しない）、(G5) **required conversation resolution（レビュースレッド全解消の必須化）が有効**（PR #207 codex ラウンド4 P1 対応。無効だと任意 check 1 件 + 承認 1 件でレビュースレッド未解消のまま即時マージが成立し得る。classic は `required_conversation_resolution`、ruleset は pull_request ルールの `required_review_thread_resolution` で判定）、(G6) **workflow 冒頭の設定変数 `REQUIRED_EXTERNAL_CHECKS`（`<check context 名>:<App ID>` のカンマ区切り。既定例は `Cursor Bugbot:1210556` = Cursor Bugbot の App ID）に列挙した各組が、required status checks に「context 名 + App ID」の完全一致で App 束縛付きにすべて存在する**（PR #207 codex ラウンド4 P1 / ラウンド5 P1 + Bugbot Medium 対応。args の `externalChecks` 契約が要求する Cursor 等の外部レビュー到着を、サーバー側マージ条件（required checks）として担保するための検証。context 名の存在だけでは同名 check を別 App や same-repo の Actions workflow が作成して偽装できるため、classic は `.checks[].app_id`、ruleset は `integration_id` との組で検証し、`app_id` / `integration_id` が null・欠落のエントリ — App 束縛のない legacy `contexts` を含む — は充足根拠として受理しない。設定値の書式不正も arm しない。空文字は外部チェック不使用の明示選択として通過するが、その場合外部レビュー到着はサーバー側で一切担保されない）、(G7) **classic branch protection を認可入力に採用する場合、`enforce_admins` 有効に加えて明示 bypass 経路が存在しない**こと（消費リポ codex ラウンド P0 対応。`required_pull_request_reviews.bypass_pull_request_allowances` に登録された users / teams / apps は `enforce_admins` が有効でも PR レビュー要件（G2/G3）を明示的に迂回でき、automation App / user が登録された構成では非 author 承認なしの即時マージが成立し得る。実 API 仕様では未設定の表現が「キー欠落」と「キーありで値 null」の 2 形態を取り（`restrictions` は未設定時に `null` を返すのが正常応答 — 消費リポ Bugbot High 対応。null を unsafe 扱いすると classic-only リポで G1〜G6 が恒久 fail する）、「キー欠落または null = 未設定として通過」「object 型 = users / teams / apps がすべて配列型かつ空の場合のみ通過」とし、非 object・非配列・要素ありは classic を認可入力から除外して ruleset 側のみで判定する）、(G8) は**撤回済み（欠番）**であり arm 条件に含めない（required status checks の strict 適用（`strict_required_status_checks_policy` / classic の `strict`）は鮮度の制御であって bypass 不能性の制御ではなく、G1〜G7 が担う認可の強度は strict の有無で変わらない。strict = true は 1 件マージするたびに他の open PR を up-to-date でなくし、`implement-issue-tree` の並列ランを構造的に停止させるため要件から外した。後述の「strict を G0 の要件にしない理由」節。クライアント側 G0 の (i-c) も同じ理由で意図的な非要件である）、の **G1〜G7 すべて**を満たす場合のみ arm し、1 つでも欠ければその PR は arm せずスキップして次の PR へ進む（**fail-closed**。classic branch protection API と ruleset 実効ルール API `GET /rules/branches/{branch}` の両方に対応し、取得・解析失敗も「保護なし」側へ倒す。判定は jq で真偽値のみ取り出し、base ブランチ名は jq の `@uri` で URL エンコードしてから API パスへ展開する — Bugbot Medium 対応。`release/1.0` 等の `/` 入りブランチ名を生のまま展開すると 404 → fail-closed で本来 arm 可能な PR が永遠に arm されない）。この構造では、偽造 PR が仮に arm されてもサーバー側で非 author の人間承認と required checks が揃わない限りマージされず、人間の承認境界を迂回できない。**これらの branch protection がマージの実強制であり、arm は「承認とチェックが揃った時点で自動的にマージが完了する」利便性だけを担う**。**絞り込み条件（認可根拠ではない。誤爆防止の対象限定のみ。3 条件の AND）**: (1) **PR author がこのスキルの PR 作成専用 automation identity（bot / machine user。リポジトリ設定変数 `TRUSTED_AUTHOR` に `your-automation-bot[bot]` 等の login を設定）に完全一致**すること（REST API の `--paginate` 全ページ列挙 + `user.login` 完全一致選別。draft は除外）。**人間の個人アカウント（リポジトリ owner 含む）の指定は禁止**（その人物が手作業で作る通常 PR まで arm 対象になるため。専用 identity が未整備なら workflow を配置せず人間マージ運用に留める）。(2) head ブランチがこのスキルの命名規約 `<type>/<N>-<short-name>` にアンカー付き正規表現で**厳密一致**すること。(3) PR 本文にこのスキルの PR Create フェーズが必ず書き込む生成物マーカー **`Closes #<N>`（N はブランチ名のイシュー番号と同一）が行として存在**すること。permissions は `contents: write` + `pull-requests: write` の最小構成（pull-requests: write は auto-merge の有効化、contents: write はマージ実行権限として `enablePullRequestAutoMerge` / マージコミット作成に必要 — PR #208 Bugbot High 対応: contents を read に落とすと arm が常に権限エラーで失敗し、スイープが per-PR skip の green 終了になるため auto-merge が黙って一切成立しなくなる。checkout・push は行わないためこれ以上は要求しない）で、PR タイトル・本文等の未信頼テキストは run スクリプトへ一切展開しない（シェルが参照するのは整数検証済みの PR 番号・リポジトリ名・正規表現一致確認済みの head ブランチ名・URL エンコード済みの base ブランチ名のみ。本文マーカーは `gh pr view --json body --jq` の test() で真偽値だけを取り出して判定する）。この方式では arm の実行主体がエージェントと権限・実行環境を共有しない GitHub Actions であり、クライアント側の subagent には arm 経路が存在せず、arm しても保護未構成ならマージに至らないため、PR #206 の認可欠陥は構造的に発生しない。ランは従来どおり PR をマージ可能状態（`blocked`）まで進めて停止し、監視中にサーバー側 auto-merge によって PR が MERGED になった場合は monitor の手順 1 が検出して already-merged 経路で正常完了する。
 
