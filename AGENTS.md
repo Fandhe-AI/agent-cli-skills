@@ -80,28 +80,31 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   に相乗りさせて `gh api .../compare/<host提供prevSha>...<今回headSha>` の結果
   （`compareStatus` / `changedFiles`）を取得する。**monitor はレビュー本文等の未信頼
   テキストを読むエージェントであり merge-verify（未信頼テキスト不読）と同型ではない**
-  ——これは #430 のスコープ内での既知の妥協である。緩和策: host へ渡す値は
+  ——これは #430 のスコープ内での既知の妥協である。緩和策として、host へ渡す値は
   `sanitizeSha`（40 桁 hex）・`compareStatus` の enum・`sanitizeRepoRelPath` 通過済み
   path のみで自由文は一切通さず、**比較・許可判定はホストの決定的コード**
   （`applyResolveProofObservation` / `computePermittedNoPushResolveIds`。詳細は
   `skills/implement-issue-tree/references/automerge-design.md`「resolve 前提のホスト側
-  決定的照合」）が行う。残存リスク: 注入されたレビュー本文の影響を受けた monitor が
-  虚偽の `ahead` + 都合の良い `changedFiles` を返せば許可対象が広がり得るが、
-  `lastRoundPushed`（実際に push が成功したラウンドの直後のみ信用）・境界 (c)（monitor
-  自身が返す未解決一覧に限定）・fix 自身の「修正対応した」という判断・次周回 monitor の
-  サーバー実値による独立再検出の 4 重で範囲が絞られる。未信頼テキストを一切読まない
-  専用の proof エージェントを分離する方が強い設計だが、スクリプトのバイト予算制約により
-  本 Issue のスコープでは見送った（follow-up 課題）。`compareStatus: ahead` かつ直前
-  ラウンドで実際に push が成功していた場合のみリモート head への反映（ancestry）を認定し、
-  `behind` / `diverged`（force-push 等）・取得不能は fail-closed で許可状態を全体
-  リセットする。
+  決定的照合」）が行う設計とした。
+  **(b) 経路の現状（2026-08-21・#430 codex-review P0 再指摘・PR #433 で対応）**:
+  上記の緩和策は「値の形式」しか検証できず「値の真偽」は検証できない。ホスト
+  （`implement-issue-tree.js`）は Workflow ランタイムの制約（`export const meta` 以外の
+  top-level export 不可・child_process 等の直接シェル実行手段なし）により `gh api compare`
+  を自ら実行して monitor の申告を裏取りできないため、injection を受けた monitor が虚偽の
+  `ahead` + 都合の良い `changedFiles` を返せば path 一致（上界判定）を根拠に push なしでの
+  resolve が許可され得るリスクは、`lastRoundPushed`・境界 (c)・fix 自身の判断・次周回
+  monitor の独立再検出という多重防御だけでは見送り可能な水準まで下げ切れないと判断した。
+  未信頼テキストを一切読まない専用の proof エージェント（merge-verify と同型の新設）を
+  用意するまでの間、`computePermittedNoPushResolveIds` は proofState の内容に関わらず
+  **常に空リストを返す**（fail-closed）よう実装済みで、(b) 経路は**恒久的に不成立**である。
+  resolve が成立するのは (a)（当該ラウンドの push が成功した場合の自己修正スレッド resolve）
+  のみであり、push しなかったラウンドで対応済みスレッドが残る場合は未解決のまま次ラウンドへ
+  持ち越され、最終的に `required_review_thread_resolution` により人間の resolve 待ちで
+  停止する（機会損失は許容し、誤った許可拡大を避ける）。専用 proof エージェントの新設は
+  follow-up 課題のまま残る。
   **fix エージェントの申告 sha はいかなる形式検証を経ても信頼境界に置かず、照合対象に
   使わない**（既存の任意の祖先 sha を「修正コミット」と申告すれば ancestry 照合を
-  通過できてしまうため。未信頼なレビュー本文の記述からの推定も同様に禁止）。対象
-  レビュースレッドと修正コミットの対応は、GraphQL `reviewThreads.path` が host 実測済み
-  push の `changedFiles` に含まれることを上界とする決定的照合（path 一致）で立証し、
-  立証できないスレッドは許可リストに含めない（fail-closed）。fix エージェントの
-  自己判断・自己申告のみでこの代替経路を成立させてはならない。ホスト側照合が
+  通過できてしまうため。未信頼なレビュー本文の記述からの推定も同様に禁止）。ホスト側照合が
   **不成立の場合、または sha を確定できない場合は resolve を実行しない（fail-closed）**
   （「ファイル内容への反映確認でも可」という旧代替経路は誰がどの範囲を照合するかが
   未定義になり、未信頼テキストを読む fix の自己判断だけで別の既存変更を対象修正と
@@ -110,7 +113,8 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   満たさず禁止、(c) 対象は monitor の構造化出力由来で host が `sanitizeThreadId` 検証
   した threadId に限定（fix がスレッド一覧を自前再取得して対象を広げない）、(d)
   out-of-scope 判断のスレッドは resolve せず人間に委ねる。この (a)〜(d) を弱める
-  変更・resolve 主体や対象を拡大する変更は引き続き P0 として指摘する
+  変更・resolve 主体や対象を拡大する変更、(b) 経路を再度有効化する変更は引き続き
+  P0 として指摘する
 
 ## 2. アーキテクチャ・設計整合の観点
 

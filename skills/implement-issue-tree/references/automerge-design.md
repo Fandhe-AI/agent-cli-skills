@@ -97,20 +97,27 @@ fix 自身の `git fetch` + `merge-base --is-ancestor` 実行指示・「ファ�
 ログ）へ渡す。リスト外の申告は警告ログのみに留め、進捗計上・成功記録から除外する（fix が
 プロンプト指示を守らずリスト外を申告しても、host 側の記録・判定は汚染されない）。
 
-**残存リスク**:
+**(b) 経路の恒久無効化（2026-08-21・#430 codex-review P0 再指摘・PR #433 で対応）**:
 
-- **観測エージェントが未信頼テキストを読む**: 上述のとおり monitor に相乗りさせたため、
-  注入されたレビュー本文の影響を受けた monitor が虚偽の `compareStatus: ahead` と
-  都合の良い `changedFiles` を返せば、ホストはそれをそのまま実測値として信用し許可対象が
-  広がり得る（`sanitizeSha` / enum / `sanitizeRepoRelPath` はいずれも「値の形式」しか
-  検証せず「値の真偽」は検証しない）。緩和は多重防御のみ: (1) `lastRoundPushed` — 直前
-  ラウンドで fix が実際に `pushed: true` を報告していない限り `ahead` は一切信用しない、
-  (2) 境界 (c) — 許可判定は monitor 自身が返す未解決一覧に限定され、一覧外へは広がらない、
-  (3) fix 自身の「修正対応した」という判断がさらに絞る、(4) 次周回 monitor が
-  サーバー実値で unresolved を独立に再検出する。未信頼テキストを一切読まない専用の
-  proof エージェント（merge-verify と同型の新設）が本来の強い設計だが、
-  `implement-issue-tree.js` のバイト予算制約により本 Issue のスコープでは見送った
-  （follow-up 課題）。
+観測エージェント（monitor）が未信頼テキストを読む点は上述のとおりで、注入されたレビュー
+本文の影響を受けた monitor が虚偽の `compareStatus: ahead` と都合の良い `changedFiles` を
+返せば、ホストはそれをそのまま実測値として信用し許可対象が広がり得る（`sanitizeSha` /
+enum / `sanitizeRepoRelPath` はいずれも「値の形式」しか検証せず「値の真偽」は検証しない）。
+`lastRoundPushed`・境界 (c)（許可判定は monitor 自身が返す未解決一覧に限定）・fix 自身の
+「修正対応した」という判断・次周回 monitor の独立再検出という多重防御だけでは、host が
+`gh api compare` を自ら実行して裏取りできない（Workflow ランタイムに直接シェル実行手段が
+ない）という構造的制約を埋め合わせられないと判断し、**`computePermittedNoPushResolveIds`
+は proofState の内容に関わらず常に空リストを返す**（fail-closed）よう変更した。(b) 経路
+（push なしラウンドでの resolve）は現在**恒久的に不成立**であり、resolve が成立するのは
+(a)（当該ラウンドの push が成功した場合の自己修正スレッド resolve）のみである。
+`applyResolveProofObservation` による状態遷移（`resolveProof.pushHead` / `files` の算出）
+自体は変更していないが、その出力は `computePermittedNoPushResolveIds` で使われなくなった
+ため実質的に不使用となる。未信頼テキストを一切読まない専用の proof エージェント
+（merge-verify と同型の新設）が本来の強い設計だが、`implement-issue-tree.js` のバイト
+予算制約により見送りが継続しており、follow-up 課題として残る。
+
+**旧残存リスク（(b) 恒久無効化により現在は非該当。設計判断の記録として残す）**:
+
 - path 一致は「そのファイルを変更した push があった」ことの上界であり「その変更が当該
   指摘を実際に修正した」ことの証明ではない（`変更した ≠ 修正した`）。上記 (2)(3)(4) が
   同様に補う。

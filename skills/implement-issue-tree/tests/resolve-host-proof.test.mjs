@@ -12,9 +12,20 @@
 //   1. host が自ら観測した push の結果 sha に対してのみ判定する（fix 申告 sha は使わない）。
 //   2. リモート head への反映確認は host が実行する決定的照合（monitor が返す compareStatus。
 //      ホストが渡した前回観測 sha からの gh api compare 結果）で行う。
-//   3. 対象スレッドと修正コミットの対応も、fix の判断に依存せず決定的に立証できる場合に限る
-//      （立証手段: reviewThreads.path が host 実測済み push の changedFiles に含まれることを
-//      上界とする path 対応判定）。立証できなければ resolve しない（fail-closed）。
+//   3. 対象スレッドと修正コミットの対応も、fix の判断に依存せず決定的に立証できる場合に限る。
+//
+// 【追記・恒久無効化（Issue #430 codex-review P0 再指摘・PR #433）】: 上記 2 の compareStatus /
+// changedFiles は、未信頼のレビュー本文を読む monitor エージェント（merge-verify とは異なり
+// 未信頼テキスト不読ではない）の構造化出力の自己申告にすぎず、ホストはこの Workflow ランタイム
+// （`export const meta` 以外の top-level export 不可・child_process 等の直接シェル実行手段なし）
+// では `gh api compare` を自ら実行して裏取りできない。sanitizeSha・enum・sanitizeRepoRelPath は
+// 値の形式しか検証できず真偽は検証できないため、プロンプトインジェクションを受けた monitor が
+// 虚偽の compareStatus: "ahead" と都合の良い changedFiles を返すと、3 の path 対応（上界判定）
+// を根拠に push なしでの resolve が許可され得た。専用の未信頼テキスト不読 proof エージェント
+// （merge-verify と同型の新設。follow-up）を用意するまで、`computePermittedNoPushResolveIds`
+// は proofState の内容に関わらず常に空リストを返す（fail-closed）。本ファイルの
+// `applyResolveProofObservation` 系テスト（状態遷移の純粋関数契約）はこの無効化と無関係に
+// 有効なまま残す。
 //
 // 検証の三層構造（merge-loop-rescan.test.mjs / nopush-resolve-progress.test.mjs と同じ方針）:
 //   1. 純粋関数（applyResolveProofObservation / computePermittedNoPushResolveIds /
@@ -157,15 +168,20 @@ test('applyResolveProofObservation: changedFiles の path 検証不通過分は�
 })
 
 // ---------------------------------------------------------------------------
-// computePermittedNoPushResolveIds: path 対応による許可リスト算出（上界判定）
+// computePermittedNoPushResolveIds: (b) 経路は恒久的に無効化（常に空リスト。Issue #430
+// codex-review P0 再指摘。headSha/compareStatus/changedFiles は未信頼レビュー本文を読む
+// monitor の自己申告にすぎず、ホストは gh api compare を自ら実行して裏取りできない
+// （Workflow ランタイムに直接シェル実行手段がない）ため、path 一致による上界判定を
+// 許可根拠にできなくなった。専用の未信頼テキスト不読 proof エージェント新設までの
+// fail-closed 措置）
 // ---------------------------------------------------------------------------
 
-test('computePermittedNoPushResolveIds: pushHead 未確立（proof 未成立）なら常に空リスト', () => {
+test('computePermittedNoPushResolveIds: pushHead 未確立（proof 未成立）でも常に空リスト', () => {
   const ids = computePermittedNoPushResolveIds(emptyProof, [{ threadId: 'PRRT_a', path: 'a.js' }])
   assert.deepEqual(ids, [])
 })
 
-test('computePermittedNoPushResolveIds: path が実測済みファイル集合に含まれるスレッドのみ許可する', () => {
+test('computePermittedNoPushResolveIds: proofState が push 実測済み（pushHead 確立・files 実在）でも path 一致に関わらず常に空リストを返す（(b) 経路の恒久無効化）', () => {
   const proof = { head: SHA_A, pushHead: SHA_A, files: ['a.js', 'b.js'] }
   const unresolved = [
     { threadId: 'PRRT_in_a', path: 'a.js' },
@@ -173,7 +189,7 @@ test('computePermittedNoPushResolveIds: path が実測済みファイル集合�
     { threadId: 'PRRT_outside', path: 'c.js' },
   ]
   const ids = computePermittedNoPushResolveIds(proof, unresolved)
-  assert.deepEqual(ids.sort(), ['PRRT_in_a', 'PRRT_in_b'].sort())
+  assert.deepEqual(ids, [], '旧実装なら path 一致で許可されていた PRRT_in_a / PRRT_in_b も含め、無条件で空を返す')
 })
 
 test('computePermittedNoPushResolveIds: unresolvedComments が非配列・欠落でも安全に空を返す', () => {
@@ -182,7 +198,7 @@ test('computePermittedNoPushResolveIds: unresolvedComments が非配列・欠落
   assert.deepEqual(computePermittedNoPushResolveIds(proof, null), [])
 })
 
-test('computePermittedNoPushResolveIds: threadId 形式不正の要素は結果から除外する', () => {
+test('computePermittedNoPushResolveIds: threadId 形式不正の要素を含んでいても（形式検証を経由しない）常に空を返す', () => {
   const proof = { head: SHA_A, pushHead: SHA_A, files: ['a.js'] }
   const ids = computePermittedNoPushResolveIds(proof, [{ threadId: 'has space', path: 'a.js' }])
   assert.deepEqual(ids, [])
