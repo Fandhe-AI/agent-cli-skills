@@ -76,8 +76,12 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   ラウンド（過去ラウンドで push 済み）では明示 refspec
   （`<branch>:refs/remotes/origin/<branch>`）の `git fetch` に続けて
   `git merge-base --is-ancestor <修正コミット sha> origin/<branch>` により該当修正の
-  反映を実測確認した場合（sha を特定できないときは `origin/<branch>` のファイル内容への
-  反映確認でも可）。未コミット・未 push の修正（ローカルにのみ存在する修正）に対する
+  反映を実測確認した場合に限る。修正コミット sha は host が保持する値を用い、fix の
+  自己申告や未信頼なレビュー本文の記述から推定しない。**sha を確定できない場合は
+  fail-closed とし resolve しない**（「ファイル内容への反映確認でも可」という代替経路は
+  誰がどの範囲を照合するかが未定義になり、未信頼テキストを読む fix の自己判断だけで
+  別の既存変更を対象修正と誤認して `required_review_thread_resolution` ゲートを解除し
+  得るため認めない）。未コミット・未 push の修正（ローカルにのみ存在する修正）に対する
   resolve は前提を満たさず禁止、(c) 対象は monitor の構造化出力由来で host が
   `sanitizeThreadId` 検証した threadId に限定（fix がスレッド一覧を自前再取得して対象を
   広げない）、(d) out-of-scope 判断のスレッドは resolve せず人間に委ねる。この (a)〜(d)
