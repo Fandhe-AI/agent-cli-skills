@@ -2626,7 +2626,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     ...commitAndPushInstructions,
     ...(pushAfterFix
       ? [
-          `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の push が成功した場合は「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（git fetch・merge-base 等の自前確認・ファイル内容確認での対象拡大は禁止。ホストが決定的に算出済み）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。一覧・許可リストにないスレッド（outOfScopeComments 記録分含む）は resolve しない。該当する各 threadId について次を実行する:`,
+          `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の push が成功した場合は「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
           `   gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`,
           '   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、mutation が失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
           '6. 手順 2 で outOfScopeComments に記録した対象外の指摘がある場合のみ、PR 本文へ記録する（該当がなければこの手順は省略してよい）。',
@@ -2653,7 +2653,7 @@ function resolvedThreadsLogLine(issueNumber, pushed, resolvedTids) {
   const ids = resolvedTids.join(', ')
   return pushed
     ? `#${issueNumber}: fix エージェントが修正 push 後に修正対応スレッドを resolve した（threadId: ${ids}）`
-    : `#${issueNumber}: fix エージェントが push なしラウンドで、過去ラウンド push 済み（リモート head 反映済み）の修正対応スレッドとして resolve を報告した（threadId: ${ids}）`
+    : `#${issueNumber}: fix エージェントが push なしラウンドで、ホスト決定的照合済み（リモート head 反映済み）の許可リスト内スレッドを resolve した（threadId: ${ids}）`
 }
 
 // fix の resolve 自己申告のうち「noPushRounds の進捗」として認める件数を数える純粋関数
@@ -4310,6 +4310,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     lastState = MERGE_VALID_STATES.has(m?.state) ? m.state : 'invalid-monitor-result'
     // resolve (b) ホスト観測（Issue #430。fix 申告 sha 不使用）。
     resolveProof = applyResolveProofObservation(resolveProof, { headSha: m?.headSha, compareStatus: m?.compareStatus, changedFiles: m?.changedFiles }, lastRoundPushed)
+    // 1 回消費したら戻す（fix 非起動ラウンドを挟んだ次の ahead を誤って再クレジットしない）。
+    lastRoundPushed = false
     // 'merged' は監視エージェントが返してはならない非推奨値。'ready' と読み替える
     // （実マージは merge-exec の独立検証を必ず経るため未検証マージは成立しない）。
     if (lastState === 'merged') {

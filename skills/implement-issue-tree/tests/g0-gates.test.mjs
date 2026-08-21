@@ -405,7 +405,7 @@ test('fixPrompt: pushAfterFix=true はリモート head 反映済み前提の re
   // （resolveProof。Issue #430）。fix 自身の反映確認・一覧再取得での対象拡大は禁止する文言を
   // 固定する。詳細は resolve-pushed-head.test.mjs を参照。
   assert.ok(prompt.includes('許可リスト'), 'resolve (b) の許可リストに関する文言がない')
-  assert.ok(prompt.includes('自前確認'), 'resolve 対象の自前拡大禁止の文言がない')
+  assert.ok(prompt.includes('一覧の自前再取得での対象拡大は禁止'), 'resolve 対象の一覧限定（自前再取得の禁止）がない')
 })
 
 test('fixPrompt: pushAfterFix=false（Review ループ）は resolveReviewThread mutation を含まない', () => {

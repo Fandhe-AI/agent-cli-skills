@@ -233,3 +233,13 @@ test('runMergeLoop: resolveProof は状態ファイルへ永続化しない（re
   assert.ok(!source.includes('saved.resolveProof'), '状態ファイルから resolveProof を復元する経路が追加されている')
   assert.ok(!source.includes('resolveProof }'), 'updateState のパッチへ resolveProof が紛れ込んでいる（永続化の再導入）')
 })
+
+test('runMergeLoop: lastRoundPushed は proof 観測の直後に false へ戻し、1 回限りで消費する', () => {
+  const observeIndex = driverPart.indexOf('applyResolveProofObservation(resolveProof,')
+  assert.ok(observeIndex >= 0, 'proof 観測の呼び出しが見つからない')
+  const afterObserve = driverPart.slice(observeIndex, observeIndex + 300)
+  assert.ok(
+    afterObserve.includes('lastRoundPushed = false'),
+    'proof 観測の直後で lastRoundPushed をリセットしていない（fix 非起動ラウンドを挟んだ次の ahead 観測を誤って再クレジットする回帰）',
+  )
+})
