@@ -109,6 +109,27 @@ test('fixPrompt(pushAfterFix=true): 許可リストの内容がプロンプト�
   assert.ok(promptEmpty.includes('(空'), '許可リストが空のとき、その旨がプロンプトに明示されない')
 })
 
+// ---------------------------------------------------------------------------
+// PR #436 Cursor Bugbot 指摘: POST_PUSH_SHA 取得・preSha/postSha 比較・pushed 判定の分岐条件が
+// JS コメントとしてのみ実装スクリプトに存在し、fixPrompt が返す指示文字列（fix が実際に受け取る
+// プロンプト）には含まれていなかった。fix は指示を受け取れないため POST_PUSH_SHA を省略・捏造
+// しやすく、host の computeVerifiedPushed が実 push を「未検証」として fail-close していた。
+// ---------------------------------------------------------------------------
+
+test('fixPrompt(pushAfterFix=true): POST_PUSH_SHA 取得・PRE_PUSH_SHA との比較・pushed 判定の分岐条件が指示文字列として渡る（PR #436 Bugbot 対応）', () => {
+  const prompt = mergeLoopFixPrompt()
+  assert.ok(prompt.includes('PRE_PUSH_SHA'), 'PRE_PUSH_SHA を返す指示がプロンプトにない')
+  assert.ok(prompt.includes('POST_PUSH_SHA'), 'POST_PUSH_SHA 取得の指示がプロンプトにない（JS コメントのみに存在する回帰）')
+  assert.ok(
+    /POST_PUSH_SHA[\s\S]{0,200}PRE_PUSH_SHA[\s\S]{0,40}比較/.test(prompt),
+    'POST_PUSH_SHA と PRE_PUSH_SHA を比較する指示がプロンプトにない',
+  )
+  assert.ok(
+    prompt.includes('一致する場合') && prompt.includes('pushed: false'),
+    'no-op push（一致する場合）で pushed: false を返す分岐条件がプロンプトにない',
+  )
+})
+
 test('fixPrompt(pushAfterFix=false): Review ループは引き続き resolve を一切行わない', () => {
   mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
   const prompt = fixPrompt(item, impl, finding, false)

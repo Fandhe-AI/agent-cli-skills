@@ -82,7 +82,23 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   （= head が実際に進んだ）ことを確認できた場合に限り `pushed: true` を「検証済み push」
   として扱う。preSha === postSha（no-op push）の場合は自己申告が `pushed: true` でも
   host は push なしラウンドとして扱い、(b) 経路（下記のとおり恒久的に空リスト）以外の
-  resolve を許可しない。(b) resolve は
+  resolve を許可しない。
+  **preSha/postSha 自体を信頼境界に置かない（2026-08-23・#436 codex-review P0 対応）**:
+  上記だけでは preSha/postSha が同一 fix 応答内の未検証な自己申告であるため、prompt
+  injection を受けた fix が「40 桁 hex で異なる 2 値」を単に捏造するだけで
+  `pushed: true` を通過させ得る懸念が残る。`computeVerifiedPushed` は第 4 引数
+  `hostPreSha` に host が独立取得した値（`resolveProof.head`。fix 起動より前の当該
+  ラウンドの monitor が自身の `gh pr view --json headRefOid` で取得し、レビュー本文等の
+  未信頼テキストを読む前に返す値）を受け取り、fix 申告の preSha がこれと一致しない場合は
+  `pushed: true` でも未検証（push なしラウンド）として扱う（host が当該ラウンドで
+  hostPreSha を取得できていない場合は照合不能のため自己申告のみで判定する既知の
+  fail-open な残存経路）。postSha は host が push 直後の値を独立取得する手段を持たない
+  （Workflow ランタイムはホストコードから直接シェル・ファイルシステムへアクセスできない
+  制約は下記 (b) と同一）ため引き続き自己申告に依存するが、`runMergeLoop` は次ラウンドの
+  monitor が独立観測した headSha と事後照合し、食い違えばログへ記録する
+  （`resolveReviewThread` mutation は fix のターン内で既に実行済みのため取り消せないが、
+  虚偽申告の痕跡を追跡可能にする）。この事後照合・hostPreSha 照合を弱める変更は
+  引き続き P0 として指摘する。(b) resolve は
   対象修正がリモート head（`origin/<branch>`）に反映済みであることを前提とする。成立
   経路は次の 2 つに限る — 当該ラウンドの push が成功した場合、または push しなかった
   ラウンド（過去ラウンドで push 済み）では、**ホストが自ら観測した push の結果**に対し

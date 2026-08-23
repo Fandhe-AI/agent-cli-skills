@@ -134,6 +134,19 @@ push なしラウンドとして扱い（`lastRoundPushed`・`noPushRounds`・`r
 resolve が一切許可されない。fixPrompt の手順 5 も「push 成功」を `pushed: true` 単独ではなく
 `preSha !== postSha` を伴う場合に限定するよう明記している。
 
+**preSha/postSha 自体の信頼境界（2026-08-23・#436 codex-review P0 対応）**: 上記だけでは
+`preSha`/`postSha` が同一 fix 応答内の未検証な自己申告のため、prompt injection を受けた fix が
+「40 桁 hex で異なる 2 値」を単に捏造するだけで `pushed: true` を通過させ得る懸念が残る。
+`computeVerifiedPushed(pushed, preSha, postSha, hostPreSha)` は第 4 引数に host が独立取得した
+`resolveProof.head`（当該ラウンドの monitor が fix 起動より前に自身の `gh pr view` で取得した
+値。未信頼テキストを読む前の観測）を受け取り、fix 申告の preSha がこれと一致しない場合は
+`pushed: true` でも未検証扱いにする（host が hostPreSha を取得できていないラウンドは照合不能の
+ため自己申告のみで判定する既知の fail-open な残存経路）。postSha は host が push 直後の値を
+独立取得する手段を持たない（Workflow ランタイムの制約は (b) と同一）ため引き続き自己申告に
+依存するが、`runMergeLoop` は次ラウンドの monitor が独立観測した headSha と `pendingPushClaim`
+で事後照合し、食い違えばログへ記録する（`resolveReviewThread` mutation は fix のターン内で
+既に実行済みのため取り消せないが、虚偽申告の痕跡を追跡可能にする）。
+
 **旧残存リスク（(b) 恒久無効化により現在は非該当。設計判断の記録として残す）**:
 
 - path 一致は「そのファイルを変更した push があった」ことの上界であり「その変更が当該

@@ -436,11 +436,31 @@ function computePermittedNoPushResolveIds(_proofState, _unresolvedComments) {
 // ターン内で実行されるため host はその呼び出しを事前に止められないが、この判定はプロンプトの
 // 許可条件（手順 5）と一致させてあり、host 側の以降のブックキーピング（noPushRounds・
 // lastRoundPushed・ログ）が自己申告のみを信頼しないための後段の防御として機能する。
-function computeVerifiedPushed(pushed, preSha, postSha) {
+//
+// 追記（PR #436 codex-review P0）: 上記だけでは preSha/postSha 自体が同一 fix 応答内の
+// 未検証な自己申告のため、prompt injection を受けた fix が「40 桁 hex で異なる 2 値」を
+// 単に捏造するだけで pushed: true を通過させられる懸念が残る。第 4 引数 hostPreSha に
+// host が独立取得した値（runMergeLoop が保持する resolveProof.head。fix 起動より前の
+// 当該ラウンドの monitor が自身の `gh pr view --json headRefOid` で取得し、レビュー本文等の
+// 未信頼テキストを読む前に返す値）を渡すと、fix 申告の preSha がそれと一致しない場合は
+// 「fix が実際に fetch した値ではなく任意の sha を報告している」と判断し pushed: false
+// （未検証）とする。hostPreSha が未取得（空文字。monitor が該当ラウンドで headSha を
+// 返さなかった場合等）のときは照合不能のため従来どおり自己申告のみで判定する（既知の
+// fail-open な残存経路）。postSha 側は host が push 直後の値を独立取得する手段を持たない
+// （Workflow ランタイムはホストコードから直接シェル・ファイルシステムへアクセスできず、
+// 監視は spawn したエージェントに委ねるほかない。AGENTS.md 参照）ため、この関数の判定は
+// 依然として自己申告の postSha に依存する。runMergeLoop 側で次ラウンドの monitor が独立
+// 観測した headSha と f.postSha を事後照合し、食い違いを検知した場合はログへ記録する
+// （resolveReviewThread mutation は fix のターン内で既に実行済みのため取り消せないが、
+// 虚偽申告の痕跡を追跡可能にする）。
+function computeVerifiedPushed(pushed, preSha, postSha, hostPreSha) {
   if (pushed !== true) return false
   const pre = sanitizeSha(preSha)
   const post = sanitizeSha(postSha)
-  return Boolean(pre && post && pre !== post)
+  if (!pre || !post || pre === post) return false
+  const known = sanitizeSha(hostPreSha)
+  if (known && pre !== known) return false
+  return true
 }
 
 
@@ -2412,14 +2432,13 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         commitlintCheckInstruction,
         // push コマンドの exit code だけを見ない。git push は「送るものが何もない」（前ラウンドで
         // 既に同じ内容が push 済みで、今ラウンドは修正コミットも base 取り込みコミットも無い）
-        // 場合も Everything up-to-date で exit 0 になる。この no-op を「push 成功」と区別せず
-        // pushed: true を自己申告すると、手順 5 (a) の resolve 許可条件（push 成功）を偽装でき、
-        // resolve (b) を恒久的に空にした fail-closed（Issue #430）が実質迂回されてしまう
-        // （Issue #435 派生 codex P0）。push 実行後に POST_PUSH_SHA=$(git rev-parse origin/${branch}) を
-        // 取得し、手順 1 で固定した PRE_PUSH_SHA と比較する: 一致する場合（head が進んでいない）は
-        // pushed: false を返し、手順 5 は実行しない（(a)(b) いずれの条件も満たさないため）。
-        // 一致しない場合のみ pushed: true を返し、preSha に PRE_PUSH_SHA・postSha に
-        // POST_PUSH_SHA をそのまま設定する（40 桁の値をそのまま。省略・短縮しない）。`,
+        // 場合も Everything up-to-date で exit 0 になる。この no-op を「push 成功」と区別しないと
+        // 手順 5 (a) の resolve 許可条件を偽装でき、resolve (b) を恒久的に空にした fail-closed
+        // （Issue #430）が実質迂回される（Issue #435 派生 codex P0）。以下は host が実際に検証する
+        // 判定条件そのものであり、コメントに留めず fix への指示文字列として渡す必要がある
+        // （PR #436 Bugbot 指摘: 旧版はこの判定ルールが JS コメントのみに存在し fix へ渡っていな
+        // かった）。
+        `   push 実行後、POST_PUSH_SHA=$(git ls-remote origin refs/heads/${branch} | cut -f1) で origin/${branch} の実際の値を直接取得する（ローカルの remote-tracking ref 経由の git rev-parse ではなく、push 直後のリモート実測値を使う）。これを手順 1 で固定した PRE_PUSH_SHA と比較する: 一致する場合（head が進んでいない no-op push）は pushed: false を返し、手順 5 は実行しない（(a)(b) いずれの条件も満たさないため）。一致しない場合のみ pushed: true を返し、preSha に PRE_PUSH_SHA・postSha に POST_PUSH_SHA をそのまま設定する（40 桁の値をそのまま。省略・短縮しない。取得失敗などで 40 桁 hex を得られない場合は pushed: false を返す）。`,
       ]
     : [
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
@@ -3868,6 +3887,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // （resume 直後は必ず空 = fail-closed。新たな実測 push まで (b) は不成立でよい設計のため）。
   let resolveProof = { head: '', pushHead: '', files: [] }
   let lastRoundPushed = false
+  // 直近ラウンドで pushVerified: true になった fix の自己申告 postSha（Issue #435 派生 PR #436
+  // codex P0）。host は push 直後の origin/<branch> を独立取得する手段を持たないため（monitor
+  // という別エージェントの観測に委ねるほかない。AGENTS.md 参照）、次ラウンドの monitor が
+  // 独立観測した headSha と事後照合し、食い違いがあれば自己申告 postSha が虚偽だった疑いを
+  // ログへ残す（resolveReviewThread mutation は fix のターン内で既に実行済みのため取り消せない
+  // が、追跡可能にすることで残存リスクを可視化する）。1 ラウンド分のみ保持し照合後は必ずクリア。
+  let pendingPushClaim = null
   // fix 中の worktree 誤配置検出フラグ。最終 updateState で routing 専用 note を記録するために使う。
   let routingErrorDetected = false
   // PR マージ済みだがイシュークローズ未確認か。クローズ未完了として記録し、次回の monitoring
@@ -3975,6 +4001,17 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // monitor 結果のホスト側検証。enum 外は 'blocked' へフォールバックさせず専用 sentinel
     // 'invalid-monitor-result' に落とし 'failed' 終端に確定させる（halt 防御の維持）。
     lastState = MERGE_VALID_STATES.has(m?.state) ? m.state : 'invalid-monitor-result'
+    // 前ラウンドの fix が pushVerified: true で自己申告した postSha を、今ラウンドの monitor が
+    // 独立取得した headSha（未信頼テキストを読む前の手順 1 の `gh pr view` 観測値）と事後照合
+    // する（PR #436 codex P0）。一致しなければ、fix の自己申告 postSha が実際の push 結果を
+    // 反映していなかった（虚偽申告、または途中で別の push が割り込んだ）疑いを記録する。
+    if (pendingPushClaim) {
+      const observedHeadForClaim = sanitizeSha(m?.headSha)
+      if (observedHeadForClaim && observedHeadForClaim !== pendingPushClaim.postSha) {
+        log(`⚠️ #${item.number}: 前ラウンドの fix が自己申告した postSha（検証済み push の根拠）が次ラウンドの monitor 独立観測 headSha と一致しない（自己申告 postSha: ${pendingPushClaim.postSha} / 観測 headSha: ${observedHeadForClaim}）。虚偽申告の疑いがあるため記録する（resolveReviewThread mutation は fix のターン内で既に実行済みのため取り消し不能）`)
+      }
+      pendingPushClaim = null
+    }
     // resolve (b) ホスト観測（Issue #430。fix 申告 sha 不使用）。
     resolveProof = applyResolveProofObservation(resolveProof, { headSha: m?.headSha, compareStatus: m?.compareStatus, changedFiles: m?.changedFiles }, lastRoundPushed)
     // 1 回消費したら戻す（fix 非起動ラウンドを挟んだ次の ahead を誤って再クレジットしない）。
@@ -4348,10 +4385,17 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // pushed 自己申告を preSha/postSha（同じ fix 応答内の origin/<branch> push 前後 sha）で
       // 裏取りした値（Issue #435 派生 codex P0）。no-op push（exit 0 だが head 不変）による
       // pushed: true の偽装を、以降のブックキーピングでは「push なし」と同じ扱いにする。
-      const pushVerified = computeVerifiedPushed(f.pushed, f.preSha, f.postSha)
+      // hostPreSha には resolveProof.head（このラウンドの monitor が fix 起動より前に独立
+      // 取得した origin/<branch> sha）を渡し、fix 申告の preSha が host 観測値と食い違う
+      // 自己申告（未信頼レビュー本文からの捏造の疑い）は pushed:true でも未検証扱いにする
+      // （PR #436 codex P0。空文字なら host 未取得で照合不能、従来どおり自己申告のみで判定）。
+      const pushVerified = computeVerifiedPushed(f.pushed, f.preSha, f.postSha, resolveProof.head)
       if (f.pushed === true && !pushVerified) {
-        log(`⚠️ #${item.number}: fix エージェントが pushed: true を自己申告したが preSha/postSha が一致した（no-op push）ため push なしラウンドとして扱う（threadId 自己申告の resolve は許可リスト外として無視する）`)
+        log(`⚠️ #${item.number}: fix エージェントが pushed: true を自己申告したが preSha/postSha が一致しない・host 観測 preSha と食い違う・形式不正のいずれかのため push なしラウンドとして扱う（threadId 自己申告の resolve は許可リスト外として無視する）`)
       }
+      // 検証済み push は自己申告 postSha を「次ラウンドの monitor 独立観測」と事後照合する対象
+      // として記憶する（postSha 自体は host が独立取得できないため。上のループ先頭を参照）。
+      if (pushVerified) pendingPushClaim = { postSha: sanitizeSha(f.postSha) }
       // 次ラウンドの resolve (b) 観測入力（Issue #430）。
       lastRoundPushed = pushVerified
       // f.resolvedThreadIds（fix 自己申告）は形式検証してログ専用（マージ判定・次 monitor には

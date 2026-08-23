@@ -233,6 +233,32 @@ test('computeVerifiedPushed: preSha/postSha が 40 桁 hex でない（形式不
 })
 
 // ---------------------------------------------------------------------------
+// computeVerifiedPushed の第 4 引数 hostPreSha（PR #436 codex-review P0 対応）:
+// preSha/postSha 自体が同一 fix 応答内の未検証な自己申告であるため、prompt injection を
+// 受けた fix が「40 桁 hex で異なる 2 値」を単に捏造するだけで pushed: true を通過させ得る
+// 懸念が残っていた。host が独立取得した preSha（runMergeLoop の resolveProof.head。fix 起動
+// より前の当該ラウンドの monitor が自身の gh pr view で取得した値）と fix 申告の preSha を
+// 照合し、食い違えば未検証（false）とする。
+// ---------------------------------------------------------------------------
+
+test('computeVerifiedPushed: hostPreSha 未指定（host 未取得）の場合は従来どおり自己申告のみで判定する（後方互換）', () => {
+  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B), true)
+  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B, ''), true)
+  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B, undefined), true)
+})
+
+test('computeVerifiedPushed: fix 申告の preSha が hostPreSha と一致すれば true', () => {
+  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B, SHA_A), true)
+})
+
+test('computeVerifiedPushed: fix 申告の preSha が hostPreSha と食い違う場合は pushed:true・preSha!==postSha でも false（捏造対策の核心）', () => {
+  // fix が preSha=SHA_A/postSha=SHA_B という「形式上は正しい・互いに異なる」2 値を自己申告して
+  // いても、host が独立観測した直前の origin/<branch> が SHA_C（SHA_A ではない）なら、fix が
+  // 実際に fetch した値を報告していない疑いが強いため未検証として扱う。
+  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B, SHA_C), false)
+})
+
+// ---------------------------------------------------------------------------
 // 配線検証: runMergeLoop が「proof 観測 → 許可リスト算出 → fixPrompt」の順で配線され、
 // pushed:false の受理が許可リストで絞られること（純粋関数テストだけでは配線なしでもグリーンになる）
 // ---------------------------------------------------------------------------
@@ -288,5 +314,31 @@ test('runMergeLoop: lastRoundPushed は proof 観測の直後に false へ戻し
   assert.ok(
     afterObserve.includes('lastRoundPushed = false'),
     'proof 観測の直後で lastRoundPushed をリセットしていない（fix 非起動ラウンドを挟んだ次の ahead 観測を誤って再クレジットする回帰）',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// 配線検証（PR #436 codex-review P0）: computeVerifiedPushed の呼び出しに host 独立観測の
+// resolveProof.head（hostPreSha）が渡っており、fix 自己申告の preSha/postSha だけに依存して
+// いないこと。純粋関数テストだけでは配線なしでもグリーンになるためソース走査で固定する。
+// ---------------------------------------------------------------------------
+
+test('runMergeLoop: computeVerifiedPushed の呼び出しに resolveProof.head（host 独立観測の preSha）を渡す', () => {
+  assert.ok(
+    driverPart.includes('computeVerifiedPushed(f.pushed, f.preSha, f.postSha, resolveProof.head)'),
+    'computeVerifiedPushed が fix 自己申告の preSha/postSha のみで呼ばれている（host 独立観測との照合が配線されていない）',
+  )
+})
+
+test('runMergeLoop: 検証済み push の postSha を次ラウンド monitor の独立観測 headSha と事後照合する（pendingPushClaim）', () => {
+  assert.ok(source.includes('let pendingPushClaim = null'), 'pendingPushClaim の初期化が見つからない')
+  const setIndex = driverPart.indexOf('if (pushVerified) pendingPushClaim = { postSha: sanitizeSha(f.postSha) }')
+  assert.ok(setIndex >= 0, '検証済み push の postSha を pendingPushClaim へ記憶する配線が見つからない')
+  const reconcileIndex = driverPart.indexOf('if (pendingPushClaim) {')
+  assert.ok(reconcileIndex >= 0, '次ラウンド monitor 後の pendingPushClaim 事後照合が見つからない')
+  const reconcileBlock = driverPart.slice(reconcileIndex, reconcileIndex + 600)
+  assert.ok(
+    reconcileBlock.includes('pendingPushClaim = null'),
+    '事後照合後に pendingPushClaim をクリアしていない（次々ラウンドへ誤って持ち越す回帰）',
   )
 })
