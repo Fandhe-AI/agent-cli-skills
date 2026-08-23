@@ -63,42 +63,46 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   (5) 以上の設計がスキル文書に明記され、差分が設計どおりかをレビューで検証できる。
   これらの要件のいずれかを弱める変更、opt-in 条件を迂回・緩和する変更、fail-closed を
   外す変更、未信頼テキストをマージ実行・検証コンテキストへ持ち込む変更は P0 として扱う。
-  **例外（2026-08-20・オーナー判断。(b) は 2026-08-21・#427 の判断で更新、#430 で実装済み）**:
-  implement-issue-tree の Merge ループ fix エージェントによる「対応済みレビュー
-  スレッド resolve」（`resolveReviewThread` mutation）は、要件 (2) の限定的例外として
-  受容する。未信頼テキスト（レビュー本文）を読む fix の自己判断が
-  `required_review_thread_resolution` ゲートの解除に影響することを認識したうえで、
-  レビュー指摘→修正 push→resolve→自動マージの無人ループ成立を優先する判断である。
-  例外の成立条件: (a) resolve 実行主体は Merge ループの fix（pushAfterFix=true）のみ
-  （monitor / merge-exec / merge-verify / Review ループは実行しない）。**(a) 経路の
-  「push が成功した」は git push コマンドの exit code のみでは判定しない**
-  （2026-08-23・#435 派生 codex-review P0 対応）。`git push` は送るものが何もない
-  no-op（前ラウンドで既に同内容が push 済み、当該ラウンドは修正コミットも base 取り込み
-  コミットも無い）でも `Everything up-to-date` で exit 0 になるため、fix が exit code
-  だけを根拠に `pushed: true` を自己申告できると、(b) を恒久的に空にした fail-closed が
-  no-op push を毎ラウンド実行するだけで実質迂回されてしまう。fix は push 前後の
-  `origin/<branch>` sha（`preSha`／`postSha`。手順 1 の fetch 直後と手順 4 の push 直後に
-  それぞれ取得）を返し、host（`computeVerifiedPushed`）が両者とも 40 桁 hex で一致しない
-  （= head が実際に進んだ）ことを確認できた場合に限り `pushed: true` を「検証済み push」
-  として扱う。preSha === postSha（no-op push）の場合は自己申告が `pushed: true` でも
-  host は push なしラウンドとして扱い、(b) 経路（下記のとおり恒久的に空リスト）以外の
-  resolve を許可しない。
-  **preSha/postSha 自体を信頼境界に置かない（2026-08-23・#436 codex-review P0 対応）**:
-  上記だけでは preSha/postSha が同一 fix 応答内の未検証な自己申告であるため、prompt
-  injection を受けた fix が「40 桁 hex で異なる 2 値」を単に捏造するだけで
-  `pushed: true` を通過させ得る懸念が残る。`computeVerifiedPushed` は第 4 引数
-  `hostPreSha` に host が独立取得した値（`resolveProof.head`。fix 起動より前の当該
-  ラウンドの monitor が自身の `gh pr view --json headRefOid` で取得し、レビュー本文等の
-  未信頼テキストを読む前に返す値）を受け取り、fix 申告の preSha がこれと一致しない場合は
-  `pushed: true` でも未検証（push なしラウンド）として扱う（host が当該ラウンドで
-  hostPreSha を取得できていない場合は照合不能のため自己申告のみで判定する既知の
-  fail-open な残存経路）。postSha は host が push 直後の値を独立取得する手段を持たない
-  （Workflow ランタイムはホストコードから直接シェル・ファイルシステムへアクセスできない
-  制約は下記 (b) と同一）ため引き続き自己申告に依存するが、`runMergeLoop` は次ラウンドの
-  monitor が独立観測した headSha と事後照合し、食い違えばログへ記録する
-  （`resolveReviewThread` mutation は fix のターン内で既に実行済みのため取り消せないが、
-  虚偽申告の痕跡を追跡可能にする）。この事後照合・hostPreSha 照合を弱める変更は
-  引き続き P0 として指摘する。(b) resolve は
+  **例外（2026-08-20・オーナー判断。(b) は 2026-08-21・#427 の判断で更新、#430 で実装済み。
+  (a) の実行主体分離は 2026-08-23・#436 codex-review P0 対応で実装済み）**:
+  implement-issue-tree の「対応済みレビュースレッド resolve」（`resolveReviewThread`
+  mutation）は、要件 (2) の限定的例外として受容する。未信頼テキスト（レビュー本文）を
+  読む fix の判断が resolve 候補の選定に影響することを認識したうえで、レビュー指摘→
+  修正 push→resolve→自動マージの無人ループ成立を優先する判断である。
+  **resolve mutation の実行主体は fix ではない（2026-08-23・#436 codex-review P0
+  対応）**: 旧設計は Merge ループの fix（pushAfterFix=true）自身が `gh api graphql` で
+  mutation を実行しており、host 側の裏取り（下記 preSha/postSha 検証）は fix のターン
+  内で mutation が既に実行された後にしか働かなかった。prompt injection を受けた fix が
+  形式上正しい preSha/postSha の 2 値を捏造するだけで mutation を通過させ得るという
+  codex-review P0（PR #436）を受け、実行主体を fix から分離した。現在の設計:
+  **(a) resolve 実行主体は host が起動する `resolveThreadsPrompt` 専用エージェントのみ
+  （monitor / merge-exec / merge-verify / Review ループの fix は実行しない）**。
+  resolve 候補は Merge ループの fix（pushAfterFix=true）が報告し、当該ラウンドで実際に
+  head が進んだことを `resolveThreadsPrompt` 自身が独立確認できた場合のみ resolve する。
+  fix は「対応したと考える候補」（`resolvedThreadIds`）を報告するのみで
+  `resolveReviewThread` mutation を一切実行しない。host は fix が報告した候補を
+  当該ラウンドの未解決スレッド一覧（`finding.unresolvedComments`）との交差に限定した
+  うえで、未信頼テキストを一切読まない専用エージェント（`resolveThreadsPrompt`）へ渡す。
+  このエージェントは branch・host 保持の `hostPreSha`（`resolveProof.head`。fix 起動
+  より前の当該ラウンドの monitor が自身の `gh pr view --json headRefOid` で取得し、
+  レビュー本文等の未信頼テキストを読む前に返す値）・候補 threadId 一覧のみを受け取り
+  （finding.summary・イシュータイトル・レビュー本文等は一切渡さない）、自ら
+  `git ls-remote origin refs/heads/<branch>` で現在の HEAD（`observedHead`）を独立取得
+  する。`observedHead` が `hostPreSha` と異なる（= head が実際に進んだ）ことを自ら確認
+  できた場合に限り mutation を実行する。host（runMergeLoop）はこの `observedHead` と
+  `hostPreSha` の比較のみを resolve 許可根拠とし（変数名 `resolveVerified`）、fix
+  自己申告の `pushed`・`preSha`・`postSha` は一切参照しない。これにより、fix が
+  任意の preSha/postSha を捏造しても mutation の実行可否には影響しなくなった。
+  **fix 自己申告の preSha/postSha（`computeVerifiedPushed`。下記）は resolve 実行の
+  許可根拠として使わない**: `git push` は送るものが何もない no-op（前ラウンドで既に
+  同内容が push 済み、当該ラウンドは修正コミットも base 取り込みコミットも無い）でも
+  `Everything up-to-date` で exit 0 になるため、fix の自己申告だけでは「実際に head が
+  進んだ」根拠にならない。`computeVerifiedPushed` は preSha/postSha が両方とも 40 桁
+  hex で一致しないこと、および第 4 引数 `hostPreSha`（`resolveProof.head`）と fix 申告
+  preSha の一致を検証するが、この関数の結果（`pushVerified`）は現在 noPushRounds・
+  lastRoundPushed・pendingPushClaim 事後照合等の host 側ブックキーピング（誤っても
+  マージ判定を止めるだけで mutation は実行されない領域）にのみ使う。resolve mutation の
+  実行可否は上記のとおり `resolveThreadsPrompt` が独立観測のみで判定する。(b) resolve は
   対象修正がリモート head（`origin/<branch>`）に反映済みであることを前提とする。成立
   経路は次の 2 つに限る — 当該ラウンドの push が成功した場合、または push しなかった
   ラウンド（過去ラウンドで push 済み）では、**ホストが自ら観測した push の結果**に対し
