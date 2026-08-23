@@ -93,18 +93,49 @@ test('prCreatePrompt: 起点決定は 4 分岐（初回/remote ahead/local ahead
     prompt.includes(' が存在しない（fetch がその旨で失敗する）場合は初回実行なのでローカル起点'),
     '初回実行（リモート branch なし）でローカル起点へフォールバックする指示がない',
   )
-  // (ii) remote ahead（純粋な再入）: リモート tip 起点。同一 sha はこの分岐に含めると明記。
+  // (ii) 同一 sha のみ継続（取り込む差分が存在せず安全）。
+  assert.ok(
+    prompt.includes('両 tip が同一 sha') && prompt.includes('取り込む差分が存在せず'),
+    '同一 sha のみ継続する（差分ゼロで安全）分岐の明記がない',
+  )
+  assert.ok(
+    prompt.includes(`git checkout --detach refs/remotes/origin/${branch}`),
+    '同一 sha で継続する際の detached HEAD checkout 指示がない',
+  )
+  // (ii-b) 真の remote ahead は fail-closed（codex P0 3 巡目 discussion_r3837883767）:
+  // 「ローカル tip がリモート tip の ancestor」は第三者・別ランの fast-forward push でも成立し、
+  // pr-create 単体では自己 push と区別不能。リモート起点を採用すると未レビューの第三者コミットを
+  // 保持したまま base merge・push し、autoMerge opt-in ではそのままマージされ得る。
   assert.ok(
     prompt.includes(`git merge-base --is-ancestor refs/heads/${branch} refs/remotes/origin/${branch}`),
     'remote-ahead 判定（ローカル tip がリモート tip の ancestor）の確認指示がない',
   )
+  const remoteAheadIdx = prompt.indexOf('真の ancestor = remote ahead')
+  assert.ok(remoteAheadIdx >= 0, '真の remote-ahead（同一 sha を除く）の分岐記述がない')
+  const remoteAheadSection = prompt.slice(remoteAheadIdx, remoteAheadIdx + 900)
   assert.ok(
-    prompt.includes(`git checkout --detach refs/remotes/origin/${branch}`),
-    'remote-ahead でリモート tip を detached HEAD の起点にする指示がない（ローカル起点のままだと再入時に non-fast-forward で push が拒否される）',
+    remoteAheadSection.includes('fail-closed'),
+    '真の remote-ahead を fail-closed にする指示がない',
   )
   assert.ok(
-    prompt.includes('両 tip が同一 sha の場合もこの分岐に含める'),
-    '両 tip 同一 sha をどの分岐で扱うかの明記がない',
+    remoteAheadSection.includes('第三者・別ラン') && remoteAheadSection.includes('区別できない'),
+    '自己 push と第三者 fast-forward push が観測上区別不能である根拠の明記がない',
+  )
+  assert.ok(
+    remoteAheadSection.includes('リモートコミットを黙って採用してはならない'),
+    '未レビューのリモートコミットを黙って取り込まない旨の明記がない',
+  )
+  assert.ok(
+    remoteAheadSection.includes('remote-ahead: 自己の過去 push か第三者 push か判別不能'),
+    'remote-ahead 終端時の理由文言（prNumber: 0 と併記）がない',
+  )
+  assert.ok(
+    remoteAheadSection.includes('0b-a') && remoteAheadSection.includes('0b-b'),
+    '回復経路（次回ランの impl 手順 0b-a / 0b-b）の明記がない',
+  )
+  assert.ok(
+    !prompt.includes('既存のマージコミットの上から継続する。(iii)'),
+    '旧文言（真の remote-ahead でもリモート起点で継続）が残っている',
   )
   // (iii) local ahead（既存 PR 再利用 + 新規コミットの通常回復フロー）: ローカル起点で継続。
   assert.ok(
