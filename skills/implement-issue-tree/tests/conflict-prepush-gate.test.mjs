@@ -165,3 +165,23 @@ test('monitorPrompt: 手順 3e は 10 分待機の後にも mergeable を再判�
   assert.ok(unknownIdx >= 0, '待機後再判定の UNKNOWN の扱いが手順 1c と揃っていない')
   assert.ok(unknownIdx > rematchIdx && unknownIdx < blockedIdx, 'UNKNOWN の扱いが再判定〜blocked の間に現れない')
 })
+
+test('monitorPrompt: 手順 3e の UNKNOWN リトライ途中で CONFLICTING に確定した場合も needs-fix 経路へ回す', () => {
+  // Cursor Bugbot Medium 2 巡目（PR #436 discussion_r3837621385）の回帰テスト: 待機後再判定の
+  // UNKNOWN リトライ分岐に「途中で CONFLICTING に確定した場合」の終端動作が未規定だと、この
+  // 修正が狙う経路そのもの（兄弟 PR マージ直後の base 移動）が needs-fix に乗らず blocked /
+  // stall し得る。リトライ分岐内に CONFLICTING 確定 → needs-fix の明記があることを固定する。
+  const prompt = monitorPrompt(item, impl, [], true, true)
+  const idxE = prompt.indexOf('チェック総数が 0 件の場合は green とみなさず')
+  assert.ok(idxE >= 0, '手順 3e の記述が見つからない')
+  const sectionE = prompt.slice(idxE, idxE + 2400)
+  const unknownIdx = sectionE.indexOf('手順 1c と同じ扱いで 30 秒程度あけて最大 3 回再取得')
+  const blockedIdx = sectionE.indexOf('state: blocked / blockedReason: "quality"')
+  assert.ok(unknownIdx >= 0 && blockedIdx >= 0, '手順 3e の UNKNOWN リトライ / blocked 終端の記述が見つからない')
+  const retryBranch = sectionE.slice(unknownIdx, blockedIdx)
+  const midConflictIdx = retryBranch.indexOf('リトライの途中で state が OPEN のまま mergeable が "CONFLICTING" に確定した場合')
+  assert.ok(midConflictIdx >= 0, 'UNKNOWN リトライ途中の CONFLICTING 確定ケースの終端動作が未規定')
+  const afterMidConflict = retryBranch.slice(midConflictIdx)
+  assert.ok(afterMidConflict.includes('needs-fix'), 'リトライ途中の CONFLICTING 確定が needs-fix 経路へ回されない')
+  assert.ok(afterMidConflict.includes('reviewThreads 走査'), 'リトライ途中の CONFLICTING 確定経路に reviewThreads 走査（unresolvedComments 収集）の指示がない')
+})
