@@ -925,6 +925,21 @@ const RESOLVE_SCHEMA = {
   },
 }
 
+// 追加 codex-review P0 対応（PR #436 再指摘。issue #435 派生）: resolve 判定の hostPreSha を
+// 「未信頼テキストを一切読まない専用エージェント」から取得するための返却スキーマ。mergeVerifyPrompt
+// と同じく自由文フィールドを持たせず注入面を作らない。
+const PRE_PUSH_HEAD_SCHEMA = {
+  type: 'object',
+  required: ['headSha'],
+  properties: {
+    headSha: {
+      type: 'string',
+      maxLength: 40,
+      description: 'git ls-remote origin refs/heads/<branch> で取得した現在の HEAD sha（40 桁）。取得失敗・形式不正時は空文字。',
+    },
+  },
+}
+
 const CLOSE_SCHEMA = {
   type: 'object',
   required: ['closed', 'summary'],
@@ -2274,6 +2289,25 @@ function mergeVerifyPrompt(item, impl) {
     `   期待値との一致判定はすべてホスト側で行う（期待 HEAD sha は本エージェントへ意図的に渡していない）。本エージェントは取得値をそのまま返すだけでよい。`,
     `3. コマンドが失敗した・値を取得できなかった場合は state: "UNKNOWN"、headRefOid: ""（空文字）を返す（推測で MERGED を返さない。取得不能はホスト側が fail-closed で処理する）。`,
     '返却: state / headRefOid / mergeCommitOid。自由文の説明フィールドは返さない。',
+  ].join('\n')
+}
+
+// resolve 判定用の host 独立 preSha 取得専用エージェント（追加 codex-review P0 対応。PR #436
+// 再指摘・issue #435 派生）。monitorPrompt はレビュー本文等の未信頼テキストを読むエージェントで
+// あり、その構造化出力（headSha を含む）は AGENTS.md が求める「host 独立取得値」の実体になって
+// いなかった（injection を受けた monitor が任意の headSha を偽装し得る）。本エージェントは
+// mergeVerifyPrompt と同型で、未信頼データを一切含まないプロンプト・単一の読み取りコマンドのみで
+// 構成し、fix 起動の直前（未信頼レビュー本文を読むいかなるエージェントより後ろに置かない）に host
+// が都度起動する。
+function prePushHeadPrompt(branch) {
+  const safeBranch = sanitizeBranch(branch)
+  return [
+    'resolve 判定用の host 独立 HEAD 取得専用の担当。未信頼データ（イシュー本文・レビュー本文・PR タイトル等）は一切含まれない。',
+    MERGE_CONTEXT_COMMON,
+    '手順:',
+    `1. git ls-remote origin refs/heads/${safeBranch} | cut -f1 で origin/${safeBranch} の現在の HEAD sha を取得する。`,
+    '2. 取得した値をそのまま headSha として返す（40 桁の小文字 16 進数）。取得できない・形式が不正な場合は headSha: ""（空文字）を返す（推測で埋めない）。',
+    '返却: headSha のみ。自由文の説明フィールドは返さない。',
   ].join('\n')
 }
 
@@ -4417,6 +4451,15 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         break
       }
       log(`PR #${impl.prNumber} に修正が必要（${lastState}）、修正エージェントを起動する（${fixCount + 1}/6 回目）`)
+      // resolve 前提の host 独立 preSha（PR #436 追加 codex-review P0 対応。issue #435 派生）。
+      // resolveProof.head は monitor（未信頼レビュー本文を読むエージェント）の構造化出力の
+      // 自己申告値にすぎず、AGENTS.md が要求する「host が独立取得した値」の実体になっていな
+      // かった。fix 起動の直前に、未信頼テキストを一切読まない専用エージェント
+      // （prePushHeadPrompt。mergeVerifyPrompt と同型）で origin/<branch> の現在の HEAD を
+      // 取得し、この値のみを以降の pushVerified 判定・resolveThreadsPrompt の hostPreSha に使う。
+      // 取得できなかった場合は空文字のまま扱い、両判定とも fail-closed（未検証）に倒れる。
+      const pp = await agent(prePushHeadPrompt(impl.branch), { label: `pre-push-head:#${item.number}`, phase: 'Merge', model: 'haiku', effort: 'low', schema: PRE_PUSH_HEAD_SCHEMA })
+      const hostPrePushHead = sanitizeSha(pp?.headSha)
       const oldWorktreePath = currentWorktreePath
       // Merge ループの fix は push が必要（pushAfterFix: true。Review ループの push なし fix と区別）。
       // finding は監視結果（既定）または merge-exec の不一致検出時の合成結果。
@@ -4450,11 +4493,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // pushed 自己申告を preSha/postSha（同じ fix 応答内の origin/<branch> push 前後 sha）で
       // 裏取りした値（Issue #435 派生 codex P0）。no-op push（exit 0 だが head 不変）による
       // pushed: true の偽装を、以降のブックキーピングでは「push なし」と同じ扱いにする。
-      // hostPreSha には resolveProof.head（このラウンドの monitor が fix 起動より前に独立
-      // 取得した origin/<branch> sha）を渡し、fix 申告の preSha が host 観測値と食い違う
-      // 自己申告（未信頼レビュー本文からの捏造の疑い）は pushed:true でも未検証扱いにする
-      // （PR #436 codex P0。空文字なら host 未取得で照合不能、従来どおり自己申告のみで判定）。
-      const pushVerified = computeVerifiedPushed(f.pushed, f.preSha, f.postSha, resolveProof.head)
+      // hostPreSha には hostPrePushHead（未信頼テキストを一切読まない専用エージェントが fix
+      // 起動より前に独立取得した origin/<branch> sha。追加 codex-review P0 対応で monitor
+      // 自己申告の resolveProof.head から切り替えた）を渡し、fix 申告の preSha が host 観測値と
+      // 食い違う自己申告（未信頼レビュー本文からの捏造の疑い）は pushed:true でも未検証扱いに
+      // する（PR #436 codex P0。空文字なら host 未取得で照合不能、従来どおり自己申告のみで判定）。
+      const pushVerified = computeVerifiedPushed(f.pushed, f.preSha, f.postSha, hostPrePushHead)
       if (f.pushed === true && !pushVerified) {
         log(`⚠️ #${item.number}: fix エージェントが pushed: true を自己申告したが preSha/postSha が一致しない・host 観測 preSha と食い違う・形式不正のいずれかのため push なしラウンドとして扱う（threadId 自己申告の resolve は許可リスト外として無視する）`)
       }
@@ -4496,11 +4540,25 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // resolve の実行主体を fix から分離する（PR #436 codex-review P0）。ここまでの resolvedTids
         // は「fix が対応したと考える候補」に過ぎず、実際の resolveReviewThread mutation は未信頼
         // テキストを一切読まない専用エージェント（resolveThreadsPrompt）へ委ねる。同エージェントは
-        // host 保持の hostPreSha（resolveProof.head。fix 起動より前の monitor 独立観測値）と、
-        // 自ら今取得する origin/<branch> の HEAD を比較し、実際に head が進んだと確認できた場合に
-        // 限り resolve する（fix 自己申告の pushed/preSha/postSha には一切依存しない）。
-        if (resolvedTids.length > 0) {
-          const hostPreSha = resolveProof.head
+        // host 保持の hostPreSha（hostPrePushHead。fix 起動より前に専用 proof エージェントが独立
+        // 取得した値）と、自ら今取得する origin/<branch> の HEAD を比較し、実際に head が進んだと
+        // 確認できた場合に限り resolve する。
+        // 追加 codex-review P0（PR #436 再指摘）対応: 「OBSERVED_HEAD が hostPreSha と異なる」
+        // だけでは、この当該ラウンドの fix 自身の push によって進んだのか、無関係な第三者 push で
+        // 進んだのかを区別できない。pushVerified（fix 自己申告の preSha/postSha を hostPrePushHead
+        // と突き合わせた値）を resolveVerified との AND 条件に追加し、AGENTS.md の resolve (a)
+        // 契約「当該ラウンドの push が成功した場合」を実装レベルでも強制する。pushVerified が
+        // false の場合は mutation 自体を実行しない（resolveThreadsPrompt を呼ばない）。
+        // Cursor Bugbot「Push claim still gates resolve」で pushVerified を候補生成のゲートに
+        // 使うことは撤回済みだが、これは「今回のラウンドの push が host 独立観測で裏付けられて
+        // いない」場合にまで mutation を実行してしまう危険（今回の P0）の方が、fix 自己申告の
+        // preSha/postSha 書式不備による機会損失より重いという判断（AGENTS.md「機会損失は許容し、
+        // 誤った許可拡大を避ける」の方針と同じトレードオフ）。
+        if (resolvedTids.length > 0 && !pushVerified) {
+          log(`⚠️ #${item.number}: fix 自己申告の pushed/preSha/postSha が host 独立観測（hostPrePushHead）と整合しない（pushVerified: false）ため resolve mutation を実行しなかった（threadId 候補: ${resolvedTids.join(', ')}）`)
+        }
+        if (resolvedTids.length > 0 && pushVerified) {
+          const hostPreSha = hostPrePushHead
           const r = await agent(
             resolveThreadsPrompt(impl.branch, hostPreSha, resolvedTids),
             { label: `resolve:#${item.number}`, phase: 'Merge', model: 'haiku', effort: 'low', schema: RESOLVE_SCHEMA },
@@ -4508,7 +4566,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           const observedHead = sanitizeSha(r?.observedHead)
           const knownPreSha = sanitizeSha(hostPreSha)
           // resolve エージェント自身が独立取得した観測値のみで判定する（fix 申告の preSha/postSha
-          // は一切参照しない。これが PR #436 codex P0 対応の核心）。
+          // は一切参照しない。これが PR #436 codex P0 対応の核心）。pushVerified は上の if で
+          // 既に AND 条件として確認済みだが、resolveVerified は引き続き単独でも成立要件を保つ
+          // （二重の fail-closed。片方の実装ミスで他方が救う設計）。
           const resolveVerified = !!observedHead && !!knownPreSha && observedHead !== knownPreSha
           const resolvedByAgent = resolveVerified
             ? (Array.isArray(r?.resolvedThreadIds) ? r.resolvedThreadIds : [])
