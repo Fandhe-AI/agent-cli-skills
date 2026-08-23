@@ -2224,8 +2224,8 @@ function prCreatePrompt(item, impl, outOfScope) {
     // 作れず pull_request トリガーの CI check-run が 1 件も発行されない（Issue #435: monitor が
     // 「チェック 0 件」を待っても収束せず blocked 終端し、自動回復しない）。push 前に必ず base を
     // 取り込み、解消不能ならこの時点で push 自体を止める。
-    `0. push 前 base 最新化ゲート: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361 と同形式）で base を取得する。本エージェントは隔離 worktree で動作し ${branch} を checkout している保証がないため git checkout --detach ${branch} で detached HEAD として取得し、git merge --no-edit -m "chore: base ブランチの変更を取り込む" origin/${baseBranch} を実行する（マージコミットの subject は commitlint 既定 ignore に依存せず明示の Conventional Commits 形式にする）。Already up to date またはクリーンマージの場合は git branch -f ${branch} HEAD でブランチ先端を更新して手順 1 へ進む。コンフリクトが発生した場合はその場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したら対象リポジトリのテスト実行規約に従いビルド・lint・テストを通してからコミットし git branch -f ${branch} HEAD で先端を更新する）。解消に確信が持てない・解消不能な場合は git merge --abort し、push せず prNumber: 0 と「base コンフリクト解消不能」を理由として返す（fail-closed。ローカルブランチはそのまま保全され、CI 未起動の空 PR を作らずに終わる）。`,
-    `1. git push origin ${branch} でローカルブランチを push する（Bash の timeout に 600000 を指定）。`,
+    `0. push 前 base 最新化ゲート: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361 と同形式）で base を取得する。本エージェントは隔離 worktree で動作し ${branch} を checkout している保証がないため git checkout --detach ${branch} で detached HEAD として取得し、git merge --no-edit -m "chore: base ブランチの変更を取り込む" origin/${baseBranch} を実行する（マージコミットの subject は commitlint 既定 ignore に依存せず明示の Conventional Commits 形式にする）。ローカルブランチ ref（refs/heads/${branch}）の更新は行わない — 手順 1 は detached HEAD の内容を直接 push するため不要であり、この worktree が ${branch} を checkout している保証がない以上 git branch -f はブランチが別 worktree で checkout 済みの場合に失敗し得る。Already up to date またはクリーンマージの場合はそのまま手順 1 へ進む。コンフリクトが発生した場合はその場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したら対象リポジトリのテスト実行規約に従いビルド・lint・テストを通してからコミットする）。解消に確信が持てない・解消不能な場合は git merge --abort し、push せず prNumber: 0 と「base コンフリクト解消不能」を理由として返す（fail-closed。ローカルブランチはそのまま保全され、CI 未起動の空 PR を作らずに終わる）。`,
+    `1. git push origin HEAD:refs/heads/${branch} で detached HEAD の内容（手順 0 の base 取り込み・コンフリクト解消を含む）を ${branch} へ push する（Bash の timeout に 600000 を指定）。git push origin ${branch} は使わない — ローカルの refs/heads/${branch} を手順 0 で更新していないため、その形では手順 0 の変更が push されず古い内容のまま push されてしまう。`,
     `   push が失敗した場合は prNumber: 0 と失敗理由を返す。`,
     // 中断再開ではこのブランチに対する open PR が既に存在しうる（gh pr create が失敗して生きて
     // いる PR が追跡されないまま残る。Issue #135）ため、push 後・PR 作成前に必ず確認する。
@@ -2234,9 +2234,9 @@ function prCreatePrompt(item, impl, outOfScope) {
     `   判定は以下のとおり（base が異なる PR を誤って再利用すると base ${baseBranch} 契約を迂回してマージされるため、必ず検証する）:`,
     `   - 出力が空の場合: 既存 PR なし。手順 2 へ進む。`,
     `   - baseRefName が ${JSON.stringify(baseBranch)} と一致する PR がある場合: その headRefOid が、いま push した ${branch} ブランチの先端 sha と一致することを確認する。`,
-    `     比較対象の sha は必ずブランチ ref から解決する（本エージェントは隔離 worktree で動作し、その worktree が ${branch} を checkout している保証がないため、git rev-parse HEAD を使ってはならない）:`,
-    `       b=${JSON.stringify(branch)}; git rev-parse --verify "refs/heads/$b"`,
-    `     （ローカル ref が解決できない場合は push 済みリモート ref の git rev-parse --verify "refs/remotes/origin/$b" を使う。いずれも解決できない場合は prNumber: 0 と理由を返す）`,
+    `     比較対象の sha は push 成功で更新されたリモート追跡 ref（refs/remotes/origin/${branch}。手順 1 の push により git が自動更新する）から解決する（ローカルの refs/heads/${branch} は手順 0 で更新していないため使ってはならない — 古い内容を指したままになる）:`,
+    `       b=${JSON.stringify(branch)}; git rev-parse --verify "refs/remotes/origin/$b"`,
+    `     （解決できない場合は prNumber: 0 と理由を返す）`,
     `     一致すればその番号を prNumber として再利用する（手順 2・3 はスキップして手順 1c へ）。`,
     `     一致しない場合は他者・別ランの push で PR の head が動いているため、再利用も新規作成もせず prNumber: 0 と「既存 open PR #<番号> の head sha が push した ${branch} の先端と一致しない」を理由として返す。`,
     `   - baseRefName が ${JSON.stringify(baseBranch)} と異なる PR しか存在しない場合: 自動では扱えないため、再利用も新規作成もせず prNumber: 0 と「同一 head branch から別 base（<baseRefName>）への open PR #<番号> が存在する」を理由として返す。`,
@@ -2331,7 +2331,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         // 破棄で失われる（この手順を作業前に置くのはそれを避けるため。Issue #435）。取り込み
         // 自体は必須実行とし、「必要な場合は」の条件文にしない — 兄弟イシューの PR が先に
         // マージされて base が動いているケースを、修正作業の前に必ず検出する。
-        `   push 前 base 最新化ゲート（必須）: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361）で base を取得し、git merge --no-edit -m "chore: base ブランチの変更を取り込む" origin/${baseBranch} を実行する。Already up to date またはクリーンマージなら手順 2 へ進む（クリーンマージの場合は git branch -f ${branch} HEAD でブランチ先端を更新してから進む）。コンフリクトが発生した場合はその場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したらテスト実行規約に従いビルド・lint・テストを通してからコミットし git branch -f ${branch} HEAD で先端を更新する）。解消に確信が持てない・解消不能な場合は git merge --abort し、まだ修正のコミットを作っていないため作業を破棄しても損失はない。pushed: false / routingError なしで「base コンフリクト解消不能」を理由に返す。`,
+        `   push 前 base 最新化ゲート（必須）: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361）で base を取得し、git merge --no-edit -m "chore: base ブランチの変更を取り込む" origin/${baseBranch} を実行する（detached HEAD のまま行ってよい。手順 4 で push するのは HEAD:refs/heads/${branch} 形式のためローカルブランチ ref の更新は不要）。Already up to date またはクリーンマージの場合はその状態を merge 済みとして記憶し（後述の手順 4 の分岐判定に使う）、手順 2 へ進む。コンフリクトが発生した場合はその場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したらテスト実行規約に従いビルド・lint・テストを通してからコミットする — このコミットが base 取り込みの結果であることを記憶しておく）。解消に確信が持てない・解消不能な場合は git merge --abort し、まだ修正のコミットを作っていないため作業を破棄しても損失はない。pushed: false / routingError なしで「base コンフリクト解消不能」を理由に返す。`,
       ]
     : [
         `1. 本エージェントは隔離された git worktree 内で動作する。push 前のローカル修正のため fetch は不要。`,
@@ -2347,7 +2347,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
   const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み取り、type-enum / scope-enum に適合する値のみを使う。該当する scope が無ければ scope を省略する。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
   const commitAndPushInstructions = pushAfterFix
     ? [
-        `4. create-commit スキルに従いコミットし、git push origin HEAD:refs/heads/${branch} で反映する。`,
+        `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。いずれの場合も git push origin HEAD:refs/heads/${branch} で反映する（手順 1 の base merge が Already up to date でなかった場合、この push を省略すると base 取り込み・コンフリクト解消の作業が detached HEAD のまま worktree 破棄で失われる。push が空振り（何も進んでいない）と誤認してこの push を省略しないこと）。`,
         commitlintCheckInstruction,
       ]
     : [
