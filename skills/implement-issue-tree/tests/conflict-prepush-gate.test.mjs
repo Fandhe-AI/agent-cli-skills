@@ -309,6 +309,30 @@ test('monitorPrompt: 手順 3e（チェック総数 0 件）が blocked へ進�
   assert.ok(sectionE.includes('CONFLICTING の可能性'), '手順 3e の summary 例に CONFLICTING の可能性の言及がない')
 })
 
+test('monitorPrompt: 手順 1c の UNKNOWN リトライ途中で CONFLICTING に確定した場合も needs-fix 経路へ回す', () => {
+  // Bugbot Medium 3 巡目（PR #436 discussion_r3837954196）の回帰テスト: 手順 1c の UNKNOWN
+  // リトライは state 変化しか書いておらず、リトライ途中で mergeable が CONFLICTING に確定した
+  // ケースの needs-fix 経路が欠落していた（3e には明示があり「1c と同じ扱い」の相互参照とも
+  // 食い違う）。作成直後に base が動く並列ランでコンフリクト検出が遅れたり通常フローへ落ちる
+  // 余地を塞ぎ、1c / 3e の文言整合を固定する。
+  const prompt = monitorPrompt(item, impl, [], true, true)
+  const idx1c = prompt.indexOf('1c. state が OPEN の場合のみ判定する')
+  assert.ok(idx1c >= 0, '手順 1c の記述が見つからない')
+  // 手順 1c の範囲は次の手順（2.）の直前まで。1c 内の文言だけを検査する。
+  const idx2 = prompt.indexOf('2. gh pr checks', idx1c)
+  assert.ok(idx2 > idx1c, '手順 2 の開始位置を特定できない')
+  const section1c = prompt.slice(idx1c, idx2)
+  assert.ok(
+    section1c.includes('state と mergeable の両方を確認する'),
+    '手順 1c の UNKNOWN リトライが state 変化しか確認していない（mergeable の再判定が欠落）',
+  )
+  const midConflictIdx = section1c.indexOf('リトライの途中で state が OPEN のまま mergeable が "CONFLICTING" に確定した場合')
+  assert.ok(midConflictIdx >= 0, '手順 1c にリトライ途中の CONFLICTING 確定ケースの終端動作が未規定')
+  const afterMidConflict = section1c.slice(midConflictIdx)
+  assert.ok(afterMidConflict.includes('needs-fix'), '手順 1c のリトライ途中 CONFLICTING 確定が needs-fix 経路へ回されない')
+  assert.ok(afterMidConflict.includes('reviewThreads 走査'), '手順 1c のリトライ途中 CONFLICTING 確定経路に reviewThreads 走査の指示がない')
+})
+
 test('monitorPrompt: 手順 3e は 10 分待機の後にも mergeable を再判定してから blocked へ倒す', () => {
   // Cursor Bugbot Medium（PR #436 discussion_r3837612684）の回帰テスト: 待機前の 1 回だけの
   // mergeable 確認では、待機中に兄弟 PR のマージで CONFLICTING へ変化したケースが blocked へ
