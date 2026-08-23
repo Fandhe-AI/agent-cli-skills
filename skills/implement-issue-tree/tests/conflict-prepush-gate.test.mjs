@@ -74,33 +74,57 @@ test('prCreatePrompt: push 前 base 最新化ゲートが git push より前に�
   assert.ok(pushLine && !pushLine.includes('git branch -f'), 'push 行自体が git branch -f に依存している')
 })
 
-test('prCreatePrompt: 再入時はリモート tip 起点で継続し、diverged は fail-closed で push しない', () => {
-  // Bugbot High（PR #436 discussion_r3837843354）の回帰テスト: prCreatePrompt はローカル
-  // refs/heads/<branch> を意図的に更新しないため、初回 push 成功後の再入（PR 作成失敗後の
-  // リトライ等）でローカル branch ref を起点にマージコミットを再作成すると non-fast-forward で
-  // push が拒否される。リモート branch を fetch し、fast-forward 関係（ローカル tip が
-  // リモート tip の ancestor）を確認できた場合のみリモート起点で継続、diverged は fail-closed
-  // とする契約を固定する。
+test('prCreatePrompt: 起点決定は 4 分岐（初回/remote ahead/local ahead/diverged）で local-ahead を diverged 扱いしない', () => {
+  // Bugbot High 1 巡目（PR #436 discussion_r3837843354）+ 2 巡目（discussion_r3837878036）の
+  // 回帰テスト: prCreatePrompt はローカル refs/heads/<branch> を意図的に更新しないため、
+  // 初回 push 成功後の再入でローカル起点からマージコミットを再作成すると non-fast-forward で
+  // push が拒否される（1 巡目 → remote-ahead はリモート tip 起点で継続）。一方、片方向の
+  // ancestor 判定だけだと、既存 PR 再利用 + implement/Review の新規コミットで local ahead に
+  // なった通常の回復フローまで diverged 扱いで終端し、push・PR 作成が永久に回復しない
+  // （2 巡目 → 双方向判定の 4 分岐）。
   const prompt = prCreatePrompt(item, impl, [])
   const branch = impl.branch
   assert.ok(
     prompt.includes(`git fetch origin ${branch}:refs/remotes/origin/${branch}`),
     '起点決定のためのリモート branch fetch（保存先明示 refspec）の指示がない',
   )
+  // (i) 初回: リモート branch 不在 → ローカル起点。
+  assert.ok(
+    prompt.includes(' が存在しない（fetch がその旨で失敗する）場合は初回実行なのでローカル起点'),
+    '初回実行（リモート branch なし）でローカル起点へフォールバックする指示がない',
+  )
+  // (ii) remote ahead（純粋な再入）: リモート tip 起点。同一 sha はこの分岐に含めると明記。
   assert.ok(
     prompt.includes(`git merge-base --is-ancestor refs/heads/${branch} refs/remotes/origin/${branch}`),
-    'fast-forward 関係（ローカル tip がリモート tip の ancestor）の確認指示がない',
+    'remote-ahead 判定（ローカル tip がリモート tip の ancestor）の確認指示がない',
   )
   assert.ok(
     prompt.includes(`git checkout --detach refs/remotes/origin/${branch}`),
-    'ancestor 確認済みの場合にリモート tip を detached HEAD の起点にする指示がない（ローカル起点のままだと再入時に non-fast-forward で push が拒否される）',
+    'remote-ahead でリモート tip を detached HEAD の起点にする指示がない（ローカル起点のままだと再入時に non-fast-forward で push が拒否される）',
   )
   assert.ok(
-    prompt.includes('リモートに ') && prompt.includes(' が存在しない（fetch がその旨で失敗する）場合は初回実行なのでローカル起点'),
-    '初回実行（リモート branch なし）でローカル起点へフォールバックする指示がない',
+    prompt.includes('両 tip が同一 sha の場合もこの分岐に含める'),
+    '両 tip 同一 sha をどの分岐で扱うかの明記がない',
   )
-  const divergedIdx = prompt.indexOf('ancestor でない（diverged')
-  assert.ok(divergedIdx >= 0, 'diverged 分岐の記述がない')
+  // (iii) local ahead（既存 PR 再利用 + 新規コミットの通常回復フロー）: ローカル起点で継続。
+  assert.ok(
+    prompt.includes(`git merge-base --is-ancestor refs/remotes/origin/${branch} refs/heads/${branch}`),
+    'local-ahead 判定（リモート tip がローカル tip の ancestor）の逆向き確認指示がない（片方向判定のみだと local ahead が diverged 扱いされ回復不能になる）',
+  )
+  const localAheadIdx = prompt.indexOf('local ahead')
+  assert.ok(localAheadIdx >= 0, 'local ahead 分岐の記述がない')
+  const localAheadSection = prompt.slice(localAheadIdx, localAheadIdx + 400)
+  assert.ok(
+    localAheadSection.includes('ローカル起点') && localAheadSection.includes('fast-forward になる'),
+    'local ahead をローカル起点で継続する（push は fast-forward）指示がない',
+  )
+  assert.ok(
+    localAheadSection.includes('diverged 扱いして終端してはならない'),
+    'local ahead を diverged 扱いしない旨の明記がない',
+  )
+  // (iv) 真の diverged（双方向とも ancestor 不成立）のみ fail-closed。
+  const divergedIdx = prompt.indexOf('どちらの向きの ancestor 関係も成立しない（真の diverged')
+  assert.ok(divergedIdx >= 0, '真の diverged（双方向とも不成立の場合のみ）の分岐条件の記述がない')
   const divergedSection = prompt.slice(divergedIdx, divergedIdx + 400)
   assert.ok(
     divergedSection.includes('merge も push もせず prNumber: 0'),
