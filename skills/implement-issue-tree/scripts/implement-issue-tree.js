@@ -2351,13 +2351,16 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
   const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み取り、type-enum / scope-enum に適合する値のみを使う。該当する scope が無ければ scope を省略する。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
   const commitAndPushInstructions = pushAfterFix
     ? [
-        // pushed: true は「リモート head が実際に進んだ」ことの申告であり、手順 5 (a) の
+        // pushed: true は「自分の修正がリモート head として反映済み」の申告であり、手順 5 (a) の
         // resolve 許可条件を兼ねる。git push は積むものが無くても Everything up-to-date で
-        // 成功終了するため、「push コマンドの成功」を pushed: true の根拠にすると、変更なしの
-        // 空振り push だけでレビュースレッドの resolve が解禁され required_review_thread_resolution
-        // ゲートの不当解除になる（PR #436 codex P0）。push 前後の ls-remote 比較で実 push の
-        // 有無を確認し、進んでいなければ pushed: false（resolve 禁止）へ倒す fail-closed。
-        `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。次に push 直前のリモート head を git ls-remote origin refs/heads/${branch} で取得して控える（取得に失敗しても push を中止しない — fix・base 取り込みのコミットはこの worktree の detached HEAD 上にしか存在せず、push を省略すると worktree 破棄で失われるため、push は必ず実行する。ただし前後比較が不能になるため pushed: false として返し、手順 5 の resolve は実行しない）。そのうえで git push origin HEAD:refs/heads/${branch} を実行する（手順 1 の base merge が Already up to date でなかった場合、この push を省略すると base 取り込み・コンフリクト解消の作業が detached HEAD のまま worktree 破棄で失われる。push が空振りになりそうだと予想してこの push 自体を省略しないこと — 実 push の有無は次の比較で事後判定する）。push 後にもう一度 git ls-remote origin refs/heads/${branch} を実行し、push 前に控えた sha と比較する: sha が進んだ場合のみ実 push ありとして pushed: true とする。sha が変わっていない場合（Everything up-to-date 等の空振り push。手順 1 の base merge が Already up to date で、かつ新たに積んだコミットも無いケース）は、push コマンドが成功していても pushed: false として返し、手順 5 の resolve を一切実行しない（実際の変更を伴わない push を根拠にレビュースレッドを resolve してはならない。summary に「変更なしのため push は no-op」と書く）。push 前・push 後いずれかの ls-remote に失敗して前後比較ができない場合も、push 自体は実行済みのまま pushed: false へ倒す（fail-closed。push の実行と pushed: true の判定は分離する — push は作業保全のため必ず実行し、pushed: true は前後比較で sha が実際に進んだと確認できた場合のみ）。`,
+        // 成功終了するため「push コマンドの成功」は根拠にならず（PR #436 codex P0 1 巡目）、
+        // 「push 前後で ls-remote sha が変化した」も根拠にならない — その間に別ラン・他者が
+        // 同じブランチを更新すると、自分の push が拒否され修正未反映のままリモート sha だけが
+        // 変化するため（同 P0 2 巡目）。判定は変化比較ではなく自ローカル HEAD との一致比較
+        // 2 条件（(i) 事前 sha ≠ ローカル HEAD = 積んだ新規コミットの存在、(ii) 事後 sha ==
+        // ローカル HEAD = 自己反映の直接証明）で行い、満たさなければ pushed: false（resolve
+        // 禁止）へ倒す fail-closed。
+        `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。次に push 直前のリモート head を git ls-remote origin refs/heads/${branch} で取得して控える（取得に失敗しても push を中止しない — fix・base 取り込みのコミットはこの worktree の detached HEAD 上にしか存在せず、push を省略すると worktree 破棄で失われるため、push は必ず実行する。ただし前後比較が不能になるため pushed: false として返し、手順 5 の resolve は実行しない）。そのうえで git push origin HEAD:refs/heads/${branch} を実行する（手順 1 の base merge が Already up to date でなかった場合、この push を省略すると base 取り込み・コンフリクト解消の作業が detached HEAD のまま worktree 破棄で失われる。push が空振りになりそうだと予想してこの push 自体を省略しないこと — 実 push の有無は次の比較で事後判定する）。push 後にもう一度 git ls-remote origin refs/heads/${branch} を実行し、自分のローカル HEAD（git rev-parse HEAD — この worktree で自分がコミットを積んだ detached HEAD の sha）と突き合わせて判定する。pushed: true としてよいのは次の 2 条件を両方満たす場合のみ: (i) push 前に控えた sha ≠ ローカル HEAD（自分が新規に積んだコミットが存在した — 空振り push の検出。等しい場合は Everything up-to-date 等の no-op であり、push コマンドが成功していても pushed: false として返し、手順 5 の resolve を一切実行しない。実際の変更を伴わない push を根拠にレビュースレッドを resolve してはならない。summary に「変更なしのため push は no-op」と書く）、(ii) push 後の ls-remote sha == ローカル HEAD（自分のコミット群がリモート head として反映済みであることの直接証明）。push 前後で sha が「変化した」ことを根拠にしてはならない — その間に別ラン・他者が同じブランチを更新すると、自分の git push が拒否・失敗して修正未反映でもリモート sha は変化するため、変化ベースの判定では未反映の指摘に resolve が実行され得る。(ii) が不一致の場合は並行 push 競合とみなし pushed: false として返し、手順 5 の resolve を実行しない（summary に「リモート head がローカル HEAD と不一致（並行 push 競合の可能性）」と書く。競合の解消は次ラウンドの monitor / fix に委ねる）。push 前・push 後いずれかの ls-remote に失敗して判定ができない場合も、push 自体は実行済みのまま pushed: false へ倒す（fail-closed。push の実行と pushed: true の判定は分離する — push は作業保全のため必ず実行し、pushed: true は上記 2 条件を実測で確認できた場合のみ）。`,
         commitlintCheckInstruction,
       ]
     : [
@@ -2391,7 +2394,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     ...commitAndPushInstructions,
     ...(pushAfterFix
       ? [
-          `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 でリモート head が実際に進んだ（ls-remote 比較で実 push あり = pushed: true）と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示だけでは足りない。空振り push（pushed: false）のラウンドは (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
+          `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示・前後で sha が変化したことだけでは足りない。pushed: false のラウンド — 空振り push・並行 push 競合・ls-remote 判定不能 — は (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
           `   gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`,
           '   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、mutation が失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
           '6. 手順 2 で outOfScopeComments に記録した対象外の指摘がある場合のみ、PR 本文へ記録する（該当がなければこの手順は省略してよい）。',

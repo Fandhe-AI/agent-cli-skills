@@ -127,9 +127,34 @@ test('fixPrompt(pushAfterFix: true): 空振り push は pushed: false とし res
     prompt.includes('push 後にもう一度 git ls-remote origin refs/heads/'),
     'push 後の ls-remote 再取得（前後比較）の指示がない',
   )
+  // codex P0 3 巡目（PR #436 discussion_r3837787753）の回帰確認: 「前後で sha が変化した」を
+  // 根拠にすると、並行 push 競合（自 push 拒否 + 他者更新）でも sha が変化して resolve が
+  // 解禁される。pushed: true は変化比較ではなく自ローカル HEAD との一致比較 2 条件
+  // （(i) 事前 sha ≠ ローカル HEAD = 新規コミットの存在、(ii) 事後 sha == ローカル HEAD =
+  // 自己反映の直接証明）でのみ成立する契約を固定する。
   assert.ok(
-    prompt.includes('sha が進んだ場合のみ実 push ありとして pushed: true とする'),
-    'pushed: true の条件が「リモート head が実際に進んだ場合のみ」に限定されていない',
+    prompt.includes('pushed: true としてよいのは次の 2 条件を両方満たす場合のみ'),
+    'pushed: true が 2 条件判定（新規コミット存在 + 自ローカル HEAD 一致）に限定されていない',
+  )
+  assert.ok(
+    prompt.includes('push 前に控えた sha ≠ ローカル HEAD'),
+    '条件 (i)（事前 sha ≠ ローカル HEAD = 空振り push の検出）の明記がない',
+  )
+  assert.ok(
+    prompt.includes('push 後の ls-remote sha == ローカル HEAD'),
+    '条件 (ii)（事後 sha == ローカル HEAD = 自己反映の直接証明）の明記がない',
+  )
+  assert.ok(
+    prompt.includes('push 前後で sha が「変化した」ことを根拠にしてはならない'),
+    '変化ベース判定の禁止（並行 push 競合での誤認遮断）の明記がない',
+  )
+  assert.ok(
+    prompt.includes('並行 push 競合とみなし pushed: false'),
+    '条件 (ii) 不一致（並行 push 競合）を pushed: false へ倒す指示がない',
+  )
+  assert.ok(
+    !prompt.includes('sha が進んだ場合のみ実 push ありとして pushed: true とする'),
+    '変化ベース（sha が進んだら pushed: true）の旧判定文言が残っている',
   )
   assert.ok(
     prompt.includes('push コマンドが成功していても pushed: false として返し、手順 5 の resolve を一切実行しない'),
@@ -148,13 +173,13 @@ test('fixPrompt(pushAfterFix: true): 空振り push は pushed: false とし res
     '事前 ls-remote 失敗で push をスキップする旧指示が残っている（detached HEAD 上の作業が失われる）',
   )
   assert.ok(
-    prompt.includes('push 前・push 後いずれかの ls-remote に失敗して前後比較ができない場合も、push 自体は実行済みのまま pushed: false へ倒す'),
-    '比較不能時の fail-closed（push は実行済み・pushed: false）の指示がない',
+    prompt.includes('push 前・push 後いずれかの ls-remote に失敗して判定ができない場合も、push 自体は実行済みのまま pushed: false へ倒す'),
+    '判定不能時の fail-closed（push は実行済み・pushed: false）の指示がない',
   )
-  // 手順 5 (a) 側も「push コマンド成功」ではなく「実 push あり」を resolve 許可条件にする。
+  // 手順 5 (a) 側も「push コマンド成功」「sha の変化」ではなく 2 条件判定を resolve 許可条件にする。
   assert.ok(
-    prompt.includes('ls-remote 比較で実 push あり = pushed: true）と確認できた場合のみ'),
-    '手順 5 (a) の resolve 許可条件が実 push 確認に限定されていない',
+    prompt.includes('push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ'),
+    '手順 5 (a) の resolve 許可条件が 2 条件判定（自ローカル HEAD 一致）に限定されていない',
   )
 })
 
