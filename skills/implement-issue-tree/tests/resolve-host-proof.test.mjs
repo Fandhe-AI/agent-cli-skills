@@ -281,22 +281,30 @@ test('runMergeLoop: monitor 呼び出しは resolveProof.head を prevSha とし
   )
 })
 
-test('runMergeLoop: pushed:false ラウンドの resolvedThreadIds は許可リストとの積のみを受理し、リスト外は進捗計上・成功ログから除外する', () => {
+test('runMergeLoop: fix 自己申告の resolvedThreadIds は当該ラウンドの finding.unresolvedComments との交差のみを resolve 候補とする（PR #436 Cursor Bugbot High）', () => {
   const branchStart = driverPart.indexOf('if (Array.isArray(f.resolvedThreadIds)) {')
   assert.ok(branchStart >= 0, 'runMergeLoop に resolvedThreadIds の処理分岐が見つからない')
   const branchEnd = driverPart.indexOf('f.outOfScopeComments', branchStart)
   assert.ok(branchEnd > branchStart, 'resolvedThreadIds 分岐の終端（outOfScopeComments 処理）が見つからない')
   const branchSource = driverPart.slice(branchStart, branchEnd)
   assert.ok(
-    branchSource.includes('permittedNoPushResolveIds.includes('),
-    'pushed:false の resolvedThreadIds が許可リスト（permittedNoPushResolveIds）で絞られていない',
+    branchSource.includes('finding?.unresolvedComments') && branchSource.includes('unresolvedTidSet.has('),
+    'resolve 候補が当該ラウンドの finding.unresolvedComments との交差に限定されていない（AGENTS.md L82-85 の契約違反）',
   )
   assert.ok(
     branchSource.includes('pushVerified'),
-    // pushVerified は f.pushed（自己申告）を preSha/postSha（同じ fix 応答内の push 前後 sha）で
-    // 裏取りした値（Issue #435 派生 codex P0: no-op push による pushed:true 偽装対策）。
-    // 生の f.pushed === true ではなくこちらを条件に使うことで (a)/(b) を分岐させる。
-    'push 成功ラウンド（a）と push なしラウンド（b）の受理条件が分岐していない',
+    // pushVerified（f.pushed を preSha/postSha で裏取りした値。Issue #435 派生 codex P0）は
+    // resolvedThreadsLogLine のログ引数としてのみ参照される（PR #436 Cursor Bugbot Medium 対応で、
+    // resolve 候補の生成条件からは切り離した。実際の mutation 可否は resolveVerified が単独で握る）。
+    'pushVerified への参照（ログ用途）が見つからない',
+  )
+  assert.ok(
+    !branchSource.includes('permittedNoPushResolveIds.includes('),
+    // PR #436 Cursor Bugbot Medium: pushVerified 由来の許可リストで resolve 候補を空にすると、
+    // 実際には push 済みでも自己申告の preSha/postSha 書式不備だけで resolveThreadsPrompt 自体が
+    // 呼ばれなくなり、host 独立検証（resolveVerified）の機会が失われる。候補生成の絞り込みは
+    // finding.unresolvedComments との交差のみで行う（上のアサーション）。
+    'resolve 候補の生成が pushVerified 由来の許可リスト（permittedNoPushResolveIds）で再びゲートされている',
   )
 })
 

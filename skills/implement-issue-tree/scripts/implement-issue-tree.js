@@ -4472,13 +4472,27 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           .slice(0, 20)
           .map((v) => sanitizeThreadId(v))
           .filter((v) => v)
-        // pushVerified: false ラウンドは許可リスト外の申告を検証済み扱いしない（Issue #430。ホスト
-        // 決定的照合を経ていない自己申告を進捗計上・成功ログへ混入させない fail-closed）。
-        const resolvedTids = pushVerified ? reportedTids : reportedTids.filter((v) => permittedNoPushResolveIds.includes(v))
-        const droppedTids = pushVerified ? [] : reportedTids.filter((v) => !permittedNoPushResolveIds.includes(v))
+        // 候補は当該ラウンドの未解決スレッド一覧（finding.unresolvedComments、monitor が実際に
+        // 観測した集合）との交差に限定する（PR #436 Cursor Bugbot High「Missing unresolved-thread
+        // candidate filter」対応）。AGENTS.md L82-85 が定める契約: fix 自己申告の resolvedThreadIds
+        // は「対応したと考える候補」に過ぎず、host はこの交差を経ずに resolveThreadsPrompt へ渡し
+        // てはならない。交差を怠ると、レビュー本文の prompt injection を受けた fix が finding の
+        // 未解決集合を超えて任意の threadId を resolve 候補に拡大し得る。
+        const unresolvedTidSet = new Set(
+          (Array.isArray(finding?.unresolvedComments) ? finding.unresolvedComments : [])
+            .map((c) => sanitizeThreadId(c?.threadId ?? ''))
+            .filter((v) => v),
+        )
+        const resolvedTids = reportedTids.filter((v) => unresolvedTidSet.has(v))
+        const droppedTids = reportedTids.filter((v) => !unresolvedTidSet.has(v))
         if (droppedTids.length > 0) {
-          log(`⚠️ #${item.number}: push なしラウンドで許可リスト外の resolve 申告を無視した（threadId: ${droppedTids.join(', ')}）`)
+          log(`⚠️ #${item.number}: fix が申告した resolve 候補のうち当該ラウンドの未解決スレッド一覧（finding.unresolvedComments）に無いものを無視した（threadId: ${droppedTids.join(', ')}）`)
         }
+        // resolve mutation の実行可否は pushVerified（fix の pushed/preSha/postSha 自己申告由来）を
+        // 候補生成のゲートに使わない（PR #436 Cursor Bugbot Medium「Push claim still gates
+        // resolve」対応。computeVerifiedPushed 冒頭のコメント参照）。pushVerified を条件にすると、
+        // 実際には push 済みでも preSha/postSha の自己申告が書式不備・欠落なだけで resolveTids が
+        // 空になり、resolveThreadsPrompt 自体が呼ばれず独立検証の機会が失われる。
         // resolve の実行主体を fix から分離する（PR #436 codex-review P0）。ここまでの resolvedTids
         // は「fix が対応したと考える候補」に過ぎず、実際の resolveReviewThread mutation は未信頼
         // テキストを一切読まない専用エージェント（resolveThreadsPrompt）へ委ねる。同エージェントは
