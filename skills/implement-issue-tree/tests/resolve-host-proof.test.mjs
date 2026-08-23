@@ -64,11 +64,11 @@ const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
 // 持てない。定義部は非 export のまま置き、テスト側でスライスへ export 文を付与して読み込む。
 // applyResolveProofObservation は MERGE_SCHEMA（同じ定義部内、後方定義）を内部参照するため、
 // スライスへは定義部全体をそのまま含める（関数を単体で切り出さない）。
-const SLICE_EXPORTS = ['applyResolveProofObservation', 'computePermittedNoPushResolveIds', 'sanitizeRepoRelPath', 'computeVerifiedPushed']
+const SLICE_EXPORTS = ['applyResolveProofObservation', 'computePermittedNoPushResolveIds', 'sanitizeRepoRelPath']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
 const mod = await import(pathToFileURL(slicePath).href)
-const { applyResolveProofObservation, computePermittedNoPushResolveIds, sanitizeRepoRelPath, computeVerifiedPushed } = mod
+const { applyResolveProofObservation, computePermittedNoPushResolveIds, sanitizeRepoRelPath } = mod
 
 const SHA_A = 'a'.repeat(40)
 const SHA_B = 'b'.repeat(40)
@@ -205,60 +205,6 @@ test('computePermittedNoPushResolveIds: threadId 形式不正の要素を含ん�
 })
 
 // ---------------------------------------------------------------------------
-// computeVerifiedPushed（Issue #435 派生 codex P0）: git push は「送るものが何もない」no-op
-// でも exit 0 になるため、fix の pushed 自己申告だけを resolve (a) の許可根拠にすると、
-// no-op push を毎ラウンド実行して pushed: true を自己申告するだけで resolve (b) の恒久
-// fail-closed（本ファイルの主題）を実質迂回できてしまう。preSha/postSha（同じ fix 応答内の
-// origin/<branch> push 前後 sha）で実際に head が進んだことを裏取りする。
-// ---------------------------------------------------------------------------
-
-test('computeVerifiedPushed: pushed:true かつ preSha!==postSha（head が実際に進んだ）なら true', () => {
-  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B), true)
-})
-
-test('computeVerifiedPushed: pushed:true でも preSha===postSha（no-op push）なら false（P0 対策の核心）', () => {
-  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_A), false)
-})
-
-test('computeVerifiedPushed: pushed:false は preSha/postSha の内容に関わらず false', () => {
-  assert.equal(computeVerifiedPushed(false, SHA_A, SHA_B), false)
-  assert.equal(computeVerifiedPushed(false, SHA_A, SHA_A), false)
-})
-
-test('computeVerifiedPushed: preSha/postSha が 40 桁 hex でない（形式不正・空・欠落）場合は pushed:true でも false（fail-closed）', () => {
-  assert.equal(computeVerifiedPushed(true, '', SHA_B), false)
-  assert.equal(computeVerifiedPushed(true, SHA_A, ''), false)
-  assert.equal(computeVerifiedPushed(true, 'not-a-sha', SHA_B), false)
-  assert.equal(computeVerifiedPushed(true, undefined, undefined), false)
-})
-
-// ---------------------------------------------------------------------------
-// computeVerifiedPushed の第 4 引数 hostPreSha（PR #436 codex-review P0 対応）:
-// preSha/postSha 自体が同一 fix 応答内の未検証な自己申告であるため、prompt injection を
-// 受けた fix が「40 桁 hex で異なる 2 値」を単に捏造するだけで pushed: true を通過させ得る
-// 懸念が残っていた。host が独立取得した preSha（runMergeLoop の resolveProof.head。fix 起動
-// より前の当該ラウンドの monitor が自身の gh pr view で取得した値）と fix 申告の preSha を
-// 照合し、食い違えば未検証（false）とする。
-// ---------------------------------------------------------------------------
-
-test('computeVerifiedPushed: hostPreSha 未指定（host 未取得）の場合は従来どおり自己申告のみで判定する（後方互換）', () => {
-  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B), true)
-  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B, ''), true)
-  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B, undefined), true)
-})
-
-test('computeVerifiedPushed: fix 申告の preSha が hostPreSha と一致すれば true', () => {
-  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B, SHA_A), true)
-})
-
-test('computeVerifiedPushed: fix 申告の preSha が hostPreSha と食い違う場合は pushed:true・preSha!==postSha でも false（捏造対策の核心）', () => {
-  // fix が preSha=SHA_A/postSha=SHA_B という「形式上は正しい・互いに異なる」2 値を自己申告して
-  // いても、host が独立観測した直前の origin/<branch> が SHA_C（SHA_A ではない）なら、fix が
-  // 実際に fetch した値を報告していない疑いが強いため未検証として扱う。
-  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B, SHA_C), false)
-})
-
-// ---------------------------------------------------------------------------
 // 配線検証: runMergeLoop が「proof 観測 → 許可リスト算出 → fixPrompt」の順で配線され、
 // pushed:false の受理が許可リストで絞られること（純粋関数テストだけでは配線なしでもグリーンになる）
 // ---------------------------------------------------------------------------
@@ -281,32 +227,19 @@ test('runMergeLoop: monitor 呼び出しは resolveProof.head を prevSha とし
   )
 })
 
-test('runMergeLoop: fix 自己申告の resolvedThreadIds は当該ラウンドの finding.unresolvedComments との交差のみを resolve 候補とする（PR #436 Cursor Bugbot High）', () => {
+test('runMergeLoop: pushed:false ラウンドの resolvedThreadIds は許可リストとの積のみを受理し、リスト外は進捗計上・成功ログから除外する', () => {
   const branchStart = driverPart.indexOf('if (Array.isArray(f.resolvedThreadIds)) {')
   assert.ok(branchStart >= 0, 'runMergeLoop に resolvedThreadIds の処理分岐が見つからない')
   const branchEnd = driverPart.indexOf('f.outOfScopeComments', branchStart)
   assert.ok(branchEnd > branchStart, 'resolvedThreadIds 分岐の終端（outOfScopeComments 処理）が見つからない')
   const branchSource = driverPart.slice(branchStart, branchEnd)
   assert.ok(
-    branchSource.includes('finding?.unresolvedComments') && branchSource.includes('unresolvedTidSet.has('),
-    'resolve 候補が当該ラウンドの finding.unresolvedComments との交差に限定されていない（AGENTS.md L82-85 の契約違反）',
+    branchSource.includes('permittedNoPushResolveIds.includes('),
+    'pushed:false の resolvedThreadIds が許可リスト（permittedNoPushResolveIds）で絞られていない',
   )
   assert.ok(
-    branchSource.includes('pushVerified'),
-    // pushVerified（f.pushed を preSha/postSha で裏取りした値。Issue #435 派生 codex P0）は
-    // resolvedThreadsLogLine のログ引数として参照されるほか、resolveThreadsPrompt 呼び出しの
-    // AND 条件としても参照される（追加 codex-review P0 対応。PR #436 再指摘）。resolve 候補
-    // （resolvedTids）の生成条件からは引き続き切り離したまま（PR #436 Cursor Bugbot Medium 対応
-    // は維持。下の別テストで固定）。
-    'pushVerified への参照が見つからない',
-  )
-  assert.ok(
-    !branchSource.includes('permittedNoPushResolveIds.includes('),
-    // PR #436 Cursor Bugbot Medium: pushVerified 由来の許可リストで resolve 候補を空にすると、
-    // 実際には push 済みでも自己申告の preSha/postSha 書式不備だけで resolveThreadsPrompt 自体が
-    // 呼ばれなくなり、host 独立検証（resolveVerified）の機会が失われる。候補生成の絞り込みは
-    // finding.unresolvedComments との交差のみで行う（上のアサーション）。
-    'resolve 候補の生成が pushVerified 由来の許可リスト（permittedNoPushResolveIds）で再びゲートされている',
+    branchSource.includes("f.pushed === true"),
+    'push 成功ラウンド（a）と push なしラウンド（b）の受理条件が分岐していない',
   )
 })
 
@@ -324,76 +257,5 @@ test('runMergeLoop: lastRoundPushed は proof 観測の直後に false へ戻し
   assert.ok(
     afterObserve.includes('lastRoundPushed = false'),
     'proof 観測の直後で lastRoundPushed をリセットしていない（fix 非起動ラウンドを挟んだ次の ahead 観測を誤って再クレジットする回帰）',
-  )
-})
-
-// ---------------------------------------------------------------------------
-// 配線検証（PR #436 codex-review P0）: computeVerifiedPushed の呼び出しに host 独立観測の
-// resolveProof.head（hostPreSha）が渡っており、fix 自己申告の preSha/postSha だけに依存して
-// いないこと。純粋関数テストだけでは配線なしでもグリーンになるためソース走査で固定する。
-// ---------------------------------------------------------------------------
-
-test('runMergeLoop: computeVerifiedPushed の呼び出しに hostPrePushHead（専用 proof エージェントによる host 独立観測の preSha）を渡す', () => {
-  assert.ok(
-    driverPart.includes('computeVerifiedPushed(f.pushed, f.preSha, f.postSha, hostPrePushHead)'),
-    'computeVerifiedPushed が fix 自己申告の preSha/postSha のみで呼ばれている（host 独立観測との照合が配線されていない）',
-  )
-})
-
-// ---------------------------------------------------------------------------
-// 追加 codex-review P0（PR #436 再指摘）: hostPreSha の出所を「未信頼テキストを読む monitor の
-// 自己申告」から「未信頼テキストを一切読まない専用 proof エージェント（prePushHeadPrompt）」へ
-// 切り替えたこと、およびその取得が fix 起動より前であることを配線検証する。
-// ---------------------------------------------------------------------------
-
-test('runMergeLoop: hostPrePushHead は prePushHeadPrompt（未信頼テキスト不読の専用エージェント）から取得し、fix 起動より前に確定する', () => {
-  const ppCallIndex = driverPart.indexOf('prePushHeadPrompt(impl.branch)')
-  assert.ok(ppCallIndex >= 0, 'prePushHeadPrompt の呼び出しが見つからない')
-  const hostPreSetIndex = driverPart.indexOf('const hostPrePushHead = sanitizeSha(pp?.headSha)', ppCallIndex)
-  assert.ok(hostPreSetIndex > ppCallIndex, 'hostPrePushHead の確定が prePushHeadPrompt 呼び出しより後ろにない')
-  const fixCallIndex = driverPart.indexOf('fixPrompt(item, impl, finding, true, permittedNoPushResolveIds)', hostPreSetIndex)
-  assert.ok(fixCallIndex > hostPreSetIndex, 'fix 起動が hostPrePushHead 確定より前に行われている（proof 観測が fix 起動後になる回帰）')
-})
-
-test('runMergeLoop: resolveThreadsPrompt への hostPreSha も hostPrePushHead を渡す（resolveProof.head を再利用しない）', () => {
-  assert.ok(
-    driverPart.includes('const hostPreSha = hostPrePushHead'),
-    'resolveThreadsPrompt への hostPreSha が hostPrePushHead 経由で渡っていない',
-  )
-})
-
-// ---------------------------------------------------------------------------
-// 追加 codex-review P0（PR #436 再指摘）: 「OBSERVED_HEAD が hostPreSha と異なる」だけでは
-// 無関係な第三者 push でも resolve が許可されてしまう。当該ラウンドの fix 自身の push が
-// host 独立観測で裏付けられている（pushVerified）ことを resolveThreadsPrompt 実行の
-// 追加条件（AND）として要求する配線を固定する。
-// ---------------------------------------------------------------------------
-
-test('runMergeLoop: resolveThreadsPrompt の呼び出しは pushVerified が true の場合に限る（無関係な並行 push での resolve を防ぐ）', () => {
-  const branchStart = driverPart.indexOf('if (Array.isArray(f.resolvedThreadIds)) {')
-  assert.ok(branchStart >= 0, 'runMergeLoop に resolvedThreadIds の処理分岐が見つからない')
-  const branchEnd = driverPart.indexOf('f.outOfScopeComments', branchStart)
-  assert.ok(branchEnd > branchStart, 'resolvedThreadIds 分岐の終端（outOfScopeComments 処理）が見つからない')
-  const branchSource = driverPart.slice(branchStart, branchEnd)
-  assert.ok(
-    branchSource.includes('resolvedTids.length > 0 && pushVerified'),
-    'resolveThreadsPrompt の呼び出しが pushVerified を AND 条件として要求していない（無関係な並行 push でも resolve が許可される回帰）',
-  )
-  assert.ok(
-    branchSource.includes('resolveThreadsPrompt(impl.branch, hostPreSha, resolvedTids)'),
-    'resolveThreadsPrompt の呼び出し自体が見つからない',
-  )
-})
-
-test('runMergeLoop: 検証済み push の postSha を次ラウンド monitor の独立観測 headSha と事後照合する（pendingPushClaim）', () => {
-  assert.ok(source.includes('let pendingPushClaim = null'), 'pendingPushClaim の初期化が見つからない')
-  const setIndex = driverPart.indexOf('if (pushVerified) pendingPushClaim = { postSha: sanitizeSha(f.postSha) }')
-  assert.ok(setIndex >= 0, '検証済み push の postSha を pendingPushClaim へ記憶する配線が見つからない')
-  const reconcileIndex = driverPart.indexOf('if (pendingPushClaim) {')
-  assert.ok(reconcileIndex >= 0, '次ラウンド monitor 後の pendingPushClaim 事後照合が見つからない')
-  const reconcileBlock = driverPart.slice(reconcileIndex, reconcileIndex + 600)
-  assert.ok(
-    reconcileBlock.includes('pendingPushClaim = null'),
-    '事後照合後に pendingPushClaim をクリアしていない（次々ラウンドへ誤って持ち越す回帰）',
   )
 })

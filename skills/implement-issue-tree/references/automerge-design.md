@@ -25,7 +25,7 @@ opt-in ランのクライアント側マージは、PR #182 / PR #222 codex P0�
 
 1. **monitor 出力のマージ経路からの完全分離**（PR #222 codex P0 対応）: monitor が返す `ready` / `headSha` はマージ経路の入力に一切使われない。`ready` は merge-exec をいつ起動するかというタイミングにのみ影響し（虚偽 `ready` の効果は merge-exec の空振り 1 回に限られる）、`headSha` は診断用の記録にすぎない。merge-exec のプロンプトに渡るのはホスト導出の boolean（allowMerge）と args 由来の検証済み値のみである。
 2. **merge-exec の自己取得再検証**: マージ判定に使う HEAD sha・チェック状態別件数・未解決スレッド件数・外部チェック起動は、未信頼テキスト（レビュー本文・Issue 本文・チェック名）を一切読まない merge-exec が `gh` の enum / 件数出力から自ら取得する。マージは自己取得 sha による `--match-head-commit` 付き squash merge のみ（照合とマージの間の push 競合や誤った sha の代入はサーバー側で拒否される）。
-3. **G0 ゲート = サーバー側強制の実測**: merge-exec はマージ実行前に、ベースブランチのサーバー側強制を件数・真偽値のみの API 出力で実測確認し、確認できなければ `server-enforcement-missing` で辞退して `blocked` 終端する（fail-closed）。確認対象は (a) required status checks が 1 件以上、(b) その bypass 不能性 —「全適用 ruleset の `bypass_actors` が空（org 継承 ruleset はこの認証で bypass 検証を保証できないため辞退し、サーバー側 workflow へ委譲）」（存在確認だけでは bypass actor に登録された主体（マージ実行主体を含み得る）が保護を迂回できる）— classic branch protection のみのリポジトリは**クライアント側自動マージ非対応**として `classic-unsupported` で辞退する（classic の bypass 不能性 — `enforce_admins`・bypass allowance・マージ実行主体のロール・カスタムリポジトリロールの「Bypass branch protections」権限 — は write 権限の実行トークンから決定的に証明できず、検証に必要な `branches/<branch>/protection` 系エンドポイントの読取自体が admin（Administration read）権限を要求する。admin 主体を許すと bypass 不能を証明できないため、classic 経路に検証可能な通過条件は存在しない。ruleset ベースの branch protection（`bypass_actors` 空 + context 束縛が read 権限で検証可能）への移行、またはサーバー側 workflow への委譲で対応する — 下流 sync PR #2007 codex P0 / PR #236 Bugbot High 対応）—、(c) **レビュースレッド解消の必須化**（`required_review_thread_resolution`）、(d) **外部チェック App を確定した構成では、args.externalChecks で宣言した信頼済み check context と App ID の組（`context` + `integration_id`）の完全一致で束縛された required status check の存在**（context 名単独は同名偽装が可能で認可根拠にならず、App ID 単独は同一 App が生成する対象レビュー用チェックとは別の無関係な context の required 化でも通過してしまうため、組の完全一致のみを合格とする — 下流 sync PR codex P0 変種 1 対応。サーバー側 workflow の G6 と同型）、(e) — **欠番。`strict_required_status_checks_policy` は G0 の確認対象に含めない**（後述の「strict を G0 の要件にしない理由」節。strict は鮮度制御であって bypass 不能性の制御ではなく、並列ランを構造的に止めるため要件から外した）、(f) **クライアント側（手順 3）で合格判定の対象になる全チェック context の required 化**（HEAD sha 上の check-run / commit status のうち required status checks に含まれない context の件数を jq の集合差で照合し、1 件でもあれば辞退する。context 文字列自体はコンテキストへ入れず件数のみを読む。required でない client-only チェックは失敗していてもサーバー側のマージ条件にならず、共有 `gh` 認証を持つ別エージェントの直接マージで迂回できるため — 下流 sync PR codex P0 変種 2 対応）、(g) **required status checks 全エントリの発行元束縛**（ruleset 宣言の `integration_id` が数値であり、HEAD sha 上に `integration_id` と一致する App 発行（`.app.id`）の check-run が required context ごとに存在することを jq の件数照合で確認する。`integration_id` が null・欠落の required check は任意の発行元で条件を満たせるため、共有 `gh` 認証を持つ別エージェントが required context と同名の成功 commit status を HEAD に作成すると required condition 自体を偽装して直接マージできる — fandhe-backend sync PR #627 codex P0 対応。commit status は発行元 App 束縛を持たないため合格根拠にせず、束縛を証明できなければ `issuer-unbound` で辞退する。復旧は required checks を GitHub App 発行の check-run に統一し ruleset へ `integration_id` を設定する）。(c)(d)(f)(g) により、クライアント側でゲートする条件（未解決スレッド 0 件・外部チェック合格・CI 全 green の判定対象全件）はサーバー側でも強制される。**マージ可否の実強制は GitHub の branch protection であり**、この実行基盤はエージェント単位の認証分離を提供しない（プロンプト指示は権限制御にならない）ため、未信頼テキストを読む monitor を含む**どのエージェントが共有 `gh` 認証で直接 `gh pr merge` を試みても、G0 が確認した同条件をサーバーが強制して拒否する** — 共有認証は追加のマージ能力を生まない（PR #222 codex P0 第 4 ラウンド対応）。サーバー側で強制されない残余操作のうちレビュースレッドの resolve は、(a) Merge ループの fix エージェント（push する版）が修正 push 成功後に自分が修正対応したと考える候補（monitor の構造化出力由来・host 側 sanitizeThreadId 検証済みの threadId に限る）を報告し、(b) push なしラウンドはホストが決定的に算出した許可リストのみを候補とし、実際の `resolveReviewThread` mutation は fix ではなく host が別途起動する専用エージェント（`resolveThreadsPrompt`。未信頼テキストを一切読まず、branch・host 保持の push 前 HEAD 観測値・候補 threadId のみを受け取り、自ら `git ls-remote` で取得する現在の HEAD と比較して head が実際に進んだことを独立確認できた場合に限り実行する）が解決する形で自動化されている（Issue #119 の全経路禁止からの転換。実行主体の fix からの分離は 2026-08-23・#436 codex-review P0 対応。fix が自分でスレッド一覧を再取得して resolve 対象を広げることは禁止）。(b) の許可算出の詳細は本ファイル「resolve 前提のホスト側決定的照合」節（Issue #430）を参照。monitor / merge-exec / merge-verify / Review ループの fix は resolve 候補の報告・実行のいずれも行わず、対象外（out-of-scope）と判断されたスレッドは resolve されないため、未解決のまま残る限り (c) の `required_review_thread_resolution` により自動マージはサーバー側でブロックされ、人間の resolve 待ちになる。
+3. **G0 ゲート = サーバー側強制の実測**: merge-exec はマージ実行前に、ベースブランチのサーバー側強制を件数・真偽値のみの API 出力で実測確認し、確認できなければ `server-enforcement-missing` で辞退して `blocked` 終端する（fail-closed）。確認対象は (a) required status checks が 1 件以上、(b) その bypass 不能性 —「全適用 ruleset の `bypass_actors` が空（org 継承 ruleset はこの認証で bypass 検証を保証できないため辞退し、サーバー側 workflow へ委譲）」（存在確認だけでは bypass actor に登録された主体（マージ実行主体を含み得る）が保護を迂回できる）— classic branch protection のみのリポジトリは**クライアント側自動マージ非対応**として `classic-unsupported` で辞退する（classic の bypass 不能性 — `enforce_admins`・bypass allowance・マージ実行主体のロール・カスタムリポジトリロールの「Bypass branch protections」権限 — は write 権限の実行トークンから決定的に証明できず、検証に必要な `branches/<branch>/protection` 系エンドポイントの読取自体が admin（Administration read）権限を要求する。admin 主体を許すと bypass 不能を証明できないため、classic 経路に検証可能な通過条件は存在しない。ruleset ベースの branch protection（`bypass_actors` 空 + context 束縛が read 権限で検証可能）への移行、またはサーバー側 workflow への委譲で対応する — 下流 sync PR #2007 codex P0 / PR #236 Bugbot High 対応）—、(c) **レビュースレッド解消の必須化**（`required_review_thread_resolution`）、(d) **外部チェック App を確定した構成では、args.externalChecks で宣言した信頼済み check context と App ID の組（`context` + `integration_id`）の完全一致で束縛された required status check の存在**（context 名単独は同名偽装が可能で認可根拠にならず、App ID 単独は同一 App が生成する対象レビュー用チェックとは別の無関係な context の required 化でも通過してしまうため、組の完全一致のみを合格とする — 下流 sync PR codex P0 変種 1 対応。サーバー側 workflow の G6 と同型）、(e) — **欠番。`strict_required_status_checks_policy` は G0 の確認対象に含めない**（後述の「strict を G0 の要件にしない理由」節。strict は鮮度制御であって bypass 不能性の制御ではなく、並列ランを構造的に止めるため要件から外した）、(f) **クライアント側（手順 3）で合格判定の対象になる全チェック context の required 化**（HEAD sha 上の check-run / commit status のうち required status checks に含まれない context の件数を jq の集合差で照合し、1 件でもあれば辞退する。context 文字列自体はコンテキストへ入れず件数のみを読む。required でない client-only チェックは失敗していてもサーバー側のマージ条件にならず、共有 `gh` 認証を持つ別エージェントの直接マージで迂回できるため — 下流 sync PR codex P0 変種 2 対応）、(g) **required status checks 全エントリの発行元束縛**（ruleset 宣言の `integration_id` が数値であり、HEAD sha 上に `integration_id` と一致する App 発行（`.app.id`）の check-run が required context ごとに存在することを jq の件数照合で確認する。`integration_id` が null・欠落の required check は任意の発行元で条件を満たせるため、共有 `gh` 認証を持つ別エージェントが required context と同名の成功 commit status を HEAD に作成すると required condition 自体を偽装して直接マージできる — fandhe-backend sync PR #627 codex P0 対応。commit status は発行元 App 束縛を持たないため合格根拠にせず、束縛を証明できなければ `issuer-unbound` で辞退する。復旧は required checks を GitHub App 発行の check-run に統一し ruleset へ `integration_id` を設定する）。(c)(d)(f)(g) により、クライアント側でゲートする条件（未解決スレッド 0 件・外部チェック合格・CI 全 green の判定対象全件）はサーバー側でも強制される。**マージ可否の実強制は GitHub の branch protection であり**、この実行基盤はエージェント単位の認証分離を提供しない（プロンプト指示は権限制御にならない）ため、未信頼テキストを読む monitor を含む**どのエージェントが共有 `gh` 認証で直接 `gh pr merge` を試みても、G0 が確認した同条件をサーバーが強制して拒否する** — 共有認証は追加のマージ能力を生まない（PR #222 codex P0 第 4 ラウンド対応）。サーバー側で強制されない残余操作のうちレビュースレッドの resolve は、Merge ループの fix エージェント（push する版）だけが (a) 修正 push 成功後に自分が修正対応したスレッド（monitor の構造化出力由来・host 側 sanitizeThreadId 検証済みの threadId に限る）、(b) push なしラウンドはホストが決定的に算出した許可リストのみを `resolveReviewThread` mutation で解決する形で自動化されている（Issue #119 の全経路禁止からの転換。fix が自分でスレッド一覧を再取得して resolve 対象を広げることは禁止）。(b) の許可算出の詳細は本ファイル「resolve 前提のホスト側決定的照合」節（Issue #430）を参照。monitor / merge-exec / merge-verify / Review ループの fix は resolve を実行せず、対象外（out-of-scope）と判断されたスレッドは resolve されないため、未解決のまま残る限り (c) の `required_review_thread_resolution` により自動マージはサーバー側でブロックされ、人間の resolve 待ちになる。
 
 さらに merge-verify（merge-exec と別コンテキストの読み取り専用エージェント）が `state=MERGED` と HEAD sha（merge-exec の申告値との完全一致）を独立確認し、裏付けられない merged 申告はホストが受理しない。
 
@@ -115,51 +115,6 @@ enum / `sanitizeRepoRelPath` はいずれも「値の形式」しか検証せず
 ため実質的に不使用となる。未信頼テキストを一切読まない専用の proof エージェント
 （merge-verify と同型の新設）が本来の強い設計だが、`implement-issue-tree.js` のバイト
 予算制約により見送りが継続しており、follow-up 課題として残る。
-
-**(a) 経路の no-op push 対策（2026-08-23・#435 派生 codex-review P0 対応）**: (b) を恒久的に
-空にしても、(a)（当該ラウンドの push が成功した場合の自己修正スレッド resolve）の「push が
-成功した」を `git push` コマンドの exit code のみで判定すると同じ穴が (a) 経由で開く。
-`git push` は送るものが何もない no-op（前ラウンドで既に同内容が push 済みで当該ラウンドは
-修正コミットも base 取り込みコミットも無い）でも `Everything up-to-date` で exit 0 になる
-ため、fix がそれを根拠に `pushed: true` を自己申告すれば、実際には何も進んでいなくても毎
-ラウンド (a) の resolve 許可条件を満たせてしまう。これは (b) を空にした fail-closed の
-意図（push なしラウンドでは resolve 対象を広げない）を no-op push という形式だけの「push」
-で迂回できることを意味する。対策として、fix は push 前後の `origin/<branch>` sha を
-`preSha`（手順 1 の fetch 直後に固定）／`postSha`（手順 4 の push 直後に取得）として返し、
-host の `computeVerifiedPushed(pushed, preSha, postSha)` が両者とも `sanitizeSha` 通過
-（40 桁 hex）かつ不一致（= head が実際に進んだ）の場合に限り「検証済み push」（`pushVerified`）
-として扱う。`pushed: true` の自己申告があっても `preSha === postSha`（no-op push）なら host は
-push なしラウンドとして扱い（`lastRoundPushed`・`noPushRounds`・`resolvedThreadIds` の受理・
-ログ記録のいずれも `pushVerified` を経由する）、(b) が恒久的に空である以上そのラウンドでは
-resolve が一切許可されない。fixPrompt の手順 5 も「push 成功」を `pushed: true` 単独ではなく
-`preSha !== postSha` を伴う場合に限定するよう明記している。
-
-**preSha/postSha 自体の信頼境界（2026-08-23・#436 codex-review P0 対応。二段階で対応）**:
-
-第一段階（PR #436 初回対応。現在は resolve 許可根拠としては使わない）: `preSha`/`postSha` が
-同一 fix 応答内の未検証な自己申告であるため、prompt injection を受けた fix が「40 桁 hex で
-異なる 2 値」を単に捏造するだけで `pushed: true` を通過させ得る懸念があった。
-`computeVerifiedPushed(pushed, preSha, postSha, hostPreSha)` は第 4 引数に host が独立取得した
-`resolveProof.head`（当該ラウンドの monitor が fix 起動より前に自身の `gh pr view` で取得した
-値。未信頼テキストを読む前の観測）を受け取り、fix 申告の preSha がこれと一致しない場合は
-`pushed: true` でも未検証扱いにする（host が hostPreSha を取得できていないラウンドは照合不能の
-ため自己申告のみで判定する既知の fail-open な残存経路）。postSha は host が push 直後の値を
-独立取得する手段を持たない（Workflow ランタイムの制約は (b) と同一）ため引き続き自己申告に
-依存する構造上、次ラウンドの monitor が独立観測した headSha と `pendingPushClaim` で事後照合
-しても mutation 実行後の食い違い検知にしかならず、実行そのものは止められなかった。
-
-第二段階（PR #436 同一ラウンド内での codex-review P0 再指摘への対応。**現在の設計**）: 上記の
-限界は「mutation の実行主体が fix 自身である」という構造そのものに起因すると判断し、実行主体
-を fix から `resolveThreadsPrompt` 専用エージェントへ分離した。このエージェントは
-`hostPreSha`（`resolveProof.head`）と候補 threadId のみを受け取り、fix の `preSha`/`postSha`
-自己申告を一切参照せず、自ら `git ls-remote origin refs/heads/<branch>` で取得した現在の
-HEAD（`observedHead`）と `hostPreSha` を比較する。両者が異なる場合に限り mutation を実行し、
-`observedHead` を `resolvedThreadIds` とともに host へ返す。host（`runMergeLoop`）はこの
-`observedHead` を resolve の許可根拠（`resolveVerified`）として使う。`computeVerifiedPushed` の
-結果（`pushVerified`）は resolve 実行の許可根拠から外れ、noPushRounds・lastRoundPushed・
-`pendingPushClaim` 事後照合等の host 側ブックキーピング（誤ってもマージ判定を止めるだけで
-mutation は実行されない領域）専用となった。`pendingPushClaim` の事後照合は「fix 自己申告の
-信頼性そのものへの警告シグナル」として引き続き有効だが、resolve 実行可否の決定要因ではない。
 
 **旧残存リスク（(b) 恒久無効化により現在は非該当。設計判断の記録として残す）**:
 
