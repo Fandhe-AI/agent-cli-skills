@@ -137,7 +137,31 @@ test('monitorPrompt: 手順 3e（チェック総数 0 件）が blocked へ進�
   const prompt = monitorPrompt(item, impl, [], true, true)
   const idxE = prompt.indexOf('チェック総数が 0 件の場合は green とみなさず')
   assert.ok(idxE >= 0, '手順 3e の記述が見つからない')
-  const sectionE = prompt.slice(idxE, idxE + 1200)
+  const sectionE = prompt.slice(idxE, idxE + 2400)
   assert.ok(sectionE.includes('mergeable'), '手順 3e に mergeable 再確認の指示がない')
   assert.ok(sectionE.includes('CONFLICTING の可能性'), '手順 3e の summary 例に CONFLICTING の可能性の言及がない')
+})
+
+test('monitorPrompt: 手順 3e は 10 分待機の後にも mergeable を再判定してから blocked へ倒す', () => {
+  // Cursor Bugbot Medium（PR #436 discussion_r3837612684）の回帰テスト: 待機前の 1 回だけの
+  // mergeable 確認では、待機中に兄弟 PR のマージで CONFLICTING へ変化したケースが blocked へ
+  // 落ちて Issue #435 の needs-fix 経路に乗らない。待機後の再判定指示が blocked 結論より前に
+  // 現れることを位置関係で固定する。
+  const prompt = monitorPrompt(item, impl, [], true, true)
+  const idxE = prompt.indexOf('チェック総数が 0 件の場合は green とみなさず')
+  assert.ok(idxE >= 0, '手順 3e の記述が見つからない')
+  const sectionE = prompt.slice(idxE, idxE + 2400)
+  const waitIdx = sectionE.indexOf('最大 10 分待って再確認する')
+  const rematchIdx = sectionE.indexOf('もう一度実行して mergeable を再判定する')
+  const blockedIdx = sectionE.indexOf('state: blocked / blockedReason: "quality"')
+  assert.ok(waitIdx >= 0, '手順 3e に最大 10 分待機の指示がない')
+  assert.ok(rematchIdx >= 0, '待機後に mergeable を再判定する指示がない（待機前の判定だけでは待機中の CONFLICTING 変化を取りこぼす）')
+  assert.ok(blockedIdx >= 0, '手順 3e に blocked 終端の指示がない')
+  assert.ok(waitIdx < rematchIdx, 'mergeable 再判定が待機指示より前にしか現れない（待機後の再判定になっていない）')
+  assert.ok(rematchIdx < blockedIdx, 'mergeable 再判定が blocked 結論より後に現れている（blocked へ倒す前に再判定する順序になっていない）')
+  assert.ok(sectionE.includes('待機前の判定結果を流用しない'), '待機前の判定結果を流用しない旨の指示がない')
+  // UNKNOWN の扱いは手順 1c と同じ上限（30 秒 x 最大 3 回）に揃える。
+  const unknownIdx = sectionE.indexOf('手順 1c と同じ扱いで 30 秒程度あけて最大 3 回再取得')
+  assert.ok(unknownIdx >= 0, '待機後再判定の UNKNOWN の扱いが手順 1c と揃っていない')
+  assert.ok(unknownIdx > rematchIdx && unknownIdx < blockedIdx, 'UNKNOWN の扱いが再判定〜blocked の間に現れない')
 })
