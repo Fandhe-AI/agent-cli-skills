@@ -2351,7 +2351,13 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
   const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み取り、type-enum / scope-enum に適合する値のみを使う。該当する scope が無ければ scope を省略する。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
   const commitAndPushInstructions = pushAfterFix
     ? [
-        `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。いずれの場合も git push origin HEAD:refs/heads/${branch} で反映する（手順 1 の base merge が Already up to date でなかった場合、この push を省略すると base 取り込み・コンフリクト解消の作業が detached HEAD のまま worktree 破棄で失われる。push が空振り（何も進んでいない）と誤認してこの push を省略しないこと）。`,
+        // pushed: true は「リモート head が実際に進んだ」ことの申告であり、手順 5 (a) の
+        // resolve 許可条件を兼ねる。git push は積むものが無くても Everything up-to-date で
+        // 成功終了するため、「push コマンドの成功」を pushed: true の根拠にすると、変更なしの
+        // 空振り push だけでレビュースレッドの resolve が解禁され required_review_thread_resolution
+        // ゲートの不当解除になる（PR #436 codex P0）。push 前後の ls-remote 比較で実 push の
+        // 有無を確認し、進んでいなければ pushed: false（resolve 禁止）へ倒す fail-closed。
+        `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。次に push 直前のリモート head を git ls-remote origin refs/heads/${branch} で取得して控える（取得失敗時は push せず pushed: false と理由を返す）。そのうえで git push origin HEAD:refs/heads/${branch} を実行する（手順 1 の base merge が Already up to date でなかった場合、この push を省略すると base 取り込み・コンフリクト解消の作業が detached HEAD のまま worktree 破棄で失われる。push が空振りになりそうだと予想してこの push 自体を省略しないこと — 実 push の有無は次の比較で事後判定する）。push 後にもう一度 git ls-remote origin refs/heads/${branch} を実行し、push 前に控えた sha と比較する: sha が進んだ場合のみ実 push ありとして pushed: true とする。sha が変わっていない場合（Everything up-to-date 等の空振り push。手順 1 の base merge が Already up to date で、かつ新たに積んだコミットも無いケース）は、push コマンドが成功していても pushed: false として返し、手順 5 の resolve を一切実行しない（実際の変更を伴わない push を根拠にレビュースレッドを resolve してはならない。summary に「変更なしのため push は no-op」と書く）。ls-remote の再取得に失敗して比較できない場合も pushed: false へ倒す（fail-closed）。`,
         commitlintCheckInstruction,
       ]
     : [
@@ -2385,7 +2391,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     ...commitAndPushInstructions,
     ...(pushAfterFix
       ? [
-          `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の push が成功した場合は「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
+          `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 でリモート head が実際に進んだ（ls-remote 比較で実 push あり = pushed: true）と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示だけでは足りない。空振り push（pushed: false）のラウンドは (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
           `   gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`,
           '   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、mutation が失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
           '6. 手順 2 で outOfScopeComments に記録した対象外の指摘がある場合のみ、PR 本文へ記録する（該当がなければこの手順は省略してよい）。',

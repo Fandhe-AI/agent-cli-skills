@@ -109,6 +109,43 @@ test('fixPrompt(pushAfterFix: true): base merge のみで解消した場合も p
   )
 })
 
+test('fixPrompt(pushAfterFix: true): 空振り push は pushed: false とし resolve を禁止する（ls-remote 前後比較）', () => {
+  // codex P0（PR #436 discussion_r3837626582）の回帰テスト: git push は積むものが無くても
+  // Everything up-to-date で成功終了するため、「push コマンドの成功」を pushed: true の根拠に
+  // すると、変更なしの空振り push だけで手順 5 (a) の resolve が解禁され
+  // required_review_thread_resolution ゲートの不当解除になる。push 前後の ls-remote 比較で
+  // 実 push を確認し、進んでいなければ pushed: false（resolve 禁止）へ倒す契約を固定する。
+  mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
+  const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
+  const prompt = fixPrompt(item, impl, finding, true)
+  const preLsRemoteIdx = prompt.indexOf(`push 直前のリモート head を git ls-remote origin refs/heads/${impl.branch} で取得して控える`)
+  const pushIdx = prompt.indexOf('git push origin HEAD:refs/heads/')
+  assert.ok(preLsRemoteIdx >= 0, 'push 前に ls-remote でリモート head を控える指示がない')
+  assert.ok(pushIdx >= 0, 'push 行がない')
+  assert.ok(preLsRemoteIdx < pushIdx, 'ls-remote の事前取得が push より後に現れている')
+  assert.ok(
+    prompt.includes('push 後にもう一度 git ls-remote origin refs/heads/'),
+    'push 後の ls-remote 再取得（前後比較）の指示がない',
+  )
+  assert.ok(
+    prompt.includes('sha が進んだ場合のみ実 push ありとして pushed: true とする'),
+    'pushed: true の条件が「リモート head が実際に進んだ場合のみ」に限定されていない',
+  )
+  assert.ok(
+    prompt.includes('push コマンドが成功していても pushed: false として返し、手順 5 の resolve を一切実行しない'),
+    '空振り push（Everything up-to-date）を pushed: false・resolve 禁止へ倒す指示がない',
+  )
+  assert.ok(
+    prompt.includes('ls-remote の再取得に失敗して比較できない場合も pushed: false へ倒す'),
+    '比較不能時の fail-closed（pushed: false）の指示がない',
+  )
+  // 手順 5 (a) 側も「push コマンド成功」ではなく「実 push あり」を resolve 許可条件にする。
+  assert.ok(
+    prompt.includes('ls-remote 比較で実 push あり = pushed: true）と確認できた場合のみ'),
+    '手順 5 (a) の resolve 許可条件が実 push 確認に限定されていない',
+  )
+})
+
 test('fixPrompt(pushAfterFix: false): push 行も必須 base merge ゲートの文言も含まない（既存契約の維持）', () => {
   mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
   const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
