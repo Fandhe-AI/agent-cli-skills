@@ -74,6 +74,44 @@ test('prCreatePrompt: push 前 base 最新化ゲートが git push より前に�
   assert.ok(pushLine && !pushLine.includes('git branch -f'), 'push 行自体が git branch -f に依存している')
 })
 
+test('prCreatePrompt: 再入時はリモート tip 起点で継続し、diverged は fail-closed で push しない', () => {
+  // Bugbot High（PR #436 discussion_r3837843354）の回帰テスト: prCreatePrompt はローカル
+  // refs/heads/<branch> を意図的に更新しないため、初回 push 成功後の再入（PR 作成失敗後の
+  // リトライ等）でローカル branch ref を起点にマージコミットを再作成すると non-fast-forward で
+  // push が拒否される。リモート branch を fetch し、fast-forward 関係（ローカル tip が
+  // リモート tip の ancestor）を確認できた場合のみリモート起点で継続、diverged は fail-closed
+  // とする契約を固定する。
+  const prompt = prCreatePrompt(item, impl, [])
+  const branch = impl.branch
+  assert.ok(
+    prompt.includes(`git fetch origin ${branch}:refs/remotes/origin/${branch}`),
+    '起点決定のためのリモート branch fetch（保存先明示 refspec）の指示がない',
+  )
+  assert.ok(
+    prompt.includes(`git merge-base --is-ancestor refs/heads/${branch} refs/remotes/origin/${branch}`),
+    'fast-forward 関係（ローカル tip がリモート tip の ancestor）の確認指示がない',
+  )
+  assert.ok(
+    prompt.includes(`git checkout --detach refs/remotes/origin/${branch}`),
+    'ancestor 確認済みの場合にリモート tip を detached HEAD の起点にする指示がない（ローカル起点のままだと再入時に non-fast-forward で push が拒否される）',
+  )
+  assert.ok(
+    prompt.includes('リモートに ') && prompt.includes(' が存在しない（fetch がその旨で失敗する）場合は初回実行なのでローカル起点'),
+    '初回実行（リモート branch なし）でローカル起点へフォールバックする指示がない',
+  )
+  const divergedIdx = prompt.indexOf('ancestor でない（diverged')
+  assert.ok(divergedIdx >= 0, 'diverged 分岐の記述がない')
+  const divergedSection = prompt.slice(divergedIdx, divergedIdx + 400)
+  assert.ok(
+    divergedSection.includes('merge も push もせず prNumber: 0'),
+    'diverged 時に push せず prNumber: 0 で返す fail-closed の指示がない',
+  )
+  assert.ok(
+    divergedSection.includes('第三者の変更を取り込んではならない'),
+    'リモート sha を無条件に信頼しない（第三者 push 非取り込み）根拠の明記がない',
+  )
+})
+
 test('fixPrompt(pushAfterFix: true): push 行の前に必須 base merge 指示があり、コミット前に位置する', () => {
   mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
   const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
