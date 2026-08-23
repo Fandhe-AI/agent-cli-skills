@@ -116,6 +116,24 @@ enum / `sanitizeRepoRelPath` はいずれも「値の形式」しか検証せず
 （merge-verify と同型の新設）が本来の強い設計だが、`implement-issue-tree.js` のバイト
 予算制約により見送りが継続しており、follow-up 課題として残る。
 
+**(a) 経路の no-op push 対策（2026-08-23・#435 派生 codex-review P0 対応）**: (b) を恒久的に
+空にしても、(a)（当該ラウンドの push が成功した場合の自己修正スレッド resolve）の「push が
+成功した」を `git push` コマンドの exit code のみで判定すると同じ穴が (a) 経由で開く。
+`git push` は送るものが何もない no-op（前ラウンドで既に同内容が push 済みで当該ラウンドは
+修正コミットも base 取り込みコミットも無い）でも `Everything up-to-date` で exit 0 になる
+ため、fix がそれを根拠に `pushed: true` を自己申告すれば、実際には何も進んでいなくても毎
+ラウンド (a) の resolve 許可条件を満たせてしまう。これは (b) を空にした fail-closed の
+意図（push なしラウンドでは resolve 対象を広げない）を no-op push という形式だけの「push」
+で迂回できることを意味する。対策として、fix は push 前後の `origin/<branch>` sha を
+`preSha`（手順 1 の fetch 直後に固定）／`postSha`（手順 4 の push 直後に取得）として返し、
+host の `computeVerifiedPushed(pushed, preSha, postSha)` が両者とも `sanitizeSha` 通過
+（40 桁 hex）かつ不一致（= head が実際に進んだ）の場合に限り「検証済み push」（`pushVerified`）
+として扱う。`pushed: true` の自己申告があっても `preSha === postSha`（no-op push）なら host は
+push なしラウンドとして扱い（`lastRoundPushed`・`noPushRounds`・`resolvedThreadIds` の受理・
+ログ記録のいずれも `pushVerified` を経由する）、(b) が恒久的に空である以上そのラウンドでは
+resolve が一切許可されない。fixPrompt の手順 5 も「push 成功」を `pushed: true` 単独ではなく
+`preSha !== postSha` を伴う場合に限定するよう明記している。
+
 **旧残存リスク（(b) 恒久無効化により現在は非該当。設計判断の記録として残す）**:
 
 - path 一致は「そのファイルを変更した push があった」ことの上界であり「その変更が当該

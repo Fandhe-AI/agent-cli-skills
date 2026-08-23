@@ -64,11 +64,11 @@ const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
 // 持てない。定義部は非 export のまま置き、テスト側でスライスへ export 文を付与して読み込む。
 // applyResolveProofObservation は MERGE_SCHEMA（同じ定義部内、後方定義）を内部参照するため、
 // スライスへは定義部全体をそのまま含める（関数を単体で切り出さない）。
-const SLICE_EXPORTS = ['applyResolveProofObservation', 'computePermittedNoPushResolveIds', 'sanitizeRepoRelPath']
+const SLICE_EXPORTS = ['applyResolveProofObservation', 'computePermittedNoPushResolveIds', 'sanitizeRepoRelPath', 'computeVerifiedPushed']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
 const mod = await import(pathToFileURL(slicePath).href)
-const { applyResolveProofObservation, computePermittedNoPushResolveIds, sanitizeRepoRelPath } = mod
+const { applyResolveProofObservation, computePermittedNoPushResolveIds, sanitizeRepoRelPath, computeVerifiedPushed } = mod
 
 const SHA_A = 'a'.repeat(40)
 const SHA_B = 'b'.repeat(40)
@@ -205,6 +205,34 @@ test('computePermittedNoPushResolveIds: threadId 形式不正の要素を含ん�
 })
 
 // ---------------------------------------------------------------------------
+// computeVerifiedPushed（Issue #435 派生 codex P0）: git push は「送るものが何もない」no-op
+// でも exit 0 になるため、fix の pushed 自己申告だけを resolve (a) の許可根拠にすると、
+// no-op push を毎ラウンド実行して pushed: true を自己申告するだけで resolve (b) の恒久
+// fail-closed（本ファイルの主題）を実質迂回できてしまう。preSha/postSha（同じ fix 応答内の
+// origin/<branch> push 前後 sha）で実際に head が進んだことを裏取りする。
+// ---------------------------------------------------------------------------
+
+test('computeVerifiedPushed: pushed:true かつ preSha!==postSha（head が実際に進んだ）なら true', () => {
+  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_B), true)
+})
+
+test('computeVerifiedPushed: pushed:true でも preSha===postSha（no-op push）なら false（P0 対策の核心）', () => {
+  assert.equal(computeVerifiedPushed(true, SHA_A, SHA_A), false)
+})
+
+test('computeVerifiedPushed: pushed:false は preSha/postSha の内容に関わらず false', () => {
+  assert.equal(computeVerifiedPushed(false, SHA_A, SHA_B), false)
+  assert.equal(computeVerifiedPushed(false, SHA_A, SHA_A), false)
+})
+
+test('computeVerifiedPushed: preSha/postSha が 40 桁 hex でない（形式不正・空・欠落）場合は pushed:true でも false（fail-closed）', () => {
+  assert.equal(computeVerifiedPushed(true, '', SHA_B), false)
+  assert.equal(computeVerifiedPushed(true, SHA_A, ''), false)
+  assert.equal(computeVerifiedPushed(true, 'not-a-sha', SHA_B), false)
+  assert.equal(computeVerifiedPushed(true, undefined, undefined), false)
+})
+
+// ---------------------------------------------------------------------------
 // 配線検証: runMergeLoop が「proof 観測 → 許可リスト算出 → fixPrompt」の順で配線され、
 // pushed:false の受理が許可リストで絞られること（純粋関数テストだけでは配線なしでもグリーンになる）
 // ---------------------------------------------------------------------------
@@ -238,7 +266,10 @@ test('runMergeLoop: pushed:false ラウンドの resolvedThreadIds は許可リ�
     'pushed:false の resolvedThreadIds が許可リスト（permittedNoPushResolveIds）で絞られていない',
   )
   assert.ok(
-    branchSource.includes("f.pushed === true"),
+    branchSource.includes('pushVerified'),
+    // pushVerified は f.pushed（自己申告）を preSha/postSha（同じ fix 応答内の push 前後 sha）で
+    // 裏取りした値（Issue #435 派生 codex P0: no-op push による pushed:true 偽装対策）。
+    // 生の f.pushed === true ではなくこちらを条件に使うことで (a)/(b) を分岐させる。
     'push 成功ラウンド（a）と push なしラウンド（b）の受理条件が分岐していない',
   )
 })

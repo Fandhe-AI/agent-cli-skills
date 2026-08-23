@@ -70,7 +70,19 @@ reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コ�
   `required_review_thread_resolution` ゲートの解除に影響することを認識したうえで、
   レビュー指摘→修正 push→resolve→自動マージの無人ループ成立を優先する判断である。
   例外の成立条件: (a) resolve 実行主体は Merge ループの fix（pushAfterFix=true）のみ
-  （monitor / merge-exec / merge-verify / Review ループは実行しない）、(b) resolve は
+  （monitor / merge-exec / merge-verify / Review ループは実行しない）。**(a) 経路の
+  「push が成功した」は git push コマンドの exit code のみでは判定しない**
+  （2026-08-23・#435 派生 codex-review P0 対応）。`git push` は送るものが何もない
+  no-op（前ラウンドで既に同内容が push 済み、当該ラウンドは修正コミットも base 取り込み
+  コミットも無い）でも `Everything up-to-date` で exit 0 になるため、fix が exit code
+  だけを根拠に `pushed: true` を自己申告できると、(b) を恒久的に空にした fail-closed が
+  no-op push を毎ラウンド実行するだけで実質迂回されてしまう。fix は push 前後の
+  `origin/<branch>` sha（`preSha`／`postSha`。手順 1 の fetch 直後と手順 4 の push 直後に
+  それぞれ取得）を返し、host（`computeVerifiedPushed`）が両者とも 40 桁 hex で一致しない
+  （= head が実際に進んだ）ことを確認できた場合に限り `pushed: true` を「検証済み push」
+  として扱う。preSha === postSha（no-op push）の場合は自己申告が `pushed: true` でも
+  host は push なしラウンドとして扱い、(b) 経路（下記のとおり恒久的に空リスト）以外の
+  resolve を許可しない。(b) resolve は
   対象修正がリモート head（`origin/<branch>`）に反映済みであることを前提とする。成立
   経路は次の 2 つに限る — 当該ラウンドの push が成功した場合、または push しなかった
   ラウンド（過去ラウンドで push 済み）では、**ホストが自ら観測した push の結果**に対し

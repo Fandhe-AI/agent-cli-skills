@@ -426,6 +426,23 @@ function computePermittedNoPushResolveIds(_proofState, _unresolvedComments) {
   return []
 }
 
+// fix の pushed 自己申告を、同じ fix 応答内の preSha/postSha（origin/<branch> の push 前後 sha）
+// で裏取りする（Issue #435 派生 codex P0）。git push は「送るものが何もない」no-op でも
+// exit 0 になるため、pushed: true という自己申告だけでは resolve (a)（自分が修正対応した
+// スレッドの resolve 許可）の根拠にならない——resolve (b) を恒久的に空にした fail-closed
+// （Issue #430）が no-op push 経由で実質迂回されてしまう。preSha と postSha が両方とも
+// 40 桁 sha として形式検証を通り、かつ両者が異なる（= head が実際に進んだ）場合のみ
+// 「検証済み push」として扱う。resolveReviewThread mutation 自体は fix エージェントの
+// ターン内で実行されるため host はその呼び出しを事前に止められないが、この判定はプロンプトの
+// 許可条件（手順 5）と一致させてあり、host 側の以降のブックキーピング（noPushRounds・
+// lastRoundPushed・ログ）が自己申告のみを信頼しないための後段の防御として機能する。
+function computeVerifiedPushed(pushed, preSha, postSha) {
+  if (pushed !== true) return false
+  const pre = sanitizeSha(preSha)
+  const post = sanitizeSha(postSha)
+  return Boolean(pre && post && pre !== post)
+}
+
 
 // エージェント返却値の整数検証
 function assertInt(val, label) {
@@ -848,6 +865,23 @@ const FIX_SCHEMA = {
         '修正がリモート head に反映済み（今回の push 成功後、または過去ラウンド push 済みの反映確認後）に resolveReviewThread mutation で resolve したスレッドの threadId 一覧'
         + '（1件1要素、最大 20 件）。resolve していなければ空配列または省略。'
         + 'Review ループ（push なし fix）では常に省略する。記録専用でマージ判定には使われない。',
+    },
+    // push 前後のリモート追跡 ref（origin/<branch>）の sha。ホスト側が pushed 自己申告を
+    // 裏取りする唯一の材料（Issue #435 派生 codex P0）。no-op push（何も進んでいないのに
+    // push コマンド自体は成功する）で pushed: true を偽装されると、resolve (b) の恒久
+    // fail-closed（Issue #430）が resolve (a) 経由で実質迂回されてしまうため、host は
+    // 生の pushed 真偽値ではなく preSha !== postSha（実際に head が進んだ事実）で
+    // resolve 関連の進捗計上を行う。pushAfterFix: false（Review ループ）では push 自体を
+    // 行わないため省略してよい。
+    preSha: {
+      type: 'string',
+      maxLength: 40,
+      description: 'pushAfterFix: true のときのみ。手順 1 の fetch 直後（push 実行前）に取得した origin/<branch> の 40 桁 sha。',
+    },
+    postSha: {
+      type: 'string',
+      maxLength: 40,
+      description: 'pushAfterFix: true のときのみ。手順 4 の push 実行後に取得した origin/<branch> の 40 桁 sha（push が no-op なら preSha と同一になる）。',
     },
   },
 }
@@ -2204,6 +2238,22 @@ function mergeVerifyPrompt(item, impl) {
   ].join('\n')
 }
 
+// base 取り込みマージコミットの -m メッセージを commitlint 準拠に決める共通手順文。
+// prCreatePrompt の push 前ゲート（手順 0）と fixPrompt の push 前ゲート（手順 1）の双方で
+// 使う base merge は git merge --no-edit -m "<固定文言>" で明示コミットを作る（マージコミットの
+// subject を commitlint の既定 merge-commit 無視ルールに依存させないため）。ただし固定文言
+// "chore: base ブランチの変更を取り込む" をそのまま全リポへハードコードすると、対象リポの
+// commitlint 設定が 'chore' を type-enum から除外している場合にこのコミット自体が commit-msg
+// フックで弾かれ、base が進んでいるだけの一般的なケースで push・fix が完了できなくなる
+// （Issue #435 が依存する conflict-recovery 経路そのものがブロックされる。Bugbot 指摘）。
+function baseMergeCommitMessageInstruction() {
+  return (
+    `git merge --no-edit -m "$MERGE_MSG" origin/${baseBranch} を実行する（$MERGE_MSG は次の手順で決める。マージコミットの subject を commitlint 既定の merge-commit 無視ルールに依存させないため、明示コミットにする）。`
+    + ` 対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み取り、type-enum に 'chore' が含まれる、または type-enum の制約が無い（commitlint 設定自体が存在しない場合を含む）なら $MERGE_MSG="chore: base ブランチの変更を取り込む" とする。`
+    + ` type-enum が定義されていて 'chore' を含まない場合は、その type-enum の中から意味的に最も近い値（'build' 'chore' 以外で「取り込み・同期」を表す値があればそれ、無ければ type-enum の先頭の値）を使い $MERGE_MSG="<その type>: base ブランチの変更を取り込む" とする。scope は付けない（scope-enum で弾かれるリスクを避けるため）。`
+  )
+}
+
 // Review 全通過後に呼ばれる push + PR 作成エージェントのプロンプト。この push が CI トリガー
 // （push は 1 回のみ）。impl.branch は sanitizeBranch 検証済みを渡す。outOfScope は PR body に記録。
 function prCreatePrompt(item, impl, outOfScope) {
@@ -2228,7 +2278,7 @@ function prCreatePrompt(item, impl, outOfScope) {
     // 作れず pull_request トリガーの CI check-run が 1 件も発行されない（Issue #435: monitor が
     // 「チェック 0 件」を待っても収束せず blocked 終端し、自動回復しない）。push 前に必ず base を
     // 取り込み、解消不能ならこの時点で push 自体を止める。
-    `0. push 前 base 最新化ゲート: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361 と同形式）で base を取得する。本エージェントは隔離 worktree で動作し ${branch} を checkout している保証がないため git checkout --detach ${branch} で detached HEAD として取得し、git merge --no-edit -m "chore: base ブランチの変更を取り込む" origin/${baseBranch} を実行する（マージコミットの subject は commitlint 既定 ignore に依存せず明示の Conventional Commits 形式にする）。ローカルブランチ ref（refs/heads/${branch}）の更新は行わない — 手順 1 は detached HEAD の内容を直接 push するため不要であり、この worktree が ${branch} を checkout している保証がない以上 git branch -f はブランチが別 worktree で checkout 済みの場合に失敗し得る。Already up to date またはクリーンマージの場合はそのまま手順 1 へ進む。コンフリクトが発生した場合はその場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したら対象リポジトリのテスト実行規約に従いビルド・lint・テストを通してからコミットする）。解消に確信が持てない・解消不能な場合は git merge --abort し、push せず prNumber: 0 と「base コンフリクト解消不能」を理由として返す（fail-closed。ローカルブランチはそのまま保全され、CI 未起動の空 PR を作らずに終わる）。`,
+    `0. push 前 base 最新化ゲート: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361 と同形式）で base を取得する。本エージェントは隔離 worktree で動作し ${branch} を checkout している保証がないため git checkout --detach ${branch} で detached HEAD として取得し、${baseMergeCommitMessageInstruction()} ローカルブランチ ref（refs/heads/${branch}）の更新は行わない — 手順 1 は detached HEAD の内容を直接 push するため不要であり、この worktree が ${branch} を checkout している保証がない以上 git branch -f はブランチが別 worktree で checkout 済みの場合に失敗し得る。Already up to date またはクリーンマージの場合はそのまま手順 1 へ進む。コンフリクトが発生した場合はその場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したら対象リポジトリのテスト実行規約に従いビルド・lint・テストを通してからコミットする）。解消に確信が持てない・解消不能な場合は git merge --abort し、push せず prNumber: 0 と「base コンフリクト解消不能」を理由として返す（fail-closed。ローカルブランチはそのまま保全され、CI 未起動の空 PR を作らずに終わる）。`,
     `1. git push origin HEAD:refs/heads/${branch} で detached HEAD の内容（手順 0 の base 取り込み・コンフリクト解消を含む）を ${branch} へ push する（Bash の timeout に 600000 を指定）。git push origin ${branch} は使わない — ローカルの refs/heads/${branch} を手順 0 で更新していないため、その形では手順 0 の変更が push されず古い内容のまま push されてしまう。`,
     `   push が失敗した場合は prNumber: 0 と失敗理由を返す。`,
     // 中断再開ではこのブランチに対する open PR が既に存在しうる（gh pr create が失敗して生きて
@@ -2330,12 +2380,19 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
   const checkoutInstructions = pushAfterFix
     ? [
         `1. 本エージェントは隔離された git worktree 内で動作する。ブランチ ${branch} は他の worktree で checkout 済みの可能性があるため、git fetch origin && git checkout --detach origin/${branch} で detached HEAD として取得して作業する。`,
+        // preSha は「この fetch 時点でリモートが実際に指していた sha」を固定する。手順 4 の push
+        // 直後に取り直す postSha と比較することで、push コマンドが exit 0 で終わっただけの no-op
+        // （何も進んでいないのに成功したように見える push）と、実際に head が進んだ push とを
+        // ホスト側で区別できるようにする（Issue #435 派生 codex P0: no-op push で pushed: true を
+        // 自己申告し resolve (a) を成立させる迂回を塞ぐ）。fetch 直後に固定するのは、この後の
+        // base 取り込み・修正コミットのいずれによっても origin/${branch} 自体は動かないため。
+        `   PRE_PUSH_SHA=$(git rev-parse origin/${branch}) — この値を preSha として最後に返す（手順 4 の push 前に上書きしない）。`,
         // 修正作業（手順 2〜3）の前に base 取り込みを済ませておく。作業後（コミット後）に base
         // コンフリクトを検出すると、そのコミットは detached HEAD 上にしか存在せず worktree
         // 破棄で失われる（この手順を作業前に置くのはそれを避けるため。Issue #435）。取り込み
         // 自体は必須実行とし、「必要な場合は」の条件文にしない — 兄弟イシューの PR が先に
         // マージされて base が動いているケースを、修正作業の前に必ず検出する。
-        `   push 前 base 最新化ゲート（必須）: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361）で base を取得し、git merge --no-edit -m "chore: base ブランチの変更を取り込む" origin/${baseBranch} を実行する（detached HEAD のまま行ってよい。手順 4 で push するのは HEAD:refs/heads/${branch} 形式のためローカルブランチ ref の更新は不要）。Already up to date またはクリーンマージの場合はその状態を merge 済みとして記憶し（後述の手順 4 の分岐判定に使う）、手順 2 へ進む。コンフリクトが発生した場合はその場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したらテスト実行規約に従いビルド・lint・テストを通してからコミットする — このコミットが base 取り込みの結果であることを記憶しておく）。解消に確信が持てない・解消不能な場合は git merge --abort し、まだ修正のコミットを作っていないため作業を破棄しても損失はない。pushed: false / routingError なしで「base コンフリクト解消不能」を理由に返す。`,
+        `   push 前 base 最新化ゲート（必須）: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361）で base を取得し、${baseMergeCommitMessageInstruction()}（detached HEAD のまま行ってよい。手順 4 で push するのは HEAD:refs/heads/${branch} 形式のためローカルブランチ ref の更新は不要）。Already up to date またはクリーンマージの場合はその状態を merge 済みとして記憶し（後述の手順 4 の分岐判定に使う）、手順 2 へ進む。コンフリクトが発生した場合はその場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したらテスト実行規約に従いビルド・lint・テストを通してからコミットする — このコミットが base 取り込みの結果であることを記憶しておく）。解消に確信が持てない・解消不能な場合は git merge --abort し、まだ修正のコミットを作っていないため作業を破棄しても損失はない。pushed: false / routingError なしで「base コンフリクト解消不能」を理由に返す。`,
       ]
     : [
         `1. 本エージェントは隔離された git worktree 内で動作する。push 前のローカル修正のため fetch は不要。`,
@@ -2353,6 +2410,16 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     ? [
         `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。いずれの場合も git push origin HEAD:refs/heads/${branch} で反映する（手順 1 の base merge が Already up to date でなかった場合、この push を省略すると base 取り込み・コンフリクト解消の作業が detached HEAD のまま worktree 破棄で失われる。push が空振り（何も進んでいない）と誤認してこの push を省略しないこと）。`,
         commitlintCheckInstruction,
+        // push コマンドの exit code だけを見ない。git push は「送るものが何もない」（前ラウンドで
+        // 既に同じ内容が push 済みで、今ラウンドは修正コミットも base 取り込みコミットも無い）
+        // 場合も Everything up-to-date で exit 0 になる。この no-op を「push 成功」と区別せず
+        // pushed: true を自己申告すると、手順 5 (a) の resolve 許可条件（push 成功）を偽装でき、
+        // resolve (b) を恒久的に空にした fail-closed（Issue #430）が実質迂回されてしまう
+        // （Issue #435 派生 codex P0）。push 実行後に POST_PUSH_SHA=$(git rev-parse origin/${branch}) を
+        // 取得し、手順 1 で固定した PRE_PUSH_SHA と比較する: 一致する場合（head が進んでいない）は
+        // pushed: false を返し、手順 5 は実行しない（(a)(b) いずれの条件も満たさないため）。
+        // 一致しない場合のみ pushed: true を返し、preSha に PRE_PUSH_SHA・postSha に
+        // POST_PUSH_SHA をそのまま設定する（40 桁の値をそのまま。省略・短縮しない）。`,
       ]
     : [
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
@@ -2385,7 +2452,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     ...commitAndPushInstructions,
     ...(pushAfterFix
       ? [
-          `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の push が成功した場合は「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
+          `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 で preSha と postSha が一致せず（= head が実際に進み）pushed: true を返した場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（preSha と postSha が一致した no-op push は push 成功として扱わない。手順 4 参照）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
           `   gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`,
           '   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、mutation が失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
           '6. 手順 2 で outOfScopeComments に記録した対象外の指摘がある場合のみ、PR 本文へ記録する（該当がなければこの手順は省略してよい）。',
@@ -2397,7 +2464,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         ]
       : []),
     `${pushAfterFix ? '7' : '5'}. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。`,
-    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）。`,
+    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / preSha・postSha（手順 1・4 で取得した 40 桁 sha。pushAfterFix 経路では必須） / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）。`,
   ].join('\n')
 }
 
@@ -4278,8 +4345,15 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         break
       }
       fixCount++
+      // pushed 自己申告を preSha/postSha（同じ fix 応答内の origin/<branch> push 前後 sha）で
+      // 裏取りした値（Issue #435 派生 codex P0）。no-op push（exit 0 だが head 不変）による
+      // pushed: true の偽装を、以降のブックキーピングでは「push なし」と同じ扱いにする。
+      const pushVerified = computeVerifiedPushed(f.pushed, f.preSha, f.postSha)
+      if (f.pushed === true && !pushVerified) {
+        log(`⚠️ #${item.number}: fix エージェントが pushed: true を自己申告したが preSha/postSha が一致した（no-op push）ため push なしラウンドとして扱う（threadId 自己申告の resolve は許可リスト外として無視する）`)
+      }
       // 次ラウンドの resolve (b) 観測入力（Issue #430）。
-      lastRoundPushed = f.pushed === true
+      lastRoundPushed = pushVerified
       // f.resolvedThreadIds（fix 自己申告）は形式検証してログ専用（マージ判定・次 monitor には
       // 渡さない。実効性は次周回 monitor が独立確認する）。ログ文言は resolvedThreadsLogLine 参照、
       // 進捗計上は countNewlyResolvedThreads 参照（未計上 threadId のみ newlyResolvedThisRound へ）。
@@ -4289,10 +4363,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           .slice(0, 20)
           .map((v) => sanitizeThreadId(v))
           .filter((v) => v)
-        // pushed:false ラウンドは許可リスト外の申告を検証済み扱いしない（Issue #430。ホスト
+        // pushVerified: false ラウンドは許可リスト外の申告を検証済み扱いしない（Issue #430。ホスト
         // 決定的照合を経ていない自己申告を進捗計上・成功ログへ混入させない fail-closed）。
-        const resolvedTids = f.pushed === true ? reportedTids : reportedTids.filter((v) => permittedNoPushResolveIds.includes(v))
-        const droppedTids = f.pushed === true ? [] : reportedTids.filter((v) => !permittedNoPushResolveIds.includes(v))
+        const resolvedTids = pushVerified ? reportedTids : reportedTids.filter((v) => permittedNoPushResolveIds.includes(v))
+        const droppedTids = pushVerified ? [] : reportedTids.filter((v) => !permittedNoPushResolveIds.includes(v))
         if (droppedTids.length > 0) {
           log(`⚠️ #${item.number}: push なしラウンドで許可リスト外の resolve 申告を無視した（threadId: ${droppedTids.join(', ')}）`)
         }
@@ -4302,7 +4376,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           claimedResolvedThreadIds,
         )
         if (resolvedTids.length > 0) {
-          log(resolvedThreadsLogLine(item.number, f.pushed === true, resolvedTids))
+          log(resolvedThreadsLogLine(item.number, pushVerified, resolvedTids))
         }
       }
       // f.outOfScopeComments（未検証の自己申告）は monitor へ渡さず、検証済み値のみ
@@ -4358,10 +4432,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // outOfScopeSeen）を更新し旧 worktree を削除する（中断・再起動後も復元でき記録が失われない）。
       // 非終端の updateState はこの fix 直後の 1 箇所で足りる。
       await updateState(item.number, { fixCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments }, { cleanupWorktree: oldWorktreePath })
-      // push 成功、または push なしでも新規スレッド resolve があれば進捗ありとしてリセット
-      // する（判定根拠と停止性は advanceNoPushRounds のコメント参照）。
-      noPushRounds = advanceNoPushRounds(noPushRounds, f.pushed === true, newlyResolvedThisRound)
-      if (!f.pushed) {
+      // push 成功（preSha/postSha で裏取り済み）、または push なしでも新規スレッド resolve が
+      // あれば進捗ありとしてリセットする（判定根拠と停止性は advanceNoPushRounds のコメント参照）。
+      noPushRounds = advanceNoPushRounds(noPushRounds, pushVerified, newlyResolvedThisRound)
+      if (!pushVerified) {
         if (newlyResolvedThisRound > 0) {
           log(`PR #${impl.prNumber} の修正エージェントは push 不要だが新規スレッド resolve（${newlyResolvedThisRound} 件）を報告、進捗ありとしてマージ条件を再判定する`)
         } else if (noPushRounds >= 2) {

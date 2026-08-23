@@ -142,7 +142,7 @@ test('resolvedThreadsLogLine: pushed=false は「過去ラウンド push 済み�
 // resolvedThreadsLogLine を経由すること（純粋関数テストだけでは配線なしでもグリーンになる）
 // ---------------------------------------------------------------------------
 
-test('runMergeLoop: resolvedThreadIds のログ記録は f.pushed を渡して resolvedThreadsLogLine を経由する', () => {
+test('runMergeLoop: resolvedThreadIds のログ記録は pushVerified を渡して resolvedThreadsLogLine を経由する', () => {
   const branchStart = driverPart.indexOf('if (Array.isArray(f.resolvedThreadIds)) {')
   assert.ok(branchStart >= 0, 'runMergeLoop に resolvedThreadIds の処理分岐が見つからない')
   // 分岐から次の処理ブロック（outOfScopeComments）までを対象に配線を検証する。
@@ -154,7 +154,10 @@ test('runMergeLoop: resolvedThreadIds のログ記録は f.pushed を渡して r
     'resolvedThreadIds のログ記録が resolvedThreadsLogLine を経由していない（pushed 無視の一律記録に戻る回帰）',
   )
   assert.ok(
-    branchSource.includes('f.pushed'),
-    'resolvedThreadIds のログ記録が f.pushed を参照していない',
+    // pushVerified は f.pushed を preSha/postSha の実 sha 比較で裏取りした値（Issue #435 派生
+    // codex P0）。生の f.pushed をそのまま渡すと no-op push で pushed:true を自己申告された
+    // ときにログ・進捗計上が偽装されるため、参照すべきは pushVerified である。
+    branchSource.includes('pushVerified'),
+    'resolvedThreadIds のログ記録が pushVerified を参照していない',
   )
 })

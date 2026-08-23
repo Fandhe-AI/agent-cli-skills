@@ -115,7 +115,7 @@ test('advanceNoPushRounds: resolve も push も無いラウンドのみ no-progr
 test('runMergeLoop: resolvedThreadIds 分岐が countNewlyResolvedThreads を呼び、noPushRounds 更新が advanceNoPushRounds を経由する', () => {
   const branchStart = driverPart.indexOf('if (Array.isArray(f.resolvedThreadIds)) {')
   assert.ok(branchStart >= 0, 'runMergeLoop に resolvedThreadIds の処理分岐が見つからない')
-  const pushBranch = driverPart.indexOf('if (!f.pushed) {', branchStart)
+  const pushBranch = driverPart.indexOf('if (!pushVerified) {', branchStart)
   assert.ok(pushBranch > branchStart, 'resolvedThreadIds 分岐より後の push 判定分岐が見つからない')
   const wiringSource = driverPart.slice(branchStart, driverPart.indexOf('\n', pushBranch + 1))
   assert.ok(
