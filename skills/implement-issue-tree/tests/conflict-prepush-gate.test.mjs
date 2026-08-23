@@ -74,6 +74,41 @@ test('prCreatePrompt: push 前 base 最新化ゲートが git push より前に�
   assert.ok(pushLine && !pushLine.includes('git branch -f'), 'push 行自体が git branch -f に依存している')
 })
 
+test('base fetch の非ゼロ終了時は merge も push もせず fail-closed 終端する（prCreate / fix 両経路）', () => {
+  // codex P1（PR #436 discussion_r3837960807）の回帰テスト: base 最新化ゲートが
+  // git fetch origin <base>:refs/remotes/origin/<base> の成功確認を指示しないと、通信・認証・
+  // refspec エラー時に以前の処理が残した stale な origin/<base> を merge したまま push でき、
+  // 「必ず最新 base を取り込む」ゲート自体を迂回できる。両経路に終了コード確認と fail-closed
+  // 終端（prCreate は prNumber: 0、fix は pushed: false）の明記があることを固定する。
+  const prPrompt = prCreatePrompt(item, impl, [])
+  const prFetchIdx = prPrompt.indexOf('base fetch の終了コードを必ず確認し')
+  assert.ok(prFetchIdx >= 0, 'prCreatePrompt に base fetch の終了コード確認の指示がない')
+  const prSection = prPrompt.slice(prFetchIdx, prFetchIdx + 400)
+  assert.ok(
+    prSection.includes('merge も push も行わず prNumber: 0') && prSection.includes('base fetch 失敗'),
+    'prCreatePrompt の base fetch 失敗時に merge/push せず prNumber: 0 で終端する指示がない',
+  )
+  assert.ok(
+    prSection.includes('stale な origin/'),
+    'prCreatePrompt に stale な base ref の merge によるゲート迂回の根拠明記がない',
+  )
+
+  mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
+  const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
+  const fixPromptText = fixPrompt(item, impl, finding, true)
+  const fixFetchIdx = fixPromptText.indexOf('base fetch の終了コードを必ず確認し')
+  assert.ok(fixFetchIdx >= 0, 'fixPrompt に base fetch の終了コード確認の指示がない')
+  const fixSection = fixPromptText.slice(fixFetchIdx, fixFetchIdx + 400)
+  assert.ok(
+    fixSection.includes('merge も push も行わず') && fixSection.includes('pushed: false') && fixSection.includes('base fetch 失敗'),
+    'fixPrompt の base fetch 失敗時に merge/push せず pushed: false で終端する指示がない',
+  )
+  assert.ok(
+    fixSection.includes('stale な origin/'),
+    'fixPrompt に stale な base ref の merge によるゲート迂回の根拠明記がない',
+  )
+})
+
 test('prCreatePrompt: 起点決定は 4 分岐（初回/remote ahead/local ahead/diverged）で local-ahead を diverged 扱いしない', () => {
   // Bugbot High 1 巡目（PR #436 discussion_r3837843354）+ 2 巡目（discussion_r3837878036）の
   // 回帰テスト: prCreatePrompt はローカル refs/heads/<branch> を意図的に更新しないため、
