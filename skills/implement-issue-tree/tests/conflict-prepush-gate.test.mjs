@@ -135,9 +135,21 @@ test('fixPrompt(pushAfterFix: true): 空振り push は pushed: false とし res
     prompt.includes('push コマンドが成功していても pushed: false として返し、手順 5 の resolve を一切実行しない'),
     '空振り push（Everything up-to-date）を pushed: false・resolve 禁止へ倒す指示がない',
   )
+  // Bugbot Medium（PR #436 discussion_r3837782458）の回帰確認: 事前 ls-remote の失敗で push を
+  // スキップすると detached HEAD 上の fix・base 取り込みコミットが worktree 破棄で失われる。
+  // push の実行（作業保全・必ず行う）と pushed: true の判定（前後比較で確認できた場合のみ）を
+  // 分離し、比較不能時は push 済みのまま pushed: false へ倒す契約を固定する。
   assert.ok(
-    prompt.includes('ls-remote の再取得に失敗して比較できない場合も pushed: false へ倒す'),
-    '比較不能時の fail-closed（pushed: false）の指示がない',
+    prompt.includes('取得に失敗しても push を中止しない'),
+    '事前 ls-remote 失敗時にも push を実行する（作業保全）指示がない',
+  )
+  assert.ok(
+    !prompt.includes('取得失敗時は push せず'),
+    '事前 ls-remote 失敗で push をスキップする旧指示が残っている（detached HEAD 上の作業が失われる）',
+  )
+  assert.ok(
+    prompt.includes('push 前・push 後いずれかの ls-remote に失敗して前後比較ができない場合も、push 自体は実行済みのまま pushed: false へ倒す'),
+    '比較不能時の fail-closed（push は実行済み・pushed: false）の指示がない',
   )
   // 手順 5 (a) 側も「push コマンド成功」ではなく「実 push あり」を resolve 許可条件にする。
   assert.ok(
