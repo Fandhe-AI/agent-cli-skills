@@ -398,6 +398,25 @@ test('base merge の subject は固定 chore ではなく commitlint 設定か�
   }
 })
 
+test('base merge 分岐 (b) の解消後コミットが hook に拒否された場合も merge --abort で fail-closed する（prCreate / fix 両経路）', () => {
+  // Bugbot（PR #437）: 分岐 (b) の git commit --no-edit も pre-commit / commit-msg hook を通る。
+  // 失敗時に abort 経路が無いと MERGE_HEAD 残存のまま merge 前の HEAD を push でき、ゲートを迂回する。
+  mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
+  const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
+  for (const [label, prompt] of [
+    ['prCreatePrompt', prCreatePrompt(item, impl, [])],
+    ['fixPrompt', fixPrompt(item, impl, finding, true)],
+  ]) {
+    const commitIdx = prompt.indexOf('git commit --no-edit でコミットする')
+    assert.ok(commitIdx >= 0, `${label}: 分岐 (b) の git commit --no-edit 指示がない`)
+    const section = prompt.slice(commitIdx, commitIdx + 400)
+    const abortIdx = section.indexOf('git merge --abort')
+    const rejectIdx = section.indexOf('base merge コミット拒否')
+    assert.ok(abortIdx >= 0 && rejectIdx >= 0, `${label}: 解消後コミットの hook 拒否時に git merge --abort + 「base merge コミット拒否」で fail-closed する指示が git commit --no-edit の直後にない`)
+    assert.ok(section.includes('--no-verify で強行せず'), `${label}: 解消後コミットの --no-verify 禁止がない`)
+  }
+})
+
 test('monitorPrompt: 手順 1c の UNKNOWN リトライ途中で CONFLICTING に確定した場合も needs-fix 経路へ回す', () => {
   // Bugbot Medium 3 巡目（PR #436 discussion_r3837954196）の回帰テスト: 手順 1c の UNKNOWN
   // リトライは state 変化しか書いておらず、リトライ途中で mergeable が CONFLICTING に確定した
