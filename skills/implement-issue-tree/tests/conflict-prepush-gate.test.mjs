@@ -449,7 +449,7 @@ test('base merge の subject は安全文字集合で検証し -F ファイル�
     const lintIdx = prompt.indexOf('merge 前に対象リポの commitlint 設定')
     assert.ok(lintIdx >= 0, `${label}: base merge の commitlint 読み取り指示がない`)
     const section = prompt.slice(lintIdx, lintIdx + 1400)
-    assert.ok(section.includes('^[a-z0-9-]{1,32}$'), `${label}: type / scope の安全文字集合（正規表現）検証がない`)
+    assert.ok(section.includes('^[A-Za-z0-9_-]{1,64}$'), `${label}: type / scope の安全文字集合（正規表現）検証がない`)
     assert.ok(section.includes('不適合ならその候補を捨てて次のフォールバックへ進む'), `${label}: 不適合候補を捨てて次へ進む指示がない`)
     assert.ok(section.includes('base merge subject の type/scope が安全文字集合に不適合'), `${label}: 最終候補も不適合なときの fail-closed 理由文言がない`)
     assert.ok(section.includes('git merge --no-edit -F <一時ファイル>'), `${label}: -F による受け渡し指示がない`)
