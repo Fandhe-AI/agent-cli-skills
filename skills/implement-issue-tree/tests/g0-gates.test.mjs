@@ -368,6 +368,27 @@ test('recoverImplementPrompt: commitlint 事前確認の指示を含む', () => 
   }
 })
 
+// Bugbot（PR #436 追補）: pr-create は base 取り込みコミットを detached HEAD から push しローカル
+// refs/heads を更新しないため、PR 作成失敗後の Recover → 回復 Implement が古いローカル tip を掴むと
+// 次の pr-create が remote-ahead / diverged で再失敗しループする。checkout 後の ff 追従を固定する。
+test('recoverImplementPrompt: 手順 2 で checkout 後にリモート tip へ ff-only 追従する', () => {
+  const prompt = recoverImplementPrompt(item, { done: [], remaining: [], broken: [] }, 'fix/42-noop')
+  const checkoutIdx = prompt.indexOf('git checkout "fix/42-noop"')
+  const ffIdx = prompt.indexOf('git merge --ff-only refs/remotes/origin/')
+  assert.ok(checkoutIdx >= 0, 'checkout 指示がない')
+  assert.ok(ffIdx > checkoutIdx, 'checkout 後の git merge --ff-only refs/remotes/origin/<branch> 追従指示がない')
+  assert.ok(prompt.includes('(iv) が fail-closed で止める'), 'ff 不能（真の diverged）を後続 pr-create の (iv) に委ねる旨がない')
+})
+
+test('implementPrompt: 0b-a で既存 open PR のブランチ取得後にリモート tip へ ff-only 追従する', () => {
+  const prompt = implementPrompt(item, { steps: ['noop'] })
+  const idx0ba = prompt.indexOf('0b-a.')
+  const ffIdx = prompt.indexOf('git merge --ff-only refs/remotes/origin/<branch>')
+  const idx0bb = prompt.indexOf('0b-b.')
+  assert.ok(idx0ba >= 0 && idx0bb > idx0ba, '0b-a / 0b-b の記述が見つからない')
+  assert.ok(ffIdx > idx0ba && ffIdx < idx0bb, '0b-a 内に git merge --ff-only refs/remotes/origin/<branch> の追従指示がない')
+})
+
 test('fixPrompt: pushAfterFix の両分岐で commitlint 事前確認の指示を含む', () => {
   // fixPrompt は boundaryNonce() を内部で使うため、テスト専用 setter で seed を注入する
   // （本番では ensureBoundaryNonceSeed() がラン開始時に 1 回だけ行う）。

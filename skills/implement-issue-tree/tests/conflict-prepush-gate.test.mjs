@@ -164,9 +164,15 @@ test('prCreatePrompt: 起点決定は 4 分岐（初回/remote ahead/local ahead
     remoteAheadSection.includes('remote-ahead: 自己の過去 push か第三者 push か判別不能'),
     'remote-ahead 終端時の理由文言（prNumber: 0 と併記）がない',
   )
+  // 回復経路は impl 手順 0b-a / 0b-b ではなく Recover → 回復 Implement 手順 2 の ff 追従
+  // （failed + branch 保存は hasRemnant で Recover を起動し、impl 手順 0b には到達しない）。
   assert.ok(
-    remoteAheadSection.includes('0b-a') && remoteAheadSection.includes('0b-b'),
-    '回復経路（次回ランの impl 手順 0b-a / 0b-b）の明記がない',
+    remoteAheadSection.includes('Recover') && remoteAheadSection.includes('git merge --ff-only refs/remotes/origin/'),
+    '回復経路（次回ランの Recover → 回復 Implement 手順 2 の ff 追従）の明記がない',
+  )
+  assert.ok(
+    !remoteAheadSection.includes('0b-b（リモートブランチ再利用'),
+    '到達不能な impl 手順 0b-b を回復路として案内する旧文言が残っている',
   )
   assert.ok(
     !prompt.includes('既存のマージコミットの上から継続する。(iii)'),
@@ -339,9 +345,57 @@ test('monitorPrompt: 手順 3e（チェック総数 0 件）が blocked へ進�
   const prompt = monitorPrompt(item, impl, [], true, true)
   const idxE = prompt.indexOf('チェック総数が 0 件の場合は green とみなさず')
   assert.ok(idxE >= 0, '手順 3e の記述が見つからない')
-  const sectionE = prompt.slice(idxE, idxE + 2400)
+  const sectionE = prompt.slice(idxE, idxE + 3200)
   assert.ok(sectionE.includes('mergeable'), '手順 3e に mergeable 再確認の指示がない')
   assert.ok(sectionE.includes('CONFLICTING の可能性'), '手順 3e の summary 例に CONFLICTING の可能性の言及がない')
+})
+
+test('monitorPrompt: 手順 3e の待機前・待機後の各再取得で state が MERGED / CLOSED なら手順 1 の分岐に従い blocked/quality へ落とさない', () => {
+  // Bugbot（PR #436 追補）: 3e は OPEN + CONFLICTING と UNKNOWN だけを特別扱いしていたため、
+  // 再取得で MERGED / CLOSED になっていても「CONFLICTING でなければ blocked/quality」に落ちていた。
+  // 各再取得の直後（待機・blocked 結論より前）に MERGED → ready / CLOSED → unrecoverable の
+  // 分岐が現れることを位置関係で固定する。
+  const prompt = monitorPrompt(item, impl, [], true, false)
+  const idxE = prompt.indexOf('チェック総数が 0 件の場合は green とみなさず')
+  assert.ok(idxE >= 0, '手順 3e の記述が見つからない')
+  const sectionE = prompt.slice(idxE, idxE + 3200)
+  const branchText = 'MERGED → 即 state: ready、CLOSED → state: blocked / blockedReason: "unrecoverable"'
+  const firstFetchIdx = sectionE.indexOf('state と mergeable を再取得する')
+  const waitIdx = sectionE.indexOf('最大 10 分待って再確認する')
+  const rematchIdx = sectionE.indexOf('もう一度実行して mergeable を再判定する')
+  const blockedIdx = sectionE.indexOf('state: blocked / blockedReason: "quality"')
+  assert.ok(firstFetchIdx >= 0 && waitIdx >= 0 && rematchIdx >= 0 && blockedIdx >= 0, '3e の各節点が見つからない')
+  const firstBranchIdx = sectionE.indexOf(branchText, firstFetchIdx)
+  assert.ok(firstBranchIdx >= 0 && firstBranchIdx < waitIdx, '待機前の再取得直後に MERGED → ready / CLOSED → unrecoverable の分岐がない')
+  const secondBranchIdx = sectionE.indexOf(branchText, rematchIdx)
+  assert.ok(secondBranchIdx >= 0 && secondBranchIdx < blockedIdx, '待機後の再判定直後（blocked 結論より前）に MERGED → ready / CLOSED → unrecoverable の分岐がない')
+  assert.ok(sectionE.includes('mergeable は MERGED / CLOSED では判定に使わない'), 'MERGED / CLOSED で mergeable を判定に使わない旨がない')
+  assert.ok(sectionE.includes('この再判定でも state が OPEN かつ CONFLICTING でなければ state: blocked'), 'blocked/quality の結論が state: OPEN 限定になっていない')
+})
+
+test('base merge の subject は固定 chore ではなく commitlint 設定から決め、hook 拒否時は merge --abort で fail-closed する（prCreate / fix 両経路）', () => {
+  // Bugbot（PR #436 追補）: 固定 -m "chore: ..." は type-enum / scope-enum を持つリポの commit-msg
+  // hook に拒否され、コンフリクト無しの mid-merge（MERGE_HEAD 残存）で exit 1 になる。この第 3
+  // 状態を定義しないとエージェントが exit 1 を無視して base 未取り込みの HEAD を push し得る。
+  mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
+  const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
+  for (const [label, prompt, failToken] of [
+    ['prCreatePrompt', prCreatePrompt(item, impl, []), 'prNumber: 0'],
+    ['fixPrompt', fixPrompt(item, impl, finding, true), 'pushed: false'],
+  ]) {
+    assert.ok(!prompt.includes('-m "chore:'), `${label}: 固定 subject の -m "chore: が残っている`)
+    const mergeIdx = prompt.indexOf('git merge --no-edit -m "<subject>"')
+    assert.ok(mergeIdx >= 0, `${label}: subject をテンプレート化した merge 指示がない`)
+    const lintIdx = prompt.indexOf('merge 前に対象リポの commitlint 設定')
+    assert.ok(lintIdx >= 0 && lintIdx < mergeIdx, `${label}: merge 前に commitlint 設定を読む指示がない`)
+    const section = prompt.slice(lintIdx, lintIdx + 1600)
+    assert.ok(section.includes('git diff --name-only --diff-filter=U'), `${label}: コンフリクト有無を U で判定する指示がない`)
+    const rejectIdx = section.indexOf('base merge コミット拒否')
+    assert.ok(rejectIdx >= 0, `${label}: hook 拒否時の理由文言がない`)
+    assert.ok(section.lastIndexOf('git merge --abort', rejectIdx) >= 0, `${label}: hook 拒否時に git merge --abort する指示がない`)
+    assert.ok(section.includes('--no-verify で強行しない'), `${label}: --no-verify 禁止の明記がない`)
+    assert.ok(section.includes(failToken), `${label}: fail-closed の返却（${failToken}）が base merge 指示の近傍にない`)
+  }
 })
 
 test('monitorPrompt: 手順 1c の UNKNOWN リトライ途中で CONFLICTING に確定した場合も needs-fix 経路へ回す', () => {
@@ -376,7 +430,7 @@ test('monitorPrompt: 手順 3e は 10 分待機の後にも mergeable を再判�
   const prompt = monitorPrompt(item, impl, [], true, true)
   const idxE = prompt.indexOf('チェック総数が 0 件の場合は green とみなさず')
   assert.ok(idxE >= 0, '手順 3e の記述が見つからない')
-  const sectionE = prompt.slice(idxE, idxE + 2400)
+  const sectionE = prompt.slice(idxE, idxE + 3200)
   const waitIdx = sectionE.indexOf('最大 10 分待って再確認する')
   const rematchIdx = sectionE.indexOf('もう一度実行して mergeable を再判定する')
   const blockedIdx = sectionE.indexOf('state: blocked / blockedReason: "quality"')
@@ -400,7 +454,7 @@ test('monitorPrompt: 手順 3e の UNKNOWN リトライ途中で CONFLICTING に
   const prompt = monitorPrompt(item, impl, [], true, true)
   const idxE = prompt.indexOf('チェック総数が 0 件の場合は green とみなさず')
   assert.ok(idxE >= 0, '手順 3e の記述が見つからない')
-  const sectionE = prompt.slice(idxE, idxE + 2400)
+  const sectionE = prompt.slice(idxE, idxE + 3200)
   const unknownIdx = sectionE.indexOf('手順 1c と同じ扱いで 30 秒程度あけて最大 3 回再取得')
   const blockedIdx = sectionE.indexOf('state: blocked / blockedReason: "quality"')
   assert.ok(unknownIdx >= 0 && blockedIdx >= 0, '手順 3e の UNKNOWN リトライ / blocked 終端の記述が見つからない')
