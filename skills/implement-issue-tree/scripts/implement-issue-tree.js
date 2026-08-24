@@ -1878,7 +1878,7 @@ function implementPrompt(item, plan) {
     `      - gh pr list --state open --search "Closes #${item.number}" --json number,title,headRefName`,
     `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
     `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
-    `      open PR が見つかった場合は新規 PR を作らず、そのブランチを git fetch origin && git checkout <branch> で取得し、続けて git fetch origin <branch>:refs/remotes/origin/<branch> && git merge --ff-only refs/remotes/origin/<branch> でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
+    `      open PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（headRefName は PR 由来の未信頼値で、ref 名には $() やセミコロンを含められる。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
     `      既存 PR 番号はここでは返さない（PR_CREATE_SCHEMA を持つ後続の PR Create フェーズが同じブランチの open PR を再検出して再利用する。本フェーズの prNumber は常に 0 として扱われる）。`,
     `      手順 2 はスキップして手順 3 以降を続ける（origin/${baseBranch} から checkout -B し直すと、その PR のコミットを失う）。`,
     `   0b-b. open PR が見つからなかった場合、git ls-remote --heads origin でイシュー #${item.number} に対応するリモートブランチが残っていないか確認する。`,
@@ -2686,7 +2686,7 @@ function recoverImplementPrompt(item, brief, branch) {
     // 既存 branch を checkout（checkout -B は使わない）。WIP commit を含む既存コミットを保持し、
     // Recover が退避した作業を引き継ぐ。branch 名は検証済みの値を明示して誤 checkout を防ぐ。
     `2. Recover フェーズで特定された既存 branch ${branchJson} を checkout する（git fetch origin && git checkout ${branchJson}）。`,
-    `   checkout 後に git fetch origin ${branchJson}:refs/remotes/origin/${branchJson} を実行する（リモートに同名ブランチが無ければ失敗してよく、以降の追従はスキップして手順 3 へ進む）。取得できたら git merge --ff-only refs/remotes/origin/${branchJson} でローカルをリモート tip へ追従させる（前回ランの pr-create は base 取り込みのマージコミットを detached HEAD から push しローカル refs/heads は更新しないため、PR 作成失敗後はリモートだけが先行する。追従せずに実装を積むと次の pr-create が remote-ahead / diverged で再び失敗し回復がループする）。ff 不能（真の diverged）なら merge は失敗するがそのまま続行してよい — 後続 pr-create の (iv) が fail-closed で止める。追従したリモートのコミットは以降の Implement・Review でレビュー対象に乗ってから push される（0b-b と同じ考え方）。`,
+    `   checkout 後に git fetch origin -- ${branchJson}:refs/remotes/origin/${branchJson} を実行する（${branchJson} はホスト側で isValidBranchName 検証済みの値。引用符付きのまま展開し、リモートに同名ブランチが無ければ失敗してよく、以降の追従はスキップして手順 3 へ進む）。取得できたら git merge --ff-only refs/remotes/origin/${branchJson} でローカルをリモート tip へ追従させる（前回ランの pr-create は base 取り込みのマージコミットを detached HEAD から push しローカル refs/heads は更新しないため、PR 作成失敗後はリモートだけが先行する。追従せずに実装を積むと次の pr-create が remote-ahead / diverged で再び失敗し回復がループする）。ff 不能（真の diverged）なら merge は失敗するがそのまま続行してよい — 後続 pr-create の (iv) が fail-closed で止める。追従したリモートのコミットは以降の Implement・Review でレビュー対象に乗ってから push される（0b-b と同じ考え方）。`,
     `   （origin/${baseBranch} からの新規作成（checkout -B）は行わない。既存コミット・WIP commit を保持するため）`,
     `   指定の branch ${branchJson} が見つからない場合は git ls-remote --heads origin で確認し、"/${item.number}-" を含む refs/heads/* を探す。`,
     `3. 回復ブリーフに従って実装を完成させる:`,
