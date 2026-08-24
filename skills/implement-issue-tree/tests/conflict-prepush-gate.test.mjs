@@ -417,6 +417,25 @@ test('base merge 分岐 (b) の解消後コミットが hook に拒否された�
   }
 })
 
+test('base merge の subject 決定は候補外 type-enum と scope-enum 無しの scope 必須リポでも決定的に定まる（prCreate / fix 両経路）', () => {
+  // codex P1（PR #437）: type-enum: [feat, docs] のようなリポでは chore → build → ci → fix が全て
+  // 不許可で type が決まらず、scope-empty: never + scope-enum 無しでは scope が決まらない。
+  // どちらも hook 拒否 → fail-closed 停止になるため、フォールバック手順の明記を固定する。
+  mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
+  const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
+  for (const [label, prompt] of [
+    ['prCreatePrompt', prCreatePrompt(item, impl, [])],
+    ['fixPrompt', fixPrompt(item, impl, finding, true)],
+  ]) {
+    const lintIdx = prompt.indexOf('merge 前に対象リポの commitlint 設定')
+    assert.ok(lintIdx >= 0, `${label}: base merge の commitlint 読み取り指示がない`)
+    const section = prompt.slice(lintIdx, lintIdx + 700)
+    assert.ok(section.includes('type-enum の先頭要素へフォールバック'), `${label}: 候補 type が全て不許可のときの type-enum 先頭へのフォールバックがない`)
+    assert.ok(section.includes('scope-enum が無ければ') && section.includes('直前の implement / fix コミットの scope を再利用'), `${label}: scope-enum 無しで scope 必須のときの決定手順（直前コミットの scope 再利用）がない`)
+    assert.ok(section.includes('base ブランチ名'), `${label}: 直前コミットにも scope が無いときの base ブランチ名フォールバックがない`)
+  }
+})
+
 test('monitorPrompt: 手順 1c の UNKNOWN リトライ途中で CONFLICTING に確定した場合も needs-fix 経路へ回す', () => {
   // Bugbot Medium 3 巡目（PR #436 discussion_r3837954196）の回帰テスト: 手順 1c の UNKNOWN
   // リトライは state 変化しか書いておらず、リトライ途中で mergeable が CONFLICTING に確定した
