@@ -833,7 +833,7 @@ const FIX_SCHEMA = {
     commitFailed: {
       type: 'boolean',
       description:
-        '修正コミットを作成できなかった（commitlint の type / scope を決定できない・hook 拒否等）場合 true。'
+        '修正コミットを作成できなかった（base fetch 失敗・base merge の解消不能 / hook 拒否・commitlint の type / scope 決定不能等）場合 true。'
         + 'true のとき pushed は false。ホストは失敗終端として扱う。コミットできた場合は省略。',
     },
     // 対応不能・スコープ外と判断した指摘の構造化記録（summary 本文に埋め込ませない）。
@@ -1578,7 +1578,7 @@ const sweepEligiblePaths = new Set()
 const confirmedRemovedPaths = new Set()
 
 // 本ランで新規作成された worktree の記録簿（残置上限ゲートの「本ラン積み増し」実測）。
-// 使い捨て（review / pr-create）・fix-routing-error・実装 worktree（implement）を記録する。
+// 使い捨て（review / pr-create）・fix-terminal（routingError / commitFailed）・実装 worktree（implement）を記録する。
 // fix の worktree は記録しない — 旧 worktree cleanup とペアの「置換」で純増せず、記録すると
 // fix 連鎖のたびに実測が単調増加して過剰停止する（cleanup 失敗の残骸は次ラン観測が捕捉）。
 // { issue, kind, path } を追記し、ラン終了時に一覧をログ出力する（削除は行わない）。
@@ -1588,17 +1588,18 @@ const ephemeralWorktrees = []
 // 予約定数の乖離防止）。予約計上（EPHEMERAL_RESERVE_PER_NEW_START）はこの合計から導出するため、
 // recordEphemeralWorktree の呼び出し箇所を追加・変更するときは必ずここへ kind と最大数を
 // 宣言する（未宣言 kind は警告。記録自体は行い実測 latch は機能し続ける）。
-// implement: 1 回 / review: 最大 3 回 / pr-create: 1 回 / fix-routing-error: 最大 1 回
-// （検出と同時に即終端のため同一ラン内で複数回記録しない）。fix は置換のため宣言しない。
-const EPHEMERAL_KIND_MAX = Object.freeze({ implement: 1, review: 3, 'pr-create': 1, 'fix-routing-error': 1 })
+// implement: 1 回 / review: 最大 3 回 / pr-create: 1 回 / fix-terminal: 最大 1 回
+// （fix の routingError / commitFailed 終端。いずれも検出と同時に即終端し互いに排他のため同一ラン内で
+// 複数回記録しない）。fix は置換のため宣言しない。
+const EPHEMERAL_KIND_MAX = Object.freeze({ implement: 1, review: 3, 'pr-create': 1, 'fix-terminal': 1 })
 // 新規着手 1 イシューが本ランで積み増しうる使い捨て worktree の最大総数（全 kind 合計）。
 // dispatch ループの予約計上（newStartActive）で参照する。
 const EPHEMERAL_RESERVE_PER_NEW_START = Object.values(EPHEMERAL_KIND_MAX).reduce((a, b) => a + b, 0)
 // monitoring 再開 1 イシューが積み増しうる最大数。再開は review / pr-create を経ないが、
-// fix の routingError 終端で fix-routing-error を最大 1 件記録し得るため別枠で見込む。
-const EPHEMERAL_RESERVE_PER_MONITORING_RESUME = EPHEMERAL_KIND_MAX['fix-routing-error']
+// fix の routingError / commitFailed 終端で fix-terminal を最大 1 件記録し得るため別枠で見込む。
+const EPHEMERAL_RESERVE_PER_MONITORING_RESUME = EPHEMERAL_KIND_MAX['fix-terminal']
 
-// 使い捨て worktree（review / pr-create）・fix-routing-error・実装 worktree を記録する。
+// 使い捨て worktree（review / pr-create）・fix-terminal・実装 worktree を記録する。
 // **この関数は削除をしない**（Issue #142）。worktreePath は所有権をホスト側で照合できない
 // 自己申告値のため、自動削除は別イシューの未コミット成果を消す経路になり復活させない
 // （「推測に基づく削除をしない」方針）。使い捨て worktree は最終スイープ対象にも構造的に
@@ -2359,7 +2360,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         // 破棄で失われる（この手順を作業前に置くのはそれを避けるため。Issue #435）。取り込み
         // 自体は必須実行とし、「必要な場合は」の条件文にしない — 兄弟イシューの PR が先に
         // マージされて base が動いているケースを、修正作業の前に必ず検出する。
-        `   push 前 base 最新化ゲート（必須）: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361）で base を取得する。この base fetch の終了コードを必ず確認し、非ゼロ終了（通信・認証・refspec エラー等）の場合は merge も push も行わず、pushed: false / routingError なしで「base fetch 失敗」（エラー内容の要旨を添える）を理由に返す（fail-closed。fetch 失敗を無視して進むと、以前の処理が残した stale な origin/${baseBranch} を merge したまま push でき、本ゲートを迂回してしまう。この時点ではまだ修正コミットを作っていないため作業を破棄しても損失はない）。fetch 成功後、base を取り込む（detached HEAD のまま行ってよい。手順 4 で push するのは HEAD:refs/heads/${branch} 形式のためローカルブランチ ref の更新は不要）: ${baseMergeInstruction(baseBranch)} 分岐 (a) ならその状態を merge 済みとして記憶し（後述の手順 4 の分岐判定に使う）手順 2 へ進む。分岐 (b) で解消コミットを作った場合はそれが base 取り込みの結果であることを記憶しておく。分岐 (b) の解消不能・分岐 (c) の拒否で返すときは pushed: false / routingError なしで上記理由を返す（まだ修正のコミットを作っていないため作業を破棄しても損失はない）。`,
+        `   push 前 base 最新化ゲート（必須）: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361）で base を取得する。この base fetch の終了コードを必ず確認し、非ゼロ終了（通信・認証・refspec エラー等）の場合は merge も push も行わず、pushed: false・commitFailed: true・routingError なしで summary に「base fetch 失敗」（エラー内容の要旨を添える）を書いて返す（fail-closed。修正コミット未作成のためホストは commitFailed で失敗終端する。fetch 失敗を無視して進むと、以前の処理が残した stale な origin/${baseBranch} を merge したまま push でき、本ゲートを迂回してしまう。この時点ではまだ修正コミットを作っていないため作業を破棄しても損失はない）。fetch 成功後、base を取り込む（detached HEAD のまま行ってよい。手順 4 で push するのは HEAD:refs/heads/${branch} 形式のためローカルブランチ ref の更新は不要）: ${baseMergeInstruction(baseBranch)} 分岐 (a) ならその状態を merge 済みとして記憶し（後述の手順 4 の分岐判定に使う）手順 2 へ進む。分岐 (b) で解消コミットを作った場合はそれが base 取り込みの結果であることを記憶しておく。分岐 (b) の解消不能・分岐 (c) の拒否（hook 拒否・type / scope 決定不能を含む）で返すときは pushed: false・commitFailed: true・routingError なしで summary に上記理由を書いて返す（修正コミット未作成のためホストは commitFailed で失敗終端する。pushed: false だけでは「修正済み・push 不要」と区別されず no-push ラウンドとして消費される。まだ修正のコミットを作っていないため作業を破棄しても損失はない）。`,
       ]
     : [
         `1. 本エージェントは隔離された git worktree 内で動作する。push 前のローカル修正のため fetch は不要。`,
@@ -2427,7 +2428,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         ]
       : []),
     `${pushAfterFix ? '7' : '5'}. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。`,
-    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）/ commitFailed（修正コミットを作成できなかった場合のみ true。その際 pushed は false。コミットできれば省略可）。`,
+    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）/ commitFailed（修正コミットを作成できなかった場合のみ true — base fetch 失敗・base merge の解消不能 / hook 拒否・commitlint の type / scope 決定不能を含む。その際 pushed は false。コミットできれば省略可）。`,
   ].join('\n')
 }
 
@@ -3699,16 +3700,19 @@ async function runImplement(item) {
         // 自己申告パスは自動削除しない（別 worktree の未コミット変更を破壊し得る）。
         const reason = 'worktree routing error: Review fix worktree が別リポに誤配置（修正不能）。実装リポの worktree への再配置が必要'
         log(`イシュー #${item.number} の Review 修正エージェントが worktree routing error を報告、即停止する`)
-        recordEphemeralWorktree(item.number, fReview?.worktreePath, 'fix-routing-error')
+        recordEphemeralWorktree(item.number, fReview?.worktreePath, 'fix-terminal')
         await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason, worktree: oldWorktreePathReview })
         recordFailure({ issue: item.number, reason })
         return false
       }
       if (fReview.commitFailed === true) {
-        // 修正コミット未作成（commitlint 決定不能・hook 拒否）。summary だけでは検出できないため
-        // 専用シグナルで failed 終端する（再試行しても同じ設定で同じ結果になる）。
+        // 修正コミット未作成（commitlint 決定不能・hook 拒否・base fetch / base merge 失敗）。summary
+        // だけでは検出できないため専用シグナルで failed 終端する（再試行しても同じ結果になる）。
+        // fix worktree は残留するため routingError と同じく台帳へ記録してから終端する（ディスク
+        // ゲートの in-run 残留予測を過小にしない）。
         const reason = `Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
         log(`⚠️ issue #${item.number}: ${reason}`)
+        recordEphemeralWorktree(item.number, fReview?.worktreePath, 'fix-terminal')
         await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason })
         recordFailure({ issue: item.number, reason })
         return false
@@ -4309,7 +4313,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // へ渡すと別 worktree の未コミット変更を破壊できてしまう）。
         routingErrorDetected = true
         log(`PR #${impl.prNumber} の修正エージェントが worktree routing error を報告、即 failed 終端（halt カウント対象）とする`)
-        recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-routing-error')
+        recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')
         await updateState(item.number, { worktree: oldWorktreePath })
         lastState = 'blocked'
         // routingErrorDetected が終端 status を 'failed' に確定させるため分類は結果に影響しないが、
@@ -4318,10 +4322,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         break
       }
       if (f.commitFailed === true) {
-        // 修正コミット未作成の専用シグナル（Review ループと同じ。pushed: false の「修正済み・push 不要」
-        // と区別し、noPushRounds の消費を待たず失敗終端する）。
+        // 修正コミット未作成の専用シグナル（Review ループと同じ。base fetch / base merge 失敗・hook
+        // 拒否・commitlint 決定不能を含む。pushed: false の「修正済み・push 不要」と区別し、
+        // noPushRounds の消費を待たず失敗終端する）。routingError と同じく台帳へ記録してから終端する。
         const reason = `fix がコミットを作成できず修正未反映: ${sanitize(f.summary ?? '')}`
         log(`⚠️ issue #${item.number}: ${reason}`)
+        recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')
         return await failMergeTerminal(reason)
       }
       fixCount++

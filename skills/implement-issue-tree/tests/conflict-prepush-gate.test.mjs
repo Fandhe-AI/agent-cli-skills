@@ -457,6 +457,29 @@ test('base merge の subject は安全文字集合で検証し -F ファイル�
   }
 })
 
+test('fixPrompt(pushAfterFix: true): base fetch 失敗・base merge 分岐 (b)/(c) の失敗返却は commitFailed: true を伴う（prCreate 経路は prNumber: 0 のまま）', () => {
+  // codex P1（articles#52）+ Bugbot（baby-tasks-app#31 / actions#109 / pronunciation-vocab-app#25）:
+  // ホストは commitFailed だけで「コミット失敗」と「修正済みで push 不要」を区別する。base merge の
+  // 失敗が pushed: false のみで返ると no-push ラウンドとして消費され fail-closed 終端を通らない。
+  mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
+  const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
+  const prompt = fixPrompt(item, impl, finding, true)
+  const fetchIdx = prompt.indexOf('「base fetch 失敗」')
+  assert.ok(fetchIdx >= 0, 'base fetch 失敗の返却指示がない')
+  assert.ok(prompt.slice(Math.max(0, fetchIdx - 120), fetchIdx).includes('pushed: false・commitFailed: true'), 'base fetch 失敗の返却に commitFailed: true がない')
+  const bcIdx = prompt.indexOf('分岐 (b) の解消不能・分岐 (c) の拒否')
+  assert.ok(bcIdx >= 0, '分岐 (b)/(c) の失敗返却指示がない')
+  const bc = prompt.slice(bcIdx, bcIdx + 260)
+  assert.ok(bc.includes('pushed: false・commitFailed: true'), '分岐 (b)/(c) の失敗返却に commitFailed: true がない')
+  assert.ok(bc.includes('ホストは commitFailed で失敗終端する'), 'commitFailed でホストが失敗終端する旨がない')
+  assert.ok(!/pushed: false \/ routingError なしで/.test(prompt), '旧契約（pushed: false / routingError なしのみ）が残っている')
+  const returnIdx = prompt.indexOf('返却: pushed / summary')
+  assert.ok(returnIdx >= 0 && prompt.slice(returnIdx).includes('commitFailed（修正コミットを作成できなかった場合のみ true — base fetch 失敗・base merge の解消不能 / hook 拒否'), '返却行の commitFailed に base merge 失敗が含まれていない')
+  // prCreate 経路は prNumber: 0 の既存契約のまま（commitFailed は FIX_SCHEMA 専用）
+  const pr = prCreatePrompt(item, impl, [])
+  assert.ok(pr.includes('prNumber: 0') && !pr.includes('commitFailed'), 'prCreate 経路に commitFailed が混入している')
+})
+
 test('monitorPrompt: 手順 1c の UNKNOWN リトライ途中で CONFLICTING に確定した場合も needs-fix 経路へ回す', () => {
   // Bugbot Medium 3 巡目（PR #436 discussion_r3837954196）の回帰テスト: 手順 1c の UNKNOWN
   // リトライは state 変化しか書いておらず、リトライ途中で mergeable が CONFLICTING に確定した

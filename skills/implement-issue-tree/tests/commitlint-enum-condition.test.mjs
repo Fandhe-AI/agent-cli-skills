@@ -29,10 +29,10 @@ if (markerIndex < 0) {
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-commitlint-enum-'))
 const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
-const SLICE_EXPORTS = ['baseMergeInstruction', 'commitlintCheckInstruction', 'FIX_SCHEMA']
+const SLICE_EXPORTS = ['baseMergeInstruction', 'commitlintCheckInstruction', 'FIX_SCHEMA', 'EPHEMERAL_KIND_MAX']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
-const { baseMergeInstruction, commitlintCheckInstruction, FIX_SCHEMA } = await import(pathToFileURL(slicePath).href)
+const { baseMergeInstruction, commitlintCheckInstruction, FIX_SCHEMA, EPHEMERAL_KIND_MAX } = await import(pathToFileURL(slicePath).href)
 // ホスト側（マーカーより下の driver 部）は import できないため、文字列として検査する。
 const driverPart = source.slice(markerIndex)
 
@@ -125,7 +125,7 @@ test('commitlintCheckInstruction: fail-closed 返却はホストが検出する�
   // ホスト側: Review ループ・Merge ループの両 fix 呼び出し直後で commitFailed を失敗終端として扱う
   const reviewIdx = driverPart.indexOf('fReview.commitFailed === true')
   assert.ok(reviewIdx >= 0, 'Review ループの host が fReview.commitFailed を判定していない')
-  const reviewSection = driverPart.slice(reviewIdx, reviewIdx + 600)
+  const reviewSection = driverPart.slice(reviewIdx, reviewIdx + 900)
   assert.ok(reviewSection.includes("status: 'failed'") && reviewSection.includes('recordFailure') && reviewSection.includes('return false'), 'Review ループの commitFailed が failed 終端になっていない')
   const mergeIdx = driverPart.indexOf('f.commitFailed === true')
   assert.ok(mergeIdx >= 0, 'Merge ループの host が f.commitFailed を判定していない')
@@ -184,4 +184,27 @@ test('commitlintCheckInstruction: scope-empty を tuple 解釈し、scope 必須
   assert.ok(chain.includes('決定できなければコミットせず'), '決定不能時にコミットしない指示がない')
   assert.ok(chain.includes('commitlint の scope-empty が scope を要求するが決定できない'), 'fail-closed の理由文言がない')
   assert.ok(text.includes('scope にイシュー番号を置かない'), '「scope にイシュー番号を置かない」が維持されていない')
+})
+
+test('host: commitFailed 終端は routingError と同じく fix worktree を台帳（recordEphemeralWorktree）へ記録してから終端する', () => {
+  // Bugbot（articles#52）: commitFailed abort 経路が recordEphemeralWorktree を呼ばずに抜けると
+  // 残留 worktree が台帳に載らず、fail-closed ディスクゲートの in-run 残留予測が過小になる。
+  // kind は routingError と同じ fix-terminal（両者は排他的な即終端のため 1 イシュー最大 1 件）。
+  assert.equal(EPHEMERAL_KIND_MAX['fix-terminal'], 1, 'EPHEMERAL_KIND_MAX に fix-terminal が宣言されていない')
+  assert.ok(!('fix-routing-error' in EPHEMERAL_KIND_MAX), '旧 kind fix-routing-error が残っている')
+  for (const [label, cond, path, terminal] of [
+    ['Review ループ', 'fReview.commitFailed === true', "recordEphemeralWorktree(item.number, fReview?.worktreePath, 'fix-terminal')", "await updateState(item.number, { status: 'failed'"],
+    ['Merge ループ', 'f.commitFailed === true', "recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')", 'return await failMergeTerminal('],
+  ]) {
+    const condIdx = driverPart.indexOf(cond)
+    assert.ok(condIdx >= 0, `${label}: commitFailed 判定がない`)
+    const section = driverPart.slice(condIdx, condIdx + 900)
+    const recIdx = section.indexOf(path)
+    const termIdx = section.indexOf(terminal)
+    assert.ok(recIdx >= 0, `${label}: commitFailed 終端で recordEphemeralWorktree が呼ばれていない`)
+    assert.ok(termIdx > recIdx, `${label}: recordEphemeralWorktree が終端処理より後にある`)
+    // routingError ハンドラも同じ kind・引数で記録している（両者の整合）
+    const routingIdx = driverPart.lastIndexOf(path, condIdx)
+    assert.ok(routingIdx >= 0 && routingIdx < condIdx, `${label}: routingError ハンドラ側の同一引数の記録がない`)
+  }
 })
