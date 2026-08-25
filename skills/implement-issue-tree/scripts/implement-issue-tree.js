@@ -537,7 +537,7 @@ const COMMON = [
 ].join('\n')
 
 // impl / recover / fix の各コミットが共通で受ける commitlint 制約（Issue #290: scope-enum リポでの落ちを防ぐ）。
-const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。該当する scope が無ければ scope を省略する。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
+const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。scope-empty は [*, "never"]（severity > 0）なら scope 必須、[*, "always"] なら scope 禁止（付けない）、severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）。scope 必須のときは、scope-enum が always なら変更内容に最も近い列挙値（判断できなければ先頭）、scope-enum が無い / never なら同ブランチで既に hook を通過した直前コミットの scope（never の禁止値は除外）、それも無ければ base ブランチ名の英数字以外を - に置換した値の順で決め、採用前に ^[A-Za-z0-9_-]{1,64}$ で検証する（不適合なら次の候補へ）。決定できなければコミットせず「commitlint の scope-empty が scope を要求するが決定できない」を理由に fail-closed で返す（その経路の失敗返却形式に従う）。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
 
 // base 取り込みマージコミットも commit-msg hook（commitlint）を通るため、固定 subject では
 // type-enum / scope-enum を持つリポで拒否される。hook 拒否はコンフリクトと異なり MERGE_HEAD が

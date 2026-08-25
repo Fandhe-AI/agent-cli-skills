@@ -85,3 +85,24 @@ test('baseMergeInstruction: scope-empty は tuple 解釈（never = 必須・alwa
   assert.ok(merge.includes('禁止値に該当しないものを使う'), 'フォールバック連鎖から禁止値を除外する指示がない')
   assert.ok(merge.includes('直前の implement / fix コミットの scope を再利用') && merge.includes('base ブランチ名'), '既存のフォールバック連鎖が残っていない')
 })
+
+test('commitlintCheckInstruction: scope-empty を tuple 解釈し、scope 必須時は決定連鎖で値を決め、決定できなければ fail-closed でコミットしない', () => {
+  // codex P1（PR #438 2 巡目）: 共通指示が scope-empty: [2, "never"]（scope 必須）を考慮せず
+  // 「該当する scope が無ければ省略」としていたため、scope-enum 無しで scope 必須のリポでは
+  // impl / recover / fix の各コミットが commit-msg hook に必ず拒否されていた。
+  const text = commitlintCheckInstruction
+  assert.ok(text.includes('scope-empty は [*, "never"]（severity > 0）なら scope 必須'), 'scope-empty never = 必須の解釈がない')
+  assert.ok(text.includes('[*, "always"] なら scope 禁止（付けない）'), 'scope-empty always = 禁止の解釈がない')
+  assert.ok(text.includes('severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）'), 'severity 0 / 未設定 = 任意（無ければ省略）の解釈がない')
+  const chainIdx = text.indexOf('scope 必須のときは')
+  assert.ok(chainIdx >= 0, 'scope 必須時の決定連鎖がない')
+  const chain = text.slice(chainIdx)
+  const enumIdx = chain.indexOf('scope-enum が always なら変更内容に最も近い列挙値')
+  const prevIdx = chain.indexOf('直前コミットの scope（never の禁止値は除外）')
+  const branchIdx = chain.indexOf('base ブランチ名の英数字以外を - に置換した値')
+  assert.ok(enumIdx >= 0 && prevIdx > enumIdx && branchIdx > prevIdx, '決定連鎖（scope-enum always → 直前コミットの scope（never 禁止値除外） → base ブランチ名）の順序が固定されていない')
+  assert.ok(chain.includes('^[A-Za-z0-9_-]{1,64}$'), '安全文字集合の検証がない')
+  assert.ok(chain.includes('決定できなければコミットせず'), '決定不能時にコミットしない指示がない')
+  assert.ok(chain.includes('commitlint の scope-empty が scope を要求するが決定できない'), 'fail-closed の理由文言がない')
+  assert.ok(text.includes('scope にイシュー番号を置かない'), '「scope にイシュー番号を置かない」が維持されていない')
+})
