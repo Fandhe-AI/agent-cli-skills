@@ -57,13 +57,35 @@ test('両指示: rule tuple [severity, when, value] の解釈（severity 0 無�
   }
 })
 
-test('baseMergeInstruction: type-enum 先頭へのフォールバックは always に限定し、never 列挙値へはフォールバックしない', () => {
-  const fallbackIdx = merge.indexOf('type-enum の先頭要素へフォールバックする')
-  assert.ok(fallbackIdx >= 0, 'type-enum 先頭へのフォールバックがない')
+test('baseMergeInstruction: always の列挙値フォールバックは先頭だけでなく安全な値を順に探索し、never 列挙値へはフォールバックしない', () => {
+  // codex P1（PR #438 5 巡目）: 先頭要素だけへ落ちると ["@invalid", "custom"] のように先頭が
+  // 安全文字集合に不適合でも後続に有効な許可値がある設定を誤って失敗終端する。
+  const fallbackIdx = merge.indexOf('type-enum の列挙値を先頭から順に探索し、後述の正規表現を満たす最初の値へフォールバックする')
+  assert.ok(fallbackIdx >= 0, 'always 時の列挙値順探索フォールバックがない')
+  assert.ok(!merge.includes('type-enum の先頭要素へフォールバック'), '旧契約（先頭要素のみへのフォールバック）が残っている')
   assert.ok(merge.lastIndexOf('always で全候補が不許可なら', fallbackIdx) >= 0, 'フォールバックの前提が always に限定されていない')
-  const after = merge.slice(fallbackIdx, fallbackIdx + 120)
-  assert.ok(after.includes('このフォールバックは always に限る'), 'フォールバックが always 限定である旨の文言がない')
+  const after = merge.slice(fallbackIdx, fallbackIdx + 260)
+  assert.ok(after.includes('先頭要素だけを見ない'), '先頭要素だけを見ない旨がない')
+  assert.ok(after.includes('1 つも無ければ git merge を実行せず「base merge subject の type を commitlint 設定から決定できない」'), 'always で安全な列挙値が 1 つも無いときの fail-closed がない')
+  assert.ok(after.includes('この列挙値探索は always に限る'), 'フォールバックが always 限定である旨の文言がない')
   assert.ok(after.includes('never の列挙値へフォールバックしない'), 'never の列挙値へフォールバックしない旨がない')
+})
+
+test('commitlintCheckInstruction: always で標準 type が 1 つも許可されなければ列挙値を順に探索し、無ければ fail-closed', () => {
+  const text = commitlintCheckInstruction
+  assert.ok(text.includes('always で標準 type が 1 つも許可されなければ、type-enum の列挙値を先頭から順に探索し ^[A-Za-z0-9_-]{1,64}$ を満たす最初のものを使う'), 'always 時の列挙値順探索がない')
+  assert.ok(text.includes('先頭だけを見て諦めない'), '先頭だけで諦めない旨がない')
+  assert.ok(text.includes('いずれでも決まらなければ type を決定できないとして下記の fail-closed 返却に従う'), '列挙値探索でも決まらない場合の fail-closed がない')
+})
+
+test('baseMergeInstruction: base ブランチ名由来の scope にも never の禁止値除外を適用し、該当すれば fail-closed', () => {
+  // Bugbot Medium（PR #438 5 巡目）: 禁止値除外が直前コミットの scope にしか無く、ブランチ名由来
+  // （main 等）は正規表現検証のみで禁止値がそのまま使われ得た。commitlintCheckInstruction と揃える。
+  const idx = merge.indexOf('base ブランチ名の英数字以外を - に置換した文字列を使う（これも never の禁止値に該当すれば使わず')
+  assert.ok(idx >= 0, 'ブランチ名由来 scope への禁止値除外がない')
+  const section = merge.slice(idx, idx + 200)
+  assert.ok(section.includes('git merge を実行せず「base merge subject の scope を commitlint 設定から決定できない」'), 'ブランチ名由来 scope が禁止値のときの fail-closed がない')
+  assert.ok(commitlintCheckInstruction.includes('base ブランチ名の英数字以外を - に置換した値（同様に検証）'), 'commitlintCheckInstruction 側のブランチ名由来 scope 検証が残っていない')
 })
 
 test('baseMergeInstruction: never で全候補が拒否されたら列挙外候補 merge → sync を経て、それも拒否されたときだけ (c) と同じ終端へ倒す', () => {
@@ -86,7 +108,7 @@ test('commitlintCheckInstruction: type は CC 標準 type から always / never 
   assert.ok(text.includes('feat / fix / docs / refactor / perf / test / style / build / ci / chore / revert'), 'type 候補の列挙がない')
   assert.ok(text.includes('always なら列挙値に含まれる値、never なら列挙値に含まれない値'), 'always / never の許可定義がない')
   assert.ok(text.includes('never で全て拒否されたら change → update の順で拒否リストに無いものを使う'), 'never 全拒否時の列挙外候補 change → update がない')
-  assert.ok(text.includes('それも拒否されたら type を決定できないとして下記の fail-closed 返却に従う'), '列挙外候補も拒否された場合の fail-closed がない')
+  assert.ok(text.includes('いずれでも決まらなければ type を決定できないとして下記の fail-closed 返却に従う'), '列挙外候補も拒否された場合の fail-closed がない')
 })
 
 test('commitlintCheckInstruction: fail-closed 返却はホストが検出する既存形式（implement / recover は branch 空文字、fix は commitFailed: true）に結び付く', () => {
