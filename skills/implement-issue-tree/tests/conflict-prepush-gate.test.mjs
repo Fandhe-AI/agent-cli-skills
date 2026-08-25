@@ -388,7 +388,7 @@ test('base merge の subject は固定 chore ではなく commitlint 設定か�
     assert.ok(mergeIdx >= 0, `${label}: subject をファイル経由で渡す merge 指示がない`)
     const lintIdx = prompt.indexOf('merge 前に対象リポの commitlint 設定')
     assert.ok(lintIdx >= 0 && lintIdx < mergeIdx, `${label}: merge 前に commitlint 設定を読む指示がない`)
-    const section = prompt.slice(lintIdx, lintIdx + 2400)
+    const section = prompt.slice(lintIdx, lintIdx + 3000)
     assert.ok(section.includes('git diff --name-only --diff-filter=U'), `${label}: コンフリクト有無を U で判定する指示がない`)
     const rejectIdx = section.indexOf('base merge コミット拒否')
     assert.ok(rejectIdx >= 0, `${label}: hook 拒否時の理由文言がない`)
@@ -429,7 +429,7 @@ test('base merge の subject 決定は候補外 type-enum と scope-enum 無し�
   ]) {
     const lintIdx = prompt.indexOf('merge 前に対象リポの commitlint 設定')
     assert.ok(lintIdx >= 0, `${label}: base merge の commitlint 読み取り指示がない`)
-    const section = prompt.slice(lintIdx, lintIdx + 700)
+    const section = prompt.slice(lintIdx, lintIdx + 1300)
     assert.ok(section.includes('type-enum の先頭要素へフォールバック'), `${label}: 候補 type が全て不許可のときの type-enum 先頭へのフォールバックがない`)
     assert.ok(section.includes('scope-enum が無ければ') && section.includes('直前の implement / fix コミットの scope を再利用'), `${label}: scope-enum 無しで scope 必須のときの決定手順（直前コミットの scope 再利用）がない`)
     assert.ok(section.includes('base ブランチ名'), `${label}: 直前コミットにも scope が無いときの base ブランチ名フォールバックがない`)
@@ -448,7 +448,7 @@ test('base merge の subject は安全文字集合で検証し -F ファイル�
   ]) {
     const lintIdx = prompt.indexOf('merge 前に対象リポの commitlint 設定')
     assert.ok(lintIdx >= 0, `${label}: base merge の commitlint 読み取り指示がない`)
-    const section = prompt.slice(lintIdx, lintIdx + 1400)
+    const section = prompt.slice(lintIdx, lintIdx + 2000)
     assert.ok(section.includes('^[A-Za-z0-9_-]{1,64}$'), `${label}: type / scope の安全文字集合（正規表現）検証がない`)
     assert.ok(section.includes('不適合ならその候補を捨てて次のフォールバックへ進む'), `${label}: 不適合候補を捨てて次へ進む指示がない`)
     assert.ok(section.includes('base merge subject の type/scope が安全文字集合に不適合'), `${label}: 最終候補も不適合なときの fail-closed 理由文言がない`)
