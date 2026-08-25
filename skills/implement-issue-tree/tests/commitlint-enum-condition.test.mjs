@@ -121,10 +121,26 @@ test('baseMergeInstruction: type 候補は chore → build → ci → fix の後
 test('baseMergeInstruction: scope-empty は tuple 解釈（never = 必須・always = 禁止・severity 0 = 省略）、scope-enum never は禁止値を除いたフォールバック連鎖を使う', () => {
   assert.ok(merge.includes('scope-empty が [*, "never"]（scope 必須）の場合のみ付け'), 'scope-empty never = 必須の解釈がない')
   assert.ok(merge.includes('[*, "always"]（scope 禁止）・severity 0・未設定なら省略'), 'scope-empty always = 禁止 / 無効時省略の解釈がない')
-  assert.ok(merge.includes('scope-enum が always ならそこから最も近い値'), 'scope-enum always 時の選択がない')
-  assert.ok(merge.includes('scope-enum が never なら列挙値は禁止値なので'), 'scope-enum never = 禁止値の解釈がない')
-  assert.ok(merge.includes('禁止値に該当しないものを使う'), 'フォールバック連鎖から禁止値を除外する指示がない')
-  assert.ok(merge.includes('直前の implement / fix コミットの scope を再利用') && merge.includes('base ブランチ名'), '既存のフォールバック連鎖が残っていない')
+  assert.ok(merge.includes('scope-enum が always なら後述の正規表現を満たす列挙値だけを順に探索し'), 'scope-enum always 時に安全な列挙値だけを探索する指示がない')
+  assert.ok(merge.includes('base merge subject の scope を commitlint 設定から決定できない'), 'always で該当列挙値が無いときの fail-closed 理由文言がない')
+  assert.ok(merge.includes('scope-enum が無い / never の場合に限り'), 'フォールバック連鎖が未設定 / never に限定されていない')
+  assert.ok(merge.includes('直前の implement / fix コミットの scope（never の禁止値は除外）を再利用') && merge.includes('base ブランチ名'), '未設定 / never 時のフォールバック連鎖が残っていない')
+})
+
+test('両指示: scope-enum が always のとき直前コミット / base ブランチ名由来の scope へ落ちず、安全な列挙値が無ければ fail-closed', () => {
+  // codex P1（PR #438 4 巡目）: always の列挙値が安全文字集合に不適合（例: @app/core のみ）のとき
+  // 直前コミット / ブランチ名へ落ちると always の許可リスト外の値を採用して hook に拒否される。
+  for (const [label, text, failText] of [
+    ['commitlintCheckInstruction', commitlintCheckInstruction, 'scope を決定できないとして fail-closed にする'],
+    ['baseMergeInstruction', merge, 'base merge subject の scope を commitlint 設定から決定できない'],
+  ]) {
+    assert.ok(text.includes('always の許可リストに含まれる保証が無いため使わない'), `${label}: always 時に直前コミット / ブランチ名由来を使わない旨がない`)
+    assert.ok(text.includes(failText), `${label}: always で安全な列挙値が無いときの fail-closed がない`)
+    // 探索対象は正規表現を満たす列挙値のみ（「次の候補へ」で連鎖をまたがない）
+    assert.ok(!/不適合なら次の候補へ/.test(text), `${label}: 連鎖をまたぐ旧文言「不適合なら次の候補へ」が残っている`)
+  }
+  assert.ok(commitlintCheckInstruction.includes('scope-enum が未設定 / never の場合に限り'), 'commitlintCheckInstruction: フォールバック連鎖が未設定 / never に限定されていない')
+  assert.ok(merge.includes('連鎖をまたいで直前コミット / ブランチ名へは落ちない'), 'baseMergeInstruction: 正規表現不適合時に連鎖をまたがない旨がない')
 })
 
 test('commitlintCheckInstruction: scope-empty を tuple 解釈し、scope 必須時は決定連鎖で値を決め、決定できなければ fail-closed でコミットしない', () => {
@@ -138,10 +154,10 @@ test('commitlintCheckInstruction: scope-empty を tuple 解釈し、scope 必須
   const chainIdx = text.indexOf('scope 必須のときは')
   assert.ok(chainIdx >= 0, 'scope 必須時の決定連鎖がない')
   const chain = text.slice(chainIdx)
-  const enumIdx = chain.indexOf('scope-enum が always なら変更内容に最も近い列挙値')
-  const prevIdx = chain.indexOf('直前コミットの scope（never の禁止値は除外）')
+  const enumIdx = chain.indexOf('scope-enum が always なら ^[A-Za-z0-9_-]{1,64}$ を満たす列挙値だけを順に探索し')
+  const prevIdx = chain.indexOf('直前コミットの scope（never の禁止値・上記正規表現に不適合な値は除外）')
   const branchIdx = chain.indexOf('base ブランチ名の英数字以外を - に置換した値')
-  assert.ok(enumIdx >= 0 && prevIdx > enumIdx && branchIdx > prevIdx, '決定連鎖（scope-enum always → 直前コミットの scope（never 禁止値除外） → base ブランチ名）の順序が固定されていない')
+  assert.ok(enumIdx >= 0 && prevIdx > enumIdx && branchIdx > prevIdx, '決定連鎖（scope-enum always は安全な列挙値のみ / 未設定 or never は直前コミットの scope → base ブランチ名）の順序が固定されていない')
   assert.ok(chain.includes('^[A-Za-z0-9_-]{1,64}$'), '安全文字集合の検証がない')
   assert.ok(chain.includes('決定できなければコミットせず'), '決定不能時にコミットしない指示がない')
   assert.ok(chain.includes('commitlint の scope-empty が scope を要求するが決定できない'), 'fail-closed の理由文言がない')

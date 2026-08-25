@@ -431,7 +431,7 @@ test('base merge の subject 決定は候補外 type-enum と scope-enum 無し�
     assert.ok(lintIdx >= 0, `${label}: base merge の commitlint 読み取り指示がない`)
     const section = prompt.slice(lintIdx, lintIdx + 1300)
     assert.ok(section.includes('type-enum の先頭要素へフォールバック'), `${label}: 候補 type が全て不許可のときの type-enum 先頭へのフォールバックがない`)
-    assert.ok(section.includes('scope-enum が無ければ') && section.includes('直前の implement / fix コミットの scope を再利用'), `${label}: scope-enum 無しで scope 必須のときの決定手順（直前コミットの scope 再利用）がない`)
+    assert.ok(section.includes('scope-enum が無い / never の場合に限り') && section.includes('直前の implement / fix コミットの scope（never の禁止値は除外）を再利用'), `${label}: scope-enum 無しで scope 必須のときの決定手順（直前コミットの scope 再利用）がない`)
     assert.ok(section.includes('base ブランチ名'), `${label}: 直前コミットにも scope が無いときの base ブランチ名フォールバックがない`)
   }
 })
@@ -450,7 +450,7 @@ test('base merge の subject は安全文字集合で検証し -F ファイル�
     assert.ok(lintIdx >= 0, `${label}: base merge の commitlint 読み取り指示がない`)
     const section = prompt.slice(lintIdx, lintIdx + 2000)
     assert.ok(section.includes('^[A-Za-z0-9_-]{1,64}$'), `${label}: type / scope の安全文字集合（正規表現）検証がない`)
-    assert.ok(section.includes('不適合ならその候補を捨てて次のフォールバックへ進む'), `${label}: 不適合候補を捨てて次へ進む指示がない`)
+    assert.ok(section.includes('不適合ならその候補を捨てて同じ連鎖内の次の候補へ進む'), `${label}: 不適合候補を捨てて同じ連鎖内の次へ進む指示がない`)
     assert.ok(section.includes('base merge subject の type/scope が安全文字集合に不適合'), `${label}: 最終候補も不適合なときの fail-closed 理由文言がない`)
     assert.ok(section.includes('git merge --no-edit -F <一時ファイル>'), `${label}: -F による受け渡し指示がない`)
     assert.ok(!section.includes('git merge --no-edit -m'), `${label}: -m へのシェル文字列補間が実行コマンドとして残っている`)
