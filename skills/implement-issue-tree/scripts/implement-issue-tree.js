@@ -537,7 +537,7 @@ const COMMON = [
 ].join('\n')
 
 // impl / recover / fix の各コミットが共通で受ける commitlint 制約（Issue #290: scope-enum リポでの落ちを防ぐ）。
-const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。scope-empty は [*, "never"]（severity > 0）なら scope 必須、[*, "always"] なら scope 禁止（付けない）、severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）。scope 必須のときは、scope-enum が always なら変更内容に最も近い列挙値（判断できなければ先頭）、scope-enum が無い / never なら同ブランチで既に hook を通過した直前コミットの scope（never の禁止値は除外）、それも無ければ base ブランチ名の英数字以外を - に置換した値の順で決め、採用前に ^[A-Za-z0-9_-]{1,64}$ で検証する（不適合なら次の候補へ）。決定できなければコミットせず「commitlint の scope-empty が scope を要求するが決定できない」を理由に fail-closed で返す（その経路の失敗返却形式に従う）。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
+const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。type は変更内容に合う Conventional Commits 標準 type（feat / fix / docs / refactor / perf / test / style / build / ci / chore / revert）のうち許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）を選び、never で全て拒否されたら change → update の順で拒否リストに無いものを使う。それも拒否されたら type を決定できないとして下記の fail-closed 返却に従う。scope-empty は [*, "never"]（severity > 0）なら scope 必須、[*, "always"] なら scope 禁止（付けない）、severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）。scope 必須のときは、scope-enum が always なら変更内容に最も近い列挙値（判断できなければ先頭）、scope-enum が無い / never なら同ブランチで既に hook を通過した直前コミットの scope（never の禁止値は除外）、それも無ければ base ブランチ名の英数字以外を - に置換した値の順で決め、採用前に ^[A-Za-z0-9_-]{1,64}$ で検証する（不適合なら次の候補へ）。決定できなければコミットせず「commitlint の scope-empty が scope を要求するが決定できない」を理由に fail-closed で返す。fail-closed 返却の形式（ホストが失敗として検出できる既存形式に限る。summary の文言だけでは検出されない）: implement / recover 経路は branch を空文字にし summary に理由を書く（ホストは branch が空のとき summary を理由に failed 終端する）。fix 経路は pushed: false・commitFailed: true・summary に理由を書く（ホストは commitFailed を失敗終端として扱う）。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
 
 // base 取り込みマージコミットも commit-msg hook（commitlint）を通るため、固定 subject では
 // type-enum / scope-enum を持つリポで拒否される。hook 拒否はコンフリクトと異なり MERGE_HEAD が
@@ -548,7 +548,7 @@ const commitlintCheckInstruction = `   コミット前に対象リポの commitl
 // commitlint の rule は [severity, when, value] の tuple。when が never の enum は拒否リストで
 // あり許可リストではない（articles#52 codex P1）。never の列挙値へフォールバックさせない。
 function baseMergeInstruction(base) {
-  return `merge 前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み、マージコミットの subject を <type>[(<scope>)]: base ブランチの変更を取り込む の形式で決める。rule は [severity, when, value] の tuple として解釈する（severity 0 の rule は無視。when が always の enum は列挙値が許可リスト、never の enum は列挙値が拒否リスト。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule（例: @commitlint/config-conventional の type-enum は always）を同じ規則で読む）。type は type-enum が無ければ chore、あれば chore → build → ci → fix → feat → docs → refactor → perf → test → style → revert の順で最初に許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）。always で全候補が不許可なら type-enum の先頭要素へフォールバックする（このフォールバックは always に限る。never の列挙値は禁止値であり、never の列挙値へフォールバックしない）。never で全候補が拒否されたら git merge を実行せず「base merge subject の type を commitlint 設定から決定できない」を理由として (c) と同じ終端へ倒す。scope は scope-empty が [*, "never"]（scope 必須）の場合のみ付け、[*, "always"]（scope 禁止）・severity 0・未設定なら省略する。付ける値は scope-enum が always ならそこから最も近い値（判断できなければ先頭）、scope-enum が never なら列挙値は禁止値なので以下の連鎖から禁止値に該当しないものを使う。scope-enum が無ければ（または never なら）同ブランチで既に hook を通過した直前の implement / fix コミットの scope を再利用し、それも無ければ base ブランチ名の英数字以外を - に置換した文字列を使う。type / scope の候補値は commitlint 設定・コミット履歴という未信頼データ由来のため、採用前に正規表現 ^[A-Za-z0-9_-]{1,64}$（英数・アンダースコア・ハイフンのみ。-F 渡しのためシェル特殊文字・空白・制御文字を弾ければ十分）で検証し、不適合ならその候補を捨てて次のフォールバックへ進む。最終候補（type-enum 先頭 / base ブランチ名由来の scope）も不適合なら git merge を実行せず「base merge subject の type/scope が安全文字集合に不適合」を理由として (c) と同じ終端へ倒す）。決めた subject は一時ファイルへ書き（printf の引数にせず、エディタ・Write ツール等でファイル内容として書く）、git merge --no-edit -F <一時ファイル> origin/${base} で渡す（-m "<subject>" のシェル文字列補間は使わない — 未信頼値をシェル構文へ再展開すると $(...)・バッククォート・引用符でコマンドインジェクションになる。検証と受け渡しの二重で塞ぐ）。終了コードで 3 分岐する: (a) 0（Already up to date またはクリーンマージ）→ 次の手順へ進む。(b) 非 0 かつ git diff --name-only --diff-filter=U が非空 → コンフリクト。その場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したらテスト実行規約に従いビルド・lint・テストを通してから git commit --no-edit でコミットする — subject は MERGE_MSG に残る上記のものを使う。この git commit --no-edit も pre-commit / commit-msg hook を通るため、非 0 終了（hook 拒否。MERGE_HEAD が残る）なら (c) と同じく git merge --abort し、push せず「base merge コミット拒否: <hook 出力の要旨>」を理由として返す。--no-verify で強行せず、終了コードを無視して merge 前の HEAD を push してはならない）。解消に確信が持てない・解消不能な場合は git merge --abort し、push せず「base コンフリクト解消不能」を理由として返す。(c) 非 0 かつ U が無い（MERGE_HEAD が残る = commit-msg hook 拒否等）→ git merge --abort し、push せず「base merge コミット拒否: <hook 出力の要旨>」を理由として返す（fail-closed。--no-verify で強行しない。exit 1 を無視して push すると base 未取り込みの HEAD が push されゲートを迂回する）。`
+  return `merge 前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み、マージコミットの subject を <type>[(<scope>)]: base ブランチの変更を取り込む の形式で決める。rule は [severity, when, value] の tuple として解釈する（severity 0 の rule は無視。when が always の enum は列挙値が許可リスト、never の enum は列挙値が拒否リスト。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule（例: @commitlint/config-conventional の type-enum は always）を同じ規則で読む）。type は type-enum が無ければ chore、あれば chore → build → ci → fix → feat → docs → refactor → perf → test → style → revert の順で最初に許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）。always で全候補が不許可なら type-enum の先頭要素へフォールバックする（このフォールバックは always に限る。never の列挙値は禁止値であり、never の列挙値へフォールバックしない）。never で全候補が拒否されたら列挙外の決定的候補 merge → sync の順で拒否リストに無く ^[A-Za-z0-9_-]{1,64}$ を満たすものを採り、それも拒否されたときだけ git merge を実行せず「base merge subject の type を commitlint 設定から決定できない」を理由として (c) と同じ終端へ倒す。scope は scope-empty が [*, "never"]（scope 必須）の場合のみ付け、[*, "always"]（scope 禁止）・severity 0・未設定なら省略する。付ける値は scope-enum が always ならそこから最も近い値（判断できなければ先頭）、scope-enum が never なら列挙値は禁止値なので以下の連鎖から禁止値に該当しないものを使う。scope-enum が無ければ（または never なら）同ブランチで既に hook を通過した直前の implement / fix コミットの scope を再利用し、それも無ければ base ブランチ名の英数字以外を - に置換した文字列を使う。type / scope の候補値は commitlint 設定・コミット履歴という未信頼データ由来のため、採用前に正規表現 ^[A-Za-z0-9_-]{1,64}$（英数・アンダースコア・ハイフンのみ。-F 渡しのためシェル特殊文字・空白・制御文字を弾ければ十分）で検証し、不適合ならその候補を捨てて次のフォールバックへ進む。最終候補（type-enum 先頭 / base ブランチ名由来の scope）も不適合なら git merge を実行せず「base merge subject の type/scope が安全文字集合に不適合」を理由として (c) と同じ終端へ倒す）。決めた subject は一時ファイルへ書き（printf の引数にせず、エディタ・Write ツール等でファイル内容として書く）、git merge --no-edit -F <一時ファイル> origin/${base} で渡す（-m "<subject>" のシェル文字列補間は使わない — 未信頼値をシェル構文へ再展開すると $(...)・バッククォート・引用符でコマンドインジェクションになる。検証と受け渡しの二重で塞ぐ）。終了コードで 3 分岐する: (a) 0（Already up to date またはクリーンマージ）→ 次の手順へ進む。(b) 非 0 かつ git diff --name-only --diff-filter=U が非空 → コンフリクト。その場で解消を試みる（対象リポジトリの CLAUDE.md・rules を遵守し、解消したらテスト実行規約に従いビルド・lint・テストを通してから git commit --no-edit でコミットする — subject は MERGE_MSG に残る上記のものを使う。この git commit --no-edit も pre-commit / commit-msg hook を通るため、非 0 終了（hook 拒否。MERGE_HEAD が残る）なら (c) と同じく git merge --abort し、push せず「base merge コミット拒否: <hook 出力の要旨>」を理由として返す。--no-verify で強行せず、終了コードを無視して merge 前の HEAD を push してはならない）。解消に確信が持てない・解消不能な場合は git merge --abort し、push せず「base コンフリクト解消不能」を理由として返す。(c) 非 0 かつ U が無い（MERGE_HEAD が残る = commit-msg hook 拒否等）→ git merge --abort し、push せず「base merge コミット拒否: <hook 出力の要旨>」を理由として返す（fail-closed。--no-verify で強行しない。exit 1 を無視して push すると base 未取り込みの HEAD が push されゲートを迂回する）。`
 }
 
 // マージ実行・マージ独立確認専用の最小共通指示。COMMON のファイル読取系指示は未信頼テキストを
@@ -826,6 +826,15 @@ const FIX_SCHEMA = {
       description:
         'worktree が別リポ（submodule 等）に誤配置されていて修正不能な場合 true。'
         + 'true のとき pushed は false。push 不要（修正済み）と区別するための専用シグナル。',
+    },
+    // commitlint の type / scope 決定不能・hook 拒否等で修正コミットを作成できなかった場合の
+    // 専用シグナル。summary の文言はホストが読まないため、これが無いと「push 不要（修正済み）」
+    // と区別できず pushed: false のまま続行してしまう（PR #438 Bugbot）。
+    commitFailed: {
+      type: 'boolean',
+      description:
+        '修正コミットを作成できなかった（commitlint の type / scope を決定できない・hook 拒否等）場合 true。'
+        + 'true のとき pushed は false。ホストは失敗終端として扱う。コミットできた場合は省略。',
     },
     // 対応不能・スコープ外と判断した指摘の構造化記録（summary 本文に埋め込ませない）。
     // この分類は未信頼の外部入力を読んだ fix エージェント自身の未検証な判断のため、次ラウンドの
@@ -2418,7 +2427,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         ]
       : []),
     `${pushAfterFix ? '7' : '5'}. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。`,
-    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）。`,
+    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）/ commitFailed（修正コミットを作成できなかった場合のみ true。その際 pushed は false。コミットできれば省略可）。`,
   ].join('\n')
 }
 
@@ -3695,6 +3704,15 @@ async function runImplement(item) {
         recordFailure({ issue: item.number, reason })
         return false
       }
+      if (fReview.commitFailed === true) {
+        // 修正コミット未作成（commitlint 決定不能・hook 拒否）。summary だけでは検出できないため
+        // 専用シグナルで failed 終端する（再試行しても同じ設定で同じ結果になる）。
+        const reason = `Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
+        log(`⚠️ issue #${item.number}: ${reason}`)
+        await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason })
+        recordFailure({ issue: item.number, reason })
+        return false
+      }
       fixCount++
       currentWorktreePath = newWorktreePathReview
       if (!currentWorktreePath) {
@@ -4298,6 +4316,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // 意味としては自動では回復し得ない（worktree の手動再配置が必要）。
         lastBlockedReason = 'unrecoverable'
         break
+      }
+      if (f.commitFailed === true) {
+        // 修正コミット未作成の専用シグナル（Review ループと同じ。pushed: false の「修正済み・push 不要」
+        // と区別し、noPushRounds の消費を待たず失敗終端する）。
+        const reason = `fix がコミットを作成できず修正未反映: ${sanitize(f.summary ?? '')}`
+        log(`⚠️ issue #${item.number}: ${reason}`)
+        return await failMergeTerminal(reason)
       }
       fixCount++
       // 次ラウンドの resolve (b) 観測入力（Issue #430）。

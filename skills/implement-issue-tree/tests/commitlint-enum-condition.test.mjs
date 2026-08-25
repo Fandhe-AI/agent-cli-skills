@@ -29,10 +29,12 @@ if (markerIndex < 0) {
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-commitlint-enum-'))
 const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
-const SLICE_EXPORTS = ['baseMergeInstruction', 'commitlintCheckInstruction']
+const SLICE_EXPORTS = ['baseMergeInstruction', 'commitlintCheckInstruction', 'FIX_SCHEMA']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
-const { baseMergeInstruction, commitlintCheckInstruction } = await import(pathToFileURL(slicePath).href)
+const { baseMergeInstruction, commitlintCheckInstruction, FIX_SCHEMA } = await import(pathToFileURL(slicePath).href)
+// ホスト側（マーカーより下の driver 部）は import できないため、文字列として検査する。
+const driverPart = source.slice(markerIndex)
 
 const merge = baseMergeInstruction('main')
 
@@ -64,12 +66,51 @@ test('baseMergeInstruction: type-enum 先頭へのフォールバックは alway
   assert.ok(after.includes('never の列挙値へフォールバックしない'), 'never の列挙値へフォールバックしない旨がない')
 })
 
-test('baseMergeInstruction: never で全候補が拒否されたら git merge を実行せず (c) と同じ終端へ倒す（fail-closed）', () => {
-  const idx = merge.indexOf('never で全候補が拒否されたら git merge を実行せず')
-  assert.ok(idx >= 0, 'never 全候補拒否時の指示がない')
-  const section = merge.slice(idx, idx + 120)
-  assert.ok(section.includes('base merge subject の type を commitlint 設定から決定できない'), 'fail-closed の理由文言がない')
-  assert.ok(section.includes('(c) と同じ終端へ倒す'), '(c) と同じ終端へ倒す旨がない')
+test('baseMergeInstruction: never で全候補が拒否されたら列挙外候補 merge → sync を経て、それも拒否されたときだけ (c) と同じ終端へ倒す', () => {
+  // codex P1（PR #438 3 巡目）: never で固定候補が全て列挙されていても列挙外の安全な type は
+  // commitlint を通過できる。直ちに停止せず決定的な列挙外候補を試し、それも拒否されたときだけ停止する。
+  const idx = merge.indexOf('never で全候補が拒否されたら列挙外の決定的候補 merge → sync の順で拒否リストに無く')
+  assert.ok(idx >= 0, 'never 全候補拒否時の列挙外候補 merge → sync がない')
+  const section = merge.slice(idx, idx + 260)
+  assert.ok(section.includes('^[A-Za-z0-9_-]{1,64}$'), '列挙外候補の安全文字集合検証がない')
+  const stopIdx = section.indexOf('それも拒否されたときだけ git merge を実行せず')
+  assert.ok(stopIdx >= 0, '列挙外候補も拒否された場合に限る停止条件がない')
+  const after = section.slice(stopIdx)
+  assert.ok(after.includes('base merge subject の type を commitlint 設定から決定できない'), 'fail-closed の理由文言がない')
+  assert.ok(after.includes('(c) と同じ終端へ倒す'), '(c) と同じ終端へ倒す旨がない')
+  assert.ok(!merge.includes('never で全候補が拒否されたら git merge を実行せず'), '旧契約（never 全候補拒否で即停止）が残っている')
+})
+
+test('commitlintCheckInstruction: type は CC 標準 type から always / never で選び、never 全拒否なら change → update を経てから fail-closed', () => {
+  const text = commitlintCheckInstruction
+  assert.ok(text.includes('feat / fix / docs / refactor / perf / test / style / build / ci / chore / revert'), 'type 候補の列挙がない')
+  assert.ok(text.includes('always なら列挙値に含まれる値、never なら列挙値に含まれない値'), 'always / never の許可定義がない')
+  assert.ok(text.includes('never で全て拒否されたら change → update の順で拒否リストに無いものを使う'), 'never 全拒否時の列挙外候補 change → update がない')
+  assert.ok(text.includes('それも拒否されたら type を決定できないとして下記の fail-closed 返却に従う'), '列挙外候補も拒否された場合の fail-closed がない')
+})
+
+test('commitlintCheckInstruction: fail-closed 返却はホストが検出する既存形式（implement / recover は branch 空文字、fix は commitFailed: true）に結び付く', () => {
+  // Bugbot Medium（PR #438 3 巡目）: ホストは summary の理由を読まない。Implement の成否は
+  // impl.branch の有無、fix の成否は typeof pushed === 'boolean' のみで判定するため、
+  // 「その経路の失敗返却形式に従う」だけでは失敗として検出されず続行してしまう。
+  const text = commitlintCheckInstruction
+  assert.ok(text.includes('summary の文言だけでは検出されない'), 'summary 文言では検出されない旨の明記がない')
+  assert.ok(text.includes('implement / recover 経路は branch を空文字にし summary に理由を書く'), 'implement / recover の失敗返却形式（branch 空文字）がない')
+  assert.ok(text.includes('fix 経路は pushed: false・commitFailed: true・summary に理由を書く'), 'fix の失敗返却形式（commitFailed: true）がない')
+  // スキーマ側にシグナルが存在する
+  assert.equal(FIX_SCHEMA.properties.commitFailed?.type, 'boolean', 'FIX_SCHEMA に commitFailed が無い')
+  assert.ok(!FIX_SCHEMA.required.includes('commitFailed'), 'commitFailed は省略可でなければならない')
+  // ホスト側: Review ループ・Merge ループの両 fix 呼び出し直後で commitFailed を失敗終端として扱う
+  const reviewIdx = driverPart.indexOf('fReview.commitFailed === true')
+  assert.ok(reviewIdx >= 0, 'Review ループの host が fReview.commitFailed を判定していない')
+  const reviewSection = driverPart.slice(reviewIdx, reviewIdx + 600)
+  assert.ok(reviewSection.includes("status: 'failed'") && reviewSection.includes('recordFailure') && reviewSection.includes('return false'), 'Review ループの commitFailed が failed 終端になっていない')
+  const mergeIdx = driverPart.indexOf('f.commitFailed === true')
+  assert.ok(mergeIdx >= 0, 'Merge ループの host が f.commitFailed を判定していない')
+  const mergeSection = driverPart.slice(mergeIdx, mergeIdx + 500)
+  assert.ok(mergeSection.includes('return await failMergeTerminal('), 'Merge ループの commitFailed が failMergeTerminal で終端していない')
+  // いずれも fixCount++（成功扱い）より前に置かれている
+  assert.ok(driverPart.indexOf('fixCount++', reviewIdx) > reviewIdx && driverPart.indexOf('fixCount++', mergeIdx) > mergeIdx)
 })
 
 test('baseMergeInstruction: type 候補は chore → build → ci → fix の後に Conventional Commits 標準 type へ続き、always / never の両条件で「許可される」を定義する', () => {
