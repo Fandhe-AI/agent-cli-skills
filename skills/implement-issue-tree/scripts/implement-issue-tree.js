@@ -828,20 +828,20 @@ function selectPrereqProbeTargets(work, depsMap, done, failedSet, running) {
 // codex 指摘: PR 番号なし・不一致の 'MERGED' 申告だけで前提を解除できてしまう fail-closed
 // 契約違反を塞ぐ）。knownPr 自体が未確定（ホストがまだその issue の PR 番号を掴んでいない）
 // なら照合不能として遷移させない — 未確認のまま前提充足と見なすことは fail-closed に反する。
+// MERGED 照合が不成立でも issueState === 'CLOSED' へフォールスルーする（早期 return で同一
+// entry の CLOSED 判定を握り潰さない。cursor 指摘: PR 番号照合失敗時に CLOSED が評価されず
+// 前提が永久にブロックされたままになる不具合の修正）。
 function classifyPrereqTransition(entry, knownPr) {
   if (entry && typeof entry === 'object') {
-    if (entry.prState === 'MERGED') {
-      const pr = entry.pr
-      if (
-        Number.isInteger(pr) &&
-        pr > 0 &&
-        Number.isInteger(knownPr) &&
-        knownPr > 0 &&
-        pr === knownPr
-      ) {
-        return 'merged'
-      }
-      return null
+    if (
+      entry.prState === 'MERGED' &&
+      Number.isInteger(entry.pr) &&
+      entry.pr > 0 &&
+      Number.isInteger(knownPr) &&
+      knownPr > 0 &&
+      entry.pr === knownPr
+    ) {
+      return 'merged'
     }
     if (entry.issueState === 'CLOSED') return 'closed'
   }
@@ -5388,8 +5388,13 @@ while (true) {
   // break してしまい、その周回で外部完了した前提が failedSet に留まり続け cascade が
   // 同一ラン内で永久にブロックされる。drain 直前は残り周回が無い（break すれば二度と
   // プローブされない）ため、通常の間隔制御より drain 検知を優先する。
+  // halted 後も本ゲートは通す（オーナー判断 2026-08-26・codex P1 案A）。halted は「新規イシュー
+  // 投入の停止」のみを意味し、その解除やプローブ自体の抑止は含まない。halted 後にプローブ・
+  // applyPrereqTransitions による状態遷移・prereqTransitions 記録・updateState 永続化を止めると、
+  // halt 後に外部完了（人手マージ/クローズ）した前提が failedSet に留まったまま終端し、
+  // レポート・状態ファイルの精度が落ちる。新規着手ゲート（直後の `if (!halted)` ブロック）と
+  // halted フラグの解除条件はこの変更で一切変えない。
   if (
-    !halted &&
     running.size < concurrency &&
     prereqProbeAtIterationSeq !== dispatchIterationSeq &&
     (running.size === 0 || Date.now() - prereqProbeLastAt >= PREREQ_RECHECK_MIN_MS)

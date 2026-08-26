@@ -179,6 +179,32 @@ test('classifyPrereqTransition: knownPr が未確定（ホストが対象 PR を
   assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: 212 }, 0), null)
 })
 
+// PR #444 cursor Bugbot Medium 指摘（threadId PRRT_kwDORuXFg86cYEKm）の回帰固定: MERGED 分岐の
+// PR 番号照合が不成立でも、同一 entry の issueState === 'CLOSED' をフォールスルーで評価する
+// （早期 return で握り潰さない）。オーナー判断（2026-08-26・案A）で早期 return を廃し単一の
+// 複合条件 if へ統合した。
+test('classifyPrereqTransition: MERGED 照合不成立でも issueState CLOSED ならフォールスルーで closed（PR番号なし）', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'CLOSED' }, 212), 'closed', 'pr 欠落でも CLOSED 判定に到達する')
+})
+
+test('classifyPrereqTransition: MERGED 照合不成立でも issueState CLOSED ならフォールスルーで closed（PR番号不一致）', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'CLOSED', pr: 999 }, 212), 'closed', 'pr 不一致でも CLOSED 判定に到達する')
+})
+
+test('classifyPrereqTransition: MERGED 照合不成立でも issueState CLOSED ならフォールスルーで closed（knownPr 未確定）', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'CLOSED', pr: 212 }, undefined), 'closed', 'knownPr 未確定でも CLOSED 判定に到達する')
+})
+
+test('classifyPrereqTransition: MERGED 照合が成立すれば従来どおり merged（issueState は無視）', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: 212 }, 212), 'merged')
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'CLOSED', pr: 212 }, 212), 'merged', 'MERGED 照合成立時は CLOSED より優先される')
+})
+
+test('classifyPrereqTransition: MERGED 照合不成立かつ issueState も CLOSED でなければ null（fail-closed 維持）', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: 999 }, 212), null)
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'UNKNOWN' }, 212), null)
+})
+
 // ---------------------------------------------------------------------------
 // applyPrereqTransitions: ホスト側の二重フィルタ（targets 集合 × 整数検証）
 // ---------------------------------------------------------------------------
@@ -356,6 +382,29 @@ test('駆動部: プローブ呼び出しが通常 dispatch の後・running.siz
   assert.ok(probeCallIdx > dispatchForStart, 'probePrereqCompletion 呼び出しが dispatch ループより前にある')
   const breakIdx = driverPart.indexOf('if (running.size === 0) break')
   assert.ok(breakIdx > probeCallIdx, 'running.size===0 の break が probePrereqCompletion 呼び出しより前にある（プローブが break 後に回っている）')
+})
+
+// PR #444 codex P1 指摘（threadId PRRT_kwDORuXFg86cYC3e）の回帰固定: halted 後は
+// probePrereqCompletion が二度と呼ばれず、halt 後に外部完了した前提の状態遷移・レポート記録が
+// 失われる。オーナー判断（2026-08-26・案A）でプローブ起動ゲートから `!halted` を外した
+// （プローブ実行・状態遷移・永続化は halt 後も継続する）。一方で新規イシュー投入ゲート
+// （`for (const item of work) {` を囲む `if (!halted) {`）は halt の意味論（新規着手停止）を
+// 維持するため変更しない。
+test('駆動部: プローブ起動ゲートに !halted が含まれない（halt 後もプローブ・状態記録を継続する）', () => {
+  const probeGateStart = driverPart.indexOf('running.size === 0 || Date.now() - prereqProbeLastAt >= PREREQ_RECHECK_MIN_MS')
+  assert.ok(probeGateStart >= 0, 'プローブ起動ゲートの条件式が見つからない')
+  const probeGateCondStart = driverPart.lastIndexOf('if (', probeGateStart)
+  const probeGateCondEnd = driverPart.indexOf(') {', probeGateStart) + ') {'.length
+  const probeGateCond = driverPart.slice(probeGateCondStart, probeGateCondEnd)
+  assert.ok(!probeGateCond.includes('!halted'), `プローブ起動ゲートに !halted が残っている（halt 後にプローブが止まる回帰）: ${probeGateCond}`)
+  assert.ok(probeGateCond.includes('running.size < concurrency'), 'プローブ起動ゲートの running.size < concurrency 条件が見つからない')
+})
+
+test('駆動部: 新規イシュー投入ゲート（dispatch for ループ）は !halted を維持する', () => {
+  const dispatchGateIdx = driverPart.indexOf('if (!halted) {')
+  assert.ok(dispatchGateIdx >= 0, '新規イシュー投入ゲート if (!halted) が見つからない（halt の新規着手停止の意味論が失われている）')
+  const dispatchForIdx = driverPart.indexOf('for (const item of work) {', dispatchGateIdx)
+  assert.ok(dispatchForIdx >= 0 && dispatchForIdx - dispatchGateIdx < 50, 'if (!halted) の直後が dispatch for ループでない')
 })
 
 test('駆動部: Promise.race 後に必ず clearTimeout が存在する（tick timer のリーク防止）', () => {
