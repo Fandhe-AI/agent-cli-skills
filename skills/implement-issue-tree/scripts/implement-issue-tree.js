@@ -870,6 +870,7 @@ function prereqProbePrompt(targets, prHints) {
   return [
     '前提イシューの外部完了（マージ/クローズ）確認担当。ラン中に人手マージ等で完了した前提を' +
       '検知するための読み取り専用プローブ。',
+    MERGE_CONTEXT_COMMON,
     `対象: ${targets.map((d) => `#${d}`).join(', ')}`,
     '権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の 3 種のみ:',
     `  jq -r '.items["<N>"].pr // 0' ${STATE_FILE}`,
@@ -4990,9 +4991,13 @@ async function probePrereqCompletion(targets) {
   })
   const transitions = applyPrereqTransitions(probe, targets, done, failedSet)
   for (const t of transitions) {
+    // kind で文言を分ける — Review 非収束等の依存ブロックは PR 未作成（push 前 blocked）が
+    // 主経路のため、'merged' 前提でハードコードすると closed 遷移（PR なし）で
+    // 「PR #? MERGED」という虚偽の note になる。
     const noteSuffix =
-      '。ラン中に外部完了を確認（Issue CLOSED / PR #' +
-      `${t.pr ?? '?'} MERGED）: 前提充足として下流を同一ラン内で再判定する`
+      t.kind === 'merged'
+        ? `。ラン中に外部完了を確認（PR #${t.pr ?? '?'} MERGED）: 前提充足として下流を同一ラン内で再判定する`
+        : '。ラン中に外部完了を確認（Issue CLOSED）: 前提充足として下流を同一ラン内で再判定する'
     const existingIdx = results.findIndex((r) => r.issue === t.issue)
     if (existingIdx >= 0) {
       results[existingIdx] = {
@@ -5001,10 +5006,15 @@ async function probePrereqCompletion(targets) {
         ...(t.pr ? { pr: t.pr } : {}),
         note: `${results[existingIdx].note ?? ''}${noteSuffix}`,
       }
+    } else {
+      // failedSet 追加経路は必ず results へも追記される契約（markBlockedByDeps・起動時の
+      // merged/closed-but-open 分岐・recordFailure 経由の failed 全て）だが、契約破れで
+      // エントリが無い場合に遷移をレポートから消さないための保険（fail-safe）。
+      results.push({ issue: t.issue, status: t.kind, ...(t.pr ? { pr: t.pr } : {}), note: noteSuffix.slice(1) })
     }
     const failuresIdx = failures.findIndex((f) => f.issue === t.issue)
     if (failuresIdx >= 0) failures.splice(failuresIdx, 1)
-    const patch = { status: t.kind, note: noteSuffix, ...(t.pr ? { pr: t.pr } : {}) }
+    const patch = { status: t.kind, note: noteSuffix.slice(1), ...(t.pr ? { pr: t.pr } : {}) }
     const updated = await updateState(t.issue, patch)
     if (!updated) log(`⚠️ #${t.issue}: 前提完了遷移後の状態ファイル更新に失敗した（レポートには反映済み）`)
     prereqTransitions.push(t)
@@ -5328,9 +5338,14 @@ while (true) {
   // running.size===0 での break 契約は変更しない。
   let finished
   const tickCandidates = selectPrereqProbeTargets(work, depsMap, done, failedSet, running)
+  // running.size < concurrency も必須: プローブ本体（上のブロック）は空きスロットがある場合
+  // にしか動かないため、スロットが全て埋まっている間に tick を arm すると「何も確認できない
+  // 周回」を PREREQ_RECHECK_TICK_MS ごとに空費し、その都度 remeasureResidualBytesIfDue() 等の
+  // 周回冒頭処理を再実行させるだけになる。
   const tickArmable =
     tickCandidates.length > 0 &&
     running.size > 0 &&
+    running.size < concurrency &&
     typeof setTimeout === 'function' &&
     typeof clearTimeout === 'function'
   if (tickArmable) {
