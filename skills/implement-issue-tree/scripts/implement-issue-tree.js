@@ -4392,6 +4392,15 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       log(`PR #${impl.prNumber} が base とコンフリクト、base 取り込みエージェントを起動する（${baseMergeCount + 1}/${maxBaseMerges} 回目。fix 予算は消費しない）`)
       const oldWorktreePath = currentWorktreePath
+      // baseMergePrompt は未信頼な Issue タイトルを読むエージェントであり、返却する worktreePath は
+      // プロンプトインジェクションや誤申告により別 Issue の worktree を指し得る（sanitizeWorktreePath
+      // は文字種検証のみで実在性・新規性は保証しない）。cleanup 追跡対象として採用してよいのは、この
+      // 呼び出しが新規作成した worktree だと物理的に証明できたパスだけであるため、spawn 前の
+      // git worktree list を先に記録しておく（証明は spawn 後、b の結果を見てから行う）。
+      const beforeBaseMergeEntries = await scanOrphanWorktrees()
+      const beforeBaseMergePaths = new Set(
+        beforeBaseMergeEntries.map((e) => sanitizeWorktreePath(e?.path ?? '')).filter(Boolean),
+      )
       const b = await agent(baseMergePrompt(item, impl), { label: `base-merge:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: BASE_MERGE_SCHEMA, isolation: 'worktree' })
       const baseMergeSucceeded = b !== null && b !== undefined && typeof b.pushed === 'boolean'
       if (!baseMergeSucceeded) {
@@ -4417,7 +4426,30 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       baseMergeCount++
       lastRoundPushed = b.pushed === true
-      const newBaseMergeWorktreePath = sanitizeWorktreePath(b?.worktreePath ?? '')
+      const reportedBaseMergeWorktreePath = sanitizeWorktreePath(b?.worktreePath ?? '')
+      let newBaseMergeWorktreePath = ''
+      if (reportedBaseMergeWorktreePath) {
+        // 「新規作成の証明」= spawn 前には存在せず、spawn 後には物理的に登録されているパス。
+        // after 側が空集合（取得不成立）の場合は「before に無ければ新規」という判定が常に真に
+        // なってしまう（fail-open）ため、after が非空であることも要求する。
+        const afterBaseMergeEntries = await scanOrphanWorktrees()
+        const afterBaseMergePaths = new Set(
+          afterBaseMergeEntries.map((e) => sanitizeWorktreePath(e?.path ?? '')).filter(Boolean),
+        )
+        if (
+          afterBaseMergePaths.size > 0 &&
+          afterBaseMergePaths.has(reportedBaseMergeWorktreePath) &&
+          !beforeBaseMergePaths.has(reportedBaseMergeWorktreePath)
+        ) {
+          newBaseMergeWorktreePath = reportedBaseMergeWorktreePath
+        } else {
+          log(
+            `⚠️ issue #${item.number}: base 取り込みエージェント自己申告の worktree パス（${reportedBaseMergeWorktreePath}）を、` +
+              `spawn 前後の git worktree list 差分で新規作成と証明できず、cleanup 追跡対象として採用しない` +
+              `（fail-closed。プロンプトインジェクション・誤申告による別 Issue の worktree 誤削除を防ぐため）`,
+          )
+        }
+      }
       currentWorktreePath = newBaseMergeWorktreePath
       if (!newBaseMergeWorktreePath) {
         log(`⚠️ issue #${item.number}: base 取り込み worktree パスを取得できず追跡不能。git worktree prune での手動掃除が必要な場合あり`)
