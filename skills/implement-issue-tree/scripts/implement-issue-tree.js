@@ -4402,7 +4402,19 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         break
       }
       log(`PR #${impl.prNumber} が base とコンフリクト、base 取り込みエージェントを起動する（${baseMergeCount + 1}/${maxBaseMerges} 回目。fix 予算は消費しない）`)
-      const b = await agent(baseMergePrompt(item, impl), { label: `base-merge:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: BASE_MERGE_SCHEMA, isolation: 'worktree' })
+      // isolation: 'worktree' はランタイムが agent() 呼び出し内部で worktree を spawn する契約
+      // のため、agent() 自体が schema 不適合・例外で reject しても worktree は既に作られている
+      // （codex-review P1・PR #443。await が reject すると b への代入が行われず、直後の
+      // recordEphemeralWorktree 呼び出しごと読み飛ばされて記録が漏れていた）。b?.worktreePath を
+      // 「応答が得られた場合の自己申告値」として使う点は変えず、例外時も同じ関数を必ず通す
+      // ため try/catch で reject を捕捉し b を null のまま次段へ渡す（return で早期終了しない）。
+      let b = null
+      let baseMergeAgentError = null
+      try {
+        b = await agent(baseMergePrompt(item, impl), { label: `base-merge:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: BASE_MERGE_SCHEMA, isolation: 'worktree' })
+      } catch (e) {
+        baseMergeAgentError = e
+      }
       // base-merge worktree は review / pr-create と同じ「記録のみ・自動削除しない」方針に従う
       // （recovery.md「検討して不採用とした代替案」参照）。spawn 前後の git worktree list 差分は
       // 並列実行下では別 Issue が同時間帯に作成した worktree と競合し一意の所有権証明にならず
@@ -4412,10 +4424,17 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // ホスト発行 nonce 方式も却下済み（nonce は未信頼データを読むエージェントへ開示されるため
       // 所持証明にならない）。よって currentWorktreePath（cleanup 対象）へは絶対に昇格させず、
       // 自己申告 worktreePath は台帳（ephemeralWorktrees）への記録専用として扱う。
-      // ランタイムはエージェントの応答内容と無関係に worktree を作成済みのため、成否判定より前に
-      // 無条件で記録する（pr-create と同じパターン。前回の before/after 差分方式は before スキャン
-      // 失敗時に記録が漏れる欠陥があった。Bugbot・PR #443）。
+      // ランタイムはエージェントの応答内容・例外の有無と無関係に worktree を作成済みのため、
+      // 成否判定・例外判定より前に無条件で記録する（pr-create と同じパターン。前回の
+      // before/after 差分方式は before スキャン失敗時に記録が漏れる欠陥があった。Bugbot・PR #443）。
       recordEphemeralWorktree(item.number, b?.worktreePath, 'base-merge')
+      if (baseMergeAgentError) {
+        // 台帳計上は上で完了済み。fix と同じ契約: 例外は baseMergeCount を消費せず即失敗終端
+        // （再試行しない）。
+        const baseMergeFailReason = `base 取り込みエージェントが例外終了した（${baseMergeCount + 1} 回目。${sanitize(String(baseMergeAgentError?.message ?? baseMergeAgentError))}）`
+        log(`⚠️ issue #${item.number}: ${baseMergeFailReason}`)
+        return await failMergeTerminal(baseMergeFailReason)
+      }
       const baseMergeSucceeded = b !== null && b !== undefined && typeof b.pushed === 'boolean'
       if (!baseMergeSucceeded) {
         // fix と同じ契約: 無効な結果は baseMergeCount を消費せず即失敗終端（再試行しない）。
