@@ -189,6 +189,26 @@ test('baseMergePrompt: gh pr merge の実行コマンド形・resolveReviewThrea
   assert.ok(!prompt.includes('mutation($tid:ID!){resolveReviewThread'), 'resolveReviewThread mutation の実行コマンド行が混入している')
 })
 
+// PR #443 codex P0（thread PRRT_kwDORuXFg86cbSqr）の回帰テスト: baseMergePrompt は PR head
+// checkout 後に fmt / lint / build / test 等、PR 由来の未信頼コード実行を指示しない。PR は
+// package scripts・Makefile・テストランナー設定を自由に変更できるため、これらを実行すると
+// 悪意ある PR から任意コード実行 → 本エージェントの push 用 GitHub 認証情報の奪取・外部送信に
+// つながる。検証は push 後に再起動される既存 CI へ委ね、コンフリクト解消後の妥当性確認は
+// git diff --check 等の非実行系のみに限定する。
+test('baseMergePrompt: fmt / lint / build / test 等の未信頼コード実行指示を含まない', () => {
+  const prompt = baseMergePrompt(item, impl)
+  // 旧実装の実行指示そのもの（「〜を通してからコミットする」という命令形）が消えていることを
+  // 固定する。否定文脈での「fmt / lint / build / test」という語の言及自体（実行しない旨の
+  // 説明）は許容するため、語の不在ではなく実行を命じる言い回しの不在で判定する。
+  assert.ok(!prompt.includes('を通してからコミットする'), '旧実装の実行命令形（〜を通してからコミットする）が残っている')
+  for (const word of ['npm run', 'npm test', 'npm ci', 'yarn ', 'pnpm ', 'make ', 'cargo test', 'cargo build', 'pytest', 'go test', 'go build']) {
+    assert.ok(!prompt.includes(word), `未信頼コード実行コマンド「${word}」が混入している`)
+  }
+  assert.ok(prompt.includes('git diff --check'), 'conflict marker 残存確認（git diff --check）の非実行系検証指示がない')
+  assert.ok(prompt.includes('既存 CI'), '検証を既存 CI へ委ねる旨の記述がない')
+  assert.ok(prompt.includes('実行しない'), '未信頼コードを実行しない旨の明示がない')
+})
+
 test('baseMergePrompt: レビュー指摘の修正を行わない権限境界の文言を含む', () => {
   const prompt = baseMergePrompt(item, impl)
   assert.ok(prompt.includes('レビュー指摘の修正'), 'レビュー指摘の修正を行わない旨の権限境界文言がない')
