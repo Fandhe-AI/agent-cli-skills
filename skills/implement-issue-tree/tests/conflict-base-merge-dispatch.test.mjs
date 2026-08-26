@@ -169,10 +169,14 @@ test('baseMergePrompt: base fetch → merge → push → mergeable 確認の順�
   assert.ok(pushIdx < mergeableIdx, 'push が mergeable 確認より前に現れない')
 })
 
-test('baseMergePrompt: submodule ポインタ指示と check-runs 起動確認を含む', () => {
+// PR #443 codex P0（submodule 例外撤去）の回帰テスト: gitlink コンフリクトは双方がポインタを
+// 変更した状態であり、base 側採用（git checkout origin/<base> -- <path> → git add → commit）は
+// PR 側の gitlink 更新を黙って破棄する。旧実装の submodule 自動解消指示が復活していないことと、
+// check-runs 起動確認は維持されていることを固定する。
+test('baseMergePrompt: submodule 自動解消指示を含まず（fail-closed）、check-runs 起動確認を含む', () => {
   const prompt = baseMergePrompt(item, impl)
-  assert.ok(prompt.includes('git checkout origin/'), 'submodule を base 側コミットへ合わせる指示がない')
-  assert.ok(prompt.includes('git add '), 'submodule ポインタの git add 指示がない')
+  assert.ok(!prompt.includes('git checkout origin/'), '撤去済みの submodule base 側採用（git checkout origin/<base> -- <path>）指示が復活している')
+  assert.ok(!prompt.includes('git add '), '撤去済みの submodule ポインタ git add 指示が復活している')
   assert.ok(prompt.includes('check-runs'), 'push 後の check-run 起動確認指示がない')
   assert.ok(prompt.includes('checksStarted'), 'checksStarted の返却指示がない')
 })
@@ -254,9 +258,10 @@ test('baseMergePrompt: gh pr merge の実行コマンド形・resolveReviewThrea
 // build/lint/test の実行だけを禁じたが、それでも「git diff --check の conflict marker 確認
 // だけで通常ファイルの内容コンフリクトを編集し push する」余地が残っていた（構文・意味の破損を
 // 検出できないまま無検証で push され得る）。この対応は実行検証を復活させる代わりに、
-// runVerification=false では内容編集を伴う解消そのものを行う権限自体を持たせない（submodule
-// gitlink ポインタの機械的な合わせ込みのみ例外）。内容コンフリクトは commitFailed: true で
-// 停止し、build/lint/test を正当に実行できる fix/implement 経路（runVerification=true）へ
+// runVerification=false ではコンフリクト解消そのものを行う権限自体を持たせない（当初あった
+// submodule gitlink ポインタの機械的な合わせ込み例外も、base 側採用が PR 側の gitlink 更新を
+// 黙って破棄するため codex P0 指摘で撤去した）。コンフリクトは種別を問わず commitFailed: true
+// で停止し、build/lint/test を正当に実行できる fix/implement 経路（runVerification=true）へ
 // 委ねる。
 // Bugbot High（thread c52cd32b-3157-4fa5-9010-5bc0c92bec7b）の回帰テスト: f8701bf は
 // baseMergePrompt 手順 2 の直接記述からは build/lint/test 実行指示を消したが、同じ手順に
@@ -284,7 +289,9 @@ test('baseMergePrompt: fmt / lint / build / test 等の未信頼コード実行�
   }
   // PR #443 codex P1 対応の核: 内容コンフリクトは編集せず commitFailed で停止する旨の明示。
   assert.ok(prompt.includes('内容を編集する') || prompt.includes('内容編集の権限'), '内容編集を伴う解消の権限が無い旨の明示がない')
-  assert.ok(prompt.includes('submodule ポインタ差分のみ'), 'submodule ポインタのみ機械的解消可という例外の明示がない')
+  // PR #443 codex P0 対応の核: submodule 例外の撤去（種別を問わず解消しない fail-closed）。
+  assert.ok(prompt.includes('コンフリクト種別を問わず解消しない'), 'コンフリクト種別を問わない fail-closed の明示がない')
+  assert.ok(!prompt.includes('submodule ポインタ差分のみ'), '撤去済みの submodule ポインタ自動解消例外が復活している')
 })
 
 // baseMergeInstruction の runVerification 引数そのものを直接検査する（合成後の baseMergePrompt
@@ -294,7 +301,10 @@ test('baseMergeInstruction: runVerification=false は実行命令形を含まず
   const withVerify = baseMergeInstruction('main')
   assert.ok(!noVerify.includes('ビルド・lint・テストを通してから'), 'runVerification=false でも実行命令形が残っている')
   assert.ok(noVerify.includes('内容を編集する') || noVerify.includes('内容編集の権限'), 'runVerification=false で内容編集権限が無い旨の明示がない')
-  assert.ok(noVerify.includes('commitFailed: true'), 'runVerification=false で内容コンフリクト時に commitFailed: true を返す明示がない')
+  assert.ok(noVerify.includes('commitFailed: true'), 'runVerification=false でコンフリクト時に commitFailed: true を返す明示がない')
+  // PR #443 codex P0: submodule gitlink 例外の撤去（base 側採用は PR 側の gitlink 更新を破棄する）。
+  assert.ok(noVerify.includes('コンフリクト種別を問わず解消しない'), 'runVerification=false でコンフリクト種別を問わない fail-closed の明示がない')
+  assert.ok(!noVerify.includes('git checkout origin/'), 'runVerification=false に撤去済みの submodule base 側採用指示が復活している')
   assert.ok(withVerify.includes('ビルド・lint・テストを通してから'), '既定 true（pr-create・fixPrompt 経路）で既存の実行指示が失われている')
 })
 
