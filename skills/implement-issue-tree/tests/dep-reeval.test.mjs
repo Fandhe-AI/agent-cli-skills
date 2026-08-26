@@ -537,3 +537,32 @@ test('駆動部: consecutiveFailures の減算は removedFailure が現在の fa
     'removedFailure.streakEpoch と現在の failureEpoch を突き合わせる条件が見つからない（世代をまたいだ誤減算を防げない）',
   )
 })
+
+// PR #444 codex P2 指摘（threadId PRRT_kwDORuXFg86ccGH7）の回帰固定: プローブ起動ゲートから
+// !halted を外した（上のテスト参照）ため、halt 後もプローブ・状態遷移・永続化は継続するが、
+// 新規イシュー投入は `if (!halted)` で引き続き停止する（下流の同一ラン内再判定は起きない）。
+// note・ログの文言が halted の有無を無視して常に「同一ラン内で再判定する」と記録すると、
+// 実際の挙動（halt 後は次回ランで反映）と食い違う。halted 分岐で文言が変わることを固定する。
+test('駆動部: probePrereqCompletion の note は halted 時に「次回ランで反映される」系へ分岐する', () => {
+  const probeFnStart = driverPart.indexOf('async function probePrereqCompletion(targets) {')
+  assert.ok(probeFnStart >= 0, 'probePrereqCompletion の定義が見つからない')
+  const probeFnEnd = driverPart.indexOf('\nwhile (true) {', probeFnStart)
+  assert.ok(probeFnEnd > probeFnStart, 'probePrereqCompletion の終端（dispatch ループ開始）が見つからない')
+  const probeFnBody = driverPart.slice(probeFnStart, probeFnEnd)
+
+  const noteSuffixIdx = probeFnBody.indexOf('const noteSuffix = halted')
+  assert.ok(noteSuffixIdx >= 0, 'noteSuffix が halted で分岐していない（halt 後も常に「同一ラン内で再判定する」と記録する回帰）')
+  const noteSuffixSection = probeFnBody.slice(noteSuffixIdx, noteSuffixIdx + 400)
+  assert.ok(
+    noteSuffixSection.includes('次回ランで反映される') && noteSuffixSection.includes('同一ラン内で再判定する'),
+    'noteSuffix の halted 分岐に「次回ランで反映される」文言、非 halted 分岐に「同一ラン内で再判定する」文言のいずれかが欠けている',
+  )
+
+  const logIdx = probeFnBody.indexOf("log(\n      halted")
+  assert.ok(logIdx >= 0, 'probePrereqCompletion 末尾の log() が halted で分岐していない')
+  const logSection = probeFnBody.slice(logIdx, logIdx + 300)
+  assert.ok(
+    logSection.includes('次回ランで反映される') && logSection.includes('同一ラン内で再判定する'),
+    'log() の halted 分岐に「次回ランで反映される」文言、非 halted 分岐に「同一ラン内で再判定する」文言のいずれかが欠けている',
+  )
+})

@@ -5031,10 +5031,15 @@ async function probePrereqCompletion(targets) {
     // kind で文言を分ける — Review 非収束等の依存ブロックは PR 未作成（push 前 blocked）が
     // 主経路のため、'merged' 前提でハードコードすると closed 遷移（PR なし）で
     // 「PR #? MERGED」という虚偽の note になる。
-    const noteSuffix =
-      t.kind === 'merged'
-        ? `。ラン中に外部完了を確認（PR #${t.pr ?? '?'} MERGED）: 前提充足として下流を同一ラン内で再判定する`
-        : '。ラン中に外部完了を確認（Issue CLOSED）: 前提充足として下流を同一ラン内で再判定する'
+    // halted の有無でも文言を分ける — 新規イシュー投入は `if (!halted)` で halt 後停止する
+    // ため（直後の dispatch ゲート）、halt 後の遷移は状態永続化のみが行われ、下流の着手は
+    // このランでは再開しない（次回ランの Recover で反映される。references/recovery.md の
+    // 「halt 発生前に限り下流を同一ラン内で再判定する」契約と一致させる。Issue #444 codex P2）。
+    const detectedFact =
+      t.kind === 'merged' ? `PR #${t.pr ?? '?'} MERGED` : 'Issue CLOSED'
+    const noteSuffix = halted
+      ? `。ラン中に外部完了を確認（${detectedFact}）: halt 中のため下流の着手は再開せず、次回ランで反映される`
+      : `。ラン中に外部完了を確認（${detectedFact}）: 前提充足として下流を同一ラン内で再判定する`
     const patch = { status: t.kind, note: noteSuffix.slice(1), ...(t.pr ? { pr: t.pr } : {}) }
     // 状態ファイルへの永続化を先に確定させる（references/recovery.md の永続化契約）。
     // done/failedSet への集合変更（applyPrereqTransitions 内で既に適用済み）は、書き込みが
@@ -5088,7 +5093,11 @@ async function probePrereqCompletion(targets) {
     }
     prereqTransitions.push(t)
     appliedCount += 1
-    log(`#${t.issue}: ラン中に外部完了を検知（${t.kind}）。前提充足として下流を同一ラン内で再判定する`)
+    log(
+      halted
+        ? `#${t.issue}: ラン中に外部完了を検知（${t.kind}）。halt 中のため下流の着手は再開せず、次回ランで反映される`
+        : `#${t.issue}: ラン中に外部完了を検知（${t.kind}）。前提充足として下流を同一ラン内で再判定する`,
+    )
   }
   return appliedCount
 }
