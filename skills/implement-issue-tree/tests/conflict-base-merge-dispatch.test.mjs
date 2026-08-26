@@ -37,6 +37,7 @@ const SLICE_EXPORTS = [
   'MERGE_VALID_STATES',
   'BASE_MERGE_SCHEMA',
   'baseMergePrompt',
+  'baseMergeInstruction',
   'monitorPrompt',
   'fixPrompt',
   'isValidRepoSlug',
@@ -61,6 +62,7 @@ const {
   MERGE_VALID_STATES,
   BASE_MERGE_SCHEMA,
   baseMergePrompt,
+  baseMergeInstruction,
   monitorPrompt,
   fixPrompt,
   isValidRepoSlug,
@@ -195,18 +197,42 @@ test('baseMergePrompt: gh pr merge の実行コマンド形・resolveReviewThrea
 // 悪意ある PR から任意コード実行 → 本エージェントの push 用 GitHub 認証情報の奪取・外部送信に
 // つながる。検証は push 後に再起動される既存 CI へ委ね、コンフリクト解消後の妥当性確認は
 // git diff --check 等の非実行系のみに限定する。
-test('baseMergePrompt: fmt / lint / build / test 等の未信頼コード実行指示を含まない', () => {
+// Bugbot High（thread c52cd32b-3157-4fa5-9010-5bc0c92bec7b）の回帰テスト: f8701bf は
+// baseMergePrompt 手順 2 の直接記述からは build/lint/test 実行指示を消したが、同じ手順に
+// 埋め込まれる共有ヘルパー baseMergeInstruction 内には「ビルド・lint・テストを通してから
+// コミットする」という実行命令形が残っていた（呼び出し元の文言だけを直しても、共有ヘルパーが
+// 展開後の合成文字列に実行指示を混入させれば RCE 緩和は不完全になる）。ここでは baseMergePrompt
+// が返す最終合成文字列（テンプレートリテラルの埋め込み展開後の全文）を対象に、
+// build / lint / test / fmt / npm / yarn / make / cargo / pytest / go test 等の実行を命じる
+// 言い回しが一切含まれないことを検査する。狙い撃ちした部分文字列ではなく合成後の全文が対象な
+// ので、baseMergeInstruction 側に実行指示が復活しても本テストは失敗する。
+test('baseMergePrompt: fmt / lint / build / test 等の未信頼コード実行指示を含まない（合成後の全文を検査）', () => {
   const prompt = baseMergePrompt(item, impl)
   // 旧実装の実行指示そのもの（「〜を通してからコミットする」という命令形）が消えていることを
   // 固定する。否定文脈での「fmt / lint / build / test」という語の言及自体（実行しない旨の
   // 説明）は許容するため、語の不在ではなく実行を命じる言い回しの不在で判定する。
   assert.ok(!prompt.includes('を通してからコミットする'), '旧実装の実行命令形（〜を通してからコミットする）が残っている')
-  for (const word of ['npm run', 'npm test', 'npm ci', 'yarn ', 'pnpm ', 'make ', 'cargo test', 'cargo build', 'pytest', 'go test', 'go build']) {
-    assert.ok(!prompt.includes(word), `未信頼コード実行コマンド「${word}」が混入している`)
+  assert.ok(!prompt.includes('ビルド・lint・テストを通してから'), 'baseMergeInstruction 側の実行命令形（ビルド・lint・テストを通してから）が残っている')
+  for (const word of [
+    'npm run', 'npm test', 'npm ci', 'yarn ', 'pnpm ', 'make ',
+    'cargo test', 'cargo build', 'pytest', 'go test', 'go build',
+    'fmt を実行', 'lint を実行', 'build を実行', 'test を実行',
+  ]) {
+    assert.ok(!prompt.includes(word), `未信頼コード実行コマンド／実行を命じる言い回し「${word}」が混入している`)
   }
   assert.ok(prompt.includes('git diff --check'), 'conflict marker 残存確認（git diff --check）の非実行系検証指示がない')
   assert.ok(prompt.includes('既存 CI'), '検証を既存 CI へ委ねる旨の記述がない')
   assert.ok(prompt.includes('実行しない'), '未信頼コードを実行しない旨の明示がない')
+})
+
+// baseMergeInstruction の runVerification 引数そのものを直接検査する（合成後の baseMergePrompt
+// テストだけでは、呼び出し元が今後増えたときに false 渡し忘れを検出できないため）。
+test('baseMergeInstruction: runVerification=false は実行命令形を含まず、既定 true は既存どおり実行指示を含む', () => {
+  const noVerify = baseMergeInstruction('main', false)
+  const withVerify = baseMergeInstruction('main')
+  assert.ok(!noVerify.includes('ビルド・lint・テストを通してから'), 'runVerification=false でも実行命令形が残っている')
+  assert.ok(noVerify.includes('実行しない'), 'runVerification=false で未実行の明示がない')
+  assert.ok(withVerify.includes('ビルド・lint・テストを通してから'), '既定 true（pr-create・fixPrompt 経路）で既存の実行指示が失われている')
 })
 
 test('baseMergePrompt: レビュー指摘の修正を行わない権限境界の文言を含む', () => {
@@ -235,9 +261,13 @@ test('baseMergePrompt: worktree routing ガード（remote 確認 + PR 番号・
 // gh fetch / checkout / merge より前（手順 0）に行われることを固定する。
 test('baseMergePrompt: 期待 owner/repo がプロンプトへ明示的に埋め込まれ、fetch/checkout/merge より前に一致確認する', () => {
   const prompt = baseMergePrompt(item, impl, 'Fandhe-AI/agent-cli-skills')
-  assert.ok(prompt.includes('"Fandhe-AI/agent-cli-skills"'), '期待 owner/repo の値がプロンプトへ埋め込まれていない')
+  // codex P1（thread PRRT_kwDORuXFg86cbaJN）の修正により、埋め込み値は ASCII 小文字化される
+  // （owner/repo は case-insensitive に解決されるため、大文字小文字差のみの正当な clone を
+  // 誤配置扱いしない）。埋め込まれる文字列は小文字化後の値であることを固定する。
+  assert.ok(prompt.includes('"fandhe-ai/agent-cli-skills"'), '期待 owner/repo の値が小文字化されてプロンプトへ埋め込まれていない')
+  assert.ok(!prompt.includes('"Fandhe-AI/agent-cli-skills"'), '期待 owner/repo が小文字化されず元の大文字小文字混在のまま埋め込まれている')
   const remoteIdx = prompt.indexOf('git remote get-url origin')
-  const expectedRepoIdx = prompt.indexOf('"Fandhe-AI/agent-cli-skills"')
+  const expectedRepoIdx = prompt.indexOf('"fandhe-ai/agent-cli-skills"')
   const fetchIdx = prompt.indexOf('git fetch origin &&')
   const baseFetchIdx = prompt.indexOf(':refs/remotes/origin/')
   const mergeIdx = prompt.indexOf('git merge --no-edit')
@@ -249,6 +279,23 @@ test('baseMergePrompt: 期待 owner/repo がプロンプトへ明示的に埋め
   assert.ok(prompt.includes('.git'), '.git 接尾辞の除去指示がない')
   assert.ok(prompt.includes('ssh://git@'), 'SSH 形式の正規化指示がない')
   assert.ok(prompt.includes('https://<host>/<owner>/<repo>'), 'HTTPS 形式の正規化指示がない')
+})
+
+// codex P1（thread PRRT_kwDORuXFg86cbaJN）の回帰テスト: routing ガードは args.repo と remote
+// 抽出 slug の比較を大文字小文字区別の完全一致で行っていたため、GitHub 上は同一リポジトリを
+// 指す大文字小文字差のみの正当な clone（例: remote が fandhe-ai/agent-cli-skills.git）を誤配置
+// 扱いし、base 取り込みを failed・halt カウント対象で終端させていた。両 slug を ASCII 小文字へ
+// 正規化してから比較する指示になっていること、かつ異なるリポジトリを拒否する fail-closed 性
+// （不一致なら routingError で終了する指示）が引き続き残っていることを固定する。
+test('baseMergePrompt: 大文字小文字差のみの入力は小文字正規化して比較する指示になる（fail-closed 性は維持）', () => {
+  const promptMixedCase = baseMergePrompt(item, impl, 'Fandhe-AI/Agent-CLI-Skills')
+  const promptLowerCase = baseMergePrompt(item, impl, 'fandhe-ai/agent-cli-skills')
+  // 大文字小文字違いの入力でも、埋め込まれるリテラルは同一の小文字化済み値になる（比較対象が
+  // 揃っていないと、remote 側だけ小文字化しても一致しない）。
+  assert.equal(promptMixedCase, promptLowerCase, '大文字小文字違いの owner/repo 入力でプロンプト内容が変化している（小文字化が両者を揃えていない）')
+  assert.ok(promptMixedCase.includes('小文字'), 'remote 側を小文字化してから比較する指示がない')
+  assert.ok(promptMixedCase.includes('case-insensitive'), '大文字小文字を区別しない理由の説明がない')
+  assert.ok(promptMixedCase.includes('routingError: true'), '不一致時に routingError で終端する fail-closed 指示が失われている')
 })
 
 // 期待 owner/repo が未確定（host 側で isValidRepoSlug を通らなかった／引数省略）の場合、
