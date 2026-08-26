@@ -314,6 +314,18 @@ function isValidRepoSlug(s) {
   return typeof s === 'string' && REPO_SLUG_RE.test(s)
 }
 
+// 対象リポジトリ（owner/repo）のホスト側明示宣言（base-merge worktree routing ガード用。
+// PR #443 codex P0: expectedRepo を人間が明示するホスト入力のみへ束縛する。未指定は
+// fail-closed（expectedRepo === '' で常に不一致 → base-merge 自動起動なし）。
+function parseRepoArg(raw) {
+  if (raw === undefined || raw === null) return ''
+  if (!isValidRepoSlug(raw)) {
+    throw new Error(`args.repo は "owner/repo" 形式で指定すること（省略時は base-merge 自動起動なし・conflicting は blocked+quality 終端）: ${String(raw).slice(0, 80)}`)
+  }
+  return raw
+}
+const repoArg = parseRepoArg(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.repo : undefined)
+
 // GitHub GraphQL の review thread ノード ID の形式検証。英数字・_・- のみ許可（不一致は空文字）。
 // 自然言語の命令文が不透明な識別子として通らないことを構造的に保証する（sanitize は命令性を
 // 消さないためこの用途には使わない）。
@@ -946,18 +958,12 @@ const CLOSE_SCHEMA = {
 // 「観測では確定できなかった」の意。確定は args.externalChecks の明示入力のみで行う。
 const EXTERNAL_CHECKS_SCHEMA = {
   type: 'object',
-  required: ['apps', 'repo'],
+  required: ['apps'],
   properties: {
     apps: {
       type: 'array',
       items: { type: 'string' },
       description: '外部チェック App slug の一意配列（例: ["cursor"]）。検出なしなら空配列',
-    },
-    // baseMergePrompt の期待リポジトリ用（Issue #441）。メインの worktree で実行される
-    // 本エージェントの申告値のみがホスト検証済みの owner/repo として埋め込める。
-    repo: {
-      type: 'string',
-      description: '手順 1 で取得した REPO の値（owner/repo 形式の文字列）をそのまま返す。取得失敗時は空文字',
     },
   },
 }
@@ -2976,17 +2982,15 @@ const detectResult = await agent(
     `   外側の独立した引数（$3）として渡す。上記コマンドはそのままの形で実行できる）`,
     '3. merged PR が 0 件・コマンド失敗・出力が空の場合は apps: [] を返す（新規リポで停止しない）。',
     '4. 収集した slug を重複排除して apps 配列として返す（例: ["cursor"]）。',
-    '返却: apps（外部 App slug の一意配列。検出なしなら空配列）、repo（手順 1 で取得した REPO の値をそのまま返す。取得失敗時は空文字）。',
+    '返却: apps（外部 App slug の一意配列。検出なしなら空配列）。',
   ].join('\n'),
   { label: 'detect:external-checks', phase: 'Tree', model: 'haiku', effort: 'low', schema: EXTERNAL_CHECKS_SCHEMA },
 )
 // 観測結果（参考値）。取得失敗（null）時は空配列として扱う。
 const observedCheckApps = detectResult?.apps ?? []
-// baseMergePrompt（Issue #441）の worktree routing ガードへ埋め込むホスト検証済み owner/repo。
-// detectResult はメインの worktree（isolation 未指定）で実行された申告値のため per-issue の
-// 隔離 worktree より信頼できるが、形式検証を通らない値は未確定として空文字にする
-// （Bugbot P0・PR #443・thread PRRT_kwDORuXFg86caswK）。
-const expectedRepo = isValidRepoSlug(detectResult?.repo) ? detectResult.repo : ''
+// baseMergePrompt の期待リポジトリは args.repo 由来の repoArg のみへ束縛する
+// （detectResult 等のエージェント自己申告値は使わない。PR #443 codex P0）。
+const expectedRepo = repoArg
 // 外部チェック構成の確定（Issue #147）。観測は完全性を保証しないため、明示入力がない限り
 // 常に確定不能とする。監視・待機・レポートは slug 配列、G0 の context 照合はエントリ配列を使う。
 const externalCheckApps = externalChecksInput?.map((e) => e.app) ?? observedCheckApps
@@ -4425,7 +4429,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // baseMergePrompt を起動せず quality+blocked へ直終端する。
         lastBlockedReason = 'quality'
         lastState = 'blocked'
-        terminalReasonOverride = capText('期待 owner/repo を確定できず base 取り込みを起動しなかった（detect 失敗・repo 未申告・slug 形式不通過のいずれか）。次回も monitoring 再開で同じ PR を再監視する。解消には人間が base をブランチへ直接取り込み push する')
+        terminalReasonOverride = capText('args.repo 未指定または形式不通過のため期待リポジトリを確定できず base 取り込みを起動しなかった。args.repo を "owner/repo" 形式で指定して再実行するか、人間が base をブランチへ直接取り込み push する。次回も monitoring 再開で同じ PR を再監視する')
         break
       }
       if (baseMergeCount >= maxBaseMerges) {

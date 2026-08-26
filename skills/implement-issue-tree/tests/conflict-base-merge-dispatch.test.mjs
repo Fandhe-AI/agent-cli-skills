@@ -40,6 +40,7 @@ const SLICE_EXPORTS = [
   'monitorPrompt',
   'fixPrompt',
   'isValidRepoSlug',
+  'parseRepoArg',
 ]
 // fixPrompt / baseMergePrompt はいずれも sanitize() 経由で item.title を untrusted() タグへ
 // 埋め込む。boundaryNonce() 自体は fixPrompt の finding 埋め込みでのみ使うが、モジュール
@@ -63,6 +64,7 @@ const {
   monitorPrompt,
   fixPrompt,
   isValidRepoSlug,
+  parseRepoArg,
 } = mod
 mod.__setBoundaryNonceSeedForTest('b'.repeat(64))
 
@@ -81,6 +83,7 @@ test('構造ガード: マーカーは 1 か所のみ存在し、対象関数が
   assert.equal(typeof monitorPrompt, 'function')
   assert.equal(typeof MERGE_SCHEMA, 'object')
   assert.equal(typeof BASE_MERGE_SCHEMA, 'object')
+  assert.equal(typeof parseRepoArg, 'function')
 })
 
 // ---------------------------------------------------------------------------
@@ -390,6 +393,42 @@ test('isValidRepoSlug: 従来どおりスラッシュなし・空文字・型不
   assert.equal(isValidRepoSlug(''), false)
   assert.equal(isValidRepoSlug(undefined), false)
   assert.equal(isValidRepoSlug(null), false)
+})
+
+// ---------------------------------------------------------------------------
+// parseRepoArg（PR #443 codex P0 回帰）: expectedRepo の唯一の信頼できる入力源。
+// エージェント自己申告値ではなく args.repo（ホスト側明示宣言）のみを受理する。
+// ---------------------------------------------------------------------------
+
+test('parseRepoArg: undefined/null は未確定（空文字）を返す', () => {
+  assert.equal(parseRepoArg(undefined), '')
+  assert.equal(parseRepoArg(null), '')
+})
+
+test('parseRepoArg: owner/repo 形式はそのまま受理する', () => {
+  assert.equal(parseRepoArg('Fandhe-AI/agent-cli-skills'), 'Fandhe-AI/agent-cli-skills')
+  assert.equal(parseRepoArg('org/.github'), 'org/.github')
+})
+
+test('parseRepoArg: isValidRepoSlug を通らない形式は throw する（誤読み替え防止・fail-closed）', () => {
+  assert.throws(() => parseRepoArg('not-a-valid-slug-without-slash'), /args\.repo/)
+  assert.throws(() => parseRepoArg(''), /args\.repo/)
+  assert.throws(() => parseRepoArg(123), /args\.repo/)
+  assert.throws(() => parseRepoArg({ owner: 'org', repo: 'repo' }), /args\.repo/)
+})
+
+// ---------------------------------------------------------------------------
+// expectedRepo の代入元（PR #443 codex P0 回帰）: エージェント自己申告値（detectResult 等）
+// から代入されず、ホスト検証済みの repoArg（= args.repo 由来）からのみ代入されること。
+// ---------------------------------------------------------------------------
+
+test('expectedRepo は repoArg（args.repo 由来のホスト検証済み値）からのみ代入され、detectResult からは代入されない', () => {
+  const assignIdx = source.indexOf('const expectedRepo = ')
+  assert.ok(assignIdx >= 0, 'expectedRepo の代入行が見つからない')
+  const lineEnd = source.indexOf('\n', assignIdx)
+  const assignLine = source.slice(assignIdx, lineEnd)
+  assert.equal(assignLine, 'const expectedRepo = repoArg', `expectedRepo の代入がエージェント申告値経由になっている: ${assignLine}`)
+  assert.ok(!assignLine.includes('detectResult'), 'expectedRepo がエージェント自己申告値 detectResult から代入されている')
 })
 
 // ---------------------------------------------------------------------------
