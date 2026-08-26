@@ -229,8 +229,16 @@ test('fixPrompt(pushAfterFix: true): push 検証の 2 条件判定を含む（pu
 // ---------------------------------------------------------------------------
 
 test('駆動部: lastState === \'conflicting\' 分岐が存在し baseMergePrompt / baseMergeCount / maxBaseMerges / failMergeTerminal を含む', () => {
-  const branchIdx = driverPart.indexOf("lastState === 'conflicting'")
-  assert.ok(branchIdx >= 0, "駆動部に lastState === 'conflicting' 分岐が見つからない")
+  // 単純な "lastState === 'conflicting'" 部分一致だと、より手前にある
+  // "lastState === 'needs-fix' || lastState === 'conflicting'"（needs-fix と conflicting を
+  // 一括 dispatch する別の分岐。line 4111 相当）の部分文字列にもマッチし、branchIdx が誤って
+  // その手前の行を指してしまう（この誤指定のまま次の needs-fix 境界まで切り出すと、conflicting
+  // 単独分岐だけでなく needs-fix 単独分岐（noPushRounds >= 2 の blocked 判定を含む）まで
+  // branchBody に混入し、後続の分岐専有アサーションが意図せず緩くなる）。
+  // 本テストが対象とする単独 `} else if (lastState === 'conflicting') {` 宣言のみに一致する
+  // よう `} else if (` を含めて検索する。
+  const branchIdx = driverPart.indexOf("} else if (lastState === 'conflicting') {")
+  assert.ok(branchIdx >= 0, "駆動部に単独の `} else if (lastState === 'conflicting') {` 分岐が見つからない")
   // 次の else if までを分岐本体として切り出す（needs-fix 分岐との境界）。
   const nextBranchIdx = driverPart.indexOf("lastState === 'needs-fix' || lastState === 'unresolved-comments'", branchIdx)
   assert.ok(nextBranchIdx > branchIdx, 'needs-fix 分岐の開始位置を特定できない（conflicting 分岐の終端が不明）')
@@ -240,7 +248,15 @@ test('駆動部: lastState === \'conflicting\' 分岐が存在し baseMergePromp
   assert.ok(branchBody.includes('maxBaseMerges'), 'conflicting 分岐が maxBaseMerges 上限を参照していない')
   assert.ok(branchBody.includes('failMergeTerminal('), 'conflicting 分岐が failMergeTerminal を呼んでいない')
   assert.ok(!branchBody.includes('fixCount++'), 'conflicting 分岐が fixCount を消費している（fix 予算と独立のはず）')
-  assert.ok(!branchBody.includes('noPushRounds'), 'conflicting 分岐が noPushRounds を参照している（fix ループ専用の変数のはず）')
+  // PR #443 codex 指摘の是正: base-merge push 成功時も CONFLICTING→fix 経路（needs-fix 分岐）と
+  // 同じ advanceNoPushRounds を経由して noPushRounds をリセットする必要がある。リセットしないと
+  // 直前の no-push fix ラウンドで積んだカウントが base merge の push 成功後も残留し、後続の
+  // no-push fix 1 回だけで noPushRounds >= 2 に達して誤って blocked 終端し得る
+  // （リモートへは実際に進捗があったのに）。noPushRounds への「参照」自体は正当な進捗リセットで
+  // あり禁止しないが、fix ループ専用の分岐終了条件（`noPushRounds >= 2` によるブロック判定）は
+  // 引き続き conflicting 分岐に持ち込まない。
+  assert.ok(branchBody.includes('advanceNoPushRounds('), 'conflicting 分岐が advanceNoPushRounds を呼んでいない（push 成功時の noPushRounds リセットが未実装）')
+  assert.ok(!branchBody.includes('noPushRounds >= 2'), 'conflicting 分岐が fix ループ専用の blocked 終端条件（noPushRounds >= 2）を持ち込んでいる')
 })
 
 test('駆動部: baseMergeCount の状態ファイル復元と runMergeLoop への引き渡しが存在する', () => {

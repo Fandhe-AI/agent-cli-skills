@@ -4460,6 +4460,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       baseMergeCount++
       lastRoundPushed = b.pushed === true
+      // push 成功時は CONFLICTING→fix 経路（advanceNoPushRounds 呼び出し）と同じく
+      // noPushRounds をリセットする（Issue #443 codex 指摘）。base-merge 経路は fix 経路と
+      // 独立に noPushRounds へ触れずに来たため、直前の no-push fix ラウンドで積んだカウントが
+      // base merge の push 成功後も残留し、後続の no-push fix があと 1 回続いただけで
+      // fix 側の連続無進捗しきい値に達し blocked 終端し得た（実際にはリモートへ進捗が
+      // あったのに）。newlyResolvedThisRound 相当（スレッド resolve による進捗）は
+      // base-merge 経路には存在しないため pushed のみを進捗シグナルとして渡す。
+      noPushRounds = advanceNoPushRounds(noPushRounds, b.pushed === true, 0)
       // currentWorktreePath は書き換えない（上のコメント参照。所有権を証明できない自己申告パスを
       // cleanup 対象へ採用しない）。state の worktree 値もこれまでの追跡値のまま維持する。
       await updateState(item.number, { baseMergeCount, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments })
