@@ -39,6 +39,7 @@ const SLICE_EXPORTS = [
   'baseMergePrompt',
   'monitorPrompt',
   'fixPrompt',
+  'isValidRepoSlug',
 ]
 // fixPrompt / baseMergePrompt はいずれも sanitize() 経由で item.title を untrusted() タグへ
 // 埋め込む。boundaryNonce() 自体は fixPrompt の finding 埋め込みでのみ使うが、モジュール
@@ -61,6 +62,7 @@ const {
   baseMergePrompt,
   monitorPrompt,
   fixPrompt,
+  isValidRepoSlug,
 } = mod
 mod.__setBoundaryNonceSeedForTest('b'.repeat(64))
 
@@ -349,4 +351,67 @@ test('駆動部: baseMergeCount の状態ファイル復元と runMergeLoop へ�
 test('駆動部: merge-loop-rescan の境界マーカー対の出現回数が変わらない（1 回のまま）', () => {
   const startCount = driverPart.split('__MERGE_MONITOR_LOOP_START__').length - 1
   assert.equal(startCount, 1, '__MERGE_MONITOR_LOOP_START__ マーカーの出現回数が 1 でない（conflicting 分岐追加でループ境界が壊れていないか確認）')
+})
+
+// ---------------------------------------------------------------------------
+// isValidRepoSlug（Bugbot Medium・PR #443・thread PRRT_kwDORuXFg86ca6Y_ の回帰）: repo セグメント
+// が先頭 `.` を許可し（`org/.github` のような実在の正当な名前）、`.`/`..` という特殊パス名のみ
+// 除外すること。owner セグメントは英数字とハイフンのみ・先頭末尾ハイフン不可・39 文字以内。
+// ---------------------------------------------------------------------------
+
+test('isValidRepoSlug: 先頭 `.` の repo 名（`.github` 等）を受理する', () => {
+  assert.equal(isValidRepoSlug('org/.github'), true)
+  assert.equal(isValidRepoSlug('Fandhe-AI/.github'), true)
+})
+
+test('isValidRepoSlug: `.`/`..` という repo セグメント単体は拒否する（パストラバーサル特殊名）', () => {
+  assert.equal(isValidRepoSlug('org/.'), false)
+  assert.equal(isValidRepoSlug('org/..'), false)
+})
+
+test('isValidRepoSlug: owner セグメントは英数字とハイフンのみ・先頭末尾ハイフン不可', () => {
+  assert.equal(isValidRepoSlug('-org/repo'), false)
+  assert.equal(isValidRepoSlug('org-/repo'), false)
+  assert.equal(isValidRepoSlug('org.name/repo'), false)
+  assert.equal(isValidRepoSlug('a'.repeat(40) + '/repo'), false, 'owner 39 文字超は拒否')
+  assert.equal(isValidRepoSlug('a'.repeat(39) + '/repo'), true, 'owner 39 文字ちょうどは受理')
+})
+
+test('isValidRepoSlug: repo セグメントは `.`/`_`/`-`（先頭ハイフン以外）を許可し 100 文字以内', () => {
+  assert.equal(isValidRepoSlug('org/_private'), true)
+  assert.equal(isValidRepoSlug('org/repo-name'), true)
+  assert.equal(isValidRepoSlug('org/-repo'), false, 'repo 先頭ハイフンは拒否')
+  assert.equal(isValidRepoSlug('org/' + 'a'.repeat(100)), true, 'repo 100 文字ちょうどは受理')
+  assert.equal(isValidRepoSlug('org/' + 'a'.repeat(101)), false, 'repo 101 文字は拒否')
+})
+
+test('isValidRepoSlug: 従来どおりスラッシュなし・空文字・型不一致は拒否する', () => {
+  assert.equal(isValidRepoSlug('not-a-valid-slug-without-slash'), false)
+  assert.equal(isValidRepoSlug(''), false)
+  assert.equal(isValidRepoSlug(undefined), false)
+  assert.equal(isValidRepoSlug(null), false)
+})
+
+// ---------------------------------------------------------------------------
+// 駆動部: expectedRepo 未確定時は baseMergePrompt を起動せず blocked + quality へ直接終端する
+// （Bugbot High・PR #443・thread PRRT_kwDORuXFg86ca6Y1 の回帰）。cap 到達到達分岐と同じ
+// 「回復可能な CONFLICTING」クラスとして扱い、routingError 経由の 'unrecoverable'（'failed' へ
+// 倒れ halt カウント対象になる）を一切通らないことを固定する。
+// ---------------------------------------------------------------------------
+
+test("駆動部: conflicting 分岐は expectedRepo === '' を baseMergePrompt 起動より前に判定し、blocked + quality へ直接終端する", () => {
+  const branchIdx = driverPart.indexOf("} else if (lastState === 'conflicting') {")
+  assert.ok(branchIdx >= 0, "conflicting 分岐が見つからない")
+  const guardIdx = driverPart.indexOf("if (expectedRepo === '') {", branchIdx)
+  assert.ok(guardIdx > branchIdx, 'conflicting 分岐に expectedRepo 未確定ガードが見つからない')
+  const capIdx = driverPart.indexOf('if (baseMergeCount >= maxBaseMerges) {', branchIdx)
+  assert.ok(capIdx > guardIdx, 'expectedRepo 未確定ガードが cap 到達判定より後に現れている（baseMergePrompt 起動より前に判定する必要がある）')
+  const guardEndIdx = driverPart.indexOf('\n      }', guardIdx)
+  assert.ok(guardEndIdx > guardIdx, 'expectedRepo 未確定ガードの終端（break を含む閉じ括弧）が見つからない')
+  const guardBody = driverPart.slice(guardIdx, guardEndIdx)
+  assert.ok(guardBody.includes("lastBlockedReason = 'quality'"), 'expectedRepo 未確定ガードが lastBlockedReason を quality に設定していない')
+  assert.ok(guardBody.includes("lastState = 'blocked'"), 'expectedRepo 未確定ガードが lastState を blocked に設定していない')
+  assert.ok(guardBody.includes('break'), 'expectedRepo 未確定ガードが break していない')
+  assert.ok(!guardBody.includes('baseMergePrompt('), 'expectedRepo 未確定ガードが baseMergePrompt を起動している（未起動でホスト側直接終端するはず）')
+  assert.ok(!guardBody.includes("lastBlockedReason = 'unrecoverable'"), 'expectedRepo 未確定ガードが unrecoverable を代入している（failed/halt カウント対象へ倒れる）')
 })

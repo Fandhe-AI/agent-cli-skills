@@ -306,7 +306,10 @@ function sanitizeBranch(str) {
 }
 
 // owner/repo スラッグの形式検証（baseMergePrompt の期待リポジトリ用。Issue #441）。
-const REPO_SLUG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})\/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})$/
+// owner: 英数字とハイフンのみ・先頭末尾ハイフン不可・1〜39 文字。repo: 先頭ハイフン以外なら
+// `.`/`_`/`-` 許可（`.github` 等が実在。PR #443）、`.`/`..` のみ除外。1〜100 文字。
+const REPO_SLUG_RE =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/(?!\.{1,2}$)[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$/
 function isValidRepoSlug(s) {
   return typeof s === 'string' && REPO_SLUG_RE.test(s)
 }
@@ -4416,16 +4419,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // base 取り込み（Issue #441）。monitor の conflicting・merge-exec の not-mergeable 写像の
       // いずれからも到達する。fixCount とは独立の baseMergeCount 予算で有界化し（monitorsLeft と
       // 合わせて二重に停止性を保つ）、品質問題ではないため fixCount は一切消費しない。
+      if (expectedRepo === '') {
+        // 未確定は誤配置ではなく cap 到達と同じ回復可能クラス（Bugbot High・PR #443・
+        // ...ca6Y1）。空文字で起動すると必ず routingError→'failed'（halt 対象）へ落ちるため
+        // baseMergePrompt を起動せず quality+blocked へ直終端する。
+        lastBlockedReason = 'quality'
+        lastState = 'blocked'
+        terminalReasonOverride = capText('期待 owner/repo を確定できず base 取り込みを起動しなかった（detect 失敗・repo 未申告・slug 形式不通過のいずれか）。次回も monitoring 再開で同じ PR を再監視する。解消には人間が base をブランチへ直接取り込み push する')
+        break
+      }
       if (baseMergeCount >= maxBaseMerges) {
-        // 'quality'（blocked + halt 非カウント。codex-review P1・PR #443）: #141（fixCount 上限）
-        // とは異なり、上限到達後も human が PR ブランチへ直接 base を取り込んで push すれば
-        // コンフリクトが解消し、次回の monitor はもう 'conflicting' を返さないためこの分岐自体を
-        // 再度は通らない（baseMergeCount 上限は 'conflicting' 分岐内でのみ参照され、コンフリクト
-        // 解消後は無関係になる）。#141 の needs-fix（fixCount 尽きても自動では何も変わらない）とは
-        // 「自動化の外側の人間操作で状態が変わり得るか」が異なるため 'unrecoverable' を流用しない。
-        // SKILL.md・automerge-design.md・args-example.json の「コンフリクトは blocked 終端」という
-        // 公開契約とも整合させる（旧実装は 'unrecoverable' により status: 'failed' へ倒れ、
-        // maxBaseMerges: 0 の明示オプトアウトだけで連続失敗 halt を誘発していた）。
+        // 'quality'（blocked + halt 非カウント。codex-review P1・PR #443）: #141 とは異なり
+        // human が base を直接取り込み push すれば解消し、以後 monitor は 'conflicting' を
+        // 返さずこの分岐を再度通らない。SKILL.md 等の「コンフリクトは blocked 終端」契約とも
+        // 整合（旧実装は 'unrecoverable'→'failed' で maxBaseMerges: 0 が連続失敗 halt を誘発）。
         lastBlockedReason = 'quality'
         lastState = 'blocked'
         // 次回実行時の再開経路は monitoring 再開（isActiveMonitoring）であり、Recover /
