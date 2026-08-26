@@ -1636,17 +1636,28 @@ const ephemeralWorktrees = []
 // 予約定数の乖離防止）。予約計上（EPHEMERAL_RESERVE_PER_NEW_START）はこの合計から導出するため、
 // recordEphemeralWorktree の呼び出し箇所を追加・変更するときは必ずここへ kind と最大数を
 // 宣言する（未宣言 kind は警告。記録自体は行い実測 latch は機能し続ける）。
-// implement: 1 回 / review: 最大 3 回 / pr-create: 1 回 / fix-terminal: 最大 1 回
-// （fix の routingError / commitFailed 終端、および base 取り込みエージェント（baseMergePrompt。
-// Issue #441）の同種終端も同じ kind を共用する。いずれも検出と同時に即終端し互いに排他のため
-// 同一ラン内で複数回記録しない）。fix / base-merge は置換のため宣言しない。
-const EPHEMERAL_KIND_MAX = Object.freeze({ implement: 1, review: 3, 'pr-create': 1, 'fix-terminal': 1 })
+// implement: 1 回 / review: 最大 3 回 / pr-create: 1 回 / fix-terminal: 最大 1 回 /
+// base-merge: 最大 maxBaseMerges 回（既定 3・args で 0〜10）。
+// （fix の routingError / commitFailed 終端は fix-terminal kind を共用する。base 取り込み
+// エージェント（baseMergePrompt。Issue #441）は spawn 直後の物理差分（before/after scan）で
+// host が計上するため base-merge 専用 kind を持つ（PR #443・codex-review P1: 自己申告
+// worktreePath の成否に関わらず新規作成された worktree を漏れなく台帳へ計上するため）。
+// baseMergeCount の上限 maxBaseMerges までラウンドごとに最大 1 件ずつ積み得る）。
+const EPHEMERAL_KIND_MAX = Object.freeze({
+  implement: 1,
+  review: 3,
+  'pr-create': 1,
+  'fix-terminal': 1,
+  'base-merge': maxBaseMerges,
+})
 // 新規着手 1 イシューが本ランで積み増しうる使い捨て worktree の最大総数（全 kind 合計）。
 // dispatch ループの予約計上（newStartActive）で参照する。
 const EPHEMERAL_RESERVE_PER_NEW_START = Object.values(EPHEMERAL_KIND_MAX).reduce((a, b) => a + b, 0)
 // monitoring 再開 1 イシューが積み増しうる最大数。再開は review / pr-create を経ないが、
-// fix の routingError / commitFailed 終端で fix-terminal を最大 1 件記録し得るため別枠で見込む。
-const EPHEMERAL_RESERVE_PER_MONITORING_RESUME = EPHEMERAL_KIND_MAX['fix-terminal']
+// fix の routingError / commitFailed 終端で fix-terminal を最大 1 件、conflicting 状態からの
+// base 取り込み（baseMergeCount 上限まで）で base-merge を最大 maxBaseMerges 件記録し得るため
+// 両方を見込む（monitor が resume 直後に CONFLICTING を検出し得るため。Issue #441）。
+const EPHEMERAL_RESERVE_PER_MONITORING_RESUME = EPHEMERAL_KIND_MAX['fix-terminal'] + EPHEMERAL_KIND_MAX['base-merge']
 
 // 使い捨て worktree（review / pr-create）・fix-terminal・実装 worktree を記録する。
 // **この関数は削除をしない**（Issue #142）。worktreePath は所有権をホスト側で照合できない
@@ -4402,9 +4413,32 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         beforeBaseMergeEntries.map((e) => sanitizeWorktreePath(e?.path ?? '')).filter(Boolean),
       )
       const b = await agent(baseMergePrompt(item, impl), { label: `base-merge:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: BASE_MERGE_SCHEMA, isolation: 'worktree' })
+      // エージェント結果の成否・自己申告値にかかわらず、isolation: 'worktree' はこの spawn で
+      // 物理的に worktree を作成済みのため、spawn 直後に after-scan を必ず実行し、host 算出の
+      // before/after 差分（自己申告に依存しない「実測で新規」の集合）を丸ごと台帳
+      // （ephemeralWorktrees）へ計上する（codex-review P1・PR #443）。自己申告パスとの一致は
+      // 後続の currentWorktreePath 選定（cleanup 対象）にのみ使い、台帳計上の可否には使わない。
+      // これを怠ると、自己申告パスが空・誤りの場合に新規作成された worktree が
+      // maxResidualWorktrees / maxResidualWorktreeBytes の残置抑止から漏れる。
+      const afterBaseMergeEntries = await scanOrphanWorktrees()
+      const afterBaseMergePaths = new Set(
+        afterBaseMergeEntries.map((e) => sanitizeWorktreePath(e?.path ?? '')).filter(Boolean),
+      )
+      // before/after いずれかのスキャンが失敗（空集合）した場合、「before に無ければ新規」という
+      // 判定が常に真になり得る（before 失敗時は他 Issue の既存 worktree まで「新規」と誤判定し、
+      // 後段で currentWorktreePath として採用・cleanup 削除され得る。Bugbot High・PR #443）ため、
+      // before・after の両方が非空であることを要求してから host 算出の新規パス集合を確定する。
+      const newlyCreatedBaseMergePaths =
+        beforeBaseMergePaths.size > 0 && afterBaseMergePaths.size > 0
+          ? [...afterBaseMergePaths].filter((p) => !beforeBaseMergePaths.has(p))
+          : []
+      for (const newPath of newlyCreatedBaseMergePaths) {
+        recordEphemeralWorktree(item.number, newPath, 'base-merge')
+      }
       const baseMergeSucceeded = b !== null && b !== undefined && typeof b.pushed === 'boolean'
       if (!baseMergeSucceeded) {
         // fix と同じ契約: 無効な結果は baseMergeCount を消費せず即失敗終端（再試行しない）。
+        // 台帳計上は上の after-scan で完了済み（自己申告値に依存しないため実行済み）。
         const baseMergeFailReason = `base 取り込みエージェントが無効な結果を返した（${baseMergeCount + 1} 回目）`
         log(`⚠️ issue #${item.number}: ${baseMergeFailReason}`)
         return await failMergeTerminal(baseMergeFailReason)
@@ -4412,7 +4446,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       if (b.routingError) {
         routingErrorDetected = true
         log(`PR #${impl.prNumber} の base 取り込みエージェントが worktree routing error を報告、即 failed 終端（halt カウント対象）とする`)
-        recordEphemeralWorktree(item.number, b?.worktreePath, 'fix-terminal')
+        // 台帳計上は上の after-scan で完了済み（recordEphemeralWorktree(..., 'fix-terminal') の
+        // 自己申告のみの計上は二重計上のため廃止した）。
         await updateState(item.number, { worktree: oldWorktreePath })
         lastState = 'blocked'
         lastBlockedReason = 'unrecoverable'
@@ -4421,34 +4456,31 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       if (b.commitFailed === true) {
         const reason = `base 取り込みがコミットを作成できず未反映: ${sanitize(b.summary ?? '')}`
         log(`⚠️ issue #${item.number}: ${reason}`)
-        recordEphemeralWorktree(item.number, b?.worktreePath, 'fix-terminal')
+        // 台帳計上は上の after-scan で完了済み。
         return await failMergeTerminal(reason)
       }
       baseMergeCount++
       lastRoundPushed = b.pushed === true
       const reportedBaseMergeWorktreePath = sanitizeWorktreePath(b?.worktreePath ?? '')
       let newBaseMergeWorktreePath = ''
-      if (reportedBaseMergeWorktreePath) {
+      if (
+        reportedBaseMergeWorktreePath &&
         // 「新規作成の証明」= spawn 前には存在せず、spawn 後には物理的に登録されているパス。
-        // after 側が空集合（取得不成立）の場合は「before に無ければ新規」という判定が常に真に
-        // なってしまう（fail-open）ため、after が非空であることも要求する。
-        const afterBaseMergeEntries = await scanOrphanWorktrees()
-        const afterBaseMergePaths = new Set(
-          afterBaseMergeEntries.map((e) => sanitizeWorktreePath(e?.path ?? '')).filter(Boolean),
+        // before・after いずれかが空集合（取得不成立）の場合は判定不能のため、cleanup 対象の
+        // 選定（currentWorktreePath への昇格）には常に両方の非空を要求する（上の
+        // newlyCreatedBaseMergePaths と同じ fail-closed 条件）。
+        beforeBaseMergePaths.size > 0 &&
+        afterBaseMergePaths.size > 0 &&
+        afterBaseMergePaths.has(reportedBaseMergeWorktreePath) &&
+        !beforeBaseMergePaths.has(reportedBaseMergeWorktreePath)
+      ) {
+        newBaseMergeWorktreePath = reportedBaseMergeWorktreePath
+      } else if (reportedBaseMergeWorktreePath) {
+        log(
+          `⚠️ issue #${item.number}: base 取り込みエージェント自己申告の worktree パス（${reportedBaseMergeWorktreePath}）を、` +
+            `spawn 前後の git worktree list 差分で新規作成と証明できず、cleanup 追跡対象として採用しない` +
+            `（fail-closed。プロンプトインジェクション・誤申告による別 Issue の worktree 誤削除を防ぐため）`,
         )
-        if (
-          afterBaseMergePaths.size > 0 &&
-          afterBaseMergePaths.has(reportedBaseMergeWorktreePath) &&
-          !beforeBaseMergePaths.has(reportedBaseMergeWorktreePath)
-        ) {
-          newBaseMergeWorktreePath = reportedBaseMergeWorktreePath
-        } else {
-          log(
-            `⚠️ issue #${item.number}: base 取り込みエージェント自己申告の worktree パス（${reportedBaseMergeWorktreePath}）を、` +
-              `spawn 前後の git worktree list 差分で新規作成と証明できず、cleanup 追跡対象として採用しない` +
-              `（fail-closed。プロンプトインジェクション・誤申告による別 Issue の worktree 誤削除を防ぐため）`,
-          )
-        }
       }
       currentWorktreePath = newBaseMergeWorktreePath
       if (!newBaseMergeWorktreePath) {
