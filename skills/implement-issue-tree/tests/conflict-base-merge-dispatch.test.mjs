@@ -180,6 +180,28 @@ test('baseMergePrompt: commitFailed の返却指示を含む', () => {
   assert.ok(prompt.includes('commitFailed: true'), 'commitFailed: true の返却指示がない')
 })
 
+// PR #443 codex P0（thread PRRT_kwDORuXFg86cbn_T）の回帰テスト: baseMergePrompt は COMMON
+// （CLAUDE.md・.claude/rules を読んで従うよう指示する）を挿入しない。COMMON は PR ブランチが
+// 改変できる未信頼文書を読ませる指示であり、コンフリクト解消コミットを作成して push できる
+// 本エージェントへ挿入すると命令注入経路になる。BASE_MERGE_CONTEXT_COMMON という専用の
+// 最小固定指示（--no-verify 禁止・push timeout・グローバル状態不変更・自動運転モード等の
+// 安全規則を含み、リポジトリ内文書・Issue/PR 本文・レビュー本文は読まない）を使うことを固定する。
+test('baseMergePrompt: COMMON のリポジトリ内文書読み取り指示（CLAUDE.md・.claude/rules）を含まず、専用の安全規則を含む', () => {
+  const prompt = baseMergePrompt(item, impl)
+  assert.ok(!prompt.includes('CLAUDE.md・.claude/rules・テスト実行規約・コーディング規約があれば必ず読んで従う'), 'COMMON の CLAUDE.md/.claude/rules 読み取り指示が混入している')
+  assert.ok(!prompt.includes('delegation ルールや専門サブエージェントがあれば、それに従い役割単位で委譲する'), 'COMMON の delegation 委譲指示が混入している')
+  assert.ok(prompt.includes('--no-verify 禁止'), '--no-verify 禁止の安全規則がない')
+  assert.ok(prompt.includes('timeout に 600000'), 'push timeout の安全規則がない')
+  assert.ok(prompt.includes('文書'), 'リポジトリ内文書を読まない旨の明示がない')
+})
+
+test('baseMergeInstruction: runVerification=false のコンフリクト解消指示は CLAUDE.md・rules の遵守を指示しない', () => {
+  const noVerify = baseMergeInstruction('main', false)
+  const withVerify = baseMergeInstruction('main')
+  assert.ok(!noVerify.includes('CLAUDE.md・rules を遵守し'), 'runVerification=false でも CLAUDE.md・rules 遵守の指示が残っている')
+  assert.ok(withVerify.includes('CLAUDE.md・rules を遵守し'), '既定 true（pr-create・fixPrompt 経路）で既存の CLAUDE.md・rules 遵守指示が失われている')
+})
+
 test('baseMergePrompt: gh pr merge の実行コマンド形・resolveReviewThread mutation を含まない（権限境界）', () => {
   const prompt = baseMergePrompt(item, impl)
   // 権限境界の説明文中に「gh pr merge / gh issue close / ... を実行しない」と禁止コマンド名を
@@ -460,6 +482,17 @@ test('isValidRepoSlug: 従来どおりスラッシュなし・空文字・型不
   assert.equal(isValidRepoSlug(''), false)
   assert.equal(isValidRepoSlug(undefined), false)
   assert.equal(isValidRepoSlug(null), false)
+})
+
+// PR #443 codex P1（thread PRRT_kwDORuXFg86cbn_b）の回帰テスト: 有効な owner/repo prefix に
+// 不正な suffix を付けた値（末尾アンカー欠落時に通過し得る形）を拒否すること。REPO_SLUG_RE は
+// 文字列全体一致（`^...$`）で構成済みだが、この不変条件を固定して退行を防ぐ。
+test('isValidRepoSlug: 有効な owner/repo prefix に不正な suffix を付けた値は拒否する（末尾アンカー回帰）', () => {
+  assert.equal(isValidRepoSlug('owner/repo!!!'), false)
+  assert.equal(isValidRepoSlug('owner/repo x'), false)
+  assert.equal(isValidRepoSlug('owner/repo\n'), false)
+  assert.equal(isValidRepoSlug('owner/repo\nmalicious'), false)
+  assert.equal(isValidRepoSlug('owner/repo'), true, '正常値まで拒否していないことの対照')
 })
 
 // ---------------------------------------------------------------------------
