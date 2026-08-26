@@ -202,6 +202,46 @@ test('baseMergePrompt: worktree routing ガード（remote 確認 + PR 番号・
   assert.ok(prompt.includes('routingError: true'), 'routing error 時の返却指示がない')
 })
 
+// PR #443 codex P0（thread PRRT_kwDORuXFg86caswK）の回帰テスト: 8dda694 は remote 確認と
+// PR 番号・headRefName 照合を追加したが、比較対象となる期待 owner/repo をプロンプトへ渡して
+// いなかった（PR 番号・headRefName は別リポジトリでも偶然一致し得るため、それだけでは誤配置
+// worktree から別リポジトリの同名ブランチへ push できてしまう）。expectedRepo 引数がホスト
+// 検証済みの owner/repo としてプロンプトへ明示的に埋め込まれ、remote 正規化・一致確認が
+// gh fetch / checkout / merge より前（手順 0）に行われることを固定する。
+test('baseMergePrompt: 期待 owner/repo がプロンプトへ明示的に埋め込まれ、fetch/checkout/merge より前に一致確認する', () => {
+  const prompt = baseMergePrompt(item, impl, 'Fandhe-AI/agent-cli-skills')
+  assert.ok(prompt.includes('"Fandhe-AI/agent-cli-skills"'), '期待 owner/repo の値がプロンプトへ埋め込まれていない')
+  const remoteIdx = prompt.indexOf('git remote get-url origin')
+  const expectedRepoIdx = prompt.indexOf('"Fandhe-AI/agent-cli-skills"')
+  const fetchIdx = prompt.indexOf('git fetch origin &&')
+  const baseFetchIdx = prompt.indexOf(':refs/remotes/origin/')
+  const mergeIdx = prompt.indexOf('git merge --no-edit')
+  assert.ok(remoteIdx >= 0, 'git remote get-url origin の指示がない')
+  assert.ok(expectedRepoIdx >= 0, '期待 owner/repo の埋め込みが見つからない')
+  assert.ok(expectedRepoIdx < fetchIdx, '期待 owner/repo の照合指示が git fetch より前に現れない')
+  assert.ok(expectedRepoIdx < baseFetchIdx, '期待 owner/repo の照合指示が base fetch より前に現れない')
+  assert.ok(expectedRepoIdx < mergeIdx, '期待 owner/repo の照合指示が merge より前に現れない')
+  assert.ok(prompt.includes('.git'), '.git 接尾辞の除去指示がない')
+  assert.ok(prompt.includes('ssh://git@'), 'SSH 形式の正規化指示がない')
+  assert.ok(prompt.includes('https://<host>/<owner>/<repo>'), 'HTTPS 形式の正規化指示がない')
+})
+
+// 期待 owner/repo が未確定（host 側で isValidRepoSlug を通らなかった／引数省略）の場合、
+// 常に不一致として fail-closed する契約を固定する。空文字を「常に不一致」の番人にするため、
+// 埋め込み値自体が空文字であることと、その旨の分岐説明がプロンプトに含まれることを確認する。
+test('baseMergePrompt: 期待 owner/repo が未確定（省略／不正形式）のとき、常に不一致として fail-closed する指示になる', () => {
+  const promptOmitted = baseMergePrompt(item, impl)
+  const promptInvalid = baseMergePrompt(item, impl, 'not-a-valid-slug-without-slash')
+  const promptEmpty = baseMergePrompt(item, impl, '')
+  for (const [label, prompt] of [['省略', promptOmitted], ['スラッシュなし不正値', promptInvalid], ['空文字', promptEmpty]]) {
+    assert.ok(prompt.includes('""'), `${label}: 期待 owner/repo が空文字として埋め込まれていない（fail-closed の番人が機能しない）`)
+    assert.ok(prompt.includes('空文字は未確定を意味し常に不一致として扱う'), `${label}: 未確定時に常に不一致とする旨の説明がない`)
+  }
+  // 不正形式（isValidRepoSlug を通らない値）を渡した場合もそのまま埋め込まれず空文字化される
+  // ことを、有効な値を渡した場合との対比で確認する。
+  assert.ok(!promptInvalid.includes('not-a-valid-slug-without-slash'), '不正形式の値がそのままプロンプトへ埋め込まれている（isValidRepoSlug による検証を経ていない）')
+})
+
 // PR #443 codex P0（thread PRRT_kwDORuXFg86cacPf）の回帰テスト: baseMergePrompt は push まで
 // 許可するエージェントのため item.title（未信頼テキスト）を一切埋め込まない。この固定を外して
 // 再度 untrusted(item.title, ...) を埋め込む変更が入るとこのテストが失敗する。
