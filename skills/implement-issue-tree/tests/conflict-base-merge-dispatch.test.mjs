@@ -638,3 +638,72 @@ test("駆動部: conflicting 分岐は expectedRepo === '' を baseMergePrompt �
   assert.ok(!guardBody.includes('baseMergePrompt('), 'expectedRepo 未確定ガードが baseMergePrompt を起動している（未起動でホスト側直接終端するはず）')
   assert.ok(!guardBody.includes("lastBlockedReason = 'unrecoverable'"), 'expectedRepo 未確定ガードが unrecoverable を代入している（failed/halt カウント対象へ倒れる）')
 })
+
+// ---------------------------------------------------------------------------
+// PR #443 codex P1（thread: baseMergePrompt のコンフリクト検出が commitFailed → failed 終端に
+// 直結し、SKILL.md / automerge-design.md の「コンフリクトは検証権限を持つ fix/implement 経路へ
+// 委譲」という遷移が実装されていない問題）の回帰。分岐 (b) のコンフリクトは conflict: true を
+// 伴う commitFailed として返り、ホストは failMergeTerminal せず lastState = 'needs-fix' へ
+// 委譲する（fixPrompt の push 前 base 最新化ゲートが解消・検証・push を担う）。conflict を
+// 伴わない commitFailed（fetch / checkout 失敗・hook 拒否等）は従来どおり失敗終端する。
+// ---------------------------------------------------------------------------
+
+test('BASE_MERGE_SCHEMA: conflict は省略可の boolean として定義される', () => {
+  assert.ok('conflict' in BASE_MERGE_SCHEMA.properties, 'conflict が定義されていない')
+  assert.equal(BASE_MERGE_SCHEMA.properties.conflict.type, 'boolean')
+  assert.ok(!BASE_MERGE_SCHEMA.required.includes('conflict'), 'conflict が required に含まれている（省略可のはず）')
+})
+
+test('baseMergeInstruction: runVerification=false のみコンフリクト時に conflict: true を返す指示を含む', () => {
+  const noVerify = baseMergeInstruction('main', false)
+  const withVerify = baseMergeInstruction('main')
+  assert.ok(noVerify.includes('conflict: true'), 'runVerification=false でコンフリクト時に conflict: true を返す明示がない')
+  // conflict は分岐 (b) 専用: 他の commitFailed 経路（fetch / checkout 失敗・hook 拒否等）では
+  // 付けない旨の限定が無いと、ホストが回復不能クラスまで fix 経路へ回してしまう。
+  assert.ok(noVerify.includes('他の commitFailed 経路では conflict を付けない'), 'conflict を分岐 (b) 限定にする指示がない')
+  // 検証権限を持つ既定 true（pr-create / fixPrompt 経路）はその場で解消するため conflict を返さない。
+  assert.ok(!withVerify.includes('conflict: true'), '既定 true（検証権限あり経路）に conflict: true の返却指示が混入している')
+})
+
+test('baseMergePrompt: 手順 2 と返却行に conflict: true の返却指示を含む（合成後の全文）', () => {
+  const prompt = baseMergePrompt(item, impl)
+  assert.ok(prompt.includes('conflict: true'), 'conflict: true の返却指示がない')
+  assert.ok(prompt.includes('/ conflict（'), '返却行に conflict フィールドの説明がない')
+})
+
+test('駆動部: commitFailed + conflict は failMergeTerminal せず needs-fix（fix 経路）へ委譲する', () => {
+  const branchIdx = driverPart.indexOf("} else if (lastState === 'conflicting') {")
+  assert.ok(branchIdx >= 0, 'conflicting 分岐が見つからない')
+  const nextBranchIdx = driverPart.indexOf("lastState === 'needs-fix' || lastState === 'unresolved-comments'", branchIdx)
+  assert.ok(nextBranchIdx > branchIdx, 'needs-fix 分岐の開始位置を特定できない')
+  const branchBody = driverPart.slice(branchIdx, nextBranchIdx)
+  // conflict 判定は conflict なし commitFailed の失敗終端より前に評価される（後ろだと到達不能）。
+  const conflictIdx = branchBody.indexOf('b.commitFailed === true && b.conflict === true')
+  assert.ok(conflictIdx >= 0, 'conflict 委譲の判定（b.commitFailed === true && b.conflict === true）が見つからない')
+  const plainFailIdx = branchBody.indexOf('} else if (b.commitFailed === true) {')
+  assert.ok(plainFailIdx > conflictIdx, 'conflict なし commitFailed の失敗終端分岐が conflict 委譲判定の後に無い')
+  // conflict 委譲ブロック本体: needs-fix 設定・finding 合成を行い、failMergeTerminal・
+  // baseMergeCount 消費・noPushRounds 前進を行わない。
+  const delegBody = branchBody.slice(conflictIdx, plainFailIdx)
+  assert.ok(delegBody.includes("lastState = 'needs-fix'"), 'conflict 委譲が lastState を needs-fix に設定していない')
+  assert.ok(delegBody.includes('finding = {'), 'conflict 委譲が fix 用の finding を合成していない')
+  assert.ok(!delegBody.includes('failMergeTerminal('), 'conflict 委譲が failMergeTerminal を呼んでいる（failed 終端せず fix 経路へ委譲するはず）')
+  assert.ok(!delegBody.includes('baseMergeCount++'), 'conflict 委譲が baseMergeCount を消費している（コミット未作成のため消費しないはず）')
+  assert.ok(!delegBody.includes('advanceNoPushRounds('), 'conflict 委譲が noPushRounds を進めている（fix 側の既存処理に委ねるはず）')
+  // conflict なし commitFailed は従来どおり失敗終端する。
+  const plainFailBody = branchBody.slice(plainFailIdx, branchBody.indexOf('} else {', plainFailIdx))
+  assert.ok(plainFailBody.includes('return await failMergeTerminal('), 'conflict なし commitFailed が failMergeTerminal で失敗終端していない')
+})
+
+test('駆動部: needs-fix 分岐は conflicting チェーンへ else if で連結せず、同一周回で fix を起動できる（2 段チェーン構造）', () => {
+  // else if のままだと conflict 委譲が設定した lastState = 'needs-fix' は同一周回で評価されず、
+  // 次ラウンドの monitor が CONFLICTING を再観測して 'conflicting' へ戻すため fix が永久に
+  // 起動しない（monitor → baseMerge → conflict のループ）。
+  assert.ok(
+    !driverPart.includes("} else if (lastState === 'needs-fix' || lastState === 'unresolved-comments')"),
+    "needs-fix 分岐が conflicting チェーンへ else if で連結されている（conflict 委譲が同一周回で fix へ到達できない）",
+  )
+  const branchIdx = driverPart.indexOf("} else if (lastState === 'conflicting') {")
+  const reDispatchIdx = driverPart.indexOf("if (lastState === 'needs-fix' || lastState === 'unresolved-comments') {")
+  assert.ok(reDispatchIdx > branchIdx, 'conflicting 分岐の後に独立の needs-fix 再ディスパッチ if が見つからない')
+})

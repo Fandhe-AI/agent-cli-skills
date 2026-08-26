@@ -565,7 +565,7 @@ function baseMergeInstruction(base, runVerification = true) {
   const commitTail = ` — subject は MERGE_MSG に残る上記のものを使う。この git commit --no-edit も pre-commit / commit-msg hook を通るため、非 0 終了（hook 拒否。MERGE_HEAD が残る）なら (c) と同じく git merge --abort し、push せず「base merge コミット拒否: <hook 出力の要旨>」を理由として返す。--no-verify で強行せず、終了コードを無視して merge 前の HEAD を push してはならない）。`
   const resolveBranch = runVerification
     ? `その場で解消を試みる（CLAUDE.md・rules を遵守し、テスト実行規約に従いビルド・lint・テストを通してから git commit --no-edit でコミットする${commitTail}解消不能な場合は git merge --abort し、push せず「base コンフリクト解消不能」を理由として返す。`
-    : `コンフリクト種別を問わず解消しない（内容編集の権限を持たない — build/lint/test 不可のため。submodule gitlink ポインタのコンフリクトも双方がポインタを変更した状態であり、base 側採用は PR 側の gitlink 更新を黙って破棄するため機械的に解消できない）。commit せず git merge --abort し、pushed: false・commitFailed: true・summary「base コンフリクト解消不能（内容編集の権限なし。fix/implement へ委譲要）」を返す。`
+    : `コンフリクト種別を問わず解消しない（内容編集の権限を持たない — build/lint/test 不可のため。submodule gitlink ポインタのコンフリクトも双方がポインタを変更した状態であり、base 側採用は PR 側の gitlink 更新を黙って破棄するため機械的に解消できない）。commit せず git merge --abort し、pushed: false・commitFailed: true・conflict: true・summary「base コンフリクト解消不能（内容編集の権限なし。fix/implement へ委譲要）」を返す（conflict: true はこのコンフリクト検出時のみ付ける。fetch / checkout 失敗・hook 拒否等の他の commitFailed 経路では conflict を付けない — ホストは conflict: true のときのみ検証権限を持つ fix 経路へ委譲する）。`
   return `merge 前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み、マージコミットの subject を <type>[(<scope>)]: base ブランチの変更を取り込む の形式で決める。rule は [severity, when, value] の tuple として解釈する（severity 0 の rule は無視。when が always の enum は列挙値が許可リスト、never の enum は列挙値が拒否リスト。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule（例: @commitlint/config-conventional の type-enum は always）を同じ規則で読む）。type は type-enum が無ければ chore、あれば chore → build → ci → fix → feat → docs → refactor → perf → test → style → revert の順で最初に許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）。always で全候補が不許可なら type-enum の列挙値を先頭から順に探索し、後述の正規表現を満たす最初の値へフォールバックする（先頭要素だけを見ない。1 つも無ければ git merge を実行せず「base merge subject の type を commitlint 設定から決定できない」を理由として (c) と同じ終端へ倒す。この列挙値探索は always に限る。never の列挙値は禁止値であり、never の列挙値へフォールバックしない）。never で全候補が拒否されたら列挙外の決定的候補 merge → sync の順で拒否リストに無く ^[A-Za-z0-9_-]{1,64}$ を満たすものを採り、それも拒否されたときだけ git merge を実行せず「base merge subject の type を commitlint 設定から決定できない」を理由として (c) と同じ終端へ倒す。scope は scope-empty が [*, "never"]（scope 必須）の場合のみ付け、[*, "always"]（scope 禁止）・severity 0・未設定なら省略する。付ける値は scope-enum が always なら後述の正規表現を満たす列挙値だけを順に探索し（最も近い値を優先。判断できなければ先頭から）、該当する列挙値が無ければ git merge を実行せず「base merge subject の scope を commitlint 設定から決定できない」を理由として (c) と同じ終端へ倒す（直前コミットの scope や base ブランチ名由来の値は always の許可リストに含まれる保証が無いため使わない）。scope-enum が無い / never の場合に限り、同ブランチで既に hook を通過した直前の implement / fix コミットの scope（never の禁止値は除外）を再利用し、それも無ければ base ブランチ名の英数字以外を - に置換した文字列を使う（これも never の禁止値に該当すれば使わず、git merge を実行せず「base merge subject の scope を commitlint 設定から決定できない」を理由として (c) と同じ終端へ倒す）。type / scope の候補値は commitlint 設定・コミット履歴という未信頼データ由来のため、採用前に正規表現 ^[A-Za-z0-9_-]{1,64}$（英数・アンダースコア・ハイフンのみ。-F 渡しのためシェル特殊文字・空白・制御文字を弾ければ十分）で検証し、不適合ならその候補を捨てて同じ連鎖内の次の候補へ進む（always の scope-enum では次の列挙値へ。連鎖をまたいで直前コミット / ブランチ名へは落ちない）。最終候補（type-enum 先頭 / base ブランチ名由来の scope）も不適合なら git merge を実行せず「base merge subject の type/scope が安全文字集合に不適合」を理由として (c) と同じ終端へ倒す）。決めた subject は一時ファイルへ書き（printf の引数にせず、エディタ・Write ツール等でファイル内容として書く）、git merge --no-edit -F <一時ファイル> origin/${base} で渡す（-m "<subject>" のシェル文字列補間は使わない — 未信頼値をシェル構文へ再展開すると $(...)・バッククォート・引用符でコマンドインジェクションになる。検証と受け渡しの二重で塞ぐ）。終了コードで 3 分岐する: (a) 0（Already up to date またはクリーンマージ）→ 次の手順へ進む。(b) 非 0 かつ git diff --name-only --diff-filter=U が非空 → コンフリクト。${resolveBranch}(c) 非 0 かつ U が無い（MERGE_HEAD が残る = commit-msg hook 拒否等）→ git merge --abort し、push せず「base merge コミット拒否: <hook 出力の要旨>」を理由として返す（fail-closed。--no-verify で強行しない。exit 1 を無視して push すると base 未取り込みの HEAD が push されゲートを迂回する）。`
 }
 
@@ -828,17 +828,12 @@ function selectPrereqProbeTargets(work, depsMap, done, failedSet, running) {
   return [...targets].sort((a, b) => a - b)
 }
 
-// プローブ結果 1 件を遷移種別へ分類する。PR MERGED を Issue CLOSED より優先する（PR がマージ
-// 済みなら Issue の状態取得が失敗していても前提は充足している）。それ以外（OPEN / UNKNOWN /
-// NONE / 非文字列）は遷移なし（fail-closed。推測で完了扱いにしない）。
-// 'merged' の受理には entry.pr が正の整数であり、かつホスト側が事前に把握している対象
-// issue の PR 番号（knownPr。results/savedItems 由来）と一致することを必須とする（Issue #442
-// codex 指摘: PR 番号なし・不一致の 'MERGED' 申告だけで前提を解除できてしまう fail-closed
-// 契約違反を塞ぐ）。knownPr 自体が未確定（ホストがまだその issue の PR 番号を掴んでいない）
-// なら照合不能として遷移させない — 未確認のまま前提充足と見なすことは fail-closed に反する。
-// MERGED 照合が不成立でも issueState === 'CLOSED' へフォールスルーする（早期 return で同一
-// entry の CLOSED 判定を握り潰さない。cursor 指摘: PR 番号照合失敗時に CLOSED が評価されず
-// 前提が永久にブロックされたままになる不具合の修正）。
+// プローブ結果 1 件を遷移種別へ分類する。PR MERGED を Issue CLOSED より優先し、それ以外
+// （OPEN / UNKNOWN / NONE / 非文字列）は遷移なし（fail-closed）。'merged' はホスト既知の
+// PR 番号（knownPr。results/savedItems 由来）と entry.pr の一致を必須とする（Issue #442
+// codex: 番号なし・不一致の MERGED 申告で前提解除できてしまうため。knownPr 未確定なら照合
+// 不能として遷移させない）。MERGED 照合不成立でも issueState === 'CLOSED' へフォールスルー
+// する（cursor: 早期 return すると CLOSED が評価されず前提が永久ブロックされる）。
 function classifyPrereqTransition(entry, knownPr) {
   if (entry && typeof entry === 'object') {
     if (
@@ -856,18 +851,12 @@ function classifyPrereqTransition(entry, knownPr) {
   return null
 }
 
-// プローブ結果を failedSet → done へ実際に適用する（Issue #442 の中核）。ホスト側で二重に検証
-// する: (1) targets に含まれる番号のみ受理（プローブ要求していない番号は無視）、(2) issue が
-// Number.isInteger（文字列・小数は拒否）。同一 issue の重複 entry は最初の 1 件のみ採用する。
-// prHints は呼び出し元（probePrereqCompletion）が results/savedItems から解決したホスト既知
-// PR 番号（issue → pr）。'merged' 判定はこれと entry.pr の一致を classifyPrereqTransition 内で
-// 必須とするため、ここでは対象 issue の値をそのまま渡すのみで独自の検証ロジックは持たない。
-// pr は kind === 'merged' の場合に限り transition へ含める。'closed' は classifyPrereqTransition
-// の CLOSED フォールスルー（entry.pr が knownPr 照合を通っていない、または照合不能なまま
-// issueState だけで確定した経路）を含むため、entry.pr をそのまま転記すると呼び出し元
-// probePrereqCompletion が未検証の PR 番号で state/results の既知値を上書きしてしまう
-// （cursor 指摘: Rejected PR persisted on fallthrough）。'closed' 遷移は常に PR なし
-// （既存の「PR なし」表現＝ transition オブジェクトに pr キー自体を含めない）として扱う。
+// プローブ結果を failedSet → done へ実際に適用する（Issue #442 の中核）。ホスト側二重検証:
+// (1) targets に含まれる番号のみ受理、(2) issue が Number.isInteger。重複 entry は先勝ち。
+// prHints は呼び出し元が解決したホスト既知 PR 番号（issue → pr。'merged' 照合は
+// classifyPrereqTransition 側で必須）。pr は kind === 'merged' の場合のみ transition へ
+// 含める。'closed' は knownPr 照合を通っていない CLOSED フォールスルー経路を含むため、常に
+// pr キーなし（既存の「PR なし」表現）で扱う（cursor: 未検証 PR 番号での既知値上書き防止）。
 function applyPrereqTransitions(probe, targets, done, failedSet, prHints) {
   const results = Array.isArray(probe?.results) ? probe.results : []
   const seen = new Set()
@@ -1047,7 +1036,14 @@ const BASE_MERGE_SCHEMA = {
     // 専用シグナル。FIX_SCHEMA.commitFailed と同じ契約（ホストは失敗終端として扱う）。
     commitFailed: {
       type: 'boolean',
-      description: 'base 取り込みコミットを作成できなかった（base fetch 失敗・コンフリクト解消不能・hook 拒否・commitlint の type / scope 決定不能等）場合 true。true のとき pushed は false。ホストは失敗終端として扱う。',
+      description: 'base 取り込みコミットを作成できなかった（base fetch 失敗・コンフリクト解消不能・hook 拒否・commitlint の type / scope 決定不能等）場合 true。true のとき pushed は false。ホストは失敗終端として扱う（conflict: true を伴う場合のみ fix 経路へ委譲する）。',
+    },
+    // 分岐 (b) のコンフリクト検出専用シグナル。true のときホストは失敗終端せず、コンフリクト
+    // 解消＋検証（build/lint/test）＋push の権限を持つ fix 経路へ委譲する。エージェント自己申告
+    // だが、誤申告の最悪ケースは検証付き・fixCount で有界の fix 経路へ余分に回るだけで安全側。
+    conflict: {
+      type: 'boolean',
+      description: '分岐 (b) のコンフリクト検出時のみ true（その際 commitFailed も true・pushed は false）。base fetch 失敗・branch fetch / checkout 失敗・hook 拒否等の他の commitFailed 経路では付けない。',
     },
     // push 後の gh pr view 再取得値。ホストのログ専用（マージ判定・分岐には使わない）。
     // 未信頼テキストではなく enum 完全一致のみを受理するため注入面を持たない。
@@ -2589,11 +2585,11 @@ function baseMergePrompt(item, impl, expectedRepo) {
     '手順:',
     `0. 本エージェントは隔離された git worktree 内で動作する。他のどの操作よりも先に \`git remote get-url origin\` の出力を取得し、末尾の改行・\`.git\` を除去したうえで SSH 形式（\`git@<host>:<owner>/<repo>\`・\`ssh://git@<host>/<owner>/<repo>\`）・HTTPS 形式（\`https://<host>/<owner>/<repo>\`）のいずれも host 部分と \`<owner>/<repo>\` 部分を別々に抽出する。まず host を ASCII 英大文字を英小文字へ変換したうえで許可ホスト "${ALLOWED_REMOTE_HOST}" と完全一致することを確認する（host が一致しない場合は owner/repo の比較へ進まず不一致として扱う。host を照合せず owner/repo だけを比較すると、期待リポジトリと同じ owner/repo を持つ別ホスト — 例: \`git@evil.example:${expectedRepoSlug}.git\` — を誤って一致とみなし、別ホストへ fetch / push しうるため。PR #443 codex P0）。host が一致した場合に限り、owner/repo 部分を ASCII 英大文字を英小文字へ変換したうえで（GitHub の owner/repo は case-insensitive）、期待リポジトリ ${expectedRepoLiteral}（同じ規則で小文字化済み。空文字は未確定を意味し常に不一致として扱う）と完全一致することを確認する（小文字化は比較にのみ使う）。host と owner/repo の両方が一致した場合に限り続けて \`gh pr view ${impl.prNumber} --json number,headRefName\` を実行し、number が ${impl.prNumber}・headRefName が "${branch}"（ホスト確定済みブランチ名）と一致することを確認する（Issue タイトル等の未信頼テキストは参照しない。remote 一致確認の代替ではなく追加チェック）。remote の host が "${ALLOWED_REMOTE_HOST}" と不一致／owner-repo が期待リポジトリと不一致／PR を解決できない／number または headRefName が不一致のいずれか（= 別ホスト・別リポ worktree への誤配置・対象 PR の取り違え・ホスト側期待値未確定）なら、git fetch / checkout / merge / push を含む後続を一切実行せず routingError: true・pushed: false・summary に「worktree routing error: remote の host/owner-repo=<正規化後の値> が期待リポジトリ ${ALLOWED_REMOTE_HOST}/${expectedRepoSlug} と不一致」を書いて即終了する（隔離契約違反のため）。`,
     `1. git fetch origin ${branch}:refs/remotes/origin/${branch}（保存先を明示した refspec）で対象ブランチを取得する。この fetch の終了コードを必ず確認し、非ゼロ終了（通信・認証・リモートブランチ削除・refspec 制限等）の場合は checkout / merge / push を一切行わず pushed: false・commitFailed: true・summary に「branch fetch 失敗」（エラー内容の要旨を添える）を書いて即終了する（fail-closed。この時点では隔離 worktree の元の HEAD のままであり、誤ってこれを対象ブランチへ push してはならない）。fetch 成功後、git checkout --detach origin/${branch} で detached HEAD として取得する（ブランチが別 worktree で checkout 済みの可能性があるため）。checkout の終了コードも必ず確認し、非ゼロ終了なら同様に checkout / merge / push を一切行わず pushed: false・commitFailed: true・summary に「branch checkout 失敗」を書いて即終了する。checkout 成功後、git rev-parse HEAD の出力が git rev-parse origin/${branch} の出力（手順1 で取得した最新の origin/${branch}）と一致することを確認し、不一致なら誤った起点を取得したとみなし手順 2 以降（merge・push を含む）を一切実行せず pushed: false・commitFailed: true・summary に「checkout 後の HEAD が origin/${branch} と不一致」を書いて即終了する（隔離 worktree の元の HEAD のまま push すると対象ブランチを意図しない履歴へ更新してしまうため）。`,
-    `2. git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec）で base を取得する。この base fetch の終了コードを必ず確認し、非ゼロ終了（通信・認証・refspec エラー等）の場合は merge も push も行わず pushed: false・commitFailed: true・summary に「base fetch 失敗」（エラー内容の要旨を添える）を書いて返す（fail-closed）。fetch 成功後、${baseMergeInstruction(baseBranch, false)} 分岐 (a) が Already up to date の場合は base 取り込み済みで積むものが無いため push せず pushed: false・commitFailed なし・summary に「Already up to date（GitHub 側の mergeable 算出待ちの可能性）」と書いて返す（次ラウンドの monitor が再確認する）。分岐 (a) がクリーンマージの場合のみ手順 3 へ進む（分岐 (b) のコンフリクトは種別を問わず解消せず commitFailed: true で返す）。`,
+    `2. git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec）で base を取得する。この base fetch の終了コードを必ず確認し、非ゼロ終了（通信・認証・refspec エラー等）の場合は merge も push も行わず pushed: false・commitFailed: true・summary に「base fetch 失敗」（エラー内容の要旨を添える）を書いて返す（fail-closed）。fetch 成功後、${baseMergeInstruction(baseBranch, false)} 分岐 (a) が Already up to date の場合は base 取り込み済みで積むものが無いため push せず pushed: false・commitFailed なし・summary に「Already up to date（GitHub 側の mergeable 算出待ちの可能性）」と書いて返す（次ラウンドの monitor が再確認する）。分岐 (a) がクリーンマージの場合のみ手順 3 へ進む（分岐 (b) のコンフリクトは種別を問わず解消せず pushed: false・commitFailed: true・conflict: true で返す。conflict: true は分岐 (b) のコンフリクト検出時のみ — base fetch 失敗・branch fetch / checkout 失敗・hook 拒否等の他の commitFailed 経路では付けない）。`,
     `3. ${pushVerifyInstruction(branch, { baseMergeStepRef: '手順 2 の base merge ', resolveStepRef: 'resolve（本エージェントの担当範囲外） ' })}`,
     `4. 手順 3 で pushed: true と判定できた場合のみ実行する（false の場合はスキップして手順 5 へ進む）: gh pr view ${impl.prNumber} --json state,mergeable,headRefOid を取得し、mergeable が UNKNOWN なら 30 秒あけて最大 6 回再取得する（推測で MERGEABLE を返さない。取得不能・上限到達は UNKNOWN のまま返す）。最終値を mergeableAfter として返し、取得した headRefOid を headSha として返す（診断用。マージ判定には使われない）。続けて gh api repos/{owner}/{repo}/commits/<headRefOid>/check-runs --jq '.total_count' を 30 秒間隔で最大 5 分待ち、1 件以上確認できれば checksStarted: true、上限まで 0 件のままなら false を返す（チェックの完了は待たない。完了判定は次ラウンドの監視エージェントの役割）。`,
     '5. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
-    '返却: pushed / summary / worktreePath / routingError（手順 0 で誤配置を検出した場合のみ true） / commitFailed（base 取り込みコミットを作成できなかった場合のみ true） / mergeableAfter（手順 4 を実行した場合のみ） / checksStarted（手順 4 を実行した場合のみ） / headSha（手順 4 を実行した場合のみ）。',
+    '返却: pushed / summary / worktreePath / routingError（手順 0 で誤配置を検出した場合のみ true） / commitFailed（base 取り込みコミットを作成できなかった場合のみ true） / conflict（手順 2 の分岐 (b) でコンフリクトを検出した場合のみ true。その際 commitFailed も true。他の commitFailed 経路では付けない） / mergeableAfter（手順 4 を実行した場合のみ） / checksStarted（手順 4 を実行した場合のみ） / headSha（手順 4 を実行した場合のみ）。',
   ].join('\n')
 }
 
@@ -4521,33 +4517,55 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         lastBlockedReason = 'unrecoverable'
         break
       }
-      if (b.commitFailed === true) {
+      if (b.commitFailed === true && b.conflict === true) {
+        // 分岐 (b) の内容コンフリクト検出（PR #443 codex P1）: baseMergePrompt は検証権限を
+        // 持たないため failed 終端せず、コンフリクト解消＋ビルド・lint・テスト検証＋push の
+        // 権限を持つ fix 経路（fixPrompt の push 前 base 最新化ゲート）へ委譲する。conflict は
+        // エージェント自己申告だが、誤申告の最悪ケースは検証付き・fixCount<=6 で有界の fix
+        // 経路へ余分に回るだけで安全側。コミット未作成のため baseMergeCount は消費せず、
+        // noPushRounds もこの周回では進めない（fix 側の既存処理に委ねる）。
+        log(`PR #${impl.prNumber}: base 取り込みがコンフリクトを検出、検証権限を持つ fix エージェントへ委譲する`)
+        lastState = 'needs-fix'
+        finding = {
+          summary: `base 取り込みが内容コンフリクトを検出した。push 前 base 最新化ゲートで base ブランチを merge し、コンフリクトを解消してビルド・lint・テストを通してから push する必要がある: ${sanitize(b.summary ?? '')}`,
+          unresolvedComments: [],
+        }
+        if (monitorsLeft < 1) monitorsLeft = 1
+      } else if (b.commitFailed === true) {
+        // conflict なし（base fetch 失敗・branch fetch / checkout 失敗・hook 拒否等）は自動
+        // 回復不能クラスのため従来どおり失敗終端する。
         const reason = `base 取り込みがコミットを作成できず未反映: ${sanitize(b.summary ?? '')}`
         log(`⚠️ issue #${item.number}: ${reason}`)
         // 台帳計上は上で完了済み。
         return await failMergeTerminal(reason)
+      } else {
+        baseMergeCount++
+        lastRoundPushed = b.pushed === true
+        // push 成功時は CONFLICTING→fix 経路と同じく noPushRounds をリセットする（PR #443 指摘。
+        // base-merge 経路は独立に触れずに来たため直前の no-push fix カウントが残留し、後続 fix
+        // 1 回で誤って blocked 終端し得た）。newlyResolvedThisRound 相当は無いため pushed のみを
+        // 進捗シグナルとして渡す。
+        noPushRounds = advanceNoPushRounds(noPushRounds, b.pushed === true, 0)
+        // currentWorktreePath は書き換えない（上のコメント参照。所有権を証明できない自己申告パスを
+        // cleanup 対象へ採用しない）。state の worktree 値もこれまでの追跡値のまま維持する。
+        await updateState(item.number, { baseMergeCount, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments })
+        // mergeableAfter / checksStarted はエージェント自己申告のためログ専用（マージ判定・分岐には
+        // 使わない。enum 完全一致のみ schema が受理する）。実際の判定は次ラウンドの monitor が
+        // サーバー側の実値を再観測して行う。
+        if (b.mergeableAfter || b.checksStarted === true) {
+          log(`PR #${impl.prNumber}: base 取り込み後（ログ専用・判定には未使用）mergeableAfter=${b.mergeableAfter ?? '不明'} checksStarted=${b.checksStarted === true}`)
+        }
+        if (!b.pushed) {
+          log(`PR #${impl.prNumber} の base 取り込みエージェントは push 不要と判断（Already up to date 等）、マージ条件を再判定する`)
+        }
+        if (monitorsLeft < 1) monitorsLeft = 1
       }
-      baseMergeCount++
-      lastRoundPushed = b.pushed === true
-      // push 成功時は CONFLICTING→fix 経路と同じく noPushRounds をリセットする（PR #443 指摘。
-      // base-merge 経路は独立に触れずに来たため直前の no-push fix カウントが残留し、後続 fix
-      // 1 回で誤って blocked 終端し得た）。newlyResolvedThisRound 相当は無いため pushed のみを
-      // 進捗シグナルとして渡す。
-      noPushRounds = advanceNoPushRounds(noPushRounds, b.pushed === true, 0)
-      // currentWorktreePath は書き換えない（上のコメント参照。所有権を証明できない自己申告パスを
-      // cleanup 対象へ採用しない）。state の worktree 値もこれまでの追跡値のまま維持する。
-      await updateState(item.number, { baseMergeCount, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments })
-      // mergeableAfter / checksStarted はエージェント自己申告のためログ専用（マージ判定・分岐には
-      // 使わない。enum 完全一致のみ schema が受理する）。実際の判定は次ラウンドの monitor が
-      // サーバー側の実値を再観測して行う。
-      if (b.mergeableAfter || b.checksStarted === true) {
-        log(`PR #${impl.prNumber}: base 取り込み後（ログ専用・判定には未使用）mergeableAfter=${b.mergeableAfter ?? '不明'} checksStarted=${b.checksStarted === true}`)
-      }
-      if (!b.pushed) {
-        log(`PR #${impl.prNumber} の base 取り込みエージェントは push 不要と判断（Already up to date 等）、マージ条件を再判定する`)
-      }
-      if (monitorsLeft < 1) monitorsLeft = 1
-    } else if (lastState === 'needs-fix' || lastState === 'unresolved-comments') {
+    }
+    // needs-fix 以降は上のチェーンへ else if で連結しない: conflicting 分岐が conflict 委譲で
+    // lastState = 'needs-fix' と finding を設定した場合に、次ラウンドの monitor（CONFLICTING を
+    // 再観測して 'conflicting' へ戻してしまう）を経ず同一周回で fix を起動するための再ディス
+    // パッチ（merge-exec 不一致時の合成 finding と同型の 2 段チェーン構造）。
+    if (lastState === 'needs-fix' || lastState === 'unresolved-comments') {
       if (fixCount >= 6) {
         // 修正上限到達時の再開可否は「上限到達時点で観測していた状態」で決める（'blocked' 上書き
         // 前に分類）。'unresolved-comments' は人間の resolve で進めるため 'quality'、'needs-fix'
@@ -5118,16 +5136,11 @@ async function probePrereqCompletion(targets) {
     const failuresIdx = failures.findIndex((f) => f.issue === t.issue)
     if (failuresIdx >= 0) {
       const [removedFailure] = failures.splice(failuresIdx, 1)
-      // recordFailure は 'blocked' を halt の連続カウントに含めない（3318 行のコメント参照）。
-      // ここで前提完了により failures から除去する対象が 'failed'（カウント対象）だった場合、
-      // 除去だけして consecutiveFailures を据え置くと、回復済みの失敗が「3 連続失敗」判定に
-      // 残り続け、後続の無関係な実失敗で不当に halt し得る（Cursor Bugbot 指摘）。
-      // カウントを対称的に戻す（0 未満にはしない）。ただし streakEpoch が現在の failureEpoch と
-      // 一致する場合のみ減算する — removedFailure の記録後に別の成功で consecutiveFailures が
-      // 0 へリセットされていた場合（例: A失敗→B成功→C失敗の後で A の外部完了を検知）、
-      // A は既にリセット済みの世代に属し現在のカウント（C 分）には含まれていないため、
-      // 世代を無視して一律デクリメントすると無関係な C の分まで削れてしまう
-      // （codex/Bugbot 指摘。詳細は failureEpoch 宣言部のコメント参照）。
+      // 前提完了で failures から除去する対象が 'failed'（halt カウント対象）だった場合は
+      // consecutiveFailures を対称に戻す（0 未満にしない。Bugbot: 据え置くと回復済み失敗が
+      // 3 連続判定に残り不当 halt し得る）。ただし streakEpoch === failureEpoch の場合のみ
+      // 減算する（別の成功でリセット済みの世代を一律デクリメントすると無関係な現行カウント
+      // まで削れる。codex/Bugbot。詳細は failureEpoch 宣言部のコメント参照）。
       if (
         removedFailure?.status !== 'blocked' &&
         removedFailure?.streakEpoch === failureEpoch &&
@@ -5432,22 +5445,13 @@ while (true) {
       running.set(n, runOne(item))
     }
   }
-  // 空きスロットがある間は、failedSet 入りした前提に塞がれている保留項目の外部完了
-  // （人手マージ等）を確認する（Issue #442）。周回内 1 回・MIN_MS 間隔で有界化し、通常
-  // dispatch（上のブロック）を完走した後にのみ行う — プローブの待ち時間が「着手可能な
-  // 項目は常に投入する」という受入条件を阻害しないため。
-  // running.size === 0（このまま次の break で drain する）の場合は MIN_MS クールダウンを
-  // 無視して最後に 1 回だけプローブする（Issue #444 Bugbot Medium: Missed prereq probe on
-  // drain）。クールダウン窓内に最後の in-flight work が完了すると、このゲートが無いまま
-  // break してしまい、その周回で外部完了した前提が failedSet に留まり続け cascade が
-  // 同一ラン内で永久にブロックされる。drain 直前は残り周回が無い（break すれば二度と
-  // プローブされない）ため、通常の間隔制御より drain 検知を優先する。
-  // halted 後も本ゲートは通す（オーナー判断 2026-08-26・codex P1 案A）。halted は「新規イシュー
-  // 投入の停止」のみを意味し、その解除やプローブ自体の抑止は含まない。halted 後にプローブ・
-  // applyPrereqTransitions による状態遷移・prereqTransitions 記録・updateState 永続化を止めると、
-  // halt 後に外部完了（人手マージ/クローズ）した前提が failedSet に留まったまま終端し、
-  // レポート・状態ファイルの精度が落ちる。新規着手ゲート（直後の `if (!halted)` ブロック）と
-  // halted フラグの解除条件はこの変更で一切変えない。
+  // failedSet 入りの前提に塞がれた保留項目の外部完了（人手マージ等）を確認する（Issue #442）。
+  // 周回内 1 回・MIN_MS 間隔で有界化し、通常 dispatch 完走後にのみ行う。running.size === 0
+  // （直後の break で drain）ならクールダウンを無視して最後に 1 回だけプローブする（#444
+  // Bugbot: drain 直前は残り周回が無く、窓内に完了した前提が failedSet に残り続けるため）。
+  // halted 後も本ゲートは通す（オーナー判断 2026-08-26・codex P1 案A: halted は新規投入の
+  // 停止のみを意味し、プローブ・遷移適用・永続化まで止めるとレポート・状態ファイルの精度が
+  // 落ちる。新規着手ゲート＝直後の `if (!halted)` と halted 解除条件は不変）。
   if (
     running.size < concurrency &&
     prereqProbeAtIterationSeq !== dispatchIterationSeq &&
@@ -5478,16 +5482,10 @@ while (true) {
     typeof setTimeout === 'function' &&
     typeof clearTimeout === 'function'
   if (tickArmable) {
-    // ここへ到達するのは (i) 今回の周回でクールダウン中のためプローブをスキップした
-    // 直後、または (ii) 今回の周回でプローブを実行したが対象なし・完了0件だった直後、
-    // のいずれか。PREREQ_RECHECK_MIN_MS（60秒）は常に PREREQ_RECHECK_TICK_MS（5分）
-    // より短いため、(ii) を区別せず「残りクールダウン時間」をそのまま tick 間隔にすると、
-    // プローブ直後は prereqProbeLastAt がリセットされ残りクールダウンが常に MIN_MS 満了
-    // まで巻き戻るため、tickDelayMs が毎回 min(TICK_MS, MIN_MS) = MIN_MS に潰れ、
-    // 本来 TICK_MS 間隔であるべき定期監視が MIN_MS 間隔（約5倍の頻度）で prereq:probe
-    // を呼び続けてしまう（Issue #442 PR #444 Bugbot Medium: Tick delay collapses
-    // recheck interval）。(i) の「クールダウン明け待ち」だけを短縮対象とし、(ii) の
-    // 「プローブ済み・対象なし」は通常どおり TICK_MS で待つ。
+    // 到達経路は (i) クールダウン中でプローブをスキップした直後、(ii) プローブ実行済みで
+    // 完了 0 件の直後、のいずれか。(i) の「クールダウン明け待ち」だけを短縮対象とし、(ii)
+    // は通常どおり TICK_MS で待つ（PR #444 Bugbot: 残りクールダウンをそのまま tick 間隔に
+    // するとプローブ直後は常に MIN_MS へ潰れ、定期監視が約 5 倍の頻度になる）。
     const probedThisIteration = prereqProbeAtIterationSeq === dispatchIterationSeq
     const cooldownRemainingMs = PREREQ_RECHECK_MIN_MS - (Date.now() - prereqProbeLastAt)
     const tickDelayMs =
