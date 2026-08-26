@@ -5370,15 +5370,22 @@ while (true) {
     typeof setTimeout === 'function' &&
     typeof clearTimeout === 'function'
   if (tickArmable) {
-    // ここへ到達するのは主にクールダウン中にプローブをスキップした直後（Issue #444
-    // Bugbot Medium: Tick delay after cooldown skip）。素朴に PREREQ_RECHECK_TICK_MS
-    // （5分）を毎回フルで張ると、クールダウンがとっくに明けていても次のプローブまで
-    // 最大5分待たされ、外部完了した前提の同一ラン内取り込みが不必要に遅延する。
-    // 残りクールダウン時間が TICK_MS より短ければそちらを優先し、クールダウン明け
-    // 直後に次の周回でプローブできるようにする。
+    // ここへ到達するのは (i) 今回の周回でクールダウン中のためプローブをスキップした
+    // 直後、または (ii) 今回の周回でプローブを実行したが対象なし・完了0件だった直後、
+    // のいずれか。PREREQ_RECHECK_MIN_MS（60秒）は常に PREREQ_RECHECK_TICK_MS（5分）
+    // より短いため、(ii) を区別せず「残りクールダウン時間」をそのまま tick 間隔にすると、
+    // プローブ直後は prereqProbeLastAt がリセットされ残りクールダウンが常に MIN_MS 満了
+    // まで巻き戻るため、tickDelayMs が毎回 min(TICK_MS, MIN_MS) = MIN_MS に潰れ、
+    // 本来 TICK_MS 間隔であるべき定期監視が MIN_MS 間隔（約5倍の頻度）で prereq:probe
+    // を呼び続けてしまう（Issue #442 PR #444 Bugbot Medium: Tick delay collapses
+    // recheck interval）。(i) の「クールダウン明け待ち」だけを短縮対象とし、(ii) の
+    // 「プローブ済み・対象なし」は通常どおり TICK_MS で待つ。
+    const probedThisIteration = prereqProbeAtIterationSeq === dispatchIterationSeq
     const cooldownRemainingMs = PREREQ_RECHECK_MIN_MS - (Date.now() - prereqProbeLastAt)
     const tickDelayMs =
-      cooldownRemainingMs > 0 ? Math.min(PREREQ_RECHECK_TICK_MS, cooldownRemainingMs) : PREREQ_RECHECK_TICK_MS
+      !probedThisIteration && cooldownRemainingMs > 0
+        ? Math.min(PREREQ_RECHECK_TICK_MS, cooldownRemainingMs)
+        : PREREQ_RECHECK_TICK_MS
     let tickTimer
     const tickPromise = new Promise((resolve) => {
       tickTimer = setTimeout(() => resolve({ tick: true }), tickDelayMs)

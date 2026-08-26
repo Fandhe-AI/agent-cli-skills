@@ -316,6 +316,28 @@ test('駆動部: Promise.race 後に必ず clearTimeout が存在する（tick t
   assert.ok(clearTimeoutIdx >= 0, 'clearTimeout 呼び出しが見つからない（tick timer が張りっぱなしになる回帰）')
 })
 
+// PR #444 Bugbot Medium (Tick delay collapses recheck interval) の回帰: 今回の周回で
+// プローブを実際に実行した直後（prereqProbeLastAt がリセット済み）は cooldownRemainingMs が
+// 常に PREREQ_RECHECK_MIN_MS 満了まで巻き戻り、min(TICK_MS, cooldownRemainingMs) が
+// TICK_MS ではなく MIN_MS に潰れて定期監視が約5倍の頻度で prereq:probe を呼び続けてしまう。
+// tickDelayMs の算出式が「今回の周回で probe 済みかどうか」を明示的に見て、probe 済みなら
+// 短縮せず TICK_MS を使うことをソース走査で固定する。
+test('駆動部: tick delay 算出は今回周回のプローブ済みフラグで短縮を打ち切る（cooldown 明け待ちのみ短縮する）', () => {
+  const tickDelayIdx = driverPart.indexOf('const tickDelayMs =')
+  assert.ok(tickDelayIdx >= 0, 'tickDelayMs の算出式が見つからない')
+  const tickDelaySection = driverPart.slice(driverPart.lastIndexOf('const cooldownRemainingMs', tickDelayIdx), tickDelayIdx + 300)
+  assert.ok(
+    tickDelaySection.includes('probedThisIteration'),
+    'tickDelayMs の算出が probedThisIteration を参照していない（今回周回でのプローブ実行直後に短縮してしまう回帰）',
+  )
+  const probedFlagIdx = driverPart.indexOf('const probedThisIteration =')
+  assert.ok(probedFlagIdx >= 0, 'probedThisIteration の定義が見つからない')
+  assert.ok(
+    driverPart.slice(probedFlagIdx, probedFlagIdx + 120).includes('prereqProbeAtIterationSeq === dispatchIterationSeq'),
+    'probedThisIteration が prereqProbeAtIterationSeq === dispatchIterationSeq で判定されていない',
+  )
+})
+
 test('駆動部: schema: PREREQ_PROBE_SCHEMA を伴う agent 呼び出しが存在する', () => {
   assert.ok(driverPart.includes('schema: PREREQ_PROBE_SCHEMA'), 'プローブ agent 呼び出しに PREREQ_PROBE_SCHEMA が使われていない')
 })
