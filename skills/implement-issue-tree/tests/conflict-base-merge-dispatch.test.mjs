@@ -329,11 +329,14 @@ test('baseMergePrompt: 期待 owner/repo がプロンプトへ明示的に埋め
   assert.ok(!prompt.includes('"Fandhe-AI/agent-cli-skills"'), '期待 owner/repo が小文字化されず元の大文字小文字混在のまま埋め込まれている')
   const remoteIdx = prompt.indexOf('git remote get-url origin')
   const expectedRepoIdx = prompt.indexOf('"fandhe-ai/agent-cli-skills"')
-  const fetchIdx = prompt.indexOf(`git fetch origin ${impl.branch}:refs/remotes/origin/${impl.branch}`)
+  const step1FetchCmd = `git fetch origin ${impl.branch}:refs/remotes/origin/${impl.branch}`
+  const fetchIdx = prompt.indexOf(step1FetchCmd)
   // 手順 1（対象ブランチ fetch）自体が保存先明示 refspec の ':refs/remotes/origin/' を含むため、
-  // indexOf の単純な最初の一致では手順 1 を拾ってしまう。手順 2（base fetch）だけを見るには
-  // 手順 1 の一致位置より後を検索する（PR #443 P1 の fail-closed 化に伴う回帰対応）。
-  const baseFetchIdx = prompt.indexOf(':refs/remotes/origin/', fetchIdx + 1)
+  // fetchIdx + 1 からの検索では手順 1 自身のマッチ文字列内の ':refs/remotes/origin/' に
+  // 再ヒットしてしまい、手順 2（base fetch）を指さない（Bugbot Low・thread
+  // PRRT_kwDORuXFg86cd8LB）。手順 1 のマッチ文字列全体の終端（fetchIdx + step1FetchCmd.length）
+  // より後を検索することで、手順 2 の base fetch だけを一意に特定する。
+  const baseFetchIdx = prompt.indexOf(':refs/remotes/origin/', fetchIdx + step1FetchCmd.length)
   const mergeIdx = prompt.indexOf('git merge --no-edit')
   assert.ok(remoteIdx >= 0, 'git remote get-url origin の指示がない')
   assert.ok(expectedRepoIdx >= 0, '期待 owner/repo の埋め込みが見つからない')
