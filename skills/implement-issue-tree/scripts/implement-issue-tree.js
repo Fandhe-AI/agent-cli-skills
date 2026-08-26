@@ -5030,7 +5030,15 @@ async function probePrereqCompletion(targets) {
       results.push({ issue: t.issue, status: t.kind, ...(t.pr ? { pr: t.pr } : {}), note: noteSuffix.slice(1) })
     }
     const failuresIdx = failures.findIndex((f) => f.issue === t.issue)
-    if (failuresIdx >= 0) failures.splice(failuresIdx, 1)
+    if (failuresIdx >= 0) {
+      const [removedFailure] = failures.splice(failuresIdx, 1)
+      // recordFailure は 'blocked' を halt の連続カウントに含めない（3318 行のコメント参照）。
+      // ここで前提完了により failures から除去する対象が 'failed'（カウント対象）だった場合、
+      // 除去だけして consecutiveFailures を据え置くと、回復済みの失敗が「3 連続失敗」判定に
+      // 残り続け、後続の無関係な実失敗で不当に halt し得る（Cursor Bugbot 指摘）。
+      // カウントを対称的に戻す（0 未満にはしない）。
+      if (removedFailure?.status !== 'blocked' && consecutiveFailures > 0) consecutiveFailures--
+    }
     prereqTransitions.push(t)
     appliedCount += 1
     log(`#${t.issue}: ラン中に外部完了を検知（${t.kind}）。前提充足として下流を同一ラン内で再判定する`)

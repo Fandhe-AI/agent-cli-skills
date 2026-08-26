@@ -341,3 +341,26 @@ test('駆動部: tick delay 算出は今回周回のプローブ済みフラグ�
 test('駆動部: schema: PREREQ_PROBE_SCHEMA を伴う agent 呼び出しが存在する', () => {
   assert.ok(driverPart.includes('schema: PREREQ_PROBE_SCHEMA'), 'プローブ agent 呼び出しに PREREQ_PROBE_SCHEMA が使われていない')
 })
+
+// 回復済み失敗が halt の連続カウントに残らないこと（Cursor Bugbot 指摘: Halt count ignores
+// recovered failures）。probePrereqCompletion が failedSet → done へ遷移させ failures から
+// エントリを除去する際、'blocked'（元々 halt 非カウント）以外なら consecutiveFailures を
+// 対称的に 1 減じ、0 未満にはしないこと（recordFailure の 3360 行付近の increment と対で減算する）。
+test('駆動部: probePrereqCompletion の failures 除去は blocked 以外で consecutiveFailures を対称的に減じる', () => {
+  const probeFnStart = driverPart.indexOf('async function probePrereqCompletion(targets) {')
+  assert.ok(probeFnStart >= 0, 'probePrereqCompletion の定義が見つからない')
+  const probeFnEnd = driverPart.indexOf('\nwhile (true) {', probeFnStart)
+  assert.ok(probeFnEnd > probeFnStart, 'probePrereqCompletion の終端（dispatch ループ開始）が見つからない')
+  const probeFnBody = driverPart.slice(probeFnStart, probeFnEnd)
+  const spliceIdx = probeFnBody.indexOf('failures.splice(failuresIdx, 1)')
+  assert.ok(spliceIdx >= 0, 'failures からの除去処理が見つからない')
+  const afterSplice = probeFnBody.slice(spliceIdx, spliceIdx + 700)
+  assert.ok(
+    /removedFailure\??\.status\s*!==\s*'blocked'/.test(afterSplice),
+    '除去対象が blocked（halt 非カウント）だったかどうかの分岐が見つからない',
+  )
+  assert.ok(
+    /consecutiveFailures\s*>\s*0/.test(afterSplice) && /consecutiveFailures--/.test(afterSplice),
+    'consecutiveFailures を 0 未満にしない減算処理が見つからない',
+  )
+})
