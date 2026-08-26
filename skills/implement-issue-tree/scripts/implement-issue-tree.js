@@ -5333,11 +5333,17 @@ while (true) {
   // （人手マージ等）を確認する（Issue #442）。周回内 1 回・MIN_MS 間隔で有界化し、通常
   // dispatch（上のブロック）を完走した後にのみ行う — プローブの待ち時間が「着手可能な
   // 項目は常に投入する」という受入条件を阻害しないため。
+  // running.size === 0（このまま次の break で drain する）の場合は MIN_MS クールダウンを
+  // 無視して最後に 1 回だけプローブする（Issue #444 Bugbot Medium: Missed prereq probe on
+  // drain）。クールダウン窓内に最後の in-flight work が完了すると、このゲートが無いまま
+  // break してしまい、その周回で外部完了した前提が failedSet に留まり続け cascade が
+  // 同一ラン内で永久にブロックされる。drain 直前は残り周回が無い（break すれば二度と
+  // プローブされない）ため、通常の間隔制御より drain 検知を優先する。
   if (
     !halted &&
     running.size < concurrency &&
     prereqProbeAtIterationSeq !== dispatchIterationSeq &&
-    Date.now() - prereqProbeLastAt >= PREREQ_RECHECK_MIN_MS
+    (running.size === 0 || Date.now() - prereqProbeLastAt >= PREREQ_RECHECK_MIN_MS)
   ) {
     const probeTargets = selectPrereqProbeTargets(work, depsMap, done, failedSet, running)
     if (probeTargets.length > 0) {
@@ -5364,9 +5370,18 @@ while (true) {
     typeof setTimeout === 'function' &&
     typeof clearTimeout === 'function'
   if (tickArmable) {
+    // ここへ到達するのは主にクールダウン中にプローブをスキップした直後（Issue #444
+    // Bugbot Medium: Tick delay after cooldown skip）。素朴に PREREQ_RECHECK_TICK_MS
+    // （5分）を毎回フルで張ると、クールダウンがとっくに明けていても次のプローブまで
+    // 最大5分待たされ、外部完了した前提の同一ラン内取り込みが不必要に遅延する。
+    // 残りクールダウン時間が TICK_MS より短ければそちらを優先し、クールダウン明け
+    // 直後に次の周回でプローブできるようにする。
+    const cooldownRemainingMs = PREREQ_RECHECK_MIN_MS - (Date.now() - prereqProbeLastAt)
+    const tickDelayMs =
+      cooldownRemainingMs > 0 ? Math.min(PREREQ_RECHECK_TICK_MS, cooldownRemainingMs) : PREREQ_RECHECK_TICK_MS
     let tickTimer
     const tickPromise = new Promise((resolve) => {
-      tickTimer = setTimeout(() => resolve({ tick: true }), PREREQ_RECHECK_TICK_MS)
+      tickTimer = setTimeout(() => resolve({ tick: true }), tickDelayMs)
     })
     finished = await Promise.race([...running.values(), tickPromise])
     clearTimeout(tickTimer)
