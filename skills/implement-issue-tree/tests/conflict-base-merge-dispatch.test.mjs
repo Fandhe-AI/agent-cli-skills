@@ -180,6 +180,36 @@ test('baseMergePrompt: commitFailed の返却指示を含む', () => {
   assert.ok(prompt.includes('commitFailed: true'), 'commitFailed: true の返却指示がない')
 })
 
+// PR #443 codex P1（PR ブランチ取得の起点で fail-closed が無い問題。skills/implement-issue-tree/
+// scripts/implement-issue-tree.js:2575）の回帰テスト。旧文言 `git fetch origin && git checkout
+// --detach origin/<branch>` は終了コード未確認・失敗時の終端指示が無く、fetch/checkout 失敗時に
+// 隔離 worktree の元の HEAD のまま手順 2 の merge・手順 3 の push へ進み得た。fetch・checkout の
+// 終了コード確認、checkout 後 HEAD が origin/<branch> と一致することの確認、いずれかの失敗時に
+// merge/push を行わず commitFailed: true で即終了する指示になっていることを固定する。
+test('baseMergePrompt: PR ブランチ取得（fetch・checkout・HEAD 一致確認）が fail-closed である', () => {
+  const prompt = baseMergePrompt(item, impl)
+  assert.ok(
+    !prompt.includes('git fetch origin && git checkout --detach origin/'),
+    '旧来の終了コード未確認 fetch && checkout 一文が残っている',
+  )
+  const branchFetchIdx = prompt.indexOf(`git fetch origin ${impl.branch}:refs/remotes/origin/${impl.branch}`)
+  const checkoutIdx = prompt.indexOf(`git checkout --detach origin/${impl.branch}`)
+  const revParseIdx = prompt.indexOf(`git rev-parse origin/${impl.branch}`)
+  const mergeIdx = prompt.indexOf('git merge --no-edit')
+  assert.ok(branchFetchIdx >= 0, '対象ブランチの保存先明示 refspec fetch の指示がない')
+  assert.ok(checkoutIdx >= 0, 'origin/<branch> への detached checkout 指示がない')
+  assert.ok(revParseIdx >= 0, 'checkout 後の HEAD 一致確認（git rev-parse origin/<branch>）の指示がない')
+  assert.ok(branchFetchIdx < checkoutIdx, 'branch fetch が checkout より前に現れない')
+  assert.ok(checkoutIdx < revParseIdx, 'checkout が HEAD 一致確認より前に現れない')
+  assert.ok(revParseIdx < mergeIdx, 'HEAD 一致確認が merge より前に現れない')
+  assert.ok(prompt.includes('branch fetch 失敗'), 'branch fetch 失敗時の fail-closed summary 文言がない')
+  assert.ok(prompt.includes('branch checkout 失敗'), 'checkout 失敗時の fail-closed summary 文言がない')
+  assert.ok(
+    prompt.includes('checkout 後の HEAD が origin/') && prompt.includes('と不一致'),
+    'checkout 後の HEAD 不一致時の fail-closed summary 文言がない',
+  )
+})
+
 // PR #443 codex P0（thread PRRT_kwDORuXFg86cbn_T）の回帰テスト: baseMergePrompt は COMMON
 // （CLAUDE.md・.claude/rules を読んで従うよう指示する）を挿入しない。COMMON は PR ブランチが
 // 改変できる未信頼文書を読ませる指示であり、コンフリクト解消コミットを作成して push できる
@@ -299,8 +329,11 @@ test('baseMergePrompt: 期待 owner/repo がプロンプトへ明示的に埋め
   assert.ok(!prompt.includes('"Fandhe-AI/agent-cli-skills"'), '期待 owner/repo が小文字化されず元の大文字小文字混在のまま埋め込まれている')
   const remoteIdx = prompt.indexOf('git remote get-url origin')
   const expectedRepoIdx = prompt.indexOf('"fandhe-ai/agent-cli-skills"')
-  const fetchIdx = prompt.indexOf('git fetch origin &&')
-  const baseFetchIdx = prompt.indexOf(':refs/remotes/origin/')
+  const fetchIdx = prompt.indexOf(`git fetch origin ${impl.branch}:refs/remotes/origin/${impl.branch}`)
+  // 手順 1（対象ブランチ fetch）自体が保存先明示 refspec の ':refs/remotes/origin/' を含むため、
+  // indexOf の単純な最初の一致では手順 1 を拾ってしまう。手順 2（base fetch）だけを見るには
+  // 手順 1 の一致位置より後を検索する（PR #443 P1 の fail-closed 化に伴う回帰対応）。
+  const baseFetchIdx = prompt.indexOf(':refs/remotes/origin/', fetchIdx + 1)
   const mergeIdx = prompt.indexOf('git merge --no-edit')
   assert.ok(remoteIdx >= 0, 'git remote get-url origin の指示がない')
   assert.ok(expectedRepoIdx >= 0, '期待 owner/repo の埋め込みが見つからない')
