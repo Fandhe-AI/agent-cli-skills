@@ -31,7 +31,7 @@ strict はセキュリティ要件ではない。「チェックが現在の bas
 
 **How to apply:**
 - ruleset を作成・更新するときは `strict_required_status_checks_policy: false` を明示する
-- 既存 ruleset を PATCH するときは `required_status_checks` の `parameters` が丸ごと置換される
+- 既存 ruleset を PUT で更新するときは `required_status_checks` の `parameters` が丸ごと置換される
   ことに注意し、`required_status_checks` 配列（各エントリの `integration_id` 束縛を含む）を
   保存したうえで strict だけを変更する。`integration_id` を落とすと G0 (v-b) が
   `issuer-unbound` で辞退し、自動マージが全リポジトリで止まる
@@ -231,7 +231,7 @@ db_enc=$(printf '%s' "${db}" | jq -sRr '@uri')                                  
 code=$(gh api -i "repos/${repo}/branches/${db_enc}/protection" 2>/dev/null | awk 'NR==1{print $2}')
 case "${code}" in
   200) gh api "repos/${repo}/branches/${db_enc}/protection" --jq '{
-         strict: (.required_status_checks.strict // "none"),
+         strict: (if .required_status_checks == null then "none" else .required_status_checks.strict end),
          enforce_admins: .enforce_admins.enabled,
          unbound: [.required_status_checks.checks[]? | select(.app_id == null) | .context]
        }' ;;                                   # classic は integration_id ではなく app_id
@@ -251,9 +251,15 @@ $ bash sweep_b.sh Fandhe-AI/agent-cli-skills
 classic BP なし（main）
 
 $ echo '{"required_status_checks":{"strict":true,"checks":[{"context":"ci","app_id":123},{"context":"legacy","app_id":null}]},"enforce_admins":{"enabled":true}}' \
-  | jq '{strict:(.required_status_checks.strict // "none"), enforce_admins:.enforce_admins.enabled, unbound:[.required_status_checks.checks[]? | select(.app_id==null) | .context]}'
+  | jq '{strict:(if .required_status_checks == null then "none" else .required_status_checks.strict end), enforce_admins:.enforce_admins.enabled, unbound:[.required_status_checks.checks[]? | select(.app_id==null) | .context]}'
 {"strict":true,"enforce_admins":true,"unbound":["legacy"]}
 ```
+
+注記: 抽出式は当初 `.required_status_checks.strict // "none"` だったが、jq の `//` は
+`false` も「値なし」と同様に右辺へ置換するため、strict が明示的に `false` の classic BP を
+`"none"`（未設定）と誤報告するバグがあった。上の `if ... == null then "none" else ... end`
+形へ修正済み。合成 JSON の実行例は `strict: true` の入力であり、新旧どちらの式でも出力は
+同一のため、上の出力記録はそのまま有効である。
 
 ### 判定表
 
