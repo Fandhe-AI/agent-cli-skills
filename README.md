@@ -24,94 +24,7 @@ npx skills add Fandhe-AI/agent-cli-skills --all
 
 ## リポジトリ構成
 
-```
-.claude/
-  agents/
-    research/
-      skill-explorer.md              -- skills/ 横断調査（読み取り専用）
-      sub-investigator.md            -- gh/git/CLI/hook 失敗調査（読み取り専用）
-      reference-researcher.md        -- 公式ドキュメント調査（読み取り専用）
-    author/
-      skill-author.md                -- skills/<name>/SKILL.md 作成編集
-      agent-author.md                -- .claude/agents 作成編集
-      rules-author.md                -- .claude/rules 作成編集
-      docs-writer.md                 -- CLAUDE.md/README 一覧・ツリー更新
-    quality/
-      skill-reviewer.md              -- SKILL.md 品質レビュー（読み取り専用）
-      security-auditor.md            -- OWASP 監査（読み取り専用）
-      frontmatter-linter.md          -- frontmatter/symlink 機械検証
-      plan-verifier.md               -- 計画ファイル検証（読み取り専用）
-  rules/
-    code-comment-style.md            -- コード内コメント・ドキュメンテーションコメント規約
-    delegation.md                    -- 委譲の原則（調査・設計フェーズ）
-    delegation-impl.md               -- 委譲マッピング（作成・編集フェーズ）
-    skill-authoring.md               -- スキル著作規約
-    agent-authoring.md               -- エージェント著作規約
-    conventional-commits.md          -- Conventional Commits 詳細規約
-    security.md                      -- セキュリティチェック規約
-    japanese-style.md                -- 日本語スタイルガイド
-    dotclaude-via-temp.md            -- .claude/ 操作時の一時ディレクトリルール
-    description-style.md             -- description 著作スタイル
-    reference-template.md            -- reference 型スキルの書式規約
-  skills/                          -- skills/ へのシンボリックリンク（一部実ディレクトリ）
-    create-skill/                  -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
-    create-agent/                  -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
-    github-docs                    -- 参照スキル（symlink）
-    anthropic-claude-code          -- 参照スキル（symlink）
-    anthropic-claude-code-extend   -- 参照スキル（symlink）
-  settings.json                      -- SessionStart hook（リマインダー）
-skills/
-  comment-code/
-    SKILL.md                         -- コメント・ドキュメンテーションコメントを追加・補強
-  create-commit/
-    SKILL.md                         -- Conventional Commits 形式でコミット作成
-  create-issue/
-    SKILL.md                         -- GitHub Issue を親子構造で作成
-  create-issue-tree/
-    SKILL.md                         -- Phase 分割された Issue ツリーを新規作成
-  create-plan/
-    SKILL.md                         -- 実装計画ファイルを作成
-  create-pr/
-    SKILL.md                         -- Conventional Commits 形式で PR 作成
-  implement-issue/
-    SKILL.md                         -- Issue を読み込み計画・実装
-  implement-issue-tree/
-    SKILL.md                         -- Issue ツリーを post-order DFS で自動開発
-    sample/                          -- 引数例・ツリー例
-    scripts/                         -- preview-tree.sh、implement-issue-tree.js
-  implement-review/
-    SKILL.md                         -- コード変更の品質・セキュリティレビュー
-  implement-review-pr/
-    SKILL.md                         -- PR の CI・品質・規約レビュー
-  init-claude/
-    SKILL.md                         -- 対象リポジトリに .claude/ 体系を初期セットアップ
-  update-docs/
-    SKILL.md                         -- コード変更に基づく CLAUDE.md 更新
-  update-issue-tree/
-    SKILL.md                         -- 既存 Issue ツリーを棚卸し・更新
-  update-claude/
-    SKILL.md                         -- 既存 .claude/ 体系を診断・差分追補
-  setup-repo-guards/
-    SKILL.md                         -- 組織標準の CI ガード一式（codex-review / AGENTS.md / 集約ジョブ / branch protection）を導入
-  project-init/
-    SKILL.md                         -- GitHub Project v2 作成・フィールド設定
-  project-add-items/
-    SKILL.md                         -- 要件ドキュメントからアイテム一括作成
-  project-create-issues/
-    SKILL.md                         -- ドラフト→Issue 変換・sub-issue 紐付け
-  project-view-status/
-    SKILL.md                         -- 進捗状況の集計・レポート生成
-  project-update-items/
-    SKILL.md                         -- フィールド値の一括更新
-  project-sync-issues/
-    SKILL.md                         -- Issue 状態とプロジェクトの同期
-  project-archive-done/
-    SKILL.md                         -- 完了アイテムのアーカイブ
-  contribute-skill/
-    SKILL.md                         -- skills-lock.json の source に応じた upstream への PR 作成
-  sync-skills-lock/
-    SKILL.md                         -- skills-lock.json の computedHash を upstream と同期
-```
+Claude Code の Claude Skills として使用するスキルは `skills/` 配下に実体があり、`.claude/skills/` からシンボリックリンクで参照されます。Agents・Rules・その他ディレクトリツリーの詳細は [CLAUDE.md](./CLAUDE.md) を参照してください。
 
 ## スキル一覧
 
@@ -176,51 +89,15 @@ skills/
 | **anthropic-claude-code** | Claude Code CLI 本体のリファレンス（settings・env-vars・cli-reference・sessions 等） |
 | **anthropic-claude-code-extend** | Claude Code 拡張リファレンス（Agent Skills・slash commands・subagents・hooks・plugins・MCP 設定等） |
 
-## Agents（サブエージェント）
+## 関連リポジトリ
 
-サブエージェントは `.claude/agents/` 配下に配置され、`subagent_type: <name>` で呼び出す。main は対話・計画・委譲・報告に徹し、token を消費する作業はサブエージェントへ委譲する。
+このリポジトリはスキル集の本体です。関連リポジトリは以下の通り。
 
-### research/ — 調査系（読み取り専用）
+- **[Fandhe-AI/agent-reference-skills](https://github.com/Fandhe-AI/agent-reference-skills)** — 公式ドキュメント参照スキル（GitHub CLI・Claude Code 拡張等）
+- **[Fandhe-AI/agent-util-skills](https://github.com/Fandhe-AI/agent-util-skills)** — ユーティリティスキル集（HTML レポート生成・Firebase Hosting デプロイ等）
+- **[Fandhe-AI/template-skills](https://github.com/Fandhe-AI/template-skills)** — 新規スキル配布リポの雛形。`gh repo create <org>/<name> --template Fandhe-AI/template-skills` で作成可能
 
-| Agent | model | 説明 |
-|-------|-------|------|
-| **skill-explorer** | Sonnet | skills/ 横断調査・仕様把握。大量ファイルの逐次 Read を代替する |
-| **sub-investigator** | Sonnet | gh/git/CLI/hook 失敗の調査・原因特定 |
-| **reference-researcher** | Sonnet | 公式ドキュメント・外部仕様の調査（WebFetch 対応） |
-
-### author/ — 作成・編集系
-
-| Agent | model | 説明 |
-|-------|-------|------|
-| **skill-author** | Sonnet | `skills/<name>/SKILL.md` の新規作成・編集。skill-authoring.md に準拠 |
-| **agent-author** | Sonnet | `.claude/agents/` の新規作成・編集。dotclaude-via-temp 準拠 |
-| **rules-author** | Sonnet | `.claude/rules/` の新規作成・編集。dotclaude-via-temp 準拠 |
-| **docs-writer** | Haiku | `CLAUDE.md`・`README.md` のスキル一覧・ツリー更新 |
-
-### quality/ — 品質・検証系（読み取り専用）
-
-| Agent | model | 説明 |
-|-------|-------|------|
-| **skill-reviewer** | Sonnet | SKILL.md の品質レビュー。skill-authoring.md 基準で評価 |
-| **security-auditor** | Sonnet | OWASP Top 10 セキュリティ監査。問題があれば PR 作成をブロック |
-| **frontmatter-linter** | Haiku | frontmatter・symlink の機械検証（必須フィールド確認等） |
-| **plan-verifier** | Sonnet | 計画ファイルに基づいて作業の完了状況を検証 |
-
-## Rules
-
-| ルール | 概要 |
-|--------|------|
-| **code-comment-style.md** | コード内コメント・ドキュメンテーションコメント規約（役割・境界・呼び出し文脈・他所からの前提を明示） |
-| **delegation.md** | 調査・設計フェーズの委譲原則（main がやること/やってはいけないこと） |
-| **delegation-impl.md** | 作成・編集フェーズの委譲マッピング（対象パス → subagent_type） |
-| **skill-authoring.md** | スキル著作フォーマット・品質基準 |
-| **agent-authoring.md** | エージェント著作フォーマット・品質基準 |
-| **conventional-commits.md** | Conventional Commits 詳細規約（type/scope/subject/breaking） |
-| **security.md** | OWASP Top 10 セキュリティチェック基準 |
-| **japanese-style.md** | 日本語スタイルガイド |
-| **dotclaude-via-temp.md** | `.claude/` 操作時の一時ディレクトリルール（`_/dotclaude/` 経由） |
-| **description-style.md** | description 著作スタイル（発火率・長さ・YAML 落とし穴） |
-| **reference-template.md** | reference 型スキルの reference/*.md と README 索引の書式規約 |
+Agents・Rules・ディレクトリツリーの詳細は [CLAUDE.md](./CLAUDE.md) を参照してください。
 
 ## 特徴
 

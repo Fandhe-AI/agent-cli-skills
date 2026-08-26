@@ -1,3 +1,12 @@
+---
+description: >
+  implement-issue-tree の並列ラン・クライアント側自動マージを成立させるための
+  ブランチ ruleset 構成規約。strict は必ず false・required check への
+  integration_id 束縛・bypass_actors 空・一括更新後の strict / bypass_actors /
+  integration_id 残存の 3 軸検証と classic branch protection の別枠検証を定める。
+applies_to: setup-repo-guards, implement-issue-tree, ruleset を変更する全作業
+---
+
 # ブランチ ruleset 方針
 
 `implement-issue-tree` の並列ラン + クライアント側自動マージ（`autoMerge: true`）を成立させるための、
@@ -22,7 +31,7 @@ strict はセキュリティ要件ではない。「チェックが現在の bas
 
 **How to apply:**
 - ruleset を作成・更新するときは `strict_required_status_checks_policy: false` を明示する
-- 既存 ruleset を PATCH するときは `required_status_checks` の `parameters` が丸ごと置換される
+- 既存 ruleset を PUT で更新するときは `required_status_checks` の `parameters` が丸ごと置換される
   ことに注意し、`required_status_checks` 配列（各エントリの `integration_id` 束縛を含む）を
   保存したうえで strict だけを変更する。`integration_id` を落とすと G0 (v-b) が
   `issuer-unbound` で辞退し、自動マージが全リポジトリで止まる
@@ -96,11 +105,11 @@ workflow 集合の入力形式をカンマ区切り文字列から JSON 配列�
 
 | リポジトリ | 判定 | 理由 | 判断 |
 |-----------|------|------|------|
-| `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は上記節の 3. の代替確認を必須とする |
+| `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は `skills/implement-issue-tree/references/automerge-design.md` の「補償策の成立確認（base CI プローブ）」節にある「不成立時の扱い（3 択・順に推奨）」の 3.（「補償策 適用外」であることを記録したうえで、ラン完了後に base を最新化した状態での検証を最低 1 回実施する）を必須とする |
 | `Fandhe-AI/life-plan-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
 | `Fandhe-AI/local-server` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
 | `Fandhe-AI/pronunciation-vocab-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
-| `Fandhe-AI/automation-app` | 補償策不成立 | `push:` トリガを持つ workflow は存在する（`deploy-api.yml` 等）が、いずれも `paths` フィルタ付きで実測 head の変更内容では起動しなかった（`push_total == 0`） | 補償策 適用外（現状の head では）。`autoMerge: true` は非推奨。使う場合は上記節の 3. の代替確認を必須とする。他 4 リポと異なり、`paths` に該当する変更が push された head では補償策が成立し得るため、再測の意義が高い |
+| `Fandhe-AI/automation-app` | 補償策不成立 | `push:` トリガを持つ workflow は存在する（`deploy-api.yml` 等）が、いずれも `paths` フィルタ付きで実測 head の変更内容では起動しなかった（`push_total == 0`） | 補償策 適用外（現状の head では）。`autoMerge: true` は非推奨。使う場合は `skills/implement-issue-tree/references/automerge-design.md` の「補償策の成立確認（base CI プローブ）」節にある「不成立時の扱い（3 択・順に推奨）」の 3.（「補償策 適用外」であることを記録したうえで、ラン完了後に base を最新化した状態での検証を最低 1 回実施する）を必須とする。他 4 リポと異なり、`paths` に該当する変更が push された head では補償策が成立し得るため、再測の意義が高い |
 
 リポジトリ構成は変わるため、この記録は測定日時点のスナップショットであり、`autoMerge`
 運用を開始・再開するたびに再測する。該当 5 リポへの push トリガ CI 追加（判定表の
@@ -222,7 +231,7 @@ db_enc=$(printf '%s' "${db}" | jq -sRr '@uri')                                  
 code=$(gh api -i "repos/${repo}/branches/${db_enc}/protection" 2>/dev/null | awk 'NR==1{print $2}')
 case "${code}" in
   200) gh api "repos/${repo}/branches/${db_enc}/protection" --jq '{
-         strict: (.required_status_checks.strict // "none"),
+         strict: (if .required_status_checks == null then "none" else .required_status_checks.strict end),
          enforce_admins: .enforce_admins.enabled,
          unbound: [.required_status_checks.checks[]? | select(.app_id == null) | .context]
        }' ;;                                   # classic は integration_id ではなく app_id
@@ -242,9 +251,15 @@ $ bash sweep_b.sh Fandhe-AI/agent-cli-skills
 classic BP なし（main）
 
 $ echo '{"required_status_checks":{"strict":true,"checks":[{"context":"ci","app_id":123},{"context":"legacy","app_id":null}]},"enforce_admins":{"enabled":true}}' \
-  | jq '{strict:(.required_status_checks.strict // "none"), enforce_admins:.enforce_admins.enabled, unbound:[.required_status_checks.checks[]? | select(.app_id==null) | .context]}'
+  | jq '{strict:(if .required_status_checks == null then "none" else .required_status_checks.strict end), enforce_admins:.enforce_admins.enabled, unbound:[.required_status_checks.checks[]? | select(.app_id==null) | .context]}'
 {"strict":true,"enforce_admins":true,"unbound":["legacy"]}
 ```
+
+注記: 抽出式は当初 `.required_status_checks.strict // "none"` だったが、jq の `//` は
+`false` も「値なし」と同様に右辺へ置換するため、strict が明示的に `false` の classic BP を
+`"none"`（未設定）と誤報告するバグがあった。上の `if ... == null then "none" else ... end`
+形へ修正済み。合成 JSON の実行例は `strict: true` の入力であり、新旧どちらの式でも出力は
+同一のため、上の出力記録はそのまま有効である。
 
 ### 判定表
 

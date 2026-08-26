@@ -38,8 +38,33 @@ applies_to: create-pr, implement-issue, implement-review, implement-review-pr, s
 # なるため、必ず `-E` を付けて `grep -vE '^\+\+\+'` と書く。
 # 鍵名は `[a-z_]*token` のように接頭辞を問わない形にする。`access_?token` 等を個別に
 # 列挙すると `GITHUB_TOKEN` / `GH_TOKEN`（上のチェック対象に明記した名前）を取りこぼす
-git diff --staged --diff-filter=ACMR | grep -E '^\+' | grep -vE '^\+\+\+' \
-  | grep -iE '(password|passwd|secret|client_secret|api_?key|[a-z_]*token|aws_secret_access_key|private_?key)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}'
+#
+# マッチ行をそのまま stdout へ出すと、検出した秘密値そのものがセッションログ・レポート・
+# CI ログへ流出する（検出器が漏洩経路になる）。最終段は行を出力せず `grep -c` の件数と
+# 終了コードだけで判定し、内容の確認は `git diff --staged` の目視レビューに委ねる。
+#
+# grep の終了コードは 0（ヒットあり）/ 1（ヒットなし）/ 2 以上（構文エラー・入出力エラー等）。
+# パイプ全体へ `|| true` を付けたり空値を `${hits:-0}` でゼロ扱いすると exit 2 まで
+# 「検出なし」へ倒れる fail-open になるため、段ごとに終了コードを受け取り 0 / 1 のみを
+# 正常とし、2 以上は「検出なし」ではなく検査自体の失敗として中止する（fail-closed）。
+staged_diff="$(git diff --staged --diff-filter=ACMR)" \
+  || { echo "検査失敗: git diff が異常終了（exit $?）。検出なしと扱わず原因を調査せよ"; exit 1; }
+
+rc=0; added="$(printf '%s\n' "${staged_diff}" | grep -E '^\+')" || rc=$?
+[ "${rc}" -le 1 ] || { echo "検査失敗: 追加行抽出の grep が exit ${rc}。検出なしと扱わず原因を調査せよ"; exit 1; }
+
+rc=0; added="$(printf '%s\n' "${added}" | grep -vE '^\+\+\+')" || rc=$?
+[ "${rc}" -le 1 ] || { echo "検査失敗: diff ヘッダ除外の grep が exit ${rc}。検出なしと扱わず原因を調査せよ"; exit 1; }
+
+rc=0; hits="$(printf '%s\n' "${added}" \
+  | grep -ciE '(password|passwd|secret|client_secret|api_?key|[a-z_]*token|aws_secret_access_key|private_?key)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}')" || rc=$?
+[ "${rc}" -le 1 ] || { echo "検査失敗: 秘密情報パターンの grep が exit ${rc}。検出なしと扱わず原因を調査せよ"; exit 1; }
+
+if [ "${hits}" -gt 0 ]; then
+  echo "秘密情報の可能性がある追加行を ${hits} 件検出（内容は表示しない）。git diff --staged を目視確認せよ"
+else
+  echo "検出なし（件数 0・grep exit ${rc}）。目視レビューへ進む"
+fi
 
 git status --short | grep -E '\.env'
 ```
@@ -48,7 +73,11 @@ git status --short | grep -E '\.env'
 除外側が構文エラーになると、検出済みの行が消えたうえで非ゼロ終了し「検出なし」になる。
 **検出側・除外側の双方を既知サンプルで自己テストしてから本検査を走らせる**（実装は
 `skills/create-commit/SKILL.md` Step 2 (a)。パターンは変数へ一度だけ定義し、自己テストと
-本検査で同じ文字列を共有する）。
+本検査で同じ文字列を共有する）。自己テストの期待値もマッチ行の出力ではなく、
+**件数（`grep -c`）と終了コード**で確認する（検出ありサンプルで件数 >= 1・終了コード 0、
+検出なしサンプルで件数 0・終了コード 1。マッチ行そのものを期待出力にしない）。加えて
+パターンを意図的に壊した構文エラーサンプル（exit 2）で、結果が「検出なし」ではなく
+「検査失敗」（中止・要調査）へ倒れることも確認する（fail-closed の実測）。
 
 **パターン照合は網羅的な検出ではない。** 任意の変数名に代入された認証情報、値の形式に規則性が
 無い自社発行トークン、除外パターンに偶然一致する実値は原理的に拾えない。したがって
@@ -70,8 +99,11 @@ GitHub の secret scanning / push protection を有効化している場合、�
 
 悪い例:
 ```bash
-git commit -m "$user_input"   # インジェクション可能
+git commit -m $user_input                # 未クォート展開。単語分割・グロブ展開が起き、オプション注入が可能
+bash -c "git commit -m '$user_input'"    # コマンド文字列の組み立て。シングルクォートを閉じる入力で任意コマンドを注入可能
 ```
+
+なお、クォート済み展開（`git commit -m "$user_input"`）は単一引数として渡されシェルで再評価されないためコマンドインジェクションにはならないが、信頼できない内容をそのまま受け入れないための妥当性検証は別論点として必要になる。
 
 良い例:
 ```bash
@@ -87,7 +119,12 @@ EOF
 
 - 許可ドメインを明示する（例: `github.com`・`docs.github.com`）
 - ユーザー入力の URL をそのまま `WebFetch` に渡さない
-- プライベート IP アドレス（`localhost`・`127.x`・`10.x`・`192.168.x`）へのアクセスを禁止
+- 内部ネットワーク・特殊用途アドレスへのアクセスを禁止する:
+  - プライベート IP（RFC 1918 全域: `10.0.0.0/8`・`172.16.0.0/12`・`192.168.0.0/16`）
+  - loopback（`localhost`・`127.0.0.0/8`・IPv6 `::1`）
+  - link-local（`169.254.0.0/16`・IPv6 `fe80::/10`）・IPv6 ULA（`fc00::/7`）
+  - クラウドメタデータエンドポイント（`169.254.169.254`・`metadata.google.internal` 等）
+- 上記の拒否はホスト名の字面だけでなく、**名前解決後の IP とリダイレクト先の URL** にも同じ基準で適用する（DNS リバインディング・リダイレクト経由の迂回を防ぐ）
 
 ## フック回避禁止
 

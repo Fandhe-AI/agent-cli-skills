@@ -1,3 +1,11 @@
+---
+description: >
+  downstream リポジトリにおけるスキル配置（.claude/skills/<name> が symlink か
+  実ディレクトリか）の混在を許容する方針。配置差を理由に同期構成やディレクトリ
+  構成を変更しないこと、同期を外す場合は対象限定入力で行うことを定める。
+applies_to: downstream リポジトリの構成を触る全作業
+---
+
 # スキル配置レイアウト方針
 
 downstream リポジトリにおけるスキルの配置（`.claude/skills/<name>` が symlink か実ディレクトリか）と、
