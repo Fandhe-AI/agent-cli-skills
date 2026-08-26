@@ -791,6 +791,126 @@ function reconcileRescueRoundState(lastState, rescueRoundActive, timeoutExecReas
   return { terminate: false, qualityBlock: false, rescuePending: false, timeoutOrigin: 'merge-exec' }
 }
 
+// dispatch ループと終端 cascade（セクション 8）の両方が呼ぶ単一の判定 choke point（Issue #442）。
+// 二箇所で条件式を独立に書くと片方だけ更新され得るため一元化する。
+//   'ready'       — 全依存が done（着手可能）
+//   'dep-blocked' — failedSet の依存を持ち、かつ全依存が確定済み（done/failedSet）
+//   'wait'        — 依存が未確定（done でも failedSet でもない依存が残る）
+function classifyDispatchReadiness(ds, done, failedSet) {
+  const depsArray = [...ds]
+  const failedDeps = depsArray.filter((d) => failedSet.has(d))
+  if (failedDeps.length > 0 && depsArray.every((d) => done.has(d) || failedSet.has(d))) return 'dep-blocked'
+  if (depsArray.every((d) => done.has(d))) return 'ready'
+  return 'wait'
+}
+
+// 前提の外部完了（マージ/クローズ）をラン中に検知するためのプローブ対象選定（Issue #442）。
+// 「failedSet 入りした前提に依存され、まだ確定していない item」の依存側の失敗番号のみを集める
+// — 対象は failedSet 側の番号（プローブする前提そのもの）であって item 側ではない。
+function selectPrereqProbeTargets(work, depsMap, done, failedSet, running) {
+  const targets = new Set()
+  for (const item of work) {
+    const n = item.number
+    if (done.has(n) || failedSet.has(n) || running.has(n)) continue
+    const ds = depsMap.get(n) ?? new Set()
+    for (const d of ds) {
+      if (failedSet.has(d)) targets.add(d)
+    }
+  }
+  return [...targets].sort((a, b) => a - b)
+}
+
+// プローブ結果 1 件を遷移種別へ分類する。PR MERGED を Issue CLOSED より優先する（PR がマージ
+// 済みなら Issue の状態取得が失敗していても前提は充足している）。それ以外（OPEN / UNKNOWN /
+// NONE / 非文字列）は遷移なし（fail-closed。推測で完了扱いにしない）。
+// 'merged' の受理には entry.pr が正の整数であり、かつホスト側が事前に把握している対象
+// issue の PR 番号（knownPr。results/savedItems 由来）と一致することを必須とする（Issue #442
+// codex 指摘: PR 番号なし・不一致の 'MERGED' 申告だけで前提を解除できてしまう fail-closed
+// 契約違反を塞ぐ）。knownPr 自体が未確定（ホストがまだその issue の PR 番号を掴んでいない）
+// なら照合不能として遷移させない — 未確認のまま前提充足と見なすことは fail-closed に反する。
+// MERGED 照合が不成立でも issueState === 'CLOSED' へフォールスルーする（早期 return で同一
+// entry の CLOSED 判定を握り潰さない。cursor 指摘: PR 番号照合失敗時に CLOSED が評価されず
+// 前提が永久にブロックされたままになる不具合の修正）。
+function classifyPrereqTransition(entry, knownPr) {
+  if (entry && typeof entry === 'object') {
+    if (
+      entry.prState === 'MERGED' &&
+      Number.isInteger(entry.pr) &&
+      entry.pr > 0 &&
+      Number.isInteger(knownPr) &&
+      knownPr > 0 &&
+      entry.pr === knownPr
+    ) {
+      return 'merged'
+    }
+    if (entry.issueState === 'CLOSED') return 'closed'
+  }
+  return null
+}
+
+// プローブ結果を failedSet → done へ実際に適用する（Issue #442 の中核）。ホスト側で二重に検証
+// する: (1) targets に含まれる番号のみ受理（プローブ要求していない番号は無視）、(2) issue が
+// Number.isInteger（文字列・小数は拒否）。同一 issue の重複 entry は最初の 1 件のみ採用する。
+// prHints は呼び出し元（probePrereqCompletion）が results/savedItems から解決したホスト既知
+// PR 番号（issue → pr）。'merged' 判定はこれと entry.pr の一致を classifyPrereqTransition 内で
+// 必須とするため、ここでは対象 issue の値をそのまま渡すのみで独自の検証ロジックは持たない。
+// pr は kind === 'merged' の場合に限り transition へ含める。'closed' は classifyPrereqTransition
+// の CLOSED フォールスルー（entry.pr が knownPr 照合を通っていない、または照合不能なまま
+// issueState だけで確定した経路）を含むため、entry.pr をそのまま転記すると呼び出し元
+// probePrereqCompletion が未検証の PR 番号で state/results の既知値を上書きしてしまう
+// （cursor 指摘: Rejected PR persisted on fallthrough）。'closed' 遷移は常に PR なし
+// （既存の「PR なし」表現＝ transition オブジェクトに pr キー自体を含めない）として扱う。
+function applyPrereqTransitions(probe, targets, done, failedSet, prHints) {
+  const results = Array.isArray(probe?.results) ? probe.results : []
+  const seen = new Set()
+  const transitions = []
+  for (const entry of results) {
+    const issue = entry?.issue
+    if (!Number.isInteger(issue) || !targets.includes(issue) || seen.has(issue)) continue
+    seen.add(issue)
+    const kind = classifyPrereqTransition(entry, prHints?.[issue])
+    if (kind === null) continue
+    failedSet.delete(issue)
+    done.add(issue)
+    const pr = kind === 'merged' && Number.isInteger(entry.pr) && entry.pr > 0 ? entry.pr : undefined
+    transitions.push({ issue, kind, ...(pr ? { pr } : {}) })
+  }
+  return transitions
+}
+
+// targets の前提完了を確認するプローブエージェント向けプロンプト（Issue #442）。読み取り専用の
+// 3 コマンドに限定し、Issue/PR の本文・タイトル・コメントは一切取得させない（非信頼自由文を
+// ホストの遷移判定へ持ち込まない設計。mergeVerifyPrompt と同型の権限境界）。
+function prereqProbePrompt(targets, prHints) {
+  for (const d of targets) assertInt(d, 'prereqProbePrompt target')
+  const lines = targets.map((d) => {
+    const hint = Number.isInteger(prHints?.[d]) && prHints[d] > 0 ? prHints[d] : 0
+    return (
+      `- #${d}: jq -r '.items["${d}"].pr // 0' ${STATE_FILE} で状態ファイルの PR 番号を読む（値が` +
+      ` 0 ならホスト提示値 ${hint} を使う。以下 prNum${d} と呼ぶ）。` +
+      `gh issue view ${d} --json state を実行し issueState として記録する。` +
+      `prNum${d} > 0 なら gh pr view <prNum${d}> --json state を実行し prState として記録する（0 の` +
+      ` ままなら prState は "NONE"）。`
+    )
+  })
+  return [
+    '前提イシューの外部完了（マージ/クローズ）確認担当。ラン中に人手マージ等で完了した前提を' +
+      '検知するための読み取り専用プローブ。',
+    MERGE_CONTEXT_COMMON,
+    `対象: ${targets.map((d) => `#${d}`).join(', ')}`,
+    '権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の 3 種のみ:',
+    `  jq -r '.items["<N>"].pr // 0' ${STATE_FILE}`,
+    '  gh issue view <N> --json state',
+    '  gh pr view <N> --json state',
+    'Issue 本文・タイトル・コメント・PR 本文・レビューコメントの取得（--json body / title / comments 等）は行わない。',
+    'gh issue close / gh pr merge / gh pr edit / git 操作は一切行わない（本エージェントは実行主体ではない）。',
+    '手順（対象ごとに繰り返す）:',
+    ...lines,
+    '取得失敗・コマンド不能の場合は issueState / prState に "UNKNOWN" を設定する（推測で CLOSED / MERGED を返さない）。',
+    '返却: results 配列。各要素は issue（対象番号）、issueState（OPEN / CLOSED / UNKNOWN）、prState（MERGED / OPEN / CLOSED / NONE / UNKNOWN）、pr（照合に使った PR 番号。無ければ 0）。',
+  ].join('\n')
+}
+
 // マージ独立確認エージェントの返却スキーマ（Issue #160）。merge-exec の merged 自己申告を
 // 別コンテキストで裏付ける読み取り専用。自由文フィールドを持たせず注入面を作らない。
 const MERGE_VERIFY_SCHEMA = {
@@ -808,6 +928,34 @@ const MERGE_VERIFY_SCHEMA = {
     mergeCommitOid: {
       type: 'string',
       description: 'gh pr view --json mergeCommit の oid（任意）。取得できなければ空文字',
+    },
+  },
+}
+
+// 前提イシューの外部完了プローブの返却スキーマ（Issue #442）。自由文フィールドを持たせず、
+// ホスト側 applyPrereqTransitions の enum 許可リスト + targets 集合の二重フィルタで受理する。
+const PREREQ_PROBE_SCHEMA = {
+  type: 'object',
+  required: ['results'],
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['issue', 'issueState', 'prState'],
+        properties: {
+          issue: { type: 'integer' },
+          issueState: {
+            type: 'string',
+            description: 'gh issue view --json state の値（OPEN / CLOSED）。取得失敗は UNKNOWN（推測で CLOSED を返さない）',
+          },
+          prState: {
+            type: 'string',
+            description: 'gh pr view --json state の値（MERGED / OPEN / CLOSED）。PR 番号が無ければ NONE、取得失敗は UNKNOWN',
+          },
+          pr: { type: 'integer', description: '照合に使った PR 番号（無ければ 0）' },
+        },
+      },
     },
   },
 }
@@ -2982,6 +3130,16 @@ let byteRemeasureAtIterationSeq = -1 // 直近に実測を行った周回番号�
 // 直近の実測呼び出しが検出した failed/exceeded。newStartSuppressed は上書きしない latch のため
 // identity 比較では 2 回目以降の失敗・超過が検出漏れになる（PR #390 Bugbot High）。独立に保持する。
 let lastByteRemeasureOutcome = { failed: false, exceeded: false }
+// 前提の外部完了（人手マージ等）をラン中に検知するプローブの間隔制御（Issue #442）。
+// スロットが埋まっている間は投入できないためコストを払わない — 完了駆動（周回ごと）で
+// 十分だが、監視専業の周回が長時間続く場合に備えて MIN_MS の下限だけ設ける。
+const PREREQ_RECHECK_MIN_MS = 60_000
+// running が空にならず監視専業の周回が続く間、人手マージを完了駆動と独立に拾うための tick 間隔。
+const PREREQ_RECHECK_TICK_MS = 5 * 60_000
+let prereqProbeAtIterationSeq = -1 // 直近にプローブした周回番号（周回内 1 回の間引き用）
+let prereqProbeLastAt = 0 // 直近のプローブ実行時刻（MIN_MS 間隔の下限判定用）
+const depDeferredLogged = new Set() // 保留ログの重複出力防止（item.number 単位で 1 回のみ）
+const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind, pr?}）
 {
   const runStartOrphanEntries = await scanOrphanWorktrees()
   const mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
@@ -3164,6 +3322,12 @@ let lastByteRemeasureOutcome = { failed: false, exceeded: false }
 const results = []
 const failures = []
 let consecutiveFailures = 0
+// consecutiveFailures が最後に 0 へリセットされた「世代」。probePrereqCompletion の外部完了
+// 回復時、除去対象の failure がどの世代で記録されたかをこれと突き合わせ、既に別の成功で
+// リセットされた後の failure を誤って現在の連続失敗カウントから減算しないようにする
+// （Issue #442 の codex/Bugbot 指摘: A失敗→B成功(reset)→C失敗の後にAの外部完了を検知すると、
+// 世代を見ずに一律デクリメントすると C の分まで削れてしまい halt 検知が弱まる）。
+let failureEpoch = 0
 let halted = null
 
 // ============================================================================
@@ -3173,6 +3337,8 @@ let halted = null
 // 失敗を記録する。完了できないイシューがあっても即停止せず次へ進み、
 // 3 イシュー連続で停滞した場合のみ新規着手を止めてユーザーの判断を待つ
 function recordFailure(failure) {
+  // 記録時点の世代を刻む（probePrereqCompletion の減算判定用。詳細は failureEpoch 宣言部参照）。
+  failure.streakEpoch = failureEpoch
   failures.push(failure)
   // results の status は既定 'failed'（'blocked' は failure.status で渡す）。unresolvedComments /
   // outOfScope は failMergeTerminal からの構造化集約データで、完了レポートの該当節が走査する
@@ -3183,6 +3349,17 @@ function recordFailure(failure) {
   }
   if (Array.isArray(failure.outOfScope) && failure.outOfScope.length > 0) {
     resultEntry.outOfScope = failure.outOfScope
+  }
+  // Review 非収束等の blocked で残置した worktree・branch・最終指摘をレポートへ集約する
+  // （Issue #442）。検証済み値のみを通す — branch は isValidBranchName、worktree は
+  // sanitizeWorktreePath を通過したもののみ。
+  if (typeof failure.branch === 'string' && isValidBranchName(failure.branch)) {
+    resultEntry.branch = failure.branch
+  }
+  const sanitizedFailureWorktree = sanitizeWorktreePath(failure.worktree ?? '')
+  if (sanitizedFailureWorktree) resultEntry.worktree = sanitizedFailureWorktree
+  if (typeof failure.lastReviewFinding === 'string' && failure.lastReviewFinding.trim()) {
+    resultEntry.lastReviewFinding = failure.lastReviewFinding
   }
   results.push(resultEntry)
   // halt は systemic な失敗（'failed' の連続）でのみ発火させる。'blocked' は他イシューの着手を
@@ -3211,6 +3388,7 @@ async function runVerifyClose(item) {
   if (v?.closed) {
     results.push({ issue: item.number, status: 'closed', note: v.summary })
     consecutiveFailures = 0
+    failureEpoch++ // 世代を進め、既存 failures の decrement 対象外にする（詳細は宣言部参照）
     // verify-close 成功 → closed に更新
     await updateState(item.number, { status: 'closed', note: String(v.summary ?? '') })
     return true
@@ -3624,7 +3802,13 @@ async function runImplement(item) {
         // のため pr: 0）。
         const reason = `Review が環境要因でブロックされた: ${sanitize(r.summary ?? '')}`
         await updateState(item.number, { status: 'blocked', pr: 0, fixCount, note: reason })
-        recordFailure({ issue: item.number, reason, status: 'blocked' })
+        recordFailure({
+          issue: item.number,
+          reason,
+          status: 'blocked',
+          branch: impl.branch,
+          worktree: currentWorktreePath,
+        })
         return false
       }
       // needs-fix または r が無効（安全側に倒して fix 相当とみなす）
@@ -3700,10 +3884,18 @@ async function runImplement(item) {
     }
     if (!reviewPassed) {
       // 3 回 Review しても収束しなかった。push も PR 作成も行わず blocked として記録する
-      // （SKILL.md Step 4。push 前のため pr: 0）。
-      const reason = `Review フェーズが 3 回で収束しなかった（最終指摘: ${sanitize(lastReviewSummary)}）。push・PR 作成は行わない`
+      // （SKILL.md Step 4。push 前のため pr: 0）。再実行時は Recover（continue / discard）→
+      // 通常 impl 経路で再着手する（pr: 0 のため monitoring 再開ではない。Issue #442）。
+      const reason = `Review フェーズが 3 回で収束しなかった（最終指摘: ${sanitize(lastReviewSummary)}）。push・PR 作成は行わない。再実行時は Recover 経路（継続/破棄）から再着手する`
       await updateState(item.number, { status: 'blocked', pr: 0, fixCount, note: reason })
-      recordFailure({ issue: item.number, reason, status: 'blocked' })
+      recordFailure({
+        issue: item.number,
+        reason,
+        status: 'blocked',
+        branch: impl.branch,
+        worktree: currentWorktreePath,
+        lastReviewFinding: sanitize(lastReviewSummary),
+      })
       return false
     }
 
@@ -4227,6 +4419,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       results.push(mergedResult)
       consecutiveFailures = 0
+      failureEpoch++ // 世代を進め、既存 failures の decrement 対象外にする（詳細は宣言部参照）
       // merged 確定: 追跡中の worktree を削除して残骸を防ぐ。終端書き込み失敗時は 1 回リトライし、
       // それでも失敗なら成功扱いを維持しつつ note に明記する（次回 monitor が即終端するため冪等）。
       {
@@ -4547,8 +4740,9 @@ async function runOne(item) {
 }
 
 // ============================================================================
-// セクション 8: 実行: スケジューラ（依存グラフ補助関数を定義してから並列実行ループに入る。
-// 全イシューを post-order 順に並列投入して後処理レポートを返す）
+// セクション 8: 実行: スケジューラ（依存グラフ補助関数・probePrereqCompletion を定義してから
+// 並列実行ループに入る。全イシューを post-order 順に並列投入して後処理レポートを返す。前提の
+// 外部完了検知はセクション 3 で定義済み。Issue #442）
 // ============================================================================
 
 // --- 並列スケジューラ ---
@@ -4838,6 +5032,104 @@ async function remeasureResidualBytesNow() {
   }
   return lastByteRemeasureOutcome
 }
+
+// targets（failedSet 入りした前提の番号集合）の外部完了をエージェントで確認し、遷移した分を
+// failedSet → done へ適用する（Issue #442）。dispatch ループから「空きスロットあり・保留項目
+// あり」の場合のみ呼ばれる（呼び出し条件はループ側で判定済み）。戻り値は遷移件数
+// （0 なら呼び出し元は通常どおり次周回へ進む。>0 なら同一周回で再 dispatch する）。
+async function probePrereqCompletion(targets) {
+  // 状態ファイルの pr が 0（未記録・reset 済み等）の場合のホスト側ヒント。results / savedItems
+  // の順で解決する（results は直近の実行結果、savedItems はラン開始時スナップショット）。
+  const prHints = {}
+  for (const d of targets) {
+    const fromResults = results.find((r) => r.issue === d)?.pr
+    const fromSaved = savedItems[String(d)]?.pr
+    const hint = Number.isInteger(fromResults) && fromResults > 0 ? fromResults : fromSaved
+    if (Number.isInteger(hint) && hint > 0) prHints[d] = hint
+  }
+  const probe = await agent(prereqProbePrompt(targets, prHints), {
+    label: 'prereq:probe',
+    phase: 'State',
+    model: 'haiku',
+    effort: 'low',
+    schema: PREREQ_PROBE_SCHEMA,
+  })
+  const transitions = applyPrereqTransitions(probe, targets, done, failedSet, prHints)
+  let appliedCount = 0
+  for (const t of transitions) {
+    // kind で文言を分ける — Review 非収束等の依存ブロックは PR 未作成（push 前 blocked）が
+    // 主経路のため、'merged' 前提でハードコードすると closed 遷移（PR なし）で
+    // 「PR #? MERGED」という虚偽の note になる。
+    // halted の有無でも文言を分ける — 新規イシュー投入は `if (!halted)` で halt 後停止する
+    // ため（直後の dispatch ゲート）、halt 後の遷移は状態永続化のみが行われ、下流の着手は
+    // このランでは再開しない（次回ランの Recover で反映される。references/recovery.md の
+    // 「halt 発生前に限り下流を同一ラン内で再判定する」契約と一致させる。Issue #444 codex P2）。
+    const detectedFact =
+      t.kind === 'merged' ? `PR #${t.pr ?? '?'} MERGED` : 'Issue CLOSED'
+    const noteSuffix = halted
+      ? `。ラン中に外部完了を確認（${detectedFact}）: halt 中のため下流の着手は再開せず、次回ランで反映される`
+      : `。ラン中に外部完了を確認（${detectedFact}）: 前提充足として下流を同一ラン内で再判定する`
+    const patch = { status: t.kind, note: noteSuffix.slice(1), ...(t.pr ? { pr: t.pr } : {}) }
+    // 状態ファイルへの永続化を先に確定させる（references/recovery.md の永続化契約）。
+    // done/failedSet への集合変更（applyPrereqTransitions 内で既に適用済み）は、書き込みが
+    // 失敗した場合ここでロールバックし、レポート反映・下流 dispatch のいずれも行わない
+    // （fail-closed）。永続化前に成功扱いで下流を進めると、再実行時の Recover 判定が
+    // 状態ファイル（依然 blocked/failed）とレポート（merged/closed）とで食い違う。
+    const updated = await updateState(t.issue, patch)
+    if (!updated) {
+      done.delete(t.issue)
+      failedSet.add(t.issue)
+      log(
+        `⚠️ #${t.issue}: 前提完了遷移の状態ファイル更新に失敗したため、この周回では遷移を確定` +
+          `せず failedSet へロールバックした（fail-closed。次回プローブで再判定する）`,
+      )
+      continue
+    }
+    const existingIdx = results.findIndex((r) => r.issue === t.issue)
+    if (existingIdx >= 0) {
+      results[existingIdx] = {
+        ...results[existingIdx],
+        status: t.kind,
+        ...(t.pr ? { pr: t.pr } : {}),
+        note: `${results[existingIdx].note ?? ''}${noteSuffix}`,
+      }
+    } else {
+      // failedSet 追加経路は必ず results へも追記される契約（markBlockedByDeps・起動時の
+      // merged/closed-but-open 分岐・recordFailure 経由の failed 全て）だが、契約破れで
+      // エントリが無い場合に遷移をレポートから消さないための保険（fail-safe）。
+      results.push({ issue: t.issue, status: t.kind, ...(t.pr ? { pr: t.pr } : {}), note: noteSuffix.slice(1) })
+    }
+    const failuresIdx = failures.findIndex((f) => f.issue === t.issue)
+    if (failuresIdx >= 0) {
+      const [removedFailure] = failures.splice(failuresIdx, 1)
+      // recordFailure は 'blocked' を halt の連続カウントに含めない（3318 行のコメント参照）。
+      // ここで前提完了により failures から除去する対象が 'failed'（カウント対象）だった場合、
+      // 除去だけして consecutiveFailures を据え置くと、回復済みの失敗が「3 連続失敗」判定に
+      // 残り続け、後続の無関係な実失敗で不当に halt し得る（Cursor Bugbot 指摘）。
+      // カウントを対称的に戻す（0 未満にはしない）。ただし streakEpoch が現在の failureEpoch と
+      // 一致する場合のみ減算する — removedFailure の記録後に別の成功で consecutiveFailures が
+      // 0 へリセットされていた場合（例: A失敗→B成功→C失敗の後で A の外部完了を検知）、
+      // A は既にリセット済みの世代に属し現在のカウント（C 分）には含まれていないため、
+      // 世代を無視して一律デクリメントすると無関係な C の分まで削れてしまう
+      // （codex/Bugbot 指摘。詳細は failureEpoch 宣言部のコメント参照）。
+      if (
+        removedFailure?.status !== 'blocked' &&
+        removedFailure?.streakEpoch === failureEpoch &&
+        consecutiveFailures > 0
+      ) {
+        consecutiveFailures--
+      }
+    }
+    prereqTransitions.push(t)
+    appliedCount += 1
+    log(
+      halted
+        ? `#${t.issue}: ラン中に外部完了を検知（${t.kind}）。halt 中のため下流の着手は再開せず、次回ランで反映される`
+        : `#${t.issue}: ラン中に外部完了を検知（${t.kind}）。前提充足として下流を同一ラン内で再判定する`,
+    )
+  }
+  return appliedCount
+}
 while (true) {
   dispatchIterationSeq += 1
   // ラン中に積み増された worktree の実容量を間引き付きで実測し直す（floor 予約の過小評価を補う）
@@ -4848,15 +5140,19 @@ while (true) {
       if (running.size >= concurrency) break
       const n = item.number
       if (done.has(n) || failedSet.has(n) || running.has(n)) continue
-      const ds = [...depsOf(item)]
-      const failedDeps = ds.filter((d) => failedSet.has(d))
-      if (failedDeps.length > 0) {
-        // 失敗依存があっても全依存が確定（done/failed）するまで blocked を確定しない（早すぎる
-        // blocked を防ぐ）。active monitoring の item も例外にしない（PR が宙に浮くことはない）。
-        if (ds.every((d) => done.has(d) || failedSet.has(d))) await markBlockedByDeps(item, failedDeps)
+      const ds = depsOf(item)
+      // blocked の即時確定はここでは行わない（Issue #442）。前提がラン中に外部完了（人手マージ
+      // 等）した場合に同一ラン内で拾えるよう、確定はループ退出後の cascade（唯一の choke point）
+      // に委ねる。ここでは 'dep-blocked' を保留として扱い、二重確定・巻き戻しを避ける。
+      const readiness = classifyDispatchReadiness(ds, done, failedSet)
+      if (readiness === 'dep-blocked') {
+        if (!depDeferredLogged.has(n)) {
+          depDeferredLogged.add(n)
+          log(`#${n}: 前提が失敗・ブロック中のため保留（前提の外部完了を検知したら同一ラン内で再判定する）`)
+        }
         continue
       }
-      if (!ds.every((d) => done.has(d))) continue
+      if (readiness !== 'ready') continue
       // active monitoring の再開も依存ゲート通過後にのみ行う（monitor ループは依存の done /
       // failedSet を確認しないため、依存未充足のまま再開すると依存順のマージ契約が破れる）。
       if (isActiveMonitoring(n)) {
@@ -5120,8 +5416,78 @@ while (true) {
       running.set(n, runOne(item))
     }
   }
+  // 空きスロットがある間は、failedSet 入りした前提に塞がれている保留項目の外部完了
+  // （人手マージ等）を確認する（Issue #442）。周回内 1 回・MIN_MS 間隔で有界化し、通常
+  // dispatch（上のブロック）を完走した後にのみ行う — プローブの待ち時間が「着手可能な
+  // 項目は常に投入する」という受入条件を阻害しないため。
+  // running.size === 0（このまま次の break で drain する）の場合は MIN_MS クールダウンを
+  // 無視して最後に 1 回だけプローブする（Issue #444 Bugbot Medium: Missed prereq probe on
+  // drain）。クールダウン窓内に最後の in-flight work が完了すると、このゲートが無いまま
+  // break してしまい、その周回で外部完了した前提が failedSet に留まり続け cascade が
+  // 同一ラン内で永久にブロックされる。drain 直前は残り周回が無い（break すれば二度と
+  // プローブされない）ため、通常の間隔制御より drain 検知を優先する。
+  // halted 後も本ゲートは通す（オーナー判断 2026-08-26・codex P1 案A）。halted は「新規イシュー
+  // 投入の停止」のみを意味し、その解除やプローブ自体の抑止は含まない。halted 後にプローブ・
+  // applyPrereqTransitions による状態遷移・prereqTransitions 記録・updateState 永続化を止めると、
+  // halt 後に外部完了（人手マージ/クローズ）した前提が failedSet に留まったまま終端し、
+  // レポート・状態ファイルの精度が落ちる。新規着手ゲート（直後の `if (!halted)` ブロック）と
+  // halted フラグの解除条件はこの変更で一切変えない。
+  if (
+    running.size < concurrency &&
+    prereqProbeAtIterationSeq !== dispatchIterationSeq &&
+    (running.size === 0 || Date.now() - prereqProbeLastAt >= PREREQ_RECHECK_MIN_MS)
+  ) {
+    const probeTargets = selectPrereqProbeTargets(work, depsMap, done, failedSet, running)
+    if (probeTargets.length > 0) {
+      prereqProbeAtIterationSeq = dispatchIterationSeq
+      prereqProbeLastAt = Date.now()
+      if ((await probePrereqCompletion(probeTargets)) > 0) continue // 同一周回で再 dispatch する
+    }
+  }
   if (running.size === 0) break
-  const finished = await Promise.race(running.values())
+  // 監視専業の周回（新規投入なし・保留項目あり）が長時間続く場合、完了駆動だけでは人手マージの
+  // 検知が遅れるため、timer API が利用可能なときのみ tick を Promise.race に加える。保留項目が
+  // 無ければ arm しない（無駄な timer を張らない）。既存の「finished.number」処理・
+  // running.size===0 での break 契約は変更しない。
+  let finished
+  const tickCandidates = selectPrereqProbeTargets(work, depsMap, done, failedSet, running)
+  // running.size < concurrency も必須: プローブ本体（上のブロック）は空きスロットがある場合
+  // にしか動かないため、スロットが全て埋まっている間に tick を arm すると「何も確認できない
+  // 周回」を PREREQ_RECHECK_TICK_MS ごとに空費し、その都度 remeasureResidualBytesIfDue() 等の
+  // 周回冒頭処理を再実行させるだけになる。
+  const tickArmable =
+    tickCandidates.length > 0 &&
+    running.size > 0 &&
+    running.size < concurrency &&
+    typeof setTimeout === 'function' &&
+    typeof clearTimeout === 'function'
+  if (tickArmable) {
+    // ここへ到達するのは (i) 今回の周回でクールダウン中のためプローブをスキップした
+    // 直後、または (ii) 今回の周回でプローブを実行したが対象なし・完了0件だった直後、
+    // のいずれか。PREREQ_RECHECK_MIN_MS（60秒）は常に PREREQ_RECHECK_TICK_MS（5分）
+    // より短いため、(ii) を区別せず「残りクールダウン時間」をそのまま tick 間隔にすると、
+    // プローブ直後は prereqProbeLastAt がリセットされ残りクールダウンが常に MIN_MS 満了
+    // まで巻き戻るため、tickDelayMs が毎回 min(TICK_MS, MIN_MS) = MIN_MS に潰れ、
+    // 本来 TICK_MS 間隔であるべき定期監視が MIN_MS 間隔（約5倍の頻度）で prereq:probe
+    // を呼び続けてしまう（Issue #442 PR #444 Bugbot Medium: Tick delay collapses
+    // recheck interval）。(i) の「クールダウン明け待ち」だけを短縮対象とし、(ii) の
+    // 「プローブ済み・対象なし」は通常どおり TICK_MS で待つ。
+    const probedThisIteration = prereqProbeAtIterationSeq === dispatchIterationSeq
+    const cooldownRemainingMs = PREREQ_RECHECK_MIN_MS - (Date.now() - prereqProbeLastAt)
+    const tickDelayMs =
+      !probedThisIteration && cooldownRemainingMs > 0
+        ? Math.min(PREREQ_RECHECK_TICK_MS, cooldownRemainingMs)
+        : PREREQ_RECHECK_TICK_MS
+    let tickTimer
+    const tickPromise = new Promise((resolve) => {
+      tickTimer = setTimeout(() => resolve({ tick: true }), tickDelayMs)
+    })
+    finished = await Promise.race([...running.values(), tickPromise])
+    clearTimeout(tickTimer)
+    if (finished?.tick === true) continue // 次周回で MIN_MS 間隔判定を通ればプローブする
+  } else {
+    finished = await Promise.race(running.values())
+  }
   running.delete(finished.number)
   // 完了イシューの残余予約を解放する（実際に積んだ分は ephemeralWorktrees の実測に反映済み）
   newStartActive.delete(finished.number)
@@ -5130,18 +5496,19 @@ while (true) {
   else failedSet.add(finished.number)
 }
 
-// 依存失敗の連鎖を最終確定する（dispatch 順の都合で未マークのものを掃く）
+// 依存失敗の連鎖を最終確定する（dispatch ループはラン中の外部完了検知のため即時確定を保留する
+// ため、blocked への確定はここが唯一の choke point。Issue #442）。
 let cascaded = true
 while (cascaded) {
   cascaded = false
   for (const item of work) {
     const n = item.number
     if (done.has(n) || failedSet.has(n)) continue
-    const ds = [...depsOf(item)]
-    const failedDeps = ds.filter((d) => failedSet.has(d))
-    // dispatch ループと同じ確定条件: 未確定の依存が残る item は blocked にせず notStarted へ
-    // 落とす（失敗依存リストが不完全なまま blocked 確定しない）。
-    if (failedDeps.length > 0 && ds.every((d) => done.has(d) || failedSet.has(d))) {
+    const ds = depsOf(item)
+    // dispatch ループと同じ判定関数（classifyDispatchReadiness）を使い、確定条件の食い違いを
+    // 防ぐ。未確定の依存が残る item（'wait'）は blocked にせず notStarted へ落とす。
+    if (classifyDispatchReadiness(ds, done, failedSet) === 'dep-blocked') {
+      const failedDeps = [...ds].filter((d) => failedSet.has(d))
       await markBlockedByDeps(item, failedDeps)
       cascaded = true
     }
@@ -5316,4 +5683,5 @@ if (residualBytesOverLimit) {
 //   未マージ成果を削除しかねない）。autoMerge: 実効状態（要求 && 確定 && context 宣言）。
 // mergeGuard: hook は deny 専用（opt-in マージと併用不可）。residualWorktrees: 残置上限ゲート
 //   観測（observed: false = 観測不成立、overLimit: true = 次ラン新規着手停止見込み）。
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees }
+// prereqTransitions: ラン中に検知した前提の外部完了遷移（merged/closed。Issue #442）。
+return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions }
