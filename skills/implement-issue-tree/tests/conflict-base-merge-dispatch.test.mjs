@@ -259,6 +259,33 @@ test('駆動部: lastState === \'conflicting\' 分岐が存在し baseMergePromp
   assert.ok(!branchBody.includes('noPushRounds >= 2'), 'conflicting 分岐が fix ループ専用の blocked 終端条件（noPushRounds >= 2）を持ち込んでいる')
 })
 
+// ---------------------------------------------------------------------------
+// 駆動部: baseMergeCount >= maxBaseMerges 上限到達時の終端分類（Issue #441 codex-review P1・PR #443
+// の回帰）。'unrecoverable' を使うと terminalStatus 決定部
+// （`blockedIsRecoverable = lastState === 'blocked' && lastBlockedReason === 'quality'`）が
+// 'failed'（halt カウント対象）へ倒し、SKILL.md・args-example.json の「コンフリクトは即 blocked
+// にする」という公開契約と不一致になり、maxBaseMerges: 0 の明示オプトアウトだけで連続失敗 halt を
+// 誘発していた。上限到達専用の if ブロックのみを切り出し、'quality' を設定し 'unrecoverable' を
+// 一切含まないことを固定する（同分岐内の他コメントに 'unrecoverable' という語自体が残っていても
+// 誤検出しないよう、実際に代入している行を対象にする）。
+// ---------------------------------------------------------------------------
+
+test('駆動部: baseMergeCount >= maxBaseMerges 到達時は lastBlockedReason を quality に設定する（unrecoverable を代入しない）', () => {
+  const capIdx = driverPart.indexOf('if (baseMergeCount >= maxBaseMerges) {')
+  assert.ok(capIdx >= 0, 'baseMergeCount >= maxBaseMerges の上限到達ブロックが見つからない')
+  const capEndIdx = driverPart.indexOf('\n      }', capIdx)
+  assert.ok(capEndIdx > capIdx, '上限到達ブロックの終端（break を含む閉じ括弧）が見つからない')
+  const capBody = driverPart.slice(capIdx, capEndIdx)
+  assert.ok(capBody.includes("lastBlockedReason = 'quality'"), '上限到達ブロックが lastBlockedReason を quality に設定していない')
+  assert.ok(!capBody.includes("lastBlockedReason = 'unrecoverable'"), '上限到達ブロックが lastBlockedReason に unrecoverable を代入している（blocked ではなく failed 終端へ倒れる）')
+  assert.ok(capBody.includes("lastState = 'blocked'"), '上限到達ブロックが lastState を blocked に設定していない')
+  assert.ok(capBody.includes('break'), '上限到達ブロックが break していない')
+  // maxBaseMerges: 0 の明示オプトアウトは cap-reached と同じ if 条件（0 >= 0）を通るため、
+  // 「上限到達」ではなく「無効化されている」という別文言を出し分ける契約を固定する
+  // （0 回到達というメッセージは opt-out の実態と合わないため）。
+  assert.ok(capBody.includes('maxBaseMerges === 0'), '上限到達ブロックが maxBaseMerges === 0 の分岐を持たない（opt-out 専用メッセージがない）')
+})
+
 test('駆動部: baseMergeCount の状態ファイル復元と runMergeLoop への引き渡しが存在する', () => {
   assert.ok(driverPart.includes('savedBaseMergeCount'), '駆動部に savedBaseMergeCount の復元が見つからない')
   assert.ok(driverPart.includes('initialBaseMergeCount'), 'runMergeLoop の initialBaseMergeCount 引数が見つからない')

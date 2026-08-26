@@ -4393,12 +4393,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // いずれからも到達する。fixCount とは独立の baseMergeCount 予算で有界化し（monitorsLeft と
       // 合わせて二重に停止性を保つ）、品質問題ではないため fixCount は一切消費しない。
       if (baseMergeCount >= maxBaseMerges) {
-        lastBlockedReason = 'unrecoverable'
+        // 'quality'（blocked + halt 非カウント。codex-review P1・PR #443）: #141（fixCount 上限）
+        // とは異なり、上限到達後も human が PR ブランチへ直接 base を取り込んで push すれば
+        // コンフリクトが解消し、次回の monitor はもう 'conflicting' を返さないためこの分岐自体を
+        // 再度は通らない（baseMergeCount 上限は 'conflicting' 分岐内でのみ参照され、コンフリクト
+        // 解消後は無関係になる）。#141 の needs-fix（fixCount 尽きても自動では何も変わらない）とは
+        // 「自動化の外側の人間操作で状態が変わり得るか」が異なるため 'unrecoverable' を流用しない。
+        // SKILL.md・automerge-design.md・args-example.json の「コンフリクトは blocked 終端」という
+        // 公開契約とも整合させる（旧実装は 'unrecoverable' により status: 'failed' へ倒れ、
+        // maxBaseMerges: 0 の明示オプトアウトだけで連続失敗 halt を誘発していた）。
+        lastBlockedReason = 'quality'
         lastState = 'blocked'
-        // #141 と同じ根拠: 上限到達のまま resume すると毎回即 blocked を繰り返し halt 防御が
-        // 働かない。再実行は Recover → impl（既存 PR 再利用）→ pr-create の base 最新化ゲートで
-        // 解消する既存経路に委ねる。
-        terminalReasonOverride = capText(`base 取り込み上限（${maxBaseMerges} 回）到達。同じ PR を再監視しても base コンフリクトが解消しないため終端する。再実行は Recover フェーズ経由で既存 PR を引き継ぎ、PR Create フェーズの base 最新化ゲートで解消する`)
+        terminalReasonOverride = maxBaseMerges === 0
+          ? capText('自動 base 取り込みは maxBaseMerges: 0 により無効化されている。base コンフリクトを解消してから再実行すれば monitoring 再開で継続する（Recover フェーズ経由で既存 PR を引き継ぐ）')
+          : capText(`base 取り込み上限（${maxBaseMerges} 回）到達。同じ PR を再監視しても自動では base コンフリクトが解消しないため終端する。base コンフリクトを解消してから再実行すれば monitoring 再開で継続する（Recover フェーズ経由で既存 PR を引き継ぎ、PR Create フェーズの base 最新化ゲートでも解消を試みる）`)
         break
       }
       log(`PR #${impl.prNumber} が base とコンフリクト、base 取り込みエージェントを起動する（${baseMergeCount + 1}/${maxBaseMerges} 回目。fix 予算は消費しない）`)
