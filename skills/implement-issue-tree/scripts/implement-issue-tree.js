@@ -4990,6 +4990,7 @@ async function probePrereqCompletion(targets) {
     schema: PREREQ_PROBE_SCHEMA,
   })
   const transitions = applyPrereqTransitions(probe, targets, done, failedSet)
+  let appliedCount = 0
   for (const t of transitions) {
     // kind で文言を分ける — Review 非収束等の依存ブロックは PR 未作成（push 前 blocked）が
     // 主経路のため、'merged' 前提でハードコードすると closed 遷移（PR なし）で
@@ -4998,6 +4999,22 @@ async function probePrereqCompletion(targets) {
       t.kind === 'merged'
         ? `。ラン中に外部完了を確認（PR #${t.pr ?? '?'} MERGED）: 前提充足として下流を同一ラン内で再判定する`
         : '。ラン中に外部完了を確認（Issue CLOSED）: 前提充足として下流を同一ラン内で再判定する'
+    const patch = { status: t.kind, note: noteSuffix.slice(1), ...(t.pr ? { pr: t.pr } : {}) }
+    // 状態ファイルへの永続化を先に確定させる（references/recovery.md の永続化契約）。
+    // done/failedSet への集合変更（applyPrereqTransitions 内で既に適用済み）は、書き込みが
+    // 失敗した場合ここでロールバックし、レポート反映・下流 dispatch のいずれも行わない
+    // （fail-closed）。永続化前に成功扱いで下流を進めると、再実行時の Recover 判定が
+    // 状態ファイル（依然 blocked/failed）とレポート（merged/closed）とで食い違う。
+    const updated = await updateState(t.issue, patch)
+    if (!updated) {
+      done.delete(t.issue)
+      failedSet.add(t.issue)
+      log(
+        `⚠️ #${t.issue}: 前提完了遷移の状態ファイル更新に失敗したため、この周回では遷移を確定` +
+          `せず failedSet へロールバックした（fail-closed。次回プローブで再判定する）`,
+      )
+      continue
+    }
     const existingIdx = results.findIndex((r) => r.issue === t.issue)
     if (existingIdx >= 0) {
       results[existingIdx] = {
@@ -5014,13 +5031,11 @@ async function probePrereqCompletion(targets) {
     }
     const failuresIdx = failures.findIndex((f) => f.issue === t.issue)
     if (failuresIdx >= 0) failures.splice(failuresIdx, 1)
-    const patch = { status: t.kind, note: noteSuffix.slice(1), ...(t.pr ? { pr: t.pr } : {}) }
-    const updated = await updateState(t.issue, patch)
-    if (!updated) log(`⚠️ #${t.issue}: 前提完了遷移後の状態ファイル更新に失敗した（レポートには反映済み）`)
     prereqTransitions.push(t)
+    appliedCount += 1
     log(`#${t.issue}: ラン中に外部完了を検知（${t.kind}）。前提充足として下流を同一ラン内で再判定する`)
   }
-  return transitions.length
+  return appliedCount
 }
 while (true) {
   dispatchIterationSeq += 1
