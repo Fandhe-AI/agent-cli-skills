@@ -2565,7 +2565,9 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
 // (2)・PR #443 P0）。同じ理由で fmt/lint/build/test も実行しない。
 function baseMergePrompt(item, impl, expectedRepo) {
   const branch = sanitizeBranch(impl.branch)
-  // 未確定（isValidRepoSlug 不通過）は空文字を埋め込む。正規化後の remote は必ず owner/repo
+  // 未確定（args.repo 省略。args 経由の形式不正は parseRepoArg が起動時に throw 済みのため、
+  // ここでの isValidRepoSlug 再検証は呼び出し側を信頼しない防御的な空文字化）は空文字を
+  // 埋め込む。正規化後の remote は必ず owner/repo
   // 形式になるため "" との比較は常に不一致となり fail-closed する（Bugbot P0・PR #443:
   // PR 番号・headRefName 一致だけでは別リポの偶然一致を排除できないため remote 一致を追加）。
   // owner/repo は case-insensitive なため ASCII 小文字化して埋め込む（比較側も同規則。P1）。
@@ -4458,7 +4460,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // baseMergePrompt を起動せず quality+blocked へ直終端する。
         lastBlockedReason = 'quality'
         lastState = 'blocked'
-        terminalReasonOverride = capText('args.repo 未指定または形式不通過のため期待リポジトリを確定できず base 取り込みを起動しなかった。args.repo を "owner/repo" 形式で指定して再実行するか、人間が base をブランチへ直接取り込み push する。次回も monitoring 再開で同じ PR を再監視する')
+        terminalReasonOverride = capText('args.repo 未指定のため期待リポジトリを確定できず base 取り込みを起動しなかった（形式不正は parseRepoArg が起動時にエラー停止するためここへは到達しない）。args.repo を "owner/repo" 形式で指定して再実行するか、人間が base をブランチへ直接取り込み push する。次回も monitoring 再開で同じ PR を再監視する')
         break
       }
       if (baseMergeCount >= maxBaseMerges) {
