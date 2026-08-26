@@ -566,3 +566,27 @@ test('駆動部: probePrereqCompletion の note は halted 時に「次回ラン
     'log() の halted 分岐に「次回ランで反映される」文言、非 halted 分岐に「同一ラン内で再判定する」文言のいずれかが欠けている',
   )
 })
+
+test('駆動部: probePrereqCompletion のプローブ agent 呼び出しは try/catch で保護され、失敗時は遷移なし（0 件）で継続する', () => {
+  // 対象バグ（Issue #442 codex P1）: プローブの await agent(...) が未捕捉のまま throw すると、
+  // GitHub API・エージェント・schema 応答の一時的な失敗が、動作中のイシュー・最終 cascade・
+  // 状態レポートまで含めてラン全体を異常終了させる。プローブは補助的な再確認処理であり、
+  // 確認不能は「遷移なし」として安全に継続できるため、throw の捕捉と 0 返却を契約として固定する。
+  const src = readFileSync(SCRIPT_PATH, 'utf8')
+  const fnStart = src.indexOf('async function probePrereqCompletion(')
+  assert.ok(fnStart >= 0, 'probePrereqCompletion が見つからない')
+  const fnEnd = src.indexOf('\nasync function ', fnStart + 1)
+  const body = src.slice(fnStart, fnEnd > fnStart ? fnEnd : undefined)
+  const agentCallIdx = body.indexOf('await agent(prereqProbePrompt(')
+  assert.ok(agentCallIdx >= 0, 'プローブの agent 呼び出しが見つからない')
+  const tryIdx = body.lastIndexOf('try {', agentCallIdx)
+  assert.ok(tryIdx >= 0, 'プローブの agent 呼び出しが try ブロックの中にない（未捕捉の throw がラン全体を中断させる）')
+  const catchIdx = body.indexOf('} catch', agentCallIdx)
+  assert.ok(catchIdx >= 0, 'プローブの agent 呼び出しに対応する catch がない')
+  // catch ブロック内の template literal（\${...}）が閉じ括弧を含むため、括弧照合ではなく
+  // 次の文（transitions 算出）までを catch 本文の走査範囲とする。
+  const afterCatchIdx = body.indexOf('applyPrereqTransitions(', catchIdx)
+  const catchBody = body.slice(catchIdx, afterCatchIdx >= 0 ? afterCatchIdx : undefined)
+  assert.ok(/return 0/.test(catchBody), 'catch が 0（遷移なし）を返していない（呼び出し元は >0 で同一周回の再 dispatch を行うため、失敗時は 0 で通常継続させる契約）')
+  assert.ok(/log\(/.test(catchBody), 'catch が失敗を log で報告していない（無音の握り潰しは診断不能になる）')
+})

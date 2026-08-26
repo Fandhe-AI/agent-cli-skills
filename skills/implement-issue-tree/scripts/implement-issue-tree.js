@@ -5076,13 +5076,27 @@ async function probePrereqCompletion(targets) {
     const hint = Number.isInteger(fromResults) && fromResults > 0 ? fromResults : fromSaved
     if (Number.isInteger(hint) && hint > 0) prHints[d] = hint
   }
-  const probe = await agent(prereqProbePrompt(targets, prHints), {
-    label: 'prereq:probe',
-    phase: 'State',
-    model: 'haiku',
-    effort: 'low',
-    schema: PREREQ_PROBE_SCHEMA,
-  })
+  // プローブは failedSet 入りした前提の外部完了を補助的に再確認する処理であり、確認不能は
+  // 「遷移なし」として安全に継続できる。agent() の throw（API 一時障害・schema 応答不良等）を
+  // ここで吸収しないと、その時点で動作中のイシュー・最終 cascade・状態レポートまで含めて
+  // ラン全体が異常終了する（Issue #442 codex P1）。skip / 終端エラーの null 返却は
+  // applyPrereqTransitions が空扱いするため、throw のみを捕捉して 0 件で返す。
+  let probe
+  try {
+    probe = await agent(prereqProbePrompt(targets, prHints), {
+      label: 'prereq:probe',
+      phase: 'State',
+      model: 'haiku',
+      effort: 'low',
+      schema: PREREQ_PROBE_SCHEMA,
+    })
+  } catch (e) {
+    log(
+      `⚠️ 前提完了プローブが一時的に失敗したため、この周回は遷移なしとして継続する` +
+        `（次周回で再判定する）: ${e?.message ?? e}`,
+    )
+    return 0
+  }
   const transitions = applyPrereqTransitions(probe, targets, done, failedSet, prHints)
   let appliedCount = 0
   for (const t of transitions) {
