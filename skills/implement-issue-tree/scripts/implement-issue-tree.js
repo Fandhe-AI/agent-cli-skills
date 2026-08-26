@@ -854,6 +854,12 @@ function classifyPrereqTransition(entry, knownPr) {
 // prHints は呼び出し元（probePrereqCompletion）が results/savedItems から解決したホスト既知
 // PR 番号（issue → pr）。'merged' 判定はこれと entry.pr の一致を classifyPrereqTransition 内で
 // 必須とするため、ここでは対象 issue の値をそのまま渡すのみで独自の検証ロジックは持たない。
+// pr は kind === 'merged' の場合に限り transition へ含める。'closed' は classifyPrereqTransition
+// の CLOSED フォールスルー（entry.pr が knownPr 照合を通っていない、または照合不能なまま
+// issueState だけで確定した経路）を含むため、entry.pr をそのまま転記すると呼び出し元
+// probePrereqCompletion が未検証の PR 番号で state/results の既知値を上書きしてしまう
+// （cursor 指摘: Rejected PR persisted on fallthrough）。'closed' 遷移は常に PR なし
+// （既存の「PR なし」表現＝ transition オブジェクトに pr キー自体を含めない）として扱う。
 function applyPrereqTransitions(probe, targets, done, failedSet, prHints) {
   const results = Array.isArray(probe?.results) ? probe.results : []
   const seen = new Set()
@@ -866,7 +872,7 @@ function applyPrereqTransitions(probe, targets, done, failedSet, prHints) {
     if (kind === null) continue
     failedSet.delete(issue)
     done.add(issue)
-    const pr = Number.isInteger(entry.pr) && entry.pr > 0 ? entry.pr : undefined
+    const pr = kind === 'merged' && Number.isInteger(entry.pr) && entry.pr > 0 ? entry.pr : undefined
     transitions.push({ issue, kind, ...(pr ? { pr } : {}) })
   }
   return transitions

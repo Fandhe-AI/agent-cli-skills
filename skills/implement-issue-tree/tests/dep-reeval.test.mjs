@@ -297,6 +297,36 @@ test('applyPrereqTransitions: issueState CLOSED は prHints 不在でも遷移�
   assert.ok(done.has(67))
 })
 
+// PR #444 Bugbot 指摘（threadId PRRT_kwDORuXFg86caRhf）の回帰固定: prState MERGED が
+// host 照合（knownPr 一致）に失敗し issueState CLOSED へフォールスルーした場合、entry.pr が
+// 正の整数であっても transition へ含めてはならない（未検証の PR 番号で既知値を上書きしない）。
+test('applyPrereqTransitions: MERGED 照合不成立のCLOSEDフォールスルーはpr不一致でもtransitionにprを含めない', () => {
+  const done = new Set()
+  const failedSet = new Set([67])
+  const probe = { results: [{ issue: 67, prState: 'MERGED', issueState: 'CLOSED', pr: 999 }] }
+  const transitions = applyPrereqTransitions(probe, [67], done, failedSet, { 67: 212 })
+  assert.deepEqual(transitions, [{ issue: 67, kind: 'closed' }], 'pr キー自体を含めない')
+  assert.ok(done.has(67))
+})
+
+test('applyPrereqTransitions: MERGED 照合不成立のCLOSEDフォールスルーはknownPr未確定でもtransitionにprを含めない', () => {
+  const done = new Set()
+  const failedSet = new Set([67])
+  const probe = { results: [{ issue: 67, prState: 'MERGED', issueState: 'CLOSED', pr: 212 }] }
+  const transitions = applyPrereqTransitions(probe, [67], done, failedSet, undefined)
+  assert.deepEqual(transitions, [{ issue: 67, kind: 'closed' }], 'knownPr 未確定でも pr キーを含めない')
+  assert.ok(done.has(67))
+})
+
+test('applyPrereqTransitions: MERGED 照合が成立した場合は従来どおり kind merged で pr を含める', () => {
+  const done = new Set()
+  const failedSet = new Set([67])
+  const probe = { results: [{ issue: 67, prState: 'MERGED', issueState: 'CLOSED', pr: 212 }] }
+  const transitions = applyPrereqTransitions(probe, [67], done, failedSet, { 67: 212 })
+  assert.deepEqual(transitions, [{ issue: 67, kind: 'merged', pr: 212 }], 'merged 経路の pr 転記は維持する')
+  assert.ok(done.has(67))
+})
+
 // ---------------------------------------------------------------------------
 // 受入条件 3 の本命: 前提 merged への遷移 → 下流の再判定
 // ---------------------------------------------------------------------------
