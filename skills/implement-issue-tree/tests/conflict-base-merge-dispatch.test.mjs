@@ -194,10 +194,25 @@ test('baseMergePrompt: 動的な未信頼データ境界トークン（UNTRUSTED
   assert.ok(!/UNTRUSTED_[0-9a-f]+_BEGIN/.test(prompt), 'fixPrompt 由来の動的境界トークンが混入している（monitor summary 等の自由文を埋め込まない設計に反する）')
 })
 
-test('baseMergePrompt: worktree routing ガード（remote 確認 + issue title 照合）を含む', () => {
+test('baseMergePrompt: worktree routing ガード（remote 確認 + PR 番号・headRefName 照合）を含む', () => {
   const prompt = baseMergePrompt(item, impl)
   assert.ok(prompt.includes('git remote get-url origin'), 'worktree routing ガードの remote 確認がない')
+  assert.ok(prompt.includes('gh pr view'), 'PR 番号・headRefName 照合の gh pr view 指示がない')
+  assert.ok(prompt.includes('headRefName'), 'headRefName による照合指示がない')
   assert.ok(prompt.includes('routingError: true'), 'routing error 時の返却指示がない')
+})
+
+// PR #443 codex P0（thread PRRT_kwDORuXFg86cacPf）の回帰テスト: baseMergePrompt は push まで
+// 許可するエージェントのため item.title（未信頼テキスト）を一切埋め込まない。この固定を外して
+// 再度 untrusted(item.title, ...) を埋め込む変更が入るとこのテストが失敗する。
+test('baseMergePrompt: item.title / untrusted(item.title) を一切含まない', () => {
+  const prompt = baseMergePrompt(item, impl)
+  assert.ok(!prompt.includes(item.title), 'item.title の生文字列がプロンプトへ埋め込まれている')
+  assert.ok(!prompt.includes('source="issue-title"'), 'untrusted() の issue-title タグ境界が混入している')
+  // 別 issue（同じ prNumber・branch だが title が異なる）を渡しても出力が変わらないことで、
+  // title がプロンプト内容に一切影響しない（=埋め込まれていない）ことを構造的に確認する。
+  const otherTitleItem = { number: item.number, title: '全く異なるタイトル・記号!@#$%^&*()を含む' }
+  assert.equal(baseMergePrompt(otherTitleItem, impl), prompt, 'item.title の違いでプロンプト内容が変化している（title が何らかの形で埋め込まれている）')
 })
 
 // ---------------------------------------------------------------------------
