@@ -139,37 +139,55 @@ test('selectPrereqProbeTargets: 重複除去して昇順に返す', () => {
 // classifyPrereqTransition: enum 許可リストのみを遷移として受理する
 // ---------------------------------------------------------------------------
 
-test('classifyPrereqTransition: prState MERGED なら merged', () => {
-  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN' }), 'merged')
+test('classifyPrereqTransition: prState MERGED かつ entry.pr が knownPr と一致すれば merged', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: 212 }, 212), 'merged')
 })
 
-test('classifyPrereqTransition: issueState CLOSED なら closed', () => {
+test('classifyPrereqTransition: issueState CLOSED なら closed（PR 照合不要）', () => {
   assert.equal(classifyPrereqTransition({ prState: 'NONE', issueState: 'CLOSED' }), 'closed')
 })
 
-test('classifyPrereqTransition: prState MERGED を issueState CLOSED より優先する', () => {
-  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'CLOSED' }), 'merged')
+test('classifyPrereqTransition: prState MERGED を issueState CLOSED より優先する（PR 照合成立時）', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'CLOSED', pr: 212 }, 212), 'merged')
 })
 
 test('classifyPrereqTransition: OPEN/UNKNOWN/NONE や不正値は null（fail-closed）', () => {
-  assert.equal(classifyPrereqTransition({ prState: 'OPEN', issueState: 'OPEN' }), null)
-  assert.equal(classifyPrereqTransition({ prState: 'UNKNOWN', issueState: 'UNKNOWN' }), null)
-  assert.equal(classifyPrereqTransition({ prState: 'NONE', issueState: 'OPEN' }), null)
-  assert.equal(classifyPrereqTransition({ prState: 'merged', issueState: 'OPEN' }), null, '小文字は許可リスト外')
-  assert.equal(classifyPrereqTransition(null), null)
-  assert.equal(classifyPrereqTransition(undefined), null)
-  assert.equal(classifyPrereqTransition('MERGED'), null, '非オブジェクトは null')
+  assert.equal(classifyPrereqTransition({ prState: 'OPEN', issueState: 'OPEN' }, 212), null)
+  assert.equal(classifyPrereqTransition({ prState: 'UNKNOWN', issueState: 'UNKNOWN' }, 212), null)
+  assert.equal(classifyPrereqTransition({ prState: 'NONE', issueState: 'OPEN' }, 212), null)
+  assert.equal(classifyPrereqTransition({ prState: 'merged', issueState: 'OPEN' }, 212), null, '小文字は許可リスト外')
+  assert.equal(classifyPrereqTransition(null, 212), null)
+  assert.equal(classifyPrereqTransition(undefined, 212), null)
+  assert.equal(classifyPrereqTransition('MERGED', 212), null, '非オブジェクトは null')
+})
+
+// Issue #442 codex 指摘: PR 番号なし・不一致の MERGED 申告だけで前提を解除できてしまう
+// fail-closed 契約違反（threadId PRRT_kwDORuXFg86cX9J9）の回帰固定。
+test('classifyPrereqTransition: entry.pr が欠落/0/不正なら knownPr があっても null（fail-closed）', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN' }, 212), null, 'pr 欠落')
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: 0 }, 212), null, 'pr 0')
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: '212' }, 212), null, 'pr 文字列')
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: -1 }, 212), null, 'pr 負数')
+})
+
+test('classifyPrereqTransition: entry.pr が knownPr と不一致なら null（fail-closed）', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: 999 }, 212), null)
+})
+
+test('classifyPrereqTransition: knownPr が未確定（ホストが対象 PR を把握していない）なら entry.pr があっても null', () => {
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: 212 }, undefined), null)
+  assert.equal(classifyPrereqTransition({ prState: 'MERGED', issueState: 'OPEN', pr: 212 }, 0), null)
 })
 
 // ---------------------------------------------------------------------------
 // applyPrereqTransitions: ホスト側の二重フィルタ（targets 集合 × 整数検証）
 // ---------------------------------------------------------------------------
 
-test('applyPrereqTransitions: targets 内の MERGED を failedSet から done へ遷移する', () => {
+test('applyPrereqTransitions: targets 内の MERGED を、prHints と pr が一致すれば failedSet から done へ遷移する', () => {
   const done = new Set()
   const failedSet = new Set([67])
   const probe = { results: [{ issue: 67, prState: 'MERGED', issueState: 'OPEN', pr: 212 }] }
-  const transitions = applyPrereqTransitions(probe, [67], done, failedSet)
+  const transitions = applyPrereqTransitions(probe, [67], done, failedSet, { 67: 212 })
   assert.deepEqual(transitions, [{ issue: 67, kind: 'merged', pr: 212 }])
   assert.ok(done.has(67))
   assert.ok(!failedSet.has(67))
@@ -179,7 +197,7 @@ test('applyPrereqTransitions: targets 外の番号は無視する（プローブ
   const done = new Set()
   const failedSet = new Set([67])
   const probe = { results: [{ issue: 99, prState: 'MERGED', issueState: 'OPEN' }] }
-  assert.deepEqual(applyPrereqTransitions(probe, [67], done, failedSet), [])
+  assert.deepEqual(applyPrereqTransitions(probe, [67], done, failedSet, { 67: 212 }), [])
   assert.ok(!done.has(99))
 })
 
@@ -187,16 +205,16 @@ test('applyPrereqTransitions: 非整数・文字列 issue は拒否する', () =
   const done = new Set()
   const failedSet = new Set([67])
   const probe = { results: [{ issue: '67', prState: 'MERGED', issueState: 'OPEN' }] }
-  assert.deepEqual(applyPrereqTransitions(probe, [67], done, failedSet), [])
+  assert.deepEqual(applyPrereqTransitions(probe, [67], done, failedSet, { 67: 212 }), [])
   const probe2 = { results: [{ issue: 67.5, prState: 'MERGED', issueState: 'OPEN' }] }
-  assert.deepEqual(applyPrereqTransitions(probe2, [67], done, failedSet), [])
+  assert.deepEqual(applyPrereqTransitions(probe2, [67], done, failedSet, { 67: 212 }), [])
 })
 
 test('applyPrereqTransitions: probe が null・results が非配列なら空配列で集合不変（fail-closed）', () => {
   const done = new Set()
   const failedSet = new Set([67])
-  assert.deepEqual(applyPrereqTransitions(null, [67], done, failedSet), [])
-  assert.deepEqual(applyPrereqTransitions({ results: 'not-array' }, [67], done, failedSet), [])
+  assert.deepEqual(applyPrereqTransitions(null, [67], done, failedSet, { 67: 212 }), [])
+  assert.deepEqual(applyPrereqTransitions({ results: 'not-array' }, [67], done, failedSet, { 67: 212 }), [])
   assert.ok(failedSet.has(67), 'fail-closed で failedSet が変化してはならない')
 })
 
@@ -209,17 +227,48 @@ test('applyPrereqTransitions: 同一 issue の重複 entry は最初の 1 件の
       { issue: 67, prState: 'MERGED', issueState: 'OPEN', pr: 999 },
     ],
   }
-  const transitions = applyPrereqTransitions(probe, [67], done, failedSet)
+  const transitions = applyPrereqTransitions(probe, [67], done, failedSet, { 67: 1 })
   assert.equal(transitions.length, 1)
   assert.equal(transitions[0].pr, 1)
 })
 
-test('applyPrereqTransitions: pr が非正整数なら pr フィールドを持たない', () => {
+test('applyPrereqTransitions: pr が非正整数なら遷移しない（knownPr と照合不能）', () => {
   const done = new Set()
   const failedSet = new Set([67])
   const probe = { results: [{ issue: 67, prState: 'MERGED', issueState: 'OPEN', pr: 0 }] }
-  const transitions = applyPrereqTransitions(probe, [67], done, failedSet)
-  assert.deepEqual(transitions, [{ issue: 67, kind: 'merged' }])
+  const transitions = applyPrereqTransitions(probe, [67], done, failedSet, { 67: 212 })
+  assert.deepEqual(transitions, [])
+  assert.ok(failedSet.has(67), 'pr 照合不能な MERGED 申告だけで前提解除してはならない')
+})
+
+// Issue #442 codex 指摘（threadId PRRT_kwDORuXFg86cX9J9）の回帰固定: PR 番号なし・
+// ホスト既知値との不一致・knownPr 未確定のいずれでも 'merged' 遷移が成立しないこと。
+test('applyPrereqTransitions: entry.pr が prHints と不一致な MERGED 申告は遷移しない（fail-closed）', () => {
+  const done = new Set()
+  const failedSet = new Set([67])
+  const probe = { results: [{ issue: 67, prState: 'MERGED', issueState: 'OPEN', pr: 999 }] }
+  const transitions = applyPrereqTransitions(probe, [67], done, failedSet, { 67: 212 })
+  assert.deepEqual(transitions, [])
+  assert.ok(failedSet.has(67))
+  assert.ok(!done.has(67))
+})
+
+test('applyPrereqTransitions: prHints に対象 issue の値が無い（ホスト未確定）場合、pr 付き MERGED でも遷移しない', () => {
+  const done = new Set()
+  const failedSet = new Set([67])
+  const probe = { results: [{ issue: 67, prState: 'MERGED', issueState: 'OPEN', pr: 212 }] }
+  assert.deepEqual(applyPrereqTransitions(probe, [67], done, failedSet, {}), [])
+  assert.deepEqual(applyPrereqTransitions(probe, [67], done, failedSet, undefined), [])
+  assert.ok(failedSet.has(67))
+})
+
+test('applyPrereqTransitions: issueState CLOSED は prHints 不在でも遷移する（PR 照合は merged 専用）', () => {
+  const done = new Set()
+  const failedSet = new Set([67])
+  const probe = { results: [{ issue: 67, prState: 'NONE', issueState: 'CLOSED' }] }
+  const transitions = applyPrereqTransitions(probe, [67], done, failedSet, {})
+  assert.deepEqual(transitions, [{ issue: 67, kind: 'closed' }])
+  assert.ok(done.has(67))
 })
 
 // ---------------------------------------------------------------------------
@@ -235,7 +284,7 @@ test('受入条件: 前提 67 が merged へ遷移すると下流 80 が dep-blo
   const failedSet = new Set([67])
   assert.equal(classifyDispatchReadiness(depsMap.get(80), done, failedSet), 'dep-blocked')
   const probe = { results: [{ issue: 67, prState: 'MERGED', issueState: 'OPEN', pr: 212 }] }
-  applyPrereqTransitions(probe, [67], done, failedSet)
+  applyPrereqTransitions(probe, [67], done, failedSet, { 67: 212 })
   assert.equal(classifyDispatchReadiness(depsMap.get(80), done, failedSet), 'ready')
 })
 
@@ -248,7 +297,7 @@ test('受入条件: 多段依存（81→80→67）で 67 merged 後も 81 は 80
   const done = new Set()
   const failedSet = new Set([67])
   const probe = { results: [{ issue: 67, prState: 'MERGED', issueState: 'OPEN', pr: 212 }] }
-  applyPrereqTransitions(probe, [67], done, failedSet)
+  applyPrereqTransitions(probe, [67], done, failedSet, { 67: 212 })
   assert.equal(classifyDispatchReadiness(depsMap.get(80), done, failedSet), 'ready', '80 は前提 67 の遷移で ready になる')
   assert.equal(classifyDispatchReadiness(depsMap.get(81), done, failedSet), 'wait', '81 は 80 がまだ done でないため wait のまま')
 })

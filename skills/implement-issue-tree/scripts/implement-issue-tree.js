@@ -823,9 +823,26 @@ function selectPrereqProbeTargets(work, depsMap, done, failedSet, running) {
 // プローブ結果 1 件を遷移種別へ分類する。PR MERGED を Issue CLOSED より優先する（PR がマージ
 // 済みなら Issue の状態取得が失敗していても前提は充足している）。それ以外（OPEN / UNKNOWN /
 // NONE / 非文字列）は遷移なし（fail-closed。推測で完了扱いにしない）。
-function classifyPrereqTransition(entry) {
+// 'merged' の受理には entry.pr が正の整数であり、かつホスト側が事前に把握している対象
+// issue の PR 番号（knownPr。results/savedItems 由来）と一致することを必須とする（Issue #442
+// codex 指摘: PR 番号なし・不一致の 'MERGED' 申告だけで前提を解除できてしまう fail-closed
+// 契約違反を塞ぐ）。knownPr 自体が未確定（ホストがまだその issue の PR 番号を掴んでいない）
+// なら照合不能として遷移させない — 未確認のまま前提充足と見なすことは fail-closed に反する。
+function classifyPrereqTransition(entry, knownPr) {
   if (entry && typeof entry === 'object') {
-    if (entry.prState === 'MERGED') return 'merged'
+    if (entry.prState === 'MERGED') {
+      const pr = entry.pr
+      if (
+        Number.isInteger(pr) &&
+        pr > 0 &&
+        Number.isInteger(knownPr) &&
+        knownPr > 0 &&
+        pr === knownPr
+      ) {
+        return 'merged'
+      }
+      return null
+    }
     if (entry.issueState === 'CLOSED') return 'closed'
   }
   return null
@@ -834,7 +851,10 @@ function classifyPrereqTransition(entry) {
 // プローブ結果を failedSet → done へ実際に適用する（Issue #442 の中核）。ホスト側で二重に検証
 // する: (1) targets に含まれる番号のみ受理（プローブ要求していない番号は無視）、(2) issue が
 // Number.isInteger（文字列・小数は拒否）。同一 issue の重複 entry は最初の 1 件のみ採用する。
-function applyPrereqTransitions(probe, targets, done, failedSet) {
+// prHints は呼び出し元（probePrereqCompletion）が results/savedItems から解決したホスト既知
+// PR 番号（issue → pr）。'merged' 判定はこれと entry.pr の一致を classifyPrereqTransition 内で
+// 必須とするため、ここでは対象 issue の値をそのまま渡すのみで独自の検証ロジックは持たない。
+function applyPrereqTransitions(probe, targets, done, failedSet, prHints) {
   const results = Array.isArray(probe?.results) ? probe.results : []
   const seen = new Set()
   const transitions = []
@@ -842,7 +862,7 @@ function applyPrereqTransitions(probe, targets, done, failedSet) {
     const issue = entry?.issue
     if (!Number.isInteger(issue) || !targets.includes(issue) || seen.has(issue)) continue
     seen.add(issue)
-    const kind = classifyPrereqTransition(entry)
+    const kind = classifyPrereqTransition(entry, prHints?.[issue])
     if (kind === null) continue
     failedSet.delete(issue)
     done.add(issue)
@@ -4999,7 +5019,7 @@ async function probePrereqCompletion(targets) {
     effort: 'low',
     schema: PREREQ_PROBE_SCHEMA,
   })
-  const transitions = applyPrereqTransitions(probe, targets, done, failedSet)
+  const transitions = applyPrereqTransitions(probe, targets, done, failedSet, prHints)
   let appliedCount = 0
   for (const t of transitions) {
     // kind で文言を分ける — Review 非収束等の依存ブロックは PR 未作成（push 前 blocked）が
