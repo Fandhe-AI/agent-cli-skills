@@ -4402,43 +4402,24 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         break
       }
       log(`PR #${impl.prNumber} が base とコンフリクト、base 取り込みエージェントを起動する（${baseMergeCount + 1}/${maxBaseMerges} 回目。fix 予算は消費しない）`)
-      const oldWorktreePath = currentWorktreePath
-      // baseMergePrompt は未信頼な Issue タイトルを読むエージェントであり、返却する worktreePath は
-      // プロンプトインジェクションや誤申告により別 Issue の worktree を指し得る（sanitizeWorktreePath
-      // は文字種検証のみで実在性・新規性は保証しない）。cleanup 追跡対象として採用してよいのは、この
-      // 呼び出しが新規作成した worktree だと物理的に証明できたパスだけであるため、spawn 前の
-      // git worktree list を先に記録しておく（証明は spawn 後、b の結果を見てから行う）。
-      const beforeBaseMergeEntries = await scanOrphanWorktrees()
-      const beforeBaseMergePaths = new Set(
-        beforeBaseMergeEntries.map((e) => sanitizeWorktreePath(e?.path ?? '')).filter(Boolean),
-      )
       const b = await agent(baseMergePrompt(item, impl), { label: `base-merge:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: BASE_MERGE_SCHEMA, isolation: 'worktree' })
-      // エージェント結果の成否・自己申告値にかかわらず、isolation: 'worktree' はこの spawn で
-      // 物理的に worktree を作成済みのため、spawn 直後に after-scan を必ず実行し、host 算出の
-      // before/after 差分（自己申告に依存しない「実測で新規」の集合）を丸ごと台帳
-      // （ephemeralWorktrees）へ計上する（codex-review P1・PR #443）。自己申告パスとの一致は
-      // 後続の currentWorktreePath 選定（cleanup 対象）にのみ使い、台帳計上の可否には使わない。
-      // これを怠ると、自己申告パスが空・誤りの場合に新規作成された worktree が
-      // maxResidualWorktrees / maxResidualWorktreeBytes の残置抑止から漏れる。
-      const afterBaseMergeEntries = await scanOrphanWorktrees()
-      const afterBaseMergePaths = new Set(
-        afterBaseMergeEntries.map((e) => sanitizeWorktreePath(e?.path ?? '')).filter(Boolean),
-      )
-      // before/after いずれかのスキャンが失敗（空集合）した場合、「before に無ければ新規」という
-      // 判定が常に真になり得る（before 失敗時は他 Issue の既存 worktree まで「新規」と誤判定し、
-      // 後段で currentWorktreePath として採用・cleanup 削除され得る。Bugbot High・PR #443）ため、
-      // before・after の両方が非空であることを要求してから host 算出の新規パス集合を確定する。
-      const newlyCreatedBaseMergePaths =
-        beforeBaseMergePaths.size > 0 && afterBaseMergePaths.size > 0
-          ? [...afterBaseMergePaths].filter((p) => !beforeBaseMergePaths.has(p))
-          : []
-      for (const newPath of newlyCreatedBaseMergePaths) {
-        recordEphemeralWorktree(item.number, newPath, 'base-merge')
-      }
+      // base-merge worktree は review / pr-create と同じ「記録のみ・自動削除しない」方針に従う
+      // （recovery.md「検討して不採用とした代替案」参照）。spawn 前後の git worktree list 差分は
+      // 並列実行下では別 Issue が同時間帯に作成した worktree と競合し一意の所有権証明にならず
+      // （codex-review P0・PR #443。並列 spawn 中に兄弟 Issue が作成した worktree が差分に紛れ込み、
+      // baseMergePrompt は未信頼な Issue タイトルを読むエージェントであるため、返却する
+      // worktreePath はプロンプトインジェクション等で兄弟の worktree を指す誤申告があり得る）、
+      // ホスト発行 nonce 方式も却下済み（nonce は未信頼データを読むエージェントへ開示されるため
+      // 所持証明にならない）。よって currentWorktreePath（cleanup 対象）へは絶対に昇格させず、
+      // 自己申告 worktreePath は台帳（ephemeralWorktrees）への記録専用として扱う。
+      // ランタイムはエージェントの応答内容と無関係に worktree を作成済みのため、成否判定より前に
+      // 無条件で記録する（pr-create と同じパターン。前回の before/after 差分方式は before スキャン
+      // 失敗時に記録が漏れる欠陥があった。Bugbot・PR #443）。
+      recordEphemeralWorktree(item.number, b?.worktreePath, 'base-merge')
       const baseMergeSucceeded = b !== null && b !== undefined && typeof b.pushed === 'boolean'
       if (!baseMergeSucceeded) {
         // fix と同じ契約: 無効な結果は baseMergeCount を消費せず即失敗終端（再試行しない）。
-        // 台帳計上は上の after-scan で完了済み（自己申告値に依存しないため実行済み）。
+        // 台帳計上は上で完了済み。
         const baseMergeFailReason = `base 取り込みエージェントが無効な結果を返した（${baseMergeCount + 1} 回目）`
         log(`⚠️ issue #${item.number}: ${baseMergeFailReason}`)
         return await failMergeTerminal(baseMergeFailReason)
@@ -4446,9 +4427,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       if (b.routingError) {
         routingErrorDetected = true
         log(`PR #${impl.prNumber} の base 取り込みエージェントが worktree routing error を報告、即 failed 終端（halt カウント対象）とする`)
-        // 台帳計上は上の after-scan で完了済み（recordEphemeralWorktree(..., 'fix-terminal') の
-        // 自己申告のみの計上は二重計上のため廃止した）。
-        await updateState(item.number, { worktree: oldWorktreePath })
+        // 台帳計上は上で完了済み。currentWorktreePath はそもそも書き換えていないため状態ファイルの
+        // worktree 値も変化しておらず、明示的な巻き戻し書き込みは不要。
         lastState = 'blocked'
         lastBlockedReason = 'unrecoverable'
         break
@@ -4456,37 +4436,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       if (b.commitFailed === true) {
         const reason = `base 取り込みがコミットを作成できず未反映: ${sanitize(b.summary ?? '')}`
         log(`⚠️ issue #${item.number}: ${reason}`)
-        // 台帳計上は上の after-scan で完了済み。
+        // 台帳計上は上で完了済み。
         return await failMergeTerminal(reason)
       }
       baseMergeCount++
       lastRoundPushed = b.pushed === true
-      const reportedBaseMergeWorktreePath = sanitizeWorktreePath(b?.worktreePath ?? '')
-      let newBaseMergeWorktreePath = ''
-      if (
-        reportedBaseMergeWorktreePath &&
-        // 「新規作成の証明」= spawn 前には存在せず、spawn 後には物理的に登録されているパス。
-        // before・after いずれかが空集合（取得不成立）の場合は判定不能のため、cleanup 対象の
-        // 選定（currentWorktreePath への昇格）には常に両方の非空を要求する（上の
-        // newlyCreatedBaseMergePaths と同じ fail-closed 条件）。
-        beforeBaseMergePaths.size > 0 &&
-        afterBaseMergePaths.size > 0 &&
-        afterBaseMergePaths.has(reportedBaseMergeWorktreePath) &&
-        !beforeBaseMergePaths.has(reportedBaseMergeWorktreePath)
-      ) {
-        newBaseMergeWorktreePath = reportedBaseMergeWorktreePath
-      } else if (reportedBaseMergeWorktreePath) {
-        log(
-          `⚠️ issue #${item.number}: base 取り込みエージェント自己申告の worktree パス（${reportedBaseMergeWorktreePath}）を、` +
-            `spawn 前後の git worktree list 差分で新規作成と証明できず、cleanup 追跡対象として採用しない` +
-            `（fail-closed。プロンプトインジェクション・誤申告による別 Issue の worktree 誤削除を防ぐため）`,
-        )
-      }
-      currentWorktreePath = newBaseMergeWorktreePath
-      if (!newBaseMergeWorktreePath) {
-        log(`⚠️ issue #${item.number}: base 取り込み worktree パスを取得できず追跡不能。git worktree prune での手動掃除が必要な場合あり`)
-      }
-      await updateState(item.number, { baseMergeCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments }, { cleanupWorktree: oldWorktreePath })
+      // currentWorktreePath は書き換えない（上のコメント参照。所有権を証明できない自己申告パスを
+      // cleanup 対象へ採用しない）。state の worktree 値もこれまでの追跡値のまま維持する。
+      await updateState(item.number, { baseMergeCount, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments })
       // mergeableAfter / checksStarted はエージェント自己申告のためログ専用（マージ判定・分岐には
       // 使わない。enum 完全一致のみ schema が受理する）。実際の判定は次ラウンドの monitor が
       // サーバー側の実値を再観測して行う。
