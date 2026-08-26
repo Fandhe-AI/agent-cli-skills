@@ -105,11 +105,11 @@ workflow 集合の入力形式をカンマ区切り文字列から JSON 配列�
 
 | リポジトリ | 判定 | 理由 | 判断 |
 |-----------|------|------|------|
-| `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は上記節の 3. の代替確認を必須とする |
+| `Fandhe-AI/actions` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 補償策 適用外。`autoMerge: true` は非推奨。使う場合は `skills/implement-issue-tree/references/automerge-design.md` の「補償策の成立確認（base CI プローブ）」節にある「不成立時の扱い（3 択・順に推奨）」の 3.（「補償策 適用外」であることを記録したうえで、ラン完了後に base を最新化した状態での検証を最低 1 回実施する）を必須とする |
 | `Fandhe-AI/life-plan-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
 | `Fandhe-AI/local-server` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
 | `Fandhe-AI/pronunciation-vocab-app` | 補償策不成立 | `.github/workflows/*.yml` に `push:` トリガが無い（構造的不在） | 同上 |
-| `Fandhe-AI/automation-app` | 補償策不成立 | `push:` トリガを持つ workflow は存在する（`deploy-api.yml` 等）が、いずれも `paths` フィルタ付きで実測 head の変更内容では起動しなかった（`push_total == 0`） | 補償策 適用外（現状の head では）。`autoMerge: true` は非推奨。使う場合は上記節の 3. の代替確認を必須とする。他 4 リポと異なり、`paths` に該当する変更が push された head では補償策が成立し得るため、再測の意義が高い |
+| `Fandhe-AI/automation-app` | 補償策不成立 | `push:` トリガを持つ workflow は存在する（`deploy-api.yml` 等）が、いずれも `paths` フィルタ付きで実測 head の変更内容では起動しなかった（`push_total == 0`） | 補償策 適用外（現状の head では）。`autoMerge: true` は非推奨。使う場合は `skills/implement-issue-tree/references/automerge-design.md` の「補償策の成立確認（base CI プローブ）」節にある「不成立時の扱い（3 択・順に推奨）」の 3.（「補償策 適用外」であることを記録したうえで、ラン完了後に base を最新化した状態での検証を最低 1 回実施する）を必須とする。他 4 リポと異なり、`paths` に該当する変更が push された head では補償策が成立し得るため、再測の意義が高い |
 
 リポジトリ構成は変わるため、この記録は測定日時点のスナップショットであり、`autoMerge`
 運用を開始・再開するたびに再測する。該当 5 リポへの push トリガ CI 追加（判定表の
