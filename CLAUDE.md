@@ -249,3 +249,7 @@ description: <one-line description>
    1. `_/dotclaude/agents/<category>/<name>.md` に frontmatter + 手順を作成
    2. `mv` で `.claude/agents/<category>/<name>.md` に移動
    3. `update-docs` スキルで CLAUDE.md の Sub-agents 一覧を更新
+
+## Adding a New Repository
+
+新規のスキル配布リポジトリは [Fandhe-AI/template-skills](https://github.com/Fandhe-AI/template-skills) テンプレートから作成する。`gh repo create <org>/<name> --template Fandhe-AI/template-skills` で作成後は、sample-skill を置き換え、Overview を差し替え、`setup-repo-guards` を適用する。

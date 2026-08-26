@@ -1,3 +1,12 @@
+---
+description: >
+  implement-issue-tree の並列ラン・クライアント側自動マージを成立させるための
+  ブランチ ruleset 構成規約。strict は必ず false・required check への
+  integration_id 束縛・bypass_actors 空・一括更新後の strict / bypass_actors /
+  integration_id 残存の 3 軸検証と classic branch protection の別枠検証を定める。
+applies_to: setup-repo-guards, implement-issue-tree, ruleset を変更する全作業
+---
+
 # ブランチ ruleset 方針
 
 `implement-issue-tree` の並列ラン + クライアント側自動マージ（`autoMerge: true`）を成立させるための、
