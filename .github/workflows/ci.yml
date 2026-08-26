@@ -64,9 +64,13 @@ jobs:
           node-version: '22'
 
       - name: Run node:test suite
+        # シェル glob + failglob で実行する。node 側の glob 指定（"skills/**/*.test.mjs"）は
+        # マッチ 0 件でも成功終了し得る fail-open のため使わない。failglob なら
+        # テストが 1 件も見つからない状態（配置変更・リネーム事故）でジョブが確実に落ちる。
         run: |
           node --version
-          node --test "skills/**/*.test.mjs"
+          shopt -s failglob
+          node --test skills/*/tests/*.test.mjs
 
   # --------------------------------------------------
   # py-tests（update-external 乖離検知の判定ロジック回帰テスト）
