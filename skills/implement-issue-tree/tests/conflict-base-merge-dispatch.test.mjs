@@ -38,6 +38,9 @@ const SLICE_EXPORTS = [
   'BASE_MERGE_SCHEMA',
   'baseMergePrompt',
   'baseMergeInstruction',
+  'baseMergeSubjectPrompt',
+  'BASE_MERGE_SUBJECT_SCHEMA',
+  'BASE_MERGE_SUBJECT_TOKEN_RE',
   'monitorPrompt',
   'fixPrompt',
   'isValidRepoSlug',
@@ -64,6 +67,9 @@ const {
   BASE_MERGE_SCHEMA,
   baseMergePrompt,
   baseMergeInstruction,
+  baseMergeSubjectPrompt,
+  BASE_MERGE_SUBJECT_SCHEMA,
+  BASE_MERGE_SUBJECT_TOKEN_RE,
   monitorPrompt,
   fixPrompt,
   isValidRepoSlug,
@@ -706,4 +712,113 @@ test('駆動部: needs-fix 分岐は conflicting チェーンへ else if で連�
   const branchIdx = driverPart.indexOf("} else if (lastState === 'conflicting') {")
   const reDispatchIdx = driverPart.indexOf("if (lastState === 'needs-fix' || lastState === 'unresolved-comments') {")
   assert.ok(reDispatchIdx > branchIdx, 'conflicting 分岐の後に独立の needs-fix 再ディスパッチ if が見つからない')
+})
+
+// ---------------------------------------------------------------------------
+// PR #443 codex P0（subject 算出の読み取り専用エージェント分離）の回帰テスト:
+// push 権限を持つ baseMergePrompt は commitlint 設定・コミット履歴という未信頼テキストを一切
+// 読まない。subject の type / scope は push 権限を持たない読み取り専用エージェント
+// （baseMergeSubjectPrompt）が算出し、ホストが BASE_MERGE_SUBJECT_TOKEN_RE で再検証して固定
+// テンプレートで組み立てた hostSubject のみが baseMergePrompt へ渡る。
+// ---------------------------------------------------------------------------
+
+const HOST_SUBJECT = 'chore: base ブランチの変更を取り込む'
+
+test('baseMergePrompt: commitlint 設定・コミット履歴の読取指示を一切含まない（未信頼読取ゼロ化・合成後の全文）', () => {
+  for (const [label, prompt] of [
+    ['hostSubject あり', baseMergePrompt(item, impl, 'Fandhe-AI/agent-cli-skills', HOST_SUBJECT)],
+    ['hostSubject なし（防御的フォールバック）', baseMergePrompt(item, impl)],
+  ]) {
+    assert.ok(!prompt.includes('commitlint.config'), `${label}: commitlint 設定ファイルの読取指示が含まれている`)
+    assert.ok(!prompt.includes('.commitlintrc'), `${label}: .commitlintrc の読取指示が含まれている`)
+    assert.ok(!prompt.includes('を読み、マージコミットの subject'), `${label}: subject 決定のための設定読取指示が含まれている`)
+    assert.ok(!prompt.includes('type-enum'), `${label}: type-enum 解釈手順（commitlint 読取前提）が含まれている`)
+    assert.ok(!prompt.includes('直前の implement / fix コミットの scope'), `${label}: コミット履歴（scope 再利用）の読取指示が含まれている`)
+  }
+})
+
+test('baseMergePrompt: ホスト検証済み subject をそのまま使う指示になり、-F 一時ファイル渡しは維持される', () => {
+  const prompt = baseMergePrompt(item, impl, 'Fandhe-AI/agent-cli-skills', HOST_SUBJECT)
+  assert.ok(prompt.includes(HOST_SUBJECT), 'ホスト検証済み subject がプロンプトへ埋め込まれていない')
+  assert.ok(prompt.includes('ホスト検証済み'), 'subject がホスト検証済みである旨の明示がない')
+  assert.ok(prompt.includes('git merge --no-edit -F'), '-F 一時ファイル渡しの指示が失われている')
+})
+
+test('baseMergePrompt: hostSubject 未指定・テンプレート不一致は subject 未確定の fail-closed へ倒す', () => {
+  for (const [label, prompt] of [
+    ['未指定', baseMergePrompt(item, impl, 'Fandhe-AI/agent-cli-skills')],
+    ['任意文字列', baseMergePrompt(item, impl, 'Fandhe-AI/agent-cli-skills', 'evil $(rm -rf /) subject')],
+    ['type 不正（空白入り）', baseMergePrompt(item, impl, 'Fandhe-AI/agent-cli-skills', 'bad type: base ブランチの変更を取り込む')],
+  ]) {
+    assert.ok(prompt.includes('base merge subject 未確定'), `${label}: subject 未確定の fail-closed 文言がない`)
+  }
+  const evil = baseMergePrompt(item, impl, 'Fandhe-AI/agent-cli-skills', 'evil $(rm -rf /) subject')
+  assert.ok(!evil.includes('evil $(rm -rf /) subject'), 'テンプレート不一致の hostSubject がそのまま埋め込まれている（防御的再検証が働いていない）')
+})
+
+test('baseMergeInstruction: hostSubject あり（false 経路）は subject 決定手順を含まず、3 分岐の終了コード処理は維持する', () => {
+  const withHost = baseMergeInstruction('main', false, HOST_SUBJECT)
+  assert.ok(withHost.includes(HOST_SUBJECT), 'hostSubject が埋め込まれていない')
+  assert.ok(!withHost.includes('commitlint.config'), 'hostSubject ありでも commitlint 設定の読取指示が残っている')
+  assert.ok(!withHost.includes('type-enum'), 'hostSubject ありでも type-enum 解釈手順が残っている')
+  assert.ok(withHost.includes('終了コードで 3 分岐する'), '3 分岐の終了コード処理が失われている')
+  assert.ok(withHost.includes('git merge --abort'), 'merge --abort の指示が失われている')
+  assert.ok(withHost.includes('conflict: true'), 'コンフリクト時の conflict: true 返却が失われている')
+})
+
+test('BASE_MERGE_SUBJECT_SCHEMA: type / scope / undecidable / reason を持ち、いずれも required ではない', () => {
+  for (const k of ['type', 'scope', 'undecidable', 'reason']) {
+    assert.ok(k in BASE_MERGE_SUBJECT_SCHEMA.properties, `${k} が定義されていない`)
+  }
+  assert.deepEqual(BASE_MERGE_SUBJECT_SCHEMA.required, [])
+  assert.equal(BASE_MERGE_SUBJECT_SCHEMA.properties.type.maxLength, 64)
+  assert.equal(BASE_MERGE_SUBJECT_SCHEMA.properties.scope.maxLength, 64)
+})
+
+test('BASE_MERGE_SUBJECT_TOKEN_RE: 安全文字集合のみ受理する（ホスト側再検証の実体）', () => {
+  for (const ok of ['chore', 'build', 'ci', 'my_scope-1', 'a'.repeat(64)]) {
+    assert.ok(BASE_MERGE_SUBJECT_TOKEN_RE.test(ok), `${ok} が受理されない`)
+  }
+  for (const bad of ['', 'a b', 'a$(x)', 'a`x`', 'あ', 'a'.repeat(65), 'a\nb', 'a;b', 'a"b']) {
+    assert.ok(!BASE_MERGE_SUBJECT_TOKEN_RE.test(bad), `${JSON.stringify(bad)} が受理されている`)
+  }
+})
+
+test('baseMergeSubjectPrompt: commitlint 決定規則と読み取り専用契約を含み、push / merge / fetch の実行を禁じる', () => {
+  const prompt = baseMergeSubjectPrompt(item, impl)
+  assert.ok(prompt.includes('commitlint 設定'), 'commitlint 設定の読取（subject 決定規則）がない')
+  assert.ok(prompt.includes('type-enum'), 'type-enum 解釈規則がない')
+  assert.ok(prompt.includes('undecidable: true'), '決定不能時の undecidable 返却指示がない')
+  assert.ok(prompt.includes('読み取り専用'), '読み取り専用契約の明示がない')
+  assert.ok(prompt.includes('git fetch / git merge / git push'), 'git 書き込み系コマンドの禁止列挙がない')
+  assert.ok(!prompt.includes('git merge --no-edit'), 'merge 実行コマンドが混入している')
+  assert.ok(!prompt.includes('git push origin'), 'push 実行コマンドが混入している')
+  assert.ok(prompt.includes('^[A-Za-z0-9_-]{1,64}$'), '返却値の安全文字集合の明示がない')
+  assert.ok(prompt.includes('固定テンプレート'), 'subject 全文を返さずホストが組み立てる旨の明示がない')
+})
+
+test('駆動部: conflicting 分岐は subject 算出 → ホスト正規表現検証 → baseMergePrompt の順で、決定不能は起動せず blocked+quality（baseMergeCount 非消費）', () => {
+  const branchIdx = driverPart.indexOf("} else if (lastState === 'conflicting') {")
+  assert.ok(branchIdx >= 0, 'conflicting 分岐が見つからない')
+  const nextBranchIdx = driverPart.indexOf("lastState === 'needs-fix' || lastState === 'unresolved-comments'", branchIdx)
+  const branchBody = driverPart.slice(branchIdx, nextBranchIdx)
+  const subjIdx = branchBody.indexOf('baseMergeSubjectPrompt(')
+  const bmpIdx = branchBody.indexOf('baseMergePrompt(')
+  assert.ok(subjIdx >= 0, 'subject 算出エージェントの起動が見つからない')
+  assert.ok(bmpIdx > subjIdx, 'subject 算出が baseMergePrompt 起動より前に無い')
+  assert.ok(branchBody.includes('BASE_MERGE_SUBJECT_TOKEN_RE.test('), 'ホスト側正規表現による再検証が見つからない（自己申告をそのまま信頼している）')
+  const gateIdx = branchBody.indexOf("if (subjectType === '' || !subjectScopeOk) {")
+  assert.ok(gateIdx >= 0 && gateIdx < bmpIdx, 'subject 決定不能ゲートが baseMergePrompt 起動より前に無い')
+  const gateEnd = branchBody.indexOf('\n      }', gateIdx)
+  const gateBody = branchBody.slice(gateIdx, gateEnd)
+  assert.ok(gateBody.includes("lastBlockedReason = 'quality'"), 'ゲートが blockedReason quality を設定しない')
+  assert.ok(gateBody.includes("lastState = 'blocked'"), 'ゲートが blocked 終端しない')
+  assert.ok(gateBody.includes('break'), 'ゲートが break で終端しない')
+  assert.ok(!gateBody.includes('baseMergeCount++'), 'ゲートが baseMergeCount を消費している（非消費のはず）')
+  assert.ok(!gateBody.includes('baseMergePrompt('), 'ゲートが baseMergePrompt を起動している（未起動で終端するはず）')
+  assert.ok(branchBody.includes('baseMergePrompt(item, impl, expectedRepo, hostSubject)'), '検証済み hostSubject が baseMergePrompt へ渡っていない')
+  assert.ok(branchBody.includes(': base ブランチの変更を取り込む`'), 'ホスト固定テンプレートによる subject 組み立てが見つからない')
+  const subjCallEnd = branchBody.indexOf('} catch', subjIdx)
+  const subjCall = branchBody.slice(branchBody.indexOf('subjectResult = await agent('), subjCallEnd)
+  assert.ok(!subjCall.includes("isolation: 'worktree'"), 'subject 算出エージェントが worktree 隔離で起動されている（読み取り専用のため worktree 台帳を増やさない設計のはず）')
 })
