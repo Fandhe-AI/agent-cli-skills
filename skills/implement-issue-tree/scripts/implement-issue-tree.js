@@ -3316,6 +3316,12 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
 const results = []
 const failures = []
 let consecutiveFailures = 0
+// consecutiveFailures が最後に 0 へリセットされた「世代」。probePrereqCompletion の外部完了
+// 回復時、除去対象の failure がどの世代で記録されたかをこれと突き合わせ、既に別の成功で
+// リセットされた後の failure を誤って現在の連続失敗カウントから減算しないようにする
+// （Issue #442 の codex/Bugbot 指摘: A失敗→B成功(reset)→C失敗の後にAの外部完了を検知すると、
+// 世代を見ずに一律デクリメントすると C の分まで削れてしまい halt 検知が弱まる）。
+let failureEpoch = 0
 let halted = null
 
 // ============================================================================
@@ -3327,6 +3333,8 @@ let halted = null
 // 失敗を記録する。完了できないイシューがあっても即停止せず次へ進み、
 // 3 イシュー連続で停滞した場合のみ新規着手を止めてユーザーの判断を待つ
 function recordFailure(failure) {
+  // 記録時点の世代を刻む（probePrereqCompletion の減算判定用。詳細は failureEpoch 宣言部参照）。
+  failure.streakEpoch = failureEpoch
   failures.push(failure)
   // results の status は既定 'failed'（'blocked' は failure.status で渡す）。unresolvedComments /
   // outOfScope は failMergeTerminal からの構造化集約データで、完了レポートの該当節が走査する
@@ -3377,6 +3385,7 @@ async function runVerifyClose(item) {
   if (v?.closed) {
     results.push({ issue: item.number, status: 'closed', note: v.summary })
     consecutiveFailures = 0
+    failureEpoch++ // 世代を進め、既存 failures の decrement 対象外にする（詳細は宣言部参照）
     // verify-close 成功 → closed に更新
     await updateState(item.number, { status: 'closed', note: String(v.summary ?? '') })
     return true
@@ -4420,6 +4429,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       results.push(mergedResult)
       consecutiveFailures = 0
+      failureEpoch++ // 世代を進め、既存 failures の decrement 対象外にする（詳細は宣言部参照）
       // merged 確定: 追跡中の worktree を削除して残骸を防ぐ。終端書き込み失敗時は 1 回リトライし、
       // それでも失敗なら merged の事実は変わらないため成功扱いを維持しつつ note に明記する
       // （次回実行時は monitor が MERGED を検出して即終端するため冪等）。
@@ -5036,8 +5046,19 @@ async function probePrereqCompletion(targets) {
       // ここで前提完了により failures から除去する対象が 'failed'（カウント対象）だった場合、
       // 除去だけして consecutiveFailures を据え置くと、回復済みの失敗が「3 連続失敗」判定に
       // 残り続け、後続の無関係な実失敗で不当に halt し得る（Cursor Bugbot 指摘）。
-      // カウントを対称的に戻す（0 未満にはしない）。
-      if (removedFailure?.status !== 'blocked' && consecutiveFailures > 0) consecutiveFailures--
+      // カウントを対称的に戻す（0 未満にはしない）。ただし streakEpoch が現在の failureEpoch と
+      // 一致する場合のみ減算する — removedFailure の記録後に別の成功で consecutiveFailures が
+      // 0 へリセットされていた場合（例: A失敗→B成功→C失敗の後で A の外部完了を検知）、
+      // A は既にリセット済みの世代に属し現在のカウント（C 分）には含まれていないため、
+      // 世代を無視して一律デクリメントすると無関係な C の分まで削れてしまう
+      // （codex/Bugbot 指摘。詳細は failureEpoch 宣言部のコメント参照）。
+      if (
+        removedFailure?.status !== 'blocked' &&
+        removedFailure?.streakEpoch === failureEpoch &&
+        consecutiveFailures > 0
+      ) {
+        consecutiveFailures--
+      }
     }
     prereqTransitions.push(t)
     appliedCount += 1

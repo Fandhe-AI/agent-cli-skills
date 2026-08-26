@@ -354,7 +354,7 @@ test('駆動部: probePrereqCompletion の failures 除去は blocked 以外で 
   const probeFnBody = driverPart.slice(probeFnStart, probeFnEnd)
   const spliceIdx = probeFnBody.indexOf('failures.splice(failuresIdx, 1)')
   assert.ok(spliceIdx >= 0, 'failures からの除去処理が見つからない')
-  const afterSplice = probeFnBody.slice(spliceIdx, spliceIdx + 700)
+  const afterSplice = probeFnBody.slice(spliceIdx, spliceIdx + 1100)
   assert.ok(
     /removedFailure\??\.status\s*!==\s*'blocked'/.test(afterSplice),
     '除去対象が blocked（halt 非カウント）だったかどうかの分岐が見つからない',
@@ -362,5 +362,50 @@ test('駆動部: probePrereqCompletion の failures 除去は blocked 以外で 
   assert.ok(
     /consecutiveFailures\s*>\s*0/.test(afterSplice) && /consecutiveFailures--/.test(afterSplice),
     'consecutiveFailures を 0 未満にしない減算処理が見つからない',
+  )
+})
+
+// PR #444 codex(github-actions[bot]) P1 / cursor[bot] Medium の回帰:
+// A失敗→B成功(consecutiveFailuresが0へリセット)→C失敗、の後で A の外部完了を検知すると、
+// removedFailure（A）が現在の連続失敗 streak（C 分のみ）に属するかを見ずに一律デクリメントし、
+// C の分まで 1→0 に削れてしまい、その後 D・E が失敗しても「3 連続失敗」の halt が発火しなく
+// なる実バグ。除去対象の failure が記録された「世代」（failureEpoch）と現在の世代が一致する
+// 場合のみ減算することで、既にリセット済みの世代に属する failure の回復が現在の streak を
+// 侵食しないことを固定する。
+test('駆動部: consecutiveFailures の減算は removedFailure が現在の failureEpoch に属する場合のみ行う（世代をまたいだ回復は無視する）', () => {
+  // failureEpoch の宣言（世代カウンタ）が存在すること
+  assert.ok(
+    /let\s+failureEpoch\s*=\s*0/.test(driverPart),
+    'failureEpoch（世代カウンタ）の宣言が見つからない',
+  )
+
+  // recordFailure が push 時に現在の世代を failure オブジェクトへ刻んでいること
+  const recordFailureStart = driverPart.indexOf('function recordFailure(failure) {')
+  assert.ok(recordFailureStart >= 0, 'recordFailure の定義が見つからない')
+  const recordFailureSection = driverPart.slice(recordFailureStart, recordFailureStart + 300)
+  assert.ok(
+    /failure\.streakEpoch\s*=\s*failureEpoch/.test(recordFailureSection) &&
+      recordFailureSection.indexOf('failure.streakEpoch') < recordFailureSection.indexOf('failures.push(failure)'),
+    'recordFailure が failures.push より前に failure.streakEpoch へ現在の世代を刻んでいない',
+  )
+
+  // 2 つの成功リセット箇所（verify-close 成功 / merged 確定）がいずれも failureEpoch を進める
+  // こと（世代を進めないと、リセット前後の failure を区別できず本バグの再発を防げない）。
+  const resetSites = [...driverPart.matchAll(/(?<!let )consecutiveFailures = 0\n(\s*failureEpoch\+\+)?/g)]
+  assert.strictEqual(resetSites.length, 2, 'consecutiveFailures = 0（リセット箇所）が想定の 2 箇所でない')
+  for (const m of resetSites) {
+    assert.ok(m[1], `リセット箇所 "${m[0].trim()}" の直後で failureEpoch がインクリメントされていない`)
+  }
+
+  // probePrereqCompletion の減算条件が removedFailure.streakEpoch と現在の failureEpoch の
+  // 一致を確認したうえで減算していること。
+  const probeFnStart = driverPart.indexOf('async function probePrereqCompletion(targets) {')
+  const probeFnEnd = driverPart.indexOf('\nwhile (true) {', probeFnStart)
+  const probeFnBody = driverPart.slice(probeFnStart, probeFnEnd)
+  const spliceIdx = probeFnBody.indexOf('failures.splice(failuresIdx, 1)')
+  const afterSplice = probeFnBody.slice(spliceIdx, spliceIdx + 1100)
+  assert.ok(
+    /removedFailure\??\.streakEpoch\s*===\s*failureEpoch/.test(afterSplice),
+    'removedFailure.streakEpoch と現在の failureEpoch を突き合わせる条件が見つからない（世代をまたいだ誤減算を防げない）',
   )
 })
