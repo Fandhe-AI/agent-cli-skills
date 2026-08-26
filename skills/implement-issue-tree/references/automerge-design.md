@@ -195,7 +195,9 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
 **strict = false で残るリスクと補い方**: 「古い base に対して成功したチェック結果のままマージされ、マージ後の base が壊れ得る」（意味的コンフリクト）。テキストコンフリクトは merge-exec の手順 1 が `mergeable` を自己取得して `CONFLICTING` を検出し `not-mergeable` で終端するため、この経路では通らない。意味的コンフリクトについては、**ラン完了後にベースブランチの CI が green であることを確認する**運用で補う（本スキルの前提条件「マージ先ブランチが CI green」は次のランの入力条件でもある）。
 
-**マージ実行より前の段階（monitor）でも CONFLICTING を検出する（Issue #435）**: merge-exec の `not-mergeable` は「マージ実行直前の最終防御」だが、それより前に PR が base とコンフリクトしていると `pull_request` トリガーの CI check-run が 1 件も作られず、チェック総数 0 件のまま `blocked` へ落ちて自動回復しない状態になり得る（並列ランで兄弟イシューの PR が先にマージされ、後続 PR の作成時点の base が既に古いケース）。monitor は手順 1 で `mergeable` も取得し、`state: OPEN` かつ `CONFLICTING` を検出したら CI 監視を待たず `needs-fix` へ回す。fix 側も push 前（PR 作成時）・push 前（Merge ループの修正コミット前）の両方で base 取り込みを必須実行し、コンフリクトが解消できない限り push しない。
+**マージ実行より前の段階（monitor）でも CONFLICTING を検出する（Issue #435）**: merge-exec の `not-mergeable` は「マージ実行直前の最終防御」だが、それより前に PR が base とコンフリクトしていると `pull_request` トリガーの CI check-run が 1 件も作られず、チェック総数 0 件のまま `blocked` へ落ちて自動回復しない状態になり得る（並列ランで兄弟イシューの PR が先にマージされ、後続 PR の作成時点の base が既に古いケース）。monitor は手順 1 で `mergeable` も取得し、`state: OPEN` かつ `CONFLICTING` を検出したら CI 監視を待たず `state: conflicting` を返す。
+
+**CONFLICTING は fix ループへは回さず独立の base 取り込みエージェントへ回す（Issue #441）**: 上記の monitor 由来 `conflicting`、および merge-exec の `not-mergeable`（`classifyMergeExecDispatch` により同じ `conflicting` へ写像される）はいずれも品質問題ではないため、レビュー指摘対応の `fixCount`（上限 6）を消費しない。ホストは独立予算 `baseMergeCount`（`args.maxBaseMerges`。既定 3・上限 10）で管理される base 取り込み専用エージェント（`baseMergePrompt`）を起動する。このエージェントはレビュー指摘の修正・スレッド resolve・PR 本文編集の権限を持たず、base の取り込み・コンフリクト解消・コミット・push のみを担う。push 後は `gh pr view` で `mergeable`（UNKNOWN なら再試行）と push 後 headRefOid に対する check-run の起動有無を確認して `mergeableAfter` / `checksStarted` としてホストへ返すが、これらは**ログ専用**でありマージ判定・分岐には使わない（実際の判定は次ラウンドの monitor がサーバー側の実値を独立に再観測して行う。エージェント自己申告をマージ経路の入力にしない設計原則を維持する）。`baseMergeCount` が `maxBaseMerges` に達すると `blocked` / `blockedReason: "unrecoverable"` で終端する（`fixCount` 上限到達時と同じ #141 の根拠）。
 
 **補償策の成立確認（base CI プローブ）**
 
