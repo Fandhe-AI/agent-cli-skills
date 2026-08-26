@@ -217,8 +217,15 @@ test('baseMergePrompt: gh pr merge の実行コマンド形・resolveReviewThrea
 // checkout 後に fmt / lint / build / test 等、PR 由来の未信頼コード実行を指示しない。PR は
 // package scripts・Makefile・テストランナー設定を自由に変更できるため、これらを実行すると
 // 悪意ある PR から任意コード実行 → 本エージェントの push 用 GitHub 認証情報の奪取・外部送信に
-// つながる。検証は push 後に再起動される既存 CI へ委ね、コンフリクト解消後の妥当性確認は
-// git diff --check 等の非実行系のみに限定する。
+// つながる。
+// PR #443 codex P1（thread PRRT_kwDORuXFg86cck5D）の回帰テスト: 上記 P0 対応（f8701bf）は
+// build/lint/test の実行だけを禁じたが、それでも「git diff --check の conflict marker 確認
+// だけで通常ファイルの内容コンフリクトを編集し push する」余地が残っていた（構文・意味の破損を
+// 検出できないまま無検証で push され得る）。この対応は実行検証を復活させる代わりに、
+// runVerification=false では内容編集を伴う解消そのものを行う権限自体を持たせない（submodule
+// gitlink ポインタの機械的な合わせ込みのみ例外）。内容コンフリクトは commitFailed: true で
+// 停止し、build/lint/test を正当に実行できる fix/implement 経路（runVerification=true）へ
+// 委ねる。
 // Bugbot High（thread c52cd32b-3157-4fa5-9010-5bc0c92bec7b）の回帰テスト: f8701bf は
 // baseMergePrompt 手順 2 の直接記述からは build/lint/test 実行指示を消したが、同じ手順に
 // 埋め込まれる共有ヘルパー baseMergeInstruction 内には「ビルド・lint・テストを通してから
@@ -226,9 +233,10 @@ test('baseMergePrompt: gh pr merge の実行コマンド形・resolveReviewThrea
 // 展開後の合成文字列に実行指示を混入させれば RCE 緩和は不完全になる）。ここでは baseMergePrompt
 // が返す最終合成文字列（テンプレートリテラルの埋め込み展開後の全文）を対象に、
 // build / lint / test / fmt / npm / yarn / make / cargo / pytest / go test 等の実行を命じる
-// 言い回しが一切含まれないことを検査する。狙い撃ちした部分文字列ではなく合成後の全文が対象な
-// ので、baseMergeInstruction 側に実行指示が復活しても本テストは失敗する。
-test('baseMergePrompt: fmt / lint / build / test 等の未信頼コード実行指示を含まない（合成後の全文を検査）', () => {
+// 言い回しが一切含まれないこと、かつ内容編集を伴う解消の権限自体が無いことを検査する。
+// 狙い撃ちした部分文字列ではなく合成後の全文が対象なので、baseMergeInstruction 側に実行指示や
+// 内容編集の権限が復活しても本テストは失敗する。
+test('baseMergePrompt: fmt / lint / build / test 等の未信頼コード実行指示を含まず、内容編集を伴う解消の権限も持たない（合成後の全文を検査）', () => {
   const prompt = baseMergePrompt(item, impl)
   // 旧実装の実行指示そのもの（「〜を通してからコミットする」という命令形）が消えていることを
   // 固定する。否定文脈での「fmt / lint / build / test」という語の言及自体（実行しない旨の
@@ -242,18 +250,19 @@ test('baseMergePrompt: fmt / lint / build / test 等の未信頼コード実行�
   ]) {
     assert.ok(!prompt.includes(word), `未信頼コード実行コマンド／実行を命じる言い回し「${word}」が混入している`)
   }
-  assert.ok(prompt.includes('git diff --check'), 'conflict marker 残存確認（git diff --check）の非実行系検証指示がない')
-  assert.ok(prompt.includes('既存 CI'), '検証を既存 CI へ委ねる旨の記述がない')
-  assert.ok(prompt.includes('実行しない'), '未信頼コードを実行しない旨の明示がない')
+  // PR #443 codex P1 対応の核: 内容コンフリクトは編集せず commitFailed で停止する旨の明示。
+  assert.ok(prompt.includes('内容を編集する') || prompt.includes('内容編集の権限'), '内容編集を伴う解消の権限が無い旨の明示がない')
+  assert.ok(prompt.includes('submodule ポインタ差分のみ'), 'submodule ポインタのみ機械的解消可という例外の明示がない')
 })
 
 // baseMergeInstruction の runVerification 引数そのものを直接検査する（合成後の baseMergePrompt
 // テストだけでは、呼び出し元が今後増えたときに false 渡し忘れを検出できないため）。
-test('baseMergeInstruction: runVerification=false は実行命令形を含まず、既定 true は既存どおり実行指示を含む', () => {
+test('baseMergeInstruction: runVerification=false は実行命令形を含まず内容編集の権限も持たない。既定 true は既存どおり実行指示を含む', () => {
   const noVerify = baseMergeInstruction('main', false)
   const withVerify = baseMergeInstruction('main')
   assert.ok(!noVerify.includes('ビルド・lint・テストを通してから'), 'runVerification=false でも実行命令形が残っている')
-  assert.ok(noVerify.includes('実行しない'), 'runVerification=false で未実行の明示がない')
+  assert.ok(noVerify.includes('内容を編集する') || noVerify.includes('内容編集の権限'), 'runVerification=false で内容編集権限が無い旨の明示がない')
+  assert.ok(noVerify.includes('commitFailed: true'), 'runVerification=false で内容コンフリクト時に commitFailed: true を返す明示がない')
   assert.ok(withVerify.includes('ビルド・lint・テストを通してから'), '既定 true（pr-create・fixPrompt 経路）で既存の実行指示が失われている')
 })
 
