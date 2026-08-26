@@ -42,6 +42,7 @@ const SLICE_EXPORTS = [
   'fixPrompt',
   'isValidRepoSlug',
   'parseRepoArg',
+  'ALLOWED_REMOTE_HOST',
 ]
 // fixPrompt / baseMergePrompt はいずれも sanitize() 経由で item.title を untrusted() タグへ
 // 埋め込む。boundaryNonce() 自体は fixPrompt の finding 埋め込みでのみ使うが、モジュール
@@ -67,6 +68,7 @@ const {
   fixPrompt,
   isValidRepoSlug,
   parseRepoArg,
+  ALLOWED_REMOTE_HOST,
 } = mod
 mod.__setBoundaryNonceSeedForTest('b'.repeat(64))
 
@@ -363,6 +365,33 @@ test('baseMergePrompt: 大文字小文字差のみの入力は小文字正規化
   assert.ok(promptMixedCase.includes('小文字'), 'remote 側を小文字化してから比較する指示がない')
   assert.ok(promptMixedCase.includes('case-insensitive'), '大文字小文字を区別しない理由の説明がない')
   assert.ok(promptMixedCase.includes('routingError: true'), '不一致時に routingError で終端する fail-closed 指示が失われている')
+})
+
+// PR #443 codex P0（2026-08-26T13:11:07Z レビュー）の回帰テスト: owner/repo だけを remote から
+// 抽出して比較するとホスト名が捨てられ、期待 owner/repo と同じ owner/repo を持つ別ホスト
+// （例: git@evil.example:Fandhe-AI/example.git）が誤って一致とみなされ、別ホストへの
+// fetch/checkout/merge/push を防げない。host を許可ホスト（ALLOWED_REMOTE_HOST = github.com）
+// と完全一致させる指示が owner/repo 比較より前段にあり、host 不一致時の routingError 文言にも
+// ホストが含まれることを固定する。
+test('baseMergePrompt: remote のホスト名を許可ホストと照合する指示を含み、owner/repo のみの一致では通さない', () => {
+  const prompt = baseMergePrompt(item, impl, 'Fandhe-AI/agent-cli-skills')
+  assert.equal(ALLOWED_REMOTE_HOST, 'github.com', 'ALLOWED_REMOTE_HOST が想定値から変更されている（このテストの前提が崩れる）')
+  assert.ok(prompt.includes(`"${ALLOWED_REMOTE_HOST}"`), '許可ホストがプロンプトへ明示的に埋め込まれていない')
+  assert.ok(prompt.includes('host'), 'host を照合する旨の指示が見当たらない')
+  assert.ok(prompt.includes('evil.example'), '別ホストでの誤一致を防ぐ具体例（別ホスト名）が指示に含まれていない')
+  // host の照合指示が owner/repo の照合指示（期待 owner/repo リテラル）より前に現れることを
+  // 固定する（host を検証せず owner/repo だけ先に一致させてしまう順序退行を防ぐ）。
+  const hostIdx = prompt.indexOf(`"${ALLOWED_REMOTE_HOST}"`)
+  const ownerRepoIdx = prompt.indexOf('"fandhe-ai/agent-cli-skills"')
+  assert.ok(hostIdx >= 0 && ownerRepoIdx >= 0, 'host または owner/repo の埋め込みが見つからない')
+  assert.ok(hostIdx < ownerRepoIdx, 'host の照合指示が owner/repo の照合指示より後に現れている（host 未検証のまま owner/repo だけ一致確認できてしまう）')
+  // git fetch（手順 1）より前に host 照合指示が現れることも固定する。
+  const fetchIdx = prompt.indexOf(`git fetch origin ${impl.branch}:refs/remotes/origin/${impl.branch}`)
+  assert.ok(fetchIdx > 0, 'git fetch（手順1）の呼び出し文字列が見つからない')
+  assert.ok(hostIdx < fetchIdx, 'host の照合指示が git fetch より前に現れていない')
+  // 不一致時の routingError 文言に host が含まれる（owner/repo だけの不一致メッセージへ
+  // 後退していない）ことを確認する。
+  assert.ok(prompt.includes(`${ALLOWED_REMOTE_HOST}/`), 'routingError の不一致メッセージにホストが含まれていない')
 })
 
 // 期待 owner/repo が未確定（host 側で isValidRepoSlug を通らなかった／引数省略）の場合、
