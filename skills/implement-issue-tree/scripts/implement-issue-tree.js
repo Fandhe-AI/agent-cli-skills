@@ -3136,7 +3136,13 @@ const PREREQ_RECHECK_MIN_MS = 60_000
 // running が空にならず監視専業の周回が続く間、人手マージを完了駆動と独立に拾うための tick 間隔。
 const PREREQ_RECHECK_TICK_MS = 5 * 60_000
 let prereqProbeAtIterationSeq = -1 // 直近にプローブした周回番号（周回内 1 回の間引き用）
-let prereqProbeLastAt = 0 // 直近のプローブ実行時刻（MIN_MS 間隔の下限判定用）
+// 直近プローブからの経過時間（ms）の単調カウンタ。Workflow ランタイムでは Date.now() が
+// 使用不可（resume 決定性のため throw する）ので、壁時計の代わりに tick timer（setTimeout）で
+// 実際に待機した tickDelayMs を累積して MIN_MS 下限を判定する。tick を経ない完了駆動の周回では
+// 加算されず過小評価になり得るが、その方向はプローブ頻度を下げるだけで有界化契約
+// （MIN_MS 間隔の下限・drain 直前の最終プローブ）を破らない。初期値 Infinity は
+// 「初回はクールダウンなしで即プローブ可」（旧実装の lastAt=0 と同義）を表す。
+let prereqProbeElapsedMs = Infinity
 const depDeferredLogged = new Set() // 保留ログの重複出力防止（item.number 単位で 1 回のみ）
 const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind, pr?}）
 {
@@ -5455,12 +5461,12 @@ while (true) {
   if (
     running.size < concurrency &&
     prereqProbeAtIterationSeq !== dispatchIterationSeq &&
-    (running.size === 0 || Date.now() - prereqProbeLastAt >= PREREQ_RECHECK_MIN_MS)
+    (running.size === 0 || prereqProbeElapsedMs >= PREREQ_RECHECK_MIN_MS)
   ) {
     const probeTargets = selectPrereqProbeTargets(work, depsMap, done, failedSet, running)
     if (probeTargets.length > 0) {
       prereqProbeAtIterationSeq = dispatchIterationSeq
-      prereqProbeLastAt = Date.now()
+      prereqProbeElapsedMs = 0
       if ((await probePrereqCompletion(probeTargets)) > 0) continue // 同一周回で再 dispatch する
     }
   }
@@ -5485,7 +5491,7 @@ while (true) {
     // (i) クールダウン中スキップ直後だけ待ちを短縮し、(ii) プローブ実行済み完了 0 件の直後は
     // 通常どおり TICK_MS で待つ（PR #444 Bugbot: 一律短縮はプローブ直後の監視頻度を約 5 倍にする）。
     const probedThisIteration = prereqProbeAtIterationSeq === dispatchIterationSeq
-    const cooldownRemainingMs = PREREQ_RECHECK_MIN_MS - (Date.now() - prereqProbeLastAt)
+    const cooldownRemainingMs = PREREQ_RECHECK_MIN_MS - prereqProbeElapsedMs
     const tickDelayMs =
       !probedThisIteration && cooldownRemainingMs > 0
         ? Math.min(PREREQ_RECHECK_TICK_MS, cooldownRemainingMs)
@@ -5496,7 +5502,13 @@ while (true) {
     })
     finished = await Promise.race([...running.values(), tickPromise])
     clearTimeout(tickTimer)
-    if (finished?.tick === true) continue // 次周回で MIN_MS 間隔判定を通ればプローブする
+    if (finished?.tick === true) {
+      // tick timer が満了した = tickDelayMs だけ実時間が経過した確証があるため単調カウンタへ
+      // 加算する（タスク完了が先に来た周回は経過を確定できず加算しない。過小評価は
+      // プローブ頻度を下げる方向で安全 — カウンタ宣言部のコメント参照）。
+      prereqProbeElapsedMs += tickDelayMs
+      continue // 次周回で MIN_MS 間隔判定を通ればプローブする
+    }
   } else {
     finished = await Promise.race(running.values())
   }
