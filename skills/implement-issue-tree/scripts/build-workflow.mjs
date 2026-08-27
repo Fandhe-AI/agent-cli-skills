@@ -103,8 +103,10 @@ export function stripComments(src) {
       while (i < n && src[i] !== '\n') i++
       continue
     }
-    // ブロックコメント: 内部の改行だけ保持して削る。`a/*x*/b` のようなトークン連結は
-    // 空白 1 個の挿入で防ぐ
+    // ブロックコメント: 内部の改行だけ保持して削り、位置に空白 1 個を置いて**全**トークン
+    // 境界を保持する（単語文字同士に限ると `x+/*c*/+y` → `x++y` の意味変化や
+    // `1/*c*/.toString()` → `1.toString()` の構文破壊を防げない — PR #452 codex P1）。
+    // 行末に残った空白は改行出力時の trimLineTail が回収する
     if (c === '/' && c2 === '*') {
       trimLineTail()
       i += 2
@@ -113,7 +115,7 @@ export function stripComments(src) {
         i++
       }
       i = Math.min(i + 2, n)
-      if (isWordChar(out.slice(-1)) && i < n && isWordChar(src[i])) out += ' '
+      out += ' '
       continue
     }
     // 文字列リテラル: 内部の `//` 等を素通しする
@@ -207,6 +209,9 @@ export function stripComments(src) {
       }
     }
 
+    // code モードの改行出力時に行末空白を回収する（ブロックコメント置換の空白 1 個が
+    // 行末に残るケース。文字列・テンプレート内の改行は別経路のため触らない）
+    if (c === '\n') trimLineTail()
     out += c
     if (isWordChar(c)) {
       sigWord = isWordChar(rawPrev) ? sigWord + c : c
@@ -220,7 +225,8 @@ export function stripComments(src) {
     rawPrev = c
     i++
   }
-  return out
+  // 末尾に改行を持たないソースで最終行にブロックコメント置換の空白が残るケースの保険
+  return out.replace(/[ \t]+$/, '')
 }
 
 /**

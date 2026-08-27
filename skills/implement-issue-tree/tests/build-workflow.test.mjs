@@ -95,6 +95,22 @@ test('ブロックコメント除去でトークンが連結しない', () => {
   assert.equal(stripComments('const/*x*/y = 1\n'), 'const y = 1\n')
 })
 
+// PR #452 codex P1 の回帰固定: 空白挿入を単語文字同士に限ると、演算子連結（`x+/*c*/+y` →
+// `x++y` は加算がインクリメントへ変わる）や数値と `.` の連結（`1/*c*/.toString()` →
+// `1.toString()` は構文エラー）で「コメントのみを除去する」契約が破れる。ブロックコメントは
+// 常に空白 1 個へ置換して全トークン境界を保持することを固定する。
+test('ブロックコメント除去で演算子が連結しない（+ /*c*/ + がインクリメントにならない）', () => {
+  assert.equal(stripComments('const z = x+/*c*/+y\n'), 'const z = x+ +y\n')
+})
+
+test('ブロックコメント除去で数値と . が連結しない（1/*c*/.toString() の構文破壊防止）', () => {
+  assert.equal(stripComments('const s = 1/*c*/.toString()\n'), 'const s = 1 .toString()\n')
+})
+
+test('行末ブロックコメントの置換空白は行末に残らない（trim_trailing_whitespace 準拠）', () => {
+  assert.equal(stripComments('const a = 1 /* c */\nconst b = 2\n'), 'const a = 1\nconst b = 2\n')
+})
+
 test('冪等性: 除去済みソースへ再適用しても不変', () => {
   const once = stripComments("const a = 1 // c\nconst u = 'http://x'\n")
   assert.equal(stripComments(once), once)
