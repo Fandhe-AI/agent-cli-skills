@@ -3136,7 +3136,17 @@ const PREREQ_RECHECK_MIN_MS = 60_000
 // running が空にならず監視専業の周回が続く間、人手マージを完了駆動と独立に拾うための tick 間隔。
 const PREREQ_RECHECK_TICK_MS = 5 * 60_000
 let prereqProbeAtIterationSeq = -1 // 直近にプローブした周回番号（周回内 1 回の間引き用）
-let prereqProbeLastAt = 0 // 直近のプローブ実行時刻（MIN_MS 間隔の下限判定用）
+// 直近プローブからの経過時間（ms）の単調カウンタ。Workflow ランタイムでは Date.now() が使用
+// 不可（resume 決定性のため throw）なので、tick timer（setTimeout）が実際に待機した delayMs
+// を満了コールバック内で累積し MIN_MS 下限を判定する（latch）。race でタスク完了が先着しても
+// timer は破棄せず pendingPrereqTick として周回間維持する — 破棄すると完了が tick 間隔より
+// 短い周期で連続する間カウンタが 0 のまま実時間だけが過ぎ、プローブが drain まで無期限に
+// 飢餓する（PR #451 codex P1）。初期値 Infinity は「初回は即プローブ可」（旧 lastAt=0 と同義）。
+let prereqProbeElapsedMs = Infinity
+// 周回間で維持する tick timer（{ promise, timer }）。満了時に自ら prereqProbeElapsedMs へ
+// 加算して null に戻る。プローブ実行（カウンタリセット）時は、プローブ前の待機分を満了時に
+// 二重計上（過大評価 = MIN_MS 下限破り）しないよう clearTimeout で破棄する。
+let pendingPrereqTick = null
 const depDeferredLogged = new Set() // 保留ログの重複出力防止（item.number 単位で 1 回のみ）
 const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind, pr?}）
 {
@@ -5455,12 +5465,18 @@ while (true) {
   if (
     running.size < concurrency &&
     prereqProbeAtIterationSeq !== dispatchIterationSeq &&
-    (running.size === 0 || Date.now() - prereqProbeLastAt >= PREREQ_RECHECK_MIN_MS)
+    (running.size === 0 || prereqProbeElapsedMs >= PREREQ_RECHECK_MIN_MS)
   ) {
     const probeTargets = selectPrereqProbeTargets(work, depsMap, done, failedSet, running)
     if (probeTargets.length > 0) {
       prereqProbeAtIterationSeq = dispatchIterationSeq
-      prereqProbeLastAt = Date.now()
+      prereqProbeElapsedMs = 0
+      // 実行中の tick timer はプローブ前からの待機分を含むため、満了時の加算がリセット後の
+      // 経過として二重計上（過大評価 = MIN_MS 下限破り）にならないよう破棄する。
+      if (pendingPrereqTick) {
+        clearTimeout(pendingPrereqTick.timer)
+        pendingPrereqTick = null
+      }
       if ((await probePrereqCompletion(probeTargets)) > 0) continue // 同一周回で再 dispatch する
     }
   }
@@ -5485,17 +5501,27 @@ while (true) {
     // (i) クールダウン中スキップ直後だけ待ちを短縮し、(ii) プローブ実行済み完了 0 件の直後は
     // 通常どおり TICK_MS で待つ（PR #444 Bugbot: 一律短縮はプローブ直後の監視頻度を約 5 倍にする）。
     const probedThisIteration = prereqProbeAtIterationSeq === dispatchIterationSeq
-    const cooldownRemainingMs = PREREQ_RECHECK_MIN_MS - (Date.now() - prereqProbeLastAt)
+    const cooldownRemainingMs = PREREQ_RECHECK_MIN_MS - prereqProbeElapsedMs
     const tickDelayMs =
       !probedThisIteration && cooldownRemainingMs > 0
         ? Math.min(PREREQ_RECHECK_TICK_MS, cooldownRemainingMs)
         : PREREQ_RECHECK_TICK_MS
-    let tickTimer
-    const tickPromise = new Promise((resolve) => {
-      tickTimer = setTimeout(() => resolve({ tick: true }), tickDelayMs)
-    })
-    finished = await Promise.race([...running.values(), tickPromise])
-    clearTimeout(tickTimer)
+    if (!pendingPrereqTick) {
+      // race でタスク完了が先着しても clearTimeout せず周回間維持する（宣言部コメント参照）。
+      // 満了時にコールバック自身が加算して自己解除する（latch）ため待機実績が消えない。
+      // 維持中 timer の delay は張った周回時点の値で固定 — cooldown 短縮が後から必要に
+      // なっても満了は最大 PREREQ_RECHECK_TICK_MS 遅れるだけで有界。
+      const tick = { timer: undefined, promise: undefined }
+      tick.promise = new Promise((resolve) => {
+        tick.timer = setTimeout(() => {
+          prereqProbeElapsedMs += tickDelayMs
+          if (pendingPrereqTick === tick) pendingPrereqTick = null
+          resolve({ tick: true })
+        }, tickDelayMs)
+      })
+      pendingPrereqTick = tick
+    }
+    finished = await Promise.race([...running.values(), pendingPrereqTick.promise])
     if (finished?.tick === true) continue // 次周回で MIN_MS 間隔判定を通ればプローブする
   } else {
     finished = await Promise.race(running.values())
@@ -5506,6 +5532,11 @@ while (true) {
   monitoringResumeActive.delete(finished.number)
   if (finished.ok) done.add(finished.number)
   else failedSet.add(finished.number)
+}
+// dispatch ループ脱出後に維持中の tick timer が残ると、満了までプロセス終了を妨げるため破棄する。
+if (pendingPrereqTick) {
+  clearTimeout(pendingPrereqTick.timer)
+  pendingPrereqTick = null
 }
 
 // 依存失敗の連鎖を最終確定する（dispatch ループはラン中の外部完了検知のため即時確定を保留する
