@@ -67,6 +67,26 @@ test('regex フラグ直後の除算も正しく除算として扱う', () => {
   assert.equal(stripComments('const x = /a/g // c\n'), 'const x = /a/g\n')
 })
 
+// PR #452 codex P2 / Bugbot Medium の回帰固定: `}` や後置 `++` / `--` の直後の `/` を
+// regex 開始と誤認すると、(a) 後続の行コメントの先頭 `/` を regex の閉じとして素通しして
+// コメントが生成物に残留し、(b) 最悪は閉じ `/` 探索が行内の文字列開始を飲み込んで
+// 非コメントのコードを書き換える。これらを除算として扱うことを固定する。
+test('} 直後の除算に続く trailing コメントを除去する', () => {
+  assert.equal(stripComments('const x = {} / 2 // remove me\n'), 'const x = {} / 2\n')
+})
+
+test('後置 ++ / -- 直後の除算に続く trailing コメントを除去する', () => {
+  assert.equal(stripComments('const y = x++ / 2 // remove me\n'), 'const y = x++ / 2\n')
+  assert.equal(stripComments('const z = x-- / 2 // remove me\n'), 'const z = x-- / 2\n')
+})
+
+test('} 直後の除算行にある後続文字列を書き換えない（regex 誤読でクォートを飲み込まない）', () => {
+  assert.equal(
+    stripComments("const x = {} / 2 + 'http://keep' // c\n"),
+    "const x = {} / 2 + 'http://keep'\n",
+  )
+})
+
 test('ブロックコメントは内部の改行を保持して除去される（行番号維持）', () => {
   assert.equal(stripComments('const a = 1\n/*\n block\n*/\nconst b = 2\n'), 'const a = 1\n\n\n\nconst b = 2\n')
 })

@@ -49,6 +49,7 @@ export function stripComments(src) {
   const n = src.length
   let rawPrev = '' // 直前に出力した文字（空白含む）。単語の連続判定に使う
   let sigCh = '' // 直前の非空白文字。regex / 除算の判別に使う
+  let sigCh2 = '' // sigCh の 1 つ前の非空白文字。後置 `++` / `--` の検出に使う（PR #452 P2）
   let sigWord = '' // 直近の単語（識別子・数値・キーワード）。空白を挟んでも保持する
   // 'code'（{} 深度つき）と 'template' のネストを管理する。template 内の `${` で code を
   // push し、その code の深度が閉じたら template へ復帰する
@@ -74,6 +75,7 @@ export function stripComments(src) {
         out += c
         i++
         stack.pop()
+        sigCh2 = sigCh
         sigCh = '`'
         sigWord = ''
         rawPrev = '`'
@@ -83,6 +85,7 @@ export function stripComments(src) {
         out += '${'
         i += 2
         stack.push({ mode: 'code', depth: 0 })
+        sigCh2 = sigCh
         sigCh = '{'
         sigWord = ''
         rawPrev = '{'
@@ -131,6 +134,7 @@ export function stripComments(src) {
         out += c
         i++
       }
+      sigCh2 = sigCh
       sigCh = c
       sigWord = ''
       rawPrev = c
@@ -155,14 +159,20 @@ export function stripComments(src) {
       }
       ctx.depth--
     }
-    // 正規表現リテラル: 直前トークンが識別子・数値・閉じ括弧・リテラル終端なら除算として
-    // 素通しし、それ以外（演算子・区切り・キーワード直後）は regex として閉じ `/` まで
-    // 素通しする — regex 内部の `//` をコメントと誤認しないための分岐
+    // 正規表現リテラル: 直前トークンが識別子・数値・閉じ括弧 `)` `]` `}`・後置 `++` / `--`・
+    // リテラル終端なら除算として素通しし、それ以外（演算子・区切り・キーワード直後）は regex
+    // として閉じ `/` まで素通しする — regex 内部の `//` をコメントと誤認しないための分岐。
+    // `}` はブロック文直後の regex（`if (a) {} /re/`）と曖昧だが除算側へ倒す: regex 側へ
+    // 誤読すると閉じ `/` 探索が行内の文字列開始を飲み込み、非コメントを書き換え得る
+    // （PR #452 Bugbot）。除算側の誤りは素通しのため出力を変えない
     if (c === '/') {
+      const postfixIncDec =
+        (sigCh === '+' && sigCh2 === '+') || (sigCh === '-' && sigCh2 === '-')
       const isDivision =
         (sigWord !== '' && !REGEX_PRECEDING_KEYWORDS.has(sigWord)) ||
-        /[)\]]/.test(sigCh) ||
-        sigCh === '"' || sigCh === "'" || sigCh === '`'
+        /[)\]}]/.test(sigCh) ||
+        sigCh === '"' || sigCh === "'" || sigCh === '`' ||
+        postfixIncDec
       if (!isDivision) {
         let j = i + 1
         let buf = c
@@ -187,6 +197,7 @@ export function stripComments(src) {
         if (closed) {
           out += buf
           i = j
+          sigCh2 = sigCh
           sigCh = '/'
           sigWord = ''
           rawPrev = '/'
@@ -199,9 +210,11 @@ export function stripComments(src) {
     out += c
     if (isWordChar(c)) {
       sigWord = isWordChar(rawPrev) ? sigWord + c : c
+      sigCh2 = sigCh
       sigCh = c
     } else if (!/\s/.test(c)) {
       sigWord = ''
+      sigCh2 = sigCh
       sigCh = c
     }
     rawPrev = c
