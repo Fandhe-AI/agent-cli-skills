@@ -20,7 +20,7 @@ skills/                               -- スキル本体（各ディレクトリ
   implement-issue-tree/
     references/                       -- 自動マージ設計・検証手順・復旧・レポート書式
     sample/                           -- 引数例・ツリー例
-    scripts/                          -- preview-tree.sh、implement-issue-tree.js（ツリー確認・自動開発）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
+    scripts/                          -- preview-tree.sh、implement-issue-tree.src.js（自動開発の開発ファイル・編集対象）、implement-issue-tree.js（build-workflow.mjs がコメント除去して生成する実行ファイル・直接編集禁止）、build-workflow.mjs（ビルダー）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
     tests/                            -- node:test 回帰テスト（G0 ゲート・merge ループ・依存再判定・CONFLICTING→base 取り込み dispatch・Workflow 起動可否・Review 比較基準）、lib/ に起動可否契約の実装
   implement-review/
   implement-review-pr/
