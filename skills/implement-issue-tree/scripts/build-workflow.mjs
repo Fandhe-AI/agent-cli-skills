@@ -13,7 +13,7 @@
 // 使い方:
 //   node skills/implement-issue-tree/scripts/build-workflow.mjs          # 生成して書き込み
 //   node skills/implement-issue-tree/scripts/build-workflow.mjs --check  # 書き込まず鮮度確認
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -116,6 +116,10 @@ export function stripComments(src) {
       }
       i = Math.min(i + 2, n)
       out += ' '
+      // 置換空白を rawPrev に反映する。古い rawPrev のままだと `x/*c*/in` の `in` が直前の
+      // 単語へ連結（`xin`）され keyword 判定が壊れ、後続の regex を除算と誤読して regex 内の
+      // `//` `/*` をコメントとして削り得る（Bugbot 指摘）
+      rawPrev = ' '
       continue
     }
     // 文字列リテラル: 内部の `//` 等を素通しする
@@ -170,11 +174,16 @@ export function stripComments(src) {
     if (c === '/') {
       const postfixIncDec =
         (sigCh === '+' && sigCh2 === '+') || (sigCh === '-' && sigCh2 === '-')
+      // 末尾ドット数値（`1. / 2`）: `.` が sigWord を空にし除算先行子にも無いため regex と
+      // 誤読され、行内の後続 `/`（`//` コメントの 1 文字目や文字列中の `/`）を閉じ `/` と
+      // 誤認する（Bugbot 指摘）。数字直後の `.` に限り除算側へ倒す（`...` spread は regex のまま）
+      const trailingDotNumber = sigCh === '.' && /[0-9]/.test(sigCh2)
       const isDivision =
         (sigWord !== '' && !REGEX_PRECEDING_KEYWORDS.has(sigWord)) ||
         /[)\]}]/.test(sigCh) ||
         sigCh === '"' || sigCh === "'" || sigCh === '`' ||
-        postfixIncDec
+        postfixIncDec ||
+        trailingDotNumber
       if (!isDivision) {
         let j = i + 1
         let buf = c
@@ -253,8 +262,17 @@ export function buildArtifact(src) {
   return stripped
 }
 
-// CLI 実行部（import 時は実行しない）
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// CLI 実行部（import 時は実行しない）。argv[1] は realpath で比較する — import.meta.url は
+// symlink 解決済みのため、symlink 経由（downstream の `.claude/skills/...` → `.agents/skills/...`）
+// で起動すると素の argv[1] とは一致せず、無言で何もせず exit 0 してしまう（Bugbot 指摘）
+const invokedAs = (() => {
+  try {
+    return realpathSync(process.argv[1] ?? '')
+  } catch {
+    return ''
+  }
+})()
+if (invokedAs && invokedAs === fileURLToPath(import.meta.url)) {
   const checkOnly = process.argv.includes('--check')
   const src = readFileSync(SRC_PATH, 'utf8')
   const artifact = buildArtifact(src)
