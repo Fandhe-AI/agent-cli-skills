@@ -54,6 +54,9 @@ export function stripComments(src) {
   // sigWord の直前の非空白文字。`.` なら sigWord はプロパティ名であり、キーワードと同名でも
   // 識別子として扱う（`obj.in / 2` を regex と誤読しないため — Bugbot 指摘）
   let wordPrev = ''
+  // wordPrev の 1 つ前の非空白文字。wordPrev が `.` でもその前が数字なら末尾ドット数値
+  // （`1. in /re/`）でありプロパティ名ではない — キーワード判定を維持する（Bugbot 指摘）
+  let wordPrev2 = ''
   // 'code'（{} 深度つき）と 'template' のネストを管理する。template 内の `${` で code を
   // push し、その code の深度が閉じたら template へ復帰する
   const stack = [{ mode: 'code', depth: 0 }]
@@ -183,8 +186,10 @@ export function stripComments(src) {
       const trailingDotNumber = sigCh === '.' && /[0-9]/.test(sigCh2)
       // `.` 直後のキーワード同名プロパティ（`obj.in / 2`・`x.return / y`）は識別子なので
       // 除算側へ倒す（Bugbot 指摘）。キーワード本体（`return /re/`・`in /re/`）は regex のまま
+      // 末尾ドット数値直後のキーワード（`1. in /re/`）はプロパティ名ではない — Bugbot 指摘
+      const keywordProperty = wordPrev === '.' && !/[0-9]/.test(wordPrev2)
       const isDivision =
-        (sigWord !== '' && (!REGEX_PRECEDING_KEYWORDS.has(sigWord) || wordPrev === '.')) ||
+        (sigWord !== '' && (!REGEX_PRECEDING_KEYWORDS.has(sigWord) || keywordProperty)) ||
         /[)\]}]/.test(sigCh) ||
         sigCh === '"' || sigCh === "'" || sigCh === '`' ||
         postfixIncDec ||
@@ -232,7 +237,8 @@ export function stripComments(src) {
         sigWord += c
       } else {
         sigWord = c
-        wordPrev = sigCh // 新規単語の開始: 直前の非空白文字を記録する
+        wordPrev = sigCh // 新規単語の開始: 直前の非空白文字とその 1 つ前を記録する
+        wordPrev2 = sigCh2
       }
       sigCh2 = sigCh
       sigCh = c

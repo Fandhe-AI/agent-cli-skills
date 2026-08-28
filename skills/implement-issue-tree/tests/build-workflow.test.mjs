@@ -72,6 +72,10 @@ test('. 直後のキーワード同名プロパティ直後の除算行の後続
   )
 })
 
+test('末尾ドット数値直後のキーワード（1. in /re/）をプロパティ名と誤判定せず regex を保持する', () => {
+  assert.equal(stripComments('const r = 1. in /x[/]y/ // c\n'), 'const r = 1. in /x[/]y/\n')
+})
+
 test('キーワード本体（in）直後の regex は保持される', () => {
   const src = 'for (const k in /x[/]y/.source) {}\n'
   assert.equal(stripComments(src), src)
