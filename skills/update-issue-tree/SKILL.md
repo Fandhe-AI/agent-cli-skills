@@ -69,11 +69,24 @@ GRANULARITY_ARG="<--granularity で渡された時間（未指定なら空文字
 
 if [[ -n "${GRANULARITY_ARG}" ]]; then
   GRANULARITY="${GRANULARITY_ARG}"
+  GRANULARITY_SOURCE="--granularity 引数"
 else
+  # ルート本文の取得失敗とマーカー不在は分離する。取得失敗は「粒度を既定へ倒さず中止」する
+  # （gh issue view 自体の失敗を || true で握り潰すと、権限エラー・issue 不在等を
+  # 「マーカーなし」と誤読して既定 2h へサイレントに倒れてしまうため）
+  ROOT_BODY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body') \
+    || { echo "エラー: ルート issue #${ROOT_NUMBER} の本文を取得できません。粒度を既定へ倒さず中止します。"; exit 1; }
   # 既存ルート本文の <!-- granularity: Nh --> マーカーから継承する。マーカーが無ければ既定 2h
-  ROOT_GRANULARITY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body' \
+  # （|| true は grep のマーカー不在にのみ掛かる。gh issue view 自体の失敗は上で既に処理済み）
+  ROOT_GRANULARITY=$(printf '%s\n' "${ROOT_BODY}" \
     | grep -oE '<!-- granularity: [1-9][0-9]*h -->' | head -1 | grep -oE '[1-9][0-9]*h' || true)
-  GRANULARITY="${ROOT_GRANULARITY:-2h}"
+  if [[ -n "${ROOT_GRANULARITY}" ]]; then
+    GRANULARITY="${ROOT_GRANULARITY}"
+    GRANULARITY_SOURCE="ルート issue #${ROOT_NUMBER} のマーカー"
+  else
+    GRANULARITY="2h"
+    GRANULARITY_SOURCE="既定値"
+  fi
 fi
 
 # 許可する構文は正整数 + h のみ（例: 1h / 2h / 4h）。引用符・空白・コマンド置換・0h・単位なしは
@@ -83,6 +96,9 @@ if ! printf '%s' "${GRANULARITY}" | grep -qE '^[1-9][0-9]*h$'; then
   echo "エラー: --granularity の値 '${GRANULARITY}' は不正です（許可: 正整数+h、例 2h）。中止します。"
   exit 1
 fi
+
+# 確定値と由来を必ず出力する（既定 2h と読み替えないことをここで可視化する）
+echo "粒度基準: ${GRANULARITY}（由来: ${GRANULARITY_SOURCE}）"
 
 # ルート直下の sub-issues を取得（ページネーション対応）
 fetch_sub_issues() {
@@ -101,6 +117,8 @@ fetch_sub_issues() {
 # ルートから再帰的にツリーを構築
 fetch_sub_issues "${ROOT_NUMBER}"
 ```
+
+以降の Step は Step 1 で出力された `GRANULARITY` の値を使う（既定 2h と読み替えない）。
 
 各 issue の `state`（open / closed）・ラベル・タイトルを記録してツリーマップを作成する。
 

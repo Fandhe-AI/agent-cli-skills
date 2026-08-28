@@ -64,13 +64,27 @@ ROOT_ARG="<--root で渡された Issue 番号（未指定なら空文字）>"
 
 if [[ -n "${GRANULARITY_ARG}" ]]; then
   GRANULARITY="${GRANULARITY_ARG}"
+  GRANULARITY_SOURCE="--granularity 引数"
 elif [[ -n "${ROOT_ARG}" ]]; then
+  # ルート本文の取得失敗とマーカー不在は分離する。取得失敗は「粒度を既定へ倒さず中止」する
+  # （gh issue view 自体の失敗を || true で握り潰すと、権限エラー・issue 不在等を
+  # 「マーカーなし」と誤読して既定 2h へサイレントに倒れてしまうため）
+  ROOT_BODY=$(gh issue view "${ROOT_ARG}" --json body --jq '.body') \
+    || { echo "エラー: ルート issue #${ROOT_ARG} の本文を取得できません。粒度を既定へ倒さず中止します。"; exit 1; }
   # 既存ルート本文の <!-- granularity: Nh --> マーカーから継承する。マーカーが無ければ既定 2h
-  ROOT_GRANULARITY=$(gh issue view "${ROOT_ARG}" --json body --jq '.body' \
+  # （|| true は grep のマーカー不在にのみ掛かる。gh issue view 自体の失敗は上で既に処理済み）
+  ROOT_GRANULARITY=$(printf '%s\n' "${ROOT_BODY}" \
     | grep -oE '<!-- granularity: [1-9][0-9]*h -->' | head -1 | grep -oE '[1-9][0-9]*h' || true)
-  GRANULARITY="${ROOT_GRANULARITY:-2h}"
+  if [[ -n "${ROOT_GRANULARITY}" ]]; then
+    GRANULARITY="${ROOT_GRANULARITY}"
+    GRANULARITY_SOURCE="ルート issue #${ROOT_ARG} のマーカー"
+  else
+    GRANULARITY="2h"
+    GRANULARITY_SOURCE="既定値"
+  fi
 else
   GRANULARITY="2h"
+  GRANULARITY_SOURCE="既定値"
 fi
 
 # 許可する構文は正整数 + h のみ（例: 1h / 2h / 4h）。引用符・空白・コマンド置換・0h・単位なしは
@@ -80,7 +94,12 @@ if ! printf '%s' "${GRANULARITY}" | grep -qE '^[1-9][0-9]*h$'; then
   echo "エラー: --granularity の値 '${GRANULARITY}' は不正です（許可: 正整数+h、例 2h）。中止します。"
   exit 1
 fi
+
+# 確定値と由来を必ず出力する（既定 2h と読み替えないことをここで可視化する）
+echo "粒度基準: ${GRANULARITY}（由来: ${GRANULARITY_SOURCE}）"
 ```
+
+以降の Step は Step 1 で出力された `GRANULARITY` の値を使う（既定 2h と読み替えない）。
 
 - 各タスクの依存関係・実行順を把握する
 - タスク数を集計し、Phase 分割の要否を判断する（目安: 10 件超で Phase 分割を検討）
@@ -373,12 +392,18 @@ done
 
 ```bash
 # --root 指定時: 既存本文を取得し、今回の Phase 分をマージしてから編集する
-CURRENT_BODY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body')
-# CURRENT_BODY の「Phase 別実装計画」表へ今回の Phase 行を追記し、
+CURRENT_BODY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body') \
+  || { echo "エラー: ルート issue #${ROOT_NUMBER} の本文を取得できません。中止します。"; exit 1; }
+
+# <!-- granularity: Nh --> マーカーは常に Step 1 で確定した GRANULARITY で先頭へ 1 行だけ
+# 書き直す（明示・未指定を問わず常に反映する。GRANULARITY 自体が Step 1 の優先順位
+# 「明示 > 既存マーカー > 既定 2h」を既に反映済みのため、ここで条件分岐しない）。
+# 既存本文に旧マーカー行があれば重複させないため、先に取り除いてから先頭へ再出力する。
+CURRENT_BODY=$(printf '%s\n' "${CURRENT_BODY}" | grep -vE '^<!-- granularity: [1-9][0-9]*h -->$')
+NEW_BODY="$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; printf '%s\n' "${CURRENT_BODY}")"
+
+# NEW_BODY の「Phase 別実装計画」表へ今回の Phase 行を追記し、
 # 「### Phase N」セクションを追加した本文を組み立てて gh issue edit --body に渡す。
-# <!-- granularity: Nh --> マーカーは保持する。--granularity が明示された場合のみ
-# GRANULARITY の確定値でマーカー行を更新し、未指定ならマーカーの既存値をそのまま残す
-# （そのマーカーが Step 1 で GRANULARITY の継承元になっている）。
 # 既存ツリーの棚卸しを伴う場合は update-issue-tree への委譲でもよい
 ```
 
