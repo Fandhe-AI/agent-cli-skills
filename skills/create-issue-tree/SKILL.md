@@ -23,8 +23,11 @@ argument-hint: "<要件テキストまたはファイルパス> [--phase <phase�
 （指定しないと新しいルート issue が重複作成される）。  
 `--milestone` オプションで起票する issue 全件に割り当てる GitHub Milestone を指定できる
 （`--root` 指定時は省略可。既存ルートの milestone を自動継承する）。
-`--granularity` オプションで 1 issue に収める実装時間の上限を指定できる。既定は `2h`。
-`2h`・`4h`・`1h` のように時間単位で指定する。
+`--granularity` オプションで 1 issue に収める実装時間の上限を指定できる。
+`2h`・`4h`・`1h` のように正整数+時間単位（`h`）で指定する。優先順位は
+**`--granularity` 明示 > `--root` 指定時の既存ルート issue 本文マーカー > 既定 `2h`** の順
+（Step 1 で確定）。決定した値はルート issue 本文へ `<!-- granularity: Nh -->` として
+永続化され、同じルートに対する `update-issue-tree` 実行時に継承される。
 
 ```
 create-issue-tree "ユーザー認証機能を実装する"
@@ -47,10 +50,36 @@ create-issue-tree requirements.md --granularity 4h
 
 - **粒度基準: 1 issue は実装 `${GRANULARITY}`（既定 2h・`--granularity` で変更可）程度に収める。** 超えると判断した場合は sub-issue に再分解する
 
+`--granularity` の値は代入前に Claude 側でも同じ正規表現（`^[1-9][0-9]*h$`）で検証し、
+不一致なら**このフェンスを実行せず**ユーザーに再指定を求める（未信頼値を生成済みシェルへ
+埋め込まない）。優先順位は使い方節のとおり、**`--granularity` > ルートのマーカー > 既定 2h** の順。
+
 ```bash
 # --granularity で渡された時間を実際の値で代入する（実行時に Claude が置き換える）
-# 例: --granularity 4h が指定された場合 → GRANULARITY="4h" / 未指定の場合 → GRANULARITY="2h"
-GRANULARITY="<--granularity で渡された時間（未指定なら既定値 2h）>"
+# 例: --granularity 4h が指定された場合 → GRANULARITY_ARG="4h" / 未指定の場合は空文字
+GRANULARITY_ARG="<--granularity で渡された時間（未指定なら空文字）>"
+# --root で渡された Issue 番号（未指定なら空文字）。Step 2.5 で ROOT_NUMBER として
+# OPEN 検証込みで正式に確定する前に、粒度継承の参照のためここでも読む
+ROOT_ARG="<--root で渡された Issue 番号（未指定なら空文字）>"
+
+if [[ -n "${GRANULARITY_ARG}" ]]; then
+  GRANULARITY="${GRANULARITY_ARG}"
+elif [[ -n "${ROOT_ARG}" ]]; then
+  # 既存ルート本文の <!-- granularity: Nh --> マーカーから継承する。マーカーが無ければ既定 2h
+  ROOT_GRANULARITY=$(gh issue view "${ROOT_ARG}" --json body --jq '.body' \
+    | grep -oE '<!-- granularity: [1-9][0-9]*h -->' | head -1 | grep -oE '[1-9][0-9]*h' || true)
+  GRANULARITY="${ROOT_GRANULARITY:-2h}"
+else
+  GRANULARITY="2h"
+fi
+
+# 許可する構文は正整数 + h のみ（例: 1h / 2h / 4h）。引用符・空白・コマンド置換・0h・単位なしは
+# ここで拒否する（ROOT_GRANULARITY はマーカー抽出時点で同じ正規表現を通しているが、
+# GRANULARITY_ARG はユーザー入力の生値のため、代入元によらずこの検証を必ず通す）
+if ! printf '%s' "${GRANULARITY}" | grep -qE '^[1-9][0-9]*h$'; then
+  echo "エラー: --granularity の値 '${GRANULARITY}' は不正です（許可: 正整数+h、例 2h）。中止します。"
+  exit 1
+fi
 ```
 
 - 各タスクの依存関係・実行順を把握する
@@ -171,7 +200,7 @@ fi
 
 # gh issue create は issue URL を stdout に出力する（--json 非対応）。URL 末尾から番号を抽出する
 ROOT_URL=$(gh issue create "${ROOT_ARGS[@]}" \
-  --body "$(cat <<'EOF'
+  --body "$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; cat <<'EOF'
 ## 概要
 
 全 open issue を Phase 別に 1 ツリーへ整理する。各 Phase 親 issue を sub-issues として紐付け。
@@ -347,13 +376,16 @@ done
 CURRENT_BODY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body')
 # CURRENT_BODY の「Phase 別実装計画」表へ今回の Phase 行を追記し、
 # 「### Phase N」セクションを追加した本文を組み立てて gh issue edit --body に渡す。
+# <!-- granularity: Nh --> マーカーは保持する。--granularity が明示された場合のみ
+# GRANULARITY の確定値でマーカー行を更新し、未指定ならマーカーの既存値をそのまま残す
+# （そのマーカーが Step 1 で GRANULARITY の継承元になっている）。
 # 既存ツリーの棚卸しを伴う場合は update-issue-tree への委譲でもよい
 ```
 
 `--root` 未指定（新規作成）の場合は以下で全体を更新する。
 
 ```bash
-gh issue edit "${ROOT_NUMBER}" --body "$(cat <<'EOF'
+gh issue edit "${ROOT_NUMBER}" --body "$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; cat <<'EOF'
 ## 概要
 
 全 open issue を Phase 別に 1 ツリーへ整理する。各 Phase 親 issue を sub-issues として紐付け。
@@ -436,6 +468,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" \
 | phase ラベルが存在しないリポジトリで issue 作成が失敗する | Step 4 冒頭の `gh label create "phase:${PHASE}"` を必ず先に実行する |
 | `--root` 追記時に既存ルートの milestone が未設定なのに気づかず milestone なしで起票してしまう | リポジトリに milestone が存在する場合、Step 2.5 は継承結果が空ならユーザー確認フローへ自動的に合流する（確認で milestone を選ぶとルート issue にも反映される）。milestone が 1 件もない非運用リポジトリでは非運用ガードによる milestone なし起票が正常動作 |
 | closed 親の下に open issue が残置される | Phase 親を close する前に全子 issue の close を確認する |
+| `--granularity` に `2 h`・`2`・`0h` 等を渡して中断される | 正整数+h 形式（`^[1-9][0-9]*h$`。例: `2h`・`4h`）で指定する |
 
 ## 注意事項
 

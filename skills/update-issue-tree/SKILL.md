@@ -19,8 +19,11 @@ closed 親下に残置された open issue の付け替え・孤児の再配置�
 
 ルートのトラッキング issue 番号を引数として渡す。
 `--granularity` オプションで粒度基準（1 issue に収める実装時間の上限）を指定できる。
-既定は `2h`。create-issue-tree と同じ粒度基準を用いる。
-値は Step 1 で `GRANULARITY` として確定し、Step 2・Step 7 の判定に使う。
+`2h`・`4h`・`1h` のように正整数+時間単位（`h`）で指定する。優先順位は
+**`--granularity` 明示 > ルート issue 本文の `<!-- granularity: Nh -->` マーカー > 既定 `2h`**
+の順（create-issue-tree と同じ粒度基準・同じマーカー形式）。値は Step 1 で `GRANULARITY`
+として確定し、Step 2・Step 7 の判定に使う。棚卸し後に Step 8 が本文を再生成する際、
+`GRANULARITY` の確定値でマーカー行を保持する。
 
 ```
 update-issue-tree 42
@@ -57,9 +60,29 @@ update-issue-tree 42 --granularity 4h
 ```bash
 ROOT_NUMBER="<ルート issue 番号>"
 
+# --granularity の値は代入前に Claude 側でも同じ正規表現（^[1-9][0-9]*h$）で検証し、
+# 不一致なら**このフェンスを実行せず**ユーザーに再指定を求める（未信頼値を生成済みシェルへ
+# 埋め込まない）。優先順位は --granularity > ルートのマーカー > 既定 2h の順。
 # --granularity で渡された時間を実際の値で代入する（実行時に Claude が置き換える）
-# 例: --granularity 4h が指定された場合 → GRANULARITY="4h" / 未指定の場合 → GRANULARITY="2h"
-GRANULARITY="<--granularity で渡された時間（未指定なら既定値 2h）>"
+# 例: --granularity 4h が指定された場合 → GRANULARITY_ARG="4h" / 未指定の場合は空文字
+GRANULARITY_ARG="<--granularity で渡された時間（未指定なら空文字）>"
+
+if [[ -n "${GRANULARITY_ARG}" ]]; then
+  GRANULARITY="${GRANULARITY_ARG}"
+else
+  # 既存ルート本文の <!-- granularity: Nh --> マーカーから継承する。マーカーが無ければ既定 2h
+  ROOT_GRANULARITY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body' \
+    | grep -oE '<!-- granularity: [1-9][0-9]*h -->' | head -1 | grep -oE '[1-9][0-9]*h' || true)
+  GRANULARITY="${ROOT_GRANULARITY:-2h}"
+fi
+
+# 許可する構文は正整数 + h のみ（例: 1h / 2h / 4h）。引用符・空白・コマンド置換・0h・単位なしは
+# ここで拒否する（ROOT_GRANULARITY はマーカー抽出時点で同じ正規表現を通しているが、
+# GRANULARITY_ARG はユーザー入力の生値のため、代入元によらずこの検証を必ず通す）
+if ! printf '%s' "${GRANULARITY}" | grep -qE '^[1-9][0-9]*h$'; then
+  echo "エラー: --granularity の値 '${GRANULARITY}' は不正です（許可: 正整数+h、例 2h）。中止します。"
+  exit 1
+fi
 
 # ルート直下の sub-issues を取得（ページネーション対応）
 fetch_sub_issues() {
@@ -486,9 +509,11 @@ gh api \
 ### Step 8: ルート issue 本文を再生成して更新する
 
 棚卸し後の最新ツリー状態を反映したルート issue 本文を生成し、`gh issue edit` で更新する。
+`GRANULARITY`（Step 1 で確定した値）で `<!-- granularity: Nh -->` マーカー行を再出力し、
+次回以降の update-issue-tree 実行が継承できる状態を保つ（マーカー行を欠落させない）。
 
 ```bash
-gh issue edit "${ROOT_NUMBER}" --body "$(cat <<'EOF'
+gh issue edit "${ROOT_NUMBER}" --body "$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; cat <<'EOF'
 ## 概要
 
 全 open issue を Phase 別に 1 ツリーへ整理。各 Phase 親 issue を sub-issues として紐付け。
@@ -595,6 +620,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
 | 問題 | 回避策 |
 |------|--------|
 | 付け替えの DELETE が 404 になり、続く POST が 422 で失敗する | 削除のパスだけ単数形 `sub_issue`。複数形 `sub_issues` は 404 になり、旧親から外れないまま POST するため `Sub issue may only have one parent` で必ず失敗する（`reassign-sub-issue.sh` は DELETE 失敗時に POST へ進まないため、この連鎖失敗自体は起きない。手動で `gh api` を直接叩く場合の注意として記載を残す） |
+| `--granularity` に `2 h`・`2`・`0h` 等を渡して中断される | 正整数+h 形式（`^[1-9][0-9]*h$`。例: `2h`・`4h`）で指定する |
 
 ## 注意事項
 
