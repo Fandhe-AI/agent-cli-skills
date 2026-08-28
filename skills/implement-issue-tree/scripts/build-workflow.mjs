@@ -51,6 +51,9 @@ export function stripComments(src) {
   let sigCh = '' // 直前の非空白文字。regex / 除算の判別に使う
   let sigCh2 = '' // sigCh の 1 つ前の非空白文字。後置 `++` / `--` の検出に使う（PR #452 P2）
   let sigWord = '' // 直近の単語（識別子・数値・キーワード）。空白を挟んでも保持する
+  // sigWord の直前の非空白文字。`.` なら sigWord はプロパティ名であり、キーワードと同名でも
+  // 識別子として扱う（`obj.in / 2` を regex と誤読しないため — Bugbot 指摘）
+  let wordPrev = ''
   // 'code'（{} 深度つき）と 'template' のネストを管理する。template 内の `${` で code を
   // push し、その code の深度が閉じたら template へ復帰する
   const stack = [{ mode: 'code', depth: 0 }]
@@ -178,8 +181,10 @@ export function stripComments(src) {
       // 誤読され、行内の後続 `/`（`//` コメントの 1 文字目や文字列中の `/`）を閉じ `/` と
       // 誤認する（Bugbot 指摘）。数字直後の `.` に限り除算側へ倒す（`...` spread は regex のまま）
       const trailingDotNumber = sigCh === '.' && /[0-9]/.test(sigCh2)
+      // `.` 直後のキーワード同名プロパティ（`obj.in / 2`・`x.return / y`）は識別子なので
+      // 除算側へ倒す（Bugbot 指摘）。キーワード本体（`return /re/`・`in /re/`）は regex のまま
       const isDivision =
-        (sigWord !== '' && !REGEX_PRECEDING_KEYWORDS.has(sigWord)) ||
+        (sigWord !== '' && (!REGEX_PRECEDING_KEYWORDS.has(sigWord) || wordPrev === '.')) ||
         /[)\]}]/.test(sigCh) ||
         sigCh === '"' || sigCh === "'" || sigCh === '`' ||
         postfixIncDec ||
@@ -223,7 +228,12 @@ export function stripComments(src) {
     if (c === '\n') trimLineTail()
     out += c
     if (isWordChar(c)) {
-      sigWord = isWordChar(rawPrev) ? sigWord + c : c
+      if (isWordChar(rawPrev)) {
+        sigWord += c
+      } else {
+        sigWord = c
+        wordPrev = sigCh // 新規単語の開始: 直前の非空白文字を記録する
+      }
       sigCh2 = sigCh
       sigCh = c
     } else if (!/\s/.test(c)) {

@@ -61,6 +61,22 @@ test('正規表現リテラル内の // をコメントと誤認しない（キ�
   assert.equal(stripComments(src), src)
 })
 
+test('. 直後のキーワード同名プロパティ直後の除算に続く trailing コメントを除去する', () => {
+  assert.equal(stripComments('const a = obj.in / 2 // c\n'), 'const a = obj.in / 2\n')
+})
+
+test('. 直後のキーワード同名プロパティ直後の除算行の後続文字列を書き換えない', () => {
+  assert.equal(
+    stripComments("const b = x.return / y + 'http://keep' // c\n"),
+    "const b = x.return / y + 'http://keep'\n",
+  )
+})
+
+test('キーワード本体（in）直後の regex は保持される', () => {
+  const src = 'for (const k in /x[/]y/.source) {}\n'
+  assert.equal(stripComments(src), src)
+})
+
 test('エスケープされたスラッシュを含む regex を保持する', () => {
   const src = 'const re = /https:\\/\\/[a-z]+/\n'
   assert.equal(stripComments(src), src)
