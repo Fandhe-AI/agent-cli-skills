@@ -122,6 +122,38 @@ test('先頭ドット小数リテラル直後のプロパティアクセス（.5
   )
 })
 
+// Issue #455 codex P1（PR #456 レビュー指摘）の回帰固定: 数字終わり識別子直後の `.` 判定
+// （wordPrevRaw のチェック）が \p{L}\p{Nl}_$ のみを識別子継続文字として認識しており、
+// 結合文字（Mn/Mc。分解形の á = 'a' + U+0301 等）・ZWNJ（U+200C）・ZWJ（U+200D）・
+// 非 BMP 識別子文字（サロゲートペア）を継続文字と判定できず、それらに隣接する数字を
+// 末尾ドット数値（`1.`）と誤同一視していた。誤同一視すると `.` 後続のプロパティアクセス
+// （`in`）が keywordProperty=false になり、後続 `/` が regex と誤読されて閉じ `/` 探索が
+// 文字列リテラル内の `/`（`http://`）を飲み込み、trailing コメントが除去されない
+// （コメント除去契約違反）。
+test('結合文字（分解形 á = a + U+0301）に隣接する数字直後のプロパティアクセスを末尾ドット数値と誤同一視しない', () => {
+  const src = "const x = á1.in / 2 + 'http://keep' // c\n"
+  const expected = "const x = á1.in / 2 + 'http://keep'\n"
+  assert.equal(stripComments(src), expected)
+})
+
+test('ZWNJ（U+200C）に隣接する数字直後のプロパティアクセスを末尾ドット数値と誤同一視しない', () => {
+  const src = "const x = a‌1.in / 2 + 'http://keep' // c\n"
+  const expected = "const x = a‌1.in / 2 + 'http://keep'\n"
+  assert.equal(stripComments(src), expected)
+})
+
+test('ZWJ（U+200D）に隣接する数字直後のプロパティアクセスを末尾ドット数値と誤同一視しない', () => {
+  const src = "const x = a‍1.in / 2 + 'http://keep' // c\n"
+  const expected = "const x = a‍1.in / 2 + 'http://keep'\n"
+  assert.equal(stripComments(src), expected)
+})
+
+test('非 BMP 識別子文字（サロゲートペア。数学用太字大文字 A U+1D400）に隣接する数字直後のプロパティアクセスを末尾ドット数値と誤同一視しない', () => {
+  const src = "const x = \u{1D400}1.in / 2 + 'http://keep' // c\n"
+  const expected = "const x = \u{1D400}1.in / 2 + 'http://keep'\n"
+  assert.equal(stripComments(src), expected)
+})
+
 test('キーワード本体（in）直後の regex は保持される', () => {
   const src = 'for (const k in /x[/]y/.source) {}\n'
   assert.equal(stripComments(src), src)

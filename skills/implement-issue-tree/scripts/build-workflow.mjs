@@ -30,6 +30,27 @@ const REGEX_PRECEDING_KEYWORDS = new Set([
 
 const isWordChar = (ch) => /[A-Za-z0-9_$]/.test(ch)
 
+// 高サロゲート（U+D800-DBFF）判定。非 BMP 識別子文字（数学記号等）はコード単位 2 個の
+// サロゲートペアで表現されるため、`.` 判定部の単一コード単位チェックだけでは判別できない
+const isHighSurrogate = (ch) => ch.length === 1 && ch.charCodeAt(0) >= 0xd800 && ch.charCodeAt(0) <= 0xdbff
+// 低サロゲート（U+DC00-DFFF）判定
+const isLowSurrogate = (ch) => ch.length === 1 && ch.charCodeAt(0) >= 0xdc00 && ch.charCodeAt(0) <= 0xdfff
+
+// ECMAScript の IdentifierPart（UnicodeIDContinue | $ | _ | <ZWNJ> | <ZWJ>）相当の判定
+// （Issue #455 codex P1）。`prevRaw` は判定対象の直前生文字（1 コード単位）、`prevRaw2` は
+// その 1 つ前の生文字（空白含む）。`prevRaw` が低サロゲートで `prevRaw2` が高サロゲートの
+// 場合は両者を結合し、非 BMP 識別子文字（例: 数学用英数字記号）も 1 コードポイントとして
+// 正しく判別する。`\p{ID_Continue}` は結合文字（Mn/Mc）・連結文字（Pc）・10 進数字（Nd）等の
+// ID_Continue カテゴリを、明示的な U+200C（ZWNJ）・U+200D（ZWJ）は環境の Unicode データ
+// によっては ID_Continue に含まれない場合がある 2 文字（ECMAScript の IdentifierPart には
+// 含まれる）をそれぞれ捕捉する。ZWNJ/ZWJ はソース中に不可視文字として直接書かず `\u`
+// エスケープで明示し、エディタ・diff ツールでの混入・破損を避ける
+const isIdentifierContinuationRaw = (prevRaw, prevRaw2) => {
+  if (prevRaw === '') return false
+  const cp = isLowSurrogate(prevRaw) && isHighSurrogate(prevRaw2) ? prevRaw2 + prevRaw : prevRaw
+  return /[\p{ID_Continue}_$\u200c\u200d]/u.test(cp)
+}
+
 /**
  * JS ソースからコメントのみを除去する（改行はすべて保持し行番号を維持する）。
  *
@@ -48,6 +69,11 @@ export function stripComments(src) {
   let i = 0
   const n = src.length
   let rawPrev = '' // 直前に出力した文字（空白含む）。単語の連続判定に使う
+  // rawPrev のさらに 1 つ前の生文字（空白含む）。`wordPrevRaw`（単語開始直前の 1 文字）が
+  // サロゲートペアの下位ハーフである場合に、上位ハーフと組み合わせて 1 コードポイントへ
+  // 復元するために保持する（Issue #455 codex P1: UTF-16 コード単位ごとの走査のため、
+  // 単一コード単位だけでは非 BMP 識別子文字を判別できない）
+  let rawPrev2 = ''
   let sigCh = '' // 直前の非空白文字。regex / 除算の判別に使う
   let sigCh2 = '' // sigCh の 1 つ前の非空白文字。後置 `++` / `--` の検出に使う（PR #452 P2）
   let sigWord = '' // 直近の単語（識別子・数値・キーワード）。空白を挟んでも保持する
@@ -64,6 +90,8 @@ export function stripComments(src) {
   // 単語開始直前の生の 1 文字（空白含む）。`wordPrev`（直前の非空白文字）だけでは非 ASCII
   // 識別子文字（`é1` 等）に隣接する数字単語を識別子の一部として除外できないため別途保持する
   let wordPrevRaw = ''
+  // wordPrevRaw のさらに 1 つ前の生文字。サロゲートペア復元用（rawPrev2 と同じ理由）
+  let wordPrevRaw2 = ''
   // 単語開始時点の dotAfterDigit。wordPrev が `.` でもこれが true なら末尾ドット数値直後の
   // キーワード（`1. in /re/`）でありプロパティ名ではない — キーワード判定を維持する（Bugbot 指摘）
   let wordDotAfterDigit = false
@@ -94,6 +122,7 @@ export function stripComments(src) {
         sigCh2 = sigCh
         sigCh = '`'
         sigWord = ''
+        rawPrev2 = rawPrev
         rawPrev = '`'
         continue
       }
@@ -104,6 +133,7 @@ export function stripComments(src) {
         sigCh2 = sigCh
         sigCh = '{'
         sigWord = ''
+        rawPrev2 = rawPrev
         rawPrev = '{'
         continue
       }
@@ -135,6 +165,7 @@ export function stripComments(src) {
       // 置換空白を rawPrev に反映する。古い rawPrev のままだと `x/*c*/in` の `in` が直前の
       // 単語へ連結（`xin`）され keyword 判定が壊れ、後続の regex を除算と誤読して regex 内の
       // `//` `/*` をコメントとして削り得る（Bugbot 指摘）
+      rawPrev2 = rawPrev
       rawPrev = ' '
       continue
     }
@@ -159,6 +190,7 @@ export function stripComments(src) {
       sigCh2 = sigCh
       sigCh = c
       sigWord = ''
+      rawPrev2 = rawPrev
       rawPrev = c
       continue
     }
@@ -167,6 +199,7 @@ export function stripComments(src) {
       out += c
       i++
       stack.push({ mode: 'template' })
+      rawPrev2 = rawPrev
       rawPrev = '`'
       continue
     }
@@ -232,6 +265,7 @@ export function stripComments(src) {
           sigCh2 = sigCh
           sigCh = '/'
           sigWord = ''
+          rawPrev2 = rawPrev
           rawPrev = '/'
           continue
         }
@@ -250,6 +284,7 @@ export function stripComments(src) {
         sigWord = c
         wordPrev = sigCh // 新規単語の開始: 直前の非空白文字と、それが `.` なら数字隣接を記録
         wordPrevRaw = rawPrev // `.` 判定で「単語開始直前が識別子文字か」を見るため生文字も保持
+        wordPrevRaw2 = rawPrev2 // サロゲートペア復元用（下記 `.` 判定部）
         wordDotAfterDigit = wordPrev === '.' && dotAfterDigit
       }
       sigCh2 = sigCh
@@ -258,17 +293,22 @@ export function stripComments(src) {
       if (c === '.') {
         // `1.` と `1 .` を字句隣接で区別（従来）に加え、直前単語が 10 進整数リテラルそのもの
         // であることも要求する。字句隣接のみだと `foo1.`・`1e10.`・`0x10.`（完了済みトークンへの
-        // プロパティアクセス）を末尾ドット数値と誤同一視してしまう（Issue #455）
+        // プロパティアクセス）を末尾ドット数値と誤同一視してしまう（Issue #455）。
+        // 識別子継続文字の判定は isWordChar（ASCII のみ）ではなく isIdentifierContinuationRaw
+        // （ID_Continue + ZWNJ/ZWJ + サロゲートペア復元）を使う — 結合文字（`á1` の合成前
+        // 形式等）・ZWNJ/ZWJ・非 BMP 識別子文字を isWordChar は継続文字として認識できず、
+        // 単一コード単位の \p{L} 判定だけでは結合文字・ZWNJ/ZWJ を捕捉できない（Issue #455 codex P1）
         dotAfterDigit =
           /[0-9]/.test(rawPrev) &&
           /^[0-9]+(?:_[0-9]+)*$/.test(sigWord) && // foo1 / 1e10 / 0x10 / 10n を除外（数値セパレータは許容）
           wordPrev !== '.' && // `1.5.` の 2 つ目の `.`（小数部直後）はプロパティアクセス
-          !/[\p{L}\p{Nl}_$]/u.test(wordPrevRaw) // 非 ASCII 識別子文字（é1 等）に隣接する数字は識別子の一部
+          !isIdentifierContinuationRaw(wordPrevRaw, wordPrevRaw2) // 識別子の一部に隣接する数字を除外
       }
       sigWord = ''
       sigCh2 = sigCh
       sigCh = c
     }
+    rawPrev2 = rawPrev
     rawPrev = c
     i++
   }
