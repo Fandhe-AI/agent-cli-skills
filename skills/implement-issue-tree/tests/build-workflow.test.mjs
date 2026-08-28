@@ -10,8 +10,15 @@
 // 生成物のサイズ・パースゲートは workflow-loadability.test.mjs が担う（対象は実行ファイル）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { stripComments, buildArtifact, SRC_PATH, DIST_PATH } from '../scripts/build-workflow.mjs'
+
+const SCRIPT_PATH = fileURLToPath(new URL('../scripts/build-workflow.mjs', import.meta.url))
+const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 
 // ---------------------------------------------------------------------------
 // (a) lexer 固定ケース
@@ -111,6 +118,26 @@ test('行末ブロックコメントの置換空白は行末に残らない（tr
   assert.equal(stripComments('const a = 1 /* c */\nconst b = 2\n'), 'const a = 1\nconst b = 2\n')
 })
 
+test('末尾ドット数値直後の除算に続く trailing コメントを除去する', () => {
+  assert.equal(stripComments('const a = 1. / 2 // c\n'), 'const a = 1. / 2\n')
+})
+
+test('末尾ドット数値直後の除算行の後続文字列を書き換えない（regex 誤読でクォートを飲み込まない）', () => {
+  assert.equal(
+    stripComments("const a = 1. / 2 + 'http://keep' // c\n"),
+    "const a = 1. / 2 + 'http://keep'\n",
+  )
+})
+
+test('spread `...` 直後の regex は保持される（末尾ドット数値の除算判定に巻き込まない）', () => {
+  const src = 'const r = [.../a[/]b/.exec(s)]\n'
+  assert.equal(stripComments(src), src)
+})
+
+test('ブロックコメント直後の識別子が直前の単語と連結して keyword 判定を壊さない', () => {
+  assert.equal(stripComments('const b = x/*c*/in /[/]/ // note\n'), 'const b = x in /[/]/\n')
+})
+
 test('冪等性: 除去済みソースへ再適用しても不変', () => {
   const once = stripComments("const a = 1 // c\nconst u = 'http://x'\n")
   assert.equal(stripComments(once), once)
@@ -137,4 +164,31 @@ test('開発ファイルと実行ファイルの行数が一致する（スタ�
   const src = readFileSync(SRC_PATH, 'utf8')
   const dist = readFileSync(DIST_PATH, 'utf8')
   assert.equal(src.split('\n').length, dist.split('\n').length)
+})
+
+// ---------------------------------------------------------------------------
+// (c) CLI ガード（symlink 経由・相対パス起動でも実行部が動くこと）
+// ---------------------------------------------------------------------------
+
+test('symlink 経由で起動しても CLI ガードを通過して --check が実行される（無言 no-op の防止）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'build-workflow-link-'))
+  try {
+    const link = join(dir, 'build-workflow.mjs')
+    symlinkSync(SCRIPT_PATH, link)
+    const r = spawnSync(process.execPath, [link, '--check'], { encoding: 'utf8' })
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /鮮度 ok/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('相対パスで起動しても CLI ガードを通過して --check が実行される', () => {
+  const r = spawnSync(
+    process.execPath,
+    ['skills/implement-issue-tree/scripts/build-workflow.mjs', '--check'],
+    { cwd: REPO_ROOT, encoding: 'utf8' },
+  )
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /鮮度 ok/)
 })
