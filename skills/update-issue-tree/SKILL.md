@@ -7,7 +7,7 @@ description: >
   ツリー新規作成は create-issue-tree、実装消化は implement-issue-tree を参照。
 model: opus
 user-invocable: true
-argument-hint: "<ルートトラッキング issue 番号>"
+argument-hint: "<ルートトラッキング issue 番号> [--granularity <時間>]"
 ---
 
 # update-issue-tree
@@ -18,9 +18,12 @@ closed 親下に残置された open issue の付け替え・孤児の再配置�
 ## 使い方
 
 ルートのトラッキング issue 番号を引数として渡す。
+`--granularity` オプションで粒度基準（1 issue に収める実装時間の上限）を指定できる。
+既定は `2h`。create-issue-tree と同じ粒度基準を用いる。
 
 ```
 update-issue-tree 42
+update-issue-tree 42 --granularity 4h
 ```
 
 ## 前提条件
@@ -83,7 +86,7 @@ fetch_sub_issues "${ROOT_NUMBER}"
 | どの親にも紐付いていない孤児 issue がある | 該当 Phase 親へ紐付け（Phase が不明な場合はユーザーに確認） |
 | phase ラベルが親と一致しない issue がある | ラベルを同期 |
 | 既存 Phase に収まらない新規タスクがある | 新 Phase 親の新設を検討 |
-| 4h 超の issue が分解されていない | sub-issue に分解（create-issue-tree と同じ粒度基準） |
+| 粒度基準（既定 2h・`--granularity`）超の issue が分解されていない | sub-issue に分解（create-issue-tree と同じ粒度基準） |
 | 対象 issue の親が別リポジトリにある（cross-repository sub-issue） | 本スキルの対象外。棚卸し対象から除外し、Step 9 の要確認事項へ記載する |
 
 棚卸し対象の一覧をユーザーに提示し、方針確認を取ってから変更を実行する。
@@ -450,9 +453,9 @@ gh issue edit "${ISSUE_NUMBER}" --add-label "phase:1"
 gh issue edit "${ISSUE_NUMBER}" --remove-label "phase:0"
 ```
 
-### Step 7: 4h 超の issue を sub-issue に分解する
+### Step 7: 粒度基準超の issue を sub-issue に分解する
 
-棚卸し中に 4h 超と判断した issue は、create-issue-tree と同じ粒度基準で sub-issue に分解する。
+棚卸し中に粒度基準（既定 2h・`--granularity`）超と判断した issue は、create-issue-tree と同じ粒度基準で sub-issue に分解する。
 （この POST も `reassign-sub-issue.sh` を使わない。理由は Step 5 と同じ: 新規作成した
 親なし issue への単発 POST）
 
@@ -531,7 +534,7 @@ EOF
 | 孤児 issue の再配置 | N 件 |
 | phase ラベル同期 | N 件 |
 | 新 Phase 親の新設 | N 件 |
-| 4h 超 issue の sub-issue 分解 | N 件 |
+| 粒度基準超 issue の sub-issue 分解 | N 件 |
 
 ### 現在の Phase 別サマリー
 | Phase | 親 issue | open 件数 |

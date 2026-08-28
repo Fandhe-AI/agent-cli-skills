@@ -35,7 +35,7 @@ Claude Code の Claude Skills として使用するスキルは、原則とし�
 | **comment-code** | コードにコメント・ドキュメンテーションコメント（JSDoc / docstring 等）を追加・補強する。パッケージ・サービス視点での役割境界、呼び出し元・呼び出し先の前提と契約、他ファイル・他サービスからの文脈を記述 |
 | **create-commit** | `git diff` を分析し、Conventional Commits 形式でコミットメッセージを生成・実行する |
 | **create-issue** | タスクを分析し、GitHub Issue を親子構造（sub-issues）で作成する |
-| **create-issue-tree** | タスク要件を Phase 分割して GitHub Issue ツリーを新規作成（4h 粒度分解・Phase 階層化） |
+| **create-issue-tree** | タスク要件を Phase 分割して GitHub Issue ツリーを新規作成（既定 2h 粒度分解（--granularity で変更可）・Phase 階層化） |
 | **create-plan** | コードベースを調査し、実装計画を `_/local-plans/` に作成する |
 | **create-pr** | 変更内容のセキュリティチェック後、Conventional Commits 形式で PR を作成する |
 | **implement-issue** | GitHub Issue を取得し、計画作成 → ユーザー承認 → 実装 → テストの流れで開発する |

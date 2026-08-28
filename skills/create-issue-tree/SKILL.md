@@ -2,12 +2,12 @@
 name: create-issue-tree
 description: >
   Phase 分割された GitHub Issue ツリーを新規作成するスキル。「イシューツリー作って」「タスクを Phase 別に Issue 化」「Issue ツリーを起票して」で使用。
-  要件・タスク一覧を受け取り、タスク分解（4h 粒度）→ Phase 分割 → ルート（トラッキング）issue → Phase 親 issue → 子 issue の階層を sub_issues API で紐付け。
+  要件・タスク一覧を受け取り、タスク分解（既定 2h 粒度・--granularity で変更可）→ Phase 分割 → ルート（トラッキング）issue → Phase 親 issue → 子 issue の階層を sub_issues API で紐付け。
   phase ラベル付与・ルート issue 本文の Phase 別表生成まで自動化。任意の phase 指定で部分起票にも対応。
   ツリーの棚卸し・更新は update-issue-tree、実装消化は implement-issue-tree を参照。
 model: opus
 user-invocable: true
-argument-hint: "<要件テキストまたはファイルパス> [--phase <phase番号>] [--root <既存ルートissue番号>] [--milestone <milestone名>]"
+argument-hint: "<要件テキストまたはファイルパス> [--phase <phase番号>] [--root <既存ルートissue番号>] [--milestone <milestone名>] [--granularity <時間>]"
 ---
 
 # create-issue-tree
@@ -23,12 +23,15 @@ argument-hint: "<要件テキストまたはファイルパス> [--phase <phase�
 （指定しないと新しいルート issue が重複作成される）。  
 `--milestone` オプションで起票する issue 全件に割り当てる GitHub Milestone を指定できる
 （`--root` 指定時は省略可。既存ルートの milestone を自動継承する）。
+`--granularity` オプションで 1 issue に収める実装時間の上限を指定できる。既定は `2h`。
+`2h`・`4h`・`1h` のように時間単位で指定する。
 
 ```
 create-issue-tree "ユーザー認証機能を実装する"
 create-issue-tree requirements.md
 create-issue-tree requirements.md --phase 2 --root 123
 create-issue-tree requirements.md --milestone "v2.0"
+create-issue-tree requirements.md --granularity 4h
 ```
 
 ## 前提条件
@@ -42,7 +45,14 @@ create-issue-tree requirements.md --milestone "v2.0"
 
 入力テキストまたはファイルから要件を読み込み、以下の観点でタスクを分解する。
 
-- **粒度基準: 1 issue は実装 4h 程度に収める。** 4h を超えると判断した場合は sub-issue に再分解する
+- **粒度基準: 1 issue は実装 `${GRANULARITY}`（既定 2h・`--granularity` で変更可）程度に収める。** 超えると判断した場合は sub-issue に再分解する
+
+```bash
+# --granularity で渡された時間を実際の値で代入する（実行時に Claude が置き換える）
+# 例: --granularity 4h が指定された場合 → GRANULARITY="4h" / 未指定の場合 → GRANULARITY="2h"
+GRANULARITY="<--granularity で渡された時間（未指定なら既定値 2h）>"
+```
+
 - 各タスクの依存関係・実行順を把握する
 - タスク数を集計し、Phase 分割の要否を判断する（目安: 10 件超で Phase 分割を検討）
 
@@ -263,7 +273,7 @@ gh api \
 
 ### Step 5: 子 issue・sub-issue を作成して紐付ける
 
-各タスクを issue として作成し、Phase 親へ紐付ける。4h 超のタスクはさらに sub-issue に分解する。
+各タスクを issue として作成し、Phase 親へ紐付ける。粒度基準（既定 2h・`--granularity`）超のタスクはさらに sub-issue に分解する。
 
 ```bash
 # MILESTONE が空でなければ --milestone を付与する（Step 2.5 で決定済み）
@@ -294,7 +304,7 @@ gh api \
   "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues" \
   -F "sub_issue_id=${CHILD_ID}"
 
-# 4h 超の場合は sub-issue を作成して子 issue へ紐付け（同じく MILESTONE を付与）
+# 粒度基準（既定 2h・--granularity）超の場合は sub-issue を作成して子 issue へ紐付け（同じく MILESTONE を付与）
 SUB_ARGS=(--title "feat: サブタスク名" --label "phase:${PHASE}")
 if [[ -n "${MILESTONE}" ]]; then
   SUB_ARGS+=(--milestone "${MILESTONE}")
@@ -429,7 +439,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" \
 
 ## 注意事項
 
-- **1 issue は 4h 程度に収める。** 4h を超えると判断した場合は sub-issue に分解する
+- **1 issue は粒度基準（既定 2h・`--granularity` で変更可）程度に収める。** 超えると判断した場合は sub-issue に分解する
 - issue タイトルは Conventional Commits 形式を推奨（`feat:`・`fix:`・`chore:` 等）
 - `--phase` 指定で部分起票した場合、別 Phase の追加起票では **必ず `--root <既存ルートissue番号>` を渡す**（Step 3 の新規作成をスキップして既存ツリーへ継ぎ足し、Step 6 も全置換せず既存本文へ差分追記する）。起票後は update-issue-tree に同じルート issue 番号を渡して棚卸しする
 - ページネーション: sub-issues が 100 件を超える場合は `per_page=100&page=N` でページングして全件取得する
