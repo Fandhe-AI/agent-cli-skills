@@ -51,6 +51,26 @@ const isIdentifierContinuationRaw = (prevRaw, prevRaw2) => {
   return /[\p{ID_Continue}_$\u200c\u200d]/u.test(cp)
 }
 
+// `\uHHHH`\uff084\u6841\u56fa\u5b9a\uff09/ `\u{H...}`\uff08\u53ef\u5909\u9577\uff09\u5f62\u5f0f\u306e Unicode \u30b3\u30fc\u30c9\u30dd\u30a4\u30f3\u30c8\u30a8\u30b9\u30b1\u30fc\u30d7\u3092
+// `src` \u306e\u4f4d\u7f6e `i`\uff08`src[i] === '\\'` \u524d\u63d0\uff09\u304b\u3089\u691c\u51fa\u3059\u308b\u3002ECMAScript \u3067\u306f `\` \u306f\u3053\u306e\u5f62\u5f0f\u306e
+// identifier \u4e2d\u30a8\u30b9\u30b1\u30fc\u30d7\u4ee5\u5916\u306e\u4f4d\u7f6e\u306b\u306f\u51fa\u73fe\u3057\u306a\u3044\uff08\u6587\u5b57\u5217\u30fb\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u30fb\u6b63\u898f\u8868\u73fe\u30ea\u30c6\u30e9\u30eb
+// \u5185\u306f\u672c lexer \u306e\u5225\u30e2\u30fc\u30c9\u3067\u51e6\u7406\u3055\u308c\u3053\u3053\u306b\u306f\u6765\u306a\u3044\uff09\u305f\u3081\u3001code \u30e2\u30fc\u30c9\u3067 `\` \u306b\u906d\u9047\u3057\u305f\u6642\u70b9\u3067
+// \u3053\u306e\u5f62\u72b6\u306e\u30de\u30c3\u30c1\u3092\u8a66\u307f\u308c\u3070\u5341\u5206\uff08Issue #455 codex P1\uff09\u3002\u30de\u30c3\u30c1\u3057\u305f\u30a8\u30b9\u30b1\u30fc\u30d7\u5168\u4f53\u306e\u30c6\u30ad\u30b9\u30c8
+// \uff08`\` \u3092\u542b\u3080\uff09\u3092\u8fd4\u3057\u3001\u30de\u30c3\u30c1\u3057\u306a\u3051\u308c\u3070 null \u3092\u8fd4\u3059
+const matchIdentifierUnicodeEscape = (src, i) => {
+  if (src[i] !== '\\' || src[i + 1] !== 'u') return null
+  if (src[i + 2] === '{') {
+    const close = src.indexOf('}', i + 3)
+    if (close === -1) return null
+    const hex = src.slice(i + 3, close)
+    if (hex.length === 0 || !/^[0-9A-Fa-f]+$/.test(hex)) return null
+    return src.slice(i, close + 1)
+  }
+  const hex = src.slice(i + 2, i + 6)
+  if (!/^[0-9A-Fa-f]{4}$/.test(hex)) return null
+  return src.slice(i, i + 6)
+}
+
 /**
  * JS ソースからコメントのみを除去する（改行はすべて保持し行番号を維持する）。
  *
@@ -69,6 +89,11 @@ export function stripComments(src) {
   let i = 0
   const n = src.length
   let rawPrev = '' // 直前に出力した文字（空白含む）。単語の連続判定に使う
+  // 直前に消費したトークンが Unicode コードポイントエスケープ（`\uXXXX` / `\u{X...}`）の
+  // 末尾であったか。isWordChar(rawPrev) はエスケープの最終文字（`}` や hex 桁）だけでは
+  // 「識別子文字が続いていた」と判定できない（`}` 自体は識別子文字でない）ため、rawPrev の
+  // 値とは別にこのフラグで単語の地続きを追跡する（Issue #455 codex P1）
+  let rawPrevIsIdentEscape = false
   // rawPrev のさらに 1 つ前の生文字（空白含む）。`wordPrevRaw`（単語開始直前の 1 文字）が
   // サロゲートペアの下位ハーフである場合に、上位ハーフと組み合わせて 1 コードポイントへ
   // 復元するために保持する（Issue #455 codex P1: UTF-16 コード単位ごとの走査のため、
@@ -124,6 +149,7 @@ export function stripComments(src) {
         sigWord = ''
         rawPrev2 = rawPrev
         rawPrev = '`'
+        rawPrevIsIdentEscape = false
         continue
       }
       if (c === '$' && src[i + 1] === '{') {
@@ -135,6 +161,7 @@ export function stripComments(src) {
         sigWord = ''
         rawPrev2 = rawPrev
         rawPrev = '{'
+        rawPrevIsIdentEscape = false
         continue
       }
       out += c
@@ -167,6 +194,7 @@ export function stripComments(src) {
       // `//` `/*` をコメントとして削り得る（Bugbot 指摘）
       rawPrev2 = rawPrev
       rawPrev = ' '
+      rawPrevIsIdentEscape = false
       continue
     }
     // 文字列リテラル: 内部の `//` 等を素通しする
@@ -192,6 +220,7 @@ export function stripComments(src) {
       sigWord = ''
       rawPrev2 = rawPrev
       rawPrev = c
+      rawPrevIsIdentEscape = false
       continue
     }
     // テンプレートリテラル開始
@@ -201,7 +230,37 @@ export function stripComments(src) {
       stack.push({ mode: 'template' })
       rawPrev2 = rawPrev
       rawPrev = '`'
+      rawPrevIsIdentEscape = false
       continue
+    }
+    // Unicode コードポイントエスケープ（`\uXXXX` / `\u{X...}`）: ECMAScript の IdentifierPart /
+    // IdentifierStart はこの形式のエスケープを含みうる。isWordChar は `\` `{` `}` を識別子文字と
+    // 認識できないため、個別文字として処理すると単語境界が誤って分断される（`\u{1D400}1.in` の
+    // `1` が新規単語開始と誤認され、直後の `.` が末尾ドット数値と誤同一視される — Issue #455
+    // codex P1）。ここでエスケープを丸ごと 1 トークンとして消費し、直前・直後の識別子文字と
+    // 地続きに扱う（{} 深度カウントの対象にもしない — エスケープ内の `{` `}` はブロック境界
+    // ではない）
+    if (c === '\\') {
+      const esc = matchIdentifierUnicodeEscape(src, i)
+      if (esc) {
+        out += esc
+        if (isWordChar(rawPrev) || rawPrevIsIdentEscape) {
+          sigWord += esc
+        } else {
+          sigWord = esc
+          wordPrev = sigCh // 新規単語の開始: 直前の非空白文字と、それが `.` なら数字隣接を記録
+          wordPrevRaw = rawPrev
+          wordPrevRaw2 = rawPrev2
+          wordDotAfterDigit = wordPrev === '.' && dotAfterDigit
+        }
+        sigCh2 = sigCh
+        sigCh = esc[esc.length - 1]
+        rawPrev2 = rawPrev
+        rawPrev = esc[esc.length - 1]
+        rawPrevIsIdentEscape = true
+        i += esc.length
+        continue
+      }
     }
     // code モードの {} 深度（template の `${` からの復帰判定）
     if (c === '{') ctx.depth++
@@ -267,6 +326,7 @@ export function stripComments(src) {
           sigWord = ''
           rawPrev2 = rawPrev
           rawPrev = '/'
+          rawPrevIsIdentEscape = false
           continue
         }
         // 行末まで閉じ `/` が無い = regex ではなかった。通常文字として下へ流す
@@ -278,7 +338,9 @@ export function stripComments(src) {
     if (c === '\n') trimLineTail()
     out += c
     if (isWordChar(c)) {
-      if (isWordChar(rawPrev)) {
+      // rawPrevIsIdentEscape: 直前が Unicode コードポイントエスケープの末尾（`\u{1D400}1` の
+      // `1` 等）で地続きの識別子文字である場合も継続として扱う（Issue #455 codex P1）
+      if (isWordChar(rawPrev) || rawPrevIsIdentEscape) {
         sigWord += c
       } else {
         sigWord = c
@@ -310,6 +372,7 @@ export function stripComments(src) {
     }
     rawPrev2 = rawPrev
     rawPrev = c
+    rawPrevIsIdentEscape = false
     i++
   }
   // 末尾に改行を持たないソースで最終行にブロックコメント置換の空白が残るケースの保険

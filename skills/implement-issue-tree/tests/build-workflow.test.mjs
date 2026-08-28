@@ -154,6 +154,29 @@ test('非 BMP 識別子文字（サロゲートペア。数学用太字大文字
   assert.equal(stripComments(src), expected)
 })
 
+// Issue #455 codex P1（PR #456 レビュー指摘・2 巡目）の回帰固定: wordPrevRaw は「識別子中に
+// 実際に出現した文字」のみを見ており、ECMAScript の Unicode コードポイントエスケープ
+// （`\u{H...}` / `\uHHHH`）で書かれた識別子文字は認識できなかった。エスケープは `\` `{` `}`
+// を含み isWordChar（ASCII のみ）が単語境界と誤認するため、`\u{1D400}1` の `1` が新規単語
+// 開始と誤認され、直後の `.` が末尾ドット数値と誤同一視されていた（上のサロゲートペア回帰は
+// 実際の非 BMP 文字が直接書かれたソースのみをカバーしており、エスケープ表記は未カバーだった）
+test('Unicode コードポイントエスケープ（\\u{H...}）で書かれた識別子直後の数字とプロパティアクセスを末尾ドット数値と誤同一視しない', () => {
+  const src = "const x = \\u{1D400}1.in / 2 + 'http://keep' // c\n"
+  const expected = "const x = \\u{1D400}1.in / 2 + 'http://keep'\n"
+  assert.equal(stripComments(src), expected)
+})
+
+test('Unicode コードポイントエスケープ（\\uHHHH 固定4桁）で書かれた識別子直後の数字とプロパティアクセスを末尾ドット数値と誤同一視しない', () => {
+  const src = "const x = \\u0041\\u0042" + "1.in / 2 + 'http://keep' // c\n"
+  const expected = "const x = \\u0041\\u0042" + "1.in / 2 + 'http://keep'\n"
+  assert.equal(stripComments(src), expected)
+})
+
+test('Unicode コードポイントエスケープの識別子は {} 深度カウントの対象にならない（エスケープ内の { } はブロック境界ではない）', () => {
+  const src = 'function f() { const \\u{1D400} = 1; return \\u{1D400} }\n'
+  assert.equal(stripComments(src), src)
+})
+
 test('キーワード本体（in）直後の regex は保持される', () => {
   const src = 'for (const k in /x[/]y/.source) {}\n'
   assert.equal(stripComments(src), src)
