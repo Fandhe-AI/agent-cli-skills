@@ -54,9 +54,13 @@ export function stripComments(src) {
   // sigWord の直前の非空白文字。`.` なら sigWord はプロパティ名であり、キーワードと同名でも
   // 識別子として扱う（`obj.in / 2` を regex と誤読しないため — Bugbot 指摘）
   let wordPrev = ''
-  // wordPrev の 1 つ前の非空白文字。wordPrev が `.` でもその前が数字なら末尾ドット数値
-  // （`1. in /re/`）でありプロパティ名ではない — キーワード判定を維持する（Bugbot 指摘）
-  let wordPrev2 = ''
+  // 直近に出力した `.` が数字と字句的に隣接していたか（`1.` = 数値リテラルの末尾ドット）。
+  // `1 .in` のように空白を挟む `.` は数値へのプロパティアクセスなので false。非空白文字の
+  // 並びだけでは両者を区別できない（PR #454 codex P1）ため、`.` 出力時点の rawPrev で判定する
+  let dotAfterDigit = false
+  // 単語開始時点の dotAfterDigit。wordPrev が `.` でもこれが true なら末尾ドット数値直後の
+  // キーワード（`1. in /re/`）でありプロパティ名ではない — キーワード判定を維持する（Bugbot 指摘）
+  let wordDotAfterDigit = false
   // 'code'（{} 深度つき）と 'template' のネストを管理する。template 内の `${` で code を
   // push し、その code の深度が閉じたら template へ復帰する
   const stack = [{ mode: 'code', depth: 0 }]
@@ -186,8 +190,9 @@ export function stripComments(src) {
       const trailingDotNumber = sigCh === '.' && /[0-9]/.test(sigCh2)
       // `.` 直後のキーワード同名プロパティ（`obj.in / 2`・`x.return / y`）は識別子なので
       // 除算側へ倒す（Bugbot 指摘）。キーワード本体（`return /re/`・`in /re/`）は regex のまま
-      // 末尾ドット数値直後のキーワード（`1. in /re/`）はプロパティ名ではない — Bugbot 指摘
-      const keywordProperty = wordPrev === '.' && !/[0-9]/.test(wordPrev2)
+      // 末尾ドット数値直後のキーワード（`1. in /re/`）はプロパティ名ではない（Bugbot 指摘）。
+      // 数値へのプロパティアクセス `1 .in / 2` は字句隣接でないためプロパティ名として除算側
+      const keywordProperty = wordPrev === '.' && !wordDotAfterDigit
       const isDivision =
         (sigWord !== '' && (!REGEX_PRECEDING_KEYWORDS.has(sigWord) || keywordProperty)) ||
         /[)\]}]/.test(sigCh) ||
@@ -237,12 +242,13 @@ export function stripComments(src) {
         sigWord += c
       } else {
         sigWord = c
-        wordPrev = sigCh // 新規単語の開始: 直前の非空白文字とその 1 つ前を記録する
-        wordPrev2 = sigCh2
+        wordPrev = sigCh // 新規単語の開始: 直前の非空白文字と、それが `.` なら数字隣接を記録
+        wordDotAfterDigit = wordPrev === '.' && dotAfterDigit
       }
       sigCh2 = sigCh
       sigCh = c
     } else if (!/\s/.test(c)) {
+      if (c === '.') dotAfterDigit = /[0-9]/.test(rawPrev) // `1.` と `1 .` を字句隣接で区別
       sigWord = ''
       sigCh2 = sigCh
       sigCh = c
