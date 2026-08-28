@@ -20,6 +20,7 @@ closed 親下に残置された open issue の付け替え・孤児の再配置�
 ルートのトラッキング issue 番号を引数として渡す。
 `--granularity` オプションで粒度基準（1 issue に収める実装時間の上限）を指定できる。
 既定は `2h`。create-issue-tree と同じ粒度基準を用いる。
+値は Step 1 で `GRANULARITY` として確定し、Step 2・Step 7 の判定に使う。
 
 ```
 update-issue-tree 42
@@ -56,6 +57,10 @@ update-issue-tree 42 --granularity 4h
 ```bash
 ROOT_NUMBER="<ルート issue 番号>"
 
+# --granularity で渡された時間を実際の値で代入する（実行時に Claude が置き換える）
+# 例: --granularity 4h が指定された場合 → GRANULARITY="4h" / 未指定の場合 → GRANULARITY="2h"
+GRANULARITY="<--granularity で渡された時間（未指定なら既定値 2h）>"
+
 # ルート直下の sub-issues を取得（ページネーション対応）
 fetch_sub_issues() {
   local PARENT="${1}"
@@ -86,7 +91,7 @@ fetch_sub_issues "${ROOT_NUMBER}"
 | どの親にも紐付いていない孤児 issue がある | 該当 Phase 親へ紐付け（Phase が不明な場合はユーザーに確認） |
 | phase ラベルが親と一致しない issue がある | ラベルを同期 |
 | 既存 Phase に収まらない新規タスクがある | 新 Phase 親の新設を検討 |
-| 粒度基準（既定 2h・`--granularity`）超の issue が分解されていない | sub-issue に分解（create-issue-tree と同じ粒度基準） |
+| 実装時間が `${GRANULARITY}`（Step 1 で確定。既定 2h）超の issue が分解されていない | sub-issue に分解（create-issue-tree と同じ粒度基準） |
 | 対象 issue の親が別リポジトリにある（cross-repository sub-issue） | 本スキルの対象外。棚卸し対象から除外し、Step 9 の要確認事項へ記載する |
 
 棚卸し対象の一覧をユーザーに提示し、方針確認を取ってから変更を実行する。
@@ -455,7 +460,7 @@ gh issue edit "${ISSUE_NUMBER}" --remove-label "phase:0"
 
 ### Step 7: 粒度基準超の issue を sub-issue に分解する
 
-棚卸し中に粒度基準（既定 2h・`--granularity`）超と判断した issue は、create-issue-tree と同じ粒度基準で sub-issue に分解する。
+棚卸し中に実装時間が `${GRANULARITY}`（Step 1 で確定。既定 2h）超と判断した issue は、create-issue-tree と同じ粒度基準で sub-issue に分解する。
 （この POST も `reassign-sub-issue.sh` を使わない。理由は Step 5 と同じ: 新規作成した
 親なし issue への単発 POST）
 
