@@ -101,6 +101,31 @@ test('指数表記リテラル直後のプロパティアクセス（1e10.in）�
   )
 })
 
+test('符号付き指数表記リテラル直後のプロパティアクセス（1e+10.in）を末尾ドット数値と誤同一視しない（Issue #455 Bugbot）', () => {
+  assert.equal(
+    stripComments("const a = 1e+10.in / 2 + 'http://keep' // c\n"),
+    "const a = 1e+10.in / 2 + 'http://keep'\n",
+  )
+})
+
+test('負符号付き指数表記リテラル直後のプロパティアクセス（1e-5.in）を末尾ドット数値と誤同一視しない（Issue #455 Bugbot）', () => {
+  assert.equal(
+    stripComments("const a = 1e-5.in / 2 + 'http://keep' // c\n"),
+    "const a = 1e-5.in / 2 + 'http://keep'\n",
+  )
+})
+
+test('符号付き指数表記リテラル（1e+10）を含む式の除算判定・trailing コメント除去は従来通り機能する', () => {
+  assert.equal(
+    stripComments("const a = 1e+10 / 2 // c\n"),
+    "const a = 1e+10 / 2\n",
+  )
+  assert.equal(
+    stripComments("const b = 1e-5 / 2 // c\n"),
+    "const b = 1e-5 / 2\n",
+  )
+})
+
 test('16 進リテラル直後のプロパティアクセス（0x10.in）を末尾ドット数値と誤同一視しない', () => {
   assert.equal(
     stripComments("const a = 0x10.in / 2 + 'http://keep' // c\n"),

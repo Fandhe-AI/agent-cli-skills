@@ -94,6 +94,13 @@ export function stripComments(src) {
   // 「識別子文字が続いていた」と判定できない（`}` 自体は識別子文字でない）ため、rawPrev の
   // 値とは別にこのフラグで単語の地続きを追跡する（Issue #455 codex P1）
   let rawPrevIsIdentEscape = false
+  // 直前に消費した文字が、10 進数値リテラルの指数部符号（`1e+10` の `+`・`1e-5` の `-`）で
+  // あったか。指数部符号は isWordChar に含まれない（`+`/`-` は識別子文字でない）ため、
+  // 符号を挟むと sigWord が指数部の桁（`1e` + `+` + `10`）で分断され、符号後の桁だけの
+  // 「10」が独立した完結済み整数リテラルと誤認される。結果、直後の `.` が末尾ドット数値と
+  // 誤同一視され、続く `.in` がプロパティ名でなくキーワードとして扱われて regex 誤判定に
+  // つながる（Issue #455 Bugbot 指摘）。このフラグで符号を挟んでも sigWord の地続きを保つ
+  let rawPrevContinuesSigWord = false
   // rawPrev のさらに 1 つ前の生文字（空白含む）。`wordPrevRaw`（単語開始直前の 1 文字）が
   // サロゲートペアの下位ハーフである場合に、上位ハーフと組み合わせて 1 コードポイントへ
   // 復元するために保持する（Issue #455 codex P1: UTF-16 コード単位ごとの走査のため、
@@ -339,8 +346,10 @@ export function stripComments(src) {
     out += c
     if (isWordChar(c)) {
       // rawPrevIsIdentEscape: 直前が Unicode コードポイントエスケープの末尾（`\u{1D400}1` の
-      // `1` 等）で地続きの識別子文字である場合も継続として扱う（Issue #455 codex P1）
-      if (isWordChar(rawPrev) || rawPrevIsIdentEscape) {
+      // `1` 等）で地続きの識別子文字である場合も継続として扱う（Issue #455 codex P1）。
+      // rawPrevContinuesSigWord: 直前が数値リテラルの指数部符号（`1e+10` の `+`）で、その
+      // 手前の sigWord が指数部途中（`1e`）だった場合も地続きとして扱う（Issue #455 Bugbot）
+      if (isWordChar(rawPrev) || rawPrevIsIdentEscape || rawPrevContinuesSigWord) {
         sigWord += c
       } else {
         sigWord = c
@@ -351,6 +360,12 @@ export function stripComments(src) {
       }
       sigCh2 = sigCh
       sigCh = c
+      rawPrev2 = rawPrev
+      rawPrev = c
+      rawPrevIsIdentEscape = false
+      rawPrevContinuesSigWord = false
+      i++
+      continue
     } else if (!/\s/.test(c)) {
       if (c === '.') {
         // `1.` と `1 .` を字句隣接で区別（従来）に加え、直前単語が 10 進整数リテラルそのもの
@@ -366,13 +381,31 @@ export function stripComments(src) {
           wordPrev !== '.' && // `1.5.` の 2 つ目の `.`（小数部直後）はプロパティアクセス
           !isIdentifierContinuationRaw(wordPrevRaw, wordPrevRaw2) // 識別子の一部に隣接する数字を除外
       }
-      sigWord = ''
+      // 指数部符号（`1e+10` の `+`・`1e-5` の `-`）: 直前 sigWord が「数字列 [小数部] e/E」で
+      // 終わっており、かつ字句隣接（rawPrev が e/E そのもの）の場合のみ、指数部の続きとして
+      // sigWord を温存する（リセットしない）。これにより符号後の桁が sigWord へ地続きで
+      // 連結され（`1e` + `10` = `1e10`）、純粋な数字列パターンに一致しなくなるため、符号後の
+      // 桁だけを独立した完結済み整数リテラルと誤認しない（Issue #455 Bugbot 指摘）
+      const isExponentSign =
+        (c === '+' || c === '-') &&
+        /[eE]/.test(rawPrev) &&
+        /^[0-9]+(?:_[0-9]+)*(?:\.[0-9]+(?:_[0-9]+)*)?[eE]$/.test(sigWord)
+      if (!isExponentSign) {
+        sigWord = ''
+      }
       sigCh2 = sigCh
       sigCh = c
+      rawPrev2 = rawPrev
+      rawPrev = c
+      rawPrevIsIdentEscape = false
+      rawPrevContinuesSigWord = isExponentSign
+      i++
+      continue
     }
     rawPrev2 = rawPrev
     rawPrev = c
     rawPrevIsIdentEscape = false
+    rawPrevContinuesSigWord = false
     i++
   }
   // 末尾に改行を持たないソースで最終行にブロックコメント置換の空白が残るケースの保険
