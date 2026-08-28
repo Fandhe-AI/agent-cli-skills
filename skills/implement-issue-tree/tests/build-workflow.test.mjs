@@ -83,6 +83,45 @@ test('数値へのプロパティアクセス（1 .in）直後の除算行で後
   )
 })
 
+// Issue #455（Bugbot 連鎖指摘 5 巡目）の回帰固定: dotAfterDigit が「. の直前 1 文字が数字か」
+// という字句隣接のみで判定していたため、数字終わり識別子（foo1）・完了済み数値リテラル
+// （1e10・0x10）へのプロパティアクセス直後の `.` を末尾ドット数値（`1.`）と誤同一視し、
+// keywordProperty が false になって後続の `/` を regex 開始と誤読していた。
+test('数字終わり識別子直後のプロパティアクセス（foo1.in）を末尾ドット数値と誤同一視しない', () => {
+  assert.equal(
+    stripComments("const a = foo1.in / 2 + 'http://keep' // c\n"),
+    "const a = foo1.in / 2 + 'http://keep'\n",
+  )
+})
+
+test('指数表記リテラル直後のプロパティアクセス（1e10.in）を末尾ドット数値と誤同一視しない', () => {
+  assert.equal(
+    stripComments("const a = 1e10.in / 2 + 'http://keep' // c\n"),
+    "const a = 1e10.in / 2 + 'http://keep'\n",
+  )
+})
+
+test('16 進リテラル直後のプロパティアクセス（0x10.in）を末尾ドット数値と誤同一視しない', () => {
+  assert.equal(
+    stripComments("const a = 0x10.in / 2 + 'http://keep' // c\n"),
+    "const a = 0x10.in / 2 + 'http://keep'\n",
+  )
+})
+
+test('小数リテラル直後のプロパティアクセス（1.5.in）を末尾ドット数値と誤同一視しない', () => {
+  assert.equal(
+    stripComments("const a = 1.5.in / 2 + 'http://keep' // c\n"),
+    "const a = 1.5.in / 2 + 'http://keep'\n",
+  )
+})
+
+test('先頭ドット小数リテラル直後のプロパティアクセス（.5.in）を末尾ドット数値と誤同一視しない', () => {
+  assert.equal(
+    stripComments("const a = .5.in / 2 + 'http://keep' // c\n"),
+    "const a = .5.in / 2 + 'http://keep'\n",
+  )
+})
+
 test('キーワード本体（in）直後の regex は保持される', () => {
   const src = 'for (const k in /x[/]y/.source) {}\n'
   assert.equal(stripComments(src), src)

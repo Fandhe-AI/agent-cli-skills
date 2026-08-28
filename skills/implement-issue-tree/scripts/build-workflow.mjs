@@ -56,8 +56,14 @@ export function stripComments(src) {
   let wordPrev = ''
   // 直近に出力した `.` が数字と字句的に隣接していたか（`1.` = 数値リテラルの末尾ドット）。
   // `1 .in` のように空白を挟む `.` は数値へのプロパティアクセスなので false。非空白文字の
-  // 並びだけでは両者を区別できない（PR #454 codex P1）ため、`.` 出力時点の rawPrev で判定する
+  // 並びだけでは両者を区別できない（PR #454 codex P1）ため、`.` 出力時点の rawPrev で判定する。
+  // ただし字句隣接だけでは `foo1.`・`1e10.`・`0x10.`（完了済みトークンへのプロパティアクセス）
+  // を `1.` と区別できない（Issue #455）ため、直前単語が 10 進整数リテラルそのものである
+  // ことも併せて要求する（下記 `.` 判定部）
   let dotAfterDigit = false
+  // 単語開始直前の生の 1 文字（空白含む）。`wordPrev`（直前の非空白文字）だけでは非 ASCII
+  // 識別子文字（`é1` 等）に隣接する数字単語を識別子の一部として除外できないため別途保持する
+  let wordPrevRaw = ''
   // 単語開始時点の dotAfterDigit。wordPrev が `.` でもこれが true なら末尾ドット数値直後の
   // キーワード（`1. in /re/`）でありプロパティ名ではない — キーワード判定を維持する（Bugbot 指摘）
   let wordDotAfterDigit = false
@@ -243,12 +249,22 @@ export function stripComments(src) {
       } else {
         sigWord = c
         wordPrev = sigCh // 新規単語の開始: 直前の非空白文字と、それが `.` なら数字隣接を記録
+        wordPrevRaw = rawPrev // `.` 判定で「単語開始直前が識別子文字か」を見るため生文字も保持
         wordDotAfterDigit = wordPrev === '.' && dotAfterDigit
       }
       sigCh2 = sigCh
       sigCh = c
     } else if (!/\s/.test(c)) {
-      if (c === '.') dotAfterDigit = /[0-9]/.test(rawPrev) // `1.` と `1 .` を字句隣接で区別
+      if (c === '.') {
+        // `1.` と `1 .` を字句隣接で区別（従来）に加え、直前単語が 10 進整数リテラルそのもの
+        // であることも要求する。字句隣接のみだと `foo1.`・`1e10.`・`0x10.`（完了済みトークンへの
+        // プロパティアクセス）を末尾ドット数値と誤同一視してしまう（Issue #455）
+        dotAfterDigit =
+          /[0-9]/.test(rawPrev) &&
+          /^[0-9]+(?:_[0-9]+)*$/.test(sigWord) && // foo1 / 1e10 / 0x10 / 10n を除外（数値セパレータは許容）
+          wordPrev !== '.' && // `1.5.` の 2 つ目の `.`（小数部直後）はプロパティアクセス
+          !/[\p{L}\p{Nl}_$]/u.test(wordPrevRaw) // 非 ASCII 識別子文字（é1 等）に隣接する数字は識別子の一部
+      }
       sigWord = ''
       sigCh2 = sigCh
       sigCh = c
