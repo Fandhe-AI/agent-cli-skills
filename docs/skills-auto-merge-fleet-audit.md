@@ -347,3 +347,59 @@ push/PR 作成が許可されたエージェント、またはユーザー自身
 
 - `docs/update-external-rollout.md` — #342 の 5 リポ導入記録・同型のテンプレートと判定基準
 - `.claude/rules/ruleset-policy.md` — 3 軸 + classic BP の検証手順・判定表
+
+## 9. 2026-08-30 追記（方針変更: 全リポ組織変数追従へ統一）
+
+5 節の決定（案 a: `'false'` 固定）は、2026-08-30 のオーナー判断で**撤回**し、Fandhe-AI 配下の
+wrapper を組織変数追従（`skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}`）へ統一する
+方針に改めた。実施済み範囲は 9.1 節のとおり（直近 1 週間に push のあったリポが対象。`automation-spec`
+は未適用）。1〜7 節は監査時点の記録として残す（本節が現行方針）。
+
+### 9.1 適用した変更
+
+直近 1 週間（2026-08-23 以降）に push のあった非 archived 36 リポを走査し、`'false'` 固定だった
+6 リポへ同一変更を適用してマージした。
+
+| リポジトリ | PR | 備考 |
+|-----------|----|------|
+| `agent-cli-skills` | #460 | codex P0（承認境界の後退）×2 を受容済み類型として resolve。codex が required のため bypass 一時付与 → admin squash → 即復元 → 3 軸 green（bypass 0 / strict false / total 12 / unbound 0） |
+| `agent-specialist-skills` | #4 | codex P1 → 返信・resolve → squash |
+| `template-skills` | #4 | 同上 |
+| `mcp_hub-spec` | #117 | ruleset 新規適用後に auto-merge 完走 |
+| `hobby-keyboard` | #55 | 同上 |
+| `aliz-corporate-web` | #17 | 同上 |
+
+走査枠外（最終 push 2026-08-19）の `automation-spec` は `'false'` 固定・ruleset 0 件のまま**未変更**。
+
+### 9.2 保護なしリポへの ruleset 適用
+
+2 節で「`'false'` 明示済み」としていた 4 リポのうち `mcp_hub-spec` / `hobby-keyboard` /
+`aliz-corporate-web` へ、同日 `setup-repo-guards` Step 4 相当を適用した（Step 1〜3 の
+codex-review / AGENTS.md / ci-complete は未導入。3 リポとも CI workflow を持たず、
+常時報告されるチェックは Cursor Bugbot のみ）。
+
+- マージ設定: squash のみ・auto-merge 許可・ブランチ自動削除・squash タイトル/本文 = PR
+- ruleset `main-protection`: active / bypass_actors 0 / strict false / deletion・non_fast_forward /
+  `required_review_thread_resolution: true` / required check `Cursor Bugbot`（integration_id 1210556）
+- secret scanning + push protection（200）/ Dependabot alerts + automated security fixes（204）
+
+3 軸スイープ結果（3 リポ同一）:
+
+```
+{"bypass":0,"enforcement":"active","merge":["squash"],"name":"main-protection","strict":false,"thread":true,"total":1,"unbound":[]}
+classic BP: HTTP 404
+```
+
+### 9.3 PR レベル `BLOCKED` 実測
+
+3 節の判定基準「実際に PR が required checks の完了を待って `BLOCKED` になること」について、
+本リポジトリでは監査時点で未確認だった（4 節）。2026-08-30 に次を実測した。
+
+- `agent-cli-skills#460`: codex rerun 中に `mergeStateStatus=BLOCKED`・pending check 1 件で停止し、
+  完了後も required check `codex-review / codex` の FAILURE により BLOCKED を維持した
+- `mcp_hub-spec#117` / `hobby-keyboard#55` / `aliz-corporate-web#17`: ruleset 適用直後の push で
+  `BLOCKED`（Cursor Bugbot pending）→ 完了後にのみ auto-merge が完走した
+
+以上により、判定基準の 3 条件は agent-cli-skills と上記 3 リポで満たされている。残る 20 リポ
+（`VARS_FOLLOW` のうち未実測分）については「構造 green・PR レベル未実測」のまま組織変数追従で
+運用する判断をオーナーが行った（4 節の「別軸」整理は維持しつつ、その差を受容する）。
