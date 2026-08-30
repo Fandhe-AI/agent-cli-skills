@@ -144,14 +144,16 @@ jobs:
     導入すると**評価していない submodule 更新 PR が初回実行で作られてしまう**（観測ではなく
     副作用の発生）。要否の判断をスコープ外に保ったまま副作用を出さないため、明示的に無効化して
     導入した。有効化が必要になった時点で別イシューとして扱う。
-- `skills-auto-merge` も**リポジトリで分かれる**:
-  - テンプレート既定は fail-closed の `'false'`。branch protection / ruleset を持たない
-    4 リポ（`aliz-corporate-web` / `automation-spec` / `hobby-keyboard` / `mcp_hub-spec`）は
-    この既定のまま使う。
-  - `team-hub-spec` のみ `${{ vars.SKILLS_AUTO_MERGE || 'false' }}` へ変更して組織変数へ
-    追従させる。同リポは ruleset `main-protection` が `active`・`bypass_actors` 0・
-    required checks 4 件であり、**同期 PR #58 が実際に `BLOCKED` で待機している**ことまで
-    実測済みで、サーバー側強制の存在を確認できているため（「自動マージ」節を参照）。
+- `skills-auto-merge` も**リポジトリで分かれる**（2026-08-30 に現行状態へ更新）:
+  - テンプレート既定は組織変数追従 `${{ vars.SKILLS_AUTO_MERGE || 'false' }}`（2026-08-30
+    オーナー判断で Fandhe-AI 全リポを統一）。`hobby-keyboard` / `mcp_hub-spec` /
+    `aliz-corporate-web` は同日 ruleset `main-protection`（`active`・`bypass_actors` 0・
+    required check `Cursor Bugbot` を integration_id 束縛）を適用したうえでこの既定へ切り替えた
+    （`docs/skills-auto-merge-fleet-audit.md` 9 節）。
+  - `team-hub-spec` は #342 導入時から組織変数追従。同リポは ruleset `main-protection` が
+    `active`・`bypass_actors` 0・required checks 4 件であり、**同期 PR #58 が実際に `BLOCKED` で
+    待機している**ことまで実測済み（「自動マージ」節を参照）。
+  - `automation-spec` のみ固定 `'false'` のまま（ruleset 未整備・2026-08-30 時点で未変更）。
 
   したがって配置したファイルは、テンプレートのプレースホルダ置換だけでは
   `aliz-corporate-web` 分を再現できない。同リポは上記 1 行を `runner-json` の直後へ加えた
