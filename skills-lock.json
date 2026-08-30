@@ -5,7 +5,7 @@
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/anthropic-claude-code/SKILL.md",
-      "computedHash": "4863133432be0af6dd253e9a2933d63b01c9bd90eea3791dcecbae09f9e88de4"
+      "computedHash": "aac22f9c6581df5637fc30d38fd7bb0e633f1c3b2d97f1bd400f1ad0c5d6edf1"
     },
     "anthropic-claude-code-extend": {
       "source": "Fandhe-AI/agent-reference-skills",
@@ -17,7 +17,7 @@
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/github-docs/SKILL.md",
-      "computedHash": "0de39bee5c0193e098f8318388bb4fbb2a45145b961fd6d75557b1d62f4bd375"
+      "computedHash": "5091d46a4b4fa3cfe813465ae3e4de5c2e3a192db6d2c538d590a98590d9d915"
     }
   }
 }
