@@ -109,19 +109,13 @@ jobs:
       runner-json: '["self-hosted","Linux"]'
       submodule-auto-merge: ${{ vars.SUBMODULE_AUTO_MERGE || 'false' }}
       submodule-auto-merge-allowlist: ${{ vars.SUBMODULE_AUTO_MERGE_ALLOWLIST }}
-      # 組織変数 vars.SKILLS_AUTO_MERGE は実測で 'true'（visibility: all）であり、
-      # allowlist 未指定と組み合わさると「全スキルを自動マージ対象」と判定される。
-      # ここで組織変数を追従させると、branch protection / ruleset を持たないリポジトリでは
-      # 上流スキルの更新がレビューもサーバー側ゲートも通らずに main へ入る。
-      # そのため本テンプレートの既定は fail-closed の 'false' とする。
-      # 組織変数追従（${{ vars.SKILLS_AUTO_MERGE || 'false' }}）へ切り替えてよいのは、
-      # 対象リポジトリで次をすべて実測できた場合に限る:
-      #   - branch ruleset が enforcement: active かつ bypass_actors が空
-      #   - required status checks が 1 件以上登録されている
-      #   - 実際に PR が required checks の完了を待って BLOCKED になることを確認した
-      # 詳細は agent-cli-skills の .claude/rules/ruleset-policy.md を参照。
-      # 既存 wrapper 導入済みリポの棚卸し結果は docs/skills-auto-merge-fleet-audit.md（#359）を参照。
-      skills-auto-merge: 'false'
+      # 組織変数 vars.SKILLS_AUTO_MERGE に追従する（2026-08-30 オーナー判断で Fandhe-AI 全リポを統一）。
+      # 未設定（null/空）を有効と解釈する composite action の非対称設計に合わせ、
+      # 明示的に 'false' へフォールバックする。
+      # 有効化の前提となるサーバー側ゲート（ruleset active・bypass_actors 空・required checks の
+      # integration_id 束縛）は agent-cli-skills の .claude/rules/ruleset-policy.md の 3 軸スイープで実測する。
+      # 経緯と PR レベル実測の記録は docs/skills-auto-merge-fleet-audit.md（#359・9 節）を参照。
+      skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}
       skills-auto-merge-allowlist: ${{ vars.SKILLS_AUTO_MERGE_ALLOWLIST }}
     secrets:
       SUBMODULE_PAT: ${{ secrets.SUBMODULE_PAT }}
@@ -136,8 +130,9 @@ jobs:
 
 | リポジトリ | `enable-submodule` | `skills-auto-merge` |
 |---|---|---|
-| `automation-spec` / `hobby-keyboard` / `mcp_hub-spec` | 既定（渡さない） | テンプレート既定の `'false'` |
-| `aliz-corporate-web` | **`false` を明示** | テンプレート既定の `'false'` |
+| `automation-spec` | 既定（渡さない） | `'false'` 固定（ruleset 未整備・2026-08-30 時点で未変更） |
+| `hobby-keyboard` / `mcp_hub-spec` | 既定（渡さない） | **組織変数追従へ変更**（2026-08-30・ruleset `main-protection` 適用済み。hobby-keyboard#55 / mcp_hub-spec#117） |
+| `aliz-corporate-web` | **`false` を明示** | **組織変数追従へ変更**（2026-08-30・ruleset `main-protection` 適用済み。aliz-corporate-web#17） |
 | `team-hub-spec` | 既定（渡さない） | **`${{ vars.SKILLS_AUTO_MERGE \|\| 'false' }}` へ変更**（保護を実測済みのため組織変数追従） |
 
 - `enable-submodule` は**リポジトリで分かれる**:
