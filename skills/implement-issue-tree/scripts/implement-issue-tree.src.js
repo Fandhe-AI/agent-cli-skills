@@ -5350,6 +5350,24 @@ async function remeasureResidualBytesNow() {
   // PR #390）。residualBytesAtStart と byteBaselineLedgerCount は必ず同時に更新する。
   residualBytesAtStart = actualBytes
   byteBaselineLedgerCount = ephemeralWorktrees.length
+  // rawPerWorktreeByteReserve はラン開始時に 1 度だけ確定し（mainKib と avgResidualBytes の
+  // 大きい方）、以後は更新されない実装だった。ビルド成果物の蓄積等で 1 worktree あたりの実サイズが
+  // 開始時見積りより大きく育つと、実ディスク空き容量ゲート（shouldSuppressForFreeDisk /
+  // projectFreeDiskReserveBytes）がこの古い raw 値のまま必要量を過小に見積もり続け、新既定
+  // 50 GiB では枯渇直前まで新規着手を止めない（Issue #467 codex-review P0 再指摘）。ここで実測した
+  // 平均サイズを安全側（Math.max。既存の見積りを下回っても縮めない）で反映し、以後の空き容量
+  // 判定（remeasureFreeDiskNow / projectFreeDiskReserveBytes）に成長を及ぼす。
+  if (targetPaths.length > 0) {
+    const avgActualBytes = Math.ceil(actualBytes / targetPaths.length)
+    if (avgActualBytes > rawPerWorktreeByteReserve) {
+      log(
+        `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
+          `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
+          `${Math.round(avgActualBytes / (1024 * 1024))} MiB`,
+      )
+      rawPerWorktreeByteReserve = avgActualBytes
+    }
+  }
   // lastByteRemeasureOutcome は latch（newStartSuppressed）の有無に関わらず、今回の実測結果を
   // そのまま反映する（下の if は latch 未設定時のみ理由文字列を立てるが、戻り値は独立に真実を返す）。
   lastByteRemeasureOutcome = { failed: false, exceeded: actualBytes > maxResidualWorktreeBytes }

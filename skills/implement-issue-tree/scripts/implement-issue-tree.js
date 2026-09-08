@@ -5352,6 +5352,24 @@ async function remeasureResidualBytesNow() {
   byteBaselineLedgerCount = ephemeralWorktrees.length
 
 
+
+
+
+
+
+  if (targetPaths.length > 0) {
+    const avgActualBytes = Math.ceil(actualBytes / targetPaths.length)
+    if (avgActualBytes > rawPerWorktreeByteReserve) {
+      log(
+        `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
+          `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
+          `${Math.round(avgActualBytes / (1024 * 1024))} MiB`,
+      )
+      rawPerWorktreeByteReserve = avgActualBytes
+    }
+  }
+
+
   lastByteRemeasureOutcome = { failed: false, exceeded: actualBytes > maxResidualWorktreeBytes }
   if (actualBytes > maxResidualWorktreeBytes && !newStartSuppressed) {
     newStartSuppressed = {
