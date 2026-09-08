@@ -753,7 +753,13 @@ const MERGE_EXEC_VALID_REASONS = new Set(MERGE_EXEC_SCHEMA.properties.reason.enu
 
 
 
-function classifyMergeExecDispatch(execReason, currentBlockedReason) {
+
+
+
+
+
+function classifyMergeExecDispatch(execReason, currentBlockedReason, agentOutputMissing = false) {
+  if (agentOutputMissing) return { lastState: 'agent-output-missing', lastBlockedReason: currentBlockedReason }
   switch (execReason) {
     case 'unresolved-threads':
       return { lastState: 'unresolved-comments', lastBlockedReason: currentBlockedReason }
@@ -798,6 +804,34 @@ function reconcileRescueRoundState(lastState, rescueRoundActive, timeoutExecReas
     return { terminate: true, qualityBlock: true, rescuePending: false, timeoutOrigin: 'monitor' }
   }
   return { terminate: false, qualityBlock: false, rescuePending: false, timeoutOrigin: 'merge-exec' }
+}
+
+
+
+
+
+
+
+
+
+
+
+function classifyMergeTerminalStatus({ lastState, lastBlockedReason, routingErrorDetected, mergedButIssueOpen, rescueTimeoutQualityBlock }) {
+  if (routingErrorDetected) return 'failed'
+  const blockedIsRecoverable = lastState === 'blocked' && lastBlockedReason === 'quality'
+  const agentOutputMissing = lastState === 'agent-output-missing'
+  return mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments' || rescueTimeoutQualityBlock || agentOutputMissing
+    ? 'blocked'
+    : 'failed'
+}
+
+
+
+
+
+
+function classifyVerifyCloseStatus(v) {
+  return v == null ? 'blocked' : 'failed'
 }
 
 
@@ -3391,7 +3425,15 @@ function recordFailure(failure) {
 async function runVerifyClose(item) {
 
   await updateState(item.number, { status: 'implementing' })
-  const v = await agent(closePrompt(item), { label: `close:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: CLOSE_SCHEMA })
+
+
+
+  let v = null
+  try {
+    v = await agent(closePrompt(item), { label: `close:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: CLOSE_SCHEMA })
+  } catch (e) {
+    log(`⚠️ #${item.number}: クローズ検証エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
+  }
   if (v?.closed) {
     results.push({ issue: item.number, status: 'closed', note: v.summary })
     consecutiveFailures = 0
@@ -3400,9 +3442,13 @@ async function runVerifyClose(item) {
     await updateState(item.number, { status: 'closed', note: String(v.summary ?? '') })
     return true
   }
-  const reason = `親イシューのクローズ検証に失敗した: ${sanitize(v?.summary ?? 'agent error')}`
-  await updateState(item.number, { status: 'failed', note: reason })
-  recordFailure({ issue: item.number, reason })
+  const verifyCloseStatus = classifyVerifyCloseStatus(v)
+  const reason =
+    verifyCloseStatus === 'blocked'
+      ? 'クローズ検証エージェントが StructuredOutput を返さず終了した。verify-close は pr/worktree を持たない冪等な検証のため、次回実行時に素のまま再実行する'
+      : `親イシューのクローズ検証に失敗した: ${sanitize(v?.summary ?? 'agent error')}`
+  await updateState(item.number, { status: verifyCloseStatus, note: reason })
+  recordFailure({ issue: item.number, reason, status: verifyCloseStatus })
   return false
 }
 
@@ -4115,10 +4161,23 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     roundTimeoutExecReason = ''
 
 
-    const m = await agent(monitorPrompt(item, impl, externalCheckApps, externalChecksConfirmed, autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, forceThreadRescan, resolveProof.head), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA })
 
 
-    lastState = MERGE_VALID_STATES.has(m?.state) ? m.state : 'invalid-monitor-result'
+
+
+    let m = null
+    try {
+      m = await agent(monitorPrompt(item, impl, externalCheckApps, externalChecksConfirmed, autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, forceThreadRescan, resolveProof.head), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA })
+    } catch (e) {
+      log(`⚠️ #${item.number}: 監視エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
+    }
+
+
+
+
+
+
+    lastState = m == null ? 'agent-output-missing' : MERGE_VALID_STATES.has(m?.state) ? m.state : 'invalid-monitor-result'
 
     resolveProof = applyResolveProofObservation(resolveProof, { headSha: m?.headSha, compareStatus: m?.compareStatus, changedFiles: m?.changedFiles }, lastRoundPushed)
 
@@ -4139,7 +4198,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     let mergeExecSummary = ''
 
 
-    if (lastState === 'unresolved-comments') {
+
+
+
+    if (lastState === 'agent-output-missing') {
+      terminalReasonOverride = `監視エージェントが StructuredOutput を返さず終了した（PR #${impl.prNumber} は既存のため次回実行の monitoring 再開で継続する）`
+      log(`⚠️ #${item.number}: ${terminalReasonOverride}`)
+    } else if (lastState === 'unresolved-comments') {
       const rawInfo =
         Array.isArray(m?.unresolvedComments) && m.unresolvedComments.length > 0
           ? m.unresolvedComments.map(unresolvedCommentText).join(' / ')
@@ -4202,13 +4267,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         }
 
 
-        const x = await agent(mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries), {
-          label: `merge-exec:#${item.number}`,
-          phase: 'Merge',
-          model: 'sonnet',
-          effort: 'medium',
-          schema: MERGE_EXEC_SCHEMA,
-        })
+
+
+        let x = null
+        try {
+          x = await agent(mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries), {
+            label: `merge-exec:#${item.number}`,
+            phase: 'Merge',
+            model: 'sonnet',
+            effort: 'medium',
+            schema: MERGE_EXEC_SCHEMA,
+          })
+        } catch (e) {
+          log(`⚠️ #${item.number}: マージ実行エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
+        }
 
         const execReason = MERGE_EXEC_VALID_REASONS.has(x?.reason) ? x.reason : ''
         const execSummaryText = capText(sanitize(x?.summary ?? ''))
@@ -4222,13 +4294,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
-          const v = await agent(mergeVerifyPrompt(item, impl), {
-            label: `merge-verify:#${item.number}`,
-            phase: 'Merge',
-            model: 'sonnet',
-            effort: 'low',
-            schema: MERGE_VERIFY_SCHEMA,
-          })
+
+
+          let v = null
+          try {
+            v = await agent(mergeVerifyPrompt(item, impl), {
+              label: `merge-verify:#${item.number}`,
+              phase: 'Merge',
+              model: 'sonnet',
+              effort: 'low',
+              schema: MERGE_VERIFY_SCHEMA,
+            })
+          } catch (e) {
+            log(`⚠️ #${item.number}: マージ検証エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
+          }
           const verifyStateOk = v?.state === 'MERGED'
           const verifyHeadSha = sanitizeSha(v?.headRefOid)
 
@@ -4403,8 +4482,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           roundTimeoutExecReason = execReason
         } else {
 
+
+
+          if (x == null) {
+            terminalReasonOverride = `マージ実行エージェントが StructuredOutput を返さず終了した（PR #${impl.prNumber} は既存のため次回実行の monitoring 再開で継続する）`
+          }
           log(`⚠️ #${item.number}: マージ実行エージェントが無効な結果を返した`)
-          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason))
+          ;({ lastState, lastBlockedReason } = classifyMergeExecDispatch(execReason, lastBlockedReason, x == null))
         }
       }
     }
@@ -4498,11 +4582,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       if (baseMergeAgentError) {
 
 
-        const baseMergeFailReason = `base 取り込みエージェントが例外終了した（${baseMergeCount + 1} 回目。${sanitize(String(baseMergeAgentError?.message ?? baseMergeAgentError))}）`
+
+        const baseMergeFailReason = `base 取り込みエージェントが例外終了した（${baseMergeCount + 1} 回目。PR #${impl.prNumber} は既存のため次回実行の monitoring 再開で継続する。${sanitize(String(baseMergeAgentError?.message ?? baseMergeAgentError))}）`
         log(`⚠️ issue #${item.number}: ${baseMergeFailReason}`)
-        return await failMergeTerminal(baseMergeFailReason)
+        return await failMergeTerminal(baseMergeFailReason, 'blocked')
       }
-      const baseMergeSucceeded = b !== null && b !== undefined && typeof b.pushed === 'boolean'
+      if (b == null) {
+
+
+
+        const baseMergeFailReason = `base 取り込みエージェントが StructuredOutput を返さなかった（${baseMergeCount + 1} 回目。PR #${impl.prNumber} は既存のため次回実行の monitoring 再開で継続する）`
+        log(`⚠️ issue #${item.number}: ${baseMergeFailReason}`)
+        return await failMergeTerminal(baseMergeFailReason, 'blocked')
+      }
+      const baseMergeSucceeded = typeof b.pushed === 'boolean'
       if (!baseMergeSucceeded) {
 
 
@@ -4585,10 +4678,36 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
       const permittedNoPushResolveIds = computePermittedNoPushResolveIds(resolveProof, finding?.unresolvedComments)
-      const f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
+
+
+
+      let f = null
+      let fixAgentError = null
+      try {
+        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
+      } catch (e) {
+        fixAgentError = e
+      }
+      if (fixAgentError) {
+
+
+
+        recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')
+        const fixFailReason = `fix エージェントが例外終了した（${fixCount + 1} 回目。PR #${impl.prNumber} は既存のため次回実行の monitoring 再開で継続する。${sanitize(String(fixAgentError?.message ?? fixAgentError))}）`
+        log(`⚠️ issue #${item.number}: ${fixFailReason}`)
+        return await failMergeTerminal(fixFailReason, 'blocked')
+      }
+      if (f == null) {
+
+        recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')
+        const fixFailReason = `fix エージェントが StructuredOutput を返さなかった（${fixCount + 1} 回目。PR #${impl.prNumber} は既存のため次回実行の monitoring 再開で継続する）`
+        log(`⚠️ issue #${item.number}: ${fixFailReason}`)
+        return await failMergeTerminal(fixFailReason, 'blocked')
+      }
       const newWorktreePath = sanitizeWorktreePath(f?.worktreePath ?? '')
-      const fixSucceeded = f !== null && f !== undefined && typeof f.pushed === 'boolean'
+      const fixSucceeded = typeof f.pushed === 'boolean'
       if (!fixSucceeded) {
+
 
 
         const fixFailReason = `fix エージェントが無効な結果を返した（${fixCount + 1} 回目）`
@@ -4715,7 +4834,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         }
       }
       if (monitorsLeft < 1) monitorsLeft = 1
-    } else if (lastState === 'blocked' || lastState === 'invalid-monitor-result') {
+    } else if (lastState === 'blocked' || lastState === 'invalid-monitor-result' || lastState === 'agent-output-missing') {
 
 
       break
@@ -4752,12 +4871,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
       log(`#${item.number}: 救済ラウンドの再走査は成立したが merge-exec が見送ったため（${roundTimeoutExecReason}）、品質ブロックへ分類せず failed（halt カウント対象）で終端する`)
     }
-    const blockedIsRecoverable = lastState === 'blocked' && lastBlockedReason === 'quality'
-    const terminalStatus =
-      !routingErrorDetected
-      && (mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments' || rescueTimeoutQualityBlock)
-        ? 'blocked'
-        : 'failed'
+    const terminalStatus = classifyMergeTerminalStatus({ lastState, lastBlockedReason, routingErrorDetected, mergedButIssueOpen, rescueTimeoutQualityBlock })
     if (lastState === 'blocked') {
       log(`#${item.number}: blocked 終端の分類 — blockedReason: ${lastBlockedReason} → status: ${terminalStatus}（${terminalStatus === 'blocked' ? '次回実行で monitoring 再開の対象' : '再開対象外。halt カウント対象'}）`)
     }
