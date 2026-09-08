@@ -3464,10 +3464,12 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
               reason:
                 `${detail}。残置 worktree の合計サイズは容量上限 ` +
                 `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB 以内でも、実ディスクが` +
-                `先に枯渇するおそれがあるため新規イシューの着手を停止した。空き容量を確保する` +
-                `（メイン worktree の gitignored なビルド成果物・依存関係の削除、不要な worktree の` +
-                `削除、ディスク拡張等）か、args.parallel を下げるか、args.maxResidualWorktreeBytes を` +
-                `実環境の空き容量に見合う値へ明示指定してから再実行すること`,
+                `先に枯渇するおそれがあるため新規イシューの着手を停止した。この時点の必要量は` +
+                `投入済み予約 0 件・着手候補自身の予約のみで算出しており、args.parallel を下げても` +
+                `args.maxResidualWorktreeBytes を変更してもこの必要量は減らない（codex-review 指摘・` +
+                `Issue #467）ため、空き容量を確保する（メイン worktree の gitignored なビルド成果物・` +
+                `依存関係の削除、不要な worktree の削除、ディスク拡張等）ことでのみ解消できる。` +
+                `解消後に再実行すること`,
               paths: residual.paths,
             }
             log(`⚠️ ${newStartSuppressed.reason}`)
@@ -5704,10 +5706,12 @@ while (true) {
                 `予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START} 件 = ` +
                 `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
                 `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を` +
-                `停止した（実行中のイシューと monitoring 再開は継続）。空き容量を確保する（メイン worktree` +
-                `の gitignored なビルド成果物・依存関係の削除、不要な worktree の削除、ディスク拡張等）か、` +
-                `args.parallel を下げるか、args.maxResidualWorktreeBytes を実環境の空き容量に見合う値へ` +
-                `明示指定してから再実行すること`,
+                `停止した（実行中のイシューと monitoring 再開は継続）。この時点の投入済み予約は 0 件で` +
+                `あり、必要量は着手候補自身の予約のみで算出しているため、args.parallel を下げても` +
+                `args.maxResidualWorktreeBytes を変更してもこの必要量は減らない（codex-review 指摘・` +
+                `Issue #467）。空き容量を確保する（メイン worktree の gitignored なビルド成果物・依存` +
+                `関係の削除、不要な worktree の削除、ディスク拡張等）ことでのみ解消できる。解消後に` +
+                `再実行すること`,
               paths: residualPathsAtStart,
             }
             log(`⚠️ ${newStartSuppressed.reason}`)
