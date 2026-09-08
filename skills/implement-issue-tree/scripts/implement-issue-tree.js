@@ -2991,8 +2991,22 @@ function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reserve
 
 
 
-function shouldSuppressForFreeDisk(freeDiskBytes, perWorktreeByteReserve) {
-  return freeDiskBytes < perWorktreeByteReserve
+
+
+
+
+
+function projectFreeDiskReserveBytes({ reservedUnits, extraReserveUnits, rawPerWorktreeByteReserve }) {
+  return (reservedUnits + extraReserveUnits) * rawPerWorktreeByteReserve
+}
+
+
+
+
+
+
+function shouldSuppressForFreeDisk(freeDiskBytes, requiredFreeDiskBytes) {
+  return freeDiskBytes < requiredFreeDiskBytes
 }
 
 
@@ -3231,6 +3245,20 @@ let lastByteRemeasureOutcome = { failed: false, exceeded: false }
 
 
 
+
+let mainWorktreePath = ''
+let rawPerWorktreeByteReserve = 0
+
+
+
+let freeDiskBytesAtStart = 0
+let freeDiskRemeasureAtIterationSeq = -1
+
+
+let lastFreeDiskRemeasureFailed = false
+
+
+
 const PREREQ_RECHECK_MIN_MS = 60_000
 
 const PREREQ_RECHECK_TICK_MS = 5 * 60_000
@@ -3250,7 +3278,7 @@ const depDeferredLogged = new Set()
 const prereqTransitions = []
 {
   const runStartOrphanEntries = await scanOrphanWorktrees()
-  const mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
+  mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
 
 
 
@@ -3390,7 +3418,10 @@ const prereqTransitions = []
         residualBytesAtRunStart = residualBytesAtStart
         const avgResidualBytes =
           verifiedResidualPaths.length > 0 ? Math.ceil(residualBytesAtStart / verifiedResidualPaths.length) : 0
-        const rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes)
+
+
+
+        rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes)
 
 
 
@@ -3413,18 +3444,29 @@ const prereqTransitions = []
 
 
 
-        const freeDiskBytes = freeDiskKib * 1024
-        if (shouldSuppressForFreeDisk(freeDiskBytes, perWorktreeByteReserve)) {
+
+
+
+
+        freeDiskBytesAtStart = freeDiskKib * 1024
+        const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
+          reservedUnits: 0,
+          extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
+          rawPerWorktreeByteReserve,
+        })
+        if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
           const detail =
-            `実ディスク空き容量 ${Math.round(freeDiskBytes / (1024 * 1024))} MiB が新規 1 件分の` +
-            `容量予約 ${Math.round(perWorktreeByteReserve / (1024 * 1024))} MiB を下回る`
+            `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
+            `容量予約（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
+            `最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件 = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
           if (!newStartSuppressed) {
             newStartSuppressed = {
               reason:
                 `${detail}。残置 worktree の合計サイズは容量上限 ` +
                 `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB 以内でも、実ディスクが` +
                 `先に枯渇するおそれがあるため新規イシューの着手を停止した。空き容量を確保する` +
-                `（不要な worktree の削除・ディスク拡張等）か、args.maxResidualWorktreeBytes を` +
+                `（メイン worktree の gitignored なビルド成果物・依存関係の削除、不要な worktree の` +
+                `削除、ディスク拡張等）か、args.parallel を下げるか、args.maxResidualWorktreeBytes を` +
                 `実環境の空き容量に見合う値へ明示指定してから再実行すること`,
               paths: residual.paths,
             }
@@ -3433,7 +3475,7 @@ const prereqTransitions = []
             log(`⚠️ ${detail}（既に他の軸で着手を停止済み）`)
           }
         } else {
-          log(`実ディスク空き容量観測: ${Math.round(freeDiskBytes / (1024 * 1024))} MiB（新規 1 件分の予約 ${Math.round(perWorktreeByteReserve / (1024 * 1024))} MiB）`)
+          log(`実ディスク空き容量観測: ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB（新規 1 件分の予約 ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）`)
         }
 
         const bytes = residualBytesAtStart
@@ -5210,6 +5252,42 @@ async function remeasureResidualBytesNow() {
 
 
 
+
+
+
+async function remeasureFreeDiskNow() {
+  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return { failed: false }
+
+
+  if (freeDiskRemeasureAtIterationSeq === dispatchIterationSeq) return { failed: lastFreeDiskRemeasureFailed }
+  freeDiskRemeasureAtIterationSeq = dispatchIterationSeq
+  const freeDiskKib = mainWorktreePath ? await measureFreeDiskKib(mainWorktreePath) : null
+  if (freeDiskKib === null) {
+
+
+    lastFreeDiskRemeasureFailed = true
+    if (!newStartSuppressed) {
+      newStartSuppressed = {
+        reason:
+          `実ディスク空き容量のラン中実測し直しに失敗した。古い実測値をそのまま使うと空き容量の` +
+          `減少を検知できないまま容量枯渇し得るため（fail-open防止）、ディスク枯渇防止のため以降の` +
+          `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。df が実行できる` +
+          `状態を確認してから再実行すること`,
+        paths: residualPathsAtStart,
+      }
+      log(`⚠️ ${newStartSuppressed.reason}`)
+    }
+    return { failed: true }
+  }
+  lastFreeDiskRemeasureFailed = false
+  freeDiskBytesAtStart = freeDiskKib * 1024
+  return { failed: false }
+}
+
+
+
+
+
 async function probePrereqCompletion(targets) {
 
 
@@ -5434,6 +5512,28 @@ while (true) {
             log(`⚠️ #${n}: ${deferReason}`)
             continue
           }
+
+
+
+
+          const freeDiskRemeasure = await remeasureFreeDiskNow()
+          const requiredFreeDiskBytesResume = projectFreeDiskReserveBytes({
+            reservedUnits,
+            extraReserveUnits: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+            rawPerWorktreeByteReserve,
+          })
+          if (freeDiskRemeasure.failed || shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytesResume)) {
+            const deferReason = freeDiskRemeasure.failed
+              ? `実ディスク空き容量のラン中実測し直しに失敗したため monitoring 再開を defer した` +
+                `（実測できない状態のまま再開すると fix-routing-error worktree を追加作成し容量を` +
+                `枯渇させ得るため fail-closed で待機する）。原因を解消してから再実行すること`
+              : `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
+                `込みの必要量 ${Math.round(requiredFreeDiskBytesResume / (1024 * 1024))} MiB を下回るため` +
+                `monitoring 再開を defer した。空き容量を確保してから再実行すること`
+            monitoringResumeGateDeferred.set(n, deferReason)
+            log(`⚠️ #${n}: ${deferReason}`)
+            continue
+          }
         }
 
 
@@ -5578,6 +5678,36 @@ while (true) {
                 `着手候補分の見積り合計 ${Math.round((projectedBytes - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
                 `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
                 `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+              paths: residualPathsAtStart,
+            }
+            log(`⚠️ ${newStartSuppressed.reason}`)
+            continue
+          }
+
+
+
+
+          const freeDiskRemeasure = await remeasureFreeDiskNow()
+
+          if (freeDiskRemeasure.failed || newStartSuppressed) continue
+          const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
+            reservedUnits,
+            extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
+            rawPerWorktreeByteReserve,
+          })
+          if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
+            if (reservedUnits > 0) continue
+            newStartSuppressed = {
+              reason:
+                `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
+                `込みの必要量（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
+                `予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START} 件 = ` +
+                `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
+                `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を` +
+                `停止した（実行中のイシューと monitoring 再開は継続）。空き容量を確保する（メイン worktree` +
+                `の gitignored なビルド成果物・依存関係の削除、不要な worktree の削除、ディスク拡張等）か、` +
+                `args.parallel を下げるか、args.maxResidualWorktreeBytes を実環境の空き容量に見合う値へ` +
+                `明示指定してから再実行すること`,
               paths: residualPathsAtStart,
             }
             log(`⚠️ ${newStartSuppressed.reason}`)

@@ -2987,12 +2987,26 @@ function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reserve
   )
 }
 
-// 実ディスク空き容量ゲートの純粋な判定関数（Issue #467 P0 codex-review 対応）。残置サイズの
-// 合計上限（maxResidualWorktreeBytes）とは独立に、新規 1 件分の予約 perWorktreeByteReserve を
-// 実際の空き容量が下回れば危険側と判定する。呼び出し側（測定・ログ・newStartSuppressed の
-// セット）から判定式を分離し、node:test で境界値を直接固定できるようにする。
-function shouldSuppressForFreeDisk(freeDiskBytes, perWorktreeByteReserve) {
-  return freeDiskBytes < perWorktreeByteReserve
+// 実ディスク空き容量ゲートに必要な予約バイト数を算出する純粋関数（Issue #467 P0/High 再指摘
+// 対応）。バイト軸 projectResidualBytes と異なり df は「今この瞬間の実測」であり、既に作成済み
+// の worktree は既にディスクを消費済みのため unbaselinedLedgerCount は加算しない（二重計上に
+// なる）。reservedUnits（実行中タスクの未消費予約。「最大増分 − 記録済み数」で呼び出し側が算出
+// 済み）と extraReserveUnits（判定対象自身の最大増分）の合計に rawPerWorktreeByteReserve
+// （clampPerWorktreeByteReserve を通さない生の 1 worktree サイズ見積り）を掛ける。クランプ済み
+// perWorktreeByteReserve は合計上限に対する予算配分でしかなく、実際の 1 worktree サイズより
+// 小さくなり得るため、実ディスクの物理的な枯渇判定にクランプ後の値を使うと危険側を見逃す
+// （Bugbot High 指摘）。
+function projectFreeDiskReserveBytes({ reservedUnits, extraReserveUnits, rawPerWorktreeByteReserve }) {
+  return (reservedUnits + extraReserveUnits) * rawPerWorktreeByteReserve
+}
+
+// 実ディスク空き容量ゲートの純粋な判定関数（Issue #467 P0/High 再指摘対応）。残置サイズの
+// 合計上限（maxResidualWorktreeBytes）とは独立に、投入済み予約を含む必要バイト数
+// （projectFreeDiskReserveBytes の戻り値）を実際の空き容量が下回れば危険側と判定する。
+// 呼び出し側（測定・ログ・newStartSuppressed のセット）から判定式を分離し、node:test で
+// 境界値を直接固定できるようにする。
+function shouldSuppressForFreeDisk(freeDiskBytes, requiredFreeDiskBytes) {
+  return freeDiskBytes < requiredFreeDiskBytes
 }
 
 // 台帳に未検証エントリが生じたとき測定対象を物理一覧（git worktree list --porcelain）へ丸ごと
@@ -3228,6 +3242,20 @@ let byteRemeasureAtIterationSeq = -1 // 直近に実測を行った周回番号�
 // 直近の実測呼び出しが検出した failed/exceeded。newStartSuppressed は上書きしない latch のため
 // identity 比較では 2 回目以降の失敗・超過が検出漏れになる（PR #390 Bugbot High）。独立に保持する。
 let lastByteRemeasureOutcome = { failed: false, exceeded: false }
+// --- 実ディスク空き容量ゲート（第3の安全弁）のラン中再評価用状態（Issue #467 P0/High 再指摘
+// 対応）。開始時 1 回の測定・単一 worktree 分の予約比較だけでは、ラン中の空き容量減少や複数
+// worktree の同時予約消費を検知できない。バイト軸の remeasure パターン（間引き付き実測し直し・
+// 予約込み projection・latch とは独立の outcome 保持）をそのまま踏襲する。
+let mainWorktreePath = '' // メイン worktree の絶対パス（実ディスク空き容量のラン中再測定に使う）
+let rawPerWorktreeByteReserve = 0 // クランプ前の 1 worktree あたり容量見積り（バイト）。
+// perWorktreeByteReserve はバイト軸の合計上限に対する「予算配分」でクランプ済みのため、実ディスク
+// の物理的な枯渇判定には使わない（クランプ後の値は実際の 1 worktree サイズより小さくなり得て、
+// 危険側を見逃す＝Bugbot High 指摘）。この raw 値は clampPerWorktreeByteReserve を通さない。
+let freeDiskBytesAtStart = 0 // 直近確定した実ディスク空き容量の実測値（ラン中実測し直しのたびに更新）
+let freeDiskRemeasureAtIterationSeq = -1 // 直近に実測し直した周回番号（周回内 1 回の間引き用）
+// 直近の実測し直しが検出した failed。newStartSuppressed は上書きしない latch のため identity
+// 比較では 2 回目以降の失敗が検出漏れになる（バイト軸と同じ理由。PR #390 Bugbot High 踏襲）。
+let lastFreeDiskRemeasureFailed = false
 // 前提の外部完了（人手マージ等）をラン中に検知するプローブの間隔制御（Issue #442）。
 // スロットが埋まっている間は投入できないためコストを払わない — 完了駆動（周回ごと）で
 // 十分だが、監視専業の周回が長時間続く場合に備えて MIN_MS の下限だけ設ける。
@@ -3250,7 +3278,7 @@ const depDeferredLogged = new Set() // 保留ログの重複出力防止（item.
 const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind, pr?}）
 {
   const runStartOrphanEntries = await scanOrphanWorktrees()
-  const mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
+  mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
   // メイン worktree を特定できないスキャン（isMain 転記の不整合・観測失敗）では孤立記録を
   // 全体として見送る（fail-closed）。isMain とパス一致の両除外が効かない状態で続行すると、
   // baseBranch 以外の issue 命名ブランチを checkout したメイン worktree を孤立として状態
@@ -3390,7 +3418,10 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
         residualBytesAtRunStart = residualBytesAtStart // ラン開始時の唯一の確定値。以後は更新しない
         const avgResidualBytes =
           verifiedResidualPaths.length > 0 ? Math.ceil(residualBytesAtStart / verifiedResidualPaths.length) : 0
-        const rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes)
+        // rawPerWorktreeByteReserve は外側スコープの状態（実ディスク空き容量ゲート専用）。
+        // clampPerWorktreeByteReserve を通す前の値をそのまま保持し、以後の空き容量判定は必ず
+        // この raw 値を使う（クランプ後の perWorktreeByteReserve はバイト軸の予算配分専用）。
+        rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes)
         // クランプの設計根拠は clampPerWorktreeByteReserve 定義側のコメントを参照
         // （Issue #348 codex-review High 指摘: mainKib が gitignored なビルド成果物を含み
         // 過大評価になり得るため、1 件目の着手候補が予約のみで恒久停止しないよう上限を課す）。
@@ -3408,23 +3439,34 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
           )
         }
 
-        // 実ディスク空き容量ゲート（Issue #467 P0 codex-review 対応）。残置サイズが容量上限の
-        // 範囲内でも、実際の空き容量が新規 1 件分の予約 perWorktreeByteReserve を下回るなら、
-        // 上限緩和後の 50 GiB に達するよりずっと早くディスクが枯渇し得る。件数軸と同じく最初に
-        // 発火した軸を優先し newStartSuppressed を上書きしない（複数軸が同時に危険側でも理由は
-        // 1 つに絞る。全軸の観測値自体はログへ残すため運用者は原因を追える）。
-        const freeDiskBytes = freeDiskKib * 1024
-        if (shouldSuppressForFreeDisk(freeDiskBytes, perWorktreeByteReserve)) {
+        // 実ディスク空き容量ゲート（Issue #467 P0/High 再指摘対応）。残置サイズが容量上限の
+        // 範囲内でも、実際の空き容量が新規 1 件分の予約を下回るなら、上限緩和後の 50 GiB に
+        // 達するよりずっと早くディスクが枯渇し得る。件数軸と同じく最初に発火した軸を優先し
+        // newStartSuppressed を上書きしない（複数軸が同時に危険側でも理由は 1 つに絞る。全軸の
+        // 観測値自体はログへ残すため運用者は原因を追える）。開始時点は投入済み予約が無いため
+        // reservedUnits: 0・extraReserveUnits: 候補自身の最大増分（バイト軸 (b) と同じ形）。
+        // 比較には clampPerWorktreeByteReserve 通過後の perWorktreeByteReserve ではなく raw 値を
+        // 使う（クランプは合計上限に対する予算配分であり、実ディスクの物理的な枯渇判定に使うと
+        // 実際の 1 worktree サイズより小さい値と比較してしまい危険側を見逃す。Bugbot High 指摘）。
+        freeDiskBytesAtStart = freeDiskKib * 1024
+        const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
+          reservedUnits: 0,
+          extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
+          rawPerWorktreeByteReserve,
+        })
+        if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
           const detail =
-            `実ディスク空き容量 ${Math.round(freeDiskBytes / (1024 * 1024))} MiB が新規 1 件分の` +
-            `容量予約 ${Math.round(perWorktreeByteReserve / (1024 * 1024))} MiB を下回る`
+            `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
+            `容量予約（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
+            `最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件 = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
           if (!newStartSuppressed) {
             newStartSuppressed = {
               reason:
                 `${detail}。残置 worktree の合計サイズは容量上限 ` +
                 `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB 以内でも、実ディスクが` +
                 `先に枯渇するおそれがあるため新規イシューの着手を停止した。空き容量を確保する` +
-                `（不要な worktree の削除・ディスク拡張等）か、args.maxResidualWorktreeBytes を` +
+                `（メイン worktree の gitignored なビルド成果物・依存関係の削除、不要な worktree の` +
+                `削除、ディスク拡張等）か、args.parallel を下げるか、args.maxResidualWorktreeBytes を` +
                 `実環境の空き容量に見合う値へ明示指定してから再実行すること`,
               paths: residual.paths,
             }
@@ -3433,7 +3475,7 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
             log(`⚠️ ${detail}（既に他の軸で着手を停止済み）`)
           }
         } else {
-          log(`実ディスク空き容量観測: ${Math.round(freeDiskBytes / (1024 * 1024))} MiB（新規 1 件分の予約 ${Math.round(perWorktreeByteReserve / (1024 * 1024))} MiB）`)
+          log(`実ディスク空き容量観測: ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB（新規 1 件分の予約 ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）`)
         }
 
         const bytes = residualBytesAtStart
@@ -5206,6 +5248,42 @@ async function remeasureResidualBytesNow() {
   return lastByteRemeasureOutcome
 }
 
+// 実ディスク空き容量のラン中実測し直し（間引き付き。Issue #467 P0/High 再指摘対応）。
+// 開始時 1 回の測定だけでは、着手が進むほど空き容量が減っていく事実をゲートへ反映できない
+// （codex-review P0: 「実行中も空き容量を再測定して着手判定へ反映すべき」）。remeasureResidualBytesNow
+// と同じ間引き設計（同一 dispatch 周回内は 1 回のみ実測）を踏襲し、周回番号 dispatchIterationSeq
+// を共有する（同じ周回で両方呼ばれても du/df はそれぞれ 1 回ずつに収まる）。判定（reservedUnits
+// を含めた必要バイト数との比較）は呼び出し元が projectFreeDiskReserveBytes + shouldSuppressForFreeDisk
+// で行う。ここでは「最新の実測値を確定させる」ことだけを担う。
+async function remeasureFreeDiskNow() {
+  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return { failed: false }
+  // 同一周回内 2 回目以降の呼び出しは実測を省略し、この周回で確定した最新の failed を返す
+  // （呼び出し元は戻り値のみで判定すること。バイト軸の lastByteRemeasureOutcome と同じ理由）。
+  if (freeDiskRemeasureAtIterationSeq === dispatchIterationSeq) return { failed: lastFreeDiskRemeasureFailed }
+  freeDiskRemeasureAtIterationSeq = dispatchIterationSeq
+  const freeDiskKib = mainWorktreePath ? await measureFreeDiskKib(mainWorktreePath) : null
+  if (freeDiskKib === null) {
+    // 測定失敗時は古い freeDiskBytesAtStart を流用しない（fail-open防止。バイト軸の実測失敗と
+    // 同じ扱い）。呼び出し元は failed: true を見て新規着手を止める。
+    lastFreeDiskRemeasureFailed = true
+    if (!newStartSuppressed) {
+      newStartSuppressed = {
+        reason:
+          `実ディスク空き容量のラン中実測し直しに失敗した。古い実測値をそのまま使うと空き容量の` +
+          `減少を検知できないまま容量枯渇し得るため（fail-open防止）、ディスク枯渇防止のため以降の` +
+          `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。df が実行できる` +
+          `状態を確認してから再実行すること`,
+        paths: residualPathsAtStart,
+      }
+      log(`⚠️ ${newStartSuppressed.reason}`)
+    }
+    return { failed: true }
+  }
+  lastFreeDiskRemeasureFailed = false
+  freeDiskBytesAtStart = freeDiskKib * 1024
+  return { failed: false }
+}
+
 // targets（failedSet 入りした前提の番号集合）の外部完了をエージェントで確認し、遷移した分を
 // failedSet → done へ適用する（Issue #442）。dispatch ループから「空きスロットあり・保留項目
 // あり」の場合のみ呼ばれる（呼び出し条件はループ側で判定済み）。戻り値は遷移件数
@@ -5434,6 +5512,28 @@ while (true) {
             log(`⚠️ #${n}: ${deferReason}`)
             continue
           }
+          // 実ディスク空き容量ゲートのラン中再評価（Issue #467 P0/High 再指摘対応）。バイト軸の
+          // reservedUnits をそのまま再利用し、投入済み予約（実行中タスクの未消費予約＋再開候補
+          // 自身の最大増分）を反映した必要バイト数と実測を比較する（raw 値を使う理由は
+          // projectFreeDiskReserveBytes 定義側コメント参照）。
+          const freeDiskRemeasure = await remeasureFreeDiskNow()
+          const requiredFreeDiskBytesResume = projectFreeDiskReserveBytes({
+            reservedUnits,
+            extraReserveUnits: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+            rawPerWorktreeByteReserve,
+          })
+          if (freeDiskRemeasure.failed || shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytesResume)) {
+            const deferReason = freeDiskRemeasure.failed
+              ? `実ディスク空き容量のラン中実測し直しに失敗したため monitoring 再開を defer した` +
+                `（実測できない状態のまま再開すると fix-routing-error worktree を追加作成し容量を` +
+                `枯渇させ得るため fail-closed で待機する）。原因を解消してから再実行すること`
+              : `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
+                `込みの必要量 ${Math.round(requiredFreeDiskBytesResume / (1024 * 1024))} MiB を下回るため` +
+                `monitoring 再開を defer した。空き容量を確保してから再実行すること`
+            monitoringResumeGateDeferred.set(n, deferReason)
+            log(`⚠️ #${n}: ${deferReason}`)
+            continue
+          }
         }
         // 今回ゲートを通過したため古い defer 理由を残さない（残すと interrupted レポートが
         // 解消済みの手動介入案内を誤って出し続ける。issue #201）。
@@ -5578,6 +5678,36 @@ while (true) {
                 `着手候補分の見積り合計 ${Math.round((projectedBytes - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
                 `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
                 `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+              paths: residualPathsAtStart,
+            }
+            log(`⚠️ ${newStartSuppressed.reason}`)
+            continue
+          }
+          // 実ディスク空き容量ゲートのラン中再評価（Issue #467 P0/High 再指摘対応）。上の
+          // reservedUnits をそのまま再利用し、投入済み予約（実行中タスクの未消費予約＋着手候補
+          // 自身の最大増分）を反映した必要バイト数と実測を比較する。raw 値を使う理由は
+          // projectFreeDiskReserveBytes 定義側コメント参照。
+          const freeDiskRemeasure = await remeasureFreeDiskNow()
+          // 失敗時は remeasureFreeDiskNow 側が newStartSuppressed を設定済み（fail-closed）。
+          if (freeDiskRemeasure.failed || newStartSuppressed) continue
+          const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
+            reservedUnits,
+            extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
+            rawPerWorktreeByteReserve,
+          })
+          if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
+            if (reservedUnits > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
+            newStartSuppressed = {
+              reason:
+                `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
+                `込みの必要量（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
+                `予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START} 件 = ` +
+                `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
+                `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を` +
+                `停止した（実行中のイシューと monitoring 再開は継続）。空き容量を確保する（メイン worktree` +
+                `の gitignored なビルド成果物・依存関係の削除、不要な worktree の削除、ディスク拡張等）か、` +
+                `args.parallel を下げるか、args.maxResidualWorktreeBytes を実環境の空き容量に見合う値へ` +
+                `明示指定してから再実行すること`,
               paths: residualPathsAtStart,
             }
             log(`⚠️ ${newStartSuppressed.reason}`)
