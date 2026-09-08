@@ -5358,26 +5358,50 @@ async function remeasureResidualBytesNow() {
   // 平均サイズを安全側（Math.max。既存の見積りを下回っても縮めない）で反映し、以後の空き容量
   // 判定（remeasureFreeDiskNow / projectFreeDiskReserveBytes）に成長を及ぼす。
   //
-  // 分母は targetPaths.length（review / pr-create worktree を含む残置パス全件）ではなく
-  // implement kind の件数を使う（Issue #467 Bugbot 再指摘）。rawPerWorktreeByteReserve は
-  // 新規着手する「次の implement worktree」1 件分の容量見積りに使われる値であり、review /
-  // pr-create worktree は使い捨てで小さいまま残るため、全件平均だと implement worktree の
-  // 成長分がそれらに希釈されて過小評価される。actualBytes（分子）は review / pr-create 分も
-  // 含めたままなので、implement 件数のみで割ると必ず「全件平均以上」になり、安全側（過大評価）
-  // へ倒れる。residualPathsAtStart（ラン開始前からの残置パス）は kind が不明なため分母算出には
-  // 使わない。implement 件数が確定できない（0 件）場合のみ、従来どおり targetPaths.length 全件
-  // 平均へフォールバックする（分母 0 除算の回避と、implement 実測値が無い状況での唯一の代替値）。
-  const implementResidualCount = ephemeralWorktrees.filter(
-    (e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)),
-  ).length
-  const avgDivisor = implementResidualCount > 0 ? implementResidualCount : targetPaths.length
-  if (avgDivisor > 0) {
-    const avgActualBytes = Math.ceil(actualBytes / avgDivisor)
+  // 分子（actualBytes）は residualPathsAtStart（過去ランの残置。kind 不明）を含む targetPaths
+  // 全件の合計だが、分母に implement kind の件数だけを使うと、過去ランの残置が多いほど
+  // 1 件あたりの見積りが本ラン implement worktree の実サイズと無関係に膨らみ続ける
+  // （Issue #467 codex-review 再指摘。例: 過去残置 20 件が各 1 GiB・本ラン implement 1 件が
+  // 1 GiB のとき、20 + 1 = 21 GiB を 1 件で割ると 21 GiB という誤った見積りになり、以後
+  // 十分な空き容量があっても新規着手が恒久停止し得る）。分子・分母の対象を implement kind の
+  // パスだけに揃えるため、implement worktree の使用量のみを個別に測定し直す（1 回余分に
+  // measureResidualWorktreeBytes を呼ぶが、この関数自体が間引き済みのため頻度は抑えられている）。
+  // implement worktree が 0 件（分母 0 除算の回避）の場合のみ、implement 実測値が無い状況での
+  // 唯一の代替値として targetPaths.length 全件平均へフォールバックする（review / pr-create を
+  // 含む全件平均は implement 単独の実サイズより小さくなり得るが、implement データが皆無な状況の
+  // 代替に留まる）。
+  const implementPaths = ephemeralWorktrees
+    .filter((e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)))
+    .map((e) => e.path)
+    .filter((p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:'))
+  const implementResidualCount = implementPaths.length
+  if (implementResidualCount > 0) {
+    const implementKib = await measureResidualWorktreeBytes(implementPaths)
+    if (implementKib === null) {
+      log(
+        `⚠️ implement worktree のみのディスク使用量実測に失敗したため、1 worktree あたりの` +
+          `容量予約見積りの更新をスキップした（分子・分母の対象がずれた全件平均へはフォールバック` +
+          `しない。次回の実測し直しで再試行する）`,
+      )
+    } else {
+      const avgActualBytes = Math.ceil((implementKib * 1024) / implementResidualCount)
+      if (avgActualBytes > rawPerWorktreeByteReserve) {
+        log(
+          `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
+            `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
+            `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
+        )
+        rawPerWorktreeByteReserve = avgActualBytes
+      }
+    }
+  } else if (targetPaths.length > 0) {
+    const avgActualBytes = Math.ceil(actualBytes / targetPaths.length)
     if (avgActualBytes > rawPerWorktreeByteReserve) {
       log(
         `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
           `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
-          `${Math.round(avgActualBytes / (1024 * 1024))} MiB`,
+          `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree データが無いため残置` +
+          `全件 ${targetPaths.length} 件の平均へフォールバック）`,
       )
       rawPerWorktreeByteReserve = avgActualBytes
     }

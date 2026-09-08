@@ -5367,17 +5367,41 @@ async function remeasureResidualBytesNow() {
 
 
 
-  const implementResidualCount = ephemeralWorktrees.filter(
-    (e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)),
-  ).length
-  const avgDivisor = implementResidualCount > 0 ? implementResidualCount : targetPaths.length
-  if (avgDivisor > 0) {
-    const avgActualBytes = Math.ceil(actualBytes / avgDivisor)
+
+
+
+  const implementPaths = ephemeralWorktrees
+    .filter((e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)))
+    .map((e) => e.path)
+    .filter((p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:'))
+  const implementResidualCount = implementPaths.length
+  if (implementResidualCount > 0) {
+    const implementKib = await measureResidualWorktreeBytes(implementPaths)
+    if (implementKib === null) {
+      log(
+        `⚠️ implement worktree のみのディスク使用量実測に失敗したため、1 worktree あたりの` +
+          `容量予約見積りの更新をスキップした（分子・分母の対象がずれた全件平均へはフォールバック` +
+          `しない。次回の実測し直しで再試行する）`,
+      )
+    } else {
+      const avgActualBytes = Math.ceil((implementKib * 1024) / implementResidualCount)
+      if (avgActualBytes > rawPerWorktreeByteReserve) {
+        log(
+          `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
+            `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
+            `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
+        )
+        rawPerWorktreeByteReserve = avgActualBytes
+      }
+    }
+  } else if (targetPaths.length > 0) {
+    const avgActualBytes = Math.ceil(actualBytes / targetPaths.length)
     if (avgActualBytes > rawPerWorktreeByteReserve) {
       log(
         `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
           `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
-          `${Math.round(avgActualBytes / (1024 * 1024))} MiB`,
+          `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree データが無いため残置` +
+          `全件 ${targetPaths.length} 件の平均へフォールバック）`,
       )
       rawPerWorktreeByteReserve = avgActualBytes
     }
