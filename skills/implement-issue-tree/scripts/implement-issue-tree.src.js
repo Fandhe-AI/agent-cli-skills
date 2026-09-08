@@ -137,9 +137,9 @@ const DEFAULT_MAX_RESIDUAL_WORKTREES = 100
 // バイト軸を maxResidualWorktreeBytes: 0 で明示オプトアウトし件数軸未指定の場合のみ、件数軸を
 // 安全側の旧既定値へ自動的に引き下げる（parseMaxResidualWorktrees の bytesAxisDisabled 引数）。
 const LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES = 20
-// 残置 worktree ディスク使用量の上限（バイト、既定 2 GiB）。件数軸と独立な第2軸（Issue #348）。
+// 残置 worktree ディスク使用量の上限（バイト、既定 50 GiB）。件数軸と独立な第2軸（Issue #348）。
 // 0 はこのバイト軸のみの明示オプトアウト（件数軸の fail-closed には影響しない）。
-const DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES = 2 * 1024 * 1024 * 1024 // 2 GiB
+const DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES = 50 * 1024 * 1024 * 1024 // 50 GiB（Issue #467。旧既定 2 GiB では Rust 等ビルド成果物の大きいリポジトリで 1 worktree が 8 GiB を超え、1 イシュー完了時点で新規着手が停止していた。vector-db #629 実測・親 #464）
 // バイト軸の確定。maxResidualWorktrees の既定値解決が参照するため件数軸より先に確定する。
 const maxResidualWorktreeBytes = parseMaxResidualWorktreeBytes(
   parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.maxResidualWorktreeBytes : undefined,
@@ -456,7 +456,7 @@ function parseMaxResidualWorktrees(raw, bytesAxisDisabled) {
 }
 
 // args.maxResidualWorktreeBytes の検証・数値化（バイト単位。件数軸と独立の第2軸・Issue #348）。
-// 未指定 → 既定 2 GiB、0 → バイト軸のみ無効化（件数軸には影響しない）、正の整数 → その値、
+// 未指定 → 既定 50 GiB、0 → バイト軸のみ無効化（件数軸には影響しない）、正の整数 → その値、
 // 他 → throw（fail-closed）。
 function parseMaxResidualWorktreeBytes(raw) {
   if (raw === undefined || raw === null) return DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES
@@ -464,7 +464,7 @@ function parseMaxResidualWorktreeBytes(raw) {
     throw new Error(
       `args.maxResidualWorktreeBytes は 0 以上の整数（バイト数）で指定すること（0 はこの` +
         `バイト軸のみ上限なし＝無効化。件数軸 maxResidualWorktrees の fail-closed は維持される。` +
-        `既定は ${DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES}（2 GiB）。残置 worktree のディスク枯渇` +
+        `既定は ${DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES}（50 GiB）。残置 worktree のディスク枯渇` +
         `防止ゲートの入力のため誤記は fail-closed で拒否する）: ${String(raw).slice(0, 50)}`,
     )
   }

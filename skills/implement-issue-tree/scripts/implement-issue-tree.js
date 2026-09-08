@@ -139,7 +139,7 @@ const DEFAULT_MAX_RESIDUAL_WORKTREES = 100
 const LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES = 20
 
 
-const DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES = 2 * 1024 * 1024 * 1024
+const DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES = 50 * 1024 * 1024 * 1024
 
 const maxResidualWorktreeBytes = parseMaxResidualWorktreeBytes(
   parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.maxResidualWorktreeBytes : undefined,
@@ -464,7 +464,7 @@ function parseMaxResidualWorktreeBytes(raw) {
     throw new Error(
       `args.maxResidualWorktreeBytes は 0 以上の整数（バイト数）で指定すること（0 はこの` +
         `バイト軸のみ上限なし＝無効化。件数軸 maxResidualWorktrees の fail-closed は維持される。` +
-        `既定は ${DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES}（2 GiB）。残置 worktree のディスク枯渇` +
+        `既定は ${DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES}（50 GiB）。残置 worktree のディスク枯渇` +
         `防止ゲートの入力のため誤記は fail-closed で拒否する）: ${String(raw).slice(0, 50)}`,
     )
   }
