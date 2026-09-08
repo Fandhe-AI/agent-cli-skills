@@ -5357,8 +5357,22 @@ async function remeasureResidualBytesNow() {
   // 50 GiB では枯渇直前まで新規着手を止めない（Issue #467 codex-review P0 再指摘）。ここで実測した
   // 平均サイズを安全側（Math.max。既存の見積りを下回っても縮めない）で反映し、以後の空き容量
   // 判定（remeasureFreeDiskNow / projectFreeDiskReserveBytes）に成長を及ぼす。
-  if (targetPaths.length > 0) {
-    const avgActualBytes = Math.ceil(actualBytes / targetPaths.length)
+  //
+  // 分母は targetPaths.length（review / pr-create worktree を含む残置パス全件）ではなく
+  // implement kind の件数を使う（Issue #467 Bugbot 再指摘）。rawPerWorktreeByteReserve は
+  // 新規着手する「次の implement worktree」1 件分の容量見積りに使われる値であり、review /
+  // pr-create worktree は使い捨てで小さいまま残るため、全件平均だと implement worktree の
+  // 成長分がそれらに希釈されて過小評価される。actualBytes（分子）は review / pr-create 分も
+  // 含めたままなので、implement 件数のみで割ると必ず「全件平均以上」になり、安全側（過大評価）
+  // へ倒れる。residualPathsAtStart（ラン開始前からの残置パス）は kind が不明なため分母算出には
+  // 使わない。implement 件数が確定できない（0 件）場合のみ、従来どおり targetPaths.length 全件
+  // 平均へフォールバックする（分母 0 除算の回避と、implement 実測値が無い状況での唯一の代替値）。
+  const implementResidualCount = ephemeralWorktrees.filter(
+    (e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)),
+  ).length
+  const avgDivisor = implementResidualCount > 0 ? implementResidualCount : targetPaths.length
+  if (avgDivisor > 0) {
+    const avgActualBytes = Math.ceil(actualBytes / avgDivisor)
     if (avgActualBytes > rawPerWorktreeByteReserve) {
       log(
         `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +

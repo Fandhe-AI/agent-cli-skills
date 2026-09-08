@@ -5357,8 +5357,22 @@ async function remeasureResidualBytesNow() {
 
 
 
-  if (targetPaths.length > 0) {
-    const avgActualBytes = Math.ceil(actualBytes / targetPaths.length)
+
+
+
+
+
+
+
+
+
+
+  const implementResidualCount = ephemeralWorktrees.filter(
+    (e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)),
+  ).length
+  const avgDivisor = implementResidualCount > 0 ? implementResidualCount : targetPaths.length
+  if (avgDivisor > 0) {
+    const avgActualBytes = Math.ceil(actualBytes / avgDivisor)
     if (avgActualBytes > rawPerWorktreeByteReserve) {
       log(
         `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
