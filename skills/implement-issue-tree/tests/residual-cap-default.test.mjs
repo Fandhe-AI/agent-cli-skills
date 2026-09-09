@@ -137,10 +137,10 @@ test('fail-closed 分岐（スキャン失敗時の新規着手抑止）がス�
 // リポジトリ非依存の絶対閾値を独立した第2軸として併用する。検証・既定値・0 の意味・
 // throw 条件は件数軸の parseMaxResidualWorktrees と同型のため、同じ観点で固定する。
 
-test('バイト軸の既定値は 2 GiB（未指定・null のいずれも DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES を返す）', () => {
-  assert.equal(DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES, 2 * 1024 * 1024 * 1024)
-  assert.equal(parseMaxResidualWorktreeBytes(undefined), 2 * 1024 * 1024 * 1024)
-  assert.equal(parseMaxResidualWorktreeBytes(null), 2 * 1024 * 1024 * 1024)
+test('バイト軸の既定値は 50 GiB（未指定・null のいずれも DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES を返す）', () => {
+  assert.equal(DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES, 50 * 1024 * 1024 * 1024)
+  assert.equal(parseMaxResidualWorktreeBytes(undefined), 50 * 1024 * 1024 * 1024)
+  assert.equal(parseMaxResidualWorktreeBytes(null), 50 * 1024 * 1024 * 1024)
 })
 
 test('バイト軸の 0 はこの軸のみの明示オプトアウトとして通り、正の整数はそのまま返る', () => {
@@ -231,10 +231,10 @@ test('新規着手・monitoring 再開の両方が projectResidualBytes によ�
 
 test('容量軸のラン中再評価: 開始時残置 0 件でも 1 worktree あたりの予約が大きいと件数上限より先に新規着手を止める', () => {
   // 実装の projected バイト計算式（(a) 恒久 latch の単純形。予約 reservedUnits=0 の近似）を
-  // そのまま模倣する。1 worktree ≈ 1.5 GiB（既定 2 GiB 上限に対し数件で到達する大きさ）の
+  // そのまま模倣する。1 worktree ≈ 1.5 GiB（シナリオ上の 2 GiB 上限に対し数件で到達する大きさ）の
   // 配布先で、件数軸だけなら 100/6 ≈ 16 イシュー着手できるはずが、バイト軸により
   // 数イシュー以内で止まることを固定する（Issue #348 codex-review 指摘の核心シナリオ）。
-  const maxResidualWorktreeBytes = DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES // 2 GiB
+  const maxResidualWorktreeBytes = 2 * 1024 * 1024 * 1024 // シナリオ固定値（本番既定値とは独立。本番既定値の固定は別テスト「バイト軸の既定値は...」が担う）
   const perWorktreeByteReserve = 1.5 * 1024 * 1024 * 1024 // 1 worktree ≈ 1.5 GiB
   const residualBytesAtStart = 0 // 開始時残置 0 件（旧実装ではバイト軸が丸ごと不成立になっていたケース）
   let ephemeralCount = 0
@@ -249,7 +249,7 @@ test('容量軸のラン中再評価: 開始時残置 0 件でも 1 worktree あ
   }
   assert.ok(
     suppressedAtIssue !== null && suppressedAtIssue <= 2,
-    `1 worktree ≈1.5GiB のとき 2 GiB 上限は 1〜2 イシュー目で抑止されるべきだが suppressedAtIssue=${suppressedAtIssue}`,
+    `1 worktree ≈1.5GiB のときシナリオ上の 2 GiB 上限は 1〜2 イシュー目で抑止されるべきだが suppressedAtIssue=${suppressedAtIssue}`,
   )
 })
 
