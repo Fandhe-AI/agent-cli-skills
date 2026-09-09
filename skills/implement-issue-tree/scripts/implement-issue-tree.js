@@ -5378,11 +5378,31 @@ async function remeasureResidualBytesNow() {
   if (implementResidualCount > 0) {
     const implementKib = await measureResidualWorktreeBytes(implementPaths)
     if (implementKib === null) {
-      log(
-        `⚠️ implement worktree のみのディスク使用量実測に失敗したため、1 worktree あたりの` +
-          `容量予約見積りの更新をスキップした（分子・分母の対象がずれた全件平均へはフォールバック` +
-          `しない。次回の実測し直しで再試行する）`,
-      )
+
+
+
+
+
+      lastByteRemeasureOutcome = { failed: true, exceeded: false }
+      if (!newStartSuppressed) {
+        newStartSuppressed = {
+          reason:
+            `implement worktree のみの追加測定に失敗したため、1 worktree あたりの容量予約` +
+            `見積り（rawPerWorktreeByteReserve）を更新できなかった。古い予約量のまま続行すると` +
+            `実際の成長を過小評価し容量枯渇を許す fail-open になるため（perWorktreeByteReserve` +
+            `による見積りは開始時の下限 floor 値であり実使用量の上界ではない）、ディスク枯渇防止の` +
+            `ため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
+            `原因を解消してから再実行すること`,
+          paths: residualPathsAtStart,
+        }
+        log(`⚠️ ${newStartSuppressed.reason}`)
+      } else {
+        log(
+          `⚠️ implement worktree のみのディスク使用量実測に失敗した（既に新規着手を停止済みの` +
+            `ため追加の抑止はしない）`,
+        )
+      }
+      return lastByteRemeasureOutcome
     } else {
       const avgActualBytes = Math.ceil((implementKib * 1024) / implementResidualCount)
       if (avgActualBytes > rawPerWorktreeByteReserve) {
