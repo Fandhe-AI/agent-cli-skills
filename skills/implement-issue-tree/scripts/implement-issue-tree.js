@@ -3137,6 +3137,19 @@ function resolveUnverifiedImplementPaths({ issues, physicalEntries, claimedPaths
 
 
 
+function classifyStartMeasurementFailure({ mainKib, kib, freeDiskKib }) {
+  if (mainKib === null || kib === null) return 'bytes'
+  if (freeDiskKib === null) return 'free-disk'
+  return 'none'
+}
+
+
+
+
+
+
+
+
 function escalateNewStartSuppressed(current, next) {
   if (!next) return { latch: current, changed: false, escalated: false }
   if (!current) return { latch: next, changed: true, escalated: false }
@@ -3546,19 +3559,20 @@ const prereqTransitions = []
 
       const freeDiskKib = mainWorktreePath ? await measureFreeDiskKib(mainWorktreePath) : null
 
-      let kib = null
-      if (hasUnverifiedResidualPath) {
-        kib = null
-      } else if (verifiedResidualPaths.length > 0) {
-        kib = await measureResidualWorktreeBytes(verifiedResidualPaths)
-      } else {
-        kib = 0
-      }
 
-      if (mainKib === null || kib === null || freeDiskKib === null) {
+
+      const residualMeasured = hasUnverifiedResidualPath
+        ? null
+        : verifiedResidualPaths.length > 0
+          ? await measureResidualWorktreeBytesDetailed(verifiedResidualPaths)
+          : { kib: 0, missing: 0 }
+      const kib = residualMeasured === null ? null : residualMeasured.kib
+
+      const startFailure = classifyStartMeasurementFailure({ mainKib, kib, freeDiskKib })
+      if (startFailure === 'bytes') {
         const detail = hasUnverifiedResidualPath
           ? `残置 worktree 一覧に検証不可なパスが含まれるため測定対象から除外し測定失敗として扱った（対象 ${residual.paths.length} 件）`
-          : `残置 worktree のディスク使用量を測定できず（対象 ${residual.paths.length} 件、メイン worktree 測定: ${mainKib === null ? '失敗' : '成功'}、実空き容量測定: ${freeDiskKib === null ? '失敗' : '成功'}）`
+          : `残置 worktree のディスク使用量を測定できず（対象 ${residual.paths.length} 件、メイン worktree 測定: ${mainKib === null ? '失敗' : '成功'}、残置合計測定: ${kib === null ? '失敗' : '成功'}）`
         if (
           !latchNewStartSuppressed({
             reason:
@@ -3566,7 +3580,7 @@ const prereqTransitions = []
               `容量を確認できないため、ディスク枯渇防止の容量上限ゲート` +
               `（上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB）を適用できず、` +
               `新規イシューの着手を停止し、implement の monitoring 再開も defer した（fail-closed）。` +
-              `du / df が実行できる状態を確認してから再実行すること`,
+              `du が実行できる状態を確認してから再実行すること`,
             paths: residual.paths,
           })
         ) {
@@ -3576,8 +3590,14 @@ const prereqTransitions = []
         residualBytesObserved = true
         residualBytesAtStart = kib * 1024
         residualBytesAtRunStart = residualBytesAtStart
+
+
         const avgResidualBytes =
-          verifiedResidualPaths.length > 0 ? Math.ceil(residualBytesAtStart / verifiedResidualPaths.length) : 0
+          computeAveragePerWorktreeBytes({
+            kib,
+            sentCount: verifiedResidualPaths.length,
+            missing: residualMeasured.missing,
+          }) ?? 0
 
 
 
@@ -3609,38 +3629,56 @@ const prereqTransitions = []
 
 
 
-        freeDiskBytesAtStart = freeDiskKib * 1024
-        const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
-          reservedUnits: 0,
-          extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
-          rawPerWorktreeByteReserve,
-        })
-        if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
-          const detail =
-            `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
-            `容量予約（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
-            `最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件 = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
-          if (
-            !latchNewStartSuppressed({
-              reason:
-                `${detail}。残置 worktree の合計サイズは容量上限 ` +
-                `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB 以内でも、実ディスクが` +
-                `先に枯渇するおそれがあるため新規イシューの着手を停止した。この時点の必要量は` +
-                `投入済み予約 0 件・着手候補自身の予約のみで算出しており、args.parallel を下げても` +
-                `args.maxResidualWorktreeBytes を変更してもこの必要量は減らない（codex-review 指摘・` +
-                `Issue #467）ため、空き容量を確保する（メイン worktree の gitignored なビルド成果物・` +
-                `依存関係の削除、不要な worktree の削除、ディスク拡張等）ことでのみ解消できる。` +
-                `解消後に再実行すること`,
-              paths: residual.paths,
+
+        if (startFailure === 'free-disk') {
 
 
-              implementOnly: true,
-            })
-          ) {
-            log(`⚠️ ${detail}（既に他の軸で着手を停止済み）`)
-          }
+
+
+
+          latchNewStartSuppressed({
+            reason:
+              `ラン開始時の実ディスク空き容量の測定に失敗した（df を実行できず）。残置 worktree の` +
+              `容量観測自体は成立しているが、実ディスクが先に枯渇するおそれを判定できないため、` +
+              `新規イシューの着手（implement）を停止した（verify-close と monitoring 再開は継続）。` +
+              `df が実行できる状態を確認してから再実行すること`,
+            paths: residual.paths,
+            implementOnly: true,
+          })
         } else {
-          log(`実ディスク空き容量観測: ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB（新規 1 件分の予約 ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）`)
+          freeDiskBytesAtStart = freeDiskKib * 1024
+          const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
+            reservedUnits: 0,
+            extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
+            rawPerWorktreeByteReserve,
+          })
+          if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
+            const detail =
+              `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
+              `容量予約（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
+              `最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件 = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
+            if (
+              !latchNewStartSuppressed({
+                reason:
+                  `${detail}。残置 worktree の合計サイズは容量上限 ` +
+                  `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB 以内でも、実ディスクが` +
+                  `先に枯渇するおそれがあるため新規イシューの着手を停止した。この時点の必要量は` +
+                  `投入済み予約 0 件・着手候補自身の予約のみで算出しており、args.parallel を下げても` +
+                  `args.maxResidualWorktreeBytes を変更してもこの必要量は減らない（codex-review 指摘・` +
+                  `Issue #467）ため、空き容量を確保する（メイン worktree の gitignored なビルド成果物・` +
+                  `依存関係の削除、不要な worktree の削除、ディスク拡張等）ことでのみ解消できる。` +
+                  `解消後に再実行すること`,
+                paths: residual.paths,
+
+
+                implementOnly: true,
+              })
+            ) {
+              log(`⚠️ ${detail}（既に他の軸で着手を停止済み）`)
+            }
+          } else {
+            log(`実ディスク空き容量観測: ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB（新規 1 件分の予約 ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）`)
+          }
         }
 
         const bytes = residualBytesAtStart
