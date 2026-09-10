@@ -130,6 +130,60 @@ test('postPushChecksInstruction: 未確定・観測不能を CONFLICTING へ倒�
   )
 })
 
+// PR #480 の codex P1 / Bugbot Medium 回帰テスト: 「チェック総数」を check-run の total_count
+// だけで数えると、check-run を作らず commit status のみを発行する CI を使うリポジトリで、
+// 正常なチェックが存在するのに 0 件と誤判定して 3e（blocked）や base 取り込みへ回してしまう。
+// gh pr checks / merge-exec の集計（gh 公式実装 pkg/cmd/pr/checks/aggregate.go）と同じく
+// check-run + commit status の合計で数えること、および取得失敗を 0 件扱いにしないことを固定する。
+const COUNT_TARGETS = [
+  ['prCreatePrompt', () => prCreatePrompt(item, impl, [])],
+  ['fixPrompt(pushAfterFix: true)', () => {
+    mod.__setBoundaryNonceSeedForTest(NONCE)
+    return fixPrompt(item, impl, { summary: 'テスト用の指摘', unresolvedComments: [] }, true)
+  }],
+  ['monitorPrompt', () => monitorPrompt(item, impl, [], true, true)],
+]
+
+test('チェック総数は check-run と commit status の合計で数える（PR #480）', () => {
+  for (const [name, build] of COUNT_TARGETS) {
+    const prompt = build()
+    assert.ok(prompt.includes("check-runs --jq '.total_count'"), `${name}: check-run 総数の取得指示がない`)
+    assert.ok(
+      prompt.includes("/status --jq '.statuses | length'"),
+      `${name}: commit status（combined status）件数の取得指示がない — check-run のみを数えると commit status だけの CI で 0 件と誤判定する`,
+    )
+    assert.ok(prompt.includes('合計'), `${name}: 両者を合算する指示がない`)
+  }
+})
+
+test('チェック総数の取得失敗を 0 件扱いにしない（PR #480 codex P1）', () => {
+  for (const [name, build] of COUNT_TARGETS) {
+    const prompt = build()
+    assert.ok(
+      prompt.includes('どちらか一方でも失敗した場合は「取得失敗」として扱う'),
+      `${name}: 片方の取得失敗を「取得失敗」として扱う指示がない`,
+    )
+    assert.ok(
+      prompt.includes('0 件と同一視してはならない'),
+      `${name}: 取得失敗を 0 件と同一視しない旨の指示がない`,
+    )
+  }
+})
+
+test('monitorPrompt: 取得失敗時は checksTotal を省略し、--watch へ進む（0 件直行させない）', () => {
+  const prompt = monitorPrompt(item, impl, [], true, true)
+  const idx2 = prompt.indexOf('\n2. ')
+  const section2 = prompt.slice(idx2, prompt.indexOf('\n3. ', idx2))
+  assert.ok(
+    section2.includes('取得失敗時は checksTotal を省略し、0 を返してはならない'),
+    '取得失敗時に checksTotal を省略する指示がない（0 を返すとホストが timeout を conflicting へ誤って倒す）',
+  )
+  assert.ok(
+    section2.includes('取得に失敗した場合は次へ進む'),
+    '取得失敗時に --watch へ進む（0 件直行させない）指示がない',
+  )
+})
+
 // ---------------------------------------------------------------------------
 // (2) スキーマ（新フィールドと enum の同期）
 // ---------------------------------------------------------------------------
@@ -175,7 +229,8 @@ test('monitorPrompt: 手順 2 は --watch の前に check-run 総数を取得し
   assert.ok(idx3 > idx2, '手順 3 の開始位置を特定できない')
   const section2 = prompt.slice(idx2, idx3)
   const totalIdx = section2.indexOf("check-runs --jq '.total_count'")
-  const watchIdx = section2.indexOf('gh pr checks')
+  // 集計定義の説明文にも「gh pr checks」の語が出るため、--watch 実行コマンドで位置決めする。
+  const watchIdx = section2.indexOf(`gh pr checks ${impl.prNumber} --watch`)
   assert.ok(totalIdx >= 0, '手順 2 に check-run 総数の取得指示がない')
   assert.ok(watchIdx >= 0, '手順 2 に --watch 監視の指示がない')
   assert.ok(totalIdx < watchIdx, 'check-run 総数の取得が --watch より後にある（0 件のまま watch へ入ってしまう）')

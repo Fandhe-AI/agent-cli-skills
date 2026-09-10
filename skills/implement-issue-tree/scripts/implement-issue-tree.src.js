@@ -700,7 +700,7 @@ const MERGE_SCHEMA = {
     checksTotal: {
       type: 'integer',
       minimum: 0,
-      description: '手順 2 で取得した HEAD sha に対する check-run の総数（total_count）。取得できなかった場合のみ省略する。timeout を返す場合は 1 以上でなければならない（0 件のまま上限到達は timeout ではなく手順 3e の判定へ倒す）',
+      description: '手順 2 で取得した HEAD sha に対するチェック総数（check-run の total_count + combined status の statuses 件数。gh pr checks / merge-exec と同じ集計定義。Issue #480）。どちらか一方でも取得に失敗した場合は省略する（取得失敗を 0 として返してはならない）。timeout を返す場合は 1 以上でなければならない（0 件のまま上限到達は timeout ではなく手順 3e の判定へ倒す）',
     },
     // resolve (b) 許可判定用（Issue #430）。値の解釈はホスト側が行う（automerge-design.md 参照）。
     compareStatus: {
@@ -1067,7 +1067,7 @@ const FIX_SCHEMA = {
     // 旧エージェント出力との互換のため required にはしない（省略時はヒントなしとして扱われる）。
     checksStarted: {
       type: 'boolean',
-      description: 'push 後の head sha に対する check-run が 1 件以上起動したか（完了は待たない）。観測不能は false。診断・分岐ヒント専用。',
+      description: 'push 後の head sha に対するチェック（check-run + commit status の合計。gh pr checks と同じ集計定義。Issue #480）が 1 件以上起動したか（完了は待たない）。観測不能・取得失敗は false（「0 件だった」ことの主張ではない）。診断・分岐ヒント専用。',
     },
     mergeableAfterPush: {
       type: 'string',
@@ -1179,7 +1179,7 @@ const PR_CREATE_SCHEMA = {
     // 旧エージェント出力との互換のため required にはしない（省略時はヒントなしとして扱われる）。
     checksStarted: {
       type: 'boolean',
-      description: 'push 後の head sha に対する check-run が 1 件以上起動したか（完了は待たない）。観測不能は false。診断・分岐ヒント専用。',
+      description: 'push 後の head sha に対するチェック（check-run + commit status の合計。gh pr checks と同じ集計定義。Issue #480）が 1 件以上起動したか（完了は待たない）。観測不能・取得失敗は false（「0 件だった」ことの主張ではない）。診断・分岐ヒント専用。',
     },
     mergeableAfterPush: {
       type: 'string',
@@ -2430,7 +2430,7 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, client
     // compareStatus/changedFiles 取得）より後に置く — 1c の早期 needs-fix 復帰が 1b の実行を
     // スキップさせない順序を保つため。
     `1c. state が OPEN の場合のみ判定する: mergeable が "CONFLICTING" なら、PR は base とコンフリクトしており test merge commit が作られないため pull_request トリガーの CI check-run が構造的に起動しない（待っても収束しない）。手順 2 の gh pr checks --watch へは進まず、先に手順 5 の reviewThreads 走査（GraphQL・ページネーション込み）を実行して未解決スレッドがあれば unresolvedComments 配列に載せたうえで state: conflicting を返す（品質問題ではないため fix 予算を消費しない base 取り込み専用エージェントへ回る）。summary には「mergeable: CONFLICTING（実測値）。base 取り込みとコンフリクト解消が必要。コンフリクト PR は pull_request トリガー CI が起動しない」と書く。mergeable が "UNKNOWN" の場合は GitHub 側の算出待ちのため 30 秒程度あけて最大 3 回再取得し（再取得のたびに state と mergeable の両方を確認する。state が OPEN でなくなっていれば手順 1 の該当分岐に従う。リトライの途中で state が OPEN のまま mergeable が "CONFLICTING" に確定した場合は、それ以上リトライせず本手順冒頭の CONFLICTING 経路 — reviewThreads 走査を先に行ったうえで state: conflicting — へ回す）、上限まで確定しなければ UNKNOWN のまま通常フロー（手順 2）へ進む（UNKNOWN を CONFLICTING と扱って fix 予算を空費しない）。`,
-    `2. まず --watch に入る前に、手順 1 で取得した HEAD sha に対する check-run の総数を取得する（Issue #479）: gh api repos/{owner}/{repo}/commits/<手順 1 の headRefOid>/check-runs --jq '.total_count' を実行し、その値を checksTotal として返却に含める（取得に失敗した場合のみ checksTotal を省略する）。総数が 0 件なら gh pr checks --watch へは進まず、直ちに手順 3e（有界待機 + mergeable 再判定）へ直行する（コンフリクト PR は test merge commit が作られず pull_request トリガの check-run が構造的に 0 件のままになるため、--watch で待っても収束しない）。総数が 1 件以上の場合のみ次へ進む: gh pr checks ${impl.prNumber} --watch --interval 60 で全チェック完了まで監視する（Bash の timeout に 600000 を指定し、コマンドがタイムアウトしたら同コマンドを再実行。再実行は 4 回まで = 最長およそ 40 分）。gh pr checks --watch がチェック不在で即時に非ゼロ終了する場合がある。これを「監視完了」とみなさず、手順 3 の総数確認へ進む。再実行 4 回を使い切っても完了しない場合も、ここで timeout を返さず手順 3 の総数確認へ進む（手順 3 を経ずに timeout を返すと、チェックが 0 件のまま監視上限だけを消費して収束しない経路が残るため。Issue #479）。`,
+    `2. まず --watch に入る前に、手順 1 で取得した HEAD sha に対するチェック総数を取得する（Issue #479 / #480）。チェック総数は check-run 件数と commit status 件数の合計とする（gh pr checks・merge-exec の集計と同じ定義。gh 公式実装 pkg/cmd/pr/checks/aggregate.go は両者を合算する。check-run を作らず commit status のみを発行する CI（外部 CI サービス等）を使うリポジトリで、正常なチェックが存在するのに 0 件と誤判定しないため）: gh api repos/{owner}/{repo}/commits/<手順 1 の headRefOid>/check-runs --jq '.total_count' と gh api repos/{owner}/{repo}/commits/<手順 1 の headRefOid>/status --jq '.statuses | length'（combined status。同一 context の重複は API 側で最新 1 件へ集約済み）の 2 つを取得して合計する。両方の取得に成功した場合のみ合計値を確定値として扱い、どちらか一方でも失敗した場合は「取得失敗」として扱う（0 件と同一視してはならない — 取得失敗を 0 件へ倒すと、実際にはチェックが動いている PR をコンフリクト扱いへ落としてしまう）。確定値が得られた場合のみその値を checksTotal として返却に含める（取得失敗時は checksTotal を省略し、0 を返してはならない）。確定値が 0 件なら gh pr checks --watch へは進まず、直ちに手順 3e（有界待機 + mergeable 再判定）へ直行する（コンフリクト PR は test merge commit が作られず pull_request トリガの check-run が構造的に 0 件のままになるため、--watch で待っても収束しない）。確定値が 1 件以上の場合、および取得に失敗した場合は次へ進む（取得失敗は 0 件扱いにせず、従来どおり --watch と手順 3 の実測に委ねる）: gh pr checks ${impl.prNumber} --watch --interval 60 で全チェック完了まで監視する（Bash の timeout に 600000 を指定し、コマンドがタイムアウトしたら同コマンドを再実行。再実行は 4 回まで = 最長およそ 40 分）。gh pr checks --watch がチェック不在で即時に非ゼロ終了する場合がある。これを「監視完了」とみなさず、手順 3 の総数確認へ進む。再実行 4 回を使い切っても完了しない場合も、ここで timeout を返さず手順 3 の総数確認へ進む（手順 3 を経ずに timeout を返すと、チェックが 0 件のまま監視上限だけを消費して収束しない経路が残るため。Issue #479）。`,
     `3. watch 完了後、gh pr checks ${impl.prNumber} の出力で全チェックの結論を列挙して確認する。「watch が終わった」だけでは合格にしない。以下を厳密に確認する:`,
     '   a. 全チェックが success / neutral / skipped で完了していること（failure / cancelled / timed_out が 0 件）。',
     '   b. pending / queued / in_progress が 0 件であること。残っていれば再 watch する。',
@@ -2455,7 +2455,7 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, client
       ? `6. CI 全 green（pending/failure 0 件）・外部チェック指摘なし・未解決レビューコメントなしの全条件が揃ったら state: ready を返して終了する（マージ・イシュークローズは自ら実行しない。本ランは autoMerge opt-in のため、後続のマージ実行エージェントが checks・HEAD sha・未解決スレッド数・外部チェック起動を独立に再検証したうえで squash merge を実行する）。summary には確認した全チェックの結論件数・未解決スレッド数を実測値として書き、「PR #${impl.prNumber} はマージ条件充足（後続エージェントが独立再検証のうえマージを実行する）」と明記する。`
       : `6. CI 全 green（pending/failure 0 件）・外部チェック指摘なし（または外部チェックなし確定）・未解決レビューコメントなしの全条件が揃ったら state: ready を返して終了する（マージ・イシュークローズは実行しない。本ランでは新規マージを行わないため、後続エージェントは checks・HEAD sha・未解決スレッド数の独立再検証とマージ済み PR のクローズ回復のみを行う）。summary には確認した全チェックの結論件数・未解決スレッド数を実測値として書く。本ランは自動マージ無効（autoMerge: true + externalChecks 確定 + 全 App の信頼済み context 宣言の opt-in ではない）のため、ready 返却後も新規マージはホスト側ゲートにより実行されない。summary には「PR #${impl.prNumber} はマージ可能状態で停止（マージは GitHub 上で人間が行う）」と明記する。`,
     '7. state: timeout を返してよいのは「チェックが 1 件以上存在し、それが pending（queued / in_progress）のまま監視上限に達した場合」だけに限定する（Issue #479）。チェック総数が 0 件のまま上限へ達した場合は timeout を返さず、手順 3e の判定（state: conflicting、または state: blocked / blockedReason: "quality"）を返す — ホストは checksTotal: 0 の timeout を受理しない。timeout を返すときは checksTotal に実測の総数（1 以上）を入れる。自力で解決できない事象（state を blocked と判断する場合）は blockedReason を必ず付与し（再監視・再実行で解消し得るなら "quality"、PR が CLOSED 等で回復し得ないなら "unrecoverable"。判断できない場合は "unrecoverable"）、その時点の残存 unresolved スレッドを summary だけでなく unresolvedComments 配列側の該当要素（{ threadId, text, url }）にも【残存未解決】マーカー付きで列挙して返す（呼び出し元は summary より unresolvedComments 配列を優先するため、配列側にマーカーがないと記録が失われる）。',
-    '返却: state / summary / headSha（手順 1 で取得した 40 桁の HEAD sha。state: ready のとき必須） / blockedReason（state: blocked のとき必須。"quality" または "unrecoverable"。省略・enum 外はホスト側で "unrecoverable" として扱われ、次回実行時の自動再開対象から外れる） / unresolvedComments（未解決スレッドがある場合、{ threadId, text, url, path } の配列。url・path は取得できた場合のみ） / checksTotal（手順 2 で取得した HEAD sha に対する check-run 総数。取得できた場合は必ず返す。timeout を返す場合は 1 以上） / compareStatus・changedFiles（手順 1b の結果。resolve (b) の許可判定専用）。マージ可否の判定は手順 3〜6 で自ら収集した証拠のみで行う。',
+    '返却: state / summary / headSha（手順 1 で取得した 40 桁の HEAD sha。state: ready のとき必須） / blockedReason（state: blocked のとき必須。"quality" または "unrecoverable"。省略・enum 外はホスト側で "unrecoverable" として扱われ、次回実行時の自動再開対象から外れる） / unresolvedComments（未解決スレッドがある場合、{ threadId, text, url, path } の配列。url・path は取得できた場合のみ） / checksTotal（手順 2 で取得した HEAD sha に対するチェック総数 = check-run + commit status の合計。確定値が得られた場合のみ返し、取得失敗時は省略する。timeout を返す場合は 1 以上） / compareStatus・changedFiles（手順 1b の結果。resolve (b) の許可判定専用）。マージ可否の判定は手順 3〜6 で自ら収集した証拠のみで行う。',
   ].join('\n')
 }
 
@@ -2713,13 +2713,14 @@ function pushVerifyInstruction(branch, steps = {}) {
 
 // push 直後の CI 起動確認指示（Issue #479）。prCreatePrompt 手順 3b / fixPrompt(pushAfterFix:
 // true) 手順 4 の共用。base とコンフリクトした PR は GitHub が test merge commit を作れず
-// pull_request トリガの check-run が構造的に 0 件のままになるため、監視ラウンド（最大 7・
+// pull_request トリガのチェック（check-run + commit status。Issue #480）が構造的に 0 件のままに
+// なるため、監視ラウンド（最大 7・
 // 1 ラウンド最長約 40 分）を消費する前に push した本人が有界（30 秒間隔・最大 5 分）で観測して
 // 返す。ホストはこの自己申告値をマージ判定には一切使わず、base 取り込み分岐へ直行するヒントと
 // してのみ使う。baseMergePrompt 手順 4 の checksStarted / mergeableAfter とは別経路・別フィールド
 // 名（mergeableAfterPush）であり、そちらの契約は変更しない。
 function postPushChecksInstruction(prRef) {
-  return `push 後 CI 起動確認（必須。Issue #479）: gh pr view ${prRef} --json headRefOid --jq .headRefOid で push 済みの head sha を取得し、gh api repos/{owner}/{repo}/commits/<headRefOid>/check-runs --jq '.total_count' と gh pr view ${prRef} --json mergeable --jq .mergeable を 30 秒間隔で最大 5 分観測する（チェックの完了は待たない。完了判定は監視エージェントの役割）。total_count が 1 件以上になり、かつ mergeable が UNKNOWN 以外（MERGEABLE / CONFLICTING）へ確定した時点で早期終了してよい。観測結果を checksStarted（1 件以上を確認できたら true、上限まで 0 件のままなら false）と mergeableAfterPush（最終値をそのまま返す。push 直後は GitHub 側の算出待ちで UNKNOWN になるため確定を待つが、上限に達しても確定しなければ UNKNOWN のまま返す — 推測で MERGEABLE / CONFLICTING を返してはならない。上限到達で checksStarted: false かつ未確定のままでも CONFLICTING とみなさず UNKNOWN を返す）として返す。gh コマンドが失敗して観測できない場合も checksStarted: false・mergeableAfterPush: "UNKNOWN" として返す（fail-closed）。この観測は診断・分岐ヒント専用であり、結果がどうであれ本手順より前に確定した返却値（prNumber / pushed）の判定を変えてはならない。`
+  return `push 後 CI 起動確認（必須。Issue #479）: gh pr view ${prRef} --json headRefOid --jq .headRefOid で push 済みの head sha を取得し、その head sha に対するチェック総数と gh pr view ${prRef} --json mergeable --jq .mergeable を 30 秒間隔で最大 5 分観測する（チェックの完了は待たない。完了判定は監視エージェントの役割）。チェック総数は check-run 件数と commit status 件数の合計とする（gh pr checks・merge-exec の集計と同じ定義。gh 公式実装 pkg/cmd/pr/checks/aggregate.go は両者を合算する。check-run を作らず commit status のみを発行する CI（外部 CI サービス等）を使うリポジトリで、正常なチェックが存在するのに 0 件と誤判定しないため）: gh api repos/{owner}/{repo}/commits/<headRefOid>/check-runs --jq '.total_count' と gh api repos/{owner}/{repo}/commits/<headRefOid>/status --jq '.statuses | length'（combined status。同一 context の重複は API 側で最新 1 件へ集約済み）の 2 つを取得して合計する。両方の取得に成功した場合のみ合計値を確定値として扱い、どちらか一方でも失敗した場合は「取得失敗」として扱う（0 件と同一視してはならない — 取得失敗を 0 件へ倒すと、実際にはチェックが動いている PR をコンフリクト扱いへ落としてしまう）。チェック総数の確定値が 1 件以上になり、かつ mergeable が UNKNOWN 以外（MERGEABLE / CONFLICTING）へ確定した時点で早期終了してよい。観測結果を checksStarted（確定値で 1 件以上を確認できたら true、上限まで確定値 0 件のままなら false。取得失敗のまま上限に達した場合も false = 「起動を確認できなかった」であり「0 件だった」ではない）と mergeableAfterPush（最終値をそのまま返す。push 直後は GitHub 側の算出待ちで UNKNOWN になるため確定を待つが、上限に達しても確定しなければ UNKNOWN のまま返す — 推測で MERGEABLE / CONFLICTING を返してはならない。上限到達で checksStarted: false かつ未確定のままでも CONFLICTING とみなさず UNKNOWN を返す）として返す。gh コマンドが失敗して観測できない場合も checksStarted: false・mergeableAfterPush: "UNKNOWN" として返す（fail-closed。取得失敗を「チェック 0 件」「CONFLICTING」と読み替えてはならない）。この観測は診断・分岐ヒント専用であり、結果がどうであれ本手順より前に確定した返却値（prNumber / pushed）の判定を変えてはならない。`
 }
 
 function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushResolveIds = []) {
@@ -4747,7 +4748,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // enum 外応答（モデルが何か返した上での不整合）と同列に 'failed' 扱いすると、次回実行が
     // Recover→再実装へ流れ既存 PR に対して重複 PR を作りかねない。
     lastState = m == null ? 'agent-output-missing' : MERGE_VALID_STATES.has(m?.state) ? m.state : 'invalid-monitor-result'
-    // Issue #479: check-run が 1 件も無いまま返された timeout は受理しない。総数 0 件は
+    // Issue #479: チェックが 1 件も無いまま返された timeout は受理しない。ここでの「チェック」は
+    // check-run + commit status の合計（gh pr checks / merge-exec と同じ集計定義。Issue #480）で
+    // あり、monitor は取得失敗時に checksTotal を省略する契約のため、この分岐へ来るのは
+    // 「実測で 0 件と確定した」場合だけである。総数 0 件は
     // 「コンフリクトで pull_request CI が構造的に起動しない」典型であり、timeout として次
     // ラウンドへ回すと監視枠（7 ラウンド・最長およそ 40 分/ラウンド）を空費した末に failed
     // 終端する。conflicting へ再判定し base 取り込みで解消を試みる（baseMergeCount で有界・
