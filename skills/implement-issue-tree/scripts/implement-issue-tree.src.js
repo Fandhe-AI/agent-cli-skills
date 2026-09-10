@@ -6536,9 +6536,12 @@ const orphanDeleteCandidates = []
 if (orphanEntriesAtEnd.length > 0) {
   const mainWorktreePathAtEnd = findMainWorktreePath(orphanEntriesAtEnd)
   // 判定はスナップショットでなく、ラン内の全 updateState を反映した最新の状態ファイルを正本とする。
+  // loadState は { items, highWaterBytes } を返す（Issue #471）ため、items マップのみを取り出す
+  // （Bugbot PR #478 指摘: このオブジェクトをそのまま items マップとして扱うと issue status /
+  // worktree lookup が miss し、削除すべき残置 worktree を回収できない）。
   let freshItems = {}
   try {
-    freshItems = await loadState()
+    freshItems = (await loadState()).items
   } catch (e) {
     log(`⚠️ 孤立 worktree のスイープ判定用に状態ファイルを再読込できなかった（${e?.message ?? e}）。孤立分の削除は見送る`)
   }

@@ -6536,9 +6536,12 @@ const orphanDeleteCandidates = []
 if (orphanEntriesAtEnd.length > 0) {
   const mainWorktreePathAtEnd = findMainWorktreePath(orphanEntriesAtEnd)
 
+
+
+
   let freshItems = {}
   try {
-    freshItems = await loadState()
+    freshItems = (await loadState()).items
   } catch (e) {
     log(`⚠️ 孤立 worktree のスイープ判定用に状態ファイルを再読込できなかった（${e?.message ?? e}）。孤立分の削除は見送る`)
   }
