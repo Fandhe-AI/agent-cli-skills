@@ -5778,6 +5778,13 @@ async function remeasureFreeDiskNow() {
   // （呼び出し元は戻り値のみで判定すること。バイト軸の lastByteRemeasureOutcome と同じ理由）。
   if (freeDiskRemeasureAtIterationSeq === dispatchIterationSeq) return { failed: lastFreeDiskRemeasureFailed }
   freeDiskRemeasureAtIterationSeq = dispatchIterationSeq
+  // df 実行前に台帳長を保持する（Issue #475 codex P1 対応）。measureFreeDiskKib は await を
+  // 挟むため、df 実行後〜結果返却までの間にも並行タスクが worktree を作成・記録し得る。
+  // await の後に ephemeralWorktrees.length を読むと、その間の増分まで「測定済み」として
+  // 基準に取り込んでしまい、次の判定で未測定消費が 0 扱いになって実際の空き容量を超える
+  // 投入を許し得る（「未測定消費を予約へ反映する」契約に反する）。df 開始直前の台帳長を
+  // 基準として固定し、成功時にのみ採用する。
+  const ledgerLengthBeforeMeasure = ephemeralWorktrees.length
   const freeDiskKib = mainWorktreePath ? await measureFreeDiskKib(mainWorktreePath) : null
   if (freeDiskKib === null) {
     // 測定失敗時は古い freeDiskBytesAtStart を流用しない（fail-open防止。バイト軸の実測失敗と
@@ -5797,7 +5804,7 @@ async function remeasureFreeDiskNow() {
   }
   lastFreeDiskRemeasureFailed = false
   freeDiskBytesAtStart = freeDiskKib * 1024
-  freeDiskMeasuredAtLedgerCount = ephemeralWorktrees.length
+  freeDiskMeasuredAtLedgerCount = ledgerLengthBeforeMeasure
   return { failed: false }
 }
 

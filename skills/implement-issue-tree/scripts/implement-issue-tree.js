@@ -5778,6 +5778,13 @@ async function remeasureFreeDiskNow() {
 
   if (freeDiskRemeasureAtIterationSeq === dispatchIterationSeq) return { failed: lastFreeDiskRemeasureFailed }
   freeDiskRemeasureAtIterationSeq = dispatchIterationSeq
+
+
+
+
+
+
+  const ledgerLengthBeforeMeasure = ephemeralWorktrees.length
   const freeDiskKib = mainWorktreePath ? await measureFreeDiskKib(mainWorktreePath) : null
   if (freeDiskKib === null) {
 
@@ -5797,7 +5804,7 @@ async function remeasureFreeDiskNow() {
   }
   lastFreeDiskRemeasureFailed = false
   freeDiskBytesAtStart = freeDiskKib * 1024
-  freeDiskMeasuredAtLedgerCount = ephemeralWorktrees.length
+  freeDiskMeasuredAtLedgerCount = ledgerLengthBeforeMeasure
   return { failed: false }
 }
 

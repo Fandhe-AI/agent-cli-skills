@@ -130,12 +130,25 @@ test('projectFreeDiskReserveBytes: ledgerLength / measuredAtLedgerCount を省�
   assert.equal(result, 9 * rawPerWorktreeByteReserve)
 })
 
-test('remeasureFreeDiskNow は df 実測完了時点の台帳長を freeDiskMeasuredAtLedgerCount へ保持する（Issue #475 codex P1）', () => {
+test('remeasureFreeDiskNow は df 実行前（await の前）に確定した台帳長を freeDiskMeasuredAtLedgerCount へ採用する（Issue #475/#477 codex P1）', () => {
   const fnStart = source.indexOf('async function remeasureFreeDiskNow()')
   const fnEnd = source.indexOf('\n// targets（failedSet 入りした前提の番号集合）の外部完了を', fnStart)
   assert.ok(fnStart >= 0 && fnEnd > fnStart, 'remeasureFreeDiskNow 本体を特定できること')
   const fnBody = source.slice(fnStart, fnEnd)
-  assert.match(fnBody, /freeDiskMeasuredAtLedgerCount = ephemeralWorktrees\.length/)
+  // measureFreeDiskKib は await を挟むため、await 後に ephemeralWorktrees.length を読むと
+  // df 実行中に並行タスクが積んだ増分まで「測定済み」扱いになってしまう（未測定消費を
+  // 予約へ反映する契約に反する）。await より前の位置で台帳長を変数へ保持し、成功時に
+  // その変数を採用していることを固定する。
+  const measureCallIndex = fnBody.indexOf('await measureFreeDiskKib(')
+  assert.ok(measureCallIndex >= 0, 'measureFreeDiskKib の呼び出しを特定できること')
+  const beforeMeasure = fnBody.slice(0, measureCallIndex)
+  const afterMeasure = fnBody.slice(measureCallIndex)
+  const captureMatch = beforeMeasure.match(/const (\w+) = ephemeralWorktrees\.length/)
+  assert.ok(captureMatch, 'await 前に ephemeralWorktrees.length を変数へ捕捉していること')
+  const capturedVar = captureMatch[1]
+  assert.match(afterMeasure, new RegExp(`freeDiskMeasuredAtLedgerCount = ${capturedVar}\\b`))
+  // await 後に ephemeralWorktrees.length を直接代入していない（バグの再発防止）。
+  assert.doesNotMatch(afterMeasure, /freeDiskMeasuredAtLedgerCount = ephemeralWorktrees\.length/)
 })
 
 test('projectFreeDiskReserveBytes の呼び出しのうち、実測時点の判定を行う 3 箇所すべてが ledgerLength / measuredAtLedgerCount を渡す（df 実測後の台帳増分未反映の再発防止）', () => {
