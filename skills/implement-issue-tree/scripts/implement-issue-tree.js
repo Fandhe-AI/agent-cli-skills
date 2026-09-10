@@ -3059,8 +3059,31 @@ function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reserve
 
 
 
-function projectFreeDiskReserveBytes({ reservedUnits, extraReserveUnits, rawPerWorktreeByteReserve }) {
-  return (reservedUnits + extraReserveUnits) * rawPerWorktreeByteReserve
+
+
+
+
+
+
+
+
+
+
+
+
+function computeUnmeasuredLedgerIncrement({ ledgerLength = 0, measuredAtLedgerCount = 0 }) {
+  return Math.max(0, ledgerLength - measuredAtLedgerCount)
+}
+
+function projectFreeDiskReserveBytes({
+  reservedUnits,
+  extraReserveUnits,
+  rawPerWorktreeByteReserve,
+  ledgerLength = 0,
+  measuredAtLedgerCount = 0,
+}) {
+  const unmeasuredLedgerIncrement = computeUnmeasuredLedgerIncrement({ ledgerLength, measuredAtLedgerCount })
+  return (reservedUnits + extraReserveUnits + unmeasuredLedgerIncrement) * rawPerWorktreeByteReserve
 }
 
 
@@ -3111,12 +3134,25 @@ function listUnverifiedImplementIssues(entries) {
 
 
 
-function resolveUnverifiedImplementPaths({ issues, physicalEntries, claimedPaths, mainPath }) {
+
+
+
+
+function resolveUnverifiedImplementPaths({ issues, physicalEntries, independentCount, claimedPaths, mainPath }) {
   const list = Array.isArray(physicalEntries) ? physicalEntries : []
+  const issuesList = Array.isArray(issues) ? issues : []
+  const countValid = Number.isInteger(independentCount) && independentCount >= 0 && independentCount === list.length
+
+
+
+  const mainFlaggedCount = list.filter((e) => e?.isMain === true).length
+  if (!countValid || mainFlaggedCount !== 1) {
+    return { paths: [], unresolvedIssues: [...issuesList] }
+  }
   const claimed = new Set(Array.isArray(claimedPaths) ? claimedPaths : [])
   const paths = []
   const unresolvedIssues = []
-  for (const issue of Array.isArray(issues) ? issues : []) {
+  for (const issue of issuesList) {
     const candidates = []
     for (const entry of list) {
       if (entry?.isMain) continue
@@ -3418,7 +3454,7 @@ let byteRemeasureAtIterationSeq = -1
 
 
 
-let lastByteRemeasureOutcome = { failed: false, exceeded: false }
+let lastByteRemeasureOutcome = { failed: false, exceeded: false, reserveStale: false }
 
 
 
@@ -3430,6 +3466,11 @@ let rawPerWorktreeByteReserve = 0
 
 let freeDiskBytesAtStart = 0
 let freeDiskRemeasureAtIterationSeq = -1
+let freeDiskMeasuredAtLedgerCount = 0
+
+
+
+
 
 
 
@@ -3650,10 +3691,13 @@ const prereqTransitions = []
           })
         } else {
           freeDiskBytesAtStart = freeDiskKib * 1024
+          freeDiskMeasuredAtLedgerCount = ephemeralWorktrees.length
           const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
             reservedUnits: 0,
             extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
             rawPerWorktreeByteReserve,
+            ledgerLength: ephemeralWorktrees.length,
+            measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
           })
           if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
             const detail =
@@ -5434,7 +5478,8 @@ async function remeasureResidualBytesIfDue() {
 
 
 async function remeasureResidualBytesNow() {
-  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return { failed: false, exceeded: false }
+  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved)
+    return { failed: false, exceeded: false, reserveStale: false }
 
 
   if (byteRemeasureAtIterationSeq === dispatchIterationSeq) return lastByteRemeasureOutcome
@@ -5484,7 +5529,7 @@ async function remeasureResidualBytesNow() {
   if (kib === null) {
 
 
-    lastByteRemeasureOutcome = { failed: true, exceeded: false }
+    lastByteRemeasureOutcome = { failed: true, exceeded: false, reserveStale: false }
 
 
     const failureCauseDetail = measurementFailed
@@ -5513,6 +5558,27 @@ async function remeasureResidualBytesNow() {
 
   residualBytesAtStart = actualBytes
   byteBaselineLedgerCount = ephemeralWorktrees.length
+
+
+
+
+
+
+
+  const exceededAtActualMeasurement = actualBytes > maxResidualWorktreeBytes
+  if (exceededAtActualMeasurement) {
+    latchNewStartSuppressed({
+      reason:
+        `残置 worktree のディスク使用量をラン中に実測し直したところ容量上限 ` +
+        `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過した（実測 ` +
+        `${Math.round(actualBytes / (1024 * 1024))} MiB、対象 ${targetPaths.length} 件）。` +
+        `perWorktreeByteReserve による見積りは開始時の下限 floor 値のため、ビルド成果物等で` +
+        `実際の消費が見積りを上回った場合はこの実測が検知する。ディスク枯渇防止のため以降の` +
+        `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。不要な` +
+        `worktree を git worktree remove で手動削除してから再実行すること`,
+      paths: residualPathsAtStart,
+    })
+  }
 
 
 
@@ -5562,11 +5628,12 @@ async function remeasureResidualBytesNow() {
 
 
 
-    const freshEntries = await scanOrphanWorktrees()
+    const [freshEntries, freshIndependentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
     const claimedPaths = ephemeralWorktrees.map((e) => e.path).filter((v) => !isUnverifiedPath(v))
     const resolution = resolveUnverifiedImplementPaths({
       issues: unverifiedImplementIssues,
       physicalEntries: freshEntries,
+      independentCount: freshIndependentCount,
       claimedPaths,
       mainPath: mainWorktreePath,
     })
@@ -5580,7 +5647,13 @@ async function remeasureResidualBytesNow() {
     if (resolution.unresolvedIssues.length > 0) {
 
 
-      lastByteRemeasureOutcome = { failed: true, exceeded: false }
+
+
+
+
+
+
+      lastByteRemeasureOutcome = { failed: false, exceeded: exceededAtActualMeasurement, reserveStale: true }
       if (
         !latchNewStartSuppressed({
           reason:
@@ -5616,7 +5689,9 @@ async function remeasureResidualBytesNow() {
 
 
 
-      lastByteRemeasureOutcome = { failed: true, exceeded: false }
+
+
+      lastByteRemeasureOutcome = { failed: false, exceeded: exceededAtActualMeasurement, reserveStale: true }
       if (
         !latchNewStartSuppressed({
           reason:
@@ -5684,20 +5759,9 @@ async function remeasureResidualBytesNow() {
 
 
 
-  lastByteRemeasureOutcome = { failed: false, exceeded: actualBytes > maxResidualWorktreeBytes }
-  if (actualBytes > maxResidualWorktreeBytes) {
-    latchNewStartSuppressed({
-      reason:
-        `残置 worktree のディスク使用量をラン中に実測し直したところ容量上限 ` +
-        `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過した（実測 ` +
-        `${Math.round(actualBytes / (1024 * 1024))} MiB、対象 ${targetPaths.length} 件）。` +
-        `perWorktreeByteReserve による見積りは開始時の下限 floor 値のため、ビルド成果物等で` +
-        `実際の消費が見積りを上回った場合はこの実測が検知する。ディスク枯渇防止のため以降の` +
-        `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。不要な` +
-        `worktree を git worktree remove で手動削除してから再実行すること`,
-      paths: residualPathsAtStart,
-    })
-  }
+
+
+  lastByteRemeasureOutcome = { failed: false, exceeded: exceededAtActualMeasurement, reserveStale: false }
   return lastByteRemeasureOutcome
 }
 
@@ -5714,6 +5778,13 @@ async function remeasureFreeDiskNow() {
 
   if (freeDiskRemeasureAtIterationSeq === dispatchIterationSeq) return { failed: lastFreeDiskRemeasureFailed }
   freeDiskRemeasureAtIterationSeq = dispatchIterationSeq
+
+
+
+
+
+
+  const ledgerLengthBeforeMeasure = ephemeralWorktrees.length
   const freeDiskKib = mainWorktreePath ? await measureFreeDiskKib(mainWorktreePath) : null
   if (freeDiskKib === null) {
 
@@ -5733,6 +5804,7 @@ async function remeasureFreeDiskNow() {
   }
   lastFreeDiskRemeasureFailed = false
   freeDiskBytesAtStart = freeDiskKib * 1024
+  freeDiskMeasuredAtLedgerCount = ledgerLengthBeforeMeasure
   return { failed: false }
 }
 
@@ -5915,7 +5987,18 @@ while (true) {
 
 
           const remeasureOutcome = await remeasureResidualBytesNow()
-          if (remeasureOutcome.failed || remeasureOutcome.exceeded) {
+
+
+
+
+
+
+
+
+
+
+          if (remeasureOutcome.failed || remeasureOutcome.exceeded || remeasureOutcome.reserveStale) {
+
 
 
             const deferReason = remeasureOutcome.failed
@@ -5923,10 +6006,16 @@ while (true) {
                 `defer した（実測できない状態のまま再開すると fix-routing-error worktree を` +
                 `追加作成し容量上限を超過し得るため fail-closed で待機する）。原因を解消してから` +
                 `再実行すること`
-              : `残置 worktree の容量をラン中に実測し直したところ上限 ` +
-                `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過したため monitoring ` +
-                `再開を defer した。不要な worktree を git worktree remove で手動削除してから` +
-                `再実行すること`
+              : remeasureOutcome.exceeded
+                ? `残置 worktree の容量をラン中に実測し直したところ上限 ` +
+                  `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過したため monitoring ` +
+                  `再開を defer した。不要な worktree を git worktree remove で手動削除してから` +
+                  `再実行すること`
+                : `1 worktree あたりの容量予約見積り（rawPerWorktreeByteReserve）の更新に失敗し` +
+                  `古い予約量のまま monitoring 再開の見積りが過小評価され得るため monitoring 再開を` +
+                  `defer した（全件測定自体は成功しており容量超過は確定していないが、予約見積りが` +
+                  `stale なまま再開すると fix-routing-error worktree の追加作成で容量上限を超過し` +
+                  `得るため fail-closed で待機する）。原因を解消してから再実行すること`
             monitoringResumeGateDeferred.set(n, deferReason)
             log(`⚠️ #${n}: ${deferReason}`)
             continue
@@ -5973,6 +6062,8 @@ while (true) {
             reservedUnits,
             extraReserveUnits: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
             rawPerWorktreeByteReserve,
+            ledgerLength: ephemeralWorktrees.length,
+            measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
           })
           if (freeDiskRemeasure.failed || shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytesResume)) {
             const deferReason = freeDiskRemeasure.failed
@@ -6146,14 +6237,37 @@ while (true) {
             reservedUnits,
             extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
             rawPerWorktreeByteReserve,
+            ledgerLength: ephemeralWorktrees.length,
+            measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
           })
           if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
             if (reservedUnits > 0) continue
+
+
+
+
+
+
+            const unmeasuredLedgerIncrement = computeUnmeasuredLedgerIncrement({
+              ledgerLength: ephemeralWorktrees.length,
+              measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
+            })
+            if (unmeasuredLedgerIncrement > 0) {
+              const requiredWithoutGap = projectFreeDiskReserveBytes({
+                reservedUnits,
+                extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
+                rawPerWorktreeByteReserve,
+                ledgerLength: freeDiskMeasuredAtLedgerCount,
+                measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
+              })
+              if (!shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredWithoutGap)) continue
+            }
             latchNewStartSuppressed({
               reason:
                 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
                 `込みの必要量（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
-                `予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START} 件 = ` +
+                `予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START + unmeasuredLedgerIncrement} 件` +
+                `（うち df 実測後の未測定台帳増分 ${unmeasuredLedgerIncrement} 件） = ` +
                 `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
                 `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を` +
                 `停止した（実行中のイシューと monitoring 再開は継続）。この時点の投入済み予約は 0 件で` +
