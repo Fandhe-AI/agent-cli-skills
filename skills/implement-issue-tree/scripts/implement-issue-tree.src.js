@@ -3065,6 +3065,16 @@ function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reserve
 // df 実測後〜判定までの間に生じた消費がキャッシュ済み空き容量にも予約にも反映されず、
 // 実空き容量を超える新規着手・monitoring 再開を許し得る。省略時は増分 0（既存呼び出し・
 // 既存テストとの後方互換）。
+// df 実測完了時点の台帳長（measuredAtLedgerCount）と現在の台帳長（ledgerLength）の差分を
+// 算出する純粋関数（Issue #475/#477 Bugbot Medium 指摘）。この増分は「同一周回内の df 実測〜
+// 判定までの間に生じた、まだ df で裏付けられていない台帳増分」であり、次の remeasureFreeDiskNow
+// 実測で measuredAtLedgerCount が現在の台帳長へ追いつけば 0 に戻る一時的な計測ギャップである
+// （実ディスクの持続的な空き容量不足そのものではない）。projectFreeDiskReserveBytes から分離し、
+// 呼び出し側が「この増分だけが原因で抑止条件を満たしたのか」を判別できるようにする。
+function computeUnmeasuredLedgerIncrement({ ledgerLength = 0, measuredAtLedgerCount = 0 }) {
+  return Math.max(0, ledgerLength - measuredAtLedgerCount)
+}
+
 function projectFreeDiskReserveBytes({
   reservedUnits,
   extraReserveUnits,
@@ -3072,7 +3082,7 @@ function projectFreeDiskReserveBytes({
   ledgerLength = 0,
   measuredAtLedgerCount = 0,
 }) {
-  const unmeasuredLedgerIncrement = Math.max(0, ledgerLength - measuredAtLedgerCount)
+  const unmeasuredLedgerIncrement = computeUnmeasuredLedgerIncrement({ ledgerLength, measuredAtLedgerCount })
   return (reservedUnits + extraReserveUnits + unmeasuredLedgerIncrement) * rawPerWorktreeByteReserve
 }
 
@@ -6222,11 +6232,32 @@ while (true) {
           })
           if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
             if (reservedUnits > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
+            // unmeasuredLedgerIncrement（df 実測〜この判定までの間に積み増された未測定分）だけが
+            // 抑止条件を満たした原因の場合、それは次の remeasureFreeDiskNow で measuredAtLedgerCount
+            // が追いつけば解消する一時的な計測ギャップであり、実ディスクの持続的な不足ではない
+            // （Issue #477 Bugbot Medium 指摘: 恒久 latch にすると一時的なキャッシュミスで以降の
+            // 新規着手が全て凍結される）。この増分を除いても抑止条件を満たす場合のみ、真の容量
+            // 不足として latch する（reservedUnits > 0 と同じ「次周回で再評価」に倒す）。
+            const unmeasuredLedgerIncrement = computeUnmeasuredLedgerIncrement({
+              ledgerLength: ephemeralWorktrees.length,
+              measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
+            })
+            if (unmeasuredLedgerIncrement > 0) {
+              const requiredWithoutGap = projectFreeDiskReserveBytes({
+                reservedUnits,
+                extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
+                rawPerWorktreeByteReserve,
+                ledgerLength: freeDiskMeasuredAtLedgerCount,
+                measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
+              })
+              if (!shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredWithoutGap)) continue
+            }
             latchNewStartSuppressed({
               reason:
                 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
                 `込みの必要量（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
-                `予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START} 件 = ` +
+                `予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START + unmeasuredLedgerIncrement} 件` +
+                `（うち df 実測後の未測定台帳増分 ${unmeasuredLedgerIncrement} 件） = ` +
                 `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
                 `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を` +
                 `停止した（実行中のイシューと monitoring 再開は継続）。この時点の投入済み予約は 0 件で` +

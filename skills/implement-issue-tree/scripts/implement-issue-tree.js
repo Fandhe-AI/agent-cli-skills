@@ -3065,6 +3065,16 @@ function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reserve
 
 
 
+
+
+
+
+
+
+function computeUnmeasuredLedgerIncrement({ ledgerLength = 0, measuredAtLedgerCount = 0 }) {
+  return Math.max(0, ledgerLength - measuredAtLedgerCount)
+}
+
 function projectFreeDiskReserveBytes({
   reservedUnits,
   extraReserveUnits,
@@ -3072,7 +3082,7 @@ function projectFreeDiskReserveBytes({
   ledgerLength = 0,
   measuredAtLedgerCount = 0,
 }) {
-  const unmeasuredLedgerIncrement = Math.max(0, ledgerLength - measuredAtLedgerCount)
+  const unmeasuredLedgerIncrement = computeUnmeasuredLedgerIncrement({ ledgerLength, measuredAtLedgerCount })
   return (reservedUnits + extraReserveUnits + unmeasuredLedgerIncrement) * rawPerWorktreeByteReserve
 }
 
@@ -6222,11 +6232,32 @@ while (true) {
           })
           if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
             if (reservedUnits > 0) continue
+
+
+
+
+
+
+            const unmeasuredLedgerIncrement = computeUnmeasuredLedgerIncrement({
+              ledgerLength: ephemeralWorktrees.length,
+              measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
+            })
+            if (unmeasuredLedgerIncrement > 0) {
+              const requiredWithoutGap = projectFreeDiskReserveBytes({
+                reservedUnits,
+                extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
+                rawPerWorktreeByteReserve,
+                ledgerLength: freeDiskMeasuredAtLedgerCount,
+                measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
+              })
+              if (!shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredWithoutGap)) continue
+            }
             latchNewStartSuppressed({
               reason:
                 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
                 `込みの必要量（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
-                `予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START} 件 = ` +
+                `予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START + unmeasuredLedgerIncrement} 件` +
+                `（うち df 実測後の未測定台帳増分 ${unmeasuredLedgerIncrement} 件） = ` +
                 `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
                 `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を` +
                 `停止した（実行中のイシューと monitoring 再開は継続）。この時点の投入済み予約は 0 件で` +

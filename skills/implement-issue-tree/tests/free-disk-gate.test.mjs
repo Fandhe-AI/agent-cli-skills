@@ -41,7 +41,7 @@ const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-free-disk-defs
 const slicePath = join(sliceDir, 'implement-issue-tree-free-disk-defs.mjs')
 // 実装スクリプトは `export const meta` 以外の top-level export を持てない（Workflow 起動制約）
 // ため、定義部は非 export のまま置き、切り出したスライス側で export 文を付与する。
-const SLICE_EXPORTS = ['shouldSuppressForFreeDisk', 'projectFreeDiskReserveBytes', 'DISK_FREE_SCHEMA']
+const SLICE_EXPORTS = ['shouldSuppressForFreeDisk', 'projectFreeDiskReserveBytes', 'computeUnmeasuredLedgerIncrement', 'DISK_FREE_SCHEMA']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
 const mod = await import(pathToFileURL(slicePath).href)
@@ -138,13 +138,63 @@ test('remeasureFreeDiskNow は df 実測完了時点の台帳長を freeDiskMeas
   assert.match(fnBody, /freeDiskMeasuredAtLedgerCount = ephemeralWorktrees\.length/)
 })
 
-test('projectFreeDiskReserveBytes の呼び出し 3 箇所すべてが ledgerLength / measuredAtLedgerCount を渡す（df 実測後の台帳増分未反映の再発防止）', () => {
+test('projectFreeDiskReserveBytes の呼び出しのうち、実測時点の判定を行う 3 箇所すべてが ledgerLength / measuredAtLedgerCount を渡す（df 実測後の台帳増分未反映の再発防止）', () => {
   // 関数定義自体（`function projectFreeDiskReserveBytes({ ... })`）も同じ字面にマッチするため、
-  // `= projectFreeDiskReserveBytes({` の呼び出し形のみを対象にする。
+  // `= projectFreeDiskReserveBytes({` の呼び出し形のみを対象にする。Issue #477 対応で追加した
+  // requiredWithoutGap（一時的な計測ギャップの有無を切り分けるための呼び出し。意図的に
+  // ledgerLength へ ephemeralWorktrees.length ではなく freeDiskMeasuredAtLedgerCount を渡す）は
+  // 別テストで検証するため、ここでは ledgerLength: ephemeralWorktrees.length を渡す「実測時点の
+  // 判定」呼び出しのみを対象にする。
   const occurrences = source.match(/\w+ = projectFreeDiskReserveBytes\(\{[^}]*\}\)/gs) ?? []
-  assert.equal(occurrences.length, 3, `呼び出し箇所は 3 箇所であること（実測 ${occurrences.length}）`)
-  for (const call of occurrences) {
-    assert.match(call, /ledgerLength: ephemeralWorktrees\.length/, call)
+  const liveCalls = occurrences.filter((call) => /ledgerLength: ephemeralWorktrees\.length/.test(call))
+  assert.equal(liveCalls.length, 3, `実測時点の判定を行う呼び出しは 3 箇所であること（実測 ${liveCalls.length}）`)
+  for (const call of liveCalls) {
     assert.match(call, /measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount/, call)
   }
+})
+
+// --- 一時的な計測ギャップのみを理由とした恒久 latch の防止（Issue #477 Bugbot Medium 指摘）---
+// unmeasuredLedgerIncrement（df 実測〜判定までの間に積み増された未測定分）は次の
+// remeasureFreeDiskNow で解消する一時的な計測ギャップであり、これだけを理由に
+// newStartSuppressed を latch（恒久停止）すると、一時的なキャッシュミスで以降の新規着手が
+// 全て凍結される。この増分を除いても抑止条件を満たす場合のみ latch する挙動を、
+// 新規着手ブロックの実装から直接検証する。
+
+test('computeUnmeasuredLedgerIncrement: ledgerLength が measuredAtLedgerCount を上回る分のみを返す', () => {
+  assert.equal(mod.computeUnmeasuredLedgerIncrement({ ledgerLength: 5, measuredAtLedgerCount: 2 }), 3)
+})
+
+test('computeUnmeasuredLedgerIncrement: 台帳が df 実測後に減っていても負値にしない（Math.max で 0 下限）', () => {
+  assert.equal(mod.computeUnmeasuredLedgerIncrement({ ledgerLength: 2, measuredAtLedgerCount: 5 }), 0)
+})
+
+// 新規着手ブロック（dispatch ループ内）と開始時ゲート（ラン開始時 1 回のみ・実測直後に
+// freeDiskMeasuredAtLedgerCount を確定するため unmeasuredLedgerIncrement は構造的に常に 0）を
+// 区別するため、新規着手ブロックにのみ現れる一意なコメント文字列をアンカーにする。
+const NEW_START_BLOCK_ANCHOR = '// reservedUnits をそのまま再利用し、投入済み予約（実行中タスクの未消費予約＋着手候補'
+
+test('新規着手ブロック: unmeasuredLedgerIncrement のみが原因で抑止条件を満たす場合は latch せず defer する（reservedUnits > 0 と同じ continue 扱い）', () => {
+  const anchorIdx = source.indexOf(NEW_START_BLOCK_ANCHOR)
+  assert.ok(anchorIdx >= 0, '新規着手ブロックのアンカーコメントを特定できること')
+  const fnStart = source.indexOf('if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {', anchorIdx)
+  assert.ok(fnStart >= 0, '新規着手ブロックの実ディスク空き容量ゲート分岐を特定できること')
+  const fnEnd = source.indexOf('\n          }\n', fnStart)
+  const block = source.slice(fnStart, fnEnd)
+  // 増分を除いた必要量（requiredWithoutGap）で再判定し、それでも抑止条件を満たす場合のみ
+  // latchNewStartSuppressed へ到達する（満たさなければ continue で次周回へ defer する）こと。
+  assert.match(block, /const requiredWithoutGap = projectFreeDiskReserveBytes\(\{/)
+  assert.match(block, /ledgerLength: freeDiskMeasuredAtLedgerCount,\s*\n\s*measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,/)
+  assert.match(block, /if \(!shouldSuppressForFreeDisk\(freeDiskBytesAtStart, requiredWithoutGap\)\) continue/)
+  // latch 到達より前に defer 分岐がある（latch が「増分を除いても抑止」の場合のみに絞られている）こと。
+  const deferIdx = block.indexOf('if (!shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredWithoutGap)) continue')
+  const latchIdx = block.indexOf('latchNewStartSuppressed({')
+  assert.ok(deferIdx >= 0 && latchIdx > deferIdx, 'defer 分岐が latch より前に評価されること')
+})
+
+test('新規着手ブロック: latch reason の予約件数表示に unmeasuredLedgerIncrement を含める（印字件数と MiB 総額の不一致防止）', () => {
+  const anchorIdx = source.indexOf(NEW_START_BLOCK_ANCHOR)
+  const fnStart = source.indexOf('if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {', anchorIdx)
+  const fnEnd = source.indexOf('\n          }\n', fnStart)
+  const block = source.slice(fnStart, fnEnd)
+  assert.match(block, /予約 \$\{reservedUnits \+ EPHEMERAL_RESERVE_PER_NEW_START \+ unmeasuredLedgerIncrement\} 件/)
 })
