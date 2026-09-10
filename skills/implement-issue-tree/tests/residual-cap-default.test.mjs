@@ -270,7 +270,9 @@ test('実測し直しは残置パス一覧＋台帳パスの合計を測定し�
   const fnEnd = source.indexOf('\nwhile (true) {', fnStart)
   const fnBody = source.slice(fnStart, fnEnd)
   assert.match(fnBody, /residualPathsAtStart, \.\.\.ephemeralWorktrees\.map\(\(e\) => e\.path\)/)
-  assert.match(fnBody, /actualBytes > maxResidualWorktreeBytes && !newStartSuppressed/)
+  // latch の設定は latchNewStartSuppressed 経由へ統一済み（弱い latch が強い latch をブロック
+  // する Bugbot Medium 指摘への対応）。上限超過時にその経路を通ることを固定する。
+  assert.match(fnBody, /if \(actualBytes > maxResidualWorktreeBytes\) \{\n\s*latchNewStartSuppressed\(\{/)
 })
 
 // --- K8Dc 回帰: ラン中実測し直しが以後の projection の基準を更新すること（PR #390 codex-review

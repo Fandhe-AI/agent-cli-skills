@@ -215,7 +215,8 @@ test('remeasureResidualBytesNow: implement worktree のみの追加測定が nul
   // latch し、関数を早期 return する（呼び出し元は戻り値・newStartSuppressed のいずれからでも
   // 停止を検知できる）。
   assert.match(nullBranchBody, /lastByteRemeasureOutcome\s*=\s*\{\s*failed:\s*true,\s*exceeded:\s*false\s*\}/)
-  assert.match(nullBranchBody, /if\s*\(!newStartSuppressed\)\s*\{/)
-  assert.match(nullBranchBody, /newStartSuppressed\s*=\s*\{/)
+  // latch の設定は latchNewStartSuppressed 経由（未設定チェックの直書きは昇格規則を素通りする
+  // ため廃止済み）。戻り値で「今回停止した / 既に停止済み」を出し分ける形を固定する。
+  assert.match(nullBranchBody, /if\s*\(\s*!latchNewStartSuppressed\(\{/)
   assert.match(nullBranchBody, /return lastByteRemeasureOutcome/)
 })

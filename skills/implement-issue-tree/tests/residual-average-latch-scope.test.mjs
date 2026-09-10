@@ -44,6 +44,7 @@ const SLICE_EXPORTS = [
   'resolveUnverifiedImplementPaths',
   'listUnverifiedImplementIssues',
   'shouldSkipForNewStartSuppressed',
+  'escalateNewStartSuppressed',
   'ORPHAN_BYTES_SCHEMA',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
@@ -54,6 +55,7 @@ const {
   resolveUnverifiedImplementPaths,
   listUnverifiedImplementIssues,
   shouldSkipForNewStartSuppressed,
+  escalateNewStartSuppressed,
   ORPHAN_BYTES_SCHEMA,
 } = mod
 
@@ -247,6 +249,49 @@ test('shouldSkipForNewStartSuppressed: 件数軸・バイト軸の latch は全 
   assert.equal(shouldSkipForNewStartSuppressed(latch, 'verify-close'), true)
 })
 
+// --- 4. latch の昇格規則（Bugbot Medium「Weaker latch blocks stricter fail-closed」）---
+
+test('escalateNewStartSuppressed: 未設定なら新しい latch を採用する', () => {
+  const next = { reason: '件数上限超過' }
+  const r = escalateNewStartSuppressed(null, next)
+  assert.equal(r.latch, next)
+  assert.equal(r.changed, true)
+  assert.equal(r.escalated, false)
+})
+
+test('escalateNewStartSuppressed: implement 限定 latch は全 kind latch へ昇格する（verify-close を通し続ける穴を塞ぐ）', () => {
+  const current = { reason: '空き容量不足', implementOnly: true }
+  const next = { reason: 'バイト軸の実測失敗' }
+  const r = escalateNewStartSuppressed(current, next)
+  assert.equal(r.latch, next)
+  assert.equal(r.changed, true)
+  assert.equal(r.escalated, true)
+})
+
+test('escalateNewStartSuppressed: 全 kind latch は implement 限定 latch で上書きされない（適用範囲を狭めない）', () => {
+  const current = { reason: '件数上限超過' }
+  const next = { reason: '空き容量不足', implementOnly: true }
+  const r = escalateNewStartSuppressed(current, next)
+  assert.equal(r.latch, current)
+  assert.equal(r.changed, false)
+  assert.equal(r.escalated, false)
+})
+
+test('escalateNewStartSuppressed: 同種同士（全 kind → 全 kind / implement 限定 → implement 限定）は最初の理由を保つ', () => {
+  const fullA = { reason: '件数上限超過' }
+  const fullB = { reason: 'バイト軸の容量超過' }
+  assert.deepEqual(escalateNewStartSuppressed(fullA, fullB), { latch: fullA, changed: false, escalated: false })
+  const onlyA = { reason: '開始時の空き容量不足', implementOnly: true }
+  const onlyB = { reason: 'ラン中の空き容量不足', implementOnly: true }
+  assert.deepEqual(escalateNewStartSuppressed(onlyA, onlyB), { latch: onlyA, changed: false, escalated: false })
+})
+
+test('escalateNewStartSuppressed: 昇格後の latch は verify-close も止める（shouldSkipForNewStartSuppressed との結合）', () => {
+  const escalated = escalateNewStartSuppressed({ reason: '空き容量不足', implementOnly: true }, { reason: '件数上限超過' })
+  assert.equal(shouldSkipForNewStartSuppressed(escalated.latch, 'verify-close'), true)
+  assert.equal(shouldSkipForNewStartSuppressed(escalated.latch, 'implement'), true)
+})
+
 // --- 配線固定（dead code 化防止）---
 // 駆動部（マーカー以下）は import できないため、既存テスト群と同型のソーステキスト固定で
 // 新規純粋関数が実際に駆動部から参照されていることを確認する。
@@ -272,4 +317,24 @@ test('dispatch ループの新規着手抑止は shouldSkipForNewStartSuppressed
 test('空き容量起因の latch は 3 箇所すべてで implementOnly: true を持つ（開始時ゲート・実測し直し失敗・ループ内ゲート）', () => {
   const occurrences = source.match(/implementOnly: true,/g) ?? []
   assert.equal(occurrences.length, 3, `implementOnly: true の設定箇所は 3 箇所であること（実測 ${occurrences.length}）`)
+})
+
+test('latch の設定は必ず latchNewStartSuppressed 経由で行う（直書き代入・生ガードが残っていない）', () => {
+  // 直書き代入が 1 箇所でも残ると、そこだけ昇格規則を通らず「弱い latch が強い latch を
+  // ブロックする」バグ（Bugbot Medium）が再発する。宣言（let newStartSuppressed = null）以外の
+  // 代入と、`if (!newStartSuppressed)` ガードの直書きが無いことを固定する。
+  // 例外は宣言（let ... = null）と latchNewStartSuppressed 内の唯一の代入（outcome.latch）のみ。
+  const assignments = source.match(/(?<!let )newStartSuppressed = (?!null|outcome\.latch)/g) ?? []
+  assert.deepEqual(assignments, [], '直書きの newStartSuppressed 代入が残っている')
+  assert.doesNotMatch(source, /if \(!newStartSuppressed\)/)
+  assert.doesNotMatch(source, /&& !newStartSuppressed\)/)
+})
+
+test('latchNewStartSuppressed は escalateNewStartSuppressed の判定に従い、代入とログのみを担う', () => {
+  const fnStart = source.indexOf('function latchNewStartSuppressed(next)')
+  assert.ok(fnStart >= 0, 'latchNewStartSuppressed の定義を特定できること')
+  const fnBody = source.slice(fnStart, source.indexOf('\n}', fnStart))
+  assert.match(fnBody, /escalateNewStartSuppressed\(newStartSuppressed, next\)/)
+  assert.match(fnBody, /if \(!outcome\.changed\) return false/)
+  assert.match(fnBody, /outcome\.escalated/)
 })
