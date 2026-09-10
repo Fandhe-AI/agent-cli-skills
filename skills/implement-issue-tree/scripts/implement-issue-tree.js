@@ -5650,6 +5650,9 @@ async function remeasureResidualBytesNow() {
 
 
 
+
+
+
       lastByteRemeasureOutcome = { failed: false, exceeded: exceededAtActualMeasurement, reserveStale: true }
       if (
         !latchNewStartSuppressed({

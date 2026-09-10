@@ -5648,8 +5648,11 @@ async function remeasureResidualBytesNow() {
       // 帰属できない未検証 implement が残る状態で部分集合の平均を採用すると fail-open になる
       // ため、rawPerWorktreeByteReserve の更新のみ見送る（reserveStale: true）。全件測定（kib）
       // 自体は成功済みで exceeded は Step 1-1 で確定済みの値をそのまま反映する（failed は true に
-      // しない）。reserveStale は「予約見積りの更新に失敗した」ことを表す独立フラグで、monitoring
-      // 再開の defer 判定（failed || exceeded）は予約更新失敗だけでは発火しなくなる（Issue #475）。
+      // しない）。reserveStale は「予約見積りの更新に失敗した」ことを表す独立フラグで、
+      // 新規着手側は latchNewStartSuppressed が先行して安全弁になるため failed:true にしないが、
+      // monitoring 再開側にはこの安全弁が無いため、monitoring 再開の defer 判定は
+      // `failed || exceeded || reserveStale` の OR とし reserveStale だけでも当該周回に限り
+      // defer を発火させる（fix #2・codex-review P0 再指摘。Issue #475）。
       lastByteRemeasureOutcome = { failed: false, exceeded: exceededAtActualMeasurement, reserveStale: true }
       if (
         !latchNewStartSuppressed({
