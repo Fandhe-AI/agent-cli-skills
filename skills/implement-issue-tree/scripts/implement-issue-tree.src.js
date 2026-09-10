@@ -1309,7 +1309,7 @@ const ORPHAN_COUNT_SCHEMA = {
 // Issue #348 案 B）専用。du -sk は macOS 標準 du でも動く（-b は GNU 限定のため使わない）。
 const ORPHAN_BYTES_SCHEMA = {
   type: 'object',
-  required: ['kib', 'err'],
+  required: ['kib', 'err', 'missing'],
   properties: {
     kib: {
       type: 'integer',
@@ -1329,8 +1329,9 @@ const ORPHAN_BYTES_SCHEMA = {
       minimum: 0,
       description:
         '対象パスのうち測定時点で既に存在しなかった（test -e が偽だった）件数。並行 cleanup と' +
-        'の競合で削除済みのパスは 0 として扱い測定失敗にしない（Bugbot 指摘対応）。ログ用の任意' +
-        'フィールドで、欠落時は 0 とみなす。',
+        'の競合で削除済みのパスは 0 として扱い測定失敗にしない（Bugbot 指摘対応）。呼び出し側は' +
+        'この件数を平均算出の分母から差し引くため必須フィールドとする（欠落を 0 とみなすと分母に' +
+        '存在しないパスが残り 1 worktree あたりの見積りが過小になる fail-open）。',
     },
   },
 }
@@ -1633,12 +1634,21 @@ function branchMatchesIssue(branch, issueNumber) {
   return new RegExp(`^[a-z]+/${issueNumber}-`).test(branch)
 }
 
-// 残置 worktree のディスク使用量（KiB）を測定する（maxResidualWorktreeBytes ゲート専用・
-// Issue #348）。測定不能（コマンド失敗・du 非0終了・許可文字集合外パス）は 0 で補わず null を
-// 返す（0 は fail-open のため、呼び出し側は null を fail-closed 分岐へ倒す）。
+// branch 名の文字種検証（runImplement の再開ガードと共有）。sanitizeBranch と検証条件を一致
+// させるため '..' も弾く（食い違うと初期ゲート通過後に sanitizeBranch で例外になる）。
+function isValidBranchName(b) {
+  return typeof b === 'string' && !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
+}
+
+// 残置 worktree のディスク使用量（KiB）と、測定時点で既に存在しなかったパス数（missing）を
+// 測定する（maxResidualWorktreeBytes ゲート専用・Issue #348）。測定不能（コマンド失敗・du 非0
+// 終了・許可文字集合外パス・missing 不正）は 0 で補わず null を返す（0 は fail-open のため、
+// 呼び出し側は null を fail-closed 分岐へ倒す）。missing を返す契約は、1 worktree あたりの平均
+// サイズを算出する呼び出し元が分母から欠落分を差し引けるようにするため（分母に存在しないパスを
+// 残すと平均が希釈され容量予約が過小になる fail-open。Bugbot Medium 指摘）。
 let residualByteMeasureCallSeq = 0
-async function measureResidualWorktreeBytes(paths) {
-  if (!Array.isArray(paths) || paths.length === 0) return 0
+async function measureResidualWorktreeBytesDetailed(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return { kib: 0, missing: 0 }
   // sanitizeWorktreePath へ強制検証してから渡し、シェルメタ文字を含むパスがプロンプトへ到達
   // しない構造的防御とする（PR #390）。1 件でも外れれば測定失敗（fail-closed）とし、一部だけ
   // 測定して過小評価しない。
@@ -1722,14 +1732,27 @@ async function measureResidualWorktreeBytes(paths) {
       log(`⚠️ 残置 worktree ディスク使用量測定で ${v?.err ?? '不明'} 件の測定エラーが報告された（合計値を受理せず観測失敗として扱う）`)
       return null
     }
-    if (Number.isInteger(v?.missing) && v.missing > 0) {
+    // missing は必須フィールド（ORPHAN_BYTES_SCHEMA）。欠落・負値・送ったパス数超過は観測失敗
+    // として扱う（0 で補うと平均算出の分母が過大になり予約が過小になる fail-open）。
+    if (!(Number.isInteger(v?.missing) && v.missing >= 0 && v.missing <= sanitizedPaths.length)) {
+      log(`⚠️ 残置 worktree ディスク使用量測定の missing が不正（${v?.missing ?? '欠落'}・対象 ${sanitizedPaths.length} 件）。観測失敗として扱う`)
+      return null
+    }
+    if (v.missing > 0) {
       log(`残置 worktree ディスク使用量測定: 並行 cleanup 等により ${v.missing} 件のパスが測定時点で既に存在しなかった（0 として扱った）`)
     }
-    return v.kib
+    return { kib: v.kib, missing: v.missing }
   } catch (e) {
     log(`⚠️ 残置 worktree のディスク使用量測定中に例外が発生した（${e?.message ?? e}）`)
     return null
   }
+}
+
+// 合計 KiB のみを必要とする呼び出し元向けの薄いラッパー（従来 signature を維持する）。
+// 測定失敗は null のまま伝える。
+async function measureResidualWorktreeBytes(paths) {
+  const measured = await measureResidualWorktreeBytesDetailed(paths)
+  return measured === null ? null : measured.kib
 }
 
 // メイン worktree の「全体 − .git」（新規 linked worktree の消費容量見積り）を測定する。linked
@@ -3049,6 +3072,75 @@ function shouldSuppressForFreeDisk(freeDiskBytes, requiredFreeDiskBytes) {
   return freeDiskBytes < requiredFreeDiskBytes
 }
 
+// 実測合計から「1 worktree あたりの平均バイト数」を算出する純粋関数（Bugbot Medium 指摘）。
+// sentCount は測定へ送ったパス数、missing はそのうち測定時点で既に存在しなかった件数。分母は
+// 実在が確認できた件数（sentCount - missing）に限る — 並行 cleanup で消えたパスを分母へ残すと
+// 平均が希釈され、実ディスク空き容量ゲートの予約量が過小になる（fail-open）。分母が 0 以下・
+// 入力が不正なら null を返し、呼び出し側は「更新をスキップ」へ倒す（測定対象が無いだけで測定
+// 失敗ではないため latch はしない）。
+function computeAveragePerWorktreeBytes({ kib, sentCount, missing }) {
+  if (!Number.isInteger(kib) || kib < 0) return null
+  if (!Number.isInteger(sentCount) || !Number.isInteger(missing)) return null
+  const denominator = sentCount - missing
+  if (denominator <= 0) return null
+  return Math.ceil((kib * 1024) / denominator)
+}
+
+// 台帳の implement エントリ集合から、パス解決が必要なイシュー番号を選ぶ純粋関数。
+// 未検証エントリ（path: '' / '(検証不可:' 始まり）を持つイシューのうち、同じイシューに検証済み
+// パスの implement エントリが既にある分は除外する — EPHEMERAL_KIND_MAX.implement は 1 で、
+// 1 イシューが持つ implement worktree は高々 1 件のため、両者は同一 worktree の重複記録
+// （新規実行と再開で 2 回 record された等）であり、その worktree は既に測定対象へ入っている。
+// 除外しないと「既に測定済みの worktree」に対して候補が枯れ、恒久 latch を招く。
+function listUnverifiedImplementIssues(entries) {
+  const list = Array.isArray(entries) ? entries : []
+  const isUnverified = (v) => !(typeof v === 'string' && v !== '' && !v.startsWith('(検証不可:'))
+  const verifiedIssues = new Set(list.filter((e) => !isUnverified(e?.path)).map((e) => e?.issue))
+  return [...new Set(list.filter((e) => isUnverified(e?.path)).map((e) => e?.issue))].filter(
+    (n) => !verifiedIssues.has(n),
+  )
+}
+
+// 台帳の未検証 implement エントリ（path: '' / '(検証不可:' 始まり）を物理一覧の worktree へ
+// 帰属させ、実測対象のパスを確定する純粋関数（PR #468 codex-review P1）。帰属規約はラン開始時
+// の孤立 worktree 帰属と同一（branchMatchesIssue のアンカー付き一致 + isValidBranchName）。
+// 候補が一意に定まる場合のみ解決し、0 件・複数件は解決不能として返す（同一イシューの別 kind
+// worktree と区別できないため推測しない）。呼び出し側は解決不能が残れば fail-closed に倒す —
+// 既知パスの部分集合だけで平均を更新すると、パス未取得の大きな worktree が見積りへ反映されない
+// fail-open になる。claimedPaths は台帳で検証済みのパス集合で、二重帰属を防ぐ。
+function resolveUnverifiedImplementPaths({ issues, physicalEntries, claimedPaths, mainPath }) {
+  const list = Array.isArray(physicalEntries) ? physicalEntries : []
+  const claimed = new Set(Array.isArray(claimedPaths) ? claimedPaths : [])
+  const paths = []
+  const unresolvedIssues = []
+  for (const issue of Array.isArray(issues) ? issues : []) {
+    const candidates = []
+    for (const entry of list) {
+      if (entry?.isMain) continue
+      const candidate = sanitizeWorktreePath(entry?.path ?? '')
+      if (!candidate || (mainPath && candidate === mainPath)) continue
+      if (claimed.has(candidate) || paths.includes(candidate) || candidates.includes(candidate)) continue
+      const branch = typeof entry?.branch === 'string' ? entry.branch : ''
+      if (!branch || !isValidBranchName(branch) || !branchMatchesIssue(branch, issue)) continue
+      candidates.push(candidate)
+    }
+    if (candidates.length === 1) paths.push(candidates[0])
+    else unresolvedIssues.push(issue)
+  }
+  return { paths, unresolvedIssues }
+}
+
+// newStartSuppressed latch を dispatch でどう適用するかの純粋な判定（Bugbot Medium 指摘）。
+// 件数軸・バイト軸の latch は worktree を作らない verify-close まで止める（過剰抑止＝安全側）
+// が、実ディスク空き容量起因の latch は implementOnly: true を持ち implement のみへ効かせる
+// （空き容量は worktree を作らない verify-close の完了を妨げる理由にならず、止めると PR の
+// クローズ処理まで滞留するため）。
+function shouldSkipForNewStartSuppressed(latch, kind) {
+  if (!latch) return false
+  if (latch.implementOnly) return kind === 'implement'
+  return true
+}
+
 // 台帳に未検証エントリが生じたとき測定対象を物理一覧（git worktree list --porcelain）へ丸ごと
 // 差し替える（Issue #404。過大側ずれのみで安全・測定専用 = 返却 paths を削除経路へ流さない）。
 // entries 空 / 件数不一致 / パス検証失格 / メイン以外の重複 → { ok: false }（fail-closed）。
@@ -3511,6 +3603,9 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
                 `依存関係の削除、不要な worktree の削除、ディスク拡張等）ことでのみ解消できる。` +
                 `解消後に再実行すること`,
               paths: residual.paths,
+              // 空き容量起因の抑止は implement 限定にする（worktree を作らない verify-close は
+              // 空き容量を消費せず、止めると PR のクローズ処理まで滞留する。Bugbot Medium 指摘）。
+              implementOnly: true,
             }
             log(`⚠️ ${newStartSuppressed.reason}`)
           } else {
@@ -5198,12 +5293,6 @@ function depsOf(item) {
   return depsMap.get(item.number) ?? new Set()
 }
 
-// branch 名の文字種検証（runImplement の再開ガードと共有）。sanitizeBranch と検証条件を一致
-// させるため '..' も弾く（食い違うと初期ゲート通過後に sanitizeBranch で例外になる）。
-function isValidBranchName(b) {
-  return typeof b === 'string' && !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
-}
-
 // 再開情報（pr/branch）が有効な issue の判定。runImplement の monitor 再開ガードと必ず同一
 // 条件にする。status は monitoring に加え blocked も対象（Issue #123）。
 function isActiveMonitoring(n) {
@@ -5293,9 +5382,13 @@ async function remeasureResidualBytesNow() {
     (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !confirmedRemovedPaths.has(p),
   )
   let fallbackDetail = ''
+  // 物理一覧は測定対象の差し替え（Issue #404）だけでなく、未検証 implement エントリのパス解決
+  // （PR #468 codex-review P1）でも使うため分岐外で保持する。
+  let physicalEntries = null
   if (unverifiedEphemeralCount > 0) {
-    const [physicalEntries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
-    const fallback = buildPhysicalByteMeasureTargets(physicalEntries, independentCount)
+    const [entries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
+    physicalEntries = entries
+    const fallback = buildPhysicalByteMeasureTargets(entries, independentCount)
     if (fallback.ok) {
       // 物理一覧は測定専用の差し替えで削除経路へは流さない。confirmedRemovedPaths による除外も
       // 行わない（fallback.paths は今この瞬間の確定スナップショットで、除外は過小評価の
@@ -5310,7 +5403,14 @@ async function remeasureResidualBytesNow() {
     }
   }
   const measurementFailed = unverifiedEphemeralCount > 0 && fallbackDetail !== ''
-  const kib = measurementFailed ? null : targetPaths.length > 0 ? await measureResidualWorktreeBytes(targetPaths) : 0
+  // 詳細版で受けるのは、全件平均フォールバック（implement 実測が無い場合）の分母から欠落パス数
+  // を差し引くため（Bugbot Medium 指摘）。
+  const measured = measurementFailed
+    ? null
+    : targetPaths.length > 0
+      ? await measureResidualWorktreeBytesDetailed(targetPaths)
+      : { kib: 0, missing: 0 }
+  const kib = measured === null ? null : measured.kib
   // 間引きカウンタは測定成否に関わらず進める（失敗のたびに毎周回リトライすると agent コストが
   // 際限なく積み上がる）。失敗が続く間は kib===null 分岐の早期 return で baseline も更新されず
   // fail-closed を維持する。
@@ -5370,19 +5470,69 @@ async function remeasureResidualBytesNow() {
   // 唯一の代替値として targetPaths.length 全件平均へフォールバックする（review / pr-create を
   // 含む全件平均は implement 単独の実サイズより小さくなり得るが、implement データが皆無な状況の
   // 代替に留まる）。
-  const implementPaths = ephemeralWorktrees
-    .filter((e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)))
-    .map((e) => e.path)
-    .filter((p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:'))
+  const implementEntries = ephemeralWorktrees.filter(
+    (e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)),
+  )
+  const isUnverifiedPath = (v) => !(typeof v === 'string' && v !== '' && !v.startsWith('(検証不可:'))
+  // Set で保持する。同一イシューの複数 implement 記録が同じ物理 worktree へ解決した場合に重複
+  // 計上すると分母が膨らみ平均が半減する（fail-open）。
+  const implementPathSet = new Set(implementEntries.map((e) => e.path).filter((v) => !isUnverifiedPath(v)))
+  // 未検証 implement エントリ（path 未取得）はパスが無いため上の集合に載らない。既知パスの
+  // 部分集合だけで平均を更新すると、パス未取得の大きな worktree の実サイズが予約見積りへ反映
+  // されない（PR #468 codex-review P1）。物理一覧からラン開始時と同じ帰属規約でパスを解決し、
+  // 解決不能が残る場合のみ測定失敗として fail-closed に倒す。
+  const unverifiedImplementIssues = listUnverifiedImplementIssues(implementEntries)
+  if (unverifiedImplementIssues.length > 0) {
+    const claimedPaths = ephemeralWorktrees.map((e) => e.path).filter((v) => !isUnverifiedPath(v))
+    const resolution = resolveUnverifiedImplementPaths({
+      issues: unverifiedImplementIssues,
+      physicalEntries,
+      claimedPaths,
+      mainPath: mainWorktreePath,
+    })
+    for (const resolvedPath of resolution.paths) implementPathSet.add(resolvedPath)
+    if (resolution.paths.length > 0) {
+      log(
+        `残置 worktree バイト実測: 未検証 implement エントリ ${resolution.paths.length} 件のパスを` +
+          `物理一覧から帰属解決し、1 worktree あたりの予約見積りの測定対象へ含めた`,
+      )
+    }
+    if (resolution.unresolvedIssues.length > 0) {
+      // 帰属できない未検証 implement が残る状態で部分集合の平均を採用すると fail-open になる
+      // ため、追加測定失敗と同じ latch 形へ倒す。
+      lastByteRemeasureOutcome = { failed: true, exceeded: false }
+      if (!newStartSuppressed) {
+        newStartSuppressed = {
+          reason:
+            `implement worktree のパスを確定できない未検証エントリが残るため（イシュー ` +
+            `#${resolution.unresolvedIssues.join(', #')}）、1 worktree あたりの容量予約見積り` +
+            `（rawPerWorktreeByteReserve）を既知パスの部分集合だけで更新することを避け、測定失敗` +
+            `として扱った。部分集合の平均で更新するとパス未取得の worktree の実サイズが見積りへ` +
+            `反映されず容量枯渇を許す fail-open になるため、ディスク枯渇防止のため以降の新規` +
+            `イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
+            `git worktree list で該当 worktree を確認してから再実行すること`,
+          paths: residualPathsAtStart,
+        }
+        log(`⚠️ ${newStartSuppressed.reason}`)
+      } else {
+        log(
+          `⚠️ implement worktree のパスを確定できない未検証エントリが残る（既に新規着手を停止済みの` +
+            `ため追加の抑止はしない）`,
+        )
+      }
+      return lastByteRemeasureOutcome
+    }
+  }
+  const implementPaths = [...implementPathSet]
   const implementResidualCount = implementPaths.length
   if (implementResidualCount > 0) {
-    const implementKib = await measureResidualWorktreeBytes(implementPaths)
-    if (implementKib === null) {
+    const implementMeasured = await measureResidualWorktreeBytesDetailed(implementPaths)
+    if (implementMeasured === null) {
       // 全件測定（kib）は成功していても、rawPerWorktreeByteReserve 更新用のこの追加測定が
       // 失敗した場合はログのみで続行せず fail-closed へ倒す（PR #468 codex-review P0）。
       // ログだけで続行すると、古い（成長を反映しない）rawPerWorktreeByteReserve のまま
       // 新規着手予約が過小評価され、既定 50 GiB の下で枯渇直前まで着手を止められない
-      // fail-open になる。上の kib===null 分岐と同じ latch 形にする。
+      // fail-open になる。上の全件測定失敗（kib === null）分岐と同じ latch 形にする。
       lastByteRemeasureOutcome = { failed: true, exceeded: false }
       if (!newStartSuppressed) {
         newStartSuppressed = {
@@ -5404,8 +5554,20 @@ async function remeasureResidualBytesNow() {
       }
       return lastByteRemeasureOutcome
     } else {
-      const avgActualBytes = Math.ceil((implementKib * 1024) / implementResidualCount)
-      if (avgActualBytes > rawPerWorktreeByteReserve) {
+      // 分母は送ったパス数から欠落分を差し引く（並行 cleanup で消えたパスを分母へ残すと平均が
+      // 希釈され予約が過小になる。Bugbot Medium 指摘）。分母 0 は測定対象が実在しなかっただけで
+      // 測定失敗ではないため latch せず更新のみ見送る。
+      const avgActualBytes = computeAveragePerWorktreeBytes({
+        kib: implementMeasured.kib,
+        sentCount: implementResidualCount,
+        missing: implementMeasured.missing,
+      })
+      if (avgActualBytes === null) {
+        log(
+          `1 worktree あたりの容量予約見積りの更新を見送った（implement worktree ${implementResidualCount} 件が` +
+            `すべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
+        )
+      } else if (avgActualBytes > rawPerWorktreeByteReserve) {
         log(
           `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
             `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
@@ -5415,8 +5577,17 @@ async function remeasureResidualBytesNow() {
       }
     }
   } else if (targetPaths.length > 0) {
-    const avgActualBytes = Math.ceil(actualBytes / targetPaths.length)
-    if (avgActualBytes > rawPerWorktreeByteReserve) {
+    const avgActualBytes = computeAveragePerWorktreeBytes({
+      kib,
+      sentCount: targetPaths.length,
+      missing: measured.missing,
+    })
+    if (avgActualBytes === null) {
+      log(
+        `1 worktree あたりの容量予約見積りの更新を見送った（残置全件 ${targetPaths.length} 件が` +
+          `すべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
+      )
+    } else if (avgActualBytes > rawPerWorktreeByteReserve) {
       log(
         `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
           `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
@@ -5472,6 +5643,8 @@ async function remeasureFreeDiskNow() {
           `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。df が実行できる` +
           `状態を確認してから再実行すること`,
         paths: residualPathsAtStart,
+        // 空き容量軸の latch は implement 限定（開始時ゲートと同じ線引き）。
+        implementOnly: true,
       }
       log(`⚠️ ${newStartSuppressed.reason}`)
     }
@@ -5744,8 +5917,11 @@ while (true) {
         continue
       }
       // 残置上限超過時は新規着手のみ抑止する（monitoring 再開は対象外 — 対象にすると既存 PR が
-      // 上限解消まで再開不能になる。verify-close 等まで止めるのは過剰抑止＝安全側で許容）。
-      if (newStartSuppressed) continue
+      // 上限解消まで再開不能になる）。件数軸・バイト軸の latch は worktree を作らない
+      // verify-close まで止める（過剰抑止＝安全側で許容）が、空き容量起因の latch
+      // （implementOnly: true）は implement のみへ効かせる（Bugbot Medium 指摘）。判定は
+      // shouldSkipForNewStartSuppressed が担う。
+      if (shouldSkipForNewStartSuppressed(newStartSuppressed, item.kind)) continue
       // ラン中の積み増し再評価: 開始時観測値＋本ラン積み増し数を新規着手の直前に毎回比較し、
       // 超過判明時点で以降の新規着手を止める（実行中・monitoring 再開は止めない）。
       if (maxResidualWorktrees > 0 && residualObserved) {
@@ -5766,7 +5942,9 @@ while (true) {
         // (b) 予約込み超過: record 未到達のタスク分を「最大増分 − 実記録数」で予約計上し
         // 「実測 + 予約 + 候補自身の最大増分」で判定する。予約起因の超過見込みは latch せず
         // defer に留め、予約 0 でなお超過見込みの場合のみ恒久停止する。判定 (b) は implement
-        // 限定（verify-close は予約 0。恒久 latch (a) は verify-close にも効く）。
+        // 限定（verify-close は予約 0。恒久 latch (a) は implementOnly を持たないため
+        // verify-close にも効く。空き容量起因の latch を verify-close が通過した後に件数軸・
+        // バイト軸が発火した場合は、この上書きで verify-close も止まる — 意図した昇格である）。
         if (item.kind === 'implement') {
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
@@ -5909,6 +6087,8 @@ while (true) {
                 `関係の削除、不要な worktree の削除、ディスク拡張等）ことでのみ解消できる。解消後に` +
                 `再実行すること`,
               paths: residualPathsAtStart,
+              // 空き容量軸の latch は implement 限定（開始時ゲートと同じ線引き）。
+              implementOnly: true,
             }
             log(`⚠️ ${newStartSuppressed.reason}`)
             continue
