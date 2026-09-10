@@ -227,6 +227,17 @@ test('listUnverifiedImplementIssues: 同一イシューに検証済みパスが�
   assert.deepEqual(listUnverifiedImplementIssues(entries), [])
 })
 
+test('listUnverifiedImplementIssues: 削除確認済みの検証済みパスを持つイシューも解決対象から外す（Bugbot Medium「Removed path breaks implement resolution」）', () => {
+  // マージ後 cleanup の典型形。呼び出し側は confirmedRemovedPaths のエントリを落とさずに渡すため、
+  // 「同一イシューに検証済みパスがあれば重複記録」の規則がそのまま効き、実体の無い worktree の
+  // 候補を探して恒久 latch する経路に入らない。
+  const entries = [
+    { issue: 100, kind: 'implement', path: '/tmp/wt-100' }, // 削除確認済み（呼び出し側で除外しない）
+    { issue: 100, kind: 'implement', path: '' },
+  ]
+  assert.deepEqual(listUnverifiedImplementIssues(entries), [])
+})
+
 test('listUnverifiedImplementIssues: 検証不可プレースホルダも未検証として扱う', () => {
   const entries = [{ issue: 300, kind: 'implement', path: '(検証不可: 応答欠落)' }]
   assert.deepEqual(listUnverifiedImplementIssues(entries), [300])
@@ -326,7 +337,7 @@ test('remeasureResidualBytesNow は computeAveragePerWorktreeBytes と resolveUn
   const fnBody = source.slice(fnStart, fnEnd)
   assert.match(fnBody, /computeAveragePerWorktreeBytes\(/)
   assert.match(fnBody, /resolveUnverifiedImplementPaths\(/)
-  assert.match(fnBody, /listUnverifiedImplementIssues\(implementEntries\)/)
+  assert.match(fnBody, /listUnverifiedImplementIssues\(allImplementEntries\)/)
   assert.match(fnBody, /measureResidualWorktreeBytesDetailed\(targetPaths\)/)
   // 全件平均フォールバック側も欠落数を差し引く（片側だけの修正で希釈が残らないことの固定）。
   assert.match(fnBody, /missing: measured\.missing/)
@@ -337,9 +348,54 @@ test('dispatch ループの新規着手抑止は shouldSkipForNewStartSuppressed
   assert.match(source, /if \(shouldSkipForNewStartSuppressed\(newStartSuppressed, item\.kind\)\) continue/)
 })
 
-test('空き容量起因の latch は 4 箇所すべてで implementOnly: true を持つ（開始時ゲート・開始時 df 単独失敗・ラン中実測し直し失敗・ループ内ゲート）', () => {
+test('容量予約見積り・空き容量起因の latch は 6 箇所すべてで implementOnly: true を持つ（開始時ゲート・開始時 df 単独失敗・未解決 implement パス・implement 限定 du 失敗・ラン中 df 実測し直し失敗・ループ内ゲート）', () => {
   const occurrences = source.match(/implementOnly: true,/g) ?? []
-  assert.equal(occurrences.length, 4, `implementOnly: true の設定箇所は 4 箇所であること（実測 ${occurrences.length}）`)
+  assert.equal(occurrences.length, 6, `implementOnly: true の設定箇所は 6 箇所であること（実測 ${occurrences.length}）`)
+})
+
+test('rawPerWorktreeByteReserve を更新できない 2 経路は implement 限定 latch にする（verify-close を止めない。Bugbot Medium「Reserve update failures stop verify-close」）', () => {
+  const fnStart = source.indexOf('async function remeasureResidualBytesNow()')
+  const fnEnd = source.indexOf('async function remeasureFreeDiskNow()', fnStart)
+  assert.ok(fnStart >= 0 && fnEnd > fnStart)
+  const fnBody = source.slice(fnStart, fnEnd)
+
+  // (1) 未解決の未検証 implement パスが残る経路
+  const unresolvedStart = fnBody.indexOf('if (resolution.unresolvedIssues.length > 0) {')
+  assert.ok(unresolvedStart >= 0, '未解決 implement パス分岐を特定できること')
+  const unresolvedBranch = fnBody.slice(unresolvedStart, fnBody.indexOf('return lastByteRemeasureOutcome', unresolvedStart))
+  assert.match(unresolvedBranch, /implementOnly: true/)
+  assert.match(unresolvedBranch, /lastByteRemeasureOutcome = \{ failed: true, exceeded: false \}/)
+
+  // (2) implement 限定 du の失敗経路
+  const measuredNullStart = fnBody.indexOf('if (implementMeasured === null) {')
+  assert.ok(measuredNullStart >= 0, 'implement 限定測定の失敗分岐を特定できること')
+  const measuredNullBranch = fnBody.slice(measuredNullStart, fnBody.indexOf('return lastByteRemeasureOutcome', measuredNullStart))
+  assert.match(measuredNullBranch, /implementOnly: true/)
+  assert.match(measuredNullBranch, /lastByteRemeasureOutcome = \{ failed: true, exceeded: false \}/)
+
+  // 全件測定（kib === null）の latch は全 kind 停止のまま（バイト軸そのものが未観測のため）。
+  const kibNullStart = fnBody.indexOf('if (kib === null) {')
+  const kibNullBranch = fnBody.slice(kibNullStart, fnBody.indexOf('return lastByteRemeasureOutcome', kibNullStart))
+  assert.doesNotMatch(kibNullBranch, /implementOnly/)
+})
+
+test('未検証 implement の帰属解決は解決直前に物理一覧を取り直す（入口のスナップショットを使い回さない。Bugbot Medium「Stale scan latches unverified implements」）', () => {
+  const fnStart = source.indexOf('async function remeasureResidualBytesNow()')
+  const fnEnd = source.indexOf('async function remeasureFreeDiskNow()', fnStart)
+  const fnBody = source.slice(fnStart, fnEnd)
+  const blockStart = fnBody.indexOf('if (unverifiedImplementIssues.length > 0) {')
+  assert.ok(blockStart >= 0, '未検証 implement の解決ブロックを特定できること')
+  const blockEnd = fnBody.indexOf('const implementPaths = [...implementPathSet]', blockStart)
+  const block = fnBody.slice(blockStart, blockEnd)
+  // 解決直前の再スキャン結果を渡すこと（入口の physicalEntries を渡さない）。
+  assert.match(block, /const freshEntries = await scanOrphanWorktrees\(\)/)
+  assert.match(block, /physicalEntries: freshEntries,/)
+  // 入口のスナップショットを解決へ流用する形（変数名の省略記法）が復活していないこと。
+  assert.doesNotMatch(source, /let physicalEntries = null/)
+  // 解決要否の判定は削除済みフィルタ前の全件を渡す（B-2）。
+  assert.match(fnBody, /listUnverifiedImplementIssues\(allImplementEntries\)/)
+  // 測定対象へは削除確認済みを含めない。
+  assert.match(fnBody, /!isUnverifiedPath\(v\) && !confirmedRemovedPaths\.has\(v\)/)
 })
 
 test('latch の設定は必ず latchNewStartSuppressed 経由で行う（直書き代入・生ガードが残っていない）', () => {

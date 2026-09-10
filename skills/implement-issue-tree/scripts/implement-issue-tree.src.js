@@ -3091,7 +3091,10 @@ function computeAveragePerWorktreeBytes({ kib, sentCount, missing }) {
 // パスの implement エントリが既にある分は除外する — EPHEMERAL_KIND_MAX.implement は 1 で、
 // 1 イシューが持つ implement worktree は高々 1 件のため、両者は同一 worktree の重複記録
 // （新規実行と再開で 2 回 record された等）であり、その worktree は既に測定対象へ入っている。
-// 除外しないと「既に測定済みの worktree」に対して候補が枯れ、恒久 latch を招く。
+// 除外しないと「既に測定済みの worktree」に対して候補が枯れ、恒久 latch を招く。呼び出し側は
+// 削除確認済み（confirmedRemovedPaths）のエントリも落とさずに渡すこと — 削除済みの検証済みパスを
+// 先に除くと、同一イシューの空パス記録だけが残って解決対象へ昇格し、実体の無い worktree の候補を
+// 探して latch する（Bugbot Medium「Removed path breaks implement resolution」）。
 function listUnverifiedImplementIssues(entries) {
   const list = Array.isArray(entries) ? entries : []
   const isUnverified = (v) => !(typeof v === 'string' && v !== '' && !v.startsWith('(検証不可:'))
@@ -5447,12 +5450,10 @@ async function remeasureResidualBytesNow() {
     (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !confirmedRemovedPaths.has(p),
   )
   let fallbackDetail = ''
-  // 物理一覧は測定対象の差し替え（Issue #404）だけでなく、未検証 implement エントリのパス解決
-  // （PR #468 codex-review P1）でも使うため分岐外で保持する。
-  let physicalEntries = null
+  // ここで取る物理一覧は全件測定の対象差し替え（Issue #404）専用。未検証 implement エントリの
+  // パス解決には使い回さない（この後の await を挟んだ時点で古くなるため、解決側は直前に取り直す）。
   if (unverifiedEphemeralCount > 0) {
     const [entries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
-    physicalEntries = entries
     const fallback = buildPhysicalByteMeasureTargets(entries, independentCount)
     if (fallback.ok) {
       // 物理一覧は測定専用の差し替えで削除経路へは流さない。confirmedRemovedPaths による除外も
@@ -5532,23 +5533,40 @@ async function remeasureResidualBytesNow() {
   // 唯一の代替値として targetPaths.length 全件平均へフォールバックする（review / pr-create を
   // 含む全件平均は implement 単独の実サイズより小さくなり得るが、implement データが皆無な状況の
   // 代替に留まる）。
-  const implementEntries = ephemeralWorktrees.filter(
-    (e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)),
-  )
+  // 削除確認済み（confirmedRemovedPaths）を落とす前の implement 全件。解決要否の判定はこちらを
+  // 使う（Bugbot Medium「Removed path breaks implement resolution」）。同一イシューに「削除確認済み
+  // の検証済みパス」と「空パスの残留記録」が並ぶ状態（マージ後 cleanup 直後の典型）で削除済みを
+  // 先に落とすと、空パス側だけが残って解決対象に昇格し、既に実体の無い worktree の候補を探して
+  // 恒久 latch する。除外規則（同一イシューに検証済みパスがあれば重複記録とみなす）は削除済みも
+  // 含めて効かせる。
+  const allImplementEntries = ephemeralWorktrees.filter((e) => e.kind === 'implement')
   const isUnverifiedPath = (v) => !(typeof v === 'string' && v !== '' && !v.startsWith('(検証不可:'))
-  // Set で保持する。同一イシューの複数 implement 記録が同じ物理 worktree へ解決した場合に重複
-  // 計上すると分母が膨らみ平均が半減する（fail-open）。
-  const implementPathSet = new Set(implementEntries.map((e) => e.path).filter((v) => !isUnverifiedPath(v)))
+  // 測定対象は削除確認済みを除いた実在パスのみ（削除済みを du へ送ると missing 計上され分母が
+  // 目減りする）。Set で保持するのは、同一イシューの複数 implement 記録が同じ物理 worktree へ
+  // 解決した場合に重複計上すると分母が膨らみ平均が半減する（fail-open）ため。
+  const implementPathSet = new Set(
+    allImplementEntries
+      .map((e) => e.path)
+      .filter((v) => !isUnverifiedPath(v) && !confirmedRemovedPaths.has(v)),
+  )
   // 未検証 implement エントリ（path 未取得）はパスが無いため上の集合に載らない。既知パスの
   // 部分集合だけで平均を更新すると、パス未取得の大きな worktree の実サイズが予約見積りへ反映
   // されない（PR #468 codex-review P1）。物理一覧からラン開始時と同じ帰属規約でパスを解決し、
   // 解決不能が残る場合のみ測定失敗として fail-closed に倒す。
-  const unverifiedImplementIssues = listUnverifiedImplementIssues(implementEntries)
+  const unverifiedImplementIssues = listUnverifiedImplementIssues(allImplementEntries)
   if (unverifiedImplementIssues.length > 0) {
+    // 物理一覧は解決の直前に取り直す（Bugbot Medium「Stale scan latches unverified implements」）。
+    // 関数入口の physicalEntries は unverifiedEphemeralCount > 0 のときしか取得されず、しかも
+    // 全件測定の await を挟んだ時点のスナップショットになる。その間に並行 recordEphemeralWorktree
+    // が空パスの implement 行を追加すると、null または古い一覧を候補集合として渡すことになり、
+    // 候補 0 件 → 解決不能 → 恒久 latch へ落ちる。入口の physicalEntries は全件測定のフォール
+    // バック専用に留め、ここでは今この瞬間の一覧で解決する。再スキャンが取得できなかった場合
+    // （null / 空配列）のみ解決不能として扱う。
+    const freshEntries = await scanOrphanWorktrees()
     const claimedPaths = ephemeralWorktrees.map((e) => e.path).filter((v) => !isUnverifiedPath(v))
     const resolution = resolveUnverifiedImplementPaths({
       issues: unverifiedImplementIssues,
-      physicalEntries,
+      physicalEntries: freshEntries,
       claimedPaths,
       mainPath: mainWorktreePath,
     })
@@ -5571,9 +5589,13 @@ async function remeasureResidualBytesNow() {
             `（rawPerWorktreeByteReserve）を既知パスの部分集合だけで更新することを避け、測定失敗` +
             `として扱った。部分集合の平均で更新するとパス未取得の worktree の実サイズが見積りへ` +
             `反映されず容量枯渇を許す fail-open になるため、ディスク枯渇防止のため以降の新規` +
-            `イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-            `git worktree list で該当 worktree を確認してから再実行すること`,
+            `イシューの着手（implement）を停止した（実行中のイシュー・monitoring 再開・` +
+            `verify-close は継続する）。git worktree list で該当 worktree を確認してから再実行すること`,
           paths: residualPathsAtStart,
+          // この値（rawPerWorktreeByteReserve）は実ディスク空き容量ゲート専用で、全件測定（kib）
+          // 自体は成功している。worktree を作らない verify-close を止める理由が無いため、他の
+          // 空き容量起因 latch と同じ implement 限定にする（Bugbot Medium 指摘）。
+          implementOnly: true,
         })
       ) {
         log(
@@ -5602,9 +5624,11 @@ async function remeasureResidualBytesNow() {
             `見積り（rawPerWorktreeByteReserve）を更新できなかった。古い予約量のまま続行すると` +
             `実際の成長を過小評価し容量枯渇を許す fail-open になるため（perWorktreeByteReserve` +
             `による見積りは開始時の下限 floor 値であり実使用量の上界ではない）、ディスク枯渇防止の` +
-            `ため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-            `原因を解消してから再実行すること`,
+            `ため以降の新規イシューの着手（implement）を停止した（実行中のイシュー・monitoring 再開・` +
+            `verify-close は継続する）。原因を解消してから再実行すること`,
           paths: residualPathsAtStart,
+          // 上の未解決パス latch と同じ理由で implement 限定（Bugbot Medium 指摘）。
+          implementOnly: true,
         })
       ) {
         log(
