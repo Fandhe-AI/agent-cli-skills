@@ -653,9 +653,14 @@ test('monitoring 再開ゲートは remeasureResidualBytesNow の戻り値のみ
   const blockEnd = source.indexOf('\n          const recordedByIssue = new Map()', start)
   assert.ok(blockEnd > start, 'ブロック終端（予約計上ロジックの開始）を特定できること')
   const block = source.slice(start, blockEnd)
-  // 戻り値を保持して失敗・超過の両方を判定すること
+  // 戻り値を保持して失敗・超過・予約見積り更新失敗（reserveStale）の全てを判定すること
+  // （Issue #475 codex-review P0 再指摘: reserveStale を defer 条件から外すと、古い
+  // rawPerWorktreeByteReserve のまま monitoring 再開が進み容量枯渇を許し得る）
   assert.match(block, /const remeasureOutcome = await remeasureResidualBytesNow\(\)/)
-  assert.match(block, /if \(remeasureOutcome\.failed \|\| remeasureOutcome\.exceeded\)/)
+  assert.match(
+    block,
+    /if \(remeasureOutcome\.failed \|\| remeasureOutcome\.exceeded \|\| remeasureOutcome\.reserveStale\)/,
+  )
   // 旧実装（identity 比較）が復活していないこと（バグの再発防止の核心的な回帰検出）
   assert.doesNotMatch(block, /suppressedBeforeResumeRemeasure/)
   assert.doesNotMatch(block, /newStartSuppressed !== /)

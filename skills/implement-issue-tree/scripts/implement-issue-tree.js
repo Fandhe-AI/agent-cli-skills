@@ -5970,7 +5970,15 @@ while (true) {
 
 
 
-          if (remeasureOutcome.failed || remeasureOutcome.exceeded) {
+
+
+
+
+
+
+
+          if (remeasureOutcome.failed || remeasureOutcome.exceeded || remeasureOutcome.reserveStale) {
+
 
 
             const deferReason = remeasureOutcome.failed
@@ -5978,10 +5986,16 @@ while (true) {
                 `defer した（実測できない状態のまま再開すると fix-routing-error worktree を` +
                 `追加作成し容量上限を超過し得るため fail-closed で待機する）。原因を解消してから` +
                 `再実行すること`
-              : `残置 worktree の容量をラン中に実測し直したところ上限 ` +
-                `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過したため monitoring ` +
-                `再開を defer した。不要な worktree を git worktree remove で手動削除してから` +
-                `再実行すること`
+              : remeasureOutcome.exceeded
+                ? `残置 worktree の容量をラン中に実測し直したところ上限 ` +
+                  `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過したため monitoring ` +
+                  `再開を defer した。不要な worktree を git worktree remove で手動削除してから` +
+                  `再実行すること`
+                : `1 worktree あたりの容量予約見積り（rawPerWorktreeByteReserve）の更新に失敗し` +
+                  `古い予約量のまま monitoring 再開の見積りが過小評価され得るため monitoring 再開を` +
+                  `defer した（全件測定自体は成功しており容量超過は確定していないが、予約見積りが` +
+                  `stale なまま再開すると fix-routing-error worktree の追加作成で容量上限を超過し` +
+                  `得るため fail-closed で待機する）。原因を解消してから再実行すること`
             monitoringResumeGateDeferred.set(n, deferReason)
             log(`⚠️ #${n}: ${deferReason}`)
             continue

@@ -5967,21 +5967,35 @@ while (true) {
           // monitoring 再開の直前にも実測し直す（間引き条件だけだと成長を古い projection が
           // 素通しし worktree を追加作成し得た。PR #390）。判定は戻り値のみで行う。
           const remeasureOutcome = await remeasureResidualBytesNow()
-          // remeasureOutcome.reserveStale（rawPerWorktreeByteReserve 更新のみ失敗）だけの場合は
-          // failed も exceeded も false になるため、ここには到達しない（Issue #475 fix #2:
-          // 予約更新失敗だけで monitoring 再開を毎周回 defer していた過剰抑止の是正）。
-          if (remeasureOutcome.failed || remeasureOutcome.exceeded) {
-            // この呼び出しが検出した実測失敗・容量超過。新規着手停止（latch）とは独立に
-            // monitoring 再開はこの周回のみ defer する（予約解放や掃除で次周回に再評価され得る）。
+          // Issue #475 fix #2 は「予約更新失敗（reserveStale）だけで monitoring 再開を毎周回
+          // defer していた過剰抑止」を是正する目的で reserveStale を defer 条件から外したが、
+          // それにより古い（成長を反映しない）rawPerWorktreeByteReserve のまま monitoring 再開
+          // が進み、再開が作る worktree の見積りが過小評価され容量枯渇を許し得た（codex-review
+          // P0 再指摘・Issue #475）。新規着手（implement）側は latchNewStartSuppressed により
+          // 容量超過 latch が先行確定済みで安全弁として機能しているため、monitoring 再開側でも
+          // reserveStale を defer 条件へ戻す（この defer はこの周回のみで、予約更新が次回成功
+          // すれば reserveStale は false に戻り再評価される。過去の「毎周回」問題は latch の
+          // ような永続停止ではなく、単に測定が成功するまで都度 defer される一過性の待機であり、
+          // fail-open のリスクを取ってまで避けるべき過剰抑止ではない）。
+          if (remeasureOutcome.failed || remeasureOutcome.exceeded || remeasureOutcome.reserveStale) {
+            // この呼び出しが検出した実測失敗・容量超過・予約見積り更新失敗。新規着手停止
+            // （latch）とは独立に monitoring 再開はこの周回のみ defer する（予約解放や掃除、
+            // 次回の予約更新成功で次周回に再評価され得る）。
             const deferReason = remeasureOutcome.failed
               ? `残置 worktree のディスク使用量のラン中実測し直しに失敗したため monitoring 再開を` +
                 `defer した（実測できない状態のまま再開すると fix-routing-error worktree を` +
                 `追加作成し容量上限を超過し得るため fail-closed で待機する）。原因を解消してから` +
                 `再実行すること`
-              : `残置 worktree の容量をラン中に実測し直したところ上限 ` +
-                `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過したため monitoring ` +
-                `再開を defer した。不要な worktree を git worktree remove で手動削除してから` +
-                `再実行すること`
+              : remeasureOutcome.exceeded
+                ? `残置 worktree の容量をラン中に実測し直したところ上限 ` +
+                  `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過したため monitoring ` +
+                  `再開を defer した。不要な worktree を git worktree remove で手動削除してから` +
+                  `再実行すること`
+                : `1 worktree あたりの容量予約見積り（rawPerWorktreeByteReserve）の更新に失敗し` +
+                  `古い予約量のまま monitoring 再開の見積りが過小評価され得るため monitoring 再開を` +
+                  `defer した（全件測定自体は成功しており容量超過は確定していないが、予約見積りが` +
+                  `stale なまま再開すると fix-routing-error worktree の追加作成で容量上限を超過し` +
+                  `得るため fail-closed で待機する）。原因を解消してから再実行すること`
             monitoringResumeGateDeferred.set(n, deferReason)
             log(`⚠️ #${n}: ${deferReason}`)
             continue
