@@ -1243,7 +1243,7 @@ const DISCARD_SAFETY_SCHEMA = {
 
 const STATE_LOAD_SCHEMA = {
   type: 'object',
-  required: ['ok', 'fileExisted', 'items'],
+  required: ['ok', 'fileExisted', 'items', 'highWaterBytes'],
   properties: {
     ok: { type: 'boolean', description: '読み込み・パース成功なら true。ファイルなしの初期化成功も true。jq パース失敗等は false' },
     fileExisted: { type: 'boolean', description: 'ファイルが存在した場合 true（新規作成した場合は false）' },
@@ -1251,6 +1251,13 @@ const STATE_LOAD_SCHEMA = {
       type: 'object',
       description: 'issue 番号（文字列キー）→ 状態オブジェクトのマップ。空オブジェクトも可',
       additionalProperties: true,
+    },
+    highWaterBytes: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        '状態ファイルのトップレベル .perWorktreeByteReserveHighWater の値（バイト単位）。' +
+        'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #471）。',
     },
   },
   additionalProperties: true,
@@ -1363,15 +1370,17 @@ async function loadState() {
       `1. ${STATE_FILE} が存在するか test -f で確認する。`,
       `2. ファイルが存在する場合:`,
       `   a. jq . ${STATE_FILE} でパースを試みる（jq の終了コードで成否を判断する）。`,
-      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。`,
-      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {} を返す。`,
+      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。加えて highWaterBytes は` +
+        ` .perWorktreeByteReserveHighWater フィールドの値（存在しない場合は 0）を返す。`,
+      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {}, highWaterBytes: 0 を返す。`,
       `3. ファイルが存在しない場合:`,
       `   a. mkdir -p _/issue-trees を実行し、`,
-      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","items":{}} を`,
+      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","perWorktreeByteReserveHighWater":0,"items":{}} を`,
       `   c. ${STATE_FILE} に書き込む。`,
-      `   d. 書き込み成功: ok: true, fileExisted: false, items: {} を返す。`,
-      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {} を返す。`,
-      `返却: ok（boolean）, fileExisted（boolean）, items（JSON オブジェクト）。`,
+      `   d. 書き込み成功: ok: true, fileExisted: false, items: {}, highWaterBytes: 0 を返す。`,
+      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {}, highWaterBytes: 0 を返す。`,
+      `返却: ok（boolean）, fileExisted（boolean）, items（JSON オブジェクト）,` +
+        ` highWaterBytes（整数。バイト単位。フィールド欠落は 0）。`,
     ].join('\n'),
     { label: 'state:load', phase: 'Restore', model: 'haiku', effort: 'low', schema: STATE_LOAD_SCHEMA },
   )
@@ -1391,7 +1400,14 @@ async function loadState() {
       )
     }
   }
-  return result?.items ?? {}
+  return {
+    items: result?.items ?? {},
+
+
+    highWaterBytes: Number.isInteger(result?.highWaterBytes) && result.highWaterBytes >= 0
+      ? result.highWaterBytes
+      : 0,
+  }
 }
 
 
@@ -1579,6 +1595,61 @@ async function updateState(issueNumber, patch, options = {}) {
   if (cleanupWorktreePath && result?.cleanupOk === true) confirmedRemovedPaths.add(cleanupWorktreePath)
 
   return result?.mergeOk === true && result?.cleanupOk === true
+}
+
+
+
+
+function computeNextHighWater(currentHighWaterBytes, candidateBytes) {
+  const current = Number.isInteger(currentHighWaterBytes) && currentHighWaterBytes > 0
+    ? currentHighWaterBytes
+    : 0
+  if (!(Number.isInteger(candidateBytes) && candidateBytes > current)) return null
+  return candidateBytes
+}
+
+
+
+
+
+
+
+
+
+
+async function persistPerWorktreeByteReserveHighWater(bytes) {
+  if (!Number.isInteger(bytes) || bytes <= 0) return { ok: false }
+  return enqueueStateWrite(async () => {
+    try {
+      const result = await agent(
+        [
+          `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater の` +
+            `更新のみ。.items には一切触れない）。`,
+          `${STATE_FILE} の .perWorktreeByteReserveHighWater を、現在値（無ければ 0）と ${bytes}` +
+            ` の大きい方へ更新する（縮めない）。`,
+          `手順（mktemp で衝突回避）:`,
+          `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+          `  jq --argjson hw ${bytes} 'if (.perWorktreeByteReserveHighWater // 0) < $hw then` +
+            ` .perWorktreeByteReserveHighWater = $hw else . end | .updatedAt = $ts'` +
+            ` --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+          `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
+            `変更しない。`,
+        ].join('\n'),
+        { label: 'state:high-water', phase: 'State', model: 'haiku', effort: 'low', schema: STATE_WRITE_SCHEMA },
+      )
+      const ok = result?.ok === true
+      if (!ok) {
+        log(
+          `⚠️ perWorktreeByteReserveHighWater（${Math.round(bytes / (1024 * 1024))} MiB）の永続化に` +
+            `失敗した（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
+        )
+      }
+      return { ok }
+    } catch (e) {
+      log(`⚠️ perWorktreeByteReserveHighWater 永続化中に例外が発生した（${e?.message ?? e}）`)
+      return { ok: false }
+    }
+  })
 }
 
 
@@ -3265,7 +3336,7 @@ phase('Restore')
 
 await ensureBoundaryNonceSeed()
 
-const savedItems = await loadState()
+const { items: savedItems, highWaterBytes: loadedHighWaterBytes } = await loadState()
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
 
@@ -3464,6 +3535,11 @@ let rawPerWorktreeByteReserve = 0
 
 
 
+
+let persistedHighWaterBytes = loadedHighWaterBytes
+
+
+
 let freeDiskBytesAtStart = 0
 let freeDiskRemeasureAtIterationSeq = -1
 let freeDiskMeasuredAtLedgerCount = 0
@@ -3645,7 +3721,12 @@ const prereqTransitions = []
 
 
 
-        rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes)
+
+
+
+
+        rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes, persistedHighWaterBytes)
+        await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
 
 
 
@@ -5471,6 +5552,17 @@ const monitoringResumeGateDeferred = new Map()
 
 
 
+
+async function raiseAndPersistHighWater(candidateBytes) {
+  const next = computeNextHighWater(persistedHighWaterBytes, candidateBytes)
+  if (next === null) return
+  persistedHighWaterBytes = next
+  await persistPerWorktreeByteReserveHighWater(next)
+}
+
+
+
+
 async function remeasureResidualBytesIfDue() {
   if (ephemeralWorktrees.length - byteRemeasureAtLedgerCount < BYTE_REMEASURE_LEDGER_INTERVAL) return
   await remeasureResidualBytesNow()
@@ -5733,6 +5825,7 @@ async function remeasureResidualBytesNow() {
             `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
         )
         rawPerWorktreeByteReserve = avgActualBytes
+        await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
       }
     }
   } else if (targetPaths.length > 0) {
@@ -5754,6 +5847,7 @@ async function remeasureResidualBytesNow() {
           `全件 ${targetPaths.length} 件の平均へフォールバック）`,
       )
       rawPerWorktreeByteReserve = avgActualBytes
+      await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
     }
   }
 

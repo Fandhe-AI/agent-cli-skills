@@ -1243,7 +1243,7 @@ const DISCARD_SAFETY_SCHEMA = {
 // 状態ファイルの読み込みスキーマ（additionalProperties 許可で柔軟に受け取る）
 const STATE_LOAD_SCHEMA = {
   type: 'object',
-  required: ['ok', 'fileExisted', 'items'],
+  required: ['ok', 'fileExisted', 'items', 'highWaterBytes'],
   properties: {
     ok: { type: 'boolean', description: '読み込み・パース成功なら true。ファイルなしの初期化成功も true。jq パース失敗等は false' },
     fileExisted: { type: 'boolean', description: 'ファイルが存在した場合 true（新規作成した場合は false）' },
@@ -1251,6 +1251,13 @@ const STATE_LOAD_SCHEMA = {
       type: 'object',
       description: 'issue 番号（文字列キー）→ 状態オブジェクトのマップ。空オブジェクトも可',
       additionalProperties: true,
+    },
+    highWaterBytes: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        '状態ファイルのトップレベル .perWorktreeByteReserveHighWater の値（バイト単位）。' +
+        'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #471）。',
     },
   },
   additionalProperties: true,
@@ -1363,15 +1370,17 @@ async function loadState() {
       `1. ${STATE_FILE} が存在するか test -f で確認する。`,
       `2. ファイルが存在する場合:`,
       `   a. jq . ${STATE_FILE} でパースを試みる（jq の終了コードで成否を判断する）。`,
-      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。`,
-      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {} を返す。`,
+      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。加えて highWaterBytes は` +
+        ` .perWorktreeByteReserveHighWater フィールドの値（存在しない場合は 0）を返す。`,
+      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {}, highWaterBytes: 0 を返す。`,
       `3. ファイルが存在しない場合:`,
       `   a. mkdir -p _/issue-trees を実行し、`,
-      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","items":{}} を`,
+      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","perWorktreeByteReserveHighWater":0,"items":{}} を`,
       `   c. ${STATE_FILE} に書き込む。`,
-      `   d. 書き込み成功: ok: true, fileExisted: false, items: {} を返す。`,
-      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {} を返す。`,
-      `返却: ok（boolean）, fileExisted（boolean）, items（JSON オブジェクト）。`,
+      `   d. 書き込み成功: ok: true, fileExisted: false, items: {}, highWaterBytes: 0 を返す。`,
+      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {}, highWaterBytes: 0 を返す。`,
+      `返却: ok（boolean）, fileExisted（boolean）, items（JSON オブジェクト）,` +
+        ` highWaterBytes（整数。バイト単位。フィールド欠落は 0）。`,
     ].join('\n'),
     { label: 'state:load', phase: 'Restore', model: 'haiku', effort: 'low', schema: STATE_LOAD_SCHEMA },
   )
@@ -1391,7 +1400,14 @@ async function loadState() {
       )
     }
   }
-  return result?.items ?? {}
+  return {
+    items: result?.items ?? {},
+    // 構造化出力が不正な値を返しても 0 へフォールバックする防御的実装。0 は「高水位なし」を
+    // 意味し、呼び出し側の Math.max 系ロジックにとって無害な値（Issue #471）。
+    highWaterBytes: Number.isInteger(result?.highWaterBytes) && result.highWaterBytes >= 0
+      ? result.highWaterBytes
+      : 0,
+  }
 }
 
 // イシュー状態を patch でマージ更新（jq。patch 値は JSON.stringify でインジェクション対策）。
@@ -1579,6 +1595,61 @@ async function updateState(issueNumber, patch, options = {}) {
   if (cleanupWorktreePath && result?.cleanupOk === true) confirmedRemovedPaths.add(cleanupWorktreePath)
   // AND 判定（分割前と同じ戻り値契約。どちらが失敗したかは上のログで判別できる）。
   return result?.mergeOk === true && result?.cleanupOk === true
+}
+
+// rawPerWorktreeByteReserve の永続化済み高水位を更新すべきか・更新後の値を純粋に決定する
+// （Issue #471）。呼び出し側は非 null を受け取ったら in-memory の高水位を更新してから
+// persistPerWorktreeByteReserveHighWater で書き戻す。Math.max（縮めない）と同じ安全側の方針。
+function computeNextHighWater(currentHighWaterBytes, candidateBytes) {
+  const current = Number.isInteger(currentHighWaterBytes) && currentHighWaterBytes > 0
+    ? currentHighWaterBytes
+    : 0
+  if (!(Number.isInteger(candidateBytes) && candidateBytes > current)) return null
+  return candidateBytes
+}
+
+// perWorktreeByteReserveHighWater（トップレベルフィールド）の永続化専用の状態ファイル更新。
+// updateState は .items[n] へのマージ専用のため、トップレベルフィールドの更新には別経路が要る
+// （Issue #471 備考）。bytes は呼び出し元（run 開始時の見積り確定・remeasureResidualBytesNow）が
+// 実測から算出した JS 数値のみで、GitHub 由来の未信頼な自由文を含まないため、updateState の
+// nonce 境界化（boundaryNonce・UNTRUSTED フェンス）は不要。enqueueStateWrite で updateState と
+// 同一キューに乗せ、read-modify-write の競合（.items 側の並行更新との last-writer-wins）を防ぐ。
+// 永続化に失敗してもこのラン自体の見積り精度には影響しない（rawPerWorktreeByteReserve は
+// in-memory のまま正しく機能し続ける）ため、失敗は警告ログのみで run を止めない（fail-open で
+// はなく「次回ランの恩恵を逃すだけ」という非致命リスクの是認）。
+async function persistPerWorktreeByteReserveHighWater(bytes) {
+  if (!Number.isInteger(bytes) || bytes <= 0) return { ok: false }
+  return enqueueStateWrite(async () => {
+    try {
+      const result = await agent(
+        [
+          `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater の` +
+            `更新のみ。.items には一切触れない）。`,
+          `${STATE_FILE} の .perWorktreeByteReserveHighWater を、現在値（無ければ 0）と ${bytes}` +
+            ` の大きい方へ更新する（縮めない）。`,
+          `手順（mktemp で衝突回避）:`,
+          `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+          `  jq --argjson hw ${bytes} 'if (.perWorktreeByteReserveHighWater // 0) < $hw then` +
+            ` .perWorktreeByteReserveHighWater = $hw else . end | .updatedAt = $ts'` +
+            ` --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+          `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
+            `変更しない。`,
+        ].join('\n'),
+        { label: 'state:high-water', phase: 'State', model: 'haiku', effort: 'low', schema: STATE_WRITE_SCHEMA },
+      )
+      const ok = result?.ok === true
+      if (!ok) {
+        log(
+          `⚠️ perWorktreeByteReserveHighWater（${Math.round(bytes / (1024 * 1024))} MiB）の永続化に` +
+            `失敗した（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
+        )
+      }
+      return { ok }
+    } catch (e) {
+      log(`⚠️ perWorktreeByteReserveHighWater 永続化中に例外が発生した（${e?.message ?? e}）`)
+      return { ok: false }
+    }
+  })
 }
 
 // 孤立 worktree 検出（orphan scan）。worktreePath 返却前にクラッシュした worktree は状態
@@ -3265,7 +3336,7 @@ phase('Restore')
 // 境界マーカー用 seed をラン開始時に 1 回だけ取得する（根拠は ensureBoundaryNonceSeed 参照）。
 await ensureBoundaryNonceSeed()
 
-const savedItems = await loadState()
+const { items: savedItems, highWaterBytes: loadedHighWaterBytes } = await loadState()
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
 // Tree フェーズ: ツリー取得 → 外部チェック観測・構成確定の順で実行する。
@@ -3461,6 +3532,11 @@ let lastByteRemeasureOutcome = { failed: false, exceeded: false, reserveStale: f
 // 予約込み projection・latch とは独立の outcome 保持）をそのまま踏襲する。
 let mainWorktreePath = '' // メイン worktree の絶対パス（実ディスク空き容量のラン中再測定に使う）
 let rawPerWorktreeByteReserve = 0 // クランプ前の 1 worktree あたり容量見積り（バイト）。
+// Issue #471: 前回以前のランで確定した永続化済み高水位。開始時 raw 値の下限として使い、
+// このラン中に成長した場合は都度書き戻す（in-memory 側の更新は raiseAndPersistHighWater が
+// 一元的に担う。1 回のランで複数回 growth があっても enqueueStateWrite が直列化するため
+// 競合しない）。
+let persistedHighWaterBytes = loadedHighWaterBytes
 // perWorktreeByteReserve はバイト軸の合計上限に対する「予算配分」でクランプ済みのため、実ディスク
 // の物理的な枯渇判定には使わない（クランプ後の値は実際の 1 worktree サイズより小さくなり得て、
 // 危険側を見逃す＝Bugbot High 指摘）。この raw 値は clampPerWorktreeByteReserve を通さない。
@@ -3645,7 +3721,12 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
         // rawPerWorktreeByteReserve は外側スコープの状態（実ディスク空き容量ゲート専用）。
         // clampPerWorktreeByteReserve を通す前の値をそのまま保持し、以後の空き容量判定は必ず
         // この raw 値を使う（クランプ後の perWorktreeByteReserve はバイト軸の予算配分専用）。
-        rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes)
+        // Issue #471: 永続化済み高水位（persistedHighWaterBytes）を第3の下限として加える。「過去の
+        // 実測を知らない」ことに起因する開始直後の過小見積りは、最初の parallel 件バッチがラン中
+        // 実測し直しの反映前に着手してしまう問題（Bugbot 指摘・baby-tasks-app#40）の根本原因であり、
+        // 前回以前のランの実測結果を下限に使うことで軽減する。3値とも Math.max（縮めない）。
+        rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes, persistedHighWaterBytes)
+        await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
         // クランプの設計根拠は clampPerWorktreeByteReserve 定義側のコメントを参照
         // （Issue #348 codex-review High 指摘: mainKib が gitignored なビルド成果物を含み
         // 過大評価になり得るため、1 件目の着手候補が予約のみで恒久停止しないよう上限を課す）。
@@ -5468,6 +5549,17 @@ const monitoringResumeActive = new Set()
 // 上限ゲートにより monitoring 再開を defer したイシューの記録（n → 理由文字列）。既定の
 // 「再実行すると monitor から再開する」案内は上限超過 defer では誤りのため個別に理由を上書きする。
 const monitoringResumeGateDeferred = new Map()
+// rawPerWorktreeByteReserve が永続化済み高水位を上回ったときだけ高水位を更新・永続化する
+// （Issue #471）。in-memory の persistedHighWaterBytes を先に更新してから非同期書き込みを
+// 投げることで、同一 candidateBytes に対する重複書き込みを避ける（enqueueStateWrite の
+// 直列化とは独立の最適化）。
+async function raiseAndPersistHighWater(candidateBytes) {
+  const next = computeNextHighWater(persistedHighWaterBytes, candidateBytes)
+  if (next === null) return
+  persistedHighWaterBytes = next
+  await persistPerWorktreeByteReserveHighWater(next)
+}
+
 // バイト軸のラン中実測し直し（間引き付き）。perWorktreeByteReserve は開始時 floor 値のため
 // projection だけでは floor 超過の成長を検知できない。既に newStartSuppressed が立っていれば
 // 追加の抑止はしない（projection 経路で既に停止済み）。
@@ -5733,6 +5825,7 @@ async function remeasureResidualBytesNow() {
             `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
         )
         rawPerWorktreeByteReserve = avgActualBytes
+        await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
       }
     }
   } else if (targetPaths.length > 0) {
@@ -5754,6 +5847,7 @@ async function remeasureResidualBytesNow() {
           `全件 ${targetPaths.length} 件の平均へフォールバック）`,
       )
       rawPerWorktreeByteReserve = avgActualBytes
+      await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
     }
   }
   // lastByteRemeasureOutcome は latch（newStartSuppressed）の有無に関わらず、今回の実測結果を
