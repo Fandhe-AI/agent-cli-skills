@@ -190,7 +190,9 @@ test('バイト軸はラン開始時の残置 0 件でもメイン worktree 測�
   assert.doesNotMatch(source, /if \(maxResidualWorktreeBytes > 0 && residual\.paths\.length > 0\)/)
   assert.match(source, /if \(maxResidualWorktreeBytes > 0\) {/)
   assert.match(source, /mainWorktreePath \? await measureMainWorktreeContentBytes\(mainWorktreePath\)/)
-  assert.match(source, /rawPerWorktreeByteReserve = Math\.max\(mainKib \* 1024, avgResidualBytes\)/)
+  // Issue #471: 永続化済み高水位（persistedHighWaterBytes）が Math.max の第3引数に加わった
+  // （前回以前のランの実測結果を開始時見積りの下限として使う）。
+  assert.match(source, /rawPerWorktreeByteReserve = Math\.max\(mainKib \* 1024, avgResidualBytes, persistedHighWaterBytes\)/)
   // クランプ適用を確認する（Issue #348 codex-review High 対応: mainKib の過大評価で
   // 1 件目着手候補が予約のみで恒久停止する回帰を防ぐ）。
   assert.match(source, /perWorktreeByteReserve = clampPerWorktreeByteReserve\(/)
