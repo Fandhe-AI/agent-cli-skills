@@ -3092,6 +3092,9 @@ function computeAveragePerWorktreeBytes({ kib, sentCount, missing }) {
 
 
 
+
+
+
 function listUnverifiedImplementIssues(entries) {
   const list = Array.isArray(entries) ? entries : []
   const isUnverified = (v) => !(typeof v === 'string' && v !== '' && !v.startsWith('(検証不可:'))
@@ -5449,10 +5452,8 @@ async function remeasureResidualBytesNow() {
   let fallbackDetail = ''
 
 
-  let physicalEntries = null
   if (unverifiedEphemeralCount > 0) {
     const [entries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
-    physicalEntries = entries
     const fallback = buildPhysicalByteMeasureTargets(entries, independentCount)
     if (fallback.ok) {
 
@@ -5532,23 +5533,40 @@ async function remeasureResidualBytesNow() {
 
 
 
-  const implementEntries = ephemeralWorktrees.filter(
-    (e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)),
-  )
+
+
+
+
+
+
+  const allImplementEntries = ephemeralWorktrees.filter((e) => e.kind === 'implement')
   const isUnverifiedPath = (v) => !(typeof v === 'string' && v !== '' && !v.startsWith('(検証不可:'))
 
 
-  const implementPathSet = new Set(implementEntries.map((e) => e.path).filter((v) => !isUnverifiedPath(v)))
+
+  const implementPathSet = new Set(
+    allImplementEntries
+      .map((e) => e.path)
+      .filter((v) => !isUnverifiedPath(v) && !confirmedRemovedPaths.has(v)),
+  )
 
 
 
 
-  const unverifiedImplementIssues = listUnverifiedImplementIssues(implementEntries)
+  const unverifiedImplementIssues = listUnverifiedImplementIssues(allImplementEntries)
   if (unverifiedImplementIssues.length > 0) {
+
+
+
+
+
+
+
+    const freshEntries = await scanOrphanWorktrees()
     const claimedPaths = ephemeralWorktrees.map((e) => e.path).filter((v) => !isUnverifiedPath(v))
     const resolution = resolveUnverifiedImplementPaths({
       issues: unverifiedImplementIssues,
-      physicalEntries,
+      physicalEntries: freshEntries,
       claimedPaths,
       mainPath: mainWorktreePath,
     })
@@ -5571,9 +5589,13 @@ async function remeasureResidualBytesNow() {
             `（rawPerWorktreeByteReserve）を既知パスの部分集合だけで更新することを避け、測定失敗` +
             `として扱った。部分集合の平均で更新するとパス未取得の worktree の実サイズが見積りへ` +
             `反映されず容量枯渇を許す fail-open になるため、ディスク枯渇防止のため以降の新規` +
-            `イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-            `git worktree list で該当 worktree を確認してから再実行すること`,
+            `イシューの着手（implement）を停止した（実行中のイシュー・monitoring 再開・` +
+            `verify-close は継続する）。git worktree list で該当 worktree を確認してから再実行すること`,
           paths: residualPathsAtStart,
+
+
+
+          implementOnly: true,
         })
       ) {
         log(
@@ -5602,9 +5624,11 @@ async function remeasureResidualBytesNow() {
             `見積り（rawPerWorktreeByteReserve）を更新できなかった。古い予約量のまま続行すると` +
             `実際の成長を過小評価し容量枯渇を許す fail-open になるため（perWorktreeByteReserve` +
             `による見積りは開始時の下限 floor 値であり実使用量の上界ではない）、ディスク枯渇防止の` +
-            `ため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-            `原因を解消してから再実行すること`,
+            `ため以降の新規イシューの着手（implement）を停止した（実行中のイシュー・monitoring 再開・` +
+            `verify-close は継続する）。原因を解消してから再実行すること`,
           paths: residualPathsAtStart,
+
+          implementOnly: true,
         })
       ) {
         log(

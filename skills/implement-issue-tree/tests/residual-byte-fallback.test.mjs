@@ -218,5 +218,9 @@ test('remeasureResidualBytesNow: implement worktree のみの追加測定が nul
   // latch の設定は latchNewStartSuppressed 経由（未設定チェックの直書きは昇格規則を素通りする
   // ため廃止済み）。戻り値で「今回停止した / 既に停止済み」を出し分ける形を固定する。
   assert.match(nullBranchBody, /if\s*\(\s*!latchNewStartSuppressed\(\{/)
+  // この latch は implement 限定（rawPerWorktreeByteReserve は空き容量ゲート専用で、全件測定は
+  // 成功しているため verify-close を止める理由が無い。Bugbot Medium「Reserve update failures
+  // stop verify-close」）。fail-closed の強さ（failed: true + 早期 return）は維持する。
+  assert.match(nullBranchBody, /implementOnly: true/)
   assert.match(nullBranchBody, /return lastByteRemeasureOutcome/)
 })
