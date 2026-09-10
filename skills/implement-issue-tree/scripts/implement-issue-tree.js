@@ -1309,7 +1309,7 @@ const ORPHAN_COUNT_SCHEMA = {
 
 const ORPHAN_BYTES_SCHEMA = {
   type: 'object',
-  required: ['kib', 'err'],
+  required: ['kib', 'err', 'missing'],
   properties: {
     kib: {
       type: 'integer',
@@ -1329,8 +1329,9 @@ const ORPHAN_BYTES_SCHEMA = {
       minimum: 0,
       description:
         '対象パスのうち測定時点で既に存在しなかった（test -e が偽だった）件数。並行 cleanup と' +
-        'の競合で削除済みのパスは 0 として扱い測定失敗にしない（Bugbot 指摘対応）。ログ用の任意' +
-        'フィールドで、欠落時は 0 とみなす。',
+        'の競合で削除済みのパスは 0 として扱い測定失敗にしない（Bugbot 指摘対応）。呼び出し側は' +
+        'この件数を平均算出の分母から差し引くため必須フィールドとする（欠落を 0 とみなすと分母に' +
+        '存在しないパスが残り 1 worktree あたりの見積りが過小になる fail-open）。',
     },
   },
 }
@@ -1635,10 +1636,19 @@ function branchMatchesIssue(branch, issueNumber) {
 
 
 
+function isValidBranchName(b) {
+  return typeof b === 'string' && !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
+}
+
+
+
+
+
+
 
 let residualByteMeasureCallSeq = 0
-async function measureResidualWorktreeBytes(paths) {
-  if (!Array.isArray(paths) || paths.length === 0) return 0
+async function measureResidualWorktreeBytesDetailed(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return { kib: 0, missing: 0 }
 
 
 
@@ -1722,14 +1732,27 @@ async function measureResidualWorktreeBytes(paths) {
       log(`⚠️ 残置 worktree ディスク使用量測定で ${v?.err ?? '不明'} 件の測定エラーが報告された（合計値を受理せず観測失敗として扱う）`)
       return null
     }
-    if (Number.isInteger(v?.missing) && v.missing > 0) {
+
+
+    if (!(Number.isInteger(v?.missing) && v.missing >= 0 && v.missing <= sanitizedPaths.length)) {
+      log(`⚠️ 残置 worktree ディスク使用量測定の missing が不正（${v?.missing ?? '欠落'}・対象 ${sanitizedPaths.length} 件）。観測失敗として扱う`)
+      return null
+    }
+    if (v.missing > 0) {
       log(`残置 worktree ディスク使用量測定: 並行 cleanup 等により ${v.missing} 件のパスが測定時点で既に存在しなかった（0 として扱った）`)
     }
-    return v.kib
+    return { kib: v.kib, missing: v.missing }
   } catch (e) {
     log(`⚠️ 残置 worktree のディスク使用量測定中に例外が発生した（${e?.message ?? e}）`)
     return null
   }
+}
+
+
+
+async function measureResidualWorktreeBytes(paths) {
+  const measured = await measureResidualWorktreeBytesDetailed(paths)
+  return measured === null ? null : measured.kib
 }
 
 
@@ -3053,6 +3076,89 @@ function shouldSuppressForFreeDisk(freeDiskBytes, requiredFreeDiskBytes) {
 
 
 
+
+
+function computeAveragePerWorktreeBytes({ kib, sentCount, missing }) {
+  if (!Number.isInteger(kib) || kib < 0) return null
+  if (!Number.isInteger(sentCount) || !Number.isInteger(missing)) return null
+  const denominator = sentCount - missing
+  if (denominator <= 0) return null
+  return Math.ceil((kib * 1024) / denominator)
+}
+
+
+
+
+
+
+
+function listUnverifiedImplementIssues(entries) {
+  const list = Array.isArray(entries) ? entries : []
+  const isUnverified = (v) => !(typeof v === 'string' && v !== '' && !v.startsWith('(検証不可:'))
+  const verifiedIssues = new Set(list.filter((e) => !isUnverified(e?.path)).map((e) => e?.issue))
+  return [...new Set(list.filter((e) => isUnverified(e?.path)).map((e) => e?.issue))].filter(
+    (n) => !verifiedIssues.has(n),
+  )
+}
+
+
+
+
+
+
+
+
+function resolveUnverifiedImplementPaths({ issues, physicalEntries, claimedPaths, mainPath }) {
+  const list = Array.isArray(physicalEntries) ? physicalEntries : []
+  const claimed = new Set(Array.isArray(claimedPaths) ? claimedPaths : [])
+  const paths = []
+  const unresolvedIssues = []
+  for (const issue of Array.isArray(issues) ? issues : []) {
+    const candidates = []
+    for (const entry of list) {
+      if (entry?.isMain) continue
+      const candidate = sanitizeWorktreePath(entry?.path ?? '')
+      if (!candidate || (mainPath && candidate === mainPath)) continue
+      if (claimed.has(candidate) || paths.includes(candidate) || candidates.includes(candidate)) continue
+      const branch = typeof entry?.branch === 'string' ? entry.branch : ''
+      if (!branch || !isValidBranchName(branch) || !branchMatchesIssue(branch, issue)) continue
+      candidates.push(candidate)
+    }
+    if (candidates.length === 1) paths.push(candidates[0])
+    else unresolvedIssues.push(issue)
+  }
+  return { paths, unresolvedIssues }
+}
+
+
+
+
+
+
+
+
+function escalateNewStartSuppressed(current, next) {
+  if (!next) return { latch: current, changed: false, escalated: false }
+  if (!current) return { latch: next, changed: true, escalated: false }
+  if (current.implementOnly && !next.implementOnly) return { latch: next, changed: true, escalated: true }
+  return { latch: current, changed: false, escalated: false }
+}
+
+
+
+
+
+
+function shouldSkipForNewStartSuppressed(latch, kind) {
+  if (!latch) return false
+  if (latch.implementOnly) return kind === 'implement'
+  return true
+}
+
+
+
+
+
 function buildPhysicalByteMeasureTargets(entries, independentCount) {
   const list = Array.isArray(entries) ? entries : []
   if (list.length === 0) {
@@ -3264,6 +3370,20 @@ let newStartSuppressed = null
 
 
 
+function latchNewStartSuppressed(next) {
+  const outcome = escalateNewStartSuppressed(newStartSuppressed, next)
+  newStartSuppressed = outcome.latch
+  if (!outcome.changed) return false
+  if (outcome.escalated) {
+    log('⚠️ 空き容量起因の implement 限定停止から全 kind 停止へ昇格した（verify-close も停止する）')
+  }
+  log(`⚠️ ${newStartSuppressed.reason}`)
+  return true
+}
+
+
+
+
 let residualBytesObserved = false
 let residualBytesAtStart = 0
 
@@ -3281,6 +3401,7 @@ let dispatchIterationSeq = 0
 let byteRemeasureAtIterationSeq = -1
 
 
+
 let lastByteRemeasureOutcome = { failed: false, exceeded: false }
 
 
@@ -3293,6 +3414,7 @@ let rawPerWorktreeByteReserve = 0
 
 let freeDiskBytesAtStart = 0
 let freeDiskRemeasureAtIterationSeq = -1
+
 
 
 let lastFreeDiskRemeasureFailed = false
@@ -3366,7 +3488,7 @@ const prereqTransitions = []
   }
   if (scanFailureDetail) {
     if (residualGateActive) {
-      newStartSuppressed = {
+      latchNewStartSuppressed({
         reason:
           `ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。` +
           `残置総数を確認できないため、ディスク枯渇防止の上限ゲート` +
@@ -3375,8 +3497,7 @@ const prereqTransitions = []
           `適用できず、新規イシューの着手を停止し、implement の monitoring 再開も defer した（fail-closed）。` +
           `git worktree list が実行できる状態を確認してから再実行すること`,
         paths: [],
-      }
-      log(`⚠️ ${newStartSuppressed.reason}`)
+      })
     } else {
 
       log(`⚠️ ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。上限ゲートは無効（maxResidualWorktrees: 0 / maxResidualWorktreeBytes: 0）のため続行する`)
@@ -3388,14 +3509,13 @@ const prereqTransitions = []
     residualPathsAtStart = residual.paths
 
     if (maxResidualWorktrees > 0 && residual.count > maxResidualWorktrees) {
-      newStartSuppressed = {
+      latchNewStartSuppressed({
         reason:
           `残置 worktree が件数上限 ${maxResidualWorktrees} 件を超過（実測 ${residual.count} 件）。` +
           `ディスク枯渇防止のため新規イシューの着手を停止した。git worktree list で確認し、` +
           `不要な worktree を git worktree remove で手動削除してから再実行すること`,
         paths: residual.paths,
-      }
-      log(`⚠️ ${newStartSuppressed.reason}`)
+      })
       log(`残置 worktree 一覧（${residual.paths.length} 件）:`)
       for (const p of residual.paths) log(`  ${p}`)
     } else if (maxResidualWorktrees > 0 && residual.count >= Math.ceil(maxResidualWorktrees * 0.8)) {
@@ -3404,6 +3524,7 @@ const prereqTransitions = []
     } else {
       log(`残置 worktree 観測: ${residual.count} 件（上限 ${maxResidualWorktrees > 0 ? `${maxResidualWorktrees} 件` : 'なし'}）`)
     }
+
 
 
 
@@ -3438,8 +3559,8 @@ const prereqTransitions = []
         const detail = hasUnverifiedResidualPath
           ? `残置 worktree 一覧に検証不可なパスが含まれるため測定対象から除外し測定失敗として扱った（対象 ${residual.paths.length} 件）`
           : `残置 worktree のディスク使用量を測定できず（対象 ${residual.paths.length} 件、メイン worktree 測定: ${mainKib === null ? '失敗' : '成功'}、実空き容量測定: ${freeDiskKib === null ? '失敗' : '成功'}）`
-        if (!newStartSuppressed) {
-          newStartSuppressed = {
+        if (
+          !latchNewStartSuppressed({
             reason:
               `ラン開始時の worktree 残置ディスク使用量観測に失敗した（${detail}）。` +
               `容量を確認できないため、ディスク枯渇防止の容量上限ゲート` +
@@ -3447,9 +3568,8 @@ const prereqTransitions = []
               `新規イシューの着手を停止し、implement の monitoring 再開も defer した（fail-closed）。` +
               `du / df が実行できる状態を確認してから再実行すること`,
             paths: residual.paths,
-          }
-          log(`⚠️ ${newStartSuppressed.reason}`)
-        } else {
+          })
+        ) {
           log(`⚠️ ${detail}（既に件数上限で着手を停止済みのため追加の抑止はしない）`)
         }
       } else {
@@ -3488,6 +3608,7 @@ const prereqTransitions = []
 
 
 
+
         freeDiskBytesAtStart = freeDiskKib * 1024
         const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
           reservedUnits: 0,
@@ -3499,8 +3620,8 @@ const prereqTransitions = []
             `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
             `容量予約（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
             `最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件 = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
-          if (!newStartSuppressed) {
-            newStartSuppressed = {
+          if (
+            !latchNewStartSuppressed({
               reason:
                 `${detail}。残置 worktree の合計サイズは容量上限 ` +
                 `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB 以内でも、実ディスクが` +
@@ -3511,9 +3632,11 @@ const prereqTransitions = []
                 `依存関係の削除、不要な worktree の削除、ディスク拡張等）ことでのみ解消できる。` +
                 `解消後に再実行すること`,
               paths: residual.paths,
-            }
-            log(`⚠️ ${newStartSuppressed.reason}`)
-          } else {
+
+
+              implementOnly: true,
+            })
+          ) {
             log(`⚠️ ${detail}（既に他の軸で着手を停止済み）`)
           }
         } else {
@@ -3525,15 +3648,14 @@ const prereqTransitions = []
           const detail =
             `残置 worktree が容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過` +
             `（実測 ${Math.round(bytes / (1024 * 1024))} MiB）`
-          if (!newStartSuppressed) {
-            newStartSuppressed = {
+          if (
+            !latchNewStartSuppressed({
               reason:
                 `${detail}。ディスク枯渇防止のため新規イシューの着手を停止した。git worktree list で確認し、` +
                 `不要な worktree を git worktree remove で手動削除してから再実行すること`,
               paths: residual.paths,
-            }
-            log(`⚠️ ${newStartSuppressed.reason}`)
-          } else {
+            })
+          ) {
             log(`⚠️ ${detail}（既に件数上限で着手を停止済み）`)
           }
         } else if (bytes >= Math.ceil(maxResidualWorktreeBytes * 0.8)) {
@@ -5200,12 +5322,6 @@ function depsOf(item) {
 
 
 
-function isValidBranchName(b) {
-  return typeof b === 'string' && !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
-}
-
-
-
 function isActiveMonitoring(n) {
   const s = savedItems[String(n)] ?? {}
   return (
@@ -5293,9 +5409,13 @@ async function remeasureResidualBytesNow() {
     (p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:') && !confirmedRemovedPaths.has(p),
   )
   let fallbackDetail = ''
+
+
+  let physicalEntries = null
   if (unverifiedEphemeralCount > 0) {
-    const [physicalEntries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
-    const fallback = buildPhysicalByteMeasureTargets(physicalEntries, independentCount)
+    const [entries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
+    physicalEntries = entries
+    const fallback = buildPhysicalByteMeasureTargets(entries, independentCount)
     if (fallback.ok) {
 
 
@@ -5310,7 +5430,14 @@ async function remeasureResidualBytesNow() {
     }
   }
   const measurementFailed = unverifiedEphemeralCount > 0 && fallbackDetail !== ''
-  const kib = measurementFailed ? null : targetPaths.length > 0 ? await measureResidualWorktreeBytes(targetPaths) : 0
+
+
+  const measured = measurementFailed
+    ? null
+    : targetPaths.length > 0
+      ? await measureResidualWorktreeBytesDetailed(targetPaths)
+      : { kib: 0, missing: 0 }
+  const kib = measured === null ? null : measured.kib
 
 
 
@@ -5328,20 +5455,17 @@ async function remeasureResidualBytesNow() {
           `フォールバックして測定対象は確定したが、ディスク使用量の実測（du）自体が失敗した`
         : `台帳に未検証エントリはなく物理一覧フォールバックも発生していないが、` +
           `ディスク使用量の実測（du）自体が失敗した`
-    if (!newStartSuppressed) {
-      newStartSuppressed = {
-        reason:
-          `残置 worktree のディスク使用量のラン中実測し直しに失敗した（対象 ${targetPaths.length} 件、` +
-          `${failureCauseDetail}）。` +
-          `perWorktreeByteReserve による見積りは開始時の下限 floor 値であり実使用量の上界ではない` +
-          `ため、実測できない状態で projection のみへフォールバックすると floor を超える成長を` +
-          `検知できないまま容量上限を超過し得る（fail-open防止）。ディスク枯渇防止のため以降の` +
-          `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。原因を解消` +
-          `してから再実行すること`,
-        paths: residualPathsAtStart,
-      }
-      log(`⚠️ ${newStartSuppressed.reason}`)
-    }
+    latchNewStartSuppressed({
+      reason:
+        `残置 worktree のディスク使用量のラン中実測し直しに失敗した（対象 ${targetPaths.length} 件、` +
+        `${failureCauseDetail}）。` +
+        `perWorktreeByteReserve による見積りは開始時の下限 floor 値であり実使用量の上界ではない` +
+        `ため、実測できない状態で projection のみへフォールバックすると floor を超える成長を` +
+        `検知できないまま容量上限を超過し得る（fail-open防止）。ディスク枯渇防止のため以降の` +
+        `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。原因を解消` +
+        `してから再実行すること`,
+      paths: residualPathsAtStart,
+    })
     return lastByteRemeasureOutcome
   }
   const actualBytes = kib * 1024
@@ -5370,22 +5494,71 @@ async function remeasureResidualBytesNow() {
 
 
 
-  const implementPaths = ephemeralWorktrees
-    .filter((e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)))
-    .map((e) => e.path)
-    .filter((p) => typeof p === 'string' && p !== '' && !p.startsWith('(検証不可:'))
+  const implementEntries = ephemeralWorktrees.filter(
+    (e) => e.kind === 'implement' && !(typeof e.path === 'string' && e.path !== '' && confirmedRemovedPaths.has(e.path)),
+  )
+  const isUnverifiedPath = (v) => !(typeof v === 'string' && v !== '' && !v.startsWith('(検証不可:'))
+
+
+  const implementPathSet = new Set(implementEntries.map((e) => e.path).filter((v) => !isUnverifiedPath(v)))
+
+
+
+
+  const unverifiedImplementIssues = listUnverifiedImplementIssues(implementEntries)
+  if (unverifiedImplementIssues.length > 0) {
+    const claimedPaths = ephemeralWorktrees.map((e) => e.path).filter((v) => !isUnverifiedPath(v))
+    const resolution = resolveUnverifiedImplementPaths({
+      issues: unverifiedImplementIssues,
+      physicalEntries,
+      claimedPaths,
+      mainPath: mainWorktreePath,
+    })
+    for (const resolvedPath of resolution.paths) implementPathSet.add(resolvedPath)
+    if (resolution.paths.length > 0) {
+      log(
+        `残置 worktree バイト実測: 未検証 implement エントリ ${resolution.paths.length} 件のパスを` +
+          `物理一覧から帰属解決し、1 worktree あたりの予約見積りの測定対象へ含めた`,
+      )
+    }
+    if (resolution.unresolvedIssues.length > 0) {
+
+
+      lastByteRemeasureOutcome = { failed: true, exceeded: false }
+      if (
+        !latchNewStartSuppressed({
+          reason:
+            `implement worktree のパスを確定できない未検証エントリが残るため（イシュー ` +
+            `#${resolution.unresolvedIssues.join(', #')}）、1 worktree あたりの容量予約見積り` +
+            `（rawPerWorktreeByteReserve）を既知パスの部分集合だけで更新することを避け、測定失敗` +
+            `として扱った。部分集合の平均で更新するとパス未取得の worktree の実サイズが見積りへ` +
+            `反映されず容量枯渇を許す fail-open になるため、ディスク枯渇防止のため以降の新規` +
+            `イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
+            `git worktree list で該当 worktree を確認してから再実行すること`,
+          paths: residualPathsAtStart,
+        })
+      ) {
+        log(
+          `⚠️ implement worktree のパスを確定できない未検証エントリが残る（既に新規着手を停止済みの` +
+            `ため追加の抑止はしない）`,
+        )
+      }
+      return lastByteRemeasureOutcome
+    }
+  }
+  const implementPaths = [...implementPathSet]
   const implementResidualCount = implementPaths.length
   if (implementResidualCount > 0) {
-    const implementKib = await measureResidualWorktreeBytes(implementPaths)
-    if (implementKib === null) {
+    const implementMeasured = await measureResidualWorktreeBytesDetailed(implementPaths)
+    if (implementMeasured === null) {
 
 
 
 
 
       lastByteRemeasureOutcome = { failed: true, exceeded: false }
-      if (!newStartSuppressed) {
-        newStartSuppressed = {
+      if (
+        !latchNewStartSuppressed({
           reason:
             `implement worktree のみの追加測定に失敗したため、1 worktree あたりの容量予約` +
             `見積り（rawPerWorktreeByteReserve）を更新できなかった。古い予約量のまま続行すると` +
@@ -5394,9 +5567,8 @@ async function remeasureResidualBytesNow() {
             `ため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
             `原因を解消してから再実行すること`,
           paths: residualPathsAtStart,
-        }
-        log(`⚠️ ${newStartSuppressed.reason}`)
-      } else {
+        })
+      ) {
         log(
           `⚠️ implement worktree のみのディスク使用量実測に失敗した（既に新規着手を停止済みの` +
             `ため追加の抑止はしない）`,
@@ -5404,8 +5576,20 @@ async function remeasureResidualBytesNow() {
       }
       return lastByteRemeasureOutcome
     } else {
-      const avgActualBytes = Math.ceil((implementKib * 1024) / implementResidualCount)
-      if (avgActualBytes > rawPerWorktreeByteReserve) {
+
+
+
+      const avgActualBytes = computeAveragePerWorktreeBytes({
+        kib: implementMeasured.kib,
+        sentCount: implementResidualCount,
+        missing: implementMeasured.missing,
+      })
+      if (avgActualBytes === null) {
+        log(
+          `1 worktree あたりの容量予約見積りの更新を見送った（implement worktree ${implementResidualCount} 件が` +
+            `すべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
+        )
+      } else if (avgActualBytes > rawPerWorktreeByteReserve) {
         log(
           `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
             `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
@@ -5415,8 +5599,17 @@ async function remeasureResidualBytesNow() {
       }
     }
   } else if (targetPaths.length > 0) {
-    const avgActualBytes = Math.ceil(actualBytes / targetPaths.length)
-    if (avgActualBytes > rawPerWorktreeByteReserve) {
+    const avgActualBytes = computeAveragePerWorktreeBytes({
+      kib,
+      sentCount: targetPaths.length,
+      missing: measured.missing,
+    })
+    if (avgActualBytes === null) {
+      log(
+        `1 worktree あたりの容量予約見積りの更新を見送った（残置全件 ${targetPaths.length} 件が` +
+          `すべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
+      )
+    } else if (avgActualBytes > rawPerWorktreeByteReserve) {
       log(
         `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
           `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
@@ -5428,9 +5621,10 @@ async function remeasureResidualBytesNow() {
   }
 
 
+
   lastByteRemeasureOutcome = { failed: false, exceeded: actualBytes > maxResidualWorktreeBytes }
-  if (actualBytes > maxResidualWorktreeBytes && !newStartSuppressed) {
-    newStartSuppressed = {
+  if (actualBytes > maxResidualWorktreeBytes) {
+    latchNewStartSuppressed({
       reason:
         `残置 worktree のディスク使用量をラン中に実測し直したところ容量上限 ` +
         `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過した（実測 ` +
@@ -5440,8 +5634,7 @@ async function remeasureResidualBytesNow() {
         `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。不要な` +
         `worktree を git worktree remove で手動削除してから再実行すること`,
       paths: residualPathsAtStart,
-    }
-    log(`⚠️ ${newStartSuppressed.reason}`)
+    })
   }
   return lastByteRemeasureOutcome
 }
@@ -5464,17 +5657,16 @@ async function remeasureFreeDiskNow() {
 
 
     lastFreeDiskRemeasureFailed = true
-    if (!newStartSuppressed) {
-      newStartSuppressed = {
-        reason:
-          `実ディスク空き容量のラン中実測し直しに失敗した。古い実測値をそのまま使うと空き容量の` +
-          `減少を検知できないまま容量枯渇し得るため（fail-open防止）、ディスク枯渇防止のため以降の` +
-          `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。df が実行できる` +
-          `状態を確認してから再実行すること`,
-        paths: residualPathsAtStart,
-      }
-      log(`⚠️ ${newStartSuppressed.reason}`)
-    }
+    latchNewStartSuppressed({
+      reason:
+        `実ディスク空き容量のラン中実測し直しに失敗した。古い実測値をそのまま使うと空き容量の` +
+        `減少を検知できないまま容量枯渇し得るため（fail-open防止）、ディスク枯渇防止のため以降の` +
+        `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。df が実行できる` +
+        `状態を確認してから再実行すること`,
+      paths: residualPathsAtStart,
+
+      implementOnly: true,
+    })
     return { failed: true }
   }
   lastFreeDiskRemeasureFailed = false
@@ -5745,24 +5937,28 @@ while (true) {
       }
 
 
-      if (newStartSuppressed) continue
+
+
+
+      if (shouldSkipForNewStartSuppressed(newStartSuppressed, item.kind)) continue
 
 
       if (maxResidualWorktrees > 0 && residualObserved) {
 
 
         if (residualObservedAtStart + ephemeralWorktrees.length > maxResidualWorktrees) {
-          newStartSuppressed = {
+          latchNewStartSuppressed({
             reason:
               `残置 worktree がラン中の積み増しで上限 ${maxResidualWorktrees} 件を超過` +
               `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件）。` +
               `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
               `不要な worktree を git worktree remove で手動削除してから再実行すること`,
             paths: residualPathsAtStart,
-          }
-          log(`⚠️ ${newStartSuppressed.reason}`)
+          })
           continue
         }
+
+
 
 
 
@@ -5784,7 +5980,7 @@ while (true) {
             residualObservedAtStart + ephemeralWorktrees.length + reservedTotal + EPHEMERAL_RESERVE_PER_NEW_START
           if (projected > maxResidualWorktrees) {
             if (reservedTotal > 0) continue
-            newStartSuppressed = {
+            latchNewStartSuppressed({
               reason:
                 `残置 worktree が予約込みで上限 ${maxResidualWorktrees} 件を超過する見込み` +
                 `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋` +
@@ -5792,8 +5988,7 @@ while (true) {
                 `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
                 `不要な worktree を git worktree remove で手動削除してから再実行すること`,
               paths: residualPathsAtStart,
-            }
-            log(`⚠️ ${newStartSuppressed.reason}`)
+            })
             continue
           }
         }
@@ -5804,13 +5999,12 @@ while (true) {
 
 
 
-          newStartSuppressed = {
+          latchNewStartSuppressed({
             reason:
               `worktree 残置ディスク使用量が未観測のため容量上限ゲートを適用できず、` +
               `新規イシューの着手を停止した（fail-closed）`,
             paths: residualPathsAtStart,
-          }
-          log(`⚠️ ${newStartSuppressed.reason}`)
+          })
           continue
         }
 
@@ -5830,7 +6024,7 @@ while (true) {
           perWorktreeByteReserve,
         })
         if (projectedBytesA > maxResidualWorktreeBytes) {
-          newStartSuppressed = {
+          latchNewStartSuppressed({
             reason:
               `残置 worktree がラン中の積み増しで容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過` +
               `（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋基準以降の積み増し見積り ` +
@@ -5838,8 +6032,7 @@ while (true) {
               `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
               `不要な worktree を git worktree remove で手動削除してから再実行すること`,
             paths: residualPathsAtStart,
-          }
-          log(`⚠️ ${newStartSuppressed.reason}`)
+          })
           continue
         }
 
@@ -5869,7 +6062,7 @@ while (true) {
           })
           if (projectedBytes > maxResidualWorktreeBytes) {
             if (reservedUnits > 0) continue
-            newStartSuppressed = {
+            latchNewStartSuppressed({
               reason:
                 `残置 worktree が予約込みで容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過する見込み` +
                 `（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋基準以降の積み増し・` +
@@ -5877,8 +6070,7 @@ while (true) {
                 `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
                 `不要な worktree を git worktree remove で手動削除してから再実行すること`,
               paths: residualPathsAtStart,
-            }
-            log(`⚠️ ${newStartSuppressed.reason}`)
+            })
             continue
           }
 
@@ -5895,7 +6087,7 @@ while (true) {
           })
           if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
             if (reservedUnits > 0) continue
-            newStartSuppressed = {
+            latchNewStartSuppressed({
               reason:
                 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
                 `込みの必要量（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
@@ -5909,8 +6101,9 @@ while (true) {
                 `関係の削除、不要な worktree の削除、ディスク拡張等）ことでのみ解消できる。解消後に` +
                 `再実行すること`,
               paths: residualPathsAtStart,
-            }
-            log(`⚠️ ${newStartSuppressed.reason}`)
+
+              implementOnly: true,
+            })
             continue
           }
         }

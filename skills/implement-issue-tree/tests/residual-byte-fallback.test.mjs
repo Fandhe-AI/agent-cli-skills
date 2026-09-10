@@ -200,22 +200,23 @@ test('remeasureResidualBytesNow: implement worktree のみの追加測定が nul
   assert.ok(fnStart >= 0 && fnEnd > fnStart, 'remeasureResidualBytesNow 本体を remeasureFreeDiskNow 定義の手前までで特定できること')
   const fnBody = source.slice(fnStart, fnEnd)
 
-  const implementKibBlockStart = fnBody.indexOf('const implementKib = await measureResidualWorktreeBytes(implementPaths)')
+  const implementKibBlockStart = fnBody.indexOf('const implementMeasured = await measureResidualWorktreeBytesDetailed(implementPaths)')
   assert.ok(implementKibBlockStart >= 0, 'implement worktree のみの追加測定呼び出しを特定できること')
-  const nullBranchStart = fnBody.indexOf('if (implementKib === null) {', implementKibBlockStart)
-  assert.ok(nullBranchStart >= 0, 'implementKib === null 分岐を特定できること')
+  const nullBranchStart = fnBody.indexOf('if (implementMeasured === null) {', implementKibBlockStart)
+  assert.ok(nullBranchStart >= 0, 'implementMeasured === null 分岐を特定できること')
   // 分岐本体は成功時処理（rawPerWorktreeByteReserve 更新）の開始行までとする。`} else {` は
   // 分岐内部（!newStartSuppressed の分岐）にも出現するため、それとは衝突しない一意な
   // 成功時コードの先頭行を境界に使う。
-  const nullBranchEnd = fnBody.indexOf('const avgActualBytes = Math.ceil((implementKib', nullBranchStart)
-  assert.ok(nullBranchEnd > nullBranchStart, 'implementKib === null 分岐の終端（成功時処理の開始）を特定できること')
+  const nullBranchEnd = fnBody.indexOf('kib: implementMeasured.kib,', nullBranchStart)
+  assert.ok(nullBranchEnd > nullBranchStart, 'implementMeasured === null 分岐の終端（成功時処理の開始）を特定できること')
   const nullBranchBody = fnBody.slice(nullBranchStart, nullBranchEnd)
 
   // fail-closed 化の核心: ログだけで続行せず、failed: true を確定させ newStartSuppressed を
   // latch し、関数を早期 return する（呼び出し元は戻り値・newStartSuppressed のいずれからでも
   // 停止を検知できる）。
   assert.match(nullBranchBody, /lastByteRemeasureOutcome\s*=\s*\{\s*failed:\s*true,\s*exceeded:\s*false\s*\}/)
-  assert.match(nullBranchBody, /if\s*\(!newStartSuppressed\)\s*\{/)
-  assert.match(nullBranchBody, /newStartSuppressed\s*=\s*\{/)
+  // latch の設定は latchNewStartSuppressed 経由（未設定チェックの直書きは昇格規則を素通りする
+  // ため廃止済み）。戻り値で「今回停止した / 既に停止済み」を出し分ける形を固定する。
+  assert.match(nullBranchBody, /if\s*\(\s*!latchNewStartSuppressed\(\{/)
   assert.match(nullBranchBody, /return lastByteRemeasureOutcome/)
 })
