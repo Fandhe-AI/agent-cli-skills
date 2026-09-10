@@ -94,3 +94,57 @@ test('DISK_FREE_SCHEMA: freeKib・err の両方を必須とする（部分値の
   assert.equal(DISK_FREE_SCHEMA.properties.err.type, 'integer')
   assert.equal(DISK_FREE_SCHEMA.properties.err.minimum, 0)
 })
+
+// --- df 実測後の台帳増分反映（Issue #475 codex P1）---
+// df の実測値（freeDiskBytesAtStart）とその後に並行タスクが記録した worktree 消費は独立に
+// 増えるため、観測時点の台帳長（measuredAtLedgerCount）を基準に未反映の増分を予約へ加算しないと、
+// df 実測後〜判定までの間に生じた消費がキャッシュ済み空き容量にも予約にも反映されない。
+
+test('projectFreeDiskReserveBytes: df 実測後の台帳増分を未測定予約として加算する（Issue #475 codex P1: 実測〜判定間に並行タスクが worktree を記録すると消費が反映されない）', () => {
+  const rawPerWorktreeByteReserve = 8 * 1024 * 1024 * 1024
+  const result = projectFreeDiskReserveBytes({
+    reservedUnits: 0,
+    extraReserveUnits: 0,
+    rawPerWorktreeByteReserve,
+    ledgerLength: 5,
+    measuredAtLedgerCount: 2,
+  })
+  assert.equal(result, 3 * rawPerWorktreeByteReserve)
+})
+
+test('projectFreeDiskReserveBytes: 台帳が df 実測後に減っていても負の予約にしない（Math.max で 0 下限）', () => {
+  const rawPerWorktreeByteReserve = 8 * 1024 * 1024 * 1024
+  const result = projectFreeDiskReserveBytes({
+    reservedUnits: 1,
+    extraReserveUnits: 0,
+    rawPerWorktreeByteReserve,
+    ledgerLength: 2,
+    measuredAtLedgerCount: 5,
+  })
+  assert.equal(result, 1 * rawPerWorktreeByteReserve)
+})
+
+test('projectFreeDiskReserveBytes: ledgerLength / measuredAtLedgerCount を省略した既存呼び出しは増分 0 として扱う（後方互換）', () => {
+  const rawPerWorktreeByteReserve = 8 * 1024 * 1024 * 1024
+  const result = projectFreeDiskReserveBytes({ reservedUnits: 3, extraReserveUnits: 6, rawPerWorktreeByteReserve })
+  assert.equal(result, 9 * rawPerWorktreeByteReserve)
+})
+
+test('remeasureFreeDiskNow は df 実測完了時点の台帳長を freeDiskMeasuredAtLedgerCount へ保持する（Issue #475 codex P1）', () => {
+  const fnStart = source.indexOf('async function remeasureFreeDiskNow()')
+  const fnEnd = source.indexOf('\n// targets（failedSet 入りした前提の番号集合）の外部完了を', fnStart)
+  assert.ok(fnStart >= 0 && fnEnd > fnStart, 'remeasureFreeDiskNow 本体を特定できること')
+  const fnBody = source.slice(fnStart, fnEnd)
+  assert.match(fnBody, /freeDiskMeasuredAtLedgerCount = ephemeralWorktrees\.length/)
+})
+
+test('projectFreeDiskReserveBytes の呼び出し 3 箇所すべてが ledgerLength / measuredAtLedgerCount を渡す（df 実測後の台帳増分未反映の再発防止）', () => {
+  // 関数定義自体（`function projectFreeDiskReserveBytes({ ... })`）も同じ字面にマッチするため、
+  // `= projectFreeDiskReserveBytes({` の呼び出し形のみを対象にする。
+  const occurrences = source.match(/\w+ = projectFreeDiskReserveBytes\(\{[^}]*\}\)/gs) ?? []
+  assert.equal(occurrences.length, 3, `呼び出し箇所は 3 箇所であること（実測 ${occurrences.length}）`)
+  for (const call of occurrences) {
+    assert.match(call, /ledgerLength: ephemeralWorktrees\.length/, call)
+    assert.match(call, /measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount/, call)
+  }
+})

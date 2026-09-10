@@ -271,8 +271,11 @@ test('実測し直しは残置パス一覧＋台帳パスの合計を測定し�
   const fnBody = source.slice(fnStart, fnEnd)
   assert.match(fnBody, /residualPathsAtStart, \.\.\.ephemeralWorktrees\.map\(\(e\) => e\.path\)/)
   // latch の設定は latchNewStartSuppressed 経由へ統一済み（弱い latch が強い latch をブロック
-  // する Bugbot Medium 指摘への対応）。上限超過時にその経路を通ることを固定する。
-  assert.match(fnBody, /if \(actualBytes > maxResidualWorktreeBytes\) \{\n\s*latchNewStartSuppressed\(\{/)
+  // する Bugbot Medium 指摘への対応）。上限超過時にその経路を通ることを固定する。判定変数
+  // exceededAtActualMeasurement は Issue #475 で全件測定直後へ先出しした cap latch が使う
+  // （予約更新失敗の 2 経路より前に容量超過を確定するため）。
+  assert.match(fnBody, /const exceededAtActualMeasurement = actualBytes > maxResidualWorktreeBytes/)
+  assert.match(fnBody, /if \(exceededAtActualMeasurement\) \{\n\s*latchNewStartSuppressed\(\{/)
 })
 
 // --- K8Dc 回帰: ラン中実測し直しが以後の projection の基準を更新すること（PR #390 codex-review
@@ -587,14 +590,19 @@ test('remeasureResidualBytesNow は全ての exit で構造化された { failed
   const fnEnd = source.indexOf('\nwhile (true) {', fnStart)
   const fnBody = source.slice(fnStart, fnEnd)
   assert.ok(fnStart >= 0 && fnEnd > fnStart, 'remeasureResidualBytesNow 本体を特定できること')
-  // ガード節（無効・未観測）の早期 return
-  assert.match(fnBody, /return \{ failed: false, exceeded: false \}/)
+  // ガード節（無効・未観測）の早期 return（Issue #475 で reserveStale フィールドを追加）。
+  assert.match(fnBody, /return \{ failed: false, exceeded: false, reserveStale: false \}/)
   // 同一周回内 2 回目以降の間引き return は直近周回の結果を返す
   assert.match(fnBody, /return lastByteRemeasureOutcome/)
-  // 測定失敗（kib === null）の return
-  assert.match(fnBody, /lastByteRemeasureOutcome = \{ failed: true, exceeded: false \}/)
-  // 測定成功時の return（超過有無を反映）
-  assert.match(fnBody, /lastByteRemeasureOutcome = \{ failed: false, exceeded: actualBytes > maxResidualWorktreeBytes \}/)
+  // 測定失敗（kib === null）の return（バイト軸そのものが未観測のため failed: true のまま）
+  assert.match(fnBody, /lastByteRemeasureOutcome = \{ failed: true, exceeded: false, reserveStale: false \}/)
+  // 測定成功時の return（超過有無は Step 1-1 で確定済みの exceededAtActualMeasurement を反映。
+  // Issue #475 で cap latch を全件測定直後へ先出ししたため、ここでは重複 latch を呼ばず
+  // reserveStale: false のみ確定する）。
+  assert.match(
+    fnBody,
+    /lastByteRemeasureOutcome = \{ failed: false, exceeded: exceededAtActualMeasurement, reserveStale: false \}/,
+  )
   // 値を返さない bare `return`（改行または `}` が直後に続く形）が本体に残っていないこと。
   // 将来ここへ bare return が再混入すると、呼び出し元の `remeasureOutcome.failed` 参照が
   // `TypeError: Cannot read properties of undefined` になり monitoring 再開ゲートが例外で落ちる。

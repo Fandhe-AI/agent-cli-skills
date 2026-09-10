@@ -3059,8 +3059,21 @@ function clampPerWorktreeByteReserve(rawValue, maxResidualWorktreeBytes, reserve
 // perWorktreeByteReserve は合計上限に対する予算配分でしかなく、実際の 1 worktree サイズより
 // 小さくなり得るため、実ディスクの物理的な枯渇判定にクランプ後の値を使うと危険側を見逃す
 // （Bugbot High 指摘）。
-function projectFreeDiskReserveBytes({ reservedUnits, extraReserveUnits, rawPerWorktreeByteReserve }) {
-  return (reservedUnits + extraReserveUnits) * rawPerWorktreeByteReserve
+// ledgerLength / measuredAtLedgerCount: df 実測時点から現在までの未反映の台帳増分
+// （Issue #475 codex P1）。df の実測値とその後に並行タスクが記録した worktree 消費は
+// 独立に増えるため、観測時点の台帳長を保持しその後の増分を予約へ加算しないと、
+// df 実測後〜判定までの間に生じた消費がキャッシュ済み空き容量にも予約にも反映されず、
+// 実空き容量を超える新規着手・monitoring 再開を許し得る。省略時は増分 0（既存呼び出し・
+// 既存テストとの後方互換）。
+function projectFreeDiskReserveBytes({
+  reservedUnits,
+  extraReserveUnits,
+  rawPerWorktreeByteReserve,
+  ledgerLength = 0,
+  measuredAtLedgerCount = 0,
+}) {
+  const unmeasuredLedgerIncrement = Math.max(0, ledgerLength - measuredAtLedgerCount)
+  return (reservedUnits + extraReserveUnits + unmeasuredLedgerIncrement) * rawPerWorktreeByteReserve
 }
 
 // 実ディスク空き容量ゲートの純粋な判定関数（Issue #467 P0/High 再指摘対応）。残置サイズの
@@ -3110,13 +3123,26 @@ function listUnverifiedImplementIssues(entries) {
 // 候補が一意に定まる場合のみ解決し、0 件・複数件は解決不能として返す（同一イシューの別 kind
 // worktree と区別できないため推測しない）。呼び出し側は解決不能が残れば fail-closed に倒す —
 // 既知パスの部分集合だけで平均を更新すると、パス未取得の大きな worktree が見積りへ反映されない
-// fail-open になる。claimedPaths は台帳で検証済みのパス集合で、二重帰属を防ぐ。
-function resolveUnverifiedImplementPaths({ issues, physicalEntries, claimedPaths, mainPath }) {
+// fail-open になる。claimedPaths は台帳で検証済みのパス集合で、二重帰属を防ぐ。independentCount は
+// buildPhysicalByteMeasureTargets と同じ独立レコードカウント照合に使う（Issue #475 4 巡目 Bugbot
+// Medium 指摘）。physicalEntries（scanOrphanWorktrees の一覧）を countWorktreeRecords() の独立カウント
+// と突き合わせずに信頼すると、一覧の転記脱落で候補が偶然一意に絞られたとき、脱落した worktree の
+// 存在を見落としたまま誤って解決してしまう（fail-open）。不一致・カウント未取得は全件解決不能とする。
+function resolveUnverifiedImplementPaths({ issues, physicalEntries, independentCount, claimedPaths, mainPath }) {
   const list = Array.isArray(physicalEntries) ? physicalEntries : []
+  const issuesList = Array.isArray(issues) ? issues : []
+  const countValid = Number.isInteger(independentCount) && independentCount >= 0 && independentCount === list.length
+  // isMain はエージェントの自己申告フラグであり、ちょうど 1 件だけ true でなければ「どれが
+  // メイン worktree か」を判定できない状態とみなす。0 件・複数件のいずれも、メイン除外漏れ・
+  // 過剰除外どちらの fail-open にも振れ得るため判定不能として fail-closed に倒す。
+  const mainFlaggedCount = list.filter((e) => e?.isMain === true).length
+  if (!countValid || mainFlaggedCount !== 1) {
+    return { paths: [], unresolvedIssues: [...issuesList] }
+  }
   const claimed = new Set(Array.isArray(claimedPaths) ? claimedPaths : [])
   const paths = []
   const unresolvedIssues = []
-  for (const issue of Array.isArray(issues) ? issues : []) {
+  for (const issue of issuesList) {
     const candidates = []
     for (const entry of list) {
       if (entry?.isMain) continue
@@ -3418,7 +3444,7 @@ let byteRemeasureAtIterationSeq = -1 // 直近に実測を行った周回番号�
 // 直近の実測呼び出しが検出した failed/exceeded。newStartSuppressed は原則上書きしない latch
 // （適用範囲が広がる昇格のみ許す）のため、identity 比較では 2 回目以降の失敗・超過が検出漏れに
 // なる（PR #390 Bugbot High）。独立に保持する。
-let lastByteRemeasureOutcome = { failed: false, exceeded: false }
+let lastByteRemeasureOutcome = { failed: false, exceeded: false, reserveStale: false }
 // --- 実ディスク空き容量ゲート（第3の安全弁）のラン中再評価用状態（Issue #467 P0/High 再指摘
 // 対応）。開始時 1 回の測定・単一 worktree 分の予約比較だけでは、ラン中の空き容量減少や複数
 // worktree の同時予約消費を検知できない。バイト軸の remeasure パターン（間引き付き実測し直し・
@@ -3430,6 +3456,11 @@ let rawPerWorktreeByteReserve = 0 // クランプ前の 1 worktree あたり容�
 // 危険側を見逃す＝Bugbot High 指摘）。この raw 値は clampPerWorktreeByteReserve を通さない。
 let freeDiskBytesAtStart = 0 // 直近確定した実ディスク空き容量の実測値（ラン中実測し直しのたびに更新）
 let freeDiskRemeasureAtIterationSeq = -1 // 直近に実測し直した周回番号（周回内 1 回の間引き用）
+let freeDiskMeasuredAtLedgerCount = 0 // 直近の df 実測完了時点の ephemeralWorktrees.length。
+// df 実測後〜要求バイト数算出までの間に並行タスクが worktree を記録すると、その消費が
+// キャッシュ済み freeDiskBytesAtStart にも reservedUnits にも反映されない（Issue #475
+// codex P1）。この台帳長を基準に、判定直前の ephemeralWorktrees.length との差分を
+// 「未測定の増分」として projectFreeDiskReserveBytes へ追加予約させる。
 // 直近の実測し直しが検出した failed。newStartSuppressed は原則上書きしない latch（昇格のみ）の
 // ため identity 比較では 2 回目以降の失敗が検出漏れになる（バイト軸と同じ理由。PR #390 Bugbot
 // High 踏襲）。
@@ -3650,10 +3681,13 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
           })
         } else {
           freeDiskBytesAtStart = freeDiskKib * 1024
+          freeDiskMeasuredAtLedgerCount = ephemeralWorktrees.length
           const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
             reservedUnits: 0,
             extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
             rawPerWorktreeByteReserve,
+            ledgerLength: ephemeralWorktrees.length,
+            measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
           })
           if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
             const detail =
@@ -5434,7 +5468,8 @@ async function remeasureResidualBytesIfDue() {
 // 実測本体（間引きは「同一 dispatch 周回内 1 回」のみ）。台帳増分による間引きは
 // remeasureResidualBytesIfDue 側が担い、新規着手直前はこちらを直接使う（PR #390 P1）。
 async function remeasureResidualBytesNow() {
-  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved) return { failed: false, exceeded: false }
+  if (maxResidualWorktreeBytes <= 0 || !residualBytesObserved)
+    return { failed: false, exceeded: false, reserveStale: false }
   // 同一周回内 2 回目以降の呼び出しは実測を省略するが、この周回で確定した最新の
   // failed/exceeded を返す（呼び出し元は戻り値のみで判定すること）。
   if (byteRemeasureAtIterationSeq === dispatchIterationSeq) return lastByteRemeasureOutcome
@@ -5484,7 +5519,7 @@ async function remeasureResidualBytesNow() {
   if (kib === null) {
     // floor 予約は実使用量の上界ではないため、実測失敗時の単純フォールバックは fail-open に
     // なる。fail-closed 側へ倒し新規着手を恒久停止する（実行中・monitoring 再開は継続）。
-    lastByteRemeasureOutcome = { failed: true, exceeded: false }
+    lastByteRemeasureOutcome = { failed: true, exceeded: false, reserveStale: false }
     // 失敗原因の帰属を実際の失敗箇所（一覧取得側 / du 側）ごとに分岐させる（Issue #404。
     // 固定文言だと du 側失敗が「フォールバック失敗」に丸め込まれオペレーターの切り分けを誤らせる）。
     const failureCauseDetail = measurementFailed
@@ -5513,6 +5548,27 @@ async function remeasureResidualBytesNow() {
   // PR #390）。residualBytesAtStart と byteBaselineLedgerCount は必ず同時に更新する。
   residualBytesAtStart = actualBytes
   byteBaselineLedgerCount = ephemeralWorktrees.length
+  // 全件測定（kib）が成功した時点で容量超過の有無を確定し、以下の rawPerWorktreeByteReserve
+  // 更新（implement 限定 latch）より先に全 kind latch を立てる（Issue #475 4 巡目 Bugbot
+  // Medium 指摘）。旧実装は予約更新失敗の 2 経路（未解決 implement パス残存・implement 限定
+  // du 失敗）が { failed: true, exceeded: false } で早期 return するため、既に容量上限を
+  // 超過している総量があっても verify-close を止める全 kind latch へ到達しなかった。ここで
+  // 先に latch すれば、escalateNewStartSuppressed が適用範囲を狭める上書きを許さないため、
+  // 後段で implementOnly 版を latch しようとしても既に立った全 kind latch は保たれる。
+  const exceededAtActualMeasurement = actualBytes > maxResidualWorktreeBytes
+  if (exceededAtActualMeasurement) {
+    latchNewStartSuppressed({
+      reason:
+        `残置 worktree のディスク使用量をラン中に実測し直したところ容量上限 ` +
+        `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過した（実測 ` +
+        `${Math.round(actualBytes / (1024 * 1024))} MiB、対象 ${targetPaths.length} 件）。` +
+        `perWorktreeByteReserve による見積りは開始時の下限 floor 値のため、ビルド成果物等で` +
+        `実際の消費が見積りを上回った場合はこの実測が検知する。ディスク枯渇防止のため以降の` +
+        `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。不要な` +
+        `worktree を git worktree remove で手動削除してから再実行すること`,
+      paths: residualPathsAtStart,
+    })
+  }
   // rawPerWorktreeByteReserve はラン開始時に 1 度だけ確定し（mainKib と avgResidualBytes の
   // 大きい方）、以後は更新されない実装だった。ビルド成果物の蓄積等で 1 worktree あたりの実サイズが
   // 開始時見積りより大きく育つと、実ディスク空き容量ゲート（shouldSuppressForFreeDisk /
@@ -5562,11 +5618,12 @@ async function remeasureResidualBytesNow() {
     // 候補 0 件 → 解決不能 → 恒久 latch へ落ちる。入口の physicalEntries は全件測定のフォール
     // バック専用に留め、ここでは今この瞬間の一覧で解決する。再スキャンが取得できなかった場合
     // （null / 空配列）のみ解決不能として扱う。
-    const freshEntries = await scanOrphanWorktrees()
+    const [freshEntries, freshIndependentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
     const claimedPaths = ephemeralWorktrees.map((e) => e.path).filter((v) => !isUnverifiedPath(v))
     const resolution = resolveUnverifiedImplementPaths({
       issues: unverifiedImplementIssues,
       physicalEntries: freshEntries,
+      independentCount: freshIndependentCount,
       claimedPaths,
       mainPath: mainWorktreePath,
     })
@@ -5579,8 +5636,11 @@ async function remeasureResidualBytesNow() {
     }
     if (resolution.unresolvedIssues.length > 0) {
       // 帰属できない未検証 implement が残る状態で部分集合の平均を採用すると fail-open になる
-      // ため、追加測定失敗と同じ latch 形へ倒す。
-      lastByteRemeasureOutcome = { failed: true, exceeded: false }
+      // ため、rawPerWorktreeByteReserve の更新のみ見送る（reserveStale: true）。全件測定（kib）
+      // 自体は成功済みで exceeded は Step 1-1 で確定済みの値をそのまま反映する（failed は true に
+      // しない）。reserveStale は「予約見積りの更新に失敗した」ことを表す独立フラグで、monitoring
+      // 再開の defer 判定（failed || exceeded）は予約更新失敗だけでは発火しなくなる（Issue #475）。
+      lastByteRemeasureOutcome = { failed: false, exceeded: exceededAtActualMeasurement, reserveStale: true }
       if (
         !latchNewStartSuppressed({
           reason:
@@ -5615,8 +5675,10 @@ async function remeasureResidualBytesNow() {
       // 失敗した場合はログのみで続行せず fail-closed へ倒す（PR #468 codex-review P0）。
       // ログだけで続行すると、古い（成長を反映しない）rawPerWorktreeByteReserve のまま
       // 新規着手予約が過小評価され、既定 50 GiB の下で枯渇直前まで着手を止められない
-      // fail-open になる。上の全件測定失敗（kib === null）分岐と同じ latch 形にする。
-      lastByteRemeasureOutcome = { failed: true, exceeded: false }
+      // fail-open になる。ただし全件測定（kib）自体は成功しているため failed は true にせず、
+      // rawPerWorktreeByteReserve 更新のみ見送ったことを reserveStale: true で表す（Issue #475）。
+      // exceeded は Step 1-1 で確定済みの値をそのまま反映する。
+      lastByteRemeasureOutcome = { failed: false, exceeded: exceededAtActualMeasurement, reserveStale: true }
       if (
         !latchNewStartSuppressed({
           reason:
@@ -5684,20 +5746,9 @@ async function remeasureResidualBytesNow() {
   // lastByteRemeasureOutcome は latch（newStartSuppressed）の有無に関わらず、今回の実測結果を
   // そのまま反映する（下の latch 設定は既存 latch を上書きしない／昇格のみだが、戻り値は独立に
   // 真実を返す）。
-  lastByteRemeasureOutcome = { failed: false, exceeded: actualBytes > maxResidualWorktreeBytes }
-  if (actualBytes > maxResidualWorktreeBytes) {
-    latchNewStartSuppressed({
-      reason:
-        `残置 worktree のディスク使用量をラン中に実測し直したところ容量上限 ` +
-        `${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過した（実測 ` +
-        `${Math.round(actualBytes / (1024 * 1024))} MiB、対象 ${targetPaths.length} 件）。` +
-        `perWorktreeByteReserve による見積りは開始時の下限 floor 値のため、ビルド成果物等で` +
-        `実際の消費が見積りを上回った場合はこの実測が検知する。ディスク枯渇防止のため以降の` +
-        `新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。不要な` +
-        `worktree を git worktree remove で手動削除してから再実行すること`,
-      paths: residualPathsAtStart,
-    })
-  }
+  // latch は Step 1-1（全件測定 kib 成功直後）で既に発火済みのため、ここでは重複して呼ばない。
+  // rawPerWorktreeByteReserve の更新にも成功しているため reserveStale: false（新鮮）で確定する。
+  lastByteRemeasureOutcome = { failed: false, exceeded: exceededAtActualMeasurement, reserveStale: false }
   return lastByteRemeasureOutcome
 }
 
@@ -5733,6 +5784,7 @@ async function remeasureFreeDiskNow() {
   }
   lastFreeDiskRemeasureFailed = false
   freeDiskBytesAtStart = freeDiskKib * 1024
+  freeDiskMeasuredAtLedgerCount = ephemeralWorktrees.length
   return { failed: false }
 }
 
@@ -5915,6 +5967,9 @@ while (true) {
           // monitoring 再開の直前にも実測し直す（間引き条件だけだと成長を古い projection が
           // 素通しし worktree を追加作成し得た。PR #390）。判定は戻り値のみで行う。
           const remeasureOutcome = await remeasureResidualBytesNow()
+          // remeasureOutcome.reserveStale（rawPerWorktreeByteReserve 更新のみ失敗）だけの場合は
+          // failed も exceeded も false になるため、ここには到達しない（Issue #475 fix #2:
+          // 予約更新失敗だけで monitoring 再開を毎周回 defer していた過剰抑止の是正）。
           if (remeasureOutcome.failed || remeasureOutcome.exceeded) {
             // この呼び出しが検出した実測失敗・容量超過。新規着手停止（latch）とは独立に
             // monitoring 再開はこの周回のみ defer する（予約解放や掃除で次周回に再評価され得る）。
@@ -5973,6 +6028,8 @@ while (true) {
             reservedUnits,
             extraReserveUnits: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
             rawPerWorktreeByteReserve,
+            ledgerLength: ephemeralWorktrees.length,
+            measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
           })
           if (freeDiskRemeasure.failed || shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytesResume)) {
             const deferReason = freeDiskRemeasure.failed
@@ -6146,6 +6203,8 @@ while (true) {
             reservedUnits,
             extraReserveUnits: EPHEMERAL_RESERVE_PER_NEW_START,
             rawPerWorktreeByteReserve,
+            ledgerLength: ephemeralWorktrees.length,
+            measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
           })
           if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
             if (reservedUnits > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
