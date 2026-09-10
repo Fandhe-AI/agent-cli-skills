@@ -45,6 +45,7 @@ const SLICE_EXPORTS = [
   'listUnverifiedImplementIssues',
   'shouldSkipForNewStartSuppressed',
   'escalateNewStartSuppressed',
+  'classifyStartMeasurementFailure',
   'ORPHAN_BYTES_SCHEMA',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
@@ -56,6 +57,7 @@ const {
   listUnverifiedImplementIssues,
   shouldSkipForNewStartSuppressed,
   escalateNewStartSuppressed,
+  classifyStartMeasurementFailure,
   ORPHAN_BYTES_SCHEMA,
 } = mod
 
@@ -292,6 +294,27 @@ test('escalateNewStartSuppressed: 昇格後の latch は verify-close も止め�
   assert.equal(shouldSkipForNewStartSuppressed(escalated.latch, 'implement'), true)
 })
 
+// --- 5. ラン開始時の測定失敗の帰属（Bugbot Medium「df failure poisons residual observation」）---
+
+test('classifyStartMeasurementFailure: 全測定成功なら none', () => {
+  assert.equal(classifyStartMeasurementFailure({ mainKib: 100, kib: 200, freeDiskKib: 300 }), 'none')
+})
+
+test('classifyStartMeasurementFailure: du 側（mainKib / kib）の失敗はバイト軸の観測失敗（全 kind 停止）', () => {
+  assert.equal(classifyStartMeasurementFailure({ mainKib: null, kib: 200, freeDiskKib: 300 }), 'bytes')
+  assert.equal(classifyStartMeasurementFailure({ mainKib: 100, kib: null, freeDiskKib: 300 }), 'bytes')
+  // du と df が同時に失敗した場合もバイト軸を優先する（観測不能の範囲が広い側へ倒す）。
+  assert.equal(classifyStartMeasurementFailure({ mainKib: null, kib: null, freeDiskKib: null }), 'bytes')
+})
+
+test('classifyStartMeasurementFailure: df だけの失敗は free-disk（バイト軸の観測は成立させる）', () => {
+  assert.equal(classifyStartMeasurementFailure({ mainKib: 100, kib: 200, freeDiskKib: null }), 'free-disk')
+})
+
+test('classifyStartMeasurementFailure: 残置 0 件（kib が 0）を失敗と取り違えない', () => {
+  assert.equal(classifyStartMeasurementFailure({ mainKib: 0, kib: 0, freeDiskKib: 0 }), 'none')
+})
+
 // --- 配線固定（dead code 化防止）---
 // 駆動部（マーカー以下）は import できないため、既存テスト群と同型のソーステキスト固定で
 // 新規純粋関数が実際に駆動部から参照されていることを確認する。
@@ -314,9 +337,9 @@ test('dispatch ループの新規着手抑止は shouldSkipForNewStartSuppressed
   assert.match(source, /if \(shouldSkipForNewStartSuppressed\(newStartSuppressed, item\.kind\)\) continue/)
 })
 
-test('空き容量起因の latch は 3 箇所すべてで implementOnly: true を持つ（開始時ゲート・実測し直し失敗・ループ内ゲート）', () => {
+test('空き容量起因の latch は 4 箇所すべてで implementOnly: true を持つ（開始時ゲート・開始時 df 単独失敗・ラン中実測し直し失敗・ループ内ゲート）', () => {
   const occurrences = source.match(/implementOnly: true,/g) ?? []
-  assert.equal(occurrences.length, 3, `implementOnly: true の設定箇所は 3 箇所であること（実測 ${occurrences.length}）`)
+  assert.equal(occurrences.length, 4, `implementOnly: true の設定箇所は 4 箇所であること（実測 ${occurrences.length}）`)
 })
 
 test('latch の設定は必ず latchNewStartSuppressed 経由で行う（直書き代入・生ガードが残っていない）', () => {
@@ -328,6 +351,34 @@ test('latch の設定は必ず latchNewStartSuppressed 経由で行う（直書�
   assert.deepEqual(assignments, [], '直書きの newStartSuppressed 代入が残っている')
   assert.doesNotMatch(source, /if \(!newStartSuppressed\)/)
   assert.doesNotMatch(source, /&& !newStartSuppressed\)/)
+})
+
+test('ラン開始時ゲート: df 単独失敗は implementOnly latch・du 側失敗は全 kind latch・平均は computeAveragePerWorktreeBytes 経由', () => {
+  const gateStart = source.indexOf("const startFailure = classifyStartMeasurementFailure({ mainKib, kib, freeDiskKib })")
+  assert.ok(gateStart >= 0, 'ラン開始時ゲートの失敗分類を特定できること')
+  const gateEnd = source.indexOf('const bytes = residualBytesAtStart', gateStart)
+  assert.ok(gateEnd > gateStart, 'ゲート本体の終端（容量上限比較の開始）を特定できること')
+  const gateBody = source.slice(gateStart, gateEnd)
+
+  // du 側失敗（'bytes'）は従来どおり全 kind 停止（implementOnly を付けない）。
+  const bytesBranchStart = gateBody.indexOf("if (startFailure === 'bytes') {")
+  const freeDiskBranchStart = gateBody.indexOf("if (startFailure === 'free-disk') {")
+  assert.ok(bytesBranchStart >= 0 && freeDiskBranchStart > bytesBranchStart)
+  const bytesBranch = gateBody.slice(bytesBranchStart, gateBody.indexOf('residualBytesObserved = true', bytesBranchStart))
+  assert.match(bytesBranch, /!latchNewStartSuppressed\(\{/)
+  assert.doesNotMatch(bytesBranch, /implementOnly/)
+
+  // df 単独失敗は implement 限定 latch。freeDiskBytesAtStart を確定させない（未実測値との比較を避ける）。
+  const freeDiskBranch = gateBody.slice(freeDiskBranchStart, gateBody.indexOf('} else {', freeDiskBranchStart))
+  assert.match(freeDiskBranch, /latchNewStartSuppressed\(\{/)
+  assert.match(freeDiskBranch, /implementOnly: true/)
+  assert.doesNotMatch(freeDiskBranch, /freeDiskBytesAtStart = /)
+
+  // バイト軸の観測確定（residualBytesObserved）は df 失敗でも巻き戻さない。
+  assert.ok(gateBody.indexOf('residualBytesObserved = true') < freeDiskBranchStart)
+
+  // 開始時の 1 worktree あたり平均も欠落パスを分母から差し引く（Bugbot Low 指摘）。
+  assert.match(gateBody, /computeAveragePerWorktreeBytes\(\{\n\s*kib,\n\s*sentCount: verifiedResidualPaths\.length,\n\s*missing: residualMeasured\.missing,/)
 })
 
 test('latchNewStartSuppressed は escalateNewStartSuppressed の判定に従い、代入とログのみを担う', () => {
