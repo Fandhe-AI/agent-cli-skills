@@ -1670,9 +1670,12 @@ async function persistPerWorktreeByteReserveHighWater(bytes) {
             ` の大きい方へ更新する（縮めない）。`,
           `手順（mktemp で衝突回避）:`,
           `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
-          `  jq --argjson hw ${bytes} 'if (.perWorktreeByteReserveHighWater // 0) < $hw then` +
+
+
+          `  jq --argjson hw ${bytes} --arg ts "$(date -u +%FT%TZ)"` +
+            ` 'if (.perWorktreeByteReserveHighWater // 0) < $hw then` +
             ` .perWorktreeByteReserveHighWater = $hw else . end | .updatedAt = $ts'` +
-            ` --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+            ` ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
           `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
             `変更しない。`,
         ].join('\n'),
