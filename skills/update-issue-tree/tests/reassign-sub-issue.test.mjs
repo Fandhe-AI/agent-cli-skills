@@ -737,3 +737,78 @@ test('ケース24: 承認不一致（exit 6）経路でも新親 GET を撃た�
   const c = calls(r.logPath).filter((l) => l.startsWith('api'))
   assert.equal(c.length, 1, 'api 呼び出しが GET 1 件のみであること')
 })
+
+// --- Issue #482: 新親初観測時の安定確認 ---------------------------------------
+// confirm_stable_parent は「旧親 / 孤児を期待した再確認で本来の新親 #NEW_PARENT を
+// 観測した」場合に戻り値 2 を返し、呼び出し元 4 箇所がこれを reassigned の成功終端へ
+// 変換する。しかし新親の観測自体は sleep 後の GET 1 回きりであり、期待値側に適用して
+// いる「2 回連続で同じ親を観測する」条件が新親側には適用されていなかった（articles#119
+// の codex P1）。孤児 → 新親 → 孤児 と推移する反映途中の過渡状態を成功として確定させて
+// しまうため、新親を初観測した後は新親を期待値としてもう 1 回取得し、一致した場合にのみ
+// reassigned を確定する。以下 3 ケースはその契約の回帰テスト。
+//
+// いずれも「DELETE 成功 → POST 失敗 → 実状態の再取得で旧親配下 → 反映遅延を考慮した
+// 再確認（confirm_stable_parent expected=旧親）」経路を使う。対象 issue への GET は
+// 1 回目=事前確認 / 2 回目=復旧のための実状態再取得 / 3 回目=反映遅延の再確認 /
+// 4 回目=本 Issue で追加した新親側の安定確認、の順に対応する。
+
+test('ケース43: 反映遅延の再確認で新親 #7 を初観測 → 新親を期待値とした再取得でも #7 → exit 0 reassigned（Issue #482。新親側も 2 回連続一致を経てから確定する）', () => {
+  const r = run(['--issue', '61', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '5', // 復旧のための再取得 GET は旧親 #5 配下に見える → 反映遅延の再確認へ進む
+    parentAfter2: '7', // 反映遅延の再確認で本来の新親 #7 を初観測（ここで即確定してはいけない）
+    parentAfter3: '7', // 新親を期待値とした再取得でも #7 → ここで初めて reassigned を確定
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 0)
+  assert.match(r.stdout.trim(), /^result=reassigned issue=61 new_parent=7 old_parent=5$/)
+  // 対象 issue への GET が 4 回撃たれていること（新親側の安定確認が実際に走った証拠）。
+  // 新親 #7 の事前検証 GET と DELETE / POST は対象パスに含まれないため除外される
+  const targetGets = calls(r.logPath).filter(
+    (l) => l.startsWith('api') && l.includes('/issues/61') && !l.includes('--method'),
+  )
+  assert.equal(targetGets.length, 4, '新親初観測後に新親を期待値とした再取得が 1 回追加されること')
+})
+
+test('ケース44: 反映遅延の再確認で新親 #7 を初観測 → 新親を期待値とした再取得では孤児（過渡状態）→ exit 8 recovery-state-unknown（Issue #482。成功へ倒さない）', () => {
+  const r = run(['--issue', '62', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '5',
+    parentAfter2: '7', // 新親を初観測
+    parentAfter3: '', // 新親側の安定確認では孤児だった（孤児 → 新親 → 孤児 の過渡状態）
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8, '新親側の安定確認が取れない場合は成功終端しないこと')
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  assert.doesNotMatch(r.stdout, /result=reassigned/, '安定確認できていない状態で reassigned を出力しないこと')
+})
+
+test('ケース44b: 反映遅延の再確認で新親 #7 を初観測 → 新親を期待値とした再取得では旧親 #5 に戻っていた → exit 8 recovery-state-unknown（Issue #482）', () => {
+  const r = run(['--issue', '63', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '5',
+    parentAfter2: '7',
+    parentAfter3: '5', // 新親側の安定確認では旧親 #5 配下に見えた（新親観測は過渡状態だった）
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  assert.doesNotMatch(r.stdout, /result=reassigned/)
+})
+
+test('ケース45: 反映遅延の再確認で新親 #7 を初観測 → 新親を期待値とした再取得が失敗 → exit 8 recovery-state-unknown（Issue #482。取得失敗も状態不明として fail-closed）', () => {
+  const r = run(['--issue', '64', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '5',
+    parentAfter2: '7', // 新親を初観測
+    fourthGetFail: true, // 新親側の安定確認のための再取得が失敗する
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8, '再取得失敗は成功ではなく状態不明として終端すること')
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  assert.doesNotMatch(r.stdout, /result=reassigned/)
+})
