@@ -165,10 +165,13 @@ emit_result() {
 # 安定確認は expected="" を渡すことで「2 回連続で親なしが観測できるか」を同じ関数で判定
 # する（cursor[bot] Medium 指摘「Orphan restore skips stability check」）。期待どおりで
 # 安定確認できれば戻り値 0（stdout 出力なし）。
-# 期待値とは異なるが実測が本来の新親 #NEW_PARENT だった場合は戻り値 2 とし、情報行のみ
+# 期待値とは異なるが実測が本来の新親 #NEW_PARENT だった場合は、新親を期待値として同じ
+# 手順をもう 1 回通し、2 回連続で新親配下が観測できたときにだけ戻り値 2 とし、情報行のみ
 # stderr へ出す（呼び出し元はこれを「元の POST が偽陰性で実際には成功していた」ことを
 # 意味する成功終端として扱う。cursor[bot] Medium 指摘 PR #391 — 旧親への復旧確認・偽陰性
 # 確認のいずれでも、実測が新親であることを第三者による割り込みと誤ラベルしていた）。
+# 新親側の再確認が一致しない・再取得に失敗した場合は成功へ倒さず戻り値 1（状態不明）とする
+# （Issue #482。新親の初観測 1 回だけで reassigned を確定していた非対称の是正）。
 # それ以外の不一致（第三者の別親・孤児への転落）は戻り値 1 とし、原因を stderr へ出力する
 # （呼び出し元は exit 8 で終端する）。
 # 引数 $1: ログメッセージに使う文脈ラベル（例: "補償復旧後の確認"） 引数 $2: 期待する親 issue 番号
@@ -230,8 +233,20 @@ confirm_stable_parent() {
     return 0
   fi
   if [[ "${expected}" != "${NEW_PARENT}" && "${recheck_same_repo}" -eq 1 && "${recheck_parent}" == "${NEW_PARENT}" ]]; then
-    echo "情報: ${label}で期待した #${expected} ではなく本来の新親 #${NEW_PARENT} 配下にあることが判明した（元の POST が偽陰性で実際には成功していた可能性）" >&2
-    return 2
+    # 新親の観測はこの時点でまだ 1 回きりであり、期待値側へ適用している「2 回連続で同じ親を
+    # 観測する」条件が新親側には適用されていない。POST 失敗後に 孤児 → 新親 → 孤児 と推移する
+    # 反映途中の過渡状態を成功として確定してしまうため、新親を期待値として同じ関数をもう一度
+    # 通し、2 回連続で新親配下が観測できて初めて偽陰性成功を確定する（Issue #482。articles#119
+    # の codex P1 指摘）。再帰は 1 段で止まる — 内側は expected == NEW_PARENT のためこの分岐の
+    # 条件を満たさず、戻り値 0 / 1 のいずれかで必ず終わる
+    echo "情報: ${label}で期待した #${expected} ではなく本来の新親 #${NEW_PARENT} 配下にあることが判明した（元の POST が偽陰性で実際には成功していた可能性。新親側の安定確認へ進む）" >&2
+    local nps_rc=0
+    confirm_stable_parent "${label}に続く新親 #${NEW_PARENT} の安定確認" "${NEW_PARENT}" || nps_rc=$?
+    if [[ "${nps_rc}" -eq 0 ]]; then
+      return 2
+    fi
+    echo "エラー: ${label}で観測した新親 #${NEW_PARENT} 配下を安定確認できなかった（反映途中の過渡状態だった可能性）。成功とはみなさず状態不明のまま終端する" >&2
+    return 1
   fi
   if [[ -n "${recheck_parent}" ]]; then
     local recheck_scope

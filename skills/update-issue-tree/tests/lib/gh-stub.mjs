@@ -32,8 +32,8 @@ function shQuote(value) {
  * @param {boolean} [fixture.verifyGetFail] 事後 GET（2 回目）を失敗させる
  * @param {boolean} [fixture.thirdGetFail] 3 回目の GET（孤児観測の安定確認 / 補償 POST 後の
  *   事後確認 / 補償 POST 失敗後の実状態再取得のいずれか、シナリオにより異なる）を失敗させる
- * @param {boolean} [fixture.fourthGetFail] 4 回目の GET（補償 POST 失敗後の実状態再取得等、
- *   孤児観測の安定確認より後で発生する再取得）を失敗させる
+ * @param {boolean} [fixture.fourthGetFail] 4 回目の GET（補償 POST 失敗後の実状態再取得、
+ *   孤児観測の安定確認より後で発生する再取得、または Issue #482 の新親側の安定確認）を失敗させる
  * @param {string} [fixture.issueId] GET が返す database id
  * @param {string} [fixture.parentBefore] 事前 GET が返す現在の親 issue 番号（'' = 親なし）
  * @param {string} [fixture.parentAfter] 対象 issue の 2 回目 GET（成功経路の事後確認 / 失敗経路の
@@ -42,8 +42,9 @@ function shQuote(value) {
  * @param {string} [fixture.parentAfter2] 対象 issue の 3 回目の GET（補償復旧 POST 後の事後
  *   確認、または補償 POST 失敗後の実状態確認）が返す親 issue 番号（未指定なら parentAfter を継続）
  * @param {string} [fixture.parentAfter3] 対象 issue の 4 回目の GET（Issue #352 の
- *   confirm_stable_old_parent が撃つ反映遅延の再確認・偽陰性の再確認、または補償 POST 成功後の
- *   事後確認 RECOVERY_VERIFY_JSON）が返す親 issue 番号（未指定なら parentAfter2 を継続）
+ *   confirm_stable_old_parent が撃つ反映遅延の再確認・偽陰性の再確認、補償 POST 成功後の
+ *   事後確認 RECOVERY_VERIFY_JSON、または Issue #482 で追加した「3 回目の GET で新親を初観測
+ *   した場合に新親を期待値として撃つ安定確認」）が返す親 issue 番号（未指定なら parentAfter2 を継続）
  * @param {string} [fixture.parentAfter4] 対象 issue の 5 回目以降の GET（補償復旧後の最終安定確認
  *   等、confirm_stable_parent の追加呼び出しが撃つ再取得）が返す親 issue 番号
  *   （未指定なら parentAfter3 を継続）
