@@ -157,6 +157,50 @@ emit_result() {
   echo "result=${state} issue=${ISSUE} new_parent=${NEW_PARENT} old_parent=${old_parent_out}"
 }
 
+# 対象 issue の GET 応答から parent_issue_url を取り出す共通ヘルパー。
+#
+# 背景: `gh api` は終了コード 0 で返しても、応答が空・`{}`・`null`・（リダイレクト等で）別
+# issue のオブジェクトになることがある。`jq -r '.parent_issue_url // empty'` はそのいずれでも
+# 終了コード 0 で空文字列を返すため、復旧取得と安定確認がともにその応答を受け入れると
+# 「孤児を 2 回確認済み」と誤認し、旧親への補償 POST という承認外になり得る書き込みへ進む
+# （fail-open。下流同期 PR Fandhe-AI/articles#119 の codex P1 指摘）。値の有無ではなく
+# **応答が対象 issue の JSON オブジェクトであること**を識別情報（`.number`）で検証する。
+#
+# 契約:
+#   引数 $1: エラーメッセージに使う文脈ラベル  引数 $2: gh api の生の応答本文
+#   stdout: 検証済みの parent_issue_url（親なしなら空文字列）
+#   戻り値 0: 応答が対象 issue #ISSUE の JSON オブジェクトであると確認できた
+#             （親なしの判定はこの場合にのみ成立する）
+#   戻り値 1: 空・`{}`・`null`・配列・別 issue のオブジェクト・不正 JSON のいずれか。
+#             「親なし」ではなく**状態不明**であり、呼び出し元は孤児と断定せず書き込み
+#             なしで終端する（fail-closed）
+# 呼び出し元は ISSUE / GH_ERR_FILE を設定済みであること。復旧・安定確認の 4 経路すべてが
+# この関数を経由する（個別に検証を書き散らさない）
+extract_parent_url() {
+  local label="$1"
+  local json="$2"
+  local out rc=0
+  # 空応答（空白のみ含む）は jq に渡す前に拒否する。jq -e の「入力なし → exit 4」は版に依存し、
+  # jq 1.6（Ubuntu 22.04 既定）では exit 0 で空出力になり、親なし（孤児）と区別できなくなる
+  # （cursor[bot] Medium 指摘 PR #488）。
+  if [[ -z "${json//[[:space:]]/}" ]]; then
+    echo "エラー: ${label}の応答が空（gh api は成功終了したが本文なし）。親なし（孤児）とは区別し、状態不明として扱う" >&2
+    return 1
+  fi
+  # jq -e: 値が 1 件も出力されなければ exit 4（空応答）、error() は exit 5。どちらも非 0 に
+  # なるため、`.parent_issue_url` の値の有無とは独立に「応答そのものが不正」を判別できる。
+  # `// ""` で親なしを空文字列に落とすため、正常系（親なし）は exit 0 で空文字列を返す
+  out=$(printf '%s' "${json}" | jq -e -r --argjson n "${ISSUE}" \
+    'if (type == "object") and (.number == $n) then (.parent_issue_url // "") else error("not-target-issue") end' \
+    2>"${GH_ERR_FILE}") || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "エラー: ${label}の応答が対象 issue #${ISSUE} の JSON オブジェクトではない（空・{}・null・別 issue・不正 JSON のいずれか。jq 終了コード ${rc}）。親なし（孤児）とは区別し、状態不明として扱う" >&2
+    cat "${GH_ERR_FILE}" >&2
+    return 1
+  fi
+  printf '%s' "${out}"
+}
+
 # 実測で期待した親配下に見えた場合でも、DELETE/POST の反映遅延による過渡状態を見ている
 # 可能性を排除できない。短い間隔を空けて再取得し、2 回連続で同じ結果が得られて初めて
 # 安定した状態として確定する（codex-review P1 指摘 PR #391）。呼び出し文脈が異なる複数箇所
@@ -210,9 +254,10 @@ confirm_stable_parent() {
   # 第三者親配下にあるのに「実測 parent=なし」＝孤児と誤報する）
   local recheck_parent_url recheck_parent recheck_same_repo=1
   # jq 解析は set -e で即終了させず明示捕捉する — GET が終了コード 0 でも空・不正 JSON を
-  # 返した場合、素の代入だと契約外の exit 1 で終端するため（codex-review P1 指摘 PR #391）
-  if ! recheck_parent_url=$(printf '%s' "${recheck_json}" | jq -r '.parent_issue_url // empty'); then
-    echo "エラー: ${label}の応答 JSON を解析できない。#${ISSUE} が #${expected} 配下で安定しているか未確認のまま終端する" >&2
+  # 返した場合、素の代入だと契約外の exit 1 で終端するため（codex-review P1 指摘 PR #391）。
+  # 応答が対象 issue の JSON であることの検証は extract_parent_url に集約している
+  if ! recheck_parent_url=$(extract_parent_url "${label}" "${recheck_json}"); then
+    echo "エラー: #${ISSUE} が #${expected} 配下で安定しているか未確認のまま終端する" >&2
     return 1
   fi
   recheck_parent=""
@@ -288,8 +333,8 @@ recover_after_post_failure() {
   local recovery_parent_url recovery_parent recovery_same_repo=1
   # jq 解析失敗は状態不明として exit 8 へ統一する（codex-review P1 指摘 PR #391。素の代入だと
   # set -e で契約外の exit 1 になり、DELETE 済みの部分変更が残ったことが呼び出し元へ伝わらない）
-  if ! recovery_parent_url=$(printf '%s' "${RECOVERY_JSON}" | jq -r '.parent_issue_url // empty'); then
-    echo "エラー: 復旧のための実状態応答 JSON を解析できない。#${ISSUE} の親子状態は未確認" >&2
+  if ! recovery_parent_url=$(extract_parent_url "復旧のための実状態再取得" "${RECOVERY_JSON}"); then
+    echo "エラー: #${ISSUE} の親子状態は未確認のまま終端する（孤児と断定せず補償 POST を撃たない）" >&2
     echo "reason=recovery-state-unknown" >&2
     exit 8
   fi
@@ -367,8 +412,8 @@ recover_after_post_failure() {
         # （codex-review P1 指摘 PR #391。CI 失敗の直接原因）
         local comp_fail_parent_url comp_fail_parent comp_fail_same_repo=1
         # jq 解析失敗は状態不明として exit 8 へ統一する（codex-review P1 指摘 PR #391）
-        if ! comp_fail_parent_url=$(printf '%s' "${COMP_FAIL_JSON}" | jq -r '.parent_issue_url // empty'); then
-          echo "エラー: 補償 POST 失敗後の実状態応答 JSON を解析できない。#${ISSUE} が孤児のままかは未確認" >&2
+        if ! comp_fail_parent_url=$(extract_parent_url "補償 POST 失敗後の実状態再取得" "${COMP_FAIL_JSON}"); then
+          echo "エラー: #${ISSUE} が孤児のままかは未確認" >&2
           echo "reason=recovery-state-unknown" >&2
           exit 8
         fi
@@ -467,8 +512,8 @@ recover_after_post_failure() {
     # 誤報し、孤児と紐付いていない状態を「孤児」として報告してしまう）
     local rv_parent_url rv_parent rv_same_repo=1
     # jq 解析失敗は状態不明として exit 8 へ統一する（codex-review P1 指摘 PR #391）
-    if ! rv_parent_url=$(printf '%s' "${RECOVERY_VERIFY_JSON}" | jq -r '.parent_issue_url // empty'); then
-      echo "エラー: 補償復旧後の確認応答 JSON を解析できない。#${ISSUE} の親子状態は未確認" >&2
+    if ! rv_parent_url=$(extract_parent_url "補償復旧後の確認取得" "${RECOVERY_VERIFY_JSON}"); then
+      echo "エラー: #${ISSUE} の親子状態は未確認" >&2
       echo "reason=recovery-state-unknown" >&2
       exit 8
     fi

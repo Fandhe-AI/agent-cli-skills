@@ -812,3 +812,76 @@ test('ケース45: 反映遅延の再確認で新親 #7 を初観測 → 新親�
   assert.match(r.stderr, /reason=recovery-state-unknown/)
   assert.doesNotMatch(r.stdout, /result=reassigned/)
 })
+
+// --- 復旧経路の応答検証（articles#119 の codex P1 指摘）---------------------------
+// gh が終了コード 0 で返しても、応答が空・`{}`・`null`・別 issue のオブジェクトである
+// 場合がある。`.parent_issue_url // empty` はそのいずれでも終了コード 0 で空文字列を
+// 返すため、復旧取得と安定確認がともにこの応答を受け入れると「孤児を 2 回確認済み」と
+// 誤認し、旧親への補償 POST（承認外になり得る書き込み）へ進んでしまう。
+// 応答が対象 issue の JSON オブジェクトであることを検証し、満たさない応答は状態不明
+// （exit 8 reason=recovery-state-unknown）として書き込まずに停止することを実測する。
+
+test('ケース46: DELETE 後の POST 失敗 → 復旧取得・安定確認がともに `{}` を返す（gh は成功終了）→ 孤児と誤認せず exit 8 reason=recovery-state-unknown、補償 POST は撃たれない（articles#119 codex P1）', () => {
+  const r = run(['--issue', '60', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    rawAfter: '{}', // 復旧のための実状態再取得が対象 issue の JSON でない応答を返す
+    rawAfter2: '{}', // 安定確認の再取得も同じ応答（指摘の「ともに受け入れる」条件）
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  const posts = calls(r.logPath).filter((l) => l.includes('--method POST'))
+  assert.equal(posts.length, 1, '状態不明のまま補償 POST（書き込み）を撃たないこと（1 回目の新親 POST のみ）')
+  assert.ok(
+    !posts.some((l) => l.includes('issues/5/sub_issues')),
+    '旧親 #5 への補償 POST が 1 件も呼ばれていないこと',
+  )
+  assert.doesNotMatch(r.stdout, /result=restored/)
+})
+
+test('ケース46b: DELETE 後の POST 失敗 → 復旧取得の応答が空（gh は成功終了・stdout なし）→ 孤児と誤認せず exit 8 reason=recovery-state-unknown、補償 POST は撃たれない（articles#119 codex P1）', () => {
+  const r = run(['--issue', '61', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    // 成功終了だが stdout が空（jq は値を 1 件も出力せず -e が exit 4 を返す）
+    rawAfter: '',
+    rawAfter2: '', // 安定確認の再取得も同じ応答（両方が受け入れると誤って孤児確定する）
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  const posts = calls(r.logPath).filter((l) => l.includes('--method POST'))
+  assert.equal(posts.length, 1, '状態不明のまま補償 POST を撃たないこと')
+})
+
+test('ケース47: DELETE 後の POST 失敗 → 復旧取得の応答が別 issue 番号のオブジェクト → 対象 issue の状態として受け入れず exit 8 reason=recovery-state-unknown（articles#119 codex P1）', () => {
+  const r = run(['--issue', '62', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    // 番号が対象 issue（#62）と異なる = リダイレクト・取り違えで別 issue の応答が返った状態
+    rawAfter: '{"id": 999, "number": 777, "repository_url": "https://api.github.com/repos/o/r", "parent_issue_url": null}',
+    // 安定確認の再取得も同じ別 issue 応答（両方が受け入れると誤って孤児確定する）
+    rawAfter2: '{"id": 999, "number": 777, "repository_url": "https://api.github.com/repos/o/r", "parent_issue_url": null}',
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 8)
+  assert.match(r.stderr, /reason=recovery-state-unknown/)
+  const posts = calls(r.logPath).filter((l) => l.includes('--method POST'))
+  assert.equal(posts.length, 1, '別 issue の応答を孤児の根拠にして補償 POST を撃たないこと')
+})
+
+test('ケース48: DELETE 後の POST 失敗 → 復旧取得・安定確認がともに対象 issue の有効な「親なし」応答 → 従来どおり孤児と判定し補償 POST を撃って exit 10 restored（ケース46/47 の対照。検証強化で正常系を壊していないこと）', () => {
+  const r = run(['--issue', '63', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    parentAfter: '', // 復旧のための再取得・安定確認ともに有効な親なし応答
+    parentAfter3: '5', // 補償 POST 後の事後確認は旧親配下
+    postExit: 1,
+    postBody: '500 Internal Server Error',
+  })
+  assert.equal(r.status, 10)
+  assert.match(r.stdout.trim(), /^result=restored issue=63 new_parent=7 old_parent=5$/)
+  const posts = calls(r.logPath).filter((l) => l.includes('--method POST'))
+  assert.equal(posts.length, 2, '有効な孤児応答なら補償 POST が撃たれること')
+  assert.match(posts[1], /issues\/5\/sub_issues/)
+})
