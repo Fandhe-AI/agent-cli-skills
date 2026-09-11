@@ -843,11 +843,9 @@ test('ケース46: DELETE 後の POST 失敗 → 復旧取得・安定確認が�
 test('ケース46b: DELETE 後の POST 失敗 → 復旧取得の応答が空（gh は成功終了・stdout なし）→ 孤児と誤認せず exit 8 reason=recovery-state-unknown、補償 POST は撃たれない（articles#119 codex P1）', () => {
   const r = run(['--issue', '61', '--old-parent', '5', '--new-parent', '7'], {
     parentBefore: '5',
-    // rawAfter に空文字列は指定できない（スタブの既定応答へフォールバックする）ため、
-    // JSON の null リテラルで「対象 issue のオブジェクトではない応答」を再現する。
-    // 空 stdout も jq が値を 1 件も出さない点で同じ経路（取得失敗）へ落ちる
-    rawAfter: 'null',
-    rawAfter2: 'null', // 安定確認の再取得も同じ応答（両方が受け入れると誤って孤児確定する）
+    // 成功終了だが stdout が空（jq は値を 1 件も出力せず -e が exit 4 を返す）
+    rawAfter: '',
+    rawAfter2: '', // 安定確認の再取得も同じ応答（両方が受け入れると誤って孤児確定する）
     postExit: 1,
     postBody: '500 Internal Server Error',
   })

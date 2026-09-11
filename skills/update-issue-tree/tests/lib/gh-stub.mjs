@@ -61,7 +61,8 @@ function shQuote(value) {
  * @param {string} [fixture.compPostBody] 2 回目以降の POST 失敗時に stderr へ出す本文
  * @param {string} [fixture.rawAfter] 対象 issue の 2 回目 GET（復旧のための実状態再取得）が返す
  *   生の JSON 本文を丸ごと差し替える（'{}' ・'null' ・'' ・別 issue 番号のオブジェクト等、
- *   「gh は成功終了したが応答が対象 issue の JSON ではない」ケースの再現。未指定なら
+ *   「gh は成功終了したが応答が対象 issue の JSON ではない」ケースの再現。空文字列は
+ *   「成功終了だが stdout が空」を表す（未指定 undefined とは区別する）。未指定なら
  *   parentAfter / parentRepoAfter から生成した通常の応答を返す）
  * @param {string} [fixture.rawAfter2] 対象 issue の 3 回目 GET（安定確認の再取得）が返す生の
  *   JSON 本文を丸ごと差し替える（未指定なら通常の応答）
@@ -95,8 +96,10 @@ export function createGhStub(fixture = {}) {
     postBody: '',
     compPostExit: 0,
     compPostBody: '',
-    rawAfter: '',
-    rawAfter2: '',
+    // 既定は undefined（差し替えなし）。空文字列は「stdout が空の成功応答」という有効な
+    // 指定値のため、`-n` による有無判定では両者を区別できない（下の raw*Set を使う）
+    rawAfter: undefined,
+    rawAfter2: undefined,
     newParentGetFail: false,
     newParentRepo: 'o/r',
     // issues API は PR も返す（issue と PR は番号空間を共有する）。true にすると
@@ -123,6 +126,10 @@ export function createGhStub(fixture = {}) {
   writeFileSync(getCountPath, '0')
   writeFileSync(postCountPath, '0')
   writeFileSync(targetPathPath, '')
+
+  // raw の「未指定」と「空文字列の指定」を stub スクリプト内で区別するためのフラグ
+  const rawAfterSet = f.rawAfter !== undefined ? '1' : '0'
+  const rawAfter2Set = f.rawAfter2 !== undefined ? '1' : '0'
 
   const authBranch = f.authFail ? 'exit 1' : 'exit 0'
   const getFailBranch = f.getFail ? "echo 'stub: get failed' >&2; exit 1" : ':'
@@ -206,6 +213,7 @@ count=$((count + 1))
 echo "\${count}" > ${shQuote(getCountPath)}
 
 raw=""
+raw_set=0
 if [[ "\${count}" -eq 1 ]]; then
   ${getFailBranch}
   parent=${shQuote(f.parentBefore)}
@@ -214,12 +222,14 @@ elif [[ "\${count}" -eq 2 ]]; then
   ${verifyGetFailBranch}
   parent=${shQuote(f.parentAfter)}
   prepo=${shQuote(f.parentRepoAfter)}
-  raw=${shQuote(f.rawAfter)}
+  raw=${shQuote(f.rawAfter ?? '')}
+  raw_set=${rawAfterSet}
 elif [[ "\${count}" -eq 3 ]]; then
   ${thirdGetFailBranch}
   parent=${shQuote(f.parentAfter2)}
   prepo=${shQuote(f.parentRepoAfter2)}
-  raw=${shQuote(f.rawAfter2)}
+  raw=${shQuote(f.rawAfter2 ?? '')}
+  raw_set=${rawAfter2Set}
 elif [[ "\${count}" -eq 4 ]]; then
   ${fourthGetFailBranch}
   parent=${shQuote(f.parentAfter3)}
@@ -231,8 +241,8 @@ fi
 
 # raw が指定された回は、生成した通常応答の代わりにその本文をそのまま返す（空文字列なら
 # 「gh は成功終了したが stdout は空」の再現）
-if [[ -n "\${raw}" ]]; then
-  printf '%s\\n' "\${raw}"
+if [[ "\${raw_set}" -eq 1 ]]; then
+  printf '%s' "\${raw}"
   exit 0
 fi
 
