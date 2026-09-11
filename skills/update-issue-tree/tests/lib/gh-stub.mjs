@@ -59,6 +59,12 @@ function shQuote(value) {
  * @param {string} [fixture.postBody] 1 回目の POST 失敗時に stderr へ出す本文（"only have one parent" 判定に使う）
  * @param {number} [fixture.compPostExit] 2 回目以降の POST（Issue #352 の補償復旧で旧親へ戻す POST）の終了コード
  * @param {string} [fixture.compPostBody] 2 回目以降の POST 失敗時に stderr へ出す本文
+ * @param {string} [fixture.rawAfter] 対象 issue の 2 回目 GET（復旧のための実状態再取得）が返す
+ *   生の JSON 本文を丸ごと差し替える（'{}' ・'null' ・'' ・別 issue 番号のオブジェクト等、
+ *   「gh は成功終了したが応答が対象 issue の JSON ではない」ケースの再現。未指定なら
+ *   parentAfter / parentRepoAfter から生成した通常の応答を返す）
+ * @param {string} [fixture.rawAfter2] 対象 issue の 3 回目 GET（安定確認の再取得）が返す生の
+ *   JSON 本文を丸ごと差し替える（未指定なら通常の応答）
  * @param {boolean} [fixture.newParentGetFail] 新親 GET を非ゼロ終了させる（存在しない番号の再現）
  * @param {string} [fixture.newParentRepo] 新親の repository_url の owner/repo（既定 'o/r' = 対象 issue と同一。'other/repo' で転送済み issue を再現）
  * @param {boolean} [fixture.newParentIsPullRequest] 新親 GET のレスポンスへ `.pull_request` を含める（issues API が PR も返す仕様の再現）
@@ -89,6 +95,8 @@ export function createGhStub(fixture = {}) {
     postBody: '',
     compPostExit: 0,
     compPostBody: '',
+    rawAfter: '',
+    rawAfter2: '',
     newParentGetFail: false,
     newParentRepo: 'o/r',
     // issues API は PR も返す（issue と PR は番号空間を共有する）。true にすると
@@ -197,6 +205,7 @@ count=$(cat ${shQuote(getCountPath)})
 count=$((count + 1))
 echo "\${count}" > ${shQuote(getCountPath)}
 
+raw=""
 if [[ "\${count}" -eq 1 ]]; then
   ${getFailBranch}
   parent=${shQuote(f.parentBefore)}
@@ -205,10 +214,12 @@ elif [[ "\${count}" -eq 2 ]]; then
   ${verifyGetFailBranch}
   parent=${shQuote(f.parentAfter)}
   prepo=${shQuote(f.parentRepoAfter)}
+  raw=${shQuote(f.rawAfter)}
 elif [[ "\${count}" -eq 3 ]]; then
   ${thirdGetFailBranch}
   parent=${shQuote(f.parentAfter2)}
   prepo=${shQuote(f.parentRepoAfter2)}
+  raw=${shQuote(f.rawAfter2)}
 elif [[ "\${count}" -eq 4 ]]; then
   ${fourthGetFailBranch}
   parent=${shQuote(f.parentAfter3)}
@@ -218,10 +229,21 @@ else
   prepo=${shQuote(f.parentRepoAfter4)}
 fi
 
+# raw が指定された回は、生成した通常応答の代わりにその本文をそのまま返す（空文字列なら
+# 「gh は成功終了したが stdout は空」の再現）
+if [[ -n "\${raw}" ]]; then
+  printf '%s\\n' "\${raw}"
+  exit 0
+fi
+
+# number は実 API の応答に含まれる対象 issue の識別情報。スクリプトは「応答が対象 issue の
+# JSON オブジェクトか」をこのフィールドで検証するため、パス末尾の issue 番号から生成する
+# （articles#119 の codex P1 指摘対応）
+num="\${path##*/}"
 if [[ -n "\${parent}" ]]; then
-  printf '{"id": ${f.issueId}, "repository_url": "https://api.github.com/repos/o/r", "parent_issue_url": "https://api.github.com/repos/%s/issues/%s"}\\n' "\${prepo}" "\${parent}"
+  printf '{"id": ${f.issueId}, "number": %s, "repository_url": "https://api.github.com/repos/o/r", "parent_issue_url": "https://api.github.com/repos/%s/issues/%s"}\\n' "\${num}" "\${prepo}" "\${parent}"
 else
-  printf '{"id": ${f.issueId}, "repository_url": "https://api.github.com/repos/o/r", "parent_issue_url": null}\\n'
+  printf '{"id": ${f.issueId}, "number": %s, "repository_url": "https://api.github.com/repos/o/r", "parent_issue_url": null}\\n' "\${num}"
 fi
 `
 
