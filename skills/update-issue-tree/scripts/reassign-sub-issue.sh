@@ -180,6 +180,13 @@ extract_parent_url() {
   local label="$1"
   local json="$2"
   local out rc=0
+  # 空応答（空白のみ含む）は jq に渡す前に拒否する。jq -e の「入力なし → exit 4」は版に依存し、
+  # jq 1.6（Ubuntu 22.04 既定）では exit 0 で空出力になり、親なし（孤児）と区別できなくなる
+  # （cursor[bot] Medium 指摘 PR #488）。
+  if [[ -z "${json//[[:space:]]/}" ]]; then
+    echo "エラー: ${label}の応答が空（gh api は成功終了したが本文なし）。親なし（孤児）とは区別し、状態不明として扱う" >&2
+    return 1
+  fi
   # jq -e: 値が 1 件も出力されなければ exit 4（空応答）、error() は exit 5。どちらも非 0 に
   # なるため、`.parent_issue_url` の値の有無とは独立に「応答そのものが不正」を判別できる。
   # `// ""` で親なしを空文字列に落とすため、正常系（親なし）は exit 0 で空文字列を返す
