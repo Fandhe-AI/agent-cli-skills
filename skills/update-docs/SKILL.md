@@ -52,9 +52,9 @@ git diff <commit_hash>..HEAD --stat
 
 ```bash
 if [ -d skills ]; then
-  find skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | sed -E 's#^skills/##; s#/SKILL.md$##' | sort
+  find skills -mindepth 2 -maxdepth 2 -name SKILL.md | sed -E 's#^skills/##; s#/SKILL.md$##' | sort
 elif [ -d .agents/skills ]; then
-  find .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | sed -E 's#^\.agents/skills/##; s#/SKILL.md$##' | sort
+  find .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md | sed -E 's#^\.agents/skills/##; s#/SKILL.md$##' | sort
 fi
 # いずれのディレクトリも無ければ何も出力しない（空集合。エラー終了しない）
 ```
@@ -252,8 +252,9 @@ extract_b3   # 参照スキルの掲載一覧
 等式が成立しない場合は、B2・B3 の抽出コマンド（タイブレーク含む）またはカウント方法に
 誤りがある。B4 が 1 件以上出た場合は、対応する `WARN:` の内容に従って手動で構成を
 確認する（symlink 化・タイブレーク再実施等。update-docs 自身は構成を変更しない）。具体的な
-数値例（実測スナップショット）は `skills/update-docs/references/measurement-example.md` を
-参照（本リポジトリ専用の値であり、他リポジトリでの期待値ではない）。
+数値例（実測スナップショット）は [references/measurement-example.md](references/measurement-example.md)
+（本 SKILL.md と同じディレクトリ配下。上流リポジトリ `agent-cli-skills` 専用の値であり、
+他リポジトリでの期待値ではない）を参照。
 
 #### Repository Structure の更新
 
@@ -297,9 +298,9 @@ commit_date=2026-03-21T10:00:00+09:00
 # CLAUDE.md のスキル数が実ディレクトリ数と一致しているか確認
 grep "^## Current Skills" CLAUDE.md
 if [ -d skills ]; then
-  find skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l
+  find skills -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l
 elif [ -d .agents/skills ]; then
-  find .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l
+  find .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l
 else
   echo 0
 fi
