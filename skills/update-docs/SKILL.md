@@ -51,10 +51,13 @@ git diff <commit_hash>..HEAD --stat
 扱い、非ゼロ終了で手順を止めない）。
 
 ```bash
+# -L で symlink を追従する（skills/<name> や .agents/skills/<name> がディレクトリへの
+# symlink の場合でも SKILL.md を取りこぼさないため。classify_b の候補集合も -L 付きで
+# 全列挙しており、-L 無しだと系統 A と B1 の計上件数が食い違う）。
 if [ -d skills ]; then
-  find skills -mindepth 2 -maxdepth 2 -name SKILL.md | sed -E 's#^skills/##; s#/SKILL.md$##' | sort
+  find -L skills -mindepth 2 -maxdepth 2 -name SKILL.md | sed -E 's#^skills/##; s#/SKILL.md$##' | sort
 elif [ -d .agents/skills ]; then
-  find .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md | sed -E 's#^\.agents/skills/##; s#/SKILL.md$##' | sort
+  find -L .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md | sed -E 's#^\.agents/skills/##; s#/SKILL.md$##' | sort
 fi
 # いずれのディレクトリも無ければ何も出力しない（空集合。エラー終了しない）
 ```
@@ -143,7 +146,7 @@ resolve() { cd -P -- "$1" 2>/dev/null && pwd -P; }
 #          別実体の参照スキルという位置づけのため上流レイアウトに限定する）
 #        - skills/ ディレクトリが存在しない（消費側レイアウト。系統 A の列挙元は
 #          .agents/skills/ そのもの）→ B1（系統 A で既に計上済みの実体へのリンクであり、
-#          B3 に分類すると A のカウントと矛盾する。#490 codex-review 指摘対応）
+#          B3 に分類すると A のカウントと矛盾する）
 #   5. .agents/skills/<n> の物理解決先が非空 かつ 不一致 → B4 警告（参照/配布実体と解決先不一致）
 #   6. .claude/skills/<n> の物理解決先が .claude/skills 自体の物理解決先直下（.claude/skills/<n>
 #      と等価）→ B2 候補 → skills-lock.json タイブレーク（jq 不在→B4／jq exit 0→掲載あり
@@ -176,7 +179,7 @@ classify_b() {
           # skills/ が存在しない消費側レイアウトでは .agents/skills/ が系統 A の
           # 列挙元そのものであるため、この一致は B3（参照スキル）ではなく B1
           # （系統 A で計上済みの実体へのリンク）として扱う。B3 のまま倒すと
-          # 「A に含める」と「B3 は N に含めない」が矛盾する（#490 codex-review 指摘）。
+          # 「A に含める」と「B3 は N に含めない」が矛盾する。
           if [ -d skills ]; then
             printf 'B3\t%s\n' "${n}"
           else
@@ -316,9 +319,9 @@ commit_date=2026-03-21T10:00:00+09:00
 # CLAUDE.md のスキル数が実ディレクトリ数と一致しているか確認
 grep "^## Current Skills" CLAUDE.md
 if [ -d skills ]; then
-  find skills -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l
+  find -L skills -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l
 elif [ -d .agents/skills ]; then
-  find .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l
+  find -L .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l
 else
   echo 0
 fi
