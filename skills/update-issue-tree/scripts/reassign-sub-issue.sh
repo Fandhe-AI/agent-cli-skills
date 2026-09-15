@@ -388,6 +388,30 @@ recover_after_delete_failure() {
     exit 8
   fi
 
+  if [[ "${delfail_same_repo}" -eq 1 && "${delfail_parent}" == "${NEW_PARENT}" ]]; then
+    # 第三者親（third-party-parent）判定の前に新親一致を判定する（codex-review P2 指摘
+    # PR #491・Issue #489）。この判定が無いと、旧親・孤児で始まり安定確認の途中で新親を
+    # 観測した場合は（上の ddo_rc==2 / ddn_rc==2 経路により）成功終端になるのに、最初の
+    # 読み取りが先に新親を観測しただけの場合は同じ状態（新親配下）にもかかわらず承認外の
+    # 第三者親として exit 11 になってしまう。観測タイミングだけで結果が変わる非対称は、
+    # 承認済みの新親へ並行処理が既に付け替えていた場合に、成功のはずが再承認必須のエラー
+    # へ変わってしまう欠陥になる。DELETE はエラー応答だったが実測では既に新親配下
+    # （DELETE→POST が既に成立していた可能性）であり、1 回の読み取りだけでは反映遅延の
+    # 過渡状態を排除できないため、他の偽陰性確認と同じ confirm_stable_parent で安定確認
+    # してから、既存の成功経路（`result=reassigned`）と同じ結果を返す。CURRENT_PARENT は
+    # 依然として非空（このパスは DELETE 実行対象、すなわち旧親ありの経路でのみ呼ばれる）
+    # であり、`emit_result` の "posted-only" 判定は CURRENT_PARENT が空かどうかで分岐する
+    # ため、"already-attached" 相当ではなく通常の "reassigned" が契約表と整合する
+    local ddp_rc=0
+    confirm_stable_parent "DELETE 失敗後の新親偽陰性確認" "${NEW_PARENT}" || ddp_rc=$?
+    if [[ "${ddp_rc}" -eq 0 ]]; then
+      emit_result "reassigned" "${CURRENT_PARENT}"
+      exit 0
+    fi
+    echo "reason=recovery-state-unknown" >&2
+    exit 8
+  fi
+
   # 実測で第三者が別の親を設定済み（同一リポジトリの別 issue、または別リポジトリへの転送）。
   # 承認外の親子関係を壊さないため、旧親へ戻すことも新親へ POST し直すこともせず
   # 書き込みなしで停止する（fail-closed）

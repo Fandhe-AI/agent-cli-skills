@@ -222,6 +222,26 @@ test('ケース52: DELETE が非ゼロ → 実状態再取得で第三者が別�
   assert.ok(!c.some((l) => l.includes('--method POST')), 'POST は 1 件も呼ばれていないこと（第三者配下を上書きしない）')
 })
 
+test('ケース55: DELETE が非ゼロ → 最初の実状態再取得で新親配下と判明 → 安定確認も一致 → exit 0 reassigned（第三者親判定より先に新親一致を判定する。codex-review P2 指摘 PR #491・Issue #489。観測タイミングだけで結果が変わる非対称の回帰）', () => {
+  // 旧親・孤児から始まり安定確認の途中で新親を観測した場合は ddo_rc==2 / ddn_rc==2 経路で
+  // 既に成功終端になる（ケース49・50 等）。このケースは「最初の読み取りが直接新親を観測する」
+  // 経路を検証する。修正前はこの経路だけが CURRENT_PARENT 一致にも孤児にも該当せず、
+  // 第三者親（exit 11）へ倒れていた
+  const r = run(['--issue', '66', '--old-parent', '5', '--new-parent', '7'], {
+    parentBefore: '5',
+    deleteExit: 1,
+    deleteBody: '500 Internal Server Error',
+    parentAfter: '7', // DELETE 失敗後の最初の実状態再取得で新親配下と判明する
+    // parentAfter2 は未指定（既定で parentAfter を継続 = '7'）: 新親偽陰性の安定確認も一致
+  })
+  assert.equal(r.status, 0)
+  assert.match(r.stdout.trim(), /^result=reassigned issue=66 new_parent=7 old_parent=5$/)
+  assert.doesNotMatch(r.stderr, /reason=third-party-parent/)
+  assert.doesNotMatch(r.stderr, /reason=recovery-state-unknown/)
+  const c = calls(r.logPath)
+  assert.ok(!c.some((l) => l.includes('--method POST')), 'POST は 1 件も呼ばれていないこと（新親への POST は既に成立済みのため再試行しない）')
+})
+
 test('ケース28: DELETE 後の POST 失敗 → 実測で孤児 → 補償 POST 成功 → exit 10 restored（Issue #352 の補償復旧成功。受入基準の核）', () => {
   const r = run(['--issue', '30', '--old-parent', '5', '--new-parent', '7'], {
     parentBefore: '5',
