@@ -44,14 +44,24 @@ git diff <commit_hash>..HEAD --stat
 
 スキルを2系統に分けて列挙し、`CLAUDE.md` の `## Current Skills` セクションと「リポジトリ管理スキル」セクションをそれぞれ更新する。
 
-**系統 A: `skills/` 配下の配布可能スキル（カウント対象）**
+**系統 A: 配布可能スキルの全列挙（カウント対象）**
+
+上流リポジトリ（`skills/` を持つ）では `skills/` を列挙する。`skills/` を持たない消費側
+リポジトリでは `.agents/skills/` を列挙する（該当ディレクトリが無い場合も含めて空集合として
+扱い、非ゼロ終了で手順を止めない）。
 
 ```bash
-ls -d skills/*/SKILL.md | sed 's|skills/||;s|/SKILL.md||' | sort
+if [ -d skills ]; then
+  find skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | sed -E 's#^skills/##; s#/SKILL.md$##' | sort
+elif [ -d .agents/skills ]; then
+  find .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | sed -E 's#^\.agents/skills/##; s#/SKILL.md$##' | sort
+fi
+# いずれのディレクトリも無ければ何も出力しない（空集合。エラー終了しない）
 ```
 
 - スキル数のカウントを更新: `## Current Skills (N)`（N は系統 A のみ）
 - カンマ区切りのスキル名一覧を更新
+- `CLAUDE.md` に `## Current Skills` セクションが存在しない場合は新規作成する
 
 **系統 B: `.claude/skills/` / `.agents/skills/` 配下のスキルの全列挙（列挙対象。カウントの扱いは内訳による）**
 
@@ -286,7 +296,13 @@ commit_date=2026-03-21T10:00:00+09:00
 ```bash
 # CLAUDE.md のスキル数が実ディレクトリ数と一致しているか確認
 grep "^## Current Skills" CLAUDE.md
-ls -d skills/*/SKILL.md | wc -l
+if [ -d skills ]; then
+  find skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l
+elif [ -d .agents/skills ]; then
+  find .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l
+else
+  echo 0
+fi
 ```
 
 - `## Current Skills (N)` の N がカウントと一致すること
@@ -294,7 +310,7 @@ ls -d skills/*/SKILL.md | wc -l
 - `_/.last-update-docs` が最新コミットの hash で更新されていること
 
 系統 B（B2・B3）を更新した場合は、以下も**新規実行**して確認する（既存ログ・前回結果の
-流用は不可。`.claude/rules/verification.md` の 5 段階ゲートに従う）。`extract_b1`・`extract_b2`・
+流用は不可。対象リポジトリに `.claude/rules/verification.md` が存在する場合はその 5 段階ゲートに従う）。`extract_b1`・`extract_b2`・
 `extract_b3` は「Step 3」で定義した `classify_b` ベースの関数と**同一のもの**を呼び出す
 （コマンドの重複記載による食い違いを避けるため、ここでは関数本体を再掲せず、Step 3 の bash
 ブロックを事前に source またはコピーしてから以下を実行する）。排他性は `classify_b` が

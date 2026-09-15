@@ -121,7 +121,7 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
   - required_status_checks（**strict false は必須**。true にすると 1 件マージするたびに他の open PR の
     base が陳腐化し、implement-issue-tree の並列ランが収束しなくなる。strict は鮮度制御であって
     bypass 不能性の制御ではないため、false でもクライアント側自動マージの G0 は通過する。
-    詳細は `.claude/rules/ruleset-policy.md`）: **[<集約ジョブ>, （集約できない別 workflow の常時チェック）,
+    実行環境に `.claude/rules/ruleset-policy.md` が存在する場合はそちらの詳細に従う）: **[<集約ジョブ>, （集約できない別 workflow の常時チェック）,
     codex-review / codex]** の最小集合
   - 自動マージ（implement-issue-tree の `autoMerge: true`）を使う場合、required_status_checks の
     各エントリに発行元 App の `integration_id` を束縛する（未束縛だと G0 が `issuer-unbound` で辞退する）。
@@ -160,7 +160,8 @@ gh api "repos/${repo}" --jq '{allow_squash_merge, allow_merge_commit, allow_reba
 
 # Step 4-a: 一括更新後の 3 軸スイープ（strict / bypass_actors / integration_id 残存）
 # PUT した ruleset 単体ではなく branch target の全 ruleset を掃く（org 継承は source_type でルーティング）。
-# コマンド全文・判定表は .claude/rules/ruleset-policy.md の「一括更新後の検証」節を参照
+# コマンド全文・判定表は実行環境に .claude/rules/ruleset-policy.md があれば「一括更新後の検証」節を参照。
+# 無ければ下記 Step 4-a/4-b のコマンド・判定表をそのまま用いる
 org="${repo%%/*}"
 gh api "repos/${repo}/rulesets" \
   --jq '.[] | select(.target == "branch") | [(.id|tostring), .name, (.source_type // "unknown")] | @tsv' |
@@ -211,7 +212,7 @@ Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須�
 | GITHUB_TOKEN read 化で暗黙 write 依存の workflow が壊れる | Step 4: 全 workflow の permissions 明示を確認してから適用する |
 | ruleset を PUT したら `integration_id` 束縛が落ち、自動マージが静かに止まる（strict と bypass だけ見ると全 green に見える） | Step 4-a: PUT 後に 3 軸スイープ（`select(.integration_id==null)`）を実行する |
 | 旧 ruleset / classic BP の掃き漏らしで未束縛・strict=true が残る | Step 4-a/4-b: 全 branch ruleset を列挙して掃き、classic BP は `defaultBranchRef` 解決 + status 分岐で別枠確認する |
-| AGENTS.md に自動マージの G0 契約を書く際 strict を要件として列挙し、実装より強い契約が codex P0 の根拠になる | Step 2: G0 契約を書くなら strict は「意図的な非要件」と明記する（`.claude/rules/ruleset-policy.md`） |
+| AGENTS.md に自動マージの G0 契約を書く際 strict を要件として列挙し、実装より強い契約が codex P0 の根拠になる | Step 2: G0 契約を書くなら strict は「意図的な非要件」と明記する（実行環境に `.claude/rules/ruleset-policy.md` があれば参照） |
 
 ## 注意事項
 
