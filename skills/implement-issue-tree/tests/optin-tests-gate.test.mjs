@@ -128,6 +128,47 @@ test('parseOptinTestDeclarations: パス成分としての ".." は runner を�
   }
 })
 
+test('parseOptinTestDeclarations: "/" 以外の区切り（= , :）の直後の ".." も拒否する（Issue #495 監査 Medium A）', () => {
+  for (const bad of [
+    'cargo test --manifest-path=../x/Cargo.toml',
+    'pytest --rootdir=..',
+    'npm test a,../b',
+    'pytest x:../y',
+  ]) {
+    const { commands, invalid } = parseOptinTestDeclarations([bad])
+    assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)
+    assert.equal(invalid.length, 1)
+  }
+  // 上記強化後も Go の "./..." 系は誤検出しない（回帰）。
+  assert.deepEqual(parseOptinTestDeclarations(['go test ./...', 'go test ./pkg/...']), {
+    commands: ['go test ./...', 'go test ./pkg/...'],
+    invalid: [],
+  })
+})
+
+test('parseOptinTestDeclarations: mvn の GAV 形式ゴール指定は拒否する（Issue #495 監査 Medium B）', () => {
+  for (const bad of [
+    'mvn org.codehaus.mojo:exec-maven-plugin:exec',
+    'mvn test org.codehaus.mojo:exec-maven-plugin:exec',
+  ]) {
+    const { commands, invalid } = parseOptinTestDeclarations([bad])
+    assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)
+    assert.equal(invalid.length, 1)
+  }
+  assert.deepEqual(parseOptinTestDeclarations(['mvn test', 'mvn verify -DskipITs=true', 'gradle test']), {
+    commands: ['mvn test', 'mvn verify -DskipITs=true', 'gradle test'],
+    invalid: [],
+  })
+})
+
+test('parseOptinTestDeclarations: deno のリモート指定子（npm: / jsr: / http: / https:）は拒否する（Issue #495 監査 追加 C）', () => {
+  for (const bad of ['deno test npm:some-pkg', 'deno test jsr:@x/y', 'deno test https://example.com/x.ts', 'deno test --importmap=https://example.com/map.json']) {
+    const { commands, invalid } = parseOptinTestDeclarations([bad])
+    assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)
+    assert.equal(invalid.length, 1)
+  }
+})
+
 test('parseOptinTestDeclarations: 第 2 トークン制約に違反する npm install を拒否する', () => {
   const { commands, invalid } = parseOptinTestDeclarations(['npm install'])
   assert.deepEqual(commands, [])

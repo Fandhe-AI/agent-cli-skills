@@ -613,6 +613,30 @@ const OPTIN_TEST_RUNNER_SUBCOMMANDS = {
   swift: new Set(['test']),
   mix: new Set(['test']),
   deno: new Set(['test', 'task']),
+
+
+
+  mvn: new Set(['test', 'verify']),
+  gradle: new Set(['test', 'check']),
+}
+
+
+
+
+
+
+function hasMavenGavGoal(runner, tokens) {
+  if (runner !== 'mvn') return false
+  return tokens.some((t) => t.split(':').length >= 3)
+}
+
+
+
+
+const DENO_REMOTE_SPECIFIER_RE = /(^|=)(npm|jsr|https?):/
+function hasDenoRemoteSpecifier(runner, tokens) {
+  if (runner !== 'deno') return false
+  return tokens.some((t) => DENO_REMOTE_SPECIFIER_RE.test(t))
 }
 
 
@@ -624,8 +648,11 @@ const OPTIN_TEST_COMMAND_RE = /^[A-Za-z0-9][A-Za-z0-9 _./:=@+,-]{0,199}$/
 
 
 
+
+
+
 function hasParentPathTraversal(s) {
-  return s.split(' ').some((tok) => tok.split('/').includes('..'))
+  return s.split(' ').some((tok) => tok.split(/[/=,:@]/).includes('..'))
 }
 
 
@@ -665,6 +692,10 @@ function parseOptinTestDeclarations(raw) {
     }
     const subcommands = OPTIN_TEST_RUNNER_SUBCOMMANDS[runner]
     if (subcommands && !subcommands.has(tokens[1])) {
+      invalid.push(capText(sanitize(s), 300))
+      continue
+    }
+    if (hasMavenGavGoal(runner, tokens) || hasDenoRemoteSpecifier(runner, tokens)) {
       invalid.push(capText(sanitize(s), 300))
       continue
     }

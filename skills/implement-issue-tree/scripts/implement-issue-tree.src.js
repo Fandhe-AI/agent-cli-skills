@@ -613,6 +613,30 @@ const OPTIN_TEST_RUNNER_SUBCOMMANDS = {
   swift: new Set(['test']),
   mix: new Set(['test']),
   deno: new Set(['test', 'task']),
+  // Issue #495 セキュリティ監査 Medium B: mvn / gradle は無制限だと
+  // `mvn org.codehaus.mojo:exec-maven-plugin:exec -Dexec.executable=id` のような GAV 形式
+  // プラグイン実行で任意コマンド実行に転用できる（npx を許可リストから除外したのと同じ理由）。
+  mvn: new Set(['test', 'verify']),
+  gradle: new Set(['test', 'check']),
+}
+// mvn の GAV 形式ゴール指定（groupId:artifactId[:version]:goal。例:
+// org.codehaus.mojo:exec-maven-plugin:exec）は第 2 トークンの制限だけでは防げない
+// （`mvn test org.codehaus.mojo:exec-maven-plugin:exec` は第 2 トークンが許可値 'test' の
+// まま第 3 トークン以降で任意プラグインを追加実行できる）。':' を 2 個以上含む（= 3 セグメント
+// 以上の）トークンは GAV 座標形式とみなして拒否する。`-Dfoo=bar` のようなプロパティ指定は
+// ':' を含まないため誤検出しない。
+function hasMavenGavGoal(runner, tokens) {
+  if (runner !== 'mvn') return false
+  return tokens.some((t) => t.split(':').length >= 3)
+}
+// deno は第 2 トークンを 'test'/'task' に制限しているだけで、`deno test npm:some-pkg` や
+// `deno test jsr:@x/y` のようなリモート指定子（npm: / jsr: / http: / https:）経由の外部
+// コード取得・実行までは防げない（Issue #495 セキュリティ監査 追加 C）。トークン先頭、または
+// `=` 直後（例: `--importmap=https://…`）にこれらの指定子が現れる宣言値を拒否する。
+const DENO_REMOTE_SPECIFIER_RE = /(^|=)(npm|jsr|https?):/
+function hasDenoRemoteSpecifier(runner, tokens) {
+  if (runner !== 'deno') return false
+  return tokens.some((t) => DENO_REMOTE_SPECIFIER_RE.test(t))
 }
 // 宣言値の文字集合。シェルメタ文字（`; | & $ \` < > ( ) { } ' " \` を含む）と改行・制御文字を
 // 拒否する（A03: イシュー本文由来のコマンドをそのまま実行させる構造のため、値そのものを
@@ -621,11 +645,14 @@ const OPTIN_TEST_COMMAND_RE = /^[A-Za-z0-9][A-Za-z0-9 _./:=@+,-]{0,199}$/
 
 // パストラバーサル対策（`..` 拒否）の判定はトークン単位・パス区切り単位で行う。単純な
 // `s.includes('..')` は `go test ./...`（Go の全パッケージ再帰指定という正規イディオム）の
-// ような `...` を含む正当な値まで拒否してしまう。スペース区切りのトークンごとに `/` で
-// パス成分へ分割し、成分が厳密に `..`（親ディレクトリ参照）と一致する場合のみ拒否する
-// （`...` は '.', '.', '.' の 3 文字連続でも成分としては `..` と一致しない）。
+// ような `...` を含む正当な値まで拒否してしまう。スペース区切りのトークンごとに、パス成分の
+// 区切りとして扱う文字（`/` に加え `=` `,` `:` `@`。`--manifest-path=../x`・`a,../b`・
+// `x:../y` のように OPTIN_TEST_COMMAND_RE が許可する記号の直後にも `..` を置けるため。
+// Issue #495 セキュリティ監査 Medium A: `/` のみの分割では `--manifest-path=../evil/…` の
+// ような値がすり抜けていた）で分割し、成分が厳密に `..`（親ディレクトリ参照）と一致する
+// 場合のみ拒否する（`...` は '.', '.', '.' の 3 文字連続でも成分としては `..` と一致しない）。
 function hasParentPathTraversal(s) {
-  return s.split(' ').some((tok) => tok.split('/').includes('..'))
+  return s.split(' ').some((tok) => tok.split(/[/=,:@]/).includes('..'))
 }
 
 // args.externalChecks のパーサ（parseExternalChecks）と同じ形の決定的パーサ。イシュー本文
@@ -665,6 +692,10 @@ function parseOptinTestDeclarations(raw) {
     }
     const subcommands = OPTIN_TEST_RUNNER_SUBCOMMANDS[runner]
     if (subcommands && !subcommands.has(tokens[1])) {
+      invalid.push(capText(sanitize(s), 300))
+      continue
+    }
+    if (hasMavenGavGoal(runner, tokens) || hasDenoRemoteSpecifier(runner, tokens)) {
       invalid.push(capText(sanitize(s), 300))
       continue
     }
