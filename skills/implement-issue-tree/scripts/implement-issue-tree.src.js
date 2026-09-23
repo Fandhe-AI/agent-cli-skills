@@ -122,6 +122,80 @@ const autoMergeEnabled = (() => {
   }
   return raw
 })()
+// Phase ゲートの明示 opt-in（Issue #494）。ルート直下の子（Phase 親 or leaf）を sub-issues
+// リスト順に直列化し、前 Phase の全子孫が merged/closed になるまで次 Phase 配下に着手しない。
+// 既定 false では depsMap への辺追加自体を行わず、現行動作（post-order 優先度のみ）を完全に
+// 維持する。マージゲート入力に準じる厳格パースとし、誤記（"true" 等）を黙って読み替えない。
+function parsePhaseGate(raw) {
+  if (raw === undefined || raw === null) return false
+  if (typeof raw !== 'boolean') {
+    throw new Error('args.phaseGate は boolean で指定すること（例: {"phaseGate": true}。未指定はゲートなし = 現行動作。Issue #494）')
+  }
+  return raw
+}
+const phaseGateEnabled = parsePhaseGate(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.phaseGate : undefined)
+// Phase ゲートの合成辺を組み立てる純粋関数。byParentMap は呼び出し側のソート済み前提に依存せず
+// ここで siblingIndex 昇順に並び替え直す（防御的コピー）。タイトル文字列（非信頼データ）は一切
+// 解析せず、構造値の siblingIndex のみを根拠にする。
+//   - order: ルート直下の子を siblingIndex 昇順に並べた issue 番号列（Phase 実行順の正本）
+//   - edges: { from, to }（from が to に依存する辺。from は Uₖ（k>=1）の子孫全部、
+//     to は j<k の gatePrereqs(Uⱼ) の和集合）。Uⱼ が leaf なら gatePrereqs(Uⱼ) = {Uⱼ} 自身、
+//     子を持つ Phase 親なら子孫全部（Phase 親自身の verify-close は前提に含めない設計）
+function buildPhaseGateEdges(rootNumber, byParentMap) {
+  const units = [...(byParentMap.get(rootNumber) ?? [])].sort((a, b) => a.siblingIndex - b.siblingIndex)
+  const order = units.map((u) => u.number)
+  function subtreeOf(unitNode) {
+    // 反復 DFS（部分木のノード全部を収集）。ルート単位自身も含む。
+    const acc = []
+    const stack = [unitNode]
+    const seen = new Set()
+    while (stack.length > 0) {
+      const n = stack.pop()
+      if (seen.has(n.number)) continue
+      seen.add(n.number)
+      acc.push(n.number)
+      for (const c of byParentMap.get(n.number) ?? []) stack.push(c)
+    }
+    return acc
+  }
+  const subtrees = units.map((u) => subtreeOf(u))
+  // gatePrereqs(Uⱼ) は Uⱼ 自身を含まない子孫全部（Phase 親自身の verify-close は前提に含めない
+  // 設計。R の「前 Phase 親の全子が merged/closed」に合わせる）。leaf（子を持たない）の場合のみ
+  // 自身を前提にする（依存できる子孫がないため）。
+  const gatePrereqs = units.map((u, i) => {
+    const children = byParentMap.get(u.number) ?? []
+    return children.length > 0 ? subtrees[i].filter((n) => n !== u.number) : [u.number]
+  })
+  const edges = []
+  for (let k = 1; k < units.length; k++) {
+    const prereqUnion = new Set()
+    for (let j = 0; j < k; j++) for (const p of gatePrereqs[j]) prereqUnion.add(p)
+    for (const node of subtrees[k]) {
+      for (const prereq of prereqUnion) {
+        if (node === prereq) continue
+        edges.push({ from: node, to: prereq })
+      }
+    }
+  }
+  return { order, edges }
+}
+// 循環除去で削除して良い辺を選ぶ純粋関数（Issue #494）。木の辺（親子関係）と Phase ゲート辺
+// （protectedKeys）は保護対象とし、削除対象は本文由来の dependsOn 辺に限定する。cycle は
+// findDependencyCycle() が返すノード列（先頭から辺で連結し、末尾は先頭へ戻る）。見つからない
+// 場合は null を返し、呼び出し側は解決不能な循環として fail-closed で throw する（木の辺と
+// ゲート辺だけでは循環が構造上生じないため、null 到達は異常データのシグナル）。
+function selectRemovableCycleEdge(cycle, byParentMap, depsMapArg, protectedKeys) {
+  for (let i = 0; i < cycle.length; i++) {
+    const from = cycle[i]
+    const to = cycle[(i + 1) % cycle.length]
+    const isTreeEdge = (byParentMap.get(from) ?? []).some((c) => c.number === to)
+    const isProtected = protectedKeys.has(`${from}->${to}`)
+    if (!isTreeEdge && !isProtected && depsMapArg.get(from)?.has(to)) {
+      return { from, to }
+    }
+  }
+  return null
+}
 // base 取り込み（conflicting 経路）の回数上限。fixCount とは独立の予算軸（Issue #441。壊れた
 // ブランチが monitorsLeft を無限消費するのを防ぐ有界化）。マージゲート入力のため型不正は
 // throw。0 は自動 base 取り込みを行わない明示的オプトアウト。
@@ -5571,6 +5645,27 @@ for (const item of queue) {
     depsMap.get(item.number).add(d)
   }
 }
+// Phase ゲート（opt-in、Issue #494）: ルート直下の子（Phase 親 or leaf）を sub-issues リスト順に
+// 直列化する合成辺を depsMap に追加する。循環除去（findDependencyCycle）より前に追加し、辺の
+// キーを phaseGateEdgeKeys に記録することで、本文由来（非信頼データ）の逆向き dependsOn が
+// 循環除去ループでゲート辺を巻き込んで削除しないよう保護する。無効時は空のまま（辺 0 本・
+// ログなし）で、既存の depsMap 構築結果に一切影響しない。
+const phaseGateEdgeKeys = new Set()
+let phaseOrder = []
+if (phaseGateEnabled) {
+  const { order, edges } = buildPhaseGateEdges(parent, byParent)
+  phaseOrder = order
+  for (const { from, to } of edges) {
+    // 前提は必ず inTree 内（buildPhaseGateEdges はツリー全体から辺を作るため理論上は常に
+    // true だが、fail-closed のため明示的に再検証する）。自己辺は作らない。
+    if (!inTree.has(from) || !inTree.has(to) || from === to) continue
+    depsMap.get(from)?.add(to)
+    phaseGateEdgeKeys.add(`${from}->${to}`)
+  }
+  if (order.length > 1) {
+    log(`Phase ゲート有効: ${order.map((n) => `#${n}`).join(' → ')}（sub-issues リスト順。前 Phase の全子孫が merged/closed になるまで次 Phase に着手しない）`)
+  }
+}
 function findDependencyCycle() {
   const color = new Map() // undefined=未訪問 / 1=訪問中 / 2=完了
   const stack = []
@@ -5598,20 +5693,12 @@ function findDependencyCycle() {
 }
 let cycle = findDependencyCycle()
 while (cycle) {
-  let removed = false
-  for (let i = 0; i < cycle.length; i++) {
-    const from = cycle[i]
-    const to = cycle[(i + 1) % cycle.length]
-    const isTreeEdge = (byParent.get(from) ?? []).some((c) => c.number === to)
-    if (!isTreeEdge && depsMap.get(from)?.has(to)) {
-      depsMap.get(from).delete(to)
-      log(`循環依存を検出: ${cycle.map((n) => `#${n}`).join(' → ')}。#${from} の dependsOn #${to} を無視する`)
-      removed = true
-      break
-    }
-  }
-  // 木の親子辺のみで構成される循環は構造上発生しないため、ここに到達するのは異常データ
-  if (!removed) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
+  // 削除対象は dependsOn 由来の辺に限る。木の辺・Phase ゲート辺（phaseGateEdgeKeys）は保護対象。
+  const edge = selectRemovableCycleEdge(cycle, byParent, depsMap, phaseGateEdgeKeys)
+  // 木の辺とゲート辺だけでは循環は構造上発生しないため、null 到達は異常データ
+  if (!edge) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
+  depsMap.get(edge.from).delete(edge.to)
+  log(`循環依存を検出: ${cycle.map((n) => `#${n}`).join(' → ')}。#${edge.from} の dependsOn #${edge.to} を無視する`)
   cycle = findDependencyCycle()
 }
 
@@ -5638,6 +5725,11 @@ async function markBlockedByDeps(item, failedDeps) {
   const childSet = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
   const failedChildren = failedDeps.filter((d) => childSet.has(d))
   const failedPrereqs = failedDeps.filter((d) => !childSet.has(d))
+  // phaseGate 由来（前 Phase 未完了）の前提失敗は、本文由来の dependsOn 前提と文言を分ける
+  // （原因追跡のため。phaseGate 無効時は phaseGateEdgeKeys が常に空なので failedPhaseGate は
+  // 常に空になり、既存の文言・分岐へ完全に一致する = R3 の非回帰）。
+  const failedPhaseGate = failedPrereqs.filter((d) => phaseGateEdgeKeys.has(`${item.number}->${d}`))
+  const failedOtherPrereqs = failedPrereqs.filter((d) => !phaseGateEdgeKeys.has(`${item.number}->${d}`))
   let note
   if (failedChildren.length > 0 && failedPrereqs.length === 0) {
     note = `子イシューの失敗・ブロックによりクローズ検証を保留: ${failedChildren.map((d) => `#${d}`).join(', ')}`
@@ -5645,6 +5737,12 @@ async function markBlockedByDeps(item, failedDeps) {
     note =
       `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
       `${failedPrereqs.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
+  } else if (failedPhaseGate.length > 0 && failedOtherPrereqs.length === 0) {
+    note = `前 Phase 未完了（phaseGate）により未着手: ${failedPhaseGate.map((d) => `#${d}`).join(', ')}`
+  } else if (failedPhaseGate.length > 0) {
+    note =
+      `前 Phase 未完了（phaseGate） ${failedPhaseGate.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
+      `${failedOtherPrereqs.map((d) => `#${d}`).join(', ')} の失敗により未着手`
   } else {
     note = `前提イシューの失敗・ブロックにより未着手: ${failedPrereqs.map((d) => `#${d}`).join(', ')}`
   }
@@ -6785,4 +6883,4 @@ if (residualBytesOverLimit) {
 // レポート返却。ephemeralWorktrees: 使い捨て worktree の記録（implement は返さない — 消費側が
 // 未マージ成果を削除しかねない）。autoMerge: 実効状態。mergeGuard: hook は deny 専用。
 // residualWorktrees: 残置上限ゲート観測。prereqTransitions: 前提の外部完了遷移（Issue #442）。
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions }
