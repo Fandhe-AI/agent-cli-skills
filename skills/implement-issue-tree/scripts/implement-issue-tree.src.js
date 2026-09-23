@@ -869,8 +869,34 @@ function optinRecordMarkerLine(sha, result, command) {
 //     たびに空行が積み増しされた。v3 は sed 実行後の "$g" をコマンド置換で読み直してから
 //     `printf '%s'` で "$f" へ書き戻し、v1 と同じ「末尾の空行を持ち越さない」性質を復元する
 //     （削除範囲は変えず、書き戻し経路だけを直す）。
-function optinRecordRemovalShellLines() {
-  const allowedLinePattern = `^$|^${OPTIN_RECORD_MARKER_PREFIX}|^- コマンド: |^- 結果: |^- 補足: `
+//
+// v4（PR #504 codex P0 3 巡目）: v3 は終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)}
+// の実測を削除条件にしたが、このマーカー自体はソース上に固定された公開文字列であり、PR 本文を
+// 書けるユーザーなら誰でも同じ見出し・箇条書き・マーカーを「正当な説明」として書ける。その場合
+// v3 は「行の見た目が既知パターンに一致する」を根拠に削除してしまい、見出しとマーカーの間へ
+// ユーザーが挟んだ Closes 行・対象外節等の正当な本文を道連れに失う（所有権の証明になっていない）。
+// v4 は「行の見た目」ではなく「直前に自分（ホスト側が保持する信頼済み state）が実際に書いた
+// 内容とのバイト完全一致」を条件にする。呼び出し元（optinRecordUpdateInstructions）が
+// optinRecordExpectedLines() でホスト側の lastFixOptin（post-push fix の実測 headSha/runs。
+// PR 本文を経由しない、プロセス内メモリまたは状態ファイルから復元した値）から「直前に書いた
+// はずの本文」を再構成できた場合に限り、その再構成値を expectedLines として渡す。本文が
+// 未信頼データである以上、値そのものが本物かはこの関数からは判定できないが、expectedLines は
+// PR 本文を一切経由せず host 側の実測だけから組み立てているため、攻撃者が PR 本文の記述だけで
+// 一致させることは（sha・結果・補足の実測値を言い当てない限り）できない。expectedLines が
+// 無い呼び出し元（prCreatePrompt。PR 作成前で post-push fix が一度も走っておらず、比較対象と
+// なる信頼済み実測が存在しない）では削除自体を行わない（v3 までと同じ fail-closed の帰結だが、
+// 根拠を「終端マーカーの有無」から「比較対象の有無」へ変更）。
+function optinRecordRemovalShellLines(expectedLines) {
+  if (!Array.isArray(expectedLines) || expectedLines.length === 0) {
+    return [
+      '   ```',
+      '   # 直前にホスト側が実際に書いた記録節の内容（信頼済み state）を特定できないため、',
+      '   # 削除は一切行わない（fail-closed。終端マーカーは固定・公開文字列で所有権の証明に',
+      '   # ならないため、見た目だけの一致では削除しない — PR #504 codex P0 3 巡目）。',
+      '   ```',
+    ]
+  }
+  const expEcho = expectedLines.map((line) => `printf '%s\\n' ${JSON.stringify(line)}`).join('; ')
   return [
     '   ```',
     '   L=$(grep -nE \'^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$\' "$f" | tail -n 1 | cut -d: -f1)',
@@ -878,7 +904,9 @@ function optinRecordRemovalShellLines() {
     `     E=$(awk -v l="$L" -v m=${JSON.stringify(OPTIN_RECORD_END_MARKER)} 'NR>l { t=$0; sub(/\\r$/,"",t); if (t==m) { print NR; exit } }' "$f"); rcE=$?`,
     '     if [ "$rcE" = 0 ] && [ -n "$E" ]; then',
     '       body=$(sed -n "$((L+1)),$((E-1))p" "$f"); rcBody=$?',
-    `       if [ "$rcBody" = 0 ] && [ -z "$(printf '%s\\n' "$body" | tr -d '\\r' | grep -vE ${JSON.stringify(allowedLinePattern)})" ]; then`,
+    '       bodyNorm=$(printf \'%s\\n\' "$body" | tr -d \'\\r\')',
+    `       exp=$(${expEcho})`,
+    '       if [ "$rcBody" = 0 ] && [ "$bodyNorm" = "$exp" ]; then',
     '         g=$(mktemp)',
     '         if sed "${L},${E}d" "$f" > "$g"; then',
     '           gt=$(mktemp); printf \'%s\' "$(cat "$g")" > "$gt"; mv "$gt" "$f"; rm -f "$g"',
@@ -889,8 +917,39 @@ function optinRecordRemovalShellLines() {
     '     fi',
     '   fi',
     '   ```',
-    `   （見出し行の最後の出現位置より後で、終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)} が最初に現れる行を実測できた場合に限り削除する。終端マーカーが見つからない場合（終端マーカーを持たない旧書式の記録節を含む）は "$f" を一切変更しない — 行の見た目だけでは正当な本文と機械生成区間を区別できないため（fail-closed。旧い記録節が残ったまま次の手順で新しい節が追記され、見出しが一時的に重複し得るが、正当な本文を巻き込んで削除するより優先する）。CRLF 本文にも対応するため比較前に各行の末尾 \\r を取り除く。見出しと終端マーカーの間の各行がマーカー行・箇条書き行・空行のいずれかにのみ一致した場合のみ実際に削除する。書き戻しはコマンド置換 \`$(cat "$g")\` を経由させ、末尾の空行を持ち越さない（除去・再追記のサイクルを繰り返しても見出し直前の空行が増殖しないようにするため）。途中の awk / sed がすべて 0 終了した場合のみ実際に削除する。1 つでも条件を満たさなければ "$f" は一切変更されない。終端マーカーより後ろに外部ツールが追記した内容があっても削除範囲に含まれず保持される）`,
+    `   （見出し行の最後の出現位置より後で、終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)} が最初に現れる行を実測できた場合に、かつその間の本文がホスト側の信頼済み実測から再構成した期待値（exp。PR 本文を経由しない値）とバイト完全一致した場合に限り削除する。一致しない場合（旧書式・見出しのみの一致・攻撃的な模倣を含む）は "$f" を一切変更しない（fail-closed。正当な本文を巻き込んで削除するより優先する）。CRLF 本文にも対応するため比較前に各行の末尾 \\r を取り除く。書き戻しはコマンド置換 \`$(cat "$g")\` を経由させ、末尾の空行を持ち越さない。途中の awk / sed がすべて 0 終了しかつ完全一致した場合のみ実際に削除する）`,
   ]
+}
+
+// optinRecordRemovalShellLines へ渡す期待値（削除してよい既存記録節の正確な内容）を、PR 本文を
+// 一切経由しない信頼済み host state（lastFixOptin: post-push fix が実測した headSha/runs）から
+// 再構成する（PR #504 codex P0 3 巡目）。optinRecordUpdateInstructions（手順 d）が書く本文と
+// 完全に同じ行構成（マーカー行 → コマンド → 結果 → 補足、ブロック間を空行 1 行で区切る）を
+// 再現する必要があり、両者がドリフトするとここでの一致判定が常に失敗して削除が起きなくなる
+// （安全側だが、見出しが際限なく重複する）。書式を変える場合は両方を同時に直すこと。
+// 再構成できない場合（宣言なし・fix 未実施・headSha 未確定・宣言コマンドと runs が不一致）は
+// null を返し、呼び出し元は削除を行わない。
+function optinRecordExpectedLines(commands, lastFixOptin) {
+  const declared = Array.isArray(commands) ? commands : []
+  if (declared.length === 0) return null
+  if (!lastFixOptin || lastFixOptin.unbound === true) return null
+  const sha = sanitizeSha(lastFixOptin.headSha)
+  if (!sha) return null
+  const runs = Array.isArray(lastFixOptin.runs) ? lastFixOptin.runs : []
+  if (runs.length !== declared.length) return null
+  const byCommand = new Map(runs.filter((r) => r && typeof r.command === 'string').map((r) => [r.command, r]))
+  const lines = []
+  for (let i = 0; i < declared.length; i++) {
+    const c = declared[i]
+    const r = byCommand.get(c)
+    if (!r || !OPTIN_RECORD_RESULTS.includes(r.result)) return null
+    if (i > 0) lines.push('')
+    lines.push(optinRecordMarkerLine(sha, r.result, c))
+    lines.push(`- コマンド: ${c}`)
+    lines.push(`- 結果: ${r.result}`)
+    lines.push(`- 補足: ${r.detail && String(r.detail).length > 0 ? String(r.detail) : '(なし)'}`)
+  }
+  return lines
 }
 
 // 実装/回復実装エージェントの optinTestRuns 返却を正規化する。宣言外コマンドの報告は破棄し
@@ -3530,10 +3589,15 @@ function optinTestExecutionLines(item, stepNo) {
 // 新方式は見出し行から本文末尾までを sed で節ごと削除してから今回分を書き直す。この節は
 // 常に本文の最後に追記される契約（prCreatePrompt・本関数のいずれも呼び出し元は末尾追記のみ）
 // のため、削除が他の節を巻き込むことはない。
-function optinRecordUpdateInstructions(item, impl, stepNo) {
+// lastFixOptin: 呼び出し元（runMergeLoop）が保持する「直前の post-push fix ラウンドで実際に
+// PR 本文へ書いた内容」の host 側実測（PR 本文を経由しない）。削除対象の完全一致比較に使う
+// （PR #504 codex P0 3 巡目。optinRecordExpectedLines 参照）。無い場合（初回ラウンド・fix 未
+// 実施・resume で復元不能）は削除を一切行わない。
+function optinRecordUpdateInstructions(item, impl, stepNo, lastFixOptin) {
   const commands = Array.isArray(item.optinTests) ? item.optinTests : []
   if (commands.length === 0) return []
   const prRef = String(impl.prNumber)
+  const expectedLines = optinRecordExpectedLines(commands, lastFixOptin)
   return [
     `${stepNo}. opt-in テスト記録の更新（必須。直前の opt-in テスト再実行手順の optinTestRuns の結果を PR 本文へ反映する。手順 4 の 2 条件判定で pushed: true と確認できた場合のみ実行する。pushed: false の場合はこの手順を省略する — まだリモートへ反映されていないコードに対する記録を書くと、実際に反映された head と PR 本文の記録内容が食い違う）:`,
     // マーカーに埋め込む sha は「この記録がどの HEAD に対する結果かをマージ前ゲートが判定する」
@@ -3546,8 +3610,8 @@ function optinRecordUpdateInstructions(item, impl, stepNo) {
     // （ユーザーが説明・引用等で同じ見出しを書いていた場合、Closes 行・対象外節を含む正当な
     // 本文を道連れに失う。PR #504 codex P0）。削除ロジックは optinRecordRemovalShellLines に
     // 集約されている（同一ロジックを個別に保持すると修正がドリフトする。cursor[bot] 指摘）。
-    `   c. 既存の opt-in テスト記録節を安全に除去する（見出し行の最後の出現位置と終端マーカーの両方から機械生成区間を識別できた場合のみ削除する。識別できない場合は "$f" を一切変更せずそのまま手順 d へ進む）:`,
-    ...optinRecordRemovalShellLines(),
+    `   c. 既存の opt-in テスト記録節を安全に除去する（見出し行の最後の出現位置と終端マーカーの両方から機械生成区間を識別でき、かつその間の内容がホスト側の信頼済み実測と完全一致した場合のみ削除する。識別・一致できない場合は "$f" を一切変更せずそのまま手順 d へ進む）:`,
+    ...optinRecordRemovalShellLines(expectedLines),
     `   d. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（見出し行・マーカー行・終端マーカー行いずれも行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる。下に示すコードブロックのインデントは箇条書きの見た目上のものであり、実際に "$f" へ書き込む内容には含めない）。見出し行の直前には必ず空行を 1 行入れる（"$f" の末尾が改行なしで終わっていても、{ echo; echo; echo '## opt-in テスト実行記録'; ...; } >> "$f" のように echo を重ねて空行を作ってから見出し以降を追記すれば、直前の行と結合しない）。節の実際の最終行として終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)} を必ず書く（次回以降の再利用経路がこの節を安全に識別・削除するための境界になる）:`,
     '   ```',
     '   ## opt-in テスト実行記録',
@@ -4034,10 +4098,15 @@ function prCreatePrompt(item, impl, outOfScope) {
     // （ユーザーが説明・引用等で同じ見出しを書いていた場合、Closes 行・対象外節を含む正当な
     // 本文を道連れに失う。PR #504 codex P0）。削除ロジックは optinRecordRemovalShellLines に
     // 集約されている（同一ロジックを個別に保持すると修正がドリフトする。cursor[bot] 指摘）。
+    // このプロンプト（prCreatePrompt）は PR 作成前に呼ばれ、post-push fix が一度も走っていない
+    // ため「直前にホスト側が実際に書いた内容」の信頼済み実測（lastFixOptin）が存在しない。
+    // 比較対象を持たないまま終端マーカーの見た目だけで削除するとユーザーの正当な本文を巻き込み
+    // 得る（PR #504 codex P0 3 巡目）ため、expectedLines を渡さず削除自体を行わない
+    // （optinRecordRemovalShellLines(undefined) は no-op を返す）。
     ...(optinRecordSection
       ? [
-          `   次に（Closes 行・対象外節の追記より前に）既存の opt-in テスト記録節を安全に除去する（見出し行の最後の出現位置と終端マーカーの両方から機械生成区間を識別できた場合のみ削除する。識別できない場合は "$f" を一切変更せずそのまま次の追記へ進む）:`,
-          ...optinRecordRemovalShellLines(),
+          `   次に（Closes 行・対象外節の追記より前に）既存の opt-in テスト記録節の除去を試みる（本手順は post-push fix 実施前のため比較対象となる信頼済み実測が無く、実際には削除を行わない no-op になる。"$f" は一切変更されない）:`,
+          ...optinRecordRemovalShellLines(undefined),
         ]
       : []),
     // 追記はエスケープシーケンスを使わない形にする（エスケープ段数の誤読・誤写を防ぐ）。
@@ -4110,7 +4179,11 @@ function postPushChecksInstruction(prRef) {
   return `push 後 CI 起動確認（必須。Issue #479）: gh pr view ${prRef} --json headRefOid --jq .headRefOid で push 済みの head sha を取得し、その head sha に対するチェック総数と gh pr view ${prRef} --json mergeable --jq .mergeable を 30 秒間隔で最大 5 分観測する（チェックの完了は待たない。完了判定は監視エージェントの役割）。チェック総数は check-run 件数と commit status 件数の合計とする（gh pr checks・merge-exec の集計と同じ定義。gh 公式実装 pkg/cmd/pr/checks/aggregate.go は両者を合算する。check-run を作らず commit status のみを発行する CI（外部 CI サービス等）を使うリポジトリで、正常なチェックが存在するのに 0 件と誤判定しないため）: gh api repos/{owner}/{repo}/commits/<headRefOid>/check-runs --jq '.total_count' と gh api repos/{owner}/{repo}/commits/<headRefOid>/status --jq '.statuses | length'（combined status。同一 context の重複は API 側で最新 1 件へ集約済み）の 2 つを取得して合計する。両方の取得に成功した場合のみ合計値を確定値として扱い、どちらか一方でも失敗した場合は「取得失敗」として扱う（0 件と同一視してはならない — 取得失敗を 0 件へ倒すと、実際にはチェックが動いている PR をコンフリクト扱いへ落としてしまう）。チェック総数の確定値が 1 件以上になり、かつ mergeable が UNKNOWN 以外（MERGEABLE / CONFLICTING）へ確定した時点で早期終了してよい。観測結果を checksStarted（確定値で 1 件以上を確認できたら true、上限まで確定値 0 件のままなら false。取得失敗のまま上限に達した場合も false = 「起動を確認できなかった」であり「0 件だった」ではない）と mergeableAfterPush（最終値をそのまま返す。push 直後は GitHub 側の算出待ちで UNKNOWN になるため確定を待つが、上限に達しても確定しなければ UNKNOWN のまま返す — 推測で MERGEABLE / CONFLICTING を返してはならない。上限到達で checksStarted: false かつ未確定のままでも CONFLICTING とみなさず UNKNOWN を返す）として返す。gh コマンドが失敗して観測できない場合も checksStarted: false・mergeableAfterPush: "UNKNOWN" として返す（fail-closed。取得失敗を「チェック 0 件」「CONFLICTING」と読み替えてはならない）。この観測は診断・分岐ヒント専用であり、結果がどうであれ本手順より前に確定した返却値（prNumber / pushed）の判定を変えてはならない。`
 }
 
-function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushResolveIds = []) {
+// lastFixOptin: 呼び出し元（runMergeLoop）保持の直前 post-push fix ラウンドの host 側実測。
+// pushAfterFix: true のときのみ optinRecordUpdateInstructions（手順 4b）へ渡し、削除対象の
+// 完全一致比較に使う（PR #504 codex P0 3 巡目）。pushAfterFix: false（Review fix）では手順 4b
+// 自体を呼ばないため未使用。
+function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushResolveIds = [], lastFixOptin = null) {
   const branch = sanitizeBranch(impl.branch)
   // resolve (b) の許可 threadId（host 算出済み・Issue #430）。opaque id のため nonce 不要。
   const permittedIds = (Array.isArray(permittedNoPushResolveIds) ? permittedNoPushResolveIds : [])
@@ -4203,7 +4276,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     // まだ存在しない（prCreatePrompt が Review 通過後にしか呼ばれない）ためこの手順は不要。
     ...(pushAfterFix ? optinTestExecutionLines(item, '3b') : []),
     ...commitAndPushInstructions,
-    ...(pushAfterFix ? optinRecordUpdateInstructions(item, impl, '4b') : []),
+    ...(pushAfterFix ? optinRecordUpdateInstructions(item, impl, '4b', lastFixOptin) : []),
     ...(pushAfterFix
       ? [
           `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示・前後で sha が変化したことだけでは足りない。pushed: false のラウンド — 空振り push・並行 push 競合・ls-remote 判定不能 — は (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
@@ -6994,7 +7067,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       let f = null
       let fixAgentError = null
       try {
-        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
+        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds, lastFixOptin), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
       } catch (e) {
         fixAgentError = e
       }

@@ -216,7 +216,7 @@ test('runMergeLoop: monitor 呼び出し・proof 観測・fix 起動がこの順
   assert.ok(observeIndex > monitorCallIndex, 'proof 観測（applyResolveProofObservation）が monitor 呼び出しより後ろで確定していない')
   const permittedIndex = driverPart.indexOf('computePermittedNoPushResolveIds(resolveProof,', observeIndex)
   assert.ok(permittedIndex > observeIndex, '許可リスト算出が proof 観測より前で行われている（更新前の古い proof を使ってしまう）')
-  const fixCallIndex = driverPart.indexOf('fixPrompt(item, impl, finding, true, permittedNoPushResolveIds)', permittedIndex)
+  const fixCallIndex = driverPart.indexOf('fixPrompt(item, impl, finding, true, permittedNoPushResolveIds, lastFixOptin)', permittedIndex)
   assert.ok(fixCallIndex > permittedIndex, '許可リストが fixPrompt 呼び出しへ渡っていない、または算出より前で fix が起動している')
 })
 
