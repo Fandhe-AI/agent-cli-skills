@@ -5733,6 +5733,15 @@ async function markBlockedByDeps(item, failedDeps) {
   let note
   if (failedChildren.length > 0 && failedPrereqs.length === 0) {
     note = `子イシューの失敗・ブロックによりクローズ検証を保留: ${failedChildren.map((d) => `#${d}`).join(', ')}`
+  } else if (failedChildren.length > 0 && failedPhaseGate.length > 0 && failedOtherPrereqs.length === 0) {
+    note =
+      `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前 Phase 未完了（phaseGate） ` +
+      `${failedPhaseGate.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
+  } else if (failedChildren.length > 0 && failedPhaseGate.length > 0) {
+    note =
+      `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')}、前 Phase 未完了（phaseGate） ` +
+      `${failedPhaseGate.map((d) => `#${d}`).join(', ')}、前提イシュー ` +
+      `${failedOtherPrereqs.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
   } else if (failedChildren.length > 0) {
     note =
       `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
