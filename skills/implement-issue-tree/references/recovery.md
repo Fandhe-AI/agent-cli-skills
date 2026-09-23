@@ -274,19 +274,24 @@ rm _/issue-trees/42.json
 ただしこれは `optinFixState.headSha` が現在の HEAD の headRefOid と**一致する場合、または
 `unbound: true` の場合のみ**働く（PR #503 3 巡目 codex P1・4 巡目セキュリティ監査 Medium）。
 
-**latch は自動で解除を試みる（PR #503 4 巡目 codex P1・停止性バグ対応）**: latch が原因で gate
-不合格になった場合、ホストは `blocked` で終端せず、`fixCount` 予算（上限 6）が残っていれば
-**同一周回で fix ループへ自動的に再ディスパッチする**（人間の手動介入は不要）。このラウンドは
-コード変更を必須としない latch 解除専用モードで動き、宣言済み opt-in テストを現在の HEAD で
-再実行して全件 pass すれば latch は自動的に解除される。したがって **`blocked` で停止するのは
-`fixCount` 予算を使い切った場合のみ**であり、以下の手動手順はその場合の復旧手段として使う:
-状態ファイル（`_/issue-trees/<parent>.json` 等）の当該イシューエントリを開き、
-`optinFixState.runs` の該当コマンドの `result` を実行結果に合わせて手動で書き換えるか、
-テストを再実行して問題が解消したことを確認したうえで `optinFixState` エントリごと削除してから
-（次回の再開時は「post-push fix 未実施」= 従来どおり PR 本文のみで判定される）、手順 3 の PR
-本文更新と合わせて同じ `args` で再実行する。`headSha` が現在の HEAD と一致しない（base 取り込み
-等で HEAD がさらに進んだ・latch ではない通常の陳腐化）場合はこの実測は無視されるため、手順 1〜4
-のみで解消する。
+**latch は設計上意図した fail-closed であり、手順 1〜4（PR 本文の書き換え）や再実行だけでは
+解除されない（PR #503 4 巡目 codex P1 の停止性指摘 → 5 巡目 codex P0 の対応で確定した方針）。**
+ホストは fix エージェントの自己申告テスト実行を直接観測できないため、latch を自己申告のみで
+自動解除する経路は用意していない（4 巡目で一度導入したが、SHA 一致は実行の証明にならないという
+5 巡目 codex P0 指摘を受けて撤去した。詳細は `automerge-design.md`「opt-in 記録 latch は
+fail-closed で停止する」節を参照）。latch が原因で `blocked` のまま止まっている場合の解消方法は
+次の 2 つに限られる:
+
+1. **宣言テストが実際に pass する新しいコミットを push する。** Merge ループの post-push fix が
+   宣言済み opt-in テストを再実行して pass し、push が成立すれば、新 HEAD の sha に束縛された
+   pass 記録へ `optinFixState` が自動的に置き換わり、latch は新 HEAD で解消する（既存経路。
+   人間の介入は「テストを実際に pass させて push する」ことのみで、状態ファイルの編集は不要）。
+2. **人間が内容を確認したうえで GitHub 上で手動マージする。**
+
+**状態ファイルの `optinFixState` を削除する・`attempted: false` へ書き換える等で latch を
+迂回する手順は存在しない（意図的に用意していない。安全弁の迂回になるため）。** `headSha` が
+現在の HEAD と一致しない（base 取り込み等で HEAD がさらに進んだ・latch ではない通常の陳腐化）
+場合はこの実測は無視されるため、latch には該当せず手順 1〜4 のみで解消する。
 
 宣言そのものが `args.optinTestCommands`（承認一覧）に無いか許可形式外（PR #503 codex P0。
 先頭トークンが許可ランナー外・シェルメタ文字を含む等）で `blocked` になった場合は、実装は

@@ -972,6 +972,8 @@ function combineOptinRecordGate(gate, fixOptin, gateHeadSha) {
 
 
 
+
+
 function isOptinLatchActive(lastFixOptin, gateHeadSha) {
   if (!lastFixOptin || !Array.isArray(lastFixOptin.runs) || lastFixOptin.runs.length === 0) return false
   const sanitizedGateHeadSha = sanitizeSha(gateHeadSha)
@@ -980,27 +982,6 @@ function isOptinLatchActive(lastFixOptin, gateHeadSha) {
     lastFixOptin.unbound === true || sanitizeSha(lastFixOptin.headSha) === sanitizedGateHeadSha
   if (!overrideApplies) return false
   return lastFixOptin.runs.some((r) => !r || r.result !== 'pass')
-}
-
-
-
-
-
-
-
-
-
-
-
-
-function acceptNoPushOptinFixResult(f, declaredOptinTests, expectedHeadSha) {
-  const declaredList = Array.isArray(declaredOptinTests) ? declaredOptinTests : []
-  if (declaredList.length === 0) return null
-  const expected = sanitizeSha(expectedHeadSha)
-  if (!expected) return null
-  const reported = sanitizeSha(f?.optinHeadSha)
-  if (!reported || reported !== expected) return null
-  return { runs: sanitizeOptinTestRuns(f?.optinTestRuns, declaredList), headSha: reported, unbound: false }
 }
 
 
@@ -3424,26 +3405,16 @@ function optinTestExecutionLines(item, stepNo) {
 
 
 
-
-
-
-
-
-function optinRecordUpdateInstructions(item, impl, stepNo, latchMode = false) {
+function optinRecordUpdateInstructions(item, impl, stepNo) {
   const commands = Array.isArray(item.optinTests) ? item.optinTests : []
   if (commands.length === 0) return []
   const prRef = String(impl.prNumber)
   return [
-    latchMode
-      ? `${stepNo}. opt-in テスト記録の更新（必須。直前の opt-in テスト再実行手順の optinTestRuns の結果を PR 本文へ反映する。手順 4 の 2 条件判定で pushed: true と確認できた場合は b 以降を通常どおり実行する。pushed: false の場合（このラウンドは latch 解除専用でコード変更を必須としない — 宣言テストの再実行結果のみを提出してよい）でも、手順 a で控えた SHA が PR の現在の headRefOid と完全一致する場合に限り b 以降を実行する。いずれの場合も a で控えた SHA の値自体は本手順の実行有無に関わらず必ず optinHeadSha として返却する — ホスト側が別コンテキストで独立観測した head と突き合わせて latch 解除の可否を判定するため、ここで省略すると latch が解除されない）:`
-      : `${stepNo}. opt-in テスト記録の更新（必須。直前の opt-in テスト再実行手順の optinTestRuns の結果を PR 本文へ反映する。手順 4 の 2 条件判定で pushed: true と確認できた場合のみ実行する。pushed: false の場合はこの手順を省略する — まだリモートへ反映されていないコードに対する記録を書くと、実際に反映された head と PR 本文の記録内容が食い違う）:`,
+    `${stepNo}. opt-in テスト記録の更新（必須。直前の opt-in テスト再実行手順の optinTestRuns の結果を PR 本文へ反映する。手順 4 の 2 条件判定で pushed: true と確認できた場合のみ実行する。pushed: false の場合はこの手順を省略する — まだリモートへ反映されていないコードに対する記録を書くと、実際に反映された head と PR 本文の記録内容が食い違う）:`,
 
 
 
-
-    latchMode
-      ? `   a. SHA=$(git rev-parse HEAD) でこの記録が対象とする HEAD の sha を控える（この値は本手順の実行有無に関わらず optinHeadSha として必ず返却する）。pushed: false の場合は gh pr view ${prRef} --json headRefOid --jq .headRefOid で PR の現在の headRefOid を取得し、SHA と完全一致するか確認する（一致しなければ b 以降を実行せず、summary に「pushed: false かつ HEAD が PR head と不一致のため opt-in テスト記録の PR 本文更新をスキップ」と書いて本手順を終了する。一致すれば b へ進む。pushed: true の場合はこの確認をせず b へ進んでよい）。`
-      : `   a. SHA=$(git rev-parse HEAD) でこの記録が対象とする HEAD の sha（push 済みの sha と同一）を控える。`,
+    `   a. SHA=$(git rev-parse HEAD) でこの記録が対象とする HEAD の sha（push 済みの sha と同一）を控える。`,
     `   b. f=$(mktemp); gh pr view ${prRef} --json body --jq '.body // ""' > "$f" で現在の本文を取得する。この取得コマンドの終了コードを必ず確認し、非 0 終了の場合は c 以降を実行せず summary に「opt-in テスト記録の更新に失敗（gh pr view の取得エラー）」と書いて本手順を終了する（fail-closed。取得失敗を無視して進むと空の "$f" を本文全体として gh pr edit してしまい、Closes 行・対象外節を含む PR 本文全体が記録節だけに置き換わる）。`,
     `   c. g=$(mktemp); grep -vF ${JSON.stringify(OPTIN_RECORD_MARKER_PREFIX)} "$f" > "$g"; rc=$?（既存の opt-in テスト記録節のマーカー行をすべて除去する。異なる HEAD sha の記録はマージ前ゲートの grep がそもそも一致しないため実害はないが、本文の肥大化を防ぐため除去する）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、その場合のみ mv "$g" "$f" する。2 以上（構文エラー等）の場合は \`|| true\` 等で握り潰さず、mv も行わず、summary に「opt-in テスト記録の更新に失敗（grep 異常終了、実測 exit code を記載）」と書いて本手順を終了する（fail-closed。ここで握り潰すと "$f" が空のまま d 以降へ進み、Closes 行・対象外節を含む PR 本文全体が記録節だけに置き換わる）。`,
     `   d. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（マーカー行は行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる）:`,
@@ -3991,15 +3962,7 @@ function postPushChecksInstruction(prRef) {
   return `push 後 CI 起動確認（必須。Issue #479）: gh pr view ${prRef} --json headRefOid --jq .headRefOid で push 済みの head sha を取得し、その head sha に対するチェック総数と gh pr view ${prRef} --json mergeable --jq .mergeable を 30 秒間隔で最大 5 分観測する（チェックの完了は待たない。完了判定は監視エージェントの役割）。チェック総数は check-run 件数と commit status 件数の合計とする（gh pr checks・merge-exec の集計と同じ定義。gh 公式実装 pkg/cmd/pr/checks/aggregate.go は両者を合算する。check-run を作らず commit status のみを発行する CI（外部 CI サービス等）を使うリポジトリで、正常なチェックが存在するのに 0 件と誤判定しないため）: gh api repos/{owner}/{repo}/commits/<headRefOid>/check-runs --jq '.total_count' と gh api repos/{owner}/{repo}/commits/<headRefOid>/status --jq '.statuses | length'（combined status。同一 context の重複は API 側で最新 1 件へ集約済み）の 2 つを取得して合計する。両方の取得に成功した場合のみ合計値を確定値として扱い、どちらか一方でも失敗した場合は「取得失敗」として扱う（0 件と同一視してはならない — 取得失敗を 0 件へ倒すと、実際にはチェックが動いている PR をコンフリクト扱いへ落としてしまう）。チェック総数の確定値が 1 件以上になり、かつ mergeable が UNKNOWN 以外（MERGEABLE / CONFLICTING）へ確定した時点で早期終了してよい。観測結果を checksStarted（確定値で 1 件以上を確認できたら true、上限まで確定値 0 件のままなら false。取得失敗のまま上限に達した場合も false = 「起動を確認できなかった」であり「0 件だった」ではない）と mergeableAfterPush（最終値をそのまま返す。push 直後は GitHub 側の算出待ちで UNKNOWN になるため確定を待つが、上限に達しても確定しなければ UNKNOWN のまま返す — 推測で MERGEABLE / CONFLICTING を返してはならない。上限到達で checksStarted: false かつ未確定のままでも CONFLICTING とみなさず UNKNOWN を返す）として返す。gh コマンドが失敗して観測できない場合も checksStarted: false・mergeableAfterPush: "UNKNOWN" として返す（fail-closed。取得失敗を「チェック 0 件」「CONFLICTING」と読み替えてはならない）。この観測は診断・分岐ヒント専用であり、結果がどうであれ本手順より前に確定した返却値（prNumber / pushed）の判定を変えてはならない。`
 }
 
-
-
-
-
-
-
-
-
-function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushResolveIds = [], optinLatchMode = false) {
+function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushResolveIds = []) {
   const branch = sanitizeBranch(impl.branch)
 
   const permittedIds = (Array.isArray(permittedNoPushResolveIds) ? permittedNoPushResolveIds : [])
@@ -4082,15 +4045,6 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     '手順:',
     `0. worktree routing ガード（他のどの gh / git 操作よりも先に、最初に必ず実行する）: \`git remote get-url origin\` でカレント worktree の remote を確認し、\`gh issue view ${item.number} --json number,title\` で取得した title が、このタスクの対象イシュー（上記タイトル）と実質的に同一であることを確認する（上記タイトルはプロンプト安全化のため記号がエスケープ／除去されている場合がある。GitHub は raw title を返すため完全一致は要求せず語句の一致で判断する。番号の存在だけでは別リポの同番号 issue を誤認しうる）。remote が想定と異なる / issue が解決できない / 取得 title が明らかに無関係（別 issue）のいずれか（= submodule 等の別リポ worktree に誤配置）なら、git fetch / git push を含む後続を一切実行せず、即 \`routingError: true\`・\`pushed: false\`・summary に「worktree routing error: remote=<URL> で誤配置」を入れて返す（routingError は「push 不要（修正済み）」と区別され、オーケストレーターが systemic failure として即 failed 終端（halt の連続カウント対象）にする）。`,
     ...checkoutInstructions,
-
-
-
-
-    ...(pushAfterFix && optinLatchMode && Array.isArray(item.optinTests) && item.optinTests.length > 0
-      ? [
-          '1b. 本ラウンドは opt-in テスト記録 latch の解除専用として起動されている（コード変更は必須ではない）。指摘内容（上記 UNTRUSTED 範囲）に実際の修正対象があれば通常どおり手順 2 以降で対応する。実際の修正対象が無ければ手順 2 は無理に変更を作らずスキップしてよく、その場合は手順 3・3b（ビルド・lint・テストおよび宣言済み opt-in テストの再実行）へ直接進む。いずれの場合も手順 3b・4b（opt-in テスト再実行・記録更新）は必ず実行する。',
-        ]
-      : []),
     '2. 指摘を重要度を問わずすべて修正する（実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い委譲する）。対象リポジトリの CLAUDE.md・rules の不変条件（migration・スキーマ等）を守る。',
     '   P0/P1 相当・セキュリティ上の指摘（脆弱性・認証認可の不備・秘密情報露出・破壊的操作等）は対象外と判定して記録・スキップしてはならない。修正するか、修正不能なら pushed: false とし summary に理由を具体的に書いて返す（ホストはこれを blocked として扱いユーザー判断へ委ねる）。対象外にすべきか判断に迷う場合は安全側（対象外にしない）に倒す。',
     `   対応不能・実装スコープ外と判断した指摘（上記の P0/P1・セキュリティ除外に該当しないもの）は修正をスキップしてよい。ただし無言でスキップせず、上記「未解決スレッド一覧」に記載された該当スレッドの threadId と判断理由を outOfScopeComments 配列に { threadId, reason } 形式で1件1要素として記録する（summary 本文には埋め込まない。threadId が「未解決スレッド一覧」に見つからない指摘は対象外記録をスキップしてよい。この記録はホスト側のログ・最終レポート専用であり、次ラウンドの監視エージェントの判定材料には一切引き継がれない。監視エージェントは毎回スレッド内容を自ら読んで独立に判定する）。対象外と判断したスレッドは resolve しない（resolve してよいのは Merge ループの fix が、リモート head に反映済みの修正で自分が実際に修正対応したスレッドのみ。対象外スレッドは記録までで停止し、人間が GitHub 上で resolve しない限り未解決のまま残って blocked → 最終レポートでの issue 化承認・手動 resolve の判断材料になる）。`,
@@ -4101,7 +4055,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
 
     ...(pushAfterFix ? optinTestExecutionLines(item, '3b') : []),
     ...commitAndPushInstructions,
-    ...(pushAfterFix ? optinRecordUpdateInstructions(item, impl, '4b', optinLatchMode) : []),
+    ...(pushAfterFix ? optinRecordUpdateInstructions(item, impl, '4b') : []),
     ...(pushAfterFix
       ? [
           `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示・前後で sha が変化したことだけでは足りない。pushed: false のラウンド — 空振り push・並行 push 競合・ls-remote 判定不能 — は (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
@@ -6186,20 +6140,6 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
-
-  let optinLatchRecoveryActive = false
-
-
-
-
-
-
-
-  let optinLatchExpectedHeadSha = ''
-
-
-
-
   async function failMergeTerminal(baseReason, terminalStatus = 'failed') {
 
     const unresolvedNote = lastUnresolvedInfo ? `。最終観測時点の未解決コメント: ${lastUnresolvedInfo}` : ''
@@ -6260,10 +6200,6 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
     roundTimeoutExecReason = ''
-
-
-    optinLatchRecoveryActive = false
-    optinLatchExpectedHeadSha = ''
 
 
 
@@ -6458,44 +6394,23 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
+
+
+
+
+
           const latchActive = isOptinLatchActive(lastFixOptin, optinGateHeadSha)
-          if (latchActive) {
-            if (fixCount >= 6) {
-
-
-              const latchExhaustedReason = capText(
-                `イシューで宣言された opt-in テストの実行記録が opt-in 記録 latch（過去の post-push fix が現在の HEAD に対して非 pass、または対象 HEAD を確定できなかった実測）により不合格に固定化されているが、修正予算（fixCount 上限 6）を使い切ったため blocked で停止する（不足: ${missingList}）${runsNote}。`
-                + `latch は PR 本文の手動編集や再監視だけでは解除されない（combineOptinRecordGate は override を維持する設計のため）。`
-                + `復旧するには、状態ファイル（${STATE_FILE}）の該当イシューの optinFixState を削除するか attempted: false へ書き換えてから再実行するか、宣言テストが実際に pass する新しいコミットを push して次の fix ラウンドで latch を解除する必要がある`,
-              )
-              log(`⚠️ #${item.number}: ${latchExhaustedReason}`)
-              return await failMergeTerminal(latchExhaustedReason, 'blocked')
-            }
-
-
-
-
-
-            log(`PR #${impl.prNumber}: opt-in 記録 latch（不足: ${missingList}）を検出。fix 経路へ再ディスパッチして latch 解除を試みる（${fixCount + 1}/6 回目）`)
-            lastState = 'needs-fix'
-            optinLatchRecoveryActive = true
-            optinLatchExpectedHeadSha = optinGateHeadSha
-            finding = {
-              summary: capText(
-                `opt-in 記録 latch により opt-in テスト記録ゲートが不合格に固定化されている（不足: ${missingList}）${runsNote}。`
-                + `latch を解除するには、宣言された opt-in テストを現在の HEAD で再実行し、全件 pass であれば latch が解除される（コード変更は必須ではない）`,
-              ),
-              unresolvedComments: [],
-            }
-            if (monitorsLeft < 1) monitorsLeft = 1
-          } else {
-            const optinReason = capText(
-              `イシューで宣言された opt-in テストの実行記録（pass、かつ現在の HEAD sha に束縛された記録）が PR 本文に確認できないためマージを停止した（不足: ${missingList}）${runsNote}。`
-              + `テストを実行し、現在の HEAD に対する opt-in テスト実行記録節のマーカー行を pass で更新してから同じ args で再実行すれば monitoring 再開で継続する`,
-            )
-            log(`⚠️ #${item.number}: ${optinReason}`)
-            return await failMergeTerminal(optinReason, 'blocked')
-          }
+          const optinReason = capText(
+            latchActive
+              ? `イシューで宣言された opt-in テストの実行記録が opt-in 記録 latch（過去の post-push fix が現在の HEAD に対して非 pass、または対象 HEAD を確定できなかった実測）により不合格に固定化されている（不足: ${missingList}）${runsNote}。`
+                + `latch は設計上意図した fail-closed であり、ホストが fix エージェントの自己申告テスト実行を直接観測できない以上、自己申告のみで解除しない。`
+                + `解消するには (a) 宣言テストが実際に pass する新しいコミットを push する（post-push fix が新 HEAD の sha に束縛された pass 記録へ置き換える）、または (b) 人間が内容を確認したうえで GitHub 上で手動マージする、のいずれかによる。`
+                + `状態ファイルの optinFixState を削除・書き換えて迂回することはしないこと（安全弁の迂回になる）`
+              : `イシューで宣言された opt-in テストの実行記録（pass、かつ現在の HEAD sha に束縛された記録）が PR 本文に確認できないためマージを停止した（不足: ${missingList}）${runsNote}。`
+                + `テストを実行し、現在の HEAD に対する opt-in テスト実行記録節のマーカー行を pass で更新してから同じ args で再実行すれば monitoring 再開で継続する`,
+          )
+          log(`⚠️ #${item.number}: ${optinReason}`)
+          return await failMergeTerminal(optinReason, 'blocked')
         }
       }
       if (lastState === 'ready') {
@@ -6926,7 +6841,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       let f = null
       let fixAgentError = null
       try {
-        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds, optinLatchRecoveryActive), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
+        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
       } catch (e) {
         fixAgentError = e
       }
@@ -7010,14 +6925,6 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
       let optinFixStatePatch
-
-
-
-
-
-
-
-      let optinLatchAcceptedNoPush = false
       if (Array.isArray(item.optinTests) && item.optinTests.length > 0) {
         const fixOptinRuns = sanitizeOptinTestRuns(f.optinTestRuns, item.optinTests)
         if (f.pushed === true) {
@@ -7044,29 +6951,6 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             lastFixOptin = { runs: unboundRuns, headSha: '', unbound: true }
             optinFixStatePatch = { attempted: true, runs: unboundRuns, headSha: '', unbound: true }
             log(`⚠️ #${item.number}: post-push fix が optinHeadSha を報告しなかった（または 40 桁 sha 形式でない）。次回のマージ前ゲートは現在の HEAD に関わらず不合格として扱う（fail-closed）`)
-          }
-        } else if (optinLatchRecoveryActive) {
-
-
-
-
-
-
-
-
-          const accepted = acceptNoPushOptinFixResult(f, item.optinTests, optinLatchExpectedHeadSha)
-          if (accepted) {
-            lastFixOptin = accepted
-            optinFixStatePatch = { attempted: true, runs: accepted.runs, headSha: accepted.headSha, unbound: false }
-            optinLatchAcceptedNoPush = true
-            const nonPassCount = accepted.runs.filter((r) => !r || r.result !== 'pass').length
-            log(
-              nonPassCount > 0
-                ? `#${item.number}: opt-in 記録 latch 解除ラウンドを受理（現在の HEAD と一致確認済み）。ただし非 pass が ${nonPassCount} 件残るため latch は非 pass の内容で維持される（override は継続、fixCount のみ消費して有界に進捗する）`
-                : `#${item.number}: opt-in 記録 latch 解除ラウンドを受理（現在の HEAD と一致確認済み・全件 pass）。latch を解除する`,
-            )
-          } else {
-            log(`⚠️ #${item.number}: opt-in 記録 latch 解除ラウンドの自己申告（optinHeadSha）をホスト側の独立観測 head と突き合わせられなかった（未報告・不一致・宣言件数不整合のいずれか）。latch は維持されたまま fixCount のみ消費する（fail-closed）`)
           }
         }
         if (fixOptinRuns.some((r) => r.result !== 'pass')) {
@@ -7152,7 +7036,6 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
-
       const optinFixPatchArgs = { fixCount, baseMergeCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, pushChecksStarted: fixChecksStarted, pushMergeable: fixPushMergeable, optinFixState: optinFixStatePatch }
       const fixStateWriteOk = await updateState(item.number, optinFixPatchArgs, { cleanupWorktree: oldWorktreePath })
 
@@ -7179,13 +7062,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
 
 
-
-
-      noPushRounds = advanceNoPushRounds(noPushRounds, f.pushed === true || optinLatchAcceptedNoPush, newlyResolvedThisRound)
+      noPushRounds = advanceNoPushRounds(noPushRounds, f.pushed === true, newlyResolvedThisRound)
       if (!f.pushed) {
-        if (optinLatchAcceptedNoPush) {
-          log(`PR #${impl.prNumber}: opt-in 記録 latch 解除ラウンドを進捗として扱い、noPushRounds をリセットしてマージ条件を再判定する`)
-        } else if (newlyResolvedThisRound > 0) {
+        if (newlyResolvedThisRound > 0) {
           log(`PR #${impl.prNumber} の修正エージェントは push 不要だが新規スレッド resolve（${newlyResolvedThisRound} 件）を報告、進捗ありとしてマージ条件を再判定する`)
         } else if (noPushRounds >= 2) {
 

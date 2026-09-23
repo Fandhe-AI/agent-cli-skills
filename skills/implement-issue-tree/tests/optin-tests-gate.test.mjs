@@ -36,7 +36,6 @@ const SLICE_EXPORTS = [
   'classifyOptinRecordGate',
   'combineOptinRecordGate',
   'isOptinLatchActive',
-  'acceptNoPushOptinFixResult',
   'OPTIN_RECORD_MARKER_PREFIX',
   'OPTIN_TESTS_MAX',
   'OPTIN_TEST_COMMANDS_MAX',
@@ -71,7 +70,6 @@ const {
   classifyOptinRecordGate,
   combineOptinRecordGate,
   isOptinLatchActive,
-  acceptNoPushOptinFixResult,
   OPTIN_RECORD_MARKER_PREFIX,
   OPTIN_TESTS_MAX,
   OPTIN_TEST_COMMANDS_MAX,
@@ -775,14 +773,16 @@ test('駆動部: merge-exec 呼び出しに optinGateHeadSha（TOCTOU 対策の�
 })
 
 // ---------------------------------------------------------------------------
-// 群 G: opt-in 記録 latch の解除（PR #503 4 巡目 codex P1・停止性バグ対応）。
-// combineOptinRecordGate の override により gate 不合格が固定化する latch を、
-// 「PR 本文編集」「再監視」だけに頼らず fix 経路への同一周回再ディスパッチで解除する仕組み。
-// isOptinLatchActive（latch 検出）・acceptNoPushOptinFixResult（自己申告の受理判定。ホストが
-// 独立観測した headRefOid との一致のみを根拠とする）の純粋関数と、その配線を検証する。
+// 群 G: opt-in 記録 latch は fail-closed で停止する（PR #503 4 巡目 codex P1 → 5 巡目 codex P0）。
+// 4 巡目で一度導入した no-push latch 解除（自己申告 optinHeadSha の一致だけで採用する設計）は
+// 5 巡目 codex P0 指摘（SHA 一致は実行の証明にならない）を受けて撤去した。isOptinLatchActive は
+// 終端メッセージの出し分け専用として残り、latch はマージ許可に一切影響しない。latch の唯一の
+// 解消経路は (a) 新しいコミットを push して pass 記録を新 HEAD へ置き換える（既存経路）、
+// (b) 人間が GitHub 上で手動マージする、の 2 つのみで、状態ファイルの手動編集による迂回手順は
+// どこにも存在しない。
 // ---------------------------------------------------------------------------
 
-test('isOptinLatchActive: 現在の HEAD に一致する非 pass 実測があれば true', () => {
+test('isOptinLatchActive: 現在の HEAD に一致する非 pass 実測があれば true（終端メッセージの出し分けにのみ使う）', () => {
   const fixOptin = { runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: SHA_A, unbound: false }
   assert.equal(isOptinLatchActive(fixOptin, SHA_A), true)
 })
@@ -792,13 +792,13 @@ test('isOptinLatchActive: unbound: true は headSha が空でも true（gateHead
   assert.equal(isOptinLatchActive(fixOptin, SHA_A), true)
 })
 
-test('isOptinLatchActive: gateHeadSha が sanitizeSha を通らない（独立検証エージェントが headRefOid を観測できなかった）場合は unbound: true でも false（fixCount 浪費を避けて既存 blocked へ委ねる）', () => {
+test('isOptinLatchActive: gateHeadSha が sanitizeSha を通らない場合は unbound: true でも false', () => {
   const fixOptin = { runs: [{ command: 'make e2e', result: 'not-run', detail: '' }], headSha: '', unbound: true }
   assert.equal(isOptinLatchActive(fixOptin, ''), false)
   assert.equal(isOptinLatchActive(fixOptin, 'not-a-sha'), false)
 })
 
-test('isOptinLatchActive: headSha が現在の HEAD と不一致（override が働かない = latch ではない）なら false', () => {
+test('isOptinLatchActive: headSha が現在の HEAD と不一致（override が働かない）なら false', () => {
   const fixOptin = { runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: SHA_A, unbound: false }
   assert.equal(isOptinLatchActive(fixOptin, SHA_B), false)
 })
@@ -813,161 +813,107 @@ test('isOptinLatchActive: lastFixOptin が null・runs 空でも false', () => {
   assert.equal(isOptinLatchActive({ runs: [] }, SHA_A), false)
 })
 
-test('acceptNoPushOptinFixResult: fix 自己申告 optinHeadSha がホスト独立観測 head と完全一致すれば受理し unbound: false を返す', () => {
-  const f = { pushed: false, optinTestRuns: [{ command: 'make e2e', result: 'pass', exitCode: 0, detail: '' }], optinHeadSha: SHA_A }
-  assert.deepEqual(acceptNoPushOptinFixResult(f, ['make e2e'], SHA_A), {
-    runs: [{ command: 'make e2e', result: 'pass', detail: '' }],
-    headSha: SHA_A,
-    unbound: false,
-  })
-})
-
-test('acceptNoPushOptinFixResult: 非 pass の実測でも sha が一致すれば受理する（latch は維持されるが fixCount は有界に進む）', () => {
-  const f = { pushed: false, optinTestRuns: [{ command: 'make e2e', result: 'fail', exitCode: 1, detail: 'timeout' }], optinHeadSha: SHA_A }
-  assert.deepEqual(acceptNoPushOptinFixResult(f, ['make e2e'], SHA_A), {
-    runs: [{ command: 'make e2e', result: 'fail', detail: 'timeout' }],
-    headSha: SHA_A,
-    unbound: false,
-  })
-})
-
-test('acceptNoPushOptinFixResult: 自己申告 optinHeadSha がホスト独立観測 head と不一致なら null（自己申告のみでは latch を解除しない）', () => {
-  const f = { pushed: false, optinTestRuns: [{ command: 'make e2e', result: 'pass', exitCode: 0, detail: '' }], optinHeadSha: SHA_B }
-  assert.equal(acceptNoPushOptinFixResult(f, ['make e2e'], SHA_A), null)
-})
-
-test('acceptNoPushOptinFixResult: optinHeadSha 未報告・不正形式・expectedHeadSha 自体が空なら null', () => {
-  assert.equal(acceptNoPushOptinFixResult({ pushed: false, optinTestRuns: [] }, ['make e2e'], SHA_A), null)
-  assert.equal(acceptNoPushOptinFixResult({ pushed: false, optinHeadSha: 'not-a-sha' }, ['make e2e'], SHA_A), null)
-  assert.equal(acceptNoPushOptinFixResult({ pushed: false, optinHeadSha: SHA_A }, ['make e2e'], ''), null)
-})
-
-test('acceptNoPushOptinFixResult: 宣言なしイシューは常に null（latch 自体が存在し得ない）', () => {
-  assert.equal(acceptNoPushOptinFixResult({ pushed: false, optinHeadSha: SHA_A }, [], SHA_A), null)
-})
-
-// ---- 統合: latch のライフサイクル（検出 → fix 経路 dispatch → 受理/非受理 → 次ラウンドの gate）----
-
-test('統合（latch 検出→dispatch の起点）: PR 本文が現在の HEAD で pass 表示でも、latch（非 pass・head 一致）があれば combineOptinRecordGate は不合格を維持し、isOptinLatchActive は dispatch すべきと判定する', () => {
+test('統合: latch 下（非 pass が現 HEAD に一致）では、PR 本文が同じ HEAD で pass 表示でも combineOptinRecordGate は不合格を維持する（isOptinLatchActive は true だが、マージ許可には一切影響しない）', () => {
   const bodyGateOk = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
   const fixOptin = { runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: SHA_A, unbound: false }
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptin, SHA_A), { ok: false, missing: [0] })
   assert.equal(isOptinLatchActive(fixOptin, SHA_A), true)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptin, SHA_A), { ok: false, missing: [0] })
 })
 
-test('統合（受理→全件 pass で latch 解除）: acceptNoPushOptinFixResult が返した全件 pass の結果を fixOptin として渡すと、combineOptinRecordGate は override せず元の gate（bodyGateOk）をそのまま返す＝マージ合格し得る', () => {
-  const f = { pushed: false, optinTestRuns: [{ command: 'make e2e', result: 'pass', exitCode: 0, detail: '' }], optinHeadSha: SHA_A }
-  const accepted = acceptNoPushOptinFixResult(f, ['make e2e'], SHA_A)
-  assert.equal(isOptinLatchActive(accepted, SHA_A), false, 'latch は解除されている')
-  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, accepted, SHA_A), bodyGateOk)
+test('統合: unbound な latch も同様に、PR 本文が pass でも不合格を維持する（現在の HEAD が何であれ override する）', () => {
+  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_B, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+  const fixOptin = { runs: [{ command: 'make e2e', result: 'not-run', detail: '' }], headSha: '', unbound: true }
+  assert.equal(isOptinLatchActive(fixOptin, SHA_B), true)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptin, SHA_B), { ok: false, missing: [0] })
 })
 
-test('統合（受理→非 pass のままなら latch 維持）: 受理された結果でも非 pass が残れば combineOptinRecordGate は不合格のまま', () => {
-  const f = { pushed: false, optinTestRuns: [{ command: 'make e2e', result: 'fail', exitCode: 1, detail: 'timeout' }], optinHeadSha: SHA_A }
-  const accepted = acceptNoPushOptinFixResult(f, ['make e2e'], SHA_A)
-  assert.equal(isOptinLatchActive(accepted, SHA_A), true, 'latch は維持される')
-  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, accepted, SHA_A), { ok: false, missing: [0] })
+test('統合（既存経路の回帰）: push を伴う fix が新 HEAD（SHA_B）で全件 pass を報告すれば、lastFixOptin は新 HEAD の unbound: false へ置き換わり、latch は新 HEAD では検出されず合格し得る', () => {
+  // SHA_A で non-pass だった latch 状態（旧 HEAD）。
+  const oldFixOptin = { runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: SHA_A, unbound: false }
+  assert.equal(isOptinLatchActive(oldFixOptin, SHA_A), true)
+  // 新しいコミットを push した post-push fix が SHA_B で全件 pass を報告した後の状態
+  // （runMergeLoop の f.pushed === true 分岐がそのまま作る形。5 巡目でも変更していない）。
+  const newFixOptin = { runs: sanitizeOptinTestRuns([{ command: 'make e2e', result: 'pass', exitCode: 0, detail: '' }], ['make e2e']), headSha: SHA_B, unbound: false }
+  assert.equal(isOptinLatchActive(newFixOptin, SHA_B), false, '新 HEAD では override 対象がないため latch ではない')
+  const bodyGateOkAtNewHead = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_B, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+  assert.deepEqual(combineOptinRecordGate(bodyGateOkAtNewHead, newFixOptin, SHA_B), bodyGateOkAtNewHead, '新 HEAD の pass 記録で override せず元の gate（合格し得る）をそのまま返す')
 })
 
-test('統合（unbound も有効な optinHeadSha の再実行で解除）: unbound: true な latch でも、latch 解除ラウンドが現在の HEAD で全件 pass を報告し host が受理すれば unbound: false へ移行し gate は元へ戻る', () => {
-  const unboundFixOptin = { runs: [{ command: 'make e2e', result: 'not-run', detail: '' }], headSha: '', unbound: true }
-  assert.equal(isOptinLatchActive(unboundFixOptin, SHA_A), true)
-  const f = { pushed: false, optinTestRuns: [{ command: 'make e2e', result: 'pass', exitCode: 0, detail: '' }], optinHeadSha: SHA_A }
-  const accepted = acceptNoPushOptinFixResult(f, ['make e2e'], SHA_A)
-  assert.equal(accepted.unbound, false)
-  assert.equal(isOptinLatchActive(accepted, SHA_A), false)
-})
-
-test('統合（restore 後に同経路で回復可能）: latch 状態を optinFixState として永続化→restoreOptinFixState で復元しても isOptinLatchActive は同じく true を返し、同じ受理判定（acceptNoPushOptinFixResult）で解除できる', () => {
-  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'fail', detail: 'timeout' }], headSha: SHA_A, unbound: false } }
-  const restored = restoreOptinFixState(saved, ['make e2e'])
-  assert.equal(isOptinLatchActive(restored, SHA_A), true, '再開後も latch は同じく検出される')
-  const f = { pushed: false, optinTestRuns: [{ command: 'make e2e', result: 'pass', exitCode: 0, detail: '' }], optinHeadSha: SHA_A }
-  const accepted = acceptNoPushOptinFixResult(f, ['make e2e'], SHA_A)
-  assert.equal(isOptinLatchActive(accepted, SHA_A), false, '再開後の同じ受理経路で解除できる')
-})
-
-test('統合（宣言なしで latch は存在しない）: declaredOptinTests が空なら restoreOptinFixState は null、isOptinLatchActive・acceptNoPushOptinFixResult も常に不介入', () => {
-  const restored = restoreOptinFixState({ optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: SHA_A } }, [])
+test('統合: 宣言なしイシューでは isOptinLatchActive・combineOptinRecordGate いずれも latch の影響を受けない（restoreOptinFixState が null を返す既定無効方針と一致）', () => {
+  const restored = restoreOptinFixState({ optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: SHA_A, unbound: false } }, [])
   assert.equal(restored, null)
   assert.equal(isOptinLatchActive(restored, SHA_A), false)
-  assert.equal(acceptNoPushOptinFixResult({ pushed: false, optinHeadSha: SHA_A }, [], SHA_A), null)
+  const bodyGateOk = classifyOptinRecordGate([], null)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored, SHA_A), bodyGateOk)
 })
 
-// ---- fixPrompt: optinLatchMode 引数（既定 false で出力完全不変・latchMode 時のみ手順追加）----
+// ---- fixPrompt: latch 解除専用パラメータ（optinLatchMode）が撤去され、出力が完全に不変であること ----
 
-test('fixPrompt: optinLatchMode を省略した場合と明示的に false を渡した場合で出力が完全一致する（既定値が既存契約を壊さない）', () => {
+test('fixPrompt: latch 関連の引数・手順が存在しない（5 巡目で撤去済み）。5 引数呼び出しと 6 引数目に任意の値を渡した呼び出しが同一出力になる（余分な引数は無視される既存の JS 挙動の確認であり、6 引数目を読む分岐が存在しないことの間接確認）', () => {
   const finding = { summary: 'テスト指摘', unresolvedComments: [] }
   const item2 = { number: 42, title: 'サンプルイシュー', optinTests: ['make e2e'] }
-  const withDefault = fixPrompt(item2, impl, finding, true, [])
-  const withExplicitFalse = fixPrompt(item2, impl, finding, true, [], false)
-  assert.equal(withDefault, withExplicitFalse)
+  const withFiveArgs = fixPrompt(item2, impl, finding, true, [])
+  // eslint 等の型チェックを経由しないテスト専用の直接呼び出し。6 引数目（撤去済みの
+  // optinLatchMode 相当の位置）に true を渡しても出力が変わらないことを確認する。
+  const withExtraArg = fixPrompt(item2, impl, finding, true, [], true)
+  assert.equal(withFiveArgs, withExtraArg)
+  assert.doesNotMatch(withFiveArgs, /latch の解除専用として起動されている/)
+  assert.doesNotMatch(withFiveArgs, /コード変更は必須ではない/)
 })
 
-test('fixPrompt: item.optinTests が空なら optinLatchMode の値に関わらず出力が完全一致する', () => {
-  const finding = { summary: 'テスト指摘', unresolvedComments: [] }
-  const withoutLatch = fixPrompt(item, impl, finding, true, [], false)
-  const withLatch = fixPrompt(item, impl, finding, true, [], true)
-  assert.equal(withoutLatch, withLatch, '宣言なしイシューでは optinLatchMode 引数が出力に影響してはならない（R3 と同じ既定無効方針）')
+// ---- 駆動部: latch は終端メッセージの出し分けにのみ使われ、fix への再ディスパッチが存在しないこと ----
+
+test('駆動部: latch 検出（isOptinLatchActive）は終端メッセージの出し分けにのみ使われ、gate 不合格は latch の有無に関わらず必ず failMergeTerminal(..., \'blocked\') で終端する（needs-fix への再ディスパッチは存在しない）', () => {
+  const gateCheckIdx = driverPart.indexOf('const latchActive = isOptinLatchActive(lastFixOptin, optinGateHeadSha)')
+  assert.ok(gateCheckIdx >= 0, 'isOptinLatchActive の呼び出しが見つからない')
+  const section = driverPart.slice(gateCheckIdx, gateCheckIdx + 2500)
+  assert.match(section, /return await failMergeTerminal\(optinReason, 'blocked'\)/)
+  // needs-fix への再ディスパッチ（5 巡目で撤去した設計）が残っていないことを確認する。
+  assert.doesNotMatch(section, /lastState = 'needs-fix'/)
+  assert.doesNotMatch(section, /optinLatchRecoveryActive/)
 })
 
-test('fixPrompt: optinLatchMode: true は「コード変更不要」の手順（1b）と、pushed: false でも記録更新を試みる旨を追加する（宣言テストありのみ）', () => {
-  const finding = { summary: 'テスト指摘', unresolvedComments: [] }
-  const item2 = { number: 42, title: 'サンプルイシュー', optinTests: ['make e2e'] }
-  const out = fixPrompt(item2, impl, finding, true, [], true)
-  assert.match(out, /本ラウンドは opt-in テスト記録 latch の解除専用として起動されている/)
-  assert.match(out, /pushed: false の場合（このラウンドは latch 解除専用でコード変更を必須としない/)
-  assert.match(out, /この値は本手順の実行有無に関わらず optinHeadSha として必ず返却する/)
+test('駆動部: acceptNoPushOptinFixResult・optinLatchMode・optinLatchExpectedHeadSha・optinLatchAcceptedNoPush はソース全体に存在しない（5 巡目 codex P0 対応で撤去済み）', () => {
+  for (const removed of ['acceptNoPushOptinFixResult', 'optinLatchMode', 'optinLatchExpectedHeadSha', 'optinLatchAcceptedNoPush', 'optinLatchRecoveryActive']) {
+    assert.ok(!driverPart.includes(removed) && !definitionPart.includes(removed), `${removed} が撤去されずに残っている`)
+  }
 })
 
-test('fixPrompt: optinLatchMode: true でも pushAfterFix: false（Review ループ）では無視され、pushAfterFix: true 時の出力から 1b・latch 文言が消える', () => {
-  const finding = { summary: 'テスト指摘', unresolvedComments: [] }
-  const item2 = { number: 42, title: 'サンプルイシュー', optinTests: ['make e2e'] }
-  const out = fixPrompt(item2, impl, finding, false, [], true)
-  assert.doesNotMatch(out, /latch の解除専用として起動されている/)
+test('駆動部: fixPrompt 呼び出しは 5 引数のまま（optinLatchRecoveryActive 等の 6 引数目を渡さない）', () => {
+  assert.match(driverPart, /fixPrompt\(item, impl, finding, true, permittedNoPushResolveIds\), \{ label: `fix:#\$\{item\.number\}`/)
 })
 
-// ---- 駆動部: latch dispatch の配線（gate-check → needs-fix 再ディスパッチ → post-fix 受理）----
-
-test('駆動部: gate 不合格時、latch（isOptinLatchActive）を検出したら fixCount 予算内で同一周回 needs-fix へ再ディスパッチし、merge-exec は lastState === \'ready\' ガードでスキップされる', () => {
-  assert.match(driverPart, /const latchActive = isOptinLatchActive\(lastFixOptin, optinGateHeadSha\)/)
-  assert.match(driverPart, /if \(latchActive\) \{/)
-  assert.match(driverPart, /lastState = 'needs-fix'\s*\n\s*optinLatchRecoveryActive = true\s*\n\s*optinLatchExpectedHeadSha = optinGateHeadSha/)
-  assert.match(driverPart, /if \(lastState === 'ready'\) \{\s*\n\s*if \(!allowMerge\) \{/)
+test('駆動部: noPushRounds の advanceNoPushRounds 呼び出しは f.pushed === true のみを進捗判定に使う（latch 由来の特別扱いが撤去されている）', () => {
+  assert.match(driverPart, /noPushRounds = advanceNoPushRounds\(noPushRounds, f\.pushed === true, newlyResolvedThisRound\)/)
+  assert.doesNotMatch(driverPart, /f\.pushed === true \|\| optinLatchAcceptedNoPush/)
 })
 
-test('駆動部: latch かつ fixCount 予算枯渇時は blocked で有界に停止し、latch 固有の復旧手順（状態ファイル編集または新規 push）を案内する', () => {
-  assert.match(driverPart, /if \(fixCount >= 6\) \{[\s\S]{0,400}?latchExhaustedReason/)
-  assert.match(driverPart, /latch は PR 本文の手動編集や再監視だけでは解除されない/)
-  assert.match(driverPart, /return await failMergeTerminal\(latchExhaustedReason, 'blocked'\)/)
+// ---- 終端メッセージ・ドキュメントに optinFixState の削除/改変手順（迂回手順）が含まれないこと ----
+
+test('駆動部: latch 終端メッセージ文言に「削除するか」「削除してから」等の実行可能な削除指示が含まれず、迂回しない旨の否定文のみが含まれる', () => {
+  const gateCheckIdx = driverPart.indexOf('const latchActive = isOptinLatchActive(lastFixOptin, optinGateHeadSha)')
+  assert.ok(gateCheckIdx >= 0)
+  const section = driverPart.slice(gateCheckIdx, gateCheckIdx + 2500)
+  assert.doesNotMatch(section, /削除するか/)
+  assert.doesNotMatch(section, /削除してから/)
+  assert.doesNotMatch(section, /attempted: false へ書き換え/)
+  assert.match(section, /削除・書き換えて迂回することはしないこと/)
 })
 
-test('駆動部: fixPrompt 呼び出しへ optinLatchRecoveryActive がそのまま渡る', () => {
-  assert.match(driverPart, /fixPrompt\(item, impl, finding, true, permittedNoPushResolveIds, optinLatchRecoveryActive\)/)
-})
-
-test('駆動部: post-fix ブロックが f.pushed === false かつ optinLatchRecoveryActive のとき acceptNoPushOptinFixResult を経由し、受理時のみ optinLatchAcceptedNoPush を立てる', () => {
-  assert.match(driverPart, /\} else if \(optinLatchRecoveryActive\) \{/)
-  assert.match(driverPart, /const accepted = acceptNoPushOptinFixResult\(f, item\.optinTests, optinLatchExpectedHeadSha\)/)
-  assert.match(driverPart, /optinLatchAcceptedNoPush = true/)
-})
-
-test('駆動部: noPushRounds の advanceNoPushRounds 呼び出しが optinLatchAcceptedNoPush を進捗として渡す（latch 解除ラウンドが noPushRounds 閾値で早期 blocked にならない）', () => {
-  assert.match(driverPart, /advanceNoPushRounds\(noPushRounds, f\.pushed === true \|\| optinLatchAcceptedNoPush, newlyResolvedThisRound\)/)
-})
-
-test('駆動部: optinLatchRecoveryActive・optinLatchExpectedHeadSha はラウンド先頭で毎回リセットされる（前ラウンドの値が漏れない）', () => {
-  // "roundTimeoutExecReason = ''" は let 宣言（初期化）とラウンド先頭のリセットの 2 箇所に
-  // 出現する。1 件目（宣言）ではなく 2 件目（ラウンド先頭のリセット、コメントに「毎ラウンド
-  // 先頭で ''」とある方）の直後に optinLatchRecoveryActive/optinLatchExpectedHeadSha の
-  // リセットが続くことを確認する。
-  const declIdx = driverPart.indexOf("roundTimeoutExecReason = ''")
-  assert.ok(declIdx >= 0, 'roundTimeoutExecReason の宣言が見つからない')
-  const resetIdx = driverPart.indexOf("roundTimeoutExecReason = ''", declIdx + 1)
-  assert.ok(resetIdx > declIdx, 'ラウンド先頭のリセット箇所（2 件目）が見つからない')
-  const nearby = driverPart.slice(resetIdx, resetIdx + 300)
-  assert.match(nearby, /optinLatchRecoveryActive = false/)
-  assert.match(nearby, /optinLatchExpectedHeadSha = ''/)
+test('ドキュメント: recovery.md・automerge-design.md・SKILL.md・state-example.json のいずれにも optinFixState を削除・改変して latch を迂回する実行指示（「削除するか」「エントリごと削除してから」等）が残っていない', () => {
+  // dirname(import.meta.url) は skills/implement-issue-tree/tests。'..' で
+  // skills/implement-issue-tree/ 相対のパスを組み立てる（SCRIPT_PATH と同じ組み立て方）。
+  const files = [
+    'references/recovery.md',
+    'references/automerge-design.md',
+    'SKILL.md',
+    'sample/state-example.json',
+  ]
+  const forbidden = [/削除するか/, /エントリごと削除してから/, /attempted: false へ書き換えてから/]
+  for (const relPath of files) {
+    const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', ...relPath.split('/')), 'utf8')
+    for (const pattern of forbidden) {
+      assert.doesNotMatch(text, pattern, `${relPath} に迂回手順の指示が残っている: ${pattern}`)
+    }
+  }
 })
