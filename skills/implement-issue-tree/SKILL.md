@@ -6,6 +6,7 @@ description: >
   per-issue 計画立案（Plan: セッション継承モデル）→実装（Implement: sonnet）の分業。push 前 review（Review 通過後にのみ push・PR 作成して CI を 1 回だけ起動）。
   外部チェック構成は args の externalChecks で明示（{"app", "context"} の組で宣言。[] で「なし」を確定して不要待機なし・未指定なら自動マージ停止・slug のみの旧形式は自動マージ fail-closed）。
   自動 squash merge は autoMerge: true + externalChecks 明示（全 App の信頼済み context 宣言込み）の opt-in で実行（merge-exec の自己取得再検証 + サーバー側 branch protection 実測が前提。既定 false はマージ可能状態で停止し人間がマージ。サーバー側 workflow サンプル（upstream の docs/implement-issue-tree/auto-merge-sample.yml 参照）+ branch protection への委譲も可）。並列度（parallel）と依存（dependsOn）で実行順を制御。
+  Phase 単位で厳密に直列化したい場合は phaseGate: true（opt-in。ルート直下の子〔Phase 親〕を sub-issues リスト順に直列化し、前 Phase の全子孫が merged/closed になるまで次 Phase 配下に着手しない。既定 false は現行の post-order 優先度のみ）。
   単一イシューの実装は implement-issue、PR レビューは implement-review-pr を参照。
 model: sonnet
 user-invocable: true
@@ -46,6 +47,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
     "parent": "<親イシュー番号>",
     "branch": "<マージ先ブランチ（省略時 main）>",
     "parallel": "<並列度 1〜8（省略時 3）>",
+    "phaseGate": "<boolean。true でルート直下の子（Phase 親 or leaf）を sub-issues リスト順（siblingIndex）に直列化し、前 Phase の全子孫が merged/closed になるまで次 Phase 配下のノードに着手しない（opt-in。Issue #494）。既定 false は現行動作（post-order 優先度のみ・追い越しあり）を完全に維持する。boolean 以外はエラーで停止>",
     "externalChecks": "<外部チェック App と信頼済み required check context の組の配列（例: [{\"app\": \"cursor\", \"context\": \"Cursor Bugbot\"}]。使用しない場合は []。slug 文字列のみの旧形式も受理するが、context 未宣言のためクライアント側自動マージは fail-closed で停止する）>",
     "autoMerge": "<boolean。true + externalChecks 明示（確定。全 App の信頼済み context 宣言込み）でクライアント側 squash merge を実行する（opt-in。references/automerge-design.md の「クライアント側自動マージの設計」節参照）。既定 false / externalChecks 未確定時はマージ可能状態で停止し、マージは GitHub 上で人間が行うか、サーバー側 auto-merge workflow（upstream の docs/implement-issue-tree/auto-merge-sample.yml）+ branch protection に委ねる>",
     "maxResidualWorktrees": "<残置 worktree 総数の上限（0 以上の整数。省略時 100、0 でこの軸のみ上限なし）>",
@@ -72,6 +74,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | `parent` | 必須 | — | 親（ルート）イシュー番号。`issue` でも可 |
 | `branch` | 任意 | `main` | マージ先ブランチ。不正な文字を含む場合はエラー |
 | `parallel` | 任意 | `3` | 並列実行数（1〜8）。`1` を指定すると実質的に直列実行になる |
+| `phaseGate` | 任意 | `false` | **`true` でルート（`args.parent`）直下の子（Phase 親 or leaf）を sub-issues リスト順（`siblingIndex`。タイトルの `feat(phase-N):` 等は非信頼データのため解析しない）に直列化する opt-in ゲート**（Issue #494）。直列化の単位は「ルート直下の子とその子孫全部（部分木）」で、単位 Uₖ（k≥1）の部分木は、それより手前の全単位 U₀…U_{k-1} の前提（子を持つ Phase 親なら自身を除く子孫全部、子を持たない leaf なら自身）がすべて `merged`/`closed` になるまで着手しない（Phase 親自身の verify-close 完了は前提に含めない設計。「前 Phase 親の**全子**が merged/closed」という要件に合わせるため）。新しいスケジューラ状態は作らず、既存の依存グラフ（`depsMap`）へ合成辺を追加するだけなので、dispatch ループ・前提プローブ（ラン中の人手マージ検知）・**前回ランで作成済みの次 Phase PR の monitoring 再開**にもそのままゲートが効く（同一引数での再実行でも次 Phase の PR は前 Phase 完了までマージされない）。ゲート辺は循環除去で削除されない（本文由来の逆向き `dependsOn` の方が無視される）。`autoMerge: false` では前 Phase の PR がマージ可能状態のまま `blocked` で停止するため、次 Phase へ進めるには人手マージ後の前提プローブ検知、または再実行を要する。`parent` に Phase 親そのものを渡した場合はその直下の子が直列化される（仕様上は動くが、ルート〔トラッキング issue〕への指定を推奨）。従来の「Phase ごとに別ランを直列起動する」回避策は不要になる（verify-close がルートまで伝播する）。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
 | `externalChecks` | 任意 | 未指定 | GitHub Actions 以外の外部チェック宣言の配列（最大 10 件）。要素は `{"app": "<slug>", "context": "<required check context>"}` の組で宣言する（slug は英小文字・数字・ハイフン。複数 context は `contexts` 配列。slug 文字列のみの旧形式も受理するが context 未宣言としてクライアント側自動マージは fail-closed で停止する）。**未指定と `[]` は意味が異なる** |
 | `autoMerge` | 任意 | `false` | **`true` + `externalChecks` 明示（確定。全 App の信頼済み context 宣言込み）の opt-in ランでクライアント側 squash merge を実行する**（references/automerge-design.md の「クライアント側自動マージの設計」節参照。マージは merge-exec の自己取得再検証（HEAD sha・checks・スレッド・外部チェック）+ G0（ベースブランチのサーバー側強制の実測 = required status checks の bypass 不能性（ruleset は `bypass_actors` 空。classic branch protection のみのリポジトリは非対応 — bypass 不能性の検証に必要な protection 読取が admin 権限を要求し write トークンで証明できないため `classic-unsupported` で辞退）+ strict 適用（マージ前の base 最新化必須）+ レビュースレッド解消の必須化 + 手順 3 の合格判定対象チェック context の required 化（client-only チェックの不在）+ 外部チェック App の宣言 context + App ID 組（`context` + `integration_id`）束縛の required 化 + required checks 全エントリの発行元 `integration_id` 束縛（同名 commit status 偽装の遮断。検証できなければ `issuer-unbound`）。確認できなければ `server-enforcement-missing` で `blocked` 終端）+ `--match-head-commit` + merge-verify の独立確認を経る。monitor の出力はマージ経路の入力に使われない）。既定 `false`・`externalChecks` 未確定時・信頼済み context 未宣言時（slug のみの旧形式）は従来どおりマージせず、PR はマージ可能状態の `blocked` で停止する（実装・push 前 Review・PR 作成・CI 監視・fix ループは値によらず自動で進む）。opt-in を使わない場合、auto-merge はサーバー側 workflow（upstream の `docs/implement-issue-tree/auto-merge-sample.yml`）+ branch protection への委譲、または GitHub 上での人間マージで行う（対象ブランチに branch protection を設定することを推奨）。注意: merge-guard hook 導入リポでは subagent の `gh pr merge` が deny されるため opt-in マージと hook は併用できない。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
 | `maxResidualWorktrees` | 任意 | `100` | 残置 worktree 総数の上限（DoS 防止ゲートの件数軸。バイト軸 `maxResidualWorktreeBytes` と独立に併用され、判定は OR＝どちらか一方でも超過すれば新規着手を止める）。ラン開始時に横断スキャンで観測した worktree の**物理総数**（メイン worktree のみ除外。状態ファイル追跡済み＝使用中の worktree も数える。使用中かどうかはディスク消費を変えないため。PR #185 codex P1 第 5 ラウンド）がこの値を**超過**（`>`）していたら、ディスク枯渇を防ぐため**新規イシューの着手を停止**する（fail-closed。既に走行中のイシュー・monitoring の継続は停止しない）。dispatch ループは新規着手の直前に毎回「開始時観測 + 本ラン積み増し（`ephemeralWorktrees.length`。implement / review / pr-create / fix-routing-error の新規作成台帳）」を再評価し、本ランの積み増しで上限を超えた時点でも以降の新規着手を停止する（PR #185 codex P1。バイト軸にも同種の途中経過再評価があるが、算出方法が異なるため後述）。さらに並列投入済みでまだ記録に到達していないタスク分を見込み、新規着手 1 件あたり最大 6 件（implement ×1 + review ×3 + pr-create ×1 + fix-routing-error ×1。`EPHEMERAL_KIND_MAX` テーブルから導出）、monitoring 再開 1 件あたり最大 1 件（fix-routing-error 分）を予約計上し、「実測 + 予約 + 着手候補分」が上限を超える投入を止める。**monitoring 再開自体もこの予約込み判定の対象**（ただし `item.kind === 'implement'` の再開に限る。verify-close ノードとして到達した再開は `runVerifyClose` が Merge ループへ入らず fix-routing-error を積み増さないため予約 0 で対象外。PR #185 Bugbot Medium と同じ線引き）であり、開始前に同じ projected 判定を適用して超過が見込まれる場合は当該イシューの再開をこの周回に限り defer する（恒久停止はしない。次周回・次回実行で予約解放後に再評価。pet-hub PR #1062 codex-review P1 対応。修正前は monitoring 再開自身の開始を無条件で許可しており、monitoring 項目を順次再開し続けると上限を無視して残置数を際限なく増やせた）。予約起因の超過見込みは今周回の投入見送り（defer）に留め、予約が解放されれば再開する。実測超過は従来どおり恒久停止する（PR #185 codex P1 第 2 ラウンド。ただしこの恒久停止＝`newStartSuppressed` は monitoring 再開の開始自体は妨げない設計を維持しており、上記の monitoring 再開専用 defer とは独立したゲート）。ラン開始時の横断スキャン自体が失敗した場合も、いずれかの軸が有効（`maxResidualWorktrees > 0 || maxResidualWorktreeBytes > 0`）なら残置総数を確認できないとみなして新規着手を停止する（fail-closed。両軸とも `0` 指定時のみ観測失敗でも続行。観測失敗時（`residualObserved === false`）も monitoring 再開（`item.kind === 'implement'` の再開に限る）は fail-closed で defer する — 観測できない状態での worktree 積み増しを許す fail-open を避けるため、`monitoringResumeGateDeferred` へ理由を記録してこの周回の再開を見送る（恒久停止ではない。次周回・次回実行で再評価する））。スキャン一覧が非空でも、独立取得したレコード総数との件数照合に不一致（転記の一部脱落の疑い）があれば同様に観測失敗として停止する（PR #185 codex P1 第 4 ラウンド）。使い捨て worktree は削除しない設計（references/recovery.md の「worktree の自動削除」節）のため、この上限超過時は `git worktree list` で確認し不要な worktree を `git worktree remove` で**手動削除**してから再実行する。`0` は「この件数軸のみ上限なし（チェック無効）」の明示オプトアウト（バイト軸の fail-closed には影響しない）。**負値・非整数はエラーで停止**（マージゲート入力と同じ厳格さ。誤記を黙って読み替えない）。既定値は 100（旧既定 20 では 1 イシュー消化あたり実測 4〜6 件の積み増しで 1 ラン 3 件着手が頭打ちになったため Issue #348 で引き上げ。linked worktree は object store を共有し working tree 分のみディスク消費のため 100 件でも過大ではないが、根拠は本リポジトリ 1 件のみの実測〔≈ 3.4 MB/件〕であり、配布先ごとに追跡ファイル量が異なるため、リポジトリ非依存の絶対閾値として `maxResidualWorktreeBytes` を必ず併用する。codex-review 指摘・PR #390）。**ただし `maxResidualWorktreeBytes: 0` でバイト軸を明示オプトアウトし、かつ本引数を未指定のままにした場合はこの補強が働かないため、既定値を安全側の旧既定 `LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES`（20）へ自動的に引き下げる**（`parseMaxResidualWorktrees` の `bytesAxisDisabled` 引数。codex-review 指摘・PR #390 第 2 ラウンド: 件数軸だけを緩和した既定値を、リポジトリ非依存の絶対閾値という補強なしに残さない）。利用者が本引数へ明示的に値を指定した場合はこのフォールバックの対象外（指定値をそのまま使う） |
@@ -161,6 +164,8 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 - 祖先イシューへの `dependsOn` は無視する（親は子の完了を待つ側のため）
 - 依存グラフに循環がある場合は DFS で検出し、循環を構成する非ツリー辺（`dependsOn`）を除去してデッドロックを防ぐ
 - 依存ブロックは各周回で再判定する: 前提イシューの失敗・ブロックで下流が着手不能でも即座に確定せず保留し、**halt（3 イシュー連続で完了できなかった場合の新規着手停止。Step 8 参照）発生前に限り**、前提がラン中に外部完了（Issue CLOSED / PR MERGED）した場合は同一ラン内で下流を再判定して着手する。halt 後はプローブと状態記録（`prereqTransitions`・state 永続化）のみ継続し、新規着手は再開しない（halt はユーザー判断を待つ防御であり自動解除しない）。halt 後に記録された外部完了は次回ランの再実行で下流着手に反映される（Issue #442）
+- **既定（`phaseGate` 未指定 / `false`）では `siblingIndex` は post-order の優先度に過ぎない**。並列ラン（`parallel >= 2`）では後続 Phase の leaf が前 Phase 完了前に空きスロットへ投入され得る（追い越し）。`create-issue-tree` / `update-issue-tree` が生成するルート本文の運用ルール「実行順は sub-issues リスト順が正」を**厳密に**保証したい場合は `phaseGate: true` を使う（`phaseGate` 引数の説明を参照）
+
 
 ### Step 2: 中断作業の回復可否を per-issue で判断する（Recover）
 
@@ -558,13 +563,15 @@ open のサブイシューが残っている場合、または受入基準が未
 
 レポート出力テンプレート（処理結果サマリー・完了イシュー・失敗/未着手イシュー・対象外/未解決コメントの各節）と返却値フィールドの説明は以下を参照。
 
+返却値 `mainWorktreeUntracked` にメイン worktree（リポジトリルート）の未追跡ファイル検査結果が入る（Issue #497）。ラン開始時・終了時の観測差分から本ラン中に新規出現したファイルを検出し、**削除はせず警告のみ**行う（並行ランや人間の作業も拾い得るため帰属は推定）。`observed: false` は検査自体が不成立だったことを示し、その場合は `git status` で手動確認する。1 件以上検出した場合はレポートにも記載し、ユーザーへ手動確認・削除を促す。
+
 詳細: [references/report-format.md](references/report-format.md)
 
 ## 検証
 
 各実装エージェントはテストコマンドを新規実行し、出力全体と終了コードを確認してから完了を宣言する（対象リポジトリに `.claude/rules/verification.md` が存在する場合はそちらの5段階ゲートに従う）。「〜のはず」「たぶん通る」等の推測語での完了主張は禁止。テスト出力・終了コードを証拠として引用してから完了を宣言する。
 
-最終レポートの「完了イシュー」に全対象イシューが列挙され、「停止イシュー」が空であることを確認する。`scripts/implement-issue-tree.js` を変更した場合の非信頼データ境界・残置 worktree 上限ゲート・merge-guard hook の適用確認手順（grep コマンド・期待結果）は以下を参照。
+最終レポートの「完了イシュー」に全対象イシューが列挙され、「停止イシュー」が空であることを確認する。`scripts/implement-issue-tree.js` を変更した場合の非信頼データ境界・残置 worktree 上限ゲート・merge-guard hook・メイン worktree への一時ファイル残置防止（Issue #497）の適用確認手順（grep コマンド・期待結果）は以下を参照。
 
 **スクリプトの編集は開発ファイルに対して行う**: `scripts/implement-issue-tree.js` は Workflow へ渡す実行ファイル（生成物）であり、直接編集しない。編集は `scripts/implement-issue-tree.src.js`（コメント込みの開発ファイル）に対して行い、`node skills/implement-issue-tree/scripts/build-workflow.mjs` でコメント除去済みの実行ファイルを再生成する（行番号は両者で一致する）。同期漏れ・直接編集は CI の `tests/build-workflow.test.mjs`（鮮度ゲート）が検出する。
 
@@ -611,7 +618,7 @@ open のサブイシューが残っている場合、または受入基準が未
 |------------|-------|--------|------|
 | `plan:issue-tree`（Tree 取得・依存抽出） | sonnet | medium | 本文読解・依存判断 |
 | `detect:external-checks`（外部チェック判定） | haiku | low | 定型コマンド集計 |
-| `state:load` / `state:update` / `state:init-all` | haiku | low | jq の機械処理 |
+| `state:load` / `state:update` / `state:cleanup` / `state:init-all` / `state:high-water` | haiku（未返却時 sonnet へ 1 回フォールバック） | low | jq の機械処理。StructuredOutput 未返却（例外・null・schema 不適合）が続く場合のみ同一プロンプトで sonnet へ 1 回フォールバックする（Issue #493。詳細は `references/recovery.md`） |
 | `nonce:seed`（境界トークン用 seed 生成） | haiku | low | `/dev/urandom` 読み出しのみ（driver に乱数源が無いため。下記「非信頼データの扱い」2 を参照） |
 | `recover:#N`（中断作業の継続可否判断） | （指定なし＝セッション継承） | medium | 計画判断相当（Plan と同じ軸で判断） |
 | `plan:#N`（per-issue 計画立案） | （指定なし＝セッション継承） | high | 最も複雑な計画立案 |
@@ -652,6 +659,7 @@ open のサブイシューが残っている場合、または受入基準が未
 - コミット・PR 作成は Conventional Commits に従う（対象リポジトリに `.claude/rules/conventional-commits.md` があればそちらに従う）。セキュリティ問題を検出した場合は修正してから進む（対象リポジトリに `.claude/rules/security.md` があればそちらの OWASP Top 10 観点に従う。無ければ秘密情報のハードコード・インジェクション・権限過剰の観点で確認する）
 - CI が全 green に見えるのにマージが進まない場合は、cancel された run の残存 check を疑い Step 6 の「全チェックが pass に見えるのにマージが進まない場合」の分岐に従って切り分ける（`mergeStateStatus` は自動フローでは取得していない）
 - **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。continue / discard いずれの worktree 削除も WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する
+- 各エージェントはメイン worktree（リポジトリルート）とカレントディレクトリへファイルを作らない（例外はホスト指定の状態ファイルとその `mktemp` 一時ファイルのみ）。一時ファイルは scratchpad または `mktemp` の絶対パスに置く（Issue #497）。ラン開始時・終了時にメイン worktree の未追跡ファイルを検査し、本ラン中に新規出現したファイルがあれば最終レポート `mainWorktreeUntracked` とログで警告する（**自動削除はしない**。並行ランや人間の作業も拾い得るため帰属は推定）
 
 ## sandbox 環境での実行
 
