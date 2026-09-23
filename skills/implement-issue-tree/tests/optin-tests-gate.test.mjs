@@ -41,7 +41,9 @@ const SLICE_EXPORTS = [
   'optinDeclarationFormatHint',
   'optinInvalidWarningLine',
   'OPTIN_RECORD_MARKER_PREFIX',
-  'OPTIN_RECORD_END_MARKER',
+  'OPTIN_NONCE_PATTERN',
+  'optinRecordEndMarker',
+  'optinRecordNonce',
   'OPTIN_TESTS_MAX',
   'OPTIN_TEST_COMMANDS_MAX',
   'OPTIN_TEST_RUNNERS',
@@ -81,7 +83,9 @@ const {
   optinDeclarationFormatHint,
   optinInvalidWarningLine,
   OPTIN_RECORD_MARKER_PREFIX,
-  OPTIN_RECORD_END_MARKER,
+  OPTIN_NONCE_PATTERN,
+  optinRecordEndMarker,
+  optinRecordNonce,
   OPTIN_TESTS_MAX,
   OPTIN_TEST_COMMANDS_MAX,
   OPTIN_TEST_RUNNERS,
@@ -98,6 +102,11 @@ __setBoundaryNonceSeedForTest('test-seed-optin-tests-gate')
 
 const item = { number: 42, title: 'サンプルイシュー', optinTests: [] }
 const impl = { prNumber: 123, branch: 'feat/42-sample', worktreePath: '/tmp/wt' }
+
+// テスト全体で使う nonce ヘルパー（PR #504 codex P0 4 巡目: 終端マーカーの nonce 束縛）。
+// 本番の optinRecordNonce と同一の導出（seed 鍵付き boundaryNonce）を使い、実装からの
+// 乖離を防ぐ。ROUND(n) は「n 回目の post-push fix ラウンドが書いた nonce」を模す。
+const ROUND = (n) => optinRecordNonce(item.number, n)
 
 // ---------------------------------------------------------------------------
 // 群 A0: validateOptinCommandForm / parseOptinTestCommands（args.optinTestCommands の
@@ -310,20 +319,20 @@ test('optinRecordMarkerLine: 固定書式で行頭インデントなし（sha �
 })
 
 test('renderOptinRecordSection: 空入力は空文字を返す', () => {
-  assert.equal(renderOptinRecordSection([]), '')
-  assert.equal(renderOptinRecordSection(undefined), '')
+  assert.equal(renderOptinRecordSection(item.number, []), '')
+  assert.equal(renderOptinRecordSection(item.number, undefined), '')
 })
 
 test('renderOptinRecordSection: <sha>/<result> プレースホルダ付きのマーカー行と見出しを含む（テンプレート化。PR #503 3 巡目 codex P1）', () => {
-  const section = renderOptinRecordSection(['make e2e'])
+  const section = renderOptinRecordSection(item.number, ['make e2e'])
   assert.match(section, /## opt-in テスト実行記録/)
   assert.match(section, new RegExp(`^${OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<sha> <result> make e2e -->$`, 'm'))
 })
 
-test('renderOptinRecordSection: 節の実際の最終行が終端マーカーと完全一致する（PR #504 codex P0: 削除側が機械生成区間を本文末尾として一意に識別する境界）', () => {
-  const section = renderOptinRecordSection(['make e2e'])
+test('renderOptinRecordSection: 節の実際の最終行が nonce 付き終端マーカーと完全一致する（PR #504 codex P0 3/4 巡目: 削除側が機械生成区間を本文末尾として一意に識別する境界。固定・公開文字列ではなく host 発行の非公開 nonce を含む）', () => {
+  const section = renderOptinRecordSection(item.number, ['make e2e'])
   const lines = section.split('\n')
-  assert.equal(lines[lines.length - 1], OPTIN_RECORD_END_MARKER)
+  assert.equal(lines[lines.length - 1], optinRecordEndMarker(ROUND('create')))
 })
 
 // ---------------------------------------------------------------------------
@@ -442,13 +451,30 @@ test('restoreOptinFixState: optinFixState が無い・attempted が true でな�
   assert.equal(restoreOptinFixState(undefined, ['make e2e']), null)
 })
 
-test('restoreOptinFixState: 永続化した pass 記録と headSha をラウンドトリップで復元する（unbound: false）', () => {
+test('restoreOptinFixState: 永続化した pass 記録と headSha をラウンドトリップで復元する（unbound: false・nonce フィールドが無い旧形式は nonce: null）', () => {
   const saved = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }], headSha: SHA_A } }
   assert.deepEqual(restoreOptinFixState(saved, ['make e2e']), {
     runs: [{ command: 'make e2e', result: 'pass', detail: '' }],
     headSha: SHA_A,
     unbound: false,
+    nonce: null,
   })
+})
+
+// PR #504 codex P0 4 巡目: nonce は headSha と同じ「実行時に導出した値そのもの」を state.nonce
+// としてそのまま復元する契約（別プロセス resume での再導出はしない）。書式が妥当な値はそのまま
+// 復元され、不正な値（形式不正・非文字列）は null（削除しないだけで unbound には倒さない）へ
+// 倒れることを確認する。
+test('restoreOptinFixState: nonce は書式が妥当ならそのまま復元し、不正・欠落なら null にする（unbound には影響しない）', () => {
+  const validNonce = ROUND(1)
+  const savedValid = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }], headSha: SHA_A, nonce: validNonce } }
+  assert.equal(restoreOptinFixState(savedValid, ['make e2e']).nonce, validNonce)
+  for (const badNonce of ['', 'not-base36!!', 'a'.repeat(27), 'a'.repeat(29), 123, null, undefined, true]) {
+    const savedBad = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }], headSha: SHA_A, nonce: badNonce } }
+    const restored = restoreOptinFixState(savedBad, ['make e2e'])
+    assert.equal(restored.nonce, null, `nonce=${JSON.stringify(badNonce)} は null へ倒れるべき`)
+    assert.equal(restored.unbound, false, 'nonce 不正は unbound（merge gate の合否）には影響しない')
+  }
 })
 
 test('restoreOptinFixState: attempted: true なのに runs が欠落・非配列なら宣言全件を not-run へ倒し unbound: true にする（fail-closed）', () => {
@@ -471,6 +497,7 @@ test('restoreOptinFixState: headSha 自体を確定できない場合、runs が
       runs: [{ command: 'make e2e', result: 'not-run', detail: '状態ファイルから post-push fix の opt-in 実測（対象 HEAD sha を含む）を復元できなかった（再開時の fail-closed）' }],
       headSha: '',
       unbound: true,
+      nonce: null,
     })
   }
 })
@@ -478,7 +505,7 @@ test('restoreOptinFixState: headSha 自体を確定できない場合、runs が
 test('restoreOptinFixState: 宣言外の永続化コマンドは復元後の一覧から落ち、宣言済みで欠落しているものは not-run 補完する（unbound: false）', () => {
   const saved = { optinFixState: { attempted: true, runs: [{ command: 'make old', result: 'pass', detail: '' }], headSha: SHA_A } }
   const restored = restoreOptinFixState(saved, ['make new'])
-  assert.deepEqual(restored, { runs: [{ command: 'make new', result: 'not-run', detail: '実装エージェントの報告なし' }], headSha: SHA_A, unbound: false })
+  assert.deepEqual(restored, { runs: [{ command: 'make new', result: 'not-run', detail: '実装エージェントの報告なし' }], headSha: SHA_A, unbound: false, nonce: null })
 })
 
 test('統合: 再開後に永続化した fix 実測が現在の HEAD に対して fail のまま残っていれば PR 本文が pass でもゲート不合格', () => {
@@ -620,12 +647,14 @@ test('prCreatePrompt: opt-in 記録節の除去（no-op）に触れる文言は 
 // ロジックの回帰（CRLF・追記トレーラ・旧書式・異常終了時の fail-closed）を検出できないため。
 // ---------------------------------------------------------------------------
 
-// optinRecordRemovalShellLines(expectedLines) のコードフェンス（'   ```' 〜 '   ```'）を取り出し、
-// 行頭の 3 space インデント（箇条書きの見た目上のもの）を剥がして実行可能な sh スクリプトへ戻す。
-// v4（PR #504 codex P0 3 巡目）以降、削除可否は expectedLines（ホスト側の信頼済み実測から
-// 再構成した「削除してよい内容」）との完全一致で決まる。省略時（undefined）は no-op。
-function extractRemovalScript(expectedLines) {
-  const lines = optinRecordRemovalShellLines(expectedLines)
+// optinRecordRemovalShellLines(expectedLines, endMarker) のコードフェンス（'   ```' 〜 '   ```'）を
+// 取り出し、行頭の 3 space インデント（箇条書きの見た目上のもの）を剥がして実行可能な sh
+// スクリプトへ戻す。v4（PR #504 codex P0 3 巡目）以降、削除可否は expectedLines（ホスト側の
+// 信頼済み実測から再構成した「削除してよい内容」）との完全一致で決まり、v5（4 巡目）で
+// さらに endMarker（host がその回に実際に発行した nonce 付き終端マーカー。PR 本文を経由
+// しない秘密値）との一致が AND で重なる。省略時（undefined）は no-op。
+function extractRemovalScript(expectedLines, endMarker) {
+  const lines = optinRecordRemovalShellLines(expectedLines, endMarker)
   const fenceStart = lines.indexOf('   ```')
   const fenceEnd = lines.indexOf('   ```', fenceStart + 1)
   assert.ok(fenceStart >= 0 && fenceEnd > fenceStart, 'コードフェンスが 2 個 1 組で見つからない')
@@ -635,11 +664,11 @@ function extractRemovalScript(expectedLines) {
     .join('\n')
 }
 
-function runRemoval(bodyBuffer, expectedLines) {
+function runRemoval(bodyBuffer, expectedLines, endMarker) {
   const dir = mkdtempSync(join(tmpdir(), 'optin-removal-'))
   const f = join(dir, 'body.txt')
   writeFileSync(f, bodyBuffer)
-  const script = `f=${JSON.stringify(f)}\n${extractRemovalScript(expectedLines)}\n`
+  const script = `f=${JSON.stringify(f)}\n${extractRemovalScript(expectedLines, endMarker)}\n`
   execFileSync('sh', ['-c', script])
   return readFileSync(f, 'utf8')
 }
@@ -647,19 +676,21 @@ function runRemoval(bodyBuffer, expectedLines) {
 // 群 F のフィクスチャで共通に使う「正しく生成された記録節」の期待行（マーカー行を含む）。
 // optinRecordExpectedLines は host state（lastFixOptin）から再構成する関数だが、ここでは
 // テストの目的（削除ロジック自体の検証）に合わせ、fixture の本文と対応する期待値を直接
-// optinRecordExpectedLines 経由で作る（本番の再構成ロジックとの乖離を防ぐ）。
-function expectedLinesFor(sha, result, command, detail) {
+// optinRecordExpectedLines 経由で作る（本番の再構成ロジックとの乖離を防ぐ）。nonce 省略時は
+// ROUND(1)（テスト全体の既定ラウンド）を使う。
+function expectedLinesFor(sha, result, command, detail, nonce = ROUND(1)) {
   return optinRecordExpectedLines([command], {
     headSha: sha,
     unbound: false,
     runs: [{ command, result, detail: detail ?? '' }],
+    nonce,
   })
 }
 
-test('optinRecordRemovalShellLines: 通常ケース（見出し〜終端マーカーが本文末尾）は、期待値と完全一致する節全体を削除し、書き戻しはコマンド置換で末尾の空行を持ち越さない（cursor[bot] Low の回帰 + PR #504 codex P0 3 巡目: 完全一致ゲート）', () => {
+test('optinRecordRemovalShellLines: 通常ケース（見出し〜終端マーカーが本文末尾）は、期待値と完全一致する節全体を削除し、書き戻しはコマンド置換で末尾の空行を持ち越さない（cursor[bot] Low の回帰 + PR #504 codex P0 3/4 巡目: 完全一致ゲート + nonce 束縛）', () => {
   const sha = 'a'.repeat(40)
-  const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n`
-  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'))
+  const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${optinRecordEndMarker(ROUND(1))}\n`
+  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'), optinRecordEndMarker(ROUND(1)))
   // 見出しより前の内容は保持されるが、削除範囲が本文の真の末尾だったため、書き戻しの
   // コマンド置換（$(cat "$g")）が末尾の空行・改行をすべて剥がす（v1 の printf '%s' と同じ
   // 挙動を復元し、次回追記の echo; echo が積み増しで空行を増殖させないようにする）。
@@ -668,8 +699,8 @@ test('optinRecordRemovalShellLines: 通常ケース（見出し〜終端マー�
 
 test('optinRecordRemovalShellLines: 終端マーカーより後ろに外部ツールの追記（Cursor Bugbot 等）があっても、記録節だけを削除しトレーラは保持する（PR #504 レビューで判明した v1 設計欠陥の回帰）', () => {
   const sha = 'a'.repeat(40)
-  const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n<!-- CURSOR_SUMMARY -->\n外部ツールのコメント\n<!-- /CURSOR_SUMMARY -->\n`
-  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'))
+  const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${optinRecordEndMarker(ROUND(1))}\n<!-- CURSOR_SUMMARY -->\n外部ツールのコメント\n<!-- /CURSOR_SUMMARY -->\n`
+  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'), optinRecordEndMarker(ROUND(1)))
   // 削除範囲より前の空行（Closes 行の直後）は本文の真の末尾ではない（トレーラが後ろに続く）
   // ため保持される。コマンド置換で剥がれるのはファイルの真の末尾の改行のみ。
   assert.equal(after, 'Closes #42\n\n<!-- CURSOR_SUMMARY -->\n外部ツールのコメント\n<!-- /CURSOR_SUMMARY -->')
@@ -677,9 +708,9 @@ test('optinRecordRemovalShellLines: 終端マーカーより後ろに外部ツ�
 
 test('optinRecordRemovalShellLines: CRLF 本文でも終端マーカー行を識別して削除する（cursor[bot] Medium 指摘の回帰）', () => {
   const sha = 'a'.repeat(40)
-  const bodyLf = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n`
+  const bodyLf = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${optinRecordEndMarker(ROUND(1))}\n`
   const bodyCrlf = bodyLf.replace(/\n/g, '\r\n')
-  const after = runRemoval(bodyCrlf, expectedLinesFor(sha, 'pass', 'make e2e'))
+  const after = runRemoval(bodyCrlf, expectedLinesFor(sha, 'pass', 'make e2e'), optinRecordEndMarker(ROUND(1)))
   assert.ok(!after.includes('## opt-in テスト実行記録'), 'CRLF 本文でも見出しが除去されているべき')
   assert.ok(after.startsWith('Closes #42'))
 })
@@ -687,21 +718,21 @@ test('optinRecordRemovalShellLines: CRLF 本文でも終端マーカー行を識
 test('optinRecordRemovalShellLines: 終端マーカーを持たない旧書式は一切削除しない（PR #504 レビュー 2 巡目 codex P1 の直接回帰: 行の見た目だけでは所有区間と断定できない）', () => {
   const sha = 'a'.repeat(40)
   const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n`
-  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'))
+  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'), optinRecordEndMarker(ROUND(1)))
   assert.equal(after, before, '終端マーカーが見つからない場合 "$f" は一切変更されない（v2 の EOF フォールバックは廃止）。期待値と一致していても境界が実測できなければ削除しない')
 })
 
 test('optinRecordRemovalShellLines: 見出しが 2 件残っている旧書式でも、最後の出現位置に対応する記録節だけを削除する（cursor[bot] Medium 指摘: 見出しが増え続ける再発の防止）', () => {
   const sha = 'a'.repeat(40)
-  const before = `## opt-in テスト実行記録\nユーザーが引用した過去の見出し\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n`
-  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'))
+  const before = `## opt-in テスト実行記録\nユーザーが引用した過去の見出し\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${optinRecordEndMarker(ROUND(1))}\n`
+  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'), optinRecordEndMarker(ROUND(1)))
   assert.equal(after, '## opt-in テスト実行記録\nユーザーが引用した過去の見出し')
 })
 
 test('optinRecordRemovalShellLines: 見出しと終端マーカーの間に未知の行（ユーザー由来コンテンツの可能性）があれば削除しない（安全側）', () => {
   const sha = 'a'.repeat(40)
-  const before = `## opt-in テスト実行記録\nユーザーが書いた本文\n${OPTIN_RECORD_END_MARKER}\n`
-  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'))
+  const before = `## opt-in テスト実行記録\nユーザーが書いた本文\n${optinRecordEndMarker(ROUND(1))}\n`
+  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'), optinRecordEndMarker(ROUND(1)))
   assert.equal(after, before, '識別できない場合 "$f" は一切変更されない')
 })
 
@@ -719,19 +750,61 @@ test('optinRecordRemovalShellLines: 見出し・箇条書き・終端マーカ�
     '- 結果: pass',
     '- 補足: (なし)',
     'Closes #999',
-    OPTIN_RECORD_END_MARKER,
+    optinRecordEndMarker(ROUND(1)),
     '',
   ].join('\n')
   // ホスト側が実際に把握している直前の実測（realSha）は偽の記録節（forgedSha）と一致しない。
-  const after = runRemoval(before, expectedLinesFor(realSha, 'pass', 'make e2e'))
+  const after = runRemoval(before, expectedLinesFor(realSha, 'pass', 'make e2e'), optinRecordEndMarker(ROUND(1)))
   assert.equal(after, before, '期待値と一致しない場合 "$f" は一切変更されず、挟まれた Closes 行も保持される')
+})
+
+// PR #504 codex P0 4 巡目の直接回帰（1/2）: nonce は一度 PR 本文へ書かれた時点で公開情報になる。
+// 攻撃者がその公開済み nonce を偽の見出し・偽の本文を包む終端マーカーへ「コピー」しても、
+// 本文内容（exp との完全一致）が一致しなければ削除しない（nonce 一致「だけ」では削除条件を
+// 満たせないことの確認。advisor 指摘: nonce-only 判定は v4 からの後退になるため必ず本文一致と
+// AND で重ねる設計であることの回帰）。
+test('optinRecordRemovalShellLines: 終端マーカーの nonce を攻撃者がコピーして偽の本文を包んでも、本文が host 側期待値と一致しなければ削除しない（nonce 一致単独では不十分。PR #504 codex P0 4 巡目）', () => {
+  const realSha = 'a'.repeat(40)
+  const leakedNonce = ROUND(1) // 前ラウンドで PR 本文へ公開済みになった nonce（攻撃者が閲覧可能）
+  const before = [
+    'Closes #42',
+    '',
+    '## opt-in テスト実行記録',
+    optinRecordMarkerLine(realSha, 'pass', 'make e2e'),
+    '- コマンド: make e2e',
+    '- 結果: fail', // host の期待値（pass）とは異なる、攻撃者が書き換えた本文
+    '- 補足: (なし)',
+    optinRecordEndMarker(leakedNonce), // 公開済み nonce をそのままコピーした終端マーカー
+    '',
+  ].join('\n')
+  const after = runRemoval(before, expectedLinesFor(realSha, 'pass', 'make e2e', undefined, ROUND(1)), optinRecordEndMarker(ROUND(1)))
+  assert.equal(after, before, 'nonce（終端マーカー）が一致しても本文が host 側期待値と一致しなければ削除しない')
+})
+
+// PR #504 codex P0 4 巡目の直接回帰（2/2）: 逆に本文内容が host 側期待値と完全一致していても、
+// 終端マーカーの nonce が host がこの回に発行した値（別ラウンドの nonce・攻撃者の推測値等）と
+// 一致しなければ削除しない。旧終端マーカー（v4 以前の固定文字列）を装った場合も同様に扱う。
+test('optinRecordRemovalShellLines: 本文が host 側期待値と完全一致していても、終端マーカーの nonce が host 発行値と異なれば削除しない（content 一致単独では不十分。PR #504 codex P0 4 巡目）', () => {
+  const sha = 'a'.repeat(40)
+  const wrongRoundMarker = optinRecordEndMarker(ROUND(2)) // host が実際に発行したのは ROUND(1)
+  const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${wrongRoundMarker}\n`
+  // 削除側は ROUND(1) の終端マーカーを探すため、本文中の ROUND(2) マーカーとは一致しない。
+  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'), optinRecordEndMarker(ROUND(1)))
+  assert.equal(after, before, '終端マーカーの nonce が host 発行値と一致しなければ、本文が期待値と一致していても削除しない')
 })
 
 test('optinRecordRemovalShellLines: expectedLines を渡さない（比較対象が無い）場合は常に no-op（prCreatePrompt からの呼び出しに対応）', () => {
   const sha = 'a'.repeat(40)
-  const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n`
-  const after = runRemoval(before, undefined)
+  const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${optinRecordEndMarker(ROUND(1))}\n`
+  const after = runRemoval(before, undefined, optinRecordEndMarker(ROUND(1)))
   assert.equal(after, before, 'expectedLines 省略時は終端マーカーが見つかっても削除しない')
+})
+
+test('optinRecordRemovalShellLines: endMarker を渡さない（比較対象が無い）場合も常に no-op', () => {
+  const sha = 'a'.repeat(40)
+  const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine(sha, 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${optinRecordEndMarker(ROUND(1))}\n`
+  const after = runRemoval(before, expectedLinesFor(sha, 'pass', 'make e2e'), undefined)
+  assert.equal(after, before, 'endMarker 省略時は expectedLines があっても削除しない')
 })
 
 test('optinRecordVerifyPrompt: gh pr view --json body,headRefOid を単一呼び出しで取得し、本文転記禁止・headRefOid 検証・件数のみ返却の指示を含む（PR #503 3 巡目 codex P1）', () => {
@@ -772,7 +845,7 @@ test('mergeExecutePrompt: expectedHeadSha 省略時は一致チェック文言�
 const finding = { summary: '指摘内容のサンプル', unresolvedComments: [] }
 
 test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありでは再実行手順・pass 偽装禁止・PR 本文更新指示を含む', () => {
-  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true)
+  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true, [], null, ROUND('w'))
   assert.match(p, /"make e2e"/)
   assert.match(p, /偽装/)
   assert.match(p, /optinTestRuns/)
@@ -782,13 +855,22 @@ test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありでは再実行
   assert.match(p, /gh pr edit 123 --body-file/)
 })
 
-test('fixPrompt: lastFixOptin が妥当な場合、マーカー境界 + 完全一致で安全確認してから削除する手順を含み、無条件削除の旧 sed 文字列・旧 grep -vF ベース・旧 tail -n 1 前提の文字列は含まない（PR #504 codex P0 / cursor[bot] Medium → codex P0 3 巡目で完全一致ゲートへ強化）', () => {
-  const validLastFixOptin = { headSha: 'a'.repeat(40), unbound: false, runs: [{ command: 'make e2e', result: 'pass', detail: '' }] }
-  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true, [], validLastFixOptin)
+test('fixPrompt: optinTests 宣言ありなのに optinWriteNonce（7 引数目）を渡さない・不正な場合は fail-closed で例外を投げる（予測可能・欠落した終端マーカーで記録節を書かせない。PR #504 codex P0 4 巡目）', () => {
+  assert.throws(() => fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true, [], null, null))
+  assert.throws(() => fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true, [], null, 'not-a-valid-nonce'))
+  assert.throws(() => fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true))
+})
+
+test('fixPrompt: lastFixOptin が妥当な場合、マーカー境界 + 完全一致で安全確認してから削除する手順を含み、無条件削除の旧 sed 文字列・旧 grep -vF ベース・旧 tail -n 1 前提の文字列は含まない（PR #504 codex P0 / cursor[bot] Medium → codex P0 3/4 巡目で完全一致ゲート + nonce 束縛へ強化）', () => {
+  const validLastFixOptin = { headSha: 'a'.repeat(40), unbound: false, runs: [{ command: 'make e2e', result: 'pass', detail: '' }], nonce: ROUND(1) }
+  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true, [], validLastFixOptin, ROUND(2))
   assert.ok(!p.includes("sed '/^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$/,$d' \"$f\""))
   assert.ok(!p.includes('grep -vF'))
   assert.ok(!p.includes('tail -n 1 "$f"'))
-  assert.ok(p.includes(OPTIN_RECORD_END_MARKER))
+  // 削除側は直前ラウンド（lastFixOptin.nonce = ROUND(1)）の終端マーカーを探す。
+  assert.ok(p.includes(optinRecordEndMarker(ROUND(1))))
+  // 新規記録節（手順 d）はこのラウンド用の終端マーカー（optinWriteNonce = ROUND(2)）を書く。
+  assert.ok(p.includes(optinRecordEndMarker(ROUND(2))))
   assert.ok(p.includes('tail -n 1 | cut -d: -f1'))
   assert.ok(p.includes("tr -d '\\r'"))
   assert.ok(p.includes('if sed "${L},${E}d" "$f" > "$g"; then'))
@@ -798,12 +880,19 @@ test('fixPrompt: lastFixOptin が妥当な場合、マーカー境界 + 完全�
 })
 
 test('fixPrompt: lastFixOptin を渡さない場合、削除は試みず no-op になる（比較対象が無いため fail-closed。PR #504 codex P0 3 巡目）', () => {
-  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true)
+  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true, [], null, ROUND('w'))
   assert.ok(!p.includes('[ "$bodyNorm" = "$exp" ]'))
   assert.match(p, /削除は一切行わない/)
 })
 
-test('fixPrompt: pushAfterFix=true でも optinTests が空なら出力は無変更（R3 と同じ既定無効方針）', () => {
+test('fixPrompt: lastFixOptin.nonce が不正・欠落の場合も、headSha/runs が妥当でも削除は試みず no-op になる（nonce 欠落を fail-closed で扱う。PR #504 codex P0 4 巡目）', () => {
+  const lastFixOptinWithoutNonce = { headSha: 'a'.repeat(40), unbound: false, runs: [{ command: 'make e2e', result: 'pass', detail: '' }] }
+  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true, [], lastFixOptinWithoutNonce, ROUND('w'))
+  assert.ok(!p.includes('[ "$bodyNorm" = "$exp" ]'))
+  assert.match(p, /削除は一切行わない/)
+})
+
+test('fixPrompt: pushAfterFix=true でも optinTests が空なら出力は無変更（R3 と同じ既定無効方針。writeNonce 未指定でも例外にならない）', () => {
   const withEmpty = fixPrompt({ ...item, optinTests: [] }, impl, finding, true)
   const withoutField = fixPrompt({ number: 42, title: 'サンプルイシュー' }, impl, finding, true)
   assert.equal(withEmpty, withoutField)
@@ -950,10 +1039,10 @@ test('optinRecordRemovalShellLines: Closes 行・対象外節を含む本文で�
     '- コマンド: make e2e',
     '- 結果: pass',
     '- 補足: (なし)',
-    OPTIN_RECORD_END_MARKER,
+    optinRecordEndMarker(ROUND(1)),
     '',
   ].join('\n')
-  const out = runRemoval(before, expectedLinesFor(SHA_A, 'pass', 'make e2e'))
+  const out = runRemoval(before, expectedLinesFor(SHA_A, 'pass', 'make e2e'), optinRecordEndMarker(ROUND(1)))
   assert.match(out, /Closes #502/)
   assert.match(out, /## 対象外（out-of-scope）/)
   assert.match(out, /- 項目1/)
@@ -966,7 +1055,7 @@ test('optinRecordRemovalShellLines: Closes 行・対象外節を含む本文で�
 // JS 側で単純に配列を join('\n') する模擬では実際の echo 二重呼び出しの挙動
 // （末尾に改行が残っているかどうかで生成される空行数が変わる）を検証できないため、
 // 削除・追記の両方を実際のシェルで実行する。
-function appendOptinRecordLikeProduction(filePath, sha, result, command) {
+function appendOptinRecordLikeProduction(filePath, sha, result, command, endMarker) {
   const script = `
 f=${JSON.stringify(filePath)}
 {
@@ -977,7 +1066,7 @@ f=${JSON.stringify(filePath)}
   echo ${JSON.stringify(`- コマンド: ${command}`)}
   echo ${JSON.stringify(`- 結果: ${result}`)}
   echo '- 補足: (なし)'
-  echo ${JSON.stringify(OPTIN_RECORD_END_MARKER)}
+  echo ${JSON.stringify(endMarker)}
 } >> "$f"
 `
   execFileSync('sh', ['-c', script])
@@ -987,24 +1076,29 @@ test('optinRecordRemovalShellLines: 本番同等の除去→追記（echo を重
   const dir = mkdtempSync(join(tmpdir(), 'optin-round-'))
   const f = join(dir, 'body.txt')
   writeFileSync(f, '## Summary\n- 実装内容の要約\n\nCloses #502\n')
+  // 各ラウンドは本番同様、そのラウンド専用の nonce（optinRecordNonce）で終端マーカーを書く
+  // （PR #504 codex P0 4 巡目）。ROUND(1)/ROUND(2)/ROUND(3) はラウンド番号を模した鍵材料。
   const rounds = [
-    { sha: SHA_A, result: 'fail' },
-    { sha: SHA_A, result: 'not-run' },
-    { sha: SHA_B, result: 'pass' },
+    { sha: SHA_A, result: 'fail', nonce: ROUND(1) },
+    { sha: SHA_A, result: 'not-run', nonce: ROUND(2) },
+    { sha: SHA_B, result: 'pass', nonce: ROUND(3) },
   ]
   // 各ラウンドの除去（手順 c）は「直前のラウンドで実際に書いた内容」を期待値として渡す
-  // （本番では lastFixOptin がこの役割を担う。PR #504 codex P0 3 巡目）。1 ラウンド目は
+  // （本番では lastFixOptin がこの役割を担う。PR #504 codex P0 3 巡目）。除去対象の終端マーカーも
+  // 直前ラウンドが発行した nonce（lastFixOptin.nonce 相当）でなければならない。1 ラウンド目は
   // 直前の実測が無いため expectedLines なし（no-op。見出し自体がまだ無く実害もない）。
   let previousRound = null
-  for (const { sha, result } of rounds) {
+  for (const { sha, result, nonce } of rounds) {
     // c. 既存の記録節を除去する（本番の optinRecordUpdateInstructions 手順 c と同一のシェル片）。
     const expectedLines = previousRound
-      ? expectedLinesFor(previousRound.sha, previousRound.result, 'make e2e')
+      ? expectedLinesFor(previousRound.sha, previousRound.result, 'make e2e', undefined, previousRound.nonce)
       : undefined
-    execFileSync('sh', ['-c', `f=${JSON.stringify(f)}\n${extractRemovalScript(expectedLines)}\n`])
-    // d. 今回の結果で記録節を書き足す（本番の手順 d と同じ echo を重ねる方式）。
-    appendOptinRecordLikeProduction(f, sha, result, 'make e2e')
-    previousRound = { sha, result }
+    const removalEndMarker = previousRound ? optinRecordEndMarker(previousRound.nonce) : undefined
+    execFileSync('sh', ['-c', `f=${JSON.stringify(f)}\n${extractRemovalScript(expectedLines, removalEndMarker)}\n`])
+    // d. 今回の結果で記録節を書き足す（本番の手順 d と同じ echo を重ねる方式。このラウンド用の
+    // nonce 付き終端マーカーを書く）。
+    appendOptinRecordLikeProduction(f, sha, result, 'make e2e', optinRecordEndMarker(nonce))
+    previousRound = { sha, result, nonce }
   }
   const body = readFileSync(f, 'utf8')
   const headingCount = (body.match(/## opt-in テスト実行記録/g) ?? []).length
@@ -1015,10 +1109,11 @@ test('optinRecordRemovalShellLines: 本番同等の除去→追記（echo を重
   // 見出し直前の連続空行が 2 行を超えて増え続けないこと（本番の echo 二重呼び出しにより
   // 最大でも 2 行までは許容し、ラウンドを重ねるごとに単調増加しないことを確認する）。
   assert.doesNotMatch(body, /\n{4,}## opt-in テスト実行記録/, '見出し直前の空行がラウンドを経て増殖していない')
-  // 終端マーカーは最終ラウンドでも節の実際の最終行として 1 個だけ残る。
-  const endMarkerCount = (body.match(new RegExp(OPTIN_RECORD_END_MARKER.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'), 'g')) ?? []).length
+  // 終端マーカーは最終ラウンド（ROUND(3)）のものが節の実際の最終行として 1 個だけ残る。
+  const finalMarker = optinRecordEndMarker(ROUND(3))
+  const endMarkerCount = (body.match(new RegExp(finalMarker.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'), 'g')) ?? []).length
   assert.equal(endMarkerCount, 1)
-  assert.equal(body.trimEnd().split('\n').pop(), OPTIN_RECORD_END_MARKER)
+  assert.equal(body.trimEnd().split('\n').pop(), finalMarker)
 })
 
 // ---------------------------------------------------------------------------
@@ -1070,16 +1165,23 @@ test('駆動部: Tree ループの invalid 分岐が optinInvalidWarningLine を
   assert.match(driverPart, /optinInvalidWarningLine\(n\.number, hasChildren, n\.optinTestsInvalid\)/)
 })
 
-test('駆動部: post-push fix 直後の updateState が optinFixState（runs + headSha + unbound）を含む（PR #503 2/3 巡目 codex P0/P1）', () => {
-  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: fixOptinRuns, headSha: fixHeadSha, unbound: false \}/)
+test('駆動部: post-push fix 直後の updateState が optinFixState（runs + headSha + unbound + nonce）を含む（PR #503 2/3 巡目 codex P0/P1 → PR #504 codex P0 4 巡目で nonce 追加）', () => {
+  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: fixOptinRuns, headSha: fixHeadSha, unbound: false, nonce: optinWriteNonce \}/)
   assert.match(driverPart, /const optinFixPatchArgs = \{ fixCount, baseMergeCount, worktree: currentWorktreePath,/)
   assert.match(driverPart, /optinFixState: optinFixStatePatch \}/)
   assert.match(driverPart, /updateState\(item\.number, optinFixPatchArgs, \{ cleanupWorktree: oldWorktreePath \}\)/)
 })
 
 test('駆動部: post-push fix が optinHeadSha を報告しない・不正な場合は unbound: true を合成しログ警告する（セキュリティ監査 Medium）', () => {
-  assert.match(driverPart, /lastFixOptin = \{ runs: unboundRuns, headSha: '', unbound: true \}/)
-  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: unboundRuns, headSha: '', unbound: true \}/)
+  assert.match(driverPart, /lastFixOptin = \{ runs: unboundRuns, headSha: '', unbound: true, nonce: optinWriteNonce \}/)
+  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: unboundRuns, headSha: '', unbound: true, nonce: optinWriteNonce \}/)
+})
+
+test('駆動部: このラウンド用の optinWriteNonce（PR #504 codex P0 4 巡目）は fix エージェント起動より前に optinRecordNonce で発行され、fixPrompt へ渡される', () => {
+  const nonceIdx = driverPart.indexOf('const optinWriteNonce =')
+  const agentCallIdx = driverPart.indexOf('f = await agent(fixPrompt(')
+  assert.ok(nonceIdx >= 0 && agentCallIdx >= 0 && nonceIdx < agentCallIdx, 'optinWriteNonce は fix エージェント呼び出しより前に確定していなければならない')
+  assert.match(driverPart, /optinRecordNonce\(item\.number, fixCount \+ 1\)/)
 })
 
 test('駆動部: optinFixState 書込み失敗時に cleanupWorktree なしで 1 回再試行し、なお失敗すれば failMergeTerminal で終端する（PR #503 3 巡目 codex P1 / Bugbot Medium）', () => {
@@ -1090,7 +1192,7 @@ test('駆動部: optinFixState 書込み失敗時に cleanupWorktree なしで 1
 
 test('駆動部: failMergeTerminal の終端 updateState が lastFixOptin から optinFixState（unbound 含む）を合成し、戻り値を確認してログ警告する（PR #503 3 巡目 Bugbot Medium・セキュリティ監査 Low）', () => {
   assert.match(driverPart, /const terminalWriteOk = await updateState\(item\.number, \{ status: terminalStatus,/)
-  assert.match(driverPart, /optinFixState: lastFixOptin \? \{ attempted: true, runs: lastFixOptin\.runs, headSha: lastFixOptin\.headSha, unbound: lastFixOptin\.unbound === true \} : undefined \}\)/)
+  assert.match(driverPart, /optinFixState: lastFixOptin \? \{ attempted: true, runs: lastFixOptin\.runs, headSha: lastFixOptin\.headSha, unbound: lastFixOptin\.unbound === true, nonce: typeof lastFixOptin\.nonce === 'string' \? lastFixOptin\.nonce : null \} : undefined \}\)/)
   assert.match(driverPart, /if \(!terminalWriteOk\) \{/)
 })
 
@@ -1187,7 +1289,7 @@ test('統合: 宣言なしイシューでは isOptinLatchActive・combineOptinRe
 test('fixPrompt: latch 関連の引数・手順が存在しない（5 巡目で撤去済み）', () => {
   const finding = { summary: 'テスト指摘', unresolvedComments: [] }
   const item2 = { number: 42, title: 'サンプルイシュー', optinTests: ['make e2e'] }
-  const withFiveArgs = fixPrompt(item2, impl, finding, true, [])
+  const withFiveArgs = fixPrompt(item2, impl, finding, true, [], null, ROUND('w'))
   assert.doesNotMatch(withFiveArgs, /latch の解除専用として起動されている/)
   assert.doesNotMatch(withFiveArgs, /コード変更は必須ではない/)
 })
@@ -1195,26 +1297,38 @@ test('fixPrompt: latch 関連の引数・手順が存在しない（5 巡目で�
 // 6 引数目 lastFixOptin（PR #504 codex P0 3 巡目で追加）は optinRecordExpectedLines を通じて
 // 削除対象の完全一致比較にのみ使われる。sha を確定できない値（形式不正・未設定）を渡した場合は
 // lastFixOptin を渡さなかった場合と出力が一致することを確認する（曖昧な値を安全側＝比較対象なし
-// として扱う fail-closed の間接確認）。
+// として扱う fail-closed の間接確認）。7 引数目 optinWriteNonce は固定して差分要因から除く。
 test('fixPrompt: lastFixOptin が headSha を確定できない値（真偽値・headSha 欠落）の場合、省略時と同一出力になる（fail-closed の確認）', () => {
   const finding = { summary: 'テスト指摘', unresolvedComments: [] }
   const item2 = { number: 42, title: 'サンプルイシュー', optinTests: ['make e2e'] }
-  const withoutLastFixOptin = fixPrompt(item2, impl, finding, true, [])
-  const withBooleanLastFixOptin = fixPrompt(item2, impl, finding, true, [], true)
-  const withMissingHeadSha = fixPrompt(item2, impl, finding, true, [], { runs: [{ command: 'make e2e', result: 'pass', detail: '' }], unbound: false })
+  const withoutLastFixOptin = fixPrompt(item2, impl, finding, true, [], null, ROUND('w'))
+  const withBooleanLastFixOptin = fixPrompt(item2, impl, finding, true, [], true, ROUND('w'))
+  const withMissingHeadSha = fixPrompt(item2, impl, finding, true, [], { runs: [{ command: 'make e2e', result: 'pass', detail: '' }], unbound: false, nonce: ROUND(1) }, ROUND('w'))
   assert.equal(withoutLastFixOptin, withBooleanLastFixOptin)
   assert.equal(withoutLastFixOptin, withMissingHeadSha)
 })
 
-// lastFixOptin が完全に妥当（宣言コマンドと 1:1 対応する runs・40 桁 sha）な場合は、削除対象の
-// 完全一致比較に使う exp（期待値）が生成に含まれ、省略時（no-op のみ）とは出力が変わることを
-// 確認する（PR #504 codex P0 3 巡目の核心: 比較対象が無ければ削除しない設計の裏返し）。
+// lastFixOptin.nonce が欠落している場合も、headSha/runs が妥当なだけでは比較対象にならないこと
+// の直接確認（PR #504 codex P0 4 巡目: headSha 妥当だが nonce が無い＝比較不能な半端な状態）。
+test('fixPrompt: lastFixOptin.nonce を欠落させた場合も省略時と同一出力になる（headSha/runs が妥当でも nonce 無しでは比較対象にならない）', () => {
+  const finding = { summary: 'テスト指摘', unresolvedComments: [] }
+  const item2 = { number: 42, title: 'サンプルイシュー', optinTests: ['make e2e'] }
+  const withoutLastFixOptin = fixPrompt(item2, impl, finding, true, [], null, ROUND('w'))
+  const withNonceMissing = fixPrompt(item2, impl, finding, true, [], { headSha: 'a'.repeat(40), unbound: false, runs: [{ command: 'make e2e', result: 'pass', detail: '' }] }, ROUND('w'))
+  assert.equal(withoutLastFixOptin, withNonceMissing)
+})
+
+// lastFixOptin が完全に妥当（宣言コマンドと 1:1 対応する runs・40 桁 sha・nonce）な場合は、
+// 削除対象の完全一致比較に使う exp（期待値）が生成に含まれ、省略時（no-op のみ）とは出力が
+// 変わることを確認する（PR #504 codex P0 3/4 巡目の核心: 比較対象が無ければ削除しない設計の
+// 裏返し。本文一致・nonce 一致のいずれか片方だけでは削除しない設計は runRemoval の実行時
+// テスト側で回帰検証済み）。
 test('fixPrompt: lastFixOptin が妥当な場合は削除対象の完全一致比較（exp 変数）を含み、省略時とは出力が異なる', () => {
   const finding = { summary: 'テスト指摘', unresolvedComments: [] }
   const item2 = { number: 42, title: 'サンプルイシュー', optinTests: ['make e2e'] }
-  const withoutLastFixOptin = fixPrompt(item2, impl, finding, true, [])
-  const validLastFixOptin = { headSha: 'a'.repeat(40), unbound: false, runs: [{ command: 'make e2e', result: 'pass', detail: '' }] }
-  const withValidLastFixOptin = fixPrompt(item2, impl, finding, true, [], validLastFixOptin)
+  const withoutLastFixOptin = fixPrompt(item2, impl, finding, true, [], null, ROUND('w'))
+  const validLastFixOptin = { headSha: 'a'.repeat(40), unbound: false, runs: [{ command: 'make e2e', result: 'pass', detail: '' }], nonce: ROUND(1) }
+  const withValidLastFixOptin = fixPrompt(item2, impl, finding, true, [], validLastFixOptin, ROUND('w'))
   assert.notEqual(withoutLastFixOptin, withValidLastFixOptin)
   assert.match(withValidLastFixOptin, /exp=\$\(/)
   assert.doesNotMatch(withoutLastFixOptin, /exp=\$\(/)
@@ -1238,8 +1352,8 @@ test('駆動部: acceptNoPushOptinFixResult・optinLatchMode・optinLatchExpecte
   }
 })
 
-test('駆動部: fixPrompt 呼び出しは optinLatchRecoveryActive 等（5 巡目で撤去済み）を渡さず、6 引数目には lastFixOptin（PR #504 codex P0 3 巡目で追加。削除対象の完全一致比較用）のみを渡す', () => {
-  assert.match(driverPart, /fixPrompt\(item, impl, finding, true, permittedNoPushResolveIds, lastFixOptin\), \{ label: `fix:#\$\{item\.number\}`/)
+test('駆動部: fixPrompt 呼び出しは optinLatchRecoveryActive 等（5 巡目で撤去済み）を渡さず、6 引数目に lastFixOptin（PR #504 codex P0 3 巡目で追加。削除対象の完全一致比較用）、7 引数目に optinWriteNonce（PR #504 codex P0 4 巡目で追加。このラウンドの新規記録節の nonce）を渡す', () => {
+  assert.match(driverPart, /fixPrompt\(item, impl, finding, true, permittedNoPushResolveIds, lastFixOptin, optinWriteNonce\), \{ label: `fix:#\$\{item\.number\}`/)
   assert.doesNotMatch(driverPart, /optinLatchRecoveryActive/)
 })
 

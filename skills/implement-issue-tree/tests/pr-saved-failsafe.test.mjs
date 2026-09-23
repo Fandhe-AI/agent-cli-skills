@@ -263,7 +263,7 @@ test('base-merge の例外分岐は failMergeTerminal に blocked を明示す�
 })
 
 test('fix 呼び出しは base-merge と対称に try/catch で包まれ、例外・null 分岐が blocked を明示する（Issue #465）', () => {
-  const callIdx = driverPart.indexOf('f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds, lastFixOptin)')
+  const callIdx = driverPart.indexOf('f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds, lastFixOptin, optinWriteNonce)')
   assert.notEqual(callIdx, -1, 'Merge ループの fix 呼び出しが見つからない')
   const before = driverPart.slice(Math.max(0, callIdx - 300), callIdx)
   assert.match(before, /let f = null/, 'f の let 宣言が呼び出し直前にない')

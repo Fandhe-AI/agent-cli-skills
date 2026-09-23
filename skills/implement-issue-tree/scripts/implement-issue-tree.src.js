@@ -830,7 +830,35 @@ const OPTIN_RECORD_RESULTS = ['pass', 'fail', 'not-run']
 // そのまま次の追記へ進む（削除しないことは常に安全側であり、この判定の失敗は処理を中断しない。
 // 旧い記録節が残ったまま次の手順で新しい節が追記され、見出しが一時的に重複し得るが、正当な本文
 // を巻き込んで削除するより優先する）。
-const OPTIN_RECORD_END_MARKER = '<!-- /opt-in-test-record -->'
+// v5（PR #504 codex P0 4 巡目）: v4 の終端マーカーは固定・公開文字列
+// （'<!-- /opt-in-test-record -->'）のままだった。bodyNorm===exp の完全一致ゲートと合わせても、
+// マーカー自体は「PR 本文を書ける利用者なら誰でも書ける」推測可能な値のため、公開情報
+// （HEAD sha・宣言済みコマンド・結果 enum・既定の補足文言）だけから exp を再現できれば、
+// マーカーと本文の両方を攻撃者が単独で偽造できてしまう。v5 は終端マーカーへ
+// boundaryNonce（実行時に /dev/urandom 由来の seed で鍵付けした値。PR 本文はもちろん
+// ソースコードにも現れない非公開値）由来の per-round nonce を埋め込み、削除条件を
+// 「(a) 本文が host 側の信頼済み実測 exp と完全一致」かつ「(b) 終端マーカーが host が
+// その回に実際に発行した nonce と一致」の AND にする。(b) だけでは不十分な点に注意:
+// nonce は一度 PR 本文へ書かれた時点で公開情報になるため、次ラウンドで攻撃者がその
+// nonce をコピーして偽の見出し＋本文を包む終端マーカーとして使い回せば、(b) 単独では
+// 正当な本文（Closes 行・対象外節等）を巻き込んで削除させられる（v4 からの後退）。
+// (a) の完全一致ゲートを外さず、nonce を「削除してよい区間を一意に特定する追加の鍵」
+// として重ねることで、攻撃者は exp（host 側実測）と nonce（host 側秘密）の両方を同時に
+// 言い当てない限り削除条件を満たせない。
+const OPTIN_NONCE_PATTERN = /^[0-9a-z]{28}$/
+const OPTIN_RECORD_END_MARKER_PREFIX = '<!-- /opt-in-test-record '
+const OPTIN_RECORD_END_MARKER_SUFFIX = ' -->'
+function optinRecordEndMarker(nonce) {
+  return `${OPTIN_RECORD_END_MARKER_PREFIX}${nonce}${OPTIN_RECORD_END_MARKER_SUFFIX}`
+}
+// 記録節の nonce を「item 番号 + ラウンド識別子（fix ラウンドの通し番号。PR 作成時点の初期
+// 節には呼び出し元から固定の 'create' を渡す）」から boundaryNonce で導出する。同一ラウンドの
+// 呼び出しは常に同じ nonce を再現する（resume でも同一）が、他ラウンド・他 issue の nonce とは
+// 一致しない。boundaryNonceSeed が未初期化の場合は boundaryNonce 自体が例外を投げる
+// （fail-closed。予測可能な nonce で境界を区切ることを避ける）。
+function optinRecordNonce(itemNumber, roundKey) {
+  return boundaryNonce(`optin-record:${itemNumber ?? 0}:${roundKey}`)
+}
 function optinRecordMarkerLine(sha, result, command) {
   return `${OPTIN_RECORD_MARKER_PREFIX}${sha} ${result} ${command} -->`
 }
@@ -870,7 +898,7 @@ function optinRecordMarkerLine(sha, result, command) {
 //     `printf '%s'` で "$f" へ書き戻し、v1 と同じ「末尾の空行を持ち越さない」性質を復元する
 //     （削除範囲は変えず、書き戻し経路だけを直す）。
 //
-// v4（PR #504 codex P0 3 巡目）: v3 は終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)}
+// v4（PR #504 codex P0 3 巡目）: v3 は終端マーカー（当時の固定文字列定数）
 // の実測を削除条件にしたが、このマーカー自体はソース上に固定された公開文字列であり、PR 本文を
 // 書けるユーザーなら誰でも同じ見出し・箇条書き・マーカーを「正当な説明」として書ける。その場合
 // v3 は「行の見た目が既知パターンに一致する」を根拠に削除してしまい、見出しとマーカーの間へ
@@ -886,13 +914,14 @@ function optinRecordMarkerLine(sha, result, command) {
 // 無い呼び出し元（prCreatePrompt。PR 作成前で post-push fix が一度も走っておらず、比較対象と
 // なる信頼済み実測が存在しない）では削除自体を行わない（v3 までと同じ fail-closed の帰結だが、
 // 根拠を「終端マーカーの有無」から「比較対象の有無」へ変更）。
-function optinRecordRemovalShellLines(expectedLines) {
-  if (!Array.isArray(expectedLines) || expectedLines.length === 0) {
+function optinRecordRemovalShellLines(expectedLines, endMarker) {
+  if (!Array.isArray(expectedLines) || expectedLines.length === 0 || typeof endMarker !== 'string' || !endMarker) {
     return [
       '   ```',
-      '   # 直前にホスト側が実際に書いた記録節の内容（信頼済み state）を特定できないため、',
-      '   # 削除は一切行わない（fail-closed。終端マーカーは固定・公開文字列で所有権の証明に',
-      '   # ならないため、見た目だけの一致では削除しない — PR #504 codex P0 3 巡目）。',
+      '   # 直前にホスト側が実際に書いた記録節の内容（信頼済み state）または、その節が発行時に',
+      '   # 持っていたはずの非公開 nonce 付き終端マーカーを特定できないため、削除は一切行わない',
+      '   # （fail-closed。終端マーカーが nonce を持たない・host 側実測が無い場合、見た目だけの',
+      '   # 一致では所有権の証明にならない — PR #504 codex P0 4 巡目）。',
       '   ```',
     ]
   }
@@ -901,7 +930,7 @@ function optinRecordRemovalShellLines(expectedLines) {
     '   ```',
     '   L=$(grep -nE \'^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$\' "$f" | tail -n 1 | cut -d: -f1)',
     '   if [ -n "$L" ]; then',
-    `     E=$(awk -v l="$L" -v m=${JSON.stringify(OPTIN_RECORD_END_MARKER)} 'NR>l { t=$0; sub(/\\r$/,"",t); if (t==m) { print NR; exit } }' "$f"); rcE=$?`,
+    `     E=$(awk -v l="$L" -v m=${JSON.stringify(endMarker)} 'NR>l { t=$0; sub(/\\r$/,"",t); if (t==m) { print NR; exit } }' "$f"); rcE=$?`,
     '     if [ "$rcE" = 0 ] && [ -n "$E" ]; then',
     '       body=$(sed -n "$((L+1)),$((E-1))p" "$f"); rcBody=$?',
     '       bodyNorm=$(printf \'%s\\n\' "$body" | tr -d \'\\r\')',
@@ -917,7 +946,7 @@ function optinRecordRemovalShellLines(expectedLines) {
     '     fi',
     '   fi',
     '   ```',
-    `   （見出し行の最後の出現位置より後で、終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)} が最初に現れる行を実測できた場合に、かつその間の本文がホスト側の信頼済み実測から再構成した期待値（exp。PR 本文を経由しない値）とバイト完全一致した場合に限り削除する。一致しない場合（旧書式・見出しのみの一致・攻撃的な模倣を含む）は "$f" を一切変更しない（fail-closed。正当な本文を巻き込んで削除するより優先する）。CRLF 本文にも対応するため比較前に各行の末尾 \\r を取り除く。書き戻しはコマンド置換 \`$(cat "$g")\` を経由させ、末尾の空行を持ち越さない。途中の awk / sed がすべて 0 終了しかつ完全一致した場合のみ実際に削除する）`,
+    `   （見出し行の最後の出現位置より後で、終端マーカー ${JSON.stringify(endMarker)}（host がこの回の直前 post-push fix で実際に発行した非公開 nonce を埋め込んだ値。PR 本文を経由しない）が最初に現れる行を実測できた場合に、かつその間の本文がホスト側の信頼済み実測から再構成した期待値（exp。PR 本文を経由しない値）とバイト完全一致した場合に限り削除する。マーカーの nonce・本文内容のいずれか一方だけが一致しても削除しない（両方を host 側の秘密・実測に同時に一致させない限り削除条件を満たせない設計。旧書式・見出しのみの一致・nonce を使い回した模倣を含む）。一致しない場合は "$f" を一切変更しない（fail-closed。正当な本文を巻き込んで削除するより優先する）。CRLF 本文にも対応するため比較前に各行の末尾 \\r を取り除く。書き戻しはコマンド置換 \`$(cat "$g")\` を経由させ、末尾の空行を持ち越さない。途中の awk / sed がすべて 0 終了しかつ完全一致した場合のみ実際に削除する）`,
   ]
 }
 
@@ -927,14 +956,18 @@ function optinRecordRemovalShellLines(expectedLines) {
 // 完全に同じ行構成（マーカー行 → コマンド → 結果 → 補足、ブロック間を空行 1 行で区切る）を
 // 再現する必要があり、両者がドリフトするとここでの一致判定が常に失敗して削除が起きなくなる
 // （安全側だが、見出しが際限なく重複する）。書式を変える場合は両方を同時に直すこと。
-// 再構成できない場合（宣言なし・fix 未実施・headSha 未確定・宣言コマンドと runs が不一致）は
-// null を返し、呼び出し元は削除を行わない。
+// 再構成できない場合（宣言なし・fix 未実施・headSha 未確定・nonce 未確定・宣言コマンドと
+// runs が不一致）は null を返し、呼び出し元は削除を行わない。nonce の妥当性検証（PR #504
+// codex P0 4 巡目）: lastFixOptin.nonce は host が直前ラウンドの記録節を書いた際に実際に
+// 発行した boundaryNonce 由来値でなければならない。存在しない・書式不正（旧バージョンで
+// 永続化された state の再開時等）の場合は削除しない（headSha 不明時と同じ fail-closed）。
 function optinRecordExpectedLines(commands, lastFixOptin) {
   const declared = Array.isArray(commands) ? commands : []
   if (declared.length === 0) return null
   if (!lastFixOptin || lastFixOptin.unbound === true) return null
   const sha = sanitizeSha(lastFixOptin.headSha)
   if (!sha) return null
+  if (typeof lastFixOptin.nonce !== 'string' || !OPTIN_NONCE_PATTERN.test(lastFixOptin.nonce)) return null
   const runs = Array.isArray(lastFixOptin.runs) ? lastFixOptin.runs : []
   if (runs.length !== declared.length) return null
   const byCommand = new Map(runs.filter((r) => r && typeof r.command === 'string').map((r) => [r.command, r]))
@@ -1029,9 +1062,17 @@ function restoreOptinFixState(saved, declaredOptinTests) {
       })),
       headSha: '',
       unbound: true,
+      nonce: null,
     }
   }
-  return { runs: sanitizeOptinTestRuns(state.runs, declaredList), headSha, unbound: false }
+  // nonce は boundaryNonce の「実行時に導出した値そのもの」を state.nonce としてそのまま復元する
+  // （headSha と同じ扱いで、resume 後のプロセスが別 seed で再導出するわけではない。resume で
+  // 別プロセスの新しい seed を使って計算し直すと、既に PR 本文へ書かれている旧プロセスの nonce
+  // とは一致しなくなり削除が永久に働かなくなる。PR #504 codex P0 4 巡目）。書式が不正・欠落
+  // （このフィールドが無い旧バージョンの永続化を含む）の場合は null にする（削除しないだけで
+  // unbound には倒さない — 記録ゲート自体の合否判定には影響させない）。
+  const nonce = typeof state.nonce === 'string' && OPTIN_NONCE_PATTERN.test(state.nonce) ? state.nonce : null
+  return { runs: sanitizeOptinTestRuns(state.runs, declaredList), headSha, unbound: false, nonce }
 }
 
 // PR 本文へ追記する「opt-in テスト実行記録」節のテンプレート。commands が空（宣言なし）なら
@@ -1044,7 +1085,12 @@ function restoreOptinFixState(saved, declaredOptinTests) {
 // 「<sha> は git rev-parse HEAD（自分が push する／した HEAD）、<result> は直前に自分が
 // 再実行した結果へ実際に置き換える」よう指示する（prCreatePrompt・optinRecordUpdateInstructions
 // 参照）。
-function renderOptinRecordSection(commands) {
+// itemNumber: nonce 導出の鍵材料（PR #504 codex P0 4 巡目）。この節は PR 作成時に 1 回だけ
+// 書かれ、比較対象となる host 側実測（lastFixOptin）がまだ存在しないため
+// optinRecordExpectedLines は常に null を返し、この節自体が削除対象に選ばれることはない
+// （削除は post-push fix が書いた節にのみ働く）。それでも終端マーカーの書式を統一するため
+// 固定のラウンド鍵 'create' で nonce を発行する。
+function renderOptinRecordSection(itemNumber, commands) {
   const list = Array.isArray(commands) ? commands : []
   if (list.length === 0) return ''
   const blocks = list.map((c) => [
@@ -1053,9 +1099,10 @@ function renderOptinRecordSection(commands) {
     '- 結果: <result>',
     '- 補足: <補足（detail）または (なし)>',
   ].join('\n'))
-  // 終端マーカーを節の実際の最終行として必ず置く（OPTIN_RECORD_END_MARKER のコメント参照）。
-  // 削除側はこのマーカーが本文の最終行と完全一致する場合のみ削除候補として扱う。
-  return `\n\n## opt-in テスト実行記録\n${blocks.join('\n\n')}\n${OPTIN_RECORD_END_MARKER}`
+  // 終端マーカーを節の実際の最終行として必ず置く（optinRecordEndMarker のコメント参照）。
+  // 削除側はこのマーカーが host 発行の nonce と完全一致する場合のみ削除候補として扱う。
+  const endMarker = optinRecordEndMarker(optinRecordNonce(itemNumber, 'create'))
+  return `\n\n## opt-in テスト実行記録\n${blocks.join('\n\n')}\n${endMarker}`
 }
 
 // マージ前記録ゲート（optinRecordVerifyPrompt）の返却を判定する純粋関数。declared が空なら
@@ -3590,14 +3637,31 @@ function optinTestExecutionLines(item, stepNo) {
 // 常に本文の最後に追記される契約（prCreatePrompt・本関数のいずれも呼び出し元は末尾追記のみ）
 // のため、削除が他の節を巻き込むことはない。
 // lastFixOptin: 呼び出し元（runMergeLoop）が保持する「直前の post-push fix ラウンドで実際に
-// PR 本文へ書いた内容」の host 側実測（PR 本文を経由しない）。削除対象の完全一致比較に使う
-// （PR #504 codex P0 3 巡目。optinRecordExpectedLines 参照）。無い場合（初回ラウンド・fix 未
-// 実施・resume で復元不能）は削除を一切行わない。
-function optinRecordUpdateInstructions(item, impl, stepNo, lastFixOptin) {
+// PR 本文へ書いた内容」の host 側実測（PR 本文を経由しない）。削除対象の完全一致比較と、
+// その節が発行時に持っていた nonce 付き終端マーカーの再現に使う（PR #504 codex P0 3/4 巡目。
+// optinRecordExpectedLines 参照）。無い場合（初回ラウンド・fix 未実施・resume で復元不能）は
+// 削除を一切行わない。
+// writeNonce: 呼び出し元が「今回このラウンドが新たに書く記録節」用にあらかじめ発行した
+// boundaryNonce 由来値（host 側のみが知る非公開値。エージェントへは文字列そのものを渡す
+// だけで、鍵となる seed 自体は渡さない）。手順 d の終端マーカーに埋め込み、次ラウンドの
+// 削除判定（optinRecordExpectedLines が lastFixOptin.nonce として参照する）と対になる。
+function optinRecordUpdateInstructions(item, impl, stepNo, lastFixOptin, writeNonce) {
   const commands = Array.isArray(item.optinTests) ? item.optinTests : []
   if (commands.length === 0) return []
   const prRef = String(impl.prNumber)
   const expectedLines = optinRecordExpectedLines(commands, lastFixOptin)
+  const removalEndMarker =
+    expectedLines && typeof lastFixOptin?.nonce === 'string' && OPTIN_NONCE_PATTERN.test(lastFixOptin.nonce)
+      ? optinRecordEndMarker(lastFixOptin.nonce)
+      : null
+  const writeEndMarker =
+    typeof writeNonce === 'string' && OPTIN_NONCE_PATTERN.test(writeNonce) ? optinRecordEndMarker(writeNonce) : null
+  if (!writeEndMarker) {
+    // 呼び出し元（runMergeLoop）は commands が非空なら必ず optinRecordNonce で有効な nonce を
+    // 発行してから本関数を呼ぶ契約。ここに到達して不正ということは呼び出し側の実装不備であり、
+    // 予測可能・欠落した終端マーカーで記録節を書かせるより fail-closed で停止する方が安全。
+    throw new Error('optinRecordUpdateInstructions: writeNonce が不正（呼び出し元は optinRecordNonce で発行した値を渡すこと）')
+  }
   return [
     `${stepNo}. opt-in テスト記録の更新（必須。直前の opt-in テスト再実行手順の optinTestRuns の結果を PR 本文へ反映する。手順 4 の 2 条件判定で pushed: true と確認できた場合のみ実行する。pushed: false の場合はこの手順を省略する — まだリモートへ反映されていないコードに対する記録を書くと、実際に反映された head と PR 本文の記録内容が食い違う）:`,
     // マーカーに埋め込む sha は「この記録がどの HEAD に対する結果かをマージ前ゲートが判定する」
@@ -3610,9 +3674,9 @@ function optinRecordUpdateInstructions(item, impl, stepNo, lastFixOptin) {
     // （ユーザーが説明・引用等で同じ見出しを書いていた場合、Closes 行・対象外節を含む正当な
     // 本文を道連れに失う。PR #504 codex P0）。削除ロジックは optinRecordRemovalShellLines に
     // 集約されている（同一ロジックを個別に保持すると修正がドリフトする。cursor[bot] 指摘）。
-    `   c. 既存の opt-in テスト記録節を安全に除去する（見出し行の最後の出現位置と終端マーカーの両方から機械生成区間を識別でき、かつその間の内容がホスト側の信頼済み実測と完全一致した場合のみ削除する。識別・一致できない場合は "$f" を一切変更せずそのまま手順 d へ進む）:`,
-    ...optinRecordRemovalShellLines(expectedLines),
-    `   d. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（見出し行・マーカー行・終端マーカー行いずれも行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる。下に示すコードブロックのインデントは箇条書きの見た目上のものであり、実際に "$f" へ書き込む内容には含めない）。見出し行の直前には必ず空行を 1 行入れる（"$f" の末尾が改行なしで終わっていても、{ echo; echo; echo '## opt-in テスト実行記録'; ...; } >> "$f" のように echo を重ねて空行を作ってから見出し以降を追記すれば、直前の行と結合しない）。節の実際の最終行として終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)} を必ず書く（次回以降の再利用経路がこの節を安全に識別・削除するための境界になる）:`,
+    `   c. 既存の opt-in テスト記録節を安全に除去する（見出し行の最後の出現位置と、host がその節の発行時に実際に埋め込んだ非公開 nonce 付き終端マーカーの両方から機械生成区間を識別でき、かつその間の内容がホスト側の信頼済み実測と完全一致した場合のみ削除する。識別・一致できない場合は "$f" を一切変更せずそのまま手順 d へ進む）:`,
+    ...optinRecordRemovalShellLines(expectedLines, removalEndMarker),
+    `   d. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（見出し行・マーカー行・終端マーカー行いずれも行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる。下に示すコードブロックのインデントは箇条書きの見た目上のものであり、実際に "$f" へ書き込む内容には含めない）。見出し行の直前には必ず空行を 1 行入れる（"$f" の末尾が改行なしで終わっていても、{ echo; echo; echo '## opt-in テスト実行記録'; ...; } >> "$f" のように echo を重ねて空行を作ってから見出し以降を追記すれば、直前の行と結合しない）。節の実際の最終行として終端マーカー ${JSON.stringify(writeEndMarker)}（host がこのラウンド用にあらかじめ発行した非公開 nonce を埋め込んだ値。文字列を正確にそのまま書き写す。生成・改変はしない）を必ず書く（次回以降の削除ラウンドがこの節を安全に識別する境界になる。固定・公開の文字列ではなく、この回限りの host 発行値のため PR 本文を読めるだけの第三者は再現できない）:`,
     '   ```',
     '   ## opt-in テスト実行記録',
     ...commands.flatMap((c) => [
@@ -3621,7 +3685,7 @@ function optinRecordUpdateInstructions(item, impl, stepNo, lastFixOptin) {
       '   - 結果: <result>',
       '   - 補足: <補足（detail）または (なし)>',
     ]),
-    `   ${OPTIN_RECORD_END_MARKER}`,
+    `   ${writeEndMarker}`,
     '   ```',
     '   （<sha> は手順 a で控えた SHA の値（40 桁小文字 16 進のまま、省略・短縮しない）へ、<result> は各コマンドの直前の再実行結果 pass / fail / not-run のいずれかへ実際に置き換える。宣言コマンドが複数ある場合は各ブロックを空行 1 行で区切る。終端マーカー行はプレースホルダ置換の対象外で、そのままの文字列を書く）',
     `   e. gh pr edit ${prRef} --body-file "$f" && rm -f "$f" で本文を更新する。`,
@@ -4041,7 +4105,7 @@ function prCreatePrompt(item, impl, outOfScope) {
   // 検証にならない。そのため host 側では値を持たず、エージェント自身が手順 0c で再実行した
   // 結果と push 対象の HEAD sha（手順 0d）で埋めるテンプレート（<sha>/<result> プレースホルダ）
   // のみを渡す。
-  const optinRecordSection = renderOptinRecordSection(item.optinTests)
+  const optinRecordSection = renderOptinRecordSection(item.number, item.optinTests)
   return [
     `イシュー #${item.number}「${untrusted(item.title, 'issue-title')}」の実装コミット（ブランチ ${branch}）を push して PR を作成する担当エージェント。`,
     COMMON,
@@ -4181,9 +4245,14 @@ function postPushChecksInstruction(prRef) {
 
 // lastFixOptin: 呼び出し元（runMergeLoop）保持の直前 post-push fix ラウンドの host 側実測。
 // pushAfterFix: true のときのみ optinRecordUpdateInstructions（手順 4b）へ渡し、削除対象の
-// 完全一致比較に使う（PR #504 codex P0 3 巡目）。pushAfterFix: false（Review fix）では手順 4b
-// 自体を呼ばないため未使用。
-function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushResolveIds = [], lastFixOptin = null) {
+// 完全一致比較・nonce 付き終端マーカーの再現に使う（PR #504 codex P0 3/4 巡目）。
+// pushAfterFix: false（Review fix）では手順 4b 自体を呼ばないため未使用。
+// optinWriteNonce: 呼び出し元がこのラウンド用にあらかじめ発行した boundaryNonce 由来値
+// （PR #504 codex P0 4 巡目）。手順 4b の新規記録節の終端マーカーへ埋め込む。呼び出し元は
+// item.optinTests が非空の場合、この呼び出しの前に optinRecordNonce(item.number, roundKey)
+// で発行し、ラウンド完了後の lastFixOptin.nonce へ同じ値を格納すること（次ラウンドの削除が
+// この値を再現できるようにするため）。
+function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushResolveIds = [], lastFixOptin = null, optinWriteNonce = null) {
   const branch = sanitizeBranch(impl.branch)
   // resolve (b) の許可 threadId（host 算出済み・Issue #430）。opaque id のため nonce 不要。
   const permittedIds = (Array.isArray(permittedNoPushResolveIds) ? permittedNoPushResolveIds : [])
@@ -4276,7 +4345,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     // まだ存在しない（prCreatePrompt が Review 通過後にしか呼ばれない）ためこの手順は不要。
     ...(pushAfterFix ? optinTestExecutionLines(item, '3b') : []),
     ...commitAndPushInstructions,
-    ...(pushAfterFix ? optinRecordUpdateInstructions(item, impl, '4b', lastFixOptin) : []),
+    ...(pushAfterFix ? optinRecordUpdateInstructions(item, impl, '4b', lastFixOptin, optinWriteNonce) : []),
     ...(pushAfterFix
       ? [
           `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示・前後で sha が変化したことだけでは足りない。pushed: false のラウンド — 空振り push・並行 push 競合・ls-remote 判定不能 — は (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
@@ -6382,7 +6451,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // 実施）のときは undefined を渡し、既存の optinFixState をそのまま保持する（省略キーは
     // updateState のオブジェクトマージで上書きされない）。unbound も引き継ぎ、fail-closed の
     // 強制不合格状態が終端経路でも失われないようにする（combineOptinRecordGate 参照）。
-    const terminalWriteOk = await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, baseMergeCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, optinFixState: lastFixOptin ? { attempted: true, runs: lastFixOptin.runs, headSha: lastFixOptin.headSha, unbound: lastFixOptin.unbound === true } : undefined })
+    const terminalWriteOk = await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, baseMergeCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, optinFixState: lastFixOptin ? { attempted: true, runs: lastFixOptin.runs, headSha: lastFixOptin.headSha, unbound: lastFixOptin.unbound === true, nonce: typeof lastFixOptin.nonce === 'string' ? lastFixOptin.nonce : null } : undefined })
     // この choke point は元々戻り値を確認していなかった（挙動は変えない: リトライや追加の
     // fail-closed 分岐は入れない）。書込み失敗自体は稀だが、気づかず放置されると次回実行が
     // 古い状態から再開して混乱を招くため、少なくともログで可視化する（PR #503 3 巡目後の
@@ -7061,13 +7130,22 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // Merge ループの fix は push が必要（pushAfterFix: true）。finding は監視結果（既定）または
       // merge-exec の不一致検出時の合成結果。resolve (b) 許可リストは同じ finding から算出（#430）。
       const permittedNoPushResolveIds = computePermittedNoPushResolveIds(resolveProof, finding?.unresolvedComments)
+      // このラウンドが新たに書く opt-in テスト記録節用の nonce（PR #504 codex P0 4 巡目）。
+      // fixCount（増加前）+ 1 をラウンド識別子にする（ちょうどこのラウンドの通し番号と一致し、
+      // 下の fixCount++ 後は同じ数値が「直前ラウンドの番号」として lastFixOptin.nonce へ
+      // 引き継がれる）。宣言なしイシューでは optinRecordUpdateInstructions が commands.length
+      // === 0 の早期 return で未使用のまま終わるため、常に発行してよい。
+      const optinWriteNonce =
+        Array.isArray(item.optinTests) && item.optinTests.length > 0
+          ? optinRecordNonce(item.number, fixCount + 1)
+          : null
       // isolation: 'worktree' のため base-merge と同じく agent() が schema 不適合・例外で reject
       // しても worktree は既に spawn 済みになり得る。try/catch で捕捉し f を null のまま次段へ
       // 渡す（Issue #465。base-merge と対称化。従来この呼び出しだけ非対称に無捕捉だった）。
       let f = null
       let fixAgentError = null
       try {
-        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds, lastFixOptin), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
+        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds, lastFixOptin, optinWriteNonce), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
       } catch (e) {
         fixAgentError = e
       }
@@ -7156,8 +7234,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         if (f.pushed === true) {
           const fixHeadSha = sanitizeSha(f.optinHeadSha)
           if (fixHeadSha) {
-            lastFixOptin = { runs: fixOptinRuns, headSha: fixHeadSha, unbound: false }
-            optinFixStatePatch = { attempted: true, runs: fixOptinRuns, headSha: fixHeadSha, unbound: false }
+            // nonce: このラウンドが手順 4b で実際に書いたはずの記録節の終端マーカー nonce
+            // （PR #504 codex P0 4 巡目）。f.pushed === true の間は step d が実行された前提
+            // （既存の headSha 同様、実行の成否自体は自己申告に依存する fail-open 部分だが、
+            // これは content 完全一致チェックが多層防御として補う）。次ラウンドの
+            // optinRecordExpectedLines がこの値を lastFixOptin.nonce として参照し、削除対象の
+            // 終端マーカーを再現する。
+            lastFixOptin = { runs: fixOptinRuns, headSha: fixHeadSha, unbound: false, nonce: optinWriteNonce }
+            optinFixStatePatch = { attempted: true, runs: fixOptinRuns, headSha: fixHeadSha, unbound: false, nonce: optinWriteNonce }
           } else {
             // fixOptinRuns が全件 pass だったとしても、その結果がどの HEAD に対するものか
             // 確定できない場合、combineOptinRecordGate は headSha 不一致（'' は現在の HEAD と
@@ -7174,8 +7258,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
               result: 'not-run',
               detail: 'post-push fix が対象 HEAD sha（optinHeadSha）を報告しなかった、または不正な値だった（fail-closed）',
             }))
-            lastFixOptin = { runs: unboundRuns, headSha: '', unbound: true }
-            optinFixStatePatch = { attempted: true, runs: unboundRuns, headSha: '', unbound: true }
+            lastFixOptin = { runs: unboundRuns, headSha: '', unbound: true, nonce: optinWriteNonce }
+            optinFixStatePatch = { attempted: true, runs: unboundRuns, headSha: '', unbound: true, nonce: optinWriteNonce }
             log(`⚠️ #${item.number}: post-push fix が optinHeadSha を報告しなかった（または 40 桁 sha 形式でない）。次回のマージ前ゲートは現在の HEAD に関わらず不合格として扱う（fail-closed）`)
           }
         }
