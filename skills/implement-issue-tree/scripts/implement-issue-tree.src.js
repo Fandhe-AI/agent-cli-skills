@@ -949,8 +949,17 @@ function classifyStateWriteFailureStatus({ outputMissing, terminalSaved, prNumbe
 // （knownPr が正の整数）なら、次回実行時の monitoring 再開で継続できるため 'blocked' へ倒し
 // 重複 PR 作成を避ける（#465 の base-merge/fix 例外分岐と同じ理由）。PR 未作成（pr: 0 相当）
 // の想定外例外は systemic な障害の可能性が高く、halt 防御を弱めないため従来どおり 'failed'。
-function classifyUncaughtFailureStatus({ knownPr }) {
-  return Number.isInteger(knownPr) && knownPr > 0 ? 'blocked' : 'failed'
+//
+// ただし 'blocked' への降格は、その 'blocked' 状態自体を state ファイルへ実際に永続化できた
+// （terminalSaved）場合に限る。呼び出し元は knownPr > 0 のときだけ 'blocked' patch の保存を
+// 試み、その成否をここへ渡す。保存自体が失敗すると state ファイルに pr が残らないまま
+// 'blocked' として扱われ、次回実行が monitoring を再開できず通常 dispatch から再実装・
+// 重複 PR 作成に進み得るため、永続化を確認できない限り 'failed'（halt カウント対象）へ倒して
+// 静かに見逃さない（classifyStateWriteFailureStatus と同じ契約。Issue #493 codex 指摘）。
+function classifyUncaughtFailureStatus({ knownPr, terminalSaved }) {
+  const hasPr = Number.isInteger(knownPr) && knownPr > 0
+  if (!hasPr) return 'failed'
+  return terminalSaved === true ? 'blocked' : 'failed'
 }
 
 // dispatch ループと終端 cascade（セクション 8）の両方が呼ぶ単一の判定 choke point（Issue #442）。
@@ -6005,13 +6014,28 @@ async function runOne(item) {
     // monitoring 再開で継続できるため 'blocked'（halt 非カウント）へ倒し、Recover→再実装による
     // 重複 PR を避ける（#465 の base-merge/fix 例外分岐と同じ理由）。PR 未作成の想定外例外は
     // systemic な障害の可能性が高く、従来どおり 'failed'（halt カウント対象）を維持する。
+    //
+    // 'blocked' へ倒す前に、その 'blocked' patch（pr を含む監視再開情報）自体が state
+    // ファイルへ永続化できたか（updateState の戻り値）を確認する。knownPrByIssue への記録は
+    // in-memory のみで state ファイルへの反映を保証しないため、ここで書き込みが失敗すると
+    // pr が state ファイルに残らないまま 'blocked' 扱いになり、次回実行が monitoring を
+    // 再開できず通常 dispatch から再実装・重複 PR 作成に進み得る（Issue #493 codex 指摘）。
     const knownPr = knownPrByIssue.get(item.number)
-    const status = classifyUncaughtFailureStatus({ knownPr })
-    await updateState(item.number, {
-      status,
-      note: reason,
-      ...(status === 'blocked' ? { pr: knownPr } : {}),
-    })
+    const hasPr = Number.isInteger(knownPr) && knownPr > 0
+    let terminalSaved
+    if (hasPr) {
+      terminalSaved = await updateState(item.number, {
+        status: 'blocked',
+        note: reason,
+        pr: knownPr,
+      })
+      if (!terminalSaved) {
+        log(`⚠️ issue #${item.number}: catch-all の blocked 状態（PR #${knownPr} の監視再開情報）永続化に失敗した。重複 PR 防止のため failed（halt カウント対象）へ倒す（${STATE_FILE} を手動確認すること）`)
+      }
+    } else {
+      await updateState(item.number, { status: 'failed', note: reason })
+    }
+    const status = classifyUncaughtFailureStatus({ knownPr, terminalSaved })
     recordFailure({
       issue: item.number,
       reason,

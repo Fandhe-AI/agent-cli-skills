@@ -267,16 +267,21 @@ test('classifyStateWriteFailureStatus: outputMissing:false, pr:0 は terminalSav
   assert.equal(classifyStateWriteFailureStatus({ outputMissing: false, terminalSaved: true, prNumber: 0 }), 'failed')
 })
 
-test('classifyUncaughtFailureStatus: knownPr が正の整数なら blocked', () => {
-  assert.equal(classifyUncaughtFailureStatus({ knownPr: 1 }), 'blocked')
-  assert.equal(classifyUncaughtFailureStatus({ knownPr: 999999 }), 'blocked')
+test('classifyUncaughtFailureStatus: knownPr が正の整数かつ terminalSaved:true なら blocked', () => {
+  assert.equal(classifyUncaughtFailureStatus({ knownPr: 1, terminalSaved: true }), 'blocked')
+  assert.equal(classifyUncaughtFailureStatus({ knownPr: 999999, terminalSaved: true }), 'blocked')
 })
 
-test('classifyUncaughtFailureStatus: knownPr が 0・undefined・負数・非整数なら failed', () => {
-  assert.equal(classifyUncaughtFailureStatus({ knownPr: 0 }), 'failed')
-  assert.equal(classifyUncaughtFailureStatus({ knownPr: undefined }), 'failed')
-  assert.equal(classifyUncaughtFailureStatus({ knownPr: -1 }), 'failed')
-  assert.equal(classifyUncaughtFailureStatus({ knownPr: 1.5 }), 'failed')
+test('classifyUncaughtFailureStatus: knownPr が正の整数でも terminalSaved が true でなければ failed（blocked 保存の永続化未確認。Issue #493 codex 指摘）', () => {
+  assert.equal(classifyUncaughtFailureStatus({ knownPr: 1, terminalSaved: false }), 'failed')
+  assert.equal(classifyUncaughtFailureStatus({ knownPr: 1, terminalSaved: undefined }), 'failed')
+})
+
+test('classifyUncaughtFailureStatus: knownPr が 0・undefined・負数・非整数なら terminalSaved によらず failed', () => {
+  assert.equal(classifyUncaughtFailureStatus({ knownPr: 0, terminalSaved: true }), 'failed')
+  assert.equal(classifyUncaughtFailureStatus({ knownPr: undefined, terminalSaved: true }), 'failed')
+  assert.equal(classifyUncaughtFailureStatus({ knownPr: -1, terminalSaved: true }), 'failed')
+  assert.equal(classifyUncaughtFailureStatus({ knownPr: 1.5, terminalSaved: true }), 'failed')
 })
 
 // ---------------------------------------------------------------------------
@@ -307,11 +312,15 @@ test('定義部・駆動部とも、STATE_AGENT_MODEL_CHAIN 以外に phase: \'S
   assert.ok(found >= 5, `state 系ラベルが期待より少ない（見つかった数: ${found}）`)
 })
 
-test('runOne の catch ブロックが classifyUncaughtFailureStatus を参照し、recordFailure へ status を渡している', () => {
+test('runOne の catch ブロックが classifyUncaughtFailureStatus に terminalSaved を渡し、recordFailure へ status を渡している（Issue #493 codex 指摘: blocked 降格は永続化成功時のみ）', () => {
   const catchIdx = driverPart.indexOf('async function runOne(item) {')
   assert.notEqual(catchIdx, -1, 'runOne が見つからない')
-  const body = driverPart.slice(catchIdx, catchIdx + 1200)
-  assert.match(body, /classifyUncaughtFailureStatus\(\{ knownPr \}\)/)
+  const body = driverPart.slice(catchIdx, catchIdx + 1800)
+  assert.match(body, /classifyUncaughtFailureStatus\(\{ knownPr, terminalSaved \}\)/)
+  // 'blocked' patch（pr を含む）の保存成否を確認してから classify していること
+  // （knownPrByIssue への in-memory 登録だけでは terminalSaved を保証しないため）。
+  assert.match(body, /terminalSaved\s*=\s*await updateState\(/)
+  assert.match(body, /status:\s*'blocked'/)
   assert.match(body, /recordFailure\(\{/)
   assert.match(body, /knownPrByIssue\.get\(item\.number\)/)
 })

@@ -949,8 +949,17 @@ function classifyStateWriteFailureStatus({ outputMissing, terminalSaved, prNumbe
 
 
 
-function classifyUncaughtFailureStatus({ knownPr }) {
-  return Number.isInteger(knownPr) && knownPr > 0 ? 'blocked' : 'failed'
+
+
+
+
+
+
+
+function classifyUncaughtFailureStatus({ knownPr, terminalSaved }) {
+  const hasPr = Number.isInteger(knownPr) && knownPr > 0
+  if (!hasPr) return 'failed'
+  return terminalSaved === true ? 'blocked' : 'failed'
 }
 
 
@@ -6005,13 +6014,28 @@ async function runOne(item) {
 
 
 
+
+
+
+
+
+
     const knownPr = knownPrByIssue.get(item.number)
-    const status = classifyUncaughtFailureStatus({ knownPr })
-    await updateState(item.number, {
-      status,
-      note: reason,
-      ...(status === 'blocked' ? { pr: knownPr } : {}),
-    })
+    const hasPr = Number.isInteger(knownPr) && knownPr > 0
+    let terminalSaved
+    if (hasPr) {
+      terminalSaved = await updateState(item.number, {
+        status: 'blocked',
+        note: reason,
+        pr: knownPr,
+      })
+      if (!terminalSaved) {
+        log(`⚠️ issue #${item.number}: catch-all の blocked 状態（PR #${knownPr} の監視再開情報）永続化に失敗した。重複 PR 防止のため failed（halt カウント対象）へ倒す（${STATE_FILE} を手動確認すること）`)
+      }
+    } else {
+      await updateState(item.number, { status: 'failed', note: reason })
+    }
+    const status = classifyUncaughtFailureStatus({ knownPr, terminalSaved })
     recordFailure({
       issue: item.number,
       reason,
