@@ -817,9 +817,55 @@ const OPTIN_RECORD_RESULTS = ['pass', 'fail', 'not-run']
 
 
 
+
+
+
+
 const OPTIN_RECORD_END_MARKER = '<!-- /opt-in-test-record -->'
 function optinRecordMarkerLine(sha, result, command) {
   return `${OPTIN_RECORD_MARKER_PREFIX}${sha} ${result} ${command} -->`
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function optinRecordRemovalShellLines() {
+  const allowedLinePattern = `^$|^${OPTIN_RECORD_MARKER_PREFIX}|^- コマンド: |^- 結果: |^- 補足: `
+  return [
+    '   ```',
+    '   L=$(grep -nE \'^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$\' "$f" | tail -n 1 | cut -d: -f1)',
+    '   if [ -n "$L" ]; then',
+    `     E=$(awk -v l="$L" -v m=${JSON.stringify(OPTIN_RECORD_END_MARKER)} 'NR>l { t=$0; sub(/\\r$/,"",t); if (t==m) { print NR; exit } }' "$f"); rcE=$?`,
+    '     N=$(wc -l < "$f"); rcN=$?',
+    '     if [ "$rcE" = 0 ] && [ "$rcN" = 0 ]; then',
+    '       if [ -n "$E" ]; then HI=$((E-1)); DEL_END=$E; else HI=$N; DEL_END=$N; fi',
+    '       body=$(sed -n "$((L+1)),${HI}p" "$f"); rcBody=$?',
+    `       if [ "$rcBody" = 0 ] && [ -z "$(printf '%s\\n' "$body" | tr -d '\\r' | grep -vE ${JSON.stringify(allowedLinePattern)})" ]; then`,
+    '         g=$(mktemp)',
+    '         if sed "${L},${DEL_END}d" "$f" > "$g"; then mv "$g" "$f"; else rm -f "$g"; fi',
+    '       fi',
+    '     fi',
+    '   fi',
+    '   ```',
+    `   （見出し行の最後の出現位置より後で、終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)} が最初に現れる行までを削除候補にする。CRLF 本文にも対応するため比較前に各行の末尾 \\r を取り除く。終端マーカーが見つからない場合は本文末尾までを同じ基準で検証する（終端マーカーを持たない旧書式の記録節が対象）。間の各行がマーカー行・箇条書き行・空行のいずれかにのみ一致し、かつ途中の awk / wc / sed がすべて 0 終了した場合のみ実際に削除する。1 つでも条件を満たさなければ "$f" は一切変更されない（fail-closed。旧い記録節が残ったまま次の手順で新しい節が追記される可能性があるが、データ損失より優先する）。終端マーカーより後ろに外部ツールが追記した内容があっても削除範囲に含まれず保持される）`,
+  ]
 }
 
 
@@ -3475,22 +3521,8 @@ function optinRecordUpdateInstructions(item, impl, stepNo) {
 
 
 
-
-
-    `   c. 既存の opt-in テスト記録節を安全に除去する（開始見出し・終端マーカーの両方で機械生成区間を本文の末尾として一意に識別できた場合のみ削除する。識別できない場合は "$f" を一切変更せずそのまま手順 d へ進む）:`,
-    '   ```',
-    `   if [ "$(tail -n 1 "$f")" = ${JSON.stringify(OPTIN_RECORD_END_MARKER)} ]; then`,
-    `     L=$(grep -nE '^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$' "$f" | cut -d: -f1)`,
-    `     if [ "$(printf '%s\\n' "$L" | grep -c '^[0-9]')" = "1" ]; then`,
-    '       N=$(wc -l < "$f")',
-    '       body=$(sed -n "$((L+1)),$((N-1))p" "$f")',
-    `       if [ -z "$(printf '%s\\n' "$body" | grep -vE ${JSON.stringify(`^$|^${OPTIN_RECORD_MARKER_PREFIX}|^- コマンド: |^- 結果: |^- 補足: `)})" ]; then`,
-    `         g=$(mktemp); s=$(sed -n "1,$((L-1))p" "$f"); printf ${JSON.stringify('%s')} "$s" > "$g"; mv "$g" "$f"`,
-    '       fi',
-    '     fi',
-    '   fi',
-    '   ```',
-    `   （最終行が終端マーカーと完全一致し、かつ見出し行がちょうど 1 件、かつ見出しと終端マーカーの間の各行がマーカー行・箇条書き行・空行のいずれかにのみ一致する場合だけ削除される。条件を 1 つでも満たさなければ "$f" は変更されず、旧い記録節が残ったまま手順 d で新しい節が追記される可能性がある — 見出しが本当にユーザー由来の非関連コンテンツだった場合の安全側の帰結であり、データ損失より優先する。printf '%s' で書き戻す（cat 等で単純にリダイレクトすると保持されたブロックの末尾改行がそのまま残り、除去→追記サイクルを繰り返すたびに見出し直前の空行が増え続ける）`,
+    `   c. 既存の opt-in テスト記録節を安全に除去する（見出し行の最後の出現位置と終端マーカーの両方から機械生成区間を識別できた場合のみ削除する。識別できない場合は "$f" を一切変更せずそのまま手順 d へ進む）:`,
+    ...optinRecordRemovalShellLines(),
     `   d. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（見出し行・マーカー行・終端マーカー行いずれも行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる。下に示すコードブロックのインデントは箇条書きの見た目上のものであり、実際に "$f" へ書き込む内容には含めない）。見出し行の直前には必ず空行を 1 行入れる（"$f" の末尾が改行なしで終わっていても、{ echo; echo; echo '## opt-in テスト実行記録'; ...; } >> "$f" のように echo を重ねて空行を作ってから見出し以降を追記すれば、直前の行と結合しない）。節の実際の最終行として終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)} を必ず書く（次回以降の再利用経路がこの節を安全に識別・削除するための境界になる）:`,
     '   ```',
     '   ## opt-in テスト実行記録',
@@ -3977,23 +4009,10 @@ function prCreatePrompt(item, impl, outOfScope) {
 
 
 
-
     ...(optinRecordSection
       ? [
-          `   次に（Closes 行・対象外節の追記より前に）既存の opt-in テスト記録節を安全に除去する（開始見出し・終端マーカーの両方で機械生成区間を本文の末尾として一意に識別できた場合のみ削除する。識別できない場合は "$f" を一切変更せずそのまま次の追記へ進む）:`,
-          '   ```',
-          `   if [ "$(tail -n 1 "$f")" = ${JSON.stringify(OPTIN_RECORD_END_MARKER)} ]; then`,
-          `     L=$(grep -nE '^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$' "$f" | cut -d: -f1)`,
-          `     if [ "$(printf '%s\\n' "$L" | grep -c '^[0-9]')" = "1" ]; then`,
-          '       N=$(wc -l < "$f")',
-          '       body=$(sed -n "$((L+1)),$((N-1))p" "$f")',
-          `       if [ -z "$(printf '%s\\n' "$body" | grep -vE ${JSON.stringify(`^$|^${OPTIN_RECORD_MARKER_PREFIX}|^- コマンド: |^- 結果: |^- 補足: `)})" ]; then`,
-          `         g=$(mktemp); s=$(sed -n "1,$((L-1))p" "$f"); printf ${JSON.stringify('%s')} "$s" > "$g"; mv "$g" "$f"`,
-          '       fi',
-          '     fi',
-          '   fi',
-          '   ```',
-          `   （最終行が終端マーカーと完全一致し、かつ見出し行がちょうど 1 件、かつ見出しと終端マーカーの間の各行がマーカー行・箇条書き行・空行のいずれかにのみ一致する場合だけ削除される。条件を 1 つでも満たさなければ "$f" は変更されず、旧い記録節が残ったまま以降の手順で新しい節が追記される可能性がある — 見出しが本当にユーザー由来の非関連コンテンツだった場合の安全側の帰結であり、データ損失より優先する。このブロックは grep/sed の異常終了時（構文エラー等）も条件不成立と同じ経路（削除せず継続）へ自然に倒れる。printf '%s' で書き戻す（cat 等で単純にリダイレクトすると保持されたブロックの末尾改行がそのまま残り、除去→追記サイクルを繰り返すたびに見出し直前の空行が増え続ける）`,
+          `   次に（Closes 行・対象外節の追記より前に）既存の opt-in テスト記録節を安全に除去する（見出し行の最後の出現位置と終端マーカーの両方から機械生成区間を識別できた場合のみ削除する。識別できない場合は "$f" を一切変更せずそのまま次の追記へ進む）:`,
+          ...optinRecordRemovalShellLines(),
         ]
       : []),
 

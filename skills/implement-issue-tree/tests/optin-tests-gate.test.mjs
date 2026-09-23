@@ -33,6 +33,7 @@ const SLICE_EXPORTS = [
   'restoreOptinFixState',
   'renderOptinRecordSection',
   'optinRecordMarkerLine',
+  'optinRecordRemovalShellLines',
   'classifyOptinRecordGate',
   'combineOptinRecordGate',
   'isOptinLatchActive',
@@ -71,6 +72,7 @@ const {
   restoreOptinFixState,
   renderOptinRecordSection,
   optinRecordMarkerLine,
+  optinRecordRemovalShellLines,
   classifyOptinRecordGate,
   combineOptinRecordGate,
   isOptinLatchActive,
@@ -585,13 +587,21 @@ test('prCreatePrompt: 宣言ありでは push 前の再実行手順（0c/0d）�
   assert.match(p, new RegExp(`${OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<sha> <result> make e2e -->`))
 })
 
-test('prCreatePrompt: 宣言ありではマーカー境界で安全確認してから削除する手順を含み、無条件削除の旧 sed 文字列・旧 grep -vF ベースの文字列は含まない（PR #504 codex P0: 非信頼な既存本文の同名見出し以降を無条件削除しない）', () => {
+test('prCreatePrompt: 宣言ありではマーカー境界で安全確認してから削除する手順を含み、無条件削除の旧 sed 文字列・旧 grep -vF ベース・旧 tail -n 1 前提の文字列は含まない（PR #504 codex P0 / cursor[bot] Medium: 非信頼な既存本文の同名見出し以降を無条件削除しない・外部ツールの追記や CRLF で恒久的に削除不能にならない）', () => {
   const p = prCreatePrompt({ ...item, optinTests: ['make e2e'] }, impl, [])
   assert.ok(!p.includes("sed '/^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$/,$d' \"$f\""))
   assert.ok(!p.includes('grep -vF'))
-  // 終端マーカーが本文の最終行と完全一致する場合のみ削除候補にする境界チェック。
-  assert.ok(p.includes(`tail -n 1 "$f"`))
+  // v1（本文の最終行が終端マーカーと完全一致することを前提にする）は Cursor Bugbot 等の
+  // 追記で恒久的に成立しなくなるため廃止済み（PR #504 レビュー）。
+  assert.ok(!p.includes('tail -n 1 "$f"'))
   assert.ok(p.includes(OPTIN_RECORD_END_MARKER))
+  // 見出し行の最後の出現位置を対象にする（旧書式の既存 PR で見出しが増え続ける再発を防ぐ）。
+  assert.ok(p.includes('tail -n 1 | cut -d: -f1'))
+  // CRLF 対策（末尾 \r の除去）を含む。
+  assert.ok(p.includes("tr -d '\\r'"))
+  // body/s の sed 終了コードを確認せず書き戻していた codex P0 を修正: 削除の書き戻しは
+  // 単一の sed 実行の終了コードで gate し、非 0 なら一時ファイルを破棄して mv しない。
+  assert.ok(p.includes('if sed "${L},${DEL_END}d" "$f" > "$g"; then mv "$g" "$f"; else rm -f "$g"; fi'))
   // 識別できない場合は "$f" を変更せず安全側に倒す旨の説明を含む。
   assert.match(p, /識別できない場合は.*"\$f".*変更せず/)
 })
@@ -604,6 +614,74 @@ test('prCreatePrompt: opt-in 記録節の除去手順は Closes 行・対象外�
   assert.ok(removeIdx >= 0 && closesIdx >= 0 && oosIdx >= 0)
   assert.ok(removeIdx < closesIdx, '除去手順は Closes 行の追記より前に現れなければならない')
   assert.ok(removeIdx < oosIdx, '除去手順は対象外節の追記より前に現れなければならない')
+})
+
+// ---------------------------------------------------------------------------
+// optinRecordRemovalShellLines の実行時回帰（PR #504 codex P0 / cursor[bot] Medium 指摘 2 件）。
+// プロンプト文字列に含まれる部分文字列だけでなく、生成されたシェル断片を実際に sh -c で
+// 実行して "$f" の中身を検証する。エージェントに指示を出す静的テキストのアサーションだけでは
+// ロジックの回帰（CRLF・追記トレーラ・旧書式・異常終了時の fail-closed）を検出できないため。
+// ---------------------------------------------------------------------------
+
+// optinRecordRemovalShellLines() のコードフェンス（'   ```' 〜 '   ```'）を取り出し、
+// 行頭の 3 space インデント（箇条書きの見た目上のもの）を剥がして実行可能な sh スクリプトへ戻す。
+function extractRemovalScript() {
+  const lines = optinRecordRemovalShellLines()
+  const fenceStart = lines.indexOf('   ```')
+  const fenceEnd = lines.indexOf('   ```', fenceStart + 1)
+  assert.ok(fenceStart >= 0 && fenceEnd > fenceStart, 'コードフェンスが 2 個 1 組で見つからない')
+  return lines
+    .slice(fenceStart + 1, fenceEnd)
+    .map((l) => l.replace(/^   /, ''))
+    .join('\n')
+}
+
+function runRemoval(bodyBuffer) {
+  const dir = mkdtempSync(join(tmpdir(), 'optin-removal-'))
+  const f = join(dir, 'body.txt')
+  writeFileSync(f, bodyBuffer)
+  const script = `f=${JSON.stringify(f)}\n${extractRemovalScript()}\n`
+  execFileSync('sh', ['-c', script])
+  return readFileSync(f, 'utf8')
+}
+
+test('optinRecordRemovalShellLines: 通常ケース（見出し〜終端マーカーが本文末尾）は節全体を削除する', () => {
+  const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine('a'.repeat(40), 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n`
+  const after = runRemoval(before)
+  // 見出しより前の内容（末尾の空行を含む）はそのまま保持される。
+  assert.equal(after, 'Closes #42\n\n')
+})
+
+test('optinRecordRemovalShellLines: 終端マーカーより後ろに外部ツールの追記（Cursor Bugbot 等）があっても、記録節だけを削除しトレーラは保持する（PR #504 レビューで判明した v1 設計欠陥の回帰）', () => {
+  const before = `Closes #42\n\n## opt-in テスト実行記録\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n<!-- CURSOR_SUMMARY -->\n外部ツールのコメント\n<!-- /CURSOR_SUMMARY -->\n`
+  const after = runRemoval(before)
+  assert.equal(after, 'Closes #42\n\n<!-- CURSOR_SUMMARY -->\n外部ツールのコメント\n<!-- /CURSOR_SUMMARY -->\n')
+})
+
+test('optinRecordRemovalShellLines: CRLF 本文でも終端マーカー行を識別して削除する（cursor[bot] Medium 指摘の回帰）', () => {
+  const bodyLf = `Closes #42\n\n## opt-in テスト実行記録\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n`
+  const bodyCrlf = bodyLf.replace(/\n/g, '\r\n')
+  const after = runRemoval(bodyCrlf)
+  assert.ok(!after.includes('## opt-in テスト実行記録'), 'CRLF 本文でも見出しが除去されているべき')
+  assert.ok(after.startsWith('Closes #42'))
+})
+
+test('optinRecordRemovalShellLines: 終端マーカーを持たない旧書式（本文末尾まで既知パターンのみ）は本文末尾までを削除する（v2 の legacy パス）', () => {
+  const before = `Closes #42\n\n## opt-in テスト実行記録\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n`
+  const after = runRemoval(before)
+  assert.equal(after, 'Closes #42\n\n')
+})
+
+test('optinRecordRemovalShellLines: 見出しが 2 件残っている旧書式でも、最後の出現位置に対応する記録節だけを削除する（cursor[bot] Medium 指摘: 見出しが増え続ける再発の防止）', () => {
+  const before = `## opt-in テスト実行記録\nユーザーが引用した過去の見出し\n\n## opt-in テスト実行記録\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n`
+  const after = runRemoval(before)
+  assert.equal(after, '## opt-in テスト実行記録\nユーザーが引用した過去の見出し\n\n')
+})
+
+test('optinRecordRemovalShellLines: 見出しと終端マーカーの間に未知の行（ユーザー由来コンテンツの可能性）があれば削除しない（安全側）', () => {
+  const before = `## opt-in テスト実行記録\nユーザーが書いた本文\n${OPTIN_RECORD_END_MARKER}\n`
+  const after = runRemoval(before)
+  assert.equal(after, before, '識別できない場合 "$f" は一切変更されない')
 })
 
 test('optinRecordVerifyPrompt: gh pr view --json body,headRefOid を単一呼び出しで取得し、本文転記禁止・headRefOid 検証・件数のみ返却の指示を含む（PR #503 3 巡目 codex P1）', () => {
@@ -654,12 +732,15 @@ test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありでは再実行
   assert.match(p, /gh pr edit 123 --body-file/)
 })
 
-test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありではマーカー境界で安全確認してから削除する手順を含み、無条件削除の旧 sed 文字列・旧 grep -vF ベースの文字列は含まない（PR #504 codex P0）', () => {
+test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありではマーカー境界で安全確認してから削除する手順を含み、無条件削除の旧 sed 文字列・旧 grep -vF ベース・旧 tail -n 1 前提の文字列は含まない（PR #504 codex P0 / cursor[bot] Medium）', () => {
   const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true)
   assert.ok(!p.includes("sed '/^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$/,$d' \"$f\""))
   assert.ok(!p.includes('grep -vF'))
-  assert.ok(p.includes(`tail -n 1 "$f"`))
+  assert.ok(!p.includes('tail -n 1 "$f"'))
   assert.ok(p.includes(OPTIN_RECORD_END_MARKER))
+  assert.ok(p.includes('tail -n 1 | cut -d: -f1'))
+  assert.ok(p.includes("tr -d '\\r'"))
+  assert.ok(p.includes('if sed "${L},${DEL_END}d" "$f" > "$g"; then mv "$g" "$f"; else rm -f "$g"; fi'))
 })
 
 test('fixPrompt: pushAfterFix=true でも optinTests が空なら出力は無変更（R3 と同じ既定無効方針）', () => {
