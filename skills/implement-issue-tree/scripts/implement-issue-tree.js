@@ -125,6 +125,80 @@ const autoMergeEnabled = (() => {
 
 
 
+
+function parsePhaseGate(raw) {
+  if (raw === undefined || raw === null) return false
+  if (typeof raw !== 'boolean') {
+    throw new Error('args.phaseGate は boolean で指定すること（例: {"phaseGate": true}。未指定はゲートなし = 現行動作。Issue #494）')
+  }
+  return raw
+}
+const phaseGateEnabled = parsePhaseGate(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.phaseGate : undefined)
+
+
+
+
+
+
+
+function buildPhaseGateEdges(rootNumber, byParentMap) {
+  const units = [...(byParentMap.get(rootNumber) ?? [])].sort((a, b) => a.siblingIndex - b.siblingIndex)
+  const order = units.map((u) => u.number)
+  function subtreeOf(unitNode) {
+
+    const acc = []
+    const stack = [unitNode]
+    const seen = new Set()
+    while (stack.length > 0) {
+      const n = stack.pop()
+      if (seen.has(n.number)) continue
+      seen.add(n.number)
+      acc.push(n.number)
+      for (const c of byParentMap.get(n.number) ?? []) stack.push(c)
+    }
+    return acc
+  }
+  const subtrees = units.map((u) => subtreeOf(u))
+
+
+
+  const gatePrereqs = units.map((u, i) => {
+    const children = byParentMap.get(u.number) ?? []
+    return children.length > 0 ? subtrees[i].filter((n) => n !== u.number) : [u.number]
+  })
+  const edges = []
+  for (let k = 1; k < units.length; k++) {
+    const prereqUnion = new Set()
+    for (let j = 0; j < k; j++) for (const p of gatePrereqs[j]) prereqUnion.add(p)
+    for (const node of subtrees[k]) {
+      for (const prereq of prereqUnion) {
+        if (node === prereq) continue
+        edges.push({ from: node, to: prereq })
+      }
+    }
+  }
+  return { order, edges }
+}
+
+
+
+
+
+function selectRemovableCycleEdge(cycle, byParentMap, depsMapArg, protectedKeys) {
+  for (let i = 0; i < cycle.length; i++) {
+    const from = cycle[i]
+    const to = cycle[(i + 1) % cycle.length]
+    const isTreeEdge = (byParentMap.get(from) ?? []).some((c) => c.number === to)
+    const isProtected = protectedKeys.has(`${from}->${to}`)
+    if (!isTreeEdge && !isProtected && depsMapArg.get(from)?.has(to)) {
+      return { from, to }
+    }
+  }
+  return null
+}
+
+
+
 function parseMaxBaseMerges(raw) {
   if (raw === undefined || raw === null) return 3
   if (Number.isInteger(raw) && raw >= 0 && raw <= 10) return raw
@@ -5778,6 +5852,27 @@ for (const item of queue) {
     depsMap.get(item.number).add(d)
   }
 }
+
+
+
+
+
+const phaseGateEdgeKeys = new Set()
+let phaseOrder = []
+if (phaseGateEnabled) {
+  const { order, edges } = buildPhaseGateEdges(parent, byParent)
+  phaseOrder = order
+  for (const { from, to } of edges) {
+
+
+    if (!inTree.has(from) || !inTree.has(to) || from === to) continue
+    depsMap.get(from)?.add(to)
+    phaseGateEdgeKeys.add(`${from}->${to}`)
+  }
+  if (order.length > 1) {
+    log(`Phase ゲート有効: ${order.map((n) => `#${n}`).join(' → ')}（sub-issues リスト順。前 Phase の全子孫が merged/closed になるまで次 Phase に着手しない）`)
+  }
+}
 function findDependencyCycle() {
   const color = new Map()
   const stack = []
@@ -5805,20 +5900,12 @@ function findDependencyCycle() {
 }
 let cycle = findDependencyCycle()
 while (cycle) {
-  let removed = false
-  for (let i = 0; i < cycle.length; i++) {
-    const from = cycle[i]
-    const to = cycle[(i + 1) % cycle.length]
-    const isTreeEdge = (byParent.get(from) ?? []).some((c) => c.number === to)
-    if (!isTreeEdge && depsMap.get(from)?.has(to)) {
-      depsMap.get(from).delete(to)
-      log(`循環依存を検出: ${cycle.map((n) => `#${n}`).join(' → ')}。#${from} の dependsOn #${to} を無視する`)
-      removed = true
-      break
-    }
-  }
 
-  if (!removed) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
+  const edge = selectRemovableCycleEdge(cycle, byParent, depsMap, phaseGateEdgeKeys)
+
+  if (!edge) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
+  depsMap.get(edge.from).delete(edge.to)
+  log(`循環依存を検出: ${cycle.map((n) => `#${n}`).join(' → ')}。#${edge.from} の dependsOn #${edge.to} を無視する`)
   cycle = findDependencyCycle()
 }
 
@@ -5845,13 +5932,33 @@ async function markBlockedByDeps(item, failedDeps) {
   const childSet = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
   const failedChildren = failedDeps.filter((d) => childSet.has(d))
   const failedPrereqs = failedDeps.filter((d) => !childSet.has(d))
+
+
+
+  const failedPhaseGate = failedPrereqs.filter((d) => phaseGateEdgeKeys.has(`${item.number}->${d}`))
+  const failedOtherPrereqs = failedPrereqs.filter((d) => !phaseGateEdgeKeys.has(`${item.number}->${d}`))
   let note
   if (failedChildren.length > 0 && failedPrereqs.length === 0) {
     note = `子イシューの失敗・ブロックによりクローズ検証を保留: ${failedChildren.map((d) => `#${d}`).join(', ')}`
+  } else if (failedChildren.length > 0 && failedPhaseGate.length > 0 && failedOtherPrereqs.length === 0) {
+    note =
+      `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前 Phase 未完了（phaseGate） ` +
+      `${failedPhaseGate.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
+  } else if (failedChildren.length > 0 && failedPhaseGate.length > 0) {
+    note =
+      `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')}、前 Phase 未完了（phaseGate） ` +
+      `${failedPhaseGate.map((d) => `#${d}`).join(', ')}、前提イシュー ` +
+      `${failedOtherPrereqs.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
   } else if (failedChildren.length > 0) {
     note =
       `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
       `${failedPrereqs.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
+  } else if (failedPhaseGate.length > 0 && failedOtherPrereqs.length === 0) {
+    note = `前 Phase 未完了（phaseGate）により未着手: ${failedPhaseGate.map((d) => `#${d}`).join(', ')}`
+  } else if (failedPhaseGate.length > 0) {
+    note =
+      `前 Phase 未完了（phaseGate） ${failedPhaseGate.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
+      `${failedOtherPrereqs.map((d) => `#${d}`).join(', ')} の失敗により未着手`
   } else {
     note = `前提イシューの失敗・ブロックにより未着手: ${failedPrereqs.map((d) => `#${d}`).join(', ')}`
   }
@@ -6992,4 +7099,4 @@ if (residualBytesOverLimit) {
 
 
 
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions }
