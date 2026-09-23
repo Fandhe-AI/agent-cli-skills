@@ -4705,10 +4705,10 @@ async function runImplement(item) {
           `（${monitoringAttempt.outputMissing ? 'state 書込みエージェントが StructuredOutput を返さなかった' : 'エージェント応答上のシステム的失敗'}）。` +
           `重複 PR 防止のためマージ監視へ進まず停止する（${STATE_FILE} と PR #${impl.prNumber} を手動確認すること）`
         log(`⚠️ issue #${item.number}: ${reason}`)
-        // best-effort で終端状態と回復メタデータの保存を試みる。'blocked' で保存できれば PR は
-        // 実在するため監視再開の対象になり、保存自体に失敗すれば再開対象から外れて重複 PR を
-        // 作りうるため 'failed' に格下げする（classifyStateWriteFailureStatus に一元化。
-        // Issue #493: outputMissing 単独でも常に 'blocked' 側へ倒す）。
+        // best-effort で終端状態と回復メタデータの保存を試みる（classifyStateWriteFailureStatus
+        // に一元化）。outputMissing（未応答）なら、この 'blocked' 保存の成否を問わず常に
+        // 'blocked' にする（Issue #493。halt 連続カウントへの誤算入回避）。outputMissing でない
+        // 場合（応答はしたが保存失敗）のみ、保存できれば 'blocked'、失敗すれば 'failed' に落とす。
         const blockedSaved = await updateState(item.number, {
           status: 'blocked',
           pr: impl.prNumber,
