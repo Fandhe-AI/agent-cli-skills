@@ -31,6 +31,7 @@ const SLICE_EXPORTS = [
   'renderOptinRecordSection',
   'optinRecordMarkerLine',
   'classifyOptinRecordGate',
+  'combineOptinRecordGate',
   'OPTIN_RECORD_MARKER_PREFIX',
   'OPTIN_TESTS_MAX',
   'OPTIN_TEST_RUNNERS',
@@ -59,6 +60,7 @@ const {
   renderOptinRecordSection,
   optinRecordMarkerLine,
   classifyOptinRecordGate,
+  combineOptinRecordGate,
   OPTIN_RECORD_MARKER_PREFIX,
   OPTIN_TESTS_MAX,
   implementPrompt,
@@ -238,6 +240,50 @@ test('classifyOptinRecordGate: null・fetchFailed・件数不一致・非整数�
   assert.deepEqual(classifyOptinRecordGate(['make e2e', 'make e2e2'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] }), { ok: false, missing: [0, 1] })
   assert.deepEqual(classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 'x', nonPass: 0 }] }), { ok: false, missing: [0] })
   assert.deepEqual(classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: -1, nonPass: 0 }] }), { ok: false, missing: [0] })
+})
+
+// ---------------------------------------------------------------------------
+// 群 D2: combineOptinRecordGate（Issue #495 Medium 2 — post-push fix の実測による PR 本文ゲートの上書き）
+// ---------------------------------------------------------------------------
+
+test('combineOptinRecordGate: fix の opt-in 結果が fail のとき、PR 本文ゲートが ok でも不合格にする', () => {
+  const bodyGateOk = { ok: true, missing: [] }
+  const fixOptinRuns = [{ command: 'make e2e', result: 'fail', detail: '' }]
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptinRuns), { ok: false, missing: [0] })
+})
+
+test('combineOptinRecordGate: fix の opt-in 結果が全 pass なら PR 本文ゲートの判定をそのまま使う（従来判定）', () => {
+  const bodyGateOk = { ok: true, missing: [] }
+  const fixOptinRuns = [{ command: 'make e2e', result: 'pass', detail: '' }]
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptinRuns), bodyGateOk)
+
+  const bodyGateMissing = { ok: false, missing: [0] }
+  assert.deepEqual(combineOptinRecordGate(bodyGateMissing, fixOptinRuns), bodyGateMissing)
+})
+
+test('combineOptinRecordGate: fix 未実施（null）は PR 本文ゲートの判定のみに委ねる', () => {
+  const bodyGateOk = { ok: true, missing: [] }
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, null), bodyGateOk)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, []), bodyGateOk)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, undefined), bodyGateOk)
+})
+
+test('combineOptinRecordGate: 結果欠落（not-run 補完・報告なし相当）は不合格として扱う', () => {
+  const bodyGateOk = { ok: true, missing: [] }
+  // sanitizeOptinTestRuns が報告欠落を not-run で補完した形を模す。
+  const fixOptinRuns = [
+    { command: 'make e2e', result: 'not-run', detail: '実装エージェントの報告なし' },
+  ]
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptinRuns), { ok: false, missing: [0] })
+})
+
+test('combineOptinRecordGate: PR 本文ゲートと fix 実測の missing 集合を重複排除して統合する', () => {
+  const bodyGateMissing = { ok: false, missing: [1] }
+  const fixOptinRuns = [
+    { command: 'make e2e', result: 'fail', detail: '' },
+    { command: 'make e2e2', result: 'pass', detail: '' },
+  ]
+  assert.deepEqual(combineOptinRecordGate(bodyGateMissing, fixOptinRuns), { ok: false, missing: [0, 1] })
 })
 
 // ---------------------------------------------------------------------------

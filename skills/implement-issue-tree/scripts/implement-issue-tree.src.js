@@ -743,6 +743,29 @@ function classifyOptinRecordGate(declared, verifyResult) {
   return { ok: missing.length === 0, missing }
 }
 
+// classifyOptinRecordGate（PR 本文の記録節を独立エージェントが読んで判定）の結果に、ホストが
+// プロセス内で直接保持する「直近の post-push fix（pushAfterFix: true）が再実行した opt-in
+// テスト結果」を AND で重ねる fail-closed 判定（Issue #495 Medium 2）。PR 本文更新
+// （optinRecordUpdateInstructions）はエージェントの自己申告手順であり、失敗・省略されても
+// エージェントは pushed: true を返し得る。その場合 classifyOptinRecordGate は PR 本文に残った
+// 古い pass マーカーだけを見て ok を返してしまう（fail-open）。fixOptinRuns はホストが
+// runMergeLoop 内で sanitizeOptinTestRuns 済みの値を毎ラウンド更新して保持するため、
+// PR 本文を経由しない独立した判定材料になる。
+// fixOptinRuns が null（このループ内で post-push fix を一度も実行していない）場合は判定材料が
+// 無いため gate をそのまま返す（既存の PR 本文ベース判定のみに委ねる）。sanitizeOptinTestRuns は
+// 宣言コマンド 1 件につき 1 エントリを返し報告欠落を not-run で補完する契約のため、ここでの
+// 「結果欠落」は enum 外・報告なしのいずれも result !== 'pass' として自然に不合格へ倒れる。
+function combineOptinRecordGate(gate, fixOptinRuns) {
+  if (!Array.isArray(fixOptinRuns) || fixOptinRuns.length === 0) return gate
+  const overrideMissing = []
+  fixOptinRuns.forEach((r, i) => {
+    if (!r || r.result !== 'pass') overrideMissing.push(i)
+  })
+  if (overrideMissing.length === 0) return gate
+  const missing = Array.from(new Set([...(gate.missing ?? []), ...overrideMissing])).sort((a, b) => a - b)
+  return { ok: false, missing }
+}
+
 // ============================================================================
 // セクション 3: 定数・JSON スキーマ（COMMON は共通指示、*_SCHEMA は返却値の型検証定義）
 // ============================================================================
@@ -5774,6 +5797,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // expectedRepo 未確定ガード・上限到達時の quality+blocked 終端もそのまま効く）。立てられる
   // 回数も pr-create 1 回 + fix 回数（<= 6）に有界。
   let pendingPushConflict = normalizePushMergeable(initialPushMergeable) === 'CONFLICTING'
+  // Issue #495 Medium 2: 直近の post-push fix（pushAfterFix: true）が再実行した opt-in テスト
+  // 結果（sanitizeOptinTestRuns 適用済み）。マージ前ゲートで PR 本文ベースの
+  // classifyOptinRecordGate と AND する独立判定材料として使う（combineOptinRecordGate）。
+  // このループ内で post-push fix を一度も実行していない間は null のまま（PR 本文ベースの
+  // 従来判定のみに委ねる）。プロセス内メモリのみで保持し状態ファイルへは永続化しない
+  // （resolveProof と同じ理由: resume 直後は null に戻って fail-closed 側へ寄る設計でよい）。
+  let lastFixOptinRuns = null
   // merge-exec が unresolved-threads（件数のみ）を検出したのに一覧が手元にないとき true。
   // 次ラウンドの monitor へ強制再走査を指示し、unresolved-comments/ready で解除する（件数・
   // reason のみを根拠に立てる）。
@@ -6004,15 +6034,21 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         } catch (e) {
           log(`⚠️ #${item.number}: opt-in テスト記録検証エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
         }
-        const gate = classifyOptinRecordGate(item.optinTests, optinVerify)
+        // combineOptinRecordGate は PR 本文ベースの gate に、ホストが保持する直近 post-push fix
+        // の実測（lastFixOptinRuns）を AND で重ねる（Issue #495 Medium 2）。fix 未実施ラウンドは
+        // lastFixOptinRuns が null のため gate をそのまま返し従来判定になる。
+        const gate = combineOptinRecordGate(classifyOptinRecordGate(item.optinTests, optinVerify), lastFixOptinRuns)
         if (!gate.ok) {
           const missingList = gate.missing.map((i) => sanitize(item.optinTests[i] ?? '')).join(' / ')
-          const optinRuns = Array.isArray(impl.optinTestRuns) ? impl.optinTestRuns : []
-          // r.command / r.detail は sanitizeOptinTestRuns で sanitize + capText 済みのため
-          // ここで再適用しない（sanitize は $ を \$ へ置換するため、既に \$ 化された文字列へ
-          // 再適用すると `\` を `/` へ潰す置換と衝突して二重エスケープになる）。
+          // lastFixOptinRuns（直近 post-push fix の実測）を優先し、無ければ初回実装エージェントの
+          // 報告にフォールバックする。r.command / r.detail は sanitizeOptinTestRuns で
+          // sanitize + capText 済みのためここで再適用しない（sanitize は $ を \$ へ置換するため、
+          // 既に \$ 化された文字列へ再適用すると `\` を `/` へ潰す置換と衝突して二重エスケープになる）。
+          const optinRuns = Array.isArray(lastFixOptinRuns) && lastFixOptinRuns.length > 0
+            ? lastFixOptinRuns
+            : (Array.isArray(impl.optinTestRuns) ? impl.optinTestRuns : [])
           const runsNote = optinRuns.length
-            ? `。実装エージェントの報告: ${optinRuns.map((r) => `${r.command}: ${r.result}${r.detail ? `（${r.detail}）` : ''}`).join(' / ')}`
+            ? `。${Array.isArray(lastFixOptinRuns) && lastFixOptinRuns.length > 0 ? 'post-push fix' : '実装エージェント'}の報告: ${optinRuns.map((r) => `${r.command}: ${r.result}${r.detail ? `（${r.detail}）` : ''}`).join(' / ')}`
             : ''
           const optinReason = capText(
             `イシューで宣言された opt-in テストの実行記録（pass）が PR 本文に確認できないためマージを停止した（不足: ${missingList}）${runsNote}。`
@@ -6514,13 +6550,19 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       const fixPushMergeable = normalizePushMergeable(f.mergeableAfterPush)
       pendingPushConflict = f.pushed === true && fixPushMergeable === 'CONFLICTING'
       log(`#${item.number}: fix の push 直後 CI 起動確認（自己申告・マージ判定には未使用） pushed=${f.pushed === true} checksStarted=${fixChecksStarted} mergeableAfterPush=${fixPushMergeable}`)
-      // opt-in テスト記録ゲート（Issue #495 Medium 指摘）: post-push fix が再実行した結果をログに
-      // 残す（マージ前ゲートの実効判定は次周回の optinRecordVerifyPrompt が PR 本文を直接読んで
-      // 行うため、ここでの値はホスト側の判定には使わない診断ログ専用）。
+      // opt-in テスト記録ゲート（Issue #495 Medium 2）: post-push fix が再実行した結果を
+      // lastFixOptinRuns へ保持し、マージ前ゲート（combineOptinRecordGate）の独立判定材料に
+      // する。PR 本文更新（optinRecordUpdateInstructions）が失敗・省略された場合でも、
+      // ここで保持した実測結果が PR 本文の古い pass マーカーより優先されるため fail-open にならない。
+      // f.pushed === true（積んだコミットが実際にリモート HEAD へ反映済みと確認できた場合のみ。
+      // 手順 4 の 2 条件判定と同じ根拠）の場合のみ更新する。pushed: false のラウンド（変更なし・
+      // resolve のみ等）はテスト対象のコード状態がリモート HEAD に反映されていないため、
+      // 直前の pushed: true ラウンドの記録を保持し続ける（上書きしない）。
       if (Array.isArray(item.optinTests) && item.optinTests.length > 0) {
         const fixOptinRuns = sanitizeOptinTestRuns(f.optinTestRuns, item.optinTests)
+        if (f.pushed === true) lastFixOptinRuns = fixOptinRuns
         if (fixOptinRuns.some((r) => r.result !== 'pass')) {
-          log(`⚠️ #${item.number}: post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文の記録節が更新されているか次周回のマージ前ゲートで確認する`)
+          log(`⚠️ #${item.number}: post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。マージ前ゲートで不合格として扱う`)
         }
       }
       // f.resolvedThreadIds（fix 自己申告）は形式検証してログ専用（マージ判定には渡さない。
