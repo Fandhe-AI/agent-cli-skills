@@ -4,7 +4,7 @@
 // 出力が完全に不変）を検証する。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -733,29 +733,40 @@ test('実行レベル: 新旧 2 つの sha の記録が併存しても現在の 
 })
 
 // ---------------------------------------------------------------------------
-// 群 F2: 記録節の書き直し（Issue #502）。optinRecordRewriteLines が出力する grep -vF 除去
-// コマンドと固定テンプレートの HEREDOC 追記をそのまま bash で実行し、2 回更新しても見出しが
-// 1 個・古い sha の行が 0 行・Closes 行が保持されることを確認する。
+// 群 F2: 記録節の書き直し（Issue #502）。optinRecordRewriteLines が出力する grep -avF 除去
+// 実行行（判定と mv まで 1 行で完結）と固定テンプレートの HEREDOC 追記をそのまま bash で実行し、
+// 2 回更新しても見出しが 1 個・古い sha の行が 0 行・Closes 行が保持されること、除去後が空に
+// なる場合は "$f" が元のまま残ることを確認する。
 // ---------------------------------------------------------------------------
 
 const SHA_C = 'c'.repeat(40)
 
-// プロンプト中の除去コマンドと HEREDOC（字下げなしで示される）をそのまま取り出し、エージェントが
-// 行うのと同じく <sha>/<result> を字面で置き換えてから実行する。rc が 0 以外なら mv せず 3 で
-// 終了する（プロンプトの fail-closed 指示と同じ分岐）。
+// プロンプト中の除去実行行と HEREDOC（字下げなしで示される）をそのまま取り出し、エージェントが
+// 行うのと同じく <sha>/<result> を字面で置き換えてから実行する。実行行は補完せず単独の bash
+// 呼び出しで実行し（シェル変数は呼び出しを跨いで残らない）、その終了コードが 0 以外なら
+// HEREDOC 追記へ進まず status 3 で失敗させる（プロンプトの fail-closed 指示と同じ分岐）。
 function applyRecordRewrite(bodyText, commands, sha, result) {
+  const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
+  const bodyPath = join(dir, 'body.md')
+  writeFileSync(bodyPath, bodyText)
+  return runRecordRewrite(bodyPath, commands, sha, result)
+}
+
+function runRecordRewrite(bodyPath, commands, sha, result) {
   const lines = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
-  const grepLine = lines.find((l) => l.trim().startsWith('g=$(mktemp); grep -vF')).trim()
+  const grepLine = lines.find((l) => l.trim().startsWith('g=$(mktemp); grep -avF')).trim()
   const hs = lines.indexOf(`cat >> "$f" <<'OPTIN_RECORD_EOF'`)
   const he = lines.indexOf('OPTIN_RECORD_EOF', hs + 1)
   assert.ok(hs >= 0 && he > hs, 'HEREDOC テンプレートが行頭インデントなしで見つからない')
   const heredoc = lines.slice(hs, he + 1).join('\n')
     .replaceAll('<sha>', sha).replaceAll('<result>', result)
-  const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
-  const bodyPath = join(dir, 'body.md')
-  writeFileSync(bodyPath, bodyText)
-  const script = `f="$1"\n${grepLine}\n[ "$rc" -eq 0 ] || exit 3\nmv "$g" "$f"\n${heredoc}\n`
-  execFileSync('bash', ['-c', script, 'bash', bodyPath])
+  const rm = spawnSync('bash', ['-c', `f="$1"\n${grepLine}\n`, 'bash', bodyPath])
+  if (rm.status !== 0) {
+    const err = new Error(`除去実行行が終了コード ${rm.status} で失敗`)
+    err.status = 3
+    throw err
+  }
+  execFileSync('bash', ['-c', `f="$1"\n${heredoc}\n`, 'bash', bodyPath])
   return readFileSync(bodyPath, 'utf8')
 }
 
@@ -787,13 +798,31 @@ test('記録節の書き直し: 字下げ・CRLF 付きの旧記録行も固定�
   assert.match(out, /Closes #42/)
 })
 
-test('記録節の書き直し: 除去後に残す行が無い（grep rc=1）場合は mv せず本文を空にしない（fail-closed。Issue #502）', () => {
+test('記録節の書き直し: 本文が記録節だけ（除去後に空）の場合は実行行が非 0 で終わり "$f" は元のまま残る（fail-closed。Issue #502）', () => {
   const commands = ['make e2e']
-  const onlyRecord = `${OPTIN_RECORD_HEADING}\n${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}\n`
-  assert.throws(() => applyRecordRewrite(onlyRecord, commands, SHA_B, 'pass'), (e) => e.status === 3)
-  const text = optinRecordRewriteLines(commands, 'sha', 'result', 'fail').join('\n')
-  assert.match(text, /rc が 0 の場合のみ mv "\$g" "\$f" する/)
-  assert.match(text, /mv も gh pr edit も行わず/)
+  const onlyRecord = `${OPTIN_RECORD_HEADING}\n${OPTIN_RECORD_HUMAN_PREFIX}make e2e => pass\n${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}\n`
+  const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
+  const bodyPath = join(dir, 'body.md')
+  writeFileSync(bodyPath, onlyRecord)
+  assert.throws(() => runRecordRewrite(bodyPath, commands, SHA_B, 'pass'), (e) => e.status === 3)
+  // mv されず、HEREDOC 追記にも進まない（本文は 1 バイトも変わらない）。
+  assert.equal(readFileSync(bodyPath, 'utf8'), onlyRecord)
+  const lines = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
+  // 判定と mv は実行行そのものに字面で含まれ、散文の読解に依存しない。
+  assert.ok(lines[0].trim().endsWith('"$f" > "$g"; rc=$?; [ "$rc" -eq 0 ] && [ -s "$g" ] && mv "$g" "$f"'))
+  const text = lines.join('\n')
+  assert.match(text, /この行の終了コードが 0 でない場合/)
+  assert.match(text, /mv も gh pr edit もせず/)
+})
+
+test('記録節の書き直し: 通常本文は 1 回の実行行 + 追記で Closes 行が残り、見出し 1 個・古い sha の行 0 行になる（Issue #502）', () => {
+  const commands = ['make e2e']
+  const initial = `## Summary\n- 要約\n\nCloses #42${renderOptinRecordSection(commands).replaceAll('<sha>', SHA_A).replaceAll('<result>', 'fail')}\n`
+  const lines = applyRecordRewrite(initial, commands, SHA_B, 'pass').split('\n')
+  assert.ok(lines.includes('Closes #42'))
+  assert.equal(lines.filter((l) => l === OPTIN_RECORD_HEADING).length, 1)
+  assert.equal(lines.filter((l) => l.includes(SHA_A)).length, 0)
+  assert.deepEqual(grepShaResultCounts(lines.join('\n'), SHA_B, 'make e2e'), { pass: 1, nonPass: 0 })
 })
 
 test('記録節の書き直し: テンプレートは固定形式の行のみで、補足（任意テキスト）・nonce・完全一致削除ゲート・printf/echo 埋め込みを含まない（Issue #502）', () => {
@@ -810,7 +839,7 @@ test('記録節の書き直し: テンプレートは固定形式の行のみで
     assert.doesNotMatch(text, /\bcmp\b|\bdiff\b/)
     assert.doesNotMatch(text, /printf|echo /)
     assert.doesNotMatch(text, /- 補足:/)
-    assert.match(text, /grep -vF -e '## opt-in テスト実行記録' -e '<!-- optin-test-record: ' -e '- opt-in テスト結果: '/)
+    assert.match(text, /grep -avF -e '## opt-in テスト実行記録' -e '<!-- optin-test-record: ' -e '- opt-in テスト結果: '/)
   }
   // prCreatePrompt の再利用経路・fixPrompt 経路が同じ書き直し手順を共有する。
   assert.ok(pr.includes(rewrite[0]) && update.includes(rewrite[0]))

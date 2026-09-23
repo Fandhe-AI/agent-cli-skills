@@ -807,10 +807,12 @@ function optinRecordLines(sha, result, commands) {
 
 
 
+
+
 function optinRecordRewriteLines(commands, shaNote, resultNote, onFail) {
   return [
-    `     g=$(mktemp); grep -vF -e ${shellSingleQuote(OPTIN_RECORD_HEADING)} -e ${shellSingleQuote(OPTIN_RECORD_MARKER_PREFIX)} -e ${shellSingleQuote(OPTIN_RECORD_HUMAN_PREFIX)} "$f" > "$g"; rc=$?`,
-    `   （旧記録節の見出し・人間可読行・マーカー行を全行除去する）。rc が 0 の場合のみ mv "$g" "$f" する。0 以外（1 は残す行が無い、2 以上は異常）の場合は \`|| true\` 等で握り潰さず、mv も gh pr edit も行わず、${onFail}（fail-closed。本文を空にしない）。`,
+    `     g=$(mktemp); grep -avF -e ${shellSingleQuote(OPTIN_RECORD_HEADING)} -e ${shellSingleQuote(OPTIN_RECORD_MARKER_PREFIX)} -e ${shellSingleQuote(OPTIN_RECORD_HUMAN_PREFIX)} "$f" > "$g"; rc=$?; [ "$rc" -eq 0 ] && [ -s "$g" ] && mv "$g" "$f"`,
+    `   （旧記録節の見出し・人間可読行・マーカー行を全行除去し、判定と mv までをこの 1 行で行う。行を分割しない）。この行の終了コードが 0 でない場合（rc が 0 でない、または除去後が空で "$f" が更新されていない）は \`|| true\` 等で握り潰さず、mv も gh pr edit もせず、${onFail}（fail-closed。本文を空にしない）。`,
     '   続けて次の固定テンプレートを "$f" の末尾へ追記する（区切り語をクォートした HEREDOC のため変数展開は起きない。<sha> と <result> は実際の値を字面で書き込んでから実行し、それ以外の文字は 1 文字も変えない。detail・not-run の理由などの補足は PR 本文へ書かず返却値にのみ残す）:',
 
     `cat >> "$f" <<'OPTIN_RECORD_EOF'`,

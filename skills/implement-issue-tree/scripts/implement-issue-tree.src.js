@@ -805,12 +805,14 @@ function optinRecordLines(sha, result, commands) {
 // optinRecordUpdateInstructions の共通部）。除去は固定文字列 3 本の grep -vF のみで行い、
 // 追記はホスト検証済みの値だけから成る固定テンプレートをクォート済み HEREDOC でファイルへ
 // 足す（PR 本文そのものは HEREDOC・シェル文字列へ載せない）。grep -v の終了コード 1 は
-// 「残す行が 1 行も無い」ことを意味するため 0 以外はすべて失敗として扱い、mv も
+// 「残す行が 1 行も無い」ことを意味するため 0 以外はすべて失敗として扱う。-a はバイナリ判定で
+// rc=0 のまま出力が空になる経路を塞ぎ、[ -s "$g" ] は除去後が空の場合を塞ぐ。判定と mv は
+// シェル変数が Bash 呼び出しを跨いで残らないため同じ 1 行で完結させ、mv されなかった場合は
 // gh pr edit もしない（fail-closed。本文を空にしない）。
 function optinRecordRewriteLines(commands, shaNote, resultNote, onFail) {
   return [
-    `     g=$(mktemp); grep -vF -e ${shellSingleQuote(OPTIN_RECORD_HEADING)} -e ${shellSingleQuote(OPTIN_RECORD_MARKER_PREFIX)} -e ${shellSingleQuote(OPTIN_RECORD_HUMAN_PREFIX)} "$f" > "$g"; rc=$?`,
-    `   （旧記録節の見出し・人間可読行・マーカー行を全行除去する）。rc が 0 の場合のみ mv "$g" "$f" する。0 以外（1 は残す行が無い、2 以上は異常）の場合は \`|| true\` 等で握り潰さず、mv も gh pr edit も行わず、${onFail}（fail-closed。本文を空にしない）。`,
+    `     g=$(mktemp); grep -avF -e ${shellSingleQuote(OPTIN_RECORD_HEADING)} -e ${shellSingleQuote(OPTIN_RECORD_MARKER_PREFIX)} -e ${shellSingleQuote(OPTIN_RECORD_HUMAN_PREFIX)} "$f" > "$g"; rc=$?; [ "$rc" -eq 0 ] && [ -s "$g" ] && mv "$g" "$f"`,
+    `   （旧記録節の見出し・人間可読行・マーカー行を全行除去し、判定と mv までをこの 1 行で行う。行を分割しない）。この行の終了コードが 0 でない場合（rc が 0 でない、または除去後が空で "$f" が更新されていない）は \`|| true\` 等で握り潰さず、mv も gh pr edit もせず、${onFail}（fail-closed。本文を空にしない）。`,
     '   続けて次の固定テンプレートを "$f" の末尾へ追記する（区切り語をクォートした HEREDOC のため変数展開は起きない。<sha> と <result> は実際の値を字面で書き込んでから実行し、それ以外の文字は 1 文字も変えない。detail・not-run の理由などの補足は PR 本文へ書かず返却値にのみ残す）:',
     // テンプレートは字下げせずに示す（字下げのまま写すと終端行が一致せず HEREDOC が閉じない）。
     `cat >> "$f" <<'OPTIN_RECORD_EOF'`,
