@@ -823,23 +823,41 @@ function sanitizeOptinTestRuns(raw, declared) {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 function restoreOptinFixState(saved, declaredOptinTests) {
   const declaredList = Array.isArray(declaredOptinTests) ? declaredOptinTests : []
   if (declaredList.length === 0) return null
   const state = saved && typeof saved === 'object' ? saved.optinFixState : null
   if (!state || typeof state !== 'object' || state.attempted !== true) return null
   const headSha = sanitizeSha(state.headSha)
-  if (!Array.isArray(state.runs)) {
+  if (!headSha || !Array.isArray(state.runs)) {
     return {
       runs: declaredList.map((command) => ({
         command,
         result: 'not-run',
-        detail: '状態ファイルから post-push fix の opt-in 実測を復元できなかった（再開時の fail-closed）',
+        detail: '状態ファイルから post-push fix の opt-in 実測（対象 HEAD sha を含む）を復元できなかった（再開時の fail-closed）',
       })),
-      headSha,
+      headSha: '',
+      unbound: true,
     }
   }
-  return { runs: sanitizeOptinTestRuns(state.runs, declaredList), headSha }
+  return { runs: sanitizeOptinTestRuns(state.runs, declaredList), headSha, unbound: false }
 }
 
 
@@ -914,11 +932,25 @@ function classifyOptinRecordGate(declared, verifyResult) {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
 function combineOptinRecordGate(gate, fixOptin, gateHeadSha) {
   const runs = fixOptin && Array.isArray(fixOptin.runs) ? fixOptin.runs : null
   if (!runs || runs.length === 0) return gate
-  const fixHeadSha = sanitizeSha(fixOptin.headSha)
-  if (!fixHeadSha || fixHeadSha !== sanitizeSha(gateHeadSha)) return gate
+  const unbound = fixOptin.unbound === true
+  if (!unbound) {
+    const fixHeadSha = sanitizeSha(fixOptin.headSha)
+    if (!fixHeadSha || fixHeadSha !== sanitizeSha(gateHeadSha)) return gate
+  }
   const overrideMissing = []
   runs.forEach((r, i) => {
     if (!r || r.result !== 'pass') overrideMissing.push(i)
@@ -6099,7 +6131,15 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
-    await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, baseMergeCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, optinFixState: lastFixOptin ? { attempted: true, runs: lastFixOptin.runs, headSha: lastFixOptin.headSha } : undefined })
+
+    const terminalWriteOk = await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, baseMergeCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, optinFixState: lastFixOptin ? { attempted: true, runs: lastFixOptin.runs, headSha: lastFixOptin.headSha, unbound: lastFixOptin.unbound === true } : undefined })
+
+
+
+
+    if (!terminalWriteOk) {
+      log(`⚠️ #${item.number}: 終端状態（${terminalStatus}）の状態ファイル永続化に失敗した。次回実行時に古い状態から再開する可能性がある`)
+    }
 
 
     recordFailure({
@@ -6304,6 +6344,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
+
+
         const gate = combineOptinRecordGate(classifyOptinRecordGate(item.optinTests, optinVerify), lastFixOptin, optinGateHeadSha)
         if (!gate.ok) {
           const missingList = gate.missing.map((i) => sanitize(item.optinTests[i] ?? '')).join(' / ')
@@ -6312,9 +6354,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
+
           const fixRunsMatchHead =
             lastFixOptin && Array.isArray(lastFixOptin.runs) && lastFixOptin.runs.length > 0
-            && sanitizeSha(lastFixOptin.headSha) && sanitizeSha(lastFixOptin.headSha) === optinGateHeadSha
+            && (lastFixOptin.unbound === true
+              || (sanitizeSha(lastFixOptin.headSha) && sanitizeSha(lastFixOptin.headSha) === optinGateHeadSha))
           const optinRuns = fixRunsMatchHead
             ? lastFixOptin.runs
             : (Array.isArray(impl.optinTestRuns) ? impl.optinTestRuns : [])
@@ -6845,8 +6889,29 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         const fixOptinRuns = sanitizeOptinTestRuns(f.optinTestRuns, item.optinTests)
         if (f.pushed === true) {
           const fixHeadSha = sanitizeSha(f.optinHeadSha)
-          lastFixOptin = { runs: fixOptinRuns, headSha: fixHeadSha }
-          optinFixStatePatch = { attempted: true, runs: fixOptinRuns, headSha: fixHeadSha }
+          if (fixHeadSha) {
+            lastFixOptin = { runs: fixOptinRuns, headSha: fixHeadSha, unbound: false }
+            optinFixStatePatch = { attempted: true, runs: fixOptinRuns, headSha: fixHeadSha, unbound: false }
+          } else {
+
+
+
+
+
+
+
+
+
+
+            const unboundRuns = item.optinTests.map((command) => ({
+              command,
+              result: 'not-run',
+              detail: 'post-push fix が対象 HEAD sha（optinHeadSha）を報告しなかった、または不正な値だった（fail-closed）',
+            }))
+            lastFixOptin = { runs: unboundRuns, headSha: '', unbound: true }
+            optinFixStatePatch = { attempted: true, runs: unboundRuns, headSha: '', unbound: true }
+            log(`⚠️ #${item.number}: post-push fix が optinHeadSha を報告しなかった（または 40 桁 sha 形式でない）。次回のマージ前ゲートは現在の HEAD に関わらず不合格として扱う（fail-closed）`)
+          }
         }
         if (fixOptinRuns.some((r) => r.result !== 'pass')) {
           log(`⚠️ #${item.number}: post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。現在の HEAD に対する PR 本文マーカーが pass で更新されていなければマージ前ゲートで不合格として扱う`)

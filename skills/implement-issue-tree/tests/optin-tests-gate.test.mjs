@@ -421,29 +421,43 @@ test('restoreOptinFixState: optinFixState が無い・attempted が true でな�
   assert.equal(restoreOptinFixState(undefined, ['make e2e']), null)
 })
 
-test('restoreOptinFixState: 永続化した pass 記録と headSha をラウンドトリップで復元する', () => {
+test('restoreOptinFixState: 永続化した pass 記録と headSha をラウンドトリップで復元する（unbound: false）', () => {
   const saved = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }], headSha: SHA_A } }
   assert.deepEqual(restoreOptinFixState(saved, ['make e2e']), {
     runs: [{ command: 'make e2e', result: 'pass', detail: '' }],
     headSha: SHA_A,
+    unbound: false,
   })
 })
 
-test('restoreOptinFixState: attempted: true なのに runs が欠落・非配列なら宣言全件を not-run へ倒す（fail-closed）。headSha は読めれば保持する', () => {
+test('restoreOptinFixState: attempted: true なのに runs が欠落・非配列なら宣言全件を not-run へ倒し unbound: true にする（fail-closed）', () => {
   for (const state of [{ attempted: true, headSha: SHA_A }, { attempted: true, runs: null, headSha: SHA_A }, { attempted: true, runs: 'x', headSha: SHA_A }]) {
     const restored = restoreOptinFixState({ optinFixState: state }, ['make e2e', 'cargo test'])
     assert.deepEqual(restored.runs.map((r) => [r.command, r.result]), [['make e2e', 'not-run'], ['cargo test', 'not-run']])
-    assert.equal(restored.headSha, SHA_A)
+    assert.equal(restored.headSha, '')
+    assert.equal(restored.unbound, true)
   }
-  // headSha 自体も読めない場合は '' になる（combine 側で「一致し得ない」扱いになり無介入）。
-  const restoredNoSha = restoreOptinFixState({ optinFixState: { attempted: true } }, ['make e2e'])
-  assert.equal(restoredNoSha.headSha, '')
 })
 
-test('restoreOptinFixState: 宣言外の永続化コマンドは復元後の一覧から落ち、宣言済みで欠落しているものは not-run 補完する', () => {
+test('restoreOptinFixState: headSha 自体を確定できない場合、runs が有効な pass 記録でも宣言全件 not-run + unbound: true へ倒す（セキュリティ監査 Medium: restore 後も不合格を維持）', () => {
+  for (const state of [
+    { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }] }, // headSha 自体が無い（旧形式の永続化）
+    { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }], headSha: '' },
+    { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }], headSha: 'not-a-sha' },
+  ]) {
+    const restored = restoreOptinFixState({ optinFixState: state }, ['make e2e'])
+    assert.deepEqual(restored, {
+      runs: [{ command: 'make e2e', result: 'not-run', detail: '状態ファイルから post-push fix の opt-in 実測（対象 HEAD sha を含む）を復元できなかった（再開時の fail-closed）' }],
+      headSha: '',
+      unbound: true,
+    })
+  }
+})
+
+test('restoreOptinFixState: 宣言外の永続化コマンドは復元後の一覧から落ち、宣言済みで欠落しているものは not-run 補完する（unbound: false）', () => {
   const saved = { optinFixState: { attempted: true, runs: [{ command: 'make old', result: 'pass', detail: '' }], headSha: SHA_A } }
   const restored = restoreOptinFixState(saved, ['make new'])
-  assert.deepEqual(restored, { runs: [{ command: 'make new', result: 'not-run', detail: '実装エージェントの報告なし' }], headSha: SHA_A })
+  assert.deepEqual(restored, { runs: [{ command: 'make new', result: 'not-run', detail: '実装エージェントの報告なし' }], headSha: SHA_A, unbound: false })
 })
 
 test('統合: 再開後に永続化した fix 実測が現在の HEAD に対して fail のまま残っていれば PR 本文が pass でもゲート不合格', () => {
@@ -453,12 +467,50 @@ test('統合: 再開後に永続化した fix 実測が現在の HEAD に対し�
   assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored, SHA_A), { ok: false, missing: [0] })
 })
 
-test('統合: fix 実施済みで復元不能（state 破損・headSha も無し）なら headSha が一致し得ず override は働かないが、gate 自身の sha 束縛が既に不合格にしている', () => {
+test('統合: fix 実施済みで復元不能（state 破損・headSha も無し）なら unbound: true が無条件 override し、gate 自身の sha 束縛判定に関わらず不合格にする', () => {
   const restored = restoreOptinFixState({ optinFixState: { attempted: true } }, ['make e2e'])
   assert.equal(restored.headSha, '')
+  assert.equal(restored.unbound, true)
   // PR 本文側は headRefOid を確認できないラウンド（fetchFailed 相当）を模す。
   const bodyGateFail = classifyOptinRecordGate(['make e2e'], null)
   assert.deepEqual(combineOptinRecordGate(bodyGateFail, restored, ''), { ok: false, missing: [0] })
+})
+
+test('統合（セキュリティ監査 Medium の核心）: optinHeadSha 欠落で unbound: true になった実測は、PR 本文が現在の HEAD sha で pass していても override してゲート不合格にする', () => {
+  const restored = restoreOptinFixState({ optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }] } }, ['make e2e'])
+  assert.equal(restored.unbound, true)
+  // PR 本文は現在の HEAD（SHA_B）に対して正しく pass 記録がある状態（bodyGateOk）を模す。
+  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_B, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored, SHA_B), { ok: false, missing: [0] })
+})
+
+test('統合（セキュリティ監査 Medium・ライブ経路）: post-push fix が optinHeadSha を報告しなかった場合と同じ形の { runs, headSha: \'\', unbound: true } を直接渡しても、PR 本文が pass の HEAD で override して不合格にする', () => {
+  // runMergeLoop の f.pushed === true かつ fixHeadSha が空のときに組み立てる lastFixOptin の
+  // 実際の形（restoreOptinFixState を経由しないライブ経路）をそのまま模す。
+  const liveUnboundFixOptin = {
+    runs: [{ command: 'make e2e', result: 'not-run', detail: 'post-push fix が対象 HEAD sha（optinHeadSha）を報告しなかった、または不正な値だった（fail-closed）' }],
+    headSha: '',
+    unbound: true,
+  }
+  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_B, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, liveUnboundFixOptin, SHA_B), { ok: false, missing: [0] })
+
+  // 上と同じ形をそのまま optinFixState として永続化 → restore しても unbound: true が維持され、
+  // 同じく PR 本文 pass を override して不合格にする（restore 後も不合格が維持される、の直接確認）。
+  const savedFromLive = { optinFixState: { attempted: true, runs: liveUnboundFixOptin.runs, headSha: liveUnboundFixOptin.headSha, unbound: liveUnboundFixOptin.unbound } }
+  const restoredFromLive = restoreOptinFixState(savedFromLive, ['make e2e'])
+  assert.equal(restoredFromLive.unbound, true)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restoredFromLive, SHA_B), { ok: false, missing: [0] })
+})
+
+test('統合（セキュリティ監査 Medium）: unbound: true の状態は restore を経ても維持され、別ラウンド（異なる gateHeadSha）でも不合格が続く', () => {
+  const savedUnbound = { optinFixState: { attempted: true, headSha: 'not-a-sha' } }
+  const restored1 = restoreOptinFixState(savedUnbound, ['make e2e'])
+  const restored2 = restoreOptinFixState(savedUnbound, ['make e2e'])
+  for (const [restored, gateHead] of [[restored1, SHA_A], [restored2, SHA_B]]) {
+    const bodyGateOk = classifyOptinRecordGate(['make e2e'], { headRefOid: gateHead, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+    assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored, gateHead), { ok: false, missing: [0] })
+  }
 })
 
 test('統合: fix 未実施の再開は従来どおり PR 本文のみで判定する（restoreOptinFixState が null を返す）', () => {
@@ -681,11 +733,16 @@ test('駆動部: runImplement 冒頭で optinTestsInvalid を参照する', () =
   assert.ok(implIdx >= 0 && invalidIdx >= 0 && invalidIdx - implIdx < 800)
 })
 
-test('駆動部: post-push fix 直後の updateState が optinFixState（runs + headSha）を含む（PR #503 2/3 巡目 codex P0/P1）', () => {
-  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: fixOptinRuns, headSha: fixHeadSha \}/)
+test('駆動部: post-push fix 直後の updateState が optinFixState（runs + headSha + unbound）を含む（PR #503 2/3 巡目 codex P0/P1）', () => {
+  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: fixOptinRuns, headSha: fixHeadSha, unbound: false \}/)
   assert.match(driverPart, /const optinFixPatchArgs = \{ fixCount, baseMergeCount, worktree: currentWorktreePath,/)
   assert.match(driverPart, /optinFixState: optinFixStatePatch \}/)
   assert.match(driverPart, /updateState\(item\.number, optinFixPatchArgs, \{ cleanupWorktree: oldWorktreePath \}\)/)
+})
+
+test('駆動部: post-push fix が optinHeadSha を報告しない・不正な場合は unbound: true を合成しログ警告する（セキュリティ監査 Medium）', () => {
+  assert.match(driverPart, /lastFixOptin = \{ runs: unboundRuns, headSha: '', unbound: true \}/)
+  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: unboundRuns, headSha: '', unbound: true \}/)
 })
 
 test('駆動部: optinFixState 書込み失敗時に cleanupWorktree なしで 1 回再試行し、なお失敗すれば failMergeTerminal で終端する（PR #503 3 巡目 codex P1 / Bugbot Medium）', () => {
@@ -694,8 +751,10 @@ test('駆動部: optinFixState 書込み失敗時に cleanupWorktree なしで 1
   assert.match(driverPart, /if \(!retryOk\) \{/)
 })
 
-test('駆動部: failMergeTerminal の終端 updateState が lastFixOptin から optinFixState を合成する（PR #503 3 巡目 Bugbot Medium）', () => {
-  assert.match(driverPart, /optinFixState: lastFixOptin \? \{ attempted: true, runs: lastFixOptin\.runs, headSha: lastFixOptin\.headSha \} : undefined/)
+test('駆動部: failMergeTerminal の終端 updateState が lastFixOptin から optinFixState（unbound 含む）を合成し、戻り値を確認してログ警告する（PR #503 3 巡目 Bugbot Medium・セキュリティ監査 Low）', () => {
+  assert.match(driverPart, /const terminalWriteOk = await updateState\(item\.number, \{ status: terminalStatus,/)
+  assert.match(driverPart, /optinFixState: lastFixOptin \? \{ attempted: true, runs: lastFixOptin\.runs, headSha: lastFixOptin\.headSha, unbound: lastFixOptin\.unbound === true \} : undefined \}\)/)
+  assert.match(driverPart, /if \(!terminalWriteOk\) \{/)
 })
 
 test('駆動部: monitoring 再開パスが restoreOptinFixState(saved, item.optinTests) を runMergeLoop の initialFixOptin へ渡す', () => {

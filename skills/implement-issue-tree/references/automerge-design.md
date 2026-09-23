@@ -629,7 +629,9 @@ Merge ループの post-push fix（`pushAfterFix: true`）が opt-in テスト�
 `fixOptin.headSha` が `optinRecordVerifyPrompt` の検証済み headRefOid と一致する場合のみ働く
 （不一致＝HEAD がさらに進んだ場合は override せず、PR 本文側の sha 束縛判定にそのまま委ねる —
 古い実測で新しい HEAD の PR を永久に止めない可用性上の配慮。安全性は失わない: gate 自身の
-sha 束縛判定はそのまま効くため）。
+sha 束縛判定はそのまま効くため）。**ただしこれは「headSha を確定できた上で HEAD が進んだ」場合
+限定の可用性配慮であり、「そもそも headSha を確定できなかった」場合は別扱いにする**（セキュリティ
+監査 Medium 指摘。詳細は次段落の `unbound` を参照）。
 
 しかしプロセスローカル変数は monitoring/blocked からの再開（別プロセス起動）で失われて `null`
 に戻るため、post-push fix が非 pass を報告した直後に再開すると、PR 本文更新
@@ -640,12 +642,18 @@ sha 束縛判定はそのまま効くため）。
 `optinFixState: { attempted: true, runs: [...], headSha }` を永続化し（`fixCount` /
 `baseMergeCount` と同じ非終端 updateState 呼び出し 1 箇所に相乗り）、monitoring 再開時は
 `restoreOptinFixState` がこれを読んで `runMergeLoop` の `initialFixOptin` として引き継ぐ。
-`attempted: true` なのに `runs` を復元できない（状態ファイル破損・キー欠落）場合は宣言コマンド
-全件を `not-run` とみなす合成配列を返し、pass 扱いにしない（fail-closed。`headSha` は読めれば
-それを使い、読めなければ `''` になる — combine 側で「一致し得ない」扱いになるだけで、sha 束縛
-マーカーによる主防御は影響を受けない）。宣言が無い・`attempted` が無い（post-push fix を一度も
-実行していない再開）場合は `null` を返して従来どおり PR 本文のみで判定する（既定無効の意味を
-壊さないため）。
+`attempted: true` なのに `runs` を復元できない（状態ファイル破損・キー欠落）、または `headSha`
+自体が `sanitizeSha` を通らない（未報告・形式不正・旧形式の永続化）場合は宣言コマンド全件を
+`not-run` とみなす合成配列を返し、`unbound: true` を立てる（セキュリティ監査 Medium 指摘）。
+`unbound: true` は `combineOptinRecordGate` の headSha 一致判定そのものをスキップさせ、現在の
+HEAD が何であれ無条件で override して不合格にする（fail-closed）。これは前段落の「headSha が
+確定していて HEAD が進んだために不一致」ケース（override せず PR 本文側へ委ねる）とは別の扱い
+であり、「そもそも headSha を確定できなかった」場合まで同じ「一致し得ないので無介入」にすると
+古い pass 実測がマージ前ゲートで見逃され得る fail-open になる。ライブ実行側（post-push fix が
+`optinHeadSha` を報告しなかった・不正値だった場合）も同じ `unbound: true` 経路を通り、
+`optinFixState` として永続化される値も `unbound` を含むため、復元後も不合格が維持される。
+宣言が無い・`attempted` が無い（post-push fix を一度も実行していない再開）場合は `null` を返して
+従来どおり PR 本文のみで判定する（既定無効の意味を壊さないため）。
 
 **永続化の書込み自体の失敗にも対処する（PR #503 3 巡目 codex P1 / Bugbot Medium）**: 上記の
 `updateState` 呼び出しは戻り値（成否）を確認し、`optinFixStatePatch` が設定されているラウンド

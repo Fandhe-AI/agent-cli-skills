@@ -804,42 +804,60 @@ function sanitizeOptinTestRuns(raw, declared) {
 }
 
 // 状態ファイルへ永続化した post-push fix の opt-in 実測（`optinFixState`。runMergeLoop の
-// updateState 呼び出しが `{ attempted: true, runs: sanitizeOptinTestRuns(...), headSha }` の形で
-// 書く）を monitoring 再開時に復元する純粋関数（PR #503 2 巡目 codex P0 → 3 巡目で headSha を
-// 追加）。lastFixOptin はプロセスローカルの let のため、monitoring/blocked からの再開（別
-// プロセス起動）では失われて null に戻っていた（誤って「fail-closed 側へ寄る」とコメント
-// されていたが、実際は combineOptinRecordGate が null を「fix 未実施」として PR 本文のみで
-// 判定する fail-open 側の初期値だったため誤り）。戻り値は `{ runs, headSha }` | null（runs は
-// sanitizeOptinTestRuns 適用済み、headSha は sanitizeSha 通過値。復元不能時は headSha: ''）。
-// 復元は fail-closed を維持する 4 分岐:
+// updateState 呼び出しが `{ attempted: true, runs: sanitizeOptinTestRuns(...), headSha, unbound }`
+// の形で書く）を monitoring 再開時に復元する純粋関数（PR #503 2 巡目 codex P0 → 3 巡目で
+// headSha を追加 → セキュリティ監査で unbound を追加）。lastFixOptin はプロセスローカルの
+// let のため、monitoring/blocked からの再開（別プロセス起動）では失われて null に戻っていた
+// （誤って「fail-closed 側へ寄る」とコメントされていたが、実際は combineOptinRecordGate が
+// null を「fix 未実施」として PR 本文のみで判定する fail-open 側の初期値だったため誤り）。
+// 戻り値は `{ runs, headSha, unbound }` | null（runs は宣言コマンド 1 件 1 要素、headSha は
+// sanitizeSha 通過値。復元不能時は headSha: ''）。
+//
+// 復元は fail-closed を維持する 3 分岐（saved が {} 等で optinFixState 自体を持たない場合は
+// 分岐 2 の「state が falsy」経路で null になる。以前のコメントは「saved 自体が {} 等」を
+// 分岐 3 の説明に含めていたが、それは実際には分岐 2 の話であり誤りだった — 分岐 3 は
+// optinFixState が存在し attempted: true でも runs/headSha を確定できない場合のみを指す）:
 //   1. 宣言（declaredOptinTests）が空 → ゲート自体が無効なので null（従来どおり)。
-//   2. `optinFixState.attempted !== true` → この PR で post-push fix を一度も実行していない
-//      （新規 PR・fix 未実施の再開）ので null（PR 本文のみの従来判定に委ねる。fix 実施済み
-//      の証拠が無いのに不合格に倒すと、宣言なしと同じ既定無効の意味が壊れる）。
-//   3. attempted === true だが `runs` を復元できない（キー欠落・非配列・状態ファイル読取失敗
-//      で saved 自体が {} 等）→ 宣言コマンド全件を not-run とみなす合成配列を返す（fail-closed。
-//      「実行した記録はあるが結果が読めない」を pass 相当として扱わない）。headSha は
-//      state.headSha が読めればそれを使い（sanitizeSha 検証込み）、読めなければ ''（combine 側
-//      で現在の HEAD と一致し得ないため override が働かない＝gate 自身の sha 束縛判定に委ねる）。
-//   4. attempted === true かつ runs が配列 → sanitizeOptinTestRuns で再検証して返す
-//      （宣言集合が再開時に変わっていても、新しい宣言集合に基づいて not-run 補完される）。
+//   2. `optinFixState` が無い（`saved` が `{}` の場合を含む）・`attempted !== true` → この PR
+//      で post-push fix を一度も実行していない（新規 PR・fix 未実施の再開）ので null
+//      （PR 本文のみの従来判定に委ねる。fix 実施済みの証拠が無いのに不合格に倒すと、宣言
+//      なしと同じ既定無効の意味が壊れる）。
+//   3. `optinFixState.attempted === true` だが `headSha` が sanitizeSha を通らない（未報告・
+//      形式不正・旧形式の永続化で headSha フィールド自体が無い）、または `runs` を復元できない
+//      （キー欠落・非配列・状態ファイル破損）→ どの HEAD に対する実測かを一切保証できないため、
+//      宣言コマンド全件を not-run とみなす合成配列を返し、`unbound: true` を立てる。
+//      `combineOptinRecordGate` はこのフラグを見て「現在の HEAD が何であれ不合格にする」
+//      （headSha 一致判定をスキップして無条件 override する）。headSha 不明を「一致し得ないので
+//      無介入」（fail-open）にしていた挙動をセキュリティ監査で fail-closed へ修正した
+//      （runMergeLoop 側で post-push fix が optinHeadSha を報告しなかった場合の対処も同じ関数
+//      を経由するため、この分岐はライブ実行・状態ファイル復元の両方の「sha 不明」ケースを
+//      一元的に扱う）。
+//   4. `optinFixState.attempted === true` かつ headSha が妥当・runs が配列 →
+//      sanitizeOptinTestRuns で再検証して返す（宣言集合が再開時に変わっていても、新しい
+//      宣言集合に基づいて not-run 補完される。unbound: false）。
+//
+// 永続化した `optinFixState.unbound` フィールド自体はここで読まず、headSha/runs の妥当性から
+// 毎回再導出する（ライブ実行側の書込みは常に unbound: true のとき headSha: '' と対で書くため
+// 同値になる。将来 unbound だけを書き換えて headSha を有効なまま残す変更を入れる場合は、
+// この再導出ロジックとの整合を確認すること）。
 function restoreOptinFixState(saved, declaredOptinTests) {
   const declaredList = Array.isArray(declaredOptinTests) ? declaredOptinTests : []
   if (declaredList.length === 0) return null
   const state = saved && typeof saved === 'object' ? saved.optinFixState : null
   if (!state || typeof state !== 'object' || state.attempted !== true) return null
   const headSha = sanitizeSha(state.headSha)
-  if (!Array.isArray(state.runs)) {
+  if (!headSha || !Array.isArray(state.runs)) {
     return {
       runs: declaredList.map((command) => ({
         command,
         result: 'not-run',
-        detail: '状態ファイルから post-push fix の opt-in 実測を復元できなかった（再開時の fail-closed）',
+        detail: '状態ファイルから post-push fix の opt-in 実測（対象 HEAD sha を含む）を復元できなかった（再開時の fail-closed）',
       })),
-      headSha,
+      headSha: '',
+      unbound: true,
     }
   }
-  return { runs: sanitizeOptinTestRuns(state.runs, declaredList), headSha }
+  return { runs: sanitizeOptinTestRuns(state.runs, declaredList), headSha, unbound: false }
 }
 
 // PR 本文へ追記する「opt-in テスト実行記録」節のテンプレート。commands が空（宣言なし）なら
@@ -900,25 +918,39 @@ function classifyOptinRecordGate(declared, verifyResult) {
 // runMergeLoop 内で sanitizeOptinTestRuns 済みの値と、その実測対象 HEAD の sha を毎ラウンド
 // 更新して保持するため、PR 本文を経由しない独立した判定材料になる。
 //
-// fixOptin: { runs, headSha } | null。runs が空・null なら判定材料が無いとして gate をそのまま
-// 返す（既定無効・fix 未実施の従来判定）。headSha は runs を計測した HEAD の sha（sanitizeSha
-// 通過値。未報告なら '' で「一致し得ない」扱いになる）。
+// fixOptin: { runs, headSha, unbound } | null。runs が空・null なら判定材料が無いとして gate
+// をそのまま返す（既定無効・fix 未実施の従来判定）。headSha は runs を計測した HEAD の sha
+// （sanitizeSha 通過値。確定できなければ '' で「一致し得ない」扱いになる）。
 //
 // gateHeadSha（classifyOptinRecordGate が検証した現在の headRefOid）と fixOptin.headSha が
-// 一致する場合のみ override する（PR #503 3 巡目 codex P1）。一致しない場合、その実測は
+// 一致する場合、または `unbound: true` の場合に override する（PR #503 3 巡目 codex P1 →
+// セキュリティ監査で unbound を追加）。一致する場合、その実測は
 // もはや現在の HEAD の検証材料ではない（base 取り込み等で HEAD がさらに進んだ）ため override
 // せず gate をそのまま返す — 「現在の HEAD に対する pass 記録が無ければ通さない」という保証は
 // classifyOptinRecordGate 自身の headRefOid 束縛で既に成立しており、古い実測を強制不合格の
 // 根拠に使うと HEAD が進んで正しく再検証された PR まで永久に止め続ける可用性上のバグになる
 // （安全性は失わない：sha が一致しないなら override しないだけで、gate 自身の sha 束縛判定は
-// そのまま効く）。sanitizeOptinTestRuns は宣言コマンド 1 件につき 1 エントリを返し報告欠落を
-// not-run で補完する契約のため、sha が一致した場合の「結果欠落」は enum 外・報告なしのいずれも
+// そのまま効く）。
+//
+// `unbound: true`（headSha 自体を確定できなかった場合。restoreOptinFixState の分岐 3、または
+// runMergeLoop が post-push fix の optinHeadSha 報告を sanitizeSha で検証できなかった場合）は
+// この「headSha 不一致は無介入」の例外であり、**headSha の一致判定をスキップして無条件に
+// override する**（fail-closed）。headSha を確定できない実測を「一致し得ないので安全側」と
+// 誤解して無介入にすると、post-push fix が実際には非 pass を検出していても看過され得るため
+// （セキュリティ監査 Medium 指摘）。`unbound: true` の runs は呼び出し元が宣言コマンド全件を
+// not-run 相当で構成する契約のため、以下の pass 判定ループにより常に override が発火する。
+//
+// sanitizeOptinTestRuns は宣言コマンド 1 件につき 1 エントリを返し報告欠落を not-run で
+// 補完する契約のため、override 対象になった場合の「結果欠落」は enum 外・報告なしのいずれも
 // result !== 'pass' として自然に不合格へ倒れる。
 function combineOptinRecordGate(gate, fixOptin, gateHeadSha) {
   const runs = fixOptin && Array.isArray(fixOptin.runs) ? fixOptin.runs : null
   if (!runs || runs.length === 0) return gate
-  const fixHeadSha = sanitizeSha(fixOptin.headSha)
-  if (!fixHeadSha || fixHeadSha !== sanitizeSha(gateHeadSha)) return gate
+  const unbound = fixOptin.unbound === true
+  if (!unbound) {
+    const fixHeadSha = sanitizeSha(fixOptin.headSha)
+    if (!fixHeadSha || fixHeadSha !== sanitizeSha(gateHeadSha)) return gate
+  }
   const overrideMissing = []
   runs.forEach((r, i) => {
     if (!r || r.result !== 'pass') overrideMissing.push(i)
@@ -6098,8 +6130,16 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // fixCount/baseMergeCount のみを永続化しており、fix 実行後だが monitor 起動前に別経路で
     // 終端したラウンドの optinFixState が失われ得た）。lastFixOptin が null（宣言なし・fix 未
     // 実施）のときは undefined を渡し、既存の optinFixState をそのまま保持する（省略キーは
-    // updateState のオブジェクトマージで上書きされない）。
-    await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, baseMergeCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, optinFixState: lastFixOptin ? { attempted: true, runs: lastFixOptin.runs, headSha: lastFixOptin.headSha } : undefined })
+    // updateState のオブジェクトマージで上書きされない）。unbound も引き継ぎ、fail-closed の
+    // 強制不合格状態が終端経路でも失われないようにする（combineOptinRecordGate 参照）。
+    const terminalWriteOk = await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, baseMergeCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, optinFixState: lastFixOptin ? { attempted: true, runs: lastFixOptin.runs, headSha: lastFixOptin.headSha, unbound: lastFixOptin.unbound === true } : undefined })
+    // この choke point は元々戻り値を確認していなかった（挙動は変えない: リトライや追加の
+    // fail-closed 分岐は入れない）。書込み失敗自体は稀だが、気づかず放置されると次回実行が
+    // 古い状態から再開して混乱を招くため、少なくともログで可視化する（PR #503 3 巡目後の
+    // セキュリティ監査 Low 指摘）。
+    if (!terminalWriteOk) {
+      log(`⚠️ #${item.number}: 終端状態（${terminalStatus}）の状態ファイル永続化に失敗した。次回実行時に古い状態から再開する可能性がある`)
+    }
     // recordFailure へ構造化データを渡す（レポート生成側が該当節を組み立てる。非空のみ付与）。
     // status も状態ファイルと同じ値を渡して一致させる（'blocked' は halt 非カウント）。
     recordFailure({
@@ -6304,17 +6344,21 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // codex P1）に、ホストが保持する直近 post-push fix の実測（lastFixOptin）を AND で重ねる
         // （Issue #495 Medium 2）。fix 未実施ラウンド・fix の headSha が現在の HEAD と不一致の
         // ラウンドは override が働かず gate をそのまま返す（combineOptinRecordGate 参照）。
+        // ただし lastFixOptin.unbound === true（headSha を確定できなかった場合。セキュリティ
+        // 監査 Medium）はこの限りでなく、headSha 一致判定を無視して無条件で override する。
         const gate = combineOptinRecordGate(classifyOptinRecordGate(item.optinTests, optinVerify), lastFixOptin, optinGateHeadSha)
         if (!gate.ok) {
           const missingList = gate.missing.map((i) => sanitize(item.optinTests[i] ?? '')).join(' / ')
-          // lastFixOptin（直近 post-push fix の実測。現在の HEAD と一致する場合のみ）を優先し、
-          // 無ければ初回実装エージェントの報告にフォールバックする。r.command / r.detail は
+          // lastFixOptin（直近 post-push fix の実測。現在の HEAD と一致する場合、または
+          // unbound: true で強制 override された場合）を優先し、無ければ初回実装エージェントの
+          // 報告にフォールバックする。r.command / r.detail は
           // sanitizeOptinTestRuns で sanitize + capText 済みのためここで再適用しない（sanitize は
           // $ を \$ へ置換するため、既に \$ 化された文字列へ再適用すると `\` を `/` へ潰す置換と
           // 衝突して二重エスケープになる）。
           const fixRunsMatchHead =
             lastFixOptin && Array.isArray(lastFixOptin.runs) && lastFixOptin.runs.length > 0
-            && sanitizeSha(lastFixOptin.headSha) && sanitizeSha(lastFixOptin.headSha) === optinGateHeadSha
+            && (lastFixOptin.unbound === true
+              || (sanitizeSha(lastFixOptin.headSha) && sanitizeSha(lastFixOptin.headSha) === optinGateHeadSha))
           const optinRuns = fixRunsMatchHead
             ? lastFixOptin.runs
             : (Array.isArray(impl.optinTestRuns) ? impl.optinTestRuns : [])
@@ -6845,8 +6889,29 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         const fixOptinRuns = sanitizeOptinTestRuns(f.optinTestRuns, item.optinTests)
         if (f.pushed === true) {
           const fixHeadSha = sanitizeSha(f.optinHeadSha)
-          lastFixOptin = { runs: fixOptinRuns, headSha: fixHeadSha }
-          optinFixStatePatch = { attempted: true, runs: fixOptinRuns, headSha: fixHeadSha }
+          if (fixHeadSha) {
+            lastFixOptin = { runs: fixOptinRuns, headSha: fixHeadSha, unbound: false }
+            optinFixStatePatch = { attempted: true, runs: fixOptinRuns, headSha: fixHeadSha, unbound: false }
+          } else {
+            // fixOptinRuns が全件 pass だったとしても、その結果がどの HEAD に対するものか
+            // 確定できない場合、combineOptinRecordGate は headSha 不一致（'' は現在の HEAD と
+            // 一致し得ない）として無介入になり、実際には非 pass だったかもしれない実測を
+            // 見逃す fail-open になりかねない（セキュリティ監査 Medium 指摘。src.js の当該
+            // 箇所は元々 headSha: '' を「一致し得ないので override しない」設計にしていたが、
+            // それは「HEAD が進んで実測が古くなった」場合の可用性配慮であり、「そもそも sha を
+            // 確定できなかった」場合まで同じ扱いにするのは fail-closed の意図に反する）。
+            // 宣言コマンド全件を not-run とみなし、unbound: true で combineOptinRecordGate に
+            // 現在の HEAD が何であれ無条件で不合格にさせる（restoreOptinFixState の対応する
+            // fail-closed 分岐と同じ意味を持たせ、永続化 → 復元後も不合格を維持する）。
+            const unboundRuns = item.optinTests.map((command) => ({
+              command,
+              result: 'not-run',
+              detail: 'post-push fix が対象 HEAD sha（optinHeadSha）を報告しなかった、または不正な値だった（fail-closed）',
+            }))
+            lastFixOptin = { runs: unboundRuns, headSha: '', unbound: true }
+            optinFixStatePatch = { attempted: true, runs: unboundRuns, headSha: '', unbound: true }
+            log(`⚠️ #${item.number}: post-push fix が optinHeadSha を報告しなかった（または 40 桁 sha 形式でない）。次回のマージ前ゲートは現在の HEAD に関わらず不合格として扱う（fail-closed）`)
+          }
         }
         if (fixOptinRuns.some((r) => r.result !== 'pass')) {
           log(`⚠️ #${item.number}: post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。現在の HEAD に対する PR 本文マーカーが pass で更新されていなければマージ前ゲートで不合格として扱う`)
