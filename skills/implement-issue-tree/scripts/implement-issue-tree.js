@@ -125,6 +125,80 @@ const autoMergeEnabled = (() => {
 
 
 
+
+function parsePhaseGate(raw) {
+  if (raw === undefined || raw === null) return false
+  if (typeof raw !== 'boolean') {
+    throw new Error('args.phaseGate は boolean で指定すること（例: {"phaseGate": true}。未指定はゲートなし = 現行動作。Issue #494）')
+  }
+  return raw
+}
+const phaseGateEnabled = parsePhaseGate(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.phaseGate : undefined)
+
+
+
+
+
+
+
+function buildPhaseGateEdges(rootNumber, byParentMap) {
+  const units = [...(byParentMap.get(rootNumber) ?? [])].sort((a, b) => a.siblingIndex - b.siblingIndex)
+  const order = units.map((u) => u.number)
+  function subtreeOf(unitNode) {
+
+    const acc = []
+    const stack = [unitNode]
+    const seen = new Set()
+    while (stack.length > 0) {
+      const n = stack.pop()
+      if (seen.has(n.number)) continue
+      seen.add(n.number)
+      acc.push(n.number)
+      for (const c of byParentMap.get(n.number) ?? []) stack.push(c)
+    }
+    return acc
+  }
+  const subtrees = units.map((u) => subtreeOf(u))
+
+
+
+  const gatePrereqs = units.map((u, i) => {
+    const children = byParentMap.get(u.number) ?? []
+    return children.length > 0 ? subtrees[i].filter((n) => n !== u.number) : [u.number]
+  })
+  const edges = []
+  for (let k = 1; k < units.length; k++) {
+    const prereqUnion = new Set()
+    for (let j = 0; j < k; j++) for (const p of gatePrereqs[j]) prereqUnion.add(p)
+    for (const node of subtrees[k]) {
+      for (const prereq of prereqUnion) {
+        if (node === prereq) continue
+        edges.push({ from: node, to: prereq })
+      }
+    }
+  }
+  return { order, edges }
+}
+
+
+
+
+
+function selectRemovableCycleEdge(cycle, byParentMap, depsMapArg, protectedKeys) {
+  for (let i = 0; i < cycle.length; i++) {
+    const from = cycle[i]
+    const to = cycle[(i + 1) % cycle.length]
+    const isTreeEdge = (byParentMap.get(from) ?? []).some((c) => c.number === to)
+    const isProtected = protectedKeys.has(`${from}->${to}`)
+    if (!isTreeEdge && !isProtected && depsMapArg.get(from)?.has(to)) {
+      return { from, to }
+    }
+  }
+  return null
+}
+
+
+
 function parseMaxBaseMerges(raw) {
   if (raw === undefined || raw === null) return 3
   if (Number.isInteger(raw) && raw >= 0 && raw <= 10) return raw
@@ -1306,7 +1380,7 @@ const DISCARD_SAFETY_SCHEMA = {
 
 const STATE_LOAD_SCHEMA = {
   type: 'object',
-  required: ['ok', 'fileExisted', 'items', 'highWaterBytes'],
+  required: ['ok', 'fileExisted', 'items', 'highWaterBytes', 'highWaterVersion'],
   properties: {
     ok: { type: 'boolean', description: '読み込み・パース成功なら true。ファイルなしの初期化成功も true。jq パース失敗等は false' },
     fileExisted: { type: 'boolean', description: 'ファイルが存在した場合 true（新規作成した場合は false）' },
@@ -1321,6 +1395,15 @@ const STATE_LOAD_SCHEMA = {
       description:
         '状態ファイルのトップレベル .perWorktreeByteReserveHighWater の値（バイト単位）。' +
         'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #471）。',
+    },
+    highWaterVersion: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        '状態ファイルのトップレベル .perWorktreeByteReserveHighWaterVersion の値。' +
+        'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #496。0 は' +
+        'ネスト二重計上を含み得た旧形式を示す番兵値で、現行版 HIGH_WATER_SCHEMA_VERSION と' +
+        '一致しない限り高水位は無効として扱われる）。',
     },
   },
   additionalProperties: true,
@@ -1488,16 +1571,22 @@ async function loadState() {
       `2. ファイルが存在する場合:`,
       `   a. jq . ${STATE_FILE} でパースを試みる（jq の終了コードで成否を判断する）。`,
       `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。加えて highWaterBytes は` +
-        ` .perWorktreeByteReserveHighWater フィールドの値（存在しない場合は 0）を返す。`,
-      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {}, highWaterBytes: 0 を返す。`,
+        ` .perWorktreeByteReserveHighWater フィールドの値（存在しない場合は 0）を返し、` +
+        ` highWaterVersion は .perWorktreeByteReserveHighWaterVersion フィールドの値` +
+        `（存在しない場合は 0）を返す。`,
+      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {},` +
+        ` highWaterBytes: 0, highWaterVersion: 0 を返す。`,
       `3. ファイルが存在しない場合:`,
       `   a. mkdir -p _/issue-trees を実行し、`,
-      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","perWorktreeByteReserveHighWater":0,"items":{}} を`,
+      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","perWorktreeByteReserveHighWater":0,"perWorktreeByteReserveHighWaterVersion":${HIGH_WATER_SCHEMA_VERSION},"items":{}} を`,
       `   c. ${STATE_FILE} に書き込む。`,
-      `   d. 書き込み成功: ok: true, fileExisted: false, items: {}, highWaterBytes: 0 を返す。`,
-      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {}, highWaterBytes: 0 を返す。`,
+      `   d. 書き込み成功: ok: true, fileExisted: false, items: {}, highWaterBytes: 0,` +
+        ` highWaterVersion: ${HIGH_WATER_SCHEMA_VERSION} を返す。`,
+      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {}, highWaterBytes: 0,` +
+        ` highWaterVersion: 0 を返す。`,
       `返却: ok（boolean）, fileExisted（boolean）, items（JSON オブジェクト）,` +
-        ` highWaterBytes（整数。バイト単位。フィールド欠落は 0）。`,
+        ` highWaterBytes（整数。バイト単位。フィールド欠落は 0）,` +
+        ` highWaterVersion（整数。フィールド欠落は 0）。`,
     ].join('\n'),
     { label: 'state:load', schema: STATE_LOAD_SCHEMA, isValid: (r) => typeof r?.ok === 'boolean' },
   )
@@ -1532,6 +1621,11 @@ async function loadState() {
 
     highWaterBytes: Number.isInteger(result?.highWaterBytes) && result.highWaterBytes >= 0
       ? result.highWaterBytes
+      : 0,
+
+
+    highWaterVersion: Number.isInteger(result?.highWaterVersion) && result.highWaterVersion >= 0
+      ? result.highWaterVersion
       : 0,
   }
 }
@@ -1768,6 +1862,75 @@ function computeNextHighWater(currentHighWaterBytes, candidateBytes) {
 
 
 
+const HIGH_WATER_SCHEMA_VERSION = 2
+
+
+
+const HIGH_WATER_DECAY_MIN_SAMPLES = 3
+const HIGH_WATER_DECAY_RATIO = 4
+
+
+
+
+
+
+function selectNestedLinkedWorktreePaths(mainPath, entries) {
+  if (typeof mainPath !== 'string' || mainPath === '') return null
+  const list = Array.isArray(entries) ? entries : []
+  const nested = new Set()
+
+
+  for (let i = 1; i < list.length; i++) {
+    const raw = typeof list[i]?.path === 'string' ? list[i].path : ''
+    const p = sanitizeWorktreePath(raw)
+    if (!p) return null
+    if (p !== mainPath && p.startsWith(`${mainPath}/`)) nested.add(p)
+  }
+  return [...nested]
+}
+
+
+
+
+function computeMainContentKib({ totalKib, gitKib, nestedKib }) {
+  if (!Number.isInteger(totalKib) || totalKib < 0) return null
+  if (!Number.isInteger(gitKib) || gitKib < 0) return null
+  if (!Number.isInteger(nestedKib) || nestedKib < 0) return null
+  return Math.max(0, totalKib - gitKib - nestedKib)
+}
+
+
+
+
+
+
+
+
+
+
+function decideRunStartHighWater({ persistedBytes, persistedVersion, freshEstimateBytes, residualSampleCount }) {
+  const persisted = Number.isInteger(persistedBytes) && persistedBytes > 0 ? persistedBytes : 0
+  if (persistedVersion !== HIGH_WATER_SCHEMA_VERSION) {
+    return persisted > 0
+      ? { effectiveBytes: 0, rewriteBytes: 0, reason: 'legacy' }
+      : { effectiveBytes: 0, rewriteBytes: null, reason: null }
+  }
+  const fresh = Number.isInteger(freshEstimateBytes) && freshEstimateBytes > 0 ? freshEstimateBytes : 0
+  const samples = Number.isInteger(residualSampleCount) && residualSampleCount > 0 ? residualSampleCount : 0
+  if (
+    samples >= HIGH_WATER_DECAY_MIN_SAMPLES &&
+    persisted > fresh * HIGH_WATER_DECAY_RATIO
+  ) {
+    const decayed = Math.max(fresh, Math.ceil(persisted / 2))
+    return { effectiveBytes: decayed, rewriteBytes: decayed, reason: 'decay' }
+  }
+  return { effectiveBytes: persisted, rewriteBytes: null, reason: null }
+}
+
+
+
+
+
 
 
 
@@ -1781,17 +1944,25 @@ async function persistPerWorktreeByteReserveHighWater(bytes) {
     try {
       const { result, outputMissing } = await runStateAgent(
         [
-          `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater の` +
-            `更新のみ。.items には一切触れない）。`,
-          `${STATE_FILE} の .perWorktreeByteReserveHighWater を、現在値（無ければ 0）と ${bytes}` +
-            ` の大きい方へ更新する（縮めない）。`,
+          `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater・` +
+            `perWorktreeByteReserveHighWaterVersion の更新のみ。.items には一切触れない）。`,
+          `${STATE_FILE} の .perWorktreeByteReserveHighWater を次のルールで更新する:` +
+            ` バージョン（.perWorktreeByteReserveHighWaterVersion // 0）が` +
+            ` ${HIGH_WATER_SCHEMA_VERSION} でない場合は無条件で ${bytes} へ置き換える` +
+            `（旧版は汚染の可能性を排除できないため）。バージョンが ${HIGH_WATER_SCHEMA_VERSION}` +
+            ` の場合は現在値（無ければ 0）と ${bytes} の大きい方へ更新する（縮めない）。` +
+            ` いずれの場合も更新後は .perWorktreeByteReserveHighWaterVersion を` +
+            ` ${HIGH_WATER_SCHEMA_VERSION} にする。`,
           `手順（mktemp で衝突回避）:`,
           `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
 
 
-          `  jq --argjson hw ${bytes} --arg ts "$(date -u +%FT%TZ)"` +
-            ` 'if (.perWorktreeByteReserveHighWater // 0) < $hw then` +
-            ` .perWorktreeByteReserveHighWater = $hw else . end | .updatedAt = $ts'` +
+          `  jq --argjson hw ${bytes} --argjson v ${HIGH_WATER_SCHEMA_VERSION}` +
+            ` --arg ts "$(date -u +%FT%TZ)"` +
+            ` 'if ((.perWorktreeByteReserveHighWaterVersion // 0) != $v)` +
+            ` or ((.perWorktreeByteReserveHighWater // 0) < $hw) then` +
+            ` .perWorktreeByteReserveHighWater = $hw | .perWorktreeByteReserveHighWaterVersion = $v` +
+            ` else . end | .updatedAt = $ts'` +
             ` ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
           `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
             `変更しない。`,
@@ -1813,6 +1984,50 @@ async function persistPerWorktreeByteReserveHighWater(bytes) {
       return { ok }
     } catch (e) {
       log(`⚠️ perWorktreeByteReserveHighWater 永続化中に例外が発生した（${e?.message ?? e}）`)
+      return { ok: false }
+    }
+  })
+}
+
+
+
+
+
+
+
+async function setPerWorktreeByteReserveHighWater(bytes) {
+  if (!Number.isInteger(bytes) || bytes < 0) return { ok: false }
+  return enqueueStateWrite(async () => {
+    try {
+      const result = await agent(
+        [
+          `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater・` +
+            `perWorktreeByteReserveHighWaterVersion の更新のみ。.items には一切触れない）。`,
+          `${STATE_FILE} の .perWorktreeByteReserveHighWater を無条件で ${bytes} へ、` +
+            ` .perWorktreeByteReserveHighWaterVersion を無条件で ${HIGH_WATER_SCHEMA_VERSION} へ` +
+            ` 上書きする（現在値の大小は見ない）。`,
+          `手順（mktemp で衝突回避）:`,
+          `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+          `  jq --argjson hw ${bytes} --argjson v ${HIGH_WATER_SCHEMA_VERSION}` +
+            ` --arg ts "$(date -u +%FT%TZ)"` +
+            ` '.perWorktreeByteReserveHighWater = $hw | .perWorktreeByteReserveHighWaterVersion = $v` +
+            ` | .updatedAt = $ts'` +
+            ` ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+          `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
+            `変更しない。`,
+        ].join('\n'),
+        { label: 'state:high-water-set', phase: 'State', model: 'haiku', effort: 'low', schema: STATE_WRITE_SCHEMA },
+      )
+      const ok = result?.ok === true
+      if (!ok) {
+        log(
+          `⚠️ perWorktreeByteReserveHighWater の書き換え（${Math.round(bytes / (1024 * 1024))} MiB へ）に` +
+            `失敗した（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
+        )
+      }
+      return { ok }
+    } catch (e) {
+      log(`⚠️ perWorktreeByteReserveHighWater 書き換え中に例外が発生した（${e?.message ?? e}）`)
       return { ok: false }
     }
   })
@@ -1996,15 +2211,42 @@ async function measureResidualWorktreeBytes(paths) {
 
 
 
-async function measureMainWorktreeContentBytes(mainPath) {
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+async function measureMainWorktreeContentBytes(mainPath, entries) {
   if (typeof mainPath !== 'string' || mainPath === '') return null
+  const nestedPaths = selectNestedLinkedWorktreePaths(mainPath, entries)
+  if (nestedPaths === null) return null
   const totalKib = await measureResidualWorktreeBytes([mainPath])
   if (totalKib === null) return null
   const gitPath = sanitizeWorktreePath(`${mainPath}/.git`)
   if (!gitPath) return null
   const gitKib = await measureResidualWorktreeBytes([gitPath])
   if (gitKib === null) return null
-  return Math.max(0, totalKib - gitKib)
+  let nestedKib = 0
+  if (nestedPaths.length > 0) {
+    const nestedMeasured = await measureResidualWorktreeBytesDetailed(nestedPaths)
+    if (nestedMeasured === null) return null
+    nestedKib = nestedMeasured.kib
+    log(
+      `メイン worktree 配下の linked worktree ${nestedPaths.length} 件` +
+        `（${Math.round((nestedKib * 1024) / (1024 * 1024))} MiB）を` +
+        `メイン内容の見積りから除外した（残置バイト軸では別途計上済み）`,
+    )
+  }
+  return computeMainContentKib({ totalKib, gitKib, nestedKib })
 }
 
 
@@ -3527,7 +3769,11 @@ phase('Restore')
 
 await ensureBoundaryNonceSeed()
 
-const { items: savedItems, highWaterBytes: loadedHighWaterBytes } = await loadState()
+const {
+  items: savedItems,
+  highWaterBytes: loadedHighWaterBytes,
+  highWaterVersion: loadedHighWaterVersion,
+} = await loadState()
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
 
@@ -3861,7 +4107,9 @@ const prereqTransitions = []
 
 
 
-      const mainKib = mainWorktreePath ? await measureMainWorktreeContentBytes(mainWorktreePath) : null
+      const mainKib = mainWorktreePath
+        ? await measureMainWorktreeContentBytes(mainWorktreePath, runStartOrphanEntries)
+        : null
 
 
 
@@ -3913,11 +4161,44 @@ const prereqTransitions = []
 
 
 
+        const residualSampleCount = verifiedResidualPaths.length - residualMeasured.missing
+        const highWaterDecision = decideRunStartHighWater({
+          persistedBytes: persistedHighWaterBytes,
+          persistedVersion: loadedHighWaterVersion,
+          freshEstimateBytes: Math.max(mainKib * 1024, avgResidualBytes),
+          residualSampleCount,
+        })
+        persistedHighWaterBytes = highWaterDecision.effectiveBytes
+        if (highWaterDecision.rewriteBytes !== null) {
+          await setPerWorktreeByteReserveHighWater(highWaterDecision.rewriteBytes)
+          if (highWaterDecision.reason === 'legacy') {
+            log(
+              `旧形式の高水位（version !== ${HIGH_WATER_SCHEMA_VERSION}）を無効化した` +
+                `（ネスト二重計上を含み得るため。Issue #496）`,
+            )
+          } else if (highWaterDecision.reason === 'decay') {
+            log(
+              `1 worktree あたりの容量予約の高水位が実測から大きく乖離していたため` +
+                `${Math.round(highWaterDecision.rewriteBytes / (1024 * 1024))} MiB へ段階的に引き下げた` +
+                `（残置実測 ${residualSampleCount} 件の平均を含む今回の見積りとの比較）`,
+            )
+          }
+        }
+
+
+
+
+
 
 
 
         rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes, persistedHighWaterBytes)
-        await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
+
+
+
+
+
+        await raiseAndPersistHighWater(avgResidualBytes)
 
 
 
@@ -5767,6 +6048,27 @@ for (const item of queue) {
     depsMap.get(item.number).add(d)
   }
 }
+
+
+
+
+
+const phaseGateEdgeKeys = new Set()
+let phaseOrder = []
+if (phaseGateEnabled) {
+  const { order, edges } = buildPhaseGateEdges(parent, byParent)
+  phaseOrder = order
+  for (const { from, to } of edges) {
+
+
+    if (!inTree.has(from) || !inTree.has(to) || from === to) continue
+    depsMap.get(from)?.add(to)
+    phaseGateEdgeKeys.add(`${from}->${to}`)
+  }
+  if (order.length > 1) {
+    log(`Phase ゲート有効: ${order.map((n) => `#${n}`).join(' → ')}（sub-issues リスト順。前 Phase の全子孫が merged/closed になるまで次 Phase に着手しない）`)
+  }
+}
 function findDependencyCycle() {
   const color = new Map()
   const stack = []
@@ -5794,20 +6096,12 @@ function findDependencyCycle() {
 }
 let cycle = findDependencyCycle()
 while (cycle) {
-  let removed = false
-  for (let i = 0; i < cycle.length; i++) {
-    const from = cycle[i]
-    const to = cycle[(i + 1) % cycle.length]
-    const isTreeEdge = (byParent.get(from) ?? []).some((c) => c.number === to)
-    if (!isTreeEdge && depsMap.get(from)?.has(to)) {
-      depsMap.get(from).delete(to)
-      log(`循環依存を検出: ${cycle.map((n) => `#${n}`).join(' → ')}。#${from} の dependsOn #${to} を無視する`)
-      removed = true
-      break
-    }
-  }
 
-  if (!removed) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
+  const edge = selectRemovableCycleEdge(cycle, byParent, depsMap, phaseGateEdgeKeys)
+
+  if (!edge) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
+  depsMap.get(edge.from).delete(edge.to)
+  log(`循環依存を検出: ${cycle.map((n) => `#${n}`).join(' → ')}。#${edge.from} の dependsOn #${edge.to} を無視する`)
   cycle = findDependencyCycle()
 }
 
@@ -5834,13 +6128,33 @@ async function markBlockedByDeps(item, failedDeps) {
   const childSet = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
   const failedChildren = failedDeps.filter((d) => childSet.has(d))
   const failedPrereqs = failedDeps.filter((d) => !childSet.has(d))
+
+
+
+  const failedPhaseGate = failedPrereqs.filter((d) => phaseGateEdgeKeys.has(`${item.number}->${d}`))
+  const failedOtherPrereqs = failedPrereqs.filter((d) => !phaseGateEdgeKeys.has(`${item.number}->${d}`))
   let note
   if (failedChildren.length > 0 && failedPrereqs.length === 0) {
     note = `子イシューの失敗・ブロックによりクローズ検証を保留: ${failedChildren.map((d) => `#${d}`).join(', ')}`
+  } else if (failedChildren.length > 0 && failedPhaseGate.length > 0 && failedOtherPrereqs.length === 0) {
+    note =
+      `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前 Phase 未完了（phaseGate） ` +
+      `${failedPhaseGate.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
+  } else if (failedChildren.length > 0 && failedPhaseGate.length > 0) {
+    note =
+      `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')}、前 Phase 未完了（phaseGate） ` +
+      `${failedPhaseGate.map((d) => `#${d}`).join(', ')}、前提イシュー ` +
+      `${failedOtherPrereqs.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
   } else if (failedChildren.length > 0) {
     note =
       `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
       `${failedPrereqs.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
+  } else if (failedPhaseGate.length > 0 && failedOtherPrereqs.length === 0) {
+    note = `前 Phase 未完了（phaseGate）により未着手: ${failedPhaseGate.map((d) => `#${d}`).join(', ')}`
+  } else if (failedPhaseGate.length > 0) {
+    note =
+      `前 Phase 未完了（phaseGate） ${failedPhaseGate.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
+      `${failedOtherPrereqs.map((d) => `#${d}`).join(', ')} の失敗により未着手`
   } else {
     note = `前提イシューの失敗・ブロックにより未着手: ${failedPrereqs.map((d) => `#${d}`).join(', ')}`
   }
@@ -6981,4 +7295,4 @@ if (residualBytesOverLimit) {
 
 
 
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions }

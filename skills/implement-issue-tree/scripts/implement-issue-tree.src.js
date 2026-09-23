@@ -122,6 +122,80 @@ const autoMergeEnabled = (() => {
   }
   return raw
 })()
+// Phase ゲートの明示 opt-in（Issue #494）。ルート直下の子（Phase 親 or leaf）を sub-issues
+// リスト順に直列化し、前 Phase の全子孫が merged/closed になるまで次 Phase 配下に着手しない。
+// 既定 false では depsMap への辺追加自体を行わず、現行動作（post-order 優先度のみ）を完全に
+// 維持する。マージゲート入力に準じる厳格パースとし、誤記（"true" 等）を黙って読み替えない。
+function parsePhaseGate(raw) {
+  if (raw === undefined || raw === null) return false
+  if (typeof raw !== 'boolean') {
+    throw new Error('args.phaseGate は boolean で指定すること（例: {"phaseGate": true}。未指定はゲートなし = 現行動作。Issue #494）')
+  }
+  return raw
+}
+const phaseGateEnabled = parsePhaseGate(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.phaseGate : undefined)
+// Phase ゲートの合成辺を組み立てる純粋関数。byParentMap は呼び出し側のソート済み前提に依存せず
+// ここで siblingIndex 昇順に並び替え直す（防御的コピー）。タイトル文字列（非信頼データ）は一切
+// 解析せず、構造値の siblingIndex のみを根拠にする。
+//   - order: ルート直下の子を siblingIndex 昇順に並べた issue 番号列（Phase 実行順の正本）
+//   - edges: { from, to }（from が to に依存する辺。from は Uₖ（k>=1）の子孫全部、
+//     to は j<k の gatePrereqs(Uⱼ) の和集合）。Uⱼ が leaf なら gatePrereqs(Uⱼ) = {Uⱼ} 自身、
+//     子を持つ Phase 親なら子孫全部（Phase 親自身の verify-close は前提に含めない設計）
+function buildPhaseGateEdges(rootNumber, byParentMap) {
+  const units = [...(byParentMap.get(rootNumber) ?? [])].sort((a, b) => a.siblingIndex - b.siblingIndex)
+  const order = units.map((u) => u.number)
+  function subtreeOf(unitNode) {
+    // 反復 DFS（部分木のノード全部を収集）。ルート単位自身も含む。
+    const acc = []
+    const stack = [unitNode]
+    const seen = new Set()
+    while (stack.length > 0) {
+      const n = stack.pop()
+      if (seen.has(n.number)) continue
+      seen.add(n.number)
+      acc.push(n.number)
+      for (const c of byParentMap.get(n.number) ?? []) stack.push(c)
+    }
+    return acc
+  }
+  const subtrees = units.map((u) => subtreeOf(u))
+  // gatePrereqs(Uⱼ) は Uⱼ 自身を含まない子孫全部（Phase 親自身の verify-close は前提に含めない
+  // 設計。R の「前 Phase 親の全子が merged/closed」に合わせる）。leaf（子を持たない）の場合のみ
+  // 自身を前提にする（依存できる子孫がないため）。
+  const gatePrereqs = units.map((u, i) => {
+    const children = byParentMap.get(u.number) ?? []
+    return children.length > 0 ? subtrees[i].filter((n) => n !== u.number) : [u.number]
+  })
+  const edges = []
+  for (let k = 1; k < units.length; k++) {
+    const prereqUnion = new Set()
+    for (let j = 0; j < k; j++) for (const p of gatePrereqs[j]) prereqUnion.add(p)
+    for (const node of subtrees[k]) {
+      for (const prereq of prereqUnion) {
+        if (node === prereq) continue
+        edges.push({ from: node, to: prereq })
+      }
+    }
+  }
+  return { order, edges }
+}
+// 循環除去で削除して良い辺を選ぶ純粋関数（Issue #494）。木の辺（親子関係）と Phase ゲート辺
+// （protectedKeys）は保護対象とし、削除対象は本文由来の dependsOn 辺に限定する。cycle は
+// findDependencyCycle() が返すノード列（先頭から辺で連結し、末尾は先頭へ戻る）。見つからない
+// 場合は null を返し、呼び出し側は解決不能な循環として fail-closed で throw する（木の辺と
+// ゲート辺だけでは循環が構造上生じないため、null 到達は異常データのシグナル）。
+function selectRemovableCycleEdge(cycle, byParentMap, depsMapArg, protectedKeys) {
+  for (let i = 0; i < cycle.length; i++) {
+    const from = cycle[i]
+    const to = cycle[(i + 1) % cycle.length]
+    const isTreeEdge = (byParentMap.get(from) ?? []).some((c) => c.number === to)
+    const isProtected = protectedKeys.has(`${from}->${to}`)
+    if (!isTreeEdge && !isProtected && depsMapArg.get(from)?.has(to)) {
+      return { from, to }
+    }
+  }
+  return null
+}
 // base 取り込み（conflicting 経路）の回数上限。fixCount とは独立の予算軸（Issue #441。壊れた
 // ブランチが monitorsLeft を無限消費するのを防ぐ有界化）。マージゲート入力のため型不正は
 // throw。0 は自動 base 取り込みを行わない明示的オプトアウト。
@@ -1306,7 +1380,7 @@ const DISCARD_SAFETY_SCHEMA = {
 // 状態ファイルの読み込みスキーマ（additionalProperties 許可で柔軟に受け取る）
 const STATE_LOAD_SCHEMA = {
   type: 'object',
-  required: ['ok', 'fileExisted', 'items', 'highWaterBytes'],
+  required: ['ok', 'fileExisted', 'items', 'highWaterBytes', 'highWaterVersion'],
   properties: {
     ok: { type: 'boolean', description: '読み込み・パース成功なら true。ファイルなしの初期化成功も true。jq パース失敗等は false' },
     fileExisted: { type: 'boolean', description: 'ファイルが存在した場合 true（新規作成した場合は false）' },
@@ -1321,6 +1395,15 @@ const STATE_LOAD_SCHEMA = {
       description:
         '状態ファイルのトップレベル .perWorktreeByteReserveHighWater の値（バイト単位）。' +
         'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #471）。',
+    },
+    highWaterVersion: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        '状態ファイルのトップレベル .perWorktreeByteReserveHighWaterVersion の値。' +
+        'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #496。0 は' +
+        'ネスト二重計上を含み得た旧形式を示す番兵値で、現行版 HIGH_WATER_SCHEMA_VERSION と' +
+        '一致しない限り高水位は無効として扱われる）。',
     },
   },
   additionalProperties: true,
@@ -1488,16 +1571,22 @@ async function loadState() {
       `2. ファイルが存在する場合:`,
       `   a. jq . ${STATE_FILE} でパースを試みる（jq の終了コードで成否を判断する）。`,
       `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。加えて highWaterBytes は` +
-        ` .perWorktreeByteReserveHighWater フィールドの値（存在しない場合は 0）を返す。`,
-      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {}, highWaterBytes: 0 を返す。`,
+        ` .perWorktreeByteReserveHighWater フィールドの値（存在しない場合は 0）を返し、` +
+        ` highWaterVersion は .perWorktreeByteReserveHighWaterVersion フィールドの値` +
+        `（存在しない場合は 0）を返す。`,
+      `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {},` +
+        ` highWaterBytes: 0, highWaterVersion: 0 を返す。`,
       `3. ファイルが存在しない場合:`,
       `   a. mkdir -p _/issue-trees を実行し、`,
-      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","perWorktreeByteReserveHighWater":0,"items":{}} を`,
+      `   b. {"parent":${parent},"baseBranch":"${baseBranch}","parallel":${concurrency},"updatedAt":"","perWorktreeByteReserveHighWater":0,"perWorktreeByteReserveHighWaterVersion":${HIGH_WATER_SCHEMA_VERSION},"items":{}} を`,
       `   c. ${STATE_FILE} に書き込む。`,
-      `   d. 書き込み成功: ok: true, fileExisted: false, items: {}, highWaterBytes: 0 を返す。`,
-      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {}, highWaterBytes: 0 を返す。`,
+      `   d. 書き込み成功: ok: true, fileExisted: false, items: {}, highWaterBytes: 0,` +
+        ` highWaterVersion: ${HIGH_WATER_SCHEMA_VERSION} を返す。`,
+      `   e. 書き込み失敗: ok: false, fileExisted: false, items: {}, highWaterBytes: 0,` +
+        ` highWaterVersion: 0 を返す。`,
       `返却: ok（boolean）, fileExisted（boolean）, items（JSON オブジェクト）,` +
-        ` highWaterBytes（整数。バイト単位。フィールド欠落は 0）。`,
+        ` highWaterBytes（整数。バイト単位。フィールド欠落は 0）,` +
+        ` highWaterVersion（整数。フィールド欠落は 0）。`,
     ].join('\n'),
     { label: 'state:load', schema: STATE_LOAD_SCHEMA, isValid: (r) => typeof r?.ok === 'boolean' },
   )
@@ -1532,6 +1621,11 @@ async function loadState() {
     // 意味し、呼び出し側の Math.max 系ロジックにとって無害な値（Issue #471）。
     highWaterBytes: Number.isInteger(result?.highWaterBytes) && result.highWaterBytes >= 0
       ? result.highWaterBytes
+      : 0,
+    // 同様に不正値は 0（＝旧形式・番兵値）へフォールバックする。0 は HIGH_WATER_SCHEMA_VERSION
+    // と一致しないため、decideRunStartHighWater は不正値混入時も安全側（無効化）に倒れる。
+    highWaterVersion: Number.isInteger(result?.highWaterVersion) && result.highWaterVersion >= 0
+      ? result.highWaterVersion
       : 0,
   }
 }
@@ -1764,6 +1858,75 @@ function computeNextHighWater(currentHighWaterBytes, candidateBytes) {
   return candidateBytes
 }
 
+// 高水位フィールドのスキーマ版。version が現行値と異なる既存値は「汚染の可能性を排除できない
+// 旧形式」とみなし無効化する（Issue #496）。旧版は measureMainWorktreeContentBytes がメイン
+// worktree 配下の linked worktree を二重計上していたため、そこから確定した高水位が数十 GiB
+// まで膨らみ得た。version を上げることで、古い状態ファイルから読んだ値を機械的に区別できる。
+const HIGH_WATER_SCHEMA_VERSION = 2
+// 実測との乖離による段階的引き下げ（decideRunStartHighWater）の発火条件。サンプル数が少ない
+// （＝残置 worktree がほぼ無い）状態は「開始直後で見積りの根拠が薄いだけ」であり Issue #471 が
+// 守りたい「開始直後の過小見積り防止」の典型ケースのため、十分な実測件数がある場合に限る。
+const HIGH_WATER_DECAY_MIN_SAMPLES = 3
+const HIGH_WATER_DECAY_RATIO = 4
+
+// メイン worktree 配下に作られたネストした linked worktree（前ランの残置等）のパス集合を返す
+// 純粋関数（Issue #496）。isolation worktree は `<main>/.claude/worktrees/<runId>-N` に作られる
+// ため、前ランの残骸が残っているとメイン worktree の du に丸ごと含まれ、実際には無関係な二重
+// 計上になる。1 件でも検証不能なパスが混在する場合は null を返し観測失敗として扱う
+// （hasUnverifiedResidualPath と同じ fail-closed 方針）。戻り値はメイン自身を含まない。
+function selectNestedLinkedWorktreePaths(mainPath, entries) {
+  if (typeof mainPath !== 'string' || mainPath === '') return null
+  const list = Array.isArray(entries) ? entries : []
+  const nested = new Set()
+  // 先頭（メイン自身）はスキップする。scanOrphanWorktrees の並び（porcelain 先頭＝メイン）を
+  // 前提にする findMainWorktreePath と同じ規約。
+  for (let i = 1; i < list.length; i++) {
+    const raw = typeof list[i]?.path === 'string' ? list[i].path : ''
+    const p = sanitizeWorktreePath(raw)
+    if (!p) return null
+    if (p !== mainPath && p.startsWith(`${mainPath}/`)) nested.add(p)
+  }
+  return [...nested]
+}
+
+// メイン worktree の「内容」バイト数（KiB）を、全体・.git・ネストした linked worktree の 3 測定
+// から合成する純粋関数（Issue #496）。いずれかが null・非整数なら null（fail-closed）。差し引き
+// 過ぎ（ハードリンク共有等）による負値は 0 にクランプする。
+function computeMainContentKib({ totalKib, gitKib, nestedKib }) {
+  if (!Number.isInteger(totalKib) || totalKib < 0) return null
+  if (!Number.isInteger(gitKib) || gitKib < 0) return null
+  if (!Number.isInteger(nestedKib) || nestedKib < 0) return null
+  return Math.max(0, totalKib - gitKib - nestedKib)
+}
+
+// ラン開始時に永続化済み高水位をそのまま使うか・無効化するか・引き下げるかを決める純粋関数
+// （Issue #496）。旧版（version !== HIGH_WATER_SCHEMA_VERSION）は measureMainWorktreeContentBytes
+// のネスト二重計上により汚染された可能性を排除できないため無条件で無効化する。現行版でも、
+// 実在する残置 worktree の実測サンプルが十分にあり（HIGH_WATER_DECAY_MIN_SAMPLES 件以上）、
+// かつ永続化値が直近の実測見積りを HIGH_WATER_DECAY_RATIO 倍超える場合は、汚染以外の経路
+// （例: 一時的に巨大なビルド成果物を含む worktree が residual に混ざった）で膨らんだ値とみなし、
+// 1 ランあたり最大半減までの段階的引き下げに留める（急激な変化で次ランの見積りが過小に振れる
+// ことを避けるため）。サンプルが無い・閾値未満の場合は据え置く——これは Issue #471 が守りたい
+// 「開始直後の過小見積り防止」の典型ケースであり、直接の反証（実測サンプル）が無い限り下げない。
+function decideRunStartHighWater({ persistedBytes, persistedVersion, freshEstimateBytes, residualSampleCount }) {
+  const persisted = Number.isInteger(persistedBytes) && persistedBytes > 0 ? persistedBytes : 0
+  if (persistedVersion !== HIGH_WATER_SCHEMA_VERSION) {
+    return persisted > 0
+      ? { effectiveBytes: 0, rewriteBytes: 0, reason: 'legacy' }
+      : { effectiveBytes: 0, rewriteBytes: null, reason: null }
+  }
+  const fresh = Number.isInteger(freshEstimateBytes) && freshEstimateBytes > 0 ? freshEstimateBytes : 0
+  const samples = Number.isInteger(residualSampleCount) && residualSampleCount > 0 ? residualSampleCount : 0
+  if (
+    samples >= HIGH_WATER_DECAY_MIN_SAMPLES &&
+    persisted > fresh * HIGH_WATER_DECAY_RATIO
+  ) {
+    const decayed = Math.max(fresh, Math.ceil(persisted / 2))
+    return { effectiveBytes: decayed, rewriteBytes: decayed, reason: 'decay' }
+  }
+  return { effectiveBytes: persisted, rewriteBytes: null, reason: null }
+}
+
 // perWorktreeByteReserveHighWater（トップレベルフィールド）の永続化専用の状態ファイル更新。
 // updateState は .items[n] へのマージ専用のため、トップレベルフィールドの更新には別経路が要る
 // （Issue #471 備考）。bytes は呼び出し元（run 開始時の見積り確定・remeasureResidualBytesNow）が
@@ -1781,17 +1944,25 @@ async function persistPerWorktreeByteReserveHighWater(bytes) {
     try {
       const { result, outputMissing } = await runStateAgent(
         [
-          `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater の` +
-            `更新のみ。.items には一切触れない）。`,
-          `${STATE_FILE} の .perWorktreeByteReserveHighWater を、現在値（無ければ 0）と ${bytes}` +
-            ` の大きい方へ更新する（縮めない）。`,
+          `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater・` +
+            `perWorktreeByteReserveHighWaterVersion の更新のみ。.items には一切触れない）。`,
+          `${STATE_FILE} の .perWorktreeByteReserveHighWater を次のルールで更新する:` +
+            ` バージョン（.perWorktreeByteReserveHighWaterVersion // 0）が` +
+            ` ${HIGH_WATER_SCHEMA_VERSION} でない場合は無条件で ${bytes} へ置き換える` +
+            `（旧版は汚染の可能性を排除できないため）。バージョンが ${HIGH_WATER_SCHEMA_VERSION}` +
+            ` の場合は現在値（無ければ 0）と ${bytes} の大きい方へ更新する（縮めない）。` +
+            ` いずれの場合も更新後は .perWorktreeByteReserveHighWaterVersion を` +
+            ` ${HIGH_WATER_SCHEMA_VERSION} にする。`,
           `手順（mktemp で衝突回避）:`,
           `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
           // --arg / --argjson はフィルタより前に置く（フィルタ後に置くと古い jq や読み手が
           // ファイル名と誤認しうる。下流同期 PR への Bugbot 指摘・#478 の永続化コマンド）。
-          `  jq --argjson hw ${bytes} --arg ts "$(date -u +%FT%TZ)"` +
-            ` 'if (.perWorktreeByteReserveHighWater // 0) < $hw then` +
-            ` .perWorktreeByteReserveHighWater = $hw else . end | .updatedAt = $ts'` +
+          `  jq --argjson hw ${bytes} --argjson v ${HIGH_WATER_SCHEMA_VERSION}` +
+            ` --arg ts "$(date -u +%FT%TZ)"` +
+            ` 'if ((.perWorktreeByteReserveHighWaterVersion // 0) != $v)` +
+            ` or ((.perWorktreeByteReserveHighWater // 0) < $hw) then` +
+            ` .perWorktreeByteReserveHighWater = $hw | .perWorktreeByteReserveHighWaterVersion = $v` +
+            ` else . end | .updatedAt = $ts'` +
             ` ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
           `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
             `変更しない。`,
@@ -1813,6 +1984,50 @@ async function persistPerWorktreeByteReserveHighWater(bytes) {
       return { ok }
     } catch (e) {
       log(`⚠️ perWorktreeByteReserveHighWater 永続化中に例外が発生した（${e?.message ?? e}）`)
+      return { ok: false }
+    }
+  })
+}
+
+// perWorktreeByteReserveHighWater を無条件で指定値へ引き下げる（または旧版を無効化する）専用の
+// 状態ファイル更新（Issue #496）。persistPerWorktreeByteReserveHighWater は「縮めない」方針で
+// 更新するため、decideRunStartHighWater が決めた「旧形式の無効化（0 へ）」「実測乖離による
+// 段階的引き下げ」のいずれも表現できない。0 を許可する点が persist 系と異なる主な違い。
+// enqueueStateWrite に乗せ .items 側の並行更新と直列化する。失敗しても警告ログのみで run は
+// 止めない（次回ランの見積りが古いまま残るだけで、今回のランの in-memory 側 raw 値には影響しない）。
+async function setPerWorktreeByteReserveHighWater(bytes) {
+  if (!Number.isInteger(bytes) || bytes < 0) return { ok: false }
+  return enqueueStateWrite(async () => {
+    try {
+      const result = await agent(
+        [
+          `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater・` +
+            `perWorktreeByteReserveHighWaterVersion の更新のみ。.items には一切触れない）。`,
+          `${STATE_FILE} の .perWorktreeByteReserveHighWater を無条件で ${bytes} へ、` +
+            ` .perWorktreeByteReserveHighWaterVersion を無条件で ${HIGH_WATER_SCHEMA_VERSION} へ` +
+            ` 上書きする（現在値の大小は見ない）。`,
+          `手順（mktemp で衝突回避）:`,
+          `  tmp=$(mktemp "${STATE_FILE}.XXXXXX")`,
+          `  jq --argjson hw ${bytes} --argjson v ${HIGH_WATER_SCHEMA_VERSION}` +
+            ` --arg ts "$(date -u +%FT%TZ)"` +
+            ` '.perWorktreeByteReserveHighWater = $hw | .perWorktreeByteReserveHighWaterVersion = $v` +
+            ` | .updatedAt = $ts'` +
+            ` ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
+          `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
+            `変更しない。`,
+        ].join('\n'),
+        { label: 'state:high-water-set', phase: 'State', model: 'haiku', effort: 'low', schema: STATE_WRITE_SCHEMA },
+      )
+      const ok = result?.ok === true
+      if (!ok) {
+        log(
+          `⚠️ perWorktreeByteReserveHighWater の書き換え（${Math.round(bytes / (1024 * 1024))} MiB へ）に` +
+            `失敗した（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
+        )
+      }
+      return { ok }
+    } catch (e) {
+      log(`⚠️ perWorktreeByteReserveHighWater 書き換え中に例外が発生した（${e?.message ?? e}）`)
       return { ok: false }
     }
   })
@@ -1992,19 +2207,46 @@ async function measureResidualWorktreeBytes(paths) {
   return measured === null ? null : measured.kib
 }
 
-// メイン worktree の「全体 − .git」（新規 linked worktree の消費容量見積り）を測定する。linked
-// worktree は object store 共有のため素の du だと数倍〜数十倍の過大予約になる（PR #390）。
-// 差分値も過大評価になり得るため clampPerWorktreeByteReserve でクランプする。両方成立時のみ
-// 差分を返し、どちらか失敗なら null（fail-closed）。
-async function measureMainWorktreeContentBytes(mainPath) {
+// メイン worktree の「全体 − .git − ネストした linked worktree」（新規 linked worktree の
+// 消費容量見積り）を測定する。linked worktree は object store 共有のため素の du だと数倍〜
+// 数十倍の過大予約になる（PR #390）。加えて、メイン worktree 配下（`<main>/.claude/worktrees/…`）
+// に前ランの linked worktree が残置していると、その中身がメイン worktree の du に丸ごと二重
+// 計上され、1 worktree あたりの予約が数十 GiB まで膨らみ得る（Issue #496）。ネスト分は残置
+// バイト軸（measureResidualWorktreeBytesDetailed）で別途個別に計上済みのため、ここで除外しても
+// 容量が計上から漏れることはない。差し引き後の値も過大評価になり得るため
+// clampPerWorktreeByteReserve でクランプする。entries は呼び出し元が渡す
+// scanOrphanWorktrees() の結果（ラン開始時に 1 度だけ取得したもの）を再利用し、この関数内では
+// 再スキャンしない。
+//
+// 測定順序は必ず「メイン → .git → ネスト」の順に固定する。ネストしたパスは du 実行までの
+// 間に並行 cleanup（他 worktree の merged 確定・sweepClosedWorktrees 等）で消え得るが、
+// measureResidualWorktreeBytesDetailed は消えたパスを missing として扱い kib 計上を 0 にする
+// だけで測定失敗にはしない。ネストを先に測ると、消えた分だけ「メインから引く量」が減って
+// 過小評価（危険側）になる。逆にメインを先に測っておけば、その後ネストが消えても差し引く
+// nestedKib が小さくなるだけで、メイン自体の du 値は変わらないため差分は過大評価（安全側）
+// に倒れる。
+async function measureMainWorktreeContentBytes(mainPath, entries) {
   if (typeof mainPath !== 'string' || mainPath === '') return null
+  const nestedPaths = selectNestedLinkedWorktreePaths(mainPath, entries)
+  if (nestedPaths === null) return null
   const totalKib = await measureResidualWorktreeBytes([mainPath])
   if (totalKib === null) return null
   const gitPath = sanitizeWorktreePath(`${mainPath}/.git`)
   if (!gitPath) return null
   const gitKib = await measureResidualWorktreeBytes([gitPath])
   if (gitKib === null) return null
-  return Math.max(0, totalKib - gitKib)
+  let nestedKib = 0
+  if (nestedPaths.length > 0) {
+    const nestedMeasured = await measureResidualWorktreeBytesDetailed(nestedPaths)
+    if (nestedMeasured === null) return null
+    nestedKib = nestedMeasured.kib
+    log(
+      `メイン worktree 配下の linked worktree ${nestedPaths.length} 件` +
+        `（${Math.round((nestedKib * 1024) / (1024 * 1024))} MiB）を` +
+        `メイン内容の見積りから除外した（残置バイト軸では別途計上済み）`,
+    )
+  }
+  return computeMainContentKib({ totalKib, gitKib, nestedKib })
 }
 
 // メイン worktree が属するファイルシステムの実空き容量の返却スキーマ（Issue #467 P0
@@ -3527,7 +3769,11 @@ phase('Restore')
 // 境界マーカー用 seed をラン開始時に 1 回だけ取得する（根拠は ensureBoundaryNonceSeed 参照）。
 await ensureBoundaryNonceSeed()
 
-const { items: savedItems, highWaterBytes: loadedHighWaterBytes } = await loadState()
+const {
+  items: savedItems,
+  highWaterBytes: loadedHighWaterBytes,
+  highWaterVersion: loadedHighWaterVersion,
+} = await loadState()
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
 // Tree フェーズ: ツリー取得 → 外部チェック観測・構成確定の順で実行する。
@@ -3861,7 +4107,9 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
       // 新規 1 worktree あたりの安全側容量予約。measureMainWorktreeContentBytes で working tree
       // 相当分のみ測定する（素の du 値は object store 全量を含み過大予約。PR #390）。残置の平均
       // 実測が上回る場合は大きい方を採用し過小評価しない。
-      const mainKib = mainWorktreePath ? await measureMainWorktreeContentBytes(mainWorktreePath) : null
+      const mainKib = mainWorktreePath
+        ? await measureMainWorktreeContentBytes(mainWorktreePath, runStartOrphanEntries)
+        : null
       // 実ディスク空き容量の測定（Issue #467 P0 codex-review 対応）。maxResidualWorktreeBytes は
       // 「残置 worktree の合計サイズ」の上限であり、ディスク自体の空き容量とは独立な指標のため、
       // 残置サイズが上限未満でも実ディスクが先に枯渇し得る（例: 残置 8 GiB・実空き 4 GiB の環境で
@@ -3909,15 +4157,48 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
             sentCount: verifiedResidualPaths.length,
             missing: residualMeasured.missing,
           }) ?? 0
+        // Issue #496: 永続化済み高水位をそのまま信頼する前に、汚染源（旧版・実測との大幅乖離）を
+        // 排除する。decideRunStartHighWater は「旧版なら無効化」「現行版でも実測乖離が大きければ
+        // 半減まで引き下げ」を純粋に決定し、rewriteBytes が非 null の場合は書き換えを永続化する
+        // （raw 確定より前に完了させることで、書き込み順序が「是正 → 今回の raise」の順になる）。
+        const residualSampleCount = verifiedResidualPaths.length - residualMeasured.missing
+        const highWaterDecision = decideRunStartHighWater({
+          persistedBytes: persistedHighWaterBytes,
+          persistedVersion: loadedHighWaterVersion,
+          freshEstimateBytes: Math.max(mainKib * 1024, avgResidualBytes),
+          residualSampleCount,
+        })
+        persistedHighWaterBytes = highWaterDecision.effectiveBytes
+        if (highWaterDecision.rewriteBytes !== null) {
+          await setPerWorktreeByteReserveHighWater(highWaterDecision.rewriteBytes)
+          if (highWaterDecision.reason === 'legacy') {
+            log(
+              `旧形式の高水位（version !== ${HIGH_WATER_SCHEMA_VERSION}）を無効化した` +
+                `（ネスト二重計上を含み得るため。Issue #496）`,
+            )
+          } else if (highWaterDecision.reason === 'decay') {
+            log(
+              `1 worktree あたりの容量予約の高水位が実測から大きく乖離していたため` +
+                `${Math.round(highWaterDecision.rewriteBytes / (1024 * 1024))} MiB へ段階的に引き下げた` +
+                `（残置実測 ${residualSampleCount} 件の平均を含む今回の見積りとの比較）`,
+            )
+          }
+        }
         // rawPerWorktreeByteReserve は外側スコープの状態（実ディスク空き容量ゲート専用）。
         // clampPerWorktreeByteReserve を通す前の値をそのまま保持し、以後の空き容量判定は必ず
         // この raw 値を使う（クランプ後の perWorktreeByteReserve はバイト軸の予算配分専用）。
-        // Issue #471: 永続化済み高水位（persistedHighWaterBytes）を第3の下限として加える。「過去の
-        // 実測を知らない」ことに起因する開始直後の過小見積りは、最初の parallel 件バッチがラン中
-        // 実測し直しの反映前に着手してしまう問題（Bugbot 指摘・baby-tasks-app#40）の根本原因であり、
-        // 前回以前のランの実測結果を下限に使うことで軽減する。3値とも Math.max（縮めない）。
+        // Issue #471: 永続化済み高水位（persistedHighWaterBytes。上で是正済み）を第3の下限として
+        // 加える。「過去の実測を知らない」ことに起因する開始直後の過小見積りは、最初の parallel 件
+        // バッチがラン中実測し直しの反映前に着手してしまう問題（Bugbot 指摘・baby-tasks-app#40）の
+        // 根本原因であり、前回以前のランの実測結果を下限に使うことで軽減する。3値とも Math.max
+        // （縮めない）。
         rawPerWorktreeByteReserve = Math.max(mainKib * 1024, avgResidualBytes, persistedHighWaterBytes)
-        await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
+        // Issue #496: 永続化候補は mainKib 項（ネスト除外後でも測定経路の変化に対して脆弱）を
+        // 含めず、実在する残置 linked worktree の実測平均のみとする（汚染源を遮断する）。
+        // in-memory の rawPerWorktreeByteReserve 自体は mainKib' も含めて Math.max で安全側を
+        // 保つため、この変更は今回のランの見積り精度を弱めない。avgResidualBytes が 0
+        // （残置が実在しない）の場合は computeNextHighWater が null を返し永続化しない。
+        await raiseAndPersistHighWater(avgResidualBytes)
         // クランプの設計根拠は clampPerWorktreeByteReserve 定義側のコメントを参照
         // （Issue #348 codex-review High 指摘: mainKib が gitignored なビルド成果物を含み
         // 過大評価になり得るため、1 件目の着手候補が予約のみで恒久停止しないよう上限を課す）。
@@ -5767,6 +6048,27 @@ for (const item of queue) {
     depsMap.get(item.number).add(d)
   }
 }
+// Phase ゲート（opt-in、Issue #494）: ルート直下の子（Phase 親 or leaf）を sub-issues リスト順に
+// 直列化する合成辺を depsMap に追加する。循環除去（findDependencyCycle）より前に追加し、辺の
+// キーを phaseGateEdgeKeys に記録することで、本文由来（非信頼データ）の逆向き dependsOn が
+// 循環除去ループでゲート辺を巻き込んで削除しないよう保護する。無効時は空のまま（辺 0 本・
+// ログなし）で、既存の depsMap 構築結果に一切影響しない。
+const phaseGateEdgeKeys = new Set()
+let phaseOrder = []
+if (phaseGateEnabled) {
+  const { order, edges } = buildPhaseGateEdges(parent, byParent)
+  phaseOrder = order
+  for (const { from, to } of edges) {
+    // 前提は必ず inTree 内（buildPhaseGateEdges はツリー全体から辺を作るため理論上は常に
+    // true だが、fail-closed のため明示的に再検証する）。自己辺は作らない。
+    if (!inTree.has(from) || !inTree.has(to) || from === to) continue
+    depsMap.get(from)?.add(to)
+    phaseGateEdgeKeys.add(`${from}->${to}`)
+  }
+  if (order.length > 1) {
+    log(`Phase ゲート有効: ${order.map((n) => `#${n}`).join(' → ')}（sub-issues リスト順。前 Phase の全子孫が merged/closed になるまで次 Phase に着手しない）`)
+  }
+}
 function findDependencyCycle() {
   const color = new Map() // undefined=未訪問 / 1=訪問中 / 2=完了
   const stack = []
@@ -5794,20 +6096,12 @@ function findDependencyCycle() {
 }
 let cycle = findDependencyCycle()
 while (cycle) {
-  let removed = false
-  for (let i = 0; i < cycle.length; i++) {
-    const from = cycle[i]
-    const to = cycle[(i + 1) % cycle.length]
-    const isTreeEdge = (byParent.get(from) ?? []).some((c) => c.number === to)
-    if (!isTreeEdge && depsMap.get(from)?.has(to)) {
-      depsMap.get(from).delete(to)
-      log(`循環依存を検出: ${cycle.map((n) => `#${n}`).join(' → ')}。#${from} の dependsOn #${to} を無視する`)
-      removed = true
-      break
-    }
-  }
-  // 木の親子辺のみで構成される循環は構造上発生しないため、ここに到達するのは異常データ
-  if (!removed) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
+  // 削除対象は dependsOn 由来の辺に限る。木の辺・Phase ゲート辺（phaseGateEdgeKeys）は保護対象。
+  const edge = selectRemovableCycleEdge(cycle, byParent, depsMap, phaseGateEdgeKeys)
+  // 木の辺とゲート辺だけでは循環は構造上発生しないため、null 到達は異常データ
+  if (!edge) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
+  depsMap.get(edge.from).delete(edge.to)
+  log(`循環依存を検出: ${cycle.map((n) => `#${n}`).join(' → ')}。#${edge.from} の dependsOn #${edge.to} を無視する`)
   cycle = findDependencyCycle()
 }
 
@@ -5834,13 +6128,33 @@ async function markBlockedByDeps(item, failedDeps) {
   const childSet = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
   const failedChildren = failedDeps.filter((d) => childSet.has(d))
   const failedPrereqs = failedDeps.filter((d) => !childSet.has(d))
+  // phaseGate 由来（前 Phase 未完了）の前提失敗は、本文由来の dependsOn 前提と文言を分ける
+  // （原因追跡のため。phaseGate 無効時は phaseGateEdgeKeys が常に空なので failedPhaseGate は
+  // 常に空になり、既存の文言・分岐へ完全に一致する = R3 の非回帰）。
+  const failedPhaseGate = failedPrereqs.filter((d) => phaseGateEdgeKeys.has(`${item.number}->${d}`))
+  const failedOtherPrereqs = failedPrereqs.filter((d) => !phaseGateEdgeKeys.has(`${item.number}->${d}`))
   let note
   if (failedChildren.length > 0 && failedPrereqs.length === 0) {
     note = `子イシューの失敗・ブロックによりクローズ検証を保留: ${failedChildren.map((d) => `#${d}`).join(', ')}`
+  } else if (failedChildren.length > 0 && failedPhaseGate.length > 0 && failedOtherPrereqs.length === 0) {
+    note =
+      `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前 Phase 未完了（phaseGate） ` +
+      `${failedPhaseGate.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
+  } else if (failedChildren.length > 0 && failedPhaseGate.length > 0) {
+    note =
+      `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')}、前 Phase 未完了（phaseGate） ` +
+      `${failedPhaseGate.map((d) => `#${d}`).join(', ')}、前提イシュー ` +
+      `${failedOtherPrereqs.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
   } else if (failedChildren.length > 0) {
     note =
       `子イシュー ${failedChildren.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
       `${failedPrereqs.map((d) => `#${d}`).join(', ')} の失敗によりクローズ検証を保留`
+  } else if (failedPhaseGate.length > 0 && failedOtherPrereqs.length === 0) {
+    note = `前 Phase 未完了（phaseGate）により未着手: ${failedPhaseGate.map((d) => `#${d}`).join(', ')}`
+  } else if (failedPhaseGate.length > 0) {
+    note =
+      `前 Phase 未完了（phaseGate） ${failedPhaseGate.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
+      `${failedOtherPrereqs.map((d) => `#${d}`).join(', ')} の失敗により未着手`
   } else {
     note = `前提イシューの失敗・ブロックにより未着手: ${failedPrereqs.map((d) => `#${d}`).join(', ')}`
   }
@@ -6981,4 +7295,4 @@ if (residualBytesOverLimit) {
 // レポート返却。ephemeralWorktrees: 使い捨て worktree の記録（implement は返さない — 消費側が
 // 未マージ成果を削除しかねない）。autoMerge: 実効状態。mergeGuard: hook は deny 専用。
 // residualWorktrees: 残置上限ゲート観測。prereqTransitions: 前提の外部完了遷移（Issue #442）。
-return { parent, baseBranch, parallel: concurrency, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions }
