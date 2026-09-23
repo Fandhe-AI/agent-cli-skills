@@ -111,6 +111,54 @@ git worktree remove <worktree-path>
 git worktree prune
 ```
 
+### 残置 worktree による容量予約の膨張と掃除（Issue #496）
+
+**症状**: 実ディスク空き容量ゲートのログで、1 worktree あたりの予約が不自然に大きく（数十 GiB 単位）、未着手 leaf が一斉に `blocked` になる。実ディスクには十分な空きがあるのに新規着手が全件止まる場合、この症状を疑う。
+
+**原因**: isolation worktree は `<main>/.claude/worktrees/<runId>-N` に、メイン worktree 配下として作られる。前ランの worktree が削除されずに残っていると、その中身（依存関係・ビルド成果物込みで 1 件あたり数〜十数 GiB）がメイン worktree の du に丸ごと含まれ、実際には無関係な二重計上になる（ネストした残置分は別途、残置バイト軸の測定でも個別に計上済みのため、実際の容量が計上から漏れることはない）。加えて、この膨張した見積りが「縮めない」方針の高水位フィールド（`.perWorktreeByteReserveHighWater`）へ永続化されると、worktree を手動で掃除しても次ラン以降に膨張値が引き継がれ続ける。
+
+**自動是正**: 修正後は 2 段構えで自動的に是正される。(1) メイン worktree の内容測定（`measureMainWorktreeContentBytes`）が、メイン worktree 配下にあるネストした linked worktree のパスを検出し、その分を差し引いてから見積りを確定する。(2) ラン開始時に、永続化済みの高水位が旧形式（`perWorktreeByteReserveHighWaterVersion` が現行版と不一致）なら無効化し、現行版でも実測との乖離が大きい（残置実測サンプルが十分にあり、かつ永続化値が直近の見積りを大きく超える）場合は 1 ランあたり最大半減までの段階的引き下げを行う。いずれも自動処理であり、手動リセットは通常不要。
+
+**手動掃除の手順（自動是正では回復しない・実行中のランが無いことを確認してから行う）**:
+
+```bash
+# 1. 対象を確認する
+git worktree list --porcelain
+
+# 2. 削除前に、未 push のコミットや未コミットの変更が無いことを確認する
+#    （worktree パスは前段の出力から。<path> を置き換える）
+git -C <path> status --porcelain
+git -C <path> log @{u}.. --oneline 2>/dev/null   # 未 push コミットの有無
+
+# 3. failed / blocked のイシューが保持する worktree でないことも確認する
+#    （状態ファイルの worktree フィールドと突き合わせる）
+cat _/issue-trees/<親イシュー番号>.json | jq '.items | to_entries[] | {issue: .key, worktree: .value.worktree}'
+
+# 4. 上記いずれの保持理由も無いと確認できたパスのみ削除する
+git worktree remove --force <path>
+git worktree prune
+
+# 5. 未登録の残骸が無いか確認する（git worktree list に載っていないものだけを対象にする）
+du -sh <main>/.claude/worktrees
+ls <main>/.claude/worktrees
+```
+
+**high-water のリセット**（自動是正が効かない・手動で強制的に 0 へ戻したい場合のみ。通常は不要）:
+
+```bash
+tmp=$(mktemp "_/issue-trees/<親イシュー番号>.json.XXXXXX")
+jq '.perWorktreeByteReserveHighWater = 0 | .perWorktreeByteReserveHighWaterVersion = 2' \
+  _/issue-trees/<親イシュー番号>.json > "$tmp" && mv "$tmp" _/issue-trees/<親イシュー番号>.json
+
+# 確認
+jq '{hw: .perWorktreeByteReserveHighWater, v: .perWorktreeByteReserveHighWaterVersion}' \
+  _/issue-trees/<親イシュー番号>.json
+```
+
+**既知の制約**: パス表記の揺れ（シンボリックリンク経由の `/var` と `/private/var` 等）でメイン worktree のパスとネストしたパスの接頭辞が一致しない場合、その linked worktree は除外されず過大見積りのまま残る（安全側にしか倒れない）。
+
+**注意点**: `git worktree remove --force` は未コミットの変更を破棄する。状態ファイルの `.items` フィールドは手動編集の対象にしない（high-water 系のフィールドのみを触る）。
+
 ### 実装エージェントによる既存 PR・リモートブランチの再利用
 
 実装エージェントは着手時に以下の順で回復手順（手順 0b）を実行する。
