@@ -661,7 +661,78 @@ function hasParentPathTraversal(s) {
 
 
 
-function parseOptinTestDeclarations(raw) {
+
+
+
+
+
+function validateOptinCommandForm(v) {
+  if (typeof v !== 'string') return { ok: false }
+
+
+
+  if (/[\r\n\v\f]/.test(v)) return { ok: false }
+  const s = v.trim().replace(/[ \t]+/g, ' ')
+
+
+
+  if (!OPTIN_TEST_COMMAND_RE.test(s) || hasParentPathTraversal(s) || s.includes('//')) return { ok: false }
+  const tokens = s.split(' ')
+  const runner = tokens[0]
+  if (!OPTIN_TEST_RUNNERS.has(runner)) return { ok: false }
+  const subcommands = OPTIN_TEST_RUNNER_SUBCOMMANDS[runner]
+  if (subcommands && !subcommands.has(tokens[1])) return { ok: false }
+  if (hasMavenGavGoal(runner, tokens) || hasDenoRemoteSpecifier(runner, tokens)) return { ok: false }
+  return { ok: true, value: s }
+}
+
+const OPTIN_TEST_COMMANDS_MAX = 20
+
+
+
+
+
+
+
+
+
+
+
+function parseOptinTestCommands(raw) {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw)) {
+    throw new Error('args.optinTestCommands は文字列配列で指定すること（例: {"optinTestCommands": ["make e2e-three-client"]}）')
+  }
+  if (raw.length > OPTIN_TEST_COMMANDS_MAX) {
+    throw new Error(`args.optinTestCommands の要素数が多すぎる（最大 ${OPTIN_TEST_COMMANDS_MAX} 件）: ${raw.length}`)
+  }
+  const commands = []
+  raw.forEach((v, i) => {
+    const r = validateOptinCommandForm(v)
+    if (!r.ok) {
+      throw new Error(
+        `args.optinTestCommands[${i}] が opt-in テストコマンドの許可形式ではない`
+        + '（文字集合・パストラバーサル・許可ランナー・サブコマンド制約・mvn GAV・deno リモート指定子。'
+        + `SKILL.md「opt-in テストの宣言」節参照）: ${String(v).slice(0, 80)}`,
+      )
+    }
+    if (!commands.includes(r.value)) commands.push(r.value)
+  })
+  return commands
+}
+const optinTestCommandsInput = parseOptinTestCommands(
+  parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.optinTestCommands : undefined,
+)
+
+
+
+
+
+
+
+
+function parseOptinTestDeclarations(raw, approved) {
+  const approvedList = Array.isArray(approved) ? approved : []
   if (raw === undefined || raw === null) return { commands: [], invalid: [] }
   if (!Array.isArray(raw)) return { commands: [], invalid: [capText(sanitize(JSON.stringify(raw)), 300)] }
   const commands = []
@@ -679,26 +750,8 @@ function parseOptinTestDeclarations(raw) {
       continue
     }
     const s = v.trim().replace(/[ \t]+/g, ' ')
-
-
-
-    if (!OPTIN_TEST_COMMAND_RE.test(s) || hasParentPathTraversal(s) || s.includes('//')) {
+    if (!approvedList.includes(s)) {
       invalid.push(capText(sanitize(v), 300))
-      continue
-    }
-    const tokens = s.split(' ')
-    const runner = tokens[0]
-    if (!OPTIN_TEST_RUNNERS.has(runner)) {
-      invalid.push(capText(sanitize(s), 300))
-      continue
-    }
-    const subcommands = OPTIN_TEST_RUNNER_SUBCOMMANDS[runner]
-    if (subcommands && !subcommands.has(tokens[1])) {
-      invalid.push(capText(sanitize(s), 300))
-      continue
-    }
-    if (hasMavenGavGoal(runner, tokens) || hasDenoRemoteSpecifier(runner, tokens)) {
-      invalid.push(capText(sanitize(s), 300))
       continue
     }
     if (!commands.includes(s)) commands.push(s)
@@ -4520,7 +4573,9 @@ for (const n of tree.nodes) {
 
 
 
-  const optinParsed = parseOptinTestDeclarations(n.optinTests)
+
+
+  const optinParsed = parseOptinTestDeclarations(n.optinTests, optinTestCommandsInput)
   n.optinTests = optinParsed.commands
   n.optinTestsInvalid = optinParsed.invalid
   if (n.optinTests.length > 0) {
@@ -4532,7 +4587,7 @@ for (const n of tree.nodes) {
     }
   }
   if (n.optinTestsInvalid.length > 0) {
-    log(`⚠️ #${n.number}: opt-in テスト宣言が許可形式外（${n.optinTestsInvalid.map(sanitize).join(' / ')}）。実装は起動せず blocked で停止する`)
+    log(`⚠️ #${n.number}: opt-in テスト宣言が承認一覧（args.optinTestCommands）に無いか許可形式外（${n.optinTestsInvalid.map(sanitize).join(' / ')}）。実装は起動せず blocked で停止する`)
   }
 }
 
@@ -5070,9 +5125,12 @@ async function runImplement(item) {
 
   if (Array.isArray(item.optinTestsInvalid) && item.optinTestsInvalid.length > 0) {
     const reason = capText(
-      `イシュー本文の opt-in テスト宣言が許可形式外（${item.optinTestsInvalid.join(' / ')}）。` +
-      `許可形式: 先頭トークンが ${[...OPTIN_TEST_RUNNERS].join(' / ')} のいずれか・シェルメタ文字不可・最大 ${OPTIN_TESTS_MAX} 件。` +
-      `イシューの \`<!-- optin-tests: ... -->\` マーカーを修正して再実行すること`,
+      `イシュー本文の opt-in テスト宣言が承認一覧（args.optinTestCommands）に無いか許可形式外（${item.optinTestsInvalid.join(' / ')}）。` +
+      `PR #503 codex P0 対応により、opt-in テストはイシュー本文だけで持ち込めず、` +
+      `ラン起動時の args.optinTestCommands（人間承認済みのコマンド一覧。最大 ${OPTIN_TEST_COMMANDS_MAX} 件）に` +
+      `正規化後の文字列が完全一致で含まれている必要がある。イシューの \`<!-- optin-tests: ... -->\` マーカーを` +
+      `args.optinTestCommands のいずれかと一致する値へ修正するか、args.optinTestCommands へ当該コマンドを` +
+      `追加して同じ args で再実行すること`,
     )
     await updateState(item.number, { status: 'blocked', note: reason })
     recordFailure({

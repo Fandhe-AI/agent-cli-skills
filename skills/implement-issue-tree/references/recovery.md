@@ -257,9 +257,13 @@ rm _/issue-trees/42.json
 3. 同じ `args` で再実行する（`monitoring` 再開から継続し、マージ前ゲートが更新済みの pass 記録を
    確認して継続する）。
 
-宣言そのものが許可形式外（先頭トークンが許可ランナー外・シェルメタ文字を含む等）で `blocked` に
-なった場合は、実装は一切起動していない。イシュー本文の `<!-- optin-tests: ... -->` マーカーを
-許可形式（SKILL.md「opt-in テストの宣言」節参照）へ修正してから同じ `args` で再実行する。
+宣言そのものが `args.optinTestCommands`（承認一覧）に無いか許可形式外（PR #503 codex P0。
+先頭トークンが許可ランナー外・シェルメタ文字を含む等）で `blocked` になった場合は、実装は
+一切起動していない。イシュー本文の `<!-- optin-tests: ... -->` マーカーを `args.optinTestCommands`
+のいずれかと正規化後に文字列完全一致する値へ修正するか、`args.optinTestCommands` へ当該
+コマンドを追加してから同じ `args` で再実行する（SKILL.md「opt-in テストの宣言」節参照）。
+`args.optinTestCommands` の要素自体が許可形式外の場合はラン起動時にエラーで停止するため
+（実装は起動しない）、`args.optinTestCommands` の当該要素を修正してから再実行する。
 
 ### 状態ファイルについて
 

@@ -345,9 +345,10 @@ node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
 
 ## opt-in テスト記録ゲートの適用確認（Issue #495）
 
-`scripts/implement-issue-tree.src.js` の opt-in テスト記録ゲート（`parseOptinTestDeclarations` /
-`sanitizeOptinTestRuns` / `renderOptinRecordSection` / `classifyOptinRecordGate` /
-`optinRecordVerifyPrompt`）を変更した場合の確認手順。
+`scripts/implement-issue-tree.src.js` の opt-in テスト記録ゲート（`validateOptinCommandForm` /
+`parseOptinTestCommands`（`args.optinTestCommands` の起動時検証。PR #503 codex P0） /
+`parseOptinTestDeclarations` / `sanitizeOptinTestRuns` / `renderOptinRecordSection` /
+`classifyOptinRecordGate` / `optinRecordVerifyPrompt`）を変更した場合の確認手順。
 
 ```bash
 # 1. merge-exec のコンテキスト分離契約（Issue #145 / #160）が退行していないこと。

