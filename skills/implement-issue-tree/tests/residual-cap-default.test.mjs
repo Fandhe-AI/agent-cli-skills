@@ -189,7 +189,10 @@ test('バイト軸はラン開始時の残置 0 件でもメイン worktree 測�
   // になっていた）。
   assert.doesNotMatch(source, /if \(maxResidualWorktreeBytes > 0 && residual\.paths\.length > 0\)/)
   assert.match(source, /if \(maxResidualWorktreeBytes > 0\) {/)
-  assert.match(source, /mainWorktreePath \? await measureMainWorktreeContentBytes\(mainWorktreePath\)/)
+  assert.match(
+    source,
+    /mainWorktreePath\s*\?\s*await measureMainWorktreeContentBytes\(mainWorktreePath, runStartOrphanEntries\)/,
+  )
   // Issue #471: 永続化済み高水位（persistedHighWaterBytes）が Math.max の第3引数に加わった
   // （前回以前のランの実測結果を開始時見積りの下限として使う）。
   assert.match(source, /rawPerWorktreeByteReserve = Math\.max\(mainKib \* 1024, avgResidualBytes, persistedHighWaterBytes\)/)
@@ -205,10 +208,11 @@ test('バイト軸はラン開始時の残置 0 件でもメイン worktree 測�
   )
 })
 
-test('measureMainWorktreeContentBytes はメイン worktree 全体から .git を差し引いた working tree 相当を返す構造になっている（.git object store の過大予約防止）', () => {
-  assert.match(source, /async function measureMainWorktreeContentBytes\(mainPath\)/)
+test('measureMainWorktreeContentBytes はメイン worktree 全体から .git・ネストした linked worktree を差し引いた working tree 相当を返す構造になっている（.git object store の過大予約防止・Issue #496 のネスト二重計上防止）', () => {
+  assert.match(source, /async function measureMainWorktreeContentBytes\(mainPath, entries\)/)
   assert.match(source, /const gitPath = sanitizeWorktreePath\(`\$\{mainPath\}\/\.git`\)/)
-  assert.match(source, /return Math\.max\(0, totalKib - gitKib\)/)
+  assert.match(source, /const nestedPaths = selectNestedLinkedWorktreePaths\(mainPath, entries\)/)
+  assert.match(source, /return computeMainContentKib\(\{ totalKib, gitKib, nestedKib \}\)/)
 })
 
 test('measureResidualWorktreeBytesDetailed はプロンプトへ渡す前に sanitizeWorktreePath で全パスを検証し、UNTRUSTED_POLICY を含める（codex-review P0 対応）', () => {
