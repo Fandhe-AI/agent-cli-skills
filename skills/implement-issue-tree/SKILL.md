@@ -534,13 +534,15 @@ open のサブイシューが残っている場合、または受入基準が未
 
 レポート出力テンプレート（処理結果サマリー・完了イシュー・失敗/未着手イシュー・対象外/未解決コメントの各節）と返却値フィールドの説明は以下を参照。
 
+返却値 `mainWorktreeUntracked` にメイン worktree（リポジトリルート）の未追跡ファイル検査結果が入る（Issue #497）。ラン開始時・終了時の観測差分から本ラン中に新規出現したファイルを検出し、**削除はせず警告のみ**行う（並行ランや人間の作業も拾い得るため帰属は推定）。`observed: false` は検査自体が不成立だったことを示し、その場合は `git status` で手動確認する。1 件以上検出した場合はレポートにも記載し、ユーザーへ手動確認・削除を促す。
+
 詳細: [references/report-format.md](references/report-format.md)
 
 ## 検証
 
 各実装エージェントはテストコマンドを新規実行し、出力全体と終了コードを確認してから完了を宣言する（対象リポジトリに `.claude/rules/verification.md` が存在する場合はそちらの5段階ゲートに従う）。「〜のはず」「たぶん通る」等の推測語での完了主張は禁止。テスト出力・終了コードを証拠として引用してから完了を宣言する。
 
-最終レポートの「完了イシュー」に全対象イシューが列挙され、「停止イシュー」が空であることを確認する。`scripts/implement-issue-tree.js` を変更した場合の非信頼データ境界・残置 worktree 上限ゲート・merge-guard hook の適用確認手順（grep コマンド・期待結果）は以下を参照。
+最終レポートの「完了イシュー」に全対象イシューが列挙され、「停止イシュー」が空であることを確認する。`scripts/implement-issue-tree.js` を変更した場合の非信頼データ境界・残置 worktree 上限ゲート・merge-guard hook・メイン worktree への一時ファイル残置防止（Issue #497）の適用確認手順（grep コマンド・期待結果）は以下を参照。
 
 **スクリプトの編集は開発ファイルに対して行う**: `scripts/implement-issue-tree.js` は Workflow へ渡す実行ファイル（生成物）であり、直接編集しない。編集は `scripts/implement-issue-tree.src.js`（コメント込みの開発ファイル）に対して行い、`node skills/implement-issue-tree/scripts/build-workflow.mjs` でコメント除去済みの実行ファイルを再生成する（行番号は両者で一致する）。同期漏れ・直接編集は CI の `tests/build-workflow.test.mjs`（鮮度ゲート）が検出する。
 
@@ -627,6 +629,7 @@ open のサブイシューが残っている場合、または受入基準が未
 - コミット・PR 作成は Conventional Commits に従う（対象リポジトリに `.claude/rules/conventional-commits.md` があればそちらに従う）。セキュリティ問題を検出した場合は修正してから進む（対象リポジトリに `.claude/rules/security.md` があればそちらの OWASP Top 10 観点に従う。無ければ秘密情報のハードコード・インジェクション・権限過剰の観点で確認する）
 - CI が全 green に見えるのにマージが進まない場合は、cancel された run の残存 check を疑い Step 6 の「全チェックが pass に見えるのにマージが進まない場合」の分岐に従って切り分ける（`mergeStateStatus` は自動フローでは取得していない）
 - **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。continue / discard いずれの worktree 削除も WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する
+- 各エージェントはメイン worktree（リポジトリルート）とカレントディレクトリへファイルを作らない（例外はホスト指定の状態ファイルとその `mktemp` 一時ファイルのみ）。一時ファイルは scratchpad または `mktemp` の絶対パスに置く（Issue #497）。ラン開始時・終了時にメイン worktree の未追跡ファイルを検査し、本ラン中に新規出現したファイルがあれば最終レポート `mainWorktreeUntracked` とログで警告する（**自動削除はしない**。並行ランや人間の作業も拾い得るため帰属は推定）
 
 ## sandbox 環境での実行
 
