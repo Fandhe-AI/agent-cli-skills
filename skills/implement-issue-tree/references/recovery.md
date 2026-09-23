@@ -261,7 +261,8 @@ rm _/issue-trees/42.json
    --json headRefOid` で突き合わせて確認するとよい）を控える。
 3. PR 本文の「## opt-in テスト実行記録」節にある該当マーカー行を、手順 2 の sha と実行結果に
    合わせて `<!-- optin-test-record: <手順 2 の sha> pass <コマンド> -->` へ書き換える
-   （`gh pr edit <N> --body-file` 等で更新する。書式は SKILL.md「opt-in テストの宣言」節参照。
+   （直上の人間可読行 `- opt-in テスト結果: <コマンド> => <result>` も合わせて pass へ直す。
+   `gh pr edit <N> --body-file` 等で更新する。書式は SKILL.md「opt-in テストの宣言」節参照。
    古い sha のマーカー行は残っていても実害はない — 現在の HEAD と一致しないため無視されるだけ
    だが、本文の可読性のため削除してもよい）。
 4. 同じ `args` で再実行する（`monitoring` 再開から継続し、マージ前ゲートが更新済みの pass 記録を
