@@ -575,26 +575,89 @@ Issue 本文・PR 本文・レビュー本文を一切読まないコンテキ�
 従来どおり G0（サーバー側 branch protection の実測）が担い、本ゲートはそれに重ねる手続き上の
 確認にすぎない。
 
-**post-push fix の実測の永続化（`optinFixState`。PR #503 2 巡目 codex P0）**: Merge ループの
-post-push fix（`pushAfterFix: true`）が opt-in テストを再実行した結果は、`lastFixOptinRuns`
-（プロセスローカルの `let`）として保持し `combineOptinRecordGate` で PR 本文ベースの判定と
-AND する（前掲 Issue #495 Medium 2）。しかしプロセスローカル変数は monitoring/blocked からの
-再開（別プロセス起動）で失われて `null` に戻るため、post-push fix が非 pass を報告した直後に
-再開すると、PR 本文更新（`optinRecordUpdateInstructions`）が失敗・省略されているケースで
-古い pass マーカーだけでマージ前ゲートを通過し得た（`combineOptinRecordGate(gate, null)` は
-「fix 未実施」として `gate` をそのまま返す fail-open 側の既定値だったため）。post-push fix が
-`pushed: true` を報告したラウンドごとに `updateState` で状態ファイルへ
-`optinFixState: { attempted: true, runs: [...] }` を永続化し（`fixCount` / `baseMergeCount` と
-同じ非終端 updateState 呼び出し 1 箇所に相乗り）、monitoring 再開時は `restoreOptinFixState` が
-これを読んで `runMergeLoop` の `initialFixOptinRuns` として引き継ぐ。`attempted: true` なのに
-`runs` を復元できない（状態ファイル破損・キー欠落）場合は宣言コマンド全件を `not-run` とみなす
-合成配列を返し、pass 扱いにしない（fail-closed）。宣言が無い・`attempted` が無い（post-push fix
-を一度も実行していない再開）場合は `null` を返して従来どおり PR 本文のみで判定する（既定無効の
-意味を壊さないため）。head sha の突き合わせ（fix 後に別の push が入り、永続化した実測が現在の
-HEAD と対応しなくなるケース）は実装していない — 判定は「不合格側」に倒し続ける設計（迷ったら
-不合格側）で十分カバーされ、head sha 比較を追加する複雑さに見合わないと判断した。この停滞から
-抜けるには、PR 本文の更新だけでは不十分で状態ファイルの `optinFixState` 自体を修正・削除する
-必要がある（`references/recovery.md`「opt-in テスト記録不足による blocked からの復旧」節参照）。
+### 記録の HEAD sha 束縛（PR #503 3 巡目 codex P1）
+
+2 巡目までの実装（後述の `optinFixState` 永続化を含む）は、いずれも「PR 本文の pass 記録」を
+どのタイミングで陳腐化させずに保つかという運用面の対処だった。しかし根の問題は別にある:
+**マーカー行自体が「どの HEAD に対する結果か」を一切束縛していなかった**。base 取り込み
+（`baseMergePrompt`）は opt-in テストを再実行しない設計のまま HEAD を進めるため、その後に
+古い pass マーカーが PR 本文に残っていれば、`classifyOptinRecordGate` は件数だけを見て合格に
+してしまう（`optinFixState` による多層防御が効かないケース — 例えば post-push fix を経由せず
+base 取り込みだけで HEAD が進んだラウンド — でも同様に fail-open になり得た）。
+
+対処は「マーカー行に検証対象の HEAD sha を刻む」設計へ変更すること。書式を
+`<!-- optin-test-record: <40 桁 sha> <pass|fail|not-run> <コマンド> -->` に拡張した
+（`optinRecordMarkerLine(sha, result, command)`。sha・result は固定形式で空白を含まないため
+コマンド文字列（空白を含み得る）の前に置き、`grep -cxF` の完全一致だけでパースが一意になる）。
+記録を書くエージェント（`prCreatePrompt` 手順 0d・`optinRecordUpdateInstructions` 手順 a）は
+`git rev-parse HEAD`（＝実際に push した／する HEAD）を自分で取得してマーカーへ埋め込む。
+
+`optinRecordVerifyPrompt` は `gh pr view --json body,headRefOid` を単一呼び出しで取得し、
+headRefOid が 40 桁 sha として取得・検証できなければ `fetchFailed: true` と同じ扱いで全件不合格
+にする。妥当なら、宣言コマンドごとに **その headRefOid に対する** pass / fail / not-run の 3 種類
+を固定文字列 `-cxF` で数える（sha が一致しない行はどの grep にも一致せず自動的に集計から除外
+される）。`classifyOptinRecordGate` はこの headRefOid 自体の検証を主要な合否入力に加えた
+（headRefOid が無効なら `fetchFailed` と同じく全件不合格）。この結果、base 取り込み・fix 前の
+記録・全く別のラウンドで書かれた記録は、現在の HEAD と sha が一致しない限り「存在しないもの」
+として扱われ、pass 以外の判定へ自動的に倒れる。
+
+**TOCTOU 対策として merge-exec へ期待 HEAD sha を渡す**（`mergeExecutePrompt` の新パラメータ
+`expectedHeadSha`）。`optinRecordVerifyPrompt` が確認した headRefOid とマージ実行時点の実際の
+HEAD がずれる（ゲート確認後に別の push が入る）競合を防ぐため、merge-exec は手順 2 で自己取得
+した headRefOid がこの期待値と一致することを追加で確認し、不一致なら既存の `reason: head-moved`
+（このラウンドは再試行され、次ラウンドの monitor が実状態を観測し直す）で辞退する。
+`--match-head-commit` には従来どおり merge-exec 自身の自己取得値のみを使い、`expectedHeadSha`
+は一致条件を**追加**するだけでマージ許可を広げる入力にはならない — 「monitor 出力をマージ経路
+の入力に使わない」という既存の分離原則（PR #222 codex P0）と矛盾しない。宣言テストが無い
+イシューでは `expectedHeadSha` は空文字のまま渡され、`mergeExecutePrompt` の出力（`optin` 文字列
+・`--json body` を含まないコンテキスト分離契約を含む）は完全に不変（R3。回帰テストの群 E で
+`expectedHeadSha` 指定時もこの分離契約が退行しないことを確認している）。
+
+**base 取り込み経路（`baseMergePrompt`）は引き続きテストを再実行しない設計を維持する**。HEAD が
+進むため記録は sha 不一致で自動的に無効になり、次のゲート確認は不合格になる。ホストはこれを
+既存の `blocked` 終端（`blockedReason: quality`）として扱う（fix ループへ自動で回す専用の
+再ディスパッチは実装していない — 既存の停止性・fixCount 予算を変更する追加の状態遷移になり
+リスクが見合わないため。次回実行時に monitoring 再開でゲートを再評価すれば、人間または別ラウンド
+の fix が現在の HEAD で記録を更新した時点で自然に解消する）。
+
+### post-push fix の実測の永続化（`optinFixState`。PR #503 2 巡目 codex P0 → 3 巡目で headSha を追加）
+
+Merge ループの post-push fix（`pushAfterFix: true`）が opt-in テストを再実行した結果は、
+`lastFixOptin`（プロセスローカルの `let`。`{ runs, headSha }`）として保持し
+`combineOptinRecordGate` で PR 本文ベースの判定と AND する（前掲 Issue #495 Medium 2）。
+3 巡目でマーカー自体に sha を束縛したため、この AND はもはや主たる防御ではなく多層防御であり、
+`fixOptin.headSha` が `optinRecordVerifyPrompt` の検証済み headRefOid と一致する場合のみ働く
+（不一致＝HEAD がさらに進んだ場合は override せず、PR 本文側の sha 束縛判定にそのまま委ねる —
+古い実測で新しい HEAD の PR を永久に止めない可用性上の配慮。安全性は失わない: gate 自身の
+sha 束縛判定はそのまま効くため）。
+
+しかしプロセスローカル変数は monitoring/blocked からの再開（別プロセス起動）で失われて `null`
+に戻るため、post-push fix が非 pass を報告した直後に再開すると、PR 本文更新
+（`optinRecordUpdateInstructions`）が失敗・省略されているケースで古い pass マーカーだけで
+マージ前ゲートを通過し得た（`combineOptinRecordGate(gate, null, gateHeadSha)` は「fix 未実施」
+として `gate` をそのまま返す fail-open 側の既定値だったため）。post-push fix が `pushed: true`
+を報告したラウンドごとに `updateState` で状態ファイルへ
+`optinFixState: { attempted: true, runs: [...], headSha }` を永続化し（`fixCount` /
+`baseMergeCount` と同じ非終端 updateState 呼び出し 1 箇所に相乗り）、monitoring 再開時は
+`restoreOptinFixState` がこれを読んで `runMergeLoop` の `initialFixOptin` として引き継ぐ。
+`attempted: true` なのに `runs` を復元できない（状態ファイル破損・キー欠落）場合は宣言コマンド
+全件を `not-run` とみなす合成配列を返し、pass 扱いにしない（fail-closed。`headSha` は読めれば
+それを使い、読めなければ `''` になる — combine 側で「一致し得ない」扱いになるだけで、sha 束縛
+マーカーによる主防御は影響を受けない）。宣言が無い・`attempted` が無い（post-push fix を一度も
+実行していない再開）場合は `null` を返して従来どおり PR 本文のみで判定する（既定無効の意味を
+壊さないため）。
+
+**永続化の書込み自体の失敗にも対処する（PR #503 3 巡目 codex P1 / Bugbot Medium）**: 上記の
+`updateState` 呼び出しは戻り値（成否）を確認し、`optinFixStatePatch` が設定されているラウンド
+（宣言テストがあり今回 push した）に限り、失敗時は `cleanupWorktree` を付けずに 1 回再試行する。
+それでも失敗すれば `failMergeTerminal` で `blocked` 終端する（この実測を次回復元できないと、
+PR 本文更新の失敗・省略時に古い記録だけでマージ前ゲートを通過し得るため）。`failMergeTerminal`
+自身の終端 `updateState` にも `lastFixOptin` から合成した `optinFixState` を含めるよう変更した
+（従来この終端書込みは `fixCount` / `baseMergeCount` のみを永続化しており、fix 実行後だが
+monitor 起動前に別経路で終端したラウンドの実測が失われ得た）。復旧手順は
+`references/recovery.md`「opt-in テスト記録不足による blocked からの復旧」節を参照
+（マーカー sha 束縛後は、PR 本文の更新は「現在の HEAD sha で」書き直す必要があり、
+`optinFixState` の実測が残っている場合は状態ファイル側の修正・削除も要ることがある）。
 
 **宣言コマンドの許可形式を厳格化する理由（A03）と、承認一覧（`args.optinTestCommands`）を
 唯一の実行許可根拠にした理由（PR #503 codex P0）**: 宣言はイシュー本文（非信頼データ）由来

@@ -284,9 +284,13 @@ test('sanitizeOptinTestRuns: 正常な pass 報告はそのまま反映する', 
 // 群 C: renderOptinRecordSection / optinRecordMarkerLine
 // ---------------------------------------------------------------------------
 
-test('optinRecordMarkerLine: 固定書式で行頭インデントなし', () => {
-  const line = optinRecordMarkerLine('make e2e', 'pass')
-  assert.equal(line, `${OPTIN_RECORD_MARKER_PREFIX}make e2e => pass -->`)
+// テスト全体で使う 2 つの区別可能な 40 桁 sha（PR #503 3 巡目 codex P1 のマーカー sha 束縛テスト用）。
+const SHA_A = 'a'.repeat(40)
+const SHA_B = 'b'.repeat(40)
+
+test('optinRecordMarkerLine: 固定書式で行頭インデントなし（sha が先頭・PR #503 3 巡目 codex P1）', () => {
+  const line = optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')
+  assert.equal(line, `${OPTIN_RECORD_MARKER_PREFIX}${SHA_A} pass make e2e -->`)
   assert.equal(line.startsWith(' '), false)
 })
 
@@ -295,10 +299,10 @@ test('renderOptinRecordSection: 空入力は空文字を返す', () => {
   assert.equal(renderOptinRecordSection(undefined), '')
 })
 
-test('renderOptinRecordSection: マーカー行と見出しを含む', () => {
-  const section = renderOptinRecordSection([{ command: 'make e2e', result: 'pass', detail: 'ok' }])
+test('renderOptinRecordSection: <sha>/<result> プレースホルダ付きのマーカー行と見出しを含む（テンプレート化。PR #503 3 巡目 codex P1）', () => {
+  const section = renderOptinRecordSection(['make e2e'])
   assert.match(section, /## opt-in テスト実行記録/)
-  assert.match(section, new RegExp(`^${OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}make e2e => pass -->$`, 'm'))
+  assert.match(section, new RegExp(`^${OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<sha> <result> make e2e -->$`, 'm'))
 })
 
 // ---------------------------------------------------------------------------
@@ -306,138 +310,171 @@ test('renderOptinRecordSection: マーカー行と見出しを含む', () => {
 // ---------------------------------------------------------------------------
 
 test('classifyOptinRecordGate: 宣言なしは常に ok', () => {
-  assert.deepEqual(classifyOptinRecordGate([], { counts: [] }), { ok: true, missing: [] })
+  assert.deepEqual(classifyOptinRecordGate([], { headRefOid: SHA_A, counts: [] }), { ok: true, missing: [] })
   assert.deepEqual(classifyOptinRecordGate([], null), { ok: true, missing: [] })
 })
 
-test('classifyOptinRecordGate: pass 1 / nonPass 0 は ok', () => {
-  const g = classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+test('classifyOptinRecordGate: headRefOid 妥当・pass 1 / nonPass 0 は ok', () => {
+  const g = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
   assert.deepEqual(g, { ok: true, missing: [] })
 })
 
 test('classifyOptinRecordGate: pass 0 は missing', () => {
-  const g = classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 0, nonPass: 0 }] })
+  const g = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 0, nonPass: 0 }] })
   assert.deepEqual(g, { ok: false, missing: [0] })
 })
 
 test('classifyOptinRecordGate: pass 1 / nonPass 1 は missing（古い not-run 行が残存）', () => {
-  const g = classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 1, nonPass: 1 }] })
+  const g = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 1, nonPass: 1 }] })
   assert.deepEqual(g, { ok: false, missing: [0] })
 })
 
 test('classifyOptinRecordGate: null・fetchFailed・件数不一致・非整数は全件 missing（fail-closed）', () => {
   assert.deepEqual(classifyOptinRecordGate(['make e2e'], null), { ok: false, missing: [0] })
-  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { fetchFailed: true, counts: [{ index: 0, pass: 1, nonPass: 0 }] }), { ok: false, missing: [0] })
-  assert.deepEqual(classifyOptinRecordGate(['make e2e', 'make e2e2'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] }), { ok: false, missing: [0, 1] })
-  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 'x', nonPass: 0 }] }), { ok: false, missing: [0] })
-  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: -1, nonPass: 0 }] }), { ok: false, missing: [0] })
+  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, fetchFailed: true, counts: [{ index: 0, pass: 1, nonPass: 0 }] }), { ok: false, missing: [0] })
+  assert.deepEqual(classifyOptinRecordGate(['make e2e', 'make e2e2'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 1, nonPass: 0 }] }), { ok: false, missing: [0, 1] })
+  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 'x', nonPass: 0 }] }), { ok: false, missing: [0] })
+  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: -1, nonPass: 0 }] }), { ok: false, missing: [0] })
+})
+
+test('classifyOptinRecordGate: headRefOid が空・形式不正なら counts が pass 1/nonPass 0 でも全件 missing（PR #503 3 巡目 codex P1）', () => {
+  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { headRefOid: '', counts: [{ index: 0, pass: 1, nonPass: 0 }] }), { ok: false, missing: [0] })
+  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] }), { ok: false, missing: [0] })
+  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { headRefOid: 'not-a-sha', counts: [{ index: 0, pass: 1, nonPass: 0 }] }), { ok: false, missing: [0] })
+  assert.deepEqual(classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A.toUpperCase(), counts: [{ index: 0, pass: 1, nonPass: 0 }] }), { ok: false, missing: [0] })
 })
 
 // ---------------------------------------------------------------------------
-// 群 D2: combineOptinRecordGate（Issue #495 Medium 2 — post-push fix の実測による PR 本文ゲートの上書き）
+// 群 D2: combineOptinRecordGate（Issue #495 Medium 2 → PR #503 3 巡目 codex P1 で sha 束縛を追加。
+// post-push fix の実測による PR 本文ゲートの上書きは、fixOptin.headSha が gateHeadSha と一致する
+// 場合のみ働く）
 // ---------------------------------------------------------------------------
 
-test('combineOptinRecordGate: fix の opt-in 結果が fail のとき、PR 本文ゲートが ok でも不合格にする', () => {
+test('combineOptinRecordGate: fixOptin.headSha が gateHeadSha と一致し、fix の結果が fail のとき、PR 本文ゲートが ok でも不合格にする', () => {
   const bodyGateOk = { ok: true, missing: [] }
-  const fixOptinRuns = [{ command: 'make e2e', result: 'fail', detail: '' }]
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptinRuns), { ok: false, missing: [0] })
+  const fixOptin = { runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: SHA_A }
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptin, SHA_A), { ok: false, missing: [0] })
 })
 
-test('combineOptinRecordGate: fix の opt-in 結果が全 pass なら PR 本文ゲートの判定をそのまま使う（従来判定）', () => {
+test('combineOptinRecordGate: headSha が一致しても fix の結果が全 pass なら PR 本文ゲートの判定をそのまま使う（従来判定）', () => {
   const bodyGateOk = { ok: true, missing: [] }
-  const fixOptinRuns = [{ command: 'make e2e', result: 'pass', detail: '' }]
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptinRuns), bodyGateOk)
+  const fixOptin = { runs: [{ command: 'make e2e', result: 'pass', detail: '' }], headSha: SHA_A }
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptin, SHA_A), bodyGateOk)
 
   const bodyGateMissing = { ok: false, missing: [0] }
-  assert.deepEqual(combineOptinRecordGate(bodyGateMissing, fixOptinRuns), bodyGateMissing)
+  assert.deepEqual(combineOptinRecordGate(bodyGateMissing, fixOptin, SHA_A), bodyGateMissing)
 })
 
 test('combineOptinRecordGate: fix 未実施（null）は PR 本文ゲートの判定のみに委ねる', () => {
   const bodyGateOk = { ok: true, missing: [] }
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, null), bodyGateOk)
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, []), bodyGateOk)
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, undefined), bodyGateOk)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, null, SHA_A), bodyGateOk)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, { runs: [], headSha: SHA_A }, SHA_A), bodyGateOk)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, undefined, SHA_A), bodyGateOk)
 })
 
-test('combineOptinRecordGate: 結果欠落（not-run 補完・報告なし相当）は不合格として扱う', () => {
+test('combineOptinRecordGate: fixOptin.headSha が gateHeadSha と不一致（HEAD がさらに進んだ）なら override せず gate をそのまま返す（PR #503 3 巡目 codex P1・可用性）', () => {
+  const bodyGateOk = { ok: true, missing: [] }
+  const staleFixOptin = { runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: SHA_A }
+  // gate は現在の HEAD（SHA_B）に対する検証結果。古い HEAD（SHA_A）の fix 実測は無関係。
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, staleFixOptin, SHA_B), bodyGateOk)
+})
+
+test('combineOptinRecordGate: fixOptin.headSha が未報告（空文字）なら override しない', () => {
+  const bodyGateOk = { ok: true, missing: [] }
+  const fixOptin = { runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: '' }
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptin, SHA_A), bodyGateOk)
+})
+
+test('combineOptinRecordGate: headSha 一致時、結果欠落（not-run 補完・報告なし相当）は不合格として扱う', () => {
   const bodyGateOk = { ok: true, missing: [] }
   // sanitizeOptinTestRuns が報告欠落を not-run で補完した形を模す。
-  const fixOptinRuns = [
-    { command: 'make e2e', result: 'not-run', detail: '実装エージェントの報告なし' },
-  ]
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptinRuns), { ok: false, missing: [0] })
+  const fixOptin = { runs: [{ command: 'make e2e', result: 'not-run', detail: '実装エージェントの報告なし' }], headSha: SHA_A }
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, fixOptin, SHA_A), { ok: false, missing: [0] })
 })
 
-test('combineOptinRecordGate: PR 本文ゲートと fix 実測の missing 集合を重複排除して統合する', () => {
+test('combineOptinRecordGate: headSha 一致時、PR 本文ゲートと fix 実測の missing 集合を重複排除して統合する', () => {
   const bodyGateMissing = { ok: false, missing: [1] }
-  const fixOptinRuns = [
-    { command: 'make e2e', result: 'fail', detail: '' },
-    { command: 'make e2e2', result: 'pass', detail: '' },
-  ]
-  assert.deepEqual(combineOptinRecordGate(bodyGateMissing, fixOptinRuns), { ok: false, missing: [0, 1] })
+  const fixOptin = {
+    runs: [
+      { command: 'make e2e', result: 'fail', detail: '' },
+      { command: 'make e2e2', result: 'pass', detail: '' },
+    ],
+    headSha: SHA_A,
+  }
+  assert.deepEqual(combineOptinRecordGate(bodyGateMissing, fixOptin, SHA_A), { ok: false, missing: [0, 1] })
 })
 
 // ---------------------------------------------------------------------------
-// 群 D3: restoreOptinFixState（optinFixState の状態ファイル復元。PR #503 2 巡目 codex P0）
+// 群 D3: restoreOptinFixState（optinFixState の状態ファイル復元。PR #503 2 巡目 codex P0 →
+// 3 巡目で { runs, headSha } を返すよう拡張）
 // ---------------------------------------------------------------------------
 
 test('restoreOptinFixState: 宣言なしは常に null（ゲート自体が無効）', () => {
-  assert.equal(restoreOptinFixState({ optinFixState: { attempted: true, runs: [] } }, []), null)
-  assert.equal(restoreOptinFixState({ optinFixState: { attempted: true, runs: [] } }, undefined), null)
+  assert.equal(restoreOptinFixState({ optinFixState: { attempted: true, runs: [], headSha: SHA_A } }, []), null)
+  assert.equal(restoreOptinFixState({ optinFixState: { attempted: true, runs: [], headSha: SHA_A } }, undefined), null)
 })
 
 test('restoreOptinFixState: optinFixState が無い・attempted が true でない場合は null（fix 未実施）', () => {
   assert.equal(restoreOptinFixState({}, ['make e2e']), null)
   assert.equal(restoreOptinFixState({ optinFixState: null }, ['make e2e']), null)
-  assert.equal(restoreOptinFixState({ optinFixState: { attempted: false, runs: [] } }, ['make e2e']), null)
+  assert.equal(restoreOptinFixState({ optinFixState: { attempted: false, runs: [], headSha: SHA_A } }, ['make e2e']), null)
   assert.equal(restoreOptinFixState(undefined, ['make e2e']), null)
 })
 
-test('restoreOptinFixState: 永続化した pass 記録をラウンドトリップで復元する', () => {
-  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }] } }
-  assert.deepEqual(restoreOptinFixState(saved, ['make e2e']), [{ command: 'make e2e', result: 'pass', detail: '' }])
+test('restoreOptinFixState: 永続化した pass 記録と headSha をラウンドトリップで復元する', () => {
+  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }], headSha: SHA_A } }
+  assert.deepEqual(restoreOptinFixState(saved, ['make e2e']), {
+    runs: [{ command: 'make e2e', result: 'pass', detail: '' }],
+    headSha: SHA_A,
+  })
 })
 
-test('restoreOptinFixState: attempted: true なのに runs が欠落・非配列なら宣言全件を not-run へ倒す（fail-closed）', () => {
-  for (const state of [{ attempted: true }, { attempted: true, runs: null }, { attempted: true, runs: 'x' }]) {
+test('restoreOptinFixState: attempted: true なのに runs が欠落・非配列なら宣言全件を not-run へ倒す（fail-closed）。headSha は読めれば保持する', () => {
+  for (const state of [{ attempted: true, headSha: SHA_A }, { attempted: true, runs: null, headSha: SHA_A }, { attempted: true, runs: 'x', headSha: SHA_A }]) {
     const restored = restoreOptinFixState({ optinFixState: state }, ['make e2e', 'cargo test'])
-    assert.deepEqual(restored.map((r) => [r.command, r.result]), [['make e2e', 'not-run'], ['cargo test', 'not-run']])
+    assert.deepEqual(restored.runs.map((r) => [r.command, r.result]), [['make e2e', 'not-run'], ['cargo test', 'not-run']])
+    assert.equal(restored.headSha, SHA_A)
   }
+  // headSha 自体も読めない場合は '' になる（combine 側で「一致し得ない」扱いになり無介入）。
+  const restoredNoSha = restoreOptinFixState({ optinFixState: { attempted: true } }, ['make e2e'])
+  assert.equal(restoredNoSha.headSha, '')
 })
 
 test('restoreOptinFixState: 宣言外の永続化コマンドは復元後の一覧から落ち、宣言済みで欠落しているものは not-run 補完する', () => {
-  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make old', result: 'pass', detail: '' }] } }
+  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make old', result: 'pass', detail: '' }], headSha: SHA_A } }
   const restored = restoreOptinFixState(saved, ['make new'])
-  assert.deepEqual(restored, [{ command: 'make new', result: 'not-run', detail: '実装エージェントの報告なし' }])
+  assert.deepEqual(restored, { runs: [{ command: 'make new', result: 'not-run', detail: '実装エージェントの報告なし' }], headSha: SHA_A })
 })
 
-test('統合: 再開後に永続化した fix 実測が fail のまま残っていれば PR 本文が pass でもゲート不合格', () => {
-  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'fail', detail: 'timeout' }] } }
+test('統合: 再開後に永続化した fix 実測が現在の HEAD に対して fail のまま残っていれば PR 本文が pass でもゲート不合格', () => {
+  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'fail', detail: 'timeout' }], headSha: SHA_A } }
   const restored = restoreOptinFixState(saved, ['make e2e'])
-  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] })
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored), { ok: false, missing: [0] })
+  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored, SHA_A), { ok: false, missing: [0] })
 })
 
-test('統合: fix 実施済みで復元不能（state 破損）なら PR 本文が pass でもゲート不合格', () => {
+test('統合: fix 実施済みで復元不能（state 破損・headSha も無し）なら headSha が一致し得ず override は働かないが、gate 自身の sha 束縛が既に不合格にしている', () => {
   const restored = restoreOptinFixState({ optinFixState: { attempted: true } }, ['make e2e'])
-  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] })
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored), { ok: false, missing: [0] })
+  assert.equal(restored.headSha, '')
+  // PR 本文側は headRefOid を確認できないラウンド（fetchFailed 相当）を模す。
+  const bodyGateFail = classifyOptinRecordGate(['make e2e'], null)
+  assert.deepEqual(combineOptinRecordGate(bodyGateFail, restored, ''), { ok: false, missing: [0] })
 })
 
 test('統合: fix 未実施の再開は従来どおり PR 本文のみで判定する（restoreOptinFixState が null を返す）', () => {
   const restored = restoreOptinFixState({}, ['make e2e'])
   assert.equal(restored, null)
-  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] })
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored), bodyGateOk)
+  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { headRefOid: SHA_A, counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored, SHA_A), bodyGateOk)
   const bodyGateMissing = classifyOptinRecordGate(['make e2e'], null)
-  assert.deepEqual(combineOptinRecordGate(bodyGateMissing, restored), bodyGateMissing)
+  assert.deepEqual(combineOptinRecordGate(bodyGateMissing, restored, SHA_A), bodyGateMissing)
 })
 
 test('統合: 宣言なしイシューは再開後も restoreOptinFixState が null を返し combineOptinRecordGate は無介入', () => {
-  const restored = restoreOptinFixState({ optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'fail', detail: '' }] } }, [])
+  const restored = restoreOptinFixState({ optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'fail', detail: '' }], headSha: SHA_A } }, [])
   assert.equal(restored, null)
   const bodyGateOk = classifyOptinRecordGate([], null)
-  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored), bodyGateOk)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored, SHA_A), bodyGateOk)
 })
 
 // ---------------------------------------------------------------------------
@@ -456,10 +493,10 @@ test('recoverImplementPrompt: item.optinTests が空なら出力は無変更（R
   assert.equal(withEmpty, withoutField)
 })
 
-test('prCreatePrompt: optinRuns 省略・空配列のいずれも出力は無変更（R3）', () => {
-  const withoutArg = prCreatePrompt(item, impl, [])
-  const withEmptyArg = prCreatePrompt(item, impl, [], [])
-  assert.equal(withoutArg, withEmptyArg)
+test('prCreatePrompt: 宣言なし（item.optinTests: []）は出力が無変更（R3）', () => {
+  const withEmpty = prCreatePrompt({ ...item, optinTests: [] }, impl, [])
+  const withoutField = prCreatePrompt({ number: 42, title: 'サンプルイシュー' }, impl, [])
+  assert.equal(withEmpty, withoutField)
 })
 
 test('implementPrompt: 宣言ありでは JSON.stringify 形のコマンド・pass 偽装禁止文言・optinTestRuns 返却指示を含む', () => {
@@ -470,25 +507,40 @@ test('implementPrompt: 宣言ありでは JSON.stringify 形のコマンド・pa
   assert.match(p, /optinTestRuns/)
 })
 
-test('prCreatePrompt: 宣言ありでは body テンプレートに記録節見出しとマーカー行が現れる', () => {
-  const runs = [{ command: 'make e2e', result: 'pass', detail: 'ok' }]
-  const p = prCreatePrompt(item, impl, [], runs)
+test('prCreatePrompt: 宣言ありでは push 前の再実行手順（0c/0d）と body テンプレートの記録節見出し・<sha>/<result> プレースホルダが現れる（PR #503 3 巡目 codex P1: Implement 時の結果を転記せず再実行する）', () => {
+  const p = prCreatePrompt({ ...item, optinTests: ['make e2e'] }, impl, [])
+  assert.match(p, /"make e2e"/)
+  assert.match(p, /0c\./)
+  assert.match(p, /git rev-parse HEAD/)
   assert.match(p, /## opt-in テスト実行記録/)
-  assert.match(p, new RegExp(`${OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}make e2e => pass -->`))
+  assert.match(p, new RegExp(`${OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<sha> <result> make e2e -->`))
 })
 
-test('optinRecordVerifyPrompt: gh pr view --json body をファイルリダイレクトの形でのみ含み、本文転記禁止・件数のみ返却の指示を含む', () => {
+test('optinRecordVerifyPrompt: gh pr view --json body,headRefOid を単一呼び出しで取得し、本文転記禁止・headRefOid 検証・件数のみ返却の指示を含む（PR #503 3 巡目 codex P1）', () => {
   const p = optinRecordVerifyPrompt(item, impl, ['make e2e'])
-  assert.match(p, /gh pr view 123 --json body/)
-  assert.match(p, /> "\$f"/)
+  assert.match(p, /gh pr view 123 --json body,headRefOid/)
+  assert.match(p, /\^\[0-9a-f\]\{40\}\$/)
   assert.match(p, /表示・転記しない/)
   assert.match(p, /counts/)
+  assert.match(p, /headRefOid/)
 })
 
-test('mergeExecutePrompt に optin 関連文字列と --json body が含まれない（分離契約の非退行）', () => {
-  const p = mergeExecutePrompt(item, impl, false, [])
-  assert.doesNotMatch(p, /optin/i)
-  assert.doesNotMatch(p, /--json body/)
+test('mergeExecutePrompt に optin 関連文字列と --json body が含まれない（分離契約の非退行。expectedHeadSha 指定時も同様）', () => {
+  const p1 = mergeExecutePrompt(item, impl, false, [])
+  assert.doesNotMatch(p1, /optin/i)
+  assert.doesNotMatch(p1, /--json body/)
+  // PR #503 3 巡目 codex P1: 期待 HEAD sha（TOCTOU 対策）を渡しても分離契約は退行しない。
+  const p2 = mergeExecutePrompt(item, impl, true, [], SHA_A)
+  assert.doesNotMatch(p2, /optin/i)
+  assert.doesNotMatch(p2, /--json body/)
+  assert.match(p2, new RegExp(SHA_A))
+  assert.match(p2, /head-moved/)
+})
+
+test('mergeExecutePrompt: expectedHeadSha 省略時は一致チェック文言を含まない（既存 R3 契約）', () => {
+  const withDefault = mergeExecutePrompt(item, impl, true, [])
+  const withEmpty = mergeExecutePrompt(item, impl, true, [], '')
+  assert.equal(withDefault, withEmpty)
 })
 
 // ---------------------------------------------------------------------------
@@ -528,11 +580,12 @@ test('fixPrompt: pushAfterFix=false（push 前 Review ループ）では optinTe
 // 群 F: 実行レベル（optinRecordVerifyPrompt と同じ grep 手順をシェルで再現）
 // ---------------------------------------------------------------------------
 
-// optinRecordVerifyPrompt 手順 2 の正規化パイプライン（tr -d '\r' | sed 行頭・行末空白除去）を
-// そのまま再現する。行頭インデント・CRLF が付いたマーカー行でも一致することを検証するのが目的。
-function grepPassNonPass(bodyText, command) {
-  const passLine = optinRecordMarkerLine(command, 'pass')
-  const prefix = `${OPTIN_RECORD_MARKER_PREFIX}${command} => `
+// optinRecordVerifyPrompt 手順 3 の正規化パイプライン（tr -d '\r' | sed 行頭・行末空白除去）と
+// 手順 4 の 3 種類（pass/fail/not-run）固定文字列 -cxF グレップをそのまま再現する
+// （PR #503 3 巡目 codex P1: sha 束縛後の実装。$H は事前に sanitizeSha 相当の形式検証を通過した
+// 値という前提でシェルへ展開する）。行頭インデント・CRLF が付いたマーカー行でも一致すること、
+// sha が一致しない行は一致しないことを検証するのが目的。
+function grepShaResultCounts(bodyText, sha, command) {
   const script = `
 f=$(mktemp)
 g=$(mktemp)
@@ -540,36 +593,53 @@ cat > "$f" <<'BODYEOF'
 ${bodyText}
 BODYEOF
 tr -d '\\r' < "$f" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' > "$g"
-pass=$(grep -cxF -- "$1" "$g")
-total=$(grep -cF -- "$2" "$g")
+H="$1"
+pass=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H pass $2 -->" "$g")
+fail=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H fail $2 -->" "$g")
+notrun=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H not-run $2 -->" "$g")
 rm -f "$f" "$g"
-echo "$pass $total"
+echo "$pass $fail $notrun"
 `
-  const out = execFileSync('bash', ['-c', script, 'bash', passLine, prefix], { encoding: 'utf8' })
-  const [pass, total] = out.trim().split(' ').map(Number)
-  return { pass, nonPass: total - pass }
+  const out = execFileSync('bash', ['-c', script, 'bash', sha, command], { encoding: 'utf8' })
+  const [pass, fail, notrun] = out.trim().split(' ').map(Number)
+  return { pass, nonPass: fail + notrun }
 }
 
-test('実行レベル: pass 行のみ → pass=1 / nonPass=0', () => {
-  const body = optinRecordMarkerLine('make e2e', 'pass')
-  assert.deepEqual(grepPassNonPass(body, 'make e2e'), { pass: 1, nonPass: 0 })
+test('実行レベル: 一致する sha の pass 行のみ → pass=1 / nonPass=0', () => {
+  const body = optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')
+  assert.deepEqual(grepShaResultCounts(body, SHA_A, 'make e2e'), { pass: 1, nonPass: 0 })
 })
 
-test('実行レベル: not-run 行のみ → pass=0 / nonPass=1', () => {
-  const body = optinRecordMarkerLine('make e2e', 'not-run')
-  assert.deepEqual(grepPassNonPass(body, 'make e2e'), { pass: 0, nonPass: 1 })
+test('実行レベル: 一致する sha の not-run 行のみ → pass=0 / nonPass=1', () => {
+  const body = optinRecordMarkerLine(SHA_A, 'not-run', 'make e2e')
+  assert.deepEqual(grepShaResultCounts(body, SHA_A, 'make e2e'), { pass: 0, nonPass: 1 })
 })
 
 test('実行レベル: 行頭インデントと CRLF 付きの pass 行 → 正規化後に pass=1 / nonPass=0', () => {
   // 行頭インデントは trim しない（正規化パイプライン自体の空白除去を検証するため）。
   // 人手による復旧編集（PR 本文をエディタで書き換える際に字下げが付く等）でも一致することを示す。
-  const body = `   ${optinRecordMarkerLine('make e2e', 'pass')}\r\n`
-  assert.deepEqual(grepPassNonPass(body, 'make e2e'), { pass: 1, nonPass: 0 })
+  const body = `   ${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}\r\n`
+  assert.deepEqual(grepShaResultCounts(body, SHA_A, 'make e2e'), { pass: 1, nonPass: 0 })
 })
 
 test('実行レベル: 別コマンドの pass 行のみ → pass=0 / nonPass=0', () => {
-  const body = optinRecordMarkerLine('make other', 'pass')
-  assert.deepEqual(grepPassNonPass(body, 'make e2e'), { pass: 0, nonPass: 0 })
+  const body = optinRecordMarkerLine(SHA_A, 'pass', 'make other')
+  assert.deepEqual(grepShaResultCounts(body, SHA_A, 'make e2e'), { pass: 0, nonPass: 0 })
+})
+
+test('実行レベル: sha が異なる pass 行は存在しないものとして扱われる（PR #503 3 巡目 codex P1 の核心）', () => {
+  // 古い HEAD（SHA_A）に対する pass 記録は、現在の HEAD（SHA_B）の確認では 0 件になる。
+  const body = optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')
+  assert.deepEqual(grepShaResultCounts(body, SHA_B, 'make e2e'), { pass: 0, nonPass: 0 })
+})
+
+test('実行レベル: 新旧 2 つの sha の記録が併存しても現在の sha の分だけを数える', () => {
+  const body = [
+    optinRecordMarkerLine(SHA_A, 'pass', 'make e2e'),
+    optinRecordMarkerLine(SHA_B, 'fail', 'make e2e'),
+  ].join('\n')
+  assert.deepEqual(grepShaResultCounts(body, SHA_B, 'make e2e'), { pass: 0, nonPass: 1 })
+  assert.deepEqual(grepShaResultCounts(body, SHA_A, 'make e2e'), { pass: 1, nonPass: 0 })
 })
 
 // ---------------------------------------------------------------------------
@@ -611,16 +681,32 @@ test('駆動部: runImplement 冒頭で optinTestsInvalid を参照する', () =
   assert.ok(implIdx >= 0 && invalidIdx >= 0 && invalidIdx - implIdx < 800)
 })
 
-test('駆動部: post-push fix 直後の updateState が optinFixState を含む（PR #503 2 巡目 codex P0）', () => {
-  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: fixOptinRuns \}/)
-  assert.match(driverPart, /updateState\(item\.number, \{ fixCount, baseMergeCount, worktree: currentWorktreePath,/)
-  assert.match(driverPart, /optinFixState: optinFixStatePatch \}, \{ cleanupWorktree: oldWorktreePath \}\)/)
+test('駆動部: post-push fix 直後の updateState が optinFixState（runs + headSha）を含む（PR #503 2/3 巡目 codex P0/P1）', () => {
+  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: fixOptinRuns, headSha: fixHeadSha \}/)
+  assert.match(driverPart, /const optinFixPatchArgs = \{ fixCount, baseMergeCount, worktree: currentWorktreePath,/)
+  assert.match(driverPart, /optinFixState: optinFixStatePatch \}/)
+  assert.match(driverPart, /updateState\(item\.number, optinFixPatchArgs, \{ cleanupWorktree: oldWorktreePath \}\)/)
 })
 
-test('駆動部: monitoring 再開パスが restoreOptinFixState(saved, item.optinTests) を runMergeLoop の initialFixOptinRuns へ渡す', () => {
+test('駆動部: optinFixState 書込み失敗時に cleanupWorktree なしで 1 回再試行し、なお失敗すれば failMergeTerminal で終端する（PR #503 3 巡目 codex P1 / Bugbot Medium）', () => {
+  assert.match(driverPart, /if \(optinFixStatePatch !== undefined && !fixStateWriteOk\)/)
+  assert.match(driverPart, /const retryOk = await updateState\(item\.number, optinFixPatchArgs\)/)
+  assert.match(driverPart, /if \(!retryOk\) \{/)
+})
+
+test('駆動部: failMergeTerminal の終端 updateState が lastFixOptin から optinFixState を合成する（PR #503 3 巡目 Bugbot Medium）', () => {
+  assert.match(driverPart, /optinFixState: lastFixOptin \? \{ attempted: true, runs: lastFixOptin\.runs, headSha: lastFixOptin\.headSha \} : undefined/)
+})
+
+test('駆動部: monitoring 再開パスが restoreOptinFixState(saved, item.optinTests) を runMergeLoop の initialFixOptin へ渡す', () => {
   assert.match(driverPart, /restoreOptinFixState\(saved, item\.optinTests\)/)
 })
 
-test('駆動部: runMergeLoop の lastFixOptinRuns 初期値は initialFixOptinRuns を引き継ぐ（null 固定ではない）', () => {
-  assert.match(driverPart, /let lastFixOptinRuns = initialFixOptinRuns/)
+test('駆動部: runMergeLoop の lastFixOptin 初期値は initialFixOptin を引き継ぐ（null 固定ではない）', () => {
+  assert.match(driverPart, /let lastFixOptin = initialFixOptin/)
+})
+
+test('駆動部: merge-exec 呼び出しに optinGateHeadSha（TOCTOU 対策の期待 HEAD sha）が渡される（PR #503 3 巡目 codex P1）', () => {
+  assert.match(driverPart, /mergeExecutePrompt\(item, impl, allowMerge, externalCheckEntries, optinGateHeadSha\)/)
+  assert.match(driverPart, /optinGateHeadSha = sanitizeSha\(optinVerify\?\.headRefOid\)/)
 })

@@ -764,10 +764,18 @@ function parseOptinTestDeclarations(raw, approved) {
 
 
 
+
+
+
+
+
+
+
+
 const OPTIN_RECORD_MARKER_PREFIX = '<!-- optin-test-record: '
 const OPTIN_RECORD_RESULTS = ['pass', 'fail', 'not-run']
-function optinRecordMarkerLine(command, result) {
-  return `${OPTIN_RECORD_MARKER_PREFIX}${command} => ${result} -->`
+function optinRecordMarkerLine(sha, result, command) {
+  return `${OPTIN_RECORD_MARKER_PREFIX}${sha} ${result} ${command} -->`
 }
 
 
@@ -811,31 +819,47 @@ function sanitizeOptinTestRuns(raw, declared) {
 
 
 
+
+
+
+
 function restoreOptinFixState(saved, declaredOptinTests) {
   const declaredList = Array.isArray(declaredOptinTests) ? declaredOptinTests : []
   if (declaredList.length === 0) return null
   const state = saved && typeof saved === 'object' ? saved.optinFixState : null
   if (!state || typeof state !== 'object' || state.attempted !== true) return null
+  const headSha = sanitizeSha(state.headSha)
   if (!Array.isArray(state.runs)) {
-    return declaredList.map((command) => ({
-      command,
-      result: 'not-run',
-      detail: '状態ファイルから post-push fix の opt-in 実測を復元できなかった（再開時の fail-closed）',
-    }))
+    return {
+      runs: declaredList.map((command) => ({
+        command,
+        result: 'not-run',
+        detail: '状態ファイルから post-push fix の opt-in 実測を復元できなかった（再開時の fail-closed）',
+      })),
+      headSha,
+    }
   }
-  return sanitizeOptinTestRuns(state.runs, declaredList)
+  return { runs: sanitizeOptinTestRuns(state.runs, declaredList), headSha }
 }
 
 
 
-function renderOptinRecordSection(runs) {
-  const list = Array.isArray(runs) ? runs : []
+
+
+
+
+
+
+
+
+function renderOptinRecordSection(commands) {
+  const list = Array.isArray(commands) ? commands : []
   if (list.length === 0) return ''
-  const blocks = list.map((r) => [
-    optinRecordMarkerLine(r.command, r.result),
-    `- コマンド: ${r.command}`,
-    `- 結果: ${r.result}`,
-    `- 補足: ${r.detail || '(なし)'}`,
+  const blocks = list.map((c) => [
+    optinRecordMarkerLine('<sha>', '<result>', c),
+    `- コマンド: ${c}`,
+    '- 結果: <result>',
+    '- 補足: <補足（detail）または (なし)>',
   ].join('\n'))
   return `\n\n## opt-in テスト実行記録\n${blocks.join('\n\n')}`
 }
@@ -843,11 +867,18 @@ function renderOptinRecordSection(runs) {
 
 
 
+
+
+
+
+
+
 function classifyOptinRecordGate(declared, verifyResult) {
   const declaredList = Array.isArray(declared) ? declared : []
   if (declaredList.length === 0) return { ok: true, missing: [] }
+  const headSha = sanitizeSha(verifyResult?.headRefOid)
   const counts = verifyResult && Array.isArray(verifyResult.counts) ? verifyResult.counts : null
-  if (verifyResult?.fetchFailed === true || !counts || counts.length !== declaredList.length) {
+  if (verifyResult?.fetchFailed === true || !headSha || !counts || counts.length !== declaredList.length) {
     return { ok: false, missing: declaredList.map((_, i) => i) }
   }
   const missing = []
@@ -872,10 +903,24 @@ function classifyOptinRecordGate(declared, verifyResult) {
 
 
 
-function combineOptinRecordGate(gate, fixOptinRuns) {
-  if (!Array.isArray(fixOptinRuns) || fixOptinRuns.length === 0) return gate
+
+
+
+
+
+
+
+
+
+
+
+function combineOptinRecordGate(gate, fixOptin, gateHeadSha) {
+  const runs = fixOptin && Array.isArray(fixOptin.runs) ? fixOptin.runs : null
+  if (!runs || runs.length === 0) return gate
+  const fixHeadSha = sanitizeSha(fixOptin.headSha)
+  if (!fixHeadSha || fixHeadSha !== sanitizeSha(gateHeadSha)) return gate
   const overrideMissing = []
-  fixOptinRuns.forEach((r, i) => {
+  runs.forEach((r, i) => {
     if (!r || r.result !== 'pass') overrideMissing.push(i)
   })
   if (overrideMissing.length === 0) return gate
@@ -1455,7 +1500,14 @@ const OPTIN_RECORD_VERIFY_SCHEMA = {
   type: 'object',
   required: ['counts'],
   properties: {
-    fetchFailed: { type: 'boolean', description: 'PR 本文の取得に失敗した場合のみ true' },
+    fetchFailed: { type: 'boolean', description: 'PR 本文または headRefOid の取得に失敗した場合のみ true' },
+
+
+
+    headRefOid: {
+      type: 'string',
+      description: 'gh pr view --json headRefOid の取得値（40 桁 sha）。counts はこの値に対して grep した件数のみを表す契約。取得失敗時は空文字を返す',
+    },
     counts: {
       type: 'array',
       items: {
@@ -1589,6 +1641,14 @@ const FIX_SCHEMA = {
       },
       description: '宣言された opt-in テストごとの再実行結果（1 コマンド 1 要素）。宣言が無ければ空配列または省略',
     },
+
+
+
+
+    optinHeadSha: {
+      type: 'string',
+      description: 'optinTestRuns を計測した HEAD の sha（40 桁小文字 16 進。git rev-parse HEAD の値）。宣言が無い・push していない場合は省略',
+    },
   },
 }
 
@@ -1700,6 +1760,24 @@ const PR_CREATE_SCHEMA = {
       type: 'string',
       enum: ['MERGEABLE', 'CONFLICTING', 'UNKNOWN'],
       description: 'push 後に有界（30 秒間隔・最大 5 分）で確定を待った mergeable の値。未確定・取得不能は UNKNOWN（推測で MERGEABLE / CONFLICTING を返さない）。診断・分岐ヒント専用。',
+    },
+
+
+
+    optinTestRuns: {
+      type: 'array',
+      maxItems: OPTIN_TESTS_MAX,
+      items: {
+        type: 'object',
+        required: ['command', 'result'],
+        properties: {
+          command: { type: 'string', maxLength: 300 },
+          result: { type: 'string', enum: OPTIN_RECORD_RESULTS },
+          exitCode: { type: 'integer' },
+          detail: { type: 'string', maxLength: 300 },
+        },
+      },
+      description: '手順 0c で再実行した宣言済み opt-in テストごとの結果（1 コマンド 1 要素）。宣言が無ければ空配列または省略',
     },
   },
 }
@@ -3270,27 +3348,32 @@ function optinTestExecutionLines(item, stepNo) {
 
 
 
+
 function optinRecordUpdateInstructions(item, impl, stepNo) {
   const commands = Array.isArray(item.optinTests) ? item.optinTests : []
   if (commands.length === 0) return []
   const prRef = String(impl.prNumber)
   return [
     `${stepNo}. opt-in テスト記録の更新（必須。直前の opt-in テスト再実行手順の optinTestRuns の結果を PR 本文へ反映する。手順 4 の 2 条件判定で pushed: true と確認できた場合のみ実行する。pushed: false の場合はこの手順を省略する — まだリモートへ反映されていないコードに対する記録を書くと、実際に反映された head と PR 本文の記録内容が食い違う）:`,
-    `   a. f=$(mktemp); gh pr view ${prRef} --json body --jq '.body // ""' > "$f" で現在の本文を取得する。この取得コマンドの終了コードを必ず確認し、非 0 終了の場合は b 以降を実行せず summary に「opt-in テスト記録の更新に失敗（gh pr view の取得エラー）」と書いて本手順を終了する（fail-closed。取得失敗を無視して進むと空の "$f" を本文全体として gh pr edit してしまい、Closes 行・対象外節を含む PR 本文全体が記録節だけに置き換わる）。`,
-    `   b. g=$(mktemp); grep -vF ${JSON.stringify(OPTIN_RECORD_MARKER_PREFIX)} "$f" > "$g"; rc=$?（既存の opt-in テスト記録節のマーカー行をすべて除去する。PR 作成時点で書かれた記録は今回の修正コミットに対する検証ではなくなったため、そのまま残すと古い pass 記録がマージ前ゲートを誤って通過させる）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、その場合のみ mv "$g" "$f" する。2 以上（構文エラー等）の場合は \`|| true\` 等で握り潰さず、mv も行わず、summary に「opt-in テスト記録の更新に失敗（grep 異常終了、実測 exit code を記載）」と書いて本手順を終了する（fail-closed。ここで握り潰すと "$f" が空のまま c 以降へ進み、Closes 行・対象外節を含む PR 本文全体が記録節だけに置き換わる）。`,
-    `   c. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（マーカー行は行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる）:`,
+
+
+
+    `   a. SHA=$(git rev-parse HEAD) でこの記録が対象とする HEAD の sha（push 済みの sha と同一）を控える。`,
+    `   b. f=$(mktemp); gh pr view ${prRef} --json body --jq '.body // ""' > "$f" で現在の本文を取得する。この取得コマンドの終了コードを必ず確認し、非 0 終了の場合は c 以降を実行せず summary に「opt-in テスト記録の更新に失敗（gh pr view の取得エラー）」と書いて本手順を終了する（fail-closed。取得失敗を無視して進むと空の "$f" を本文全体として gh pr edit してしまい、Closes 行・対象外節を含む PR 本文全体が記録節だけに置き換わる）。`,
+    `   c. g=$(mktemp); grep -vF ${JSON.stringify(OPTIN_RECORD_MARKER_PREFIX)} "$f" > "$g"; rc=$?（既存の opt-in テスト記録節のマーカー行をすべて除去する。異なる HEAD sha の記録はマージ前ゲートの grep がそもそも一致しないため実害はないが、本文の肥大化を防ぐため除去する）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、その場合のみ mv "$g" "$f" する。2 以上（構文エラー等）の場合は \`|| true\` 等で握り潰さず、mv も行わず、summary に「opt-in テスト記録の更新に失敗（grep 異常終了、実測 exit code を記載）」と書いて本手順を終了する（fail-closed。ここで握り潰すと "$f" が空のまま d 以降へ進み、Closes 行・対象外節を含む PR 本文全体が記録節だけに置き換わる）。`,
+    `   d. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（マーカー行は行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる）:`,
     '   ```',
     '   ## opt-in テスト実行記録',
     ...commands.flatMap((c) => [
-      `   ${optinRecordMarkerLine(c, '<result>')}`,
+      `   ${optinRecordMarkerLine('<sha>', '<result>', c)}`,
       `   - コマンド: ${c}`,
       '   - 結果: <result>',
       '   - 補足: <補足（detail）または (なし)>',
     ]),
     '   ```',
-    '   （<result> は各コマンドの直前の再実行結果 pass / fail / not-run のいずれかへ実際に置き換える。宣言コマンドが複数ある場合は各ブロックを空行 1 行で区切る）',
-    `   d. gh pr edit ${prRef} --body-file "$f" && rm -f "$f" で本文を更新する。`,
-    `   e. 更新後に再度 gh pr view ${prRef} --json body --jq '.body // ""' を取得し、各コマンドについて直前の再実行結果に対応するマーカー行が実際に反映されていることを確認する。反映されていなければ b〜d をやり直し、それでも確認できなければ summary に「opt-in テスト記録の PR 本文反映に失敗」と理由を書く（無言で見過ごさない。反映できないまま終わるとマージ前ゲートが古い記録のまま停止せず通過し得るため重大）。`,
+    '   （<sha> は手順 a で控えた SHA の値（40 桁小文字 16 進のまま、省略・短縮しない）へ、<result> は各コマンドの直前の再実行結果 pass / fail / not-run のいずれかへ実際に置き換える。宣言コマンドが複数ある場合は各ブロックを空行 1 行で区切る）',
+    `   e. gh pr edit ${prRef} --body-file "$f" && rm -f "$f" で本文を更新する。`,
+    `   f. 更新後に再度 gh pr view ${prRef} --json body --jq '.body // ""' を取得し、各コマンドについて直前の再実行結果・SHA に対応するマーカー行が実際に反映されていることを確認する。反映されていなければ c〜e をやり直し、それでも確認できなければ summary に「opt-in テスト記録の PR 本文反映に失敗」と理由を書く（無言で見過ごさない。反映できないまま終わるとマージ前ゲートが古い記録のまま停止せず通過し得るため重大）。`,
   ]
 }
 
@@ -3485,7 +3568,7 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, client
 
 
 
-function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries) {
+function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries, expectedHeadSha = '') {
   const entries = Array.isArray(externalCheckEntries) ? externalCheckEntries : []
 
 
@@ -3550,6 +3633,15 @@ function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries) {
     allowMerge
       ? [
           `2. 手順 1 の headRefOid を本ランの HEAD sha として固定する。この値が 40 桁の小文字 16 進数でない・取得できない場合はマージせず merged: false / reason: head-moved を返す。以降の手順（2b (v) の HEAD_SHA・4b の HEAD_SHA・手順 5 の --match-head-commit・返却の headSha）にはこの固定値のみを使い、再取得・他エージェントから渡された値の使用は禁止する（HEAD sha の出所を自分の gh pr view 観測に限定するため）。`,
+
+
+
+
+
+
+          ...(expectedHeadSha
+            ? [`   - ホスト側ゲートが直前に確認した期待 HEAD sha（${expectedHeadSha}）と、上記で固定した headRefOid が完全一致することを確認する。一致しなければマージせず merged: false / reason: head-moved を返す（summary に両者の sha を書く）。`]
+            : []),
           `   - baseRefName が ${JSON.stringify(baseBranch)} と一致しない場合、または isDraft が true の場合はマージせず merged: false / reason: wrong-target を返す（summary に実測の baseRefName / isDraft を書く。コンフリクトの not-mergeable と異なり fix ループでは解消しないため、専用 reason で終端させる）。`,
           `2b. ベースブランチのサーバー側強制を実測確認する（G0 ゲート。マージ可否の実強制は GitHub の branch protection であり、required status checks が「存在する」だけでなく「マージ実行主体（この gh 認証を含む全員）に bypass 不能に適用される」ことまで確認できない限り新規マージを行わない。さらに、クライアント側でゲートする条件（未解決スレッド 0 件・外部チェック合格）がサーバー側でも強制されていることを確認する — 共有 gh 認証の実行基盤ではプロンプト指示は権限制御にならないため、どのエージェントが直接マージを試みても同条件をサーバーが拒否する構成であることが opt-in マージの前提となる。PR #222 codex P0 第 2 / 第 4 ラウンド対応）。以下を順に実行する:`,
           `   (i) ruleset の required status checks 存在確認（--paginate --slurp で全ページを 1 つの配列に束ねてから数える。2 ページ目以降のルールを見落とすと bypass 検証対象の ruleset が漏れるため必須。gh は --slurp と --jq の併用を拒否するため、正規化は外部の jq へパイプして行う）: gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/${encodeURIComponent(baseBranch)}" | jq '[.[][] | select(.type == "required_status_checks")] | length'`,
@@ -3645,34 +3737,42 @@ function mergeVerifyPrompt(item, impl) {
 function optinRecordVerifyPrompt(item, impl, commands) {
   const list = Array.isArray(commands) ? commands : []
   return [
-    `PR #${impl.prNumber}（イシュー #${item.number}）の opt-in テスト実行記録の確認担当。イシューで宣言された opt-in テストの実行記録（pass）が PR 本文に存在するかを、件数のみで読み取り専用に確認する。`,
+    `PR #${impl.prNumber}（イシュー #${item.number}）の opt-in テスト実行記録の確認担当。イシューで宣言された opt-in テストの実行記録（pass）が、現在の HEAD に対して PR 本文に存在するかを、件数のみで読み取り専用に確認する。`,
     MERGE_CONTEXT_COMMON,
     `権限境界: 本エージェントは読み取り専用である。PR 本文は一時ファイルへ落として grep の件数を数えるためだけに使い、本文の内容・要約・引用はコンテキストにも返却値にも含めない。gh pr merge / gh issue close / gh pr edit / git push / コード変更 / レビュースレッドの resolve は一切行わない。`,
     '手順:',
-    `1. f=$(mktemp); gh pr view ${impl.prNumber} --json body --jq '.body // ""' > "$f" を実行する。この取得コマンドの終了コードが非 0 の場合は fetchFailed: true・counts: [] を返して終了する（推測で件数を返さない）。`,
-    `2. 正規化した作業用ファイルを作る: g=$(mktemp); tr -d '\\r' < "$f" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' > "$g"（CRLF・末尾 CR の除去と行頭・行末の空白除去。マーカー行は行頭インデントなしで書き写す契約だが、人手による復旧編集で空白が付くことがあるため、両側とも実際の内容比較には影響しない範囲で許容する）。`,
+
+
+    `1. j=$(mktemp); gh pr view ${impl.prNumber} --json body,headRefOid > "$j" を実行する。この取得コマンドの終了コードが非 0 の場合は fetchFailed: true・headRefOid: ""・counts: [] を返して終了する（推測で件数を返さない）。`,
+    `2. H=$(jq -r '.headRefOid // ""' "$j") で HEAD sha を取り出す。H が 40 桁の小文字 16 進数（正規表現 ^[0-9a-f]{40}$）でなければ fetchFailed: true・headRefOid: ""・counts: [] を返して終了する（取得できたが形式不正の値をそのまま信用しない）。形式が妥当なら手順 4 以降の返却値 headRefOid にこの H をそのまま使う。`,
+    `3. f=$(mktemp); jq -r '.body // ""' "$j" > "$f" で本文を取り出し、g=$(mktemp); tr -d '\\r' < "$f" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' > "$g" で正規化した作業用ファイルを作る（CRLF・末尾 CR の除去と行頭・行末の空白除去。マーカー行は行頭インデントなしで書き写す契約だが、人手による復旧編集で空白が付くことがあるため、両側とも実際の内容比較には影響しない範囲で許容する）。`,
     ...(list.length
       ? [
-          `3. 宣言されたコマンドごとに、次の固定文字列で grep の件数のみを数える（正規表現ではなく固定文字列一致 -F を使う。grep コマンド自体・比較対象の文字列は改変しない）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、2 以上（構文エラー等）が 1 回でも発生した時点で残りのコマンドの確認を打ち切り、直ちに fetchFailed: true・counts: [] を返して終了する（推測で件数を埋めない。取得不能を「0 件」と区別する）:`,
+
+
+
+
+          `4. 宣言されたコマンドごとに、次の固定文字列で grep の件数のみを数える（正規表現ではなく固定文字列一致 -F を使う。grep コマンド自体・比較対象の文字列は改変しない）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、2 以上（構文エラー等）が 1 回でも発生した時点で残りのコマンドの確認を打ち切り、直ちに fetchFailed: true・headRefOid: ""・counts: [] を返して終了する（推測で件数を埋めない。取得不能を「0 件」と区別する）:`,
           ...list.flatMap((c, i) => [
             `   - index ${i}（コマンド ${JSON.stringify(c)} は表示・転記しない。件数の取得にのみ使う）:`,
-            `     pass=$(grep -cxF -- ${shellSingleQuote(optinRecordMarkerLine(c, 'pass'))} "$g"); rc=$?`,
-            `     total=$(grep -cF -- ${shellSingleQuote(`${OPTIN_RECORD_MARKER_PREFIX}${c} => `)} "$g"); rc=$?`,
+            `     pass=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H pass ${c} -->" "$g"); rc=$?`,
+            `     fail=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H fail ${c} -->" "$g"); rc=$?`,
+            `     notrun=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H not-run ${c} -->" "$g"); rc=$?`,
           ]),
-          `   nonPass はコマンドごとに total - pass として算出する。`,
-          `4. counts に宣言コマンドの数だけ { index, pass, nonPass }（いずれも 0 以上の整数）を入れて返す（index は上記の 0-indexed 位置と一致させる）。`,
+          `   nonPass はコマンドごとに fail + notrun として算出する（$H と一致しないマーカー行はどの grep にも一致せず自動的に集計から除外される。古い HEAD・base 取り込み前・fix 前の記録が存在しないものとして扱われる契約はこれで成立する）。`,
+          `5. counts に宣言コマンドの数だけ { index, pass, nonPass }（いずれも 0 以上の整数）を入れて返す（index は上記の 0-indexed 位置と一致させる）。`,
         ]
       : [
-          '3. 宣言コマンドが無いため counts: [] を返す。',
+          '4. 宣言コマンドが無いため counts: [] を返す（headRefOid は手順 2 で確定した H をそのまま返す）。',
         ]),
-    '5. 手順 1〜4 に記載した以外のコマンド・gh api 呼び出しは実行しない（Issue 本文・レビューコメント・チェック名の取得も行わない）。',
-    '返却: fetchFailed（取得失敗時のみ true）/ counts（index・pass・nonPass の配列）。自由文の説明フィールド・本文テキスト・コマンド文字列は返さない。',
+    '6. 手順 1〜5 に記載した以外のコマンド・gh api 呼び出しは実行しない（Issue 本文・レビューコメント・チェック名の取得も行わない）。',
+    '返却: fetchFailed（取得失敗・headRefOid 形式不正時のみ true）/ headRefOid（手順 2 で確定した 40 桁 sha。取得・検証に失敗した場合は空文字）/ counts（index・pass・nonPass の配列）。自由文の説明フィールド・本文テキスト・コマンド文字列は返さない。',
   ].join('\n')
 }
 
 
 
-function prCreatePrompt(item, impl, outOfScope, optinRuns = []) {
+function prCreatePrompt(item, impl, outOfScope) {
   const branch = sanitizeBranch(impl.branch)
 
   const outOfScopeItems = (Array.isArray(outOfScope) ? outOfScope : [])
@@ -3685,7 +3785,11 @@ function prCreatePrompt(item, impl, outOfScope, optinRuns = []) {
 
 
 
-  const optinRecordSection = renderOptinRecordSection(optinRuns)
+
+
+
+
+  const optinRecordSection = renderOptinRecordSection(item.optinTests)
   return [
     `イシュー #${item.number}「${untrusted(item.title, 'issue-title')}」の実装コミット（ブランチ ${branch}）を push して PR を作成する担当エージェント。`,
     COMMON,
@@ -3702,6 +3806,13 @@ function prCreatePrompt(item, impl, outOfScope, optinRuns = []) {
 
     `0. push 前 base 最新化ゲート: git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec。Issue #361 と同形式）で base を取得する。この base fetch の終了コードを必ず確認し、非ゼロ終了（通信・認証・refspec エラー等）の場合は merge も push も行わず prNumber: 0 と「base fetch 失敗」（エラー内容の要旨を添える）を理由として返す（fail-closed。fetch 失敗を無視して進むと、以前の処理が残した stale な origin/${baseBranch} を merge したまま push でき、「必ず最新 base を取り込む」という本ゲートを迂回してしまう）。fetch 成功後、detached HEAD の起点を決める（再入対応: PR 作成失敗後のリトライ等の再入では、初回実行の push によりリモート ${branch} には base 取り込みのマージコミットが既に積まれている一方、ローカルの refs/heads/${branch} は意図的に更新していないため古いままであり、ローカル起点でマージコミットを再作成すると non-fast-forward で push が拒否される）。git fetch origin ${branch}:refs/remotes/origin/${branch} を実行し、結果で分岐する: (i) リモートに ${branch} が存在しない（fetch がその旨で失敗する）場合は初回実行なのでローカル起点 — 本エージェントは隔離 worktree で動作し ${branch} を checkout している保証がないため git checkout --detach ${branch} で detached HEAD として取得する。この checkout の終了コードを必ず確認する（非 0 終了はローカルに refs/heads/${branch} が存在しない等を意味する）。加えて checkout 成功後に git rev-parse HEAD と git rev-parse refs/heads/${branch}（実装 worktree 側の implement 手順で作成された実ブランチの実体。同一リポジトリの worktree 間で共有される git 参照）を突き合わせ、両者が一致することを確認する（この worktree に残っていた無関係な直前の HEAD をそのまま base 取り込み・push してしまう事故の直接検知）。checkout の終了コードが非 0、または両 sha が不一致の場合は base merge も push も行わず prNumber: 0 と「ローカルブランチ ${branch} の checkout に失敗、または detached HEAD が refs/heads/${branch} の実体と不一致」を理由として返す（fail-closed。起点確立の検証を欠くと、隔離 worktree に残っていた無関係な HEAD が base の tip のまま push され、push した remote branch の tip が origin/${baseBranch} の tip と一致して gh pr create が失敗し得る）。(ii) リモート追跡 ref が得られ、両 tip が同一 sha（git rev-parse refs/heads/${branch} と git rev-parse refs/remotes/origin/${branch} が一致）の場合は継続する — 取り込む差分が存在せずどちらを起点にしても同一コミットのため安全。git checkout --detach refs/remotes/origin/${branch} として既存のマージコミット（過去の自分の push）の上から継続する。(ii-b) 同一 sha ではなく git merge-base --is-ancestor refs/heads/${branch} refs/remotes/origin/${branch} が成立する（ローカル tip がリモート tip の真の ancestor = remote ahead）場合は fail-closed: この祖先関係は過去の自分の push だけでなく、第三者・別ランが任意コミットを同ブランチへ fast-forward push した場合にも成立し、pr-create 単体の観測では両者を区別できない。リモート起点を採用するとその未レビューコミットを保持したまま base merge・push してしまい、autoMerge opt-in ランでは未レビューの第三者コミットがマージされ得るため、リモートコミットを黙って採用してはならない。merge も push もせず prNumber: 0 と「remote-ahead: 自己の過去 push か第三者 push か判別不能」を理由として返し、summary に両 tip の sha を書く。回復経路: この失敗では branch が保存されるため次回ランは Recover フェーズを起動し、回復 Implement の手順 2 がローカル ${branch} を git merge --ff-only refs/remotes/origin/${branch} でリモート tip へ追従させてから実装・Review を経て push する（自己の過去 push なら ff で追従でき、リモートコミットはそこでレビュー対象に乗る。ff 不能な真の diverged は次の pr-create の (iv) で止まる）。(iii) (ii) が不成立で、逆向きの git merge-base --is-ancestor refs/remotes/origin/${branch} refs/heads/${branch} が成立する（リモート tip がローカル tip の ancestor = local ahead。既存 PR 再利用後に implement / Review でローカルへ新規コミットを積んだ通常の回復フロー）場合はローカル起点 — git checkout --detach ${branch} で継続する。この checkout も (i) と同じ終了コード確認・git rev-parse HEAD と git rev-parse refs/heads/${branch} の一致確認を行い、失敗・不一致なら同じ理由で fail-closed に倒す（ローカル履歴はリモート履歴を含むため push は fast-forward になる。この向きを diverged 扱いして終端してはならない — 終端すると push・PR 作成が永久に回復しない）。(iv) どちらの向きの ancestor 関係も成立しない（真の diverged — 他者・別ランの push でリモートが書き換わっている等）場合のみ fail-closed: リモート側 sha を無条件に信頼して第三者の変更を取り込んではならないため、merge も push もせず prNumber: 0 と「ローカル ${branch} とリモート origin/${branch} が diverged」を理由として返し、summary に両 tip の sha を書く。起点を checkout したら base を取り込む: ${baseMergeInstruction(baseBranch)} 分岐 (b) の解消不能・分岐 (c) の拒否で返すときは prNumber: 0 と上記理由を返す（ローカルブランチはそのまま保全され、CI 未起動の空 PR を作らずに終わる）。分岐 (a) ならそのまま手順 0b へ進む。ローカルブランチ ref（refs/heads/${branch}）の更新は行わない — 手順 1 は detached HEAD の内容を直接 push するため不要であり、この worktree が ${branch} を checkout している保証がない以上 git branch -f はブランチが別 worktree で checkout 済みの場合に失敗し得る。`,
     `0b. push 前 差分ゼロチェック（必須。fail-closed）: git rev-list --count origin/${baseBranch}..HEAD を実行し、base に対する先行コミット数を数える（手順 0 で base 取り込み・起点確立を終えた後の detached HEAD が対象。base の再 fetch は不要 — 手順 0 で取得済みの refs/remotes/origin/${baseBranch} をそのまま使う）。0 件の場合は push を一切行わず、prNumber: 0 と「base ${baseBranch} との差分が 0 件（push 対象コミットなし）。手順 0 の起点確立が意図通りか要調査」を理由として返す（fail-closed。detached HEAD が誤って base の tip のまま残っている場合の最終防御線。実装 worktree 側は Review 通過済みのため、ここで 0 件になるのは本エージェント側の起点取り違えを意味する）。1 件以上の場合のみ手順 1 へ進む。`,
+
+
+
+    ...optinTestExecutionLines(item, '0c'),
+    ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
+      ? [`0d. SHA=$(git rev-parse HEAD) でこの記録が対象とする HEAD の sha（手順 0c のテスト対象・この後 push する内容と同一）を控える。手順 1c・2 の記録節に書く <sha> はこの値（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。`]
+      : []),
     `1. git push origin HEAD:refs/heads/${branch} で detached HEAD の内容（手順 0 の base 取り込み・コンフリクト解消を含む）を ${branch} へ push する（Bash の timeout に 600000 を指定）。git push origin ${branch} は使わない — ローカルの refs/heads/${branch} を手順 0 で更新していないため、その形では手順 0 の変更が push されず古い内容のまま push されてしまう。`,
     `   push が失敗した場合は prNumber: 0 と失敗理由を返す。`,
 
@@ -3741,7 +3852,7 @@ function prCreatePrompt(item, impl, outOfScope, optinRuns = []) {
 
     ...(optinRecordSection
       ? [
-          `   次に opt-in テスト記録節を更新する: g=$(mktemp); grep -vF ${JSON.stringify(OPTIN_RECORD_MARKER_PREFIX)} "$f" > "$g"; rc=$?（既存マーカー行の除去）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、その場合のみ mv "$g" "$f" する。2 以上（構文エラー等）の場合は \`|| true\` 等で握り潰さず、mv も行わず prNumber: 0 と「opt-in テスト記録節の更新に失敗（grep 異常終了、実測 exit code を記載）」を理由として返す（fail-closed。握り潰すと "$g" が空のまま mv され、Closes 行・対象外節を含む "$f" 全体が失われたまま gh pr edit されてしまう）。そのうえで手順 2 の body テンプレートに記載された「## opt-in テスト実行記録」節と同じ内容を "$f" の末尾へ追記する（マーカー行は記載どおり行頭インデントなしでそのまま書き写す）。`,
+          `   次に opt-in テスト記録節を更新する: g=$(mktemp); grep -vF ${JSON.stringify(OPTIN_RECORD_MARKER_PREFIX)} "$f" > "$g"; rc=$?（既存マーカー行の除去）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、その場合のみ mv "$g" "$f" する。2 以上（構文エラー等）の場合は \`|| true\` 等で握り潰さず、mv も行わず prNumber: 0 と「opt-in テスト記録節の更新に失敗（grep 異常終了、実測 exit code を記載）」を理由として返す（fail-closed。握り潰すと "$g" が空のまま mv され、Closes 行・対象外節を含む "$f" 全体が失われたまま gh pr edit されてしまう）。そのうえで手順 2 の body テンプレートに記載された「## opt-in テスト実行記録」節と同じ書式で "$f" の末尾へ追記する（マーカー行は行頭インデントなしで、テンプレートの \`<sha>\` は手順 0d で控えた SHA、\`<result>\` は手順 0c の各コマンドの結果へ実際に置き換えて書く）。`,
         ]
       : []),
     optinRecordSection
@@ -3909,7 +4020,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
 
 
 
-    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）${pushAfterFix ? ' / checksStarted・mergeableAfterPush（手順 4 の push 後 CI 起動確認の観測結果。任意・診断と分岐ヒント専用）' : ''}${pushAfterFix && Array.isArray(item.optinTests) && item.optinTests.length > 0 ? ' / optinTestRuns（手順 3b で再実行した宣言済み opt-in テストごとの結果）' : ''}/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）/ commitFailed（修正コミットを作成できなかった場合のみ true — base fetch 失敗・base merge の解消不能 / hook 拒否・commitlint の type / scope 決定不能を含む。その際 pushed は false。コミットできれば省略可）。`,
+    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）${pushAfterFix ? ' / checksStarted・mergeableAfterPush（手順 4 の push 後 CI 起動確認の観測結果。任意・診断と分岐ヒント専用）' : ''}${pushAfterFix && Array.isArray(item.optinTests) && item.optinTests.length > 0 ? ' / optinTestRuns（手順 3b で再実行した宣言済み opt-in テストごとの結果） / optinHeadSha（手順 4b a で控えた HEAD sha。optinTestRuns の対象 HEAD）' : ''}/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）/ commitFailed（修正コミットを作成できなかった場合のみ true — base fetch 失敗・base merge の解消不能 / hook 拒否・commitlint の type / scope 決定不能を含む。その際 pushed は false。コミットできれば省略可）。`,
   ].join('\n')
 }
 
@@ -5741,7 +5852,7 @@ async function runImplement(item) {
 
 
     const outOfScope = Array.isArray(impl.outOfScope) ? impl.outOfScope : []
-    const prCreateResult = await agent(prCreatePrompt(item, impl, outOfScope, impl.optinTestRuns ?? []), {
+    const prCreateResult = await agent(prCreatePrompt(item, impl, outOfScope), {
       label: `pr-create:#${item.number}`,
       phase: 'Implement',
       model: 'sonnet',
@@ -5869,7 +5980,8 @@ async function runImplement(item) {
 
 
 
-async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptinRuns = null) {
+
+async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptin = null) {
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -5941,7 +6053,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
-  let lastFixOptinRuns = initialFixOptinRuns
+
+
+
+
+  let lastFixOptin = initialFixOptin
 
 
 
@@ -5978,7 +6094,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     const reason = `${baseReason}${unresolvedNote}${outOfScopeNote}`
 
 
-    await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, baseMergeCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments })
+
+
+
+
+
+    await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, baseMergeCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, optinFixState: lastFixOptin ? { attempted: true, runs: lastFixOptin.runs, headSha: lastFixOptin.headSha } : undefined })
 
 
     recordFailure({
@@ -6158,6 +6279,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
+      let optinGateHeadSha = ''
+
+
+
+
+
 
       if (allowMerge && Array.isArray(item.optinTests) && item.optinTests.length > 0) {
         let optinVerify = null
@@ -6172,25 +6299,31 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         } catch (e) {
           log(`⚠️ #${item.number}: opt-in テスト記録検証エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
         }
+        optinGateHeadSha = sanitizeSha(optinVerify?.headRefOid)
 
 
 
-        const gate = combineOptinRecordGate(classifyOptinRecordGate(item.optinTests, optinVerify), lastFixOptinRuns)
+
+        const gate = combineOptinRecordGate(classifyOptinRecordGate(item.optinTests, optinVerify), lastFixOptin, optinGateHeadSha)
         if (!gate.ok) {
           const missingList = gate.missing.map((i) => sanitize(item.optinTests[i] ?? '')).join(' / ')
 
 
 
 
-          const optinRuns = Array.isArray(lastFixOptinRuns) && lastFixOptinRuns.length > 0
-            ? lastFixOptinRuns
+
+          const fixRunsMatchHead =
+            lastFixOptin && Array.isArray(lastFixOptin.runs) && lastFixOptin.runs.length > 0
+            && sanitizeSha(lastFixOptin.headSha) && sanitizeSha(lastFixOptin.headSha) === optinGateHeadSha
+          const optinRuns = fixRunsMatchHead
+            ? lastFixOptin.runs
             : (Array.isArray(impl.optinTestRuns) ? impl.optinTestRuns : [])
           const runsNote = optinRuns.length
-            ? `。${Array.isArray(lastFixOptinRuns) && lastFixOptinRuns.length > 0 ? 'post-push fix' : '実装エージェント'}の報告: ${optinRuns.map((r) => `${r.command}: ${r.result}${r.detail ? `（${r.detail}）` : ''}`).join(' / ')}`
+            ? `。${fixRunsMatchHead ? 'post-push fix' : '実装エージェント'}の報告: ${optinRuns.map((r) => `${r.command}: ${r.result}${r.detail ? `（${r.detail}）` : ''}`).join(' / ')}`
             : ''
           const optinReason = capText(
-            `イシューで宣言された opt-in テストの実行記録（pass）が PR 本文に確認できないためマージを停止した（不足: ${missingList}）${runsNote}。`
-            + `テストを実行し、PR 本文の opt-in テスト実行記録節の該当マーカー行を pass に更新してから同じ args で再実行すれば monitoring 再開で継続する`,
+            `イシューで宣言された opt-in テストの実行記録（pass、かつ現在の HEAD sha に束縛された記録）が PR 本文に確認できないためマージを停止した（不足: ${missingList}）${runsNote}。`
+            + `テストを実行し、現在の HEAD に対する opt-in テスト実行記録節のマーカー行を pass で更新してから同じ args で再実行すれば monitoring 再開で継続する`,
           )
           log(`⚠️ #${item.number}: ${optinReason}`)
           return await failMergeTerminal(optinReason, 'blocked')
@@ -6206,7 +6339,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
         let x = null
         try {
-          x = await agent(mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries), {
+          x = await agent(mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries, optinGateHeadSha), {
             label: `merge-exec:#${item.number}`,
             phase: 'Merge',
             model: 'sonnet',
@@ -6703,15 +6836,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
+
+
+
+
       let optinFixStatePatch
       if (Array.isArray(item.optinTests) && item.optinTests.length > 0) {
         const fixOptinRuns = sanitizeOptinTestRuns(f.optinTestRuns, item.optinTests)
         if (f.pushed === true) {
-          lastFixOptinRuns = fixOptinRuns
-          optinFixStatePatch = { attempted: true, runs: fixOptinRuns }
+          const fixHeadSha = sanitizeSha(f.optinHeadSha)
+          lastFixOptin = { runs: fixOptinRuns, headSha: fixHeadSha }
+          optinFixStatePatch = { attempted: true, runs: fixOptinRuns, headSha: fixHeadSha }
         }
         if (fixOptinRuns.some((r) => r.result !== 'pass')) {
-          log(`⚠️ #${item.number}: post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。マージ前ゲートで不合格として扱う`)
+          log(`⚠️ #${item.number}: post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。現在の HEAD に対する PR 本文マーカーが pass で更新されていなければマージ前ゲートで不合格として扱う`)
         }
       }
 
@@ -6793,7 +6931,30 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
-      await updateState(item.number, { fixCount, baseMergeCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, pushChecksStarted: fixChecksStarted, pushMergeable: fixPushMergeable, optinFixState: optinFixStatePatch }, { cleanupWorktree: oldWorktreePath })
+      const optinFixPatchArgs = { fixCount, baseMergeCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, pushChecksStarted: fixChecksStarted, pushMergeable: fixPushMergeable, optinFixState: optinFixStatePatch }
+      const fixStateWriteOk = await updateState(item.number, optinFixPatchArgs, { cleanupWorktree: oldWorktreePath })
+
+
+
+
+
+
+
+
+
+
+
+
+      if (optinFixStatePatch !== undefined && !fixStateWriteOk) {
+        log(`⚠️ #${item.number}: optinFixState を含む状態ファイル更新が失敗した。cleanupWorktree なしで 1 回再試行する`)
+        const retryOk = await updateState(item.number, optinFixPatchArgs)
+        if (!retryOk) {
+          const reason = 'post-push fix の opt-in テスト実測（optinFixState）を状態ファイルへ永続化できなかった（再試行後も失敗）。'
+            + 'この実測を次回 monitoring 再開時に復元できないと、PR 本文更新の失敗・省略時に古い記録だけでマージ前ゲートを通過し得るため、fail-closed で終端する'
+          recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')
+          return await failMergeTerminal(reason, 'blocked')
+        }
+      }
 
 
       noPushRounds = advanceNoPushRounds(noPushRounds, f.pushed === true, newlyResolvedThisRound)

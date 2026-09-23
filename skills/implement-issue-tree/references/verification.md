@@ -348,9 +348,12 @@ node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
 `scripts/implement-issue-tree.src.js` の opt-in テスト記録ゲート（`validateOptinCommandForm` /
 `parseOptinTestCommands`（`args.optinTestCommands` の起動時検証。PR #503 codex P0） /
 `parseOptinTestDeclarations` / `sanitizeOptinTestRuns` / `restoreOptinFixState`（`optinFixState`
-の状態ファイル復元。PR #503 2 巡目 codex P0） / `renderOptinRecordSection` /
-`classifyOptinRecordGate` / `combineOptinRecordGate` / `optinRecordVerifyPrompt`）を変更した
-場合の確認手順。
+の状態ファイル復元。`{ runs, headSha }` を返す。PR #503 2 巡目 codex P0 → 3 巡目で headSha を
+追加） / `optinRecordMarkerLine`（sha・result・command の順で束縛。PR #503 3 巡目 codex P1） /
+`renderOptinRecordSection`（`<sha>`/`<result>` プレースホルダのテンプレート） /
+`classifyOptinRecordGate`（headRefOid の検証を含む） / `combineOptinRecordGate`（`fixOptin`・
+`gateHeadSha` の sha 一致判定を含む） / `optinRecordVerifyPrompt`（`--json body,headRefOid` の
+単一取得） / `mergeExecutePrompt` の `expectedHeadSha` パラメータ）を変更した場合の確認手順。
 
 ```bash
 # 1. merge-exec のコンテキスト分離契約（Issue #145 / #160）が退行していないこと。
@@ -375,8 +378,9 @@ wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
 node --test skills/implement-issue-tree/tests/optin-tests-gate.test.mjs
 ```
 
-期待結果（手順 1 は本ファイル更新時点で実測済み。関数本体 135 行を抽出し、`optin`・`--json body`
-いずれも 0 件）: 手順 1 のいずれのコマンドも出力 `0`（`mergeExecutePrompt` の関数本体に `optin`
+期待結果（手順 1 は本ファイル更新時点で実測済み。関数本体 144 行（PR #503 3 巡目で expectedHeadSha
+の一致チェックを追加し 135→144 行に増加）を抽出し、`optin`・`--json body` いずれも 0 件）: 手順 1
+のいずれのコマンドも出力 `0`（`mergeExecutePrompt` の関数本体に `optin`
 文字列・`--json body` が含まれないこと。コンテキスト分離の非退行）。手順 2 の
 `optinRecordVerifyPrompt(` 呼び出しがドライバ部に 1 箇所のみ。手順 3 のビルドが `--check` 通過・
 500,000 B 未満。手順 4 が全 pass・fail 0（宣言なしイシューでのプロンプト出力完全一致テストを

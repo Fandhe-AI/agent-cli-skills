@@ -26,7 +26,7 @@ cat _/issue-trees/42.json
 | `blocked` | 依存失敗・halted・Review/Merge 非収束（未解決レビューコメント・対象外コメント起因を含む、イシュー固有の品質ブロック。halt の連続カウントには乗せない）。監視エージェント由来の blocked はこの状態へ落ちるのが `blockedReason: quality` の場合のみで、`unrecoverable`（PR の未マージクローズ等）は `failed` になる。前提の外部完了（Issue CLOSED / PR MERGED）をラン中に検知した場合は `merged` / `closed` へ遷移し（この遷移自体は halt 後も継続する）、**halt 発生前に限り**下流を同一ラン内で再判定する。halt 後に検知した場合は遷移・状態記録は行われるが下流の同一ラン内再判定は行われず、次回ランで反映される（Issue #442。次回ランを待たずに解消するため本行の再開対象から外れる。この遷移で `merged` / `closed` へ落ちた項目の残置実装 worktree は、終了時 sweep（本節前掲の worktree スイープ）の削除候補になる — 人手マージ済みのため契約上問題ないが、未コミット変更が残る想定は禁物）。Merge ループ中のエージェント呼び出し（monitor / merge-exec / merge-verify / base-merge / fix）が StructuredOutput を返さず終了した場合（例外・null 返却いずれも）も、Merge ループ突入時点で `pr` は必ず保存済みのため `blocked`（次回実行で monitoring 再開）に分類する。`failed`（Recover → 再実装）に倒すと重複 PR を作りうるため（Issue #465。詳細は下記「StructuredOutput 未返却時の fail-safe」節） | **`pr` 保存済み（PR 作成後の Merge 非収束）なら impl をスキップし monitor ループから再開**（PR 番号・ブランチ・fixCount・baseMergeCount・optinFixState を引き継ぐ。人間がレビュースレッドを resolve した後の再実行で既存 PR のマージ監視を続行する）。`pr` なし（依存失敗・push 前の Review 非収束等）は Recover phase が残骸の有無を確認して再実行（continue / discard に分岐）。Review 非収束の `blocked`（push 前のため `pr: 0`）は monitoring 再開ではなく必ずこの経路（Recover → 通常 Implement）から再着手する。ルートノード（verify-close）が StructuredOutput を返さず終了した場合は `pr` / `worktree` の概念がないため `blocked`（halt 非カウント）に分類し、次回実行時に verify-close を素のまま再実行する（冪等なため重複作用はない）。エージェントが応答した上で `closed: false` と判定した場合は従来どおり `failed` |
 | `skipped` | GitHub 側で closed 済み | スキップ（変更なし） |
 
-`monitoring` 中断、および `pr` 保存済みの `blocked` からの再開では、保存された `pr`（PR 番号）・`branch`・`fixCount`（修正済み回数）・`baseMergeCount`（base 取り込み済み回数。Issue #441）を引き継いで monitor ループから再開する。`fixCount` の上限（6 回）・`baseMergeCount` の上限（`args.maxBaseMerges`。既定 3）は、いずれも引き継いだ値に基づいて判定される（独立した 2 つの予算軸）。opt-in テスト宣言があるイシューでは `optinFixState`（`{ attempted: boolean, runs: [...] }`。post-push fix が `pushed: true` を報告したラウンドごとに更新）も引き継ぎ、`restoreOptinFixState` がマージ前ゲート（`combineOptinRecordGate`）の判定材料 `lastFixOptinRuns` の初期値として復元する（PR #503 2 巡目 codex P0）。`attempted: true` なのに `runs` を復元できない場合は宣言コマンド全件を `not-run` とみなし fail-closed で不合格にする。
+`monitoring` 中断、および `pr` 保存済みの `blocked` からの再開では、保存された `pr`（PR 番号）・`branch`・`fixCount`（修正済み回数）・`baseMergeCount`（base 取り込み済み回数。Issue #441）を引き継いで monitor ループから再開する。`fixCount` の上限（6 回）・`baseMergeCount` の上限（`args.maxBaseMerges`。既定 3）は、いずれも引き継いだ値に基づいて判定される（独立した 2 つの予算軸）。opt-in テスト宣言があるイシューでは `optinFixState`（`{ attempted: boolean, runs: [...], headSha }`。post-push fix が `pushed: true` を報告したラウンドごとに更新）も引き継ぎ、`restoreOptinFixState` がマージ前ゲート（`combineOptinRecordGate`）の判定材料 `lastFixOptin`（`{ runs, headSha }`）の初期値として復元する（PR #503 2 巡目 codex P0 → 3 巡目で headSha を追加）。`attempted: true` なのに `runs` を復元できない場合は宣言コマンド全件を `not-run` とみなし fail-closed で不合格にする。`headSha` が現在の HEAD の headRefOid と一致する場合のみ `runs` の非 pass がマージ前ゲートを不合格にする（PR 本文のマーカー自体が HEAD sha に束縛されたため、これは多層防御であり主防御ではない）。
 
 `planning` / `implementing` / `reviewing` からの再開では、まず Recover phase が残骸 worktree / branch の有無を確認する。**残骸がある場合**は Recover が「途中作業を継続できるか」を判断し、continue なら既存 branch を checkout して Implement で継続、discard なら worktree と branch を掃除して Plan から新規実行する。**残骸がない場合**は通常の Plan → Implement から再実行する。いずれの経路でも push 前 review フローのため PR 未作成の状態で中断している。impl 手順 0b-a が既存 open PR のブランチを検出して続きから作業し、その PR 番号は PR Create フェーズが `--head <branch>` の再検出で引き継ぐ（重複 PR も `gh pr create` の失敗も起こさない）。「push 成功・PR 作成失敗」のケース（状態 `failed`・`branch` 保存済み）は `branch` が残骸として Recover phase を起動するため impl 手順 0b には到達しない。continue の回復 Implement は手順 2 で既存 branch を checkout した後、`git fetch origin <branch>:refs/remotes/origin/<branch>` → `git merge --ff-only refs/remotes/origin/<branch>` でローカルをリモート tip へ追従させ、push 済みの base 取り込みコミット（PR Create が detached HEAD から push しローカル ref を更新しないもの）を保持したまま回復する。ff 不能な真の diverged は続行し、次の PR 作成の (iv) が fail-closed で止める。
 
@@ -242,30 +242,43 @@ rm _/issue-trees/42.json
 # 再実行
 ```
 
-### opt-in テスト記録不足による blocked からの復旧（Issue #495）
+### opt-in テスト記録不足による blocked からの復旧（Issue #495 → PR #503 3 巡目で HEAD sha 束縛）
 
 イシュー本文で opt-in テストを宣言している場合、マージ前ゲートが PR 本文の pass 記録不足を理由に
 `blocked`（`blockedReason: quality`）で停止することがある（新規マージ経路のみ。回復専用経路では
 このゲートは起動しない）。終端理由には不足しているコマンド一覧が記録される。
 
+マーカー行は **現在の HEAD sha に束縛された記録だけがカウントされる**（`<!-- optin-test-record:
+<40 桁 sha> <pass|fail|not-run> <コマンド> -->`）。base 取り込み・別の push で HEAD が変わった
+後は、それより前に書かれた記録（古い sha のもの）は自動的に「存在しないもの」として扱われる
+ため、**PR 本文を書き換えるときは必ず現在の HEAD の sha で書く**。古い sha のまま `pass` へ
+書き換えても、マージ前ゲートの grep はどの行にも一致せず不合格のまま停止する。
+
 復旧手順:
 
 1. 対象 PR のブランチを手元で checkout し、終端理由に挙げられたコマンドを実際に実行する。
-2. PR 本文の「## opt-in テスト実行記録」節にある該当マーカー行を、実行結果に合わせて
-   `<!-- optin-test-record: <コマンド> => pass -->` へ書き換える（`gh pr edit <N> --body-file` 等で
-   更新する。書式は SKILL.md「opt-in テストの宣言」節参照）。
-3. 同じ `args` で再実行する（`monitoring` 再開から継続し、マージ前ゲートが更新済みの pass 記録を
+2. `git rev-parse HEAD` で現在の HEAD sha（PR の `headRefOid` と同一のはず。`gh pr view <N>
+   --json headRefOid` で突き合わせて確認するとよい）を控える。
+3. PR 本文の「## opt-in テスト実行記録」節にある該当マーカー行を、手順 2 の sha と実行結果に
+   合わせて `<!-- optin-test-record: <手順 2 の sha> pass <コマンド> -->` へ書き換える
+   （`gh pr edit <N> --body-file` 等で更新する。書式は SKILL.md「opt-in テストの宣言」節参照。
+   古い sha のマーカー行は残っていても実害はない — 現在の HEAD と一致しないため無視されるだけ
+   だが、本文の可読性のため削除してもよい）。
+4. 同じ `args` で再実行する（`monitoring` 再開から継続し、マージ前ゲートが更新済みの pass 記録を
    確認して継続する）。
 
 **PR 本文の更新だけでは不十分な場合（PR #503 2 巡目 codex P0）**: 終端理由が「post-push fix の
 実測」に基づく不合格（状態ファイルの当該イシューエントリに `optinFixState.attempted: true` があり
 `runs` に非 pass が残っている場合）は、`combineOptinRecordGate` が状態ファイルの永続化済み実測を
-PR 本文の pass マーカーより優先するため、手順 1〜3 だけでは解消しない（PR 本文を pass へ書き換えても
-不合格のまま停止する）。この場合は状態ファイル（`_/issue-trees/<parent>.json` 等）の当該イシュー
-エントリを開き、`optinFixState.runs` の該当コマンドの `result` を実行結果に合わせて手動で書き換える
-か、テストを再実行して問題が解消したことを確認したうえで `optinFixState` エントリごと削除してから
-（次回の再開時は「post-push fix 未実施」= 従来どおり PR 本文のみで判定される）、手順 2 の PR 本文
-更新と合わせて同じ `args` で再実行する。
+PR 本文の pass マーカーより優先する。ただしこれは `optinFixState.headSha` が現在の HEAD の
+headRefOid と**一致する場合のみ**働く（PR #503 3 巡目 codex P1）。一致する場合は手順 1〜4 だけ
+では解消せず（PR 本文を現在の HEAD sha で pass へ書き換えても不合格のまま停止する）、状態ファイル
+（`_/issue-trees/<parent>.json` 等）の当該イシューエントリを開き、`optinFixState.runs` の該当
+コマンドの `result` を実行結果に合わせて手動で書き換えるか、テストを再実行して問題が解消した
+ことを確認したうえで `optinFixState` エントリごと削除してから（次回の再開時は「post-push fix
+未実施」= 従来どおり PR 本文のみで判定される）、手順 3 の PR 本文更新と合わせて同じ `args` で
+再実行する。`headSha` が現在の HEAD と一致しない（base 取り込み等で HEAD がさらに進んだ）場合は
+この実測は無視されるため、手順 1〜4 のみで解消する。
 
 宣言そのものが `args.optinTestCommands`（承認一覧）に無いか許可形式外（PR #503 codex P0。
 先頭トークンが許可ランナー外・シェルメタ文字を含む等）で `blocked` になった場合は、実装は
