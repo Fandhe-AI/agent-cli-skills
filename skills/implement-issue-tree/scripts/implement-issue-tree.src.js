@@ -787,8 +787,8 @@ function optinRecordMarkerLine(sha, result, command) {
 // result enum・承認一覧と一致したコマンド）だけで組む固定形式の行のみから成り、detail・not-run
 // の理由などの任意テキストは PR 本文へ書かない（エージェントの返却値・ログにのみ残す）。
 // 人間可読行のプレフィックスは PR 本文の他の箇条書きやマーカー接頭辞と包含関係を持たない固定
-// 文字列にし、更新時はこの 3 本の固定文字列（grep -vF）だけで旧記録行を全行除去できるようにする
-// （見出しの重複や古い pass / not-run 行の蓄積を防ぐ）。
+// 文字列にし、更新時は行全体の形式に一致する固定パターン 3 本（grep -vE。optinRecordRewriteLines）
+// だけで旧記録行を全行除去できるようにする（見出しの重複や古い pass / not-run 行の蓄積を防ぐ）。
 const OPTIN_RECORD_HEADING = '## opt-in テスト実行記録'
 const OPTIN_RECORD_HUMAN_PREFIX = '- opt-in テスト結果: '
 function optinRecordLines(sha, result, commands) {
@@ -802,16 +802,26 @@ function optinRecordLines(sha, result, commands) {
 }
 
 // 既存 PR 本文（"$f"）の記録節を書き直す手順（prCreatePrompt の再利用経路・
-// optinRecordUpdateInstructions の共通部）。除去は固定文字列 3 本の grep -vF のみで行い、
+// optinRecordUpdateInstructions の共通部）。除去は行全体の形式に一致する固定パターン 3 本の
+// grep -vE のみで行い（PR #505 codex P1: 部分文字列一致の grep -vF では、本文の説明文中に見出しや
+// 接頭辞を引用しただけの無関係な行まで消えていた）、
 // 追記はホスト検証済みの値だけから成る固定テンプレートをクォート済み HEREDOC でファイルへ
 // 足す（PR 本文そのものは HEREDOC・シェル文字列へ載せない）。grep -v の終了コード 1 は
 // 「残す行が 1 行も無い」ことを意味するため 0 以外はすべて失敗として扱う。-a はバイナリ判定で
 // rc=0 のまま出力が空になる経路を塞ぎ、[ -s "$g" ] は除去後が空の場合を塞ぐ。判定と mv は
 // シェル変数が Bash 呼び出しを跨いで残らないため同じ 1 行で完結させ、mv されなかった場合は
 // gh pr edit もしない（fail-closed。本文を空にしない）。
+// パターンはホスト定数のみから組む（未信頼値を含めない。3 定数は ERE メタ文字を含まないため
+// エスケープ不要。回帰テストで固定）。行頭の空白と行末の [[:space:]]*（CRLF の CR を含む）だけを
+// 許容し、BSD grep（macOS）・GNU grep 双方で同じ意味になる POSIX ERE に限る（\s・\r 等は使わない）。
+const OPTIN_RECORD_REMOVE_PATTERNS = [
+  `^[[:space:]]*${OPTIN_RECORD_HEADING}[[:space:]]*$`,
+  `^[[:space:]]*${OPTIN_RECORD_MARKER_PREFIX}[^ ]+ [^ ]+ .+ -->[[:space:]]*$`,
+  `^[[:space:]]*${OPTIN_RECORD_HUMAN_PREFIX}.+ => [^ ]+[[:space:]]*$`,
+]
 function optinRecordRewriteLines(commands, shaNote, resultNote, onFail) {
   return [
-    `     g=$(mktemp); grep -avF -e ${shellSingleQuote(OPTIN_RECORD_HEADING)} -e ${shellSingleQuote(OPTIN_RECORD_MARKER_PREFIX)} -e ${shellSingleQuote(OPTIN_RECORD_HUMAN_PREFIX)} "$f" > "$g"; rc=$?; [ "$rc" -eq 0 ] && [ -s "$g" ] && mv "$g" "$f"`,
+    `     g=$(mktemp); grep -avE ${OPTIN_RECORD_REMOVE_PATTERNS.map((p) => `-e ${shellSingleQuote(p)}`).join(' ')} "$f" > "$g"; rc=$?; [ "$rc" -eq 0 ] && [ -s "$g" ] && mv "$g" "$f"`,
     `   （旧記録節の見出し・人間可読行・マーカー行を全行除去し、判定と mv までをこの 1 行で行う。行を分割しない）。この行の終了コードが 0 でない場合（rc が 0 でない、または除去後が空で "$f" が更新されていない）は \`|| true\` 等で握り潰さず、mv も gh pr edit もせず、${onFail}（fail-closed。本文を空にしない）。`,
     '   続けて次の固定テンプレートを "$f" の末尾へ追記する（区切り語をクォートした HEREDOC のため変数展開は起きない。<sha> と <result> は実際の値を字面で書き込んでから実行し、それ以外の文字は 1 文字も変えない。detail・not-run の理由などの補足は PR 本文へ書かず返却値にのみ残す）:',
     // テンプレートは字下げせずに示す（字下げのまま写すと終端行が一致せず HEREDOC が閉じない）。

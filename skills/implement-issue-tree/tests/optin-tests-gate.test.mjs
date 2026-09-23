@@ -733,7 +733,7 @@ test('実行レベル: 新旧 2 つの sha の記録が併存しても現在の 
 })
 
 // ---------------------------------------------------------------------------
-// 群 F2: 記録節の書き直し（Issue #502）。optinRecordRewriteLines が出力する grep -avF 除去
+// 群 F2: 記録節の書き直し（Issue #502）。optinRecordRewriteLines が出力する grep -avE 除去
 // 実行行（判定と mv まで 1 行で完結）と固定テンプレートの HEREDOC 追記をそのまま bash で実行し、
 // 2 回更新しても見出しが 1 個・古い sha の行が 0 行・Closes 行が保持されること、除去後が空に
 // なる場合は "$f" が元のまま残ることを確認する。
@@ -741,32 +741,37 @@ test('実行レベル: 新旧 2 つの sha の記録が併存しても現在の 
 
 const SHA_C = 'c'.repeat(40)
 
+// 除去実行行の期待字面（ホスト定数のみから成る行頭・行末アンカー付き ERE 3 本。PR #505 codex P1）。
+const EXPECTED_REMOVE_GREP = `grep -avE -e '^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$' -e '^[[:space:]]*<!-- optin-test-record: [^ ]+ [^ ]+ .+ -->[[:space:]]*$' -e '^[[:space:]]*- opt-in テスト結果: .+ => [^ ]+[[:space:]]*$'`
+
 // プロンプト中の除去実行行と HEREDOC（字下げなしで示される）をそのまま取り出し、エージェントが
 // 行うのと同じく <sha>/<result> を字面で置き換えてから実行する。実行行は補完せず単独の bash
 // 呼び出しで実行し（シェル変数は呼び出しを跨いで残らない）、その終了コードが 0 以外なら
 // HEREDOC 追記へ進まず status 3 で失敗させる（プロンプトの fail-closed 指示と同じ分岐）。
-function applyRecordRewrite(bodyText, commands, sha, result) {
+// env を渡すと子 bash の環境を差し替える（PATH を /usr/bin 先頭に固定して、macOS では BSD grep
+// 〔/usr/bin/grep〕で実行行を実際に走らせる確認に使う。PR #505 codex P1）。
+function applyRecordRewrite(bodyText, commands, sha, result, env) {
   const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
   const bodyPath = join(dir, 'body.md')
   writeFileSync(bodyPath, bodyText)
-  return runRecordRewrite(bodyPath, commands, sha, result)
+  return runRecordRewrite(bodyPath, commands, sha, result, env)
 }
 
-function runRecordRewrite(bodyPath, commands, sha, result) {
+function runRecordRewrite(bodyPath, commands, sha, result, env = process.env) {
   const lines = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
-  const grepLine = lines.find((l) => l.trim().startsWith('g=$(mktemp); grep -avF')).trim()
+  const grepLine = lines.find((l) => l.trim().startsWith('g=$(mktemp); grep -avE')).trim()
   const hs = lines.indexOf(`cat >> "$f" <<'OPTIN_RECORD_EOF'`)
   const he = lines.indexOf('OPTIN_RECORD_EOF', hs + 1)
   assert.ok(hs >= 0 && he > hs, 'HEREDOC テンプレートが行頭インデントなしで見つからない')
   const heredoc = lines.slice(hs, he + 1).join('\n')
     .replaceAll('<sha>', sha).replaceAll('<result>', result)
-  const rm = spawnSync('bash', ['-c', `f="$1"\n${grepLine}\n`, 'bash', bodyPath])
+  const rm = spawnSync('bash', ['-c', `f="$1"\n${grepLine}\n`, 'bash', bodyPath], { env })
   if (rm.status !== 0) {
     const err = new Error(`除去実行行が終了コード ${rm.status} で失敗`)
     err.status = 3
     throw err
   }
-  execFileSync('bash', ['-c', `f="$1"\n${heredoc}\n`, 'bash', bodyPath])
+  execFileSync('bash', ['-c', `f="$1"\n${heredoc}\n`, 'bash', bodyPath], { env })
   return readFileSync(bodyPath, 'utf8')
 }
 
@@ -789,7 +794,7 @@ test('記録節の書き直し: 2 回更新しても見出しは 1 個・古い 
   }
 })
 
-test('記録節の書き直し: 字下げ・CRLF 付きの旧記録行も固定文字列の除去で残らない（Issue #502）', () => {
+test('記録節の書き直し: 字下げ・CRLF 付きの旧記録行も固定パターンの除去で残らない（Issue #502）', () => {
   const commands = ['make e2e']
   const initial = `Closes #42\r\n\r\n  ${OPTIN_RECORD_HEADING}\r\n  ${OPTIN_RECORD_HUMAN_PREFIX}make e2e => pass\r\n  ${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}\r\n`
   const out = applyRecordRewrite(initial, commands, SHA_B, 'pass')
@@ -839,7 +844,8 @@ test('記録節の書き直し: テンプレートは固定形式の行のみで
     assert.doesNotMatch(text, /\bcmp\b|\bdiff\b/)
     assert.doesNotMatch(text, /printf|echo /)
     assert.doesNotMatch(text, /- 補足:/)
-    assert.match(text, /grep -avF -e '## opt-in テスト実行記録' -e '<!-- optin-test-record: ' -e '- opt-in テスト結果: '/)
+    assert.ok(text.includes(EXPECTED_REMOVE_GREP), '除去実行行が行全体の形式に一致する固定パターン 3 本の grep -avE でない')
+    assert.doesNotMatch(text, /grep -a?vF/)
   }
   // prCreatePrompt の再利用経路・fixPrompt 経路が同じ書き直し手順を共有する。
   assert.ok(pr.includes(rewrite[0]) && update.includes(rewrite[0]))
@@ -847,6 +853,52 @@ test('記録節の書き直し: テンプレートは固定形式の行のみで
   // 本文は従来どおりファイル経由（取得 → 加工 → --body-file）。
   assert.match(update, /gh pr view 123 --json body --jq '\.body \/\/ ""' > "\$f"/)
   assert.match(update, /gh pr edit 123 --body-file "\$f"/)
+})
+
+test('記録節の書き直し: 除去パターンの元になる 3 定数は ERE メタ文字・単一引用符を含まない（エスケープ不要の前提を固定。PR #505 codex P1）', () => {
+  for (const c of [OPTIN_RECORD_HEADING, OPTIN_RECORD_MARKER_PREFIX, OPTIN_RECORD_HUMAN_PREFIX]) {
+    assert.doesNotMatch(c, /[.^$*+?()[\]{}|\\']/)
+  }
+})
+
+test('記録節の書き直し: 固定文字列を行の途中に含む行・行頭でも形式が合わない行は 1 字も変わらず残る（/usr/bin/grep で実行。PR #505 codex P1）', () => {
+  // PATH を /usr/bin 先頭に固定し、実行行の grep を /usr/bin/grep（macOS では BSD grep、Linux では
+  // GNU grep）へ解決させる。
+  const env = { ...process.env, PATH: '/usr/bin:/bin' }
+  if (process.platform === 'darwin') {
+    const v = spawnSync('/usr/bin/grep', ['--version'], { encoding: 'utf8' })
+    assert.match(`${v.stdout}${v.stderr}`, /BSD grep/)
+  }
+  const commands = ['make e2e']
+  const unrelated = [
+    `説明: ${OPTIN_RECORD_HEADING} という節が付く`,
+    `前回は ${OPTIN_RECORD_HUMAN_PREFIX}を手で書いた`,
+    `${OPTIN_RECORD_MARKER_PREFIX}の書式について -->`,
+    `${OPTIN_RECORD_HEADING}について`,
+    `${OPTIN_RECORD_HUMAN_PREFIX}手動確認のみ`,
+    `x ${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}`,
+    `\`${OPTIN_RECORD_HUMAN_PREFIX}make e2e => pass\` の形式で書かれる`,
+  ]
+  const initial = [
+    '## Summary',
+    ...unrelated,
+    '',
+    'Closes #42',
+    '',
+    OPTIN_RECORD_HEADING,
+    `${OPTIN_RECORD_HUMAN_PREFIX}make e2e => fail`,
+    optinRecordMarkerLine(SHA_A, 'fail', 'make e2e'),
+    '',
+  ].join('\n')
+  const out = applyRecordRewrite(initial, commands, SHA_B, 'pass', env)
+  const lines = out.split('\n')
+  for (const l of unrelated) assert.ok(lines.includes(l), `無関係な行が消えた・変化した: ${l}`)
+  // 更新前の本文のうち記録節（見出し・人間可読行・マーカー行）以外は順序も含めて 1 字も変わらない。
+  assert.ok(out.startsWith(['## Summary', ...unrelated, '', 'Closes #42', '', ''].join('\n')))
+  assert.equal(lines.filter((l) => l === OPTIN_RECORD_HEADING).length, 1)
+  assert.equal(lines.filter((l) => l === optinRecordMarkerLine(SHA_A, 'fail', 'make e2e')).length, 0)
+  assert.equal(lines.filter((l) => l === `${OPTIN_RECORD_HUMAN_PREFIX}make e2e => fail`).length, 0)
+  assert.deepEqual(grepShaResultCounts(out, SHA_B, 'make e2e'), { pass: 1, nonPass: 0 })
 })
 
 // ---------------------------------------------------------------------------
