@@ -269,16 +269,24 @@ rm _/issue-trees/42.json
 
 **PR 本文の更新だけでは不十分な場合（PR #503 2 巡目 codex P0）**: 終端理由が「post-push fix の
 実測」に基づく不合格（状態ファイルの当該イシューエントリに `optinFixState.attempted: true` があり
-`runs` に非 pass が残っている場合）は、`combineOptinRecordGate` が状態ファイルの永続化済み実測を
-PR 本文の pass マーカーより優先する。ただしこれは `optinFixState.headSha` が現在の HEAD の
-headRefOid と**一致する場合のみ**働く（PR #503 3 巡目 codex P1）。一致する場合は手順 1〜4 だけ
-では解消せず（PR 本文を現在の HEAD sha で pass へ書き換えても不合格のまま停止する）、状態ファイル
-（`_/issue-trees/<parent>.json` 等）の当該イシューエントリを開き、`optinFixState.runs` の該当
-コマンドの `result` を実行結果に合わせて手動で書き換えるか、テストを再実行して問題が解消した
-ことを確認したうえで `optinFixState` エントリごと削除してから（次回の再開時は「post-push fix
-未実施」= 従来どおり PR 本文のみで判定される）、手順 3 の PR 本文更新と合わせて同じ `args` で
-再実行する。`headSha` が現在の HEAD と一致しない（base 取り込み等で HEAD がさらに進んだ）場合は
-この実測は無視されるため、手順 1〜4 のみで解消する。
+`runs` に非 pass が残っている、または `unbound: true` の場合。これを **latch** と呼ぶ）は、
+`combineOptinRecordGate` が状態ファイルの永続化済み実測を PR 本文の pass マーカーより優先する。
+ただしこれは `optinFixState.headSha` が現在の HEAD の headRefOid と**一致する場合、または
+`unbound: true` の場合のみ**働く（PR #503 3 巡目 codex P1・4 巡目セキュリティ監査 Medium）。
+
+**latch は自動で解除を試みる（PR #503 4 巡目 codex P1・停止性バグ対応）**: latch が原因で gate
+不合格になった場合、ホストは `blocked` で終端せず、`fixCount` 予算（上限 6）が残っていれば
+**同一周回で fix ループへ自動的に再ディスパッチする**（人間の手動介入は不要）。このラウンドは
+コード変更を必須としない latch 解除専用モードで動き、宣言済み opt-in テストを現在の HEAD で
+再実行して全件 pass すれば latch は自動的に解除される。したがって **`blocked` で停止するのは
+`fixCount` 予算を使い切った場合のみ**であり、以下の手動手順はその場合の復旧手段として使う:
+状態ファイル（`_/issue-trees/<parent>.json` 等）の当該イシューエントリを開き、
+`optinFixState.runs` の該当コマンドの `result` を実行結果に合わせて手動で書き換えるか、
+テストを再実行して問題が解消したことを確認したうえで `optinFixState` エントリごと削除してから
+（次回の再開時は「post-push fix 未実施」= 従来どおり PR 本文のみで判定される）、手順 3 の PR
+本文更新と合わせて同じ `args` で再実行する。`headSha` が現在の HEAD と一致しない（base 取り込み
+等で HEAD がさらに進んだ・latch ではない通常の陳腐化）場合はこの実測は無視されるため、手順 1〜4
+のみで解消する。
 
 宣言そのものが `args.optinTestCommands`（承認一覧）に無いか許可形式外（PR #503 codex P0。
 先頭トークンが許可ランナー外・シェルメタ文字を含む等）で `blocked` になった場合は、実装は

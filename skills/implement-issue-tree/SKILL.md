@@ -603,7 +603,7 @@ open のサブイシューが残っている場合、または受入基準が未
 | P0/P1 相当・セキュリティ指摘を対象外扱いにする | fix エージェントは単独で対象外と判定して記録のみで済ませてはならない。修正するか、ユーザーまたは指摘者の承認を得るまで `blocked` として扱う（安全側ガード） |
 | 全チェックが pass に見えるので CI 起因を除外し、PR の差分を疑って調査を続ける | 同名 check-run の重複件数を実測する（Step 6 の該当分岐）。cancel された run の残存 check が BLOCKED の原因になり得る |
 | (A) の出力を検証せず `0` を「重複なし」と読む | 取得失敗・空出力・形式不一致は `UNDETERMINED`。CI 由来を除外せず `blocked`（quality）に倒す |
-| opt-in テスト記録不足で `blocked` になったまま再実行を繰り返す | [references/recovery.md](references/recovery.md) の手順（手元で現在の HEAD に対して実行 → PR 本文の該当マーカー行を現在の HEAD sha・pass で更新 → 同じ args で再実行）に従う。`optinFixState` の永続化実測が残っている場合は PR 本文の更新だけでは不十分なことがある点に注意（recovery.md 参照） |
+| opt-in テスト記録不足で `blocked` になったまま再実行を繰り返す | `optinFixState` の非 pass・unbound 由来の不合格（latch。PR #503 4 巡目 codex P1）は、fixCount 予算が残っていればホストが自動的に fix 経路へ再ディスパッチして解除を試みるため、通常は人間の介入なしで自然に解消する。`blocked` が続くのは fixCount 予算を使い切った場合のみで、その場合は [references/recovery.md](references/recovery.md) の手順（手元で現在の HEAD に対して実行 → PR 本文の該当マーカー行を現在の HEAD sha・pass で更新 → `optinFixState` を状態ファイルから削除・書き換え → 同じ args で再実行）に従う |
 | 重複の bad を cancelled / failure / timed_out のみに限定し、pending・action_required・startup_failure・stale を「正常な重複」に含める | `success`・`neutral`・`skipped`（required status checks 上は合格・非ブロック扱い）以外は正常扱いしない。pending（未完了）は別枠の `pend` で検知し、それ自体が BLOCKED の原因になり得るため rerun 対象探索へ進まず待機する |
 | `neutral`・`skipped` を bad（通常の CI 失敗）として rerun 対象探索へ進める | `neutral`・`skipped` は GitHub の required status checks 判定で合格扱いになる conclusion であり fail-closed 対象ではない。`success`・`neutral`・`skipped` の重複は正常な再実行として扱い、BLOCKED の別原因を疑う |
 | 差分と無関係なテスト失敗を確認せず flaky と決めつけて rerun する | main での同ジョブ green と差分スコープの 2 点を実測してから rerun する（下記「一斉同期・大量 PR 投入時の運用ガード」参照） |

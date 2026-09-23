@@ -620,6 +620,14 @@ HEAD がずれる（ゲート確認後に別の push が入る）競合を防ぐ
 リスクが見合わないため。次回実行時に monitoring 再開でゲートを再評価すれば、人間または別ラウンド
 の fix が現在の HEAD で記録を更新した時点で自然に解消する）。
 
+**この「自動で回す専用の再ディスパッチは実装していない」は、PR 本文の記録が単に古い（HEAD が
+進んだだけで `lastFixOptin` の override が働いていない）ケースに限る。** 下記「opt-in 記録
+latch の自動解除」で説明する `lastFixOptin` 由来の override（latch）が原因で gate 不合格に
+なっているケースは、この節の対象外であり、**同一周回で fix 経路へ自動再ディスパッチする**
+（PR #503 4 巡目 codex P1・停止性バグ対応）。両者の違いは `isOptinLatchActive` が判定する:
+override が実際に働いた（latch）場合のみ再ディスパッチし、override が働かず gate 自身が
+（PR 本文のみを理由に）不合格な場合は従来どおり blocked のまま次回実行を待つ。
+
 ### post-push fix の実測の永続化（`optinFixState`。PR #503 2 巡目 codex P0 → 3 巡目で headSha を追加）
 
 Merge ループの post-push fix（`pushAfterFix: true`）が opt-in テストを再実行した結果は、
@@ -666,6 +674,63 @@ monitor 起動前に別経路で終端したラウンドの実測が失われ得
 `references/recovery.md`「opt-in テスト記録不足による blocked からの復旧」節を参照
 （マーカー sha 束縛後は、PR 本文の更新は「現在の HEAD sha で」書き直す必要があり、
 `optinFixState` の実測が残っている場合は状態ファイル側の修正・削除も要ることがある）。
+
+### opt-in 記録 latch の自動解除（PR #503 4 巡目 codex P1・停止性バグ対応）
+
+`combineOptinRecordGate` の override（`lastFixOptin` の非 pass・`unbound` による強制不合格）が
+実際に働いている状態を **latch** と呼ぶ。latch は「PR 本文を人間が編集する」「テストを実行して
+同じ args で再実行し、次回 monitoring の再監視を待つ」だけでは解除できない — `lastFixOptin`
+（プロセスローカル）も永続化された `optinFixState` も、現在の HEAD が変わらない限り毎ラウンド
+同じ override 判定を再生産し、`combineOptinRecordGate` 自身は false→true の書き換えを一切
+行わないため gate 自身の再判定でも解除できない。旧版の従来メッセージ（「マーカー行を pass で
+更新してから同じ args で再実行すれば継続する」）は latch 由来の不合格には当てはまらず、案内
+どおり従っても復旧しないまま `fixCount` を消費し続ける・あるいは `blocked` に固定化される
+停止性バグだった。
+
+**検出（`isOptinLatchActive`）**: `optinGateHeadSha`（このラウンドで `optinRecordVerifyPrompt`
+が観測した現在の headRefOid）が `sanitizeSha` を通らない場合は常に `false` を返す（独立検証
+エージェントが現在の head を観測できなければ、どんな fix 結果も受理できず fix ラウンドが
+`fixCount` を浪費するだけになるため、latch 由来と断定せず既存の `blocked` 終端に委ねる）。
+`optinGateHeadSha` が確定していれば、`lastFixOptin.unbound === true`、または
+`lastFixOptin.headSha` が `optinGateHeadSha` と一致し、かつ `runs` に非 pass が 1 件でも
+あれば latch と判定する。
+
+**解除（同一周回での fix 再ディスパッチ）**: gate 不合格時、`isOptinLatchActive` が `true` かつ
+`fixCount < 6` なら、`failMergeTerminal` で終端せず `lastState = 'needs-fix'` を設定して
+**同一周回**で fix ループへ再ディスパッチする（`conflicting`→`needs-fix` 委譲と同型の 2 段
+チェーン構造。次ラウンドの monitor を経ないため latch 検出直後に即座に回復を試みられる）。
+このとき `optinLatchRecoveryActive` を立て、`fixPrompt` の `optinLatchMode` 引数へ伝播する。
+latch 解除ラウンドは**コード変更を必須としない**（`fixPrompt` の手順 1b）: 指摘に実際の修正
+対象がなければコード変更をスキップしてよく、宣言済み opt-in テストの再実行（手順 3b）と記録
+更新（手順 4b）のみで進める。`fixCount >= 6`（予算枯渇）の場合は従来どおり `blocked` で有界に
+停止し、latch 固有の復旧手順（状態ファイルの `optinFixState` を削除・`attempted: false` へ
+書き換える、または宣言テストが実際に pass する新しいコミットを push する）を終端メッセージへ
+明示する。
+
+**受理（「エージェント自己申告の PR 本文だけで解除しない」というオーナー決定の実体）**:
+latch 解除ラウンドが `pushed: false`（コード変更なし）で終わった場合、fix 自身が申告した
+`optinTestRuns`/`optinHeadSha` を無条件には信用しない。`acceptNoPushOptinFixResult` が、
+ホストがこのラウンド**開始時**に別コンテキストの `optinRecordVerifyPrompt` で独立観測した
+head（`optinLatchExpectedHeadSha`）と、fix 自己申告の `optinHeadSha` を突き合わせ、
+`sanitizeSha` 通過の上で完全一致する場合のみ受理する。一致しない（未報告・形式不正・別 HEAD の
+結果を報告した等）場合は `null` を返し、ホストは `lastFixOptin`/`optinFixState` を一切
+更新しない（latch は維持されたまま `fixCount` のみ消費する fail-closed 側に倒す）。受理できても
+これは「override を止める」だけであり、実際のマージ合否は元の gate（次ラウンドの独立検証
+エージェントが改めて PR 本文を確認する）に委ねられたままで、自己申告のみでマージへ直結する
+経路は存在しない。`pushed: true`（コード変更を伴った通常経路）の場合は従来どおりの判定
+（`f.optinHeadSha` を `sanitizeSha`）をそのまま使う（変更なし）。
+
+**`noPushRounds` との整合**: latch 解除ラウンドが `acceptNoPushOptinFixResult` に受理された
+場合、`push を伴わないが実際に前進したラウンド」であるため `noPushRounds`（無進捗連続ラウンド。
+閾値 2 で `blocked`）を `pushed: true` と同様にリセットする（`optinLatchAcceptedNoPush` フラグ
+経由）。これを怠ると `noPushRounds` の閾値（2）が `fixCount` の上限（6）より先に到達し、
+latch 解除ラウンドが 2 回連続しただけで `blocked` に落ちて予算を無駄にする（レビュー時に
+判明した停止性の副作用）。受理されなかった場合は通常どおり `noPushRounds` を進める。
+
+**適用範囲**: この自動解除は「latch（`lastFixOptin` 由来の override が実際に働いた場合）」
+限定であり、前段落の「base 取り込みで HEAD が進んだだけの PR 本文陳腐化」（override が働かず
+gate 自身が PR 本文のみを理由に不合格）には適用されない（その場合は従来どおり次回実行の
+monitoring 再開に委ねる）。
 
 **宣言コマンドの許可形式を厳格化する理由（A03）と、承認一覧（`args.optinTestCommands`）を
 唯一の実行許可根拠にした理由（PR #503 codex P0）**: 宣言はイシュー本文（非信頼データ）由来
