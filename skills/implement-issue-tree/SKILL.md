@@ -90,6 +90,23 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 
 観測ベースの検出は直近 3 件の merged PR しか見ないため、新規導入 App・条件付き起動 App・直近 3 件で実行されなかった App を取りこぼす。「検出なし」が不在の証明にならないのはもちろん、**「検出あり」も集合としての完全性を保証しない**（例: 観測で `sonarcloud` だけを拾い、実際には必須の `cursor` を取りこぼしたまま「確定済み」として cursor[bot] レビューの再検証を省いてしまう）。したがって観測結果は確定情報として扱わず、参考値としてログ・停止理由・返却値に残すだけにする。`externalChecks` が配列でない・slug / context の形式不正（context は 1〜255 文字で、制御文字（改行・タブ等）と前後空白のみ不可。GitHub の context には文字種契約がないため文字種は制限せず、matrix 由来の `build [ubuntu]` や日本語を含む context もそのまま宣言できる — シェル / jq への埋め込み安全性は単一引用符リテラル + `jq --arg` の値渡しで保証する）・11 件以上の場合は既定値へフォールバックせずエラーで停止する（`parallel` は性能ノブのため不正値を既定 3 へ落とすが、`externalChecks` はマージゲートの入力であり、誤記を黙って「未指定」や「なし確定」に読み替えるとゲートが静かに弱まるため）。
 
+### opt-in テストの宣言（任意・既定無効・Issue #495）
+
+`#[ignore]` 付きテストや `make e2e-*` のように既定の CI・テストでは走らないテストを受入条件に含むイシューでは、イシュー本文に HTML コメントで宣言することで、マージ前ゲートに「PR 本文へ pass の実行記録があること」を追加できる。宣言が無いイシューでは本節の分岐に一切入らない（プロンプト・判定・PR 本文のいずれも現行と一致する。既定無効）。
+
+宣言の書式（1 マーカー 1 コマンド、最大 10 件）:
+
+```html
+<!-- optin-tests: make e2e-three-client -->
+<!-- optin-tests: cargo test -- --ignored -->
+```
+
+コマンドの先頭トークンは許可されたテストランナー（`make` / `just` / `cargo` / `npm` / `pnpm` / `yarn` / `bun` / `go` / `pytest` / `deno` / `mvn` / `gradle` / `dotnet` / `swift` / `mix`）に限り、シェルメタ文字（`; | & $ ` ` `）・改行・`..` を含む値は許可形式外として実装を起動せず `blocked` で停止する（fail-closed。イシュー本文由来のコマンドをそのまま実行エージェントへ渡す構造のため、ホスト側で厳格に検証する）。
+
+宣言があるイシューでは、Implement / 回復 Implement エージェントが各コマンドの実行と結果報告（`optinTestRuns`）を必須手順として行う。実行していないものを pass と報告することは禁止し、環境要因で実行できない場合は `not-run` と理由を返す。PR 本文には「## opt-in テスト実行記録」節と、コマンドごとの機械可読マーカー行（`<!-- optin-test-record: <コマンド> => <pass|fail|not-run> -->`）が追記される。
+
+マージ前（新規マージ経路のみ。`recoveryOnly` では適用しない）に、宣言コマンドごとに PR 本文の pass マーカー行が 1 件以上・pass 以外のマーカー行が 0 件であることを、読み取り専用の記録検証エージェントが件数のみで確認する（本文テキスト自体はコンテキスト・返却値に載せない。merge-exec と同じコンテキスト分離契約）。不足があればマージせず `blocked`（`blockedReason: quality`）で停止し、終端理由に不足コマンドを明記する。復旧手順は [references/recovery.md](references/recovery.md) を参照。
+
 ### 自動マージのサーバー側委譲と merge-guard hook（deny 専用・best-effort）
 
 **クライアント側の自動マージは `autoMerge: true` + `externalChecks` 確定（全 App の信頼済み context 宣言込み）の opt-in ランでのみ実行する**（次節「クライアント側自動マージの設計」参照。opt-out 既定では従来どおりマージしない。auto-merge の予約（arm）は引き続き提供しない）。merge-guard hook は deny 専用（承認境界ではなく、迂回可能な best-effort の攻撃面削減）。
@@ -113,6 +130,8 @@ opt-in ランのクライアント側マージは、PR #182 / PR #222 codex P0�
 ### Step 1: ツリーを取得して依存グラフ付き実行キューを構築する（Tree）
 
 gh CLI の sub-issues API で親イシュー配下の全ツリーを再帰取得し、post-order DFS で実行キューを構築する。各 open イシューは本文を読んで機能的依存（`dependsOn`）を抽出する。
+
+各 open イシューの本文からは opt-in テスト宣言マーカー（`<!-- optin-tests: ... -->`）も機械抽出し、ホスト側で許可形式かを再検証する（前掲「opt-in テストの宣言」節参照。宣言が無ければ後続処理は現行と変わらない）。
 
 ツリー取得に続いて、直前 3 件の merged PR の check-runs から GitHub Actions 以外の外部チェック App（例: Cursor Bugbot）を観測する。**観測結果は参考値であり構成の確定情報ではない**。構成の確定は `args.externalChecks` の明示入力で行い、明示がない限り「確定不能」として後続の Merge ステップで自動マージを停止する（Issue #147）。
 
@@ -198,6 +217,7 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
    - 対象リポジトリに `.claude/rules/code-comment-style.md`（`init-claude` が配備）が存在する場合はそちらの詳細規約に従う。存在しない場合は上記の要点に従う
 
 4. 対象リポジトリの CLAUDE.md・rules・テスト実行規約に従いビルド・lint・テストを通す。テストが失敗した場合は根本原因を調査してから修正する（対象リポジトリに `.claude/rules/debugging.md` が存在する場合はその4フェーズを順に踏む。存在しない場合も同じ方針〔調査→分析→仮説→修正〕を踏む。同一箇所で3回失敗したらアーキテクチャ問題と判断し、該当イシューを `blocked` として記録してユーザーに状況を報告する）
+4b. **opt-in テスト宣言がある場合のみ**: 宣言コマンドごとに実行前確認（対象リポジトリで定義されたテスト入口か）→ 単一コマンドとして実行（`sh -c` / `eval` 禁止）→ 結果（`pass` / `fail` / `not-run`）を報告する。実行していないものを `pass` と報告してはならない（前掲「opt-in テストの宣言」節参照）
 5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む
 6. 実装が完了したら `create-commit` スキルに従い Conventional Commits で**実装コミットを 1 つ**作成する。
    コミット前に対象リポの commitlint 設定（`commitlint.config.*` / `.commitlintrc*` / `package.json` の
@@ -276,6 +296,8 @@ EOF
 )"
 ```
 
+opt-in テスト宣言がある場合、body には Closes 行に続けて「## opt-in テスト実行記録」節（コマンドごとの機械可読マーカー行を含む）も追記する（前掲「opt-in テストの宣言」節参照。宣言が無ければ本節は出力されない）。
+
 **既存 open PR の再利用（Issue #135）:** push 成功後・`gh pr create` の前に、このブランチに対する open PR が既に存在しないかを `gh pr list --state open --head <branch> --json number,baseRefName,headRefOid` で必ず確認する。中断再開（PR 作成直後のクラッシュ・`pr` 保存済み `failed` からの再実行）では open PR が残っていることがあり、確認せずに `gh pr create` すると必ず失敗して、生きている PR が追跡されないまま残るため。
 
 再利用の条件は 2 つあり、**両方を満たす場合にのみ**その番号を `prNumber` として返す。
@@ -290,6 +312,8 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 ### Step 6: CI / 外部チェック監視・レビューコメント解決確認・squash merge する（Merge）
 
 `gh pr checks --watch` で CI を監視し、以下の全条件を満たした場合のみ squash merge する。
+
+**opt-in テスト記録ゲート（Issue #495）**: イシューで opt-in テストが宣言されている場合、新規マージ経路（`recoveryOnly` ではない）に限り merge-exec 呼び出しの直前で読み取り専用の記録検証エージェントを起動し、宣言コマンドごとの PR 本文 pass マーカー行の件数を確認する（本文は一時ファイル経由で件数のみへ正規化し、merge-exec 同様に本文テキストを実行主体のコンテキストへ入れない）。不足があれば merge-exec を起動せず `blocked`（`blockedReason: quality`）で停止する。詳細は前掲「opt-in テストの宣言」節・[references/automerge-design.md](references/automerge-design.md) を参照。
 
 **クライアント側の自動マージは opt-in ランでのみ実行する（references/automerge-design.md の「クライアント側自動マージの設計」節参照）:** `autoMerge: true` + `externalChecks` 確定（全 App の信頼済み context 宣言込み）のランでは、monitor の `ready` 判定後に merge-exec が HEAD sha を自己取得・固定したうえで全条件（checks・未解決スレッド数・外部チェック起動・G0 = ベースブランチのサーバー側強制の実測: required checks の bypass 不能性（ruleset の `bypass_actors` 空。classic branch protection のみのリポジトリは非対応として `classic-unsupported` で辞退）・レビュースレッド解消の必須化・合格判定対象チェック context の required 化（client-only チェックの不在）・外部チェック App の宣言 context + App ID 組束縛の required 化・required checks 全エントリの発行元 integration_id 束縛（同名 commit status 偽装の遮断 — `issuer-unbound` で辞退））を独立再検証し、`gh pr merge --squash --delete-branch --match-head-commit <自己取得 sha>` で squash merge を実行、さらに merge-verify の独立確認（`state=MERGED` + merge-exec 申告 sha との完全一致）を通過した場合のみ `merged` 終端する。monitor の出力（`ready` / `headSha`）はマージ経路の入力に使われない（`ready` は起動タイミングのみ。PR #222 codex P0 対応）。G0 を確認できないリポジトリでは `server-enforcement-missing`（classic branch protection のみのリポジトリは `classic-unsupported`）で `blocked` 終端する（fail-closed。ruleset ベースの branch protection を構成して再実行すれば継続する）。opt-out（既定 `false`）・`externalChecks` 未確定・信頼済み context 未宣言（slug のみの旧形式）のランでは従来どおり新規マージを実行せず、PR をマージ可能状態のまま `blocked`（`blockedReason: quality`）+ `pr` 保持で終端する。opt-out 時は monitor が `ready`（虚偽含む）を返しても merge-exec は `gh pr merge` を含まない回復専用経路に固定される（既存 Issue #168 機構。recoveryOnly。opt-in 判定はホストの決定的コード = args パースのみ。モデル出力・未信頼テキストに依存しない）。マージ済み PR のクローズ回復（already-merged 経路）は両モードで通る。この経路は「前回ランでマージ済みだが状態記録に失敗した PR」に加えて、**サーバー側 auto-merge workflow（upstream の `docs/implement-issue-tree/auto-merge-sample.yml`）が監視中に PR をマージした場合**も同様にカバーし、いずれも正常完了（merged）として終端する。`blocked` + `pr` は次回ランの monitoring 再開対象で、マージは **GitHub 上で人間が行う**か、サーバー側 auto-merge workflow + branch protection に委ねる（references/automerge-design.md の「自動マージのサーバー側委譲と merge-guard hook」節参照）。
 
@@ -562,6 +586,7 @@ open のサブイシューが残っている場合、または受入基準が未
 | P0/P1 相当・セキュリティ指摘を対象外扱いにする | fix エージェントは単独で対象外と判定して記録のみで済ませてはならない。修正するか、ユーザーまたは指摘者の承認を得るまで `blocked` として扱う（安全側ガード） |
 | 全チェックが pass に見えるので CI 起因を除外し、PR の差分を疑って調査を続ける | 同名 check-run の重複件数を実測する（Step 6 の該当分岐）。cancel された run の残存 check が BLOCKED の原因になり得る |
 | (A) の出力を検証せず `0` を「重複なし」と読む | 取得失敗・空出力・形式不一致は `UNDETERMINED`。CI 由来を除外せず `blocked`（quality）に倒す |
+| opt-in テスト記録不足で `blocked` になったまま再実行を繰り返す | [references/recovery.md](references/recovery.md) の手順（手元で実行 → PR 本文の該当マーカー行を pass へ更新 → 同じ args で再実行）に従う |
 | 重複の bad を cancelled / failure / timed_out のみに限定し、pending・action_required・startup_failure・stale を「正常な重複」に含める | `success`・`neutral`・`skipped`（required status checks 上は合格・非ブロック扱い）以外は正常扱いしない。pending（未完了）は別枠の `pend` で検知し、それ自体が BLOCKED の原因になり得るため rerun 対象探索へ進まず待機する |
 | `neutral`・`skipped` を bad（通常の CI 失敗）として rerun 対象探索へ進める | `neutral`・`skipped` は GitHub の required status checks 判定で合格扱いになる conclusion であり fail-closed 対象ではない。`success`・`neutral`・`skipped` の重複は正常な再実行として扱い、BLOCKED の別原因を疑う |
 | 差分と無関係なテスト失敗を確認せず flaky と決めつけて rerun する | main での同ジョブ green と差分スコープの 2 点を実測してから rerun する（下記「一斉同期・大量 PR 投入時の運用ガード」参照） |

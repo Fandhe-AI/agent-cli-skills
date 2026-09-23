@@ -306,3 +306,32 @@ node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
 
 期待結果: 手順 1 の出力が `1`（dispatch ループ内での即時確定が復活すると 2 以上、または cascade 側が壊れると 0 になる）。手順 2 がヒットする。手順 3 が 500,000 B 未満。手順 4 の `node --test` が全 pass・fail 0（受入条件 3「前提 merged への遷移 → 下流の再判定」を含む）。
 
+
+## opt-in テスト記録ゲートの適用確認（Issue #495）
+
+`scripts/implement-issue-tree.src.js` の opt-in テスト記録ゲート（`parseOptinTestDeclarations` /
+`sanitizeOptinTestRuns` / `renderOptinRecordSection` / `classifyOptinRecordGate` /
+`optinRecordVerifyPrompt`）を変更した場合の確認手順。
+
+```bash
+# 1. merge-exec のコンテキスト分離契約（Issue #145 / #160）が退行していないこと。
+#    mergeExecutePrompt は本文取得コマンドを含まない（0 件であること）。
+grep -c 'optin' skills/implement-issue-tree/scripts/implement-issue-tree.src.js
+grep -n 'function mergeExecutePrompt' skills/implement-issue-tree/scripts/implement-issue-tree.src.js
+
+# 2. マージ前ゲートが新規マージ経路（!recoveryOnly）にのみ配線されていること。
+grep -n 'optinRecordVerifyPrompt(' skills/implement-issue-tree/scripts/implement-issue-tree.src.js
+
+# 3. ビルド鮮度・サイズ
+node skills/implement-issue-tree/scripts/build-workflow.mjs
+node skills/implement-issue-tree/scripts/build-workflow.mjs --check
+wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
+
+# 4. 回帰テスト
+node --test skills/implement-issue-tree/tests/optin-tests-gate.test.mjs
+```
+
+期待結果: 手順 1 の `mergeExecutePrompt` 定義範囲に `optin` 文字列・`--json body` が含まれないこと
+（コンテキスト分離の非退行）。手順 2 の `optinRecordVerifyPrompt(` 呼び出しがドライバ部に 1 箇所のみ。
+手順 3 のビルドが `--check` 通過・500,000 B 未満。手順 4 が全 pass・fail 0（宣言なしイシューでの
+プロンプト出力完全一致テストを含む＝既定無効の確認）。
