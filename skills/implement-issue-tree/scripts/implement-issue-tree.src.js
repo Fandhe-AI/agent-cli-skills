@@ -4725,8 +4725,11 @@ async function runImplement(item) {
           terminalSaved: blockedSaved,
           prNumber: impl.prNumber,
         })
-        // results の status は状態ファイルへ実際に書けた内容と一致させる（blockedSaved が false
-        // かつ outputMissing も false の場合のみ 'failed' に落ちる）。
+        // results の status は outputMissing が false の場合のみ状態ファイルへ実際に書けた内容
+        // （blockedSaved）と一致する。outputMissing が true の場合は blockedSaved の成否に
+        // 関わらず 'blocked' を報告する（classifyStateWriteFailureStatus の仕様。Issue #493）——
+        // 'blocked' 保存自体が失敗していても、次回実行時は monitoring 再開ではなく通常の
+        // dispatch へフォールバックするため、この不一致自体が重複 PR や消失には直結しない。
         recordFailure({
           issue: item.number,
           pr: impl.prNumber,
