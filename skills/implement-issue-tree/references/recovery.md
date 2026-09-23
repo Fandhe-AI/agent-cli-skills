@@ -58,7 +58,7 @@ StructuredOutput 未返却は `blocked`（halt 非カウント）に分類し、
 
 ### state 書込みエージェント自身の StructuredOutput 未返却（Issue #493）
 
-#465 の fail-safe は Merge ループ内のエージェント（monitor / merge-exec / merge-verify /
+Issue #465 の fail-safe は Merge ループ内のエージェント（monitor / merge-exec / merge-verify /
 base-merge / fix）の未返却だけを対象にしており、**状態ファイル書込みを担う state 系エージェント
 自身**（`state:update` / `state:cleanup` / `state:init-all` / `state:high-water` / `state:load`。
 いずれも既定 haiku）の未返却は救えない。下流の複数ランでこのエージェントが StructuredOutput を
@@ -76,10 +76,16 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
 に一元化）:
 
 - state 書込みエージェントが haiku / sonnet とも StructuredOutput を返さなかった
-  （`outputMissing: true`）→ **`blocked`**（halt 非カウント）。push 前の遷移（reviewing 遷移・
-  Recover の掃除ゲート）は状態ファイルへ書けなかった可能性があるため、次回実行時は状態ファイル
-  の既存値（`implementing` 等）から Recover 経由で再開する。PR 作成後の monitoring 遷移は
-  PR が実在するため、次回実行時に monitoring 再開で継続する。
+  （`outputMissing: true`）かつ PR 未作成（`prNumber` が 0 以下）→ **`blocked`**（halt 非
+  カウント）。push 前の遷移（reviewing 遷移・Recover の掃除ゲート）は状態ファイルへ書けなかった
+  可能性があるが、PR がまだ存在しないため再実装しても重複 PR の危険はなく、次回実行時は状態
+  ファイルの既存値（`implementing` 等）から Recover 経由で再開する。
+- `outputMissing: true` かつ PR が既に存在する（`prNumber > 0`。PR 作成後の monitoring 遷移）
+  場合は、この `blocked` 遷移自体の状態ファイルへの永続化（`terminalSaved`）が確認できたときに
+  限り **`blocked`** とする。永続化できていなければ **`failed`**（halt カウント対象）に倒す
+  （Issue #493 の codex レビュー指摘で是正）。永続化されないまま `blocked` として扱うと、状態
+  ファイルに `pr` が残らず次回実行が monitoring を再開できず、通常 dispatch から再実装・PR 再
+  作成に進み得るため。
 - 状態書込みエージェントが応答した上でのシステム的な失敗（`ok: false`。jq 失敗・権限不足等）は
   従来どおり **`failed`**（halt カウント対象）を維持する。フォールバックで隠さない。
 

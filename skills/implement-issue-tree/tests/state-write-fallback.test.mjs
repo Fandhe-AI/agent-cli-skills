@@ -241,10 +241,17 @@ test('(j) 並列呼び出しでも state:cleanup / state:update の呼び出し�
 // 層 2: 純粋関数の入出力表
 // ---------------------------------------------------------------------------
 
-test('classifyStateWriteFailureStatus: outputMissing:true は prNumber の有無によらず blocked', () => {
+test('classifyStateWriteFailureStatus: outputMissing:true, pr:0 は terminalSaved によらず blocked（PR 未作成のため重複 PR リスクなし）', () => {
   assert.equal(classifyStateWriteFailureStatus({ outputMissing: true, terminalSaved: false, prNumber: 0 }), 'blocked')
-  assert.equal(classifyStateWriteFailureStatus({ outputMissing: true, terminalSaved: false, prNumber: 42 }), 'blocked')
+  assert.equal(classifyStateWriteFailureStatus({ outputMissing: true, terminalSaved: true, prNumber: 0 }), 'blocked')
+})
+
+test('classifyStateWriteFailureStatus: outputMissing:true, pr>0, terminalSaved:true は blocked（この blocked 遷移自体は永続化済み）', () => {
   assert.equal(classifyStateWriteFailureStatus({ outputMissing: true, terminalSaved: true, prNumber: 42 }), 'blocked')
+})
+
+test('classifyStateWriteFailureStatus: outputMissing:true, pr>0, terminalSaved:false は failed（Issue #493 codex 指摘。永続化未確認のまま blocked にすると次回 monitoring を再開できず重複実装・重複 PR に繋がり得る）', () => {
+  assert.equal(classifyStateWriteFailureStatus({ outputMissing: true, terminalSaved: false, prNumber: 42 }), 'failed')
 })
 
 test('classifyStateWriteFailureStatus: outputMissing:false, pr>0, terminalSaved:true は blocked（monitoring 遷移の既存契約）', () => {

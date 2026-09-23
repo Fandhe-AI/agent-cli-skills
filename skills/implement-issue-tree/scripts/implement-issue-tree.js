@@ -931,9 +931,17 @@ function classifyVerifyCloseStatus(v) {
 
 
 
+
+
+
+
+
+
+
 function classifyStateWriteFailureStatus({ outputMissing, terminalSaved, prNumber }) {
-  if (outputMissing === true) return 'blocked'
-  if (Number.isInteger(prNumber) && prNumber > 0 && terminalSaved === true) return 'blocked'
+  const hasPr = Number.isInteger(prNumber) && prNumber > 0
+  if (outputMissing === true) return hasPr && terminalSaved !== true ? 'failed' : 'blocked'
+  if (hasPr && terminalSaved === true) return 'blocked'
   return 'failed'
 }
 
@@ -1560,6 +1568,25 @@ async function runStateAgent(prompt, { label, schema, isValid }) {
 
 
 
+
+function isValidStateLoadResult(r) {
+  return (
+    typeof r?.ok === 'boolean' &&
+    typeof r?.fileExisted === 'boolean' &&
+    r?.items !== null &&
+    typeof r?.items === 'object' &&
+    !Array.isArray(r.items) &&
+    Number.isInteger(r?.highWaterBytes) &&
+    r.highWaterBytes >= 0 &&
+    Number.isInteger(r?.highWaterVersion) &&
+    r.highWaterVersion >= 0
+  )
+}
+
+
+
+
+
 async function loadState() {
 
 
@@ -1588,7 +1615,7 @@ async function loadState() {
         ` highWaterBytes（整数。バイト単位。フィールド欠落は 0）,` +
         ` highWaterVersion（整数。フィールド欠落は 0）。`,
     ].join('\n'),
-    { label: 'state:load', schema: STATE_LOAD_SCHEMA, isValid: (r) => typeof r?.ok === 'boolean' },
+    { label: 'state:load', schema: STATE_LOAD_SCHEMA, isValid: isValidStateLoadResult },
   )
 
 
@@ -1998,8 +2025,13 @@ async function persistPerWorktreeByteReserveHighWater(bytes) {
 async function setPerWorktreeByteReserveHighWater(bytes) {
   if (!Number.isInteger(bytes) || bytes < 0) return { ok: false }
   return enqueueStateWrite(async () => {
+
+
+
+
+
     try {
-      const result = await agent(
+      const { result, outputMissing } = await runStateAgent(
         [
           `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater・` +
             `perWorktreeByteReserveHighWaterVersion の更新のみ。.items には一切触れない）。`,
@@ -2016,10 +2048,15 @@ async function setPerWorktreeByteReserveHighWater(bytes) {
           `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
             `変更しない。`,
         ].join('\n'),
-        { label: 'state:high-water-set', phase: 'State', model: 'haiku', effort: 'low', schema: STATE_WRITE_SCHEMA },
+        { label: 'state:high-water-set', schema: STATE_WRITE_SCHEMA, isValid: (r) => typeof r?.ok === 'boolean' },
       )
       const ok = result?.ok === true
-      if (!ok) {
+      if (outputMissing) {
+        log(
+          `⚠️ perWorktreeByteReserveHighWater の書き換え（${Math.round(bytes / (1024 * 1024))} MiB へ）タスクで` +
+            `haiku / sonnet いずれも StructuredOutput を返さなかった（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
+        )
+      } else if (!ok) {
         log(
           `⚠️ perWorktreeByteReserveHighWater の書き換え（${Math.round(bytes / (1024 * 1024))} MiB へ）に` +
             `失敗した（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
@@ -4538,8 +4575,15 @@ async function runImplement(item) {
             `Implement を起動せず残骸を保全して ${continueCleanupStatus} にする。旧 worktree と branch を手動確認し、対処後に再実行すること`,
           )
           log(`⚠️ #${item.number}: Recover → continue を保全へ格下げ（${reason}）`)
+
+
+
+
+
+
           await updateState(item.number, {
             status: continueCleanupStatus,
+            pr: 0,
             branch: effectiveBranch,
             worktree: sanitizedRecoverWorktree,
             note: reason,
@@ -4671,7 +4715,11 @@ async function runImplement(item) {
             `branch ${effectiveBranch} と旧 worktree を手動確認し、対処後に再実行すること`,
           )
           log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
-          await updateState(item.number, { status: discardCleanupStatus, note: reason })
+
+
+
+
+          await updateState(item.number, { status: discardCleanupStatus, pr: 0, note: reason })
           recordFailure({ issue: item.number, reason, status: discardCleanupStatus })
           return false
         }
@@ -4986,7 +5034,6 @@ async function runImplement(item) {
           `（${monitoringAttempt.outputMissing ? 'state 書込みエージェントが StructuredOutput を返さなかった' : 'エージェント応答上のシステム的失敗'}）。` +
           `重複 PR 防止のためマージ監視へ進まず停止する（${STATE_FILE} と PR #${impl.prNumber} を手動確認すること）`
         log(`⚠️ issue #${item.number}: ${reason}`)
-
 
 
 

@@ -931,9 +931,17 @@ function classifyVerifyCloseStatus(v) {
 // 連続カウントに算入すると正常進捗まで停止トリガーへ誤算入する。
 // terminalSaved は「blocked として state ファイルへの保存自体は成功した」ことを表し、
 // 旧来の monitoring 遷移判定（PR 実在 + 終端保存済み→blocked）をこの関数へ一元化する。
+//
+// outputMissing かつ PR が既に存在する（prNumber > 0）場合は、この 'blocked' 遷移自体の
+// 永続化（terminalSaved）を確認できなければ 'failed'（halt 対象）に倒す（Issue #493
+// codex 指摘）。永続化に失敗すると state ファイルに pr が残らず、次回実行は monitoring
+// 再開ではなく通常 dispatch から再実装・PR 再作成に進み得るため、blocked（非 halt）で
+// 静かに見逃さない。PR がまだ存在しない場合（prNumber <= 0）は再実装しても重複 PR の
+// 危険がないため、従来どおり outputMissing だけで 'blocked' に倒してよい。
 function classifyStateWriteFailureStatus({ outputMissing, terminalSaved, prNumber }) {
-  if (outputMissing === true) return 'blocked'
-  if (Number.isInteger(prNumber) && prNumber > 0 && terminalSaved === true) return 'blocked'
+  const hasPr = Number.isInteger(prNumber) && prNumber > 0
+  if (outputMissing === true) return hasPr && terminalSaved !== true ? 'failed' : 'blocked'
+  if (hasPr && terminalSaved === true) return 'blocked'
   return 'failed'
 }
 
@@ -1556,6 +1564,25 @@ async function runStateAgent(prompt, { label, schema, isValid }) {
   return { result: null, outputMissing: true, attempts }
 }
 
+// state:load の isValid（Issue #493 codex 指摘）。`ok` が boolean であること単独では
+// STATE_LOAD_SCHEMA の必須フィールド（fileExisted / items / highWaterBytes / highWaterVersion）
+// 欠落を検出できず、`{ ok: true }` のようなスキーマ不適合応答を成功として受理してしまう。
+// 受理すると loadState の `items: result?.items ?? {}` が既存の全 item を未記録扱いにし、
+// 重複実装・重複 PR 作成につながるため、必須フィールドの型を全て検証してから受理する。
+function isValidStateLoadResult(r) {
+  return (
+    typeof r?.ok === 'boolean' &&
+    typeof r?.fileExisted === 'boolean' &&
+    r?.items !== null &&
+    typeof r?.items === 'object' &&
+    !Array.isArray(r.items) &&
+    Number.isInteger(r?.highWaterBytes) &&
+    r.highWaterBytes >= 0 &&
+    Number.isInteger(r?.highWaterVersion) &&
+    r.highWaterVersion >= 0
+  )
+}
+
 // --- 状態ファイル操作ヘルパー ---
 
 // 状態ファイルを読み込む（存在しなければ初期 JSON を作成して返す）
@@ -1588,7 +1615,7 @@ async function loadState() {
         ` highWaterBytes（整数。バイト単位。フィールド欠落は 0）,` +
         ` highWaterVersion（整数。フィールド欠落は 0）。`,
     ].join('\n'),
-    { label: 'state:load', schema: STATE_LOAD_SCHEMA, isValid: (r) => typeof r?.ok === 'boolean' },
+    { label: 'state:load', schema: STATE_LOAD_SCHEMA, isValid: isValidStateLoadResult },
   )
   // 読み込み・初期化のいずれが失敗しても停止する
   // （壊れた・未永続化の状態で続行すると重複 PR・重複実装が発生する危険がある）。
@@ -1998,8 +2025,13 @@ async function persistPerWorktreeByteReserveHighWater(bytes) {
 async function setPerWorktreeByteReserveHighWater(bytes) {
   if (!Number.isInteger(bytes) || bytes < 0) return { ok: false }
   return enqueueStateWrite(async () => {
+    // runStateAgent は例外を投げない契約のため、この関数の try/catch は runStateAgent 呼び出し
+    // 自体より前後の同期コード（テンプレート文字列構築等）の想定外の例外を拾う保険。他の state
+    // 書込み系（persistPerWorktreeByteReserveHighWater 等）と同じく model 直書きの agent()
+    // 呼び出しにしない（Issue #493。haiku が StructuredOutput を一度も返さず終了しても
+    // sonnet へフォールバックせず即座に失敗扱いになっていた）。
     try {
-      const result = await agent(
+      const { result, outputMissing } = await runStateAgent(
         [
           `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater・` +
             `perWorktreeByteReserveHighWaterVersion の更新のみ。.items には一切触れない）。`,
@@ -2016,10 +2048,15 @@ async function setPerWorktreeByteReserveHighWater(bytes) {
           `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
             `変更しない。`,
         ].join('\n'),
-        { label: 'state:high-water-set', phase: 'State', model: 'haiku', effort: 'low', schema: STATE_WRITE_SCHEMA },
+        { label: 'state:high-water-set', schema: STATE_WRITE_SCHEMA, isValid: (r) => typeof r?.ok === 'boolean' },
       )
       const ok = result?.ok === true
-      if (!ok) {
+      if (outputMissing) {
+        log(
+          `⚠️ perWorktreeByteReserveHighWater の書き換え（${Math.round(bytes / (1024 * 1024))} MiB へ）タスクで` +
+            `haiku / sonnet いずれも StructuredOutput を返さなかった（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
+        )
+      } else if (!ok) {
         log(
           `⚠️ perWorktreeByteReserveHighWater の書き換え（${Math.round(bytes / (1024 * 1024))} MiB へ）に` +
             `失敗した（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
@@ -4538,8 +4575,15 @@ async function runImplement(item) {
             `Implement を起動せず残骸を保全して ${continueCleanupStatus} にする。旧 worktree と branch を手動確認し、対処後に再実行すること`,
           )
           log(`⚠️ #${item.number}: Recover → continue を保全へ格下げ（${reason}）`)
+          // pr: 0 を明示する（Bugbot High 指摘）。この経路は Recover が旧 PR を破棄して
+          // Implement からやり直す前提（成功時も impl.prNumber を 0 にリセットする）ため、
+          // patch に pr を含めないと状態ファイルに残る以前の（unrecoverable merge 等で
+          // 'failed' だった時点の）実在 PR 番号がそのまま残存し、次回実行の isActiveMonitoring
+          // （status: 'blocked' かつ pr > 0 かつ branch 妥当）が誤って true 判定し、本来
+          // Recover へ回るべき item が monitoring 再開してしまう。
           await updateState(item.number, {
             status: continueCleanupStatus,
+            pr: 0,
             branch: effectiveBranch,
             worktree: sanitizedRecoverWorktree,
             note: reason,
@@ -4671,7 +4715,11 @@ async function runImplement(item) {
             `branch ${effectiveBranch} と旧 worktree を手動確認し、対処後に再実行すること`,
           )
           log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
-          await updateState(item.number, { status: discardCleanupStatus, note: reason })
+          // pr: 0 を明示する（Bugbot High 指摘。continue 経路と同じ理由）。discard は
+          // 旧 PR/branch を破棄して通常 Plan からやり直す前提のため、patch に pr を含めないと
+          // 状態ファイルに残る以前の実在 PR 番号がそのまま残り、isActiveMonitoring が誤って
+          // true 判定して monitoring 再開してしまう。
+          await updateState(item.number, { status: discardCleanupStatus, pr: 0, note: reason })
           recordFailure({ issue: item.number, reason, status: discardCleanupStatus })
           return false
         }
@@ -4987,9 +5035,8 @@ async function runImplement(item) {
           `重複 PR 防止のためマージ監視へ進まず停止する（${STATE_FILE} と PR #${impl.prNumber} を手動確認すること）`
         log(`⚠️ issue #${item.number}: ${reason}`)
         // best-effort で終端状態と回復メタデータの保存を試みる（classifyStateWriteFailureStatus
-        // に一元化）。outputMissing（未応答）なら、この 'blocked' 保存の成否を問わず常に
-        // 'blocked' にする（Issue #493。halt 連続カウントへの誤算入回避）。outputMissing でない
-        // 場合（応答はしたが保存失敗）のみ、保存できれば 'blocked'、失敗すれば 'failed' に落とす。
+        // に一元化。outputMissing でも PR 実在時はこの 'blocked' 保存の成否＝terminalSaved で
+        // 'blocked'/'failed' を分ける。Issue #493 codex 指摘）。
         const blockedSaved = await updateState(item.number, {
           status: 'blocked',
           pr: impl.prNumber,
@@ -5006,11 +5053,11 @@ async function runImplement(item) {
           terminalSaved: blockedSaved,
           prNumber: impl.prNumber,
         })
-        // results の status は outputMissing が false の場合のみ状態ファイルへ実際に書けた内容
-        // （blockedSaved）と一致する。outputMissing が true の場合は blockedSaved の成否に
-        // 関わらず 'blocked' を報告する（classifyStateWriteFailureStatus の仕様。Issue #493）——
-        // 'blocked' 保存自体が失敗していても、次回実行時は monitoring 再開ではなく通常の
-        // dispatch へフォールバックするため、この不一致自体が重複 PR や消失には直結しない。
+        // results の status は blockedSaved（'blocked' 保存の成否）と一致する
+        // （classifyStateWriteFailureStatus の仕様。Issue #493 codex 指摘で是正）。
+        // PR が既に存在するこの経路では、'blocked' 保存自体が失敗すると次回実行時に
+        // monitoring を再開できず通常 dispatch から再実装・PR 再作成に進み得るため、
+        // halt 対象の 'failed' として静かに見逃さない。
         recordFailure({
           issue: item.number,
           pr: impl.prNumber,
