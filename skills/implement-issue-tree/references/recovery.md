@@ -56,6 +56,49 @@ StructuredOutput 未返却は `blocked`（halt 非カウント）に分類し、
 素のまま再実行する（重複作用は起きない）。エージェントが応答した上で `closed: false` と判定した
 場合（「まだ子イシューが残っている」等の実際の判定）は従来どおり `failed`。
 
+### state 書込みエージェント自身の StructuredOutput 未返却（Issue #493）
+
+Issue #465 の fail-safe は Merge ループ内のエージェント（monitor / merge-exec / merge-verify /
+base-merge / fix）の未返却だけを対象にしており、**状態ファイル書込みを担う state 系エージェント
+自身**（`state:update` / `state:cleanup` / `state:init-all` / `state:high-water` / `state:load`。
+いずれも既定 haiku）の未返却は救えない。下流の複数ランでこのエージェントが StructuredOutput を
+一度も返さず終了する例が常態化し、実装済み・PR 作成済みの item まで catch-all の `failed`
+（halt カウント対象）に落ちていた。
+
+state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。haiku が例外・`null`・schema 不適合
+（StructuredOutput 未返却相当）で終わった場合、**同一プロンプト文字列（バイト一致・patch を
+組み直さない）で 1 回だけ sonnet へフォールバックする**。haiku・sonnet とも失敗した場合のみ
+`outputMissing: true` として呼び出し元へ返す（例外は投げない）。フォールバックのリトライが
+安全な理由は、state 系操作がいずれも冪等（patch の再マージは同値になる・worktree/branch 削除は
+実在確認してから行う・高水位は縮めない・初期化は既存エントリを上書きしない）であるため。
+
+`outputMissing` は次のように終端 status へ写像する（純粋関数 `classifyStateWriteFailureStatus`
+に一元化）:
+
+- state 書込みエージェントが haiku / sonnet とも StructuredOutput を返さなかった
+  （`outputMissing: true`）かつ PR 未作成（`prNumber` が 0 以下）→ **`blocked`**（halt 非
+  カウント）。push 前の遷移（reviewing 遷移・Recover の掃除ゲート）は状態ファイルへ書けなかった
+  可能性があるが、PR がまだ存在しないため再実装しても重複 PR の危険はなく、次回実行時は状態
+  ファイルの既存値（`implementing` 等）から Recover 経由で再開する。
+- `outputMissing: true` かつ PR が既に存在する（`prNumber > 0`。PR 作成後の monitoring 遷移）
+  場合は、この `blocked` 遷移自体の状態ファイルへの永続化（`terminalSaved`）が確認できたときに
+  限り **`blocked`** とする。永続化できていなければ **`failed`**（halt カウント対象）に倒す
+  （Issue #493 の codex レビュー指摘で是正）。永続化されないまま `blocked` として扱うと、状態
+  ファイルに `pr` が残らず次回実行が monitoring を再開できず、通常 dispatch から再実装・PR 再
+  作成に進み得るため。
+- 状態書込みエージェントが応答した上でのシステム的な失敗（`ok: false`。jq 失敗・権限不足等）は
+  従来どおり **`failed`**（halt カウント対象）を維持する。フォールバックで隠さない。
+
+`runOne` の catch-all（想定外の例外）も同様の理由で見直した。PR 作成成功直後・monitoring 再開時
+に issue 番号→PR 番号を記録する `knownPrByIssue` を参照し、PR が既に存在する場合は想定外の例外を
+`blocked`（次回 monitoring 再開）に倒し、PR 未作成の想定外例外は従来どおり `failed` を維持する
+（純粋関数 `classifyUncaughtFailureStatus`）。
+
+`state:load`（Restore フェーズの状態ファイル読込・初期化）が haiku / sonnet とも未返却の場合は
+停止する（fail-closed は維持。壊れた・未永続化の状態で続行すると重複 PR・重複実装の危険がある）。
+ただし文言は「初期化に失敗した」という誤ったメッセージにはせず、未返却専用の案内（ファイル自体の
+破損ではないため、そのまま再実行すればよい旨）にする。
+
 `blockedReason` は状態ファイルへ永続化されるフィールドではない（既存の契約のまま）。
 `isActiveMonitoring()` は `status`（`'monitoring'` または `'blocked'`）と `pr > 0` と `branch`
 の妥当性のみで再開判定しており、`blockedReason` を読まない。同一ラン内のメモリ上変数として

@@ -593,7 +593,7 @@ open のサブイシューが残っている場合、または受入基準が未
 |------------|-------|--------|------|
 | `plan:issue-tree`（Tree 取得・依存抽出） | sonnet | medium | 本文読解・依存判断 |
 | `detect:external-checks`（外部チェック判定） | haiku | low | 定型コマンド集計 |
-| `state:load` / `state:update` / `state:init-all` | haiku | low | jq の機械処理 |
+| `state:load` / `state:update` / `state:cleanup` / `state:init-all` / `state:high-water` | haiku（未返却時 sonnet へ 1 回フォールバック） | low | jq の機械処理。StructuredOutput 未返却（例外・null・schema 不適合）が続く場合のみ同一プロンプトで sonnet へ 1 回フォールバックする（Issue #493。詳細は `references/recovery.md`） |
 | `nonce:seed`（境界トークン用 seed 生成） | haiku | low | `/dev/urandom` 読み出しのみ（driver に乱数源が無いため。下記「非信頼データの扱い」2 を参照） |
 | `recover:#N`（中断作業の継続可否判断） | （指定なし＝セッション継承） | medium | 計画判断相当（Plan と同じ軸で判断） |
 | `plan:#N`（per-issue 計画立案） | （指定なし＝セッション継承） | high | 最も複雑な計画立案 |

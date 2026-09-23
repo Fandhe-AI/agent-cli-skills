@@ -342,3 +342,32 @@ node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
 
 期待結果: 手順 1 の出力が `1`（dispatch ループ内での即時確定が復活すると 2 以上、または cascade 側が壊れると 0 になる）。手順 2 がヒットする。手順 3 が 500,000 B 未満。手順 4 の `node --test` が全 pass・fail 0（受入条件 3「前提 merged への遷移 → 下流の再判定」を含む）。
 
+### state 書込みエージェントの StructuredOutput 未返却 fail-safe（Issue #493）
+
+`runStateAgent` / `updateStateDetailed` / `updateState` / `initAllPending` /
+`persistPerWorktreeByteReserveHighWater` / `loadState`、または `classifyStateWriteFailureStatus` /
+`classifyUncaughtFailureStatus` を変更した場合、state 系 5 ラベル（`state:update` /
+`state:cleanup` / `state:init-all` / `state:high-water` / `state:load`）が `runStateAgent` 経由の
+ままであること・呼び出し元の終端分類が新設純粋関数に一元化されたままであることを確認する。
+
+```bash
+# 1. state 系 5 ラベルはすべて runStateAgent(...) の呼び出しであり、agent(...) の直接呼び出しの
+#    options に現れていないこと（決定的な機械検証は本節 4 の state-write-fallback.test.mjs
+#    「STATE_AGENT_MODEL_CHAIN 以外に state:* 直書きが無い」テストが担う。以下は目視補助）
+grep -n "label:\s*'state:\(update\|cleanup\|init-all\|high-water\|load\)" skills/implement-issue-tree/scripts/implement-issue-tree.js
+grep -n "label: \`state:\(update\|cleanup\):#" skills/implement-issue-tree/scripts/implement-issue-tree.js
+
+# 2. runOne の catch-all・reviewing/monitoring 遷移・Recover の掃除ゲートが新設分類関数を参照
+grep -n "classifyStateWriteFailureStatus\|classifyUncaughtFailureStatus\|knownPrByIssue" skills/implement-issue-tree/scripts/implement-issue-tree.js
+
+# 3. サイズ確認（Workflow 起動可否の実測は Issue #277 節を参照）
+wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
+
+# 4. 決定的回帰テスト（層1: スタブ agent の振る舞い / 層2: 純粋関数の入出力表 / 層3: 配線の source-scan）
+node --test skills/implement-issue-tree/tests/state-write-fallback.test.mjs
+# 非退行確認（Issue #465 の Merge ループ fail-safe 契約に影響していないこと）
+node --test skills/implement-issue-tree/tests/pr-saved-failsafe.test.mjs
+```
+
+期待結果: 手順 1 の各コマンドが該当箇所にヒットする（`runStateAgent(...)` の呼び出しに渡す label であることは手順 4 の source-scan テストが機械検証する）。手順 2 が `runOne` の catch ブロック・`continueReviewingAttempt` / `reviewingAttempt` / `monitoringAttempt` / `continueCleanupAttempt` / `discardCleanupAttempt` の各箇所にヒットする。手順 3 が 500,000 B 未満。手順 4 の 2 つの `node --test` がいずれも全 pass・fail 0。
+

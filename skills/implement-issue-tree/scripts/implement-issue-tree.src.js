@@ -5,7 +5,7 @@ export const meta = {
   phases: [
     { title: 'Restore', detail: '状態ファイルの読み込み・再開情報の復元', model: 'haiku' },
     { title: 'Tree', detail: 'イシューツリー取得・機能的依存の抽出・並列実行順の決定・外部チェック構成の確定', model: 'sonnet' },
-    { title: 'State', detail: '状態ファイル更新（進捗・worktree パスの記録）', model: 'haiku' },
+    { title: 'State', detail: '状態ファイル更新（進捗・worktree パスの記録）。state:update / state:cleanup / state:init-all / state:high-water / state:load は StructuredOutput 未返却時に sonnet へ 1 回フォールバックする（Issue #493）', model: 'haiku' },
     // Recover は Plan の直前。中断 worktree が残る場合のみ起動（per-issue 分岐）。
     // 判断軸は Review の正しさではなく「この途中作業から継続するのが妥当か」。
     { title: 'Recover', detail: '中断作業の回復判断（継続/破棄）' },
@@ -940,6 +940,64 @@ function classifyVerifyCloseStatus(v) {
   return v == null ? 'blocked' : 'failed'
 }
 
+// state 書込みエージェント自身が haiku / sonnet いずれも StructuredOutput を返さなかった
+// 場合（outputMissing）、または monitoring 遷移で PR 実在かつ終端が保存済みの場合に、
+// halt カウント対象の 'failed' ではなく次回 monitoring 再開対象の 'blocked' へ倒す純粋関数
+// （Issue #493）。outputMissing はエージェントが一度も応答できなかったケースであり、
+// 実装・push・PR 作成の進捗は state 書込みの成否と無関係に既に存在し得るため、halt の
+// 連続カウントに算入すると正常進捗まで停止トリガーへ誤算入する。
+// terminalSaved は「blocked として state ファイルへの保存自体は成功した」ことを表し、
+// 旧来の monitoring 遷移判定（PR 実在 + 終端保存済み→blocked）をこの関数へ一元化する。
+//
+// outputMissing かつ PR が既に存在する（prNumber > 0）場合は、この 'blocked' 遷移自体の
+// 永続化（terminalSaved）を確認できなければ 'failed'（halt 対象）に倒す（Issue #493
+// codex 指摘）。永続化に失敗すると state ファイルに pr が残らず、次回実行は monitoring
+// 再開ではなく通常 dispatch から再実装・PR 再作成に進み得るため、blocked（非 halt）で
+// 静かに見逃さない。PR がまだ存在しない場合（prNumber <= 0）は再実装しても重複 PR の
+// 危険がないため、従来どおり outputMissing だけで 'blocked' に倒してよい。
+//
+// sawSystemicFailure（Issue #493 PR #500 codex 指摘）: 重要遷移は updateStateDetailed を
+// 最大2回呼ぶ（1 回目失敗時に 1 回だけリトライ）。呼び出し元は最後の試行の outputMissing しか
+// ここへ渡せないため、1 回目が「応答した上での明示的な失敗」（ok:false かつ outputMissing:false。
+// jq 失敗・権限不足等）で 2 回目が StructuredOutput 未返却（outputMissing:true）だった場合、
+// 1 回目の事実が失われて 'blocked' に誤分類され halt カウントを回避してしまう
+// （recovery.md の契約「応答した上でのシステム的な失敗は従来どおり failed、フォールバックで
+// 隠さない」に反する）。呼び出し元は全試行のうち一度でも ok:false かつ outputMissing:false が
+// あれば true を渡す。true が渡された場合は最後の試行が outputMissing:true であっても
+// 'blocked' への降格対象にしない（outputMissing 由来の分岐を無効化し、下の 'failed' 既定へ
+// 落とす）。terminalSaved 由来の 'blocked'（この関数の 2 段目）は sawSystemicFailure と無関係の
+// 独立した安全弁のため、そのまま維持する。
+function classifyStateWriteFailureStatus({ outputMissing, terminalSaved, prNumber, sawSystemicFailure }) {
+  const hasPr = Number.isInteger(prNumber) && prNumber > 0
+  const treatAsOutputMissing = outputMissing === true && sawSystemicFailure !== true
+  if (treatAsOutputMissing) return hasPr && terminalSaved !== true ? 'failed' : 'blocked'
+  if (hasPr && terminalSaved === true) return 'blocked'
+  return 'failed'
+}
+
+// classifyStateWriteFailureStatus の sawSystemicFailure 引数を、updateStateDetailed の
+// 全試行（最大2回）から算出する（コメントは同関数の説明を参照）。
+function sawSystemicStateWriteFailure(...attempts) {
+  return attempts.some((a) => a?.ok === false && a?.outputMissing !== true)
+}
+
+// runOne の catch-all（想定外の例外）用の終端 status 判定（Issue #493）。PR 作成済み
+// （knownPr が正の整数）なら、次回実行時の monitoring 再開で継続できるため 'blocked' へ倒し
+// 重複 PR 作成を避ける（#465 の base-merge/fix 例外分岐と同じ理由）。PR 未作成（pr: 0 相当）
+// の想定外例外は systemic な障害の可能性が高く、halt 防御を弱めないため従来どおり 'failed'。
+//
+// ただし 'blocked' への降格は、その 'blocked' 状態自体を state ファイルへ実際に永続化できた
+// （terminalSaved）場合に限る。呼び出し元は knownPr > 0 のときだけ 'blocked' patch の保存を
+// 試み、その成否をここへ渡す。保存自体が失敗すると state ファイルに pr が残らないまま
+// 'blocked' として扱われ、次回実行が monitoring を再開できず通常 dispatch から再実装・
+// 重複 PR 作成に進み得るため、永続化を確認できない限り 'failed'（halt カウント対象）へ倒して
+// 静かに見逃さない（classifyStateWriteFailureStatus と同じ契約。Issue #493 codex 指摘）。
+function classifyUncaughtFailureStatus({ knownPr, terminalSaved }) {
+  const hasPr = Number.isInteger(knownPr) && knownPr > 0
+  if (!hasPr) return 'failed'
+  return terminalSaved === true ? 'blocked' : 'failed'
+}
+
 // dispatch ループと終端 cascade（セクション 8）の両方が呼ぶ単一の判定 choke point（Issue #442）。
 // 二箇所で条件式を独立に書くと片方だけ更新され得るため一元化する。
 //   'ready'       — 全依存が done（着手可能）
@@ -1508,12 +1566,85 @@ function enqueueStateWrite(fn) {
   return next
 }
 
+// --- state 書込みエージェントの fail-safe（Issue #493）---
+// 下流の複数ランで、state 系ラベル（state:update / state:cleanup / state:init-all /
+// state:high-water / state:load）を担う haiku エージェントが StructuredOutput を一度も返さず
+// 終了する（例外・null 返却のいずれも）ケースが常態化していた。#465 の fail-safe は Merge
+// ループ内のエージェント（monitor / merge-exec / base-merge / fix）の未返却だけを対象にしており、
+// state 書込みエージェント自身の未返却は救えず、実装済み・PR 作成済みの item まで catch-all の
+// 'failed'（halt カウント対象）へ落ちていた。
+//
+// STATE_AGENT_MODEL_CHAIN: state 系呼び出しの主モデルは haiku のまま維持する（呼び出し回数が
+// 全エージェント中で最多のため、主モデルを sonnet へ切り替えるとコスト影響が大きい）。
+// StructuredOutput 未返却時にのみ、同一プロンプトで 1 段階 sonnet へフォールバックする。
+const STATE_AGENT_MODEL_CHAIN = ['haiku', 'sonnet']
+
+// state 系プロンプト末尾に付す返却指示。haiku が StructuredOutput ツール呼び出しの代わりに
+// XML 風タグ・地の文で結果を書いてしまう（Issue #493 の根本原因候補）挙動を減らす補助策。
+// フォールバック機構の代替ではなく、フォールバック発生率を下げるための追加策。
+const STATE_RETURN_DIRECTIVE =
+  '返却は必ず StructuredOutput ツールの呼び出しで行う。XML 風タグ・コードブロック・地の文で結果を書かない。'
+
+// state 系エージェント呼び出しの共通境界（Issue #493）。呼び出し元（updateStateDetailed の
+// merge/cleanup 段・initAllPending・persistPerWorktreeByteReserveHighWater・loadState）は
+// いずれも「エージェントが応答した上での失敗」（isValid が false を返す構造化出力。例: ok:false）
+// と「StructuredOutput を一度も返せなかった失敗」（例外・null・schema 不適合）を区別する必要が
+// ある。後者だけがモデルフォールバック対象であり、前者はフォールバックしない
+// （jq 失敗等のシステム的失敗をフォールバックで隠さないため）。
+//
+// 契約: 例外を投げない。STATE_AGENT_MODEL_CHAIN の全モデルで isValid を満たせなければ
+// { result: null, outputMissing: true } を返す。プロンプト文字列は全試行で同一（バイト一致）に
+// し、patch を組み直さない（呼び出し側の冪等性の前提。同一手順の再適用は安全という設計に依拠する）。
+async function runStateAgent(prompt, { label, schema, isValid }) {
+  const promptWithDirective = `${prompt}\n${STATE_RETURN_DIRECTIVE}`
+  let attempts = 0
+  for (const model of STATE_AGENT_MODEL_CHAIN) {
+    attempts++
+    const isPrimary = model === STATE_AGENT_MODEL_CHAIN[0]
+    const attemptLabel = isPrimary ? label : `${label}:fallback-${model}`
+    let result = null
+    try {
+      result = await agent(promptWithDirective, { label: attemptLabel, phase: 'State', model, effort: 'low', schema })
+    } catch (e) {
+      log(`⚠️ ${attemptLabel}: state 書込みエージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
+      result = null
+    }
+    if (isValid(result)) return { result, outputMissing: false, attempts }
+    const isLast = model === STATE_AGENT_MODEL_CHAIN[STATE_AGENT_MODEL_CHAIN.length - 1]
+    if (!isLast) {
+      log(`⚠️ ${attemptLabel}: StructuredOutput 未返却相当（例外・null・schema 不適合）。次のモデルへフォールバックする`)
+    }
+  }
+  return { result: null, outputMissing: true, attempts }
+}
+
+// state:load の isValid（Issue #493 codex 指摘）。`ok` が boolean であること単独では
+// STATE_LOAD_SCHEMA の必須フィールド（fileExisted / items / highWaterBytes / highWaterVersion）
+// 欠落を検出できず、`{ ok: true }` のようなスキーマ不適合応答を成功として受理してしまう。
+// 受理すると loadState の `items: result?.items ?? {}` が既存の全 item を未記録扱いにし、
+// 重複実装・重複 PR 作成につながるため、必須フィールドの型を全て検証してから受理する。
+function isValidStateLoadResult(r) {
+  return (
+    typeof r?.ok === 'boolean' &&
+    typeof r?.fileExisted === 'boolean' &&
+    r?.items !== null &&
+    typeof r?.items === 'object' &&
+    !Array.isArray(r.items) &&
+    Number.isInteger(r?.highWaterBytes) &&
+    r.highWaterBytes >= 0 &&
+    Number.isInteger(r?.highWaterVersion) &&
+    r.highWaterVersion >= 0
+  )
+}
+
 // --- 状態ファイル操作ヘルパー ---
 
 // 状態ファイルを読み込む（存在しなければ初期 JSON を作成して返す）
 // monitor / close エージェント（isolation なし）はメインリポの cwd で動くため _/ に直接アクセスできる
 async function loadState() {
-  const result = await agent(
+  // 読込・初期化は副作用が「存在しなければ作る」のみで、既存ファイルへは書き込まない冪等操作
+  // のため、フォールバックのリトライで状態を壊す心配はない（Issue #493 2.3 節）。
+  const { result, outputMissing } = await runStateAgent(
     [
       `状態ファイル読み込みタスク。`,
       TEMP_FILE_POLICY,
@@ -1539,10 +1670,19 @@ async function loadState() {
         ` highWaterBytes（整数。バイト単位。フィールド欠落は 0）,` +
         ` highWaterVersion（整数。フィールド欠落は 0）。`,
     ].join('\n'),
-    { label: 'state:load', phase: 'Restore', model: 'haiku', effort: 'low', schema: STATE_LOAD_SCHEMA },
+    { label: 'state:load', schema: STATE_LOAD_SCHEMA, isValid: isValidStateLoadResult },
   )
   // 読み込み・初期化のいずれが失敗しても停止する
-  // （壊れた・未永続化の状態で続行すると重複 PR・重複実装が発生する危険がある）
+  // （壊れた・未永続化の状態で続行すると重複 PR・重複実装が発生する危険がある）。
+  // outputMissing（haiku / sonnet とも StructuredOutput 未返却）は「初期化に失敗した」という
+  // 誤った文言を避け、専用の再実行案内にする（Issue #493。result?.fileExisted は常に
+  // undefined のためこの分岐を独立させないと誤って初期化失敗メッセージに落ちる）。
+  if (outputMissing) {
+    throw new Error(
+      `状態ファイル（${STATE_FILE}）読み込みエージェントが haiku / sonnet いずれも` +
+      `StructuredOutput を返さなかった。ファイル自体の破損ではないため、そのまま再実行すること。`,
+    )
+  }
   if (!result?.ok) {
     if (result?.fileExisted) {
       throw new Error(
@@ -1576,7 +1716,11 @@ async function loadState() {
 // JSON マージと worktree/branch 削除はコンテキスト分離（Issue #144）。options.cleanupWorktree:
 // string → そのパス / true → patch.worktree / falsy → なし。options.deleteBranch: true で
 // 削除後に git branch -D -- <branch>（Recover discard 限定）。
-async function updateState(issueNumber, patch, options = {}) {
+// updateState の詳細版（Issue #493）。呼び出し側が「state 書込みエージェント自身の
+// StructuredOutput 未返却」（outputMissing）を検知して halt 非カウントの 'blocked' へ倒せる
+// よう、単純な boolean だけでなく mergeOk / cleanupOk / outputMissing を個別に返す。
+// 既存呼び出し元（約 60 箇所）は下の updateState（boolean ラッパー）を使い続けられる。
+async function updateStateDetailed(issueNumber, patch, options = {}) {
   assertInt(issueNumber, 'updateState issueNumber')
   // patch は未信頼自由文を含む。固定フェンスは境界偽装できたため呼び出しごとの nonce で境界を
   // 作る（埋め込み前に nonce 文字列自体を patchJson から除去）。HEREDOC にはプレースホルダ
@@ -1723,42 +1867,68 @@ async function updateState(issueNumber, patch, options = {}) {
     : ''
 
   // 2 つのエージェント呼び出しを 1 つのキュー要素として直列実行する（外で分けると他イシューの
-  // 書き込みが間に割り込み read-modify-write が競合しうる）。
+  // 書き込みが間に割り込み read-modify-write が競合しうる）。全体を try/catch で包み、
+  // runStateAgent 経由以外の想定外の例外（例: agent() 呼び出し以外の同期例外）も
+  // { mergeOk:false, cleanupOk:false, outputMissing:true } へ合流させる（Issue #493 2.4）。
+  const isStateWriteValid = (r) => typeof r?.ok === 'boolean'
   const result = await enqueueStateWrite(async () => {
-    const mergeResult = await agent(mergePromptText, {
-      label: `state:update:#${issueNumber}`,
-      phase: 'State',
-      model: 'haiku',
-      effort: 'low',
-      schema: STATE_WRITE_SCHEMA,
-    })
-    const mergeOk = mergeResult?.ok === true
-    if (!mergeOk) log(`⚠️ 状態ファイル更新失敗（issue #${issueNumber}）: JSON マージエージェントが ok:false を返した`)
-    // 掃除は JSON マージの後（逆順だと patch が worktree を書き戻す）。マージ失敗時は掃除しない
-    // （回復情報未永続化のまま削除するとデータ損失に直結する）。branch 残骸は呼び出し側が
-    // 戻り値 false を検知して failed 終端で保全し、次回 Recover に委ねる。
-    let cleanupOk = true
-    if (cleanupPromptText && !mergeOk) {
-      cleanupOk = false
-      log(`⚠️ #${issueNumber}: 状態ファイル更新に失敗したため worktree / branch の掃除をスキップした（回復情報の保全を優先。worktree は最終スイープで回収されるが branch は残存し、discard 経路は本関数の戻り値 false の検知で failed 終端として保全する）`)
-    } else if (cleanupPromptText) {
-      const cleanupResult = await agent(cleanupPromptText, {
-        label: `state:cleanup:#${issueNumber}`,
-        phase: 'State',
-        model: 'haiku',
-        effort: 'low',
+    try {
+      const { result: mergeResult, outputMissing: mergeOutputMissing } = await runStateAgent(mergePromptText, {
+        label: `state:update:#${issueNumber}`,
         schema: STATE_WRITE_SCHEMA,
+        isValid: isStateWriteValid,
       })
-      cleanupOk = cleanupResult?.ok === true
-      if (!cleanupOk) log(`⚠️ worktree / branch 掃除失敗（issue #${issueNumber}）: 掃除エージェントが ok:false を返した`)
+      const mergeOk = mergeResult?.ok === true
+      if (mergeOutputMissing) {
+        log(`⚠️ 状態ファイル更新（issue #${issueNumber}）: JSON マージエージェントが haiku / sonnet いずれも StructuredOutput を返さなかった`)
+      } else if (!mergeOk) {
+        log(`⚠️ 状態ファイル更新失敗（issue #${issueNumber}）: JSON マージエージェントが ok:false を返した`)
+      }
+      // 掃除は JSON マージの後（逆順だと patch が worktree を書き戻す）。マージ失敗時は掃除しない
+      // （回復情報未永続化のまま削除するとデータ損失に直結する）。branch 残骸は呼び出し側が
+      // 戻り値 false を検知して終端で保全し、次回 Recover に委ねる。
+      let cleanupOk = true
+      let cleanupOutputMissing = false
+      if (cleanupPromptText && !mergeOk) {
+        cleanupOk = false
+        log(`⚠️ #${issueNumber}: 状態ファイル更新に失敗したため worktree / branch の掃除をスキップした（回復情報の保全を優先。worktree は最終スイープで回収されるが branch は残存し、discard 経路は本関数の戻り値 false の検知で終端として保全する）`)
+      } else if (cleanupPromptText) {
+        const { result: cleanupResult, outputMissing } = await runStateAgent(cleanupPromptText, {
+          label: `state:cleanup:#${issueNumber}`,
+          schema: STATE_WRITE_SCHEMA,
+          isValid: isStateWriteValid,
+        })
+        cleanupOutputMissing = outputMissing
+        cleanupOk = cleanupResult?.ok === true
+        if (outputMissing) {
+          log(`⚠️ worktree / branch 掃除（issue #${issueNumber}）: 掃除エージェントが haiku / sonnet いずれも StructuredOutput を返さなかった`)
+        } else if (!cleanupOk) {
+          log(`⚠️ worktree / branch 掃除失敗（issue #${issueNumber}）: 掃除エージェントが ok:false を返した`)
+        }
+      }
+      return { mergeOk, cleanupOk, outputMissing: mergeOutputMissing || cleanupOutputMissing }
+    } catch (e) {
+      log(`⚠️ #${issueNumber}: 状態ファイル更新キュー内で想定外の例外が発生した（${sanitize(String(e?.message ?? e))}）`)
+      return { mergeOk: false, cleanupOk: false, outputMissing: true }
     }
-    return { mergeOk, cleanupOk }
   })
   // 削除成功が確認できたパスのみ confirmedRemovedPaths へ登録する（バイト軸実測し直しの du
   // フィルタ専用。sweepEligiblePaths は流用しない）。空文字（削除対象なし）は登録不要。
   if (cleanupWorktreePath && result?.cleanupOk === true) confirmedRemovedPaths.add(cleanupWorktreePath)
   // AND 判定（分割前と同じ戻り値契約。どちらが失敗したかは上のログで判別できる）。
-  return result?.mergeOk === true && result?.cleanupOk === true
+  return {
+    ok: result?.mergeOk === true && result?.cleanupOk === true,
+    mergeOk: result?.mergeOk === true,
+    cleanupOk: result?.cleanupOk === true,
+    outputMissing: result?.outputMissing === true,
+  }
+}
+
+// updateStateDetailed の薄い boolean ラッパー。既存呼び出し元（約 60 箇所）の戻り値契約
+// （成功なら true）を変えずに維持する（Issue #493）。outputMissing の判定が必要な呼び出し元
+// （reviewing / monitoring 遷移・掃除ゲート）は updateStateDetailed を直接使う。
+async function updateState(issueNumber, patch, options = {}) {
+  return (await updateStateDetailed(issueNumber, patch, options)).ok
 }
 
 // rawPerWorktreeByteReserve の永続化済み高水位を更新すべきか・更新後の値を純粋に決定する
@@ -1853,8 +2023,10 @@ function decideRunStartHighWater({ persistedBytes, persistedVersion, freshEstima
 async function persistPerWorktreeByteReserveHighWater(bytes) {
   if (!Number.isInteger(bytes) || bytes <= 0) return { ok: false }
   return enqueueStateWrite(async () => {
+    // runStateAgent は例外を投げない契約のため、この関数の try/catch は runStateAgent 呼び出し
+    // 自体より前後の同期コード（テンプレート文字列構築等）の想定外の例外を拾う保険（Issue #493）。
     try {
-      const result = await agent(
+      const { result, outputMissing } = await runStateAgent(
         [
           `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater・` +
             `perWorktreeByteReserveHighWaterVersion の更新のみ。.items には一切触れない）。`,
@@ -1880,10 +2052,15 @@ async function persistPerWorktreeByteReserveHighWater(bytes) {
           `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
             `変更しない。`,
         ].join('\n'),
-        { label: 'state:high-water', phase: 'State', model: 'haiku', effort: 'low', schema: STATE_WRITE_SCHEMA },
+        { label: 'state:high-water', schema: STATE_WRITE_SCHEMA, isValid: (r) => typeof r?.ok === 'boolean' },
       )
       const ok = result?.ok === true
-      if (!ok) {
+      if (outputMissing) {
+        log(
+          `⚠️ perWorktreeByteReserveHighWater（${Math.round(bytes / (1024 * 1024))} MiB）の永続化タスクで` +
+            `haiku / sonnet いずれも StructuredOutput を返さなかった（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
+        )
+      } else if (!ok) {
         log(
           `⚠️ perWorktreeByteReserveHighWater（${Math.round(bytes / (1024 * 1024))} MiB）の永続化に` +
             `失敗した（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
@@ -1906,8 +2083,13 @@ async function persistPerWorktreeByteReserveHighWater(bytes) {
 async function setPerWorktreeByteReserveHighWater(bytes) {
   if (!Number.isInteger(bytes) || bytes < 0) return { ok: false }
   return enqueueStateWrite(async () => {
+    // runStateAgent は例外を投げない契約のため、この関数の try/catch は runStateAgent 呼び出し
+    // 自体より前後の同期コード（テンプレート文字列構築等）の想定外の例外を拾う保険。他の state
+    // 書込み系（persistPerWorktreeByteReserveHighWater 等）と同じく model 直書きの agent()
+    // 呼び出しにしない（Issue #493。haiku が StructuredOutput を一度も返さず終了しても
+    // sonnet へフォールバックせず即座に失敗扱いになっていた）。
     try {
-      const result = await agent(
+      const { result, outputMissing } = await runStateAgent(
         [
           `状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater・` +
             `perWorktreeByteReserveHighWaterVersion の更新のみ。.items には一切触れない）。`,
@@ -1924,10 +2106,15 @@ async function setPerWorktreeByteReserveHighWater(bytes) {
           `jq の終了コードで成否を判断し ok（boolean）を返す。.items を含む他のフィールドは一切` +
             `変更しない。`,
         ].join('\n'),
-        { label: 'state:high-water-set', phase: 'State', model: 'haiku', effort: 'low', schema: STATE_WRITE_SCHEMA },
+        { label: 'state:high-water-set', schema: STATE_WRITE_SCHEMA, isValid: (r) => typeof r?.ok === 'boolean' },
       )
       const ok = result?.ok === true
-      if (!ok) {
+      if (outputMissing) {
+        log(
+          `⚠️ perWorktreeByteReserveHighWater の書き換え（${Math.round(bytes / (1024 * 1024))} MiB へ）タスクで` +
+            `haiku / sonnet いずれも StructuredOutput を返さなかった（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
+        )
+      } else if (!ok) {
         log(
           `⚠️ perWorktreeByteReserveHighWater の書き換え（${Math.round(bytes / (1024 * 1024))} MiB へ）に` +
             `失敗した（次回ラン開始時の下限には反映されない。このランの見積りには影響しない）`,
@@ -2569,8 +2756,12 @@ async function initAllPending(queueItems) {
     type: item.kind === 'verify-close' ? 'verify-close' : 'implement',
   }))
   const initJson = JSON.stringify(initEntries)
-  const result = await enqueueStateWrite(() =>
-    agent(
+  // 呼び出し元（実行キュー確定直後の起動シーケンス、runOne の try/catch 外）は本関数の
+  // 呼び出しを try/catch していない。runStateAgent は例外を投げない契約のため、この呼び出しが
+  // 例外で reject してラン全体を落とすことはない（Issue #493。旧実装は agent() を直呼びして
+  // おり、StructuredOutput 未返却時の例外がここから伝播しラン全体をクラッシュさせていた）。
+  const { result, outputMissing } = await enqueueStateWrite(() =>
+    runStateAgent(
       [
         `状態ファイル一括初期化タスク。`,
         TEMP_FILE_POLICY,
@@ -2584,10 +2775,12 @@ async function initAllPending(queueItems) {
         `  jq --argjson entries '${initJson}' 'reduce $entries[] as $e (.; if .items[($e.number|tostring)] == null then .items[($e.number|tostring)] = {"type":$e.type,"status":"pending","pr":0,"branch":"","worktree":"","fixCount":0,"note":""} else . end) | .updatedAt = $ts' --arg ts "$(date -u +%FT%TZ)" ${STATE_FILE} > "$tmp" && mv "$tmp" ${STATE_FILE}`,
         `返却: ok: true（成功時）/ ok: false（失敗時）。`,
       ].join('\n'),
-      { label: 'state:init-all', phase: 'State', model: 'haiku', effort: 'low', schema: STATE_WRITE_SCHEMA },
+      { label: 'state:init-all', schema: STATE_WRITE_SCHEMA, isValid: (r) => typeof r?.ok === 'boolean' },
     ),
   )
-  if (result?.ok !== true) {
+  if (outputMissing) {
+    log(`⚠️ 状態ファイル一括初期化: エージェントが haiku / sonnet いずれも StructuredOutput を返さなかった（既存エントリは影響を受けない。以後の per-issue 初期化は各イシューの updateState が担う）`)
+  } else if (result?.ok !== true) {
     log(`⚠️ 状態ファイル一括初期化失敗: エージェントが ok:false を返した`)
   }
 }
@@ -4355,6 +4548,10 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
 
 const results = []
 const failures = []
+// runOne の catch-all（想定外の例外）が「PR 作成済みか」を判定するための issue→prNumber の
+// 記録（Issue #493）。PR 作成成功直後と monitoring 再開時に set し、値は host 側の数値のみで
+// 未信頼入力を含まない。classifyUncaughtFailureStatus が参照する。
+const knownPrByIssue = new Map()
 let consecutiveFailures = 0
 // consecutiveFailures が最後に 0 へリセットされた「世代」。外部完了回復時の failure 減算は同一
 // 世代のみに限る（Issue #442 codex/Bugbot: 世代を見ない一律デクリメントは別世代の failure で
@@ -4476,6 +4673,9 @@ async function runImplement(item) {
       summary: '（状態ファイルから再開）',
       worktreePath: sanitizeWorktreePath(saved.worktree ?? ''),
     }
+    // 想定外例外時の分類（classifyUncaughtFailureStatus）が参照する既知 PR を記録する
+    // （Issue #493）。monitoring 再開は PR 実在が前提のため、この時点で必ず記録できる。
+    if (Number.isInteger(impl.prNumber) && impl.prNumber > 0) knownPrByIssue.set(item.number, impl.prNumber)
     log(`#${item.number}: 状態ファイルから monitoring 再開（PR #${impl.prNumber}、fixCount: ${savedFixCount}）`)
     // monitor ループ突入前に status を monitoring へ更新（blocked のまま残るとレポート・
     // halt ガード・次回再開判定が実態と食い違う）。
@@ -4556,26 +4756,42 @@ async function runImplement(item) {
 
         // 掃除実施ゲート。false は掃除スキップか削除未完で、旧 worktree が branch を掴んだままだと
         // 多重 checkout 拒否で継続実装が失敗するため fail-closed で停止する。deleteBranch は渡さない。
-        const continueCleanupOk = await updateState(
+        const continueCleanupAttempt = await updateStateDetailed(
           item.number,
           { status: 'implementing', branch: effectiveBranch, worktree: '' },
           sanitizedRecoverWorktree ? { cleanupWorktree: sanitizedRecoverWorktree } : {},
         )
-        if (!continueCleanupOk) {
+        if (!continueCleanupAttempt.ok) {
+          // fail-closed（Implement へ進まず残骸を保全する）方針そのものは維持する。終端 status
+          // のみ classifyStateWriteFailureStatus で決め、state 書込みエージェント自身が
+          // StructuredOutput を返さなかった場合（outputMissing）は 'blocked' にする（Issue #493。
+          // push 前のため prNumber は 0 のまま渡す）。
+          const continueCleanupStatus = classifyStateWriteFailureStatus({
+            outputMissing: continueCleanupAttempt.outputMissing,
+            terminalSaved: false,
+            prNumber: 0,
+          })
           const reason = sanitize(
             `旧 worktree の掃除または implementing 遷移の永続化を完了確認できなかった` +
-            `（状態マージ失敗による掃除スキップ、または掃除エージェント失敗）。` +
+            `（${continueCleanupStatus === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。` +
             `旧 worktree が branch を掴んだままだと新 worktree が同 branch を checkout できないため、` +
-            `Implement を起動せず残骸を保全して failed にする。旧 worktree と branch を手動確認し、対処後に再実行すること`,
+            `Implement を起動せず残骸を保全して ${continueCleanupStatus} にする。旧 worktree と branch を手動確認し、対処後に再実行すること`,
           )
           log(`⚠️ #${item.number}: Recover → continue を保全へ格下げ（${reason}）`)
+          // pr: 0 を明示する（Bugbot High 指摘）。この経路は Recover が旧 PR を破棄して
+          // Implement からやり直す前提（成功時も impl.prNumber を 0 にリセットする）ため、
+          // patch に pr を含めないと状態ファイルに残る以前の（unrecoverable merge 等で
+          // 'failed' だった時点の）実在 PR 番号がそのまま残存し、次回実行の isActiveMonitoring
+          // （status: 'blocked' かつ pr > 0 かつ branch 妥当）が誤って true 判定し、本来
+          // Recover へ回るべき item が monitoring 再開してしまう。
           await updateState(item.number, {
-            status: 'failed',
+            status: continueCleanupStatus,
+            pr: 0,
             branch: effectiveBranch,
             worktree: sanitizedRecoverWorktree,
             note: reason,
           })
-          recordFailure({ issue: item.number, reason })
+          recordFailure({ issue: item.number, reason, status: continueCleanupStatus })
           return false
         }
 
@@ -4617,18 +4833,30 @@ async function runImplement(item) {
           worktree: impl.worktreePath,
           fixCount: 0,
         }
-        const continueReviewingOk =
-          (await updateState(item.number, continueReviewingPatch)) ||
-          (await updateState(item.number, continueReviewingPatch))
-        if (!continueReviewingOk) {
+        const continueReviewingAttempt1 = await updateStateDetailed(item.number, continueReviewingPatch)
+        const continueReviewingAttempt = continueReviewingAttempt1.ok
+          ? continueReviewingAttempt1
+          : await updateStateDetailed(item.number, continueReviewingPatch)
+        if (!continueReviewingAttempt.ok) {
+          // outputMissing（state 書込みエージェントが haiku / sonnet とも StructuredOutput を
+          // 返さなかった）なら 'blocked'（halt 非カウント。次回実行が手順 0b のブランチ再利用で
+          // 回復できる）。応答した上での失敗（jq 失敗等）は systemic な障害として従来どおり
+          // 'failed' を維持する（Issue #493。push 前のため prNumber は 0 のまま渡す）。
+          const continueReviewingTerminalStatus = classifyStateWriteFailureStatus({
+            outputMissing: continueReviewingAttempt.outputMissing,
+            terminalSaved: false,
+            prNumber: 0,
+            sawSystemicFailure: sawSystemicStateWriteFailure(continueReviewingAttempt1, continueReviewingAttempt),
+          })
           const reason =
             `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
-            `永続化できなかった。重複実装防止のため Review・push へ進まず停止する（${STATE_FILE} を手動確認すること）`
+            `永続化できなかった（${continueReviewingTerminalStatus === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : 'エージェント応答上のシステム的失敗'}）。` +
+            `重複実装防止のため Review・push へ進まず停止する（${STATE_FILE} を手動確認すること）`
           log(`⚠️ issue #${item.number}: ${reason}`)
-          // best-effort で failed 状態と回復メタデータの保存を試みる（一過性の失敗なら永続化でき、
+          // best-effort で終端状態と回復メタデータの保存を試みる（一過性の失敗なら永続化でき、
           // 次回実行が手順 0b のブランチ再利用で回復できる）。
           const failedSaved = await updateState(item.number, {
-            status: 'failed',
+            status: continueReviewingTerminalStatus,
             pr: 0,
             branch: impl.branch,
             worktree: impl.worktreePath,
@@ -4636,9 +4864,9 @@ async function runImplement(item) {
             note: reason,
           })
           if (!failedSaved) {
-            log(`⚠️ issue #${item.number}: failed 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
+            log(`⚠️ issue #${item.number}: ${continueReviewingTerminalStatus} 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
           }
-          recordFailure({ issue: item.number, reason })
+          recordFailure({ issue: item.number, reason, status: continueReviewingTerminalStatus })
           return false
         }
       } else if (recoverDecision === 'discard' && effectiveBranch) {
@@ -4666,7 +4894,7 @@ async function runImplement(item) {
 
         // discard: worktree 削除後に branch も削除。deleteBranch は patch.branch を対象にするため
         // 2 段階に分ける（1. branch 名を patch に持たせて削除 / 2. planning でクリーン状態に更新）。
-        const discardCleanupOk = await updateState(
+        const discardCleanupAttempt = await updateStateDetailed(
           item.number,
           { branch: effectiveBranch },
           {
@@ -4676,16 +4904,27 @@ async function runImplement(item) {
         )
         // 削除実施ゲート（Issue #162）。false では branch 削除の完了を確認できず、残存したまま
         // Plan へ進むと checkout -B のサイレントリセットで退避済み WIP commit が orphan 化する。
-        // fail-closed で Plan へ進まず、残骸を保全して failed 終端にする。
-        if (!discardCleanupOk) {
+        // fail-closed（Plan へ進まず残骸を保全）は維持する。終端 status のみ
+        // classifyStateWriteFailureStatus で決め、outputMissing なら 'blocked' にする（Issue #493）。
+        if (!discardCleanupAttempt.ok) {
+          const discardCleanupStatus = classifyStateWriteFailureStatus({
+            outputMissing: discardCleanupAttempt.outputMissing,
+            terminalSaved: false,
+            prNumber: 0,
+          })
           const reason = sanitize(
-            `discard の worktree / branch 掃除を完了確認できなかった（状態マージ失敗による掃除スキップ、または掃除エージェント失敗）。` +
-            `branch が残存したまま Plan へ進むと git checkout -B により退避済み WIP commit が orphan 化するため、残骸を保全して failed にする。` +
+            `discard の worktree / branch 掃除を完了確認できなかった` +
+            `（${discardCleanupStatus === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。` +
+            `branch が残存したまま Plan へ進むと git checkout -B により退避済み WIP commit が orphan 化するため、残骸を保全して ${discardCleanupStatus} にする。` +
             `branch ${effectiveBranch} と旧 worktree を手動確認し、対処後に再実行すること`,
           )
           log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
-          await updateState(item.number, { status: 'failed', note: reason })
-          recordFailure({ issue: item.number, reason })
+          // pr: 0 を明示する（Bugbot High 指摘。continue 経路と同じ理由）。discard は
+          // 旧 PR/branch を破棄して通常 Plan からやり直す前提のため、patch に pr を含めないと
+          // 状態ファイルに残る以前の実在 PR 番号がそのまま残り、isActiveMonitoring が誤って
+          // true 判定して monitoring 再開してしまう。
+          await updateState(item.number, { status: discardCleanupStatus, pr: 0, note: reason })
+          recordFailure({ issue: item.number, reason, status: discardCleanupStatus })
           return false
         }
         // planning 状態に戻してクリアする（branch: '' で状態を初期化）
@@ -4769,18 +5008,26 @@ async function runImplement(item) {
       }
       // 旧 worktree の削除は同じ呼び出しに載せない（Issue #143。updateState はマージと掃除の
       // AND を返すため削除だけの失敗で正常実装が failed に倒れる）。削除は書き込み成功後に非致命で行う。
-      const reviewingOk =
-        (await updateState(item.number, reviewingPatch)) ||
-        (await updateState(item.number, reviewingPatch))
-      if (!reviewingOk) {
+      const reviewingAttempt1 = await updateStateDetailed(item.number, reviewingPatch)
+      const reviewingAttempt = reviewingAttempt1.ok ? reviewingAttempt1 : await updateStateDetailed(item.number, reviewingPatch)
+      if (!reviewingAttempt.ok) {
+        // outputMissing なら 'blocked'（halt 非カウント）、応答上の失敗（jq 失敗等）は従来どおり
+        // 'failed' を維持する（Issue #493。push 前のため prNumber は 0 のまま渡す）。
+        const reviewingTerminalStatus = classifyStateWriteFailureStatus({
+          outputMissing: reviewingAttempt.outputMissing,
+          terminalSaved: false,
+          prNumber: 0,
+          sawSystemicFailure: sawSystemicStateWriteFailure(reviewingAttempt1, reviewingAttempt),
+        })
         const reason =
           `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
-          `永続化できなかった。重複実装防止のため Review・push へ進まず停止する（${STATE_FILE} を手動確認すること）`
+          `永続化できなかった（${reviewingTerminalStatus === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : 'エージェント応答上のシステム的失敗'}）。` +
+          `重複実装防止のため Review・push へ進まず停止する（${STATE_FILE} を手動確認すること）`
         log(`⚠️ issue #${item.number}: ${reason}`)
-        // best-effort で failed 状態と回復メタデータを保存する。cleanupWorktree は旧 worktree
+        // best-effort で終端状態と回復メタデータを保存する。cleanupWorktree は旧 worktree
         // のみ（実装 worktree を未永続化のまま削除すると回復手段を失う）。
         const failedSaved = await updateState(item.number, {
-          status: 'failed',
+          status: reviewingTerminalStatus,
           pr: 0,
           branch: impl.branch,
           worktree: impl.worktreePath,
@@ -4790,9 +5037,9 @@ async function runImplement(item) {
           ? { cleanupWorktree: fallbackOldWorktree, preserveWorktreeField: true }
           : {})
         if (!failedSaved) {
-          log(`⚠️ issue #${item.number}: failed 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
+          log(`⚠️ issue #${item.number}: ${reviewingTerminalStatus} 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
         }
-        recordFailure({ issue: item.number, reason })
+        recordFailure({ issue: item.number, reason, status: reviewingTerminalStatus })
         return false
       }
       // 永続化成功後に旧 worktree を非致命的に削除する。patch の実装 worktree 再表明は空 patch
@@ -4968,6 +5215,9 @@ async function runImplement(item) {
     }
     // impl オブジェクトを PR 作成後の prNumber で更新する（以降の Merge ループが参照する）
     impl = { ...impl, prNumber: prCreateResult.prNumber }
+    // 想定外例外時の分類（classifyUncaughtFailureStatus）が参照する既知 PR を記録する
+    // （Issue #493）。PR 作成成功直後のため、以降の想定外例外は重複 PR を避けて blocked へ倒す。
+    knownPrByIssue.set(item.number, impl.prNumber)
     log(`#${item.number}: push + PR 作成完了 — PR #${impl.prNumber}`)
     // Issue #479: push 直後の CI 起動確認（エージェント自己申告）。マージ判定には使わず、
     // 状態ファイルへの記録（人間が _/issue-trees/<n>.json で確認できる）と、CONFLICTING の
@@ -4981,16 +5231,18 @@ async function runImplement(item) {
       // pushChecksStarted / pushMergeable は Issue #479 の観測記録（診断用。再開時の判定には
       // 使わない — 再開後は monitor がサーバー側の実値を再観測する）。
       const monitoringPatch = { status: 'monitoring', pr: impl.prNumber, pushChecksStarted: prCreateChecksStarted, pushMergeable: prCreatePushMergeable }
-      const monitoringOk =
-        (await updateState(item.number, monitoringPatch)) ||
-        (await updateState(item.number, monitoringPatch))
-      if (!monitoringOk) {
+      const monitoringAttempt1 = await updateStateDetailed(item.number, monitoringPatch)
+      const monitoringAttempt = monitoringAttempt1.ok ? monitoringAttempt1 : await updateStateDetailed(item.number, monitoringPatch)
+      const monitoringSawSystemicFailure = sawSystemicStateWriteFailure(monitoringAttempt1, monitoringAttempt)
+      if (!monitoringAttempt.ok) {
         const reason =
-          `PR #${impl.prNumber} 作成後の monitoring 遷移（pr 記録）を状態ファイルへ永続化できなかった。` +
+          `PR #${impl.prNumber} 作成後の monitoring 遷移（pr 記録）を状態ファイルへ永続化できなかった` +
+          `（${monitoringAttempt.outputMissing ? 'state 書込みエージェントが StructuredOutput を返さなかった' : 'エージェント応答上のシステム的失敗'}）。` +
           `重複 PR 防止のためマージ監視へ進まず停止する（${STATE_FILE} と PR #${impl.prNumber} を手動確認すること）`
         log(`⚠️ issue #${item.number}: ${reason}`)
-        // best-effort で終端状態と回復メタデータの保存を試みる。status は 'blocked': PR は実在する
-        // ため監視再開が必要で、'failed' だと再開対象から外れて重複 PR を作りうる。
+        // best-effort で終端状態と回復メタデータの保存を試みる（classifyStateWriteFailureStatus
+        // に一元化。outputMissing でも PR 実在時はこの 'blocked' 保存の成否＝terminalSaved で
+        // 'blocked'/'failed' を分ける。Issue #493 codex 指摘）。
         const blockedSaved = await updateState(item.number, {
           status: 'blocked',
           pr: impl.prNumber,
@@ -5002,13 +5254,22 @@ async function runImplement(item) {
         if (!blockedSaved) {
           log(`⚠️ issue #${item.number}: blocked 状態（監視再開情報）の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
         }
-        // results の status は状態ファイルへ実際に書けた内容と一致させる。保存成功時は 'blocked'
-        // （halt 非カウント）、保存失敗は systemic な障害のため 'failed'（halt カウント対象）。
+        const monitoringTerminalStatus = classifyStateWriteFailureStatus({
+          outputMissing: monitoringAttempt.outputMissing,
+          terminalSaved: blockedSaved,
+          prNumber: impl.prNumber,
+          sawSystemicFailure: monitoringSawSystemicFailure,
+        })
+        // results の status は blockedSaved（'blocked' 保存の成否）と一致する
+        // （classifyStateWriteFailureStatus の仕様。Issue #493 codex 指摘で是正）。
+        // PR が既に存在するこの経路では、'blocked' 保存自体が失敗すると次回実行時に
+        // monitoring を再開できず通常 dispatch から再実装・PR 再作成に進み得るため、
+        // halt 対象の 'failed' として静かに見逃さない。
         recordFailure({
           issue: item.number,
           pr: impl.prNumber,
           reason,
-          ...(blockedSaved ? { status: 'blocked' } : {}),
+          status: monitoringTerminalStatus,
         })
         return false
       }
@@ -5947,8 +6208,37 @@ async function runOne(item) {
     return { number: item.number, ok }
   } catch (e) {
     const reason = sanitize(e?.message ?? 'agent error')
-    await updateState(item.number, { status: 'failed', note: reason })
-    recordFailure({ issue: item.number, reason })
+    // Issue #493: PR 作成済み（knownPrByIssue に記録済み）の想定外例外は、次回実行時の
+    // monitoring 再開で継続できるため 'blocked'（halt 非カウント）へ倒し、Recover→再実装による
+    // 重複 PR を避ける（#465 の base-merge/fix 例外分岐と同じ理由）。PR 未作成の想定外例外は
+    // systemic な障害の可能性が高く、従来どおり 'failed'（halt カウント対象）を維持する。
+    //
+    // 'blocked' へ倒す前に、その 'blocked' patch（pr を含む監視再開情報）自体が state
+    // ファイルへ永続化できたか（updateState の戻り値）を確認する。knownPrByIssue への記録は
+    // in-memory のみで state ファイルへの反映を保証しないため、ここで書き込みが失敗すると
+    // pr が state ファイルに残らないまま 'blocked' 扱いになり、次回実行が monitoring を
+    // 再開できず通常 dispatch から再実装・重複 PR 作成に進み得る（Issue #493 codex 指摘）。
+    const knownPr = knownPrByIssue.get(item.number)
+    const hasPr = Number.isInteger(knownPr) && knownPr > 0
+    let terminalSaved
+    if (hasPr) {
+      terminalSaved = await updateState(item.number, {
+        status: 'blocked',
+        note: reason,
+        pr: knownPr,
+      })
+      if (!terminalSaved) {
+        log(`⚠️ issue #${item.number}: catch-all の blocked 状態（PR #${knownPr} の監視再開情報）永続化に失敗した。重複 PR 防止のため failed（halt カウント対象）へ倒す（${STATE_FILE} を手動確認すること）`)
+      }
+    } else {
+      await updateState(item.number, { status: 'failed', note: reason })
+    }
+    const status = classifyUncaughtFailureStatus({ knownPr, terminalSaved })
+    recordFailure({
+      issue: item.number,
+      reason,
+      ...(status === 'blocked' ? { status, pr: knownPr } : {}),
+    })
     return { number: item.number, ok: false }
   }
 }
