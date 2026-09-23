@@ -33,10 +33,14 @@ const SLICE_EXPORTS = [
   'restoreOptinFixState',
   'renderOptinRecordSection',
   'optinRecordMarkerLine',
+  'optinRecordRewriteLines',
+  'optinRecordUpdateInstructions',
   'classifyOptinRecordGate',
   'combineOptinRecordGate',
   'isOptinLatchActive',
   'OPTIN_RECORD_MARKER_PREFIX',
+  'OPTIN_RECORD_HEADING',
+  'OPTIN_RECORD_HUMAN_PREFIX',
   'OPTIN_TESTS_MAX',
   'OPTIN_TEST_COMMANDS_MAX',
   'OPTIN_TEST_RUNNERS',
@@ -67,10 +71,14 @@ const {
   restoreOptinFixState,
   renderOptinRecordSection,
   optinRecordMarkerLine,
+  optinRecordRewriteLines,
+  optinRecordUpdateInstructions,
   classifyOptinRecordGate,
   combineOptinRecordGate,
   isOptinLatchActive,
   OPTIN_RECORD_MARKER_PREFIX,
+  OPTIN_RECORD_HEADING,
+  OPTIN_RECORD_HUMAN_PREFIX,
   OPTIN_TESTS_MAX,
   OPTIN_TEST_COMMANDS_MAX,
   implementPrompt,
@@ -163,6 +171,15 @@ test('parseOptinTestCommands: deno のリモート指定子（npm: / jsr: / http
 
 test('parseOptinTestCommands: 第 2 トークン制約に違反する npm install は起動時エラーで停止する', () => {
   assert.throws(() => parseOptinTestCommands(['npm install']), /許可形式ではない/)
+})
+
+test('parseOptinTestCommands: 絶対パス引数（トークン先頭・"=" 直後の "/"）は起動時エラーで停止する（Issue #502）', () => {
+  for (const bad of ['cargo test --target-dir /tmp/x', 'pytest --rootdir=/etc', 'make -C /etc', 'go test /abs/pkg']) {
+    assert.throws(() => parseOptinTestCommands([bad]), /許可形式ではない/, `should throw: ${JSON.stringify(bad)}`)
+  }
+  assert.deepEqual(parseOptinTestCommands(['go test ./...', 'cargo test -- --ignored', 'make e2e-x', 'pytest tests/e2e']), [
+    'go test ./...', 'cargo test -- --ignored', 'make e2e-x', 'pytest tests/e2e',
+  ])
 })
 
 test('parseOptinTestCommands: 重複コマンドは除去する', () => {
@@ -305,6 +322,25 @@ test('renderOptinRecordSection: <sha>/<result> プレースホルダ付きのマ
   const section = renderOptinRecordSection(['make e2e'])
   assert.match(section, /## opt-in テスト実行記録/)
   assert.match(section, new RegExp(`^${OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<sha> <result> make e2e -->$`, 'm'))
+})
+
+// Issue #502: 記録節は見出し・人間可読行・マーカー行の固定形式のみ。detail 等の任意テキストを
+// 書く欄（旧「- 補足:」行）が無いこと、各行が固定 3 形式のいずれかであることを確認する。
+function assertFixedFormRecordLines(lines, commands) {
+  for (const line of lines) {
+    const ok = line === OPTIN_RECORD_HEADING
+      || commands.some((c) => line === `${OPTIN_RECORD_HUMAN_PREFIX}${c} => <result>`)
+      || commands.some((c) => line === optinRecordMarkerLine('<sha>', '<result>', c))
+    assert.ok(ok, `固定形式以外の行が記録節テンプレートにある: ${JSON.stringify(line)}`)
+  }
+}
+
+test('renderOptinRecordSection: 固定形式の行のみで構成され、補足（任意テキスト）欄を持たない（Issue #502）', () => {
+  const commands = ['make e2e', 'cargo test -- --ignored']
+  const section = renderOptinRecordSection(commands)
+  assert.doesNotMatch(section, /補足|detail/)
+  assertFixedFormRecordLines(section.split('\n').filter((l) => l !== ''), commands)
+  assert.equal(section.split('\n').filter((l) => l === OPTIN_RECORD_HEADING).length, 1)
 })
 
 // ---------------------------------------------------------------------------
@@ -697,6 +733,94 @@ test('実行レベル: 新旧 2 つの sha の記録が併存しても現在の 
 })
 
 // ---------------------------------------------------------------------------
+// 群 F2: 記録節の書き直し（Issue #502）。optinRecordRewriteLines が出力する grep -vF 除去
+// コマンドと固定テンプレートの HEREDOC 追記をそのまま bash で実行し、2 回更新しても見出しが
+// 1 個・古い sha の行が 0 行・Closes 行が保持されることを確認する。
+// ---------------------------------------------------------------------------
+
+const SHA_C = 'c'.repeat(40)
+
+// プロンプト中の除去コマンドと HEREDOC（字下げなしで示される）をそのまま取り出し、エージェントが
+// 行うのと同じく <sha>/<result> を字面で置き換えてから実行する。rc が 0 以外なら mv せず 3 で
+// 終了する（プロンプトの fail-closed 指示と同じ分岐）。
+function applyRecordRewrite(bodyText, commands, sha, result) {
+  const lines = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
+  const grepLine = lines.find((l) => l.trim().startsWith('g=$(mktemp); grep -vF')).trim()
+  const hs = lines.indexOf(`cat >> "$f" <<'OPTIN_RECORD_EOF'`)
+  const he = lines.indexOf('OPTIN_RECORD_EOF', hs + 1)
+  assert.ok(hs >= 0 && he > hs, 'HEREDOC テンプレートが行頭インデントなしで見つからない')
+  const heredoc = lines.slice(hs, he + 1).join('\n')
+    .replaceAll('<sha>', sha).replaceAll('<result>', result)
+  const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
+  const bodyPath = join(dir, 'body.md')
+  writeFileSync(bodyPath, bodyText)
+  const script = `f="$1"\n${grepLine}\n[ "$rc" -eq 0 ] || exit 3\nmv "$g" "$f"\n${heredoc}\n`
+  execFileSync('bash', ['-c', script, 'bash', bodyPath])
+  return readFileSync(bodyPath, 'utf8')
+}
+
+test('記録節の書き直し: 2 回更新しても見出しは 1 個・古い sha の行は 0 行・Closes 行と他の本文は保持される（Issue #502）', () => {
+  const commands = ['make e2e', 'cargo test -- --ignored']
+  const initial = `## Summary\n- 実装内容の要約\n\nCloses #42${renderOptinRecordSection(commands).replaceAll('<sha>', SHA_A).replaceAll('<result>', 'pass')}\n`
+  const once = applyRecordRewrite(initial, commands, SHA_B, 'not-run')
+  const twice = applyRecordRewrite(once, commands, SHA_C, 'pass')
+  const lines = twice.split('\n')
+  assert.equal(lines.filter((l) => l === OPTIN_RECORD_HEADING).length, 1)
+  assert.equal(lines.filter((l) => l.includes(SHA_A) || l.includes(SHA_B)).length, 0)
+  assert.equal(lines.filter((l) => l.includes('not-run')).length, 0)
+  assert.equal(lines.filter((l) => l.startsWith(OPTIN_RECORD_HUMAN_PREFIX)).length, commands.length)
+  assert.equal(lines.filter((l) => l.startsWith(OPTIN_RECORD_MARKER_PREFIX)).length, commands.length)
+  assert.ok(lines.includes('Closes #42') && lines.includes('## Summary') && lines.includes('- 実装内容の要約'))
+  // マージ前ゲートの判定（grep -cxF）の意味は不変: 最新 sha の pass だけが数えられる。
+  for (const c of commands) {
+    assert.deepEqual(grepShaResultCounts(twice, SHA_C, c), { pass: 1, nonPass: 0 })
+    assert.deepEqual(grepShaResultCounts(twice, SHA_A, c), { pass: 0, nonPass: 0 })
+  }
+})
+
+test('記録節の書き直し: 字下げ・CRLF 付きの旧記録行も固定文字列の除去で残らない（Issue #502）', () => {
+  const commands = ['make e2e']
+  const initial = `Closes #42\r\n\r\n  ${OPTIN_RECORD_HEADING}\r\n  ${OPTIN_RECORD_HUMAN_PREFIX}make e2e => pass\r\n  ${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}\r\n`
+  const out = applyRecordRewrite(initial, commands, SHA_B, 'pass')
+  assert.equal(out.split('\n').filter((l) => l.includes(OPTIN_RECORD_HEADING)).length, 1)
+  assert.doesNotMatch(out, new RegExp(SHA_A))
+  assert.match(out, /Closes #42/)
+})
+
+test('記録節の書き直し: 除去後に残す行が無い（grep rc=1）場合は mv せず本文を空にしない（fail-closed。Issue #502）', () => {
+  const commands = ['make e2e']
+  const onlyRecord = `${OPTIN_RECORD_HEADING}\n${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}\n`
+  assert.throws(() => applyRecordRewrite(onlyRecord, commands, SHA_B, 'pass'), (e) => e.status === 3)
+  const text = optinRecordRewriteLines(commands, 'sha', 'result', 'fail').join('\n')
+  assert.match(text, /rc が 0 の場合のみ mv "\$g" "\$f" する/)
+  assert.match(text, /mv も gh pr edit も行わず/)
+})
+
+test('記録節の書き直し: テンプレートは固定形式の行のみで、補足（任意テキスト）・nonce・完全一致削除ゲート・printf/echo 埋め込みを含まない（Issue #502）', () => {
+  const commands = ['make e2e']
+  const rewrite = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
+  const hs = rewrite.findIndex((l) => l.trim() === `cat >> "$f" <<'OPTIN_RECORD_EOF'`)
+  const he = rewrite.findIndex((l, i) => i > hs && l.trim() === 'OPTIN_RECORD_EOF')
+  assertFixedFormRecordLines(rewrite.slice(hs + 1, he).map((l) => l.trim()), commands)
+  const update = optinRecordUpdateInstructions({ ...item, optinTests: commands }, impl, '4b').join('\n')
+  const pr = prCreatePrompt({ ...item, optinTests: commands }, impl, [])
+  for (const text of [rewrite.join('\n'), update]) {
+    assert.doesNotMatch(text, /nonce/i)
+    assert.doesNotMatch(text, /grep -c?xF/)
+    assert.doesNotMatch(text, /\bcmp\b|\bdiff\b/)
+    assert.doesNotMatch(text, /printf|echo /)
+    assert.doesNotMatch(text, /- 補足:/)
+    assert.match(text, /grep -vF -e '## opt-in テスト実行記録' -e '<!-- optin-test-record: ' -e '- opt-in テスト結果: '/)
+  }
+  // prCreatePrompt の再利用経路・fixPrompt 経路が同じ書き直し手順を共有する。
+  assert.ok(pr.includes(rewrite[0]) && update.includes(rewrite[0]))
+  assert.doesNotMatch(pr, /- 補足:|OPTIN_NONCE/)
+  // 本文は従来どおりファイル経由（取得 → 加工 → --body-file）。
+  assert.match(update, /gh pr view 123 --json body --jq '\.body \/\/ ""' > "\$f"/)
+  assert.match(update, /gh pr edit 123 --body-file "\$f"/)
+})
+
+// ---------------------------------------------------------------------------
 // 群 G: 駆動部配線（source-scan）
 // ---------------------------------------------------------------------------
 
@@ -733,6 +857,36 @@ test('駆動部: runImplement 冒頭で optinTestsInvalid を参照する', () =
   const implIdx = driverPart.indexOf('async function runImplement')
   const invalidIdx = driverPart.indexOf('optinTestsInvalid', implIdx)
   assert.ok(implIdx >= 0 && invalidIdx >= 0 && invalidIdx - implIdx < 800)
+})
+
+test('駆動部: runImplement の blocked 理由が実挙動（承認一覧との完全一致・ランナー別サブコマンド制限・".." と "//"・絶対パス）を明記する（Issue #502）', () => {
+  const implIdx = driverPart.indexOf('async function runImplement')
+  const section = driverPart.slice(implIdx, driverPart.indexOf('await updateState(item.number, { status: \'blocked\', note: reason })', implIdx))
+  assert.match(section, /承認一覧に無い宣言/)
+  assert.match(section, /invalid になる/)
+  assert.match(section, /ランナー別のサブコマンド制限/)
+  // サブコマンド制限は定数から生成し、文言と実装の乖離を防ぐ。
+  assert.match(section, /Object\.entries\(OPTIN_TEST_RUNNER_SUBCOMMANDS\)/)
+  assert.match(section, /go test \.\/\.\.\./)
+  assert.ok(section.includes('\\`//\\`'), '"//" の拒否が明記されていない')
+  assert.match(section, /絶対パス引数/)
+  assert.doesNotMatch(section, /許可形式外（/)
+  // 文言が述べる拒否・許可が validateOptinCommandForm の実挙動と一致する。
+  assert.equal(validateOptinCommandForm('make a//b').ok, false)
+  assert.equal(validateOptinCommandForm('make -C ../x').ok, false)
+  assert.equal(validateOptinCommandForm('cargo run').ok, false)
+  assert.equal(validateOptinCommandForm('cargo test --target-dir /tmp/x').ok, false)
+  assert.equal(validateOptinCommandForm('go test ./...').ok, true)
+})
+
+test('駆動部: Tree の invalid 宣言警告は子を持つノード（verify-close）では blocked を予告しない（Issue #502）', () => {
+  assert.match(driverPart, /const hasChildren = tree\.nodes\.some\(\(m\) => m\.parent === n\.number\)/)
+  assert.match(driverPart, /\$\{hasChildren \? 'このノードは子を持つ verify-close のため宣言は使われず、blocked にもならない' : '実装は起動せず blocked で停止する'\}/)
+  // blocked 終端は runImplement のみで、runVerifyClose は optinTestsInvalid を参照しない。
+  const vcIdx = driverPart.indexOf('async function runVerifyClose')
+  const implIdx = driverPart.indexOf('async function runImplement')
+  assert.ok(vcIdx >= 0 && implIdx > vcIdx)
+  assert.equal(driverPart.slice(vcIdx, implIdx).includes('optinTestsInvalid'), false)
 })
 
 test('駆動部: post-push fix 直後の updateState が optinFixState（runs + headSha + unbound）を含む（PR #503 2/3 巡目 codex P0/P1）', () => {
