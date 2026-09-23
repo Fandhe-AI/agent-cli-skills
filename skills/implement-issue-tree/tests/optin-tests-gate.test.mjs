@@ -36,10 +36,13 @@ const SLICE_EXPORTS = [
   'classifyOptinRecordGate',
   'combineOptinRecordGate',
   'isOptinLatchActive',
+  'optinDeclarationFormatHint',
+  'optinInvalidWarningLine',
   'OPTIN_RECORD_MARKER_PREFIX',
   'OPTIN_TESTS_MAX',
   'OPTIN_TEST_COMMANDS_MAX',
   'OPTIN_TEST_RUNNERS',
+  'OPTIN_TEST_RUNNER_SUBCOMMANDS',
   'implementPrompt',
   'recoverImplementPrompt',
   'prCreatePrompt',
@@ -70,9 +73,13 @@ const {
   classifyOptinRecordGate,
   combineOptinRecordGate,
   isOptinLatchActive,
+  optinDeclarationFormatHint,
+  optinInvalidWarningLine,
   OPTIN_RECORD_MARKER_PREFIX,
   OPTIN_TESTS_MAX,
   OPTIN_TEST_COMMANDS_MAX,
+  OPTIN_TEST_RUNNERS,
+  OPTIN_TEST_RUNNER_SUBCOMMANDS,
   implementPrompt,
   recoverImplementPrompt,
   prCreatePrompt,
@@ -570,6 +577,22 @@ test('prCreatePrompt: 宣言ありでは push 前の再実行手順（0c/0d）�
   assert.match(p, new RegExp(`${OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<sha> <result> make e2e -->`))
 })
 
+test('prCreatePrompt: 宣言ありでは節ごと削除の sed コマンド文字列を含み、旧 grep -vF ベースの文字列は含まない（Issue #502）', () => {
+  const p = prCreatePrompt({ ...item, optinTests: ['make e2e'] }, impl, [])
+  assert.ok(p.includes("sed '/^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$/,$d' \"$f\""))
+  assert.ok(!p.includes('grep -vF'))
+})
+
+test('prCreatePrompt: opt-in 記録節の除去手順は Closes 行・対象外節の追記より前に現れる（Issue #502: 除去を後回しにすると新規追記した対象外節が巻き込まれて消える）', () => {
+  const p = prCreatePrompt({ ...item, optinTests: ['make e2e'] }, impl, ['対象外の項目1'])
+  const removeIdx = p.indexOf('opt-in テスト記録節を丸ごと除去する')
+  const closesIdx = p.indexOf(`grep -qF ${JSON.stringify('Closes #42')}`)
+  const oosIdx = p.indexOf('## 対象外（out-of-scope）」の見出しが無い場合')
+  assert.ok(removeIdx >= 0 && closesIdx >= 0 && oosIdx >= 0)
+  assert.ok(removeIdx < closesIdx, '除去手順は Closes 行の追記より前に現れなければならない')
+  assert.ok(removeIdx < oosIdx, '除去手順は対象外節の追記より前に現れなければならない')
+})
+
 test('optinRecordVerifyPrompt: gh pr view --json body,headRefOid を単一呼び出しで取得し、本文転記禁止・headRefOid 検証・件数のみ返却の指示を含む（PR #503 3 巡目 codex P1）', () => {
   const p = optinRecordVerifyPrompt(item, impl, ['make e2e'])
   assert.match(p, /gh pr view 123 --json body,headRefOid/)
@@ -618,6 +641,12 @@ test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありでは再実行
   assert.match(p, /gh pr edit 123 --body-file/)
 })
 
+test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありでは節ごと削除の sed コマンド文字列を含み、旧 grep -vF ベースの文字列は含まない（Issue #502）', () => {
+  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true)
+  assert.ok(p.includes("sed '/^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$/,$d' \"$f\""))
+  assert.ok(!p.includes('grep -vF'))
+})
+
 test('fixPrompt: pushAfterFix=true でも optinTests が空なら出力は無変更（R3 と同じ既定無効方針）', () => {
   const withEmpty = fixPrompt({ ...item, optinTests: [] }, impl, finding, true)
   const withoutField = fixPrompt({ number: 42, title: 'サンプルイシュー' }, impl, finding, true)
@@ -628,6 +657,49 @@ test('fixPrompt: pushAfterFix=false（push 前 Review ループ）では optinTe
   const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, false)
   assert.doesNotMatch(p, /optinTestRuns/)
   assert.doesNotMatch(p, new RegExp(OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+})
+
+// ---------------------------------------------------------------------------
+// 群 E3: optinDeclarationFormatHint / optinInvalidWarningLine（Issue #502: blocked 理由文言の
+// 検証規則案内・ノード種別に応じた警告ログの実挙動一致）
+// ---------------------------------------------------------------------------
+
+test('optinDeclarationFormatHint: 許可形式の要点（不許可サブコマンド例・パストラバーサル・"//"・SKILL.md 参照）を含む', () => {
+  const hint = optinDeclarationFormatHint()
+  assert.match(hint, /cargo run/)
+  assert.match(hint, /\.\./)
+  assert.match(hint, /\/\//)
+  assert.match(hint, /SKILL\.md/)
+})
+
+test('optinDeclarationFormatHint: 許可ランナー一覧を OPTIN_TEST_RUNNERS から動的に組み立てる（ハードコード禁止・ドリフト検知）', () => {
+  const hint = optinDeclarationFormatHint()
+  for (const runner of OPTIN_TEST_RUNNERS) {
+    assert.ok(hint.includes(runner), `許可ランナー ${runner} がヒント文言に含まれない`)
+  }
+})
+
+test('optinDeclarationFormatHint: サブコマンド制限を OPTIN_TEST_RUNNER_SUBCOMMANDS から動的に組み立てる（ドリフト検知）', () => {
+  const hint = optinDeclarationFormatHint()
+  for (const [runner, subs] of Object.entries(OPTIN_TEST_RUNNER_SUBCOMMANDS)) {
+    assert.ok(hint.includes(runner), `ランナー ${runner} の制約がヒント文言に含まれない`)
+    for (const sub of subs) {
+      assert.ok(hint.includes(sub), `${runner} の許可サブコマンド ${sub} がヒント文言に含まれない`)
+    }
+  }
+})
+
+test('optinInvalidWarningLine: hasChildren: true では blocked にはならない旨の否定文を含み「実装は起動せず blocked で停止する」を含まない', () => {
+  const line = optinInvalidWarningLine(99, true, ['bad cmd'])
+  assert.match(line, /blocked にはならない/)
+  assert.doesNotMatch(line, /実装は起動せず blocked で停止する/)
+  assert.match(line, /runVerifyClose/)
+})
+
+test('optinInvalidWarningLine: hasChildren: false では従来どおり「実装は起動せず blocked で停止する」を含む', () => {
+  const line = optinInvalidWarningLine(99, false, ['bad cmd'])
+  assert.match(line, /実装は起動せず blocked で停止する/)
+  assert.doesNotMatch(line, /blocked にはならない/)
 })
 
 // ---------------------------------------------------------------------------
@@ -697,6 +769,91 @@ test('実行レベル: 新旧 2 つの sha の記録が併存しても現在の 
 })
 
 // ---------------------------------------------------------------------------
+// 群 F2: 実行レベル（optinRecordUpdateInstructions・prCreatePrompt が指示する sed による
+// 「見出し行〜EOF」節ごと削除。Issue #502: 旧 grep -vF 方式はマーカー行だけを除去し見出し・
+// 人間可読行が残るため、fix ラウンドを重ねるたびに見出しが重複・古い結果が蓄積していた）
+// ---------------------------------------------------------------------------
+
+// 実装コード内の sed コマンド（optinRecordUpdateInstructions・prCreatePrompt が指示する文字列）
+// と同一のパターンを、実際のシェルで実行して検証する（プロンプト文字列のコピーではなく
+// ソース上の同一定数と一致させることで、文言変更時にテストが追随し損ねるのを防ぐ）。
+const OPTIN_RECORD_SED_DELETE_PATTERN = "/^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$/,$d"
+
+function sedRemoveOptinSection(bodyText) {
+  const script = `
+f=$(mktemp)
+g=$(mktemp)
+cat > "$f" <<'BODYEOF'
+${bodyText}
+BODYEOF
+s=$(sed '${OPTIN_RECORD_SED_DELETE_PATTERN}' "$f"); rc=$?
+printf '%s' "$s" > "$g"
+cat "$g"
+rm -f "$f" "$g"
+exit "$rc"
+`
+  return execFileSync('bash', ['-c', script], { encoding: 'utf8' })
+}
+
+test('実行レベル sed: 見出し〜EOF を節ごと削除し、見出しより前の内容（Closes 行・対象外節）は保持する', () => {
+  const body = [
+    '## Summary',
+    '- 実装内容の要約',
+    '',
+    'Closes #502',
+    '',
+    '## 対象外（out-of-scope）',
+    '- 項目1',
+    '',
+    '## opt-in テスト実行記録',
+    optinRecordMarkerLine(SHA_A, 'pass', 'make e2e'),
+    '- コマンド: make e2e',
+    '- 結果: pass',
+    '- 補足: (なし)',
+  ].join('\n')
+  const out = sedRemoveOptinSection(body)
+  assert.match(out, /Closes #502/)
+  assert.match(out, /## 対象外（out-of-scope）/)
+  assert.match(out, /- 項目1/)
+  assert.doesNotMatch(out, /## opt-in テスト実行記録/)
+  assert.doesNotMatch(out, /- コマンド: make e2e/)
+})
+
+test('実行レベル sed: 見出しが存在しない本文（初回 PR 作成相当）は exit 0・内容不変（末尾改行差分を除く）', () => {
+  const body = ['## Summary', '- 実装内容の要約', '', 'Closes #502'].join('\n')
+  const out = sedRemoveOptinSection(body)
+  assert.equal(out.trimEnd(), body.trimEnd())
+})
+
+test('実行レベル sed: 複数回の除去→追記サイクルを経ても見出しが 1 個だけ残り、古いラウンドの結果行が残らない', () => {
+  let body = ['## Summary', '- 実装内容の要約', '', 'Closes #502'].join('\n')
+  const rounds = [
+    { sha: SHA_A, result: 'fail' },
+    { sha: SHA_A, result: 'not-run' },
+    { sha: SHA_B, result: 'pass' },
+  ]
+  for (const { sha, result } of rounds) {
+    const removed = sedRemoveOptinSection(body)
+    body = [
+      removed,
+      '',
+      '## opt-in テスト実行記録',
+      optinRecordMarkerLine(sha, result, 'make e2e'),
+      '- コマンド: make e2e',
+      `- 結果: ${result}`,
+      '- 補足: (なし)',
+    ].join('\n')
+  }
+  const headingCount = (body.match(/## opt-in テスト実行記録/g) ?? []).length
+  assert.equal(headingCount, 1)
+  assert.doesNotMatch(body, /- 結果: fail/)
+  assert.doesNotMatch(body, /- 結果: not-run/)
+  assert.match(body, /- 結果: pass/)
+  // 見出し直前の連続空行が異常に増えていないこと（複数ラウンドを経ても空行だけが蓄積しない）。
+  assert.doesNotMatch(body, /\n{4,}## opt-in テスト実行記録/)
+})
+
+// ---------------------------------------------------------------------------
 // 群 G: 駆動部配線（source-scan）
 // ---------------------------------------------------------------------------
 
@@ -733,6 +890,16 @@ test('駆動部: runImplement 冒頭で optinTestsInvalid を参照する', () =
   const implIdx = driverPart.indexOf('async function runImplement')
   const invalidIdx = driverPart.indexOf('optinTestsInvalid', implIdx)
   assert.ok(implIdx >= 0 && invalidIdx >= 0 && invalidIdx - implIdx < 800)
+})
+
+test('駆動部: runImplement の blocked 理由構築に optinDeclarationFormatHint の呼び出しが含まれる（Issue #502）', () => {
+  const implIdx = driverPart.indexOf('async function runImplement')
+  const hintIdx = driverPart.indexOf('optinDeclarationFormatHint(', implIdx)
+  assert.ok(implIdx >= 0 && hintIdx >= 0 && hintIdx - implIdx < 1200)
+})
+
+test('駆動部: Tree ループの invalid 分岐が optinInvalidWarningLine を hasChildren 付きで呼ぶ（Issue #502）', () => {
+  assert.match(driverPart, /optinInvalidWarningLine\(n\.number, hasChildren, n\.optinTestsInvalid\)/)
 })
 
 test('駆動部: post-push fix 直後の updateState が optinFixState（runs + headSha + unbound）を含む（PR #503 2/3 巡目 codex P0/P1）', () => {

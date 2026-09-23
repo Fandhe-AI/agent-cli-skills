@@ -769,6 +769,40 @@ function parseOptinTestDeclarations(raw, approved) {
 
 
 
+function optinDeclarationFormatHint() {
+  const runners = [...OPTIN_TEST_RUNNERS].sort().join(' / ')
+  const subEntries = Object.keys(OPTIN_TEST_RUNNER_SUBCOMMANDS)
+    .sort()
+    .map((r) => `${r} は ${[...OPTIN_TEST_RUNNER_SUBCOMMANDS[r]].sort().join('/')}`)
+    .join('、')
+  return (
+    `許可形式は SKILL.md「opt-in テストの宣言」節で定義する: 先頭トークンが許可ランナー（${runners}）` +
+    `のいずれかであること、一部ランナーは第 2 トークン（サブコマンド）も制限すること（${subEntries}のみ許可。` +
+    `例: cargo run は不許可）、シェルメタ文字・改行を含まないこと、` +
+    `\`.\` に隣接しない \`..\`（親ディレクトリ参照）と \`//\` を含まないこと`
+  )
+}
+
+
+
+
+
+
+
+function optinInvalidWarningLine(number, hasChildren, invalidList) {
+  const detail = (Array.isArray(invalidList) ? invalidList : []).map(sanitize).join(' / ')
+  return hasChildren
+    ? `⚠️ #${number}: 子イシューを持つノードに承認一覧（args.optinTestCommands）に無いか許可形式外の opt-in テスト宣言がある（${detail}）が、このノードは PR を作成せず runVerifyClose のみを実行するため blocked にはならない（宣言は無視される）`
+    : `⚠️ #${number}: opt-in テスト宣言が承認一覧（args.optinTestCommands）に無いか許可形式外（${detail}）。実装は起動せず blocked で停止する`
+}
+
+
+
+
+
+
+
+
 
 
 
@@ -3405,6 +3439,14 @@ function optinTestExecutionLines(item, stepNo) {
 
 
 
+
+
+
+
+
+
+
+
 function optinRecordUpdateInstructions(item, impl, stepNo) {
   const commands = Array.isArray(item.optinTests) ? item.optinTests : []
   if (commands.length === 0) return []
@@ -3416,8 +3458,8 @@ function optinRecordUpdateInstructions(item, impl, stepNo) {
 
     `   a. SHA=$(git rev-parse HEAD) でこの記録が対象とする HEAD の sha（push 済みの sha と同一）を控える。`,
     `   b. f=$(mktemp); gh pr view ${prRef} --json body --jq '.body // ""' > "$f" で現在の本文を取得する。この取得コマンドの終了コードを必ず確認し、非 0 終了の場合は c 以降を実行せず summary に「opt-in テスト記録の更新に失敗（gh pr view の取得エラー）」と書いて本手順を終了する（fail-closed。取得失敗を無視して進むと空の "$f" を本文全体として gh pr edit してしまい、Closes 行・対象外節を含む PR 本文全体が記録節だけに置き換わる）。`,
-    `   c. g=$(mktemp); grep -vF ${JSON.stringify(OPTIN_RECORD_MARKER_PREFIX)} "$f" > "$g"; rc=$?（既存の opt-in テスト記録節のマーカー行をすべて除去する。異なる HEAD sha の記録はマージ前ゲートの grep がそもそも一致しないため実害はないが、本文の肥大化を防ぐため除去する）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、その場合のみ mv "$g" "$f" する。2 以上（構文エラー等）の場合は \`|| true\` 等で握り潰さず、mv も行わず、summary に「opt-in テスト記録の更新に失敗（grep 異常終了、実測 exit code を記載）」と書いて本手順を終了する（fail-closed。ここで握り潰すと "$f" が空のまま d 以降へ進み、Closes 行・対象外節を含む PR 本文全体が記録節だけに置き換わる）。`,
-    `   d. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（マーカー行は行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる）:`,
+    `   c. g=$(mktemp); s=$(sed '/^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$/,$d' "$f"); rc=$?; printf '%s' "$s" > "$g"（既存の「## opt-in テスト実行記録」見出し行から本文末尾までを節ごと削除する。この節は常に本文の最後に追記される契約のため、他の節を巻き込まない。見出しがまだ存在しない場合も sed は exit 0 で "$f" の内容をそのまま返す）。sed の終了コードは 0 のみ正常とし、その場合のみ mv "$g" "$f" する。0 以外（構文エラー等）の場合は \`|| true\` 等で握り潰さず、mv も行わず、summary に「opt-in テスト記録の更新に失敗（sed 異常終了、実測 exit code を記載）」と書いて本手順を終了する（fail-closed。ここで握り潰すと "$f" が空のまま d 以降へ進み、Closes 行・対象外節を含む PR 本文全体が記録節だけに置き換わる）。`,
+    `   d. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（見出し行・マーカー行いずれも行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる。下に示すコードブロックのインデントは箇条書きの見た目上のものであり、実際に "$f" へ書き込む内容には含めない）。見出し行の直前には必ず空行を 1 行入れる（"$f" の末尾が改行なしで終わっていても、{ echo; echo; echo '## opt-in テスト実行記録'; ...; } >> "$f" のように echo を重ねて空行を作ってから見出し以降を追記すれば、直前の行と結合しない）:`,
     '   ```',
     '   ## opt-in テスト実行記録',
     ...commands.flatMap((c) => [
@@ -3892,6 +3934,17 @@ function prCreatePrompt(item, impl, outOfScope) {
     `     gh pr view <番号> --json body --jq .body > "$f"`,
     `   この取得コマンドの終了コードを必ず確認し、非 0 終了の場合は以降の追記・gh pr edit を一切行わず prNumber: 0 と「既存 PR 本文の取得に失敗」を理由として返す（fail-closed。取得失敗を無視して進むと空の "$f" を本文全体として gh pr edit してしまい、既存の PR 本文全体が失われる）。`,
 
+
+
+
+
+
+    ...(optinRecordSection
+      ? [
+          `   次に（Closes 行・対象外節の追記より前に）既存の opt-in テスト記録節を丸ごと除去する: g=$(mktemp); s=$(sed '/^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$/,$d' "$f"); rc=$?; printf '%s' "$s" > "$g"（「## opt-in テスト実行記録」見出し行から本文末尾までを削除する。この節は常に本文の最後に追記される契約のため、この削除が他の節を巻き込むことはない。見出しがまだ無い場合も sed は exit 0 で "$f" の内容をそのまま返す）。sed の終了コードは 0 のみ正常とし、その場合のみ mv "$g" "$f" する。0 以外（構文エラー等）の場合は \`|| true\` 等で握り潰さず、mv も行わず prNumber: 0 と「opt-in テスト記録節の除去に失敗（sed 異常終了、実測 exit code を記載）」を理由として返す（fail-closed。握り潰すと "$g" が空のまま mv され、Closes 行・対象外節を含む "$f" 全体が失われたまま後続処理が進む）。`,
+        ]
+      : []),
+
     `     grep -qF ${JSON.stringify(`Closes #${item.number}`)} "$f" || { echo; echo; echo ${JSON.stringify(`Closes #${item.number}`)}; } >> "$f"`,
 
 
@@ -3905,10 +3958,9 @@ function prCreatePrompt(item, impl, outOfScope) {
 
 
 
-
     ...(optinRecordSection
       ? [
-          `   次に opt-in テスト記録節を更新する: g=$(mktemp); grep -vF ${JSON.stringify(OPTIN_RECORD_MARKER_PREFIX)} "$f" > "$g"; rc=$?（既存マーカー行の除去）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、その場合のみ mv "$g" "$f" する。2 以上（構文エラー等）の場合は \`|| true\` 等で握り潰さず、mv も行わず prNumber: 0 と「opt-in テスト記録節の更新に失敗（grep 異常終了、実測 exit code を記載）」を理由として返す（fail-closed。握り潰すと "$g" が空のまま mv され、Closes 行・対象外節を含む "$f" 全体が失われたまま gh pr edit されてしまう）。そのうえで手順 2 の body テンプレートに記載された「## opt-in テスト実行記録」節と同じ書式で "$f" の末尾へ追記する（マーカー行は行頭インデントなしで、テンプレートの \`<sha>\` は手順 0d で控えた SHA、\`<result>\` は手順 0c の各コマンドの結果へ実際に置き換えて書く）。`,
+          `   最後に opt-in テスト記録節を書き足す: "$f" の末尾へ、上で除去した節を今回の再実行結果で更新した内容として追記する。見出し行・マーカー行いずれも行頭インデントなしで正確にこの書式で書く（1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる）。見出し行の直前には必ず空行を 1 行入れる（{ echo; echo; echo '## opt-in テスト実行記録'; ...; } >> "$f" のように echo を重ねて空行を作ってから見出し以降を追記する。上の Closes 行の追記に使っているのと同じ考え方）。書式・値（\`<sha>\` は手順 0d で控えた SHA、\`<result>\` は手順 0c の各コマンドの結果）は手順 2 の body テンプレートに記載された「## opt-in テスト実行記録」節と同一にする。`,
         ]
       : []),
     optinRecordSection
@@ -4776,16 +4828,20 @@ for (const n of tree.nodes) {
   const optinParsed = parseOptinTestDeclarations(n.optinTests, optinTestCommandsInput)
   n.optinTests = optinParsed.commands
   n.optinTestsInvalid = optinParsed.invalid
+
+
+
+
+
+  const hasChildren = tree.nodes.some((m) => m.parent === n.number)
   if (n.optinTests.length > 0) {
     log(`#${n.number}: opt-in テスト宣言 ${n.optinTests.map(sanitize).join(' / ')}`)
-
-
-    if ((tree.nodes.some((m) => m.parent === n.number))) {
+    if (hasChildren) {
       log(`⚠️ #${n.number}: 子イシューを持つノードに opt-in テスト宣言があるが、このノードは PR を作成しないため記録ゲートは適用されない`)
     }
   }
   if (n.optinTestsInvalid.length > 0) {
-    log(`⚠️ #${n.number}: opt-in テスト宣言が承認一覧（args.optinTestCommands）に無いか許可形式外（${n.optinTestsInvalid.map(sanitize).join(' / ')}）。実装は起動せず blocked で停止する`)
+    log(optinInvalidWarningLine(n.number, hasChildren, n.optinTestsInvalid))
   }
 }
 
@@ -5324,6 +5380,7 @@ async function runImplement(item) {
   if (Array.isArray(item.optinTestsInvalid) && item.optinTestsInvalid.length > 0) {
     const reason = capText(
       `イシュー本文の opt-in テスト宣言が承認一覧（args.optinTestCommands）に無いか許可形式外（${item.optinTestsInvalid.join(' / ')}）。` +
+      `${optinDeclarationFormatHint()}。` +
       `PR #503 codex P0 対応により、opt-in テストはイシュー本文だけで持ち込めず、` +
       `ラン起動時の args.optinTestCommands（人間承認済みのコマンド一覧。最大 ${OPTIN_TEST_COMMANDS_MAX} 件）に` +
       `正規化後の文字列が完全一致で含まれている必要がある。イシューの \`<!-- optin-tests: ... -->\` マーカーを` +
