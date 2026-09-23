@@ -111,6 +111,21 @@ test('parseOptinTestDeclarations: 任意コマンド実行に転用されやす�
   }
 })
 
+test('parseOptinTestDeclarations: Go の "./..." 全パッケージ指定は ".." 拒否の対象外（トークン単位判定）', () => {
+  assert.deepEqual(parseOptinTestDeclarations(['go test ./...', 'go test ./pkg/...']), {
+    commands: ['go test ./...', 'go test ./pkg/...'],
+    invalid: [],
+  })
+})
+
+test('parseOptinTestDeclarations: パス成分としての ".." は runner を問わず拒否する（"..." とは区別）', () => {
+  for (const bad of ['npm test ../x', 'pytest a/../b', 'pytest ..']) {
+    const { commands, invalid } = parseOptinTestDeclarations([bad])
+    assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)
+    assert.equal(invalid.length, 1)
+  }
+})
+
 test('parseOptinTestDeclarations: 第 2 トークン制約に違反する npm install を拒否する', () => {
   const { commands, invalid } = parseOptinTestDeclarations(['npm install'])
   assert.deepEqual(commands, [])

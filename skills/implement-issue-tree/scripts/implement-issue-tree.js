@@ -623,6 +623,15 @@ const OPTIN_TEST_COMMAND_RE = /^[A-Za-z0-9][A-Za-z0-9 _./:=@+,-]{0,199}$/
 
 
 
+
+function hasParentPathTraversal(s) {
+  return s.split(' ').some((tok) => tok.split('/').includes('..'))
+}
+
+
+
+
+
 function parseOptinTestDeclarations(raw) {
   if (raw === undefined || raw === null) return { commands: [], invalid: [] }
   if (!Array.isArray(raw)) return { commands: [], invalid: [capText(sanitize(JSON.stringify(raw)), 300)] }
@@ -644,7 +653,7 @@ function parseOptinTestDeclarations(raw) {
 
 
 
-    if (!OPTIN_TEST_COMMAND_RE.test(s) || s.includes('..') || s.includes('//')) {
+    if (!OPTIN_TEST_COMMAND_RE.test(s) || hasParentPathTraversal(s) || s.includes('//')) {
       invalid.push(capText(sanitize(v), 300))
       continue
     }

