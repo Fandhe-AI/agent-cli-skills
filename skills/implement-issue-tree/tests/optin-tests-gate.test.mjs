@@ -39,8 +39,18 @@ const SLICE_EXPORTS = [
   'prCreatePrompt',
   'optinRecordVerifyPrompt',
   'mergeExecutePrompt',
+  'fixPrompt',
 ]
-writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
+// fixPrompt は boundaryNonce() を内部で使う。本番では ensureBoundaryNonceSeed() が agent() 経由で
+// 乱数 seed を注入してから呼ばれるが、agent はこのスライスに未注入のため、テスト専用の setter を
+// 同一モジュールスコープへ追記して非 export の module-scope let（boundaryNonceSeed）へ疑似乱数値を
+// 直接注入する（conflict-prepush-gate.test.mjs / g0-gates.test.mjs と同一パターン）。
+const TEST_ONLY_SETTER =
+  'export function __setBoundaryNonceSeedForTest(v) { boundaryNonceSeed = v }\n'
+writeFileSync(
+  slicePath,
+  `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n${TEST_ONLY_SETTER}`,
+)
 
 const mod = await import(pathToFileURL(slicePath).href)
 const {
@@ -56,7 +66,10 @@ const {
   prCreatePrompt,
   optinRecordVerifyPrompt,
   mergeExecutePrompt,
+  fixPrompt,
+  __setBoundaryNonceSeedForTest,
 } = mod
+__setBoundaryNonceSeedForTest('test-seed-optin-tests-gate')
 
 const item = { number: 42, title: 'サンプルイシュー', optinTests: [] }
 const impl = { prNumber: 123, branch: 'feat/42-sample', worktreePath: '/tmp/wt' }
@@ -261,6 +274,39 @@ test('mergeExecutePrompt に optin 関連文字列と --json body が含まれ�
   const p = mergeExecutePrompt(item, impl, false, [])
   assert.doesNotMatch(p, /optin/i)
   assert.doesNotMatch(p, /--json body/)
+})
+
+// ---------------------------------------------------------------------------
+// 群 E2: fixPrompt の opt-in テスト再検証（Issue #495 Medium 指摘の回帰）
+//
+// post-push fix（pushAfterFix: true）はコード（opt-in テストが検証する挙動を含む）を変更しうるが、
+// renderOptinRecordSection は prCreatePrompt でしか呼ばれず、修正後に PR 本文の pass 記録が
+// 再検証されないまま残ると、マージ前ゲートが陳腐化した記録を見て通過してしまう。
+// ---------------------------------------------------------------------------
+
+const finding = { summary: '指摘内容のサンプル', unresolvedComments: [] }
+
+test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありでは再実行手順・pass 偽装禁止・PR 本文更新指示を含む', () => {
+  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, true)
+  assert.match(p, /"make e2e"/)
+  assert.match(p, /偽装/)
+  assert.match(p, /optinTestRuns/)
+  // PR 本文の既存マーカー行を除去してから記録節を書き直す指示（陳腐化した pass の残存防止）。
+  assert.match(p, new RegExp(OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(p, /pushed: true と確認できた場合のみ実行する/)
+  assert.match(p, /gh pr edit 123 --body-file/)
+})
+
+test('fixPrompt: pushAfterFix=true でも optinTests が空なら出力は無変更（R3 と同じ既定無効方針）', () => {
+  const withEmpty = fixPrompt({ ...item, optinTests: [] }, impl, finding, true)
+  const withoutField = fixPrompt({ number: 42, title: 'サンプルイシュー' }, impl, finding, true)
+  assert.equal(withEmpty, withoutField)
+})
+
+test('fixPrompt: pushAfterFix=false（push 前 Review ループ）では optinTests 宣言ありでも再実行手順を含まない（記録節が未作成のため対象外）', () => {
+  const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, false)
+  assert.doesNotMatch(p, /optinTestRuns/)
+  assert.doesNotMatch(p, new RegExp(OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 })
 
 // ---------------------------------------------------------------------------

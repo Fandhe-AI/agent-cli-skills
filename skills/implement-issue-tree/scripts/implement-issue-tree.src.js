@@ -1270,6 +1270,24 @@ const FIX_SCHEMA = {
       enum: ['MERGEABLE', 'CONFLICTING', 'UNKNOWN'],
       description: 'push 後に有界（30 秒間隔・最大 5 分）で確定を待った mergeable の値。未確定・取得不能は UNKNOWN（推測で MERGEABLE / CONFLICTING を返さない）。診断・分岐ヒント専用。',
     },
+    // opt-in テスト記録ゲート（Issue #495 Medium 指摘）。post-push fix（pushAfterFix: true）が
+    // item.optinTests 宣言済みイシューで再実行した結果。IMPL_SCHEMA.optinTestRuns と同一定義
+    // （宣言が無いイシューのプロンプトには手順自体が出ないため、モデルが返しても未使用）。
+    optinTestRuns: {
+      type: 'array',
+      maxItems: OPTIN_TESTS_MAX,
+      items: {
+        type: 'object',
+        required: ['command', 'result'],
+        properties: {
+          command: { type: 'string', maxLength: 300 },
+          result: { type: 'string', enum: OPTIN_RECORD_RESULTS },
+          exitCode: { type: 'integer' },
+          detail: { type: 'string', maxLength: 300 },
+        },
+      },
+      description: '宣言された opt-in テストごとの再実行結果（1 コマンド 1 要素）。宣言が無ければ空配列または省略',
+    },
   },
 }
 
@@ -2493,6 +2511,37 @@ function optinTestExecutionLines(item, stepNo) {
   ]
 }
 
+// PR 本文の「## opt-in テスト実行記録」節を、post-push fix（pushAfterFix: true）が再実行した
+// 結果へ更新させる手順（Issue #495 Medium 指摘）。renderOptinRecordSection は prCreatePrompt 呼び出し
+// 時点（PR 作成時の 1 回のみ）でしか呼ばれておらず、fix はこの呼び出し内で push まで完結するため
+// host 側が結果を受け取ってから renderOptinRecordSection を呼ぶ機会がない。そのためマーカー書式
+// （optinRecordMarkerLine）をエージェント自身に厳密に再現させ、マージ前ゲート（optinRecordVerifyPrompt
+// の固定文字列 grep）が古い pass 記録のまま停止せず通過してしまう陳腐化を防ぐ。item.optinTests が
+// 空なら [] を返す（宣言なしイシューでは fixPrompt の出力を完全に不変に保つ。R3 と同じ方針）。
+function optinRecordUpdateInstructions(item, impl, stepNo) {
+  const commands = Array.isArray(item.optinTests) ? item.optinTests : []
+  if (commands.length === 0) return []
+  const prRef = String(impl.prNumber)
+  return [
+    `${stepNo}. opt-in テスト記録の更新（必須。直前の opt-in テスト再実行手順の optinTestRuns の結果を PR 本文へ反映する。手順 4 の 2 条件判定で pushed: true と確認できた場合のみ実行する。pushed: false の場合はこの手順を省略する — まだリモートへ反映されていないコードに対する記録を書くと、実際に反映された head と PR 本文の記録内容が食い違う）:`,
+    `   a. f=$(mktemp); gh pr view ${prRef} --json body --jq '.body // ""' > "$f" で現在の本文を取得する。`,
+    `   b. g=$(mktemp); grep -vF ${JSON.stringify(OPTIN_RECORD_MARKER_PREFIX)} "$f" > "$g" || true; mv "$g" "$f"（既存の opt-in テスト記録節のマーカー行をすべて除去する。PR 作成時点で書かれた記録は今回の修正コミットに対する検証ではなくなったため、そのまま残すと古い pass 記録がマージ前ゲートを誤って通過させる。grep の終了コードは 0/1 のみ正常）。`,
+    `   c. "$f" の末尾に、直前の再実行手順の結果を使って次の見出し・書式で記録節を書き足す（マーカー行は行頭インデントなしで正確にこの書式で書く。1 文字でも変わるとマージ前ゲートの固定文字列一致が外れ、記録が反映されていない扱い＝missing 判定になる）:`,
+    '   ```',
+    '   ## opt-in テスト実行記録',
+    ...commands.flatMap((c) => [
+      `   ${optinRecordMarkerLine(c, '<result>')}`,
+      `   - コマンド: ${c}`,
+      '   - 結果: <result>',
+      '   - 補足: <補足（detail）または (なし)>',
+    ]),
+    '   ```',
+    '   （<result> は各コマンドの直前の再実行結果 pass / fail / not-run のいずれかへ実際に置き換える。宣言コマンドが複数ある場合は各ブロックを空行 1 行で区切る）',
+    `   d. gh pr edit ${prRef} --body-file "$f" && rm -f "$f" で本文を更新する。`,
+    `   e. 更新後に再度 gh pr view ${prRef} --json body --jq '.body // ""' を取得し、各コマンドについて直前の再実行結果に対応するマーカー行が実際に反映されていることを確認する。反映されていなければ b〜d をやり直し、それでも確認できなければ summary に「opt-in テスト記録の PR 本文反映に失敗」と理由を書く（無言で見過ごさない。反映できないまま終わるとマージ前ゲートが古い記録のまま停止せず通過し得るため重大）。`,
+  ]
+}
+
 // plan は planPrompt が返した実装計画本文。JSON.stringify 経由でコードブロックに埋め込む
 // （インジェクション対策）。セルフレビュー手順は独立 Review フェーズへ移管済み。
 function implementPrompt(item, plan) {
@@ -3079,7 +3128,13 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     '   P0/P1 相当・セキュリティ上の指摘（脆弱性・認証認可の不備・秘密情報露出・破壊的操作等）は対象外と判定して記録・スキップしてはならない。修正するか、修正不能なら pushed: false とし summary に理由を具体的に書いて返す（ホストはこれを blocked として扱いユーザー判断へ委ねる）。対象外にすべきか判断に迷う場合は安全側（対象外にしない）に倒す。',
     `   対応不能・実装スコープ外と判断した指摘（上記の P0/P1・セキュリティ除外に該当しないもの）は修正をスキップしてよい。ただし無言でスキップせず、上記「未解決スレッド一覧」に記載された該当スレッドの threadId と判断理由を outOfScopeComments 配列に { threadId, reason } 形式で1件1要素として記録する（summary 本文には埋め込まない。threadId が「未解決スレッド一覧」に見つからない指摘は対象外記録をスキップしてよい。この記録はホスト側のログ・最終レポート専用であり、次ラウンドの監視エージェントの判定材料には一切引き継がれない。監視エージェントは毎回スレッド内容を自ら読んで独立に判定する）。対象外と判断したスレッドは resolve しない（resolve してよいのは Merge ループの fix が、リモート head に反映済みの修正で自分が実際に修正対応したスレッドのみ。対象外スレッドは記録までで停止し、人間が GitHub 上で resolve しない限り未解決のまま残って blocked → 最終レポートでの issue 化承認・手動 resolve の判断材料になる）。`,
     '3. 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して通す。',
+    // opt-in テスト記録ゲート（Issue #495 Medium 指摘）: post-push fix はコード（opt-in テストが
+    // 検証する挙動を含む）を変更しうるため、PR 作成時に記録した pass が今回の修正後も有効かを
+    // ここで再検証する。pushAfterFix: false（push 前 Review ループ）の時点では PR 本文の記録節が
+    // まだ存在しない（prCreatePrompt が Review 通過後にしか呼ばれない）ためこの手順は不要。
+    ...(pushAfterFix ? optinTestExecutionLines(item, '3b') : []),
     ...commitAndPushInstructions,
+    ...(pushAfterFix ? optinRecordUpdateInstructions(item, impl, '4b') : []),
     ...(pushAfterFix
       ? [
           `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示・前後で sha が変化したことだけでは足りない。pushed: false のラウンド — 空振り push・並行 push 競合・ls-remote 判定不能 — は (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
@@ -3100,7 +3155,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     // 省略するとエージェントがフィールドを返さず、push 後に pendingPushConflict が立たないため
     // コンフリクト中の PR で monitor ラウンドを 1 回空費する。Review ループ（pushAfterFix: false）は
     // 手順 4 で観測しないため付けない。
-    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）${pushAfterFix ? ' / checksStarted・mergeableAfterPush（手順 4 の push 後 CI 起動確認の観測結果。任意・診断と分岐ヒント専用）' : ''}/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）/ commitFailed（修正コミットを作成できなかった場合のみ true — base fetch 失敗・base merge の解消不能 / hook 拒否・commitlint の type / scope 決定不能を含む。その際 pushed は false。コミットできれば省略可）。`,
+    `返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ''} / worktreePath（pwd の結果）${pushAfterFix ? ' / checksStarted・mergeableAfterPush（手順 4 の push 後 CI 起動確認の観測結果。任意・診断と分岐ヒント専用）' : ''}${pushAfterFix && Array.isArray(item.optinTests) && item.optinTests.length > 0 ? ' / optinTestRuns（手順 3b で再実行した宣言済み opt-in テストごとの結果）' : ''}/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）/ commitFailed（修正コミットを作成できなかった場合のみ true — base fetch 失敗・base merge の解消不能 / hook 拒否・commitlint の type / scope 決定不能を含む。その際 pushed は false。コミットできれば省略可）。`,
   ].join('\n')
 }
 
@@ -5728,6 +5783,15 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       const fixPushMergeable = normalizePushMergeable(f.mergeableAfterPush)
       pendingPushConflict = f.pushed === true && fixPushMergeable === 'CONFLICTING'
       log(`#${item.number}: fix の push 直後 CI 起動確認（自己申告・マージ判定には未使用） pushed=${f.pushed === true} checksStarted=${fixChecksStarted} mergeableAfterPush=${fixPushMergeable}`)
+      // opt-in テスト記録ゲート（Issue #495 Medium 指摘）: post-push fix が再実行した結果をログに
+      // 残す（マージ前ゲートの実効判定は次周回の optinRecordVerifyPrompt が PR 本文を直接読んで
+      // 行うため、ここでの値はホスト側の判定には使わない診断ログ専用）。
+      if (Array.isArray(item.optinTests) && item.optinTests.length > 0) {
+        const fixOptinRuns = sanitizeOptinTestRuns(f.optinTestRuns, item.optinTests)
+        if (fixOptinRuns.some((r) => r.result !== 'pass')) {
+          log(`⚠️ #${item.number}: post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文の記録節が更新されているか次周回のマージ前ゲートで確認する`)
+        }
+      }
       // f.resolvedThreadIds（fix 自己申告）は形式検証してログ専用（マージ判定には渡さない。
       // 実効性は次周回 monitor が独立確認する）。
       let newlyResolvedThisRound = 0
