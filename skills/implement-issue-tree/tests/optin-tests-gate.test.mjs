@@ -128,12 +128,15 @@ test('parseOptinTestDeclarations: パス成分としての ".." は runner を�
   }
 })
 
-test('parseOptinTestDeclarations: "/" 以外の区切り（= , :）の直後の ".." も拒否する（Issue #495 監査 Medium A）', () => {
+test('parseOptinTestDeclarations: 区切り文字直後・短オプション接着の ".." も拒否する（Issue #495 監査 Medium A / PR #503 Bugbot Medium）', () => {
   for (const bad of [
     'cargo test --manifest-path=../x/Cargo.toml',
     'pytest --rootdir=..',
     'npm test a,../b',
     'pytest x:../y',
+    // PR #503 Bugbot Medium: 短オプションに接着した ".."（区切り文字の列挙ではすり抜ける）。
+    'make -C..',
+    'pytest -I../x',
   ]) {
     const { commands, invalid } = parseOptinTestDeclarations([bad])
     assert.deepEqual(commands, [], `should reject: ${JSON.stringify(bad)}`)

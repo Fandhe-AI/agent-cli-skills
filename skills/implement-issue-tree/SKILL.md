@@ -104,7 +104,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 <!-- optin-tests: cargo test -- --ignored -->
 ```
 
-コマンドの先頭トークンは許可されたテストランナー（`make` / `just` / `cargo` / `npm` / `pnpm` / `yarn` / `bun` / `go` / `pytest` / `deno` / `mvn` / `gradle` / `dotnet` / `swift` / `mix`）に限り、シェルメタ文字（`; | & $ ` ` `）・改行・パス成分としての `..`（親ディレクトリ参照。`go test ./...` のような `...` を含む値は許可）を含む値は許可形式外として実装を起動せず `blocked` で停止する（fail-closed。イシュー本文由来のコマンドをそのまま実行エージェントへ渡す構造のため、ホスト側で厳格に検証する）。`npm` / `pnpm` / `yarn` / `bun` / `cargo` / `go` / `dotnet` / `swift` / `mix` / `deno` / `mvn` / `gradle` は第 2 トークン（サブコマンド）も `test` 等に制限する。`mvn` は GAV 形式のゴール指定（`groupId:artifactId:goal` 等、`:` を 2 個以上含むトークン）を、`deno` はリモート指定子（`npm:` / `jsr:` / `http:` / `https:` で始まるトークン）を、それぞれ任意プラグイン実行・外部コード取得の迂回経路として追加で拒否する（Issue #495 セキュリティ監査対応）。
+コマンドの先頭トークンは許可されたテストランナー（`make` / `just` / `cargo` / `npm` / `pnpm` / `yarn` / `bun` / `go` / `pytest` / `deno` / `mvn` / `gradle` / `dotnet` / `swift` / `mix`）に限り、シェルメタ文字（`; | & $ ` ` `）・改行・`.` に隣接しない `..`（親ディレクトリ参照。`go test ./...` のような `...` を含む値は許可）を含む値は許可形式外として実装を起動せず `blocked` で停止する（fail-closed。イシュー本文由来のコマンドをそのまま実行エージェントへ渡す構造のため、ホスト側で厳格に検証する）。`npm` / `pnpm` / `yarn` / `bun` / `cargo` / `go` / `dotnet` / `swift` / `mix` / `deno` / `mvn` / `gradle` は第 2 トークン（サブコマンド）も `test` 等に制限する。`mvn` は GAV 形式のゴール指定（`groupId:artifactId:goal` 等、`:` を 2 個以上含むトークン）を、`deno` はリモート指定子（`npm:` / `jsr:` / `http:` / `https:` で始まるトークン）を、それぞれ任意プラグイン実行・外部コード取得の迂回経路として追加で拒否する（Issue #495 セキュリティ監査対応）。
 
 宣言があるイシューでは、Implement / 回復 Implement エージェントが各コマンドの実行と結果報告（`optinTestRuns`）を必須手順として行う。実行していないものを pass と報告することは禁止し、環境要因で実行できない場合は `not-run` と理由を返す。PR 本文には「## opt-in テスト実行記録」節と、コマンドごとの機械可読マーカー行（`<!-- optin-test-record: <コマンド> => <pass|fail|not-run> -->`）が追記される。
 

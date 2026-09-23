@@ -651,8 +651,10 @@ const OPTIN_TEST_COMMAND_RE = /^[A-Za-z0-9][A-Za-z0-9 _./:=@+,-]{0,199}$/
 
 
 
+
+
 function hasParentPathTraversal(s) {
-  return s.split(' ').some((tok) => tok.split(/[/=,:@]/).includes('..'))
+  return /(^|[^.])\.\.([^.]|$)/.test(s)
 }
 
 
