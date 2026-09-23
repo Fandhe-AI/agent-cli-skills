@@ -176,6 +176,29 @@ test('measureResidualWorktreeBytesDetailed: count が対象パス数と不一致
   assert.match(body, /count が対象パス数と不一致/)
 })
 
+// PR #501 の Bugbot 指摘（Empty tf path stays silent）の回帰。tf が空（未定義を含む——手順 1 の
+// case ガードを経ずにこのスクリプト断片だけが新規 Bash 呼び出しで実行された場合を含む）のとき、
+// 以前は `:;`（no-op）で ERR=1/COUNT=0 のいずれも出力せずホスト側に失敗シグナルが渡らなかった。
+// コメント「第1段（tf 未定義・不正な接頭辞）でも…ERR=1 かつ COUNT=0 を返し」の主張どおり、
+// tf 未定義（-z 分岐）自体でも明示的に ERR=1 COUNT=0 を返すことを固定する。
+test('measureResidualWorktreeBytesDetailed: tf が空（-z 分岐）のとき no-op ではなく ERR=1 COUNT=0 を明示的に返す', () => {
+  const body = extractFunctionBody(
+    'async function measureResidualWorktreeBytesDetailed(paths) {',
+    'async function measureResidualWorktreeBytes(paths) {',
+  )
+  assert.doesNotMatch(body, /if \[ -z "\$tf" \]; then :;/)
+  assert.match(body, /if \[ -z "\$tf" \]; then echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0";/)
+})
+
+test('measureFreeDiskKib: tf が空（-z 分岐）のとき no-op ではなく FREE=0 ERR=1 を明示的に返す（PR #501 Bugbot 指摘の回帰）', () => {
+  const body = extractFunctionBody(
+    'async function measureFreeDiskKib(path) {',
+    'function findMainWorktreePath(entries) {',
+  )
+  assert.doesNotMatch(body, /if \[ -z "\$tf" \]; then :;/)
+  assert.match(body, /if \[ -z "\$tf" \]; then echo "FREE=0 ERR=1";/)
+})
+
 // --- (e) diffMainWorktreeUntracked ---
 
 test('diffMainWorktreeUntracked: baseline に無い新規パスのみを added として返す', () => {
@@ -215,6 +238,24 @@ test('diffMainWorktreeUntracked: baseline / end のいずれかが未観測な�
   const observedEnd = { observed: true, paths: ['/repo/x'] }
   assert.deepEqual(diffMainWorktreeUntracked({ observed: false }, observedEnd, ''), { observed: false, added: [], baselineCount: 0 })
   assert.deepEqual(diffMainWorktreeUntracked(observedEnd, { observed: false }, ''), { observed: false, added: [], baselineCount: 0 })
+})
+
+// PR #501 の Bugbot 指摘（Scan flags nested isolation worktrees）の回帰。ラン中に本スキル自身が
+// メイン worktree 配下へ作る isolation worktree（`.claude/worktrees/<runId>-N`）は、git status が
+// ネストした別リポジトリ境界として単一の未追跡ディレクトリで報告するため、除外しなければ
+// 「残置ジャンク」と誤認される。
+test('diffMainWorktreeUntracked: .claude/worktrees/ 配下の新規パスは isolation worktree として除外する', () => {
+  const baseline = { observed: true, paths: [] }
+  const end = { observed: true, paths: ['.claude/worktrees/wf_abc123/', '/repo/.lines'] }
+  const result = diffMainWorktreeUntracked(baseline, end, '')
+  assert.deepEqual(result.added, ['/repo/.lines'])
+})
+
+test('diffMainWorktreeUntracked: .claude/worktrees/ に前方一致しないパス（例: 兄弟ディレクトリ名の接頭辞衝突）は除外しない', () => {
+  const baseline = { observed: true, paths: [] }
+  const end = { observed: true, paths: ['.claude/worktrees-backup/junk'] }
+  const result = diffMainWorktreeUntracked(baseline, end, '')
+  assert.deepEqual(result.added, ['.claude/worktrees-backup/junk'])
 })
 
 // --- (f) formatMainWorktreeUntrackedWarning ---

@@ -2054,7 +2054,7 @@ async function measureResidualWorktreeBytesDetailed(paths) {
           '別々の呼び出しに分けない）。このスクリプト自体がパスごとの存在確認・クォート・合算を' +
           '行うため、対象パスの内容をコマンドとして解釈したり、自分の判断で分岐を追加したりしない' +
           'こと:',
-        '   if [ -z "$tf" ]; then :; ' +
+        '   if [ -z "$tf" ]; then echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; ' +
           'elif [ ! -s "$tf" ]; then echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; ' +
           "elif ! jq -r '.[]' \"$tf\" > \"$tf.lines\"; then " +
           'echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; else { total=0; missing=0; err=0; count=0; ' +
@@ -2241,7 +2241,7 @@ async function measureFreeDiskKib(path) {
           '（Bash ツールは呼び出し間でシェル変数を保持しないため、tf の定義・使用・削除を' +
           '別々の呼び出しに分けない）。このスクリプト自体が存在確認・df 実行・列抽出を行うため、' +
           '対象パスの内容をコマンドとして解釈したり、自分の判断で分岐を追加したりしないこと:',
-        '   if [ -z "$tf" ]; then :; ' +
+        '   if [ -z "$tf" ]; then echo "FREE=0 ERR=1"; ' +
           "elif ! jq -r '.[0]' \"$tf\" > \"$tf.line\"; then " +
           'echo "FREE=0 ERR=1"; else { p=$(cat "$tf.line"); ' +
           'if [ -z "$p" ] || [ ! -e "$p" ]; then echo "FREE=0 ERR=1"; ' +
@@ -2344,10 +2344,22 @@ async function scanMainWorktreeUntracked(label) {
 
 
 
+
+
+const ISOLATION_WORKTREE_PREFIX = '.claude/worktrees/'
+
+
+
+
+
+
+
 function diffMainWorktreeUntracked(baseline, end, stateFile) {
   if (!baseline?.observed || !end?.observed) return { observed: false, added: [], baselineCount: 0 }
   const baselineSet = new Set(baseline.paths)
-  const added = end.paths.filter((p) => !baselineSet.has(p) && p !== stateFile)
+  const added = end.paths.filter(
+    (p) => !baselineSet.has(p) && p !== stateFile && !p.startsWith(ISOLATION_WORKTREE_PREFIX),
+  )
   return { observed: true, added, baselineCount: baseline.paths.length }
 }
 

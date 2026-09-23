@@ -2054,7 +2054,7 @@ async function measureResidualWorktreeBytesDetailed(paths) {
           '別々の呼び出しに分けない）。このスクリプト自体がパスごとの存在確認・クォート・合算を' +
           '行うため、対象パスの内容をコマンドとして解釈したり、自分の判断で分岐を追加したりしない' +
           'こと:',
-        '   if [ -z "$tf" ]; then :; ' +
+        '   if [ -z "$tf" ]; then echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; ' +
           'elif [ ! -s "$tf" ]; then echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; ' +
           "elif ! jq -r '.[]' \"$tf\" > \"$tf.lines\"; then " +
           'echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; else { total=0; missing=0; err=0; count=0; ' +
@@ -2241,7 +2241,7 @@ async function measureFreeDiskKib(path) {
           '（Bash ツールは呼び出し間でシェル変数を保持しないため、tf の定義・使用・削除を' +
           '別々の呼び出しに分けない）。このスクリプト自体が存在確認・df 実行・列抽出を行うため、' +
           '対象パスの内容をコマンドとして解釈したり、自分の判断で分岐を追加したりしないこと:',
-        '   if [ -z "$tf" ]; then :; ' +
+        '   if [ -z "$tf" ]; then echo "FREE=0 ERR=1"; ' +
           "elif ! jq -r '.[0]' \"$tf\" > \"$tf.line\"; then " +
           'echo "FREE=0 ERR=1"; else { p=$(cat "$tf.line"); ' +
           'if [ -z "$p" ] || [ ! -e "$p" ]; then echo "FREE=0 ERR=1"; ' +
@@ -2339,15 +2339,27 @@ async function scanMainWorktreeUntracked(label) {
   }
 }
 
+// isolation worktree がメイン worktree 配下に作る未追跡パスの接頭辞（Issue #497 Bugbot 指摘）。
+// selectNestedLinkedWorktreePaths のコメントにある通り `<main>/.claude/worktrees/<runId>-N` に
+// 作られ、git はこれをネストした別リポジトリの境界として単一の未追跡ディレクトリ
+// （末尾 "/" 付き、--untracked-files=all でも中身は展開されない）で報告する。本スキル自身が
+// ラン中に正規に作る isolation worktree であり、削除を促す「残置ジャンク」ではないため、
+// diffMainWorktreeUntracked の added からは除外する（STATE_FILE と同じ「正規に生成される
+// パスの除外」という位置付け）。
+const ISOLATION_WORKTREE_PREFIX = '.claude/worktrees/'
+
 // baseline（ラン開始時）と end（ラン終了時）の観測差分から「本ラン中に新規出現した未追跡ファイル」
 // を求める純粋関数（テスト対象）。stateFile はホストが正規に書き込む状態ファイルであり、
 // 下流リポで _/ が gitignore されていない場合に誤検出しないよう除外する。mktemp が
 // 状態ファイル名にサフィックスを付けて作る一時ファイル（"<stateFile>.XXXXXX" 相当）は
-// 書き戻し失敗の痕跡であり続く警告対象として残す（意図的に除外しない）。
+// 書き戻し失敗の痕跡であり続く警告対象として残す（意図的に除外しない）。ISOLATION_WORKTREE_PREFIX
+// 配下のパスも同様に正規パスとして除外する（上記コメント参照）。
 function diffMainWorktreeUntracked(baseline, end, stateFile) {
   if (!baseline?.observed || !end?.observed) return { observed: false, added: [], baselineCount: 0 }
   const baselineSet = new Set(baseline.paths)
-  const added = end.paths.filter((p) => !baselineSet.has(p) && p !== stateFile)
+  const added = end.paths.filter(
+    (p) => !baselineSet.has(p) && p !== stateFile && !p.startsWith(ISOLATION_WORKTREE_PREFIX),
+  )
   return { observed: true, added, baselineCount: baseline.paths.length }
 }
 
