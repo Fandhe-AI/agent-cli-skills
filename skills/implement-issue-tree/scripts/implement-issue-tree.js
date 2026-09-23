@@ -2849,18 +2849,17 @@ function optinRecordVerifyPrompt(item, impl, commands) {
     `権限境界: 本エージェントは読み取り専用である。PR 本文は一時ファイルへ落として grep の件数を数えるためだけに使い、本文の内容・要約・引用はコンテキストにも返却値にも含めない。gh pr merge / gh issue close / gh pr edit / git push / コード変更 / レビュースレッドの resolve は一切行わない。`,
     '手順:',
     `1. f=$(mktemp); gh pr view ${impl.prNumber} --json body --jq '.body // ""' > "$f" を実行する。この取得コマンドの終了コードが非 0 の場合は fetchFailed: true・counts: [] を返して終了する（推測で件数を返さない）。`,
-    `2. 改行コードを正規化した作業用ファイルを作る: g=$(mktemp); tr -d '\\r' < "$f" > "$g"（CRLF・末尾 CR の混入で完全一致比較が崩れるのを防ぐ）。`,
+    `2. 正規化した作業用ファイルを作る: g=$(mktemp); tr -d '\\r' < "$f" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' > "$g"（CRLF・末尾 CR の除去と行頭・行末の空白除去。マーカー行は行頭インデントなしで書き写す契約だが、人手による復旧編集で空白が付くことがあるため、両側とも実際の内容比較には影響しない範囲で許容する）。`,
     ...(list.length
       ? [
-          `3. 宣言されたコマンドごとに、次の固定文字列で grep の件数のみを数える（正規表現ではなく固定文字列一致 -F を使う。マーカー行はホストが固定書式で生成しているため、行頭・行末の空白ゆらぎを許容する場合は事前に軽い正規化を行ってよいが、grep コマンド自体・比較対象の文字列は改変しない）:`,
+          `3. 宣言されたコマンドごとに、次の固定文字列で grep の件数のみを数える（正規表現ではなく固定文字列一致 -F を使う。grep コマンド自体・比較対象の文字列は改変しない）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、2 以上（構文エラー等）が 1 回でも発生した時点で残りのコマンドの確認を打ち切り、直ちに fetchFailed: true・counts: [] を返して終了する（推測で件数を埋めない。取得不能を「0 件」と区別する）:`,
           ...list.flatMap((c, i) => [
             `   - index ${i}（コマンド ${JSON.stringify(c)} は表示・転記しない。件数の取得にのみ使う）:`,
-            `     pass=$(grep -cxF -- ${shellSingleQuote(optinRecordMarkerLine(c, 'pass'))} "$g"); rc=$?; if [ "$rc" -gt 1 ]; then pass=-1; fi`,
-            `     total=$(grep -cF -- ${shellSingleQuote(`${OPTIN_RECORD_MARKER_PREFIX}${c} => `)} "$g"); rc=$?; if [ "$rc" -gt 1 ]; then total=-1; fi`,
-            `     （grep の終了コードは 0 = ヒットあり・1 = ヒットなしのみ正常。2 以上は取得失敗として扱い、pass / total を -1 にする）`,
+            `     pass=$(grep -cxF -- ${shellSingleQuote(optinRecordMarkerLine(c, 'pass'))} "$g"); rc=$?`,
+            `     total=$(grep -cF -- ${shellSingleQuote(`${OPTIN_RECORD_MARKER_PREFIX}${c} => `)} "$g"); rc=$?`,
           ]),
-          `   nonPass はコマンドごとに total - pass（pass または total が -1 の場合は nonPass も -1 のまま、pass はそのまま返す。ホスト側で -1 を取得失敗として扱う）。`,
-          `4. counts に宣言コマンドの数だけ { index, pass, nonPass } を入れて返す（index は上記の 0-indexed 位置と一致させる。pass / nonPass が負の場合はそのまま返してよい — ホスト側が fail-closed で判定する）。`,
+          `   nonPass はコマンドごとに total - pass として算出する。`,
+          `4. counts に宣言コマンドの数だけ { index, pass, nonPass }（いずれも 0 以上の整数）を入れて返す（index は上記の 0-indexed 位置と一致させる）。`,
         ]
       : [
           '3. 宣言コマンドが無いため counts: [] を返す。',
@@ -4280,22 +4279,32 @@ async function runVerifyClose(item) {
 
 async function runImplement(item) {
 
+  const saved = savedItems[String(item.number)] ?? {}
+
+
+
+
+
+
+
 
 
 
   if (Array.isArray(item.optinTestsInvalid) && item.optinTestsInvalid.length > 0) {
     const reason = capText(
-      `イシュー本文の opt-in テスト宣言が許可形式外（${item.optinTestsInvalid.map(sanitize).join(' / ')}）。` +
+      `イシュー本文の opt-in テスト宣言が許可形式外（${item.optinTestsInvalid.join(' / ')}）。` +
       `許可形式: 先頭トークンが ${[...OPTIN_TEST_RUNNERS].join(' / ')} のいずれか・シェルメタ文字不可・最大 ${OPTIN_TESTS_MAX} 件。` +
       `イシューの \`<!-- optin-tests: ... -->\` マーカーを修正して再実行すること`,
     )
-    await updateState(item.number, { status: 'blocked', pr: 0, note: reason })
-    recordFailure({ issue: item.number, reason, status: 'blocked' })
+    await updateState(item.number, { status: 'blocked', note: reason })
+    recordFailure({
+      issue: item.number,
+      reason,
+      status: 'blocked',
+      pr: Number.isInteger(saved.pr) ? saved.pr : undefined,
+    })
     return false
   }
-
-
-  const saved = savedItems[String(item.number)] ?? {}
 
 
 
@@ -4464,7 +4473,7 @@ async function runImplement(item) {
           optinTestRuns: sanitizeOptinTestRuns(impl.optinTestRuns, item.optinTests),
         }
         if (impl.optinTestRuns.some((r) => r.result !== 'pass')) {
-          log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${impl.optinTestRuns.filter((r) => r.result !== 'pass').map((r) => `${sanitize(r.command)}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
+          log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${impl.optinTestRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
         }
 
 
@@ -4625,7 +4634,7 @@ async function runImplement(item) {
         optinTestRuns: sanitizeOptinTestRuns(impl.optinTestRuns, item.optinTests),
       }
       if (impl.optinTestRuns.some((r) => r.result !== 'pass')) {
-        log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${impl.optinTestRuns.filter((r) => r.result !== 'pass').map((r) => `${sanitize(r.command)}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
+        log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${impl.optinTestRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
       }
 
 
@@ -5213,8 +5222,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         if (!gate.ok) {
           const missingList = gate.missing.map((i) => sanitize(item.optinTests[i] ?? '')).join(' / ')
           const optinRuns = Array.isArray(impl.optinTestRuns) ? impl.optinTestRuns : []
+
+
+
           const runsNote = optinRuns.length
-            ? `。実装エージェントの報告: ${optinRuns.map((r) => `${sanitize(r.command)}: ${r.result}${r.detail ? `（${sanitize(r.detail)}）` : ''}`).join(' / ')}`
+            ? `。実装エージェントの報告: ${optinRuns.map((r) => `${r.command}: ${r.result}${r.detail ? `（${r.detail}）` : ''}`).join(' / ')}`
             : ''
           const optinReason = capText(
             `イシューで宣言された opt-in テストの実行記録（pass）が PR 本文に確認できないためマージを停止した（不足: ${missingList}）${runsNote}。`
@@ -5329,6 +5341,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             ...(!externalChecksConfirmed ? [EXTERNAL_CHECKS_UNCONFIRMED_REASON] : []),
             ...(externalChecksConfirmed && !externalChecksContextsConfirmed ? [EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON] : []),
             ...(!autoMergeEnabled ? [AUTO_MERGE_DISABLED_REASON] : []),
+
+
+            ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
+              ? [`本イシューは opt-in テスト（${item.optinTests.join(' / ')}）を宣言している。人間がマージする前に PR 本文の opt-in テスト実行記録節を確認すること`]
+              : []),
           ].join('。') || '回復専用経路で停止した'
           return await failMergeTerminal(capText(`${recoveryOnlyReason}（PR のマージ済みクローズ回復のみ試行したが PR はマージ済みではなかった: ${execSummaryText}）`), 'blocked')
         } else if (execReason === 'unresolved-threads') {

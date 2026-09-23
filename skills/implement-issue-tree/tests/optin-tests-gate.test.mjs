@@ -267,17 +267,21 @@ test('mergeExecutePrompt に optin 関連文字列と --json body が含まれ�
 // 群 F: 実行レベル（optinRecordVerifyPrompt と同じ grep 手順をシェルで再現）
 // ---------------------------------------------------------------------------
 
+// optinRecordVerifyPrompt 手順 2 の正規化パイプライン（tr -d '\r' | sed 行頭・行末空白除去）を
+// そのまま再現する。行頭インデント・CRLF が付いたマーカー行でも一致することを検証するのが目的。
 function grepPassNonPass(bodyText, command) {
   const passLine = optinRecordMarkerLine(command, 'pass')
   const prefix = `${OPTIN_RECORD_MARKER_PREFIX}${command} => `
   const script = `
+f=$(mktemp)
 g=$(mktemp)
-tr -d '\\r' > "$g" <<'BODYEOF'
+cat > "$f" <<'BODYEOF'
 ${bodyText}
 BODYEOF
-pass=$(grep -cxF -- "$1" "$g"); rc=$?; [ "$rc" -gt 1 ] && pass=-1 || true
-total=$(grep -cF -- "$2" "$g"); rc=$?; [ "$rc" -gt 1 ] && total=-1 || true
-rm -f "$g"
+tr -d '\\r' < "$f" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' > "$g"
+pass=$(grep -cxF -- "$1" "$g")
+total=$(grep -cF -- "$2" "$g")
+rm -f "$f" "$g"
 echo "$pass $total"
 `
   const out = execFileSync('bash', ['-c', script, 'bash', passLine, prefix], { encoding: 'utf8' })
@@ -295,10 +299,10 @@ test('実行レベル: not-run 行のみ → pass=0 / nonPass=1', () => {
   assert.deepEqual(grepPassNonPass(body, 'make e2e'), { pass: 0, nonPass: 1 })
 })
 
-test('実行レベル: 行頭インデントと CRLF 付きの pass 行 → pass=1 / nonPass=0', () => {
-  const body = `   ${optinRecordMarkerLine('make e2e', 'pass')}\r\n`.trimStart()
-  // grep -x は行全体一致のため行頭インデントは除去した状態で埋め込む（マーカー行は行頭
-  // インデントなしで書き写す契約 — prCreatePrompt の指示と一致）。CRLF は tr -d '\r' で除去される。
+test('実行レベル: 行頭インデントと CRLF 付きの pass 行 → 正規化後に pass=1 / nonPass=0', () => {
+  // 行頭インデントは trim しない（正規化パイプライン自体の空白除去を検証するため）。
+  // 人手による復旧編集（PR 本文をエディタで書き換える際に字下げが付く等）でも一致することを示す。
+  const body = `   ${optinRecordMarkerLine('make e2e', 'pass')}\r\n`
   assert.deepEqual(grepPassNonPass(body, 'make e2e'), { pass: 1, nonPass: 0 })
 })
 
