@@ -795,6 +795,37 @@ function sanitizeOptinTestRuns(raw, declared) {
   )
 }
 
+// 状態ファイルへ永続化した post-push fix の opt-in 実測（`optinFixState`。runMergeLoop の
+// updateState 呼び出しが `{ attempted: true, runs: sanitizeOptinTestRuns(...) }` の形で書く）を
+// monitoring 再開時に復元する純粋関数（PR #503 2 巡目 codex P0）。lastFixOptinRuns はプロセス
+// ローカルの let のため、monitoring/blocked からの再開（別プロセス起動）では失われて null に
+// 戻っていた（誤って「fail-closed 側へ寄る」とコメントされていたが、実際は combineOptinRecordGate
+// が null を「fix 未実施」として PR 本文のみで判定する fail-open 側の初期値だったため誤り）。
+// 復元は fail-closed を維持する 3 分岐:
+//   1. 宣言（declaredOptinTests）が空 → ゲート自体が無効なので null（従来どおり)。
+//   2. `optinFixState.attempted !== true` → この PR で post-push fix を一度も実行していない
+//      （新規 PR・fix 未実施の再開）ので null（PR 本文のみの従来判定に委ねる。fix 実施済み
+//      の証拠が無いのに不合格に倒すと、宣言なしと同じ既定無効の意味が壊れる）。
+//   3. attempted === true だが `runs` を復元できない（キー欠落・非配列・状態ファイル読取失敗
+//      で saved 自体が {} 等）→ 宣言コマンド全件を not-run とみなす合成配列を返す（fail-closed。
+//      「実行した記録はあるが結果が読めない」を pass 相当として扱わない）。
+//   4. attempted === true かつ runs が配列 → sanitizeOptinTestRuns で再検証して返す
+//      （宣言集合が再開時に変わっていても、新しい宣言集合に基づいて not-run 補完される）。
+function restoreOptinFixState(saved, declaredOptinTests) {
+  const declaredList = Array.isArray(declaredOptinTests) ? declaredOptinTests : []
+  if (declaredList.length === 0) return null
+  const state = saved && typeof saved === 'object' ? saved.optinFixState : null
+  if (!state || typeof state !== 'object' || state.attempted !== true) return null
+  if (!Array.isArray(state.runs)) {
+    return declaredList.map((command) => ({
+      command,
+      result: 'not-run',
+      detail: '状態ファイルから post-push fix の opt-in 実測を復元できなかった（再開時の fail-closed）',
+    }))
+  }
+  return sanitizeOptinTestRuns(state.runs, declaredList)
+}
+
 // PR 本文へ追記する「opt-in テスト実行記録」節。runs が空（宣言なし）なら空文字を返し、
 // prCreatePrompt の出力を無変更に保つ（R3）。
 function renderOptinRecordSection(runs) {
@@ -5812,6 +5843,8 @@ async function runImplement(item) {
 
   // monitoring 再開パス: Review をスキップして monitor ループから再開。outOfScopeLog 等も
   // 検証付きで復元して渡す（渡さないと再開で対象外記録・未解決コメント情報が失われる）。
+  // initialPushMergeable は意図的に渡さない（上記コメント参照。永続値は stale）。
+  // initialFixOptinRuns は restoreOptinFixState で復元する（PR #503 2 巡目 codex P0）。
   return await runMergeLoop(
     item,
     impl,
@@ -5822,6 +5855,8 @@ async function runImplement(item) {
     restoreUnresolvedComments(saved.lastUnresolvedComments),
     sanitizeOutOfScopeSeen(saved.outOfScopeSeen),
     savedBaseMergeCount,
+    undefined,
+    restoreOptinFixState(saved, item.optinTests),
   )
 }
 
@@ -5831,7 +5866,10 @@ async function runImplement(item) {
 // initialPushMergeable: pr-create の push 直後 CI 起動確認が返した mergeableAfterPush（Issue
 // #479。'CONFLICTING' のときだけ最初のラウンドを monitor 非起動の seed ラウンドにする）。
 // monitoring 再開パスからは渡さない（永続値は stale であり、再開時は monitor が実観測する）。
-async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '') {
+// initialFixOptinRuns: monitoring 再開パスのみ restoreOptinFixState(saved, item.optinTests) の
+// 復元結果を渡す（PR #503 2 巡目 codex P0）。新規 impl パスは常に既定の null（新規コミット列
+// のためこの PR での post-push fix 実測は存在しない）。
+async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptinRuns = null) {
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -5888,13 +5926,22 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // expectedRepo 未確定ガード・上限到達時の quality+blocked 終端もそのまま効く）。立てられる
   // 回数も pr-create 1 回 + fix 回数（<= 6）に有界。
   let pendingPushConflict = normalizePushMergeable(initialPushMergeable) === 'CONFLICTING'
-  // Issue #495 Medium 2: 直近の post-push fix（pushAfterFix: true）が再実行した opt-in テスト
-  // 結果（sanitizeOptinTestRuns 適用済み）。マージ前ゲートで PR 本文ベースの
-  // classifyOptinRecordGate と AND する独立判定材料として使う（combineOptinRecordGate）。
-  // このループ内で post-push fix を一度も実行していない間は null のまま（PR 本文ベースの
-  // 従来判定のみに委ねる）。プロセス内メモリのみで保持し状態ファイルへは永続化しない
-  // （resolveProof と同じ理由: resume 直後は null に戻って fail-closed 側へ寄る設計でよい）。
-  let lastFixOptinRuns = null
+  // Issue #495 Medium 2 → PR #503 2 巡目 codex P0: 直近の post-push fix（pushAfterFix: true）が
+  // 再実行した opt-in テスト結果（sanitizeOptinTestRuns 適用済み）。マージ前ゲートで PR 本文
+  // ベースの classifyOptinRecordGate と AND する独立判定材料として使う（combineOptinRecordGate）。
+  // このループ内で post-push fix を一度も実行していない間は null のまま（PR 本文ベースの従来
+  // 判定のみに委ねる）。
+  //
+  // 初期値は呼び出し元の initialFixOptinRuns（monitoring 再開パスのみ restoreOptinFixState で
+  // 状態ファイルから復元して渡す。新規 impl パスは常に null）を引き継ぐ。旧コメントは
+  // 「プロセス内メモリのみで保持し状態ファイルへは永続化しない」「resume 直後は null に戻って
+  // fail-closed 側へ寄る」としていたが誤りだった: combineOptinRecordGate は
+  // lastFixOptinRuns === null を「fix 未実施」として PR 本文のみで判定する fail-open 側の
+  // 既定値として扱うため、post-push fix が非 pass を報告した直後に再開すると、PR 本文更新
+  // （optinRecordUpdateInstructions）が失敗・省略されているケースで古い pass マーカーだけで
+  // 自動マージが通り得た。updateState 経由の永続化（下の fix 実行後ブロック参照）と
+  // restoreOptinFixState による復元でこれを塞ぐ。
+  let lastFixOptinRuns = initialFixOptinRuns
   // merge-exec が unresolved-threads（件数のみ）を検出したのに一覧が手元にないとき true。
   // 次ラウンドの monitor へ強制再走査を指示し、unresolved-comments/ready で解除する（件数・
   // reason のみを根拠に立てる）。
@@ -6641,17 +6688,28 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       const fixPushMergeable = normalizePushMergeable(f.mergeableAfterPush)
       pendingPushConflict = f.pushed === true && fixPushMergeable === 'CONFLICTING'
       log(`#${item.number}: fix の push 直後 CI 起動確認（自己申告・マージ判定には未使用） pushed=${f.pushed === true} checksStarted=${fixChecksStarted} mergeableAfterPush=${fixPushMergeable}`)
-      // opt-in テスト記録ゲート（Issue #495 Medium 2）: post-push fix が再実行した結果を
-      // lastFixOptinRuns へ保持し、マージ前ゲート（combineOptinRecordGate）の独立判定材料に
-      // する。PR 本文更新（optinRecordUpdateInstructions）が失敗・省略された場合でも、
-      // ここで保持した実測結果が PR 本文の古い pass マーカーより優先されるため fail-open にならない。
-      // f.pushed === true（積んだコミットが実際にリモート HEAD へ反映済みと確認できた場合のみ。
-      // 手順 4 の 2 条件判定と同じ根拠）の場合のみ更新する。pushed: false のラウンド（変更なし・
-      // resolve のみ等）はテスト対象のコード状態がリモート HEAD に反映されていないため、
-      // 直前の pushed: true ラウンドの記録を保持し続ける（上書きしない）。
+      // opt-in テスト記録ゲート（Issue #495 Medium 2 → PR #503 2 巡目 codex P0）: post-push fix
+      // が再実行した結果を lastFixOptinRuns へ保持し、マージ前ゲート（combineOptinRecordGate）の
+      // 独立判定材料にする。PR 本文更新（optinRecordUpdateInstructions）が失敗・省略された場合
+      // でも、ここで保持した実測結果が PR 本文の古い pass マーカーより優先されるため fail-open
+      // にならない。f.pushed === true（積んだコミットが実際にリモート HEAD へ反映済みと確認
+      // できた場合のみ。手順 4 の 2 条件判定と同じ根拠）の場合のみ更新する。pushed: false の
+      // ラウンド（変更なし・resolve のみ等）はテスト対象のコード状態がリモート HEAD に反映
+      // されていないため、直前の pushed: true ラウンドの記録を保持し続ける（上書きしない）。
+      //
+      // lastFixOptinRuns はプロセスローカルの let のため、monitoring/blocked からの再開
+      // （別プロセス起動）では失われ null に戻っていた。この状態で PR 本文更新が失敗・省略
+      // されていると、次回ランは古い pass マーカーだけで combineOptinRecordGate を通過し
+      // 自動マージし得た（PR #503 2 巡目 codex P0）。optinFixStatePatch を下の updateState で
+      // 状態ファイルへ永続化し、runMergeLoop の呼び出し元（monitoring 再開パス）が
+      // restoreOptinFixState で復元して initialFixOptinRuns として引き継ぐことで塞ぐ。
+      let optinFixStatePatch
       if (Array.isArray(item.optinTests) && item.optinTests.length > 0) {
         const fixOptinRuns = sanitizeOptinTestRuns(f.optinTestRuns, item.optinTests)
-        if (f.pushed === true) lastFixOptinRuns = fixOptinRuns
+        if (f.pushed === true) {
+          lastFixOptinRuns = fixOptinRuns
+          optinFixStatePatch = { attempted: true, runs: fixOptinRuns }
+        }
         if (fixOptinRuns.some((r) => r.result !== 'pass')) {
           log(`⚠️ #${item.number}: post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。マージ前ゲートで不合格として扱う`)
         }
@@ -6729,9 +6787,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡不能。git worktree prune での手動掃除が必要な場合あり`)
       }
       // fix 実行後: fixCount・新 worktree・追跡データ（outOfScopeLog / lastUnresolved* /
-      // outOfScopeSeen）を更新し旧 worktree を削除する（中断・再起動後も復元でき記録が失われない）。
-      // 非終端の updateState はこの fix 直後の 1 箇所で足りる。
-      await updateState(item.number, { fixCount, baseMergeCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, pushChecksStarted: fixChecksStarted, pushMergeable: fixPushMergeable }, { cleanupWorktree: oldWorktreePath })
+      // outOfScopeSeen / optinFixState）を更新し旧 worktree を削除する（中断・再起動後も復元でき
+      // 記録が失われない）。非終端の updateState はこの fix 直後の 1 箇所で足りる。
+      // optinFixStatePatch は宣言済みかつ今ラウンド pushed: true の場合のみ設定される
+      // （undefined のキーは JSON.stringify で落ちるため、それ以外のラウンドは patch から
+      // optinFixState を省略し既存の永続化値をそのまま保持する — updateState はオブジェクト
+      // マージのため patch に無いキーは上書きされない）。
+      await updateState(item.number, { fixCount, baseMergeCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, pushChecksStarted: fixChecksStarted, pushMergeable: fixPushMergeable, optinFixState: optinFixStatePatch }, { cleanupWorktree: oldWorktreePath })
       // push 成功、または push なしでも新規スレッド resolve があれば進捗ありとしてリセット
       // する（判定根拠と停止性は advanceNoPushRounds のコメント参照）。
       noPushRounds = advanceNoPushRounds(noPushRounds, f.pushed === true, newlyResolvedThisRound)

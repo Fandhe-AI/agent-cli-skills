@@ -30,6 +30,7 @@ const SLICE_EXPORTS = [
   'parseOptinTestCommands',
   'parseOptinTestDeclarations',
   'sanitizeOptinTestRuns',
+  'restoreOptinFixState',
   'renderOptinRecordSection',
   'optinRecordMarkerLine',
   'classifyOptinRecordGate',
@@ -62,6 +63,7 @@ const {
   parseOptinTestCommands,
   parseOptinTestDeclarations,
   sanitizeOptinTestRuns,
+  restoreOptinFixState,
   renderOptinRecordSection,
   optinRecordMarkerLine,
   classifyOptinRecordGate,
@@ -376,6 +378,69 @@ test('combineOptinRecordGate: PR 本文ゲートと fix 実測の missing 集合
 })
 
 // ---------------------------------------------------------------------------
+// 群 D3: restoreOptinFixState（optinFixState の状態ファイル復元。PR #503 2 巡目 codex P0）
+// ---------------------------------------------------------------------------
+
+test('restoreOptinFixState: 宣言なしは常に null（ゲート自体が無効）', () => {
+  assert.equal(restoreOptinFixState({ optinFixState: { attempted: true, runs: [] } }, []), null)
+  assert.equal(restoreOptinFixState({ optinFixState: { attempted: true, runs: [] } }, undefined), null)
+})
+
+test('restoreOptinFixState: optinFixState が無い・attempted が true でない場合は null（fix 未実施）', () => {
+  assert.equal(restoreOptinFixState({}, ['make e2e']), null)
+  assert.equal(restoreOptinFixState({ optinFixState: null }, ['make e2e']), null)
+  assert.equal(restoreOptinFixState({ optinFixState: { attempted: false, runs: [] } }, ['make e2e']), null)
+  assert.equal(restoreOptinFixState(undefined, ['make e2e']), null)
+})
+
+test('restoreOptinFixState: 永続化した pass 記録をラウンドトリップで復元する', () => {
+  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'pass', detail: '' }] } }
+  assert.deepEqual(restoreOptinFixState(saved, ['make e2e']), [{ command: 'make e2e', result: 'pass', detail: '' }])
+})
+
+test('restoreOptinFixState: attempted: true なのに runs が欠落・非配列なら宣言全件を not-run へ倒す（fail-closed）', () => {
+  for (const state of [{ attempted: true }, { attempted: true, runs: null }, { attempted: true, runs: 'x' }]) {
+    const restored = restoreOptinFixState({ optinFixState: state }, ['make e2e', 'cargo test'])
+    assert.deepEqual(restored.map((r) => [r.command, r.result]), [['make e2e', 'not-run'], ['cargo test', 'not-run']])
+  }
+})
+
+test('restoreOptinFixState: 宣言外の永続化コマンドは復元後の一覧から落ち、宣言済みで欠落しているものは not-run 補完する', () => {
+  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make old', result: 'pass', detail: '' }] } }
+  const restored = restoreOptinFixState(saved, ['make new'])
+  assert.deepEqual(restored, [{ command: 'make new', result: 'not-run', detail: '実装エージェントの報告なし' }])
+})
+
+test('統合: 再開後に永続化した fix 実測が fail のまま残っていれば PR 本文が pass でもゲート不合格', () => {
+  const saved = { optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'fail', detail: 'timeout' }] } }
+  const restored = restoreOptinFixState(saved, ['make e2e'])
+  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored), { ok: false, missing: [0] })
+})
+
+test('統合: fix 実施済みで復元不能（state 破損）なら PR 本文が pass でもゲート不合格', () => {
+  const restored = restoreOptinFixState({ optinFixState: { attempted: true } }, ['make e2e'])
+  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored), { ok: false, missing: [0] })
+})
+
+test('統合: fix 未実施の再開は従来どおり PR 本文のみで判定する（restoreOptinFixState が null を返す）', () => {
+  const restored = restoreOptinFixState({}, ['make e2e'])
+  assert.equal(restored, null)
+  const bodyGateOk = classifyOptinRecordGate(['make e2e'], { counts: [{ index: 0, pass: 1, nonPass: 0 }] })
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored), bodyGateOk)
+  const bodyGateMissing = classifyOptinRecordGate(['make e2e'], null)
+  assert.deepEqual(combineOptinRecordGate(bodyGateMissing, restored), bodyGateMissing)
+})
+
+test('統合: 宣言なしイシューは再開後も restoreOptinFixState が null を返し combineOptinRecordGate は無介入', () => {
+  const restored = restoreOptinFixState({ optinFixState: { attempted: true, runs: [{ command: 'make e2e', result: 'fail', detail: '' }] } }, [])
+  assert.equal(restored, null)
+  const bodyGateOk = classifyOptinRecordGate([], null)
+  assert.deepEqual(combineOptinRecordGate(bodyGateOk, restored), bodyGateOk)
+})
+
+// ---------------------------------------------------------------------------
 // 群 E: プロンプト契約
 // ---------------------------------------------------------------------------
 
@@ -544,4 +609,18 @@ test('駆動部: runImplement 冒頭で optinTestsInvalid を参照する', () =
   const implIdx = driverPart.indexOf('async function runImplement')
   const invalidIdx = driverPart.indexOf('optinTestsInvalid', implIdx)
   assert.ok(implIdx >= 0 && invalidIdx >= 0 && invalidIdx - implIdx < 800)
+})
+
+test('駆動部: post-push fix 直後の updateState が optinFixState を含む（PR #503 2 巡目 codex P0）', () => {
+  assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: fixOptinRuns \}/)
+  assert.match(driverPart, /updateState\(item\.number, \{ fixCount, baseMergeCount, worktree: currentWorktreePath,/)
+  assert.match(driverPart, /optinFixState: optinFixStatePatch \}, \{ cleanupWorktree: oldWorktreePath \}\)/)
+})
+
+test('駆動部: monitoring 再開パスが restoreOptinFixState(saved, item.optinTests) を runMergeLoop の initialFixOptinRuns へ渡す', () => {
+  assert.match(driverPart, /restoreOptinFixState\(saved, item\.optinTests\)/)
+})
+
+test('駆動部: runMergeLoop の lastFixOptinRuns 初期値は initialFixOptinRuns を引き継ぐ（null 固定ではない）', () => {
+  assert.match(driverPart, /let lastFixOptinRuns = initialFixOptinRuns/)
 })

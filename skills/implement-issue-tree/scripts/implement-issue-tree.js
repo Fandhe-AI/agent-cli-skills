@@ -797,6 +797,37 @@ function sanitizeOptinTestRuns(raw, declared) {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function restoreOptinFixState(saved, declaredOptinTests) {
+  const declaredList = Array.isArray(declaredOptinTests) ? declaredOptinTests : []
+  if (declaredList.length === 0) return null
+  const state = saved && typeof saved === 'object' ? saved.optinFixState : null
+  if (!state || typeof state !== 'object' || state.attempted !== true) return null
+  if (!Array.isArray(state.runs)) {
+    return declaredList.map((command) => ({
+      command,
+      result: 'not-run',
+      detail: '状態ファイルから post-push fix の opt-in 実測を復元できなかった（再開時の fail-closed）',
+    }))
+  }
+  return sanitizeOptinTestRuns(state.runs, declaredList)
+}
+
+
+
 function renderOptinRecordSection(runs) {
   const list = Array.isArray(runs) ? runs : []
   if (list.length === 0) return ''
@@ -5812,6 +5843,8 @@ async function runImplement(item) {
 
 
 
+
+
   return await runMergeLoop(
     item,
     impl,
@@ -5822,6 +5855,8 @@ async function runImplement(item) {
     restoreUnresolvedComments(saved.lastUnresolvedComments),
     sanitizeOutOfScopeSeen(saved.outOfScopeSeen),
     savedBaseMergeCount,
+    undefined,
+    restoreOptinFixState(saved, item.optinTests),
   )
 }
 
@@ -5831,7 +5866,10 @@ async function runImplement(item) {
 
 
 
-async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '') {
+
+
+
+async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptinRuns = null) {
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -5894,7 +5932,16 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
-  let lastFixOptinRuns = null
+
+
+
+
+
+
+
+
+
+  let lastFixOptinRuns = initialFixOptinRuns
 
 
 
@@ -6649,9 +6696,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
+
+
+
+
+
+
+
+      let optinFixStatePatch
       if (Array.isArray(item.optinTests) && item.optinTests.length > 0) {
         const fixOptinRuns = sanitizeOptinTestRuns(f.optinTestRuns, item.optinTests)
-        if (f.pushed === true) lastFixOptinRuns = fixOptinRuns
+        if (f.pushed === true) {
+          lastFixOptinRuns = fixOptinRuns
+          optinFixStatePatch = { attempted: true, runs: fixOptinRuns }
+        }
         if (fixOptinRuns.some((r) => r.result !== 'pass')) {
           log(`⚠️ #${item.number}: post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。マージ前ゲートで不合格として扱う`)
         }
@@ -6731,7 +6789,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
-      await updateState(item.number, { fixCount, baseMergeCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, pushChecksStarted: fixChecksStarted, pushMergeable: fixPushMergeable }, { cleanupWorktree: oldWorktreePath })
+
+
+
+
+      await updateState(item.number, { fixCount, baseMergeCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, pushChecksStarted: fixChecksStarted, pushMergeable: fixPushMergeable, optinFixState: optinFixStatePatch }, { cleanupWorktree: oldWorktreePath })
 
 
       noPushRounds = advanceNoPushRounds(noPushRounds, f.pushed === true, newlyResolvedThisRound)

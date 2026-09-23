@@ -114,7 +114,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 
 宣言が採用されたイシューでは、Implement / 回復 Implement エージェントが各コマンドの実行と結果報告（`optinTestRuns`）を必須手順として行う。実行していないものを pass と報告することは禁止し、環境要因で実行できない場合は `not-run` と理由を返す。PR 本文には「## opt-in テスト実行記録」節と、コマンドごとの機械可読マーカー行（`<!-- optin-test-record: <コマンド> => <pass|fail|not-run> -->`）が追記される。
 
-マージ前（新規マージ経路のみ。`recoveryOnly` では適用しない）に、宣言コマンドごとに PR 本文の pass マーカー行が 1 件以上・pass 以外のマーカー行が 0 件であることを、読み取り専用の記録検証エージェントが件数のみで確認する（本文テキスト自体はコンテキスト・返却値に載せない。merge-exec と同じコンテキスト分離契約）。不足があればマージせず `blocked`（`blockedReason: quality`）で停止し、終端理由に不足コマンドを明記する。復旧手順は [references/recovery.md](references/recovery.md) を参照。
+マージ前（新規マージ経路のみ。`recoveryOnly` では適用しない）に、宣言コマンドごとに PR 本文の pass マーカー行が 1 件以上・pass 以外のマーカー行が 0 件であることを、読み取り専用の記録検証エージェントが件数のみで確認する（本文テキスト自体はコンテキスト・返却値に載せない。merge-exec と同じコンテキスト分離契約）。不足があればマージせず `blocked`（`blockedReason: quality`）で停止し、終端理由に不足コマンドを明記する。**この PR 本文ベースの判定は、Merge ループの post-push fix が再実行した実測（`optinFixState`。状態ファイルへ永続化し monitoring 再開時に復元する。PR #503 2 巡目 codex P0）と AND で重ねられる**: fix の実測に非 pass が 1 件でも残っていれば、PR 本文が pass のままでも不合格として扱う（PR 本文更新の失敗・省略による fail-open を防ぐ）。復旧手順は [references/recovery.md](references/recovery.md) を参照。
 
 ### 自動マージのサーバー側委譲と merge-guard hook（deny 専用・best-effort）
 

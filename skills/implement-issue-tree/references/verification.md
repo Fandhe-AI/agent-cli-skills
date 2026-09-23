@@ -347,14 +347,21 @@ node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
 
 `scripts/implement-issue-tree.src.js` の opt-in テスト記録ゲート（`validateOptinCommandForm` /
 `parseOptinTestCommands`（`args.optinTestCommands` の起動時検証。PR #503 codex P0） /
-`parseOptinTestDeclarations` / `sanitizeOptinTestRuns` / `renderOptinRecordSection` /
-`classifyOptinRecordGate` / `optinRecordVerifyPrompt`）を変更した場合の確認手順。
+`parseOptinTestDeclarations` / `sanitizeOptinTestRuns` / `restoreOptinFixState`（`optinFixState`
+の状態ファイル復元。PR #503 2 巡目 codex P0） / `renderOptinRecordSection` /
+`classifyOptinRecordGate` / `combineOptinRecordGate` / `optinRecordVerifyPrompt`）を変更した
+場合の確認手順。
 
 ```bash
 # 1. merge-exec のコンテキスト分離契約（Issue #145 / #160）が退行していないこと。
-#    mergeExecutePrompt は本文取得コマンドを含まない（0 件であること）。
-grep -c 'optin' skills/implement-issue-tree/scripts/implement-issue-tree.src.js
-grep -n 'function mergeExecutePrompt' skills/implement-issue-tree/scripts/implement-issue-tree.src.js
+#    mergeExecutePrompt の関数本体（定義開始行から次のトップレベル function 定義の直前まで）に
+#    本文取得コマンドを含まない（0 件であること）。ファイル全体への grep -c は、契約上は
+#    optin 関連文字列を含んでよい他の関数（fixPrompt 等）にヒットしても検知できず、関数本体の
+#    退行を見逃すため使わない（PR #503 2 巡目 Bugbot Medium）。
+awk '/^function mergeExecutePrompt\(/{f=1;print;next} f&&/^function /{exit} f' \
+  skills/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c 'optin'
+awk '/^function mergeExecutePrompt\(/{f=1;print;next} f&&/^function /{exit} f' \
+  skills/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c -- '--json body'
 
 # 2. マージ前ゲートが新規マージ経路（!recoveryOnly）にのみ配線されていること。
 grep -n 'optinRecordVerifyPrompt(' skills/implement-issue-tree/scripts/implement-issue-tree.src.js
@@ -368,10 +375,12 @@ wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
 node --test skills/implement-issue-tree/tests/optin-tests-gate.test.mjs
 ```
 
-期待結果: 手順 1 の `mergeExecutePrompt` 定義範囲に `optin` 文字列・`--json body` が含まれないこと
-（コンテキスト分離の非退行）。手順 2 の `optinRecordVerifyPrompt(` 呼び出しがドライバ部に 1 箇所のみ。
-手順 3 のビルドが `--check` 通過・500,000 B 未満。手順 4 が全 pass・fail 0（宣言なしイシューでの
-プロンプト出力完全一致テストを含む＝既定無効の確認）。
+期待結果（手順 1 は本ファイル更新時点で実測済み。関数本体 135 行を抽出し、`optin`・`--json body`
+いずれも 0 件）: 手順 1 のいずれのコマンドも出力 `0`（`mergeExecutePrompt` の関数本体に `optin`
+文字列・`--json body` が含まれないこと。コンテキスト分離の非退行）。手順 2 の
+`optinRecordVerifyPrompt(` 呼び出しがドライバ部に 1 箇所のみ。手順 3 のビルドが `--check` 通過・
+500,000 B 未満。手順 4 が全 pass・fail 0（宣言なしイシューでのプロンプト出力完全一致テストを
+含む＝既定無効の確認）。
 
 ### state 書込みエージェントの StructuredOutput 未返却 fail-safe（Issue #493）
 

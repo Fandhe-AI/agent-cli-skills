@@ -575,6 +575,27 @@ Issue 本文・PR 本文・レビュー本文を一切読まないコンテキ�
 従来どおり G0（サーバー側 branch protection の実測）が担い、本ゲートはそれに重ねる手続き上の
 確認にすぎない。
 
+**post-push fix の実測の永続化（`optinFixState`。PR #503 2 巡目 codex P0）**: Merge ループの
+post-push fix（`pushAfterFix: true`）が opt-in テストを再実行した結果は、`lastFixOptinRuns`
+（プロセスローカルの `let`）として保持し `combineOptinRecordGate` で PR 本文ベースの判定と
+AND する（前掲 Issue #495 Medium 2）。しかしプロセスローカル変数は monitoring/blocked からの
+再開（別プロセス起動）で失われて `null` に戻るため、post-push fix が非 pass を報告した直後に
+再開すると、PR 本文更新（`optinRecordUpdateInstructions`）が失敗・省略されているケースで
+古い pass マーカーだけでマージ前ゲートを通過し得た（`combineOptinRecordGate(gate, null)` は
+「fix 未実施」として `gate` をそのまま返す fail-open 側の既定値だったため）。post-push fix が
+`pushed: true` を報告したラウンドごとに `updateState` で状態ファイルへ
+`optinFixState: { attempted: true, runs: [...] }` を永続化し（`fixCount` / `baseMergeCount` と
+同じ非終端 updateState 呼び出し 1 箇所に相乗り）、monitoring 再開時は `restoreOptinFixState` が
+これを読んで `runMergeLoop` の `initialFixOptinRuns` として引き継ぐ。`attempted: true` なのに
+`runs` を復元できない（状態ファイル破損・キー欠落）場合は宣言コマンド全件を `not-run` とみなす
+合成配列を返し、pass 扱いにしない（fail-closed）。宣言が無い・`attempted` が無い（post-push fix
+を一度も実行していない再開）場合は `null` を返して従来どおり PR 本文のみで判定する（既定無効の
+意味を壊さないため）。head sha の突き合わせ（fix 後に別の push が入り、永続化した実測が現在の
+HEAD と対応しなくなるケース）は実装していない — 判定は「不合格側」に倒し続ける設計（迷ったら
+不合格側）で十分カバーされ、head sha 比較を追加する複雑さに見合わないと判断した。この停滞から
+抜けるには、PR 本文の更新だけでは不十分で状態ファイルの `optinFixState` 自体を修正・削除する
+必要がある（`references/recovery.md`「opt-in テスト記録不足による blocked からの復旧」節参照）。
+
 **宣言コマンドの許可形式を厳格化する理由（A03）と、承認一覧（`args.optinTestCommands`）を
 唯一の実行許可根拠にした理由（PR #503 codex P0）**: 宣言はイシュー本文（非信頼データ）由来
 であり、それを実装エージェントがそのまま実行する構造になる。当初はホスト側

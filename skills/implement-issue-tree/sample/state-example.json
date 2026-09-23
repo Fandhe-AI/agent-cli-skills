@@ -27,7 +27,9 @@
       "worktree": "/path/to/repo/.git/worktrees/impl-44",
       "fixCount": 0,
       "baseMergeCount": 1,
-      "note": "並列ランで兄弟イシューの PR が先にマージされ base とコンフリクト、base 取り込みエージェントが 1 回解消して監視を継続中"
+      "note": "並列ランで兄弟イシューの PR が先にマージされ base とコンフリクト、base 取り込みエージェントが 1 回解消して監視を継続中",
+      "_comment_optinFixState": "opt-in テストの宣言があるイシューでのみ意味を持つ（Issue #495 / PR #503 2 巡目 codex P0）。post-push fix（pushAfterFix: true）が pushed: true を報告したラウンドごとに更新され、次回ラン（monitoring 再開）で restoreOptinFixState が復元して runMergeLoop の lastFixOptinRuns の初期値にする。attempted: true は「post-push fix を少なくとも 1 回実行した」印で、runs に非 pass が 1 件でもあれば PR 本文の pass マーカーが古いまま残っていてもマージ前ゲートを不合格にする（fail-closed）。attempted: true なのに runs が欠落・非配列の場合も宣言コマンド全件を not-run とみなし不合格にする",
+      "optinFixState": { "attempted": true, "runs": [{ "command": "make e2e-three-client", "result": "pass", "detail": "" }] }
     },
     "45": {
       "type": "implement",
