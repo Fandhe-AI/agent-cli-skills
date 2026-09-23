@@ -87,11 +87,14 @@ test('MERGE_CONTEXT_COMMON は TEMP_FILE_POLICY と UNTRUSTED_POLICY をちょ�
   assert.equal(countOccurrences(MERGE_CONTEXT_COMMON, UNTRUSTED_POLICY), 1)
 })
 
-test('BASE_MERGE_CONTEXT_COMMON は COMMON_LINES 由来の TEMP_FILE_POLICY 1 回のみを含む（UNTRUSTED_POLICY は専用文言で個別に付与するため 2 回になる）', () => {
-  // BASE_MERGE_CONTEXT_COMMON は COMMON_LINES を index フィルタで再利用しつつ、UNTRUSTED_POLICY
-  // だけは専用の「リポジトリ内ファイルを読まない」文言とセットで独自に追加し直す設計
-  // （PR #443 codex P0）。TEMP_FILE_POLICY はフィルタ対象外の末尾要素のため 1 回のみのはず。
+test('BASE_MERGE_CONTEXT_COMMON は TEMP_FILE_POLICY・UNTRUSTED_POLICY をいずれもちょうど 1 回含む', () => {
+  // BASE_MERGE_CONTEXT_COMMON は COMMON_LINES を index フィルタ [0,2,3,4,9] で再利用する。
+  // index 9（旧 UNTRUSTED_POLICY の位置）は除外されるため COMMON_LINES 由来では 0 回になり、
+  // 代わりに専用の「リポジトリ内ファイルを読まない」文言とセットで独自に 1 回だけ追加し直す
+  // 設計（PR #443 codex P0）。TEMP_FILE_POLICY は index 10（フィルタ対象外の末尾要素）のため
+  // COMMON_LINES 由来の 1 回のみが残る。両者とも合計 1 回であることを固定する。
   assert.equal(countOccurrences(BASE_MERGE_CONTEXT_COMMON, TEMP_FILE_POLICY), 1)
+  assert.equal(countOccurrences(BASE_MERGE_CONTEXT_COMMON, UNTRUSTED_POLICY), 1)
 })
 
 // --- (b) measureResidualWorktreeBytesDetailed のプロンプト硬化（ソーステキスト固定） ---
@@ -124,6 +127,23 @@ test('measureResidualWorktreeBytesDetailed: TEMP_FILE_POLICY を含み、tmpFile
   // COUNT による件数照合（fail-closed 強化）。
   assert.match(body, /COUNT=\$count/)
   assert.match(body, /v\.count/)
+})
+
+test('measureResidualWorktreeBytesDetailed: tf が空のとき rm を実行しない（tf="" での `rm -f -- "" "$tf.lines"` はカレント直下の .lines を削除しかねないため）', () => {
+  const body = extractFunctionBody(
+    'async function measureResidualWorktreeBytesDetailed(paths) {',
+    'async function measureResidualWorktreeBytes(paths) {',
+  )
+  assert.match(body, /if \[ -n "\$tf" \]; then rm -f -- "\$tf" "\$tf\.lines"/)
+  assert.doesNotMatch(body, /^\s*'   rm -f -- "\$tf"/m)
+})
+
+test('measureFreeDiskKib: tf が空のとき rm を実行しない', () => {
+  const body = extractFunctionBody(
+    'async function measureFreeDiskKib(path) {',
+    'function findMainWorktreePath(entries) {',
+  )
+  assert.match(body, /if \[ -n "\$tf" \]; then rm -f -- "\$tf" "\$tf\.line"/)
 })
 
 test('measureFreeDiskKib: TEMP_FILE_POLICY を含み、tmpFile リテラルの埋め込みは最小化され "$tf" 参照へ統一されている', () => {
@@ -220,6 +240,34 @@ test('formatMainWorktreeUntrackedWarning: バッククォート・$ を含むパ
   assert.doesNotMatch(warning, /`/)
 })
 
+// --- 計画 §3.1 で列挙した State / worktree 系 haiku プロンプトへの TEMP_FILE_POLICY 挿入
+// （COMMON を持たないためこれらは個別挿入が必要。ソーステキスト固定で dead code 化を防ぐ）---
+
+test('State/worktree 系の主要プロンプト（loadState・updateState merge/cleanup・state:init-all・state:high-water・sweep・orphan-scan・record-count）は TEMP_FILE_POLICY を個別に含む', () => {
+  const labelsAndWindows = [
+['状態ファイル読み込みタスク。', 600],
+    ['const mergePromptText = [', 400],
+    ["`worktree / branch 掃除タスク（状態ファイルの JSON マージは別エージェントが実施済み）。`", 400],
+    ["状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater の", 400],
+    ["状態ファイル一括初期化タスク。", 400],
+    ["'worktree スイープタスク（ラン終了時の残骸回収）。'", 500],
+    ["'git worktree 一覧の取得タスク（読み取り専用。削除・変更は一切行わない）。'", 400],
+    ["'git worktree レコード総数の取得タスク（読み取り専用。削除・変更は一切行わない）。'", 400],
+  ]
+  for (const [marker, window] of labelsAndWindows) {
+    const idx = source.indexOf(marker)
+    assert.ok(idx >= 0, `マーカーを特定できること: ${marker}`)
+    const section = source.slice(idx, idx + window)
+    assert.match(section, /TEMP_FILE_POLICY/, `TEMP_FILE_POLICY が見つからない: ${marker}`)
+  }
+})
+
+test('worktree:sweep はプロンプトに「1 回の Bash 呼び出しで実行する」旨を含む（retain_file/registered_file/candidates_file を mktemp で手順をまたいで参照するため）', () => {
+  const idx = source.indexOf("'worktree スイープタスク（ラン終了時の残骸回収）。'")
+  const section = source.slice(idx, idx + 700)
+  assert.match(section, /1 回の Bash 呼び出しで一連の手順すべてを実行する/)
+})
+
 // --- (g) scanMainWorktreeUntracked のプロンプトが破壊的操作を含まず例外時に throw しない ---
 
 test('scanMainWorktreeUntracked: プロンプトが rm・git clean・git checkout -- を含まない読み取り専用タスクである', () => {
@@ -252,6 +300,16 @@ test('駆動部は scanMainWorktreeUntracked をラン開始直後（baseline）
   assert.match(driverPart, /const mainUntrackedBaseline = await scanMainWorktreeUntracked\('baseline'\)/)
   assert.match(driverPart, /const mainUntrackedEnd = await scanMainWorktreeUntracked\('end'\)/)
   assert.match(driverPart, /diffMainWorktreeUntracked\(mainUntrackedBaseline, mainUntrackedEnd, STATE_FILE\)/)
+})
+
+test('baseline 観測は ensureBoundaryNonceSeed・loadState より前に取得する（それら自身が残置を作っても baseline がマスクしないため）', () => {
+  const driverPart = source.slice(markerIndex)
+  const baselineIdx = driverPart.indexOf("scanMainWorktreeUntracked('baseline')")
+  const nonceSeedIdx = driverPart.indexOf('await ensureBoundaryNonceSeed()')
+  const loadStateIdx = driverPart.indexOf('await loadState()')
+  assert.ok(baselineIdx >= 0 && nonceSeedIdx >= 0 && loadStateIdx >= 0, '3 箇所とも駆動部から特定できること')
+  assert.ok(baselineIdx < nonceSeedIdx, 'baseline 取得は ensureBoundaryNonceSeed より前であること')
+  assert.ok(baselineIdx < loadStateIdx, 'baseline 取得は loadState より前であること')
 })
 
 test('駆動部の返却値に mainWorktreeUntracked フィールドが含まれる', () => {
