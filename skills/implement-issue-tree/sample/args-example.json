@@ -17,6 +17,11 @@
     "boolean 以外": "エラーで停止する（誤記を黙って読み替えない）"
   },
   "_maxBaseMerges": "PR が base とコンフリクト（mergeable: CONFLICTING）した際に自動起動する base 取り込み専用エージェントの回数上限（0〜10 の整数。省略時 3）。fixCount（レビュー指摘対応）とは独立の予算軸で、品質問題ではないため fixCount を消費しない（Issue #441）。0 は自動 base 取り込みを無効化し、コンフリクト検出時点で即 blocked にする。ただし repo が未指定のランでは maxBaseMerges の値によらず起動しない（repo の形式不正は起動時エラーで停止しラン自体が始まらない。PR #443 codex P0）",
+  "_optinTestCommands": {
+    "未指定 / []": "opt-in テストの承認一覧なし。イシュー本文に <!-- optin-tests: ... --> 宣言があっても全件 invalid として実装起動前に blocked で停止する（fail-closed。本文だけでは新しいコマンドを持ち込めない）",
+    "[\"make e2e-three-client\"]": "正規化後にこの文字列と完全一致するイシュー本文の宣言だけが実装エージェントへ渡る。一致しない宣言（例: make deploy）は invalid のまま",
+    "許可形式外の要素を含む配列（例: [\"mvn org.codehaus.mojo:exec-maven-plugin:exec\"]）": "起動時エラーで停止する（externalChecks と同じ厳格さ。PR #503 codex P0: 承認一覧自体も make/npm run 等の任意タスクディスパッチャー対策として許可形式を検証する）"
+  },
   "_repo": "base 取り込み（maxBaseMerges > 0）の worktree routing ガードが期待する owner/repo（例: \"Fandhe-AI/agent-cli-skills\"）。人間が明示するホスト側入力のみを使い、エージェントの自己申告値は使わない（PR #443 codex P0）。未指定は base 取り込みを起動せず conflicting を即 blocked+quality にする。形式不正（owner/repo でない）は起動時にエラーで停止する（誤記の黙読み替え禁止）",
   "examples": [
     {
@@ -58,6 +63,10 @@
     {
       "description": "Phase 分割されたツリー（ルート #860 直下に Phase 0 / Phase 1 / Phase 2 の Phase 親）で、Phase 0 を全件 merged/closed にしてから Phase 1 に着手する厳密な直列化を有効化する（phaseGate: true。Issue #494。並列度は Phase 内では従来どおり有効）",
       "args": { "parent": 860, "phaseGate": true, "autoMerge": true, "externalChecks": [{ "app": "cursor", "context": "Cursor Bugbot" }] }
+    },
+    {
+      "description": "配下イシューが #[ignore] 付き e2e テストを受入条件に含むため opt-in テストを有効化する。optinTestCommands に承認済みコマンドを列挙しておくと、イシュー本文の <!-- optin-tests: make e2e-three-client --> 宣言のうち一覧と完全一致するものだけがマージ前ゲートの対象になる（PR #503 codex P0）",
+      "args": { "parent": 42, "externalChecks": [{ "app": "cursor", "context": "Cursor Bugbot" }], "optinTestCommands": ["make e2e-three-client", "cargo test -- --ignored"] }
     }
   ]
 }

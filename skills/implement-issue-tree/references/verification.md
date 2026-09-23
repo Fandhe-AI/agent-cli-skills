@@ -342,6 +342,50 @@ node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
 
 期待結果: 手順 1 の出力が `1`（dispatch ループ内での即時確定が復活すると 2 以上、または cascade 側が壊れると 0 になる）。手順 2 がヒットする。手順 3 が 500,000 B 未満。手順 4 の `node --test` が全 pass・fail 0（受入条件 3「前提 merged への遷移 → 下流の再判定」を含む）。
 
+
+## opt-in テスト記録ゲートの適用確認（Issue #495）
+
+`scripts/implement-issue-tree.src.js` の opt-in テスト記録ゲート（`validateOptinCommandForm` /
+`parseOptinTestCommands`（`args.optinTestCommands` の起動時検証。PR #503 codex P0） /
+`parseOptinTestDeclarations` / `sanitizeOptinTestRuns` / `restoreOptinFixState`（`optinFixState`
+の状態ファイル復元。`{ runs, headSha }` を返す。PR #503 2 巡目 codex P0 → 3 巡目で headSha を
+追加） / `optinRecordMarkerLine`（sha・result・command の順で束縛。PR #503 3 巡目 codex P1） /
+`renderOptinRecordSection`（`<sha>`/`<result>` プレースホルダのテンプレート） /
+`classifyOptinRecordGate`（headRefOid の検証を含む） / `combineOptinRecordGate`（`fixOptin`・
+`gateHeadSha` の sha 一致判定を含む） / `optinRecordVerifyPrompt`（`--json body,headRefOid` の
+単一取得） / `mergeExecutePrompt` の `expectedHeadSha` パラメータ）を変更した場合の確認手順。
+
+```bash
+# 1. merge-exec のコンテキスト分離契約（Issue #145 / #160）が退行していないこと。
+#    mergeExecutePrompt の関数本体（定義開始行から次のトップレベル function 定義の直前まで）に
+#    本文取得コマンドを含まない（0 件であること）。ファイル全体への grep -c は、契約上は
+#    optin 関連文字列を含んでよい他の関数（fixPrompt 等）にヒットしても検知できず、関数本体の
+#    退行を見逃すため使わない（PR #503 2 巡目 Bugbot Medium）。
+awk '/^function mergeExecutePrompt\(/{f=1;print;next} f&&/^function /{exit} f' \
+  skills/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c 'optin'
+awk '/^function mergeExecutePrompt\(/{f=1;print;next} f&&/^function /{exit} f' \
+  skills/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c -- '--json body'
+
+# 2. マージ前ゲートが新規マージ経路（!recoveryOnly）にのみ配線されていること。
+grep -n 'optinRecordVerifyPrompt(' skills/implement-issue-tree/scripts/implement-issue-tree.src.js
+
+# 3. ビルド鮮度・サイズ
+node skills/implement-issue-tree/scripts/build-workflow.mjs
+node skills/implement-issue-tree/scripts/build-workflow.mjs --check
+wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
+
+# 4. 回帰テスト
+node --test skills/implement-issue-tree/tests/optin-tests-gate.test.mjs
+```
+
+期待結果（手順 1 は本ファイル更新時点で実測済み。関数本体 144 行（PR #503 3 巡目で expectedHeadSha
+の一致チェックを追加し 135→144 行に増加）を抽出し、`optin`・`--json body` いずれも 0 件）: 手順 1
+のいずれのコマンドも出力 `0`（`mergeExecutePrompt` の関数本体に `optin`
+文字列・`--json body` が含まれないこと。コンテキスト分離の非退行）。手順 2 の
+`optinRecordVerifyPrompt(` 呼び出しがドライバ部に 1 箇所のみ。手順 3 のビルドが `--check` 通過・
+500,000 B 未満。手順 4 が全 pass・fail 0（宣言なしイシューでのプロンプト出力完全一致テストを
+含む＝既定無効の確認）。
+
 ### state 書込みエージェントの StructuredOutput 未返却 fail-safe（Issue #493）
 
 `runStateAgent` / `updateStateDetailed` / `updateState` / `initAllPending` /
@@ -370,4 +414,3 @@ node --test skills/implement-issue-tree/tests/pr-saved-failsafe.test.mjs
 ```
 
 期待結果: 手順 1 の各コマンドが該当箇所にヒットする（`runStateAgent(...)` の呼び出しに渡す label であることは手順 4 の source-scan テストが機械検証する）。手順 2 が `runOne` の catch ブロック・`continueReviewingAttempt` / `reviewingAttempt` / `monitoringAttempt` / `continueCleanupAttempt` / `discardCleanupAttempt` の各箇所にヒットする。手順 3 が 500,000 B 未満。手順 4 の 2 つの `node --test` がいずれも全 pass・fail 0。
-
