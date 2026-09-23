@@ -821,10 +821,33 @@ const OPTIN_RECORD_RESULTS = ['pass', 'fail', 'not-run']
 
 
 
+
+
+
+
+
+
+
+
+
 const OPTIN_RECORD_END_MARKER = '<!-- /opt-in-test-record -->'
 function optinRecordMarkerLine(sha, result, command) {
   return `${OPTIN_RECORD_MARKER_PREFIX}${sha} ${result} ${command} -->`
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -853,18 +876,20 @@ function optinRecordRemovalShellLines() {
     '   L=$(grep -nE \'^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$\' "$f" | tail -n 1 | cut -d: -f1)',
     '   if [ -n "$L" ]; then',
     `     E=$(awk -v l="$L" -v m=${JSON.stringify(OPTIN_RECORD_END_MARKER)} 'NR>l { t=$0; sub(/\\r$/,"",t); if (t==m) { print NR; exit } }' "$f"); rcE=$?`,
-    '     N=$(wc -l < "$f"); rcN=$?',
-    '     if [ "$rcE" = 0 ] && [ "$rcN" = 0 ]; then',
-    '       if [ -n "$E" ]; then HI=$((E-1)); DEL_END=$E; else HI=$N; DEL_END=$N; fi',
-    '       body=$(sed -n "$((L+1)),${HI}p" "$f"); rcBody=$?',
+    '     if [ "$rcE" = 0 ] && [ -n "$E" ]; then',
+    '       body=$(sed -n "$((L+1)),$((E-1))p" "$f"); rcBody=$?',
     `       if [ "$rcBody" = 0 ] && [ -z "$(printf '%s\\n' "$body" | tr -d '\\r' | grep -vE ${JSON.stringify(allowedLinePattern)})" ]; then`,
     '         g=$(mktemp)',
-    '         if sed "${L},${DEL_END}d" "$f" > "$g"; then mv "$g" "$f"; else rm -f "$g"; fi',
+    '         if sed "${L},${E}d" "$f" > "$g"; then',
+    '           gt=$(mktemp); printf \'%s\' "$(cat "$g")" > "$gt"; mv "$gt" "$f"; rm -f "$g"',
+    '         else',
+    '           rm -f "$g"',
+    '         fi',
     '       fi',
     '     fi',
     '   fi',
     '   ```',
-    `   （見出し行の最後の出現位置より後で、終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)} が最初に現れる行までを削除候補にする。CRLF 本文にも対応するため比較前に各行の末尾 \\r を取り除く。終端マーカーが見つからない場合は本文末尾までを同じ基準で検証する（終端マーカーを持たない旧書式の記録節が対象）。間の各行がマーカー行・箇条書き行・空行のいずれかにのみ一致し、かつ途中の awk / wc / sed がすべて 0 終了した場合のみ実際に削除する。1 つでも条件を満たさなければ "$f" は一切変更されない（fail-closed。旧い記録節が残ったまま次の手順で新しい節が追記される可能性があるが、データ損失より優先する）。終端マーカーより後ろに外部ツールが追記した内容があっても削除範囲に含まれず保持される）`,
+    `   （見出し行の最後の出現位置より後で、終端マーカー ${JSON.stringify(OPTIN_RECORD_END_MARKER)} が最初に現れる行を実測できた場合に限り削除する。終端マーカーが見つからない場合（終端マーカーを持たない旧書式の記録節を含む）は "$f" を一切変更しない — 行の見た目だけでは正当な本文と機械生成区間を区別できないため（fail-closed。旧い記録節が残ったまま次の手順で新しい節が追記され、見出しが一時的に重複し得るが、正当な本文を巻き込んで削除するより優先する）。CRLF 本文にも対応するため比較前に各行の末尾 \\r を取り除く。見出しと終端マーカーの間の各行がマーカー行・箇条書き行・空行のいずれかにのみ一致した場合のみ実際に削除する。書き戻しはコマンド置換 \`$(cat "$g")\` を経由させ、末尾の空行を持ち越さない（除去・再追記のサイクルを繰り返しても見出し直前の空行が増殖しないようにするため）。途中の awk / sed がすべて 0 終了した場合のみ実際に削除する。1 つでも条件を満たさなければ "$f" は一切変更されない。終端マーカーより後ろに外部ツールが追記した内容があっても削除範囲に含まれず保持される）`,
   ]
 }
 

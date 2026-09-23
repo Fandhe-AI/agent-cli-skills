@@ -601,7 +601,8 @@ test('prCreatePrompt: 宣言ありではマーカー境界で安全確認して�
   assert.ok(p.includes("tr -d '\\r'"))
   // body/s の sed 終了コードを確認せず書き戻していた codex P0 を修正: 削除の書き戻しは
   // 単一の sed 実行の終了コードで gate し、非 0 なら一時ファイルを破棄して mv しない。
-  assert.ok(p.includes('if sed "${L},${DEL_END}d" "$f" > "$g"; then mv "$g" "$f"; else rm -f "$g"; fi'))
+  assert.ok(p.includes('if sed "${L},${E}d" "$f" > "$g"; then'))
+  assert.ok(p.includes(`gt=$(mktemp); printf '%s' "$(cat "$g")" > "$gt"; mv "$gt" "$f"; rm -f "$g"`))
   // 識別できない場合は "$f" を変更せず安全側に倒す旨の説明を含む。
   assert.match(p, /識別できない場合は.*"\$f".*変更せず/)
 })
@@ -645,17 +646,21 @@ function runRemoval(bodyBuffer) {
   return readFileSync(f, 'utf8')
 }
 
-test('optinRecordRemovalShellLines: 通常ケース（見出し〜終端マーカーが本文末尾）は節全体を削除する', () => {
+test('optinRecordRemovalShellLines: 通常ケース（見出し〜終端マーカーが本文末尾）は節全体を削除し、書き戻しはコマンド置換で末尾の空行を持ち越さない（cursor[bot] Low の回帰）', () => {
   const before = `Closes #42\n\n## opt-in テスト実行記録\n${optinRecordMarkerLine('a'.repeat(40), 'pass', 'make e2e')}\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n`
   const after = runRemoval(before)
-  // 見出しより前の内容（末尾の空行を含む）はそのまま保持される。
-  assert.equal(after, 'Closes #42\n\n')
+  // 見出しより前の内容は保持されるが、削除範囲が本文の真の末尾だったため、書き戻しの
+  // コマンド置換（$(cat "$g")）が末尾の空行・改行をすべて剥がす（v1 の printf '%s' と同じ
+  // 挙動を復元し、次回追記の echo; echo が積み増しで空行を増殖させないようにする）。
+  assert.equal(after, 'Closes #42')
 })
 
 test('optinRecordRemovalShellLines: 終端マーカーより後ろに外部ツールの追記（Cursor Bugbot 等）があっても、記録節だけを削除しトレーラは保持する（PR #504 レビューで判明した v1 設計欠陥の回帰）', () => {
   const before = `Closes #42\n\n## opt-in テスト実行記録\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n<!-- CURSOR_SUMMARY -->\n外部ツールのコメント\n<!-- /CURSOR_SUMMARY -->\n`
   const after = runRemoval(before)
-  assert.equal(after, 'Closes #42\n\n<!-- CURSOR_SUMMARY -->\n外部ツールのコメント\n<!-- /CURSOR_SUMMARY -->\n')
+  // 削除範囲より前の空行（Closes 行の直後）は本文の真の末尾ではない（トレーラが後ろに続く）
+  // ため保持される。コマンド置換で剥がれるのはファイルの真の末尾の改行のみ。
+  assert.equal(after, 'Closes #42\n\n<!-- CURSOR_SUMMARY -->\n外部ツールのコメント\n<!-- /CURSOR_SUMMARY -->')
 })
 
 test('optinRecordRemovalShellLines: CRLF 本文でも終端マーカー行を識別して削除する（cursor[bot] Medium 指摘の回帰）', () => {
@@ -666,16 +671,16 @@ test('optinRecordRemovalShellLines: CRLF 本文でも終端マーカー行を識
   assert.ok(after.startsWith('Closes #42'))
 })
 
-test('optinRecordRemovalShellLines: 終端マーカーを持たない旧書式（本文末尾まで既知パターンのみ）は本文末尾までを削除する（v2 の legacy パス）', () => {
+test('optinRecordRemovalShellLines: 終端マーカーを持たない旧書式は一切削除しない（PR #504 レビュー 2 巡目 codex P1 の直接回帰: 行の見た目だけでは所有区間と断定できない）', () => {
   const before = `Closes #42\n\n## opt-in テスト実行記録\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n`
   const after = runRemoval(before)
-  assert.equal(after, 'Closes #42\n\n')
+  assert.equal(after, before, '終端マーカーが見つからない場合 "$f" は一切変更されない（v2 の EOF フォールバックは廃止）')
 })
 
 test('optinRecordRemovalShellLines: 見出しが 2 件残っている旧書式でも、最後の出現位置に対応する記録節だけを削除する（cursor[bot] Medium 指摘: 見出しが増え続ける再発の防止）', () => {
   const before = `## opt-in テスト実行記録\nユーザーが引用した過去の見出し\n\n## opt-in テスト実行記録\n- コマンド: make e2e\n- 結果: pass\n- 補足: (なし)\n${OPTIN_RECORD_END_MARKER}\n`
   const after = runRemoval(before)
-  assert.equal(after, '## opt-in テスト実行記録\nユーザーが引用した過去の見出し\n\n')
+  assert.equal(after, '## opt-in テスト実行記録\nユーザーが引用した過去の見出し')
 })
 
 test('optinRecordRemovalShellLines: 見出しと終端マーカーの間に未知の行（ユーザー由来コンテンツの可能性）があれば削除しない（安全側）', () => {
@@ -740,7 +745,8 @@ test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありではマーカ
   assert.ok(p.includes(OPTIN_RECORD_END_MARKER))
   assert.ok(p.includes('tail -n 1 | cut -d: -f1'))
   assert.ok(p.includes("tr -d '\\r'"))
-  assert.ok(p.includes('if sed "${L},${DEL_END}d" "$f" > "$g"; then mv "$g" "$f"; else rm -f "$g"; fi'))
+  assert.ok(p.includes('if sed "${L},${E}d" "$f" > "$g"; then'))
+  assert.ok(p.includes(`gt=$(mktemp); printf '%s' "$(cat "$g")" > "$gt"; mv "$gt" "$f"; rm -f "$g"`))
 })
 
 test('fixPrompt: pushAfterFix=true でも optinTests が空なら出力は無変更（R3 と同じ既定無効方針）', () => {
@@ -865,49 +871,18 @@ test('実行レベル: 新旧 2 つの sha の記録が併存しても現在の 
 })
 
 // ---------------------------------------------------------------------------
-// 群 F2: 実行レベル（optinRecordUpdateInstructions・prCreatePrompt が指示するマーカー境界
-// 安全確認つき削除。PR #504 codex P0: 旧方式は「見出し行〜EOF」を無条件に削除しており、
-// 既存 PR 本文が非信頼データである以上「同名見出しから先は必ずワークフロー所有」と断定
-// できなかった（ユーザーが説明・引用等で同じ見出しを書いていた場合、それ以降の正当な内容を
-// 道連れに失う）。新方式は開始見出し・終端マーカー（OPTIN_RECORD_END_MARKER）の両方で
-// 機械生成区間を本文の末尾として一意に識別できた場合のみ削除し、識別できなければ本文を
-// 一切変更しない）
+// 群 F2: 実行レベル・複数回サイクル（cursor[bot] Medium 指摘の回帰: 群 F2 は従来
+// safeRemoveOptinSection という「本番実装から乖離したローカル再実装」（旧 v1 契約 — 最終行が
+// 終端マーカーと完全一致すること・見出しがちょうど 1 件であることを要求）を保持しており、
+// F2 のテストが green でも本番実装 optinRecordRemovalShellLines の回帰を検知できなかった
+// （複数見出しで削除をブロックすると期待する 1 件は現行実装の挙動と正反対だった）。
+// 本番と同一のシェル断片を実行する runRemoval（群 F で定義）を再利用し、実装からの乖離を
+// 構造的に防ぐ。単発ケースは群 F がカバーするため、本群は「複数節を組み合わせた本文の保持」と
+// 「本番同等の追記手順（echo を重ねる方式）を挟んだ複数ラウンドの往復」に限定する。
 // ---------------------------------------------------------------------------
 
-// optinRecordUpdateInstructions・prCreatePrompt が指示するマーカー境界安全確認ロジックと
-// 同一のシェルスクリプトを、実際のシェルで実行して検証する（プロンプト文字列のコピーではなく
-// ソース上の同一定数 OPTIN_RECORD_END_MARKER・OPTIN_RECORD_MARKER_PREFIX と一致させることで、
-// 文言変更時にテストが追随し損ねるのを防ぐ）。
-const OPTIN_RECORD_BODY_LINE_PATTERN =
-  `^$|^${OPTIN_RECORD_MARKER_PREFIX}|^- コマンド: |^- 結果: |^- 補足: `
-
-function safeRemoveOptinSection(bodyText) {
-  const script = `
-f=$(mktemp)
-cat > "$f" <<'BODYEOF'
-${bodyText}
-BODYEOF
-if [ "$(tail -n 1 "$f")" = "$END_MARKER" ]; then
-  L=$(grep -nE '^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$' "$f" | cut -d: -f1)
-  if [ "$(printf '%s\\n' "$L" | grep -c '^[0-9]')" = "1" ]; then
-    N=$(wc -l < "$f")
-    body=$(sed -n "$((L+1)),$((N-1))p" "$f")
-    if [ -z "$(printf '%s\\n' "$body" | grep -vE "$PATTERN")" ]; then
-      g=$(mktemp); s=$(sed -n "1,$((L-1))p" "$f"); printf '%s' "$s" > "$g"; mv "$g" "$f"
-    fi
-  fi
-fi
-cat "$f"
-rm -f "$f"
-`
-  return execFileSync('bash', ['-c', script], {
-    encoding: 'utf8',
-    env: { ...process.env, END_MARKER: OPTIN_RECORD_END_MARKER, PATTERN: OPTIN_RECORD_BODY_LINE_PATTERN },
-  })
-}
-
-test('実行レベル: 終端マーカーが末尾・見出し 1 件・区間が既知パターンのみなら節ごと削除し、見出しより前の内容（Closes 行・対象外節）は保持する', () => {
-  const body = [
+test('optinRecordRemovalShellLines: Closes 行・対象外節を含む本文でも記録節だけを削除し、他の節は保持する', () => {
+  const before = [
     '## Summary',
     '- 実装内容の要約',
     '',
@@ -922,8 +897,9 @@ test('実行レベル: 終端マーカーが末尾・見出し 1 件・区間が
     '- 結果: pass',
     '- 補足: (なし)',
     OPTIN_RECORD_END_MARKER,
+    '',
   ].join('\n')
-  const out = safeRemoveOptinSection(body)
+  const out = runRemoval(before)
   assert.match(out, /Closes #502/)
   assert.match(out, /## 対象外（out-of-scope）/)
   assert.match(out, /- 項目1/)
@@ -931,87 +907,52 @@ test('実行レベル: 終端マーカーが末尾・見出し 1 件・区間が
   assert.doesNotMatch(out, /- コマンド: make e2e/)
 })
 
-test('実行レベル: 見出しが存在しない本文（初回 PR 作成相当）は内容不変（末尾改行差分を除く）', () => {
-  const body = ['## Summary', '- 実装内容の要約', '', 'Closes #502'].join('\n')
-  const out = safeRemoveOptinSection(body)
-  assert.equal(out.trimEnd(), body.trimEnd())
-})
+// 本番の追記手順（optinRecordUpdateInstructions 手順 d・prCreatePrompt）が指示する
+// 「{ echo; echo; echo '## opt-in ...'; ...; } >> "$f"」パターンをそのまま再現する。
+// JS 側で単純に配列を join('\n') する模擬では実際の echo 二重呼び出しの挙動
+// （末尾に改行が残っているかどうかで生成される空行数が変わる）を検証できないため、
+// 削除・追記の両方を実際のシェルで実行する。
+function appendOptinRecordLikeProduction(filePath, sha, result, command) {
+  const script = `
+f=${JSON.stringify(filePath)}
+{
+  echo
+  echo
+  echo '## opt-in テスト実行記録'
+  echo ${JSON.stringify(optinRecordMarkerLine(sha, result, command))}
+  echo ${JSON.stringify(`- コマンド: ${command}`)}
+  echo ${JSON.stringify(`- 結果: ${result}`)}
+  echo '- 補足: (なし)'
+  echo ${JSON.stringify(OPTIN_RECORD_END_MARKER)}
+} >> "$f"
+`
+  execFileSync('sh', ['-c', script])
+}
 
-test('実行レベル（PR #504 codex P0 の直接回帰）: 見出しは存在するが本文の最終行が終端マーカーと一致しない（＝ユーザーが説明・引用等で偶然同じ見出しを書いていた等、機械生成区間と確認できない）場合は一切削除せず内容を完全に保持する', () => {
-  const body = [
-    '## Summary',
-    '- 実装内容の要約',
-    '',
-    'Closes #502',
-    '',
-    '## opt-in テスト実行記録',
-    'このプロジェクトでは opt-in テストの実行記録を PR 本文に書く運用にしている。',
-    '詳細は CONTRIBUTING.md を参照。',
-  ].join('\n')
-  const out = safeRemoveOptinSection(body)
-  assert.equal(out.trimEnd(), body.trimEnd())
-})
-
-test('実行レベル（PR #504 codex P0 の直接回帰）: 終端マーカーは末尾にあるが見出しと終端マーカーの間に未知の行（人間が追記した注記等）が混在する場合は機械生成区間と確認できず削除しない', () => {
-  const body = [
-    '## Summary',
-    'Closes #502',
-    '',
-    '## opt-in テスト実行記録',
-    optinRecordMarkerLine(SHA_A, 'pass', 'make e2e'),
-    '- コマンド: make e2e',
-    '- 結果: pass',
-    '- 補足: (なし)',
-    'レビュアーへ: この結果は手動で再確認済み。',
-    OPTIN_RECORD_END_MARKER,
-  ].join('\n')
-  const out = safeRemoveOptinSection(body)
-  assert.equal(out.trimEnd(), body.trimEnd())
-})
-
-test('実行レベル（PR #504 codex P0 の直接回帰）: 見出しが複数存在する場合は一意に識別できず削除しない', () => {
-  const body = [
-    '## opt-in テスト実行記録',
-    'ユーザーがこの見出しについて説明した文章。',
-    '',
-    '## opt-in テスト実行記録',
-    optinRecordMarkerLine(SHA_A, 'pass', 'make e2e'),
-    '- コマンド: make e2e',
-    '- 結果: pass',
-    '- 補足: (なし)',
-    OPTIN_RECORD_END_MARKER,
-  ].join('\n')
-  const out = safeRemoveOptinSection(body)
-  assert.equal(out.trimEnd(), body.trimEnd())
-})
-
-test('実行レベル: 複数回の除去→追記サイクルを経ても見出しが 1 個だけ残り、古いラウンドの結果行が残らない', () => {
-  let body = ['## Summary', '- 実装内容の要約', '', 'Closes #502'].join('\n')
+test('optinRecordRemovalShellLines: 本番同等の除去→追記（echo を重ねる方式）を複数ラウンド繰り返しても見出し直前の空行が増殖しない（cursor[bot] Low の回帰）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optin-round-'))
+  const f = join(dir, 'body.txt')
+  writeFileSync(f, '## Summary\n- 実装内容の要約\n\nCloses #502\n')
   const rounds = [
     { sha: SHA_A, result: 'fail' },
     { sha: SHA_A, result: 'not-run' },
     { sha: SHA_B, result: 'pass' },
   ]
   for (const { sha, result } of rounds) {
-    const removed = safeRemoveOptinSection(body)
-    body = [
-      removed,
-      '',
-      '## opt-in テスト実行記録',
-      optinRecordMarkerLine(sha, result, 'make e2e'),
-      '- コマンド: make e2e',
-      `- 結果: ${result}`,
-      '- 補足: (なし)',
-      OPTIN_RECORD_END_MARKER,
-    ].join('\n')
+    // c. 既存の記録節を除去する（本番の optinRecordUpdateInstructions 手順 c と同一のシェル片）。
+    execFileSync('sh', ['-c', `f=${JSON.stringify(f)}\n${extractRemovalScript()}\n`])
+    // d. 今回の結果で記録節を書き足す（本番の手順 d と同じ echo を重ねる方式）。
+    appendOptinRecordLikeProduction(f, sha, result, 'make e2e')
   }
+  const body = readFileSync(f, 'utf8')
   const headingCount = (body.match(/## opt-in テスト実行記録/g) ?? []).length
-  assert.equal(headingCount, 1)
+  assert.equal(headingCount, 1, '複数ラウンドを経ても見出しは 1 個だけ残る')
   assert.doesNotMatch(body, /- 結果: fail/)
   assert.doesNotMatch(body, /- 結果: not-run/)
   assert.match(body, /- 結果: pass/)
-  // 見出し直前の連続空行が異常に増えていないこと（複数ラウンドを経ても空行だけが蓄積しない）。
-  assert.doesNotMatch(body, /\n{4,}## opt-in テスト実行記録/)
+  // 見出し直前の連続空行が 2 行を超えて増え続けないこと（本番の echo 二重呼び出しにより
+  // 最大でも 2 行までは許容し、ラウンドを重ねるごとに単調増加しないことを確認する）。
+  assert.doesNotMatch(body, /\n{4,}## opt-in テスト実行記録/, '見出し直前の空行がラウンドを経て増殖していない')
   // 終端マーカーは最終ラウンドでも節の実際の最終行として 1 個だけ残る。
   const endMarkerCount = (body.match(new RegExp(OPTIN_RECORD_END_MARKER.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'), 'g')) ?? []).length
   assert.equal(endMarkerCount, 1)
