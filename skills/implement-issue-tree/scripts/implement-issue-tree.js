@@ -914,6 +914,14 @@ function optinRecordMarkerLine(sha, result, command) {
 
 
 
+
+
+
+
+
+
+
+
 function optinRecordRemovalShellLines(expectedLines, endMarker) {
   if (!Array.isArray(expectedLines) || expectedLines.length === 0 || typeof endMarker !== 'string' || !endMarker) {
     return [
@@ -938,7 +946,7 @@ function optinRecordRemovalShellLines(expectedLines, endMarker) {
     '       if [ "$rcBody" = 0 ] && [ "$bodyNorm" = "$exp" ]; then',
     '         g=$(mktemp)',
     '         if sed "${L},${E}d" "$f" > "$g"; then',
-    '           gt=$(mktemp); printf \'%s\' "$(cat "$g")" > "$gt"; mv "$gt" "$f"; rm -f "$g"',
+    '           gt=$(mktemp); if cbody=$(cat "$g") && printf \'%s\' "$cbody" > "$gt"; then mv "$gt" "$f"; else rm -f "$gt"; fi; rm -f "$g"',
     '         else',
     '           rm -f "$g"',
     '         fi',
@@ -946,7 +954,7 @@ function optinRecordRemovalShellLines(expectedLines, endMarker) {
     '     fi',
     '   fi',
     '   ```',
-    `   （見出し行の最後の出現位置より後で、終端マーカー ${JSON.stringify(endMarker)}（host がこの回の直前 post-push fix で実際に発行した非公開 nonce を埋め込んだ値。PR 本文を経由しない）が最初に現れる行を実測できた場合に、かつその間の本文がホスト側の信頼済み実測から再構成した期待値（exp。PR 本文を経由しない値）とバイト完全一致した場合に限り削除する。マーカーの nonce・本文内容のいずれか一方だけが一致しても削除しない（両方を host 側の秘密・実測に同時に一致させない限り削除条件を満たせない設計。旧書式・見出しのみの一致・nonce を使い回した模倣を含む）。一致しない場合は "$f" を一切変更しない（fail-closed。正当な本文を巻き込んで削除するより優先する）。CRLF 本文にも対応するため比較前に各行の末尾 \\r を取り除く。書き戻しはコマンド置換 \`$(cat "$g")\` を経由させ、末尾の空行を持ち越さない。途中の awk / sed がすべて 0 終了しかつ完全一致した場合のみ実際に削除する）`,
+    `   （見出し行の最後の出現位置より後で、終端マーカー ${JSON.stringify(endMarker)}（host がこの回の直前 post-push fix で実際に発行した非公開 nonce を埋め込んだ値。PR 本文を経由しない）が最初に現れる行を実測できた場合に、かつその間の本文がホスト側の信頼済み実測から再構成した期待値（exp。PR 本文を経由しない値）とバイト完全一致した場合に限り削除する。マーカーの nonce・本文内容のいずれか一方だけが一致しても削除しない（両方を host 側の秘密・実測に同時に一致させない限り削除条件を満たせない設計。旧書式・見出しのみの一致・nonce を使い回した模倣を含む）。一致しない場合は "$f" を一切変更しない（fail-closed。正当な本文を巻き込んで削除するより優先する）。CRLF 本文にも対応するため比較前に各行の末尾 \\r を取り除く。書き戻しはコマンド置換 \`$(cat "$g")\` を経由させ、末尾の空行を持ち越さない。途中の awk / sed / cat / printf がすべて 0 終了しかつ完全一致した場合のみ実際に削除する（cat が失敗した場合は "$gt" を破棄し "$f" を変更しない）。`,
   ]
 }
 

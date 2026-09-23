@@ -874,7 +874,11 @@ test('fixPrompt: lastFixOptin が妥当な場合、マーカー境界 + 完全�
   assert.ok(p.includes('tail -n 1 | cut -d: -f1'))
   assert.ok(p.includes("tr -d '\\r'"))
   assert.ok(p.includes('if sed "${L},${E}d" "$f" > "$g"; then'))
-  assert.ok(p.includes(`gt=$(mktemp); printf '%s' "$(cat "$g")" > "$gt"; mv "$gt" "$f"; rm -f "$g"`))
+  // v5（PR #504 codex P0 4 巡目）: cat の終了コードを確認してから書き戻す fail-closed 版。
+  // cat が失敗しても空文字列で "$f"（PR 本文）を上書きしてしまう旧 v4 の書き戻し文字列は
+  // もう含まれないことを確認する（データ破壊の回帰防止）。
+  assert.ok(!p.includes(`gt=$(mktemp); printf '%s' "$(cat "$g")" > "$gt"; mv "$gt" "$f"; rm -f "$g"`))
+  assert.ok(p.includes(`gt=$(mktemp); if cbody=$(cat "$g") && printf '%s' "$cbody" > "$gt"; then mv "$gt" "$f"; else rm -f "$gt"; fi; rm -f "$g"`))
   // 完全一致比較（v4）の核心: exp（ホスト側の信頼済み実測から再構成した期待値）との比較。
   assert.ok(p.includes('[ "$bodyNorm" = "$exp" ]'))
 })
