@@ -938,11 +938,30 @@ function classifyVerifyCloseStatus(v) {
 // 再開ではなく通常 dispatch から再実装・PR 再作成に進み得るため、blocked（非 halt）で
 // 静かに見逃さない。PR がまだ存在しない場合（prNumber <= 0）は再実装しても重複 PR の
 // 危険がないため、従来どおり outputMissing だけで 'blocked' に倒してよい。
-function classifyStateWriteFailureStatus({ outputMissing, terminalSaved, prNumber }) {
+//
+// sawSystemicFailure（Issue #493 PR #500 codex 指摘）: 重要遷移は updateStateDetailed を
+// 最大2回呼ぶ（1 回目失敗時に 1 回だけリトライ）。呼び出し元は最後の試行の outputMissing しか
+// ここへ渡せないため、1 回目が「応答した上での明示的な失敗」（ok:false かつ outputMissing:false。
+// jq 失敗・権限不足等）で 2 回目が StructuredOutput 未返却（outputMissing:true）だった場合、
+// 1 回目の事実が失われて 'blocked' に誤分類され halt カウントを回避してしまう
+// （recovery.md の契約「応答した上でのシステム的な失敗は従来どおり failed、フォールバックで
+// 隠さない」に反する）。呼び出し元は全試行のうち一度でも ok:false かつ outputMissing:false が
+// あれば true を渡す。true が渡された場合は最後の試行が outputMissing:true であっても
+// 'blocked' への降格対象にしない（outputMissing 由来の分岐を無効化し、下の 'failed' 既定へ
+// 落とす）。terminalSaved 由来の 'blocked'（この関数の 2 段目）は sawSystemicFailure と無関係の
+// 独立した安全弁のため、そのまま維持する。
+function classifyStateWriteFailureStatus({ outputMissing, terminalSaved, prNumber, sawSystemicFailure }) {
   const hasPr = Number.isInteger(prNumber) && prNumber > 0
-  if (outputMissing === true) return hasPr && terminalSaved !== true ? 'failed' : 'blocked'
+  const treatAsOutputMissing = outputMissing === true && sawSystemicFailure !== true
+  if (treatAsOutputMissing) return hasPr && terminalSaved !== true ? 'failed' : 'blocked'
   if (hasPr && terminalSaved === true) return 'blocked'
   return 'failed'
+}
+
+// classifyStateWriteFailureStatus の sawSystemicFailure 引数を、updateStateDetailed の
+// 全試行（最大2回）から算出する（コメントは同関数の説明を参照）。
+function sawSystemicStateWriteFailure(...attempts) {
+  return attempts.some((a) => a?.ok === false && a?.outputMissing !== true)
 }
 
 // runOne の catch-all（想定外の例外）用の終端 status 判定（Issue #493）。PR 作成済み
@@ -4652,6 +4671,7 @@ async function runImplement(item) {
             outputMissing: continueReviewingAttempt.outputMissing,
             terminalSaved: false,
             prNumber: 0,
+            sawSystemicFailure: sawSystemicStateWriteFailure(continueReviewingAttempt1, continueReviewingAttempt),
           })
           const reason =
             `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
@@ -4822,6 +4842,7 @@ async function runImplement(item) {
           outputMissing: reviewingAttempt.outputMissing,
           terminalSaved: false,
           prNumber: 0,
+          sawSystemicFailure: sawSystemicStateWriteFailure(reviewingAttempt1, reviewingAttempt),
         })
         const reason =
           `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
@@ -5037,6 +5058,7 @@ async function runImplement(item) {
       const monitoringPatch = { status: 'monitoring', pr: impl.prNumber, pushChecksStarted: prCreateChecksStarted, pushMergeable: prCreatePushMergeable }
       const monitoringAttempt1 = await updateStateDetailed(item.number, monitoringPatch)
       const monitoringAttempt = monitoringAttempt1.ok ? monitoringAttempt1 : await updateStateDetailed(item.number, monitoringPatch)
+      const monitoringSawSystemicFailure = sawSystemicStateWriteFailure(monitoringAttempt1, monitoringAttempt)
       if (!monitoringAttempt.ok) {
         const reason =
           `PR #${impl.prNumber} 作成後の monitoring 遷移（pr 記録）を状態ファイルへ永続化できなかった` +
@@ -5061,6 +5083,7 @@ async function runImplement(item) {
           outputMissing: monitoringAttempt.outputMissing,
           terminalSaved: blockedSaved,
           prNumber: impl.prNumber,
+          sawSystemicFailure: monitoringSawSystemicFailure,
         })
         // results の status は blockedSaved（'blocked' 保存の成否）と一致する
         // （classifyStateWriteFailureStatus の仕様。Issue #493 codex 指摘で是正）。

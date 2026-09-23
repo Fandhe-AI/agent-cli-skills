@@ -938,11 +938,30 @@ function classifyVerifyCloseStatus(v) {
 
 
 
-function classifyStateWriteFailureStatus({ outputMissing, terminalSaved, prNumber }) {
+
+
+
+
+
+
+
+
+
+
+
+
+function classifyStateWriteFailureStatus({ outputMissing, terminalSaved, prNumber, sawSystemicFailure }) {
   const hasPr = Number.isInteger(prNumber) && prNumber > 0
-  if (outputMissing === true) return hasPr && terminalSaved !== true ? 'failed' : 'blocked'
+  const treatAsOutputMissing = outputMissing === true && sawSystemicFailure !== true
+  if (treatAsOutputMissing) return hasPr && terminalSaved !== true ? 'failed' : 'blocked'
   if (hasPr && terminalSaved === true) return 'blocked'
   return 'failed'
+}
+
+
+
+function sawSystemicStateWriteFailure(...attempts) {
+  return attempts.some((a) => a?.ok === false && a?.outputMissing !== true)
 }
 
 
@@ -4652,6 +4671,7 @@ async function runImplement(item) {
             outputMissing: continueReviewingAttempt.outputMissing,
             terminalSaved: false,
             prNumber: 0,
+            sawSystemicFailure: sawSystemicStateWriteFailure(continueReviewingAttempt1, continueReviewingAttempt),
           })
           const reason =
             `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
@@ -4822,6 +4842,7 @@ async function runImplement(item) {
           outputMissing: reviewingAttempt.outputMissing,
           terminalSaved: false,
           prNumber: 0,
+          sawSystemicFailure: sawSystemicStateWriteFailure(reviewingAttempt1, reviewingAttempt),
         })
         const reason =
           `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
@@ -5037,6 +5058,7 @@ async function runImplement(item) {
       const monitoringPatch = { status: 'monitoring', pr: impl.prNumber, pushChecksStarted: prCreateChecksStarted, pushMergeable: prCreatePushMergeable }
       const monitoringAttempt1 = await updateStateDetailed(item.number, monitoringPatch)
       const monitoringAttempt = monitoringAttempt1.ok ? monitoringAttempt1 : await updateStateDetailed(item.number, monitoringPatch)
+      const monitoringSawSystemicFailure = sawSystemicStateWriteFailure(monitoringAttempt1, monitoringAttempt)
       if (!monitoringAttempt.ok) {
         const reason =
           `PR #${impl.prNumber} 作成後の monitoring 遷移（pr 記録）を状態ファイルへ永続化できなかった` +
@@ -5061,6 +5083,7 @@ async function runImplement(item) {
           outputMissing: monitoringAttempt.outputMissing,
           terminalSaved: blockedSaved,
           prNumber: impl.prNumber,
+          sawSystemicFailure: monitoringSawSystemicFailure,
         })
 
 
