@@ -606,6 +606,31 @@ test('prCreatePrompt: 宣言ありでは push 前の再実行手順（0c/0d）�
   assert.match(p, new RegExp(`${OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}<sha> <result> make e2e -->`))
 })
 
+// pr-create は Review 通過後・push 直前に呼ばれ、手順 0c の後にコミット手順が無い。0c で失敗を
+// 作業ツリー上で直すと、修正を含まない HEAD（0d）に pass 記録が付きマージ前ゲートが受理し得る。
+test('prCreatePrompt: 手順 0c ではコード修正を禁止し fail をそのまま記録させ、push 前に作業ツリー無変更を確認する', () => {
+  const p = prCreatePrompt({ ...item, optinTests: ['make e2e'] }, impl, [])
+  assert.doesNotMatch(p, /原因を調査して pass を目指す/)
+  assert.match(p, /コードを修正しない/)
+  assert.match(p, /result: "fail"/)
+  const statusIdx = p.indexOf('git status --porcelain')
+  assert.ok(statusIdx >= 0, 'prCreatePrompt に git status --porcelain の確認がない')
+  assert.ok(statusIdx < p.indexOf('1. git push origin HEAD:'), '作業ツリー確認が push より後にある')
+  assert.match(p, /git status --porcelain[^\n]*prNumber: 0/)
+})
+
+test('optinTestExecutionLines: pr-create 以外の呼び出し（implement / recover / post-push fix）は従来どおり原因調査して pass を目指す', () => {
+  const cmds = { ...item, optinTests: ['make e2e'] }
+  for (const p of [
+    implementPrompt(cmds, 'plan-text'),
+    recoverImplementPrompt(cmds, { done: '', remaining: '', broken: '' }, 'feat/42-x'),
+    fixPrompt(cmds, impl, { summary: 's', unresolvedComments: [] }, true),
+  ]) {
+    assert.match(p, /原因を調査して pass を目指す/)
+    assert.doesNotMatch(p, /git status --porcelain/)
+  }
+})
+
 test('optinRecordVerifyPrompt: gh pr view --json body,headRefOid を単一呼び出しで取得し、本文転記禁止・headRefOid 検証・件数のみ返却の指示を含む（PR #503 3 巡目 codex P1）', () => {
   const p = optinRecordVerifyPrompt(item, impl, ['make e2e'])
   assert.match(p, /gh pr view 123 --json body,headRefOid/)

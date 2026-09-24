@@ -2506,6 +2506,10 @@ const HIGH_WATER_DECAY_RATIO = 4
 
 
 
+
+
+
+
 function selectNestedLinkedWorktreePaths(mainPath, entries) {
   if (typeof mainPath !== 'string' || mainPath === '') return null
   const list = Array.isArray(entries) ? entries : []
@@ -2518,7 +2522,9 @@ function selectNestedLinkedWorktreePaths(mainPath, entries) {
     if (!p) return null
     if (p !== mainPath && p.startsWith(`${mainPath}/`)) nested.add(p)
   }
-  return [...nested]
+  const paths = [...nested]
+
+  return paths.filter((p) => !paths.some((other) => other !== p && p.startsWith(`${other}/`)))
 }
 
 
@@ -3432,7 +3438,11 @@ function lowFindingsCommentPrompt(item, prNumber, findings) {
 
 
 
-function optinTestExecutionLines(item, stepNo) {
+
+
+
+
+function optinTestExecutionLines(item, stepNo, noFix = false) {
   const commands = Array.isArray(item.optinTests) ? item.optinTests : []
   if (commands.length === 0) return []
   return [
@@ -3440,7 +3450,10 @@ function optinTestExecutionLines(item, stepNo) {
     ...commands.map((c) => `   - ${JSON.stringify(c)}`),
     '   各コマンドについて、実行前にそのコマンドが対象リポジトリで定義されたテスト入口であることを確認する（Makefile のターゲット・package.json の scripts・cargo のテスト名等）。確認できない場合は実行せず result: "not-run" とし、確認できなかった理由を detail に書く。',
     '   実行は worktree ルートで、そのコマンド文字列 1 つを Bash へそのまま渡す形に限る（sh -c・eval での再解釈、他コマンドとの連結・書き換えは禁止）。長時間になり得るため Bash の timeout に 600000 を指定する。',
-    '   失敗（非 0 終了）した場合は通常のテストと同様に原因を調査して pass を目指す。環境要因（依存・サービス・資格情報の不在等）で実行できない場合のみ result: "not-run" とし、具体的な理由を detail に書く。実行していないものを result: "pass" と報告してはならない（偽装禁止）。',
+    (noFix
+      ? '   失敗（非 0 終了）した場合もコードを修正しない（この手順では作業ツリーを変更してはならない）。result: "fail" として記録し（終了コードと失敗の要旨を detail に書く）、そのまま次の手順へ進む。環境要因'
+      : '   失敗（非 0 終了）した場合は通常のテストと同様に原因を調査して pass を目指す。環境要因')
+      + '（依存・サービス・資格情報の不在等）で実行できない場合のみ result: "not-run" とし、具体的な理由を detail に書く。実行していないものを result: "pass" と報告してはならない（偽装禁止）。',
     '   宣言コマンドごとに { command, result, exitCode, detail } を 1 件ずつ optinTestRuns に入れて返す（command は上記の値と完全一致させる）。',
   ]
 }
@@ -3908,9 +3921,11 @@ function prCreatePrompt(item, impl, outOfScope) {
 
 
 
-    ...optinTestExecutionLines(item, '0c'),
+
+
+    ...optinTestExecutionLines(item, '0c', true),
     ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
-      ? [`0d. git rev-parse HEAD を実行し、この記録が対象とする HEAD の sha（手順 0c のテスト対象・この後 push する内容と同一）の出力を控える（シェル変数は Bash 呼び出しを跨いで残らないため、値そのものを控える）。手順 1c・2 の記録節に書く <sha> はこの値（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
+      ? [`0d. git status --porcelain を実行し、出力が空（手順 0c で作業ツリーが変わっていない）であることを確認する。空でない場合は push せず prNumber: 0 と「opt-in テスト実行後に作業ツリーが変更されている」を理由として返す。空の場合のみ git rev-parse HEAD を実行し、この記録が対象とする HEAD の sha（手順 0c のテスト対象・この後 push する内容と同一）の出力を控える（シェル変数は Bash 呼び出しを跨いで残らないため、値そのものを控える）。手順 1c・2 の記録節に書く <sha> はこの値（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
       : []),
     `1. git push origin HEAD:refs/heads/${branch} で detached HEAD の内容（手順 0 の base 取り込み・コンフリクト解消を含む）を ${branch} へ push する（Bash の timeout に 600000 を指定）。git push origin ${branch} は使わない — ローカルの refs/heads/${branch} を手順 0 で更新していないため、その形では手順 0 の変更が push されず古い内容のまま push されてしまう。`,
     `   push が失敗した場合は prNumber: 0 と失敗理由を返す。`,

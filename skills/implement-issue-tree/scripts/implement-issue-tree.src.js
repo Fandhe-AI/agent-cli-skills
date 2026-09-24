@@ -2506,6 +2506,10 @@ const HIGH_WATER_DECAY_RATIO = 4
 // ため、前ランの残骸が残っているとメイン worktree の du に丸ごと含まれ、実際には無関係な二重
 // 計上になる。1 件でも検証不能なパスが混在する場合は null を返し観測失敗として扱う
 // （hasUnverifiedResidualPath と同じ fail-closed 方針）。戻り値はメイン自身を含まない。
+// 戻り値は他の採用パスに包含されない最上位のパスのみに限る。呼び出し側
+// （measureMainWorktreeContentBytes）は各パスの du を合算してメインの総量から差し引くため、
+// `/repo/wt` と `/repo/wt/inner` を両方返すと inner を二重に控除し、メイン見積りが過小
+// （空き容量ゲートの予約が不足する危険側）になる。
 function selectNestedLinkedWorktreePaths(mainPath, entries) {
   if (typeof mainPath !== 'string' || mainPath === '') return null
   const list = Array.isArray(entries) ? entries : []
@@ -2518,7 +2522,9 @@ function selectNestedLinkedWorktreePaths(mainPath, entries) {
     if (!p) return null
     if (p !== mainPath && p.startsWith(`${mainPath}/`)) nested.add(p)
   }
-  return [...nested]
+  const paths = [...nested]
+  // 区切りの `/` まで含めて比較し、`/repo/wt` と `/repo/wt2` を包含関係と誤判定しない。
+  return paths.filter((p) => !paths.some((other) => other !== p && p.startsWith(`${other}/`)))
 }
 
 // メイン worktree の「内容」バイト数（KiB）を、全体・.git・ネストした linked worktree の 3 測定
@@ -3432,7 +3438,11 @@ function lowFindingsCommentPrompt(item, prNumber, findings) {
 // 返す（空なら [] — 呼び出し側は '' 相当として扱い、implementPrompt/recoverImplementPrompt の
 // 出力を宣言なしイシューでは完全に不変に保つ。R3）。宣言コマンドはホストで形式検証済みだが
 // イシュー本文由来のため、実行前確認・単一コマンド限定・pass 偽装禁止を明示する。
-function optinTestExecutionLines(item, stepNo) {
+// noFix: true は pr-create（Review 通過後・push 直前）専用。この後にコミット手順が無いため、
+// 失敗を作業ツリー上で直すと修正を含まない HEAD に pass 記録が付く。そこで修正を禁じて
+// fail をそのまま記録させる（修正は既存の fix 経路に委ね、ゲートは fail 記録で不合格になる）。
+// 既定 false の出力は従来とバイト単位で同一に保つ。
+function optinTestExecutionLines(item, stepNo, noFix = false) {
   const commands = Array.isArray(item.optinTests) ? item.optinTests : []
   if (commands.length === 0) return []
   return [
@@ -3440,7 +3450,10 @@ function optinTestExecutionLines(item, stepNo) {
     ...commands.map((c) => `   - ${JSON.stringify(c)}`),
     '   各コマンドについて、実行前にそのコマンドが対象リポジトリで定義されたテスト入口であることを確認する（Makefile のターゲット・package.json の scripts・cargo のテスト名等）。確認できない場合は実行せず result: "not-run" とし、確認できなかった理由を detail に書く。',
     '   実行は worktree ルートで、そのコマンド文字列 1 つを Bash へそのまま渡す形に限る（sh -c・eval での再解釈、他コマンドとの連結・書き換えは禁止）。長時間になり得るため Bash の timeout に 600000 を指定する。',
-    '   失敗（非 0 終了）した場合は通常のテストと同様に原因を調査して pass を目指す。環境要因（依存・サービス・資格情報の不在等）で実行できない場合のみ result: "not-run" とし、具体的な理由を detail に書く。実行していないものを result: "pass" と報告してはならない（偽装禁止）。',
+    (noFix
+      ? '   失敗（非 0 終了）した場合もコードを修正しない（この手順では作業ツリーを変更してはならない）。result: "fail" として記録し（終了コードと失敗の要旨を detail に書く）、そのまま次の手順へ進む。環境要因'
+      : '   失敗（非 0 終了）した場合は通常のテストと同様に原因を調査して pass を目指す。環境要因')
+      + '（依存・サービス・資格情報の不在等）で実行できない場合のみ result: "not-run" とし、具体的な理由を detail に書く。実行していないものを result: "pass" と報告してはならない（偽装禁止）。',
     '   宣言コマンドごとに { command, result, exitCode, detail } を 1 件ずつ optinTestRuns に入れて返す（command は上記の値と完全一致させる）。',
   ]
 }
@@ -3908,9 +3921,11 @@ function prCreatePrompt(item, impl, outOfScope) {
     // opt-in テスト記録ゲート（PR #503 3 巡目 codex P1）: Implement 時点の結果は手順 0 の base
     // 取り込みで陳腐化し得るため、push 前のこの時点（＝これから push する内容そのもの）で
     // 必ず再実行する。手順 0d で控える SHA と対にして手順 1c・2 の記録節へ書く。
-    ...optinTestExecutionLines(item, '0c'),
+    // この後にコミット手順が無いため、0c で作業ツリーを直すと修正を含まない HEAD に pass 記録が
+    // 付く。noFix で修正を禁じ、0d 冒頭の作業ツリー確認で変更の混入を push 前に止める。
+    ...optinTestExecutionLines(item, '0c', true),
     ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
-      ? [`0d. git rev-parse HEAD を実行し、この記録が対象とする HEAD の sha（手順 0c のテスト対象・この後 push する内容と同一）の出力を控える（シェル変数は Bash 呼び出しを跨いで残らないため、値そのものを控える）。手順 1c・2 の記録節に書く <sha> はこの値（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
+      ? [`0d. git status --porcelain を実行し、出力が空（手順 0c で作業ツリーが変わっていない）であることを確認する。空でない場合は push せず prNumber: 0 と「opt-in テスト実行後に作業ツリーが変更されている」を理由として返す。空の場合のみ git rev-parse HEAD を実行し、この記録が対象とする HEAD の sha（手順 0c のテスト対象・この後 push する内容と同一）の出力を控える（シェル変数は Bash 呼び出しを跨いで残らないため、値そのものを控える）。手順 1c・2 の記録節に書く <sha> はこの値（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
       : []),
     `1. git push origin HEAD:refs/heads/${branch} で detached HEAD の内容（手順 0 の base 取り込み・コンフリクト解消を含む）を ${branch} へ push する（Bash の timeout に 600000 を指定）。git push origin ${branch} は使わない — ローカルの refs/heads/${branch} を手順 0 で更新していないため、その形では手順 0 の変更が push されず古い内容のまま push されてしまう。`,
     `   push が失敗した場合は prNumber: 0 と失敗理由を返す。`,
