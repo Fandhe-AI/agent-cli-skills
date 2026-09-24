@@ -587,6 +587,8 @@ test('prCreatePrompt: 宣言なし（item.optinTests: []）は出力が無変更
   const withEmpty = prCreatePrompt({ ...item, optinTests: [] }, impl, [])
   const withoutField = prCreatePrompt({ number: 42, title: 'サンプルイシュー' }, impl, [])
   assert.equal(withEmpty, withoutField)
+  assert.match(withEmpty, /1 件以上の場合のみ手順 1 へ進む。/)
+  assert.doesNotMatch(withEmpty, /0b2/)
 })
 
 test('implementPrompt: 宣言ありでは JSON.stringify 形のコマンド・pass 偽装禁止文言・optinTestRuns 返却指示を含む', () => {
@@ -623,7 +625,7 @@ test('prCreatePrompt: 手順 0c ではコード修正を禁止し fail をその
 // 通るため、テスト後の HEAD を記録すると未レビュー履歴を push し得る（PR #508 codex P1）。
 test('prCreatePrompt: 期待 SHA をテスト実行前に控え、push 前に porcelain の空出力と HEAD の期待 SHA 一致を終了コード込みで確認する', () => {
   const p = prCreatePrompt({ ...item, optinTests: ['make e2e'] }, impl, [])
-  const preIdx = p.indexOf('手順 0c のテスト実行より前に）git rev-parse HEAD')
+  const preIdx = p.indexOf('0b2. 期待 SHA の取得（必須。手順 0c のテスト実行より前に行う）: git rev-parse HEAD')
   const testIdx = p.indexOf('0c. opt-in テスト実行記録')
   const verifyIdx = p.indexOf('0d. push 前の不変確認')
   const pushIdx = p.indexOf('1. git push origin HEAD:')
@@ -633,11 +635,18 @@ test('prCreatePrompt: 期待 SHA をテスト実行前に控え、push 前に po
   assert.ok(testIdx < verifyIdx && verifyIdx < pushIdx, '不変確認がテスト後・push 前にない')
   const verifyLine = p.slice(verifyIdx, p.indexOf('\n', verifyIdx))
   assert.match(verifyLine, /git status --porcelain を実行し、終了コード 0 かつ出力が空/)
-  assert.match(verifyLine, /git rev-parse HEAD を実行し、終了コード 0 かつ出力が手順 0b で控えた期待 SHA と完全一致/)
+  assert.match(verifyLine, /git rev-parse HEAD を実行し、終了コード 0 かつ出力が手順 0b2 で控えた期待 SHA と完全一致/)
   assert.match(verifyLine, /非 0 終了[^\n]*push せず prNumber: 0/)
   assert.match(verifyLine, /<sha> は期待 SHA/)
   // 記録節の書き直し（既存 PR 再利用経路）も期待 SHA を使う。
-  assert.match(p, /手順 0b で控えた期待 SHA（手順 0d で HEAD との一致を確認済み/)
+  assert.match(p, /手順 0b2 で控えた期待 SHA（手順 0d で HEAD との一致を確認済み/)
+  // 期待 SHA の参照は独立手順 0b2 だけを指し、差分ゼロチェック（0b）を指す字面は残さない。
+  // 0b は宣言ありなら 0b2 へ進ませ、SHA 取得を飛ばす読み方を許さない（PR #508 Bugbot Medium / codex P2）。
+  assert.doesNotMatch(p, /手順 0b で控え/)
+  const zeroDiffLine = p.slice(p.indexOf('0b. push 前 差分ゼロチェック'), p.indexOf('\n', p.indexOf('0b. push 前 差分ゼロチェック')))
+  assert.match(zeroDiffLine, /1 件以上の場合のみ手順 0b2 へ進む。$/)
+  assert.doesNotMatch(zeroDiffLine, /期待 SHA/)
+  assert.match(p.slice(preIdx, testIdx), /取得できた場合のみ手順 0c へ進む/)
 })
 
 test('optinTestExecutionLines: pr-create 以外の呼び出し（implement / recover / post-push fix）は従来どおり原因調査して pass を目指す', () => {
