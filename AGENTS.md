@@ -3,9 +3,9 @@
 ## 文書の位置づけ
 
 本リポジトリで作業するすべての AI エージェント・人間レビュアーが共通で用いるレビュー観点集。
-Codex による PR 自動レビュー（`.github/workflows/codex-review.yml`。Fandhe-AI/actions の
-reusable workflow を `@latest` で呼び出す wrapper）は、PR の base コミットの本ファイルを
-レビュー基準として読む。運用ガイドの正は `CLAUDE.md`、著作規約の詳細は
+ai-review（provider: codex）による PR 自動レビュー（`.github/workflows/ai-review.yml`。
+Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）は、PR の base
+コミットの本ファイルをレビュー基準として読む。運用ガイドの正は `CLAUDE.md`、著作規約の詳細は
 `.claude/rules/`（特に `skill-authoring.md` / `security.md`）を参照し、本書は重複させず
 レビュー判定基準に絞る。
 
