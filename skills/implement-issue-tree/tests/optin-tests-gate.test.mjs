@@ -619,6 +619,27 @@ test('prCreatePrompt: 手順 0c ではコード修正を禁止し fail をその
   assert.match(p, /git status --porcelain[^\n]*prNumber: 0/)
 })
 
+// テスト入口が git commit・reset・checkout 等で HEAD を動かすと git status --porcelain は空のまま
+// 通るため、テスト後の HEAD を記録すると未レビュー履歴を push し得る（PR #508 codex P1）。
+test('prCreatePrompt: 期待 SHA をテスト実行前に控え、push 前に porcelain の空出力と HEAD の期待 SHA 一致を終了コード込みで確認する', () => {
+  const p = prCreatePrompt({ ...item, optinTests: ['make e2e'] }, impl, [])
+  const preIdx = p.indexOf('手順 0c のテスト実行より前に）git rev-parse HEAD')
+  const testIdx = p.indexOf('0c. opt-in テスト実行記録')
+  const verifyIdx = p.indexOf('0d. push 前の不変確認')
+  const pushIdx = p.indexOf('1. git push origin HEAD:')
+  assert.ok(preIdx >= 0, '期待 SHA をテスト前に取得する指示がない')
+  assert.ok(testIdx >= 0 && verifyIdx >= 0 && pushIdx >= 0)
+  assert.ok(preIdx < testIdx, '期待 SHA の取得がテスト実行より後にある')
+  assert.ok(testIdx < verifyIdx && verifyIdx < pushIdx, '不変確認がテスト後・push 前にない')
+  const verifyLine = p.slice(verifyIdx, p.indexOf('\n', verifyIdx))
+  assert.match(verifyLine, /git status --porcelain を実行し、終了コード 0 かつ出力が空/)
+  assert.match(verifyLine, /git rev-parse HEAD を実行し、終了コード 0 かつ出力が手順 0b で控えた期待 SHA と完全一致/)
+  assert.match(verifyLine, /非 0 終了[^\n]*push せず prNumber: 0/)
+  assert.match(verifyLine, /<sha> は期待 SHA/)
+  // 記録節の書き直し（既存 PR 再利用経路）も期待 SHA を使う。
+  assert.match(p, /手順 0b で控えた期待 SHA（手順 0d で HEAD との一致を確認済み/)
+})
+
 test('optinTestExecutionLines: pr-create 以外の呼び出し（implement / recover / post-push fix）は従来どおり原因調査して pass を目指す', () => {
   const cmds = { ...item, optinTests: ['make e2e'] }
   for (const p of [

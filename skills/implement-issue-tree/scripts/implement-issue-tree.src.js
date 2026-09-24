@@ -3899,7 +3899,7 @@ function prCreatePrompt(item, impl, outOfScope) {
   // 時点（impl.optinTestRuns）の結果をここで literal な値として埋め込んでいたが、本手順 0 の
   // base 取り込みでコードが変わり得るため、Implement 時の結果はもはや push する HEAD に対する
   // 検証にならない。そのため host 側では値を持たず、エージェント自身が手順 0c で再実行した
-  // 結果と push 対象の HEAD sha（手順 0d）で埋めるテンプレート（<sha>/<result> プレースホルダ）
+  // 結果と push 対象の HEAD sha（手順 0b で控え手順 0d で一致を確認した期待 SHA）で埋めるテンプレート（<sha>/<result> プレースホルダ）
   // のみを渡す。
   const optinRecordSection = renderOptinRecordSection(item.optinTests)
   return [
@@ -3920,12 +3920,17 @@ function prCreatePrompt(item, impl, outOfScope) {
     `0b. push 前 差分ゼロチェック（必須。fail-closed）: git rev-list --count origin/${baseBranch}..HEAD を実行し、base に対する先行コミット数を数える（手順 0 で base 取り込み・起点確立を終えた後の detached HEAD が対象。base の再 fetch は不要 — 手順 0 で取得済みの refs/remotes/origin/${baseBranch} をそのまま使う）。0 件の場合は push を一切行わず、prNumber: 0 と「base ${baseBranch} との差分が 0 件（push 対象コミットなし）。手順 0 の起点確立が意図通りか要調査」を理由として返す（fail-closed。detached HEAD が誤って base の tip のまま残っている場合の最終防御線。実装 worktree 側は Review 通過済みのため、ここで 0 件になるのは本エージェント側の起点取り違えを意味する）。1 件以上の場合のみ手順 1 へ進む。`,
     // opt-in テスト記録ゲート（PR #503 3 巡目 codex P1）: Implement 時点の結果は手順 0 の base
     // 取り込みで陳腐化し得るため、push 前のこの時点（＝これから push する内容そのもの）で
-    // 必ず再実行する。手順 0d で控える SHA と対にして手順 1c・2 の記録節へ書く。
+    // 必ず再実行する。テスト前に控える期待 SHA と対にして手順 1c・2 の記録節へ書く。
     // この後にコミット手順が無いため、0c で作業ツリーを直すと修正を含まない HEAD に pass 記録が
-    // 付く。noFix で修正を禁じ、0d 冒頭の作業ツリー確認で変更の混入を push 前に止める。
+    // 付く。noFix で修正を禁じる。加えてテスト入口が git commit・reset・checkout 等で HEAD 自体を
+    // 動かすと作業ツリー確認だけでは検知できず、テスト後の HEAD を記録すると未レビュー履歴を
+    // push し得るため、SHA はテスト前に控え、0d で作業ツリー無変更と HEAD 一致の両方を確認する。
+    ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
+      ? ['   続けて（手順 0c のテスト実行より前に）git rev-parse HEAD を実行し、終了コード 0 かつ 40 桁小文字 16 進の出力であることを確認して、その値を期待 SHA として控える（シェル変数は Bash 呼び出しを跨いで残らないため、値そのものを控える）。非 0 終了・形式不正の場合は push せず prNumber: 0 と「opt-in テスト実行前の HEAD sha を取得できない」を理由として返す。']
+      : []),
     ...optinTestExecutionLines(item, '0c', true),
     ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
-      ? [`0d. git status --porcelain を実行し、出力が空（手順 0c で作業ツリーが変わっていない）であることを確認する。空でない場合は push せず prNumber: 0 と「opt-in テスト実行後に作業ツリーが変更されている」を理由として返す。空の場合のみ git rev-parse HEAD を実行し、この記録が対象とする HEAD の sha（手順 0c のテスト対象・この後 push する内容と同一）の出力を控える（シェル変数は Bash 呼び出しを跨いで残らないため、値そのものを控える）。手順 1c・2 の記録節に書く <sha> はこの値（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
+      ? [`0d. push 前の不変確認（必須。fail-closed）: (1) git status --porcelain を実行し、終了コード 0 かつ出力が空であること、(2) git rev-parse HEAD を実行し、終了コード 0 かつ出力が手順 0b で控えた期待 SHA と完全一致すること、の両方を確認する（手順 0c のテスト入口が作業ツリーを変更したり、git commit・git reset・git checkout 等で HEAD を動かしたりしていないことの確認）。いずれかのコマンドが非 0 終了、または出力が空でない・期待 SHA と不一致の場合は push せず prNumber: 0 と「opt-in テスト実行後に作業ツリーまたは HEAD が変更されている（検査コマンドの失敗を含む）」を理由として返す。両方成立した場合のみ手順 1 へ進む。手順 1c・2 の記録節に書く <sha> は期待 SHA（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
       : []),
     `1. git push origin HEAD:refs/heads/${branch} で detached HEAD の内容（手順 0 の base 取り込み・コンフリクト解消を含む）を ${branch} へ push する（Bash の timeout に 600000 を指定）。git push origin ${branch} は使わない — ローカルの refs/heads/${branch} を手順 0 で更新していないため、その形では手順 0 の変更が push されず古い内容のまま push されてしまう。`,
     `   push が失敗した場合は prNumber: 0 と失敗理由を返す。`,
@@ -3967,7 +3972,7 @@ function prCreatePrompt(item, impl, outOfScope) {
           `   次に opt-in テスト記録節を更新する:`,
           ...optinRecordRewriteLines(
             item.optinTests,
-            '手順 0d で控えた sha（省略・短縮しない）',
+            '手順 0b で控えた期待 SHA（手順 0d で HEAD との一致を確認済み。省略・短縮しない）',
             '手順 0c の各コマンドの結果 pass / fail / not-run のいずれか',
             'prNumber: 0 と「opt-in テスト記録節の更新に失敗（grep の終了コード、実測値を記載）」を理由として返す',
           ),

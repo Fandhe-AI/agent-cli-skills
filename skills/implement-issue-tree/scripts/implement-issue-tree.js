@@ -3923,9 +3923,14 @@ function prCreatePrompt(item, impl, outOfScope) {
 
 
 
+
+
+    ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
+      ? ['   続けて（手順 0c のテスト実行より前に）git rev-parse HEAD を実行し、終了コード 0 かつ 40 桁小文字 16 進の出力であることを確認して、その値を期待 SHA として控える（シェル変数は Bash 呼び出しを跨いで残らないため、値そのものを控える）。非 0 終了・形式不正の場合は push せず prNumber: 0 と「opt-in テスト実行前の HEAD sha を取得できない」を理由として返す。']
+      : []),
     ...optinTestExecutionLines(item, '0c', true),
     ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
-      ? [`0d. git status --porcelain を実行し、出力が空（手順 0c で作業ツリーが変わっていない）であることを確認する。空でない場合は push せず prNumber: 0 と「opt-in テスト実行後に作業ツリーが変更されている」を理由として返す。空の場合のみ git rev-parse HEAD を実行し、この記録が対象とする HEAD の sha（手順 0c のテスト対象・この後 push する内容と同一）の出力を控える（シェル変数は Bash 呼び出しを跨いで残らないため、値そのものを控える）。手順 1c・2 の記録節に書く <sha> はこの値（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
+      ? [`0d. push 前の不変確認（必須。fail-closed）: (1) git status --porcelain を実行し、終了コード 0 かつ出力が空であること、(2) git rev-parse HEAD を実行し、終了コード 0 かつ出力が手順 0b で控えた期待 SHA と完全一致すること、の両方を確認する（手順 0c のテスト入口が作業ツリーを変更したり、git commit・git reset・git checkout 等で HEAD を動かしたりしていないことの確認）。いずれかのコマンドが非 0 終了、または出力が空でない・期待 SHA と不一致の場合は push せず prNumber: 0 と「opt-in テスト実行後に作業ツリーまたは HEAD が変更されている（検査コマンドの失敗を含む）」を理由として返す。両方成立した場合のみ手順 1 へ進む。手順 1c・2 の記録節に書く <sha> は期待 SHA（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
       : []),
     `1. git push origin HEAD:refs/heads/${branch} で detached HEAD の内容（手順 0 の base 取り込み・コンフリクト解消を含む）を ${branch} へ push する（Bash の timeout に 600000 を指定）。git push origin ${branch} は使わない — ローカルの refs/heads/${branch} を手順 0 で更新していないため、その形では手順 0 の変更が push されず古い内容のまま push されてしまう。`,
     `   push が失敗した場合は prNumber: 0 と失敗理由を返す。`,
@@ -3967,7 +3972,7 @@ function prCreatePrompt(item, impl, outOfScope) {
           `   次に opt-in テスト記録節を更新する:`,
           ...optinRecordRewriteLines(
             item.optinTests,
-            '手順 0d で控えた sha（省略・短縮しない）',
+            '手順 0b で控えた期待 SHA（手順 0d で HEAD との一致を確認済み。省略・短縮しない）',
             '手順 0c の各コマンドの結果 pass / fail / not-run のいずれか',
             'prNumber: 0 と「opt-in テスト記録節の更新に失敗（grep の終了コード、実測値を記載）」を理由として返す',
           ),
