@@ -147,7 +147,7 @@ REPO_SLUG="${REPO_SLUG%.git}"
 # 2) 正規化後の値を厳密検証する: owner は Fandhe-AI 固定、repo は単一セグメントのみ許可する
 #    [A-Za-z0-9._-]+ は '/'・'?'・'#'・空文字を含められないため、
 #    パストラバーサル（../）・余剰パスセグメント・クエリ・フラグメントをすべて拒否できる
-#    （前方一致 case では `Fandhe-AI/../../attacker/repo` のような値が誤って通過していた）
+#    （前方一致では `Fandhe-AI/../../attacker/repo` のような値が通過するため）
 if [[ ! "${REPO_SLUG}" =~ ^Fandhe-AI/[A-Za-z0-9._-]+$ ]]; then
   echo "エラー: source '${SOURCE}' は Fandhe-AI/<repo> 形式ではありません。中止します。"
   exit 1
@@ -298,7 +298,7 @@ cd "${SCRIPT_UPSTREAM_DIR}"
 # origin/HEAD 未設定時に symbolic-ref が非ゼロ終了する。set -e 下（本コマンドを
 # skills-contribute.sh 同様の厳格モードで実行する場合）では ${DEFAULT_BRANCH:-main}
 # フォールバックへ到達できなくなるため `|| true` で吸収する
-# （skills-contribute.sh:246 と同一の修正、参照: コミット履歴の同一 fix）。
+# （skills-contribute.sh の同じ処理と同じ理由）。
 DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || true)
 echo "デフォルトブランチ: ${DEFAULT_BRANCH:-main}"
 ```
@@ -468,7 +468,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 
 ## 注意事項
 
-- **SKILL_NAME は kebab-case のみ許可**：`..` のような値によるパストラバーサルを防ぐため、空判定の直後・パス解決の前に `^[a-z][a-z0-9-]+$` で検証する（security.md A03/A01）
+- **SKILL_NAME は kebab-case のみ許可**：`..` のような値によるパストラバーサルを防ぐため、空判定の直後・パス解決の前に `^[a-z][a-z0-9-]+$` で検証する（OWASP A03 / A01）
 - **`skills/`・`.agents/skills/`・`.claude/skills/` の複数に実体が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` の3パスのみ受理し（末尾要素・中間の親ディレクトリのいずれかが symlink なら実体側パスの指定を要求）、任意パス指定によるパストラバーサルを防ぐ。Step 5 で本スキル自身（contribute-skill）の配置を解決する `CONTRIBUTE_SKILL_DIR` も同じ fail-closed 方針を取り、`${ORIG_DIR}/skills/contribute-skill`・`${ORIG_DIR}/.agents/skills/contribute-skill`・`${ORIG_DIR}/.claude/skills/contribute-skill` の3候補のみ受理する（末尾要素・中間の親ディレクトリのいずれかが symlink なら実体側パスの指定を要求）。3候補のうち複数が存在する場合は silently にどれかを優先せず中止して環境変数 `CONTRIBUTE_SKILL_DIR` での指定を求める（LOCAL_SKILL_DIR とは非対称にしない）
 - **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行

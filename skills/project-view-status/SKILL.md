@@ -45,11 +45,9 @@ Status, Priority, Size フィールドの定義とオプション値を取得す
 
 ### Step 4: ステータス別・優先度別に集計する
 
-JSON データを処理して以下を集計:
-- ステータス別アイテム数（Todo / In Progress / In Review / Done）
-- 優先度別アイテム数（High / Medium / Low）
-- ステータス × 優先度のクロス集計
-- 完了率（Done / 全件）
+件数と割合は `jq` で算出する（手で数えない）。例:
+`jq '[.items[] | .status // "(未設定)"] | group_by(.) | map({key: .[0], count: length})'`
+優先度別・ステータス × 優先度も同様に `group_by` で求め、完了率は Done 件数 ÷ 全件で計算する。モデルは算出結果を表に整形し、目立つ偏りがあればコメントする。
 
 ### Step 5: レポートを生成する
 

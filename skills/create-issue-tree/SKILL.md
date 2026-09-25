@@ -504,7 +504,6 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" \
 - `--phase` 指定で部分起票した場合、別 Phase の追加起票では **必ず `--root <既存ルートissue番号>` を渡す**（Step 3 の新規作成をスキップして既存ツリーへ継ぎ足し、Step 6 も全置換せず既存本文へ差分追記する）。起票後は update-issue-tree に同じルート issue 番号を渡して棚卸しする
 - ページネーション: sub-issues が 100 件を超える場合は `per_page=100&page=N` でページングして全件取得する
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）
-- `--no-verify` は絶対に使用しない
 - **`gh issue create` は `--json` 非対応**。issue URL を stdout に出力するため、`| grep -oE '[0-9]+$'` で末尾の番号を抽出して変数に保持する
 - **sub_issues API の `sub_issue_id` は issue 番号ではなく database id**（GitHub 仕様）。`gh api "repos/{owner}/{repo}/issues/<number>" --jq '.id'` で id を取得してから POST する。番号をそのまま渡すと誤った issue を紐付ける／404 になる
 - phase ラベルは Step 4 冒頭の `gh label create "phase:${PHASE}" --color "0075ca"` で issue 作成より前に必ず作成する（作成済みリポジトリでは no-op）
