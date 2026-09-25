@@ -51,7 +51,7 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
 参照する SHA は**下記のレビュー済み SHA 定数**を使う。最新 main からの動的取得
 （`gh api repos/Fandhe-AI/actions/commits/main`）は禁止する — 文字列上は commit SHA 固定でも、
 導入のたびに未レビューの最新コードを取り込む「可動 ref の自動追従」と同じであり、
-サプライチェーン対策（レビュー済み SHA 固定）を弱体化する（fandhe-frontend PR #1311 codex P1）。
+サプライチェーン対策（レビュー済み SHA 固定）を弱体化する。
 
 ```bash
 # レビュー済み SHA 定数（内容精査済み。既存導入リポジトリ fandhe-frontend の
