@@ -87,8 +87,9 @@ prompt: |
                    model（選定基準に従う）, tools（最小権限の原則）
     - 本文: # Agent名 → ## 役割 → ## 対象スコープ → ## 遵守する規約 → ## 手順/観点 →
             ## 完了条件 → ## 報告フォーマット
-    - Edit・Write は含めない。Bash・WebFetch・WebSearch は agent-authoring.md の例外条件を
-      満たす場合のみ許可し、用途を本文に明記する
+    - research/・quality/ カテゴリには Edit・Write を含めない（author/ カテゴリは Edit・Write
+      を許可する）。Bash・WebFetch・WebSearch は agent-authoring.md の例外条件を満たす場合のみ
+      許可し、用途を本文に明記する
 ```
 
 ### Step 3: model 選定と tools 設定を確認する
