@@ -1176,7 +1176,8 @@ const TREE_SCHEMA = {
 // #3` 等）を受理する。節内でも行頭以外の参照（「依存なし。関連 issue #42」等）は拾わず、関連・
 // 参考・否定を示す語を含む行頭項目は除外する（行頭項目は 1 行 1 宣言のため行単位で判定し、インライン
 // 記法には適用しない — `Depends on #12; related: #34` の #12 を落とさないため）。コードフェンス内
-// （開始時の記号と長さを保持し、同種・同長以上の終了行でのみ閉じる）・引用行・インラインコード
+// （開始時の記号と長さを保持し、同種・同長以上の終了行でのみ閉じる）・インデントコードブロック（4 スペース
+// 以上またはタブで始まる行。ただし入れ子の箇条書き項目は除外しない）・引用行・インラインコード
 // （CommonMark と同じく同じ長さのバッククォート列同士を組にし内容ごと除去。RE2 は後方参照を持たない
 // ため jq の再帰で組を作る）は除外する（機能的に先行完了が必須のものだけを依存辺にする既存規約を保つため）。
 // 本文テキストはエージェントのコンテキストへ入れない（jq が整数配列へ正規化した出力のみを扱う）。
@@ -1201,7 +1202,7 @@ const DECLARED_DEPS_JQ = [
   String.raw`| if .fence != null then`,
   String.raw`(if $f != null and ($f[0:1] == .fence[0:1]) and (($f | length) >= (.fence | length)) and ($l | test("^[ ]{0,3}[\u0060~]+[ \t]*$")) then .fence = null else . end)`,
   String.raw`elif $f != null then .fence = $f`,
-  String.raw`elif ($l | test("^[ ]{0,3}>")) then .`,
+  String.raw`elif ($l | test("^[ ]{0,3}>")) or (($l | test("^(?: {4}|\t)")) and ($l | test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]") | not)) then .`,
   String.raw`else ($l | stripcode) as $t`,
   String.raw`| if ($t | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then`,
   String.raw`.in = ($t | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,

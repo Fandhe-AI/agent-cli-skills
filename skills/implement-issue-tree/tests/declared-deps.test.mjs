@@ -108,6 +108,11 @@ test('コードフェンス内・引用行・インラインコードの例示�
   assert.deepEqual(runFilter(body), [94])
 })
 
+test('インデントコードブロックの例示は除外し、入れ子の箇条書き項目は拾う', () => {
+  assert.deepEqual(runFilter('例:\n\n    Depends on #42\n\tBlocked by #43\nDepends on #44\n'), [44])
+  assert.deepEqual(runFilter('## 依存\n- #1\n    - #2（入れ子）\n\t- #3\n        #4 コード\n'), [1, 2, 3])
+})
+
 test('異なる種類・短いフェンスではコードブロックを閉じない', () => {
   const body = [
     '```', '~~~', 'Depends on #30', '```', 'Depends on #31',

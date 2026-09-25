@@ -1183,6 +1183,7 @@ const TREE_SCHEMA = {
 
 
 
+
 const DECLARED_DEPS_JQ = [
   String.raw`def refs: [scan("#([0-9]+)") | .[0] | tonumber];`,
   String.raw`def run: "(#[0-9]+(?:(?:[ \t,、/]|and|および|及び)+#[0-9]+)*)";`,
@@ -1201,7 +1202,7 @@ const DECLARED_DEPS_JQ = [
   String.raw`| if .fence != null then`,
   String.raw`(if $f != null and ($f[0:1] == .fence[0:1]) and (($f | length) >= (.fence | length)) and ($l | test("^[ ]{0,3}[\u0060~]+[ \t]*$")) then .fence = null else . end)`,
   String.raw`elif $f != null then .fence = $f`,
-  String.raw`elif ($l | test("^[ ]{0,3}>")) then .`,
+  String.raw`elif ($l | test("^[ ]{0,3}>")) or (($l | test("^(?: {4}|\t)")) and ($l | test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]") | not)) then .`,
   String.raw`else ($l | stripcode) as $t`,
   String.raw`| if ($t | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then`,
   String.raw`.in = ($t | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
