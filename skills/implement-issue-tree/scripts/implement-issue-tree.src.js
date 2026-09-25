@@ -6407,10 +6407,49 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
     }
     if (lastState === 'ready') {
+      // 新規マージ経路（!recoveryOnly）かつ opt-in 宣言があるときだけ、opt-in ゲートより前に
+      // PR が既に人間の手動マージで MERGED になっていないかを独立確認する（Issue #509）。
+      // 人間による手動マージは latch からの正規の復旧手段 (b)（automerge-design.md「opt-in
+      // 記録 latch は fail-closed で停止する」節）だが、従来はこの復旧後も monitor の ready
+      // 判定を経て opt-in ゲートが再び起動し、記録不足を理由に blocked へ倒し続けていた
+      // （already-merged 回復経路へ到達できない）。mergeVerifyPrompt / MERGE_VERIFY_SCHEMA は
+      // merge-exec の merged 自己申告を裏付けるためにこの下ですでに使っている読み取り専用契約
+      // （gh pr view --json state,headRefOid,mergeCommit の 1 コマンドのみを許す）をそのまま
+      // 再利用し、新しいプロンプト・スキーマは追加しない（監査対象を増やさない）。
+      // 変数名を `v`（下記の merge-verify 呼び出しの代入先）にはしない: pr-saved-failsafe.test.mjs
+      // の「merge-verify 呼び出しは try/catch で包まれ…」テストは、変数 v への agent(mergeVerifyPrompt(
+      // 呼び出し代入の**最初の出現箇所**を周辺の try/catch ごと検証している。ここで同じ変数名を
+      // 使うとソース上より前方にあるこの呼び出しが先に一致し、本来検証したい既存の merge-verify
+      // 呼び出しの検証にならなくなる。
+      let prAlreadyMerged = false
+      if (!recoveryOnly && Array.isArray(item.optinTests) && item.optinTests.length > 0) {
+        let mergedProbe = null
+        try {
+          mergedProbe = await agent(mergeVerifyPrompt(item, impl), {
+            label: `merged-probe:#${item.number}`,
+            phase: 'Merge',
+            model: 'sonnet',
+            effort: 'low',
+            schema: MERGE_VERIFY_SCHEMA,
+          })
+        } catch (e) {
+          log(`⚠️ #${item.number}: マージ済み独立確認（opt-in ゲート前）エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
+        }
+        // 'MERGED' 以外（例外・UNKNOWN・OPEN・CLOSED・無効値）はすべて false に倒す
+        // （fail-closed。誤って true になっても、後段は allowMerge=false の回復専用文面で
+        // merge-exec を呼ぶだけであり、その文面には gh pr merge 等の変更系コマンドの指示が
+        // 一切含まれないため新規マージが実行される余地はない）。
+        prAlreadyMerged = mergedProbe?.state === 'MERGED'
+        if (prAlreadyMerged) {
+          log(`#${item.number}: 新規マージ経路だが独立確認で PR が既に MERGED と判定した（人間による手動マージ等）。opt-in ゲートを起動せず already-merged 回復経路へ合流する`)
+        }
+      }
       // allowMerge はホスト導出の boolean のみ（monitor の headSha はマージ経路に渡さず、
-      // merge-exec の自己取得値を merge-verify の独立観測と突き合わせる）。回復専用経路は
-      // 手順 5 の文面自体をホスト側で分岐しマージコマンドを含めない。
-      const allowMerge = !recoveryOnly
+      // merge-exec の自己取得値を merge-verify の独立観測と突き合わせる）。回復専用経路
+      // （recoveryOnly）、または新規マージ経路でも PR が既に MERGED と独立確認できた場合
+      // （prAlreadyMerged。Issue #509）は、いずれも手順 5 の文面自体をホスト側で分岐し
+      // マージコマンドを含めない。
+      const allowMerge = !recoveryOnly && !prAlreadyMerged
       // opt-in テスト記録ゲートが検証した現在の headRefOid（sanitizeSha 通過値）。merge-exec の
       // TOCTOU 対策（PR #503 3 巡目 codex P1）の期待 HEAD sha として使うため、if ブロックの外
       // （merge-exec 呼び出し）まで持ち越す必要があり関数スコープではなくラウンドスコープで
@@ -6421,8 +6460,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // （MERGE_CONTEXT_COMMON・権限境界段落）のため、その契約を保ったまま「宣言テストの pass
       // 記録が PR 本文にある」を合格条件へ加えるには、merge-exec の外側・呼び出し直前で別コンテキ
       // ストの読み取り専用エージェントによりゲートする（automerge-design.md 参照）。新規マージ
-      // 経路（allowMerge）に限り適用し、回復専用経路（recoveryOnly）では検証エージェントを
-      // 起動しない（新規マージをしない経路にゲートを課しても意味がないため）。
+      // 経路（allowMerge）に限り適用し、回復専用経路（recoveryOnly）、および新規マージ経路でも
+      // 上記の独立確認により PR が既に MERGED と判明した経路（prAlreadyMerged。Issue #509）
+      // では検証エージェントを起動しない（新規マージをしない経路にゲートを課しても意味がなく、
+      // 後者は latch からの正規の復旧手段 (b) を機能させるために必須）。
       if (allowMerge && Array.isArray(item.optinTests) && item.optinTests.length > 0) {
         let optinVerify = null
         try {
@@ -6488,7 +6529,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       if (lastState === 'ready') {
         if (!allowMerge) {
-          log(`⚠️ #${item.number}: 新規マージは行わずマージ済み確認のみ実行する（回復専用経路。opt-out または外部チェック未確定）`)
+          log(`⚠️ #${item.number}: 新規マージは行わずマージ済み確認のみ実行する（${prAlreadyMerged ? 'PR が既に MERGED と独立確認されたため（Issue #509）' : '回復専用経路。opt-out または外部チェック未確定'}）`)
         }
         // 回復専用経路は「MERGED ならクローズ確認のみ」。opt-in 経路は G0 と全条件の独立再検証後に
         // squash merge を実行する。例外は x = null として null 返却と同じ経路へ合流させる
@@ -6584,9 +6625,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           // failure として 'failed' 終端・halt カウント対象に落とす（fail-closed）。
           log(`⚠️ #${item.number}: マージ実行エージェントが merged: true と不整合な reason（${sanitize(String(x?.reason ?? ''))}）を返した。無効な結果として扱う`)
           lastState = 'invalid-monitor-result'
-        } else if (recoveryOnly && execReason && execReason !== 'pr-closed') {
-          // 回復専用経路で PR がマージ済みでなかった。reason 別分岐より先に fail-closed で捕捉し
-          // fix ループ・再監視へ進ませず blocked で終端する。'pr-closed' のみ専用分岐（unrecoverable）へ流す。
+        } else if ((recoveryOnly || prAlreadyMerged) && execReason && execReason !== 'pr-closed') {
+          // 回復専用経路、または新規マージ経路の独立確認（opt-in ゲート前の probe）が MERGED と
+          // 判定したが merge-exec 自身の再取得では MERGED でなかった経路（prAlreadyMerged。
+          // Issue #509。probe と merge-exec は独立コンテキストのため判定がずれる余地がある——
+          // push 直後の反映遅延等）で、PR がマージ済みでなかった。reason 別分岐より先に
+          // fail-closed で捕捉し fix ループ・再監視へ進ませず blocked（halt 非カウント）で終端
+          // する。'pr-closed' のみ専用分岐（unrecoverable）へ流す。
           const recoveryOnlyReason = [
             ...(!externalChecksConfirmed ? [EXTERNAL_CHECKS_UNCONFIRMED_REASON] : []),
             ...(externalChecksConfirmed && !externalChecksContextsConfirmed ? [EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON] : []),
@@ -6595,6 +6640,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             // では検証エージェントを起動しないため、宣言がある場合は人間への確認依頼をここへ添える。
             ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
               ? [`本イシューは opt-in テスト（${item.optinTests.join(' / ')}）を宣言している。人間がマージする前に PR 本文の opt-in テスト実行記録節を確認すること`]
+              : []),
+            // prAlreadyMerged 単独（recoveryOnly ではない）の場合、上の 3 条件はいずれも真になら
+            // ないため、この文言を足さないと配列が空になり汎用フォールバック文だけになる
+            // （Issue #509）。
+            ...(prAlreadyMerged && !recoveryOnly
+              ? ['直前の独立確認では PR が MERGED と判定されたが、マージ実行エージェントの再取得ではマージ済みと確認できなかった。判定のずれの可能性があるため次回実行で再確認する']
               : []),
           ].join('。') || '回復専用経路で停止した'
           return await failMergeTerminal(capText(`${recoveryOnlyReason}（PR のマージ済みクローズ回復のみ試行したが PR はマージ済みではなかった: ${execSummaryText}）`), 'blocked')
