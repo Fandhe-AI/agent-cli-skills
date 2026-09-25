@@ -7725,14 +7725,22 @@ async function remeasureResidualBytesNow() {
           `1 worktree あたりの容量予約見積りの更新を見送った（implement worktree ${implementResidualCount} 件が` +
             `すべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
         )
-      } else if (avgActualBytes > rawPerWorktreeByteReserve) {
-        log(
-          `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
-            `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
-            `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
-        )
-        rawPerWorktreeByteReserve = avgActualBytes
-        await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
+      } else {
+        if (avgActualBytes > rawPerWorktreeByteReserve) {
+          log(
+            `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
+              `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
+              `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
+          )
+          rawPerWorktreeByteReserve = avgActualBytes
+        }
+
+
+
+
+
+
+        await raiseAndPersistHighWater(avgActualBytes)
       }
     }
   } else if (targetPaths.length > 0) {
@@ -7746,15 +7754,19 @@ async function remeasureResidualBytesNow() {
         `1 worktree あたりの容量予約見積りの更新を見送った（残置全件 ${targetPaths.length} 件が` +
           `すべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
       )
-    } else if (avgActualBytes > rawPerWorktreeByteReserve) {
-      log(
-        `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
-          `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
-          `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree データが無いため残置` +
-          `全件 ${targetPaths.length} 件の平均へフォールバック）`,
-      )
-      rawPerWorktreeByteReserve = avgActualBytes
-      await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
+    } else {
+      if (avgActualBytes > rawPerWorktreeByteReserve) {
+        log(
+          `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
+            `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
+            `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree データが無いため残置` +
+            `全件 ${targetPaths.length} 件の平均へフォールバック）`,
+        )
+        rawPerWorktreeByteReserve = avgActualBytes
+      }
+
+
+      await raiseAndPersistHighWater(avgActualBytes)
     }
   }
 

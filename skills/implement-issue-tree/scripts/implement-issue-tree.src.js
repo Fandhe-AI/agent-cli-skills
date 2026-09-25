@@ -7725,14 +7725,22 @@ async function remeasureResidualBytesNow() {
           `1 worktree あたりの容量予約見積りの更新を見送った（implement worktree ${implementResidualCount} 件が` +
             `すべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
         )
-      } else if (avgActualBytes > rawPerWorktreeByteReserve) {
-        log(
-          `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
-            `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
-            `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
-        )
-        rawPerWorktreeByteReserve = avgActualBytes
-        await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
+      } else {
+        if (avgActualBytes > rawPerWorktreeByteReserve) {
+          log(
+            `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
+              `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
+              `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
+          )
+          rawPerWorktreeByteReserve = avgActualBytes
+        }
+        // raw 予約が今回増えない周回でも、実測平均は高水位の下限候補として無条件に永続化する
+        // （Issue #510）。raiseAndPersistHighWater 内の computeNextHighWater は Math.max（縮めない）
+        // 純粋関数で、既存の永続化済み高水位以下なら no-op になるため、この無条件化自体が
+        // 高水位を不当に押し上げることはない。raw 条件付きのままだと「今回の raw 予約より小さい
+        // 実測」が永続化されずに終わり、次ラン開始時の見積りが実測を反映しないまま残る
+        // （ラン開始時 avgResidualBytes を無条件で渡す #496 のパターンと同じ設計）。
+        await raiseAndPersistHighWater(avgActualBytes)
       }
     }
   } else if (targetPaths.length > 0) {
@@ -7746,15 +7754,19 @@ async function remeasureResidualBytesNow() {
         `1 worktree あたりの容量予約見積りの更新を見送った（残置全件 ${targetPaths.length} 件が` +
           `すべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
       )
-    } else if (avgActualBytes > rawPerWorktreeByteReserve) {
-      log(
-        `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
-          `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
-          `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree データが無いため残置` +
-          `全件 ${targetPaths.length} 件の平均へフォールバック）`,
-      )
-      rawPerWorktreeByteReserve = avgActualBytes
-      await raiseAndPersistHighWater(rawPerWorktreeByteReserve)
+    } else {
+      if (avgActualBytes > rawPerWorktreeByteReserve) {
+        log(
+          `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ` +
+            `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB → ` +
+            `${Math.round(avgActualBytes / (1024 * 1024))} MiB（implement worktree データが無いため残置` +
+            `全件 ${targetPaths.length} 件の平均へフォールバック）`,
+        )
+        rawPerWorktreeByteReserve = avgActualBytes
+      }
+      // raw 予約の増減条件とは独立して常に永続化する（Issue #510。上の implement worktree 実測
+      // パスと同じ設計・同じ理由。raiseAndPersistHighWater 側の Math.max 安全策はそのまま活きる）。
+      await raiseAndPersistHighWater(avgActualBytes)
     }
   }
   // lastByteRemeasureOutcome は latch（newStartSuppressed）の有無に関わらず、今回の実測結果を
