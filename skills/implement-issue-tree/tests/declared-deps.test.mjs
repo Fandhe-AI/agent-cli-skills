@@ -112,12 +112,17 @@ test('異なる種類・短いフェンスではコードブロックを閉じ�
   assert.deepEqual(runFilter(body), [31])
 })
 
-test('否定語から同じ節の否定された宣言までを消費し、肯定の宣言だけを抽出する', () => {
+test('否定語の直後（挟まる語は 1 語以内）の宣言は否定として消費し、肯定の宣言だけを抽出する', () => {
   const body = [
     'Not yet blocked by #6', 'This is not needed; depends on #7', 'blocked by #8 but not blocked by #9',
-    "isn't blocked by #10", 'never depends on #11. Depends on #12',
+    "isn't blocked by #10", 'never depends on #11. Depends on #12', 'is not currently blocked by #13',
   ].join('\n')
   assert.deepEqual(runFilter(body), [7, 8, 12])
+})
+
+test('無関係な否定語・短縮形で同じ行の本物の依存宣言を落とさない', () => {
+  const body = ["We can't start yet, depends on #5", "Don't forget this depends on #4", 'Not sure, but blocked by #3'].join('\n')
+  assert.deepEqual(runFilter(body), [3, 4, 5])
 })
 
 test('否定・関連の判定はインライン宣言ごとに行い、同じ行の別宣言を落とさない', () => {

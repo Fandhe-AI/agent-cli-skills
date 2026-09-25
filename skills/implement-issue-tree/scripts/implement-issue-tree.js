@@ -1181,10 +1181,12 @@ const TREE_SCHEMA = {
 
 
 
+
+
 const DECLARED_DEPS_JQ = [
   String.raw`def refs: [scan("#([0-9]+)") | .[0] | tonumber];`,
   String.raw`def run: "(#[0-9]+(?:(?:[ \t,、/]|and|および|及び)+#[0-9]+)*)";`,
-  String.raw`def inline: gsub("(?i)(?:\\b(?:not|no longer|never)\\b|n\u0027t)[^.;。；]*?(?:depends on|blocked by)[ \t]*:?[ \t]*" + run; "") | [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];`,
+  String.raw`def inline: gsub("(?i)(?:\\b(?:not|no longer|never)\\b|n\u0027t)(?:[ \t]+[A-Za-z]+)?[ \t]+(?:depends on|blocked by)[ \t]*:?[ \t]*" + run; "") | [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];`,
   String.raw`def neg: test("(?i)関連|参考|参照|任意|なし|\\b(related|see also|optional|none|no longer)\\b");`,
   String.raw`def fenceof: (capture("^[ ]{0,3}(?<f>\u0060{3,}|~{3,})") | .f) // null;`,
   String.raw`def stripcode: . as $s | [match("\u0060+"; "g") | {o: .offset, l: .length}] as $r`,

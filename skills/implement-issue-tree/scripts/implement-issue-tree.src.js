@@ -1170,7 +1170,9 @@ const TREE_SCHEMA = {
 // 節（`## 依存` / `## Depends on` 等。`## 依存クレート` のような別見出しは行末アンカーで除外）
 // の中で、行頭（箇条書き記号・チェックボックスの直後）に置かれた `#N` の並び、(2) GitHub 流の
 // インライン記法 `Depends on #N` / `Blocked by #N`（見出し行を含む。否定語〔not / no longer / never /
-// n't〕から同じ節〔. ; 。 ；まで〕にある否定された宣言までを先に消費し、肯定の宣言だけを抽出）。`#N` の並びは空白・カンマ・読点・スラッシュ・and 区切り（`#1, #2, and
+// n't〕の直後、句読点なしで挟まる語が 1 語以内〔`not yet blocked by` 等〕の宣言は否定として先に消費し、
+// 肯定の宣言だけを抽出する。無関係な否定〔`We can't start yet, depends on #5` 等〕で本物の依存を落とすと
+// 依存未充足の着手を招くため、否定の範囲は広げない）。`#N` の並びは空白・カンマ・読点・スラッシュ・and 区切り（`#1, #2, and
 // #3` 等）を受理する。節内でも行頭以外の参照（「依存なし。関連 issue #42」等）は拾わず、関連・
 // 参考・否定を示す語を含む行頭項目は除外する（行頭項目は 1 行 1 宣言のため行単位で判定し、インライン
 // 記法には適用しない — `Depends on #12; related: #34` の #12 を落とさないため）。コードフェンス内
@@ -1184,7 +1186,7 @@ const TREE_SCHEMA = {
 const DECLARED_DEPS_JQ = [
   String.raw`def refs: [scan("#([0-9]+)") | .[0] | tonumber];`,
   String.raw`def run: "(#[0-9]+(?:(?:[ \t,、/]|and|および|及び)+#[0-9]+)*)";`,
-  String.raw`def inline: gsub("(?i)(?:\\b(?:not|no longer|never)\\b|n\u0027t)[^.;。；]*?(?:depends on|blocked by)[ \t]*:?[ \t]*" + run; "") | [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];`,
+  String.raw`def inline: gsub("(?i)(?:\\b(?:not|no longer|never)\\b|n\u0027t)(?:[ \t]+[A-Za-z]+)?[ \t]+(?:depends on|blocked by)[ \t]*:?[ \t]*" + run; "") | [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];`,
   String.raw`def neg: test("(?i)関連|参考|参照|任意|なし|\\b(related|see also|optional|none|no longer)\\b");`,
   String.raw`def fenceof: (capture("^[ ]{0,3}(?<f>\u0060{3,}|~{3,})") | .f) // null;`,
   String.raw`def stripcode: . as $s | [match("\u0060+"; "g") | {o: .offset, l: .length}] as $r`,
