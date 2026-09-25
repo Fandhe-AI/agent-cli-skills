@@ -77,6 +77,21 @@ test('#0 は抽出しない（assertInt で決定的に停止させないため�
   assert.deepEqual(runFilter('## 依存\n- #0\n- #5\nDepends on #0\n'), [5])
 })
 
+test('依存節内でも行頭以外の参照・関連/参考/否定の行は依存辺にしない', () => {
+  assert.deepEqual(runFilter('## 依存\n\n依存なし。関連 issue #42\n'), [])
+  assert.deepEqual(
+    runFilter('## 依存\n- 関連: #42\n- #42（関連のみ）\n- #7（TASK-1）\n- [ ] #8\n1. #9, #10\n参考 #11\n* #12 optional\n'),
+    [7, 8, 9, 10],
+  )
+})
+
+test('インライン記法の否定（not / no longer）は除外し、none を含む別単語は除外しない', () => {
+  assert.deepEqual(
+    runFilter('Not blocked by #3\nno longer depends on #4\nnonetheless depends on #5\n'),
+    [5],
+  )
+})
+
 test('依存宣言がなければ空配列・body が null でも失敗しない', () => {
   assert.deepEqual(runFilter('## 概要\n#5 を参照\n'), [])
   assert.deepEqual(runFilter(null), [])
@@ -87,6 +102,10 @@ test('declaredDepsPrompt は整数の対象番号と jq フィルタを単一引
   assert.match(p, /for n in 34 45; do gh issue view "\$n" --json number,body --jq '/)
   assert.ok(p.includes(DECLARED_DEPS_JQ))
   assert.ok(!DECLARED_DEPS_JQ.includes("'"), 'jq フィルタに単一引用符を含めない（シェル埋め込みが壊れる）')
+})
+
+test('declaredDepsPrompt は gh を sandbox 無効で実行する指示を含む', () => {
+  assert.match(declaredDepsPrompt([1]), /sandbox 無効/)
 })
 
 test('collectDeclaredDeps: 全件返却なら missing は空・欠落は missing に出る', () => {
