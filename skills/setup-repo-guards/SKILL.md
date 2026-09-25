@@ -121,8 +121,10 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
   - required_status_checks（**strict false は必須**。true にすると 1 件マージするたびに他の open PR の
     base が陳腐化し、implement-issue-tree の並列ランが収束しなくなる。strict は鮮度制御であって
     bypass 不能性の制御ではないため、false でもクライアント側自動マージの G0 は通過する。
-    実行環境に `.claude/rules/ruleset-policy.md` が存在する場合はそちらの詳細に従う）: **[<集約ジョブ>, （集約できない別 workflow の常時チェック）,
-    codex-review / codex]** の最小集合
+    実行環境に `.claude/rules/ruleset-policy.md` が存在する場合はそちらの詳細に従う）: 必須集合は
+    `autoMerge` を使うかどうかで変わる（下記「必須チェック選定の注意」参照）。使わない場合は
+    **[<集約ジョブ>, （集約できない別 workflow の常時チェック）, codex-review / codex]** の最小集合、
+    使う場合は PR HEAD へ報告される全 context
   - 自動マージ（implement-issue-tree の `autoMerge: true`）を使う場合、required_status_checks の
     各エントリに発行元 App の `integration_id` を束縛する（未束縛だと G0 が `issuer-unbound` で辞退する）。
     **ruleset を PUT で更新した後は必ず下記「検証」の 3 軸スイープを実行する**（`PUT` は
@@ -131,7 +133,25 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
 - 必須チェック選定の注意（重要な落とし穴）:
   - 直近 PR の check runs で「**常に報告される**」チェックのみ選ぶ。workflow レベル paths フィルタで
     実行されないことがあるチェックは入れない（マージが永久ブロックされる）。ジョブレベル条件の skipped は可
-  - Cursor Bugbot 等の外部アプリ、codex-review / post_feedback は必須にしない
+  - **autoMerge を使わない場合**: Cursor Bugbot 等の外部アプリ、codex-review / post_feedback は
+    必須にしない。
+  - **`autoMerge: true`（implement-issue-tree）を使う場合**: 上記の除外は適用しない。
+    `implement-issue-tree` の autoMerge G0 は「PR HEAD 上の check-run / commit status のうち
+    required_status_checks に含まれない context が 0 件であること」を合格条件にする
+    （`skills/implement-issue-tree/references/automerge-design.md` の G0 (d)/(f)/(g)）。
+    外部アプリを required から外すと、その context が G0 (f) に「required でない context」として
+    検出され `server-enforcement-missing` で辞退し、自動マージが構造的に成立しない。
+    `args.externalChecks` で宣言した外部 App の context と codex-review workflow の残りジョブ
+    （`post_feedback` 等、HEAD に check-run を報告するもの）を含め、**PR HEAD へ報告される全 context**
+    を required に列挙し、外部 App の required エントリは発行元 App の ID（ruleset は
+    `integration_id`）で束縛する。commit status は App 束縛（`integration_id`）を持てないため、
+    束縛不能な commit-status 専用チェックしか発行しない外部プロバイダは autoMerge と併用できない
+    （G0 (g) の帰結）。paths フィルタで実行されないことがあるチェックを必須化できない制約と
+    両立させるには、条件は workflow の `on.pull_request.paths` ではなくジョブレベル `if:` に寄せ、
+    check-run 自体は常に報告させる（skipped も可）実装パターンを使う（実例:
+    `Fandhe-AI/fandhe-frontend` の `musl-smoke.yml` / `image-size.yml` の「Detect relevant changes」
+    ステップ。同リポの `.claude/rules/ci.md`「`ci-complete` 集約ジョブと ruleset 必須チェック」節
+    〔イシュー #2325〕も、外部チェックを required から外さない運用を採用している）。
   - **チェック名が変わる PR をマージするときは、マージ前に ruleset を新チェック名へ PUT で置換する**
     （旧名のままだと CI 全 pass でも「Expected」のまま BLOCKED になる）。PUT は GET した JSON の
     required_status_checks のみ差し替えて送る
@@ -213,6 +233,7 @@ Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須�
 | ruleset を PUT したら `integration_id` 束縛が落ち、自動マージが静かに止まる（strict と bypass だけ見ると全 green に見える） | Step 4-a: PUT 後に 3 軸スイープ（`select(.integration_id==null)`）を実行する |
 | 旧 ruleset / classic BP の掃き漏らしで未束縛・strict=true が残る | Step 4-a/4-b: 全 branch ruleset を列挙して掃き、classic BP は `defaultBranchRef` 解決 + status 分岐で別枠確認する |
 | AGENTS.md に自動マージの G0 契約を書く際 strict を要件として列挙し、実装より強い契約が codex P0 の根拠になる | Step 2: G0 契約を書くなら strict は「意図的な非要件」と明記する（実行環境に `.claude/rules/ruleset-policy.md` があれば参照） |
+| autoMerge 運用で外部アプリ・post_feedback 等を required から外すと G0 (f) が server-enforcement-missing で辞退し自動マージが静かに恒久停止する | Step 4: autoMerge を使う場合は PR HEAD の全 context を required に列挙する（外部アプリ・codex-review の全ジョブを含む） |
 
 ## 注意事項
 
