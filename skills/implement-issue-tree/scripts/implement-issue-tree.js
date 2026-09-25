@@ -1189,6 +1189,7 @@ const TREE_SCHEMA = {
 
 
 
+
 const DECLARED_DEPS_JQ = [
   String.raw`def refs: [scan("#([0-9]+)") | .[0] | tonumber];`,
   String.raw`def run: "(#[0-9]+(?:(?:[ \t,、/]|and|および|及び)+#[0-9]+)*)";`,
@@ -1199,7 +1200,7 @@ const DECLARED_DEPS_JQ = [
   String.raw`| def go($i): if $i >= ($r | length) then []`,
   String.raw`else (first(range($i + 1; $r | length) | select($r[.].l == $r[$i].l)) // null) as $j`,
   String.raw`| if $j == null then go($i + 1) else [[$r[$i].o, $r[$j].o + $r[$j].l]] + go($j + 1) end end;`,
-  String.raw`go(0) as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + .[$x[1]:]);`,
+  String.raw`go(0) as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + ($s[$x[0]:$x[1]] | gsub("[^\n]"; "")) + .[$x[1]:]);`,
   String.raw`def linehead: [scan("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + run) | .[0] | refs[]];`,
   String.raw`def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline);`,
   String.raw`def flush: if (.buf | length) == 0 then . else (.buf | join("\n") | stripcode | split("\n")) as $ls | reduce $ls[] as $t (.; extract($t)) | .buf = [] end;`,

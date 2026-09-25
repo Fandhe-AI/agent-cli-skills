@@ -159,6 +159,9 @@ test('改行をまたぐインラインコードは段落内で除去し、ブ�
   assert.deepEqual(runFilter('~~~\na`b\n~~~\n## 依存\n- #5\n`c`\n'), [5])
   assert.deepEqual(runFilter('## 依存\n- #1 `a\n- #2 b` 項目\n'), [1, 2])
   assert.deepEqual(runFilter('## 依存\n- #3\n  続き `x\n  Depends on #4\n  y` 終わり\n- #5\n'), [3, 5])
+  // 除去後も行構造を保ち、閉じ側の行の語（関連 / not）を宣言の行の否定判定へ混ぜない。
+  assert.deepEqual(runFilter('## 依存\n- #5 `code\nfoo` 関連の説明\n- #6\n'), [5, 6])
+  assert.deepEqual(runFilter('`x\ny` not needed. Depends on #7\n'), [7])
 })
 
 test('見出し行のインライン記法も抽出する（見出し自体は依存節にならない）', () => {

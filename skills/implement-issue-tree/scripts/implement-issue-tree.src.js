@@ -1184,7 +1184,8 @@ const TREE_SCHEMA = {
 // 引用行・インラインコード（CommonMark と同じく同じ長さのバッククォート列同士を組にし内容ごと除去。
 // RE2 は後方参照を持たないため jq の再帰で組を作る。コードスパンは段落内の改行をまたげるがブロック
 // 境界はまたげないため、空行・見出し・フェンス・引用・リスト項目の開始で区切った段落ごとに除去して
-// から行単位で抽出する）。インデントされた行はコードブロックとみなさず抽出
+// から行単位で抽出する。除去した範囲は含まれていた改行だけを残し、閉じ側の行の語が宣言の行へ連結されて
+// 行単位の否定判定を誤らせないようにする）。インデントされた行はコードブロックとみなさず抽出
 // する（CommonMark のリスト内容インデントはマーカー幅と入れ子の深さに依存する状態を持ち、行単位の判定
 // ではリスト継続行の取りこぼしとインデントコード例の誤抽出を両立して避けられないため）。
 // フィルタはシェルの単一引用符へ埋め込むため単一引用符を含めず（jq の \u0027 で表す）、バッククォートも
@@ -1199,7 +1200,7 @@ const DECLARED_DEPS_JQ = [
   String.raw`| def go($i): if $i >= ($r | length) then []`,
   String.raw`else (first(range($i + 1; $r | length) | select($r[.].l == $r[$i].l)) // null) as $j`,
   String.raw`| if $j == null then go($i + 1) else [[$r[$i].o, $r[$j].o + $r[$j].l]] + go($j + 1) end end;`,
-  String.raw`go(0) as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + .[$x[1]:]);`,
+  String.raw`go(0) as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + ($s[$x[0]:$x[1]] | gsub("[^\n]"; "")) + .[$x[1]:]);`,
   String.raw`def linehead: [scan("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + run) | .[0] | refs[]];`,
   String.raw`def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline);`,
   String.raw`def flush: if (.buf | length) == 0 then . else (.buf | join("\n") | stripcode | split("\n")) as $ls | reduce $ls[] as $t (.; extract($t)) | .buf = [] end;`,
