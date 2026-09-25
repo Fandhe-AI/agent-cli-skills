@@ -108,16 +108,10 @@ test('コードフェンス内・引用行・インラインコードの例示�
   assert.deepEqual(runFilter(body), [94])
 })
 
-test('インデントコードブロックの例示は除外し、入れ子の箇条書き項目は拾う', () => {
-  assert.deepEqual(runFilter('例:\n\n    Depends on #42\n\tBlocked by #43\nDepends on #44\n'), [44])
+test('インデントされた行はコードとみなさず抽出する（入れ子の箇条書き・リスト継続行・段落継続行）', () => {
+  // リスト内容インデントは行単位で判定できないため、取りこぼし（halt の原因）より有界な過剰待機を選ぶ。
   assert.deepEqual(runFilter('## 依存\n- #1\n    - #2（入れ子）\n\t- #3\n'), [1, 2, 3])
-})
-
-test('リスト継続行・段落継続行のインデントはコードとみなさず抽出する', () => {
-  const body = [
-    '- 項目', '    Depends on #50（リスト継続）', '段落', '    Blocked by #51（段落継続）', '',
-    '    Depends on #52（コード）', '', '    Depends on #53（コード継続）', 'Depends on #54',
-  ].join('\n')
+  const body = ['- 項目', '    Depends on #50（リスト継続）', '段落', '    Blocked by #51（段落継続）', '', 'Depends on #54'].join('\n')
   assert.deepEqual(runFilter(body), [50, 51, 54])
 })
 

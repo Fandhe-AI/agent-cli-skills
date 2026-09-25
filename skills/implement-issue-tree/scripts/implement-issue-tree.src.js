@@ -1165,55 +1165,48 @@ const TREE_SCHEMA = {
 }
 
 // 本文の依存宣言の機械抽出（Tree エージェントの dependsOn 判断を補う決定的な下限）。
-// Tree エージェントは「判断に迷えば含めない」方針で大規模ツリーほど取りこぼすため、明示的な
-// 依存宣言だけを gh --jq で抽出し、ホストで dependsOn と和集合を取る。抽出対象は (1) 依存見出し
-// 節（`## 依存` / `## Depends on` 等。`## 依存クレート` のような別見出しは行末アンカーで除外）
-// の中で、行頭（箇条書き記号・チェックボックスの直後）に置かれた `#N` の並び、(2) GitHub 流の
-// インライン記法 `Depends on #N` / `Blocked by #N`（見出し行を含む。否定語〔not / no longer / never /
-// n't〕の直後、句読点なしで挟まる語が 1 語以内〔`not yet blocked by` 等〕の宣言は否定として先に消費し、
-// 肯定の宣言だけを抽出する。無関係な否定〔`We can't start yet, depends on #5` 等〕で本物の依存を落とすと
-// 依存未充足の着手を招くため、否定の範囲は広げない）。`#N` の並びは空白・カンマ・読点・スラッシュ・and 区切り（`#1, #2, and
-// #3` 等）を受理する。節内でも行頭以外の参照（「依存なし。関連 issue #42」等）は拾わず、関連・
-// 参考・否定（`不要` / not / never / n't 等）を示す語を含む行頭項目は除外する（行頭項目は 1 行 1 宣言のため行単位で判定し、インライン
-// 記法には適用しない — `Depends on #12; related: #34` の #12 を落とさないため）。コードフェンス内
-// （開始時の記号と長さを保持し、同種・同長以上の終了行でのみ閉じる）・インデントコードブロック（CommonMark
-// と同じく、空行（または本文先頭）の直後でリストの文脈にない、4 スペース以上またはタブで始まる非箇条書き行
-// から始まり、インデント行・空行が続く間だけ継続する。リスト継続行・段落継続行はコードとみなさず抽出する）・
-// 引用行・インラインコード
-// （CommonMark と同じく同じ長さのバッククォート列同士を組にし内容ごと除去。RE2 は後方参照を持たない
-// ため jq の再帰で組を作る）は除外する（機能的に先行完了が必須のものだけを依存辺にする既存規約を保つため）。
-// 本文テキストはエージェントのコンテキストへ入れない（jq が整数配列へ正規化した出力のみを扱う）。
-// 過剰な待機は depsMap 構築時のツリー外除外・祖先除外・循環除去で有界だが、取りこぼしは依存
-// 未充足の着手 → 連続失敗 → halt を招くため和集合を採る。フィルタはシェルの単一引用符へ埋め込む
-// ため単一引用符を含めず（jq の \u0027 で表す）、バッククォートも jq の \u0060 で表す（String.raw 内に生のバッククォートを置かないため）。
+// Tree エージェントは「判断に迷えば含めない」方針で大規模ツリーほど取りこぼすため、明示的な依存宣言
+// だけを gh --jq で抽出し、ホストで dependsOn と和集合を取る。過剰な待機は depsMap 構築時のツリー外
+// 除外・祖先除外・循環除去で有界だが、取りこぼしは依存未充足の着手 → 連続失敗 → halt を招くため、
+// 判断が割れる形は抽出する側に倒す。本文テキストはエージェントのコンテキストへ入れない（jq が整数配列
+// へ正規化した出力のみを扱う）。
+// 抽出対象:
+// - 依存見出し節（`## 依存` / `## Depends on` 等。`## 依存クレート` のような別見出しは行末アンカーで
+//   除外）の中で、行頭（箇条書き記号・チェックボックスの直後）に置かれた `#N` の並び。関連・参考・否定
+//   （関連 / 参考 / 不要 / not / never / n't 等）を含む行頭項目は除外する（行頭項目は 1 行 1 宣言のため
+//   行単位で判定する）。行頭以外の参照（「依存なし。関連 issue #42」等）は拾わない。
+// - インライン記法 `Depends on #N` / `Blocked by #N`（見出し行を含む）。否定語（not / no longer /
+//   never / n't）の直後で、句読点なしに挟まる語が 1 語以内の宣言（`not yet blocked by` 等）は否定として
+//   先に消費する。無関係な否定（`We can't start yet, depends on #5` 等）で本物の依存を落とさないよう、
+//   否定の範囲は広げず、関連語による除外もインライン記法には適用しない。
+// - `#N` の並びは空白・カンマ・読点・スラッシュ・and 区切り（`#1, #2, and #3` 等）を受理する。
+// 除外対象: コードフェンス内（開始時の記号と長さを保持し、同種・同長以上の終了行でのみ閉じる）・
+// 引用行・インラインコード（CommonMark と同じく同じ長さのバッククォート列同士を組にし内容ごと除去。
+// RE2 は後方参照を持たないため jq の再帰で組を作る）。インデントされた行はコードブロックとみなさず抽出
+// する（CommonMark のリスト内容インデントはマーカー幅と入れ子の深さに依存する状態を持ち、行単位の判定
+// ではリスト継続行の取りこぼしとインデントコード例の誤抽出を両立して避けられないため）。
+// フィルタはシェルの単一引用符へ埋め込むため単一引用符を含めず（jq の \u0027 で表す）、バッククォートも
+// jq の \u0060 で表す（String.raw 内に生のバッククォートを置かないため）。
 const DECLARED_DEPS_JQ = [
   String.raw`def refs: [scan("#([0-9]+)") | .[0] | tonumber];`,
   String.raw`def run: "(#[0-9]+(?:(?:[ \t,、/]|and|および|及び)+#[0-9]+)*)";`,
   String.raw`def inline: gsub("(?i)(?:\\b(?:not|no longer|never)\\b|n\u0027t)(?:[ \t]+[A-Za-z]+)?[ \t]+(?:depends on|blocked by)[ \t]*:?[ \t]*" + run; "") | [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];`,
   String.raw`def neg: test("(?i)関連|参考|参照|任意|なし|不要|\\b(related|see also|optional|none|no longer|not|never|unnecessary)\\b|n\u0027t");`,
   String.raw`def fenceof: (capture("^[ ]{0,3}(?<f>\u0060{3,}|~{3,})") | .f) // null;`,
-  String.raw`def listitem: test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]");`,
-  String.raw`def indented: test("^(?: {4}|\t)");`,
-  String.raw`def blank: test("^[ \t]*$");`,
   String.raw`def stripcode: . as $s | [match("\u0060+"; "g") | {o: .offset, l: .length}] as $r`,
   String.raw`| def go($i): if $i >= ($r | length) then []`,
   String.raw`else (first(range($i + 1; $r | length) | select($r[.].l == $r[$i].l)) // null) as $j`,
   String.raw`| if $j == null then go($i + 1) else [[$r[$i].o, $r[$j].o + $r[$j].l]] + go($j + 1) end end;`,
   String.raw`go(0) as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + .[$x[1]:]);`,
   String.raw`(.body // "") | split("\n")`,
-  String.raw`| reduce .[] as $raw ({in: false, fence: null, icode: false, list: false, prevblank: true, d: []};`,
+  String.raw`| reduce .[] as $raw ({in: false, fence: null, d: []};`,
   String.raw`($raw | sub("\r$"; "")) as $l`,
   String.raw`| ($l | fenceof) as $f`,
   String.raw`| (if .fence != null then`,
   String.raw`(if $f != null and ($f[0:1] == .fence[0:1]) and (($f | length) >= (.fence | length)) and ($l | test("^[ ]{0,3}[\u0060~]+[ \t]*$")) then .fence = null else . end)`,
-  String.raw`elif .icode and (($l | indented) or ($l | blank)) then .`,
-  String.raw`elif ($l | blank) then .icode = false`,
-  String.raw`elif ($l | indented) and (($l | listitem) | not) and .prevblank and (.list | not) then .icode = true`,
-  String.raw`elif $f != null then .fence = $f | .icode = false`,
-  String.raw`elif ($l | test("^[ ]{0,3}>")) then .icode = false`,
-  String.raw`else .icode = false`,
-  String.raw`| (if ($l | listitem) then .list = true elif ($l | indented) then . else .list = false end)`,
-  String.raw`| ($l | stripcode) as $t`,
+  String.raw`elif $f != null then .fence = $f`,
+  String.raw`elif ($l | test("^[ ]{0,3}>")) then .`,
+  String.raw`else ($l | stripcode) as $t`,
   String.raw`| if ($t | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then`,
   String.raw`.in = ($t | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
   String.raw`| .d += ($t | inline)`,
@@ -1221,8 +1214,7 @@ const DECLARED_DEPS_JQ = [
   String.raw`(if .in and ($t | neg | not) then .d += [$t | scan("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + run) | .[0] | refs[]] else . end)`,
   String.raw`| .d += ($t | inline)`,
   String.raw`end`,
-  String.raw`end)`,
-  String.raw`| .prevblank = ($l | blank))`,
+  String.raw`end))`,
   String.raw`| .d | map(select(. > 0)) | unique`,
 ].join(' ')
 // 1 エージェントあたりの対象件数。転記量を抑えて取りこぼしを減らし、ホスト側の全件照合で検出する。
