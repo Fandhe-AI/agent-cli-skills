@@ -224,10 +224,15 @@ fi
 ---
 name: <name>
 description: "<役割の説明（発火トリガー語を含める）>"
-model: <haiku|sonnet|opus|fable>
+model: <対象リポの model 配分表で確定した tier alias>
 tools: [必要最小限のツール]
 ---
 ```
+
+`model:` には対象リポの CLAUDE.md にある model 配分表（2-1 診断が確認する
+最上位 tier / 標準 tier / 軽量 tier → alias の対応）に従って具体的な alias（`haiku`・`sonnet`・`opus` 等、
+導入先が別 alias を採用していればその値）を書く。対応表が無い場合は Step 2 の gap として先に記録し、
+alias を決めてから追加する（対応表に無い alias を frontmatter へ直書きしない）。
 
 frontmatter のキーは Claude Code の subagent 定義仕様に従い `name` を使う
 （`subagent_type` は Agent ツール呼び出し時のパラメータ名であり、定義キーではない）。

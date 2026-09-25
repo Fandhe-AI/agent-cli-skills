@@ -181,10 +181,14 @@ Step 2 で設計した Agent を `.claude/agents/<category>/<name>.md` に作成
 ---
 name: <name>
 description: "<役割の説明>"
-model: <haiku|sonnet|opus>
+model: <Step 2 の model 配分表で確定した tier alias>
 tools: [必要最小限のツール]
 ---
 ```
+
+`model:` には具体的な model alias（例: `haiku`・`sonnet`・`opus`）を書くが、値は固定の列挙ではなく
+Step 2 で確定した tier 対応表（最上位 tier / 標準 tier / 軽量 tier → alias）から選ぶ。
+対応表と異なる alias を frontmatter へ書かない（`update-claude` の 2-1 診断が対応表との整合を確認する）。
 
 frontmatter のキーは Claude Code の subagent 定義仕様に従い `name` を使う
 （`subagent_type` は Agent ツール呼び出し時のパラメータ名であり、定義キーではない）。
