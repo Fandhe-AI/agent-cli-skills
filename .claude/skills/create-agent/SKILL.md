@@ -41,10 +41,10 @@ argument-hint: "<category>/<agent-name> (例: create-agent quality/lint-runner)"
 
 | Agent カテゴリ | 許可ツール |
 |-------------|-----------|
-| 読み取り専用（research/・quality/） | `Read`・`Glob`・`Grep` のみ |
+| 読み取り専用（research/・quality/） | 原則 `Read`・`Glob`・`Grep` のみ。例外は `agent-authoring.md` の条件を満たす場合に限る |
 | 作成・編集（author/） | 上記 + `Edit`・`Write`・`Bash` |
 
-読み取り専用 Agent には `Edit`・`Write`・`Bash` を **含めない**。
+読み取り専用 Agent に `Edit`・`Write` は無条件で **含めない**。`Bash`・`WebFetch`・`WebSearch` も原則含めないが、`.claude/rules/agent-authoring.md`「例外: Bash を許可する読み取り専用 Agent」「WebFetch / WebSearch を許可する読み取り専用 Agent」の条件（機械的検証 Agent・CLI 失敗調査 Agent・許可ドメイン明示の調査系 Agent）を満たす場合のみ例外とし、本文に用途（診断目的限定・破壊的操作禁止・許可ドメイン等）を明記する。例外の詳細・許可ドメイン一覧は `agent-authoring.md` を正典として参照し、ここでは複製しない。
 
 ## subagent フォールバック（skills add 導入先向け）
 
@@ -87,7 +87,9 @@ prompt: |
                    model（選定基準に従う）, tools（最小権限の原則）
     - 本文: # Agent名 → ## 役割 → ## 対象スコープ → ## 遵守する規約 → ## 手順/観点 →
             ## 完了条件 → ## 報告フォーマット
-    - 読み取り専用 Agent には Edit・Write・Bash を含めない
+    - research/・quality/ カテゴリには Edit・Write を含めない（author/ カテゴリは Edit・Write
+      を許可する）。Bash・WebFetch・WebSearch は agent-authoring.md の例外条件を満たす場合のみ
+      許可し、用途を本文に明記する
 ```
 
 ### Step 3: model 選定と tools 設定を確認する
@@ -96,7 +98,8 @@ prompt: |
 
 - `model` がカテゴリ・用途に合った選定になっているか
 - `tools` が最小権限原則を守っているか
-- `quality/` カテゴリなのに `Edit`・`Write`・`Bash` が含まれていないか
+- `quality/`・`research/` カテゴリに `Edit`・`Write` が含まれていないか。`Bash`・`WebFetch`・
+  `WebSearch` を含む場合は `agent-authoring.md` の例外条件を満たし、本文に用途が明記されているか
 
 ### Step 4: frontmatter-linter で検証する
 
@@ -142,6 +145,6 @@ CLAUDE.md の Sub-agents 表・構造ツリーを更新するには:
 
 - **dotclaude-via-temp 必須**: `agent-author` は `.claude/agents/` に直接書き込まず、`_/dotclaude/agents/` への一時作成から `.claude/agents/` への `mv` まで一貫して実行する。`create-agent` 側で `mv` を別途実行する必要はない（詳細: `.claude/rules/dotclaude-via-temp.md`）
 - **`rm -rf _/dotclaude` は禁止**: `rmdir` で空ディレクトリのみ削除する（他の並行作業との共有ディレクトリ）
-- **読み取り専用 Agent の tools**: `research/` と `quality/` カテゴリには `Edit`・`Write`・`Bash` を含めない
+- **読み取り専用 Agent の tools**: `research/` と `quality/` カテゴリに `Edit`・`Write` は無条件で含めない。`Bash`・`WebFetch`・`WebSearch` は原則含めないが、`.claude/rules/agent-authoring.md` の例外条件（機械的検証 Agent・CLI 失敗調査 Agent・許可ドメイン明示の調査系 Agent）を満たす場合のみ例外とし、用途を本文に明記する
 - **name の解決**: `subagent_type:` による呼び出しは frontmatter の `name:` フィールドで解決される。カテゴリを移動しても呼び出しコードの変更が不要
 - **update-docs の実行**: Agent 追加後は必ず `/update-docs` で `CLAUDE.md` を最新化する
