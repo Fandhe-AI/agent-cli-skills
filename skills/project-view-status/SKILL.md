@@ -57,14 +57,14 @@ gh project item-list <number> --owner <owner> --limit "${total}" --format json \
     total: .totalCount,
     n: (.items | length),
     by_status: ([.items[] | .status // "(未設定)"] | group_by(.) | map({key: .[0], count: length})),
-    by_priority: ([.items[] | .priority // "(未設定)"] | group_by(.) | map({key: .[0], count: length})),
-    by_size: ([.items[] | .size // "(未設定)"] | group_by(.) | map({key: .[0], count: length})),
-    status_x_priority: ([.items[] | {status: (.status // "(未設定)"), priority: (.priority // "(未設定)")}] | group_by(.) | map({key: .[0], count: length})),
+    open_by_priority: ([.items[] | select(.status != "Done") | .priority // "(未設定)"] | group_by(.) | map({key: .[0], count: length})),
+    open_by_size: ([.items[] | select(.status != "Done") | .size // "(未設定)"] | group_by(.) | map({key: .[0], count: length})),
+    open_status_x_priority: ([.items[] | select(.status != "Done") | {status: (.status // "(未設定)"), priority: (.priority // "(未設定)")}] | group_by(.) | map({key: .[0], count: length})),
     done: ([.items[] | select(.status == "Done")] | length)
   }'
 ```
 
-出力の `total`（`.totalCount`）と `n`（`.items | length`）を確認し、一致しない場合は Step 2 取得後にアイテムが追加・削除された等の不完全な集計として扱わず、処理を停止してユーザーへ報告する（1 回の取得のため確認も 1 回でよい）。フィールドが Step 3 の field-list に存在しない場合、全件で `(未設定)` になるため、該当フィールドのセクションはスキップする。完了率は `done / n` から算出する。モデルは算出結果を表に整形し、目立つ偏りがあればコメントする。
+出力の `total`（`.totalCount`）と `n`（`.items | length`）を確認し、一致しない場合は Step 2 取得後にアイテムが追加・削除された等の不完全な集計として扱わず、処理を停止してユーザーへ報告する（1 回の取得のため確認も 1 回でよい）。フィールドが Step 3 の field-list に存在しない場合、全件で `(未設定)` になるため、該当フィールドのセクションはスキップする。完了率は `done / n` から算出する。`open_by_priority`・`open_by_size`・`open_status_x_priority` は Step 5 の書式（優先度別・サイズ別は未完了のみ）に合わせ、Status が `Done` 以外（未設定も含む）のアイテムのみを集計する。モデルは算出結果を表に整形し、目立つ偏りがあればコメントする。
 
 ### Step 5: レポートを生成する
 
