@@ -35,7 +35,7 @@ total=$(gh project item-list <number> --owner <owner> --limit 1 --format json --
 [ "${total}" -eq 0 ] && { echo "アイテム 0 件"; exit 0; }
 ```
 
-以降の集計（Step 4）では `${total}` を `--limit` にそのまま渡す。各集計クエリは出力に `total`（`.totalCount`）と `n`（`.items | length`）を含め、その場で一致を確認する。一致しない場合は不完全な集計として扱わず、処理を停止してユーザーへ報告する（`--limit` の再指定や原因調査は報告後の対応とする）。
+Step 4 では `${total}` を `--limit` にそのまま渡し、全アイテムを 1 回だけ取得する。取得結果の `totalCount` が `${total}` と一致しない場合は、取得の間にアイテムが追加・削除されたことを意味するため、不完全な集計として扱わず処理を停止してユーザーへ報告する（`--limit` の再指定や原因調査は報告後の対応とする）。
 
 ### Step 3: フィールド定義を取得する
 
@@ -49,14 +49,22 @@ Status, Priority, Size フィールドの定義とオプション値を取得す
 
 ### Step 4: ステータス別・優先度別に集計する
 
-件数と割合は `gh` の `--jq`（組み込み jq）で算出する（手で数えない、standalone の `jq` インストールは不要）。例:
+`gh project item-list` は Step 2 で確認した `${total}` を `--limit` に渡して **1 回だけ**取得し、その同一 JSON から `--jq` の 1 つの式で全集計をまとめて算出する（同一レポート内でスナップショットが混在しないようにするため、複数回に分けて再取得しない）。手で数えない、standalone の `jq` インストールも不要。例:
 
 ```bash
 gh project item-list <number> --owner <owner> --limit "${total}" --format json \
-  --jq '{total: .totalCount, n: (.items | length), by_status: ([.items[] | .status // "(未設定)"] | group_by(.) | map({key: .[0], count: length}))}'
+  --jq '{
+    total: .totalCount,
+    n: (.items | length),
+    by_status: ([.items[] | .status // "(未設定)"] | group_by(.) | map({key: .[0], count: length})),
+    by_priority: ([.items[] | .priority // "(未設定)"] | group_by(.) | map({key: .[0], count: length})),
+    by_size: ([.items[] | .size // "(未設定)"] | group_by(.) | map({key: .[0], count: length})),
+    status_x_priority: ([.items[] | {status: (.status // "(未設定)"), priority: (.priority // "(未設定)")}] | group_by(.) | map({key: .[0], count: length})),
+    done: ([.items[] | select(.status == "Done")] | length)
+  }'
 ```
 
-優先度別・ステータス × 優先度も同様に `--jq` の `group_by` で求め、完了率は Done 件数 ÷ 全件で計算する。集計ごとに再取得するため、クエリの出力には毎回 `total` と `n` を含めてその場で一致を確認する。一致しない出力は集計に使わない（不完全な集計を返さず停止してユーザーへ報告する）。モデルは算出結果を表に整形し、目立つ偏りがあればコメントする。
+出力の `total`（`.totalCount`）と `n`（`.items | length`）を確認し、一致しない場合は Step 2 取得後にアイテムが追加・削除された等の不完全な集計として扱わず、処理を停止してユーザーへ報告する（1 回の取得のため確認も 1 回でよい）。フィールドが Step 3 の field-list に存在しない場合、全件で `(未設定)` になるため、該当フィールドのセクションはスキップする。完了率は `done / n` から算出する。モデルは算出結果を表に整形し、目立つ偏りがあればコメントする。
 
 ### Step 5: レポートを生成する
 
@@ -120,4 +128,4 @@ Step 5 のレポート出力に以下が含まれていれば完了:
 
 ## sandbox 環境での実行
 
-Step 1〜3 の `gh project view` / `gh project item-list` / `gh project field-list` はいずれも GitHub API への読み取りであり、ネットワークを要する。該当コマンド単位で sandbox 無効にして実行する。本スキルは書き込みを一切行わない（プロジェクトへの変更なし・ワークスペース外への書き込みなし）。Step 4〜5 の集計・レポート生成はローカル処理であり、ネットワークを要しない。
+Step 1〜4 の `gh project view` / `gh project item-list` / `gh project field-list`（Step 4 の集計取得も含む）はいずれも GitHub API への読み取りであり、ネットワークを要する。該当コマンド単位で sandbox 無効にして実行する。本スキルは書き込みを一切行わない（プロジェクトへの変更なし・ワークスペース外への書き込みなし）。Step 5 のレポート整形のみローカル処理であり、ネットワークを要しない。
