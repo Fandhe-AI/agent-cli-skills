@@ -35,7 +35,7 @@ total=$(gh project item-list <number> --owner <owner> --limit 1 --format json --
 [ "${total}" -eq 0 ] && { echo "アイテム 0 件"; exit 0; }
 ```
 
-Step 4 では `${total}` を `--limit` にそのまま渡し、全アイテムを 1 回だけ取得する。取得結果の `totalCount` が `${total}` と一致しない場合は、取得の間にアイテムが追加・削除されたことを意味するため、不完全な集計として扱わず処理を停止してユーザーへ報告する（`--limit` の再指定や原因調査は報告後の対応とする）。
+Step 4 では `${total}` を `--limit` にそのまま渡し、全アイテムを 1 回だけ取得する（取りこぼしの判定は Step 4 の出力で行う）。
 
 ### Step 3: フィールド定義を取得する
 
@@ -64,7 +64,7 @@ gh project item-list <number> --owner <owner> --limit "${total}" --format json \
   }'
 ```
 
-出力の `total`（`.totalCount`）と `n`（`.items | length`）を確認し、一致しない場合は Step 2 取得後にアイテムが追加・削除された等の不完全な集計として扱わず、処理を停止してユーザーへ報告する（1 回の取得のため確認も 1 回でよい）。フィールドが Step 3 の field-list に存在しない場合、全件で `(未設定)` になるため、該当フィールドのセクションはスキップする。完了率は `done / n` から算出する。`open_by_priority`・`open_by_size`・`open_status_x_priority` は Step 5 の書式（優先度別・サイズ別は未完了のみ）に合わせ、Status が `Done` 以外（未設定も含む）のアイテムのみを集計する。モデルは算出結果を表に整形し、目立つ偏りがあればコメントする。
+取得は 1 回だけなので結果は取得時点の一貫したスナップショットであり、Step 2〜4 の間にアイテムが削除されていても影響しない。問題になるのは Step 2 以降にアイテムが増えて `--limit "${total}"` を超え取りこぼす場合のみで、出力の `total`（`.totalCount`）と `n`（`.items | length`）が一致しない（`total` > `n`）ときは不完全な集計として扱わず、処理を停止してユーザーへ報告する（再実行は報告後の対応とする）。フィールドが Step 3 の field-list に存在しない場合、全件で `(未設定)` になるため、該当フィールドのセクションはスキップする。完了率は `done / n` から算出する。`open_by_priority`・`open_by_size`・`open_status_x_priority` は Step 5 の書式（優先度別・サイズ別は未完了のみ）に合わせ、Status が `Done` 以外（未設定も含む）のアイテムのみを集計する。モデルは算出結果を表に整形し、目立つ偏りがあればコメントする。
 
 ### Step 5: レポートを生成する
 
