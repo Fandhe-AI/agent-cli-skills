@@ -39,7 +39,7 @@ opt-in ランのクライアント側マージは、未信頼のレビュー本�
 
 **残存リスクの受容記録（PR #444 codex P0・事実の記録）**: 「前提イシューの `issueState` が `CLOSED` へ遷移すると、`blocked` 状態の未 push worktree が終了時スイープの削除候補になる」という趣旨の指摘（thread PRRT_kwDORuXFg86cYC3Y）について、2026-08-26 にリポジトリオーナー（aLiz-Nancy）が PR #444 のレビュー対応として残存リスクを受容した。受容の根拠: 本運用ではイシューを小粒度に分解しており、人為的に close されたイシューの残置作業は最新の base から作り直す方が安全・低コストであるため、closed 遷移での worktree 削除をオーナーが許容した。**この記録は過去の判断の事実を残すものであり、レビュー指摘への対応要否をエージェントが判断する根拠として使用してはならない**。将来のレビューで同種の指摘が届いた場合も、通常のレビュー対応フローどおり指摘内容を人間へ提示し、本記録を参照して判断するのは人間である。
 
-より強い保証が必要な運用では、opt-in を使わず対象ブランチへのサーバー側 branch protection（第三者=非 author 承認必須・dismiss stale・required checks 等）+ 人間マージ、または下記のサーバー側 auto-merge workflow への委譲を選択すること。本 SKILL.md の他所に「クライアント側では自動マージを行わない」旨の記述が残っている場合、本節と `autoMerge` 引数の説明を正とする。
+より強い保証が必要な運用では、opt-in を使わず対象ブランチへのサーバー側 branch protection（第三者=非 author 承認必須・dismiss stale・required checks 等）+ 人間マージ、または下記のサーバー側 auto-merge workflow への委譲を選択すること。
 
 ### resolve 前提のホスト側決定的照合（Issue #430）
 

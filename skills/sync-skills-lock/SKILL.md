@@ -13,7 +13,7 @@ model: sonnet
 ## 対象ファイル
 
 - **ルート**: 呼び出し元リポジトリ直下の `skills-lock.json` — このスキルが唯一編集するファイル
-- **除外**: submodule 配下の `skills-lock.json` — submodule 境界を跨がないため **絶対に触らない**
+- **除外**: submodule 配下の `skills-lock.json` は編集しない（submodule 境界を跨がないため）
 
 ## 前提条件
 
