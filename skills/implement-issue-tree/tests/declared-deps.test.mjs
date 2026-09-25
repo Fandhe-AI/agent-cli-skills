@@ -112,6 +112,14 @@ test('異なる種類・短いフェンスではコードブロックを閉じ�
   assert.deepEqual(runFilter(body), [31])
 })
 
+test('否定語から同じ節の否定された宣言までを消費し、肯定の宣言だけを抽出する', () => {
+  const body = [
+    'Not yet blocked by #6', 'This is not needed; depends on #7', 'blocked by #8 but not blocked by #9',
+    "isn't blocked by #10", 'never depends on #11. Depends on #12',
+  ].join('\n')
+  assert.deepEqual(runFilter(body), [7, 8, 12])
+})
+
 test('否定・関連の判定はインライン宣言ごとに行い、同じ行の別宣言を落とさない', () => {
   assert.deepEqual(
     runFilter('Depends on #12; related: #34\nrelated work, blocked by #35 but not blocked by #36\n'),
@@ -135,7 +143,8 @@ test('依存宣言がなければ空配列・body が null でも失敗しない
 
 test('declaredDepsPrompt は整数の対象番号と jq フィルタを単一引用符で埋め込む', () => {
   const p = declaredDepsPrompt([34, 45])
-  assert.match(p, /for n in 34 45; do gh issue view "\$n" --json number,body --jq '/)
+  assert.match(p, /for n in 34 45; do out=\$\(gh issue view "\$n" --json number,body --jq '/)
+  assert.match(p, /\) && printf '%s\\n' "\$out" \|\| echo "FAILED #\$n" >&2; done/)
   assert.ok(p.includes(DECLARED_DEPS_JQ))
   assert.ok(!DECLARED_DEPS_JQ.includes("'"), 'jq フィルタに単一引用符を含めない（シェル埋め込みが壊れる）')
 })
