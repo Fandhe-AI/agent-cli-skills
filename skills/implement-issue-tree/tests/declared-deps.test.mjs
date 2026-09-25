@@ -110,7 +110,20 @@ test('コードフェンス内・引用行・インラインコードの例示�
 
 test('インデントコードブロックの例示は除外し、入れ子の箇条書き項目は拾う', () => {
   assert.deepEqual(runFilter('例:\n\n    Depends on #42\n\tBlocked by #43\nDepends on #44\n'), [44])
-  assert.deepEqual(runFilter('## 依存\n- #1\n    - #2（入れ子）\n\t- #3\n        #4 コード\n'), [1, 2, 3])
+  assert.deepEqual(runFilter('## 依存\n- #1\n    - #2（入れ子）\n\t- #3\n'), [1, 2, 3])
+})
+
+test('リスト継続行・段落継続行のインデントはコードとみなさず抽出する', () => {
+  const body = [
+    '- 項目', '    Depends on #50（リスト継続）', '段落', '    Blocked by #51（段落継続）', '',
+    '    Depends on #52（コード）', '', '    Depends on #53（コード継続）', 'Depends on #54',
+  ].join('\n')
+  assert.deepEqual(runFilter(body), [50, 51, 54])
+})
+
+test('依存節の行頭項目の否定（not required / 依存不要 / never）は依存辺にしない', () => {
+  assert.deepEqual(runFilter('## 依存\n- #42 (not required)\n- #43（依存不要）\n- #44\n- #45 never\n'), [44])
+  assert.deepEqual(runFilter('## Blocked by\n- #60\n'), [60])
 })
 
 test('異なる種類・短いフェンスではコードブロックを閉じない', () => {
