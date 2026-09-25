@@ -71,7 +71,7 @@ cat <target-repo>/.github/workflows/*.yml 2>/dev/null | head -60 || true
 
 技術レイヤ別の builder Agent と横断サポート Agent を組み合わせる。
 
-以下の model tier 表記はモデル世代交代に追従するための抽象ラベルである。本 Step でユーザーへ提示・承認を得る際に、tier ごとの具体的な model alias（例: 最上位 tier=opus、標準 tier=sonnet、軽量 tier=haiku。導入先の方針で別 alias 可）を確定し、Step 3-1/3-6 で生成する対象リポ CLAUDE.md の model 配分表、および Step 3-2 で生成する各 Agent frontmatter の `model:` へ同じ対応表を反映する。
+以下の model tier 表記はモデル世代交代に追従するための抽象ラベルである。本 Step でユーザーへ提示・承認を得る際に、tier ごとの具体的な model alias（例: 最上位 tier=opus または fable、標準 tier=sonnet、軽量 tier=haiku。導入先の方針で別 alias 可）を確定し、Step 3-1/3-6 で生成する対象リポ CLAUDE.md の model 配分表、および Step 3-2 で生成する各 Agent frontmatter の `model:` へ同じ対応表を反映する。
 
 | カテゴリ | Agent 例 | model tier |
 |---------|---------|-------|
@@ -186,7 +186,7 @@ tools: [必要最小限のツール]
 ---
 ```
 
-`model:` には具体的な model alias（例: `haiku`・`sonnet`・`opus`）を書くが、値は固定の列挙ではなく
+`model:` には具体的な model alias（例: `haiku`・`sonnet`・`opus`・`fable`）を書くが、値は固定の列挙ではなく
 Step 2 で確定した tier 対応表（最上位 tier / 標準 tier / 軽量 tier → alias）から選ぶ。
 対応表と異なる alias を frontmatter へ書かない（`update-claude` の 2-1 診断が対応表との整合を確認する）。
 
