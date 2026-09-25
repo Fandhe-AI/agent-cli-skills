@@ -203,7 +203,7 @@ fi
 
 ### Step 5: 変更を反映する
 
-`skills-contribute.sh` は upstream の `gh repo clone` から作業ディレクトリ（`WORKDIR`）の作成・反映までを自己完結で行います。手動での事前 clone は不要です（機械可読な `CONTRIBUTE_SKILL_WORKDIR=` 等の出力を Step 6 以降で唯一の正として使う契約に一本化しています）。
+`skills-contribute.sh` は upstream の `gh repo clone` から作業ディレクトリ（`WORKDIR`）の作成・反映までを自己完結で行うため、手動での事前 clone は不要です。Step 6 以降は同スクリプトの機械可読な出力（`CONTRIBUTE_SKILL_WORKDIR=` 等）だけを唯一の正として使います。
 
 **このステップは手順を個別に打鍵せず、必ず本スキル自身のスクリプト（`skills-contribute.sh`）を実行してください。** 同スクリプトには rm -rf 前の symlink 境界検証（TOCTOU 対策込み）が実装されており、以下の断片だけを個別に実行すると検証が欠落します。
 
@@ -211,7 +211,7 @@ fi
 
 `LOCAL_SKILL_DIR` は Step 1 で解決した**貢献対象スキル**（`$ARGUMENTS`）のパスであり、本スキル（contribute-skill）自身の配置とは無関係です。スクリプトの実行パスに `LOCAL_SKILL_DIR` を流用すると、貢献対象が contribute-skill 以外の場合に存在しないパスを参照してしまいます。実行するスクリプト自身の配置は別変数 `CONTRIBUTE_SKILL_DIR` として、本スキル（contribute-skill）自身のインストール場所から解決してください。
 
-`skills-contribute.sh` は呼び出し時のカレントディレクトリを貢献元リポジトリのルートとして `LOCAL_SKILL_DIR`・`skills-lock.json` を探索し、内部で自分自身の `gh repo clone` と `WORKDIR`（clone 先）を新規作成します。手動での事前 clone は不要なため、実行直前にこの Step 内で `ORIG_DIR`（貢献元ローカルリポジトリのルート）を捕捉しておいてください。スクリプトの標準出力最終行群が返す `CONTRIBUTE_SKILL_WORKDIR=<path>` と `CONTRIBUTE_SKILL_UPSTREAM_PATH=<path>` を捕捉し、`WORKDIR` および（後述の参考コードで示す判定ロジックの）`UPSTREAM_SKILL_PATH` はこれらの値のみを唯一の正として採用します（参考コードを個別実行して得た値は使用しません）。これにより Step 6 以降が参照する `${WORKDIR}/upstream` と `${UPSTREAM_SKILL_PATH}` は、スクリプトが実際に使った clone・実際に反映したパスと一致します。
+`skills-contribute.sh` は呼び出し時のカレントディレクトリを貢献元リポジトリのルートとして `LOCAL_SKILL_DIR`・`skills-lock.json` を探索し、内部で自分自身の `gh repo clone` と `WORKDIR`（clone 先）を新規作成します。実行直前にこの Step 内で `ORIG_DIR`（貢献元ローカルリポジトリのルート）を捕捉しておいてください。スクリプトの標準出力最終行群が返す `CONTRIBUTE_SKILL_WORKDIR=<path>` と `CONTRIBUTE_SKILL_UPSTREAM_PATH=<path>` を捕捉し、`WORKDIR` および（後述の参考コードで示す判定ロジックの）`UPSTREAM_SKILL_PATH` はこれらの値のみを唯一の正として採用します（参考コードを個別実行して得た値は使用しません）。これにより Step 6 以降が参照する `${WORKDIR}/upstream` と `${UPSTREAM_SKILL_PATH}` は、スクリプトが実際に使った clone・実際に反映したパスと一致します。
 
 ```bash
 # cd する前にローカルリポジトリのルートを捕捉する（cd - は stdout を汚染するため使用しない）
@@ -478,7 +478,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 
 ## sandbox 環境での実行
 
-このスキルはネットワーク越しの GitHub 操作（fork・`git push`・PR 作成）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する。ネットワーク遮断を解除できない環境では実行できない。
+このスキルはネットワーク越しの GitHub 操作（`gh repo clone`・`git push`・PR 作成）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する。ネットワーク遮断を解除できない環境では実行できない。
 
 ## 検証
 

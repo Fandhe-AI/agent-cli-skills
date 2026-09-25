@@ -161,7 +161,7 @@ CLAUDE.md のスキル一覧・構造ツリーを更新するには:
 
 - **symlink の相対パス**: `.claude/skills/<name>` からの相対パスは `../../skills/<name>` とする（絶対パス不可）
 - **ディレクトリ名と name の一致**: frontmatter の `name:` はディレクトリ名と完全一致させる
-- **`#` を含む description**: YAML コメント扱いを防ぐためクォートで囲む（規約 e83e1bb 参照）
+- **`#` を含む description**: YAML コメント扱いを防ぐためクォートで囲む（`.claude/rules/description-style.md` 参照）
 - **スクリプト同梱時の命名**: スキルにスクリプトを同梱する場合はディレクトリ名を `scripts/`（複数形）に統一する（`script/` は使用しない）
 - **update-docs の実行**: スキル追加後は必ず `/update-docs` で `CLAUDE.md` を最新化する
 - **委譲の連鎖**: `skill-author` が別の Agent をさらに委譲する場合がある。承認フローが必要なスキルは事前に要件を確認する
