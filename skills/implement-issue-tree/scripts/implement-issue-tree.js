@@ -1217,6 +1217,17 @@ const DECLARED_DEPS_JQ = [
 const DECLARED_DEPS_CHUNK_SIZE = 40
 
 const DECLARED_DEPS_MAX_PER_NODE = 100
+
+
+
+
+const DECLARED_DEPS_SIG_MOD = 1000000007
+const DECLARED_DEPS_SIG_JQ =
+  '.sig = ((((.number * 7919) % 1000000007) + ([.deps | to_entries[] | (((.key + 1) * .value * 104729) % 1000000007)] | add // 0)) % 1000000007)'
+function declaredDepsChecksum(number, deps) {
+  const sum = deps.reduce((acc, d, i) => acc + (((i + 1) * d * 104729) % DECLARED_DEPS_SIG_MOD), 0)
+  return (((number * 7919) % DECLARED_DEPS_SIG_MOD) + sum) % DECLARED_DEPS_SIG_MOD
+}
 const DECLARED_DEPS_SCHEMA = {
   type: 'object',
   required: ['entries'],
@@ -1225,20 +1236,21 @@ const DECLARED_DEPS_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['number', 'deps'],
+        required: ['number', 'deps', 'sig'],
         properties: {
           number: { type: 'number' },
           deps: { type: 'array', items: { type: 'number' } },
+          sig: { type: 'number', description: 'コマンド出力の sig をそのまま転記した値' },
         },
       },
-      description: 'コマンド出力の各行（{"number": N, "deps": [...]}）をそのまま転記した配列',
+      description: 'コマンド出力の各行（{"number": N, "deps": [...], "sig": S}）をそのまま転記した配列',
     },
   },
 }
 
 
 function declaredDepsPrompt(numbers) {
-  const filter = `{number: .number, deps: (${DECLARED_DEPS_JQ})}`
+  const filter = `{number: .number, deps: (${DECLARED_DEPS_JQ})} | ${DECLARED_DEPS_SIG_JQ}`
   return [
     'GitHub イシュー本文の依存宣言を機械抽出するタスク（判断・補完はしない）。',
 
@@ -1249,10 +1261,11 @@ function declaredDepsPrompt(numbers) {
 
 
     `for n in ${numbers.join(' ')}; do out=$(gh issue view "$n" --json number,body --jq '${filter}') && printf '%s\\n' "$out" || echo "FAILED #$n" >&2; done`,
-    '標準出力は成功したイシューにつき 1 行の JSON（{"number": N, "deps": [...]}）。標準出力の全行を entries 配列へそのまま転記して返す（行の省略・並べ替え以外の加工・推測による追加をしない）。',
+    '標準出力は成功したイシューにつき 1 行の JSON（{"number": N, "deps": [...], "sig": S}）。標準出力の全行を entries 配列へそのまま転記して返す（number・deps〔要素の順序も含む〕・sig を出力どおりに写す。行の省略以外の加工・推測による追加をしない。sig はホストが deps との整合を検査する値）。',
     '標準エラーに FAILED と出たイシューは entries に含めない（ホストが欠落を検出して再試行する）。',
   ].join('\n')
 }
+
 
 
 
@@ -1274,6 +1287,11 @@ function collectDeclaredDeps(requested, result) {
     if (byNumber.has(n)) throw new Error(`依存宣言の抽出結果にイシュー #${n} が重複している`)
     const set = new Set()
     for (const d of deps) set.add(assertInt(d, `declaredDeps.entries[].deps[]（issue #${n}）`))
+
+
+    if (e.sig !== declaredDepsChecksum(n, deps)) {
+      throw new Error(`依存宣言の抽出結果の sig が deps と一致しない（issue #${n}。転記の誤り）`)
+    }
     byNumber.set(n, set)
   }
   const missing = requested.filter((n) => !byNumber.has(n))

@@ -27,6 +27,8 @@ const slicePath = join(sliceDir, 'implement-issue-tree-declared-deps-defs.mjs')
 const SLICE_EXPORTS = [
   'DECLARED_DEPS_JQ',
   'DECLARED_DEPS_MAX_PER_NODE',
+  'DECLARED_DEPS_SIG_JQ',
+  'declaredDepsChecksum',
   'declaredDepsPrompt',
   'collectDeclaredDeps',
   'mergeDeclaredDeps',
@@ -36,6 +38,8 @@ writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')
 const {
   DECLARED_DEPS_JQ,
   DECLARED_DEPS_MAX_PER_NODE,
+  DECLARED_DEPS_SIG_JQ,
+  declaredDepsChecksum,
   declaredDepsPrompt,
   collectDeclaredDeps,
   mergeDeclaredDeps,
@@ -158,8 +162,36 @@ test('declaredDepsPrompt は gh を sandbox 無効で実行する指示を含む
   assert.match(declaredDepsPrompt([1]), /sandbox 無効/)
 })
 
+// コマンド出力と同じ sig 付きの entry を作る。
+const e = (number, deps) => ({ number, deps, sig: declaredDepsChecksum(number, deps) })
+
+test('jq が出力する sig はホストの declaredDepsChecksum と一致する', () => {
+  const samples = [
+    [34, '## 依存\n- #21\n'],
+    [91, '## 依存\n- #78\n- #85\n'],
+    [21, '本文のみ\n'],
+    [999999, 'Depends on #99997, #99998, #99999\n'],
+  ]
+  for (const [number, body] of samples) {
+    const out = JSON.parse(execFileSync(
+      'jq',
+      ['-c', `{number: .number, deps: (${DECLARED_DEPS_JQ})} | ${DECLARED_DEPS_SIG_JQ}`],
+      { input: JSON.stringify({ number, body }) },
+    ).toString())
+    assert.equal(out.sig, declaredDepsChecksum(number, out.deps))
+  }
+})
+
+test('collectDeclaredDeps: sig の欠落・不一致（deps の脱落・書き換え・並べ替え）は throw する', () => {
+  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: [] }] }), /sig/)
+  const ok = e(1, [42, 43])
+  assert.throws(() => collectDeclaredDeps([1], { entries: [{ ...ok, deps: [] }] }), /sig/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [{ ...ok, deps: [43, 42] }] }), /sig/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [{ ...ok, deps: [42, 44] }] }), /sig/)
+})
+
 test('collectDeclaredDeps: 全件返却なら missing は空・欠落は missing に出る', () => {
-  const r = collectDeclaredDeps([1, 2, 3], { entries: [{ number: 1, deps: [5] }, { number: 3, deps: [] }] })
+  const r = collectDeclaredDeps([1, 2, 3], { entries: [e(1, [5]), e(3, [])] })
   assert.deepEqual([...r.byNumber.get(1)], [5])
   assert.deepEqual([...r.byNumber.get(3)], [])
   assert.deepEqual(r.missing, [2])
@@ -167,16 +199,13 @@ test('collectDeclaredDeps: 全件返却なら missing は空・欠落は missing
 })
 
 test('collectDeclaredDeps: 依頼外番号・非整数・上限超過は throw する', () => {
-  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 2, deps: [] }] }), /依頼外/)
-  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: ['3'] }] }), /正の整数/)
-  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1 }] }), /配列ではない/)
-  assert.throws(
-    () => collectDeclaredDeps([1], { entries: [{ number: 1, deps: [42] }, { number: 1, deps: [] }] }),
-    /重複/,
-  )
-  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: '3' }] }), /配列ではない/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [e(2, [])] }), /依頼外/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: ['3'], sig: 0 }] }), /正の整数/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, sig: 0 }] }), /配列ではない/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [e(1, [42]), e(1, [])] }), /重複/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: '3', sig: 0 }] }), /配列ではない/)
   const many = Array.from({ length: DECLARED_DEPS_MAX_PER_NODE + 1 }, (_, i) => i + 1)
-  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: many }] }), /上限/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [e(1, many)] }), /上限/)
 })
 
 test('mergeDeclaredDeps: 既存 dependsOn と和集合を取り、自己参照は除く', () => {

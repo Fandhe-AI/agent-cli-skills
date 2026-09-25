@@ -1217,6 +1217,17 @@ const DECLARED_DEPS_JQ = [
 const DECLARED_DEPS_CHUNK_SIZE = 40
 // 1 イシューあたりの依存宣言数の上限（本文由来の過大な配列で depsMap を膨らませない）。
 const DECLARED_DEPS_MAX_PER_NODE = 100
+// 転記の検査値。ホストはシェルを持たずコマンド出力を直接照合できないため、jq がイシュー番号と
+// deps から計算した sig をエージェントに転記させ、ホストが返却 deps から同じ式で再計算して照合する
+// （deps の脱落・書き換え・並べ替えといった転記の誤りを契約違反として検出し再試行へ回す）。
+// 各項を法 1000000007 で丸め、jq（倍精度）・gojq・JS の整数演算が一致する範囲に収める。
+const DECLARED_DEPS_SIG_MOD = 1000000007
+const DECLARED_DEPS_SIG_JQ =
+  '.sig = ((((.number * 7919) % 1000000007) + ([.deps | to_entries[] | (((.key + 1) * .value * 104729) % 1000000007)] | add // 0)) % 1000000007)'
+function declaredDepsChecksum(number, deps) {
+  const sum = deps.reduce((acc, d, i) => acc + (((i + 1) * d * 104729) % DECLARED_DEPS_SIG_MOD), 0)
+  return (((number * 7919) % DECLARED_DEPS_SIG_MOD) + sum) % DECLARED_DEPS_SIG_MOD
+}
 const DECLARED_DEPS_SCHEMA = {
   type: 'object',
   required: ['entries'],
@@ -1225,20 +1236,21 @@ const DECLARED_DEPS_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['number', 'deps'],
+        required: ['number', 'deps', 'sig'],
         properties: {
           number: { type: 'number' },
           deps: { type: 'array', items: { type: 'number' } },
+          sig: { type: 'number', description: 'コマンド出力の sig をそのまま転記した値' },
         },
       },
-      description: 'コマンド出力の各行（{"number": N, "deps": [...]}）をそのまま転記した配列',
+      description: 'コマンド出力の各行（{"number": N, "deps": [...], "sig": S}）をそのまま転記した配列',
     },
   },
 }
 
 // 依存宣言抽出エージェントのプロンプト。numbers は Tree 返却値を assertInt 済みの整数のみ。
 function declaredDepsPrompt(numbers) {
-  const filter = `{number: .number, deps: (${DECLARED_DEPS_JQ})}`
+  const filter = `{number: .number, deps: (${DECLARED_DEPS_JQ})} | ${DECLARED_DEPS_SIG_JQ}`
   return [
     'GitHub イシュー本文の依存宣言を機械抽出するタスク（判断・補完はしない）。',
     // gh の sandbox 無効化・リポジトリ内ファイル不読・非信頼データ方針は、未信頼テキストを読まない
@@ -1249,13 +1261,14 @@ function declaredDepsPrompt(numbers) {
     // 成功したイシューの行だけを標準出力へ出す（gh / jq が途中で失敗したイシューの出力を空の宣言と
     // 取り違えないため。失敗分は欠落としてホストの全件照合が検出し再試行する）。
     `for n in ${numbers.join(' ')}; do out=$(gh issue view "$n" --json number,body --jq '${filter}') && printf '%s\\n' "$out" || echo "FAILED #$n" >&2; done`,
-    '標準出力は成功したイシューにつき 1 行の JSON（{"number": N, "deps": [...]}）。標準出力の全行を entries 配列へそのまま転記して返す（行の省略・並べ替え以外の加工・推測による追加をしない）。',
+    '標準出力は成功したイシューにつき 1 行の JSON（{"number": N, "deps": [...], "sig": S}）。標準出力の全行を entries 配列へそのまま転記して返す（number・deps〔要素の順序も含む〕・sig を出力どおりに写す。行の省略以外の加工・推測による追加をしない。sig はホストが deps との整合を検査する値）。',
     '標準エラーに FAILED と出たイシューは entries に含めない（ホストが欠落を検出して再試行する）。',
   ].join('\n')
 }
 
 // 依存宣言抽出エージェントの返却値を検証し、number → Set(deps) を返す。requested に無い番号・
-// 非整数・上限超過は契約違反として throw する（プロンプトは信頼境界ではないため構造で検証する）。
+// 非整数・上限超過・重複・sig 不一致は契約違反として throw する（プロンプトは信頼境界ではない
+// ため構造で検証する）。
 // missing は requested のうち返却に含まれなかった番号（呼び出し側が再試行・fail-closed 判定に使う）。
 function collectDeclaredDeps(requested, result) {
   const want = new Set(requested)
@@ -1274,6 +1287,11 @@ function collectDeclaredDeps(requested, result) {
     if (byNumber.has(n)) throw new Error(`依存宣言の抽出結果にイシュー #${n} が重複している`)
     const set = new Set()
     for (const d of deps) set.add(assertInt(d, `declaredDeps.entries[].deps[]（issue #${n}）`))
+    // jq が計算した sig と返却 deps の整合を検査する（deps の脱落・書き換えを「依存なし」として
+    // 受理しないため）。
+    if (e.sig !== declaredDepsChecksum(n, deps)) {
+      throw new Error(`依存宣言の抽出結果の sig が deps と一致しない（issue #${n}。転記の誤り）`)
+    }
     byNumber.set(n, set)
   }
   const missing = requested.filter((n) => !byNumber.has(n))
