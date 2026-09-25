@@ -13,6 +13,7 @@ user-invocable: true
 
 - 対象の GitHub Project が存在すること
 - `gh` CLI がインストールされ、認証済みであること（`project` スコープ付き）
+- 集計は `gh` の `--jq`（組み込み jq）で行うため、別途 `jq` のインストールは不要
 
 ## フロー
 
@@ -45,9 +46,14 @@ Status, Priority, Size フィールドの定義とオプション値を取得す
 
 ### Step 4: ステータス別・優先度別に集計する
 
-件数と割合は `jq` で算出する（手で数えない）。例:
-`jq '[.items[] | .status // "(未設定)"] | group_by(.) | map({key: .[0], count: length})'`
-優先度別・ステータス × 優先度も同様に `group_by` で求め、完了率は Done 件数 ÷ 全件で計算する。モデルは算出結果を表に整形し、目立つ偏りがあればコメントする。
+件数と割合は `gh` の `--jq`（組み込み jq）で算出する（手で数えない、standalone の `jq` インストールは不要）。例:
+
+```bash
+gh project item-list <number> --owner <owner> --limit 999 --format json \
+  --jq '[.items[] | .status // "(未設定)"] | group_by(.) | map({key: .[0], count: length})'
+```
+
+優先度別・ステータス × 優先度も同様に `--jq` の `group_by` で求め、完了率は Done 件数 ÷ 全件で計算する。モデルは算出結果を表に整形し、目立つ偏りがあればコメントする。
 
 ### Step 5: レポートを生成する
 
