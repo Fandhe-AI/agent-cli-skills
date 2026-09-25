@@ -1174,8 +1174,9 @@ const TREE_SCHEMA = {
 // #3` 等）を受理する。節内でも行頭以外の参照（「依存なし。関連 issue #42」等）は拾わず、関連・
 // 参考・否定を示す語を含む行頭項目は除外する（行頭項目は 1 行 1 宣言のため行単位で判定し、インライン
 // 記法には適用しない — `Depends on #12; related: #34` の #12 を落とさないため）。コードフェンス内
-// （開始時の記号と長さを保持し、同種・同長以上の終了行でのみ閉じる）・引用行・インラインコードは
-// 除外する（機能的に先行完了が必須のものだけを依存辺にする既存規約を保つため）。
+// （開始時の記号と長さを保持し、同種・同長以上の終了行でのみ閉じる）・引用行・インラインコード
+// （CommonMark と同じく同じ長さのバッククォート列同士を組にし内容ごと除去。RE2 は後方参照を持たない
+// ため jq の再帰で組を作る）は除外する（機能的に先行完了が必須のものだけを依存辺にする既存規約を保つため）。
 // 本文テキストはエージェントのコンテキストへ入れない（jq が整数配列へ正規化した出力のみを扱う）。
 // 過剰な待機は depsMap 構築時のツリー外除外・祖先除外・循環除去で有界だが、取りこぼしは依存
 // 未充足の着手 → 連続失敗 → halt を招くため和集合を採る。フィルタはシェルの単一引用符へ埋め込む
@@ -1186,6 +1187,11 @@ const DECLARED_DEPS_JQ = [
   String.raw`def inline: [scan("(?i)(\\bnot[ \t]+|\\bno longer[ \t]+)?(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | select(.[0] == null) | .[1] | refs[]];`,
   String.raw`def neg: test("(?i)関連|参考|参照|任意|なし|\\b(related|see also|optional|none|no longer)\\b");`,
   String.raw`def fenceof: (capture("^[ ]{0,3}(?<f>\u0060{3,}|~{3,})") | .f) // null;`,
+  String.raw`def stripcode: . as $s | [match("\u0060+"; "g") | {o: .offset, l: .length}] as $r`,
+  String.raw`| def go($i): if $i >= ($r | length) then []`,
+  String.raw`else (first(range($i + 1; $r | length) | select($r[.].l == $r[$i].l)) // null) as $j`,
+  String.raw`| if $j == null then go($i + 1) else [[$r[$i].o, $r[$j].o + $r[$j].l]] + go($j + 1) end end;`,
+  String.raw`go(0) as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + .[$x[1]:]);`,
   String.raw`(.body // "") | split("\n")`,
   String.raw`| reduce .[] as $raw ({in: false, fence: null, d: []};`,
   String.raw`($raw | sub("\r$"; "")) as $l`,
@@ -1194,7 +1200,7 @@ const DECLARED_DEPS_JQ = [
   String.raw`(if $f != null and ($f[0:1] == .fence[0:1]) and (($f | length) >= (.fence | length)) and ($l | test("^[ ]{0,3}[\u0060~]+[ \t]*$")) then .fence = null else . end)`,
   String.raw`elif $f != null then .fence = $f`,
   String.raw`elif ($l | test("^[ ]{0,3}>")) then .`,
-  String.raw`else ($l | gsub("\u0060[^\u0060]*\u0060"; "")) as $t`,
+  String.raw`else ($l | stripcode) as $t`,
   String.raw`| if ($t | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then`,
   String.raw`.in = ($t | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
   String.raw`| .d += ($t | inline)`,
@@ -1260,7 +1266,9 @@ function collectDeclaredDeps(requested, result) {
     if (deps.length > DECLARED_DEPS_MAX_PER_NODE) {
       throw new Error(`依存宣言の抽出結果が上限 ${DECLARED_DEPS_MAX_PER_NODE} 件を超える（issue #${n}: ${deps.length} 件）`)
     }
-    const set = byNumber.get(n) ?? new Set()
+    // 同一番号の重複は転記の誤りの兆候のため、どちらかを採用せず契約違反として再試行へ回す。
+    if (byNumber.has(n)) throw new Error(`依存宣言の抽出結果にイシュー #${n} が重複している`)
+    const set = new Set()
     for (const d of deps) set.add(assertInt(d, `declaredDeps.entries[].deps[]（issue #${n}）`))
     byNumber.set(n, set)
   }

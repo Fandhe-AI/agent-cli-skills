@@ -119,6 +119,11 @@ test('否定・関連の判定はインライン宣言ごとに行い、同じ�
   )
 })
 
+test('複数バッククォートのインラインコードは内容ごと除外し、閉じないバッククォートは文字として扱う', () => {
+  assert.deepEqual(runFilter('日本語 ``Depends on #42`` と ``a ` Depends on #43`` 後 Depends on #44\n'), [44])
+  assert.deepEqual(runFilter('`` 閉じない Depends on #45\n'), [45])
+})
+
 test('見出し行のインライン記法も抽出する（見出し自体は依存節にならない）', () => {
   assert.deepEqual(runFilter('## Depends on #20, #21\n## 依存\n- #22\n## 依存クレート\n- #99\n'), [20, 21, 22])
 })
@@ -151,6 +156,10 @@ test('collectDeclaredDeps: 依頼外番号・非整数・上限超過は throw �
   assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 2, deps: [] }] }), /依頼外/)
   assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: ['3'] }] }), /正の整数/)
   assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1 }] }), /配列ではない/)
+  assert.throws(
+    () => collectDeclaredDeps([1], { entries: [{ number: 1, deps: [42] }, { number: 1, deps: [] }] }),
+    /重複/,
+  )
   assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: '3' }] }), /配列ではない/)
   const many = Array.from({ length: DECLARED_DEPS_MAX_PER_NODE + 1 }, (_, i) => i + 1)
   assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: many }] }), /上限/)
