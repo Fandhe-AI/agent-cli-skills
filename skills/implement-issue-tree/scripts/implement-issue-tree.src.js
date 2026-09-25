@@ -1182,7 +1182,9 @@ const TREE_SCHEMA = {
 // - `#N` の並びは空白・カンマ・読点・スラッシュ・and 区切り（`#1, #2, and #3` 等）を受理する。
 // 除外対象: コードフェンス内（開始時の記号と長さを保持し、同種・同長以上の終了行でのみ閉じる）・
 // 引用行・インラインコード（CommonMark と同じく同じ長さのバッククォート列同士を組にし内容ごと除去。
-// RE2 は後方参照を持たないため jq の再帰で組を作る）。インデントされた行はコードブロックとみなさず抽出
+// RE2 は後方参照を持たないため jq の再帰で組を作る。コードスパンは段落内の改行をまたげるがブロック
+// 境界はまたげないため、空行・見出し・フェンス・引用・リスト項目の開始で区切った段落ごとに除去して
+// から行単位で抽出する）。インデントされた行はコードブロックとみなさず抽出
 // する（CommonMark のリスト内容インデントはマーカー幅と入れ子の深さに依存する状態を持ち、行単位の判定
 // ではリスト継続行の取りこぼしとインデントコード例の誤抽出を両立して避けられないため）。
 // フィルタはシェルの単一引用符へ埋め込むため単一引用符を含めず（jq の \u0027 で表す）、バッククォートも
@@ -1198,23 +1200,23 @@ const DECLARED_DEPS_JQ = [
   String.raw`else (first(range($i + 1; $r | length) | select($r[.].l == $r[$i].l)) // null) as $j`,
   String.raw`| if $j == null then go($i + 1) else [[$r[$i].o, $r[$j].o + $r[$j].l]] + go($j + 1) end end;`,
   String.raw`go(0) as $c | reduce ($c | reverse[]) as $x ($s; .[:$x[0]] + .[$x[1]:]);`,
+  String.raw`def linehead: [scan("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + run) | .[0] | refs[]];`,
+  String.raw`def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline);`,
+  String.raw`def flush: if (.buf | length) == 0 then . else (.buf | join("\n") | stripcode | split("\n")) as $ls | reduce $ls[] as $t (.; extract($t)) | .buf = [] end;`,
   String.raw`(.body // "") | split("\n")`,
-  String.raw`| reduce .[] as $raw ({in: false, fence: null, d: []};`,
+  String.raw`| (reduce .[] as $raw ({in: false, fence: null, buf: [], d: []};`,
   String.raw`($raw | sub("\r$"; "")) as $l`,
   String.raw`| ($l | fenceof) as $f`,
-  String.raw`| (if .fence != null then`,
+  String.raw`| if .fence != null then`,
   String.raw`(if $f != null and ($f[0:1] == .fence[0:1]) and (($f | length) >= (.fence | length)) and ($l | test("^[ ]{0,3}[\u0060~]+[ \t]*$")) then .fence = null else . end)`,
-  String.raw`elif $f != null then .fence = $f`,
-  String.raw`elif ($l | test("^[ ]{0,3}>")) then .`,
-  String.raw`else ($l | stripcode) as $t`,
-  String.raw`| if ($t | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then`,
-  String.raw`.in = ($t | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
-  String.raw`| .d += ($t | inline)`,
-  String.raw`else`,
-  String.raw`(if .in and ($t | neg | not) then .d += [$t | scan("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + run) | .[0] | refs[]] else . end)`,
-  String.raw`| .d += ($t | inline)`,
-  String.raw`end`,
-  String.raw`end))`,
+  String.raw`elif $f != null then flush | .fence = $f`,
+  String.raw`elif ($l | test("^[ ]{0,3}>")) or ($l | test("^[ \t]*$")) then flush`,
+  String.raw`elif ($l | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then flush`,
+  String.raw`| .in = ($l | stripcode | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
+  String.raw`| .d += ($l | stripcode | inline)`,
+  String.raw`elif ($l | test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]")) then flush | .buf = [$l]`,
+  String.raw`else .buf += [$l]`,
+  String.raw`end) | flush)`,
   String.raw`| .d | map(select(. > 0)) | unique`,
 ].join(' ')
 // 1 エージェントあたりの対象件数。転記量を抑えて取りこぼしを減らし、ホスト側の全件照合で検出する。

@@ -153,6 +153,14 @@ test('複数バッククォートのインラインコードは内容ごと除�
   assert.deepEqual(runFilter('`` 閉じない Depends on #45\n'), [45])
 })
 
+test('改行をまたぐインラインコードは段落内で除去し、ブロック境界はまたがない', () => {
+  assert.deepEqual(runFilter('説明 `コード例\nDepends on #70\n続き` 本文\nDepends on #71\n'), [71])
+  assert.deepEqual(runFilter('段落 `開き\n\nDepends on #72\n'), [72])
+  assert.deepEqual(runFilter('~~~\na`b\n~~~\n## 依存\n- #5\n`c`\n'), [5])
+  assert.deepEqual(runFilter('## 依存\n- #1 `a\n- #2 b` 項目\n'), [1, 2])
+  assert.deepEqual(runFilter('## 依存\n- #3\n  続き `x\n  Depends on #4\n  y` 終わり\n- #5\n'), [3, 5])
+})
+
 test('見出し行のインライン記法も抽出する（見出し自体は依存節にならない）', () => {
   assert.deepEqual(runFilter('## Depends on #20, #21\n## 依存\n- #22\n## 依存クレート\n- #99\n'), [20, 21, 22])
 })
