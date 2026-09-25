@@ -6410,13 +6410,54 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
 
 
-      const allowMerge = !recoveryOnly
+
+
+
+
+
+
+
+
+
+
+
+      let prAlreadyMerged = false
+      if (!recoveryOnly && Array.isArray(item.optinTests) && item.optinTests.length > 0) {
+        let mergedProbe = null
+        try {
+          mergedProbe = await agent(mergeVerifyPrompt(item, impl), {
+            label: `merged-probe:#${item.number}`,
+            phase: 'Merge',
+            model: 'sonnet',
+            effort: 'low',
+            schema: MERGE_VERIFY_SCHEMA,
+          })
+        } catch (e) {
+          log(`⚠️ #${item.number}: マージ済み独立確認（opt-in ゲート前）エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
+        }
+
+
+
+
+        prAlreadyMerged = mergedProbe?.state === 'MERGED'
+        if (prAlreadyMerged) {
+          log(`#${item.number}: 新規マージ経路だが独立確認で PR が既に MERGED と判定した（人間による手動マージ等）。opt-in ゲートを起動せず already-merged 回復経路へ合流する`)
+        }
+      }
+
+
+
+
+
+      const allowMerge = !recoveryOnly && !prAlreadyMerged
 
 
 
 
 
       let optinGateHeadSha = ''
+
+
 
 
 
@@ -6488,7 +6529,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       if (lastState === 'ready') {
         if (!allowMerge) {
-          log(`⚠️ #${item.number}: 新規マージは行わずマージ済み確認のみ実行する（回復専用経路。opt-out または外部チェック未確定）`)
+          log(`⚠️ #${item.number}: 新規マージは行わずマージ済み確認のみ実行する（${prAlreadyMerged ? 'PR が既に MERGED と独立確認されたため（Issue #509）' : '回復専用経路。opt-out または外部チェック未確定'}）`)
         }
 
 
@@ -6584,7 +6625,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
           log(`⚠️ #${item.number}: マージ実行エージェントが merged: true と不整合な reason（${sanitize(String(x?.reason ?? ''))}）を返した。無効な結果として扱う`)
           lastState = 'invalid-monitor-result'
-        } else if (recoveryOnly && execReason && execReason !== 'pr-closed') {
+        } else if ((recoveryOnly || prAlreadyMerged) && execReason && execReason !== 'pr-closed') {
+
+
+
+
 
 
           const recoveryOnlyReason = [
@@ -6595,6 +6640,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
 
             ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
               ? [`本イシューは opt-in テスト（${item.optinTests.join(' / ')}）を宣言している。人間がマージする前に PR 本文の opt-in テスト実行記録節を確認すること`]
+              : []),
+
+
+
+            ...(prAlreadyMerged && !recoveryOnly
+              ? ['直前の独立確認では PR が MERGED と判定されたが、マージ実行エージェントの再取得ではマージ済みと確認できなかった。判定のずれの可能性があるため次回実行で再確認する']
               : []),
           ].join('。') || '回復専用経路で停止した'
           return await failMergeTerminal(capText(`${recoveryOnlyReason}（PR のマージ済みクローズ回復のみ試行したが PR はマージ済みではなかった: ${execSummaryText}）`), 'blocked')
