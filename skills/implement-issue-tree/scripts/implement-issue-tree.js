@@ -1177,24 +1177,32 @@ const TREE_SCHEMA = {
 
 
 
+
+
+
 const DECLARED_DEPS_JQ = [
   String.raw`def refs: [scan("#([0-9]+)") | .[0] | tonumber];`,
   String.raw`def run: "(#[0-9]+(?:(?:[ \t,、/]|and|および|及び)+#[0-9]+)*)";`,
-  String.raw`def inline: [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];`,
-  String.raw`def neg: test("(?i)関連|参考|参照|任意|なし|\\b(related|see also|optional|none|no longer)\\b|\\bnot[ \t]+(depends on|blocked by)");`,
+  String.raw`def inline: [scan("(?i)(\\bnot[ \t]+|\\bno longer[ \t]+)?(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | select(.[0] == null) | .[1] | refs[]];`,
+  String.raw`def neg: test("(?i)関連|参考|参照|任意|なし|\\b(related|see also|optional|none|no longer)\\b");`,
+  String.raw`def fenceof: (capture("^[ ]{0,3}(?<f>\u0060{3,}|~{3,})") | .f) // null;`,
   String.raw`(.body // "") | split("\n")`,
-  String.raw`| reduce .[] as $raw ({in: false, fence: false, d: []};`,
+  String.raw`| reduce .[] as $raw ({in: false, fence: null, d: []};`,
   String.raw`($raw | sub("\r$"; "")) as $l`,
-  String.raw`| if ($l | test("^[ ]{0,3}(\u0060\u0060\u0060|~~~)")) then .fence = (.fence | not)`,
-  String.raw`elif .fence or ($l | test("^[ ]{0,3}>")) then .`,
+  String.raw`| ($l | fenceof) as $f`,
+  String.raw`| if .fence != null then`,
+  String.raw`(if $f != null and ($f[0:1] == .fence[0:1]) and (($f | length) >= (.fence | length)) and ($l | test("^[ ]{0,3}[\u0060~]+[ \t]*$")) then .fence = null else . end)`,
+  String.raw`elif $f != null then .fence = $f`,
+  String.raw`elif ($l | test("^[ ]{0,3}>")) then .`,
   String.raw`else ($l | gsub("\u0060[^\u0060]*\u0060"; "")) as $t`,
   String.raw`| if ($t | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then`,
   String.raw`.in = ($t | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
-  String.raw`| .d += (if ($t | neg) then [] else ($t | inline) end)`,
-  String.raw`elif ($t | neg) then .`,
-  String.raw`else (if .in then .d += [$t | scan("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + run) | .[0] | refs[]] else . end)`,
   String.raw`| .d += ($t | inline)`,
-  String.raw`end end)`,
+  String.raw`else`,
+  String.raw`(if .in and ($t | neg | not) then .d += [$t | scan("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + run) | .[0] | refs[]] else . end)`,
+  String.raw`| .d += ($t | inline)`,
+  String.raw`end`,
+  String.raw`end)`,
   String.raw`| .d | map(select(. > 0)) | unique`,
 ].join(' ')
 

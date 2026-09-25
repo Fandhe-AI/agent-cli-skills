@@ -104,6 +104,21 @@ test('コードフェンス内・引用行・インラインコードの例示�
   assert.deepEqual(runFilter(body), [94])
 })
 
+test('異なる種類・短いフェンスではコードブロックを閉じない', () => {
+  const body = [
+    '```', '~~~', 'Depends on #30', '```', 'Depends on #31',
+    '````md', '```', 'Depends on #32', '````',
+  ].join('\n')
+  assert.deepEqual(runFilter(body), [31])
+})
+
+test('否定・関連の判定はインライン宣言ごとに行い、同じ行の別宣言を落とさない', () => {
+  assert.deepEqual(
+    runFilter('Depends on #12; related: #34\nrelated work, blocked by #35 but not blocked by #36\n'),
+    [12, 35],
+  )
+})
+
 test('見出し行のインライン記法も抽出する（見出し自体は依存節にならない）', () => {
   assert.deepEqual(runFilter('## Depends on #20, #21\n## 依存\n- #22\n## 依存クレート\n- #99\n'), [20, 21, 22])
 })
