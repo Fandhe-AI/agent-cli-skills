@@ -1174,17 +1174,29 @@ const TREE_SCHEMA = {
 
 
 
-const DECLARED_DEPS_REF_RUN = '((?:#[0-9]+(?:[ \\t]*(?:,|、|and)[ \\t]*)?)+)'
-const DECLARED_DEPS_JQ =
-  '(.body // "") | split("\\n") | reduce .[] as $l ({in: false, d: []}; '
-  + 'if ($l | test("^[ ]{0,3}#{1,6}([ \\t]|$)")) then '
-  + '.in = ($l | test("^[ ]{0,3}#{1,6}[ \\t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \\t]*:?[ \\t\\r]*$"; "i")) '
-  + 'elif ($l | test("(?i)関連|参考|参照|任意|なし|\\\\b(related|see also|optional|none|no longer)\\\\b|\\\\bnot[ \\t]+(depends on|blocked by)")) then . '
-  + 'else (if .in then .d += [$l | scan("^[ \\t]*(?:(?:[-*+]|[0-9]+[.)])[ \\t]+)?(?:\\\\[[ xX]\\\\][ \\t]+)?' + DECLARED_DEPS_REF_RUN + '") '
-  + '| .[0] | scan("#([0-9]+)") | .[0] | tonumber] else . end) '
-  + '| .d += [$l | scan("(?i)(?:depends on|blocked by)[ \\t]*:?[ \\t]*' + DECLARED_DEPS_REF_RUN + '") '
-  + '| .[0] | scan("#([0-9]+)") | .[0] | tonumber] end) '
-  + '| .d | map(select(. > 0)) | unique'
+
+
+
+const DECLARED_DEPS_JQ = [
+  String.raw`def refs: [scan("#([0-9]+)") | .[0] | tonumber];`,
+  String.raw`def run: "(#[0-9]+(?:(?:[ \t,、/]|and|および|及び)+#[0-9]+)*)";`,
+  String.raw`def inline: [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];`,
+  String.raw`def neg: test("(?i)関連|参考|参照|任意|なし|\\b(related|see also|optional|none|no longer)\\b|\\bnot[ \t]+(depends on|blocked by)");`,
+  String.raw`(.body // "") | split("\n")`,
+  String.raw`| reduce .[] as $raw ({in: false, fence: false, d: []};`,
+  String.raw`($raw | sub("\r$"; "")) as $l`,
+  String.raw`| if ($l | test("^[ ]{0,3}(\u0060\u0060\u0060|~~~)")) then .fence = (.fence | not)`,
+  String.raw`elif .fence or ($l | test("^[ ]{0,3}>")) then .`,
+  String.raw`else ($l | gsub("\u0060[^\u0060]*\u0060"; "")) as $t`,
+  String.raw`| if ($t | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then`,
+  String.raw`.in = ($t | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
+  String.raw`| .d += (if ($t | neg) then [] else ($t | inline) end)`,
+  String.raw`elif ($t | neg) then .`,
+  String.raw`else (if .in then .d += [$t | scan("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + run) | .[0] | refs[]] else . end)`,
+  String.raw`| .d += ($t | inline)`,
+  String.raw`end end)`,
+  String.raw`| .d | map(select(. > 0)) | unique`,
+].join(' ')
 
 const DECLARED_DEPS_CHUNK_SIZE = 40
 
@@ -1234,7 +1246,9 @@ function collectDeclaredDeps(requested, result) {
   for (const e of entries) {
     const n = assertInt(e?.number, 'declaredDeps.entries[].number')
     if (!want.has(n)) throw new Error(`依存宣言の抽出結果に依頼外のイシュー #${n} が含まれる`)
-    const deps = Array.isArray(e.deps) ? e.deps : []
+
+    if (!Array.isArray(e.deps)) throw new Error(`依存宣言の抽出結果の deps が配列ではない（issue #${n}）`)
+    const deps = e.deps
     if (deps.length > DECLARED_DEPS_MAX_PER_NODE) {
       throw new Error(`依存宣言の抽出結果が上限 ${DECLARED_DEPS_MAX_PER_NODE} 件を超える（issue #${n}: ${deps.length} 件）`)
     }

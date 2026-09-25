@@ -92,6 +92,22 @@ test('インライン記法の否定（not / no longer）は除外し、none を
   )
 })
 
+test('番号の並びは空白・カンマ・and（Oxford comma 含む）・スラッシュ区切りをすべて拾う', () => {
+  assert.deepEqual(runFilter('## 依存\n- #1, #2, and #3\n- #4 #5\n- #6/#7\n'), [1, 2, 3, 4, 5, 6, 7])
+})
+
+test('コードフェンス内・引用行・インラインコードの例示は依存辺にしない', () => {
+  const body = [
+    '例:', '```', 'Depends on #90', '## 依存', '- #91', '```',
+    '> Depends on #92', '`Depends on #93` は例', 'Depends on #94',
+  ].join('\n')
+  assert.deepEqual(runFilter(body), [94])
+})
+
+test('見出し行のインライン記法も抽出する（見出し自体は依存節にならない）', () => {
+  assert.deepEqual(runFilter('## Depends on #20, #21\n## 依存\n- #22\n## 依存クレート\n- #99\n'), [20, 21, 22])
+})
+
 test('依存宣言がなければ空配列・body が null でも失敗しない', () => {
   assert.deepEqual(runFilter('## 概要\n#5 を参照\n'), [])
   assert.deepEqual(runFilter(null), [])
@@ -119,6 +135,8 @@ test('collectDeclaredDeps: 全件返却なら missing は空・欠落は missing
 test('collectDeclaredDeps: 依頼外番号・非整数・上限超過は throw する', () => {
   assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 2, deps: [] }] }), /依頼外/)
   assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: ['3'] }] }), /正の整数/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1 }] }), /配列ではない/)
+  assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: '3' }] }), /配列ではない/)
   const many = Array.from({ length: DECLARED_DEPS_MAX_PER_NODE + 1 }, (_, i) => i + 1)
   assert.throws(() => collectDeclaredDeps([1], { entries: [{ number: 1, deps: many }] }), /上限/)
 })
