@@ -88,7 +88,7 @@ fi
 |---------|---------|
 | カテゴリ分割 | research / implement / testing / quality / docs のカテゴリ分割があるか |
 | 技術レイヤ別 builder | リポの技術レイヤに対応した builder Agent が存在するか |
-| model 配分 | 実装・調査=sonnet / 機械的=haiku / 横断判断=opus または fable（fable は Opus 上位の最上位 tier）が守られているか |
+| model 配分 | 各 Agent の model が対象リポ CLAUDE.md の model 配分表（最上位 tier / 標準 tier / 軽量 tier → alias の対応）と整合するか。対応表が無ければ gap として記録する |
 | 最小権限 | Agent の `tools` リストが必要最小限か |
 | 委譲 Agent | skill-author / agent-author / rules-author / docs-writer に相当する Agent があるか |
 

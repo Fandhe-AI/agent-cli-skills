@@ -71,19 +71,21 @@ cat <target-repo>/.github/workflows/*.yml 2>/dev/null | head -60 || true
 
 技術レイヤ別の builder Agent と横断サポート Agent を組み合わせる。
 
-| カテゴリ | Agent 例 | model |
+以下の model tier 表記はモデル世代交代に追従するための抽象ラベルである。本 Step でユーザーへ提示・承認を得る際に、tier ごとの具体的な model alias（例: 最上位 tier=opus、標準 tier=sonnet、軽量 tier=haiku。導入先の方針で別 alias 可）を確定し、Step 3-1/3-6 で生成する対象リポ CLAUDE.md の model 配分表、および Step 3-2 で生成する各 Agent frontmatter の `model:` へ同じ対応表を反映する。
+
+| カテゴリ | Agent 例 | model tier |
 |---------|---------|-------|
-| research | explorer（コードベース横断調査）, reference-researcher（外部仕様調査） | sonnet |
-| implement | 技術レイヤ別 builder（例: api-builder, web-builder, core-builder） | sonnet |
-| testing | test-runner, e2e-runner | sonnet |
-| quality | reviewer, security-auditor, linter | haiku / sonnet |
-| docs | docs-writer | haiku |
+| research | explorer（コードベース横断調査）, reference-researcher（外部仕様調査） | 標準 tier |
+| implement | 技術レイヤ別 builder（例: api-builder, web-builder, core-builder） | 標準 tier |
+| testing | test-runner, e2e-runner | 標準 tier |
+| quality | reviewer, security-auditor, linter | 軽量 tier / 標準 tier |
+| docs | docs-writer | 軽量 tier |
 
 - 実装系 Agent はリポの技術レイヤに合わせてカスタマイズする
   （例: Rust workspace → クレート別 builder / TypeScript monorepo → パッケージ別 builder）
-- 複雑な横断判断・アーキテクチャ設計は opus または fable（fable は Opus 上位の最上位 tier。特に大規模設計や複雑な横断判断が必要な場面に限定する）
-- 調査・生成・レビューは sonnet
-- 機械的集計・frontmatter lint・ドキュメント更新は haiku
+- 複雑な横断判断・アーキテクチャ設計は最上位 tier（特に大規模設計や複雑な横断判断が必要な場面に限定する）
+- 調査・生成・レビューは標準 tier
+- 機械的集計・frontmatter lint・ドキュメント更新は軽量 tier
 
 #### Rules 設計方針
 
@@ -121,11 +123,11 @@ cat <target-repo>/.github/workflows/*.yml 2>/dev/null | head -60 || true
 
 #### model 配分表（CLAUDE.md に記載）
 
-| 用途 | model |
-|------|-------|
-| 複雑な横断判断・アーキテクチャ設計 | opus または fable（fable は特に大規模設計・横断判断の最上位 tier） |
-| 調査・生成・実装・レビュー | sonnet |
-| 機械的集計・lint・ドキュメント更新 | haiku |
+| 用途 | model tier |
+|------|------|
+| 複雑な横断判断・アーキテクチャ設計 | 最上位 tier |
+| 調査・生成・実装・レビュー | 標準 tier |
+| 機械的集計・lint・ドキュメント更新 | 軽量 tier |
 
 上記の構成案（Agent 一覧・Rules 一覧・model 配分・hooks・Skills）を**ユーザーに提示し承認を得てから**次の Step に進む。
 
