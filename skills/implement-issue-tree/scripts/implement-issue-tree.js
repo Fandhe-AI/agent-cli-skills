@@ -1404,11 +1404,14 @@ function collectOutOfTreeDeps(nodes, treeNumbers) {
 
 function outOfTreeStatePrompt(numbers) {
   for (const n of numbers) assertInt(n, 'outOfTreeStatePrompt number')
+
+
+  const q = `{number: .number, state: .state} | ${OUT_OF_TREE_STATE_SIG_JQ}`
   return [
     'ツリー外の前提イシューの state を機械取得するタスク（判断・補完はしない）。',
     MERGE_CONTEXT_COMMON,
     '本文・タイトル・コメントは取得しない。次のコマンドを 1 回だけそのまま実行する:',
-    `for n in ${numbers.join(' ')}; do out=$(gh issue view "$n" --json number,state --jq '{number: .number, state: .state} | ${OUT_OF_TREE_STATE_SIG_JQ}') && printf '%s\\n' "$out" || echo "FAILED #$n" >&2; done`,
+    `for n in ${numbers.join(' ')}; do out=$(gh issue view "$n" --json number,state --jq '${q}' 2>/dev/null || gh pr view "$n" --json number,state --jq '${q}') && printf '%s\\n' "$out" || echo "FAILED #$n" >&2; done`,
     '標準出力の全行を entries 配列へそのまま転記して返す（number・state・sig を出力どおりに写す。推測で追加・変更しない。sig はホストが state との整合を検査する値）。標準エラーに FAILED と出た番号は含めない。',
   ].join('\n')
 }
