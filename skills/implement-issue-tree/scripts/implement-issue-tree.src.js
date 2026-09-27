@@ -1378,10 +1378,14 @@ function outOfTreeStateChecksum(number, state) {
 }
 const ROOT_ANCESTORS_SCHEMA = {
   type: 'object',
-  required: ['fetched', 'ancestors'],
+  required: ['fetched', 'chain'],
   properties: {
-    fetched: { type: 'boolean', description: 'コマンドが終了コード 0 で整数配列を出力した場合のみ true' },
-    ancestors: { type: 'array', items: { type: 'number' }, description: 'コマンド出力の整数配列をそのまま転記' },
+    fetched: { type: 'boolean', description: 'コマンドが終了コード 0 で配列を出力した場合のみ true' },
+    chain: {
+      type: 'array',
+      items: { type: 'object', required: ['number', 'parent'], properties: { number: { type: 'number' }, parent: { type: 'number' } } },
+      description: 'コマンド出力の配列（{"number": N, "parent": P} の並び）をそのまま転記',
+    },
   },
 }
 
@@ -1418,8 +1422,8 @@ function rootAncestorsPrompt(root) {
     'イシューの親チェーン（sub-issues の祖先）を機械取得するタスク（判断・補完はしない）。',
     MERGE_CONTEXT_COMMON,
     '次のコマンドを 1 回だけそのまま実行する:',
-    `gh api graphql -F owner='{owner}' -F name='{repo}' -F n=${root} -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){${sel}}}}' --jq '[.data.repository.issue | recurse(.parent // empty) | .number] | .[1:]'`,
-    '終了コード 0 なら fetched: true・ancestors に出力の整数配列をそのまま転記する。非 0 なら fetched: false・ancestors: [] を返す。',
+    `gh api graphql -F owner='{owner}' -F name='{repo}' -F n=${root} -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){${sel}}}}' --jq '[.data.repository.issue | recurse(.parent // empty) | {number: .number, parent: (.parent.number // 0)}]'`,
+    '終了コード 0 なら fetched: true・chain に出力の配列をそのまま転記する（要素の順序・number・parent を出力どおりに写す）。非 0 なら fetched: false・chain: [] を返す。',
   ].join('\n')
 }
 
@@ -1443,12 +1447,20 @@ function collectOutOfTreeStates(requested, result) {
   return { byNumber, missing: requested.filter((n) => !byNumber.has(n)) }
 }
 
-// 祖先チェーン取得の返却値を検証する。取得失敗・契約違反は null（祖先除外なし = 待つ側へ倒す）。
-function collectRootAncestors(result) {
-  if (result?.fetched !== true || !Array.isArray(result.ancestors)) return null
-  if (result.ancestors.length > ROOT_ANCESTOR_DEPTH) return null
-  if (!result.ancestors.every((a) => Number.isInteger(a) && a > 0)) return null
-  return new Set(result.ancestors)
+// 祖先チェーン取得の返却値を検証し、祖先（root を除くチェーンの番号）の Set を返す。誤った祖先で
+// open の前提を待機対象から外す fail-open を避けるため、(number, parent) の連鎖が root から始まり、
+// 各 parent が次の要素の number と一致し、末尾の parent が 0（親なし・取得深さの末端）で、番号の重複が
+// ないことをホストで検証する。取得失敗・不整合は null（祖先除外なし = 待つ側へ倒す）。
+function collectRootAncestors(result, root) {
+  const c = result?.chain
+  if (result?.fetched !== true || !Array.isArray(c) || c.length < 1 || c.length > ROOT_ANCESTOR_DEPTH + 1) return null
+  if (c[0]?.number !== root || new Set(c.map((e) => e?.number)).size !== c.length) return null
+  for (let i = 0; i < c.length; i++) {
+    const { number, parent } = c[i] ?? {}
+    if (!Number.isInteger(number) || number <= 0 || !Number.isInteger(parent) || parent < 0) return null
+    if (parent !== (i + 1 < c.length ? c[i + 1].number : 0)) return null
+  }
+  return new Set(c.slice(1).map((e) => e.number))
 }
 
 // ツリー外前提を分類する。states に無い番号（取得不能・上限超過）は unknown で、open と同じく待つ。
@@ -5233,11 +5245,11 @@ const outOfTreeDeps = { open: [], unknown: [], closed: [], ancestors: [] }
   let ancestors = null
   if (fetchable.length > 0) {
     try {
-      ancestors = collectRootAncestors(await agent(rootAncestorsPrompt(parent), { label: 'plan:root-ancestors', phase: 'Tree', model: 'haiku', effort: 'low', schema: ROOT_ANCESTORS_SCHEMA }))
+      ancestors = collectRootAncestors(await agent(rootAncestorsPrompt(parent), { label: 'plan:root-ancestors', phase: 'Tree', model: 'haiku', effort: 'low', schema: ROOT_ANCESTORS_SCHEMA }), parent)
     } catch (e) {
       log(`⚠️ ルートの祖先チェーン取得が失敗した: ${sanitize(String(e?.message ?? e))}`)
     }
-    if (!ancestors) log('⚠️ ルートの祖先チェーンを取得できなかったため、祖先の除外なしでツリー外前提を判定する（待つ側へ倒す）')
+    if (!ancestors) log('⚠️ ルートの祖先チェーンを取得できなかった、または (number, parent) の連鎖が整合しなかったため、祖先の除外なしでツリー外前提を判定する（待つ側へ倒す）')
     const chunks = []
     for (let i = 0; i < fetchable.length; i += DECLARED_DEPS_CHUNK_SIZE) chunks.push(fetchable.slice(i, i + DECLARED_DEPS_CHUNK_SIZE))
     await Promise.all(chunks.map(async (chunk, index) => {
@@ -5254,6 +5266,7 @@ const outOfTreeDeps = { open: [], unknown: [], closed: [], ancestors: [] }
     }))
   }
   Object.assign(outOfTreeDeps, classifyOutOfTreeDeps(requested, states, ancestors))
+  // 祖先として除外した番号は、実際にツリー外依存に現れたもの（classifyOutOfTreeDeps の ancestors）だけを明示する。
   if (outOfTreeDeps.ancestors.length > 0) log(`ツリー外の前提のうちルートの祖先 ${outOfTreeDeps.ancestors.map((d) => `#${d}`).join(', ')} は待たない（祖先は子の完了を待つ側）`)
   if (outOfTreeDeps.unknown.length > 0) log(`⚠️ ツリー外の前提 ${outOfTreeDeps.unknown.map((d) => `#${d}`).join(', ')} の state を取得できなかった（gh の失敗・存在しない番号・上限超過）。open 扱いで待つ（fail-closed）`)
   if (requested.length > 0) log(`ツリー外の前提イシュー: open ${outOfTreeDeps.open.length} 件${outOfTreeDeps.open.length > 0 ? `（${outOfTreeDeps.open.map((d) => `#${d}`).join(', ')}）` : ''}・closed ${outOfTreeDeps.closed.length} 件・取得不能 ${outOfTreeDeps.unknown.length} 件`)

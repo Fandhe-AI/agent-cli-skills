@@ -124,12 +124,40 @@ test('collectOutOfTreeStates: null 返却は全件 missing（取得不能 = open
   assert.deepEqual(collectOutOfTreeStates([5, 6], null).missing, [5, 6])
 })
 
-test('collectRootAncestors: 取得成功時のみ Set を返し、失敗・契約違反は null', () => {
-  assert.deepEqual([...collectRootAncestors({ fetched: true, ancestors: [3, 1] })], [3, 1])
-  assert.equal(collectRootAncestors({ fetched: false, ancestors: [3] }), null)
-  assert.equal(collectRootAncestors(null), null)
-  assert.equal(collectRootAncestors({ fetched: true, ancestors: [3, 'x'] }), null)
-  assert.equal(collectRootAncestors({ fetched: true, ancestors: Array.from({ length: ROOT_ANCESTOR_DEPTH + 1 }, (_, i) => i + 1) }), null)
+// root=4 → 親 3 → 親 1（最上位）の整合したチェーン。
+const chain = [{ number: 4, parent: 3 }, { number: 3, parent: 1 }, { number: 1, parent: 0 }]
+
+test('collectRootAncestors: root から始まり parent が次の number に一致する連鎖なら root を除く祖先の Set を返す', () => {
+  assert.deepEqual([...collectRootAncestors({ fetched: true, chain }, 4)], [3, 1])
+  // 親を持たない root は祖先なし（空集合）。
+  assert.deepEqual([...collectRootAncestors({ fetched: true, chain: [{ number: 4, parent: 0 }] }, 4)], [])
+})
+
+test('collectRootAncestors: 取得失敗・形式不正は null（祖先除外なし = 待つ側）', () => {
+  assert.equal(collectRootAncestors({ fetched: false, chain }, 4), null)
+  assert.equal(collectRootAncestors(null, 4), null)
+  assert.equal(collectRootAncestors({ fetched: true, chain: [] }, 4), null)
+  assert.equal(collectRootAncestors({ fetched: true, chain: [{ number: 4, parent: 'x' }] }, 4), null)
+  const tooLong = Array.from({ length: ROOT_ANCESTOR_DEPTH + 2 }, (_, i) => ({ number: 100 - i, parent: i === ROOT_ANCESTOR_DEPTH + 1 ? 0 : 99 - i }))
+  assert.equal(collectRootAncestors({ fetched: true, chain: tooLong }, 100), null)
+})
+
+test('collectRootAncestors: 連鎖の不整合（root 不一致・parent と次の number の食い違い・末尾の親の欠落・重複）は null', () => {
+  // root が依頼と異なる
+  assert.equal(collectRootAncestors({ fetched: true, chain }, 5), null)
+  // 途中の parent が次の number と一致しない（誤った祖先 #7 の混入）
+  assert.equal(collectRootAncestors({ fetched: true, chain: [{ number: 4, parent: 3 }, { number: 7, parent: 0 }] }, 4), null)
+  // 末尾の要素が親を持つと申告しているのに次の要素がない（切り詰め）
+  assert.equal(collectRootAncestors({ fetched: true, chain: [{ number: 4, parent: 3 }, { number: 3, parent: 1 }] }, 4), null)
+  // 番号の重複（循環）
+  assert.equal(collectRootAncestors({ fetched: true, chain: [{ number: 4, parent: 3 }, { number: 3, parent: 4 }, { number: 4, parent: 0 }] }, 4), null)
+})
+
+test('classifyOutOfTreeDeps: 祖先除外はツリー外依存に実際に現れた番号だけに限る', () => {
+  const ancestors = collectRootAncestors({ fetched: true, chain }, 4)
+  const r = classifyOutOfTreeDeps([3, 9], new Map([[9, 'OPEN']]), ancestors)
+  assert.deepEqual(r.ancestors, [3])
+  assert.deepEqual(r.open, [9])
 })
 
 test('classifyOutOfTreeDeps: open / closed（MERGED 含む）/ 取得不能 / 祖先に分類する', () => {
@@ -161,7 +189,7 @@ test('rootAncestorsPrompt: parent を ROOT_ANCESTOR_DEPTH 段辿る読み取り�
   const p = rootAncestorsPrompt(4)
   assert.equal((p.match(/parent\{/g) ?? []).length, ROOT_ANCESTOR_DEPTH)
   assert.ok(p.includes('-F n=4 '))
-  assert.ok(p.includes('recurse(.parent // empty)'))
+  assert.ok(p.includes("recurse(.parent // empty) | {number: .number, parent: (.parent.number // 0)}"))
   // 実行コマンド行は読み取り専用の query のみ（共通指示の禁止事項の説明文は対象外）。
   const cmd = p.split('\n').find((l) => l.startsWith('gh api graphql '))
   assert.ok(cmd)
@@ -291,7 +319,7 @@ test('駆動部: ツリー外前提の state 取得は本文宣言の和集合�
   assert.ok(driverPart.indexOf('mergeDeclaredDeps(tree.nodes') < driverPart.indexOf('const outOfTreeDeps = {'))
   assert.match(block, /collectOutOfTreeDeps\(tree\.nodes,/)
   assert.match(block, /schema: OUT_OF_TREE_STATE_SCHEMA/)
-  assert.match(block, /schema: ROOT_ANCESTORS_SCHEMA/)
+  assert.match(block, /schema: ROOT_ANCESTORS_SCHEMA \}\), parent\)/, '祖先チェーンは root（parent）を渡して連鎖の起点を検証する')
   // 状態ファイルの保存値を使わない（close 後の再実行で必ず再評価される）。
   assert.doesNotMatch(block, /savedItems|loadState/)
 })
