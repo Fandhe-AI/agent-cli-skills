@@ -1360,12 +1360,21 @@ const OUT_OF_TREE_STATE_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['number', 'state'],
-        properties: { number: { type: 'number' }, state: { type: 'string' } },
+        required: ['number', 'state', 'sig'],
+        properties: { number: { type: 'number' }, state: { type: 'string' }, sig: { type: 'number' } },
       },
-      description: 'コマンド出力の各行（{"number": N, "state": "..."}）をそのまま転記した配列',
+      description: 'コマンド出力の各行（{"number": N, "state": "...", "sig": S}）をそのまま転記した配列',
     },
   },
+}
+// state 転記の検査値（DECLARED_DEPS_SIG_JQ と同じ方式・同じ法）。jq が number と state から計算した sig を
+// 転記させ、ホストが同じ式で再計算して照合する（OPEN を CLOSED と書き違える等の偶発的な転記の誤りを検出し、
+// 不一致はその回を破棄・再試行、なお取れなければ unknown = 待機へ倒す）。
+const OUT_OF_TREE_STATE_CODES = { OPEN: 1, CLOSED: 2, MERGED: 3 }
+const OUT_OF_TREE_STATE_SIG_JQ =
+  '.sig = (((.number * 7919) + (({"OPEN": 1, "CLOSED": 2, "MERGED": 3}[.state] // 0) * 104729)) % 1000000007)'
+function outOfTreeStateChecksum(number, state) {
+  return ((number * 7919) + (OUT_OF_TREE_STATE_CODES[state] ?? 0) * 104729) % DECLARED_DEPS_SIG_MOD
 }
 const ROOT_ANCESTORS_SCHEMA = {
   type: 'object',
@@ -1395,8 +1404,8 @@ function outOfTreeStatePrompt(numbers) {
     'ツリー外の前提イシューの state を機械取得するタスク（判断・補完はしない）。',
     MERGE_CONTEXT_COMMON,
     '本文・タイトル・コメントは取得しない。次のコマンドを 1 回だけそのまま実行する:',
-    `for n in ${numbers.join(' ')}; do out=$(gh issue view "$n" --json number,state --jq '{number: .number, state: .state}') && printf '%s\\n' "$out" || echo "FAILED #$n" >&2; done`,
-    '標準出力の全行を entries 配列へそのまま転記して返す（推測で追加・変更しない）。標準エラーに FAILED と出た番号は含めない。',
+    `for n in ${numbers.join(' ')}; do out=$(gh issue view "$n" --json number,state --jq '{number: .number, state: .state} | ${OUT_OF_TREE_STATE_SIG_JQ}') && printf '%s\\n' "$out" || echo "FAILED #$n" >&2; done`,
+    '標準出力の全行を entries 配列へそのまま転記して返す（number・state・sig を出力どおりに写す。推測で追加・変更しない。sig はホストが state との整合を検査する値）。標準エラーに FAILED と出た番号は含めない。',
   ].join('\n')
 }
 
@@ -1414,7 +1423,7 @@ function rootAncestorsPrompt(root) {
   ].join('\n')
 }
 
-// state 取得の返却値を検証する。依頼外番号・重複・enum 外 state は契約違反として throw する
+// state 取得の返却値を検証する。依頼外番号・重複・enum 外 state・sig 不一致は契約違反として throw する
 // （OPEN を CLOSED と取り違える転記の誤りを受理しないため、部分採用せず呼び出し側で破棄・再試行）。
 function collectOutOfTreeStates(requested, result) {
   const want = new Set(requested)
@@ -1425,6 +1434,9 @@ function collectOutOfTreeStates(requested, result) {
     if (byNumber.has(n)) throw new Error(`ツリー外前提の state 取得結果にイシュー #${n} が重複している`)
     if (e.state !== 'OPEN' && !OUT_OF_TREE_DONE_STATES.has(e.state)) {
       throw new Error(`ツリー外前提の state 取得結果が想定外の値（issue #${n}: ${String(e.state).slice(0, 20)}）`)
+    }
+    if (e.sig !== outOfTreeStateChecksum(n, e.state)) {
+      throw new Error(`ツリー外前提の state 取得結果の sig が state と一致しない（issue #${n}。転記の誤り）`)
     }
     byNumber.set(n, e.state)
   }

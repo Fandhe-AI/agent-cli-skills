@@ -15,6 +15,7 @@
 // 下）はソース走査で配線を固定する。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -36,6 +37,8 @@ const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-out-of-tree-')
 const slicePath = join(sliceDir, 'implement-issue-tree-out-of-tree-defs.mjs')
 const SLICE_EXPORTS = [
   'OUT_OF_TREE_DEPS_MAX',
+  'OUT_OF_TREE_STATE_SIG_JQ',
+  'outOfTreeStateChecksum',
   'ROOT_ANCESTOR_DEPTH',
   'collectOutOfTreeDeps',
   'outOfTreeStatePrompt',
@@ -50,6 +53,8 @@ const SLICE_EXPORTS = [
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 const {
   OUT_OF_TREE_DEPS_MAX,
+  OUT_OF_TREE_STATE_SIG_JQ,
+  outOfTreeStateChecksum,
   ROOT_ANCESTOR_DEPTH,
   collectOutOfTreeDeps,
   outOfTreeStatePrompt,
@@ -81,26 +86,38 @@ test('collectOutOfTreeDeps: 非整数・0 以下は拾わない（ツリー内�
   assert.deepEqual(collectOutOfTreeDeps(nodes, new Set([10, 20])), [])
 })
 
+// 正しい sig 付きの返却エントリ。
+const ent = (number, state) => ({ number, state, sig: outOfTreeStateChecksum(number, state) })
+
 test('collectOutOfTreeStates: OPEN / CLOSED / MERGED を受理し、欠落を missing で返す', () => {
   const r = collectOutOfTreeStates([5, 6, 7, 8], {
-    entries: [
-      { number: 5, state: 'OPEN' },
-      { number: 6, state: 'CLOSED' },
-      { number: 7, state: 'MERGED' },
-    ],
+    entries: [ent(5, 'OPEN'), ent(6, 'CLOSED'), ent(7, 'MERGED')],
   })
   assert.deepEqual([...r.byNumber], [[5, 'OPEN'], [6, 'CLOSED'], [7, 'MERGED']])
   assert.deepEqual(r.missing, [8])
 })
 
 test('collectOutOfTreeStates: 依頼外番号・重複・enum 外 state は契約違反として throw する', () => {
-  assert.throws(() => collectOutOfTreeStates([5], { entries: [{ number: 6, state: 'OPEN' }] }), /依頼外/)
-  assert.throws(
-    () => collectOutOfTreeStates([5], { entries: [{ number: 5, state: 'OPEN' }, { number: 5, state: 'CLOSED' }] }),
-    /重複/,
-  )
-  assert.throws(() => collectOutOfTreeStates([5], { entries: [{ number: 5, state: 'closed' }] }), /想定外/)
-  assert.throws(() => collectOutOfTreeStates([5], { entries: [{ number: '5', state: 'OPEN' }] }), /正の整数/)
+  assert.throws(() => collectOutOfTreeStates([5], { entries: [ent(6, 'OPEN')] }), /依頼外/)
+  assert.throws(() => collectOutOfTreeStates([5], { entries: [ent(5, 'OPEN'), ent(5, 'CLOSED')] }), /重複/)
+  assert.throws(() => collectOutOfTreeStates([5], { entries: [ent(5, 'closed')] }), /想定外/)
+  assert.throws(() => collectOutOfTreeStates([5], { entries: [{ ...ent(5, 'OPEN'), number: '5' }] }), /正の整数/)
+})
+
+test('collectOutOfTreeStates: state の転記誤り（OPEN → CLOSED）を sig 不一致で検出して throw する', () => {
+  // jq が OPEN から計算した sig のまま state だけ CLOSED と写し違えた返却。
+  const wrong = { number: 5, state: 'CLOSED', sig: outOfTreeStateChecksum(5, 'OPEN') }
+  assert.throws(() => collectOutOfTreeStates([5], { entries: [wrong] }), /sig/)
+  assert.throws(() => collectOutOfTreeStates([5], { entries: [{ number: 5, state: 'OPEN' }] }), /sig/)
+})
+
+test('OUT_OF_TREE_STATE_SIG_JQ: jq の計算値がホストの outOfTreeStateChecksum と一致する', () => {
+  for (const [number, state] of [[5, 'OPEN'], [1234567, 'CLOSED'], [99999, 'MERGED']]) {
+    const out = execFileSync('jq', ['-c', `{number: .number, state: .state} | ${OUT_OF_TREE_STATE_SIG_JQ}`], {
+      input: JSON.stringify({ number, state }),
+    })
+    assert.equal(JSON.parse(out.toString()).sig, outOfTreeStateChecksum(number, state))
+  }
 })
 
 test('collectOutOfTreeStates: null 返却は全件 missing（取得不能 = open 扱いの入力）', () => {
@@ -134,7 +151,7 @@ test('classifyOutOfTreeDeps: 祖先チェーン取得失敗（null）では祖�
 test('outOfTreeStatePrompt: state のみを取得する固定コマンドで、本文・書き込み系を含まない', () => {
   const p = outOfTreeStatePrompt([5, 12])
   assert.ok(p.includes('for n in 5 12; do'))
-  assert.ok(p.includes(`gh issue view "$n" --json number,state --jq '{number: .number, state: .state}'`))
+  assert.ok(p.includes(`gh issue view "$n" --json number,state --jq '{number: .number, state: .state} | ${OUT_OF_TREE_STATE_SIG_JQ}'`))
   assert.ok(p.includes(MERGE_CONTEXT_COMMON))
   assert.doesNotMatch(p, /--json [^\n]*body|gh issue close|gh pr merge|--method/)
   assert.throws(() => outOfTreeStatePrompt([5, '6; rm -rf /']), /正の整数/)
