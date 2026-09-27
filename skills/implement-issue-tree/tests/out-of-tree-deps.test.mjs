@@ -145,7 +145,10 @@ test('rootAncestorsPrompt: parent を ROOT_ANCESTOR_DEPTH 段辿る読み取り�
   assert.equal((p.match(/parent\{/g) ?? []).length, ROOT_ANCESTOR_DEPTH)
   assert.ok(p.includes('-F n=4 '))
   assert.ok(p.includes('recurse(.parent // empty)'))
-  assert.doesNotMatch(p, /mutation/)
+  // 実行コマンド行は読み取り専用の query のみ（共通指示の禁止事項の説明文は対象外）。
+  const cmd = p.split('\n').find((l) => l.startsWith('gh api graphql '))
+  assert.ok(cmd)
+  assert.doesNotMatch(cmd, /mutation/)
   assert.throws(() => rootAncestorsPrompt(0), /正の整数/)
 })
 
