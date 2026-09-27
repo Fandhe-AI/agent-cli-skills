@@ -179,7 +179,9 @@ test('classifyOutOfTreeDeps: 祖先チェーン取得失敗（null）では祖�
 test('outOfTreeStatePrompt: state のみを取得する固定コマンドで、本文・書き込み系を含まない', () => {
   const p = outOfTreeStatePrompt([5, 12])
   assert.ok(p.includes('for n in 5 12; do'))
-  assert.ok(p.includes(`gh issue view "$n" --json number,state --jq '{number: .number, state: .state} | ${OUT_OF_TREE_STATE_SIG_JQ}'`))
+  const q = `{number: .number, state: .state} | ${OUT_OF_TREE_STATE_SIG_JQ}`
+  // issue として取れない番号（PR 番号）は gh pr view へフォールバックし、MERGED を取得できる。
+  assert.ok(p.includes(`out=$(gh issue view "$n" --json number,state --jq '${q}' 2>/dev/null || gh pr view "$n" --json number,state --jq '${q}')`))
   assert.ok(p.includes(MERGE_CONTEXT_COMMON))
   assert.doesNotMatch(p, /--json [^\n]*body|gh issue close|gh pr merge|--method/)
   assert.throws(() => outOfTreeStatePrompt([5, '6; rm -rf /']), /正の整数/)
