@@ -1414,6 +1414,8 @@ function outOfTreeStatePrompt(numbers) {
 }
 
 // ルートの祖先チェーン取得エージェントのプロンプト（Issue.parent を ROOT_ANCESTOR_DEPTH 段まで辿る）。
+// owner・name は -F（--field）で渡す。-F の値の `{owner}`・`{repo}` は gh がカレントリポジトリの値へ
+// 展開する（`gh api --help` の -F/--field 節。-f/--raw-field は展開しないため -f へ置き換えない）。
 function rootAncestorsPrompt(root) {
   assertInt(root, 'rootAncestorsPrompt root')
   let sel = 'number'
