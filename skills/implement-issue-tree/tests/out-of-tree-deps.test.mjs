@@ -1,0 +1,314 @@
+// ツリー外の前提イシュー（Tree のノード集合に無い dependsOn 番号）を待つ fail-closed 挙動の回帰テスト。
+//
+// 対象バグ: depsMap 構築が `!inTree.has(d)` でツリー外の番号を黙って捨てていたため、人間担当 issue を
+// 別トラッキングツリーで管理し実装 issue 本文の依存節にその番号を書く運用では、前提が open のまま
+// 着手していた。
+//
+// 是正後の契約:
+//   - Tree フェーズで毎ラン、ツリー外の前提の state のみを機械取得する（状態ファイルの保存値は使わない）。
+//   - open・取得不能（fail-closed）の前提は failedSet 入りの疑似前提として depsMap へ入れ、既存の
+//     dep-blocked → cascade → markBlockedByDeps（recordFailure の status: 'blocked'。halt 非カウント）で
+//     待たせる。後続は既存の「前提イシューの失敗・ブロックにより未着手」伝搬で待つ。
+//   - closed（PR 番号なら MERGED も）は従来どおり制約なし。ルートの祖先は待たない。
+//
+// 検証の二層構造（dep-reeval.test.mjs と同じ方針）: 純粋関数はスライス import で、駆動部（マーカーより
+// 下）はソース走査で配線を固定する。
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const SCRIPT_PATH = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..', 'scripts', 'implement-issue-tree.src.js',
+)
+// マーカー文字列はソース中に 1 回しか現れてはならない（g0-gates.test.mjs が出現回数を固定）ため分割して組み立てる。
+const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
+
+const source = readFileSync(SCRIPT_PATH, 'utf8')
+const markerIndex = source.indexOf(DRIVER_MARKER)
+if (markerIndex < 0) throw new Error(`テスト境界マーカー ${DRIVER_MARKER} が実装スクリプトに存在しない`)
+const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
+const driverPart = source.slice(markerIndex)
+const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-out-of-tree-'))
+const slicePath = join(sliceDir, 'implement-issue-tree-out-of-tree-defs.mjs')
+const SLICE_EXPORTS = [
+  'OUT_OF_TREE_DEPS_MAX',
+  'ROOT_ANCESTOR_DEPTH',
+  'collectOutOfTreeDeps',
+  'outOfTreeStatePrompt',
+  'rootAncestorsPrompt',
+  'collectOutOfTreeStates',
+  'collectRootAncestors',
+  'classifyOutOfTreeDeps',
+  'outOfTreeBlockNote',
+  'classifyDispatchReadiness',
+  'MERGE_CONTEXT_COMMON',
+]
+writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
+const {
+  OUT_OF_TREE_DEPS_MAX,
+  ROOT_ANCESTOR_DEPTH,
+  collectOutOfTreeDeps,
+  outOfTreeStatePrompt,
+  rootAncestorsPrompt,
+  collectOutOfTreeStates,
+  collectRootAncestors,
+  classifyOutOfTreeDeps,
+  outOfTreeBlockNote,
+  classifyDispatchReadiness,
+  MERGE_CONTEXT_COMMON,
+} = await import(pathToFileURL(slicePath).href)
+
+// ---------------------------------------------------------------------------
+// 純粋関数
+// ---------------------------------------------------------------------------
+
+test('collectOutOfTreeDeps: open ノードの dependsOn からツリー外の番号だけを重複なし昇順で集める', () => {
+  const nodes = [
+    { number: 4, state: 'open', dependsOn: [] },
+    { number: 10, state: 'open', dependsOn: [11, 50, 7] },
+    { number: 11, state: 'open', dependsOn: [50, 11, 3] },
+    { number: 12, state: 'closed', dependsOn: [99] },
+  ]
+  assert.deepEqual(collectOutOfTreeDeps(nodes, new Set([4, 10, 11, 12])), [3, 7, 50])
+})
+
+test('collectOutOfTreeDeps: 非整数・0 以下は拾わない（ツリー内・自己参照も除外）', () => {
+  const nodes = [{ number: 10, state: 'open', dependsOn: [10, 0, -1, 1.5, '8', 20] }]
+  assert.deepEqual(collectOutOfTreeDeps(nodes, new Set([10, 20])), [])
+})
+
+test('collectOutOfTreeStates: OPEN / CLOSED / MERGED を受理し、欠落を missing で返す', () => {
+  const r = collectOutOfTreeStates([5, 6, 7, 8], {
+    entries: [
+      { number: 5, state: 'OPEN' },
+      { number: 6, state: 'CLOSED' },
+      { number: 7, state: 'MERGED' },
+    ],
+  })
+  assert.deepEqual([...r.byNumber], [[5, 'OPEN'], [6, 'CLOSED'], [7, 'MERGED']])
+  assert.deepEqual(r.missing, [8])
+})
+
+test('collectOutOfTreeStates: 依頼外番号・重複・enum 外 state は契約違反として throw する', () => {
+  assert.throws(() => collectOutOfTreeStates([5], { entries: [{ number: 6, state: 'OPEN' }] }), /依頼外/)
+  assert.throws(
+    () => collectOutOfTreeStates([5], { entries: [{ number: 5, state: 'OPEN' }, { number: 5, state: 'CLOSED' }] }),
+    /重複/,
+  )
+  assert.throws(() => collectOutOfTreeStates([5], { entries: [{ number: 5, state: 'closed' }] }), /想定外/)
+  assert.throws(() => collectOutOfTreeStates([5], { entries: [{ number: '5', state: 'OPEN' }] }), /正の整数/)
+})
+
+test('collectOutOfTreeStates: null 返却は全件 missing（取得不能 = open 扱いの入力）', () => {
+  assert.deepEqual(collectOutOfTreeStates([5, 6], null).missing, [5, 6])
+})
+
+test('collectRootAncestors: 取得成功時のみ Set を返し、失敗・契約違反は null', () => {
+  assert.deepEqual([...collectRootAncestors({ fetched: true, ancestors: [3, 1] })], [3, 1])
+  assert.equal(collectRootAncestors({ fetched: false, ancestors: [3] }), null)
+  assert.equal(collectRootAncestors(null), null)
+  assert.equal(collectRootAncestors({ fetched: true, ancestors: [3, 'x'] }), null)
+  assert.equal(collectRootAncestors({ fetched: true, ancestors: Array.from({ length: ROOT_ANCESTOR_DEPTH + 1 }, (_, i) => i + 1) }), null)
+})
+
+test('classifyOutOfTreeDeps: open / closed（MERGED 含む）/ 取得不能 / 祖先に分類する', () => {
+  const states = new Map([[5, 'OPEN'], [6, 'CLOSED'], [7, 'MERGED'], [1, 'OPEN']])
+  assert.deepEqual(classifyOutOfTreeDeps([1, 5, 6, 7, 8], states, new Set([1])), {
+    open: [5],
+    unknown: [8],
+    closed: [6, 7],
+    ancestors: [1],
+  })
+})
+
+test('classifyOutOfTreeDeps: 祖先チェーン取得失敗（null）では祖先除外をせず open として待つ（fail-closed）', () => {
+  const r = classifyOutOfTreeDeps([1], new Map([[1, 'OPEN']]), null)
+  assert.deepEqual(r.open, [1])
+  assert.deepEqual(r.ancestors, [])
+})
+
+test('outOfTreeStatePrompt: state のみを取得する固定コマンドで、本文・書き込み系を含まない', () => {
+  const p = outOfTreeStatePrompt([5, 12])
+  assert.ok(p.includes('for n in 5 12; do'))
+  assert.ok(p.includes(`gh issue view "$n" --json number,state --jq '{number: .number, state: .state}'`))
+  assert.ok(p.includes(MERGE_CONTEXT_COMMON))
+  assert.doesNotMatch(p, /--json [^\n]*body|gh issue close|gh pr merge|--method/)
+  assert.throws(() => outOfTreeStatePrompt([5, '6; rm -rf /']), /正の整数/)
+})
+
+test('rootAncestorsPrompt: parent を ROOT_ANCESTOR_DEPTH 段辿る読み取り専用 GraphQL クエリを含む', () => {
+  const p = rootAncestorsPrompt(4)
+  assert.equal((p.match(/parent\{/g) ?? []).length, ROOT_ANCESTOR_DEPTH)
+  assert.ok(p.includes('-F n=4 '))
+  assert.ok(p.includes('recurse(.parent // empty)'))
+  assert.doesNotMatch(p, /mutation/)
+  assert.throws(() => rootAncestorsPrompt(0), /正の整数/)
+})
+
+test('outOfTreeBlockNote: 待ちの理由のツリー外番号と再実行の案内を含む', () => {
+  assert.equal(
+    outOfTreeBlockNote([51, 52]),
+    'ツリー外の前提イシュー #51, #52 が open のため未着手（close 後に再実行すると着手する）',
+  )
+})
+
+test('OUT_OF_TREE_DEPS_MAX: 正の整数の上限を持つ', () => {
+  assert.ok(Number.isInteger(OUT_OF_TREE_DEPS_MAX) && OUT_OF_TREE_DEPS_MAX > 0)
+})
+
+// ---------------------------------------------------------------------------
+// スケジューラ意味論（駆動部と同じ depsMap / failedSet の組み立てを classifyDispatchReadiness で再現）
+// ---------------------------------------------------------------------------
+
+// 駆動部の depsMap 構築（ツリー外 open を疑似前提として failedSet に入れる）と cascade の最小再現。
+function simulate({ queue, outOfTreeWait }) {
+  const inTree = new Set(queue.map((q) => q.number))
+  const failedSet = new Set(outOfTreeWait)
+  const done = new Set()
+  const depsMap = new Map(queue.map((q) => [q.number, new Set()]))
+  for (const item of queue) {
+    for (const d of item.dependsOn ?? []) {
+      if (d === item.number) continue
+      if (!inTree.has(d)) {
+        if (outOfTreeWait.has(d)) depsMap.get(item.number).add(d)
+        continue
+      }
+      depsMap.get(item.number).add(d)
+    }
+  }
+  // dispatch: ready のものを完了扱いにし、残りを cascade で blocked 確定する。
+  let progressed = true
+  while (progressed) {
+    progressed = false
+    for (const item of queue) {
+      const n = item.number
+      if (done.has(n) || failedSet.has(n)) continue
+      if (classifyDispatchReadiness(depsMap.get(n), done, failedSet) === 'ready') {
+        done.add(n)
+        progressed = true
+      }
+    }
+  }
+  const blocked = []
+  let cascaded = true
+  while (cascaded) {
+    cascaded = false
+    for (const item of queue) {
+      const n = item.number
+      if (done.has(n) || failedSet.has(n)) continue
+      if (classifyDispatchReadiness(depsMap.get(n), done, failedSet) === 'dep-blocked') {
+        blocked.push({ issue: n, failedDeps: [...depsMap.get(n)].filter((d) => failedSet.has(d)) })
+        failedSet.add(n)
+        cascaded = true
+      }
+    }
+  }
+  return { done: [...done].sort((a, b) => a - b), blocked }
+}
+
+test('受入条件: ツリー外の前提 #5 が open なら #10 は着手せず、#10 に依存する #11 も待ちへ伝搬する', () => {
+  const r = simulate({
+    queue: [
+      { number: 10, dependsOn: [5] },
+      { number: 11, dependsOn: [10] },
+      { number: 12, dependsOn: [] },
+    ],
+    outOfTreeWait: new Set([5]),
+  })
+  assert.deepEqual(r.done, [12])
+  assert.deepEqual(r.blocked, [
+    { issue: 10, failedDeps: [5] },
+    { issue: 11, failedDeps: [10] },
+  ])
+})
+
+test('受入条件: ツリー外の前提が closed（outOfTreeWait に無い）なら従来どおり制約なしで着手する', () => {
+  const r = simulate({
+    queue: [
+      { number: 10, dependsOn: [5] },
+      { number: 11, dependsOn: [10] },
+    ],
+    outOfTreeWait: new Set(),
+  })
+  assert.deepEqual(r.done, [10, 11])
+  assert.deepEqual(r.blocked, [])
+})
+
+test('受入条件: 再実行時の再評価 — 1 回目 open で blocked、close 後の 2 回目は取得し直した state で着手する', () => {
+  const queue = [{ number: 10, dependsOn: [5] }]
+  const run = (state) => {
+    const c = classifyOutOfTreeDeps([5], new Map([[5, state]]), new Set())
+    return simulate({ queue, outOfTreeWait: new Set([...c.open, ...c.unknown]) })
+  }
+  assert.deepEqual(run('OPEN').blocked, [{ issue: 10, failedDeps: [5] }])
+  assert.deepEqual(run('CLOSED').done, [10])
+})
+
+test('受入条件: state を取得できなかった前提は open 扱いで待つ（fail-closed）', () => {
+  const c = classifyOutOfTreeDeps([5], new Map(), new Set())
+  const r = simulate({ queue: [{ number: 10, dependsOn: [5] }], outOfTreeWait: new Set([...c.open, ...c.unknown]) })
+  assert.deepEqual(r.blocked, [{ issue: 10, failedDeps: [5] }])
+})
+
+// ---------------------------------------------------------------------------
+// 駆動部の配線（ソース走査）
+// ---------------------------------------------------------------------------
+
+// Tree フェーズの取得ブロック（`const outOfTreeDeps =` から `const byParent` まで）。
+function treeFetchBlock() {
+  const start = driverPart.indexOf('const outOfTreeDeps = {')
+  const end = driverPart.indexOf('const byParent = new Map()')
+  assert.ok(start >= 0 && end > start, 'Tree フェーズのツリー外前提取得ブロックが queue 構築（byParent）より前に見つからない')
+  return driverPart.slice(start, end)
+}
+
+test('駆動部: ツリー外前提の state 取得は本文宣言の和集合（mergeDeclaredDeps）の後に毎ラン行う', () => {
+  const block = treeFetchBlock()
+  assert.ok(driverPart.indexOf('mergeDeclaredDeps(tree.nodes') < driverPart.indexOf('const outOfTreeDeps = {'))
+  assert.match(block, /collectOutOfTreeDeps\(tree\.nodes,/)
+  assert.match(block, /schema: OUT_OF_TREE_STATE_SCHEMA/)
+  assert.match(block, /schema: ROOT_ANCESTORS_SCHEMA/)
+  // 状態ファイルの保存値を使わない（close 後の再実行で必ず再評価される）。
+  assert.doesNotMatch(block, /savedItems|loadState/)
+})
+
+test('駆動部: 取得の失敗・契約違反はチャンク単位で 1 回再試行し、throw でランを止めない（open 扱いへ倒す）', () => {
+  const block = treeFetchBlock()
+  assert.match(block, /attempt <= 2 && pending\.length > 0/)
+  assert.doesNotMatch(block, /throw new Error/)
+  assert.match(block, /classifyOutOfTreeDeps\(requested, states, ancestors\)/)
+})
+
+test('駆動部: open・取得不能のツリー外前提を failedSet と depsMap へ入れる（closed は従来どおり捨てる）', () => {
+  assert.match(driverPart, /const outOfTreeWait = new Set\(\[\.\.\.outOfTreeDeps\.open, \.\.\.outOfTreeDeps\.unknown\]\)/)
+  assert.match(driverPart, /for \(const d of outOfTreeWait\) failedSet\.add\(d\)/)
+  assert.match(driverPart, /if \(!inTree\.has\(d\)\) \{\n\s+if \(item\.state === 'open' && outOfTreeWait\.has\(d\)\) depsMap\.get\(item\.number\)\.add\(d\)\n\s+continue\n\s+\}/)
+})
+
+test('駆動部: 前提完了プローブの対象からツリー外の番号を除外する（状態ファイル・results を汚さない）', () => {
+  const calls = [...driverPart.matchAll(/selectPrereqProbeTargets\(work, depsMap, done, failedSet, running\)(.*)/g)]
+  assert.equal(calls.length, 2)
+  for (const m of calls) assert.equal(m[1], '.filter((d) => inTree.has(d))')
+})
+
+test('駆動部: markBlockedByDeps はツリー外前提待ちを recordFailure（status: blocked・outOfTreeDeps 付き）で記録する', () => {
+  const start = driverPart.indexOf('async function markBlockedByDeps(')
+  const body = driverPart.slice(start, driverPart.indexOf('\n}\n', start))
+  assert.match(body, /const oot = allFailedDeps\.filter\(\(d\) => outOfTreeWait\.has\(d\)\)/)
+  assert.match(body, /outOfTreeBlockNote\(oot\)/)
+  assert.match(body, /recordFailure\(\{ issue: entry\.issue, reason: entry\.note, status: 'blocked', pr: entry\.pr, outOfTreeDeps: oot \}\)/)
+  // 再開情報（PR 作成済み）の保持は既存どおり: active monitoring 分岐は updateState しない。
+  const monitoringBranch = body.slice(body.indexOf('if (isActiveMonitoring(item.number))'), body.indexOf('return\n'))
+  assert.doesNotMatch(monitoringBranch, /updateState/)
+})
+
+test('駆動部: recordFailure は outOfTreeDeps を results へ引き継ぎ、返却値に outOfTreeDeps を含める', () => {
+  const start = source.indexOf('function recordFailure(failure)')
+  const body = source.slice(start, source.indexOf('\n}\n', start))
+  assert.match(body, /resultEntry\.outOfTreeDeps = failure\.outOfTreeDeps/)
+  assert.match(driverPart, /failures, outOfTreeDeps, notStarted/)
+})

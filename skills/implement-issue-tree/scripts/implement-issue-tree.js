@@ -1329,6 +1329,123 @@ function mergeDeclaredDeps(nodes, declaredByNumber) {
 
 
 
+
+
+
+
+const OUT_OF_TREE_DEPS_MAX = 200
+
+const ROOT_ANCESTOR_DEPTH = 8
+
+const OUT_OF_TREE_DONE_STATES = new Set(['CLOSED', 'MERGED'])
+const OUT_OF_TREE_STATE_SCHEMA = {
+  type: 'object',
+  required: ['entries'],
+  properties: {
+    entries: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['number', 'state'],
+        properties: { number: { type: 'number' }, state: { type: 'string' } },
+      },
+      description: 'コマンド出力の各行（{"number": N, "state": "..."}）をそのまま転記した配列',
+    },
+  },
+}
+const ROOT_ANCESTORS_SCHEMA = {
+  type: 'object',
+  required: ['fetched', 'ancestors'],
+  properties: {
+    fetched: { type: 'boolean', description: 'コマンドが終了コード 0 で整数配列を出力した場合のみ true' },
+    ancestors: { type: 'array', items: { type: 'number' }, description: 'コマンド出力の整数配列をそのまま転記' },
+  },
+}
+
+
+function collectOutOfTreeDeps(nodes, treeNumbers) {
+  const s = new Set()
+  for (const n of nodes) {
+    if (n.state !== 'open') continue
+    for (const d of n.dependsOn ?? []) {
+      if (Number.isInteger(d) && d > 0 && d !== n.number && !treeNumbers.has(d)) s.add(d)
+    }
+  }
+  return [...s].sort((a, b) => a - b)
+}
+
+
+function outOfTreeStatePrompt(numbers) {
+  for (const n of numbers) assertInt(n, 'outOfTreeStatePrompt number')
+  return [
+    'ツリー外の前提イシューの state を機械取得するタスク（判断・補完はしない）。',
+    MERGE_CONTEXT_COMMON,
+    '本文・タイトル・コメントは取得しない。次のコマンドを 1 回だけそのまま実行する:',
+    `for n in ${numbers.join(' ')}; do out=$(gh issue view "$n" --json number,state --jq '{number: .number, state: .state}') && printf '%s\\n' "$out" || echo "FAILED #$n" >&2; done`,
+    '標準出力の全行を entries 配列へそのまま転記して返す（推測で追加・変更しない）。標準エラーに FAILED と出た番号は含めない。',
+  ].join('\n')
+}
+
+
+function rootAncestorsPrompt(root) {
+  assertInt(root, 'rootAncestorsPrompt root')
+  let sel = 'number'
+  for (let i = 0; i < ROOT_ANCESTOR_DEPTH; i++) sel = `number parent{${sel}}`
+  return [
+    'イシューの親チェーン（sub-issues の祖先）を機械取得するタスク（判断・補完はしない）。',
+    MERGE_CONTEXT_COMMON,
+    '次のコマンドを 1 回だけそのまま実行する:',
+    `gh api graphql -F owner='{owner}' -F name='{repo}' -F n=${root} -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){${sel}}}}' --jq '[.data.repository.issue | recurse(.parent // empty) | .number] | .[1:]'`,
+    '終了コード 0 なら fetched: true・ancestors に出力の整数配列をそのまま転記する。非 0 なら fetched: false・ancestors: [] を返す。',
+  ].join('\n')
+}
+
+
+
+function collectOutOfTreeStates(requested, result) {
+  const want = new Set(requested)
+  const byNumber = new Map()
+  for (const e of Array.isArray(result?.entries) ? result.entries : []) {
+    const n = assertInt(e?.number, 'outOfTreeStates.entries[].number')
+    if (!want.has(n)) throw new Error(`ツリー外前提の state 取得結果に依頼外のイシュー #${n} が含まれる`)
+    if (byNumber.has(n)) throw new Error(`ツリー外前提の state 取得結果にイシュー #${n} が重複している`)
+    if (e.state !== 'OPEN' && !OUT_OF_TREE_DONE_STATES.has(e.state)) {
+      throw new Error(`ツリー外前提の state 取得結果が想定外の値（issue #${n}: ${String(e.state).slice(0, 20)}）`)
+    }
+    byNumber.set(n, e.state)
+  }
+  return { byNumber, missing: requested.filter((n) => !byNumber.has(n)) }
+}
+
+
+function collectRootAncestors(result) {
+  if (result?.fetched !== true || !Array.isArray(result.ancestors)) return null
+  if (result.ancestors.length > ROOT_ANCESTOR_DEPTH) return null
+  if (!result.ancestors.every((a) => Number.isInteger(a) && a > 0)) return null
+  return new Set(result.ancestors)
+}
+
+
+function classifyOutOfTreeDeps(numbers, states, ancestors) {
+  const r = { open: [], unknown: [], closed: [], ancestors: [] }
+  for (const d of numbers) {
+    if (ancestors?.has(d)) r.ancestors.push(d)
+    else if (!states.has(d)) r.unknown.push(d)
+    else if (OUT_OF_TREE_DONE_STATES.has(states.get(d))) r.closed.push(d)
+    else r.open.push(d)
+  }
+  return r
+}
+
+
+function outOfTreeBlockNote(deps) {
+  return `ツリー外の前提イシュー ${deps.map((d) => `#${d}`).join(', ')} が open のため未着手（close 後に再実行すると着手する）`
+}
+
+
+
+
+
 const IMPL_SCHEMA = {
   type: 'object',
   required: ['branch', 'summary', 'worktreePath'],
@@ -5076,6 +5193,46 @@ for (const n of tree.nodes) {
   )
 }
 
+
+
+
+const outOfTreeDeps = { open: [], unknown: [], closed: [], ancestors: [] }
+{
+  const requested = collectOutOfTreeDeps(tree.nodes, new Set(tree.nodes.map((n) => n.number)))
+  const fetchable = requested.slice(0, OUT_OF_TREE_DEPS_MAX)
+  if (requested.length > fetchable.length) {
+    log(`⚠️ ツリー外の前提イシューが上限 ${OUT_OF_TREE_DEPS_MAX} 件を超えるため、超過分は state を取得せず open 扱いにする（fail-closed）`)
+  }
+  const states = new Map()
+  let ancestors = null
+  if (fetchable.length > 0) {
+    try {
+      ancestors = collectRootAncestors(await agent(rootAncestorsPrompt(parent), { label: 'plan:root-ancestors', phase: 'Tree', model: 'haiku', effort: 'low', schema: ROOT_ANCESTORS_SCHEMA }))
+    } catch (e) {
+      log(`⚠️ ルートの祖先チェーン取得が失敗した: ${sanitize(String(e?.message ?? e))}`)
+    }
+    if (!ancestors) log('⚠️ ルートの祖先チェーンを取得できなかったため、祖先の除外なしでツリー外前提を判定する（待つ側へ倒す）')
+    const chunks = []
+    for (let i = 0; i < fetchable.length; i += DECLARED_DEPS_CHUNK_SIZE) chunks.push(fetchable.slice(i, i + DECLARED_DEPS_CHUNK_SIZE))
+    await Promise.all(chunks.map(async (chunk, index) => {
+      let pending = chunk
+      for (let attempt = 1; attempt <= 2 && pending.length > 0; attempt++) {
+        try {
+          const r = collectOutOfTreeStates(pending, await agent(outOfTreeStatePrompt(pending), { label: `plan:out-of-tree-deps-${index + 1}${attempt > 1 ? '-retry' : ''}`, phase: 'Tree', model: 'haiku', effort: 'low', schema: OUT_OF_TREE_STATE_SCHEMA }))
+          for (const [n, s] of r.byNumber) states.set(n, s)
+          pending = r.missing
+        } catch (e) {
+          log(`⚠️ ツリー外前提の state 取得（チャンク ${index + 1}・${attempt} 回目）が失敗・契約違反のため破棄した: ${sanitize(String(e?.message ?? e))}`)
+        }
+      }
+    }))
+  }
+  Object.assign(outOfTreeDeps, classifyOutOfTreeDeps(requested, states, ancestors))
+  if (outOfTreeDeps.ancestors.length > 0) log(`ツリー外の前提のうちルートの祖先 ${outOfTreeDeps.ancestors.map((d) => `#${d}`).join(', ')} は待たない（祖先は子の完了を待つ側）`)
+  if (outOfTreeDeps.unknown.length > 0) log(`⚠️ ツリー外の前提 ${outOfTreeDeps.unknown.map((d) => `#${d}`).join(', ')} の state を取得できなかった（gh の失敗・存在しない番号・上限超過）。open 扱いで待つ（fail-closed）`)
+  if (requested.length > 0) log(`ツリー外の前提イシュー: open ${outOfTreeDeps.open.length} 件${outOfTreeDeps.open.length > 0 ? `（${outOfTreeDeps.open.map((d) => `#${d}`).join(', ')}）` : ''}・closed ${outOfTreeDeps.closed.length} 件・取得不能 ${outOfTreeDeps.unknown.length} 件`)
+}
+
 const byParent = new Map()
 for (const n of tree.nodes) {
   const list = byParent.get(n.parent) ?? []
@@ -5532,6 +5689,9 @@ function recordFailure(failure) {
   }
   if (Array.isArray(failure.outOfScope) && failure.outOfScope.length > 0) {
     resultEntry.outOfScope = failure.outOfScope
+  }
+  if (Array.isArray(failure.outOfTreeDeps) && failure.outOfTreeDeps.length > 0) {
+    resultEntry.outOfTreeDeps = failure.outOfTreeDeps
   }
 
 
@@ -7569,9 +7729,18 @@ function isAncestor(anc, n) {
   }
   return false
 }
+
+
+
+const outOfTreeWait = new Set([...outOfTreeDeps.open, ...outOfTreeDeps.unknown])
+for (const d of outOfTreeWait) failedSet.add(d)
 for (const item of queue) {
   for (const d of item.dependsOn ?? []) {
-    if (!Number.isInteger(d) || !inTree.has(d) || d === item.number) continue
+    if (!Number.isInteger(d) || d === item.number) continue
+    if (!inTree.has(d)) {
+      if (item.state === 'open' && outOfTreeWait.has(d)) depsMap.get(item.number).add(d)
+      continue
+    }
     if (isAncestor(d, item.number)) {
       log(`#${item.number} の dependsOn #${d} は祖先イシューのため無視する（親は子の完了を待つ側）`)
       continue
@@ -7652,8 +7821,11 @@ function isActiveMonitoring(n) {
   )
 }
 
-async function markBlockedByDeps(item, failedDeps) {
+async function markBlockedByDeps(item, allFailedDeps) {
   failedSet.add(item.number)
+
+  const oot = allFailedDeps.filter((d) => outOfTreeWait.has(d))
+  const failedDeps = allFailedDeps.filter((d) => !outOfTreeWait.has(d))
 
 
   const childSet = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
@@ -7686,13 +7858,20 @@ async function markBlockedByDeps(item, failedDeps) {
     note =
       `前 Phase 未完了（phaseGate） ${failedPhaseGate.map((d) => `#${d}`).join(', ')} と前提イシュー ` +
       `${failedOtherPrereqs.map((d) => `#${d}`).join(', ')} の失敗により未着手`
-  } else {
+  } else if (failedPrereqs.length > 0) {
     note = `前提イシューの失敗・ブロックにより未着手: ${failedPrereqs.map((d) => `#${d}`).join(', ')}`
   }
+  if (oot.length > 0) note = note ? `${outOfTreeBlockNote(oot)}。${note}` : outOfTreeBlockNote(oot)
+
+
+  const push = (entry) =>
+    oot.length > 0
+      ? recordFailure({ issue: entry.issue, reason: entry.note, status: 'blocked', pr: entry.pr, outOfTreeDeps: oot })
+      : results.push(entry)
 
   if (isActiveMonitoring(item.number)) {
     const pr = savedItems[String(item.number)].pr
-    results.push({
+    push({
       issue: item.number,
       status: 'blocked',
       pr,
@@ -7701,7 +7880,7 @@ async function markBlockedByDeps(item, failedDeps) {
     log(`#${item.number}: 再開情報を維持する（PR #${pr}）。依存失敗により新規着手はしない`)
     return
   }
-  results.push({
+  push({
     issue: item.number,
     status: 'blocked',
     note,
@@ -8205,7 +8384,9 @@ while (true) {
       if (readiness === 'dep-blocked') {
         if (!depDeferredLogged.has(n)) {
           depDeferredLogged.add(n)
-          log(`#${n}: 前提が失敗・ブロック中のため保留（前提の外部完了を検知したら同一ラン内で再判定する）`)
+          log([...ds].some((d) => outOfTreeWait.has(d))
+            ? `#${n}: ツリー外の前提が open のため保留（close 後の再実行で再評価する）`
+            : `#${n}: 前提が失敗・ブロック中のため保留（前提の外部完了を検知したら同一ラン内で再判定する）`)
         }
         continue
       }
@@ -8580,7 +8761,7 @@ while (true) {
     prereqProbeAtIterationSeq !== dispatchIterationSeq &&
     (running.size === 0 || prereqProbeElapsedMs >= PREREQ_RECHECK_MIN_MS)
   ) {
-    const probeTargets = selectPrereqProbeTargets(work, depsMap, done, failedSet, running)
+    const probeTargets = selectPrereqProbeTargets(work, depsMap, done, failedSet, running).filter((d) => inTree.has(d))
     if (probeTargets.length > 0) {
       prereqProbeAtIterationSeq = dispatchIterationSeq
       prereqProbeElapsedMs = 0
@@ -8599,7 +8780,7 @@ while (true) {
 
 
   let finished
-  const tickCandidates = selectPrereqProbeTargets(work, depsMap, done, failedSet, running)
+  const tickCandidates = selectPrereqProbeTargets(work, depsMap, done, failedSet, running).filter((d) => inTree.has(d))
 
 
 
@@ -8852,4 +9033,4 @@ if (!mainUntrackedDiff.observed) {
 
 
 
-return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) } }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) } }
