@@ -7904,7 +7904,9 @@ async function markBlockedByDeps(item, allFailedDeps) {
   }
   if (oot.length > 0) note = note ? `${outOfTreeBlockNote(oot)}。${note}` : outOfTreeBlockNote(oot)
   // ツリー外前提待ちは本イシュー自身の blocked のため recordFailure（status: 'blocked'。halt 非
-  // カウント）で failures にも載せ、待ちの理由の番号を outOfTreeDeps で返す。
+  // カウント）で failures にも載せ、待ちの理由の番号を outOfTreeDeps で返す。recordFailure は
+  // reason を results の note へ、pr をそのまま写すため、下の active monitoring 分岐の再開案内と
+  // PR 番号は done（results）・failures の双方に残る（tests/out-of-tree-deps.test.mjs の振る舞いテスト）。
   const push = (entry) =>
     oot.length > 0
       ? recordFailure({ issue: entry.issue, reason: entry.note, status: 'blocked', pr: entry.pr, outOfTreeDeps: oot })

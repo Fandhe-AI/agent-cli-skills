@@ -360,3 +360,86 @@ test('駆動部: recordFailure は outOfTreeDeps を results へ引き継ぎ、�
   assert.match(body, /resultEntry\.outOfTreeDeps = failure\.outOfTreeDeps/)
   assert.match(driverPart, /failures, outOfTreeDeps, notStarted/)
 })
+
+// markBlockedByDeps・recordFailure の実体を切り出して実行し、ツリー外前提待ちの記録経路でも
+// 再開情報（PR 番号・再実行の案内）が done（results）と failures の双方に残ることを振る舞いで固定する。
+function runMarkBlockedByDeps({ item, allFailedDeps, outOfTree, monitoringPr }) {
+  const extract = (src, head) => {
+    const start = src.indexOf(head)
+    assert.ok(start >= 0, `${head} が見つからない`)
+    return src.slice(start, src.indexOf('\n}\n', start) + 2)
+  }
+  const recordFailureSrc = extract(source, 'function recordFailure(failure)')
+  const markSrc = extract(driverPart, 'async function markBlockedByDeps(')
+  const ctx = {
+    failedSet: new Set(),
+    outOfTreeWait: new Set(outOfTree),
+    byParent: new Map(),
+    phaseGateEdgeKeys: new Set(),
+    outOfTreeBlockNote,
+    results: [],
+    failures: [],
+    isActiveMonitoring: () => monitoringPr > 0,
+    savedItems: { [String(item.number)]: { pr: monitoringPr } },
+    stateUpdates: [],
+    log: () => {},
+    isValidBranchName: () => false,
+    sanitizeWorktreePath: () => '',
+  }
+  ctx.updateState = async (n, patch) => { ctx.stateUpdates.push({ n, patch }) }
+  const factory = new Function('ctx', [
+    'const { failedSet, outOfTreeWait, byParent, phaseGateEdgeKeys, outOfTreeBlockNote, results, failures,',
+    '  isActiveMonitoring, savedItems, updateState, log, isValidBranchName, sanitizeWorktreePath } = ctx',
+    'let failureEpoch = 0',
+    'let consecutiveFailures = 0',
+    'let halted = null',
+    recordFailureSrc,
+    markSrc,
+    'return markBlockedByDeps',
+  ].join('\n'))
+  return factory(ctx)(item, allFailedDeps).then(() => ctx)
+}
+
+test('振る舞い: 再開情報が有効なイシューのツリー外前提待ちは done・failures の双方に PR 番号と再開案内を残し、状態を上書きしない', async () => {
+  const ctx = await runMarkBlockedByDeps({ item: { number: 10 }, allFailedDeps: [5], outOfTree: [5], monitoringPr: 42 })
+  assert.equal(ctx.results.length, 1)
+  assert.equal(ctx.failures.length, 1)
+  const [done] = ctx.results
+  const [failure] = ctx.failures
+  assert.equal(done.issue, 10)
+  assert.equal(done.status, 'blocked')
+  assert.equal(done.pr, 42)
+  assert.deepEqual(done.outOfTreeDeps, [5])
+  assert.match(done.note, /ツリー外の前提イシュー #5 が open のため未着手/)
+  assert.match(done.note, /中断時に PR #42 作成済み。同じ引数で再実行すると monitor から再開する/)
+  assert.equal(failure.issue, 10)
+  assert.equal(failure.status, 'blocked')
+  assert.equal(failure.pr, 42)
+  assert.equal(failure.reason, done.note)
+  assert.deepEqual(ctx.stateUpdates, [])
+  assert.ok(ctx.failedSet.has(10))
+})
+
+test('振る舞い: 再開情報が無いイシューのツリー外前提待ちは pr: 0 で状態をクリアし、done・failures の双方に記録する', async () => {
+  const ctx = await runMarkBlockedByDeps({ item: { number: 11 }, allFailedDeps: [5], outOfTree: [5], monitoringPr: 0 })
+  assert.equal(ctx.results.length, 1)
+  assert.equal(ctx.failures.length, 1)
+  assert.equal(ctx.results[0].status, 'blocked')
+  assert.equal(ctx.results[0].pr, undefined)
+  assert.equal(ctx.failures[0].reason, ctx.results[0].note)
+  assert.deepEqual(ctx.stateUpdates, [
+    { n: 11, patch: { status: 'blocked', note: 'ツリー外の前提イシュー #5 が open のため未着手（close 後に再実行すると着手する）', pr: 0 } },
+  ])
+})
+
+test('振る舞い: ツリー内の前提失敗のみなら従来どおり results のみに記録し failures へは載せない', async () => {
+  const ctx = await runMarkBlockedByDeps({ item: { number: 12 }, allFailedDeps: [7], outOfTree: [], monitoringPr: 42 })
+  assert.equal(ctx.failures.length, 0)
+  assert.deepEqual(ctx.results, [{
+    issue: 12,
+    status: 'blocked',
+    pr: 42,
+    note: '前提イシューの失敗・ブロックにより未着手: #7（中断時に PR #42 作成済み。同じ引数で再実行すると monitor から再開する）',
+  }])
+  assert.deepEqual(ctx.stateUpdates, [])
+})
