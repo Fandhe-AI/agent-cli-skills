@@ -33,6 +33,11 @@
 #       gh pr merge（あらゆる形）/ REST merge（pulls/<n>/merge・repos/<o>/<r>/merges）/
 #       GraphQL merge（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）/
 #       gh pr review --approve / gh alias / gh extension
+#   - subagent からのリポジトリ設定変更も無条件 deny（読み取りは許可）:
+#       gh api による rulesets・branches/<b>/protection への書き込み（明示の PUT/PATCH/POST/DELETE、
+#       またはフィールド指定による暗黙の POST）/ repos/<o>/<r> 本体への明示の書き込み /
+#       GraphQL の ruleset・branch protection・updateRepository・(un)archiveRepository mutation /
+#       gh repo edit・rename・archive・unarchive・delete
 #   - jq 不在・stdin パース失敗等の異常時 → deny（fail-closed）。ただし stdin に文字列
 #     "agent_id" が現れない入力（main スレッド）は jq 不在でも許可する
 #     （jq 不在環境で main スレッドをロックアウトしないための入口判定）
@@ -307,7 +312,45 @@ if contains_subsequence "$all_nf" gh api; then
   if evidence 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
     deny "subagent からの GraphQL merge 系 mutation（mergePullRequest / enablePullRequestAutoMerge / mergeBranch）は禁止"
   fi
+
+  # リポジトリ設定の書き込み（ruleset・branch protection・リポジトリ本体）。承認なしの ruleset 変更
+  # （fix エージェントが gh api --method PUT .../rulesets/<id> を実行した事例）の再発防止。
+  # 読み取り（G0 の rules/branches・rulesets/<id> の GET 等）は止めない — 書き込みの証拠がある
+  # 場合のみ deny する:
+  #   - 明示の書き込みメソッド（-X / --method の PUT・PATCH・POST・DELETE。-XPUT・--method=PUT も）
+  #   - gh api が暗黙に POST へ切り替えるフィールド指定（-f/-F key=value・--field・--raw-field・
+  #     --input）で、明示の GET が無いもの。-f/-F は key=value 形に限る（grep -F・jq -f 等の
+  #     同名フラグを誤検知しないため）
+  # リポジトリ本体（repos/<o>/<r> 単独）は GET が常用されるため明示の書き込みメソッドのみで判定する。
+  explicit_write=0
+  implicit_write=0
+  if printf '%s' "$norm" | grep -qiE '(^|[[:space:]])(-X|--method)(=|[[:space:]]*)(PUT|PATCH|POST|DELETE)([[:space:]]|$)'; then
+    explicit_write=1
+  elif printf '%s' "$norm" | grep -qE '(^|[[:space:]])(-[fF][[:space:]]*[^[:space:]=-][^[:space:]=]*=|--(raw-)?field([[:space:]]|=)|--input([[:space:]]|=|$))' \
+    && ! printf '%s' "$norm" | grep -qiE '(^|[[:space:]])(-X|--method)(=|[[:space:]]*)GET([[:space:]]|$)'; then
+    implicit_write=1
+  fi
+  if [ "$explicit_write" -eq 1 ] || [ "$implicit_write" -eq 1 ]; then
+    if printf '%s' "$norm" | grep -qE '(repos|orgs)/[^[:space:]]*/rulesets([/?[:space:]]|$)|branches/[^[:space:]]+/protection'; then
+      deny "subagent からの ruleset・branch protection の変更（gh api の書き込み）は禁止（設定変更は人間が行う。要対応事項として報告すること）"
+    fi
+  fi
+  if [ "$explicit_write" -eq 1 ] \
+    && printf '%s' "$norm" | grep -qE '(^|[[:space:]])/?repos/[^/[:space:]]+/[^/[:space:]]+([[:space:]?]|$)'; then
+    deny "subagent からのリポジトリ設定の変更（gh api repos/<o>/<r> の書き込み）は禁止（設定変更は人間が行う。要対応事項として報告すること）"
+  fi
+  # GraphQL のリポジトリ設定系 mutation（ruleset・branch protection・リポジトリ本体・archive）。
+  if evidence '(create|update|delete)(BranchProtectionRule|RepositoryRuleset)|updateRepository|(un)?archiveRepository'; then
+    deny "subagent からの GraphQL リポジトリ設定系 mutation（ruleset・branch protection・updateRepository 等）は禁止"
+  fi
 fi
+
+# リポジトリ設定を変える gh repo サブコマンド（gh repo view 等の読み取りは対象外）
+for sub in edit rename archive unarchive delete; do
+  if contains_subsequence "$all_nf" gh repo "$sub"; then
+    deny "subagent からの gh repo edit / rename / archive / unarchive / delete は禁止（設定変更は人間が行う。要対応事項として報告すること）"
+  fi
+done
 
 # レビュー承認（外部レビューゲートの自作自演を防ぐ）。--approve はフラグなので
 # strip_flags 後には残らない。tokenized（フラグ除去前・メタ文字区切り済み）に対して判定する
