@@ -49,6 +49,20 @@ const DENY = [
   'gh repo edit --enable-auto-merge',
   'gh repo edit o/r --default-branch develop',
   'gh repo archive o/r --yes',
+  // security-auditor 実証のバイパス形（証拠照合を norm・tokenized の両方で行う契約・アンカー・終端・
+  // 結合ショートオプション・`-f=` 形）
+  'gh api -X POST -f name=x repos/O/R/rulesets;true',
+  'gh api -X PATCH https://api.github.com/repos/OWNER/REPO -f name=x',
+  'gh api -X DELETE repos/OWNER/REPO/',
+  'gh api -iX DELETE repos/O/R/rulesets/1',
+  'gh api -f=name=x repos/O/R/rulesets',
+  // 同系統の派生形
+  'gh api -XPUT repos/o/r/rulesets/1&&true',
+  'gh api --method=delete repos/o/r/branches/main/protection',
+  'gh api -F=enforcement=active orgs/o/rulesets',
+  'gh api --field=name=x repos/o/r/rulesets',
+  'gh api --raw-field=name=x repos/o/r/rulesets',
+  'gh api -X PATCH /repos/o/r;echo',
 ]
 
 const ALLOW = [
@@ -68,6 +82,10 @@ const ALLOW = [
   'gh api repos/o/r --jq .default_branch',
   'gh api repos/o/r/issues/5/comments -f body=hello',
   'gh repo view --json defaultBranchRef --jq .defaultBranchRef.name',
+  // リポジトリ本体配下の非設定エンドポイントへの書き込み・フル URL の GET
+  'gh api -X POST repos/o/r/issues/5/comments -f body=hi',
+  'gh api https://api.github.com/repos/o/r --jq .default_branch',
+  'gh api -X GET repos/o/r/',
   // GraphQL の読み取り
   `gh api graphql -f query='query{repository(owner:"o",name:"r"){rulesets(first:10){nodes{name}}}}'`,
   `gh api graphql -F owner='{owner}' -F name='{repo}' -F n=4 -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){number parent{number}}}}'`,

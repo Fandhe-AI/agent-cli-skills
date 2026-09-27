@@ -38,6 +38,8 @@
 #       またはフィールド指定による暗黙の POST）/ repos/<o>/<r> 本体への明示の書き込み /
 #       GraphQL の ruleset・branch protection・updateRepository・(un)archiveRepository mutation /
 #       gh repo edit・rename・archive・unarchive・delete
+#     機械的に deny するのは上記に限る。variables・secrets・actions permissions・collaborators・
+#     hooks・environments 等の他の設定変更はプロンプト（REPO_SETTINGS_POLICY）上の禁止のみ
 #   - jq 不在・stdin パース失敗等の異常時 → deny（fail-closed）。ただし stdin に文字列
 #     "agent_id" が現れない入力（main スレッド）は jq 不在でも許可する
 #     （jq 不在環境で main スレッドをロックアウトしないための入口判定）
@@ -315,28 +317,35 @@ if contains_subsequence "$all_nf" gh api; then
 
   # リポジトリ設定の書き込み（ruleset・branch protection・リポジトリ本体）。承認なしの ruleset 変更
   # （fix エージェントが gh api --method PUT .../rulesets/<id> を実行した事例）の再発防止。
+  # 機械的に deny する範囲はここと下の GraphQL / gh repo 系に限る（variables・secrets・actions
+  # permissions・collaborators・hooks・environments 等はプロンプトの REPO_SETTINGS_POLICY による
+  # 禁止のみ。best-effort）。
   # 読み取り（G0 の rules/branches・rulesets/<id> の GET 等）は止めない — 書き込みの証拠がある
-  # 場合のみ deny する:
-  #   - 明示の書き込みメソッド（-X / --method の PUT・PATCH・POST・DELETE。-XPUT・--method=PUT も）
-  #   - gh api が暗黙に POST へ切り替えるフィールド指定（-f/-F key=value・--field・--raw-field・
-  #     --input）で、明示の GET が無いもの。-f/-F は key=value 形に限る（grep -F・jq -f 等の
-  #     同名フラグを誤検知しないため）
-  # リポジトリ本体（repos/<o>/<r> 単独）は GET が常用されるため明示の書き込みメソッドのみで判定する。
+  # 場合のみ deny する。証拠照合はファイル冒頭の契約どおり evidence()（norm・tokenized の両方）で行う:
+  #   - 明示の書き込みメソッド（-X / --method の PUT・PATCH・POST・DELETE。-XPUT・-iX DELETE の
+  #     結合ショートオプション・--method=PUT も）
+  #   - gh api が暗黙に POST へ切り替えるフィールド指定（-f/-F key=value・-f=key=value・--field・
+  #     --raw-field・--input）で、明示の GET が無いもの。-f/-F は key=value 形に限る（grep -F・
+  #     jq -f 等の同名フラグを誤検知しないため）。GET 免除は norm のみで判定する（免除側を
+  #     広げない）
+  # リポジトリ本体（repos/<o>/<r> 単独。フル URL・末尾スラッシュを含む）は GET が常用されるため
+  # 明示の書き込みメソッドのみで判定する。
+  m_write='([Pp][Uu][Tt]|[Pp][Aa][Tt][Cc][Hh]|[Pp][Oo][Ss][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee])'
   explicit_write=0
   implicit_write=0
-  if printf '%s' "$norm" | grep -qiE '(^|[[:space:]])(-X|--method)(=|[[:space:]]*)(PUT|PATCH|POST|DELETE)([[:space:]]|$)'; then
+  if evidence "(^|[[:space:]])(-[A-Za-z]*X|--method)(=|[[:space:]]*)${m_write}([^A-Za-z]|\$)"; then
     explicit_write=1
-  elif printf '%s' "$norm" | grep -qE '(^|[[:space:]])(-[fF][[:space:]]*[^[:space:]=-][^[:space:]=]*=|--(raw-)?field([[:space:]]|=)|--input([[:space:]]|=|$))' \
-    && ! printf '%s' "$norm" | grep -qiE '(^|[[:space:]])(-X|--method)(=|[[:space:]]*)GET([[:space:]]|$)'; then
+  elif evidence '(^|[[:space:]])(-[A-Za-z]*[fF](=|[[:space:]]*)[^[:space:]=-][^[:space:]=]*=|--(raw-)?field([[:space:]]|=)|--input([[:space:]]|=|$))' \
+    && ! printf '%s' "$norm" | grep -qE '(^|[[:space:]])(-[A-Za-z]*X|--method)(=|[[:space:]]*)[Gg][Ee][Tt]([^A-Za-z]|$)'; then
     implicit_write=1
   fi
   if [ "$explicit_write" -eq 1 ] || [ "$implicit_write" -eq 1 ]; then
-    if printf '%s' "$norm" | grep -qE '(repos|orgs)/[^[:space:]]*/rulesets([/?[:space:]]|$)|branches/[^[:space:]]+/protection'; then
+    if evidence '(repos|orgs)/[^[:space:]]*/rulesets([^A-Za-z0-9_-]|$)|branches/[^[:space:]]+/protection'; then
       deny "subagent からの ruleset・branch protection の変更（gh api の書き込み）は禁止（設定変更は人間が行う。要対応事項として報告すること）"
     fi
   fi
   if [ "$explicit_write" -eq 1 ] \
-    && printf '%s' "$norm" | grep -qE '(^|[[:space:]])/?repos/[^/[:space:]]+/[^/[:space:]]+([[:space:]?]|$)'; then
+    && evidence '(^|[[:space:]/])repos/[^/[:space:]]+/[^/[:space:]]+/?([^A-Za-z0-9_./-]|$)'; then
     deny "subagent からのリポジトリ設定の変更（gh api repos/<o>/<r> の書き込み）は禁止（設定変更は人間が行う。要対応事項として報告すること）"
   fi
   # GraphQL のリポジトリ設定系 mutation（ruleset・branch protection・リポジトリ本体・archive）。
