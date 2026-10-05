@@ -14,7 +14,7 @@ model: sonnet
 
 - `gh` CLI がインストールされ認証済みであること（対象 org への push / PR 権限が必要）
 - 対象スキルが `skills-lock.json` に登録され `source` を持つこと（未登録・`source` 欠落・lock 不在・解析失敗はスクリプトが clone 前に中止する。新規スキルの初回貢献は対象外）
-- 対象スキルのローカル改修が最新のコミットに含まれ、作業ツリーが clean であること
+- 対象スキルのディレクトリ配下が最新コミットと一致していること（未コミットの変更・未追跡・ignore 対象ファイルがあるとスクリプトが clone 前に中止する。対象スキル以外の場所の変更は検査しない）
 
 ## 責務の分離
 
@@ -182,6 +182,15 @@ fi
 ### Step 3: 変更内容を確認する
 
 ```bash
+# コピー元が HEAD と一致することを先に確認する（強制点は skills-contribute.sh 側。
+# --untracked-files=all を省くと status.showUntrackedFiles=no で未追跡が隠れ、--ignored を
+# 省くと .env 等の ignore 対象が見逃される。非ゼロ終了も clean と扱わず中止する）
+rc=0; DIRTY=$(git status --porcelain=v1 --untracked-files=all --ignored -- "${LOCAL_SKILL_DIR}") || rc=$?
+if [[ "${rc}" -ne 0 || -n "${DIRTY}" ]]; then
+  echo "中止: ${LOCAL_SKILL_DIR} が HEAD と一致しないか、状態を確認できません" >&2
+  printf '%s\n' "${DIRTY}" >&2
+  exit 1
+fi
 git log --oneline -- "${LOCAL_SKILL_DIR}/"
 # HEAD~1 の有無を明示的に判定する（git diff は差分ありでも終了コード 0 のため || で分岐しない）
 if git rev-parse --verify -q HEAD~1 >/dev/null; then
@@ -192,6 +201,8 @@ else
   git diff "$(git hash-object -t tree /dev/null)" HEAD -- "${LOCAL_SKILL_DIR}/"
 fi
 ```
+
+検査で中止した場合、Claude は自動で stash・削除・コミットをしません。列挙されたパスをユーザーへ提示し、対応（コミットする／取り除く）を選んでもらってから再実行します。
 
 ユーザーに「この改修内容で upstream に PR を作ってよいか」を確認します。
 
@@ -388,6 +399,8 @@ if [[ -d "${DELETE_PARENT}" ]]; then
     rm -rf -- "${DELETE_LEAF}"
   )
 fi
+# スクリプトはここで貢献元の対象スキルを再検査する（clone を挟む間の変更を拾うため。
+# 未コミット・未追跡・ignore 対象があれば中止し、コピーしない）
 mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 # LOCAL_SKILL_DIR は Step 1 で解決済み（skills/<name>/ または .agents/skills/<name>/）
 # ORIG_DIR は Step 5 で cd する前に捕捉済み（cd - は stdout 汚染のため使用しない）
@@ -481,6 +494,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → `.claude/skills/<name>` の存在 → スキルルート親ディレクトリの慣習（`skills/` → `.agents/skills/` → `.claude/skills/` の順。新規スキルは個別パスが存在しないためこの親ディレクトリ判定で配置先が決まる）→ 最終デフォルト `skills/`（より一般的な公開レイアウト）。全候補で `assert_no_symlink_components` により経路の全要素（`.claude` 等の最上位親を含む）が symlink でない場合のみ採用し、`.claude` 自体がリポジトリ外を指す symlink でも外部内容が upstream へコピーされない（fail-closed。symlink 経由の実体は前段の実体側候補で検出される）
 - **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 5 は必ず `${CONTRIBUTE_SKILL_DIR}/scripts/skills-contribute.sh`（本スキル自身の配置から別途解決したパス。貢献対象のパスである `LOCAL_SKILL_DIR` とは別物）経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
+- **コピー元は HEAD と一致している場合のみ反映する**：事前レビューはコミット済み差分しか見せない一方、`cp -R` は作業ツリーの現物をコピーするため、未コミット・未追跡・ignore 対象のファイルが無レビューで upstream PR へ混入し得る。スクリプトは `${LOCAL_SKILL_DIR}` 配下を `git status --porcelain=v1 --untracked-files=all --ignored` で検査し、出力が非空なら中止する。`--untracked-files=all` を外すとユーザー設定 `status.showUntrackedFiles=no` で未追跡が隠れ、`--ignored` を外すと `.env` 等がコピーされる。非ゼロ終了（git リポジトリ外など）も clean と扱わない。`git update-index --assume-unchanged` / `--skip-worktree` を付けたファイルの変更は `git status` でも検出できず対象外
 - **既に同名の branch がある場合**：秒単位スラッグで通常は衝突しないが、万一の場合はユーザーに確認
 
 ## sandbox 環境での実行

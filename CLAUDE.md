@@ -39,8 +39,8 @@ skills/                               -- スキル本体（各ディレクトリ
   project-sync-issues/
   project-archive-done/
   contribute-skill/
-    scripts/                          -- skills-contribute.sh（lock 照合は fail-closed）
-    tests/                            -- node:test 回帰テスト（lock 不在・未登録・source 欠落・解析失敗の中止）
+    scripts/                          -- skills-contribute.sh（upstream 反映スクリプト。lock 照合は fail-closed・コピー前に対象スキルの作業ツリー clean 検査を行う）
+    tests/                            -- node:test 回帰テスト（lock 不在・未登録・source 欠落・解析失敗の中止、未コミット・未追跡・ignore 対象の検出時にコピー前で中止すること）
   sync-skills-lock/
 .claude/
   agents/
