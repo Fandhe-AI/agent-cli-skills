@@ -483,6 +483,10 @@ function runMarkBlockedByDeps({ item, allFailedDeps, outOfTree, monitoringPr }) 
   }
   const recordFailureSrc = extract(source, 'function recordFailure(failure)')
   const markSrc = extract(driverPart, 'async function markBlockedByDeps(')
+  // 「作成済み」と断定しない文言ヘルパー（markBlockedByDeps が参照する駆動部の const 1 行）。
+  const prRecordStart = driverPart.indexOf('const PR_RECORD_UNVERIFIED = ')
+  assert.ok(prRecordStart >= 0, 'PR_RECORD_UNVERIFIED が見つからない')
+  const prRecordSrc = driverPart.slice(prRecordStart, driverPart.indexOf('\n', prRecordStart))
   const ctx = {
     failedSet: new Set(),
     outOfTreeWait: new Set(outOfTree),
@@ -505,6 +509,7 @@ function runMarkBlockedByDeps({ item, allFailedDeps, outOfTree, monitoringPr }) 
     'let failureEpoch = 0',
     'let consecutiveFailures = 0',
     'let halted = null',
+    prRecordSrc,
     recordFailureSrc,
     markSrc,
     'return markBlockedByDeps',
@@ -523,7 +528,9 @@ test('振る舞い: 再開情報が有効なイシューのツリー外前提待
   assert.equal(done.pr, 42)
   assert.deepEqual(done.outOfTreeDeps, [5])
   assert.match(done.note, /ツリー外の前提イシュー #5 が open のため未着手/)
-  assert.match(done.note, /中断時に PR #42 作成済み。同じ引数で再実行すると monitor から再開する/)
+  assert.match(done.note, /状態ファイルに PR #42 の記録あり・実在と本イシューとの結び付きは未確認。同じ引数で再実行すると照合のうえ monitor から再開する/)
+  // PR の実在を確かめていない経路では「作成済み」と断定しない。
+  assert.doesNotMatch(done.note, /作成済み/)
   assert.equal(failure.issue, 10)
   assert.equal(failure.status, 'blocked')
   assert.equal(failure.pr, 42)
@@ -551,7 +558,7 @@ test('振る舞い: ツリー内の前提失敗のみなら従来どおり resul
     issue: 12,
     status: 'blocked',
     pr: 42,
-    note: '前提イシューの失敗・ブロックにより未着手: #7（中断時に PR #42 作成済み。同じ引数で再実行すると monitor から再開する）',
+    note: '前提イシューの失敗・ブロックにより未着手: #7（状態ファイルに PR #42 の記録あり・実在と本イシューとの結び付きは未確認。同じ引数で再実行すると照合のうえ monitor から再開する）',
   }])
   assert.deepEqual(ctx.stateUpdates, [])
 })
