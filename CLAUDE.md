@@ -27,8 +27,8 @@ skills/                               -- スキル本体（各ディレクトリ
   init-claude/
   update-docs/
   update-issue-tree/
-    scripts/                          -- reassign-sub-issue.sh（closed 親下の残置 open issue 付け替え・孤児再配置。DELETE→POST を単一プロセスで冪等に実行。cross-repository sub-issue は非対応で exit 2）、reassign-lib.sh（Step 3/4 の呼び出し側共有ヘルパー。計画配列の存在・型検証と終了ステータス解釈。両フェンスが自己完結的に source する）
-    tests/                            -- node:test 回帰テスト（DELETE 失敗時に POST が呼ばれないこと等）、lib/ に gh スタブ
+    scripts/                          -- reassign-sub-issue.sh（closed 親下の残置 open issue 付け替え・孤児再配置。DELETE→POST を単一プロセスで冪等に実行。cross-repository sub-issue は非対応で exit 2）、reassign-lib.sh（Step 3/4 の呼び出し側共有ヘルパー。計画配列の存在・型検証と終了ステータス解釈。両フェンスが自己完結的に source する）、update-root-body.sh（Step 8 のルート本文部分更新。マーカー間の管理ブロックのみ差し替え・既存本文は保持・マーカー無し本文は旧 Phase 表を details へ退避して移行・exit 4/5 で fail-closed）
+    tests/                            -- node:test 回帰テスト（DELETE 失敗時に POST が呼ばれないこと、Step 8 の既存本文保持・移行・冪等・並行編集検知・マーカー不整合停止等）、lib/ に gh スタブ
   update-claude/
   setup-repo-guards/
   project-init/
