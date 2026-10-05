@@ -60,32 +60,41 @@ case "${REPO_SLUG#Fandhe-AI/}" in
     ;;
 esac
 
-# skills-lock.json に source があれば argv の UPSTREAM_REPO と照合する（誤リポ clone 防止）。
-# jq 不在時にこの照合ブロックごと skip すると、lockfile の source 安全弁を経由せず
-# 任意のリポジトリを UPSTREAM_REPO として通過させ clone・PR 作成できてしまうため、
-# skills-lock.json が存在するのに jq が無い場合は照合を省略せず fail-closed で中止する。
-if [[ -f skills-lock.json ]]; then
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "エラー: jq が見つかりません。skills-lock.json の source 照合に jq の導入が必要です。中止します。" >&2
-    exit 1
-  fi
-  LOCK_SOURCE=$(jq -r ".skills[\"${SKILL_NAME}\"].source // empty" skills-lock.json 2>/dev/null)
-  if [[ -n "${LOCK_SOURCE}" ]]; then
-    norm_lock="${LOCK_SOURCE#https://github.com/}"; norm_lock="${norm_lock%.git}"
-    norm_arg="${UPSTREAM_REPO#https://github.com/}"; norm_arg="${norm_arg%.git}"
-    if [[ "${norm_lock}" != "${norm_arg}" ]]; then
-      echo "エラー: 指定された upstream (${UPSTREAM_REPO}) が skills-lock.json の source (${LOCK_SOURCE}) と一致しません。中止します。" >&2
-      exit 1
-    fi
-    # sourceType の安全弁: github 以外（欠落・null 含む）は gh repo clone / gh pr create が
-    # 成立しないため中止する（contribute-skill/SKILL.md Step 2 と同じガード）。
-    # lockfile にエントリが存在する場合のみ検査し、未登録の新規スキル貢献は対象外とする
-    LOCK_SOURCE_TYPE=$(jq -r ".skills[\"${SKILL_NAME}\"].sourceType // empty" skills-lock.json 2>/dev/null)
-    if [[ "${LOCK_SOURCE_TYPE}" != "github" ]]; then
-      echo "エラー: sourceType '${LOCK_SOURCE_TYPE}' は github ではありません。中止します。" >&2
-      exit 1
-    fi
-  fi
+# skills-lock.json の source 照合（誤リポ clone・PR 作成を防ぐ安全弁。fail-closed）。
+# 本スクリプトは lock に登録済みのスキルを upstream へ戻す用途に限る（SKILL.md の前提条件）。
+# lock 不在・未登録・source 欠落・lock 解析失敗のいずれでも照合を省略して続行すると、
+# 上の正規表現を満たす任意の Fandhe-AI/<repo> が投稿先として通ってしまうため、
+# すべて clone より前に中止する。未登録スキルの新規貢献は本スクリプトの対象外。
+if [[ ! -f skills-lock.json ]]; then
+  echo "エラー: skills-lock.json が見つかりません。リポジトリルートから実行し、対象スキルが lock に登録されていることを確認してください。中止します。" >&2
+  exit 1
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "エラー: jq が見つかりません。skills-lock.json の source 照合に jq の導入が必要です。中止します。" >&2
+  exit 1
+fi
+lock_rc=0
+LOCK_SOURCE=$(jq -r --arg n "${SKILL_NAME}" '.skills[$n].source // empty' skills-lock.json) || lock_rc=$?
+if [[ "${lock_rc}" -ne 0 ]]; then
+  echo "エラー: skills-lock.json を解析できません（jq exit ${lock_rc}）。中止します。" >&2
+  exit 1
+fi
+if [[ -z "${LOCK_SOURCE}" ]]; then
+  echo "エラー: スキル '${SKILL_NAME}' が skills-lock.json に登録されていない、または source がありません。未登録スキルの新規貢献は本スクリプトの対象外です。中止します。" >&2
+  exit 1
+fi
+norm_lock="${LOCK_SOURCE#https://github.com/}"; norm_lock="${norm_lock%.git}"
+norm_arg="${UPSTREAM_REPO#https://github.com/}"; norm_arg="${norm_arg%.git}"
+if [[ "${norm_lock}" != "${norm_arg}" ]]; then
+  echo "エラー: 指定された upstream (${UPSTREAM_REPO}) が skills-lock.json の source (${LOCK_SOURCE}) と一致しません。中止します。" >&2
+  exit 1
+fi
+# sourceType の安全弁: github 以外（欠落・null 含む）は gh repo clone / gh pr create が
+# 成立しないため中止する（contribute-skill/SKILL.md Step 2 と同じガード）
+LOCK_SOURCE_TYPE=$(jq -r --arg n "${SKILL_NAME}" '.skills[$n].sourceType // empty' skills-lock.json) || LOCK_SOURCE_TYPE=""
+if [[ "${LOCK_SOURCE_TYPE}" != "github" ]]; then
+  echo "エラー: sourceType '${LOCK_SOURCE_TYPE}' は github ではありません。中止します。" >&2
+  exit 1
 fi
 
 # symlink 境界の共通判定（fail-closed）: 相対経路 rel の全要素を先頭から累積検査し、

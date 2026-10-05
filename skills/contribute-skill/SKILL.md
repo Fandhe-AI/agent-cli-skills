@@ -13,7 +13,7 @@ model: sonnet
 ## 前提条件
 
 - `gh` CLI がインストールされ認証済みであること（対象 org への push / PR 権限が必要）
-- 対象スキルが `skills-lock.json` に登録されていること
+- 対象スキルが `skills-lock.json` に登録され `source` を持つこと（未登録・`source` 欠落・lock 不在・解析失敗はスクリプトが clone 前に中止する。新規スキルの初回貢献は対象外）
 - 対象スキルのローカル改修が最新のコミットに含まれ、作業ツリーが clean であること
 
 ## 責務の分離
@@ -126,8 +126,14 @@ fi
 
 ```bash
 # jq が使えるなら jq で取得する
-SOURCE=$(jq -r ".skills[\"${SKILL_NAME}\"].source" skills-lock.json)
-SOURCE_TYPE=$(jq -r ".skills[\"${SKILL_NAME}\"].sourceType" skills-lock.json)
+SOURCE=$(jq -r --arg n "${SKILL_NAME}" '.skills[$n].source // empty' skills-lock.json) || { echo "エラー: skills-lock.json を解析できません。中止します。"; exit 1; }
+SOURCE_TYPE=$(jq -r --arg n "${SKILL_NAME}" '.skills[$n].sourceType // empty' skills-lock.json) || SOURCE_TYPE=""
+
+# 未登録・source 欠落は fail-closed（スクリプトと同じ判定）
+if [[ -z "${SOURCE}" ]]; then
+  echo "エラー: スキル '${SKILL_NAME}' が skills-lock.json に未登録、または source がありません。中止します。"
+  exit 1
+fi
 
 # 安全弁: Fandhe-AI org 以外への push を拒否する
 # 1) まず正規化する（URL 形式は OWNER/REPO へ変換、短縮形はそのまま採用）
@@ -471,6 +477,7 @@ Draft PR を作成する場合は `--draft` を付けます（デフォルトは
 - **SKILL_NAME は kebab-case のみ許可**：`..` のような値によるパストラバーサルを防ぐため、空判定の直後・パス解決の前に `^[a-z][a-z0-9-]+$` で検証する（OWASP A03 / A01）
 - **`skills/`・`.agents/skills/`・`.claude/skills/` の複数に実体が存在する場合は中止**：silently に `skills/` を優先せず、環境変数 `LOCAL_SKILL_DIR` に改修対象パスを指定して再実行を求める。`LOCAL_SKILL_DIR` は `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` の3パスのみ受理し（末尾要素・中間の親ディレクトリのいずれかが symlink なら実体側パスの指定を要求）、任意パス指定によるパストラバーサルを防ぐ。Step 5 で本スキル自身（contribute-skill）の配置を解決する `CONTRIBUTE_SKILL_DIR` も同じ fail-closed 方針を取り、`${ORIG_DIR}/skills/contribute-skill`・`${ORIG_DIR}/.agents/skills/contribute-skill`・`${ORIG_DIR}/.claude/skills/contribute-skill` の3候補のみ受理する（末尾要素・中間の親ディレクトリのいずれかが symlink なら実体側パスの指定を要求）。3候補のうち複数が存在する場合は silently にどれかを優先せず中止して環境変数 `CONTRIBUTE_SKILL_DIR` での指定を求める（LOCAL_SKILL_DIR とは非対称にしない）
 - **source が Fandhe-AI org 以外の場合は中止**：前方一致（`Fandhe-AI/*` 等）ではなく、正規化（`.git` 除去等）後の `OWNER/REPO` が `^Fandhe-AI/[A-Za-z0-9._-]+$` に完全一致するかで判定する。`../` によるパストラバーサル・クエリ・フラグメント・余剰パスセグメントを含む値、および repo 名が `.`／`..` になる値は中止し、意図しない外部リポジトリへの push を防ぐ
+- **lock 不在・未登録・`source` 欠落・lock 解析失敗は fail-closed**：clone 前に中止する（照合を省略して続行しない）。新規スキルの初回貢献は本スキルの対象外
 - **セキュリティ問題が見つかった場合は中止**：修正後に再実行
 - **upstream の配置はクローンしたリポジトリのレイアウトで判定する**：`skills-lock.json` の `skillPath` はローカル install パス（例: `.agents/skills/github-docs/SKILL.md`）であり、upstream リポジトリ内の配置ではない。`skillPath` の dirname を `UPSTREAM_SKILL_PATH` に採用してはならない。判定順は `skills/<name>` の存在 → `.agents/skills/<name>` の存在 → `.claude/skills/<name>` の存在 → スキルルート親ディレクトリの慣習（`skills/` → `.agents/skills/` → `.claude/skills/` の順。新規スキルは個別パスが存在しないためこの親ディレクトリ判定で配置先が決まる）→ 最終デフォルト `skills/`（より一般的な公開レイアウト）。全候補で `assert_no_symlink_components` により経路の全要素（`.claude` 等の最上位親を含む）が symlink でない場合のみ採用し、`.claude` 自体がリポジトリ外を指す symlink でも外部内容が upstream へコピーされない（fail-closed。symlink 経由の実体は前段の実体側候補で検出される）
 - **宛先は消してからコピーする（削除伝搬）**：`cp -R` は追加・上書きのみで削除を反映しないため、ローカルで削除したファイルが upstream 側に残存してしまう。`rm -rf` 前に `UPSTREAM_SKILL_PATH` が `skills/<name>`・`.agents/skills/<name>`・`.claude/skills/<name>` のいずれかであることを case 文で検証し、それ以外の値なら中止する。加えて rm -rf 直前に実体パス（symlink 境界・clone ルート配下チェック、cd -P + 相対 rm による TOCTOU 対策）を再検証する。削除対象は必ず clone 用の一時ディレクトリ（`${WORKDIR}/upstream/`）配下のみに閉じ、それ以外のファイルには一切触れない。**Step 5 は必ず `${CONTRIBUTE_SKILL_DIR}/scripts/skills-contribute.sh`（本スキル自身の配置から別途解決したパス。貢献対象のパスである `LOCAL_SKILL_DIR` とは別物）経由で実行し、断片コマンドの個別打鍵で検証を省略しない**
