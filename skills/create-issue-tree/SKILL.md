@@ -407,12 +407,80 @@ NEW_BODY="$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; printf '%s\n' 
 # NEW_BODY の「Phase 別実装計画」表へ今回の Phase 行を追記し、
 # 「### Phase N」セクションを追加した本文を組み立てて gh issue edit --body に渡す。
 # 既存ツリーの棚卸しを伴う場合は update-issue-tree への委譲でもよい
+
+# gh issue edit の直前に、組み立て後の NEW_BODY をプレースホルダー検査へ通す（fail-closed）。
+# grep の終了コードは 0=ヒット / 1=なし / 2 以上=失敗。2 以上は「残りなし」へ倒さず中止する
+rc=0; printf '%s\n' "${NEW_BODY}" | grep -qE '<phase[0-9]*_number>|#N([^0-9A-Za-z]|$)|^\|.*\|[[:space:]]*N[[:space:]]*(\||$)' || rc=$?
+[ "${rc}" -eq 1 ] \
+  || { echo "エラー: 本文にプレースホルダーが残っている、または検査に失敗した（grep exit ${rc}）。ルート本文は更新しません。"; exit 1; }
 ```
 
 `--root` 未指定（新規作成）の場合は以下で全体を更新する。
 
 ```bash
-gh issue edit "${ROOT_NUMBER}" --body "$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; cat <<'EOF'
+# 本文のプレースホルダー（#<phaseN_number>・N 等）を手書きで埋めない。実ツリー（sub_issues API）
+# から表を生成し、プレースホルダーが残った本文では gh issue edit しない（fail-closed）。
+# 前提: コードフェンスは独立シェルで実行され得るため、ROOT_NUMBER（ルート issue 番号）と
+# GRANULARITY（Step 1 で確定した粒度。例: 2h）をこのフェンスの前に設定しておく。
+: "${ROOT_NUMBER:?ROOT_NUMBER 未設定}" "${GRANULARITY:?GRANULARITY 未設定}"
+
+# 指定 issue の sub-issues 全件（JSON 配列）をページングで取得する。失敗時は非ゼロ。
+list_subs() {
+  local n="$1" page=1 res all='[]'
+  while true; do
+    res=$(gh api "repos/{owner}/{repo}/issues/${n}/sub_issues?per_page=100&page=${page}") || return 1
+    all=$(jq -n --argjson a "${all}" --argjson b "${res}" '$a + $b') || return 1
+    [ "$(printf '%s' "${res}" | jq 'length')" -lt 100 ] && break
+    page=$((page + 1))
+  done
+  printf '%s' "${all}"
+}
+
+BODY_FILE=$(mktemp) && SUMMARY_FILE=$(mktemp) && DETAIL_FILE=$(mktemp) \
+  || { echo "エラー: 一時ファイルを作成できません。中止します。"; exit 1; }
+trap 'rm -f "${BODY_FILE}" "${SUMMARY_FILE}" "${DETAIL_FILE}"' EXIT
+
+# issue タイトルは非信頼データ。表を壊す | と改行だけ無害化し、シェル展開には載せない
+CELL='gsub("[\r\n]+"; " ") | gsub("\\|"; "\\|")'
+
+PHASES=$(list_subs "${ROOT_NUMBER}") \
+  || { echo "エラー: ルート #${ROOT_NUMBER} の sub-issues を取得できません。中止します。"; exit 1; }
+PHASE_COUNT=$(printf '%s' "${PHASES}" | jq 'length')
+[ "${PHASE_COUNT}" -ge 1 ] \
+  || { echo "エラー: ルート #${ROOT_NUMBER} 直下に Phase 親がありません。中止します。"; exit 1; }
+
+for i in $(seq 0 $((PHASE_COUNT - 1))); do
+  PNUM=$(printf '%s' "${PHASES}" | jq -r --argjson i "${i}" '.[$i].number')
+  PTITLE=$(printf '%s' "${PHASES}" | jq -r --argjson i "${i}" ".[\$i].title | ${CELL}")
+  CHILDREN=$(list_subs "${PNUM}") \
+    || { echo "エラー: Phase 親 #${PNUM} の sub-issues を取得できません。中止します。"; exit 1; }
+  CHILDREN=$(printf '%s' "${CHILDREN}" | jq '[.[] | select(.state == "open")]')
+  DIRECT=$(printf '%s' "${CHILDREN}" | jq 'length')
+  TOTAL=${DIRECT}
+
+  {
+    printf '\n### Phase %s: %s\n\n' "$((i + 1))" "${PTITLE}"
+    printf '| Issue | タイトル | 分解 |\n|-------|---------|------|\n'
+  } >> "${DETAIL_FILE}"
+
+  for j in $(seq 0 $((DIRECT - 1))); do
+    [ "${DIRECT}" -ge 1 ] || break
+    CNUM=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" '.[$j].number')
+    CTITLE=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" ".[\$j].title | ${CELL}")
+    GRAND=$(list_subs "${CNUM}") \
+      || { echo "エラー: #${CNUM} の sub-issues を取得できません。中止します。"; exit 1; }
+    GRAND_OPEN=$(printf '%s' "${GRAND}" | jq '[.[] | select(.state == "open")] | length')
+    TOTAL=$((TOTAL + GRAND_OPEN))
+    if [ "${GRAND_OPEN}" -ge 1 ]; then DECOMP='sub-issue あり'; else DECOMP='-'; fi
+    printf '| #%s | %s | %s |\n' "${CNUM}" "${CTITLE}" "${DECOMP}" >> "${DETAIL_FILE}"
+  done
+
+  printf '| Phase %s | #%s %s | %s | %s |\n' "$((i + 1))" "${PNUM}" "${PTITLE}" "${DIRECT}" "${TOTAL}" >> "${SUMMARY_FILE}"
+done
+
+{
+  printf '<!-- granularity: %s -->\n' "${GRANULARITY}"
+  cat <<'EOF'
 ## 概要
 
 全 open issue を Phase 別に 1 ツリーへ整理する。各 Phase 親 issue を sub-issues として紐付け。
@@ -421,15 +489,10 @@ gh issue edit "${ROOT_NUMBER}" --body "$(printf '<!-- granularity: %s -->\n' "${
 
 | Phase | 親 issue | 直下 | 総 open 件数 |
 |-------|----------|------|-------------|
-| Phase 1 | #<phase1_number> タイトル | N | N |
-| Phase 2 | #<phase2_number> タイトル | N | N |
-
-### Phase 1: 基盤整備
-
-| Issue | タイトル | 分解 |
-|-------|---------|------|
-| #N | タイトル | - |
-| #N | タイトル | sub-issue あり |
+EOF
+  cat "${SUMMARY_FILE}"
+  cat "${DETAIL_FILE}"
+  cat <<'EOF'
 
 ## 運用
 
@@ -438,7 +501,18 @@ gh issue edit "${ROOT_NUMBER}" --body "$(printf '<!-- granularity: %s -->\n' "${
 - closed 親の下に open issue を残置しない
 - implement-issue-tree が post-order DFS で消化可能な構造を維持する
 EOF
-)"
+} > "${BODY_FILE}"
+
+# プレースホルダー検査（fail-closed）。grep の終了コードは 0=ヒット / 1=なし / 2 以上=失敗。
+# 2 以上は「残りなし」へ倒さず検査失敗として中止する
+rc=0; grep -qE '<phase[0-9]*_number>|\(作成後に更新\)|#N([^0-9A-Za-z]|$)|^\|.*\|[[:space:]]*N[[:space:]]*(\||$)' "${BODY_FILE}" || rc=$?
+[ "${rc}" -eq 1 ] \
+  || { echo "エラー: 本文にプレースホルダーが残っている、または検査に失敗した（grep exit ${rc}）。ルート本文は更新しません。"; exit 1; }
+rc=0; ROWS=$(grep -cE '^\| Phase [0-9]+ \| #[0-9]+ ' "${BODY_FILE}") || rc=$?
+{ [ "${rc}" -le 1 ] && [ "${ROWS}" -eq "${PHASE_COUNT}" ]; } \
+  || { echo "エラー: Phase 行数（${ROWS:-?}）が Phase 親数（${PHASE_COUNT}）と一致しません。ルート本文は更新しません。"; exit 1; }
+
+gh issue edit "${ROOT_NUMBER}" --body-file "${BODY_FILE}"
 ```
 
 ### Step 7: 作成結果を報告する
@@ -468,6 +542,7 @@ EOF
 - ルート issue の sub-issues に各 Phase 親 issue が列挙されていることを確認する
 - 各 Phase 親 issue の sub-issues に子 issue が列挙されていることを確認する
 - `gh issue view "${ROOT_NUMBER}"` でルート issue 本文の Phase 別表が正しく生成されていることを確認する
+- `gh issue view "${ROOT_NUMBER}" --json body --jq .body` に `<phaseN_number>`・`#N`・`(作成後に更新)`・素の `N` セルが残っていないことを確認する（残っていれば Step 6 を再実行する）
 - `MILESTONE` を割り当てた場合、`gh issue view <N> --json milestone --jq '.milestone.title'`
   でルート・Phase 親・子いずれも `${MILESTONE}` と一致することを確認する
 
@@ -495,6 +570,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" \
 | phase ラベルが存在しないリポジトリで issue 作成が失敗する | Step 4 冒頭の `gh label create "phase:${PHASE}"` を必ず先に実行する |
 | `--root` 追記時に既存ルートの milestone が未設定なのに気づかず milestone なしで起票してしまう | リポジトリに milestone が存在する場合、Step 2.5 は継承結果が空ならユーザー確認フローへ自動的に合流する（確認で milestone を選ぶとルート issue にも反映される）。milestone が 1 件もない非運用リポジトリでは非運用ガードによる milestone なし起票が正常動作 |
 | closed 親の下に open issue が残置される | Phase 親を close する前に全子 issue の close を確認する |
+| Step 6 の例をプレースホルダーのまま実行してルート本文が雛形で上書きされる | 実ツリーから表を生成する Step 6 のブロックを使う。検査ガードに引っかかったら本文を送らず中止される |
 | `--granularity` に `2 h`・`2`・`0h` 等を渡して中断される | 正整数+h 形式（`^[1-9][0-9]*h$`。例: `2h`・`4h`）で指定する |
 
 ## 注意事項
