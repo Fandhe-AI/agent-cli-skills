@@ -2708,7 +2708,8 @@ function isValidStateVerifyResult(r) {
     typeof r?.fileExists === 'boolean' &&
     h !== null && typeof h === 'object' && !Array.isArray(h) &&
     Object.values(h).every((x) => typeof x === 'string' && /^[0-9a-f]{64}$/.test(x)) &&
-    (r.fileExists ? /^[0-9a-f]{64}$/.test(r.keysSha256) : r.keysSha256 === '') &&
+    (r.fileExists ? /^[0-9a-f]{64}$/.test(r.keysSha256) : r.keysSha256 === '' && r.keysCount === 0) &&
+    Number.isInteger(r.keysCount) && r.keysCount >= 0 &&
     Number.isInteger(r.highWaterBytes) && r.highWaterBytes >= 0 &&
     Number.isInteger(r.highWaterVersion) && r.highWaterVersion >= 0
   )
@@ -2716,11 +2717,12 @@ function isValidStateVerifyResult(r) {
 
 const STATE_VERIFY_SCHEMA = {
   type: 'object',
-  required: ['fileExists', 'hashes', 'keysSha256', 'highWaterBytes', 'highWaterVersion'],
+  required: ['fileExists', 'hashes', 'keysSha256', 'keysCount', 'highWaterBytes', 'highWaterVersion'],
   properties: {
     fileExists: { type: 'boolean' },
     hashes: { type: 'object', additionalProperties: { type: 'string' } },
     keysSha256: { type: 'string' },
+    keysCount: { type: 'integer', minimum: 0 },
     highWaterBytes: { type: 'integer', minimum: 0 },
     highWaterVersion: { type: 'integer', minimum: 0 },
   },
@@ -2793,9 +2795,9 @@ async function loadState() {
 
   const { result: check } = await runStateAgent(
     [
-      `状態ファイルのハッシュ取得タスク（読み取り専用）。次のコマンドをそのまま実行し出力を転記する（推測しない。切り詰められたら Read で全文を読む）:`,
-      `f=${STATE_FILE}; h() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }; if [ -f "$f" ]; then jq -r '.items // {} | keys[] | select(test("^[1-9][0-9]*$"))' "$f" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; echo "KEYS $(jq -jc '[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]' "$f" | h | cut -c1-64)"; jq -c '[(.perWorktreeByteReserveHighWater // 0), (.perWorktreeByteReserveHighWaterVersion // 0)]' "$f"; else echo NOFILE; fi`,
-      `返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他は 0。それ以外は fileExists: true、hashes は「キー ハッシュ」行の対応表、keysSha256 は KEYS 行の値、最終行の配列を highWaterBytes・highWaterVersion。`,
+      `状態ファイルのハッシュ取得タスク（読み取り専用）。次のコマンドをそのまま実行し出力を転記する（推測しない。キー行が切り詰められたら R=1,20 のように行範囲を指定して同じコマンドを分割実行し全件を取得する）:`,
+      `f=${STATE_FILE}; h() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[(.perWorktreeByteReserveHighWater // 0), (.perWorktreeByteReserveHighWaterVersion // 0)]' "$f"; jq -r "$K | .[]" "$f" | sed -n "\${R:-1,\\$}p" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`,
+      `返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他は 0。それ以外は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目の配列を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行の対応表を hashes。`,
     ].join('\n'),
     { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult },
   )
@@ -2807,8 +2809,11 @@ async function loadState() {
 
 
 
+
+
   if (!check || (check.fileExists === false && result.fileExisted) ||
-    (check.fileExists && sha256Hex(canonicalJson(Object.keys(check.hashes).sort())) !== check.keysSha256)) {
+    (check.fileExists && (sha256Hex(canonicalJson(Object.keys(check.hashes).sort())) !== check.keysSha256 ||
+      Object.keys(check.hashes).length !== check.keysCount))) {
     throw new Error(
       `状態ファイル（${STATE_FILE}）の内容照合（state:load-verify）が成立しなかったため停止した（新規着手 0 件）。` +
       `そのまま再実行するか、解消しない場合は状態ファイルを退避（mv ${STATE_FILE} ${STATE_FILE}.aside）して内容を確認してから再実行すること`,
