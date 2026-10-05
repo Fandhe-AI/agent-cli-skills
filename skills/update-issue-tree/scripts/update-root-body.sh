@@ -22,8 +22,6 @@ set -euo pipefail
 
 PB='<!-- update-issue-tree:phase-plan:begin -->'
 PE='<!-- update-issue-tree:phase-plan:end -->'
-IB='<!-- update-issue-tree:inventory:begin -->'
-IE='<!-- update-issue-tree:inventory:end -->'
 MAX_BODY=65536
 MAX_DEPTH=8
 
@@ -101,11 +99,22 @@ if jq -e '.pull_request != null' "${ROOT_JSON}" > /dev/null 2>&1; then
   die 2 "#${ROOT} は PR であり issue ではない"
 fi
 ROOT_REPO_URL=$(jq -r '.repository_url // ""' "${ROOT_JSON}")
-RAW_BODY_1=$(jq -j '.body // ""' "${ROOT_JSON}")
 
 BODY_FILE="${WORK}/body.md"
-# 原文を逐語で保持する（CR を削らない）。解析時の CRLF 吸収は merge.awk 側で行う。
-printf '%s' "${RAW_BODY_1}" > "${BODY_FILE}"
+# 原文を逐語で保持する（CR・末尾改行を削らない）。コマンド置換は末尾改行を落とすため、
+# 本文は jq からファイルへ直接書き出し、以降の比較もすべてファイル内容で行う。
+# 解析時の CRLF 吸収は merge.awk 側で行う。
+jq -j '.body // ""' "${ROOT_JSON}" > "${BODY_FILE}" || die 2 "ルート本文を取り出せない"
+
+# 末尾の改行だけを無視した比較用の正規化（$1 入力ファイル / $2 出力ファイル / $3 "nocr" で CR も除去）。
+# unchanged 判定と事後確認が、改行 1 個の有無（GitHub 側の正規化を含む）で誤判定しないようにする。
+norm_to() {
+  if [[ "${3:-}" == "nocr" ]]; then
+    jq -Rj -s 'gsub("\r"; "") | sub("\n+\\z"; "")' "$1" > "$2"
+  else
+    jq -Rj -s 'sub("\n+\\z"; "")' "$1" > "$2"
+  fi
+}
 
 # ---- ツリー取得 ----
 # 子一覧は番号ごとにキャッシュし、同じ issue を再取得しない。
@@ -332,6 +341,13 @@ END {
     }
   }
 
+  # 閉じていないフェンスは以降をすべてコード扱いにする。本物の見出し・管理マーカーを見落として
+  # 管理ブロックを二重に追記し、追記分も描画上コードに飲まれるため、本文を変えずに止める。
+  if (infence) {
+    print "コードフェンスが閉じていない。管理マーカーの位置を判定できないため本文は変更しない（本文のフェンスを閉じてから再実行する）" > "/dev/stderr"
+    exit 4
+  }
+
   hfound = 0
   nonblank = 0
   for (i = 1; i <= n; i++) {
@@ -450,16 +466,16 @@ fi
 MIGRATION=$(cat "${MIG_FILE}")
 
 # granularity マーカーは先頭に 1 行だけ維持する（値は引数どおり）。
-NEW_FULL=$(
+# 送信本文はコマンド置換を介さずファイルとして組み立てる（末尾改行を含め逐語で保つ）。
+OUT_FILE="${WORK}/new-body.md"
+{
   printf '<!-- granularity: %s -->\n' "${GRAN}"
   cat "${MERGED_FILE}"
-)
-OLD_NORM=$(cat "${BODY_FILE}")
+} > "${OUT_FILE}"
 
-# 書き込み時に printf '%s\n' が改行を 1 つ加える（コマンド置換が末尾改行を除去済みのため）。
-# 実際に送る長さ（+1）で判定し、ちょうど上限の本文が 1 文字超過で exit 6 になるのを防ぐ。
-# 長さは jq でコードポイント数を数える（bash の ${#} は C ロケールだとバイト数になる）。
-WRITE_LEN=$(printf '%s\n' "${NEW_FULL}" | jq -Rs 'length') || die 3 "本文の長さを計測できない"
+# 実際に送る内容の長さで判定する。長さは jq でコードポイント数を数える
+# （bash の ${#} は C ロケールだとバイト数になる）。
+WRITE_LEN=$(jq -Rs 'length' "${OUT_FILE}") || die 3 "本文の長さを計測できない"
 if [[ "${WRITE_LEN}" -gt "${MAX_BODY}" ]]; then
   die 3 "更新後の本文が ${MAX_BODY} 文字を超える（${WRITE_LEN} 文字）。編集しない"
 fi
@@ -469,63 +485,44 @@ emit_result() {
 }
 
 if [[ "${DRY}" -eq 1 ]]; then
-  printf '%s\n' "${NEW_FULL}"
+  cat "${OUT_FILE}"
   emit_result dry-run
   exit 0
 fi
 
-if [[ "${NEW_FULL}" == "${OLD_NORM}" ]]; then
+norm_to "${OUT_FILE}" "${WORK}/n_new.txt" || die 3 "送信本文を正規化できない"
+norm_to "${BODY_FILE}" "${WORK}/n_old.txt" || die 3 "取得本文を正規化できない"
+if cmp -s "${WORK}/n_new.txt" "${WORK}/n_old.txt"; then
   emit_result unchanged
   exit 0
 fi
 
 # ---- 編集直前の再取得で並行編集を検知する ----
 # 条件付き更新が API に無いため、取得時点の本文と一致する場合に限って書き込む。
+# 比較はファイル内容の厳密一致（コマンド置換を介さないため末尾改行・CR も差として検出する）。
 RECHECK_JSON="${WORK}/root_recheck.json"
 fetch_root "${RECHECK_JSON}" || die 5 "編集直前のルート再取得に失敗した。編集しない"
-RAW_BODY_2=$(jq -j '.body // ""' "${RECHECK_JSON}")
-if [[ "${RAW_BODY_2}" != "${RAW_BODY_1}" ]]; then
+RECHECK_BODY="${WORK}/body_recheck.md"
+jq -j '.body // ""' "${RECHECK_JSON}" > "${RECHECK_BODY}" || die 5 "編集直前のルート本文を取り出せない。編集しない"
+if ! cmp -s "${BODY_FILE}" "${RECHECK_BODY}"; then
   die 5 "取得後にルート本文が変更された（並行編集）。編集しない。再実行して差分を確認する"
 fi
 
-OUT_FILE="${WORK}/new-body.md"
-printf '%s\n' "${NEW_FULL}" > "${OUT_FILE}"
 if ! gh issue edit "${ROOT}" --body-file "${OUT_FILE}" > /dev/null; then
   die 6 "gh issue edit が失敗した。本文の実状態を確認する"
 fi
 
 # ---- 事後確認 ----
+# 取得した本文全体を送信した本文と比較する。欠落・第三者による改変・マーカー崩れはすべて
+# 不一致になる。末尾改行と CR だけは GitHub 側の正規化を許容して無視する。
 VERIFY_JSON="${WORK}/root_verify.json"
 fetch_root "${VERIFY_JSON}" || die 7 "事後確認の再取得に失敗した（本文は編集済み）"
-VERIFY_BODY=$(jq -j '.body // ""' "${VERIFY_JSON}" | tr -d '\r')
-# 先頭行はパラメータ展開で取る（printf | head は pipefail 下で SIGPIPE の exit 141 になり得る）。
-VERIFY_FIRST="${VERIFY_BODY%%$'\n'*}"
-# 管理マーカーの数はコードフェンスの外だけを数える（フェンス内の例示文字列は管理範囲ではない）。
-cat > "${WORK}/verify.awk" << 'AWK'
-{
-  t = $0
-  sub(/^ ? ? ?/, "", t)
-  c = substr(t, 1, 1)
-  run = 0
-  if (c == "`" || c == "~") { while (substr(t, run + 1, 1) == c) run++ }
-  if (!infence) {
-    if (run >= 3 && (c == "~" || index(substr(t, run + 1), "`") == 0)) { infence = 1; fch = c; flen = run; next }
-    s = $0
-    sub(/[ \t]+$/, "", s)
-    if (s == ENVIRON["PB"]) a++
-    else if (s == ENVIRON["PE"]) b++
-    else if (s == ENVIRON["IB"]) x++
-    else if (s == ENVIRON["IE"]) y++
-  } else if (c == fch && run >= flen && substr(t, run + 1) ~ /^[ \t]*$/) {
-    infence = 0
-  }
-}
-END { print a + 0, b + 0, x + 0, y + 0 }
-AWK
-VERIFY_COUNTS=$(printf '%s\n' "${VERIFY_BODY}" | PB="${PB}" PE="${PE}" IB="${IB}" IE="${IE}" awk -f "${WORK}/verify.awk")
-if [[ "${VERIFY_FIRST}" != "<!-- granularity: ${GRAN} -->" ]] \
-  || [[ "${VERIFY_COUNTS}" != "1 1 1 1" ]]; then
-  die 7 "事後確認の不一致（granularity マーカーが先頭 1 行でない、または管理マーカー対が各 1 組でない。本文は編集済み）"
+VERIFY_BODY="${WORK}/body_verify.md"
+jq -j '.body // ""' "${VERIFY_JSON}" > "${VERIFY_BODY}" || die 7 "事後確認の本文を取り出せない（本文は編集済み）"
+norm_to "${VERIFY_BODY}" "${WORK}/n_verify.txt" nocr || die 7 "事後確認の本文を正規化できない（本文は編集済み）"
+norm_to "${OUT_FILE}" "${WORK}/n_sent.txt" nocr || die 7 "送信本文を正規化できない（本文は編集済み）"
+if ! cmp -s "${WORK}/n_verify.txt" "${WORK}/n_sent.txt"; then
+  die 7 "事後確認の不一致（取得した本文が送信した本文と一致しない。本文は編集済み）"
 fi
 
 emit_result updated

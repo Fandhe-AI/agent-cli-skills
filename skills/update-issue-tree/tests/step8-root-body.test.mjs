@@ -55,7 +55,9 @@ case "$1" in
         k=$(cat "\${D}/root.count" 2>/dev/null || echo 0)
         k=$((k + 1))
         echo "\${k}" > "\${D}/root.count"
-        if [[ -f "\${D}/edited.body" ]]; then
+        if [[ -f "\${D}/edited.body" && -f "\${D}/verify.override.json" ]]; then
+          cat "\${D}/verify.override.json"
+        elif [[ -f "\${D}/edited.body" ]]; then
           jq -n --rawfile b "\${D}/edited.body" '{body: $b, repository_url: "${REPO_URL}"}'
         elif [[ -f "\${D}/root.\${k}.json" ]]; then
           cat "\${D}/root.\${k}.json"
@@ -454,6 +456,42 @@ test('y: 書き込み長がちょうど 65536 文字なら編集し、65537 文�
     assert.equal(editCount(env), 0)
   })
 })
+
+test('z1: マーカー外の末尾改行を失わない（コマンド置換で落とさない）', () =>
+  withEnv((env) => {
+    const before = ['## 概要', '', '手書き', '', PB, PE, '', '末尾', ''].join('\n') + '\n\n'
+    setRoot(env, before)
+    basicTree(env)
+    const r = run(env)
+    assert.equal(r.status, 0, r.stderr)
+    assert.ok(edited(env).endsWith('末尾\n\n\n'), JSON.stringify(edited(env).slice(-12)))
+  }))
+
+test('z2: 事後確認で取得本文が送信本文と異なれば（欠落・改変）exit 7', () =>
+  withEnv((env) => {
+    setRoot(env, HANDWRITTEN)
+    basicTree(env)
+    // 先頭の granularity 行と管理マーカー数は正しいまま、本文の一部だけが欠けた応答を返す。
+    const probe = run(env, [...DEFAULT_ARGS, '--dry-run'])
+    assert.equal(probe.status, 0, probe.stderr)
+    const full = probe.stdout.replace(/result=.*\n$/, '')
+    const lines = full.split('\n')
+    const idx = lines.findIndex((l) => l === '手書き' || l.startsWith('- '))
+    assert.ok(idx > 0)
+    lines.splice(idx, 1)
+    writeFileSync(join(env.stub, 'verify.override.json'), JSON.stringify({ number: 254, repository_url: REPO_URL, body: lines.join('\n') }))
+    const r = run(env)
+    assert.equal(r.status, 7, r.stderr)
+  }))
+
+test('z3: 閉じていないコードフェンスは exit 4・edit なし（管理ブロックを二重追記しない）', () =>
+  withEnv((env) => {
+    setRoot(env, ['## 概要', '', '```', '## Phase 別実装計画', PB, PE, '', '手書き'].join('\n'))
+    basicTree(env)
+    const r = run(env)
+    assert.equal(r.status, 4, r.stderr)
+    assert.equal(editCount(env), 0)
+  }))
 
 test('m: コードフェンス内のマーカー様文字列・見出しは管理範囲として扱わない', () =>
   withEnv((env) => {
