@@ -201,6 +201,25 @@ test('(g) タイトルが #N 等のプレースホルダーに見える場合も
   }
 })
 
+test('(h) 本文を含む大きな sub_issues 応答（引数長上限超え）でも edit まで到達する', () => {
+  const fx = BASE()
+  const bigBody = 'x'.repeat(4000)
+  const page1 = Array.from({ length: 100 }, (_, i) => ({ ...issue(2000 + i, `feat: c${i}`), body: bigBody }))
+  fx['sub_102_1.json'] = page1
+  fx['sub_102_2.json'] = [{ ...issue(3000, 'feat: 最終'), body: bigBody }]
+  for (const i of page1) fx[`sub_${i.number}_1.json`] = []
+  fx['sub_3000_1.json'] = []
+  const ctx = setup(fx)
+  try {
+    const { r, calls, body } = run(ctx)
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(calls.length, 1)
+    assert.match(body, /\| #3000 \| feat: 最終 \| - \|/)
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
 test('(f) 一時ファイルは成功時も失敗時も残らない', () => {
   const ok = setup(BASE())
   const fx = BASE()

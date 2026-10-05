@@ -405,14 +405,17 @@ CURRENT_BODY=$(printf '%s\n' "${CURRENT_BODY}" | grep -vE '^<!-- granularity: [1
 NEW_BODY="$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; printf '%s\n' "${CURRENT_BODY}")"
 
 # NEW_BODY の「Phase 別実装計画」表へ今回の Phase 行を追記し、
-# 「### Phase N」セクションを追加した本文を組み立てて gh issue edit --body に渡す。
+# 「### Phase N」セクションを追加した本文を組み立てて NEW_BODY を更新する。
 # 既存ツリーの棚卸しを伴う場合は update-issue-tree への委譲でもよい
+# （追記内容は実ツリー〔sub_issues API〕から生成し、#<phaseN_number>・N 等を手書きで埋めない）
 
-# gh issue edit の直前に、組み立て後の NEW_BODY をプレースホルダー検査へ通す（fail-closed）。
+# 検査は追記・更新を全て終えた最終本文（NEW_BODY）に対し、gh issue edit の直前で行う（fail-closed）。
+# 追記前に検査すると、追記部分に残ったプレースホルダーが検査を素通りする。
 # grep の終了コードは 0=ヒット / 1=なし / 2 以上=失敗。2 以上は「残りなし」へ倒さず中止する
-rc=0; printf '%s\n' "${NEW_BODY}" | grep -qE '<phase[0-9]*_number>|#N([^0-9A-Za-z]|$)|^\|.*\|[[:space:]]*N[[:space:]]*(\||$)' || rc=$?
+rc=0; printf '%s\n' "${NEW_BODY}" | grep -qE '<phase[0-9]*_number>|\(作成後に更新\)|#N([^0-9A-Za-z]|$)|^\|.*\|[[:space:]]*N[[:space:]]*(\||$)' || rc=$?
 [ "${rc}" -eq 1 ] \
   || { echo "エラー: 本文にプレースホルダーが残っている、または検査に失敗した（grep exit ${rc}）。ルート本文は更新しません。"; exit 1; }
+# 検査を通った NEW_BODY をそのまま gh issue edit へ渡す（検査後に本文を変更しない）
 ```
 
 `--root` 未指定（新規作成）の場合は以下で全体を更新する。
@@ -429,7 +432,9 @@ list_subs() {
   local n="$1" page=1 res all='[]'
   while true; do
     res=$(gh api "repos/{owner}/{repo}/issues/${n}/sub_issues?per_page=100&page=${page}") || return 1
-    all=$(jq -n --argjson a "${all}" --argjson b "${res}" '$a + $b') || return 1
+    # 本文を含む全 JSON を --argjson の引数に載せると ARG_MAX / MAX_ARG_STRLEN を超え得るため、
+    # printf（組み込み）経由の stdin で jq へ渡す
+    all=$({ printf '%s' "${all}"; printf '%s' "${res}"; } | jq -s '.[0] + .[1]') || return 1
     [ "$(printf '%s' "${res}" | jq 'length')" -lt 100 ] && break
     page=$((page + 1))
   done
