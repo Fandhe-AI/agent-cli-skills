@@ -48,7 +48,6 @@ const SLICE_EXPORTS = [
   'mergeExecutePrompt',
   'checkPrBinding',
   'isValidStateVerifyResult',
-  'dropForeignBranchEntry',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 const {
@@ -62,7 +61,6 @@ const {
   mergeExecutePrompt,
   checkPrBinding,
   isValidStateVerifyResult,
-  dropForeignBranchEntry,
 } = await import(pathToFileURL(slicePath).href)
 
 const nodeSha = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
@@ -334,17 +332,77 @@ test('駆動部: isActiveMonitoring と runOne の resumable は branchMatchesIs
   assert.match(resumable, /branchMatchesIssue\(saved\.branch, item\.number\)/)
 })
 
-test('駆動部: runImplement は monitoring 再開前に PR 照合（pr-bind）し、不一致なら再開しない', () => {
+// runImplement の「branch 照合 → 再開前の PR 照合」区間を切り出して実行する振る舞いハーネス。
+// 区間の末尾まで到達した（再開・通常実装へ進む）場合は 'proceed' を返す。
+async function runResumeGuard({ number = 365, saved, active = true, bind = '' }) {
+  const start = driverPart.indexOf('async function runImplement(item)')
+  const from = driverPart.indexOf('  const stopUnverified = (why) => {', start)
+  const resumeHead = '  if (isResumeFromMonitoring) {\n    const why = await checkPrBinding('
+  const bindStart = driverPart.indexOf(resumeHead, from)
+  const to = driverPart.indexOf('\n  }\n', bindStart) + 4
+  assert.ok(start > 0 && from > start && bindStart > from, '再開ガードの区間が見つからない')
+  const ctx = { failures: [], stateWrites: [], bindCalls: [] }
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+  const fn = new AsyncFunction('item', 'saved', 'ctx', [
+    'const recordFailure = (f) => ctx.failures.push(f)',
+    'const updateState = async (...a) => { ctx.stateWrites.push(a); return true }',
+    "const branchMatchesIssue = (b, n) => new RegExp(`^[a-z]+/${n}-`).test(b)",
+    'const sanitize = (x) => x',
+    `const isActiveMonitoring = () => ${active}`,
+    `const checkPrBinding = async (...a) => { ctx.bindCalls.push(a); return ${JSON.stringify(bind)} }`,
+    driverPart.slice(from, to),
+    "return 'proceed'",
+  ].join('\n'))
+  const ret = await fn({ number }, saved, ctx)
+  return { ret, ...ctx }
+}
+
+test('runImplement: 再開前の PR 照合が不一致・取得失敗なら状態を書き換えず state-unverified の blocked で終える', async () => {
+  const saved = { status: 'monitoring', pr: 1366, branch: 'feat/365-bar', worktree: '/w' }
+  for (const bind of ['PR not found', 'headRefName feat/359-foo']) {
+    const r = await runResumeGuard({ saved, bind })
+    assert.equal(r.ret, false, bind)
+    assert.deepEqual(r.bindCalls, [[{ number: 365 }, 1366, 'feat/365-bar']])
+    assert.equal(r.stateWrites.length, 0, '照合失敗で状態ファイルを書き換えてはならない')
+    assert.equal(r.failures.length, 1)
+    assert.equal(r.failures[0].status, 'blocked')
+    assert.equal(r.failures[0].pr, undefined)
+    assert.match(r.failures[0].reason, /^state-unverified: 状態ファイルの PR #1366 を本イシューに結び付けられない/)
+    assert.match(r.failures[0].reason, /状態ファイルは変更していない/)
+  }
+  // 照合が通れば再開へ進む
+  const ok = await runResumeGuard({ saved, bind: '' })
+  assert.equal(ok.ret, 'proceed')
+  assert.equal(ok.failures.length, 0)
+})
+
+test('runImplement: 別 issue の命名の branch を持つエントリは再開・Recover へ進まず state-unverified の blocked で終える', async () => {
+  for (const saved of [
+    { status: 'monitoring', pr: 1366, branch: 'feat/359-foo', worktree: '/repo/.git/worktrees/impl-359' },
+    { status: 'implementing', pr: 0, branch: 'misc-branch', worktree: '/w' },
+  ]) {
+    const r = await runResumeGuard({ saved, active: false })
+    assert.equal(r.ret, false)
+    assert.equal(r.stateWrites.length, 0)
+    assert.deepEqual(r.bindCalls, [])
+    assert.equal(r.failures[0].status, 'blocked')
+    assert.match(r.failures[0].reason, /^state-unverified: 状態ファイルの branch が本イシューの命名ではない/)
+  }
+  // 本 issue の branch・branch なしは素通しする
+  assert.equal((await runResumeGuard({ saved: { status: 'implementing', branch: 'feat/365-bar' }, active: false })).ret, 'proceed')
+  assert.equal((await runResumeGuard({ saved: { status: 'implementing', worktree: '/w' }, active: false })).ret, 'proceed')
+})
+
+test('駆動部: runImplement の照合ガードは再開判定・Recover より前にあり、savedItems を書き換えない', () => {
   const start = driverPart.indexOf('async function runImplement(item)')
   const body = driverPart.slice(start, driverPart.indexOf('\nasync function ', start + 10))
-  const resumeDecl = body.indexOf('let isResumeFromMonitoring = isActiveMonitoring(item.number)')
-  const bindCheck = body.indexOf('const why = await checkPrBinding(item, saved.pr, saved.branch)')
-  const resumeUse = body.indexOf('if (isResumeFromMonitoring) {\n    // 保存済みの pr')
-  assert.ok(resumeDecl > 0 && bindCheck > resumeDecl, 'PR 照合の配線がない')
-  assert.ok(resumeUse > bindCheck, 'PR 照合が monitoring 再開より後にある')
-  const failBranch = body.slice(bindCheck, resumeUse)
-  assert.match(failBranch, /isResumeFromMonitoring = false/)
-  assert.doesNotMatch(failBranch, /updateState/, '照合失敗で状態ファイルを書き換えてはならない')
+  const guard = body.indexOf("if (saved.branch && !branchMatchesIssue(String(saved.branch), item.number)) {")
+  const resumeDecl = body.indexOf('const isResumeFromMonitoring = isActiveMonitoring(item.number)')
+  const bind = body.indexOf('if (why) return stopUnverified(')
+  const remnant = body.indexOf('const hasRemnant')
+  assert.ok(guard > 0 && guard < resumeDecl && resumeDecl < bind && bind < remnant, '照合ガードの位置が不正')
+  assert.doesNotMatch(body, /savedItems\[String\(item\.number\)\] = /)
+  assert.doesNotMatch(body, /dropForeignBranchEntry/)
 })
 
 test('駆動部: merged 受理（already-merged を含む）は PR 照合を要求し、opt-in 前の MERGED 確認も照合する', () => {
@@ -467,29 +525,6 @@ test('loadState: 検証エージェントが haiku / sonnet とも不正な応�
   const { calls } = installAgentStub((opts) => (opts.label === 'state:load' ? loadResult(sampleItems) : { fileExists: true }))
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
   assert.equal(calls.length, 3)
-})
-
-test('dropForeignBranchEntry: 別 issue のブランチを持つエントリは branch・worktree ごと捨てる', () => {
-  const foreign = { status: 'monitoring', pr: 1366, branch: 'feat/359-foo', worktree: '/repo/.git/worktrees/impl-359' }
-  assert.deepEqual(dropForeignBranchEntry(365, foreign), {})
-  assert.deepEqual(dropForeignBranchEntry(365, { status: 'blocked', branch: 'misc-branch', worktree: '/w' }), {})
-  const own = { status: 'monitoring', pr: 1400, branch: 'feat/365-bar', worktree: '/w' }
-  assert.equal(dropForeignBranchEntry(365, own), own)
-  const noBranch = { status: 'implementing', worktree: '/w' }
-  assert.equal(dropForeignBranchEntry(365, noBranch), noBranch)
-  assert.deepEqual(dropForeignBranchEntry(365, undefined), {})
-})
-
-test('駆動部: runImplement は冒頭で別 issue のブランチを持つエントリを捨て、再開判定・Recover より前に置く', () => {
-  const start = driverPart.indexOf('async function runImplement(item)')
-  const body = driverPart.slice(start, driverPart.indexOf('\nasync function ', start + 10))
-  const drop = body.indexOf('if (dropForeignBranchEntry(item.number, saved) !== saved) {')
-  const resumeDecl = body.indexOf('let isResumeFromMonitoring = isActiveMonitoring(item.number)')
-  const remnant = body.indexOf('const hasRemnant')
-  assert.ok(drop > 0 && drop < resumeDecl && resumeDecl < remnant, 'ブランチ照合の位置が不正')
-  const branch = body.slice(drop, body.indexOf('\n  }\n', drop))
-  assert.match(branch, /saved = \{\}/)
-  assert.match(branch, /savedItems\[String\(item\.number\)\] = saved/)
 })
 
 test('駆動部: state:load-verify の isValid は isValidStateVerifyResult を使う', () => {

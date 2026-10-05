@@ -124,16 +124,21 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
 monitoring 再開の前に、`pr-bind:#N` が保存済み PR の `state` / `headRefName` /
 `isCrossRepository` / `closingIssuesReferences` を取得し、ホストが照合する（`prBindingProblem`）。
 PR が実在し、fork からの PR でなく、期待ブランチが本 issue の命名で `headRefName` と一致し、
-`closingIssuesReferences` が空か本 issue を含む場合だけ再開する。一致しなければ再開も close もせず、
-状態なしとして通常の実装へ進む。主な判別は `headRefName` が担う（`closingIssuesReferences` は
+`closingIssuesReferences` が空か本 issue を含む場合だけ再開する。一致しない場合も、`gh` の一時的な
+失敗で照合できない場合も、再開も close も通常の実装（Recover・新規 PR 作成）もせず、状態ファイルを
+書き換えないまま `state-unverified` の `blocked`（halt 非カウント）で終える（MERGED / CLOSED の
+既存 PR は open PR の検索に掛からず、通常の実装へ進むと再実装・重複 PR になり得るため。元の再開情報の
+まま人が確認して再試行できる）。主な判別は `headRefName` が担う（`closingIssuesReferences` は
 PR 本文から導出され鸚鵡返しされ得るため補助条件に留める）。pr-create が報告した新規 PR も、
 Merge ループへ渡す前に同じ照合を通し、不一致なら `blocked` で終端する（照合できない PR 番号は
 再開用の `pr` には保存せず、診断専用の `unverifiedPr` に残す）。opt-in 前の MERGED 確認で
 照合が不一致の場合も `blocked` で終端する。merge-verify による
 merged（`already-merged` を含む）の受理にも同じ照合を課し、monitor・merge-exec の手順 1 にも同じ
 照合を指示する。再開判定（`isActiveMonitoring`）は、保存済みブランチがその issue の命名
-（`<type>/<N>-`）であることも要求する。保存済みブランチが別 issue の命名のエントリは、
-`runImplement` の冒頭で branch・worktree を含めて捨て、Recover・再開の対象にしない。
+（`<type>/<N>-`）であることも要求する。保存済みブランチが別 issue の命名のエントリも、
+`runImplement` の冒頭で同じく状態を書き換えずに `state-unverified` の `blocked` で終え、Recover・
+再開の対象にしない（メモリ上だけ捨てると、マージ更新の `updateState` で別 issue の `pr` / `worktree`
+が新しい branch と組み合わさって状態ファイルに残るため）。
 
 `blockedReason` は状態ファイルへ永続化されるフィールドではない。
 `isActiveMonitoring()` は `status`（`'monitoring'` または `'blocked'`）と `pr > 0` と `branch`

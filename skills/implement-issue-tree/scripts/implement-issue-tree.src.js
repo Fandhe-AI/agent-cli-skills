@@ -1965,13 +1965,6 @@ const MERGE_VERIFY_SCHEMA = {
   },
 }
 
-// 保存済みエントリのブランチが別 issue の命名なら、branch・worktree を含めて丸ごと捨てた空の
-// エントリを返す（Bugbot 指摘）。runImplement の冒頭で使い、他 issue のブランチ・worktree を
-// Recover（WIP コミット・worktree 削除）や再開の対象にしない。branch が空のエントリはそのまま返す。
-function dropForeignBranchEntry(n, saved) {
-  return saved?.branch && !branchMatchesIssue(String(saved.branch), n) ? {} : saved ?? {}
-}
-
 // PR #pr を issue #n に結び付けてよいかを MERGE_VERIFY_SCHEMA の取得値で照合する純粋関数。問題が
 // あれば理由文字列、なければ空文字を返す。条件: PR が実在する（state が MERGED / OPEN / CLOSED）・
 // 同一リポジトリのブランチからの PR である（isCrossRepository が false。fork の同名ブランチを
@@ -6088,9 +6081,8 @@ async function runVerifyClose(item) {
 
 // 末端イシューの実装 → 監視 → 修正 → マージ。implement / fix は worktree 隔離で並列実行する
 async function runImplement(item) {
-  // 状態ファイルから保存済みの情報を取得（再開判定に使用）。PR の結び付けを照合できなければ
-  // 下の monitoring 再開判定で pr / status を落とした値へ差し替える。
-  let saved = savedItems[String(item.number)] ?? {}
+  // 状態ファイルから保存済みの情報を取得（再開判定に使用）
+  const saved = savedItems[String(item.number)] ?? {}
 
   // opt-in テスト記録ゲート（Issue #495）。Tree フェーズで許可形式外と判定された宣言が
   // 1 件でもあれば、monitoring 再開判定より前に実装・再開のいずれにも進まず blocked で
@@ -6122,27 +6114,27 @@ async function runImplement(item) {
     return false
   }
 
-  // 別 issue のブランチを持つエントリは状態なしとして扱う（dropForeignBranchEntry）。再開判定・Recover より前に置く。
-  if (dropForeignBranchEntry(item.number, saved) !== saved) {
-    log(`⚠️ #${item.number}: 状態ファイルの branch が本 issue の命名ではないため、branch・worktree を含めて状態なしとして扱う（Recover・再開の対象にしない）`)
-    saved = {}
-    savedItems[String(item.number)] = saved
+  // 保存済みの branch が本 issue の命名でない（Bugbot 指摘）、または保存済み PR を本 issue に結び
+  // 付けられない（不一致・一時的な取得失敗とも。Codex P1）場合は、再開も通常の実装（Recover・
+  // 新規 PR 作成）もせず state-unverified の blocked（halt 非カウント）で終える。状態ファイルは
+  // 一切書き換えない: メモリ上だけ捨てると updateState のマージ更新で別 issue の pr / worktree が
+  // 新しい branch と組み合わさって残り、通常経路へ進むと MERGED / CLOSED の既存 PR を open PR 検索で
+  // 見つけられず再実装・重複 PR になり得るため。元の再開情報のまま人が確認して再試行できる。
+  const stopUnverified = (why) => {
+    recordFailure({ issue: item.number, reason: `state-unverified: ${why}。状態ファイルは変更していない。確認のうえ同じ引数で再実行すること`, status: 'blocked' })
+    return false
+  }
+  if (saved.branch && !branchMatchesIssue(String(saved.branch), item.number)) {
+    return stopUnverified('状態ファイルの branch が本イシューの命名ではない')
   }
   // monitoring/blocked（pr 保存済み）からの再開は impl をスキップして monitor ループから開始
   // する。branch 不正なら通常 impl からやり直す。判定は isActiveMonitoring に一元化する。
-  let isResumeFromMonitoring = isActiveMonitoring(item.number)
-  // 再開前に保存済み PR がこの issue のものかを独立に照合する（実在・headRefName・
-  // closingIssuesReferences。checkPrBinding）。不一致・取得不能は再開せず、pr / status を
-  // 持たない状態なし扱いで通常 impl（Recover・既存 PR 検出）へ倒す。状態ファイルは書き換えない
-  // （一時的な gh 失敗で正しい再開情報を消さないため）。
+  const isResumeFromMonitoring = isActiveMonitoring(item.number)
+  // 再開前に保存済み PR がこの issue のものかを独立に照合する（実在・fork でない・headRefName・
+  // closingIssuesReferences。checkPrBinding）。照合できなければ上の stopUnverified で止める。
   if (isResumeFromMonitoring) {
     const why = await checkPrBinding(item, saved.pr, saved.branch)
-    if (why) {
-      log(`⚠️ #${item.number}: 状態ファイルの PR #${saved.pr} を本 issue に結び付けられないため再開しない（${sanitize(why)}）。状態なしとして通常の実装へ進む`)
-      saved = { branch: saved.branch, worktree: saved.worktree }
-      savedItems[String(item.number)] = saved
-      isResumeFromMonitoring = false
-    }
+    if (why) return stopUnverified(`状態ファイルの PR #${saved.pr} を本イシューに結び付けられない（${sanitize(why)}）`)
   }
   if (saved.status === 'monitoring' && !isResumeFromMonitoring) {
     log(`#${item.number}: 状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)

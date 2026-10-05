@@ -1968,13 +1968,6 @@ const MERGE_VERIFY_SCHEMA = {
 
 
 
-function dropForeignBranchEntry(n, saved) {
-  return saved?.branch && !branchMatchesIssue(String(saved.branch), n) ? {} : saved ?? {}
-}
-
-
-
-
 
 
 
@@ -6089,8 +6082,7 @@ async function runVerifyClose(item) {
 
 async function runImplement(item) {
 
-
-  let saved = savedItems[String(item.number)] ?? {}
+  const saved = savedItems[String(item.number)] ?? {}
 
 
 
@@ -6123,26 +6115,26 @@ async function runImplement(item) {
   }
 
 
-  if (dropForeignBranchEntry(item.number, saved) !== saved) {
-    log(`⚠️ #${item.number}: 状態ファイルの branch が本 issue の命名ではないため、branch・worktree を含めて状態なしとして扱う（Recover・再開の対象にしない）`)
-    saved = {}
-    savedItems[String(item.number)] = saved
+
+
+
+
+
+  const stopUnverified = (why) => {
+    recordFailure({ issue: item.number, reason: `state-unverified: ${why}。状態ファイルは変更していない。確認のうえ同じ引数で再実行すること`, status: 'blocked' })
+    return false
+  }
+  if (saved.branch && !branchMatchesIssue(String(saved.branch), item.number)) {
+    return stopUnverified('状態ファイルの branch が本イシューの命名ではない')
   }
 
 
-  let isResumeFromMonitoring = isActiveMonitoring(item.number)
-
-
+  const isResumeFromMonitoring = isActiveMonitoring(item.number)
 
 
   if (isResumeFromMonitoring) {
     const why = await checkPrBinding(item, saved.pr, saved.branch)
-    if (why) {
-      log(`⚠️ #${item.number}: 状態ファイルの PR #${saved.pr} を本 issue に結び付けられないため再開しない（${sanitize(why)}）。状態なしとして通常の実装へ進む`)
-      saved = { branch: saved.branch, worktree: saved.worktree }
-      savedItems[String(item.number)] = saved
-      isResumeFromMonitoring = false
-    }
+    if (why) return stopUnverified(`状態ファイルの PR #${saved.pr} を本イシューに結び付けられない（${sanitize(why)}）`)
   }
   if (saved.status === 'monitoring' && !isResumeFromMonitoring) {
     log(`#${item.number}: 状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)
