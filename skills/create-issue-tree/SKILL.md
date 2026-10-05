@@ -211,6 +211,8 @@ MILESTONE_COUNT=$(gh api "repos/{owner}/{repo}/milestones?state=all" --jq 'lengt
 そのまま再利用する（ここで再代入・再検証しない）。
 
 `--root` 未指定の場合のみ、以下でルート issue を新規作成する。
+表のプレースホルダー行は Step 6 の `--root` 経路が追記位置として読む。文言を変えるときは
+Step 6 の awk とテスト (n) を合わせて直す。
 
 ```bash
 # MILESTONE が空でなければ --milestone を付与する（Step 2.5 で決定済み）
@@ -391,6 +393,8 @@ done
 **`--root` での部分起票では本文を全置換しない。** 既存ルートの本文には先行 Phase の表が
 含まれるため、現在の本文を取得し、今回起票した Phase の行・セクションのみを追記・更新した
 本文で `gh issue edit` する。以下の全置換テンプレートは新規作成（`--root` 未指定）時のみ使う。
+Step 3 の雛形のままのルート（Step 6 到達前に中断した起票の再実行）でも、表のプレースホルダー行
+`| (作成後に更新) |` を今回の Phase 行へ置き換えて完走する。
 
 ```bash
 # --root 指定時: 既存本文を取得し、今回の Phase 分をマージしてから編集する
@@ -464,7 +468,9 @@ PHASE_ROW="| Phase ${PHASE} | #${PHASE_NUMBER} ${PTITLE} | ${DIRECT} | ${TOTAL} 
 # Phase N が既存本文にあれば、その行とセクションを置き換える（再利用した Phase 親の件数更新）。
 # 無ければ表の最終行（'| Phase N |' 行）の直後へ行を挿入し、セクションは既存 Phase セクションと同じ位置
 # （'## 運用' の直前）へ挿入する（'## 運用' が無い本文のみ末尾へ追加する）。
-# 表に 'Phase N' 行が 1 つも無く追記位置を決められなければ awk が exit 3 で中止する（fail-closed）。
+# 実在の Phase 行が 1 つも無い Step 3 雛形のままの本文では、'| (作成後に更新) |' 行の位置へ今回の Phase 行を
+# 置き換えて挿入する。このプレースホルダー行は実在行の有無によらず出力しない。
+# 追記位置がどちらも無い、または行を出力できなかった場合は awk が exit 3 で中止する（fail-closed）。
 # セクションは全子 issue の行を含み環境変数・引数の長さ上限を超え得るため、一時ファイル経由で渡す。
 # 行（1 行）は ENVIRON で渡し、いずれもシェル構文・awk 構文として再評価させない
 # trap を mktemp より先に登録する（mktemp 失敗時も作成済みファイルを削除するため）
@@ -478,15 +484,20 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     while ((rc = (getline sl < ENVIRON["SECF"])) > 0) { sec = (n++ ? sec "\n" : "") sl }
     if (rc < 0) exit 4
   }
-  { L[NR] = $0; if ($0 ~ /^[|] Phase [0-9]+ [|]/) last = NR }
+  {
+    L[NR] = $0
+    if ($0 ~ /^[|] Phase [0-9]+ [|]/) last = NR
+    else if ($0 ~ /^[|] [(]作成後に更新[)] [|][ |]*$/) { T[NR] = 1; if (!tmpl) tmpl = NR }
+  }
   END {
     ph = ENVIRON["PH"]; row_re = "^[|] Phase " ph " [|]"; sec_re = "^### Phase " ph ":"
     row_done = 0; sec_done = 0; skip = 0; has_sec = 0
     for (k = 1; k <= NR; k++) if (L[k] ~ sec_re) has_sec = 1
-    if (last == 0) exit 3
+    if (last == 0 && tmpl == 0) exit 3
     for (i = 1; i <= NR; i++) {
       line = L[i]
       if (skip) { if (line ~ /^(#|##|###) /) { skip = 0; print "" } else continue }
+      if (i in T) { if (last == 0 && i == tmpl && !row_done) { print ENVIRON["ROW"]; row_done = 1 }; continue }
       if (line ~ row_re) { if (!row_done) { print ENVIRON["ROW"]; row_done = 1 }; continue }
       if (line ~ sec_re) { if (!sec_done) { print sec; sec_done = 1 }; skip = 1; continue }
       if (line ~ /^## 運用/ && !sec_done && !has_sec) { print sec; print ""; sec_done = 1 }
@@ -494,8 +505,10 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
       if (i == last && !row_done) { print ENVIRON["ROW"]; row_done = 1 }
     }
     if (!sec_done) { print ""; print sec }
+    # 唯一のプレースホルダー行が置換対象セクション内にあると skip 分岐で読み飛ばされ、行を出力しないまま終わる
+    if (!row_done) exit 3
   }') \
-  || { echo "エラー: 本文の Phase 別表に追記位置（'| Phase N |' 行）がありません。中止します。"; exit 1; }
+  || { echo "エラー: 本文の Phase 別表に追記位置（'| Phase N |' 行または '| (作成後に更新) |' 行）がないか、Phase 行を出力できませんでした。中止します。"; exit 1; }
 
 # 検査は追記を全て終えた最終本文（NEW_BODY）に対し、gh issue edit の直前で行う（fail-closed）。
 # 追記前に検査すると、追記部分に残ったプレースホルダーが検査を素通りする。
@@ -694,6 +707,7 @@ gh api "repos/{owner}/{repo}/issues/${PHASE_NUMBER}/sub_issues?per_page=100" \
 | `--root` 追記時に既存ルートの milestone が未設定なのに気づかず milestone なしで起票してしまう | リポジトリに milestone が存在する場合、Step 2.5 は継承結果が空ならユーザー確認フローへ自動的に合流する（確認で milestone を選ぶとルート issue にも反映される）。milestone が 1 件もない非運用リポジトリでは非運用ガードによる milestone なし起票が正常動作 |
 | closed 親の下に open issue が残置される | Phase 親を close する前に全子 issue の close を確認する |
 | Step 6 の例をプレースホルダーのまま実行してルート本文が雛形で上書きされる | 実ツリーから表を生成する Step 6 のブロックを使う。検査ガードに引っかかったら本文を送らず中止される |
+| Step 6 到達前に中断し、雛形のままのルートが残った | `--root <ルート番号>` を付けて再実行する。プレースホルダー行は今回の Phase 行へ置き換わる |
 | `--granularity` に `2 h`・`2`・`0h` 等を渡して中断される | 正整数+h 形式（`^[1-9][0-9]*h$`。例: `2h`・`4h`）で指定する |
 
 ## 注意事項
