@@ -150,7 +150,7 @@ Merge ループへ渡す前に同じ照合を通し、不一致なら `blocked` 
 新規の実装・PR 作成をさせない）。monitor が手順 1 の照合不成立を返した場合
 （`blockedReason: "unbound"`）も、状態ファイルを書き換えずに `state-unverified` の `blocked` で終える。`state-unverified` で止めた issue の保存済み `pr` は、前提完了プローブの
 ホスト既知 PR に渡さない（照合できない MERGED PR を根拠に前提を完了扱いにしない。人手で issue が
-CLOSED になった場合の遷移は従来どおり）。opt-in 前の MERGED 確認で
+CLOSED になった場合の遷移は従来どおり）。前提完了プローブの MERGED 受理には、PR 番号の一致に加え `prBindingProblem` と同じ結び付け照合（実在・同一リポジトリ・base・headRefName 完全一致・closingIssues。期待ブランチはホスト決定の `knownBranchByIssue` → 状態ファイルの `branch` で、エージェントへ渡さない）が必要で、不成立は MERGED とせず issue CLOSED 判定へ落とす（Issue #533）。opt-in 前の MERGED 確認で
 照合が不一致の場合も `blocked` で終端する。merge-verify による
 merged（`already-merged` を含む）の受理にも同じ照合を課し、monitor・merge-exec の手順 1 にも同じ
 照合を指示する。再開判定（`isActiveMonitoring`）は、保存済みブランチがその issue の命名

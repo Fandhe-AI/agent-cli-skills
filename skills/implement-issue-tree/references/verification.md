@@ -341,6 +341,8 @@ wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
 node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
 ```
 
+`classifyPrereqTransition` / `PREREQ_PROBE_SCHEMA` / `prereqProbePrompt` を変更した場合は、MERGED 判定が `prBindingProblem` と同じ結び付け照合（別 issue の MERGED PR を受理しないこと）を課していることを手順 4 の回帰テスト（Issue #533 の再現ケース）で確認する。
+
 期待結果: 手順 1 の出力が `1`（dispatch ループ内での即時確定が復活すると 2 以上、または cascade 側が壊れると 0 になる）。手順 2 がヒットする。手順 3 が 500,000 B 未満。手順 4 の `node --test` が全 pass・fail 0（受入条件 3「前提 merged への遷移 → 下流の再判定」を含む）。
 
 

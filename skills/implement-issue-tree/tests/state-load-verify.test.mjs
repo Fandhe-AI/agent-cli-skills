@@ -42,6 +42,8 @@ const SLICE_EXPORTS = [
   'canonicalJson',
   'verifyLoadedItems',
   'prBindingProblem',
+  'isValidBranchName',
+  'branchMatchesIssue',
   'loadState',
   'mergeVerifyPrompt',
   'monitorPrompt',
@@ -59,6 +61,8 @@ const {
   canonicalJson,
   verifyLoadedItems,
   prBindingProblem,
+  isValidBranchName,
+  branchMatchesIssue,
   loadState,
   mergeVerifyPrompt,
   monitorPrompt,
@@ -493,21 +497,21 @@ function buildPrHints({ targets, results, savedItems, unverifiedIssues }) {
   const from = driverPart.indexOf('  const prHints = {}', fnStart)
   const to = driverPart.indexOf('  let probe', from)
   assert.ok(fnStart > 0 && from > fnStart && to > from)
-  const fn = new Function('targets', 'results', 'savedItems', 'unverifiedIssues', `${driverPart.slice(from, to)}\nreturn prHints`)
-  return fn(targets, results, savedItems, unverifiedIssues)
+  const fn = new Function('targets', 'results', 'savedItems', 'unverifiedIssues', 'knownBranchByIssue', 'isValidBranchName', 'branchMatchesIssue', `${driverPart.slice(from, to)}\nreturn { prHints, branchHints }`)
+  return fn(targets, results, savedItems, unverifiedIssues, new Map(), isValidBranchName, branchMatchesIssue)
 }
 
 test('probePrereqCompletion: state-unverified の issue の保存済み pr は prHints に渡さず、MERGED でも done にしない（Bugbot High）', () => {
-  const savedItems = { 365: { status: 'blocked', pr: 1366, branch: 'feat/365-bar' }, 366: { status: 'failed', pr: 1400 } }
-  const unverified = buildPrHints({ targets: [365, 366], results: [], savedItems, unverifiedIssues: new Set([365]) })
+  const savedItems = { 365: { status: 'blocked', pr: 1366, branch: 'feat/365-bar' }, 366: { status: 'failed', pr: 1400, branch: 'feat/366-baz' } }
+  const { prHints: unverified, branchHints } = buildPrHints({ targets: [365, 366], results: [], savedItems, unverifiedIssues: new Set([365]) })
   assert.deepEqual(unverified, { 366: 1400 })
   const done = new Set()
   const failedSet = new Set([365, 366])
   const probe = { results: [
     { issue: 365, issueState: 'OPEN', prState: 'MERGED', pr: 1366 },
-    { issue: 366, issueState: 'OPEN', prState: 'MERGED', pr: 1400 },
+    { issue: 366, issueState: 'OPEN', prState: 'MERGED', pr: 1400, headRefName: 'feat/366-baz', baseRefName: 'main', isCrossRepository: false, closingIssues: [366] },
   ] }
-  const t = applyPrereqTransitions(probe, [365, 366], done, failedSet, unverified)
+  const t = applyPrereqTransitions(probe, [365, 366], done, failedSet, unverified, branchHints)
   assert.deepEqual(t, [{ issue: 366, kind: 'merged', pr: 1400 }])
   assert.ok(failedSet.has(365) && !done.has(365), '未照合 PR の MERGED で前提を done にしてはならない')
   // 人手で CLOSED になった場合の遷移は従来どおり
