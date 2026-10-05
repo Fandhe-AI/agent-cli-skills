@@ -40,6 +40,8 @@ skills/                               -- スキル本体（各ディレクトリ
   project-sync-issues/
   project-archive-done/
   contribute-skill/
+    scripts/                          -- skills-contribute.sh（lock 照合は fail-closed）
+    tests/                            -- node:test 回帰テスト（lock 不在・未登録・source 欠落・解析失敗の中止）
   sync-skills-lock/
 .claude/
   agents/
