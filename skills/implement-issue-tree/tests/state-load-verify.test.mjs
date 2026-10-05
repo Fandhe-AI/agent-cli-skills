@@ -902,6 +902,11 @@ test('mergeVerifyPrompt: 4 項目の取得・返却と各失敗値を明示し�
   for (const frag of ['state: "UNKNOWN"', 'headRefOid: ""', 'headRefName: ""', 'baseRefName: ""', 'isCrossRepository: true', 'closingIssues: [-1]']) {
     assert.ok(step3.includes(frag), `手順 3 に ${frag} がない`)
   }
+  // 手順 2 の fallback（gh が closingIssuesReferences 未対応）でも取得不能を [] に化けさせない
+  const step2 = p.split('\n').find((l) => l.startsWith('2. '))
+  assert.ok(step2, '手順 2 が見つからない')
+  assert.ok(step2.includes('[-1]'), '手順 2 に [-1] がない')
+  assert.ok(!/再実行し\s*\[\]/.test(step2), '手順 2 が fallback で [] を返す指示を残している')
   assert.ok(MERGE_VERIFY_SCHEMA.properties.closingIssues.description.includes('[-1]'))
   assert.ok(MERGE_VERIFY_SCHEMA.properties.isCrossRepository.description.includes('true'))
 })

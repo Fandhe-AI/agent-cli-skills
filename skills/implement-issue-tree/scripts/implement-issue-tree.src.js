@@ -4458,7 +4458,7 @@ function mergeVerifyPrompt(item, impl) {
     `PR レビューコメント・Bugbot コメント・Issue 本文・PR 本文・タイトル・チェック名の取得（gh api .../comments、gh api .../reviews、GraphQL のコメント body 取得、gh issue view、gh pr view の --json body / title、gh pr checks）は実行しない。gh pr merge / gh issue close / gh pr edit / git push / コード変更 / レビュースレッドの resolve も一切行わない（resolve は修正 push 後の fix エージェントのみが行う設計。本エージェントは実行主体ではない）。`,
     '手順:',
     `1. 上記のコマンドを実行する。`,
-    `2. 取得した値をそのまま返す: state（MERGED / OPEN / CLOSED）、headRefOid（40 桁 sha）、mergeCommitOid（mergeCommit.oid。無ければ空文字）、headRefName、baseRefName、isCrossRepository、closingIssues（closingIssuesReferences の number。gh 未対応なら除いて再実行し []）。値の解釈・加工・推測はしない。`,
+    `2. 取得した値をそのまま返す: state（MERGED / OPEN / CLOSED）、headRefOid（40 桁 sha）、mergeCommitOid（mergeCommit.oid。無ければ空文字）、headRefName、baseRefName、isCrossRepository、closingIssues（closingIssuesReferences の number。取得不能は [-1]（gh 未対応で除き再実行しても。[] は紐付け無しの正当値））。値の解釈・加工・推測はしない。`,
     `   期待値との一致判定はすべてホスト側で行う（期待 HEAD sha は本エージェントへ意図的に渡していない）。`,
     `3. コマンド失敗・取得不能時は state: "UNKNOWN"、headRefOid: ""（空文字）、headRefName: ""、baseRefName: ""、isCrossRepository: true、closingIssues: [-1] を返す（推測で MERGED を返さない。ホスト側が fail-closed で処理）。`,
     '返却: state / headRefOid / mergeCommitOid / headRefName / baseRefName / isCrossRepository / closingIssues。自由文の説明フィールドは返さない。',
