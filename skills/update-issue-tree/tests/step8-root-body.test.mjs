@@ -393,9 +393,67 @@ test('l: CRLF 本文でも見出し・マーカーを認識し内容を保持す
     const out = edited(env)
     assert.ok(out.includes('手書きの概要。判断根拠はここに書く。'))
     assert.ok(out.includes('### 実装ラン (#275)'))
-    assert.ok(!out.includes('\r'))
+    // 管理範囲外の行は CR を含め逐語で保持する（#545 契約）。
+    assert.ok(out.includes('手書きの概要。判断根拠はここに書く。\r\n'))
+    assert.ok(out.includes('## 運用\r\n'))
     assert.match(r.stdout, /migration=phase-plan-archived/)
   }))
+
+test('l2: マーカーあり CRLF 本文は管理範囲外の CR を失わず、2 回目は unchanged', () =>
+  withEnv((env) => {
+    const body = ['## 概要', '', '手書き', '', PB, 'old', PE, '', '## 運用', '', '- 手書き bullet', ''].join('\r\n')
+    setRoot(env, body)
+    basicTree(env)
+    const r = run(env)
+    assert.equal(r.status, 0, r.stderr)
+    const out = edited(env)
+    assert.ok(out.includes('手書き\r\n'))
+    assert.ok(out.includes('- 手書き bullet\r'))
+    assert.equal(count(out, PB), 1)
+  }))
+
+test('x: 子 issue が 0 件のルートでも Phase 表を生成して更新できる', () =>
+  withEnv((env) => {
+    setRoot(env, '## 概要\n\n手書き\n')
+    setSubs(env, 254, [])
+    const r = run(env)
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /phases=0/)
+    assert.ok(edited(env).includes('| Phase | 親 issue | 直下 open | 総 open |'))
+  }))
+
+test('y: 書き込み長がちょうど 65536 文字なら編集し、65537 文字になる本文は exit 3・edit なし', () => {
+  const build = (pad) => {
+    const base = ['## 概要', '', 'x'.repeat(pad), ''].join('\n')
+    return base
+  }
+  // 骨格長を実測して、書き込み長（末尾改行込み）を 65536 / 65537 に合わせる。
+  let probeLen
+  withEnv((env) => {
+    setRoot(env, build(1))
+    basicTree(env)
+    const r = run(env, [...DEFAULT_ARGS, '--dry-run'])
+    assert.equal(r.status, 0, r.stderr)
+    // dry-run は printf '%s\n' で出力する。stdout は result= 行を含むため除去して測る。
+    const body = r.stdout.replace(/result=.*\n$/, '')
+    probeLen = [...body].length
+  })
+  const exact = 65536 - probeLen + 1
+  withEnv((env) => {
+    setRoot(env, build(exact))
+    basicTree(env)
+    const r = run(env)
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal([...edited(env)].length, 65536)
+  })
+  withEnv((env) => {
+    setRoot(env, build(exact + 1))
+    basicTree(env)
+    const r = run(env)
+    assert.equal(r.status, 3, r.stderr)
+    assert.equal(editCount(env), 0)
+  })
+})
 
 test('m: コードフェンス内のマーカー様文字列・見出しは管理範囲として扱わない', () =>
   withEnv((env) => {

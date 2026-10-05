@@ -104,7 +104,8 @@ ROOT_REPO_URL=$(jq -r '.repository_url // ""' "${ROOT_JSON}")
 RAW_BODY_1=$(jq -j '.body // ""' "${ROOT_JSON}")
 
 BODY_FILE="${WORK}/body.md"
-printf '%s' "${RAW_BODY_1}" | tr -d '\r' > "${BODY_FILE}"
+# 原文を逐語で保持する（CR を削らない）。解析時の CRLF 吸収は merge.awk 側で行う。
+printf '%s' "${RAW_BODY_1}" > "${BODY_FILE}"
 
 # ---- ツリー取得 ----
 # 子一覧は番号ごとにキャッシュし、同じ issue を再取得しない。
@@ -285,7 +286,7 @@ function readfile(path,    line, out, first) {
   return out
 }
 function ish(i, lvl,    s) {
-  s = L[i]
+  s = A[i]
   if (lvl == 1) return (substr(s, 1, 2) == "# ")
   if (lvl == 2) return (substr(s, 1, 3) == "## ")
   return (substr(s, 1, 4) == "### ")
@@ -296,7 +297,7 @@ function addarch(a, b,    j) {
     skip[j] = 1
   }
 }
-{ n++; L[n] = $0 }
+{ n++; L[n] = $0; A[n] = $0; sub(/\r$/, "", A[n]) }
 END {
   PB = "<!-- update-issue-tree:phase-plan:begin -->"
   PE = "<!-- update-issue-tree:phase-plan:end -->"
@@ -310,7 +311,7 @@ END {
 
   infence = 0
   for (i = 1; i <= n; i++) {
-    t = L[i]
+    t = A[i]
     sub(/^ ? ? ?/, "", t)
     c = substr(t, 1, 1)
     run = 0
@@ -335,14 +336,14 @@ END {
   nonblank = 0
   for (i = 1; i <= n; i++) {
     if (F[i]) { nonblank++; continue }
-    s = rtrim(L[i])
+    s = rtrim(A[i])
     if (s == PB) { npb++; pb = i }
     else if (s == PE) { npe++; pe = i }
     else if (s == IB) { nib++; ib = i }
     else if (s == IE) { nie++; ie = i }
     else if (s ~ /^<!--[ ]*granularity:[ ]*[0-9]+h[ ]*-->$/) { skip[i] = 1; continue }
     if (s !~ /^[ \t]*$/) nonblank++
-    if (!hfound && index(L[i], "## Phase 別実装計画") == 1) { h = i; hfound = 1 }
+    if (!hfound && index(A[i], "## Phase 別実装計画") == 1) { h = i; hfound = 1 }
   }
 
   bad = 0
@@ -385,7 +386,7 @@ END {
       }
       arch = ""
       pre_nb = 0
-      for (j = h + 1; j < first3; j++) if (L[j] !~ /^[ \t]*$/) pre_nb = 1
+      for (j = h + 1; j < first3; j++) if (A[j] !~ /^[ \t]*$/) pre_nb = 1
       if (pre_nb) addarch(h + 1, first3 - 1)
       j = first3
       while (j <= e) {
@@ -393,7 +394,7 @@ END {
         for (k = j + 1; k <= e; k++) {
           if (!F[k] && ish(k, 3)) { ce = k - 1; break }
         }
-        if (substr(L[j], 1, 10) == "### Phase ") addarch(j, ce)
+        if (substr(A[j], 1, 10) == "### Phase ") addarch(j, ce)
         j = ce + 1
       }
       aft = "\n" BLOCK "\n"
@@ -414,7 +415,7 @@ END {
 
   if (nib == 1) {
     last = ""
-    for (j = ib + 1; j < ie; j++) if (L[j] !~ /^[ \t]*$/) last = rtrim(L[j])
+    for (j = ib + 1; j < ie; j++) if (A[j] !~ /^[ \t]*$/) last = rtrim(A[j])
     if (last != ROW) before[ie] = ROW
   } else {
     if (anchor <= n) pre[anchor] = INVSEC "\n"
@@ -455,8 +456,12 @@ NEW_FULL=$(
 )
 OLD_NORM=$(cat "${BODY_FILE}")
 
-if [[ "${#NEW_FULL}" -gt "${MAX_BODY}" ]]; then
-  die 3 "更新後の本文が ${MAX_BODY} 文字を超える（${#NEW_FULL} 文字）。編集しない"
+# 書き込み時に printf '%s\n' が改行を 1 つ加える（コマンド置換が末尾改行を除去済みのため）。
+# 実際に送る長さ（+1）で判定し、ちょうど上限の本文が 1 文字超過で exit 6 になるのを防ぐ。
+# 長さは jq でコードポイント数を数える（bash の ${#} は C ロケールだとバイト数になる）。
+WRITE_LEN=$(printf '%s\n' "${NEW_FULL}" | jq -Rs 'length') || die 3 "本文の長さを計測できない"
+if [[ "${WRITE_LEN}" -gt "${MAX_BODY}" ]]; then
+  die 3 "更新後の本文が ${MAX_BODY} 文字を超える（${WRITE_LEN} 文字）。編集しない"
 fi
 
 emit_result() {
@@ -493,7 +498,8 @@ fi
 VERIFY_JSON="${WORK}/root_verify.json"
 fetch_root "${VERIFY_JSON}" || die 7 "事後確認の再取得に失敗した（本文は編集済み）"
 VERIFY_BODY=$(jq -j '.body // ""' "${VERIFY_JSON}" | tr -d '\r')
-VERIFY_FIRST=$(printf '%s\n' "${VERIFY_BODY}" | head -n 1)
+# 先頭行はパラメータ展開で取る（printf | head は pipefail 下で SIGPIPE の exit 141 になり得る）。
+VERIFY_FIRST="${VERIFY_BODY%%$'\n'*}"
 # 管理マーカーの数はコードフェンスの外だけを数える（フェンス内の例示文字列は管理範囲ではない）。
 cat > "${WORK}/verify.awk" << 'AWK'
 {
