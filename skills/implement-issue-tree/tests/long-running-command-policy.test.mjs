@@ -25,7 +25,7 @@ const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-long-running-'
 const slicePath = join(sliceDir, 'defs.mjs')
 const SLICE_EXPORTS = [
   'LONG_RUNNING_POLICY', 'COMMON_LINES', 'COMMON', 'MERGE_CONTEXT_COMMON',
-  'BASE_MERGE_CONTEXT_COMMON', 'agentRetryOnce', 'reviewPrompt', 'REVIEW_SCHEMA',
+  'BASE_MERGE_CONTEXT_COMMON', 'agentRetryOnce', 'MONITOR_RETRY_OBSERVE_ONLY', 'reviewPrompt', 'REVIEW_SCHEMA',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 const m = await import(pathToFileURL(slicePath).href)
@@ -64,9 +64,23 @@ test('B: 1 回目 null・2 回目成功なら成功値（呼び出し 2 回・�
   stub([null, { ok: 2 }])
   assert.deepEqual(await m.agentRetryOnce('same-prompt', { label: 'x', model: 's' }), { ok: 2 })
   assert.equal(calls.length, 2)
-  assert.equal(calls[0].prompt, calls[1].prompt)
+  assert.equal(calls[0].prompt, 'same-prompt')
+  assert.equal(calls[1].prompt, 'same-prompt')
   assert.equal(calls[1].opts.label, 'x:retry')
   assert.equal(calls[1].opts.model, 's')
+})
+
+test('B: retrySuffix 指定時は 2 回目のみプロンプトへ付加される', async () => {
+  stub([null, { ok: 5 }])
+  assert.deepEqual(await m.agentRetryOnce('p', { label: 'x' }, '[S]'), { ok: 5 })
+  assert.equal(calls[0].prompt, 'p')
+  assert.equal(calls[1].prompt, 'p[S]')
+})
+
+test('B: monitor 再試行は観測専用 suffix 付きで書き込みを禁止する', () => {
+  assert.ok(driverPart.includes('MONITOR_RETRY_OBSERVE_ONLY)'))
+  assert.ok(m.MONITOR_RETRY_OBSERVE_ONLY.includes('gh run rerun'))
+  assert.ok(m.MONITOR_RETRY_OBSERVE_ONLY.includes('@cursor review'))
 })
 
 test('B: 1 回目例外・2 回目成功なら成功値', async () => {

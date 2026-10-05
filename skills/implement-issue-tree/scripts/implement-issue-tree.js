@@ -2519,7 +2519,16 @@ const STATE_RETURN_DIRECTIVE =
 
 
 
-async function agentRetryOnce(prompt, opts) {
+
+
+
+const MONITOR_RETRY_OBSERVE_ONLY =
+  '\n\n【再試行・観測専用】この呼び出しは直前の同一監視が StructuredOutput を返さず終了したための再試行である。' +
+  '直前の呼び出しが副作用（gh run rerun / gh pr comment / gh pr edit / スレッド resolve 等）を実行済みか確認できないため、' +
+  'ここでは書き込みを一切実行しない（gh run rerun・gh pr comment・"@cursor review" 投稿・gh api の POST/PATCH/PUT/DELETE・graphql mutation を禁止）。' +
+  '読み取りのみで状態を判定し、flaky CI の再実行や @cursor review の催促が必要になる場合でも実行せず、state: blocked / blockedReason: "quality" と理由を返して終了する。'
+
+async function agentRetryOnce(prompt, opts, retrySuffix = '') {
   try {
     const first = await agent(prompt, opts)
     if (first != null) return first
@@ -2527,7 +2536,7 @@ async function agentRetryOnce(prompt, opts) {
   } catch (e) {
     log(`⚠️ ${opts.label}: エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）。同一プロンプトで 1 回再試行する`)
   }
-  return await agent(prompt, { ...opts, label: `${opts.label}:retry` })
+  return await agent(prompt + retrySuffix, { ...opts, label: `${opts.label}:retry` })
 }
 
 async function runStateAgent(prompt, { label, schema, isValid }) {
@@ -6799,7 +6808,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       m = seededMonitorResult
     } else {
       try {
-        m = await agentRetryOnce(monitorPrompt(item, impl, externalCheckApps, externalChecksConfirmed, autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, forceThreadRescan, resolveProof.head), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA })
+        m = await agentRetryOnce(monitorPrompt(item, impl, externalCheckApps, externalChecksConfirmed, autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, forceThreadRescan, resolveProof.head), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA }, MONITOR_RETRY_OBSERVE_ONLY)
       } catch (e) {
         log(`⚠️ #${item.number}: 監視エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
       }
