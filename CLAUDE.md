@@ -14,7 +14,7 @@ skills/                               -- スキル本体（各ディレクトリ
   create-commit/
   create-issue/
   create-issue-tree/
-    tests/                            -- node:test 回帰テスト（Step 6 ルート本文を実ツリーから生成・プレースホルダー残りで中止・ページング・一時ファイル削除）
+    tests/                            -- node:test 回帰テスト（Step 6 ルート本文を実ツリーから生成・プレースホルダー残りで中止・ページング・一時ファイル削除・Step 3 雛形への --root マージ）
   create-plan/
   create-pr/
   implement-issue/

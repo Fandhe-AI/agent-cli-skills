@@ -7,6 +7,9 @@
 // 修正は (1) 実ツリー（sub_issues API）から表を生成、(2) プレースホルダー残りの
 // 検査ガード（fail-closed）の 2 点。
 //
+// Issue #551 は Step 3 の雛形（プレースホルダー行だけの表）を持つルートへ --root で
+// 再実行しても Step 6 が完走することの回帰（テスト (n)〜(r)）。
+//
 // SKILL.md はドキュメントのため、フェンス内の bash をテキスト抽出し、PATH 先頭に
 // gh スタブを差し込んで実プロセスとして実行し、gh 呼び出しと本文を観測する
 // （node:test 標準ライブラリのみ）。
@@ -410,4 +413,59 @@ test('(m) --root 用フェンスは PHASE_SECTION を SEC 環境変数として 
   const block = extractRootBlock()
   assert.ok(!/\bSEC=/.test(block), 'SEC= による環境変数渡しが残っている')
   assert.ok(!/ENVIRON\["SEC"\]/.test(block))
+})
+
+// ---- Issue #551: Step 3 の雛形だけのルートへ --root で再実行するケース ----
+// 雛形は手で写さず SKILL.md の Step 3 フェンスから抽出する。Step 3 の文言と Step 6 の
+// 追記位置判定が食い違うと、この入力のテストが落ちて気づける。
+function extractStep3Template() {
+  const text = readFileSync(SKILL_MD, 'utf8')
+  const start = text.indexOf('### Step 3')
+  const end = text.indexOf('### Step 4')
+  assert.ok(start >= 0 && end > start, 'Step 3 / Step 4 見出しが見つからない')
+  const m = /cat <<'EOF'\n([\s\S]*?)\nEOF\n/.exec(text.slice(start, end))
+  assert.ok(m, 'Step 3 の heredoc が見つからない')
+  assert.match(m[1], /^\| \(作成後に更新\) \|/m, 'Step 3 雛形にプレースホルダー行がある')
+  return `<!-- granularity: 2h -->\n${m[1]}\n`
+}
+
+test('(n) Step 3 の雛形本文へ --root マージするとプレースホルダー行が Phase 行に置き換わる', () => {
+  const { r, body } = runRoot(extractStep3Template(), [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.ok(!body.includes('(作成後に更新)'))
+  assert.match(body, /\|\n\| Phase 1 \| #101 feat: 基盤整備 \| 1 \| 1 \|\n\n### Phase 1: feat: 基盤整備\n/)
+  assert.match(body, /\| #111 \| feat: 新しい子 \| - \|\n\n## 運用\n/)
+  assert.match(body, /^<!-- granularity: 2h -->\n## 概要\n/)
+  assert.equal(body.split('\n').filter((l) => /^\| Phase \d+ \|/.test(l)).length, 1)
+})
+
+test('(o) Phase 行もプレースホルダー行も無い本文は edit せず中止する', () => {
+  const { r, body } = runRoot('## 概要\n\n自由記述のみ\n\n## 運用\n\nx\n', [issue(111, 'c')])
+  assert.notEqual(r.status, 0)
+  assert.equal(body, null)
+})
+
+test('(p) 実在の Phase 行とプレースホルダー行が併存する本文ではプレースホルダー行だけ落とす', () => {
+  const b = extractStep3Template().replace('| (作成後に更新) | | | |', '| Phase 2 | #102 後続 | 1 | 1 |\n| (作成後に更新) | | | |')
+  const { r, body } = runRoot(b, [issue(111, 'c')])
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.ok(!body.includes('(作成後に更新)'))
+  assert.match(body, /\| Phase 2 \| #102 後続 \| 1 \| 1 \|\n\| Phase 1 \| #101 feat: 基盤整備 \| 1 \| 1 \|\n\n/)
+})
+
+test('(q) 表の行以外にある (作成後に更新) は追記位置にせず、残っていれば中止する', () => {
+  const b = '## 概要\n\n(作成後に更新) という語を含む自由記述\n\n| x | (作成後に更新) |\n\n## 運用\n'
+  const { r, body } = runRoot(b, [issue(111, 'c')])
+  assert.notEqual(r.status, 0)
+  assert.equal(body, null)
+})
+
+test('(r) 雛形へのマージ結果へ同じ Phase を再マージしても行・セクションが重複しない', () => {
+  const first = runRoot(extractStep3Template(), [issue(111, 'c')])
+  assert.equal(first.r.status, 0, first.r.stderr)
+  const second = runRoot(first.body, [issue(111, 'c'), issue(112, 'd')])
+  assert.equal(second.r.status, 0, second.r.stderr)
+  assert.equal(second.body.split('\n').filter((l) => /^\| Phase 1 \|/.test(l)).length, 1)
+  assert.equal(second.body.split('\n').filter((l) => /^### Phase 1:/.test(l)).length, 1)
+  assert.match(second.body, /\| Phase 1 \| #101 feat: 基盤整備 \| 2 \| 2 \|/)
 })
