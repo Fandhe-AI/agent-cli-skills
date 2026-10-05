@@ -48,8 +48,8 @@ StructuredOutput を返さず終了した（呼び出し先が `null` / `undefin
 対象は「PR が既に存在する Merge ループ内」に限る。**Plan / Implement / Review / Recover /
 PR Create（PR 作成前。`pr: 0`）の失敗分類には一切触れない**。これらは `failed`
 （halt カウント対象）のままであり、システミックなモデル障害は依然として「3 イシュー連続失敗で
-新規着手停止」に到達する（halt 防御はこの fail-safe の影響を受けない）。`blocked` はこのランの中で自動リトライを
-一切行わない（`monitorsLeft` の消費は起こるが、ただちに終端する）。効果は「次回実行が
+新規着手停止」に到達する（halt 防御はこの fail-safe の影響を受けない）。monitor と Merge ループ fix に限り、null・例外のとき同一プロンプトで 1 回だけ即時再試行する（Issue #531。1 回目の fix worktree が残る場合は孤立 worktree スキャンが拾う）。再試行後も失敗した場合の `blocked` と、それ以外の経路では
+このランの中で自動リトライを一切行わない（`monitorsLeft` の消費は起こるが、ただちに終端する）。効果は「次回実行が
 Recover→再実装ではなく monitoring 再開に入れるようになる」ことだけであり、実行者（人間）の
 トリガーなしに勝手に再試行され続けるものではない。
 
