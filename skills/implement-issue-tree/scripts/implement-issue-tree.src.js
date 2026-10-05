@@ -1536,6 +1536,7 @@ function outOfTreeBlockNote(deps) {
   return `ツリー外の前提イシュー ${deps.map((d) => `#${d}`).join(', ')} が open のため未着手（close 後に再実行すると着手する）`
 }
 
+const WORKTREE_PATH_PROP = { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' }
 // prNumber は push 前 review フローでは未作成（0）のため必須外（PR 作成は Review 通過後）。
 // worktreePath は required（Issue #404）: 省略されると台帳計上が path: '' となりバイト実測
 // ゲートが恒久停止し得るため入口で申告漏れを減らす。「pwd を確定できない場合のみ空文字」の
@@ -1547,7 +1548,7 @@ const IMPL_SCHEMA = {
     prNumber: { type: 'number', description: 'push 前 review フローでは常に 0（PR はまだ作成しない）' },
     branch: { type: 'string' },
     summary: { type: 'string' },
-    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' },
+    worktreePath: WORKTREE_PATH_PROP,
     // out-of-scope 項目専用フィールド。summary の文字列マッチ抽出は誤混入を招いたため（#92）、
     // 専用フィールド化して PR 作成フェーズが推測抽出せずに済むようにした。
     outOfScope: {
@@ -1876,7 +1877,12 @@ function selectPrereqProbeTargets(work, depsMap, done, failedSet, running) {
 // なし（fail-closed）。'merged' はホスト既知 PR 番号（knownPr）と entry.pr の一致必須（Issue
 // #442 codex。knownPr 未確定は遷移させない）。MERGED 照合不成立でも CLOSED へフォールスルー
 // する（cursor: 早期 return は前提を永久ブロックする）。
-function classifyPrereqTransition(entry, knownPr) {
+// PR 番号の一致だけでは、knownPr が誤っているとき別 issue の MERGED PR を前提完了として受理して
+// しまう（Issue #533）。そのため prBindingProblem（merge-verify・monitoring 再開と同じ結び付け
+// 照合: 実在・同一リポジトリ・base・headRefName 完全一致・closingIssues）も課す。knownBranch は
+// ホストが決めた期待ブランチ（エージェント返却値ではない）。n は前提 issue 番号。照合不成立は
+// 'merged' にせず CLOSED 判定へ落とす（fail-closed）。
+function classifyPrereqTransition(entry, knownPr, knownBranch, n) {
   if (entry && typeof entry === 'object') {
     if (
       entry.prState === 'MERGED' &&
@@ -1884,7 +1890,8 @@ function classifyPrereqTransition(entry, knownPr) {
       entry.pr > 0 &&
       Number.isInteger(knownPr) &&
       knownPr > 0 &&
-      entry.pr === knownPr
+      entry.pr === knownPr &&
+      prBindingProblem(n, knownBranch, { ...entry, state: entry.prState }) === ''
     ) {
       return 'merged'
     }
@@ -1896,8 +1903,9 @@ function classifyPrereqTransition(entry, knownPr) {
 // プローブ結果を failedSet → done へ適用する（Issue #442 の中核）。ホスト側二重検証: targets 内
 // の番号のみ受理・issue は整数。重複 entry は先勝ち。prHints はホスト既知 PR 番号（'merged'
 // 照合は classifyPrereqTransition 側で必須）。pr は kind === 'merged' のみ transition へ含め、
-// 'closed' は常に pr キーなし（cursor: 未検証 PR 番号での既知値上書き防止）。
-function applyPrereqTransitions(probe, targets, done, failedSet, prHints) {
+// 'closed' は常に pr キーなし（cursor: 未検証 PR 番号での既知値上書き防止）。branchHints は
+// ホスト決定の期待ブランチ（未指定なら 'merged' は成立しない fail-closed。Issue #533）。
+function applyPrereqTransitions(probe, targets, done, failedSet, prHints, branchHints) {
   const results = Array.isArray(probe?.results) ? probe.results : []
   const seen = new Set()
   const transitions = []
@@ -1905,7 +1913,7 @@ function applyPrereqTransitions(probe, targets, done, failedSet, prHints) {
     const issue = entry?.issue
     if (!Number.isInteger(issue) || !targets.includes(issue) || seen.has(issue)) continue
     seen.add(issue)
-    const kind = classifyPrereqTransition(entry, prHints?.[issue])
+    const kind = classifyPrereqTransition(entry, prHints?.[issue], branchHints?.[issue], issue)
     if (kind === null) continue
     failedSet.delete(issue)
     done.add(issue)
@@ -1918,6 +1926,9 @@ function applyPrereqTransitions(probe, targets, done, failedSet, prHints) {
 // targets の前提完了を確認するプローブエージェント向けプロンプト（Issue #442）。読み取り専用の
 // 3 コマンドに限定し、Issue/PR の本文・タイトル・コメントは一切取得させない（非信頼自由文を
 // ホストの遷移判定へ持ち込まない設計。mergeVerifyPrompt と同型の権限境界）。
+const WT_RM_NOTE = '不要な worktree を git worktree remove で手動削除してから再実行すること'
+const DISK_HALT_NOTE = 'ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。'
+const PR_VIEW_FIELDS = 'state,headRefName,baseRefName,isCrossRepository,closingIssuesReferences'
 function prereqProbePrompt(targets, prHints) {
   for (const d of targets) assertInt(d, 'prereqProbePrompt target')
   const lines = targets.map((d) => {
@@ -1926,8 +1937,10 @@ function prereqProbePrompt(targets, prHints) {
       `- #${d}: jq -r '.items["${d}"].pr // 0' ${STATE_FILE} で状態ファイルの PR 番号を読む（値が` +
       ` 0 ならホスト提示値 ${hint} を使う。以下 prNum${d} と呼ぶ）。` +
       `gh issue view ${d} --json state を実行し issueState として記録する。` +
-      `prNum${d} > 0 なら gh pr view <prNum${d}> --json state を実行し prState として記録する（0 の` +
-      ` ままなら prState は "NONE"）。`
+      `prNum${d} > 0 なら gh pr view <prNum${d}> --json ${PR_VIEW_FIELDS} を実行し、state を prState、` +
+      `closingIssuesReferences の number 配列を closingIssues として記録する（他は取得値のまま。` +
+      `prNum${d} が 0 のまま・取得失敗時の headRefName / baseRefName は ""・isCrossRepository は true・` +
+      `closingIssues は [-1]。[] は紐付け無しの正当値）。`
     )
   })
   return [
@@ -1938,13 +1951,13 @@ function prereqProbePrompt(targets, prHints) {
     '権限境界: 本エージェントは読み取り専用である。実行してよいコマンドは次の 3 種のみ:',
     `  jq -r '.items["<N>"].pr // 0' ${STATE_FILE}`,
     '  gh issue view <N> --json state',
-    '  gh pr view <N> --json state',
+    `  gh pr view <N> --json ${PR_VIEW_FIELDS}`,
     'Issue 本文・タイトル・コメント・PR 本文・レビューコメントの取得（--json body / title / comments 等）は行わない。',
     'gh issue close / gh pr merge / gh pr edit / git 操作は一切行わない（本エージェントは実行主体ではない）。',
     '手順（対象ごとに繰り返す）:',
     ...lines,
     '取得失敗・コマンド不能の場合は issueState / prState に "UNKNOWN" を設定する（推測で CLOSED / MERGED を返さない）。',
-    '返却: results 配列。各要素は issue（対象番号）、issueState（OPEN / CLOSED / UNKNOWN）、prState（MERGED / OPEN / CLOSED / NONE / UNKNOWN）、pr（照合に使った PR 番号。無ければ 0）。',
+    '返却: results 配列。各要素は issue（対象番号）、issueState（OPEN / CLOSED / UNKNOWN）、prState（MERGED / OPEN / CLOSED / NONE / UNKNOWN）、pr（照合に使った PR 番号。無ければ 0）、headRefName、baseRefName、isCrossRepository、closingIssues。',
   ].join('\n')
 }
 
@@ -2059,7 +2072,7 @@ const PREREQ_PROBE_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['issue', 'issueState', 'prState'],
+        required: ['issue', 'issueState', 'prState', 'headRefName', 'baseRefName', 'isCrossRepository', 'closingIssues'],
         properties: {
           issue: { type: 'integer' },
           issueState: {
@@ -2071,6 +2084,12 @@ const PREREQ_PROBE_SCHEMA = {
             description: 'gh pr view --json state の値（MERGED / OPEN / CLOSED）。PR 番号が無ければ NONE、取得失敗は UNKNOWN',
           },
           pr: { type: 'integer', description: '照合に使った PR 番号（無ければ 0）' },
+          // PR と issue の結び付け照合用（prBindingProblem。Issue #533）。MERGE_VERIFY_SCHEMA と同じ
+          // 理由で required・失敗値は不成立になる値（"" / true / [-1]）。自由文は持たせない。
+          headRefName: { type: 'string' },
+          baseRefName: { type: 'string' },
+          isCrossRepository: { type: 'boolean' },
+          closingIssues: { type: 'array', items: { type: 'integer' } },
         },
       },
     },
@@ -2084,7 +2103,7 @@ const FIX_SCHEMA = {
   properties: {
     pushed: { type: 'boolean' },
     summary: { type: 'string' },
-    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' },
+    worktreePath: WORKTREE_PATH_PROP,
     routingError: {
       type: 'boolean',
       description:
@@ -2186,7 +2205,7 @@ const BASE_MERGE_SCHEMA = {
   properties: {
     pushed: { type: 'boolean' },
     summary: { type: 'string' },
-    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' },
+    worktreePath: WORKTREE_PATH_PROP,
     routingError: {
       type: 'boolean',
       description: 'worktree が別リポ（submodule 等）に誤配置されていて修正不能な場合 true。true のとき pushed は false。',
@@ -2272,7 +2291,7 @@ const PR_CREATE_SCHEMA = {
     summary: { type: 'string' },
     // pr-create の worktree は push 完了時点で origin に成果が存在するため保持価値がない。
     // 呼び出し元が返却直後に削除して残骸の蓄積を防ぐ（イシュー close 時まで残さない）。
-    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' },
+    worktreePath: WORKTREE_PATH_PROP,
     // push 直後の CI 起動確認（Issue #479）。いずれもエージェントの自己申告値でありマージ判定
     // には使わない（ホストは mergeableAfterPush === 'CONFLICTING' を base 取り込み分岐へ直行する
     // ヒントとしてのみ使い、誤申告の最悪ケースは baseMergeCount を 1 消費するだけで有界）。
@@ -2325,7 +2344,7 @@ const REVIEW_SCHEMA = {
     // Review は読み取り専用（判定のみ）で worktree に成果物を残さないため、
     // 呼び出し元が返却直後に削除する。impl / fix の worktree（未 push の実装コミットを
     // 保持する唯一の場所）とは扱いが異なる点に注意。
-    worktreePath: { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' },
+    worktreePath: WORKTREE_PATH_PROP,
   },
 }
 
@@ -5813,7 +5832,7 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
         reason:
           `残置 worktree が件数上限 ${maxResidualWorktrees} 件を超過（実測 ${residual.count} 件）。` +
           `ディスク枯渇防止のため新規イシューの着手を停止した。git worktree list で確認し、` +
-          `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+          WT_RM_NOTE,
         paths: residual.paths,
       })
       log(`残置 worktree 一覧（${residual.paths.length} 件）:`)
@@ -6020,7 +6039,7 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
             !latchNewStartSuppressed({
               reason:
                 `${detail}。ディスク枯渇防止のため新規イシューの着手を停止した。git worktree list で確認し、` +
-                `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+                WT_RM_NOTE,
               paths: residual.paths,
             })
           ) {
@@ -6042,6 +6061,10 @@ const failures = []
 // 記録（Issue #493）。PR 作成成功直後と monitoring 再開時に set し、値は host 側の数値のみで
 // 未信頼入力を含まない。classifyUncaughtFailureStatus が参照する。
 const knownPrByIssue = new Map()
+// 前提完了プローブ（probePrereqCompletion）の PR 結び付け照合に使う issue→検証済みブランチの記録
+// （Issue #533）。knownPrByIssue と同じ 2 箇所（monitoring 再開・PR 作成直後）で、PR 照合を通った
+// impl.branch のみ set する。無いと、ラン中に作成された PR の外部マージ検知が fail-closed に倒れる。
+const knownBranchByIssue = new Map()
 let consecutiveFailures = 0
 // consecutiveFailures が最後に 0 へリセットされた「世代」。外部完了回復時の failure 減算は同一
 // 世代のみに限る（Issue #442 codex/Bugbot: 世代を見ない一律デクリメントは別世代の failure で
@@ -6231,6 +6254,7 @@ async function runImplement(item) {
     // 想定外例外時の分類（classifyUncaughtFailureStatus）が参照する既知 PR を記録する
     // （Issue #493）。monitoring 再開は PR 実在が前提のため、この時点で必ず記録できる。
     if (Number.isInteger(impl.prNumber) && impl.prNumber > 0) knownPrByIssue.set(item.number, impl.prNumber)
+    knownBranchByIssue.set(item.number, impl.branch)
     log(`#${item.number}: 状態ファイルから monitoring 再開（PR #${impl.prNumber}、fixCount: ${savedFixCount}）`)
     // monitor ループ突入前に status を monitoring へ更新（blocked のまま残るとレポート・
     // halt ガード・次回再開判定が実態と食い違う）。
@@ -6812,6 +6836,7 @@ async function runImplement(item) {
     // 想定外例外時の分類（classifyUncaughtFailureStatus）が参照する既知 PR を記録する
     // （Issue #493）。PR 作成成功直後のため、以降の想定外例外は重複 PR を避けて blocked へ倒す。
     knownPrByIssue.set(item.number, impl.prNumber)
+    knownBranchByIssue.set(item.number, impl.branch)
     log(`#${item.number}: push + PR 作成完了 — PR #${impl.prNumber}`)
     // Issue #479: push 直後の CI 起動確認（エージェント自己申告）。マージ判定には使わず、
     // 状態ファイルへの記録（人間が _/issue-trees/<n>.json で確認できる）と、CONFLICTING の
@@ -8755,6 +8780,14 @@ async function probePrereqCompletion(targets) {
     const hint = Number.isInteger(fromResults) && fromResults > 0 ? fromResults : fromSaved
     if (Number.isInteger(hint) && hint > 0) prHints[d] = hint
   }
+  // 期待ブランチ（ホスト決定）。knownBranchByIssue（ラン中に PR 照合済み）→ savedItems の順。
+  // エージェントへは渡さず、classifyPrereqTransition の prBindingProblem 照合にのみ使う（Issue #533）。
+  const branchHints = {}
+  for (const d of targets) {
+    if (unverifiedIssues.has(d)) continue
+    const b = knownBranchByIssue.get(d) ?? savedItems[String(d)]?.branch
+    if (isValidBranchName(b) && branchMatchesIssue(b, d)) branchHints[d] = b
+  }
   // プローブは failedSet 入りした前提の外部完了を補助的に再確認する処理であり、確認不能は
   // 「遷移なし」として安全に継続できる。agent() の throw（API 一時障害・schema 応答不良等）を
   // ここで吸収しないと、その時点で動作中のイシュー・最終 cascade・状態レポートまで含めて
@@ -8776,7 +8809,7 @@ async function probePrereqCompletion(targets) {
     )
     return 0
   }
-  const transitions = applyPrereqTransitions(probe, targets, done, failedSet, prHints)
+  const transitions = applyPrereqTransitions(probe, targets, done, failedSet, prHints, branchHints)
   let appliedCount = 0
   for (const t of transitions) {
     // kind で文言を分ける — 依存ブロックは PR 未作成が主経路のため 'merged' 前提のハードコード
@@ -8900,7 +8933,7 @@ while (true) {
               `残置 worktree が予約込みで上限 ${maxResidualWorktrees} 件を超過する見込みのため monitoring 再開を defer した` +
               `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋` +
               `実行中タスクの残余予約 ${reservedTotal} 件＋再開候補の最大増分 ${EPHEMERAL_RESERVE_PER_MONITORING_RESUME} 件）。` +
-              `不要な worktree を git worktree remove で手動削除してから再実行すること`
+              WT_RM_NOTE
             monitoringResumeGateDeferred.set(n, deferReason)
             log(`⚠️ #${n}: ${deferReason}`)
             continue
@@ -8983,7 +9016,7 @@ while (true) {
               `見込みのため monitoring 再開を defer した（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋` +
               `基準以降の積み増し・実行中タスク予約・再開候補分の見積り合計 ` +
               `${Math.round((projectedBytes - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
-              `不要な worktree を git worktree remove で手動削除してから再実行すること`
+              WT_RM_NOTE
             monitoringResumeGateDeferred.set(n, deferReason)
             log(`⚠️ #${n}: ${deferReason}`)
             continue
@@ -9039,8 +9072,8 @@ while (true) {
             reason:
               `残置 worktree がラン中の積み増しで上限 ${maxResidualWorktrees} 件を超過` +
               `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件）。` +
-              `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-              `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+              DISK_HALT_NOTE +
+              WT_RM_NOTE,
             paths: residualPathsAtStart,
           })
           continue
@@ -9073,8 +9106,8 @@ while (true) {
                 `残置 worktree が予約込みで上限 ${maxResidualWorktrees} 件を超過する見込み` +
                 `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋` +
                 `着手候補の最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件）。` +
-                `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-                `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+                DISK_HALT_NOTE +
+                WT_RM_NOTE,
               paths: residualPathsAtStart,
             })
             continue
@@ -9117,8 +9150,8 @@ while (true) {
               `残置 worktree がラン中の積み増しで容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過` +
               `（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋基準以降の積み増し見積り ` +
               `${Math.round((projectedBytesA - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
-              `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-              `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+              DISK_HALT_NOTE +
+              WT_RM_NOTE,
             paths: residualPathsAtStart,
           })
           continue
@@ -9155,8 +9188,8 @@ while (true) {
                 `残置 worktree が予約込みで容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過する見込み` +
                 `（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋基準以降の積み増し・` +
                 `着手候補分の見積り合計 ${Math.round((projectedBytes - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
-                `ディスク枯渇防止のため以降の新規イシューの着手を停止した（実行中のイシューと monitoring 再開は継続）。` +
-                `不要な worktree を git worktree remove で手動削除してから再実行すること`,
+                DISK_HALT_NOTE +
+                WT_RM_NOTE,
               paths: residualPathsAtStart,
             })
             continue
