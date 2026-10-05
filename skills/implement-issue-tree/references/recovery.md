@@ -124,7 +124,8 @@ Merge ループへ渡す前に同じ照合を通し、不一致なら `blocked` 
 照合が不一致の場合も `blocked` で終端する。merge-verify による
 merged（`already-merged` を含む）の受理にも同じ照合を課し、monitor・merge-exec の手順 1 にも同じ
 照合を指示する。再開判定（`isActiveMonitoring`）は、保存済みブランチがその issue の命名
-（`<type>/<N>-`）であることも要求する。
+（`<type>/<N>-`）であることも要求する。保存済みブランチが別 issue の命名のエントリは、
+`runImplement` の冒頭で branch・worktree を含めて捨て、Recover・再開の対象にしない。
 
 `blockedReason` は状態ファイルへ永続化されるフィールドではない。
 `isActiveMonitoring()` は `status`（`'monitoring'` または `'blocked'`）と `pr > 0` と `branch`

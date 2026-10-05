@@ -1965,6 +1965,13 @@ const MERGE_VERIFY_SCHEMA = {
   },
 }
 
+// 保存済みエントリのブランチが別 issue の命名なら、branch・worktree を含めて丸ごと捨てた空の
+// エントリを返す（Bugbot 指摘）。runImplement の冒頭で使い、他 issue のブランチ・worktree を
+// Recover（WIP コミット・worktree 削除）や再開の対象にしない。branch が空のエントリはそのまま返す。
+function dropForeignBranchEntry(n, saved) {
+  return saved?.branch && !branchMatchesIssue(String(saved.branch), n) ? {} : saved ?? {}
+}
+
 // PR #pr を issue #n に結び付けてよいかを MERGE_VERIFY_SCHEMA の取得値で照合する純粋関数。問題が
 // あれば理由文字列、なければ空文字を返す。条件: PR が実在する（state が MERGED / OPEN / CLOSED）・
 // 同一リポジトリのブランチからの PR である（isCrossRepository が false。fork の同名ブランチを
@@ -2692,6 +2699,21 @@ function verifyLoadedItems(items, check) {
   return { adopted, dropped, verified: complete && dropped.length === 0 }
 }
 
+// state:load-verify の isValid（Bugbot 指摘）。fileExists だけの応答（例 { fileExists: true }）を
+// 受理すると sonnet へのフォールバックが走らず全項目不採用に落ちるため、state:load と同じく必須
+// フィールドの型をすべて検証する。hashes の値も 64 桁小文字 16 進のみ受理する（不正な応答は
+// フォールバックへ回し、それでも不成立なら呼び出し側が状態なしとして扱う）。
+function isValidStateVerifyResult(r) {
+  const h = r?.hashes
+  return (
+    typeof r?.fileExists === 'boolean' &&
+    h !== null && typeof h === 'object' && !Array.isArray(h) &&
+    Object.values(h).every((x) => typeof x === 'string' && /^[0-9a-f]{64}$/.test(x)) &&
+    Number.isInteger(r.highWaterBytes) && r.highWaterBytes >= 0 &&
+    Number.isInteger(r.highWaterVersion) && r.highWaterVersion >= 0
+  )
+}
+
 const STATE_VERIFY_SCHEMA = {
   type: 'object',
   required: ['fileExists', 'hashes', 'highWaterBytes', 'highWaterVersion'],
@@ -2774,7 +2796,7 @@ async function loadState() {
       `f=${STATE_FILE}; h() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }; if [ -f "$f" ]; then jq -r '.items // {} | keys[] | select(test("^[1-9][0-9]*$"))' "$f" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; jq -c '[(.perWorktreeByteReserveHighWater // 0), (.perWorktreeByteReserveHighWaterVersion // 0)]' "$f"; else echo NOFILE; fi`,
       `返却: NOFILE なら fileExists: false・hashes: {}・他は 0。それ以外は fileExists: true、hashes は「キー ハッシュ」行の対応表、最終行の配列を highWaterBytes・highWaterVersion。`,
     ].join('\n'),
-    { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: (r) => typeof r?.fileExists === 'boolean' },
+    { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult },
   )
   const { adopted, dropped, verified } = verifyLoadedItems(result?.items, check)
   if (dropped.length > 0 || !verified) {
@@ -6085,6 +6107,12 @@ async function runImplement(item) {
     return false
   }
 
+  // 別 issue のブランチを持つエントリは状態なしとして扱う（dropForeignBranchEntry）。再開判定・Recover より前に置く。
+  if (dropForeignBranchEntry(item.number, saved) !== saved) {
+    log(`⚠️ #${item.number}: 状態ファイルの branch が本 issue の命名ではないため、branch・worktree を含めて状態なしとして扱う（Recover・再開の対象にしない）`)
+    saved = {}
+    savedItems[String(item.number)] = saved
+  }
   // monitoring/blocked（pr 保存済み）からの再開は impl をスキップして monitor ループから開始
   // する。branch 不正なら通常 impl からやり直す。判定は isActiveMonitoring に一元化する。
   let isResumeFromMonitoring = isActiveMonitoring(item.number)

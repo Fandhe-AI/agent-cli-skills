@@ -1968,6 +1968,13 @@ const MERGE_VERIFY_SCHEMA = {
 
 
 
+function dropForeignBranchEntry(n, saved) {
+  return saved?.branch && !branchMatchesIssue(String(saved.branch), n) ? {} : saved ?? {}
+}
+
+
+
+
 
 
 
@@ -2692,6 +2699,21 @@ function verifyLoadedItems(items, check) {
   return { adopted, dropped, verified: complete && dropped.length === 0 }
 }
 
+
+
+
+
+function isValidStateVerifyResult(r) {
+  const h = r?.hashes
+  return (
+    typeof r?.fileExists === 'boolean' &&
+    h !== null && typeof h === 'object' && !Array.isArray(h) &&
+    Object.values(h).every((x) => typeof x === 'string' && /^[0-9a-f]{64}$/.test(x)) &&
+    Number.isInteger(r.highWaterBytes) && r.highWaterBytes >= 0 &&
+    Number.isInteger(r.highWaterVersion) && r.highWaterVersion >= 0
+  )
+}
+
 const STATE_VERIFY_SCHEMA = {
   type: 'object',
   required: ['fileExists', 'hashes', 'highWaterBytes', 'highWaterVersion'],
@@ -2774,7 +2796,7 @@ async function loadState() {
       `f=${STATE_FILE}; h() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }; if [ -f "$f" ]; then jq -r '.items // {} | keys[] | select(test("^[1-9][0-9]*$"))' "$f" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; jq -c '[(.perWorktreeByteReserveHighWater // 0), (.perWorktreeByteReserveHighWaterVersion // 0)]' "$f"; else echo NOFILE; fi`,
       `返却: NOFILE なら fileExists: false・hashes: {}・他は 0。それ以外は fileExists: true、hashes は「キー ハッシュ」行の対応表、最終行の配列を highWaterBytes・highWaterVersion。`,
     ].join('\n'),
-    { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: (r) => typeof r?.fileExists === 'boolean' },
+    { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult },
   )
   const { adopted, dropped, verified } = verifyLoadedItems(result?.items, check)
   if (dropped.length > 0 || !verified) {
@@ -6085,6 +6107,12 @@ async function runImplement(item) {
     return false
   }
 
+
+  if (dropForeignBranchEntry(item.number, saved) !== saved) {
+    log(`⚠️ #${item.number}: 状態ファイルの branch が本 issue の命名ではないため、branch・worktree を含めて状態なしとして扱う（Recover・再開の対象にしない）`)
+    saved = {}
+    savedItems[String(item.number)] = saved
+  }
 
 
   let isResumeFromMonitoring = isActiveMonitoring(item.number)

@@ -47,6 +47,8 @@ const SLICE_EXPORTS = [
   'monitorPrompt',
   'mergeExecutePrompt',
   'checkPrBinding',
+  'isValidStateVerifyResult',
+  'dropForeignBranchEntry',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 const {
@@ -59,6 +61,8 @@ const {
   monitorPrompt,
   mergeExecutePrompt,
   checkPrBinding,
+  isValidStateVerifyResult,
+  dropForeignBranchEntry,
 } = await import(pathToFileURL(slicePath).href)
 
 const nodeSha = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
@@ -374,4 +378,75 @@ test('駆動部: 未検証の PR 記録を「作成済み」と報告しない�
   const intBody = driverPart.slice(intStart, driverPart.indexOf('\n}\n', intStart))
   assert.doesNotMatch(intBody, /作成済み/)
   assert.match(intBody, /PR_RECORD_UNVERIFIED\(pr\)/)
+})
+
+// ---------------------------------------------------------------------------
+// Bugbot 指摘への回帰テスト
+// ---------------------------------------------------------------------------
+
+test('isValidStateVerifyResult: 必須フィールド・型・ハッシュ形式をすべて検証する', () => {
+  const ok = { fileExists: true, hashes: SAMPLE_JQ_HASHES, highWaterBytes: 0, highWaterVersion: 2 }
+  assert.equal(isValidStateVerifyResult(ok), true)
+  assert.equal(isValidStateVerifyResult({ fileExists: false, hashes: {}, highWaterBytes: 0, highWaterVersion: 0 }), true)
+  for (const bad of [
+    null,
+    { fileExists: true },
+    { fileExists: true, hashes: SAMPLE_JQ_HASHES },
+    { ...ok, hashes: null },
+    { ...ok, hashes: [] },
+    { ...ok, hashes: { 42: 'abc' } },
+    { ...ok, hashes: { 42: SAMPLE_JQ_HASHES[42].toUpperCase() } },
+    { ...ok, highWaterBytes: -1 },
+    { ...ok, highWaterVersion: 1.5 },
+    { ...ok, fileExists: 'true' },
+  ]) {
+    assert.equal(isValidStateVerifyResult(bad), false, JSON.stringify(bad))
+  }
+})
+
+test('loadState: 検証エージェントの haiku が { fileExists: true } だけを返したら sonnet へフォールバックして照合する', async () => {
+  const { calls } = installAgentStub((opts) => {
+    if (opts.label === 'state:load') return loadResult(sampleItems)
+    if (opts.model === 'haiku') return { fileExists: true }
+    return { fileExists: true, hashes: SAMPLE_JQ_HASHES, highWaterBytes: 0, highWaterVersion: 0 }
+  })
+  const r = await loadState()
+  assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load-verify', 'state:load-verify:fallback-sonnet'])
+  assert.deepEqual(Object.keys(r.items).sort(), ['42', '43', '44', '45'])
+  assert.equal(r.verified, true)
+})
+
+test('loadState: 検証エージェントが haiku / sonnet とも不正な応答なら状態なし（throw しない）', async () => {
+  const { calls } = installAgentStub((opts) => (opts.label === 'state:load' ? loadResult(sampleItems) : { fileExists: true }))
+  const r = await loadState()
+  assert.equal(calls.length, 3)
+  assert.deepEqual(r.items, {})
+  assert.equal(r.verified, false)
+})
+
+test('dropForeignBranchEntry: 別 issue のブランチを持つエントリは branch・worktree ごと捨てる', () => {
+  const foreign = { status: 'monitoring', pr: 1366, branch: 'feat/359-foo', worktree: '/repo/.git/worktrees/impl-359' }
+  assert.deepEqual(dropForeignBranchEntry(365, foreign), {})
+  assert.deepEqual(dropForeignBranchEntry(365, { status: 'blocked', branch: 'misc-branch', worktree: '/w' }), {})
+  const own = { status: 'monitoring', pr: 1400, branch: 'feat/365-bar', worktree: '/w' }
+  assert.equal(dropForeignBranchEntry(365, own), own)
+  const noBranch = { status: 'implementing', worktree: '/w' }
+  assert.equal(dropForeignBranchEntry(365, noBranch), noBranch)
+  assert.deepEqual(dropForeignBranchEntry(365, undefined), {})
+})
+
+test('駆動部: runImplement は冒頭で別 issue のブランチを持つエントリを捨て、再開判定・Recover より前に置く', () => {
+  const start = driverPart.indexOf('async function runImplement(item)')
+  const body = driverPart.slice(start, driverPart.indexOf('\nasync function ', start + 10))
+  const drop = body.indexOf('if (dropForeignBranchEntry(item.number, saved) !== saved) {')
+  const resumeDecl = body.indexOf('let isResumeFromMonitoring = isActiveMonitoring(item.number)')
+  const remnant = body.indexOf('const hasRemnant')
+  assert.ok(drop > 0 && drop < resumeDecl && resumeDecl < remnant, 'ブランチ照合の位置が不正')
+  const branch = body.slice(drop, body.indexOf('\n  }\n', drop))
+  assert.match(branch, /saved = \{\}/)
+  assert.match(branch, /savedItems\[String\(item\.number\)\] = saved/)
+})
+
+test('駆動部: state:load-verify の isValid は isValidStateVerifyResult を使う', () => {
+  assert.match(source, /label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult/)
 })
