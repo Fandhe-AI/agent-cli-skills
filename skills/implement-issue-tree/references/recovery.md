@@ -127,7 +127,11 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
   PR を拾えないため、重複防止をそれだけに委ねない。状態ファイル自体は書き換えない
 - 検証側にハッシュが無いことは「実ファイルに無い」証明にならない（取りこぼしと捏造を区別
   できない）ため、読込側だけにあるキーも状態なしにはしない
+- 高水位（容量予約）が読込側と検証側で食い違う場合も停止する（0 へ置き換えて続行すると、過去の
+  実測に基づく容量予約を失い並列着手時に容量を過小評価するため）
 - ラン開始時・末尾の孤立 worktree の記録・削除は、全項目を照合できた場合だけ行う
+- 依存ブロック・未着手で `blocked` にする項目でも、`state-unverified` や branch が別 issue の
+  命名の項目は保存済み `pr` を 0 でクリアしない（次回の照合で止めるため。`prClearPatch`）
 
 monitoring 再開の前に、`pr-bind:#N` が保存済み PR の `state` / `headRefName` /
 `isCrossRepository` / `closingIssuesReferences` を取得し、ホストが照合する（`prBindingProblem`）。

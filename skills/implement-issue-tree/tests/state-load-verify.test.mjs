@@ -242,10 +242,10 @@ test('loadState: 捏造 items（PR = issue + 1006）は採用せず state-unveri
   assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load-verify'])
   // 検証エージェントには読込結果を渡さない（鸚鵡返し防止）。
   assert.ok(!calls[1].prompt.includes('1049'), '検証プロンプトに読込結果が混入している')
-  assert.ok(logs.some((l) => /確認できない 4 件/.test(l) && /state-unverified/.test(l)))
+  assert.ok(logs.some((l) => /state-unverified 4 件/.test(l)))
 })
 
-test('loadState: 実ファイルと一致する items は採用し、高水位は両エージェント一致時のみ採用する', async () => {
+test('loadState: 実ファイルと一致する items は採用し、高水位は両エージェントが一致しなければ停止する', async () => {
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
@@ -260,15 +260,19 @@ test('loadState: 実ファイルと一致する items は採用し、高水位�
     opts.label === 'state:load'
       ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
       : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: Object.keys(SAMPLE_JQ_HASHES).length, highWaterBytes: 1, highWaterVersion: 2 })
-  const mismatch = await loadState()
-  assert.equal(mismatch.highWaterBytes, 0)
-  assert.equal(mismatch.highWaterVersion, 0)
+  // 高水位が両エージェントで食い違う場合は 0 へ置き換えて続行せず停止する（容量予約を失わない。Codex P1）
+  await assert.rejects(() => loadState(), /成立しなかったため停止した/)
+  installAgentStub((opts) =>
+    opts.label === 'state:load'
+      ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
+      : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: 4, highWaterBytes: 4096, highWaterVersion: 1 })
+  await assert.rejects(() => loadState(), /成立しなかったため停止した/)
 })
 
 test('loadState: 既存ファイルの照合が成立しない（検証が haiku / sonnet とも未返却）ならランを停止する', async () => {
   installAgentStub((opts) => (opts.label === 'state:load' ? loadResult(sampleItems) : null))
   await assert.rejects(() => loadState(), (err) => {
-    assert.match(err.message, /内容照合（state:load-verify）が成立しなかったため停止した（新規着手 0 件）/)
+    assert.match(err.message, /内容照合が成立しなかったため停止した（新規着手 0 件）/)
     assert.match(err.message, /退避/)
     return true
   })
@@ -359,21 +363,21 @@ test('駆動部: isActiveMonitoring と runOne の resumable は branchMatchesIs
 // 区間の末尾まで到達した（再開・通常実装へ進む）場合は 'proceed' を返す。
 async function runResumeGuard({ number = 365, saved, active = true, bind = '' }) {
   const savedItems = { [String(number)]: saved }
-  const stateUnverifiedIssues = new Set()
+  const unverifiedIssues = new Set()
   const start = driverPart.indexOf('async function runImplement(item)')
   const from = driverPart.indexOf('  const stopUnverified = (why) => {', start)
   const resumeHead = '  if (isResumeFromMonitoring && !bound) {\n    const why = await checkPrBinding('
   const bindStart = driverPart.indexOf(resumeHead, from)
   const to = driverPart.indexOf('\n  }\n', bindStart) + 4
   assert.ok(start > 0 && from > start && bindStart > from, '再開ガードの区間が見つからない')
-  const ctx = { failures: [], stateWrites: [], bindCalls: [], savedItems, stateUnverifiedIssues }
+  const ctx = { failures: [], stateWrites: [], bindCalls: [], savedItems, unverifiedIssues }
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
   const fn = new AsyncFunction('item', 'saved', 'ctx', [
     'const recordFailure = (f) => ctx.failures.push(f)',
     'const updateState = async (...a) => { ctx.stateWrites.push(a); return true }',
     "const branchMatchesIssue = (b, n) => new RegExp(`^[a-z]+/${n}-`).test(b)",
     'const sanitize = (x) => x',
-    'const { savedItems, stateUnverifiedIssues } = ctx',
+    'const { savedItems, unverifiedIssues } = ctx',
     // active: true は常に再開対象、'auto' は保存値（pr > 0）から判定する。
     `const isActiveMonitoring = (n) => ${active === 'auto' ? 'savedItems[String(n)].pr > 0' : active}`,
     `const checkPrBinding = async (...a) => { ctx.bindCalls.push(a); return ${JSON.stringify(bind)} }`,
@@ -415,7 +419,7 @@ test('runImplement: 別 issue の命名の branch を持つエントリは再開
     assert.equal(r.failures[0].status, 'blocked')
     assert.match(r.failures[0].reason, /^state-unverified: 状態ファイルの branch が本イシューの命名ではない/)
     // 止めた issue の番号は前提完了プローブのヒントから外す集合へ入る
-    assert.ok(r.stateUnverifiedIssues.has(365))
+    assert.ok(r.unverifiedIssues.has(365))
   }
   // 本 issue の branch・branch なしは素通しする
   assert.equal((await runResumeGuard({ saved: { status: 'implementing', branch: 'feat/365-bar' }, active: false })).ret, 'proceed')
@@ -460,7 +464,7 @@ test('runImplement: unverifiedPr の照合が不一致・取得失敗なら新�
     assert.equal(r.savedItems['365'].pr, 0, '未照合の番号を pr へ昇格させてはならない')
     assert.equal(r.failures[0].pr, undefined, '未照合の番号を結果一覧の pr へ流してはならない')
     assert.match(r.failures[0].reason, /^state-unverified: 未照合の PR #1380 を本イシューに結び付けられない/)
-    assert.ok(r.stateUnverifiedIssues.has(365))
+    assert.ok(r.unverifiedIssues.has(365))
   }
 })
 
@@ -470,18 +474,18 @@ test('駆動部: 再開時の状態同期と pr-create 後の monitoring 遷移�
 })
 
 // probePrereqCompletion の prHints 構築区間を切り出して実行する（Bugbot High）。
-function buildPrHints({ targets, results, savedItems, stateUnverifiedIssues }) {
+function buildPrHints({ targets, results, savedItems, unverifiedIssues }) {
   const fnStart = driverPart.indexOf('async function probePrereqCompletion(targets) {')
   const from = driverPart.indexOf('  const prHints = {}', fnStart)
   const to = driverPart.indexOf('  let probe', from)
   assert.ok(fnStart > 0 && from > fnStart && to > from)
-  const fn = new Function('targets', 'results', 'savedItems', 'stateUnverifiedIssues', `${driverPart.slice(from, to)}\nreturn prHints`)
-  return fn(targets, results, savedItems, stateUnverifiedIssues)
+  const fn = new Function('targets', 'results', 'savedItems', 'unverifiedIssues', `${driverPart.slice(from, to)}\nreturn prHints`)
+  return fn(targets, results, savedItems, unverifiedIssues)
 }
 
 test('probePrereqCompletion: state-unverified の issue の保存済み pr は prHints に渡さず、MERGED でも done にしない（Bugbot High）', () => {
   const savedItems = { 365: { status: 'blocked', pr: 1366, branch: 'feat/365-bar' }, 366: { status: 'failed', pr: 1400 } }
-  const unverified = buildPrHints({ targets: [365, 366], results: [], savedItems, stateUnverifiedIssues: new Set([365]) })
+  const unverified = buildPrHints({ targets: [365, 366], results: [], savedItems, unverifiedIssues: new Set([365]) })
   assert.deepEqual(unverified, { 366: 1400 })
   const done = new Set()
   const failedSet = new Set([365, 366])
@@ -497,11 +501,11 @@ test('probePrereqCompletion: state-unverified の issue の保存済み pr は p
   assert.deepEqual(t2, [{ issue: 365, kind: 'closed' }])
 })
 
-test('駆動部: stopUnverified と dispatch 前の state-unverified は同じ集合（stateUnverifiedIssues）を使う', () => {
-  assert.match(driverPart, /const stateUnverifiedIssues = new Set\(stateUnverified\)/)
-  assert.match(driverPart, /if \(stateUnverifiedIssues\.has\(item\.number\)\) \{/)
-  assert.match(driverPart, /const stopUnverified = \(why\) => \{\s*stateUnverifiedIssues\.add\(item\.number\)/)
-  assert.match(driverPart, /if \(stateUnverifiedIssues\.has\(d\)\) continue/)
+test('駆動部: stopUnverified と dispatch 前の state-unverified は同じ集合（unverifiedIssues）を使う', () => {
+  assert.match(driverPart, /const unverifiedIssues = new Set\(stateUnverified\)/)
+  assert.match(driverPart, /if \(unverifiedIssues\.has\(item\.number\)\) \{/)
+  assert.match(driverPart, /const stopUnverified = \(why\) => \{\s*unverifiedIssues\.add\(item\.number\)/)
+  assert.match(driverPart, /if \(unverifiedIssues\.has\(d\)\) continue/)
 })
 
 test('駆動部: merged 受理（already-merged を含む）は PR 照合を要求し、opt-in 前の MERGED 確認も照合する', () => {
@@ -539,7 +543,7 @@ test('駆動部: 新規 PR は pr-create 直後・Merge ループ投入前に PR
 
 test('駆動部: state-unverified の issue は dispatch 前に blocked（halt 非カウント）で止め、後続も止める', () => {
   assert.match(driverPart, /unverified: stateUnverified,\s*\} = await loadState\(\)/)
-  const idx = driverPart.indexOf('if (stateUnverifiedIssues.has(item.number)) {')
+  const idx = driverPart.indexOf('if (unverifiedIssues.has(item.number)) {')
   const preloop = driverPart.indexOf('const failedSet = new Set()')
   const work = driverPart.indexOf('const work = queue.filter(')
   assert.ok(idx > preloop && idx < work, 'state-unverified の判定位置が不正')
@@ -645,10 +649,10 @@ async function runNewPrBindFailure(writeResults) {
   const from = driverPart.indexOf('    const newPrBindIssue = await checkPrBinding(item, impl.prNumber, impl.branch)')
   const to = driverPart.indexOf('\n    }\n', from) + 6
   assert.ok(from > 0 && to > from)
-  const ctx = { writes: [], failures: [], stateUnverifiedIssues: new Set() }
+  const ctx = { writes: [], failures: [], unverifiedIssues: new Set() }
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
   const fn = new AsyncFunction('item', 'impl', 'ctx', [
-    'const { stateUnverifiedIssues } = ctx',
+    'const { unverifiedIssues } = ctx',
     "const checkPrBinding = async () => 'PR not found'",
     'const sanitize = (x) => x',
     'const log = () => {}',
@@ -677,7 +681,7 @@ test('pr-create 後の照合失敗: 保存に 1 回失敗したら 1 回だけ�
   assert.equal(r.writes.length, 2)
   assert.deepEqual(r.writes[0], r.writes[1])
   assert.doesNotMatch(r.failures[0].reason, /Failed to save/)
-  assert.equal(r.stateUnverifiedIssues.size, 0)
+  assert.equal(r.unverifiedIssues.size, 0)
 })
 
 test('pr-create 後の照合失敗: 再試行も失敗したら番号と手動確認の要否を英語で結果に残し state-unverified で終える', async () => {
@@ -689,7 +693,7 @@ test('pr-create 後の照合失敗: 再試行も失敗したら番号と手動�
   assert.equal(r.failures[0].pr, undefined, '未照合の番号を結果の pr（前提完了プローブのヒント源）へ流さない')
   assert.match(r.failures[0].reason, /^state-unverified: /)
   assert.match(r.failures[0].reason, /Failed to save to the state file\. PR #1380 may exist; verify it manually before re-running\./)
-  assert.ok(r.stateUnverifiedIssues.has(365))
+  assert.ok(r.unverifiedIssues.has(365))
 })
 
 // ---------------------------------------------------------------------------
@@ -752,7 +756,7 @@ test('検証プロンプトは KEYS 行（数値キー一覧の jq -jc ダイジ
   // 高水位の行・項目ごとのハッシュ行（while ループ）より前に出す（Bugbot 指摘）。
   const branchStart = p.indexOf('if [ -f "$f" ]; then ')
   const keysIdx = p.indexOf('echo "KEYS ')
-  const hwIdx = p.indexOf("jq -c '[(.perWorktreeByteReserveHighWater")
+  const hwIdx = p.indexOf("jq -c '[.perWorktreeByteReserveHighWater")
   const loopIdx = p.indexOf('while IFS= read -r k')
   assert.ok(branchStart > 0 && keysIdx > branchStart && keysIdx < hwIdx && hwIdx < loopIdx, 'KEYS 行が出力の先頭にない')
   assert.doesNotMatch(p.slice(branchStart, keysIdx), /echo |printf |jq -c|jq -r/, 'KEYS 行より前に別の出力がある')

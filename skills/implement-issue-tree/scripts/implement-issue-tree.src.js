@@ -1670,7 +1670,7 @@ const MERGE_EXEC_SCHEMA = {
     reason: {
       type: 'string',
       enum: ['merged', 'already-merged', 'head-moved', 'checks-not-green', 'unresolved-threads', 'not-mergeable', 'wrong-target', 'merge-failed', 'pr-closed', 'external-review-missing', 'server-enforcement-missing', 'classic-unsupported', 'issuer-unbound'],
-      description: 'merged: 本エージェントがマージした / already-merged: 既に MERGED だった / head-moved: HEAD sha を取得・検証できなかった（回復専用経路で PR が MERGED でなかった場合を含む） / checks-not-green: チェック未完了・失敗 / unresolved-threads: 未解決スレッドが残存 / not-mergeable: コンフリクト等でマージ不可（fix ループで解消し得るもの） / wrong-target: base ブランチ不一致・draft・PR が本イシューのものでない（fix ループでは解消しないため終端） / merge-failed: merge コマンド自体が失敗 / pr-closed: 未マージクローズ / external-review-missing: 確定済みの外部チェック App（args.externalChecks の明示値）のいずれかについて HEAD sha に対する合格の根拠を確認できない（cursor はレビュー 0 件または CHANGES_REQUESTED が 1 件以上、cursor 以外は check-run 0 件かつフォールバックのレビューが合格条件（APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない場合。APPROVED が否定的レビューと併存するケースを含む） / server-enforcement-missing: ベースブランチのサーバー側強制（required status checks の bypass 不能性 = 全適用 ruleset の bypass_actors が空かつ Repository ソース。加えてレビュースレッド解消の必須化（required_review_thread_resolution）、手順 3 で合格判定の対象になる全チェック context の required 化（client-only チェックの不在）、外部チェック確定時は宣言 context + App ID の組（context + integration_id）で束縛された required status check の存在）を実測確認できない / classic-unsupported: ruleset の required status checks を確認できない（classic branch protection のみで保護されている場合・保護なしの場合を含む）。classic の bypass 不能性（enforce_admins・bypass allowance・実行主体ロール・カスタムロールの bypass 権限）は検証に必要な protection 読取自体が admin 権限を要求し、write 権限の実行トークンから決定的に証明できないため、classic 経路はクライアント側自動マージ非対応として fail-closed で辞退する / issuer-unbound: ベースブランチの required status checks の発行元束縛を検証できない（integration_id が数値でない required check が存在する = 任意の発行元（同名 commit status を含む）で条件を満たせるため偽装可能、または宣言 integration_id と一致する App 発行の check-run が HEAD sha 上に存在しない required context がある。commit status は発行元 App 束縛を持たないため合格根拠にしない）',
+      description: 'merged: 本エージェントがマージした / already-merged: 既に MERGED だった / head-moved: HEAD sha を取得・検証できなかった（回復専用経路で PR が MERGED でなかった場合を含む） / checks-not-green: チェック未完了・失敗 / unresolved-threads: 未解決スレッドが残存 / not-mergeable: コンフリクト等でマージ不可（fix ループで解消し得るもの） / wrong-target: base ブランチ不一致または draft（fix ループでは解消しないため終端） / merge-failed: merge コマンド自体が失敗 / pr-closed: 未マージクローズ / external-review-missing: 確定済みの外部チェック App（args.externalChecks の明示値）のいずれかについて HEAD sha に対する合格の根拠を確認できない（cursor はレビュー 0 件または CHANGES_REQUESTED が 1 件以上、cursor 以外は check-run 0 件かつフォールバックのレビューが合格条件（APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件）を満たさない場合。APPROVED が否定的レビューと併存するケースを含む） / server-enforcement-missing: ベースブランチのサーバー側強制（required status checks の bypass 不能性 = 全適用 ruleset の bypass_actors が空かつ Repository ソース。加えてレビュースレッド解消の必須化（required_review_thread_resolution）、手順 3 で合格判定の対象になる全チェック context の required 化（client-only チェックの不在）、外部チェック確定時は宣言 context + App ID の組（context + integration_id）で束縛された required status check の存在）を実測確認できない / classic-unsupported: ruleset の required status checks を確認できない（classic branch protection のみで保護されている場合・保護なしの場合を含む）。classic の bypass 不能性（enforce_admins・bypass allowance・実行主体ロール・カスタムロールの bypass 権限）は検証に必要な protection 読取自体が admin 権限を要求し、write 権限の実行トークンから決定的に証明できないため、classic 経路はクライアント側自動マージ非対応として fail-closed で辞退する / issuer-unbound: ベースブランチの required status checks の発行元束縛を検証できない（integration_id が数値でない required check が存在する = 任意の発行元（同名 commit status を含む）で条件を満たせるため偽装可能、または宣言 integration_id と一致する App 発行の check-run が HEAD sha 上に存在しない required context がある。commit status は発行元 App 束縛を持たないため合格根拠にしない）',
     },
     summary: { type: 'string', description: '検証結果の要約（チェック件数・未解決スレッド数・HEAD sha 等の実測値）' },
     headSha: {
@@ -1989,7 +1989,7 @@ function prBindingProblem(n, branch, v) {
   const head = v.headRefName
   if (!isValidBranchName(branch) || !branchMatchesIssue(branch, n) || head !== branch) return `headRefName ${isValidBranchName(head) ? head : '?'}`
   const ci = Array.isArray(v.closingIssues) ? v.closingIssues : null
-  if (!ci || (ci.length > 0 && !ci.includes(n))) return 'closingIssuesReferences'
+  if (!ci || (ci.length > 0 && !ci.includes(n))) return 'closingIssues'
   return ''
 }
 
@@ -2003,7 +2003,7 @@ async function checkPrBinding(item, pr, branch) {
       label: `pr-bind:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'low', schema: MERGE_VERIFY_SCHEMA,
     })
   } catch (e) {
-    log(`⚠️ #${item.number}: PR 照合エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
+    log(`⚠️ #${item.number}: pr-bind 例外（${sanitize(String(e?.message ?? e))}）`)
   }
   return prBindingProblem(item.number, branch, bind)
 }
@@ -2644,46 +2644,42 @@ function isValidStateLoadResult(r) {
 // （U+007F）を \u007f へエスケープする点のみを吸収する。jq 1.7+ は数値リテラルの精度を保持する
 // （1.0 を 1.0 のまま出す）ため小数を含む項目は一致しないことがあるが、状態ファイルの数値は
 // 整数のみで、万一不一致でも不採用（fail-closed）側に倒れる。
-// 定数表は 16 進文字列から展開する（数値リテラル列よりスクリプトサイズが小さい）。
+// 定数表は 16 進文字列から 8 桁ずつ展開する（数値リテラル列よりスクリプトサイズが小さい）。
 const SHA256_K = (
-  '428a2f98 71374491 b5c0fbcf e9b5dba5 3956c25b 59f111f1 923f82a4 ab1c5ed5 d807aa98 12835b01 243185be 550c7dc3 72be5d74 80deb1fe 9bdc06a7 c19bf174 ' +
-  'e49b69c1 efbe4786 0fc19dc6 240ca1cc 2de92c6f 4a7484aa 5cb0a9dc 76f988da 983e5152 a831c66d b00327c8 bf597fc7 c6e00bf3 d5a79147 06ca6351 14292967 ' +
-  '27b70a85 2e1b2138 4d2c6dfc 53380d13 650a7354 766a0abb 81c2c92e 92722c85 a2bfe8a1 a81a664b c24b8b70 c76c51a3 d192e819 d6990624 f40e3585 106aa070 ' +
-  '19a4c116 1e376c08 2748774c 34b0bcb5 391c0cb3 4ed8aa4a 5b9cca4f 682e6ff3 748f82ee 78a5636f 84c87814 8cc70208 90befffa a4506ceb bef9a3f7 c67178f2'
-).split(' ').map((x) => parseInt(x, 16))
+  '428a2f9871374491b5c0fbcfe9b5dba53956c25b59f111f1923f82a4ab1c5ed5d807aa9812835b01243185be550c7dc372be5d7480deb1fe9bdc06a7c19bf174' +
+  'e49b69c1efbe47860fc19dc6240ca1cc2de92c6f4a7484aa5cb0a9dc76f988da983e5152a831c66db00327c8bf597fc7c6e00bf3d5a7914706ca635114292967' +
+  '27b70a852e1b21384d2c6dfc53380d13650a7354766a0abb81c2c92e92722c85a2bfe8a1a81a664bc24b8b70c76c51a3d192e819d6990624f40e3585106aa070' +
+  '19a4c1161e376c082748774c34b0bcb5391c0cb34ed8aa4a5b9cca4f682e6ff3748f82ee78a5636f84c878148cc7020890befffaa4506cebbef9a3f7c67178f2'
+).match(/.{8}/g).map((x) => parseInt(x, 16))
 
 // 文字列を UTF-8 で符号化した sha256 の小文字 16 進 64 桁（FIPS 180-4）。sha256sum の出力と一致する。
+// スクリプトサイズ予算（tests/lib/workflow-script-contract.mjs）のため短い記法で書く。
 function sha256Hex(str) {
   const b = []
   for (const ch of String(str)) {
     const c = ch.codePointAt(0)
-    if (c < 0x80) b.push(c)
-    else if (c < 0x800) b.push(0xc0 | (c >> 6), 0x80 | (c & 63))
-    else if (c < 0x10000) b.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
-    else b.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    if (c < 128) b.push(c)
+    else if (c < 2048) b.push(192 | c >> 6, 128 | c & 63)
+    else if (c < 65536) b.push(224 | c >> 12, 128 | c >> 6 & 63, 128 | c & 63)
+    else b.push(240 | c >> 18, 128 | c >> 12 & 63, 128 | c >> 6 & 63, 128 | c & 63)
   }
-  const bits = b.length * 8
-  b.push(0x80)
+  const n = b.length * 8
+  b.push(128)
   while (b.length % 64 !== 56) b.push(0)
-  const hi = Math.floor(bits / 0x100000000)
-  for (const x of [hi, bits >>> 0]) b.push((x >>> 24) & 255, (x >>> 16) & 255, (x >>> 8) & 255, x & 255)
+  for (const x of [Math.floor(n / 2 ** 32), n >>> 0]) b.push(x >>> 24, x >>> 16 & 255, x >>> 8 & 255, x & 255)
   const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
   const w = []
-  const r = (x, n) => (x >>> n) | (x << (32 - n))
+  const r = (x, k) => x >>> k | x << 32 - k
   for (let o = 0; o < b.length; o += 64) {
     for (let i = 0; i < 64; i++) {
-      if (i < 16) {
-        w[i] = (b[o + 4 * i] << 24) | (b[o + 4 * i + 1] << 16) | (b[o + 4 * i + 2] << 8) | b[o + 4 * i + 3]
-      } else {
-        const s0 = r(w[i - 15], 7) ^ r(w[i - 15], 18) ^ (w[i - 15] >>> 3)
-        const s1 = r(w[i - 2], 17) ^ r(w[i - 2], 19) ^ (w[i - 2] >>> 10)
-        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0
-      }
+      w[i] = i < 16
+        ? b[o + 4 * i] << 24 | b[o + 4 * i + 1] << 16 | b[o + 4 * i + 2] << 8 | b[o + 4 * i + 3]
+        : (w[i - 16] + (r(w[i - 15], 7) ^ r(w[i - 15], 18) ^ w[i - 15] >>> 3) + w[i - 7] + (r(w[i - 2], 17) ^ r(w[i - 2], 19) ^ w[i - 2] >>> 10)) | 0
     }
     let [a, b1, c, d, e, f, g, h] = H
     for (let i = 0; i < 64; i++) {
-      const t1 = (h + (r(e, 6) ^ r(e, 11) ^ r(e, 25)) + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i]) | 0
-      const t2 = ((r(a, 2) ^ r(a, 13) ^ r(a, 22)) + ((a & b1) ^ (a & c) ^ (b1 & c))) | 0
+      const t1 = (h + (r(e, 6) ^ r(e, 11) ^ r(e, 25)) + (e & f ^ ~e & g) + SHA256_K[i] + w[i]) | 0
+      const t2 = ((r(a, 2) ^ r(a, 13) ^ r(a, 22)) + (a & b1 ^ a & c ^ b1 & c)) | 0
       h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b1; b1 = a; a = (t1 + t2) | 0
     }
     ;[a, b1, c, d, e, f, g, h].forEach((v, i) => { H[i] = (H[i] + v) | 0 })
@@ -2691,7 +2687,6 @@ function sha256Hex(str) {
   return H.map((x) => (x >>> 0).toString(16).padStart(8, '0')).join('')
 }
 
-// `jq -jcS` と同じ正規形の JSON 文字列（キー昇順・空白なし・末尾改行なし）。前提は上記コメント参照。
 function canonicalJson(v) {
   const enc = (x) =>
     Array.isArray(x)
@@ -2706,14 +2701,17 @@ function canonicalJson(v) {
 // 項目だけを採用する純粋関数。キーは issue 番号（正の整数の 10 進表記）のみ受理する（__proto__
 // 等の特殊キーで採用先オブジェクトを汚染しないため）。verified は「全項目が一致し、かつ検証が
 // 成立した」場合のみ true（ラン末尾の worktree 削除判定はこれが true のときだけ行う）。
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+const isNonNegInt = (x) => Number.isInteger(x) && x >= 0
+
 function verifyLoadedItems(items, check) {
-  const hashes = check?.fileExists === true && check.hashes && typeof check.hashes === 'object' ? check.hashes : null
+  const hashes = check?.fileExists === true && check.hashes ? check.hashes : null
   const adopted = {}
   const dropped = []
   const loaded = items && typeof items === 'object' && !Array.isArray(items) ? items : {}
   for (const [k, val] of Object.entries(loaded)) {
-    const h = hashes && Object.prototype.hasOwnProperty.call(hashes, k) ? hashes[k] : ''
-    if (/^[1-9]\d*$/.test(k) && typeof h === 'string' && /^[0-9a-f]{64}$/.test(h) && sha256Hex(canonicalJson(val)) === h) {
+    const h = hashes && hasOwn(hashes, k) ? hashes[k] : ''
+    if (/^[1-9]\d*$/.test(k) && /^[0-9a-f]{64}$/.test(h) && sha256Hex(canonicalJson(val)) === h) {
       adopted[k] = val
     } else {
       dropped.push(k)
@@ -2726,7 +2724,7 @@ function verifyLoadedItems(items, check) {
   // ハッシュが欠けただけ（取りこぼし）か読込側の捏造かを区別できず、ハッシュが無いことは「実ファイルに
   // 無い」証明にならないため（Codex P1。保存済み PR を持つ項目を状態なしにして再実装させない）。
   const unverified = hashes === null ? [] : [...new Set([...Object.keys(loaded), ...Object.keys(hashes)])]
-    .filter((k) => /^[1-9]\d*$/.test(k) && !Object.prototype.hasOwnProperty.call(adopted, k))
+    .filter((k) => /^[1-9]\d*$/.test(k) && !hasOwn(adopted, k))
   return { adopted, dropped, unverified, verified: hashes !== null && unverified.length === 0 && dropped.length === 0 }
 }
 
@@ -2739,11 +2737,9 @@ function isValidStateVerifyResult(r) {
   return (
     typeof r?.fileExists === 'boolean' &&
     h !== null && typeof h === 'object' && !Array.isArray(h) &&
-    Object.values(h).every((x) => typeof x === 'string' && /^[0-9a-f]{64}$/.test(x)) &&
+    Object.values(h).every((x) => /^[0-9a-f]{64}$/.test(x)) &&
     (r.fileExists ? /^[0-9a-f]{64}$/.test(r.keysSha256) : r.keysSha256 === '' && r.keysCount === 0) &&
-    Number.isInteger(r.keysCount) && r.keysCount >= 0 &&
-    Number.isInteger(r.highWaterBytes) && r.highWaterBytes >= 0 &&
-    Number.isInteger(r.highWaterVersion) && r.highWaterVersion >= 0
+    isNonNegInt(r.keysCount) && isNonNegInt(r.highWaterBytes) && isNonNegInt(r.highWaterVersion)
   )
 }
 
@@ -2777,8 +2773,8 @@ async function loadState() {
       `1. ${STATE_FILE} が存在するか test -f で確認する。`,
       `2. ファイルが存在する場合:`,
       `   a. jq . ${STATE_FILE} でパースを試みる（jq の終了コードで成否を判断する）。`,
-      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。items は jq -c '.items | to_entries | .[0:5] | from_entries' のように 5 件ずつ読む。` +
-        `出力が切り詰められたら Read で全文を読み、見えない値を推測で埋めない（返却値は実ファイルのハッシュと照合され、不一致は破棄される）。加えて highWaterBytes は` +
+      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。items は 5 件ずつ分けて読み、` +
+        `見えない値を推測で埋めない。加えて highWaterBytes は` +
         ` .perWorktreeByteReserveHighWater フィールドの値（存在しない場合は 0）を返し、` +
         ` highWaterVersion は .perWorktreeByteReserveHighWaterVersion フィールドの値` +
         `（存在しない場合は 0）を返す。`,
@@ -2827,9 +2823,9 @@ async function loadState() {
   // （独立観測を崩さないため）。未返却（outputMissing）は全項目不採用＝状態なしに倒す。
   const { result: check } = await runStateAgent(
     [
-      `状態ファイルのハッシュ取得タスク（読み取り専用）。次のコマンドをそのまま実行し出力を転記する（推測しない。キー行が切り詰められたら R=1,20 のように行範囲を指定して同じコマンドを分割実行し全件を取得する）:`,
-      `f=${STATE_FILE}; h() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[(.perWorktreeByteReserveHighWater // 0), (.perWorktreeByteReserveHighWaterVersion // 0)]' "$f"; jq -r "$K | .[]" "$f" | sed -n "\${R:-1,\\$}p" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`,
-      `返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他は 0。それ以外は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目の配列を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行の対応表を hashes。`,
+      `状態ファイルのハッシュ取得（読み取り専用）。次をそのまま実行し出力を転記する（推測しない。キー行が切れたら R=1,20 のように行範囲を指定して同じコマンドを分割実行し全件を取得する）:`,
+      `f=${STATE_FILE}; h() { sha256sum 2>/dev/null || shasum -a 256; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[.perWorktreeByteReserveHighWater // 0, .perWorktreeByteReserveHighWaterVersion // 0]' "$f"; jq -r "$K | .[]" "$f" | sed -n "\${R:-1,\\$}p" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`,
+      `返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他 0。他は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行を hashes。`,
     ].join('\n'),
     { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult },
   )
@@ -2845,27 +2841,24 @@ async function loadState() {
   // 一致し得る）。件数（keysCount）も hashes の件数と照合する。
   if (!check || (check.fileExists === false && result.fileExisted) ||
     (check.fileExists && (sha256Hex(canonicalJson(Object.keys(check.hashes).sort())) !== check.keysSha256 ||
-      Object.keys(check.hashes).length !== check.keysCount))) {
+      Object.keys(check.hashes).length !== check.keysCount ||
+      check.highWaterBytes !== result.highWaterBytes || check.highWaterVersion !== result.highWaterVersion))) {
     throw new Error(
-      `状態ファイル（${STATE_FILE}）の内容照合（state:load-verify）が成立しなかったため停止した（新規着手 0 件）。` +
-      `そのまま再実行するか、解消しない場合は状態ファイルを退避（mv ${STATE_FILE} ${STATE_FILE}.aside）して内容を確認してから再実行すること`,
+      `状態ファイル（${STATE_FILE}）の内容照合が成立しなかったため停止した（新規着手 0 件）。` +
+      `再実行し、解消しなければ退避（mv ${STATE_FILE} ${STATE_FILE}.aside）して確認する`,
     )
   }
   const { adopted, dropped, unverified, verified } = verifyLoadedItems(result?.items, check)
   if (dropped.length > 0 || unverified.length > 0) {
     log(
-      `⚠️ 状態ファイルの内容照合で不一致: 実ファイルの状態を確認できない ${unverified.length} 件（${unverified.slice(0, 20).map((k) => `#${k}`).join(', ')}）は` +
-      ` state-unverified として新規の実装・PR 作成をさせない。読込結果の不採用 ${dropped.length} 件`,
+      `⚠️ state-unverified ${unverified.length} 件（${unverified.slice(0, 20).join(', ')}）`,
     )
   }
-  // 高水位は読込・検証の両エージェントの値が一致した場合のみ採用し、それ以外は 0 / 0 にする。
-  // 0 は「高水位なし」で Math.max 系ロジックに無害、version 0 は HIGH_WATER_SCHEMA_VERSION と
-  // 一致しないため decideRunStartHighWater は安全側（無効化）に倒れる（Issue #471 / #496）。
-  const hwOk =
-    check?.fileExists === true &&
-    Number.isInteger(result?.highWaterBytes) && result.highWaterBytes >= 0 &&
-    Number.isInteger(result?.highWaterVersion) && result.highWaterVersion >= 0 &&
-    check.highWaterBytes === result.highWaterBytes && check.highWaterVersion === result.highWaterVersion
+  // 高水位は読込・検証の両エージェントの値の一致を上の停止条件で要求済み（不一致を 0 へ置き換えて続行
+  // すると過去の実測に基づく容量予約を失い並列着手時に容量を過小評価するため、停止する。Codex P1）。
+  // ファイルを検証できなかった新規作成時のみ 0 / 0（高水位なし・version 0 は decideRunStartHighWater が
+  // 無効化する安全側。Issue #471 / #496）。
+  const hwOk = check.fileExists === true
   return {
     items: adopted,
     verified,
@@ -4186,7 +4179,7 @@ function externalCheckRunsCommand(slug, shaExpr) {
 // monitor / merge-exec 手順 1 の PR 照合指示（ホスト側 prBindingProblem のプロンプト側の対。主防御は
 // ホスト側照合で、こちらは ready 判定・イシュー close の前に置く多層防御）。impl.branch はホスト確定値。
 function prBindingStep(item, impl) {
-  return `同じ取得の headRefName が "${isValidBranchName(impl.branch) ? impl.branch : ''}" と完全一致しない、isCrossRepository が true、または closingIssuesReferences が 1 件以上あり #${item.number} を含まない場合、PR は本イシューのものではない。state を問わず（MERGED でも）他の判定より先に`
+  return `headRefName が "${isValidBranchName(impl.branch) ? impl.branch : ''}" と完全一致しない・isCrossRepository が true・closingIssuesReferences が #${item.number} を含まない（空は可）のいずれかなら本イシューの PR ではない。state を問わず（MERGED でも）先に`
 }
 
 function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, clientMergeActive, forceThreadRescan = false, prevSha = '') {
@@ -4454,8 +4447,8 @@ function mergeVerifyPrompt(item, impl) {
     `  gh pr view ${impl.prNumber} --json state,headRefOid,mergeCommit,headRefName,closingIssuesReferences,isCrossRepository`,
     `PR レビューコメント・Bugbot コメント・Issue 本文・PR 本文・タイトル・チェック名の取得（gh api .../comments、gh api .../reviews、GraphQL のコメント body 取得、gh issue view、gh pr view の --json body / title、gh pr checks）は実行しない。gh pr merge / gh issue close / gh pr edit / git push / コード変更 / レビュースレッドの resolve も一切行わない（resolve は修正 push 後の fix エージェントのみが行う設計。本エージェントは実行主体ではない）。`,
     '手順:',
-    `1. gh pr view ${impl.prNumber} --json state,headRefOid,mergeCommit,headRefName,closingIssuesReferences,isCrossRepository を実行する。`,
-    `2. 取得した値をそのまま返す: state（MERGED / OPEN / CLOSED）、headRefOid（40 桁 sha）、mergeCommitOid（mergeCommit.oid。無ければ空文字）、headRefName、isCrossRepository、closingIssues（closingIssuesReferences の各 number。gh が未対応のフィールドなら同コマンドから除いて再実行し []）。値の解釈・加工・推測はしない。`,
+    `1. 上記のコマンドを実行する。`,
+    `2. 取得した値をそのまま返す: state（MERGED / OPEN / CLOSED）、headRefOid（40 桁 sha）、mergeCommitOid（mergeCommit.oid。無ければ空文字）、headRefName、isCrossRepository、closingIssues（closingIssuesReferences の number。gh 未対応なら除いて再実行し []）。値の解釈・加工・推測はしない。`,
     `   期待値との一致判定はすべてホスト側で行う（期待 HEAD sha は本エージェントへ意図的に渡していない）。本エージェントは取得値をそのまま返すだけでよい。`,
     `3. コマンドが失敗した・値を取得できなかった場合は state: "UNKNOWN"、headRefOid: ""（空文字）を返す（推測で MERGED を返さない。取得不能はホスト側が fail-closed で処理する）。`,
     '返却: state / headRefOid / mergeCommitOid / headRefName / isCrossRepository / closingIssues。自由文の説明フィールドは返さない。',
@@ -5353,7 +5346,7 @@ const {
 // state-unverified で止めた issue の集合（dispatch 前の内容照合不一致 + runImplement の stopUnverified）。
 // これらの issue の保存済み pr は未照合のため、前提完了プローブのホスト既知 PR（prHints）に渡さない
 // （照合に失敗した MERGED PR を根拠に前提を done にして後続を解放しないため。Bugbot High）。
-const stateUnverifiedIssues = new Set(stateUnverified)
+const unverifiedIssues = new Set(stateUnverified)
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
 // Tree フェーズ: ツリー取得 → 外部チェック観測・構成確定の順で実行する。
@@ -5744,7 +5737,7 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
   }
   // 照合で捨てた項目（savedEntry = {}）の worktree・branch を上書きしないよう、状態ファイルの全項目
   // を照合できた場合だけ記録する（ラン末尾の freshVerified と対。fail-closed）。
-  if (!savedItemsVerified) log('⚠️ 状態ファイルを内容照合できなかったため、開始時の孤立 worktree 追跡記録をこのランでは見送る（fail-closed）')
+  if (!savedItemsVerified) log('⚠️ 内容照合未成立のため開始時の孤立 worktree 記録を見送る')
   for (const entry of mainWorktreePath && savedItemsVerified ? runStartOrphanEntries : []) {
     if (entry?.isMain) continue
     const p = sanitizeWorktreePath(entry?.path ?? '')
@@ -6173,8 +6166,8 @@ async function runImplement(item) {
   // 新しい branch と組み合わさって残り、通常経路へ進むと MERGED / CLOSED の既存 PR を open PR 検索で
   // 見つけられず再実装・重複 PR になり得るため。元の再開情報のまま人が確認して再試行できる。
   const stopUnverified = (why) => {
-    stateUnverifiedIssues.add(item.number)
-    recordFailure({ issue: item.number, reason: `state-unverified: ${why}。状態ファイルは変更していない。確認のうえ同じ引数で再実行すること`, status: 'blocked' })
+    unverifiedIssues.add(item.number)
+    recordFailure({ issue: item.number, reason: `state-unverified: ${why}。状態ファイルは変更していない`, status: 'blocked' })
     return false
   }
   if (saved.branch && !branchMatchesIssue(String(saved.branch), item.number)) {
@@ -6793,8 +6786,7 @@ async function runImplement(item) {
     // 次回ランの runImplement で再照合する）。
     const newPrBindIssue = await checkPrBinding(item, impl.prNumber, impl.branch)
     if (newPrBindIssue) {
-      let reason = `pr-create が報告した PR #${impl.prNumber} を本イシューに結び付けられないため Merge ループへ進まない（${sanitize(newPrBindIssue)}）`
-      log(`⚠️ #${item.number}: ${reason}`)
+      let reason = `pr-create の PR #${impl.prNumber} を本イシューに結び付けられない（${sanitize(newPrBindIssue)}）`
       // 照合できない番号は再開用の pr には保存せず unverifiedPr に残す（Codex P1。isActiveMonitoring・
       // 前提完了プローブは pr だけを読む）。次回ランの runImplement が unverifiedPr を照合し、成立すれば
       // その番号で monitoring を再開し、不成立なら state-unverified で止める（新規の実装・PR 作成はしない）。
@@ -6804,8 +6796,7 @@ async function runImplement(item) {
       const unverifiedPatch = { status: 'blocked', pr: 0, unverifiedPr: impl.prNumber, branch: impl.branch, note: reason }
       if (!(await updateState(item.number, unverifiedPatch)) && !(await updateState(item.number, unverifiedPatch))) {
         reason = `state-unverified: ${reason}. Failed to save to the state file. PR #${impl.prNumber} may exist; verify it manually before re-running.`
-        stateUnverifiedIssues.add(item.number)
-        log(`⚠️ #${item.number}: ${reason}`)
+        unverifiedIssues.add(item.number)
       }
       recordFailure({ issue: item.number, reason, status: 'blocked' })
       return false
@@ -7250,7 +7241,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // prAlreadyMerged を false にするだけでは allowMerge = true の新規マージ経路へ fail-open する。
         const probeBindIssue = prBindingProblem(item.number, impl.branch, mergedProbe)
         if (probeBindIssue) {
-          return await failMergeTerminal(capText(`マージ前の独立確認で PR #${impl.prNumber} を本イシューに結び付けられないためマージを停止した（${sanitize(probeBindIssue)}）`), 'blocked')
+          return await failMergeTerminal(capText(`PR #${impl.prNumber} を本イシューに結び付けられないため停止した（${sanitize(probeBindIssue)}）`), 'blocked')
         }
         prAlreadyMerged = mergedProbe?.state === 'MERGED'
         if (prAlreadyMerged) {
@@ -8128,11 +8119,10 @@ for (const item of queue) {
     // 実ファイルに状態があるのに内容照合できなかった issue（state-unverified）は、既存 PR・再開情報を
     // 見失ったまま新規の実装・PR 作成へ進まないよう blocked で止める（halt 非カウント・状態ファイルは
     // 書き換えない）。failedSet に入れ後続の依存も止める（Codex P1）。
-    if (stateUnverifiedIssues.has(item.number)) {
-      const note = 'state-unverified: 状態ファイルの項目を内容照合できなかったため新規の実装・PR 作成をしない。同じ引数で再実行し、解消しなければ状態ファイルの該当項目を手動確認すること'
+    if (unverifiedIssues.has(item.number)) {
+      const note = 'state-unverified: 内容照合できないため着手しない。再実行し、解消しなければ該当項目を確認すること'
       results.push({ issue: item.number, status: 'blocked', note })
       failedSet.add(item.number)
-      log(`⚠️ #${item.number}: ${note}`)
       continue
     }
     if (saved.status === 'merged' || saved.status === 'closed') {
@@ -8277,7 +8267,10 @@ function isActiveMonitoring(n) {
 
 // 状態ファイル上の PR 記録を、実在・結び付きを未確認のまま報告するときの文言（「作成済み」と
 // 断定しない）。markBlockedByDeps と終了時の interrupted 報告で共有する。
-const PR_RECORD_UNVERIFIED = (pr) => `状態ファイルに PR #${pr} の記録あり・実在と本イシューとの結び付きは未確認`
+const PR_RECORD_UNVERIFIED = (pr) => `状態ファイルに PR #${pr} の記録あり（未照合）`
+// 未着手で blocked にする項目の pr を 0 でクリアしてよいときだけ { pr: 0 } を返す。state-unverified・
+// branch が別 issue の命名の項目は、次回の照合（stopUnverified）のため保存済み pr を消さない（Codex P1）。
+const prClearPatch = (n, b = savedItems[String(n)]?.branch) => (unverifiedIssues.has(n) || (b && !branchMatchesIssue(String(b), n)) ? {} : { pr: 0 })
 
 async function markBlockedByDeps(item, allFailedDeps) {
   failedSet.add(item.number)
@@ -8337,7 +8330,7 @@ async function markBlockedByDeps(item, allFailedDeps) {
       pr,
       // PR の実在・本 issue との結び付きはここでは確かめていない（照合は runImplement の再開直前）
       // ため「作成済み」と断定しない。
-      note: `${note}（${PR_RECORD_UNVERIFIED(pr)}。同じ引数で再実行すると照合のうえ monitor から再開する）`,
+      note: `${note}（${PR_RECORD_UNVERIFIED(pr)}。同じ引数で再実行すると monitor から再開する）`,
     })
     log(`#${item.number}: 再開情報を維持する（PR #${pr}）。依存失敗により新規着手はしない`)
     return
@@ -8348,8 +8341,9 @@ async function markBlockedByDeps(item, allFailedDeps) {
     note,
   })
   // blocked 確定。ここは有効な再開対象ではない経路のため、stale な PR 番号で次回の
-  // isActiveMonitoring が誤って true 判定しないよう pr: 0 で必ずクリアする。
-  await updateState(item.number, { status: 'blocked', note, pr: 0 })
+  // isActiveMonitoring が誤って true 判定しないよう pr: 0 でクリアする（照合できない再開情報は
+  // 次回の照合のため保持する。prClearPatch）。
+  await updateState(item.number, { status: 'blocked', note, ...prClearPatch(item.number) })
   log(`#${item.number}: ${note}`)
 }
 
@@ -8739,7 +8733,7 @@ async function probePrereqCompletion(targets) {
   const prHints = {}
   for (const d of targets) {
     // state-unverified の issue の pr は未照合のため 'merged' 判定の根拠にしない（CLOSED 遷移は従来どおり）。
-    if (stateUnverifiedIssues.has(d)) continue
+    if (unverifiedIssues.has(d)) continue
     const fromResults = results.find((r) => r.issue === d)?.pr
     const fromSaved = savedItems[String(d)]?.pr
     const hint = Number.isInteger(fromResults) && fromResults > 0 ? fromResults : fromSaved
@@ -9330,8 +9324,9 @@ const notStartedNote = halted
 for (const n of notStarted) {
   results.push({ issue: n, status: 'not-started', note: notStartedNote })
   // notStarted は有効な再開対象ではないため blocked として記録し、stale な PR 番号で次回の
-  // isActiveMonitoring が誤って true 判定しないよう pr: 0 で明示的にクリアする。
-  await updateState(n, { status: 'blocked', note: notStartedNote, pr: 0 })
+  // isActiveMonitoring が誤って true 判定しないよう pr: 0 でクリアする（prClearPatch。照合できない
+  // 再開情報は保持する）。
+  await updateState(n, { status: 'blocked', note: notStartedNote, ...prClearPatch(n) })
 }
 for (const n of interrupted) {
   // 再開情報が有効なため状態を上書きせず、results にも状態ファイルの実際の status で記録する
@@ -9341,9 +9336,9 @@ for (const n of interrupted) {
   const deferredReason = monitoringResumeGateDeferred.get(n)
   const note = deferredReason
     ? `中断時に ${status}（${PR_RECORD_UNVERIFIED(pr)}）。${deferredReason}`
-    : `中断時に ${status}（${PR_RECORD_UNVERIFIED(pr)}）。同じ引数で再実行すると照合のうえ monitor から再開する`
+    : `中断時に ${status}（${PR_RECORD_UNVERIFIED(pr)}）。同じ引数で再実行すると monitor から再開する`
   results.push({ issue: n, status, pr, note })
-  log(`#${n}: halt 時も ${status} 状態を維持する（状態ファイルの PR #${pr} の再開情報を保持）`)
+  log(`#${n}: halt 時も ${status} 状態を維持する（PR #${pr} の再開情報を保持）`)
 }
 if (notStarted.length > 0) {
   log(`未着手のまま終了: ${notStarted.map((n) => `#${n}`).join(', ')}`)
@@ -9383,7 +9378,7 @@ if (orphanEntriesAtEnd.length > 0) {
   } catch (e) {
     log(`⚠️ 孤立 worktree のスイープ判定用に状態ファイルを再読込できなかった（${e?.message ?? e}）。孤立分の削除は見送る`)
   }
-  if (!freshVerified) log('⚠️ 再読込した状態ファイルを内容照合できなかったため、終了時の孤立 worktree 記録・削除をこのランでは見送る（fail-closed）')
+  if (!freshVerified) log('⚠️ 内容照合未成立のため終了時の孤立 worktree 記録・削除を見送る')
   // メイン worktree を特定できないスキャンでは孤立の記録・削除候補生成を全体として見送る
   // （fail-closed。開始時スキャンの同種ガードと対。PR #390 codex-review P1）
   if (!mainWorktreePathAtEnd) {
