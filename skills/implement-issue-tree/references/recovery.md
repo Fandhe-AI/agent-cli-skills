@@ -110,8 +110,15 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
   返す。このエージェントには読込結果を渡さない（鸚鵡返し・結託を防ぐ）
 - ホストは読込結果の各項目を `jq -jcS` と同じ正規形へ直列化し、純 JS の sha256 で再計算する。
   一致した項目だけを採用する（`verifyLoadedItems`）
-- 照合できない項目は「状態なし」として扱い、Recover・既存 PR 検出（実装手順 0b）へ倒す。
-  状態ファイル自体は書き換えない
+- 照合自体が成立しない（`state:load-verify` が haiku / sonnet とも不成立、または既存のはずの
+  ファイルを検証側が見つけられない）場合はランを停止する（新規着手 0 件）。そのまま再実行し、
+  解消しなければ状態ファイルを退避して内容を確認する。ファイルが無く新規作成した場合だけは
+  状態なしで続行する
+- 照合が成立し、実ファイルにある項目が一致しなかった場合、その issue は `state-unverified` として
+  `blocked`（halt 非カウント）で止め、新規の実装・PR 作成をさせない（依存する後続も止まる）。
+  実装手順 0b の既存 PR 検出は open PR の検索に依存し、MERGED / CLOSED の PR や検索に掛からない
+  PR を拾えないため、重複防止をそれだけに委ねない。状態ファイル自体は書き換えない
+- 実ファイルに無いキーを読込側が捏造した項目は捨てる（実際の状態は「なし」のため）
 - ラン開始時・末尾の孤立 worktree の記録・削除は、全項目を照合できた場合だけ行う
 
 monitoring 再開の前に、`pr-bind:#N` が保存済み PR の `state` / `headRefName` /
@@ -120,7 +127,8 @@ PR が実在し、fork からの PR でなく、期待ブランチが本 issue �
 `closingIssuesReferences` が空か本 issue を含む場合だけ再開する。一致しなければ再開も close もせず、
 状態なしとして通常の実装へ進む。主な判別は `headRefName` が担う（`closingIssuesReferences` は
 PR 本文から導出され鸚鵡返しされ得るため補助条件に留める）。pr-create が報告した新規 PR も、
-Merge ループへ渡す前に同じ照合を通し、不一致なら `blocked` で終端する。opt-in 前の MERGED 確認で
+Merge ループへ渡す前に同じ照合を通し、不一致なら `blocked` で終端する（照合できない PR 番号は
+再開用の `pr` には保存せず、診断専用の `unverifiedPr` に残す）。opt-in 前の MERGED 確認で
 照合が不一致の場合も `blocked` で終端する。merge-verify による
 merged（`already-merged` を含む）の受理にも同じ照合を課し、monitor・merge-exec の手順 1 にも同じ
 照合を指示する。再開判定（`isActiveMonitoring`）は、保存済みブランチがその issue の命名

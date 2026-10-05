@@ -2695,8 +2695,11 @@ function verifyLoadedItems(items, check) {
   }
 
 
-  const complete = hashes !== null && Object.keys(hashes).every((k) => Object.prototype.hasOwnProperty.call(adopted, k))
-  return { adopted, dropped, verified: complete && dropped.length === 0 }
+
+
+
+  const unverified = hashes === null ? [] : Object.keys(hashes).filter((k) => /^[1-9]\d*$/.test(k) && !Object.prototype.hasOwnProperty.call(adopted, k))
+  return { adopted, dropped, unverified, verified: hashes !== null && unverified.length === 0 && dropped.length === 0 }
 }
 
 
@@ -2798,11 +2801,21 @@ async function loadState() {
     ].join('\n'),
     { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult },
   )
-  const { adopted, dropped, verified } = verifyLoadedItems(result?.items, check)
-  if (dropped.length > 0 || !verified) {
+
+
+
+
+  if (!check || (check.fileExists === false && result.fileExisted)) {
+    throw new Error(
+      `状態ファイル（${STATE_FILE}）の内容照合（state:load-verify）が成立しなかったため停止した（新規着手 0 件）。` +
+      `そのまま再実行するか、解消しない場合は状態ファイルを退避（mv ${STATE_FILE} ${STATE_FILE}.aside）して内容を確認してから再実行すること`,
+    )
+  }
+  const { adopted, dropped, unverified, verified } = verifyLoadedItems(result?.items, check)
+  if (dropped.length > 0 || unverified.length > 0) {
     log(
-      `⚠️ 状態ファイルの内容照合で ${dropped.length} 件を不採用にした（${dropped.slice(0, 20).map((k) => `#${sanitize(k)}`).join(', ') || '照合不成立'}）。` +
-      `該当 issue は状態なしとして扱い、Recover・既存 PR 検出へ倒す`,
+      `⚠️ 状態ファイルの内容照合で不一致: 実ファイルの状態を確認できない ${unverified.length} 件（${unverified.slice(0, 20).map((k) => `#${k}`).join(', ')}）は` +
+      ` state-unverified として新規の実装・PR 作成をさせない。読込結果の不採用 ${dropped.length} 件`,
     )
   }
 
@@ -2816,6 +2829,7 @@ async function loadState() {
   return {
     items: adopted,
     verified,
+    unverified: unverified.map(Number),
     highWaterBytes: hwOk ? result.highWaterBytes : 0,
     highWaterVersion: hwOk ? result.highWaterVersion : 0,
   }
@@ -5294,6 +5308,7 @@ const {
   highWaterBytes: loadedHighWaterBytes,
   highWaterVersion: loadedHighWaterVersion,
   verified: savedItemsVerified,
+  unverified: stateUnverified,
 } = await loadState()
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
@@ -6724,8 +6739,11 @@ async function runImplement(item) {
     if (newPrBindIssue) {
       const reason = `pr-create が報告した PR #${impl.prNumber} を本イシューに結び付けられないため Merge ループへ進まない（${sanitize(newPrBindIssue)}）`
       log(`⚠️ #${item.number}: ${reason}`)
-      await updateState(item.number, { status: 'blocked', pr: impl.prNumber, branch: impl.branch, note: reason })
-      recordFailure({ issue: item.number, reason, status: 'blocked', pr: impl.prNumber })
+
+
+
+      await updateState(item.number, { status: 'blocked', pr: 0, unverifiedPr: impl.prNumber, branch: impl.branch, note: reason })
+      recordFailure({ issue: item.number, reason, status: 'blocked' })
       return false
     }
 
@@ -8043,6 +8061,16 @@ for (const item of queue) {
 
 
     const saved = savedItems[String(item.number)] ?? {}
+
+
+
+    if (stateUnverified.includes(item.number)) {
+      const note = 'state-unverified: 状態ファイルの項目を内容照合できなかったため新規の実装・PR 作成をしない。同じ引数で再実行し、解消しなければ状態ファイルの該当項目を手動確認すること'
+      results.push({ issue: item.number, status: 'blocked', note })
+      failedSet.add(item.number)
+      log(`⚠️ #${item.number}: ${note}`)
+      continue
+    }
     if (saved.status === 'merged' || saved.status === 'closed') {
       const resumable =
         saved.status === 'merged' && Number.isInteger(saved.pr) && saved.pr > 0 && isValidBranchName(saved.branch) &&

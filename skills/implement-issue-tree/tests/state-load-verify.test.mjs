@@ -114,6 +114,8 @@ test('verifyLoadedItems: 件数一致でも PR 番号を捏造（issue 番号 + 
   const r = verifyLoadedItems(fabricated, { fileExists: true, hashes: SAMPLE_JQ_HASHES })
   assert.deepEqual(r.adopted, {})
   assert.deepEqual(r.dropped.sort(), ['42', '43', '44', '45'])
+  // 実ファイルに状態がある項目は「状態なし」ではなく state-unverified として扱わせる。
+  assert.deepEqual(r.unverified.sort(), ['42', '43', '44', '45'])
   assert.equal(r.verified, false)
 })
 
@@ -122,6 +124,7 @@ test('verifyLoadedItems: 一部だけ捏造された場合は一致した項目�
   const r = verifyLoadedItems(partly, { fileExists: true, hashes: SAMPLE_JQ_HASHES })
   assert.deepEqual(Object.keys(r.adopted).sort(), ['42', '43', '45'])
   assert.deepEqual(r.dropped, ['44'])
+  assert.deepEqual(r.unverified, ['44'])
   assert.equal(r.verified, false)
 })
 
@@ -130,6 +133,15 @@ test('verifyLoadedItems: 読込側が項目を省いた場合は採用分が一�
   const r = verifyLoadedItems(rest, { fileExists: true, hashes: SAMPLE_JQ_HASHES })
   assert.deepEqual(Object.keys(r.adopted).sort(), ['42', '43', '44'])
   assert.deepEqual(r.dropped, [])
+  assert.deepEqual(r.unverified, ['45'])
+  assert.equal(r.verified, false)
+})
+
+test('verifyLoadedItems: 実ファイルに無いキーの捏造は捨てるだけで state-unverified にしない', () => {
+  const r = verifyLoadedItems({ ...sampleItems, 365: { status: 'merged', pr: 1371 } }, { fileExists: true, hashes: SAMPLE_JQ_HASHES })
+  assert.deepEqual(Object.keys(r.adopted).sort(), ['42', '43', '44', '45'])
+  assert.deepEqual(r.dropped, ['365'])
+  assert.deepEqual(r.unverified, [])
   assert.equal(r.verified, false)
 })
 
@@ -151,7 +163,7 @@ test('verifyLoadedItems: 検証未返却・ファイルなし申告・不正ハ�
 
 test('verifyLoadedItems: 空ファイル（items: {}）は空のまま verified: true（新規作成直後）', () => {
   const r = verifyLoadedItems({}, { fileExists: true, hashes: {} })
-  assert.deepEqual(r, { adopted: {}, dropped: [], verified: true })
+  assert.deepEqual(r, { adopted: {}, dropped: [], unverified: [], verified: true })
 })
 
 test('prBindingProblem: 別 issue（#359）のブランチ・closingIssues の PR は結び付けない', () => {
@@ -196,7 +208,7 @@ function installAgentStub(behavior) {
 
 const loadResult = (items, extra = {}) => ({ ok: true, fileExisted: true, items, highWaterBytes: 0, highWaterVersion: 0, ...extra })
 
-test('loadState: 捏造 items（PR = issue + 1006）は採用せず状態なしで返す（throw しない）', async () => {
+test('loadState: 捏造 items（PR = issue + 1006）は採用せず state-unverified として返す（throw しない）', async () => {
   const fabricated = Object.fromEntries(Object.entries(sampleItems).map(([k, v]) => [k, { ...v, pr: Number(k) + 1006 }]))
   const { calls, logs } = installAgentStub((opts) =>
     opts.label === 'state:load'
@@ -205,10 +217,11 @@ test('loadState: 捏造 items（PR = issue + 1006）は採用せず状態なし�
   const r = await loadState()
   assert.deepEqual(r.items, {})
   assert.equal(r.verified, false)
+  assert.deepEqual(r.unverified, [42, 43, 44, 45])
   assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load-verify'])
   // 検証エージェントには読込結果を渡さない（鸚鵡返し防止）。
   assert.ok(!calls[1].prompt.includes('1049'), '検証プロンプトに読込結果が混入している')
-  assert.ok(logs.some((l) => /内容照合で 4 件を不採用/.test(l)))
+  assert.ok(logs.some((l) => /確認できない 4 件/.test(l) && /state-unverified/.test(l)))
 })
 
 test('loadState: 実ファイルと一致する items は採用し、高水位は両エージェント一致時のみ採用する', async () => {
@@ -231,11 +244,29 @@ test('loadState: 実ファイルと一致する items は採用し、高水位�
   assert.equal(mismatch.highWaterVersion, 0)
 })
 
-test('loadState: 検証エージェントが haiku / sonnet とも未返却なら全項目不採用（throw しない）', async () => {
+test('loadState: 既存ファイルの照合が成立しない（検証が haiku / sonnet とも未返却）ならランを停止する', async () => {
   installAgentStub((opts) => (opts.label === 'state:load' ? loadResult(sampleItems) : null))
+  await assert.rejects(() => loadState(), (err) => {
+    assert.match(err.message, /内容照合（state:load-verify）が成立しなかったため停止した（新規着手 0 件）/)
+    assert.match(err.message, /退避/)
+    return true
+  })
+})
+
+test('loadState: 読込側が既存と申告したファイルを検証側が見つけられない場合も停止する', async () => {
+  installAgentStub((opts) =>
+    opts.label === 'state:load' ? loadResult(sampleItems) : { fileExists: false, hashes: {}, highWaterBytes: 0, highWaterVersion: 0 })
+  await assert.rejects(() => loadState(), /成立しなかったため停止した/)
+})
+
+test('loadState: ファイルが無く新規作成した場合は検証が NOFILE でも状態なしで続行する', async () => {
+  installAgentStub((opts) =>
+    opts.label === 'state:load'
+      ? { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
+      : { fileExists: false, hashes: {}, highWaterBytes: 0, highWaterVersion: 0 })
   const r = await loadState()
   assert.deepEqual(r.items, {})
-  assert.equal(r.verified, false)
+  assert.deepEqual(r.unverified, [])
 })
 
 test('loadState: 新規作成（items: {}）は検証成立で verified: true', async () => {
@@ -340,6 +371,22 @@ test('駆動部: 新規 PR は pr-create 直後・Merge ループ投入前に PR
   const branch = driverPart.slice(check, known)
   assert.match(branch, /status: 'blocked'/)
   assert.match(branch, /return false/)
+  // 照合できない番号は再開用の pr へ保存せず、診断専用の unverifiedPr に残す（Codex P1）。
+  assert.match(branch, /updateState\(item\.number, \{ status: 'blocked', pr: 0, unverifiedPr: impl\.prNumber,/)
+  assert.match(branch, /recordFailure\(\{ issue: item\.number, reason, status: 'blocked' \}\)/)
+  assert.doesNotMatch(driverPart, /\.unverifiedPr\b/, 'unverifiedPr を再開判定等で読んではならない')
+})
+
+test('駆動部: state-unverified の issue は dispatch 前に blocked（halt 非カウント）で止め、後続も止める', () => {
+  assert.match(driverPart, /unverified: stateUnverified,\s*\} = await loadState\(\)/)
+  const idx = driverPart.indexOf('if (stateUnverified.includes(item.number)) {')
+  const preloop = driverPart.indexOf('const failedSet = new Set()')
+  const work = driverPart.indexOf('const work = queue.filter(')
+  assert.ok(idx > preloop && idx < work, 'state-unverified の判定位置が不正')
+  const body = driverPart.slice(idx, driverPart.indexOf('continue', idx))
+  assert.match(body, /results\.push\(\{ issue: item\.number, status: 'blocked', note \}\)/)
+  assert.match(body, /failedSet\.add\(item\.number\)/)
+  assert.doesNotMatch(body, /updateState|recordFailure/)
 })
 
 test('checkPrBinding: 例外・未返却・fork の PR は問題ありを返し、同一リポの本 issue ブランチは空文字を返す', async () => {
@@ -416,12 +463,10 @@ test('loadState: 検証エージェントの haiku が { fileExists: true } だ�
   assert.equal(r.verified, true)
 })
 
-test('loadState: 検証エージェントが haiku / sonnet とも不正な応答なら状態なし（throw しない）', async () => {
+test('loadState: 検証エージェントが haiku / sonnet とも不正な応答ならランを停止する', async () => {
   const { calls } = installAgentStub((opts) => (opts.label === 'state:load' ? loadResult(sampleItems) : { fileExists: true }))
-  const r = await loadState()
+  await assert.rejects(() => loadState(), /成立しなかったため停止した/)
   assert.equal(calls.length, 3)
-  assert.deepEqual(r.items, {})
-  assert.equal(r.verified, false)
 })
 
 test('dropForeignBranchEntry: 別 issue のブランチを持つエントリは branch・worktree ごと捨てる', () => {
