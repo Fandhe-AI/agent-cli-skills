@@ -137,12 +137,31 @@ test('verifyLoadedItems: 読込側が項目を省いた場合は採用分が一�
   assert.equal(r.verified, false)
 })
 
-test('verifyLoadedItems: 実ファイルに無いキーの捏造は捨てるだけで state-unverified にしない', () => {
+test('verifyLoadedItems: 検証側にハッシュが無い読込側のキーも state-unverified にする（捏造か取りこぼしか区別できない。Codex P1）', () => {
   const r = verifyLoadedItems({ ...sampleItems, 365: { status: 'merged', pr: 1371 } }, { fileExists: true, hashes: SAMPLE_JQ_HASHES })
   assert.deepEqual(Object.keys(r.adopted).sort(), ['42', '43', '44', '45'])
   assert.deepEqual(r.dropped, ['365'])
-  assert.deepEqual(r.unverified, [])
+  assert.deepEqual(r.unverified, ['365'])
   assert.equal(r.verified, false)
+})
+
+test('verifyLoadedItems: 検証側が一部・全部のハッシュを返さない場合、保存済み項目を状態なしにせず state-unverified にする（Codex P1）', () => {
+  const { 44: _missing, ...partialHashes } = SAMPLE_JQ_HASHES
+  const partial = verifyLoadedItems(sampleItems, { fileExists: true, hashes: partialHashes })
+  assert.deepEqual(Object.keys(partial.adopted).sort(), ['42', '43', '45'])
+  assert.deepEqual(partial.unverified, ['44'])
+  assert.equal(partial.verified, false)
+  const none = verifyLoadedItems(sampleItems, { fileExists: true, hashes: {} })
+  assert.deepEqual(none.adopted, {})
+  assert.deepEqual(none.unverified.sort(), ['42', '43', '44', '45'])
+  // 和集合の性質: 採用されなかった issue 番号キーはすべて unverified に入る（読込側・検証側どちら由来でも）
+  const loaderOnly = { 42: sampleItems[42], 500: { status: 'monitoring', pr: 9 } }
+  const mixed = verifyLoadedItems(loaderOnly, { fileExists: true, hashes: { 42: SAMPLE_JQ_HASHES[42], 43: SAMPLE_JQ_HASHES[43] } })
+  assert.deepEqual(Object.keys(mixed.adopted), ['42'])
+  assert.deepEqual(mixed.unverified.sort(), ['43', '500'])
+  // 配列・文字列などオブジェクトでない items は添字をキーとして扱わない
+  assert.deepEqual(verifyLoadedItems('ab', { fileExists: true, hashes: {} }).unverified, [])
+  assert.deepEqual(verifyLoadedItems(['x', 'y'], { fileExists: true, hashes: {} }).unverified, [])
 })
 
 test('verifyLoadedItems: 検証未返却・ファイルなし申告・不正ハッシュ・特殊キーはすべて不採用', () => {
@@ -508,7 +527,7 @@ test('駆動部: 新規 PR は pr-create 直後・Merge ループ投入前に PR
   assert.match(branch, /status: 'blocked'/)
   assert.match(branch, /return false/)
   // 照合できない番号は再開用の pr へ保存せず、診断専用の unverifiedPr に残す（Codex P1）。
-  assert.match(branch, /updateState\(item\.number, \{ status: 'blocked', pr: 0, unverifiedPr: impl\.prNumber,/)
+  assert.match(branch, /const unverifiedPatch = \{ status: 'blocked', pr: 0, unverifiedPr: impl\.prNumber,/)
   assert.match(branch, /recordFailure\(\{ issue: item\.number, reason, status: 'blocked' \}\)/)
   // unverifiedPr を読むのは runImplement の照合（saved.unverifiedPr）だけ。isActiveMonitoring・
   // 前提完了プローブ・結果一覧は読まない。
@@ -610,4 +629,56 @@ test('loadState: 検証エージェントが haiku / sonnet とも不正な応�
 
 test('駆動部: state:load-verify の isValid は isValidStateVerifyResult を使う', () => {
   assert.match(source, /label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult/)
+})
+
+// pr-create 直後の PR 照合失敗ブロックを切り出して実行する（Codex P1: unverifiedPr 保存の成否確認）。
+async function runNewPrBindFailure(writeResults) {
+  const from = driverPart.indexOf('    const newPrBindIssue = await checkPrBinding(item, impl.prNumber, impl.branch)')
+  const to = driverPart.indexOf('\n    }\n', from) + 6
+  assert.ok(from > 0 && to > from)
+  const ctx = { writes: [], failures: [], stateUnverifiedIssues: new Set() }
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+  const fn = new AsyncFunction('item', 'impl', 'ctx', [
+    'const { stateUnverifiedIssues } = ctx',
+    "const checkPrBinding = async () => 'PR not found'",
+    'const sanitize = (x) => x',
+    'const log = () => {}',
+    'const recordFailure = (f) => ctx.failures.push(f)',
+    'let w = 0',
+    `const updateState = async (n, patch) => { ctx.writes.push(patch); return ${JSON.stringify(writeResults)}[w++] }`,
+    driverPart.slice(from, to),
+    "return 'proceed'",
+  ].join('\n'))
+  const ret = await fn({ number: 365 }, { prNumber: 1380, branch: 'feat/365-bar' }, ctx)
+  return { ret, ...ctx }
+}
+
+test('pr-create 後の照合失敗: unverifiedPr の保存に成功すれば再試行せず blocked で終える', async () => {
+  const r = await runNewPrBindFailure([true])
+  assert.equal(r.ret, false)
+  assert.equal(r.writes.length, 1)
+  assert.deepEqual({ ...r.writes[0], note: undefined }, { status: 'blocked', pr: 0, unverifiedPr: 1380, branch: 'feat/365-bar', note: undefined })
+  assert.equal(r.failures[0].status, 'blocked')
+  assert.equal(r.failures[0].pr, undefined)
+  assert.doesNotMatch(r.failures[0].reason, /Failed to save/)
+})
+
+test('pr-create 後の照合失敗: 保存に 1 回失敗したら 1 回だけ再試行する', async () => {
+  const r = await runNewPrBindFailure([false, true])
+  assert.equal(r.writes.length, 2)
+  assert.deepEqual(r.writes[0], r.writes[1])
+  assert.doesNotMatch(r.failures[0].reason, /Failed to save/)
+  assert.equal(r.stateUnverifiedIssues.size, 0)
+})
+
+test('pr-create 後の照合失敗: 再試行も失敗したら番号と手動確認の要否を英語で結果に残し state-unverified で終える', async () => {
+  const r = await runNewPrBindFailure([false, false])
+  assert.equal(r.ret, false)
+  assert.equal(r.writes.length, 2)
+  assert.equal(r.failures.length, 1)
+  assert.equal(r.failures[0].status, 'blocked')
+  assert.equal(r.failures[0].pr, undefined, '未照合の番号を結果の pr（前提完了プローブのヒント源）へ流さない')
+  assert.match(r.failures[0].reason, /^state-unverified: /)
+  assert.match(r.failures[0].reason, /Failed to save to the state file\. PR #1380 may exist; verify it manually before re-running\./)
+  assert.ok(r.stateUnverifiedIssues.has(365))
 })

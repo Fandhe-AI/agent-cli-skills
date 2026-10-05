@@ -2678,7 +2678,8 @@ function verifyLoadedItems(items, check) {
   const hashes = check?.fileExists === true && check.hashes && typeof check.hashes === 'object' ? check.hashes : null
   const adopted = {}
   const dropped = []
-  for (const [k, val] of Object.entries(items && typeof items === 'object' ? items : {})) {
+  const loaded = items && typeof items === 'object' && !Array.isArray(items) ? items : {}
+  for (const [k, val] of Object.entries(loaded)) {
     const h = hashes && Object.prototype.hasOwnProperty.call(hashes, k) ? hashes[k] : ''
     if (/^[1-9]\d*$/.test(k) && typeof h === 'string' && /^[0-9a-f]{64}$/.test(h) && sha256Hex(canonicalJson(val)) === h) {
       adopted[k] = val
@@ -2688,10 +2689,12 @@ function verifyLoadedItems(items, check) {
   }
   // 全件照合の成立には、検証側に存在する全キーの採用まで要求する（読込側が項目を黙って省いた
   // 場合も verified にしない。省かれた項目はラン末尾の削除判定で空扱いになり誤記録を招くため）。
-  // unverified: 実ファイルに存在する（検証側にキーがある）のに採用できなかった issue 番号。読込側が
-  // 捏造・省略した項目で、実ファイルには状態がある＝「状態なし」ではないため、呼び出し側は新規の
-  // 実装・PR 作成をさせない（state-unverified）。実ファイルに無いキーの捏造は単に捨てる。
-  const unverified = hashes === null ? [] : Object.keys(hashes).filter((k) => /^[1-9]\d*$/.test(k) && !Object.prototype.hasOwnProperty.call(adopted, k))
+  // unverified: 読込側・検証側のキー集合の和（issue 番号のみ）のうち採用できなかったもの。呼び出し側は
+  // 新規の実装・PR 作成をさせない（state-unverified）。読込側だけにあるキーも含める: 検証側の
+  // ハッシュが欠けただけ（取りこぼし）か読込側の捏造かを区別できず、ハッシュが無いことは「実ファイルに
+  // 無い」証明にならないため（Codex P1。保存済み PR を持つ項目を状態なしにして再実装させない）。
+  const unverified = hashes === null ? [] : [...new Set([...Object.keys(loaded), ...Object.keys(hashes)])]
+    .filter((k) => /^[1-9]\d*$/.test(k) && !Object.prototype.hasOwnProperty.call(adopted, k))
   return { adopted, dropped, unverified, verified: hashes !== null && unverified.length === 0 && dropped.length === 0 }
 }
 
@@ -6742,16 +6745,24 @@ async function runImplement(item) {
     impl = { ...impl, prNumber: prCreateResult.prNumber }
     // pr-create の prNumber は自己申告値。merge-exec は手順 5 で自ら gh issue close を実行し、ホスト
     // 側の merge-verify 照合はその後にしか走らないため、Merge ループへ渡す前に再開経路と同じ照合
-    // （checkPrBinding）を通す。不一致・取得不能は blocked で終端する（pr は記録し、次回ランの
-    // monitoring 再開で再照合する。照合を通らなければ再開せず状態なしとして扱われる）。
+    // （checkPrBinding）を通す。不一致・取得不能は blocked で終端する（番号は unverifiedPr に記録し、
+    // 次回ランの runImplement で再照合する）。
     const newPrBindIssue = await checkPrBinding(item, impl.prNumber, impl.branch)
     if (newPrBindIssue) {
-      const reason = `pr-create が報告した PR #${impl.prNumber} を本イシューに結び付けられないため Merge ループへ進まない（${sanitize(newPrBindIssue)}）`
+      let reason = `pr-create が報告した PR #${impl.prNumber} を本イシューに結び付けられないため Merge ループへ進まない（${sanitize(newPrBindIssue)}）`
       log(`⚠️ #${item.number}: ${reason}`)
       // 照合できない番号は再開用の pr には保存せず unverifiedPr に残す（Codex P1。isActiveMonitoring・
       // 前提完了プローブは pr だけを読む）。次回ランの runImplement が unverifiedPr を照合し、成立すれば
       // その番号で monitoring を再開し、不成立なら state-unverified で止める（新規の実装・PR 作成はしない）。
-      await updateState(item.number, { status: 'blocked', pr: 0, unverifiedPr: impl.prNumber, branch: impl.branch, note: reason })
+      // 保存は成否を確認し 1 回だけ再試行する（monitoring 遷移の書き込みと同じ扱い。Codex P1）。それでも
+      // 失敗した場合は番号が状態ファイルに残らず次回の自動再開を保証できないため、state-unverified の
+      // blocked で終え、番号と手動確認の要否を結果（英語）に残して人の確認に委ねる。
+      const unverifiedPatch = { status: 'blocked', pr: 0, unverifiedPr: impl.prNumber, branch: impl.branch, note: reason }
+      if (!(await updateState(item.number, unverifiedPatch)) && !(await updateState(item.number, unverifiedPatch))) {
+        reason = `state-unverified: ${reason}. Failed to save to the state file. PR #${impl.prNumber} may exist; verify it manually before re-running.`
+        stateUnverifiedIssues.add(item.number)
+        log(`⚠️ #${item.number}: ${reason}`)
+      }
       recordFailure({ issue: item.number, reason, status: 'blocked' })
       return false
     }

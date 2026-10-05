@@ -2678,7 +2678,8 @@ function verifyLoadedItems(items, check) {
   const hashes = check?.fileExists === true && check.hashes && typeof check.hashes === 'object' ? check.hashes : null
   const adopted = {}
   const dropped = []
-  for (const [k, val] of Object.entries(items && typeof items === 'object' ? items : {})) {
+  const loaded = items && typeof items === 'object' && !Array.isArray(items) ? items : {}
+  for (const [k, val] of Object.entries(loaded)) {
     const h = hashes && Object.prototype.hasOwnProperty.call(hashes, k) ? hashes[k] : ''
     if (/^[1-9]\d*$/.test(k) && typeof h === 'string' && /^[0-9a-f]{64}$/.test(h) && sha256Hex(canonicalJson(val)) === h) {
       adopted[k] = val
@@ -2691,7 +2692,9 @@ function verifyLoadedItems(items, check) {
 
 
 
-  const unverified = hashes === null ? [] : Object.keys(hashes).filter((k) => /^[1-9]\d*$/.test(k) && !Object.prototype.hasOwnProperty.call(adopted, k))
+
+  const unverified = hashes === null ? [] : [...new Set([...Object.keys(loaded), ...Object.keys(hashes)])]
+    .filter((k) => /^[1-9]\d*$/.test(k) && !Object.prototype.hasOwnProperty.call(adopted, k))
   return { adopted, dropped, unverified, verified: hashes !== null && unverified.length === 0 && dropped.length === 0 }
 }
 
@@ -6746,12 +6749,20 @@ async function runImplement(item) {
 
     const newPrBindIssue = await checkPrBinding(item, impl.prNumber, impl.branch)
     if (newPrBindIssue) {
-      const reason = `pr-create が報告した PR #${impl.prNumber} を本イシューに結び付けられないため Merge ループへ進まない（${sanitize(newPrBindIssue)}）`
+      let reason = `pr-create が報告した PR #${impl.prNumber} を本イシューに結び付けられないため Merge ループへ進まない（${sanitize(newPrBindIssue)}）`
       log(`⚠️ #${item.number}: ${reason}`)
 
 
 
-      await updateState(item.number, { status: 'blocked', pr: 0, unverifiedPr: impl.prNumber, branch: impl.branch, note: reason })
+
+
+
+      const unverifiedPatch = { status: 'blocked', pr: 0, unverifiedPr: impl.prNumber, branch: impl.branch, note: reason }
+      if (!(await updateState(item.number, unverifiedPatch)) && !(await updateState(item.number, unverifiedPatch))) {
+        reason = `state-unverified: ${reason}. Failed to save to the state file. PR #${impl.prNumber} may exist; verify it manually before re-running.`
+        stateUnverifiedIssues.add(item.number)
+        log(`⚠️ #${item.number}: ${reason}`)
+      }
       recordFailure({ issue: item.number, reason, status: 'blocked' })
       return false
     }
