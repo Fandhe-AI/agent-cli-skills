@@ -422,6 +422,21 @@ list_subs() {
   printf '%s' "${all}"
 }
 
+# 指定 issue の全子孫のうち open な issue 件数を再帰で数えて stdout へ出す。Step 5 は sub-issue への
+# 追加分解を許すため、直下だけでなく 3 階層目より深い open issue も総件数に含める。
+# 失敗時は非ゼロ。depth は循環・異常な深さへの安全弁（超過は失敗扱い）
+count_open_desc() {
+  local n="$1" depth="${2:-0}" subs open c cnum
+  [ "${depth}" -le 20 ] || return 1
+  subs=$(list_subs "${n}") || return 1
+  open=$(printf '%s' "${subs}" | jq '[.[] | select(.state == "open")] | length') || return 1
+  for cnum in $(printf '%s' "${subs}" | jq -r '.[].number'); do
+    c=$(count_open_desc "${cnum}" $((depth + 1))) || return 1
+    open=$((open + c))
+  done
+  printf '%s' "${open}"
+}
+
 # issue タイトルは非信頼データ。表を壊す | と改行だけ無害化する（バックスラッシュ二重化が先）
 CELL='gsub("[\r\n]+"; " ") | gsub("\\\\"; "\\\\") | gsub("\\|"; "\\|")'
 
@@ -438,9 +453,8 @@ for j in $(seq 0 $((DIRECT - 1))); do
   [ "${DIRECT}" -ge 1 ] || break
   CNUM=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" '.[$j].number')
   CTITLE=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" ".[\$j].title | ${CELL}")
-  GRAND=$(list_subs "${CNUM}") \
-    || { echo "エラー: #${CNUM} の sub-issues を取得できません。中止します。"; exit 1; }
-  GRAND_OPEN=$(printf '%s' "${GRAND}" | jq '[.[] | select(.state == "open")] | length')
+  GRAND_OPEN=$(count_open_desc "${CNUM}") \
+    || { echo "エラー: #${CNUM} の子孫を取得できません。中止します。"; exit 1; }
   TOTAL=$((TOTAL + GRAND_OPEN))
   if [ "${GRAND_OPEN}" -ge 1 ]; then DECOMP='sub-issue あり'; else DECOMP='-'; fi
   PHASE_SECTION+=$'\n'"| #${CNUM} | ${CTITLE} | ${DECOMP} |"
@@ -448,20 +462,23 @@ done
 PHASE_ROW="| Phase ${PHASE} | #${PHASE_NUMBER} ${PTITLE} | ${DIRECT} | ${TOTAL} |"
 
 # Phase N が既存本文にあれば、その行とセクションを置き換える（再利用した Phase 親の件数更新）。
-# 無ければ表の最終行（'| Phase N |' 行）の直後へ行を挿入し、本文末尾へセクションを追加する。
+# 無ければ表の最終行（'| Phase N |' 行）の直後へ行を挿入し、セクションは既存 Phase セクションと同じ位置
+# （'## 運用' の直前）へ挿入する（'## 運用' が無い本文のみ末尾へ追加する）。
 # 表に 'Phase N' 行が 1 つも無く追記位置を決められなければ awk が exit 3 で中止する（fail-closed）。
 # 行・セクションは ENVIRON で渡し、シェル構文・awk 構文として再評価させない
 NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SEC="${PHASE_SECTION}" awk '
   { L[NR] = $0; if ($0 ~ /^[|] Phase [0-9]+ [|]/) last = NR }
   END {
     ph = ENVIRON["PH"]; row_re = "^[|] Phase " ph " [|]"; sec_re = "^### Phase " ph ":"
-    row_done = 0; sec_done = 0; skip = 0
+    row_done = 0; sec_done = 0; skip = 0; has_sec = 0
+    for (k = 1; k <= NR; k++) if (L[k] ~ sec_re) has_sec = 1
     if (last == 0) exit 3
     for (i = 1; i <= NR; i++) {
       line = L[i]
       if (skip) { if (line ~ /^#+ /) { skip = 0; print "" } else continue }
       if (line ~ row_re) { if (!row_done) { print ENVIRON["ROW"]; row_done = 1 }; continue }
       if (line ~ sec_re) { if (!sec_done) { print ENVIRON["SEC"]; sec_done = 1 }; skip = 1; continue }
+      if (line ~ /^## 運用/ && !sec_done && !has_sec) { print ENVIRON["SEC"]; print ""; sec_done = 1 }
       print line
       if (i == last && !row_done) { print ENVIRON["ROW"]; row_done = 1 }
     }
@@ -505,6 +522,21 @@ list_subs() {
   printf '%s' "${all}"
 }
 
+# 指定 issue の全子孫のうち open な issue 件数を再帰で数えて stdout へ出す。Step 5 は sub-issue への
+# 追加分解を許すため、直下だけでなく 3 階層目より深い open issue も総件数に含める。
+# 失敗時は非ゼロ。depth は循環・異常な深さへの安全弁（超過は失敗扱い）
+count_open_desc() {
+  local n="$1" depth="${2:-0}" subs open c cnum
+  [ "${depth}" -le 20 ] || return 1
+  subs=$(list_subs "${n}") || return 1
+  open=$(printf '%s' "${subs}" | jq '[.[] | select(.state == "open")] | length') || return 1
+  for cnum in $(printf '%s' "${subs}" | jq -r '.[].number'); do
+    c=$(count_open_desc "${cnum}" $((depth + 1))) || return 1
+    open=$((open + c))
+  done
+  printf '%s' "${open}"
+}
+
 # trap を mktemp より先に登録する（2 回目以降の mktemp 失敗でも作成済みファイルを削除するため）
 BODY_FILE=''; SUMMARY_FILE=''; DETAIL_FILE=''
 trap 'rm -f "${BODY_FILE}" "${SUMMARY_FILE}" "${DETAIL_FILE}"' EXIT
@@ -539,9 +571,8 @@ for i in $(seq 0 $((PHASE_COUNT - 1))); do
     [ "${DIRECT}" -ge 1 ] || break
     CNUM=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" '.[$j].number')
     CTITLE=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" ".[\$j].title | ${CELL}")
-    GRAND=$(list_subs "${CNUM}") \
-      || { echo "エラー: #${CNUM} の sub-issues を取得できません。中止します。"; exit 1; }
-    GRAND_OPEN=$(printf '%s' "${GRAND}" | jq '[.[] | select(.state == "open")] | length')
+    GRAND_OPEN=$(count_open_desc "${CNUM}") \
+      || { echo "エラー: #${CNUM} の子孫を取得できません。中止します。"; exit 1; }
     TOTAL=$((TOTAL + GRAND_OPEN))
     if [ "${GRAND_OPEN}" -ge 1 ]; then DECOMP='sub-issue あり'; else DECOMP='-'; fi
     printf '| #%s | %s | %s |\n' "${CNUM}" "${CTITLE}" "${DECOMP}" >> "${DETAIL_FILE}"
