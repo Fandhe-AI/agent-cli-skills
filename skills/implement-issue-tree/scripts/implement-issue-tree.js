@@ -1952,7 +1952,7 @@ function prereqProbePrompt(targets, prHints) {
 
 const MERGE_VERIFY_SCHEMA = {
   type: 'object',
-  required: ['state', 'headRefOid'],
+  required: ['state', 'headRefOid', 'headRefName', 'baseRefName', 'isCrossRepository', 'closingIssues'],
   properties: {
     state: {
       type: 'string',
@@ -1967,10 +1967,17 @@ const MERGE_VERIFY_SCHEMA = {
       description: 'gh pr view --json mergeCommit の oid（任意）。取得できなければ空文字',
     },
 
-    headRefName: { type: 'string' },
-    baseRefName: { type: 'string' },
-    isCrossRepository: { type: 'boolean' },
-    closingIssues: { type: 'array', items: { type: 'integer' } },
+
+
+
+    headRefName: { type: 'string', description: 'headRefName; "" if unavailable' },
+    baseRefName: { type: 'string', description: 'baseRefName; "" if unavailable' },
+    isCrossRepository: { type: 'boolean', description: 'isCrossRepository; true if unavailable' },
+    closingIssues: {
+      type: 'array',
+      items: { type: 'integer' },
+      description: 'closingIssuesReferences numbers; [-1] if unavailable ([] = none)',
+    },
   },
 }
 
@@ -4452,8 +4459,8 @@ function mergeVerifyPrompt(item, impl) {
     '手順:',
     `1. 上記のコマンドを実行する。`,
     `2. 取得した値をそのまま返す: state（MERGED / OPEN / CLOSED）、headRefOid（40 桁 sha）、mergeCommitOid（mergeCommit.oid。無ければ空文字）、headRefName、baseRefName、isCrossRepository、closingIssues（closingIssuesReferences の number。gh 未対応なら除いて再実行し []）。値の解釈・加工・推測はしない。`,
-    `   期待値との一致判定はすべてホスト側で行う（期待 HEAD sha は本エージェントへ意図的に渡していない）。本エージェントは取得値をそのまま返すだけでよい。`,
-    `3. コマンドが失敗した・値を取得できなかった場合は state: "UNKNOWN"、headRefOid: ""（空文字）を返す（推測で MERGED を返さない。取得不能はホスト側が fail-closed で処理する）。`,
+    `   期待値との一致判定はすべてホスト側で行う（期待 HEAD sha は本エージェントへ意図的に渡していない）。`,
+    `3. コマンド失敗・取得不能時は state: "UNKNOWN"、headRefOid: ""（空文字）、headRefName: ""、baseRefName: ""、isCrossRepository: true、closingIssues: [-1] を返す（推測で MERGED を返さない。ホスト側が fail-closed で処理）。`,
     '返却: state / headRefOid / mergeCommitOid / headRefName / baseRefName / isCrossRepository / closingIssues。自由文の説明フィールドは返さない。',
   ].join('\n')
 }
