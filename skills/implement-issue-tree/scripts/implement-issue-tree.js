@@ -2891,11 +2891,16 @@ async function loadState() {
     const chunks = []
     for (let i = 0; i < need.length; i += 5) chunks.push(need.slice(i, i + 5))
     if (!chunks.length) break
-    const got = await Promise.all(chunks.map((ks) => runStateAgent(
-      `状態ファイル項目の読み取り（読み取り専用）。次をそのまま実行し、出力 JSON を items として返す（推測で埋めない）:\n` +
-        `jq -c --argjson k '${JSON.stringify(ks)}' '.items | with_entries(select(.key as $x | $k | index($x)))' ${STATE_FILE}`,
-      { label: 'state:load-fill', schema: STATE_FILL_SCHEMA, isValid: isValidStateFillResult },
-    )))
+
+
+    const got = []
+    for (let b = 0; b < chunks.length; b += 2) {
+      got.push(...await Promise.all(chunks.slice(b, b + 2).map((ks) => runStateAgent(
+        `状態ファイル項目の読み取り（読み取り専用）。次をそのまま実行し、出力 JSON を items として返す（推測で埋めない）:\n` +
+          `jq -c --argjson k '${JSON.stringify(ks)}' '.items | with_entries(select(.key as $x | $k | index($x)))' ${STATE_FILE}`,
+        { label: 'state:load-fill', schema: STATE_FILL_SCHEMA, isValid: isValidStateFillResult },
+      ))))
+    }
     items = { ...items }
     got.forEach(({ result: r }, i) => chunks[i].forEach((k) => { if (r && hasOwn(r.items, k)) items[k] = r.items[k] }))
     v = verifyLoadedItems(items, check)
