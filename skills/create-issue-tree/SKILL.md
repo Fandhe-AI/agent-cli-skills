@@ -404,18 +404,33 @@ CURRENT_BODY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body') \
 CURRENT_BODY=$(printf '%s\n' "${CURRENT_BODY}" | grep -vE '^<!-- granularity: [1-9][0-9]*h -->$')
 NEW_BODY="$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; printf '%s\n' "${CURRENT_BODY}")"
 
-# NEW_BODY の「Phase 別実装計画」表へ今回の Phase 行を追記し、
-# 「### Phase N」セクションを追加した本文を組み立てて NEW_BODY を更新する。
-# 既存ツリーの棚卸しを伴う場合は update-issue-tree への委譲でもよい
-# （追記内容は実ツリー〔sub_issues API〕から生成し、#<phaseN_number>・N 等を手書きで埋めない）
+# 今回の Phase 行（PHASE_ROW）と「### Phase N」セクション（PHASE_SECTION）は、実ツリー
+# （sub_issues API）から生成した確定値を設定しておく（#<phaseN_number>・N 等を手書きで埋めない。
+# 既存ツリーの棚卸しを伴う場合は update-issue-tree への委譲でもよい）。
+: "${PHASE_ROW:?PHASE_ROW 未設定}" "${PHASE_SECTION:?PHASE_SECTION 未設定}"
 
-# 検査は追記・更新を全て終えた最終本文（NEW_BODY）に対し、gh issue edit の直前で行う（fail-closed）。
+# 「Phase 別実装計画」表の最終行（'| Phase N |' 行）の直後へ PHASE_ROW を挿入し、
+# 本文末尾へ PHASE_SECTION を追加して最終本文 NEW_BODY を組み立てる。
+# 表の最終行が見つからなければ追記位置を決められないため中止する（fail-closed）
+LAST_ROW_LINE=$(printf '%s\n' "${NEW_BODY}" | grep -nE '^\| Phase [0-9]+ \|' | tail -n 1 | cut -d: -f1)
+[ -n "${LAST_ROW_LINE}" ] \
+  || { echo "エラー: 本文の Phase 別表に追記位置（'| Phase N |' 行）がありません。中止します。"; exit 1; }
+NEW_BODY="$(printf '%s\n' "${NEW_BODY}" | sed -n "1,${LAST_ROW_LINE}p"
+  printf '%s\n' "${PHASE_ROW}"
+  printf '%s\n' "${NEW_BODY}" | sed -n "$((LAST_ROW_LINE + 1)),\$p"
+  printf '\n%s\n' "${PHASE_SECTION}")"
+
+# 検査は追記を全て終えた最終本文（NEW_BODY）に対し、gh issue edit の直前で行う（fail-closed）。
 # 追記前に検査すると、追記部分に残ったプレースホルダーが検査を素通りする。
 # grep の終了コードは 0=ヒット / 1=なし / 2 以上=失敗。2 以上は「残りなし」へ倒さず中止する
 rc=0; printf '%s\n' "${NEW_BODY}" | grep -qE '<phase[0-9]*_number>|\(作成後に更新\)|#N([^0-9A-Za-z]|$)|^\|.*\|[[:space:]]*N[[:space:]]*(\||$)' || rc=$?
 [ "${rc}" -eq 1 ] \
   || { echo "エラー: 本文にプレースホルダーが残っている、または検査に失敗した（grep exit ${rc}）。ルート本文は更新しません。"; exit 1; }
-# 検査を通った NEW_BODY をそのまま gh issue edit へ渡す（検査後に本文を変更しない）
+
+# 検査を通った NEW_BODY を、検査直後に（本文を変更せず）そのまま gh issue edit へ渡す。
+# 本文は stdin 経由で渡し、一時ファイルを作らない
+printf '%s\n' "${NEW_BODY}" | gh issue edit "${ROOT_NUMBER}" --body-file - \
+  || { echo "エラー: ルート issue #${ROOT_NUMBER} の本文更新に失敗しました。"; exit 1; }
 ```
 
 `--root` 未指定（新規作成）の場合は以下で全体を更新する。
@@ -441,9 +456,11 @@ list_subs() {
   printf '%s' "${all}"
 }
 
+# trap を mktemp より先に登録する（2 回目以降の mktemp 失敗でも作成済みファイルを削除するため）
+BODY_FILE=''; SUMMARY_FILE=''; DETAIL_FILE=''
+trap 'rm -f "${BODY_FILE}" "${SUMMARY_FILE}" "${DETAIL_FILE}"' EXIT
 BODY_FILE=$(mktemp) && SUMMARY_FILE=$(mktemp) && DETAIL_FILE=$(mktemp) \
   || { echo "エラー: 一時ファイルを作成できません。中止します。"; exit 1; }
-trap 'rm -f "${BODY_FILE}" "${SUMMARY_FILE}" "${DETAIL_FILE}"' EXIT
 
 # issue タイトルは非信頼データ。表を壊す | と改行だけ無害化し、シェル展開には載せない。
 # 先にバックスラッシュを \\ へ二重化してから | を \| にする（順序が逆だと a\|b が a\\|b となり | が列区切り化する）
