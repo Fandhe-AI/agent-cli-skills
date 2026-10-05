@@ -136,7 +136,7 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
 monitoring 再開の前に、`pr-bind:#N` が保存済み PR の `state` / `headRefName` /
 `baseRefName` / `isCrossRepository` / `closingIssuesReferences` を取得し、ホストが照合する
 （`prBindingProblem`）。PR が実在し、fork からの PR でなく、base が `args.branch` で、期待ブランチが本 issue の命名で `headRefName` と一致し、
-`closingIssuesReferences` が空か本 issue を含む場合だけ再開する。一致しない場合も、`gh` の一時的な
+`closingIssuesReferences` が空か本 issue を含む場合だけ再開する。これら 4 項目（`headRefName` / `baseRefName` / `isCrossRepository` / `closingIssues`）は `MERGE_VERIFY_SCHEMA` の必須項目で、取得失敗時は照合が必ず不成立になる値（空文字 / `true` / `[-1]`）を返させる（空配列は「紐付け無し」の正当値で、失敗値にしない）。一致しない場合も、`gh` の一時的な
 失敗で照合できない場合も、再開も close も通常の実装（Recover・新規 PR 作成）もせず、状態ファイルを
 書き換えないまま `state-unverified` の `blocked`（halt 非カウント）で終える（MERGED / CLOSED の
 既存 PR は open PR の検索に掛からず、通常の実装へ進むと再実装・重複 PR になり得るため。元の再開情報の

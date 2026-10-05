@@ -51,6 +51,7 @@ const SLICE_EXPORTS = [
   'applyPrereqTransitions',
   'normalizeBlockedReason',
   'MERGE_SCHEMA',
+  'MERGE_VERIFY_SCHEMA',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 const {
@@ -67,6 +68,7 @@ const {
   applyPrereqTransitions,
   normalizeBlockedReason,
   MERGE_SCHEMA,
+  MERGE_VERIFY_SCHEMA,
 } = await import(pathToFileURL(slicePath).href)
 
 const nodeSha = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
@@ -846,4 +848,73 @@ test('ホストは monitor の blockedReason: "unbound" を enum 外扱いにせ
   const norm = driverPart.indexOf('lastBlockedReason = normalizeBlockedReason(m?.blockedReason)')
   const branch = driverPart.indexOf("if (lastBlockedReason === 'unbound') {", norm)
   assert.ok(norm > 0 && branch > norm && branch - norm < 900)
+})
+
+// ---------------------------------------------------------------------------
+// MERGE_VERIFY_SCHEMA: PR 照合（prBindingProblem）に使う取得値は必須項目（Bugbot 指摘への対応）。
+// 任意項目のままだと、構造化出力が省いた正当な PR が fail-closed の照合不成立になる。
+// ---------------------------------------------------------------------------
+const BINDING_FIELDS = ['headRefName', 'baseRefName', 'isCrossRepository', 'closingIssues']
+const VALID_VERIFY = { state: 'OPEN', headRefOid: 'a'.repeat(40), headRefName: 'feat/365-bar', baseRefName: 'main', isCrossRepository: false, closingIssues: [365] }
+
+test('MERGE_VERIFY_SCHEMA: 照合に使う 4 項目が required に入り、properties に定義され description を持つ', () => {
+  assert.ok(MERGE_VERIFY_SCHEMA.required.includes('state'))
+  assert.ok(MERGE_VERIFY_SCHEMA.required.includes('headRefOid'))
+  for (const f of BINDING_FIELDS) {
+    assert.ok(MERGE_VERIFY_SCHEMA.required.includes(f), `${f} が required にない`)
+    assert.ok(MERGE_VERIFY_SCHEMA.properties[f], `${f} が properties にない`)
+    assert.ok(MERGE_VERIFY_SCHEMA.properties[f].description, `${f} に description がない`)
+  }
+  // 4 項目のいずれかを省いた出力は required 違反（スキーマ側で省略を許さない）
+  for (const f of BINDING_FIELDS) {
+    const omitted = { ...VALID_VERIFY }
+    delete omitted[f]
+    assert.ok(MERGE_VERIFY_SCHEMA.required.some((k) => !(k in omitted)), `${f} 省略が required 違反にならない`)
+  }
+  assert.ok(MERGE_VERIFY_SCHEMA.required.every((k) => k in VALID_VERIFY))
+})
+
+test('prBindingProblem: 4 項目が揃った正当な値は空文字（結び付く）', () => {
+  assert.equal(prBindingProblem(365, 'feat/365-bar', VALID_VERIFY), '')
+  assert.equal(prBindingProblem(365, 'feat/365-bar', { ...VALID_VERIFY, state: 'MERGED', closingIssues: [] }), '')
+})
+
+test('prBindingProblem: 各項目の取得失敗値（プロンプトが指示する値）は必ず不成立になる', () => {
+  // 取得失敗値: headRefName / baseRefName は空文字、isCrossRepository は true、closingIssues は [-1]
+  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { ...VALID_VERIFY, headRefName: '' }), '')
+  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { ...VALID_VERIFY, baseRefName: '' }), '')
+  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { ...VALID_VERIFY, isCrossRepository: true }), '')
+  // closingIssues の失敗値 [-1] は空配列（紐付け無しの正当値）と区別され、不成立になる
+  assert.equal(prBindingProblem(365, 'feat/365-bar', { ...VALID_VERIFY, closingIssues: [] }), '')
+  assert.equal(prBindingProblem(365, 'feat/365-bar', { ...VALID_VERIFY, closingIssues: [-1] }), 'closingIssues')
+  // コマンド全体の失敗値（state UNKNOWN + 全項目の失敗値）
+  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { state: 'UNKNOWN', headRefOid: '', headRefName: '', baseRefName: '', isCrossRepository: true, closingIssues: [-1] }), '')
+})
+
+test('mergeVerifyPrompt: 4 項目の取得・返却と各失敗値を明示し、スキーマの description と一致する', () => {
+  const p = mergeVerifyPrompt({ number: 365 }, { prNumber: 1366 })
+  const ret = p.split('\n').find((l) => l.startsWith('返却: '))
+  assert.ok(ret, '返却行が見つからない')
+  for (const f of MERGE_VERIFY_SCHEMA.required) assert.ok(ret.includes(f), `返却に ${f} がない`)
+  assert.ok(p.includes('--json state,headRefOid,mergeCommit,headRefName,baseRefName,closingIssuesReferences,isCrossRepository'))
+  const step3 = p.split('\n').find((l) => l.startsWith('3. '))
+  assert.ok(step3)
+  for (const frag of ['state: "UNKNOWN"', 'headRefOid: ""', 'headRefName: ""', 'baseRefName: ""', 'isCrossRepository: true', 'closingIssues: [-1]']) {
+    assert.ok(step3.includes(frag), `手順 3 に ${frag} がない`)
+  }
+  // 手順 2 の fallback（gh が closingIssuesReferences 未対応）でも取得不能を [] に化けさせない
+  const step2 = p.split('\n').find((l) => l.startsWith('2. '))
+  assert.ok(step2, '手順 2 が見つからない')
+  assert.ok(step2.includes('[-1]'), '手順 2 に [-1] がない')
+  assert.ok(!/再実行し\s*\[\]/.test(step2), '手順 2 が fallback で [] を返す指示を残している')
+  assert.ok(MERGE_VERIFY_SCHEMA.properties.closingIssues.description.includes('[-1]'))
+  assert.ok(MERGE_VERIFY_SCHEMA.properties.isCrossRepository.description.includes('true'))
+})
+
+test('MERGE_VERIFY_SCHEMA の 3 利用箇所（pr-bind / merged-probe / merge-verify）は mergeVerifyPrompt とペアで使い、結果を prBindingProblem へ渡す', () => {
+  assert.equal([...source.matchAll(/schema: MERGE_VERIFY_SCHEMA/g)].length, 3)
+  assert.equal([...source.matchAll(/= await agent\(mergeVerifyPrompt\(/g)].length, 3)
+  assert.match(source, /prBindingProblem\(item\.number, branch, bind\)/)
+  assert.match(source, /prBindingProblem\(item\.number, impl\.branch, mergedProbe\)/)
+  assert.match(source, /prBindingProblem\(item\.number, impl\.branch, v\)/)
 })
