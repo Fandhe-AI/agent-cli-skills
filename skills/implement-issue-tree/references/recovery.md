@@ -100,9 +100,68 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
 ただし文言は「初期化に失敗した」という誤ったメッセージにはせず、未返却専用の案内（ファイル自体の
 破損ではないため、そのまま再実行すればよい旨）にする。
 
+### 状態ファイル読込の内容照合と PR 照合
+
+`state:load` が大きな状態ファイルをツール出力のプレビューでしか読めず、残りの items を推測で
+埋めて返す事故があった（PR 番号を issue 番号からの連番で捏造し、件数は実ファイルと一致）。
+件数や型の検査では検出できないため、読込結果は内容で照合する。
+
+- 別コンテキストの `state:load-verify` が、項目ごとに `jq -jcS '.items[$k]'` の sha256 を計算して
+  返す。このエージェントには読込結果を渡さない（鸚鵡返し・結託を防ぐ）
+- ホストは読込結果の各項目を `jq -jcS` と同じ正規形へ直列化し、純 JS の sha256 で再計算する。
+  一致した項目だけを採用する（`verifyLoadedItems`）
+- 検証側は実ファイルの数値キー一覧の sha256（`keysSha256`）と件数（`keysCount`）も jq で直接
+  計算し、コマンド出力の先頭の `KEYS` 行からそのまま転記して返す（先頭に置くのはプレビューが
+  切れても必ず見えるようにするため）。ホストは返された `hashes` のキー一覧から同じ正規形を作って
+  照合し、件数も突き合わせて、両エージェントが同じ項目を読み落とした場合や件数を合わせた捏造を
+  検出する。検証エージェントが `KEYS` 行を見ずに自分のキー一覧から sha256 を計算して返す故意の
+  偽装はプロンプト指示だけでは完全には防げない（残余リスク）
+- 照合自体が成立しない（`state:load-verify` が haiku / sonnet とも不成立、既存のはずのファイルを
+  検証側が見つけられない、またはキー一覧の sha256 が一致しない）場合はランを停止する（新規着手 0 件）。そのまま再実行し、
+  解消しなければ状態ファイルを退避して内容を確認する。ファイルが無く新規作成した場合だけは
+  状態なしで続行する
+- 照合が成立し、読込側・検証側のキー集合の和のうち採用できなかった issue（不一致・検証側の
+  ハッシュ欠落・読込側だけにあるキーを含む）は `state-unverified` として
+  `blocked`（halt 非カウント）で止め、新規の実装・PR 作成をさせない（依存する後続も止まる）。
+  実装手順 0b の既存 PR 検出は open PR の検索に依存し、MERGED / CLOSED の PR や検索に掛からない
+  PR を拾えないため、重複防止をそれだけに委ねない。状態ファイル自体は書き換えない
+- 検証側にハッシュが無いことは「実ファイルに無い」証明にならない（取りこぼしと捏造を区別
+  できない）ため、読込側だけにあるキーも状態なしにはしない
+- 高水位（容量予約）が読込側と検証側で食い違う場合も停止する（0 へ置き換えて続行すると、過去の
+  実測に基づく容量予約を失い並列着手時に容量を過小評価するため）
+- ラン開始時・末尾の孤立 worktree の記録・削除は、全項目を照合できた場合だけ行う
+- 依存ブロック・未着手で `blocked` にする項目でも、`state-unverified` や branch が別 issue の
+  命名の項目は保存済み `pr` を 0 でクリアしない（次回の照合で止めるため。`prClearPatch`）
+
+monitoring 再開の前に、`pr-bind:#N` が保存済み PR の `state` / `headRefName` /
+`baseRefName` / `isCrossRepository` / `closingIssuesReferences` を取得し、ホストが照合する
+（`prBindingProblem`）。PR が実在し、fork からの PR でなく、base が `args.branch` で、期待ブランチが本 issue の命名で `headRefName` と一致し、
+`closingIssuesReferences` が空か本 issue を含む場合だけ再開する。一致しない場合も、`gh` の一時的な
+失敗で照合できない場合も、再開も close も通常の実装（Recover・新規 PR 作成）もせず、状態ファイルを
+書き換えないまま `state-unverified` の `blocked`（halt 非カウント）で終える（MERGED / CLOSED の
+既存 PR は open PR の検索に掛からず、通常の実装へ進むと再実装・重複 PR になり得るため。元の再開情報の
+まま人が確認して再試行できる）。主な判別は `headRefName` が担う（`closingIssuesReferences` は
+PR 本文から導出され鸚鵡返しされ得るため補助条件に留める）。pr-create が報告した新規 PR も、
+Merge ループへ渡す前に同じ照合を通し、不一致なら `blocked` で終端する（PR 番号は照合中のクラッシュで
+失わないよう照合より先に、再開用の `pr` ではなく `unverifiedPr` として保存し、照合が通れば `pr` へ
+昇格させる。この保存は成否を確認して 1 回だけ再試行し、それでも失敗したら照合へ進まず、番号と手動
+確認の要否を結果に英語で残して `state-unverified` で終える。次回ランは `unverifiedPr` を照合し、
+成立すればその番号で monitoring を再開して `pr` へ昇格させ、不成立なら `state-unverified` で止めて
+新規の実装・PR 作成をさせない）。monitor が手順 1 の照合不成立を返した場合
+（`blockedReason: "unbound"`）も、状態ファイルを書き換えずに `state-unverified` の `blocked` で終える。`state-unverified` で止めた issue の保存済み `pr` は、前提完了プローブの
+ホスト既知 PR に渡さない（照合できない MERGED PR を根拠に前提を完了扱いにしない。人手で issue が
+CLOSED になった場合の遷移は従来どおり）。opt-in 前の MERGED 確認で
+照合が不一致の場合も `blocked` で終端する。merge-verify による
+merged（`already-merged` を含む）の受理にも同じ照合を課し、monitor・merge-exec の手順 1 にも同じ
+照合を指示する。再開判定（`isActiveMonitoring`）は、保存済みブランチがその issue の命名
+（`<type>/<N>-`）であることも要求する。保存済みブランチが別 issue の命名のエントリも、
+`runImplement` の冒頭で同じく状態を書き換えずに `state-unverified` の `blocked` で終え、Recover・
+再開の対象にしない（メモリ上だけ捨てると、マージ更新の `updateState` で別 issue の `pr` / `worktree`
+が新しい branch と組み合わさって状態ファイルに残るため）。
+
 `blockedReason` は状態ファイルへ永続化されるフィールドではない。
 `isActiveMonitoring()` は `status`（`'monitoring'` または `'blocked'`）と `pr > 0` と `branch`
-の妥当性のみで再開判定しており、`blockedReason` を読まない。同一ラン内のメモリ上変数として
+の妥当性（issue の命名一致を含む）のみで再開判定しており、`blockedReason` を読まない。同一ラン内のメモリ上変数として
 note・ログ文言の合成にのみ使われる。
 
 **Recover の判断軸は Review とは別**である。Review は「正しいか・マージできるか」を判定するのに対し、Recover は「この途中作業から継続するのが妥当か」を判断する。動かない・未完成でも方向が妥当なら continue（残りは Implement が完成させる）。未 commit 変更は Recover が WIP commit として branch へ退避してから worktree を削除するため、continue / discard どちらの経路でもデータを失わない。worktree の削除は continue / discard いずれでも退避完了を申告・実測の 2 段で検証してから行う（Step 2 の削除ゲート参照）。
