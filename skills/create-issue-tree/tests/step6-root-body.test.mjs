@@ -101,13 +101,19 @@ function run(ctx) {
   return { r, calls, body, leftovers: readdirSync(ctx.tmp) }
 }
 
-const issue = (number, title, state = 'open') => ({ number, title, state })
+const issue = (number, title, state = 'open', labels = []) => ({
+  number,
+  title,
+  state,
+  labels: labels.map((name) => ({ name })),
+})
 
 const BASE = () => ({
-  'sub_100_1.json': [issue(101, 'feat: 基盤整備'), issue(102, 'feat: 機能追加')],
+  'sub_100_1.json': [issue(101, 'feat: 基盤整備', 'open', ['phase:1']), issue(102, 'feat: 機能追加', 'open', ['phase:2'])],
   'sub_101_1.json': [issue(111, 'feat: DB 設計'), issue(112, 'feat: API 雛形')],
   'sub_102_1.json': [issue(121, 'feat: 画面')],
   'sub_111_1.json': [issue(1111, 'feat: テーブル定義')],
+  'sub_1111_1.json': [],
   'sub_112_1.json': [],
   'sub_121_1.json': [],
 })
@@ -215,6 +221,35 @@ test('(h) 本文を含む大きな sub_issues 応答（引数長上限超え）�
     assert.equal(r.status, 0, r.stderr)
     assert.equal(calls.length, 1)
     assert.match(body, /\| #3000 \| feat: 最終 \| - \|/)
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('(i) 部分起票（Phase 2・3 のみ）でも実 Phase 番号で表と見出しを生成する', () => {
+  const fx = BASE()
+  fx['sub_100_1.json'] = [issue(101, 'feat: 基盤整備', 'open', ['phase:2']), issue(102, 'feat(phase-3): 機能追加')]
+  const ctx = setup(fx)
+  try {
+    const { r, body } = run(ctx)
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(body, /\| Phase 2 \| #101 /)
+    assert.match(body, /\| Phase 3 \| #102 /)
+    assert.match(body, /### Phase 2: feat: 基盤整備/)
+    assert.ok(!/Phase 1/.test(body), 'Phase 1 を誤記録しない')
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('(j) Phase 番号を決定できない親があれば edit せず中止する', () => {
+  const fx = BASE()
+  fx['sub_100_1.json'] = [issue(101, 'feat: 基盤整備'), issue(102, 'feat: 機能追加', 'open', ['phase:2'])]
+  const ctx = setup(fx)
+  try {
+    const { r, calls } = run(ctx)
+    assert.notEqual(r.status, 0)
+    assert.equal(calls.length, 0)
   } finally {
     rmSync(ctx.dir, { recursive: true, force: true })
   }

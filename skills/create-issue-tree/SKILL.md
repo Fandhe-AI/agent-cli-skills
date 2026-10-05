@@ -556,6 +556,15 @@ PHASE_COUNT=$(printf '%s' "${PHASES}" | jq 'length')
 for i in $(seq 0 $((PHASE_COUNT - 1))); do
   PNUM=$(printf '%s' "${PHASES}" | jq -r --argjson i "${i}" '.[$i].number')
   PTITLE=$(printf '%s' "${PHASES}" | jq -r --argjson i "${i}" ".[\$i].title | ${CELL}")
+  # Phase 番号は位置（i + 1）で採番しない。--phase 2 等の部分起票では最初の親が Phase 2 になるため、
+  # Step 4 で付与した phase:N ラベルから取得する（無ければ title の feat(phase-N): から取得）。
+  # どちらからも決められなければ誤記録せず中止する（fail-closed）
+  PNO=$(printf '%s' "${PHASES}" | jq -r --argjson i "${i}" '.[$i] as $p
+    | ([$p.labels[]?.name | select(test("^phase:[0-9]+$")) | sub("^phase:"; "")][0]
+       // ($p.title | capture("^feat\\(phase-(?<n>[0-9]+)\\):").n) // empty)') \
+    || PNO=''
+  [[ "${PNO}" =~ ^[0-9]+$ ]] \
+    || { echo "エラー: Phase 親 #${PNUM} の Phase 番号（phase:N ラベル / タイトル）を決定できません。中止します。"; exit 1; }
   CHILDREN=$(list_subs "${PNUM}") \
     || { echo "エラー: Phase 親 #${PNUM} の sub-issues を取得できません。中止します。"; exit 1; }
   CHILDREN=$(printf '%s' "${CHILDREN}" | jq '[.[] | select(.state == "open")]')
@@ -563,7 +572,7 @@ for i in $(seq 0 $((PHASE_COUNT - 1))); do
   TOTAL=${DIRECT}
 
   {
-    printf '\n### Phase %s: %s\n\n' "$((i + 1))" "${PTITLE}"
+    printf '\n### Phase %s: %s\n\n' "${PNO}" "${PTITLE}"
     printf '| Issue | タイトル | 分解 |\n|-------|---------|------|\n'
   } >> "${DETAIL_FILE}"
 
@@ -578,7 +587,7 @@ for i in $(seq 0 $((PHASE_COUNT - 1))); do
     printf '| #%s | %s | %s |\n' "${CNUM}" "${CTITLE}" "${DECOMP}" >> "${DETAIL_FILE}"
   done
 
-  printf '| Phase %s | #%s %s | %s | %s |\n' "$((i + 1))" "${PNUM}" "${PTITLE}" "${DIRECT}" "${TOTAL}" >> "${SUMMARY_FILE}"
+  printf '| Phase %s | #%s %s | %s | %s |\n' "${PNO}" "${PNUM}" "${PTITLE}" "${DIRECT}" "${TOTAL}" >> "${SUMMARY_FILE}"
 done
 
 {
