@@ -1,7 +1,7 @@
 // 長時間コマンドのバックグラウンド化による StructuredOutput 未返却（Issue #531）の回帰テスト。
 //
 // 契約: (A) COMMON へ前景実行・Monitor 禁止・StructuredOutput 義務の共通指示を入れる、
-// (B) monitor と Merge ループ fix は agentRetryOnce 経由で 1 回だけ再試行する（最大 2 回で有界）、
+// (B) monitor のみ agentRetryOnce 経由で 1 回だけ再試行する（fix は push 済みの可能性があり再実行しない）（最大 2 回で有界）、
 // (C) review の worktreePath は schema で required のまま、プロンプトで必須性を明記する。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -87,9 +87,10 @@ test('B: 2 回目が例外ならその例外を throw する', async () => {
   assert.equal(calls.length, 2)
 })
 
-test('B: monitor と Merge ループ fix は agentRetryOnce 経由で、後段の null 分岐が残る', () => {
+test('B: monitor のみ agentRetryOnce 経由（fix は再実行しない）で、後段の null 分岐が残る', () => {
   assert.ok(driverPart.includes('m = await agentRetryOnce(monitorPrompt('))
-  assert.ok(driverPart.includes('f = await agentRetryOnce(fixPrompt('))
+  assert.ok(driverPart.includes('f = await agent(fixPrompt('))
+  assert.ok(!driverPart.includes('agentRetryOnce(fixPrompt('))
   assert.ok(!driverPart.includes('m = await agent(monitorPrompt('))
   assert.ok(driverPart.includes("'agent-output-missing'"))
   assert.ok(driverPart.includes('fix エージェントが StructuredOutput を返さなかった'))

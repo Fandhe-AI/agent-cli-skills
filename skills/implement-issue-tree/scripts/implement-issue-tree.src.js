@@ -2515,7 +2515,8 @@ const STATE_RETURN_DIRECTIVE =
 // 契約: 例外を投げない。STATE_AGENT_MODEL_CHAIN の全モデルで isValid を満たせなければ
 // { result: null, outputMissing: true } を返す。プロンプト文字列は全試行で同一（バイト一致）に
 // し、patch を組み直さない（呼び出し側の冪等性の前提。同一手順の再適用は安全という設計に依拠する）。
-// monitor / Merge ループ fix 用の 1 回再試行（Issue #531）。契約は agent() と同一（結果を返す・
+// monitor 用の 1 回再試行（Issue #531）。fix には使わない（書き込みを伴い、1 回目が push 済みの可能性があるため再実行すると
+// pushed:false の no-op を返し、ホストが push と thread resolve を把握できなくなる）。契約は agent() と同一（結果を返す・
 // 例外は throw・null は null）。1 回目が null か例外なら同一プロンプト・同一 opts（label のみ
 // :retry）で 1 回だけ再実行し、2 回目の結果を最終結果とする。最大 2 回で有界。
 async function agentRetryOnce(prompt, opts) {
@@ -7472,7 +7473,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       let f = null
       let fixAgentError = null
       try {
-        f = await agentRetryOnce(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
+        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
       } catch (e) {
         fixAgentError = e
       }

@@ -2518,6 +2518,7 @@ const STATE_RETURN_DIRECTIVE =
 
 
 
+
 async function agentRetryOnce(prompt, opts) {
   try {
     const first = await agent(prompt, opts)
@@ -7472,7 +7473,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       let f = null
       let fixAgentError = null
       try {
-        f = await agentRetryOnce(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
+        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
       } catch (e) {
         fixAgentError = e
       }
