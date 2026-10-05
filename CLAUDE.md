@@ -39,6 +39,8 @@ skills/                               -- スキル本体（各ディレクトリ
   project-sync-issues/
   project-archive-done/
   contribute-skill/
+    scripts/                          -- skills-contribute.sh（upstream 反映スクリプト。コピー前に対象スキルの作業ツリー clean 検査を行う）
+    tests/                            -- node:test 回帰テスト（未コミット・未追跡・ignore 対象の検出時にコピー前で中止すること）
   sync-skills-lock/
 .claude/
   agents/

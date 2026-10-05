@@ -109,6 +109,38 @@ assert_no_symlink_components() {
   return 0
 }
 
+# コピー元（貢献元の対象スキルディレクトリ）が HEAD と完全に一致することを検査する（fail-closed）。
+# 呼び出し元: Step 3 の直前（主ゲート）と cp -R の直前（clone を挟んだ後の再検査）。
+# 事前レビュー（Step 3）が見せるのはコミット済み差分だけだが、cp -R は作業ツリーの現物を
+# コピーするため、未コミット・未追跡・ignore 対象のファイルがレビューを経ずに upstream PR へ混入し得る。
+# それを入口で止める。
+# - --untracked-files=all を明示する: 省略するとユーザー設定 status.showUntrackedFiles=no で
+#   未追跡が黙って隠れる（fail-open）。
+# - --ignored を付ける: cp -R は ignore 対象（.env 等）もコピーし、upstream 側の .gitignore は
+#   貢献元と異なり得るため、貢献元でだけ ignore されている秘密情報が git add で stage され得る。
+# - git status は clean でも dirty でも終了コード 0 を返すため、判定は出力の非空で行う。
+#   非ゼロ終了（git リポジトリ外など）は clean ではなく検査失敗として中止する。
+# - local 宣言と代入を分ける: local out=$(...) は local の終了コードで git の失敗を隠す。
+# - 表示するのはパスと状態記号のみで、ファイル内容は出さない（検出器を漏洩経路にしない）。
+# 残存する境界: git update-index --assume-unchanged / --skip-worktree を付けたファイルの変更は
+# git status も git diff も検出できない。同一ユーザーが意図的に設定した状態であり対象外とする。
+# 引数 repo_dir: 貢献元リポジトリのルート（Step 3 前は '.'、clone へ cd した後は ORIG_DIR）。
+assert_local_skill_clean() {
+  local repo_dir="$1" out rc=0
+  out=$(git -C "${repo_dir}" status --porcelain=v1 --untracked-files=all --ignored -- "${LOCAL_SKILL_DIR}") || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "エラー: ${LOCAL_SKILL_DIR} の作業ツリー状態を確認できません（git status exit ${rc}）。clean と扱わず中止します。" >&2
+    return 1
+  fi
+  if [[ -n "${out}" ]]; then
+    echo "エラー: ${LOCAL_SKILL_DIR} に最新コミット（HEAD）と一致しないファイルがあります。コミットするか取り除いてから再実行してください。中止します。" >&2
+    echo "  （行頭 '??' = 未追跡 / '!!' = ignore 対象 / それ以外 = 未コミットの変更）" >&2
+    printf '%s\n' "${out}" >&2
+    return 1
+  fi
+  return 0
+}
+
 # ローカルスキルのパス確認（override: 環境変数 LOCAL_SKILL_DIR が設定済みならそれを検証して使う）
 if [[ -n "${LOCAL_SKILL_DIR:-}" ]]; then
   case "${LOCAL_SKILL_DIR}" in
@@ -160,6 +192,9 @@ fi
 
 echo "==> contribute-skill: ${SKILL_NAME} → ${UPSTREAM_REPO}"
 echo ""
+
+# コピー元が HEAD と一致しない場合は、mktemp・clone・差分表示より前に中止する
+assert_local_skill_clean . || exit 1
 
 # Step 3: 変更内容を確認する
 echo "--- ローカル変更履歴 ---"
@@ -346,6 +381,10 @@ if [[ -d "${DELETE_PARENT}" ]]; then
     rm -rf -- "${DELETE_LEAF}"
   )
 fi
+# Step 6 の clone（ネットワーク越し）を挟んだ間に貢献元の作業ツリーが変わった場合を拾う再検査
+# （この時点の cwd は clone 側のため ORIG_DIR で貢献元を指す）。中止しても触ったのは
+# 一時 clone 内の宛先削除だけで、貢献元にも upstream にも影響しない
+assert_local_skill_clean "${ORIG_DIR}" || exit 1
 mkdir -p "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}"
 cp -R "${ORIG_DIR}/${LOCAL_SKILL_DIR}/." "${WORKDIR}/upstream/${UPSTREAM_SKILL_PATH}/"
 
