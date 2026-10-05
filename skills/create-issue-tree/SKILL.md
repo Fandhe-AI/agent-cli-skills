@@ -404,21 +404,70 @@ CURRENT_BODY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body') \
 CURRENT_BODY=$(printf '%s\n' "${CURRENT_BODY}" | grep -vE '^<!-- granularity: [1-9][0-9]*h -->$')
 NEW_BODY="$(printf '<!-- granularity: %s -->\n' "${GRANULARITY}"; printf '%s\n' "${CURRENT_BODY}")"
 
-# 今回の Phase 行（PHASE_ROW）と「### Phase N」セクション（PHASE_SECTION）は、実ツリー
-# （sub_issues API）から生成した確定値を設定しておく（#<phaseN_number>・N 等を手書きで埋めない。
-# 既存ツリーの棚卸しを伴う場合は update-issue-tree への委譲でもよい）。
-: "${PHASE_ROW:?PHASE_ROW 未設定}" "${PHASE_SECTION:?PHASE_SECTION 未設定}"
+# 今回の Phase 行（PHASE_ROW）と「### Phase N: ...」セクション（PHASE_SECTION）を実ツリー
+# （sub_issues API）から生成する。#<phaseN_number>・N 等は手書きで埋めない。
+# 前提: PHASE（Step 4 で確定した Phase 番号 N）と PHASE_NUMBER（その Phase 親 issue 番号）を
+# このフェンスの前に設定しておく（コードフェンスは独立シェルで実行され得る）。
+: "${PHASE:?PHASE 未設定}" "${PHASE_NUMBER:?PHASE_NUMBER 未設定}"
 
-# 「Phase 別実装計画」表の最終行（'| Phase N |' 行）の直後へ PHASE_ROW を挿入し、
-# 本文末尾へ PHASE_SECTION を追加して最終本文 NEW_BODY を組み立てる。
-# 表の最終行が見つからなければ追記位置を決められないため中止する（fail-closed）
-LAST_ROW_LINE=$(printf '%s\n' "${NEW_BODY}" | grep -nE '^\| Phase [0-9]+ \|' | tail -n 1 | cut -d: -f1)
-[ -n "${LAST_ROW_LINE}" ] \
+# 指定 issue の sub-issues 全件（JSON 配列）をページングで取得する。失敗時は非ゼロ
+list_subs() {
+  local n="$1" page=1 res all='[]'
+  while true; do
+    res=$(gh api "repos/{owner}/{repo}/issues/${n}/sub_issues?per_page=100&page=${page}") || return 1
+    all=$({ printf '%s' "${all}"; printf '%s' "${res}"; } | jq -s '.[0] + .[1]') || return 1
+    [ "$(printf '%s' "${res}" | jq 'length')" -lt 100 ] && break
+    page=$((page + 1))
+  done
+  printf '%s' "${all}"
+}
+
+# issue タイトルは非信頼データ。表を壊す | と改行だけ無害化する（バックスラッシュ二重化が先）
+CELL='gsub("[\r\n]+"; " ") | gsub("\\\\"; "\\\\") | gsub("\\|"; "\\|")'
+
+PTITLE=$(gh issue view "${PHASE_NUMBER}" --json title --jq ".title | ${CELL}") \
+  || { echo "エラー: Phase 親 #${PHASE_NUMBER} を取得できません。中止します。"; exit 1; }
+CHILDREN=$(list_subs "${PHASE_NUMBER}") \
+  || { echo "エラー: Phase 親 #${PHASE_NUMBER} の sub-issues を取得できません。中止します。"; exit 1; }
+CHILDREN=$(printf '%s' "${CHILDREN}" | jq '[.[] | select(.state == "open")]')
+DIRECT=$(printf '%s' "${CHILDREN}" | jq 'length')
+TOTAL=${DIRECT}
+
+PHASE_SECTION="### Phase ${PHASE}: ${PTITLE}"$'\n\n'"| Issue | タイトル | 分解 |"$'\n'"|-------|---------|------|"
+for j in $(seq 0 $((DIRECT - 1))); do
+  [ "${DIRECT}" -ge 1 ] || break
+  CNUM=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" '.[$j].number')
+  CTITLE=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" ".[\$j].title | ${CELL}")
+  GRAND=$(list_subs "${CNUM}") \
+    || { echo "エラー: #${CNUM} の sub-issues を取得できません。中止します。"; exit 1; }
+  GRAND_OPEN=$(printf '%s' "${GRAND}" | jq '[.[] | select(.state == "open")] | length')
+  TOTAL=$((TOTAL + GRAND_OPEN))
+  if [ "${GRAND_OPEN}" -ge 1 ]; then DECOMP='sub-issue あり'; else DECOMP='-'; fi
+  PHASE_SECTION+=$'\n'"| #${CNUM} | ${CTITLE} | ${DECOMP} |"
+done
+PHASE_ROW="| Phase ${PHASE} | #${PHASE_NUMBER} ${PTITLE} | ${DIRECT} | ${TOTAL} |"
+
+# Phase N が既存本文にあれば、その行とセクションを置き換える（再利用した Phase 親の件数更新）。
+# 無ければ表の最終行（'| Phase N |' 行）の直後へ行を挿入し、本文末尾へセクションを追加する。
+# 表に 'Phase N' 行が 1 つも無く追記位置を決められなければ awk が exit 3 で中止する（fail-closed）。
+# 行・セクションは ENVIRON で渡し、シェル構文・awk 構文として再評価させない
+NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SEC="${PHASE_SECTION}" awk '
+  { L[NR] = $0; if ($0 ~ /^[|] Phase [0-9]+ [|]/) last = NR }
+  END {
+    ph = ENVIRON["PH"]; row_re = "^[|] Phase " ph " [|]"; sec_re = "^### Phase " ph ":"
+    row_done = 0; sec_done = 0; skip = 0
+    if (last == 0) exit 3
+    for (i = 1; i <= NR; i++) {
+      line = L[i]
+      if (skip) { if (line ~ /^#+ /) { skip = 0; print "" } else continue }
+      if (line ~ row_re) { if (!row_done) { print ENVIRON["ROW"]; row_done = 1 }; continue }
+      if (line ~ sec_re) { if (!sec_done) { print ENVIRON["SEC"]; sec_done = 1 }; skip = 1; continue }
+      print line
+      if (i == last && !row_done) { print ENVIRON["ROW"]; row_done = 1 }
+    }
+    if (!sec_done) { print ""; print ENVIRON["SEC"] }
+  }') \
   || { echo "エラー: 本文の Phase 別表に追記位置（'| Phase N |' 行）がありません。中止します。"; exit 1; }
-NEW_BODY="$(printf '%s\n' "${NEW_BODY}" | sed -n "1,${LAST_ROW_LINE}p"
-  printf '%s\n' "${PHASE_ROW}"
-  printf '%s\n' "${NEW_BODY}" | sed -n "$((LAST_ROW_LINE + 1)),\$p"
-  printf '\n%s\n' "${PHASE_SECTION}")"
 
 # 検査は追記を全て終えた最終本文（NEW_BODY）に対し、gh issue edit の直前で行う（fail-closed）。
 # 追記前に検査すると、追記部分に残ったプレースホルダーが検査を素通りする。
