@@ -632,7 +632,7 @@ open のサブイシューが残っている場合、または受入基準が未
 | `plan:declared-deps-*`（本文の依存宣言の機械抽出） | haiku | low | 定型コマンド出力の転記（判断なし） |
 | `plan:out-of-tree-deps-*` / `plan:root-ancestors-<round>`（ツリー外前提の state・ルートの祖先チェーンの機械取得） | haiku | low | 定型コマンド出力の転記（判断なし）。ツリー外の前提がある場合のみ起動。祖先チェーンはラウンドごとにラベルが変わる（`plan:root-ancestors-1` 等、最大 5 ラウンド） |
 | `detect:external-checks`（外部チェック判定） | haiku | low | 定型コマンド集計 |
-| `state:load` / `state:load-verify` / `state:update` / `state:cleanup` / `state:init-all` / `state:high-water` | haiku（未返却時 sonnet へ 1 回フォールバック） | low | jq の機械処理。StructuredOutput 未返却（例外・null・schema 不適合）が続く場合のみ同一プロンプトで sonnet へ 1 回フォールバックする。`state:load-verify` は読込結果を項目ごとの sha256 で照合する独立エージェント（詳細は `references/recovery.md`） |
+| `state:load` / `state:load-verify` / `state:load-fill` / `state:update` / `state:cleanup` / `state:init-all` / `state:high-water` | haiku（未返却時 sonnet へ 1 回フォールバック） | low | jq の機械処理。StructuredOutput 未返却（例外・null・schema 不適合）が続く場合のみ同一プロンプトで sonnet へ 1 回フォールバックする。`state:load-verify` は読込結果を項目ごとの sha256 で照合する独立エージェント。`state:load-fill` は返らなかったキーをホスト組み立ての jq で 5 件ずつ再取得する（詳細は `references/recovery.md`） |
 | `nonce:seed`（境界トークン用 seed 生成） | haiku | low | `/dev/urandom` 読み出しのみ（driver に乱数源が無いため。下記「非信頼データの扱い」2 を参照） |
 | `recover:#N`（中断作業の継続可否判断） | （指定なし＝セッション継承） | medium | 計画判断相当（Plan と同じ軸で判断） |
 | `plan:#N`（per-issue 計画立案） | （指定なし＝セッション継承） | high | 最も複雑な計画立案 |
