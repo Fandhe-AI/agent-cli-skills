@@ -233,7 +233,7 @@ function installAgentStub(behavior) {
   const calls = []
   globalThis.agent = async (prompt, opts) => {
     calls.push({ prompt, opts })
-    return behavior(opts)
+    return behavior(opts, prompt)
   }
   const logs = []
   globalThis.log = (msg) => { logs.push(msg) }
@@ -252,7 +252,9 @@ test('loadState: 捏造 items（PR = issue + 1006）は採用せず state-unveri
   assert.deepEqual(r.items, {})
   assert.equal(r.verified, false)
   assert.deepEqual(r.unverified, [42, 43, 44, 45])
-  assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load-verify'])
+  // 不一致の項目は再取得の対象になる。fill が値を返さない（null）ため最大 2 巡で打ち切られ、不採用のまま止まる。
+  assert.deepEqual(calls.slice(0, 2).map((c) => c.opts.label), ['state:load', 'state:load-verify'])
+  assert.ok(calls.slice(2).every((c) => c.opts.label.startsWith('state:load-fill')))
   // 検証エージェントには読込結果を渡さない（鸚鵡返し防止）。
   assert.ok(!calls[1].prompt.includes('1049'), '検証プロンプトに読込結果が混入している')
   assert.ok(logs.some((l) => /state-unverified 4 件/.test(l)))
@@ -318,6 +320,104 @@ test('loadState: 新規作成（items: {}）は検証成立で verified: true', 
   assert.equal(r.highWaterVersion, 2)
 })
 
+// Issue #535: state:load が先頭 5 件しか返さない場合、ホストが欠落キーを特定して 5 件ずつ再取得する。
+const makeItems = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [String(100 + i), { status: 'monitoring', pr: 1000 + i, branch: `fix/${100 + i}-x` }]))
+const hashesOf = (items) => Object.fromEntries(Object.entries(items).map(([k, v]) => [k, sha256Hex(canonicalJson(v))]))
+const verifyResult = (hashes) => ({ fileExists: true, hashes, keysSha256: keysOf(hashes), keysCount: Object.keys(hashes).length, highWaterBytes: 0, highWaterVersion: 0 })
+// fill プロンプトの --argjson k '[...]' から要求キーを取り出し、実ファイル相当の items から返す。
+const requestedKeys = (prompt) => JSON.parse(/--argjson k '(\[[^']*\])'/.exec(prompt)[1])
+
+test('loadState: 30 件の状態ファイルで state:load が先頭 5 件しか返しても、ホストが 5 件ずつ再取得して全件採用する', async () => {
+  const all = makeItems(30)
+  const hashes = hashesOf(all)
+  const first5 = Object.fromEntries(Object.entries(all).slice(0, 5))
+  const fillCalls = []
+  installAgentStub((opts, prompt) => {
+    if (opts.label === 'state:load') return loadResult(first5)
+    if (opts.label === 'state:load-verify') return verifyResult(hashes)
+    fillCalls.push(prompt)
+    return { items: Object.fromEntries(requestedKeys(prompt).map((k) => [k, all[k]])) }
+  })
+  const r = await loadState()
+  assert.equal(Object.keys(r.items).length, 30)
+  assert.deepEqual(r.items, all)
+  assert.equal(r.verified, true)
+  assert.deepEqual(r.unverified, [])
+  // 25 件 ÷ 5 件ずつ = 5 回。各プロンプトは要求キーだけを含み、ホストが組み立てた jq コマンドである。
+  assert.equal(fillCalls.length, 5)
+  const seen = fillCalls.flatMap(requestedKeys)
+  assert.equal(new Set(seen).size, 25)
+  assert.ok(seen.every((k) => !(k in first5)))
+  assert.ok(fillCalls.every((p) => requestedKeys(p).length <= 5 && /jq -c --argjson k /.test(p) && p.includes('.items | with_entries')))
+})
+
+test('loadState: 再取得が値を返さない場合は 2 巡で打ち切り、欠落キーを state-unverified として明示する（throw しない）', async () => {
+  const all = makeItems(12)
+  const { calls, logs } = installAgentStub((opts) => {
+    if (opts.label === 'state:load') return loadResult(Object.fromEntries(Object.entries(all).slice(0, 5)))
+    if (opts.label === 'state:load-verify') return verifyResult(hashesOf(all))
+    return { items: {} }
+  })
+  const r = await loadState()
+  assert.equal(r.verified, false)
+  assert.deepEqual(r.unverified, Array.from({ length: 7 }, (_, i) => 105 + i))
+  assert.deepEqual(Object.keys(r.items).sort(), ['100', '101', '102', '103', '104'])
+  // 7 件 = 2 塊 × 2 巡。fill は schema 適合応答（空 items）なのでフォールバックしない。
+  assert.equal(calls.filter((c) => c.opts.label === 'state:load-fill').length, 4)
+  assert.ok(logs.some((l) => /state-unverified 7 件/.test(l)))
+})
+
+test('loadState: 初回が改変して返した項目も、再取得の正しい値で救済される', async () => {
+  const all = makeItems(8)
+  const tampered = { ...all, 103: { ...all[103], pr: 9999 } }
+  installAgentStub((opts, prompt) => {
+    if (opts.label === 'state:load') return loadResult(tampered)
+    if (opts.label === 'state:load-verify') return verifyResult(hashesOf(all))
+    return { items: Object.fromEntries(requestedKeys(prompt).map((k) => [k, all[k]])) }
+  })
+  const r = await loadState()
+  assert.deepEqual(r.items, all)
+  assert.equal(r.verified, true)
+})
+
+test('loadState: 再取得が要求外のキー・捏造値を返しても採用しない', async () => {
+  const all = makeItems(7)
+  const { logs } = installAgentStub((opts, prompt) => {
+    if (opts.label === 'state:load') return loadResult(Object.fromEntries(Object.entries(all).slice(0, 5)))
+    if (opts.label === 'state:load-verify') return verifyResult(hashesOf(all))
+    const fabricated = Object.fromEntries(requestedKeys(prompt).map((k) => [k, { ...all[k], pr: 1 }]))
+    return { items: { ...fabricated, 999: { status: 'monitoring', pr: 1 }, __proto__x: {} } }
+  })
+  const r = await loadState()
+  assert.equal(r.verified, false)
+  assert.deepEqual(Object.keys(r.items).sort(), ['100', '101', '102', '103', '104'])
+  assert.ok(!('999' in r.items))
+  assert.ok(logs.some((l) => /state-unverified 2 件/.test(l)))
+})
+
+test('loadState: 再取得プロンプトには数値キー以外（__proto__・コマンド片）を埋め込まない', async () => {
+  const all = makeItems(6)
+  // JSON.parse は __proto__ を own プロパティとして生成する（実応答の再現）。
+  const hashes = JSON.parse(JSON.stringify({ ...hashesOf(all), '1; rm -rf x': 'a'.repeat(64) }).replace(/}$/, `,"__proto__":"${'b'.repeat(64)}"}`))
+  const fills = []
+  installAgentStub((opts, prompt) => {
+    if (opts.label === 'state:load') return loadResult(Object.fromEntries(Object.entries(all).slice(0, 5)))
+    if (opts.label === 'state:load-verify') return verifyResult(hashes)
+    fills.push(prompt)
+    return { items: {} }
+  })
+  await loadState().catch(() => {})
+  assert.ok(fills.every((p) => !p.includes('rm -rf') && !p.includes('__proto__')))
+})
+
+test('loadState: 全件が初回で返れば再取得エージェントは起動しない（回帰）', async () => {
+  const all = makeItems(30)
+  const { calls } = installAgentStub((opts) => (opts.label === 'state:load' ? loadResult(all) : verifyResult(hashesOf(all))))
+  const r = await loadState()
+  assert.equal(r.verified, true)
+  assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load-verify'])
+})
+
 // ---------------------------------------------------------------------------
 // 層 3: プロンプト・駆動部の配線
 // ---------------------------------------------------------------------------
@@ -333,6 +433,7 @@ test('検証プロンプトは項目ごとの jq -jcS ハッシュを要求し�
   assert.match(calls[1].prompt, /shasum -a 256/)
   assert.match(calls[0].prompt, /5 件ずつ/)
   assert.match(calls[0].prompt, /推測で埋めない/)
+  assert.match(calls[0].prompt, /ホストが再取得/)
 })
 
 test('mergeVerifyPrompt は headRefName・baseRefName・closingIssuesReferences を取得させる', () => {
