@@ -49,6 +49,8 @@ const SLICE_EXPORTS = [
   'checkPrBinding',
   'isValidStateVerifyResult',
   'applyPrereqTransitions',
+  'normalizeBlockedReason',
+  'MERGE_SCHEMA',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 const {
@@ -63,6 +65,8 @@ const {
   checkPrBinding,
   isValidStateVerifyResult,
   applyPrereqTransitions,
+  normalizeBlockedReason,
+  MERGE_SCHEMA,
 } = await import(pathToFileURL(slicePath).href)
 
 const nodeSha = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
@@ -806,4 +810,40 @@ test('駆動部: monitor の PR 照合不成立（blockedReason: unbound）は�
   assert.match(body, /recordFailure\(\{ issue: item\.number, reason: `state-unverified: /)
   assert.match(body, /status: 'blocked' \}\)\s*return false/)
   assert.doesNotMatch(body, /updateState|failMergeTerminal/, '状態ファイルを書き換えてはならない（failed 終端・pr クリアをしない）')
+})
+
+// monitor プロンプト内の blockedReason の契約（Bugbot Medium。fandhe-container#1387 で検出）。
+// 手順 1 と MERGE_SCHEMA は "unbound" を受け付けるのに、手順 7 と「返却:」が "quality" /
+// "unrecoverable" だけを挙げていると、monitor はそちらに従って unbound を返さず、ホスト側の
+// unbound 経路（状態を書き換えない state-unverified の blocked）が動かない。
+test('monitorPrompt: blockedReason の値を列挙する文面（手順 7・返却）は "unbound" を手順 1 の照合不成立に限って明示する', () => {
+  const p = monitorPrompt({ number: 365 }, { prNumber: 1366, branch: 'feat/365-bar' }, [], true, false)
+  const lines = p.split('\n')
+  const step7 = lines.find((l) => l.startsWith('7. '))
+  const ret = lines.find((l) => l.startsWith('返却: '))
+  assert.ok(step7 && ret, '手順 7 / 返却の行が見つからない')
+  assert.ok(step7.includes('手順 1 の PR 照合不成立に限り "unbound"、再監視・再実行で解消し得るなら "quality"'))
+  assert.ok(ret.includes('"quality"・"unrecoverable"、手順 1 の PR 照合不成立に限り "unbound"。省略・enum 外は'))
+  // blockedReason の選び方を一般的に説明する行（手順 7 の「必ず付与し」・返却の「blockedReason（」）は
+  // 必ず "unbound" も挙げる。特定の state に 1 つの値を指定するだけの行（手順 1 の CLOSED、3e）は対象外。
+  const enumerating = lines.filter((l) => l.includes('blockedReason を必ず付与し') || l.includes('blockedReason（'))
+  assert.ok(enumerating.length >= 2)
+  for (const l of enumerating) assert.ok(l.includes('"unbound"'), `unbound を挙げていない列挙行: ${l.slice(0, 40)}`)
+  // 旧文面（2 値だけの列挙）が残っていない
+  assert.ok(!p.includes('"quality" または "unrecoverable"'))
+  // schema の enum をすべてプロンプトが返却値として挙げている
+  for (const v of MERGE_SCHEMA.properties.blockedReason.enum) assert.ok(ret.includes(`"${v}"`), `返却に ${v} がない`)
+})
+
+test('ホストは monitor の blockedReason: "unbound" を enum 外扱いにせずそのまま受理する', () => {
+  assert.deepEqual(MERGE_SCHEMA.properties.blockedReason.enum, ['quality', 'unrecoverable', 'unbound'])
+  assert.equal(normalizeBlockedReason('unbound'), 'unbound')
+  assert.equal(normalizeBlockedReason('quality'), 'quality')
+  // 省略・enum 外は従来どおり unrecoverable
+  assert.equal(normalizeBlockedReason(undefined), 'unrecoverable')
+  assert.equal(normalizeBlockedReason('Unbound'), 'unrecoverable')
+  // 正規化の直後に unbound を分岐し、unrecoverable の終端分類（failed）へ流さない
+  const norm = driverPart.indexOf('lastBlockedReason = normalizeBlockedReason(m?.blockedReason)')
+  const branch = driverPart.indexOf("if (lastBlockedReason === 'unbound') {", norm)
+  assert.ok(norm > 0 && branch > norm && branch - norm < 900)
 })
