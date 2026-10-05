@@ -465,8 +465,19 @@ PHASE_ROW="| Phase ${PHASE} | #${PHASE_NUMBER} ${PTITLE} | ${DIRECT} | ${TOTAL} 
 # 無ければ表の最終行（'| Phase N |' 行）の直後へ行を挿入し、セクションは既存 Phase セクションと同じ位置
 # （'## 運用' の直前）へ挿入する（'## 運用' が無い本文のみ末尾へ追加する）。
 # 表に 'Phase N' 行が 1 つも無く追記位置を決められなければ awk が exit 3 で中止する（fail-closed）。
-# 行・セクションは ENVIRON で渡し、シェル構文・awk 構文として再評価させない
-NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SEC="${PHASE_SECTION}" awk '
+# セクションは全子 issue の行を含み環境変数・引数の長さ上限を超え得るため、一時ファイル経由で渡す。
+# 行（1 行）は ENVIRON で渡し、いずれもシェル構文・awk 構文として再評価させない
+# trap を mktemp より先に登録する（mktemp 失敗時も作成済みファイルを削除するため）
+SEC_FILE=''
+trap 'rm -f "${SEC_FILE}"' EXIT
+SEC_FILE=$(mktemp) && printf '%s\n' "${PHASE_SECTION}" > "${SEC_FILE}" \
+  || { echo "エラー: Phase セクションの一時ファイルを作成できません。中止します。"; exit 1; }
+NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="${SEC_FILE}" awk '
+  BEGIN {
+    sec = ""; n = 0
+    while ((rc = (getline sl < ENVIRON["SECF"])) > 0) { sec = (n++ ? sec "\n" : "") sl }
+    if (rc < 0) exit 4
+  }
   { L[NR] = $0; if ($0 ~ /^[|] Phase [0-9]+ [|]/) last = NR }
   END {
     ph = ENVIRON["PH"]; row_re = "^[|] Phase " ph " [|]"; sec_re = "^### Phase " ph ":"
@@ -475,14 +486,14 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SEC="$
     if (last == 0) exit 3
     for (i = 1; i <= NR; i++) {
       line = L[i]
-      if (skip) { if (line ~ /^#+ /) { skip = 0; print "" } else continue }
+      if (skip) { if (line ~ /^(#|##|###) /) { skip = 0; print "" } else continue }
       if (line ~ row_re) { if (!row_done) { print ENVIRON["ROW"]; row_done = 1 }; continue }
-      if (line ~ sec_re) { if (!sec_done) { print ENVIRON["SEC"]; sec_done = 1 }; skip = 1; continue }
-      if (line ~ /^## 運用/ && !sec_done && !has_sec) { print ENVIRON["SEC"]; print ""; sec_done = 1 }
+      if (line ~ sec_re) { if (!sec_done) { print sec; sec_done = 1 }; skip = 1; continue }
+      if (line ~ /^## 運用/ && !sec_done && !has_sec) { print sec; print ""; sec_done = 1 }
       print line
       if (i == last && !row_done) { print ENVIRON["ROW"]; row_done = 1 }
     }
-    if (!sec_done) { print ""; print ENVIRON["SEC"] }
+    if (!sec_done) { print ""; print sec }
   }') \
   || { echo "エラー: 本文の Phase 別表に追記位置（'| Phase N |' 行）がありません。中止します。"; exit 1; }
 
