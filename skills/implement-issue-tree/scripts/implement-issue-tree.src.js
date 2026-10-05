@@ -5303,6 +5303,10 @@ const {
   verified: savedItemsVerified,
   unverified: stateUnverified,
 } = await loadState()
+// state-unverified で止めた issue の集合（dispatch 前の内容照合不一致 + runImplement の stopUnverified）。
+// これらの issue の保存済み pr は未照合のため、前提完了プローブのホスト既知 PR（prHints）に渡さない
+// （照合に失敗した MERGED PR を根拠に前提を done にして後続を解放しないため。Bugbot High）。
+const stateUnverifiedIssues = new Set(stateUnverified)
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
 // Tree フェーズ: ツリー取得 → 外部チェック観測・構成確定の順で実行する。
@@ -6081,8 +6085,9 @@ async function runVerifyClose(item) {
 
 // 末端イシューの実装 → 監視 → 修正 → マージ。implement / fix は worktree 隔離で並列実行する
 async function runImplement(item) {
-  // 状態ファイルから保存済みの情報を取得（再開判定に使用）
-  const saved = savedItems[String(item.number)] ?? {}
+  // 状態ファイルから保存済みの情報を取得（再開判定に使用）。未照合 PR（unverifiedPr）の照合が
+  // 成立した場合だけ、その番号を pr へ昇格させた値へ差し替える。
+  let saved = savedItems[String(item.number)] ?? {}
 
   // opt-in テスト記録ゲート（Issue #495）。Tree フェーズで許可形式外と判定された宣言が
   // 1 件でもあれば、monitoring 再開判定より前に実装・再開のいずれにも進まず blocked で
@@ -6121,18 +6126,30 @@ async function runImplement(item) {
   // 新しい branch と組み合わさって残り、通常経路へ進むと MERGED / CLOSED の既存 PR を open PR 検索で
   // 見つけられず再実装・重複 PR になり得るため。元の再開情報のまま人が確認して再試行できる。
   const stopUnverified = (why) => {
+    stateUnverifiedIssues.add(item.number)
     recordFailure({ issue: item.number, reason: `state-unverified: ${why}。状態ファイルは変更していない。確認のうえ同じ引数で再実行すること`, status: 'blocked' })
     return false
   }
   if (saved.branch && !branchMatchesIssue(String(saved.branch), item.number)) {
     return stopUnverified('状態ファイルの branch が本イシューの命名ではない')
   }
+  // pr-create 直後の照合に失敗して unverifiedPr だけを残した項目（pr: 0。Codex P1）は、照合が
+  // 成立するまで新規の実装・PR 作成をさせない。照合できればその番号で monitoring を再開する
+  // （pr への昇格と unverifiedPr の消去は下の再開時の状態同期書き込みで永続化する）。
+  let bound = false
+  if (!(saved.pr > 0) && Number.isInteger(saved.unverifiedPr) && saved.unverifiedPr > 0) {
+    const why = await checkPrBinding(item, saved.unverifiedPr, saved.branch)
+    if (why) return stopUnverified(`未照合の PR #${saved.unverifiedPr} を本イシューに結び付けられない（${sanitize(why)}）`)
+    saved = { ...saved, pr: saved.unverifiedPr }
+    savedItems[String(item.number)] = saved
+    bound = true
+  }
   // monitoring/blocked（pr 保存済み）からの再開は impl をスキップして monitor ループから開始
   // する。branch 不正なら通常 impl からやり直す。判定は isActiveMonitoring に一元化する。
   const isResumeFromMonitoring = isActiveMonitoring(item.number)
   // 再開前に保存済み PR がこの issue のものかを独立に照合する（実在・fork でない・headRefName・
   // closingIssuesReferences。checkPrBinding）。照合できなければ上の stopUnverified で止める。
-  if (isResumeFromMonitoring) {
+  if (isResumeFromMonitoring && !bound) {
     const why = await checkPrBinding(item, saved.pr, saved.branch)
     if (why) return stopUnverified(`状態ファイルの PR #${saved.pr} を本イシューに結び付けられない（${sanitize(why)}）`)
   }
@@ -6170,7 +6187,7 @@ async function runImplement(item) {
     if (saved.status !== 'monitoring') {
       // ここは表示同期で再開情報は永続化済み。書き込み失敗でも再開対象であり続け重複 PR 作成には
       // 倒れないため、警告ログに留めて監視を継続する。
-      const resumeOk = await updateState(item.number, { status: 'monitoring', pr: impl.prNumber })
+      const resumeOk = await updateState(item.number, { status: 'monitoring', pr: impl.prNumber, unverifiedPr: 0 })
       if (!resumeOk) {
         log(`⚠️ issue #${item.number}: monitoring 再開時の status 同期書き込みに失敗（再開情報は保持済みのため監視は継続する）`)
       }
@@ -6731,9 +6748,9 @@ async function runImplement(item) {
     if (newPrBindIssue) {
       const reason = `pr-create が報告した PR #${impl.prNumber} を本イシューに結び付けられないため Merge ループへ進まない（${sanitize(newPrBindIssue)}）`
       log(`⚠️ #${item.number}: ${reason}`)
-      // 照合できない番号は再開用の pr には保存せず、診断専用の unverifiedPr に残す（Codex P1。再開判定・
-      // 前提完了プローブは pr だけを読む）。次回ランは pr: 0 のため再開せず、Recover → 既存 PR 検出 →
-      // pr-create の再利用経路で同じ PR に到達し、ここで再照合される。
+      // 照合できない番号は再開用の pr には保存せず unverifiedPr に残す（Codex P1。isActiveMonitoring・
+      // 前提完了プローブは pr だけを読む）。次回ランの runImplement が unverifiedPr を照合し、成立すれば
+      // その番号で monitoring を再開し、不成立なら state-unverified で止める（新規の実装・PR 作成はしない）。
       await updateState(item.number, { status: 'blocked', pr: 0, unverifiedPr: impl.prNumber, branch: impl.branch, note: reason })
       recordFailure({ issue: item.number, reason, status: 'blocked' })
       return false
@@ -6753,7 +6770,7 @@ async function runImplement(item) {
     {
       // pushChecksStarted / pushMergeable は Issue #479 の観測記録（診断用。再開時の判定には
       // 使わない — 再開後は monitor がサーバー側の実値を再観測する）。
-      const monitoringPatch = { status: 'monitoring', pr: impl.prNumber, pushChecksStarted: prCreateChecksStarted, pushMergeable: prCreatePushMergeable }
+      const monitoringPatch = { status: 'monitoring', pr: impl.prNumber, unverifiedPr: 0, pushChecksStarted: prCreateChecksStarted, pushMergeable: prCreatePushMergeable }
       const monitoringAttempt1 = await updateStateDetailed(item.number, monitoringPatch)
       const monitoringAttempt = monitoringAttempt1.ok ? monitoringAttempt1 : await updateStateDetailed(item.number, monitoringPatch)
       const monitoringSawSystemicFailure = sawSystemicStateWriteFailure(monitoringAttempt1, monitoringAttempt)
@@ -8056,7 +8073,7 @@ for (const item of queue) {
     // 実ファイルに状態があるのに内容照合できなかった issue（state-unverified）は、既存 PR・再開情報を
     // 見失ったまま新規の実装・PR 作成へ進まないよう blocked で止める（halt 非カウント・状態ファイルは
     // 書き換えない）。failedSet に入れ後続の依存も止める（Codex P1）。
-    if (stateUnverified.includes(item.number)) {
+    if (stateUnverifiedIssues.has(item.number)) {
       const note = 'state-unverified: 状態ファイルの項目を内容照合できなかったため新規の実装・PR 作成をしない。同じ引数で再実行し、解消しなければ状態ファイルの該当項目を手動確認すること'
       results.push({ issue: item.number, status: 'blocked', note })
       failedSet.add(item.number)
@@ -8666,6 +8683,8 @@ async function probePrereqCompletion(targets) {
   // の順で解決する（results は直近の実行結果、savedItems はラン開始時スナップショット）。
   const prHints = {}
   for (const d of targets) {
+    // state-unverified の issue の pr は未照合のため 'merged' 判定の根拠にしない（CLOSED 遷移は従来どおり）。
+    if (stateUnverifiedIssues.has(d)) continue
     const fromResults = results.find((r) => r.issue === d)?.pr
     const fromSaved = savedItems[String(d)]?.pr
     const hint = Number.isInteger(fromResults) && fromResults > 0 ? fromResults : fromSaved

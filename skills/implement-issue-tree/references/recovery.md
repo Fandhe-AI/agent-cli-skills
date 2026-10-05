@@ -131,7 +131,11 @@ PR が実在し、fork からの PR でなく、期待ブランチが本 issue �
 まま人が確認して再試行できる）。主な判別は `headRefName` が担う（`closingIssuesReferences` は
 PR 本文から導出され鸚鵡返しされ得るため補助条件に留める）。pr-create が報告した新規 PR も、
 Merge ループへ渡す前に同じ照合を通し、不一致なら `blocked` で終端する（照合できない PR 番号は
-再開用の `pr` には保存せず、診断専用の `unverifiedPr` に残す）。opt-in 前の MERGED 確認で
+再開用の `pr` には保存せず `unverifiedPr` に残す。次回ランは `unverifiedPr` を照合し、成立すれば
+その番号で monitoring を再開して `pr` へ昇格させ、不成立なら `state-unverified` で止めて新規の
+実装・PR 作成をさせない）。`state-unverified` で止めた issue の保存済み `pr` は、前提完了プローブの
+ホスト既知 PR に渡さない（照合できない MERGED PR を根拠に前提を完了扱いにしない。人手で issue が
+CLOSED になった場合の遷移は従来どおり）。opt-in 前の MERGED 確認で
 照合が不一致の場合も `blocked` で終端する。merge-verify による
 merged（`already-merged` を含む）の受理にも同じ照合を課し、monitor・merge-exec の手順 1 にも同じ
 照合を指示する。再開判定（`isActiveMonitoring`）は、保存済みブランチがその issue の命名

@@ -5303,6 +5303,10 @@ const {
   verified: savedItemsVerified,
   unverified: stateUnverified,
 } = await loadState()
+
+
+
+const stateUnverifiedIssues = new Set(stateUnverified)
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
 
 
@@ -6082,7 +6086,8 @@ async function runVerifyClose(item) {
 
 async function runImplement(item) {
 
-  const saved = savedItems[String(item.number)] ?? {}
+
+  let saved = savedItems[String(item.number)] ?? {}
 
 
 
@@ -6121,6 +6126,7 @@ async function runImplement(item) {
 
 
   const stopUnverified = (why) => {
+    stateUnverifiedIssues.add(item.number)
     recordFailure({ issue: item.number, reason: `state-unverified: ${why}。状態ファイルは変更していない。確認のうえ同じ引数で再実行すること`, status: 'blocked' })
     return false
   }
@@ -6129,10 +6135,21 @@ async function runImplement(item) {
   }
 
 
+
+  let bound = false
+  if (!(saved.pr > 0) && Number.isInteger(saved.unverifiedPr) && saved.unverifiedPr > 0) {
+    const why = await checkPrBinding(item, saved.unverifiedPr, saved.branch)
+    if (why) return stopUnverified(`未照合の PR #${saved.unverifiedPr} を本イシューに結び付けられない（${sanitize(why)}）`)
+    saved = { ...saved, pr: saved.unverifiedPr }
+    savedItems[String(item.number)] = saved
+    bound = true
+  }
+
+
   const isResumeFromMonitoring = isActiveMonitoring(item.number)
 
 
-  if (isResumeFromMonitoring) {
+  if (isResumeFromMonitoring && !bound) {
     const why = await checkPrBinding(item, saved.pr, saved.branch)
     if (why) return stopUnverified(`状態ファイルの PR #${saved.pr} を本イシューに結び付けられない（${sanitize(why)}）`)
   }
@@ -6170,7 +6187,7 @@ async function runImplement(item) {
     if (saved.status !== 'monitoring') {
 
 
-      const resumeOk = await updateState(item.number, { status: 'monitoring', pr: impl.prNumber })
+      const resumeOk = await updateState(item.number, { status: 'monitoring', pr: impl.prNumber, unverifiedPr: 0 })
       if (!resumeOk) {
         log(`⚠️ issue #${item.number}: monitoring 再開時の status 同期書き込みに失敗（再開情報は保持済みのため監視は継続する）`)
       }
@@ -6753,7 +6770,7 @@ async function runImplement(item) {
     {
 
 
-      const monitoringPatch = { status: 'monitoring', pr: impl.prNumber, pushChecksStarted: prCreateChecksStarted, pushMergeable: prCreatePushMergeable }
+      const monitoringPatch = { status: 'monitoring', pr: impl.prNumber, unverifiedPr: 0, pushChecksStarted: prCreateChecksStarted, pushMergeable: prCreatePushMergeable }
       const monitoringAttempt1 = await updateStateDetailed(item.number, monitoringPatch)
       const monitoringAttempt = monitoringAttempt1.ok ? monitoringAttempt1 : await updateStateDetailed(item.number, monitoringPatch)
       const monitoringSawSystemicFailure = sawSystemicStateWriteFailure(monitoringAttempt1, monitoringAttempt)
@@ -8056,7 +8073,7 @@ for (const item of queue) {
 
 
 
-    if (stateUnverified.includes(item.number)) {
+    if (stateUnverifiedIssues.has(item.number)) {
       const note = 'state-unverified: 状態ファイルの項目を内容照合できなかったため新規の実装・PR 作成をしない。同じ引数で再実行し、解消しなければ状態ファイルの該当項目を手動確認すること'
       results.push({ issue: item.number, status: 'blocked', note })
       failedSet.add(item.number)
@@ -8666,6 +8683,8 @@ async function probePrereqCompletion(targets) {
 
   const prHints = {}
   for (const d of targets) {
+
+    if (stateUnverifiedIssues.has(d)) continue
     const fromResults = results.find((r) => r.issue === d)?.pr
     const fromSaved = savedItems[String(d)]?.pr
     const hint = Number.isInteger(fromResults) && fromResults > 0 ? fromResults : fromSaved
