@@ -188,28 +188,31 @@ test('verifyLoadedItems: 空ファイル（items: {}）は空のまま verified:
 })
 
 test('prBindingProblem: 別 issue（#359）のブランチ・closingIssues の PR は結び付けない', () => {
-  const merged359 = { state: 'MERGED', isCrossRepository: false, headRefName: 'feat/359-foo', closingIssues: [359] }
+  const merged359 = { state: 'MERGED', isCrossRepository: false, baseRefName: 'main', headRefName: 'feat/359-foo', closingIssues: [359] }
   assert.notEqual(prBindingProblem(365, 'feat/365-bar', merged359), '')
   // ブランチは一致しても closingIssuesReferences が別 issue のみを指すなら結び付けない
-  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { state: 'MERGED', isCrossRepository: false, headRefName: 'feat/365-bar', closingIssues: [359] }), '')
+  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { state: 'MERGED', isCrossRepository: false, baseRefName: 'main', headRefName: 'feat/365-bar', closingIssues: [359] }), '')
   // 取得不能・UNKNOWN・closingIssues 欠落は fail-closed
   assert.notEqual(prBindingProblem(365, 'feat/365-bar', null), '')
-  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { state: 'UNKNOWN', isCrossRepository: false, headRefName: 'feat/365-bar', closingIssues: [] }), '')
-  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { state: 'MERGED', isCrossRepository: false, headRefName: 'feat/365-bar' }), '')
+  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { state: 'UNKNOWN', isCrossRepository: false, baseRefName: 'main', headRefName: 'feat/365-bar', closingIssues: [] }), '')
+  assert.notEqual(prBindingProblem(365, 'feat/365-bar', { state: 'MERGED', isCrossRepository: false, baseRefName: 'main', headRefName: 'feat/365-bar' }), '')
   // fork（isCrossRepository: true）・isCrossRepository 欠落は結び付けない
-  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'OPEN', isCrossRepository: true, headRefName: 'feat/365-bar', closingIssues: [365] }), 'cross-repository')
+  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'OPEN', isCrossRepository: true, baseRefName: 'main', headRefName: 'feat/365-bar', closingIssues: [365] }), 'cross-repository')
   assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'OPEN', headRefName: 'feat/365-bar', closingIssues: [365] }), 'cross-repository')
+  // base ブランチが期待（args.branch。既定 main）と異なる PR・baseRefName 欠落は結び付けない（Codex P1）
+  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'MERGED', isCrossRepository: false, baseRefName: 'release', headRefName: 'feat/365-bar', closingIssues: [365] }), 'baseRefName')
+  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'MERGED', isCrossRepository: false, headRefName: 'feat/365-bar', closingIssues: [365] }), 'baseRefName')
   // 期待ブランチ自体が本 issue の命名でなければ、headRefName と一致しても結び付けない
-  assert.notEqual(prBindingProblem(365, 'feat/359-foo', { state: 'MERGED', isCrossRepository: false, headRefName: 'feat/359-foo', closingIssues: [365] }), '')
-  assert.notEqual(prBindingProblem(365, 'misc-branch', { state: 'OPEN', isCrossRepository: false, headRefName: 'misc-branch', closingIssues: [] }), '')
+  assert.notEqual(prBindingProblem(365, 'feat/359-foo', { state: 'MERGED', isCrossRepository: false, baseRefName: 'main', headRefName: 'feat/359-foo', closingIssues: [365] }), '')
+  assert.notEqual(prBindingProblem(365, 'misc-branch', { state: 'OPEN', isCrossRepository: false, baseRefName: 'main', headRefName: 'misc-branch', closingIssues: [] }), '')
   // 期待ブランチが不正値なら一致させない
-  assert.notEqual(prBindingProblem(365, '', { state: 'OPEN', isCrossRepository: false, headRefName: '', closingIssues: [] }), '')
+  assert.notEqual(prBindingProblem(365, '', { state: 'OPEN', isCrossRepository: false, baseRefName: 'main', headRefName: '', closingIssues: [] }), '')
 })
 
 test('prBindingProblem: 本 issue のブランチで closingIssues が空か本 issue を含めば結び付ける', () => {
-  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'MERGED', isCrossRepository: false, headRefName: 'feat/365-bar', closingIssues: [] }), '')
-  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'OPEN', isCrossRepository: false, headRefName: 'feat/365-bar', closingIssues: [365, 400] }), '')
-  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'CLOSED', isCrossRepository: false, headRefName: 'feat/365-bar', closingIssues: [365] }), '')
+  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'MERGED', isCrossRepository: false, baseRefName: 'main', headRefName: 'feat/365-bar', closingIssues: [] }), '')
+  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'OPEN', isCrossRepository: false, baseRefName: 'main', headRefName: 'feat/365-bar', closingIssues: [365, 400] }), '')
+  assert.equal(prBindingProblem(365, 'feat/365-bar', { state: 'CLOSED', isCrossRepository: false, baseRefName: 'main', headRefName: 'feat/365-bar', closingIssues: [365] }), '')
 })
 
 // ---------------------------------------------------------------------------
@@ -322,20 +325,24 @@ test('検証プロンプトは項目ごとの jq -jcS ハッシュを要求し�
   assert.match(calls[0].prompt, /推測で埋めない/)
 })
 
-test('mergeVerifyPrompt は headRefName と closingIssuesReferences を取得させる', () => {
+test('mergeVerifyPrompt は headRefName・baseRefName・closingIssuesReferences を取得させる', () => {
   const p = mergeVerifyPrompt({ number: 365 }, { prNumber: 1371 })
-  assert.ok(p.includes('gh pr view 1371 --json state,headRefOid,mergeCommit,headRefName,closingIssuesReferences,isCrossRepository'))
+  assert.ok(p.includes('gh pr view 1371 --json state,headRefOid,mergeCommit,headRefName,baseRefName,closingIssuesReferences,isCrossRepository'))
   assert.ok(p.includes('closingIssues'))
+  assert.match(p, /返却: state \/ headRefOid \/ mergeCommitOid \/ headRefName \/ baseRefName \//)
 })
 
-test('monitorPrompt 手順 1 は PR 照合不一致で MERGED でも ready にせず blocked / unrecoverable を返させる', () => {
+test('monitorPrompt 手順 1 は PR 照合不一致で MERGED でも ready にせず blocked / unbound を返させる', () => {
   const p = monitorPrompt({ number: 365 }, { prNumber: 1366, branch: 'feat/365-bar' }, [], true, false)
   const step1 = p.slice(p.indexOf('1. まず gh pr view'), p.indexOf('\n', p.indexOf('1. まず gh pr view')))
-  assert.ok(step1.includes('--json state,headRefOid,mergeable,headRefName,closingIssuesReferences,isCrossRepository'))
+  assert.ok(step1.includes('--json state,headRefOid,mergeable,headRefName,baseRefName,closingIssuesReferences,isCrossRepository'))
+  assert.ok(step1.includes('baseRefName が "main" でない'))
   assert.ok(step1.includes('"feat/365-bar" と完全一致しない'))
   assert.ok(step1.includes('#365 を含まない'))
   assert.ok(step1.includes('MERGED でも'))
-  assert.ok(step1.indexOf('blockedReason: "unrecoverable" を返す（ready にしない）') < step1.indexOf('state が MERGED の場合'))
+  const unboundIdx = step1.indexOf('blockedReason: "unbound" を返す（ready にしない）')
+  assert.ok(unboundIdx > 0 && unboundIdx < step1.indexOf('state が MERGED の場合'))
+  assert.doesNotMatch(step1.slice(0, unboundIdx), /"unrecoverable"/)
 })
 
 test('mergeExecutePrompt 手順 1 は PR 照合不一致で close せず wrong-target を返させ、MERGED 分岐より先に置く', () => {
@@ -347,6 +354,7 @@ test('mergeExecutePrompt 手順 1 は PR 照合不一致で close せず wrong-t
     assert.ok(bindIdx < mergedIdx, `allowMerge=${allowMerge}: PR 照合が MERGED 分岐より後にある`)
     assert.ok(p.includes('--json state,headRefOid,mergeable,baseRefName,isDraft,headRefName,closingIssuesReferences,isCrossRepository'))
     assert.ok(p.includes('"feat/365-bar" と完全一致しない'))
+    assert.ok(p.includes('baseRefName が "main" でない'))
   }
 })
 
@@ -525,16 +533,15 @@ test('駆動部: opt-in 前の MERGED 確認で PR 照合が不一致なら stat
 
 test('駆動部: 新規 PR は pr-create 直後・Merge ループ投入前に PR 照合し、不一致なら blocked で終端する', () => {
   const created = driverPart.indexOf('impl = { ...impl, prNumber: prCreateResult.prNumber }')
+  const save = driverPart.indexOf("const unverifiedPatch = { status: 'blocked', pr: 0, unverifiedPr: impl.prNumber, branch: impl.branch }", created)
   const check = driverPart.indexOf('const newPrBindIssue = await checkPrBinding(item, impl.prNumber, impl.branch)')
   const known = driverPart.indexOf('knownPrByIssue.set(item.number, impl.prNumber)', created)
   const loop = driverPart.indexOf('runMergeLoop(item, impl', created)
-  assert.ok(created > 0 && check > created && check < known && known < loop, 'pr-create 後の PR 照合の位置が不正')
+  // 照合より先に未照合の番号を unverifiedPr として保存する（照合中のクラッシュで番号を失わない。Bugbot）
+  assert.ok(created > 0 && save > created && check > save && check < known && known < loop, 'pr-create 後の保存・PR 照合の位置が不正')
   const branch = driverPart.slice(check, known)
   assert.match(branch, /status: 'blocked'/)
   assert.match(branch, /return false/)
-  // 照合できない番号は再開用の pr へ保存せず、診断専用の unverifiedPr に残す（Codex P1）。
-  assert.match(branch, /const unverifiedPatch = \{ status: 'blocked', pr: 0, unverifiedPr: impl\.prNumber,/)
-  assert.match(branch, /recordFailure\(\{ issue: item\.number, reason, status: 'blocked' \}\)/)
   // unverifiedPr を読むのは runImplement の照合（saved.unverifiedPr）だけ。isActiveMonitoring・
   // 前提完了プローブ・結果一覧は読まない。
   const readers = [...driverPart.matchAll(/([A-Za-z_$.\]\[?]+)\.unverifiedPr\b/g)].map((m) => m[1])
@@ -558,12 +565,12 @@ test('checkPrBinding: 例外・未返却・fork の PR は問題ありを返し�
   globalThis.log = () => {}
   globalThis.agent = async (prompt, opts) => { calls.push(opts.label); throw new Error('boom') }
   assert.equal(await checkPrBinding({ number: 365 }, 1371, 'feat/365-bar'), 'PR not found')
-  globalThis.agent = async () => ({ state: 'OPEN', isCrossRepository: true, headRefName: 'feat/365-bar', closingIssues: [] })
+  globalThis.agent = async () => ({ state: 'OPEN', isCrossRepository: true, baseRefName: 'main', headRefName: 'feat/365-bar', closingIssues: [] })
   assert.equal(await checkPrBinding({ number: 365 }, 1371, 'feat/365-bar'), 'cross-repository')
   globalThis.agent = async (prompt, opts) => {
     calls.push(opts.label)
     assert.ok(prompt.includes('gh pr view 1371 --json'))
-    return { state: 'OPEN', isCrossRepository: false, headRefName: 'feat/365-bar', closingIssues: [365] }
+    return { state: 'OPEN', isCrossRepository: false, baseRefName: 'main', headRefName: 'feat/365-bar', closingIssues: [365] }
   }
   assert.equal(await checkPrBinding({ number: 365 }, 1371, 'feat/365-bar'), '')
   assert.deepEqual(calls, ['pr-bind:#365', 'pr-bind:#365'])
@@ -645,15 +652,16 @@ test('駆動部: state:load-verify の isValid は isValidStateVerifyResult を�
 })
 
 // pr-create 直後の PR 照合失敗ブロックを切り出して実行する（Codex P1: unverifiedPr 保存の成否確認）。
-async function runNewPrBindFailure(writeResults) {
-  const from = driverPart.indexOf('    const newPrBindIssue = await checkPrBinding(item, impl.prNumber, impl.branch)')
-  const to = driverPart.indexOf('\n    }\n', from) + 6
-  assert.ok(from > 0 && to > from)
-  const ctx = { writes: [], failures: [], unverifiedIssues: new Set() }
+async function runNewPrBindFailure(writeResults, bind = 'PR not found') {
+  const from = driverPart.indexOf('    const unverifiedPatch = { status: ')
+  const bindAt = driverPart.indexOf('    const newPrBindIssue = await checkPrBinding(item, impl.prNumber, impl.branch)', from)
+  const to = driverPart.indexOf('\n    }\n', bindAt) + 6
+  assert.ok(from > 0 && bindAt > from && to > bindAt)
+  const ctx = { writes: [], failures: [], unverifiedIssues: new Set(), bindCalls: 0 }
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
   const fn = new AsyncFunction('item', 'impl', 'ctx', [
     'const { unverifiedIssues } = ctx',
-    "const checkPrBinding = async () => 'PR not found'",
+    `const checkPrBinding = async () => { ctx.bindCalls++; return ${JSON.stringify(bind)} }`,
     'const sanitize = (x) => x',
     'const log = () => {}',
     'const recordFailure = (f) => ctx.failures.push(f)',
@@ -666,11 +674,19 @@ async function runNewPrBindFailure(writeResults) {
   return { ret, ...ctx }
 }
 
+test('pr-create 後: 照合より先に unverifiedPr を保存し、照合が通れば Merge ループへ進む（Bugbot）', async () => {
+  const r = await runNewPrBindFailure([true], '')
+  assert.equal(r.ret, 'proceed')
+  assert.deepEqual(r.writes, [{ status: 'blocked', pr: 0, unverifiedPr: 1380, branch: 'feat/365-bar' }])
+  assert.equal(r.bindCalls, 1)
+  assert.equal(r.failures.length, 0)
+})
+
 test('pr-create 後の照合失敗: unverifiedPr の保存に成功すれば再試行せず blocked で終える', async () => {
   const r = await runNewPrBindFailure([true])
   assert.equal(r.ret, false)
   assert.equal(r.writes.length, 1)
-  assert.deepEqual({ ...r.writes[0], note: undefined }, { status: 'blocked', pr: 0, unverifiedPr: 1380, branch: 'feat/365-bar', note: undefined })
+  assert.deepEqual(r.writes[0], { status: 'blocked', pr: 0, unverifiedPr: 1380, branch: 'feat/365-bar' })
   assert.equal(r.failures[0].status, 'blocked')
   assert.equal(r.failures[0].pr, undefined)
   assert.doesNotMatch(r.failures[0].reason, /Failed to save/)
@@ -684,10 +700,11 @@ test('pr-create 後の照合失敗: 保存に 1 回失敗したら 1 回だけ�
   assert.equal(r.unverifiedIssues.size, 0)
 })
 
-test('pr-create 後の照合失敗: 再試行も失敗したら番号と手動確認の要否を英語で結果に残し state-unverified で終える', async () => {
-  const r = await runNewPrBindFailure([false, false])
+test('pr-create 後: unverifiedPr の保存が再試行も失敗したら照合せず、番号と手動確認の要否を英語で残し state-unverified で終える', async () => {
+  const r = await runNewPrBindFailure([false, false], '')
   assert.equal(r.ret, false)
   assert.equal(r.writes.length, 2)
+  assert.equal(r.bindCalls, 0, '保存できない場合は照合（エージェント呼び出し）へ進まない')
   assert.equal(r.failures.length, 1)
   assert.equal(r.failures[0].status, 'blocked')
   assert.equal(r.failures[0].pr, undefined, '未照合の番号を結果の pr（前提完了プローブのヒント源）へ流さない')
@@ -778,4 +795,15 @@ test('loadState: KEYS 行の件数（keysCount）と hashes の件数が一致�
       ? loadResult(sampleItems)
       : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: JQ_KEYS_SHA_SAMPLE, keysCount: 5, highWaterBytes: 0, highWaterVersion: 0 })
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
+})
+
+test('駆動部: monitor の PR 照合不成立（blockedReason: unbound）は状態を書き換えず state-unverified の blocked で終える（Bugbot High）', () => {
+  assert.match(source, /enum: \['quality', 'unrecoverable', 'unbound'\]/)
+  const idx = driverPart.indexOf("if (lastBlockedReason === 'unbound') {")
+  assert.ok(idx > driverPart.indexOf('lastBlockedReason = normalizeBlockedReason(m?.blockedReason)'))
+  const body = driverPart.slice(idx, driverPart.indexOf('\n      }\n', idx))
+  assert.match(body, /unverifiedIssues\.add\(item\.number\)/)
+  assert.match(body, /recordFailure\(\{ issue: item\.number, reason: `state-unverified: /)
+  assert.match(body, /status: 'blocked' \}\)\s*return false/)
+  assert.doesNotMatch(body, /updateState|failMergeTerminal/, '状態ファイルを書き換えてはならない（failed 終端・pr クリアをしない）')
 })

@@ -134,19 +134,21 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
   命名の項目は保存済み `pr` を 0 でクリアしない（次回の照合で止めるため。`prClearPatch`）
 
 monitoring 再開の前に、`pr-bind:#N` が保存済み PR の `state` / `headRefName` /
-`isCrossRepository` / `closingIssuesReferences` を取得し、ホストが照合する（`prBindingProblem`）。
-PR が実在し、fork からの PR でなく、期待ブランチが本 issue の命名で `headRefName` と一致し、
+`baseRefName` / `isCrossRepository` / `closingIssuesReferences` を取得し、ホストが照合する
+（`prBindingProblem`）。PR が実在し、fork からの PR でなく、base が `args.branch` で、期待ブランチが本 issue の命名で `headRefName` と一致し、
 `closingIssuesReferences` が空か本 issue を含む場合だけ再開する。一致しない場合も、`gh` の一時的な
 失敗で照合できない場合も、再開も close も通常の実装（Recover・新規 PR 作成）もせず、状態ファイルを
 書き換えないまま `state-unverified` の `blocked`（halt 非カウント）で終える（MERGED / CLOSED の
 既存 PR は open PR の検索に掛からず、通常の実装へ進むと再実装・重複 PR になり得るため。元の再開情報の
 まま人が確認して再試行できる）。主な判別は `headRefName` が担う（`closingIssuesReferences` は
 PR 本文から導出され鸚鵡返しされ得るため補助条件に留める）。pr-create が報告した新規 PR も、
-Merge ループへ渡す前に同じ照合を通し、不一致なら `blocked` で終端する（照合できない PR 番号は
-再開用の `pr` には保存せず `unverifiedPr` に残す。この保存は成否を確認して 1 回だけ再試行し、
-それでも失敗したら番号と手動確認の要否を結果に英語で残して `state-unverified` で終える。次回ランは `unverifiedPr` を照合し、成立すれば
-その番号で monitoring を再開して `pr` へ昇格させ、不成立なら `state-unverified` で止めて新規の
-実装・PR 作成をさせない）。`state-unverified` で止めた issue の保存済み `pr` は、前提完了プローブの
+Merge ループへ渡す前に同じ照合を通し、不一致なら `blocked` で終端する（PR 番号は照合中のクラッシュで
+失わないよう照合より先に、再開用の `pr` ではなく `unverifiedPr` として保存し、照合が通れば `pr` へ
+昇格させる。この保存は成否を確認して 1 回だけ再試行し、それでも失敗したら照合へ進まず、番号と手動
+確認の要否を結果に英語で残して `state-unverified` で終える。次回ランは `unverifiedPr` を照合し、
+成立すればその番号で monitoring を再開して `pr` へ昇格させ、不成立なら `state-unverified` で止めて
+新規の実装・PR 作成をさせない）。monitor が手順 1 の照合不成立を返した場合
+（`blockedReason: "unbound"`）も、状態ファイルを書き換えずに `state-unverified` の `blocked` で終える。`state-unverified` で止めた issue の保存済み `pr` は、前提完了プローブの
 ホスト既知 PR に渡さない（照合できない MERGED PR を根拠に前提を完了扱いにしない。人手で issue が
 CLOSED になった場合の遷移は従来どおり）。opt-in 前の MERGED 確認で
 照合が不一致の場合も `blocked` で終端する。merge-verify による
