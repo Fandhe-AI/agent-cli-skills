@@ -445,8 +445,9 @@ BODY_FILE=$(mktemp) && SUMMARY_FILE=$(mktemp) && DETAIL_FILE=$(mktemp) \
   || { echo "エラー: 一時ファイルを作成できません。中止します。"; exit 1; }
 trap 'rm -f "${BODY_FILE}" "${SUMMARY_FILE}" "${DETAIL_FILE}"' EXIT
 
-# issue タイトルは非信頼データ。表を壊す | と改行だけ無害化し、シェル展開には載せない
-CELL='gsub("[\r\n]+"; " ") | gsub("\\|"; "\\|")'
+# issue タイトルは非信頼データ。表を壊す | と改行だけ無害化し、シェル展開には載せない。
+# 先にバックスラッシュを \\ へ二重化してから | を \| にする（順序が逆だと a\|b が a\\|b となり | が列区切り化する）
+CELL='gsub("[\r\n]+"; " ") | gsub("\\\\"; "\\\\") | gsub("\\|"; "\\|")'
 
 PHASES=$(list_subs "${ROOT_NUMBER}") \
   || { echo "エラー: ルート #${ROOT_NUMBER} の sub-issues を取得できません。中止します。"; exit 1; }
