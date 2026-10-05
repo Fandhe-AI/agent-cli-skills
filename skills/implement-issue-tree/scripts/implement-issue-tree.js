@@ -1071,6 +1071,13 @@ const REPO_SETTINGS_POLICY =
   + '承認の有無を事実以上に記述しない（コミットメッセージ・PR 本文・summary に、実際に得ていない承認を書かない）。'
 
 
+
+
+
+
+const LONG_RUNNING_POLICY =
+  '長時間コマンド: ビルド・テスト・lint・gh pr checks 等は Bash の timeout に 600000 を指定し前景で完了させる。run_in_background と Monitor で待たない（待って end_turn すると最終応答とみなされ失敗扱いになる）。バックグラウンド化された場合は結果を待たず現時点の状態を返し未確認は「未検証」と明記する。返却は必ず StructuredOutput ツールの呼び出しで行い、地の文で終えない。催促を受けても echo / sleep で応じず StructuredOutput を呼ぶ。'
+
 const COMMON_LINES = [
   `リポジトリ: カレントディレクトリが実装対象リポ（base branch: ${baseBranch}）であること。起動直後に \`git remote get-url origin\` を確認し、想定と異なる submodule（例: docs/spec 等）の worktree に誤配置されていないか検証すること。`,
   '自動運転モード: ユーザーへの質問・承認待ちは不可。判断が必要なら安全側に倒して進める。',
@@ -1084,6 +1091,7 @@ const COMMON_LINES = [
   UNTRUSTED_POLICY,
   TEMP_FILE_POLICY,
   REPO_SETTINGS_POLICY,
+  LONG_RUNNING_POLICY,
 ]
 const COMMON = COMMON_LINES.join('\n')
 
@@ -2546,6 +2554,30 @@ const STATE_RETURN_DIRECTIVE =
 
 
 
+
+
+
+
+
+
+
+const MONITOR_RETRY_OBSERVE_ONLY =
+  '\n\n【再試行・観測専用】この呼び出しは直前の同一監視が StructuredOutput を返さず終了したための再試行である。' +
+  '直前の呼び出しが副作用（gh run rerun / gh pr comment / gh pr edit / スレッド resolve 等）を実行済みか確認できないため、' +
+  'ここでは書き込みを一切実行しない（gh run rerun・gh pr comment・"@cursor review" 投稿・gh api の POST/PATCH/PUT/DELETE・graphql mutation を禁止）。' +
+  '読み取りのみで状態を判定し、flaky CI の再実行や @cursor review の催促が必要になる場合でも実行せず、state: blocked / blockedReason: "quality" と理由を返して終了する。'
+
+async function agentRetryOnce(prompt, opts, retrySuffix = '') {
+  try {
+    const first = await agent(prompt, opts)
+    if (first != null) return first
+    log(`⚠️ ${opts.label}: StructuredOutput 未返却。同一プロンプトで 1 回再試行する`)
+  } catch (e) {
+    log(`⚠️ ${opts.label}: エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）。同一プロンプトで 1 回再試行する`)
+  }
+  return await agent(prompt + retrySuffix, { ...opts, label: `${opts.label}:retry` })
+}
+
 async function runStateAgent(prompt, { label, schema, isValid }) {
   const promptWithDirective = `${prompt}\n${STATE_RETURN_DIRECTIVE}`
   let attempts = 0
@@ -3989,7 +4021,7 @@ function reviewPrompt(item, impl) {
     '   重要: 重要度は厳密に判定すること。Low は「動作に影響しない様式・命名・重複・行数・コメント等の改善提案」に限る。',
     '   実バグ・誤った挙動・セキュリティ・認可・データ不整合・エッジケースの欠落は最低でも medium とする（最終ラウンドで Low のみは通過扱いになるため）。',
     '5. pwd の結果を worktreePath として返す（呼び出し元がラン終了時の残骸一覧に記録するため。自動削除はされない）。',
-    '返却: state（"ok" / "needs-fix" / "blocked"）/ highestSeverity / summary / worktreePath（pwd の結果）。',
+    '返却: state（"ok" / "needs-fix" / "blocked"）/ highestSeverity / summary / worktreePath（pwd の結果。必須。欠落するとエージェントごと失敗扱いになるため、pwd を実行して絶対パスを必ず返す）。',
   ].join('\n')
 }
 
@@ -7066,7 +7098,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       m = seededMonitorResult
     } else {
       try {
-        m = await agent(monitorPrompt(item, impl, externalCheckApps, externalChecksConfirmed, autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, forceThreadRescan, resolveProof.head), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA })
+        m = await agentRetryOnce(monitorPrompt(item, impl, externalCheckApps, externalChecksConfirmed, autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, forceThreadRescan, resolveProof.head), { label: `merge:#${item.number}`, phase: 'Merge', model: 'sonnet', effort: 'medium', schema: MERGE_SCHEMA }, MONITOR_RETRY_OBSERVE_ONLY)
       } catch (e) {
         log(`⚠️ #${item.number}: 監視エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
       }

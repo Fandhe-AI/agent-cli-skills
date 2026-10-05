@@ -48,8 +48,8 @@ StructuredOutput を返さず終了した（呼び出し先が `null` / `undefin
 対象は「PR が既に存在する Merge ループ内」に限る。**Plan / Implement / Review / Recover /
 PR Create（PR 作成前。`pr: 0`）の失敗分類には一切触れない**。これらは `failed`
 （halt カウント対象）のままであり、システミックなモデル障害は依然として「3 イシュー連続失敗で
-新規着手停止」に到達する（halt 防御はこの fail-safe の影響を受けない）。`blocked` はこのランの中で自動リトライを
-一切行わない（`monitorsLeft` の消費は起こるが、ただちに終端する）。効果は「次回実行が
+新規着手停止」に到達する（halt 防御はこの fail-safe の影響を受けない）。monitor に限り、null・例外のとき 1 回だけ即時再試行する（Issue #531）。monitor は `gh run rerun --failed` や `@cursor review` 投稿といった副作用を実行し得るため、再試行は書き込みを禁止する観測専用の指示を付けた同一プロンプトで行い、flaky 再実行 1 回・催促 1 回の上限を超えないようにする（副作用が必要なら `blocked` / `quality` で返す）。書き込みを伴う fix は 1 回目が push 済みの可能性があり、再実行すると pushed:false の no-op でホストが push と thread resolve を把握できなくなるため再試行せず従来どおり `blocked` へ倒す。再試行後も失敗した場合の `blocked` と、それ以外の経路では
+このランの中で自動リトライを一切行わない（`monitorsLeft` の消費は起こるが、ただちに終端する）。効果は「次回実行が
 Recover→再実装ではなく monitoring 再開に入れるようになる」ことだけであり、実行者（人間）の
 トリガーなしに勝手に再試行され続けるものではない。
 
