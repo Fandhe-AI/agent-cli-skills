@@ -1084,13 +1084,13 @@ function routingTitleCheck(n) {
 
 
 const FIX_NO_DISCUSSION_POLICY =
-  '議論コメント禁止: レビュースレッドへの返信・gh pr comment / gh pr review 等の議論投稿はしない（gh 認証は利用者本人）。例外は手順が明示する resolve・PR 本文更新・外部レビュー App の再実行依頼のみ。修正しない判断は反論せず pushed: false と理由で返す。'
+  '議論コメント禁止: レビュースレッドへの返信・gh pr comment / gh pr review 等の議論投稿はしない（gh 認証は利用者本人）。例外は手順が明示する resolve・PR 本文更新・外部レビュー App の再実行依頼のみ。修正しない判断も反論で済ませず手順 2 に従う（P0/P1・セキュリティは pushed: false と理由、それ以外は outOfScopeComments）。'
 
 
 
 
 const MONITOR_NO_REBUTTAL_POLICY =
-  'P0/P1 の対応案は修正案のみ書く（反論・返信で済ませる案は書かない。summary は fix へ渡る）。'
+  'P0/P1 相当・セキュリティ指摘の対応案は修正案のみ書く（反論・返信で済ませる案は書かない。summary は fix へ渡る）。'
 
 
 

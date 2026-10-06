@@ -1081,16 +1081,16 @@ function routingTitleCheck(n) {
 // fix エージェントの議論コメント投稿禁止（Issue #564）。外部 AI レビューの P0 指摘に対し fix が
 // コードを直さず「既存実装も同じ方式」と反論するコメントをレビュースレッドへ投稿した事例の再発防止。
 // gh 認証はラン起動者本人のため、投稿は利用者本人の発言として公開される。修正しない判断は
-// コメントではなく pushed: false + summary で返し、ホストが blocked としてユーザー判断へ委ねる。
+// コメントではなく手順 2 の返却（P0/P1 は pushed: false で blocked、それ以外は outOfScopeComments）で返す。
 // fixPrompt の COMMON 直後（UNTRUSTED 境界の外側）へ push / no-push 両経路で入れる。
 const FIX_NO_DISCUSSION_POLICY =
-  '議論コメント禁止: レビュースレッドへの返信・gh pr comment / gh pr review 等の議論投稿はしない（gh 認証は利用者本人）。例外は手順が明示する resolve・PR 本文更新・外部レビュー App の再実行依頼のみ。修正しない判断は反論せず pushed: false と理由で返す。'
+  '議論コメント禁止: レビュースレッドへの返信・gh pr comment / gh pr review 等の議論投稿はしない（gh 認証は利用者本人）。例外は手順が明示する resolve・PR 本文更新・外部レビュー App の再実行依頼のみ。修正しない判断も反論で済ませず手順 2 に従う（P0/P1・セキュリティは pushed: false と理由、それ以外は outOfScopeComments）。'
 
 // monitor の対応案から「反論・返信で済ませる案」を排除する（Issue #564）。monitor の summary は fix へ
 // そのまま渡り実行候補になるため、修正以外の対応案が書かれると fix が反論コメント投稿に流れる。
 // monitorPrompt の既存「権限境界」行の直後へ入れる。"@cursor review" 等の定型投稿手順は従来どおり。
 const MONITOR_NO_REBUTTAL_POLICY =
-  'P0/P1 の対応案は修正案のみ書く（反論・返信で済ませる案は書かない。summary は fix へ渡る）。'
+  'P0/P1 相当・セキュリティ指摘の対応案は修正案のみ書く（反論・返信で済ませる案は書かない。summary は fix へ渡る）。'
 
 // BASE_MERGE_CONTEXT_COMMON（定義箇所参照）が index 指定で行を再利用するため配列化する。
 // 長時間コマンドの前景実行と StructuredOutput 義務（Issue #531）。ビルド・テストが Bash 既定 timeout を

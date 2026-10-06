@@ -40,7 +40,7 @@ test('FIX_NO_DISCUSSION_POLICY: 返信・議論投稿の禁止、定型操作の
     assert.ok(p.includes(s), `禁止対象に ${s} が無い`)
   }
   assert.match(p, /例外は.*resolve.*再実行依頼のみ/)
-  assert.match(p, /修正しない判断は反論せず pushed: false/)
+  assert.match(p, /修正しない判断も反論で済ませず手順 2 に従う（P0\/P1・セキュリティは pushed: false と理由、それ以外は outOfScopeComments）/)
 })
 
 test('fixPrompt: push / no-push 両経路で UNTRUSTED 境界より前に固定文を含む', () => {
@@ -55,7 +55,7 @@ test('fixPrompt: push / no-push 両経路で UNTRUSTED 境界より前に固定�
 
 test('MONITOR_NO_REBUTTAL_POLICY: P0/P1 の対応案を修正案に限り反論・返信案を排除する', () => {
   const p = m.MONITOR_NO_REBUTTAL_POLICY
-  assert.match(p, /P0\/P1 の対応案は修正案のみ/)
+  assert.match(p, /P0\/P1 相当・セキュリティ指摘の対応案は修正案のみ/)
   assert.match(p, /反論・返信で済ませる案は書かない/)
 })
 
