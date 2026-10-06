@@ -91,15 +91,25 @@ PTITLE=$(gh issue view "${PHASE_NUMBER}" --json title --jq ".title | ${CELL}") \
   || die 1 "Phase 親 #${PHASE_NUMBER} を取得できません。中止します。"
 CHILDREN=$(list_subs "${PHASE_NUMBER}") \
   || die 1 "Phase 親 #${PHASE_NUMBER} の sub-issues を取得できません。中止します。"
-CHILDREN=$(printf '%s' "${CHILDREN}" | jq '[.[] | select(.state == "open")]')
-DIRECT=$(printf '%s' "${CHILDREN}" | jq 'length')
+# jq が失敗（API 応答の形が想定外）したまま空値で Phase 行・セクションを作ると、既存本文を誤内容で
+# 上書きし得るため、変換ごとに終了コードと値の形を確認して失敗時は本文未更新で中止する（fail-closed）
+CHILDREN=$(printf '%s' "${CHILDREN}" | jq '[.[] | select(.state == "open")]') \
+  || die 1 "Phase 親 #${PHASE_NUMBER} の sub-issues の絞り込みに失敗しました。ルート本文は更新しません。"
+DIRECT=$(printf '%s' "${CHILDREN}" | jq 'length') \
+  || die 1 "Phase 親 #${PHASE_NUMBER} の子 issue 数の集計に失敗しました。ルート本文は更新しません。"
+[[ "${DIRECT}" =~ ^[0-9]+$ ]] \
+  || die 1 "Phase 親 #${PHASE_NUMBER} の子 issue 数が数値ではありません。ルート本文は更新しません。"
 TOTAL=${DIRECT}
 
 PHASE_SECTION="### Phase ${PHASE}: ${PTITLE}"$'\n\n'"| Issue | タイトル | 分解 |"$'\n'"|-------|---------|------|"
 for j in $(seq 0 $((DIRECT - 1))); do
   [ "${DIRECT}" -ge 1 ] || break
-  CNUM=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" '.[$j].number')
-  CTITLE=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" ".[\$j].title | ${CELL}")
+  CNUM=$(printf '%s' "${CHILDREN}" | jq -r --argjson j "${j}" '.[$j].number') \
+    || die 1 "子 issue の番号を取得できません。ルート本文は更新しません。"
+  [[ "${CNUM}" =~ ^[1-9][0-9]*$ ]] \
+    || die 1 "子 issue の番号が正整数ではありません。ルート本文は更新しません。"
+  CTITLE=$(printf '%s' "${CHILDREN}" | jq -er --argjson j "${j}" ".[\$j].title | ${CELL}") \
+    || die 1 "#${CNUM} のタイトルを取得できません。ルート本文は更新しません。"
   GRAND_OPEN=$(count_open_desc "${CNUM}") \
     || die 1 "#${CNUM} の子孫を取得できません。中止します。"
   TOTAL=$((TOTAL + GRAND_OPEN))

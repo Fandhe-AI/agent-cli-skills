@@ -718,3 +718,12 @@ test('(z7) 先行 Phase のマーカー重複行は 1 行へ正規化される',
   assert.equal(body.split('\n').filter((l) => l.startsWith('<!-- granularity:')).length, 1)
   assert.ok(body.startsWith('<!-- granularity: 2h -->\n'))
 })
+
+test('(s) sub_issues 応答の形が想定外で jq 変換が失敗したら edit せず非ゼロ終了する', () => {
+  // 配列要素が文字列だと `.state` の参照で jq が失敗する。空値から Phase 行を作って本文を上書きしてはならない
+  const { r, body, edits } = runRootFull(ROOT_BODY, ['unexpected'])
+  assert.notEqual(r.status, 0)
+  assert.equal(edits.length, 0, 'gh issue edit が呼ばれた')
+  assert.equal(body, null)
+  assert.match(r.stderr, /絞り込みに失敗/)
+})
