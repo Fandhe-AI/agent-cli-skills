@@ -72,7 +72,7 @@ for i in $(seq 0 $((PHASE_COUNT - 1))); do
   # どちらからも決められなければ誤記録せず中止する（fail-closed）
   PNO=$(printf '%s' "${PHASES}" | jq -r --argjson i "${i}" '.[$i] as $p
     | ([$p.labels[]?.name | select(test("^phase:[0-9]+$")) | sub("^phase:"; "")][0]
-       // ($p.title | capture("^feat\\(phase-(?<n>[0-9]+)\\):").n) // empty)') \
+        // ($p.title | capture("^feat\\(phase-(?<n>[0-9]+)\\):").n) // empty)') \
     || PNO=''
   [[ "${PNO}" =~ ^[0-9]+$ ]] \
     || die 1 "Phase 親 #${PNUM} の Phase 番号（phase:N ラベル / タイトル）を決定できません。中止します。"
