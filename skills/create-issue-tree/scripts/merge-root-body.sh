@@ -19,6 +19,8 @@
 #   - Phase 行・セクションは実ツリーからのみ生成し、タイトルは非信頼データとして無害化する（CELL）。
 #   - 最終本文にプレースホルダーが残る・検査に失敗する場合は gh issue edit を呼ばない（fail-closed）。
 #   - セクションは一時ファイル、行は ENVIRON 経由で awk へ渡す（環境変数長上限の回帰防止。SEC= で渡さない）。
+#   - コードフェンス内の行は見出し・表行・`## 運用` として扱わない（フェンス内の `# コメント` が置換対象セクションの
+#     終端に見えて旧内容が残るのを防ぐ）。閉じ忘れのフェンスは追記位置を判定できないため中止する（Issue #557）。
 #   - 一時ファイルは成否によらず削除する（trap は mktemp より先に登録）。
 #   - granularity マーカーは常に GRANULARITY で先頭へ 1 行だけ書き直す。
 #
@@ -124,11 +126,42 @@ PHASE_ROW="| Phase ${PHASE} | #${PHASE_NUMBER} ${PTITLE} | ${DIRECT} | ${TOTAL} 
 # 実在の Phase 行が 1 つも無い Step 3 雛形のままの本文では、'| (作成後に更新) |' 行の位置へ今回の Phase 行を
 # 置き換えて挿入する。このプレースホルダー行は実在行の有無によらず出力しない。
 # 追記位置がどちらも無い、または行を出力できなかった場合は awk が exit 3 で中止する（fail-closed）。
+# コードフェンス（行頭 0〜3 空白の ``` / ~~~、閉じは同記号で開き以上の長さ）の内側の行は F[] で印を付け、
+# 見出し・表行・プレースホルダー・運用見出しの判定から外す。ユーザー編集可能な本文で閉じ忘れフェンスがあると
+# 以降が全てフェンス内扱いになり実セクションを消し得るため、閉じていなければ exit 5 で本文未更新のまま中止する。
+# 区間指定 {n,m} や gawk 拡張は mawk・BSD awk 非対応のため使わない。
 # セクションは全子 issue の行を含み環境変数・引数の長さ上限を超え得るため、一時ファイル経由で渡す。
 # 行（1 行）は ENVIRON で渡し、いずれもシェル構文・awk 構文として再評価させない
 SEC_FILE=$(mktemp) && printf '%s\n' "${PHASE_SECTION}" > "${SEC_FILE}" \
   || die 1 "Phase セクションの一時ファイルを作成できません。中止します。"
+rc=0
 NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="${SEC_FILE}" awk '
+  # 開きフェンス行なら 1 を返し、記号 fch と長さ flen を保存する。info 文字列に ` を含む ``` 行は開きではない
+  function fence_open(line,    ind, rest, len, info) {
+    match(line, /^ */); ind = RLENGTH
+    if (ind > 3) return 0
+    rest = substr(line, ind + 1)
+    if (match(rest, /^`+/)) {
+      len = RLENGTH; info = substr(rest, len + 1)
+      if (len < 3 || index(info, "`") > 0) return 0
+      fch = "`"; flen = len; return 1
+    }
+    if (match(rest, /^~+/)) {
+      if (RLENGTH < 3) return 0
+      fch = "~"; flen = RLENGTH; return 1
+    }
+    return 0
+  }
+  # 閉じフェンス行なら 1 を返す。同じ記号が開き以上の長さで続き、後ろは空白・タブ・CR のみ
+  function fence_close(line,    ind, rest, len) {
+    match(line, /^ */); ind = RLENGTH
+    if (ind > 3) return 0
+    rest = substr(line, ind + 1)
+    # 三項演算子に正規表現リテラルを置くと $0 との照合結果（0/1）になるため、文字列で渡す
+    if (!match(rest, (fch == "`") ? "^`+" : "^~+")) return 0
+    len = RLENGTH
+    return (len >= flen && substr(rest, len + 1) ~ /^[ \t\r]*$/)
+  }
   BEGIN {
     sec = ""; n = 0
     while ((rc = (getline sl < ENVIRON["SECF"])) > 0) { sec = (n++ ? sec "\n" : "") sl }
@@ -136,16 +169,20 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
   }
   {
     L[NR] = $0
-    if ($0 ~ /^[|] Phase [0-9]+ [|]/) last = NR
+    if (infence) { F[NR] = 1; if (fence_close($0)) infence = 0 }
+    else if (fence_open($0)) { F[NR] = 1; infence = 1 }
+    else if ($0 ~ /^[|] Phase [0-9]+ [|]/) last = NR
     else if ($0 ~ /^[|] [(]作成後に更新[)] [|][ |]*$/) { T[NR] = 1; if (!tmpl) tmpl = NR }
   }
   END {
+    if (infence) exit 5
     ph = ENVIRON["PH"]; row_re = "^[|] Phase " ph " [|]"; sec_re = "^### Phase " ph ":"
     row_done = 0; sec_done = 0; skip = 0; has_sec = 0
-    for (k = 1; k <= NR; k++) if (L[k] ~ sec_re) has_sec = 1
+    for (k = 1; k <= NR; k++) if (!F[k] && L[k] ~ sec_re) has_sec = 1
     if (last == 0 && tmpl == 0) exit 3
     for (i = 1; i <= NR; i++) {
       line = L[i]
+      if (F[i]) { if (skip) continue; print line; continue }
       if (skip) { if (line ~ /^(#|##|###) /) { skip = 0; print "" } else continue }
       if (i in T) { if (last == 0 && i == tmpl && !row_done) { print ENVIRON["ROW"]; row_done = 1 }; continue }
       if (line ~ row_re) { if (!row_done) { print ENVIRON["ROW"]; row_done = 1 }; continue }
@@ -157,8 +194,12 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     if (!sec_done) { print ""; print sec }
     # 唯一のプレースホルダー行が置換対象セクション内にあると skip 分岐で読み飛ばされ、行を出力しないまま終わる
     if (!row_done) exit 3
-  }') \
-  || die 1 "本文の Phase 別表に追記位置（'| Phase N |' 行または '| (作成後に更新) |' 行）がないか、Phase 行を出力できませんでした。中止します。"
+  }') || rc=$?
+if [ "${rc}" -eq 5 ]; then
+  die 1 "ルート本文のコードフェンスが閉じていないため追記位置を判定できません。ルート本文は更新しません。"
+elif [ "${rc}" -ne 0 ]; then
+  die 1 "本文の Phase 別表に追記位置（'| Phase N |' 行または '| (作成後に更新) |' 行）がないか、Phase 行を出力できませんでした。中止します。"
+fi
 
 # 検査は追記を全て終えた最終本文（NEW_BODY）に対し、gh issue edit の直前で行う（fail-closed）。
 # 追記前に検査すると、追記部分に残ったプレースホルダーが検査を素通りする。

@@ -727,3 +727,163 @@ test('(s) sub_issues 応答の形が想定外で jq 変換が失敗したら edi
   assert.equal(body, null)
   assert.match(r.stderr, /絞り込みに失敗/)
 })
+
+// ---- コードフェンス内の行を見出し・表行・運用見出しと誤認しない（Issue #557） ----
+const FENCE = '```'
+const fenceCount = (b) => b.split('\n').filter((l) => /^ {0,3}(`{3,}|~{3,})/.test(l)).length
+
+const FENCED_ROOT = `<!-- granularity: 2h -->
+## Phase 別表
+
+| Phase | 親 | 直下 | 総数 |
+|-------|----|------|------|
+| Phase 1 | #101 古い | 9 | 9 |
+
+### Phase 1: 古い
+
+旧メモ A
+
+${FENCE}bash
+# コメント行
+### Phase 2: ニセ
+## 運用
+| Phase 9 | ニセ | 0 | 0 |
+echo old
+${FENCE}
+
+旧メモ B
+
+### Phase 2: 後続
+
+PHASE2-KEEP-MARKER
+
+## 運用
+
+OPS-KEEP-MARKER
+`
+
+test('(A1) セクション内のフェンス中の # 行で読み飛ばしが止まらず、旧内容が全て置換される', () => {
+  const { r, body } = runRootFull(FENCED_ROOT, KIDS())
+  assert.equal(r.status, 0, r.stderr)
+  for (const m of ['旧メモ A', '旧メモ B', '# コメント行', 'echo old', 'ニセ']) {
+    assert.ok(!body.includes(m), `${m} が残っている`)
+  }
+  assert.match(body, /### Phase 2: 後続\n\nPHASE2-KEEP-MARKER/)
+  assert.match(body, /## 運用\n\nOPS-KEEP-MARKER/)
+  assert.equal(fenceCount(body), 0, 'フェンス行が孤立して残っている')
+  assert.equal(body.split('\n').filter((l) => l.startsWith('### Phase 1:')).length, 1)
+})
+
+test('(A2) フェンス内の見出し形の行は終端扱いされず、セクション全体が置換される（チルダ・長いフェンス）', () => {
+  const F4 = FENCE + '`'
+  const body0 = FENCED_ROOT.replace(`${FENCE}bash`, `${F4}bash`).replace(`echo old\n${FENCE}`, `${FENCE}\necho old\n${F4}`)
+  const { r, body } = runRootFull(body0, KIDS())
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(!body.includes('echo old'))
+  assert.ok(!body.includes('旧メモ B'))
+  assert.equal(fenceCount(body), 0)
+  const tilde = FENCED_ROOT.replace(`${FENCE}bash`, '~~~bash').replace(`echo old\n${FENCE}`, 'echo old\n~~~')
+  const t = runRootFull(tilde, KIDS())
+  assert.equal(t.r.status, 0, t.r.stderr)
+  assert.ok(!t.body.includes('echo old'))
+  assert.ok(!t.body.includes('旧メモ B'))
+  assert.equal(fenceCount(t.body), 0)
+})
+
+test('(A3) フェンス内の ## 運用 形の行を新セクションの挿入位置にしない', () => {
+  const root = `<!-- granularity: 2h -->
+## Phase 別表
+
+| Phase | 親 | 直下 | 総数 |
+|-------|----|------|------|
+| Phase 2 | #102 後続 | 1 | 1 |
+
+### Phase 2: 後続
+
+${FENCE}md
+## 運用
+${FENCE}
+
+## 運用
+
+OPS-KEEP-MARKER
+`
+  const { r, body } = runRootFull(root, KIDS())
+  assert.equal(r.status, 0, r.stderr)
+  const lines = body.split('\n')
+  const newSec = lines.findIndex((l) => l.startsWith('### Phase 1:'))
+  const realOps = lines.findIndex((l, i) => l === '## 運用' && lines[i - 1] === '' && lines[i - 2] !== '```md')
+  const fakeOps = lines.findIndex((l) => l === '## 運用')
+  assert.ok(newSec > fakeOps, '新セクションがフェンス内の疑似見出しの前へ入った')
+  assert.ok(newSec < realOps)
+  assert.match(body, /OPS-KEEP-MARKER/)
+})
+
+test('(A4) フェンス内の | Phase N | 形の行を表の追記位置にしない', () => {
+  const root = `<!-- granularity: 2h -->
+## Phase 別表
+
+| Phase | 親 | 直下 | 総数 |
+|-------|----|------|------|
+| Phase 2 | #102 後続 | 1 | 1 |
+
+例:
+
+${FENCE}
+| Phase 9 | ニセ | 0 | 0 |
+${FENCE}
+
+## 運用
+`
+  const { r, body } = runRootFull(root, KIDS())
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(body, /\| Phase 2 \| #102 後続 \| 1 \| 1 \|\n\| Phase 1 \| #101 feat: 基盤整備 \| 1 \| 1 \|/)
+  assert.match(body, /\| Phase 9 \| ニセ \| 0 \| 0 \|\n```/)
+})
+
+test('(A5) 4 個のフェンスは 3 個の行や別記号の行では閉じない', () => {
+  const root = `<!-- granularity: 2h -->
+## Phase 別表
+
+| Phase | 親 | 直下 | 総数 |
+|-------|----|------|------|
+| Phase 1 | #101 古い | 9 | 9 |
+
+### Phase 1: 古い
+
+\`\`\`\`md
+${FENCE}
+~~~
+# 内側のコメント
+\`\`\`\`
+
+### Phase 2: 後続
+
+KEEP
+
+## 運用
+`
+  const { r, body } = runRootFull(root, KIDS())
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(!body.includes('内側のコメント'))
+  assert.match(body, /### Phase 2: 後続\n\nKEEP/)
+})
+
+test('(A6) CRLF の閉じフェンスも閉じとして扱う', () => {
+  const root = FENCED_ROOT.replace(/\n/g, '\r\n')
+  const { r, body } = runRootFull(root, KIDS())
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(!body.includes('echo old'))
+  assert.ok(!body.includes('旧メモ B'))
+  assert.match(body, /PHASE2-KEEP-MARKER/)
+})
+
+test('(A7) 閉じ忘れフェンスを含む本文は edit せず中止し、一時ファイルが残らない', () => {
+  const root = FENCED_ROOT.replace(`echo old\n${FENCE}`, 'echo old')
+  const { r, body, edits, leftovers } = runRootFull(root, KIDS())
+  assert.notEqual(r.status, 0)
+  assert.equal(edits.length, 0)
+  assert.equal(body, null)
+  assert.match(r.stderr, /閉じていない/)
+  assert.deepEqual(leftovers, [])
+})
