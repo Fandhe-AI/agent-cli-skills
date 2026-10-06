@@ -7,42 +7,30 @@
 // 修正は (1) 実ツリー（sub_issues API）から表を生成、(2) プレースホルダー残りの
 // 検査ガード（fail-closed）の 2 点。
 //
+// Issue #555 は新規作成経路（旧フェンス）を scripts/create-root-body.sh + tree-lib.sh へ
+// 切り出した。(a)〜(j)・(f) は期待値を変えずスクリプト直接実行へ移行し、引数検証・
+// 環境変数フォールバック・ライブラリ契約・SKILL.md の静的検査・探索フェンス単体実行を追加した。
+//
 // Issue #551 は Step 3 の雛形（プレースホルダー行だけの表）を持つルートへ --root で
 // 再実行しても Step 6 が完走することの回帰（テスト (n)〜(r)）。
 //
-// SKILL.md はドキュメントのため、フェンス内の bash をテキスト抽出し、PATH 先頭に
+// --root 経路は SKILL.md のフェンス内 bash をテキスト抽出し、PATH 先頭に
 // gh スタブを差し込んで実プロセスとして実行し、gh 呼び出しと本文を観測する
 // （node:test 標準ライブラリのみ）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, readdirSync, existsSync, chmodSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, readdirSync, existsSync, chmodSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md')
 
-// Step 6 見出し以降の bash フェンスのうち、新規作成用（gh issue edit --body-file を含み、
-// --root 用の CURRENT_BODY を含まないもの）だけを抽出する。件数が 1 から変わったら落とし、
-// フェンスの追加・削除の当て漏れに気づけるようにする。
-function extractStep6Block() {
-  const text = readFileSync(SKILL_MD, 'utf8')
-  const start = text.indexOf('### Step 6')
-  const end = text.indexOf('### Step 7')
-  assert.ok(start >= 0 && end > start, 'Step 6 / Step 7 見出しが見つからない')
-  const section = text.slice(start, end)
-  const blocks = []
-  const re = /```bash\n([\s\S]*?)```/g
-  let m
-  while ((m = re.exec(section)) !== null) {
-    if (m[1].includes('gh issue edit') && m[1].includes('--body-file') && !m[1].includes('CURRENT_BODY')) {
-      blocks.push(m[1])
-    }
-  }
-  assert.equal(blocks.length, 1, `新規作成用フェンスは 1 つであること（実際: ${blocks.length}）`)
-  return blocks[0]
-}
+// 新規作成経路は scripts/create-root-body.sh へ切り出した（Issue #555）。SKILL.md からの
+// ブロック抽出ではなく、スクリプトを直接実行して検証する。
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'create-root-body.sh')
+const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'tree-lib.sh')
 
 // gh スタブ。api .../issues/<n>/sub_issues?...page=<p> には fixture/sub_<n>_<p>.json を返し、
 // 無ければ exit 1（API 失敗）。issue edit は引数と --body-file の中身を記録する。
@@ -82,10 +70,10 @@ function setup(fixtures) {
   return { dir, bin, fx, tmp }
 }
 
-function run(ctx) {
+function run(ctx, { args = ['--root', '100', '--granularity', '2h'], env = {} } = {}) {
   const callLog = join(ctx.dir, 'calls.log')
   const bodyOut = join(ctx.dir, 'body.md')
-  const r = spawnSync('bash', ['-c', extractStep6Block()], {
+  const r = spawnSync('bash', [SCRIPT, ...args], {
     cwd: ctx.dir,
     encoding: 'utf8',
     env: {
@@ -95,8 +83,7 @@ function run(ctx) {
       FIXTURE_DIR: ctx.fx,
       GH_CALL_LOG: callLog,
       GH_BODY_OUT: bodyOut,
-      ROOT_NUMBER: '100',
-      GRANULARITY: '2h',
+      ...env,
     },
   })
   const calls = existsSync(callLog) ? readFileSync(callLog, 'utf8').split('\n').filter(Boolean) : []
@@ -468,4 +455,152 @@ test('(r) 雛形へのマージ結果へ同じ Phase を再マージしても行
   assert.equal(second.body.split('\n').filter((l) => /^\| Phase 1 \|/.test(l)).length, 1)
   assert.equal(second.body.split('\n').filter((l) => /^### Phase 1:/.test(l)).length, 1)
   assert.match(second.body, /\| Phase 1 \| #101 feat: 基盤整備 \| 2 \| 2 \|/)
+})
+
+// ---- Issue #555: スクリプト切り出しの追加検証 ----
+
+test('(s) 不正な引数・欠落は gh を 1 回も呼ばず exit 1 で止まる', () => {
+  const cases = [
+    { args: ['--root', 'abc', '--granularity', '2h'] },
+    { args: ['--root', '0', '--granularity', '2h'] },
+    { args: ['--root', '100', '--granularity', '2'] },
+    { args: ['--root', '100', '--granularity', '2 h'] },
+    { args: ['--root', '100', '--bogus', 'x'] },
+    { args: ['--root'] },
+    { args: [] },
+  ]
+  for (const c of cases) {
+    const ctx = setup(BASE())
+    try {
+      const { r, calls } = run(ctx, c)
+      assert.equal(r.status, 1, `${JSON.stringify(c.args)}: ${r.stderr}`)
+      assert.equal(calls.length, 0)
+      assert.equal(r.stdout.includes('result='), false)
+    } finally {
+      rmSync(ctx.dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('(t) 引数が無ければ環境変数 ROOT_NUMBER / GRANULARITY を使う', () => {
+  const ctx = setup(BASE())
+  try {
+    const { r, calls, body } = run(ctx, { args: [], env: { ROOT_NUMBER: '100', GRANULARITY: '4h' } })
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(calls.length, 1)
+    assert.ok(body.startsWith('<!-- granularity: 4h -->\n'))
+    assert.match(r.stdout.trim().split('\n').pop(), /^result=updated root=100 phases=2$/)
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('(u) tree-lib.sh は source してもシェルオプションを変えず、ヘルパーを定義する', () => {
+  const script = [
+    'before=$(set +o)',
+    `source "${LIB}"`,
+    'after=$(set +o)',
+    '[ "$before" = "$after" ] || exit 3',
+    `source "${LIB}" || exit 4`,
+    'declare -F list_subs count_open_desc >/dev/null || exit 5',
+    '[ -n "$CELL" ] && [ -n "$TREE_PLACEHOLDER_RE" ] || exit 6',
+  ].join('\n')
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 0, `exit=${r.status} ${r.stderr}`)
+})
+
+test('(v) gh が見つからなければ前提不備として exit 2 で止まる', () => {
+  const ctx = setup(BASE())
+  try {
+    // gh を含まない PATH（jq・bash・coreutils の symlink だけ）で実行する
+    const bare = join(ctx.dir, 'nogh')
+    mkdirSync(bare)
+    for (const cmd of ['jq', 'bash', 'dirname', 'mktemp', 'rm']) {
+      const w = spawnSync('bash', ['-c', `command -v ${cmd}`], { encoding: 'utf8' }).stdout.trim()
+      if (w) symlinkSync(w, join(bare, cmd))
+    }
+    const r = spawnSync(join(bare, 'bash'), [SCRIPT, '--root', '100', '--granularity', '2h'], {
+      cwd: ctx.dir,
+      encoding: 'utf8',
+      env: { PATH: bare, HOME: process.env.HOME, TMPDIR: ctx.tmp },
+    })
+    assert.equal(r.status, 2, r.stderr)
+    assert.deepEqual(readdirSync(ctx.tmp), [])
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+// ---- SKILL.md の静的検査（update-issue-tree の Step 8 テストと同型）----
+
+function step6Section() {
+  const text = readFileSync(SKILL_MD, 'utf8')
+  const start = text.indexOf('### Step 6')
+  const end = text.indexOf('### Step 7')
+  assert.ok(start >= 0 && end > start, 'Step 6 / Step 7 見出しが見つからない')
+  return text.slice(start, end)
+}
+
+function step6Fences() {
+  const blocks = []
+  const re = /```bash\n([\s\S]*?)```/g
+  const section = step6Section()
+  let m
+  while ((m = re.exec(section)) !== null) blocks.push(m[1])
+  return blocks
+}
+
+// 新規作成の呼び出しフェンス（create-root-body.sh を参照するもの）
+function invokeFence() {
+  const fences = step6Fences().filter((b) => b.includes('create-root-body.sh'))
+  assert.equal(fences.length, 1, `呼び出しフェンスは 1 つであること（実際: ${fences.length}）`)
+  return fences[0]
+}
+
+test('(w) Step 6 の bash フェンスは --root 用と新規作成の呼び出し用の 2 つだけで、ロジックの重複が無い', () => {
+  const fences = step6Fences()
+  assert.equal(fences.length, 2, `実際: ${fences.length}`)
+  const inv = invokeFence()
+  assert.ok(!/list_subs\(\)|count_open_desc\(\)|CELL=/.test(inv), '呼び出しフェンスにヘルパー定義が無い')
+  assert.ok(!inv.includes('gh issue edit'), '呼び出しフェンスは gh issue edit を直接呼ばない')
+  const defs = step6Section().match(/list_subs\(\) \{/g) ?? []
+  assert.equal(defs.length, 1, `list_subs 定義は --root フェンスの 1 件だけ（実際: ${defs.length}）`)
+})
+
+// ---- 探索フェンスの単体実行（スタブスクリプトで引数と終了コードの伝播を確認）----
+
+function runInvoke(layout, { env = {}, stubExit = '0' } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'step6inv-'))
+  try {
+    if (layout) {
+      const sd = join(dir, layout, 'create-issue-tree', 'scripts')
+      mkdirSync(sd, { recursive: true })
+      writeFileSync(join(sd, 'create-root-body.sh'), '#!/usr/bin/env bash\necho "ARGS $*"\nexit "${STUB_EXIT:-0}"\n')
+    }
+    return spawnSync('bash', ['-c', invokeFence()], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, STUB_EXIT: stubExit, ...env },
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('(x) 探索フェンスは 3 レイアウトを解決し、引数を渡す', () => {
+  for (const layout of ['skills', '.agents/skills', '.claude/skills']) {
+    const r = runInvoke(layout, { env: { ROOT_NUMBER: '100', GRANULARITY: '2h' } })
+    assert.equal(r.status, 0, `${layout}: ${r.stderr}`)
+    assert.match(r.stdout, /ARGS --root 100 --granularity 2h/)
+  }
+})
+
+test('(y) 探索フェンスはスクリプトの非ゼロ終了を伝播し、未設定・不在では起動前に止まる', () => {
+  const ng = runInvoke('skills', { env: { ROOT_NUMBER: '100', GRANULARITY: '2h' }, stubExit: '7' })
+  assert.equal(ng.status, 7, ng.stderr)
+  const unset = runInvoke('skills', { env: { GRANULARITY: '2h' } })
+  assert.notEqual(unset.status, 0)
+  assert.ok(!unset.stdout.includes('ARGS'), 'ROOT_NUMBER 未設定ならスクリプトを起動しない')
+  const none = runInvoke(null, { env: { ROOT_NUMBER: '100', GRANULARITY: '2h' } })
+  assert.equal(none.status, 1)
 })
