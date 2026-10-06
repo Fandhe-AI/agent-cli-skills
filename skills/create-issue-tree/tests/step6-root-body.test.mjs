@@ -14,9 +14,12 @@
 // Issue #551 は Step 3 の雛形（プレースホルダー行だけの表）を持つルートへ --root で
 // 再実行しても Step 6 が完走することの回帰（テスト (n)〜(r)）。
 //
-// --root 経路は SKILL.md のフェンス内 bash をテキスト抽出し、PATH 先頭に
-// gh スタブを差し込んで実プロセスとして実行し、gh 呼び出しと本文を観測する
-// （node:test 標準ライブラリのみ）。
+// Issue #556 は --root 経路（既存本文への Phase 行・セクションのマージ）も
+// scripts/merge-root-body.sh へ切り出した。(k)〜(r) は期待値を変えずスクリプト直接実行へ移行し、
+// 引数検証・環境変数フォールバック・取得失敗・edit 失敗の伝播・前提不備を追加した。
+//
+// いずれの経路も PATH 先頭に gh スタブを差し込んで実プロセスとして実行し、
+// gh 呼び出しと本文を観測する（node:test 標準ライブラリのみ）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -30,6 +33,7 @@ const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md')
 // 新規作成経路は scripts/create-root-body.sh へ切り出した（Issue #555）。SKILL.md からの
 // ブロック抽出ではなく、スクリプトを直接実行して検証する。
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'create-root-body.sh')
+const MERGE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'merge-root-body.sh')
 const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'tree-lib.sh')
 
 // gh スタブ。api .../issues/<n>/sub_issues?...page=<p> には fixture/sub_<n>_<p>.json を返し、
@@ -263,24 +267,11 @@ test('(f) 一時ファイルは成功時も失敗時も残らない', () => {
 // Issue #544 PR #548 のレビュー指摘（P1: セクションを環境変数で awk へ渡して長さ上限超過、
 // P2: 読み飛ばしが任意の見出しで終了し小見出し以降の旧内容が残る）の回帰テスト。
 
-function extractRootBlock() {
-  const text = readFileSync(SKILL_MD, 'utf8')
-  const start = text.indexOf('### Step 6')
-  const end = text.indexOf('### Step 7')
-  const section = text.slice(start, end)
-  const blocks = []
-  const re = /```bash\n([\s\S]*?)```/g
-  let m
-  while ((m = re.exec(section)) !== null) {
-    if (m[1].includes('gh issue edit') && m[1].includes('CURRENT_BODY')) blocks.push(m[1])
-  }
-  assert.equal(blocks.length, 1, `--root 用フェンスは 1 つであること（実際: ${blocks.length}）`)
-  return blocks[0]
-}
-
-// issue view <n> --json body は fixture/root_body.md、--json title は jq 経由で title を返す。
-// issue edit は --body-file - の stdin を GH_BODY_OUT へ記録する。
+// issue view <n> --json body は fixture/root_body.md（FAIL_VIEW_BODY=1 なら失敗）、--json title は jq 経由で
+// title を返す。issue edit は --body-file - の stdin を GH_BODY_OUT へ記録し、EDIT_EXIT で終了コードを変えられる。
+// 全 gh 呼び出しは GH_ALL_LOG へ記録する（引数検証で gh が 1 回も呼ばれないことの確認用）。
 const ROOT_GH_STUB = `#!/usr/bin/env bash
+echo "CALL $*" >> "$GH_ALL_LOG"
 if [ "$1" = "api" ]; then
   path="$2"
   n=$(printf '%s' "$path" | sed -E 's#.*issues/([0-9]+)/sub_issues.*#\\1#')
@@ -290,19 +281,24 @@ if [ "$1" = "api" ]; then
   exit 1
 fi
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
-  if [ "$5" = "body" ]; then jq -n --rawfile b "$FIXTURE_DIR/root_body.md" '{body:$b}' | jq -r '.body'; exit 0; fi
+  if [ "$5" = "body" ]; then
+    [ -z "\${FAIL_VIEW_BODY:-}" ] || exit 1
+    jq -n --rawfile b "$FIXTURE_DIR/root_body.md" '{body:$b}' | jq -r '.body'; exit 0
+  fi
   jq -n --arg t "$PHASE_TITLE" '{title:$t}' | jq -r ".title | $(printf '%s' "$7" | sed 's/^\\.title | //')"
   exit 0
 fi
 if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
   echo "EDIT $*" >> "$GH_CALL_LOG"
   cat > "$GH_BODY_OUT"
-  exit 0
+  exit "\${EDIT_EXIT:-0}"
 fi
 exit 1
 `
 
-function runRoot(rootBody, children) {
+const ROOT_ARGS = ['--root', '100', '--granularity', '2h', '--phase', '1', '--phase-number', '101']
+
+function runRootFull(rootBody, children, { args = ROOT_ARGS, env = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'step6root-'))
   const bin = join(dir, 'bin')
   const fx = join(dir, 'fx')
@@ -314,9 +310,10 @@ function runRoot(rootBody, children) {
   writeFileSync(join(fx, 'sub_101_1.json'), JSON.stringify(children))
   for (const c of children) writeFileSync(join(fx, `sub_${c.number}_1.json`), '[]')
   const callLog = join(dir, 'calls.log')
+  const allLog = join(dir, 'all.log')
   const bodyOut = join(dir, 'body.md')
   try {
-    const r = spawnSync('bash', ['-c', extractRootBlock()], {
+    const r = spawnSync('bash', [MERGE_SCRIPT, ...args], {
       cwd: dir,
       encoding: 'utf8',
       env: {
@@ -325,19 +322,23 @@ function runRoot(rootBody, children) {
         TMPDIR: tmp,
         FIXTURE_DIR: fx,
         GH_CALL_LOG: callLog,
+        GH_ALL_LOG: allLog,
         GH_BODY_OUT: bodyOut,
-        ROOT_NUMBER: '100',
-        GRANULARITY: '2h',
-        PHASE: '1',
-        PHASE_NUMBER: '101',
         PHASE_TITLE: 'feat: 基盤整備',
+        ...env,
       },
     })
+    const lines = (f) => (existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean) : [])
     const body = existsSync(bodyOut) ? readFileSync(bodyOut, 'utf8') : null
-    return { r, body, leftovers: readdirSync(tmp) }
+    return { r, body, edits: lines(callLog), allCalls: lines(allLog), leftovers: readdirSync(tmp) }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+}
+
+function runRoot(rootBody, children) {
+  const { r, body, leftovers } = runRootFull(rootBody, children)
+  return { r, body, leftovers }
 }
 
 const ROOT_BODY = `<!-- granularity: 2h -->
@@ -396,10 +397,11 @@ test('(l) Phase セクションが巨大でも環境変数に載せず置換で�
   assert.deepEqual(leftovers, [])
 })
 
-test('(m) --root 用フェンスは PHASE_SECTION を SEC 環境変数として awk へ渡さない', () => {
-  const block = extractRootBlock()
-  assert.ok(!/\bSEC=/.test(block), 'SEC= による環境変数渡しが残っている')
-  assert.ok(!/ENVIRON\["SEC"\]/.test(block))
+test('(m) merge-root-body.sh は PHASE_SECTION を SEC 環境変数として awk へ渡さない', () => {
+  // コメント行（不変条件の説明文に SEC= の語が出る）は除いてコードだけを検査する
+  const src = readFileSync(MERGE_SCRIPT, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+  assert.ok(!/\bSEC=/.test(src), 'SEC= による環境変数渡しが残っている')
+  assert.ok(!/ENVIRON\["SEC"\]/.test(src))
 })
 
 // ---- Issue #551: Step 3 の雛形だけのルートへ --root で再実行するケース ----
@@ -433,7 +435,9 @@ test('(o) Phase 行もプレースホルダー行も無い本文は edit せず�
 })
 
 test('(p) 実在の Phase 行とプレースホルダー行が併存する本文ではプレースホルダー行だけ落とす', () => {
-  const b = extractStep3Template().replace('| (作成後に更新) | | | |', '| Phase 2 | #102 後続 | 1 | 1 |\n| (作成後に更新) | | | |')
+  const tpl = extractStep3Template()
+  const b = tpl.replace('| (作成後に更新) | | | |', '| Phase 2 | #102 後続 | 1 | 1 |\n| (作成後に更新) | | | |')
+  assert.notEqual(b, tpl, 'Step 3 の文言が変わり置換が空振りしている')
   const { r, body } = runRoot(b, [issue(111, 'c')])
   assert.equal(r.status, 0, r.stdout + r.stderr)
   assert.ok(!body.includes('(作成後に更新)'))
@@ -550,34 +554,38 @@ function step6Fences() {
   return blocks
 }
 
-// 新規作成の呼び出しフェンス（create-root-body.sh を参照するもの）
-function invokeFence() {
-  const fences = step6Fences().filter((b) => b.includes('create-root-body.sh'))
-  assert.equal(fences.length, 1, `呼び出しフェンスは 1 つであること（実際: ${fences.length}）`)
+// 呼び出しフェンス（指定スクリプトを参照するもの）
+function invokeFence(script) {
+  const fences = step6Fences().filter((b) => b.includes(script))
+  assert.equal(fences.length, 1, `${script} の呼び出しフェンスは 1 つであること（実際: ${fences.length}）`)
   return fences[0]
 }
 
-test('(w) Step 6 の bash フェンスは --root 用と新規作成の呼び出し用の 2 つだけで、ロジックの重複が無い', () => {
+const SCRIPTS = ['create-root-body.sh', 'merge-root-body.sh']
+
+test('(w) Step 6 の bash フェンスは 2 つの呼び出し用だけで、本文生成ロジックが残っていない', () => {
   const fences = step6Fences()
   assert.equal(fences.length, 2, `実際: ${fences.length}`)
-  const inv = invokeFence()
-  assert.ok(!/list_subs\(\)|count_open_desc\(\)|CELL=/.test(inv), '呼び出しフェンスにヘルパー定義が無い')
-  assert.ok(!inv.includes('gh issue edit'), '呼び出しフェンスは gh issue edit を直接呼ばない')
+  for (const script of SCRIPTS) {
+    const inv = invokeFence(script)
+    assert.ok(!/list_subs\(\)|count_open_desc\(\)|CELL=|\bawk\b|CURRENT_BODY/.test(inv), `${script}: ロジックが無い`)
+    assert.ok(!inv.includes('gh issue edit'), `${script}: gh issue edit を直接呼ばない`)
+  }
   const defs = step6Section().match(/list_subs\(\) \{/g) ?? []
-  assert.equal(defs.length, 1, `list_subs 定義は --root フェンスの 1 件だけ（実際: ${defs.length}）`)
+  assert.equal(defs.length, 0, `Step 6 に list_subs 定義が残っている（実際: ${defs.length}）`)
 })
 
 // ---- 探索フェンスの単体実行（スタブスクリプトで引数と終了コードの伝播を確認）----
 
-function runInvoke(layout, { env = {}, stubExit = '0' } = {}) {
+function runInvoke(script, layout, { env = {}, stubExit = '0' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'step6inv-'))
   try {
     if (layout) {
       const sd = join(dir, layout, 'create-issue-tree', 'scripts')
       mkdirSync(sd, { recursive: true })
-      writeFileSync(join(sd, 'create-root-body.sh'), '#!/usr/bin/env bash\necho "ARGS $*"\nexit "${STUB_EXIT:-0}"\n')
+      writeFileSync(join(sd, script), '#!/usr/bin/env bash\necho "ARGS $*"\nexit "${STUB_EXIT:-0}"\n')
     }
-    return spawnSync('bash', ['-c', invokeFence()], {
+    return spawnSync('bash', ['-c', invokeFence(script)], {
       cwd: dir,
       encoding: 'utf8',
       env: { PATH: process.env.PATH, HOME: process.env.HOME, STUB_EXIT: stubExit, ...env },
@@ -587,20 +595,135 @@ function runInvoke(layout, { env = {}, stubExit = '0' } = {}) {
   }
 }
 
+const INV_ENV = { ROOT_NUMBER: '100', GRANULARITY: '2h', PHASE: '3', PHASE_NUMBER: '103' }
+const INV_ARGS = {
+  'create-root-body.sh': /ARGS --root 100 --granularity 2h$/m,
+  'merge-root-body.sh': /ARGS --root 100 --granularity 2h --phase 3 --phase-number 103$/m,
+}
+
 test('(x) 探索フェンスは 3 レイアウトを解決し、引数を渡す', () => {
-  for (const layout of ['skills', '.agents/skills', '.claude/skills']) {
-    const r = runInvoke(layout, { env: { ROOT_NUMBER: '100', GRANULARITY: '2h' } })
-    assert.equal(r.status, 0, `${layout}: ${r.stderr}`)
-    assert.match(r.stdout, /ARGS --root 100 --granularity 2h/)
+  for (const script of SCRIPTS) {
+    for (const layout of ['skills', '.agents/skills', '.claude/skills']) {
+      const r = runInvoke(script, layout, { env: INV_ENV })
+      assert.equal(r.status, 0, `${script} ${layout}: ${r.stderr}`)
+      assert.match(r.stdout, INV_ARGS[script])
+    }
   }
 })
 
 test('(y) 探索フェンスはスクリプトの非ゼロ終了を伝播し、未設定・不在では起動前に止まる', () => {
-  const ng = runInvoke('skills', { env: { ROOT_NUMBER: '100', GRANULARITY: '2h' }, stubExit: '7' })
-  assert.equal(ng.status, 7, ng.stderr)
-  const unset = runInvoke('skills', { env: { GRANULARITY: '2h' } })
-  assert.notEqual(unset.status, 0)
-  assert.ok(!unset.stdout.includes('ARGS'), 'ROOT_NUMBER 未設定ならスクリプトを起動しない')
-  const none = runInvoke(null, { env: { ROOT_NUMBER: '100', GRANULARITY: '2h' } })
-  assert.equal(none.status, 1)
+  for (const script of SCRIPTS) {
+    const ng = runInvoke(script, 'skills', { env: INV_ENV, stubExit: '7' })
+    assert.equal(ng.status, 7, `${script}: ${ng.stderr}`)
+    for (const missing of Object.keys(INV_ENV)) {
+      const { [missing]: _drop, ...env } = INV_ENV
+      const unset = runInvoke(script, 'skills', { env })
+      // 呼び出しフェンスが要求しない変数（create 側の PHASE 等）は未設定でも起動してよい
+      const required = script === 'merge-root-body.sh' || ['ROOT_NUMBER', 'GRANULARITY'].includes(missing)
+      if (required) {
+        assert.notEqual(unset.status, 0, `${script}: ${missing} 未設定で止まる`)
+        assert.ok(!unset.stdout.includes('ARGS'), `${script}: ${missing} 未設定ならスクリプトを起動しない`)
+      }
+    }
+    const none = runInvoke(script, null, { env: INV_ENV })
+    assert.equal(none.status, 1)
+  }
+})
+
+// ---- Issue #556: merge-root-body.sh の追加検証 ----
+
+const KIDS = () => [issue(111, 'feat: 新しい子')]
+
+test('(z1) 不正な引数・欠落は gh を 1 回も呼ばず exit 1 で止まる', () => {
+  const cases = [
+    ['--root', 'abc', '--granularity', '2h', '--phase', '1', '--phase-number', '101'],
+    ['--root', '100', '--granularity', '2', '--phase', '1', '--phase-number', '101'],
+    ['--root', '100', '--granularity', '2h', '--phase', 'abc', '--phase-number', '101'],
+    ['--root', '100', '--granularity', '2h', '--phase', '1;x', '--phase-number', '101'],
+    ['--root', '100', '--granularity', '2h', '--phase', '1', '--phase-number', '0'],
+    ['--root', '100', '--granularity', '2h', '--phase', '1'],
+    ['--root', '100', '--bogus', 'x'],
+    ['--phase-number'],
+    [],
+  ]
+  for (const args of cases) {
+    const { r, allCalls } = runRootFull(ROOT_BODY, KIDS(), { args })
+    assert.equal(r.status, 1, `${JSON.stringify(args)}: ${r.stderr}`)
+    assert.equal(allCalls.length, 0, `${JSON.stringify(args)}: gh が呼ばれた`)
+    assert.ok(!r.stdout.includes('result='))
+  }
+})
+
+test('(z2) 引数が無ければ環境変数を使い、成功時の最終行は result=merged になる', () => {
+  const { r, edits, body } = runRootFull(ROOT_BODY, KIDS(), {
+    args: [],
+    env: { ROOT_NUMBER: '100', GRANULARITY: '4h', PHASE: '1', PHASE_NUMBER: '101' },
+  })
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(edits.length, 1)
+  assert.ok(body.startsWith('<!-- granularity: 4h -->\n'))
+  assert.match(r.stdout.trim().split('\n').pop(), /^result=merged root=100 phase=1$/)
+})
+
+test('(z3) 既存本文の取得に失敗したら edit せず exit 1 で止まる', () => {
+  const { r, edits } = runRootFull(ROOT_BODY, KIDS(), { env: { FAIL_VIEW_BODY: '1' } })
+  assert.equal(r.status, 1, r.stderr)
+  assert.equal(edits.length, 0)
+})
+
+test('(z4) gh issue edit の失敗は同じ終了コードで伝播し、成功メッセージを出さない', () => {
+  const { r, edits } = runRootFull(ROOT_BODY, KIDS(), { env: { EDIT_EXIT: '9' } })
+  assert.equal(r.status, 9, r.stderr)
+  assert.equal(edits.length, 1)
+  assert.ok(!r.stdout.includes('result='))
+})
+
+test('(z5) gh が見つからなければ前提不備として exit 2 で止まり、一時ファイルが残らない', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'step6nogh-'))
+  try {
+    const bare = join(dir, 'bin')
+    const tmp = join(dir, 'tmp')
+    mkdirSync(bare)
+    mkdirSync(tmp)
+    for (const cmd of ['jq', 'bash', 'dirname', 'mktemp', 'rm']) {
+      const w = spawnSync('bash', ['-c', `command -v ${cmd}`], { encoding: 'utf8' }).stdout.trim()
+      if (w) symlinkSync(w, join(bare, cmd))
+    }
+    const r = spawnSync(join(bare, 'bash'), [MERGE_SCRIPT, ...ROOT_ARGS], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { PATH: bare, HOME: process.env.HOME, TMPDIR: tmp },
+    })
+    assert.equal(r.status, 2, r.stderr)
+    assert.deepEqual(readdirSync(tmp), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('(z6) 本文がマーカー 1 行だけ・空本文でも grep -v の exit 1 を失敗扱いにせず、追記位置が無ければ安全に中止する', () => {
+  for (const b of ['<!-- granularity: 2h -->\n', '']) {
+    const { r, edits } = runRootFull(b, KIDS())
+    // 追記位置（Phase 行・プレースホルダー行）が無いので exit 1 だが、理由は追記位置であってマーカー除去ではない
+    assert.equal(r.status, 1, r.stderr)
+    assert.match(r.stderr, /追記位置/)
+    assert.ok(!/マーカー除去/.test(r.stderr))
+    assert.equal(edits.length, 0)
+  }
+})
+
+test('(z7) 先行 Phase のマーカー重複行は 1 行へ正規化される', () => {
+  const { r, body } = runRootFull('<!-- granularity: 8h -->\n' + ROOT_BODY, KIDS())
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(body.split('\n').filter((l) => l.startsWith('<!-- granularity:')).length, 1)
+  assert.ok(body.startsWith('<!-- granularity: 2h -->\n'))
+})
+
+test('(s) sub_issues 応答の形が想定外で jq 変換が失敗したら edit せず非ゼロ終了する', () => {
+  // 配列要素が文字列だと `.state` の参照で jq が失敗する。空値から Phase 行を作って本文を上書きしてはならない
+  const { r, body, edits } = runRootFull(ROOT_BODY, ['unexpected'])
+  assert.notEqual(r.status, 0)
+  assert.equal(edits.length, 0, 'gh issue edit が呼ばれた')
+  assert.equal(body, null)
+  assert.match(r.stderr, /絞り込みに失敗/)
 })

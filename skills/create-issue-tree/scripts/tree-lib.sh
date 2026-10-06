@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # tree-lib.sh — イシューツリーの実ツリー取得と表セル無害化の共通ヘルパー（source 専用）
 #
-# 呼び出し元: create-root-body.sh（Step 6 新規作成経路）。--root 経路のフェンスが同じ
-#             ヘルパーを複製で持つため、後続 issue でここへ集約する前提の置き場でもある。
+# 呼び出し元: create-root-body.sh（Step 6 新規作成経路）と merge-root-body.sh（Step 6 --root 経路）。
 # 役割: sub_issues API のページング取得・open 子孫の再帰集計・issue タイトルの表セル無害化・
-#       プレースホルダー検査の正規表現を 1 箇所に定義し、本文生成ロジックの重複を防ぐ（Issue #555）。
+#       プレースホルダー検査の正規表現を 1 箇所に定義し、2 つのスクリプトで本文生成ロジックを
+#       重複させない（Issue #555・#556）。
 # 前提: gh（認証済み）と jq が PATH にあること。リポジトリは gh の {owner}/{repo} 解決に従う。
 # 契約: 失敗は非ゼロ return。source 元のシェル状態を壊さないため set -e / set -u / trap / exit
 #       は置かない（エラー処理は呼び出し側が行う）。二重 source は無害（ガードで即 return）。

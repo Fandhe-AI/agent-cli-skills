@@ -14,8 +14,8 @@ skills/                               -- スキル本体（各ディレクトリ
   create-commit/
   create-issue/
   create-issue-tree/
-    scripts/                          -- create-root-body.sh（Step 6 新規作成経路のルート本文生成・実ツリーから表を作りプレースホルダー残りで中止）、tree-lib.sh（list_subs・count_open_desc・CELL・プレースホルダー正規表現の共通ヘルパー・source 専用）
-    tests/                            -- node:test 回帰テスト（新規作成経路は scripts/create-root-body.sh を直接実行・引数検証・ライブラリ契約・Step 6 の呼び出しフェンス検査と 3 レイアウト探索・プレースホルダー残りで中止・ページング・一時ファイル削除・Step 3 雛形への --root マージ）
+    scripts/                          -- create-root-body.sh（Step 6 新規作成経路のルート本文生成・実ツリーから表を作りプレースホルダー残りで中止）、merge-root-body.sh（Step 6 --root 経路・既存ルート本文へ今回の Phase 行・セクションをマージ）、tree-lib.sh（list_subs・count_open_desc・CELL・プレースホルダー正規表現の共通ヘルパー・source 専用）
+    tests/                            -- node:test 回帰テスト（新規作成・--root 両経路とも scripts/ のスクリプトを直接実行・引数検証・edit 失敗の終了コード伝播・ライブラリ契約・Step 6 の呼び出しフェンス検査と 3 レイアウト探索・プレースホルダー残りで中止・ページング・一時ファイル削除・Step 3 雛形への --root マージ）
   create-plan/
   create-pr/
   implement-issue/
