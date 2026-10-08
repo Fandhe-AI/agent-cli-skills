@@ -186,6 +186,10 @@ test('classifyResidualByteReport: 正常・転記失敗・実失敗・スキー�
   assert.equal(t.retryable, true)
   assert.equal(classifyResidualByteReport({ kib: 1, err: 0, missing: 0, count: 2 }, 3).retryable, true)
   assert.equal(classifyResidualByteReport(undefined, 3).retryable, true)
+  const o = classifyResidualByteReport({ count: 3, err: 0 }, 3)
+  assert.deepEqual([o.ok, o.retryable, o.reason], [false, true, 'output-missing'])
+  assert.equal(classifyResidualByteReport(null, 3).reason, 'output-missing')
+  assert.equal(classifyResidualByteReport({ kib: 1, err: -1, missing: 0, count: 3 }, 3).retryable, false)
   const m = classifyResidualByteReport({ kib: 100, err: 2, missing: 0, count: 3 }, 3)
   assert.deepEqual([m.ok, m.retryable, m.reason], [false, false, 'measure'])
   assert.equal(classifyResidualByteReport({ kib: 1, err: 0, missing: 4, count: 3 }, 3).retryable, false)
@@ -218,11 +222,50 @@ test('count 一致で err>0（du 実失敗）は再測定せず null', async () 
   assert.equal(calls.length, 1)
 })
 
-test('agent が throw した場合は再測定せず null', async () => {
+test('agent が throw → 2 回目 sonnet で正常: 値を返す（Issue #571）', async () => {
   const { calls } = stubAgent([new Error('boom'), GOOD])
-  assert.equal(await measureResidualWorktreeBytesDetailed(PATHS), null)
-  assert.equal(calls.length, 1)
+  assert.deepEqual(await measureResidualWorktreeBytesDetailed(PATHS), { kib: 300, missing: 0 })
+  assert.deepEqual(calls.map((c) => c.model), ['haiku', 'sonnet'])
 })
+
+test('agent の throw が続くと合計 1+MAX_RETRIES 回で打ち切り null（有界）', async () => {
+  const { calls } = stubAgent([new Error('a'), new Error('b'), new Error('c'), GOOD])
+  assert.equal(await measureResidualWorktreeBytesDetailed(PATHS), null)
+  assert.equal(calls.length, 1 + RESIDUAL_BYTE_MEASURE_MAX_RETRIES)
+})
+
+test('agent が null 返却（StructuredOutput 欠落）→ 再測定で正常。3 回続くと null', async () => {
+  const a = stubAgent([null, GOOD])
+  assert.deepEqual(await measureResidualWorktreeBytesDetailed(PATHS), { kib: 300, missing: 0 })
+  assert.equal(a.calls.length, 2)
+  const b = stubAgent([null, null, null, GOOD])
+  assert.equal(await measureResidualWorktreeBytesDetailed(PATHS), null)
+  assert.equal(b.calls.length, 3)
+})
+
+test('必須フィールド欠落（kib / missing 欠落）→ 再測定で正常', async () => {
+  const { calls } = stubAgent([{ count: 3, err: 0 }, GOOD])
+  assert.deepEqual(await measureResidualWorktreeBytesDetailed(PATHS), { kib: 300, missing: 0 })
+  assert.equal(calls.length, 2)
+})
+
+test('例外 → 転記失敗 → 正常: 再測定予算を共有し合計 3 回で値を返す', async () => {
+  const { calls } = stubAgent([new Error('boom'), TRANSCRIPTION_FAIL, GOOD])
+  assert.deepEqual(await measureResidualWorktreeBytesDetailed(PATHS), { kib: 300, missing: 0 })
+  assert.equal(calls.length, 3)
+})
+
+for (const [name, bad] of [
+  ['kib が文字列', { kib: 'x', err: 0, missing: 0, count: 3 }],
+  ['err が負', { kib: 1, err: -1, missing: 0, count: 3 }],
+  ['missing が件数超過', { kib: 1, err: 0, missing: 4, count: 3 }],
+]) {
+  test(`値が存在して不正（${name}）は再測定せず null`, async () => {
+    const { calls } = stubAgent([bad, GOOD])
+    assert.equal(await measureResidualWorktreeBytesDetailed(PATHS), null)
+    assert.equal(calls.length, 1)
+  })
+}
 
 test('許可文字集合外パスは agent を呼ばず null', async () => {
   const { calls } = stubAgent([GOOD])
@@ -241,6 +284,30 @@ test('measureFreeDiskKib: err!==0 1 回目 → 2 回目 sonnet で正常なら�
 test('measureFreeDiskKib: 2 回とも失敗なら null（再測定は 1 回まで）', async () => {
   const { calls } = stubAgent([{ freeKib: 0, err: 1 }, { freeKib: 0, err: 1 }, { freeKib: 5000, err: 0 }])
   assert.equal(await measureFreeDiskKib('/tmp/main-wt'), null)
+  assert.equal(calls.length, 2)
+})
+
+test('measureFreeDiskKib: agent 例外 1 回 → 2 回目 sonnet で正常なら値を返す（Issue #571）', async () => {
+  const { calls } = stubAgent([new Error('boom'), { freeKib: 5000, err: 0 }])
+  assert.equal(await measureFreeDiskKib('/tmp/main-wt'), 5000)
+  assert.deepEqual(calls.map((c) => c.model), ['haiku', 'sonnet'])
+})
+
+test('measureFreeDiskKib: agent 例外が 2 回なら null（再測定は 1 回まで）', async () => {
+  const { calls } = stubAgent([new Error('a'), new Error('b'), { freeKib: 5000, err: 0 }])
+  assert.equal(await measureFreeDiskKib('/tmp/main-wt'), null)
+  assert.equal(calls.length, 2)
+})
+
+test('measureFreeDiskKib: null 返却 → 再測定で正常（現行挙動）', async () => {
+  const { calls } = stubAgent([null, { freeKib: 5000, err: 0 }])
+  assert.equal(await measureFreeDiskKib('/tmp/main-wt'), 5000)
+  assert.equal(calls.length, 2)
+})
+
+test('measureFreeDiskKib: err===0 かつ freeKib 不正も再測定される（現行挙動を固定）', async () => {
+  const { calls } = stubAgent([{ freeKib: -1, err: 0 }, { freeKib: 5000, err: 0 }])
+  assert.equal(await measureFreeDiskKib('/tmp/main-wt'), 5000)
   assert.equal(calls.length, 2)
 })
 
