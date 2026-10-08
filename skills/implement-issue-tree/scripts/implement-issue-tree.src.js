@@ -3491,10 +3491,17 @@ function buildResidualBytesScript({ tmpFile, delimiter, pathsJson }) {
   ].join('\n')
 }
 
-// 測定結果の分類（Issue #566）。count が送信件数と一致しない結果は「対象を処理していない／別集合を
-// 処理した」転記失敗とみなして再測定可（retryable）。count 一致で err>0 は du の実失敗、型・範囲
-// 不正はスキーマ不正で、いずれも再測定しても結果が変わらないため再測定しない。
+// 測定結果の分類（Issue #566・#571）。次はエージェント側の一過性の失敗とみなして再測定可（retryable）。
+//   - output-missing: 結果がオブジェクトでない、または必須フィールド（kib / err / missing / count）の
+//     いずれかが undefined / null（StructuredOutput 欠落・スキーマ不適合）
+//   - transcription: count が送信件数と一致しない（対象を処理していない／別集合を処理した）
+// 値は存在するが型・範囲が不正なもの（schema）と、count 一致で err>0 の du 実失敗（measure）は、
+// 再測定しても結果が変わらないため再測定しない。判定順は 欠落 → count 不一致 → err → 型・範囲。
 function classifyResidualByteReport(v, sentCount) {
+  const isObj = v !== null && typeof v === 'object'
+  if (!isObj || [v.kib, v.err, v.missing, v.count].some((x) => x === undefined || x === null)) {
+    return { ok: false, retryable: true, reason: 'output-missing' }
+  }
   if (!(Number.isInteger(v?.count) && v.count === sentCount)) {
     return { ok: false, retryable: true, reason: 'transcription' }
   }
@@ -3506,10 +3513,10 @@ function classifyResidualByteReport(v, sentCount) {
   return { ok: true, kib: v.kib, missing: v.missing }
 }
 
-// 転記失敗時の再測定回数上限（初回を含め最大 3 回）。再測定は別エージェント（sonnet）で行う。
+// 転記失敗・agent 例外・出力欠落時の再測定回数上限（合算で初回を含め最大 3 回）。再測定は別エージェント（sonnet）で行う。
 const RESIDUAL_BYTE_MEASURE_MAX_RETRIES = 2
 
-// 1 回分のエージェント呼び出し。区切り語衝突は { error: true }（再測定しない）。
+// 1 回分のエージェント呼び出し。区切り語衝突は { error: true }（再測定しない）、agent 例外は { thrown }（再測定可）。
 let residualByteMeasureCallSeq = 0
 async function measureResidualBytesOnce(sanitizedPaths, model) {
   const pathsJson = JSON.stringify(sanitizedPaths)
@@ -3522,7 +3529,11 @@ async function measureResidualBytesOnce(sanitizedPaths, model) {
     delimiter,
     pathsJson,
   })
-  const v = await agent(
+  // agent() の例外のみ捕捉する（Issue #571）。一過性のエージェント失敗として呼び出し側が再測定する。
+  // boundaryNonce 等の決定的な内部例外は包まず、外側 catch の null（fail-closed）に任せる。
+  let v
+  try {
+    v = await agent(
     [
       '残置 worktree のディスク使用量測定タスク（読み取り専用。削除・変更は一切行わない）。',
       UNTRUSTED_POLICY,
@@ -3544,7 +3555,10 @@ async function measureResidualBytesOnce(sanitizedPaths, model) {
       effort: 'low',
       schema: ORPHAN_BYTES_SCHEMA,
     },
-  )
+    )
+  } catch (e) {
+    return { thrown: e }
+  }
   return { report: v }
 }
 
@@ -3552,7 +3566,8 @@ async function measureResidualBytesOnce(sanitizedPaths, model) {
 // 測定する（maxResidualWorktreeBytes ゲート専用・Issue #348）。測定不能（コマンド失敗・du 非0
 // 終了・許可文字集合外パス・missing 不正）は 0 で補わず null を返す（0 は fail-open のため、
 // 呼び出し側は null を fail-closed 分岐へ倒す）。missing は平均サイズ算出側が分母から欠落分を
-// 差し引くための契約（Bugbot Medium 指摘）。count 不一致（転記失敗）のみ有界に再測定する。
+// 差し引くための契約（Bugbot Medium 指摘）。count 不一致（転記失敗）・agent 例外・出力欠落／不完全は
+// 一過性のエージェント失敗として有界に再測定する（Issue #566・#571）。du 実失敗と型・範囲不正は再測定しない。
 async function measureResidualWorktreeBytesDetailed(paths) {
   if (!Array.isArray(paths) || paths.length === 0) return { kib: 0, missing: 0 }
   // sanitizeWorktreePath へ強制検証してから渡す構造的防御（PR #390）。1 件でも外れれば全体中止。
@@ -3565,7 +3580,9 @@ async function measureResidualWorktreeBytesDetailed(paths) {
     for (let attempt = 0; attempt <= RESIDUAL_BYTE_MEASURE_MAX_RETRIES; attempt += 1) {
       const once = await measureResidualBytesOnce(sanitizedPaths, attempt === 0 ? 'haiku' : 'sonnet')
       if (once.error) return null
-      const r = classifyResidualByteReport(once.report, sanitizedPaths.length)
+      const r = once.thrown !== undefined
+        ? { ok: false, retryable: true, reason: 'exception' }
+        : classifyResidualByteReport(once.report, sanitizedPaths.length)
       if (r.ok) {
         if (r.missing > 0) {
           log(`残置 worktree ディスク使用量測定: 並行 cleanup 等により ${r.missing} 件のパスが測定時点で既に存在しなかった（0 として扱った）`)
@@ -3573,8 +3590,14 @@ async function measureResidualWorktreeBytesDetailed(paths) {
         return { kib: r.kib, missing: r.missing }
       }
       const rv = once.report
-      if (r.reason === 'transcription') {
-        log(`⚠️ 残置 worktree ディスク使用量測定の count が対象パス数と不一致（count=${rv?.count ?? '欠落'}・対象 ${sanitizedPaths.length} 件・err=${rv?.err ?? '不明'}）。転記失敗の疑い`)
+      if (r.retryable) {
+        if (r.reason === 'exception') {
+          log(`⚠️ 残置 worktree ディスク使用量測定の agent 呼び出しが例外を投げた（${once.thrown?.message ?? once.thrown}）`)
+        } else if (r.reason === 'output-missing') {
+          log('⚠️ 残置 worktree ディスク使用量測定の結果が欠落または不完全（StructuredOutput 欠落の疑い）')
+        } else {
+          log(`⚠️ 残置 worktree ディスク使用量測定の count が対象パス数と不一致（count=${rv?.count ?? '欠落'}・対象 ${sanitizedPaths.length} 件・err=${rv?.err ?? '不明'}）。転記失敗の疑い`)
+        }
         if (attempt < RESIDUAL_BYTE_MEASURE_MAX_RETRIES) {
           log(`別エージェントで再測定する（${attempt + 1}/${RESIDUAL_BYTE_MEASURE_MAX_RETRIES}）`)
           continue
@@ -3688,8 +3711,8 @@ function buildFreeDiskScript({ tmpFile, delimiter, pathsJson }) {
 
 // メイン worktree が属するファイルシステムの実空き容量（KiB）を測定する（maxResidualWorktreeBytes
 // ゲート専用の第3の安全弁・Issue #467）。測定不能（df 非0終了・許可文字集合外パス等）は 0 で補わず
-// null を返す（呼び出し側は fail-closed へ倒す）。err!==0 は転記失敗と df 失敗を区別できないため
-// 1 回だけ別エージェント（sonnet）で再測定する（Issue #566）。df の POSIX 出力は 2 行目の第4列
+// null を返す（呼び出し側は fail-closed へ倒す）。err!==0・出力欠落・agent 例外は転記失敗と df 失敗を
+// 区別できない／一過性のエージェント失敗のため 1 回だけ別エージェント（sonnet）で再測定する（Issue #566）。df の POSIX 出力は 2 行目の第4列
 // （Available、KiB）を抽出する。
 async function measureFreeDiskKib(path) {
   const sanitized = sanitizeWorktreePath(typeof path === 'string' ? path : '')
@@ -3708,7 +3731,10 @@ async function measureFreeDiskKib(path) {
         delimiter,
         pathsJson,
       })
-      const v = await agent(
+      // agent() の例外は一過性のエージェント失敗として失敗扱いにし、下の再測定へ合流させる（Issue #571）。
+      let v = null
+      try {
+        v = await agent(
         [
           'メイン worktree が属するファイルシステムの空き容量測定タスク（読み取り専用。削除・変更は一切行わない）。',
           UNTRUSTED_POLICY,
@@ -3729,7 +3755,10 @@ async function measureFreeDiskKib(path) {
           effort: 'low',
           schema: DISK_FREE_SCHEMA,
         },
-      )
+        )
+      } catch (e) {
+        log(`⚠️ 実ディスク空き容量測定の agent 呼び出しが例外を投げた（${e?.message ?? e}）`)
+      }
       if (Number.isInteger(v?.err) && v.err === 0 && Number.isInteger(v?.freeKib) && v.freeKib >= 0) {
         return v.freeKib
       }

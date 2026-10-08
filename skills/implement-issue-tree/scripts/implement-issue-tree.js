@@ -3494,7 +3494,14 @@ function buildResidualBytesScript({ tmpFile, delimiter, pathsJson }) {
 
 
 
+
+
+
 function classifyResidualByteReport(v, sentCount) {
+  const isObj = v !== null && typeof v === 'object'
+  if (!isObj || [v.kib, v.err, v.missing, v.count].some((x) => x === undefined || x === null)) {
+    return { ok: false, retryable: true, reason: 'output-missing' }
+  }
   if (!(Number.isInteger(v?.count) && v.count === sentCount)) {
     return { ok: false, retryable: true, reason: 'transcription' }
   }
@@ -3522,7 +3529,11 @@ async function measureResidualBytesOnce(sanitizedPaths, model) {
     delimiter,
     pathsJson,
   })
-  const v = await agent(
+
+
+  let v
+  try {
+    v = await agent(
     [
       '残置 worktree のディスク使用量測定タスク（読み取り専用。削除・変更は一切行わない）。',
       UNTRUSTED_POLICY,
@@ -3544,9 +3555,13 @@ async function measureResidualBytesOnce(sanitizedPaths, model) {
       effort: 'low',
       schema: ORPHAN_BYTES_SCHEMA,
     },
-  )
+    )
+  } catch (e) {
+    return { thrown: e }
+  }
   return { report: v }
 }
+
 
 
 
@@ -3565,7 +3580,9 @@ async function measureResidualWorktreeBytesDetailed(paths) {
     for (let attempt = 0; attempt <= RESIDUAL_BYTE_MEASURE_MAX_RETRIES; attempt += 1) {
       const once = await measureResidualBytesOnce(sanitizedPaths, attempt === 0 ? 'haiku' : 'sonnet')
       if (once.error) return null
-      const r = classifyResidualByteReport(once.report, sanitizedPaths.length)
+      const r = once.thrown !== undefined
+        ? { ok: false, retryable: true, reason: 'exception' }
+        : classifyResidualByteReport(once.report, sanitizedPaths.length)
       if (r.ok) {
         if (r.missing > 0) {
           log(`残置 worktree ディスク使用量測定: 並行 cleanup 等により ${r.missing} 件のパスが測定時点で既に存在しなかった（0 として扱った）`)
@@ -3573,8 +3590,14 @@ async function measureResidualWorktreeBytesDetailed(paths) {
         return { kib: r.kib, missing: r.missing }
       }
       const rv = once.report
-      if (r.reason === 'transcription') {
-        log(`⚠️ 残置 worktree ディスク使用量測定の count が対象パス数と不一致（count=${rv?.count ?? '欠落'}・対象 ${sanitizedPaths.length} 件・err=${rv?.err ?? '不明'}）。転記失敗の疑い`)
+      if (r.retryable) {
+        if (r.reason === 'exception') {
+          log(`⚠️ 残置 worktree ディスク使用量測定の agent 呼び出しが例外を投げた（${once.thrown?.message ?? once.thrown}）`)
+        } else if (r.reason === 'output-missing') {
+          log('⚠️ 残置 worktree ディスク使用量測定の結果が欠落または不完全（StructuredOutput 欠落の疑い）')
+        } else {
+          log(`⚠️ 残置 worktree ディスク使用量測定の count が対象パス数と不一致（count=${rv?.count ?? '欠落'}・対象 ${sanitizedPaths.length} 件・err=${rv?.err ?? '不明'}）。転記失敗の疑い`)
+        }
         if (attempt < RESIDUAL_BYTE_MEASURE_MAX_RETRIES) {
           log(`別エージェントで再測定する（${attempt + 1}/${RESIDUAL_BYTE_MEASURE_MAX_RETRIES}）`)
           continue
@@ -3708,7 +3731,10 @@ async function measureFreeDiskKib(path) {
         delimiter,
         pathsJson,
       })
-      const v = await agent(
+
+      let v = null
+      try {
+        v = await agent(
         [
           'メイン worktree が属するファイルシステムの空き容量測定タスク（読み取り専用。削除・変更は一切行わない）。',
           UNTRUSTED_POLICY,
@@ -3729,7 +3755,10 @@ async function measureFreeDiskKib(path) {
           effort: 'low',
           schema: DISK_FREE_SCHEMA,
         },
-      )
+        )
+      } catch (e) {
+        log(`⚠️ 実ディスク空き容量測定の agent 呼び出しが例外を投げた（${e?.message ?? e}）`)
+      }
       if (Number.isInteger(v?.err) && v.err === 0 && Number.isInteger(v?.freeKib) && v.freeKib >= 0) {
         return v.freeKib
       }
