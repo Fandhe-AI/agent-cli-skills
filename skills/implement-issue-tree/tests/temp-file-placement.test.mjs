@@ -109,7 +109,7 @@ function extractFunctionBody(fnSignature, stopSignature) {
 
 test('measureResidualWorktreeBytesDetailed: TEMP_FILE_POLICY を含み、tmpFile リテラルの埋め込みは tf= 代入の1箇所に限られ、以降は "$tf" 参照になる', () => {
   const body = extractFunctionBody(
-    'async function measureResidualWorktreeBytesDetailed(paths) {',
+    'function buildResidualBytesScript({ tmpFile, delimiter, pathsJson }) {',
     'async function measureResidualWorktreeBytes(paths) {',
   )
   assert.match(body, /TEMP_FILE_POLICY/)
@@ -131,7 +131,7 @@ test('measureResidualWorktreeBytesDetailed: TEMP_FILE_POLICY を含み、tmpFile
 
 test('measureResidualWorktreeBytesDetailed: tf が空のとき rm を実行しない（tf="" での `rm -f -- "" "$tf.lines"` はカレント直下の .lines を削除しかねないため）', () => {
   const body = extractFunctionBody(
-    'async function measureResidualWorktreeBytesDetailed(paths) {',
+    'function buildResidualBytesScript({ tmpFile, delimiter, pathsJson }) {',
     'async function measureResidualWorktreeBytes(paths) {',
   )
   assert.match(body, /if \[ -n "\$tf" \]; then rm -f -- "\$tf" "\$tf\.lines"/)
@@ -140,7 +140,7 @@ test('measureResidualWorktreeBytesDetailed: tf が空のとき rm を実行し�
 
 test('measureFreeDiskKib: tf が空のとき rm を実行しない', () => {
   const body = extractFunctionBody(
-    'async function measureFreeDiskKib(path) {',
+    'function buildFreeDiskScript({ tmpFile, delimiter, pathsJson }) {',
     'function findMainWorktreePath(entries) {',
   )
   assert.match(body, /if \[ -n "\$tf" \]; then rm -f -- "\$tf" "\$tf\.line"/)
@@ -148,7 +148,7 @@ test('measureFreeDiskKib: tf が空のとき rm を実行しない', () => {
 
 test('measureFreeDiskKib: TEMP_FILE_POLICY を含み、tmpFile リテラルの埋め込みは最小化され "$tf" 参照へ統一されている', () => {
   const body = extractFunctionBody(
-    'async function measureFreeDiskKib(path) {',
+    'function buildFreeDiskScript({ tmpFile, delimiter, pathsJson }) {',
     'function findMainWorktreePath(entries) {',
   )
   assert.match(body, /TEMP_FILE_POLICY/)
@@ -169,10 +169,10 @@ test('ORPHAN_BYTES_SCHEMA は count を required に含む', () => {
 
 test('measureResidualWorktreeBytesDetailed: count が対象パス数と不一致なら null を返す fail-closed 分岐を持つ（ソーステキスト固定）', () => {
   const body = extractFunctionBody(
-    'async function measureResidualWorktreeBytesDetailed(paths) {',
+    'function classifyResidualByteReport(v, sentCount) {',
     'async function measureResidualWorktreeBytes(paths) {',
   )
-  assert.match(body, /v\.count\s*===\s*sanitizedPaths\.length/)
+  assert.match(body, /v\.count\s*===\s*sentCount/)
   assert.match(body, /count が対象パス数と不一致/)
 })
 
@@ -183,7 +183,7 @@ test('measureResidualWorktreeBytesDetailed: count が対象パス数と不一致
 // tf 未定義（-z 分岐）自体でも明示的に ERR=1 COUNT=0 を返すことを固定する。
 test('measureResidualWorktreeBytesDetailed: tf が空（-z 分岐）のとき no-op ではなく ERR=1 COUNT=0 を明示的に返す', () => {
   const body = extractFunctionBody(
-    'async function measureResidualWorktreeBytesDetailed(paths) {',
+    'function buildResidualBytesScript({ tmpFile, delimiter, pathsJson }) {',
     'async function measureResidualWorktreeBytes(paths) {',
   )
   assert.doesNotMatch(body, /if \[ -z "\$tf" \]; then :;/)
@@ -192,7 +192,7 @@ test('measureResidualWorktreeBytesDetailed: tf が空（-z 分岐）のとき no
 
 test('measureFreeDiskKib: tf が空（-z 分岐）のとき no-op ではなく FREE=0 ERR=1 を明示的に返す（PR #501 Bugbot 指摘の回帰）', () => {
   const body = extractFunctionBody(
-    'async function measureFreeDiskKib(path) {',
+    'function buildFreeDiskScript({ tmpFile, delimiter, pathsJson }) {',
     'function findMainWorktreePath(entries) {',
   )
   assert.doesNotMatch(body, /if \[ -z "\$tf" \]; then :;/)
