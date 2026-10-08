@@ -79,7 +79,7 @@ const TRANSCRIPTION_FAIL = { kib: 0, err: 1, missing: 0, count: 0 }
 // --- 1. 実 sh でのスクリプト実行 ---
 
 test('buildResidualBytesScript: 実 sh で実行すると COUNT が対象件数と一致し ERR=0、一時ファイルは削除される', { skip: !hasJq }, () => {
-  const work = mkdtempSync(join(tmpdir(), 'residual-script-'))
+  const work = mkdtempSync('/tmp/residual-script-')
   try {
     const dirs = ['d1', 'd2'].map((n) => {
       const d = join(work, n)
@@ -135,7 +135,7 @@ test('measureFreeDiskKib: 条件文言が無く、ヒアドキュメントは無
 })
 
 test('buildFreeDiskScript: 実 sh で FREE と ERR=0 が出る', { skip: !hasJq }, () => {
-  const work = mkdtempSync(join(tmpdir(), 'freedisk-script-'))
+  const work = mkdtempSync('/tmp/freedisk-script-')
   try {
     const script = buildFreeDiskScript({
       tmpFile: join(work, 'p.json'),
@@ -149,6 +149,33 @@ test('buildFreeDiskScript: 実 sh で FREE と ERR=0 が出る', { skip: !hasJq 
     rmSync(work, { recursive: true, force: true })
   }
 })
+
+// --- 2b. tmpFile の /tmp 配下ガード（PR #567 codex P1） ---
+
+for (const [name, build] of [
+  ['buildResidualBytesScript', buildResidualBytesScript],
+  ['buildFreeDiskScript', buildFreeDiskScript],
+]) {
+  for (const bad of ['rel-paths.json', './rel-paths.json', '/tmp/../escape-paths.json', '/var/tmp/x.json']) {
+    test(`${name}: tmpFile=${bad} は書き込みも rm も行わず失敗値を出す`, { skip: !hasJq }, () => {
+      const work = mkdtempSync('/tmp/tf-guard-')
+      try {
+        writeFileSync(join(work, 'rel-paths.json'), 'keep')
+        const script = build({ tmpFile: bad, delimiter: 'PATHSEOF_test', pathsJson: JSON.stringify([work]) })
+        const r = spawnSync('/bin/sh', ['-c', script], { encoding: 'utf8', cwd: work })
+        assert.equal(r.status, 0, r.stderr)
+        assert.match(r.stdout, /ERR=1/)
+        assert.equal(readFileSync(join(work, 'rel-paths.json'), 'utf8'), 'keep')
+        assert.equal(existsSync(join(work, 'rel-paths.json.lines')), false)
+        assert.equal(existsSync(join(work, 'rel-paths.json.line')), false)
+        assert.equal(existsSync('/tmp/escape-paths.json'), false)
+        assert.equal(existsSync('/var/tmp/x.json'), false)
+      } finally {
+        rmSync(work, { recursive: true, force: true })
+      }
+    })
+  }
+}
 
 // --- 3. 分類 ---
 

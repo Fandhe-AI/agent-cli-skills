@@ -3469,9 +3469,12 @@ function isValidBranchName(b) {
 function buildResidualBytesScript({ tmpFile, delimiter, pathsJson }) {
   return [
     `tf=${tmpFile}`,
+    'case "$tf" in *..*) tf="" ;; /tmp/*) ;; *) tf="" ;; esac',
+    'if [ -n "$tf" ]; then',
     `cat <<'${delimiter}' > "$tf"`,
     pathsJson,
     delimiter,
+    'fi',
     'if [ -z "$tf" ]; then echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; ' +
       'elif [ ! -s "$tf" ]; then echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; ' +
       "elif ! jq -r '.[]' \"$tf\" > \"$tf.lines\"; then " +
@@ -3665,9 +3668,12 @@ const DISK_FREE_SCHEMA = {
 function buildFreeDiskScript({ tmpFile, delimiter, pathsJson }) {
   return [
     `tf=${tmpFile}`,
+    'case "$tf" in *..*) tf="" ;; /tmp/*) ;; *) tf="" ;; esac',
+    'if [ -n "$tf" ]; then',
     `cat <<'${delimiter}' > "$tf"`,
     pathsJson,
     delimiter,
+    'fi',
     'if [ -z "$tf" ]; then echo "FREE=0 ERR=1"; ' +
       "elif ! jq -r '.[0]' \"$tf\" > \"$tf.line\"; then " +
       'echo "FREE=0 ERR=1"; else { p=$(cat "$tf.line"); ' +
