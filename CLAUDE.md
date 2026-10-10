@@ -23,7 +23,7 @@ skills/                               -- スキル本体（各ディレクトリ
     references/                       -- 自動マージ設計・検証手順・復旧・レポート書式
     sample/                           -- 引数例・ツリー例
     scripts/                          -- preview-tree.sh、implement-issue-tree.src.js（自動開発の開発ファイル・編集対象）、implement-issue-tree.js（build-workflow.mjs がコメント除去して生成する実行ファイル・直接編集禁止）、build-workflow.mjs（ビルダー）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
-    tests/                            -- node:test 回帰テスト（G0 ゲート・merge ループ・依存再判定・CONFLICTING→base 取り込み dispatch・Workflow 起動可否・Review 比較基準・opt-in テスト記録ゲート・state 書込みフォールバック・残置 worktree バイト測定の再測定〔転記失敗・agent 例外・StructuredOutput 欠落を有界に再測定／du 実失敗は再測定せず fail-closed〕）、lib/ に起動可否契約の実装
+    tests/                            -- node:test 回帰テスト（G0 ゲート・merge ループ・依存再判定・CONFLICTING→base 取り込み dispatch・Workflow 起動可否・Review 比較基準・opt-in テスト記録ゲート・state 書込みフォールバック・残置 worktree バイト測定の再測定〔転記失敗・agent 例外・StructuredOutput 欠落を有界に再測定／du 実失敗は再測定せず fail-closed〕・monitor の required context 揃い待機）、lib/ に起動可否契約の実装
   implement-review/
   implement-review-pr/
   init-claude/
