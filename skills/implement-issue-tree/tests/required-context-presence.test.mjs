@@ -67,6 +67,16 @@ test('monitorPrompt: context 名・App 名を取得・転記せず REQ/HAVE を�
   assert.ok(!/echo\s+"?\$(REQ|HAVE)/.test(s))
 })
 
+test('monitorPrompt: 3g の取得不能は有界再取得後に blocked/quality（ready にも timeout にもしない）', () => {
+  const p = monitorPrompt(item, impl, [], false, true)
+  const s = p.slice(p.indexOf('3g.'), p.indexOf('\n6. '))
+  assert.ok(s.includes('最大 3 回') && s.includes('state: blocked') && s.includes('"quality"'))
+  assert.ok(!s.includes('手順 4 へ進む（0 件扱いにも blocked にもしない'))
+  const s6 = p.slice(p.indexOf('\n6. '), p.indexOf('\n7. '))
+  assert.ok(s6.includes('取得不能のまま ready にしない'))
+  assert.ok(p.slice(p.indexOf('\n7. ')).includes('取得不能は timeout ではなく'))
+})
+
 test('monitorPrompt: 手順 7 に 3g 由来の timeout 条件があり既存文言は維持される', () => {
   const p = monitorPrompt(item, impl, [], true, true)
   const s7 = p.slice(p.indexOf('\n7. '))
