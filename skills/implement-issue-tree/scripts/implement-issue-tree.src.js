@@ -4376,6 +4376,76 @@ async function initAllPending(queueItems) {
 // 1 チャンク 数十 KB に収まり、1,101 件でも 12 回で済む。大きくすると転記の取りこぼしが増える。
 const BLOCKED_STATE_CHUNK_SIZE = 100
 
+// --- エージェント呼び出し数の予算（Issue #592）---
+// Workflow ランタイムは 1 ラン 1,000 エージェントで打ち切る（references/subagents/workflows.md の
+// Max agents per run。fandhe-container の実測 agent_count 1000 / agents_done 1000 / agents_error 0 で
+// 一致）。打ち切りは completed として返るため、PR 作成直後の未監視で終わる半端な状態を作る。
+// 数え方: 本スクリプトの agent(...) 1 回 = ランタイムのエージェント 1 件。runStateAgent の sonnet
+// フォールバック・agentRetryOnce の再試行・fix の再起動も agent() を呼び直すので、呼び出し箇所を
+// 書き換えず駆動部で agent を数える関数へ差し替えれば（wrapAgentCounting）実際の起動数と一致する。
+// pipeline() は使わない。呼ぶ前に数えるため、例外・null 返却の呼び出しも 1 件に入る（起動はした）。
+// 引数 agentCallLimit は「新規着手・monitoring 再開を止める判断に使う、ランタイム上限の想定値」で、
+// 呼び出しそのものは止めない。開始処理・終了処理・実行中の issue は上限を超えても続行する: 実行中の
+// issue の途中で呼び出しを止めると、本機構が防ぎたい半端な状態をスクリプト自身が作るため。ハード
+// キャップはランタイムが持つ。値は下限（AGENT_CALL_LIMIT_MIN）以上 1000 以下に限り、矛盾する入力
+// （開始処理だけで使い切る値）は受理しない。
+const AGENT_RUN_LIMIT = 1000
+// 開始処理（未追跡検査・nonce・loadState と照合・ツリー取得・外部チェック観測・依存宣言と祖先と
+// ツリー外前提の取得・init-all・孤立スキャン・残置の観測・HEAD 検査）が着手前に使う呼び出し数の見込み。
+// 依存宣言はチャンク数に比例するため約 20 に余裕 10 を足した。
+const AGENT_CALLS_START = 30
+function parseAgentCallLimit(raw) {
+  if (raw === undefined || raw === null) return AGENT_RUN_LIMIT
+  // 下限 = 開始処理 + 終了処理の予備（固定分）+ 1 issue の目安 + 1。これ未満だと 1 件も着手できないか、
+  // 開始処理だけで使い切って予算判定の前提が崩れる。AGENT_CALLS_PER_ISSUE 等は下で宣言するが、
+  // 本関数は宣言後（agentBudget の初期化時）にしか呼ばれない。
+  const min = AGENT_CALLS_START + AGENT_CALLS_TERMINAL_BASE + AGENT_CALLS_PER_ISSUE.implement + 1
+  if (!Number.isInteger(raw) || raw < min || raw > AGENT_RUN_LIMIT) {
+    throw new Error(`args.agentCallLimit は ${min}〜${AGENT_RUN_LIMIT} の整数で指定すること（省略時 ${AGENT_RUN_LIMIT}。新規着手を止める判断に使うランタイム上限の想定値で、呼び出し自体は止めない。下限は開始処理 + 終了処理の予備 + 1 issue の目安。Issue #592）`)
+  }
+  return raw
+}
+// 1 件を最後まで終えるのに要るエージェント呼び出し数の目安。implement は 1 issue の通常経路:
+// 状態書込み 約 8（開始・実装後・Review 後・unverifiedPr・monitoring・終端・cleanup。1 回の
+// フォールバックで +1）+ plan 1 + implement 1 + Review 2 と fix 1（1 往復）+ pr-create 1 +
+// PR 照合 1 + monitor 3 + fix 1 と再 monitor 1 + merge-exec/merge-verify 2 = 約 22。
+// 上限は fix 6 回・monitor 7 回・Review 往復で 60 を超えるが、実行中の issue は既にその一部を
+// 使っているため、残り全量を最悪値で見積もると着手を止めすぎる。これに 8 を足して 30 とする。
+// resume は monitoring 再開（Review までを省く。monitor 3 + fix/再 monitor 2 + 状態書込み 4 +
+// merge 2 に余裕）、close は verify-close（close 1 + 状態書込み 2 + 余裕）。
+const AGENT_CALLS_PER_ISSUE = { implement: 30, resume: 12, close: 6 }
+// 終了処理の予備の固定分。ループ後に走るのは writeBlockedStateBatch（下の chunks 分を別に加える）、
+// scanOrphanWorktrees、終了時 loadState、容量の終了時実測、スイープ、メイン worktree の
+// 未追跡検査と HEAD 検査（worktree:head-scan。開始時 1 回は使用済みに入り、終了時 1 回がここ）で、
+// 再測定の再試行を含めても約 20 に収まる。いずれも予算ゲートの対象ではなく無条件に実行される。
+const AGENT_CALLS_TERMINAL_BASE = 20
+const agentBudget = { limit: parseAgentCallLimit(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.agentCallLimit : undefined), used: 0, enforced: false, stoppedDispatchAt: null, starts: 0 }
+// 上限（budget.limit）を超えても呼び出しは止めない（上のコメント参照）。超えた最初の 1 回だけ warn で知らせる。
+function wrapAgentCounting(raw, budget, warn = () => {}) {
+  let warned = false
+  return (...a) => {
+    budget.used += 1
+    if (!warned && budget.used > budget.limit) {
+      warned = true
+      warn(`⚠️ エージェント呼び出し数が想定上限 ${budget.limit} を超えた（使用 ${budget.used}）。呼び出しは止めない。ランタイムの上限（${AGENT_RUN_LIMIT}）に達すると打ち切られる`)
+    }
+    return raw(...a)
+  }
+}
+// 新規着手（kind: implement / resume / close）を止めるべきなら { remaining, required } を返す。
+// 必要量 = 実行中の件数 × implement の目安 + 候補の目安 + 終了処理の予備（固定 + 未完了ノードの
+// blocked 一括記録 chunks）。非ラッチ: 実行中の issue が終わって running が減れば再び通る。
+// 前進保証: このランでまだ 1 件も着手しておらず実行中も 0 の最初の着手には、blocked 一括記録の chunks 分
+// （未完了ノード数に比例）を課さない。未完了ノードが多いと chunks だけで limit を超え、実行中 0・使用量が
+// 少ないのに全件が未着手になる（limit を下限に近い値にした大きなツリー）ため。最初の 1 件を終えれば
+// 残りは未着手として記録され、chunks 分が limit を超える分は想定上限の超過（警告のみ・呼び出しは止めない）。
+function agentBudgetHold(budget, { running, kind, pending }) {
+  const remaining = budget.limit - budget.used
+  const first = running === 0 && (budget.starts ?? 0) === 0
+  const required = AGENT_CALLS_PER_ISSUE.implement * running + AGENT_CALLS_PER_ISSUE[kind] + AGENT_CALLS_TERMINAL_BASE + (first ? 0 : Math.ceil(Math.max(pending, 0) / BLOCKED_STATE_CHUNK_SIZE))
+  return remaining < required ? { remaining, required } : null
+}
+
 // 保存済み項目が patch の全キーで既に同じ値なら true（書いても何も変わらない）。status・note だけでなく
 // patch に載る全キーを比べる: pr: 0 でクリアしたい項目の保存済み pr が 0 以外なら書く必要がある。
 // saved は loadState が内容照合を通した項目（adopted）のみ入る savedItems の値。照合できなかった項目・
@@ -5946,6 +6016,17 @@ if (!Number.isInteger(parent) || parent <= 0) {
   throw new Error('親イシュー番号を args で指定すること（例: {"parent": 1008, "branch": "main", "parallel": 3}）')
 }
 
+// agent を数える関数へ差し替える（Issue #592。根拠は agentBudget 宣言部）。呼び出し箇所は書き換えず
+// 識別子の再束縛だけで全 agent() を数える。定義部ではなく駆動部に置く理由: 定義部のスライスを
+// module として import するテストで ReferenceError にならないため。再束縛できない実行環境では
+// 数えられず、予算ゲートは効かない（enforced: false を返却値とログで見えるようにする）。
+{
+  const countedAgent = wrapAgentCounting(agent, agentBudget, log)
+  try { agent = countedAgent } catch { /* 下の同一性検査で検出する */ }
+  agentBudget.enforced = agent === countedAgent
+  if (!agentBudget.enforced) log('⚠️ agent を数える関数へ差し替えられないため、エージェント呼び出し数の予算ゲートは無効（返却値 agentBudget.enforced: false）')
+}
+
 // --- Restore フェーズ: 状態ファイルを読み込む ---
 phase('Restore')
 
@@ -6641,6 +6722,21 @@ const knownPrByIssue = new Map()
 // （Issue #533）。knownPrByIssue と同じ 2 箇所（monitoring 再開・PR 作成直後）で、PR 照合を通った
 // impl.branch のみ set する。無いと、ラン中に作成された PR の外部マージ検知が fail-closed に倒れる。
 const knownBranchByIssue = new Map()
+// PR を作成済み（または monitoring 再開）で、まだ一度も monitor の結果を得ていない issue→PR 番号
+// （Issue #592）。エージェント数の上限で監視に進めなかった PR を、打ち切り後に返却値とログへ出すための
+// 記録。PR 番号を得た時点（runImplement）と runMergeLoop の入口（monitoring 再開）で set し、実 monitor が
+// 結果を返したら delete する。
+const unmonitoredPrs = new Map()
+// 未監視の PR を「次回ランが monitoring 再開できる」(resumable: true) へ上げる。根拠は事実であって到達点
+// ではない: 状態ファイルへ pr を含む patch を書けたときだけ呼ぶ。判定は isActiveMonitoring（次回ランの再開
+// 条件）と同一: status が monitoring / blocked、pr が正の整数、branch が妥当かつその issue の命名。
+// blockedReason 等の追加条件は isActiveMonitoring に無いので課さない。呼び出し側は書き込み成功後に限る。
+const markPrResumable = (n, pr, status, branch) => {
+  const e = unmonitoredPrs.get(n)
+  if (e && e.pr === pr && (status === 'monitoring' || status === 'blocked') && Number.isInteger(pr) && pr > 0 && isValidBranchName(branch) && branchMatchesIssue(branch, n)) e.resumable = true
+}
+// 予算不足で今回見送った issue の集合（未着手ノードの note の出し分けに使う。着手できたら外す）。
+const agentBudgetHeld = new Set()
 let consecutiveFailures = 0
 // consecutiveFailures が最後に 0 へリセットされた「世代」。外部完了回復時の failure 減算は同一
 // 世代のみに限る（Issue #442 codex/Bugbot: 世代を見ない一律デクリメントは別世代の failure で
@@ -7390,6 +7486,8 @@ async function runImplement(item) {
     }
     // impl オブジェクトを PR 作成後の prNumber で更新する（以降の Merge ループが参照する）
     impl = { ...impl, prNumber: prCreateResult.prNumber }
+    // 照合・状態保存・monitor のどこで打ち切られても未監視として報告できるよう、番号を得た時点で記録する（Issue #592）。
+    unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: false })
     // pr-create の prNumber は自己申告値。照合（checkPrBinding。エージェント呼び出し）の最中にクラッシュ
     // しても PR 番号を失わないよう、照合より先に未照合のまま unverifiedPr として保存する（Bugbot 指摘。
     // 再開用の pr には入れない。isActiveMonitoring・前提完了プローブは pr だけを読む）。保存は成否を確認し
@@ -7466,9 +7564,13 @@ async function runImplement(item) {
           reason,
           status: monitoringTerminalStatus,
         })
+        // monitoring 保存は失敗したが blocked + pr + branch を書けた場合も、次回ランは isActiveMonitoring で再開する。
+        if (blockedSaved) markPrResumable(item.number, impl.prNumber, 'blocked', impl.branch)
         return false
       }
     }
+    // monitoring 遷移（status + pr）を書けた。branch は直前の unverifiedPatch で保存済み。
+    markPrResumable(item.number, impl.prNumber, 'monitoring', impl.branch)
     // Low のみ通過の場合、Low 指摘を PR コメントとして残す（マージはブロックしない）。投稿は
     // monitoring 遷移より後に try/catch 付きで行う（先に投稿すると重複 PR を作りうる。Issue #136）。
     if (deferredLowFindings) {
@@ -7518,6 +7620,9 @@ async function runImplement(item) {
 // 追加）。新規 impl パスは常に既定の null（新規コミット列のためこの PR での post-push fix
 // 実測は存在しない）。
 async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptin = null) {
+  // monitoring 再開経路（isActiveMonitoring を通った保存済みの pr から来る）は未登録なので、ここで再開可能として登録する。
+  // 新規作成経路は上の markPrResumable が登録・更新済みのため上書きしない。
+  if (Number.isInteger(impl.prNumber) && impl.prNumber > 0 && !unmonitoredPrs.has(item.number)) unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: true })
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -7703,6 +7808,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         log(`⚠️ #${item.number}: 監視エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
       }
     }
+    if (m != null && !seededConflictRound) unmonitoredPrs.delete(item.number)
     // monitor 結果のホスト側検証。enum 外は 'blocked' へフォールバックさせず専用 sentinel
     // 'invalid-monitor-result' に落とし 'failed' 終端に確定させる（halt 防御の維持）。
     // m が null（例外・StructuredOutput 未返却いずれも）の場合は 'agent-output-missing' という
@@ -9510,6 +9616,9 @@ while (true) {
   dispatchIterationSeq += 1
   // ラン中に積み増された worktree の実容量を間引き付きで実測し直す（floor 予約の過小評価を補う）
   await remeasureResidualBytesIfDue()
+  // 予算ゲート（Issue #592）用の未完了ノード数（blocked 一括記録の chunks 見積り）。done は開始時の
+  // merged/closed を含み work に居ないため、件数の引き算ではなく work の絞り込みで数える。
+  const budgetPending = work.filter((q) => !done.has(q.number) && !failedSet.has(q.number)).length
   // 空きスロットへ post-order 順に投入する（halted 後は新規着手しない）
   if (!halted) {
     for (const item of work) {
@@ -9531,6 +9640,21 @@ while (true) {
         continue
       }
       if (readiness !== 'ready') continue
+      // エージェント呼び出し数の予算（Issue #592）。残りが「実行中 + この候補を終える目安 + 終了処理の予備」
+      // を下回るなら着手せず、実行中の issue の完了を優先する。非ラッチ（実行中が減れば再び通る）。
+      const budgetKind = isActiveMonitoring(n) ? 'resume' : item.kind === 'implement' ? 'implement' : 'close'
+      // 数えられていない（enforced: false）ときは used が 0 のままで判定が成り立たないため、ゲートを適用しない。
+      const budgetHold = agentBudget.enforced ? agentBudgetHold(agentBudget, { running: running.size, kind: budgetKind, pending: budgetPending }) : null
+      if (budgetHold) {
+        if (agentBudget.stoppedDispatchAt === null) {
+          agentBudget.stoppedDispatchAt = agentBudget.used
+          log(`⚠️ エージェント呼び出し数が上限 ${agentBudget.limit} に近いため新規着手を停止する（使用 ${agentBudget.used}・残り ${budgetHold.remaining}・#${n} に必要 ${budgetHold.required}）。実行中の issue の完了を優先する`)
+        }
+        agentBudgetHeld.add(n)
+        if (budgetKind === 'resume') monitoringResumeGateDeferred.set(n, `エージェント呼び出し数の予算不足で monitoring 再開を見送った（使用 ${agentBudget.used}/${agentBudget.limit}）。同じ引数で再実行すると monitor から再開する`)
+        continue
+      }
+      agentBudgetHeld.delete(n)
       // active monitoring の再開も依存ゲート通過後にのみ行う（monitor ループは依存の done /
       // failedSet を確認しないため、依存未充足のまま再開すると依存順のマージ契約が破れる）。
       if (isActiveMonitoring(n)) {
@@ -9686,6 +9810,7 @@ while (true) {
         // monitoringResumeActive には implement の再開のみ載せる（verify-close を載せると
         // 幽霊予約が乗り他候補を過剰に defer / 抑止する。newStartActive と同じ線引き）。
         if (item.kind === 'implement') monitoringResumeActive.add(n)
+        agentBudget.starts += 1
         running.set(n, runOne(item))
         continue
       }
@@ -9888,6 +10013,7 @@ while (true) {
       log(`#${n} を開始（実行中 ${running.size + 1}/${concurrency}）: ${sanitize(item.title)}`)
       // verify-close は worktree を作らないため newStartActive に載せない（予約枠を塞がない）。
       if (item.kind === 'implement') newStartActive.add(n)
+      agentBudget.starts += 1
       running.set(n, runOne(item))
     }
   }
@@ -9998,12 +10124,13 @@ const pending = work
   .map((q) => q.number)
 const notStarted = pending.filter((n) => !isActiveMonitoring(n))
 const interrupted = pending.filter((n) => isActiveMonitoring(n))
-const notStartedNote = halted
+const notStartedNoteBase = halted
   ? `halted により未着手（理由: ${halted.reason}）`
   : newStartSuppressed
     ? `残置 worktree 上限ゲートにより新規着手を抑止（理由: ${newStartSuppressed.reason}）`
     : 'スケジューラ終了時に未着手（キュー未到達）'
 for (const n of notStarted) {
+  const notStartedNote = agentBudgetHeld.has(n) ? `エージェント呼び出し数の予算不足により新規着手を停止（使用 ${agentBudget.used}/${agentBudget.limit}。同じ引数で再実行すると着手する）` : notStartedNoteBase
   results.push({ issue: n, status: 'not-started', note: notStartedNote })
   // notStarted は有効な再開対象ではないため blocked として記録し、stale な PR 番号で次回の
   // isActiveMonitoring が誤って true 判定しないよう pr: 0 でクリアする（prClearPatch。照合できない
@@ -10040,6 +10167,15 @@ if (blockedStateWrite.requested > 0) {
 if (blockedStateWrite.unwritten > 0) {
   log(`⚠️ blocked の状態ファイル記録: ${blockedStateWrite.unwritten} 件を書けなかった（失敗チャンク ${blockedStateWrite.failedChunks} 回。先頭: ${formatIssueList(blockedStateWrite.unwrittenIssues)}）。返却値の done と状態ファイルの件数がずれている。エージェント数の上限（1 ラン 1,000）への到達でも起きる。同じ引数で再実行すると未記録分が書き直される`)
 }
+
+// 上限による打ち切りで半端な状態が残っていないかを終了ログに出す（Issue #592）。
+const unmonitoredPrList = [...unmonitoredPrs].map(([issue, e]) => ({ issue, pr: e.pr, resumable: e.resumable }))
+// resumable は照合と pr の保存（updateState の成否確認）が済んだ PR だけ true。それ以外は状態ファイルに pr が無い
+// （または照合未了）ため、再実行しても monitor から再開しない。
+const unmonitoredFmt = (resumable) => unmonitoredPrList.filter((e) => e.resumable === resumable).map((e) => `#${e.issue}→PR #${e.pr}`).join(', ')
+if (unmonitoredFmt(true)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr 保存済み）: ${unmonitoredFmt(true)}。同じ引数で再実行すると monitor から再開する`)
+if (unmonitoredFmt(false)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr が無い／照合未了）: ${unmonitoredFmt(false)}。再実行では monitor から再開しない。GitHub 上で PR を手動確認すること（状態ファイルの unverifiedPr があれば再実行で再照合される）`)
+log(`エージェント呼び出し数: ${agentBudget.used}/${agentBudget.limit}（新規着手停止時点 ${agentBudget.stoppedDispatchAt ?? 'なし'}）`)
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)
 
@@ -10206,4 +10342,4 @@ if (!mainHeadDiff.observed) {
 // residualWorktrees: 残置上限ゲート観測。prereqTransitions: 前提の外部完了遷移（Issue #442）。
 // mainWorktreeUntracked: メイン worktree への一時ファイル残置検出（Issue #497 AC2。削除はしない）。
 // mainWorktreeHead: メイン worktree の HEAD 変化検出（Issue #591。警告のみで戻さない）。
-return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }

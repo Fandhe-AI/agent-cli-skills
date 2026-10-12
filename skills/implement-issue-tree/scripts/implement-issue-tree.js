@@ -4380,6 +4380,76 @@ const BLOCKED_STATE_CHUNK_SIZE = 100
 
 
 
+
+
+
+
+
+
+
+
+
+const AGENT_RUN_LIMIT = 1000
+
+
+
+const AGENT_CALLS_START = 30
+function parseAgentCallLimit(raw) {
+if (raw === undefined || raw === null) return AGENT_RUN_LIMIT
+
+
+
+const min = AGENT_CALLS_START + AGENT_CALLS_TERMINAL_BASE + AGENT_CALLS_PER_ISSUE.implement + 1
+if (!Number.isInteger(raw) || raw < min || raw > AGENT_RUN_LIMIT) {
+throw new Error(`args.agentCallLimit は ${min}〜${AGENT_RUN_LIMIT} の整数で指定すること（省略時 ${AGENT_RUN_LIMIT}。新規着手を止める判断に使うランタイム上限の想定値で、呼び出し自体は止めない。下限は開始処理 + 終了処理の予備 + 1 issue の目安。Issue #592）`)
+}
+return raw
+}
+
+
+
+
+
+
+
+
+const AGENT_CALLS_PER_ISSUE = { implement: 30, resume: 12, close: 6 }
+
+
+
+
+const AGENT_CALLS_TERMINAL_BASE = 20
+const agentBudget = { limit: parseAgentCallLimit(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.agentCallLimit : undefined), used: 0, enforced: false, stoppedDispatchAt: null, starts: 0 }
+
+function wrapAgentCounting(raw, budget, warn = () => {}) {
+let warned = false
+return (...a) => {
+budget.used += 1
+if (!warned && budget.used > budget.limit) {
+warned = true
+warn(`⚠️ エージェント呼び出し数が想定上限 ${budget.limit} を超えた（使用 ${budget.used}）。呼び出しは止めない。ランタイムの上限（${AGENT_RUN_LIMIT}）に達すると打ち切られる`)
+}
+return raw(...a)
+}
+}
+
+
+
+
+
+
+
+function agentBudgetHold(budget, { running, kind, pending }) {
+const remaining = budget.limit - budget.used
+const first = running === 0 && (budget.starts ?? 0) === 0
+const required = AGENT_CALLS_PER_ISSUE.implement * running + AGENT_CALLS_PER_ISSUE[kind] + AGENT_CALLS_TERMINAL_BASE + (first ? 0 : Math.ceil(Math.max(pending, 0) / BLOCKED_STATE_CHUNK_SIZE))
+return remaining < required ? { remaining, required } : null
+}
+
+
+
+
+
 function isUnchangedStatePatch(saved, patch) {
 if (saved === null || typeof saved !== 'object' || Array.isArray(saved)) return false
 return Object.keys(patch).every((k) => hasOwn(saved, k) && JSON.stringify(saved[k]) === JSON.stringify(patch[k]))
@@ -5947,6 +6017,17 @@ throw new Error('親イシュー番号を args で指定すること（例: {"pa
 }
 
 
+
+
+
+{
+const countedAgent = wrapAgentCounting(agent, agentBudget, log)
+try { agent = countedAgent } catch {  }
+agentBudget.enforced = agent === countedAgent
+if (!agentBudget.enforced) log('⚠️ agent を数える関数へ差し替えられないため、エージェント呼び出し数の予算ゲートは無効（返却値 agentBudget.enforced: false）')
+}
+
+
 phase('Restore')
 
 
@@ -6641,6 +6722,21 @@ const knownPrByIssue = new Map()
 
 
 const knownBranchByIssue = new Map()
+
+
+
+
+const unmonitoredPrs = new Map()
+
+
+
+
+const markPrResumable = (n, pr, status, branch) => {
+const e = unmonitoredPrs.get(n)
+if (e && e.pr === pr && (status === 'monitoring' || status === 'blocked') && Number.isInteger(pr) && pr > 0 && isValidBranchName(branch) && branchMatchesIssue(branch, n)) e.resumable = true
+}
+
+const agentBudgetHeld = new Set()
 let consecutiveFailures = 0
 
 
@@ -7391,6 +7487,8 @@ return false
 
 impl = { ...impl, prNumber: prCreateResult.prNumber }
 
+unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: false })
+
 
 
 
@@ -7466,9 +7564,13 @@ pr: impl.prNumber,
 reason,
 status: monitoringTerminalStatus,
 })
+
+if (blockedSaved) markPrResumable(item.number, impl.prNumber, 'blocked', impl.branch)
 return false
 }
 }
+
+markPrResumable(item.number, impl.prNumber, 'monitoring', impl.branch)
 
 
 if (deferredLowFindings) {
@@ -7518,6 +7620,9 @@ restoreOptinFixState(saved, item.optinTests),
 
 
 async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptin = null) {
+
+
+if (Number.isInteger(impl.prNumber) && impl.prNumber > 0 && !unmonitoredPrs.has(item.number)) unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: true })
 let merged = false
 let lastState = 'timeout'
 let fixCount = initialFixCount
@@ -7703,6 +7808,7 @@ m = await agentRetryOnce(monitorPrompt(item, impl, externalCheckApps, externalCh
 log(`⚠️ #${item.number}: 監視エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
 }
 }
+if (m != null && !seededConflictRound) unmonitoredPrs.delete(item.number)
 
 
 
@@ -9511,6 +9617,9 @@ dispatchIterationSeq += 1
 
 await remeasureResidualBytesIfDue()
 
+
+const budgetPending = work.filter((q) => !done.has(q.number) && !failedSet.has(q.number)).length
+
 if (!halted) {
 for (const item of work) {
 if (running.size >= concurrency) break
@@ -9531,6 +9640,21 @@ log([...ds].some((d) => outOfTreeWait.has(d))
 continue
 }
 if (readiness !== 'ready') continue
+
+
+const budgetKind = isActiveMonitoring(n) ? 'resume' : item.kind === 'implement' ? 'implement' : 'close'
+
+const budgetHold = agentBudget.enforced ? agentBudgetHold(agentBudget, { running: running.size, kind: budgetKind, pending: budgetPending }) : null
+if (budgetHold) {
+if (agentBudget.stoppedDispatchAt === null) {
+agentBudget.stoppedDispatchAt = agentBudget.used
+log(`⚠️ エージェント呼び出し数が上限 ${agentBudget.limit} に近いため新規着手を停止する（使用 ${agentBudget.used}・残り ${budgetHold.remaining}・#${n} に必要 ${budgetHold.required}）。実行中の issue の完了を優先する`)
+}
+agentBudgetHeld.add(n)
+if (budgetKind === 'resume') monitoringResumeGateDeferred.set(n, `エージェント呼び出し数の予算不足で monitoring 再開を見送った（使用 ${agentBudget.used}/${agentBudget.limit}）。同じ引数で再実行すると monitor から再開する`)
+continue
+}
+agentBudgetHeld.delete(n)
 
 
 if (isActiveMonitoring(n)) {
@@ -9686,6 +9810,7 @@ log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(i
 
 
 if (item.kind === 'implement') monitoringResumeActive.add(n)
+agentBudget.starts += 1
 running.set(n, runOne(item))
 continue
 }
@@ -9888,6 +10013,7 @@ continue
 log(`#${n} を開始（実行中 ${running.size + 1}/${concurrency}）: ${sanitize(item.title)}`)
 
 if (item.kind === 'implement') newStartActive.add(n)
+agentBudget.starts += 1
 running.set(n, runOne(item))
 }
 }
@@ -9998,12 +10124,13 @@ const pending = work
 .map((q) => q.number)
 const notStarted = pending.filter((n) => !isActiveMonitoring(n))
 const interrupted = pending.filter((n) => isActiveMonitoring(n))
-const notStartedNote = halted
+const notStartedNoteBase = halted
 ? `halted により未着手（理由: ${halted.reason}）`
 : newStartSuppressed
 ? `残置 worktree 上限ゲートにより新規着手を抑止（理由: ${newStartSuppressed.reason}）`
 : 'スケジューラ終了時に未着手（キュー未到達）'
 for (const n of notStarted) {
+const notStartedNote = agentBudgetHeld.has(n) ? `エージェント呼び出し数の予算不足により新規着手を停止（使用 ${agentBudget.used}/${agentBudget.limit}。同じ引数で再実行すると着手する）` : notStartedNoteBase
 results.push({ issue: n, status: 'not-started', note: notStartedNote })
 
 
@@ -10040,6 +10167,15 @@ log(`blocked の状態ファイル記録: 対象 ${blockedStateWrite.requested} 
 if (blockedStateWrite.unwritten > 0) {
 log(`⚠️ blocked の状態ファイル記録: ${blockedStateWrite.unwritten} 件を書けなかった（失敗チャンク ${blockedStateWrite.failedChunks} 回。先頭: ${formatIssueList(blockedStateWrite.unwrittenIssues)}）。返却値の done と状態ファイルの件数がずれている。エージェント数の上限（1 ラン 1,000）への到達でも起きる。同じ引数で再実行すると未記録分が書き直される`)
 }
+
+
+const unmonitoredPrList = [...unmonitoredPrs].map(([issue, e]) => ({ issue, pr: e.pr, resumable: e.resumable }))
+
+
+const unmonitoredFmt = (resumable) => unmonitoredPrList.filter((e) => e.resumable === resumable).map((e) => `#${e.issue}→PR #${e.pr}`).join(', ')
+if (unmonitoredFmt(true)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr 保存済み）: ${unmonitoredFmt(true)}。同じ引数で再実行すると monitor から再開する`)
+if (unmonitoredFmt(false)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr が無い／照合未了）: ${unmonitoredFmt(false)}。再実行では monitor から再開しない。GitHub 上で PR を手動確認すること（状態ファイルの unverifiedPr があれば再実行で再照合される）`)
+log(`エージェント呼び出し数: ${agentBudget.used}/${agentBudget.limit}（新規着手停止時点 ${agentBudget.stoppedDispatchAt ?? 'なし'}）`)
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)
 
@@ -10206,4 +10342,4 @@ if (headWarning) log(headWarning)
 
 
 
-return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }
