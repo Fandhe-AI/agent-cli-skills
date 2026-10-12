@@ -14,10 +14,13 @@
 // 空白除去は 512 KiB 予算（tests/lib/workflow-script-contract.mjs）を行番号一致を保ったまま
 // 守るための措置。空白除去は、詰めても同じ 2 トークンに字句解析される隣接の組だけを許可リスト
 // （shouldSqueezeSpace）で詰め、迷う組は詰めない。
-// lexer の `/` 判別（除算と正規表現）は誤り得るため、誤読で文字列・テンプレートの中身が詰められても
-// 気づけるよう、ビルド（生成時と --check の両方）で生成物のトークン列（種類・値・開始行）が開発ファイルの
-// トークン列と一致することを Node 同梱の acorn で照合する（verifyTokenParity）。不一致・acorn を取得
-// できない Node・字句解析の失敗はいずれも生成ファイルを書かずに非ゼロ終了する（fail-closed）。
+// lexer の `/` 判別（除算と正規表現）は、直前のトークンだけでは決まらない箇所がある。決められる範囲
+// （非 ASCII 識別子・`of`・`if` / `for` / `while` / `with` の括弧の直後・正規表現リテラルの直後）は
+// lexer が直し、決められない範囲（`}` の直後 = ブロックの終わりかオブジェクトリテラルの終わりか、など）は
+// 除算側に倒したうえで、誤読で文字列・テンプレートの中身が詰められても気づけるよう、ビルド（生成時と
+// --check の両方）で生成物のトークン列（種類・値・開始行）が開発ファイルのトークン列と一致することを
+// Node 同梱の acorn で照合する（verifyTokenParity）。不一致・acorn を取得できない Node・字句解析の失敗・
+// 照合結果が想定の形でない場合はいずれも生成ファイルを書かずに非ゼロ終了する（fail-closed）。
 // 生成物の鮮度（開発ファイルとの同期）は tests/build-workflow.test.mjs が CI で検証する —
 // 生成物を直接編集したりビルドを忘れたりすると byte 不一致で fail する。
 //
@@ -26,6 +29,7 @@
 //   node skills/implement-issue-tree/scripts/build-workflow.mjs --check  # 書き込まず鮮度確認
 //   --src <path> / --dist <path> で入力の開発ファイル・出力（--check では比較対象）の実行ファイルを差し替える
 //   （テスト用。既定はこのディレクトリの implement-issue-tree.src.js / implement-issue-tree.js）
+//   --token-diff <path> でトークン照合ヘルパーを差し替える（テスト用。照合を実行できない場合の中止を確かめる）
 import { spawnSync } from 'node:child_process'
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -38,10 +42,22 @@ export const TOKEN_DIFF_PATH = join(HERE, 'token-diff.cjs')
 
 // 直後の `/` を正規表現リテラルの開始と判定するキーワード。識別子・数値の直後の `/` は
 // 除算として素通しする（標準的な division / regex 判別ヒューリスティック）。
+// `of` は for-of 以外では識別子になれる（`x = of / 2`）ため、`for (` の括弧の直下にあるときだけ
+// キーワードとして扱う（下の isDivision）。`of` をこの集合から外さないのは、外すと
+// `for (x of /`/.test(s))` が除算側の誤読（正規表現内のバッククォートでテンプレートの開閉が反転）に
+// なり、正規表現側の誤読より害が大きいため
 const REGEX_PRECEDING_KEYWORDS = new Set([
   'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void',
   'case', 'do', 'else', 'yield', 'await', 'throw',
 ])
+
+// 直後の括弧が「文の頭の条件」になるキーワード。`if (x) /re/` の `)` の直後は正規表現、
+// `f(x) / 2` の `)` の直後は除算になる。括弧を開いた時点の直前の単語で決める（`o.if(x)` の
+// プロパティ名は対象外）
+// 正規表現リテラルの直後を表す sigWord の目印。キーワードでも識別子でもない値
+const AFTER_REGEX_LITERAL = '/regex/'
+
+const CONTROL_PAREN_KEYWORDS = new Set(['if', 'for', 'while', 'with'])
 
 const isWordChar = (ch) => /[A-Za-z0-9_$]/.test(ch)
 
@@ -60,10 +76,23 @@ const isLowSurrogate = (ch) => ch.length === 1 && ch.charCodeAt(0) >= 0xdc00 && 
 // によっては ID_Continue に含まれない場合がある 2 文字（ECMAScript の IdentifierPart には
 // 含まれる）をそれぞれ捕捉する。ZWNJ/ZWJ はソース中に不可視文字として直接書かず `\u`
 // エスケープで明示し、エディタ・diff ツールでの混入・破損を避ける
+const IDENTIFIER_PART = /[\p{ID_Continue}_$\u200c\u200d]/u
 const isIdentifierContinuationRaw = (prevRaw, prevRaw2) => {
   if (prevRaw === '') return false
   const cp = isLowSurrogate(prevRaw) && isHighSurrogate(prevRaw2) ? prevRaw2 + prevRaw : prevRaw
-  return /[\p{ID_Continue}_$\u200c\u200d]/u.test(cp)
+  return IDENTIFIER_PART.test(cp)
+}
+
+// `src` の位置 `i` のコード単位が識別子文字（ASCII の単語文字・非 ASCII の ID_Continue・ZWNJ/ZWJ）の
+// 一部か。非 BMP の識別子文字はサロゲートペアの 2 単位とも真を返す（高単位は後ろの低単位と、低単位は
+// 前の高単位と組にして判定する）。lexer が「識別子の直後の `/` は除算」と判定するための単語判定で、
+// ASCII しか見ないと `é / 2` を正規表現の開始と誤読する
+const isWordUnitAt = (src, i) => {
+  const ch = src[i]
+  if (isWordChar(ch)) return true
+  if (ch.charCodeAt(0) < 0x80) return false
+  const cp = isLowSurrogate(ch) && isHighSurrogate(src[i - 1] ?? '') ? src.codePointAt(i - 1) : src.codePointAt(i)
+  return IDENTIFIER_PART.test(String.fromCodePoint(cp))
 }
 
 // `\uHHHH`\uff084\u6841\u56fa\u5b9a\uff09/ `\u{H...}`\uff08\u53ef\u5909\u9577\uff09\u5f62\u5f0f\u306e Unicode \u30b3\u30fc\u30c9\u30dd\u30a4\u30f3\u30c8\u30a8\u30b9\u30b1\u30fc\u30d7\u3092
@@ -94,42 +123,65 @@ const SQUEEZE_QUOTES = '"\'`' // 文字列・テンプレートリテラルの�
 const SQUEEZE_DELIMITERS = '()[]{},;' // 他の記号と連結しても別トークンにならない 1 文字記号
 const SQUEEZE_SYMBOLS = '=:?!<>|&*%^+-~.' // 上記以外の記号。記号どうしの連結は合成トークンを作り得る
 
+const squeezeIsWord = (ch) => SQUEEZE_WORD.test(ch)
+const squeezeIsQuote = (ch) => SQUEEZE_QUOTES.includes(ch)
+const squeezeIsDelimiter = (ch) => SQUEEZE_DELIMITERS.includes(ch)
+const squeezeIsSymbol = (ch) => SQUEEZE_SYMBOLS.includes(ch)
+const squeezeClassified = (ch) => squeezeIsWord(ch) || squeezeIsQuote(ch) || squeezeIsDelimiter(ch) || squeezeIsSymbol(ch)
+
+/**
+ * 「詰めない」規則の一覧（prev・next は隣接する 1 文字。`refuses` が真ならその組は詰めない）。
+ * どの規則にも当たらない組だけを詰める（fail-closed）。規則を 1 項ずつ外した版を
+ * tests/build-workflow.test.mjs が作り、外すとトークン列が変わる入力が見つかること（各規則が実際に
+ * 効いていること）を確かめる。
+ */
+export const SQUEEZE_REFUSAL_RULES = [
+  // 分類なし（`/`・非 ASCII・バックスラッシュ・`#`・`@` 等）は判断できない。`/` は除算・正規表現・
+  // `//` `/*` の誤生成を避けるため常に残す
+  { name: 'unclassified', refuses: (prev, next) => !squeezeClassified(prev) || !squeezeClassified(next) },
+  // `1. a` は `1.a` で構文エラーになる
+  { name: 'after-dot', refuses: (prev) => prev === '.' },
+  // 単語どうしは連結すると別の単語になる
+  { name: 'word-word', refuses: (prev, next) => squeezeIsWord(prev) && squeezeIsWord(next) },
+  // `1e +2` → `1e+2`、`1.e + 2` → `1.e+2`（直前が数字・e・E で直後が符号）
+  { name: 'exponent-sign', refuses: (prev, next) => /[0-9eE]/.test(prev) && (next === '+' || next === '-') },
+  // `1e+ 2` → `1e+2`（符号の後ろの空白）
+  { name: 'sign-digit', refuses: (prev, next) => (prev === '+' || prev === '-') && /[0-9]/.test(next) },
+  // 直後が `.` なら詰めない。`1 .toString()` → `1.toString()` は構文エラー（トークン列が変わる）。
+  // `return .5` → `return.5` や `? .5` → `?.5` はトークン列が変わらない（または別規則が守る）が、
+  // 下流の Bugbot が誤検出したため見た目も残す側に倒す
+  { name: 'before-dot', refuses: (prev, next) => next === '.' },
+  // 記号どうしは片方が ( ) [ ] { } , ; のときだけ詰める（`<!--`・`-->`・`++`・`--`・`=>`・`**`・`??` 等の
+  // 合成を防ぐ）
+  {
+    name: 'symbol-symbol',
+    refuses: (prev, next) => {
+      const prevIsPunct = squeezeIsSymbol(prev) || squeezeIsDelimiter(prev)
+      const nextIsPunct = squeezeIsSymbol(next) || squeezeIsDelimiter(next)
+      return prevIsPunct && nextIsPunct && !squeezeIsDelimiter(prev) && !squeezeIsDelimiter(next)
+    },
+  },
+]
+
 /**
  * トークン間の半角スペースを詰めてよいかを、直前トークンの末尾 1 文字 `prev` と直後トークンの
- * 先頭 1 文字 `next` だけで判定する純粋関数。**詰めてよい組を列挙し、それ以外はすべて残す**
- * （fail-closed: 想定外の組は詰めない）。字句解析器の状態（直前の単語等）には頼らない。
- *
- * 詰めてよい組は、次の「詰めない」条件のどれにも当たらない次のいずれか:
+ * 先頭 1 文字 `next` だけで判定する純粋関数。字句解析器の状態（直前の単語等）には頼らない。
+ * `SQUEEZE_REFUSAL_RULES` のどれにも当たらない組だけを詰める（fail-closed: 想定外の組は残す）。
+ * 詰める組の典型:
  * - 単語文字（英数字・`_`・`$`）↔ 単語文字以外の分類ありの文字（記号・括弧・引用符）
  * - 引用符 ↔ 分類ありの任意の文字
- * - 記号どうしは、片方が `( ) [ ] { } , ;` のときだけ（`<!--`・`-->`・`++`・`--`・`=>`・`**`・
- *   `??`・`?.` 等の合成をまとめて防ぐ。`/` は常に対象外なので `//` `/*` も作らない）
+ * - 記号どうしは、片方が `( ) [ ] { } , ;` のときだけ
+ * 詰めない組の典型: 単語どうし、分類なしの文字、直前が `.`、直後が `.`、
+ * 直前が数字・`e`・`E` で直後が `+` `-`、直前が `+` `-` で直後が数字。
  *
- * 詰めない条件（上の許可に優先する）:
- * - どちらかが分類なし、単語文字同士（`a b`）、直前が `.`（`1. a` は `1.a` で構文エラー）
- * - 直前が数字・`e`・`E` で直後が `+` `-` `.`（`1e +2` → `1e+2`、`1 .toString()`、`1.e + 2`）。
- *   `1.e` のように末尾ドットで単語が切れる形も隣接 2 文字だけで防ぐ
- * - 直前が `+` `-` で直後が数字（`1e+ 2` → `1e+2`、符号の後ろの空白）
+ * `rules` は規則一覧の差し替え用（テストが規則を 1 項ずつ外した版を作る）。実行時は既定のまま使う。
  *
  * lexer が状態から加えて除外する組 — `\u{...}` の直後・同一行に除算の `/` がある行 — は
  * ここでは判定しない。
  */
-export function shouldSqueezeSpace(prev, next) {
+export function shouldSqueezeSpace(prev, next, rules = SQUEEZE_REFUSAL_RULES) {
   if (typeof prev !== 'string' || typeof next !== 'string' || prev.length !== 1 || next.length !== 1) return false
-  const isWord = (ch) => SQUEEZE_WORD.test(ch)
-  const isQuote = (ch) => SQUEEZE_QUOTES.includes(ch)
-  const isDelimiter = (ch) => SQUEEZE_DELIMITERS.includes(ch)
-  const isSymbol = (ch) => SQUEEZE_SYMBOLS.includes(ch)
-  const classified = (ch) => isWord(ch) || isQuote(ch) || isDelimiter(ch) || isSymbol(ch)
-  if (!classified(prev) || !classified(next)) return false
-  if (prev === '.') return false
-  if (isWord(prev) && isWord(next)) return false
-  if (/[0-9eE]/.test(prev) && (next === '+' || next === '-' || next === '.')) return false
-  if ((prev === '+' || prev === '-') && /[0-9]/.test(next)) return false
-  const prevIsPunct = isSymbol(prev) || isDelimiter(prev)
-  const nextIsPunct = isSymbol(next) || isDelimiter(next)
-  if (prevIsPunct && nextIsPunct) return isDelimiter(prev) || isDelimiter(next)
-  return true
+  return !rules.some((rule) => rule.refuses(prev, next))
 }
 
 /**
@@ -143,12 +195,29 @@ export function shouldSqueezeSpace(prev, next) {
  * テンプレートリテラル（コード例を含み得る）を多数持つため、行ベースの正規表現置換では
  * 安全に処理できない — 必ずこの lexer を経由すること。
  *
+ * `/` の判別（除算か正規表現か）:
+ * - 直前が識別子（非 ASCII の識別子文字・サロゲートペアを含む）・数値・文字列・テンプレート・
+ *   `]`・後置 `++` / `--`・正規表現リテラルなら除算。`of` は `for (` の括弧の直下でだけキーワード
+ *   （直後は正規表現）で、それ以外は識別子（直後は除算）
+ * - 直前が `)` のときは、その括弧を開いた直前の単語で決める。`if` / `for` / `while` / `with`
+ *   （プロパティ名でない）なら条件の括弧の終わりなので正規表現（`if (x) /re/`）、それ以外は除算
+ *   （`f(x) / 2`・`(a) / b`）
+ * - 決められない箇所は除算側に倒す: `}` の直後（ブロックの終わりなら正規表現、オブジェクト
+ *   リテラルの終わりなら除算）、`for await (...)` の括弧の直後（`await` が直前の単語になる）
+ * - 逆に正規表現と読むと決めた箇所が実は除算だった場合に備え、正規表現と読んだ行の残りは
+ *   文字列・テンプレートの中身を詰めない（squeezeOff）
+ *
+ * 残る制約: 上の「除算側に倒す」箇所で実際は正規表現であり、その中にバッククォートがあると、以降の
+ * テンプレートの開閉が反転して中身を詰める。lexer では解かず、ビルド時のトークン照合
+ * （verifyTokenParity）が止める。`}` の直後に限らず、正規表現と除算が構文上どちらも成立する位置は
+ * この lexer では決められない。
+ *
  * 誤判定の安全性: 除算を正規表現と誤読しても出力は素通しで不変。危険なのは正規表現内の
  * `//` を行コメントと誤認して以降を削る方向のみで、それを判別分岐が防ぐ。変換の妥当性は
  * ビルド時検証（行数保持・先頭 meta 宣言・冪等性）と tests/build-workflow.test.mjs の
  * 固定ケース + 生成物パースゲートで担保する。
  */
-export function stripComments(src, { squeezeSpaces = false } = {}) {
+export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shouldSqueezeSpace } = {}) {
   let out = ''
   let i = 0
   const n = src.length
@@ -193,10 +262,13 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
   let wordDotAfterDigit = false
   // 'code'（{} 深度つき）と 'template' のネストを管理する。template 内の `${` で code を
   // push し、その code の深度が閉じたら template へ復帰する
-  const stack = [{ mode: 'code', depth: 0 }]
+  const stack = [{ mode: 'code', depth: 0, parens: [] }]
   // 空白除去用: 現在の行に除算（正規表現と判別されなかった `/`）が出たか。除算と誤読した正規表現
   // リテラルの内部の空白を詰めて壊さないため、その行の残りでは空白を詰めない（改行で解除）
   let squeezeOff = false
+  // 直近に閉じた `)` の種類（開いた時点の直前の単語: 'if' | 'for' | 'while' | 'with'、それ以外は 'other'）。
+  // 直後の `/` が `if (x) /re/` の正規表現か `f(x) / 2` の除算かの判別に使う
+  let lastClosedParen = 'other'
 
   // コメント除去の直前に出力末尾の行内空白を切り詰める。コメントだけの行は空行になり、
   // `code  // c` は `code` になる（.editorconfig の trim_trailing_whitespace 準拠）
@@ -229,7 +301,7 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
       if (c === '$' && src[i + 1] === '{') {
         out += '${'
         i += 2
-        stack.push({ mode: 'code', depth: 0 })
+        stack.push({ mode: 'code', depth: 0, parens: [] })
         sigCh2 = sigCh
         sigCh = '{'
         sigWord = ''
@@ -270,7 +342,7 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
       const prev = out[out.length - 1]
       if (prev !== undefined && prev !== '\n' && next !== undefined && next !== '\n' && next !== '\r') {
         const squeeze =
-          shouldSqueezeSpace(prev, next) &&
+          shouldSqueeze(prev, next) &&
           // `\u{41}` の閉じ `}` と単語文字を連結すると識別子が地続きになる
           !(prev === '}' && rawPrevIsIdentEscape && isWordChar(next))
         if (!squeeze) out += ' '
@@ -378,6 +450,15 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
         continue
       }
     }
+    // 括弧の種類の追跡（`/` が除算か正規表現かの判別用）。開いた時点の直前の単語が if / for / while / with
+    // （プロパティ名でない）なら条件の括弧として記録し、閉じたときにその種類を残す。文字列・正規表現・
+    // コメント・テンプレート本文の括弧はここへ来ないので数えない
+    if (c === '(') {
+      const control = CONTROL_PAREN_KEYWORDS.has(sigWord) && !(wordPrev === '.' && !wordDotAfterDigit)
+      ctx.parens.push(control ? sigWord : 'other')
+    } else if (c === ')') {
+      lastClosedParen = ctx.parens.pop() ?? 'other'
+    }
     // code モードの {} 深度（template の `${` からの復帰判定）
     if (c === '{') ctx.depth++
     if (c === '}') {
@@ -407,9 +488,14 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
       // 末尾ドット数値直後のキーワード（`1. in /re/`）はプロパティ名ではない（Bugbot 指摘）。
       // 数値へのプロパティアクセス `1 .in / 2` は字句隣接でないためプロパティ名として除算側
       const keywordProperty = wordPrev === '.' && !wordDotAfterDigit
+      // `of` は for の括弧の直下でだけキーワード（`for (x of /re/.exec(s))`）。それ以外は識別子
+      const ofIsIdentifier = sigWord === 'of' && ctx.parens[ctx.parens.length - 1] !== 'for'
+      // `if (x) /re/` の `)` は条件の括弧を閉じた直後なので正規表現。`}` の直後はブロックの終わり
+      // （正規表現）とオブジェクトリテラルの終わり（除算）を lexer では決められないため除算側に倒す
+      const closedControlParen = sigCh === ')' && lastClosedParen !== 'other'
       const isDivision =
-        (sigWord !== '' && (!REGEX_PRECEDING_KEYWORDS.has(sigWord) || keywordProperty)) ||
-        /[)\]}]/.test(sigCh) ||
+        (sigWord !== '' && (!REGEX_PRECEDING_KEYWORDS.has(sigWord) || keywordProperty || ofIsIdentifier)) ||
+        (/[)\]}]/.test(sigCh) && !closedControlParen) ||
         sigCh === '"' || sigCh === "'" || sigCh === '`' ||
         postfixIncDec ||
         trailingDotNumber
@@ -437,9 +523,13 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
         if (closed) {
           out += buf
           i = j
+          // 正規表現と読んだ判定が誤りでも、その行の残りの文字列・テンプレートの中身を詰めない
+          squeezeOff = true
           sigCh2 = sigCh
           sigCh = '/'
-          sigWord = ''
+          // 正規表現リテラルは被演算子なので、直後の `/` は除算（`/a/ / 2`）。単語として扱う目印を置く。
+          // 直後にフラグ（`/a/g`）が続けば通常の単語で置き換わる
+          sigWord = AFTER_REGEX_LITERAL
           rawPrev2 = rawPrev
           rawPrev = '/'
           rawPrevIsIdentEscape = false
@@ -455,12 +545,13 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
     out += c
     if (c === '\n') squeezeOff = false
     else if (c === '/') squeezeOff = true
-    if (isWordChar(c)) {
+    if (isWordUnitAt(src, i)) {
       // rawPrevIsIdentEscape: 直前が Unicode コードポイントエスケープの末尾（`\u{1D400}1` の
       // `1` 等）で地続きの識別子文字である場合も継続として扱う（Issue #455 codex P1）。
       // rawPrevContinuesSigWord: 直前が数値リテラルの指数部符号（`1e+10` の `+`）で、その
       // 手前の sigWord が指数部途中（`1e`）だった場合も地続きとして扱う（Issue #455 Bugbot）
-      if (isWordChar(rawPrev) || rawPrevIsIdentEscape || rawPrevContinuesSigWord) {
+      // isLowSurrogate(c): 非 BMP 識別子文字の 2 単位目は 1 単位目と同じ単語（isWordUnitAt が組を確認済み）
+      if (isLowSurrogate(c) || isIdentifierContinuationRaw(rawPrev, rawPrev2) || rawPrevIsIdentEscape || rawPrevContinuesSigWord) {
         sigWord += c
       } else {
         sigWord = c
@@ -533,9 +624,10 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
  * コメント・インデントを除去したうえで、最上位のコードのトークン間の不要な半角スペースを詰める。
  * 先にコメントを除去してから空白除去の lexer を走らせるため、ブロックコメントの置換空白が
  * 詰め残しになって冪等性を壊すことはない。冪等（出力へ再適用しても不変）。
+ * `shouldSqueeze` は詰める組の判定関数の差し替え用（テストが規則を 1 項ずつ外した版を渡す）。
  */
-export function squeezeSpaces(src) {
-  return stripComments(stripComments(src), { squeezeSpaces: true })
+export function squeezeSpaces(src, { shouldSqueeze = shouldSqueezeSpace } = {}) {
+  return stripComments(stripComments(src), { squeezeSpaces: true, shouldSqueeze })
 }
 
 /**
@@ -570,8 +662,8 @@ export function buildArtifact(src) {
  * 値・開始行で、sourceType は module と script の両方。一致しなければ最初の差の位置（行番号と前後の
  * トークン）を含めて throw する。acorn を取得できない Node でも黙って飛ばさず throw する。
  */
-export function verifyTokenParity(src, artifact) {
-  const r = spawnSync(process.execPath, ['--expose-internals', TOKEN_DIFF_PATH], {
+export function verifyTokenParity(src, artifact, { helperPath = TOKEN_DIFF_PATH, execPath = process.execPath } = {}) {
+  const r = spawnSync(execPath, ['--expose-internals', helperPath], {
     input: JSON.stringify([{ name: 'build', before: src, after: artifact }]),
     encoding: 'utf8',
     maxBuffer: 1 << 28,
@@ -579,10 +671,22 @@ export function verifyTokenParity(src, artifact) {
   if (r.error || r.status !== 0) {
     throw new Error(
       'トークン照合を実行できない（acorn を取得できない Node の可能性。検査を省略せず中止する）: ' +
-        `${r.error ? r.error.message : `status ${r.status}`} ${r.stderr ?? ''}`.trim(),
+        `${r.error ? r.error.message : `status ${r.status}${r.signal ? ` signal ${r.signal}` : ''}`} ${r.stderr ?? ''}`.trim(),
     )
   }
-  const [result] = JSON.parse(r.stdout).results
+  // 終了コード 0 でも出力が JSON でない・想定の形でない場合は「一致した」と扱わず中止する
+  // （出力が空・途中で切れた・別のスクリプトが差し込まれた等。通過は ok: true を明示的に受け取ったときだけ）
+  let parsed
+  try {
+    parsed = JSON.parse(r.stdout)
+  } catch (e) {
+    throw new Error(`トークン照合の結果を解釈できない（出力が JSON として読めない。検査を省略せず中止する）: ${e.message}`)
+  }
+  const results = parsed?.results
+  if (!Array.isArray(results) || results.length !== 1 || typeof results[0]?.ok !== 'boolean') {
+    throw new Error('トークン照合の結果を解釈できない（results が 1 件の { ok: boolean } でない。検査を省略せず中止する）')
+  }
+  const [result] = results
   if (!result.ok) throw new Error(`生成物のトークン列が開発ファイルと一致しない: ${result.detail}`)
 }
 
@@ -604,13 +708,14 @@ if (invokedAs && invokedAs === fileURLToPath(import.meta.url)) {
   const checkOnly = process.argv.includes('--check')
   const srcPath = argValue('--src', SRC_PATH)
   const distPath = argValue('--dist', DIST_PATH)
+  const tokenDiffPath = argValue('--token-diff', TOKEN_DIFF_PATH)
   const startedAt = Date.now()
   let src
   let artifact
   try {
     src = readFileSync(srcPath, 'utf8')
     artifact = buildArtifact(src)
-    verifyTokenParity(src, artifact)
+    verifyTokenParity(src, artifact, { helperPath: tokenDiffPath })
   } catch (e) {
     console.error(`ビルド中止（${distPath} は書き込まない）: ${e.message}`)
     process.exit(1)

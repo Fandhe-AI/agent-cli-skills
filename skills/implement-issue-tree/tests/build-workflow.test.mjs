@@ -1,6 +1,6 @@
 // scripts/build-workflow.mjs（開発ファイル → 実行ファイルのコメント除去ビルダー）の回帰テスト。
 //
-// 検証は 2 系統:
+// 検証は次の系統:
 //   (a) lexer の固定ケース — 文字列・テンプレートリテラル・正規表現の内部にある `//` を
 //       コメントと誤認して削らないこと（本スクリプトはプロンプト用の巨大テンプレートに
 //       コード例を含み得るため、ここが壊れると生成物が静かに破損する）
@@ -10,9 +10,11 @@
 //   (d) 空白除去 — トークン間の不要な半角スペースを詰める後段パス（squeezeSpaces）の許可リスト・
 //       固定ケース・性質（行数保持・冪等・リテラル不変）と、Node 同梱 acorn による変換前後の
 //       トークン列一致（実ファイル + 固定ケース + Bugbot 指摘の回帰 + 生成的テスト〔ランダム・
-//       3 トークン全数・隣接 2 文字全数〕）。
+//       3 トークン全数・隣接 2 文字全数〕）と、許可リストの規則を 1 項ずつ外す変異テスト。
+//   (e) ビルド時のトークン照合 — lexer の `/` 判別の固定ケースと、判別できない入力・照合ヘルパーの
+//       失敗（実行できない・出力が想定の形でない）でビルドが生成ファイルを書かずに中止すること。
 // 生成物のサイズ・パースゲートは workflow-loadability.test.mjs が担う（対象は実行ファイル）。
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -20,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  stripComments, squeezeSpaces, shouldSqueezeSpace, buildArtifact, SRC_PATH, DIST_PATH,
+  stripComments, squeezeSpaces, shouldSqueezeSpace, buildArtifact, verifyTokenParity, SQUEEZE_REFUSAL_RULES, SRC_PATH, DIST_PATH,
 } from '../scripts/build-workflow.mjs'
 
 const SCRIPT_PATH = fileURLToPath(new URL('../scripts/build-workflow.mjs', import.meta.url))
@@ -406,10 +408,8 @@ test('許可リスト: 詰めてよい組（括弧・区切り・引用符の隣
     ['a', '('], [')', 'b'], ['(', 'x'], ['x', ')'], [',', 'y'], [';', 'z'], ['{', 'k'], ['}', 'e'], ['t', '['],
     ['a', '='], ['=', 'b'], ['a', '+'], ['+', 'b'], ['a', '?'], ['?', 'b'], ['b', ':'], [':', 'c'], ['a', '<'],
     ['=', '1'], ['<', '1'], ['*', '2'], // 符号以外の記号の後ろの数字
-    ['a', '.'], ['x', '.'], ['F', '.'], // 数字・e・E 以外の単語文字の後ろの `.`
     ['"', '"'], ['"', '+'], ['+', '"'],
     ['n', '"'], ['"', 'i'], ["'", 'x'], ['`', 'x'], ['=', '`'],
-    [',', '.'], ['(', '.'], ['"', '.'], ['}', '.'], [')', '.'], // `.` の直前が区切りか引用符
     // 記号どうしは片方が ( ) [ ] { } , ; のときだけ
     ['=', '('], [')', '='], ['+', '('], [')', '+'], ['!', '('], ['(', '!'], ['(', '-'], ['(', '+'], ['}', '+'],
     [']', '='], [',', '!'], [',', '-'], [';', '+'], ['(', ')'], ['{', '}'], ['>', ')'], ['=', '['], ['?', '{'],
@@ -428,6 +428,8 @@ test('許可リスト: 詰めてはいけない組（連結すると別トーク
     ['=', '!'], ['&', '!'], ['=', '-'], ['+', '!'], ['=', '+'], ['=', '~'], ['!', '~'], ['+', '~'], ['*', '-'], // 記号どうし
     ['?', '.'], // `?.5`
     ['1', '.'], ['.', '5'], ['.', 'a'], ['+', '.'], ['=', '.'], ['.', '('], ['.', '.'], // `.` の前後（直前が `.` は常に残す）
+    ['n', '.'], ['x', '.'], ['F', '.'], ['a', '.'], // 直後が `.` は常に残す（`return .5` が `return.5` にならない）
+    [',', '.'], ['(', '.'], ['"', '.'], ['}', '.'], [')', '.'], [']', '.'], ['`', '.'], [';', '.'], // 直後が `.` なら直前が区切り・引用符でも残す
     ['1', '+'], ['9', '-'], ['e', '+'], ['E', '-'], ['e', '.'], // 直前が数字・e・E で直後が + - .（`1e +2` `1.e + 2` `1 .toString()`）
     ['+', '2'], ['-', '2'], ['+', '0'], ['-', '9'], // 符号の直後の数字（`1e+ 2`）
     ['a', '/'], ['/', 'a'], [')', '/'], ['/', '/'], ['*', '/'], ['/', '*'], // `/` の前後
@@ -495,9 +497,21 @@ test('空白除去: 数値の後の . は詰めない（1 .toString()）、? . �
   assert.ok(!out.includes('?.5'))
 })
 
-test('空白除去: spread の ... は直前が区切りのときだけ詰める', () => {
-  assert.equal(squeezeSpaces('const a = [x, ...y]\n'), 'const a=[x,...y]\n')
-  assert.equal(squeezeSpaces('f(...args, ...more)\n'), 'f(...args,...more)\n')
+test('空白除去: 語の直後の .5 は詰めない（return .5 を return.5 にしない。トークン列は変わらないが Bugbot が誤検出した形）', () => {
+  assert.equal(squeezeSpaces('function f() { return .5 }\n'), 'function f(){return .5}\n')
+  assert.equal(squeezeSpaces('const a = typeof .5\n'), 'const a=typeof .5\n')
+  assert.equal(squeezeSpaces('const a = x in .5\n'), 'const a=x in .5\n')
+  assert.equal(squeezeSpaces('const a = b + .5\n'), 'const a=b+ .5\n')
+  const cases = ['return .5\n', 'x = typeof .5\n', 'x = a in .5\n', 'x = b + .5\n', 'x = [a, ...b]\n'].map((code) => ({
+    name: JSON.stringify(code), before: code, after: squeezeSpaces(code), lenient: true,
+  }))
+  assert.deepEqual(compareTokensWithAcorn(cases).filter((r) => !r.ok), [])
+})
+
+test('空白除去: spread の ... の前の空白は残す（直後が . の規則）', () => {
+  // 直後が `.` なら詰めない規則に従い、`, ...` の空白は残る（`(...args` のように空白の無い箇所は元のまま）
+  assert.equal(squeezeSpaces('const a = [x, ...y]\n'), 'const a=[x, ...y]\n')
+  assert.equal(squeezeSpaces('f(...args, ...more)\n'), 'f(...args, ...more)\n')
 })
 
 test('空白除去: 文字列リテラル内の空白は 1 バイトも変えない', () => {
@@ -666,11 +680,12 @@ test('Bugbot 指摘 3: `1.e + 2`（末尾ドットで単語が切れる形）を
 //
 // - 構文エラーになる並び（`1e+` `a ) ( 1.` 等）も含むため lenient（例外の有無と例外までのトークンを
 //   比較）で比べる。トークン列の比較は module と script の両方（token-diff.cjs）。
-// - `/` は除算と正規表現の判別が字句解析器（本ビルダーの lexer と acorn）で食い違い得る。食い違うと
-//   文字列・テンプレートの中身を詰める入力が実在する（非 ASCII 識別子・`of` の直後の `/`、`)` 直後の
-//   正規表現。下の「ビルド時のトークン照合」のテスト参照）。lexer の `/` 誤読は残っており、この生成的
-//   テストは語彙に `/` を含めて食い違いの有無を調べるが、検出を保証するものではない。誤読で詰めすぎた
-//   生成物は、ビルダー自身のビルド時トークン照合（verifyTokenParity）が止める。
+// - `/` は除算と正規表現の判別が字句解析器（本ビルダーの lexer と acorn）で食い違い得る。語彙に `/` を
+//   含む文字列・バッククォートや引用符入りの正規表現・非 ASCII 識別子・`if` を入れて、食い違いが残って
+//   いないかを調べる。食い違う並びのうち、lexer が決められない `}` の直後と、構文エラーになる `.` `?.` の
+//   直後の「バッククォート入りの正規表現」は avoidKnownSlashDisagreement で避ける（下のコメント参照）。
+//   それ以外の食い違いは、このテストが赤くなって見つかる。誤読で詰めすぎた生成物は、ビルダー自身の
+//   ビルド時トークン照合（verifyTokenParity）が止める。
 // - 引用符 1 文字だけ・バッククォート 1 文字だけは語彙に入れない（文字列・テンプレートの開始になり、
 //   以降を丸ごと文字列として読むため、トークンの隣接を試せなくなる）。完結した文字列リテラルだけ入れる。
 //   引用符 1 文字どうしの隣接は、下の「隣接 2 文字の全数検査」が扱う。
@@ -682,6 +697,10 @@ const GENERATIVE_VOCABULARY = [
   '+', '-', '++', '--', '!', '~', '<', '>', '=', '=>', '==', '*', '**', '/', '.', '...', '?', '?.', '??', ':', '&', '&&', '|', '||', '%', '^',
   '(', ')', '[', ']', '{', '}', ',', ';',
   "'s p'", '"d"', '`t`', "''", '/r/g',
+  // 空白を含む文字列・テンプレート（詰められたら中身が変わる）、`/` を含む文字列、バッククォート・引用符入りの
+  // 正規表現（除算と誤読すると以降の文字列・テンプレートの開閉が反転する）、制御構文の括弧を作る語、
+  // 非 BMP の識別子（サロゲートペア）
+  "'s  p'", '`t  u`', '"a/b"', '/`/', '/"/', 'if', 'while', 'for', 'ok', '\u{1D400}',
 ]
 
 // 全数列挙用の中核語彙。長さ 3 の全並びを列挙できる大きさに絞る（`<!--` `-->` 等の 3 トークンの合成と
@@ -690,6 +709,7 @@ const GENERATIVE_CORE = [
   'a', 'e', 'E', '1', '2', '1.', '.5', '1e', '1e+', '1.e', '0x1', '1n',
   '+', '-', '++', '--', '!', '~', '<', '>', '=', '=>', '*', '/', '.', '...', '?', '??', ':', '&', '|', '%',
   '(', ')', '[', ']', '{', '}', ',', ';', "'s'", 'in',
+  'return', 'é', "'s  p'", '`t  u`', // 語の直後の `.5`、非 ASCII 識別子、空白を含む文字列・テンプレート
 ]
 
 // mulberry32（固定シードで再現できる 32 ビット擬似乱数）
@@ -703,11 +723,23 @@ const mulberry32 = (seed) => () => {
 const GENERATIVE_CASES = 20000
 const GENERATIVE_SEED = 20260926
 
+// lexer と acorn で `/` の読みが分かれる既知の並びを避ける（置き換えるだけで長さは変えない）。
+// バッククォートを含む正規表現は、除算と読まれると以降のテンプレートの開閉を反転させる。
+// - `}` の直後: ブロックの終わり（正規表現）かオブジェクトリテラルの終わり（除算）かを lexer は
+//   決められず、除算側に倒す。解かない制約で、ビルド時のトークン照合が止める（LEXER_SLASH_RESIDUAL）
+// - `.` `?.` の直後: プロパティ名が来るべき位置で、正規表現が来る入力は構文エラー。lexer は正規表現と
+//   読み、acorn は除算と読む。実在しないプログラムなので扱わない
+const UNRESOLVABLE_BEFORE_BACKTICK_REGEX = new Set(['}', '.', '?.'])
+const avoidKnownSlashDisagreement = (tokens) =>
+  tokens.map((t, i) => (t === '/`/' && UNRESOLVABLE_BEFORE_BACKTICK_REGEX.has(tokens[i - 1]) ? 'ok' : t))
+
 const generateLines = (rand) => {
   const lineCount = 1 + Math.floor(rand() * 3)
   return Array.from({ length: lineCount }, () => {
     const len = 2 + Math.floor(rand() * 6)
-    return Array.from({ length: len }, () => GENERATIVE_VOCABULARY[Math.floor(rand() * GENERATIVE_VOCABULARY.length)])
+    return avoidKnownSlashDisagreement(
+      Array.from({ length: len }, () => GENERATIVE_VOCABULARY[Math.floor(rand() * GENERATIVE_VOCABULARY.length)]),
+    )
   })
 }
 
@@ -779,6 +811,52 @@ test('生成的テスト: 隣接 2 文字の全数検査（ASCII 印字可能 ×
   assert.deepEqual(failed.slice(0, 5), [], `${failed.length}/${cases.length} 件でトークン列が変化`)
 })
 
+// 変異テスト: 「詰めない」規則を 1 項ずつ外した判定関数で squeezeSpaces を走らせ、外すとトークン列が変わる
+// 入力が生成的テストの入力空間（中核語彙の長さ 3 の全並び + 隣接 2 文字の全数）から見つかることを確かめる。
+// 見つからない規則は、規則そのものが不要か、生成的テストの語彙が足りないかのどちらか（どの規則も他の規則に
+// 隠れていない）。規則表そのものを export しているので、テストが規則を再構成せず実物から 1 項ずつ外す。
+const mutationCorpus = (() => {
+  let cached
+  return () => {
+    if (cached) return cached
+    const codes = []
+    for (const x of GENERATIVE_CORE) for (const y of GENERATIVE_CORE) for (const z of GENERATIVE_CORE) codes.push(linesToSource([[x, y, z]]))
+    const printable = Array.from({ length: 94 }, (_, i) => String.fromCharCode(33 + i))
+    for (const p of printable) for (const q of printable) for (const ctx of ['', '1', '1.', 'a', '1e', 'x1', '0x1']) codes.push(`${ctx}${p} ${q}2\n`)
+    cached = codes
+    return codes
+  }
+})()
+
+const withoutRule = (rule) => (prev, next) => shouldSqueezeSpace(prev, next, SQUEEZE_REFUSAL_RULES.filter((r) => r !== rule))
+
+test('変異テスト: 規則表の規則名は重複せず、既定の判定は全規則を使う', () => {
+  const names = SQUEEZE_REFUSAL_RULES.map((r) => r.name)
+  assert.equal(new Set(names).size, names.length)
+  assert.ok(names.length >= 7, `規則が減っている: ${names}`)
+  assert.equal(shouldSqueezeSpace('a', 'b', SQUEEZE_REFUSAL_RULES), shouldSqueezeSpace('a', 'b'))
+  assert.equal(shouldSqueezeSpace('a', 'b', []), true, '規則を全部外すと単語どうしも詰める判定になる（変異が実際に効く前提）')
+})
+
+for (const rule of SQUEEZE_REFUSAL_RULES) {
+  test(`変異テスト: 規則 ${rule.name} を外すと、トークン列が変わる入力が見つかる`, () => {
+    const shouldSqueeze = withoutRule(rule)
+    const cases = mutationCorpus().map((code) => ({
+      name: JSON.stringify(code), before: code, after: squeezeSpaces(code, { shouldSqueeze }), lenient: true,
+    }))
+    const failed = compareTokensWithAcorn(cases).filter((r) => !r.ok)
+    assert.ok(failed.length > 0, `規則 ${rule.name} を外してもトークン列が変わる入力が無い（規則が効いていないか、入力空間が足りない）`)
+  })
+}
+
+test('変異テスト: 規則 before-dot を外すと return .5 が return.5 になる（トークン列は同じだが見た目を残す規則）', () => {
+  const mutant = withoutRule(SQUEEZE_REFUSAL_RULES.find((r) => r.name === 'before-dot'))
+  assert.equal(squeezeSpaces('return .5\n', { shouldSqueeze: mutant }), 'return.5\n')
+  assert.equal(squeezeSpaces('return .5\n'), 'return .5\n')
+  const [r] = compareTokensWithAcorn([{ name: 'x', before: 'return .5\n', after: 'return.5\n' }])
+  assert.equal(r.ok, true, 'return .5 → return.5 はトークン列を変えない（規則を残す理由は見た目だけ）')
+})
+
 // ---------------------------------------------------------------------------
 // (b) 鮮度ゲート（リポジトリ実体の検証）
 // ---------------------------------------------------------------------------
@@ -806,18 +884,102 @@ test('開発ファイルと実行ファイルの行数が一致する（スタ�
 // (e) ビルド時のトークン照合（fail-closed）
 // ---------------------------------------------------------------------------
 
-// lexer の `/` 判別（除算と正規表現）の誤読で、文字列・テンプレートの中身が詰められる入力。lexer は
-// 個別には直さず、ビルダーが生成物と開発ファイルのトークン列（値込み）を acorn で照合して止める。
-// 一時ファイルの開発ファイルをビルダーの CLI（--src / --dist）へ渡し、非ゼロ終了・生成ファイルが
-// 書かれないこと・最初の差の位置が出ることを確かめる。
+// lexer の `/` 判別（除算と正規表現）は、直前のトークンだけでは決まらない箇所がある。誤読すると文字列・
+// テンプレートの中身を詰めたり、正規表現内のバッククォートでテンプレートの開閉が反転したりする。
+// 判別できる範囲は lexer が直し（下の LEXER_SLASH_FIXED）、判別できない範囲は
+// ビルド時のトークン照合（verifyTokenParity）が止める（下の LEXER_SLASH_RESIDUAL）。
+// 一時ファイルの開発ファイルをビルダーの CLI（--src / --dist）へ渡して確かめる。
 const META_HEADER = "export const meta = { name: 'x' }\n"
-const LEXER_SLASH_MISREAD = {
-  // 非 ASCII 識別子の直後の `/` を正規表現と誤読し、文字列の中身を詰める
-  'A: 非 ASCII 識別子の直後の除算': `${META_HEADER}const x = é / 2 + " / a  +  b "\n`,
-  // `of` の直後の `/` を正規表現と誤読する（`of` は for-of 以外では識別子）
-  'A: of の直後の除算': `${META_HEADER}const of = 4\nconst y = of / 2 + " / a  +  b "\n`,
-  // `)` 直後の正規表現を除算と誤読し、正規表現内のバッククォートで以降のテンプレートが反転する
-  'B: ) 直後の正規表現内のバッククォート': `${META_HEADER}if (ok) /\`/.test(s) && f()\nconst t = \`line1\n  indented   text  =  1\`\n`,
+
+// lexer が正しく読む入力: ビルドが通り、文字列・テンプレート・正規表現の中身が 1 バイトも変わらない。
+// keep は生成物にそのまま残るべき部分文字列
+// 各入力は、1 行目の `/` の判別を誤ると、複数行のテンプレート（2〜3 行目）の中身が壊れるように組んである。
+// 正規表現と誤読すると閉じ `/` を `` `/` `` の間に探し、末尾のバッククォートがテンプレートを開いてしまう
+// （テンプレートの開閉が反転し、2 行目の改行がコードの改行として扱われて 3 行目が詰められる）。
+// 文字列の中身だけなら「行の残りを詰めない」安全策が守るので、この安全策に隠れない形で見る。
+const SLASH_PROBE = '`/`\nconst t = `a\n  b  c`\n'
+const SLASH_PROBE_KEEP = ['`/`', '`a\n  b  c`']
+const LEXER_SLASH_FIXED = {
+  'A: 非 ASCII 識別子の直後の除算': {
+    text: `${META_HEADER}const x = é / 2 + ${SLASH_PROBE}`,
+    keep: SLASH_PROBE_KEEP,
+  },
+  'A: 非 BMP 識別子（サロゲートペア）の直後の除算': {
+    text: `${META_HEADER}const x = \u{1D400} / 2 + ${SLASH_PROBE}`,
+    keep: SLASH_PROBE_KEEP,
+  },
+  'A: 非 ASCII 識別子の末尾に数字が付く形の直後の除算': {
+    text: `${META_HEADER}const x = é1 / 2 + ${SLASH_PROBE}`,
+    keep: SLASH_PROBE_KEEP,
+  },
+  'A: 非 ASCII 識別子の途中に非 ASCII が続く形の直後の除算': {
+    text: `${META_HEADER}const x = aé / 2 + ${SLASH_PROBE}`,
+    keep: SLASH_PROBE_KEEP,
+  },
+  'A: 文字列の中身も変えない（非 ASCII 識別子の直後の除算）': {
+    text: `${META_HEADER}const x = é / 2 + " / a  +  b "\n`,
+    keep: ['" / a  +  b "'],
+  },
+  'A: of の直後の除算（for の括弧の外では識別子）': {
+    text: `${META_HEADER}const of = 4\nconst y = of / 2 + ${SLASH_PROBE}`,
+    keep: SLASH_PROBE_KEEP,
+  },
+  'A: for の括弧の中の of の直後の正規表現': {
+    text: `${META_HEADER}for (const m of /a  b/g[Symbol.matchAll](s)) { f(m) }\nconst z = 1  +  2\n`,
+    keep: ['/a  b/g'],
+  },
+  'A: for の括弧の中の of の直後の正規表現内のバッククォート': {
+    text: `${META_HEADER}for (const m of /\`/g[Symbol.matchAll](s)) { f(m) }\nconst t = \`a\n  b  c\`\n`,
+    keep: ['/`/g', '`a\n  b  c`'],
+  },
+  'A: for の括弧の中で変数 of を除算に使う曖昧な形（正規表現側に読むが行の残りは詰めない）': {
+    text: `${META_HEADER}for (let i = 0; i < of / 2 + " / a  +  b "; i++) { f(i) }\n`,
+    keep: ['" / a  +  b "'],
+  },
+  '正規表現リテラルの直後の除算': {
+    text: `${META_HEADER}const x = /a/ / 2 + ${SLASH_PROBE}`,
+    keep: SLASH_PROBE_KEEP,
+  },
+  'B: if の括弧の直後の正規表現内のバッククォート': {
+    text: `${META_HEADER}if (ok) /\`/.test(s) && f()\nconst t = \`line1\n  indented   text  =  1\`\n`,
+    keep: ['/`/.test', '`line1\n  indented   text  =  1`'],
+  },
+  'B: while の括弧の直後の正規表現内のバッククォート': {
+    text: `${META_HEADER}while (more()) /\`/.test(s) && g()\nconst t = \`line1\n  indented   text  =  1\`\n`,
+    keep: ['/`/.test', '`line1\n  indented   text  =  1`'],
+  },
+  'B: for の括弧の直後の正規表現内のバッククォート': {
+    text: `${META_HEADER}for (;;) /\`/.test(s) && g()\nconst t = \`line1\n  indented   text  =  1\`\n`,
+    keep: ['/`/.test', '`line1\n  indented   text  =  1`'],
+  },
+  'B: 二重の括弧の if の直後の正規表現': {
+    text: `${META_HEADER}if ((ok)) /\`/.test(s) && f()\nconst t = \`line1\n  indented   text  =  1\`\n`,
+    keep: ['/`/.test', '`line1\n  indented   text  =  1`'],
+  },
+  'B: 関数呼び出しの括弧の直後の除算': {
+    text: `${META_HEADER}const q = f(a) / 2 + " / a  +  b "\n`,
+    keep: ['" / a  +  b "'],
+  },
+  'B: 式の括弧の直後の除算': {
+    text: `${META_HEADER}const q = (a) / 2 + " / a  +  b "\n`,
+    keep: ['" / a  +  b "'],
+  },
+  'B: return の括弧の直後の除算': {
+    text: `${META_HEADER}function g(a, b) { return (a) / b + " / a  +  b " }\n`,
+    keep: ['" / a  +  b "'],
+  },
+  'B: if の本文が括弧で始まる式の除算': {
+    text: `${META_HEADER}if (x) (a) / 2 + " / a  +  b "\n`,
+    keep: ['" / a  +  b "'],
+  },
+}
+
+// lexer が判別できない入力: `}` の直後の `/` はブロックの終わり（直後は正規表現）にも、オブジェクト
+// リテラルの終わり（直後は除算）にもなる。lexer は除算側に倒す。実際が正規表現でその中にバッククォートが
+// あると、以降のテンプレートが反転して中身を詰める。この制約は lexer では解かず、ビルド時のトークン
+// 照合が止める。
+const LEXER_SLASH_RESIDUAL = {
+  '} 直後の正規表現内のバッククォート': `${META_HEADER}if (ok) {} /\`/.test(s) && f()\nconst t = \`line1\n  indented   text  =  1\`\n`,
 }
 
 const runBuilder = (srcText, extra = []) => {
@@ -833,8 +995,29 @@ const runBuilder = (srcText, extra = []) => {
   }
 }
 
-for (const [name, text] of Object.entries(LEXER_SLASH_MISREAD)) {
-  test(`ビルド時のトークン照合: ${name} はビルドが非ゼロで終わり生成ファイルを書かない`, () => {
+// acorn のトークナイザは `o.if(x) / 2` の `.if` をキーワードの `if` と読み、直後の `/` を正規表現と誤読する。
+// そのため acorn 照合を通せない入力は lexer の出力だけを確かめる
+test('lexer の / 判別: プロパティ名が if の呼び出し（o.if(x)）の直後の / は除算で、行の残りの文字列を変えない', () => {
+  assert.equal(squeezeSpaces('const q = o.if(x) / 2 + " / a  +  b "\n'), 'const q=o.if(x) / 2 + " / a  +  b "\n')
+  assert.equal(squeezeSpaces('const q = o.while (x) / 2 + " / a  +  b "\n'), 'const q=o.while(x) / 2 + " / a  +  b "\n')
+})
+
+for (const [name, { text, keep }] of Object.entries(LEXER_SLASH_FIXED)) {
+  test(`lexer の / 判別: ${name} はビルドが通り、中身を変えない`, () => {
+    const out = buildArtifact(text)
+    for (const part of keep) assert.ok(out.includes(part), `${JSON.stringify(part)} が生成物から消えた・変わった: ${JSON.stringify(out)}`)
+    const [result] = compareTokensWithAcorn([{ name, before: text, after: out }])
+    assert.equal(result.ok, true, result.detail)
+    const r = runBuilder(text)
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /トークン照合 ok/)
+    assert.equal(r.written, true)
+    assert.equal(r.distText, out)
+  })
+}
+
+for (const [name, text] of Object.entries(LEXER_SLASH_RESIDUAL)) {
+  test(`ビルド時のトークン照合: lexer が判別できない入力（${name}）はビルドが非ゼロで終わり生成ファイルを書かない`, () => {
     // 前提: squeezeSpaces が実際に中身を変える（照合が無ければ壊れた生成物が出る入力であること）
     assert.notEqual(buildArtifact(text).replace(/\n$/, ''), text.replace(/\n$/, ''))
     const r = runBuilder(text)
@@ -845,12 +1028,26 @@ for (const [name, text] of Object.entries(LEXER_SLASH_MISREAD)) {
     assert.match(r.stderr, /直前/, `前後のトークンが出ていない: ${r.stderr}`)
   })
 
-  test(`ビルド時のトークン照合: ${name} は --check でも非ゼロで終わる`, () => {
+  test(`ビルド時のトークン照合: lexer が判別できない入力（${name}）は --check でも非ゼロで終わる`, () => {
     const r = runBuilder(text, ['--check'])
     assert.notEqual(r.status, 0)
     assert.match(r.stderr, /トークン列が開発ファイルと一致しない/)
   })
 }
+
+test('verifyTokenParity: 中身を変えた生成物は最初の差の位置つきで throw する（lexer を直しても不一致を作れる入力）', () => {
+  const src = `${META_HEADER}const s = " / a  +  b "\nconst t = \`l1\n  i   t  =  1\`\n`
+  assert.doesNotThrow(() => verifyTokenParity(src, buildArtifact(src)))
+  const tampered = [
+    ['文字列の中身を詰めた', buildArtifact(src).replace('" / a  +  b "', '" / a+b "')],
+    ['テンプレートの中身を詰めた', buildArtifact(src).replace('  i   t  =  1', ' i t=1')],
+    ['トークンを消した', buildArtifact(src).replace('const t', 'const')],
+  ]
+  for (const [label, artifact] of tampered) {
+    assert.notEqual(artifact, buildArtifact(src), `前提: ${label}改変が実際に差を作る`)
+    assert.throws(() => verifyTokenParity(src, artifact), /トークン列が開発ファイルと一致しない.*変換前 [0-9]+ 行）が不一致|トークン数が不一致/s, label)
+  }
+})
 
 test('ビルド時のトークン照合: 正常な開発ファイルはビルドが通り、生成ファイルが書かれる', () => {
   const text = `${META_HEADER}const x = a / 2 + " / a  +  b "\nconst re = /\`/.test(s)\nconst t = \`l1\n  i   t  =  1\`\n`
@@ -859,6 +1056,73 @@ test('ビルド時のトークン照合: 正常な開発ファイルはビルド
   assert.match(r.stdout, /トークン照合 ok/)
   assert.equal(r.written, true)
   assert.equal(r.distText, buildArtifact(text))
+})
+
+// 照合を実行できない・結果を解釈できない場合は、検査を省略して通さずに止める（fail-closed）。
+// 照合ヘルパーを差し替えて（verifyTokenParity の helperPath / execPath、CLI の --token-diff）確かめる。
+// 正常終了で一致を示す出力は `{"results":[{"ok":true}]}` の形だけで、それ以外はすべて中止になる。
+const helperDir = mkdtempSync(join(tmpdir(), 'build-workflow-helper-'))
+after(() => rmSync(helperDir, { recursive: true, force: true }))
+// 標準入力を読み切ってから body を実行する照合ヘルパー（読まずに終了すると EPIPE で原因が変わる）
+const writeHelper = (name, body) => {
+  const path = join(helperDir, name)
+  writeFileSync(path, `process.stdin.resume()\nprocess.stdin.on('data', () => {})\nprocess.stdin.on('end', () => { ${body} })\n`)
+  return path
+}
+const GOOD_SRC = `${META_HEADER}const s = " / a  +  b "\n`
+const UNREADABLE = /トークン照合の結果を解釈できない/
+const BAD_HELPERS = {
+  '終了コード 3 で終わる': { path: writeHelper('exit3.cjs', 'process.exit(3)'), message: /トークン照合を実行できない.*status 3/s },
+  '存在しないパス': { path: join(helperDir, 'no-such-helper.cjs'), message: /トークン照合を実行できない/ },
+  '終了コード 0 で出力が空': { path: writeHelper('empty.cjs', ''), message: UNREADABLE },
+  '終了コード 0 で出力が JSON でない': { path: writeHelper('garbage.cjs', "process.stdout.write('not json')"), message: UNREADABLE },
+  '終了コード 0 で出力が途中で切れた JSON': { path: writeHelper('truncated.cjs', `process.stdout.write('{"results":[{"ok":tr')`), message: UNREADABLE },
+  '終了コード 0 で出力が {}': { path: writeHelper('object.cjs', "process.stdout.write('{}')"), message: UNREADABLE },
+  '終了コード 0 で出力が null': { path: writeHelper('null.cjs', "process.stdout.write('null')"), message: UNREADABLE },
+  '終了コード 0 で results が空配列': { path: writeHelper('empty-results.cjs', `process.stdout.write('{"results":[]}')`), message: UNREADABLE },
+  '終了コード 0 で results が 2 件': {
+    path: writeHelper('two-results.cjs', `process.stdout.write('{"results":[{"ok":true},{"ok":true}]}')`),
+    message: UNREADABLE,
+  },
+  '終了コード 0 で ok が真偽値でない': { path: writeHelper('ok-string.cjs', `process.stdout.write('{"results":[{"ok":"true"}]}')`), message: UNREADABLE },
+  '終了コード 0 で ok が無い': { path: writeHelper('no-ok.cjs', `process.stdout.write('{"results":[{}]}')`), message: UNREADABLE },
+  '終了コード 0 で不一致を報告': {
+    path: writeHelper('mismatch.cjs', `process.stdout.write('{"results":[{"ok":false,"detail":"差あり"}]}')`),
+    message: /トークン列が開発ファイルと一致しない: 差あり/,
+  },
+}
+const GOOD_HELPER = writeHelper('ok.cjs', `process.stdout.write('{"results":[{"ok":true,"detail":"x"}]}')`)
+
+test('verifyTokenParity: 照合ヘルパーが一致を示す出力を返せば通る（差し替え機構の正常系）', () => {
+  assert.doesNotThrow(() => verifyTokenParity(GOOD_SRC, buildArtifact(GOOD_SRC), { helperPath: GOOD_HELPER }))
+})
+
+for (const [name, { path, message }] of Object.entries(BAD_HELPERS)) {
+  test(`verifyTokenParity: 照合ヘルパーが${name}と throw し、通過扱いにしない`, () => {
+    assert.throws(() => verifyTokenParity(GOOD_SRC, buildArtifact(GOOD_SRC), { helperPath: path }), message)
+  })
+
+  test(`ビルド CLI: 照合ヘルパーが${name}と非ゼロで終わり、生成ファイルを書かない`, () => {
+    const r = runBuilder(GOOD_SRC, ['--token-diff', path])
+    assert.notEqual(r.status, 0, `ビルドが成功してしまった: ${r.stdout}`)
+    assert.equal(r.written, false, '照合を実行できないのに生成ファイルが書かれた')
+    assert.match(r.stderr, /ビルド中止/)
+    assert.match(r.stderr, message)
+  })
+}
+
+test('verifyTokenParity: 実行ファイル（node）が存在しないと throw する', () => {
+  assert.throws(
+    () => verifyTokenParity(GOOD_SRC, buildArtifact(GOOD_SRC), { execPath: join(helperDir, 'no-such-node') }),
+    /トークン照合を実行できない.*ENOENT/s,
+  )
+})
+
+test('ビルド CLI: --check でも照合ヘルパーが失敗すれば非ゼロで終わる（鮮度比較へ進まない）', () => {
+  const r = runBuilder(GOOD_SRC, ['--check', '--token-diff', BAD_HELPERS['終了コード 3 で終わる'].path])
+  assert.notEqual(r.status, 0)
+  assert.match(r.stderr, /トークン照合を実行できない/)
+  assert.doesNotMatch(r.stdout, /鮮度 ok/)
 })
 
 // ---------------------------------------------------------------------------
