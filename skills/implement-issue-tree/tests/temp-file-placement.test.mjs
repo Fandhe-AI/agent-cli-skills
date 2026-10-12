@@ -120,7 +120,7 @@ test('measureResidualBytesOnce: プロンプトは TEMP_FILE_POLICY と UNTRUSTE
   // 旧実装の一時ファイル経路（tf 変数・.lines・mktemp・rm）がプロンプト生成に残っていない
   assert.doesNotMatch(body, /\btf\b|\.lines|mktemp|\brm\b|tmpFile/)
   // 件数照合は classifyResidualByteReport（下の count 照合テスト）が担う。ここでは封筒の照合を通すこと
-  assert.match(body, /verifySignedOutput\(v, tmpNonce\)/)
+  assert.match(body, /verifySignedOutput\(v, tmpNonce, /)
 })
 
 test('measureFreeDiskKib: プロンプトは TEMP_FILE_POLICY と UNTRUSTED_POLICY を含み、一時ファイルを作らせず、1 回の Bash 呼び出しで実行させる', () => {
@@ -129,7 +129,7 @@ test('measureFreeDiskKib: プロンプトは TEMP_FILE_POLICY と UNTRUSTED_POLI
   assert.match(body, /UNTRUSTED_POLICY/)
   assert.match(body, /1 回の Bash 呼び出しで実行/)
   assert.doesNotMatch(body, /\btf\b|\.line\b|mktemp|\brm\b|tmpFile/)
-  assert.match(body, /verifySignedOutput\(v, tmpNonce\)/)
+  assert.match(body, /verifySignedOutput\(v, tmpNonce, /)
 })
 
 test('測定スクリプトと launcher は一時ファイルを作らず、ファイルを削除せず、/dev/null と標準エラー以外へリダイレクトしない', () => {

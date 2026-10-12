@@ -17,7 +17,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { availableBashes, expectedSha256, toolExists } from './lib/signed-output.mjs'
+import { availableBashes, expectedSha256, inputSha256, toolExists } from './lib/signed-output.mjs'
 
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
 const RESIDUAL = join(SCRIPTS, 'measure-residual-bytes.sh')
@@ -87,23 +87,24 @@ for (const bash of BASHES) {
       const r = run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n${b}\n${gone}\n` })
       const env = parseEnvelope(r)
       assert.equal(env.nonce, NONCE)
-      assert.deepEqual(env.payload, { count: 3, err: 0, kib: duKib(a) + duKib(b), missing: 1 })
+      // inputSha256 は標準入力のパス列（末尾の改行 1 つを除く）の SHA-256。ホストが送った列から再計算して照合する
+      assert.deepEqual(env.payload, { count: 3, err: 0, inputSha256: inputSha256(`${a}\n${b}\n${gone}`), kib: duKib(a) + duKib(b), missing: 1 })
       assert.equal(env.sha256, expectedSha256(NONCE, env.payload))
       // payload のキー順は昇順（ホストの canonicalJson と同じ正規形）
-      assert.match(r.stdout, /"payload":\{"count":\d+,"err":\d+,"kib":\d+,"missing":\d+\}/)
+      assert.match(r.stdout, /"payload":\{"count":\d+,"err":\d+,"inputSha256":"[0-9a-f]{64}","kib":\d+,"missing":\d+\}/)
     })
   })
 
   test(`${tag} residual: 0 件は count=0・err=0・kib=0 の正常な封筒（取得失敗とは err で区別する）`, () => {
     const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: '' }))
-    assert.deepEqual(env.payload, { count: 0, err: 0, kib: 0, missing: 0 })
+    assert.deepEqual(env.payload, { count: 0, err: 0, inputSha256: inputSha256(''), kib: 0, missing: 0 })
   })
 
   test(`${tag} residual: 末尾の改行が無い最終行も 1 件として処理する`, () => {
     withWork((work) => {
       const a = mkTree(work, 'wt-a')
       const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: a }))
-      assert.deepEqual(env.payload, { count: 1, err: 0, kib: duKib(a), missing: 0 })
+      assert.deepEqual(env.payload, { count: 1, err: 0, inputSha256: inputSha256(a), kib: duKib(a), missing: 0 })
     })
   })
 
@@ -136,7 +137,7 @@ for (const bash of BASHES) {
       ]
       const r = run(bash, RESIDUAL, ['--nonce', NONCE], { input: [good, ...bad].join('\n') + '\n' })
       const env = parseEnvelope(r)
-      assert.deepEqual(env.payload, { count: 1 + bad.length, err: bad.length, kib: duKib(good), missing: 0 })
+      assert.deepEqual(env.payload, { count: 1 + bad.length, err: bad.length, inputSha256: inputSha256([good, ...bad].join('\n')), kib: duKib(good), missing: 0 })
       assert.equal(existsSync(marker), false, '入力がシェルに再評価されていない')
     })
   })
@@ -151,7 +152,7 @@ for (const bash of BASHES) {
       try {
         const r = run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n${b}\n`, env: { PATH: `${bin}:${process.env.PATH}` } })
         const env = parseEnvelope(r)
-        assert.deepEqual(env.payload, { count: 2, err: 1, kib: duKib(b), missing: 0 })
+        assert.deepEqual(env.payload, { count: 2, err: 1, inputSha256: inputSha256(`${a}\n${b}`), kib: duKib(b), missing: 0 })
       } finally {
         rmSync(bin, { recursive: true, force: true })
       }
@@ -165,7 +166,7 @@ for (const bash of BASHES) {
         const bin = fakeBin({ du: body })
         try {
           const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n`, env: { PATH: `${bin}:${process.env.PATH}` } }))
-          assert.deepEqual(env.payload, { count: 1, err: 1, kib: 0, missing: 0 }, body)
+          assert.deepEqual(env.payload, { count: 1, err: 1, inputSha256: inputSha256(a), kib: 0, missing: 0 }, body)
         } finally {
           rmSync(bin, { recursive: true, force: true })
         }
@@ -179,7 +180,121 @@ for (const bash of BASHES) {
       const lines = []
       for (let i = 0; i < 400; i++) lines.push(i % 4 === 3 ? join(work, `gone-${i}`) : base)
       const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: lines.join('\n') + '\n' }))
-      assert.deepEqual(env.payload, { count: 400, err: 0, kib: duKib(base) * 300, missing: 100 })
+      assert.deepEqual(env.payload, { count: 400, err: 0, inputSha256: inputSha256(lines.join('\n')), kib: duKib(base) * 300, missing: 100 })
+    })
+  })
+
+
+  // --- 数値の解釈（先頭ゼロを 8 進と読まない・算術エラーで err:0 のまま出力しない） ---
+
+  test(`${tag} residual: du の出力が先頭ゼロ（08・0600）でも 10 進として合算する（8 進解釈・算術エラーにしない）`, () => {
+    withWork((work) => {
+      const a = mkTree(work, 'wt-a')
+      for (const [out, kib] of [['08', 8], ['0600', 600], ['007', 7], ['0', 0]]) {
+        const bin = fakeBin({ du: `printf '${out}\\t%s\\n' "$3"` })
+        try {
+          const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n`, env: { PATH: `${bin}:${process.env.PATH}` } }))
+          assert.deepEqual(env.payload, { count: 1, err: 0, inputSha256: inputSha256(a), kib, missing: 0 }, out)
+        } finally {
+          rmSync(bin, { recursive: true, force: true })
+        }
+      }
+    })
+  })
+
+  test(`${tag} residual: 桁あふれする du の出力は err（算術がラップして誤った値を err:0 で出さない）`, () => {
+    withWork((work) => {
+      const a = mkTree(work, 'wt-a')
+      for (const out of ['99999999999999999999', '9223372036854775808', '18446744073709551617']) {
+        const bin = fakeBin({ du: `printf '${out}\\t%s\\n' "$3"` })
+        try {
+          const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n`, env: { PATH: `${bin}:${process.env.PATH}` } }))
+          assert.equal(env.payload.err, 1, out)
+          assert.equal(env.payload.kib, 0, out)
+        } finally {
+          rmSync(bin, { recursive: true, force: true })
+        }
+      }
+    })
+  })
+
+  test(`${tag} free-disk: Available が先頭ゼロ（08・0600）でも 10 進の整数として返す`, () => {
+    withWork((work) => {
+      for (const [avail, free] of [['08', 8], ['0600', 600], ['000', 0]]) {
+        const bin = fakeBin({ df: `echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/x 1000 400 ${avail} 40% /"` })
+        try {
+          const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work], { env: { PATH: `${bin}:${process.env.PATH}` } }))
+          assert.deepEqual(env.payload, { err: 0, freeKib: free, inputSha256: inputSha256(work) }, avail)
+        } finally {
+          rmSync(bin, { recursive: true, force: true })
+        }
+      }
+    })
+  })
+
+  test(`${tag} free-disk: 桁あふれする Available は err`, () => {
+    withWork((work) => {
+      const bin = fakeBin({ df: 'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/x 1 1 99999999999999999999 40% /"' })
+      try {
+        const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work], { env: { PATH: `${bin}:${process.env.PATH}` } }))
+        assert.deepEqual(env.payload, { err: 1, freeKib: 0, inputSha256: inputSha256(work) })
+      } finally {
+        rmSync(bin, { recursive: true, force: true })
+      }
+    })
+  })
+
+  // --- S1: df の単位 ---
+
+  test(`${tag} free-disk: POSIXLY_CORRECT が設定されていても 1024 バイト単位で測る（busybox の df は -k を無視して 512 バイト単位になる）`, () => {
+    withWork((work) => {
+      // busybox を模す: POSIXLY_CORRECT が設定されているとヘッダが 512-blocks になり、値も 2 倍になる
+      const bin = fakeBin({
+        df: `if env | grep -q "^POSIXLY_CORRECT="; then echo "Filesystem 512-blocks Used Available Capacity Mounted on"; echo "/dev/x 2000 800 1200 40% /"; else echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/x 1000 400 600 40% /"; fi`,
+      })
+      try {
+        const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work], { env: { PATH: `${bin}:${process.env.PATH}`, POSIXLY_CORRECT: '1' } }))
+        assert.deepEqual(env.payload, { err: 0, freeKib: 600, inputSha256: inputSha256(work) })
+      } finally {
+        rmSync(bin, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test(`${tag} free-disk: ヘッダが 1024-blocks でなければ（単位を確かめられなければ）err`, () => {
+    withWork((work) => {
+      for (const header of ['Filesystem 512-blocks Used Available Capacity Mounted on', 'Filesystem Size Used Avail Use% Mounted on', 'Filesystem 1M-blocks Used Available Capacity Mounted on']) {
+        const bin = fakeBin({ df: `echo "${header}"; echo "/dev/x 1000 400 600 40% /"` })
+        try {
+          const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work], { env: { PATH: `${bin}:${process.env.PATH}` } }))
+          assert.deepEqual(env.payload, { err: 1, freeKib: 0, inputSha256: inputSha256(work) }, header)
+        } finally {
+          rmSync(bin, { recursive: true, force: true })
+        }
+      }
+    })
+  })
+
+  test(`${tag} free-disk: デバイス名に空白があっても Available を取り違えない（Capacity 列を基準に数える）`, () => {
+    withWork((work) => {
+      const bin = fakeBin({ df: 'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "map auto_home 1000 400 600 40% /System/Volumes/Data/home"' })
+      try {
+        const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work], { env: { PATH: `${bin}:${process.env.PATH}` } }))
+        assert.deepEqual(env.payload, { err: 0, freeKib: 600, inputSha256: inputSha256(work) })
+      } finally {
+        rmSync(bin, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test(`${tag} du: POSIXLY_CORRECT・BLOCKSIZE 系の環境変数が設定されていても kib は変わらない（-k を明示している）`, () => {
+    withWork((work) => {
+      const a = mkTree(work, 'wt-a', 64)
+      const env0 = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n` }))
+      for (const e of [{ POSIXLY_CORRECT: '1' }, { BLOCKSIZE: '512' }, { BLOCK_SIZE: '1M' }, { DU_BLOCK_SIZE: '1M' }]) {
+        const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n`, env: e }))
+        assert.deepEqual(env.payload, env0.payload, JSON.stringify(e))
+      }
     })
   })
 
@@ -212,7 +327,8 @@ for (const bash of BASHES) {
       const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work]))
       assert.equal(env.payload.err, 0)
       assert.ok(Number.isInteger(env.payload.freeKib) && env.payload.freeKib > 0, JSON.stringify(env.payload))
-      assert.deepEqual(Object.keys(env.payload), ['err', 'freeKib'])
+      assert.deepEqual(Object.keys(env.payload), ['err', 'freeKib', 'inputSha256'])
+      assert.equal(env.payload.inputSha256, inputSha256(work), '対象パスを束縛する')
       assert.equal(env.sha256, expectedSha256(NONCE, env.payload))
       // 本物の df と同じ桁であること（実行間の変動は許容: 1 GiB 以内）
       const df = spawnSync('df', ['-Pk', '--', work], { encoding: 'utf8' }).stdout.split('\n')[1].trim().split(/\s+/)
@@ -225,7 +341,7 @@ for (const bash of BASHES) {
       const bin = fakeBin({ df: 'echo "Filesystem 1024-blocks Used Available Capacity Mounted"; echo "/dev/x 1000000 400000 600000 40% /"' })
       try {
         const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work], { env: { PATH: `${bin}:${process.env.PATH}` } }))
-        assert.deepEqual(env.payload, { err: 0, freeKib: 600000 })
+        assert.deepEqual(env.payload, { err: 0, freeKib: 600000, inputSha256: inputSha256(work) })
       } finally {
         rmSync(bin, { recursive: true, force: true })
       }
@@ -235,20 +351,20 @@ for (const bash of BASHES) {
   test(`${tag} free-disk: 取得失敗は err=1・freeKib=0（空き 0 KiB の実測とは err で区別できる）`, () => {
     withWork((work) => {
       // df の非 0 終了 / 出力が 1 行だけ / 第 4 列が数値でない
-      for (const body of ['exit 1', 'echo header-only', 'echo hdr; echo "/dev/x 1 2 abc 4% /"', 'exit 0']) {
+      for (const body of ['exit 1', 'echo header-only', 'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/x 1 2 abc 4% /"', 'exit 0']) {
         const bin = fakeBin({ df: body })
         try {
           const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work], { env: { PATH: `${bin}:${process.env.PATH}` } }))
-          assert.deepEqual(env.payload, { err: 1, freeKib: 0 }, body)
+          assert.deepEqual(env.payload, { err: 1, freeKib: 0, inputSha256: inputSha256(work) }, body)
         } finally {
           rmSync(bin, { recursive: true, force: true })
         }
       }
       // 空き 0 の実測は err=0・freeKib=0
-      const bin = fakeBin({ df: 'echo hdr; echo "/dev/x 1 1 0 100% /"' })
+      const bin = fakeBin({ df: 'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/x 1 1 0 100% /"' })
       try {
         const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work], { env: { PATH: `${bin}:${process.env.PATH}` } }))
-        assert.deepEqual(env.payload, { err: 0, freeKib: 0 })
+        assert.deepEqual(env.payload, { err: 0, freeKib: 0, inputSha256: inputSha256(work) })
       } finally {
         rmSync(bin, { recursive: true, force: true })
       }
@@ -260,7 +376,7 @@ for (const bash of BASHES) {
       const marker = join(work, 'PWNED')
       for (const p of [join(work, 'none'), `/tmp/$(touch ${marker})`, '/tmp/a;b', 'relative', '/tmp/../etc', '/']) {
         const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', p]))
-        assert.deepEqual(env.payload, { err: 1, freeKib: 0 }, p)
+        assert.deepEqual(env.payload, { err: 1, freeKib: 0, inputSha256: inputSha256(p) }, p)
       }
       assert.equal(existsSync(marker), false)
     })
@@ -277,7 +393,7 @@ for (const bash of BASHES) {
   test(`${tag} free-disk: パスが -- の後ろにあれば先頭が - でも引数として解釈されない`, () => {
     // 先頭が - のパスは許可文字集合外（絶対パスでない）として err=1 になるだけで、df のオプションにならない
     const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', '-h']))
-    assert.deepEqual(env.payload, { err: 1, freeKib: 0 })
+    assert.deepEqual(env.payload, { err: 1, freeKib: 0, inputSha256: inputSha256('-h') })
   })
 }
 

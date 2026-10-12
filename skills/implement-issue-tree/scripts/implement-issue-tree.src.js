@@ -328,8 +328,11 @@ function capText(str, max = 2000) {
 }
 
 // 未信頼データ埋め込み用のデータ境界マーカートークン。固定文字列だと境界偽装できるため
-// 呼び出しごとに予測不能な値にする。Workflow harness は乱数・時刻 API を提供しないが、
-// /dev/urandom 由来の seed で予測不能性と resume 再現性を両立する。
+// 呼び出しごとに予測不能な値にする。Workflow harness は乱数・時刻 API を提供しないため、
+// /dev/urandom 由来の seed（ランごとに seed エージェントで取得し、ラン間では永続化しない）を内容に
+// 混ぜて導出する。トークンは seed と内容だけで決まるので、seed エージェントの結果が再生される resume
+// でのみ同じトークンが再現する（新規ランは別の seed になる）。注意: 内容が同じ呼び出しは同じトークンに
+// なる。呼び出しごとに一意であるべき用途（測定スクリプトの nonce など）は、呼び出し連番を内容に含めること。
 let boundaryNonceSeed = ''
 
 // nonce:seed エージェントの返却スキーマ。厳密な 64 桁 hex のみを受理する
@@ -2799,10 +2802,13 @@ const ORPHAN_COUNT_SCHEMA = {
 //   count: スクリプトが処理した行数。ホストは送った対象パス数との一致を検証する（Issue #497: 入力の
 //        取り違え・空展開で 0 件や別集合を読んでも ERR=0 の正常終了に化けて容量ゲートを素通りする
 //        fail-open を、件数照合で塞ぐ）
+//   inputSha256: スクリプトが読んだ標準入力の SHA-256。件数が同じでパスだけ違う入力（過小な値）を、ホストが
+//        自分の送ったパス列から再計算した値との照合で拒否する（verifySignedOutput。Issue #603）
 const ORPHAN_BYTES_SCHEMA = {
   type: 'object',
-  required: ['kib', 'err', 'missing', 'count'],
+  required: ['kib', 'err', 'missing', 'count', 'inputSha256'],
   properties: {
+    inputSha256: { type: 'string', description: '標準入力の SHA-256（ホストが送ったパス列と照合する）' },
     kib: { type: 'integer', minimum: 0, description: 'du -sk 第1列の合計（KiB）' },
     err: { type: 'integer', minimum: 0, description: '測定失敗の件数（0 以外は失敗）' },
     missing: { type: 'integer', minimum: 0, description: '測定時点で存在しなかったパスの件数' },
@@ -3691,9 +3697,10 @@ function isValidBranchName(b) {
 // （scripts/measure-*.sh）が行う。エージェントは run-verified.sh 経由のコマンドを 1 回実行し、標準出力の
 // 1 行 JSON（封筒 = nonce・payload・sha256）を StructuredOutput へ転記するだけにする。ホストは封筒を再計算して
 // 照合し（verifySignedOutput）、通ったときだけ payload を使う。
-// 検出できるのは、転記ミス・別の呼び出しの出力の流用・スクリプトを実行せず自己流で進めた（sha256 を
-// 合わせられない）こと。検出できないのは、sha256sum を自分で回せる悪意あるエージェントによる捏造
-// （nonce と payload が手元にあれば封筒は作れる）。したがって封筒の値は「測定値の転記が正しかった」ことの
+// 検出できるのは、転記ミス・別の呼び出しの出力の流用（nonce）・送った入力と違うものを測ったこと
+// （payload.inputSha256）・値を推測で作って sha256 を合わせなかったこと。検出できないのは、sha256sum を
+// 自分で回せる悪意あるエージェントによる捏造と、コマンドを組み直して別の launcher・スクリプトを実行すること
+// （nonce と入力はホストがプロンプトに書くので封筒は作れる）。したがって封筒の値は「測定値の転記が正しかった」ことの
 // 確認であり、マージ・push・削除の可否には一切使わない（用途は新規着手の抑止と次回ラン開始時の予約見積りの
 // 下限だけ。偽の小さい値は着手を許し得るが、損なうのはローカルのディスク保護で、悪意ある偽装への防御は
 // 目的外）。信頼モデルの全文は references/script-trust-model.md。
@@ -3732,17 +3739,21 @@ const SIGNED_OUTPUT_INSTRUCTION =
   '非 0 終了や JSON が無いときは、他の方法で測り直さず、値を作らずに失敗として報告する。'
 
 // 封筒 { nonce, payload, sha256 } の照合（純粋関数）。sha256 の入力は「nonce + 改行 + payload の正規形」で、
-// scripts/lib/signed-output.sh の so_emit と同じ定義（正規形は canonicalJson = jq -cS 相当。payload は整数と
-// ASCII の固定文字列だけ）。返り値は { ok: true, payload } か { ok: false, reason }。reason は
-// missing（封筒の形が不完全）・nonce（呼び出しに結び付かない）・sha256（転記ミス・未実行）。いずれも
+// scripts/lib/signed-output.sh の so_emit と同じ定義（正規形は canonicalJson = jq -cS 相当。payload は
+// 整数と ASCII の固定文字列だけ）。inputSha256 を渡すと、payload.inputSha256（スクリプトが読んだ入力の
+// SHA-256）がホストの送った入力から再計算した値と一致することも要求する。コマンド中のパスを書き換えて
+// 実行した出力は、スクリプトが正しく計算した封筒でも別の入力の値になり、ここで拒否される。
+// 返り値は { ok: true, payload } か { ok: false, reason }。reason は missing（封筒の形が不完全）・
+// nonce（呼び出しに結び付かない）・sha256（転記ミス・未実行）・input（別の入力を測った）。いずれも
 // 呼び出し側は転記失敗として扱い、有界に再測定してよい
-function verifySignedOutput(raw, nonce) {
+function verifySignedOutput(raw, nonce, inputSha256) {
   const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x)
   if (!isObj(raw) || !isObj(raw.payload) || typeof raw.sha256 !== 'string' || typeof raw.nonce !== 'string') {
     return { ok: false, reason: 'missing' }
   }
   if (raw.nonce !== nonce) return { ok: false, reason: 'nonce' }
   if (sha256Hex(`${nonce}\n${canonicalJson(raw.payload)}`) !== raw.sha256) return { ok: false, reason: 'sha256' }
+  if (inputSha256 !== undefined && raw.payload.inputSha256 !== inputSha256) return { ok: false, reason: 'input' }
   return { ok: true, payload: raw.payload }
 }
 
@@ -3812,7 +3823,8 @@ async function measureResidualBytesOnce(sanitizedPaths, model) {
   } catch (e) {
     return { thrown: e }
   }
-  const signed = verifySignedOutput(v, tmpNonce)
+  // 封筒が束縛する入力 = ホストが送ったパス列。コマンドを書き換えて別のパスを測った出力はここで落ちる
+  const signed = verifySignedOutput(v, tmpNonce, sha256Hex(pathLines))
   return signed.ok ? { report: signed.payload } : { report: null, envelope: signed.reason }
 }
 
@@ -3849,8 +3861,8 @@ async function measureResidualWorktreeBytesDetailed(paths) {
           log(`⚠️ 残置 worktree ディスク使用量測定の agent 呼び出しが例外を投げた（${once.thrown?.message ?? once.thrown}）`)
         } else if (r.reason === 'output-missing') {
           log(
-            once.envelope === 'nonce' || once.envelope === 'sha256'
-              ? `⚠️ 残置 worktree ディスク使用量測定の出力封筒の照合に失敗した（${once.envelope} 不一致。転記ミスまたはスクリプト未実行の疑い）`
+            once.envelope === 'nonce' || once.envelope === 'sha256' || once.envelope === 'input'
+              ? `⚠️ 残置 worktree ディスク使用量測定の出力封筒の照合に失敗した（${once.envelope} 不一致。転記ミス・スクリプト未実行・別のパスを測った疑い）`
               : '⚠️ 残置 worktree ディスク使用量測定の結果が欠落または不完全（StructuredOutput 欠落・スクリプトの起動失敗の疑い）',
           )
         } else {
@@ -3930,8 +3942,9 @@ async function measureMainWorktreeContentBytes(mainPath, entries) {
 // （成功時 0）。ホストは err === 0 のみ測定成功として受理する。
 const DISK_FREE_SCHEMA = {
   type: 'object',
-  required: ['freeKib', 'err'],
+  required: ['freeKib', 'err', 'inputSha256'],
   properties: {
+    inputSha256: { type: 'string', description: '対象パスの SHA-256（ホストが送ったパスと照合する）' },
     freeKib: { type: 'integer', minimum: 0, description: 'df -Pk の Available 列（KiB）' },
     err: { type: 'integer', minimum: 0, description: '測定失敗なら 1（成功時 0）' },
   },
@@ -3942,6 +3955,7 @@ const DISK_FREE_SCHEMA = {
 // null を返す（呼び出し側は fail-closed へ倒す）。err!==0・出力欠落・agent 例外は転記失敗と df 失敗を
 // 区別できない／一過性のエージェント失敗のため 1 回だけ別エージェント（sonnet）で再測定する（Issue #566）。df の POSIX 出力は 2 行目の第4列
 // （Available、KiB）を抽出する。
+let freeDiskMeasureCallSeq = 0
 async function measureFreeDiskKib(path) {
   const sanitized = sanitizeWorktreePath(typeof path === 'string' ? path : '')
   if (sanitized === '') {
@@ -3949,8 +3963,11 @@ async function measureFreeDiskKib(path) {
     return null
   }
   try {
+    // 呼び出しごとに連番を進める。keyMaterial が内容だけだと同じパスの測定は毎回同じ nonce になり、
+    // 前回の封筒を実行せず流用しても受理される（PR #611 codex P1）
+    freeDiskMeasureCallSeq += 1
     for (let attempt = 0; attempt <= 1; attempt += 1) {
-      const tmpNonce = boundaryNonce(`free-disk-tmp:${attempt}:${sanitized}`)
+      const tmpNonce = boundaryNonce(`free-disk-tmp:${freeDiskMeasureCallSeq}:${attempt}:${sanitized}`)
       // コマンドの組み立て（skillDir 未指定の例外を含む）は agent() の外で行い、決定的な失敗を一過性の
       // エージェント失敗と取り違えない（外側 catch の null = fail-closed へ進む）
       const command = scriptInvocation('measure-free-disk.sh', tmpNonce, ` -- '${sanitized}'`)
@@ -3980,7 +3997,7 @@ async function measureFreeDiskKib(path) {
         log(`⚠️ 実ディスク空き容量測定の agent 呼び出しが例外を投げた（${e?.message ?? e}）`)
       }
       // 封筒（nonce・sha256）の照合に通らない転記は失敗扱いにして再測定へ合流させる
-      const signed = verifySignedOutput(v, tmpNonce)
+      const signed = verifySignedOutput(v, tmpNonce, sha256Hex(sanitized))
       if (!signed.ok && v !== null && v !== undefined) log(`⚠️ 実ディスク空き容量測定の出力封筒の照合に失敗した（${signed.reason}）`)
       v = signed.ok ? signed.payload : null
       if (Number.isInteger(v?.err) && v.err === 0 && Number.isInteger(v?.freeKib) && v.freeKib >= 0) {

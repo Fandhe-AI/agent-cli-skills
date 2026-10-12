@@ -88,7 +88,7 @@ test('projectFreeDiskReserveBytes: PR #468 P0 指摘の具体例（実行中タ�
 })
 
 test('DISK_FREE_SCHEMA: freeKib・err の両方を必須とする（部分値の受理を防ぐ契約の固定）', () => {
-  assert.deepEqual(DISK_FREE_SCHEMA.required, ['freeKib', 'err'])
+  assert.deepEqual(DISK_FREE_SCHEMA.required, ['freeKib', 'err', 'inputSha256'])
   assert.equal(DISK_FREE_SCHEMA.properties.freeKib.type, 'integer')
   assert.equal(DISK_FREE_SCHEMA.properties.freeKib.minimum, 0)
   assert.equal(DISK_FREE_SCHEMA.properties.err.type, 'integer')

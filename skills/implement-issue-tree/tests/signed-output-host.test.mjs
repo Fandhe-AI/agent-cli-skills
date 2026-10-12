@@ -217,11 +217,11 @@ test('free-disk: err=1 の封筒（df 失敗の正直な報告）は freeKib を
 
 // プロンプトの ```sh フェンスのコマンドを実際に実行し、標準出力の 1 行 JSON を StructuredOutput として返す
 // （エージェントがコマンドを実行して転記した結果を模す）。開発ファイルの目印は実スクリプトのハッシュに置換する
-function runningAgent(onResult) {
+function runningAgent(onResult, mutateCommand = (c) => c) {
   return (prompt) => {
     const fence = /```sh\n([\s\S]*?)\n```/.exec(prompt)
     assert.ok(fence, 'プロンプトに ```sh フェンスのコマンドがある')
-    const command = fence[1].replace(/@@SCRIPT_SHA256:([a-z0-9.-]+\.sh)@@/g, (_m, name) => bundleSha256(join(SKILL_DIR, 'scripts'), name))
+    const command = mutateCommand(fence[1]).replace(/@@SCRIPT_SHA256:([a-z0-9.-]+\.sh)@@/g, (_m, name) => bundleSha256(join(SKILL_DIR, 'scripts'), name))
     const r = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
     assert.equal(r.status, 0, r.stderr)
     return onResult(JSON.parse(r.stdout))
@@ -276,6 +276,102 @@ test('結合: 期待ハッシュと合わないスクリプト（版ずれ）は
     })
     assert.equal(await measureResidualWorktreeBytesDetailed([d]), null)
     assert.equal(calls.length, 3)
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+})
+
+
+// --- B1: nonce は呼び出し・再試行ごとに一意（codex P1。同じパスの測定で nonce が変わらないと、1 回目の封筒を
+// 実行せず流用しても受理される） ---
+
+test('B1: free-disk の nonce は同じパスの測定ごと・再試行ごとに異なる', async () => {
+  const { calls } = stub(() => null) // 失敗させて再試行まで走らせる（1 測定 = 2 呼び出し）
+  await measureFreeDiskKib('/tmp/main-wt')
+  await measureFreeDiskKib('/tmp/main-wt')
+  const nonces = calls.map((c) => nonceOf(c.prompt))
+  assert.equal(nonces.length, 4)
+  assert.equal(new Set(nonces).size, 4, nonces.join(' '))
+})
+
+test('B1: free-disk で 1 回目の封筒を 2 回目の測定へ流用しても拒否される（実行せず流用した場合）', async () => {
+  let first = null
+  const { calls, logs } = stub((prompt, n) => (n === 1 ? (first = signedReply(prompt, { err: 0, freeKib: 4242 })) : first))
+  assert.equal(await measureFreeDiskKib('/tmp/main-wt'), 4242)
+  assert.equal(await measureFreeDiskKib('/tmp/main-wt'), null)
+  assert.equal(calls.length, 3)
+  assert.ok(logs.some((l) => l.includes('nonce')), logs.join('\n'))
+})
+
+test('B1 総点検: 残置バイト・空き容量・メイン worktree 相当サイズの測定が使う nonce は、呼び出し・再試行を通して全て一意', async () => {
+  const { calls } = stub(() => null) // 全測定を失敗させ、再試行を含めて最大回数まで呼ばせる
+  for (let i = 0; i < 3; i++) {
+    await measureResidualWorktreeBytesDetailed(PATHS)
+    await measureFreeDiskKib('/tmp/main-wt')
+    await measureResidualWorktreeBytesDetailed(['/tmp/main-wt']) // measureMainWorktreeContentBytes が使う単一パスの測定と同形
+  }
+  const nonces = calls.map((c) => nonceOf(c.prompt))
+  assert.equal(nonces.length, 3 * (3 + 2 + 3))
+  assert.ok(nonces.every((n) => n), '全呼び出しのコマンドに nonce がある')
+  assert.equal(new Set(nonces).size, nonces.length)
+})
+
+// --- S2: 封筒が入力（測定対象）を束縛する ---
+
+test('verifySignedOutput: 期待する入力 sha256 を渡すと payload.inputSha256 と照合し、違えば input', () => {
+  const withInput = (h) => makeEnvelope(NONCE, { ...PAYLOAD, inputSha256: h })
+  const h = 'a'.repeat(64)
+  assert.deepEqual(verifySignedOutput(withInput(h), NONCE, h), { ok: true, payload: { ...PAYLOAD, inputSha256: h } })
+  assert.deepEqual(verifySignedOutput(withInput('b'.repeat(64)), NONCE, h), { ok: false, reason: 'input' })
+  assert.deepEqual(verifySignedOutput(makeEnvelope(NONCE, PAYLOAD), NONCE, h), { ok: false, reason: 'input' }, 'inputSha256 が無い封筒')
+  assert.equal(verifySignedOutput(makeEnvelope(NONCE, PAYLOAD), NONCE).ok, true, '期待値を渡さなければ従来どおり')
+})
+
+test('S2: 件数は同じで別のパスを測った封筒（正しい nonce・正しい sha256）は input で拒否され、再測定しても続けば null', async () => {
+  const { calls, logs } = stub((prompt) => {
+    const nonce = nonceOf(prompt)
+    // 1 文字違いのパス列を測った正直な出力（過小な kib）。inputSha256 はその別入力の値になる
+    return makeEnvelope(nonce, { count: 3, err: 0, inputSha256: 'c'.repeat(64), kib: 1, missing: 3 })
+  })
+  assert.equal(await measureResidualWorktreeBytesDetailed(PATHS), null)
+  assert.equal(calls.length, 3)
+  assert.ok(logs.some((l) => l.includes('input')), logs.join('\n'))
+})
+
+test('S2 結合: エージェントがコマンド中のパスを 1 文字変えて実行した出力は、実スクリプトの正しい封筒でも拒否される', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'iit-e2e-'))
+  try {
+    const dirs = ['wt-one', 'wt-two'].map((n) => {
+      const d = join(work, n)
+      mkdirSync(d)
+      writeFileSync(join(d, 'f'), Buffer.alloc(40 * 1024, 2))
+      return d
+    })
+    const { calls } = stub(runningAgent((env) => env, (c) => c.replace('wt-one', 'wt-onx')))
+    assert.equal(await measureResidualWorktreeBytesDetailed(dirs), null)
+    assert.equal(calls.length, 3)
+    // 変えずに実行すれば受理される（束縛が正しい入力まで拒否していない）
+    stub(runningAgent((env) => env))
+    const r = await measureResidualWorktreeBytesDetailed(dirs)
+    assert.equal(r.missing, 0)
+    assert.ok(r.kib > 0)
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+})
+
+test('S2 結合: free-disk のパスを変えて実行した出力も拒否され、変えなければ受理される', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'iit-e2e-'))
+  try {
+    const d = join(work, 'main-wt')
+    mkdirSync(d)
+    mkdirSync(join(work, 'main-wx')) // 変えた先も実在する（err=1 の別の理由ではなく、入力の束縛だけで拒否されることを見る）
+    const { calls } = stub(runningAgent((env) => env, (c) => c.replace('main-wt', 'main-wx')))
+    assert.equal(await measureFreeDiskKib(d), null)
+    assert.equal(calls.length, 2)
+    stub(runningAgent((env) => env))
+    const free = await measureFreeDiskKib(d)
+    assert.ok(Number.isInteger(free) && free > 0)
   } finally {
     rmSync(work, { recursive: true, force: true })
   }

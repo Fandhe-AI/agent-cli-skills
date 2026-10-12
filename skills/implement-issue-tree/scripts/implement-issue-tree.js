@@ -330,6 +330,9 @@ return s.length>max?`${s.slice(0, max)}（省略）`:s
 
 
 
+
+
+
 let boundaryNonceSeed=''
 
 
@@ -2799,10 +2802,13 @@ description:'git worktree list --porcelain | grep -c \'^worktree \' の出力数
 
 
 
+
+
 const ORPHAN_BYTES_SCHEMA={
 type:'object',
-required:['kib','err','missing','count'],
+required:['kib','err','missing','count','inputSha256'],
 properties:{
+inputSha256:{type:'string',description:'標準入力の SHA-256（ホストが送ったパス列と照合する）'},
 kib:{type:'integer',minimum:0,description:'du -sk 第1列の合計（KiB）'},
 err:{type:'integer',minimum:0,description:'測定失敗の件数（0 以外は失敗）'},
 missing:{type:'integer',minimum:0,description:'測定時点で存在しなかったパスの件数'},
@@ -3699,9 +3705,10 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 
+
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'958ebaea8e00d9b10950bfcca6e18576126c7db0c4fa6e6c290f48675627a022',
-'measure-free-disk.sh':'ad579a8acdcb268890b0da857ff23e071d15707f4d5f2d7dbfd940dcc0bab839',
+'measure-residual-bytes.sh':'f0ac3399501b2fb501f6c1d9d7bee3875523169436be3976c398546b7558269e',
+'measure-free-disk.sh':'13aea5d9ef3fc787d7a333740bec814a5ffdcfa30b3a8e08c2ffb00127c66036',
 }
 
 
@@ -3736,13 +3743,17 @@ const SIGNED_OUTPUT_INSTRUCTION=
 
 
 
-function verifySignedOutput(raw,nonce){
+
+
+
+function verifySignedOutput(raw,nonce,inputSha256){
 const isObj=(x)=>x!==null&&typeof x==='object'&& !Array.isArray(x)
 if(!isObj(raw)|| !isObj(raw.payload)||typeof raw.sha256!=='string'||typeof raw.nonce!=='string'){
 return{ok:false,reason:'missing'}
 }
 if(raw.nonce!==nonce)return{ok:false,reason:'nonce'}
 if(sha256Hex(`${nonce}\n${canonicalJson(raw.payload)}`)!==raw.sha256)return{ok:false,reason:'sha256'}
+if(inputSha256!==undefined&&raw.payload.inputSha256!==inputSha256)return{ok:false,reason:'input'}
 return{ok:true,payload:raw.payload}
 }
 
@@ -3812,7 +3823,8 @@ schema:signedOutputSchema(ORPHAN_BYTES_SCHEMA),
 }catch(e){
 return{thrown:e}
 }
-const signed=verifySignedOutput(v,tmpNonce)
+
+const signed=verifySignedOutput(v,tmpNonce,sha256Hex(pathLines))
 return signed.ok?{report:signed.payload}:{report:null,envelope:signed.reason}
 }
 
@@ -3849,8 +3861,8 @@ if(r.reason==='exception'){
 log(`⚠️ 残置 worktree ディスク使用量測定の agent 呼び出しが例外を投げた（${once.thrown?.message ?? once.thrown}）`)
 }else if(r.reason==='output-missing'){
 log(
-once.envelope==='nonce'||once.envelope==='sha256'
-?`⚠️ 残置 worktree ディスク使用量測定の出力封筒の照合に失敗した（${once.envelope} 不一致。転記ミスまたはスクリプト未実行の疑い）`
+once.envelope==='nonce'||once.envelope==='sha256'||once.envelope==='input'
+?`⚠️ 残置 worktree ディスク使用量測定の出力封筒の照合に失敗した（${once.envelope} 不一致。転記ミス・スクリプト未実行・別のパスを測った疑い）`
 :'⚠️ 残置 worktree ディスク使用量測定の結果が欠落または不完全（StructuredOutput 欠落・スクリプトの起動失敗の疑い）',
 )
 }else{
@@ -3930,8 +3942,9 @@ return computeMainContentKib({totalKib,gitKib,nestedKib})
 
 const DISK_FREE_SCHEMA={
 type:'object',
-required:['freeKib','err'],
+required:['freeKib','err','inputSha256'],
 properties:{
+inputSha256:{type:'string',description:'対象パスの SHA-256（ホストが送ったパスと照合する）'},
 freeKib:{type:'integer',minimum:0,description:'df -Pk の Available 列（KiB）'},
 err:{type:'integer',minimum:0,description:'測定失敗なら 1（成功時 0）'},
 },
@@ -3942,6 +3955,7 @@ err:{type:'integer',minimum:0,description:'測定失敗なら 1（成功時 0）
 
 
 
+let freeDiskMeasureCallSeq=0
 async function measureFreeDiskKib(path){
 const sanitized=sanitizeWorktreePath(typeof path==='string'?path:'')
 if(sanitized===''){
@@ -3949,8 +3963,11 @@ log('⚠️ 実ディスク空き容量の測定: 許可文字集合外のパス
 return null
 }
 try{
+
+
+freeDiskMeasureCallSeq+=1
 for(let attempt=0;attempt<=1;attempt+=1){
-const tmpNonce=boundaryNonce(`free-disk-tmp:${attempt}:${sanitized}`)
+const tmpNonce=boundaryNonce(`free-disk-tmp:${freeDiskMeasureCallSeq}:${attempt}:${sanitized}`)
 
 
 const command=scriptInvocation('measure-free-disk.sh',tmpNonce,` -- '${sanitized}'`)
@@ -3980,7 +3997,7 @@ schema:signedOutputSchema(DISK_FREE_SCHEMA),
 log(`⚠️ 実ディスク空き容量測定の agent 呼び出しが例外を投げた（${e?.message ?? e}）`)
 }
 
-const signed=verifySignedOutput(v,tmpNonce)
+const signed=verifySignedOutput(v,tmpNonce,sha256Hex(sanitized))
 if(!signed.ok&&v!==null&&v!==undefined)log(`⚠️ 実ディスク空き容量測定の出力封筒の照合に失敗した（${signed.reason}）`)
 v=signed.ok?signed.payload:null
 if(Number.isInteger(v?.err)&&v.err===0&&Number.isInteger(v?.freeKib)&&v.freeKib>=0){

@@ -38,10 +38,27 @@ export function nonceOf(prompt) {
   return m ? m[1] : null
 }
 
+// プロンプトのコマンドが測定対象として束縛する入力。残置バイトは標準入力のヒアドキュメント本文（パスを
+// 改行で連結したもの）、空き容量は `-- '<path>'` の 1 件。無ければ null
+export function commandInputOf(prompt) {
+  const here = /<<'(PATHSEOF_[0-9a-z]+)'\n([\s\S]*?)\n\1\n/.exec(String(prompt))
+  if (here) return here[2]
+  const arg = /--nonce [0-9a-z]+ -- '([^']*)'\n/.exec(String(prompt))
+  return arg ? arg[1] : null
+}
+
+export function inputSha256(text) {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+// 正直なエージェント（コマンドをそのまま実行して転記した）の応答。スクリプトは入力の sha256 を payload の
+// inputSha256 に入れる（Issue #603 S2）ので、プロンプトのコマンドから同じ値を作って補う
 export function signedReply(prompt, payload) {
   const nonce = nonceOf(prompt)
   if (nonce === null) throw new Error('プロンプトに --nonce <nonce> のコマンドが無い')
-  return makeEnvelope(nonce, payload)
+  const input = commandInputOf(prompt)
+  const full = input !== null && !('inputSha256' in payload) ? { ...payload, inputSha256: inputSha256(input) } : payload
+  return makeEnvelope(nonce, full)
 }
 
 export function wrapAgentReply(prompt, value) {
