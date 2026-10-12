@@ -20,11 +20,18 @@
 //   lexer と同じ位置で `/` を誤読しても、src と生成物が「同じ誤読」で一致して通ってしまうことがない。
 //   どちらかがパースできなければ ok: false にする（変換前がパースできないなら検査できないので中止、
 //   変換後がパースできないなら生成物が壊れている）。tokenizer へフォールバックしない。
-//   オプション: ecmaVersion は latest、sourceType は module。Workflow ランタイムは先頭の `export const meta`
-//   を要求する ES モジュールとして読むので、script では読まない（script だと `export` でパースできない）。
-//   allowReturnOutsideFunction は必須: 実 src（implement-issue-tree.src.js）は Workflow スクリプトで、
-//   最上位に return を持つ。top-level await は module + ecmaVersion latest で既定で許可されるため
-//   allowAwaitOutsideFunction は不要（実 src が通る最小の組）。
+//   2 つのゴールで読み、**両方**で一致することを要求する:
+//   - module: 開発ファイルの書き方どおり（先頭が `export const meta`）。ecmaVersion は latest、
+//     allowReturnOutsideFunction は必須（実 src implement-issue-tree.src.js は Workflow スクリプトで最上位に
+//     return を持つ）。top-level await は module + ecmaVersion latest で既定で許可される
+//   - script: Workflow ランタイムが実際に評価する形。ランタイムは module ではなく、先頭の `export const meta`
+//     の `export ` を外した本体を関数本体（AsyncFunction）として評価する（tests/lib/workflow-script-contract.mjs
+//     の stripMetaExport と同じ規則: 行頭の `export const meta` だけ `const meta` に置き換える）。関数本体は
+//     script ゴールなので、`<!--` と行頭の `-->` が行末までのコメントになる（module では普通の演算子列）。
+//     module の parse だけだと `r = a <!-- b /*` の後のコードが消えて実行結果が変わっても、トークン列が
+//     同じに見えて通ってしまう。オプションは sourceType: script + allowReturnOutsideFunction +
+//     allowAwaitOutsideFunction（AsyncFunction の本体は最上位の return と await を許す）
+//   どちらかで変換前がパースできなければ source-unparsable、変換後がパースできなければ artifact-unparsable。
 //
 // mode: "tokenize"（テスト専用）
 //   acorn.tokenizer 単体のトークン列を比べる。tokenizer はパーサ文脈を持たないので `/` の読みはビルダーの
@@ -52,17 +59,25 @@ const tokenize = (code, sourceType) => {
   return { tokens, error: null }
 }
 
+// ランタイムが関数本体として評価する形にする（先頭の `export const meta` の `export ` を外す。
+// tests/lib/workflow-script-contract.mjs の stripMetaExport と同じ規則。一致しなければそのまま）
+const toRuntimeBody = (code) => code.replace(/^export const meta\b/, 'const meta')
+
+const PARSE_GOALS = {
+  module: { code: (c) => c, options: { sourceType: 'module', allowReturnOutsideFunction: true } },
+  script: {
+    code: toRuntimeBody,
+    options: { sourceType: 'script', allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true },
+  },
+}
+
 // parser: パーサ文脈つきのトークン列。パースできなければ error にメッセージ（例外までのトークンは使わない）
-const parseTokens = (code) => {
+const parseTokens = (original, goal) => {
+  const { code: toCode, options } = PARSE_GOALS[goal]
+  const code = toCode(original)
   const tokens = []
   try {
-    acorn.parse(code, {
-      ecmaVersion: 'latest',
-      sourceType: 'module',
-      allowReturnOutsideFunction: true,
-      locations: true,
-      onToken: (t) => tokens.push(entry(t, code)),
-    })
+    acorn.parse(code, { ecmaVersion: 'latest', locations: true, ...options, onToken: (t) => tokens.push(entry(t, code)) })
   } catch (e) {
     return { tokens: [], error: e.message }
   }
@@ -114,13 +129,22 @@ const compareTokenize = ({ name, before, after, lenient = false }) => {
 }
 
 const compareParse = ({ name, before, after }) => {
-  const a = parseTokens(before)
-  if (a.error) return { name, ok: false, kind: 'source-unparsable', detail: `[module] 変換前のパースに失敗: ${a.error}` }
-  const b = parseTokens(after)
-  if (b.error) return { name, ok: false, kind: 'artifact-unparsable', detail: `[module] 変換後のパースに失敗: ${b.error}` }
-  const problem = diffTokens(a.tokens, b.tokens, '[module]')
-  if (problem) return { name, ok: false, kind: 'mismatch', detail: problem }
-  return { name, ok: true, kind: 'match', detail: `${a.tokens.length} トークン一致` }
+  // まず両ゴールで変換前をパースする（どちらかでパースできなければ検査できない）
+  const parsed = {}
+  for (const goal of Object.keys(PARSE_GOALS)) {
+    const a = parseTokens(before, goal)
+    if (a.error) return { name, ok: false, kind: 'source-unparsable', detail: `[${goal}] 変換前のパースに失敗: ${a.error}` }
+    parsed[goal] = a
+  }
+  let count = 0
+  for (const goal of Object.keys(PARSE_GOALS)) {
+    const b = parseTokens(after, goal)
+    if (b.error) return { name, ok: false, kind: 'artifact-unparsable', detail: `[${goal}] 変換後のパースに失敗: ${b.error}` }
+    const problem = diffTokens(parsed[goal].tokens, b.tokens, `[${goal}]`)
+    if (problem) return { name, ok: false, kind: 'mismatch', detail: problem }
+    count = parsed[goal].tokens.length
+  }
+  return { name, ok: true, kind: 'match', detail: `${count} トークン一致（module・script の両ゴール）` }
 }
 
 const compare = (c) => {

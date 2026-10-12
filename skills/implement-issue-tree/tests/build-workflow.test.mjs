@@ -15,6 +15,7 @@
 //       失敗（実行できない・出力が想定の形でない）でビルドが生成ファイルを書かずに中止すること。
 // 生成物のサイズ・パースゲートは workflow-loadability.test.mjs が担う（対象は実行ファイル）。
 import { test, after } from 'node:test'
+import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -1107,6 +1108,43 @@ const LEXER_SLASH_FIXED = {
     text: `${META_HEADER}async function f(a) {\n  return await (a) / 2 + "//" + " a  b "\n}\n`,
     keep: ['"//"', '" a  b "'],
   },
+  'await の直後の正規表現内の //（await は正規表現の前置キーワード）': {
+    text: `${META_HEADER}async function f(s) {\n  return await /[//]/.test(s)\n}\n`,
+    keep: ['await /[//]/.test(s)'],
+  },
+  'yield の直後の正規表現内の //（yield は正規表現の前置キーワード）': {
+    text: `${META_HEADER}function* g(s) {\n  yield /[//]/.exec(s)\n}\n`,
+    keep: ['yield /[//]/.exec(s)'],
+  },
+  'await が単独の式（for の直後でない）の括弧の直後の / は除算で、以降のテンプレートの開閉を反転させない': {
+    text: `${META_HEADER}async function f(a) {\n  return await (a) / 2 + \`/\`\n}\nconst t = \`a\n  b  c\`\n`,
+    keep: ['await(a) / 2 + `/`', '`a\n  b  c`'],
+  },
+  'for の括弧の中の波括弧（オブジェクトリテラル）の中の of は識別子': {
+    text: `${META_HEADER}function f(s, of) {\n  for (const p of {k: of / \`/x//y\`}.k) { g(\`//\`) }\n}\n`,
+    keep: ['of / `/x//y`', '`//`'],
+  },
+  '} の直後の普通の正規表現（クォート・空白・文字クラスを含む）はビルドできる': {
+    text: `${META_HEADER}function f(s) {\n  if (a) { b() }\n  /re/.test(s)\n  if (a) { b() }\n  /"/.test(s) && c()\n  if (a) { b() }\n  /a  b/.test(s)\n  if (a) { b() }\n  /[ab]/.test(s)\n  return 1\n}\n`,
+    keep: ['/re/.test(s)', '/"/.test(s) && c()', '/a  b/.test(s)', '/[ab]/.test(s)'],
+  },
+  'for の括弧の中で変数 of を除算に使う行の末尾コメントは生成物に残る（意味は変わらない）': {
+    text: `${META_HEADER}function f(of) {\n  for (let i = 0; i < of / 2; i++) { g(i) } // c\n}\n`,
+    keep: ['{ g(i) } // c'],
+    expected: "export const meta={name:'x'}\nfunction f(of){\nfor(let i=0;i<of / 2; i++) { g(i) } // c\n}\n",
+  },
+  'K1 の回避: 括弧で包んだ ?.キーワード名プロパティ の直後の除算': {
+    text: `${META_HEADER}const o = { in: 4, default: 8 }\nconst half = (o?.in) / 2\nreturn half + (o?.default) / 4\n`,
+    keep: ['(o?.in) / 2', '(o?.default) / 4'],
+  },
+  'K1 の回避: ブラケット記法の ?.["in"] の直後の除算': {
+    text: `${META_HEADER}const o = { in: 4 }\nconst half = o?.["in"] / 2\nreturn half\n`,
+    keep: ['o?.["in"] / 2'],
+  },
+  'K1 の回避: 呼び出し o?.in() の直後の除算': {
+    text: `${META_HEADER}const o = { in() { return 4 } }\nconst half = o?.in() / 2\nreturn half\n`,
+    keep: ['o?.in() / 2'],
+  },
   'R2: private メソッド #if の呼び出しの直後の除算で文字列を変えない': {
     text: `${META_HEADER}class A {\n  #if(x) { return x }\n  m(a) { return this.#if(a) / 2 + "/" + "http://x" }\n}\n`,
     keep: ['"/"', '"http://x"'],
@@ -1203,6 +1241,14 @@ const LEXER_SLASH_RESIDUAL = {
   '} 直後の正規表現内の //': `${META_HEADER}function f(s) {\n  if (a) { b() }\n  { c() }\n  /[//]/.test(s) && d()\n  return 1\n}\n`,
   // 正規表現内の `/*` で、次の `*/` までをブロックコメントとして読み、`in` までのコードが消えて意味が変わる
   // （消えた先がパースできる別のプログラムになる。tokenizer 単体の比較では src と同じ誤読で一致して通っていた）
+  // `for (` の括弧の中で変数 `of` を除算に使う行は正規表現と読む（閉じ `/` 以降は読み違える）。同じ行の `/` を含む
+  // テンプレートは正規表現の中に飲まれ、以降のテンプレートの開閉が反転して中身が変わる
+  'for の括弧の中の変数 of の除算と同じ行の / を含むテンプレート': `${META_HEADER}function f(of) {\n  for (let i = 0; i < of / 2; i++) { g(\`a/b\`) }\n  const t = \`c\n    d\`\n}\n`,
+  // 同じ行の `//` を含むブロックコメントは `//` 以降が行コメントとして読まれ、閉じのないコメントになる
+  'for の括弧の中の変数 of の除算と同じ行の // を含むブロックコメント': `${META_HEADER}function f(of) {\n  for (let i = 0; i < of / 2; i++) { g(i) } /* a//b */\n}\n`,
+  // ブロックコメントの中の CR は行終端として読まれる（`return` の後なら ASI で `return;` になる）が、lexer は
+  // コメントを 1 個の空白に置き換えるので改行が消えて意味が変わる。トークンの開始行の比較が止める
+  'return の後のブロックコメント内の CR（ASI で意味が変わる）': `${META_HEADER}function f() {\n  return /*\r*/ 1\n}\n`,
   '} 直後の正規表現内の /*': `${META_HEADER}function f(s, t) {\n  if (a) { b() }\n  { c() }\n  /[/*]/.test(s) && /a*/ in /]/\n  return 1\n}\n`,
 }
 
@@ -1307,6 +1353,109 @@ test('パーサ文脈つきの照合: 開発ファイルをパースできない
 test('パーサ文脈つきの照合: 生成物がパースできないときも中止する', () => {
   const src = `${META_HEADER}const x = 1\n`
   assert.throws(() => verifyTokenParity(src, `${META_HEADER}const x = (\n`), /生成物のトークン列が開発ファイルと一致しない.*変換後のパースに失敗/s)
+})
+
+// ランタイムは module ではなく、先頭の `export const meta` の `export ` を外した本体を関数本体（AsyncFunction）として
+// 評価する（tests/lib/workflow-script-contract.mjs）。関数本体は script ゴールなので、`<!--` と行頭の `-->` が
+// 行末までのコメントになる。module の parse だけの照合では、`<!--` の後のコードがコメントとして消えて実行結果が変わる
+// 生成物を見逃していた（レビュー再現）。
+const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor
+const runLikeRuntime = async (code) => new AsyncFunctionCtor(stripMetaExport(code))()
+const H1_SRC = `${META_HEADER}let a = 1, b = 5, r = 0\nr = a <!-- b /*\nr = 42\n/* */\nreturn r\n`
+
+test('script ゴールの照合: <!-- の後に /* を置いた開発ファイルはビルドが中止になる（module の parse だけでは通って実行結果が変わっていた）', async () => {
+  // 前提: ランタイムの形（関数本体）で実行すると 42。lexer の出力（照合なし）は 1 になる
+  assert.equal(await runLikeRuntime(H1_SRC), 42)
+  const unchecked = buildArtifact(H1_SRC)
+  assert.equal(await runLikeRuntime(unchecked), 1, '前提: 照合が無ければ実行結果が変わる生成物ができる入力であること')
+  assert.throws(() => verifyTokenParity(H1_SRC, unchecked), /生成物のトークン列が開発ファイルと一致しない: \[script\]/)
+  const r = runBuilder(H1_SRC)
+  assert.notEqual(r.status, 0, `ビルドが成功してしまった: ${r.stdout}`)
+  assert.equal(r.written, false)
+  assert.match(r.stderr, /\[script\]/)
+})
+
+test('script ゴールの照合: 行頭の --> を含む開発ファイルは module でパースできないので中止になる', () => {
+  const src = `${META_HEADER}let a = 1, b = 5, r = 0\nr = a\n--> b /*\nr = 42\n/* */\nreturn r\n`
+  const r = runBuilder(src)
+  assert.notEqual(r.status, 0)
+  assert.equal(r.written, false)
+  assert.match(r.stderr, /開発ファイルをパースできないため照合できない/)
+})
+
+test('script ゴールの照合: 無害な r = a <!-- b（後ろに /* が無い）はビルドでき、実行結果は変わらない', async () => {
+  const src = `${META_HEADER}let a = 1, b = 5, r = 0\nr = a <!-- b\nreturn r\n`
+  const out = buildArtifact(src)
+  assert.doesNotThrow(() => verifyTokenParity(src, out))
+  assert.ok(out.includes('<!--'), `<!-- が残る: ${JSON.stringify(out)}`)
+  assert.equal(await runLikeRuntime(src), 1)
+  assert.equal(await runLikeRuntime(out), 1)
+  const r = runBuilder(src)
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.written, true)
+})
+
+test('script ゴールの照合: <!-- を文字列の中に持つ開発ファイルは影響を受けずビルドできる', async () => {
+  const src = `${META_HEADER}let r = "a <!-- b /*"\nreturn r\n`
+  const out = buildArtifact(src)
+  assert.doesNotThrow(() => verifyTokenParity(src, out))
+  assert.equal(await runLikeRuntime(out), 'a <!-- b /*')
+})
+
+test('script ゴールの照合: export を外す規則はランタイムの stripMetaExport と同じ（先頭の export const meta だけ）', () => {
+  // 先頭が export const meta でない開発ファイルはそのまま script として読む（export を含めばパースできず中止）
+  const noMeta = 'const x = 1\n'
+  assert.doesNotThrow(() => verifyTokenParity(noMeta, buildArtifactUnchecked(noMeta)))
+  const lateExport = `${META_HEADER}const a = 1\nexport const meta2 = 2\n`
+  assert.throws(() => verifyTokenParity(lateExport, lateExport), /開発ファイルをパースできないため照合できない.*\[script\]/s)
+})
+
+// buildArtifact は先頭が export const meta であることを要求する。meta の無い断片は squeezeSpaces だけを通す
+const buildArtifactUnchecked = (code) => squeezeSpaces(code)
+
+test('tokenize モードの比較は script も読む（<!-- は script でだけコメント。module だけでは空白を詰めて <!-- を作った変化を見逃す）', () => {
+  const [r] = compareTokensWithTokenizer([{ name: 'x', before: 'x = a < ! --b\n', after: 'x = a<!--b\n', lenient: true }])
+  assert.equal(r.ok, false)
+  assert.match(r.detail, /\[script\]/, 'module では同じトークン列なので、script の読みで見つかった差であること')
+})
+
+// 照合のトークン数・開始行の比較（どちらかを外しても他のテストが通ってしまった分岐）
+for (const [mode, compare] of [['parse', compareTokensWithParser], ['tokenize', compareTokensWithTokenizer]]) {
+  test(`${mode} モードの比較: 共通部分が同じでも、変換後のトークンが余分・不足なら不一致`, () => {
+    const base = 'const x = 1\n'
+    const [more] = compare([{ name: 'more', before: base, after: `${base}foo()\n` }])
+    assert.equal(more.ok, false)
+    const [fewer] = compare([{ name: 'fewer', before: `${base}foo()\n`, after: base }])
+    assert.equal(fewer.ok, false)
+    // tokenize モードは終端のトークンを持たないので、数の比較だけが差を見つける。parse モードは終端（eof）の
+    // 位置で別のトークンとして不一致になる
+    const pattern = mode === 'tokenize' ? /トークン数が不一致/ : /不一致/
+    assert.match(more.detail, pattern)
+    assert.match(fewer.detail, pattern)
+  })
+
+  test(`${mode} モードの比較: トークンの種類と値が同じでも、開始行が違えば不一致`, () => {
+    const [r] = compare([{ name: 'line', before: 'x = 1\ny = 2\n', after: 'x = 1\n\ny = 2\n' }])
+    assert.equal(r.ok, false)
+    assert.match(r.detail, /不一致/)
+  })
+}
+
+test('K1: ?. の直後のキーワード名プロパティの直後の / は acorn が誤読して中止になり、エラー文言に回避形が出る', () => {
+  const src = `${META_HEADER}const o = { in: 4, default: 8 }\nconst half = o?.in / 2\nreturn half + o?.default / 4\n`
+  assert.throws(() => verifyTokenParity(src, src), /開発ファイルをパースできないため照合できない.*acorn が読めない正当な構文の可能性.*\(o\?\.in\) \/ 2/s)
+  const r = runBuilder(src)
+  assert.notEqual(r.status, 0)
+  assert.equal(r.written, false)
+  assert.match(r.stderr, /acorn が読めない正当な構文の可能性/)
+})
+
+test('with 文は module でパースできないので中止になる（lexer の条件の括弧に with を含めない理由）', () => {
+  const src = `${META_HEADER}function f(o, s) {\n  with (o) /re/.test(s)\n}\n`
+  const r = runBuilder(src)
+  assert.notEqual(r.status, 0)
+  assert.equal(r.written, false)
+  assert.match(r.stderr, /開発ファイルをパースできないため照合できない.*with/s)
 })
 
 test('パーサ文脈つきの照合: 先頭の return・top-level await を含む Workflow スクリプトの形をパースできる', () => {
