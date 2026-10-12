@@ -20,13 +20,15 @@ import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  stripComments, squeezeSpaces, shouldSqueezeSpace, buildArtifact, verifyTokenParity, runBuild, parseArgs, SQUEEZE_REFUSAL_RULES, SRC_PATH, DIST_PATH,
+  stripComments, squeezeSpaces, shouldSqueezeSpace, buildArtifact, verifyTokenParity, runBuild, parseArgs, embedScriptHashes, SQUEEZE_REFUSAL_RULES, SRC_PATH, DIST_PATH,
 } from '../scripts/build-workflow.mjs'
 
 const SCRIPT_PATH = fileURLToPath(new URL('../scripts/build-workflow.mjs', import.meta.url))
+// 開発ファイルは目印（スクリプトのハッシュ）を持つため、ビルダーと同じく置換してから比較する
+const readSrcEmbedded = () => embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), dirname(SRC_PATH))
 const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const TOKEN_DIFF_HELPER = fileURLToPath(new URL('../scripts/token-diff.cjs', import.meta.url))
 
@@ -650,7 +652,7 @@ test('トークン列一致（acorn）: 固定ケースで変換前後のトー�
 })
 
 test('トークン列一致（acorn）: 実ファイル implement-issue-tree.src.js と生成物の全トークンが一致する', () => {
-  const src = readFileSync(SRC_PATH, 'utf8')
+  const src = readSrcEmbedded()
   const dist = readFileSync(DIST_PATH, 'utf8')
   // before は生の src（acorn はコメントを読み飛ばす）なので、コメント除去・インデント除去・
   // 空白除去の全体が「トークン列と各トークンの開始行を変えない」ことを独立実装で検証する
@@ -1010,7 +1012,7 @@ test('変異テスト: 規則 before-dot を外すと return .5 が return.5 に
 // ---------------------------------------------------------------------------
 
 test('実行ファイルは開発ファイルからの再生成結果と byte 一致する（ビルド忘れ・直接編集の検出）', () => {
-  const src = readFileSync(SRC_PATH, 'utf8')
+  const src = readSrcEmbedded()
   const dist = readFileSync(DIST_PATH, 'utf8')
   // buildArtifact は行数保持・先頭 meta 宣言・冪等性の検証込み（失敗時は throw）
   const rebuilt = buildArtifact(src)

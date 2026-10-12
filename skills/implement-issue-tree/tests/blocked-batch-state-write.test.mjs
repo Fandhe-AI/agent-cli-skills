@@ -357,7 +357,8 @@ async function runScript({ args, nodes, saved = null, ootStates = { [OOT]: 'OPEN
     return handler(prompt, opts)
   }
   const fn = new AsyncFunction('args', 'agent', 'log', 'phase', scriptBody)
-  const result = await fn(args, agent, (m) => { logs.push(m) }, () => {})
+  // skillDir は残置バイト軸が有効な通常ランの必須引数（Issue #603）。呼び出し側の指定があればそれを優先する
+  const result = await fn({ skillDir: '/opt/skills/implement-issue-tree', ...args }, agent, (m) => { logs.push(m) }, () => {})
   return { result, calls, logs }
 }
 

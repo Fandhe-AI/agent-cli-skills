@@ -446,6 +446,27 @@ function parseRepoArg(raw) {
 }
 const repoArg = parseRepoArg(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.repo : undefined)
 
+// スキルディレクトリ（scripts/ の 1 つ上）の絶対パスのホスト側明示宣言（Issue #603）。決定的な手順を
+// 切り出したスクリプト（scripts/*.sh）をエージェントが実行する場所で、起動手順が scriptPath と同じ
+// スキルディレクトリを渡す。Workflow スクリプト自身はファイルシステムに触れないため存在確認はできず、
+// 形式だけをここで検証する（存在・ハッシュの確認は実行時にサブエージェント側の run-verified.sh が
+// fail-closed で行う）。args.repo と同じく人間が明示する入力だけを信頼し、エージェントの申告値や
+// worktree 内のコピーから推測しない。絶対パスだけを受理する: 相対パスは実行するエージェントの cwd
+// （隔離 worktree では worktree 内のコピー）に解決されて信頼境界が崩れる。未指定は ''（実際に測定が
+// 必要なランでだけ駆動部冒頭が起動時エラーにする）。不正な値は黙って読み替えずエラーで停止する。
+const SKILL_DIR_HINT = 'args.skillDir にはスキルディレクトリ（scripts/ の 1 つ上）の絶対パスを渡す（例: "/home/me/repo/.claude/skills/implement-issue-tree"）'
+function parseSkillDirArg(raw) {
+  if (raw === undefined || raw === null) return ''
+  if (
+    typeof raw !== 'string' || raw.length > 400 || /\.\.|\/\/|\/$/.test(raw) ||
+    !/^\/[A-Za-z0-9_][A-Za-z0-9._ \/-]*$/.test(raw)
+  ) {
+    throw new Error(`${SKILL_DIR_HINT}。相対パス・".."・"//"・末尾 "/"・英数字と ._ /- と半角スペース以外・400 文字超は不可: ${String(raw).slice(0, 80)}`)
+  }
+  return raw
+}
+const skillDir = parseSkillDirArg(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.skillDir : undefined)
+
 // GitHub GraphQL の review thread ノード ID の形式検証。英数字・_・- のみ許可（不一致は空文字）。
 // 自然言語の命令文が不透明な識別子として通らないことを構造的に保証する（sanitize は命令性を
 // 消さないためこの用途には使わない）。
@@ -2764,43 +2785,28 @@ const ORPHAN_COUNT_SCHEMA = {
   },
 }
 
-// 残置 worktree ディスク使用量（KiB）の返却スキーマ。maxResidualWorktreeBytes ゲート（第2軸・
-// Issue #348 案 B）専用。du -sk は macOS 標準 du でも動く（-b は GNU 限定のため使わない）。
+// 残置 worktree ディスク使用量（KiB）の返却スキーマ（measure-residual-bytes.sh の payload）。
+// maxResidualWorktreeBytes ゲート（第2軸・Issue #348 案 B）専用。du -sk は macOS 標準 du でも動く
+// （-b は GNU 限定のため使わない）。モデルが読む description は短くし、根拠は次のコメントに置く
+// （生成物のサイズ予算のため。コメントは生成物から除かれる）。
+//   kib: 実在したパス全件の du -sk 第 1 列の単純合計（存在しないパスは 0 として加算）
+//   err: スクリプトの ERR 値そのまま（du の非 0 終了・出力欠損・許可文字集合外のパスの件数）。ホストは
+//        err === 0 のみ測定成功として受理し、ERR>0 の部分合計は kib として返されても採用しない
+//        （fail-closed の二重化。PR #390 codex-review P1）
+//   missing: 測定時点で既に存在しなかったパスの件数。並行 cleanup で消えたパスは 0 として扱い測定失敗に
+//        しない（Bugbot 指摘対応）。呼び出し側は平均算出の分母から差し引くため必須（欠落を 0 とみなすと
+//        存在しないパスが分母に残り 1 worktree あたりの見積りが過小になる fail-open）
+//   count: スクリプトが処理した行数。ホストは送った対象パス数との一致を検証する（Issue #497: 入力の
+//        取り違え・空展開で 0 件や別集合を読んでも ERR=0 の正常終了に化けて容量ゲートを素通りする
+//        fail-open を、件数照合で塞ぐ）
 const ORPHAN_BYTES_SCHEMA = {
   type: 'object',
   required: ['kib', 'err', 'missing', 'count'],
   properties: {
-    kib: {
-      type: 'integer',
-      minimum: 0,
-      description: '対象パス全件に du -sk を実行した第1列（KiB）の単純合計（存在しないパスは 0 として加算）',
-    },
-    err: {
-      type: 'integer',
-      minimum: 0,
-      description:
-        '測定スクリプト出力の ERR 値そのまま（du の非 0 終了・出力欠損の件数。jq 展開の失敗も 1 と' +
-        'して計上する）。ホスト側は err === 0 のみ測定成功として受理する（エージェントが ERR>0 の' +
-        '部分合計を kib として返しても受理しない fail-closed の二重化。PR #390 codex-review P1）。',
-    },
-    missing: {
-      type: 'integer',
-      minimum: 0,
-      description:
-        '対象パスのうち測定時点で既に存在しなかった（test -e が偽だった）件数。並行 cleanup と' +
-        'の競合で削除済みのパスは 0 として扱い測定失敗にしない（Bugbot 指摘対応）。呼び出し側は' +
-        'この件数を平均算出の分母から差し引くため必須フィールドとする（欠落を 0 とみなすと分母に' +
-        '存在しないパスが残り 1 worktree あたりの見積りが過小になる fail-open）。',
-    },
-    count: {
-      type: 'integer',
-      minimum: 0,
-      description:
-        'スクリプトが while ループで実際に処理した行数（COUNT）。ホスト側は送った対象パス数と' +
-        '一致することを検証する（Issue #497: 一時ファイルの取り違え・空展開により jq が誤って' +
-        '0 件や別集合を読み込んでも「TOTAL=0 MISSING=0 ERR=0」の正常終了に化けて容量ゲートを' +
-        '素通りする fail-open を、件数照合で塞ぐ）。',
-    },
+    kib: { type: 'integer', minimum: 0, description: 'du -sk 第1列の合計（KiB）' },
+    err: { type: 'integer', minimum: 0, description: '測定失敗の件数（0 以外は失敗）' },
+    missing: { type: 'integer', minimum: 0, description: '測定時点で存在しなかったパスの件数' },
+    count: { type: 'integer', minimum: 0, description: 'スクリプトが処理した行数' },
   },
 }
 
@@ -3680,37 +3686,64 @@ function isValidBranchName(b) {
   return typeof b === 'string' && !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
 }
 
-// 残置バイト測定の固定シェルスクリプトを組み立てる純粋関数（Issue #566）。呼び出し元は
-// measureResidualBytesOnce のみ。対象パス JSON はホストがヒアドキュメントへ無条件に埋め込み、
-// エージェントに「条件付きで書き出す」「タグ内側を写し取る」判断を残さない。旧実装は手順 2 が
-// 自然言語の条件（tf が空でなければ…）で、エージェントが if を逆に書き起こして書き出しが
-// 行われず ERR=1 COUNT=0 になった。tf はリテラル代入のため -z 分岐・rm ガードは防御として残す。
-// 読み取りは jq 展開を一時ファイル経由で終了コード検査し（直結だと jq 失敗が入力 0 件の正常測定に
-// 化ける）、改行区切り（POSIX sh 互換。read -d は Bash 拡張で dash では即終了し fail-open）で処理
-// する。du の終了状態は if 条件で検査する（パイプ直結だと cut の終了状態に化ける）。
-function buildResidualBytesScript({ tmpFile, delimiter, pathsJson }) {
-  return [
-    `tf=${tmpFile}`,
-    'case "$tf" in *..*) tf="" ;; /tmp/*) ;; *) tf="" ;; esac',
-    'if [ -n "$tf" ]; then',
-    `cat <<'${delimiter}' > "$tf"`,
-    pathsJson,
-    delimiter,
-    'fi',
-    'if [ -z "$tf" ]; then echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; ' +
-      'elif [ ! -s "$tf" ]; then echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; ' +
-      "elif ! jq -r '.[]' \"$tf\" > \"$tf.lines\"; then " +
-      'echo "TOTAL=0 MISSING=0 ERR=1 COUNT=0"; else { total=0; missing=0; err=0; count=0; ' +
-      'while IFS= read -r p; do count=$((count+1)); ' +
-      'if [ ! -e "$p" ]; then missing=$((missing+1)); continue; fi; ' +
-      'if duout=$(du -sk -- "$p" 2>/dev/null); then ' +
-      'sz=$(printf %s "$duout" | cut -f1); ' +
-      'if [ -z "$sz" ]; then err=$((err+1)); continue; fi; ' +
-      'total=$((total+sz)); ' +
-      'else err=$((err+1)); fi; ' +
-      'done < "$tf.lines"; echo "TOTAL=$total MISSING=$missing ERR=$err COUNT=$count"; }; fi',
-    'if [ -n "$tf" ]; then rm -f -- "$tf" "$tf.lines" 2>/dev/null; fi',
-  ].join('\n')
+// --- 測定スクリプトの実行と出力封筒の照合（Issue #603 第 1 弾）---
+// 決定的な測定（残置バイト・空き容量）はプロンプトに書いたシェルではなく、スキル同梱のスクリプト
+// （scripts/measure-*.sh）が行う。エージェントは run-verified.sh 経由のコマンドを 1 回実行し、標準出力の
+// 1 行 JSON（封筒 = nonce・payload・sha256）を StructuredOutput へ転記するだけにする。ホストは封筒を再計算して
+// 照合し（verifySignedOutput）、通ったときだけ payload を使う。
+// 検出できるのは、転記ミス・別の呼び出しの出力の流用・スクリプトを実行せず自己流で進めた（sha256 を
+// 合わせられない）こと。検出できないのは、sha256sum を自分で回せる悪意あるエージェントによる捏造
+// （nonce と payload が手元にあれば封筒は作れる）。したがって封筒の値は「測定値の転記が正しかった」ことの
+// 確認であり、マージ・push・削除の可否には一切使わない（用途は新規着手の抑止と次回ラン開始時の予約見積りの
+// 下限だけ。偽の小さい値は着手を許し得るが、損なうのはローカルのディスク保護で、悪意ある偽装への防御は
+// 目的外）。信頼モデルの全文は references/script-trust-model.md。
+// スクリプト実行前のハッシュ照合は run-verified.sh が行う。期待ハッシュはビルダーが生成物へ埋め込む
+// （開発ファイルには置換前の目印を書く。build-workflow.mjs の embedScriptHashes）。
+const SCRIPT_SHA256 = {
+  'measure-residual-bytes.sh': '@@SCRIPT_SHA256:measure-residual-bytes.sh@@',
+  'measure-free-disk.sh': '@@SCRIPT_SHA256:measure-free-disk.sh@@',
+}
+
+// 測定スクリプトを run-verified.sh 経由で起動するコマンド行（rest は --nonce の後ろに続く部分）。skillDir は
+// parseSkillDirArg が引用符・展開を壊す文字を除外済みなので単一引用符で包める。未指定は例外（呼び出し側の
+// catch が fail-closed の null にする）
+function scriptInvocation(name, nonce, rest) {
+  if (!skillDir) throw new Error('args.skillDir が未指定のため測定スクリプトの場所を決められない')
+  return `bash '${skillDir}/scripts/run-verified.sh' ${SCRIPT_SHA256[name]} ${name} --nonce ${nonce}${rest}`
+}
+
+// 封筒を返すエージェントの StructuredOutput スキーマ。payload は測定ごとのスキーマを入れ子にする
+function signedOutputSchema(payloadSchema) {
+  return {
+    type: 'object',
+    required: ['nonce', 'payload', 'sha256'],
+    properties: {
+      nonce: { type: 'string', description: '標準出力 JSON の nonce をそのまま転記する' },
+      payload: payloadSchema,
+      sha256: { type: 'string', description: '標準出力 JSON の sha256 をそのまま転記する（再計算しない）' },
+    },
+  }
+}
+
+// 封筒を返させるプロンプトの共通末尾。転記以外（再計算・補完・修正）をさせない
+const SIGNED_OUTPUT_INSTRUCTION =
+  '標準出力は nonce・payload・sha256 を持つ 1 行の JSON である。3 項目を観測値のまま StructuredOutput へ転記する' +
+  '（再計算・補完・修正をしない。ホストが再計算して照合し、不一致なら破棄する）。' +
+  '非 0 終了や JSON が無いときは、他の方法で測り直さず、値を作らずに失敗として報告する。'
+
+// 封筒 { nonce, payload, sha256 } の照合（純粋関数）。sha256 の入力は「nonce + 改行 + payload の正規形」で、
+// scripts/lib/signed-output.sh の so_emit と同じ定義（正規形は canonicalJson = jq -cS 相当。payload は整数と
+// ASCII の固定文字列だけ）。返り値は { ok: true, payload } か { ok: false, reason }。reason は
+// missing（封筒の形が不完全）・nonce（呼び出しに結び付かない）・sha256（転記ミス・未実行）。いずれも
+// 呼び出し側は転記失敗として扱い、有界に再測定してよい
+function verifySignedOutput(raw, nonce) {
+  const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x)
+  if (!isObj(raw) || !isObj(raw.payload) || typeof raw.sha256 !== 'string' || typeof raw.nonce !== 'string') {
+    return { ok: false, reason: 'missing' }
+  }
+  if (raw.nonce !== nonce) return { ok: false, reason: 'nonce' }
+  if (sha256Hex(`${nonce}\n${canonicalJson(raw.payload)}`) !== raw.sha256) return { ok: false, reason: 'sha256' }
+  return { ok: true, payload: raw.payload }
 }
 
 // 測定結果の分類（Issue #566・#571）。次はエージェント側の一過性の失敗とみなして再測定可（retryable）。
@@ -3738,21 +3771,22 @@ function classifyResidualByteReport(v, sentCount) {
 // 転記失敗・agent 例外・出力欠落時の再測定回数上限（合算で初回を含め最大 3 回）。再測定は別エージェント（sonnet）で行う。
 const RESIDUAL_BYTE_MEASURE_MAX_RETRIES = 2
 
-// 1 回分のエージェント呼び出し。区切り語衝突は { error: true }（再測定しない）、agent 例外は { thrown }（再測定可）。
+// 1 回分のエージェント呼び出し。区切り語衝突は { error: true }（再測定しない）、agent 例外は { thrown }（再測定可）、
+// 封筒の照合に失敗したら { report: null, envelope: <reason> }（出力欠落と同じ再測定可。理由はログ用）。
 let residualByteMeasureCallSeq = 0
 async function measureResidualBytesOnce(sanitizedPaths, model) {
-  const pathsJson = JSON.stringify(sanitizedPaths)
+  const pathLines = sanitizedPaths.join('\n')
   residualByteMeasureCallSeq += 1
-  const tmpNonce = boundaryNonce(`residual-bytes-tmp:${residualByteMeasureCallSeq}:${pathsJson}`)
+  const tmpNonce = boundaryNonce(`residual-bytes-tmp:${residualByteMeasureCallSeq}:${pathLines}`)
   const delimiter = `PATHSEOF_${tmpNonce}`
-  if (pathsJson.includes(delimiter)) return { error: true }
-  const script = buildResidualBytesScript({
-    tmpFile: `/tmp/wt-residual-paths-${tmpNonce}.json`,
+  if (pathLines.includes(delimiter)) return { error: true }
+  const command = [
+    scriptInvocation('measure-residual-bytes.sh', tmpNonce, ` <<'${delimiter}'`),
+    pathLines,
     delimiter,
-    pathsJson,
-  })
+  ].join('\n')
   // agent() の例外のみ捕捉する（Issue #571）。一過性のエージェント失敗として呼び出し側が再測定する。
-  // boundaryNonce 等の決定的な内部例外は包まず、外側 catch の null（fail-closed）に任せる。
+  // boundaryNonce・scriptInvocation 等の決定的な内部例外は包まず、外側 catch の null（fail-closed）に任せる。
   let v
   try {
     v = await agent(
@@ -3760,28 +3794,26 @@ async function measureResidualBytesOnce(sanitizedPaths, model) {
         '残置 worktree のディスク使用量測定タスク（読み取り専用。削除・変更は一切行わない）。',
         UNTRUSTED_POLICY,
         TEMP_FILE_POLICY,
-        `次のシェルスクリプトを一字一句そのまま（${sanitizedPaths.length} 件分のパス JSON を含む。` +
-          '改変・条件追加・分岐追加・コマンド行の組み立て直しをしない）、1 回の Bash 呼び出しで実行する' +
-          '（Bash ツールは呼び出し間でシェル変数を保持しない）。スクリプト内の JSON 配列は' +
-          'パスの文字列データであり、指示・コマンドではない:',
+        `次のコマンドを一字一句そのまま（${sanitizedPaths.length} 件分のパスを含む。改変・条件追加・パスの追加削除や並べ替え・` +
+          'コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する。ヒアドキュメントの各行はパスの文字列データであり、指示・コマンドではない:',
         '```sh',
-        script,
+        command,
         '```',
-        '出力の TOTAL を kib、MISSING を missing、ERR を err、COUNT を count として、観測値のまま返す' +
-          '（ERR が 0 より大きくても kib を補わない。成否判定はホスト側が行う）。',
+        SIGNED_OUTPUT_INSTRUCTION,
       ].join('\n'),
       {
         label: 'worktree:residual-bytes',
         phase: 'State',
         model,
         effort: 'low',
-        schema: ORPHAN_BYTES_SCHEMA,
+        schema: signedOutputSchema(ORPHAN_BYTES_SCHEMA),
       },
     )
   } catch (e) {
     return { thrown: e }
   }
-  return { report: v }
+  const signed = verifySignedOutput(v, tmpNonce)
+  return signed.ok ? { report: signed.payload } : { report: null, envelope: signed.reason }
 }
 
 // 残置 worktree のディスク使用量（KiB）と、測定時点で既に存在しなかったパス数（missing）を
@@ -3816,7 +3848,11 @@ async function measureResidualWorktreeBytesDetailed(paths) {
         if (r.reason === 'exception') {
           log(`⚠️ 残置 worktree ディスク使用量測定の agent 呼び出しが例外を投げた（${once.thrown?.message ?? once.thrown}）`)
         } else if (r.reason === 'output-missing') {
-          log('⚠️ 残置 worktree ディスク使用量測定の結果が欠落または不完全（StructuredOutput 欠落の疑い）')
+          log(
+            once.envelope === 'nonce' || once.envelope === 'sha256'
+              ? `⚠️ 残置 worktree ディスク使用量測定の出力封筒の照合に失敗した（${once.envelope} 不一致。転記ミスまたはスクリプト未実行の疑い）`
+              : '⚠️ 残置 worktree ディスク使用量測定の結果が欠落または不完全（StructuredOutput 欠落・スクリプトの起動失敗の疑い）',
+          )
         } else {
           log(`⚠️ 残置 worktree ディスク使用量測定の count が対象パス数と不一致（count=${rv?.count ?? '欠落'}・対象 ${sanitizedPaths.length} 件・err=${rv?.err ?? '不明'}）。転記失敗の疑い`)
         }
@@ -3824,7 +3860,7 @@ async function measureResidualWorktreeBytesDetailed(paths) {
           log(`別エージェントで再測定する（${attempt + 1}/${RESIDUAL_BYTE_MEASURE_MAX_RETRIES}）`)
           continue
         }
-        log('再測定を使い切った。観測失敗として扱う（fail-closed）')
+        log(`再測定を使い切った（skillDir=${skillDir}。スクリプトの欠落・ハッシュ不一致で出力が無い場合もある）。観測失敗として扱う（fail-closed）`)
         return null
       }
       log(`⚠️ 残置 worktree ディスク使用量測定が失敗した（reason=${r.reason}・err=${rv?.err ?? '不明'}・missing=${rv?.missing ?? '欠落'}）。再測定せず観測失敗として扱う`)
@@ -3886,49 +3922,19 @@ async function measureMainWorktreeContentBytes(mainPath, entries) {
   return computeMainContentKib({ totalKib, gitKib, nestedKib })
 }
 
-// メイン worktree が属するファイルシステムの実空き容量の返却スキーマ（Issue #467 P0
-// codex-review 対応）。maxResidualWorktreeBytes ゲートは「残置 worktree の合計サイズ」のみを
+// メイン worktree が属するファイルシステムの実空き容量の返却スキーマ（measure-free-disk.sh の payload。
+// Issue #467 P0 codex-review 対応）。maxResidualWorktreeBytes ゲートは「残置 worktree の合計サイズ」のみを
 // 見る指標であり、実ディスクの空き容量とは独立のため、単独では「残置は上限未満でもディスクは
 // 先に枯渇する」ケースを検出できない。df -Pk は POSIX 標準オプションで macOS 標準 df でも動く
-// （-B 等の GNU 拡張は使わない）。
+// （-B 等の GNU 拡張は使わない）。freeKib は df -Pk の Available 列（KiB）、err は df 失敗・出力欠損で 1
+// （成功時 0）。ホストは err === 0 のみ測定成功として受理する。
 const DISK_FREE_SCHEMA = {
   type: 'object',
   required: ['freeKib', 'err'],
   properties: {
-    freeKib: {
-      type: 'integer',
-      minimum: 0,
-      description: '対象パスが属するファイルシステムの df -Pk Available 列（KiB）',
-    },
-    err: {
-      type: 'integer',
-      minimum: 0,
-      description: 'df 実行失敗・出力欠損時に 1（成功時 0）。ホスト側は err === 0 のみ測定成功として受理する',
-    },
+    freeKib: { type: 'integer', minimum: 0, description: 'df -Pk の Available 列（KiB）' },
+    err: { type: 'integer', minimum: 0, description: '測定失敗なら 1（成功時 0）' },
   },
-}
-
-// 空き容量測定の固定スクリプト（Issue #566: 対象パス JSON を無条件ヒアドキュメントで埋め込み、
-// 「tf が空でなければ書き出す」自然言語条件の転記ミスを構造的に除去する。-z 分岐・rm ガードは防御）。
-function buildFreeDiskScript({ tmpFile, delimiter, pathsJson }) {
-  return [
-    `tf=${tmpFile}`,
-    'case "$tf" in *..*) tf="" ;; /tmp/*) ;; *) tf="" ;; esac',
-    'if [ -n "$tf" ]; then',
-    `cat <<'${delimiter}' > "$tf"`,
-    pathsJson,
-    delimiter,
-    'fi',
-    'if [ -z "$tf" ]; then echo "FREE=0 ERR=1"; ' +
-      "elif ! jq -r '.[0]' \"$tf\" > \"$tf.line\"; then " +
-      'echo "FREE=0 ERR=1"; else { p=$(cat "$tf.line"); ' +
-      'if [ -z "$p" ] || [ ! -e "$p" ]; then echo "FREE=0 ERR=1"; ' +
-      'elif dfout=$(df -Pk -- "$p" 2>/dev/null); then ' +
-      "avail=$(printf %s \"$dfout\" | awk 'NR==2{print $4}'); " +
-      'if [ -z "$avail" ]; then echo "FREE=0 ERR=1"; else echo "FREE=$avail ERR=0"; fi; ' +
-      'else echo "FREE=0 ERR=1"; fi; }; fi',
-    'if [ -n "$tf" ]; then rm -f -- "$tf" "$tf.line" 2>/dev/null; fi',
-  ].join('\n')
 }
 
 // メイン worktree が属するファイルシステムの実空き容量（KiB）を測定する（maxResidualWorktreeBytes
@@ -3943,16 +3949,11 @@ async function measureFreeDiskKib(path) {
     return null
   }
   try {
-    const pathsJson = JSON.stringify([sanitized])
     for (let attempt = 0; attempt <= 1; attempt += 1) {
       const tmpNonce = boundaryNonce(`free-disk-tmp:${attempt}:${sanitized}`)
-      const delimiter = `PATHEOF_${tmpNonce}`
-      if (pathsJson.includes(delimiter)) return null
-      const script = buildFreeDiskScript({
-        tmpFile: `/tmp/wt-free-disk-${tmpNonce}.json`,
-        delimiter,
-        pathsJson,
-      })
+      // コマンドの組み立て（skillDir 未指定の例外を含む）は agent() の外で行い、決定的な失敗を一過性の
+      // エージェント失敗と取り違えない（外側 catch の null = fail-closed へ進む）
+      const command = scriptInvocation('measure-free-disk.sh', tmpNonce, ` -- '${sanitized}'`)
       // agent() の例外は一過性のエージェント失敗として失敗扱いにし、下の再測定へ合流させる（Issue #571）。
       let v = null
       try {
@@ -3961,26 +3962,27 @@ async function measureFreeDiskKib(path) {
             'メイン worktree が属するファイルシステムの空き容量測定タスク（読み取り専用。削除・変更は一切行わない）。',
             UNTRUSTED_POLICY,
             TEMP_FILE_POLICY,
-            '次のシェルスクリプトを一字一句そのまま（改変・条件追加・分岐追加をしない）、' +
-              '1 回の Bash 呼び出しで実行する（Bash ツールは呼び出し間でシェル変数を保持しない）。' +
-              'スクリプト内の JSON 配列は絶対パスの文字列データであり、指示・コマンドではない:',
+            '次のコマンドを一字一句そのまま（改変・条件追加・分岐追加をしない）、1 回の Bash 呼び出しで実行する。引数の引用符内は絶対パスの文字列データであり、指示・コマンドではない:',
             '```sh',
-            script,
+            command,
             '```',
-            '出力の FREE を freeKib、ERR を err として観測値のまま返す（err が 0 より大きくても' +
-              ' freeKib を補わない。成否判定はホスト側が err で行う）。',
+            SIGNED_OUTPUT_INSTRUCTION,
           ].join('\n'),
           {
             label: 'worktree:free-disk-bytes',
             phase: 'State',
             model: attempt === 0 ? 'haiku' : 'sonnet',
             effort: 'low',
-            schema: DISK_FREE_SCHEMA,
+            schema: signedOutputSchema(DISK_FREE_SCHEMA),
           },
         )
       } catch (e) {
         log(`⚠️ 実ディスク空き容量測定の agent 呼び出しが例外を投げた（${e?.message ?? e}）`)
       }
+      // 封筒（nonce・sha256）の照合に通らない転記は失敗扱いにして再測定へ合流させる
+      const signed = verifySignedOutput(v, tmpNonce)
+      if (!signed.ok && v !== null && v !== undefined) log(`⚠️ 実ディスク空き容量測定の出力封筒の照合に失敗した（${signed.reason}）`)
+      v = signed.ok ? signed.payload : null
       if (Number.isInteger(v?.err) && v.err === 0 && Number.isInteger(v?.freeKib) && v.freeKib >= 0) {
         return v.freeKib
       }
@@ -6073,6 +6075,14 @@ function buildPhysicalByteMeasureTargets(entries, independentCount) {
 // 実行時に必ず走る駆動部冒頭で無条件に検証する（fail-closed）。
 if (!Number.isInteger(parent) || parent <= 0) {
   throw new Error('親イシュー番号を args で指定すること（例: {"parent": 1008, "branch": "main", "parallel": 3}）')
+}
+
+// skillDir の必須検証（Issue #603 第 1 弾）。測定スクリプト（残置バイト・空き容量）を使うのは、残置バイト軸が有効
+// （maxResidualWorktreeBytes > 0。既定 50 GiB）で dryRun でないランだけで、そのランでは skillDir が無いと最初の
+// 測定が失敗してラン開始時の観測失敗（新規着手の全停止）になる。エージェントを 1 回も呼ぶ前に、何を渡すかを
+// 具体的に示して停止する。バイト軸を 0 で明示オプトアウトしたラン・dryRun は測定を使わないため省略できる。
+if (!dryRunEnabled && maxResidualWorktreeBytes > 0 && !skillDir) {
+  throw new Error(`${SKILL_DIR_HINT}。残置バイト・空き容量の測定スクリプトの場所に使う。省略できるのは dryRun: true か maxResidualWorktreeBytes: 0 のときだけ`)
 }
 
 // agent を数える関数へ差し替える（Issue #592。根拠は agentBudget 宣言部）。呼び出し箇所は書き換えず
