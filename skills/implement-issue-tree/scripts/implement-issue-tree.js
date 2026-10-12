@@ -4472,7 +4472,7 @@ function stopReasons(f) {
 const r = []
 if (f.halted) r.push('halt')
 if (!f.resume && shouldSkipForNewStartSuppressed(f.latch, f.kind)) r.push('latch')
-if (f.waiting?.length) r.push('dep')
+if (f.waiting?.length || f.failedDeps?.length) r.push('dep')
 if (f.gate) r.push('gate')
 if (f.held) r.push('budget')
 return r
@@ -4490,13 +4490,15 @@ return `エージェント呼び出し数の予算不足で保留（保留時の
 
 
 
+
+
 function stopNote(f, b) {
 const r = stopReasons(f)
 if (r.length === 0) return f.resume ? '再実行すると monitor からの再開を試みる' : 'スケジューラ終了時に未着手（キュー未到達）'
 const part = {
 halt: `${f.resume ? 'halt のため再開しなかった' : 'halted により未着手'}（理由: ${f.halted?.reason}）`,
 latch: `残置 worktree 上限ゲートにより新規着手を抑止（理由: ${f.latch?.reason}）`,
-dep: `前提 ${formatIssueList(f.waiting ?? [])} が未完了のため待機`,
+dep: [f.waiting?.length && `前提 ${formatIssueList(f.waiting)} が未完了のため待機`, f.failedDeps?.length && `前提 ${formatIssueList(f.failedDeps)} は完了していない（失敗・ブロックとして記録済み）`].filter(Boolean).join('。'),
 gate: f.held ? `${f.gate}（この理由は前回の評価。予算で保留した周回では再評価していない）` : f.gate,
 budget: f.held ? budgetHeldText(f.held, b.limit, b.starts) : '',
 }
@@ -10191,7 +10193,9 @@ const interrupted = pending.filter((n) => isActiveMonitoring(n))
 
 const workKind = new Map(work.map((q) => [q.number, q.kind]))
 const workItem = new Map(work.map((q) => [q.number, q]))
-const stopFacts = (n) => ({ resume: isActiveMonitoring(n), kind: workKind.get(n), halted, latch: newStartSuppressed, waiting: [...depsOf(workItem.get(n))].filter((d) => !done.has(d)), gate: monitoringResumeGateDeferred.get(n), held: agentBudgetHeld.get(n) })
+
+const unmetDeps = (n) => [...depsOf(workItem.get(n))].filter((d) => !done.has(d))
+const stopFacts = (n) => ({ resume: isActiveMonitoring(n), kind: workKind.get(n), halted, latch: newStartSuppressed, waiting: unmetDeps(n).filter((d) => !failedSet.has(d)), failedDeps: unmetDeps(n).filter((d) => failedSet.has(d)), gate: monitoringResumeGateDeferred.get(n), held: agentBudgetHeld.get(n) })
 const budgetOnly = (n) => { const r = stopReasons(stopFacts(n)); return r.length === 1 && r[0] === 'budget' }
 
 

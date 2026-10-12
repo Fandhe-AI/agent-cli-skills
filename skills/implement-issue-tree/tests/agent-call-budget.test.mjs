@@ -484,7 +484,7 @@ const heldRequired = (note) => {
   return m ? Number(m[1]) : null
 }
 // 予算だけが理由の note: 予算の断片があり、halt・ラッチ・前提待ち・ゲート（前回の評価）の断片が無い。
-const soleBudget = (t) => t.includes(BUDGET_MARK) && !/halted により|halt のため|残置 worktree 上限ゲートにより|が未完了のため待機|前回の評価/.test(t)
+const soleBudget = (t) => t.includes(BUDGET_MARK) && !/halted により|halt のため|残置 worktree 上限ゲートにより|が未完了のため待機|は完了していない（失敗|前回の評価/.test(t)
 // 次ランの予測・言い切り・下限・上乗せの語を使わない（生成される全 note・終了ログの回帰検査に使う）。
 const PREDICTION = /同じ引数で再実行すると *(着手|再開|monitor)|分割|下限値|少なくとも|余裕を見た|にして再実行/
 const LEGACY_PHRASE = /同じ引数で再実行すると *(着手|再開|monitor)|余裕を見た|下限値|にして再実行/
@@ -812,8 +812,15 @@ const HELDS = {
   at1001: { used: 90, required: 911, needed: 1001 },
   big: { used: 90, required: 1410, needed: 1500 },
 }
-// 前提待ちの未完了ノード（先頭 5 件 + 件数の表記を確かめるため 2 通り）
-const WAITINGS = { none: [], few: [2], many: [2, 3, 4, 5, 6, 7, 8] }
+// 前提は 2 種類に分けて書く: waiting = まだ決着していない前提（done にも failedSet にも無い。「待機」）、failedDeps = 既に failedSet に記録された前提
+// （失敗・ブロック、ツリー外で open のままの前提を含む。待っているのではなく決着済みで、完了していない）。先頭 5 件 + 件数の表記も確かめる。
+const DEPCASES = {
+  none: { waiting: [], failedDeps: [] },
+  pending: { waiting: [2], failedDeps: [] },
+  pendingMany: { waiting: [2, 3, 4, 5, 6, 7, 8], failedDeps: [] },
+  failed: { waiting: [], failedDeps: [9] },
+  both: { waiting: [2, 3], failedDeps: [9, 10] },
+}
 const BUDGET_CTX = { limit: 100, starts: 3 }
 for (const [k, h] of Object.entries(HELDS)) assert.ok(h.needed > BUDGET_CTX.limit && h.needed === h.used + h.required, `HELDS.${k} は保留の不変条件を満たす`)
 
@@ -822,10 +829,10 @@ function* stopRows() {
     for (const kind of ['implement', 'verify-close']) {
       for (const halted of [null, HALT]) {
         for (const latch of [null, LATCH, LATCH_IMPL_ONLY]) {
-          for (const waitCase of Object.keys(WAITINGS)) {
+          for (const waitCase of Object.keys(DEPCASES)) {
             for (const gate of [undefined, GATE]) {
               for (const heldCase of [undefined, ...Object.keys(HELDS)]) {
-                yield { resume, kind, halted, latch, waitCase, waiting: WAITINGS[waitCase], gate, heldCase, held: heldCase && HELDS[heldCase] }
+                yield { resume, kind, halted, latch, waitCase, ...DEPCASES[waitCase], gate, heldCase, held: heldCase && HELDS[heldCase] }
               }
             }
           }
@@ -836,11 +843,11 @@ function* stopRows() {
 }
 // 到達不能: ゲート理由は implement の再開だけが持つ。ゲート評価・予算検査は前提を満たした（ready な）ノードにしか走らないので、
 // 前提待ちのノードはゲート理由も予算保留も持たない（前提は後退しない）。
-const reachable = (r) => !(r.gate && !(r.resume && r.kind === 'implement')) && !(r.waiting.length > 0 && (r.gate || r.held))
+const reachable = (r) => !(r.gate && !(r.resume && r.kind === 'implement')) && !((r.waiting.length > 0 || r.failedDeps.length > 0) && (r.gate || r.held))
 const expectedReasons = (r) => [
   r.halted && 'halt',
   !r.resume && r.latch && (!r.latch.implementOnly || r.kind === 'implement') && 'latch',
-  r.waiting.length > 0 && 'dep',
+  (r.waiting.length > 0 || r.failedDeps.length > 0) && 'dep',
   r.gate && 'gate',
   r.held && 'budget',
 ].filter(Boolean)
@@ -855,11 +862,16 @@ function checkNote(row, note) {
   assert.equal(has(row.resume ? 'halt のため再開しなかった' : 'halted により未着手'), order.includes('halt'), `halt の文言: ${where}\n${note}`)
   assert.equal(has('LATCH_REASON_X'), order.includes('latch'), `ラッチの理由は適用される行にだけ: ${where}\n${note}`)
   assert.equal(has('残置 worktree 上限ゲートにより新規着手を抑止'), order.includes('latch'), `ラッチの文言: ${where}\n${note}`)
-  assert.equal(has('が未完了のため待機'), order.includes('dep'), `前提待ちの理由: ${where}\n${note}`)
-  if (order.includes('dep')) {
-    const shown = row.waiting.length <= 5 ? row.waiting.map((n) => `#${n}`).join(', ') : `${row.waiting.length} 件（先頭 5 件: ${row.waiting.slice(0, 5).map((n) => `#${n}`).join(', ')}）`
-    assert.ok(has(`前提 ${shown} が未完了のため待機`), `前提待ちは番号（多いときは先頭 5 件 + 件数）を示す: ${where}\n${note}`)
-  }
+  assert.equal(has('前提 '), order.includes('dep'), `前提の理由: ${where}\n${note}`)
+  const shownList = (list) => (list.length <= 5 ? list.map((n) => `#${n}`).join(', ') : `${list.length} 件（先頭 5 件: ${list.slice(0, 5).map((n) => `#${n}`).join(', ')}）`)
+  const waitText = row.waiting.length > 0 ? `前提 ${shownList(row.waiting)} が未完了のため待機` : null
+  const failedText = row.failedDeps.length > 0 ? `前提 ${shownList(row.failedDeps)} は完了していない（失敗・ブロックとして記録済み）` : null
+  assert.equal(has('が未完了のため待機'), waitText !== null, `未決着の前提だけを「待機」と書く: ${where}\n${note}`)
+  assert.equal(has('は完了していない（失敗・ブロックとして記録済み）'), failedText !== null, `決着済みの前提は待機とは書かず、完了していない事実として書く: ${where}\n${note}`)
+  for (const n of row.failedDeps) assert.ok(!new RegExp(`前提[^。]*#${n}[^。]*が未完了のため待機`).test(note), `失敗済みの前提 #${n} を待機と書かない: ${where}\n${note}`)
+  if (waitText) assert.ok(has(waitText), `未決着の前提は番号（多いときは先頭 5 件 + 件数）を示す: ${where}\n${note}`)
+  if (failedText) assert.ok(has(failedText), `決着済みの前提は番号を示す: ${where}\n${note}`)
+  if (waitText && failedText) assert.ok(note.indexOf(waitText) < note.indexOf(failedText), `未決着 → 決着済みの順: ${where}\n${note}`)
   assert.equal(has('GATE_REASON_X'), order.includes('gate'), `ゲートの理由: ${where}\n${note}`)
   assert.equal(has('前回の評価') && has('再評価していない'), order.includes('gate') && order.includes('budget'), `ゲートが前回の評価と分かるのは予算保留と併存するときだけ: ${where}\n${note}`)
   assert.equal(has(BUDGET_MARK), order.includes('budget'), `予算の断片は予算保留があるときだけ: ${where}\n${note}`)
@@ -887,7 +899,7 @@ test('単体: 停止理由の全組み合わせ（軸 × 種別の表）で、no
   let budgetRows = 0
   let defaults = 0
   for (const row of stopRows()) {
-    const facts = { resume: row.resume, kind: row.kind, halted: row.halted, latch: row.latch, waiting: row.waiting, gate: row.gate, held: row.held }
+    const facts = { resume: row.resume, kind: row.kind, halted: row.halted, latch: row.latch, waiting: row.waiting, failedDeps: row.failedDeps, gate: row.gate, held: row.held }
     const reasons = stopReasons(facts)
     assert.deepEqual(reasons, expectedReasons(row), `理由の集合と順序: ${JSON.stringify(row)}`)
     const note = stopNote(facts, BUDGET_CTX)
@@ -904,7 +916,7 @@ test('単体: 停止理由の全組み合わせ（軸 × 種別の表）で、no
 
 test('単体: 名前付きの行 — #600（ゲートで defer → 予算保留 → halt）と #596 #597 #598 が指した組み合わせ、needed の境界 (1000 / 1001)、前提待ち', () => {
   const ctx = BUDGET_CTX
-  const base = { resume: false, kind: 'implement', halted: null, latch: null, waiting: [], gate: undefined, held: undefined }
+  const base = { resume: false, kind: 'implement', halted: null, latch: null, waiting: [], failedDeps: [], gate: undefined, held: undefined }
   // #600: ゲート（前回の評価）・予算・halt が併存。halt が落ちず、先頭に来る。
   const n600 = stopNote({ ...base, resume: true, halted: HALT, gate: GATE, held: HELDS.normal }, ctx)
   assert.match(n600, /^halt のため再開しなかった（理由: HALT_REASON_X）。GATE_REASON_X.*（この理由は前回の評価。予算で保留した周回では再評価していない）。エージェント呼び出し数の予算不足で保留/, n600)
@@ -926,6 +938,9 @@ test('単体: 名前付きの行 — #600（ゲートで defer → 予算保留 
   assert.equal(stopNote({ ...base, resume: true, halted: HALT }, ctx), 'halt のため再開しなかった（理由: HALT_REASON_X）')
   // 前提待ちの再開（#3 が #2 に依存し、#2 が予算保留）: 理由 0 件の既定文にせず、前提待ちを理由に挙げる。
   assert.equal(stopNote({ ...base, resume: true, waiting: [2] }, ctx), '前提 #2 が未完了のため待機')
+  // 決着済み（failedSet）の前提は「待機」と書かない。未決着の前提と両方あるときは 未決着 → 決着済み の順に並べる。
+  assert.equal(stopNote({ ...base, resume: true, failedDeps: [3] }, ctx), '前提 #3 は完了していない（失敗・ブロックとして記録済み）')
+  assert.equal(stopNote({ ...base, resume: true, waiting: [2], failedDeps: [3] }, ctx), '前提 #2 が未完了のため待機。前提 #3 は完了していない（失敗・ブロックとして記録済み）')
   // 理由が 1 つも無い再開の既定文は、再開の結果を言い切らない。
   assert.equal(stopNote({ ...base, resume: true }, ctx), '再実行すると monitor からの再開を試みる')
   // needed の境界: 1000 は指定できる上限ちょうど、1001 から「指定できる上限を超える」という事実を添える。分割の案内は出さない。
@@ -1184,4 +1199,17 @@ test('結合: 前提ノードが予算保留で再開できないとき、前提
   assert.ok(n3.includes('前提 #2 が未完了のため待機'), n3)
   assert.doesNotMatch(n3, /再開する|再開に乗る|同じ引数/, `前提が未完了の再開について、再実行すれば再開すると言い切らない: ${n3}`)
   assertStarvedConsistent(result, '前提待ちの再開', logs)
+})
+
+test('結合: 未決着の前提と失敗済みの前提を両方持つ再開は、失敗済みの前提を「待機」と書かず、完了していない事実として書く (Issue #600 追加是正。上流 Bugbot の指摘)', async () => {
+  // 保存済み monitoring の #4 は #2（未決着。開始処理で使い切った残りでは予算保留）と #3（保存済みの merged だが再開情報なしで failedSet 入り）に依存する。
+  // 別の未決着の依存で 'wait' に留まるため、失敗済みの #3 も unmet に入る。以前は両方を「未完了のため待機」と書いていた。
+  const tree = budgetTree({ ready: [2, 3, 4], pad: 1600 }).map((nd) => (nd.number === 4 ? { ...nd, dependsOn: [2, 3] } : nd))
+  const { result, logs } = await runScript({ args: { ...BASE_ARGS, agentCallLimit: 81 }, tree, saved: { 2: resumeSaved(2), 3: mergedNoResume, 4: resumeSaved(4) } })
+  assert.ok(result.interrupted.includes(2) && result.interrupted.includes(4))
+  assert.ok(result.agentBudget.held.some((h) => h.issue === 2) && !result.agentBudget.held.some((h) => h.issue === 4), '#2 は予算保留（未決着）、#4 は前提待ちで予算検査に届かない')
+  const n4 = noteOf(result, 4)
+  assert.ok(n4.includes('前提 #2 が未完了のため待機。前提 #3 は完了していない（失敗・ブロックとして記録済み）'), n4)
+  assert.doesNotMatch(n4, /#3[^。]*が未完了のため待機/, `失敗済みの #3 を待機と書かない: ${n4}`)
+  assertStarvedConsistent(result, '未決着 + 失敗済みの前提', logs)
 })
