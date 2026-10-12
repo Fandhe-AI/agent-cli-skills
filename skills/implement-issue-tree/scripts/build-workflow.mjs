@@ -15,12 +15,19 @@
 // 守るための措置。空白除去は、詰めても同じ 2 トークンに字句解析される隣接の組だけを許可リスト
 // （shouldSqueezeSpace）で詰め、迷う組は詰めない。
 // lexer の `/` 判別（除算と正規表現）は、直前のトークンだけでは決まらない箇所がある。決められる範囲
-// （非 ASCII 識別子・`of`・`if` / `for` / `while` / `with` の括弧の直後・正規表現リテラルの直後）は
-// lexer が直し、決められない範囲（`}` の直後 = ブロックの終わりかオブジェクトリテラルの終わりか、など）は
-// 除算側に倒したうえで、誤読で文字列・テンプレートの中身が詰められても気づけるよう、ビルド（生成時と
-// --check の両方）で生成物のトークン列（種類・値・開始行）が開発ファイルのトークン列と一致することを
-// Node 同梱の acorn で照合する（verifyTokenParity）。不一致・acorn を取得できない Node・字句解析の失敗・
-// 照合結果が想定の形でない場合はいずれも生成ファイルを書かずに非ゼロ終了する（fail-closed）。
+// （非 ASCII 識別子・`of`・`if` / `for` / `for await` / `while` / `with` の括弧の直後・プロパティ名・private 名・
+// 正規表現リテラルの直後）は lexer が直し、決められない範囲（`}` の直後 = ブロックの終わりか
+// オブジェクトリテラルの終わりか）は除算側に倒す。lexer が誤読して文字列・テンプレートの中身を詰めたり
+// コードをコメントとして消したりしても気づけるよう、ビルド（生成時と --check の両方）で、生成物と開発
+// ファイルを Node 同梱の acorn の**パーサ**（acorn.parse の onToken）で読んで、トークン列（種類・値・開始行）が
+// 一致することを照合する（verifyTokenParity）。パーサは文脈（ブロックかオブジェクトか、条件の括弧、
+// for await 等）を決めるので、acorn.tokenizer 単体の比較のように lexer と同じ位置で `/` を誤読して
+// 「同じ誤読」で一致することがない。開発ファイルをパースできない（検査できない）・生成物をパースできない・
+// トークン列が違う・acorn を取得できない Node・照合結果が想定の形でない場合は、いずれも生成ファイルを書かずに
+// 非ゼロ終了する（fail-closed）。照合を通ったとき保証されるのは、生成物が開発ファイルと同じトークン列
+// （コメントと空白を除く）の ES モジュールであること。保証されないのは、`}` の直後など lexer が決められない
+// 箇所の誤読を lexer が防ぐことで、その場合ビルドが止まる（`}` の直後に正規表現を置いた開発ファイルは
+// ビルドできない。括弧で包む・変数に代入する等で避ける）。
 // 生成物の鮮度（開発ファイルとの同期）は tests/build-workflow.test.mjs が CI で検証する —
 // 生成物を直接編集したりビルドを忘れたりすると byte 不一致で fail する。
 //
@@ -28,8 +35,9 @@
 //   node skills/implement-issue-tree/scripts/build-workflow.mjs          # 生成して書き込み
 //   node skills/implement-issue-tree/scripts/build-workflow.mjs --check  # 書き込まず鮮度確認
 //   --src <path> / --dist <path> で入力の開発ファイル・出力（--check では比較対象）の実行ファイルを差し替える
-//   （テスト用。既定はこのディレクトリの implement-issue-tree.src.js / implement-issue-tree.js）
-//   --token-diff <path> でトークン照合ヘルパーを差し替える（テスト用。照合を実行できない場合の中止を確かめる）
+//   （テスト用。既定はこのディレクトリの implement-issue-tree.src.js / implement-issue-tree.js）。値が無い・
+//   未知の引数は既定値へ戻らず使い方のエラー（exit 2）。トークン照合を差し替える引数は無い（迂回できてしまうため）。
+//   照合の差し替え（テスト用）は runBuild / verifyTokenParity の引数だけで行う
 import { spawnSync } from 'node:child_process'
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -202,20 +210,29 @@ export function shouldSqueezeSpace(prev, next, rules = SQUEEZE_REFUSAL_RULES) {
  * - 直前が `)` のときは、その括弧を開いた直前の単語で決める。`if` / `for` / `while` / `with`
  *   （プロパティ名でない）なら条件の括弧の終わりなので正規表現（`if (x) /re/`）、それ以外は除算
  *   （`f(x) / 2`・`(a) / b`）
+ * - `for await (` の括弧は `for` の括弧（`await` の直前の単語が `for`）。`await (x) / 2` は除算
+ * - プロパティ名（`obj.if(x)`・private 名 `this.#if(x)`・`this.#in`）はキーワードと同名でも識別子
+ * - 角括弧・波括弧も積むので、`for (x of [of / 2])` の `of` は識別子（括弧の直下でない）
  * - 決められない箇所は除算側に倒す: `}` の直後（ブロックの終わりなら正規表現、オブジェクト
- *   リテラルの終わりなら除算）、`for await (...)` の括弧の直後（`await` が直前の単語になる）
+ *   リテラルの終わりなら除算）
  * - 逆に正規表現と読むと決めた箇所が実は除算だった場合に備え、正規表現と読んだ行の残りは
  *   文字列・テンプレートの中身を詰めない（squeezeOff）
  *
- * 残る制約: 上の「除算側に倒す」箇所で実際は正規表現であり、その中にバッククォートがあると、以降の
- * テンプレートの開閉が反転して中身を詰める。lexer では解かず、ビルド時のトークン照合
- * （verifyTokenParity）が止める。`}` の直後に限らず、正規表現と除算が構文上どちらも成立する位置は
- * この lexer では決められない。
+ * 残る制約: 上の「除算側に倒す」箇所（`}` の直後）で実際は正規表現のとき、その中にバッククォートが
+ * あると以降のテンプレートの開閉が反転して中身を詰め、`//` `/*` があるとコードをコメントとして消す。
+ * lexer では解かず、ビルド時のトークン照合（verifyTokenParity）が止める — 開発ファイル側は
+ * ブロックの直後に正規表現を置かない（`if (a) { b() }` の次の文を `/re/.test(s)` で始めない）。
+ * `for (` の括弧の中で変数 `of` を除算に使う形（`i < of / 2`）は正規表現と読むが、閉じ `/` が無ければ
+ * 除算に戻り、あっても行の残りを詰めない。
+ * 後置 `++` / `--` の判定は直前 2 文字が `++` `--` かだけを見るため、空白で離れた `x-- - /re/`（後置 `--` の次の
+ * 二項 `-` の直後の正規表現）や `a - -/re/` も除算と読む。正規表現内に `//` `/*` バッククォートがあれば
+ * コードが消える・開閉が反転するが、ビルド時のトークン照合（パーサ）が止める。
  *
- * 誤判定の安全性: 除算を正規表現と誤読しても出力は素通しで不変。危険なのは正規表現内の
- * `//` を行コメントと誤認して以降を削る方向のみで、それを判別分岐が防ぐ。変換の妥当性は
- * ビルド時検証（行数保持・先頭 meta 宣言・冪等性）と tests/build-workflow.test.mjs の
- * 固定ケース + 生成物パースゲートで担保する。
+ * 誤判定の安全性: 除算を正規表現と読んでも、その行の残りは詰めないのでリテラルの中身は変わらない。
+ * 危険なのは正規表現を除算と読む方向（正規表現内の `//` を行コメントと誤認して以降を削る、バッククォートで
+ * テンプレートの開閉が反転する）で、それは上の判別とビルド時のトークン照合が防ぐ。変換の妥当性は
+ * ビルド時検証（行数保持・先頭 meta 宣言・冪等性・トークン照合）と tests/build-workflow.test.mjs の
+ * 固定ケース + 生成的テスト + 生成物パースゲートで担保する。
  */
 export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shouldSqueezeSpace } = {}) {
   let out = ''
@@ -245,6 +262,9 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
   // sigWord の直前の非空白文字。`.` なら sigWord はプロパティ名であり、キーワードと同名でも
   // 識別子として扱う（`obj.in / 2` を regex と誤読しないため — Bugbot 指摘）
   let wordPrev = ''
+  // sigWord の 1 つ前の単語（sigWord が始まった時点で、まだ句読点に遮られていなかった直前の sigWord）。
+  // `for await (` の `await` の前が `for` であることの判定に使う
+  let wordBefore = ''
   // 直近に出力した `.` が数字と字句的に隣接していたか（`1.` = 数値リテラルの末尾ドット）。
   // `1 .in` のように空白を挟む `.` は数値へのプロパティアクセスなので false。非空白文字の
   // 並びだけでは両者を区別できない（PR #454 codex P1）ため、`.` 出力時点の rawPrev で判定する。
@@ -269,6 +289,11 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
   // 直近に閉じた `)` の種類（開いた時点の直前の単語: 'if' | 'for' | 'while' | 'with'、それ以外は 'other'）。
   // 直後の `/` が `if (x) /re/` の正規表現か `f(x) / 2` の除算かの判別に使う
   let lastClosedParen = 'other'
+
+  // 直近の単語 sigWord がプロパティ名か（`obj.in`・`x.return`・private 名 `this.#if` の `if`）。
+  // プロパティ名はキーワードと同名でも識別子として扱う。`1. in /re/`（末尾ドット数値の直後の
+  // キーワード）の `.` は演算子の直前なのでプロパティ名ではない。`#` 直後の名前は private 名
+  const isPropertyName = () => (wordPrev === '.' && !wordDotAfterDigit) || wordPrev === '#'
 
   // コメント除去の直前に出力末尾の行内空白を切り詰める。コメントだけの行は空行になり、
   // `code  // c` は `code` になる（.editorconfig の trim_trailing_whitespace 準拠）
@@ -435,6 +460,7 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
         if (isWordChar(rawPrev) || rawPrevIsIdentEscape) {
           sigWord += esc
         } else {
+          wordBefore = sigWord
           sigWord = esc
           wordPrev = sigCh // 新規単語の開始: 直前の非空白文字と、それが `.` なら数字隣接を記録
           wordPrevRaw = rawPrev
@@ -454,10 +480,23 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
     // （プロパティ名でない）なら条件の括弧として記録し、閉じたときにその種類を残す。文字列・正規表現・
     // コメント・テンプレート本文の括弧はここへ来ないので数えない
     if (c === '(') {
-      const control = CONTROL_PAREN_KEYWORDS.has(sigWord) && !(wordPrev === '.' && !wordDotAfterDigit)
-      ctx.parens.push(control ? sigWord : 'other')
+      // `for await (` の括弧は `for` の括弧（直下の `of` はキーワード）。`await` が単独の式のとき
+      // （`await (x) / 2`）は対象外なので、直前が `for` のときだけ
+      const kind = sigWord === 'await' && wordBefore === 'for' ? 'for' : sigWord
+      const control = CONTROL_PAREN_KEYWORDS.has(kind) && !isPropertyName()
+      ctx.parens.push(control ? kind : 'other')
     } else if (c === ')') {
-      lastClosedParen = ctx.parens.pop() ?? 'other'
+      const top = ctx.parens.pop() ?? 'other'
+      lastClosedParen = top === '[' || top === '{' ? 'other' : top
+    } else if (c === '[') {
+      // 角括弧・波括弧も積む: `for (x of [of / 2])` の `of` は `for` の括弧の直下ではなく識別子
+      ctx.parens.push('[')
+    } else if (c === ']') {
+      if (ctx.parens[ctx.parens.length - 1] === '[') ctx.parens.pop()
+    } else if (c === '{') {
+      ctx.parens.push('{')
+    } else if (c === '}' && ctx.parens[ctx.parens.length - 1] === '{') {
+      ctx.parens.pop()
     }
     // code モードの {} 深度（template の `${` からの復帰判定）
     if (c === '{') ctx.depth++
@@ -487,7 +526,7 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
       // 除算側へ倒す（Bugbot 指摘）。キーワード本体（`return /re/`・`in /re/`）は regex のまま
       // 末尾ドット数値直後のキーワード（`1. in /re/`）はプロパティ名ではない（Bugbot 指摘）。
       // 数値へのプロパティアクセス `1 .in / 2` は字句隣接でないためプロパティ名として除算側
-      const keywordProperty = wordPrev === '.' && !wordDotAfterDigit
+      const keywordProperty = isPropertyName()
       // `of` は for の括弧の直下でだけキーワード（`for (x of /re/.exec(s))`）。それ以外は識別子
       const ofIsIdentifier = sigWord === 'of' && ctx.parens[ctx.parens.length - 1] !== 'for'
       // `if (x) /re/` の `)` は条件の括弧を閉じた直後なので正規表現。`}` の直後はブロックの終わり
@@ -554,6 +593,7 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
       if (isLowSurrogate(c) || isIdentifierContinuationRaw(rawPrev, rawPrev2) || rawPrevIsIdentEscape || rawPrevContinuesSigWord) {
         sigWord += c
       } else {
+        wordBefore = sigWord
         sigWord = c
         wordPrev = sigCh // 新規単語の開始: 直前の非空白文字と、それが `.` なら数字隣接を記録
         wordPrevRaw = rawPrev // `.` 判定で「単語開始直前が識別子文字か」を見るため生文字も保持
@@ -656,15 +696,24 @@ export function buildArtifact(src) {
 }
 
 /**
- * 生成物のトークン列が開発ファイルのトークン列と一致することを acorn で照合する。lexer
- * （stripComments）とは独立の字句解析なので、lexer が `/` を誤読して文字列・テンプレート・正規表現の
- * 中身を変えても検出できる。コメントはトークンに出ないため開発ファイルをそのまま比べる。比較は種類・
- * 値・開始行で、sourceType は module と script の両方。一致しなければ最初の差の位置（行番号と前後の
- * トークン）を含めて throw する。acorn を取得できない Node でも黙って飛ばさず throw する。
+ * 生成物のトークン列が開発ファイルのトークン列と一致することを、acorn のパーサ（onToken）で照合する。
+ * lexer（stripComments）とは独立の解析で、lexer が `/` を誤読して文字列・テンプレート・正規表現の中身を
+ * 変えたり、コードをコメントとして消したりしても検出できる。パーサは文脈（`/` が除算か正規表現か、
+ * `if (x) /re/` の括弧、ブロックかオブジェクトリテラルか、for await の括弧）を決めるので、tokenizer 単体の
+ * 比較と違い、lexer と同じ位置で `/` を誤読して「同じ誤読」で一致してしまうことがない
+ * （照合の詳細は scripts/token-diff.cjs の mode: "parse"）。比較は種類・値・開始行。
+ *
+ * 次の場合はいずれも throw する（fail-closed。検査を省略して通さない）:
+ * - 開発ファイルをパースできない（検査できない）。tokenizer へのフォールバックはしない
+ * - 生成物をパースできない・トークン列が違う（最初の差の位置の行番号と前後のトークンつき）
+ * - acorn を取得できない Node・照合ヘルパーの異常終了・出力が想定の形でない
+ *
+ * `helperPath` / `execPath` は照合ヘルパーと実行ファイルの差し替え用（テストが照合を実行できない
+ * 状況を作る）。CLI からは渡せない（照合を迂回する口を本番の入口に残さない）。
  */
 export function verifyTokenParity(src, artifact, { helperPath = TOKEN_DIFF_PATH, execPath = process.execPath } = {}) {
   const r = spawnSync(execPath, ['--expose-internals', helperPath], {
-    input: JSON.stringify([{ name: 'build', before: src, after: artifact }]),
+    input: JSON.stringify([{ name: 'build', mode: 'parse', before: src, after: artifact }]),
     encoding: 'utf8',
     maxBuffer: 1 << 28,
   })
@@ -687,7 +736,85 @@ export function verifyTokenParity(src, artifact, { helperPath = TOKEN_DIFF_PATH,
     throw new Error('トークン照合の結果を解釈できない（results が 1 件の { ok: boolean } でない。検査を省略せず中止する）')
   }
   const [result] = results
-  if (!result.ok) throw new Error(`生成物のトークン列が開発ファイルと一致しない: ${result.detail}`)
+  if (result.ok) return
+  if (result.kind === 'source-unparsable') {
+    throw new Error(`開発ファイルをパースできないため照合できない（検査を省略せず中止する）: ${result.detail}`)
+  }
+  throw new Error(`生成物のトークン列が開発ファイルと一致しない: ${result.detail}`)
+}
+
+/**
+ * ビルド本体（CLI が使う関数）。開発ファイルから生成物を作ってトークン照合し、書き込む（`checkOnly` では
+ * 書かず、既存の実行ファイルとの一致だけ確かめる）。標準出力・標準エラーに出す行と終了コードを返し、
+ * 出力と終了は呼び出し側（CLI）が行う。照合に失敗したら生成ファイルは書かない。
+ * `parity` は verifyTokenParity へ渡す差し替え（`helperPath` / `execPath`。テスト専用で、CLI の引数からは渡せない）。
+ */
+export function runBuild({ srcPath = SRC_PATH, distPath = DIST_PATH, checkOnly = false, parity = {} } = {}) {
+  const startedAt = Date.now()
+  let src
+  let artifact
+  try {
+    src = readFileSync(srcPath, 'utf8')
+    artifact = buildArtifact(src)
+    verifyTokenParity(src, artifact, parity)
+  } catch (e) {
+    return { status: 1, stdout: [], stderr: [`ビルド中止（${distPath} は書き込まない）: ${e.message}`], wrote: false }
+  }
+  const srcBytes = Buffer.byteLength(src)
+  const outBytes = Buffer.byteLength(artifact)
+  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(2)
+  if (checkOnly) {
+    let current
+    try {
+      current = readFileSync(distPath, 'utf8')
+    } catch (e) {
+      return { status: 1, stdout: [], stderr: [`鮮度エラー: 実行ファイルを読めない（${distPath}）: ${e.message}`], wrote: false }
+    }
+    if (current !== artifact) {
+      return {
+        status: 1,
+        stdout: [],
+        stderr: ['鮮度エラー: 実行ファイルが開発ファイルと同期していない。node build-workflow.mjs で再生成せよ'],
+        wrote: false,
+      }
+    }
+    return { status: 0, stdout: [`鮮度 ok: ${outBytes} B（src ${srcBytes} B・トークン照合 ok・${elapsed}s）`], stderr: [], wrote: false }
+  }
+  writeFileSync(distPath, artifact)
+  return {
+    status: 0,
+    stdout: [
+      `生成完了: ${distPath}`,
+      `src ${srcBytes} B → dist ${outBytes} B（-${srcBytes - outBytes} B, -${Math.round(((srcBytes - outBytes) / srcBytes) * 100)}%・トークン照合 ok・${elapsed}s）`,
+    ],
+    stderr: [],
+    wrote: true,
+  }
+}
+
+const USAGE = '使い方: node build-workflow.mjs [--check] [--src <path>] [--dist <path>]'
+
+/**
+ * コマンドライン引数を解釈する。未知の引数・値のないオプション（末尾、または次が別のオプション）は
+ * 既定値へ黙って戻らず、使い方のエラーとして `error` を返す。照合を差し替える口は持たない。
+ */
+export function parseArgs(argv) {
+  const out = { checkOnly: false, srcPath: SRC_PATH, distPath: DIST_PATH, error: null }
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === '--check') {
+      out.checkOnly = true
+    } else if (a === '--src' || a === '--dist') {
+      const v = argv[i + 1]
+      if (v === undefined || v.startsWith('--')) return { ...out, error: `${a} に値がない` }
+      if (a === '--src') out.srcPath = v
+      else out.distPath = v
+      i++
+    } else {
+      return { ...out, error: `未知の引数: ${a}` }
+    }
+  }
+  return out
 }
 
 // CLI 実行部（import 時は実行しない）。argv[1] は realpath で比較する — import.meta.url は
@@ -701,38 +828,13 @@ const invokedAs = (() => {
   }
 })()
 if (invokedAs && invokedAs === fileURLToPath(import.meta.url)) {
-  const argValue = (flag, fallback) => {
-    const at = process.argv.indexOf(flag)
-    return at === -1 ? fallback : (process.argv[at + 1] ?? fallback)
+  const args = parseArgs(process.argv.slice(2))
+  if (args.error) {
+    console.error(`${args.error}\n${USAGE}`)
+    process.exit(2)
   }
-  const checkOnly = process.argv.includes('--check')
-  const srcPath = argValue('--src', SRC_PATH)
-  const distPath = argValue('--dist', DIST_PATH)
-  const tokenDiffPath = argValue('--token-diff', TOKEN_DIFF_PATH)
-  const startedAt = Date.now()
-  let src
-  let artifact
-  try {
-    src = readFileSync(srcPath, 'utf8')
-    artifact = buildArtifact(src)
-    verifyTokenParity(src, artifact, { helperPath: tokenDiffPath })
-  } catch (e) {
-    console.error(`ビルド中止（${distPath} は書き込まない）: ${e.message}`)
-    process.exit(1)
-  }
-  const srcBytes = Buffer.byteLength(src)
-  const outBytes = Buffer.byteLength(artifact)
-  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(2)
-  if (checkOnly) {
-    const current = readFileSync(distPath, 'utf8')
-    if (current !== artifact) {
-      console.error('鮮度エラー: 実行ファイルが開発ファイルと同期していない。node build-workflow.mjs で再生成せよ')
-      process.exit(1)
-    }
-    console.log(`鮮度 ok: ${outBytes} B（src ${srcBytes} B・トークン照合 ok・${elapsed}s）`)
-  } else {
-    writeFileSync(distPath, artifact)
-    console.log(`生成完了: ${distPath}`)
-    console.log(`src ${srcBytes} B → dist ${outBytes} B（-${srcBytes - outBytes} B, -${Math.round(((srcBytes - outBytes) / srcBytes) * 100)}%・トークン照合 ok・${elapsed}s）`)
-  }
+  const r = runBuild(args)
+  for (const line of r.stdout) console.log(line)
+  for (const line of r.stderr) console.error(line)
+  process.exit(r.status)
 }
