@@ -4384,12 +4384,24 @@ const BLOCKED_STATE_CHUNK_SIZE = 100
 // フォールバック・agentRetryOnce の再試行・fix の再起動も agent() を呼び直すので、呼び出し箇所を
 // 書き換えず駆動部で agent を数える関数へ差し替えれば（wrapAgentCounting）実際の起動数と一致する。
 // pipeline() は使わない。呼ぶ前に数えるため、例外・null 返却の呼び出しも 1 件に入る（起動はした）。
-// 引数 agentCallLimit は下げる方向にだけ使える（ランタイムの上限を超える値は受け付けない）。
+// 引数 agentCallLimit は「新規着手・monitoring 再開を止める判断に使う、ランタイム上限の想定値」で、
+// 呼び出しそのものは止めない。開始処理・終了処理・実行中の issue は上限を超えても続行する: 実行中の
+// issue の途中で呼び出しを止めると、本機構が防ぎたい半端な状態をスクリプト自身が作るため。ハード
+// キャップはランタイムが持つ。値は下限（AGENT_CALL_LIMIT_MIN）以上 1000 以下に限り、矛盾する入力
+// （開始処理だけで使い切る値）は受理しない。
 const AGENT_RUN_LIMIT = 1000
+// 開始処理（未追跡検査・nonce・loadState と照合・ツリー取得・外部チェック観測・依存宣言と祖先と
+// ツリー外前提の取得・init-all・孤立スキャン・残置の観測・HEAD 検査）が着手前に使う呼び出し数の見込み。
+// 依存宣言はチャンク数に比例するため約 20 に余裕 10 を足した。
+const AGENT_CALLS_START = 30
 function parseAgentCallLimit(raw) {
   if (raw === undefined || raw === null) return AGENT_RUN_LIMIT
-  if (!Number.isInteger(raw) || raw < 1 || raw > AGENT_RUN_LIMIT) {
-    throw new Error(`args.agentCallLimit は 1〜${AGENT_RUN_LIMIT} の整数で指定すること（省略時 ${AGENT_RUN_LIMIT}。ランタイム上限を下げる用途のみ。Issue #592）`)
+  // 下限 = 開始処理 + 終了処理の予備（固定分）+ 1 issue の目安 + 1。これ未満だと 1 件も着手できないか、
+  // 開始処理だけで使い切って予算判定の前提が崩れる。AGENT_CALLS_PER_ISSUE 等は下で宣言するが、
+  // 本関数は宣言後（agentBudget の初期化時）にしか呼ばれない。
+  const min = AGENT_CALLS_START + AGENT_CALLS_TERMINAL_BASE + AGENT_CALLS_PER_ISSUE.implement + 1
+  if (!Number.isInteger(raw) || raw < min || raw > AGENT_RUN_LIMIT) {
+    throw new Error(`args.agentCallLimit は ${min}〜${AGENT_RUN_LIMIT} の整数で指定すること（省略時 ${AGENT_RUN_LIMIT}。新規着手を止める判断に使うランタイム上限の想定値で、呼び出し自体は止めない。下限は開始処理 + 終了処理の予備 + 1 issue の目安。Issue #592）`)
   }
   return raw
 }
@@ -4408,9 +4420,15 @@ const AGENT_CALLS_PER_ISSUE = { implement: 30, resume: 12, close: 6 }
 // 再測定の再試行を含めても約 20 に収まる。いずれも予算ゲートの対象ではなく無条件に実行される。
 const AGENT_CALLS_TERMINAL_BASE = 20
 const agentBudget = { limit: parseAgentCallLimit(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.agentCallLimit : undefined), used: 0, enforced: false, stoppedDispatchAt: null }
-function wrapAgentCounting(raw, budget) {
+// 上限（budget.limit）を超えても呼び出しは止めない（上のコメント参照）。超えた最初の 1 回だけ warn で知らせる。
+function wrapAgentCounting(raw, budget, warn = () => {}) {
+  let warned = false
   return (...a) => {
     budget.used += 1
+    if (!warned && budget.used > budget.limit) {
+      warned = true
+      warn(`⚠️ エージェント呼び出し数が想定上限 ${budget.limit} を超えた（使用 ${budget.used}）。呼び出しは止めない。ランタイムの上限（${AGENT_RUN_LIMIT}）に達すると打ち切られる`)
+    }
     return raw(...a)
   }
 }
@@ -5998,7 +6016,7 @@ if (!Number.isInteger(parent) || parent <= 0) {
 // module として import するテストで ReferenceError にならないため。再束縛できない実行環境では
 // 数えられず、予算ゲートは効かない（enforced: false を返却値とログで見えるようにする）。
 {
-  const countedAgent = wrapAgentCounting(agent, agentBudget)
+  const countedAgent = wrapAgentCounting(agent, agentBudget, log)
   try { agent = countedAgent } catch { /* 下の同一性検査で検出する */ }
   agentBudget.enforced = agent === countedAgent
   if (!agentBudget.enforced) log('⚠️ agent を数える関数へ差し替えられないため、エージェント呼び出し数の予算ゲートは無効（返却値 agentBudget.enforced: false）')

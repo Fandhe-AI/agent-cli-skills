@@ -5,7 +5,8 @@
 //      実行中の issue は完了まで進める。止めた分は未着手（not-started）として理由付きで返す。
 //   3. 上限が十分大きければ従来どおり全件着手する。
 //   4. 上限での打ち切りで監視に進めなかった PR を返却値 unmonitoredPrs とログに出す。
-//   5. args.agentCallLimit はランタイム上限を超えて上げられない。
+//   5. args.agentCallLimit は新規着手を止める判断に使う想定値で、呼び出し自体は止めない。下限（81）未満と
+//      1000 超は受理しない。超過時は最初の 1 回だけ警告し、呼び出しは続行する。
 //
 // 検証の二層構造: 定義部をスライス import して純粋関数を直接実行（単体）し、実装スクリプト全体を
 // Workflow ランタイムと同じ評価形態（AsyncFunction。agent は引数）で stub agent に対して実行する（結合）。
@@ -31,7 +32,7 @@ const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-agent-budget-'
 const slicePath = join(sliceDir, 'implement-issue-tree-agent-budget-defs.mjs')
 // 旧実装（修正前）にはこれらの宣言が無い。RED 確認用に typeof ガードで存在しない名前を undefined にする。
 const SLICE_EXPORTS = [
-  'AGENT_RUN_LIMIT', 'AGENT_CALLS_PER_ISSUE', 'AGENT_CALLS_TERMINAL_BASE', 'BLOCKED_STATE_CHUNK_SIZE',
+  'AGENT_RUN_LIMIT', 'AGENT_CALLS_START', 'AGENT_CALLS_PER_ISSUE', 'AGENT_CALLS_TERMINAL_BASE', 'BLOCKED_STATE_CHUNK_SIZE',
   'parseAgentCallLimit', 'wrapAgentCounting', 'agentBudgetHold', 'sha256Hex', 'canonicalJson',
   'declaredDepsChecksum', 'outOfTreeStateChecksum',
 ]
@@ -42,7 +43,7 @@ globalThis.log = () => {}
 writeFileSync(slicePath, `${definitionPart}\n${optionalExports}\nexport { ${exportList} }\n`)
 const mod = await import(pathToFileURL(slicePath).href)
 const {
-  AGENT_RUN_LIMIT, AGENT_CALLS_PER_ISSUE, AGENT_CALLS_TERMINAL_BASE, BLOCKED_STATE_CHUNK_SIZE,
+  AGENT_RUN_LIMIT, AGENT_CALLS_START, AGENT_CALLS_PER_ISSUE, AGENT_CALLS_TERMINAL_BASE, BLOCKED_STATE_CHUNK_SIZE,
   parseAgentCallLimit, wrapAgentCounting, agentBudgetHold, declaredDepsChecksum, outOfTreeStateChecksum,
 } = mod
 
@@ -50,15 +51,18 @@ const {
 // 単体
 // ---------------------------------------------------------------------------
 
-test('単体: 上限はランタイムの 1,000 件で、agentCallLimit は下げる方向にだけ使える', () => {
+test('単体: 既定はランタイムの 1,000 件で、agentCallLimit は下限（開始処理 + 終了処理の予備 + 1 issue の目安 + 1）〜1000 に限る', () => {
   assert.equal(AGENT_RUN_LIMIT, 1000)
+  const min = AGENT_CALLS_START + AGENT_CALLS_TERMINAL_BASE + AGENT_CALLS_PER_ISSUE.implement + 1
+  assert.equal(min, 81)
   assert.equal(parseAgentCallLimit(undefined), 1000)
   assert.equal(parseAgentCallLimit(null), 1000)
-  assert.equal(parseAgentCallLimit(80), 80)
+  assert.equal(parseAgentCallLimit(min), min)
   assert.equal(parseAgentCallLimit(1000), 1000)
-  for (const bad of [0, -1, 1001, 1.5, '100', true, NaN]) {
+  for (const bad of [1, 0, -1, min - 1, 1001, 1.5, '100', true, NaN]) {
     assert.throws(() => parseAgentCallLimit(bad), /agentCallLimit/, String(bad))
   }
+  assert.throws(() => parseAgentCallLimit(1), /81〜1000/, 'エラーメッセージに範囲を示す')
 })
 
 test('単体: wrapAgentCounting は呼び出す前に数え、null 返却・例外・引数をそのまま通す', async () => {
@@ -74,6 +78,18 @@ test('単体: wrapAgentCounting は呼び出す前に数え、null 返却・例�
   await assert.rejects(() => wrapped('p3', { label: 'boom' }), /x/)
   assert.equal(budget.used, 3, 'null 返却・例外も起動した 1 件として数える')
   assert.deepEqual(seen.map((s) => s[0]), ['p1', 'p2', 'p3'])
+})
+
+test('単体: 上限を超えると警告を最初の 1 回だけ出し、呼び出しは止めない', async () => {
+  const budget = { limit: 3, used: 0 }
+  const warns = []
+  const wrapped = wrapAgentCounting(async () => 'ran', budget, (m) => warns.push(m))
+  for (let i = 0; i < 3; i++) assert.equal(await wrapped('p', {}), 'ran')
+  assert.deepEqual(warns, [], '上限ちょうどまでは警告しない')
+  for (let i = 0; i < 4; i++) assert.equal(await wrapped('p', {}), 'ran', '超過後も呼び出しは実行される')
+  assert.equal(warns.length, 1, '警告は 1 回だけ')
+  assert.match(warns[0], /想定上限 3/)
+  assert.equal(budget.used, 7)
 })
 
 test('単体: agentBudgetHold の式は「実行中 × 目安 + 候補の目安 + 終了処理の予備」', () => {
@@ -103,6 +119,7 @@ test('単体: 生成元は agent() の呼び出し箇所を変えず、pipeline(
   const dist = readFileSync(join(dirname(SCRIPT_PATH), 'implement-issue-tree.js'), 'utf8')
   assert.doesNotMatch(dist, /\bpipeline\(/, 'pipeline() が増えると agent() 呼び出し数とランタイムの数がずれる（コメント除去済みの生成物で検査）')
   assert.ok(driverPart.includes('agent = countedAgent'), '駆動部で agent を再束縛する')
+  assert.ok(driverPart.includes('wrapAgentCounting(agent, agentBudget, log)'), '超過の警告をラン中のログへ出す')
   assert.ok(!definitionPart.includes('agent = countedAgent'), '定義部に置くとスライス import のテストが ReferenceError になる')
 })
 

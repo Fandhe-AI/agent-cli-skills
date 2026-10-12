@@ -4385,11 +4385,23 @@ const BLOCKED_STATE_CHUNK_SIZE = 100
 
 
 
+
+
+
+
 const AGENT_RUN_LIMIT = 1000
+
+
+
+const AGENT_CALLS_START = 30
 function parseAgentCallLimit(raw) {
 if (raw === undefined || raw === null) return AGENT_RUN_LIMIT
-if (!Number.isInteger(raw) || raw < 1 || raw > AGENT_RUN_LIMIT) {
-throw new Error(`args.agentCallLimit は 1〜${AGENT_RUN_LIMIT} の整数で指定すること（省略時 ${AGENT_RUN_LIMIT}。ランタイム上限を下げる用途のみ。Issue #592）`)
+
+
+
+const min = AGENT_CALLS_START + AGENT_CALLS_TERMINAL_BASE + AGENT_CALLS_PER_ISSUE.implement + 1
+if (!Number.isInteger(raw) || raw < min || raw > AGENT_RUN_LIMIT) {
+throw new Error(`args.agentCallLimit は ${min}〜${AGENT_RUN_LIMIT} の整数で指定すること（省略時 ${AGENT_RUN_LIMIT}。新規着手を止める判断に使うランタイム上限の想定値で、呼び出し自体は止めない。下限は開始処理 + 終了処理の予備 + 1 issue の目安。Issue #592）`)
 }
 return raw
 }
@@ -4408,9 +4420,15 @@ const AGENT_CALLS_PER_ISSUE = { implement: 30, resume: 12, close: 6 }
 
 const AGENT_CALLS_TERMINAL_BASE = 20
 const agentBudget = { limit: parseAgentCallLimit(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.agentCallLimit : undefined), used: 0, enforced: false, stoppedDispatchAt: null }
-function wrapAgentCounting(raw, budget) {
+
+function wrapAgentCounting(raw, budget, warn = () => {}) {
+let warned = false
 return (...a) => {
 budget.used += 1
+if (!warned && budget.used > budget.limit) {
+warned = true
+warn(`⚠️ エージェント呼び出し数が想定上限 ${budget.limit} を超えた（使用 ${budget.used}）。呼び出しは止めない。ランタイムの上限（${AGENT_RUN_LIMIT}）に達すると打ち切られる`)
+}
 return raw(...a)
 }
 }
@@ -5998,7 +6016,7 @@ throw new Error('親イシュー番号を args で指定すること（例: {"pa
 
 
 {
-const countedAgent = wrapAgentCounting(agent, agentBudget)
+const countedAgent = wrapAgentCounting(agent, agentBudget, log)
 try { agent = countedAgent } catch {  }
 agentBudget.enforced = agent === countedAgent
 if (!agentBudget.enforced) log('⚠️ agent を数える関数へ差し替えられないため、エージェント呼び出し数の予算ゲートは無効（返却値 agentBudget.enforced: false）')
