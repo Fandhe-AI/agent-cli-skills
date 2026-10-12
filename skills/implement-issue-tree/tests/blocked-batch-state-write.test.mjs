@@ -257,7 +257,7 @@ test('estimateDispatch: 着手見込み・ツリー外前提待ち・phaseGate�
   const r = estimateDispatch(work, depsMap, done, failed, { outOfTreeWait: new Set([900]), phaseGateEdgeKeys: new Set(['6->2']) })
   assert.deepEqual(r.startable, [2, 5, 6])
   assert.equal(r.readyNow, 1)
-  assert.deepEqual(r.blocked, { outOfTree: [3], phaseGate: [], downstream: [4] })
+  assert.deepEqual(r.blocked, { outOfTree: [3], phaseGate: [], downstream: [4], optinTestsInvalid: [], savedBranchMismatch: [] })
   assert.deepEqual([...done], [], '入力の done を書き換えない')
   assert.deepEqual([...failed], [900], '入力の failedSet を書き換えない')
 })
@@ -266,7 +266,23 @@ test('estimateDispatch: phaseGate 辺の先が失敗済みなら phaseGate に�
   const work = [10, 11].map((number) => ({ number }))
   const depsMap = new Map([[10, new Set([900])], [11, new Set([10])]])
   const r = estimateDispatch(work, depsMap, new Set(), new Set([900]), { outOfTreeWait: new Set([900]), phaseGateEdgeKeys: new Set(['11->10']) })
-  assert.deepEqual(r.blocked, { outOfTree: [10], phaseGate: [11], downstream: [] })
+  assert.deepEqual(r.blocked, { outOfTree: [10], phaseGate: [11], downstream: [], optinTestsInvalid: [], savedBranchMismatch: [] })
+})
+
+test('estimateDispatch: 前提を満たしても自身が実行前ゲートで blocked になるノードは着手見込みに入れず、下流へ伝播する', () => {
+  const work = [20, 21, 22, 23, 24].map((number) => ({ number }))
+  const depsMap = new Map([
+    [20, new Set()], // opt-in 宣言不備の葉
+    [21, new Set([20])], // 20 の下流
+    [22, new Set()], // 保存済み branch が別 issue の命名
+    [23, new Set([900])], // 依存で止まる。自身も宣言不備だが、実行されないので依存側に分類する
+    [24, new Set()], // 正常
+  ])
+  const selfBlocked = new Map([[20, 'optinTestsInvalid'], [22, 'savedBranchMismatch'], [23, 'optinTestsInvalid']])
+  const r = estimateDispatch(work, depsMap, new Set(), new Set([900]), { outOfTreeWait: new Set([900]), phaseGateEdgeKeys: new Set(), selfBlocked })
+  assert.deepEqual(r.startable, [24])
+  assert.equal(r.readyNow, 1, '自身が blocked になるノードは「今すぐ着手できる」に数えない')
+  assert.deepEqual(r.blocked, { outOfTree: [23], phaseGate: [], downstream: [21], optinTestsInvalid: [20], savedBranchMismatch: [22] })
 })
 
 // ---------------------------------------------------------------------------
@@ -288,6 +304,7 @@ function buildTree(specs) {
     parent: s.parent,
     siblingIndex: s.parent === 0 ? 0 : kids.get(s.parent).indexOf(s.number),
     dependsOn: s.dependsOn ?? [],
+    ...(s.optinTests ? { optinTests: s.optinTests } : {}),
     subIssuesTotal: (kids.get(s.number) ?? []).length,
   }))
 }
@@ -318,7 +335,8 @@ async function runScript({ args, nodes, saved = null, ootStates = { [OOT]: 'OPEN
       if (saved === null) return { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 }
       return { ...stateVerifyFor(saved), highWaterVersion: 2 }
     }
-    if (label === 'plan:issue-tree') return { nodes }
+    // スクリプトが返却ノードを書き換える（optinTests の採用結果）ため、実行ごとに複製して返す。
+    if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }
     if (label.startsWith('plan:declared-deps')) {
       const m = /for n in ([0-9 ]+); do/.exec(prompt)
@@ -459,9 +477,38 @@ test('結合: dryRun は状態ファイル・worktree・実装系のエージェ
   assert.deepEqual(result.blocked.outOfTree, { count: 1, first: [3] })
   assert.deepEqual(result.blocked.downstream, { count: 2, first: [4, 1] })
   assert.deepEqual(result.blocked.phaseGate, { count: 0, first: [] })
+  assert.deepEqual(result.blocked.optinTestsInvalid, { count: 0, first: [] })
   assert.deepEqual(result.outOfTreeDeps.open, [OOT])
   assert.equal(result.total, 4)
   assert.ok(logs.some((l) => l.startsWith('dryRun:')))
+})
+
+test('結合: dryRun は opt-in 宣言不備の葉とその下流を blocked に数え、着手見込みに入れない（通常実行の runImplement ゲートと一致）', async () => {
+  // 2: 承認一覧（args.optinTestCommands 未指定）に無い宣言を持つ葉 / 3: 2 の下流 / 4: 正常
+  const nodes = buildTree([
+    { number: 1, parent: 0 },
+    { number: 2, parent: 1, optinTests: ['make deploy'] },
+    { number: 3, parent: 1, dependsOn: [2] },
+    { number: 4, parent: 1 },
+  ])
+  const dry = await runScript({ args: { parent: 1, dryRun: true }, nodes })
+  assert.deepEqual(dry.result.startable, { count: 1, readyNow: 1, first: [4] })
+  assert.deepEqual(dry.result.blocked.optinTestsInvalid, { count: 1, first: [2] })
+  assert.deepEqual(dry.result.blocked.downstream, { count: 2, first: [3, 1] })
+  assert.equal(dry.result.blocked.count, 3)
+  // 通常実行でも 2 は blocked（halt 非カウント）で、3 と 1 は前提失敗で止まる。dryRun の見積りと同じ集合。
+  // 残置上限ゲートは stub に worktree 一覧が無く新規着手を抑止してしまうため無効化する。
+  const real = await runScript({ args: { parent: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0 }, nodes })
+  const blockedReal = real.result.done.filter((d) => d.status === 'blocked').map((d) => d.issue).sort((a, b) => a - b)
+  assert.deepEqual(blockedReal, [1, 2, 3])
+})
+
+test('結合: dryRun は状態ファイルの branch が本イシューの命名でないノードを blocked（savedBranchMismatch）に数える', async () => {
+  const nodes = buildTree([{ number: 1, parent: 0 }, { number: 5, parent: 1 }, { number: 6, parent: 1 }])
+  const saved = { 5: { type: 'implement', status: 'pending', pr: 0, branch: 'feat/999-other', worktree: '', fixCount: 0, note: '' } }
+  const { result } = await runScript({ args: { parent: 1, dryRun: true }, nodes, saved })
+  assert.deepEqual(result.blocked.savedBranchMismatch, { count: 1, first: [5] })
+  assert.deepEqual(result.startable.first, [6])
 })
 
 test('結合: dryRun の phaseGate 内訳 — 前 Phase がツリー外前提待ちなら後続は phaseGate に数える', async () => {

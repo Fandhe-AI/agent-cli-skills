@@ -4295,14 +4295,21 @@ failedChunks,
 
 
 
-function estimateDispatch(work, depsMap, done0, failed0, { outOfTreeWait, phaseGateEdgeKeys }) {
+
+
+
+
+
+
+
+function estimateDispatch(work, depsMap, done0, failed0, { outOfTreeWait, phaseGateEdgeKeys, selfBlocked = new Map() }) {
 const done = new Set(done0)
 const failed = new Set(failed0)
 const preBlocked = work.filter((i) => failed.has(i.number)).map((i) => i.number)
 const depsOfNumber = (n) => depsMap.get(n) ?? new Set()
-const readyNow = work.filter((i) => !failed.has(i.number) && classifyDispatchReadiness(depsOfNumber(i.number), done0, failed0) === 'ready').length
+const readyNow = work.filter((i) => !failed.has(i.number) && !selfBlocked.has(i.number) && classifyDispatchReadiness(depsOfNumber(i.number), done0, failed0) === 'ready').length
 const startable = []
-const blocked = { outOfTree: [], phaseGate: [], downstream: [] }
+const blocked = { outOfTree: [], phaseGate: [], downstream: [], optinTestsInvalid: [], savedBranchMismatch: [] }
 const decided = new Set()
 let changed = true
 while (changed) {
@@ -4316,6 +4323,12 @@ if (readiness === 'wait') continue
 decided.add(n)
 changed = true
 if (readiness === 'ready') {
+const own = selfBlocked.get(n)
+if (own) {
+blocked[own].push(n)
+failed.add(n)
+continue
+}
 startable.push(n)
 done.add(n)
 continue
@@ -8810,9 +8823,20 @@ log(`#${item.number}: ${note}`)
 
 
 if (dryRunEnabled) {
-const plan = estimateDispatch(work, depsMap, done, new Set(failedSet), { outOfTreeWait, phaseGateEdgeKeys })
-const blockedCount = plan.blocked.outOfTree.length + plan.blocked.phaseGate.length + plan.blocked.downstream.length
-log(`dryRun: 着手見込み ${plan.startable.length} 件（今すぐ ${plan.readyNow} 件）・blocked 見込み ${blockedCount} 件（ツリー外前提待ち ${plan.blocked.outOfTree.length}・phaseGate ${plan.blocked.phaseGate.length}・下流 ${plan.blocked.downstream.length}）・ツリー外の open な前提 ${outOfTreeDeps.open.length} 件。状態ファイル・worktree・PR・issue へは何も書いていない`)
+
+
+const selfBlocked = new Map()
+for (const item of work) {
+if (item.kind !== 'implement') continue
+if (Array.isArray(item.optinTestsInvalid) && item.optinTestsInvalid.length > 0) selfBlocked.set(item.number, 'optinTestsInvalid')
+else {
+const savedBranch = savedItems[String(item.number)]?.branch
+if (savedBranch && !branchMatchesIssue(String(savedBranch), item.number)) selfBlocked.set(item.number, 'savedBranchMismatch')
+}
+}
+const plan = estimateDispatch(work, depsMap, done, new Set(failedSet), { outOfTreeWait, phaseGateEdgeKeys, selfBlocked })
+const blockedCount = Object.values(plan.blocked).reduce((sum, list) => sum + list.length, 0)
+log(`dryRun: 着手見込み ${plan.startable.length} 件（今すぐ ${plan.readyNow} 件）・blocked 見込み ${blockedCount} 件（ツリー外前提待ち ${plan.blocked.outOfTree.length}・phaseGate ${plan.blocked.phaseGate.length}・下流 ${plan.blocked.downstream.length}・opt-in 宣言不備 ${plan.blocked.optinTestsInvalid.length}・保存済み branch 不一致 ${plan.blocked.savedBranchMismatch.length}）・ツリー外の open な前提 ${outOfTreeDeps.open.length} 件。状態ファイル・worktree・PR・issue へは何も書いていない`)
 return {
 dryRun: true,
 parent,
@@ -8828,6 +8852,8 @@ count: blockedCount,
 outOfTree: { count: plan.blocked.outOfTree.length, first: plan.blocked.outOfTree.slice(0, 5) },
 phaseGate: { count: plan.blocked.phaseGate.length, first: plan.blocked.phaseGate.slice(0, 5) },
 downstream: { count: plan.blocked.downstream.length, first: plan.blocked.downstream.slice(0, 5) },
+optinTestsInvalid: { count: plan.blocked.optinTestsInvalid.length, first: plan.blocked.optinTestsInvalid.slice(0, 5) },
+savedBranchMismatch: { count: plan.blocked.savedBranchMismatch.length, first: plan.blocked.savedBranchMismatch.slice(0, 5) },
 },
 preBlocked: plan.preBlocked,
 undetermined: plan.undetermined,

@@ -4290,19 +4290,26 @@ async function writeBlockedStateBatch(entries, savedItems) {
 // dryRun 用の事前見積り（Issue #585）。副作用なし。スケジューラの確定ロジックと同じ判定関数
 // （classifyDispatchReadiness）で、着手できたノードが全て成功する前提の連鎖を fixpoint まで進める。
 //   startable — 着手見込み（post-order 順）。readyNow — そのうち前提が全て done で今すぐ着手できる件数
-//   blocked   — 失敗済みの前提を持ち、全前提が確定したノード。原因を次の優先順で 1 つに分類する:
-//     outOfTree（ツリー外の open な前提を直接待つ）/ phaseGate（前 Phase 未完了の合成辺）/ downstream
-//     （それ以外。子・dependsOn・上記の下流）
+//   blocked   — 通常実行で必ず blocked になるノード。原因を 1 つに分類する。優先順は上から:
+//     1. 依存で止まる（失敗済みの前提を持ち全前提が確定。実行されないため自身の条件は見ない）:
+//        outOfTree（ツリー外の open な前提を直接待つ）→ phaseGate（前 Phase 未完了の合成辺）→
+//        downstream（それ以外。子・dependsOn・上記の下流）
+//     2. 前提は満たすが自身が実行前に blocked で終端する（selfBlocked。runImplement の冒頭ゲート）:
+//        optinTestsInvalid（承認一覧に無い opt-in テスト宣言。monitoring 再開中の PR も対象）→
+//        savedBranchMismatch（状態ファイルの branch が本イシューの命名でない）。ゲートの実行順と同じ
+//   どちらも failed に入れて下流へ伝播させる（通常実行の failedSet → cascade と同じ）。
 //   preBlocked — 状態ファイル由来で最初から failedSet に入っているノード（内容照合不成立等）
-// ここでは halt・残置 worktree 上限ゲート・CI 結果は評価しない（実行時にしか分からない）。
-function estimateDispatch(work, depsMap, done0, failed0, { outOfTreeWait, phaseGateEdgeKeys }) {
+// selfBlocked は Map<番号, 原因キー>。実行前（Tree 取得・状態ファイル読込）に確定する条件だけを呼び出し側
+// が渡す。halt・残置 worktree 上限ゲート・CI 結果・PR 照合（checkPrBinding）など実行時にしか分からない
+// 条件は評価しない。
+function estimateDispatch(work, depsMap, done0, failed0, { outOfTreeWait, phaseGateEdgeKeys, selfBlocked = new Map() }) {
   const done = new Set(done0)
   const failed = new Set(failed0)
   const preBlocked = work.filter((i) => failed.has(i.number)).map((i) => i.number)
   const depsOfNumber = (n) => depsMap.get(n) ?? new Set()
-  const readyNow = work.filter((i) => !failed.has(i.number) && classifyDispatchReadiness(depsOfNumber(i.number), done0, failed0) === 'ready').length
+  const readyNow = work.filter((i) => !failed.has(i.number) && !selfBlocked.has(i.number) && classifyDispatchReadiness(depsOfNumber(i.number), done0, failed0) === 'ready').length
   const startable = []
-  const blocked = { outOfTree: [], phaseGate: [], downstream: [] }
+  const blocked = { outOfTree: [], phaseGate: [], downstream: [], optinTestsInvalid: [], savedBranchMismatch: [] }
   const decided = new Set()
   let changed = true
   while (changed) {
@@ -4316,6 +4323,12 @@ function estimateDispatch(work, depsMap, done0, failed0, { outOfTreeWait, phaseG
       decided.add(n)
       changed = true
       if (readiness === 'ready') {
+        const own = selfBlocked.get(n)
+        if (own) {
+          blocked[own].push(n)
+          failed.add(n)
+          continue
+        }
         startable.push(n)
         done.add(n)
         continue
@@ -8810,9 +8823,20 @@ async function markBlockedByDeps(item, allFailedDeps) {
 // 書いていない（初期化・孤立記録・残置実測は上でガード済み）。着手見込みと blocked の見積りを返して
 // 終了する。dispatch・cascade・状態書き込みは行わない。返却の先頭は通常ランの返却と区別する。
 if (dryRunEnabled) {
-  const plan = estimateDispatch(work, depsMap, done, new Set(failedSet), { outOfTreeWait, phaseGateEdgeKeys })
-  const blockedCount = plan.blocked.outOfTree.length + plan.blocked.phaseGate.length + plan.blocked.downstream.length
-  log(`dryRun: 着手見込み ${plan.startable.length} 件（今すぐ ${plan.readyNow} 件）・blocked 見込み ${blockedCount} 件（ツリー外前提待ち ${plan.blocked.outOfTree.length}・phaseGate ${plan.blocked.phaseGate.length}・下流 ${plan.blocked.downstream.length}）・ツリー外の open な前提 ${outOfTreeDeps.open.length} 件。状態ファイル・worktree・PR・issue へは何も書いていない`)
+  // 実行前に確定していて通常実行では runImplement の冒頭で必ず blocked になる条件（実装ノードのみ。
+  // ゲートの順序は runImplement と同じ: opt-in 宣言不備 → 保存済み branch の命名不一致）。
+  const selfBlocked = new Map()
+  for (const item of work) {
+    if (item.kind !== 'implement') continue
+    if (Array.isArray(item.optinTestsInvalid) && item.optinTestsInvalid.length > 0) selfBlocked.set(item.number, 'optinTestsInvalid')
+    else {
+      const savedBranch = savedItems[String(item.number)]?.branch
+      if (savedBranch && !branchMatchesIssue(String(savedBranch), item.number)) selfBlocked.set(item.number, 'savedBranchMismatch')
+    }
+  }
+  const plan = estimateDispatch(work, depsMap, done, new Set(failedSet), { outOfTreeWait, phaseGateEdgeKeys, selfBlocked })
+  const blockedCount = Object.values(plan.blocked).reduce((sum, list) => sum + list.length, 0)
+  log(`dryRun: 着手見込み ${plan.startable.length} 件（今すぐ ${plan.readyNow} 件）・blocked 見込み ${blockedCount} 件（ツリー外前提待ち ${plan.blocked.outOfTree.length}・phaseGate ${plan.blocked.phaseGate.length}・下流 ${plan.blocked.downstream.length}・opt-in 宣言不備 ${plan.blocked.optinTestsInvalid.length}・保存済み branch 不一致 ${plan.blocked.savedBranchMismatch.length}）・ツリー外の open な前提 ${outOfTreeDeps.open.length} 件。状態ファイル・worktree・PR・issue へは何も書いていない`)
   return {
     dryRun: true,
     parent,
@@ -8828,6 +8852,8 @@ if (dryRunEnabled) {
       outOfTree: { count: plan.blocked.outOfTree.length, first: plan.blocked.outOfTree.slice(0, 5) },
       phaseGate: { count: plan.blocked.phaseGate.length, first: plan.blocked.phaseGate.slice(0, 5) },
       downstream: { count: plan.blocked.downstream.length, first: plan.blocked.downstream.slice(0, 5) },
+      optinTestsInvalid: { count: plan.blocked.optinTestsInvalid.length, first: plan.blocked.optinTestsInvalid.slice(0, 5) },
+      savedBranchMismatch: { count: plan.blocked.savedBranchMismatch.length, first: plan.blocked.savedBranchMismatch.slice(0, 5) },
     },
     preBlocked: plan.preBlocked,
     undetermined: plan.undetermined,
