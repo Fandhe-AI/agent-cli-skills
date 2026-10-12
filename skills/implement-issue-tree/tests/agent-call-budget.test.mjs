@@ -106,6 +106,15 @@ test('単体: 生成元は agent() の呼び出し箇所を変えず、pipeline(
   assert.ok(!definitionPart.includes('agent = countedAgent'), '定義部に置くとスライス import のテストが ReferenceError になる')
 })
 
+test('単体: 差し替えより前に agent() が呼ばれない（定義部にトップレベル await が無く、駆動部で差し替えが最初の await より前）', () => {
+  assert.doesNotMatch(definitionPart, /^(await |(const|let|var) [^=\n]*= await |for await )/m, '定義部のトップレベルで agent() を呼ぶと数え漏れになる')
+  const swap = driverPart.indexOf('agent = countedAgent')
+  assert.ok(swap > 0)
+  assert.ok(!/\bawait\b/.test(driverPart.slice(0, swap).replace(/\/\/.*$/gm, '')), '差し替えより前の駆動部に await が無い')
+  // extractDeclaredDeps（定義部の関数。レート制限時に待って再試行する）も呼び出し時に束縛を解決するため、差し替え後の呼び出しは数えられる
+  assert.ok(driverPart.indexOf('extractDeclaredDeps(chunks') > swap)
+})
+
 // ---------------------------------------------------------------------------
 // 結合
 // ---------------------------------------------------------------------------

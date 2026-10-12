@@ -4404,7 +4404,8 @@ function parseAgentCallLimit(raw) {
 const AGENT_CALLS_PER_ISSUE = { implement: 30, resume: 12, close: 6 }
 // 終了処理の予備の固定分。ループ後に走るのは writeBlockedStateBatch（下の chunks 分を別に加える）、
 // scanOrphanWorktrees、終了時 loadState、容量の終了時実測、スイープ、メイン worktree の
-// 未追跡検査で、再測定の再試行を含めても約 20 に収まる。
+// 未追跡検査と HEAD 検査（worktree:head-scan。開始時 1 回は使用済みに入り、終了時 1 回がここ）で、
+// 再測定の再試行を含めても約 20 に収まる。いずれも予算ゲートの対象ではなく無条件に実行される。
 const AGENT_CALLS_TERMINAL_BASE = 20
 const agentBudget = { limit: parseAgentCallLimit(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.agentCallLimit : undefined), used: 0, enforced: false, stoppedDispatchAt: null }
 function wrapAgentCounting(raw, budget) {
