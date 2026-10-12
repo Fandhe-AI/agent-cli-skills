@@ -10222,7 +10222,9 @@ for (const n of interrupted) {
   // （上限ゲートの defer・halt・予算の保留が併存すれば全部を示す。Issue #598 #600）。
   const { pr, status } = savedItems[String(n)]
   results.push({ issue: n, status, pr, note: `中断時に ${status}（${PR_RECORD_UNVERIFIED(pr)}）。${stopNote(stopFacts(n), agentBudget)}` })
-  log(`#${n}: 再開できないまま ${status} 状態を維持する（PR #${pr} の再開情報を保持）`)
+  // 再開可否はここでは断定しない。同じノードの note（stopNote）は「再実行すると monitor からの再開を試みる」、
+  // 直後の集計ログは「monitor 再開可能な中断」と書く。このランが monitor を再開しなかった事実だけを書く。
+  log(`#${n}: monitor 中断のまま終了（状態 ${status}・PR #${pr} の再開情報を保持）`)
 }
 if (notStarted.length > 0) {
   log(`未着手のまま終了: ${formatIssueList(notStarted)}`)

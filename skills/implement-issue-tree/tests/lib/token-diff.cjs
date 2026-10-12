@@ -3,47 +3,64 @@
 // `node --expose-internals` を付けた子プロセスでしか読み込めないため、tests/build-workflow.test.mjs
 // が spawnSync で本ファイルを起動する（通常の `node --test` は --expose-internals を伝播しない）。
 //
-// 入力（stdin）: JSON `[{ "name": string, "before": string, "after": string }]`
+// 入力（stdin）: JSON `[{ "name": string, "before": string, "after": string, "lenient"?: boolean }]`
 // 出力（stdout）: JSON `{ "acornVersion": string, "results": [{ "name", "ok", "detail" }] }`
-//   ok が true = 変換前後のトークン列が完全一致。tokenizer が例外を投げた場合は ok: false。
+//   ok が true = 変換前後のトークン列が完全一致。
+//
+// 字句解析は sourceType を module と script の両方で行い、両方の一致を要求する。`<!--` と行頭の
+// `-->` は HTML 風コメントで、script でだけコメントとして読まれる（module では普通の演算子列）ため、
+// module だけでは空白を詰めて `a<!--b` ができた場合の変化を検出できない。
+//
+// lenient が偽（既定）: tokenizer が例外を投げたら ok: false（実ファイルや固定ケースは必ず字句解析できる）。
+// lenient が真: 構文エラーになる入力も比べる。例外までに得たトークン列と、例外が起きたか否かを比較し、
+// 変換前後の一方だけが例外になる・例外までのトークンが違う場合を不一致とする（生成的テスト用）。
 'use strict'
 
 const acorn = require('internal/deps/acorn/acorn/dist/acorn')
 
-const tokenize = (code) => {
+const SOURCE_TYPES = ['module', 'script']
+
+// 例外までのトークンを返す。error は例外メッセージ（無ければ null）
+const tokenize = (code, sourceType) => {
   const tokens = []
-  for (const t of acorn.tokenizer(code, { ecmaVersion: 'latest', sourceType: 'module', locations: true })) {
-    tokens.push([t.type.label, code.slice(t.start, t.end), t.loc.start.line])
+  try {
+    for (const t of acorn.tokenizer(code, { ecmaVersion: 'latest', sourceType, locations: true })) {
+      tokens.push([t.type.label, code.slice(t.start, t.end), t.loc.start.line])
+    }
+  } catch (e) {
+    return { tokens, error: e.message }
   }
-  return tokens
+  return { tokens, error: null }
 }
 
-const compare = ({ name, before, after }) => {
-  let a
-  let b
-  try {
-    a = tokenize(before)
-  } catch (e) {
-    return { name, ok: false, detail: `変換前の字句解析に失敗: ${e.message}` }
+const compareOne = (before, after, sourceType, lenient) => {
+  const a = tokenize(before, sourceType)
+  const b = tokenize(after, sourceType)
+  const tag = `[${sourceType}]`
+  if (!lenient) {
+    if (a.error) return `${tag} 変換前の字句解析に失敗: ${a.error}`
+    if (b.error) return `${tag} 変換後の字句解析に失敗: ${b.error}`
+  } else if ((a.error === null) !== (b.error === null)) {
+    return `${tag} 例外の有無が不一致（変換前 ${a.error ?? 'なし'} / 変換後 ${b.error ?? 'なし'}）`
   }
-  try {
-    b = tokenize(after)
-  } catch (e) {
-    return { name, ok: false, detail: `変換後の字句解析に失敗: ${e.message}` }
+  if (a.tokens.length !== b.tokens.length) {
+    return `${tag} トークン数が不一致（変換前 ${a.tokens.length} / 変換後 ${b.tokens.length}）`
   }
-  if (a.length !== b.length) {
-    return { name, ok: false, detail: `トークン数が不一致（変換前 ${a.length} / 変換後 ${b.length}）` }
-  }
-  for (let i = 0; i < a.length; i++) {
-    if (a[i][0] !== b[i][0] || a[i][1] !== b[i][1] || a[i][2] !== b[i][2]) {
-      return {
-        name,
-        ok: false,
-        detail: `トークン ${i} が不一致: ${JSON.stringify(a[i])} ≠ ${JSON.stringify(b[i])}`,
-      }
+  for (let i = 0; i < a.tokens.length; i++) {
+    if (a.tokens[i][0] !== b.tokens[i][0] || a.tokens[i][1] !== b.tokens[i][1] || a.tokens[i][2] !== b.tokens[i][2]) {
+      return `${tag} トークン ${i} が不一致: ${JSON.stringify(a.tokens[i])} ≠ ${JSON.stringify(b.tokens[i])}`
     }
   }
-  return { name, ok: true, detail: `${a.length} トークン一致` }
+  return null
+}
+
+const compare = ({ name, before, after, lenient = false }) => {
+  for (const sourceType of SOURCE_TYPES) {
+    const problem = compareOne(before, after, sourceType, lenient)
+    if (problem) return { name, ok: false, detail: problem }
+  }
+  const n = tokenize(before, 'script').tokens.length
+  return { name, ok: true, detail: `${n} トークン一致` }
 }
 
 const chunks = []

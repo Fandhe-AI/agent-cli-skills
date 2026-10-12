@@ -540,9 +540,9 @@ test('結合: 開始処理が小さいツリーでは starved にならず従来
   assertStarvedConsistent(result, '開始処理が小さいツリー')
 })
 
-test('結合: 予算に収まる monitoring 再開が worktree ゲートで defer されて 1 件も着手しないランも throw せず starved になる (Bugbot 指摘 1)', async () => {
-  // 再開（目安 12 + 予備 20 = 32）は収まり、実装（30 + 20 = 50）は収まらない残りになる limit だけを検査対象にする
-  // （開始処理の呼び出し数が変わっても検査が空振りしないよう掃引し、空振りしたら失敗にする）。
+// 再開（目安 12 + 予備 20 = 32）は収まり、実装（30 + 20 = 50）は収まらない残りになる limit だけを集める
+// （開始処理の呼び出し数が変わっても検査が空振りしないよう掃引する。空振りは呼び出し側が失敗にする）。
+const deferredResumeRuns = async () => {
   const hits = []
   for (let limit = 81; limit <= 100; limit++) {
     const run = await runScript({
@@ -553,9 +553,28 @@ test('結合: 予算に収まる monitoring 再開が worktree ゲートで defe
     })
     if (run.logs.some((l) => l.includes('#2:') && l.includes('monitoring 再開を defer')) && run.logs.some((l) => l.includes('新規着手を停止する'))) hits.push({ limit, ...run })
   }
+  return hits
+}
+
+test('結合: 中断した monitor ノードの終了ログは再開可否を断定せず、同じノードの note・集計ログと矛盾しない (Bugbot Low 指摘)', async () => {
+  const hits = await deferredResumeRuns()
+  assert.ok(hits.length > 0, '再開が defer されて中断として残るランが 1 つ以上ある')
+  for (const { limit, result, logs } of hits) {
+    const own = logs.filter((l) => l.startsWith('#2: ') && l.includes('再開情報を保持'))
+    assert.equal(own.length, 1, `limit ${limit}: 中断ノードの終了ログは 1 行: ${JSON.stringify(own)}`)
+    assert.ok(own[0].includes('monitor 中断のまま'), `limit ${limit}: 事実（monitor 中断のまま終了）を書く: ${own[0]}`)
+    assert.ok(!own[0].includes('再開できない'), `limit ${limit}: 再開不可を断定しない: ${own[0]}`)
+    assert.ok(logs.some((l) => l.startsWith('monitor 再開可能な中断:') && l.includes('#2')), `limit ${limit}: 集計ログは再開可能な中断として #2 を数える`)
+    const note = noteOf(result, 2)
+    assert.ok(!note.includes('再開できない'), `limit ${limit}: note も再開不可を断定しない: ${note}`)
+  }
+})
+
+test('結合: 予算に収まる monitoring 再開が worktree ゲートで defer されて 1 件も着手しないランも throw せず starved になる (Bugbot 指摘 1)', async () => {
+  const hits = await deferredResumeRuns()
   assert.ok(hits.length > 0, '再開は予算を通って worktree ゲートで defer され、実装は予算で保留されるランが 1 つ以上ある')
   for (const { limit, result, calls, logs } of hits) {
-    assert.ok(logs.some((l) => l.includes('#2: 再開できないまま monitoring 状態を維持する')) && !logs.some((l) => l.includes('halt 時も')), `limit ${limit}: halt していないランの終了ログに「halt 時も」と書かない（理由は note にある）`)
+    assert.ok(logs.some((l) => l.includes('#2: monitor 中断のまま終了（状態 monitoring')) && !logs.some((l) => l.includes('halt 時も')), `limit ${limit}: halt していないランの終了ログに「halt 時も」と書かない（理由は note にある）`)
     const a = result.agentBudget
     assert.equal(a.starts, 0, `limit ${limit}: 再開は defer され、実装は予算で保留され、1 件も着手しない`)
     assert.equal(a.starved, true, `limit ${limit}`)

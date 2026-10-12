@@ -78,52 +78,50 @@ const matchIdentifierUnicodeEscape = (src, i) => {
   return src.slice(i, i + 6)
 }
 
-// 空白除去の許可リストで使う文字の分類。ここに無い文字（`/` 以外の記号・非 ASCII・バックスラッシュ・
-// `#`・`@`・改行等）は分類なし（null）= 空白を詰めない。`.` と `/` は別扱い（下記）
+// 空白除去で使う文字の分類。ここに無い文字（`/`・非 ASCII・バックスラッシュ・`#`・`@`・改行等）は
+// 分類なし = 空白を詰めない。`/` は除算・正規表現・`//` `/*` の誤生成と判別不能を避けるため、
+// 常に詰めない
 const SQUEEZE_WORD = /[A-Za-z0-9_$]/
-const SQUEEZE_SELF_DELIMITING = '(){}[],;' // 他の文字と連結しても別トークンにならない 1 文字記号
 const SQUEEZE_QUOTES = '"\'`' // 文字列・テンプレートリテラルの境界
-const SQUEEZE_OPERATORS = '=:?!<>|&*%^+-~'
-// 演算子同士で詰めてよい組（[前の文字の集合, 後ろの文字の集合]）。`+ +` `- -` `+ ++` `< !--` `= >`
-// `? .` `* *` `& &` のように連結すると別トークンになる組を含めないため、列挙したものだけを許可する
-const SQUEEZE_OPERATOR_PAIRS = [
-  ['=:?&|*%^>!', '!~+-'],
-  ['+-', '!~'],
-]
-
-const classifyForSqueeze = (ch) => {
-  if (ch === undefined || ch === '') return null
-  if (ch === '.') return 'dot'
-  if (SQUEEZE_WORD.test(ch)) return 'word'
-  if (SQUEEZE_SELF_DELIMITING.includes(ch)) return 'self'
-  if (SQUEEZE_QUOTES.includes(ch)) return 'quote'
-  if (SQUEEZE_OPERATORS.includes(ch)) return 'op'
-  return null
-}
+const SQUEEZE_DELIMITERS = '()[]{},;' // 他の記号と連結しても別トークンにならない 1 文字記号
+const SQUEEZE_SYMBOLS = '=:?!<>|&*%^+-~.' // 上記以外の記号。記号どうしの連結は合成トークンを作り得る
 
 /**
  * トークン間の半角スペースを詰めてよいかを、直前トークンの末尾 1 文字 `prev` と直後トークンの
- * 先頭 1 文字 `next` だけで判定する純粋関数（許可リスト方式: true を返す組だけが対象）。
- * 詰めても同じ 2 トークンに字句解析される組だけを許可する。
+ * 先頭 1 文字 `next` だけで判定する純粋関数。**詰めてよい組を列挙し、それ以外はすべて残す**
+ * （fail-closed: 想定外の組は詰めない）。字句解析器の状態（直前の単語等）には頼らない。
  *
- * 詰めない組: 単語文字同士（`a b` → `ab`）、`/` の前後（除算・正規表現・`//` `/*` の誤生成）、
- * `.` の前後の大半（`1 .toString()`・`? .5`。`.` の直前が `(),;{}[]` か引用符のときだけ可）、
- * 演算子同士の大半（`+ +`・`+ ++`・`- --`・`< !--`・`= >`・`? .`・`* *`・`& &` 等）、
- * 分類なしの文字。lexer が状態から加えて除外する組 — `\u{...}` の直後・数値の指数部 `1e +`・
- * 同一行に除算の `/` がある行 — はここでは判定しない。
+ * 詰めてよい組は、次の「詰めない」条件のどれにも当たらない次のいずれか:
+ * - 単語文字（英数字・`_`・`$`）↔ 単語文字以外の分類ありの文字（記号・括弧・引用符）
+ * - 引用符 ↔ 分類ありの任意の文字
+ * - 記号どうしは、片方が `( ) [ ] { } , ;` のときだけ（`<!--`・`-->`・`++`・`--`・`=>`・`**`・
+ *   `??`・`?.` 等の合成をまとめて防ぐ。`/` は常に対象外なので `//` `/*` も作らない）
+ *
+ * 詰めない条件（上の許可に優先する）:
+ * - どちらかが分類なし、単語文字同士（`a b`）、直前が `.`（`1. a` は `1.a` で構文エラー）
+ * - 直前が数字・`e`・`E` で直後が `+` `-` `.`（`1e +2` → `1e+2`、`1 .toString()`、`1.e + 2`）。
+ *   `1.e` のように末尾ドットで単語が切れる形も隣接 2 文字だけで防ぐ
+ * - 直前が `+` `-` で直後が数字（`1e+ 2` → `1e+2`、符号の後ろの空白）
+ *
+ * lexer が状態から加えて除外する組 — `\u{...}` の直後・同一行に除算の `/` がある行 — は
+ * ここでは判定しない。
  */
 export function shouldSqueezeSpace(prev, next) {
-  const a = classifyForSqueeze(prev)
-  const b = classifyForSqueeze(next)
-  if (a === null || b === null) return false
-  if (a === 'dot') return false
-  if (b === 'dot') return a === 'self' || a === 'quote'
-  if (a === 'word' && b === 'word') return false
-  if (a === 'self' || b === 'self' || a === 'quote' || b === 'quote') return true
-  if (a === 'op' && b === 'op') {
-    return SQUEEZE_OPERATOR_PAIRS.some(([lefts, rights]) => lefts.includes(prev) && rights.includes(next))
-  }
-  return true // 単語 ↔ 演算子
+  if (typeof prev !== 'string' || typeof next !== 'string' || prev.length !== 1 || next.length !== 1) return false
+  const isWord = (ch) => SQUEEZE_WORD.test(ch)
+  const isQuote = (ch) => SQUEEZE_QUOTES.includes(ch)
+  const isDelimiter = (ch) => SQUEEZE_DELIMITERS.includes(ch)
+  const isSymbol = (ch) => SQUEEZE_SYMBOLS.includes(ch)
+  const classified = (ch) => isWord(ch) || isQuote(ch) || isDelimiter(ch) || isSymbol(ch)
+  if (!classified(prev) || !classified(next)) return false
+  if (prev === '.') return false
+  if (isWord(prev) && isWord(next)) return false
+  if (/[0-9eE]/.test(prev) && (next === '+' || next === '-' || next === '.')) return false
+  if ((prev === '+' || prev === '-') && /[0-9]/.test(next)) return false
+  const prevIsPunct = isSymbol(prev) || isDelimiter(prev)
+  const nextIsPunct = isSymbol(next) || isDelimiter(next)
+  if (prevIsPunct && nextIsPunct) return isDelimiter(prev) || isDelimiter(next)
+  return true
 }
 
 /**
@@ -266,9 +264,7 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
         const squeeze =
           shouldSqueezeSpace(prev, next) &&
           // `\u{41}` の閉じ `}` と単語文字を連結すると識別子が地続きになる
-          !(prev === '}' && rawPrevIsIdentEscape && isWordChar(next)) &&
-          // `1e +2` の空白を詰めると指数部符号（`1e+2`）になる
-          !((prev === 'e' || prev === 'E') && (next === '+' || next === '-') && /^[0-9]/.test(sigWord))
+          !(prev === '}' && rawPrevIsIdentEscape && isWordChar(next))
         if (!squeeze) out += ' '
         rawPrev2 = rawPrev
         rawPrev = ' '
