@@ -4457,7 +4457,7 @@ const chunks = Math.ceil(Math.max(pending, 0) / BLOCKED_STATE_CHUNK_SIZE)
 const required = AGENT_CALLS_PER_ISSUE.implement * running + AGENT_CALLS_PER_ISSUE[kind] + AGENT_CALLS_TERMINAL_BASE + (first ? 0 : chunks)
 
 
-return remaining < required ? { remaining, required, chunks, needed: budget.used + required + (first ? chunks : 0) } : null
+return remaining < required ? { remaining, required, chunks, needed: budget.used + required } : null
 }
 
 
@@ -4472,6 +4472,7 @@ function stopReasons(f) {
 const r = []
 if (f.halted) r.push('halt')
 if (!f.resume && shouldSkipForNewStartSuppressed(f.latch, f.kind)) r.push('latch')
+if (f.waiting?.length) r.push('dep')
 if (f.gate) r.push('gate')
 if (f.held) r.push('budget')
 return r
@@ -4481,22 +4482,23 @@ return r
 
 
 
-function budgetHeldText(h, limit, resume) {
-const head = `エージェント呼び出し数の予算不足で保留（保留時の使用 ${h.used}/${limit}）`
-if (h.needed > AGENT_RUN_LIMIT) return `${head}。保留時の観測では必要量が ${h.needed} だった（上限 ${AGENT_RUN_LIMIT} では足りない可能性がある）。対象ツリーの分割を検討する`
-return `${head}。この周回で${resume ? '再開' : '着手'}するには args.agentCallLimit が ${h.needed} 要った（余裕を見た目安。次ランの開始処理・先に着手するノード・ゲート実測で必要量は変わる）`
+
+
+function budgetHeldText(h, limit, starts) {
+return `エージェント呼び出し数の予算不足で保留（保留時の使用 ${h.used}/${limit}、必要量 ${h.required}。このランの着手 ${starts} 件）。保留した時点では args.agentCallLimit が ${h.needed} 以上なら予算検査を通った${h.needed > AGENT_RUN_LIMIT ? `（指定できる上限 ${AGENT_RUN_LIMIT} を超える）` : ''}（次ランの必要量は、開始処理・先に着手するノード・ゲート実測で変わる）`
 }
 
 
 
 function stopNote(f, b) {
 const r = stopReasons(f)
-if (r.length === 0) return f.resume ? '同じ引数で再実行すると monitor から再開する' : 'スケジューラ終了時に未着手（キュー未到達）'
+if (r.length === 0) return f.resume ? '再実行すると monitor からの再開を試みる' : 'スケジューラ終了時に未着手（キュー未到達）'
 const part = {
 halt: `${f.resume ? 'halt のため再開しなかった' : 'halted により未着手'}（理由: ${f.halted?.reason}）`,
 latch: `残置 worktree 上限ゲートにより新規着手を抑止（理由: ${f.latch?.reason}）`,
+dep: `前提 ${formatIssueList(f.waiting ?? [])} が未完了のため待機`,
 gate: f.held ? `${f.gate}（この理由は前回の評価。予算で保留した周回では再評価していない）` : f.gate,
-budget: f.held ? budgetHeldText(f.held, b.limit, f.resume) : '',
+budget: f.held ? budgetHeldText(f.held, b.limit, b.starts) : '',
 }
 return r.map((k) => part[k].replace(/。$/, '')).join('。')
 }
@@ -9123,7 +9125,7 @@ status: 'blocked',
 pr,
 
 
-note: `${note}（${PR_RECORD_UNVERIFIED(pr)}。同じ引数で再実行すると monitor から再開する）`,
+note: `${note}（${PR_RECORD_UNVERIFIED(pr)}。再実行すると monitor からの再開を試みる）`,
 })
 log(`#${item.number}: 再開情報を維持する（PR #${pr}）。依存失敗により新規着手はしない`)
 return
@@ -10188,7 +10190,8 @@ const interrupted = pending.filter((n) => isActiveMonitoring(n))
 
 
 const workKind = new Map(work.map((q) => [q.number, q.kind]))
-const stopFacts = (n) => ({ resume: isActiveMonitoring(n), kind: workKind.get(n), halted, latch: newStartSuppressed, gate: monitoringResumeGateDeferred.get(n), held: agentBudgetHeld.get(n) })
+const workItem = new Map(work.map((q) => [q.number, q]))
+const stopFacts = (n) => ({ resume: isActiveMonitoring(n), kind: workKind.get(n), halted, latch: newStartSuppressed, waiting: [...depsOf(workItem.get(n))].filter((d) => !done.has(d)), gate: monitoringResumeGateDeferred.get(n), held: agentBudgetHeld.get(n) })
 const budgetOnly = (n) => { const r = stopReasons(stopFacts(n)); return r.length === 1 && r[0] === 'budget' }
 
 
@@ -10241,10 +10244,10 @@ const unmonitoredPrList = [...unmonitoredPrs].map(([issue, e]) => ({ issue, pr: 
 
 
 const unmonitoredFmt = (resumable) => unmonitoredPrList.filter((e) => e.resumable === resumable).map((e) => `#${e.issue}→PR #${e.pr}`).join(', ')
-if (unmonitoredFmt(true)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr 保存済み）: ${unmonitoredFmt(true)}。同じ引数で再実行すると monitor から再開する`)
+if (unmonitoredFmt(true)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr 保存済み）: ${unmonitoredFmt(true)}。再実行すると monitor からの再開を試みる（状態ファイルに再開情報がある）`)
 if (unmonitoredFmt(false)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr が無い／照合未了）: ${unmonitoredFmt(false)}。再実行では monitor から再開しない。GitHub 上で PR を手動確認すること（状態ファイルの unverifiedPr があれば再実行で再照合される）`)
 log(`エージェント呼び出し数: ${agentBudget.used}/${agentBudget.limit}（新規着手停止時点 ${agentBudget.stoppedDispatchAt ?? 'なし'}）`)
-if (agentBudget.starved) log(`⚠️ 予算を使い切り 1 件も着手していない。${budgetHeldText(neededRow, agentBudget.limit, neededRow.resume)}`)
+if (agentBudget.starved) log(`⚠️ 予算不足で 1 件も着手していない。${budgetHeldText(neededRow, agentBudget.limit, agentBudget.starts)}`)
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)
 
