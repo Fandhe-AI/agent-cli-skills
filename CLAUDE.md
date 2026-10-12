@@ -22,7 +22,7 @@ skills/                               -- スキル本体（各ディレクトリ
   implement-issue-tree/
     references/                       -- 自動マージ設計・検証手順・復旧・レポート書式
     sample/                           -- 引数例・ツリー例
-    scripts/                          -- preview-tree.sh、implement-issue-tree.src.js（自動開発の開発ファイル・編集対象）、implement-issue-tree.js（build-workflow.mjs がコメント除去・コード行の先頭インデント除去・トークン間の不要な半角スペース除去をして生成する実行ファイル・直接編集禁止）、build-workflow.mjs（ビルダー）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
+    scripts/                          -- preview-tree.sh、implement-issue-tree.src.js（自動開発の開発ファイル・編集対象）、implement-issue-tree.js（build-workflow.mjs がコメント除去・コード行の先頭インデント除去・トークン間の不要な半角スペース除去をして生成する実行ファイル・直接編集禁止）、build-workflow.mjs（ビルダー。生成時と --check で生成物のトークン列を src と acorn で照合し、不一致なら書かずに中止）、token-diff.cjs（その照合ヘルパー・テストと共用）、merge-guard-hook.sh（マージ系 deny hook・best-effort）
     tests/                            -- node:test 回帰テスト（G0 ゲート・merge ループ・依存再判定・CONFLICTING→base 取り込み dispatch・Workflow 起動可否・Review 比較基準・opt-in テスト記録ゲート・state 書込みフォールバック・残置 worktree バイト測定の再測定〔転記失敗・agent 例外・StructuredOutput 欠落を有界に再測定／du 実失敗は再測定せず fail-closed〕・monitor の required context 揃い待機・ツリー取得の完全性照合〔子総数 subIssuesTotal と返却ノードの子数の不一致・欠落・番号重複で停止／5 段ツリー・closed 配下の open 子孫〕・closed 中間ノード配下の open 子孫を親の verify-close が待つ待機先〔closed を貫通して最初の open 子孫・貫通辺は循環除去で削除されない〕）・着手できないノードの blocked 一括記録〔件数 N に比例せず 100 件ごと 1 エージェント・保存済みと同一の項目は書かない・dryRun が書き込み系と実装系エージェントを起動せず見積りを返す・チャンク失敗時の書けた件数の差・note の「件数 + 先頭 5 件」・sonnet フォールバック登録〕・ビルダーの空白除去〔許可リスト・文字列／テンプレート／正規表現の不変・行数保持・冪等・acorn による変換前後のトークン列一致〕、lib/ に起動可否契約の実装と acorn トークン比較ヘルパー
   implement-review/
   implement-review-pr/

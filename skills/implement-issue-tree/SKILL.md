@@ -594,7 +594,7 @@ open のサブイシューが残っている場合、または受入基準が未
 
 最終レポートの「完了イシュー」に全対象イシューが列挙され、「停止イシュー」が空であることを確認する。`scripts/implement-issue-tree.js` を変更した場合の非信頼データ境界・残置 worktree 上限ゲート・merge-guard hook・メイン worktree への一時ファイル残置防止の適用確認手順（grep コマンド・期待結果）は以下を参照。
 
-**スクリプトの編集は開発ファイルに対して行う**: `scripts/implement-issue-tree.js` は Workflow へ渡す実行ファイル（生成物）であり、直接編集しない。編集は `scripts/implement-issue-tree.src.js`（コメント込みの開発ファイル）に対して行い、`node skills/implement-issue-tree/scripts/build-workflow.mjs` でコメント・先頭インデント・トークン間の不要な半角スペースを除去した実行ファイルを再生成する（行番号は両者で一致し、列番号は一致しない）。同期漏れ・直接編集は CI の `tests/build-workflow.test.mjs`（鮮度ゲート）が検出する。
+**スクリプトの編集は開発ファイルに対して行う**: `scripts/implement-issue-tree.js` は Workflow へ渡す実行ファイル（生成物）であり、直接編集しない。編集は `scripts/implement-issue-tree.src.js`（コメント込みの開発ファイル）に対して行い、`node skills/implement-issue-tree/scripts/build-workflow.mjs` でコメント・先頭インデント・トークン間の不要な半角スペースを除去した実行ファイルを再生成する（行番号は両者で一致し、列番号は一致しない）。ビルダーは生成物のトークン列（文字列・テンプレートの中身を含む）を開発ファイルと acorn で照合し、不一致なら生成ファイルを書かずに中止する。同期漏れ・直接編集は CI の `tests/build-workflow.test.mjs`（鮮度ゲート）が検出する。
 
 詳細: [references/verification.md](references/verification.md)
 

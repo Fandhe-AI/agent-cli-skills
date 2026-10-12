@@ -14,12 +14,19 @@
 // 空白除去は 512 KiB 予算（tests/lib/workflow-script-contract.mjs）を行番号一致を保ったまま
 // 守るための措置。空白除去は、詰めても同じ 2 トークンに字句解析される隣接の組だけを許可リスト
 // （shouldSqueezeSpace）で詰め、迷う組は詰めない。
+// lexer の `/` 判別（除算と正規表現）は誤り得るため、誤読で文字列・テンプレートの中身が詰められても
+// 気づけるよう、ビルド（生成時と --check の両方）で生成物のトークン列（種類・値・開始行）が開発ファイルの
+// トークン列と一致することを Node 同梱の acorn で照合する（verifyTokenParity）。不一致・acorn を取得
+// できない Node・字句解析の失敗はいずれも生成ファイルを書かずに非ゼロ終了する（fail-closed）。
 // 生成物の鮮度（開発ファイルとの同期）は tests/build-workflow.test.mjs が CI で検証する —
 // 生成物を直接編集したりビルドを忘れたりすると byte 不一致で fail する。
 //
 // 使い方:
 //   node skills/implement-issue-tree/scripts/build-workflow.mjs          # 生成して書き込み
 //   node skills/implement-issue-tree/scripts/build-workflow.mjs --check  # 書き込まず鮮度確認
+//   --src <path> / --dist <path> で入力の開発ファイル・出力（--check では比較対象）の実行ファイルを差し替える
+//   （テスト用。既定はこのディレクトリの implement-issue-tree.src.js / implement-issue-tree.js）
+import { spawnSync } from 'node:child_process'
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +34,7 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const SRC_PATH = join(HERE, 'implement-issue-tree.src.js')
 export const DIST_PATH = join(HERE, 'implement-issue-tree.js')
+export const TOKEN_DIFF_PATH = join(HERE, 'token-diff.cjs')
 
 // 直後の `/` を正規表現リテラルの開始と判定するキーワード。識別子・数値の直後の `/` は
 // 除算として素通しする（標準的な division / regex 判別ヒューリスティック）。
@@ -78,52 +86,50 @@ const matchIdentifierUnicodeEscape = (src, i) => {
   return src.slice(i, i + 6)
 }
 
-// 空白除去の許可リストで使う文字の分類。ここに無い文字（`/` 以外の記号・非 ASCII・バックスラッシュ・
-// `#`・`@`・改行等）は分類なし（null）= 空白を詰めない。`.` と `/` は別扱い（下記）
+// 空白除去で使う文字の分類。ここに無い文字（`/`・非 ASCII・バックスラッシュ・`#`・`@`・改行等）は
+// 分類なし = 空白を詰めない。`/` は除算・正規表現・`//` `/*` の誤生成と判別不能を避けるため、
+// 常に詰めない
 const SQUEEZE_WORD = /[A-Za-z0-9_$]/
-const SQUEEZE_SELF_DELIMITING = '(){}[],;' // 他の文字と連結しても別トークンにならない 1 文字記号
 const SQUEEZE_QUOTES = '"\'`' // 文字列・テンプレートリテラルの境界
-const SQUEEZE_OPERATORS = '=:?!<>|&*%^+-~'
-// 演算子同士で詰めてよい組（[前の文字の集合, 後ろの文字の集合]）。`+ +` `- -` `+ ++` `< !--` `= >`
-// `? .` `* *` `& &` のように連結すると別トークンになる組を含めないため、列挙したものだけを許可する
-const SQUEEZE_OPERATOR_PAIRS = [
-  ['=:?&|*%^>!', '!~+-'],
-  ['+-', '!~'],
-]
-
-const classifyForSqueeze = (ch) => {
-  if (ch === undefined || ch === '') return null
-  if (ch === '.') return 'dot'
-  if (SQUEEZE_WORD.test(ch)) return 'word'
-  if (SQUEEZE_SELF_DELIMITING.includes(ch)) return 'self'
-  if (SQUEEZE_QUOTES.includes(ch)) return 'quote'
-  if (SQUEEZE_OPERATORS.includes(ch)) return 'op'
-  return null
-}
+const SQUEEZE_DELIMITERS = '()[]{},;' // 他の記号と連結しても別トークンにならない 1 文字記号
+const SQUEEZE_SYMBOLS = '=:?!<>|&*%^+-~.' // 上記以外の記号。記号どうしの連結は合成トークンを作り得る
 
 /**
  * トークン間の半角スペースを詰めてよいかを、直前トークンの末尾 1 文字 `prev` と直後トークンの
- * 先頭 1 文字 `next` だけで判定する純粋関数（許可リスト方式: true を返す組だけが対象）。
- * 詰めても同じ 2 トークンに字句解析される組だけを許可する。
+ * 先頭 1 文字 `next` だけで判定する純粋関数。**詰めてよい組を列挙し、それ以外はすべて残す**
+ * （fail-closed: 想定外の組は詰めない）。字句解析器の状態（直前の単語等）には頼らない。
  *
- * 詰めない組: 単語文字同士（`a b` → `ab`）、`/` の前後（除算・正規表現・`//` `/*` の誤生成）、
- * `.` の前後の大半（`1 .toString()`・`? .5`。`.` の直前が `(),;{}[]` か引用符のときだけ可）、
- * 演算子同士の大半（`+ +`・`+ ++`・`- --`・`< !--`・`= >`・`? .`・`* *`・`& &` 等）、
- * 分類なしの文字。lexer が状態から加えて除外する組 — `\u{...}` の直後・数値の指数部 `1e +`・
- * 同一行に除算の `/` がある行 — はここでは判定しない。
+ * 詰めてよい組は、次の「詰めない」条件のどれにも当たらない次のいずれか:
+ * - 単語文字（英数字・`_`・`$`）↔ 単語文字以外の分類ありの文字（記号・括弧・引用符）
+ * - 引用符 ↔ 分類ありの任意の文字
+ * - 記号どうしは、片方が `( ) [ ] { } , ;` のときだけ（`<!--`・`-->`・`++`・`--`・`=>`・`**`・
+ *   `??`・`?.` 等の合成をまとめて防ぐ。`/` は常に対象外なので `//` `/*` も作らない）
+ *
+ * 詰めない条件（上の許可に優先する）:
+ * - どちらかが分類なし、単語文字同士（`a b`）、直前が `.`（`1. a` は `1.a` で構文エラー）
+ * - 直前が数字・`e`・`E` で直後が `+` `-` `.`（`1e +2` → `1e+2`、`1 .toString()`、`1.e + 2`）。
+ *   `1.e` のように末尾ドットで単語が切れる形も隣接 2 文字だけで防ぐ
+ * - 直前が `+` `-` で直後が数字（`1e+ 2` → `1e+2`、符号の後ろの空白）
+ *
+ * lexer が状態から加えて除外する組 — `\u{...}` の直後・同一行に除算の `/` がある行 — は
+ * ここでは判定しない。
  */
 export function shouldSqueezeSpace(prev, next) {
-  const a = classifyForSqueeze(prev)
-  const b = classifyForSqueeze(next)
-  if (a === null || b === null) return false
-  if (a === 'dot') return false
-  if (b === 'dot') return a === 'self' || a === 'quote'
-  if (a === 'word' && b === 'word') return false
-  if (a === 'self' || b === 'self' || a === 'quote' || b === 'quote') return true
-  if (a === 'op' && b === 'op') {
-    return SQUEEZE_OPERATOR_PAIRS.some(([lefts, rights]) => lefts.includes(prev) && rights.includes(next))
-  }
-  return true // 単語 ↔ 演算子
+  if (typeof prev !== 'string' || typeof next !== 'string' || prev.length !== 1 || next.length !== 1) return false
+  const isWord = (ch) => SQUEEZE_WORD.test(ch)
+  const isQuote = (ch) => SQUEEZE_QUOTES.includes(ch)
+  const isDelimiter = (ch) => SQUEEZE_DELIMITERS.includes(ch)
+  const isSymbol = (ch) => SQUEEZE_SYMBOLS.includes(ch)
+  const classified = (ch) => isWord(ch) || isQuote(ch) || isDelimiter(ch) || isSymbol(ch)
+  if (!classified(prev) || !classified(next)) return false
+  if (prev === '.') return false
+  if (isWord(prev) && isWord(next)) return false
+  if (/[0-9eE]/.test(prev) && (next === '+' || next === '-' || next === '.')) return false
+  if ((prev === '+' || prev === '-') && /[0-9]/.test(next)) return false
+  const prevIsPunct = isSymbol(prev) || isDelimiter(prev)
+  const nextIsPunct = isSymbol(next) || isDelimiter(next)
+  if (prevIsPunct && nextIsPunct) return isDelimiter(prev) || isDelimiter(next)
+  return true
 }
 
 /**
@@ -266,9 +272,7 @@ export function stripComments(src, { squeezeSpaces = false } = {}) {
         const squeeze =
           shouldSqueezeSpace(prev, next) &&
           // `\u{41}` の閉じ `}` と単語文字を連結すると識別子が地続きになる
-          !(prev === '}' && rawPrevIsIdentEscape && isWordChar(next)) &&
-          // `1e +2` の空白を詰めると指数部符号（`1e+2`）になる
-          !((prev === 'e' || prev === 'E') && (next === '+' || next === '-') && /^[0-9]/.test(sigWord))
+          !(prev === '}' && rawPrevIsIdentEscape && isWordChar(next))
         if (!squeeze) out += ' '
         rawPrev2 = rawPrev
         rawPrev = ' '
@@ -559,6 +563,29 @@ export function buildArtifact(src) {
   return stripped
 }
 
+/**
+ * 生成物のトークン列が開発ファイルのトークン列と一致することを acorn で照合する。lexer
+ * （stripComments）とは独立の字句解析なので、lexer が `/` を誤読して文字列・テンプレート・正規表現の
+ * 中身を変えても検出できる。コメントはトークンに出ないため開発ファイルをそのまま比べる。比較は種類・
+ * 値・開始行で、sourceType は module と script の両方。一致しなければ最初の差の位置（行番号と前後の
+ * トークン）を含めて throw する。acorn を取得できない Node でも黙って飛ばさず throw する。
+ */
+export function verifyTokenParity(src, artifact) {
+  const r = spawnSync(process.execPath, ['--expose-internals', TOKEN_DIFF_PATH], {
+    input: JSON.stringify([{ name: 'build', before: src, after: artifact }]),
+    encoding: 'utf8',
+    maxBuffer: 1 << 28,
+  })
+  if (r.error || r.status !== 0) {
+    throw new Error(
+      'トークン照合を実行できない（acorn を取得できない Node の可能性。検査を省略せず中止する）: ' +
+        `${r.error ? r.error.message : `status ${r.status}`} ${r.stderr ?? ''}`.trim(),
+    )
+  }
+  const [result] = JSON.parse(r.stdout).results
+  if (!result.ok) throw new Error(`生成物のトークン列が開発ファイルと一致しない: ${result.detail}`)
+}
+
 // CLI 実行部（import 時は実行しない）。argv[1] は realpath で比較する — import.meta.url は
 // symlink 解決済みのため、symlink 経由（downstream の `.claude/skills/...` → `.agents/skills/...`）
 // で起動すると素の argv[1] とは一致せず、無言で何もせず exit 0 してしまう（Bugbot 指摘）
@@ -570,21 +597,37 @@ const invokedAs = (() => {
   }
 })()
 if (invokedAs && invokedAs === fileURLToPath(import.meta.url)) {
+  const argValue = (flag, fallback) => {
+    const at = process.argv.indexOf(flag)
+    return at === -1 ? fallback : (process.argv[at + 1] ?? fallback)
+  }
   const checkOnly = process.argv.includes('--check')
-  const src = readFileSync(SRC_PATH, 'utf8')
-  const artifact = buildArtifact(src)
+  const srcPath = argValue('--src', SRC_PATH)
+  const distPath = argValue('--dist', DIST_PATH)
+  const startedAt = Date.now()
+  let src
+  let artifact
+  try {
+    src = readFileSync(srcPath, 'utf8')
+    artifact = buildArtifact(src)
+    verifyTokenParity(src, artifact)
+  } catch (e) {
+    console.error(`ビルド中止（${distPath} は書き込まない）: ${e.message}`)
+    process.exit(1)
+  }
   const srcBytes = Buffer.byteLength(src)
   const outBytes = Buffer.byteLength(artifact)
+  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(2)
   if (checkOnly) {
-    const current = readFileSync(DIST_PATH, 'utf8')
+    const current = readFileSync(distPath, 'utf8')
     if (current !== artifact) {
       console.error('鮮度エラー: 実行ファイルが開発ファイルと同期していない。node build-workflow.mjs で再生成せよ')
       process.exit(1)
     }
-    console.log(`鮮度 ok: ${outBytes} B（src ${srcBytes} B）`)
+    console.log(`鮮度 ok: ${outBytes} B（src ${srcBytes} B・トークン照合 ok・${elapsed}s）`)
   } else {
-    writeFileSync(DIST_PATH, artifact)
-    console.log(`生成完了: ${DIST_PATH}`)
-    console.log(`src ${srcBytes} B → dist ${outBytes} B（-${srcBytes - outBytes} B, -${Math.round(((srcBytes - outBytes) / srcBytes) * 100)}%）`)
+    writeFileSync(distPath, artifact)
+    console.log(`生成完了: ${distPath}`)
+    console.log(`src ${srcBytes} B → dist ${outBytes} B（-${srcBytes - outBytes} B, -${Math.round(((srcBytes - outBytes) / srcBytes) * 100)}%・トークン照合 ok・${elapsed}s）`)
   }
 }

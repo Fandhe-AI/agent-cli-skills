@@ -34,13 +34,13 @@ phases:[
 
 function findIncompleteTreeNodes(nodes){
 const cnt=new Map()
-for(const n of nodes)cnt.set(n.parent,(cnt.get(n.parent)??0)+1)
+for(const n of nodes)cnt.set(n.parent,(cnt.get(n.parent)??0)+ 1)
 const seen=new Set()
 const bad=[]
 for(const n of nodes){
 const t=n.subIssuesTotal
 const actual=cnt.get(n.number)??0
-if(seen.has(n.number)||!Number.isInteger(t)||t<0||t!==actual)bad.push({number:n.number,expected:t,actual})
+if(seen.has(n.number)|| !Number.isInteger(t)||t<0||t!==actual)bad.push({number:n.number,expected:t,actual})
 seen.add(n.number)
 }
 return bad
@@ -92,7 +92,7 @@ const contexts=[]
 if(typeof v==='string'){
 
 slug=v
-}else if(v&&typeof v==='object'&&!Array.isArray(v)){
+}else if(v&&typeof v==='object'&& !Array.isArray(v)){
 slug=v.app
 
 if(v.context!==undefined&&v.contexts!==undefined){
@@ -106,7 +106,7 @@ if(rawContexts.length>10){
 throw new Error(`args.externalChecks の contexts の要素数が多すぎる（最大 10 件）: ${rawContexts.length}`)
 }
 for(const c of rawContexts){
-if(typeof c!=='string'||c!==c.trim()||!EXTERNAL_CHECK_CONTEXT_RE.test(c)){
+if(typeof c!=='string'||c!==c.trim()|| !EXTERNAL_CHECK_CONTEXT_RE.test(c)){
 throw new Error(`args.externalChecks の context が required status check の context 形式（1〜255 文字、制御文字（改行・タブ等）と前後空白は不可。文字種は制限しない）ではない: ${String(c).slice(0, 80)}`)
 }
 if(!contexts.includes(c))contexts.push(c)
@@ -115,7 +115,7 @@ if(!contexts.includes(c))contexts.push(c)
 throw new Error('args.externalChecks の要素は {"app": "<slug>", "context": "<required check context>"} 形式（または旧形式の slug 文字列）で指定すること')
 }
 
-if(typeof slug!=='string'||!EXTERNAL_CHECK_APP_SLUG_RE.test(slug)){
+if(typeof slug!=='string'|| !EXTERNAL_CHECK_APP_SLUG_RE.test(slug)){
 throw new Error(`args.externalChecks の App slug が GitHub App slug の形式（英小文字・数字・ハイフン、39 文字以内）ではない: ${String(slug).slice(0, 50)}`)
 }
 
@@ -257,10 +257,10 @@ return targets
 function selectRemovableCycleEdge(cycle,byParentMap,depsMapArg,protectedKeys){
 for(let i=0;i<cycle.length;i++){
 const from=cycle[i]
-const to=cycle[(i+1)%cycle.length]
+const to=cycle[(i+ 1)%cycle.length]
 const isTreeEdge=(byParentMap.get(from)??[]).some((c)=>c.number===to)
 const isProtected=protectedKeys.has(`${from}->${to}`)
-if(!isTreeEdge&&!isProtected&&depsMapArg.get(from)?.has(to)){
+if(!isTreeEdge&& !isProtected&&depsMapArg.get(from)?.has(to)){
 return{from,to}
 }
 }
@@ -397,9 +397,9 @@ let h4=0x85ebca6b
 for(let i=0;i<input.length;i+=1){
 const c=input.charCodeAt(i)
 h1=Math.imul(h1^c,0x01000193)>>>0
-h2=Math.imul(h2+c,0x85ebca6b)>>>0
+h2=Math.imul(h2 +c,0x85ebca6b)>>>0
 h3=Math.imul(h3^(c+i),0x27220a95)>>>0
-h4=Math.imul(h4+(c^(i&0xff)),0xc2b2ae35)>>>0
+h4=Math.imul(h4 +(c^(i&0xff)),0xc2b2ae35)>>>0
 }
 const pad=(h)=>h.toString(36).padStart(7,'0')
 return`${pad(h1)}${pad(h2)}${pad(h3)}${pad(h4)}`
@@ -491,7 +491,7 @@ return arr
 .filter((v)=>typeof v==='string'&&v.length>0)
 
 
-.slice(0,OUT_OF_SCOPE_LOG_MAX+1)
+.slice(0,OUT_OF_SCOPE_LOG_MAX+ 1)
 .map((v)=>capText(v,450))
 }
 
@@ -553,7 +553,7 @@ return{threadId,text,url}
 
 function sanitizeRepoRelPath(str){
 const s=String(str??'')
-return s&&s.length<=300&&!/^\//.test(s)&&!/\.\./.test(s)&&!/[\x00-\x1f\\]/.test(s)?s:''
+return s&&s.length<=300&& !/^\//.test(s)&& !/\.\./.test(s)&& !/[\x00-\x1f\\]/.test(s)?s:''
 }
 
 
@@ -589,7 +589,7 @@ function parseMaxResidualWorktrees(raw,bytesAxisDisabled){
 if(raw===undefined||raw===null){
 return bytesAxisDisabled===true?LEGACY_DEFAULT_MAX_RESIDUAL_WORKTREES:DEFAULT_MAX_RESIDUAL_WORKTREES
 }
-if(typeof raw!=='number'||!Number.isInteger(raw)||raw<0){
+if(typeof raw!=='number'|| !Number.isInteger(raw)||raw<0){
 throw new Error(
 `args.maxResidualWorktrees は 0 以上の整数で指定すること（0 は上限なし＝チェック無効。`+
 `既定は ${DEFAULT_MAX_RESIDUAL_WORKTREES}（maxResidualWorktreeBytes を 0 で明示オプトアウト`+
@@ -605,7 +605,7 @@ return raw
 
 function parseMaxResidualWorktreeBytes(raw){
 if(raw===undefined||raw===null)return DEFAULT_MAX_RESIDUAL_WORKTREE_BYTES
-if(typeof raw!=='number'||!Number.isInteger(raw)||raw<0){
+if(typeof raw!=='number'|| !Number.isInteger(raw)||raw<0){
 throw new Error(
 `args.maxResidualWorktreeBytes は 0 以上の整数（バイト数）で指定すること（0 はこの`+
 `バイト軸のみ上限なし＝無効化。件数軸 maxResidualWorktrees の fail-closed は維持される。`+
@@ -756,7 +756,7 @@ const tokens=s.split(' ')
 const runner=tokens[0]
 if(!OPTIN_TEST_RUNNERS.has(runner))return{ok:false}
 const subcommands=OPTIN_TEST_RUNNER_SUBCOMMANDS[runner]
-if(subcommands&&!subcommands.has(tokens[1]))return{ok:false}
+if(subcommands&& !subcommands.has(tokens[1]))return{ok:false}
 if(hasMavenGavGoal(runner,tokens)||hasDenoRemoteSpecifier(runner,tokens))return{ok:false}
 if(tokens.some((t)=>ABSOLUTE_PATH_TOKEN_RE.test(t)))return{ok:false}
 return{ok:true,value:s}
@@ -971,7 +971,7 @@ if(declaredList.length===0)return null
 const state=saved&&typeof saved==='object'?saved.optinFixState:null
 if(!state||typeof state!=='object'||state.attempted!==true)return null
 const headSha=sanitizeSha(state.headSha)
-if(!headSha||!Array.isArray(state.runs)){
+if(!headSha|| !Array.isArray(state.runs)){
 return{
 runs:declaredList.map((command)=>({
 command,
@@ -1015,14 +1015,14 @@ const declaredList=Array.isArray(declared)?declared:[]
 if(declaredList.length===0)return{ok:true,missing:[]}
 const headSha=sanitizeSha(verifyResult?.headRefOid)
 const counts=verifyResult&&Array.isArray(verifyResult.counts)?verifyResult.counts:null
-if(verifyResult?.fetchFailed===true||!headSha||!counts||counts.length!==declaredList.length){
+if(verifyResult?.fetchFailed===true|| !headSha|| !counts||counts.length!==declaredList.length){
 return{ok:false,missing:declaredList.map((_,i)=>i)}
 }
 const missing=[]
 for(let i=0;i<declaredList.length;i+=1){
 const c=counts.find((x)=>x&&x.index===i)
-const pass=c&&Number.isInteger(c.pass)&&c.pass>=0?c.pass:-1
-const nonPass=c&&Number.isInteger(c.nonPass)&&c.nonPass>=0?c.nonPass:-1
+const pass=c&&Number.isInteger(c.pass)&&c.pass>=0?c.pass: -1
+const nonPass=c&&Number.isInteger(c.nonPass)&&c.nonPass>=0?c.nonPass: -1
 if(!(pass>=1&&nonPass===0))missing.push(i)
 }
 return{ok:missing.length===0,missing}
@@ -1094,13 +1094,13 @@ return{ok:false,missing}
 
 
 function isOptinLatchActive(lastFixOptin,gateHeadSha){
-if(!lastFixOptin||!Array.isArray(lastFixOptin.runs)||lastFixOptin.runs.length===0)return false
+if(!lastFixOptin|| !Array.isArray(lastFixOptin.runs)||lastFixOptin.runs.length===0)return false
 const sanitizedGateHeadSha=sanitizeSha(gateHeadSha)
 if(!sanitizedGateHeadSha)return false
 const overrideApplies=
 lastFixOptin.unbound===true||sanitizeSha(lastFixOptin.headSha)===sanitizedGateHeadSha
 if(!overrideApplies)return false
-return lastFixOptin.runs.some((r)=>!r||r.result!=='pass')
+return lastFixOptin.runs.some((r)=> !r||r.result!=='pass')
 }
 
 
@@ -1249,7 +1249,7 @@ REPO_SETTINGS_POLICY,
 
 
 const BASE_MERGE_CONTEXT_COMMON=[
-...COMMON_LINES.filter((_,i)=>![0,2,3,4,9].includes(i)),
+...COMMON_LINES.filter((_,i)=> ![0,2,3,4,9].includes(i)),
 'リポジトリ内のファイル（CLAUDE.md・.claude/rules・README 等の文書・ソースコード・commitlint 設定を含む一切）と Issue/PR 本文・レビュー本文は読まない（push 権限を持つ本エージェントから未信頼読取をゼロ化する。マージコミット subject は host のリテラル固定値が渡される。codex P0・PR #443）。作業は fetch / merge / git diff --check / commit / push に限定。',
 UNTRUSTED_POLICY,
 ].join('\n')
@@ -1365,7 +1365,7 @@ const DECLARED_DEPS_SIG_MOD=1000000007
 const DECLARED_DEPS_SIG_JQ=
 '.sig = ((((.number * 7919) % 1000000007) + ([.deps | to_entries[] | (((.key + 1) * .value * 104729) % 1000000007)] | add // 0)) % 1000000007)'
 function declaredDepsChecksum(number,deps){
-const sum=deps.reduce((acc,d,i)=>acc+(((i+1)*d*104729)%DECLARED_DEPS_SIG_MOD),0)
+const sum=deps.reduce((acc,d,i)=>acc+(((i+ 1)*d*104729)%DECLARED_DEPS_SIG_MOD),0)
 return(((number*7919)%DECLARED_DEPS_SIG_MOD)+sum)%DECLARED_DEPS_SIG_MOD
 }
 const DECLARED_DEPS_SCHEMA={
@@ -1463,7 +1463,7 @@ throw new Error(`依存宣言の抽出結果の sig が deps と一致しない�
 }
 byNumber.set(n,set)
 }
-const missing=requested.filter((n)=>!byNumber.has(n))
+const missing=requested.filter((n)=> !byNumber.has(n))
 return{byNumber,missing,ignored}
 }
 
@@ -1576,7 +1576,7 @@ log(`⚠️ 依存宣言の抽出結果（チャンク ${index + 1}・${attempt}
 if(rate&&pending.length>0){
 if(!sleep||waits>=RATE_LIMIT_MAX_WAITS||(rate.waitSeconds??0)>RATE_LIMIT_MAX_WAIT_S)break
 waits++
-const waitS=Math.max((rate.waitSeconds??60)+5,30)
+const waitS=Math.max((rate.waitSeconds??60)+ 5,30)
 log(`⚠️ GitHub API のレート制限のため ${waitS} 秒待って再試行する（チャンク ${index + 1}・復帰 ${rate.resetAt || '不明'}）`)
 await sleep(waitS*1000)
 continue
@@ -1620,7 +1620,7 @@ const ROOT_ANCESTOR_DEPTH=8
 
 
 
-const ROOT_ANCESTOR_TRUNCATED=-1
+const ROOT_ANCESTOR_TRUNCATED= -1
 
 
 
@@ -1671,7 +1671,7 @@ const s=new Set()
 for(const n of nodes){
 if(n.state!=='open')continue
 for(const d of n.dependsOn??[]){
-if(Number.isInteger(d)&&d>0&&d!==n.number&&!treeNumbers.has(d))s.add(d)
+if(Number.isInteger(d)&&d>0&&d!==n.number&& !treeNumbers.has(d))s.add(d)
 }
 }
 return[...s].sort((a,b)=>a-b)
@@ -1725,7 +1725,7 @@ ignored.push(n)
 continue
 }
 if(byNumber.has(n))throw new Error(`ツリー外前提の state 取得結果にイシュー #${n} が重複している`)
-if(e.state!=='OPEN'&&!OUT_OF_TREE_DONE_STATES.has(e.state)){
+if(e.state!=='OPEN'&& !OUT_OF_TREE_DONE_STATES.has(e.state)){
 throw new Error(`ツリー外前提の state 取得結果が想定外の値（issue #${n}: ${String(e.state).slice(0, 20)}）`)
 }
 if(e.sig!==outOfTreeStateChecksum(n,e.state)){
@@ -1733,7 +1733,7 @@ throw new Error(`ツリー外前提の state 取得結果の sig が state と�
 }
 byNumber.set(n,e.state)
 }
-return{byNumber,ignored,missing:requested.filter((n)=>!byNumber.has(n))}
+return{byNumber,ignored,missing:requested.filter((n)=> !byNumber.has(n))}
 }
 
 
@@ -1752,21 +1752,21 @@ return{byNumber,ignored,missing:requested.filter((n)=>!byNumber.has(n))}
 
 function collectRootAncestorsChunk(result,start){
 const c=result?.chain
-if(result?.fetched!==true||!Array.isArray(c)||c.length<1||c.length>ROOT_ANCESTOR_DEPTH+1)return null
+if(result?.fetched!==true|| !Array.isArray(c)||c.length<1||c.length>ROOT_ANCESTOR_DEPTH+ 1)return null
 if(c[0]?.number!==start||new Set(c.map((e)=>e?.number)).size!==c.length)return null
-const atMax=c.length===ROOT_ANCESTOR_DEPTH+1
+const atMax=c.length===ROOT_ANCESTOR_DEPTH+ 1
 for(let i=0;i<c.length;i++){
 const{number,parent}=c[i]??{}
-if(!Number.isInteger(number)||number<=0||!Number.isInteger(parent))return null
-const isTailAtMax=atMax&&i===c.length-1
+if(!Number.isInteger(number)||number<=0|| !Number.isInteger(parent))return null
+const isTailAtMax=atMax&&i===c.length- 1
 if(isTailAtMax){
 if(parent!==ROOT_ANCESTOR_TRUNCATED)return null
 }else{
 if(parent<0)return null
-if(parent!==(i+1<c.length?c[i+1].number:0))return null
+if(parent!==(i+ 1<c.length?c[i+ 1].number:0))return null
 }
 }
-const truncatedAt=atMax?c[c.length-1].number:null
+const truncatedAt=atMax?c[c.length- 1].number:null
 return{ancestors:new Set(c.slice(1).map((e)=>e.number)),truncatedAt}
 }
 
@@ -2176,7 +2176,7 @@ const seen=new Set()
 const transitions=[]
 for(const entry of results){
 const issue=entry?.issue
-if(!Number.isInteger(issue)||!targets.includes(issue)||seen.has(issue))continue
+if(!Number.isInteger(issue)|| !targets.includes(issue)||seen.has(issue))continue
 seen.add(issue)
 const kind=classifyPrereqTransition(entry,prHints?.[issue],branchHints?.[issue],issue)
 if(kind===null)continue
@@ -2275,9 +2275,9 @@ if(!['MERGED','OPEN','CLOSED'].includes(v?.state))return'PR not found'
 if(v.isCrossRepository!==false)return'cross-repository'
 if(v.baseRefName!==baseBranch)return'baseRefName'
 const head=v.headRefName
-if(!isValidBranchName(branch)||!branchMatchesIssue(branch,n)||head!==branch)return`headRefName ${isValidBranchName(head) ? head : '?'}`
+if(!isValidBranchName(branch)|| !branchMatchesIssue(branch,n)||head!==branch)return`headRefName ${isValidBranchName(head) ? head : '?'}`
 const ci=Array.isArray(v.closingIssues)?v.closingIssues:null
-if(!ci||(ci.length>0&&!ci.includes(n)))return'closingIssues'
+if(!ci||(ci.length>0&& !ci.includes(n)))return'closingIssues'
 return''
 }
 
@@ -2887,7 +2887,7 @@ log(`⚠️ ${attemptLabel}: state 書込みエージェントが例外終了し
 result=null
 }
 if(isValid(result))return{result,outputMissing:false,attempts}
-const isLast=model===STATE_AGENT_MODEL_CHAIN[STATE_AGENT_MODEL_CHAIN.length-1]
+const isLast=model===STATE_AGENT_MODEL_CHAIN[STATE_AGENT_MODEL_CHAIN.length- 1]
 if(!isLast){
 log(`⚠️ ${attemptLabel}: StructuredOutput 未返却相当（例外・null・schema 不適合）。次のモデルへフォールバックする`)
 }
@@ -2963,18 +2963,18 @@ while(b.length%64!==56)b.push(0)
 for(const x of[Math.floor(n / 2 ** 32), n >>> 0]) b.push(x >>> 24, x >>> 16 & 255, x >>> 8 & 255, x & 255)
 const H=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]
 const w=[]
-const r=(x,k)=>x>>>k|x<<32-k
+const r=(x,k)=>x>>>k|x<<32 -k
 for(let o=0;o<b.length;o+=64){
 for(let i=0;i<64;i++){
 w[i]=i<16
-?b[o+4*i]<<24|b[o+4*i+1]<<16|b[o+4*i+2]<<8|b[o+4*i+3]
-:(w[i-16]+(r(w[i-15],7)^r(w[i-15],18)^w[i-15]>>>3)+w[i-7]+(r(w[i-2],17)^r(w[i-2],19)^w[i-2]>>>10))|0
+?b[o+ 4*i]<<24|b[o+ 4*i+ 1]<<16|b[o+ 4*i+ 2]<<8|b[o+ 4*i+ 3]
+:(w[i- 16]+(r(w[i- 15],7)^r(w[i- 15],18)^w[i- 15]>>>3)+w[i- 7]+(r(w[i- 2],17)^r(w[i- 2],19)^w[i- 2]>>>10))|0
 }
 let[a,b1,c,d,e,f,g,h]=H
 for(let i=0;i<64;i++){
-const t1=(h+(r(e,6)^r(e,11)^r(e,25))+(e&f^~e&g)+SHA256_K[i]+w[i])|0
+const t1=(h+(r(e,6)^r(e,11)^r(e,25))+(e&f^ ~e&g)+SHA256_K[i]+w[i])|0
 const t2=((r(a,2)^r(a,13)^r(a,22))+(a&b1^a&c^b1&c))|0
-h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b1;b1=a;a=(t1+t2)|0
+h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b1;b1=a;a=(t1 +t2)|0
 }
 ;[a,b1,c,d,e,f,g,h].forEach((v,i)=>{H[i]=(H[i]+v)|0})
 }
@@ -3002,7 +3002,7 @@ function verifyLoadedItems(items,check){
 const hashes=check?.fileExists===true&&check.hashes?check.hashes:null
 const adopted={}
 const dropped=[]
-const loaded=items&&typeof items==='object'&&!Array.isArray(items)?items:{}
+const loaded=items&&typeof items==='object'&& !Array.isArray(items)?items:{}
 for(const[k,val]of Object.entries(loaded)){
 const h=hashes&&hasOwn(hashes,k)?hashes[k]:''
 if(/^[1-9]\d*$/.test(k)&& /^[0-9a-f]{64}$/.test(h)&&sha256Hex(canonicalJson(val))===h){
@@ -3018,7 +3018,7 @@ dropped.push(k)
 
 
 const unverified=hashes===null?[]:[...new Set([...Object.keys(loaded),...Object.keys(hashes)])]
-.filter((k)=> /^[1-9]\d*$/.test(k)&&!hasOwn(adopted,k))
+.filter((k)=> /^[1-9]\d*$/.test(k)&& !hasOwn(adopted,k))
 return{adopted,dropped,unverified,verified:hashes!==null&&unverified.length===0&&dropped.length===0}
 }
 
@@ -3030,7 +3030,7 @@ function isValidStateVerifyResult(r){
 const h=r?.hashes
 return(
 typeof r?.fileExists==='boolean'&&
-h!==null&&typeof h==='object'&&!Array.isArray(h)&&
+h!==null&&typeof h==='object'&& !Array.isArray(h)&&
 Object.values(h).every((x)=> /^[0-9a-f]{64}$/.test(x))&&
 (r.fileExists? /^[0-9a-f]{64}$/.test(r.keysSha256):r.keysSha256===''&&r.keysCount===0)&&
 isNonNegInt(r.keysCount)&&isNonNegInt(r.highWaterBytes)&&isNonNegInt(r.highWaterVersion)
@@ -3042,7 +3042,7 @@ type:'object',
 required:['items'],
 properties:{items:{type:'object',additionalProperties:true}},
 }
-const isValidStateFillResult=(r)=>r?.items!==null&&typeof r?.items==='object'&&!Array.isArray(r.items)
+const isValidStateFillResult=(r)=>r?.items!==null&&typeof r?.items==='object'&& !Array.isArray(r.items)
 
 const STATE_VERIFY_SCHEMA={
 type:'object',
@@ -3160,13 +3160,13 @@ let v=verifyLoadedItems(items,check)
 for(let round=0;round<2&&check.fileExists;round++){
 const need=v.unverified.filter((k)=>hasOwn(check.hashes,k))
 const chunks=[]
-for(let i=0;i<need.length;i+=5)chunks.push(need.slice(i,i+5))
+for(let i=0;i<need.length;i+=5)chunks.push(need.slice(i,i+ 5))
 if(!chunks.length)break
 
 
 const got=[]
 for(let b=0;b<chunks.length;b+=2){
-got.push(...await Promise.all(chunks.slice(b,b+2).map((ks)=>runStateAgent(
+got.push(...await Promise.all(chunks.slice(b,b+ 2).map((ks)=>runStateAgent(
 `状態ファイル項目の読み取り（読み取り専用）。${TEMP_FILE_POLICY}\n次をそのまま実行し、出力 JSON を items として返す（推測で埋めない）:\n`+
 `jq -c --argjson k '${JSON.stringify(ks)}' '.items | with_entries(select(.key as $x | $k | index($x)))' ${STATE_FILE}`,
 {label:'state:load-fill',schema:STATE_FILL_SCHEMA,isValid:isValidStateFillResult},
@@ -3373,7 +3373,7 @@ log(`⚠️ 状態ファイル更新失敗（issue #${issueNumber}）: JSON マ�
 
 let cleanupOk=true
 let cleanupOutputMissing=false
-if(cleanupPromptText&&!mergeOk){
+if(cleanupPromptText&& !mergeOk){
 cleanupOk=false
 log(`⚠️ #${issueNumber}: 状態ファイル更新に失敗したため worktree / branch の掃除をスキップした（回復情報の保全を優先。worktree は最終スイープで回収されるが branch は残存し、discard 経路は本関数の戻り値 false の検知で終端として保全する）`)
 }else if(cleanupPromptText){
@@ -3460,7 +3460,7 @@ if(p!==mainPath&&p.startsWith(`${mainPath}/`))nested.add(p)
 }
 const paths=[...nested]
 
-return paths.filter((p)=>!paths.some((other)=>other!==p&&p.startsWith(`${other}/`)))
+return paths.filter((p)=> !paths.some((other)=>other!==p&&p.startsWith(`${other}/`)))
 }
 
 
@@ -3677,7 +3677,7 @@ return new RegExp(`^[a-z]+/${issueNumber}-`).test(branch)
 
 
 function isValidBranchName(b){
-return typeof b==='string'&&!/\.\./.test(b)&& /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
+return typeof b==='string'&& !/\.\./.test(b)&& /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
 }
 
 
@@ -4069,10 +4069,10 @@ const ISOLATION_WORKTREE_PREFIX='.claude/worktrees/'
 
 
 function diffMainWorktreeUntracked(baseline,end,stateFile){
-if(!baseline?.observed||!end?.observed)return{observed:false,added:[],baselineCount:0}
+if(!baseline?.observed|| !end?.observed)return{observed:false,added:[],baselineCount:0}
 const baselineSet=new Set(baseline.paths)
 const added=end.paths.filter(
-(p)=>!baselineSet.has(p)&&p!==stateFile&&!p.startsWith(ISOLATION_WORKTREE_PREFIX),
+(p)=> !baselineSet.has(p)&&p!==stateFile&& !p.startsWith(ISOLATION_WORKTREE_PREFIX),
 )
 return{observed:true,added,baselineCount:baseline.paths.length}
 }
@@ -4080,7 +4080,7 @@ return{observed:true,added,baselineCount:baseline.paths.length}
 
 
 function formatMainWorktreeUntrackedWarning(result,limit=20){
-if(!result?.observed||!Array.isArray(result.added)||result.added.length===0)return''
+if(!result?.observed|| !Array.isArray(result.added)||result.added.length===0)return''
 const shown=result.added.slice(0,limit).map((p)=>sanitize(p))
 const omitted=result.added.length-shown.length
 const list=shown.join(', ')+(omitted>0?` ほか ${omitted} 件`:'')
@@ -4137,7 +4137,7 @@ return{observed:false}
 
 
 function diffMainWorktreeHead(baseline,end){
-if(!baseline?.observed||!end?.observed)return{observed:false,changed:false,shaChanged:false}
+if(!baseline?.observed|| !end?.observed)return{observed:false,changed:false,shaChanged:false}
 const refChanged=baseline.ref!==end.ref
 const shaChanged=baseline.sha!==end.sha
 const changed=refChanged||(baseline.ref===''&&shaChanged)
@@ -4147,7 +4147,7 @@ return{observed:true,changed,shaChanged,baselineRef:baseline.ref,endRef:end.ref,
 
 
 function formatMainWorktreeHeadWarning(result){
-if(!result?.observed||!result.changed)return''
+if(!result?.observed|| !result.changed)return''
 const show=(ref,sha)=>(ref===''?`detached HEAD (${sha.slice(0, 12)})`:`${sanitize(ref)} (${sha.slice(0, 12)})`)
 return(
 `⚠️ メイン worktree の HEAD がラン中に変化した: ${show(result.baselineRef, result.baselineSha)} → ${show(result.endRef, result.endSha)}。`+
@@ -4162,7 +4162,7 @@ function findMainWorktreePath(entries){
 
 if(!Array.isArray(entries)||entries.length===0)return''
 const flaggedIndexes=entries
-.map((e,i)=>(e?.isMain?i:-1))
+.map((e,i)=>(e?.isMain?i: -1))
 .filter((i)=>i>=0)
 if(flaggedIndexes.length!==1||flaggedIndexes[0]!==0)return''
 const raw=entries[0]?.path??''
@@ -4410,7 +4410,7 @@ if(raw===undefined||raw===null)return AGENT_RUN_LIMIT
 
 
 
-const min=AGENT_CALLS_START+AGENT_CALLS_TERMINAL_BASE+AGENT_CALLS_PER_ISSUE.implement+1
+const min=AGENT_CALLS_START+AGENT_CALLS_TERMINAL_BASE +AGENT_CALLS_PER_ISSUE.implement+ 1
 if(!Number.isInteger(raw)||raw<min||raw>AGENT_RUN_LIMIT){
 throw new Error(`args.agentCallLimit は ${min}〜${AGENT_RUN_LIMIT} の整数で指定すること（省略時 ${AGENT_RUN_LIMIT}。新規着手を止める判断に使うランタイム上限の想定値で、呼び出し自体は止めない。下限は開始処理 + 終了処理の予備 + 1 issue の目安。Issue #592）`)
 }
@@ -4454,7 +4454,7 @@ function agentBudgetHold(budget,{running,kind,pending}){
 const remaining=budget.limit-budget.used
 const first=running===0&&(budget.starts??0)===0
 const chunks=Math.ceil(Math.max(pending,0) / BLOCKED_STATE_CHUNK_SIZE)
-const required=AGENT_CALLS_PER_ISSUE.implement*running+AGENT_CALLS_PER_ISSUE[kind]+AGENT_CALLS_TERMINAL_BASE+(first?0:chunks)
+const required=AGENT_CALLS_PER_ISSUE.implement*running+AGENT_CALLS_PER_ISSUE[kind]+AGENT_CALLS_TERMINAL_BASE +(first?0:chunks)
 
 
 return remaining<required?{remaining,required,chunks,needed:budget.used+required}:null
@@ -4629,7 +4629,7 @@ const done=new Set(done0)
 const failed=new Set(failed0)
 const preBlocked=work.filter((i)=>failed.has(i.number)).map((i)=>i.number)
 const depsOfNumber=(n)=>depsMap.get(n)??new Set()
-const readyNow=work.filter((i)=>!failed.has(i.number)&&!selfBlocked.has(i.number)&&classifyDispatchReadiness(depsOfNumber(i.number),done0,failed0)==='ready').length
+const readyNow=work.filter((i)=> !failed.has(i.number)&& !selfBlocked.has(i.number)&&classifyDispatchReadiness(depsOfNumber(i.number),done0,failed0)==='ready').length
 const startable=[]
 const blocked={outOfTree:[],phaseGate:[],downstream:[],optinTestsInvalid:[],savedBranchMismatch:[]}
 const decided=new Set()
@@ -4665,7 +4665,7 @@ blocked[cause].push(n)
 failed.add(n)
 }
 }
-const undetermined=work.filter((i)=>!decided.has(i.number)&&!failed0.has(i.number)).map((i)=>i.number)
+const undetermined=work.filter((i)=> !decided.has(i.number)&& !failed0.has(i.number)).map((i)=>i.number)
 return{startable,readyNow,blocked,preBlocked,undetermined}
 }
 
@@ -5053,7 +5053,7 @@ function mergeExecutePrompt(item,impl,allowMerge,externalCheckEntries,expectedHe
 const entries=Array.isArray(externalCheckEntries)?externalCheckEntries:[]
 
 
-if(allowMerge&&entries.some((e)=>!Array.isArray(e.contexts)||e.contexts.length===0)){
+if(allowMerge&&entries.some((e)=> !Array.isArray(e.contexts)||e.contexts.length===0)){
 throw new Error('mergeExecutePrompt: allowMerge=true には全外部チェック App の信頼済み context 宣言が必要（externalChecksContextsConfirmed ゲートの退行）')
 }
 const apps=entries.map((e)=>e.app)
@@ -5584,7 +5584,7 @@ return count
 
 
 function advanceNoPushRounds(noPushRounds,pushed,newlyResolvedCount){
-return pushed||newlyResolvedCount>0?0:noPushRounds+1
+return pushed||newlyResolvedCount>0?0:noPushRounds+ 1
 }
 
 function closePrompt(item){
@@ -5645,7 +5645,7 @@ const resolveStepLines=oldWorktree
 
 
 const resolvedBranchNote=
-branch&&!oldWorktree
+branch&& !oldWorktree
 ?[`（対象ブランチ: ${branch}。返却の branch にこの名前を入れる）`,``]
 :[]
 
@@ -5786,7 +5786,7 @@ return{safe:false,detail:'安全確認エージェントが無効な結果を返
 if(v.dirty===true){
 return{safe:false,detail:'対象 worktree に未 commit 変更が残っている（WIP 退避が完了していない）'}
 }
-const ahead=Number.isInteger(v.aheadCount)?v.aheadCount:-1
+const ahead=Number.isInteger(v.aheadCount)?v.aheadCount: -1
 return{
 safe:true,
 detail:`未 commit 変更なし（worktreeMissing: ${v.worktreeMissing === true}, aheadCount: ${ahead}）`,
@@ -5919,7 +5919,7 @@ return freeDiskBytes<requiredFreeDiskBytes
 
 function computeAveragePerWorktreeBytes({kib,sentCount,missing}){
 if(!Number.isInteger(kib)||kib<0)return null
-if(!Number.isInteger(sentCount)||!Number.isInteger(missing))return null
+if(!Number.isInteger(sentCount)|| !Number.isInteger(missing))return null
 const denominator=sentCount-missing
 if(denominator<=0)return null
 return Math.ceil((kib*1024) / denominator)
@@ -5936,10 +5936,10 @@ return Math.ceil((kib*1024) / denominator)
 
 function listUnverifiedImplementIssues(entries){
 const list=Array.isArray(entries)?entries:[]
-const isUnverified=(v)=>!(typeof v==='string'&&v!==''&&!v.startsWith('(検証不可:'))
-const verifiedIssues=new Set(list.filter((e)=>!isUnverified(e?.path)).map((e)=>e?.issue))
+const isUnverified=(v)=> !(typeof v==='string'&&v!==''&& !v.startsWith('(検証不可:'))
+const verifiedIssues=new Set(list.filter((e)=> !isUnverified(e?.path)).map((e)=>e?.issue))
 return[...new Set(list.filter((e)=>isUnverified(e?.path)).map((e)=>e?.issue))].filter(
-(n)=>!verifiedIssues.has(n),
+(n)=> !verifiedIssues.has(n),
 )
 }
 
@@ -5976,7 +5976,7 @@ const candidate=sanitizeWorktreePath(entry?.path??'')
 if(!candidate||(mainPath&&candidate===mainPath))continue
 if(claimed.has(candidate)||paths.includes(candidate)||candidates.includes(candidate))continue
 const branch=typeof entry?.branch==='string'?entry.branch:''
-if(!branch||!isValidBranchName(branch)||!branchMatchesIssue(branch,issue))continue
+if(!branch|| !isValidBranchName(branch)|| !branchMatchesIssue(branch,issue))continue
 candidates.push(candidate)
 }
 if(candidates.length===1)paths.push(candidates[0])
@@ -6008,7 +6008,7 @@ return'none'
 function escalateNewStartSuppressed(current,next){
 if(!next)return{latch:current,changed:false,escalated:false}
 if(!current)return{latch:next,changed:true,escalated:false}
-if(current.implementOnly&&!next.implementOnly)return{latch:next,changed:true,escalated:true}
+if(current.implementOnly&& !next.implementOnly)return{latch:next,changed:true,escalated:true}
 return{latch:current,changed:false,escalated:false}
 }
 
@@ -6363,7 +6363,7 @@ queue.push({...node,kind:children.length>0?'verify-close':'implement'})
 const root=tree.nodes.find((n)=>n.number===parent)
 if(!root)throw new Error(`ルートイシュー #${parent} がツリー取得結果に含まれていない`)
 visit(root)
-const unreachable=tree.nodes.filter((n)=>!visited.has(n.number))
+const unreachable=tree.nodes.filter((n)=> !visited.has(n.number))
 if(unreachable.length>0){
 throw new Error(
 `Plan が返したノードのうち ${unreachable.length} 件がルート #${parent} から到達不能: `+
@@ -6418,7 +6418,7 @@ let byteBaselineLedgerCount=0
 const BYTE_REMEASURE_LEDGER_INTERVAL=3
 let byteRemeasureAtLedgerCount=0
 let dispatchIterationSeq=0
-let byteRemeasureAtIterationSeq=-1
+let byteRemeasureAtIterationSeq= -1
 
 
 
@@ -6438,7 +6438,7 @@ let persistedHighWaterBytes=loadedHighWaterBytes
 
 
 let freeDiskBytesAtStart=0
-let freeDiskRemeasureAtIterationSeq=-1
+let freeDiskRemeasureAtIterationSeq= -1
 let freeDiskMeasuredAtLedgerCount=0
 
 
@@ -6454,7 +6454,7 @@ let lastFreeDiskRemeasureFailed=false
 const PREREQ_RECHECK_MIN_MS=60_000
 
 const PREREQ_RECHECK_TICK_MS=5*60_000
-let prereqProbeAtIterationSeq=-1
+let prereqProbeAtIterationSeq= -1
 
 
 
@@ -6488,7 +6488,7 @@ if(entry?.isMain)continue
 const p=sanitizeWorktreePath(entry?.path??'')
 if(!p||(mainWorktreePath&&p===mainWorktreePath))continue
 const branch=typeof entry?.branch==='string'?entry.branch:''
-if(!branch||branch===baseBranch||!isValidBranchName(branch))continue
+if(!branch||branch===baseBranch|| !isValidBranchName(branch))continue
 
 const matched=queue.find(
 (q)=>q.kind==='implement'&&q.state==='open'&&branchMatchesIssue(branch,q.number),
@@ -6566,7 +6566,7 @@ log(`残置 worktree 観測: ${residual.count} 件（上限 ${maxResidualWorktre
 if(maxResidualWorktreeBytes>0){
 
 
-const verifiedResidualPaths=residual.paths.filter((p)=>!p.startsWith('(検証不可:'))
+const verifiedResidualPaths=residual.paths.filter((p)=> !p.startsWith('(検証不可:'))
 const hasUnverifiedResidualPath=verifiedResidualPaths.length!==residual.paths.length
 
 
@@ -6847,7 +6847,7 @@ return
 }
 consecutiveFailures++
 log(`#${failure.issue} を完了できず次へ進む（${consecutiveFailures} 連続）: ${failure.reason}`)
-if(consecutiveFailures>=3&&!halted){
+if(consecutiveFailures>=3&& !halted){
 halted={
 reason:'3 イシュー連続で完了できなかったため新規着手を停止する。ユーザーの判断を待つこと',
 
@@ -6935,7 +6935,7 @@ unverifiedIssues.add(item.number)
 recordFailure({issue:item.number,reason:`state-unverified: ${why}。状態ファイルは変更していない`,status:'blocked'})
 return false
 }
-if(saved.branch&&!branchMatchesIssue(String(saved.branch),item.number)){
+if(saved.branch&& !branchMatchesIssue(String(saved.branch),item.number)){
 return stopUnverified('状態ファイルの branch が本イシューの命名ではない')
 }
 
@@ -6954,11 +6954,11 @@ bound=true
 const isResumeFromMonitoring=isActiveMonitoring(item.number)
 
 
-if(isResumeFromMonitoring&&!bound){
+if(isResumeFromMonitoring&& !bound){
 const why=await checkPrBinding(item,saved.pr,saved.branch)
 if(why)return stopUnverified(`状態ファイルの PR #${saved.pr} を本イシューに結び付けられない（${sanitize(why)}）`)
 }
-if(saved.status==='monitoring'&&!isResumeFromMonitoring){
+if(saved.status==='monitoring'&& !isResumeFromMonitoring){
 log(`#${item.number}: 状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)
 }
 
@@ -7121,7 +7121,7 @@ isolation:'worktree',
 recordEphemeralWorktree(item.number,impl?.worktreePath,'implement')
 
 
-if(!impl||!impl.branch){
+if(!impl|| !impl.branch){
 const reason=sanitize(impl?.summary??'回復 Implement エージェントが異常終了した')
 await updateState(item.number,{status:'failed',note:reason})
 recordFailure({issue:item.number,reason})
@@ -7256,9 +7256,9 @@ await updateState(item.number,{status:'planning',branch:'',worktree:''})
 
 
 const reason=sanitize(
-recoverDecision==='continue'&&!effectiveBranch
+recoverDecision==='continue'&& !effectiveBranch
 ?'回復継続には有効な branch が必要だが state にも worktree HEAD からも解決できなかった。worktree/branch を保全して failed にする'
-:recoverDecision==='discard'&&!effectiveBranch
+:recoverDecision==='discard'&& !effectiveBranch
 ?'discard 指示だが対象ブランチを確定できないため安全に削除できない。worktree/branch を保全して failed にする'
 :(recoverResult?.reason??'Recover エージェントが異常終了または不正な decision を返した。worktree/branch を保全して failed にする'),
 )
@@ -7280,7 +7280,7 @@ effort:'high',
 schema:PLAN_SCHEMA,
 })
 
-if(!planResult||!planResult.plan||planResult.plan.trim()===''){
+if(!planResult|| !planResult.plan||planResult.plan.trim()===''){
 const reason=sanitize(planResult?.summary??'計画エージェントが異常終了した、または計画本文が空だった')
 await updateState(item.number,{status:'failed',note:reason})
 recordFailure({issue:item.number,reason})
@@ -7302,7 +7302,7 @@ isolation:'worktree',
 
 recordEphemeralWorktree(item.number,impl?.worktreePath,'implement')
 
-if(!impl||!impl.branch){
+if(!impl|| !impl.branch){
 const reason=sanitize(impl?.summary??'実装エージェントが異常終了した')
 await updateState(item.number,{status:'failed',note:reason})
 recordFailure({issue:item.number,reason})
@@ -7535,7 +7535,7 @@ isolation:'worktree',
 
 
 recordEphemeralWorktree(item.number,prCreateResult?.worktreePath,'pr-create')
-if(!prCreateResult||!Number.isInteger(prCreateResult.prNumber)||prCreateResult.prNumber<=0){
+if(!prCreateResult|| !Number.isInteger(prCreateResult.prNumber)||prCreateResult.prNumber<=0){
 const reason=sanitize(prCreateResult?.summary??'push・PR 作成エージェントが異常終了した、または prNumber が不正')
 
 
@@ -7557,7 +7557,7 @@ unmonitoredPrs.set(item.number,{pr:impl.prNumber,resumable:false})
 
 
 const unverifiedPatch={status:'blocked',pr:0,unverifiedPr:impl.prNumber,branch:impl.branch}
-if(!(await updateState(item.number,unverifiedPatch))&&!(await updateState(item.number,unverifiedPatch))){
+if(!(await updateState(item.number,unverifiedPatch))&& !(await updateState(item.number,unverifiedPatch))){
 unverifiedIssues.add(item.number)
 recordFailure({issue:item.number,reason:`state-unverified: Failed to save to the state file. PR #${impl.prNumber} may exist; verify it manually before re-running.`,status:'blocked'})
 return false
@@ -7682,7 +7682,7 @@ restoreOptinFixState(saved,item.optinTests),
 async function runMergeLoop(item,impl,initialFixCount,initialWorktreePath,initialOutOfScopeLog=[],initialUnresolvedInfo='',initialUnresolvedComments=[],initialOutOfScopeSeen=[],initialBaseMergeCount=0,initialPushMergeable='',initialFixOptin=null){
 
 
-if(Number.isInteger(impl.prNumber)&&impl.prNumber>0&&!unmonitoredPrs.has(item.number))unmonitoredPrs.set(item.number,{pr:impl.prNumber,resumable:true})
+if(Number.isInteger(impl.prNumber)&&impl.prNumber>0&& !unmonitoredPrs.has(item.number))unmonitoredPrs.set(item.number,{pr:impl.prNumber,resumable:true})
 let merged=false
 let lastState='timeout'
 let fixCount=initialFixCount
@@ -7868,7 +7868,7 @@ m=await agentRetryOnce(monitorPrompt(item,impl,externalCheckApps,externalChecksC
 log(`⚠️ #${item.number}: 監視エージェントが例外終了した（${sanitize(String(e?.message ?? e))}）`)
 }
 }
-if(m!=null&&!seededConflictRound)unmonitoredPrs.delete(item.number)
+if(m!=null&& !seededConflictRound)unmonitoredPrs.delete(item.number)
 
 
 
@@ -7954,7 +7954,7 @@ terminalReasonOverride=capText(`監視エージェントが blocked と判定: $
 
 if(!externalChecksConfirmed){
 terminalReasonOverride=`${terminalReasonOverride}。${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`
-}else if(autoMergeEnabled&&!externalChecksContextsConfirmed){
+}else if(autoMergeEnabled&& !externalChecksContextsConfirmed){
 terminalReasonOverride=`${terminalReasonOverride}。${EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON}`
 }
 
@@ -7971,11 +7971,11 @@ lastUnresolvedComments=normalizeUnresolvedComments(m.unresolvedComments)
 
 
 
-const recoveryOnly=lastState==='ready'&&!(autoMergeEnabled&&externalChecksConfirmed&&externalChecksContextsConfirmed)
+const recoveryOnly=lastState==='ready'&& !(autoMergeEnabled&&externalChecksConfirmed&&externalChecksContextsConfirmed)
 if(recoveryOnly){
 const recoveryOnlyCauses=[
 ...(!externalChecksConfirmed?['外部チェック構成が未確定']:[]),
-...(externalChecksConfirmed&&!externalChecksContextsConfirmed?['外部チェック App の信頼済み check context が未宣言（slug のみの旧形式）']:[]),
+...(externalChecksConfirmed&& !externalChecksContextsConfirmed?['外部チェック App の信頼済み check context が未宣言（slug のみの旧形式）']:[]),
 ...(!autoMergeEnabled?['自動マージが無効（args.autoMerge が true でない。Issue #165）']:[]),
 ].join('・')
 log(`#${item.number}: ${recoveryOnlyCauses}のため新規マージは行わない。PR がマージ済み（サーバー側 auto-merge によるマージ完了を含む）の場合のクローズ回復のみ試行する`)
@@ -8036,7 +8036,7 @@ log(`#${item.number}: 新規マージ経路だが独立確認で PR が既に ME
 
 
 
-const allowMerge=!recoveryOnly&&!prAlreadyMerged
+const allowMerge= !recoveryOnly&& !prAlreadyMerged
 
 
 
@@ -8170,7 +8170,7 @@ execReason==='merged'?Boolean(execHeadSha)&&verifyHeadSha===execHeadSha:true
 
 
 const verifyBindIssue=prBindingProblem(item.number,impl.branch,v)
-if(!(verifyStateOk&&verifyHeadOk&&!verifyBindIssue)){
+if(!(verifyStateOk&&verifyHeadOk&& !verifyBindIssue)){
 
 
 
@@ -8185,7 +8185,7 @@ terminalReasonOverride=capText(
 
 if(!externalChecksConfirmed){
 terminalReasonOverride=capText(`${terminalReasonOverride}。${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`)
-}else if(autoMergeEnabled&&!externalChecksContextsConfirmed){
+}else if(autoMergeEnabled&& !externalChecksContextsConfirmed){
 terminalReasonOverride=capText(`${terminalReasonOverride}。${EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON}`)
 }
 
@@ -8224,7 +8224,7 @@ lastState='invalid-monitor-result'
 
 const recoveryOnlyReason=[
 ...(!externalChecksConfirmed?[EXTERNAL_CHECKS_UNCONFIRMED_REASON]:[]),
-...(externalChecksConfirmed&&!externalChecksContextsConfirmed?[EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON]:[]),
+...(externalChecksConfirmed&& !externalChecksContextsConfirmed?[EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON]:[]),
 ...(!autoMergeEnabled?[AUTO_MERGE_DISABLED_REASON]:[]),
 
 
@@ -8234,7 +8234,7 @@ const recoveryOnlyReason=[
 
 
 
-...(prAlreadyMerged&&!recoveryOnly
+...(prAlreadyMerged&& !recoveryOnly
 ?['直前の独立確認では PR が MERGED と判定されたが、マージ実行エージェントの再取得ではマージ済みと確認できなかった。判定のずれの可能性があるため次回実行で再確認する']
 :[]),
 ].join('。')||'回復専用経路で停止した'
@@ -8682,7 +8682,7 @@ const reportedTids=f.resolvedThreadIds
 
 
 const resolvedTids=f.pushed===true?reportedTids:reportedTids.filter((v)=>permittedNoPushResolveIds.includes(v))
-const droppedTids=f.pushed===true?[]:reportedTids.filter((v)=>!permittedNoPushResolveIds.includes(v))
+const droppedTids=f.pushed===true?[]:reportedTids.filter((v)=> !permittedNoPushResolveIds.includes(v))
 if(droppedTids.length>0){
 log(`⚠️ #${item.number}: push なしラウンドで許可リスト外の resolve 申告を無視した（threadId: ${droppedTids.join(', ')}）`)
 }
@@ -8764,7 +8764,7 @@ const fixStateWriteOk=await updateState(item.number,optinFixPatchArgs,{cleanupWo
 
 
 
-if(optinFixStatePatch!==undefined&&!fixStateWriteOk){
+if(optinFixStatePatch!==undefined&& !fixStateWriteOk){
 log(`⚠️ #${item.number}: optinFixState を含む状態ファイル更新が失敗した。cleanupWorktree なしで 1 回再試行する`)
 const retryOk=await updateState(item.number,optinFixPatchArgs)
 if(!retryOk){
@@ -8821,10 +8821,10 @@ const reconciled=reconcileRescueRoundState(lastState,rescueRoundActive,roundTime
 rescueRoundActive=reconciled.rescuePending
 
 
-if(reconciled.terminate&&!mergedButIssueOpen){
+if(reconciled.terminate&& !mergedButIssueOpen){
 rescueTimeoutQualityBlock=reconciled.qualityBlock
 log(`#${item.number}: 救済ラウンドがスレッド内容を観測できないまま timeout したため、未解決スレッド由来の品質ブロックとして終端させる（次回実行で monitoring 再開の対象）`)
-}else if(reconciled.timeoutOrigin==='merge-exec'&&!mergedButIssueOpen){
+}else if(reconciled.timeoutOrigin==='merge-exec'&& !mergedButIssueOpen){
 
 
 log(`#${item.number}: 救済ラウンドの再走査は成立したが merge-exec が見送ったため（${roundTimeoutExecReason}）、品質ブロックへ分類せず failed（halt カウント対象）で終端する`)
@@ -8932,7 +8932,7 @@ log(`⚠️ #${item.number}: 状態ファイルは ${saved.status} だが GitHub
 }
 }
 }
-const work=queue.filter((q)=>q.state==='open'&&!done.has(q.number))
+const work=queue.filter((q)=>q.state==='open'&& !done.has(q.number))
 const inTree=new Set(queue.map((q)=>q.number))
 
 
@@ -8995,7 +8995,7 @@ phaseOrder=order
 for(const{from,to}of edges){
 
 
-if(!inTree.has(from)||!inTree.has(to)||from===to)continue
+if(!inTree.has(from)|| !inTree.has(to)||from===to)continue
 depsMap.get(from)?.add(to)
 phaseGateEdgeKeys.add(`${from}->${to}`)
 }
@@ -9064,7 +9064,7 @@ branchMatchesIssue(s.branch,n)
 const PR_RECORD_UNVERIFIED=(pr)=>`状態ファイルに PR #${pr} の記録あり（未照合）`
 
 
-const prClearPatch=(n,b=savedItems[String(n)]?.branch)=>(unverifiedIssues.has(n)||(b&&!branchMatchesIssue(String(b),n))?{}:{pr:0})
+const prClearPatch=(n,b=savedItems[String(n)]?.branch)=>(unverifiedIssues.has(n)||(b&& !branchMatchesIssue(String(b),n))?{}:{pr:0})
 
 
 const blockedStateBatch=[]
@@ -9073,17 +9073,17 @@ async function markBlockedByDeps(item,allFailedDeps){
 failedSet.add(item.number)
 
 const oot=allFailedDeps.filter((d)=>outOfTreeWait.has(d))
-const failedDeps=allFailedDeps.filter((d)=>!outOfTreeWait.has(d))
+const failedDeps=allFailedDeps.filter((d)=> !outOfTreeWait.has(d))
 
 
 const childSet=childWaitTargets.get(item.number)??new Set()
 const failedChildren=failedDeps.filter((d)=>childSet.has(d))
-const failedPrereqs=failedDeps.filter((d)=>!childSet.has(d))
+const failedPrereqs=failedDeps.filter((d)=> !childSet.has(d))
 
 
 
 const failedPhaseGate=failedPrereqs.filter((d)=>phaseGateEdgeKeys.has(`${item.number}->${d}`))
-const failedOtherPrereqs=failedPrereqs.filter((d)=>!phaseGateEdgeKeys.has(`${item.number}->${d}`))
+const failedOtherPrereqs=failedPrereqs.filter((d)=> !phaseGateEdgeKeys.has(`${item.number}->${d}`))
 let note
 if(failedChildren.length>0&&failedPrereqs.length===0){
 note=`子イシューの失敗・ブロックによりクローズ検証を保留: ${formatIssueList(failedChildren)}`
@@ -9157,7 +9157,7 @@ if(item.kind!=='implement')continue
 if(Array.isArray(item.optinTestsInvalid)&&item.optinTestsInvalid.length>0)selfBlocked.set(item.number,'optinTestsInvalid')
 else{
 const savedBranch=savedItems[String(item.number)]?.branch
-if(savedBranch&&!branchMatchesIssue(String(savedBranch),item.number))selfBlocked.set(item.number,'savedBranchMismatch')
+if(savedBranch&& !branchMatchesIssue(String(savedBranch),item.number))selfBlocked.set(item.number,'savedBranchMismatch')
 }
 }
 const plan=estimateDispatch(work,depsMap,done,new Set(failedSet),{outOfTreeWait,phaseGateEdgeKeys,selfBlocked})
@@ -9219,7 +9219,7 @@ await remeasureResidualBytesNow()
 
 
 async function remeasureResidualBytesNow(){
-if(maxResidualWorktreeBytes<=0||!residualBytesObserved)
+if(maxResidualWorktreeBytes<=0|| !residualBytesObserved)
 return{failed:false,exceeded:false,reserveStale:false}
 
 
@@ -9233,7 +9233,7 @@ const unverifiedEphemeralCount=ephemeralWorktrees.filter(
 (e)=>typeof e.path!=='string'||e.path===''||e.path.startsWith('(検証不可:'),
 ).length
 let targetPaths=[...residualPathsAtStart,...ephemeralWorktrees.map((e)=>e.path)].filter(
-(p)=>typeof p==='string'&&p!==''&&!p.startsWith('(検証不可:')&&!confirmedRemovedPaths.has(p),
+(p)=>typeof p==='string'&&p!==''&& !p.startsWith('(検証不可:')&& !confirmedRemovedPaths.has(p),
 )
 let fallbackDetail=''
 
@@ -9347,14 +9347,14 @@ paths:residualPathsAtStart,
 
 
 const allImplementEntries=ephemeralWorktrees.filter((e)=>e.kind==='implement')
-const isUnverifiedPath=(v)=>!(typeof v==='string'&&v!==''&&!v.startsWith('(検証不可:'))
+const isUnverifiedPath=(v)=> !(typeof v==='string'&&v!==''&& !v.startsWith('(検証不可:'))
 
 
 
 const implementPathSet=new Set(
 allImplementEntries
 .map((e)=>e.path)
-.filter((v)=>!isUnverifiedPath(v)&&!confirmedRemovedPaths.has(v)),
+.filter((v)=> !isUnverifiedPath(v)&& !confirmedRemovedPaths.has(v)),
 )
 
 
@@ -9370,7 +9370,7 @@ if(unverifiedImplementIssues.length>0){
 
 
 const[freshEntries,freshIndependentCount]=await Promise.all([scanOrphanWorktrees(),countWorktreeRecords()])
-const claimedPaths=ephemeralWorktrees.map((e)=>e.path).filter((v)=>!isUnverifiedPath(v))
+const claimedPaths=ephemeralWorktrees.map((e)=>e.path).filter((v)=> !isUnverifiedPath(v))
 const resolution=resolveUnverifiedImplementPaths({
 issues:unverifiedImplementIssues,
 physicalEntries:freshEntries,
@@ -9528,7 +9528,7 @@ return lastByteRemeasureOutcome
 
 
 async function remeasureFreeDiskNow(){
-if(maxResidualWorktreeBytes<=0||!residualBytesObserved)return{failed:false}
+if(maxResidualWorktreeBytes<=0|| !residualBytesObserved)return{failed:false}
 
 
 if(freeDiskRemeasureAtIterationSeq===dispatchIterationSeq)return{failed:lastFreeDiskRemeasureFailed}
@@ -9678,7 +9678,7 @@ dispatchIterationSeq+=1
 await remeasureResidualBytesIfDue()
 
 
-const budgetPending=work.filter((q)=>!done.has(q.number)&&!failedSet.has(q.number)).length
+const budgetPending=work.filter((q)=> !done.has(q.number)&& !failedSet.has(q.number)).length
 
 if(!halted){
 for(const item of work){
@@ -9726,7 +9726,7 @@ if(isActiveMonitoring(n)){
 
 
 
-if(item.kind==='implement'&&maxResidualWorktrees>0&&!residualObserved){
+if(item.kind==='implement'&&maxResidualWorktrees>0&& !residualObserved){
 const deferReason=
 `ラン開始時の worktree 残置観測に失敗しているため monitoring 再開を defer した`+
 `（観測失敗時は fix-routing-error worktree の新規作成で残置総数を確認できないまま上限を`+
@@ -9738,14 +9738,14 @@ continue
 if(item.kind==='implement'&&maxResidualWorktrees>0&&residualObserved){
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+1)
+recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedTotal=0
 for(const rn of newStartActive){
 reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_NEW_START-(recordedByIssue.get(rn)??0))
 }
 for(const rn of monitoringResumeActive){
-reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME-(recordedByIssue.get(rn)??0))
+reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME -(recordedByIssue.get(rn)??0))
 }
 const projected=
 residualObservedAtStart+ephemeralWorktrees.length+reservedTotal+EPHEMERAL_RESERVE_PER_MONITORING_RESUME
@@ -9763,7 +9763,7 @@ continue
 
 
 
-if(item.kind==='implement'&&maxResidualWorktreeBytes>0&&!residualBytesObserved){
+if(item.kind==='implement'&&maxResidualWorktreeBytes>0&& !residualBytesObserved){
 const deferReason=
 `ラン開始時の worktree 残置ディスク使用量観測に失敗しているため monitoring 再開を defer した`+
 `（観測失敗時は fix-routing-error worktree の新規作成で容量を確認できないまま上限を`+
@@ -9811,14 +9811,14 @@ continue
 }
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+1)
+recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedUnits=0
 for(const rn of newStartActive){
 reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_NEW_START-(recordedByIssue.get(rn)??0))
 }
 for(const rn of monitoringResumeActive){
-reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME-(recordedByIssue.get(rn)??0))
+reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME -(recordedByIssue.get(rn)??0))
 }
 
 
@@ -9894,7 +9894,7 @@ latchNewStartSuppressed({
 reason:
 `残置 worktree がラン中の積み増しで上限 ${maxResidualWorktrees} 件を超過`+
 `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件）。`+
-DISK_HALT_NOTE+
+DISK_HALT_NOTE +
 WT_RM_NOTE,
 paths:residualPathsAtStart,
 })
@@ -9909,7 +9909,7 @@ continue
 if(item.kind==='implement'){
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+1)
+recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedTotal=0
 for(const rn of newStartActive){
@@ -9917,7 +9917,7 @@ reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_NEW_START-(recordedByIssue.get(r
 }
 
 for(const rn of monitoringResumeActive){
-reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME-(recordedByIssue.get(rn)??0))
+reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME -(recordedByIssue.get(rn)??0))
 }
 const projected=
 residualObservedAtStart+ephemeralWorktrees.length+reservedTotal+EPHEMERAL_RESERVE_PER_NEW_START
@@ -9928,7 +9928,7 @@ reason:
 `残置 worktree が予約込みで上限 ${maxResidualWorktrees} 件を超過する見込み`+
 `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋`+
 `着手候補の最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件）。`+
-DISK_HALT_NOTE+
+DISK_HALT_NOTE +
 WT_RM_NOTE,
 paths:residualPathsAtStart,
 })
@@ -9972,7 +9972,7 @@ reason:
 `残置 worktree がラン中の積み増しで容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過` +
 `（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋基準以降の積み増し見積り ` +
 `${Math.round((projectedBytesA - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
-DISK_HALT_NOTE+
+DISK_HALT_NOTE +
 WT_RM_NOTE,
 paths:residualPathsAtStart,
 })
@@ -9984,14 +9984,14 @@ continue
 if(item.kind==='implement'){
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+1)
+recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedUnits=0
 for(const rn of newStartActive){
 reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_NEW_START-(recordedByIssue.get(rn)??0))
 }
 for(const rn of monitoringResumeActive){
-reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME-(recordedByIssue.get(rn)??0))
+reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME -(recordedByIssue.get(rn)??0))
 }
 
 
@@ -10010,7 +10010,7 @@ reason:
 `残置 worktree が予約込みで容量上限 ${Math.round(maxResidualWorktreeBytes / (1024 * 1024))} MiB を超過する見込み` +
 `（直近実測基準 ${Math.round(residualBytesAtStart / (1024 * 1024))} MiB＋基準以降の積み増し・` +
 `着手候補分の見積り合計 ${Math.round((projectedBytes - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
-DISK_HALT_NOTE+
+DISK_HALT_NOTE +
 WT_RM_NOTE,
 paths:residualPathsAtStart,
 })
@@ -10184,9 +10184,9 @@ cascaded=true
 
 
 const pending=work
-.filter((q)=>!done.has(q.number)&&!failedSet.has(q.number))
+.filter((q)=> !done.has(q.number)&& !failedSet.has(q.number))
 .map((q)=>q.number)
-const notStarted=pending.filter((n)=>!isActiveMonitoring(n))
+const notStarted=pending.filter((n)=> !isActiveMonitoring(n))
 const interrupted=pending.filter((n)=>isActiveMonitoring(n))
 
 
@@ -10194,8 +10194,8 @@ const interrupted=pending.filter((n)=>isActiveMonitoring(n))
 const workKind=new Map(work.map((q)=>[q.number,q.kind]))
 const workItem=new Map(work.map((q)=>[q.number,q]))
 
-const unmetDeps=(n)=>[...depsOf(workItem.get(n))].filter((d)=>!done.has(d))
-const stopFacts=(n)=>({resume:isActiveMonitoring(n),kind:workKind.get(n),halted,latch:newStartSuppressed,waiting:unmetDeps(n).filter((d)=>!failedSet.has(d)),failedDeps:unmetDeps(n).filter((d)=>failedSet.has(d)),gate:monitoringResumeGateDeferred.get(n),held:agentBudgetHeld.get(n)})
+const unmetDeps=(n)=>[...depsOf(workItem.get(n))].filter((d)=> !done.has(d))
+const stopFacts=(n)=>({resume:isActiveMonitoring(n),kind:workKind.get(n),halted,latch:newStartSuppressed,waiting:unmetDeps(n).filter((d)=> !failedSet.has(d)),failedDeps:unmetDeps(n).filter((d)=>failedSet.has(d)),gate:monitoringResumeGateDeferred.get(n),held:agentBudgetHeld.get(n)})
 const budgetOnly=(n)=>{const r=stopReasons(stopFacts(n));return r.length===1&&r[0]==='budget'}
 
 
@@ -10222,7 +10222,9 @@ for(const n of interrupted){
 
 const{pr,status}=savedItems[String(n)]
 results.push({issue:n,status,pr,note:`中断時に ${status}（${PR_RECORD_UNVERIFIED(pr)}）。${stopNote(stopFacts(n), agentBudget)}`})
-log(`#${n}: 再開できないまま ${status} 状態を維持する（PR #${pr} の再開情報を保持）`)
+
+
+log(`#${n}: monitor 中断のまま終了（状態 ${status}・PR #${pr} の再開情報を保持）`)
 }
 if(notStarted.length>0){
 log(`未着手のまま終了: ${formatIssueList(notStarted)}`)
@@ -10297,7 +10299,7 @@ const p=sanitizeWorktreePath(entry?.path??'')
 
 if(!p||(mainWorktreePathAtEnd&&p===mainWorktreePathAtEnd)||sweepEligiblePaths.has(p)||ephemeralWorktreePaths.has(p))continue
 const branch=typeof entry?.branch==='string'?entry.branch:''
-if(!branch||branch===baseBranch||!isValidBranchName(branch))continue
+if(!branch||branch===baseBranch|| !isValidBranchName(branch))continue
 
 const matched=queue.find(
 (q)=>q.kind==='implement'&&q.state==='open'&&branchMatchesIssue(branch,q.number),
@@ -10358,7 +10360,7 @@ const hasUnverifiedEndPath=rawEndPaths.some(
 if(hasUnverifiedEndPath){
 log('⚠️ ラン終了時の測定対象に検証不可な worktree パスが含まれるため測定不成立として扱う（overLimit: true で報告する。fail-closed）')
 }else{
-const endTargetPaths=rawEndPaths.filter((p)=>!confirmedRemovedPaths.has(p))
+const endTargetPaths=rawEndPaths.filter((p)=> !confirmedRemovedPaths.has(p))
 const endKib=endTargetPaths.length>0?await measureResidualWorktreeBytes(endTargetPaths):0
 if(endKib!==null){
 residualBytesAtEnd=endKib*1024
