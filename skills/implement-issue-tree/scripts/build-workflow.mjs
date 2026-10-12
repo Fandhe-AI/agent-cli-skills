@@ -5,12 +5,15 @@
 // 実行ファイルからコメントを落としてサイズ予算を確保し、開発ファイル側はコメント量の制約から
 // 解放する（設計の経緯は PR #241 → 本分離）。
 //
-// 変換は「コメント除去」と「コード行の先頭インデント除去」の 2 つだけで、これ以外の minify は
-// しない: コメント行は空行化し改行を全て保持するため、生成物と開発ファイルの行番号は完全に
-// 一致する（スタックトレース・エラー行の突き合わせ用）。一方、先頭インデントを落とすため
-// **列番号は一致しない**。テンプレートリテラル内（`${}` 式部分を含む）は一切変更しない
-// （プロンプトに埋め込む bash・YAML 等は継続行のインデントが内容の一部）。インデント除去は
-// 512 KiB 予算（tests/lib/workflow-script-contract.mjs）を行番号一致を保ったまま守るための措置。
+// 変換は「コメント除去」「コード行の先頭インデント除去」「トークン間の不要な半角スペースの
+// 除去」の 3 つだけで、これ以外の minify（識別子短縮・改行除去等）はしない: コメント行は空行化し
+// 改行を全て保持するため、生成物と開発ファイルの行番号は完全に一致する（スタックトレース・
+// エラー行の突き合わせ用）。一方、先頭インデントと空白を落とすため**列番号は一致しない**。
+// テンプレートリテラル内（`${}` 式部分を含む）・文字列リテラル・正規表現リテラルは一切変更しない
+// （プロンプトに埋め込む bash・YAML 等は継続行のインデントが内容の一部）。インデント除去と
+// 空白除去は 512 KiB 予算（tests/lib/workflow-script-contract.mjs）を行番号一致を保ったまま
+// 守るための措置。空白除去は、詰めても同じ 2 トークンに字句解析される隣接の組だけを許可リスト
+// （shouldSqueezeSpace）で詰め、迷う組は詰めない。
 // 生成物の鮮度（開発ファイルとの同期）は tests/build-workflow.test.mjs が CI で検証する —
 // 生成物を直接編集したりビルドを忘れたりすると byte 不一致で fail する。
 //
@@ -75,9 +78,59 @@ const matchIdentifierUnicodeEscape = (src, i) => {
   return src.slice(i, i + 6)
 }
 
+// 空白除去の許可リストで使う文字の分類。ここに無い文字（`/` 以外の記号・非 ASCII・バックスラッシュ・
+// `#`・`@`・改行等）は分類なし（null）= 空白を詰めない。`.` と `/` は別扱い（下記）
+const SQUEEZE_WORD = /[A-Za-z0-9_$]/
+const SQUEEZE_SELF_DELIMITING = '(){}[],;' // 他の文字と連結しても別トークンにならない 1 文字記号
+const SQUEEZE_QUOTES = '"\'`' // 文字列・テンプレートリテラルの境界
+const SQUEEZE_OPERATORS = '=:?!<>|&*%^+-~'
+// 演算子同士で詰めてよい組（[前の文字の集合, 後ろの文字の集合]）。`+ +` `- -` `+ ++` `< !--` `= >`
+// `? .` `* *` `& &` のように連結すると別トークンになる組を含めないため、列挙したものだけを許可する
+const SQUEEZE_OPERATOR_PAIRS = [
+  ['=:?&|*%^>!', '!~+-'],
+  ['+-', '!~'],
+]
+
+const classifyForSqueeze = (ch) => {
+  if (ch === undefined || ch === '') return null
+  if (ch === '.') return 'dot'
+  if (SQUEEZE_WORD.test(ch)) return 'word'
+  if (SQUEEZE_SELF_DELIMITING.includes(ch)) return 'self'
+  if (SQUEEZE_QUOTES.includes(ch)) return 'quote'
+  if (SQUEEZE_OPERATORS.includes(ch)) return 'op'
+  return null
+}
+
+/**
+ * トークン間の半角スペースを詰めてよいかを、直前トークンの末尾 1 文字 `prev` と直後トークンの
+ * 先頭 1 文字 `next` だけで判定する純粋関数（許可リスト方式: true を返す組だけが対象）。
+ * 詰めても同じ 2 トークンに字句解析される組だけを許可する。
+ *
+ * 詰めない組: 単語文字同士（`a b` → `ab`）、`/` の前後（除算・正規表現・`//` `/*` の誤生成）、
+ * `.` の前後の大半（`1 .toString()`・`? .5`。`.` の直前が `(),;{}[]` か引用符のときだけ可）、
+ * 演算子同士の大半（`+ +`・`+ ++`・`- --`・`< !--`・`= >`・`? .`・`* *`・`& &` 等）、
+ * 分類なしの文字。lexer が状態から加えて除外する組 — `\u{...}` の直後・数値の指数部 `1e +`・
+ * 同一行に除算の `/` がある行 — はここでは判定しない。
+ */
+export function shouldSqueezeSpace(prev, next) {
+  const a = classifyForSqueeze(prev)
+  const b = classifyForSqueeze(next)
+  if (a === null || b === null) return false
+  if (a === 'dot') return false
+  if (b === 'dot') return a === 'self' || a === 'quote'
+  if (a === 'word' && b === 'word') return false
+  if (a === 'self' || b === 'self' || a === 'quote' || b === 'quote') return true
+  if (a === 'op' && b === 'op') {
+    return SQUEEZE_OPERATOR_PAIRS.some(([lefts, rights]) => lefts.includes(prev) && rights.includes(next))
+  }
+  return true // 単語 ↔ 演算子
+}
+
 /**
  * JS ソースからコメントとコード行の先頭インデントを除去する（改行はすべて保持し行番号を
- * 維持する。列番号は維持しない）。
+ * 維持する。列番号は維持しない）。`squeezeSpaces` オプションを true にすると、さらに最上位の
+ * コードのトークン間の不要な半角スペースを詰める（`squeezeSpaces()` 経由で使う。lexer の状態
+ * 追跡を共有するため、文字列・テンプレート・正規表現の判定を二重実装しない）。
  *
  * 文字列・テンプレートリテラル（`${}` のネスト含む）・正規表現リテラルを追跡する lexer で、
  * それらの内部にある `//` `/*` をコメントと誤認しない。本スクリプトはプロンプト用の巨大
@@ -89,7 +142,7 @@ const matchIdentifierUnicodeEscape = (src, i) => {
  * ビルド時検証（行数保持・先頭 meta 宣言・冪等性）と tests/build-workflow.test.mjs の
  * 固定ケース + 生成物パースゲートで担保する。
  */
-export function stripComments(src) {
+export function stripComments(src, { squeezeSpaces = false } = {}) {
   let out = ''
   let i = 0
   const n = src.length
@@ -135,6 +188,9 @@ export function stripComments(src) {
   // 'code'（{} 深度つき）と 'template' のネストを管理する。template 内の `${` で code を
   // push し、その code の深度が閉じたら template へ復帰する
   const stack = [{ mode: 'code', depth: 0 }]
+  // 空白除去用: 現在の行に除算（正規表現と判別されなかった `/`）が出たか。除算と誤読した正規表現
+  // リテラルの内部の空白を詰めて壊さないため、その行の残りでは空白を詰めない（改行で解除）
+  let squeezeOff = false
 
   // コメント除去の直前に出力末尾の行内空白を切り詰める。コメントだけの行は空行になり、
   // `code  // c` は `code` になる（.editorconfig の trim_trailing_whitespace 準拠）
@@ -195,6 +251,32 @@ export function stripComments(src) {
       rawPrevContinuesSigWord = false
       i++
       continue
+    }
+
+    // トークン間の空白除去（squeezeSpaces 有効時）: 最上位のコードで行内の空白・タブの連なりを
+    // 丸ごと消費し、詰められる組（shouldSqueezeSpace）なら何も出さず、そうでなければ 1 個に
+    // まとめて出す。行末の空白は対象外（下の通常経路）。字句状態は空白 1 個を出した場合と
+    // 同じに更新するため、regex / 除算判別の結果は変わらない
+    if (squeezeSpaces && (c === ' ' || c === '\t') && stack.length === 1 && !squeezeOff) {
+      let j = i
+      while (src[j] === ' ' || src[j] === '\t') j++
+      const next = src[j]
+      const prev = out[out.length - 1]
+      if (prev !== undefined && prev !== '\n' && next !== undefined && next !== '\n' && next !== '\r') {
+        const squeeze =
+          shouldSqueezeSpace(prev, next) &&
+          // `\u{41}` の閉じ `}` と単語文字を連結すると識別子が地続きになる
+          !(prev === '}' && rawPrevIsIdentEscape && isWordChar(next)) &&
+          // `1e +2` の空白を詰めると指数部符号（`1e+2`）になる
+          !((prev === 'e' || prev === 'E') && (next === '+' || next === '-') && /^[0-9]/.test(sigWord))
+        if (!squeeze) out += ' '
+        rawPrev2 = rawPrev
+        rawPrev = ' '
+        rawPrevIsIdentEscape = false
+        rawPrevContinuesSigWord = false
+        i = j
+        continue
+      }
     }
 
     const c2 = src[i + 1]
@@ -367,6 +449,8 @@ export function stripComments(src) {
     // 行末に残るケース。文字列・テンプレート内の改行は別経路のため触らない）
     if (c === '\n') trimLineTail()
     out += c
+    if (c === '\n') squeezeOff = false
+    else if (c === '/') squeezeOff = true
     if (isWordChar(c)) {
       // rawPrevIsIdentEscape: 直前が Unicode コードポイントエスケープの末尾（`\u{1D400}1` の
       // `1` 等）で地続きの識別子文字である場合も継続として扱う（Issue #455 codex P1）。
@@ -442,11 +526,20 @@ export function stripComments(src) {
 }
 
 /**
+ * コメント・インデントを除去したうえで、最上位のコードのトークン間の不要な半角スペースを詰める。
+ * 先にコメントを除去してから空白除去の lexer を走らせるため、ブロックコメントの置換空白が
+ * 詰め残しになって冪等性を壊すことはない。冪等（出力へ再適用しても不変）。
+ */
+export function squeezeSpaces(src) {
+  return stripComments(stripComments(src), { squeezeSpaces: true })
+}
+
+/**
  * 開発ファイルのソースから実行ファイルの内容を生成し、変換の安全性を検証して返す。
  * 検証に失敗した場合は throw する（fail-closed: 壊れた生成物を書き出さない）。
  */
 export function buildArtifact(src) {
-  const stripped = stripComments(src)
+  const stripped = squeezeSpaces(src) // コメント・インデント・不要な空白を除去した生成物
   const srcLines = src.split('\n').length
   const outLines = stripped.split('\n').length
   if (srcLines !== outLines) {
@@ -458,9 +551,10 @@ export function buildArtifact(src) {
   if (!/^export const meta\b/.test(stripped)) {
     throw new Error('生成物の先頭が `export const meta` でない（開発ファイル先頭にコメント等が混入）')
   }
-  // 冪等性: コメント除去済みの生成物へ再適用しても不変であること（lexer の自己整合検証）
-  if (stripComments(stripped) !== stripped) {
-    throw new Error('コメント除去が冪等でない（lexer がコメント以外を変更している疑い）')
+  // 冪等性: 生成物へ再適用しても不変であること（lexer の自己整合検証）。空白除去モードの lexer は
+  // コメント・インデント除去も兼ねるため、1 回の再適用でコメント除去・空白除去の双方を検証できる
+  if (stripComments(stripped, { squeezeSpaces: true }) !== stripped) {
+    throw new Error('コメント除去・空白除去が冪等でない（lexer がコメント・空白以外を変更している疑い）')
   }
   return stripped
 }

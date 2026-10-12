@@ -7,6 +7,9 @@
 //   (b) 鮮度ゲート — リポジトリの実行ファイル（implement-issue-tree.js）が開発ファイル
 //       （implement-issue-tree.src.js）から再生成した内容と byte 一致すること。生成物の
 //       直接編集・ビルド忘れの双方をここで fail させる（CI がこのスイートを実行する）。
+//   (d) 空白除去 — トークン間の不要な半角スペースを詰める後段パス（squeezeSpaces）の許可リスト・
+//       固定ケース・性質（行数保持・冪等・リテラル不変）と、Node 同梱 acorn による変換前後の
+//       トークン列一致（実ファイル + 固定ケース）。
 // 生成物のサイズ・パースゲートは workflow-loadability.test.mjs が担う（対象は実行ファイル）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -15,10 +18,13 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { stripComments, buildArtifact, SRC_PATH, DIST_PATH } from '../scripts/build-workflow.mjs'
+import {
+  stripComments, squeezeSpaces, shouldSqueezeSpace, buildArtifact, SRC_PATH, DIST_PATH,
+} from '../scripts/build-workflow.mjs'
 
 const SCRIPT_PATH = fileURLToPath(new URL('../scripts/build-workflow.mjs', import.meta.url))
 const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)))
+const TOKEN_DIFF_HELPER = fileURLToPath(new URL('./lib/token-diff.cjs', import.meta.url))
 
 // ---------------------------------------------------------------------------
 // (a) lexer 固定ケース
@@ -388,6 +394,229 @@ test('冪等性: インデント除去後の出力へ再適用しても不変', 
 test('冪等性: 除去済みソースへ再適用しても不変', () => {
   const once = stripComments("const a = 1 // c\nconst u = 'http://x'\n")
   assert.equal(stripComments(once), once)
+})
+
+// ---------------------------------------------------------------------------
+// (d) 空白除去（squeezeSpaces）
+// ---------------------------------------------------------------------------
+
+test('許可リスト: 詰めてよい組（括弧・区切り・引用符の隣、単語と演算子の隣、一部の演算子同士）', () => {
+  const squeezable = [
+    ['a', '('], [')', 'b'], ['(', 'x'], ['x', ')'], [',', 'y'], [';', 'z'], ['{', 'k'], ['}', 'else'], ['t', '['],
+    ['a', '='], ['=', 'b'], ['a', '+'], ['+', 'b'], ['a', '?'], ['?', 'b'], ['b', ':'], [':', 'c'], ['a', '<'],
+    ['return', '"'], ['"', 'in'], ["'", 'x'], ['`', 'x'], ['=', '`'], ['=', '!'], ['&', '!'], ['=', '-'], ['+', '!'],
+    [',', '.'], ['(', '.'], ['"', '.'], ['}', '.'],
+  ]
+  for (const [prev, next] of squeezable) {
+    assert.equal(shouldSqueezeSpace(prev, next), true, `${prev} ${next} は詰めてよい`)
+  }
+})
+
+test('許可リスト: 詰めてはいけない組（連結すると別トークンになる・意味が変わる・判断できない）', () => {
+  const kept = [
+    ['a', 'b'], ['1', 'a'], ['_', '$'], // 単語文字同士
+    ['+', '+'], ['+', '-'], ['-', '-'], ['-', '+'], // `+ +` `+ ++` `- --` の先頭 2 文字
+    ['*', '*'], ['&', '&'], ['|', '|'], ['?', '?'], ['<', '<'], ['>', '>'], ['=', '='], ['=', '>'], ['!', '='],
+    ['<', '!'], // `<!--`
+    ['?', '.'], // `?.5`
+    ['1', '.'], ['a', '.'], ['.', '5'], ['.', 'a'], ['+', '.'], ['=', '.'], // `.` の前後
+    ['a', '/'], ['/', 'a'], [')', '/'], ['/', '/'], ['*', '/'], ['/', '*'], // `/` の前後
+    ['é', 'a'], ['a', 'é'], ['\\', 'a'], ['a', '\\'], ['#', 'a'], ['@', 'a'], // 分類なし
+    ['', 'a'], ['a', ''], [undefined, 'a'], ['a', undefined],
+  ]
+  for (const [prev, next] of kept) {
+    assert.equal(shouldSqueezeSpace(prev, next), false, `${prev} ${next} は詰めない`)
+  }
+})
+
+test('空白除去: 括弧・区切り・演算子の隣の空白を詰める', () => {
+  assert.equal(squeezeSpaces('const a = 1\n'), 'const a=1\n')
+  assert.equal(squeezeSpaces('f(a, b)\n'), 'f(a,b)\n')
+  assert.equal(squeezeSpaces('if (x) { y() } else { z() }\n'), 'if(x){y()}else{z()}\n')
+  assert.equal(squeezeSpaces('const o = { a: 1, b: -1 }\n'), 'const o={a:1,b:-1}\n')
+  assert.equal(squeezeSpaces('const f = (a) => a + 1\n'), 'const f=(a)=>a+1\n')
+  assert.equal(squeezeSpaces('const v = c ? b : d\n'), 'const v=c?b:d\n')
+  assert.equal(squeezeSpaces('const w = a && !b || ~c\n'), 'const w=a&&!b||~c\n')
+  assert.equal(squeezeSpaces("switch (k) { case 'a': return -1 }\n"), "switch(k){case'a':return-1}\n")
+})
+
+test('空白除去: 単語文字同士の空白は残す', () => {
+  assert.equal(squeezeSpaces('const x = a in o\n'), 'const x=a in o\n')
+  assert.equal(squeezeSpaces('return typeof x\n'), 'return typeof x\n')
+})
+
+test('空白除去: 連続する空白・タブは詰めるか 1 個に畳む', () => {
+  assert.equal(squeezeSpaces('const   x  =\t1\n'), 'const x=1\n')
+  assert.equal(squeezeSpaces('return \t x\n'), 'return x\n')
+})
+
+test('空白除去: 連結すると別トークンになる組は詰めない（+ + / + ++ / - - / - --）', () => {
+  assert.equal(squeezeSpaces('const a = b + +c\n'), 'const a=b+ +c\n')
+  assert.equal(squeezeSpaces('const a = b + ++c\n'), 'const a=b+ ++c\n')
+  assert.equal(squeezeSpaces('const a = b - -c\n'), 'const a=b- -c\n')
+  assert.equal(squeezeSpaces('const a = b - --c\n'), 'const a=b- --c\n')
+  assert.equal(squeezeSpaces('const a = b++ + c\n'), 'const a=b++ +c\n')
+})
+
+test('空白除去: <!-- を作らない（< と ! の間は詰めない）', () => {
+  const out = squeezeSpaces('const a = b < !--c\n')
+  assert.equal(out, 'const a=b< !--c\n')
+  assert.ok(!out.includes('<!--'))
+})
+
+test('空白除去: / の前後は詰めない（除算・正規表現・コメント開始の誤生成防止）', () => {
+  assert.equal(squeezeSpaces('const q = a / b\n'), 'const q=a / b\n')
+  assert.equal(squeezeSpaces('const r = /ab/ .test(s)\n'), 'const r= /ab/ .test(s)\n')
+  assert.equal(squeezeSpaces('const t = a * /b/.source.length\n'), 'const t=a* /b/.source.length\n')
+})
+
+test('空白除去: 除算（または除算と誤読された正規表現）がある行は残りの空白を詰めない', () => {
+  // `if (x)` 直後の `/` は除算側に倒される（`)` `}` 直後の曖昧さ）。実際は正規表現でも、
+  // その内部の空白（`a (b)`）を詰めて正規表現を壊さない
+  assert.equal(squeezeSpaces('if (x) /a (b)/.test(s)\n'), 'if(x) /a (b)/.test(s)\n')
+  // 次の行は影響を受けず詰める
+  assert.equal(squeezeSpaces('if (x) /a (b)/.test(s)\nconst z = 1\n'), 'if(x) /a (b)/.test(s)\nconst z=1\n')
+})
+
+test('空白除去: 数値の後の . は詰めない（1 .toString()）、? . 数値（a ? .5 : b）も ?.5 にしない', () => {
+  assert.equal(squeezeSpaces('const s = 1 .toString()\n'), 'const s=1 .toString()\n')
+  const out = squeezeSpaces('const n = a ? .5 : b\n')
+  assert.equal(out, 'const n=a? .5:b\n')
+  assert.ok(!out.includes('?.5'))
+})
+
+test('空白除去: spread の ... は直前が区切りのときだけ詰める', () => {
+  assert.equal(squeezeSpaces('const a = [x, ...y]\n'), 'const a=[x,...y]\n')
+  assert.equal(squeezeSpaces('f(...args, ...more)\n'), 'f(...args,...more)\n')
+})
+
+test('空白除去: 文字列リテラル内の空白は 1 バイトも変えない', () => {
+  assert.equal(squeezeSpaces(`const s = 'a  +  b' + "x  (y)  =  z"\n`), `const s='a  +  b'+"x  (y)  =  z"\n`)
+})
+
+test('空白除去: テンプレートリテラル（本文・${} 式内・ネスト）は 1 バイトも変えない', () => {
+  const t = 'const t = `a  b ${ c  +  d } e  ${ f ? `g  h ${ i  +  j }` : k }  l`\n'
+  assert.equal(squeezeSpaces(t), 'const t=`a  b ${ c  +  d } e  ${ f ? `g  h ${ i  +  j }` : k }  l`\n')
+})
+
+test('空白除去: テンプレートリテラルの直後の空白は詰める（モード復帰）', () => {
+  assert.equal(squeezeSpaces('const t = `a  b` + c  + `d`\n'), 'const t=`a  b`+c+`d`\n')
+})
+
+test('空白除去: 正規表現リテラル内の空白とエスケープは 1 バイトも変えない', () => {
+  assert.equal(squeezeSpaces('const r = /a  (b)  \\//g.test(s)\n'), 'const r= /a  (b)  \\//g.test(s)\n')
+  assert.equal(squeezeSpaces('const r = [x, /a  [ ]  b/]\n'), 'const r=[x, /a  [ ]  b/]\n')
+})
+
+test('空白除去: 行末の空白は残らず、改行と行数は保持される', () => {
+  const src = 'foo(a)  \nbar( b )\n\n  baz()\n'
+  const out = squeezeSpaces(src)
+  assert.equal(out, 'foo(a)\nbar(b)\n\nbaz()\n')
+  assert.equal(out.split('\n').length, src.split('\n').length)
+})
+
+test('空白除去: Unicode エスケープ識別子の閉じ } と単語文字を連結しない', () => {
+  assert.equal(squeezeSpaces('const x = \\u{61} in o\n'), 'const x= \\u{61} in o\n')
+  assert.equal(squeezeSpaces('const y = {} in o\n'), 'const y={}in o\n') // 通常の } は詰める
+})
+
+test('空白除去: 非 ASCII 識別子の隣は詰めない（return é が returné にならない）', () => {
+  assert.equal(squeezeSpaces('return é\n'), 'return é\n')
+  assert.equal(squeezeSpaces('const x = é + 1\n'), 'const x= é +1\n')
+})
+
+test('空白除去: 数値の指数部になる並び（1e +2）は詰めない', () => {
+  assert.equal(squeezeSpaces('const a = 1e + 2\n'), 'const a=1e +2\n')
+  assert.equal(squeezeSpaces('const b = e + 2\n'), 'const b=e+2\n')
+})
+
+test('空白除去: ブロックコメントの置換空白が詰め残しにならず冪等', () => {
+  const out = squeezeSpaces('foo(/*c*/ x, /* d */ y)\n')
+  assert.equal(out, 'foo(x,y)\n')
+  assert.equal(squeezeSpaces(out), out)
+})
+
+test('空白除去: stripComments は既定では空白を詰めない（既存契約を変えない）', () => {
+  assert.equal(stripComments('const a = f(b, c)\n'), 'const a = f(b, c)\n')
+})
+
+test('空白除去: 冪等（再適用しても不変）', () => {
+  const src = [
+    'function f(a, b) {',
+    '  const t = `x  ${ a  +  b }`',
+    '  if (a < !--b) return a + +b - --a',
+    '  return /a  (b)/.test(t) ? 1 .toString() : "s  s"',
+    '}',
+    '',
+  ].join('\n')
+  const once = squeezeSpaces(src)
+  assert.equal(squeezeSpaces(once), once)
+  assert.equal(stripComments(once, { squeezeSpaces: true }), once)
+})
+
+test('空白除去: 行数（改行数）を保持する', () => {
+  const src = 'a ( 1 )\n\n/* x\n y */ b ( 2 )\n`t\n  u`\n  c ( 3 )'
+  assert.equal(squeezeSpaces(src).split('\n').length, src.split('\n').length)
+})
+
+// acorn（Node 同梱の字句解析器）で、変換前後のトークン列（種類・テキスト・開始行）が一致する
+// ことを検証する。acorn は `node --expose-internals` の子プロセスでしか読めないため
+// tests/lib/token-diff.cjs 経由で呼ぶ。読み込めない環境でも skip せず fail する（fail-closed:
+// 検証が静かに無効化されて「トークン列一致」の保証が消えるのを防ぐ）
+const compareTokensWithAcorn = (cases) => {
+  const r = spawnSync(process.execPath, ['--expose-internals', TOKEN_DIFF_HELPER], {
+    input: JSON.stringify(cases),
+    encoding: 'utf8',
+    maxBuffer: 1 << 28,
+  })
+  assert.equal(r.status, 0, `acorn によるトークン比較の子プロセスが失敗（status ${r.status}）: ${r.stderr}`)
+  const { results } = JSON.parse(r.stdout)
+  assert.equal(results.length, cases.length)
+  return results
+}
+
+test('トークン列一致（acorn）: 固定ケースで変換前後のトークンの種類・値・行が一致する', () => {
+  const snippets = [
+    'const a = 1\n',
+    'if (x) { y() } else { z() }\n',
+    'const o = { a: 1, b: -1, ...c }\n',
+    'const f = (a) => a + 1\n',
+    'const v = c ? b : d\n',
+    'const n = a ? .5 : b\n',
+    'const s = 1 .toString()\n',
+    'const q = a / b / c\n',
+    'const r = /a  (b)  \\//g.test(s) + 1\n',
+    'const a = b + +c - -d + ++e - --f\n',
+    'const a = b++ + c-- - d\n',
+    'const z = b < !--c\n',
+    'const w = a && !b || ~c ?? d\n',
+    'const e1 = e + 2\n',
+    "switch (k) { case 'a': return -1; default: return +x }\n",
+    'const s = \'a  +  b\' + "x  (y)  =  z"\n',
+    'const t = `a  b ${ c  +  d } e  ${ f ? `g  h ${ i  +  j }` : k }  l`\n',
+    'const t = `a  b` + c  + `d`\n',
+    'const x = \\u{61} in o\n',
+    'for (const k of [1, 2]) { sum += k * 2 ** 3 }\n',
+    'a = b ? c : d ? e : f\n',
+    'x = a ? -1 : +1\n',
+    'async function g() { await h(); return typeof (await i) }\n',
+    'class A extends B { static #p = 1; get x() { return this.#p } }\n',
+    'label: for (;;) { break label }\n',
+    'x = y\n  ? z\n  : w\n',
+    'foo(/*c*/ x, /* d */ y) // tail\n',
+  ]
+  const cases = snippets.map((code) => ({ name: JSON.stringify(code), before: code, after: squeezeSpaces(code) }))
+  const failed = compareTokensWithAcorn(cases).filter((r) => !r.ok)
+  assert.deepEqual(failed, [])
+})
+
+test('トークン列一致（acorn）: 実ファイル implement-issue-tree.src.js と生成物の全トークンが一致する', () => {
+  const src = readFileSync(SRC_PATH, 'utf8')
+  const dist = readFileSync(DIST_PATH, 'utf8')
+  // before は生の src（acorn はコメントを読み飛ばす）なので、コメント除去・インデント除去・
+  // 空白除去の全体が「トークン列と各トークンの開始行を変えない」ことを独立実装で検証する
+  const [result] = compareTokensWithAcorn([{ name: 'implement-issue-tree', before: src, after: dist }])
+  assert.equal(result.ok, true, result.detail)
 })
 
 // ---------------------------------------------------------------------------
