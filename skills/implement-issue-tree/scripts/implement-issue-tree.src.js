@@ -200,6 +200,34 @@ function buildPhaseGateEdges(rootNumber, byParentMap) {
   }
   return { order, edges }
 }
+// 親ノードの verify-close が完了を待つ相手（depsMap の子由来の辺の終点）を求める純粋関数。
+// 直下の子は state を問わず全件含める。closed（state !== 'open'）の子は、その配下を辿って
+// closed を貫通し、最初に現れる open の子孫を加える。
+// 理由: closePrompt は「全子孫が closed」を要求し、Tree 取得も closed ノード配下を列挙する一方、
+// スケジューラは closed ノードをラン開始時に done へ入れる。直下の子だけを待つと、
+// P(open) → C(closed) → G(open) で G が未完了のまま P の verify-close が ready になり、
+// closed: false の返却で failed（halt カウント）へ落ちる。open の子孫に到達したらそこで打ち切る
+// （その open ノード自身の verify-close がさらに下を待つため、P が孫以下を直接待つ必要はない）。
+// 再帰ではなく seen 付きの反復走査（buildPhaseGateEdges の subtreeOf と同じ流儀）で、循環データでも
+// 止まる。先頭から添字で読む待ち行列にして、直下の子を siblingIndex 順のまま先に並べる。
+// byParentMap の要素は { number, state } を持つ前提（駆動部の byParent と同形）。
+function collectChildWaitTargets(nodeNumber, byParentMap) {
+  const targets = new Set()
+  const seen = new Set([nodeNumber])
+  const direct = byParentMap.get(nodeNumber) ?? []
+  const directNumbers = new Set(direct.map((c) => c.number))
+  const pending = [...direct]
+  for (let i = 0; i < pending.length; i++) {
+    const n = pending[i]
+    if (seen.has(n.number)) continue
+    seen.add(n.number)
+    // 貫通先の closed ノードは待たない（done 済みで待機先に入れても意味がない）。
+    if (directNumbers.has(n.number) || n.state === 'open') targets.add(n.number)
+    // closed のノードだけ配下へ貫通する。open のノードは自身の verify-close が配下を待つ。
+    if (n.state !== 'open') for (const c of byParentMap.get(n.number) ?? []) pending.push(c)
+  }
+  return targets
+}
 // 循環除去で削除して良い辺を選ぶ純粋関数（Issue #494）。木の辺（親子関係）と Phase ゲート辺
 // （protectedKeys）は保護対象とし、削除対象は本文由来の dependsOn 辺に限定する。cycle は
 // findDependencyCycle() が返すノード列（先頭から辺で連結し、末尾は先頭へ戻る）。見つからない
@@ -8325,8 +8353,8 @@ async function runOne(item) {
 // ============================================================================
 
 // --- 並列スケジューラ ---
-// 待機が必要なのは「機能的依存」のみ（verify-close は全子イシューの完了を待つ、Plan の
-// dependsOn を待つ）。それ以外は post-order 順を優先度として空きスロットへ並列投入する。
+// 待機が必要なのは「機能的依存」のみ（verify-close は全子イシューの完了を待つ — closed の子の
+// 配下にある open の子孫も含む、Plan の dependsOn を待つ）。それ以外は post-order 順を優先度として空きスロットへ並列投入する。
 // ファイル競合は待機せず後段の修正ループで解消する。
 const done = new Set()
 const failedSet = new Set()
@@ -8376,12 +8404,22 @@ const inTree = new Set(queue.map((q) => q.number))
 
 // 依存グラフを事前構築し、解決不能な依存を除去してデッドロックを防ぐ:
 //   1. 祖先イシューへの dependsOn は無視（親は子の完了を待つため本質的に循環）
-//   2. 残る循環は DFS で検出し構成 dependsOn 辺を除去（木の親子辺は対象外）
+//   2. 残る循環は DFS で検出し構成 dependsOn 辺を除去（木の親子辺・closed 貫通辺は対象外）
+// 親の待機先は直下の子に加え、closed の子を貫通した先の最初の open 子孫（collectChildWaitTargets）。
+// closed ノードは done へ入るため、直下の子だけを待つと配下の open 子孫の未完了を素通りする。
 const depsMap = new Map()
+const childWaitTargets = new Map()
+// 貫通辺（直下の子ではない待機先）。木の辺ではないため本文由来 dependsOn との循環除去で削除され
+// 得る。削除されると closed 中間ノードの配下を待たなくなるため保護対象へ加える（下の循環除去）。
+const closedPierceEdgeKeys = new Set()
 for (const item of queue) {
-  const ds = new Set()
-  for (const c of byParent.get(item.number) ?? []) ds.add(c.number)
-  depsMap.set(item.number, ds)
+  const targets = collectChildWaitTargets(item.number, byParent)
+  const directChildren = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
+  for (const t of targets) {
+    if (!directChildren.has(t)) closedPierceEdgeKeys.add(`${item.number}->${t}`)
+  }
+  childWaitTargets.set(item.number, targets)
+  depsMap.set(item.number, new Set(targets))
 }
 const parentNumOf = new Map(queue.map((q) => [q.number, q.parent]))
 function isAncestor(anc, n) {
@@ -8459,9 +8497,10 @@ function findDependencyCycle() {
 }
 let cycle = findDependencyCycle()
 while (cycle) {
-  // 削除対象は dependsOn 由来の辺に限る。木の辺・Phase ゲート辺（phaseGateEdgeKeys）は保護対象。
-  const edge = selectRemovableCycleEdge(cycle, byParent, depsMap, phaseGateEdgeKeys)
-  // 木の辺とゲート辺だけでは循環は構造上発生しないため、null 到達は異常データ
+  // 削除対象は dependsOn 由来の辺に限る。木の辺・Phase ゲート辺（phaseGateEdgeKeys）・closed 貫通辺
+  // （closedPierceEdgeKeys）は保護対象。
+  const edge = selectRemovableCycleEdge(cycle, byParent, depsMap, new Set([...phaseGateEdgeKeys, ...closedPierceEdgeKeys]))
+  // 木の辺・ゲート辺・貫通辺だけでは循環は構造上発生しないため、null 到達は異常データ
   if (!edge) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
   depsMap.get(edge.from).delete(edge.to)
   log(`循環依存を検出: ${cycle.map((n) => `#${n}`).join(' → ')}。#${edge.from} の dependsOn #${edge.to} を無視する`)
@@ -8500,8 +8539,8 @@ async function markBlockedByDeps(item, allFailedDeps) {
   const oot = allFailedDeps.filter((d) => outOfTreeWait.has(d))
   const failedDeps = allFailedDeps.filter((d) => !outOfTreeWait.has(d))
   // 失敗依存を「子イシュー」と「dependsOn 前提」に分けて文言を変える（クローズ検証の保留と
-  // 着手不能を混同しないため）。
-  const childSet = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
+  // 着手不能を混同しないため）。closed 中間ノードを貫通した先の open 子孫も子イシュー側に数える。
+  const childSet = childWaitTargets.get(item.number) ?? new Set()
   const failedChildren = failedDeps.filter((d) => childSet.has(d))
   const failedPrereqs = failedDeps.filter((d) => !childSet.has(d))
   // phaseGate 由来（前 Phase 未完了）の前提失敗は、本文由来の dependsOn 前提と文言を分ける

@@ -205,6 +205,34 @@ return { order, edges }
 
 
 
+
+
+
+
+
+
+function collectChildWaitTargets(nodeNumber, byParentMap) {
+const targets = new Set()
+const seen = new Set([nodeNumber])
+const direct = byParentMap.get(nodeNumber) ?? []
+const directNumbers = new Set(direct.map((c) => c.number))
+const pending = [...direct]
+for (let i = 0; i < pending.length; i++) {
+const n = pending[i]
+if (seen.has(n.number)) continue
+seen.add(n.number)
+
+if (directNumbers.has(n.number) || n.state === 'open') targets.add(n.number)
+
+if (n.state !== 'open') for (const c of byParentMap.get(n.number) ?? []) pending.push(c)
+}
+return targets
+}
+
+
+
+
+
 function selectRemovableCycleEdge(cycle, byParentMap, depsMapArg, protectedKeys) {
 for (let i = 0; i < cycle.length; i++) {
 const from = cycle[i]
@@ -8377,11 +8405,21 @@ const inTree = new Set(queue.map((q) => q.number))
 
 
 
+
+
 const depsMap = new Map()
+const childWaitTargets = new Map()
+
+
+const closedPierceEdgeKeys = new Set()
 for (const item of queue) {
-const ds = new Set()
-for (const c of byParent.get(item.number) ?? []) ds.add(c.number)
-depsMap.set(item.number, ds)
+const targets = collectChildWaitTargets(item.number, byParent)
+const directChildren = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
+for (const t of targets) {
+if (!directChildren.has(t)) closedPierceEdgeKeys.add(`${item.number}->${t}`)
+}
+childWaitTargets.set(item.number, targets)
+depsMap.set(item.number, new Set(targets))
 }
 const parentNumOf = new Map(queue.map((q) => [q.number, q.parent]))
 function isAncestor(anc, n) {
@@ -8460,7 +8498,8 @@ return null
 let cycle = findDependencyCycle()
 while (cycle) {
 
-const edge = selectRemovableCycleEdge(cycle, byParent, depsMap, phaseGateEdgeKeys)
+
+const edge = selectRemovableCycleEdge(cycle, byParent, depsMap, new Set([...phaseGateEdgeKeys, ...closedPierceEdgeKeys]))
 
 if (!edge) throw new Error(`解決不能な循環依存: ${cycle.map((n) => `#${n}`).join(' → ')}`)
 depsMap.get(edge.from).delete(edge.to)
@@ -8501,7 +8540,7 @@ const oot = allFailedDeps.filter((d) => outOfTreeWait.has(d))
 const failedDeps = allFailedDeps.filter((d) => !outOfTreeWait.has(d))
 
 
-const childSet = new Set((byParent.get(item.number) ?? []).map((c) => c.number))
+const childSet = childWaitTargets.get(item.number) ?? new Set()
 const failedChildren = failedDeps.filter((d) => childSet.has(d))
 const failedPrereqs = failedDeps.filter((d) => !childSet.has(d))
 
