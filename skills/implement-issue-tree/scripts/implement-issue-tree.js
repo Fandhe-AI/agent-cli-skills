@@ -7474,7 +7474,7 @@ return false
 
 impl = { ...impl, prNumber: prCreateResult.prNumber }
 
-unmonitoredPrs.set(item.number, impl.prNumber)
+unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: false })
 
 
 
@@ -7603,7 +7603,9 @@ restoreOptinFixState(saved, item.optinTests),
 
 
 async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptin = null) {
-if (Number.isInteger(impl.prNumber) && impl.prNumber > 0) unmonitoredPrs.set(item.number, impl.prNumber)
+
+
+if (Number.isInteger(impl.prNumber) && impl.prNumber > 0) unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: true })
 let merged = false
 let lastState = 'timeout'
 let fixCount = initialFixCount
@@ -10147,9 +10149,12 @@ log(`⚠️ blocked の状態ファイル記録: ${blockedStateWrite.unwritten} 
 }
 
 
+const unmonitoredPrList = [...unmonitoredPrs].map(([issue, e]) => ({ issue, pr: e.pr, resumable: e.resumable }))
 
-const unmonitoredPrList = [...unmonitoredPrs].map(([issue, pr]) => ({ issue, pr }))
-if (unmonitoredPrList.length > 0) log(`⚠️ PR 作成済みで未監視: ${unmonitoredPrList.map((e) => `#${e.issue}→PR #${e.pr}`).join(', ')}。同じ引数で再実行すると monitor から再開する`)
+
+const unmonitoredFmt = (resumable) => unmonitoredPrList.filter((e) => e.resumable === resumable).map((e) => `#${e.issue}→PR #${e.pr}`).join(', ')
+if (unmonitoredFmt(true)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr 保存済み）: ${unmonitoredFmt(true)}。同じ引数で再実行すると monitor から再開する`)
+if (unmonitoredFmt(false)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr が無い／照合未了）: ${unmonitoredFmt(false)}。再実行では monitor から再開しない。GitHub 上で PR を手動確認すること（状態ファイルの unverifiedPr があれば再実行で再照合される）`)
 log(`エージェント呼び出し数: ${agentBudget.used}/${agentBudget.limit}（新規着手停止時点 ${agentBudget.stoppedDispatchAt ?? 'なし'}）`)
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)

@@ -84,11 +84,14 @@ issue は値を超えても続行する。実行中の issue の途中で呼び�
 | 返却値 `agentBudget` | `{ limit, used, enforced, stoppedDispatchAt, reached }` |
 | 未着手ノード | `notStarted` に載り、`done` の `not-started` の note が予算不足を示す。状態ファイルには `blocked` で一括記録される |
 | monitoring 再開の見送り | `interrupted` に載り、note が予算不足を示す。状態ファイルの `pr` は保持される |
-| 返却値 `unmonitoredPrs` | 本ランで PR 番号を得たが、実 monitor が一度も結果を返さなかった `[{ issue, pr }]`。終了ログにも出す |
+| 返却値 `unmonitoredPrs` | 本ランで PR 番号を得たが、実 monitor が一度も結果を返さなかった `[{ issue, pr, resumable }]`。終了ログにも出す |
 
-`unmonitoredPrs` の PR は、番号を得た時点（照合・状態保存より前）で記録するため、その後のどこで打ち切られても載る。
-状態ファイルへの `monitoring` 遷移まで書けていれば `pr` が保存されており、同じ引数で再実行すると monitoring 再開
-（Recover・Implement・PR 作成は通らない）に乗る。書けていない場合は `unverifiedPr` か、返却値の PR 番号を手動で確認する。
+`unmonitoredPrs` の PR は、番号を得た時点（照合・状態保存より前）で `resumable: false` として記録するため、その後のどこで
+打ち切られても載る。照合と `monitoring` 遷移（`pr` の保存）の成否確認を通って Merge ループへ入った時点で
+`resumable: true` へ上がる。`resumable: true` は状態ファイルに `pr` が保存されており、同じ引数で再実行すると
+monitoring 再開（Recover・Implement・PR 作成は通らない）に乗る。`resumable: false` は再実行しても再開しないため、
+返却値の PR 番号を GitHub 上で手動確認する（`unverifiedPr` が保存されていれば再実行で再照合される）。終了ログも
+両者で案内を分ける。
 
 ## 検証していない点
 

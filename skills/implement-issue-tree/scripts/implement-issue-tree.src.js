@@ -7474,7 +7474,7 @@ async function runImplement(item) {
     // impl オブジェクトを PR 作成後の prNumber で更新する（以降の Merge ループが参照する）
     impl = { ...impl, prNumber: prCreateResult.prNumber }
     // 照合・状態保存・monitor のどこで打ち切られても未監視として報告できるよう、番号を得た時点で記録する（Issue #592）。
-    unmonitoredPrs.set(item.number, impl.prNumber)
+    unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: false })
     // pr-create の prNumber は自己申告値。照合（checkPrBinding。エージェント呼び出し）の最中にクラッシュ
     // しても PR 番号を失わないよう、照合より先に未照合のまま unverifiedPr として保存する（Bugbot 指摘。
     // 再開用の pr には入れない。isActiveMonitoring・前提完了プローブは pr だけを読む）。保存は成否を確認し
@@ -7603,7 +7603,9 @@ async function runImplement(item) {
 // 追加）。新規 impl パスは常に既定の null（新規コミット列のためこの PR での post-push fix
 // 実測は存在しない）。
 async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptin = null) {
-  if (Number.isInteger(impl.prNumber) && impl.prNumber > 0) unmonitoredPrs.set(item.number, impl.prNumber)
+  // ここへ来た PR は照合済みで、monitoring 遷移（pr の保存）の成否確認も済んでいる（新規作成経路は保存失敗で
+  // ここへ来ない。再開経路は保存済みの pr から来る）。実データに基づき再開可能（resumable: true）へ上げる。
+  if (Number.isInteger(impl.prNumber) && impl.prNumber > 0) unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: true })
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount
@@ -10146,10 +10148,13 @@ if (blockedStateWrite.unwritten > 0) {
   log(`⚠️ blocked の状態ファイル記録: ${blockedStateWrite.unwritten} 件を書けなかった（失敗チャンク ${blockedStateWrite.failedChunks} 回。先頭: ${formatIssueList(blockedStateWrite.unwrittenIssues)}）。返却値の done と状態ファイルの件数がずれている。エージェント数の上限（1 ラン 1,000）への到達でも起きる。同じ引数で再実行すると未記録分が書き直される`)
 }
 
-// 上限による打ち切りで半端な状態が残っていないかを終了ログに出す（Issue #592）。PR は状態ファイルに
-// 保存済みのため、同じ引数で再実行すると monitoring 再開に乗る。
-const unmonitoredPrList = [...unmonitoredPrs].map(([issue, pr]) => ({ issue, pr }))
-if (unmonitoredPrList.length > 0) log(`⚠️ PR 作成済みで未監視: ${unmonitoredPrList.map((e) => `#${e.issue}→PR #${e.pr}`).join(', ')}。同じ引数で再実行すると monitor から再開する`)
+// 上限による打ち切りで半端な状態が残っていないかを終了ログに出す（Issue #592）。
+const unmonitoredPrList = [...unmonitoredPrs].map(([issue, e]) => ({ issue, pr: e.pr, resumable: e.resumable }))
+// resumable は照合と pr の保存（updateState の成否確認）が済んだ PR だけ true。それ以外は状態ファイルに pr が無い
+// （または照合未了）ため、再実行しても monitor から再開しない。
+const unmonitoredFmt = (resumable) => unmonitoredPrList.filter((e) => e.resumable === resumable).map((e) => `#${e.issue}→PR #${e.pr}`).join(', ')
+if (unmonitoredFmt(true)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr 保存済み）: ${unmonitoredFmt(true)}。同じ引数で再実行すると monitor から再開する`)
+if (unmonitoredFmt(false)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr が無い／照合未了）: ${unmonitoredFmt(false)}。再実行では monitor から再開しない。GitHub 上で PR を手動確認すること（状態ファイルの unverifiedPr があれば再実行で再照合される）`)
 log(`エージェント呼び出し数: ${agentBudget.used}/${agentBudget.limit}（新規着手停止時点 ${agentBudget.stoppedDispatchAt ?? 'なし'}）`)
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)

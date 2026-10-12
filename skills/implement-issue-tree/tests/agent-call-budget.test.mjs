@@ -148,7 +148,7 @@ function buildTree(leaves) {
 // 1 issue が plan → impl → review → pr-create → PR 照合 → monitor まで進む stub。monitor は blocked(quality)
 // で終端させる（マージまで進める必要はなく、1 issue あたり約 10 回のエージェント呼び出しになる）。
 // cutoffAfter: ランタイムの打ち切りを模して、この回数を超えた agent() は null を返す。
-async function runScript({ args, leaves, cutoffAfter = Infinity }) {
+async function runScript({ args, leaves, cutoffAfter = Infinity, override = () => undefined }) {
   const nodes = buildTree(leaves)
   const calls = []
   const logs = []
@@ -156,6 +156,8 @@ async function runScript({ args, leaves, cutoffAfter = Infinity }) {
   let peak = 0
   const handler = (prompt, opts) => {
     const label = opts.label
+    const overridden = override(label, opts)
+    if (overridden !== undefined) return overridden
     const n = Number(/#(\d+)/.exec(label)?.[1])
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
@@ -256,12 +258,44 @@ test('結合: 上限で打ち切られ PR 作成後に監視へ進めなかっ�
   assert.ok(prCreateIndex > 0)
   // 見積りが外れて予算ゲートをすり抜けた場合（実行中の issue が目安を超えて呼び出した場合）の打ち切りを模す。
   const { result, logs } = await runScript({ args: BASE_ARGS, leaves: [2], cutoffAfter: prCreateIndex + 1 })
-  assert.deepEqual(result.unmonitoredPrs, [{ issue: 2, pr: 1002 }])
-  assert.ok(logs.some((l) => l.includes('PR 作成済みで未監視') && l.includes('#2→PR #1002')), '終了ログにも出す')
+  assert.deepEqual(result.unmonitoredPrs, [{ issue: 2, pr: 1002, resumable: false }], '状態の保存前に打ち切られた PR は再開できない')
+  assert.ok(logs.some((l) => l.includes('未監視（状態ファイルに pr が無い／照合未了）') && l.includes('#2→PR #1002') && l.includes('手動確認')), '再開できない旨の案内を終了ログに出す')
+  assert.ok(!logs.some((l) => l.includes('pr 保存済み')), '再開できる案内は出さない')
   assert.ok(logs.some((l) => l.includes('エージェント呼び出し数:')))
 })
 
 test('結合: 監視まで進んだ PR は未監視に載らない', async () => {
   const { result } = await runScript({ args: BASE_ARGS, leaves: [2, 3] })
   assert.deepEqual(result.unmonitoredPrs, [])
+})
+
+test('結合: 状態保存・照合が済んだ PR は resumable: true で「再実行で monitor から再開」と案内し、未了の PR とは案内が分かれる', async () => {
+  // #2: monitor の直前で打ち切り(pr 保存済み) / #3: PR 照合が不成立 / #4: pr-create 直後の状態保存が失敗
+  const probe = await runScript({ args: BASE_ARGS, leaves: [2] })
+  const mergeIndex = probe.calls.findIndex((c) => c.opts.label === 'merge:#2')
+  const saved = await runScript({ args: BASE_ARGS, leaves: [2], cutoffAfter: mergeIndex })
+  assert.deepEqual(saved.result.unmonitoredPrs, [{ issue: 2, pr: 1002, resumable: true }], 'pr の保存まで済んでいれば再開できる')
+  assert.ok(saved.logs.some((l) => l.includes('状態ファイルに pr 保存済み') && l.includes('#2→PR #1002') && l.includes('再実行すると monitor から再開する')))
+  assert.ok(!saved.logs.some((l) => l.includes('pr が無い／照合未了')))
+
+  const unbound = await runScript({
+    args: BASE_ARGS,
+    leaves: [3],
+    override: (label) => (label.startsWith('pr-bind:#') ? { state: 'OPEN', headRefOid: 'a'.repeat(40), headRefName: 'other/branch', baseRefName: 'main', isCrossRepository: false, closingIssues: [] } : undefined),
+  })
+  assert.deepEqual(unbound.result.unmonitoredPrs, [{ issue: 3, pr: 1003, resumable: false }], '照合不成立の PR は再開できない')
+  assert.ok(unbound.logs.some((l) => l.includes('pr が無い／照合未了') && l.includes('#3→PR #1003')))
+  assert.ok(!unbound.logs.some((l) => l.includes('pr 保存済み')))
+
+  let prCreated = false
+  const unsaved = await runScript({
+    args: BASE_ARGS,
+    leaves: [4],
+    override: (label) => {
+      if (label.startsWith('pr-create:#')) { prCreated = true; return undefined }
+      return prCreated && label.startsWith('state:update:#') ? { ok: false } : undefined
+    },
+  })
+  assert.deepEqual(unsaved.result.unmonitoredPrs, [{ issue: 4, pr: 1004, resumable: false }], '保存に失敗した PR は再開できない')
+  assert.ok(unsaved.logs.some((l) => l.includes('pr が無い／照合未了') && l.includes('#4→PR #1004')))
 })
