@@ -4419,7 +4419,7 @@ const AGENT_CALLS_PER_ISSUE = { implement: 30, resume: 12, close: 6 }
 
 
 const AGENT_CALLS_TERMINAL_BASE = 20
-const agentBudget = { limit: parseAgentCallLimit(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.agentCallLimit : undefined), used: 0, enforced: false, stoppedDispatchAt: null }
+const agentBudget = { limit: parseAgentCallLimit(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.agentCallLimit : undefined), used: 0, enforced: false, stoppedDispatchAt: null, starts: 0 }
 
 function wrapAgentCounting(raw, budget, warn = () => {}) {
 let warned = false
@@ -4435,9 +4435,14 @@ return raw(...a)
 
 
 
+
+
+
+
 function agentBudgetHold(budget, { running, kind, pending }) {
 const remaining = budget.limit - budget.used
-const required = AGENT_CALLS_PER_ISSUE.implement * running + AGENT_CALLS_PER_ISSUE[kind] + AGENT_CALLS_TERMINAL_BASE + Math.ceil(Math.max(pending, 0) / BLOCKED_STATE_CHUNK_SIZE)
+const first = running === 0 && (budget.starts ?? 0) === 0
+const required = AGENT_CALLS_PER_ISSUE.implement * running + AGENT_CALLS_PER_ISSUE[kind] + AGENT_CALLS_TERMINAL_BASE + (first ? 0 : Math.ceil(Math.max(pending, 0) / BLOCKED_STATE_CHUNK_SIZE))
 return remaining < required ? { remaining, required } : null
 }
 
@@ -9638,7 +9643,8 @@ if (readiness !== 'ready') continue
 
 
 const budgetKind = isActiveMonitoring(n) ? 'resume' : item.kind === 'implement' ? 'implement' : 'close'
-const budgetHold = agentBudgetHold(agentBudget, { running: running.size, kind: budgetKind, pending: budgetPending })
+
+const budgetHold = agentBudget.enforced ? agentBudgetHold(agentBudget, { running: running.size, kind: budgetKind, pending: budgetPending }) : null
 if (budgetHold) {
 if (agentBudget.stoppedDispatchAt === null) {
 agentBudget.stoppedDispatchAt = agentBudget.used
@@ -9804,6 +9810,7 @@ log(`#${n}: monitoring 再開（PR #${savedItems[String(n)].pr}）: ${sanitize(i
 
 
 if (item.kind === 'implement') monitoringResumeActive.add(n)
+agentBudget.starts += 1
 running.set(n, runOne(item))
 continue
 }
@@ -10006,6 +10013,7 @@ continue
 log(`#${n} を開始（実行中 ${running.size + 1}/${concurrency}）: ${sanitize(item.title)}`)
 
 if (item.kind === 'implement') newStartActive.add(n)
+agentBudget.starts += 1
 running.set(n, runOne(item))
 }
 }

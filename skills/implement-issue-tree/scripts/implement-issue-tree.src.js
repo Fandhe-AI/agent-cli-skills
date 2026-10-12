@@ -4419,7 +4419,7 @@ const AGENT_CALLS_PER_ISSUE = { implement: 30, resume: 12, close: 6 }
 // 未追跡検査と HEAD 検査（worktree:head-scan。開始時 1 回は使用済みに入り、終了時 1 回がここ）で、
 // 再測定の再試行を含めても約 20 に収まる。いずれも予算ゲートの対象ではなく無条件に実行される。
 const AGENT_CALLS_TERMINAL_BASE = 20
-const agentBudget = { limit: parseAgentCallLimit(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.agentCallLimit : undefined), used: 0, enforced: false, stoppedDispatchAt: null }
+const agentBudget = { limit: parseAgentCallLimit(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.agentCallLimit : undefined), used: 0, enforced: false, stoppedDispatchAt: null, starts: 0 }
 // 上限（budget.limit）を超えても呼び出しは止めない（上のコメント参照）。超えた最初の 1 回だけ warn で知らせる。
 function wrapAgentCounting(raw, budget, warn = () => {}) {
   let warned = false
@@ -4435,9 +4435,14 @@ function wrapAgentCounting(raw, budget, warn = () => {}) {
 // 新規着手（kind: implement / resume / close）を止めるべきなら { remaining, required } を返す。
 // 必要量 = 実行中の件数 × implement の目安 + 候補の目安 + 終了処理の予備（固定 + 未完了ノードの
 // blocked 一括記録 chunks）。非ラッチ: 実行中の issue が終わって running が減れば再び通る。
+// 前進保証: このランでまだ 1 件も着手しておらず実行中も 0 の最初の着手には、blocked 一括記録の chunks 分
+// （未完了ノード数に比例）を課さない。未完了ノードが多いと chunks だけで limit を超え、実行中 0・使用量が
+// 少ないのに全件が未着手になる（limit を下限に近い値にした大きなツリー）ため。最初の 1 件を終えれば
+// 残りは未着手として記録され、chunks 分が limit を超える分は想定上限の超過（警告のみ・呼び出しは止めない）。
 function agentBudgetHold(budget, { running, kind, pending }) {
   const remaining = budget.limit - budget.used
-  const required = AGENT_CALLS_PER_ISSUE.implement * running + AGENT_CALLS_PER_ISSUE[kind] + AGENT_CALLS_TERMINAL_BASE + Math.ceil(Math.max(pending, 0) / BLOCKED_STATE_CHUNK_SIZE)
+  const first = running === 0 && (budget.starts ?? 0) === 0
+  const required = AGENT_CALLS_PER_ISSUE.implement * running + AGENT_CALLS_PER_ISSUE[kind] + AGENT_CALLS_TERMINAL_BASE + (first ? 0 : Math.ceil(Math.max(pending, 0) / BLOCKED_STATE_CHUNK_SIZE))
   return remaining < required ? { remaining, required } : null
 }
 
@@ -9638,7 +9643,8 @@ while (true) {
       // エージェント呼び出し数の予算（Issue #592）。残りが「実行中 + この候補を終える目安 + 終了処理の予備」
       // を下回るなら着手せず、実行中の issue の完了を優先する。非ラッチ（実行中が減れば再び通る）。
       const budgetKind = isActiveMonitoring(n) ? 'resume' : item.kind === 'implement' ? 'implement' : 'close'
-      const budgetHold = agentBudgetHold(agentBudget, { running: running.size, kind: budgetKind, pending: budgetPending })
+      // 数えられていない（enforced: false）ときは used が 0 のままで判定が成り立たないため、ゲートを適用しない。
+      const budgetHold = agentBudget.enforced ? agentBudgetHold(agentBudget, { running: running.size, kind: budgetKind, pending: budgetPending }) : null
       if (budgetHold) {
         if (agentBudget.stoppedDispatchAt === null) {
           agentBudget.stoppedDispatchAt = agentBudget.used
@@ -9804,6 +9810,7 @@ while (true) {
         // monitoringResumeActive には implement の再開のみ載せる（verify-close を載せると
         // 幽霊予約が乗り他候補を過剰に defer / 抑止する。newStartActive と同じ線引き）。
         if (item.kind === 'implement') monitoringResumeActive.add(n)
+        agentBudget.starts += 1
         running.set(n, runOne(item))
         continue
       }
@@ -10006,6 +10013,7 @@ while (true) {
       log(`#${n} を開始（実行中 ${running.size + 1}/${concurrency}）: ${sanitize(item.title)}`)
       // verify-close は worktree を作らないため newStartActive に載せない（予約枠を塞がない）。
       if (item.kind === 'implement') newStartActive.add(n)
+      agentBudget.starts += 1
       running.set(n, runOne(item))
     }
   }

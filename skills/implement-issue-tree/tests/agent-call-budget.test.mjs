@@ -111,7 +111,7 @@ test('単体: agentBudgetHold の式は「実行中 × 目安 + 候補の目安 
   // 未完了ノードが多いほど終了処理（blocked 一括記録の chunks）の予備が増える
   const many = agentBudgetHold({ limit: 1000, used: 0 }, { running: 0, kind: 'implement', pending: 1100 })
   assert.equal(many, null)
-  const manyReq = agentBudgetHold({ limit: 1, used: 0 }, { running: 0, kind: 'implement', pending: 1100 }).required
+  const manyReq = agentBudgetHold({ limit: 1, used: 0, starts: 1 }, { running: 0, kind: 'implement', pending: 1100 }).required
   assert.equal(manyReq, impl + AGENT_CALLS_TERMINAL_BASE + Math.ceil(1100 / BLOCKED_STATE_CHUNK_SIZE))
 })
 
@@ -148,7 +148,7 @@ function buildTree(leaves) {
 // 1 issue が plan → impl → review → pr-create → PR 照合 → monitor まで進む stub。monitor は blocked(quality)
 // で終端させる（マージまで進める必要はなく、1 issue あたり約 10 回のエージェント呼び出しになる）。
 // cutoffAfter: ランタイムの打ち切りを模して、この回数を超えた agent() は null を返す。
-async function runScript({ args, leaves, cutoffAfter = Infinity, override = () => undefined }) {
+async function runScript({ args, leaves, cutoffAfter = Infinity, override = () => undefined, constAgent = false }) {
   const nodes = buildTree(leaves)
   const calls = []
   const logs = []
@@ -191,7 +191,10 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
     if (calls.length > cutoffAfter) return null
     return handler(prompt, opts)
   }
-  const fn = new AsyncFunction('args', 'agent', 'log', 'phase', scriptBody)
+  // constAgent: agent を再束縛できない実行環境（const 宣言）を模す。差し替えは TypeError になり enforced: false へ倒れる。
+  const fn = constAgent
+    ? new AsyncFunction('args', '__agent', 'log', 'phase', `const agent = __agent\n${scriptBody}`)
+    : new AsyncFunction('args', 'agent', 'log', 'phase', scriptBody)
   const result = await fn(args, agent, (m) => { logs.push(m) }, () => {})
   return { result, calls, logs, peak }
 }
@@ -327,4 +330,34 @@ test('結合: monitoring 保存が失敗しても blocked の退避保存で pr 
   assert.deepEqual(unsaved.result.unmonitoredPrs, [{ issue: 2, pr: 1002, resumable: false }], '退避保存も失敗なら再開できない')
   assert.ok(unsaved.logs.some((l) => l.includes('pr が無い／照合未了') && l.includes('#2→PR #1002')))
   assert.ok(!unsaved.logs.some((l) => l.includes('pr 保存済み')))
+})
+
+test('結合: agent を再束縛できない（enforced: false）ときは予算ゲートを適用せず、上限が小さくても全件に着手する', async () => {
+  const { result, calls, logs } = await runScript({ args: { ...BASE_ARGS, agentCallLimit: 81 }, leaves: LEAVES, constAgent: true })
+  assert.equal(result.agentBudget.enforced, false)
+  assert.equal(result.agentBudget.used, 0, '数えられていない')
+  assert.equal(result.agentBudget.stoppedDispatchAt, null)
+  assert.equal(calls.filter((c) => c.opts.label.startsWith('plan:#')).length, LEAVES.length, '全件着手される')
+  assert.equal(result.notStarted.length, 0)
+  assert.ok(logs.some((l) => l.includes('予算ゲートは無効')))
+})
+
+test('単体: 最初の 1 件は blocked 一括記録の chunks 分を課されず、2 件目以降は課される（未完了が多くても前進できる）', () => {
+  const budget = { limit: 81, used: 20, starts: 0 }
+  const first = agentBudgetHold(budget, { running: 0, kind: 'implement', pending: 3101 })
+  assert.equal(first, null, '実行中 0・未着手の最初の 1 件は chunks 32 を課さず着手できる（30 + 20 = 50 <= 残り 61）')
+  const second = agentBudgetHold({ ...budget, starts: 1 }, { running: 0, kind: 'implement', pending: 3101 })
+  assert.deepEqual(second, { remaining: 61, required: 30 + 20 + 32 }, '1 件着手した後は chunks 分を課す')
+  assert.ok(agentBudgetHold({ ...budget, used: 40 }, { running: 0, kind: 'implement', pending: 3101 }), '残りが最初の 1 件の目安にも足りなければ止める')
+})
+
+test('結合: 未完了ノードが多く limit が下限に近いときも、最初の 1 件は着手して完了まで進め、残りは未着手になる', async () => {
+  const many = Array.from({ length: 400 }, (_, i) => 2 + i)
+  const { result, calls } = await runScript({ args: { ...BASE_ARGS, agentCallLimit: 81 }, leaves: many })
+  const planned = calls.filter((c) => c.opts.label.startsWith('plan:#')).length
+  const monitored = calls.filter((c) => /^merge:#\d+$/.test(c.opts.label)).length
+  assert.equal(planned, 1, `前進保証で 1 件だけ着手する: ${planned}`)
+  assert.equal(monitored, 1, '着手した 1 件は監視まで進む')
+  assert.equal(result.notStarted.length, many.length - 1 + 1, '残りの葉と親 #1 は未着手')
+  assert.ok(result.agentBudget.stoppedDispatchAt !== null)
 })

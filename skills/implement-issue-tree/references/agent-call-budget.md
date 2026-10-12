@@ -36,7 +36,8 @@ issue は値を超えても続行する。実行中の issue の途中で呼び�
   呼び直すので、実際に起動した数と一致する。例外・null を返した呼び出しも「起動した」ので数える。
 - `pipeline()` は使わない（使うとスクリプトからは数えられない）。テストが生成物に `pipeline(` が無いことを検査する。
 - 再束縛できない実行環境では数えられず、予算ゲートは効かない。その場合は返却値の `agentBudget.enforced` が
-  `false` になり、ログにも出す（起動を止めずに、効いていないことを見えるようにする）。
+  `false` になり、ログにも出す（起動を止めずに、効いていないことを見えるようにする）。`enforced: false` のランでは
+  `used` が 0 のままで判定が成り立たないため、新規着手・monitoring 再開の予算判定を適用しない（全件が従来どおり着手する）。
 
 ## 新規着手を止める式
 
@@ -47,6 +48,11 @@ issue は値を超えても続行する。実行中の issue の途中で呼び�
 候補の目安 = 実装 30 / monitoring 再開 12 / verify-close 6
 終了処理の予備 = 20 + ceil(未完了ノード数 / 100)
 ```
+
+**前進保証**: このランでまだ 1 件も着手しておらず実行中も 0 の最初の着手には、`ceil(未完了ノード数 / 100)` の項を課さない。
+未完了ノードが多いと、この項だけで limit を超え、実行中 0・使用量が少ないのに全件が未着手になるため（例: `agentCallLimit: 81`・
+未完了 3,101 件では必要量が 82 になる）。最初の 1 件は固定分（候補の目安 + 20）が残りに収まる限り着手し、2 件目以降は
+項を課す。blocked 一括記録が想定上限を超える分は、超過の警告（呼び出しは止めない）が受け止める。
 
 非ラッチ: 実行中の issue が終われば `running` が減り、残りが足りれば再び着手する。判定は `AGENT_CALLS_PER_ISSUE`・
 `AGENT_CALLS_TERMINAL_BASE` と `agentBudgetHold`（純粋関数）に集約し、テストが式の境界を固定する。
@@ -81,7 +87,7 @@ issue は値を超えても続行する。実行中の issue の途中で呼び�
 | 項目 | 内容 |
 |------|------|
 | ログ | 停止時点の使用量・残り・必要量。終了時に `エージェント呼び出し数: used/limit` |
-| 返却値 `agentBudget` | `{ limit, used, enforced, stoppedDispatchAt, reached }` |
+| 返却値 `agentBudget` | `{ limit, used, enforced, stoppedDispatchAt, starts, reached }`（`starts` は本ランで着手した件数。前進保証の判定に使う） |
 | 未着手ノード | `notStarted` に載り、`done` の `not-started` の note が予算不足を示す。状態ファイルには `blocked` で一括記録される |
 | monitoring 再開の見送り | `interrupted` に載り、note が予算不足を示す。状態ファイルの `pr` は保持される |
 | 返却値 `unmonitoredPrs` | 本ランで PR 番号を得たが、実 monitor が一度も結果を返さなかった `[{ issue, pr, resumable }]`。終了ログにも出す |
