@@ -46,6 +46,9 @@ const acorn = require('internal/deps/acorn/acorn/dist/acorn')
 
 const SOURCE_TYPES = ['module', 'script']
 
+// 例外の文面。メッセージが空・未定義でも、失敗を表す null でない値（文字列）を返す
+const errorText = (e) => String(e?.message ?? e)
+
 const entry = (t, code) => [t.type.label, code.slice(t.start, t.end), t.loc.start.line]
 
 // tokenizer: 例外までのトークンを返す。error は例外メッセージ（無ければ null）
@@ -54,7 +57,7 @@ const tokenize = (code, sourceType) => {
   try {
     for (const t of acorn.tokenizer(code, { ecmaVersion: 'latest', sourceType, locations: true })) tokens.push(entry(t, code))
   } catch (e) {
-    return { tokens, error: e.message }
+    return { tokens, error: errorText(e) }
   }
   return { tokens, error: null }
 }
@@ -79,7 +82,7 @@ const parseTokens = (original, goal) => {
   try {
     acorn.parse(code, { ecmaVersion: 'latest', locations: true, ...options, onToken: (t) => tokens.push(entry(t, code)) })
   } catch (e) {
-    return { tokens: [], error: e.message }
+    return { tokens: [], error: errorText(e) }
   }
   return { tokens, error: null }
 }
@@ -111,8 +114,9 @@ const compareTokenizeOne = (before, after, sourceType, lenient) => {
   const b = tokenize(after, sourceType)
   const tag = `[${sourceType}]`
   if (!lenient) {
-    if (a.error) return `${tag} 変換前の字句解析に失敗: ${a.error}`
-    if (b.error) return `${tag} 変換後の字句解析に失敗: ${b.error}`
+    // error は例外メッセージ。空文字でも失敗として扱う（真偽判定にしない）
+    if (a.error !== null) return `${tag} 変換前の字句解析に失敗: ${a.error}`
+    if (b.error !== null) return `${tag} 変換後の字句解析に失敗: ${b.error}`
   } else if ((a.error === null) !== (b.error === null)) {
     return `${tag} 例外の有無が不一致（変換前 ${a.error ?? 'なし'} / 変換後 ${b.error ?? 'なし'}）`
   }
@@ -133,13 +137,13 @@ const compareParse = ({ name, before, after }) => {
   const parsed = {}
   for (const goal of Object.keys(PARSE_GOALS)) {
     const a = parseTokens(before, goal)
-    if (a.error) return { name, ok: false, kind: 'source-unparsable', detail: `[${goal}] 変換前のパースに失敗: ${a.error}` }
+    if (a.error !== null) return { name, ok: false, kind: 'source-unparsable', detail: `[${goal}] 変換前のパースに失敗: ${a.error}` }
     parsed[goal] = a
   }
   let count = 0
   for (const goal of Object.keys(PARSE_GOALS)) {
     const b = parseTokens(after, goal)
-    if (b.error) return { name, ok: false, kind: 'artifact-unparsable', detail: `[${goal}] 変換後のパースに失敗: ${b.error}` }
+    if (b.error !== null) return { name, ok: false, kind: 'artifact-unparsable', detail: `[${goal}] 変換後のパースに失敗: ${b.error}` }
     const problem = diffTokens(parsed[goal].tokens, b.tokens, `[${goal}]`)
     if (problem) return { name, ok: false, kind: 'mismatch', detail: problem }
     count = parsed[goal].tokens.length

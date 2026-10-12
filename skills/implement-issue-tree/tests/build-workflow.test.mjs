@@ -1133,6 +1133,11 @@ const LEXER_SLASH_FIXED = {
     keep: ['{ g(i) } // c'],
     expected: "export const meta={name:'x'}\nfunction f(of){\nfor(let i=0;i<of / 2; i++) { g(i) } // c\n}\n",
   },
+  'for の括弧の中で変数 of を除算に使う行の同じ行に / を含むテンプレートがあるだけ（以降に別のテンプレートが無い）': {
+    text: `${META_HEADER}let a = 1, b = 5, r = 0, s = 'x', g = 2, t = ''\nfor (let of = 4, i = 0; i < of / 2; i++) { t = \`a/b\` }\nreturn t\n`,
+    keep: ['t = `a/b`'],
+    expected: "export const meta={name:'x'}\nlet a=1,b=5,r=0,s='x',g=2,t=''\nfor(let of=4,i=0;i<of / 2; i++) { t = `a/b` }\nreturn t\n",
+  },
   'K1 の回避: 括弧で包んだ ?.キーワード名プロパティ の直後の除算': {
     text: `${META_HEADER}const o = { in: 4, default: 8 }\nconst half = (o?.in) / 2\nreturn half + (o?.default) / 4\n`,
     keep: ['(o?.in) / 2', '(o?.default) / 4'],
@@ -1246,6 +1251,10 @@ const LEXER_SLASH_RESIDUAL = {
   'for の括弧の中の変数 of の除算と同じ行の / を含むテンプレート': `${META_HEADER}function f(of) {\n  for (let i = 0; i < of / 2; i++) { g(\`a/b\`) }\n  const t = \`c\n    d\`\n}\n`,
   // 同じ行の `//` を含むブロックコメントは `//` 以降が行コメントとして読まれ、閉じのないコメントになる
   'for の括弧の中の変数 of の除算と同じ行の // を含むブロックコメント': `${META_HEADER}function f(of) {\n  for (let i = 0; i < of / 2; i++) { g(i) } /* a//b */\n}\n`,
+  // 除算の行の後に複数行のテンプレートがあると、閉じ `/` を飲まれたテンプレートの開閉が反転して改行後のインデントが詰まる
+  'for の括弧の中の変数 of の除算の行（/ を含むテンプレート）の後の複数行のテンプレート': `${META_HEADER}let t = ''\nfor (let of = 4, i = 0; i < of / 2; i++) { t = \`a/b\` }\nt = \`c\n    d\`\nreturn t\n`,
+  // 後ろに `//` を含むテンプレートがあると、`//` 以降が行コメントとして読まれて閉じのないテンプレートになる
+  'for の括弧の中の変数 of の除算の行（/ を含むテンプレート）の後の // を含むテンプレート': `${META_HEADER}let t = ''\nfor (let of = 4, i = 0; i < of / 2; i++) { t = \`a/b\` }\nt = \`c//d\`\nreturn t\n`,
   // ブロックコメントの中の CR は行終端として読まれる（`return` の後なら ASI で `return;` になる）が、lexer は
   // コメントを 1 個の空白に置き換えるので改行が消えて意味が変わる。トークンの開始行の比較が止める
   'return の後のブロックコメント内の CR（ASI で意味が変わる）': `${META_HEADER}function f() {\n  return /*\r*/ 1\n}\n`,
@@ -1441,13 +1450,134 @@ for (const [mode, compare] of [['parse', compareTokensWithParser], ['tokenize', 
   })
 }
 
+// 中止にはならないが、lexer が取り違えた結果テンプレートモードに入ったままになり、以降のコメントとインデントが
+// 生成物に残る形（意味は同じ・サイズが縮まない・開発用コメントが配布物に残る）。ランタイムの形で実行して結果を比べる。
+const KEPT_COMMENT_CASES = {
+  'for の括弧の中の変数 of の除算の行（/ を含むテンプレート）の後': {
+    body: "for (let of = 4, i = 0; i < of / 2; i++) { t = `a/b` }\n// secret comment\n    r = 5 /* c2 */\nt = `p  q`\nreturn t + r",
+    kept: ['// secret comment', '    r = 5 /* c2 */'],
+    result: 'p  q5',
+  },
+  '} の直後の /`/ の後（以降に別のテンプレートが無い）': {
+    body: 'if (a) { r = 1 }\n/`/.test(s)\n// secret comment\n   r = 5 /* c2 */\nreturn r',
+    kept: ['// secret comment', '   r = 5 /* c2 */'],
+    result: 5,
+  },
+}
+for (const [name, { body, kept, result }] of Object.entries(KEPT_COMMENT_CASES)) {
+  test(`中止にならず以降のコメントが生成物に残る形: ${name}（意味は同じ）`, async () => {
+    const src = `${META_HEADER}let a = 1, b = 5, r = 0, s = 'x', g = 2, t = ''\n${body}\n`
+    const out = buildArtifact(src)
+    assert.doesNotThrow(() => verifyTokenParity(src, out))
+    for (const part of kept) assert.ok(out.includes(part), `${JSON.stringify(part)} が残る: ${JSON.stringify(out)}`)
+    assert.equal(await runLikeRuntime(src), result)
+    assert.equal(await runLikeRuntime(out), result)
+    assert.equal(runBuilder(src).status, 0)
+  })
+}
+
+test('for の括弧の中の変数 of の除算の行の末尾コメント: 除算の / の次の / が // の 1 文字目なら残り、ほかの / が先にあれば消える', async () => {
+  const head = `${META_HEADER}let r = 0\n`
+  const one = `${head}for (let of = 4, i = 0; i < of / 2; i++) { r += 1 } // c\nreturn r\n`
+  const two = `${head}for (let of = 4, i = 0; i < of / 2; i++) { r += of / 2 } // c\nreturn r\n`
+  const outOne = buildArtifact(one)
+  const outTwo = buildArtifact(two)
+  assert.ok(outOne.includes('// c'), `1 個目の / の次が // の 1 文字目: コメントが残る: ${JSON.stringify(outOne)}`)
+  assert.ok(!outTwo.includes('// c'), `ほかの / が先にある: コメントは消える: ${JSON.stringify(outTwo)}`)
+  for (const [src, out, expected] of [[one, outOne, 2], [two, outTwo, 4]]) {
+    assert.doesNotThrow(() => verifyTokenParity(src, out))
+    assert.equal(await runLikeRuntime(out), expected)
+    assert.equal(await runLikeRuntime(src), expected)
+  }
+})
+
 test('K1: ?. の直後のキーワード名プロパティの直後の / は acorn が誤読して中止になり、エラー文言に回避形が出る', () => {
   const src = `${META_HEADER}const o = { in: 4, default: 8 }\nconst half = o?.in / 2\nreturn half + o?.default / 4\n`
-  assert.throws(() => verifyTokenParity(src, src), /開発ファイルをパースできないため照合できない.*acorn が読めない正当な構文の可能性.*\(o\?\.in\) \/ 2/s)
+  assert.throws(() => verifyTokenParity(src, src), /開発ファイルをパースできないため照合できない.*変換前のパースに失敗.*原因の例.*acorn が正当な構文を読めない場合.*\(o\?\.in\) \/ 2/s)
   const r = runBuilder(src)
   assert.notEqual(r.status, 0)
   assert.equal(r.written, false)
-  assert.match(r.stderr, /acorn が読めない正当な構文の可能性/)
+  assert.match(r.stderr, /acorn が正当な構文を読めない場合/)
+})
+
+// 開発ファイルをパースできない原因は K1 型とは限らない。エラー本文と位置が先に出て、ヒントは「例」と分かる書き方
+// （どの原因にも同じ「K1 が原因」という断定を出さない）
+for (const [label, body] of Object.entries({
+  'with 文': 'function f(o, s) {\n  with (o) g(s)\n}\n',
+  '2 つ目の export': 'const a = 1\nexport const meta2 = 2\n',
+  'import.meta': 'const u = import.meta.url\n',
+  '行頭の -->': 'let r = 1\n--> r\n',
+  '構文エラー': 'const x = (\n',
+})) {
+  test(`パースできない開発ファイルの中止メッセージ: ${label} は acorn のエラー本文と位置が先に出て、ヒントは原因の例として添えられる`, () => {
+    const src = META_HEADER + body
+    let message = ''
+    try {
+      verifyTokenParity(src, src)
+    } catch (e) {
+      message = e.message
+    }
+    assert.match(message, /^開発ファイルをパースできないため照合できない（検査を省略せず中止する）: \[(module|script)\] 変換前のパースに失敗: .+ \(\d+:\d+\)。原因の例:/s)
+    assert.match(message, /よくある原因の 1 つ/)
+    assert.doesNotMatch(message, /acorn が読めない正当な構文の可能性:/, '旧文言（常に K1 が原因と読める断定）が残っていない')
+  })
+}
+
+// buildArtifact の先頭 `export const meta` 検査（Workflow ランタイムが位置 0 に要求する）。外す変異が全テスト緑で
+// 生き残っていたので、export をまったく持たない入力・先頭にコメントがある入力が中止になることを固定する
+test('buildArtifact: export を持たない入力は先頭が export const meta でないとして throw し、CLI 本体も書かずに中止する', () => {
+  assert.throws(() => buildArtifact('const x = 1\n'), /生成物の先頭が `export const meta` でない/)
+  assert.throws(() => buildArtifact('const meta = { name: \'x\' }\n'), /生成物の先頭が `export const meta` でない/)
+  const r = runBuildOn('const x = 1\n')
+  assert.equal(r.status, 1)
+  assert.equal(r.wrote, false)
+  assert.equal(r.distExists, false)
+  assert.match(r.stderr.join('\n'), /先頭が `export const meta` でない/)
+})
+
+test('buildArtifact: 先頭にコメントがある入力（コメント除去後の先頭が空行になる）も throw する', () => {
+  assert.throws(() => buildArtifact(`// c\n${META_HEADER}const x = 1\n`), /生成物の先頭が `export const meta` でない/)
+  // 同じ行の先頭のブロックコメントは行頭なら置換の空白を置かないので、除去後も先頭は export const meta になる
+  assert.doesNotThrow(() => buildArtifact(`/* c */ ${META_HEADER}`))
+  assert.doesNotThrow(() => buildArtifact(`${META_HEADER}// c\nconst x = 1\n`))
+})
+
+// 失敗を表す error は空文字のメッセージでも失敗として扱う（token-diff.cjs の判定を `!== null` にした）。
+// 変換前だけ・変換後だけが空メッセージの例外で失敗する状況を作り、どちらの側の判定も外れていないことを見る
+// （両側が失敗すると片方の判定が外れても不一致として止まり、見分けがつかない）
+test('token-diff の失敗判定: 例外のメッセージが空文字でも、変換前・変換後それぞれの失敗として扱う', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'token-diff-empty-error-'))
+  try {
+    const stub = join(dir, 'run.cjs')
+    writeFileSync(
+      stub,
+      `const Module = require('module')\nconst real = require('internal/deps/acorn/acorn/dist/acorn')\nconst orig = Module._load\n` +
+        `const fake = { ...real,\n` +
+        `  parse(code, o) { if (code.includes('BAD')) throw new Error(''); return real.parse(code, o) },\n` +
+        `  tokenizer(code, o) { if (code.includes('BAD')) throw new Error(''); return real.tokenizer(code, o) } }\n` +
+        `Module._load = function (request, ...rest) { return request === 'internal/deps/acorn/acorn/dist/acorn' ? fake : orig.call(this, request, ...rest) }\n` +
+        `require(${JSON.stringify(TOKEN_DIFF_HELPER)})\n`,
+    )
+    const run = (cases) => {
+      const r = spawnSync(process.execPath, ['--expose-internals', stub], { input: JSON.stringify(cases), encoding: 'utf8' })
+      assert.equal(r.status, 0, r.stderr)
+      return JSON.parse(r.stdout).results
+    }
+    const [srcBad, artBad] = run([
+      { name: 'src', mode: 'parse', before: 'BAD\n', after: 'x\n' },
+      { name: 'art', mode: 'parse', before: 'x\n', after: 'BAD\n' },
+    ])
+    assert.equal(srcBad.kind, 'source-unparsable', '変換前の空メッセージの失敗を、失敗として扱わなかった')
+    assert.equal(artBad.kind, 'artifact-unparsable', '変換後の空メッセージの失敗を、失敗として扱わなかった')
+    const [tokSrcBad, tokArtBad] = run([
+      { name: 'src', mode: 'tokenize', before: 'BAD\n', after: 'x\n' },
+      { name: 'art', mode: 'tokenize', before: 'x\n', after: 'BAD\n' },
+    ])
+    assert.match(tokSrcBad.detail, /変換前の字句解析に失敗/)
+    assert.match(tokArtBad.detail, /変換後の字句解析に失敗/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('with 文は module でパースできないので中止になる（lexer の条件の括弧に with を含めない理由）', () => {
