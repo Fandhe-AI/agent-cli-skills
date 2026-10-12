@@ -120,6 +120,8 @@ test('monitorPrompt: 手順 2 失敗かつ列挙 0 件は 3g へ入らず 3e へ
   assert.ok(head.includes('手順 3 の gh pr checks が列挙した件数が 0 件'), '列挙 0 件の扱いがない')
   assert.ok(head.includes('本手順へ入らず手順 3e へ進む'), '列挙 0 件が 3e へ回る旨がない')
   assert.ok(head.includes('timeout は返さない'), '3g 前提に 0 件で timeout を返さない旨がない')
+  assert.ok(head.includes('30 秒間隔で最大 3 回まで再取得する'), '3g 前提の gh pr checks 失敗時の再取得が有界でない')
+  assert.ok(head.includes('なお読めなければ state: blocked / blockedReason: "quality" を返す'), '3g 前提の読めない場合の終端がない')
   assert.ok(s3g.includes('0 件なら timeout ではなく手順 3e'), '3g の timeout 節に 0 件の除外がない')
   const tail = p.slice(p.indexOf('\n7. '))
   const s7 = tail.slice(0, tail.indexOf('\n返却: '))
