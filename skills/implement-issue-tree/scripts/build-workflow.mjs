@@ -14,12 +14,19 @@
 // 空白除去は 512 KiB 予算（tests/lib/workflow-script-contract.mjs）を行番号一致を保ったまま
 // 守るための措置。空白除去は、詰めても同じ 2 トークンに字句解析される隣接の組だけを許可リスト
 // （shouldSqueezeSpace）で詰め、迷う組は詰めない。
+// lexer の `/` 判別（除算と正規表現）は誤り得るため、誤読で文字列・テンプレートの中身が詰められても
+// 気づけるよう、ビルド（生成時と --check の両方）で生成物のトークン列（種類・値・開始行）が開発ファイルの
+// トークン列と一致することを Node 同梱の acorn で照合する（verifyTokenParity）。不一致・acorn を取得
+// できない Node・字句解析の失敗はいずれも生成ファイルを書かずに非ゼロ終了する（fail-closed）。
 // 生成物の鮮度（開発ファイルとの同期）は tests/build-workflow.test.mjs が CI で検証する —
 // 生成物を直接編集したりビルドを忘れたりすると byte 不一致で fail する。
 //
 // 使い方:
 //   node skills/implement-issue-tree/scripts/build-workflow.mjs          # 生成して書き込み
 //   node skills/implement-issue-tree/scripts/build-workflow.mjs --check  # 書き込まず鮮度確認
+//   --src <path> / --dist <path> で入力の開発ファイル・出力（--check では比較対象）の実行ファイルを差し替える
+//   （テスト用。既定はこのディレクトリの implement-issue-tree.src.js / implement-issue-tree.js）
+import { spawnSync } from 'node:child_process'
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +34,7 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const SRC_PATH = join(HERE, 'implement-issue-tree.src.js')
 export const DIST_PATH = join(HERE, 'implement-issue-tree.js')
+export const TOKEN_DIFF_PATH = join(HERE, 'token-diff.cjs')
 
 // 直後の `/` を正規表現リテラルの開始と判定するキーワード。識別子・数値の直後の `/` は
 // 除算として素通しする（標準的な division / regex 判別ヒューリスティック）。
@@ -555,6 +563,29 @@ export function buildArtifact(src) {
   return stripped
 }
 
+/**
+ * 生成物のトークン列が開発ファイルのトークン列と一致することを acorn で照合する。lexer
+ * （stripComments）とは独立の字句解析なので、lexer が `/` を誤読して文字列・テンプレート・正規表現の
+ * 中身を変えても検出できる。コメントはトークンに出ないため開発ファイルをそのまま比べる。比較は種類・
+ * 値・開始行で、sourceType は module と script の両方。一致しなければ最初の差の位置（行番号と前後の
+ * トークン）を含めて throw する。acorn を取得できない Node でも黙って飛ばさず throw する。
+ */
+export function verifyTokenParity(src, artifact) {
+  const r = spawnSync(process.execPath, ['--expose-internals', TOKEN_DIFF_PATH], {
+    input: JSON.stringify([{ name: 'build', before: src, after: artifact }]),
+    encoding: 'utf8',
+    maxBuffer: 1 << 28,
+  })
+  if (r.error || r.status !== 0) {
+    throw new Error(
+      'トークン照合を実行できない（acorn を取得できない Node の可能性。検査を省略せず中止する）: ' +
+        `${r.error ? r.error.message : `status ${r.status}`} ${r.stderr ?? ''}`.trim(),
+    )
+  }
+  const [result] = JSON.parse(r.stdout).results
+  if (!result.ok) throw new Error(`生成物のトークン列が開発ファイルと一致しない: ${result.detail}`)
+}
+
 // CLI 実行部（import 時は実行しない）。argv[1] は realpath で比較する — import.meta.url は
 // symlink 解決済みのため、symlink 経由（downstream の `.claude/skills/...` → `.agents/skills/...`）
 // で起動すると素の argv[1] とは一致せず、無言で何もせず exit 0 してしまう（Bugbot 指摘）
@@ -566,21 +597,37 @@ const invokedAs = (() => {
   }
 })()
 if (invokedAs && invokedAs === fileURLToPath(import.meta.url)) {
+  const argValue = (flag, fallback) => {
+    const at = process.argv.indexOf(flag)
+    return at === -1 ? fallback : (process.argv[at + 1] ?? fallback)
+  }
   const checkOnly = process.argv.includes('--check')
-  const src = readFileSync(SRC_PATH, 'utf8')
-  const artifact = buildArtifact(src)
+  const srcPath = argValue('--src', SRC_PATH)
+  const distPath = argValue('--dist', DIST_PATH)
+  const startedAt = Date.now()
+  let src
+  let artifact
+  try {
+    src = readFileSync(srcPath, 'utf8')
+    artifact = buildArtifact(src)
+    verifyTokenParity(src, artifact)
+  } catch (e) {
+    console.error(`ビルド中止（${distPath} は書き込まない）: ${e.message}`)
+    process.exit(1)
+  }
   const srcBytes = Buffer.byteLength(src)
   const outBytes = Buffer.byteLength(artifact)
+  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(2)
   if (checkOnly) {
-    const current = readFileSync(DIST_PATH, 'utf8')
+    const current = readFileSync(distPath, 'utf8')
     if (current !== artifact) {
       console.error('鮮度エラー: 実行ファイルが開発ファイルと同期していない。node build-workflow.mjs で再生成せよ')
       process.exit(1)
     }
-    console.log(`鮮度 ok: ${outBytes} B（src ${srcBytes} B）`)
+    console.log(`鮮度 ok: ${outBytes} B（src ${srcBytes} B・トークン照合 ok・${elapsed}s）`)
   } else {
-    writeFileSync(DIST_PATH, artifact)
-    console.log(`生成完了: ${DIST_PATH}`)
-    console.log(`src ${srcBytes} B → dist ${outBytes} B（-${srcBytes - outBytes} B, -${Math.round(((srcBytes - outBytes) / srcBytes) * 100)}%）`)
+    writeFileSync(distPath, artifact)
+    console.log(`生成完了: ${distPath}`)
+    console.log(`src ${srcBytes} B → dist ${outBytes} B（-${srcBytes - outBytes} B, -${Math.round(((srcBytes - outBytes) / srcBytes) * 100)}%・トークン照合 ok・${elapsed}s）`)
   }
 }

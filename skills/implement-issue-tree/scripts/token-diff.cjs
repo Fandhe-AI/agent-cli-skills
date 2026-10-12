@@ -1,7 +1,12 @@
 // build-workflow の変換前後でトークン列（種類・テキスト・開始行）が一致することを、Node 同梱の
-// acorn（字句解析器）で検証するヘルパー。acorn は内部モジュール（internal/deps/acorn/...）で、
-// `node --expose-internals` を付けた子プロセスでしか読み込めないため、tests/build-workflow.test.mjs
-// が spawnSync で本ファイルを起動する（通常の `node --test` は --expose-internals を伝播しない）。
+// acorn（字句解析器）で検証するヘルパー。ビルダー（build-workflow.mjs）がビルド時の照合
+// （生成物のトークン列が src と一致しなければ書き込まず中止する fail-closed 検査）に使い、
+// tests/build-workflow.test.mjs も同じ比較を使う。ビルダーの lexer は `/` の判別（除算と正規表現）を
+// 誤り得るため、文字列・テンプレート・正規表現の中身が詰められていないことを lexer とは独立の字句解析で
+// 確かめる。acorn は内部モジュール（internal/deps/acorn/...）で、`node --expose-internals` を付けた
+// 子プロセスでしか読み込めないため、呼び出し側が spawnSync で本ファイルを起動する（通常の
+// `node` / `node --test` は --expose-internals を伝播しない）。acorn を取得できない Node では
+// require が失敗して非ゼロで終了する（呼び出し側はそれを検査の失敗として扱い、黙って飛ばさない）。
 //
 // 入力（stdin）: JSON `[{ "name": string, "before": string, "after": string, "lenient"?: boolean }]`
 // 出力（stdout）: JSON `{ "acornVersion": string, "results": [{ "name", "ok", "detail" }] }`
@@ -43,13 +48,21 @@ const compareOne = (before, after, sourceType, lenient) => {
   } else if ((a.error === null) !== (b.error === null)) {
     return `${tag} 例外の有無が不一致（変換前 ${a.error ?? 'なし'} / 変換後 ${b.error ?? 'なし'}）`
   }
-  if (a.tokens.length !== b.tokens.length) {
-    return `${tag} トークン数が不一致（変換前 ${a.tokens.length} / 変換後 ${b.tokens.length}）`
-  }
-  for (let i = 0; i < a.tokens.length; i++) {
+  const show = (t) => (t ? JSON.stringify([t[0], t[1].length > 80 ? `${t[1].slice(0, 80)}…` : t[1], t[2]]) : '(なし)')
+  const common = Math.min(a.tokens.length, b.tokens.length)
+  for (let i = 0; i < common; i++) {
     if (a.tokens[i][0] !== b.tokens[i][0] || a.tokens[i][1] !== b.tokens[i][1] || a.tokens[i][2] !== b.tokens[i][2]) {
-      return `${tag} トークン ${i} が不一致: ${JSON.stringify(a.tokens[i])} ≠ ${JSON.stringify(b.tokens[i])}`
+      return (
+        `${tag} トークン ${i}（変換前 ${a.tokens[i][2]} 行）が不一致: 変換前 ${show(a.tokens[i])} ≠ 変換後 ${show(b.tokens[i])}。` +
+        `直前 ${show(a.tokens[i - 1])}、直後（変換前）${show(a.tokens[i + 1])}`
+      )
     }
+  }
+  if (a.tokens.length !== b.tokens.length) {
+    return (
+      `${tag} トークン数が不一致（変換前 ${a.tokens.length} / 変換後 ${b.tokens.length}）。` +
+      `最初に差が出る位置はトークン ${common}: 変換前 ${show(a.tokens[common])} / 変換後 ${show(b.tokens[common])}、直前 ${show(a.tokens[common - 1])}`
+    )
   }
   return null
 }

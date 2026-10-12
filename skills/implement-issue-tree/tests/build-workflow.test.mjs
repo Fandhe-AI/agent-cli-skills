@@ -14,7 +14,7 @@
 // 生成物のサイズ・パースゲートは workflow-loadability.test.mjs が担う（対象は実行ファイル）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -25,7 +25,7 @@ import {
 
 const SCRIPT_PATH = fileURLToPath(new URL('../scripts/build-workflow.mjs', import.meta.url))
 const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)))
-const TOKEN_DIFF_HELPER = fileURLToPath(new URL('./lib/token-diff.cjs', import.meta.url))
+const TOKEN_DIFF_HELPER = fileURLToPath(new URL('../scripts/token-diff.cjs', import.meta.url))
 
 // ---------------------------------------------------------------------------
 // (a) lexer 固定ケース
@@ -572,7 +572,7 @@ test('空白除去: 行数（改行数）を保持する', () => {
 
 // acorn（Node 同梱の字句解析器）で、変換前後のトークン列（種類・テキスト・開始行）が一致する
 // ことを検証する。acorn は `node --expose-internals` の子プロセスでしか読めないため
-// tests/lib/token-diff.cjs 経由で呼ぶ。読み込めない環境でも skip せず fail する（fail-closed:
+// scripts/token-diff.cjs（ビルダーのビルド時照合と共用）経由で呼ぶ。読み込めない環境でも skip せず fail する（fail-closed:
 // 検証が静かに無効化されて「トークン列一致」の保証が消えるのを防ぐ）
 const compareTokensWithAcorn = (cases) => {
   const r = spawnSync(process.execPath, ['--expose-internals', TOKEN_DIFF_HELPER], {
@@ -666,9 +666,11 @@ test('Bugbot 指摘 3: `1.e + 2`（末尾ドットで単語が切れる形）を
 //
 // - 構文エラーになる並び（`1e+` `a ) ( 1.` 等）も含むため lenient（例外の有無と例外までのトークンを
 //   比較）で比べる。トークン列の比較は module と script の両方（token-diff.cjs）。
-// - `/` は除算と正規表現の判別が字句解析器（本ビルダーの lexer と acorn）で食い違い得るが、除算とみなした
-//   `/` の後ろでは同じ行の空白を詰めない（squeezeOff）ため、食い違っても詰めすぎる方向には働かない。
-//   よって語彙から外さず、食い違いはこのテストが検出する。
+// - `/` は除算と正規表現の判別が字句解析器（本ビルダーの lexer と acorn）で食い違い得る。食い違うと
+//   文字列・テンプレートの中身を詰める入力が実在する（非 ASCII 識別子・`of` の直後の `/`、`)` 直後の
+//   正規表現。下の「ビルド時のトークン照合」のテスト参照）。lexer の `/` 誤読は残っており、この生成的
+//   テストは語彙に `/` を含めて食い違いの有無を調べるが、検出を保証するものではない。誤読で詰めすぎた
+//   生成物は、ビルダー自身のビルド時トークン照合（verifyTokenParity）が止める。
 // - 引用符 1 文字だけ・バッククォート 1 文字だけは語彙に入れない（文字列・テンプレートの開始になり、
 //   以降を丸ごと文字列として読むため、トークンの隣接を試せなくなる）。完結した文字列リテラルだけ入れる。
 //   引用符 1 文字どうしの隣接は、下の「隣接 2 文字の全数検査」が扱う。
@@ -798,6 +800,65 @@ test('開発ファイルと実行ファイルの行数が一致する（スタ�
   const src = readFileSync(SRC_PATH, 'utf8')
   const dist = readFileSync(DIST_PATH, 'utf8')
   assert.equal(src.split('\n').length, dist.split('\n').length)
+})
+
+// ---------------------------------------------------------------------------
+// (e) ビルド時のトークン照合（fail-closed）
+// ---------------------------------------------------------------------------
+
+// lexer の `/` 判別（除算と正規表現）の誤読で、文字列・テンプレートの中身が詰められる入力。lexer は
+// 個別には直さず、ビルダーが生成物と開発ファイルのトークン列（値込み）を acorn で照合して止める。
+// 一時ファイルの開発ファイルをビルダーの CLI（--src / --dist）へ渡し、非ゼロ終了・生成ファイルが
+// 書かれないこと・最初の差の位置が出ることを確かめる。
+const META_HEADER = "export const meta = { name: 'x' }\n"
+const LEXER_SLASH_MISREAD = {
+  // 非 ASCII 識別子の直後の `/` を正規表現と誤読し、文字列の中身を詰める
+  'A: 非 ASCII 識別子の直後の除算': `${META_HEADER}const x = é / 2 + " / a  +  b "\n`,
+  // `of` の直後の `/` を正規表現と誤読する（`of` は for-of 以外では識別子）
+  'A: of の直後の除算': `${META_HEADER}const of = 4\nconst y = of / 2 + " / a  +  b "\n`,
+  // `)` 直後の正規表現を除算と誤読し、正規表現内のバッククォートで以降のテンプレートが反転する
+  'B: ) 直後の正規表現内のバッククォート': `${META_HEADER}if (ok) /\`/.test(s) && f()\nconst t = \`line1\n  indented   text  =  1\`\n`,
+}
+
+const runBuilder = (srcText, extra = []) => {
+  const dir = mkdtempSync(join(tmpdir(), 'build-workflow-parity-'))
+  try {
+    const src = join(dir, 'in.src.js')
+    const dist = join(dir, 'out.js')
+    writeFileSync(src, srcText)
+    const r = spawnSync(process.execPath, [SCRIPT_PATH, '--src', src, '--dist', dist, ...extra], { encoding: 'utf8' })
+    return { ...r, dist, written: existsSync(dist), distText: existsSync(dist) ? readFileSync(dist, 'utf8') : null }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+for (const [name, text] of Object.entries(LEXER_SLASH_MISREAD)) {
+  test(`ビルド時のトークン照合: ${name} はビルドが非ゼロで終わり生成ファイルを書かない`, () => {
+    // 前提: squeezeSpaces が実際に中身を変える（照合が無ければ壊れた生成物が出る入力であること）
+    assert.notEqual(buildArtifact(text).replace(/\n$/, ''), text.replace(/\n$/, ''))
+    const r = runBuilder(text)
+    assert.notEqual(r.status, 0, `ビルドが成功してしまった: ${r.stdout}`)
+    assert.equal(r.written, false, '照合に失敗したのに生成ファイルが書かれた')
+    assert.match(r.stderr, /トークン列が開発ファイルと一致しない/)
+    assert.match(r.stderr, /変換前 [0-9]+ 行）が不一致/, `最初の差の位置（行番号）が出ていない: ${r.stderr}`)
+    assert.match(r.stderr, /直前/, `前後のトークンが出ていない: ${r.stderr}`)
+  })
+
+  test(`ビルド時のトークン照合: ${name} は --check でも非ゼロで終わる`, () => {
+    const r = runBuilder(text, ['--check'])
+    assert.notEqual(r.status, 0)
+    assert.match(r.stderr, /トークン列が開発ファイルと一致しない/)
+  })
+}
+
+test('ビルド時のトークン照合: 正常な開発ファイルはビルドが通り、生成ファイルが書かれる', () => {
+  const text = `${META_HEADER}const x = a / 2 + " / a  +  b "\nconst re = /\`/.test(s)\nconst t = \`l1\n  i   t  =  1\`\n`
+  const r = runBuilder(text)
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /トークン照合 ok/)
+  assert.equal(r.written, true)
+  assert.equal(r.distText, buildArtifact(text))
 })
 
 // ---------------------------------------------------------------------------
