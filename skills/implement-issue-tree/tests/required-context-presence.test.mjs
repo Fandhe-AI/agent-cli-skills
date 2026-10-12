@@ -127,7 +127,7 @@ test('monitorPrompt: 手順 2 失敗かつ列挙 0 件は 3g へ入らず 3e へ
   // gh pr checks 失敗時の再取得は有界で、終端は blocked / quality（状態 3）。
   const s3 = stateLine(p, 3)
   assert.ok(s3.includes('30 秒間隔で最大 3 回'), 'gh pr checks 失敗時の再取得が有界でない')
-  assert.ok(s3.includes('gh pr checks が読取不能') && s3.includes('state: blocked / blockedReason: "quality"'), '読めない場合の終端がない')
+  assert.ok(s3.includes('読取不能') && s3.includes('state: blocked / blockedReason: "quality"'), '読めない場合の終端がない')
   const tail = p.slice(p.indexOf('\n7. '))
   const s7 = tail.slice(0, tail.indexOf('\n返却: '))
   assert.ok(s7.includes('状態 2 は timeout を返さず手順 3e'), '手順 7 に状態 2 の除外がない')
@@ -145,10 +145,10 @@ test('monitorPrompt: 列挙 0 件 → 3e は手順 2 取得失敗の経路に限
   const s2 = stateLine(p, 2)
   const s3 = stateLine(p, 3)
   // 3e（状態 2）に入るのは「確定値 0」か「手順 2 取得失敗かつ列挙 0 件」だけ。確定値 1 件以上は含まない。
-  assert.ok(s2.includes('手順 2 確定値が 0、または手順 2 取得失敗かつ列挙 0 件'))
+  assert.ok(s2.includes('手順 2 確定値が 0（列挙結果は問わない') && s2.includes('または手順 2 取得失敗かつ列挙 0 件'))
   assert.ok(!s2.includes('1 件以上'), '状態 2 に確定値 1 件以上が混ざっている')
   // 確定値 1 件以上 + 列挙 0 件は状態 3。3e にも ready にも倒さず、3g も走らせない。
-  assert.ok(s3.includes('手順 2 確定値が 1 件以上なのに列挙 0 件'))
+  assert.ok(s3.includes('手順 2 確定値が 1 件以上で列挙 0 件または読取不能'))
   assert.ok(s3.includes('ready・timeout・手順 3e に倒さない'))
   const s3g = p.slice(p.indexOf('3g.'), p.indexOf('\n6. '))
   const head = s3g.slice(0, s3g.indexOf('\n'))
@@ -223,8 +223,8 @@ test('#586 状態 2（確定 0 件）: 確定値 0、または手順 2 取得失
 
 test('#586 状態 3（不整合・読取不能）: 確定値 1 件以上なのに列挙 0 件、または読取不能 → 緑にも 0 件にも倒さず有界再取得、終端は blocked/quality', () => {
   const l = stateLine(monitorPrompt(item, impl, [], true, true), 3)
-  assert.ok(l.includes('手順 2 確定値が 1 件以上なのに列挙 0 件'))
-  assert.ok(l.includes('gh pr checks が読取不能'))
+  assert.ok(l.includes('手順 2 確定値が 1 件以上で列挙 0 件または読取不能'))
+  assert.ok(l.includes('手順 2 取得失敗で読取不能'))
   assert.ok(l.includes('a・b を満たしたとみなさず') && l.includes('緑にも 0 件にも倒さない'))
   assert.ok(l.includes('30 秒間隔で最大 3 回'))
   assert.ok(l.includes('state: blocked / blockedReason: "quality"'), '終端が blocked / quality でない')
@@ -243,10 +243,55 @@ test('#586 状態 3: checksTotal は手順 2 の確定値があるときだけ�
   assert.ok(l.includes('checksTotal は手順 2 の確定値があるときだけ載せ') && l.includes('0 は返さない'))
 })
 
-test('#586 「no checks reported」の非ゼロ終了は列挙 0 件、それ以外の失敗は読取不能として区別する', () => {
+test('#586 列挙結果は終了コードではなく出力で分類する: 行あり = 列挙 N 件、行なしの no checks reported = 列挙 0 件、行なしのそれ以外 = 読取不能', () => {
   const sec = observationSection(monitorPrompt(item, impl, [], true, true))
-  assert.ok(sec.includes('「no checks reported」での非ゼロ終了は「列挙 0 件」'))
-  assert.ok(sec.includes('それ以外の失敗') && sec.includes('「読取不能」'))
+  assert.ok(sec.includes('終了コードではなく出力で分類する'))
+  assert.ok(sec.includes('チェック行が 1 行以上あれば終了コード 1（失敗あり）・8（pending あり）でも「列挙 N 件」'))
+  assert.ok(sec.includes('行が無く「no checks reported」なら「列挙 0 件」'))
+  assert.ok(sec.includes('行が無くそれ以外（認証・通信・API エラー等）なら「読取不能」'))
+})
+
+test('#586 チェック行があり終了コード 1 / 8 のときは状態 1 に入り、状態 3（読取不能）に入らない', () => {
+  // 失敗チェックあり（終了コード 1）が読取不能へ落ちると CI 失敗が needs-fix に届かず、pending あり
+  // （終了コード 8）も再監視されないまま 3 回後に blocked / quality で止まる（codex P1）。
+  const p = monitorPrompt(item, impl, [], true, true)
+  const sec = observationSection(p)
+  assert.ok(sec.includes('終了コード 1（失敗あり）・8（pending あり）でも「列挙 N 件」（a・b が failure / pending を判定する）'))
+  // 状態 3 の「読取不能」は「行が無く」の定義にだけ結び付き、終了コードを条件にしない。
+  const s3 = stateLine(p, 3)
+  assert.ok(!/終了コード/.test(s3), '状態 3 が終了コードを条件にしている')
+  // 状態 1 は列挙 1 件以上であり、a・b が結論（failure / pending）を判定する経路へ進む。
+  const s1 = stateLine(p, 1)
+  assert.ok(s1.includes('列挙 1 件以上') && s1.includes('a・b を列挙結果で検証'))
+  assert.ok(p.includes('   c. いずれかが failure / cancelled / timed_out の場合') && p.includes('state: needs-fix'))
+})
+
+test('#586 3 状態は排他: 判定は状態 2 → 3 → 1 の順で最初に当たる 1 つへ確定する', () => {
+  const p = monitorPrompt(item, impl, [], true, true)
+  const sec = observationSection(p)
+  assert.ok(sec.includes('判定は状態 2 → 3 → 1 の順に最初に当たる 1 つへ確定する（3 状態は排他）'))
+  assert.ok(stateLine(p, 3).includes('（状態 2 に当たらない場合のみ）'))
+  assert.ok(stateLine(p, 1).includes('状態 2・3 のいずれにも当たらない場合'))
+})
+
+test('#586 手順 2 確定値 0 は列挙結果（読取不能を含む）に関係なく状態 2 だけになる', () => {
+  const p = monitorPrompt(item, impl, [], true, true)
+  const s2 = stateLine(p, 2)
+  // 確定値 0 の節は列挙結果への条件を持たない（「かつ列挙…」が後続するのは取得失敗の節だけ）。
+  const zeroClause = s2.slice(s2.indexOf('手順 2 確定値が 0'), s2.indexOf('、または'))
+  assert.ok(zeroClause.includes('列挙結果は問わない') && !zeroClause.includes('かつ'), '確定値 0 が列挙結果で条件付けられている')
+  // 状態 3 の再取得で確定値 0 に変わった場合も状態 2（3e）へ合流する。
+  assert.ok(stateLine(p, 3).includes('状態 1 / 2 に戻れば該当の行き先へ合流'))
+})
+
+test('#586 状態 3 の条件は手順 2 確定値 0 を含まない（確定値 1 件以上、または手順 2 取得失敗に限る）', () => {
+  const p = monitorPrompt(item, impl, [], true, true)
+  const s3 = stateLine(p, 3)
+  const cond = s3.slice(s3.indexOf('手順 2 確定値'), s3.indexOf(' → '))
+  assert.ok(cond.includes('手順 2 確定値が 1 件以上で列挙 0 件または読取不能'))
+  assert.ok(cond.includes('手順 2 取得失敗で読取不能'))
+  assert.ok(!/確定値が 0/.test(cond), '状態 3 の条件に確定値 0 が含まれている')
+  assert.ok(!cond.includes('gh pr checks が読取不能'), '確定値・取得失敗を問わない「読取不能」単独の旧条件が残っている')
 })
 
 test('#586 3e へ来るのは状態 2 のみ（状態 3・確定値 1 件以上の経路は 3e に来ない）', () => {
@@ -289,7 +334,7 @@ test('#586 references/automerge-design.md は観測状態表（3 状態）と同
   const doc = readFileSync(join(dirname(SCRIPT_PATH), '..', 'references', 'automerge-design.md'), 'utf8')
   const line = doc.split('\n').find((l) => l.startsWith('3. **monitor の 0 件直行と `timeout` の限定**'))
   assert.ok(line, 'monitor の 0 件直行の節がない')
-  for (const needle of ['整合', '確定 0 件', '不整合・読取不能', '30 秒間隔で最大 3 回', '`blocked` / `"quality"`']) {
+  for (const needle of ['整合', '確定 0 件', '不整合・読取不能', '30 秒間隔で最大 3 回', '`blocked` / `"quality"`', '3 状態は排他', '終了コードではなく出力で分類', '確定値 0 は含まない']) {
     assert.ok(line.includes(needle), `automerge-design.md に「${needle}」がない`)
   }
   assert.ok(!line.includes('確定値で 3g を実行し、3e へは回さない'), '旧: 列挙 0 件でも確定値で 3g を走らせる記述が残っている')
