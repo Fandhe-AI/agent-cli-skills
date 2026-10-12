@@ -397,7 +397,7 @@ const EXTRA_WORKTREES = [
 const MANY = Array.from({ length: 1000 }, (_, i) => 2 + i)
 
 test('結合: 残置 worktree 上限の新規着手抑止があるとき、予算の not-started note で本当の理由を上書きしない (Bugbot A)', async () => {
-  // 1,000 件のツリーは開始処理だけで約 52 回使う（依存宣言のチャンク分）ため、下限付近の limit では最初の候補から予算で止まる。
+  // 1,000 件のツリーは開始処理だけで約 35 回使う（ループ開始時点の使用量。最初の保留ログの「使用 N」で実測。依存宣言のチャンク分）ため、下限付近の limit では最初の候補から予算で止まる。
   const hit = await sweepLimits([81, 90, 100], (limit) => runScript({
     args: { ...BASE_ARGS, maxResidualWorktrees: 1, agentCallLimit: limit },
     leaves: MANY,
@@ -466,6 +466,17 @@ const closedProbe = (label) => (label === 'prereq:probe'
   ? { results: [{ issue: 11, issueState: 'CLOSED', prState: 'NONE', pr: 0, headRefName: '', baseRefName: '', isCrossRepository: true, closingIssues: [-1] }] }
   : undefined)
 const callsBefore = (calls, pred) => calls.findIndex((c) => pred(c.opts.label))
+// 予算保留の note が案内する再実行用の limit を取り出す: 引き上げの案内はその N、「同じ引数」に下限が添えてあればその下限、
+// 添えが無ければ同じ limit。案内が実際に効くか（その limit で再実行すると当該ノードが着手するか）を結合テストで確かめるのに使う。
+function adviceLimit(note, limit) {
+  const raise = /少なくとも (\d+) にして再実行/.exec(note)
+  if (raise) return Number(raise[1])
+  const hedge = /その場合は args\.agentCallLimit を少なくとも (\d+) にする/.exec(note)
+  return hedge ? Number(hedge[1]) : limit
+}
+const planned = (run, n) => run.calls.some((c) => c.opts.label.startsWith(`plan:#${n}`))
+// 閉じた状態にしたノード（再実行では完了済みの verify-close とその子）。
+const withClosed = (tree, numbers) => tree.map((nd) => (numbers.includes(nd.number) ? { ...nd, state: 'closed' } : nd))
 
 test('結合: 開始処理で予算を使い切り最初の 1 件も着手できなくても throw せず、starved と必要な最小値を返し、保存される note も「agentCallLimit を少なくとも N にして再実行」になる (Bugbot D → 終了時判定)', async () => {
   const { result, calls, logs } = await runScript({ args: { ...BASE_ARGS, agentCallLimit: 81 }, leaves: MANY })
@@ -476,9 +487,10 @@ test('結合: 開始処理で予算を使い切り最初の 1 件も着手でき
   const notes = notStartedNotes(result).filter((t) => t.includes('予算不足'))
   assert.ok(notes.length >= MANY.length, `予算で保留した葉 ${MANY.length} 件が対象（子待ちの親 #1 は予算の保留ではない）: ${notes.length}`)
   assert.ok(notes.every((t) => /agentCallLimit を少なくとも \d+ にして再実行/.test(t) && !t.includes('同じ引数で再実行すると着手する')), `全件が「同じ引数」ではなく limit の引き上げを案内する: ${notes[0]}`)
-  const used = Number(/使用 (\d+)\/81/.exec(notes[0])[1])
-  assert.ok(used > AGENT_CALLS_START, `開始処理の見積り ${AGENT_CALLS_START} を超えて使っている（${used}）ことが前提`)
-  assert.equal(a.neededLimit, used + AGENT_CALLS_PER_ISSUE.implement + AGENT_CALLS_TERMINAL_BASE, '必要な最小値 = 使用量 + 最初の 1 件に要る量（実装の目安 + 終了処理の予備）')
+  // neededLimit = ループに入る時点の使用量（開始処理の実績）+ 最初の 1 件に要る量（実装の目安 + 終了処理の予備）。終了時の使用量ではない。
+  const startUsed = a.neededLimit - (AGENT_CALLS_PER_ISSUE.implement + AGENT_CALLS_TERMINAL_BASE)
+  assert.ok(startUsed > AGENT_CALLS_START, `開始処理の見積り ${AGENT_CALLS_START} を超えて使っている（${startUsed}）ことが前提`)
+  assert.equal(logs.find((l) => l.includes('新規着手を停止する')).match(/使用 (\d+)/)[1], String(startUsed), '必要な最小値の基準はループ開始時点の使用量（最初の保留ログの使用量と一致）')
   assert.equal(Number(/agentCallLimit を少なくとも (\d+) にして再実行/.exec(notes[0])[1]), a.neededLimit)
   assert.ok(logs.some((l) => l.includes('⚠️') && l.includes(String(a.neededLimit)) && l.includes('1 件も着手していない')), '終了ログに警告を出す')
   // 次ランが同じ引数で同じ停滞を繰り返さないよう、状態ファイルへ保存される note も同じ文言にする。
@@ -489,7 +501,7 @@ test('結合: 開始処理で予算を使い切り最初の 1 件も着手でき
   assert.equal(ok.calls.filter((c) => c.opts.label.startsWith('plan:#')).length, 1)
   assert.equal(ok.result.agentBudget.starts, 1)
   assert.equal(ok.result.agentBudget.starved, false)
-  assert.equal(ok.result.agentBudget.neededLimit, null)
+  assertStarvedConsistent(ok.result, '示された最小値で再実行')
   const short = await runScript({ args: { ...BASE_ARGS, agentCallLimit: a.neededLimit - 1 }, leaves: MANY })
   assert.equal(short.result.agentBudget.starved, true)
 })
@@ -498,7 +510,7 @@ test('結合: 開始処理が小さいツリーでは starved にならず従来
   const { result, calls } = await runScript({ args: { ...BASE_ARGS, agentCallLimit: 81 }, leaves: LEAVES })
   assert.ok(calls.some((c) => c.opts.label.startsWith('plan:#')))
   assert.equal(result.agentBudget.starved, false)
-  assert.equal(result.agentBudget.neededLimit, null)
+  assertStarvedConsistent(result, '開始処理が小さいツリー')
 })
 
 test('結合: 予算に収まる monitoring 再開が worktree ゲートで defer されて 1 件も着手しないランも throw せず starved になる (Bugbot 指摘 1)', async () => {
@@ -551,8 +563,47 @@ test('結合: ラン中に ready になった安価な verify-close は、開始
     assert.equal(result.agentBudget.starts, 1, `limit ${limit}`)
     assert.equal(result.agentBudget.starved, false, `limit ${limit}: 1 件でも着手したランは starved ではない`)
     const notes = notStartedNotes(result).filter((t) => t.includes('予算不足'))
-    assert.ok(notes.length > 0 && notes.every((t) => t.includes('同じ引数で再実行すると着手する') && !t.includes('agentCallLimit を')), `limit ${limit}: 1 件以上着手したランの保留は従来どおり「同じ引数で再実行」: ${notes[0]}`)
+    assert.ok(notes.length > 0, `limit ${limit}: 予算で保留した実装がある`)
+    assertStarvedConsistent(result, `limit ${limit}`)
+    // 経路 A（Issue #600 の追加是正）: 他のノード（#10）が着手できたかではなく、保留したノード自身の必要量で案内する。以前は #10 が着手して
+    // starts = 1 になっただけで「同じ引数で再実行すると着手する」と案内したが、次ラン（#10 は closed）は実装 0 件のまま同じ停滞になった。
+    const first = noteOf(result, 3)
+    const rerun = (l) => runScript({ args: { ...BASE_ARGS, agentCallLimit: l }, tree: withClosed(budgetTree({ ready: [3, 4, 5] }), [10, 11]) })
+    if (!planned(await rerun(limit), 3)) assert.match(first, /少なくとも \d+/, `limit ${limit}: 同じ引数で再実行しても #3 が着手しないのに、数を示さずに案内している: ${first}`)
+    assert.ok(planned(await rerun(adviceLimit(first, limit)), 3), `limit ${limit}: 案内どおりの上限で再実行すると #3 が着手する: ${first}`)
   }
+})
+
+test('結合: 経路 B — 毎ラン再開される monitoring が先に着手しても、保留した実装の note は「同じ引数で進む」とだけ読める文にならない (Issue #600 追加是正)', async () => {
+  // 保存済み monitoring の #2 は毎ラン先に再開して（first の式で）着手し、約 4 回使う。実装 #3 以降はその後に評価され、starts = 1 でも保留される。
+  // 開始時点の使用量だけで言うと同じ引数で足りるように見えるが、再実行しても #2 が同じ量を使うため進まない。
+  const leaves = Array.from({ length: 600 }, (_, i) => 2 + i)
+  const mk = (limit) => runScript({ args: { ...BASE_ARGS, agentCallLimit: limit }, leaves, saved: { 2: resumeSaved(2) } })
+  const run = await mk(81)
+  const a = run.result.agentBudget
+  assert.equal(a.starts, 1, '前提: 再開 #2 だけが着手する')
+  assert.equal(a.starved, false)
+  const note = noteOf(run.result, 3)
+  assert.ok(note.includes('予算不足'), note)
+  assertStarvedConsistent(run.result, '経路 B')
+  assert.ok(!planned(await mk(81), 3), '前提: 同じ引数で再実行しても #3 は着手しない（#2 が毎ラン先に同じ量を使う）')
+  assert.match(note, /その場合は args\.agentCallLimit を少なくとも \d+ にする/, `同じ引数で進まない場合の下限を示す: ${note}`)
+  const need = adviceLimit(note, 81)
+  assert.ok(need > 81 && planned(await mk(need), 3), `案内の下限（${need}）で再実行すると #3 が着手する`)
+})
+
+test('結合: 再開と実装が同時に予算保留のとき、各ノードの note は自ノードの必要量を言う（種別をまたいだ最小値を言わない）(Issue #600 追加是正)', async () => {
+  // 開始処理で使い切って再開 #2（必要 32）も実装 #3（必要 50）も保留される。neededLimit は #2 の need（どれか 1 件が進む下限）、
+  // #3 の note は自分の need。以前は #3 の note にも #2 の値が出ていた。
+  const { result } = await runScript({ args: { ...BASE_ARGS, agentCallLimit: 81 }, tree: budgetTree({ ready: [2, 3], pad: 1600 }), saved: { 2: resumeSaved(2) } })
+  const a = result.agentBudget
+  assert.equal(a.starved, true, '前提: 1 件も着手しない')
+  const n2 = /少なくとも (\d+) にして再実行/.exec(noteOf(result, 2))
+  const n3 = /少なくとも (\d+) にして再実行/.exec(noteOf(result, 3))
+  assert.ok(n2 && n3, `${noteOf(result, 2)} / ${noteOf(result, 3)}`)
+  assert.equal(Number(n3[1]) - Number(n2[1]), AGENT_CALLS_PER_ISSUE.implement - AGENT_CALLS_PER_ISSUE.resume, '#3 の need は #2 より実装と再開の目安の差だけ大きい')
+  assert.equal(a.neededLimit, Number(n2[1]), 'neededLimit は予算だけが理由の保留ノードの need の最小値（= #2）')
+  assertStarvedConsistent(result, '再開と実装の同時保留')
 })
 
 test('結合: 予算で保留した monitoring 再開の note は、前回評価したゲートの理由を消さず、予算の不足と併記する (Issue #598 指摘 3。#596 の「ゲート理由を消す」を反転)', async () => {
@@ -699,7 +750,8 @@ test('結合: 予算だけが理由の未着手は、従来どおり予算不足
   assert.ok(logs.some((l) => l.includes('新規着手を停止する')))
   assert.equal(result.agentBudget.starved, false, '1 件以上着手したランは starved ではない')
   const notes = result.done.filter((d) => d.status === 'not-started' && d.issue !== 1).map((d) => d.note)
-  assert.ok(notes.length > 0 && notes.every((t) => t.includes('予算不足') && t.includes('同じ引数で再実行すると着手する')))
+  assert.ok(notes.length > 0 && notes.every((t) => t.includes('予算不足') && t.includes('同じ引数で再実行すると着手しうる') && !t.includes('にして再実行')), notes[0])
+  assertStarvedConsistent(result, 'Bugbot A 対照')
 })
 
 test('結合: halt しているとき、予算の not-started note で halt の理由を上書きしない (Bugbot A)', async () => {
@@ -738,8 +790,19 @@ const HALT = { reason: 'HALT_REASON_X', issues: [3] }
 const LATCH = { reason: 'LATCH_REASON_X' }
 const LATCH_IMPL_ONLY = { reason: 'LATCH_REASON_X', implementOnly: true }
 const GATE = 'GATE_REASON_X のため monitoring 再開を defer した。'
-const HELD = { required: 32, used: 90 }
-const BUDGET_CTX = { used: 95, limit: 100, neededLimit: 127 }
+// 予算保留の記録（limit 100 の想定）。予算だけが理由のときの案内は need で 3 通りに分かれる:
+//   same: need <= limit（同じ引数で足り得る）。保留時の used + required が 1000 以内なら、先に着手したノードが次ランも同じ量を使う場合の下限を添える
+//   sameNoHedge: 同上だが used + required が 1000 を超える（その場合の下限は受理されない値なので添えない）
+//   raise: limit < need <= 1000（少なくとも need にして再実行）
+//   split: need > 1000（受理されない値なので引き上げではなく対象ツリーの分割）
+// 保留とは limit - used < required のことなので、used + required > limit が常に成り立つ（need は開始時点の使用量で言うため小さくなり得る）。
+const HELDS = {
+  same: { required: 32, used: 90, need: 95 },
+  sameNoHedge: { required: 32, used: 990, need: 95 },
+  raise: { required: 32, used: 90, need: 127 },
+  split: { required: 32, used: 90, need: 1500 },
+}
+const BUDGET_CTX = { used: 95, limit: 100 }
 
 function* stopRows() {
   for (const resume of [false, true]) {
@@ -747,8 +810,8 @@ function* stopRows() {
       for (const halted of [null, HALT]) {
         for (const latch of [null, LATCH, LATCH_IMPL_ONLY]) {
           for (const gate of [undefined, GATE]) {
-            for (const held of [undefined, HELD]) {
-              for (const starved of [false, true]) yield { resume, kind, halted, latch, gate, held, starved }
+            for (const heldCase of [undefined, ...Object.keys(HELDS)]) {
+              yield { resume, kind, halted, latch, gate, heldCase, held: heldCase && HELDS[heldCase] }
             }
           }
         }
@@ -766,7 +829,7 @@ const expectedReasons = (r) => [
 
 function checkNote(row, note) {
   const order = expectedReasons(row)
-  const where = JSON.stringify({ ...row, halted: !!row.halted, latch: row.latch && (row.latch.implementOnly ? 'implementOnly' : 'all'), gate: !!row.gate, held: !!row.held })
+  const where = JSON.stringify({ ...row, halted: !!row.halted, latch: row.latch && (row.latch.implementOnly ? 'implementOnly' : 'all'), gate: !!row.gate, held: row.heldCase })
   const has = (s) => note.includes(s)
   const sole = order.length === 1 && order[0] === 'budget'
   assert.equal(has('HALT_REASON_X'), order.includes('halt'), `halt の理由: ${where}\n${note}`)
@@ -775,22 +838,33 @@ function checkNote(row, note) {
   assert.equal(has('残置 worktree 上限ゲートにより新規着手を抑止'), order.includes('latch'), `ラッチの文言: ${where}\n${note}`)
   assert.equal(has('GATE_REASON_X'), order.includes('gate'), `ゲートの理由: ${where}\n${note}`)
   assert.equal(has('前回の評価') && has('再評価していない'), order.includes('gate') && order.includes('budget'), `ゲートが前回の評価と分かるのは予算保留と併存するときだけ: ${where}\n${note}`)
-  assert.equal(has('予算'), order.includes('budget'), `予算の言及は予算保留があるときだけ: ${where}\n${note}`)
+  assert.equal(has('エージェント呼び出し数の予算'), order.includes('budget'), `予算の言及は予算保留があるときだけ: ${where}\n${note}`)
+  const hi = row.held ? row.held.used + row.held.required : 0
   if (sole) {
     assert.ok(has('予算不足'), `予算だけが理由なら予算不足: ${where}\n${note}`)
-    assert.ok(row.starved ? has(`少なくとも ${BUDGET_CTX.neededLimit} にして再実行`) && has('下限値') : has('同じ引数で再実行すると'), `starved の出し分け: ${where}\n${note}`)
-    assert.equal(has('にして再実行'), row.starved, `limit の引き上げを案内するのは starved のときだけ: ${where}\n${note}`)
+    const to = row.resume ? ' monitor から再開' : '着手'
+    if (row.heldCase === 'raise') {
+      assert.ok(has(`少なくとも ${row.held.need} にして再実行すると${to}しうる`) && has('下限値') && !has('同じ引数で再実行すると'), `引き上げの案内: ${where}\n${note}`)
+    } else if (row.heldCase === 'split') {
+      assert.ok(has('対象ツリーを分けて実行する') && has(`少なくとも ${row.held.need}`) && has('上限 1000 では足りない'), `分割の案内: ${where}\n${note}`)
+      assert.ok(!has('にして再実行') && !has('args.agentCallLimit'), `受理されない値（1000 超）への引き上げを案内しない: ${where}\n${note}`)
+    } else {
+      assert.ok(has(`同じ引数で再実行すると${to}しうる`) && !has('にして再実行') && !has('対象ツリーを分けて'), `同じ引数の案内: ${where}\n${note}`)
+      assert.equal(has(`その場合は args.agentCallLimit を少なくとも ${hi} にする`), row.heldCase === 'same', `先に着手したノードが次ランも走る場合の下限は 1000 以内のときだけ添える: ${where}\n${note}`)
+    }
   } else if (order.includes('budget')) {
     assert.ok(has('予算も不足していた'), `他の理由があるときは併記形: ${where}\n${note}`)
-    assert.ok(has(`保留時の使用 ${HELD.used}/${BUDGET_CTX.limit}`) && has(`少なくとも ${HELD.used + HELD.required}`), `保留時の使用量から言う下限値: ${where}\n${note}`)
-    assert.ok(!has('予算不足') && !has('にして再実行'), `他の理由が残るのに limit の引き上げだけで進むとは案内しない: ${where}\n${note}`)
+    assert.ok(has(`保留時の使用 ${row.held.used}/${BUDGET_CTX.limit}`) && has(`少なくとも ${hi} 要った`), `保留時の使用量から言う下限値: ${where}\n${note}`)
+    assert.ok(!has('予算不足') && !has('にして再実行') && !has('対象ツリーを分けて') && !has('同じ引数で再実行すると'), `他の理由が残るのに引き上げ・同じ引数だけで進むとは案内しない: ${where}\n${note}`)
   }
   assert.equal(has('キュー未到達'), order.length === 0 && !row.resume, `理由なしの新規着手の既定文: ${where}\n${note}`)
-  const resumeAdvice = has('同じ引数で再実行すると monitor から再開する')
-  assert.equal(resumeAdvice, row.resume && (order.length === 0 || (sole && !row.starved)), `「同じ引数で再実行すると再開する」は理由が残らないときだけ: ${where}\n${note}`)
+  assert.equal(has('同じ引数で再実行すると monitor から再開する'), row.resume && order.length === 0, `「同じ引数で再実行すると再開する」は理由が残らないときだけ: ${where}\n${note}`)
   assert.ok(!has('。。'), `句点が重ならない: ${where}\n${note}`)
-  const at = [['halt', row.resume ? 'halt のため再開しなかった' : 'halted により未着手'], ['latch', '残置 worktree 上限ゲートにより'], ['gate', 'GATE_REASON_X'], ['budget', '予算']]
+  // 優先順 halt → ラッチ → ゲート → 予算。位置は予算断片に固有の文字列で取る（ゲートの注記にも「予算で保留した周回」が出る）。
+  const budgetMark = sole ? 'エージェント呼び出し数の予算不足' : 'エージェント呼び出し数の予算も不足していた'
+  const at = [['halt', row.resume ? 'halt のため再開しなかった' : 'halted により未着手'], ['latch', '残置 worktree 上限ゲートにより'], ['gate', 'GATE_REASON_X'], ['budget', budgetMark]]
     .filter(([k]) => order.includes(k)).map(([, s]) => note.indexOf(s))
+  assert.ok(at.every((i) => i >= 0), `断片の位置を取れる: ${where}\n${note}`)
   assert.deepEqual(at, [...at].sort((a, b) => a - b), `優先順 halt → ラッチ → ゲート → 予算: ${where}\n${note}`)
 }
 
@@ -802,7 +876,7 @@ test('単体: 停止理由の全組み合わせ（軸 × 種別の表）で、no
     const facts = { resume: row.resume, kind: row.kind, halted: row.halted, latch: row.latch, gate: row.gate, held: row.held }
     const reasons = stopReasons(facts)
     assert.deepEqual(reasons, expectedReasons(row), `理由の集合と順序: ${JSON.stringify(row)}`)
-    const note = stopNote(facts, { ...BUDGET_CTX, starved: row.starved })
+    const note = stopNote(facts, BUDGET_CTX)
     if (row.gate && !gateReachable(row)) { unreachable += 1; continue } // 到達不能（上の根拠）。呼び出しが落ちないことだけ確認
     reachable += 1
     if (reasons.length >= 2) multi += 1
@@ -812,22 +886,22 @@ test('単体: 停止理由の全組み合わせ（軸 × 種別の表）で、no
 })
 
 test('単体: 名前付きの行 — #600（ゲートで defer → 予算保留 → halt）と #596 #597 #598 が指した組み合わせ', () => {
-  const ctx = { ...BUDGET_CTX, starved: false }
+  const ctx = BUDGET_CTX
   // #600: ゲート（前回の評価）・予算・halt が併存。halt が落ちず、先頭に来る。
-  const n600 = stopNote({ resume: true, kind: 'implement', halted: HALT, latch: null, gate: GATE, held: HELD }, ctx)
+  const n600 = stopNote({ resume: true, kind: 'implement', halted: HALT, latch: null, gate: GATE, held: HELDS.same }, ctx)
   assert.match(n600, /^halt のため再開しなかった（理由: HALT_REASON_X）。GATE_REASON_X.*（この理由は前回の評価。予算で保留した周回では再評価していない）。エージェント呼び出し数の予算も不足していた/, n600)
   // #598 指摘 2: halt + 予算保留の再開。予算の事実を落とさず、「同じ引数で再開する」とは書かない。
-  const n598b = stopNote({ resume: true, kind: 'implement', halted: HALT, latch: null, gate: undefined, held: HELD }, ctx)
+  const n598b = stopNote({ resume: true, kind: 'implement', halted: HALT, latch: null, gate: undefined, held: HELDS.same }, ctx)
   assert.match(n598b, /保留時の使用 90\/100。この周回の使用量では再開に args\.agentCallLimit が少なくとも 122 要った/)
   assert.ok(!n598b.includes('同じ引数で再実行すると monitor から再開する'), n598b)
   // #598 指摘 3: ゲート理由 + 予算保留。ゲートは前回の評価で、予算だけが理由とは案内しない。
-  const n598c = stopNote({ resume: true, kind: 'implement', halted: null, latch: null, gate: GATE, held: HELD }, { ...BUDGET_CTX, starved: true })
+  const n598c = stopNote({ resume: true, kind: 'implement', halted: null, latch: null, gate: GATE, held: HELDS.raise }, ctx)
   assert.ok(n598c.includes('前回の評価') && n598c.includes('予算も不足していた') && !n598c.includes('にして再実行') && !n598c.includes('予算不足'), n598c)
   // #596 の Bugbot A: ラッチ + 予算保留の新規着手は、ラッチの理由を残しつつ予算も併記する。
-  const nA = stopNote({ resume: false, kind: 'implement', halted: null, latch: LATCH, gate: undefined, held: HELD }, { ...BUDGET_CTX, starved: true })
+  const nA = stopNote({ resume: false, kind: 'implement', halted: null, latch: LATCH, gate: undefined, held: HELDS.raise }, ctx)
   assert.match(nA, /^残置 worktree 上限ゲートにより新規着手を抑止（理由: LATCH_REASON_X）。エージェント呼び出し数の予算も不足していた/, nA)
   // #597: 再開はラッチの対象外。ラッチが立っていても、予算で保留した再開は予算だけが理由。
-  const n597 = stopNote({ resume: true, kind: 'implement', halted: null, latch: LATCH, gate: undefined, held: HELD }, { ...BUDGET_CTX, starved: true })
+  const n597 = stopNote({ resume: true, kind: 'implement', halted: null, latch: LATCH, gate: undefined, held: HELDS.raise }, ctx)
   assert.match(n597, /予算不足で monitoring 再開を見送った/)
   assert.ok(!n597.includes('LATCH_REASON_X') && n597.includes('少なくとも 127 にして再実行'), n597)
   // 適用されないラッチ: 空き容量起因（implementOnly）のラッチは verify-close に効かない。前提待ちで未着手の verify-close の理由にしない。
@@ -836,23 +910,28 @@ test('単体: 名前付きの行 — #600（ゲートで defer → 予算保留 
   // halt のみの再開は halt の理由を残す（以前は halt を落として「同じ引数で再実行すると再開する」だけを出していた）。
   const nH = stopNote({ resume: true, kind: 'implement', halted: HALT, latch: null, gate: undefined, held: undefined }, ctx)
   assert.equal(nH, 'halt のため再開しなかった（理由: HALT_REASON_X）')
+  // 受理されない値の案内（Issue #600 追加是正 C）: need が 1000 を超えるノードの note は引き上げではなく分割を案内する。
+  const nSplit = stopNote({ resume: false, kind: 'implement', halted: null, latch: null, gate: undefined, held: HELDS.split }, ctx)
+  assert.equal(nSplit, 'エージェント呼び出し数の予算不足により新規着手を停止（使用 95/100。上限 1000 では足りない（必要量は少なくとも 1500）ので対象ツリーを分けて実行する）')
 })
 
 // ---------------------------------------------------------------------------
 // 統合: 実際にその状態へ到達するランで、note と starved / neededLimit / budgetOnly が矛盾しないことを確かめる (Issue #600)
 // ---------------------------------------------------------------------------
-// note が「agentCallLimit を少なくとも N にして再実行」と言うのは、予算だけが理由の保留ノードがあり 1 件も着手しなかったラン（starved）の
-// そのノードだけ。starved の neededLimit は note の N と一致し、他の理由が残るノードの note は limit の引き上げだけを案内しない。
+// 予算だけが理由の note（「予算不足」を含む）があるなら neededLimit はその need の最小値で、引き上げを案内する note の N はそれ以上。
+// 予算だけが理由の note が無ければ neededLimit は null。starved は着手 0 件で予算だけが理由の保留があるとき。他の理由が残るノードの note は
+// 引き上げ・同じ引数・分割だけで進むとは案内しない。
 function assertStarvedConsistent(result, where) {
   const a = result.agentBudget
   const notes = result.done.filter((d) => d.status === 'not-started' || d.status === 'monitoring' || d.status === 'blocked').map((d) => d.note)
-  const raising = notes.filter((t) => t.includes('にして再実行'))
-  if (!a.starved) assert.equal(raising.length, 0, `${where}: starved でないランは limit の引き上げを案内しない: ${raising[0]}`)
+  const sole = notes.filter((t) => t.includes('エージェント呼び出し数の予算不足'))
+  assert.equal(a.starved, a.starts === 0 && sole.length > 0, `${where}: starved は着手 0 件かつ予算だけが理由の保留があるとき`)
+  if (sole.length === 0) assert.equal(a.neededLimit, null, `${where}: 予算だけが理由の保留が無ければ neededLimit は null`)
   else {
-    assert.ok(raising.length > 0, `${where}: starved なら引き上げを案内する note がある`)
-    for (const t of raising) assert.ok(t.includes(`少なくとも ${a.neededLimit} にして再実行`) && t.includes('予算不足') && !t.includes('予算も不足していた'), `${where}: 引き上げを案内するのは予算だけが理由のノードで、値は neededLimit: ${t}`)
+    assert.ok(Number.isInteger(a.neededLimit), `${where}: 予算だけが理由の保留があれば neededLimit を持つ（着手の有無に関わらない）`)
+    for (const t of sole.filter((x) => x.includes('にして再実行'))) assert.ok(Number(/少なくとも (\d+) にして再実行/.exec(t)[1]) >= a.neededLimit, `${where}: 引き上げの N は neededLimit（予算だけが理由のノードの need の最小値）以上: ${t}`)
   }
-  for (const t of notes.filter((x) => x.includes('予算も不足していた'))) assert.ok(!t.includes('にして再実行'), `${where}: 他の理由が残るノードは引き上げだけを案内しない: ${t}`)
+  for (const t of notes.filter((x) => x.includes('予算も不足していた'))) assert.ok(!t.includes('にして再実行') && !t.includes('同じ引数で再実行すると') && !t.includes('対象ツリーを分けて'), `${where}: 他の理由が残るノードは予算の案内だけで進むとは書かない: ${t}`)
 }
 
 // 親 #1 の配下: 保存済み monitoring の再開 #2、閉じた子を持つ verify-close #10 #20 #30（close の agent が closed: false を返して

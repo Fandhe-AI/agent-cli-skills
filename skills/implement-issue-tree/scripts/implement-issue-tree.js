@@ -4479,11 +4479,21 @@ const BUDGET_FLOOR = '（下限値。保存された状態が大きいと開始�
 
 
 
+function budgetAdvice(h, limit, to) {
+if (h.need > AGENT_RUN_LIMIT) return `上限 ${AGENT_RUN_LIMIT} では足りない（必要量は少なくとも ${h.need}）ので対象ツリーを分けて実行する`
+if (h.need > limit) return `args.agentCallLimit を少なくとも ${h.need} にして再実行すると${to}しうる${BUDGET_FLOOR}`
+const again = h.used + h.required
+return `同じ引数で再実行すると${to}しうる${again <= AGENT_RUN_LIMIT ? `（このランで先に着手したノードが次ランでも同じ量を使うと再び保留になる。その場合は args.agentCallLimit を少なくとも ${again} にする）` : ''}`
+}
+
+
+
+
+
 function stopNote(f, b) {
 const r = stopReasons(f)
 if (r.length === 0) return f.resume ? '同じ引数で再実行すると monitor から再開する' : 'スケジューラ終了時に未着手（キュー未到達）'
-const to = f.resume ? ' monitor から再開' : '着手'
-const rerun = b.starved ? `args.agentCallLimit を少なくとも ${b.neededLimit} にして再実行すると${to}しうる${BUDGET_FLOOR}` : `同じ引数で再実行すると${to}する`
+const rerun = budgetAdvice(f.held ?? {}, b.limit, f.resume ? ' monitor から再開' : '着手')
 const part = {
 halt: `${f.resume ? 'halt のため再開しなかった' : 'halted により未着手'}（理由: ${f.halted?.reason}）`,
 latch: `残置 worktree 上限ゲートにより新規着手を抑止（理由: ${f.latch?.reason}）`,
@@ -9664,6 +9674,9 @@ halted
 }
 return appliedCount
 }
+
+
+const startUsed = agentBudget.used
 while (true) {
 dispatchIterationSeq += 1
 
@@ -9703,7 +9716,7 @@ agentBudget.stoppedDispatchAt = agentBudget.used
 log(`⚠️ エージェント呼び出し数が上限 ${agentBudget.limit} に近いため新規着手を停止する（使用 ${agentBudget.used}・残り ${budgetHold.remaining}・#${n} に必要 ${budgetHold.required}）。実行中の issue の完了を優先する`)
 }
 
-agentBudgetHeld.set(n, { required: budgetHold.required, used: agentBudget.used })
+agentBudgetHeld.set(n, { required: budgetHold.required, used: agentBudget.used, need: startUsed + budgetHold.required })
 
 
 
@@ -10191,9 +10204,10 @@ const budgetOnly = (n) => { const r = stopReasons(stopFacts(n)); return r.length
 
 
 
-const starvedHeld = agentBudget.starts === 0 ? pending.filter(budgetOnly) : []
-agentBudget.starved = starvedHeld.length > 0
-if (agentBudget.starved) agentBudget.neededLimit = agentBudget.used + Math.min(...starvedHeld.map((n) => agentBudgetHeld.get(n).required))
+const budgetOnlyHeld = pending.filter(budgetOnly)
+agentBudget.starved = agentBudget.starts === 0 && budgetOnlyHeld.length > 0
+const neededHeld = budgetOnlyHeld.length > 0 ? agentBudgetHeld.get(budgetOnlyHeld.reduce((m, n) => (agentBudgetHeld.get(n).need < agentBudgetHeld.get(m).need ? n : m))) : null
+if (neededHeld) agentBudget.neededLimit = neededHeld.need
 for (const n of notStarted) {
 const notStartedNote = stopNote(stopFacts(n), agentBudget)
 results.push({ issue: n, status: 'not-started', note: notStartedNote })
@@ -10237,7 +10251,7 @@ const unmonitoredFmt = (resumable) => unmonitoredPrList.filter((e) => e.resumabl
 if (unmonitoredFmt(true)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr 保存済み）: ${unmonitoredFmt(true)}。同じ引数で再実行すると monitor から再開する`)
 if (unmonitoredFmt(false)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr が無い／照合未了）: ${unmonitoredFmt(false)}。再実行では monitor から再開しない。GitHub 上で PR を手動確認すること（状態ファイルの unverifiedPr があれば再実行で再照合される）`)
 log(`エージェント呼び出し数: ${agentBudget.used}/${agentBudget.limit}（新規着手停止時点 ${agentBudget.stoppedDispatchAt ?? 'なし'}）`)
-if (agentBudget.starved) log(`⚠️ 予算を使い切り 1 件も着手していない。args.agentCallLimit を少なくとも ${agentBudget.neededLimit} にして再実行すること${BUDGET_FLOOR}${agentBudget.neededLimit > AGENT_RUN_LIMIT ? `（ランタイムの上限 ${AGENT_RUN_LIMIT} を超えるため対象ツリーを分けて実行する）` : ''}`)
+if (agentBudget.starved) log(`⚠️ 予算を使い切り 1 件も着手していない。${budgetAdvice(neededHeld, agentBudget.limit, '着手')}`)
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)
 

@@ -1418,7 +1418,7 @@ function declaredDepsPrompt(numbers) {
     // HTTP 403 を無条件にレート制限とみなさない: 権限不足・SSO 等の恒久的な 403 で core の復帰まで待って
     // 「一過性」と報告すると、再実行しても同じ 403 で失敗する。レート制限と確認できたときだけ待たせ、
     // それ以外は rateLimited を立てず通常の失敗（再試行・抽出失敗による停止）へ回す。secondary rate limit は
-    // core の reset と無関係なので retry-after（無ければ省略。ホストが 60 秒待つ）を waitSeconds に使う。
+    // core の reset と無関係なので retry-after（無ければ省略。ホストが 60 秒に余裕 5 秒を足して 65 秒待つ）を waitSeconds に使う。
     `標準エラーのメッセージに rate limit・secondary rate limit・RATE_LIMITED がある、または HTTP 403・429 で gh api rate_limit --jq '.resources.core | {remaining, resetAt: (.reset | todate), waitSeconds: ([.reset - now, 0] | max | ceil)}' の remaining が 0 のときだけ rateLimited を true にする。権限・SSO など他の 403 は rateLimited にしない（通常の失敗として扱う）。core の枯渇なら resetAt と waitSeconds を出力どおりに返し、secondary rate limit なら resetAt は省略して waitSeconds に retry-after の秒数を入れる（無ければ省略）。待機はホストが行う。sleep しない。`,
   ].join('\n')
 }
@@ -4474,16 +4474,26 @@ function stopReasons(f) {
   return r
 }
 const BUDGET_FLOOR = '（下限値。保存された状態が大きいと開始処理の分だけさらに要る）'
-// b は agentBudget（used・limit・starved・neededLimit）。予算だけが理由のときは従来の文言（starved なら limit の
-// 引き上げを案内）、他の理由があるときは「予算も不足していた」と保留時の使用量から言う下限値を併記する
+// 予算で保留したノードの再実行案内を、ランに着手があったかではなくノード自身の必要量から決める（Issue #600 の追加是正）。
+// h は保留の記録 { required, used, need }。need = ループに入る時点の使用量（開始処理の実績）+ 保留時の required:
+// 次ランは同じ開始処理を経てからそのノードを評価するので、need が limit に収まれば同じ引数で足り得る。ただし、このランで
+// 先に着手したノードが次ランでも走る（毎ラン再開される monitoring 等）と、その分も使うので、保留時の used + required
+// （上限 1000 以内なら）をその場合の下限として添える。need が limit を超えれば引き上げ、1000 を超えれば受理されないので分割。
+function budgetAdvice(h, limit, to) {
+  if (h.need > AGENT_RUN_LIMIT) return `上限 ${AGENT_RUN_LIMIT} では足りない（必要量は少なくとも ${h.need}）ので対象ツリーを分けて実行する`
+  if (h.need > limit) return `args.agentCallLimit を少なくとも ${h.need} にして再実行すると${to}しうる${BUDGET_FLOOR}`
+  const again = h.used + h.required
+  return `同じ引数で再実行すると${to}しうる${again <= AGENT_RUN_LIMIT ? `（このランで先に着手したノードが次ランでも同じ量を使うと再び保留になる。その場合は args.agentCallLimit を少なくとも ${again} にする）` : ''}`
+}
+// b は agentBudget（used・limit）。予算だけが理由のときは自ノードの need から言う 3 通り（同じ引数 / 少なくとも N に引き上げ /
+// 上限 1000 では足りないので分割）、他の理由があるときは「予算も不足していた」と保留時の使用量から言う下限値を併記する
 // （他の理由が残る限り limit を上げるだけでは進まないので、引き上げだけを案内しない）。ゲートは予算で保留した周回では
 // 評価されない（実測 du・df が自身でエージェントを呼ぶ）ため、held と併存するゲートは必ず前回の評価。
-// 「同じ引数で再実行すると再開する」は、理由が 1 つも成立しないとき（と予算だけが理由で starved でないとき）にしか出さない。
+// 「同じ引数で再実行すると再開する」は、理由が 1 つも成立しないときにしか出さない。
 function stopNote(f, b) {
   const r = stopReasons(f)
   if (r.length === 0) return f.resume ? '同じ引数で再実行すると monitor から再開する' : 'スケジューラ終了時に未着手（キュー未到達）'
-  const to = f.resume ? ' monitor から再開' : '着手'
-  const rerun = b.starved ? `args.agentCallLimit を少なくとも ${b.neededLimit} にして再実行すると${to}しうる${BUDGET_FLOOR}` : `同じ引数で再実行すると${to}する`
+  const rerun = budgetAdvice(f.held ?? {}, b.limit, f.resume ? ' monitor から再開' : '着手')
   const part = {
     halt: `${f.resume ? 'halt のため再開しなかった' : 'halted により未着手'}（理由: ${f.halted?.reason}）`,
     latch: `残置 worktree 上限ゲートにより新規着手を抑止（理由: ${f.latch?.reason}）`,
@@ -9664,6 +9674,9 @@ async function probePrereqCompletion(targets) {
   }
   return appliedCount
 }
+// 開始処理の実績（dispatch ループに入る時点の使用量）。次ランも同じ開始処理を経るため、予算で保留したノードが次ランで
+// 着手できる上限の下限 need = startUsed + 保留時の required の基準にする（budgetAdvice）。
+const startUsed = agentBudget.used
 while (true) {
   dispatchIterationSeq += 1
   // ラン中に積み増された worktree の実容量を間引き付きで実測し直す（floor 予約の過小評価を補う）
@@ -9702,8 +9715,8 @@ while (true) {
           agentBudget.stoppedDispatchAt = agentBudget.used
           log(`⚠️ エージェント呼び出し数が上限 ${agentBudget.limit} に近いため新規着手を停止する（使用 ${agentBudget.used}・残り ${budgetHold.remaining}・#${n} に必要 ${budgetHold.required}）。実行中の issue の完了を優先する`)
         }
-        // 保留時点の使用量も残す（halt 後など終了時の使用量では保留時の必要量を言えない note 用）。
-        agentBudgetHeld.set(n, { required: budgetHold.required, used: agentBudget.used })
+        // 保留時点の使用量と、次ランで足りる上限の下限 need（開始処理の実績 + 保留時の必要量）も残す。
+        agentBudgetHeld.set(n, { required: budgetHold.required, used: agentBudget.used, need: startUsed + budgetHold.required })
         // 再開ゲートの理由（monitoringResumeGateDeferred）は消さない。ゲートの実測（du・df）は自身がエージェントを
         // 呼ぶため予算が足りない周回では評価できず、消すと残置 worktree の defer が残るのに予算だけが理由と案内する
         // （Issue #598）。ゲートを通過した周回（下の delete）で消え、予算を通った周回の defer で上書きされる。
@@ -10188,12 +10201,13 @@ const stopFacts = (n) => ({ resume: isActiveMonitoring(n), kind: workKind.get(n)
 const budgetOnly = (n) => { const r = stopReasons(stopFacts(n)); return r.length === 1 && r[0] === 'budget' }
 // 予算枯渇による停滞（Issue #592・Bugbot 指摘）: このランで 1 件も着手せず、予算だけが理由の保留ノードがある。
 // 着手の可否はループ中にしか分からない（再開ゲートの defer、プローブで ready になったノード）ため、ループ前では
-// 断定せず終了時に判定する。同じ引数で再実行しても同じ停滞を繰り返すので、保留の note（状態ファイルにも保存される）は、
-// 使用量 + 最初の 1 件に要る量（保留時に実測した required の最小値）を案内する。値は下限: 次ランの開始処理は状態の読み込み
+// 断定せず終了時に判定する。neededLimit は着手の有無に関わらず「予算だけが理由の保留ノードの need の最小値」
+// （どれか 1 件が進む上限の下限。ノードごとの案内は budgetAdvice）。値は下限: 次ランの開始処理は状態の読み込み
 // （state:load-fill。未照合の項目 5 件ごとに最大 2 巡）が LLM の返した件数で変わり、事前に決められない。
-const starvedHeld = agentBudget.starts === 0 ? pending.filter(budgetOnly) : []
-agentBudget.starved = starvedHeld.length > 0
-if (agentBudget.starved) agentBudget.neededLimit = agentBudget.used + Math.min(...starvedHeld.map((n) => agentBudgetHeld.get(n).required))
+const budgetOnlyHeld = pending.filter(budgetOnly)
+agentBudget.starved = agentBudget.starts === 0 && budgetOnlyHeld.length > 0
+const neededHeld = budgetOnlyHeld.length > 0 ? agentBudgetHeld.get(budgetOnlyHeld.reduce((m, n) => (agentBudgetHeld.get(n).need < agentBudgetHeld.get(m).need ? n : m))) : null
+if (neededHeld) agentBudget.neededLimit = neededHeld.need
 for (const n of notStarted) {
   const notStartedNote = stopNote(stopFacts(n), agentBudget)
   results.push({ issue: n, status: 'not-started', note: notStartedNote })
@@ -10237,7 +10251,7 @@ const unmonitoredFmt = (resumable) => unmonitoredPrList.filter((e) => e.resumabl
 if (unmonitoredFmt(true)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr 保存済み）: ${unmonitoredFmt(true)}。同じ引数で再実行すると monitor から再開する`)
 if (unmonitoredFmt(false)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr が無い／照合未了）: ${unmonitoredFmt(false)}。再実行では monitor から再開しない。GitHub 上で PR を手動確認すること（状態ファイルの unverifiedPr があれば再実行で再照合される）`)
 log(`エージェント呼び出し数: ${agentBudget.used}/${agentBudget.limit}（新規着手停止時点 ${agentBudget.stoppedDispatchAt ?? 'なし'}）`)
-if (agentBudget.starved) log(`⚠️ 予算を使い切り 1 件も着手していない。args.agentCallLimit を少なくとも ${agentBudget.neededLimit} にして再実行すること${BUDGET_FLOOR}${agentBudget.neededLimit > AGENT_RUN_LIMIT ? `（ランタイムの上限 ${AGENT_RUN_LIMIT} を超えるため対象ツリーを分けて実行する）` : ''}`)
+if (agentBudget.starved) log(`⚠️ 予算を使い切り 1 件も着手していない。${budgetAdvice(neededHeld, agentBudget.limit, '着手')}`)
 
 if (halted) log(`中断: ${halted.reason}（直近の停滞イシュー: ${halted.issues.map((n) => `#${n}`).join(', ')}）`)
 
