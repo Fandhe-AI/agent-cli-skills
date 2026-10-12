@@ -298,6 +298,9 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
   // sigWord の 1 つ前の単語（sigWord が始まった時点で、まだ句読点に遮られていなかった直前の sigWord）。
   // `for await (` の `await` の前が `for` であることの判定に使う
   let wordBefore = ''
+  // wordBefore がプロパティ名・private 名（`obj.for`・`this.#for`）だったか。プロパティ名の `for` は
+  // キーワードではないので、その後に改行を挟んで来る `await (` を `for await (` と読まない
+  let wordBeforeIsProperty = false
   // 直近に出力した `.` が数字と字句的に隣接していたか（`1.` = 数値リテラルの末尾ドット）。
   // `1 .in` のように空白を挟む `.` は数値へのプロパティアクセスなので false。非空白文字の
   // 並びだけでは両者を区別できない（PR #454 codex P1）ため、`.` 出力時点の rawPrev で判定する。
@@ -493,6 +496,7 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
         if (isWordChar(rawPrev) || rawPrevIsIdentEscape) {
           sigWord += esc
         } else {
+          wordBeforeIsProperty = sigWord !== '' && isPropertyName()
           wordBefore = sigWord
           sigWord = esc
           wordPrev = sigCh // 新規単語の開始: 直前の非空白文字と、それが `.` なら数字隣接を記録
@@ -514,8 +518,9 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
     // コメント・テンプレート本文の括弧はここへ来ないので数えない
     if (c === '(') {
       // `for await (` の括弧は `for` の括弧（直下の `of` はキーワード）。`await` が単独の式のとき
-      // （`await (x) / 2`）は対象外なので、直前が `for` のときだけ
-      const kind = sigWord === 'await' && wordBefore === 'for' ? 'for' : sigWord
+      // （`await (x) / 2`）は対象外なので、直前が実際の `for` キーワードのときだけ（`obj.for` `this.#for` の
+      // プロパティ名の `for` の後に改行を挟んで `await (` が来る形は `for await` ではない）
+      const kind = sigWord === 'await' && wordBefore === 'for' && !wordBeforeIsProperty ? 'for' : sigWord
       const control = CONTROL_PAREN_KEYWORDS.has(kind) && !isPropertyName()
       ctx.parens.push(control ? kind : 'other')
     } else if (c === ')') {
@@ -628,6 +633,7 @@ export function stripComments(src, { squeezeSpaces = false, shouldSqueeze = shou
       if (isLowSurrogate(c) || isIdentifierContinuationRaw(rawPrev, rawPrev2) || rawPrevIsIdentEscape || rawPrevContinuesSigWord) {
         sigWord += c
       } else {
+        wordBeforeIsProperty = sigWord !== '' && isPropertyName()
         wordBefore = sigWord
         sigWord = c
         wordPrev = sigCh // 新規単語の開始: 直前の非空白文字と、それが `.` なら数字隣接を記録

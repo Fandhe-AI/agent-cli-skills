@@ -1450,6 +1450,82 @@ for (const [mode, compare] of [['parse', compareTokensWithParser], ['tokenize', 
   })
 }
 
+// 直前の単語の文字列だけを見て、その単語がプロパティ名・private 名だったかを見ない分岐の点検（PR レビュー指摘）。
+// `obj.for` の後に改行を挟んで `await (a) / 2` が来ると、`wordBefore === 'for'` だけでは `for await (` と取り違え、
+// await の括弧を条件の括弧として `/` を正規表現と読む（正当な入力がビルド中止になる）。実際の `for` キーワード
+// のときだけ `for await` として扱う。各入力は、ランタイム形で実行して src と生成物の結果が一致することを見る。
+// 末尾のテンプレート（複数行）は、`/` の読みを誤ると開閉が反転して中身が変わるプローブ。
+const PROBE_TEMPLATE = 'const t = `a\n  b  c`\n'
+const WORD_PROPERTY_CASES = {
+  'obj.for の後に改行を挟んだ await (a) / 2（ASI）': {
+    code: `async function f(obj, a) {\n  obj.for\n  await (a) / 2 + \`/\`\n  return 1\n}\n${PROBE_TEMPLATE}return [await f({ for: 1 }, 4), t]\n`,
+    result: [1, 'a\n  b  c'],
+  },
+  'this.#for の後に改行を挟んだ await (a) / 2（ASI）': {
+    code: `class K {\n  #for = 1\n  async m(a) {\n    this.#for\n    await (a) / 2 + \`/\`\n    return this.#for\n  }\n}\n${PROBE_TEMPLATE}return [await new K().m(4), t]\n`,
+    result: [1, 'a\n  b  c'],
+  },
+  'obj.for の後に ; を挟んだ同一行の await (a) / 2': {
+    code: `async function f(obj, a) {\n  obj.for; await (a) / 2 + \`/\`\n  return 1\n}\n${PROBE_TEMPLATE}return [await f({ for: 1 }, 4), t]\n`,
+    result: [1, 'a\n  b  c'],
+  },
+  'this.#for の後に ; を挟んだ同一行の await (a) / 2': {
+    code: `class K {\n  #for = 1\n  async m(a) {\n    this.#for; await (a) / 2 + \`/\`\n    return 1\n  }\n}\n${PROBE_TEMPLATE}return [await new K().m(4), t]\n`,
+    result: [1, 'a\n  b  c'],
+  },
+  'for と await の間に別のトークンがある（オブジェクトのキー for の後の : と値）': {
+    code: `async function f(a) {\n  const o = { for: 1 }\n  await (a) / 2 + \`/\`\n  return o.for\n}\n${PROBE_TEMPLATE}return [await f(4), t]\n`,
+    result: [1, 'a\n  b  c'],
+  },
+  'obj?.for の後に改行を挟んだ await (a) / 2': {
+    code: `async function f(obj, a) {\n  obj?.for\n  await (a) / 2 + \`/\`\n  return 1\n}\n${PROBE_TEMPLATE}return [await f({ for: 1 }, 4), t]\n`,
+    result: [1, 'a\n  b  c'],
+  },
+  // 実際の for キーワードなら、for と await の間に改行があっても for await の括弧として読む（正規表現内の // を消さない）
+  '実際の for キーワードと await の間に改行がある for await': {
+    code: `async function f(s) {\n  let n = 0\n  for\n  await (const m of /[//]/g[Symbol.matchAll](s)) { n++ }\n  return n\n}\n${PROBE_TEMPLATE}return [await f('a//b'), t]\n`,
+    result: [2, 'a\n  b  c'],
+  },
+  // 同類の点検: 条件の括弧を作る語（if / while / for）がプロパティ名・private 名で、改行を挟んで括弧が来る形
+  'obj.if の後に改行を挟んだ (a) / 2': {
+    code: `function f(obj, a) {\n  return obj.if\n  (a) / 2 + \`/\`\n}\n${PROBE_TEMPLATE}return [f({ if: (x) => x }, 4), t]\n`,
+    result: ['2/', 'a\n  b  c'],
+  },
+  'this.#while の後に改行を挟んだ (a) / 2': {
+    code: `class K {\n  #while(x) { return x }\n  m(a) {\n    return this.#while\n    (a) / 2 + \`/\`\n  }\n}\n${PROBE_TEMPLATE}return [new K().m(4), t]\n`,
+    result: ['2/', 'a\n  b  c'],
+  },
+  // 同類の点検: 正規表現の前置キーワードがプロパティ名・private 名で、改行を挟んで除算が続く形
+  'obj.return の後に改行を挟んだ / 2': {
+    code: `function f(obj) {\n  return obj.return\n  / 2 + \`/\`\n}\n${PROBE_TEMPLATE}return [f({ return: 8 }), t]\n`,
+    result: ['4/', 'a\n  b  c'],
+  },
+  'this.#in の後に改行を挟んだ / 2': {
+    code: `class K {\n  #in = 8\n  m() {\n    return this.#in\n    / 2 + \`/\`\n  }\n}\n${PROBE_TEMPLATE}return [new K().m(), t]\n`,
+    result: ['4/', 'a\n  b  c'],
+  },
+  'obj.await の後に改行を挟んだ / 2': {
+    code: `function f(obj) {\n  return obj.await\n  / 2 + \`/\`\n}\n${PROBE_TEMPLATE}return [f({ await: 8 }), t]\n`,
+    result: ['4/', 'a\n  b  c'],
+  },
+  'obj.of の後に改行を挟んだ / 2（for の括弧の外）': {
+    code: `function f(obj) {\n  return obj.of\n  / 2 + \`/\`\n}\n${PROBE_TEMPLATE}return [f({ of: 8 }), t]\n`,
+    result: ['4/', 'a\n  b  c'],
+  },
+}
+for (const [name, { code, result }] of Object.entries(WORD_PROPERTY_CASES)) {
+  test(`直前の単語がプロパティ名・private 名のときの分岐: ${name} はビルドでき、テンプレートの中身が変わらず、実行結果が一致する`, async () => {
+    const src = `${META_HEADER}${code}`
+    const out = buildArtifact(src)
+    assert.doesNotThrow(() => verifyTokenParity(src, out))
+    assert.ok(out.includes('`a\n  b  c`'), `テンプレートの中身が変わった: ${JSON.stringify(out)}`)
+    const expected = await runLikeRuntime(src)
+    assert.deepEqual(expected, result)
+    assert.deepEqual(await runLikeRuntime(out), result)
+    assert.equal(runBuilder(src).status, 0)
+  })
+}
+
 // 中止にはならないが、lexer が取り違えた結果テンプレートモードに入ったままになり、以降のコメントとインデントが
 // 生成物に残る形（意味は同じ・サイズが縮まない・開発用コメントが配布物に残る）。ランタイムの形で実行して結果を比べる。
 const KEPT_COMMENT_CASES = {
