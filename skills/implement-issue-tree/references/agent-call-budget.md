@@ -87,8 +87,10 @@ issue は値を超えても続行する。実行中の issue の途中で呼び�
 | 返却値 `unmonitoredPrs` | 本ランで PR 番号を得たが、実 monitor が一度も結果を返さなかった `[{ issue, pr, resumable }]`。終了ログにも出す |
 
 `unmonitoredPrs` の PR は、番号を得た時点（照合・状態保存より前）で `resumable: false` として記録するため、その後のどこで
-打ち切られても載る。照合と `monitoring` 遷移（`pr` の保存）の成否確認を通って Merge ループへ入った時点で
-`resumable: true` へ上がる。`resumable: true` は状態ファイルに `pr` が保存されており、同じ引数で再実行すると
+打ち切られても載る。照合を通り、状態ファイルへ `pr` を含む patch を書けた時点で
+`resumable: true` へ上がる（`monitoring` 遷移の保存成功、またはその失敗後の `blocked` + `pr` + `branch` の退避保存の成功。
+どちらも次回ランの `isActiveMonitoring` が再開対象にする条件〔status が monitoring / blocked、`pr` が正の整数、
+branch がその issue の命名〕と同一で、`blockedReason` 等の追加条件は無い）。`resumable: true` は状態ファイルに `pr` が保存されており、同じ引数で再実行すると
 monitoring 再開（Recover・Implement・PR 作成は通らない）に乗る。`resumable: false` は再実行しても再開しないため、
 返却値の PR 番号を GitHub 上で手動確認する（`unverifiedPr` が保存されていれば再実行で再照合される）。終了ログも
 両者で案内を分ける。

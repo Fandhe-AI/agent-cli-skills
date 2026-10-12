@@ -6722,6 +6722,14 @@ const knownBranchByIssue = new Map()
 // 記録。PR 番号を得た時点（runImplement）と runMergeLoop の入口（monitoring 再開）で set し、実 monitor が
 // 結果を返したら delete する。
 const unmonitoredPrs = new Map()
+// 未監視の PR を「次回ランが monitoring 再開できる」(resumable: true) へ上げる。根拠は事実であって到達点
+// ではない: 状態ファイルへ pr を含む patch を書けたときだけ呼ぶ。判定は isActiveMonitoring（次回ランの再開
+// 条件）と同一: status が monitoring / blocked、pr が正の整数、branch が妥当かつその issue の命名。
+// blockedReason 等の追加条件は isActiveMonitoring に無いので課さない。呼び出し側は書き込み成功後に限る。
+const markPrResumable = (n, pr, status, branch) => {
+  const e = unmonitoredPrs.get(n)
+  if (e && e.pr === pr && (status === 'monitoring' || status === 'blocked') && Number.isInteger(pr) && pr > 0 && isValidBranchName(branch) && branchMatchesIssue(branch, n)) e.resumable = true
+}
 // 予算不足で今回見送った issue の集合（未着手ノードの note の出し分けに使う。着手できたら外す）。
 const agentBudgetHeld = new Set()
 let consecutiveFailures = 0
@@ -7551,9 +7559,13 @@ async function runImplement(item) {
           reason,
           status: monitoringTerminalStatus,
         })
+        // monitoring 保存は失敗したが blocked + pr + branch を書けた場合も、次回ランは isActiveMonitoring で再開する。
+        if (blockedSaved) markPrResumable(item.number, impl.prNumber, 'blocked', impl.branch)
         return false
       }
     }
+    // monitoring 遷移（status + pr）を書けた。branch は直前の unverifiedPatch で保存済み。
+    markPrResumable(item.number, impl.prNumber, 'monitoring', impl.branch)
     // Low のみ通過の場合、Low 指摘を PR コメントとして残す（マージはブロックしない）。投稿は
     // monitoring 遷移より後に try/catch 付きで行う（先に投稿すると重複 PR を作りうる。Issue #136）。
     if (deferredLowFindings) {
@@ -7603,9 +7615,9 @@ async function runImplement(item) {
 // 追加）。新規 impl パスは常に既定の null（新規コミット列のためこの PR での post-push fix
 // 実測は存在しない）。
 async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptin = null) {
-  // ここへ来た PR は照合済みで、monitoring 遷移（pr の保存）の成否確認も済んでいる（新規作成経路は保存失敗で
-  // ここへ来ない。再開経路は保存済みの pr から来る）。実データに基づき再開可能（resumable: true）へ上げる。
-  if (Number.isInteger(impl.prNumber) && impl.prNumber > 0) unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: true })
+  // monitoring 再開経路（isActiveMonitoring を通った保存済みの pr から来る）は未登録なので、ここで再開可能として登録する。
+  // 新規作成経路は上の markPrResumable が登録・更新済みのため上書きしない。
+  if (Number.isInteger(impl.prNumber) && impl.prNumber > 0 && !unmonitoredPrs.has(item.number)) unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: true })
   let merged = false
   let lastState = 'timeout'
   let fixCount = initialFixCount

@@ -6723,6 +6723,14 @@ const knownBranchByIssue = new Map()
 
 const unmonitoredPrs = new Map()
 
+
+
+
+const markPrResumable = (n, pr, status, branch) => {
+const e = unmonitoredPrs.get(n)
+if (e && e.pr === pr && (status === 'monitoring' || status === 'blocked') && Number.isInteger(pr) && pr > 0 && isValidBranchName(branch) && branchMatchesIssue(branch, n)) e.resumable = true
+}
+
 const agentBudgetHeld = new Set()
 let consecutiveFailures = 0
 
@@ -7551,9 +7559,13 @@ pr: impl.prNumber,
 reason,
 status: monitoringTerminalStatus,
 })
+
+if (blockedSaved) markPrResumable(item.number, impl.prNumber, 'blocked', impl.branch)
 return false
 }
 }
+
+markPrResumable(item.number, impl.prNumber, 'monitoring', impl.branch)
 
 
 if (deferredLowFindings) {
@@ -7605,7 +7617,7 @@ restoreOptinFixState(saved, item.optinTests),
 async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, initialOutOfScopeLog = [], initialUnresolvedInfo = '', initialUnresolvedComments = [], initialOutOfScopeSeen = [], initialBaseMergeCount = 0, initialPushMergeable = '', initialFixOptin = null) {
 
 
-if (Number.isInteger(impl.prNumber) && impl.prNumber > 0) unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: true })
+if (Number.isInteger(impl.prNumber) && impl.prNumber > 0 && !unmonitoredPrs.has(item.number)) unmonitoredPrs.set(item.number, { pr: impl.prNumber, resumable: true })
 let merged = false
 let lastState = 'timeout'
 let fixCount = initialFixCount

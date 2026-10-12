@@ -156,7 +156,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
   let peak = 0
   const handler = (prompt, opts) => {
     const label = opts.label
-    const overridden = override(label, opts)
+    const overridden = override(label, opts, prompt)
     if (overridden !== undefined) return overridden
     const n = Number(/#(\d+)/.exec(label)?.[1])
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
@@ -298,4 +298,33 @@ test('結合: 状態保存・照合が済んだ PR は resumable: true で「再
   })
   assert.deepEqual(unsaved.result.unmonitoredPrs, [{ issue: 4, pr: 1004, resumable: false }], '保存に失敗した PR は再開できない')
   assert.ok(unsaved.logs.some((l) => l.includes('pr が無い／照合未了') && l.includes('#4→PR #1004')))
+})
+
+test('結合: monitoring 保存が失敗しても blocked の退避保存で pr を書けたら resumable: true、退避も失敗なら false のまま', async () => {
+  // monitoring 遷移（status: monitoring）の書き込みだけを失敗させ、退避の blocked + pr 保存の成否を切り替える。
+  // 次回ランの isActiveMonitoring は status が monitoring / blocked かつ pr > 0 かつ branch が issue の命名で再開する。
+  const run = (fallbackOk) => {
+    let prCreated = false
+    return runScript({
+      args: BASE_ARGS,
+      leaves: [2],
+      override: (label, _opts, prompt) => {
+        if (label.startsWith('pr-create:#')) { prCreated = true; return undefined }
+        if (!prCreated || !label.startsWith('state:update:#')) return undefined
+        if (prompt.includes('"status":"monitoring"')) return { ok: false }
+        if (prompt.includes('"pr":1002') && prompt.includes('"status":"blocked"')) return fallbackOk ? undefined : { ok: false }
+        return undefined
+      },
+    })
+  }
+  const saved = await run(true)
+  assert.deepEqual(saved.result.unmonitoredPrs, [{ issue: 2, pr: 1002, resumable: true }], '退避保存で pr を書けたので次回は再開できる')
+  assert.ok(saved.logs.some((l) => l.includes('状態ファイルに pr 保存済み') && l.includes('#2→PR #1002')))
+  assert.ok(!saved.logs.some((l) => l.includes('pr が無い／照合未了')))
+  assert.ok(saved.logs.some((l) => l.includes('monitoring 遷移') || l.includes('マージ監視へ進まず停止')), '前提: monitoring 保存の失敗経路を通っている')
+
+  const unsaved = await run(false)
+  assert.deepEqual(unsaved.result.unmonitoredPrs, [{ issue: 2, pr: 1002, resumable: false }], '退避保存も失敗なら再開できない')
+  assert.ok(unsaved.logs.some((l) => l.includes('pr が無い／照合未了') && l.includes('#2→PR #1002')))
+  assert.ok(!unsaved.logs.some((l) => l.includes('pr 保存済み')))
 })
