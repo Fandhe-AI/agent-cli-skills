@@ -582,6 +582,8 @@ open のサブイシューが残っている場合、または受入基準が未
 
 返却値 `mainWorktreeUntracked` にメイン worktree（リポジトリルート）の未追跡ファイル検査結果が入る。ラン開始時・終了時の観測差分から本ラン中に新規出現したファイルを検出し、**削除はせず警告のみ**行う（並行ランや人間の作業も拾い得るため帰属は推定）。`observed: false` は検査自体が不成立だったことを示し、その場合は `git status` で手動確認する。1 件以上検出した場合はレポートにも記載し、ユーザーへ手動確認・削除を促す。
 
+返却値 `mainWorktreeHead` にメイン worktree の HEAD 検査結果（`observed` / `changed` / `shaChanged` / `baselineRef` / `endRef`）が入る。`changed: true` はラン中にブランチが切り替わった（または detached HEAD のまま動いた）ことを示す。**自動では戻さない**ので、`git status` で確認して手動で元のブランチへ戻す。`observed: false` は検査不成立のため手動確認する。
+
 詳細: [references/report-format.md](references/report-format.md)
 
 ## 検証
@@ -682,7 +684,9 @@ open のサブイシューが残っている場合、または受入基準が未
 - コミット・PR 作成は Conventional Commits に従う（対象リポジトリに `.claude/rules/conventional-commits.md` があればそちらに従う）。セキュリティ問題を検出した場合は修正してから進む（対象リポジトリに `.claude/rules/security.md` があればそちらの OWASP Top 10 観点に従う。無ければ秘密情報のハードコード・インジェクション・権限過剰の観点で確認する）
 - CI が全 green に見えるのにマージが進まない場合は、cancel された run の残存 check を疑い Step 6 の「全チェックが pass に見えるのにマージが進まない場合」の分岐に従って切り分ける（`mergeStateStatus` は自動フローでは取得していない）
 - **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。continue / discard いずれの worktree 削除も WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する
-- 各エージェントはメイン worktree（リポジトリルート）とカレントディレクトリへファイルを作らない（例外はホスト指定の状態ファイルとその `mktemp` 一時ファイルのみ）。一時ファイルは scratchpad または `mktemp` の絶対パスに置く。ラン開始時・終了時にメイン worktree の未追跡ファイルを検査し、本ラン中に新規出現したファイルがあれば最終レポート `mainWorktreeUntracked` とログで警告する（**自動削除はしない**。並行ランや人間の作業も拾い得るため帰属は推定）
+- 各エージェントはメイン worktree（リポジトリルート）とカレントディレクトリへファイルを作らない（例外はホスト指定の状態ファイルとその `mktemp` 一時ファイルのみ）。一時ファイルは `mktemp` の絶対パス、または scratchpad 内に `mktemp -d` で作った自分専用ディレクトリの中に置き、削除は自作物だけに限る。ラン開始時・終了時にメイン worktree の未追跡ファイルを検査し、本ラン中に新規出現したファイルがあれば最終レポート `mainWorktreeUntracked` とログで警告する（**自動削除はしない**。並行ランや人間の作業も拾い得るため帰属は推定）
+- **ラン中のエージェントは main セッションと scratchpad を共有する**。ラン間で使うファイル（作業契約・ゲート用スクリプト・待機用スクリプト等）は scratchpad に置かず、`~/.cache/<名前>/` など scratchpad の外に置いてエージェントへそのパスを渡す（エージェントには自作物以外を削除・上書きしない規則を課しているが、規則に依存せず巻き込まれる余地を残さない）
+- 隔離 worktree を持たないエージェント（計画・監視・マージ・状態書込み等）はメイン worktree で動くため、`git checkout` / `switch` / `reset` / `merge` / `rebase` / `stash` / `pull` / `commit` / `clean` 等でメイン worktree の HEAD・インデックス・作業ツリーを変更しない（`origin/<base>` の内容は `git show` / `git diff` / `git ls-tree` / `git log` で読む）。ラン開始時・終了時にメイン worktree の HEAD（ブランチ名と sha）を観測し、ブランチが変わっていれば（開始時から detached の場合は sha が動いたとき）最終レポート `mainWorktreeHead` とログで警告する（**自動では戻さない**）
 
 ## sandbox 環境での実行
 
