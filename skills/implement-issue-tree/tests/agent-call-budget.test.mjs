@@ -34,7 +34,7 @@ const slicePath = join(sliceDir, 'implement-issue-tree-agent-budget-defs.mjs')
 const SLICE_EXPORTS = [
   'AGENT_RUN_LIMIT', 'AGENT_CALLS_START', 'AGENT_CALLS_PER_ISSUE', 'AGENT_CALLS_TERMINAL_BASE', 'BLOCKED_STATE_CHUNK_SIZE',
   'parseAgentCallLimit', 'wrapAgentCounting', 'agentBudgetHold', 'sha256Hex', 'canonicalJson',
-  'declaredDepsChecksum', 'outOfTreeStateChecksum',
+  'declaredDepsChecksum', 'outOfTreeStateChecksum', 'stopReasons', 'stopNote',
 ]
 const optionalExports = SLICE_EXPORTS.map((n) => `const __opt_${n} = typeof ${n} === 'undefined' ? undefined : ${n}`).join('\n')
 const exportList = SLICE_EXPORTS.map((n) => `__opt_${n} as ${n}`).join(', ')
@@ -45,6 +45,7 @@ const mod = await import(pathToFileURL(slicePath).href)
 const {
   AGENT_RUN_LIMIT, AGENT_CALLS_START, AGENT_CALLS_PER_ISSUE, AGENT_CALLS_TERMINAL_BASE, BLOCKED_STATE_CHUNK_SIZE,
   parseAgentCallLimit, wrapAgentCounting, agentBudgetHold, declaredDepsChecksum, outOfTreeStateChecksum, sha256Hex, canonicalJson,
+  stopReasons, stopNote,
 } = mod
 
 // ---------------------------------------------------------------------------
@@ -514,7 +515,8 @@ test('結合: 予算に収まる monitoring 再開が worktree ゲートで defe
     if (run.logs.some((l) => l.includes('#2:') && l.includes('monitoring 再開を defer')) && run.logs.some((l) => l.includes('新規着手を停止する'))) hits.push({ limit, ...run })
   }
   assert.ok(hits.length > 0, '再開は予算を通って worktree ゲートで defer され、実装は予算で保留されるランが 1 つ以上ある')
-  for (const { limit, result, calls } of hits) {
+  for (const { limit, result, calls, logs } of hits) {
+    assert.ok(logs.some((l) => l.includes('#2: 再開できないまま monitoring 状態を維持する')) && !logs.some((l) => l.includes('halt 時も')), `limit ${limit}: halt していないランの終了ログに「halt 時も」と書かない（理由は note にある）`)
     const a = result.agentBudget
     assert.equal(a.starts, 0, `limit ${limit}: 再開は defer され、実装は予算で保留され、1 件も着手しない`)
     assert.equal(a.starved, true, `limit ${limit}`)
@@ -526,6 +528,7 @@ test('結合: 予算に収まる monitoring 再開が worktree ゲートで defe
     assert.ok(noteOf(result, 2).includes('worktree') && !noteOf(result, 2).includes('予算'), `limit ${limit}: 再開 #2 の note は worktree ゲートの理由のまま: ${noteOf(result, 2)}`)
     const saved = Object.values(patchesFromBatchCalls(calls)).filter((p) => p.note.includes('予算不足'))
     assert.ok(saved.length > 0 && saved.every((p) => p.note.includes(`agentCallLimit を少なくとも ${a.neededLimit} にして再実行`)), `limit ${limit}: 保存される note も同じ文言`)
+    assertStarvedConsistent(result, `limit ${limit}`)
   }
 })
 
@@ -639,7 +642,12 @@ test('単体: monitoring 再開の予算保留はゲートの理由を消さず�
   assert.doesNotMatch(driverPart, /monitoringResumeGateDeferred\.set\([^)]*予算/, '予算の文言でゲートの理由を上書きしない')
   const hold = driverPart.slice(driverPart.indexOf('if (budgetHold) {'), driverPart.indexOf('agentBudgetHeld.delete(n)'))
   assert.ok(hold.length > 0 && !hold.includes('monitoringResumeGateDeferred.delete'), '予算保留の分岐でゲートの理由を消さない（消すとゲートが未評価のまま予算だけを理由と案内する）')
-  assert.ok(driverPart.includes('!monitoringResumeGateDeferred.has(n) &&'), 'ゲートの理由が残る再開は budgetOnly（starved / neededLimit の対象）に数えない')
+  // 旧: budgetOnly の式に `!monitoringResumeGateDeferred.has(n)` が含まれることを文字列で固定していた。#600 で note と budgetOnly を
+  // 同じ理由の集合（stopReasons）から導く構造へ変えたため、式の文字列ではなく導出元を固定する。ゲートが残る再開を数えない振る舞いは
+  // 下の「全組み合わせ」の表（budget だけの行以外は budgetOnly でない）と、上の結合テスト（starved: false）が検査する。
+  assert.ok(driverPart.includes('const budgetOnly = (n) => { const r = stopReasons(stopFacts(n)); return r.length === 1 && r[0] === \'budget\' }'), 'budgetOnly（starved / neededLimit の対象）は note と同じ理由の集合から導く')
+  assert.equal((driverPart.match(/stopNote\(stopFacts\(n\), agentBudget\)/g) ?? []).length, 2, '未着手（保存する blocked の note を含む）と中断の note は同じ合成関数を通る')
+  assert.ok(!/monitoringResumeGateDeferred\.get\(n\)\s*\?/.test(driverPart) && !driverPart.includes('deferredReason'), '理由を選ぶ三項・if/else を note の組み立てに残さない')
 })
 
 test('結合: starved の note は neededLimit を下限値として案内し、「N 以上にすれば必ず進む」と読める文言を使わない (Issue #598 指摘 1)', async () => {
@@ -675,6 +683,7 @@ test('結合: 新規着手抑止（ラッチ）が効いていても、予算で
     assert.ok(noteOf(result, 2).includes(`agentCallLimit を少なくとも ${a.neededLimit} にして再実行`), `limit ${limit}: ${noteOf(result, 2)}`)
     const impl = notStartedNotes(result).filter((t) => t.includes('残置 worktree 上限ゲート'))
     assert.ok(impl.length > 0 && impl.every((t) => !t.includes('予算不足')), `limit ${limit}: ラッチが理由の実装の note は抑止の理由のまま`)
+    assertStarvedConsistent(result, `limit ${limit}`)
   }
 })
 
@@ -707,4 +716,233 @@ test('結合: halt しているとき、予算の not-started note で halt の�
     assert.ok(notes.length > 0, `limit ${limit}`)
     assert.ok(notes.every((t) => !t.includes('予算不足') && t.includes('halted')), `limit ${limit}: halt の理由が残る: ${notes[0]}`)
   }
+})
+
+// ---------------------------------------------------------------------------
+// 終了時 note の停止理由は「1 つ選ぶ」のではなく「成立しているものをすべて優先順に並べる」(Issue #600)
+// ---------------------------------------------------------------------------
+// #595 → #596 → #597 → #599 は note を「止めた理由を 1 つ選ぶ」if/else で組み、修正のたびに 1 つの組み合わせだけを塞いだため、
+// 未テストの組み合わせが毎回残った。ここでは停止理由の軸（halt・新規着手抑止のラッチ・再開ゲート・予算保留）× ノード種別を
+// 表で網羅し、到達可能な全行で note が「成立している理由の断片をすべて含み、成立していない理由の断片を含まない」ことを固定する。
+//
+// 到達可能性（コードから判断。到達不能な行は呼び出しだけを確認し、期待は課さない）:
+//   - ゲート理由 (gate): monitoringResumeGateDeferred.set は isActiveMonitoring かつ item.kind === 'implement' の再開ブロック内にしか無い。
+//     よって「再開 × implement」以外（新規着手、verify-close の再開）は常にゲート理由なし。
+//   - ラッチ (latch): 新規着手抑止は再開ブロックの後に判定されるため、再開ノードには適用されない（再開はラッチの対象外）。
+//     implementOnly のラッチ（空き容量起因）は implement にしか効かず、verify-close には適用されない。
+//   - 予算保留 (held): 予算検査は種別を問わず走るため、どの種別にも付き得る。
+//   - 「ゲートを今回再評価済み × 予算保留」は無い: 予算保留の分岐は agentBudgetHeld.delete よりも前で continue し、ゲート評価はその後。
+//     よって held とゲート理由が併存するなら、ゲートは必ず「前回の評価」。
+//   - halt はグローバル状態で、どの種別にも併存し得る（halt 後は dispatch が走らず、それ以前の held・gate が残る）。
+const HALT = { reason: 'HALT_REASON_X', issues: [3] }
+const LATCH = { reason: 'LATCH_REASON_X' }
+const LATCH_IMPL_ONLY = { reason: 'LATCH_REASON_X', implementOnly: true }
+const GATE = 'GATE_REASON_X のため monitoring 再開を defer した。'
+const HELD = { required: 32, used: 90 }
+const BUDGET_CTX = { used: 95, limit: 100, neededLimit: 127 }
+
+function* stopRows() {
+  for (const resume of [false, true]) {
+    for (const kind of ['implement', 'verify-close']) {
+      for (const halted of [null, HALT]) {
+        for (const latch of [null, LATCH, LATCH_IMPL_ONLY]) {
+          for (const gate of [undefined, GATE]) {
+            for (const held of [undefined, HELD]) {
+              for (const starved of [false, true]) yield { resume, kind, halted, latch, gate, held, starved }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+const gateReachable = (r) => r.resume && r.kind === 'implement'
+const expectedReasons = (r) => [
+  r.halted && 'halt',
+  !r.resume && r.latch && (!r.latch.implementOnly || r.kind === 'implement') && 'latch',
+  r.gate && 'gate',
+  r.held && 'budget',
+].filter(Boolean)
+
+function checkNote(row, note) {
+  const order = expectedReasons(row)
+  const where = JSON.stringify({ ...row, halted: !!row.halted, latch: row.latch && (row.latch.implementOnly ? 'implementOnly' : 'all'), gate: !!row.gate, held: !!row.held })
+  const has = (s) => note.includes(s)
+  const sole = order.length === 1 && order[0] === 'budget'
+  assert.equal(has('HALT_REASON_X'), order.includes('halt'), `halt の理由: ${where}\n${note}`)
+  assert.equal(has(row.resume ? 'halt のため再開しなかった' : 'halted により未着手'), order.includes('halt'), `halt の文言: ${where}\n${note}`)
+  assert.equal(has('LATCH_REASON_X'), order.includes('latch'), `ラッチの理由は適用される行にだけ: ${where}\n${note}`)
+  assert.equal(has('残置 worktree 上限ゲートにより新規着手を抑止'), order.includes('latch'), `ラッチの文言: ${where}\n${note}`)
+  assert.equal(has('GATE_REASON_X'), order.includes('gate'), `ゲートの理由: ${where}\n${note}`)
+  assert.equal(has('前回の評価') && has('再評価していない'), order.includes('gate') && order.includes('budget'), `ゲートが前回の評価と分かるのは予算保留と併存するときだけ: ${where}\n${note}`)
+  assert.equal(has('予算'), order.includes('budget'), `予算の言及は予算保留があるときだけ: ${where}\n${note}`)
+  if (sole) {
+    assert.ok(has('予算不足'), `予算だけが理由なら予算不足: ${where}\n${note}`)
+    assert.ok(row.starved ? has(`少なくとも ${BUDGET_CTX.neededLimit} にして再実行`) && has('下限値') : has('同じ引数で再実行すると'), `starved の出し分け: ${where}\n${note}`)
+    assert.equal(has('にして再実行'), row.starved, `limit の引き上げを案内するのは starved のときだけ: ${where}\n${note}`)
+  } else if (order.includes('budget')) {
+    assert.ok(has('予算も不足していた'), `他の理由があるときは併記形: ${where}\n${note}`)
+    assert.ok(has(`保留時の使用 ${HELD.used}/${BUDGET_CTX.limit}`) && has(`少なくとも ${HELD.used + HELD.required}`), `保留時の使用量から言う下限値: ${where}\n${note}`)
+    assert.ok(!has('予算不足') && !has('にして再実行'), `他の理由が残るのに limit の引き上げだけで進むとは案内しない: ${where}\n${note}`)
+  }
+  assert.equal(has('キュー未到達'), order.length === 0 && !row.resume, `理由なしの新規着手の既定文: ${where}\n${note}`)
+  const resumeAdvice = has('同じ引数で再実行すると monitor から再開する')
+  assert.equal(resumeAdvice, row.resume && (order.length === 0 || (sole && !row.starved)), `「同じ引数で再実行すると再開する」は理由が残らないときだけ: ${where}\n${note}`)
+  assert.ok(!has('。。'), `句点が重ならない: ${where}\n${note}`)
+  const at = [['halt', row.resume ? 'halt のため再開しなかった' : 'halted により未着手'], ['latch', '残置 worktree 上限ゲートにより'], ['gate', 'GATE_REASON_X'], ['budget', '予算']]
+    .filter(([k]) => order.includes(k)).map(([, s]) => note.indexOf(s))
+  assert.deepEqual(at, [...at].sort((a, b) => a - b), `優先順 halt → ラッチ → ゲート → 予算: ${where}\n${note}`)
+}
+
+test('単体: 停止理由の全組み合わせ（軸 × 種別の表）で、note は成立している理由をすべて優先順に含み、成立していない理由を含まない (Issue #600)', () => {
+  let reachable = 0
+  let unreachable = 0
+  let multi = 0
+  for (const row of stopRows()) {
+    const facts = { resume: row.resume, kind: row.kind, halted: row.halted, latch: row.latch, gate: row.gate, held: row.held }
+    const reasons = stopReasons(facts)
+    assert.deepEqual(reasons, expectedReasons(row), `理由の集合と順序: ${JSON.stringify(row)}`)
+    const note = stopNote(facts, { ...BUDGET_CTX, starved: row.starved })
+    if (row.gate && !gateReachable(row)) { unreachable += 1; continue } // 到達不能（上の根拠）。呼び出しが落ちないことだけ確認
+    reachable += 1
+    if (reasons.length >= 2) multi += 1
+    checkNote(row, note)
+  }
+  assert.ok(reachable > 0 && unreachable > 0 && multi > 0, `表が空振りしていない: reachable ${reachable} / unreachable ${unreachable} / multi ${multi}`)
+})
+
+test('単体: 名前付きの行 — #600（ゲートで defer → 予算保留 → halt）と #596 #597 #598 が指した組み合わせ', () => {
+  const ctx = { ...BUDGET_CTX, starved: false }
+  // #600: ゲート（前回の評価）・予算・halt が併存。halt が落ちず、先頭に来る。
+  const n600 = stopNote({ resume: true, kind: 'implement', halted: HALT, latch: null, gate: GATE, held: HELD }, ctx)
+  assert.match(n600, /^halt のため再開しなかった（理由: HALT_REASON_X）。GATE_REASON_X.*（この理由は前回の評価。予算で保留した周回では再評価していない）。エージェント呼び出し数の予算も不足していた/, n600)
+  // #598 指摘 2: halt + 予算保留の再開。予算の事実を落とさず、「同じ引数で再開する」とは書かない。
+  const n598b = stopNote({ resume: true, kind: 'implement', halted: HALT, latch: null, gate: undefined, held: HELD }, ctx)
+  assert.match(n598b, /保留時の使用 90\/100。この周回の使用量では再開に args\.agentCallLimit が少なくとも 122 要った/)
+  assert.ok(!n598b.includes('同じ引数で再実行すると monitor から再開する'), n598b)
+  // #598 指摘 3: ゲート理由 + 予算保留。ゲートは前回の評価で、予算だけが理由とは案内しない。
+  const n598c = stopNote({ resume: true, kind: 'implement', halted: null, latch: null, gate: GATE, held: HELD }, { ...BUDGET_CTX, starved: true })
+  assert.ok(n598c.includes('前回の評価') && n598c.includes('予算も不足していた') && !n598c.includes('にして再実行') && !n598c.includes('予算不足'), n598c)
+  // #596 の Bugbot A: ラッチ + 予算保留の新規着手は、ラッチの理由を残しつつ予算も併記する。
+  const nA = stopNote({ resume: false, kind: 'implement', halted: null, latch: LATCH, gate: undefined, held: HELD }, { ...BUDGET_CTX, starved: true })
+  assert.match(nA, /^残置 worktree 上限ゲートにより新規着手を抑止（理由: LATCH_REASON_X）。エージェント呼び出し数の予算も不足していた/, nA)
+  // #597: 再開はラッチの対象外。ラッチが立っていても、予算で保留した再開は予算だけが理由。
+  const n597 = stopNote({ resume: true, kind: 'implement', halted: null, latch: LATCH, gate: undefined, held: HELD }, { ...BUDGET_CTX, starved: true })
+  assert.match(n597, /予算不足で monitoring 再開を見送った/)
+  assert.ok(!n597.includes('LATCH_REASON_X') && n597.includes('少なくとも 127 にして再実行'), n597)
+  // 適用されないラッチ: 空き容量起因（implementOnly）のラッチは verify-close に効かない。前提待ちで未着手の verify-close の理由にしない。
+  const nVC = stopNote({ resume: false, kind: 'verify-close', halted: null, latch: LATCH_IMPL_ONLY, gate: undefined, held: undefined }, ctx)
+  assert.equal(nVC, 'スケジューラ終了時に未着手（キュー未到達）')
+  // halt のみの再開は halt の理由を残す（以前は halt を落として「同じ引数で再実行すると再開する」だけを出していた）。
+  const nH = stopNote({ resume: true, kind: 'implement', halted: HALT, latch: null, gate: undefined, held: undefined }, ctx)
+  assert.equal(nH, 'halt のため再開しなかった（理由: HALT_REASON_X）')
+})
+
+// ---------------------------------------------------------------------------
+// 統合: 実際にその状態へ到達するランで、note と starved / neededLimit / budgetOnly が矛盾しないことを確かめる (Issue #600)
+// ---------------------------------------------------------------------------
+// note が「agentCallLimit を少なくとも N にして再実行」と言うのは、予算だけが理由の保留ノードがあり 1 件も着手しなかったラン（starved）の
+// そのノードだけ。starved の neededLimit は note の N と一致し、他の理由が残るノードの note は limit の引き上げだけを案内しない。
+function assertStarvedConsistent(result, where) {
+  const a = result.agentBudget
+  const notes = result.done.filter((d) => d.status === 'not-started' || d.status === 'monitoring' || d.status === 'blocked').map((d) => d.note)
+  const raising = notes.filter((t) => t.includes('にして再実行'))
+  if (!a.starved) assert.equal(raising.length, 0, `${where}: starved でないランは limit の引き上げを案内しない: ${raising[0]}`)
+  else {
+    assert.ok(raising.length > 0, `${where}: starved なら引き上げを案内する note がある`)
+    for (const t of raising) assert.ok(t.includes(`少なくとも ${a.neededLimit} にして再実行`) && t.includes('予算不足') && !t.includes('予算も不足していた'), `${where}: 引き上げを案内するのは予算だけが理由のノードで、値は neededLimit: ${t}`)
+  }
+  for (const t of notes.filter((x) => x.includes('予算も不足していた'))) assert.ok(!t.includes('にして再実行'), `${where}: 他の理由が残るノードは引き上げだけを案内しない: ${t}`)
+}
+
+// 親 #1 の配下: 保存済み monitoring の再開 #2、閉じた子を持つ verify-close #10 #20 #30（close の agent が closed: false を返して
+// 'failed' で終わり、3 連続で halt する）、ツリー外前提待ちで着手しない葉 pad 件（未完了ノード数 = blocked 一括記録の chunks を増やし、
+// 再開 #2（目安 12）が verify-close（目安 6）より多く要る窓を作る）。
+function haltTree(pad = 1600) {
+  const node = (number, parent, siblingIndex, state, subIssuesTotal, dependsOn = []) => ({ number, title: number === 1 ? 'root' : `issue ${number}`, state, parent, siblingIndex, dependsOn, subIssuesTotal })
+  return [
+    node(1, 0, 0, 'open', 4 + pad),
+    node(2, 1, 0, 'open', 0),
+    node(10, 1, 1, 'open', 1), node(11, 10, 0, 'closed', 0),
+    node(20, 1, 2, 'open', 1), node(21, 20, 0, 'closed', 0),
+    node(30, 1, 3, 'open', 1), node(31, 30, 0, 'closed', 0),
+    ...Array.from({ length: pad }, (_, i) => node(100 + i, 1, 4 + i, 'open', 0, [OOT])),
+  ]
+}
+const failClose = (label) => (label.startsWith('close:#') ? { closed: false, summary: '検証失敗' } : undefined)
+
+test('結合: ゲートで defer した再開が、次の周回で予算保留になり、そのあと halt すると、note に halt・前回のゲート・予算の不足が優先順にすべて出る (Issue #600)', async () => {
+  const hits = []
+  for (let limit = 81; limit <= 140; limit++) {
+    const run = await runScript({
+      args: { ...BASE_ARGS, maxResidualWorktrees: 1, agentCallLimit: limit },
+      tree: haltTree(),
+      saved: { 2: resumeSaved(2) },
+      override: (label, ...rest) => withOneExtraWorktree(label) ?? failClose(label, ...rest),
+    })
+    const gateAt = run.logs.findIndex((l) => l.includes('#2:') && l.includes('monitoring 再開を defer'))
+    const holdAt = run.logs.findIndex((l) => l.includes('新規着手を停止する') && l.includes('#2 '))
+    if (run.result.halted && run.result.interrupted.includes(2) && gateAt >= 0 && holdAt > gateAt && noteOf(run.result, 2).includes('予算も不足していた')) hits.push({ limit, ...run })
+  }
+  assert.ok(hits.length > 0, 'ゲート defer → 予算保留 → halt の順に起きる limit が 1 つ以上ある')
+  for (const { limit, result } of hits) {
+    const note = noteOf(result, 2)
+    const at = ['halt のため再開しなかった', 'monitoring 再開を defer した', '前回の評価', '予算も不足していた'].map((s) => note.indexOf(s))
+    assert.ok(at.every((i) => i >= 0), `limit ${limit}: halt・ゲート・前回の評価・予算がすべて出る: ${note}`)
+    assert.deepEqual(at, [...at].sort((a, b) => a - b), `limit ${limit}: 優先順 halt → ゲート → 予算: ${note}`)
+    assert.ok(!note.includes('同じ引数で再実行すると monitor から再開する') && !note.includes('にして再実行'), `limit ${limit}: ${note}`)
+    assert.equal(result.agentBudget.starved, false, `limit ${limit}: halt とゲートが残るので予算だけが理由の停滞ではない`)
+    assertStarvedConsistent(result, `limit ${limit}`)
+  }
+})
+
+test('結合: 新規着手抑止（ラッチ）と予算保留が併存する未着手の note は、ラッチの理由に予算の不足を併記する (Issue #600)', async () => {
+  const hit = await sweepLimits([81, 90, 100], (limit) => runScript({
+    args: { ...BASE_ARGS, maxResidualWorktrees: 1, agentCallLimit: limit },
+    leaves: MANY,
+    override: (label) => (label === 'worktree:orphan-scan' ? { entries: EXTRA_WORKTREES } : undefined),
+  }))
+  assert.ok(hit.length > 0, '予算ゲートが効いたランが 1 つ以上ある')
+  for (const { limit, result, calls } of hit) {
+    const both = notStartedNotes(result).filter((t) => t.includes('残置 worktree 上限ゲート') && t.includes('予算も不足していた'))
+    assert.ok(both.length > 0, `limit ${limit}: 予算で保留したノードの note はラッチと予算の両方を示す`)
+    assert.ok(both.every((t) => t.indexOf('残置 worktree 上限ゲート') < t.indexOf('予算も不足していた') && !t.includes('予算不足')), `limit ${limit}: ラッチ → 予算の順で、予算だけが理由とは書かない: ${both[0]}`)
+    const saved = Object.values(patchesFromBatchCalls(calls)).map((p) => p.note)
+    assert.ok(saved.some((t) => t.includes('残置 worktree 上限ゲート') && t.includes('予算も不足していた')), `limit ${limit}: 状態ファイルへ保存する note も同じ合成`)
+    assertStarvedConsistent(result, `limit ${limit}`)
+  }
+})
+
+test('結合: halt と予算保留が併存する未着手の note は、halt の理由に予算の不足を併記する (Issue #600)', async () => {
+  const hit = await sweepLimits([81, 90, 100, 110, 120, 130, 140, 160, 200], (limit) => runScript({
+    args: { ...BASE_ARGS, parallel: 3, agentCallLimit: limit },
+    leaves: LEAVES,
+    override: (label) => (label.startsWith('impl:#') ? { branch: '', summary: '', worktreePath: '' } : undefined),
+  }))
+  const halted = hit.filter((h) => h.result.halted)
+  assert.ok(halted.length > 0, 'halt と予算の保留が同じランで起きる limit が 1 つ以上ある')
+  let both = 0
+  for (const { limit, result } of halted) {
+    for (const t of notStartedNotes(result).filter((x) => x.includes('予算も不足していた'))) {
+      both += 1
+      assert.ok(t.startsWith('halted により未着手') && !t.includes('予算不足') && !t.includes('にして再実行'), `limit ${limit}: halt が先頭で、予算だけが理由とは書かない: ${t}`)
+    }
+    assertStarvedConsistent(result, `limit ${limit}`)
+  }
+  assert.ok(both > 0, '予算で保留したあとに halt したノードの note が 1 件以上ある')
+})
+
+test('結合: halt だけが理由の monitoring 再開は halt の理由を残し、「同じ引数で再実行すると再開する」とは書かない (Issue #600)', async () => {
+  // #9 は保存済みの monitoring。予算は十分で、実装 3 件（#2〜#4）が失敗して halt し、#9 は評価されないまま残る。
+  const { result } = await runScript({
+    args: { ...BASE_ARGS, parallel: 3, agentCallLimit: 1000 },
+    leaves: LEAVES,
+    saved: { 9: resumeSaved(9) },
+    override: (label) => (label.startsWith('impl:#') ? { branch: '', summary: '', worktreePath: '' } : undefined),
+  })
+  assert.ok(result.halted && result.interrupted.includes(9))
+  const note = noteOf(result, 9)
+  assert.ok(note.includes('halt のため再開しなかった') && note.includes('3 イシュー連続で完了できなかった'), `halt の理由を残す: ${note}`)
+  assert.ok(!note.includes('同じ引数で再実行すると monitor から再開する') && !note.includes('予算'), `halt は再実行で解けるとは限らない。予算は無関係: ${note}`)
+  assertStarvedConsistent(result, 'halt のみ')
 })
