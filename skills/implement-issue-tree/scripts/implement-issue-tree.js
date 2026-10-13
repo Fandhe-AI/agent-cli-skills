@@ -3766,7 +3766,7 @@ const SCRIPT_SHA256={
 'observe-pr.sh':'90b3ba8d530e76f023eb787b4c4de009773e82b9ff2b52e0e7c035abb635cacb',
 'base-merge.sh':'fb222224b6b27dd6799939f7cba736edf0cba5bf1bc3b535ae7d6f8f4f67ef03',
 'pr-push.sh':'faabf66fbaeb6aa29f36f78e5ef874487358938b18d9e497e475c9c28ec1b6a9',
-'state.sh':'74c4c55fac1e975aef796645d04198828c827fed43ed283ce9c2a8ac2518c26c',
+'state.sh':'fb8e84f470492c08dc7a21ef44e432f84518c235d13fe1eb6bcf3ac90df8e896',
 }
 
 

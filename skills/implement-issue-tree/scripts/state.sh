@@ -67,12 +67,11 @@ done
 [ -n "${mode}" ] || usage "モードが無い"
 st_valid_file "${file}" || usage "--file は _/issue-trees/N.json の形で指定する"
 
-tmpfiles=""
+pf=""
 # shellcheck disable=SC2329  # trap 経由で呼ばれる
 cleanup() {
-  # shellcheck disable=SC2086  # mktemp の出力（空白を含まない）だけを並べている
-  [ -z "${tmpfiles}" ] || rm -f ${tmpfiles}
-  tmpfiles=""
+  [ -z "${pf}" ] || rm -f -- "${pf}"
+  pf=""
 }
 trap cleanup EXIT
 trap 'cleanup; exit 143' TERM INT HUP
@@ -92,7 +91,6 @@ case "${mode}" in
       var=entries
     fi
     pf=$(mktemp "${TMPDIR:-/tmp}/state-in.XXXXXX") || result no-temp
-    tmpfiles="${pf}"
     printf '%s\n' "${body}" >"${pf}" || result no-temp
     st_rewrite "${file}" "${prog}" --slurpfile "${var}" "${pf}" --arg ts "${ts}" || rc=$?
     ;;

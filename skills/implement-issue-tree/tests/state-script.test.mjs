@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { availableBashes, toolExists } from './lib/signed-output.mjs'
+import { bundleSha256 } from '../scripts/build-workflow.mjs'
 
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
 const SCRIPT = join(SCRIPTS, 'state.sh')
@@ -183,6 +184,28 @@ for (const bash of BASHES) {
     }
     assert.equal(readFileSync(join(sb.root, sb.file), 'utf8'), raw)
     assert.deepEqual(sb.leftovers(), [])
+  })
+}
+
+// 本番のコマンドは run-verified.sh 経由（ハッシュ照合 → exec）で、patch は標準入力のヒアドキュメントで渡る。launcher が標準入力を
+// 食わずに state.sh へ引き継ぐことが、merge / init が invalid-input にならない前提
+for (const bash of BASHES) {
+  test(`[${bash}] launcher 経由: run-verified.sh が標準入力を state.sh へ引き継ぎ、merge と init が書ける。期待ハッシュが違えば起動せず何も書かない`, { skip: !jq }, () => {
+    const sb = sandbox()
+    const launcher = join(SCRIPTS, 'run-verified.sh')
+    const sha = bundleSha256(SCRIPTS, 'state.sh')
+    const viaLauncher = (hash, args, input) => spawnSync(bash, [launcher, hash, 'state.sh', '--file', sb.file, ...args], {
+      cwd: sb.root, input, encoding: 'utf8', env: { ...process.env, TMPDIR: sb.root },
+    })
+    assert.deepEqual(lastResult(viaLauncher(sha, ['merge'], G([{ numbers: [10], patch: { status: 'done', note: "it's" } }]))), { ok: true })
+    assert.deepEqual(sb.read().items['10'], { status: 'done', pr: 0, note: "it's" })
+    assert.deepEqual(lastResult(viaLauncher(sha, ['init'], G([{ number: 30, type: 'implement' }]))), { ok: true })
+    assert.equal(sb.read().items['30'].status, 'pending')
+    const raw = readFileSync(join(sb.root, sb.file), 'utf8')
+    const bad = viaLauncher('0'.repeat(64), ['merge'], G([{ numbers: [10], patch: { status: 'x' } }]))
+    assert.equal(bad.status, 3)
+    assert.doesNotMatch(bad.stdout, /STATE_RESULT/)
+    assert.equal(readFileSync(join(sb.root, sb.file), 'utf8'), raw)
   })
 }
 
