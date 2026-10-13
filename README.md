@@ -60,7 +60,7 @@ Claude Code の Claude Skills として使用するスキルは、原則とし�
 |--------|------|
 | **init-claude** | 任意のリポジトリに Claude Code の `.claude/` 体系（Agents・Rules・Skills・hooks）を初期セットアップ |
 | **update-claude** | 既存の `.claude/` 体系を診断し、理想形との差分を提示・追補する（破壊なし） |
-| **setup-repo-guards** | 対象リポジトリへ組織標準の CI ガード一式（codex-review / AGENTS.md / 必須チェック集約ジョブ / branch protection ruleset）を導入する |
+| **setup-repo-guards** | 対象リポジトリへ組織標準の CI ガード一式（ai-review / AGENTS.md / 必須チェック集約ジョブ / branch protection ruleset）を導入する |
 
 ### GitHub Projects 管理
 
