@@ -47,48 +47,18 @@ command -v git >/dev/null 2>&1 || { echo "base-merge: git が無い" >&2; exit 3
 script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 3
 # shellcheck source=lib/push-verify.sh
 . "${script_dir}/lib/push-verify.sh" || exit 3
+# is_uint・valid_repo・lower・url_allowed と許可ホストの定数 ALLOWED_REMOTE_HOST（テストが表で単体検査するため lib へ切り出した）
+# shellcheck source=lib/base-merge-lib.sh
+. "${script_dir}/lib/base-merge-lib.sh" || exit 3
 
 # マージコミットの subject（ホストの固定値と同じ文字列。commitlint が拒否するリポでは hookRejected で返り、
 # ホストが commitlint 対応の subject を決められる fix 経路へ委譲する）
 MERGE_SUBJECT='chore: base ブランチの変更を取り込む'
-# 許可するリモートのホスト。Fandhe-AI は GitHub.com 運用のため固定値とする（owner/repo だけを比較すると、同じ
-# owner/repo を持つ別ホストを一致とみなして別ホストへ push しうる。PR #443 codex P0）
-ALLOWED_REMOTE_HOST='github.com'
 
 usage() {
   echo "使い方: base-merge.sh --pr NUM --branch BRANCH --base BASE --repo OWNER/REPO" >&2
   [ $# -eq 0 ] || echo "base-merge: $1" >&2
   exit 2
-}
-
-# 正の整数（先頭ゼロは拒否: 012 を 12 と読み替えない。gh の応答との文字列比較が偶然止めるのに頼らない）
-is_uint() {
-  case "$1" in
-    '' | *[!0-9]* | 0*) return 1 ;;
-  esac
-  [ "${#1}" -le 9 ]
-}
-# OWNER/REPO の形式（ホストの REPO_SLUG_RE と同じ厳格さ）。owner は英数字とハイフン・先頭末尾ハイフン不可・1〜39 文字、
-# repo は先頭がハイフン以外の英数字 . _ で . と .. だけは不可・1〜100 文字
-valid_repo() {
-  local owner name
-  case "$1" in
-    */*/* | */ | /* | '') return 1 ;;
-  esac
-  case "$1" in */*) ;; *) return 1 ;; esac
-  owner=${1%%/*}
-  name=${1#*/}
-  case "${owner}" in
-    '' | -* | *- | *[!A-Za-z0-9-]*) return 1 ;;
-  esac
-  [ "${#owner}" -le 39 ] || return 1
-  case "${name}" in
-    '' | . | .. | [!A-Za-z0-9._]* | *[!A-Za-z0-9._-]*) return 1 ;;
-  esac
-  [ "${#name}" -le 100 ]
-}
-lower() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 pr=""
@@ -153,60 +123,9 @@ fail_commit() {
 
 # ---- 0. worktree routing ガード ----
 # remote の URL を照合する。fetch URL（`git remote get-url --all`）と push 先 URL（`--push --all`）の『全行』が、許可ホストと
-# 期待 owner/repo に一致しなければならない。先頭 1 件だけを見ると、pushurl・pushInsteadOf・複数 url の追加で push だけが別の
-# リポジトリへ届く（隔離 worktree は本体の .git/config を共有するので、先行するエージェントが書ける位置にある）。
-# 許す形: https://[userinfo@]github.com[:443]/<owner>/<repo>[.git]、ssh://git@github.com[:22]/<owner>/<repo>[.git]、
-# git@github.com:<owner>/<repo>[.git]。userinfo は authority の最後の @ までを捨てて host を取り出す
-# （https://github.com@evil.example/… の host は evil.example）。authority に @ が 2 つ以上ある URL は拒否する
-# （https://a@evil.example@github.com/… は git が接続に失敗しても、エラー文に 2 つ目の userinfo が残る。トークン中の @ は
-# %40 にエンコードされる）。URL はトークンを含み得るので、どの出力にも出さない。
-# `.git` の除去は小文字の `.git` だけ（`.GIT` は別名になり得るので受理しない）。owner/repo の比較は大文字小文字を区別しない
-url_allowed() {
-  local u=$1 want_slug=$2 scheme rest hostport host port path
-  case "${u}" in
-    '' | *[!A-Za-z0-9._~:/@%+-]*) return 1 ;;
-  esac
-  u=${u%/}
-  u=${u%.git}
-  case "${u}" in
-    ssh://git@*)
-      rest=${u#ssh://git@}
-      case "${rest}" in */*) ;; *) return 1 ;; esac
-      hostport=${rest%%/*}
-      path=${rest#*/}
-      case "${hostport}" in *@*) return 1 ;; esac
-      scheme=ssh
-      ;;
-    git@*:*)
-      rest=${u#git@}
-      hostport=${rest%%:*}
-      path=${rest#*:}
-      scheme=scp
-      ;;
-    https://*)
-      rest=${u#https://}
-      case "${rest}" in */*) ;; *) return 1 ;; esac
-      hostport=${rest%%/*}
-      case "${hostport}" in *@*@*) return 1 ;; esac
-      hostport=${hostport##*@}
-      path=${rest#*/}
-      scheme=https
-      ;;
-    *) return 1 ;;
-  esac
-  case "${hostport}" in
-    *:*) host=${hostport%%:*}; port=${hostport#*:} ;;
-    *) host=${hostport}; port="" ;;
-  esac
-  # 標準ポートだけ許す（https の 443、ssh:// の 22）。scp 形式にポートは無い
-  case "${scheme}:${port}" in
-    ssh: | ssh:22 | https: | https:443 | scp:) ;;
-    *) return 1 ;;
-  esac
-  host=$(lower "${host}")
-  path=$(lower "${path}")
-  [ "${host}" = "${ALLOWED_REMOTE_HOST}" ] && [ -n "${path}" ] && [ "${path}" = "${want_slug}" ]
-}
+# 期待 owner/repo に一致しなければならない（1 行ごとの判定 url_allowed と、許す URL の形・拒否の根拠は lib/base-merge-lib.sh）。
+# 先頭 1 件だけを見ると、pushurl・pushInsteadOf・複数 url の追加で push だけが別のリポジトリへ届く（隔離 worktree は本体の
+# .git/config を共有するので、先行するエージェントが書ける位置にある）。URL はトークンを含み得るので、どの出力にも出さない。
 # $1 = ラベル（fetch / push）、残り = git remote get-url への追加オプション。0 = 全行が許可、1 = 1 行でも外れた、2 = 取得できない
 check_remote_urls() {
   local label=$1 out line n=0

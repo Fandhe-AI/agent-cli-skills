@@ -169,6 +169,9 @@ test('実装スクリプト: base-merge 返却のログ専用 3 項目を読む�
 const BASE_MERGE_SH = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'base-merge.sh'), 'utf8')
 // コメント行を除いたスクリプト本文（禁止語の検査をコメント中の説明文で誤検出しない）
 const baseMergeCode = BASE_MERGE_SH.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+// 許可ホストの定数と URL 照合の関数は lib/base-merge-lib.sh（スクリプト本体から無変更で切り出したもの。テストが表で単体検査するため）
+const BASE_MERGE_LIB_SH = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'base-merge-lib.sh'), 'utf8')
+const baseMergeLibCode = BASE_MERGE_LIB_SH.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
 const commandOf = (prompt) => /```sh\n([\s\S]*?)\n```/.exec(prompt)?.[1]
 
 test('baseMergePrompt: base-merge.sh を run-verified.sh 経由の 1 コマンドで起動し、引数は検証済みの値だけを渡す', () => {
@@ -274,12 +277,16 @@ test('baseMergePrompt: 期待 owner/repo が未確定（省略／不正形式）
 })
 
 test('base-merge.sh: 許可ホストは github.com の固定値で、host / owner-repo / PR の照合が fetch・merge・push より前にある', () => {
-  assert.ok(baseMergeCode.includes("ALLOWED_REMOTE_HOST='github.com'"))
+  assert.ok(baseMergeLibCode.includes("ALLOWED_REMOTE_HOST='github.com'"))
+  assert.ok(!baseMergeCode.includes('ALLOWED_REMOTE_HOST='), '許可ホストの定義が lib と本体に二重にある')
   const guard = baseMergeCode.indexOf('gh pr view')
   for (const w of ['git fetch', 'git checkout', 'git merge ', 'pv_push_verified']) {
     assert.ok(baseMergeCode.indexOf(w) > guard, `${w} が routing ガード（gh pr view）より前にある`)
   }
-  assert.ok(baseMergeCode.indexOf('ALLOWED_REMOTE_HOST') < baseMergeCode.indexOf('gh pr view'))
+  // 許可ホストの定数と url_allowed を持つ lib は、gh pr view（routing ガード）より前に source される
+  const libSource = baseMergeCode.indexOf('lib/base-merge-lib.sh')
+  assert.ok(libSource >= 0 && libSource < baseMergeCode.indexOf('gh pr view'), 'lib/base-merge-lib.sh が gh pr view より前に source されていない')
+  assert.ok(baseMergeLibCode.includes('url_allowed()') && baseMergeCode.includes('url_allowed "${line}" "${want}"'), 'URL 照合（url_allowed）が routing ガードで使われていない')
   assert.ok(!source.includes('ALLOWED_REMOTE_HOST'), 'ホストの実装スクリプトに ALLOWED_REMOTE_HOST が残っている（許可ホストはスクリプトの埋め込み定数）')
 })
 

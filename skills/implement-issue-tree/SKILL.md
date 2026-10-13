@@ -620,6 +620,8 @@ open のサブイシューが残っている場合、または受入基準が未
 
 詳細: [references/verification.md](references/verification.md)
 
+テストの流し方（全体・ファイル単位・Node 24 と 22 の並列）と、検査が弱くなっていないことを変異で確かめる実行器 `tests/tools/mutate.mjs` の使い方: [references/testing.md](references/testing.md)
+
 ## よくある失敗
 
 | 問題 | 回避策 |

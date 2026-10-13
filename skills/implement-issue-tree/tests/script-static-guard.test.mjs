@@ -115,7 +115,7 @@ function codeLines(text) {
 
 test('走査の対象にスクリプト一式（scripts/*.sh と scripts/lib/*.sh）が含まれ、除外は merge-guard-hook.sh だけ', () => {
   const names = targets().map((t) => t.name)
-  for (const must of ['base-merge.sh', 'observe-pr.sh', 'measure-residual-bytes.sh', 'measure-free-disk.sh', 'run-verified.sh', 'preview-tree.sh', 'lib/signed-output.sh', 'lib/push-verify.sh']) {
+  for (const must of ['base-merge.sh', 'observe-pr.sh', 'measure-residual-bytes.sh', 'measure-free-disk.sh', 'run-verified.sh', 'preview-tree.sh', 'lib/signed-output.sh', 'lib/push-verify.sh', 'lib/base-merge-lib.sh']) {
     assert.ok(names.includes(must), `${must} が走査の対象にない（${names.join(', ')}）`)
   }
   assert.ok(!names.includes('merge-guard-hook.sh'))

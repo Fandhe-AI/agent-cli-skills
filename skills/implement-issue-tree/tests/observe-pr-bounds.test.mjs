@@ -8,9 +8,14 @@
 //   - reviews の件数は DISMISSED を含まない。--repo の '.' '..' 要素は拒否する
 //
 // 偽 gh は tests/lib/gh-observe-stub.mjs（GH_STUB_DELAY・GH_STUB_HANG で遅い・ハングする gh を模す）。
-import { test } from 'node:test'
+//
+// 速度: 実時間を待つケース（遅い gh・ハングする gh・壁時計の窓の判定。縮尺は壁時計 1〜8 秒）は、縮尺を変えずに非同期で走らせ、
+// describe の concurrency で同時に待つ（旧: spawnSync で順に待ち、ファイル全体で約 54 秒。今: 最長の 1 本分 + 数秒）。
+// 同時に走るケースの sleep を取り違えないよう、ハングする gh の sleep 秒数はケース・bash ごとに一意にする（hangSeconds）。
+import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
+import { hangSeconds, spawnAsync } from './lib/run-async.mjs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { availableBashes, toolExists } from './lib/signed-output.mjs'
@@ -30,6 +35,7 @@ const lines = (...pages) => `${pages.map((p) => JSON.stringify(p)).join('\n')}\n
 function run(bash, stub, args, env = {}) {
   return spawnSync(bash, [SCRIPT, '--nonce', NONCE, ...args], { encoding: 'utf8', env: stub.env({ ...FAST, ...env }) })
 }
+const runA = (bash, stub, args, env = {}) => spawnAsync(bash, [SCRIPT, '--nonce', NONCE, ...args], { env: stub.env({ ...FAST, ...env }) })
 function payloadOf(r) {
   assert.equal(r.status, 0, `exit ${r.status} / stderr: ${r.stderr}`)
   return JSON.parse(r.stdout).payload
@@ -41,25 +47,26 @@ function sleepersOf(seconds) {
   return r.stdout.split('\n').filter((l) => new RegExp(`\\bsleep ${seconds}\\b`).test(l)).length
 }
 
-for (const bash of BASHES) {
+describe('時間上限（実時間を待つケースは同時に走る）', { concurrency: 24 }, () => {
+BASHES.forEach((bash, bi) => {
   const t = (name, fn) => test(`[${bash}] ${name}`, { skip: !jqAvailable }, fn)
 
   // --- 時間上限 ---
 
-  t('遅い gh（呼び出しごとの時間制限を超える）は取得失敗（err=1）として返し、制限を超えて待たない', () => {
+  t('遅い gh（呼び出しごとの時間制限を超える）は取得失敗（err=1）として返し、制限を超えて待たない', async () => {
     const stub = createObserveStub({ prview: { out: prJson() } })
     const t0 = Date.now()
-    const p = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '12'], { GH_STUB_DELAY: '3', OBSERVE_PR_GH_TIMEOUT_SEC: '1', OBSERVE_PR_WALL_SEC: '20' }))
+    const p = payloadOf(await runA(bash, stub, ['--mode', 'checks', '--pr', '12'], { GH_STUB_DELAY: '3', OBSERVE_PR_GH_TIMEOUT_SEC: '1', OBSERVE_PR_WALL_SEC: '20' }))
     const elapsed = (Date.now() - t0) / 1000
     assert.deepEqual({ err: p.err, o: p.outcome, total: p.total }, { err: 1, o: 'error', total: 0 })
     assert.ok(elapsed < 2.9, `1 回目の gh が時間制限（1 秒）で打ち切られ、遅延（3 秒）を待たない: ${elapsed}s`)
   })
 
-  t('ハングする gh は時間制限で kill され、gh の孫プロセスも残さない。壁時計上限（WALL）を超えない', () => {
-    const hang = String(2000 + (process.pid % 900))
+  t('ハングする gh は時間制限で kill され、gh の孫プロセスも残さない。壁時計上限（WALL）を超えない', async () => {
+    const hang = hangSeconds(2000, bi)
     const stub = createObserveStub({ prview: { out: prJson() } })
     const t0 = Date.now()
-    const r = run(bash, stub, ['--mode', 'checks', '--pr', '12', '--wait', '--attempt', '1'], {
+    const r = await runA(bash, stub, ['--mode', 'checks', '--pr', '12', '--wait', '--attempt', '1'], {
       GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '1', OBSERVE_PR_WALL_SEC: '4', OBSERVE_PR_POLLS: '10',
     })
     const elapsed = (Date.now() - t0) / 1000
@@ -70,20 +77,27 @@ for (const bash of BASHES) {
     if (left !== null) assert.equal(left, 0, 'gh の子・孫の sleep が残っていない')
   })
 
-  t('次の観測を始める前に残り時間が 1 観測分に満たなければ、始めずに pending を返す（窓の判定）', () => {
+  t('次の観測を始める前に残り時間が 1 観測分に満たなければ、始めずに pending を返す（窓の判定）', async () => {
     const stub = createObserveStub({
       prview: { out: prJson() },
       'check-runs-total': { out: '{"total_count":0,"check_runs":[]}' },
       status: { out: '{"statuses":[]}' },
     })
     // 1 観測 = gh 3 回 × 遅延 1 秒 ≒ 3 秒。壁時計 5 秒では 2 回目の観測を始められない
-    const p = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '12', '--wait', '--attempt', '1'], {
+    const p = payloadOf(await runA(bash, stub, ['--mode', 'checks', '--pr', '12', '--wait', '--attempt', '1'], {
       GH_STUB_DELAY: '1', OBSERVE_PR_GH_TIMEOUT_SEC: '5', OBSERVE_PR_WALL_SEC: '5', OBSERVE_PR_POLLS: '10',
     }))
     assert.equal(p.outcome, 'pending')
     assert.equal(p.err, 0, '観測は成功しており、取得失敗ではない')
     assert.equal(stub.countOf('prview'), 1, '2 回目の観測を始めていない')
   })
+})
+})
+
+// 同期のテスト（spawnSync）はイベントループを塞ぐ。上の describe の中に置くと、同時に待っているケースの経過時間の測定（子の終了を
+// このプロセスが受け取るまで）が塞いだ時間だけ延びて上限の検査が偽の赤になるので、describe の外（上の後）に置く
+for (const bash of BASHES) {
+  const t = (name, fn) => test(`[${bash}] ${name}`, { skip: !jqAvailable }, fn)
 
   t('既定の壁時計上限は Bash ツールの既定タイムアウト 120 秒に余裕を持たせた値で、環境変数でも 120 秒以上にできない', () => {
     const sh = spawnSync('grep', ['-E', 'env_int "\\$\\{OBSERVE_PR_(WALL_SEC|GH_TIMEOUT_SEC):-\\}"', SCRIPT], { encoding: 'utf8' }).stdout
@@ -241,7 +255,22 @@ const MODES = {
   reviews: ['--mode', 'reviews', '--slug', 'cursor', '--until', 'review', '--wait', '--attempt', '1'],
 }
 
+// 余裕（3 秒）の検査は、観測時間が整数秒で測られる境界（実測 3.0〜3.3 秒の観測が 3 秒と 4 秒のどちらに測られるか）に依存する。
+// 同時に多数のプロセスを走らせると観測が延びて 4 秒側に倒れ、余裕を外した変異を見逃す（変異テストで確認）ので、この検査だけは
+// 同時実行の describe に入れず単独で走らせる（旧テストと同じ条件。2 つの bash で約 6 秒）。
 for (const bash of BASHES) {
+  test(`[${bash}] 余裕: 残りが「最長の 1 観測 + 間隔」ちょうど（整数秒の誤差の範囲）なら次の観測を始めず pending を返す`, { skip: !jqAvailable }, () => {
+    const stub = UNMET()
+    // 1 観測 = gh 3 回 × 1 秒 ≒ 3 秒。壁時計 8 秒・間隔 1 秒では、1 回目のあとに残り約 5 秒 < 3 + 1 + 余裕。始めない
+    const r = run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '1'], { ...SCALED, GH_STUB_DELAY: '1' })
+    const p = payloadOf(r)
+    assert.deepEqual({ o: p.outcome, e: p.err }, { o: 'pending', e: 0 })
+    assert.equal(stub.countOf('prview'), 1, '2 回目の観測を始めていない')
+  })
+}
+
+describe('待機の窓の境界・壁時計の打ち切り（実時間を待つケースは同時に走る）', { concurrency: 24 }, () => {
+BASHES.forEach((bash, bi) => {
   test(`[${bash}] 条件未成立の --wait は、gh の遅延が観測時間の整数秒の境界をまたぐ帯でも、全モードで pending を返す（正常な gh を取得失敗にしない）`, { skip: !jqAvailable }, async () => {
     const delays = ['0.3', '0.5', '0.7', '1.0', '1.3', '1.6', '2.0', '2.4']
     const jobs = []
@@ -256,42 +285,45 @@ for (const bash of BASHES) {
     for (const r of results) assert.ok(r.elapsed <= 8 + 4, `${r.name} D=${r.d}: ${r.elapsed}s が壁時計上限 + 後始末に収まる`)
   })
 
-  test(`[${bash}] 余裕: 残りが「最長の 1 観測 + 間隔」ちょうど（整数秒の誤差の範囲）なら次の観測を始めず pending を返す`, { skip: !jqAvailable }, () => {
-    const stub = UNMET()
-    // 1 観測 = gh 3 回 × 1 秒 ≒ 3 秒。壁時計 8 秒・間隔 1 秒では、1 回目のあとに残り約 5 秒 < 3 + 1 + 余裕。始めない
-    const r = run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '1'], { ...SCALED, GH_STUB_DELAY: '1' })
-    const p = payloadOf(r)
-    assert.deepEqual({ o: p.outcome, e: p.err }, { o: 'pending', e: 0 })
-    assert.equal(stub.countOf('prview'), 1, '2 回目の観測を始めていない')
-  })
-
-  test(`[${bash}] 壁時計の残りで縮めた制限に掛かって kill した場合は pending、gh 自身の制限に掛かった場合は error（取得失敗）と区別する`, { skip: !jqAvailable }, () => {
-    const hang = String(3000 + (process.pid % 900))
+  test(`[${bash}] 壁時計の残りで縮めた制限に掛かって kill した場合は pending、gh 自身の制限に掛かった場合は error（取得失敗）と区別する`, { skip: !jqAvailable }, async () => {
+    const hang = hangSeconds(3000, bi)
     const stub = createObserveStub({ prview: { out: prJson() } })
-    // gh の制限（30 秒）> 壁時計（3 秒）: 3 秒で壁時計の縮めに掛かる → この起動では結論が出なかった（pending）
+    // 3 つは独立した起動。待ちを重ねるため同時に走らせる（縮尺は変えない）
     const t0 = Date.now()
-    const wall = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '1'], { GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '30', OBSERVE_PR_WALL_SEC: '3' }))
-    assert.deepEqual({ o: wall.outcome, e: wall.err }, { o: 'pending', e: 0 })
-    assert.ok((Date.now() - t0) / 1000 <= 3 + 3, '壁時計の縮めで 3 秒付近に打ち切られる（gh の 30 秒制限を待たない）')
-    // 待機なしの単発観測は pending という概念が無いので、壁時計で打ち切られたら取得失敗（error）
-    const once = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '5'], { GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '30', OBSERVE_PR_WALL_SEC: '2' }))
-    assert.deepEqual({ o: once.outcome, e: once.err }, { o: 'error', e: 1 })
-    // gh 自身の制限（1 秒）を超えた場合は取得失敗のまま
-    const own = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '1'], { GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '1', OBSERVE_PR_WALL_SEC: '5', OBSERVE_PR_POLLS: '1' }))
-    assert.deepEqual({ o: own.outcome, e: own.err }, { o: 'error', e: 1 })
+    const [wall, once, own] = (await Promise.all([
+      // gh の制限（30 秒）> 壁時計（3 秒）: 3 秒で壁時計の縮めに掛かる → この起動では結論が出なかった（pending）
+      runA(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '1'], { GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '30', OBSERVE_PR_WALL_SEC: '3' }).then((r) => ({ p: payloadOf(r), elapsed: (Date.now() - t0) / 1000 })),
+      // 待機なしの単発観測は pending という概念が無いので、壁時計で打ち切られたら取得失敗（error）
+      runA(bash, stub, ['--mode', 'checks', '--pr', '5'], { GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '30', OBSERVE_PR_WALL_SEC: '2' }).then((r) => ({ p: payloadOf(r) })),
+      // gh 自身の制限（1 秒）を超えた場合は取得失敗のまま
+      runA(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '1'], { GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '1', OBSERVE_PR_WALL_SEC: '5', OBSERVE_PR_POLLS: '1' }).then((r) => ({ p: payloadOf(r) })),
+    ]))
+    assert.deepEqual({ o: wall.p.outcome, e: wall.p.err }, { o: 'pending', e: 0 })
+    assert.ok(wall.elapsed <= 3 + 3, '壁時計の縮めで 3 秒付近に打ち切られる（gh の 30 秒制限を待たない）')
+    assert.deepEqual({ o: once.p.outcome, e: once.p.err }, { o: 'error', e: 1 })
+    assert.deepEqual({ o: own.p.outcome, e: own.p.err }, { o: 'error', e: 1 })
     const left = sleepersOf(hang)
     if (left !== null) assert.equal(left, 0)
   })
 
-  test(`[${bash}] --attempt が上限のときの壁時計打ち切りは exhausted（pending のまま再実行させない）`, { skip: !jqAvailable }, () => {
-    const hang = String(3900 + (process.pid % 90))
+  test(`[${bash}] --attempt が上限のときの壁時計打ち切りは exhausted（pending のまま再実行させない）`, { skip: !jqAvailable }, async () => {
+    const hang = hangSeconds(3900, bi)
     const stub = createObserveStub({ prview: { out: prJson() } })
-    const p = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '7'], { GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '30', OBSERVE_PR_WALL_SEC: '2' }))
+    const p = payloadOf(await runA(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '7'], { GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '30', OBSERVE_PR_WALL_SEC: '2' }))
     assert.deepEqual({ o: p.outcome, e: p.err }, { o: 'exhausted', e: 0 })
   })
 
-  // --- 小さい修正 ---
+  t2(bash, 'gh の出力サイズに上限があり、出力し続ける gh は取得失敗にする（一時ファイルが際限なく育たない）', async () => {
+    const stub = createObserveStub({ prview: { out: prJson() } })
+    const t0 = Date.now()
+    const p = payloadOf(await runA(bash, stub, ['--mode', 'checks', '--pr', '12'], { GH_STUB_FLOOD: '1', OBSERVE_PR_MAX_OUT_BYTES: '20000', OBSERVE_PR_WALL_SEC: '20' }))
+    assert.deepEqual({ e: p.err, o: p.outcome }, { e: 1, o: 'error' })
+    assert.ok((Date.now() - t0) / 1000 < 10, '上限で打ち切る（壁時計まで待たない）')
+  })
+})
+})
 
+for (const bash of BASHES) {
   t2(bash, '--thread-id が見つからないときは空で exit 0 にせず、見つからないことが分かる行を出して exit 4 にする。未解決 0 件で空行を挟まない', () => {
     const stub = createObserveStub({ graphql: { out: gql2([th2('T1', 'a'), th2('T2', 'b', true)]) } })
     const nf = run(bash, stub, ['--mode', 'threads-detail', '--pr', '12', '--thread-id', 'NOPE'])
@@ -305,13 +337,6 @@ for (const bash of BASHES) {
     assert.equal(dataLines2(none.stdout).length, 0)
   })
 
-  t2(bash, 'gh の出力サイズに上限があり、出力し続ける gh は取得失敗にする（一時ファイルが際限なく育たない）', () => {
-    const stub = createObserveStub({ prview: { out: prJson() } })
-    const t0 = Date.now()
-    const p = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '12'], { GH_STUB_FLOOD: '1', OBSERVE_PR_MAX_OUT_BYTES: '20000', OBSERVE_PR_WALL_SEC: '20' }))
-    assert.deepEqual({ e: p.err, o: p.outcome }, { e: 1, o: 'error' })
-    assert.ok((Date.now() - t0) / 1000 < 10, '上限で打ち切る（壁時計まで待たない）')
-  })
 }
 
 const th2 = (id, body, resolved = false) => ({ id, isResolved: resolved, path: 'a.js', comments: { nodes: [{ body, url: 'https://github.com/o/r/pull/12#d', author: { login: 'cursor' } }] } })
