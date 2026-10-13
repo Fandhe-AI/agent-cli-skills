@@ -5634,7 +5634,7 @@ prPushBlock(` --mode push --origin pr-create --branch ${branch} --base ${baseBra
 outOfScopeSection,
 ...(optinRecordSection?[optinRecordSection]:[]),
 '   ```',
-`   次のコマンドを実行する（<タイトルファイル>・<本文ファイル> だけをそれぞれ書いたファイルの絶対パスへ置き換え、他は一字一句そのまま。open PR の検出と作成はスクリプトが行う）:`,
+`   次のコマンドを実行する（<タイトルファイル>・<本文ファイル> はそれぞれ書いたファイルの絶対パスへ、<headSha> は手順 1 の結果の headSha へ置き換え、他は一字一句そのまま。open PR の検出と作成はスクリプトが行う）:`,
 prPushBlock(` --mode pr --branch ${branch} --base ${baseBranch} --title-file <タイトルファイル> --body-file <本文ファイル> --issue ${item.number} --expect-sha <headSha>${repoArg ? ` --repo ${repoArg}` : ''}`),
 `   <headSha> は手順 1 の結果の headSha（40 桁の sha をそのまま転記。コマンドの出力を推測で補わない）。スクリプトは milestone も確認する（Closes 対象 Issue の milestone。リポジトリに milestone が無ければ確認しない）。結果の milestone が unassigned のとき、created なら本文に警告を足してある。status が created ならその prNumber を返す（手順 1c はスキップして手順 3 へ）。reused は base と head の sha が一致する既存の open PR を再利用する場合で、その prNumber で手順 1c へ進む。head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch（サーバー上の head が push した HEAD と違う）・milestone-check-failed（milestone を取得できない。PR は作っていない）・routing-error・head-mismatch・base-mismatch・ambiguous・list-failed・create-failed・body-invalid・title-invalid・error は再利用も新規作成もせず prNumber: 0 と status（prNumber が付いていれば「既存 open PR #<番号>」）を理由として返す。`,
 `1c. （1b が reused を返したときのみ）既存本文に「Closes #${item.number}」があるか確認し、無ければ追記する。`,

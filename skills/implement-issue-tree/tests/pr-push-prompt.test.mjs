@@ -93,6 +93,7 @@ test('prCreatePrompt: 再利用 PR の本文取得・更新（gh pr view / gh pr
   const prompt = prCreatePrompt(item, impl, [])
   assert.match(prompt, /gh pr view <番号> -R Fandhe-AI\/agent-cli-skills --json body --jq \.body > "\$f"/)
   assert.match(prompt, /gh pr edit <番号> -R Fandhe-AI\/agent-cli-skills --body-file "\$f" && rm -f "\$f"/)
+  assert.match(prompt, /<タイトルファイル>・<本文ファイル> はそれぞれ書いたファイルの絶対パスへ、<headSha> は手順 1 の結果の headSha へ置き換え、他は一字一句そのまま/, '置換対象の列挙に <headSha> を含める')
   assert.match(prompt, /milestone が unassigned のときは、"\$f" の末尾にも「> \*\*警告\*\*/)
 })
 
