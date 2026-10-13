@@ -10,6 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -26,7 +27,7 @@ if (markerIndex < 0) {
   throw new Error(`テスト境界マーカー ${DRIVER_MARKER} が実装スクリプトに存在しない（削除・改名は回帰テストを無効化する）`)
 }
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-conflict-gate-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-conflict-gate-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
 const SLICE_EXPORTS = ['prCreatePrompt', 'fixPrompt', 'monitorPrompt']
 // fixPrompt は boundaryNonce() を内部で使う。本番では ensureBoundaryNonceSeed() が agent()
@@ -42,6 +43,8 @@ writeFileSync(
 
 const mod = await import(pathToFileURL(slicePath).href)
 const { prCreatePrompt, fixPrompt, monitorPrompt } = mod
+// prCreatePrompt の push 後確認コマンドが nonce（boundaryNonce）を使うため、seed を注入しておく
+mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
 
 const item = { number: 435, title: 'テストイシュー' }
 const impl = { prNumber: 777, branch: 'fix/435-conflict-gate' }

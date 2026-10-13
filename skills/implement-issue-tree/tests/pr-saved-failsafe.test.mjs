@@ -20,6 +20,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -41,7 +42,7 @@ const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 // 配線を検証する。import はできない（Workflow ハーネス依存のため）。
 const driverPart = source.slice(markerIndex)
 
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-failsafe-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-failsafe-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
 const SLICE_EXPORTS = [
   'classifyMergeExecDispatch',

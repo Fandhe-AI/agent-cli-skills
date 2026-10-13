@@ -431,12 +431,6 @@ function isValidRepoSlug(s) {
   return typeof s === 'string' && REPO_SLUG_RE.test(s)
 }
 
-// base-merge worktree routing ガードが remote と照合するホワイトリストホスト。owner/repo
-// だけを比較しホスト名を捨てると、期待 owner/repo と一致する別ホスト（例:
-// git@evil.example:Fandhe-AI/example.git）を誤って一致とみなし、別ホストへ fetch / push
-// してしまう（PR #443 codex P0）。Fandhe-AI は GitHub.com 運用のため固定値とする。
-const ALLOWED_REMOTE_HOST = 'github.com'
-
 // 対象リポジトリ（owner/repo）のホスト側明示宣言（base-merge worktree routing ガード用。
 // PR #443 codex P0: expectedRepo を人間が明示するホスト入力のみへ束縛する。未指定は
 // fail-closed（expectedRepo === '' で常に不一致 → base-merge 自動起動なし）。
@@ -1225,9 +1219,9 @@ const COMMON = COMMON_LINES.join('\n')
 const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。type は変更内容に合う Conventional Commits 標準 type（feat / fix / docs / refactor / perf / test / style / build / ci / chore / revert）のうち許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）を選ぶ。always で標準 type が 1 つも許可されなければ、type-enum の列挙値を先頭から順に探索し ^[A-Za-z0-9_-]{1,64}$ を満たす最初のものを使う（先頭だけを見て諦めない）。never で全て拒否されたら change → update の順で拒否リストに無いものを使う。いずれでも決まらなければ type を決定できないとして下記の fail-closed 返却に従う。scope-empty は [*, "never"]（severity > 0）なら scope 必須、[*, "always"] なら scope 禁止（付けない）、severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）。scope 必須のときは、scope-enum が always なら ^[A-Za-z0-9_-]{1,64}$ を満たす列挙値だけを順に探索し（変更内容に最も近いものを優先。判断できなければ先頭から）、該当する列挙値が 1 つも無ければ scope を決定できないとして fail-closed にする（直前コミットの scope や base ブランチ名由来の値は always の許可リストに含まれる保証が無いため使わない）。scope-enum が未設定 / never の場合に限り、同ブランチで既に hook を通過した直前コミットの scope（never の禁止値・上記正規表現に不適合な値は除外）、それも無ければ base ブランチ名の英数字以外を - に置換した値（同様に検証）の順で決める。決定できなければコミットせず「commitlint の scope-empty が scope を要求するが決定できない」を理由に fail-closed で返す。fail-closed 返却の形式（ホストが失敗として検出できる既存形式に限る。summary の文言だけでは検出されない）: implement / recover 経路は branch を空文字にし summary に理由を書く（ホストは branch が空のとき summary を理由に failed 終端する）。fix 経路は pushed: false・commitFailed: true・summary に理由を書く（ホストは commitFailed を失敗終端として扱う）。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
 
 // base merge subject の type / scope 決定規則。未信頼テキスト（commitlint 設定・コミット履歴）
-// の読取を伴うため、埋め込み先は検証権限付き経路（runVerification=true の pr-create / fix）に
-// 限り、push 権限を持つ baseMergePrompt へは埋め込まない（codex P0・PR #443。false 経路は
-// host リテラル固定 subject を使う）。failPre / failPost は決定不能時の帰結を差し込む。
+// の読取を伴うため、埋め込み先は検証権限付き経路（pr-create / fix の baseMergeInstruction）に
+// 限り、push 権限を持つ自動 base 取り込み（scripts/base-merge.sh）へは持ち込まない（codex P0・PR #443。
+// 自動経路はスクリプトの埋め込み固定 subject を使う）。failPre / failPost は決定不能時の帰結を差し込む。
 function subjectDecisionRules(failPre, failPost) {
   const fail = (reason) => `${failPre}「${reason}」を理由として ${failPost}`
   return `対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド）を読み、マージコミットの subject を <type>[(<scope>)]: base ブランチの変更を取り込む の形式で決める。rule は [severity, when, value] の tuple として解釈する（severity 0 の rule は無視。when が always の enum は列挙値が許可リスト、never の enum は列挙値が拒否リスト。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule（例: @commitlint/config-conventional の type-enum は always）を同じ規則で読む）。type は type-enum が無ければ chore、あれば chore → build → ci → fix → feat → docs → refactor → perf → test → style → revert の順で最初に許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）。always で全候補が不許可なら type-enum の列挙値を先頭から順に探索し、後述の正規表現を満たす最初の値へフォールバックする（先頭要素だけを見ない。1 つも無ければ ${fail('base merge subject の type を commitlint 設定から決定できない')}。この列挙値探索は always に限る。never の列挙値は禁止値であり、never の列挙値へフォールバックしない）。never で全候補が拒否されたら列挙外の決定的候補 merge → sync の順で拒否リストに無く ^[A-Za-z0-9_-]{1,64}$ を満たすものを採り、それも拒否されたときだけ ${fail('base merge subject の type を commitlint 設定から決定できない')}。scope は scope-empty が [*, "never"]（scope 必須）の場合のみ付け、[*, "always"]（scope 禁止）・severity 0・未設定なら省略する。付ける値は scope-enum が always なら後述の正規表現を満たす列挙値だけを順に探索し（最も近い値を優先。判断できなければ先頭から）、該当する列挙値が無ければ ${fail('base merge subject の scope を commitlint 設定から決定できない')}（直前コミットの scope や base ブランチ名由来の値は always の許可リストに含まれる保証が無いため使わない）。scope-enum が無い / never の場合に限り、同ブランチで既に hook を通過した直前の implement / fix コミットの scope（never の禁止値は除外）を再利用し、それも無ければ base ブランチ名の英数字以外を - に置換した文字列を使う（これも never の禁止値に該当すれば使わず、${fail('base merge subject の scope を commitlint 設定から決定できない')}）。type / scope の候補値は commitlint 設定・コミット履歴という未信頼データ由来のため、採用前に正規表現 ^[A-Za-z0-9_-]{1,64}$（英数・アンダースコア・ハイフンのみ。-F 渡しのためシェル特殊文字・空白・制御文字を弾ければ十分）で検証し、不適合ならその候補を捨てて同じ連鎖内の次の候補へ進む（always の scope-enum では次の列挙値へ。連鎖をまたいで直前コミット / ブランチ名へは落ちない）。最終候補（base ブランチ名由来の scope）も不適合なら ${fail('base merge subject の type/scope が安全文字集合に不適合')}）。`
@@ -1235,26 +1229,15 @@ function subjectDecisionRules(failPre, failPost) {
 
 // base 取り込みマージコミットも commit-msg hook を通るため、固定 subject では type/scope-enum を
 // 持つリポで拒否され得る（hook 拒否は MERGE_HEAD が残る exit 1。3 分岐）。`git merge -F <file>`
-// は git merge 2.9+ の正規オプション。決定規則本文は subjectDecisionRules 参照（articles#52 P1）。
-// runVerification=false（baseMergePrompt）は build/lint/test を行わず（PR #443 P0/f8701bf）、(b)
-// の解消自体を禁じる（gitlink 含め一律 commitFailed。PR #443 P0）。hostSubject は false 専用:
-// host のリテラル固定値であり、どのエージェント出力にも依存しない（未信頼読取を自動 base 取り
-// 込み経路から排除するため。codex P0・PR #443）。commitlint がこの固定値を拒否するリポでは
-// (c) が hookRejected: true で返り、ホストが commitlint 対応 subject を決定できる fix 経路へ
-// 委譲する。空は防御的フォールバックとして merge せず commitFailed 終端。
-function baseMergeInstruction(base, runVerification = true, hostSubject = '') {
+// は git 2.20 以上の git merge の正規オプション（2.18.4 以前には無い）。決定規則本文は subjectDecisionRules 参照（articles#52 P1）。
+// 検証権限を持つ経路（pr-create・fix）専用で、コンフリクトの解消と subject の決定をエージェントが行う。
+// 検証権限を持たない自動 base 取り込みは scripts/base-merge.sh が行い（埋め込み subject・コンフリクトは
+// 解消せず fix 経路へ委譲）、この関数は使わない（Issue #603 第 3 弾）。
+function baseMergeInstruction(base) {
   const commitTail = ` — subject は MERGE_MSG に残る上記のものを使う。この git commit --no-edit も pre-commit / commit-msg hook を通るため、非 0 終了（hook 拒否。MERGE_HEAD が残る）なら (c) と同じく git merge --abort し、push せず「base merge コミット拒否: <hook 出力の要旨>」を理由として返す。--no-verify で強行せず、終了コードを無視して merge 前の HEAD を push してはならない）。`
-  const resolveBranch = runVerification
-    ? `その場で解消を試みる（CLAUDE.md・rules を遵守し、テスト実行規約に従いビルド・lint・テストを通してから git commit --no-edit でコミットする${commitTail}解消不能な場合は git merge --abort し、push せず「base コンフリクト解消不能」を理由として返す。`
-    : `コンフリクト種別を問わず解消しない（内容編集の権限を持たない — build/lint/test 不可のため。submodule gitlink ポインタのコンフリクトも双方がポインタを変更した状態であり、base 側採用は PR 側の gitlink 更新を黙って破棄するため機械的に解消できない）。commit せず git merge --abort し、pushed: false・commitFailed: true・conflict: true・summary「base コンフリクト解消不能（内容編集の権限なし。fix/implement へ委譲要）」を返す（conflict: true はこのコンフリクト検出時のみ付ける。fetch / checkout 失敗・hook 拒否等の他の commitFailed 経路では conflict を付けない — ホストは conflict: true または hookRejected: true のとき検証権限を持つ fix 経路へ委譲する）。`
-  const hookRejectReturn = runVerification
-    ? '「base merge コミット拒否: <hook 出力の要旨>」を理由として返す'
-    : 'pushed: false・commitFailed: true・hookRejected: true・summary「base merge コミット拒否: <hook 出力の要旨>」を返す（hookRejected: true は分岐 (c) の hook 拒否時のみ付ける — ホストが commitlint 対応 subject を決定できる fix 経路へ委譲するためのシグナル。他の commitFailed 経路では付けない）'
-  const subjectPart = runVerification
-    ? `merge 前に${subjectDecisionRules('git merge を実行せず', '(c) と同じ終端へ倒す')}`
-    : (hostSubject
-      ? `マージコミットの subject は次のホスト固定文字列をそのまま使う（host のリテラル定数。subject 決定のために commitlint 設定・コミット履歴等リポジトリ内ファイルを読まない — 未信頼読取を自動 base 取り込み経路から排除するため。codex P0・PR #443）: ${hostSubject} 。`
-      : `マージコミットのホスト固定 subject が渡されていない（未確定）。git merge を実行せず pushed: false・commitFailed: true・summary「base merge subject 未確定」で返す（hook 拒否ではないため hookRejected は付けない）。`)
+  const resolveBranch = `その場で解消を試みる（CLAUDE.md・rules を遵守し、テスト実行規約に従いビルド・lint・テストを通してから git commit --no-edit でコミットする${commitTail}解消不能な場合は git merge --abort し、push せず「base コンフリクト解消不能」を理由として返す。`
+  const hookRejectReturn = '「base merge コミット拒否: <hook 出力の要旨>」を理由として返す'
+  const subjectPart = `merge 前に${subjectDecisionRules('git merge を実行せず', '(c) と同じ終端へ倒す')}`
   return `${subjectPart}決めた subject は一時ファイルへ書き（printf の引数にせず、エディタ・Write ツール等でファイル内容として書く）、git merge --no-edit -F <一時ファイル> origin/${base} で渡す（-m "<subject>" のシェル文字列補間は使わない — 未信頼値をシェル構文へ再展開すると $(...)・バッククォート・引用符でコマンドインジェクションになる。検証と受け渡しの二重で塞ぐ）。終了コードで 3 分岐する: (a) 0（Already up to date またはクリーンマージ）→ 次の手順へ進む。(b) 非 0 かつ git diff --name-only --diff-filter=U が非空 → コンフリクト。${resolveBranch}(c) 非 0 かつ U が無い（MERGE_HEAD が残る = commit-msg hook 拒否等）→ git merge --abort し、push せず ${hookRejectReturn}（fail-closed。--no-verify で強行しない。exit 1 を無視して push すると base 未取り込みの HEAD が push されゲートを迂回する）。`
 }
 
@@ -2541,19 +2524,6 @@ const BASE_MERGE_SCHEMA = {
       type: 'boolean',
       description: '分岐 (c) の commit-msg hook 拒否時のみ true（その際 commitFailed も true・pushed は false）。他の commitFailed 経路では付けない。',
     },
-    // push 後の gh pr view 再取得値。ホストのログ専用（マージ判定・分岐には使わない）。
-    // 未信頼テキストではなく enum 完全一致のみを受理するため注入面を持たない。
-    mergeableAfter: {
-      type: 'string',
-      enum: ['MERGEABLE', 'CONFLICTING', 'UNKNOWN'],
-      description: 'push 後に再取得した mergeable の値（推測で MERGEABLE を返さない。取得不能は UNKNOWN）。ログ専用。',
-    },
-    checksStarted: {
-      type: 'boolean',
-      description: 'push 後の headRefOid に対する check-run が 1 件以上起動したか（完了は待たない）。ログ専用。',
-    },
-    // 診断専用（マージ判定には使われない）。push 後の headRefOid をそのまま記録する。
-    headSha: { type: 'string', maxLength: 40, description: '手順 4 で取得した push 後の headRefOid（診断用）。取得しなかった場合は省略' },
   },
 }
 
@@ -3740,6 +3710,7 @@ const SCRIPT_SHA256 = {
   'measure-residual-bytes.sh': '@@SCRIPT_SHA256:measure-residual-bytes.sh@@',
   'measure-free-disk.sh': '@@SCRIPT_SHA256:measure-free-disk.sh@@',
   'observe-pr.sh': '@@SCRIPT_SHA256:observe-pr.sh@@',
+  'base-merge.sh': '@@SCRIPT_SHA256:base-merge.sh@@',
 }
 
 // 測定スクリプトを run-verified.sh 経由で起動するコマンド行（rest は --nonce の後ろに続く部分）。skillDir は
@@ -3747,7 +3718,7 @@ const SCRIPT_SHA256 = {
 // catch が fail-closed の null にする）
 function scriptInvocation(name, nonce, rest) {
   if (!skillDir) throw new Error('args.skillDir が未指定のため測定スクリプトの場所を決められない')
-  return `bash '${skillDir}/scripts/run-verified.sh' ${SCRIPT_SHA256[name]} ${name} --nonce ${nonce}${rest}`
+  return `bash '${skillDir}/scripts/run-verified.sh' ${SCRIPT_SHA256[name]} ${name}${nonce === undefined ? '' : ` --nonce ${nonce}`}${rest}`
 }
 
 // 封筒を返すエージェントの StructuredOutput スキーマ。payload は測定ごとのスキーマを入れ子にする
@@ -4873,9 +4844,6 @@ function optinRecordUpdateInstructions(item, impl, stepNo) {
   ]
 }
 
-// monitor プロンプト（手順 2）と push 後 CI 起動確認で共通のチェック総数の取得手順（Issue #479 / #480）。
-// sha は head sha を指すプレースホルダ表記。文面の複製は実行ファイルの予算を圧迫するため共有する。
-const checksTotalHow = (sha) => `（gh pr checks・merge-exec の集計と同じ定義。gh 公式実装 pkg/cmd/pr/checks/aggregate.go は両者を合算する。check-run を作らず commit status のみを発行する CI（外部 CI サービス等）を使うリポジトリで、正常なチェックが存在するのに 0 件と誤判定しないため）: gh api repos/{owner}/{repo}/commits/${sha}/check-runs --jq '.total_count' と gh api repos/{owner}/{repo}/commits/${sha}/status --jq '.statuses | length'（combined status。同一 context の重複は API 側で最新 1 件へ集約済み）の 2 つを取得して合計する。両方の取得に成功した場合のみ合計値を確定値として扱い、どちらか一方でも失敗した場合は「取得失敗」として扱う（0 件と同一視してはならない — 取得失敗を 0 件へ倒すと、実際にはチェックが動いている PR をコンフリクト扱いへ落としてしまう）。`
 
 // implementPrompt（新規実装）と recoverPrompt（再開実装）で共通の手順 4〜8・返却文面。
 // 同一文面を 2 か所へ複製すると実行ファイルが予算（WORKFLOW_SCRIPT_BUDGET_BYTES）を圧迫するため共有する。
@@ -4973,6 +4941,9 @@ function externalCheckRunsCommand(slug, shaExpr) {
 const OBSERVE_MAX_ATTEMPTS = 7
 // 監視呼び出しの連番（nonce の keyMaterial に入れ、同じ PR の別ラウンドでも nonce を別にする）
 let monitorObserveSeq = 0
+// pr-create は PR 番号を手順 1b / 2 まで知らないため、push 後確認のコマンドには次の文字列を置き、エージェントが実際の番号へ
+// 置き換える。コマンドの文字列を変えてよい唯一の箇所（置換するのはこの 1 語だけ。postPushChecksInstruction が文面で限定する）
+const PR_NUMBER_PLACEHOLDER = '<PR 番号>'
 
 // scripts/observe-pr.sh が payload.inputSha256 に入れる入力文字列と同じ定義（モード・PR 番号・対象 repo・base・branch・
 // issue・App slug・--until を改行で連ねる）。ホストは自分が組み立てた引数から再計算して封筒を照合する。
@@ -4983,7 +4954,7 @@ function observeInputText(f) {
 // 観測スクリプトの起動コマンド。base / branch / slug は検証済みの文字集合だけを通す（コマンド行へ未検証の文字列を
 // 埋め込まない）。attempt が正なら待機つき（--wait --attempt <attempt>）。pr モードの待機は回数を持たない。
 function observeCommand(nonce, f, attempt = 0) {
-  if (!Number.isInteger(f.pr) || f.pr <= 0) throw new Error('observeCommand: PR 番号が正の整数でない')
+  if (f.pr !== PR_NUMBER_PLACEHOLDER && (!Number.isInteger(f.pr) || f.pr <= 0)) throw new Error('observeCommand: PR 番号が正の整数でない')
   if (f.base !== undefined && !isValidBranchName(f.base)) throw new Error('observeCommand: base の形式が不正')
   if (f.branch !== undefined && !isValidBranchName(f.branch)) throw new Error('observeCommand: branch の形式が不正')
   if (f.slug !== undefined && !EXTERNAL_CHECK_APP_SLUG_RE.test(f.slug)) throw new Error('observeCommand: slug の形式が不正')
@@ -5019,10 +4990,10 @@ function applyChecksObservation(m, nonces, inputSha256) {
   let total
   if (!signed.ok) reason = checksObservation === undefined || checksObservation === null ? 'absent' : signed.reason
   else if (signed.payload.mode !== 'checks') reason = 'mode'
-  else if (signed.payload.err !== 0) reason = 'fetch-error'
+  else if (signed.payload.err !== 0 || signed.payload.outcome === 'error') reason = 'fetch-error'
   else if (!Number.isInteger(signed.payload.total) || signed.payload.total < 0) reason = 'total'
   // 壁時計 kill の封筒は err:0・total:0 だが headSha が空。実測の 0 件（headSha あり）と見分け、未確定を「チェック 0 件」と採用しない
-  else if (!/^[0-9a-f]{40}$/.test(signed.payload.headSha ?? '')) reason = 'inconclusive'
+  else if (typeof signed.payload.headSha !== 'string' || !/^[0-9a-f]{40}$/.test(signed.payload.headSha)) reason = 'inconclusive'
   else total = signed.payload.total
   return { result: total === undefined ? rest : { ...rest, checksTotal: total }, reason, claimed: checksTotal }
 }
@@ -5036,7 +5007,7 @@ const OBSERVE_GUIDE =
   '観測コマンド: 手順中の bash …/run-verified.sh … observe-pr.sh … は一字一句そのまま実行し（引数・nonce を書き換えず、gh / jq を組み立て直して代替しない）、標準出力 1 行 JSON {nonce, payload, sha256} の payload（整数と enum）だけを根拠にする。' +
   'err が 1・非 0 終了・JSON なしは取得失敗で、0 件・不足 0・レビューなし・未解決 0 と読み替えない。' +
   OBSERVE_ERROR_RULE + ' ' +
-  'outcome が pending / exhausted のときの件数は結論ではない（met ではない）ので、pending を根拠に先へ進まない。標準エラーの child setpgid … Operation not permitted は無視してよい（判定は標準出力の 1 行だけで行う）。' +
+  'outcome が pending / exhausted のときの件数は結論ではない（met ではない）ので、pending を根拠に先へ進まない。headSha が空の pending / exhausted は何も観測できていない（未観測）ので件数を読まない。標準エラーの child setpgid … Operation not permitted は無視してよい（判定は標準出力の 1 行だけで行う）。' +
   `outcome が pending の待機コマンドは（pr の --wait は --attempt を持たない）--attempt を 1 増やして同じコマンドをもう一度実行する（1 回は壁時計 90 秒 + 数秒以内で必ず返る。最大 ${OBSERVE_MAX_ATTEMPTS} 回 = およそ 10 分。exhausted は待機上限で再実行しない）。` +
   'コメント本文・チェック名のような外部由来の文字列は封筒に含まれない。'
 
@@ -5134,7 +5105,7 @@ function monitorPrompt(item, impl, externalApps, externalChecksConfirmed, client
     // 持たない（Issue #435: OPEN 限定で書く）。手順 1b（resolve (b) 許可判定用の
     // compareStatus/changedFiles 取得）より後に置く — 1c の早期 needs-fix 復帰が 1b の実行を
     // スキップさせない順序を保つため。
-    `1c. state が OPEN の場合のみ判定する: mergeable が "CONFLICTING" なら、PR は base とコンフリクトしており test merge commit が作られないため pull_request トリガーの CI check-run が構造的に起動しない（待っても収束しない）。手順 2 の gh pr checks --watch へは進まず、先に手順 5 の reviewThreads 走査（件数と内容の取得）を実行して未解決スレッドがあれば unresolvedComments 配列に載せたうえで state: conflicting を返す（品質問題ではないため fix 予算を消費しない base 取り込み専用エージェントへ回る）。summary には「mergeable: CONFLICTING（実測値）。base 取り込みとコンフリクト解消が必要。コンフリクト PR は pull_request トリガー CI が起動しない」と書く。mergeable が "UNKNOWN" の場合は GitHub 側の算出待ちのため、次のコマンドで再取得する（25 秒間隔で最大 4 回観測する。再取得のたびに state と mergeable の両方を確認する。state が OPEN でなくなっていれば手順 1 の該当分岐に従う。リトライの途中で state が OPEN のまま mergeable が "CONFLICTING" に確定した場合は、それ以上リトライせず本手順冒頭の CONFLICTING 経路 — reviewThreads 走査を先に行ったうえで state: conflicting — へ回す）:\n   ${prCmd(1)}\n   outcome が pending（上限まで、または壁時計で確定できなかった = state が空・bound が -1 を含む）なら UNKNOWN のまま通常フロー（手順 2）へ進む（UNKNOWN を CONFLICTING と扱って fix 予算を空費しない）。`,
+    `1c. state が OPEN の場合のみ判定する: mergeable が "CONFLICTING" なら、PR は base とコンフリクトしており test merge commit が作られないため pull_request トリガーの CI check-run が構造的に起動しない（待っても収束しない）。手順 2 の gh pr checks --watch へは進まず、先に手順 5 の reviewThreads 走査（件数と内容の取得）を実行して未解決スレッドがあれば unresolvedComments 配列に載せたうえで state: conflicting を返す（品質問題ではないため fix 予算を消費しない base 取り込み専用エージェントへ回る）。summary には「mergeable: CONFLICTING（実測値）。base 取り込みとコンフリクト解消が必要。コンフリクト PR は pull_request トリガー CI が起動しない」と書く。mergeable が "UNKNOWN" の場合は GitHub 側の算出待ちのため、次のコマンドで再取得する（25 秒間隔で最大 4 回観測する。再取得のたびに state と mergeable の両方を確認する。state が OPEN でなくなっていれば手順 1 の該当分岐に従う。リトライの途中で state が OPEN のまま mergeable が "CONFLICTING" に確定した場合は、それ以上リトライせず本手順冒頭の CONFLICTING 経路 — reviewThreads 走査を先に行ったうえで state: conflicting — へ回す）:\n   ${prCmd(1)}\n   outcome が pending（上限まで、または壁時計で確定できなかった = state が空・bound が -1 を含む。state が空は OPEN でなくなったとは扱わない）なら UNKNOWN のまま通常フロー（手順 2）へ進む（UNKNOWN を CONFLICTING と扱って fix 予算を空費しない）。`,
     `2. まず --watch に入る前に、手順 1 で取得した HEAD sha に対するチェック総数を次のコマンドで取得する（Issue #479 / #480）。payload.total は check-run 件数（checkRuns）と commit status 件数（statuses）の合計（gh pr checks・merge-exec と同じ集計定義。commit status のみを発行する CI でも 0 件と誤判定しないため）:\n   ${obs({ mode: 'checks' })}\n   err が 0 の場合のみ total を確定値として扱い checksTotal として返却に含める。err が 1（どちらか一方でも取得失敗）の場合は取得失敗として扱い、取得失敗時は checksTotal を省略し、0 を返してはならない（0 件と同一視すると、実際にはチェックが動いている PR をコンフリクト扱いへ落としてしまう）。返却の checksObservation には、最後に実行した checks コマンド（手順 3e の待機つきを含む）の標準出力を観測値のまま転記する（通らなければホストは checksTotal を採用しない）。確定値が 0 件なら gh pr checks --watch へは進まず、直ちに手順 3e（有界待機 + mergeable 再判定）へ直行する（コンフリクト PR は test merge commit が作られず pull_request トリガの check-run が構造的に 0 件のままになるため、--watch で待っても収束しない）。確定値が 1 件以上の場合、および取得に失敗した場合は次へ進む（取得失敗は 0 件扱いにせず、従来どおり --watch と手順 3 の実測に委ねる）: gh pr checks ${impl.prNumber} --watch --interval 60 で全チェック完了まで監視する（Bash の timeout に 600000 を指定し、コマンドがタイムアウトしたら同コマンドを再実行。再実行は 4 回まで = 最長およそ 40 分）。gh pr checks --watch がチェック不在で即時に非ゼロ終了する場合がある。これを「監視完了」とみなさず、手順 3 の総数確認へ進む。再実行 4 回を使い切っても完了しない場合も、ここで timeout を返さず手順 3 の総数確認へ進む（手順 3 を経ずに timeout を返すと、チェックが 0 件のまま監視上限だけを消費して収束しない経路が残るため。Issue #479）。`,
     `3. watch 完了後、gh pr checks ${impl.prNumber} の出力で全チェックの結論を列挙して確認する。「watch が終わった」だけでは合格にしない。まず手順 2 のチェック総数（確定値 / 取得失敗）と列挙結果の組を次の観測状態に確定する。3e・3g・7・返却はこの表だけを根拠とし、判定は状態 2 → 3 → 1 の順に最初に当たる 1 つへ確定する（3 状態は排他）。列挙結果は gh pr checks の終了コードではなく出力で分類する: チェック行が 1 行以上あれば終了コード 1（失敗あり）・8（pending あり）でも「列挙 N 件」（a・b が failure / pending を判定する）、行が無く「no checks reported」なら「列挙 0 件」、行が無くそれ以外（認証・通信・API エラー等）なら「読取不能」:`,
     '   - 状態 2「確定 0 件」: 手順 2 確定値が 0（列挙結果は問わない。REST の確定値を権威とする）、または手順 2 取得失敗かつ列挙 0 件 → 手順 3e。',
@@ -5500,7 +5471,7 @@ function prCreatePrompt(item, impl, outOfScope) {
     `   body に必ず「Closes #${item.number}」を含めること。`,
     `   （ブランチ名は ${JSON.stringify(branch)} — 変数展開不要、そのまま使用する）`,
     '3. PR 作成成功後、prNumber を返す（既存 PR を再利用した場合はその番号を返す）。',
-    `3b. ${postPushChecksInstruction('<手順 1b で再利用した、または手順 2 で作成した PR 番号>')}`,
+    `3b. ${postPushChecksInstruction(PR_NUMBER_PLACEHOLDER, branch)}`,
     '4. pwd の結果を worktreePath として返す（呼び出し元がラン終了時の残骸一覧に記録するため。自動削除はされない）。',
     '返却: prNumber（失敗時 0）/ summary（push・PR 作成の結果要約）/ worktreePath（pwd の結果）/ checksStarted・mergeableAfterPush（手順 3b の観測結果。任意・診断と分岐ヒント専用）。',
   ].join('\n')
@@ -5509,10 +5480,11 @@ function prCreatePrompt(item, impl, outOfScope) {
 // fix プロンプト。pushAfterFix: true = Merge ループ（修正後 push）/ false = Review ループ。
 // resolve と PR 本文記録は true のみ: (a) push 成功時は自分が修正対応したスレッド限定、(b) push
 // なしは permittedNoPushResolveIds（Issue #430）限定。対象外は記録のみ。
-// fixPrompt 手順 4 / baseMergePrompt 手順 3 共用の push 検証指示（#441・#436・#443。手順番号は steps で渡す）。
-function pushVerifyInstruction(branch, steps = {}) {
-  const baseMergeStepRef = steps.baseMergeStepRef ?? '手順 1 の base merge '
-  const resolveStepRef = steps.resolveStepRef ?? '手順 5 の resolve '
+// fixPrompt 手順 4 の push 検証指示（#441・#436・#443）。自動 base 取り込みは同じ二条件を scripts/base-merge.sh
+// （scripts/lib/push-verify.sh）で行う。fix と pr-create もこの lib へ移す予定（Issue #603）。
+function pushVerifyInstruction(branch) {
+  const baseMergeStepRef = '手順 1 の base merge '
+  const resolveStepRef = '手順 5 の resolve '
   return `次に push 直前のリモート head を git ls-remote origin refs/heads/${branch} で取得して控える（取得に失敗しても push を中止しない — fix・base 取り込みのコミットはこの worktree の detached HEAD 上にしか存在せず、push を省略すると worktree 破棄で失われるため、push は必ず実行する。ただし前後比較が不能になるため pushed: false として返し、${resolveStepRef}は実行しない）。そのうえで git push origin HEAD:refs/heads/${branch} を実行する（${baseMergeStepRef}が Already up to date でなかった場合、この push を省略すると base 取り込み・コンフリクト解消の作業が detached HEAD のまま worktree 破棄で失われる。push が空振りになりそうだと予想してこの push 自体を省略しないこと — 実 push の有無は次の比較で事後判定する）。push 後にもう一度 git ls-remote origin refs/heads/${branch} を実行し、自分のローカル HEAD（git rev-parse HEAD — この worktree で自分がコミットを積んだ detached HEAD の sha）と突き合わせて判定する。pushed: true としてよいのは次の 2 条件を両方満たす場合のみ: (i) push 前に控えた sha ≠ ローカル HEAD（自分が新規に積んだコミットが存在した — 空振り push の検出。等しい場合は Everything up-to-date 等の no-op であり、push コマンドが成功していても pushed: false として返し、${resolveStepRef}を一切実行しない。実際の変更を伴わない push を根拠にレビュースレッドを resolve してはならない。summary に「変更なしのため push は no-op」と書く）、(ii) push 後の ls-remote sha == ローカル HEAD（自分のコミット群がリモート head として反映済みであることの直接証明）。push 前後で sha が「変化した」ことを根拠にしてはならない — その間に別ラン・他者が同じブランチを更新すると、自分の git push が拒否・失敗して修正未反映でもリモート sha は変化するため、変化ベースの判定では未反映の指摘に resolve が実行され得る。(ii) が不一致の場合は並行 push 競合とみなし pushed: false として返し、${resolveStepRef}を実行しない（summary に「リモート head がローカル HEAD と不一致（並行 push 競合の可能性）」と書く。競合の解消は次ラウンドの monitor / fix に委ねる）。push 前・push 後いずれかの ls-remote に失敗して判定ができない場合も、push 自体は実行済みのまま pushed: false へ倒す（fail-closed。push の実行と pushed: true の判定は分離する — push は作業保全のため必ず実行し、pushed: true は上記 2 条件を実測で確認できた場合のみ）。`
 }
 
@@ -5522,10 +5494,15 @@ function pushVerifyInstruction(branch, steps = {}) {
 // なるため、監視ラウンド（最大 7・
 // 1 ラウンド最長約 40 分）を消費する前に push した本人が有界（30 秒間隔・最大 5 分）で観測して
 // 返す。ホストはこの自己申告値をマージ判定には一切使わず、base 取り込み分岐へ直行するヒントと
-// してのみ使う。baseMergePrompt 手順 4 の checksStarted / mergeableAfter とは別経路・別フィールド
-// 名（mergeableAfterPush）であり、そちらの契約は変更しない。
-function postPushChecksInstruction(prRef) {
-  return `push 後 CI 起動確認（必須。Issue #479）: gh pr view ${prRef} --json headRefOid --jq .headRefOid で push 済みの head sha を取得し、その head sha に対するチェック総数と gh pr view ${prRef} --json mergeable --jq .mergeable を 30 秒間隔で最大 5 分観測する（チェックの完了は待たない。完了判定は監視エージェントの役割）。チェック総数は check-run 件数と commit status 件数の合計とする${checksTotalHow('<headRefOid>')}チェック総数の確定値が 1 件以上になり、かつ mergeable が UNKNOWN 以外（MERGEABLE / CONFLICTING）へ確定した時点で早期終了してよい。観測結果を checksStarted（確定値で 1 件以上を確認できたら true、上限まで確定値 0 件のままなら false。取得失敗のまま上限に達した場合も false = 「起動を確認できなかった」であり「0 件だった」ではない）と mergeableAfterPush（最終値をそのまま返す。push 直後は GitHub 側の算出待ちで UNKNOWN になるため確定を待つが、上限に達しても確定しなければ UNKNOWN のまま返す — 推測で MERGEABLE / CONFLICTING を返してはならない。上限到達で checksStarted: false かつ未確定のままでも CONFLICTING とみなさず UNKNOWN を返す）として返す。gh コマンドが失敗して観測できない場合も checksStarted: false・mergeableAfterPush: "UNKNOWN" として返す（fail-closed。取得失敗を「チェック 0 件」「CONFLICTING」と読み替えてはならない）。この観測は診断・分岐ヒント専用であり、結果がどうであれ本手順より前に確定した返却値（prNumber / pushed）の判定を変えてはならない。`
+// してのみ使う。観測は scripts/observe-pr.sh --mode push が行い（Issue #603 第 3 弾）、エージェントは
+// 最終行の封筒の payload を読む。ホストは封筒を照合せず採用もしない（ヒント専用の現状のまま）。
+// nonce は PR・ブランチから決まる値で、呼び出しごとには変えない（プロンプトを決定的に保つ）。ホストはこの観測の封筒を
+// 照合も採用もしないため、呼び出しごとの一意性は要らない。採用へ切り替えるときは呼び出し連番を keyMaterial に足すこと
+// （同じ nonce だと前回の封筒の流用を検出できない。references/script-trust-model.md）。
+function postPushChecksInstruction(prRef, branch) {
+  const command = observeCommand(boundaryNonce(`push-confirm:${branch}:${prRef}`), { mode: 'push', pr: prRef, base: baseBranch, branch }, 1)
+  const placeholderNote = prRef === PR_NUMBER_PLACEHOLDER ? `${PR_NUMBER_PLACEHOLDER} だけを手順 1b で再利用した、または手順 2 で作成した PR 番号（正の整数）に置き換え、他は` : ''
+  return `push 後 CI 起動確認（必須。Issue #479）: 次のコマンドを実行する（${placeholderNote}一字一句そのまま。push 済みの HEAD が PR の head になり、そのチェック総数（check-run + commit status）が 1 件以上で mergeable が確定するまで、1 回の実行は壁時計 90 秒 + 数秒以内で返る）:\n\`\`\`sh\n${command}\n\`\`\`\n標準出力の 1 行 JSON {nonce, payload, sha256} の payload を読む。outcome が pending なら --attempt を 1 増やして同じコマンドをもう一度実行する（最大 4 回 = およそ 5 分。met・exhausted・error・非 0 終了で打ち切る）。checksStarted は payload.checksStarted が 1 のとき true、mergeableAfterPush は payload.mergeable（MERGEABLE / CONFLICTING / UNKNOWN）をそのまま返す（推測で補わない）。err が 1・非 0 終了・JSON なしは checksStarted: false・mergeableAfterPush: "UNKNOWN"（0 件・CONFLICTING と読み替えない）。標準エラーの child setpgid … Operation not permitted は無視してよい。この観測は診断・分岐ヒント専用であり、本手順より前に確定した返却値（prNumber / pushed）の判定を変えてはならない。`
 }
 
 function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushResolveIds = []) {
@@ -5584,7 +5561,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         // pushed: true は「自分の修正がリモート head として反映済み」の申告で手順 5 (a) の resolve
         // 許可条件を兼ねる。push コマンド成功や sha 変化は根拠にならず（PR #436 P0）、(i) 事前 sha
         // ≠ ローカル HEAD かつ (ii) 事後 sha == ローカル HEAD で判定し、満たさなければ false へ倒す。
-        `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。${pushVerifyInstruction(branch)} ${postPushChecksInstruction(String(impl.prNumber))}`,
+        `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。${pushVerifyInstruction(branch)} ${postPushChecksInstruction(impl.prNumber, branch)}`,
         commitlintCheckInstruction,
       ]
     : [
@@ -5647,38 +5624,27 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
   ].join('\n')
 }
 
-// base 取り込み専用エージェントのプロンプト（Issue #441）。conflicting（merge-exec の
-// not-mergeable 含む）由来のみで起動され、レビュー指摘の修正・resolve・PR 本文編集は行わない。
-// 埋め込み値は検証済みのみ（sanitizeBranch 済み branch・パース済み baseBranch・整数・テンプレート
-// 全形再検証済み hostSubject）で UNTRUSTED 境界を持たない。worktree routing ガードも item.title
-// を読まず、fmt/lint/build/test も実行しない（push 許可エージェントへの注入波及防止。PR #443 P0）。
-function baseMergePrompt(item, impl, expectedRepo, hostSubject = '') {
+// base 取り込み専用エージェントのプロンプト（Issue #441）。conflicting（merge-exec の not-mergeable 含む）由来のみで
+// 起動され、レビュー指摘の修正・resolve・PR 本文編集は行わない。routing 照合・fetch・merge・push とその検証は
+// scripts/base-merge.sh が決定的に行い（Issue #603 第 3 弾）、エージェントは 1 コマンドを実行して最終行の JSON を転記する。
+// 埋め込む値は検証済みのみ（sanitizeBranch 済み branch・パース済み baseBranch・整数・isValidRepoSlug 済み repo）で
+// UNTRUSTED 境界を持たない。item.title も読まず、fmt/lint/build/test も実行しない（push 許可エージェントへの
+// 注入波及防止。PR #443 P0）。マージコミットの subject と許可ホストはスクリプトの埋め込み定数（ハッシュで固定）。
+function baseMergePrompt(item, impl, expectedRepo) {
   const branch = sanitizeBranch(impl.branch)
-  // 呼び出し側を信頼しない防御的再検証: テンプレート全形に一致しない hostSubject は空文字へ
-  // 落とし、baseMergeInstruction が merge せず commitFailed 終端する（codex P0・PR #443。
-  // hostSubject は host のリテラル固定値のためテンプレート全形に必ず一致する）。
-  const hostSubjectSafe = /^[A-Za-z0-9_-]{1,64}(\([A-Za-z0-9_-]{1,64}\))?: base ブランチの変更を取り込む$/.test(hostSubject ?? '') ? hostSubject : ''
-  // 未確定（args.repo 省略／不正形式。防御的な空文字化）は空文字を埋め込む。正規化後の remote
-  // は必ず owner/repo 形式のため "" 比較は常に不一致 = fail-closed（Bugbot P0・PR #443: PR 番号・
-  // headRefName 一致だけでは別リポの偶然一致を排除できない）。owner/repo は case-insensitive の
-  // ため ASCII 小文字化して埋め込む（比較側も同規則。P1）。host も ALLOWED_REMOTE_HOST 一致を
-  // 別途必須にする（codex P0）。expectedRepoSlug はクォートなしの生スラッグ（remote 形状として
-  // 埋め込む箇所専用）、散文中の比較対象表記はクォート付き expectedRepoLiteral（Bugbot Low:
-  // 混用するとクォートが混入し remote 形状と一致しない）。
-  const expectedRepoSlug = isValidRepoSlug(expectedRepo) ? expectedRepo.toLowerCase() : ''
-  const expectedRepoLiteral = JSON.stringify(expectedRepoSlug)
+  assertInt(impl.prNumber, 'baseMergePrompt prNumber')
+  // 未確定（args.repo 省略／不正形式）は空文字を渡す。スクリプトは空の --repo を『期待リポジトリが未確定』の routingError
+  // （常に不一致 = fail-closed）で返す。owner/repo は case-insensitive のためここで ASCII 小文字化し、スクリプトも同じ規則で比較する
+  const repo = isValidRepoSlug(expectedRepo) ? expectedRepo.toLowerCase() : ''
+  const command = scriptInvocation('base-merge.sh', undefined, ` --pr ${impl.prNumber} --branch ${branch} --base ${baseBranch} --repo '${repo}'`)
   return [
-    `PR #${impl.prNumber}（イシュー #${item.number}）の base 取り込み専用担当エージェント。レビュー指摘の修正・スレッドの resolve・PR 本文編集は行わない。`,
+    `PR #${impl.prNumber}（イシュー #${item.number}）の base 取り込み専用担当エージェント。レビュー指摘の修正・スレッドの resolve・PR 本文編集・マージ・クローズは行わない。`,
     BASE_MERGE_CONTEXT_COMMON,
-    `権限境界: 本エージェントは gh pr merge / gh issue close / gh pr edit / gh pr close / レビュースレッドの resolve mutation を理由を問わず実行しない。base 取り込み・コンフリクト解消のコミットを作成して push するところまでが役割である。`,
-    '手順:',
-    `0. 本エージェントは隔離された git worktree 内で動作する。他のどの操作よりも先に \`git remote get-url origin\` の出力を取得し、末尾の改行・\`.git\` を除去したうえで SSH 形式（\`git@<host>:<owner>/<repo>\`・\`ssh://git@<host>/<owner>/<repo>\`）・HTTPS 形式（\`https://<host>/<owner>/<repo>\`）のいずれも host 部分と \`<owner>/<repo>\` 部分を別々に抽出する。まず host を ASCII 英大文字を英小文字へ変換したうえで許可ホスト "${ALLOWED_REMOTE_HOST}" と完全一致することを確認する（host が一致しない場合は owner/repo の比較へ進まず不一致として扱う。host を照合せず owner/repo だけを比較すると、期待リポジトリと同じ owner/repo を持つ別ホスト — 例: \`git@evil.example:${expectedRepoSlug}.git\` — を誤って一致とみなし、別ホストへ fetch / push しうるため。PR #443 codex P0）。host が一致した場合に限り、owner/repo 部分を ASCII 英大文字を英小文字へ変換したうえで（GitHub の owner/repo は case-insensitive）、期待リポジトリ ${expectedRepoLiteral}（同じ規則で小文字化済み。空文字は未確定を意味し常に不一致として扱う）と完全一致することを確認する（小文字化は比較にのみ使う）。host と owner/repo の両方が一致した場合に限り続けて \`gh pr view ${impl.prNumber} --json number,headRefName\` を実行し、number が ${impl.prNumber}・headRefName が "${branch}"（ホスト確定済みブランチ名）と一致することを確認する（Issue タイトル等の未信頼テキストは参照しない。remote 一致確認の代替ではなく追加チェック）。remote の host が "${ALLOWED_REMOTE_HOST}" と不一致／owner-repo が期待リポジトリと不一致／PR を解決できない／number または headRefName が不一致のいずれか（= 別ホスト・別リポ worktree への誤配置・対象 PR の取り違え・ホスト側期待値未確定）なら、git fetch / checkout / merge / push を含む後続を一切実行せず routingError: true・pushed: false・summary に「worktree routing error: remote の host/owner-repo=<正規化後の値> が期待リポジトリ ${ALLOWED_REMOTE_HOST}/${expectedRepoSlug} と不一致」を書いて即終了する（隔離契約違反のため）。`,
-    `1. git fetch origin ${branch}:refs/remotes/origin/${branch}（保存先を明示した refspec）で対象ブランチを取得する。この fetch の終了コードを必ず確認し、非ゼロ終了（通信・認証・リモートブランチ削除・refspec 制限等）の場合は checkout / merge / push を一切行わず pushed: false・commitFailed: true・summary に「branch fetch 失敗」（エラー内容の要旨を添える）を書いて即終了する（fail-closed。この時点では隔離 worktree の元の HEAD のままであり、誤ってこれを対象ブランチへ push してはならない）。fetch 成功後、git checkout --detach origin/${branch} で detached HEAD として取得する（ブランチが別 worktree で checkout 済みの可能性があるため）。checkout の終了コードも必ず確認し、非ゼロ終了なら同様に checkout / merge / push を一切行わず pushed: false・commitFailed: true・summary に「branch checkout 失敗」を書いて即終了する。checkout 成功後、git rev-parse HEAD の出力が git rev-parse origin/${branch} の出力（手順1 で取得した最新の origin/${branch}）と一致することを確認し、不一致なら誤った起点を取得したとみなし手順 2 以降（merge・push を含む）を一切実行せず pushed: false・commitFailed: true・summary に「checkout 後の HEAD が origin/${branch} と不一致」を書いて即終了する（隔離 worktree の元の HEAD のまま push すると対象ブランチを意図しない履歴へ更新してしまうため）。`,
-    `2. git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch}（保存先を明示した refspec）で base を取得する。この base fetch の終了コードを必ず確認し、非ゼロ終了（通信・認証・refspec エラー等）の場合は merge も push も行わず pushed: false・commitFailed: true・summary に「base fetch 失敗」（エラー内容の要旨を添える）を書いて返す（fail-closed）。fetch 成功後、${baseMergeInstruction(baseBranch, false, hostSubjectSafe)} 分岐 (a) が Already up to date の場合は base 取り込み済みで積むものが無いため push せず pushed: false・commitFailed なし・summary に「Already up to date（GitHub 側の mergeable 算出待ちの可能性）」と書いて返す（次ラウンドの monitor が再確認する）。分岐 (a) がクリーンマージの場合のみ手順 3 へ進む（分岐 (b) のコンフリクトは種別を問わず解消せず pushed: false・commitFailed: true・conflict: true で返す。conflict: true は分岐 (b) のコンフリクト検出時のみ — base fetch 失敗・branch fetch / checkout 失敗・hook 拒否等の他の commitFailed 経路では付けない）。`,
-    `3. ${pushVerifyInstruction(branch, { baseMergeStepRef: '手順 2 の base merge ', resolveStepRef: 'resolve（本エージェントの担当範囲外） ' })}`,
-    `4. 手順 3 で pushed: true と判定できた場合のみ実行する（false の場合はスキップして手順 5 へ進む）: gh pr view ${impl.prNumber} --json state,mergeable,headRefOid を取得し、mergeable が UNKNOWN なら 30 秒あけて最大 6 回再取得する（推測で MERGEABLE を返さない。取得不能・上限到達は UNKNOWN のまま返す）。最終値を mergeableAfter として返し、取得した headRefOid を headSha として返す（診断用。マージ判定には使われない）。続けて gh api repos/{owner}/{repo}/commits/<headRefOid>/check-runs --jq '.total_count' を 30 秒間隔で最大 5 分待ち、1 件以上確認できれば checksStarted: true、上限まで 0 件のままなら false を返す（チェックの完了は待たない。完了判定は次ラウンドの監視エージェントの役割）。`,
-    '5. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。',
-    '返却: pushed / summary / worktreePath / routingError（手順 0 で誤配置を検出した場合のみ true） / commitFailed（base 取り込みコミットを作成できなかった場合のみ true） / conflict（手順 2 の分岐 (b) でコンフリクトを検出した場合のみ true。その際 commitFailed も true。他の commitFailed 経路では付けない） / hookRejected（手順 2 の分岐 (c) の commit-msg hook 拒否時のみ true。その際 commitFailed も true） / mergeableAfter（手順 4 を実行した場合のみ） / checksStarted（手順 4 を実行した場合のみ） / headSha（手順 4 を実行した場合のみ）。',
+    '次のコマンドを一字一句そのまま、1 回の Bash 呼び出し（timeout に 600000）で実行する。worktree の routing 照合・fetch・merge・push とその検証はスクリプトが行う。改変・条件追加・手順の組み立て直しをせず、成否の判断を自分で作らない:',
+    '```sh',
+    command,
+    '```',
+    '標準出力の最後の 1 行は BASE_MERGE_RESULT に続く 1 行の JSON である。そのキー（pushed・summary・worktreePath と、あれば routingError・commitFailed・conflict・hookRejected）と値を観測値のまま StructuredOutput へ転記する（解釈・補完・修正をしない）。非 0 終了や該当行が無いときは、他の方法で取り込み直さず pushed: false・commitFailed: true・summary「base-merge.sh の失敗」・worktreePath は pwd の結果で返す。',
   ].join('\n')
 }
 
@@ -8580,13 +8546,12 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         break
       }
       // 未信頼読取（commitlint 設定・コミット履歴）を自動 base 取り込み経路から排除するため、
-      // subject は host のリテラル固定値とする（どのエージェント出力にも依存しない完全な定数。
-      // codex P0・PR #443: 読み取り専用 subject 算出エージェント方式はプロンプト指示のみで
-      // 読み取り専用をランタイム強制できず撤去した）。commitlint がこの固定値を拒否するリポ
-      // では分岐 (c) が hookRejected: true で返り、下の needs-fix 委譲で fix エージェント
-      // （runVerification=true の base 最新化ゲート）が commitlint 対応 subject で解消・検証・
-      // push する。
-      const hostSubject = 'chore: base ブランチの変更を取り込む'
+      // subject は scripts/base-merge.sh の埋め込み固定値とする（どのエージェント出力にも依存しない
+      // 完全な定数で、スクリプトのハッシュで固定される。codex P0・PR #443: 読み取り専用 subject 算出
+      // エージェント方式はプロンプト指示のみで読み取り専用をランタイム強制できず撤去した）。
+      // commitlint がこの固定値を拒否するリポでは分岐 (c) が hookRejected: true で返り、下の
+      // needs-fix 委譲で fix エージェント（push 前 base 最新化ゲート）が commitlint 対応 subject で
+      // 解消・検証・push する。
       log(`PR #${impl.prNumber} が base とコンフリクト、base 取り込みエージェントを起動する（${baseMergeCount + 1}/${maxBaseMerges} 回目。fix 予算は消費しない）`)
       // isolation: 'worktree' は agent() 内部で worktree を spawn するため、agent() が schema
       // 不適合・例外で reject しても worktree は既に作られている（P1・PR #443。await の reject
@@ -8595,7 +8560,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       let b = null
       let baseMergeAgentError = null
       try {
-        b = await agent(baseMergePrompt(item, impl, expectedRepo, hostSubject), { label: `base-merge:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: BASE_MERGE_SCHEMA, isolation: 'worktree' })
+        b = await agent(baseMergePrompt(item, impl, expectedRepo), { label: `base-merge:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: BASE_MERGE_SCHEMA, isolation: 'worktree' })
       } catch (e) {
         baseMergeAgentError = e
       }
@@ -8640,8 +8605,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // 分岐 (b) の内容コンフリクト（PR #443 codex P1）、または分岐 (c) の hook 拒否（host
         // 固定 subject が commitlint 等に拒否された。PR #443 codex P0）: baseMergePrompt は検証
         // 権限（build/lint/test）も subject 決定権限も持たないため failed 終端せず fix 経路
-        // （push 前 base 最新化ゲート = runVerification=true。commitlint 対応 subject で解消・
-        // 検証・push できる）へ委譲する。conflict / hookRejected は自己申告だが誤申告の最悪は
+        // （fixPrompt の push 前 base 最新化ゲート = pushAfterFix: true の手順。commitlint 対応
+        // subject で解消・検証・push できる）へ委譲する。conflict / hookRejected は自己申告だが誤申告の最悪は
         // 有界（fixCount<=6）の fix 経路へ余分に回るだけで安全側。コミット未作成のため
         // baseMergeCount は消費せず noPushRounds も進めない（fix 側処理に委ねる）。
         const isConflict = b.conflict === true
@@ -8672,12 +8637,6 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // currentWorktreePath は書き換えない（上のコメント参照。所有権を証明できない自己申告パスを
         // cleanup 対象へ採用しない）。state の worktree 値もこれまでの追跡値のまま維持する。
         await updateState(item.number, { baseMergeCount, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments })
-        // mergeableAfter / checksStarted はエージェント自己申告のためログ専用（マージ判定・分岐には
-        // 使わない。enum 完全一致のみ schema が受理する）。実際の判定は次ラウンドの monitor が
-        // サーバー側の実値を再観測して行う。
-        if (b.mergeableAfter || b.checksStarted === true) {
-          log(`PR #${impl.prNumber}: base 取り込み後（ログ専用・判定には未使用）mergeableAfter=${b.mergeableAfter ?? '不明'} checksStarted=${b.checksStarted === true}`)
-        }
         if (!b.pushed) {
           log(`PR #${impl.prNumber} の base 取り込みエージェントは push 不要と判断（Already up to date 等）、マージ条件を再判定する`)
         }

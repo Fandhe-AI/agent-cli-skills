@@ -21,6 +21,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -37,7 +38,7 @@ if (markerIndex < 0) {
   throw new Error(`テスト境界マーカー ${DRIVER_MARKER} が実装スクリプトに存在しない（削除・改名は回帰テストを無効化する）`)
 }
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-pr-create-checkout-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-pr-create-checkout-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
 const SLICE_EXPORTS = ['prCreatePrompt', 'fixPrompt', 'baseMergePrompt']
 // fixPrompt は boundaryNonce() を内部で使う。本番では ensureBoundaryNonceSeed() が agent()
@@ -51,6 +52,8 @@ writeFileSync(
   `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n${TEST_ONLY_SETTER}`,
 )
 
+// baseMergePrompt の起動コマンド（scriptInvocation）は args.skillDir を要る。実ランでは起動手順が渡す
+globalThis.args = { skillDir: '/opt/skills/implement-issue-tree' }
 const mod = await import(pathToFileURL(slicePath).href)
 const { prCreatePrompt, fixPrompt, baseMergePrompt, __setBoundaryNonceSeedForTest } = mod
 __setBoundaryNonceSeedForTest(123456789)
@@ -148,7 +151,7 @@ test('fixPrompt / baseMergePrompt には新設した checkout 検証・差分ゼ
   // Issue #466 の要件は pr-create フェーズの push 処理に限定される。fixPrompt / baseMergePrompt
   // 側の類似構造（checkout + base merge）は本 Issue のスコープ外であり、新規追加した固有文言が
   // 混入していないことのみを確認する（既存動作への回帰がないことの傍証）。
-  const fixText = fixPrompt(item, impl, { summary: 'テスト用の指摘要約', unresolvedComments: [] }, true, [])
+  const fixText = fixPrompt(item, { ...impl, prNumber: 777 }, { summary: 'テスト用の指摘要約', unresolvedComments: [] }, true, [])
   const baseMergeText = baseMergePrompt(item, { ...impl, prNumber: 777 }, 'Fandhe-AI/agent-cli-skills')
   for (const text of [fixText, baseMergeText]) {
     assert.ok(!text.includes('push 前 差分ゼロチェック'), '手順 0b（pr-create 専用）が他プロンプトに混入している')

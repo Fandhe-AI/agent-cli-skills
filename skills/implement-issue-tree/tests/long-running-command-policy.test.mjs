@@ -6,6 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -21,7 +22,7 @@ const markerIndex = source.indexOf(DRIVER_MARKER)
 if (markerIndex < 0) throw new Error(`テスト境界マーカー ${DRIVER_MARKER} が存在しない`)
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const driverPart = source.slice(markerIndex)
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-long-running-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-long-running-')))
 const slicePath = join(sliceDir, 'defs.mjs')
 const SLICE_EXPORTS = [
   'LONG_RUNNING_POLICY', 'COMMON_LINES', 'COMMON', 'MERGE_CONTEXT_COMMON',

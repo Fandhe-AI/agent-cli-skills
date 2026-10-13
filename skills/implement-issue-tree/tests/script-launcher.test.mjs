@@ -14,6 +14,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,7 +27,7 @@ const sh = (cmd) => spawnSync('sh', ['-c', cmd], { encoding: 'utf8' }).stdout.tr
 
 // 本物の scripts/ を一時ディレクトリへ複製する（lib も含む）。書き換え・追加のテストが本物を汚さないため
 function cloneScripts() {
-  const dir = mkdtempSync(join(tmpdir(), 'iit-launcher-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-launcher-')))
   const scripts = join(dir, 'scripts')
   mkdirSync(join(scripts, 'lib'), { recursive: true })
   for (const f of ['run-verified.sh', 'measure-residual-bytes.sh', 'measure-free-disk.sh']) copyFileSync(join(SCRIPTS, f), join(scripts, f))
@@ -104,7 +105,7 @@ for (const bash of BASHES) {
   })
 
   test(`${tag} launcher: lib/ が無い配置でもスクリプト単体のハッシュで動く（bundleSha256 と一致）`, () => {
-    const dir = mkdtempSync(join(tmpdir(), 'iit-launcher-nolib-'))
+    const dir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-launcher-nolib-')))
     try {
       copyFileSync(join(SCRIPTS, 'run-verified.sh'), join(dir, 'run-verified.sh'))
       writeFileSync(join(dir, 'hello.sh'), 'echo "hello $1"\nexit 7\n')
@@ -162,7 +163,7 @@ for (const bash of BASHES) {
 
   test(`${tag} launcher: スクリプトは launcher と同じディレクトリから名前だけで解決する（cwd や PATH の同名ファイルは使わない）`, () => {
     const { dir, scripts } = cloneScripts()
-    const other = mkdtempSync(join(tmpdir(), 'iit-launcher-cwd-'))
+    const other = trackTmp(mkdtempSync(join(tmpdir(), 'iit-launcher-cwd-')))
     try {
       writeFileSync(join(other, 'measure-free-disk.sh'), 'echo hijacked\n')
       const hash = bundleSha256(scripts, 'measure-free-disk.sh')
@@ -179,7 +180,7 @@ for (const bash of BASHES) {
   for (const tool of ['sha256sum', 'shasum']) {
     test(`${tag} launcher: ${tool} だけが使える環境でもビルダーと同じハッシュで起動できる`, { skip: !toolExists(tool) }, () => {
       const { dir, scripts } = cloneScripts()
-      const bin = mkdtempSync(join(tmpdir(), 'iit-only-'))
+      const bin = trackTmp(mkdtempSync(join(tmpdir(), 'iit-only-')))
       try {
         for (const t of ['dirname', 'cat', 'du', 'df', 'awk', tool]) {
           const p = sh(`command -v ${t}`)
@@ -199,7 +200,7 @@ for (const bash of BASHES) {
 
   test(`${tag} launcher: sha256sum も shasum も無ければ exit 4（検証できないまま起動しない）`, () => {
     const { dir, scripts } = cloneScripts()
-    const bin = mkdtempSync(join(tmpdir(), 'iit-nohash-'))
+    const bin = trackTmp(mkdtempSync(join(tmpdir(), 'iit-nohash-')))
     try {
       for (const t of ['dirname', 'cat']) symlinkSync(sh(`command -v ${t}`), join(bin, t))
       const r = launch(bash, scripts, [bundleSha256(scripts, 'measure-free-disk.sh'), 'measure-free-disk.sh', '--nonce', 'abc123', '--', dir], { env: { PATH: bin } })
@@ -215,7 +216,7 @@ for (const bash of BASHES) {
 // --- ビルダーによる埋め込み ---
 
 function fixture(files) {
-  const dir = mkdtempSync(join(tmpdir(), 'iit-embed-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-embed-')))
   mkdirSync(join(dir, 'lib'), { recursive: true })
   for (const [name, body] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, name)), { recursive: true })
@@ -269,7 +270,7 @@ test('目印の書式は run-verified.sh が受理するスクリプト名と同
 })
 
 function buildFixture(scriptBody) {
-  const dir = mkdtempSync(join(tmpdir(), 'iit-build-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-build-')))
   const srcPath = join(dir, 'w.src.js')
   const distPath = join(dir, 'w.js')
   writeFileSync(srcPath, "export const meta = { name: 'x' }\nconst SHA = '@@SCRIPT_SHA256:t.sh@@' // 目印\n")
@@ -326,7 +327,7 @@ test('実リポジトリの生成物: 目印は残らず、埋め込まれたハ
 
 test('スクリプト一式は実行ビットに依存しない（bash "<path>" で起動する）。launcher の起動コマンドは常に bash 経由', () => {
   const src = readFileSync(SRC_PATH, 'utf8')
-  assert.match(src, /return `bash '\$\{skillDir\}\/scripts\/run-verified\.sh' \$\{SCRIPT_SHA256\[name\]\} \$\{name\} --nonce/)
+  assert.match(src, /return `bash '\$\{skillDir\}\/scripts\/run-verified\.sh' \$\{SCRIPT_SHA256\[name\]\} \$\{name\}\$\{nonce === undefined \? '' : ` --nonce \$\{nonce\}`\}/)
   // 実行ビットを落としても launcher 経由で動く
   const { dir, scripts } = cloneScripts()
   try {

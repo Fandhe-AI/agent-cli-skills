@@ -18,6 +18,7 @@ import { test, after } from 'node:test'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, existsSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -1264,7 +1265,7 @@ const LEXER_SLASH_RESIDUAL = {
 }
 
 const runBuilder = (srcText, extra = []) => {
-  const dir = mkdtempSync(join(tmpdir(), 'build-workflow-parity-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'build-workflow-parity-')))
   try {
     const src = join(dir, 'in.src.js')
     const dist = join(dir, 'out.js')
@@ -1624,7 +1625,7 @@ test('buildArtifact: 先頭にコメントがある入力（コメント除去�
 // 変換前だけ・変換後だけが空メッセージの例外で失敗する状況を作り、どちらの側の判定も外れていないことを見る
 // （両側が失敗すると片方の判定が外れても不一致として止まり、見分けがつかない）
 test('token-diff の失敗判定: 例外のメッセージが空文字でも、変換前・変換後それぞれの失敗として扱う', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'token-diff-empty-error-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'token-diff-empty-error-')))
   try {
     const stub = join(dir, 'run.cjs')
     writeFileSync(
@@ -1698,7 +1699,7 @@ test('ビルド時のトークン照合: 正常な開発ファイルはビルド
 // 照合ヘルパーの差し替えは verifyTokenParity の引数（helperPath / execPath）と、CLI 本体が使う関数 runBuild の
 // 引数 parity だけで行う（CLI の引数には差し替える口がない — 照合を迂回できてしまうため。下のテスト参照）。
 // 正常終了で一致を示す出力は `{"results":[{"ok":true}]}` の形だけで、それ以外はすべて中止になる。
-const helperDir = mkdtempSync(join(tmpdir(), 'build-workflow-helper-'))
+const helperDir = trackTmp(mkdtempSync(join(tmpdir(), 'build-workflow-helper-')))
 after(() => rmSync(helperDir, { recursive: true, force: true }))
 // 標準入力を読み切ってから body を実行する照合ヘルパー（読まずに終了すると EPIPE で原因が変わる）
 const writeHelper = (name, body) => {
@@ -1708,7 +1709,7 @@ const writeHelper = (name, body) => {
 }
 // CLI 本体が使う runBuild を、一時ファイルの開発ファイルに対して呼ぶ（照合ヘルパーを差し替えられる）
 const runBuildOn = (srcText, { checkOnly = false, parity = {} } = {}) => {
-  const dir = mkdtempSync(join(tmpdir(), 'build-workflow-run-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'build-workflow-run-')))
   try {
     const srcPath = join(dir, 'in.src.js')
     const distPath = join(dir, 'out.js')
@@ -1784,7 +1785,7 @@ test('runBuild: --check 相当でも照合ヘルパーが失敗すれば status 
 })
 
 test('runBuild: --check 相当で実行ファイルが読めなければ status 1', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'build-workflow-nodist-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'build-workflow-nodist-')))
   try {
     const srcPath = join(dir, 'in.src.js')
     writeFileSync(srcPath, GOOD_SRC)
@@ -1838,7 +1839,7 @@ test('parseArgs: 引数なしは既定の src / dist、--src / --dist / --check 
 // ---------------------------------------------------------------------------
 
 test('symlink 経由で起動しても CLI ガードを通過して --check が実行される（無言 no-op の防止）', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'build-workflow-link-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'build-workflow-link-')))
   try {
     const link = join(dir, 'build-workflow.mjs')
     symlinkSync(SCRIPT_PATH, link)

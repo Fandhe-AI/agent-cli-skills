@@ -13,6 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -29,7 +30,7 @@ const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const driverPart = source.slice(markerIndex)
 
 globalThis.args = { parent: 1 }
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-agent-budget-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-agent-budget-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-agent-budget-defs.mjs')
 // 旧実装（修正前）にはこれらの宣言が無い。RED 確認用に typeof ガードで存在しない名前を undefined にする。
 const SLICE_EXPORTS = [

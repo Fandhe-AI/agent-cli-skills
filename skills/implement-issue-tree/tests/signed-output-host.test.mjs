@@ -14,6 +14,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -43,7 +44,7 @@ const SLICE_EXPORTS = [
   'SCRIPT_SHA256',
   'RESIDUAL_BYTE_MEASURE_MAX_RETRIES',
 ]
-const sliceDir = mkdtempSync(join(tmpdir(), 'iit-signed-host-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-signed-host-')))
 let sliceSeq = 0
 // args を差し替えて別の定義部スライスを import する（skillDir は import 時に確定する定数のため）
 async function importSlice(argsValue) {
@@ -229,7 +230,7 @@ function runningAgent(onResult, mutateCommand = (c) => c) {
 }
 
 test('結合: 実スクリプトの出力を転記すると受理され、du / df の実測値になる', async () => {
-  const work = mkdtempSync(join(tmpdir(), 'iit-e2e-'))
+  const work = trackTmp(mkdtempSync(join(tmpdir(), 'iit-e2e-')))
   try {
     const dirs = ['wt one', 'wt-two'].map((n) => {
       const d = join(work, n)
@@ -249,7 +250,7 @@ test('結合: 実スクリプトの出力を転記すると受理され、du / d
 })
 
 test('結合: 実スクリプトの出力を転記後に kib を書き換えると拒否される（再測定でも改竄が続けば null）', async () => {
-  const work = mkdtempSync(join(tmpdir(), 'iit-e2e-'))
+  const work = trackTmp(mkdtempSync(join(tmpdir(), 'iit-e2e-')))
   try {
     const d = join(work, 'wt')
     mkdirSync(d)
@@ -262,7 +263,7 @@ test('結合: 実スクリプトの出力を転記後に kib を書き換える�
 })
 
 test('結合: 期待ハッシュと合わないスクリプト（版ずれ）は launcher が起動せず、出力が無いので null（fail-closed）', async () => {
-  const work = mkdtempSync(join(tmpdir(), 'iit-e2e-'))
+  const work = trackTmp(mkdtempSync(join(tmpdir(), 'iit-e2e-')))
   try {
     const d = join(work, 'wt')
     mkdirSync(d)
@@ -339,7 +340,7 @@ test('S2: 件数は同じで別のパスを測った封筒（正しい nonce・�
 })
 
 test('S2 結合: エージェントがコマンド中のパスを 1 文字変えて実行した出力は、実スクリプトの正しい封筒でも拒否される', async () => {
-  const work = mkdtempSync(join(tmpdir(), 'iit-e2e-'))
+  const work = trackTmp(mkdtempSync(join(tmpdir(), 'iit-e2e-')))
   try {
     const dirs = ['wt-one', 'wt-two'].map((n) => {
       const d = join(work, n)
@@ -361,7 +362,7 @@ test('S2 結合: エージェントがコマンド中のパスを 1 文字変え
 })
 
 test('S2 結合: free-disk のパスを変えて実行した出力も拒否され、変えなければ受理される', async () => {
-  const work = mkdtempSync(join(tmpdir(), 'iit-e2e-'))
+  const work = trackTmp(mkdtempSync(join(tmpdir(), 'iit-e2e-')))
   try {
     const d = join(work, 'main-wt')
     mkdirSync(d)
