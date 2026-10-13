@@ -27,6 +27,14 @@ dir=\${GH_STUB_DIR:?}
 echo "$*" >> "$dir/calls.log"
 # 遅い・ハングする gh を模す（GH_STUB_DELAY 秒眠る / GH_STUB_HANG 秒の sleep を子と孫に残す）
 [ -n "\${GH_STUB_DELAY:-}" ] && sleep "$GH_STUB_DELAY"
+# GH_STUB_DELAYS="0 0 0 60": 全経路を通した n 番目の呼び出しだけ n 番目の秒数だけ眠る（リスト外は 0）
+if [ -n "\${GH_STUB_DELAYS:-}" ]; then
+  c=0; [ -f "$dir/all.count" ] && c=$(cat "$dir/all.count")
+  c=$((c + 1)); echo "$c" > "$dir/all.count"
+  d=0; i=0
+  for x in $GH_STUB_DELAYS; do i=$((i + 1)); [ "$i" -eq "$c" ] && d=$x; done
+  [ "$d" = 0 ] || sleep "$d"
+fi
 if [ -n "\${GH_STUB_FLOOD:-}" ]; then while :; do echo '{"total_count":1}'; done; fi
 if [ -n "\${GH_STUB_HANG:-}" ]; then sleep "$GH_STUB_HANG" & sleep "$GH_STUB_HANG"; fi
 key=""

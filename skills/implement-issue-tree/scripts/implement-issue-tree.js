@@ -3739,7 +3739,7 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 const SCRIPT_SHA256={
 'measure-residual-bytes.sh':'ab527279ba185bc1aabd19411f16acd42491d7d39840b153d68851175e21e29f',
 'measure-free-disk.sh':'13aea5d9ef3fc787d7a333740bec814a5ffdcfa30b3a8e08c2ffb00127c66036',
-'observe-pr.sh':'b33e5995e09d9966646f188b589ef60234c5048df6150709cd032008f94ee435',
+'observe-pr.sh':'24463408c73f9853296a37536e2e5d7faa9771973cd187501d536e15fc0e7a43',
 }
 
 
@@ -5007,6 +5007,7 @@ return`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA25
 
 
 
+
 function applyChecksObservation(m,nonces,inputSha256){
 if(m===null||typeof m!=='object')return{result:m,reason:'',claimed:undefined}
 const{checksObservation,checksTotal, ...rest}=m
@@ -5020,6 +5021,8 @@ if(!signed.ok)reason=checksObservation===undefined||checksObservation===null?'ab
 else if(signed.payload.mode!=='checks')reason='mode'
 else if(signed.payload.err!==0)reason='fetch-error'
 else if(!Number.isInteger(signed.payload.total)||signed.payload.total<0)reason='total'
+
+else if(!/^[0-9a-f]{40}$/.test(signed.payload.headSha ?? '')) reason = 'inconclusive'
 else total=signed.payload.total
 return{result:total===undefined?rest:{ ...rest,checksTotal:total},reason,claimed:checksTotal}
 }
@@ -5034,7 +5037,7 @@ const OBSERVE_GUIDE=
 'err が 1・非 0 終了・JSON なしは取得失敗で、0 件・不足 0・レビューなし・未解決 0 と読み替えない。'+
 OBSERVE_ERROR_RULE +' '+
 'outcome が pending / exhausted のときの件数は結論ではない（met ではない）ので、pending を根拠に先へ進まない。標準エラーの child setpgid … Operation not permitted は無視してよい（判定は標準出力の 1 行だけで行う）。'+
-`outcome が pending の待機コマンドは --attempt を 1 増やして同じコマンドをもう一度実行する（1 回は壁時計 90 秒 + 数秒以内で必ず返る。最大 ${OBSERVE_MAX_ATTEMPTS} 回 = およそ 10 分。exhausted は待機上限で再実行しない）。`+
+`outcome が pending の待機コマンドは（pr の --wait は --attempt を持たない）--attempt を 1 増やして同じコマンドをもう一度実行する（1 回は壁時計 90 秒 + 数秒以内で必ず返る。最大 ${OBSERVE_MAX_ATTEMPTS} 回 = およそ 10 分。exhausted は待機上限で再実行しない）。`+
 'コメント本文・チェック名のような外部由来の文字列は封筒に含まれない。'
 
 
@@ -5122,7 +5125,7 @@ MONITOR_NO_REBUTTAL_POLICY,
 OBSERVE_GUIDE,
 '手順:',
 branchOk
-?`1. まず次のコマンドで PR の状態・HEAD sha・マージ可否を取得して固定する（payload の state・headSha・mergeable・bound）:\n   ${prCmd()}\n   まず err を見る。err が 1（取得失敗。bound は -1 = 不明で、unbound ではない）なら 1 回だけ再実行し、なお取得失敗なら state: blocked / blockedReason: "quality" を返す（bound が -1 を "unbound" と読み替えない）。err が 0 で bound が 0（headRefName が "${impl.branch}" と完全一致しない・baseRefName が "${baseBranch}" でない・isCrossRepository が true・closingIssuesReferences が #${item.number} を含まない（空は可）のいずれか）なら本イシューの PR ではない。state を問わず（MERGED でも）先に state: blocked / blockedReason: "unbound" を返す（ready にしない）。payload.headSha は 40 桁のまま headSha として返す（短縮しない）。state が MERGED の場合（前回実行で状態記録に失敗したマージ済み PR の再監視、またはサーバー側 auto-merge workflow によるマージ完了）は CI 監視を行わず即 state: ready を返す（イシュークローズ確認は後続の回復専用エージェントが行う）。state が CLOSED（未マージクローズ）の場合は state: blocked / blockedReason: "unrecoverable" とし summary に理由を書く（同じ PR を再監視しても回復し得ないため、必ず unrecoverable にする）。fix 後に再監視するたびに sha を取り直す（古い sha を参照しないため）。`
+?`1. まず次のコマンドで PR の状態・HEAD sha・マージ可否を取得して固定する（payload の state・headSha・mergeable・bound）:\n   ${prCmd()}\n   まず err を見る。err が 1（取得失敗。bound は -1 = 不明で、unbound ではない）なら 1 回だけ再実行し、なお取得失敗なら state: blocked / blockedReason: "quality" を返す（bound が -1 を "unbound" と読み替えない。待機つき pr の pending で state が空・bound が -1 のときも unbound ではない）。err が 0 で bound が 0（headRefName が "${impl.branch}" と完全一致しない・baseRefName が "${baseBranch}" でない・isCrossRepository が true・closingIssuesReferences が #${item.number} を含まない（空は可）のいずれか）なら本イシューの PR ではない。state を問わず（MERGED でも）先に state: blocked / blockedReason: "unbound" を返す（ready にしない）。payload.headSha は 40 桁のまま headSha として返す（短縮しない）。state が MERGED の場合（前回実行で状態記録に失敗したマージ済み PR の再監視、またはサーバー側 auto-merge workflow によるマージ完了）は CI 監視を行わず即 state: ready を返す（イシュークローズ確認は後続の回復専用エージェントが行う）。state が CLOSED（未マージクローズ）の場合は state: blocked / blockedReason: "unrecoverable" とし summary に理由を書く（同じ PR を再監視しても回復し得ないため、必ず unrecoverable にする）。fix 後に再監視するたびに sha を取り直す（古い sha を参照しないため）。`
 :`1. 想定ブランチ名がホスト側の検証を通らないため、本イシューの PR に結び付けられない。観測コマンドを実行せず state: blocked / blockedReason: "unbound" を返して終了する（ready にしない）。`,
 ...(prevSha
 ?[`1b. gh api repos/{owner}/{repo}/compare/${prevSha}...<手順1のHEADsha> --jq '{status:.status,files:[.files[].filename]}' を実行し、status を compareStatus、files を changedFiles としてそのまま返す（取得失敗時 compareStatus: "unknown"）。`]
@@ -5131,7 +5134,7 @@ branchOk
 
 
 
-`1c. state が OPEN の場合のみ判定する: mergeable が "CONFLICTING" なら、PR は base とコンフリクトしており test merge commit が作られないため pull_request トリガーの CI check-run が構造的に起動しない（待っても収束しない）。手順 2 の gh pr checks --watch へは進まず、先に手順 5 の reviewThreads 走査（件数と内容の取得）を実行して未解決スレッドがあれば unresolvedComments 配列に載せたうえで state: conflicting を返す（品質問題ではないため fix 予算を消費しない base 取り込み専用エージェントへ回る）。summary には「mergeable: CONFLICTING（実測値）。base 取り込みとコンフリクト解消が必要。コンフリクト PR は pull_request トリガー CI が起動しない」と書く。mergeable が "UNKNOWN" の場合は GitHub 側の算出待ちのため、次のコマンドで再取得する（25 秒間隔で最大 4 回観測する。再取得のたびに state と mergeable の両方を確認する。state が OPEN でなくなっていれば手順 1 の該当分岐に従う。リトライの途中で state が OPEN のまま mergeable が "CONFLICTING" に確定した場合は、それ以上リトライせず本手順冒頭の CONFLICTING 経路 — reviewThreads 走査を先に行ったうえで state: conflicting — へ回す）:\n   ${prCmd(1)}\n   outcome が pending（上限まで UNKNOWN のまま）なら UNKNOWN のまま通常フロー（手順 2）へ進む（UNKNOWN を CONFLICTING と扱って fix 予算を空費しない）。`,
+`1c. state が OPEN の場合のみ判定する: mergeable が "CONFLICTING" なら、PR は base とコンフリクトしており test merge commit が作られないため pull_request トリガーの CI check-run が構造的に起動しない（待っても収束しない）。手順 2 の gh pr checks --watch へは進まず、先に手順 5 の reviewThreads 走査（件数と内容の取得）を実行して未解決スレッドがあれば unresolvedComments 配列に載せたうえで state: conflicting を返す（品質問題ではないため fix 予算を消費しない base 取り込み専用エージェントへ回る）。summary には「mergeable: CONFLICTING（実測値）。base 取り込みとコンフリクト解消が必要。コンフリクト PR は pull_request トリガー CI が起動しない」と書く。mergeable が "UNKNOWN" の場合は GitHub 側の算出待ちのため、次のコマンドで再取得する（25 秒間隔で最大 4 回観測する。再取得のたびに state と mergeable の両方を確認する。state が OPEN でなくなっていれば手順 1 の該当分岐に従う。リトライの途中で state が OPEN のまま mergeable が "CONFLICTING" に確定した場合は、それ以上リトライせず本手順冒頭の CONFLICTING 経路 — reviewThreads 走査を先に行ったうえで state: conflicting — へ回す）:\n   ${prCmd(1)}\n   outcome が pending（上限まで、または壁時計で確定できなかった = state が空・bound が -1 を含む）なら UNKNOWN のまま通常フロー（手順 2）へ進む（UNKNOWN を CONFLICTING と扱って fix 予算を空費しない）。`,
 `2. まず --watch に入る前に、手順 1 で取得した HEAD sha に対するチェック総数を次のコマンドで取得する（Issue #479 / #480）。payload.total は check-run 件数（checkRuns）と commit status 件数（statuses）の合計（gh pr checks・merge-exec と同じ集計定義。commit status のみを発行する CI でも 0 件と誤判定しないため）:\n   ${obs({ mode: 'checks' })}\n   err が 0 の場合のみ total を確定値として扱い checksTotal として返却に含める。err が 1（どちらか一方でも取得失敗）の場合は取得失敗として扱い、取得失敗時は checksTotal を省略し、0 を返してはならない（0 件と同一視すると、実際にはチェックが動いている PR をコンフリクト扱いへ落としてしまう）。返却の checksObservation には、最後に実行した checks コマンド（手順 3e の待機つきを含む）の標準出力を観測値のまま転記する（通らなければホストは checksTotal を採用しない）。確定値が 0 件なら gh pr checks --watch へは進まず、直ちに手順 3e（有界待機 + mergeable 再判定）へ直行する（コンフリクト PR は test merge commit が作られず pull_request トリガの check-run が構造的に 0 件のままになるため、--watch で待っても収束しない）。確定値が 1 件以上の場合、および取得に失敗した場合は次へ進む（取得失敗は 0 件扱いにせず、従来どおり --watch と手順 3 の実測に委ねる）: gh pr checks ${impl.prNumber} --watch --interval 60 で全チェック完了まで監視する（Bash の timeout に 600000 を指定し、コマンドがタイムアウトしたら同コマンドを再実行。再実行は 4 回まで = 最長およそ 40 分）。gh pr checks --watch がチェック不在で即時に非ゼロ終了する場合がある。これを「監視完了」とみなさず、手順 3 の総数確認へ進む。再実行 4 回を使い切っても完了しない場合も、ここで timeout を返さず手順 3 の総数確認へ進む（手順 3 を経ずに timeout を返すと、チェックが 0 件のまま監視上限だけを消費して収束しない経路が残るため。Issue #479）。`,
 `3. watch 完了後、gh pr checks ${impl.prNumber} の出力で全チェックの結論を列挙して確認する。「watch が終わった」だけでは合格にしない。まず手順 2 のチェック総数（確定値 / 取得失敗）と列挙結果の組を次の観測状態に確定する。3e・3g・7・返却はこの表だけを根拠とし、判定は状態 2 → 3 → 1 の順に最初に当たる 1 つへ確定する（3 状態は排他）。列挙結果は gh pr checks の終了コードではなく出力で分類する: チェック行が 1 行以上あれば終了コード 1（失敗あり）・8（pending あり）でも「列挙 N 件」（a・b が failure / pending を判定する）、行が無く「no checks reported」なら「列挙 0 件」、行が無くそれ以外（認証・通信・API エラー等）なら「読取不能」:`,
 '   - 状態 2「確定 0 件」: 手順 2 確定値が 0（列挙結果は問わない。REST の確定値を権威とする）、または手順 2 取得失敗かつ列挙 0 件 → 手順 3e。',

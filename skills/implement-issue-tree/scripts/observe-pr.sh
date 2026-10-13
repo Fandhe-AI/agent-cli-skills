@@ -32,23 +32,30 @@
 #       - inputSha256  入力（mode・pr・repo・base・branch・issue・slug・until を改行で連ねたもの）の SHA-256。
 #                      ホストは自分が組み立てた引数から同じ値を再計算して照合する
 #       - err          取得失敗 = 1。失敗を「0 件」「不足 0」へ畳み込まない（件数は 0 を入れるが err を見ること）。
-#                      時間切れ（gh 1 回ごとの制限・壁時計上限）も取得失敗。pr の bound は取得失敗のとき -1（不明）で、
-#                      想定外の PR（0）と区別できる。err を先に見ること
-#       - outcome      observed（待機なしで取得できた）/ met / pending（条件未成立。--attempt を 1 増やして同じコマンドを
-#                      再実行する）/ exhausted（--attempt が上限に達しても未成立）/ error（取得に失敗）
+#                      gh 自身の制限（OBSERVE_PR_GH_TIMEOUT_SEC）の超過・非 0 終了・HTTP エラー・出力サイズ超過が取得失敗。
+#                      壁時計の残りで縮めた制限に掛かった kill は取得失敗ではなく「この起動では結論が出なかった」（下の「時間の
+#                      上限」）。pr の bound は取得失敗のとき -1（不明）で、想定外の PR（0）と区別できる。err を先に見ること
+#       - outcome      observed（待機なしで取得できた）/ met / pending（条件未成立、または壁時計でこの起動では結論が出なかった。
+#                      --attempt を持つモードは --attempt を 1 増やして同じコマンドを再実行する。pr の --wait は --attempt を
+#                      持たず、pending は mergeable が UNKNOWN のまま = 結論が出ていない）/ exhausted（--attempt が上限に
+#                      達しても未成立）/ error（取得に失敗）。pending・exhausted の件数は結論ではない。壁時計で打ち切った
+#                      封筒は headSha が空（実測した 0 件の exhausted は headSha を持つ。ホストはこれで見分ける）
 #       - attempt, maxAttempts  --wait の何回目か・上限（待機なしは 0）
 # 時間の上限（遅い・ハングする gh を含めて保証する）:
 #       - gh 1 回ごとに OBSERVE_PR_GH_TIMEOUT_SEC 秒（既定 25）の制限を付ける。macOS に timeout(1) は無いので、gh を
 #         ジョブ制御つきのバックグラウンドで走らせ（自分のプロセスグループ）、別のウォッチャーが時間切れでグループごと kill
-#         する（gh が git などの孫プロセスを持っても残さない）。時間切れは取得失敗（err:1）
+#         する（gh が git などの孫プロセスを持っても残さない）。gh 自身の制限超過は取得失敗（err:1）
 #       - 1 回の起動の壁時計上限は OBSERVE_PR_WALL_SEC 秒（既定 90・最大 100）。個々の gh の制限は残り時間でさらに短くなり、
 #         残りが無ければ gh を呼ばない。後始末を含めても 90 秒 + 数秒で必ず返る（Bash ツールの既定タイムアウト 120 秒に収まる）
 #       - 次の観測は、残り時間が「それまでで最長の 1 観測 + 間隔 + 余裕 3 秒」に満たなければ始めずに pending を返す
 #         （観測時間は整数秒でしか測れず最大 1 秒ほど過小になるため余裕を足す）
 #       - 壁時計の残りで縮めた制限に掛かって gh を kill した（または残りが無く呼べなかった）場合は、待機つきなら取得失敗ではなく
-#         この起動では結論が出なかったものとして pending（--attempt が上限なら exhausted）を返す（件数は 0 で、met ではない）。
-#         gh 自身の制限超過・非 0 終了・HTTP エラー・出力サイズ超過は本当の取得失敗（err:1）。待機なしの単発観測は pending が無いので err:1
+#         この起動では結論が出なかったものとして pending（--attempt が上限なら exhausted）を返す（件数は 0・headSha は空で、met
+#         ではない）。ただし、その起動の中で取得失敗（HTTP エラー等）があり、一度も取得に成功しないまま終わる場合は、「待ち切った」と
+#         読める封筒を出さず err:1・error にする。gh 自身の制限超過・非 0 終了・HTTP エラー・出力サイズ超過は本当の取得失敗（err:1）。
+#         待機なしの単発観測は pending が無いので err:1
 #       - gh 1 回の出力は OBSERVE_PR_MAX_OUT_BYTES（既定 16 MiB）まで。超えたら取得失敗（出力し続ける gh が一時ファイルを育てない）
+#       - グループを作れず pid 単独の kill に倒れた場合（macOS の bash が稀に setpgid に失敗する）、gh の孫プロセスは残り得る
 #       - スクリプトが TERM・INT・HUP を受けたときは、走らせている gh のグループを kill して一時ファイルを消す。ただし SIGKILL で
 #         本体が殺された場合は後始末できず、gh とウォッチャーが最大 gh の制限（25 秒）まで残り、一時ファイルが 1 個残る
 #       - 設計上の限界: 1 回の gh が 23 秒を超えるほど遅いと、gh を 4 回呼ぶ required は壁時計 90 秒内に観測を終えられず取得失敗または
@@ -298,8 +305,14 @@ run_timed() {
       [ -n "${OUT}" ] || rc=1
     fi
   elif [ "${rc}" -eq 137 ]; then
-    echo "observe-pr: gh が ${limit} 秒の時間制限を超えたため kill した" >&2
-    [ "${clamped}" -eq 0 ] || WALL_HIT=1
+    if [ "${clamped}" -eq 1 ]; then
+      WALL_HIT=1
+      echo "observe-pr: この起動の残り時間 ${limit} 秒に達したため gh を kill した（この起動では結論が出ていない）" >&2
+    else
+      echo "observe-pr: gh が ${limit} 秒の時間制限を超えたため kill した（取得失敗）" >&2
+    fi
+  else
+    echo "observe-pr: gh が終了コード ${rc} で失敗した（141 は出力サイズ上限の超過による SIGPIPE）" >&2
   fi
   rm -f "${CUR_TMP}"
   CUR_TMP=""
@@ -316,7 +329,11 @@ gh_api() {
   run_timed "${gh_timeout}" gh api "$@"
 }
 fail() {
-  echo "observe-pr: 取得に失敗した（${1}）" >&2
+  if [ "${WALL_HIT}" -eq 1 ]; then
+    echo "observe-pr: この起動では結論が出ていない（壁時計の残り時間に達した: ${1}）。取得失敗ではない" >&2
+  else
+    echo "observe-pr: 取得に失敗した（${1}）" >&2
+  fi
   return 1
 }
 
@@ -517,12 +534,15 @@ outcome=observed
 i=0
 obs_max=0
 inconclusive=0
+ever_ok=0
+ever_failed=0
 while :; do
   i=$((i + 1))
   err=0
   t_obs=$(date +%s)
   WALL_HIT=0
   run_observe || err=1
+  if [ "${err}" -eq 0 ]; then ever_ok=1; elif [ "${WALL_HIT}" -eq 0 ]; then ever_failed=1; fi
   now=$(date +%s)
   # それまでで最長の 1 観測の所要秒数。次の観測を始められるかの見積りに使う
   [ $((now - t_obs)) -le "${obs_max}" ] || obs_max=$((now - t_obs))
@@ -533,6 +553,11 @@ while :; do
   # 壁時計の残りで縮めた制限に掛かって kill した（正常な gh かもしれない）= 取得失敗ではなく、この起動では結論が出なかった。
   # 件数は 0 に戻して返し、outcome が pending / exhausted であることを根拠にしてもらう（met ではない）
   if [ "${err}" -ne 0 ] && [ "${WALL_HIT}" -eq 1 ]; then
+    # この起動で取得失敗が続き、一度も取得に成功しないまま壁時計に達したなら「待ち切った」とは言えない = 取得失敗として返す
+    if [ "${ever_failed}" -eq 1 ] && [ "${ever_ok}" -eq 0 ]; then
+      outcome=error
+      break
+    fi
     err=0
     inconclusive=1
     if [ "${mode}" != pr ] && [ "${attempt}" -ge "${max_attempts}" ]; then outcome=exhausted; else outcome=pending; fi

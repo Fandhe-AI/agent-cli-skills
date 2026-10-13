@@ -1,0 +1,160 @@
+// 壁時計 kill 由来の「未確定」と本当の取得失敗の区別、およびホストがそれを「チェック 0 件」と採用しないことの回帰テスト
+// （PR #612 の独立レビュー・codex P1・Bugbot の同一指摘）。
+//
+//   - 壁時計で kill した観測の封筒は headSha が空で件数は 0（古い件数・headSha を載せない）。ホストは headSha が 40 桁 16 進でない
+//     封筒を採用しない（採用すると timeout かつ checksTotal 0 が conflicting へ再判定され、不要な base 取り込みになる）
+//   - 実測 0 件の封筒（headSha あり）は従来どおり採用する
+//   - その起動の中で取得失敗があり、一度も取得に成功しないまま終わるなら、pending / exhausted ではなく error（err:1）
+//   - 非 0 終了の gh は、本文が有効な JSON でも取得失敗（pipefail）。出力サイズの検査は上限ちょうどの境界を固定する
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { availableBashes, toolExists } from './lib/signed-output.mjs'
+import { createObserveStub } from './lib/gh-observe-stub.mjs'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const SCRIPT = join(HERE, '..', 'scripts', 'observe-pr.sh')
+const SRC = join(HERE, '..', 'scripts', 'implement-issue-tree.src.js')
+const NONCE = 'k3x9a0b1c2d4e5f6g7h8i9j0k1l2'
+const SHA = 'a1'.repeat(20)
+const BASHES = availableBashes()
+const jqAvailable = toolExists('jq')
+const prJson = JSON.stringify({ headRefOid: SHA, state: 'OPEN', mergeable: 'MERGEABLE', headRefName: 'fix/7-x', baseRefName: 'main', isCrossRepository: false, closingIssuesReferences: [{ number: 7 }] })
+const ERR_BODY = { out: '{"message":"Bad Gateway"}', exit: 1 }
+const SCALED = { OBSERVE_PR_WALL_SEC: '7', OBSERVE_PR_SLEEP_SEC: '1', OBSERVE_PR_POLLS: '10', OBSERVE_PR_GH_TIMEOUT_SEC: '30' }
+
+function run(bash, stub, args, env = {}) {
+  return spawnSync(bash, [SCRIPT, '--nonce', NONCE, ...args], { encoding: 'utf8', env: stub.env(env) })
+}
+const payloadOf = (r) => {
+  assert.equal(r.status, 0, `exit ${r.status} / stderr: ${r.stderr}`)
+  return JSON.parse(r.stdout).payload
+}
+
+// ホスト側（定義部のスライス）
+globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
+globalThis.agent = async () => null
+globalThis.log = () => {}
+const source = readFileSync(SRC, 'utf8')
+const def = source.slice(0, source.lastIndexOf('\n', source.indexOf(['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_'))))
+const slice = join(mkdtempSync(join(tmpdir(), 'iit-inconclusive-')), 'defs.mjs')
+writeFileSync(slice, `${def}\nexport { applyChecksObservation, observeInputText, sha256Hex }\n`)
+const m = await import(pathToFileURL(slice).href)
+const inputSha = m.sha256Hex(m.observeInputText({ mode: 'checks', pr: 5 }))
+
+for (const bash of BASHES) {
+  const t = (name, fn) => test(`[${bash}] ${name}`, { skip: !jqAvailable }, fn)
+  const unmetStub = (extra = {}) => createObserveStub({
+    prview: { out: prJson }, 'check-runs-total': { out: '{"total_count":0,"check_runs":[]}' }, status: { out: '{"statuses":[]}' }, ...extra,
+  })
+
+  t('壁時計 kill の pending 封筒は headSha が空で件数 0（直前の観測の headSha・件数を載せない）。stderr は「結論が出ていない」と言う', () => {
+    // 1 回目の観測は成功（gh 3 回）。2 回目の観測は pr view に成功して HEAD を得たあと、check-runs の呼び出しが壁時計で kill される
+    const stub = unmetStub()
+    const r = run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '1'], { ...SCALED, GH_STUB_DELAYS: '0 0 0 0 60' })
+    const p = payloadOf(r)
+    assert.deepEqual({ o: p.outcome, e: p.err, h: p.headSha, t: p.total, r: p.checkRuns, s: p.statuses }, { o: 'pending', e: 0, h: '', t: 0, r: 0, s: 0 })
+    assert.match(r.stderr, /この起動では結論が出ていない/)
+    assert.ok(!/取得に失敗した（gh pr view/.test(r.stderr.split('\n').filter((l) => l.includes('結論が出ていない')).join('')), '結論が出ていない行は取得失敗と言わない')
+  })
+
+  t('その起動で取得失敗があり、一度も取得に成功しないまま壁時計 kill で終わるなら、pending / exhausted ではなく error（err:1）', () => {
+    for (const attempt of ['1', '7']) {
+      const stub = createObserveStub({ prview: ERR_BODY })
+      const p = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', attempt], { ...SCALED, GH_STUB_DELAYS: '0 0 60' }))
+      assert.deepEqual({ o: p.outcome, e: p.err, h: p.headSha, t: p.total }, { o: 'error', e: 1, h: '', t: 0 }, `attempt ${attempt}`)
+    }
+  })
+
+  t('対照: 取得に一度でも成功していれば、そのあと壁時計で kill されても pending（取得失敗が混じっていても）', () => {
+    // 観測 1 の pr view は 502、観測 2 は成功（0 件）、観測 3 が壁時計 kill
+    const stub = createObserveStub({
+      prview: [ERR_BODY, { out: prJson }], 'check-runs-total': { out: '{"total_count":0,"check_runs":[]}' }, status: { out: '{"statuses":[]}' },
+    })
+    const p = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '1'], { ...SCALED, GH_STUB_DELAYS: '0 0 0 0 60' }))
+    assert.deepEqual({ o: p.outcome, e: p.err }, { o: 'pending', e: 0 })
+  })
+
+  t('非 0 終了の gh は、標準出力が有効な JSON でも取得失敗（pipefail）。全モードで err:1 になり、理由を標準エラーに 1 行出す', () => {
+    const cases = [
+      ['checks', ['--mode', 'checks'], { prview: { out: prJson }, 'check-runs-total': { out: '{"total_count":2,"check_runs":[]}', exit: 1 }, status: { out: '{"statuses":[]}' } }],
+      ['checks-prview', ['--mode', 'checks'], { prview: { out: SHA, exit: 1 }, 'check-runs-total': { out: '{"total_count":2}' }, status: { out: '{"statuses":[]}' } }],
+      ['pr', ['--mode', 'pr', '--base', 'main', '--branch', 'fix/7-x', '--issue', '7'], { prview: { out: prJson, exit: 1 } }],
+      ['required', ['--mode', 'required', '--base', 'main'], {
+        prview: { out: prJson }, rules: { out: '[{"type":"pull_request"}]\n', exit: 1 }, 'check-runs': { out: '{"check_runs":[]}\n' }, statuses: { out: '[]\n' },
+      }],
+      ['threads', ['--mode', 'threads'], { graphql: { out: '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}', exit: 1 } }],
+    ]
+    for (const [name, args, routes] of cases) {
+      const r = run(bash, createObserveStub(routes), [...args, '--pr', '5'])
+      const p = payloadOf(r)
+      assert.deepEqual({ e: p.err, o: p.outcome }, { e: 1, o: 'error' }, name)
+      assert.match(r.stderr, /終了コード/, `${name}: 失敗の理由を標準エラーに出す`)
+    }
+  })
+
+  t('gh の出力サイズの上限は境界を含めて検査する（上限ちょうどは採用、1 バイト超は取得失敗）', () => {
+    const body = (n) => `{"total_count":2,"pad":"${'x'.repeat(n - '{"total_count":2,"pad":""}'.length)}"}`
+    assert.equal(body(1000).length, 1000)
+    const ok = payloadOf(run(bash, unmetStub({ 'check-runs-total': { out: body(1000) } }), ['--mode', 'checks', '--pr', '5'], { OBSERVE_PR_MAX_OUT_BYTES: '1000' }))
+    assert.deepEqual({ e: ok.err, t: ok.total }, { e: 0, t: 2 })
+    const over = payloadOf(run(bash, unmetStub({ 'check-runs-total': { out: body(1001) } }), ['--mode', 'checks', '--pr', '5'], { OBSERVE_PR_MAX_OUT_BYTES: '1000' }))
+    assert.deepEqual({ e: over.err, o: over.outcome }, { e: 1, o: 'error' })
+  })
+}
+
+// --- ホスト側 ---
+
+const NONCES = [NONCE, `${NONCE}w`]
+const envOf = (payload, nonce = NONCE) => {
+  // 独立実装（test lib）で署名する
+  return import('./lib/signed-output.mjs').then((lib) => lib.makeEnvelope(nonce, payload))
+}
+const good = (over = {}) => ({ mode: 'checks', err: 0, total: 0, checkRuns: 0, statuses: 0, headSha: SHA, attempt: 7, maxAttempts: 7, outcome: 'exhausted', inputSha256: inputSha, ...over })
+
+test('ホスト: headSha が 40 桁 16 進でない封筒（壁時計 kill 由来の未確定）は、正しく署名されていても採用しない', async () => {
+  for (const headSha of ['', 'abc', 'Z'.repeat(40), 'a'.repeat(41), null, 12]) {
+    for (const outcome of ['pending', 'exhausted']) {
+      const env = await envOf(good({ headSha, outcome }))
+      const r = m.applyChecksObservation({ state: 'timeout', summary: 's', checksTotal: 0, checksObservation: env }, NONCES, inputSha)
+      assert.equal(r.reason, 'inconclusive', JSON.stringify({ headSha, outcome }))
+      assert.ok(!('checksTotal' in r.result), '採用しない（conflicting への再判定の根拠にならない）')
+    }
+  }
+})
+
+test('ホスト: 実測 0 件の封筒（headSha あり、exhausted / pending / met いずれも）は従来どおり採用する', async () => {
+  for (const outcome of ['exhausted', 'pending', 'met', 'observed']) {
+    const env = await envOf(good({ outcome, total: 0 }))
+    const r = m.applyChecksObservation({ state: 'timeout', summary: 's', checksTotal: 9, checksObservation: env }, NONCES, inputSha)
+    assert.equal(r.reason, '')
+    assert.equal(r.result.checksTotal, 0, outcome)
+  }
+})
+
+test('ホスト: 実際の壁時計 kill の封筒（スクリプトの出力）は採用されず、実測 0 件の exhausted は採用される', { skip: !jqAvailable }, () => {
+  const bash = BASHES[0]
+  const rKilled = spawnSync(bash, [SCRIPT, '--nonce', NONCE, '--mode', 'checks', '--pr', '5', '--wait', '--attempt', '7'], {
+    encoding: 'utf8', env: createObserveStub({ prview: { out: prJson }, 'check-runs-total': { out: '{"total_count":0}' }, status: { out: '{"statuses":[]}' } }).env({ ...SCALED, GH_STUB_DELAYS: '0 0 0 0 60' }),
+  })
+  const killed = JSON.parse(rKilled.stdout)
+  assert.deepEqual({ o: killed.payload.outcome, h: killed.payload.headSha }, { o: 'exhausted', h: '' })
+  const a = m.applyChecksObservation({ state: 'timeout', summary: 's', checksTotal: 0, checksObservation: killed }, NONCES, inputSha)
+  assert.equal(a.reason, 'inconclusive')
+  assert.ok(!('checksTotal' in a.result))
+  const rReal = spawnSync(bash, [SCRIPT, '--nonce', NONCE, '--mode', 'checks', '--pr', '5', '--wait', '--attempt', '7'], {
+    encoding: 'utf8', env: unmetEnv(),
+  })
+  const b = m.applyChecksObservation({ state: 'timeout', summary: 's', checksObservation: JSON.parse(rReal.stdout) }, NONCES, inputSha)
+  assert.equal(b.reason, '')
+  assert.equal(b.result.checksTotal, 0)
+})
+
+function unmetEnv() {
+  return createObserveStub({ prview: { out: prJson }, 'check-runs-total': { out: '{"total_count":0}' }, status: { out: '{"statuses":[]}' } })
+    .env({ OBSERVE_PR_POLLS: '2', OBSERVE_PR_SLEEP_SEC: '0' })
+}
