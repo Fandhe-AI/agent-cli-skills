@@ -233,8 +233,10 @@ printf '%s\n' "${input}" | jq -s -e 'length == 1 and (.[0] | type) == "array" an
 candidates=$(printf '%s\n' "${input}" | jq -r -s '.[0][]' 2>/dev/null) || sweep_result "" 0 0 0 invalid-input
 # 保持対象: failed / blocked / monitoring のイシューが記録した worktree。読めなければ（ファイル無し・壊れている）何も消さない
 # 空ファイル・空白だけ・2 値・items が無い／配列は jq が 0 終了で通すので、保持対象が空のまま進んで消すことのないよう、形を先に確かめる
-jq -s -e 'length == 1 and (.[0] | type) == "object" and (.[0].items | type) == "object"' "${file}" >/dev/null 2>&1 || sweep_result "" 0 0 0 state-unreadable
-retain_list=$(jq -r '.items | to_entries[] | select(.value.status == "failed" or .value.status == "blocked" or .value.status == "monitoring") | .value.worktree | select(type == "string" and . != "")' "${file}" 2>/dev/null) || sweep_result "" 0 0 0 state-unreadable
+# items の値がオブジェクトでない・worktree が文字列でない状態も、保持対象を取りこぼしたまま進まないよう読めない扱いにする
+jq -s -e 'length == 1 and (.[0] | type) == "object" and (.[0].items | type) == "object" and all(.[0].items[]; type == "object" and (if has("worktree") then .worktree else "" end | type) == "string")' "${file}" >/dev/null 2>&1 || sweep_result "" 0 0 0 state-unreadable
+# 抽出側（wr_retain_list）も想定外の型に出会ったら非 0 終了する（黙って 0 件にしない）
+retain_list=$(wr_retain_list "${file}") || sweep_result "" 0 0 0 state-unreadable
 retain_real=""
 while IFS= read -r r; do
   [ -n "${r}" ] || continue

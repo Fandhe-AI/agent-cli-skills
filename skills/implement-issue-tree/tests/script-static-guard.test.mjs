@@ -48,6 +48,13 @@ const GIT_BRANCH_DELETE_ALLOWED = /^\s*git branch -D -- "\$\{branch\}"( >\/dev\/
 // pr-push.sh が自分の作業用 ref（refs/worktree/…。変数への代入は下の専用テストが形を固定する）を片付ける -d の 1 形だけ
 const GIT_UPDATE_REF_CALL = GIT_SUB('update-ref')
 const GIT_UPDATE_REF_ALLOWED = /^\s*git update-ref -d "\$\{(base_ref|branch_ref)\}" >\/dev\/null 2>&1 \|\| true\s*$/
+// base_ref / branch_ref への束縛（代入・local / readonly / declare / export・+=・read・printf -v・${x:=…}・前置代入・; の後ろ・for … in など形を問わない）は、
+// 許可した決まった代入行と完全一致するものだけを通す。読み出し（"${base_ref}" と $base_ref）を取り除いたあとに名前が残る行は束縛か、読み出しとの区別がつかない形として扱う
+const REF_NAME = /\b(base_ref|branch_ref)\b/
+const REF_READ = /\$\{(base_ref|branch_ref)\}|\$(base_ref|branch_ref)\b/g
+const REF_ASSIGN_ALLOWED = /^(base_ref|branch_ref)="refs\/worktree\/[a-z-]+\/(base|branch)"$/
+const refBinding = (line) => REF_NAME.test(line.replace(REF_READ, ''))
+const refBindingRejected = (line) => refBinding(line) && !REF_ASSIGN_ALLOWED.test(line.trim())
 
 const PATTERNS = [
   // マージ・クローズ
@@ -390,13 +397,26 @@ test('git update-ref の許可形は base-merge.sh と pr-push.sh の -d だけ�
   for (const { name, path } of targets()) {
     for (const { n, l } of codeLines(readFileSync(path, 'utf8'))) {
       if (GIT_UPDATE_REF_CALL.test(l)) calls.push({ name, n, l: l.trim() })
-      if (/^\s*(base_ref|branch_ref)=/.test(l)) assigns.push({ name, n, l: l.trim() })
+      if (refBinding(l)) assigns.push({ name, n, l: l.trim() })
     }
   }
   assert.deepEqual([...new Set(calls.map((c) => c.name))].sort(), ['base-merge.sh', 'pr-push.sh'], JSON.stringify(calls))
   for (const c of calls) assert.ok(GIT_UPDATE_REF_ALLOWED.test(c.l), c.l)
   assert.ok(assigns.length >= 4, `代入が見つかる: ${JSON.stringify(assigns)}`)
-  for (const a of assigns) assert.match(a.l, /^(base_ref|branch_ref)="refs\/worktree\/[a-z-]+\/(base|branch)"$/, `${a.name}:${a.n}`)
+  for (const a of assigns) assert.ok(!refBindingRejected(a.l) && REF_ASSIGN_ALLOWED.test(a.l), `${a.name}:${a.n} ${a.l}`)
+})
+
+test('base_ref / branch_ref の束縛検査の自己検査: どんな束縛の形も許可した代入行以外は拒否し、読み出しだけの行は通す', () => {
+  const bad = [
+    'local base_ref="refs/heads/main"', 'readonly base_ref=refs/heads/main', 'declare base_ref=refs/heads/main', 'export base_ref=refs/heads/main', 'base_ref+=x',
+    'read -r base_ref <<<"refs/heads/main"', 'printf -v base_ref %s refs/heads/main', ': "${base_ref:=refs/heads/main}"', 'x=1 base_ref=refs/heads/main',
+    'true; base_ref=refs/heads/main', 'for base_ref in refs/heads/main; do :; done', 'base_ref="refs/worktree/a/base" branch_ref=refs/heads/main',
+    'branch_ref=refs/heads/main', 'local branch_ref="refs/heads/x"', 'base_ref="refs/heads/main"', 'base_ref="refs/worktree/a/other"', 'base_ref="refs/worktree/a/base" # x',
+    'base_ref="${other}"', 'base_ref=$(git rev-parse HEAD)', 'eval base_ref=refs/heads/main',
+  ]
+  for (const l of bad) assert.ok(refBindingRejected(l), `拒否されるべき: ${l}`)
+  const good = ['base_ref="refs/worktree/base-merge/base"', '  branch_ref="refs/worktree/pr-push/branch"', 'git merge --no-ff --no-edit -F "${msgfile}" "${base_ref}"', 'git rev-parse --verify -q "${base_ref}^{commit}"', 'git checkout --detach "$branch_ref"']
+  for (const l of good) assert.ok(!refBindingRejected(l), `通るべき: ${l}`)
 })
 
 test('worktree-remove.sh に rm の再帰削除・git clean・git checkout -- ・git reset --hard が無い（消せないものは保持して報告する）', () => {

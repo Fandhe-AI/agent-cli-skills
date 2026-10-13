@@ -6,6 +6,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { availableBashes } from './lib/signed-output.mjs'
@@ -256,3 +258,31 @@ check(
     assert.equal(g.rc, exp ? OK : NG, `${i}: ${JSON.stringify(r)}`)
   },
 )
+
+// wr_retain_list は形の検査（worktree-remove.sh の jq -s -e）を通った後の防御の二重化: 想定外の型は黙って 0 件にせず非 0 終了する
+test('wr_retain_list: 保持対象を 1 行 1 パスで返し、値がオブジェクトでない項目・文字列でない worktree は非 0 終了（0 件にしない）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-retain-'))
+  try {
+    const cases = [
+      ['{"items":{}}', 0, ''],
+      ['{"items":{"1":{"status":"failed","worktree":"/a"},"2":{"status":"merged","worktree":"/b"},"3":{"status":"blocked"},"4":{"status":"monitoring","worktree":""},"5":{"status":"monitoring","worktree":"/c"}}}', 0, '/a\n/c\n'],
+      ['{"items":{"1":5}}', 5, ''],
+      ['{"items":{"1":null}}', 5, ''],
+      ['{"items":{"1":"x"}}', 5, ''],
+      ['{"items":{"1":{"status":"failed","worktree":3}}}', 5, ''],
+      ['{"items":{"1":{"status":"failed","worktree":null}}}', 5, ''],
+      ['{"items":{"1":{"status":"merged","worktree":3}}}', 0, ''],
+    ]
+    for (const bash of availableBashes()) {
+      cases.forEach(([json, rc, out], i) => {
+        const f = join(dir, `s${i}.json`)
+        writeFileSync(f, json)
+        const r = spawnSync(bash, ['-c', '. "$1" && wr_retain_list "$2"', '_', LIB, f], { encoding: 'utf8' })
+        assert.equal(r.stdout, out, `${bash} ${json}`)
+        assert.equal(r.status === 0, rc === 0, `${bash} ${json} rc=${r.status}`)
+      })
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

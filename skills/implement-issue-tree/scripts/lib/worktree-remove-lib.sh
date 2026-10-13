@@ -287,3 +287,9 @@ wr_ok() {
 wr_retained() {
   ! wr_wt_gone "$1"
 }
+
+# sweep が保持する worktree（failed / blocked / monitoring のイシューが記録したもの）を 1 行 1 パスで出す。$1 = 状態ファイル。
+# 値がオブジェクトでない項目・文字列でない worktree に出会ったら error で非 0 終了する（黙って 0 件にしない。0 件は「保持なし」と区別できず、全候補を消してしまう）
+wr_retain_list() {
+  jq -r '.items | to_entries[] | .value | if type != "object" then error("item") else . end | select(.status == "failed" or .status == "blocked" or .status == "monitoring") | if has("worktree") then (.worktree | if type == "string" then . else error("worktree") end) else empty end | select(. != "")' "$1" 2>/dev/null
+}

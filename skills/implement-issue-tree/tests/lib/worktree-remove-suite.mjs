@@ -543,7 +543,7 @@ export function registerWorktreeRemoveTests(bash) {
     const repo = makeRepo()
     const a = repo.addWorktree('a')
     // jq は空ファイル・空白だけの入力でも 0 終了するので、形（ちょうど 1 個の値・items がオブジェクト）を先に確かめる
-    const bad = [[null, undefined], [{}, '{not json'], [{}, '{}'], [{}, '[]'], [{}, ''], [{}, '  \n\t\n'], [{}, '{"items":{}}\n{"items":{}}'], [{}, '{"x":1}'], [{}, '{"items":[]}'], [{}, '{"items":null}'], [{}, '{"items":"x"}'], [{}, 'null'], [{}, '"s"'], [{}, '{"items":{"1":5}}']]
+    const bad = [[null, undefined], [{}, '{not json'], [{}, '{}'], [{}, '[]'], [{}, ''], [{}, '  \n\t\n'], [{}, '{"items":{}}\n{"items":{}}'], [{}, '{"x":1}'], [{}, '{"items":[]}'], [{}, '{"items":null}'], [{}, '{"items":"x"}'], [{}, 'null'], [{}, '"s"'], [{}, '{"items":{"1":5}}'], [{}, '{"items":{"1":null}}'], [{}, '{"items":{"1":"x"}}'], [{}, '{"items":{"1":[]}}'], [{}, '{"items":{"1":{"worktree":3}}}'], [{}, '{"items":{"1":{"status":"failed","worktree":null}}}'], [{}, '{"items":{"1":{"worktree":false}}}'], [{}, '{"items":{"1":{"worktree":"/x"},"2":5}}']]
     for (const [items, raw] of bad) {
       const r = sweep(repo, [a.path], items, { raw })
       assert.deepEqual([r.status, r.result.reason, r.result.removed], [0, 'state-unreadable', []], String(raw))
