@@ -1,9 +1,9 @@
 ---
 name: setup-repo-guards
 description: >
-  Fandhe-AI 組織標準の CI ガード一式（codex-review 導入 / AGENTS.md レビュー観点集 / 必須チェック集約ジョブ /
+  Fandhe-AI 組織標準の CI ガード一式（ai-review 導入 / AGENTS.md レビュー観点集 / 必須チェック集約ジョブ /
   branch protection ruleset・追加ガード）を対象リポジトリへ導入する。「リポジトリガード入れて」「CI ガード導入して」
-  「branch protection セットアップ」「codex-review 導入して」「AGENTS.md 整備して」などで使用。
+  「branch protection セットアップ」「ai-review 導入して」「AGENTS.md 整備して」などで使用。
   複数リポジトリへの一括適用にも対応。.claude/ 体系の初期セットアップは init-claude、既存体系の充実は update-claude を参照。
 model: opus
 user-invocable: true
@@ -15,8 +15,8 @@ argument-hint: "<対象リポジトリ名 (owner/repo)> <public|private> [追加
 対象リポジトリへ組織標準の CI ガード一式を導入する。導入するのは次の 4 点で、
 Step 1 → 4 の順に、各 Step を PR → CI 全 pass → レビュースレッド resolve → squash merge で確定させてから次へ進む。
 
-1. codex-review（PR 自動レビュー workflow の wrapper）
-2. AGENTS.md（codex が読むレビュー観点集）
+1. ai-review（PR 自動レビュー workflow の wrapper）
+2. AGENTS.md（AI レビューが読むレビュー観点集）
 3. CI 必須チェックの集約ジョブ（`ci-complete` 等）
 4. branch protection ruleset・リポジトリ追加ガード（GitHub API のみ、コミット不要）
 
@@ -31,7 +31,7 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
 ```
 
 - 第 1 引数: 対象リポジトリ名（`owner/repo`）
-- 第 2 引数: visibility（`public` / `private`）。runner 方針の分岐に使う（public は ubuntu ホステッド、private は self-hosted。codex 実行ジョブのみ self-hosted codex runner の例外）
+- 第 2 引数: visibility（`public` / `private`）。runner 方針の分岐に使う（public は ubuntu ホステッド、private は self-hosted。ai-review の review ジョブのみ self-hosted の専用 runner の例外）
 - 複数リポジトリへ一括適用する場合はリポジトリと visibility の組を列挙する。各リポジトリのセッション（または並列 agent）で順次消化する
 
 ## 前提条件
@@ -43,40 +43,47 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
 
 ## フロー
 
-### Step 1: codex-review の導入（未導入の場合のみ）
+### Step 1: ai-review の導入（未導入の場合のみ）
 
-`.github/workflows/codex-review.yml` を wrapper として追加し、Fandhe-AI/actions の reusable workflow
-`codex-review.yml` を **commit SHA 固定**（`@main` 禁止）で参照する。
+`.github/workflows/ai-review.yml` を wrapper として追加し、Fandhe-AI/actions の reusable workflow
+`ai-review.yml` を **可変タグ `@latest`** で参照する（Fandhe-AI/actions の利用側規約。`latest` は main へ
+自動追従するため、参照の更新作業は不要。commit SHA 固定・`@main` は使わない）。
+旧 `codex-review.yml` は Fandhe-AI/actions から削除済みのため、新規導入では使わない。
 
-参照する SHA は**下記のレビュー済み SHA 定数**を使う。最新 main からの動的取得
-（`gh api repos/Fandhe-AI/actions/commits/main`）は禁止する — 文字列上は commit SHA 固定でも、
-導入のたびに未レビューの最新コードを取り込む「可動 ref の自動追従」と同じであり、
-サプライチェーン対策（レビュー済み SHA 固定）を弱体化する。
+- 既に `.github/workflows/ai-review.yml` がある場合はこの Step をスキップする
+- 旧 `.github/workflows/codex-review.yml` が残っている場合は、`codex-review.yml@latest` が解決できず
+  レビューが動かない状態になっている。Fandhe-AI/actions の `ai-review/README.md`「codex-review からの移行」の
+  手順（入力名の対応表・required check 名の差し替え順序）に従って置き換える
+
+wrapper は単一 provider テンプレートをそのままコピーして作る（既定は `provider: codex`、ジョブ ID `codex`）:
 
 ```bash
-# レビュー済み SHA 定数（内容精査済み。既存導入リポジトリ fandhe-frontend の
-# .github/workflows/codex-review.yml が参照している SHA と同一）
-sha="fed9c07d98367f77e5e2b63bca38843f46feee96"
+mkdir -p .github/workflows
+gh api -H 'Accept: application/vnd.github.raw' \
+  repos/Fandhe-AI/actions/contents/ai-review/templates/ai-review.single.yml \
+  > .github/workflows/ai-review.yml
 ```
 
-定数の更新手順（新しい SHA を採用したくなった場合）:
-
-1. 旧 SHA → 新 SHA の差分を精査する:
-   `gh api "repos/Fandhe-AI/actions/compare/<旧SHA>...<新SHA>"` または Web UI の compare で、
-   reusable workflow 本体（fork PR 拒否・fail-closed 検証・資格情報スキャン等）の変更内容を確認する
-2. 問題がないと判断してから、本 SKILL.md のこの定数（full SHA）を書き換えるコミットを作成する
-3. 以後の導入は更新後の定数を使う（導入時に動的取得へ戻さない）
-
-- 書き方・fork PR 拒否等の適用条件は Fandhe-AI/actions の `docs/codex-review-runner-exception.md` と、
-  既存導入リポジトリ（fandhe-frontend 等）の wrapper を参照して揃える
+- 書き方・適用条件（fork PR 拒否・sudo なし runner 等）は Fandhe-AI/actions の `ai-review/README.md` と
+  `ai-review/docs/runner-exception.md`、既存導入リポジトリ（fandhe-frontend 等）の wrapper を参照して揃える
 - runner 方針: CI ジョブは public なら ubuntu ホステッド、private なら self-hosted。
-  codex 実行ジョブのみ self-hosted codex runner の例外。`post_feedback` ジョブは資格情報に触れないため
-  `ubuntu-latest` を明示する
-- `CODEX_HOME_DIR` variable は設定しない
+  ai-review の review ジョブ（`runner`。codex の既定は self-hosted の `codex` ラベル）のみ専用 runner の例外。
+  `preflight` / `post_feedback`（`post-feedback-runner`）は資格情報に触れず、既定で可視性に応じて
+  自動切替する（public は `ubuntu-latest`、private は `self-hosted`）ため、明示指定は不要
+- 資格情報: `CODEX_HOME_DIR` は org 単位の Actions variable（visibility: all）として設定済みのため、リポジトリには設定しない。
+  `gh api orgs/Fandhe-AI/actions/variables --jq '.variables[].name'` で存在を確認し、無い場合（他 org 等）は
+  `ai-review/README.md`「セットアップ」手順 3 に従ってリポジトリへ設定する
+- `update-external` の日次同期 PR（`chore/skills-update-*` / `chore/submodule-update-*`）がある場合は
+  `skip-branch-prefixes: chore/skills-update-,chore/submodule-update-` を指定する。push できる主体は
+  ブランチ名で gate を回避できる受容済み残留リスクがあるため、第三者の write コラボレーターがいる
+  リポジトリでは指定しない（`ai-review/README.md`「`skip-branch-prefixes` の受容済み残留リスク」）
+- `collaborators-only`（write 未満の actor のイベントでは `preflight` を失敗させる）は既定の `true` のまま使う
+- 資格情報が使えない間は review ジョブが `skipped` になり、workflow 全体では成功に見える。
+  導入 PR では必ずジョブ単位で `review` が実行されたことを確認する（下記「検証」）
 
-### Step 2: AGENTS.md（codex のレビュー観点集）の追加
+### Step 2: AGENTS.md（AI レビューの観点集）の追加
 
-codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビュー基準として読む。
+ai-review は **PR の base コミットの AGENTS.md** をリポジトリ固有のレビュー基準として読む。
 リポジトリルートに日本語で新規作成する（既存があれば基準を弱めず不足観点を追記する）。
 
 必須 3 観点を、必ず**対象リポジトリ固有の具体項目**に落とし込んで書く（別リポジトリ用の記述を流用しない）:
@@ -89,10 +96,11 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
 
 - CLAUDE.md / `.claude/rules/` / 設計文書から抽出したリポジトリ固有観点を整理する
 - 重大度区分 P0（マージブロック）/ P1（強く推奨）/ P2（提案）を付け、**P1 の定義は CI ゲートの実挙動
-  （codex ジョブは P1 でも fail する）と矛盾させない**
-- カスタム prompt（`.github/codex/prompts/review.md`）が既にある場合は二重管理を避ける:
+  （ai-review の `block-priorities` 既定 `P0,P1` により review ジョブは P1 でも fail する）と矛盾させない**
+- カスタム prompt（`.github/ai-review/prompts/review.md`）が既にある場合は二重管理を避ける:
   観点の正は AGENTS.md、enforcement（完了判定・機械格上げ）の正は review.md という役割分担にし、
-  review.md へは AGENTS.md 読み取りの最小追記のみ行う
+  review.md へは AGENTS.md 読み取りの最小追記のみ行う。旧パス `.github/codex/prompts/review.md` に
+  置いたままの場合は `.github/ai-review/prompts/review.md` へ移す（または `prompt-path` で旧パスを明示する）
 - 参考実例: fandhe-backend / fandhe-frontend / Fandhe-AI/actions / agent-cli-skills の AGENTS.md
 - 注意: 新基準はマージ後の**次の PR から**実効（base 参照仕様）
 
@@ -102,7 +110,7 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
 全ジョブを `needs:` に列挙し、`if: always()` を付け、`toJSON(needs)` を jq で判定する。
 
 - **fail-closed を厳守**: `skipped` の許容は「条件付きジョブ（`if:` を持つジョブ）」の**明示リストに限定**し、
-  他ジョブは success のみ受理する（skipped 全許容は fail-open として codex に P1 指摘される）。
+  他ジョブは success のみ受理する（skipped 全許容は fail-open として AI レビューに P1 指摘される）。
   change detection ゲートがある場合はゲート出力に基づき「skip が正しい状況」でのみ skipped を受理する
 - 集約ジョブには `permissions: {}` を付け、「ジョブ追加時は needs への追加が必要」のコメントを書く
 - Fandhe-AI/actions の reusable workflow（lint-docs 等）を使っている場合、集約ジョブ
@@ -117,14 +125,19 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
 - ruleset `main-protection`（target: branch、`~DEFAULT_BRANCH`、enforcement: active、bypass_actors 空）:
   - deletion 禁止 / non_fast_forward（force push 禁止）
   - pull_request: required_approving_review_count 0（人間 approver 不在の AI 運用。レビューゲートは
-    codex の必須チェックで担保）・required_review_thread_resolution true・allowed_merge_methods ["squash"]
+    ai-review の必須チェックで担保）・required_review_thread_resolution true・allowed_merge_methods ["squash"]
   - required_status_checks（**strict false は必須**。true にすると 1 件マージするたびに他の open PR の
     base が陳腐化し、implement-issue-tree の並列ランが収束しなくなる。strict は鮮度制御であって
     bypass 不能性の制御ではないため、false でもクライアント側自動マージの G0 は通過する。
     実行環境に `.claude/rules/ruleset-policy.md` が存在する場合はそちらの詳細に従う）: 必須集合は
     `autoMerge` を使うかどうかで変わる（下記「必須チェック選定の注意」参照）。使わない場合は
-    **[<集約ジョブ>, （集約できない別 workflow の常時チェック）, codex-review / codex]** の最小集合、
-    使う場合は PR HEAD へ報告される全 context
+    **[<集約ジョブ>, （集約できない別 workflow の常時チェック）, ai-review の 3 チェック]** の最小集合、
+    使う場合は PR HEAD へ報告される全 context。ai-review の 3 チェックはジョブ ID が先頭になる
+    `<job> / preflight`・`<job> / review`・`<job> / post_feedback`（テンプレート既定なら `codex / preflight` 等。
+    複数モデル構成ではテンプレート同梱の集約 gate `ai-review-gate` 1 件でもよい）。個別ジョブを登録する場合は
+    **`preflight` を必ず含める**: actor 判定等で `preflight` が失敗すると後続が skipped になり、skipped は
+    required check を満たしてしまう（`ai-review-gate` は reviewer の `preflight` 失敗で自身も失敗するため、
+    gate 1 件で登録する場合は個別の `preflight` を追加しなくてよい）
   - 自動マージ（implement-issue-tree の `autoMerge: true`）を使う場合、required_status_checks の
     各エントリに発行元 App の `integration_id` を束縛する（未束縛だと G0 が `issuer-unbound` で辞退する）。
     **ruleset を PUT で更新した後は必ず下記「検証」の 3 軸スイープを実行する**（`PUT` は
@@ -133,16 +146,15 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
 - 必須チェック選定の注意（重要な落とし穴）:
   - 直近 PR の check runs で「**常に報告される**」チェックのみ選ぶ。workflow レベル paths フィルタで
     実行されないことがあるチェックは入れない（マージが永久ブロックされる）。ジョブレベル条件の skipped は可
-  - **autoMerge を使わない場合**: Cursor Bugbot 等の外部アプリ、codex-review / post_feedback は
-    必須にしない。
+  - **autoMerge を使わない場合**: Cursor Bugbot 等の外部アプリは必須にしない。
   - **`autoMerge: true`（implement-issue-tree）を使う場合**: 上記の除外は適用しない。
     `implement-issue-tree` の autoMerge G0 は「PR HEAD 上の check-run / commit status のうち
     required_status_checks に含まれない context が 0 件であること」を合格条件にする
     （`skills/implement-issue-tree/references/automerge-design.md` の G0 (d)/(f)/(g)）。
     外部アプリを required から外すと、その context が G0 (f) に「required でない context」として
     検出され `server-enforcement-missing` で辞退し、自動マージが構造的に成立しない。
-    `args.externalChecks` で宣言した外部 App の context と codex-review workflow の残りジョブ
-    （`post_feedback` 等、HEAD に check-run を報告するもの）を含め、**PR HEAD へ報告される全 context**
+    `args.externalChecks` で宣言した外部 App の context と ai-review workflow の全ジョブ
+    （`preflight` / `review` / `post_feedback`）を含め、**PR HEAD へ報告される全 context**
     を required に列挙し、外部 App の required エントリは発行元 App の ID（ruleset は
     `integration_id`）で束縛する。commit status は App 束縛（`integration_id`）を持てないため、
     束縛不能な commit-status 専用チェックしか発行しない外部プロバイダは autoMerge と併用できない
@@ -168,8 +180,13 @@ codex の既定 prompt は **PR の base コミットの AGENTS.md** をレビ�
 
 ```bash
 repo="Fandhe-AI/<REPO>"
-# Step 1: wrapper の存在と SHA 固定（@main が残っていないこと）
-grep -n "uses: Fandhe-AI/actions" .github/workflows/codex-review.yml
+# Step 1: wrapper の存在と @latest 参照（@main・旧 codex-review.yml が残っていないこと）
+grep -n "uses: Fandhe-AI/actions" .github/workflows/ai-review.yml
+test ! -e .github/workflows/codex-review.yml && echo "旧 wrapper なし"
+# Step 1: 直近 run でジョブ単位に review が実行されたこと（skipped は「workflow 成功」に見える）
+# head_branch は検証対象の PR（導入 PR 等）の head ブランチ名
+run_id=$(gh run list --repo "${repo}" --workflow "AI PR review" --event pull_request --branch "${head_branch}" --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run view "${run_id}" --repo "${repo}" --json jobs --jq '.jobs[] | {name, status, conclusion}'
 # Step 2: AGENTS.md の存在と P0/P1/P2 定義
 grep -n "P0\|P1\|P2" AGENTS.md | head
 # Step 3: 直近 PR の check runs で集約ジョブが報告されること
@@ -211,7 +228,7 @@ case "${code}" in
 esac
 ```
 
-最終確認として、導入後に小さな PR を 1 件流し、codex-review の実行・必須チェックの報告・
+最終確認として、導入後に小さな PR を 1 件流し、ai-review の実行・必須チェックの報告・
 squash merge のみ許可・スレッド resolve 必須が実際に効いていることを観察する。
 
 ## 完了報告
@@ -223,23 +240,26 @@ Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須�
 
 | 問題 | 回避策 |
 |------|--------|
-| 集約ジョブの skipped 全許容が fail-open として codex に P1 指摘される | Step 3: skipped 許容を条件付きジョブの明示リストに限定する |
+| 集約ジョブの skipped 全許容が fail-open として AI レビューに P1 指摘される | Step 3: skipped 許容を条件付きジョブの明示リストに限定する |
 | チェック名変更 PR が CI 全 pass でも BLOCKED（ruleset が旧名のまま「Expected」待ち） | Step 4: マージ前に ruleset を新チェック名へ PUT で置換する |
 | 未クォート `name:` の ` #` 以降が切れて API 報告名が不安定になる | Step 3: name に ` #` や「: 」を含む場合はクォート必須 |
 | paths フィルタ付き workflow のチェックを必須にするとマージが永久ブロックされる | Step 4: 常に報告されるチェックのみ必須化する |
-| 参考ファイルの取り違え（別リポジトリ用 AGENTS.md の混入）を codex が検出 | Step 2: 対象リポジトリ固有の具体項目に落とし込む |
-| AGENTS.md の P1 定義と CI ゲート実挙動（P1 でも fail）の矛盾を codex が指摘 | Step 2: P1 定義をゲート実挙動と矛盾させない |
+| 参考ファイルの取り違え（別リポジトリ用 AGENTS.md の混入）を AI レビューが検出 | Step 2: 対象リポジトリ固有の具体項目に落とし込む |
+| AGENTS.md の P1 定義と CI ゲート実挙動（P1 でも fail）の矛盾を AI レビューが指摘 | Step 2: P1 定義をゲート実挙動と矛盾させない |
 | GITHUB_TOKEN read 化で暗黙 write 依存の workflow が壊れる | Step 4: 全 workflow の permissions 明示を確認してから適用する |
 | ruleset を PUT したら `integration_id` 束縛が落ち、自動マージが静かに止まる（strict と bypass だけ見ると全 green に見える） | Step 4-a: PUT 後に 3 軸スイープ（`select(.integration_id==null)`）を実行する |
 | 旧 ruleset / classic BP の掃き漏らしで未束縛・strict=true が残る | Step 4-a/4-b: 全 branch ruleset を列挙して掃き、classic BP は `defaultBranchRef` 解決 + status 分岐で別枠確認する |
-| AGENTS.md に自動マージの G0 契約を書く際 strict を要件として列挙し、実装より強い契約が codex P0 の根拠になる | Step 2: G0 契約を書くなら strict は「意図的な非要件」と明記する（実行環境に `.claude/rules/ruleset-policy.md` があれば参照） |
-| autoMerge 運用で外部アプリ・post_feedback 等を required から外すと G0 (f) が server-enforcement-missing で辞退し自動マージが静かに恒久停止する | Step 4: autoMerge を使う場合は PR HEAD の全 context を required に列挙する（外部アプリ・codex-review の全ジョブを含む） |
+| AGENTS.md に自動マージの G0 契約を書く際 strict を要件として列挙し、実装より強い契約が AI レビューの P0 の根拠になる | Step 2: G0 契約を書くなら strict は「意図的な非要件」と明記する（実行環境に `.claude/rules/ruleset-policy.md` があれば参照） |
+| autoMerge 運用で外部アプリ・post_feedback 等を required から外すと G0 (f) が server-enforcement-missing で辞退し自動マージが静かに恒久停止する | Step 4: autoMerge を使う場合は PR HEAD の全 context を required に列挙する（外部アプリ・ai-review の全ジョブを含む） |
+| 旧 `codex-review.yml` wrapper を新規導入する・残したままにする（Fandhe-AI/actions から削除済みで workflow を解決できない） | Step 1: `ai-review/templates/ai-review.single.yml` から導入し、旧 wrapper は「codex-review からの移行」で置き換える |
+| ai-review の `preflight` を required から外し、actor 判定の失敗で review が skipped のまま必須チェックを満たす | Step 4: `<job> / preflight` を必ず required に含める |
+| 資格情報未設定で review が skipped なのに workflow 全体の成功を見て導入完了とする | 検証: `gh run view --json jobs` でジョブ単位に `review` の実行を確認する |
 
 ## 注意事項
 
 - コミットは日本語 Conventional Commits 形式で作成し、対象リポジトリのコミット規約・フッター運用に従う。`--no-verify` は使用しない
 - シェル変数は `"${var}"` 形式でクォートする
-- codex の指摘が正当なら修正で応える（テスト・ゲートの弱体化やスキップでごまかさない）。
+- AI レビューの指摘が正当なら修正で応える（テスト・ゲートの弱体化やスキップでごまかさない）。
   スレッドへ対応内容を返信して resolve してからマージする
 - スコープ外の発見は Issue 化をユーザーに提案する（勝手に起票しない）
 - このスキルはネットワーク越しの GitHub 操作（ruleset の PUT・workflow の配布）を必須とする。該当コマンドはコマンド単位で sandbox 無効にして実行する。ネットワーク遮断を解除できない環境では実行できない
