@@ -13,7 +13,13 @@
 #   pr        PR の state・HEAD sha・mergeable と、想定した PR かどうか（bound）。--base --branch --issue が必須。
 #             --wait は mergeable が UNKNOWN の間だけ有界に再取得する（GitHub 側の算出待ち）
 #   checks    HEAD sha に対するチェック総数 = check-run の total_count + combined status の件数
-#             （gh pr checks・merge-exec と同じ集計定義）。--wait は 1 件以上になるまで
+#             （gh pr checks・merge-exec と同じ集計定義）。--wait は 1 件以上になるまで。
+#             --until settled（Issue #603 第 8 弾。gh pr checks --watch の置き換え）は、check-run と commit status を全件読んで
+#             合格（passed）・未完了（pending）・不合格（failed）に分類し、--wait は未完了が 0 件になるまで待つ。
+#             総数が 0 件でも未完了は 0 なので met（total 0 を返す。0 件の扱いは呼び出し側が決める）。
+#             分類は lib/observe-checks-lib.sh（check-run は success / neutral / skipped が合格、queued 系が未完了、それ以外はすべて
+#             不合格。commit status は success が合格、pending が未完了、それ以外は不合格）。
+#             待機の既定は 25 秒間隔・1 起動 4 回観測・--attempt 最大 30 回（およそ 40 分。gh pr checks --watch の最長と同じ）
 #   required  ベースブランチ（--base 必須）の ruleset の required context のうち HEAD sha 上に無いものの件数。
 #             context 名は出力せず件数だけを返す。--wait は不足 0 になるまで
 #   reviews   --slug の App（<slug>[bot]）の HEAD sha に対するレビュー件数と、その App の check-run の状態別件数。
@@ -100,6 +106,9 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 # 定義し直す（このファイルの後に定義した関数が優先される）
 # shellcheck source=lib/base-merge-lib.sh
 . "${script_dir}/lib/base-merge-lib.sh" || exit 3
+# checks_classify（checks --until settled の分類。純関数）
+# shellcheck source=lib/observe-checks-lib.sh
+. "${script_dir}/lib/observe-checks-lib.sh" || exit 3
 
 usage() {
   echo "使い方: observe-pr.sh --nonce N --mode pr|checks|required|reviews|threads|threads-detail|push --pr NUM [--repo O/R] [--base B] [--branch B] [--issue N] [--slug S] [--until review|settled|started] [--thread-id ID] [--wait --attempt K]" >&2
@@ -194,6 +203,7 @@ case "${until_cond}" in
   '' | review | settled | started) ;;
   *) usage "--until が不正: ${until_cond}" ;;
 esac
+[ "${mode}" != checks ] || [ -z "${until_cond}" ] || [ "${until_cond}" = settled ] || usage "checks の --until は settled だけを取る"
 case "${mode}" in
   pr) [ -n "${base}" ] && [ -n "${branch}" ] && [ -n "${issue}" ] || usage "pr には --base --branch --issue が必要" ;;
   required) [ -n "${base}" ] || usage "required には --base が必要" ;;
@@ -210,6 +220,8 @@ if [ "${wait}" -eq 1 ] && [ "${mode}" != pr ]; then
   max_attempts=$(env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 7 20 1)
   # push は『30 秒間隔・最大 5 分』の観測（1 回の起動 = 30 秒間隔で 3 回観測 + 後始末。それを最大 4 回）
   [ "${mode}" != push ] || max_attempts=$(env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 4 20 1)
+  # checks --until settled は『およそ 40 分』（gh pr checks --watch の最長）。1 起動 4 観測 × 25 秒間隔でおよそ 83 秒 × 30 回
+  [ "${mode}" != checks ] || [ "${until_cond}" != settled ] || max_attempts=$(env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 30 40 1)
   is_uint "${attempt}" && [ "${attempt}" -le "${max_attempts}" ] || usage "--wait には 1 以上 ${max_attempts} 以下の --attempt が必要"
   attempt=$((10#${attempt}))
 else
@@ -221,6 +233,10 @@ sleep_sec=$(env_int "${OBSERVE_PR_SLEEP_SEC:-}" 15 30 0)
 if [ "${mode}" = push ]; then
   polls=$(env_int "${OBSERVE_PR_POLLS:-}" 3 10 1)
   sleep_sec=$(env_int "${OBSERVE_PR_SLEEP_SEC:-}" 30 30 0)
+fi
+if [ "${mode}" = checks ] && [ "${until_cond}" = settled ]; then
+  polls=$(env_int "${OBSERVE_PR_POLLS:-}" 4 10 1)
+  sleep_sec=$(env_int "${OBSERVE_PR_SLEEP_SEC:-}" 25 30 0)
 fi
 wall=$(env_int "${OBSERVE_PR_WALL_SEC:-}" 90 100 1)
 gh_timeout=$(env_int "${OBSERVE_PR_GH_TIMEOUT_SEC:-}" 25 60 1)
@@ -392,10 +408,29 @@ observe_pr() {
 met_pr() { [ "${O_MERGEABLE}" != UNKNOWN ] || [ "${O_STATE}" != OPEN ]; }
 
 O_RUNS=0; O_STATUSES=0; O_TOTAL=0
+O_PASSED=0; O_PENDING=0; O_FAILED=0
 observe_checks() {
-  O_RUNS=0; O_STATUSES=0; O_TOTAL=0
+  O_RUNS=0; O_STATUSES=0; O_TOTAL=0; O_PASSED=0; O_PENDING=0; O_FAILED=0
   resolve_head || return 1
-  count_checks
+  if [ "${until_cond}" = settled ]; then count_settled; else count_checks; fi
+}
+# --until settled: HEAD の check-run と commit status を全件読み、合格・未完了・不合格に分類する（総数もこの全件の数）。
+# 取得・解析・分類のどれかが失敗したら件数を信用せず return 1（取得失敗を『未完了 0 = 完了』に畳まない）
+count_settled() {
+  local runs sts cls nr ns
+  gh_api --paginate "${repo_path}/commits/${HEAD}/check-runs" || { fail "check-runs"; return 1; }
+  runs=$(printf '%s' "${OUT}" | jq -sec '[.[].check_runs[]]' 2>/dev/null) || { fail "check-runs の形式"; return 1; }
+  gh_api --paginate "${repo_path}/commits/${HEAD}/status" || { fail "combined status"; return 1; }
+  sts=$(printf '%s' "${OUT}" | jq -sec '[.[].statuses[]]' 2>/dev/null) || { fail "combined status の statuses"; return 1; }
+  cls=$(checks_classify "${runs}" "${sts}") || { fail "チェックの分類"; return 1; }
+  nr=$(printf '%s' "${runs}" | jq 'length') || { fail "check-run 件数"; return 1; }
+  ns=$(printf '%s' "${sts}" | jq 'length') || { fail "status 件数"; return 1; }
+  # shellcheck disable=SC2086
+  set -- ${cls}
+  [ $# -eq 3 ] || { fail "分類結果の形式"; return 1; }
+  case "${1}${2}${3}${nr}${ns}" in '' | *[!0-9]*) fail "件数の形式"; return 1 ;; esac
+  O_PASSED=$1; O_PENDING=$2; O_FAILED=$3
+  O_RUNS=$nr; O_STATUSES=$ns; O_TOTAL=$((nr + ns))
 }
 # HEAD に対するチェック総数（check-run の total_count + combined status の件数）を O_RUNS / O_STATUSES / O_TOTAL に入れる
 count_checks() {
@@ -407,7 +442,10 @@ count_checks() {
   case "${runs}${sts}" in *[!0-9]*) fail "件数の形式"; return 1 ;; esac
   O_RUNS=$((10#${runs})); O_STATUSES=$((10#${sts})); O_TOTAL=$((O_RUNS + O_STATUSES))
 }
-met_checks() { [ "${O_TOTAL}" -ge 1 ]; }
+# 通常は 1 件以上になったら。settled は未完了が 0 件になったら（総数 0 も未完了 0 = met。0 件の扱いは呼び出し側）
+met_checks() {
+  if [ "${until_cond}" = settled ]; then [ "${O_PENDING}" -eq 0 ]; else [ "${O_TOTAL}" -ge 1 ]; fi
+}
 
 # push: push 直後の確認。この worktree の HEAD（push 済みのコミット）が PR の head になったか、そのチェック総数と mergeable を
 # 観測する。PR の head は push の反映に少し遅れることがあるので、ローカルの HEAD と一致するまで件数・mergeable を読まない
@@ -669,7 +707,7 @@ fi
 if [ "${err}" -ne 0 ] || [ "${inconclusive}" -eq 1 ]; then
   HEAD=""
   O_PUSH_OK=0
-  O_STATE=""; O_MERGEABLE=""; O_BOUND=-1; O_RUNS=0; O_STATUSES=0; O_TOTAL=0; O_MISSING=0; O_REQTOTAL=0
+  O_STATE=""; O_MERGEABLE=""; O_BOUND=-1; O_RUNS=0; O_STATUSES=0; O_TOTAL=0; O_MISSING=0; O_REQTOTAL=0; O_PASSED=0; O_PENDING=0; O_FAILED=0
   O_APPROVED=0; O_CHANGES=0; O_COMMENTED=0; O_PENDINGREV=0; O_DISMISSED=0; O_REVIEWS=0
   O_CR_TOTAL=0; O_CR_PASSED=0; O_CR_RUNNING=0; O_CR_FAILED=0; O_THREADS=0; O_UNRESOLVED=0
 fi
@@ -681,9 +719,14 @@ case "${mode}" in
       '{mode: $m, inputSha256: $is, outcome: $oc, err: $e, attempt: $a, maxAttempts: $ma, headSha: $hs, state: $st, mergeable: $mg, bound: $b}')
     ;;
   checks)
+    # settled のときだけ passed / pending / failed を payload に足す（通常の checks の payload の形は変えない）
+    settled_flag=0
+    [ "${until_cond}" != settled ] || settled_flag=1
     payload=$(jq -cnS --arg m "${mode}" --arg is "${input_sha}" --arg oc "${outcome}" --arg hs "${HEAD}" \
       --argjson e "${err}" --argjson a "${attempt}" --argjson ma "${max_attempts}" --argjson r "${O_RUNS}" --argjson s "${O_STATUSES}" --argjson t "${O_TOTAL}" \
-      '{mode: $m, inputSha256: $is, outcome: $oc, err: $e, attempt: $a, maxAttempts: $ma, headSha: $hs, checkRuns: $r, statuses: $s, total: $t}')
+      --argjson st "${settled_flag}" --argjson pa "${O_PASSED}" --argjson pe "${O_PENDING}" --argjson fa "${O_FAILED}" \
+      '{mode: $m, inputSha256: $is, outcome: $oc, err: $e, attempt: $a, maxAttempts: $ma, headSha: $hs, checkRuns: $r, statuses: $s, total: $t}
+      + (if $st == 1 then {passed: $pa, pending: $pe, failed: $fa} else {} end)')
     ;;
   push)
     [ -n "${O_MERGEABLE}" ] || O_MERGEABLE=UNKNOWN

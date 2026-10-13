@@ -18,6 +18,9 @@ const MG_LIB = 'scripts/lib/merge-gate-lib.sh'
 const STATE_SCRIPT = ['state-script.test.mjs']
 const MERGE_GATE = ['merge-gate.test.mjs', 'merge-gate-unit.test.mjs']
 const MERGE_GATE_HOST = ['merge-gate-host.test.mjs']
+const OBS_LIB = 'scripts/lib/observe-checks-lib.sh'
+const SETTLED = ['observe-pr-checks-settled.test.mjs']
+const CLASSIFY = ['observe-checks-unit.test.mjs', 'observe-pr-checks-settled.test.mjs']
 const PR_PUSH = ['pr-push.test.mjs', 'pr-push-unit.test.mjs']
 const BASE_MERGE = ['base-merge.test.mjs', 'base-merge-unit.test.mjs']
 
@@ -140,4 +143,25 @@ export const MUTATIONS = [
   { id: 'G40-context-max-256', file: MG, from: 'length >= 1 and length <= 255', to: 'length >= 1 and length <= 256', tests: ['merge-gate-context-parity.test.mjs'], note: 'context の長さ上限を 1 つ緩める（256 文字を受理する境界の食い違い）' },
   { id: 'G41-context-control-chars-allowed', file: MG, from: '(test("[\\\\p{Cc}\\u2028\\u2029]") | not)', to: 'true', tests: ['merge-gate-context-parity.test.mjs'], note: 'context の制御文字・U+2028/2029 の拒否を外す（ホストが拒否する入力を通す）' },
   { id: 'G42-context-trailing-space-allowed', file: MG, from: '\\ufeff]|[\\\\t\\\\v\\\\f ', to: '\\ufeff]|[Z', tests: ['merge-gate-context-parity.test.mjs'], note: 'context の末尾空白類の拒否を外す（ホストの c !== c.trim() が拒否する入力を通す）' },
+
+  // ---- observe-pr.sh checks --until settled（第 8 弾。gh pr checks --watch の置き換え）----
+  { id: 'K01-checkruns-fetch-fail-settles', file: OBS, from: 'gh_api --paginate "${repo_path}/commits/${HEAD}/check-runs" || { fail "check-runs"; return 1; }\n  runs=$(printf', to: 'gh_api --paginate "${repo_path}/commits/${HEAD}/check-runs" || return 0\n  runs=$(printf', tests: SETTLED, note: 'check-run の取得失敗を握りつぶして未完了 0 = 完了として返す（取得失敗を settled に倒す）' },
+  { id: 'K02-status-fetch-fail-settles', file: OBS, from: 'gh_api --paginate "${repo_path}/commits/${HEAD}/status" || { fail "combined status"; return 1; }', to: 'gh_api --paginate "${repo_path}/commits/${HEAD}/status" || return 0', tests: SETTLED, note: 'combined status の取得失敗を握りつぶして完了として返す（check-run が全部緑のあとに status が失敗しても met になる）' },
+  { id: 'K03-classify-failure-passes', file: OBS, from: 'cls=$(checks_classify "${runs}" "${sts}") || { fail "チェックの分類"; return 1; }', to: 'cls=$(checks_classify "${runs}" "${sts}") || cls="0 0 0"', tests: SETTLED, note: '分類の失敗（形の違う応答）を 0 0 0 = 完了として扱う' },
+  { id: 'K04-in-progress-not-pending', file: OBS_LIB, from: ' or $v == "in_progress" or', to: ' or', tests: CLASSIFY, note: 'in_progress を未完了に数えない（実行中のチェックを失敗扱いにして早く終わる）' },
+  { id: 'K05-queued-not-pending', file: OBS_LIB, from: '($v == "queued" or ', to: '(', tests: CLASSIFY, note: 'queued を未完了に数えない' },
+  { id: 'K06-unknown-conclusion-passes', file: OBS_LIB, from: '        else "f" end;\n    def st_bucket:', to: '        else "p" end;\n    def st_bucket:', tests: CLASSIFY, note: '未知の conclusion を合格に倒す（fail-open）' },
+  { id: 'K07-status-error-passes', file: OBS_LIB, from: 'elif .state == "pending" then "w" else "f" end;', to: 'elif .state == "pending" then "w" else "p" end;', tests: CLASSIFY, note: 'commit status の failure / error / 未知を合格に倒す' },
+  { id: 'K08-conclusion-ignored', file: OBS_LIB, from: '(.conclusion // .status) as $v', to: '.status as $v', tests: CLASSIFY, note: 'conclusion を見ず status（completed）だけで分類する' },
+  { id: 'K09-met-without-pending-zero', file: OBS, from: 'if [ "${until_cond}" = settled ]; then [ "${O_PENDING}" -eq 0 ]; else', to: 'if [ "${until_cond}" = settled ]; then true; else', tests: SETTLED, note: '未完了が残っていても met にする（待たずに完了と読ませる）' },
+  { id: 'K10-pending-field-zero', file: OBS, from: 'then {passed: $pa, pending: $pe, failed: $fa} else {} end', to: 'then {passed: $pa, pending: 0, failed: $fa} else {} end', tests: SETTLED, note: 'payload の pending を常に 0 で出す' },
+  { id: 'K11-status-not-counted-in-total', file: OBS, from: 'O_RUNS=$nr; O_STATUSES=$ns; O_TOTAL=$((nr + ns))', to: 'O_RUNS=$nr; O_STATUSES=$ns; O_TOTAL=$nr', tests: SETTLED, note: '総数に commit status を足さない（commit status だけの CI を 0 件と読ませる）' },
+  { id: 'K12-attempt-bound-off', file: OBS, from: 'is_uint "${attempt}" && [ "${attempt}" -le "${max_attempts}" ] || usage', to: 'is_uint "${attempt}" || usage', tests: SETTLED, note: '--attempt の上限検査を外す（プロンプトが回数を増やせる）' },
+  { id: 'K13-settled-default-attempts-7', file: OBS, from: 'env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 30 40 1', to: 'env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 7 40 1', tests: [...SETTLED, 'observe-pr-host.test.mjs', 'observe-pr-push.test.mjs'], note: 'settled の待機上限を通常の 7 回（10 分）へ戻す（40 分の完了待ちが 10 分で切れる）' },
+  { id: 'K14-settled-attempts-env-unbounded', file: OBS, from: 'env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 30 40 1', to: 'env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 30 9999 1', tests: SETTLED, note: '環境変数で settled の上限を際限なく引き上げられる' },
+  { id: 'K15-envelope-nonce-altered', file: OBS, from: 'so_emit "${nonce}" "${payload}" || {\n  echo "observe-pr: 出力封筒', to: 'so_emit "${nonce}x" "${payload}" || {\n  echo "observe-pr: 出力封筒', tests: SETTLED, note: '封筒の nonce を変える（nonce 照合が通らない）' },
+  { id: 'K16-until-not-bound-to-input', file: OBS, from: '${slug}${nl}${until_cond}"', to: '${slug}${nl}"', tests: SETTLED, note: '--until を入力の束縛 inputSha256 に含めない（settled の封筒を通常の checks の封筒と取り違える）' },
+  { id: 'K17-host-settle-constant-7', file: SRC, from: 'const OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS = 30', to: 'const OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS = 7', tests: ['observe-pr-host.test.mjs', 'required-context-presence.test.mjs'], note: 'ホストの定数（プロンプトの最大回数）がスクリプトの既定とずれる' },
+  { id: 'K18-host-input-binding-dropped', file: SRC, from: "if (inputSha256 !== undefined && raw.payload.inputSha256 !== inputSha256) return { ok: false, reason: 'input' }", to: '', tests: ['observe-pr-host.test.mjs'], note: 'ホストの封筒照合から入力束縛の検査を外す（--until settled の封筒など別の入力の封筒の total を採用する）' },
+  { id: 'K19-settled-polls-default-6', file: OBS, from: 'polls=$(env_int "${OBSERVE_PR_POLLS:-}" 4 10 1)', to: 'polls=$(env_int "${OBSERVE_PR_POLLS:-}" 6 10 1)', tests: [...SETTLED, 'observe-pr-host.test.mjs', 'observe-pr-push.test.mjs'], note: 'settled の 1 起動の観測回数を通常の 6 回へ戻す（25 秒間隔 × 6 で壁時計 90 秒を超える）' },
 ]
