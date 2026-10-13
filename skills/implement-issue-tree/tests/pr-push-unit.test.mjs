@@ -127,7 +127,7 @@ for (const bash of availableBashes()) {
 
   test(`${tag} pp_valid_title / pp_valid_path: タイトルは 1〜256 文字・制御文字なし。パスは絶対・安全な文字種・.. なし`, () => {
     const titles = [['feat(x): 追加', 0], ['a', 0], ['x'.repeat(256), 0], ['', 1], ['x'.repeat(257), 1], ['a\tb', 1], ['a\u001bb', 1]]
-    const paths = [['/tmp/x/pr-title.abc', 0], ['/var/folders/ab/c_d/T/tmp.Xy12', 0], ['rel/path', 1], ['', 1], ['/tmp/a b', 1], ['/tmp/../etc/passwd', 1], ['/tmp/a;b', 1], ['/tmp/a$b', 1], [`/${'a'.repeat(300)}`, 1]]
+    const paths = [['/tmp/x/pr-title.abc', 0], ['/var/folders/ab/c_d/T/tmp.Xy12', 0], ['/Users/me/My Files/tmp.Xy12', 0], ['rel/path', 1], ['', 1], ['/tmp/a\tb', 1], ['/tmp/../etc/passwd', 1], ['/tmp/a;b', 1], ['/tmp/a$b', 1], [`/${'a'.repeat(300)}`, 1]]
     const res = table(bash, [...titles.map(([t]) => ['title', t]), ...paths.map(([p]) => ['path', p])])
     const all = [...titles, ...paths]
     all.forEach(([v, rc], i) => assert.deepEqual({ rc: res[i].rc, out: res[i].out }, { rc, out: '' }, JSON.stringify(v)))

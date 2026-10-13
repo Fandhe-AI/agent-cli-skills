@@ -3816,11 +3816,11 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'b6174c826c9a39fd7f717597998af3d30b5cded85bee2e5b2f2dc6a9999def90',
-'measure-free-disk.sh':'56d07ab9e631503d40482ac404bb6585b89ad8840a0c9b76a45ff18131c55f8e',
-'observe-pr.sh':'7b75e252645375ae42f4c84cb9b3dd207746ef25714efca17cfb3e6a6ef65fa1',
-'base-merge.sh':'08e1efd0d85d9bb717e866ffc25eee2912e49fc39d99abfb57d10633e28398c0',
-'pr-push.sh':'f738ddeecdb242d13c22be93c79f768c81e05e6bf64268e4d22b1e6198a50893',
+'measure-residual-bytes.sh':'d4124e568233b6c6e263b307a07ab64f4cf92c62c0f7bb912bfc1350bac1566c',
+'measure-free-disk.sh':'acd96627f67427d64014c635497113814c0f86047a8d894bd9e9d5e3da69e60d',
+'observe-pr.sh':'2a2804988770e08f1f07662bdf4856c39ebf0b4f1abe82f12598dcf1f44b557d',
+'base-merge.sh':'1f77a87d3d1f3c333a63afa4ea6cc7fe5f7a589d97dafb5decbc1becc18e54a6',
+'pr-push.sh':'c766b4142d771a5ff88bb86c552ebe177d471a6d586c547f994011827dfd2413',
 }
 
 

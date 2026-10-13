@@ -310,7 +310,8 @@ do_pr() {
   [ -f "${body_file}" ] && [ -r "${body_file}" ] && [ -s "${body_file}" ] || fail body-invalid "--body-file を読めない・空"
   IFS= read -r title <"${title_file}" || true
   pp_valid_title "${title}" || fail title-invalid "タイトルが空・長すぎる・制御文字を含む"
-  grep -qxF "Closes #${issue}" "${body_file}" || fail body-invalid "body に「Closes #${issue}」の行が無い"
+  # 「Closes #N」の行（インデントや行末の空白は許す。#6030 のような桁の続きは別の番号なので許さない。issue は正の整数に検証済み）
+  grep -qE "^[[:space:]]*Closes #${issue}([^0-9]|$)" "${body_file}" || fail body-invalid "body に「Closes #${issue}」の行が無い"
   # push した先端 sha は、push が自動更新するリモート追跡 ref から解決する（ローカルの refs/heads/ は更新していないため使わない）
   remote_sha=$(git rev-parse -q --verify "${branch_ref}" 2>/dev/null) || remote_sha=""
   pv_is_sha "${remote_sha}" || fail no-remote-ref "リモート追跡 ref を解決できない"

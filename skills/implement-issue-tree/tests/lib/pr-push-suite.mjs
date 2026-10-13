@@ -312,6 +312,19 @@ export function registerPrPushTests(bash) {
   const prArgs = (files, extra = []) => ['--mode', 'pr', '--branch', BRANCH, '--base', BASE, ...files, ...extra]
   const list = (rows) => JSON.stringify(rows.map(([number, baseRefName, headRefOid]) => ({ number, baseRefName, headRefOid })))
 
+  t('pr: body の「Closes #N」の行はインデント・行末の空白があっても受理する。パスに半角スペースを含んでいても動く', () => {
+    const sb = makeSandbox()
+    const dir = join(sb.tmp, 'with space')
+    mkdirSync(dir, { recursive: true })
+    const tf = join(dir, 'title.txt')
+    const bf = join(dir, 'body.md')
+    writeFileSync(tf, 'feat(x): 追加\n')
+    writeFileSync(bf, '## Summary\n\n   Closes #603  \n')
+    const v = result(run(bash, sb, ['--mode', 'pr', '--branch', BRANCH, '--base', BASE, '--title-file', tf, '--body-file', bf, '--issue', '603']))
+    assert.deepEqual(v, { mode: 'pr', status: 'created', prNumber: 77 })
+    assert.match(ghCalls(sb)[1], /--body-file \S+with space\/body\.md$/)
+  })
+
   t('pr: open PR が無ければ gh pr create（-R・--base・--head・--title・--body-file）で作成して prNumber を返す。URL は出力しない', () => {
     const sb = makeSandbox()
     const files = prFiles(sb)
@@ -357,6 +370,7 @@ export function registerPrPushTests(bash) {
       [{ title: 'a\u001bb\n' }, 'title-invalid'],
       [{ body: 'no closing line\n' }, 'body-invalid'],
       [{ body: 'Closes #6030\n' }, 'body-invalid'],
+      [{ body: 'Please close #603 (Closes#603)\n' }, 'body-invalid'],
       [{ body: '' }, 'body-invalid'],
     ]
     for (const [opts, status] of cases) {
@@ -388,7 +402,7 @@ export function registerPrPushTests(bash) {
       [...ok, '--repo', 'a/b/c'],
       [...ok, '--repo', '-x/y'],
       [...ok, '--subject-file', 'relative.txt'],
-      [...ok, '--subject-file', '/tmp/a b'],
+      [...ok, '--subject-file', '/tmp/a;b'],
       [...ok, ...files],
       ['--mode', 'push', '--origin', 'fix', '--branch', BRANCH, '--base', BASE, '--subject-file', '/tmp/x'],
       ['--mode', 'pr', '--branch', BRANCH, '--base', BASE],
