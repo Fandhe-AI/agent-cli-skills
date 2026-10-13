@@ -11,6 +11,9 @@
 //   rules         gh api … …/rules/branches/<base>
 //   reviews       gh api … …/pulls/<n>/reviews
 //   graphql       gh api graphql …
+//   prchecks      gh pr checks <n> [-R repo] --json state [--jq …]（--jq は prview と同じ扱い。第 6 弾 merge-gate.sh）
+//   rulesets-<id> gh api …/rulesets/<id>（merge-gate.sh の G0 が bypass_actors と enforcement を読む）
+//   apps-<slug>   gh api apps/<slug>（外部チェック App の ID）
 // 応答: routes[key] は { out, exit } か、その配列（n 回目の呼び出しに配列の n 番目、足りなければ最後の要素）。
 //   out は文字列（そのまま標準出力）、exit は終了コード（既定 0）。gh api は HTTP エラー時に本文を標準出力へ出して
 //   非 0 で終わるので、{ out: '{"message":"Not Found"}', exit: 1 } でその挙動を再現できる。
@@ -41,6 +44,8 @@ if [ -n "\${GH_STUB_HANG:-}" ]; then sleep "$GH_STUB_HANG" & sleep "$GH_STUB_HAN
 key=""
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   key=prview
+elif [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
+  key=prchecks
 elif [ "$1" = "api" ]; then
   for a in "$@"; do
     case "$a" in
@@ -50,6 +55,8 @@ elif [ "$1" = "api" ]; then
       repos/*/status) key=status ;;
       repos/*/statuses) key=statuses ;;
       repos/*/rules/branches/*) key=rules ;;
+      repos/*/rulesets/*) key=rulesets-\${a##*/} ;;
+      apps/*) key=apps-\${a##*/} ;;
       repos/*/pulls/*/reviews) key=reviews ;;
     esac
   done
@@ -75,7 +82,7 @@ exitf=$(pick exit)
 code=0
 [ -n "$exitf" ] && code=$(cat "$exitf")
 if [ -n "$outf" ]; then
-  if [ "$key" = prview ]; then
+  if [ "$key" = prview ] || [ "$key" = prchecks ]; then
     jq_expr=""
     prev=""
     for a in "$@"; do

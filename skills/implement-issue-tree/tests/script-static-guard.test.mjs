@@ -44,12 +44,17 @@ const PATTERNS = [
   // 承認
   re('approve', /--approve\b|\bgh\b[^\n|;&]*\bpr\b[^\n|;&]*\breview\b|\bevent=APPROVE\b|\bAPPROVE\b|submitPullRequestReview|addPullRequestReview/),
   // リポジトリ設定・ruleset・branch protection の変更
-  re('ruleset / branch protection / リポジトリ設定', /\/rulesets\b|branches\/[^\s'"]*\/protection|\bgh\b[^\n|;&]*\brepo\b[^\n|;&]*\b(edit|rename|archive|unarchive|delete)\b|updateRepository|deleteRepository|archiveRepository|ruleset\w*Mutation|createRuleset|updateRuleset/),
+  // /rulesets は設定変更の経路なので拒否するが、merge-gate.sh の G0 が適用 ruleset 1 件の bypass_actors と enforcement を読む GET
+  // （gh_api "${repo_path}/rulesets/${id}" || …。-X・-f などの書き込みは別のパターンが拒否する）だけは、この 1 行の形に限って許す。
+  // 許す行が merge-gate.sh 以外に無く、形が 1 つだけであることは下の専用テストで固定する
+  re('ruleset / branch protection / リポジトリ設定', /\/rulesets\b(?!\/\$\{id\}"\s*\|\|)|branches\/[^\s'"]*\/protection|\bgh\b[^\n|;&]*\brepo\b[^\n|;&]*\b(edit|rename|archive|unarchive|delete)\b|updateRepository|deleteRepository|archiveRepository|ruleset\w*Mutation|createRuleset|updateRuleset/),
   // -X は大文字小文字を区別する別パターン（set -x や jq の -x を拾わない）。-XPUT のように値が直結する形も拾う
   {
     label: '書き込み系の HTTP メソッド',
     // -iX PUT のように他の短縮オプションと連結した形、-X の後ろがタブの形も拾う
-    test: (line) => /(--method|--request)[\s=]+['"]?(?!GET\b)[A-Za-z]+/i.test(line) || /(^|[\s'"])-[A-Za-z]*X[\s=]*['"]?(?!GET\b)[A-Za-z]+/.test(line),
+    // 値が GET のリテラル（クォートつき・小文字の get を含む）以外はすべて拒否する。`-X "$m"` / `--method "${m}"` / `--request "$M"` のような
+    // 変数値は実行時に PUT / DELETE へ化け得るので、値を読めない形は書き込みとして扱う
+    test: (line) => /(--method|--request)[\s=]+(?!['"]?GET['"]?(\s|$))\S/i.test(line) || /(^|[\s'"])-[A-Za-z]*X[\s=]*(?!['"]?GET['"]?(\s|$))\S/.test(line),
   },
   // curl / wget による本文付きリクエスト（-d / --data* / -F / --form / -T / --upload-file / --json、wget の --post-data / --post-file / --body-*）。
   // -X / --method は上のパターンが拾う
@@ -119,7 +124,7 @@ function codeLines(text) {
 
 test('走査の対象にスクリプト一式（scripts/*.sh と scripts/lib/*.sh）が含まれ、除外は merge-guard-hook.sh だけ', () => {
   const names = targets().map((t) => t.name)
-  for (const must of ['base-merge.sh', 'observe-pr.sh', 'measure-residual-bytes.sh', 'measure-free-disk.sh', 'run-verified.sh', 'preview-tree.sh', 'pr-push.sh', 'lib/signed-output.sh', 'lib/push-verify.sh', 'lib/base-merge-lib.sh', 'lib/pr-push-lib.sh']) {
+  for (const must of ['base-merge.sh', 'observe-pr.sh', 'measure-residual-bytes.sh', 'measure-free-disk.sh', 'run-verified.sh', 'preview-tree.sh', 'pr-push.sh', 'merge-gate.sh', 'lib/merge-gate-lib.sh', 'lib/signed-output.sh', 'lib/push-verify.sh', 'lib/base-merge-lib.sh', 'lib/pr-push-lib.sh']) {
     assert.ok(names.includes(must), `${must} が走査の対象にない（${names.join(', ')}）`)
   }
   assert.ok(!names.includes('merge-guard-hook.sh'))
@@ -145,11 +150,14 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
     'REST のマージ API': ['gh api repos/o/r/pulls/3/merge -X PUT', 'gh api repos/o/r/merges'],
     'GraphQL のマージ mutation': ['mergePullRequest(input:{})', 'enablePullRequestAutoMerge'],
     approve: ['gh pr review 3 --approve', 'gh pr review 3', '-f event=APPROVE', '"event": "APPROVE"'],
-    'ruleset / branch protection / リポジトリ設定': ['gh api repos/o/r/rulesets/1', 'gh api repos/o/r/branches/main/protection', 'gh repo edit --visibility public', 'gh repo delete o/r'],
+    'ruleset / branch protection / リポジトリ設定': ['gh api repos/o/r/rulesets/1', 'gh_api "${repo_path}/rulesets/${id}"', 'gh_api "${repo_path}/rulesets/${id}/x" || true', 'gh_api "${repo_path}/rulesets" || true', 'gh api repos/o/r/branches/main/protection', 'gh repo edit --visibility public', 'gh repo delete o/r'],
     '書き込み系の HTTP メソッド': [
       'gh api -X PUT repos/o/r/x', 'gh api --method POST repos/o/r/x', 'gh api --method=DELETE x',
       'gh api -XPUT repos/o/r/x', 'gh api -XDELETE x', 'gh api --request PATCH x', 'gh api --request=POST x', "gh api -X 'POST' x",
       'gh api -iX PUT repos/o/r/x', 'gh api -iXPOST x', 'gh api -X\tPUT repos/o/r/x', 'gh api --method\tPOST x', 'gh api -siXDELETE x',
+      // 変数値（実行時に書き込みメソッドへ化け得る）。クォートの有無・${} 形・大文字小文字・= 連結を問わない
+      'gh api -X "$m" x', 'gh api --method "${m}" x', 'gh api --request "$M" x', 'gh api -X $m x', 'gh api --method=$m x', 'gh api -X "${GH_M:-GET}" x',
+      'gh api -iX "$m" x', 'gh api -X"$m" x', 'gh_api -X "$m" "${repo_path}/rulesets/${id}"',
     ],
     'GraphQL の mutation': ['mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{id} } }'],
     'gh api の書き込み系（-f / -F / --field / --raw-field / --input による暗黙 POST）': [
@@ -229,6 +237,9 @@ test('自己検査: 正当な行（読み取りの gh api・graphql の query・
     'gh -R "${repo}" api graphql -f query="${Q}" -F owner="${o}"',
     'gh --repo o/r api -X GET repos/o/r/x',
     'gh api -iX GET repos/o/r/x',
+    'gh api -X "GET" repos/o/r/x',
+    "gh api -X 'GET' repos/o/r/x",
+    'gh api --method "GET" repos/o/r/x',
     'gh api -i repos/o/r/x',
     'curl -sSL -H "Accept: x" https://example.com',
     'curl -fsSL -o out https://example.com',
@@ -270,4 +281,23 @@ test('自己検査: バックスラッシュ行継続を連結してから検査
   const ok = codeLines('# gh pr merge 1\nx=1\ngh_api graphql \\\n  -f query="${Q}" \\\n  -F owner="${o}"\ny=2')
   assert.deepEqual(ok.map((x) => x.n), [2, 3, 6])
   for (const { l } of ok) for (const { label, test: fires } of PATTERNS) assert.ok(!fires(l), `${label}: ${l}`)
+})
+
+test('/rulesets を含むコード行は merge-gate.sh の読み取り 1 行だけで、書き込み系の綴りを伴わない', () => {
+  const found = []
+  for (const { name, path } of targets()) {
+    for (const { n, l } of codeLines(readFileSync(path, 'utf8'))) if (/\/rulesets\b/.test(l)) found.push({ name, n, l: l.trim() })
+  }
+  assert.deepEqual(found.map((f) => f.name), ['merge-gate.sh'], `許可は merge-gate.sh の 1 行だけ: ${JSON.stringify(found)}`)
+  assert.match(found[0].l, /^gh_api "\$\{repo_path\}\/rulesets\/\$\{id\}" \|\| stop server-enforcement-missing g0 ruleset-fetch 1$/)
+})
+
+test('merge-gate.sh の gh_api() 本体は run_timed "${gh_timeout}" gh api "$@" の 1 形だけで、メソッド指定を含まない', () => {
+  const path = targets().find((t) => t.name === 'merge-gate.sh').path
+  const src = readFileSync(path, 'utf8')
+  const defs = [...src.matchAll(/^gh_api\(\) \{\n([\s\S]*?)\n\}/gm)]
+  assert.equal(defs.length, 1, 'gh_api() の定義は 1 つだけ')
+  assert.equal(defs[0][1].trim(), 'run_timed "${gh_timeout}" gh api "$@"', 'ラッパー本体は固定の 1 形。-X / --method / --request などを足さない')
+  // GET 以外になり得る環境変数・変数展開を gh api の直前に置く形も拒否する
+  assert.ok(!/GH_M\b|\$\{?GH_METHOD/.test(src), 'メソッドを変数で切り替える足場がない')
 })
