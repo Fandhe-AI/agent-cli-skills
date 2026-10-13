@@ -126,33 +126,17 @@ fail_commit() {
 # 期待 owner/repo に一致しなければならない（1 行ごとの判定 url_allowed と、許す URL の形・拒否の根拠は lib/base-merge-lib.sh）。
 # 先頭 1 件だけを見ると、pushurl・pushInsteadOf・複数 url の追加で push だけが別のリポジトリへ届く（隔離 worktree は本体の
 # .git/config を共有するので、先行するエージェントが書ける位置にある）。URL はトークンを含み得るので、どの出力にも出さない。
-# $1 = ラベル（fetch / push）、残り = git remote get-url への追加オプション。0 = 全行が許可、1 = 1 行でも外れた、2 = 取得できない
-check_remote_urls() {
-  local label=$1 out line n=0
-  shift
-  out=$(git remote get-url "$@" origin 2>/dev/null) || return 2
-  [ -n "${out}" ] || return 2
-  while IFS= read -r line; do
-    n=$((n + 1))
-    url_allowed "${line}" "${want}" || { echo "base-merge: ${label} URL の ${n} 行目が許可ホスト・期待リポジトリと一致しない" >&2; return 1; }
-  done <<EOF
-${out}
-EOF
-  return 0
-}
+# 全行の照合は lib の routing_check_remotes（pr-push.sh と共有）。0 = 全行が許可、1 = 1 行でも外れた、2 = 取得できない
 
 [ -n "${repo}" ] || fail_routing "期待リポジトリが空" "期待リポジトリが未確定（--repo が空）"
 want=$(lower "${repo}")
-for spec in "fetch:--all" "push:--push --all"; do
-  rc=0
-  # shellcheck disable=SC2086
-  check_remote_urls "${spec%%:*}" ${spec#*:} || rc=$?
-  case "${rc}" in
-    0) ;;
-    1) fail_routing "remote の ${spec%%:*} URL が不一致" "remote の URL（fetch / push）が許可ホスト・期待リポジトリと不一致" ;;
-    *) fail_routing "git remote get-url（${spec%%:*}）が失敗または空" "origin の URL（fetch / push）を取得できない" ;;
-  esac
-done
+rc=0
+routing_check_remotes "${want}" || rc=$?
+case "${rc}" in
+  0) ;;
+  1) fail_routing "remote の ${RM_FAILED} URL が不一致" "remote の URL（fetch / push）が許可ホスト・期待リポジトリと不一致" ;;
+  *) fail_routing "git remote get-url（${RM_FAILED}）が失敗または空" "origin の URL（fetch / push）を取得できない" ;;
+esac
 # -R で期待リポジトリを明示する（GH_REPO や gh repo set-default で別リポジトリの PR を引かない）
 pr_row=$(gh pr view "${pr}" -R "${repo}" --json number,headRefName --jq '[(.number | tostring), .headRefName] | join(" ")' 2>/dev/null) \
   || fail_routing "gh pr view が失敗" "PR を解決できない（gh 取得失敗）"

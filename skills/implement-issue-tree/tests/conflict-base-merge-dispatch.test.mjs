@@ -38,7 +38,7 @@ const SLICE_EXPORTS = [
   'MERGE_VALID_STATES',
   'BASE_MERGE_SCHEMA',
   'baseMergePrompt',
-  'baseMergeInstruction',
+  'basePrepareInstruction',
   'monitorPrompt',
   'fixPrompt',
   'isValidRepoSlug',
@@ -65,7 +65,7 @@ const {
   MERGE_VALID_STATES,
   BASE_MERGE_SCHEMA,
   baseMergePrompt,
-  baseMergeInstruction,
+  basePrepareInstruction,
   monitorPrompt,
   fixPrompt,
   isValidRepoSlug,
@@ -286,7 +286,7 @@ test('base-merge.sh: 許可ホストは github.com の固定値で、host / owne
   // 許可ホストの定数と url_allowed を持つ lib は、gh pr view（routing ガード）より前に source される
   const libSource = baseMergeCode.indexOf('lib/base-merge-lib.sh')
   assert.ok(libSource >= 0 && libSource < baseMergeCode.indexOf('gh pr view'), 'lib/base-merge-lib.sh が gh pr view より前に source されていない')
-  assert.ok(baseMergeLibCode.includes('url_allowed()') && baseMergeCode.includes('url_allowed "${line}" "${want}"'), 'URL 照合（url_allowed）が routing ガードで使われていない')
+  assert.ok(baseMergeLibCode.includes('url_allowed()') && baseMergeLibCode.includes('url_allowed "${line}" "${want_slug}"') && baseMergeCode.includes('routing_check_remotes "${want}"'), 'URL 照合（url_allowed。lib の routing_check_remotes 経由）が routing ガードで使われていない')
   assert.ok(!source.includes('ALLOWED_REMOTE_HOST'), 'ホストの実装スクリプトに ALLOWED_REMOTE_HOST が残っている（許可ホストはスクリプトの埋め込み定数）')
 })
 
@@ -326,11 +326,11 @@ test('monitorPrompt: 手順 1c の CONFLICTING 経路は state: conflicting を�
 // fixPrompt: push 検証ロジック（pushVerifyInstruction 切り出し後の回帰固定）
 // ---------------------------------------------------------------------------
 
-test('fixPrompt(pushAfterFix: true): push 検証の 2 条件判定を含む（pushVerifyInstruction 切り出し後の回帰）', () => {
+test('fixPrompt(pushAfterFix: true): push 検証は pr-push.sh の status（pushed のときだけ pushed: true）に結ぶ（二条件判定は lib/push-verify.sh の実行テストが固定する）', () => {
   const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
   const prompt = fixPrompt(item, impl, finding, true)
-  assert.ok(prompt.includes('push 前に控えた sha ≠ ローカル HEAD'), '事前 sha ≠ ローカル HEAD の判定条件がない')
-  assert.ok(prompt.includes('push 後の ls-remote sha == ローカル HEAD'), '事後 sha == ローカル HEAD の判定条件がない')
+  assert.ok(prompt.includes('status が pushed のときだけ pushed: true'), 'pushed: true の判定が status に結ばれていない')
+  assert.ok(prompt.includes('push 前後のリモート head をローカル HEAD と突き合わせる判定もスクリプトが行う'), '突き合わせをスクリプトが行う旨がない')
 })
 
 // ---------------------------------------------------------------------------
@@ -530,14 +530,13 @@ test('BASE_MERGE_SCHEMA: conflict は省略可の boolean として定義され�
   assert.ok(!BASE_MERGE_SCHEMA.required.includes('conflict'), 'conflict が required に含まれている（省略可のはず）')
 })
 
-test('baseMergeInstruction: 検証権限を持つ経路（pr-create・fix）専用で、その場で解消する。conflict: true / hookRejected の返却指示は含まない', () => {
-  const instr = baseMergeInstruction('main')
+test('basePrepareInstruction: 検証権限を持つ経路（pr-create・fix）専用で、コンフリクトはその場で解消する。conflict: true / hookRejected の返却指示は含まない', () => {
+  const instr = basePrepareInstruction('pr-create', 'feat/x', 'prNumber: 0 で返す')
   assert.ok(!instr.includes('conflict: true'), '検証権限あり経路に conflict: true の返却指示が混入している')
   assert.ok(!instr.includes('hookRejected'), '検証権限あり経路に hookRejected の返却指示が混入している')
-  assert.ok(instr.includes('その場で解消を試みる'), 'コンフリクトをその場で解消する指示が失われている')
-  assert.ok(instr.includes('終了コードで 3 分岐する'), '3 分岐の終了コード処理が失われている')
+  assert.ok(instr.includes('conflict はマージが途中のまま残っている: CLAUDE.md・rules を遵守して解消し'), 'コンフリクトをその場で解消する指示が失われている')
   assert.ok(instr.includes('git merge --abort'), 'merge --abort の指示が失われている')
-  assert.equal(baseMergeInstruction.length, 1, 'runVerification / hostSubject の引数は撤去済み（自動 base 取り込みは base-merge.sh）')
+  assert.equal(basePrepareInstruction.length, 3, '引数は origin・branch・failTail の 3 つ（自動 base 取り込みは base-merge.sh）')
 })
 
 test('baseMergePrompt: 返却キーに conflict / hookRejected / routingError / commitFailed を列挙する（スクリプトの結果の転記指示）', () => {
