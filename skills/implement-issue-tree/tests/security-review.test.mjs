@@ -259,6 +259,70 @@ test('結合: モデルの既定は models.review に従い、models.securityRev
 })
 
 // ---------------------------------------------------------------------------
+// 片方の Review が reject したとき（残置 worktree の台帳と例外の経路）
+// ---------------------------------------------------------------------------
+
+// 台帳（返却値 ephemeralWorktrees）の review / security-review の記録だけを取り出す。reject した側は
+// パスが分からないが、isolation: 'worktree' の agent() は reject の前に worktree を作り得るため、
+// base-merge と同じく path: ''（パス不明）の 1 件として計上される（件数を実体より過小にしない）。
+const reviewLedger = (result) => result.ephemeralWorktrees
+  .filter((e) => e.kind === 'review' || e.kind === 'security-review')
+  .map((e) => [e.kind, e.path])
+
+test('例外: セキュリティ専用の Review が reject しても、決着した通常の Review の worktree は台帳に載る', async () => {
+  const { calls, result } = await runScript({
+    args: { ...BASE_ARGS, securityReview: true },
+    override: (label) => { if (label.startsWith('security-review:#')) throw new Error('SEC-BOOM') },
+  })
+  assert.deepEqual(reviewLedger(result), [['review', '/repo/wt/r2'], ['security-review', '']], 'Promise.all だと通常の Review の記録が漏れる')
+  assert.deepEqual(result.failures.map((f) => [f.issue, f.reason]), [[2, 'SEC-BOOM']], '単独の Review の reject と同じ failed 経路（runOne の catch-all）')
+  assert.equal(labels(calls, 'fix:#').length, 0, '例外を無効な結果へ倒して fix を誘発しない')
+  assert.equal(labels(calls, 'pr-create:#').length, 0)
+})
+
+test('例外: 通常の Review が reject しても、決着したセキュリティ専用の Review の worktree は台帳に載る', async () => {
+  const { calls, result } = await runScript({
+    args: { ...BASE_ARGS, securityReview: true },
+    override: (label) => {
+      if (label.startsWith('review:#')) throw new Error('MAIN-BOOM')
+      if (label.startsWith('security-review:#')) return { state: 'ok', highestSeverity: 'none', summary: 's', worktreePath: '/repo/wt/s2' }
+    },
+  })
+  assert.deepEqual(reviewLedger(result), [['review', ''], ['security-review', '/repo/wt/s2']], 'Promise.all だとセキュリティ専用の Review の記録が漏れる')
+  assert.deepEqual(result.failures.map((f) => [f.issue, f.reason]), [[2, 'MAIN-BOOM']])
+  assert.equal(labels(calls, 'fix:#').length, 0)
+})
+
+test('例外: 両方 reject したらパス不明の 2 件を計上し、通常の Review の原因を伝える', async () => {
+  const { result } = await runScript({
+    args: { ...BASE_ARGS, securityReview: true },
+    override: (label) => {
+      if (label.startsWith('security-review:#')) throw new Error('SEC-BOOM')
+      if (label.startsWith('review:#')) throw new Error('MAIN-BOOM')
+    },
+  })
+  assert.deepEqual(reviewLedger(result), [['review', ''], ['security-review', '']])
+  assert.deepEqual(result.failures.map((f) => f.reason), ['MAIN-BOOM'])
+})
+
+test('例外: 無効時の通常の Review の reject も同じ failed 経路（有効時はこの経路に揃えている）', async () => {
+  const { calls, result } = await runScript({
+    args: BASE_ARGS,
+    override: (label) => { if (label.startsWith('review:#')) throw new Error('MAIN-BOOM') },
+  })
+  assert.deepEqual(result.failures.map((f) => [f.issue, f.reason]), [[2, 'MAIN-BOOM']])
+  assert.equal(labels(calls, 'fix:#').length, 0)
+})
+
+test('例外: reject と null（StructuredOutput 欠落）は別経路 — null は無効な結果として needs-fix 相当で fix へ進む', async () => {
+  const { calls } = await runScript({
+    args: { ...BASE_ARGS, securityReview: true },
+    override: (label) => { if (label.startsWith('security-review:#')) return null },
+  })
+  assert.ok(labels(calls, 'fix:#').length >= 1, 'null は従来どおり指摘ありとして扱う')
+})
+
+// ---------------------------------------------------------------------------
 // 起動時の fail-closed（配布物 implement-issue-tree.js で検証）
 // ---------------------------------------------------------------------------
 

@@ -145,6 +145,26 @@ test('駆動部: 判断を伴う agent の呼び出しはすべて stageModelOpt
   assert.match(driverPart, /label: `plan:#\$\{item\.number\}`,\s*phase: 'Plan',\s*\.\.\.stageModelOpt\('plan'\),/, 'plan は既定なし（セッション継承）で stageModelOpt を使う')
 })
 
+test('結合: base 取り込みは既定で sonnet、models.baseMerge で変えられ、プロンプト（スクリプトの起動コマンド）と他の opts は変わらない', async () => {
+  // #603 第 3 弾以降の base 取り込みは scripts/base-merge.sh を 1 回実行して結果を転記するだけの agent で、
+  // 判断はスクリプトが行う。それでも models.baseMerge はモデルだけを変える（費用を下げる用途で残す）。
+  const conflicting = (label) => (label.startsWith('merge:#')
+    ? { state: 'conflicting', summary: 'mergeable: CONFLICTING', headSha: 'a'.repeat(40), unresolvedComments: [] }
+    : undefined)
+  const args = { ...BASE_ARGS, repo: 'Fandhe-AI/agent-cli-skills' }
+  const base = await runScript({ args, override: conflicting })
+  const low = await runScript({ args: { ...args, models: { baseMerge: 'haiku' } }, override: conflicting })
+  const pick = (r) => r.calls.filter((c) => c.opts.label.startsWith('base-merge:#'))
+  assert.equal(pick(base).length, 1)
+  assert.equal(pick(base)[0].opts.model, 'sonnet')
+  assert.equal(pick(low).length, 1)
+  assert.equal(pick(low)[0].opts.model, 'haiku')
+  assert.equal(pick(low)[0].prompt, pick(base)[0].prompt, 'モデルを変えてもプロンプトは同一')
+  const { model: _a, ...baseRest } = pick(base)[0].opts
+  const { model: _b, ...lowRest } = pick(low)[0].opts
+  assert.deepEqual(lowRest, baseRest)
+})
+
 // ---------------------------------------------------------------------------
 // 起動時の fail-closed（配布物 implement-issue-tree.js で検証）
 // ---------------------------------------------------------------------------

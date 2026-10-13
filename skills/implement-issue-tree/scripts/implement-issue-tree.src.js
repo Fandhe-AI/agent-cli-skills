@@ -7620,15 +7620,29 @@ async function runImplement(item) {
         isolation: 'worktree',
       })
       // セキュリティ専用の Review（args.securityReview）は通常の Review と並列に、互いの結果を見せずに走らせる。
-      const [rMain, rSec] = securityReviewEnabled
-        ? await Promise.all([reviewCall, agent(reviewPrompt(item, impl, true), { label: `security-review:#${item.number}`, phase: 'Review', model: securityReviewModel, effort: 'medium', schema: REVIEW_SCHEMA, isolation: 'worktree' })])
-        : [await reviewCall, null]
+      // Promise.all ではなく allSettled で両方の決着を待つ: 片方が reject すると、もう片方が作った使い捨て
+      // worktree のパスが記録されないまま例外が伝わり、残置 worktree の台帳（件数・バイト）が実体とずれる。
+      let rMain
+      let rSec = null
+      let reviewRejection = null
+      if (securityReviewEnabled) {
+        const [sMain, sSec] = await Promise.allSettled([reviewCall, agent(reviewPrompt(item, impl, true), { label: `security-review:#${item.number}`, phase: 'Review', model: securityReviewModel, effort: 'medium', schema: REVIEW_SCHEMA, isolation: 'worktree' })])
+        rMain = sMain.status === 'fulfilled' ? sMain.value : null
+        rSec = sSec.status === 'fulfilled' ? sSec.value : null
+        // 通常の Review を先に採る（単独の Review の reject と同じ原因を優先して伝える）。
+        reviewRejection = sMain.status === 'rejected' ? sMain : sSec.status === 'rejected' ? sSec : null
+      } else {
+        rMain = await reviewCall
+      }
       // Review worktree は自己申告値で所有権を確認できないため自動削除せず記録のみ（Issue #142）。
       // currentWorktreePath へは代入しない（上書きすると cleanupWorktree が実装 worktree を取り違える）。
       recordEphemeralWorktree(item.number, rMain?.worktreePath, 'review')
+      if (securityReviewEnabled) recordEphemeralWorktree(item.number, rSec?.worktreePath, 'security-review')
+      // 片方でも reject したら、台帳へ記録した後に単独の Review の reject と同じ経路（runOne の catch-all）へ流す。
+      // 無効な結果（null）へ倒して needs-fix にすると、agent の例外が fix の実行を誘発する別経路になる。
+      if (reviewRejection) throw reviewRejection.reason
       let r = rMain
       if (securityReviewEnabled) {
-        recordEphemeralWorktree(item.number, rSec?.worktreePath, 'security-review')
         const brief = (x) => `${sanitize(x?.state ?? '無効な結果')}（${sanitize(x?.highestSeverity ?? '-')}）`
         log(`#${item.number}: Review ラウンド（残り ${reviewsLeft} 回）— 通常の Review: ${brief(rMain)} / セキュリティ専用の Review: ${brief(rSec)}`)
         // 合わせた結果に以降の判定（blocked・最終ラウンドの Low の扱い・fix への指摘の受け渡し）をそのまま当てる。

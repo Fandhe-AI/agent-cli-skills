@@ -7620,15 +7620,29 @@ schema:REVIEW_SCHEMA,
 isolation:'worktree',
 })
 
-const[rMain,rSec]=securityReviewEnabled
-?await Promise.all([reviewCall,agent(reviewPrompt(item,impl,true),{label:`security-review:#${item.number}`,phase:'Review',model:securityReviewModel,effort:'medium',schema:REVIEW_SCHEMA,isolation:'worktree'})])
-:[await reviewCall,null]
+
+
+let rMain
+let rSec=null
+let reviewRejection=null
+if(securityReviewEnabled){
+const[sMain,sSec]=await Promise.allSettled([reviewCall,agent(reviewPrompt(item,impl,true),{label:`security-review:#${item.number}`,phase:'Review',model:securityReviewModel,effort:'medium',schema:REVIEW_SCHEMA,isolation:'worktree'})])
+rMain=sMain.status==='fulfilled'?sMain.value:null
+rSec=sSec.status==='fulfilled'?sSec.value:null
+
+reviewRejection=sMain.status==='rejected'?sMain:sSec.status==='rejected'?sSec:null
+}else{
+rMain=await reviewCall
+}
 
 
 recordEphemeralWorktree(item.number,rMain?.worktreePath,'review')
+if(securityReviewEnabled)recordEphemeralWorktree(item.number,rSec?.worktreePath,'security-review')
+
+
+if(reviewRejection)throw reviewRejection.reason
 let r=rMain
 if(securityReviewEnabled){
-recordEphemeralWorktree(item.number,rSec?.worktreePath,'security-review')
 const brief=(x)=>`${sanitize(x?.state ?? '無効な結果')}（${sanitize(x?.highestSeverity ?? '-')}）`
 log(`#${item.number}: Review ラウンド（残り ${reviewsLeft} 回）— 通常の Review: ${brief(rMain)} / セキュリティ専用の Review: ${brief(rSec)}`)
 
