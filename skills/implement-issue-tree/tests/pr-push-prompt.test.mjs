@@ -141,3 +141,27 @@ test('baseMergePrompt（自動 base 取り込み）は pr-push.sh を呼ばな�
   assert.doesNotMatch(text, /pr-push\.sh/)
   assert.match(text, /base-merge\.sh/)
 })
+
+test('prCreatePrompt: milestone 警告の追記は最後の gh pr edit より前（更新後に足しても PR へ反映されない）で、最後の更新の列挙にも含む', () => {
+  for (const outOfScope of [[], ['対象外の項目 A']]) {
+    const prompt = prCreatePrompt(item, impl, outOfScope)
+    const warn = prompt.indexOf('milestone が unassigned のときは、"$f" の末尾にも')
+    const edit = prompt.indexOf(`gh pr edit <番号> -R Fandhe-AI/agent-cli-skills --body-file "$f" && rm -f "$f"`)
+    assert.ok(warn >= 0 && edit >= 0)
+    assert.ok(warn < edit, `警告の指示(${warn})が gh pr edit(${edit})より後ろにある`)
+    assert.match(prompt, /本文への追記（Closes 行・対象外節[^）]*milestone 警告）をすべて終えてから、最後に 1 回だけ更新/)
+  }
+})
+
+test('prCreatePrompt: push 前（prepare 後・push 前）に base の SHA から HEAD までの差分でセキュリティ確認し、問題・検査失敗は push も PR 作成もせず prNumber: 0 で返す', () => {
+  const prompt = prCreatePrompt(item, impl, [])
+  const prepare = prompt.indexOf(CMD(` --mode prepare --origin pr-create --branch ${B} --base main${R}`))
+  const sec = prompt.indexOf('0e. push 前のセキュリティ確認')
+  const push = prompt.indexOf(CMD(` --mode push --origin pr-create --branch ${B} --base main${R}`))
+  assert.ok(prepare >= 0 && sec > prepare && sec < push, '確認は prepare の後・push の前')
+  assert.match(prompt, /git rev-parse refs\/worktree\/pr-push\/base/)
+  assert.match(prompt, /git diff <その SHA> HEAD の差分（[^）]*コンフリクト解消コミットの変更を含む）/)
+  assert.match(prompt, /skills\/create-pr\/SKILL\.md Step 2/)
+  assert.match(prompt, /\.claude\/rules\/security\.md の方針に従う（追加行のみ対象・マッチ行は出力せず件数と終了コードで判定・grep が終了コード 2 以上なら検査失敗として中止）/)
+  assert.match(prompt, /push も PR 作成もせず prNumber: 0 と「セキュリティ確認で問題を検出/)
+})
