@@ -4617,6 +4617,7 @@ const AGENT_RUN_LIMIT=1000
 
 
 
+
 const AGENT_CALLS_START=30
 function parseAgentCallLimit(raw){
 if(raw===undefined||raw===null)return AGENT_RUN_LIMIT
@@ -5591,7 +5592,6 @@ return[
 COMMON,
 'Review フェーズが全通過した後にのみ呼ばれる。この push が CI トリガーになる（push はこの 1 回のみ）。',
 '手順:',
-
 
 
 

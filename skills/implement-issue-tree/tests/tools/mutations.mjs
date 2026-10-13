@@ -8,6 +8,10 @@ const PV = 'scripts/lib/push-verify.sh'
 const OBS = 'scripts/observe-pr.sh'
 const SRC = 'scripts/implement-issue-tree.src.js'
 const BW = 'scripts/build-workflow.mjs'
+const PP = 'scripts/pr-push.sh'
+const PP_LIB = 'scripts/lib/pr-push-lib.sh'
+const RV = 'scripts/run-verified.sh'
+const PR_PUSH = ['pr-push.test.mjs', 'pr-push-unit.test.mjs']
 const BASE_MERGE = ['base-merge.test.mjs', 'base-merge-unit.test.mjs']
 
 export const MUTATIONS = [
@@ -26,8 +30,8 @@ export const MUTATIONS = [
   { id: 'U31-read-without-r', file: BM_LIB, from: '  while IFS= read -r line; do\n    n=$((n + 1))', to: '  while IFS= read line; do\n    n=$((n + 1))', tests: ['base-merge.test.mjs'], note: 'get-url の各行を read -r なしで読む（バックスラッシュが消え、evil.example\\@github.com が github.com 宛てに見える = routing 偽装）' },
   // ---- lib/push-verify.sh（push 前後の突き合わせ）----
   { id: 'U12-no-check-ref-format', file: PV, from: '  git check-ref-format "refs/heads/$1" >/dev/null 2>&1\n}', to: '  true\n}', tests: ['push-verify.test.mjs', 'base-merge.test.mjs'], note: 'ブランチ名を git check-ref-format で検証しない' },
-  { id: 'U30-follow-tags-allowed', file: PV, from: 'git push --no-follow-tags origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?', to: 'git push origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?', tests: ['push-verify.test.mjs', 'base-merge.test.mjs'], note: '--no-follow-tags を外す（利用者設定 push.followTags でタグが origin へ出る）' },
-  { id: 'U32-force-push-refspec', file: PV, from: 'git push --no-follow-tags origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?', to: 'git push --no-follow-tags origin "+HEAD:refs/heads/${branch}" >/dev/null || rc=$?', tests: ['push-verify.test.mjs', 'base-merge.test.mjs', 'script-static-guard.test.mjs'], note: 'push の refspec を +HEAD:… にする（force push。リモートが進んだブランチを上書きしうる）' },
+  { id: 'U30-follow-tags-allowed', file: PV, from: 'git push --no-follow-tags origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?', to: 'git push origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?', tests: ['push-verify.test.mjs', 'base-merge.test.mjs', 'pr-push.test.mjs'], note: '--no-follow-tags を外す（利用者設定 push.followTags でタグが origin へ出る）' },
+  { id: 'U32-force-push-refspec', file: PV, from: 'git push --no-follow-tags origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?', to: 'git push --no-follow-tags origin "+HEAD:refs/heads/${branch}" >/dev/null || rc=$?', tests: ['push-verify.test.mjs', 'base-merge.test.mjs', 'pr-push.test.mjs', 'script-static-guard.test.mjs'], note: 'push の refspec を +HEAD:… にする（force push。リモートが進んだブランチを上書きしうる）' },
   // ---- observe-pr.sh の壁時計・取得失敗・出力サイズ（実時間を待つテストを並行に走らせた群）----
   { id: 'O1-wall-keeps-counts', file: OBS, from: 'if [ "${err}" -ne 0 ] || [ "${inconclusive}" -eq 1 ]; then', to: 'if [ "${err}" -ne 0 ]; then', tests: ['observe-pr-inconclusive.test.mjs'], note: '壁時計 kill の封筒に直前の件数・headSha を載せる' },
   { id: 'O2-no-failonly-error', file: OBS, from: 'if [ "${ever_failed}" -eq 1 ] && [ "${ever_ok}" -eq 0 ]; then', to: 'if false; then', tests: ['observe-pr-inconclusive.test.mjs'], note: '一度も取得に成功しないまま壁時計で終わっても error にしない' },
@@ -38,4 +42,18 @@ export const MUTATIONS = [
   // ---- build-workflow.mjs（ビルダー）----
   { id: 'B1-rule-sign-digit-off', file: BW, from: "refuses: (prev, next) => (prev === '+' || prev === '-') && /[0-9]/.test(next) }", to: 'refuses: () => false }', tests: ['build-workflow.test.mjs'], note: '空白除去の規則 sign-digit を外す（1e- 2 を 1e-2 にしてしまう）' },
   { id: 'B2-cli-guard-no-realpath', file: BW, from: "return realpathSync(process.argv[1] ?? '')", to: "return process.argv[1] ?? ''", tests: ['build-workflow.test.mjs'], note: 'symlink 経由の起動で CLI が無言の no-op になる' },
+  // ---- pr-push.sh と lib/pr-push-lib.sh（第 4 弾。pr-create / fix の base 取り込み・push・PR 作成）----
+  { id: 'P01-routing-off', file: PP, from: '  if [ -n "${repo}" ]; then\n    want=$(lower "${repo}")', to: '  if false; then\n    want=$(lower "${repo}")', tests: ['pr-push.test.mjs'], note: 'prepare の routing ガード（remote の fetch / push URL の全行照合）を外す（別リポジトリから取り込み・push しうる）' },
+  { id: 'P02-no-diff-check-off', file: PP, from: '    [ "${count}" -gt 0 ] || fail no-diff "base との差分が 0 件（push 対象コミットなし）"', to: '    :', tests: ['pr-push.test.mjs'], note: 'pr-create の差分ゼロ確認を外す（起点の取り違えで base の tip をそのまま push する）' },
+  { id: 'P03-merge-in-progress-off', file: PP, from: '  if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then\n    fail merge-in-progress', to: '  if false; then\n    fail merge-in-progress', tests: ['pr-push.test.mjs'], note: 'push モードがコンフリクト途中（MERGE_HEAD 残存）で止まらない（解消コミットの無い HEAD を push する）' },
+  { id: 'P04-remote-ahead-continues', file: PP_LIB, from: "0) PP_ORIGIN='remote-ahead'; return 1 ;;", to: "0) PP_ORIGIN='remote-ahead'; return 0 ;;", tests: PR_PUSH, note: 'remote ahead（第三者の push と区別できない）を続行扱いにする（未レビューのリモートコミットを取り込む）' },
+  { id: 'P05-head-mismatch-reused', file: PP_LIB, from: '    if [ "${same_sha}" = "${remote}" ]; then', to: '    if true; then', tests: PR_PUSH, note: 'head の sha が違う既存 PR も再利用する（他者・別ランの push で動いた PR にマージ経路が結ばれる）' },
+  { id: 'P06-sha-mismatch-ignored', file: PP, from: '  [ "$(git rev-parse HEAD 2>/dev/null)" = "${head_now}" ] || fail sha-mismatch "checkout 後の HEAD が起点の sha と一致しない"', to: '  :', tests: ['pr-push.test.mjs'], note: 'checkout 後の HEAD と起点の sha の一致確認を外す（無関係な HEAD を取り込み・push する）' },
+  // ---- 起動時のハッシュ予検査（第 4 弾）----
+  { id: 'P07-precheck-skew-accepted', file: SRC, from: '  if (p.mismatch === 0 && p.missing === 0) return { ok: true }', to: '  if (true) return { ok: true }', tests: ['script-hash-precheck.test.mjs'], note: 'ホストが不一致・欠落を一致扱いにする（版ずれのまま着手する）' },
+  { id: 'P08-verify-only-mismatch-ok', file: RV, from: '    elif [ "${actual}" = "${expected}" ]; then\n      ok=$((ok + 1))', to: '    elif true; then\n      ok=$((ok + 1))', tests: ['script-hash-precheck.test.mjs'], note: '--verify-only がハッシュ不一致を一致として数える' },
+  { id: 'P09-precheck-skipped', file: SRC, from: 'if (skillDir) await precheckScriptHashes()', to: 'if (false) await precheckScriptHashes()', tests: ['script-hash-precheck.test.mjs'], note: 'ラン開始時の予検査を呼ばない' },
+  // ---- observe-pr.sh --repo（第 4 弾）----
+  { id: 'P10-repo-not-passed', file: SRC, from: "    repo !== '' ? ` --repo ${repo}` : '',", to: "    '',", tests: ['observe-pr-host.test.mjs'], note: 'ホストが args.repo を持つのに観測コマンドへ --repo を渡さない' },
+  { id: 'P11-observe-no-R', file: OBS, from: 'run_timed "${gh_timeout}" gh pr view "${pr}" -R "${repo}" "$@"', to: 'run_timed "${gh_timeout}" gh pr view "${pr}" "$@"', tests: ['observe-pr.test.mjs'], note: '--repo があっても gh pr view に -R を付けない' },
 ]

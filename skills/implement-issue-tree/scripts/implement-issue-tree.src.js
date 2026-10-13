@@ -4616,7 +4616,8 @@ const BLOCKED_STATE_CHUNK_SIZE = 100
 const AGENT_RUN_LIMIT = 1000
 // 開始処理（未追跡検査・nonce・loadState と照合・ツリー取得・外部チェック観測・依存宣言と祖先と
 // ツリー外前提の取得・init-all・孤立スキャン・残置の観測・HEAD 検査）が着手前に使う呼び出し数の見込み。
-// 依存宣言はチャンク数に比例するため約 20 に余裕 10 を足した。
+// 依存宣言はチャンク数に比例するため約 20 に余裕 10 を足した。スクリプトハッシュの予検査（script-hash-precheck。1 回、転記ミス・
+// 例外のときだけ 2 回）はこの余裕の内（下限 81 は変えない。Issue #603 第 4 弾）。
 const AGENT_CALLS_START = 30
 function parseAgentCallLimit(raw) {
   if (raw === undefined || raw === null) return AGENT_RUN_LIMIT
@@ -5597,9 +5598,8 @@ function prCreatePrompt(item, impl, outOfScope) {
     // 解消不能ならここで push を止める。
     // 起点確立（checkout）の失敗を検知しないまま base merge・push まで進むと、隔離 worktree に
     // 残っていた無関係な HEAD（base の tip 等）がそのまま push され、実装コミットを含まない誤った
-    // ref が origin へ反映される（実測: vector-db #629 ラン #645、Issue #464・#466）。手順 0 の各
-    // checkout 直後に rev-parse で起点の実体を確認し、手順 0b で base との差分ゼロを最終防御として
-    // 検知する。
+    // ref が origin へ反映される（実測: vector-db #629 ラン #645、Issue #464・#466）。prepare は checkout 直後に
+    // rev-parse で起点の実体を確認し（sha-mismatch）、push モードが base との差分ゼロを最終防御として検知する（no-diff）。
     // 起点の確立・base の取り込み（コンフリクトは解消せず途中のまま返す）・差分ゼロ確認は scripts/pr-push.sh が行う（Issue #603 第 4 弾）。
     // 起点の 4 分岐（ローカル / リモート / remote-ahead / diverged）は lib/pr-push-lib.sh の pp_decide_origin。
     `0. 起点の確立と push 前 base 最新化ゲート: ${basePrepareInstruction('pr-create', branch, 'prNumber: 0 で返す')}`,
