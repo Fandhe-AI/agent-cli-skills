@@ -61,6 +61,16 @@ export function signedReply(prompt, payload) {
   return makeEnvelope(nonce, full)
 }
 
+// 起動時のハッシュ予検査（label: script-hash-precheck）への正直な応答。プロンプトのヒアドキュメントから表を取り出し、
+// 全行が実ファイルと一致したとき（既定）の封筒を返す。overrides でカウントを差し替えて版ずれ・欠落を模せる
+export function hashPrecheckReply(prompt, overrides = {}) {
+  const nonce = nonceOf(prompt)
+  const m = /<<'(HASHESEOF_[0-9a-z]+)'\n([\s\S]*?)\n\1\n/.exec(String(prompt))
+  if (nonce === null || !m) throw new Error('プロンプトに --verify-only のコマンドが無い')
+  const count = m[2].split('\n').length
+  return makeEnvelope(nonce, { count, firstBad: 0, inputSha256: inputSha256(m[2]), mismatch: 0, missing: 0, ok: count, ...overrides })
+}
+
 export function wrapAgentReply(prompt, value) {
   if (value === null || value === undefined || value instanceof Error) return value
   if (typeof value !== 'object' || Array.isArray(value)) return value

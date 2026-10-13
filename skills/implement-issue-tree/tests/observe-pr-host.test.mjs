@@ -393,3 +393,46 @@ test('observe-pr.sh の待機の余裕と壁時計の扱いが文書に書かれ
     assert.ok(sh.includes(needle), needle)
   }
 })
+
+// --- args.repo をホストが持つとき、観測スクリプトの gh 呼び出しは -R 付きになる（Issue #603 第 4 弾）---
+// ホストが対象リポジトリを持つのに --repo を渡さないと、スクリプト内の gh は cwd のリポジトリ（隔離 worktree の remote）か GH_REPO に
+// 解決される。args.repo はホストが人間から受け取った唯一の宣言なので、観測も同じリポジトリへ束縛する。
+// 定義部は args を読み込み時に 1 回だけ解釈するため、repo 入りの引数で別のスライスを読み込んで検査する。
+const REPO = 'Fandhe-AI/agent-cli-skills'
+globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree', repo: REPO }
+const slicePathRepo = join(sliceDir, 'defs-repo.mjs')
+writeFileSync(slicePathRepo, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
+const mr = await import(pathToFileURL(slicePathRepo).href)
+globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
+
+test('observeCommand: args.repo があれば --repo を付ける。未指定なら付けない。明示の repo が優先で、不正な形式は例外にする', () => {
+  const withRepo = mr.observeCommand(NONCE, { mode: 'checks', pr: 12 })
+  assert.match(withRepo, / --mode checks --pr 12 --repo Fandhe-AI\/agent-cli-skills$/)
+  assert.doesNotMatch(m.observeCommand(NONCE, { mode: 'checks', pr: 12 }), /--repo/)
+  assert.match(mr.observeCommand(NONCE, { mode: 'checks', pr: 12, repo: 'o/r' }), / --repo o\/r$/)
+  assert.doesNotMatch(mr.observeCommand(NONCE, { mode: 'checks', pr: 12, repo: '' }), /--repo/)
+  for (const bad of ['a/b/c', '-x/y', 'o/r;id', 'o/r r']) assert.throws(() => mr.observeCommand(NONCE, { mode: 'checks', pr: 12, repo: bad }), /repo の形式が不正/, bad)
+})
+
+test('observeInputText: repo は args.repo（未指定は空）で、明示の repo が優先される。スクリプトが束縛する入力文字列と同じ定義', () => {
+  assert.equal(mr.observeInputText({ mode: 'checks', pr: 12 }), `observe-pr\nchecks\n12\n${REPO}\n\n\n\n\n`)
+  assert.equal(m.observeInputText({ mode: 'checks', pr: 12 }), 'observe-pr\nchecks\n12\n\n\n\n\n\n')
+  assert.equal(mr.observeInputText({ mode: 'checks', pr: 12, repo: 'o/r' }), 'observe-pr\nchecks\n12\no/r\n\n\n\n\n')
+})
+
+{
+  const bash = availableBashes()[0]
+  test(`[${bash}] repo 入りのコマンドを実際に実行すると gh は対象リポジトリへ束縛され、封筒は repo 入りの入力でだけ照合に通る（repo を落とした入力は input で拒否される）`, { skip: !jqAvailable }, () => {
+    const stub = createObserveStub(stubRoutes())
+    const cmd = mr.observeCommand(NONCE, { mode: 'checks', pr: 12 })
+    const argv = cmd.split(' observe-pr.sh ')[1].split(' ').slice(2) // --nonce N を除く
+    assert.deepEqual(argv, ['--mode', 'checks', '--pr', '12', '--repo', REPO])
+    const r = spawnSync(bash, [OBSERVE_SH, '--nonce', NONCE, ...argv], { encoding: 'utf8', env: stub.env() })
+    assert.equal(r.status, 0, r.stderr)
+    const env = JSON.parse(r.stdout)
+    assert.ok(mr.verifySignedOutput(env, NONCE, mr.sha256Hex(mr.observeInputText({ mode: 'checks', pr: 12 }))).ok)
+    assert.equal(mr.verifySignedOutput(env, NONCE, mr.sha256Hex(m.observeInputText({ mode: 'checks', pr: 12 }))).reason, 'input')
+    const calls = stub.calls()
+    assert.ok(calls.length >= 2 && calls.every((c) => /(^| )-R Fandhe-AI\/agent-cli-skills( |$)|repos\/Fandhe-AI\/agent-cli-skills\//.test(c)), `全ての gh 呼び出しが対象リポジトリに束縛される:\n${calls.join('\n')}`)
+  })
+}

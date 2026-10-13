@@ -17,6 +17,8 @@
 # 読み込み済みを示す変数でのガードは置かない: 環境から継承した変数でこのファイルの定義が飛ばされ、export -f した偽の関数が使われるのを防ぐ
 #（定義だけのファイルなので毎回読み直して構わない）。
 
+# shellcheck disable=SC2034  # RM_FAILED（routing_check_remotes が設定する）は source 元のスクリプトが読む
+
 # 許可するリモートのホスト。Fandhe-AI は GitHub.com 運用のため固定値とする（owner/repo だけを比較すると、同じ
 # owner/repo を持つ別ホストを一致とみなして別ホストへ push しうる。PR #443 codex P0）
 ALLOWED_REMOTE_HOST='github.com'
@@ -106,4 +108,40 @@ url_allowed() {
   host=$(lower "${host}")
   path=$(lower "${path}")
   [ "${host}" = "${ALLOWED_REMOTE_HOST}" ] && [ -n "${path}" ] && [ "${path}" = "${want_slug}" ]
+}
+
+# 1 つの種別（fetch / push）の URL 全行を url_allowed で照合する。base-merge.sh と pr-push.sh の routing ガードが共有する
+# （同じ照合を別々に書くと、片方だけ pushurl・pushInsteadOf の迂回を見逃す）。URL はトークンを含み得るので、どの出力にも出さない。
+# $1 = ラベル（fetch / push）、$2 = 期待する owner/repo（小文字化済み）、残り = git remote get-url への追加オプション。
+# 0 = 全行が許可、1 = 1 行でも外れた、2 = 取得できない（git が失敗・出力が空）
+check_remote_urls() {
+  local label=$1 want_slug=$2 out line n=0
+  shift 2
+  out=$(git remote get-url "$@" origin 2>/dev/null) || return 2
+  [ -n "${out}" ] || return 2
+  while IFS= read -r line; do
+    n=$((n + 1))
+    url_allowed "${line}" "${want_slug}" || { echo "routing: ${label} URL の ${n} 行目が許可ホスト・期待リポジトリと一致しない" >&2; return 1; }
+  done <<EOF
+${out}
+EOF
+  return 0
+}
+
+# fetch URL（`--all`）と push 先 URL（`--push --all`）の両方を check_remote_urls で照合する。$1 = 期待する owner/repo（小文字化済み）。
+# 戻り値は check_remote_urls と同じ。外れた種別を RM_FAILED（fetch / push）に入れる
+RM_FAILED=""
+routing_check_remotes() {
+  local want_slug=$1 spec rc
+  RM_FAILED=""
+  for spec in "fetch:--all" "push:--push --all"; do
+    rc=0
+    # shellcheck disable=SC2086  # ${spec#*:} は意図した単語分割（--push --all）
+    check_remote_urls "${spec%%:*}" "${want_slug}" ${spec#*:} || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      RM_FAILED=${spec%%:*}
+      return "${rc}"
+    fi
+  done
+  return 0
 }

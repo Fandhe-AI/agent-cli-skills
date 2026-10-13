@@ -2,7 +2,7 @@
 
 本書は implement-issue-tree スキルの一部。全体は ../SKILL.md 参照。
 
-決定的な手順（`gh` / `git` / `du` 等のコマンド列と分類規則）をプロンプトの文章から切り出し、スキル同梱のスクリプトにして、サブエージェントには「コマンドを実行して出力を転記する」ことだけをさせる設計（Issue #603）の、**何を防ぎ、何を防がないか**を書く。第 1 弾の対象は読み取り専用の測定 2 本（残置 worktree のバイト測定・実ディスク空き容量）、第 2 弾の対象は monitor の観測と待機（`observe-pr.sh`）で、いずれも安全判定（マージ・push・削除）を含まない。第 3 弾の対象は base 取り込みと push の検証（`base-merge.sh`、`lib/push-verify.sh`）と、push 直後の確認（`observe-pr.sh --mode push`）で、**base-merge.sh は push を実行する最初のスクリプト**である（下の「第 3 弾」節）。安全判定を含むスクリプトを足す弾は、本書の前提を満たすか、満たさない部分を別の機構で補うことを、その弾の PR で示す。
+決定的な手順（`gh` / `git` / `du` 等のコマンド列と分類規則）をプロンプトの文章から切り出し、スキル同梱のスクリプトにして、サブエージェントには「コマンドを実行して出力を転記する」ことだけをさせる設計（Issue #603）の、**何を防ぎ、何を防がないか**を書く。第 1 弾の対象は読み取り専用の測定 2 本（残置 worktree のバイト測定・実ディスク空き容量）、第 2 弾の対象は monitor の観測と待機（`observe-pr.sh`）で、いずれも安全判定（マージ・push・削除）を含まない。第 3 弾の対象は base 取り込みと push の検証（`base-merge.sh`、`lib/push-verify.sh`）と、push 直後の確認（`observe-pr.sh --mode push`）で、**base-merge.sh は push を実行する最初のスクリプト**である（下の「第 3 弾」節）。第 4 弾の対象は pr-create と fix の base 取り込み・push・PR 作成（`pr-push.sh`）と、ラン開始時のハッシュ予検査（`run-verified.sh --verify-only`）、観測スクリプトの `--repo` である（下の「第 4 弾」節）。安全判定を含むスクリプトを足す弾は、本書の前提を満たすか、満たさない部分を別の機構で補うことを、その弾の PR で示す。
 
 ## 構成
 
@@ -13,6 +13,7 @@
 | `scripts/measure-residual-bytes.sh` / `measure-free-disk.sh` | 測定本体。入力はパスの一覧（標準入力）または 1 件（引数）。出力は 1 行の封筒 |
 | `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail` / `push`（第 3 弾）。出力は 1 行の封筒（`threads-detail` だけは外部由来の自由文を含む非信頼データで、封筒ではない）。`--wait` は有界の待機 |
 | `scripts/base-merge.sh` | 自動 base 取り込みの本体（第 3 弾）。入力は PR 番号・branch・base・期待 owner/repo（引数）。**封筒を使わない**。出力の最後の 1 行は `BASE_MERGE_RESULT {…}`（キーは `BASE_MERGE_SCHEMA` と同じ） |
+| `scripts/pr-push.sh` | pr-create と fix の起点の確立・base 取り込み・push・PR 作成（第 4 弾）。モードは `prepare` / `push` / `pr`。**封筒を使わない**。出力の最後の 1 行は `PR_PUSH_RESULT {…}` |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
 | `scripts/lib/push-verify.sh` | push の前後でリモート head を突き合わせる共通部（`pv_push_verified`。第 3 弾）。`base-merge.sh` が使い、以降 pr-create の push と fix の push 検証も同じ部品へ移す |
 | 生成物 `implement-issue-tree.js` の `SCRIPT_SHA256` | ビルダーが埋め込む期待ハッシュ。開発ファイルには置換前の目印を書き、`build-workflow.mjs` が置換する |
@@ -97,7 +98,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 `pushed` の自己申告を封筒で裏付けることは、次弾以降の選択肢である（費用は monitor の checks 系統並み: schema・observe 部品・ガイド文で数 KB）。
 
-`observe-pr.sh --mode push` の封筒も、ホストは**照合も採用もしない**（`checksStarted` / `mergeableAfterPush` は従来どおり診断・分岐ヒント専用）。nonce はホストが常に生成して渡すが、材料は `push-confirm:<branch>:<PR 番号>` だけで呼び出しごとには変えない（プロンプトを決定的に保つため）。fix では `<PR 番号>` は実際の PR 番号だが、pr-create は PR 番号を手順 1b / 2 まで知らないため、材料には字面のプレースホルダ `<PR 番号>` がそのまま入る（エージェントが実行時に置き換えるのはコマンドの引数だけで、nonce は変わらない）。**採用に切り替えるときは呼び出し連番を `boundaryNonce` の keyMaterial に足すこと**（同じ nonce のままだと前回の封筒の流用を検出できない）。
+`observe-pr.sh --mode push` の封筒も、ホストは**照合も採用もしない**（`checksStarted` / `mergeableAfterPush` は従来どおり診断・分岐ヒント専用）。nonce はホストが常に生成して渡すが、材料は `push-confirm:<branch>:<PR 番号>` だけで呼び出しごとには変えない（プロンプトを決定的に保つため）。fix では `<PR 番号>` は実際の PR 番号だが、pr-create は PR 番号を手順 1b まで知らないため、材料には字面のプレースホルダ `<PR 番号>` がそのまま入る（エージェントが実行時に置き換えるのはコマンドの引数だけで、nonce は変わらない）。**採用に切り替えるときは呼び出し連番を `boundaryNonce` の keyMaterial に足すこと**（同じ nonce のままだと前回の封筒の流用を検出できない）。
 
 ### スクリプト内のコマンドは merge-guard hook から見えない
 
@@ -151,6 +152,52 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 ### 隔離 worktree からの実行は実ランで未検証
 
 第 3 弾は、`isolation: 'worktree'` のエージェント（base-merge・pr-create・fix）が、メイン作業ディレクトリ側の絶対パス `skillDir` のスクリプトを実行する**最初の弾**である（第 1・2 弾のエージェントは非隔離）。隔離 worktree のエージェントがそのパスを実行できるか、スクリプトの cwd が隔離 worktree になるか（`git` の操作が隔離 worktree に対して行われるか）は、実ランで確認していない。テストは cwd を作業用 clone にして実 git で確かめているが、Workflow ランタイムの隔離とサンドボックスの挙動は再現していない。
+
+## 第 4 弾: pr-create と fix の push（`pr-push.sh`）と起動時のハッシュ予検査
+
+### `pr-push.sh`: 検証権限のある経路の push
+
+`pr-push.sh` は pr-create と fix（検証権限を持つエージェント。ビルド・lint・テストを実行できる）が使う。`base-merge.sh`（検証権限を持たず、コンフリクトを解消しない）とは役割が違い、**push と base の取り込みを決定的にし、判断だけをエージェントに残す**。
+
+| モード | スクリプトが行う | エージェントに残る判断 |
+|--------|------------------|----------------------|
+| `prepare` | routing ガード（`--repo` があるとき）・未コミットの変更の拒否・base の fetch（worktree ごとの ref に固定）・起点の確立と sha の一致確認・base の取り込み | コンフリクトの解消・commitlint に合わせた subject の決定（`--subject-file`）・ビルド・lint・テスト |
+| `push` | routing ガード（`--repo` があるとき）・途中のマージ（MERGE_HEAD）の拒否・固定した base が HEAD の祖先でなければ拒否（`base-not-merged`）・差分ゼロの拒否（pr-create）・`pv_push_verified` による push と前後の突き合わせ（結果に `headSha` を添える） | 修正のコミット・opt-in テストの実行 |
+| `pr` | routing ガード（`--repo` があるとき）・サーバー上のブランチ head と `--expect-sha` の照合・Closes 対象 Issue の milestone 確認・open PR の検出（同一リポジトリの head だけ。base と head の sha の照合）・`gh pr create` | タイトルと本文の文面・既存 PR 本文の追記 |
+
+- **封筒を使わない。** 結果の最後の 1 行 `PR_PUSH_RESULT {…}` は固定語彙・整数・40 桁 16 進だけで、ホストは採用しない。`base-merge.sh` と同じ理由（上の第 3 弾「封筒なしで足りる理由」）で、ホストが読む値は従来のエージェントの返却値（`prNumber`・`pushed`・`commitFailed`）と同じで、新しく採用する値は無い。`pushed: true` の誤報が resolve (a) を解禁し得る点は従来と同じ経路で、`pushed` は `pv_push_verified` の二条件でしか `pushed` にならない（スクリプトを経由しない自己申告に戻らない）。
+- **routing ガードは `base-merge.sh` と同じ関数。** `lib/base-merge-lib.sh` の `routing_check_remotes`（fetch URL と push 先 URL の全行を `url_allowed` で照合）を共有する。`--repo` はホストが `args.repo` を持つときだけ渡す。**持たないランでは照合しない**（従来の pr-create / fix も照合していない）。この場合の別リポジトリへの push の防御は、fix の手順 0（`gh issue view` の title 照合）と、隔離 worktree の運用に依存したままである。`args.repo` を渡すと pr-create / fix も `base-merge.sh` と同じ強さになる（`prepare` だけでなく `push` の push の直前と `pr` の gh の前にも同じ照合を実行する。remote の URL は本体の `.git/config` を共有する worktree 間で書き換えられ得るため）。`pr` モードの `gh pr list` / `gh pr create` / `gh issue view` も `-R <repo>` で束縛し、milestone の件数を読む `gh api` は path に repo を埋める。プロンプトが実行する再利用 PR の本文取得・更新（`gh pr view` / `gh pr edit`）にも同じ `-R` を渡す。
+- **コンフリクトの扱いは `base-merge.sh` と逆。** 検証権限のある経路なので、`prepare` はコンフリクトを解消せず**マージを途中のまま残して `conflict` を返す**（エージェントが解消し `git commit -F` で確定する）。途中のまま `push` を呼んでも、`MERGE_HEAD` が残っていれば `merge-in-progress` で止まり push しない。commit hook が既定 subject を拒否したときは abort して `hook-rejected` を返し、エージェントが subject を決めて `--subject-file` つきで再実行する。解消後のコミットが hook に拒否されたときは、エージェントが `git merge --abort` して失敗で返す（プロンプトが固定する）。
+- **push の形は 1 形。** `git push --no-follow-tags origin HEAD:refs/heads/<branch>`（`lib/push-verify.sh` の `pv_git_push` が唯一の `git push`）。`--force` 系・`--no-verify` を使わない。push の標準エラーは URL を含み得る行（`To <url>`・`failed to push some refs to '<url>'`・`://` を含む行）を除いて出す（どの出力にも URL を出さない）。
+- **起点の取り違えを止める。** `prepare` は checkout 後の HEAD が決めた sha と一致することを確かめ（`sha-mismatch`）、`push` は pr-create で base との差分ゼロなら push しない（`no-diff`）。remote ahead（第三者の push と区別できない）は採用せず `remote-ahead`、双方向とも祖先でないなら `diverged`、リモートにあるのにローカルの `refs/heads/` が無ければ `local-missing` で止まる（判定は `lib/pr-push-lib.sh` の `pp_decide_origin` で、表の単体テストが固定する）。
+- **既存 PR の再利用は base と head の sha が一致する 1 件だけ。** base が違う PR・head が動いている PR・複数の PR は再利用も新規作成もしない（`pp_classify_pr`）。fork の同名ブランチの PR（`isCrossRepository`）は一覧から除く。
+- **PR の head はサーバーで確認してから使う。** `push` の結果（`race`・`unverified` を含む）に関わらず、`pr` モードは `git ls-remote` で得たサーバー上のブランチ head が `--expect-sha`（`push` の結果の `headSha`）と一致しなければ、作成も再利用もしない（`remote-head-mismatch`・`remote-head-unknown`・`remote-head-missing`）。ローカル HEAD が `--expect-sha` と違えば `head-moved`。push 後に第三者が積んだ未レビューのコミットを含む PR を自動マージ経路へ渡さない。プロンプトは `race` で PR 作成を止める（`unverified` はこの照合に委ねる）。
+- **base は worktree ごとの ref に固定する。** `prepare` は base を `refs/worktree/pr-push/base`（linked worktree 間で共有されない）へ取得し、以降の取り込み・`push` の base 検査・差分ゼロ確認はこの ref を使う。並列 worktree が共有する `refs/remotes/origin/<base>` は削除しない（別の worktree が参照中に消すと、そちらの取り込みや検査が解決できず正常な作業を失敗終端させる）。`git fetch` による共有 ref の前進は git の通常動作で、固定した base には影響しない。
+- **milestone の確認（create-pr スキル Step 2.5 の手順 3 と同じ判定）。** リポジトリに milestone が 1 件も無ければ非運用とみなして確認しない（`not-used`）。件数・Issue の milestone を取得できなければ PR を作らず止まる（`milestone-check-failed`。取得失敗を非運用や割当済みと読み替えない）。未割当は警告つきで続行し、新規作成なら PR 本文へ警告行を足す（再利用ならプロンプトが追記する）。自律運転ではユーザーの同意を取れないため、create-pr の『候補が 1 件なら同意を得て割り当てる』は行わない（milestone を書き換えない）。判定は `lib/pr-push-lib.sh` の `pp_milestone_status`（表の単体テストが固定する）。
+- **静的ガード**（`tests/script-static-guard.test.mjs`）は `pr-push.sh` と `lib/pr-push-lib.sh` も走査する。`gh` は `pr list` / `pr create` / `issue view` と、milestone 件数を読む `gh api`（GET のみ）だけを呼ぶ（merge・review・close・edit・API の書き込みの綴りが無い）。
+
+### 起動時のハッシュ予検査（`run-verified.sh --verify-only`）
+
+**何をするか。** ラン開始時（シードの取得の直後・状態の読み込みの前）に 1 回、`SCRIPT_SHA256` の全エントリ（`<sha256> <スクリプト名>` を 1 行ずつ）を skillDir の実ファイルと照合する。`skillDir` を渡したランで行う（`dryRun` を含む。`dryRun` で `skillDir` を省略したラン〔スクリプトを使わない〕では行わない）。不一致・欠落があれば、状態の読み込みも Plan も実装も始めずに、件数と先頭のスクリプト名を示して停止する。従来は版ずれを最初のスクリプトの起動（exit 3 / 4）で、ラン途中に初めて知った。
+
+**ホストは bash を実行できないので、エージェント 1 回で確かめる。** 表を標準入力のヒアドキュメントで渡し、`bash <skillDir>/scripts/run-verified.sh --verify-only --nonce <nonce>` を一字一句そのまま実行させ、出力の封筒（`nonce`・`payload`・`sha256`）を転記させる。`--verify-only` は**スクリプトを実行せず**、各行を通常の起動と同じ定義のハッシュ（スクリプト本体 + `lib/*.sh`）で照合する。payload は整数と入力のハッシュだけ（`count`・`ok`・`mismatch`・`missing`・`firstBad`・`inputSha256`）。ホストは `verifySignedOutput` で再計算し、(1) nonce が呼び出しごとに一意（試行番号を材料に含める）、(2) `inputSha256` がホストの送った表と一致、(3) `count` が表の行数と一致し `ok + mismatch + missing == count`、のときだけ採用する。
+
+| 結果 | ホストの動作 |
+|------|------------|
+| 全行一致（`mismatch == 0 && missing == 0`） | 続行 |
+| 封筒の形が不完全・nonce 不一致・sha256 不一致・別の表を検査した・件数が合わない | 転記ミスまたはスクリプト未実行とみなし、別エージェント（sonnet）で 1 回だけ再試行する。使い切れば停止する |
+| agent 例外・出力欠落 | 同上（再試行 1 回、使い切れば停止） |
+| 不一致・欠落（封筒は正しい） | 再試行せず停止する（実ファイルが埋め込みと違うことは、再試行しても変わらない） |
+
+**エージェントの自己申告だけで「一致」を信じない。** 「一致した」とだけ報告させても検証できないので、ホストが再計算できる封筒を要求する。ただし、これは**転記ミス・未実行・別の呼び出しの流用・別の表の検査を検出するもの**で、`sha256sum` を自分で回せる悪意あるエージェントの捏造（nonce と表はプロンプトに書かれているため、正しい封筒を作れる）は検出しない。launcher 自身も照合の対象外である。
+
+**予検査は信頼境界ではない。** 各スクリプトの起動時のハッシュ照合（`run-verified.sh` の exit 3 / 4）は予検査とは別に毎回働き、マージ・push・削除の可否は予検査の結果に依らない。予検査が防ぐのは『版ずれのままラン途中まで進んでから止まる』ことで（すでに状態を書き、worktree を作った後に止まる）、『版ずれのスクリプトが実行される』ことは起動時の照合が防ぐ。予検査を通過した後にスクリプトが書き換わる競合（TOCTOU）も防がない（上の限界と同じ）。
+
+**エージェント呼び出し数。** 予検査は 1 回（再試行で最大 2 回）で、開始処理の見積り（30）の余裕の内に収まる。`agentCallLimit` の下限（81）は変えない（`references/agent-call-budget.md`）。
+
+### `observe-pr.sh --repo`
+
+ホストが `args.repo` を持つときは、観測コマンドに `--repo OWNER/REPO` を渡し、スクリプト内の `gh` を対象リポジトリへ束縛する（`gh pr view -R`・`gh api repos/OWNER/REPO/…`・GraphQL の owner / name）。持たないランは従来どおり（`gh` が cwd のリポジトリに解決する）。`--repo` は封筒の `inputSha256` の材料に含まれるので、`--repo` を落として実行した出力は、repo 入りの入力を期待するホストの照合で `input` として拒否される。形式検証は `lib/base-merge-lib.sh` の `valid_repo` を共有する。
 
 ## ハッシュ埋め込みと鮮度
 

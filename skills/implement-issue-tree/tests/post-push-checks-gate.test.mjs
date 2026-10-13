@@ -83,7 +83,7 @@ const pushCommandOf = (prompt) => /```sh\n(bash '[^\n]*observe-pr\.sh[^\n]* --mo
 
 test('prCreatePrompt: CI 起動確認が push 行より後に現れ、observe-pr.sh --mode push を有界に実行させる', () => {
   const prompt = prCreatePrompt(item, impl, [])
-  const pushIdx = prompt.indexOf('git push origin HEAD:refs/heads/')
+  const pushIdx = prompt.indexOf('--mode push --origin ' + (prompt.includes('--origin fix') ? 'fix' : 'pr-create'))
   const checkIdx = prompt.indexOf('push 後 CI 起動確認（必須。Issue #479）')
   assert.ok(pushIdx >= 0, 'push 指示が見つからない')
   assert.ok(checkIdx >= 0, 'push 後 CI 起動確認の指示がない')
@@ -101,7 +101,7 @@ test('prCreatePrompt: CI 起動確認が push 行より後に現れ、observe-pr
 test('prCreatePrompt: PR 番号が未確定の push 後確認コマンドは <PR 番号> だけを置換してよいと 1 か所で限定する。fixPrompt は番号を埋め込み置換を許さない', () => {
   const create = prCreatePrompt(item, impl, [])
   assert.equal(create.split('<PR 番号>').length - 1, 2, '<PR 番号> はコマンド中と置換の指示の 2 回だけ現れる')
-  assert.ok(create.includes('<PR 番号> だけを手順 1b で再利用した、または手順 2 で作成した PR 番号（正の整数）に置き換え、他は一字一句そのまま'))
+  assert.ok(create.includes('<PR 番号> だけを手順 1b で作成または再利用した PR 番号（正の整数）に置き換え、他は一字一句そのまま'))
   mod.__setBoundaryNonceSeedForTest(NONCE)
   const fix = fixPrompt(item, impl, { summary: 'テスト用の指摘', unresolvedComments: [] }, true)
   assert.ok(!fix.includes('<PR 番号>'), 'fix は PR 番号が分かっているので置換を求めない')
@@ -123,7 +123,7 @@ test('prCreatePrompt: CI 起動確認は PR 番号確定後（手順 3 の後）
 test('fixPrompt(pushAfterFix: true): CI 起動確認が push 検証の後に現れる', () => {
   mod.__setBoundaryNonceSeedForTest(NONCE)
   const prompt = fixPrompt(item, impl, { summary: 'テスト用の指摘', unresolvedComments: [] }, true)
-  const pushIdx = prompt.indexOf('git push origin HEAD:refs/heads/')
+  const pushIdx = prompt.indexOf('--mode push --origin ' + (prompt.includes('--origin fix') ? 'fix' : 'pr-create'))
   const checkIdx = prompt.indexOf('push 後 CI 起動確認（必須。Issue #479）')
   assert.ok(pushIdx >= 0, 'push 指示が見つからない')
   assert.ok(checkIdx >= 0, 'push 後 CI 起動確認の指示がない')

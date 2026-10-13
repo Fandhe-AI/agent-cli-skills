@@ -75,9 +75,15 @@ EOF
   return 0
 }
 
+# push コマンドそのもの（この 1 行が lib 全体で唯一の git push。静的ガードが綴りを固定する）。呼び出し元 pv_push_verified の
+# ローカル変数 branch と rc を動的スコープで読み書きするため、単独では呼ばない。標準エラーの扱いは呼び出し側がリダイレクトで決める
+pv_git_push() {
+  git push --no-follow-tags origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?
+}
+
 # HEAD を refs/heads/$1 へ push し、二条件で反映を確認して PV_OUTCOME に結果を入れる。
 pv_push_verified() {
-  local branch=$1 local_head before="" before_ok=0 after="" after_ok=0 rc=0
+  local branch=$1 local_head before="" before_ok=0 after="" after_ok=0 rc=0 errf
   PV_OUTCOME=""
   pv_valid_branch "${branch}" || return 1
   local_head=$(git rev-parse HEAD 2>/dev/null) || local_head=""
@@ -90,7 +96,17 @@ pv_push_verified() {
     before_ok=1
   fi
   # push の標準出力は捨てる（呼び出し元の標準出力は結果の 1 行だけにするため）。標準エラー（hook の出力）は残す
-  git push --no-follow-tags origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?
+  # 標準エラーは一時ファイルへ受け、リモートの URL を含み得る行（"To <url>"・"failed to push some refs to '<url>'"・:// を含む行）を
+  # 除いて出す（URL はトークンを含み得る。hook の出力など、それ以外の行は診断のために残す）。
+  # 一時ファイルを作れないときは標準エラーを捨てる（出力が減るだけで push の結果は変わらない）
+  errf=$(mktemp "${TMPDIR:-/tmp}/push-verify-err.XXXXXX" 2>/dev/null) || errf=""
+  if [ -n "${errf}" ]; then
+    pv_git_push 2>"${errf}"
+    grep -vE '^To |failed to push some refs to|://' "${errf}" >&2 || true
+    rm -f "${errf}"
+  else
+    pv_git_push 2>/dev/null
+  fi
   if [ "${rc}" -ne 0 ]; then
     PV_OUTCOME=push-failed
     return 0

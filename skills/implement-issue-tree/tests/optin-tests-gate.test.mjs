@@ -588,7 +588,7 @@ test('prCreatePrompt: 宣言なし（item.optinTests: []）は出力が無変更
   const withEmpty = prCreatePrompt({ ...item, optinTests: [] }, impl, [])
   const withoutField = prCreatePrompt({ number: 42, title: 'サンプルイシュー' }, impl, [])
   assert.equal(withEmpty, withoutField)
-  assert.match(withEmpty, /1 件以上の場合のみ手順 1 へ進む。/)
+  assert.match(withEmpty, /1\. push（Bash の timeout に 600000 を指定）/)
   assert.doesNotMatch(withEmpty, /0b2/)
 })
 
@@ -618,7 +618,7 @@ test('prCreatePrompt: 手順 0c ではコード修正を禁止し fail をその
   assert.match(p, /result: "fail"/)
   const statusIdx = p.indexOf('git status --porcelain')
   assert.ok(statusIdx >= 0, 'prCreatePrompt に git status --porcelain の確認がない')
-  assert.ok(statusIdx < p.indexOf('1. git push origin HEAD:'), '作業ツリー確認が push より後にある')
+  assert.ok(statusIdx < p.indexOf('1. push（Bash の timeout'), '作業ツリー確認が push より後にある')
   assert.match(p, /git status --porcelain[^\n]*prNumber: 0/)
 })
 
@@ -629,7 +629,7 @@ test('prCreatePrompt: 期待 SHA をテスト実行前に控え、push 前に po
   const preIdx = p.indexOf('0b2. 期待 SHA の取得（必須。手順 0c のテスト実行より前に行う）: git rev-parse HEAD')
   const testIdx = p.indexOf('0c. opt-in テスト実行記録')
   const verifyIdx = p.indexOf('0d. push 前の不変確認')
-  const pushIdx = p.indexOf('1. git push origin HEAD:')
+  const pushIdx = p.indexOf('1. push（Bash の timeout')
   assert.ok(preIdx >= 0, '期待 SHA をテスト前に取得する指示がない')
   assert.ok(testIdx >= 0 && verifyIdx >= 0 && pushIdx >= 0)
   assert.ok(preIdx < testIdx, '期待 SHA の取得がテスト実行より後にある')
@@ -641,12 +641,9 @@ test('prCreatePrompt: 期待 SHA をテスト実行前に控え、push 前に po
   assert.match(verifyLine, /<sha> は期待 SHA/)
   // 記録節の書き直し（既存 PR 再利用経路）も期待 SHA を使う。
   assert.match(p, /手順 0b2 で控えた期待 SHA（手順 0d で HEAD との一致を確認済み/)
-  // 期待 SHA の参照は独立手順 0b2 だけを指し、差分ゼロチェック（0b）を指す字面は残さない。
-  // 0b は宣言ありなら 0b2 へ進ませ、SHA 取得を飛ばす読み方を許さない（PR #508 Bugbot Medium / codex P2）。
+  // 期待 SHA の参照は独立手順 0b2 だけを指す（差分ゼロの確認は push モードへ移り、手順 0b は無い。SHA 取得を飛ばす読み方を許さない）
   assert.doesNotMatch(p, /手順 0b で控え/)
-  const zeroDiffLine = p.slice(p.indexOf('0b. push 前 差分ゼロチェック'), p.indexOf('\n', p.indexOf('0b. push 前 差分ゼロチェック')))
-  assert.match(zeroDiffLine, /1 件以上の場合のみ手順 0b2 へ進む。$/)
-  assert.doesNotMatch(zeroDiffLine, /期待 SHA/)
+  assert.doesNotMatch(p, /0b\. /)
   assert.match(p.slice(preIdx, testIdx), /取得できた場合のみ手順 0c へ進む/)
 })
 

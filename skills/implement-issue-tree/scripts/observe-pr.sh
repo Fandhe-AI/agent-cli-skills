@@ -96,6 +96,10 @@ export LC_ALL
 script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 # shellcheck source=lib/signed-output.sh
 . "${script_dir}/lib/signed-output.sh" || exit 3
+# valid_repo（OWNER/REPO の形式検証。base-merge.sh・pr-push.sh と共有する）。同じファイルの is_uint などは、下で observe-pr 用に
+# 定義し直す（このファイルの後に定義した関数が優先される）
+# shellcheck source=lib/base-merge-lib.sh
+. "${script_dir}/lib/base-merge-lib.sh" || exit 3
 
 usage() {
   echo "使い方: observe-pr.sh --nonce N --mode pr|checks|required|reviews|threads|threads-detail|push --pr NUM [--repo O/R] [--base B] [--branch B] [--issue N] [--slug S] [--until review|settled|started] [--thread-id ID] [--wait --attempt K]" >&2
@@ -118,16 +122,6 @@ env_int() {
   esac
   if [ "${#1}" -gt 4 ] || [ "$1" -gt "$3" ] || [ "$1" -lt "$4" ]; then printf '%s' "$2"; return; fi
   printf '%s' "$((10#$1))"
-}
-valid_repo() {
-  case "$1" in
-    */*/* | */ | /* | -* | '' | *[!A-Za-z0-9._/-]*) return 1 ;;
-  esac
-  case "$1" in */*) ;; *) return 1 ;; esac
-  # owner・name のどちらかが . か .. だと API パスが repos/a/../... のように別の経路へ解決される
-  case "${1%%/*}" in . | ..) return 1 ;; esac
-  case "${1#*/}" in . | ..) return 1 ;; esac
-  [ "${#1}" -le 140 ]
 }
 valid_ref() {
   case "$1" in
