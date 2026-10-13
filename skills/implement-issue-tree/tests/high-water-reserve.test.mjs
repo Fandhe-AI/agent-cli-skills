@@ -199,28 +199,16 @@ test('配線: persistedHighWaterBytes が loadedHighWaterBytes で初期化さ�
 
 // --- 3. プロンプト文言テスト ---
 
-test('プロンプト文言: persistPerWorktreeByteReserveHighWater が .items に触れない旨の文言を含む', () => {
-  const idx = source.indexOf('async function persistPerWorktreeByteReserveHighWater')
-  assert.ok(idx >= 0)
-  const fnBody = source.slice(idx, idx + 2500)
-  assert.match(fnBody, /\.items には一切触れない/)
-})
-
-test('プロンプト文言: persistPerWorktreeByteReserveHighWater のプロンプトが version 条件込みの jq 比較式を含む（Issue #496）', () => {
-  const idx = source.indexOf('async function persistPerWorktreeByteReserveHighWater')
-  assert.ok(idx >= 0)
-  const fnBody = source.slice(idx, idx + 3000)
-  assert.match(fnBody, /if \(\(\.perWorktreeByteReserveHighWaterVersion \/\/ 0\) != \$v\)/)
-  assert.match(fnBody, /or \(\(\.perWorktreeByteReserveHighWater \/\/ 0\) < \$hw\) then/)
-  assert.match(fnBody, /\.perWorktreeByteReserveHighWater = \$hw \| \.perWorktreeByteReserveHighWaterVersion = \$v/)
-})
-
-test('配線: setPerWorktreeByteReserveHighWater が定義され .items に触れない旨の文言を含む（Issue #496）', () => {
-  const idx = source.indexOf('async function setPerWorktreeByteReserveHighWater')
-  assert.ok(idx >= 0)
-  const fnBody = source.slice(idx, idx + 2000)
-  assert.match(fnBody, /\.items には一切触れない/)
-  assert.match(fnBody, /'\.perWorktreeByteReserveHighWater = \$hw \| \.perWorktreeByteReserveHighWaterVersion = \$v/)
+test('配線: persistPerWorktreeByteReserveHighWater は state.sh hw-max、setPerWorktreeByteReserveHighWater は hw-set を呼び、.items に触れない旨を伝える（Issue #496・#603 第 5 弾）', () => {
+  // 比較式そのもの（version 条件込みの大小比較・無条件の上書き）は scripts/lib/state-lib.sh にあり、tests/state-script.test.mjs が実行して固定する
+  for (const [fn, mode] of [['persistPerWorktreeByteReserveHighWater', 'hw-max'], ['setPerWorktreeByteReserveHighWater', 'hw-set']]) {
+    const idx = source.indexOf(`async function ${fn}`)
+    assert.ok(idx >= 0, fn)
+    const fnBody = source.slice(idx, idx + 3000)
+    assert.match(fnBody, new RegExp(`'${mode}',\\n\\s+\` --bytes \\$\\{bytes\\} --version \\$\\{HIGH_WATER_SCHEMA_VERSION\\}\``))
+    assert.match(fnBody, /\.items には一切触れない/)
+    assert.doesNotMatch(fnBody, /mktemp|jq --/)
+  }
 })
 
 test('配線: ラン開始時の高水位是正（rewriteBytes !== null）が raw 値確定より前に setPerWorktreeByteReserveHighWater を呼ぶ（Issue #496）', () => {

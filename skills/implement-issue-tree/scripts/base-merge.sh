@@ -11,7 +11,8 @@
 #            --all）が host github.com・owner/repo が --repo と完全一致（大文字小文字を区別しない）し、gh pr view -R の
 #            number と headRefName が --pr / --branch と一致すること。1 つでも外れたら fetch・checkout・merge・push を
 #            一切実行しない（git 2.7 以降。取得できない git では routingError に倒れる）
-#         1. 対象ブランチの fetch（refs/heads/ 修飾）→ detached checkout → HEAD と origin のブランチの sha 照合
+#         1. 対象ブランチの fetch（refs/heads/ 修飾。保存先は worktree ごとの ref refs/worktree/base-merge/*。共有の
+#            refs/remotes/origin/* は読み書きも削除もしない）→ detached checkout → HEAD と取得した sha の照合
 #         2. base の fetch → 埋め込み subject でマージ。コンフリクトは解消せず abort して報告する
 #         3. push 前後のリモート head の突き合わせ（lib/push-verify.sh。pushed になるのは二条件を満たしたときだけ）
 # 入力: 引数は検証済みの値だけを渡す。--branch と --base は同じ値にできない（base 自身への push の防止）。--repo は
@@ -149,20 +150,24 @@ fi
 dirty=$(git status --porcelain --untracked-files=no 2>/dev/null) || fail_commit "git status が失敗" "worktree の状態を確認できない"
 [ -z "${dirty}" ] || fail_commit "作業ツリーに未コミットの変更がある" "worktree が clean でない"
 # fetch 元は refs/heads/ で修飾する（修飾しないと同名のタグが優先され、タグにしか無いコミットがブランチへ入る）。
-# 失敗した fetch が古い追跡 ref を残して、stale な内容を merge しないよう、先に追跡 ref を消す
-git update-ref -d "refs/remotes/origin/${branch}" >/dev/null 2>&1 || true
-git fetch origin "refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null || fail_commit "branch の fetch が失敗" "branch fetch 失敗"
-git checkout --detach "refs/remotes/origin/${branch}" >/dev/null 2>&1 || fail_commit "branch の checkout が失敗" "branch checkout 失敗"
+# 取得先は『この worktree だけの ref』（refs/worktree/ 配下は linked worktree 間で共有されない。pr-push.sh と同じ）。
+# refs/remotes/origin/ は並列 worktree が共有するため、読まず・書かず・消さない（別の worktree が参照中の ref を消すと、
+# そちらの checkout や取り込みが解決できず正常な作業を失敗終端させる）。失敗した fetch が古い ref を残して stale な内容を
+# merge しないよう、先に自分の ref だけを消す
+branch_ref="refs/worktree/base-merge/branch"
+git update-ref -d "${branch_ref}" >/dev/null 2>&1 || true
+git fetch origin "refs/heads/${branch}:${branch_ref}" >/dev/null || fail_commit "branch の fetch が失敗" "branch fetch 失敗"
+git checkout --detach "${branch_ref}" >/dev/null 2>&1 || fail_commit "branch の checkout が失敗" "branch checkout 失敗"
 head_now=$(git rev-parse HEAD 2>/dev/null) || head_now=""
-remote_tip=$(git rev-parse "refs/remotes/origin/${branch}" 2>/dev/null) || remote_tip=""
+remote_tip=$(git rev-parse "${branch_ref}" 2>/dev/null) || remote_tip=""
 if ! pv_is_sha "${head_now}" || [ "${head_now}" != "${remote_tip}" ]; then
   fail_commit "checkout 後の HEAD が origin のブランチと不一致" "checkout 後の HEAD が origin/<branch> と不一致"
 fi
 
 # ---- 2. base の取得とマージ ----
-git update-ref -d "refs/remotes/origin/${base}" >/dev/null 2>&1 || true
-git fetch origin "refs/heads/${base}:refs/remotes/origin/${base}" >/dev/null || fail_commit "base の fetch が失敗" "base fetch 失敗"
-base_ref="refs/remotes/origin/${base}"
+base_ref="refs/worktree/base-merge/base"
+git update-ref -d "${base_ref}" >/dev/null 2>&1 || true
+git fetch origin "refs/heads/${base}:${base_ref}" >/dev/null || fail_commit "base の fetch が失敗" "base fetch 失敗"
 # ブランチの先頭が base に含まれている（独自のコミットが無い）なら、マージは fast-forward になり base の先端をそのまま
 # ブランチへ push してしまう。取り込む差分が無いので何もしない
 anc=0

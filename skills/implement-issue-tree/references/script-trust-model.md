@@ -14,6 +14,7 @@
 | `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail` / `push`（第 3 弾）。出力は 1 行の封筒（`threads-detail` だけは外部由来の自由文を含む非信頼データで、封筒ではない）。`--wait` は有界の待機 |
 | `scripts/base-merge.sh` | 自動 base 取り込みの本体（第 3 弾）。入力は PR 番号・branch・base・期待 owner/repo（引数）。**封筒を使わない**。出力の最後の 1 行は `BASE_MERGE_RESULT {…}`（キーは `BASE_MERGE_SCHEMA` と同じ） |
 | `scripts/pr-push.sh` | pr-create と fix の起点の確立・base 取り込み・push・PR 作成（第 4 弾）。モードは `prepare` / `push` / `pr`。**封筒を使わない**。出力の最後の 1 行は `PR_PUSH_RESULT {…}` |
+| `scripts/state.sh` | 状態ファイル（`_/issue-trees/<親>.json`）の書き込み（第 5 弾）。モードは `merge` / `init` / `hw-max` / `hw-set`。入力は標準入力の 1 行 JSON と引数。**封筒を使わない**。出力の最後の 1 行は `STATE_RESULT {"ok":…}` |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
 | `scripts/lib/push-verify.sh` | push の前後でリモート head を突き合わせる共通部（`pv_push_verified`。第 3 弾）。`base-merge.sh` が使い、以降 pr-create の push と fix の push 検証も同じ部品へ移す |
 | 生成物 `implement-issue-tree.js` の `SCRIPT_SHA256` | ビルダーが埋め込む期待ハッシュ。開発ファイルには置換前の目印を書き、`build-workflow.mjs` が置換する |
@@ -106,7 +107,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 1. **内容の固定**: `run-verified.sh` の期待ハッシュ。スクリプトと `scripts/lib/*.sh` の内容は、ビルドしたときのものに固定される（書き換え・版ずれは exit 3 で起動しない）。ただし、固定されるのは『レビューした内容から変わっていない』ことで、『その内容が安全か』ではない。スキルディレクトリへ書き込める者は防げない（下の「何を防がないか」）。
 2. **静的テスト**（`tests/script-static-guard.test.mjs`）: `scripts/*.sh` と `scripts/lib/*.sh`（hook 自身を除く）のコード行（バックスラッシュ行継続は連結してから検査する）に、マージ（`gh pr merge`・merge 系 API・mutation）、approve、ruleset・branch protection・リポジトリ設定の変更、書き込み系の HTTP メソッド（`-X` / `-XPUT` / `-iX PUT` のような他の短縮オプションとの連結 / `-X` の後ろがタブの形 / `--method` / `--request`）、`gh api` の `-f` / `-F` / `--field` / `--raw-field` / `--input` による暗黙 POST（graphql の query 送信は読み取りとして許す。`gh -R "${repo}" api …` のように `gh` と `api` の間にオプションが入る形も同じ扱い）、`gh alias` / `gh extension`（`merge-guard-hook.sh` が拒否している類）、`curl` の `-d` / `--data*` / `-F` / `--form` / `-T` / `--upload-file` / `--json` と `wget` の `--post-data` / `--post-file` / `--body-*`、`git push` の `--force` 系・`-f`・`+` refspec、`git push` の許可形（`git push --no-follow-tags origin "HEAD:refs/heads/${branch}"`）以外の形（`--no-follow-tags` の欠落・削除 refspec・`--all`・URL 直指定・remote 違い・引用符で囲んだ `"git" push` / `git "push"`）、`git remote`（`get-url` 以外）と `git config`（`--get` / `--list` 以外）、`core.hooksPath` と `GIT_CONFIG_*` による設定の注入、`--no-verify`（`--no-verif` のような長いオプションの一意な省略形を含む）と `git commit -n`、`HUSKY=` / `LEFTHOOK=` の綴りが無いことを検査する。各パターンが悪い例に発火し、正当な行に発火しないことも自己検査で固定する。**これは正規表現の lint であり、変数経由（`"${cmd}" push`）・`eval`・文字列連結で組み立てたコマンドは防げない**。防ぐのは『レビューした内容から無自覚に外れた綴り』であって、意図して迂回する書き手ではない。
-3. **スクリプト側の自衛**（`base-merge.sh`）: `--branch` と `--base` が同じ値を拒否する。ref・repo・PR 番号をホストと同じ厳格さで再検証する（PR 番号の先頭ゼロ、`refs/` 始まりと `HEAD` のブランチ名、`git check-ref-format` に通らない名前を拒否する）。push は `git push --no-follow-tags origin HEAD:refs/heads/<branch>` の 1 形だけで、`--force` 系・`--no-verify` を使わない（hook を通す）。`--no-follow-tags` は、利用者設定 `push.followTags=true` と注釈付きタグがあるとき、タグが同じ push で origin へ出ていくのを止める（実測: 付けないとタグが origin に作られ、結果は `pushed: true` のままである。`tests/base-merge.test.mjs` が固定する）。fetch 元は `refs/heads/<name>` で修飾し（修飾しないと同名のタグが優先され、タグにしか無いコミットがブランチへ入る）、fetch の前に古い追跡 ref を消す（fetch が失敗しても stale な追跡 ref を merge しない）。マージの subject は埋め込み定数を一時ファイルに書いて `-F` で渡し（commitlint 設定やコミット履歴を読まない）、一時ファイルは trap で必ず消す。作業ツリーが clean でなければマージしない。ブランチが base に含まれている（独自コミットが無い）ときは fast-forward せず何も push しない。`gh pr view` には `-R <期待リポジトリ>` を付ける（`GH_REPO` や `gh repo set-default` で別リポジトリの PR を引かない）。
+3. **スクリプト側の自衛**（`base-merge.sh`）: `--branch` と `--base` が同じ値を拒否する。ref・repo・PR 番号をホストと同じ厳格さで再検証する（PR 番号の先頭ゼロ、`refs/` 始まりと `HEAD` のブランチ名、`git check-ref-format` に通らない名前を拒否する）。push は `git push --no-follow-tags origin HEAD:refs/heads/<branch>` の 1 形だけで、`--force` 系・`--no-verify` を使わない（hook を通す）。`--no-follow-tags` は、利用者設定 `push.followTags=true` と注釈付きタグがあるとき、タグが同じ push で origin へ出ていくのを止める（実測: 付けないとタグが origin に作られ、結果は `pushed: true` のままである。`tests/base-merge.test.mjs` が固定する）。fetch 元は `refs/heads/<name>` で修飾し（修飾しないと同名のタグが優先され、タグにしか無いコミットがブランチへ入る）、取得先は worktree ごとの ref（`refs/worktree/base-merge/*`。linked worktree 間で共有されず、`pr-push.sh` と同じ。並列 worktree が共有する `refs/remotes/origin/*` は読み書きも削除もしない）で、fetch の前に自分の ref だけを消す（fetch が失敗しても stale な ref を merge しない）。マージの subject は埋め込み定数を一時ファイルに書いて `-F` で渡し（commitlint 設定やコミット履歴を読まない）、一時ファイルは trap で必ず消す。作業ツリーが clean でなければマージしない。ブランチが base に含まれている（独自コミットが無い）ときは fast-forward せず何も push しない。`gh pr view` には `-R <期待リポジトリ>` を付ける（`GH_REPO` や `gh repo set-default` で別リポジトリの PR を引かない）。
 
 ### 別リポジトリ・別ホストへ push しない保証の範囲
 
@@ -198,6 +199,31 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 ### `observe-pr.sh --repo`
 
 ホストが `args.repo` を持つときは、観測コマンドに `--repo OWNER/REPO` を渡し、スクリプト内の `gh` を対象リポジトリへ束縛する（`gh pr view -R`・`gh api repos/OWNER/REPO/…`・GraphQL の owner / name）。持たないランは従来どおり（`gh` が cwd のリポジトリに解決する）。`--repo` は封筒の `inputSha256` の材料に含まれるので、`--repo` を落として実行した出力は、repo 入りの入力を期待するホストの照合で `input` として拒否される。形式検証は `lib/base-merge-lib.sh` の `valid_repo` を共有する。
+
+## 第 5 弾: 状態ファイルの書き込み（`state.sh`）
+
+### 位置づけ: 封筒なしで足りる理由
+
+`state.sh` は状態ファイルへの書き込み（`.items[n]` へのマージ・一括初期化・高水位の更新）を、従来プロンプトに文章で書いていた `mktemp` → `jq` → `mv` の手順から、固定のコマンド列へ移した。ホストが読む値は従来のエージェントの返却値（`ok`）と同じで、新しく採用する値は無いため、`base-merge.sh` と同じく封筒を付けない（上の「測定値の使い方」の (c) 自己申告値を判定に使わない設計）。`ok` が偽って `true` で返ると、保存できていない回復情報（PR 番号・worktree）のまま次へ進み得る。これは従来のエージェントの自己申告と同じ水準で、悪化していない。改善した点は、手順の組み立て（クォート・一時ファイル・原子的な置換）がエージェントの文章解釈に依らなくなったことである。
+
+| 項目 | 従来（プロンプト） | `state.sh` |
+|------|------------------|-----------|
+| 書き込み先 | プロンプトの `STATE_FILE` | `_/issue-trees/<正の整数>.json` の 1 形だけ（それ以外は exit 2 で何も書かない） |
+| patch の渡し方 | 未信頼範囲の囲み + ヒアドキュメント + `--slurpfile` | ヒアドキュメント（終端は呼び出しごとの nonce で作り、本文から nonce を除く）+ `--slurpfile`。patch は jq のプログラム文字列に入らない |
+| 入力の形 | なし | 入力はちょうど 1 個の JSON 値（複数の値が続く入力は拒否。`jq -e` は最後の値しか見ないため）。`merge`: 番号は 1 以上の整数・patch はオブジェクト。`init`: type は `implement` / `verify-close`。形が違えば書かず `invalid-input` |
+| 壊れた状態ファイル | jq の失敗に任せる | 書き換え前に `.items` がオブジェクトかを確かめ、違えば書かない（`rewrite-failed`）。出力も同じ検査を通ってから置換する |
+| 並行書き込み | なし（ホストの直列化だけ） | スナップショットから計算し、置換の直前に元ファイルが変わっていないか確かめる。変わっていれば最初からやり直し、3 回続けば `changed-concurrently`（別ランの書き込みを失わない） |
+| 一時ファイル | 後始末はエージェント任せ | 入力の一時ファイル・`st_rewrite` のスナップショット・出力用一時ファイルのパスを trap から見える変数（`pf` / `ST_SNAP` / `ST_TMP`）で持ち、正常終了・失敗経路・TERM / INT / HUP のいずれでも消す（テストが残存 0 を確かめ、SIGTERM 中断も実測する）。SIGKILL では残る |
+
+- **`state.sh` が持たないもの。** 読み込み（`loadState` の読込・照合）と worktree / branch の削除（`state:cleanup`・最終スイープ）は移していない。削除は `--force` を使う別の安全判定を含み、確認と削除を同じスクリプトで行う独立の弾で扱う。掃除の手順 5（削除後の `.worktree` のクリア）だけは `state.sh merge` を呼ぶ。
+- **変更検知はアドバイザリで、排他ロックではない。** 検知から `mv` までの数ミリ秒の窓は残る。同一ランの書き込みはホストが直列化している（`enqueueStateWrite`）ので、検知が対象にするのは別ランが同じ状態ファイルを書いた場合である。
+- **掃除の手順 5 にも同じ判定指示を入れる。** `state.sh` は書き込みに失敗しても exit 0 で `STATE_RESULT {"ok":false,…}` を出すので、掃除プロンプトの手順 5 にも「`ok` が false・結果の行なし・非 0 終了なら掃除全体の `ok` を false で返す」を入れる（書き込みプロンプトと同じ `STATE_NOTE`）。open な項目が 0 件のときの `init` はホストが呼ばずに成功として扱う（`state.sh` は空配列を `invalid-input` で拒否する）。
+- **失敗の返し方は従来と同じ。** 結果の行が出ない・非 0 終了・`ok: false` は、エージェントが `ok: false` を返し、ホストの既存の経路（`StructuredOutput` 未返却は sonnet へ 1 回フォールバック、応答した上での失敗はフォールバックしない）に乗る。`merge` が失敗したら掃除をしない（回復情報を保全する）契約も変えていない。
+- **静的ガード**（`tests/script-static-guard.test.mjs`）は `state.sh` と `lib/state-lib.sh` も走査する。`rm` は自分が作った一時ファイルへの `rm -f` だけで、`rm -rf`・`--force` の綴りは無い（ガードが固定する）。
+
+### `base-merge.sh` の共有 ref
+
+第 4 弾の持ち越し: `base-merge.sh` は branch と base の取得先を `refs/worktree/base-merge/*` に変え、並列 worktree が共有する `refs/remotes/origin/*` を削除しない（実 git の 2 worktree テストと変異 U40 が固定する）。`refs/worktree/` が worktree ごとに分かれることは、git 2.54 でしか実測していない（最低版 2.20 では未確認）。
 
 ## ハッシュ埋め込みと鮮度
 
