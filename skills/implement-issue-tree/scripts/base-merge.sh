@@ -25,7 +25,8 @@
 #   0  結果の行を出力した（成否は JSON の内容で判断する）
 #   2  使い方の誤り（引数不足・形式不正・未知の引数・--branch と --base が同じ）。結果の行は出力しない
 #   3  実行できる前提が無い（git が無い等）。結果の行は出力しない
-# 自衛: push の refspec は HEAD:refs/heads/<branch> の 1 形だけ。--force 系・--no-verify は使わない（hook を通す）。
+# 自衛: push の refspec は HEAD:refs/heads/<branch> の 1 形だけ（--no-follow-tags 付き。利用者設定 push.followTags でタグが
+#       origin へ出ない）。--force 系・--no-verify は使わない（hook を通す）。
 #       マージの subject は下の埋め込み定数を一時ファイルに書いて -F で渡す（commitlint 設定やコミット履歴を読まない =
 #       未信頼の読み取りを自動 base 取り込みの経路から排除する。PR #443 codex P0）。一時ファイルは trap で必ず消す。
 #       --no-ff でマージするため、merge.ff などの利用者設定でマージコミットの有無が変わらない。
@@ -156,7 +157,9 @@ fail_commit() {
 # リポジトリへ届く（隔離 worktree は本体の .git/config を共有するので、先行するエージェントが書ける位置にある）。
 # 許す形: https://[userinfo@]github.com[:443]/<owner>/<repo>[.git]、ssh://git@github.com[:22]/<owner>/<repo>[.git]、
 # git@github.com:<owner>/<repo>[.git]。userinfo は authority の最後の @ までを捨てて host を取り出す
-# （https://github.com@evil.example/… の host は evil.example）。URL はトークンを含み得るので、どの出力にも出さない。
+# （https://github.com@evil.example/… の host は evil.example）。authority に @ が 2 つ以上ある URL は拒否する
+# （https://a@evil.example@github.com/… は git が接続に失敗しても、エラー文に 2 つ目の userinfo が残る。トークン中の @ は
+# %40 にエンコードされる）。URL はトークンを含み得るので、どの出力にも出さない。
 # `.git` の除去は小文字の `.git` だけ（`.GIT` は別名になり得るので受理しない）。owner/repo の比較は大文字小文字を区別しない
 url_allowed() {
   local u=$1 want_slug=$2 scheme rest hostport host port path
@@ -184,6 +187,7 @@ url_allowed() {
       rest=${u#https://}
       case "${rest}" in */*) ;; *) return 1 ;; esac
       hostport=${rest%%/*}
+      case "${hostport}" in *@*@*) return 1 ;; esac
       hostport=${hostport##*@}
       path=${rest#*/}
       scheme=https

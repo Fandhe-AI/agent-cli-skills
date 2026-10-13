@@ -12,7 +12,9 @@
 #         (iii) push コマンド自身が成功した
 #       push 前後どちらかの ls-remote が失敗して比較できないときも push 自体は実行する（作業は detached HEAD 上にしか
 #       無く、push を省くと worktree の破棄で失われるため）が、結果は unverified（pushed ではない）にする。
-# 契約: push は `git push origin HEAD:refs/heads/<branch>` の 1 形だけ（refspec 固定・--force 系・--no-verify を使わない）。
+# 契約: push は `git push --no-follow-tags origin HEAD:refs/heads/<branch>` の 1 形だけ（refspec 固定・--force 系・--no-verify を
+#       使わない）。--no-follow-tags は利用者設定 push.followTags=true のとき、push 先の履歴を指す注釈付きタグまで origin へ
+#       出ていくのを止める（push するのは対象ブランチの 1 ref だけにする）。
 #       結果は PV_OUTCOME に入れる:
 #         pushed      二条件を満たした
 #         noop        push 前のリモート head がローカル HEAD と同じ（変更なしの空振り）
@@ -89,7 +91,7 @@ pv_push_verified() {
     before_ok=1
   fi
   # push の標準出力は捨てる（呼び出し元の標準出力は結果の 1 行だけにするため）。標準エラー（hook の出力）は残す
-  git push origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?
+  git push --no-follow-tags origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?
   if [ "${rc}" -ne 0 ]; then
     PV_OUTCOME=push-failed
     return 0

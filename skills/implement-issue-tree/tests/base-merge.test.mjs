@@ -78,14 +78,26 @@ for (const bash of BASHES) {
     assert.deepEqual(readdirSync(sb.tmp), [], '一時ファイル（マージ subject）が残らない')
   })
 
-  t('正常: push の refspec は HEAD:refs/heads/<branch> の 1 形で、--force 系・--no-verify・先頭 + を使わない', () => {
+  t('正常: push の refspec は HEAD:refs/heads/<branch> の 1 形（--no-follow-tags 付き）で、--force 系・--no-verify・先頭 + を使わない', () => {
     const sb = makeSandbox()
     result(run(bash, sb))
     const pushes = sb.gitCalls().filter((c) => /^push( |$)/.test(c))
-    assert.deepEqual(pushes, [`push origin HEAD:refs/heads/${BRANCH}`])
+    assert.deepEqual(pushes, [`push --no-follow-tags origin HEAD:refs/heads/${BRANCH}`])
     for (const c of sb.gitCalls()) {
       assert.doesNotMatch(c, /--force|--no-verify|--force-with-lease|--mirror|--delete|(^| )-f( |$)/, c)
     }
+  })
+
+  // push.followTags=true だと、push するコミットの履歴を指す注釈付きタグが同じ push で origin へ出ていく
+  t('push.followTags が有効で注釈付きタグがあっても、push でタグは origin に出ない（ブランチの 1 ref だけを push する）', () => {
+    const sb = makeSandbox()
+    git(sb.wt, 'config', 'push.followTags', 'true')
+    git(sb.wt, 'tag', '-a', 'v-follow', '-m', 'annotated', `refs/remotes/origin/${BRANCH}`)
+    assert.equal(git(sb.origin, 'tag', '-l'), '', '前提: origin にタグは無い')
+    const v = result(run(bash, sb))
+    assert.equal(v.pushed, true)
+    assert.equal(git(sb.origin, 'for-each-ref', 'refs/tags'), '', 'origin にタグが作られていない')
+    assert.equal(git(sb.wt, 'tag', '-l'), 'v-follow', 'ローカルのタグはそのまま')
   })
 
   t('正常: git の呼び出し順は routing 照合 → branch fetch → checkout → base fetch → merge → ls-remote → push → ls-remote', () => {
@@ -95,12 +107,14 @@ for (const bash of BASHES) {
     const at = (re) => calls.findIndex((c) => re.test(c))
     const order = [
       at(/^remote get-url --all origin$/), at(new RegExp(`^fetch origin refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}$`)), at(/^checkout --detach refs\/remotes\/origin\//),
-      at(new RegExp(`^fetch origin refs/heads/${BASE}:refs/remotes/origin/${BASE}$`)), at(/^merge --no-ff --no-edit -F /), at(/^ls-remote origin /), at(/^push origin /),
+      at(new RegExp(`^fetch origin refs/heads/${BASE}:refs/remotes/origin/${BASE}$`)), at(/^merge --no-ff --no-edit -F /), at(/^ls-remote origin /), at(/^push --no-follow-tags origin /),
     ]
     assert.ok(order.every((i) => i >= 0), JSON.stringify(order))
     assert.ok(at(/^remote get-url --push --all origin$/) >= 0 && at(/^remote get-url --push --all origin$/) < order[1], 'push 先 URL の照合も fetch より前')
     assert.deepEqual([...order].sort((a, b) => a - b), order, '順序が崩れている')
     assert.equal(calls.filter((c) => /^ls-remote /.test(c)).length, 2, 'push の前後で 1 回ずつ')
+    // merge の引数は完全修飾の追跡 ref（短縮形 origin/<base> は同名のタグ refs/tags/origin/<base> に負ける）
+    assert.match(calls[order[4]], new RegExp(`^merge --no-ff --no-edit -F \\S+ refs/remotes/origin/${BASE}$`))
     assert.ok(calls.findIndex((c, i) => /^ls-remote /.test(c) && i > order[6]) > order[6], '2 回目の ls-remote は push のあと')
   })
 
@@ -231,6 +245,9 @@ for (const bash of BASHES) {
     for (const url of [
       `git@evil.example:${REPO}.git`, `https://evil.example/${REPO}`, `ssh://git@evil.example/${REPO}`,
       `https://github.com.evil.example/${REPO}`, `/srv/git/${REPO}`, '',
+      // host の後方一致（github.com で終わる別ホスト）は拒否する
+      `https://evilgithub.com/${REPO}`, `https://evil.github.com/${REPO}`, `git@notgithub.com:${REPO}`,
+      `ssh://git@evilgithub.com/${REPO}`, `https://x:${TOKEN}@evilgithub.com/${REPO}`,
     ]) {
       const sb = makeSandbox()
       const before = sb.remoteSha()
@@ -338,6 +355,41 @@ for (const bash of BASHES) {
     assert.ok(!hist.includes(tagSha), 'タグ側のコミットが入っていない')
   })
 
+  // 短縮形 origin/<base> は refs/tags/origin/<base> を refs/remotes/origin/<base> より先に解決する。merge の引数が完全修飾でないと、
+  // 同名のタグにしか無いコミットがブランチへ入る
+  t('タグ: origin/<base> という名前のタグがローカルにあっても、merge するのは refs/remotes/origin/<base>（タグ側のコミットが入らない）', () => {
+    const sb = makeSandbox()
+    const tagSha = plantTag(sb, `origin/${BASE}`)
+    git(sb.wt, 'fetch', '-q', 'origin', `refs/tags/origin/${BASE}:refs/tags/origin/${BASE}`)
+    assert.equal(git(sb.wt, 'rev-parse', `refs/tags/origin/${BASE}`), tagSha, '前提: タグがローカルにある')
+    assert.equal(git(sb.wt, 'rev-parse', `origin/${BASE}`), tagSha, '前提: 短縮形はタグへ解決される')
+    const baseTip = sb.remoteSha(BASE)
+    const v = result(run(bash, sb))
+    assert.equal(v.pushed, true)
+    const hist = git(sb.origin, 'rev-list', `refs/heads/${BRANCH}`).split('\n')
+    assert.ok(hist.includes(baseTip), 'base ブランチの先端が取り込まれている')
+    assert.ok(!hist.includes(tagSha), 'タグ側のコミットが入っていない')
+    assert.ok(!existsSync(join(sb.wt, 'tag-only.txt')))
+  })
+
+  t('追跡 ref: base が force-push で書き換わっても、stale な追跡 ref に引きずられず書き換え後の base を取り込む', () => {
+    const sb = makeSandbox()
+    const oldBase = sb.remoteSha(BASE)
+    git(sb.seed, 'checkout', '-q', '-B', BASE, `origin/${BASE}~1`)
+    writeFileSync(join(sb.seed, 'rewritten-base.txt'), 'rewritten base\n')
+    git(sb.seed, 'add', 'rewritten-base.txt')
+    git(sb.seed, 'commit', '-q', '-m', 'rewritten base')
+    git(sb.seed, 'push', '-q', '--force', 'origin', BASE)
+    const newBase = sb.remoteSha(BASE)
+    assert.notEqual(newBase, oldBase)
+    assert.equal(git(sb.wt, 'rev-parse', `refs/remotes/origin/${BASE}`), oldBase, '前提: wt の追跡 ref は書き換え前の base のまま（非 fast-forward になる）')
+    const v = result(run(bash, sb))
+    assert.equal(v.pushed, true, v.summary)
+    const hist = git(sb.origin, 'rev-list', `refs/heads/${BRANCH}`).split('\n')
+    assert.ok(hist.includes(newBase), '書き換え後の base が親に含まれている')
+    assert.ok(!hist.includes(oldBase), '書き換え前の base は入っていない')
+  })
+
   t('追跡 ref: PR ブランチが force-push で書き換わっても、stale な追跡 ref に引きずられず書き換え後の head を取り込む', () => {
     const sb = makeSandbox()
     git(sb.seed, 'checkout', '-q', '-B', BRANCH, `origin/${BASE}~1`)
@@ -377,6 +429,8 @@ for (const bash of BASHES) {
       `https://github.com/${REPO}?x=${TOKEN}`, `https://github.com/${REPO}#${TOKEN}`,
       // userinfo の中に区切り文字（バックスラッシュ・?・#）を置く偽装。WHATWG 系のパーサは \ ? # で authority を終えるので、本当の host は evil.example
       `https://evil.example\\@github.com/${REPO}`, `https://evil.example?@github.com/${REPO}`, `https://evil.example#@github.com/${REPO}`,
+      // authority に @ が 2 つ以上ある（git は接続に失敗するが、エラー文に 2 つ目の userinfo が残る）。トークン中の @ は %40 で書く
+      `https://a@evil.example@github.com/${REPO}`, `https://${TOKEN}@evil.example@github.com/${REPO}`, `https://a@b@github.com/${REPO}`, `https://@@github.com/${REPO}`,
     ]) {
       const sb = makeSandbox()
       const before = sb.remoteSha()
@@ -388,6 +442,14 @@ for (const bash of BASHES) {
       assert.ok(!(r.stdout + r.stderr).includes(TOKEN), `${url}: トークンを出力しない`)
       assert.ok(!(r.stdout + r.stderr).includes('evil.example'), `${url}: URL を出力しない`)
     }
+  })
+
+  t('URL: トークンの @ をパーセントエンコード（%40）した userinfo は受理する（@ が 2 つ以上の拒否と区別される）', () => {
+    const url = `https://x-access-token:p%40ss${TOKEN}@github.com/${REPO}.git`
+    const sb = makeSandbox()
+    const r = run(bash, sb, { env: { FAKE_REMOTE_URL: url } })
+    assert.equal(result(r).pushed, true)
+    assert.ok(!(r.stdout + r.stderr).includes(TOKEN))
   })
 
   t('URL: 空の --repo は URL が owner/repo を欠く（git@github.com: ・https://github.com/）場合も routingError。変更系の git を呼ばない', () => {

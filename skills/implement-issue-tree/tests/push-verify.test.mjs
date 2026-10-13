@@ -47,7 +47,7 @@ for (const bash of BASHES) {
     assert.deepEqual(outcomeOf(bash, sb), { rc: 0, outcome: 'pushed' })
     assert.equal(sb.remoteSha(), sb.headSha())
     assert.notEqual(sb.remoteSha(), before)
-    assert.deepEqual(sb.gitCalls().filter((c) => /^push( |$)/.test(c)), [`push origin HEAD:refs/heads/${BRANCH}`])
+    assert.deepEqual(sb.gitCalls().filter((c) => /^push( |$)/.test(c)), [`push --no-follow-tags origin HEAD:refs/heads/${BRANCH}`])
   })
 
   t('noop (i): push 前のリモート head がすでにローカル HEAD と同じなら、push が成功しても pushed にしない', () => {

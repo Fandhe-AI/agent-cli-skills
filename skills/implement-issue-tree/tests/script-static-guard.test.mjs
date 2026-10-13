@@ -20,15 +20,18 @@ const EXCLUDED = new Set(['merge-guard-hook.sh'])
 
 // 検査パターン。{ label, test(line) }。test は連結済みのコード 1 行を受ける。
 const re = (label, regex) => ({ label, test: (line) => regex.test(line) })
-// gh api / gh_api（スクリプト内のラッパー）の呼び出しか
-const GH_API = /\bgh(_api|\s+api)\b/
+// gh api / gh_api（スクリプト内のラッパー）の呼び出しか。gh と api の間にグローバルオプションが入る形（gh -R "${repo}" api …）も含む
+const GH_API_HEAD = '(?:\\bgh_api\\b|\\bgh\\b[^\\n|;&]*\\bapi\\b)'
+const GH_API = new RegExp(GH_API_HEAD)
 // gh api の最初の位置引数が graphql（読み取りの query）か。オプションを挟んでもよい
-const GH_API_GRAPHQL = /\bgh(_api|\s+api)\s+(--?[A-Za-z][\w-]*\s+)*graphql\b/
-// git push の許可形（lib/push-verify.sh の 1 行だけ）。ほかの形は削除 refspec・--all・URL 直指定・remote 違いを含めてすべて拒否する
-// git の後ろのグローバルオプション（-C <dir>・-c k=v・--no-pager など）を読み飛ばして、サブコマンドの位置を見る
-const GIT_SUB = (sub) => new RegExp(`\\bgit\\s+(?:(?:-[Cc]\\s+\\S+|--?[\\w-]+(?:=\\S+)?)\\s+)*${sub}\\b`)
+const GH_API_GRAPHQL = new RegExp(`${GH_API_HEAD}\\s+(--?[A-Za-z][\\w-]*\\s+)*graphql\\b`)
+// git の後ろのグローバルオプション（-C <dir>・-c k=v・--no-pager など）を読み飛ばして、サブコマンドの位置を見る。
+// git とサブコマンドは引用符で囲んでもシェルでは同じコマンドになる（"git" push・git "push"）ので、引用符も許す
+const GIT_SUB = (sub) => new RegExp(`["']?\\bgit\\b["']?\\s+(?:(?:-[Cc]\\s+\\S+|--?[\\w-]+(?:=\\S+)?)\\s+)*["']?${sub}\\b["']?`)
 const GIT_PUSH_CALL = GIT_SUB('push')
-const GIT_PUSH_ALLOWED = /^\s*git push origin "HEAD:refs\/heads\/\$\{branch\}"(\s*>\/dev\/null)?(\s*\|\|\s*rc=\$\?)?\s*$/
+// git push の許可形（lib/push-verify.sh の 1 行だけ。--no-follow-tags は利用者設定 push.followTags でタグが出ていくのを止める）。
+// ほかの形は削除 refspec・--all・URL 直指定・remote 違い・--no-follow-tags の欠落を含めてすべて拒否する。引用符付きの git / push も許可形ではない
+const GIT_PUSH_ALLOWED = /^\s*git push --no-follow-tags origin "HEAD:refs\/heads\/\$\{branch\}"(\s*>\/dev\/null)?(\s*\|\|\s*rc=\$\?)?\s*$/
 
 const PATTERNS = [
   // マージ・クローズ
@@ -36,6 +39,8 @@ const PATTERNS = [
   re('gh pr close / gh issue close', /\bgh\b[^\n|;&]*\b(pr|issue)\b[^\n|;&]*\bclose\b/),
   re('REST のマージ API', /pulls\/[^\s'"]*\/merge|\/merges\b|\/merge['"\s]*$/),
   re('GraphQL のマージ mutation', /mergePullRequest|enablePullRequestAutoMerge|mergeBranch|closePullRequest/),
+  // 別名・拡張経由の迂回（merge-guard-hook.sh が拒否している類と揃える）
+  re('gh alias / gh extension', /\bgh\b[^\n|;&]*\b(alias|extensions?)\b/),
   // 承認
   re('approve', /--approve\b|\bgh\b[^\n|;&]*\bpr\b[^\n|;&]*\breview\b|\bevent=APPROVE\b|\bAPPROVE\b|submitPullRequestReview|addPullRequestReview/),
   // リポジトリ設定・ruleset・branch protection の変更
@@ -43,8 +48,12 @@ const PATTERNS = [
   // -X は大文字小文字を区別する別パターン（set -x や jq の -x を拾わない）。-XPUT のように値が直結する形も拾う
   {
     label: '書き込み系の HTTP メソッド',
-    test: (line) => /(--method|--request)[ =]+['"]?(?!GET\b)[A-Za-z]+/i.test(line) || /(^|[\s'"])-X[ =]*['"]?(?!GET\b)[A-Za-z]+/.test(line),
+    // -iX PUT のように他の短縮オプションと連結した形、-X の後ろがタブの形も拾う
+    test: (line) => /(--method|--request)[\s=]+['"]?(?!GET\b)[A-Za-z]+/i.test(line) || /(^|[\s'"])-[A-Za-z]*X[\s=]*['"]?(?!GET\b)[A-Za-z]+/.test(line),
   },
+  // curl / wget による本文付きリクエスト（-d / --data* / -F / --form / -T / --upload-file / --json、wget の --post-data / --post-file / --body-*）。
+  // -X / --method は上のパターンが拾う
+  re('curl / wget による書き込み系リクエスト', /\bcurl\b[^\n|;&]*\s(-[A-Za-z]*[dFT]|--(data[\w-]*|form[\w-]*|upload-file|json))\b|\bwget\b[^\n|;&]*\s--(post-(data|file)|body-(data|file))\b/),
   re('GraphQL の mutation', /\bmutation\b/),
   // gh api は -f / -F / --field / --raw-field / --input を付けると、メソッド指定なしでも暗黙に POST になる。
   // graphql の query 送信（-f query=… -F owner=…）だけは読み取りとして許す（mutation は別パターンが拒否する）。--input は graphql でも拒否する
@@ -61,7 +70,7 @@ const PATTERNS = [
   re('git push の -f 系短縮オプション', /\bgit\b[^\n|;&]*\bpush\b[^\n]*\s-[a-zA-Z]*f[a-zA-Z]*(\s|$)/),
   re('git push の + refspec', /\bgit\b[^\n|;&]*\bpush\b[^\n]*\s['"]?\+/),
   {
-    label: 'git push は許可形（git push origin "HEAD:refs/heads/${branch}"）以外を拒否',
+    label: 'git push は許可形（git push --no-follow-tags origin "HEAD:refs/heads/${branch}"）以外を拒否',
     test: (line) => GIT_PUSH_CALL.test(line) && !GIT_PUSH_ALLOWED.test(line),
   },
   // リポジトリ設定の書き換え（push 先や hook の差し替え）
@@ -69,7 +78,8 @@ const PATTERNS = [
   re('git config の書き込み（--get / --list 以外）', new RegExp(`${GIT_SUB('config').source}(?!\\s+(--get(-all|-regexp)?|--list|-l)\\b)`)),
   re('core.hooksPath / GIT_CONFIG 環境変数による設定の注入', /core\.hooksPath|\bGIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+|PARAMETERS)\b/i),
   // フック回避
-  re('--no-verify', /--no-verify\b/),
+  // git は長いオプションの一意な省略形を受け付ける（--no-verif・--no-ver・--no-v）。--no-verbose のような別のオプションは拾わない
+  re('--no-verify', /--no-v(e(r(i(f(y)?)?)?)?)?\b/),
   re('git commit -n（--no-verify の短縮）', /\bgit\b[^\n|;&]*\bcommit\b[^\n|;&]*\s-[a-zA-Z]*n[a-zA-Z]*(\s|$)/),
   re('HUSKY / LEFTHOOK の無効化', /\b(HUSKY(_\w+)?|LEFTHOOK|SKIP_HOOKS)\s*=/),
 ]
@@ -126,6 +136,7 @@ test('スクリプトのコード行に、マージ・承認・設定変更・fo
 test('自己検査: 各パターンは悪い例に発火する（パターンが壊れて何も検出しなくなっていない）', () => {
   const bad = {
     'gh pr merge': ['gh pr merge 12 --squash', 'gh -R o/r pr merge 12', 'gh --repo o/r pr merge'],
+    'gh alias / gh extension': ['gh alias set m "pr merge"', 'gh alias import x.yml', 'gh extension install o/r', 'gh extensions list', 'gh -R o/r alias set x y'],
     'gh pr close / gh issue close': ['gh pr close 3', 'gh issue close 4'],
     'REST のマージ API': ['gh api repos/o/r/pulls/3/merge -X PUT', 'gh api repos/o/r/merges'],
     'GraphQL のマージ mutation': ['mergePullRequest(input:{})', 'enablePullRequestAutoMerge'],
@@ -134,29 +145,47 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
     '書き込み系の HTTP メソッド': [
       'gh api -X PUT repos/o/r/x', 'gh api --method POST repos/o/r/x', 'gh api --method=DELETE x',
       'gh api -XPUT repos/o/r/x', 'gh api -XDELETE x', 'gh api --request PATCH x', 'gh api --request=POST x', "gh api -X 'POST' x",
+      'gh api -iX PUT repos/o/r/x', 'gh api -iXPOST x', 'gh api -X\tPUT repos/o/r/x', 'gh api --method\tPOST x', 'gh api -siXDELETE x',
     ],
     'GraphQL の mutation': ['mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{id} } }'],
     'gh api の書き込み系（-f / -F / --field / --raw-field / --input による暗黙 POST）': [
       'gh api repos/o/r/issues -f title=x', 'gh api repos/o/r/issues -F title=x', 'gh_api repos/o/r/issues --field title=x',
       'gh api repos/o/r/issues --raw-field title=x', 'gh api repos/o/r/issues -ftitle=x', 'gh api repos/o/r/issues --input body.json',
       'gh api graphql --input query.json', 'gh api --paginate repos/o/r/issues/1/comments -f body=x',
+      // gh と api の間にグローバルオプションが入る形
+      'gh -R "${repo}" api repos/o/r/issues -f title=x', 'gh --repo o/r api repos/o/r/issues --field title=x', 'gh -R "${repo}" api repos/o/r/issues --input body.json',
+      'gh -R "${repo}" api graphql --input query.json',
+    ],
+    'curl / wget による書き込み系リクエスト': [
+      'curl -d x https://example.com', 'curl -sd @body.json https://example.com', 'curl --data-raw x https://example.com', 'curl --data-binary @f https://example.com',
+      'curl --data-urlencode a=b https://example.com', 'curl -F a=b https://example.com', 'curl --form a=@f https://example.com', 'curl -T f https://example.com',
+      'curl --upload-file f https://example.com', 'curl --json {} https://example.com', 'curl -sSL -d x https://example.com',
+      'wget --post-data=a=b https://example.com', 'wget --post-file f https://example.com', 'wget --body-data=x https://example.com', 'wget --body-file f https://example.com',
     ],
     'git push の --force 系': ['git push --force origin HEAD', 'git push origin HEAD --force-with-lease', 'git push --mirror', 'git push origin --delete x'],
     'git push の -f 系短縮オプション': ['git push -f origin HEAD', 'git push origin HEAD -f', 'git push -uf origin HEAD'],
     'git push の + refspec': ['git push origin +HEAD:refs/heads/x', 'git push origin "+HEAD:refs/heads/x"'],
-    'git push は許可形（git push origin "HEAD:refs/heads/${branch}"）以外を拒否': [
+    'git push は許可形（git push --no-follow-tags origin "HEAD:refs/heads/${branch}"）以外を拒否': [
+      // --no-follow-tags の欠落（push.followTags でタグが出ていく）・順序違い・引用符付きの git / push
+      'git push origin "HEAD:refs/heads/${branch}"', 'git push origin "HEAD:refs/heads/${branch}" --no-follow-tags', 'git push --follow-tags origin "HEAD:refs/heads/${branch}"',
+      '"git" push --no-follow-tags origin "HEAD:refs/heads/${branch}"', 'git "push" --no-follow-tags origin "HEAD:refs/heads/${branch}"', "'git' 'push' origin :refs/heads/main",
+      'git "push" origin ":refs/heads/main"', '"git" push --all origin',
       'git push origin ":refs/heads/main"', 'git push origin :refs/heads/main', 'git push --all origin', 'git push --tags origin',
       'git push https://github.com/o/r.git "HEAD:refs/heads/${branch}"', 'git push evil "HEAD:refs/heads/${branch}"',
       'git push origin HEAD:refs/heads/main', 'git push origin "HEAD:refs/heads/${branch}" --tags', 'git push', 'git push origin',
       'git -c core.x=y push origin "HEAD:refs/heads/${branch}"', 'git push origin "HEAD:refs/heads/${branch}" "HEAD:refs/heads/main"',
     ],
-    'git remote（get-url 以外）': ['git remote set-url --push origin x', 'git remote add evil x', 'git remote set-url --add origin x', 'git remote remove origin', 'git remote -v', 'git remote', 'git -C x remote rename a b'],
+    'git remote（get-url 以外）': ['git remote set-url --push origin x', 'git remote add evil x', 'git remote set-url --add origin x', 'git remote remove origin', 'git remote -v', 'git remote', 'git -C x remote rename a b', '"git" remote add evil x', 'git "remote" add evil x'],
     'git config の書き込み（--get / --list 以外）': [
       'git config url.x.pushInsteadOf y', 'git config --local remote.origin.pushurl x', 'git config --unset remote.origin.url', 'git config --global user.name x',
-      'git config core.hooksPath x', 'git config --add remote.origin.url x', 'git config', 'git -c a=b config x y',
+      'git config core.hooksPath x', 'git config --add remote.origin.url x', 'git config', 'git -c a=b config x y', '"git" config core.x y', 'git "config" core.x y',
     ],
     'core.hooksPath / GIT_CONFIG 環境変数による設定の注入': ['git -c core.hooksPath=/dev/null commit -m x', 'git config core.hooksPath x', 'GIT_CONFIG_COUNT=1 git commit', 'export GIT_CONFIG_KEY_0=core.hooksPath', 'GIT_CONFIG_PARAMETERS="x"'],
-    '--no-verify': ['git commit --no-verify -m x', 'git push --no-verify'],
+    '--no-verify': [
+      'git commit --no-verify -m x', 'git push --no-verify',
+      // 長いオプションの省略形（git は一意なら受け付ける）
+      'git commit --no-verif -m x', 'git commit --no-veri -m x', 'git commit --no-ver -m x', 'git commit --no-ve -m x', 'git commit --no-v -m x', 'git push --no-verif origin HEAD',
+    ],
     'git commit -n（--no-verify の短縮）': ['git commit -n -m x', 'git commit -m x -n', 'git commit -anm x', 'git -c a=b commit -n'],
     'HUSKY / LEFTHOOK の無効化': ['HUSKY=0 git commit -m x', 'export HUSKY=0', 'HUSKY_SKIP_HOOKS=1 git commit', 'LEFTHOOK=0 git commit', 'SKIP_HOOKS=1 git commit'],
   }
@@ -179,9 +208,9 @@ test('自己検査: 正当な行（読み取りの gh api・graphql の query・
     'gh api graphql -f query="${Q}" -F cursor="${cursor}"',
     'gh api --paginate "repos/{owner}/{repo}/issues/${n}/sub_issues?per_page=100" --jq \'.[].number\'',
     'run_timed "${gh_timeout}" gh api "$@"',
-    'git push origin "HEAD:refs/heads/${branch}"',
-    'git push origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?',
-    'git push origin "HEAD:refs/heads/${branch}" >/dev/null',
+    'git push --no-follow-tags origin "HEAD:refs/heads/${branch}"',
+    'git push --no-follow-tags origin "HEAD:refs/heads/${branch}" >/dev/null || rc=$?',
+    'git push --no-follow-tags origin "HEAD:refs/heads/${branch}" >/dev/null',
     'out=$(git remote get-url "$@" origin 2>/dev/null) || return 2',
     'git remote get-url --push --all origin',
     'git config --get remote.origin.url',
@@ -189,6 +218,16 @@ test('自己検査: 正当な行（読み取りの gh api・graphql の query・
     'git ls-remote origin "refs/heads/$1"',
     'git commit -m "x" --amend',
     'git commit --no-edit',
+    'git commit --no-verbose',
+    'gh -R "${repo}" api repos/o/r/commits/x/check-runs',
+    'gh -R "${repo}" api graphql -f query="${Q}" -F owner="${o}"',
+    'gh --repo o/r api -X GET repos/o/r/x',
+    'gh api -iX GET repos/o/r/x',
+    'gh api -i repos/o/r/x',
+    'curl -sSL -H "Accept: x" https://example.com',
+    'curl -fsSL -o out https://example.com',
+    'wget -q -O out https://example.com',
+    'echo "alias"',
     'git merge --no-ff --no-edit -F "${msgfile}" "${base_ref}"',
     'git merge --abort',
     'git fetch origin "refs/heads/${base}:refs/remotes/origin/${base}"',
@@ -211,7 +250,7 @@ test('自己検査: バックスラッシュ行継続を連結してから検査
     ['gh api repos/o/r/issues \\\n  -f title=x', 'gh api の書き込み系（-f / -F / --field / --raw-field / --input による暗黙 POST）'],
     ['git push \\\n  --force origin HEAD', 'git push の --force 系'],
     ['git commit \\\n  -n -m x', 'git commit -n（--no-verify の短縮）'],
-    ['git push origin \\\n  ":refs/heads/main"', 'git push は許可形（git push origin "HEAD:refs/heads/${branch}"）以外を拒否'],
+    ['git push origin \\\n  ":refs/heads/main"', 'git push は許可形（git push --no-follow-tags origin "HEAD:refs/heads/${branch}"）以外を拒否'],
     ['git \\\n  remote add evil x', 'git remote（get-url 以外）'],
   ]
   for (const [text, label] of cases) {

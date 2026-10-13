@@ -3707,10 +3707,10 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'3c12ded1ac400dd414123667cb4c69b9097c99f0bfbe021d1395e43b79a16448',
-'measure-free-disk.sh':'11de84f5706b9475c83592c57aab19c9385b2ada6ee3a760ec439a3ce9f971ff',
-'observe-pr.sh':'8444bf367bf2aeeb10d7879582ab6e6f12e9f3c95aa18ebbbc98d2fd13dde4b2',
-'base-merge.sh':'ab2db355dae0f7d842c3e19dee84712a51a2f5cc1674ab273445c1f794d6f1fe',
+'measure-residual-bytes.sh':'4ed344695d84f241805f8db02263b0feddf478962e559e13d4d62e8d46388a9d',
+'measure-free-disk.sh':'1f9e4fb2a0991ea86235d4a9955e00c32f5ff574873f681c9eb8f7c55a4c98af',
+'observe-pr.sh':'ee978d117721a57d390c099cfef72096154dc8af727b3cf832b4d136a5ba56ab',
+'base-merge.sh':'53e17f0a18ceb407a3fb38f1b3bcb19e4213ac1d00a87035bd9459af44692e30',
 }
 
 
