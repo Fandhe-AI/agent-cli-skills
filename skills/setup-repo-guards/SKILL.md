@@ -70,7 +70,9 @@ gh api -H 'Accept: application/vnd.github.raw' \
   ai-review の review ジョブ（`runner`。codex の既定は self-hosted の `codex` ラベル）のみ専用 runner の例外。
   `preflight` / `post_feedback`（`post-feedback-runner`）は資格情報に触れず、既定で可視性に応じて
   自動切替する（public は `ubuntu-latest`、private は `self-hosted`）ため、明示指定は不要
-- 資格情報: `CODEX_HOME_DIR` は org 単位の Actions variable として設定済みのため、リポジトリには設定しない
+- 資格情報: `CODEX_HOME_DIR` は org 単位の Actions variable（visibility: all）として設定済みのため、リポジトリには設定しない。
+  `gh api orgs/Fandhe-AI/actions/variables --jq '.variables[].name'` で存在を確認し、無い場合（他 org 等）は
+  `ai-review/README.md`「セットアップ」手順 3 に従ってリポジトリへ設定する
 - `update-external` の日次同期 PR（`chore/skills-update-*` / `chore/submodule-update-*`）がある場合は
   `skip-branch-prefixes: chore/skills-update-,chore/submodule-update-` を指定する。push できる主体は
   ブランチ名で gate を回避できる受容済み残留リスクがあるため、第三者の write コラボレーターがいる
@@ -132,8 +134,10 @@ ai-review は **PR の base コミットの AGENTS.md** をリポジトリ固有
     **[<集約ジョブ>, （集約できない別 workflow の常時チェック）, ai-review の 3 チェック]** の最小集合、
     使う場合は PR HEAD へ報告される全 context。ai-review の 3 チェックはジョブ ID が先頭になる
     `<job> / preflight`・`<job> / review`・`<job> / post_feedback`（テンプレート既定なら `codex / preflight` 等。
-    複数モデル構成ではテンプレート同梱の集約 gate `ai-review-gate` でもよい）。**`preflight` は必ず含める**:
-    actor 判定等で `preflight` が失敗すると後続が skipped になり、skipped は required check を満たしてしまう
+    複数モデル構成ではテンプレート同梱の集約 gate `ai-review-gate` 1 件でもよい）。個別ジョブを登録する場合は
+    **`preflight` を必ず含める**: actor 判定等で `preflight` が失敗すると後続が skipped になり、skipped は
+    required check を満たしてしまう（`ai-review-gate` は reviewer の `preflight` 失敗で自身も失敗するため、
+    gate 1 件で登録する場合は個別の `preflight` を追加しなくてよい）
   - 自動マージ（implement-issue-tree の `autoMerge: true`）を使う場合、required_status_checks の
     各エントリに発行元 App の `integration_id` を束縛する（未束縛だと G0 が `issuer-unbound` で辞退する）。
     **ruleset を PUT で更新した後は必ず下記「検証」の 3 軸スイープを実行する**（`PUT` は
@@ -180,7 +184,8 @@ repo="Fandhe-AI/<REPO>"
 grep -n "uses: Fandhe-AI/actions" .github/workflows/ai-review.yml
 test ! -e .github/workflows/codex-review.yml && echo "旧 wrapper なし"
 # Step 1: 直近 run でジョブ単位に review が実行されたこと（skipped は「workflow 成功」に見える）
-run_id=$(gh run list --repo "${repo}" --workflow "AI PR review" --limit 1 --json databaseId --jq '.[0].databaseId')
+# head_branch は検証対象の PR（導入 PR 等）の head ブランチ名
+run_id=$(gh run list --repo "${repo}" --workflow "AI PR review" --event pull_request --branch "${head_branch}" --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run view "${run_id}" --repo "${repo}" --json jobs --jq '.jobs[] | {name, status, conclusion}'
 # Step 2: AGENTS.md の存在と P0/P1/P2 定義
 grep -n "P0\|P1\|P2" AGENTS.md | head
