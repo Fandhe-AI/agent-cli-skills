@@ -119,14 +119,18 @@ if [ -n "${expect_sha}" ]; then
   case "${expect_sha}" in *[!0-9a-f]*) usage "--expect-sha は 40 桁の小文字 16 進で指定する" ;; esac
   [ "${#expect_sha}" -eq 40 ] || usage "--expect-sha は 40 桁の小文字 16 進で指定する"
 fi
-# --external: [{"app": slug, "contexts": [context, …]}, …]（contexts は 1 件以上）。形式が違えば使い方の誤り（合格にしない）
+# --external: [{"app": slug, "contexts": [context, …]}, …]（contexts は 1 件以上）。context の受理条件はホストの EXTERNAL_CHECK_CONTEXT_RE と
+# 前後空白の拒否（c === c.trim()）に合わせる（1〜255 文字・制御文字と U+2028/2029 は不可・前後に JS の空白類は不可）。同じ入力表での一致は merge-gate-context-parity.test.mjs が固定する。
+# 形式が違えば使い方の誤り（合格にしない）。
 ext_json='[]'
 if [ -n "${external}" ]; then
   printf '%s' "${external}" | jq -e '
     type == "array" and length >= 1 and all(.[];
       type == "object" and (.app | type) == "string" and (.app | test("^[a-z0-9][a-z0-9-]{0,38}$"))
       and (.contexts | type) == "array" and (.contexts | length) >= 1
-      and all(.contexts[]; type == "string" and length >= 1 and length <= 200))' >/dev/null 2>&1 || usage "--external の形式が不正"
+      and all(.contexts[]; type == "string" and length >= 1 and length <= 255
+        and (test("[\\p{Cc}\u2028\u2029]") | not)
+        and (test("^[\\t\\v\\f \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]|[\\t\\v\\f \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]\\z") | not)))' >/dev/null 2>&1 || usage "--external の形式が不正"
   ext_json=${external}
 fi
 
