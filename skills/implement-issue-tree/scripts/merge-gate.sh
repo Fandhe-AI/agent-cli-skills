@@ -406,4 +406,4 @@ while [ "${i}" -lt "${n_ext}" ]; do
   i=$((i + 1))
 done
 
-stop ok done ok
+stop ok 'done' ok

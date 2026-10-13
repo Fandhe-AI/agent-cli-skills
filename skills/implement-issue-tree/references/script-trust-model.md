@@ -15,6 +15,7 @@
 | `scripts/base-merge.sh` | 自動 base 取り込みの本体（第 3 弾）。入力は PR 番号・branch・base・期待 owner/repo（引数）。**封筒を使わない**。出力の最後の 1 行は `BASE_MERGE_RESULT {…}`（キーは `BASE_MERGE_SCHEMA` と同じ） |
 | `scripts/pr-push.sh` | pr-create と fix の起点の確立・base 取り込み・push・PR 作成（第 4 弾）。モードは `prepare` / `push` / `pr`。**封筒を使わない**。出力の最後の 1 行は `PR_PUSH_RESULT {…}` |
 | `scripts/state.sh` | 状態ファイル（`_/issue-trees/<親>.json`）の書き込み（第 5 弾）。モードは `merge` / `init` / `hw-max` / `hw-set`。入力は標準入力の 1 行 JSON と引数。**封筒を使わない**。出力の最後の 1 行は `STATE_RESULT {"ok":…}` |
+| `scripts/merge-gate.sh` | merge-exec のマージ直前の読み取り専用検証（第 6 弾。G0 = サーバー側強制の実測と、チェック・未解決スレッド・mergeable・外部チェックの再検証）。入力は PR 番号・base・期待 sha・外部チェックの宣言（引数）。**封筒を使う**: payload は判定語（`verdict`。merge-exec の reason と同じ語彙）・段階・固定語の detail・整数の件数・40 桁 16 進の HEAD sha だけ。**マージの実行は含まない** |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
 | `scripts/lib/push-verify.sh` | push の前後でリモート head を突き合わせる共通部（`pv_push_verified`。第 3 弾）。`base-merge.sh` が使い、以降 pr-create の push と fix の push 検証も同じ部品へ移す |
 | 生成物 `implement-issue-tree.js` の `SCRIPT_SHA256` | ビルダーが埋め込む期待ハッシュ。開発ファイルには置換前の目印を書き、`build-workflow.mjs` が置換する |
@@ -224,6 +225,52 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 ### `base-merge.sh` の共有 ref
 
 第 4 弾の持ち越し: `base-merge.sh` は branch と base の取得先を `refs/worktree/base-merge/*` に変え、並列 worktree が共有する `refs/remotes/origin/*` を削除しない（実 git の 2 worktree テストと変異 U40 が固定する）。`refs/worktree/` が worktree ごとに分かれることは、git 2.54 でしか実測していない（最低版 2.20 では未確認）。
+
+## 第 6 弾: merge-exec の G0 と再検証（`merge-gate.sh`）
+
+### 位置づけ: マージの実行はプロンプトに残し、読み取り専用の検証だけを移す
+
+merge-exec のプロンプトは、マージ直前に (a) ベースブランチのサーバー側強制の実測（G0: ruleset の source / `bypass_actors` / `enforcement` / required status checks の `integration_id` 束縛 / 外部チェック App の context + App ID の組 / レビュースレッド解消の必須化 / client-only チェックの不在）と、(b) チェック状態・未解決スレッド・mergeable・外部チェックの再検証を、`gh` / `jq` の手順として文章で持っていた。これを `scripts/merge-gate.sh`（判定は `lib/merge-gate-lib.sh` の純関数）へ移し、プロンプトは「コマンドを 1 回実行し、`payload.verdict` が `ok` ならマージ、それ以外は verdict をそのまま reason にして辞退する」だけにした。
+
+**squash merge の実行（`--match-head-commit` 付きの 1 形）はスクリプトに入れない。** `script-static-guard` はスクリプトにマージ系の綴りを禁じ、`merge-guard-hook.sh` は Bash のコマンド文字列でマージを拒否する。マージ実行をスクリプトに入れるとガードの例外化と hook の素通りが生じる。除外リストと hook はこの弾で変えていない（変えたのは `/rulesets` の 1 パターンだけで、下の「静的ガード」参照）。merge-verify（マージ後の `gh pr view` 1 コマンドの独立確認）は、移しても削減が無いうえ「別コンテキストが独立に観測する」ことが本質なので移していない。
+
+### 封筒を使う理由: ホストの受理条件に入る
+
+`state.sh` と違い、出力はホストのゲート判定の入力になる。ホストは `merged: true / reason: merged` を受理する前に、merge-exec が転記した封筒（返却の `gate`）を `verifyMergeGate` で照合し、次がすべて揃ったときだけ受理する。
+
+- 封筒の nonce が、そのラウンドの merge-exec 呼び出しに対してホストが決めた nonce と一致する（呼び出しごと・ラウンドごとに別。前の封筒の流用は通らない）
+- sha256 が nonce + payload の正規形から再計算した値と一致する
+- `payload.inputSha256` が、ホストが自分の引数（PR・repo・base・期待 sha・外部チェックの宣言の文字列）から再計算した値と一致する（別の PR・別の宣言を検証した出力は通らない）
+- `verdict == ok`・`err == 0`・`stage == done`（最後の段階まで到達した）
+- 封筒の `headSha` が merge-exec 申告の `headSha` と一致する（ホストが opt-in ゲートの期待 sha を持つときはそれとも一致）。続けて既存の merge-verify の独立観測 `headRefOid` との一致も要求する
+
+不合格は既存の「独立確認で裏付けられなかった」経路（`blocked` + `quality`、次回ランの monitoring 再開で `already-merged` 回復）へ流す。ホストの分岐の意味は変えていない。`already-merged` の回復は新規マージではないので封筒を要求しない。reason が `merged` でない辞退（`checks-not-green` など）の分岐は従来どおり merge-exec の reason を使う。
+
+payload に入れるのは整数・固定語彙（verdict / stage / detail）・40 桁 16 進だけで、ruleset 名・context 名・App 名・PR のタイトルのような GitHub 由来の自由文字列は入れない（テストが外部由来の文字列を含む fixture で標準出力に出ないことを確かめる）。外部チェックの宣言（App の slug と context）は `--external` の引数文字列 1 つで渡し、封筒の `inputSha256` がそれを束縛する。
+
+### 判定の対応（プロンプトの旧手順との同値性）
+
+| 段階 | 判定語 | 旧手順 |
+|------|--------|--------|
+| view | `head-moved`（取得失敗・HEAD sha の形式・OPEN でない・期待 sha の不一致）/ `pr-closed` / `wrong-target`（base 不一致・draft） | 手順 2 |
+| g0 | `classic-unsupported`（required status checks が 0 件・取得失敗）/ `server-enforcement-missing`（Organization 継承・ruleset の取得失敗・`bypass_actors` が空でない・スレッド解消の強制なし・外部チェックの App ID + context の組が required に無い・client-only チェックあり・取得失敗）/ `issuer-unbound`（`integration_id` が数値でない・取得失敗）/ `checks-not-green`（束縛済み check-run が HEAD に未発行 = 一過性） | 手順 2b (i)〜(v-b) |
+| checks | `checks-not-green`（非 0 終了・総数 0・合格以外あり） | 手順 3 |
+| threads | `unresolved-threads` / `head-moved`（取得失敗） | 手順 4 |
+| mergeable | `not-mergeable`（CONFLICTING のみ。UNKNOWN は止めない） | 手順 4 |
+| external | `external-review-missing` / `checks-not-green`（cursor 以外の check-run が不合格） | 手順 4b |
+
+- **追加した検査は 1 つ**: 各 ruleset の `enforcement` が `active` であること（旧手順は `bypass_actors` のみ。effective rules は active の ruleset だけを返すはずなので通常は同値で、`evaluate` / `disabled` を通さない側にだけ厳しくなる）。`ruleset-policy.md` の「strict 以外の必須構成」表の enforcement 行に対応する。
+- **取得失敗・ページ不完全は合格に倒さない**: `gh` の非 0 終了（`--paginate` のページ途中の失敗を含む）・出力サイズ超過・時間切れ（1 回 25 秒・全体 100 秒、孫プロセスごと kill）・想定外の形（HTTP エラー本文が exit 0 で出た等）は、それぞれの段階の fail-closed の判定語と `err == 1` で返す。未解決スレッドは `hasNextPage` が真で `endCursor` が無ければ打ち切らず取得失敗にする。
+- **`strict_required_status_checks_policy` は読まない**（`ruleset-policy.md`）。
+- **HEAD sha の出所**: スクリプトが `gh pr view` で 1 回取得して固定し、封筒で返す。エージェントはその値だけを `--match-head-commit` に使う。ホストが opt-in ゲートの確認値を持つときは `--expect-sha` で束縛し、不一致は `head-moved`。`--repo` は任意引数（`args.repo` を持つラン）で、持たないランは `observe-pr.sh` と同じく cwd のリポジトリに解決する。
+
+### 静的ガード
+
+G0 は適用 ruleset の `bypass_actors` を読むため `gh_api "${repo_path}/rulesets/${id}" || …` の 1 行が `/rulesets` を含む。`script-static-guard` の「ruleset / リポジトリ設定」パターンは `/rulesets` を設定変更の経路として拒否していたので、**この 1 行の形（`/${id}" ||` が続く GET）だけを許す**ようパターンを狭く直した。許す行が `merge-gate.sh` 以外に無く、形が 1 つであることは専用テストで固定する。書き込み（`-X`・`--method`・`-f` による暗黙 POST）は別のパターンが引き続き拒否する。`EXCLUDED`（除外リスト）と `merge-guard-hook.sh` は変更していない。
+
+### この弾の検証範囲
+
+単体テスト（判定の表・偽 `gh` を差し替えたスクリプト全体・ホストの封筒照合・プロンプトの配線）と変異（危険側 29 件）でのみ検証している。**`autoMerge: true` の実ランでは未検証**（実 GitHub の ruleset / App に対する G0 の通過、`gh pr checks --json state --jq` の実出力、隔離 worktree からの `run-verified.sh` 経由の起動を含む）。
 
 ## ハッシュ埋め込みと鮮度
 

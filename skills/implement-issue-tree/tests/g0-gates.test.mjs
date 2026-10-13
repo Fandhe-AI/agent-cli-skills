@@ -199,6 +199,7 @@ test('mergeExecutePrompt: 新規マージ経路（allowMerge=true）は検証ス
   assert.match(prompt, /bash '[^']+\/scripts\/run-verified\.sh' \S+ merge-gate\.sh --nonce noncex1 --pr 123 --base \S+ --external '\[\{"app":"cursor","contexts":\["Cursor Bugbot"\]\}\]'/)
   // ok 以外は verdict をそのまま reason にして辞退し、ok のときだけ payload.headSha でマージへ進む。
   assert.ok(prompt.includes('payload.verdict が ok 以外ならマージせず'))
+  assert.ok(prompt.includes('ok のときだけ手順 3 へ進む'))
   assert.ok(prompt.includes('payload.headSha'))
   // 検証の手順（旧 2b〜4b）は文面から消えている。
   for (const gone of ['bypass_actors', 'required_review_thread_resolution', 'rules/branches', 'integration_id', '--slurp', 'reviewThreads', 'APP_ID_', 'gh pr checks --json state']) {

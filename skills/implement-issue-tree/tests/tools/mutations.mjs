@@ -13,7 +13,11 @@ const PP_LIB = 'scripts/lib/pr-push-lib.sh'
 const RV = 'scripts/run-verified.sh'
 const ST = 'scripts/state.sh'
 const ST_LIB = 'scripts/lib/state-lib.sh'
+const MG = 'scripts/merge-gate.sh'
+const MG_LIB = 'scripts/lib/merge-gate-lib.sh'
 const STATE_SCRIPT = ['state-script.test.mjs']
+const MERGE_GATE = ['merge-gate.test.mjs', 'merge-gate-unit.test.mjs']
+const MERGE_GATE_HOST = ['merge-gate-host.test.mjs']
 const PR_PUSH = ['pr-push.test.mjs', 'pr-push-unit.test.mjs']
 const BASE_MERGE = ['base-merge.test.mjs', 'base-merge-unit.test.mjs']
 
@@ -93,4 +97,34 @@ export const MUTATIONS = [
   // ---- observe-pr.sh --repo（第 4 弾）----
   { id: 'P10-repo-not-passed', file: SRC, from: "    repo !== '' ? ` --repo ${repo}` : '',", to: "    '',", tests: ['observe-pr-host.test.mjs'], note: 'ホストが args.repo を持つのに観測コマンドへ --repo を渡さない' },
   { id: 'P11-observe-no-R', file: OBS, from: 'run_timed "${gh_timeout}" gh pr view "${pr}" -R "${repo}" "$@"', to: 'run_timed "${gh_timeout}" gh pr view "${pr}" "$@"', tests: ['observe-pr.test.mjs'], note: '--repo があっても gh pr view に -R を付けない' },
+  // ---- merge-gate.sh と lib/merge-gate-lib.sh（第 6 弾。merge-exec の G0 とマージ直前の再検証）----
+  { id: 'G01-bypass-nonempty-passes', file: MG_LIB, from: '(.bypass_actors | type) == "array" and (.bypass_actors | length) == 0\'', to: '(.bypass_actors | type) == "array"\'', tests: MERGE_GATE, note: 'bypass_actors が空でない ruleset を通す（bypass 主体がマージ条件を迂回できる）' },
+  { id: 'G02-enforcement-not-checked', file: MG_LIB, from: 'type == "object" and .enforcement == "active" and', to: 'type == "object" and', tests: MERGE_GATE, note: 'enforcement が active でない ruleset（evaluate / disabled）を通す' },
+  { id: 'G03-integration-null-passes', file: MG_LIB, from: "'[.[] | select((.integration_id | type) != \"number\")] | length'", to: "'[.[] | select(false)] | length'", tests: MERGE_GATE, note: 'integration_id が数値でない required check を未束縛と数えない（同名 commit status で偽装できる）' },
+  { id: 'G04-unissued-ignores-app', file: MG_LIB, from: '($runs | any(.n == $r.context and .a == $r.integration_id))', to: '($runs | any(.n == $r.context))', tests: MERGE_GATE, note: '発行元の App ID を照合せず名前だけで check-run の発行済みとみなす' },
+  { id: 'G05-org-ruleset-passes', file: MG_LIB, from: '(.ruleset_id | type) == "number" and .ruleset_source_type == "Repository")', to: '(.ruleset_id | type) == "number")', tests: MERGE_GATE, note: 'Organization 継承 ruleset を通す（bypass の検証をこの認証で保証できない）' },
+  { id: 'G06-thread-resolution-unchecked', file: MG, from: '[ "${enforced}" = 1 ] || stop server-enforcement-missing g0 thread-resolution', to: ':', tests: MERGE_GATE, note: 'レビュースレッド解消のサーバー側強制を確認しない' },
+  { id: 'G07-client-only-ignored', file: MG, from: '[ "${N_CLIENTONLY}" = 0 ] || stop server-enforcement-missing g0 client-only', to: ':', tests: MERGE_GATE, note: 'required でない client-only チェックがあっても通す' },
+  { id: 'G08-expect-sha-ignored', file: MG, from: '[ -z "${expect_sha}" ] || [ "${expect_sha}" = "${HEAD}" ] || stop head-moved view expect-sha', to: ':', tests: MERGE_GATE, note: '--expect-sha の不一致（ホストが確認した HEAD と違う）を通す' },
+  { id: 'G09-failed-gh-treated-ok', file: MG, from: '  rm -f "${CUR_TMP}"\n  CUR_TMP=""\n  [ "${rc}" -eq 0 ]\n}', to: '  OUT=$(cat "${CUR_TMP}" 2>/dev/null)\n  rm -f "${CUR_TMP}"\n  CUR_TMP=""\n  [ -n "${OUT}" ]\n}', tests: MERGE_GATE, note: 'gh の非 0 終了でも途中までの出力が空でなければ採用する（ページ途中の失敗を合格に倒す）' },
+  { id: 'G10-nonce-altered', file: MG, from: '  so_emit "${nonce}" "${payload}" || {\n    echo "merge-gate: 出力封筒', to: '  so_emit "${nonce}x" "${payload}" || {\n    echo "merge-gate: 出力封筒', tests: MERGE_GATE, note: '封筒の nonce が呼び出しの nonce と違う（別の呼び出しの出力を流用できる）' },
+  { id: 'G11-unresolved-ignored', file: MG, from: '[ "${N_UNRESOLVED}" -eq 0 ] || stop unresolved-threads threads unresolved', to: ':', tests: MERGE_GATE, note: '未解決スレッドが残っていても通す' },
+  { id: 'G12-threads-first-page-only', file: MG, from: '[ "$(printf \'%s\' "${page}" | jq -r \'.pageInfo.hasNextPage\')" = true ] || break', to: 'break', tests: MERGE_GATE, note: '未解決スレッドを先頭ページしか数えない（100 件超の PR で見落とす）' },
+  { id: 'G13-checks-zero-passes', file: MG, from: '[ "${N_CHECKS}" -ge 1 ] || stop checks-not-green checks checks-total-zero', to: ':', tests: MERGE_GATE, note: 'チェック総数 0 件を green の証拠にする' },
+  { id: 'G14-conflicting-passes', file: MG, from: '[ "${v_mergeable}" != CONFLICTING ] || stop not-mergeable mergeable conflicting', to: ':', tests: MERGE_GATE, note: 'CONFLICTING の PR を通す' },
+  { id: 'G15-draft-passes', file: MG, from: '[ "${v_draft}" = 0 ] || stop wrong-target view draft', to: ':', tests: MERGE_GATE, note: 'draft の PR を通す' },
+  { id: 'G16-base-mismatch-passes', file: MG, from: '[ "${v_base_ok}" = 1 ] || stop wrong-target view base', to: ':', tests: MERGE_GATE, note: 'base ブランチの不一致を通す' },
+  { id: 'G17-cursor-changes-requested-passes', file: MG_LIB, from: 'if ($rv | length) == 0 or n("CHANGES_REQUESTED") > 0 then "missing"', to: 'if ($rv | length) == 0 then "missing"', tests: MERGE_GATE, note: 'cursor の CHANGES_REQUESTED を合格にする' },
+  { id: 'G18-approved-with-comments-passes', file: MG_LIB, from: 'and n("CHANGES_REQUESTED") == 0 and n("COMMENTED") == 0 and n("PENDING") == 0 then "ok"', to: 'and n("CHANGES_REQUESTED") == 0 then "ok"', tests: MERGE_GATE, note: 'APPROVED に COMMENTED / PENDING が併存しても合格にする' },
+  { id: 'G19-view-without-R', file: MG, from: 'gh pr view "${pr}" -R "${repo}" --json state,headRefOid,mergeable,baseRefName,isDraft || stop', to: 'gh pr view "${pr}" --json state,headRefOid,mergeable,baseRefName,isDraft || stop', tests: MERGE_GATE, note: '--repo があっても gh pr view に -R を付けない（GH_REPO・既定リポに頼る）' },
+  { id: 'G20-ruleset-path-unbound', file: MG, from: 'gh_api "${repo_path}/rulesets/${id}" ||', to: 'gh_api "repos/{owner}/{repo}/rulesets/${id}" ||', tests: [...MERGE_GATE, 'script-static-guard.test.mjs'], note: 'ruleset の取得が --repo に束縛されない' },
+  { id: 'G21-input-not-bound-external', file: SRC, from: "return ['merge-gate', String(pr), repoArg, baseBranch, expectSha, external].join('\\n')", to: "return ['merge-gate', String(pr), repoArg, baseBranch, expectSha].join('\\n')", tests: MERGE_GATE_HOST, note: '封筒の入力に外部チェックの宣言を含めない（別の宣言を検証した出力が通る）' },
+  { id: 'G22-host-nonce-unchecked', file: SRC, from: 'const s = verifySignedOutput(raw, nonce, sha256Hex(mergeGateInputText(pr, expectSha, external)))', to: 'const s = verifySignedOutput(raw, raw?.nonce, sha256Hex(mergeGateInputText(pr, expectSha, external)))', tests: MERGE_GATE_HOST, note: 'ホストが封筒の nonce を呼び出しの nonce と照合しない（前の呼び出しの封筒を流用できる）' },
+  { id: 'G23-host-verdict-unchecked', file: SRC, from: "if (p.mode !== 'merge-gate' || p.verdict !== 'ok' || p.err !== 0 || p.stage !== 'done') return", to: "if (p.mode !== 'merge-gate') return", tests: MERGE_GATE_HOST, note: 'ホストが verdict ok・取得失敗でない・最終段階までの到達を要求しない' },
+  { id: 'G24-host-head-unchecked', file: SRC, from: "if (!sanitizeSha(p.headSha) || p.headSha !== execHeadSha || (expectSha !== '' && p.headSha !== expectSha)) return", to: "if (!sanitizeSha(p.headSha)) return", tests: MERGE_GATE_HOST, note: 'ホストが封筒の HEAD sha と merge-exec 申告・期待 sha の一致を要求しない' },
+  { id: 'G25-host-gate-not-required', file: SRC, from: "const gateCheck = execReason === 'merged'\n            ? verifyMergeGate(", to: "const gateCheck = false\n            ? verifyMergeGate(", tests: MERGE_GATE_HOST, note: '新規マージ（reason: merged）の受理で封筒を要求しない' },
+  { id: 'G26-gate-nonce-fixed', file: SRC, from: ':${mergeGateSeq += 1}:${optinGateHeadSha}`)', to: ':${mergeGateSeq}:${optinGateHeadSha}`)', tests: MERGE_GATE_HOST, note: 'merge-exec の呼び出しごとに nonce を変えない（前ラウンドの封筒を流用できる）' },
+  { id: 'G27-prompt-expect-sha-dropped', file: SRC, from: "    expectSha !== '' ? ` --expect-sha ${expectSha}` : '',", to: "    '',", tests: ['g0-gates.test.mjs'], note: 'ホストが確認した HEAD sha をコマンドに束縛しない' },
+  { id: 'G28-prompt-ok-only-dropped', file: SRC, from: 'ok のときだけ手順 3 へ進む。ok のとき payload.headSha が本ランの HEAD sha で', to: 'ok のとき payload.headSha が本ランの HEAD sha で', tests: ['g0-gates.test.mjs'], note: '判定が ok のときだけマージへ進むという指示を外す' },
+  { id: 'G29-prompt-external-dropped', file: SRC, from: "    external !== '' ? ` --external ${shellSingleQuote(external)}` : '',", to: "    '',", tests: ['g0-gates.test.mjs'], note: '外部チェックの宣言をコマンドに渡さない（宣言 App の束縛・合格を検証しない）' },
 ]
