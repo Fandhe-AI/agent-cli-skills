@@ -2094,7 +2094,7 @@ const MERGE_EXEC_SCHEMA = {
         sha256: { type: 'string' },
         payload: {
           type: 'object',
-          required: ['mode', 'err', 'verdict', 'inputSha256'],
+          required: ['mode', 'err', 'verdict', 'stage', 'headSha', 'inputSha256'],
           properties: {
             checks: { type: 'integer' }, clientOnly: { type: 'integer' }, detail: { type: 'string' }, err: { type: 'integer' }, headSha: { type: 'string' },
             inputSha256: { type: 'string' }, mode: { type: 'string' }, notGreen: { type: 'integer' }, requiredTotal: { type: 'integer' }, stage: { type: 'string' },

@@ -211,6 +211,26 @@ for (const bash of availableBashes()) {
     assert.equal(verdictOf(payloadOf(mixed.r)), 'external-review-missing/external/external-review/0')
   })
 
+  t('複数 App の宣言: App ごとに apps/<slug> を引き直して照合する（先行 App の ID を後続 App の context に流用しない。下流 Bugbot Medium の回帰）', async () => {
+    const external = [{ app: 'cursor', contexts: ['Cursor Bugbot'] }, { app: 'sonar', contexts: ['Sonar Gate'] }]
+    const args = ['--pr', '5', '--base', 'main', '--repo', REPO, '--external', J(external)]
+    const two = (sonarIntegration) => {
+      const r = happy()
+      r.rules = ok([[rsc({ context: 'ci', integration_id: CI_APP }, { context: 'Cursor Bugbot', integration_id: CURSOR_APP }, { context: 'Sonar Gate', integration_id: sonarIntegration }), prRule(true)]])
+      r['apps-sonar'] = ok({ id: 77 })
+      r['check-runs'] = ok([{ check_runs: [run('ci', CI_APP), run('Cursor Bugbot', CURSOR_APP), { name: 'Sonar Gate', app: { id: sonarIntegration, slug: 'sonar' }, conclusion: 'success' }] }])
+      r.reviews = ok([[{ user: { login: 'cursor[bot]' }, commit_id: HEAD, state: 'COMMENTED' }]])
+      return r
+    }
+    const good = await execute(bash, two(77), { args })
+    assert.equal(verdictOf(payloadOf(good.r)), 'ok/done/ok/0')
+    assert.equal(good.stub.countOf('apps-cursor'), 1)
+    assert.equal(good.stub.countOf('apps-sonar'), 1)
+    // Sonar Gate の required が先行 App（cursor）の ID に束縛されているだけでは、sonar の組としては不合格
+    const mixed = await execute(bash, two(CURSOR_APP), { args })
+    assert.equal(verdictOf(payloadOf(mixed.r)), 'server-enforcement-missing/g0/external-binding/0')
+  })
+
   t('--expect-sha: 一致すれば ok、不一致は head-moved（以降の gh を呼ばない）。inputSha256 に期待 sha が入る', async () => {
     const good = await execute(bash, happy(), { args: ['--pr', '5', '--base', 'main', '--repo', REPO, '--expect-sha', HEAD, '--external', externalArg] })
     const gp = payloadOf(good.r)

@@ -270,7 +270,7 @@ G0 は適用 ruleset の `bypass_actors` を読むため `gh_api "${repo_path}/r
 
 ### この弾の検証範囲
 
-単体テスト（判定の表・偽 `gh` を差し替えたスクリプト全体・ホストの封筒照合・プロンプトの配線）と変異（危険側 29 件）でのみ検証している。**`autoMerge: true` の実ランでは未検証**（実 GitHub の ruleset / App に対する G0 の通過、`gh pr checks --json state --jq` の実出力、隔離 worktree からの `run-verified.sh` 経由の起動を含む）。
+単体テスト（判定の表・偽 `gh` を差し替えたスクリプト全体・ホストの封筒照合・プロンプトの配線）と変異（危険側 29 件）でのみ検証している。**`autoMerge: true` の実ランでは未検証**（実 GitHub の ruleset / App に対する G0 の通過、`gh pr checks --json state --jq` の実出力と終了コード（pending で 8 を返すか。どちらでも非 0 終了は `checks-not-green`、exit 0 で PENDING が混じっても `checks-not-green` なので fail-closed）、隔離 worktree からの `run-verified.sh` 経由の起動を含む）。なお `apps/<slug>`（外部チェック App の ID 取得）は GitHub 側がリポジトリに束縛できないグローバルな endpoint で、他の `gh` 呼び出しがすべて対象リポジトリを明示するのに対する唯一の例外である。
 
 ## ハッシュ埋め込みと鮮度
 
