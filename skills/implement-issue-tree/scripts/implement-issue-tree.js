@@ -169,6 +169,44 @@ const dryRunEnabled=parseDryRun(parsedArgs&&typeof parsedArgs==='object'?parsedA
 
 
 
+
+
+
+
+const AGENT_MODEL_STAGES=['plan','implement','review','fix','prCreate','baseMerge']
+const AGENT_MODEL_NAMES=['haiku','sonnet','opus','fable']
+function parseAgentModels(raw){
+if(raw===undefined||raw===null)return{}
+if(typeof raw!=='object'||Array.isArray(raw)){
+throw new Error('args.models はオブジェクトで指定すること（例: {"models": {"plan": "opus", "implement": "opus"}}。未指定は既定のモデル）')
+}
+for(const k of Object.keys(raw)){
+if(!AGENT_MODEL_STAGES.includes(k)){
+throw new Error(`args.models のキーは ${AGENT_MODEL_STAGES.join(' / ')} のいずれか（機械的な agent のモデルは変えられない）: ${String(k).slice(0, 40)}`)
+}
+}
+
+const out={}
+for(const k of AGENT_MODEL_STAGES){
+if(!Object.prototype.hasOwnProperty.call(raw,k))continue
+const v=raw[k]
+if(typeof v!=='string'|| !AGENT_MODEL_NAMES.includes(v)){
+throw new Error(`args.models.${k} は ${AGENT_MODEL_NAMES.join(' / ')} のいずれかで指定すること: ${String(v).slice(0, 40)}`)
+}
+out[k]=v
+}
+return out
+}
+const agentModels=parseAgentModels(parsedArgs&&typeof parsedArgs==='object'?parsedArgs.models:undefined)
+
+
+function stageModelOpt(stage,fallback){
+const m=agentModels[stage]??fallback
+return m?{model:m}:{}
+}
+
+
+
 function formatIssueList(numbers,max=5){
 
 
@@ -7215,7 +7253,7 @@ return false
 impl=await agent(recoverImplementPrompt(item,recoverResult.brief,effectiveBranch),{
 label:`impl:#${item.number}`,
 phase:'Implement',
-model:'sonnet',
+...stageModelOpt('implement','sonnet'),
 effort:'medium',
 schema:IMPL_SCHEMA,
 isolation:'worktree',
@@ -7380,6 +7418,7 @@ await updateState(item.number,{status:'planning'})
 const planResult=await agent(planPrompt(item),{
 label:`plan:#${item.number}`,
 phase:'Plan',
+...stageModelOpt('plan'),
 effort:'high',
 schema:PLAN_SCHEMA,
 })
@@ -7397,7 +7436,7 @@ await updateState(item.number,{status:'implementing'})
 impl=await agent(implementPrompt(item,planResult.plan),{
 label:`impl:#${item.number}`,
 phase:'Implement',
-model:'sonnet',
+...stageModelOpt('implement','sonnet'),
 effort:'medium',
 schema:IMPL_SCHEMA,
 isolation:'worktree',
@@ -7509,7 +7548,7 @@ reviewsLeft--
 const r=await agent(reviewPrompt(item,impl),{
 label:`review:#${item.number}`,
 phase:'Review',
-model:'sonnet',
+...stageModelOpt('review','sonnet'),
 effort:'medium',
 schema:REVIEW_SCHEMA,
 isolation:'worktree',
@@ -7565,7 +7604,7 @@ const oldWorktreePathReview=currentWorktreePath
 const fReview=await agent(fixPrompt(item,impl,{summary:lastReviewSummary},false),{
 label:`fix:#${item.number}`,
 phase:'Implement',
-model:'sonnet',
+...stageModelOpt('fix','sonnet'),
 effort:'medium',
 schema:FIX_SCHEMA,
 isolation:'worktree',
@@ -7631,7 +7670,7 @@ const outOfScope=Array.isArray(impl.outOfScope)?impl.outOfScope:[]
 const prCreateResult=await agent(prCreatePrompt(item,impl,outOfScope),{
 label:`pr-create:#${item.number}`,
 phase:'Implement',
-model:'sonnet',
+...stageModelOpt('prCreate','sonnet'),
 effort:'low',
 schema:PR_CREATE_SCHEMA,
 isolation:'worktree',
@@ -8560,7 +8599,7 @@ log(`PR #${impl.prNumber} が base とコンフリクト、base 取り込みエ�
 let b=null
 let baseMergeAgentError=null
 try{
-b=await agent(baseMergePrompt(item,impl,expectedRepo),{label:`base-merge:#${item.number}`,phase:'Implement',model:'sonnet',effort:'medium',schema:BASE_MERGE_SCHEMA,isolation:'worktree'})
+b=await agent(baseMergePrompt(item,impl,expectedRepo),{label:`base-merge:#${item.number}`,phase:'Implement', ...stageModelOpt('baseMerge','sonnet'),effort:'medium',schema:BASE_MERGE_SCHEMA,isolation:'worktree'})
 }catch(e){
 baseMergeAgentError=e
 }
@@ -8667,7 +8706,7 @@ const permittedNoPushResolveIds=computePermittedNoPushResolveIds(resolveProof,fi
 let f=null
 let fixAgentError=null
 try{
-f=await agent(fixPrompt(item,impl,finding,true,permittedNoPushResolveIds),{label:`fix:#${item.number}`,phase:'Implement',model:'sonnet',effort:'medium',schema:FIX_SCHEMA,isolation:'worktree'})
+f=await agent(fixPrompt(item,impl,finding,true,permittedNoPushResolveIds),{label:`fix:#${item.number}`,phase:'Implement', ...stageModelOpt('fix','sonnet'),effort:'medium',schema:FIX_SCHEMA,isolation:'worktree'})
 }catch(e){
 fixAgentError=e
 }
@@ -9282,6 +9321,7 @@ baseBranch,
 parallel:concurrency,
 phaseGate:phaseGateEnabled,
 phaseOrder,
+models:agentModels,
 total:queue.length,
 open:work.length,
 startable:{count:plan.startable.length,readyNow:plan.readyNow,first:plan.startable.slice(0,5)},
@@ -10532,4 +10572,4 @@ if(headWarning)log(headWarning)
 
 
 
-return{parent,baseBranch,parallel:concurrency,phaseGate:phaseGateEnabled,phaseOrder,autoMerge:autoMergeEnabled&&externalChecksConfirmed&&externalChecksContextsConfirmed,autoMergeRequested:autoMergeEnabled,externalChecks:externalCheckApps,externalCheckContexts:externalCheckEntries.map((e)=>({app:e.app,contexts:e.contexts})),externalChecksConfirmed,externalChecksContextsConfirmed,externalChecksObserved:observedCheckApps,mergeGuard:{hookDenyOnly:true},residualWorktrees:{observed:residualObserved,observedAtStart:residualObservedAtStart,addedThisRun:residualAddedThisRun,limit:maxResidualWorktrees,overLimit:residualOverLimit,suppressed:newStartSuppressed!==null,paths:residualPathsAtStart,bytesObserved:residualBytesObserved,bytesAtStart:residualBytesAtRunStart,bytesLastMeasured:residualBytesAtStart,bytesAtEnd:residualBytesAtEnd,bytesEndObserved:residualBytesEndObserved,bytesLimit:maxResidualWorktreeBytes,perWorktreeByteReserve},total:queue.length,done:results,failures,outOfTreeDeps,notStarted,interrupted,halted,blockedStateWrite,agentBudget:{ ...agentBudget,reached:agentBudget.used>=agentBudget.limit},unmonitoredPrs:unmonitoredPrList,sweptWorktrees,ephemeralWorktrees:disposableWorktrees,prereqTransitions,mainWorktreeUntracked:{observed:mainUntrackedDiff.observed,baselineCount:mainUntrackedDiff.baselineCount,added:mainUntrackedDiff.added.slice(0,50).map((p)=>sanitize(p))},mainWorktreeHead:{observed:mainHeadDiff.observed,changed:mainHeadDiff.changed,shaChanged:mainHeadDiff.shaChanged,baselineRef:sanitize(mainHeadDiff.baselineRef??''),endRef:sanitize(mainHeadDiff.endRef??'')}}
+return{parent,baseBranch,parallel:concurrency,phaseGate:phaseGateEnabled,phaseOrder,models:agentModels,autoMerge:autoMergeEnabled&&externalChecksConfirmed&&externalChecksContextsConfirmed,autoMergeRequested:autoMergeEnabled,externalChecks:externalCheckApps,externalCheckContexts:externalCheckEntries.map((e)=>({app:e.app,contexts:e.contexts})),externalChecksConfirmed,externalChecksContextsConfirmed,externalChecksObserved:observedCheckApps,mergeGuard:{hookDenyOnly:true},residualWorktrees:{observed:residualObserved,observedAtStart:residualObservedAtStart,addedThisRun:residualAddedThisRun,limit:maxResidualWorktrees,overLimit:residualOverLimit,suppressed:newStartSuppressed!==null,paths:residualPathsAtStart,bytesObserved:residualBytesObserved,bytesAtStart:residualBytesAtRunStart,bytesLastMeasured:residualBytesAtStart,bytesAtEnd:residualBytesAtEnd,bytesEndObserved:residualBytesEndObserved,bytesLimit:maxResidualWorktreeBytes,perWorktreeByteReserve},total:queue.length,done:results,failures,outOfTreeDeps,notStarted,interrupted,halted,blockedStateWrite,agentBudget:{ ...agentBudget,reached:agentBudget.used>=agentBudget.limit},unmonitoredPrs:unmonitoredPrList,sweptWorktrees,ephemeralWorktrees:disposableWorktrees,prereqTransitions,mainWorktreeUntracked:{observed:mainUntrackedDiff.observed,baselineCount:mainUntrackedDiff.baselineCount,added:mainUntrackedDiff.added.slice(0,50).map((p)=>sanitize(p))},mainWorktreeHead:{observed:mainHeadDiff.observed,changed:mainHeadDiff.changed,shaChanged:mainHeadDiff.shaChanged,baselineRef:sanitize(mainHeadDiff.baselineRef??''),endRef:sanitize(mainHeadDiff.endRef??'')}}

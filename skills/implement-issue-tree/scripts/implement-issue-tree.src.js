@@ -166,6 +166,44 @@ function parseDryRun(raw) {
   return raw
 }
 const dryRunEnabled = parseDryRun(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.dryRun : undefined)
+// 判断を伴う agent のモデルを段階ごとに上書きする任意引数 args.models。対象は計画・実装・レビュー・
+// 修正・PR 作成・base 取り込みに限る。状態ファイル・worktree 走査・ツリー取得・monitor・merge-exec・
+// merge-verify・pr-bind などの機械的な agent は対象外にする（呼び出し回数が多く固定費が増えるうえ、
+// マージの安全側の判定に関わる agent のモデルを呼び出し側が変えられる経路を作らないため）。
+// 未指定の段階は既定（plan はモデルを渡さずセッションのモデルを継ぐ・それ以外は sonnet）のまま。
+// 値は agent() の model に渡すエイリアスだけを受理し、未知のキー・値・オブジェクト以外は誤記を黙って
+// 既定へ読み替えず起動時に throw する（他の引数と同じ fail-closed）。
+const AGENT_MODEL_STAGES = ['plan', 'implement', 'review', 'fix', 'prCreate', 'baseMerge']
+const AGENT_MODEL_NAMES = ['haiku', 'sonnet', 'opus', 'fable']
+function parseAgentModels(raw) {
+  if (raw === undefined || raw === null) return {}
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('args.models はオブジェクトで指定すること（例: {"models": {"plan": "opus", "implement": "opus"}}。未指定は既定のモデル）')
+  }
+  for (const k of Object.keys(raw)) {
+    if (!AGENT_MODEL_STAGES.includes(k)) {
+      throw new Error(`args.models のキーは ${AGENT_MODEL_STAGES.join(' / ')} のいずれか（機械的な agent のモデルは変えられない）: ${String(k).slice(0, 40)}`)
+    }
+  }
+  // 段階の定義順で正規化する（返却値・ログの順序を入力のキー順に依存させない）。
+  const out = {}
+  for (const k of AGENT_MODEL_STAGES) {
+    if (!Object.prototype.hasOwnProperty.call(raw, k)) continue
+    const v = raw[k]
+    if (typeof v !== 'string' || !AGENT_MODEL_NAMES.includes(v)) {
+      throw new Error(`args.models.${k} は ${AGENT_MODEL_NAMES.join(' / ')} のいずれかで指定すること: ${String(v).slice(0, 40)}`)
+    }
+    out[k] = v
+  }
+  return out
+}
+const agentModels = parseAgentModels(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.models : undefined)
+// agent() の opts に展開するモデル指定。上書きも既定も無い段階（plan の既定）は model キー自体を
+// 持たない（model: undefined を渡すとセッション継承と同じになる保証がランタイムの文書に無いため）。
+function stageModelOpt(stage, fallback) {
+  const m = agentModels[stage] ?? fallback
+  return m ? { model: m } : {}
+}
 // 件数 + 先頭 max 件の形に縮める note 用整形（Issue #585）。blocked の note は状態ファイルとプロンプトに
 // 載るため、前 Phase の未完了 issue 番号を数百件並べると 1 件ごとに膨らむ。max 件以下は従来の
 // `#a, #b` 形式（番号の昇順）。
@@ -7215,7 +7253,7 @@ async function runImplement(item) {
         impl = await agent(recoverImplementPrompt(item, recoverResult.brief, effectiveBranch), {
           label: `impl:#${item.number}`,
           phase: 'Implement',
-          model: 'sonnet',
+          ...stageModelOpt('implement', 'sonnet'),
           effort: 'medium',
           schema: IMPL_SCHEMA,
           isolation: 'worktree',
@@ -7380,6 +7418,7 @@ async function runImplement(item) {
       const planResult = await agent(planPrompt(item), {
         label: `plan:#${item.number}`,
         phase: 'Plan',
+        ...stageModelOpt('plan'),
         effort: 'high',
         schema: PLAN_SCHEMA,
       })
@@ -7392,12 +7431,12 @@ async function runImplement(item) {
       }
       log(`#${item.number}: 計画立案完了 — ${sanitize(planResult.summary ?? '')}`)
 
-      // Implement フェーズ: 計画は完了済みのため sonnet 固定で実装する。
+      // Implement フェーズ: 計画は完了済みのため sonnet で実装する（args.models.implement があればそれを使う）。
       await updateState(item.number, { status: 'implementing' })
       impl = await agent(implementPrompt(item, planResult.plan), {
         label: `impl:#${item.number}`,
         phase: 'Implement',
-        model: 'sonnet',
+        ...stageModelOpt('implement', 'sonnet'),
         effort: 'medium',
         schema: IMPL_SCHEMA,
         isolation: 'worktree',
@@ -7509,7 +7548,7 @@ async function runImplement(item) {
       const r = await agent(reviewPrompt(item, impl), {
         label: `review:#${item.number}`,
         phase: 'Review',
-        model: 'sonnet',
+        ...stageModelOpt('review', 'sonnet'),
         effort: 'medium',
         schema: REVIEW_SCHEMA,
         isolation: 'worktree',
@@ -7565,7 +7604,7 @@ async function runImplement(item) {
       const fReview = await agent(fixPrompt(item, impl, { summary: lastReviewSummary }, false), {
         label: `fix:#${item.number}`,
         phase: 'Implement',
-        model: 'sonnet',
+        ...stageModelOpt('fix', 'sonnet'),
         effort: 'medium',
         schema: FIX_SCHEMA,
         isolation: 'worktree',
@@ -7631,7 +7670,7 @@ async function runImplement(item) {
     const prCreateResult = await agent(prCreatePrompt(item, impl, outOfScope), {
       label: `pr-create:#${item.number}`,
       phase: 'Implement',
-      model: 'sonnet',
+      ...stageModelOpt('prCreate', 'sonnet'),
       effort: 'low',
       schema: PR_CREATE_SCHEMA,
       isolation: 'worktree',
@@ -8560,7 +8599,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       let b = null
       let baseMergeAgentError = null
       try {
-        b = await agent(baseMergePrompt(item, impl, expectedRepo), { label: `base-merge:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: BASE_MERGE_SCHEMA, isolation: 'worktree' })
+        b = await agent(baseMergePrompt(item, impl, expectedRepo), { label: `base-merge:#${item.number}`, phase: 'Implement', ...stageModelOpt('baseMerge', 'sonnet'), effort: 'medium', schema: BASE_MERGE_SCHEMA, isolation: 'worktree' })
       } catch (e) {
         baseMergeAgentError = e
       }
@@ -8667,7 +8706,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       let f = null
       let fixAgentError = null
       try {
-        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', model: 'sonnet', effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
+        f = await agent(fixPrompt(item, impl, finding, true, permittedNoPushResolveIds), { label: `fix:#${item.number}`, phase: 'Implement', ...stageModelOpt('fix', 'sonnet'), effort: 'medium', schema: FIX_SCHEMA, isolation: 'worktree' })
       } catch (e) {
         fixAgentError = e
       }
@@ -9282,6 +9321,7 @@ if (dryRunEnabled) {
     parallel: concurrency,
     phaseGate: phaseGateEnabled,
     phaseOrder,
+    models: agentModels,
     total: queue.length,
     open: work.length,
     startable: { count: plan.startable.length, readyNow: plan.readyNow, first: plan.startable.slice(0, 5) },
@@ -10532,4 +10572,4 @@ if (!mainHeadDiff.observed) {
 // residualWorktrees: 残置上限ゲート観測。prereqTransitions: 前提の外部完了遷移（Issue #442）。
 // mainWorktreeUntracked: メイン worktree への一時ファイル残置検出（Issue #497 AC2。削除はしない）。
 // mainWorktreeHead: メイン worktree の HEAD 変化検出（Issue #591。警告のみで戻さない）。
-return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, models: agentModels, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }
