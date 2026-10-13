@@ -20,6 +20,13 @@
 #             --wait は --until の条件になるまで（review = レビューが 1 件以上、settled = 未完了の check-run が 0 件、
 #             started = check-run かレビューが 1 件以上）
 #   threads   未解決のレビュースレッド数（GraphQL をページングして全件走査する）
+#   push      push 直後の確認（Issue #603 第 3 弾）。--base --branch が必須で、git の作業ディレクトリは push した HEAD の
+#             worktree であること（pr-create・fix のエージェントの cwd）。PR の head がローカルの HEAD と一致するまで
+#             待ち（push の反映は少し遅れる）、一致してから HEAD のチェック総数（checks と同じ集計定義）と mergeable を
+#             読む。payload の checksStarted は『一致したうえでチェックが 1 件以上』（1/0）、mergeable は一致するまで UNKNOWN。
+#             待機の既定は 30 秒間隔・1 起動 3 回観測・--attempt 最大 4 回（およそ 5 分。OBSERVE_PR_MAX_ATTEMPTS で変更可）。
+#             met は『一致 + チェック 1 件以上 + mergeable 確定』のほか、待っても変わらない状態（mergeable が CONFLICTING に確定 =
+#             チェックは構造的に 0 件のまま、想定外の PR = bound 0、OPEN でない）。診断・分岐ヒント専用で、ホストは値を採用しない
 #   threads-detail
 #             未解決スレッドの内容を 1 行 1 件の JSON（threadId・path・url・author・bodyLength・truncated・body）で出す。
 #             封筒ではなく、外部由来の自由文を含む非信頼データなので、nonce 入りの BEGIN / END UNTRUSTED の行で囲む
@@ -91,7 +98,7 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 . "${script_dir}/lib/signed-output.sh" || exit 3
 
 usage() {
-  echo "使い方: observe-pr.sh --nonce N --mode pr|checks|required|reviews|threads|threads-detail --pr NUM [--repo O/R] [--base B] [--branch B] [--issue N] [--slug S] [--until review|settled|started] [--thread-id ID] [--wait --attempt K]" >&2
+  echo "使い方: observe-pr.sh --nonce N --mode pr|checks|required|reviews|threads|threads-detail|push --pr NUM [--repo O/R] [--base B] [--branch B] [--issue N] [--slug S] [--until review|settled|started] [--thread-id ID] [--wait --attempt K]" >&2
   [ $# -eq 0 ] || echo "observe-pr: $1" >&2
   exit 2
 }
@@ -179,7 +186,7 @@ done
 
 so_valid_nonce "${nonce}" || usage "--nonce は小文字英数字 1〜64 文字で指定する"
 case "${mode}" in
-  pr | checks | required | reviews | threads | threads-detail) ;;
+  pr | checks | required | reviews | threads | threads-detail | push) ;;
   *) usage "--mode が不正: ${mode}" ;;
 esac
 is_uint "${pr}" || usage "--pr は正の整数で指定する"
@@ -196,16 +203,19 @@ esac
 case "${mode}" in
   pr) [ -n "${base}" ] && [ -n "${branch}" ] && [ -n "${issue}" ] || usage "pr には --base --branch --issue が必要" ;;
   required) [ -n "${base}" ] || usage "required には --base が必要" ;;
+  push) [ -n "${base}" ] && [ -n "${branch}" ] || usage "push には --base --branch が必要" ;;
   reviews)
     [ -n "${slug}" ] || usage "reviews には --slug が必要"
     [ "${wait}" -eq 0 ] || [ -n "${until_cond}" ] || usage "reviews の --wait には --until が必要"
     ;;
 esac
-[ "${wait}" -eq 0 ] || case "${mode}" in checks | required | reviews | pr) ;; *) usage "${mode} は --wait を取らない" ;; esac
+[ "${wait}" -eq 0 ] || case "${mode}" in checks | required | reviews | pr | push) ;; *) usage "${mode} は --wait を取らない" ;; esac
 
 max_attempts=0
 if [ "${wait}" -eq 1 ] && [ "${mode}" != pr ]; then
   max_attempts=$(env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 7 20 1)
+  # push は『30 秒間隔・最大 5 分』の観測（1 回の起動 = 30 秒間隔で 3 回観測 + 後始末。それを最大 4 回）
+  [ "${mode}" != push ] || max_attempts=$(env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 4 20 1)
   is_uint "${attempt}" && [ "${attempt}" -le "${max_attempts}" ] || usage "--wait には 1 以上 ${max_attempts} 以下の --attempt が必要"
   attempt=$((10#${attempt}))
 else
@@ -214,6 +224,10 @@ fi
 
 polls=$(env_int "${OBSERVE_PR_POLLS:-}" 6 10 1)
 sleep_sec=$(env_int "${OBSERVE_PR_SLEEP_SEC:-}" 15 30 0)
+if [ "${mode}" = push ]; then
+  polls=$(env_int "${OBSERVE_PR_POLLS:-}" 3 10 1)
+  sleep_sec=$(env_int "${OBSERVE_PR_SLEEP_SEC:-}" 30 30 0)
+fi
 wall=$(env_int "${OBSERVE_PR_WALL_SEC:-}" 90 100 1)
 gh_timeout=$(env_int "${OBSERVE_PR_GH_TIMEOUT_SEC:-}" 25 60 1)
 # gh 1 回の出力サイズの上限（バイト）。超えたら取得失敗。出力し続ける gh が一時ファイルを際限なく育てるのを防ぐ
@@ -329,7 +343,9 @@ gh_api() {
   run_timed "${gh_timeout}" gh api "$@"
 }
 fail() {
-  if [ "${WALL_HIT}" -eq 1 ]; then
+  # 『取得失敗ではない』と言えるのは待機つきだけ（pending / exhausted で返せる）。待機なしの単発観測は結論が出なければ
+  # そのまま err:1・error になるので、取得失敗として知らせる
+  if [ "${WALL_HIT}" -eq 1 ] && [ "${wait}" -eq 1 ]; then
     echo "observe-pr: この起動では結論が出ていない（壁時計の残り時間に達した: ${1}）。取得失敗ではない" >&2
   else
     echo "observe-pr: 取得に失敗した（${1}）" >&2
@@ -385,6 +401,10 @@ O_RUNS=0; O_STATUSES=0; O_TOTAL=0
 observe_checks() {
   O_RUNS=0; O_STATUSES=0; O_TOTAL=0
   resolve_head || return 1
+  count_checks
+}
+# HEAD に対するチェック総数（check-run の total_count + combined status の件数）を O_RUNS / O_STATUSES / O_TOTAL に入れる
+count_checks() {
   gh_api "${repo_path}/commits/${HEAD}/check-runs?per_page=1" || { fail "check-runs"; return 1; }
   local runs sts
   runs=$(printf '%s' "${OUT}" | jq -er '.total_count | numbers | floor' 2>/dev/null) || { fail "check-runs の total_count"; return 1; }
@@ -394,6 +414,55 @@ observe_checks() {
   O_RUNS=$((10#${runs})); O_STATUSES=$((10#${sts})); O_TOTAL=$((O_RUNS + O_STATUSES))
 }
 met_checks() { [ "${O_TOTAL}" -ge 1 ]; }
+
+# push: push 直後の確認。この worktree の HEAD（push 済みのコミット）が PR の head になったか、そのチェック総数と mergeable を
+# 観測する。PR の head は push の反映に少し遅れることがあるので、ローカルの HEAD と一致するまで件数・mergeable を読まない
+# （古い head の値を『push 後の値』として返さない）。結果は診断・分岐ヒント専用で、ホストは値を採用しない。
+#   O_PUSH_OK     PR の head が HEAD と一致した = 1
+#   O_BOUND       PR が想定どおり（head ブランチ・base・fork でない）= 1、違えば 0
+O_PUSH_OK=0
+observe_push() {
+  O_STATE=""; O_MERGEABLE="UNKNOWN"; O_BOUND=-1; O_RUNS=0; O_STATUSES=0; O_TOTAL=0; O_PUSH_OK=0; HEAD=""
+  local lhead row
+  lhead=$(git rev-parse HEAD 2>/dev/null) || { fail "git rev-parse HEAD"; return 1; }
+  case "${lhead}" in '' | *[!0-9a-f]*) fail "HEAD の形式"; return 1 ;; esac
+  [ "${#lhead}" -eq 40 ] || { fail "HEAD の桁数"; return 1; }
+  gh_pr_view --json state,headRefOid,mergeable,headRefName,baseRefName,isCrossRepository || { fail "gh pr view"; return 1; }
+  row=$(printf '%s' "${OUT}" | jq -r --arg br "${branch}" --arg bs "${base}" '
+    if (type == "object" and (.headRefOid | type) == "string" and (.state | type) == "string") then
+      [ .state, .headRefOid, (.mergeable // "UNKNOWN"),
+        (if (.headRefName == $br and .baseRefName == $bs and .isCrossRepository == false) then "1" else "0" end) ]
+      | join(" ")
+    else empty end' 2>/dev/null) || { fail "gh pr view の JSON"; return 1; }
+  # shellcheck disable=SC2086
+  set -- ${row}
+  [ $# -eq 4 ] || { fail "gh pr view の形式"; return 1; }
+  case "$1" in OPEN | MERGED | CLOSED) O_STATE=$1 ;; *) fail "state の語彙"; return 1 ;; esac
+  case "$2" in '' | *[!0-9a-f]*) fail "headRefOid の形式"; return 1 ;; esac
+  [ "${#2}" -eq 40 ] || { fail "headRefOid の桁数"; return 1; }
+  HEAD=$2
+  case "$4" in 0 | 1) O_BOUND=$4 ;; *) fail "bound の形式"; return 1 ;; esac
+  # 想定外の PR・OPEN でない PR は待っても変わらない（呼び出し側が met として返す）。値は読まない
+  if [ "${O_BOUND}" -ne 1 ] || [ "${O_STATE}" != OPEN ]; then
+    return 0
+  fi
+  [ "${HEAD}" = "${lhead}" ] || return 0
+  O_PUSH_OK=1
+  case "$3" in MERGEABLE | CONFLICTING | UNKNOWN) O_MERGEABLE=$3 ;; *) O_MERGEABLE="UNKNOWN" ;; esac
+  # コンフリクトのある PR は test merge commit が作られずチェックが構造的に 0 件のままなので、件数は待たない
+  if [ "${O_MERGEABLE}" = CONFLICTING ]; then
+    return 0
+  fi
+  count_checks
+}
+# 待っても変わらない状態（想定外の PR・OPEN でない・CONFLICTING に確定）か、head が一致して件数 1 件以上かつ mergeable が確定
+met_push() {
+  [ "${O_BOUND}" -ne 1 ] && return 0
+  [ "${O_STATE}" != OPEN ] && return 0
+  [ "${O_PUSH_OK}" -eq 1 ] || return 1
+  [ "${O_MERGEABLE}" = CONFLICTING ] && return 0
+  [ "${O_MERGEABLE}" != UNKNOWN ] && [ "${O_TOTAL}" -ge 1 ]
+}
 
 O_MISSING=0; O_REQTOTAL=0
 observe_required() {
@@ -512,6 +581,7 @@ run_observe() {
   case "${mode}" in
     pr) observe_pr ;;
     checks) observe_checks ;;
+    push) observe_push ;;
     required) observe_required ;;
     reviews) observe_reviews ;;
     threads | threads-detail) observe_threads ;;
@@ -521,6 +591,7 @@ run_met() {
   case "${mode}" in
     pr) met_pr ;;
     checks) met_checks ;;
+    push) met_push ;;
     required) met_required ;;
     reviews) met_reviews ;;
     *) return 0 ;;
@@ -555,6 +626,7 @@ while :; do
   if [ "${err}" -ne 0 ] && [ "${WALL_HIT}" -eq 1 ]; then
     # この起動で取得失敗が続き、一度も取得に成功しないまま壁時計に達したなら「待ち切った」とは言えない = 取得失敗として返す
     if [ "${ever_failed}" -eq 1 ] && [ "${ever_ok}" -eq 0 ]; then
+      echo "observe-pr: 壁時計に達するまで一度も取得に成功しなかった（取得失敗が続いた）ため、待ち切ったとは返さず error にする" >&2
       outcome=error
       break
     fi
@@ -602,6 +674,7 @@ fi
 # 失敗した観測の値は信用しない（件数は 0、語彙は空にして err で判別させる）
 if [ "${err}" -ne 0 ] || [ "${inconclusive}" -eq 1 ]; then
   HEAD=""
+  O_PUSH_OK=0
   O_STATE=""; O_MERGEABLE=""; O_BOUND=-1; O_RUNS=0; O_STATUSES=0; O_TOTAL=0; O_MISSING=0; O_REQTOTAL=0
   O_APPROVED=0; O_CHANGES=0; O_COMMENTED=0; O_PENDINGREV=0; O_DISMISSED=0; O_REVIEWS=0
   O_CR_TOTAL=0; O_CR_PASSED=0; O_CR_RUNNING=0; O_CR_FAILED=0; O_THREADS=0; O_UNRESOLVED=0
@@ -617,6 +690,13 @@ case "${mode}" in
     payload=$(jq -cnS --arg m "${mode}" --arg is "${input_sha}" --arg oc "${outcome}" --arg hs "${HEAD}" \
       --argjson e "${err}" --argjson a "${attempt}" --argjson ma "${max_attempts}" --argjson r "${O_RUNS}" --argjson s "${O_STATUSES}" --argjson t "${O_TOTAL}" \
       '{mode: $m, inputSha256: $is, outcome: $oc, err: $e, attempt: $a, maxAttempts: $ma, headSha: $hs, checkRuns: $r, statuses: $s, total: $t}')
+    ;;
+  push)
+    [ -n "${O_MERGEABLE}" ] || O_MERGEABLE=UNKNOWN
+    # checksStarted: PR の head が HEAD と一致したうえでチェックが 1 件以上。mergeable は一致しなければ UNKNOWN
+    payload=$(jq -cnS --arg m "${mode}" --arg is "${input_sha}" --arg oc "${outcome}" --arg hs "${HEAD}" --arg st "${O_STATE}" --arg mg "${O_MERGEABLE}" \
+      --argjson e "${err}" --argjson a "${attempt}" --argjson ma "${max_attempts}" --argjson b "${O_BOUND}" --argjson t "${O_TOTAL}" --argjson ok "${O_PUSH_OK}" \
+      '{mode: $m, inputSha256: $is, outcome: $oc, err: $e, attempt: $a, maxAttempts: $ma, headSha: $hs, state: $st, bound: $b, total: $t, checksStarted: (if ($ok == 1 and $t >= 1) then 1 else 0 end), mergeable: $mg}')
     ;;
   required)
     payload=$(jq -cnS --arg m "${mode}" --arg is "${input_sha}" --arg oc "${outcome}" --arg hs "${HEAD}" \

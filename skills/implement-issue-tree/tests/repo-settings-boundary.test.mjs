@@ -58,6 +58,8 @@ const SLICE_EXPORTS = [
 // seed を注入する（本番では ensureBoundaryNonceSeed() がラン開始時に 1 回だけ行う）。
 const TEST_ONLY_SETTER = 'export function __setBoundaryNonceSeedForTest(v) { boundaryNonceSeed = v }\n'
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n${TEST_ONLY_SETTER}`)
+// baseMergePrompt の起動コマンド（scriptInvocation）は args.skillDir を要る。実ランでは起動手順が渡す
+globalThis.args = { skillDir: '/opt/skills/implement-issue-tree' }
 const m = await import(pathToFileURL(slicePath).href)
 m.__setBoundaryNonceSeedForTest('a'.repeat(64))
 

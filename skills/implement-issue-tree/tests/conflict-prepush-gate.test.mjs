@@ -42,6 +42,8 @@ writeFileSync(
 
 const mod = await import(pathToFileURL(slicePath).href)
 const { prCreatePrompt, fixPrompt, monitorPrompt } = mod
+// prCreatePrompt の push 後確認コマンドが nonce（boundaryNonce）を使うため、seed を注入しておく
+mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
 
 const item = { number: 435, title: 'テストイシュー' }
 const impl = { prNumber: 777, branch: 'fix/435-conflict-gate' }

@@ -1,0 +1,150 @@
+// 実 git を使うスクリプトテスト用のサンドボックス（Issue #603 第 3 弾）。ファイル名が `*.test.mjs` に一致しないため
+// node --test の glob には拾われない。
+//
+// 構成: bare の origin（一時ディレクトリ）と、それを clone した作業用 worktree（スクリプトの cwd）を作る。
+//   - main: 初期コミット a.txt。ブランチ feat/603-x: main から分岐して feature.txt を追加。
+//   - main はその後 base.txt（または conflict: true なら a.txt の同じ行）を進める。
+// 偽の `git`（シム）: `git remote get-url origin` だけを環境変数 FAKE_REMOTE_URL の値で返す（実 remote はローカルの
+//   パスだが、スクリプトの routing ガードは github.com の URL を要求するため）。ls-remote は呼び出し回数ごとに
+//   FAKE_LS_<n> = fail（失敗）/ head（今の HEAD をリモート head として返す）で差し替えられる。それ以外はすべて実 git へ
+//   exec する。すべての呼び出しを SHIM_LOG に 1 行ずつ記録するので、「routing 不一致のあとに fetch / merge / push を
+//   一切呼んでいない」ことを呼び出し履歴で確かめられる。
+// 偽の `gh`: tests/lib/gh-observe-stub.mjs（pr view の応答を経路キー prview で設定する）。
+import { spawnSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createObserveStub } from './gh-observe-stub.mjs'
+
+export const REAL_GIT = (() => {
+  const r = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' })
+  return r.stdout.trim()
+})()
+
+export const BRANCH = 'feat/603-x'
+export const BASE = 'main'
+export const REPO = 'Fandhe-AI/agent-cli-skills'
+export const PR = 12
+export const MERGE_SUBJECT = 'chore: base ブランチの変更を取り込む'
+
+const SHIM = `#!/bin/sh
+echo "$*" >> "\${SHIM_LOG:?}"
+if [ "$1" = remote ] && [ "$2" = get-url ]; then
+  printf '%s\\n' "\${FAKE_REMOTE_URL:?}"
+  exit 0
+fi
+if [ "$1" = ls-remote ]; then
+  c=0
+  [ -f "\${SHIM_DIR:?}/ls.count" ] && c=$(cat "$SHIM_DIR/ls.count")
+  c=$((c + 1))
+  echo "$c" > "$SHIM_DIR/ls.count"
+  eval "mode=\\\${FAKE_LS_$c:-}"
+  case "$mode" in
+    fail) exit 1 ;;
+    head) printf '%s\\trefs/heads/%s\\n' "$("\${REAL_GIT:?}" rev-parse HEAD)" "\${FAKE_LS_BRANCH:?}"; exit 0 ;;
+  esac
+fi
+exec "\${REAL_GIT:?}" "$@"
+`
+
+export function git(cwd, ...args) {
+  const r = spawnSync(REAL_GIT, args, { cwd, encoding: 'utf8', env: gitEnv(cwd) })
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')} (cwd=${cwd}) 失敗: ${r.stderr}`)
+  return r.stdout.trim()
+}
+
+function gitEnv(home) {
+  return {
+    PATH: process.env.PATH,
+    HOME: home,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_AUTHOR_NAME: 'test',
+    GIT_AUTHOR_EMAIL: 'test@example.com',
+    GIT_COMMITTER_NAME: 'test',
+    GIT_COMMITTER_EMAIL: 'test@example.com',
+  }
+}
+
+function commit(dir, file, content, message) {
+  writeFileSync(join(dir, file), content)
+  git(dir, 'add', file)
+  git(dir, 'commit', '-q', '-m', message)
+}
+
+// opts:
+//   conflict          main とブランチが a.txt の同じ行を別内容に変える（マージでコンフリクト）
+//   baseAdvanced      main がブランチ分岐後に進んでいる（既定 true）。false なら main は分岐点のまま
+//   branchHasBase     ブランチが main の先頭をすでに取り込んでいる（Already up to date になる）
+//   branchBehindOnly  ブランチに独自コミットが無く、main だけが進んでいる（ブランチの先頭が base に含まれる）
+export function makeSandbox(opts = {}) {
+  const { conflict = false, baseAdvanced = true, branchHasBase = false, branchBehindOnly = false } = opts
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'iit-base-merge-')))
+  const origin = join(root, 'origin.git')
+  const seed = join(root, 'seed')
+  const wt = join(root, 'wt')
+  const shimDir = join(root, 'shim')
+  const tmp = join(root, 'tmp')
+  for (const d of [origin, seed, shimDir, tmp]) mkdirSync(d, { recursive: true })
+  git(origin, 'init', '-q', '--bare', '-b', BASE)
+  git(seed, 'init', '-q', '-b', BASE)
+  commit(seed, 'a.txt', 'line1\nline2\n', 'init')
+  git(seed, 'remote', 'add', 'origin', origin)
+  git(seed, 'push', '-q', 'origin', BASE)
+  git(seed, 'checkout', '-q', '-b', BRANCH)
+  if (!branchBehindOnly) {
+    if (conflict) commit(seed, 'a.txt', 'line1\nbranch side\n', 'branch change')
+    else commit(seed, 'feature.txt', 'feature\n', 'feature')
+  }
+  git(seed, 'push', '-q', 'origin', BRANCH)
+  git(seed, 'checkout', '-q', BASE)
+  if (baseAdvanced) {
+    if (conflict) commit(seed, 'a.txt', 'line1\nbase side\n', 'base change')
+    else commit(seed, 'base.txt', 'base\n', 'base advance')
+    git(seed, 'push', '-q', 'origin', BASE)
+  }
+  if (branchHasBase) {
+    git(seed, 'checkout', '-q', BRANCH)
+    git(seed, 'merge', '-q', '--no-ff', '-m', 'merge base', BASE)
+    git(seed, 'push', '-q', 'origin', BRANCH)
+  }
+  git(root, 'clone', '-q', origin, wt)
+  git(wt, 'config', 'user.name', 'test')
+  git(wt, 'config', 'user.email', 'test@example.com')
+  writeFileSync(join(shimDir, 'git'), SHIM)
+  chmodSync(join(shimDir, 'git'), 0o755)
+  writeFileSync(join(shimDir, 'calls.log'), '')
+  const stub = createObserveStub({ prview: { out: JSON.stringify({ number: PR, headRefName: BRANCH }) } })
+  return {
+    root, origin, seed, wt, shimDir, tmp, stub,
+    remoteSha: (b = BRANCH) => git(origin, 'rev-parse', `refs/heads/${b}`),
+    headSha: () => git(wt, 'rev-parse', 'HEAD'),
+    gitCalls: () => readFileSync(join(shimDir, 'calls.log'), 'utf8').split('\n').filter(Boolean),
+    lsCalls: () => {
+      try {
+        return Number(readFileSync(join(shimDir, 'ls.count'), 'utf8'))
+      } catch {
+        return 0
+      }
+    },
+    env(extra = {}) {
+      return {
+        ...gitEnv(root),
+        PATH: `${shimDir}:${stub.binDir}:${process.env.PATH}`,
+        GH_STUB_DIR: stub.dir,
+        SHIM_LOG: join(shimDir, 'calls.log'),
+        SHIM_DIR: shimDir,
+        REAL_GIT,
+        FAKE_REMOTE_URL: `https://github.com/${REPO}.git`,
+        FAKE_LS_BRANCH: BRANCH,
+        TMPDIR: tmp,
+        ...extra,
+      }
+    },
+    writeHook(dir, name, body) {
+      mkdirSync(join(dir, 'hooks'), { recursive: true })
+      writeFileSync(join(dir, 'hooks', name), `#!/bin/sh\n${body}\n`)
+      chmodSync(join(dir, 'hooks', name), 0o755)
+    },
+  }
+}

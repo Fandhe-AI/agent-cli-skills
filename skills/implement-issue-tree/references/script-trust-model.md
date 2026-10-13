@@ -2,7 +2,7 @@
 
 本書は implement-issue-tree スキルの一部。全体は ../SKILL.md 参照。
 
-決定的な手順（`gh` / `git` / `du` 等のコマンド列と分類規則）をプロンプトの文章から切り出し、スキル同梱のスクリプトにして、サブエージェントには「コマンドを実行して出力を転記する」ことだけをさせる設計（Issue #603）の、**何を防ぎ、何を防がないか**を書く。第 1 弾の対象は読み取り専用の測定 2 本（残置 worktree のバイト測定・実ディスク空き容量）、第 2 弾の対象は monitor の観測と待機（`observe-pr.sh`）で、いずれも安全判定（マージ・push・削除）を含まない。安全判定を含むスクリプトを足す弾は、本書の前提を満たすか、満たさない部分を別の機構で補うことを、その弾の PR で示す。
+決定的な手順（`gh` / `git` / `du` 等のコマンド列と分類規則）をプロンプトの文章から切り出し、スキル同梱のスクリプトにして、サブエージェントには「コマンドを実行して出力を転記する」ことだけをさせる設計（Issue #603）の、**何を防ぎ、何を防がないか**を書く。第 1 弾の対象は読み取り専用の測定 2 本（残置 worktree のバイト測定・実ディスク空き容量）、第 2 弾の対象は monitor の観測と待機（`observe-pr.sh`）で、いずれも安全判定（マージ・push・削除）を含まない。第 3 弾の対象は base 取り込みと push の検証（`base-merge.sh`、`lib/push-verify.sh`）と、push 直後の確認（`observe-pr.sh --mode push`）で、**base-merge.sh は push を実行する最初のスクリプト**である（下の「第 3 弾」節）。安全判定を含むスクリプトを足す弾は、本書の前提を満たすか、満たさない部分を別の機構で補うことを、その弾の PR で示す。
 
 ## 構成
 
@@ -11,8 +11,10 @@
 | `args.skillDir` | スキルディレクトリ（`scripts/` の 1 つ上）の絶対パス。人間（起動手順）が渡す。形式だけをホストが検証する |
 | `scripts/run-verified.sh` | 実行前にスクリプトの SHA-256 を照合する launcher。`bash "<skillDir>/scripts/run-verified.sh" <sha256> <name>.sh …` で起動する（実行ビットに依存しない） |
 | `scripts/measure-residual-bytes.sh` / `measure-free-disk.sh` | 測定本体。入力はパスの一覧（標準入力）または 1 件（引数）。出力は 1 行の封筒 |
-| `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail`。出力は 1 行の封筒（`threads-detail` だけは外部由来の自由文を含む非信頼データで、封筒ではない）。`--wait` は有界の待機 |
+| `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail` / `push`（第 3 弾）。出力は 1 行の封筒（`threads-detail` だけは外部由来の自由文を含む非信頼データで、封筒ではない）。`--wait` は有界の待機 |
+| `scripts/base-merge.sh` | 自動 base 取り込みの本体（第 3 弾）。入力は PR 番号・branch・base・期待 owner/repo（引数）。**封筒を使わない**。出力の最後の 1 行は `BASE_MERGE_RESULT {…}`（キーは `BASE_MERGE_SCHEMA` と同じ） |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
+| `scripts/lib/push-verify.sh` | push の前後でリモート head を突き合わせる共通部（`pv_push_verified`。第 3 弾）。`base-merge.sh` が使い、以降 pr-create の push と fix の push 検証も同じ部品へ移す |
 | 生成物 `implement-issue-tree.js` の `SCRIPT_SHA256` | ビルダーが埋め込む期待ハッシュ。開発ファイルには置換前の目印を書き、`build-workflow.mjs` が置換する |
 | `verifySignedOutput`（ホスト） | 転記された封筒を再計算して照合する |
 
@@ -80,6 +82,47 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 安全判定を含むスクリプト（G0・マージ実行・opt-in ゲート・`verifyDiscardSafety`・base 取り込み）を切り出す弾では、この水準では足りない。出力の用途がマージ可否に及ぶ場合は、(a) ホスト側の独立な再取得、(b) サーバー側強制（ruleset の実測）、(c) 自己申告値を判定に使わない設計、のいずれかで補うこと。nonce と sha256 の照合は補強にならない。
 
+## 第 3 弾: base 取り込みと push 後確認（`base-merge.sh`・`observe-pr.sh --mode push`）
+
+### 位置づけ: 封筒なしで足りる理由
+
+`base-merge.sh` は **push を実行する最初のスクリプト**だが、出力に封筒（nonce・sha256）を付けない。上の「測定値の使い方」節が求める (a)(b)(c) のうち **(c) 自己申告値を判定に使わない設計**で足りるからである。ホストが `BASE_MERGE_RESULT` から読む値は、スクリプト化の前から返っていたものと同じで、新たに採用する値が無い。
+
+| 値 | ホストの使い道 | 誤っていた場合に起きること |
+|----|----------------|--------------------------|
+| `pushed` | 進捗の記録だけ（`noPushRounds` のリセットと `lastRoundPushed`）。マージ・クローズ・push・削除の可否には使わない。resolve (b) の許可リスト `computePermittedNoPushResolveIds` は常に空（恒久無効）で、`lastRoundPushed` は安全判定に届かない | `true` の誤報は連続 no-push の数え損ないにとどまり、`baseMergeCount`（`maxBaseMerges`）が回数を有界にする。次ラウンドの monitor がサーバー側の実値を再観測する |
+| `routingError` | halt 対象の失敗終端 | 偽陽性は止まる側（安全側）。偽陰性は、スクリプト自身が routing 不一致のときに fetch・merge・push を一切実行していない（実 git のテストが呼び出し履歴で固定する） |
+| `commitFailed` | 失敗終端 | 止まる側 |
+| `conflict` / `hookRejected` | 失敗終端せず fix 経路へ委譲 | 余分に fix 経路へ回るだけ（`fixCount` 上限 6 で有界、検証権限付き） |
+
+`pushed` の自己申告を封筒で裏付けることは、次弾以降の選択肢である（費用は monitor の checks 系統並み: schema・observe 部品・ガイド文で数 KB）。
+
+`observe-pr.sh --mode push` の封筒も、ホストは**照合も採用もしない**（`checksStarted` / `mergeableAfterPush` は従来どおり診断・分岐ヒント専用）。nonce はホストが常に生成して渡すが、PR とブランチから決まる値で呼び出しごとには変えない（プロンプトを決定的に保つため）。**採用に切り替えるときは呼び出し連番を `boundaryNonce` の keyMaterial に足すこと**（同じ nonce のままだと前回の封筒の流用を検出できない）。
+
+### スクリプト内のコマンドは merge-guard hook から見えない
+
+`merge-guard-hook.sh` は subagent の Bash の**コマンド文字列**を見て、マージ系・設定変更系を拒否する。スクリプトの中で実行されるコマンドは hook から見えない。この hook は元から best-effort（承認境界ではない）だが、push を含むスクリプトが入った以降は、迂回面が『スクリプトの内容』に移る。補うのは次の 3 つである。
+
+1. **内容の固定**: `run-verified.sh` の期待ハッシュ。スクリプトと `scripts/lib/*.sh` の内容は、ビルドしたときのものに固定される（書き換え・版ずれは exit 3 で起動しない）。ただし、固定されるのは『レビューした内容から変わっていない』ことで、『その内容が安全か』ではない。スキルディレクトリへ書き込める者は防げない（下の「何を防がないか」）。
+2. **静的テスト**（`tests/script-static-guard.test.mjs`）: `scripts/*.sh` と `scripts/lib/*.sh`（hook 自身を除く）のコード行に、マージ（`gh pr merge`・merge 系 API・mutation）、approve、ruleset・branch protection・リポジトリ設定の変更、書き込み系の HTTP メソッド、`--force` 系・`-f`・`+` refspec つきの `git push`、`--no-verify` の綴りが無いことを検査する。各パターンが悪い例に発火することも自己検査で固定する。
+3. **スクリプト側の自衛**（`base-merge.sh`）: `--branch` と `--base` が同じ値を拒否する。ref・repo・PR 番号をホストと同じ厳格さで再検証する。push の refspec は `HEAD:refs/heads/<branch>` の 1 形だけで、`--force` 系・`--no-verify` を使わない（hook を通す）。マージの subject は埋め込み定数を一時ファイルに書いて `-F` で渡し（commitlint 設定やコミット履歴を読まない）、一時ファイルは trap で必ず消す。作業ツリーが clean でなければマージしない。ブランチが base に含まれている（独自コミットが無い）ときは fast-forward せず何も push しない。
+
+### 出力は固定語彙
+
+`BASE_MERGE_RESULT` の `summary` は固定の語彙だけで、hook の出力・gh の出力・URL・ブランチ名のような外部由来の文字列を入れない（診断は標準エラーへ出す。標準エラーはエージェントが読むが、ホストへ返る値には載らない）。ホストは `summary` を `finding.summary`（fix プロンプト）へ流すため、ここに外部由来の自由文を入れると未信頼データが push 権限のある経路へ入る。
+
+### push の検証（`lib/push-verify.sh`）
+
+`pushed` になるのは、(i) push 前のリモート head がローカル HEAD と違い、(ii) push 後のリモート head がローカル HEAD と一致し、(iii) push コマンド自身が成功したときだけである。push コマンドの成功や、push の前後で sha が変わったことは根拠にならない（その間に別ランが同じブランチを更新すると、自分の push が拒否されても sha は変わる。PR #436）。比較できない（ls-remote の失敗・HEAD を読めない）ときも、作業は detached HEAD 上にしか無く push を省くと失われるため push は実行し、結果は `unverified`（`pushed: false`）にする。3 条件を 1 つずつ外すと赤になることは `tests/push-verify.test.mjs` が固定する。
+
+### スクリプトを実行できなかったとき
+
+`run-verified.sh` の exit 3（ハッシュ不一致）/ 4（欠落）、スクリプトの exit 2（使い方の誤り）では `BASE_MERGE_RESULT` の行が出ない。プロンプトはこのとき、取り込み直さずに `pushed: false`・`commitFailed: true`・`summary: base-merge.sh の失敗` で返させる。ホストは `conflict` / `hookRejected` を伴わない `commitFailed` として `failed` 終端する（`tests/base-merge-host-flow.test.mjs` が固定する）。**配布の版ずれの影響範囲は、第 1・2 弾（測定・監視が止まる）より広い**: 版ずれがあると、実装が終わった後の PR 作成・base 取り込みの時点で初めて失敗し得る（起動時に全スクリプトのハッシュを検証する予検査は未実装）。
+
+### 隔離 worktree からの実行は実ランで未検証
+
+第 3 弾は、`isolation: 'worktree'` のエージェント（base-merge・pr-create・fix）が、メイン作業ディレクトリ側の絶対パス `skillDir` のスクリプトを実行する**最初の弾**である（第 1・2 弾のエージェントは非隔離）。隔離 worktree のエージェントがそのパスを実行できるか、スクリプトの cwd が隔離 worktree になるか（`git` の操作が隔離 worktree に対して行われるか）は、実ランで確認していない。テストは cwd を作業用 clone にして実 git で確かめているが、Workflow ランタイムの隔離とサンドボックスの挙動は再現していない。
+
 ## ハッシュ埋め込みと鮮度
 
 - 開発ファイル（`implement-issue-tree.src.js`）には、スクリプトごとの期待ハッシュの代わりに置換前の目印（`SCRIPT_SHA256` の値）を書く。`build-workflow.mjs` は**コメント除去とトークン照合より前に**、同じディレクトリのスクリプトの `bundleSha256`（スクリプト本体 + `scripts/lib/*.sh` のバイト列連結の SHA-256）へ置換する。置換後の文字列を「開発ファイル」としてトークン照合に使うので、照合の定義（種類・値・開始行）は変わらない。生成物に目印が残らない。
@@ -91,7 +134,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 - `args.skillDir` は呼び出し側（起動手順）が渡す。配布後、既存の呼び出し手順は更新が必要になる。`dryRun` でないランで未指定なら起動時エラーで停止する（第 2 弾から、monitor が毎回 `observe-pr.sh` を使うため、`maxResidualWorktreeBytes: 0` のランも対象）。named workflow（`{name: "implement-issue-tree"}`）で起動する場合も同じ。
 - 同期で届くのはスキルディレクトリ全体（Workflow とスクリプトを同じコミットで）なので、通常は版ずれは起きない。`run-verified.sh` が exit 3 を出したときは、スキルの同期が途中か、スクリプトがローカルで変更されている。同期し直す。
-- 新しいスクリプトを足すとき: `scripts/` 直下に `*.sh`（小文字・数字・`-`・`.`）で置き、`SCRIPT_SHA256` に目印を足し、`bash <skillDir>/scripts/run-verified.sh` 経由で起動し、封筒で返す。冒頭コメントに入力・出力・終了コードを書く。`bash 3.2`（macOS）と GNU の両方で動く書き方に限る（`paste`・`bc`・GNU 専用フラグ・`date -d`・`sed -i`・`mapfile`・連想配列を使わない）。
+- 新しいスクリプトを足すとき: `scripts/` 直下に `*.sh`（小文字・数字・`-`・`.`）で置き、`SCRIPT_SHA256` に目印を足し、`bash <skillDir>/scripts/run-verified.sh` 経由で起動し、封筒で返す（ホストが値を採用しないスクリプトは、上の第 3 弾の節の理由づけを示したうえで封筒なしにできる）。`scripts/lib/*.sh` を足すと、**すべてのスクリプトのハッシュが変わる**（`run-verified.sh` は lib 全体をハッシュに含める）。再ビルドで追従する。`tests/script-static-guard.test.mjs` の走査対象は `scripts/*.sh` と `scripts/lib/*.sh` の全体なので、新しいスクリプトも自動で対象になる。冒頭コメントに入力・出力・終了コードを書く。`bash 3.2`（macOS）と GNU の両方で動く書き方に限る（`paste`・`bc`・GNU 専用フラグ・`date -d`・`sed -i`・`mapfile`・連想配列を使わない）。
 
 ## 関連
 

@@ -245,6 +245,17 @@ test('monitorPrompt: 待機は pending のたびに --attempt を 1 増やして
   assert.ok(!/(^|[\s;])(until|while) [^\n]*; do/m.test(p), '自作の待機ループ（until / while … do）を指示しない')
 })
 
+// #603 第 2 弾の持ち越し: headSha が空の pending / exhausted は壁時計 kill 由来の未観測で、件数を『観測した 0 件』と読ませない。
+// state が空の pr 封筒（同じく未観測）を『OPEN でなくなった』と読ませない（誤って終端・ready に進まない）。
+test('monitorPrompt: headSha が空の pending / exhausted は未観測で件数を読まない。state が空は OPEN でなくなったとは扱わない', () => {
+  const p = m.monitorPrompt(item, impl, [], true, true, false, '', NONCE)
+  assert.ok(p.includes('headSha が空の pending / exhausted は何も観測できていない（未観測）ので件数を読まない'), 'OBSERVE_GUIDE に未観測の読み方がない')
+  assert.equal(p.split('headSha が空の pending / exhausted').length - 1, 1, '共通の読み方は 1 か所だけに書く')
+  const i1c = p.indexOf('1c. state が OPEN の場合のみ判定する')
+  const section1c = p.slice(i1c, p.indexOf('\n2. ', i1c))
+  assert.ok(section1c.includes('state が空は OPEN でなくなったとは扱わない'), '手順 1c に state が空の扱いがない')
+})
+
 test('monitorPrompt: 外部由来の自由文は封筒に入らず、未解決スレッドの内容は封筒ではない threads-detail から非信頼データとして読む', () => {
   const p = m.monitorPrompt(item, impl, [], true, true, false, '', NONCE)
   assert.ok(commandsOf(p).some((c) => c.includes('--mode threads-detail')))

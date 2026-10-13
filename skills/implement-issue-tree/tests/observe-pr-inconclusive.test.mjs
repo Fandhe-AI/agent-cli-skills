@@ -65,9 +65,30 @@ for (const bash of BASHES) {
   t('その起動で取得失敗があり、一度も取得に成功しないまま壁時計 kill で終わるなら、pending / exhausted ではなく error（err:1）', () => {
     for (const attempt of ['1', '7']) {
       const stub = createObserveStub({ prview: ERR_BODY })
-      const p = payloadOf(run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', attempt], { ...SCALED, GH_STUB_DELAYS: '0 0 60' }))
+      const r = run(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', attempt], { ...SCALED, GH_STUB_DELAYS: '0 0 60' })
+      const p = payloadOf(r)
       assert.deepEqual({ o: p.outcome, e: p.err, h: p.headSha, t: p.total }, { o: 'error', e: 1, h: '', t: 0 }, `attempt ${attempt}`)
+      // error にする箇所の直前に、なぜ pending / exhausted ではなく error なのかを 1 行出す（ログから原因が分かる）
+      assert.match(r.stderr, /一度も取得に成功しなかった（取得失敗が続いた）ため、待ち切ったとは返さず error にする/, `attempt ${attempt}`)
     }
+  })
+
+  // 『取得失敗ではない』と言えるのは待機つきだけ（pending / exhausted で返せる）。待機なしの単発観測は結論が出なければ
+  // そのまま err:1・error になるので、取得失敗として知らせる（payload と stderr が食い違わない）。
+  t('壁時計の残りで gh を kill したとき、stderr が「取得失敗ではない」と言うのは --wait のときだけ。待機なしは取得失敗と言う（err:1 と一致）', () => {
+    const routes = {
+      prview: { out: prJson }, rules: { out: '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]\n' },
+      'check-runs': { out: '{"check_runs":[]}\n' }, statuses: { out: '[]\n' },
+    }
+    const noWait = run(bash, createObserveStub(routes), ['--mode', 'required', '--base', 'main', '--pr', '5'], { ...SCALED, GH_STUB_DELAYS: '0 0 60' })
+    const pn = payloadOf(noWait)
+    assert.deepEqual({ o: pn.outcome, e: pn.err }, { o: 'error', e: 1 }, '待機なしは壁時計で結論が出なければ取得失敗')
+    assert.match(noWait.stderr, /取得に失敗した（/)
+    assert.doesNotMatch(noWait.stderr, /取得失敗ではない/, '待機なしの err:1 に「取得失敗ではない」と言わない')
+    const waited = run(bash, createObserveStub(routes), ['--mode', 'required', '--base', 'main', '--pr', '5', '--wait', '--attempt', '1'], { ...SCALED, GH_STUB_DELAYS: '0 0 0 0 0 0 60' })
+    const pw = payloadOf(waited)
+    assert.equal(pw.err, 0, '待機つきは取得失敗ではなく未確定')
+    assert.match(waited.stderr, /この起動では結論が出ていない（壁時計の残り時間に達した: .*）。取得失敗ではない/)
   })
 
   t('対照: 取得に一度でも成功していれば、そのあと壁時計で kill されても pending（取得失敗が混じっていても）', () => {
@@ -117,7 +138,8 @@ const envOf = (payload, nonce = NONCE) => {
 const good = (over = {}) => ({ mode: 'checks', err: 0, total: 0, checkRuns: 0, statuses: 0, headSha: SHA, attempt: 7, maxAttempts: 7, outcome: 'exhausted', inputSha256: inputSha, ...over })
 
 test('ホスト: headSha が 40 桁 16 進でない封筒（壁時計 kill 由来の未確定）は、正しく署名されていても採用しない', async () => {
-  for (const headSha of ['', 'abc', 'Z'.repeat(40), 'a'.repeat(41), null, 12]) {
+  // [SHA] は String に強制変換すると 40 桁 16 進と一致する（typeof の検査が無いと正規表現を通る）
+  for (const headSha of ['', 'abc', 'Z'.repeat(40), 'a'.repeat(41), null, 12, [SHA]]) {
     for (const outcome of ['pending', 'exhausted']) {
       const env = await envOf(good({ headSha, outcome }))
       const r = m.applyChecksObservation({ state: 'timeout', summary: 's', checksTotal: 0, checksObservation: env }, NONCES, inputSha)
@@ -158,3 +180,18 @@ function unmetEnv() {
   return createObserveStub({ prview: { out: prJson }, 'check-runs-total': { out: '{"total_count":0}' }, status: { out: '{"statuses":[]}' } })
     .env({ OBSERVE_PR_POLLS: '2', OBSERVE_PR_SLEEP_SEC: '0' })
 }
+
+test('ホスト: outcome が error の封筒は、err が 0・headSha・total が揃っていても採用しない（手組みの封筒でのみ到達する不整合）', async () => {
+  for (const outcome of ['error']) {
+    const env = await envOf(good({ outcome, err: 0, total: 3, headSha: SHA }))
+    const r = m.applyChecksObservation({ state: 'timeout', summary: 's', checksTotal: 3, checksObservation: env }, NONCES, inputSha)
+    assert.equal(r.reason, 'fetch-error')
+    assert.ok(!('checksTotal' in r.result))
+  }
+  // 対照: outcome が met / observed / exhausted / pending（headSha あり）なら従来どおり採用する
+  for (const outcome of ['met', 'observed', 'exhausted', 'pending']) {
+    const r = m.applyChecksObservation({ state: 'timeout', summary: 's', checksTotal: 3, checksObservation: await envOf(good({ outcome, total: 3 })) }, NONCES, inputSha)
+    assert.equal(r.reason, '', outcome)
+    assert.equal(r.result.checksTotal, 3, outcome)
+  }
+})

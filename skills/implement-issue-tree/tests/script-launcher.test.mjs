@@ -326,7 +326,7 @@ test('実リポジトリの生成物: 目印は残らず、埋め込まれたハ
 
 test('スクリプト一式は実行ビットに依存しない（bash "<path>" で起動する）。launcher の起動コマンドは常に bash 経由', () => {
   const src = readFileSync(SRC_PATH, 'utf8')
-  assert.match(src, /return `bash '\$\{skillDir\}\/scripts\/run-verified\.sh' \$\{SCRIPT_SHA256\[name\]\} \$\{name\} --nonce/)
+  assert.match(src, /return `bash '\$\{skillDir\}\/scripts\/run-verified\.sh' \$\{SCRIPT_SHA256\[name\]\} \$\{name\}\$\{nonce === undefined \? '' : ` --nonce \$\{nonce\}`\}/)
   // 実行ビットを落としても launcher 経由で動く
   const { dir, scripts } = cloneScripts()
   try {

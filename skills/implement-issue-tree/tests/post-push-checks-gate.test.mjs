@@ -68,23 +68,43 @@ const {
 const item = { number: 479, title: 'テストイシュー' }
 const impl = { prNumber: 777, branch: 'fix/479-post-push-checks' }
 const NONCE = 'b'.repeat(64)
+// push 後確認のコマンドが nonce（boundaryNonce）を使うため、seed を注入しておく（prCreatePrompt も使う）
+mod.__setBoundaryNonceSeedForTest(NONCE)
 
 // ---------------------------------------------------------------------------
 // (1) push 直後の CI 起動確認（プロンプト契約）
 // ---------------------------------------------------------------------------
 
-test('prCreatePrompt: CI 起動確認が push 行より後に現れ、check-runs と mergeable を有界に観測する', () => {
+// #603 第 3 弾: push 後の観測は observe-pr.sh --mode push に移った（30 秒間隔・最大 5 分は --attempt 最大 4 回で保つ）。
+// 観測の挙動（HEAD と PR の head の一致待ち・チェック総数・mergeable・取得失敗の扱い）は、スクリプトを実際に走らせる
+// tests/observe-pr-push.test.mjs が固定する。ここはプロンプトが『どのコマンドを実行させ、どの値を返させるか』を固定する。
+const pushCommandOf = (prompt) => /```sh\n(bash '[^\n]*observe-pr\.sh[^\n]* --mode push[^\n]*)\n```/.exec(prompt)?.[1]
+
+test('prCreatePrompt: CI 起動確認が push 行より後に現れ、observe-pr.sh --mode push を有界に実行させる', () => {
   const prompt = prCreatePrompt(item, impl, [])
   const pushIdx = prompt.indexOf('git push origin HEAD:refs/heads/')
   const checkIdx = prompt.indexOf('push 後 CI 起動確認（必須。Issue #479）')
   assert.ok(pushIdx >= 0, 'push 指示が見つからない')
   assert.ok(checkIdx >= 0, 'push 後 CI 起動確認の指示がない')
   assert.ok(pushIdx < checkIdx, 'CI 起動確認が push より前に現れる（push していない head を観測してしまう）')
-  assert.ok(prompt.includes("check-runs --jq '.total_count'"), 'check-run 総数の取得コマンドがない')
-  assert.ok(prompt.includes('--json mergeable --jq .mergeable'), 'mergeable の取得コマンドがない')
-  assert.ok(prompt.includes('30 秒間隔で最大 5 分'), '有界（30 秒間隔・最大 5 分）の待機指示がない')
+  const command = pushCommandOf(prompt)
+  assert.ok(command, 'observe-pr.sh --mode push のコマンドがない')
+  assert.match(command, new RegExp(`observe-pr\\.sh --nonce [0-9a-z]{1,64} --mode push --pr <PR 番号> --base main --branch ${impl.branch} --wait --attempt 1$`))
+  assert.ok(prompt.includes('最大 4 回 = およそ 5 分'), '有界（--attempt 最大 4 回 = およそ 5 分）の待機指示がない')
   assert.ok(prompt.includes('checksStarted'), 'checksStarted の返却指示がない')
   assert.ok(prompt.includes('mergeableAfterPush'), 'mergeableAfterPush の返却指示がない')
+  assert.ok(!prompt.includes("check-runs --jq '.total_count'"), '旧: gh api の組み立てで総数を取る指示が残っている')
+})
+
+// `<PR 番号>` の置換は、コマンドの文字列をエージェントが変えてよい唯一の箇所。何を置換してよいかを 1 か所で限定する。
+test('prCreatePrompt: PR 番号が未確定の push 後確認コマンドは <PR 番号> だけを置換してよいと 1 か所で限定する。fixPrompt は番号を埋め込み置換を許さない', () => {
+  const create = prCreatePrompt(item, impl, [])
+  assert.equal(create.split('<PR 番号>').length - 1, 2, '<PR 番号> はコマンド中と置換の指示の 2 回だけ現れる')
+  assert.ok(create.includes('<PR 番号> だけを手順 1b で再利用した、または手順 2 で作成した PR 番号（正の整数）に置き換え、他は一字一句そのまま'))
+  mod.__setBoundaryNonceSeedForTest(NONCE)
+  const fix = fixPrompt(item, impl, { summary: 'テスト用の指摘', unresolvedComments: [] }, true)
+  assert.ok(!fix.includes('<PR 番号>'), 'fix は PR 番号が分かっているので置換を求めない')
+  assert.match(pushCommandOf(fix), new RegExp(` --mode push --pr ${impl.prNumber} --base main --branch ${impl.branch} --wait --attempt 1$`))
 })
 
 test('prCreatePrompt: CI 起動確認は PR 番号確定後（手順 3 の後）に置かれ、再利用経路も通る', () => {
@@ -118,16 +138,16 @@ test('fixPrompt(pushAfterFix: false): CI 起動確認を含まない（Review �
 })
 
 test('postPushChecksInstruction: 未確定・観測不能を CONFLICTING へ倒さない（fail-closed は UNKNOWN 側）', () => {
-  const text = postPushChecksInstruction('123')
-  assert.ok(text.includes('UNKNOWN のまま返す'), '上限到達時に UNKNOWN のまま返す指示がない')
-  assert.ok(
-    text.includes('CONFLICTING とみなさず UNKNOWN を返す'),
-    '未確定を CONFLICTING とみなさない（誤って base 取り込みを起動しない）指示がない',
-  )
+  const text = postPushChecksInstruction(123, 'fix/479-x')
+  assert.ok(text.includes('mergeableAfterPush: "UNKNOWN"'), '観測不能時に UNKNOWN を返す指示がない')
+  assert.ok(text.includes('推測で補わない'), 'mergeable を推測で補わない指示がない')
+  assert.ok(text.includes('0 件・CONFLICTING と読み替えない'), '取得失敗を CONFLICTING とみなさない（誤って base 取り込みを起動しない）指示がない')
   assert.ok(
     text.includes('返却値（prNumber / pushed）の判定を変えてはならない'),
     '既存返却値の意味を変えない旨の指示がない',
   )
+  assert.throws(() => postPushChecksInstruction('123', 'fix/479-x'), /PR 番号/, '文字列の PR 番号（旧 API）や不正値は組み立てない')
+  assert.throws(() => postPushChecksInstruction(123, 'a;b'), /branch/, '不正なブランチ名はコマンドへ埋め込まない')
 })
 
 // PR #480 の codex P1 / Bugbot Medium 回帰テスト: 「チェック総数」を check-run の total_count
@@ -143,15 +163,15 @@ const COUNT_TARGETS = [
   }],
 ]
 
-test('チェック総数は check-run と commit status の合計で数える（PR #480）', () => {
+// #603 第 3 弾: push 後確認の集計定義（check-run の total_count + combined status の件数の合計）は observe-pr.sh --mode push が持つ。
+// 合算と取得失敗の扱いは tests/observe-pr-push.test.mjs が実行して固定する。ここではプロンプトが gh の組み立てを持たず、
+// 取得失敗を 0 件・CONFLICTING に読み替えないことを固定する。
+test('チェック総数の取得は組み立てさせず、取得失敗を 0 件・CONFLICTING に読み替えさせない（PR #480）', () => {
   for (const [name, build] of COUNT_TARGETS) {
     const prompt = build()
-    assert.ok(prompt.includes("check-runs --jq '.total_count'"), `${name}: check-run 総数の取得指示がない`)
-    assert.ok(
-      prompt.includes("/status --jq '.statuses | length'"),
-      `${name}: commit status（combined status）件数の取得指示がない — check-run のみを数えると commit status だけの CI で 0 件と誤判定する`,
-    )
-    assert.ok(prompt.includes('合計'), `${name}: 両者を合算する指示がない`)
+    assert.ok(!prompt.includes("check-runs --jq '.total_count'") && !prompt.includes("/status --jq '.statuses | length'"), `${name}: gh api の組み立て指示が残っている`)
+    assert.ok(prompt.includes('payload.checksStarted が 1 のとき true'), `${name}: checksStarted の読み方の指示がない`)
+    assert.ok(prompt.includes('payload.mergeable（MERGEABLE / CONFLICTING / UNKNOWN）をそのまま返す'), `${name}: mergeable の読み方の指示がない`)
   }
 })
 
@@ -173,14 +193,8 @@ test('monitorPrompt: チェック総数は observe-pr.sh の checks（check-run 
 test('チェック総数の取得失敗を 0 件扱いにしない（PR #480 codex P1）', () => {
   for (const [name, build] of COUNT_TARGETS) {
     const prompt = build()
-    assert.ok(
-      prompt.includes('どちらか一方でも失敗した場合は「取得失敗」として扱う'),
-      `${name}: 片方の取得失敗を「取得失敗」として扱う指示がない`,
-    )
-    assert.ok(
-      prompt.includes('0 件と同一視してはならない'),
-      `${name}: 取得失敗を 0 件と同一視しない旨の指示がない`,
-    )
+    assert.ok(prompt.includes('err が 1・非 0 終了・JSON なしは checksStarted: false・mergeableAfterPush: "UNKNOWN"'), `${name}: 取得失敗の扱いの指示がない`)
+    assert.ok(prompt.includes('0 件・CONFLICTING と読み替えない'), `${name}: 取得失敗を 0 件・CONFLICTING と読み替えない旨の指示がない`)
   }
 })
 
