@@ -95,6 +95,50 @@ for (const bash of availableBashes()) {
     cases.forEach(([a, b], i) => assert.deepEqual(got[i], { rc: 0, out: cases[i][2] }, JSON.stringify([a, b])))
   })
 
+  t('checks_classify: 進行中（status が未完了）の check-run は conclusion を持っていても未完了に数える', () => {
+    const cases = [
+      [[run('in_progress', 'success')], [], '0 1 0'],
+      [[run('queued', 'failure')], [], '0 1 0'],
+      [[run('completed', 'success'), run('in_progress', 'cancelled')], [], '1 1 0'],
+    ]
+    const got = table(bash, cases.map(([a, b]) => [a, b]))
+    cases.forEach(([a], i) => assert.deepEqual(got[i], { rc: 0, out: cases[i][2] }, JSON.stringify(a)))
+  })
+
+  t('checks_classify: 同じ (app.id, name) の重複は id 最大の 1 件だけを数える。別 app・別名・id か名前が無い要素は畳まない', () => {
+    const r = (id, name, conclusion, appId = 1) => ({ id, name, app: { id: appId }, status: 'completed', conclusion })
+    const s = (id, context, state) => ({ id, context, state })
+    const cases = [
+      // cancelled が古く success が新しい → 合格 1
+      [[r(1, 'build', 'cancelled'), r(2, 'build', 'success')], [], '1 0 0'],
+      // 並び順が逆でも id 最大が勝つ
+      [[r(2, 'build', 'success'), r(1, 'build', 'cancelled')], [], '1 0 0'],
+      // 新しい方が failure なら不合格のまま
+      [[r(1, 'build', 'success'), r(2, 'build', 'failure')], [], '0 0 1'],
+      // 最新が進行中なら未完了
+      [[r(1, 'build', 'cancelled'), { id: 2, name: 'build', app: { id: 1 }, status: 'in_progress', conclusion: null }], [], '0 1 0'],
+      // app.id が違えば別の check
+      [[r(1, 'build', 'cancelled', 1), r(2, 'build', 'success', 2)], [], '1 0 1'],
+      // 名前が違えば別の check
+      [[r(1, 'a', 'cancelled'), r(2, 'b', 'success')], [], '1 0 1'],
+      // id か名前が無い要素は畳まない
+      [[{ name: 'x', status: 'completed', conclusion: 'cancelled' }, { name: 'x', status: 'completed', conclusion: 'success' }], [], '1 0 1'],
+      [[{ id: 1, status: 'completed', conclusion: 'cancelled' }, { id: 2, status: 'completed', conclusion: 'success' }], [], '1 0 1'],
+      // commit status は同じ context の id 最大
+      [[], [s(1, 'ci', 'failure'), s(2, 'ci', 'success')], '1 0 0'],
+      [[], [s(2, 'ci', 'success'), s(1, 'ci', 'failure'), s(3, 'other', 'pending')], '1 1 0'],
+    ]
+    const got = table(bash, cases.map(([a, b]) => [a, b]))
+    cases.forEach(([a, b], i) => assert.deepEqual(got[i], { rc: 0, out: cases[i][2] }, JSON.stringify([a, b])))
+  })
+
+  t('checks_classify: 標準入力で渡すので 1 引数 128 KiB を超える入力（150 件 × 長い output.text）でも分類できる', () => {
+    const big = 'x'.repeat(10000)
+    const many = Array.from({ length: 150 }, (_, i) => ({ id: i + 1, name: `job-${i}`, status: 'completed', conclusion: 'success', output: { text: big } }))
+    const got = table(bash, [[many, []]])
+    assert.deepEqual(got[0], { rc: 0, out: '150 0 0' })
+  })
+
   t('checks_classify: 形の違う入力は件数を出さず rc 1 を返す（0 件に畳まない）', () => {
     const bad = [
       ['null', '[]'],

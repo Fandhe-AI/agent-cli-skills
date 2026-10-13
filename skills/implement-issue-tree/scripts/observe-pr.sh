@@ -420,9 +420,13 @@ observe_checks() {
 count_settled() {
   local runs sts cls nr ns
   gh_api --paginate "${repo_path}/commits/${HEAD}/check-runs" || { fail "check-runs"; return 1; }
-  runs=$(printf '%s' "${OUT}" | jq -sec '[.[].check_runs[]]' 2>/dev/null) || { fail "check-runs の形式"; return 1; }
+  # 分類に必要なフィールドだけに射影する（output.text など巨大なフィールドを後段へ持ち込まない）
+  runs=$(printf '%s' "${OUT}" | jq -sec '[.[].check_runs[] | {id, name, status, conclusion, app: {id: (.app.id? // null)}}]' 2>/dev/null) || { fail "check-runs の形式"; return 1; }
   gh_api --paginate "${repo_path}/commits/${HEAD}/status" || { fail "combined status"; return 1; }
-  sts=$(printf '%s' "${OUT}" | jq -sec '[.[].statuses[]]' 2>/dev/null) || { fail "combined status の statuses"; return 1; }
+  sts=$(printf '%s' "${OUT}" | jq -sec '[.[].statuses[] | {id, context, state}]' 2>/dev/null) || { fail "combined status の statuses"; return 1; }
+  # 同じ check-run・同じ context の重複は最新の 1 件だけにする（件数・総数もこの数）
+  runs=$(checks_latest runs "${runs}") || { fail "check-runs の重複排除"; return 1; }
+  sts=$(checks_latest statuses "${sts}") || { fail "combined status の重複排除"; return 1; }
   cls=$(checks_classify "${runs}" "${sts}") || { fail "チェックの分類"; return 1; }
   nr=$(printf '%s' "${runs}" | jq 'length') || { fail "check-run 件数"; return 1; }
   ns=$(printf '%s' "${sts}" | jq 'length') || { fail "status 件数"; return 1; }

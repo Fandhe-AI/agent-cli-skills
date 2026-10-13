@@ -172,6 +172,44 @@ for (const bash of availableBashes()) {
     assert.equal(stub.countOf('check-runs'), 1)
   })
 
+  t('commit status の複数ページ: --paginate で 2 ページ目も合算して分類する（1 ページで打ち切らない）', () => {
+    const page = (...rows) => ({ statuses: rows.map(([id, state]) => ({ id, context: `ci/${id}`, state })) })
+    const stub = createObserveStub({
+      prview: prView,
+      'check-runs': runs([run('completed', 'success')]),
+      status: { out: JSON.stringify([page([1, 'success'], [2, 'success']), page([3, 'pending']), page([4, 'failure'])]) },
+    })
+    const p = envelope(exec(bash, stub, ARGS))
+    assert.deepEqual({ c: counts(p), r: p.checkRuns, s: p.statuses }, { c: { passed: 3, pending: 1, failed: 1, total: 5 }, r: 1, s: 4 })
+  })
+
+  t('同名の check-run の重複: 古い check suite の cancelled と新しい success が並んでも最新（id 最大）だけを数える。件数・総数も畳んだ後', () => {
+    const r = (id, name, status, conclusion, appId = 15368) => ({ id, name, status, conclusion, app: { id: appId, slug: 'github-actions' } })
+    const stub = createObserveStub({
+      prview: prView,
+      'check-runs': runs(
+        [r(10, 'build', 'completed', 'cancelled'), r(30, 'build', 'completed', 'success'), r(20, 'lint', 'completed', 'failure')],
+        [r(40, 'lint', 'completed', 'success'), r(5, 'test', 'completed', 'success', 99), r(6, 'test', 'completed', 'failure', 15368)],
+      ),
+      status: { out: JSON.stringify({ statuses: [{ id: 1, context: 'ci/x', state: 'failure' }, { id: 2, context: 'ci/x', state: 'success' }] }) },
+    })
+    const p = envelope(exec(bash, stub, ARGS))
+    // build 1・lint 1・test は app が別なので 2 件（success と failure）・status ci/x 1 件
+    assert.deepEqual({ c: counts(p), r: p.checkRuns, s: p.statuses }, { c: { passed: 4, pending: 0, failed: 1, total: 5 }, r: 4, s: 1 })
+  })
+
+  t('大きな応答: 150 件・長い output.text を含む check-run でも引数の上限に当たらず分類できる（射影して標準入力で渡す）', () => {
+    const big = 'x'.repeat(10000)
+    const many = Array.from({ length: 150 }, (_, i) => ({ id: i + 1, name: `job-${i}`, status: 'completed', conclusion: 'success', app: { id: 15368 }, output: { title: 't', summary: 's', text: big } }))
+    const stub = createObserveStub({
+      prview: prView,
+      'check-runs': runs(many.slice(0, 100), many.slice(100)),
+      status: status('success'),
+    })
+    const p = envelope(exec(bash, stub, ARGS))
+    assert.deepEqual({ o: p.outcome, c: counts(p) }, { o: 'observed', c: { passed: 151, pending: 0, failed: 0, total: 151 } })
+  })
+
   t('通常の checks（--until なし）の payload は変えない: passed / pending / failed を持たず、per_page=1 の総数で数える', () => {
     const stub = createObserveStub({
       prview: prView,
