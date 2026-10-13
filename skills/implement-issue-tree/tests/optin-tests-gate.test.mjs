@@ -1068,7 +1068,7 @@ test('駆動部: post-push fix 直後の updateState が optinFixState（runs + 
   assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: fixOptinRuns, headSha: fixHeadSha, unbound: false \}/)
   assert.match(driverPart, /const optinFixPatchArgs = \{ fixCount, baseMergeCount, worktree: currentWorktreePath,/)
   assert.match(driverPart, /optinFixState: optinFixStatePatch \}/)
-  assert.match(driverPart, /updateState\(item\.number, optinFixPatchArgs, \{ cleanupWorktree: oldWorktreePath \}\)/)
+  assert.match(driverPart, /updateState\(item\.number, optinFixPatchArgs, \{ cleanupWorktree: oldWorktreePath, replacementWorktree: currentWorktreePath \}\)/)
 })
 
 test('駆動部: post-push fix が optinHeadSha を報告しない・不正な場合は unbound: true を合成しログ警告する（セキュリティ監査 Medium）', () => {
