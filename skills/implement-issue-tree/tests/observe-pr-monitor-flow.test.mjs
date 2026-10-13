@@ -38,7 +38,7 @@ const payloadOf = (over = {}) => ({
 })
 
 // 葉 #2 が PR 作成（#1002）まで進み、monitor の応答を monitorReply(prompt, opts, callIndex) に任せる最小の stub
-async function run(monitorReply) {
+async function run(monitorReply, { args = ARGS, mergeExecReply = () => null } = {}) {
   const nodes = [
     { number: 1, title: 'root', state: 'open', parent: 0, siblingIndex: 0, dependsOn: [], subIssuesTotal: 1 },
     { number: 2, title: 'issue 2', state: 'open', parent: 1, siblingIndex: 0, dependsOn: [], subIssuesTotal: 0 },
@@ -71,6 +71,7 @@ async function run(monitorReply) {
     if (label.startsWith('pr-create:#')) return { prNumber: PR, summary: 's', worktreePath: '/repo/wt/p2', checksStarted: true, mergeableAfterPush: 'MERGEABLE' }
     if (label.startsWith('pr-bind:#')) return { state: 'OPEN', headRefOid: SHA, headRefName: 'feat/2-x', baseRefName: 'main', isCrossRepository: false, closingIssues: [2] }
     if (label.startsWith('merge:#')) return monitorReply(prompt, opts, (monitorCalls += 1))
+    if (label.startsWith('merge-exec:#')) return mergeExecReply(prompt, opts)
     if (label.startsWith('state:')) return { ok: true }
     return null
   }
@@ -79,7 +80,7 @@ async function run(monitorReply) {
     await Promise.resolve()
     return handler(prompt, opts)
   }
-  const result = await new AsyncFunction('args', 'agent', 'log', 'phase', scriptBody)(ARGS, agent, (m) => { logs.push(m) }, () => {})
+  const result = await new AsyncFunction('args', 'agent', 'log', 'phase', scriptBody)(args, agent, (m) => { logs.push(m) }, () => {})
   return { result, calls, logs }
 }
 
@@ -168,4 +169,29 @@ test('結合: 別ラウンドの monitor 呼び出しは別の nonce を持つ�
   assert.ok(nonces.length >= 2, `2 ラウンド以上監視する: ${nonces.length}`)
   assert.equal(new Set(nonces).size, nonces.length, `全 monitor 呼び出しの nonce が一意: ${nonces.join(',')}`)
   assert.ok(!logs.some((l) => REROUTED.test(l)), 'ラウンド 1 の封筒をラウンド 2 で流用しても採用されない')
+})
+
+// D1（#603 の実ラン検証の指摘）: autoMerge: false で止まった PR の note に、回復専用 merge-exec の内部理由名（head-moved）を
+// 「HEAD が動いた」と読める形で混ぜない。HEAD は動いておらず、PR が未マージなだけである。
+test('結合: autoMerge 無効で ready になった PR の停止 note は、回復専用 merge-exec の内部理由 head-moved を転記せず「未マージのまま」と書く', async () => {
+  const { result, calls } = await run(
+    (prompt) => ({ state: 'ready', summary: 'マージ条件充足', headSha: SHA }),
+    { mergeExecReply: () => ({ merged: false, reason: 'head-moved', summary: 'head-moved で終了。PR は MERGED ではなかった', issueClosed: false }) },
+  )
+  assert.ok(calls.some((c) => c.opts.label.startsWith('merge-exec:#')), '回復専用の merge-exec が走る')
+  const done = result.done.find((d) => d.issue === 2)
+  assert.equal(done.status, 'blocked')
+  assert.ok(!done.note.includes('head-moved'), done.note)
+  assert.ok(!done.note.includes('HEAD'), done.note)
+  assert.ok(done.note.includes('PR は未マージのままだった'), done.note)
+  assert.ok(done.note.includes('自動マージは無効'), '停止の本当の理由（自動マージ無効）は残る')
+})
+
+test('結合: 回復専用 merge-exec が head-moved 以外の理由を返したときは、従来どおりその summary を note に添える', async () => {
+  const { result } = await run(
+    () => ({ state: 'ready', summary: 'マージ条件充足', headSha: SHA }),
+    { mergeExecReply: () => ({ merged: false, reason: 'checks-not-green', summary: '独自の説明文', issueClosed: false }) },
+  )
+  const done = result.done.find((d) => d.issue === 2)
+  assert.ok(done.note.includes('独自の説明文'), done.note)
 })

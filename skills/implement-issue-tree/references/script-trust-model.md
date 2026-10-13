@@ -2,7 +2,7 @@
 
 本書は implement-issue-tree スキルの一部。全体は ../SKILL.md 参照。
 
-決定的な手順（`gh` / `git` / `du` 等のコマンド列と分類規則）をプロンプトの文章から切り出し、スキル同梱のスクリプトにして、サブエージェントには「コマンドを実行して出力を転記する」ことだけをさせる設計（Issue #603）の、**何を防ぎ、何を防がないか**を書く。第 1 弾の対象は読み取り専用の測定 2 本（残置 worktree のバイト測定・実ディスク空き容量）で、安全判定（マージ・push・削除）を含まない。安全判定を含むスクリプトを足す弾は、本書の前提を満たすか、満たさない部分を別の機構で補うことを、その弾の PR で示す。
+決定的な手順（`gh` / `git` / `du` 等のコマンド列と分類規則）をプロンプトの文章から切り出し、スキル同梱のスクリプトにして、サブエージェントには「コマンドを実行して出力を転記する」ことだけをさせる設計（Issue #603）の、**何を防ぎ、何を防がないか**を書く。第 1 弾の対象は読み取り専用の測定 2 本（残置 worktree のバイト測定・実ディスク空き容量）、第 2 弾の対象は monitor の観測と待機（`observe-pr.sh`）で、いずれも安全判定（マージ・push・削除）を含まない。安全判定を含むスクリプトを足す弾は、本書の前提を満たすか、満たさない部分を別の機構で補うことを、その弾の PR で示す。
 
 ## 構成
 
@@ -11,6 +11,7 @@
 | `args.skillDir` | スキルディレクトリ（`scripts/` の 1 つ上）の絶対パス。人間（起動手順）が渡す。形式だけをホストが検証する |
 | `scripts/run-verified.sh` | 実行前にスクリプトの SHA-256 を照合する launcher。`bash "<skillDir>/scripts/run-verified.sh" <sha256> <name>.sh …` で起動する（実行ビットに依存しない） |
 | `scripts/measure-residual-bytes.sh` / `measure-free-disk.sh` | 測定本体。入力はパスの一覧（標準入力）または 1 件（引数）。出力は 1 行の封筒 |
+| `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail`。出力は 1 行の封筒（`threads-detail` だけは外部由来の自由文を含む非信頼データで、封筒ではない）。`--wait` は有界の待機 |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
 | 生成物 `implement-issue-tree.js` の `SCRIPT_SHA256` | ビルダーが埋め込む期待ハッシュ。開発ファイルには置換前の目印を書き、`build-workflow.mjs` が置換する |
 | `verifySignedOutput`（ホスト） | 転記された封筒を再計算して照合する |
@@ -44,6 +45,24 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - **`du` / `df` 自体が返す値の正しさ**は測れない（ファイルシステム上の実値を信じる）。`du` の実失敗は `err` に数え、0 に畳み込まずに測定失敗として扱う。
 - **sha256sum / shasum が無い環境**では検証できない。launcher は exit 4 で起動せず、スクリプトも exit 3 で封筒を出さない。検証できないまま通すことはしない。
 
+## 観測スクリプト（第 2 弾）が何に使われ、何に使われないか
+
+`observe-pr.sh` の封筒は monitor エージェントの**助言的判定の材料**であり、マージ・クローズ・push・削除・イシューへの書き込みの可否には使われない（monitor の出力はマージ経路の入力にならない、という既存の性質を変えない。マージ可否は merge-exec が checks・HEAD sha・未解決スレッド数を自分で再取得して判定し、G0 がサーバー側強制を実測する）。
+
+| 観測 | 使い道 | ホストが封筒を照合して採用するか |
+|------|--------|--------------------------------|
+| `checks`（チェック総数 = check-run + commit status） | monitor が 3e・3 の観測状態表で使う。ホストは `state: timeout` かつ `checksTotal === 0` を conflicting（base 取り込み）へ再判定する | **する**。monitor が `checksObservation` に転記した封筒を `applyChecksObservation` が nonce・sha256・`inputSha256`・`mode`・`err` で照合し、通ったときだけ total を `checksTotal` に採用する。欠落・不正・取得失敗は `checksTotal` を省略する（従来の「取得失敗は省略」と同じ。timeout は 0 件再判定を受けず次ラウンドへ回る） |
+| `pr`（state・mergeable・headSha・bound） | monitor の MERGED / CLOSED / CONFLICTING の分岐と PR 照合（bound = 想定ブランチ・base・fork でない・closing issue） | しない（monitor が読むだけ。ホストの PR 照合 `prBindingProblem` は別経路で独立に行う） |
+| `required`（required context の不足件数） | autoMerge ラン専用の 3g。`ready` を返す前の助言的確認 | しない（発行元束縛は merge-exec (v-b) が独立に検証する。名前の存在確認は助言） |
+| `reviews`（外部 App のレビュー・check-run 件数） | cursor のレビュー到着待ち・外部 App の起動確認 | しない（merge-exec が `external-review-missing` を独立に判定する） |
+| `threads` / `threads-detail`（未解決スレッド） | unresolved-comments の判定と fix への指摘の受け渡し | しない（merge-exec が未解決スレッド数を自分で再取得する） |
+
+**payload は整数と ASCII の固定語彙・40 桁 16 進だけ**で、PR のコメント本文・チェック名・context 名・ログイン名のような外部由来の文字列を含めない。そのため canonical JSON の定義の差（キー順・エスケープ・非 ASCII）が問題にならず、スクリプト（`jq -cS`）とホスト（`canonicalJson`）の出力が一致することを `tests/observe-pr-host.test.mjs` が実走で固定する。`threads-detail` の自由文は非信頼データとして監視エージェントが読むだけで、プロンプトに戻す値（封筒）には入らない。
+
+**nonce は監視呼び出しごと・再試行ごとに別**にする（`monitorObserveSeq` の連番と試行番号を `boundaryNonce` の keyMaterial に含める）。1 回の呼び出しの中でエージェントが同じコマンドを再実行する待機（`pending` の繰り返し）は同じ nonce を使うが、それは同一呼び出しの再観測であって、別ラウンド・別試行の出力の流用ではない。流用した封筒は nonce の不一致で採用されない。
+
+**待機の回数の上限はスクリプトが `--attempt` で強制する**（範囲外は exit 2）。1 回の起動は内部 sleep 込みで 90 秒以内に収まり、エージェントは `pending` のたびに `--attempt` を 1 増やして同じコマンドを再実行する（最大 7 回 = およそ 10 分。現行の「最大 10 分」と同等）。ホストが 1 回ごとにエージェントを呼び直す設計にしなかった理由は `agent-call-budget.md` の「監視の待機」。エージェントが `--attempt` を進めずに繰り返すことは止められないが、その場合も 1 回の起動が有界なので、foreground の長い sleep（ハーネスが拒否する）にも無限ループにもならない。
+
 ## 測定値の使い方（なぜこの弾の自己申告で足りるか）
 
 残置バイト・空き容量の測定値は、**新規着手を止めるか（ディスク枯渇の防止）**、および**次回ラン開始時の 1 worktree あたり予約見積りの下限（クランプ済みの高水位）**にだけ使う。マージ可否・push・worktree の削除・PR/issue への書き込みの判定には使わない。偽の小さい値は着手を許す側に働き得るが、それが損なうのはローカルのディスク容量の保護で、リポジトリの内容・マージ・認証には影響しない。逆に偽の大きい値は着手を止める側（安全側）に働く。したがって、この弾の信頼水準は「事故を検出できる」で足りる。**悪意のあるエージェントがディスク枯渇防止の弁を迂回できる**ことは受け入れた制約である（件数軸の元になる `git worktree list` の転記も同じ自己申告である）。
@@ -59,7 +78,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 ## 運用
 
-- `args.skillDir` は呼び出し側（起動手順）が渡す。配布後、既存の呼び出し手順は更新が必要になる。未指定で測定を使うラン（`dryRun` でなく `maxResidualWorktreeBytes > 0`）は起動時エラーで停止する。
+- `args.skillDir` は呼び出し側（起動手順）が渡す。配布後、既存の呼び出し手順は更新が必要になる。`dryRun` でないランで未指定なら起動時エラーで停止する（第 2 弾から、monitor が毎回 `observe-pr.sh` を使うため、`maxResidualWorktreeBytes: 0` のランも対象）。named workflow（`{name: "implement-issue-tree"}`）で起動する場合も同じ。
 - 同期で届くのはスキルディレクトリ全体（Workflow とスクリプトを同じコミットで）なので、通常は版ずれは起きない。`run-verified.sh` が exit 3 を出したときは、スキルの同期が途中か、スクリプトがローカルで変更されている。同期し直す。
 - 新しいスクリプトを足すとき: `scripts/` 直下に `*.sh`（小文字・数字・`-`・`.`）で置き、`SCRIPT_SHA256` に目印を足し、`bash <skillDir>/scripts/run-verified.sh` 経由で起動し、封筒で返す。冒頭コメントに入力・出力・終了コードを書く。`bash 3.2`（macOS）と GNU の両方で動く書き方に限る（`paste`・`bc`・GNU 専用フラグ・`date -d`・`sed -i`・`mapfile`・連想配列を使わない）。
 

@@ -1934,7 +1934,7 @@ description:'手順 2 で取得した HEAD sha に対するチェック総数（
 checksObservation:{
 type:'object',
 required:['nonce','payload','sha256'],
-description:'手順 2 で最後に実行した checks コマンドの標準出力 1 行 JSON を観測値のまま転記する（再計算・補完・修正をしない）。ホストが再計算して照合する',
+description:'最後に実行した checks コマンドの標準出力 1 行 JSON を観測値のまま転記する（再計算・補完・修正をしない）',
 properties:{
 nonce:{type:'string'},
 sha256:{type:'string'},
@@ -3737,7 +3737,7 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'f0ac3399501b2fb501f6c1d9d7bee3875523169436be3976c398546b7558269e',
+'measure-residual-bytes.sh':'ab527279ba185bc1aabd19411f16acd42491d7d39840b153d68851175e21e29f',
 'measure-free-disk.sh':'13aea5d9ef3fc787d7a333740bec814a5ffdcfa30b3a8e08c2ffb00127c66036',
 'observe-pr.sh':'91d0b8f0b32717c7bdea4018bb800c799ceb21e34b65d490985310311fa9530c',
 }
@@ -3980,6 +3980,7 @@ freeKib:{type:'integer',minimum:0,description:'df -Pk の Available 列（KiB）
 err:{type:'integer',minimum:0,description:'測定失敗なら 1（成功時 0）'},
 },
 }
+
 
 
 
@@ -5023,9 +5024,9 @@ return{result:total===undefined?rest:{ ...rest,checksTotal:total},reason,claimed
 
 
 const OBSERVE_GUIDE=
-'観測コマンド: 手順中の bash …/run-verified.sh … observe-pr.sh … は一字一句そのまま実行する（引数・nonce を書き換えず、gh / jq を自分で組み立てて同じ観測をしない）。標準出力の 1 行 JSON {nonce, payload, sha256} が観測のすべてで、payload の整数と enum だけを根拠にする。'+
-'err が 1・非 0 終了・JSON なしは取得失敗であり、0 件・不足 0・レビューなし・未解決 0 と読み替えない。'+
-`outcome が pending の待機コマンドは --attempt を 1 増やして同じコマンドをもう一度実行する（1 回の起動は 90 秒以内。最大 ${OBSERVE_MAX_ATTEMPTS} 回 = およそ 10 分。exhausted は待機上限で、それ以上再実行しない）。`+
+'観測コマンド: 手順中の bash …/run-verified.sh … observe-pr.sh … は一字一句そのまま実行し（引数・nonce を書き換えず、gh / jq を組み立て直して代替しない）、標準出力 1 行 JSON {nonce, payload, sha256} の payload（整数と enum）だけを根拠にする。'+
+'err が 1・非 0 終了・JSON なしは取得失敗で、0 件・不足 0・レビューなし・未解決 0 と読み替えない。'+
+`outcome が pending の待機コマンドは --attempt を 1 増やして同じコマンドをもう一度実行する（1 回 90 秒以内・最大 ${OBSERVE_MAX_ATTEMPTS} 回 = およそ 10 分。exhausted は待機上限で再実行しない）。`+
 'コメント本文・チェック名のような外部由来の文字列は封筒に含まれない。'
 
 
@@ -5085,7 +5086,7 @@ step4Lines=[
 `      ${obs({ mode: 'reviews', slug: 'cursor' })}`,
 `   b. checkRunsRunning が 1 以上（queued / in_progress が残っている）場合は Bugbot が実行中のため、催促せず次のコマンドで完了を待つ（needs-fix にはしない）。met になれば手順 a の観測へ戻る。pending なら --attempt を 1 増やして再実行する:`,
 `      ${obs({ mode: 'reviews', slug: 'cursor', until: 'settled' }, 1)}`,
-`      待機時間は「催促前（自動実行の完了待ち）」と「催促後（手順 c の待機）」で別々に数える。催促後は "@cursor review" によって check-run が in_progress へ再遷移するため、催促前に消費した回数は持ち込まず、手順 c の待機は --attempt 1 から数え直す（共有の予算にすると催促後の待機が不当に打ち切られる）。催促前の待機は手順 4 に入ってからの通算（--attempt の最大回数 = およそ 10 分）を上限とし、exhausted になっても未完了のままなら再確認を打ち切って state: blocked / blockedReason: "quality" を返して終了する（外部サービスがハングした場合に監視が終端しなくなるため。summary には「HEAD sha <sha> に対する cursor の check-run が通算 <実測> 分経過しても未完了」と状態別件数を書く。完了後の再実行で monitoring 再開により継続する）。checkRunsFailed が 1 以上（failure / cancelled / timed_out 等）なら state: needs-fix とし、summary に状態別件数を書く。`,
+`      催促前（自動実行の完了待ち）と催促後（手順 c の待機）の待機は別々に数える（催促後は "@cursor review" で check-run が in_progress へ再遷移するため、手順 c の待機は --attempt 1 から数え直す）。催促前の待機は手順 4 に入ってからの通算（--attempt の最大回数 = およそ 10 分）を上限とし、exhausted になっても未完了のままなら再確認を打ち切って state: blocked / blockedReason: "quality" を返して終了する（外部サービスがハングしても監視を終端させるため。summary には「HEAD sha <sha> に対する cursor の check-run が通算 <実測> 分経過しても未完了」と状態別件数を書く。完了後の再実行で monitoring 再開により継続する）。checkRunsFailed が 1 以上（failure / cancelled / timed_out 等）なら state: needs-fix とし、summary に状態別件数を書く。`,
 `   c. HEAD sha に対する cursor[bot] レビューがまだない（reviews が 0）場合（check-run が完了済みで存在する場合も含む）: Bugbot は自動実行では指摘 0 件のときレビューを投稿しないため、レビュー不在を「指摘なし」と解釈してはならない。HEAD push 以降に "@cursor review" コメントが未投稿であることを確認したうえで gh pr comment ${impl.prNumber} --body "@cursor review" を 1 回だけ投稿し、次のコマンドでレビューの到着を最大 10 分待つ（明示依頼の場合は指摘 0 件でも「新規指摘なし」のレビューが投稿される）。met になれば手順 d へ。pending なら --attempt を 1 増やして再実行する:`,
 `      ${obs({ mode: 'reviews', slug: 'cursor', until: 'review' }, 1)}`,
 `      exhausted でも reviews が 0 のまま HEAD sha に対するレビューを確認できない場合は、再投稿せず state: blocked / blockedReason: "quality" を返して終了する（レビュー到着後の再実行で継続できるため回復可能。「レビューなし」とみなして先へ進んではならない。外部レビューゲートが導入されたリポジトリで App の障害・遅延・起動失敗時にゲートを迂回することになるため）。summary には「HEAD sha <sha> に対する cursor[bot] レビューが待機上限内に到着しなかった」と実測の待機時間・催促の有無を書く（次回実行時の monitoring 再開でレビュー到着後に自動継続される）。`,
@@ -5122,7 +5123,7 @@ branchOk
 
 
 `1c. state が OPEN の場合のみ判定する: mergeable が "CONFLICTING" なら、PR は base とコンフリクトしており test merge commit が作られないため pull_request トリガーの CI check-run が構造的に起動しない（待っても収束しない）。手順 2 の gh pr checks --watch へは進まず、先に手順 5 の reviewThreads 走査（件数と内容の取得）を実行して未解決スレッドがあれば unresolvedComments 配列に載せたうえで state: conflicting を返す（品質問題ではないため fix 予算を消費しない base 取り込み専用エージェントへ回る）。summary には「mergeable: CONFLICTING（実測値）。base 取り込みとコンフリクト解消が必要。コンフリクト PR は pull_request トリガー CI が起動しない」と書く。mergeable が "UNKNOWN" の場合は GitHub 側の算出待ちのため、次のコマンドで再取得する（25 秒間隔で最大 4 回観測する。再取得のたびに state と mergeable の両方を確認する。state が OPEN でなくなっていれば手順 1 の該当分岐に従う。リトライの途中で state が OPEN のまま mergeable が "CONFLICTING" に確定した場合は、それ以上リトライせず本手順冒頭の CONFLICTING 経路 — reviewThreads 走査を先に行ったうえで state: conflicting — へ回す）:\n   ${prCmd(1)}\n   outcome が pending（上限まで UNKNOWN のまま）なら UNKNOWN のまま通常フロー（手順 2）へ進む（UNKNOWN を CONFLICTING と扱って fix 予算を空費しない）。`,
-`2. まず --watch に入る前に、手順 1 で取得した HEAD sha に対するチェック総数を次のコマンドで取得する（Issue #479 / #480）。payload.total は check-run 件数（checkRuns）と commit status 件数（statuses）の合計（gh pr checks・merge-exec と同じ集計定義。check-run を作らず commit status のみを発行する CI（外部 CI サービス等）を使うリポジトリで、正常なチェックが存在するのに 0 件と誤判定しないため）:\n   ${obs({ mode: 'checks' })}\n   err が 0 の場合のみ total を確定値として扱い checksTotal として返却に含める。err が 1（どちらか一方でも取得失敗）の場合は取得失敗として扱い、取得失敗時は checksTotal を省略し、0 を返してはならない（0 件と同一視すると、実際にはチェックが動いている PR をコンフリクト扱いへ落としてしまう）。返却の checksObservation には、最後に実行した上記 checks コマンド（手順 3e の待機つきを含む）の標準出力の nonce・payload・sha256 を観測値のまま転記する（再計算・補完・修正をしない。ホストが照合し、通らなければ checksTotal を採用しない）。確定値が 0 件なら gh pr checks --watch へは進まず、直ちに手順 3e（有界待機 + mergeable 再判定）へ直行する（コンフリクト PR は test merge commit が作られず pull_request トリガの check-run が構造的に 0 件のままになるため、--watch で待っても収束しない）。確定値が 1 件以上の場合、および取得に失敗した場合は次へ進む（取得失敗は 0 件扱いにせず、従来どおり --watch と手順 3 の実測に委ねる）: gh pr checks ${impl.prNumber} --watch --interval 60 で全チェック完了まで監視する（Bash の timeout に 600000 を指定し、コマンドがタイムアウトしたら同コマンドを再実行。再実行は 4 回まで = 最長およそ 40 分）。gh pr checks --watch がチェック不在で即時に非ゼロ終了する場合がある。これを「監視完了」とみなさず、手順 3 の総数確認へ進む。再実行 4 回を使い切っても完了しない場合も、ここで timeout を返さず手順 3 の総数確認へ進む（手順 3 を経ずに timeout を返すと、チェックが 0 件のまま監視上限だけを消費して収束しない経路が残るため。Issue #479）。`,
+`2. まず --watch に入る前に、手順 1 で取得した HEAD sha に対するチェック総数を次のコマンドで取得する（Issue #479 / #480）。payload.total は check-run 件数（checkRuns）と commit status 件数（statuses）の合計（gh pr checks・merge-exec と同じ集計定義。commit status のみを発行する CI でも 0 件と誤判定しないため）:\n   ${obs({ mode: 'checks' })}\n   err が 0 の場合のみ total を確定値として扱い checksTotal として返却に含める。err が 1（どちらか一方でも取得失敗）の場合は取得失敗として扱い、取得失敗時は checksTotal を省略し、0 を返してはならない（0 件と同一視すると、実際にはチェックが動いている PR をコンフリクト扱いへ落としてしまう）。返却の checksObservation には、最後に実行した上記 checks コマンド（手順 3e の待機つきを含む）の標準出力の nonce・payload・sha256 を観測値のまま転記する（再計算・補完・修正をしない。ホストが照合し、通らなければ checksTotal を採用しない）。確定値が 0 件なら gh pr checks --watch へは進まず、直ちに手順 3e（有界待機 + mergeable 再判定）へ直行する（コンフリクト PR は test merge commit が作られず pull_request トリガの check-run が構造的に 0 件のままになるため、--watch で待っても収束しない）。確定値が 1 件以上の場合、および取得に失敗した場合は次へ進む（取得失敗は 0 件扱いにせず、従来どおり --watch と手順 3 の実測に委ねる）: gh pr checks ${impl.prNumber} --watch --interval 60 で全チェック完了まで監視する（Bash の timeout に 600000 を指定し、コマンドがタイムアウトしたら同コマンドを再実行。再実行は 4 回まで = 最長およそ 40 分）。gh pr checks --watch がチェック不在で即時に非ゼロ終了する場合がある。これを「監視完了」とみなさず、手順 3 の総数確認へ進む。再実行 4 回を使い切っても完了しない場合も、ここで timeout を返さず手順 3 の総数確認へ進む（手順 3 を経ずに timeout を返すと、チェックが 0 件のまま監視上限だけを消費して収束しない経路が残るため。Issue #479）。`,
 `3. watch 完了後、gh pr checks ${impl.prNumber} の出力で全チェックの結論を列挙して確認する。「watch が終わった」だけでは合格にしない。まず手順 2 のチェック総数（確定値 / 取得失敗）と列挙結果の組を次の観測状態に確定する。3e・3g・7・返却はこの表だけを根拠とし、判定は状態 2 → 3 → 1 の順に最初に当たる 1 つへ確定する（3 状態は排他）。列挙結果は gh pr checks の終了コードではなく出力で分類する: チェック行が 1 行以上あれば終了コード 1（失敗あり）・8（pending あり）でも「列挙 N 件」（a・b が failure / pending を判定する）、行が無く「no checks reported」なら「列挙 0 件」、行が無くそれ以外（認証・通信・API エラー等）なら「読取不能」:`,
 '   - 状態 2「確定 0 件」: 手順 2 確定値が 0（列挙結果は問わない。REST の確定値を権威とする）、または手順 2 取得失敗かつ列挙 0 件 → 手順 3e。',
 '   - 状態 3「不整合・読取不能」（状態 2 に当たらない場合のみ）: 手順 2 確定値が 1 件以上で列挙 0 件または読取不能、または手順 2 取得失敗で読取不能 → a・b を満たしたとみなさず、緑にも 0 件にも倒さない。30 秒間隔で最大 3 回、手順 2 の集計と gh pr checks の両方を取り直して状態を判定し直し、状態 1 / 2 に戻れば該当の行き先へ合流する。3 回後も状態 3 なら state: blocked / blockedReason: "quality" を返す（ready・timeout・手順 3e に倒さない）。summary は件数のみ、checksTotal は手順 2 の確定値があるときだけ載せ 0 は返さない。',
@@ -8374,7 +8375,11 @@ const recoveryOnlyReason=[
 ?['直前の独立確認では PR が MERGED と判定されたが、マージ実行エージェントの再取得ではマージ済みと確認できなかった。判定のずれの可能性があるため次回実行で再確認する']
 :[]),
 ].join('。')||'回復専用経路で停止した'
-return await failMergeTerminal(capText(`${recoveryOnlyReason}（PR のマージ済みクローズ回復のみ試行したが PR はマージ済みではなかった: ${execSummaryText}）`),'blocked')
+
+
+
+const notMergedDetail=execReason==='head-moved'?'PR は未マージのままだった':`PR はマージ済みではなかった: ${execSummaryText}`
+return await failMergeTerminal(capText(`${recoveryOnlyReason}（PR のマージ済みクローズ回復のみ試行したが${notMergedDetail}）`),'blocked')
 }else if(execReason==='unresolved-threads'){
 
 
