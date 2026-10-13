@@ -3809,10 +3809,10 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'4ed344695d84f241805f8db02263b0feddf478962e559e13d4d62e8d46388a9d',
-'measure-free-disk.sh':'1f9e4fb2a0991ea86235d4a9955e00c32f5ff574873f681c9eb8f7c55a4c98af',
-'observe-pr.sh':'ee978d117721a57d390c099cfef72096154dc8af727b3cf832b4d136a5ba56ab',
-'base-merge.sh':'53e17f0a18ceb407a3fb38f1b3bcb19e4213ac1d00a87035bd9459af44692e30',
+'measure-residual-bytes.sh':'02f28d582e9f853172f3d779bc52cf128a592a577d2d273aaac71446b47f99b2',
+'measure-free-disk.sh':'934bb1a356d163b342dca4a7d20a26f14b2cd4ac5082224e02a987f5e550dba3',
+'observe-pr.sh':'280cbebd54389d3a847749cf4c97dfcf50c71be6cde846b6a072166bac838f1c',
+'base-merge.sh':'91b5915b07a2550a26eedb56baffd8724fab8256d346d7d80198e8e9503078cf',
 }
 
 

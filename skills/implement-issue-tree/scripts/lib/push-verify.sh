@@ -28,11 +28,10 @@
 #
 # このファイルは単体実行しない。run-verified.sh のハッシュ照合は scripts/lib/*.sh も対象に含む
 # （ここを書き換えると、これを読み込む全スクリプトのハッシュが変わる）。
+# 読み込み済みを示す変数でのガードは置かない: 環境から継承した変数でこのファイルの定義が飛ばされ、export -f した偽の関数が使われるのを防ぐ
+#（定義だけのファイルなので毎回読み直して構わない）。
 
 # shellcheck disable=SC2034  # PV_SHA / PV_OUTCOME は source 元のスクリプトが読む
-[[ -n "${PUSH_VERIFY_LIB_LOADED:-}" ]] && return 0
-PUSH_VERIFY_LIB_LOADED=1
-
 PV_SHA=""
 PV_OUTCOME=""
 

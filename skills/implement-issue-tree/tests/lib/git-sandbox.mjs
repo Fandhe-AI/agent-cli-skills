@@ -14,7 +14,7 @@
 //   一切呼んでいない」ことを呼び出し履歴で確かめられる。
 // 偽の `gh`: tests/lib/gh-observe-stub.mjs（pr view の応答を経路キー prview で設定する）。
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { trackTmp } from './tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -96,15 +96,41 @@ function commit(dir, file, content, message) {
 //   branchBehindOnly  ブランチに独自コミットが無く、main だけが進んでいる（ブランチの先頭が base に含まれる）
 //   gitlinkConflict   サブモジュールのポインタ（gitlink）を main とブランチが別のコミットへ変える（マージでコンフリクト）
 //   submodule         実体のあるサブモジュール sub を持つ。wt は初期化済みで、dirtySubmodule() で未コミットの変更を作れる
+//
+// 作り方（速度）: opts の組ごとに、origin / seed / wt（と subrepo）だけを持つ『テンプレート』を 1 回だけ実 git で作り、
+// makeSandbox はそれを新しい一時ディレクトリへコピーして使う（実 git の呼び出し約 15 回 ≒ 0.5 秒 → コピー数十ミリ秒）。
+// コピー後に直すのは seed と wt の .git/config にある origin の URL（テンプレートの絶対パス）だけで、テストごとに別の
+// ディレクトリ・別のリポジトリ状態になる（テスト間は独立。互いの push・設定変更はコピー先だけに及ぶ）。
+// サブモジュールの url（テンプレートの subrepo）と .gitmodules のコミット済みの値は書き換えない（書き換えると .gitmodules が
+// 未コミットの変更になり、worktree が clean でなくなる）。テンプレートは同じプロセスの間だけ trackTmp で保持し、終了時に消える。
+const templates = new Map()
+
 export function makeSandbox(opts = {}) {
   const { conflict = false, baseAdvanced = true, branchHasBase = false, branchBehindOnly = false, gitlinkConflict = false, submodule = false } = opts
+  const key = JSON.stringify({ conflict, baseAdvanced, branchHasBase, branchBehindOnly, gitlinkConflict, submodule })
+  let tpl = templates.get(key)
+  if (tpl === undefined) {
+    tpl = buildTemplate({ conflict, baseAdvanced, branchHasBase, branchBehindOnly, gitlinkConflict, submodule })
+    templates.set(key, tpl)
+  }
   const root = realpathSync(trackTmp(mkdtempSync(join(tmpdir(), 'iit-base-merge-'))))
+  cpSync(tpl, root, { recursive: true, preserveTimestamps: true })
+  for (const repo of ['seed', 'wt']) {
+    const cfg = join(root, repo, '.git', 'config')
+    const text = readFileSync(cfg, 'utf8')
+    const from = `${tpl}/origin.git`
+    if (!text.includes(from)) throw new Error(`${cfg} にテンプレートの origin URL が無い`)
+    writeFileSync(cfg, text.split(from).join(`${root}/origin.git`))
+  }
+  return sandboxOf(root)
+}
+
+function buildTemplate({ conflict, baseAdvanced, branchHasBase, branchBehindOnly, gitlinkConflict, submodule }) {
+  const root = realpathSync(trackTmp(mkdtempSync(join(tmpdir(), 'iit-base-merge-tpl-'))))
   const origin = join(root, 'origin.git')
   const seed = join(root, 'seed')
   const wt = join(root, 'wt')
-  const shimDir = join(root, 'shim')
-  const tmp = join(root, 'tmp')
-  for (const d of [origin, seed, shimDir, tmp]) mkdirSync(d, { recursive: true })
+  for (const d of [origin, seed]) mkdirSync(d, { recursive: true })
   git(origin, 'init', '-q', '--bare', '-b', BASE)
   git(seed, 'init', '-q', '-b', BASE)
   commit(seed, 'a.txt', 'line1\nline2\n', 'init')
@@ -153,6 +179,16 @@ export function makeSandbox(opts = {}) {
   git(wt, 'config', 'user.name', 'test')
   git(wt, 'config', 'user.email', 'test@example.com')
   if (submodule) git(wt, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '-q')
+  return root
+}
+
+function sandboxOf(root) {
+  const origin = join(root, 'origin.git')
+  const seed = join(root, 'seed')
+  const wt = join(root, 'wt')
+  const shimDir = join(root, 'shim')
+  const tmp = join(root, 'tmp')
+  for (const d of [shimDir, tmp]) mkdirSync(d, { recursive: true })
   writeFileSync(join(shimDir, 'git'), SHIM)
   chmodSync(join(shimDir, 'git'), 0o755)
   writeFileSync(join(shimDir, 'calls.log'), '')
