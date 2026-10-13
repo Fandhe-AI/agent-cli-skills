@@ -172,4 +172,6 @@ export const MUTATIONS = [
   { id: 'K26-classify-args-not-stdin', file: OBS_LIB, from: `| jq -r "\${CHECKS_JQ_DEFS}"'\n    def run_bucket:`, to: `| jq -r --argjson pad "\${1:-null}" "\${CHECKS_JQ_DEFS}"'\n    def run_bucket:`, tests: CLASSIFY, note: '分類の入力を引数（--argjson）でも渡す（巨大入力が 1 引数・全引数の上限に当たり、CI green でも monitor が止まる）' },
   { id: 'K27-statuses-first-page-only', file: OBS, from: "jq -sec '[.[].statuses[] | {id, context, state}]'", to: "jq -sec '[.[0].statuses[] | {id, context, state}]'", tests: SETTLED, note: 'commit status の 2 ページ目以降を捨てる（100 件超の status を持つ CI で未完了・失敗を見落とす）' },
   { id: 'K28-status-no-paginate', file: OBS, from: 'gh_api --paginate "${repo_path}/commits/${HEAD}/status" ||', to: 'gh_api "${repo_path}/commits/${HEAD}/status" ||', tests: SETTLED, note: 'combined status を 1 ページだけ取る（--paginate を外す）' },
+  { id: 'K29-3e-confirmed-total-not-updated', file: SRC, from: '3e の met で確定値を更新する: その total を直ちに手順 2 の確定値へ反映する', to: '3e の met の total は参考値にとどめ、手順 2 の確定値は変えない', tests: ['required-context-presence.test.mjs'], note: '3e の met で手順 2 の確定値を更新しない（確定値 0 のまま状態 2 が最優先になり 3e → --attempt 1 を繰り返し得る）' },
+  { id: 'K30-3e-roundtrip-unbounded', file: SRC, from: '3e → 手順 3 の往復は 1 ラウンドで最大 1 回（往復は 1 回）で、2 回目の 3e には入らない。', to: '', tests: ['required-context-presence.test.mjs'], note: '3e → 手順 3 の往復回数の上限の文を外す' },
 ]

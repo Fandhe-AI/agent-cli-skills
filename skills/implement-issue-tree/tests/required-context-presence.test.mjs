@@ -336,3 +336,21 @@ test('#586 references/automerge-design.md は観測状態表（3 状態）と同
   }
   assert.ok(!line.includes('確定値で 3g を実行し、3e へは回さない'), '旧: total 0 でも確定値で 3g を走らせる記述が残っている')
 })
+
+test('#603-8 3e が起動を確認した時点（met・total 1 以上）で手順 2 の確定値を更新し、往復は 1 回で完了待ちを繰り返さない', () => {
+  const p = monitorPrompt(item, impl, [], true, true)
+  const s3e = p.slice(p.indexOf('   e. チェック総数が 0 件'), p.indexOf('   f. '))
+  const upd = s3e.indexOf('3e の met で確定値を更新')
+  const back = s3e.indexOf('手順 3 へ戻り、--until settled のコマンドを --attempt 1 から実行')
+  const once = s3e.indexOf('往復は 1 回')
+  // 更新は手順 3 へ戻るより前（手順 3 の結果を待たない）。往復の上限の文は戻る指示の後
+  assert.ok(upd >= 0 && back > upd, '確定値の更新が手順 3 へ戻る指示より前にない')
+  assert.ok(s3e.slice(upd, back).includes('手順 2 の確定値へ反映'))
+  assert.ok(s3e.slice(upd, back).includes('手順 3 の結果を待たない'))
+  assert.ok(once > back, '往復は 1 回の文が戻る指示の後にない')
+  assert.ok(s3e.includes('2 回目の 3e には入らない'))
+  assert.ok(s3e.includes('どの経路でも --attempt 1 からの完了待ちを繰り返さない'))
+  // 状態表（手順 3 冒頭）は 3e より前にあり、状態 2 が最優先のまま。更新後は状態 2 に戻らない
+  assert.ok(p.indexOf('   - 状態 2「') < p.indexOf('   e. チェック総数が 0 件'))
+  assert.ok(s3e.includes('確定値 1 件以上なので状態 2 には戻らない'))
+})
