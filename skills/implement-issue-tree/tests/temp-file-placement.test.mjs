@@ -277,10 +277,8 @@ test('formatMainWorktreeUntrackedWarning: バッククォート・$ を含むパ
 test('State/worktree 系の主要プロンプト（loadState・updateState merge/cleanup・state:init-all・state:high-water・sweep・orphan-scan・record-count）は TEMP_FILE_POLICY を個別に含む', () => {
   const labelsAndWindows = [
 ['状態ファイル読み込みタスク。', 600],
-    ['const mergePromptText = [', 400],
+    ['function stateWritePrompt(', 600],
     ["`worktree / branch 掃除タスク（状態ファイルの JSON マージは別エージェントが実施済み）。`", 400],
-    ["状態ファイル更新タスク（トップレベルフィールド perWorktreeByteReserveHighWater・", 400],
-    ["状態ファイル一括初期化タスク。", 400],
     ["'worktree スイープタスク（ラン終了時の残骸回収）。'", 500],
     ["'git worktree 一覧の取得タスク（読み取り専用。削除・変更は一切行わない）。'", 400],
     ["'git worktree レコード総数の取得タスク（読み取り専用。削除・変更は一切行わない）。'", 400],

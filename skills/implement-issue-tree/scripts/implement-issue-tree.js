@@ -3446,18 +3446,16 @@ const result=await enqueueStateWrite(async()=>{
 try{
 
 
-const mergePromptText=stateWritePrompt(
+const{result:mergeResult,outputMissing:mergeOutputMissing}=await runStateAgent(
+stateWritePrompt(
 '状態ファイル更新タスク（JSON マージのみ。worktree / branch の削除は行わない）。',
 'merge',
 '',
 JSON.stringify([{numbers:[issueNumber],patch}]),
 `state:${issueNumber}`,
+),
+{label:`state:update:#${issueNumber}`,schema:STATE_WRITE_SCHEMA,isValid:isStateWriteValid},
 )
-const{result:mergeResult,outputMissing:mergeOutputMissing}=await runStateAgent(mergePromptText,{
-label:`state:update:#${issueNumber}`,
-schema:STATE_WRITE_SCHEMA,
-isValid:isStateWriteValid,
-})
 const mergeOk=mergeResult?.ok===true
 if(mergeOutputMissing){
 log(`⚠️ 状態ファイル更新（issue #${issueNumber}）: JSON マージエージェントが haiku / sonnet いずれも StructuredOutput を返さなかった`)
