@@ -115,6 +115,50 @@ wr_start_matches() {
   [ -n "${a}" ] && [ "${a}" = "${b}" ]
 }
 
+# `kill -0 <pid>` の結果を語にする。$1 = 終了コード、$2 = LC_ALL=C で得たエラーメッセージ。標準出力:
+#   ok（成功 = 存在する）/ esrch（No such process = 存在しないと肯定的に言えた）/ eperm（Operation not permitted = 存在する。
+#   他ユーザーのプロセス）/ other（それ以外のメッセージ。判定不能）
+wr_kill_class() {
+  if [ "$1" = 0 ]; then
+    echo ok
+    return 0
+  fi
+  case "$2" in
+    *'No such process'*) echo esrch ;;
+    *'Operation not permitted'*) echo eperm ;;
+    *) echo other ;;
+  esac
+}
+
+# `ps -p <pid> -o pid=` の結果を語にする。$1 = 自己確認（自分の pid `ps -p $$ -o pid=` の出力。空なら ps は使えない）、
+# $2 = 対象 pid の終了コード、$3 = 対象 pid の出力。標準出力: found（終了コード 0 で出力あり）/ absent（自己確認が通り、
+# 終了コード 1・出力空）/ unusable（それ以外。ps が無い・失敗・busybox のように -p を持たない、など）
+wr_ps_class() {
+  if [ "$2" = 0 ] && [ -n "$3" ]; then
+    echo found
+  elif [ -n "$1" ] && [ "$2" = 1 ] && [ -z "$3" ]; then
+    echo absent
+  else
+    echo unusable
+  fi
+}
+
+# 3 つの観測から pid のプロセスの生死を決める。$1 = kill（ok / esrch / eperm / other）、$2 = ps（found / absent / unusable）、
+# $3 = proc（present / absent / unavailable）。標準出力: alive / dead / unknown。
+# 規則: どれか 1 つでも「存在する」（ok・eperm・found・present）と言えば alive。存在すると言う観測が無く、少なくとも 1 つが
+# 肯定的に「存在しない」（esrch・absent）と言ったときだけ dead。それ以外（観測不能・エラー・未知の語）は unknown。
+# 呼び出し側は unknown を生存扱い（保持）にする。ps の absent は ps の自己確認が通ったときだけ呼び出し側が出す
+wr_pid_state() {
+  case "$1" in ok | eperm) echo alive; return 0 ;; esac
+  case "$2" in found) echo alive; return 0 ;; esac
+  case "$3" in present) echo alive; return 0 ;; esac
+  if [ "$1" = esrch ] || [ "$2" = absent ] || [ "$3" = absent ]; then
+    echo dead
+  else
+    echo unknown
+  fi
+}
+
 # lock の扱い。$1 = locked か（0/1）、$2 = pid（wr_lock_pid の結果。空なら Claude Code の形ではない）、$3 = その pid のプロセスが
 # 生きているか（0/1。観測できなければ 1 = 生きていると見なす。start つきの lock では start が一致する同じプロセスか）。
 # 標準出力: none（lock なし）/ unlock（Claude Code の形で pid が死んでいる・pid が再利用されている）/

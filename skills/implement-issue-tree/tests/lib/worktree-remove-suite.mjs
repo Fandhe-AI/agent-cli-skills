@@ -311,6 +311,55 @@ export function registerWorktreeRemoveTests(bash) {
     assert.ok(real)
   })
 
+  // 死亡を肯定的に確定できないとき（観測不能・エラー）は生存扱いで保持する。pid 1 は他ユーザーのプロセスで kill -0 が EPERM になる（root では成功）
+  test(`${tag} lock: kill -0 が EPERM・ps が使えない（失敗・127・自己確認が通らない）・/proc が無い、でも生存を確認できないだけなら保持する`, () => {
+    const repo = makeRepo()
+    const shim = join(repo.root, 'psshim2')
+    mkdirSync(shim)
+    for (const [name, body] of [['fail', 'exit 1'], ['notfound', 'exit 127'], ['empty', 'exit 0'], ['err2', 'exit 2']]) {
+      writeFileSync(join(shim, 'ps'), `#!/bin/sh\n${body}\n`, { mode: 0o755 })
+      const env = { PATH: `${shim}:${process.env.PATH}` }
+      for (const mode of ['superseded', 'discard']) {
+        const w = repo.addWorktree(`eperm-${name}-${mode}`)
+        repo.git(repo.main, 'worktree', 'lock', '--reason', lockReason(1), w.path)
+        const r = run(repo, ['remove', '--mode', mode, '--path', w.path], { env })
+        assert.deepEqual([name, mode, r.result.worktree, r.result.unlocked], [name, mode, 'retained-locked', false], JSON.stringify(r.result))
+        assert.ok(existsSync(w.path))
+      }
+    }
+  })
+
+  // pid 9999999999 は kill -0 が「No such process」ではなく引数エラーになる（判定不能）。観測のうち肯定的に「無い」と言えるのは ps（正常なとき）と /proc（Linux）だけ
+  test(`${tag} lock: kill -0 が判定不能のとき、壊れた ps と /proc の不在だけでは外さず、正常な ps が「無い」と言えば外す`, () => {
+    const repo = makeRepo()
+    const broken = join(repo.root, 'psshim4')
+    mkdirSync(broken)
+    writeFileSync(join(broken, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    const reason = lockReason('9999999999')
+    const hasProc = existsSync('/proc/self')
+    const w1 = repo.addWorktree('unknown-brokenps')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', reason, w1.path)
+    const r1 = run(repo, ['remove', '--mode', 'superseded', '--path', w1.path], { env: { PATH: `${broken}:${process.env.PATH}` } })
+    // /proc が見える Linux では /proc/<pid> の不在が肯定的な「無い」になる。見えない環境（macOS）では保持
+    assert.equal(r1.result.worktree, hasProc ? 'removed' : 'retained-locked', JSON.stringify(r1.result))
+    const w2 = repo.addWorktree('unknown-goodps')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', reason, w2.path)
+    const r2 = run(repo, ['remove', '--mode', 'superseded', '--path', w2.path])
+    assert.deepEqual([r2.result.worktree, r2.result.unlocked], ['removed', true], JSON.stringify(r2.result))
+  })
+
+  test(`${tag} lock: ps が壊れていても kill -0 が ESRCH なら死亡と確定して外す`, () => {
+    const repo = makeRepo()
+    const shim = join(repo.root, 'psshim3')
+    mkdirSync(shim)
+    writeFileSync(join(shim, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    const w = repo.addWorktree('esrch-brokenps')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', lockReason(deadPid()), w.path)
+    const r = run(repo, ['remove', '--mode', 'superseded', '--path', w.path], { env: { PATH: `${shim}:${process.env.PATH}` } })
+    assert.deepEqual([r.result.worktree, r.result.unlocked], ['removed', true], JSON.stringify(r.result))
+    assert.ok(!existsSync(w.path))
+  })
+
   test(`${tag} lock: \`claude session …\` の形も agent と同じ規則（pid が生きていれば保持、死んでいれば外して消す）`, () => {
     const repo = makeRepo()
     const live = repo.addWorktree('live')

@@ -3743,14 +3743,14 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'acaead23d96c6a0e0aeabde061f3f8ff159adff924248a8270872a0b60baf5fa',
-'measure-free-disk.sh':'7b8e372a7890b303f1df2f62fea0798a58d24441780610c8df4b3472d3be133c',
-'observe-pr.sh':'78823f0874b68a91657cae985223f5d1458fa73029af32f061fabe5e7d0d5fff',
-'base-merge.sh':'5abb9b1d209ea3e8ffe318da34bf3291635b7667cb795ded1c688fc86904df76',
-'pr-push.sh':'d5810f37758d1c0ed3eddbc2ba6b0a94ff9c39fbbd03cc8192d46fe99b94e9ba',
-'state.sh':'7b7e037a8a3f0d0be0d8deef18ef9be022b222193feb05bc972f847d3ec53cb7',
-'merge-gate.sh':'c4f51dfeb639f6f8f7a86b6ac50db6a84ebe5242d3d24c3c69c144743f6522e3',
-'worktree-remove.sh':'78e8d67f6a3c2419069f3202ebaa421a92219200648fac26490523b984a8e5f4',
+'measure-residual-bytes.sh':'57d4fffeb441583bafdb28f0e2eca21be73d6ebddf14bc33c8d309427b7545a5',
+'measure-free-disk.sh':'874cc262bcd8a6a95da0f7d6584b53e818bcdfa20d56574af0ff8eef50c1427a',
+'observe-pr.sh':'63e2a9ea5c3f68afe66c81a3b0a04d5bb9b35b9e1c1f1558c402e93bd686da54',
+'base-merge.sh':'0a8411bd69482e4f862f1249c2bf0da7f77027c874342a4307b255e66dca1750',
+'pr-push.sh':'4fe648591a48d49be07730bcfdc299135e7a33075ea1dd5325871a7d1386c0f4',
+'state.sh':'f857e9009725664da565c9e6f5be5ec5d605fb967b0407eea3671425d842d26a',
+'merge-gate.sh':'152a8109097c67cbe511ce194d77520c741688711c738df932f3bc23cdc8f43d',
+'worktree-remove.sh':'859ee533fc7abab3765a616b0aed5599f761d1ce0972a80b9efe78b7fed1ba7a',
 }
 
 

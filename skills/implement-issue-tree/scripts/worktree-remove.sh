@@ -19,8 +19,9 @@
 #       未追跡を隠す）。リポジトリの .gitignore と .git/info/exclude に載った ignore 対象（node_modules・dist 等）は汚れに数えず、中身ごと消える
 #       （--ignored は見ない）。残る限界は references/script-trust-model.md に記載。
 # lock: Claude Code の形（`claude agent|session <名前> (pid N)` と `… (pid N start <LC_ALL=C TZ=UTC ps -o lstart= の出力>)`）で、そのプロセスが
-#       死んでいる（kill -0・ps -p・/proc/<pid> のどれも見つからない）か、start が現在のプロセスの値と一致しない（pid の再利用）ときだけ外す。
-#       ps が使えない・失敗したときは生存扱い。それ以外の lock は外さず、worktree を保持して結果に記録する。この pid は agent ごとではなく
+#       死んでいる（kill -0 が ESRCH、自己確認の通った ps -p が「無い」、/proc が見える環境で /proc/<pid> が無い、のうち少なくとも 1 つが
+#       肯定的に「存在しない」と言い、どれも「存在する」と言わない。EPERM は存在扱い）か、start が現在のプロセスの値と一致しない（pid の再利用）ときだけ外す。
+#       観測できない・エラー・判定不能（ps が無い・失敗、/proc が無い、未知の kill のエラー）は生存扱い。それ以外の lock は外さず、worktree を保持して結果に記録する。この pid は agent ごとではなく
 #       セッション（メインの claude プロセス）の pid なので、同じセッションの中から実行すると lock は常に生存と判定されて保持になる
 #       （外れるのは、そのセッションが終わったあとの実行だけ）。
 # 自衛: メイン worktree（porcelain の先頭エントリ・実体のパスの一致）、登録されていないパス、カレントがその中にあるパスは消さない。
@@ -88,7 +89,7 @@ T_DIRTY=0
 T_UNLOCKED=false
 # $1 = モード、$2 = パス
 remove_one() {
-  local m=$1 path=$2 list top real cwd_real plan lockact alive cur_start status_out sub_init gd rc
+  local m=$1 path=$2 list top real cwd_real plan lockact alive cur_start status_out sub_init gd rc kmsg krc kw pw pself pout prc xw
   T_WT=""
   T_DIRTY=0
   T_UNLOCKED=false
@@ -107,8 +108,19 @@ remove_one() {
   if [ "${WR_LOCKED}" = 1 ]; then
     alive=1
     if wr_lock_pid "${WR_LOCK_REASON}"; then
-      # kill -0 は他ユーザーの生きたプロセス（EPERM）も失敗するので ps -p でも確かめる。ps -p を持たない環境（busybox）では /proc も見る
-      if kill -0 "${WR_LOCK_PID}" 2>/dev/null || ps -p "${WR_LOCK_PID}" >/dev/null 2>&1 || [ -d "/proc/${WR_LOCK_PID}" ]; then alive=1; else alive=0; fi
+      # 死亡は「存在しない」と肯定的に言えたときだけ確定する。EPERM・ps の不在や失敗・/proc の不在・未知のエラーは生存扱い（保持）
+      kmsg=$(builtin kill -0 "${WR_LOCK_PID}" 2>&1 >/dev/null) && krc=0 || krc=$?
+      kw=$(wr_kill_class "${krc}" "${kmsg}")
+      # ps は自己確認（自分の pid が見える）が通ったときだけ根拠に使う。終了コード 1・出力空のときだけ「存在しない」
+      pself=$(ps -p "$$" -o pid= 2>/dev/null) || pself=""
+      pout=$(ps -p "${WR_LOCK_PID}" -o pid= 2>/dev/null) && prc=0 || prc=$?
+      pw=$(wr_ps_class "${pself}" "${prc}" "${pout}")
+      # /proc は Linux のみ。/proc/self が見えるときだけ「無い」を根拠にする
+      xw=unavailable
+      if [ -d /proc/self ]; then
+        if [ -d "/proc/${WR_LOCK_PID}" ]; then xw=present; else xw=absent; fi
+      fi
+      if [ "$(wr_pid_state "${kw}" "${pw}" "${xw}")" = dead ]; then alive=0; fi
       # start つきの lock: 生きているプロセスの開始時刻が lock に書かれた値と違えば、pid が再利用された別のプロセス（= lock した側は死んでいる）。
       # ps が無い・失敗・出力が空のときは観測できないので生存扱いのまま（保持側）
       if [ "${alive}" = 1 ] && [ -n "${WR_LOCK_START}" ]; then

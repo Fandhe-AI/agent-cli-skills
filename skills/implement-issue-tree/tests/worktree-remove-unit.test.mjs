@@ -162,6 +162,41 @@ check(
   (g, r, i) => assert.equal(g.out, ['none', 'none', 'unlock', 'retain', 'retain', 'retain', 'retain', 'retain', 'retain'][i], JSON.stringify(r)),
 )
 
+check(
+  'wr_kill_class: 成功 → ok / No such process → esrch / Operation not permitted → eperm / それ以外のメッセージ・空 → other',
+  [
+    ['wr_kill_class', '0', ''], ['wr_kill_class', '1', 'bash: kill: (123) - No such process'], ['wr_kill_class', '1', 'bash: kill: (1) - Operation not permitted'],
+    ['wr_kill_class', '1', ''], ['wr_kill_class', '1', 'bash: kill: (x) - arguments must be process or job IDs'], ['wr_kill_class', '2', 'kill: Nicht gefunden'],
+    ['wr_kill_class', '0', 'No such process'],
+  ],
+  (g, r, i) => assert.equal(g.out, ['ok', 'esrch', 'eperm', 'other', 'other', 'other', 'ok'][i], JSON.stringify(r)),
+)
+
+check(
+  'wr_ps_class: 出力あり → found / 自己確認が通り終了コード 1・出力空 → absent / 自己確認が空・終了コードが 1 以外（失敗・127）・出力ありで非 0 → unusable',
+  [
+    ['wr_ps_class', '99', '0', '123'], ['wr_ps_class', '99', '1', ''], ['wr_ps_class', '', '1', ''], ['wr_ps_class', '99', '127', ''], ['wr_ps_class', '99', '2', ''],
+    ['wr_ps_class', '99', '0', ''], ['wr_ps_class', '99', '1', '123'], ['wr_ps_class', '', '0', ''], ['wr_ps_class', '', '0', '123'],
+  ],
+  (g, r, i) => assert.equal(g.out, ['found', 'absent', 'unusable', 'unusable', 'unusable', 'unusable', 'unusable', 'unusable', 'found'][i], JSON.stringify(r)),
+)
+
+// wr_pid_state KILL PS PROC: 存在すると言う観測が 1 つでもあれば alive、肯定的に「無い」と言う観測だけ（存在と言う観測なし）で dead、それ以外は unknown
+const PID_STATE_ROWS = [
+  ['ok', 'found', 'present', 'alive'], ['ok', 'unusable', 'unavailable', 'alive'], ['eperm', 'unusable', 'unavailable', 'alive'], ['eperm', 'absent', 'absent', 'alive'],
+  ['other', 'found', 'unavailable', 'alive'], ['other', 'unusable', 'present', 'alive'],
+  ['esrch', 'unusable', 'unavailable', 'dead'], ['esrch', 'absent', 'absent', 'dead'], ['esrch', 'absent', 'unavailable', 'dead'],
+  ['other', 'absent', 'unavailable', 'dead'], ['other', 'unusable', 'absent', 'dead'], ['other', 'absent', 'absent', 'dead'],
+  ['esrch', 'found', 'absent', 'alive'], ['esrch', 'absent', 'present', 'alive'], ['esrch', 'unusable', 'present', 'alive'],
+  ['other', 'unusable', 'unavailable', 'unknown'], ['other', 'unusable', 'unavailable', 'unknown'], ['', '', '', 'unknown'], ['bogus', 'bogus', 'bogus', 'unknown'],
+  ['other', 'unusable', 'bogus', 'unknown'], ['OK', 'FOUND', 'PRESENT', 'unknown'],
+]
+check(
+  'wr_pid_state: 生存の観測が 1 つでもあれば alive / 生存の観測が無く肯定的な「存在しない」があるときだけ dead / EPERM・ps 不在・失敗・/proc 不在・未知の語は unknown（保持）',
+  PID_STATE_ROWS.map((r) => ['wr_pid_state', r[0], r[1], r[2]]),
+  (g, r, i) => assert.equal(g.out, PID_STATE_ROWS[i][3], JSON.stringify(r)),
+)
+
 // wr_plan MODE DIRTY SUB_DIRTY SUB_INIT
 check(
   'wr_plan: superseded は汚れていても force（submodule の未記録の変更・確認不能は保持）、discard は汚れ・初期化済み submodule で保持し --force を使わない',
