@@ -3317,7 +3317,8 @@ async function loadState() {
 // イシュー状態を patch でマージ更新（jq。patch 値は JSON.stringify でインジェクション対策）。
 // JSON マージと worktree/branch 削除はコンテキスト分離（Issue #144）。options.cleanupWorktree:
 // string → そのパス / true → patch.worktree / falsy → なし。options.deleteBranch: true で
-// 削除後に git branch -D -- <branch>（Recover discard 限定）。
+// 削除後に git branch -D -- <branch>（Recover discard 限定）。options.replacementWorktree: string は
+// 「cleanupWorktree を新しい worktree へ置き換える」呼び出し（fix）で新パスを渡す（空文字 = 不明）。旧が保持されたとき新も台帳へ載せる。
 // updateState の詳細版（Issue #493）。呼び出し側が「state 書込みエージェント自身の
 // StructuredOutput 未返却」（outputMissing）を検知して halt 非カウントの 'blocked' へ倒せる
 // よう、単純な boolean だけでなく mergeOk / cleanupOk / outputMissing を個別に返す。
@@ -3472,7 +3473,14 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
   if (cleanupWorktreePath && cleanupConfirmedRemoved) confirmedRemovedPaths.add(cleanupWorktreePath)
   // 消えたと確認できない旧 worktree（保持・結果なし・例外・状態マージ失敗による掃除スキップ）は、種別を問わず残置台帳へ載せる
   // （件数・バイトの両軸の対象にする。fix の旧 worktree も含む）。retained === false の結果だけが「無くなった」と読める
-  if (cleanupWorktreePath && result?.cleanupRetained !== false) recordRetainedWorktree(issueNumber, cleanupWorktreePath)
+  if (cleanupWorktreePath && result?.cleanupRetained !== false) {
+    recordRetainedWorktree(issueNumber, cleanupWorktreePath)
+    // 置換（旧を消して新に置き換える fix など。呼び出し側が replacementWorktree に新パスを渡す。パス不明は空文字）で旧が保持されたら、
+    // 物理的に 2 本になるので新しい worktree も載せる
+    if (typeof options.replacementWorktree === 'string') {
+      recordReplacementWorktree(issueNumber, options.replacementWorktree)
+    }
+  }
   // superseded の試み、または discard で削除を確認できたパスは、スイープの除外から戻す（discard で保持したパスは除外のまま）
   if (cleanupWorktreePath && (cleanupMode !== 'discard' || cleanupConfirmedRemoved)) sweepHeldPaths.delete(cleanupWorktreePath)
   // AND 判定（分割前と同じ戻り値契約。どちらが失敗したかは上のログで判別できる）。
@@ -4384,7 +4392,8 @@ const sweepHeldPaths = new Set()
 const confirmedRemovedPaths = new Set()
 
 // 本ランで新規作成された worktree の記録簿（残置上限ゲートの積み増し実測）。fix の worktree は
-// 記録しない（cleanup とペアで純増しない）。{ issue, kind, path } を追記し一覧をログ出力する。
+// 旧が正常に消えれば記録しない（cleanup とペアで純増しない）。旧が保持されたときだけ新を kind 'replacement' で載せる
+// （recordReplacementWorktree）。{ issue, kind, path } を追記し一覧をログ出力する。
 const ephemeralWorktrees = []
 // ラン開始時の観測に含まれていた残置パス（residualPathsAtStart と同じ内容。recordRetainedWorktree が二重計上を避けるのに使う）
 const residualStartPathSet = new Set()
@@ -4439,6 +4448,27 @@ function recordRetainedWorktree(issueNumber, rawPath) {
   log(`${issueNumber ? `#${issueNumber}: ` : ''}消えたと確認できなかった worktree を残置の台帳へ載せた（${p}）`)
   return true
 }
+
+// 台帳の不変条件: 台帳（+ ラン開始時の観測）は、物理的に存在しうる worktree を重複なく 1 件ずつ数える。fix のように旧 worktree を消して
+// 新しい worktree に置き換える経路は、旧が正常に消えれば台帳の 1 件が新へ引き継がれる（純増しない）。旧が保持されると物理的には 2 本になる
+// ので、旧を載せたうえで新しい worktree（kind 'replacement'）も載せる。新パスが不明（空）なら path '' の件数だけのエントリを載せる
+// （他の未検証エントリと同じく、バイトの再測定は物理一覧へフォールバックして fail-closed）。台帳・開始時観測に既にあるパスは載せない。
+// kind 'replacement' は状態ファイルが追跡中の現行の実装 worktree なので、使い捨ての案内には出さない。予約の差し引きにも数えない
+function recordReplacementWorktree(issueNumber, rawPath) {
+  const p = sanitizeWorktreePath(rawPath ?? '')
+  if (!p) {
+    ephemeralWorktrees.push({ issue: issueNumber, kind: 'replacement', path: '' })
+    log(`#${issueNumber}: 置換後の worktree のパスを取得できないまま旧 worktree を保持した（件数のみ 1 件計上する。git worktree list で確認すること）`)
+    return true
+  }
+  if (residualStartPathSet.has(p) || ephemeralWorktrees.some((e) => e.path === p)) return false
+  ephemeralWorktrees.push({ issue: issueNumber, kind: 'replacement', path: p })
+  log(`#${issueNumber}: 旧 worktree を保持したため、置換後の worktree も残置の台帳へ載せた（${p}）`)
+  return true
+}
+
+// 予約の差し引き（recordedByIssue）に数えない台帳エントリの kind。予約は EPHEMERAL_KIND_MAX の枠で、事後に載せた分で枠を食わせない
+const LEDGER_ONLY_KINDS = new Set(['retained', 'replacement'])
 
 const SWEEP_SCHEMA = {
   type: 'object',
@@ -7470,7 +7500,7 @@ async function runImplement(item) {
           fixCount: savedFixCount,
           note: reason,
         }, fallbackOldWorktree && fallbackOldWorktree !== impl.worktreePath
-          ? { cleanupWorktree: fallbackOldWorktree, preserveWorktreeField: true }
+          ? { cleanupWorktree: fallbackOldWorktree, preserveWorktreeField: true, replacementWorktree: impl.worktreePath }
           : {})
         if (!failedSaved) {
           log(`⚠️ issue #${item.number}: ${reviewingTerminalStatus} 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
@@ -7485,6 +7515,7 @@ async function runImplement(item) {
         const cleanedOk = await updateState(item.number, { worktree: impl.worktreePath }, {
           cleanupWorktree: fallbackOldWorktree,
           preserveWorktreeField: true,
+          replacementWorktree: impl.worktreePath,
         })
         if (!cleanedOk) {
           log(`⚠️ issue #${item.number}: フォールバック前の旧 worktree（${fallbackOldWorktree}）の削除に失敗した（非致命。最終スイープで回収する）`)
@@ -7642,7 +7673,7 @@ async function runImplement(item) {
       if (!currentWorktreePath) {
         log(`⚠️ issue #${item.number}: Review fix worktree パスを取得できず追跡不能`)
       }
-      await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePathReview })
+      await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePathReview, replacementWorktree: currentWorktreePath })
     }
     if (!reviewPassed) {
       // 3 回 Review しても収束しなかった。push も PR 作成も行わず blocked として記録する
@@ -8905,7 +8936,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // optinFixState を省略し既存の永続化値をそのまま保持する — updateState はオブジェクト
       // マージのため patch に無いキーは上書きされない）。
       const optinFixPatchArgs = { fixCount, baseMergeCount, worktree: currentWorktreePath, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, pushChecksStarted: fixChecksStarted, pushMergeable: fixPushMergeable, optinFixState: optinFixStatePatch }
-      const fixStateWriteOk = await updateState(item.number, optinFixPatchArgs, { cleanupWorktree: oldWorktreePath })
+      const fixStateWriteOk = await updateState(item.number, optinFixPatchArgs, { cleanupWorktree: oldWorktreePath, replacementWorktree: currentWorktreePath })
       // PR #503 3 巡目 codex P1 / Bugbot Medium: optinFixStatePatch が設定されているラウンド
       // （宣言テストがあり今回 push した）のみ、書込み成否を確認して 1 回再試行する。restore 側
       // （restoreOptinFixState）は「attempted: true だが runs を復元できない」場合を宣言コマンド
@@ -9894,7 +9925,7 @@ while (true) {
         if (item.kind === 'implement' && maxResidualWorktrees > 0 && residualObserved) {
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
-            if (e.kind !== 'retained') recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+            if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
           }
           let reservedTotal = 0
           for (const rn of newStartActive) {
@@ -9967,7 +9998,7 @@ while (true) {
           }
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
-            if (e.kind !== 'retained') recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+            if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
           }
           let reservedUnits = 0
           for (const rn of newStartActive) {
@@ -10065,7 +10096,7 @@ while (true) {
         if (item.kind === 'implement') {
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
-            if (e.kind !== 'retained') recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+            if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
           }
           let reservedTotal = 0
           for (const rn of newStartActive) {
@@ -10140,7 +10171,7 @@ while (true) {
         if (item.kind === 'implement') {
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
-            if (e.kind !== 'retained') recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+            if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
           }
           let reservedUnits = 0
           for (const rn of newStartActive) {
@@ -10420,7 +10451,7 @@ const orphanEntriesAtEnd = await scanOrphanWorktrees()
 // 本ランが記録した使い捨て worktree のパス集合（孤立スキャンの除外用）。implement は除外リストへ
 // 入れない: 実装 worktree は所有権照合を経て削除候補になる正当な回収対象のため。
 const ephemeralWorktreePaths = new Set(
-  ephemeralWorktrees.filter((e) => e.kind !== 'implement').map((e) => e.path),
+  ephemeralWorktrees.filter((e) => e.kind !== 'implement' && e.kind !== 'replacement').map((e) => e.path),
 )
 const orphanDeleteCandidates = []
 if (orphanEntriesAtEnd.length > 0) {
@@ -10488,10 +10519,17 @@ const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
 // --- 使い捨て worktree の一覧報告 ---
 // 自動削除しない（Issue #142）ため、残骸の存在を利用者が把握できるよう記録簿を出力する。
 // implement は一覧から除く（案内に載せると failed イシューの未マージ成果を誤削除しかねない）。
-const disposableWorktrees = ephemeralWorktrees.filter((e) => e.kind !== 'implement')
+const disposableWorktrees = ephemeralWorktrees.filter((e) => e.kind !== 'implement' && e.kind !== 'replacement' && e.kind !== 'retained')
 if (disposableWorktrees.length > 0) {
   log(`使い捨て worktree（review / pr-create / fix-routing-error）を ${disposableWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
   for (const e of disposableWorktrees) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
+}
+// 掃除が削除せず保持した（またはスイープでも消せなかった）worktree。使い捨てとは別: 未コミットの変更や submodule の記録されていない変更を持つ
+// 場合があり、そのまま git worktree remove すると失われる。理由はエントリごとには持たない（掃除の結果行の語: retained-dirty / retained-locked / retained-submodule）
+const retainedLedger = ephemeralWorktrees.filter((e) => e.kind === 'retained')
+if (retainedLedger.length > 0) {
+  log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+  for (const e of retainedLedger) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
 // --- 残置 worktree 総数のサマリ報告 ---
@@ -10576,4 +10614,4 @@ if (!mainHeadDiff.observed) {
 // residualWorktrees: 残置上限ゲート観測。prereqTransitions: 前提の外部完了遷移（Issue #442）。
 // mainWorktreeUntracked: メイン worktree への一時ファイル残置検出（Issue #497 AC2。削除はしない）。
 // mainWorktreeHead: メイン worktree の HEAD 変化検出（Issue #591。警告のみで戻さない）。
-return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, models: agentModels, securityReview: { enabled: securityReviewEnabled, model: securityReviewModel }, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, models: agentModels, securityReview: { enabled: securityReviewEnabled, model: securityReviewModel }, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, retainedWorktrees: retainedLedger, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }

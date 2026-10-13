@@ -3322,6 +3322,7 @@ highWaterVersion:hwOk?result.highWaterVersion:0,
 
 
 
+
 async function updateStateDetailed(issueNumber,patch,options={}){
 assertInt(issueNumber,'updateState issueNumber')
 
@@ -3472,7 +3473,14 @@ const cleanupConfirmedRemoved=result?.cleanupOk===true&&result?.cleanupRetained=
 if(cleanupWorktreePath&&cleanupConfirmedRemoved)confirmedRemovedPaths.add(cleanupWorktreePath)
 
 
-if(cleanupWorktreePath&&result?.cleanupRetained!==false)recordRetainedWorktree(issueNumber,cleanupWorktreePath)
+if(cleanupWorktreePath&&result?.cleanupRetained!==false){
+recordRetainedWorktree(issueNumber,cleanupWorktreePath)
+
+
+if(typeof options.replacementWorktree==='string'){
+recordReplacementWorktree(issueNumber,options.replacementWorktree)
+}
+}
 
 if(cleanupWorktreePath&&(cleanupMode!=='discard'||cleanupConfirmedRemoved))sweepHeldPaths.delete(cleanupWorktreePath)
 
@@ -4385,6 +4393,7 @@ const confirmedRemovedPaths=new Set()
 
 
 
+
 const ephemeralWorktrees=[]
 
 const residualStartPathSet=new Set()
@@ -4439,6 +4448,27 @@ ephemeralWorktrees.push({issue:issueNumber,kind:'retained',path:p})
 log(`${issueNumber ? `#${issueNumber}: ` : ''}消えたと確認できなかった worktree を残置の台帳へ載せた（${p}）`)
 return true
 }
+
+
+
+
+
+
+function recordReplacementWorktree(issueNumber,rawPath){
+const p=sanitizeWorktreePath(rawPath??'')
+if(!p){
+ephemeralWorktrees.push({issue:issueNumber,kind:'replacement',path:''})
+log(`#${issueNumber}: 置換後の worktree のパスを取得できないまま旧 worktree を保持した（件数のみ 1 件計上する。git worktree list で確認すること）`)
+return true
+}
+if(residualStartPathSet.has(p)||ephemeralWorktrees.some((e)=>e.path===p))return false
+ephemeralWorktrees.push({issue:issueNumber,kind:'replacement',path:p})
+log(`#${issueNumber}: 旧 worktree を保持したため、置換後の worktree も残置の台帳へ載せた（${p}）`)
+return true
+}
+
+
+const LEDGER_ONLY_KINDS=new Set(['retained','replacement'])
 
 const SWEEP_SCHEMA={
 type:'object',
@@ -7470,7 +7500,7 @@ worktree:impl.worktreePath,
 fixCount:savedFixCount,
 note:reason,
 },fallbackOldWorktree&&fallbackOldWorktree!==impl.worktreePath
-?{cleanupWorktree:fallbackOldWorktree,preserveWorktreeField:true}
+?{cleanupWorktree:fallbackOldWorktree,preserveWorktreeField:true,replacementWorktree:impl.worktreePath}
 :{})
 if(!failedSaved){
 log(`⚠️ issue #${item.number}: ${reviewingTerminalStatus} 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
@@ -7485,6 +7515,7 @@ if(fallbackOldWorktree&&fallbackOldWorktree!==impl.worktreePath){
 const cleanedOk=await updateState(item.number,{worktree:impl.worktreePath},{
 cleanupWorktree:fallbackOldWorktree,
 preserveWorktreeField:true,
+replacementWorktree:impl.worktreePath,
 })
 if(!cleanedOk){
 log(`⚠️ issue #${item.number}: フォールバック前の旧 worktree（${fallbackOldWorktree}）の削除に失敗した（非致命。最終スイープで回収する）`)
@@ -7642,7 +7673,7 @@ currentWorktreePath=newWorktreePathReview
 if(!currentWorktreePath){
 log(`⚠️ issue #${item.number}: Review fix worktree パスを取得できず追跡不能`)
 }
-await updateState(item.number,{fixCount,worktree:currentWorktreePath},{cleanupWorktree:oldWorktreePathReview})
+await updateState(item.number,{fixCount,worktree:currentWorktreePath},{cleanupWorktree:oldWorktreePathReview,replacementWorktree:currentWorktreePath})
 }
 if(!reviewPassed){
 
@@ -8905,7 +8936,7 @@ log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡�
 
 
 const optinFixPatchArgs={fixCount,baseMergeCount,worktree:currentWorktreePath,outOfScopeLog,outOfScopeSeen:[...seenOutOfScopeThreadIds].slice(0,OUT_OF_SCOPE_SEEN_MAX),lastUnresolvedInfo,lastUnresolvedComments,pushChecksStarted:fixChecksStarted,pushMergeable:fixPushMergeable,optinFixState:optinFixStatePatch}
-const fixStateWriteOk=await updateState(item.number,optinFixPatchArgs,{cleanupWorktree:oldWorktreePath})
+const fixStateWriteOk=await updateState(item.number,optinFixPatchArgs,{cleanupWorktree:oldWorktreePath,replacementWorktree:currentWorktreePath})
 
 
 
@@ -9894,7 +9925,7 @@ continue
 if(item.kind==='implement'&&maxResidualWorktrees>0&&residualObserved){
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-if(e.kind!=='retained')recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
+if(!LEDGER_ONLY_KINDS.has(e.kind))recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedTotal=0
 for(const rn of newStartActive){
@@ -9967,7 +9998,7 @@ continue
 }
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-if(e.kind!=='retained')recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
+if(!LEDGER_ONLY_KINDS.has(e.kind))recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedUnits=0
 for(const rn of newStartActive){
@@ -10065,7 +10096,7 @@ continue
 if(item.kind==='implement'){
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-if(e.kind!=='retained')recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
+if(!LEDGER_ONLY_KINDS.has(e.kind))recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedTotal=0
 for(const rn of newStartActive){
@@ -10140,7 +10171,7 @@ continue
 if(item.kind==='implement'){
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-if(e.kind!=='retained')recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
+if(!LEDGER_ONLY_KINDS.has(e.kind))recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedUnits=0
 for(const rn of newStartActive){
@@ -10420,7 +10451,7 @@ const orphanEntriesAtEnd=await scanOrphanWorktrees()
 
 
 const ephemeralWorktreePaths=new Set(
-ephemeralWorktrees.filter((e)=>e.kind!=='implement').map((e)=>e.path),
+ephemeralWorktrees.filter((e)=>e.kind!=='implement'&&e.kind!=='replacement').map((e)=>e.path),
 )
 const orphanDeleteCandidates=[]
 if(orphanEntriesAtEnd.length>0){
@@ -10488,10 +10519,17 @@ const sweptWorktrees=await sweepClosedWorktrees(orphanDeleteCandidates)
 
 
 
-const disposableWorktrees=ephemeralWorktrees.filter((e)=>e.kind!=='implement')
+const disposableWorktrees=ephemeralWorktrees.filter((e)=>e.kind!=='implement'&&e.kind!=='replacement'&&e.kind!=='retained')
 if(disposableWorktrees.length>0){
 log(`使い捨て worktree（review / pr-create / fix-routing-error）を ${disposableWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
 for(const e of disposableWorktrees)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
+}
+
+
+const retainedLedger=ephemeralWorktrees.filter((e)=>e.kind==='retained')
+if(retainedLedger.length>0){
+log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+for(const e of retainedLedger)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
 
@@ -10576,4 +10614,4 @@ if(headWarning)log(headWarning)
 
 
 
-return{parent,baseBranch,parallel:concurrency,phaseGate:phaseGateEnabled,phaseOrder,models:agentModels,securityReview:{enabled:securityReviewEnabled,model:securityReviewModel},autoMerge:autoMergeEnabled&&externalChecksConfirmed&&externalChecksContextsConfirmed,autoMergeRequested:autoMergeEnabled,externalChecks:externalCheckApps,externalCheckContexts:externalCheckEntries.map((e)=>({app:e.app,contexts:e.contexts})),externalChecksConfirmed,externalChecksContextsConfirmed,externalChecksObserved:observedCheckApps,mergeGuard:{hookDenyOnly:true},residualWorktrees:{observed:residualObserved,observedAtStart:residualObservedAtStart,addedThisRun:residualAddedThisRun,limit:maxResidualWorktrees,overLimit:residualOverLimit,suppressed:newStartSuppressed!==null,paths:residualPathsAtStart,bytesObserved:residualBytesObserved,bytesAtStart:residualBytesAtRunStart,bytesLastMeasured:residualBytesAtStart,bytesAtEnd:residualBytesAtEnd,bytesEndObserved:residualBytesEndObserved,bytesLimit:maxResidualWorktreeBytes,perWorktreeByteReserve},total:queue.length,done:results,failures,outOfTreeDeps,notStarted,interrupted,halted,blockedStateWrite,agentBudget:{ ...agentBudget,reached:agentBudget.used>=agentBudget.limit},unmonitoredPrs:unmonitoredPrList,sweptWorktrees,ephemeralWorktrees:disposableWorktrees,prereqTransitions,mainWorktreeUntracked:{observed:mainUntrackedDiff.observed,baselineCount:mainUntrackedDiff.baselineCount,added:mainUntrackedDiff.added.slice(0,50).map((p)=>sanitize(p))},mainWorktreeHead:{observed:mainHeadDiff.observed,changed:mainHeadDiff.changed,shaChanged:mainHeadDiff.shaChanged,baselineRef:sanitize(mainHeadDiff.baselineRef??''),endRef:sanitize(mainHeadDiff.endRef??'')}}
+return{parent,baseBranch,parallel:concurrency,phaseGate:phaseGateEnabled,phaseOrder,models:agentModels,securityReview:{enabled:securityReviewEnabled,model:securityReviewModel},autoMerge:autoMergeEnabled&&externalChecksConfirmed&&externalChecksContextsConfirmed,autoMergeRequested:autoMergeEnabled,externalChecks:externalCheckApps,externalCheckContexts:externalCheckEntries.map((e)=>({app:e.app,contexts:e.contexts})),externalChecksConfirmed,externalChecksContextsConfirmed,externalChecksObserved:observedCheckApps,mergeGuard:{hookDenyOnly:true},residualWorktrees:{observed:residualObserved,observedAtStart:residualObservedAtStart,addedThisRun:residualAddedThisRun,limit:maxResidualWorktrees,overLimit:residualOverLimit,suppressed:newStartSuppressed!==null,paths:residualPathsAtStart,bytesObserved:residualBytesObserved,bytesAtStart:residualBytesAtRunStart,bytesLastMeasured:residualBytesAtStart,bytesAtEnd:residualBytesAtEnd,bytesEndObserved:residualBytesEndObserved,bytesLimit:maxResidualWorktreeBytes,perWorktreeByteReserve},total:queue.length,done:results,failures,outOfTreeDeps,notStarted,interrupted,halted,blockedStateWrite,agentBudget:{ ...agentBudget,reached:agentBudget.used>=agentBudget.limit},unmonitoredPrs:unmonitoredPrList,sweptWorktrees,ephemeralWorktrees:disposableWorktrees,retainedWorktrees:retainedLedger,prereqTransitions,mainWorktreeUntracked:{observed:mainUntrackedDiff.observed,baselineCount:mainUntrackedDiff.baselineCount,added:mainUntrackedDiff.added.slice(0,50).map((p)=>sanitize(p))},mainWorktreeHead:{observed:mainHeadDiff.observed,changed:mainHeadDiff.changed,shaChanged:mainHeadDiff.shaChanged,baselineRef:sanitize(mainHeadDiff.baselineRef??''),endRef:sanitize(mainHeadDiff.endRef??'')}}

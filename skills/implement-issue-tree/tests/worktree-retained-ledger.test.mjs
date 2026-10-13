@@ -6,8 +6,11 @@
 //
 // 二層:
 //   1. 定義部（updateStateDetailed・sweepClosedWorktrees）: 登録の条件・重複排除・開始時観測との二重計上の回避・fail-closed。
-//   2. 実装スクリプト全体（stub agent）: 2 回目の fix の旧 worktree が保持されると、件数軸の新規着手の閾値が 1 つ上がり、
+//   2. 実装スクリプト全体（stub agent）: 2 回目の fix の旧 worktree が保持されると、件数軸の新規着手の閾値が上がり、
 //      バイト軸の測定対象に入って上限判定に効く。
+//
+// 台帳の不変条件（PR #623 の Bugbot High）: 台帳（+ 開始時観測）は物理的に存在しうる worktree を重複なく 1 件ずつ数える。fix のような置換で
+// 旧 worktree が保持されると物理的には 2 本になるので、旧（載っていなければ kind retained）に加えて新しい worktree（kind replacement）も載せる。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { importDefinitions, runScript, BASE_ARGS, source } from './lib/stub-run.mjs'
@@ -124,12 +127,68 @@ test('最終スイープ: 消せた候補は削除確認済みへ、消えたと
   assert.deepEqual(retainedEntries(f).map((e) => e.path), ['/tmp/orph-2', '/tmp/orph-3', '/tmp/orph-4'])
 })
 
-test('予約の差し引き（recordedByIssue）は retained を数えない: 保持は予約の外で事後に載せるので、予約済みの枠を食わない', () => {
-  const guarded = source.split("if (e.kind !== 'retained') recordedByIssue.set(").length - 1
+const replacementEntries = (f) => f.ephemeralWorktrees.filter((e) => e.kind === 'replacement')
+
+test('置換: 旧 worktree が保持されると、旧（台帳に無ければ retained）に加えて新しい worktree が kind replacement で載る。旧が消えたら新は載せない', async () => {
+  const f = await fresh('ledger-r1')
+  stub(cleanupOf(KEPT))
+  await f.updateStateDetailed(60, { fixCount: 1, worktree: '/tmp/new-60' }, { cleanupWorktree: '/tmp/old-60', replacementWorktree: '/tmp/new-60' })
+  assert.deepEqual(retainedEntries(f), [{ issue: 60, kind: 'retained', path: '/tmp/old-60' }])
+  assert.deepEqual(replacementEntries(f), [{ issue: 60, kind: 'replacement', path: '/tmp/new-60' }])
+
+  stub(cleanupOf(GONE))
+  await f.updateStateDetailed(61, { fixCount: 1, worktree: '/tmp/new-61' }, { cleanupWorktree: '/tmp/old-61', replacementWorktree: '/tmp/new-61' })
+  assert.equal(replacementEntries(f).length, 1, '旧が消えたなら台帳の 1 件が新へ引き継がれる（純増しない）')
+})
+
+test('置換: 旧が台帳にある実装 worktree なら旧は二重に載せず、新だけが載る（物理 2 本 = 台帳 2 件）', async () => {
+  const f = await fresh('ledger-r2')
+  f.recordEphemeralWorktree(62, '/tmp/impl-62', 'implement')
+  stub(cleanupOf(KEPT))
+  await f.updateStateDetailed(62, { fixCount: 1, worktree: '/tmp/fix-62' }, { cleanupWorktree: '/tmp/impl-62', replacementWorktree: '/tmp/fix-62' })
+  assert.deepEqual(f.ephemeralWorktrees.map((e) => [e.kind, e.path]), [['implement', '/tmp/impl-62'], ['replacement', '/tmp/fix-62']])
+  // 2 回目の fix でも旧（1 回目の新）は台帳にあるので載せず、新だけが増える
+  await f.updateStateDetailed(62, { fixCount: 2, worktree: '/tmp/fix-62b' }, { cleanupWorktree: '/tmp/fix-62', replacementWorktree: '/tmp/fix-62b' })
+  assert.deepEqual(f.ephemeralWorktrees.map((e) => e.path), ['/tmp/impl-62', '/tmp/fix-62', '/tmp/fix-62b'])
+  // 新が台帳・開始時観測に既にあるパスなら二重に数えない
+  await f.updateStateDetailed(62, { fixCount: 3, worktree: '/tmp/impl-62' }, { cleanupWorktree: '/tmp/fix-62b', replacementWorktree: '/tmp/impl-62' })
+  f.residualStartPathSet.add('/tmp/start-62')
+  await f.updateStateDetailed(62, { fixCount: 4, worktree: '/tmp/start-62' }, { cleanupWorktree: '/tmp/fix-62b', replacementWorktree: '/tmp/start-62' })
+  assert.deepEqual(f.ephemeralWorktrees.map((e) => e.path), ['/tmp/impl-62', '/tmp/fix-62', '/tmp/fix-62b'])
+})
+
+test('置換: 新パスが不明（空文字）でも旧が保持されたら件数を 1 増やす（path 空のプレースホルダー）。結果なし・例外でも同じ。指定しない呼び出し（merged など）は旧だけ。新旧が同じでも二重に数えない', async () => {
+  const f = await fresh('ledger-r3')
+  stub(cleanupOf(KEPT))
+  await f.updateStateDetailed(63, { fixCount: 1, worktree: '' }, { cleanupWorktree: '/tmp/old-63', replacementWorktree: '' })
+  assert.deepEqual(replacementEntries(f), [{ issue: 63, kind: 'replacement', path: '' }])
+  await f.updateStateDetailed(63, { fixCount: 2, worktree: '' }, { cleanupWorktree: '/tmp/old-63b', replacementWorktree: '' })
+  assert.equal(replacementEntries(f).length, 2, '空パスは重複排除できないので呼び出しごとに 1 件')
+
+  stub(() => null)
+  await f.updateStateDetailed(64, { fixCount: 1 }, { cleanupWorktree: '/tmp/old-64', replacementWorktree: '/tmp/new-64' })
+  assert.ok(replacementEntries(f).some((e) => e.path === '/tmp/new-64'), '結果なしは消えたと確認できないので新も載せる')
+
+  stub(cleanupOf(KEPT))
+  const before = f.ephemeralWorktrees.length
+  await f.updateStateDetailed(65, { status: 'merged' }, { cleanupWorktree: '/tmp/old-65' })
+  assert.equal(f.ephemeralWorktrees.length, before + 1, 'replacementWorktree を渡さない呼び出し（merged など）は旧だけ')
+  await f.updateStateDetailed(66, { fixCount: 1 }, { cleanupWorktree: '/tmp/same-66', replacementWorktree: '/tmp/same-66' })
+  assert.equal(f.ephemeralWorktrees.filter((e) => e.path === '/tmp/same-66').length, 1, '新旧が同じパスでも二重に数えない')
+})
+
+test('予約の差し引き（recordedByIssue）は retained・replacement を数えない: 事後に載せた分は予約済みの枠を食わない', () => {
+  const guarded = source.split('if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(').length - 1
   const all = source.split('recordedByIssue.set(').length - 1
   assert.equal(all, 4)
   assert.equal(guarded, 4)
-  assert.doesNotMatch(source, /EPHEMERAL_KIND_MAX = Object\.freeze\(\{[^}]*retained/, 'retained は予約（EPHEMERAL_KIND_MAX）に含めない')
+  assert.match(source, /const LEDGER_ONLY_KINDS = new Set\(\['retained', 'replacement'\]\)/)
+  assert.doesNotMatch(source, /EPHEMERAL_KIND_MAX = Object\.freeze\(\{[^}]*(retained|replacement)/, 'retained・replacement は予約（EPHEMERAL_KIND_MAX）に含めない')
+})
+
+test('置換を渡す呼び出しは fix の 2 経路（Review ループ・Merge ループ）と fallback の 2 経路だけ', () => {
+  assert.equal(source.split('replacementWorktree: currentWorktreePath').length - 1, 2)
+  assert.equal(source.split('replacementWorktree: impl.worktreePath').length - 1, 2)
 })
 
 // ---- 2. 実装スクリプト全体 ----
@@ -139,12 +198,12 @@ const FIX_B = '/repo/wt/fix-b'
 
 // #2: Review が 2 回指摘 → fix を 2 回（旧 worktree は 1 回目が実装 worktree、2 回目が FIX_A）→ 3 回目の Review で通過。
 // 2 回目の掃除（旧 = FIX_A。台帳には載っていない）の結果を oldFixResult で切り替える。#3 は既定の流れ
-function overrides({ oldFixResult, extra = () => undefined }) {
+function overrides({ oldFixResult, firstFixResult = GONE, fixRounds = 2, extra = () => undefined }) {
   const seen = { review: 0, fix: 0, cleanup: 0 }
   return (label, opts, prompt) => {
     if (label === 'review:#2') {
       seen.review += 1
-      return seen.review <= 2
+      return seen.review <= fixRounds
         ? { state: 'needs-fix', highestSeverity: 'medium', summary: 's', worktreePath: '/repo/wt/r2' }
         : { state: 'ok', highestSeverity: 'none', summary: 's', worktreePath: '/repo/wt/r2' }
     }
@@ -154,7 +213,7 @@ function overrides({ oldFixResult, extra = () => undefined }) {
     }
     if (label === 'state:cleanup:#2') {
       seen.cleanup += 1
-      return seen.cleanup === 1 ? GONE : oldFixResult
+      return seen.cleanup === 1 ? firstFixResult : oldFixResult
     }
     return extra(label, opts, prompt)
   }
@@ -163,32 +222,76 @@ function overrides({ oldFixResult, extra = () => undefined }) {
 const started3 = (calls) => calls.some((c) => /^(plan|impl):#3$/.test(c.opts.label))
 
 // #3 が着手できる最小の maxResidualWorktrees
-async function minLimitStarting3(oldFixResult) {
+async function minLimitStarting3(oldFixResult, firstFixResult = GONE) {
   for (let limit = 1; limit <= 60; limit++) {
     const { calls } = await runScript({
       args: { ...BASE_ARGS, maxResidualWorktrees: limit },
       leaves: [2, 3],
-      override: overrides({ oldFixResult }),
+      override: overrides({ oldFixResult, firstFixResult }),
     })
     if (started3(calls)) return limit
   }
   return null
 }
 
-test('件数軸: 2 回目の fix の旧 worktree が保持されると、新規着手の閾値がちょうど 1 件分上がる（保持されなければ上がらない）', async () => {
+test('件数軸: 2 回目の fix の旧 worktree（台帳に無い）が保持されると、旧と新の 2 件が載り、新規着手の閾値が 2 件分上がる（保持されなければ上がらない）', async () => {
   const removed = await minLimitStarting3(GONE)
   const kept = await minLimitStarting3(KEPT)
   assert.ok(removed !== null && kept !== null, `着手できる上限が見つかる: ${removed} / ${kept}`)
-  assert.equal(kept, removed + 1)
+  // 1 回目の fix の旧（実装 worktree）は消えたので台帳の実装の 1 件は残ったまま（過大側）。保持された FIX_A と現行の FIX_B で +2
+  assert.equal(kept, removed + 2)
 })
 
-test('件数軸: 保持を結果なし（null）で返しても同じ（消えたと確認できない）。ラン終了時の報告にも retained が出る', async () => {
+test('件数軸: 1 回目の fix で実装 worktree が保持されると台帳は 2 件・閾値は +1。2 回目の fix でも保持されると +1 ずつ（Bugbot High）', async () => {
+  const base = await minLimitStarting3(GONE, GONE)
+  const first = await minLimitStarting3(GONE, KEPT)
+  const both = await minLimitStarting3(KEPT, KEPT)
+  assert.equal(first, base + 1, '1 回目: 実装 worktree が残り、FIX_A が増える')
+  assert.equal(both, base + 2, '2 回目: FIX_A が残り、FIX_B が増える')
+
+  const ledger = async (firstFixResult, oldFixResult) => {
+    const { result } = await runScript({ args: { ...BASE_ARGS, maxResidualWorktrees: 100 }, leaves: [2], override: overrides({ oldFixResult, firstFixResult }) })
+    return result.residualWorktrees.addedThisRun
+  }
+  const n0 = await ledger(GONE, GONE)
+  assert.equal(await ledger(KEPT, GONE), n0 + 1)
+  assert.equal(await ledger(KEPT, KEPT), n0 + 2)
+})
+
+test('件数軸: 保持を結果なし（null）で返しても同じ（消えたと確認できない）', async () => {
   const removed = await minLimitStarting3(GONE)
   const none = await minLimitStarting3(null)
-  assert.equal(none, removed + 1)
+  assert.equal(none, removed + 2)
+  assert.equal(await minLimitStarting3(GONE, null), removed + 1)
+})
 
-  const { result } = await runScript({ args: { ...BASE_ARGS, maxResidualWorktrees: 100 }, leaves: [2], override: overrides({ oldFixResult: KEPT }) })
-  assert.ok(result.ephemeralWorktrees.some((e) => e.kind === 'retained' && e.path === FIX_A))
+test('ラン終了時の報告: 保持した worktree は使い捨てと別の見出しで出し、返却値は retainedWorktrees に分ける。置換後の現行 worktree は案内に出さない', async () => {
+  const { result, logs } = await runScript({ args: { ...BASE_ARGS, maxResidualWorktrees: 100 }, leaves: [2], override: overrides({ oldFixResult: KEPT }) })
+  assert.ok(result.retainedWorktrees.some((e) => e.kind === 'retained' && e.path === FIX_A))
+  assert.ok(!result.ephemeralWorktrees.some((e) => e.kind === 'retained' || e.kind === 'replacement'))
+
+  const disposableHead = logs.findIndex((l) => l.startsWith('使い捨て worktree（review'))
+  const retainedHead = logs.findIndex((l) => l.startsWith('削除せず保持した worktree'))
+  assert.ok(disposableHead >= 0 && retainedHead >= 0, '見出しが 2 つ出る')
+  assert.match(logs[retainedHead], /retained-dirty/)
+  assert.match(logs[retainedHead], /retained-locked/)
+  assert.match(logs[retainedHead], /retained-submodule/)
+  assert.match(logs[retainedHead], /中身を確認してから手動で対処/)
+  assert.doesNotMatch(logs[retainedHead], /不要であれば git worktree remove で手動削除/)
+  const listed = (from, to) => logs.slice(from + 1, to).filter((l) => /^ {2}(#|\()/.test(l))
+  const disposableLines = listed(disposableHead, retainedHead > disposableHead ? retainedHead : logs.length)
+  assert.ok(disposableLines.length > 0)
+  assert.ok(!disposableLines.some((l) => l.includes('(retained)') || l.includes(FIX_A)), '保持した worktree は使い捨ての一覧に出ない')
+  const retainedLines = listed(retainedHead, logs.length).filter((l) => l.includes('(retained)'))
+  assert.equal(retainedLines.length, 1)
+  assert.ok(retainedLines[0].includes(FIX_A))
+  assert.ok(!logs.some((l) => /^ {2}.*\(replacement\)/.test(l)), '置換後の現行 worktree は案内に出さない')
+})
+
+test('保持が無いラン: 保持の見出しは出ない', async () => {
+  const { logs, result } = await runScript({ args: { ...BASE_ARGS, maxResidualWorktrees: 100 }, leaves: [2], override: overrides({ oldFixResult: GONE }) })
+  assert.ok(!logs.some((l) => l.startsWith('削除せず保持した worktree')))
+  assert.deepEqual(result.retainedWorktrees, [])
 })
 
 const GIB_KIB = 1024 * 1024
@@ -223,4 +326,22 @@ test('バイト軸: 保持したパスが測定の対象に入り、上限を超
   const kept = await run(KEPT)
   assert.ok(kept.measured.some((paths) => paths.includes(FIX_A)), '保持したパスが測定の対象に入る')
   assert.equal(kept.started, false, '保持したパスの実測が上限を超えるので #3 は着手しない')
+})
+
+test('バイト軸: fix が 1 回だけで実装 worktree が保持されたとき、置換後の worktree（FIX_A）が測定の対象に入り、上限を超えると新規着手が止まる', async () => {
+  const run = async (firstFixResult) => {
+    const measured = []
+    const { calls } = await runScript({
+      args: { ...BASE_ARGS, maxResidualWorktreeBytes: 512 * 1024 * 1024, maxResidualWorktrees: 100 },
+      leaves: [2, 3],
+      override: overrides({ firstFixResult, oldFixResult: GONE, fixRounds: 1, extra: bytesExtra(measured) }),
+    })
+    return { measured, started: started3(calls) }
+  }
+  const kept = await run(KEPT)
+  assert.ok(kept.measured.some((paths) => paths.includes(FIX_A)), '置換後の worktree が測定の対象に入る')
+  assert.equal(kept.started, false, '実測が上限を超えるので #3 は着手しない')
+  const gone = await run(GONE)
+  assert.ok(!gone.measured.some((paths) => paths.includes(FIX_A)), '旧が消えたなら新は台帳に載らず（実装の 1 件が引き継ぐ）、ここでは測定の対象に入らない')
+  assert.equal(gone.started, true)
 })
