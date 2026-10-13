@@ -27,6 +27,7 @@ dir=\${GH_STUB_DIR:?}
 echo "$*" >> "$dir/calls.log"
 # 遅い・ハングする gh を模す（GH_STUB_DELAY 秒眠る / GH_STUB_HANG 秒の sleep を子と孫に残す）
 [ -n "\${GH_STUB_DELAY:-}" ] && sleep "$GH_STUB_DELAY"
+if [ -n "\${GH_STUB_FLOOD:-}" ]; then while :; do echo '{"total_count":1}'; done; fi
 if [ -n "\${GH_STUB_HANG:-}" ]; then sleep "$GH_STUB_HANG" & sleep "$GH_STUB_HANG"; fi
 key=""
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then

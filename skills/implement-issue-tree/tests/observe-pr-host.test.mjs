@@ -344,3 +344,40 @@ test('monitorPrompt 手順 5: 切り詰められたスレッド本文は --threa
   assert.ok(step5.includes('--thread-id'))
   assert.ok(step5.includes('BEGIN / END UNTRUSTED DATA'))
 })
+
+// --- 待機つき観測が error / inconclusive のときの扱い（PR #612 2 回目のレビュー）---
+
+test('monitorPrompt: 待機を持つ全手順（3e・3g・4x・4b・4c）が error の扱い（1 回再実行 → なお error なら blocked / quality）を持ち、共通の読み方にも書く', () => {
+  const p = m.monitorPrompt(item, impl, ['cursor', 'codex'], true, true, false, '', NONCE)
+  const guide = p.slice(p.indexOf('観測コマンド:'), p.indexOf('\n手順:'))
+  assert.ok(guide.includes('outcome が error の場合は 1 回だけ同じコマンドを再実行し'), '共通の読み方に error の扱いがある')
+  assert.ok(guide.includes('child setpgid') && guide.includes('無視してよい'), '標準エラーのノイズは無視してよい')
+  assert.ok(guide.includes('pending を根拠に先へ進まない'))
+  const sections = {
+    '3e': p.slice(p.indexOf('   e. チェック総数が 0 件'), p.indexOf('   f. ')),
+    '3g': p.slice(p.indexOf('3g.'), p.indexOf('\n4. ')),
+    '4b': p.slice(p.indexOf('   b. checkRunsRunning'), p.indexOf('   c. HEAD sha に対する cursor')),
+    '4c': p.slice(p.indexOf('   c. HEAD sha に対する cursor'), p.indexOf('   d. HEAD sha に対する cursor')),
+    '4x': p.slice(p.indexOf('4x.'), p.indexOf('\n5. ')),
+  }
+  for (const [name, sec] of Object.entries(sections)) {
+    assert.ok(sec.length > 100, `${name} の節を特定できる`)
+    if (name === '3e') continue // 3e の取得失敗は手順 2 の取得失敗の扱いと 3e 自身の blocked / quality に既に書かれている（下で確認）
+    assert.ok(/error/.test(sec) && sec.includes('blocked') && sec.includes('quality'), `${name}: error の扱いが書かれていない`)
+  }
+  assert.ok(sections['3e'].includes('exhausted（または error）'), '3e は error / exhausted のとき mergeable を再判定してから blocked へ進む')
+})
+
+test('monitorPrompt 3g: 成功の根拠は missing の数ではなく outcome が met であること（壁時計で結論が出なかった pending の missing:0 を成功と読まない）', () => {
+  const p = m.monitorPrompt(item, impl, [], true, true, false, '', NONCE)
+  const s3g = p.slice(p.indexOf('3g.'), p.indexOf('\n4. '))
+  assert.ok(s3g.includes('outcome が met（missing が 0'))
+  assert.ok(s3g.includes('壁時計の都合でこの起動では結論が出なかった'))
+})
+
+test('observe-pr.sh の待機の余裕と壁時計の扱いが文書に書かれている（余裕 3 秒・pending / exhausted への変換・SIGKILL の残存・出力上限）', () => {
+  const sh = readFileSync(OBSERVE_SH, 'utf8')
+  for (const needle of ['need=$((obs_max + sleep_sec + 3))', 'WALL_HIT', 'OBSERVE_PR_MAX_OUT_BYTES', 'SIGKILL で', '23 秒を超える']) {
+    assert.ok(sh.includes(needle), needle)
+  }
+})
