@@ -33,7 +33,7 @@ test('parseAgentModels: undefined / null / {} は空オブジェクト（既定�
 })
 
 test('parseAgentModels: 対象の段階と許可する値', () => {
-  assert.deepEqual(AGENT_MODEL_STAGES, ['plan', 'implement', 'review', 'fix', 'prCreate', 'baseMerge'])
+  assert.deepEqual(AGENT_MODEL_STAGES, ['plan', 'implement', 'review', 'securityReview', 'fix', 'prCreate', 'baseMerge'])
   assert.deepEqual(AGENT_MODEL_NAMES, ['haiku', 'sonnet', 'opus', 'fable'])
 })
 
@@ -118,7 +118,8 @@ test('結合: 指定した段階だけが変わり、機械的な agent のモ�
 
 test('結合: すべての段階を指定しても、呼び出しの順序と数は未指定のランと同じ（モデル以外は変えない）', async () => {
   const base = await runScript({ args: BASE_ARGS, override: reviewNeedsFixOnce() })
-  const all = Object.fromEntries(AGENT_MODEL_STAGES.map((s) => [s, 'opus']))
+  // securityReview はセキュリティ専用の Review を有効にしたときだけ指定できる（security-review.test.mjs）。
+  const all = Object.fromEntries(AGENT_MODEL_STAGES.filter((s) => s !== 'securityReview').map((s) => [s, 'opus']))
   const { calls } = await runScript({ args: { ...BASE_ARGS, models: all }, override: reviewNeedsFixOnce() })
   assert.deepEqual(calls.map((c) => c.opts.label), base.calls.map((c) => c.opts.label))
   const strip = (o) => { const { model, ...rest } = o; return rest }

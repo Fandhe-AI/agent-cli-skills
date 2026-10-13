@@ -173,7 +173,7 @@ const dryRunEnabled = parseDryRun(parsedArgs && typeof parsedArgs === 'object' ?
 // 未指定の段階は既定（plan はモデルを渡さずセッションのモデルを継ぐ・それ以外は sonnet）のまま。
 // 値は agent() の model に渡すエイリアスだけを受理し、未知のキー・値・オブジェクト以外は誤記を黙って
 // 既定へ読み替えず起動時に throw する（他の引数と同じ fail-closed）。
-const AGENT_MODEL_STAGES = ['plan', 'implement', 'review', 'fix', 'prCreate', 'baseMerge']
+const AGENT_MODEL_STAGES = ['plan', 'implement', 'review', 'securityReview', 'fix', 'prCreate', 'baseMerge']
 const AGENT_MODEL_NAMES = ['haiku', 'sonnet', 'opus', 'fable']
 function parseAgentModels(raw) {
   if (raw === undefined || raw === null) return {}
@@ -198,6 +198,52 @@ function parseAgentModels(raw) {
   return out
 }
 const agentModels = parseAgentModels(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.models : undefined)
+// セキュリティ専用の Review の opt-in（args.securityReview）。有効なとき各 Review ラウンドで、通常の
+// Review（品質とセキュリティを 1 体で見る）とは別に、セキュリティに絞った Review を同じ差分に対して
+// 独立に並列で走らせ、両方の結果を合わせて判定する（combineReviews）。true / { enabled: true } で有効、
+// 未指定・false / { enabled: false } で無効（今と同じ）。他の形・未知のキーは誤記を黙って無効へ
+// 読み替えず起動時に throw する。
+function parseSecurityReview(raw) {
+  if (raw === undefined || raw === null) return false
+  if (typeof raw === 'boolean') return raw
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const keys = Object.keys(raw)
+    if (keys.length === 1 && keys[0] === 'enabled' && typeof raw.enabled === 'boolean') return raw.enabled
+  }
+  throw new Error('args.securityReview は boolean または {"enabled": <boolean>} で指定すること（例: {"securityReview": true}。未指定は無効 = 現行動作）')
+}
+const securityReviewEnabled = parseSecurityReview(parsedArgs && typeof parsedArgs === 'object' ? parsedArgs.securityReview : undefined)
+// 無効のまま models.securityReview だけを指定すると、セキュリティの Review が走ったと誤解し得るため止める。
+if (!securityReviewEnabled && agentModels.securityReview) {
+  throw new Error('args.models.securityReview は args.securityReview を有効にしたときだけ指定できる（無効のままではセキュリティの Review は走らない）')
+}
+// セキュリティの Review のモデル。未指定なら通常の Review と同じ（models.review、無ければ sonnet）。
+const securityReviewModel = securityReviewEnabled ? (agentModels.securityReview ?? agentModels.review ?? 'sonnet') : null
+// 1 ラウンドの通常の Review とセキュリティの Review の結果を、1 つの Review 結果として合わせる純粋関数。
+// どちらかが blocked なら blocked、両方 ok なら ok、それ以外は needs-fix。highestSeverity は両方の高い方。
+// 無効な結果（null 等）は既存の単独 Review と同じく指摘あり（medium 相当）として扱い、needs-fix なのに
+// 重要度が none / 不明の矛盾出力も medium 相当に倒す（片方の low と合わせて最終ラウンドを通さないため）。
+// summary には指摘のある側（blocked なら blocked の側）だけを見出し付きで並べ、fix へそのまま渡せる形にする。
+const REVIEW_SEVERITY_ORDER = ['none', 'low', 'medium', 'high', 'critical']
+function combineReviews(main, sec) {
+  const sides = [['品質・セキュリティ（通常の Review）', main], ['セキュリティ専用の Review', sec]]
+  const isOk = (r) => r?.state === 'ok'
+  const severity = (r) => {
+    if (isOk(r)) return 'none'
+    const v = r?.highestSeverity
+    return REVIEW_SEVERITY_ORDER.includes(v) && v !== 'none' ? v : 'medium'
+  }
+  const text = (name, r) => `【${name}】${r?.summary ?? 'review エージェントが異常終了した'}`
+  const blocked = sides.filter(([, r]) => r?.state === 'blocked')
+  if (blocked.length > 0) {
+    return { state: 'blocked', highestSeverity: 'none', summary: blocked.map(([n, r]) => text(n, r)).join('\n'), worktreePath: main?.worktreePath }
+  }
+  if (isOk(main) && isOk(sec)) {
+    return { state: 'ok', highestSeverity: 'none', summary: sides.map(([n, r]) => text(n, r)).join('\n'), worktreePath: main?.worktreePath }
+  }
+  const highest = sides.map(([, r]) => severity(r)).reduce((a, b) => (REVIEW_SEVERITY_ORDER.indexOf(b) > REVIEW_SEVERITY_ORDER.indexOf(a) ? b : a))
+  return { state: 'needs-fix', highestSeverity: highest, summary: sides.filter(([, r]) => !isOk(r)).map(([n, r]) => text(n, r)).join('\n'), worktreePath: main?.worktreePath }
+}
 // agent() の opts に展開するモデル指定。上書きも既定も無い段階（plan の既定）は model キー自体を
 // 持たない（model: undefined を渡すとセッション継承と同じになる保証がランタイムの文書に無いため）。
 function stageModelOpt(stage, fallback) {
@@ -4245,6 +4291,8 @@ const ephemeralWorktrees = []
 const EPHEMERAL_KIND_MAX = Object.freeze({
   implement: 1,
   review: 3,
+  // セキュリティ専用の Review は Review ラウンド（最大 3 回）ごとに 1 体。無効なら 0 で予約に影響しない。
+  'security-review': securityReviewEnabled ? 3 : 0,
   'pr-create': 1,
   'fix-terminal': 1,
   'base-merge': maxBaseMerges,
@@ -4481,7 +4529,8 @@ function parseAgentCallLimit(raw) {
 // 使っているため、残り全量を最悪値で見積もると着手を止めすぎる。これに 8 を足して 30 とする。
 // resume は monitoring 再開（Review までを省く。monitor 3 + fix/再 monitor 2 + 状態書込み 4 +
 // merge 2 に余裕）、close は verify-close（close 1 + 状態書込み 2 + 余裕）。
-const AGENT_CALLS_PER_ISSUE = { implement: 30, resume: 12, close: 6 }
+// セキュリティ専用の Review を有効にしたランは、見積りの Review 2 回ぶん（各ラウンド 1 体）を足す。
+const AGENT_CALLS_PER_ISSUE = { implement: 30 + (securityReviewEnabled ? 2 : 0), resume: 12, close: 6 }
 // 終了処理の予備の固定分。ループ後に走るのは writeBlockedStateBatch（下の chunks 分を別に加える）、
 // scanOrphanWorktrees、終了時 loadState、容量の終了時実測、スイープ、メイン worktree の
 // 未追跡検査と HEAD 検査（worktree:head-scan。開始時 1 回は使用済みに入り、終了時 1 回がここ）で、
@@ -4758,10 +4807,14 @@ function planPrompt(item) {
 // detach で参照可）。判定のみで修正は fix へ委譲。Low 含む指摘 1 件でも needs-fix（安全側）。
 // 比較基準は origin/<base> の 3 点ドット diff（Issue #315）。stale ref 対策でレビュー直前に
 // 保存先明示 refspec で base を毎回取得する（Issue #361）。
-function reviewPrompt(item, impl) {
+// security: true はセキュリティ専用の Review（args.securityReview）。比較基準・差分の取り方・返却は通常の
+// Review と同じで、見出しとレビュー観点（手順 2）だけをセキュリティに絞る。既定 false の出力は従来と同一。
+function reviewPrompt(item, impl, security = false) {
   const branch = sanitizeBranch(impl.branch)
   return [
-    `イシュー #${item.number}（ブランチ ${branch}）のコードレビュー担当エージェント（push 前ローカル diff レビュー）。`,
+    security
+      ? `イシュー #${item.number}（ブランチ ${branch}）のセキュリティレビュー担当エージェント（push 前ローカル diff レビュー）。品質は別の Review エージェントが独立に見るため、本エージェントはセキュリティに絞る。`
+      : `イシュー #${item.number}（ブランチ ${branch}）のコードレビュー担当エージェント（push 前ローカル diff レビュー）。`,
     COMMON,
     '本エージェントは判定のみを行い、コードの変更・コミット・push は行わない。',
     '対象ブランチは push 前のため origin には存在しない。base の remote-tracking ref はレビュー直前に毎回取得し直す。',
@@ -4784,12 +4837,25 @@ function reviewPrompt(item, impl) {
     `   コード指摘を表す needs-fix とは呼び出し元の扱いが異なり、fix エージェントは起動されず`,
     `   即座に終端する。needs-fix / highestSeverity: critical は使わない — 無関係なコードへの`,
     `   修正試行を誘発するため）。`,
-    `2. implement-review スキルに従い、git diff origin/${baseBranch}...HEAD のローカル diff を対象に品質・セキュリティレビューを実施する。`,
+    security
+      ? `2. git diff origin/${baseBranch}...HEAD のローカル diff を対象にセキュリティレビューを実施する。`
+      : `2. implement-review スキルに従い、git diff origin/${baseBranch}...HEAD のローカル diff を対象に品質・セキュリティレビューを実施する。`,
     `   （origin/${baseBranch}（直前に取得し直した remote-tracking ref）基準。3 点ドットのため比較点はブランチの分岐点に固定され、以降ラン中に origin が進んでも比較点は不変）`,
-    '   レビュー観点:',
-    '   - 実装品質（設計・可読性・エッジケース・テストカバレッジ）',
-    '   - OWASP Top 10 セキュリティ（インジェクション・認証・秘密情報露出等）',
-    '   - 対象リポジトリの CLAUDE.md・rules への準拠',
+    ...(security
+      ? [
+          '   対象リポジトリの CLAUDE.md・.claude/rules・専門サブエージェントにセキュリティレビューの手順・観点があれば必ず従う。',
+          '   レビュー観点（セキュリティに限る。可読性・命名・設計の好みは指摘しない）:',
+          '   - 認証・認可（権限チェックの欠落・権限境界やテナント等の分離の越境）',
+          '   - 入力検証とインジェクション（SQL・コマンド・パス・テンプレート・XSS 等）',
+          '   - 秘密情報・個人情報の露出（ハードコードされた鍵、ログ・応答・エラー文への出力）',
+          '   - OWASP Top 10 のその他の項目（安全でない設定・脆弱な依存・暗号の誤用・SSRF 等）',
+        ]
+      : [
+          '   レビュー観点:',
+          '   - 実装品質（設計・可読性・エッジケース・テストカバレッジ）',
+          '   - OWASP Top 10 セキュリティ（インジェクション・認証・秘密情報露出等）',
+          '   - 対象リポジトリの CLAUDE.md・rules への準拠',
+        ]),
     '3. Low（要改善）含む指摘が 1 件でもあれば state: needs-fix とし、summary に全指摘を重要度付き（Critical / High / Medium / Low）で列挙する。',
     '   指摘がなければ state: ok とし、summary に確認した観点と問題なしの旨を記す。',
     '4. highestSeverity に全指摘のうち最も高い重要度を入れる（Critical→critical / High→high / Medium→medium / Low→low）。指摘なし（state=ok）は none。',
@@ -7468,7 +7534,7 @@ async function runImplement(item) {
     let deferredLowFindings = ''
     while (!reviewPassed && reviewsLeft > 0) {
       reviewsLeft--
-      const r = await agent(reviewPrompt(item, impl), {
+      const reviewCall = agent(reviewPrompt(item, impl), {
         label: `review:#${item.number}`,
         phase: 'Review',
         ...stageModelOpt('review', 'sonnet'),
@@ -7476,9 +7542,21 @@ async function runImplement(item) {
         schema: REVIEW_SCHEMA,
         isolation: 'worktree',
       })
+      // セキュリティ専用の Review（args.securityReview）は通常の Review と並列に、互いの結果を見せずに走らせる。
+      const [rMain, rSec] = securityReviewEnabled
+        ? await Promise.all([reviewCall, agent(reviewPrompt(item, impl, true), { label: `security-review:#${item.number}`, phase: 'Review', model: securityReviewModel, effort: 'medium', schema: REVIEW_SCHEMA, isolation: 'worktree' })])
+        : [await reviewCall, null]
       // Review worktree は自己申告値で所有権を確認できないため自動削除せず記録のみ（Issue #142）。
       // currentWorktreePath へは代入しない（上書きすると cleanupWorktree が実装 worktree を取り違える）。
-      recordEphemeralWorktree(item.number, r?.worktreePath, 'review')
+      recordEphemeralWorktree(item.number, rMain?.worktreePath, 'review')
+      let r = rMain
+      if (securityReviewEnabled) {
+        recordEphemeralWorktree(item.number, rSec?.worktreePath, 'security-review')
+        const brief = (x) => `${sanitize(x?.state ?? '無効な結果')}（${sanitize(x?.highestSeverity ?? '-')}）`
+        log(`#${item.number}: Review ラウンド（残り ${reviewsLeft} 回）— 通常の Review: ${brief(rMain)} / セキュリティ専用の Review: ${brief(rSec)}`)
+        // 合わせた結果に以降の判定（blocked・最終ラウンドの Low の扱い・fix への指摘の受け渡し）をそのまま当てる。
+        r = combineReviews(rMain, rSec)
+      }
       if (r?.state === 'ok') {
         reviewPassed = true
         log(`#${item.number}: Review 通過 — ${sanitize(r.summary ?? '')}`)
@@ -9237,6 +9315,7 @@ if (dryRunEnabled) {
     phaseGate: phaseGateEnabled,
     phaseOrder,
     models: agentModels,
+    securityReview: { enabled: securityReviewEnabled, model: securityReviewModel },
     total: queue.length,
     open: work.length,
     startable: { count: plan.startable.length, readyNow: plan.readyNow, first: plan.startable.slice(0, 5) },
@@ -10487,4 +10566,4 @@ if (!mainHeadDiff.observed) {
 // residualWorktrees: 残置上限ゲート観測。prereqTransitions: 前提の外部完了遷移（Issue #442）。
 // mainWorktreeUntracked: メイン worktree への一時ファイル残置検出（Issue #497 AC2。削除はしない）。
 // mainWorktreeHead: メイン worktree の HEAD 変化検出（Issue #591。警告のみで戻さない）。
-return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, models: agentModels, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, models: agentModels, securityReview: { enabled: securityReviewEnabled, model: securityReviewModel }, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }

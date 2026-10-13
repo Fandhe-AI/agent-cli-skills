@@ -169,6 +169,8 @@ monitoring 再開は予算検査のあとに再開ゲート（残置 worktree �
 | マージ後の fix と再 monitor | 2 |
 | merge-exec・merge-verify | 2 |
 
+`args.securityReview` を有効にしたランは、Review ラウンドごとにセキュリティ専用の Review が 1 回増えるため、上の Review 2 回ぶんの 2 を足して 32 とする（`agentCallLimit` の下限も 81 から 83 に上がる）。無効なら 30 のまま。
+
 最悪値（fix 6 回・monitor 7 回・Review 往復）は 60 を超えるが、実行中の issue は既にその一部を使っているため、
 残り全量を最悪値で見積もると着手を止めすぎる。目安を超えた issue が上限へ達した場合は、下の「未監視の PR」が
 受け止める。過剰に見積もったときの代償は未着手が増えること（再実行で着手し得る）で、

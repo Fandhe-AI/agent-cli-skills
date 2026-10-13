@@ -83,7 +83,8 @@ export async function runScript({ args, leaves = [2], override = () => undefined
     if (label === 'worktree:record-count') return { count: 1 }
     if (label.startsWith('plan:#')) return { plan: 'p', summary: 's' }
     if (label.startsWith('impl:#')) return { branch: `feat/${n}-x`, summary: 's', worktreePath: `/repo/wt/${n}` }
-    if (label.startsWith('review:#')) return { state: 'ok', highestSeverity: 'none', summary: 's', worktreePath: `/repo/wt/r${n}` }
+    // セキュリティ専用の Review（args.securityReview）も既定は ok（通常の Review と同じスキーマ）
+    if (label.startsWith('review:#') || label.startsWith('security-review:#')) return { state: 'ok', highestSeverity: 'none', summary: 's', worktreePath: `/repo/wt/r${n}` }
     if (label.startsWith('fix:#')) return { pushed: false, summary: 'fixed', worktreePath: `/repo/wt/f${n}` }
     if (label.startsWith('pr-create:#')) return { prNumber: 1000 + n, summary: 's', worktreePath: `/repo/wt/p${n}`, checksStarted: true, mergeableAfterPush: 'MERGEABLE' }
     if (label.startsWith('pr-bind:#')) return { state: 'OPEN', headRefOid: 'a'.repeat(40), headRefName: `feat/${n}-x`, baseRefName: 'main', isCrossRepository: false, closingIssues: [n] }
