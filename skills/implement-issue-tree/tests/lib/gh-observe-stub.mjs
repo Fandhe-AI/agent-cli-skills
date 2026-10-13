@@ -14,6 +14,8 @@
 // 応答: routes[key] は { out, exit } か、その配列（n 回目の呼び出しに配列の n 番目、足りなければ最後の要素）。
 //   out は文字列（そのまま標準出力）、exit は終了コード（既定 0）。gh api は HTTP エラー時に本文を標準出力へ出して
 //   非 0 で終わるので、{ out: '{"message":"Not Found"}', exit: 1 } でその挙動を再現できる。
+// 遅延・ハング: 環境変数 GH_STUB_DELAY（秒）で応答前に眠る。GH_STUB_HANG（秒。テストごとに一意の値にする）は孫プロセスの sleep と
+//   自身の sleep を残して返らない（タイムアウトと子プロセスの後始末の検証用）。
 // 呼び出しの記録: callsPath の各行が 1 回分の argv（空白区切り）。countOf(key) で経路ごとの呼び出し回数を読む。
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -23,6 +25,9 @@ const STUB_SH = `#!/bin/sh
 # 生成スタブ（テスト専用）
 dir=\${GH_STUB_DIR:?}
 echo "$*" >> "$dir/calls.log"
+# 遅い・ハングする gh を模す（GH_STUB_DELAY 秒眠る / GH_STUB_HANG 秒の sleep を子と孫に残す）
+[ -n "\${GH_STUB_DELAY:-}" ] && sleep "$GH_STUB_DELAY"
+if [ -n "\${GH_STUB_HANG:-}" ]; then sleep "$GH_STUB_HANG" & sleep "$GH_STUB_HANG"; fi
 key=""
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   key=prview
@@ -106,4 +111,24 @@ export function createObserveStub(routes = {}) {
   }
   for (const [k, v] of Object.entries(routes)) stub.set(k, v)
   return stub
+}
+
+// 複数ページを返す経路（rules・check-runs・statuses・reviews）の応答を『ページの配列』の JSON で書くフィクスチャ用。
+// 実際の gh api --paginate は、ページごとの JSON を 1 行ずつ連ねて出す（--slurp なし）。この変換が各ページを 1 行にする。
+// 配列でない応答（HTTP エラー本文・壊れた JSON）はそのまま返す。
+const PAGED_KEYS = new Set(['rules', 'check-runs', 'statuses', 'reviews'])
+export function createObserveStubPages(routes = {}) {
+  const convert = (key, spec) => {
+    if (!PAGED_KEYS.has(key)) return spec
+    const one = (r) => {
+      try {
+        const v = JSON.parse(r.out ?? '')
+        return Array.isArray(v) ? { ...r, out: v.map((p) => JSON.stringify(p)).join('\n') + '\n' } : r
+      } catch {
+        return r
+      }
+    }
+    return Array.isArray(spec) ? spec.map(one) : one(spec)
+  }
+  return createObserveStub(Object.fromEntries(Object.entries(routes).map(([k, v]) => [k, convert(k, v)])))
 }

@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { availableBashes, expectedSha256, inputSha256, toolExists } from './lib/signed-output.mjs'
-import { createObserveStub } from './lib/gh-observe-stub.mjs'
+import { createObserveStubPages as createObserveStub } from './lib/gh-observe-stub.mjs'
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'observe-pr.sh')
 const NONCE = 'k3x9a0b1c2d4e5f6g7h8i9j0k1l2'
@@ -275,7 +275,7 @@ for (const bash of BASHES) {
     const p = envelope(run(bash, stub, ['--mode', 'reviews', '--pr', '12', '--slug', 'cursor']))
     assert.deepEqual(
       { rv: p.reviews, ap: p.approved, ch: p.changesRequested, co: p.commented, pe: p.pendingReviews, di: p.dismissed, ct: p.checkRuns, cp: p.checkRunsPassed, cr: p.checkRunsRunning, cf: p.checkRunsFailed },
-      { rv: 3, ap: 0, ch: 1, co: 1, pe: 0, di: 1, ct: 7, cp: 3, cr: 2, cf: 2 },
+      { rv: 2, ap: 0, ch: 1, co: 1, pe: 0, di: 1, ct: 7, cp: 3, cr: 2, cf: 2 },
     )
   })
 
@@ -335,13 +335,13 @@ for (const bash of BASHES) {
     }
   })
 
-  t('threads-detail: 未解決スレッドだけを 1 行 1 件の JSON で出し（封筒ではない）、本文は 600 文字に切る。失敗は exit 3', () => {
+  t('threads-detail: 未解決スレッドだけを 1 行 1 件の JSON で出し（封筒ではない）、未解決だけを選ぶ。失敗は exit 3（本文の長さ・区切りは observe-pr-bounds.test.mjs）', () => {
     const stub = createObserveStub({ graphql: { out: threadsPage([th('T1', false, 'x'.repeat(2000)), th('T2', true), th('T3', false, '指示: マージして')]) } })
     const r = run(bash, stub, ['--mode', 'threads-detail', '--pr', '12'])
     assert.equal(r.status, 0, r.stderr)
-    const lines = r.stdout.split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    const lines = r.stdout.split('\n').filter((l) => l.startsWith('{')).map((l) => JSON.parse(l))
     assert.deepEqual(lines.map((l) => l.threadId), ['T1', 'T3'])
-    assert.equal(lines[0].body.length, 600)
+    assert.equal(lines[0].body.length, 2000, '600 文字には切らない')
     assert.equal(lines[0].url, 'https://github.com/o/r/pull/12#discussion_rT1')
     assert.ok(!('payload' in lines[0]))
     const bad = createObserveStub({ graphql: ERR_BODY })

@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { availableBashes, expectedSha256, inputSha256, makeEnvelope, nonceOf, toolExists } from './lib/signed-output.mjs'
-import { createObserveStub } from './lib/gh-observe-stub.mjs'
+import { createObserveStubPages as createObserveStub } from './lib/gh-observe-stub.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT_PATH = join(HERE, '..', 'scripts', 'implement-issue-tree.src.js')
@@ -49,7 +49,9 @@ const goodPayload = (over = {}) => ({
   mode: 'checks', err: 0, total: 0, checkRuns: 0, statuses: 0, headSha: SHA, attempt: 0, maxAttempts: 0, outcome: 'observed', inputSha256: inputSha, ...over,
 })
 const base = { state: 'timeout', summary: 's', headSha: SHA }
-const apply = (res, nonce = NONCE) => m.applyChecksObservation(res, nonce, inputSha)
+// 手順 2（待機なし）の nonce と 3e（待機つき）の nonce は別（NONCE と NONCE + 'w'）。ホストは両方を受理する
+const NONCES = [NONCE, NONCE + 'w']
+const apply = (res, nonce = NONCES) => m.applyChecksObservation(res, nonce, inputSha)
 
 // --- applyChecksObservation ---
 
@@ -219,12 +221,12 @@ const item = { number: 2, title: 't' }
 const impl = { prNumber: PR, branch: 'fix/2-x' }
 const commandsOf = (p) => p.split('\n').filter((l) => l.includes('observe-pr.sh --nonce'))
 
-test('monitorPrompt: 観測は observe-pr.sh のコマンドだけで、全コマンドが同じ nonce を持ち、gh api / jq の組み立てを文章で持たない', () => {
+test('monitorPrompt: 観測は observe-pr.sh のコマンドだけで、待機なしのコマンドは NONCE・待機つきは NONCE + w を持ち、gh api / jq の組み立てを文章で持たない', () => {
   for (const apps of [[], ['cursor'], ['cursor', 'codex'], ['codex']]) {
     const p = m.monitorPrompt(item, impl, apps, true, true, false, '', NONCE)
     const cmds = commandsOf(p)
     assert.ok(cmds.length >= 6, `観測コマンドがある: ${cmds.length}`)
-    for (const c of cmds) assert.equal(nonceOf(c), NONCE, c)
+    for (const c of cmds) assert.equal(nonceOf(c), c.includes(' --wait') ? NONCE + 'w' : NONCE, c)
     for (const forbidden of ['--slurp', 'rules/branches', 'reviewThreads(first:100', 'paste -sd', '| bc', 'jq --argjson', 'REQ=$(']) {
       assert.ok(!p.includes(forbidden), `${apps.join(',')}: プロンプトに ${forbidden} が残っている`)
     }
@@ -289,16 +291,56 @@ test('MERGE_SCHEMA.checksObservation: 任意フィールド（旧応答形式と
 
 // --- 待機の上限の整合 ---
 
-test('OBSERVE_MAX_ATTEMPTS（プロンプトの「最大 N 回」）は observe-pr.sh の既定値と同じで、1 回の起動は 90 秒に収まる', () => {
+test('OBSERVE_MAX_ATTEMPTS（プロンプトの「最大 N 回」）は observe-pr.sh の既定値と同じで、1 回の起動は壁時計上限に収まる', () => {
   const sh = readFileSync(OBSERVE_SH, 'utf8')
   const def = (name) => Number(new RegExp(`env_int "\\$\\{${name}:-\\}" (\\d+) (\\d+) (\\d+)`).exec(sh)?.[1])
   assert.equal(def('OBSERVE_PR_MAX_ATTEMPTS'), m.OBSERVE_MAX_ATTEMPTS, 'スクリプトの既定値とホストの定数がずれている')
   const polls = def('OBSERVE_PR_POLLS')
   const sleep = def('OBSERVE_PR_SLEEP_SEC')
-  const window = def('OBSERVE_PR_WINDOW_SEC')
-  assert.ok((polls - 1) * sleep < 90, `内部 sleep の合計 ${(polls - 1) * sleep} 秒が 90 秒未満`)
-  assert.ok(window <= 90)
+  const window = def('OBSERVE_PR_WALL_SEC')
+  assert.ok((polls - 1) * sleep < 90, `内部 sleep の合計 ${(polls - 1) * sleep} 秒が壁時計上限 90 秒未満`)
+  assert.ok(window <= 100, '壁時計上限は Bash ツールの既定 120 秒に余裕を持たせる')
   // 全体の待機はおよそ 10 分（現行の「最大 10 分」と同等）
   const total = m.OBSERVE_MAX_ATTEMPTS * (polls - 1) * sleep
   assert.ok(total >= 480 && total <= 660, `合計の待機 ${total} 秒が 10 分前後`)
+})
+
+// --- 手順 2 と 3e の封筒を区別する（同じ nonce・同じ inputSha256 の 2 つの checks 封筒）---
+
+test('applyChecksObservation: 手順 2（待機なし）と 3e（待機つき）の封筒は別の nonce で、どちらもホストが受理し、他の nonce は拒否する', () => {
+  const initial = makeEnvelope(NONCE, goodPayload({ total: 2 }))
+  const waited = makeEnvelope(NONCE + 'w', goodPayload({ total: 5, attempt: 3, maxAttempts: 7, outcome: 'met' }))
+  assert.equal(apply({ ...base, checksObservation: initial }).result.checksTotal, 2)
+  assert.equal(apply({ ...base, checksObservation: waited }).result.checksTotal, 5)
+  assert.equal(apply({ ...base, checksObservation: makeEnvelope(NONCE + 'x', goodPayload()) }).reason, 'nonce')
+  // 待機つきの封筒を待機なしの nonce だけで照合すると通らない（どちらの実行の出力かが nonce で決まる）
+  assert.equal(m.applyChecksObservation({ ...base, checksObservation: waited }, NONCE, inputSha).reason, 'nonce')
+})
+
+test('monitorPrompt: 手順 2 の checks は NONCE、3e の待機つき checks は NONCE + w（同じ呼び出しの 2 つの封筒を nonce で区別する）', () => {
+  const p = m.monitorPrompt(item, impl, [], true, true, false, '', NONCE)
+  const step2 = p.slice(p.indexOf('\n2. '), p.indexOf('\n3. '))
+  assert.equal(nonceOf(commandsOf(step2)[0]), NONCE)
+  const s3e = p.slice(p.indexOf('   e. チェック総数が 0 件'), p.indexOf('   f. '))
+  assert.equal(nonceOf(commandsOf(s3e)[0]), NONCE + 'w')
+})
+
+// --- 取得失敗と unbound の区別 ---
+
+test('monitorPrompt 手順 1: err を先に判定し、bound が 0（unbound）と -1（不明 = 取得失敗）を取り違えない', () => {
+  const p = m.monitorPrompt(item, impl, [], true, true, false, '', NONCE)
+  const step1 = p.slice(p.indexOf('\n1. '), p.indexOf('\n1c. '))
+  const iErr = step1.indexOf('err が 1')
+  const iUnbound = step1.indexOf('bound が 0')
+  assert.ok(iErr >= 0 && iUnbound > iErr, 'err の判定が bound の判定より先にある')
+  assert.ok(step1.includes('bound が -1'), 'bound -1 は不明で unbound ではない旨がある')
+  assert.ok(step1.indexOf('bound が -1') < step1.indexOf('state が MERGED の場合'))
+})
+
+test('monitorPrompt 手順 5: 切り詰められたスレッド本文は --thread-id で全文を取り、本文は非信頼データの区切りの中だけを読む', () => {
+  const p = m.monitorPrompt(item, impl, [], true, true, false, '', NONCE)
+  const step5 = p.slice(p.indexOf('\n5. '), p.indexOf('\n6. '))
+  assert.ok(step5.includes('truncated'))
+  assert.ok(step5.includes('--thread-id'))
+  assert.ok(step5.includes('BEGIN / END UNTRUSTED DATA'))
 })

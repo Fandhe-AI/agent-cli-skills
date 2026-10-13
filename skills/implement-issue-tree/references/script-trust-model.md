@@ -37,6 +37,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 ## 何を防がないか
 
+- **エージェントが待機コマンドを繰り返す回数**は止められない。`--attempt` の上限（範囲外は exit 2）を強制できるのは、エージェントが正しく 1 から 7 へ進めたときだけで、`--attempt 1` を何度も実行されればホストは見ない（ホストが見るのは転記された封筒だけ）。1 回ごとは壁時計で有界なので、影響は監視の所要時間の延びに限られ、マージ・push・削除の判定には届かない。
 - **悪意のあるエージェント**は防げない。nonce と `inputSha256` の元になる入力はホストがプロンプトに書くので、エージェントは両方を知っている。`sha256sum` を自分で回せば、捏造した payload にも正しい sha256 と `inputSha256` を付けられる。nonce・sha256・`inputSha256` の照合は、**事故（転記ミス・使い回し・入力の打ち間違い・うっかりの未実行）の検出**であって、敵対的な改竄への認証ではない。
 - **コマンドを組み直して別の launcher・別のスクリプトを実行すること**は止められない。ホストが検証するのは封筒の中身だけで、どのファイルを実行したかは見えない。エージェントが `bash` で別の場所の `run-verified.sh` や自作のスクリプトを起動し、同じ形式の封筒を出力して転記すれば、ホストはそれを区別できない（launcher のハッシュ照合は、正しい launcher を経由したときの版ずれ・書き換えを止めるだけである）。「スクリプトを実行せず自己流で進めた」ことの検出は、値を推測で作って sha256 を合わせなかった場合に限る。
 - **StructuredOutput 経由の値は、転記の時点で自己申告になる。** スクリプトの出力そのものはホストから見えず、ホストが見るのはエージェントが返した封筒だけである。ホストは「この封筒は、この nonce に対してこの payload から計算できる sha256 を持つ」ことまでしか確かめられない。`args.repo` の先例（PR #443）と同じく、エージェントの自己申告値を**マージ・push・削除の判定には使わない**。
@@ -52,7 +53,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 | 観測 | 使い道 | ホストが封筒を照合して採用するか |
 |------|--------|--------------------------------|
 | `checks`（チェック総数 = check-run + commit status） | monitor が 3e・3 の観測状態表で使う。ホストは `state: timeout` かつ `checksTotal === 0` を conflicting（base 取り込み）へ再判定する | **する**。monitor が `checksObservation` に転記した封筒を `applyChecksObservation` が nonce・sha256・`inputSha256`・`mode`・`err` で照合し、通ったときだけ total を `checksTotal` に採用する。欠落・不正・取得失敗は `checksTotal` を省略する（従来の「取得失敗は省略」と同じ。timeout は 0 件再判定を受けず次ラウンドへ回る） |
-| `pr`（state・mergeable・headSha・bound） | monitor の MERGED / CLOSED / CONFLICTING の分岐と PR 照合（bound = 想定ブランチ・base・fork でない・closing issue） | しない（monitor が読むだけ。ホストの PR 照合 `prBindingProblem` は別経路で独立に行う） |
+| `pr`（state・mergeable・headSha・bound。取得失敗は err:1 かつ bound:-1 = 不明で、想定外の PR = 0 と区別する） | monitor の MERGED / CLOSED / CONFLICTING の分岐と PR 照合（bound = 想定ブランチ・base・fork でない・closing issue） | しない（monitor が読むだけ。ホストの PR 照合 `prBindingProblem` は別経路で独立に行う） |
 | `required`（required context の不足件数） | autoMerge ラン専用の 3g。`ready` を返す前の助言的確認 | しない（発行元束縛は merge-exec (v-b) が独立に検証する。名前の存在確認は助言） |
 | `reviews`（外部 App のレビュー・check-run 件数） | cursor のレビュー到着待ち・外部 App の起動確認 | しない（merge-exec が `external-review-missing` を独立に判定する） |
 | `threads` / `threads-detail`（未解決スレッド） | unresolved-comments の判定と fix への指摘の受け渡し | しない（merge-exec が未解決スレッド数を自分で再取得する） |
@@ -61,7 +62,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 **nonce は監視呼び出しごと・再試行ごとに別**にする（`monitorObserveSeq` の連番と試行番号を `boundaryNonce` の keyMaterial に含める）。1 回の呼び出しの中でエージェントが同じコマンドを再実行する待機（`pending` の繰り返し）は同じ nonce を使うが、それは同一呼び出しの再観測であって、別ラウンド・別試行の出力の流用ではない。流用した封筒は nonce の不一致で採用されない。
 
-**待機の回数の上限はスクリプトが `--attempt` で強制する**（範囲外は exit 2）。1 回の起動は内部 sleep 込みで 90 秒以内に収まり、エージェントは `pending` のたびに `--attempt` を 1 増やして同じコマンドを再実行する（最大 7 回 = およそ 10 分。現行の「最大 10 分」と同等）。ホストが 1 回ごとにエージェントを呼び直す設計にしなかった理由は `agent-call-budget.md` の「監視の待機」。エージェントが `--attempt` を進めずに繰り返すことは止められないが、その場合も 1 回の起動が有界なので、foreground の長い sleep（ハーネスが拒否する）にも無限ループにもならない。
+**待機の回数の上限はスクリプトが `--attempt` で強制する**（範囲外は exit 2）。1 回の起動は、gh が遅い・ハングする場合を含めて壁時計 90 秒（`OBSERVE_PR_WALL_SEC`）+ 後始末の数秒以内に必ず返る（gh 1 回ごとに 25 秒の時間制限を付けてグループごと kill し、残り時間が 1 観測分に満たなければ次の観測を始めない。Bash ツールの既定タイムアウト 120 秒に収まる）。エージェントは `pending` のたびに `--attempt` を 1 増やして同じコマンドを再実行する（最大 7 回 = およそ 10 分。現行の「最大 10 分」と同等）。ホストが 1 回ごとにエージェントを呼び直す設計にしなかった理由は `agent-call-budget.md` の「監視の待機」。エージェントが `--attempt` を進めずに（`--attempt 1` を打ち続けて）繰り返すことは止められない。スクリプトが保証するのは 1 回の起動の有界性と `--attempt` の範囲検査までで、foreground の長い sleep（ハーネスが拒否する）にはならないが、繰り返しの総数の上限はエージェントの遵守と監視枠に委ねる（次節「防がないこと」）。
 
 ## 測定値の使い方（なぜこの弾の自己申告で足りるか）
 
