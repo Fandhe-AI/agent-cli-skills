@@ -199,7 +199,7 @@ test('流れ: 実ファイルとの不一致は何も着手せずに停止する
       args: BASE_ARGS,
       override: (label, opts, prompt) => {
         seen.push(label)
-        if (label === LABEL) return hashPrecheckReply(prompt, { ok: 6, mismatch: 1, firstBad: 2 })
+        if (label === LABEL) return hashPrecheckReply(prompt, { ok: NAMES.length - 1, mismatch: 1, firstBad: 2 })
         return undefined
       },
     }),

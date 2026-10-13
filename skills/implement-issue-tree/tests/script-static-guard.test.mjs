@@ -33,6 +33,14 @@ const GIT_PUSH_CALL = GIT_SUB('push')
 // ほかの形は削除 refspec・--all・URL 直指定・remote 違い・--no-follow-tags の欠落を含めてすべて拒否する。引用符付きの git / push も許可形ではない
 const GIT_PUSH_ALLOWED = /^\s*git push --no-follow-tags origin "HEAD:refs\/heads\/\$\{branch\}"(\s*>\/dev\/null)?(\s*\|\|\s*rc=\$\?)?\s*$/
 
+// git worktree の remove / unlock と git branch の削除（-d / -D / --delete）の許可形。worktree-remove.sh の決まった行だけが使う
+// （確認と削除を同じプロセスで行うスクリプト。Issue #603 第 7 弾）。ほかの形（--force の二重指定 -f -f・変数以外の引数・別のスクリプト）は
+// すべて拒否する。許可形が worktree-remove.sh にしか無いことは下の専用テストで固定する。引用符付きの git / サブコマンドは許可形ではない
+const GIT_WORKTREE_RM_CALL = new RegExp(`${GIT_SUB('worktree').source}\\s+["']?(remove|unlock)\\b`)
+const GIT_WORKTREE_RM_ALLOWED = /^\s*git worktree (remove( --force)?|unlock) -- "\$\{path\}"( >\/dev\/null 2>&1)? \|\| rc=\$\?\s*$/
+const GIT_BRANCH_DELETE_CALL = (line) => GIT_SUB('branch').test(line) && /\s(-[a-zA-Z]*[dD][a-zA-Z]*|--delete)(\s|$)/.test(line)
+const GIT_BRANCH_DELETE_ALLOWED = /^\s*git branch -D -- "\$\{branch\}"( >\/dev\/null 2>&1)? \|\| rc=\$\?\s*$/
+
 const PATTERNS = [
   // マージ・クローズ
   re('gh pr merge', /\bgh\b[^\n|;&]*\bpr\b[^\n|;&]*\bmerge\b/),
@@ -74,10 +82,17 @@ const PATTERNS = [
   re('git push の --force 系', /\bgit\b[^\n|;&]*\bpush\b[^\n]*(--force\b|--force-with-lease|--mirror|--delete\b|--prune\b|--force-if-includes)/),
   re('git push の -f 系短縮オプション', /\bgit\b[^\n|;&]*\bpush\b[^\n]*\s-[a-zA-Z]*f[a-zA-Z]*(\s|$)/),
   re('git push の + refspec', /\bgit\b[^\n|;&]*\bpush\b[^\n]*\s['"]?\+/),
-  // 削除は自分が作った一時ファイルへの rm -f だけ（再帰削除・worktree の強制削除はスクリプトに置かない。確認と削除を同じスクリプトで行う
-  // 設計は独立の弾で扱う）
+  // 削除は自分が作った一時ファイルへの rm -f だけ（再帰削除はスクリプトに置かない）。worktree とブランチの削除は、確認と削除を同じプロセスで
+  // 行う worktree-remove.sh の決まった行だけ許す
   re('rm の再帰削除（-r / -R / -rf / --recursive）', /\brm\b[^\n|;&]*(\s-[A-Za-z]*[rR][A-Za-z]*(\s|$)|\s--recursive\b)/),
-  re('git worktree remove（強制削除を含む）', /\bgit\b[^\n|;&]*\bworktree\s+remove\b/),
+  {
+    label: 'git worktree remove / unlock は許可形（git worktree remove [--force] -- "${path}" など）以外を拒否',
+    test: (line) => GIT_WORKTREE_RM_CALL.test(line) && !GIT_WORKTREE_RM_ALLOWED.test(line),
+  },
+  {
+    label: 'git branch の削除（-d / -D / --delete）は許可形（git branch -D -- "${branch}"）以外を拒否',
+    test: (line) => GIT_BRANCH_DELETE_CALL(line) && !GIT_BRANCH_DELETE_ALLOWED.test(line),
+  },
   {
     label: 'git push は許可形（git push --no-follow-tags origin "HEAD:refs/heads/${branch}"）以外を拒否',
     test: (line) => GIT_PUSH_CALL.test(line) && !GIT_PUSH_ALLOWED.test(line),
@@ -124,7 +139,7 @@ function codeLines(text) {
 
 test('走査の対象にスクリプト一式（scripts/*.sh と scripts/lib/*.sh）が含まれ、除外は merge-guard-hook.sh だけ', () => {
   const names = targets().map((t) => t.name)
-  for (const must of ['base-merge.sh', 'observe-pr.sh', 'measure-residual-bytes.sh', 'measure-free-disk.sh', 'run-verified.sh', 'preview-tree.sh', 'pr-push.sh', 'merge-gate.sh', 'lib/merge-gate-lib.sh', 'lib/signed-output.sh', 'lib/push-verify.sh', 'lib/base-merge-lib.sh', 'lib/pr-push-lib.sh']) {
+  for (const must of ['base-merge.sh', 'observe-pr.sh', 'measure-residual-bytes.sh', 'measure-free-disk.sh', 'run-verified.sh', 'preview-tree.sh', 'pr-push.sh', 'merge-gate.sh', 'worktree-remove.sh', 'lib/worktree-remove-lib.sh', 'lib/merge-gate-lib.sh', 'lib/signed-output.sh', 'lib/push-verify.sh', 'lib/base-merge-lib.sh', 'lib/pr-push-lib.sh']) {
     assert.ok(names.includes(must), `${must} が走査の対象にない（${names.join(', ')}）`)
   }
   assert.ok(!names.includes('merge-guard-hook.sh'))
@@ -176,7 +191,19 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
     ],
     'git push の --force 系': ['git push --force origin HEAD', 'git push origin HEAD --force-with-lease', 'git push --mirror', 'git push origin --delete x'],
     'rm の再帰削除（-r / -R / -rf / --recursive）': ['rm -rf "${dir}"', 'rm -r -- "${d}"', 'rm -fR x', 'rm --recursive x', 'rm -f a && rm -rf b'],
-    'git worktree remove（強制削除を含む）': ['git worktree remove --force -- "$p"', 'git worktree remove "$p"'],
+    'git worktree remove / unlock は許可形（git worktree remove [--force] -- "${path}" など）以外を拒否': [
+      'git worktree remove --force -- "$p"', 'git worktree remove "$p"', 'git worktree remove -- "${path}" 2>/dev/null && continue', 'git worktree remove --force -- "${p}"',
+      'git worktree remove -f -f -- "${path}"', 'git worktree remove --force --force -- "${path}"', 'git worktree remove --force "${path}"', 'git worktree remove -- /tmp/x',
+      'git worktree unlock "$p"', 'git worktree unlock -- "$p"', 'git worktree unlock -- "${p}"', 'git worktree unlock -- /tmp/x', 'git -C "${dir}" worktree remove -- "${path}"',
+      '"git" worktree remove -- "${path}"', 'git "worktree" remove -- "${path}"', 'git worktree "remove" -- "${path}"', 'git worktree remove -- "${path}" && git worktree remove -- "${other}"',
+      'git worktree remove --force -- "${path}"; rm -rf x', 'git worktree remove --force -- "${path}" >/dev/null 2>&1 || true', 'git worktree remove --force -- "${path}" || rc=$? # x',
+    ],
+    'git branch の削除（-d / -D / --delete）は許可形（git branch -D -- "${branch}"）以外を拒否': [
+      'git branch -D -- "$b"', 'git branch -D "${branch}"', 'git branch -d -- "${branch}"', 'git branch --delete -- "${branch}"', 'git branch --delete --force "${branch}"',
+      'git branch -D -- "${b}"', 'git branch -D -- main', 'git branch -Df "${branch}"', 'git branch -fD "${branch}"', 'git -C x branch -D -- "${branch}"', '"git" branch -D -- "${branch}"',
+      'git branch -D -- "${branch}" "${other}"', 'git branch -D -- "${branch}" && git branch -D -- "${other}"', 'git branch -D -- "${branch}" >/dev/null 2>&1 || true',
+      'git branch -D -- "${branch}" || rc=$? ; git branch -D x',
+    ],
     'git push の -f 系短縮オプション': ['git push -f origin HEAD', 'git push origin HEAD -f', 'git push -uf origin HEAD'],
     'git push の + refspec': ['git push origin +HEAD:refs/heads/x', 'git push origin "+HEAD:refs/heads/x"'],
     'git push は許可形（git push --no-follow-tags origin "HEAD:refs/heads/${branch}"）以外を拒否': [
@@ -249,6 +276,16 @@ test('自己検査: 正当な行（読み取りの gh api・graphql の query・
     'git merge --abort',
     'git fetch origin "refs/heads/${base}:refs/remotes/origin/${base}"',
     'git update-ref -d "refs/remotes/origin/${base}"',
+    'git worktree remove -- "${path}" >/dev/null 2>&1 || rc=$?',
+    'git worktree remove --force -- "${path}" >/dev/null 2>&1 || rc=$?',
+    'git worktree remove --force -- "${path}" || rc=$?',
+    'git worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?',
+    'git worktree list --porcelain',
+    'git worktree prune >/dev/null 2>&1 || true',
+    'git branch -D -- "${branch}" >/dev/null 2>&1 || rc=$?',
+    'git branch --list -- "${b}"',
+    'git branch --format=%(refname:short)',
+    'git branch --show-current',
     'set -x',
     'bash -x script.sh',
     "map(select(. == \"APPROVED\"))",
@@ -290,6 +327,34 @@ test('/rulesets を含むコード行は merge-gate.sh の読み取り 1 行だ�
   }
   assert.deepEqual(found.map((f) => f.name), ['merge-gate.sh'], `許可は merge-gate.sh の 1 行だけ: ${JSON.stringify(found)}`)
   assert.match(found[0].l, /^gh_api "\$\{repo_path\}\/rulesets\/\$\{id\}" \|\| stop server-enforcement-missing g0 ruleset-fetch 1$/)
+})
+
+test('git worktree remove / unlock と git branch -D の許可形は worktree-remove.sh だけにあり、決まった行（remove 2 形・unlock 1 形・branch -D 1 形）だけが存在する', () => {
+  const found = { worktree: [], branch: [] }
+  for (const { name, path } of targets()) {
+    for (const { n, l } of codeLines(readFileSync(path, 'utf8'))) {
+      if (GIT_WORKTREE_RM_CALL.test(l)) found.worktree.push({ name, n, l: l.trim() })
+      if (GIT_BRANCH_DELETE_CALL(l)) found.branch.push({ name, n, l: l.trim() })
+    }
+  }
+  assert.deepEqual([...new Set([...found.worktree, ...found.branch].map((f) => f.name))], ['worktree-remove.sh'], JSON.stringify(found))
+  assert.deepEqual(
+    found.worktree.map((f) => f.l),
+    [
+      'git worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?',
+      'git worktree remove --force -- "${path}" >/dev/null 2>&1 || rc=$?',
+      'git worktree remove -- "${path}" >/dev/null 2>&1 || rc=$?',
+    ],
+  )
+  assert.deepEqual(found.branch.map((f) => f.l), ['git branch -D -- "${branch}" >/dev/null 2>&1 || rc=$?'])
+  for (const f of [...found.worktree, ...found.branch]) assert.ok(GIT_WORKTREE_RM_ALLOWED.test(f.l) || GIT_BRANCH_DELETE_ALLOWED.test(f.l), f.l)
+})
+
+test('worktree-remove.sh に rm の再帰削除・git clean・git checkout -- ・git reset --hard が無い（消せないものは保持して報告する）', () => {
+  const path = targets().find((t) => t.name === 'worktree-remove.sh').path
+  const code = codeLines(readFileSync(path, 'utf8')).map((x) => x.l).join('\n')
+  assert.doesNotMatch(code, /\brm\b/, 'rm を使わない（一時ファイルも作らない）')
+  assert.doesNotMatch(code, /\bgit\b[^\n|;&]*\b(clean|reset|checkout|restore|stash)\b/)
 })
 
 test('merge-gate.sh の gh_api() 本体は run_timed "${gh_timeout}" gh api "$@" の 1 形だけで、メソッド指定を含まない', () => {

@@ -178,7 +178,7 @@ test('(g) マージは成功、掃除段の haiku が例外 → 掃除段だけ 
   const { calls } = installAgentStub((opts) => {
     if (opts.label?.startsWith?.('state:update')) return { ok: true }
     if (opts.model === 'haiku') throw new Error('cleanup agent crashed')
-    return { ok: true }
+    return { ok: true, retained: false }
   })
   const ok = await updateState(
     107,
@@ -196,22 +196,24 @@ test('(g) マージは成功、掃除段の haiku が例外 → 掃除段だけ 
   }
 })
 
-test('(g2) 掃除プロンプトの手順 5（.worktree のクリア）は state.sh merge を呼ぶ。追跡中の worktree と別物を消すとき（preserveWorktreeField・新パス記録済み）は呼ばない', async () => {
+test('(g2) 掃除プロンプトは worktree-remove.sh の 1 コマンドと、worktree が無くなったときだけ行う .worktree のクリア（state.sh merge）から成る。追跡中の worktree と別物を消すとき（preserveWorktreeField・新パス記録済み）はクリアしない', async () => {
   const run = async (patch, options) => {
-    const { calls } = installAgentStub(() => ({ ok: true }))
+    const { calls } = installAgentStub(() => ({ ok: true, retained: false }))
     assert.equal(await updateState(108, patch, options), true)
     return calls.find((c) => c.opts.label.startsWith('state:cleanup:#108')).prompt
   }
   const cleared = await run({ status: 'merged' }, { cleanupWorktree: '/tmp/wt-108' })
+  assert.match(cleared, /worktree-remove\.sh remove --mode superseded --path '\/tmp\/wt-108'\n/)
+  assert.match(cleared, /結果の worktree が removed \/ not-registered \/ skipped のときだけ（それ以外は実行しない）/)
   assert.match(cleared, /state\.sh --file _\/issue-trees\/1\.json merge <<'STATE_EOF'\n\[\{"numbers":\[108\],"patch":\{"worktree":""\}\}\]\nSTATE_EOF\n/)
   assert.doesNotMatch(cleared, /jq --argjson patch/)
   assert.doesNotMatch(await run({ status: 'merged', worktree: '/tmp/wt-108-new' }, { cleanupWorktree: '/tmp/wt-108' }), /state\.sh/)
   assert.doesNotMatch(await run({ status: 'merged' }, { cleanupWorktree: '/tmp/wt-108', preserveWorktreeField: true }), /state\.sh/)
 })
 
-test('(g3) 書き込みプロンプトと掃除の手順 5 は STATE_RESULT の ok を返す・自分で書き直さない指示（STATE_NOTE）を含む', async () => {
+test('(g3) 書き込みプロンプトと掃除の .worktree クリアは STATE_RESULT の ok を返す・自分で書き直さない指示（STATE_NOTE）を含み、掃除は WORKTREE_REMOVE_RESULT の ok / retained / branchSha を返す・自分で消さない指示を含む', async () => {
   const marker = '標準出力の最後の行 STATE_RESULT {json} の ok を ok として返す'
-  const { calls } = installAgentStub(() => ({ ok: true }))
+  const { calls } = installAgentStub(() => ({ ok: true, retained: false }))
   assert.equal(await updateState(109, { status: 'merged' }, { cleanupWorktree: '/tmp/wt-109' }), true)
   const merge = calls.find((c) => c.opts.label.startsWith('state:update:#109')).prompt
   const cleanup = calls.find((c) => c.opts.label.startsWith('state:cleanup:#109')).prompt
@@ -219,7 +221,14 @@ test('(g3) 書き込みプロンプトと掃除の手順 5 は STATE_RESULT の 
     assert.ok(p.includes(marker), 'STATE_RESULT の判定指示')
     assert.match(p, /jq \/ mv で状態ファイルを自分で書き直して代替しない/)
   }
-  assert.match(cleanup, /手順 5 が失敗した場合は掃除全体の ok を false で返す/)
+  assert.match(cleanup, /手順 2 が失敗した場合は掃除全体の ok を false で返す/)
+  assert.match(cleanup, /標準出力の最後の行 WORKTREE_REMOVE_RESULT \{json\} の ok・retained・branchSha をそのまま返す/)
+  assert.match(cleanup, /git worktree remove \/ unlock・git branch -D・rm を自分で実行して代替しない/)
+  assert.match(cleanup, /run-verified\.sh' \S+ worktree-remove\.sh remove /)
+  // 共通規則（TEMP_FILE_POLICY）は rm -rf という語を含むので、手順の本文（「対象は」以降）だけを見る
+  const body = cleanup.slice(cleanup.indexOf('対象は下記コマンド'))
+  assert.ok(body.length > 0 && body.length < cleanup.length)
+  assert.doesNotMatch(body, /rm -rf|git worktree list|--force --|main_wt|realpath|pwd -P/, '手順の本文（確認・unlock・フォールバック）はスクリプトに移っている')
 })
 
 test('(h0) initAllPending は open が 0 件のとき state.sh init を呼ばない（空配列は invalid-input の偽失敗になる）', async () => {
