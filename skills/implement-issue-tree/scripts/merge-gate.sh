@@ -12,7 +12,7 @@
 #   view      PR の state / HEAD sha / mergeable / base / draft を 1 回取得する。取得失敗・HEAD sha の形式不正・OPEN でない・
 #             --expect-sha との不一致 → head-moved（CLOSED は pr-closed）、base 不一致または draft → wrong-target
 #   g0        ベースブランチのサーバー側強制の実測（rules/branches を全ページ取得）
-#             - required status checks が 1 件も無い・取得失敗 → classic-unsupported（classic branch protection は非対応）
+#             - required status checks が 1 件も無い（集計後の総数 0 を含む）・取得失敗 → classic-unsupported（classic branch protection は非対応）
 #             - 適用 ruleset が Repository ソースでない（Organization 継承を含む）・各 ruleset の enforcement が active でない・
 #               bypass_actors が空配列でない・取得失敗 → server-enforcement-missing
 #             - required_review_thread_resolution が強制されていない → server-enforcement-missing
@@ -22,7 +22,7 @@
 #             - integration_id と一致する App 発行の check-run が HEAD に未発行の required context がある → checks-not-green（一過性）
 #             strict_required_status_checks_policy は読まない（意図的な非要件。ruleset-policy.md）
 #   checks    gh pr checks の state が 1 件以上あり全件 SUCCESS / NEUTRAL / SKIPPED でなければ checks-not-green
-#             （非ゼロ終了・取得失敗・総数 0 を含む）
+#             （総数 0・終了コード 8〔pending あり。一過性なので err 0〕を含む）。8 以外の非ゼロ終了・時間切れ・解析失敗は取得失敗（err 1）
 #   threads   未解決のレビュースレッド（GraphQL を全ページ走査）が 1 件でもあれば unresolved-threads、取得失敗は head-moved
 #   mergeable view で取得した mergeable が CONFLICTING なら not-mergeable（UNKNOWN は止めない。マージ時に GitHub が拒否する）
 #   external  --external の App ごと: cursor はレビュー 0 件または CHANGES_REQUESTED があれば external-review-missing。
@@ -179,6 +179,10 @@ trap cleanup EXIT
 trap 'cleanup; exit 143' TERM INT HUP
 
 OUT=""
+# RC: 直近の run_timed の終了コード（失敗の種類の判別用）。accept_rc: 0 のほかに出力を OUT へ取り込む終了コード（既定は無し = 255。
+# gh pr checks が pending で返す 8 だけ checks 段階で指定する。取り込んでも run_timed の戻り値は 0 のときだけ成功）
+RC=0
+accept_rc=255
 run_timed() {
   local limit=$1 now rem pid wpid rc=1 size
   shift
@@ -202,7 +206,7 @@ run_timed() {
   { wait "${wpid}"; } 2>/dev/null
   CUR_PID=""
   CUR_WPID=""
-  if [ "${rc}" -eq 0 ]; then
+  if [ "${rc}" -eq 0 ] || [ "${rc}" -eq "${accept_rc}" ]; then
     size=$(wc -c <"${CUR_TMP}")
     if [ $((size + 0)) -gt "${max_out}" ]; then
       echo "merge-gate: gh の出力が上限 ${max_out} バイトを超えた" >&2
@@ -218,6 +222,7 @@ run_timed() {
   fi
   rm -f "${CUR_TMP}"
   CUR_TMP=""
+  RC=${rc}
   [ "${rc}" -eq 0 ]
 }
 gh_api() {
@@ -303,6 +308,7 @@ enforced=$(mg_thread_enforced "${rules}") || stop server-enforcement-missing g0 
 [ "${enforced}" = 1 ] || stop server-enforcement-missing g0 thread-resolution
 rsc=$(mg_rsc "${rules}") || stop server-enforcement-missing g0 rules-fetch 1
 N_REQTOTAL=$(printf '%s' "${rsc}" | jq 'length') || stop server-enforcement-missing g0 rules-fetch 1
+[ "${N_REQTOTAL}" -ge 1 ] 2>/dev/null || stop classic-unsupported g0 no-required-checks
 
 # 外部チェック App は slug ごとに App ID を取得し、宣言 context との組が required にあることを確認する
 n_ext=$(printf '%s' "${ext_json}" | jq 'length') || stop server-enforcement-missing g0 external-binding 1
@@ -340,20 +346,27 @@ N_UNISSUED=$(mg_unissued_count "${rsc}" "${runs}") || stop issuer-unbound g0 rsc
 [ "${N_UNISSUED}" = 0 ] || stop checks-not-green g0 unissued
 
 # ---- checks: gh pr checks の state（チェック名は取得しない）----
+# gh pr checks は pending のチェックがあると終了コード 8 を返す（一過性）。8 は出力を解析して判定し、解析できれば解析結果（pending は
+# checks-not-green・err 0）、できなければ取得失敗（err 1）。8 以外の非 0 終了・時間切れ・出力なしは取得失敗（err 1）。どれも合格に倒さない
 stage=checks
+accept_rc=8
 if [ -n "${repo}" ]; then
-  run_timed "${gh_timeout}" gh pr checks "${pr}" -R "${repo}" --json state --jq '[.[].state]' || stop checks-not-green checks checks-fetch
+  run_timed "${gh_timeout}" gh pr checks "${pr}" -R "${repo}" --json state --jq '[.[].state]' && ck_ok=1 || ck_ok=0
 else
-  run_timed "${gh_timeout}" gh pr checks "${pr}" --json state --jq '[.[].state]' || stop checks-not-green checks checks-fetch
+  run_timed "${gh_timeout}" gh pr checks "${pr}" --json state --jq '[.[].state]' && ck_ok=1 || ck_ok=0
 fi
-counts=$(mg_checks_counts "${OUT}") || stop checks-not-green checks checks-fetch
+accept_rc=255
+if [ "${ck_ok}" = 0 ] && [ "${RC}" -ne 8 ]; then stop checks-not-green checks checks-fetch 1; fi
+counts=$(mg_checks_counts "${OUT}") || stop checks-not-green checks checks-fetch 1
 # shellcheck disable=SC2086
 set -- ${counts}
-[ $# -eq 2 ] || stop checks-not-green checks checks-fetch
+[ $# -eq 2 ] || stop checks-not-green checks checks-fetch 1
 N_CHECKS=$1
 N_NOTGREEN=$2
 [ "${N_CHECKS}" -ge 1 ] || stop checks-not-green checks checks-total-zero
 [ "${N_NOTGREEN}" -eq 0 ] || stop checks-not-green checks checks-not-green
+# 終了コード 8 は（上の解析結果で止まらなかった場合も） pending の存在を意味する。出力が全件 green に読めても合格にしない（pending を一過性として止める）
+[ "${ck_ok}" = 1 ] || stop checks-not-green checks checks-pending
 
 # ---- threads: 未解決のレビュースレッド（コメント本文は取得しない）----
 stage=threads

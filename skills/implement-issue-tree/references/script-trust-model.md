@@ -244,7 +244,7 @@ merge-exec のプロンプトは、マージ直前に (a) ベースブランチ�
 - `verdict == ok`・`err == 0`・`stage == done`（最後の段階まで到達した）
 - 封筒の `headSha` が merge-exec 申告の `headSha` と一致する（ホストが opt-in ゲートの期待 sha を持つときはそれとも一致）。続けて既存の merge-verify の独立観測 `headRefOid` との一致も要求する
 
-不合格は既存の「独立確認で裏付けられなかった」経路（`blocked` + `quality`、次回ランの monitoring 再開で `already-merged` 回復）へ流す。ホストの分岐の意味は変えていない。`already-merged` の回復は新規マージではないので封筒を要求しない。reason が `merged` でない辞退（`checks-not-green` など）の分岐は従来どおり merge-exec の reason を使う。
+**この照合はマージの後に行われ、マージを防ぐ仕組みではない**（マージを防ぐのはサーバー側の ruleset と hook で、照合は不正・転記漏れの検出と `blocked` 化を担う）。不合格は既存の「独立確認で裏付けられなかった」経路（`blocked` + `quality`、次回ランの monitoring 再開で `already-merged` 回復）へ流す。ホストの分岐の意味は変えていない。`already-merged` の回復は新規マージではないので封筒を要求しない。reason が `merged` でない辞退（`checks-not-green` など）の分岐は従来どおり merge-exec の reason を使う。
 
 payload に入れるのは整数・固定語彙（verdict / stage / detail）・40 桁 16 進だけで、ruleset 名・context 名・App 名・PR のタイトルのような GitHub 由来の自由文字列は入れない（テストが外部由来の文字列を含む fixture で標準出力に出ないことを確かめる）。外部チェックの宣言（App の slug と context）は `--external` の引数文字列 1 つで渡し、封筒の `inputSha256` がそれを束縛する。
 
@@ -254,7 +254,7 @@ payload に入れるのは整数・固定語彙（verdict / stage / detail）・
 |------|--------|--------|
 | view | `head-moved`（取得失敗・HEAD sha の形式・OPEN でない・期待 sha の不一致）/ `pr-closed` / `wrong-target`（base 不一致・draft） | 手順 2 |
 | g0 | `classic-unsupported`（required status checks が 0 件・取得失敗）/ `server-enforcement-missing`（Organization 継承・ruleset の取得失敗・`bypass_actors` が空でない・スレッド解消の強制なし・外部チェックの App ID + context の組が required に無い・client-only チェックあり・取得失敗）/ `issuer-unbound`（`integration_id` が数値でない・取得失敗）/ `checks-not-green`（束縛済み check-run が HEAD に未発行 = 一過性） | 手順 2b (i)〜(v-b) |
-| checks | `checks-not-green`（非 0 終了・総数 0・合格以外あり） | 手順 3 |
+| checks | `checks-not-green`（総数 0・合格以外あり・終了コード 8 = pending あり〔一過性 = `err 0`。出力が解析できれば解析結果で、全件 green に読めても止める〕。8 以外の非 0 終了・時間切れ・解析失敗は取得失敗 = `err 1`） | 手順 3 |
 | threads | `unresolved-threads` / `head-moved`（取得失敗） | 手順 4 |
 | mergeable | `not-mergeable`（CONFLICTING のみ。UNKNOWN は止めない） | 手順 4 |
 | external | `external-review-missing` / `checks-not-green`（cursor 以外の check-run が不合格） | 手順 4b |
@@ -266,11 +266,11 @@ payload に入れるのは整数・固定語彙（verdict / stage / detail）・
 
 ### 静的ガード
 
-G0 は適用 ruleset の `bypass_actors` を読むため `gh_api "${repo_path}/rulesets/${id}" || …` の 1 行が `/rulesets` を含む。`script-static-guard` の「ruleset / リポジトリ設定」パターンは `/rulesets` を設定変更の経路として拒否していたので、**この 1 行の形（`/${id}" ||` が続く GET）だけを許す**ようパターンを狭く直した。許す行が `merge-gate.sh` 以外に無く、形が 1 つであることは専用テストで固定する。書き込み（`-X`・`--method`・`-f` による暗黙 POST）は別のパターンが引き続き拒否する。`EXCLUDED`（除外リスト）と `merge-guard-hook.sh` は変更していない。
+G0 は適用 ruleset の `bypass_actors` を読むため `gh_api "${repo_path}/rulesets/${id}" || …` の 1 行が `/rulesets` を含む。`script-static-guard` の「ruleset / リポジトリ設定」パターンは `/rulesets` を設定変更の経路として拒否していたので、**この 1 行の形（`/${id}" ||` が続く GET）だけを許す**ようパターンを狭く直した。許す行が `merge-gate.sh` 以外に無く、形が 1 つであることは専用テストで固定する。書き込み（`-X`・`--method`・`-f` による暗黙 POST）は別のパターンが引き続き拒否する。メソッド指定のパターンは GET のリテラル以外（`-X "$m"` のような変数値を含む）にすべて反応し、`gh_api()` ラッパーの本体が `run_timed "${gh_timeout}" gh api "$@"` の 1 形（メソッド指定を含まない）であることも専用テストで固定する（変数でメソッドを切り替えると `/rulesets/${id}` が DELETE になり得るため）。`EXCLUDED`（除外リスト）と `merge-guard-hook.sh` は変更していない。
 
 ### この弾の検証範囲
 
-単体テスト（判定の表・偽 `gh` を差し替えたスクリプト全体・ホストの封筒照合・プロンプトの配線）と変異（危険側 29 件）でのみ検証している。**`autoMerge: true` の実ランでは未検証**（実 GitHub の ruleset / App に対する G0 の通過、`gh pr checks --json state --jq` の実出力と終了コード（pending で 8 を返すか。どちらでも非 0 終了は `checks-not-green`、exit 0 で PENDING が混じっても `checks-not-green` なので fail-closed）、隔離 worktree からの `run-verified.sh` 経由の起動を含む）。なお `apps/<slug>`（外部チェック App の ID 取得）は GitHub 側がリポジトリに束縛できないグローバルな endpoint で、他の `gh` 呼び出しがすべて対象リポジトリを明示するのに対する唯一の例外である。
+単体テスト（判定の表・偽 `gh` を差し替えたスクリプト全体・ホストの封筒照合・プロンプトの配線）と変異（危険側 38 件）でのみ検証している。**`autoMerge: true` の実ランでは未検証**（実 GitHub の ruleset / App に対する G0 の通過、`gh pr checks --json state --jq` の実出力と終了コード（pending で 8 を返すかは未確認。8 は一過性の `checks-not-green`、それ以外の非 0 終了は取得失敗で、どちらも合格に倒さない。exit 0 で PENDING が混じっても `checks-not-green`）、隔離 worktree からの `run-verified.sh` 経由の起動を含む）。なお `apps/<slug>`（外部チェック App の ID 取得）は GitHub 側がリポジトリに束縛できないグローバルな endpoint で、他の `gh` 呼び出しがすべて対象リポジトリを明示するのに対する唯一の例外である。
 
 ## ハッシュ埋め込みと鮮度
 

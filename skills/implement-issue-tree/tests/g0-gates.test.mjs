@@ -267,6 +267,15 @@ test('merge-gate.sh が返し得る verdict は、すべて merge-exec の返却
 // MERGE_EXEC_SCHEMA / MERGE_EXEC_VALID_REASONS（reason enum の契約）
 // ---------------------------------------------------------------------------
 
+test('MERGE_EXEC_SCHEMA.gate.payload は merge-gate.sh が常に出力する全キー（detail と件数 7 種を含む）を必須にする（転記漏れを StructuredOutput で弾く）', () => {
+  const gate = MERGE_EXEC_SCHEMA.properties.gate
+  assert.deepEqual([...gate.required].sort(), ['nonce', 'payload', 'sha256'])
+  const req = [...gate.properties.payload.required].sort()
+  assert.deepEqual(req, ['checks', 'clientOnly', 'detail', 'err', 'headSha', 'inputSha256', 'mode', 'notGreen', 'requiredTotal', 'stage', 'unbound', 'unissued', 'unresolved', 'verdict'])
+  assert.deepEqual(req, Object.keys(gate.properties.payload.properties).sort(), '必須キーと定義済みキーが一致する')
+  assert.ok(!MERGE_EXEC_SCHEMA.required.includes('gate'), 'gate 自体は任意（回復専用経路・辞退では不要）')
+})
+
 test('MERGE_EXEC_VALID_REASONS は schema の reason enum と完全一致する（二重検証の同一性）', () => {
   const enumValues = MERGE_EXEC_SCHEMA.properties.reason.enum
   assert.equal(MERGE_EXEC_VALID_REASONS.size, enumValues.length)

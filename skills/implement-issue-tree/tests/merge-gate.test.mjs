@@ -73,8 +73,8 @@ function payloadOf(r) {
 const verdictOf = (p) => `${p.verdict}/${p.stage}/${p.detail}/${p.err}`
 
 for (const bash of availableBashes()) {
- // スクリプト全体の実行は 1 ケース 0.3〜0.6 秒かかるため、独立したケースは同時に走らせる（検査の中身は変えない）
- describe(`[${bash}]`, { concurrency: 8 }, () => {
+  // スクリプト全体の実行は 1 ケース 0.3〜0.6 秒かかるため、独立したケースは同時に走らせる（検査の中身は変えない）
+  describe(`[${bash}]`, { concurrency: 8 }, () => {
   const t = (name, fn) => it(name, { skip: !jqAvailable }, fn)
 
   t('全段階を合格する構成: verdict ok・stage done・HEAD sha を返し、入力の束縛 inputSha256 がホストの再計算と一致する', async () => {
@@ -157,11 +157,19 @@ for (const bash of availableBashes()) {
     ['g0: integration_id が null の required check は issuer-unbound', (r) => { r.rules = ok([[rsc({ context: 'ci', integration_id: null }, { context: 'Cursor Bugbot', integration_id: CURSOR_APP }), prRule(true)]]) }, 'issuer-unbound/g0/unbound/0'],
     ['g0: 同名の commit status では発行元束縛を満たさない（未束縛の required は issuer-unbound）', (r) => { r.rules = ok([[rsc({ context: 'ci', integration_id: null }), prRule(true)]]); r.statuses = ok([[{ context: 'ci', state: 'success' }]]); r['check-runs'] = ok([{ check_runs: [] }]) }, 'issuer-unbound/g0/unbound/0', ['prchecks'], false],
     ['g0: 束縛済み App の check-run が未発行（別 App が同名で発行）は一過性の checks-not-green', (r) => { r['check-runs'] = ok([{ check_runs: [run('ci', 99), run('Cursor Bugbot', CURSOR_APP)] }]) }, 'checks-not-green/g0/unissued/0', ['prchecks']],
-    ['checks: gh pr checks の非 0 終了（pending は exit 8）は checks-not-green', (r) => { r.prchecks = { out: J([{ state: 'PENDING' }]), exit: 8 } }, 'checks-not-green/checks/checks-fetch/0'],
+    ['checks: 終了コード 8（pending あり）で出力も PENDING なら、解析結果の checks-not-green（一過性 = err 0）', (r) => { r.prchecks = { out: J([{ state: 'SUCCESS' }, { state: 'PENDING' }]), exit: 8 } }, 'checks-not-green/checks/checks-not-green/0'],
+    ['checks: 終了コード 8 は出力が全件 green に読めても合格にしない（checks-pending・err 0）', (r) => { r.prchecks = { out: J([{ state: 'SUCCESS' }]), exit: 8 } }, 'checks-not-green/checks/checks-pending/0'],
+    ['checks: 終了コード 8 でも出力が解析できなければ取得失敗（err 1）', (r) => { r.prchecks = { out: J({ state: 'SUCCESS' }), exit: 8 } }, 'checks-not-green/checks/checks-fetch/1'],
+    ['checks: 終了コード 0 でも state が文字列でない（出力は読めるが解析できない）なら取得失敗（err 1）', (r) => { r.prchecks = ok([{ state: 1 }]) }, 'checks-not-green/checks/checks-fetch/1'],
+    ['checks: 終了コード 8 でも state が文字列でないなら取得失敗（err 1）', (r) => { r.prchecks = { out: J([{ state: 1 }]), exit: 8 } }, 'checks-not-green/checks/checks-fetch/1'],
+    ['checks: 終了コード 8 で出力なしは取得失敗（err 1）', (r) => { r.prchecks = { out: '', exit: 8 } }, 'checks-not-green/checks/checks-fetch/1'],
+    ['checks: 8 以外の非 0 終了（1）は出力が PENDING でも取得失敗（err 1）', (r) => { r.prchecks = { out: J([{ state: 'PENDING' }]), exit: 1 } }, 'checks-not-green/checks/checks-fetch/1'],
+    ['checks: 8 以外の非 0 終了（4）は出力が全件 green でも合格にしない（取得失敗 err 1）', (r) => { r.prchecks = { out: J([{ state: 'SUCCESS' }]), exit: 4 } }, 'checks-not-green/checks/checks-fetch/1'],
+    ['g0: required status checks のエントリが集計後 0 件なら classic-unsupported（no-required-checks）', (r) => { r.rules = ok([[rsc(), prRule(true)]]) }, 'classic-unsupported/g0/no-required-checks/0', ['check-runs', 'prchecks']],
     ['checks: 成功終了でも PENDING が混じれば checks-not-green', (r) => { r.prchecks = ok([{ state: 'SUCCESS' }, { state: 'PENDING' }]) }, 'checks-not-green/checks/checks-not-green/0'],
     ['checks: FAILURE / CANCELLED は checks-not-green', (r) => { r.prchecks = ok([{ state: 'FAILURE' }, { state: 'CANCELLED' }]) }, 'checks-not-green/checks/checks-not-green/0'],
     ['checks: 総数 0 件は green の証拠にならず checks-not-green', (r) => { r.prchecks = ok([]) }, 'checks-not-green/checks/checks-total-zero/0'],
-    ['checks: 形が違う応答は checks-not-green', (r) => { r.prchecks = ok({ state: 'SUCCESS' }) }, 'checks-not-green/checks/checks-fetch/0'],
+    ['checks: 形が違う応答は checks-not-green', (r) => { r.prchecks = ok({ state: 'SUCCESS' }) }, 'checks-not-green/checks/checks-fetch/1'],
     ['threads: 未解決が 1 件でもあれば unresolved-threads', (r) => { r.graphql = ok(threadsPage([{ isResolved: true }, { isResolved: false }])) }, 'unresolved-threads/threads/unresolved/0', ['reviews']],
     ['threads: 取得失敗は head-moved（err=1）', (r) => { r.graphql = { out: '{"errors":[{"message":"x"}]}', exit: 1 } }, 'head-moved/threads/threads-fetch/1'],
     ['threads: GraphQL のエラー本文（exit 0）は判定不能 = head-moved（err=1）', (r) => { r.graphql = ok({ errors: [{ message: 'rate limited' }] }) }, 'head-moved/threads/threads-fetch/1'],
@@ -248,6 +256,25 @@ for (const bash of availableBashes()) {
     routes.rules = ok([[rsc({ context: 'ci', integration_id: CI_APP }, { context: 'Cursor Bugbot', integration_id: CURSOR_APP }), ...pad]])
     const { r } = await execute(bash, routes, { env: { MERGE_GATE_MAX_OUT_BYTES: '1000' } })
     assert.equal(verdictOf(payloadOf(r)), 'classic-unsupported/g0/rules-fetch/1')
+  })
+
+  t('出力サイズ上限ちょうどを 1 バイト超える出力は、全体が正しい JSON として読めても取得失敗（上限判定を単独で固定する）', async () => {
+    const view = J({ state: 'OPEN', headRefOid: HEAD, mergeable: 'MERGEABLE', baseRefName: 'main', isDraft: false })
+    const padTo = (n) => view + ' '.repeat(n - Buffer.byteLength(view))
+    const env = { MERGE_GATE_MAX_OUT_BYTES: '1000' }
+    // gh は書き終えて正常終了するので SIGPIPE にならず、head -c が max+1 バイトで残すファイルのサイズだけが超過を示す
+    const over = happy()
+    over.prview = ok(padTo(1001))
+    assert.doesNotThrow(() => JSON.parse(over.prview.out), '超過分は空白で、出力全体は正しい JSON')
+    assert.equal(Buffer.byteLength(over.prview.out), 1001)
+    const o = await execute(bash, over, { env })
+    assert.equal(verdictOf(payloadOf(o.r)), 'head-moved/view/view-fetch/1')
+    assert.equal(o.stub.countOf('rules'), 0)
+    // 対照: ちょうど上限のバイト数なら view は通る（上限判定が > であること）
+    const edge = happy()
+    edge.prview = ok(padTo(1000))
+    const e = await execute(bash, edge, { env })
+    assert.notEqual(payloadOf(e.r).detail, 'view-fetch')
   })
 
   t('引数の誤りは exit 2 で封筒を出さない（nonce・PR・base・repo・expect-sha・external の形式）', async () => {

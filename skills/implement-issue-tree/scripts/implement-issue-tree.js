@@ -2085,6 +2085,7 @@ description:
 },
 
 
+
 gate:{
 type:'object',
 required:['nonce','payload','sha256'],
@@ -2094,7 +2095,7 @@ nonce:{type:'string'},
 sha256:{type:'string'},
 payload:{
 type:'object',
-required:['mode','err','verdict','stage','headSha','inputSha256'],
+required:['mode','err','verdict','stage','detail','headSha','inputSha256','checks','notGreen','unresolved','requiredTotal','clientOnly','unbound','unissued'],
 properties:{
 checks:{type:'integer'},clientOnly:{type:'integer'},detail:{type:'string'},err:{type:'integer'},headSha:{type:'string'},
 inputSha256:{type:'string'},mode:{type:'string'},notGreen:{type:'integer'},requiredTotal:{type:'integer'},stage:{type:'string'},
@@ -3788,7 +3789,7 @@ const SCRIPT_SHA256={
 'base-merge.sh':'6970be50f39f19db01e861a3c5f8651133b63f3653345f08c96d2dfc8435db8e',
 'pr-push.sh':'f3283dfa7e3df716457250971352e9a0c88a999464777637ffd27461ba579137',
 'state.sh':'b08ede22da26b0219303067c9faf232355e75808d2996e24cc61ec900b7348c7',
-'merge-gate.sh':'5069b86eedc8f752c7b36ed2522ea984943188d6e90dad3e798c134edad058c9',
+'merge-gate.sh':'d345afff0aadf2f8556fc34e627d4446210780540d487b2f6abdba19fdbb331e',
 }
 
 

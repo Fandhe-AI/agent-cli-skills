@@ -2084,7 +2084,8 @@ const MERGE_EXEC_SCHEMA = {
         + '監視エージェント等の他エージェントから渡された値をここに書いてはならない（スクリプトの封筒の値のみ）',
     },
     // 手順 2 の検証スクリプト（merge-gate.sh）の標準出力の封筒の転記。ホストが照合し、通ったときだけ merged: true / reason: merged を受理する。
-    // 任意（回復専用経路・辞退では不要）。payload の各キーを列挙するのは転記時の欠落を防ぐため（スキーマは信頼境界ではない）。
+    // 任意（回復専用経路・辞退では不要）。gate を返す場合は payload の全キー（スクリプトが常に出力する detail と件数 7 種を含む）を必須にし、
+    // 転記漏れを StructuredOutput の段階で弾く（スキーマは信頼境界ではない。照合はホストの verifyMergeGate が行う）。
     gate: {
       type: 'object',
       required: ['nonce', 'payload', 'sha256'],
@@ -2094,7 +2095,7 @@ const MERGE_EXEC_SCHEMA = {
         sha256: { type: 'string' },
         payload: {
           type: 'object',
-          required: ['mode', 'err', 'verdict', 'stage', 'headSha', 'inputSha256'],
+          required: ['mode', 'err', 'verdict', 'stage', 'detail', 'headSha', 'inputSha256', 'checks', 'notGreen', 'unresolved', 'requiredTotal', 'clientOnly', 'unbound', 'unissued'],
           properties: {
             checks: { type: 'integer' }, clientOnly: { type: 'integer' }, detail: { type: 'string' }, err: { type: 'integer' }, headSha: { type: 'string' },
             inputSha256: { type: 'string' }, mode: { type: 'string' }, notGreen: { type: 'integer' }, requiredTotal: { type: 'integer' }, stage: { type: 'string' },

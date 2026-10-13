@@ -52,7 +52,9 @@ const PATTERNS = [
   {
     label: '書き込み系の HTTP メソッド',
     // -iX PUT のように他の短縮オプションと連結した形、-X の後ろがタブの形も拾う
-    test: (line) => /(--method|--request)[\s=]+['"]?(?!GET\b)[A-Za-z]+/i.test(line) || /(^|[\s'"])-[A-Za-z]*X[\s=]*['"]?(?!GET\b)[A-Za-z]+/.test(line),
+    // 値が GET のリテラル（クォートつき・小文字の get を含む）以外はすべて拒否する。`-X "$m"` / `--method "${m}"` / `--request "$M"` のような
+    // 変数値は実行時に PUT / DELETE へ化け得るので、値を読めない形は書き込みとして扱う
+    test: (line) => /(--method|--request)[\s=]+(?!['"]?GET['"]?(\s|$))\S/i.test(line) || /(^|[\s'"])-[A-Za-z]*X[\s=]*(?!['"]?GET['"]?(\s|$))\S/.test(line),
   },
   // curl / wget による本文付きリクエスト（-d / --data* / -F / --form / -T / --upload-file / --json、wget の --post-data / --post-file / --body-*）。
   // -X / --method は上のパターンが拾う
@@ -153,6 +155,9 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
       'gh api -X PUT repos/o/r/x', 'gh api --method POST repos/o/r/x', 'gh api --method=DELETE x',
       'gh api -XPUT repos/o/r/x', 'gh api -XDELETE x', 'gh api --request PATCH x', 'gh api --request=POST x', "gh api -X 'POST' x",
       'gh api -iX PUT repos/o/r/x', 'gh api -iXPOST x', 'gh api -X\tPUT repos/o/r/x', 'gh api --method\tPOST x', 'gh api -siXDELETE x',
+      // 変数値（実行時に書き込みメソッドへ化け得る）。クォートの有無・${} 形・大文字小文字・= 連結を問わない
+      'gh api -X "$m" x', 'gh api --method "${m}" x', 'gh api --request "$M" x', 'gh api -X $m x', 'gh api --method=$m x', 'gh api -X "${GH_M:-GET}" x',
+      'gh api -iX "$m" x', 'gh api -X"$m" x', 'gh_api -X "$m" "${repo_path}/rulesets/${id}"',
     ],
     'GraphQL の mutation': ['mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{id} } }'],
     'gh api の書き込み系（-f / -F / --field / --raw-field / --input による暗黙 POST）': [
@@ -232,6 +237,9 @@ test('自己検査: 正当な行（読み取りの gh api・graphql の query・
     'gh -R "${repo}" api graphql -f query="${Q}" -F owner="${o}"',
     'gh --repo o/r api -X GET repos/o/r/x',
     'gh api -iX GET repos/o/r/x',
+    'gh api -X "GET" repos/o/r/x',
+    "gh api -X 'GET' repos/o/r/x",
+    'gh api --method "GET" repos/o/r/x',
     'gh api -i repos/o/r/x',
     'curl -sSL -H "Accept: x" https://example.com',
     'curl -fsSL -o out https://example.com',
@@ -282,4 +290,14 @@ test('/rulesets を含むコード行は merge-gate.sh の読み取り 1 行だ�
   }
   assert.deepEqual(found.map((f) => f.name), ['merge-gate.sh'], `許可は merge-gate.sh の 1 行だけ: ${JSON.stringify(found)}`)
   assert.match(found[0].l, /^gh_api "\$\{repo_path\}\/rulesets\/\$\{id\}" \|\| stop server-enforcement-missing g0 ruleset-fetch 1$/)
+})
+
+test('merge-gate.sh の gh_api() 本体は run_timed "${gh_timeout}" gh api "$@" の 1 形だけで、メソッド指定を含まない', () => {
+  const path = targets().find((t) => t.name === 'merge-gate.sh').path
+  const src = readFileSync(path, 'utf8')
+  const defs = [...src.matchAll(/^gh_api\(\) \{\n([\s\S]*?)\n\}/gm)]
+  assert.equal(defs.length, 1, 'gh_api() の定義は 1 つだけ')
+  assert.equal(defs[0][1].trim(), 'run_timed "${gh_timeout}" gh api "$@"', 'ラッパー本体は固定の 1 形。-X / --method / --request などを足さない')
+  // GET 以外になり得る環境変数・変数展開を gh api の直前に置く形も拒否する
+  assert.ok(!/GH_M\b|\$\{?GH_METHOD/.test(src), 'メソッドを変数で切り替える足場がない')
 })
