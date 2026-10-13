@@ -2,7 +2,7 @@
 
 本書は implement-issue-tree スキルの一部。全体は ../SKILL.md 参照。
 
-決定的な手順（`gh` / `git` / `du` 等のコマンド列と分類規則）をプロンプトの文章から切り出し、スキル同梱のスクリプトにして、サブエージェントには「コマンドを実行して出力を転記する」ことだけをさせる設計（Issue #603）の、**何を防ぎ、何を防がないか**を書く。第 1 弾の対象は読み取り専用の測定 2 本（残置 worktree のバイト測定・実ディスク空き容量）、第 2 弾の対象は monitor の観測と待機（`observe-pr.sh`）で、いずれも安全判定（マージ・push・削除）を含まない。第 3 弾の対象は base 取り込みと push の検証（`base-merge.sh`、`lib/push-verify.sh`）と、push 直後の確認（`observe-pr.sh --mode push`）で、**base-merge.sh は push を実行する最初のスクリプト**である（下の「第 3 弾」節）。第 4 弾の対象は pr-create と fix の base 取り込み・push・PR 作成（`pr-push.sh`）と、ラン開始時のハッシュ予検査（`run-verified.sh --verify-only`）、観測スクリプトの `--repo` である（下の「第 4 弾」節）。安全判定を含むスクリプトを足す弾は、本書の前提を満たすか、満たさない部分を別の機構で補うことを、その弾の PR で示す。
+決定的な手順（`gh` / `git` / `du` 等のコマンド列と分類規則）をプロンプトの文章から切り出し、スキル同梱のスクリプトにして、サブエージェントには「コマンドを実行して出力を転記する」ことだけをさせる設計（Issue #603）の、**何を防ぎ、何を防がないか**を書く。第 1 弾の対象は読み取り専用の測定 2 本（残置 worktree のバイト測定・実ディスク空き容量）、第 2 弾の対象は monitor の観測と待機（`observe-pr.sh`）で、いずれも安全判定（マージ・push・削除）を含まない。第 3 弾の対象は base 取り込みと push の検証（`base-merge.sh`、`lib/push-verify.sh`）と、push 直後の確認（`observe-pr.sh --mode push`）で、**base-merge.sh は push を実行する最初のスクリプト**である（下の「第 3 弾」節）。第 4 弾の対象は pr-create と fix の base 取り込み・push・PR 作成（`pr-push.sh`）と、ラン開始時のハッシュ予検査（`run-verified.sh --verify-only`）、観測スクリプトの `--repo` である（下の「第 4 弾」節）。第 8 弾の対象は monitor の CI 完了待ち（`observe-pr.sh --mode checks --until settled`。`gh pr checks --watch` の置き換え）で、第 2 弾と同じく助言的判定に限る（下の「第 8 弾」節）。安全判定を含むスクリプトを足す弾は、本書の前提を満たすか、満たさない部分を別の機構で補うことを、その弾の PR で示す。
 
 ## 構成
 
@@ -18,6 +18,7 @@
 | `scripts/merge-gate.sh` | merge-exec のマージ直前の読み取り専用検証（第 6 弾。G0 = サーバー側強制の実測と、チェック・未解決スレッド・mergeable・外部チェックの再検証）。入力は PR 番号・base・期待 sha・外部チェックの宣言（引数）。**封筒を使う**: payload は判定語（`verdict`。merge-exec の reason と同じ語彙）・段階・固定語の detail・整数の件数・40 桁 16 進の HEAD sha だけ。**マージの実行は含まない** |
 | `scripts/worktree-remove.sh` | worktree の破棄・掃除（第 7 弾）。確認と削除を同じプロセスで行う。サブコマンドは `remove --mode superseded|discard`（`--path`・`--branch`・`--base`）と `sweep --file`（候補は標準入力の JSON 配列）。**封筒を使わない**。出力の最後の 1 行は `WORKTREE_REMOVE_RESULT {…}` |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
+| `scripts/lib/observe-checks-lib.sh` | `observe-pr.sh --mode checks --until settled` の分類（`checks_classify`。check-run と commit status を合格 / 未完了 / 不合格の件数にする純関数。第 8 弾） |
 | `scripts/lib/push-verify.sh` | push の前後でリモート head を突き合わせる共通部（`pv_push_verified`。第 3 弾）。`base-merge.sh` が使い、以降 pr-create の push と fix の push 検証も同じ部品へ移す |
 | 生成物 `implement-issue-tree.js` の `SCRIPT_SHA256` | ビルダーが埋め込む期待ハッシュ。開発ファイルには置換前の目印を書き、`build-workflow.mjs` が置換する |
 | `verifySignedOutput`（ホスト） | 転記された封筒を再計算して照合する |
@@ -313,6 +314,40 @@ G0 は適用 ruleset の `bypass_actors` を読むため `gh_api "${repo_path}/r
 ### この弾の検証範囲
 
 単体テスト（判断の表・実 git のサンドボックス〔clean・追跡変更・staged・未追跡・入れ子の独立 repo・ignore のみ・`showUntrackedFiles=no`・グローバルの除外ファイル（`core.excludesFile`・既定の XDG）・`ignoreSubmodules` 設定・submodule 未初期化 / 初期化済み / 内部の変更 / deinit 後・lock〔生存 pid / 死んだ pid / `start` つきの一致・不一致〔pid の再利用〕・`ps` の失敗・EPERM〔pid 1〕・`kill -0` の判定不能〔pid 9999999999〕・壊れた ps での ESRCH・`session` 形 / 他形式〕・実体なし・メイン worktree・未登録パス・`.git` 破損・空白を含むパス・ブランチの 5 状態・引数の誤り・sweep の保持照合と状態ファイルを読めない場合〕を bash 3.2 と 5 で・ホスト配線〔モード・引数の組み立て・`retained` の扱い・Recover の分岐・discard で保持したパスがスイープの候補に入らないこと〕）と変異（危険側 50 件）でのみ検証している。**実ランの隔離 worktree からの `run-verified.sh` 経由の起動は未検証**で、`ps -p` / `kill -0` による pid の生死判定は同一ホストの agent を前提にする（別ホストの worktree を共有しているランは想定しない）。
+
+## 第 8 弾: monitor の CI 完了待ち（`observe-pr.sh --mode checks --until settled`）
+
+### 位置づけ: 第 2 弾の観測の延長で、安全判定には使わない
+
+monitor の手順 2〜3 は、HEAD sha のチェックの完了を `gh pr checks --watch --interval 60`（Bash の timeout 600000 で最大 4 回再実行 = およそ 40 分）で待ち、続けて `gh pr checks` の出力を列挙して「合格 / pending / 失敗」を数えていた。これを第 2 弾の `observe-pr.sh` の `checks` モードに `--until settled` を足して置き換えた。**判定は助言的なまま**で、位置づけは第 2 弾の節と同じである: monitor の出力（`ready` / `timeout` / `needs-fix` と件数）はマージ・クローズ・push・削除の可否に使われない（マージ可否は merge-exec が `merge-gate.sh` で再取得して判定する）。ホストが封筒を照合して採用するのは引き続きチェック総数だけ（手順 2 と 3e の `--until` を持たない checks の封筒）で、**`--until settled` の封筒はホストが採用しない**。その封筒は `inputSha256` に `until` を含むため、転記されても `applyChecksObservation` が入力束縛の不一致（`input`）で採用せず、`checksTotal` を省略した従来の fail-closed 経路に落ちる（テストが固定する）。
+
+### 何をスクリプトにしたか
+
+- check-run を `gh api --paginate`（全ページ）で、commit status を `/status`（`--paginate`）で読み、`lib/observe-checks-lib.sh` の純関数 `checks_classify` で「合格 / 未完了 / 不合格」に分類する。payload は既存の `checkRuns` / `statuses` / `total` に `passed` / `pending` / `failed` の 3 つの整数を足したもの（`--until` を付けた checks だけ。通常の checks の payload の形は変えない）。
+- 分類は `merge-gate.sh` と同じ側に倒す。check-run は `(.conclusion // .status)` が `success` / `neutral` / `skipped` なら合格、`queued` / `in_progress` / `waiting` / `pending` / `requested` なら未完了、**それ以外はすべて不合格**（`failure` / `cancelled` / `timed_out` / `action_required` / `stale` / `startup_failure` と未知の語彙）。commit status は `success` が合格、`pending` が未完了、それ以外は不合格。combined status の最上位の `state` は使わない（status が 0 件でも `pending` を返すため）。形の違う入力は件数を出さず取得失敗にする（0 件に畳まない）。
+- **重複排除と射影（レビュー指摘の修正）。** REST の `/commits/<sha>/check-runs` は古い check suite の `cancelled` を新しい `success` と並べて返す（実測: baby-tasks-app b0f7e318 で REST 12 件・一意 7 件）。`gh pr checks`（旧版と `merge-gate.sh` が使う）は最新だけを見るので、揃えないと新版だけが failed になり fix 予算を空費する。分類の前に、同じ `(app.id, name)` の check-run は `id` 最大の 1 件、同じ `context` の commit status も `id` 最大の 1 件に畳む（`checks_latest`。`id`〔数値〕か名前を持たない要素は畳まずそのまま数える）。件数・総数・payload の `checkRuns` / `statuses` も畳んだ後の数。`status` が未完了語彙の check-run は `conclusion` を持っていても未完了に数える。取得時に分類へ必要な `id` / `name` / `status` / `conclusion` / `app.id`（status は `id` / `context` / `state`）だけに射影し、JSON は `jq --argjson`（1 引数）ではなく標準入力で渡す（Linux の 1 引数 128 KiB 上限で、巨大な `output.text` を含む応答が E2BIG になり CI green でも monitor が止まるのを防ぐ）。
+- **met は「未完了が 0 件」**。不合格があっても未完了が 0 なら met で、全チェックの完了を待つ点は旧 `--watch` と同じ（失敗を見つけたら早く返す変更はしていない）。総数 0 件も未完了 0 なので met（`total: 0`）。旧 `--watch` は「チェックが無い」と即時に非ゼロ終了していたので、同じく 0 件で待ち続けない。0 件の扱い（コンフリクト再判定 #479・3e の有界待機）は monitor の手順 3e が従来どおり決める。
+
+### 待ち時間の総上限（現行と同じ 40 分）
+
+旧 `--watch` の最長は「Bash の timeout 600000（10 分）× 再実行 4 回」でおよそ 40 分。新しい完了待ちは、1 回の起動を**壁時計 90 秒 + 数秒以内**（第 2 弾の仕組みをそのまま使う: gh 1 回ごとに 25 秒の制限・グループごと kill・残りが 1 観測分に満たなければ始めない）にし、`--attempt` を 1 から増やして再実行させる。既定は**25 秒間隔・1 起動 4 観測・最大 30 回**:
+
+- 1 起動の名目の所要 = 3 回の sleep（25 秒 × 3 = 75 秒）+ 4 観測の gh（1 観測あたり gh 3 回で数秒）= およそ 83 秒。壁時計上限 90 秒に収まる。
+- 合計 = 83 秒 × 30 回 = およそ 41.5 分（`--watch` の 40 分と同等。壁時計いっぱいまで使った場合の上限は 90 秒 × 30 = 45 分）。gh が遅く 1 起動が早く切られるときは待ち時間が短くなる側にずれ、この場合は `exhausted` が早く出て `timeout`（次ラウンドの再監視）になる。
+- **回数の上限はスクリプトが強制する**: `--attempt` は 1 以上 30 以下で、範囲外は exit 2（封筒なし）。既定値は `observe-pr.sh` の `env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 30 40 1`（環境変数での引き上げは 40 まで）で、ホストの定数 `OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS`（プロンプトの「最大 30 回」）と一致することをテストが固定する。プロンプトは回数を書くだけで、書き換えても通らない。
+- **既知の限界（第 2 弾と同じ）**: `--attempt` を進めずに同じコマンドを繰り返すこと、`--attempt 1` から何度でも始め直すことはスクリプトからは止められない。旧 `--watch` の「再実行は 4 回まで」もプロンプトの指示だけで強制されていたので、退行ではない。flaky の rerun（手順 3c の 1 回だけ）の後は `--attempt 1` から再監視する。
+- 通常の `checks --wait`（手順 3e の「総数が 1 件以上になるまで」）の上限は従来どおり 7 回（およそ 10 分）で変えていない。
+
+### 手順 3 で変えた点（`--watch` 時代との差）
+
+- **観測状態の 3 状態（整合 / 確定 0 件 / 不整合）は維持し、判定の入力を REST の 1 本にした。** 旧「不整合」は手順 2 の REST 総数と `gh pr checks` の出力の列挙の食い違いだった。件数の出所が 1 本になったので、不整合は「手順 2 の確定値が 1 件以上なのに手順 3 が met で total 0」と「手順 3 が取得不能（error・非 0 終了・JSON なし・`headSha` が空のまま exhausted）」になった。再取得（30 秒間隔・最大 3 回）と終端（`blocked` / `quality`。`ready` にも `timeout` にも 3e にも倒さない）は同じ。
+- 手順 2 が取得失敗で手順 3 も取得不能なら、旧は `gh pr checks` の列挙で先へ進めたが、新は状態 3 の再取得 → `blocked` / `quality` になる（REST の取得失敗を列挙で補えなくなった。fail-closed 側の変化）。
+- `gh pr checks` の終了コード（1 = 失敗あり・8 = pending あり）と `no checks reported` の読み分けは廃止した。`exhausted`（`headSha` あり = 未完了が残ったまま待機上限）の扱いは状態 1 の「exhausted の規則」が唯一の定義で、`failed` が 1 件以上なら手順 3c の `needs-fix` を優先し、0 件のときだけ `timeout` にする（手順 b と 3e はこの規則を参照するだけで、3e → 手順 3 の往復後の `exhausted` も同じ）。
+- 手順 3c の失敗原因の調査（`gh run view --log-failed`）は monitor の判断として残す。スクリプトは件数だけを返し、チェック名・ログは封筒に入れない（外部由来の文字列を入れない方針は第 2 弾と同じ）。
+
+### この弾の検証範囲
+
+単体テスト（`checks_classify` の表・偽 `gh` を差し替えたスクリプト全体・ホストの封筒照合・プロンプトの配線）と変異（危険側 19 件）でのみ検証している。**実 GitHub の PR に対する実ランでは未検証**（`gh api --paginate` の `/commits/<sha>/status` が 100 件超の status を複数ページで返すときの合算、実際の check-run の `conclusion` 語彙、40 分規模の実待機を含む）。
 
 ## ハッシュ埋め込みと鮮度
 

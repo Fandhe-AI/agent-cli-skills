@@ -24,6 +24,9 @@ const WR_LEDGER = ['worktree-retained-ledger.test.mjs']
 const STATE_SCRIPT = ['state-script.test.mjs']
 const MERGE_GATE = ['merge-gate.test.mjs', 'merge-gate-unit.test.mjs']
 const MERGE_GATE_HOST = ['merge-gate-host.test.mjs']
+const OBS_LIB = 'scripts/lib/observe-checks-lib.sh'
+const SETTLED = ['observe-pr-checks-settled.test.mjs']
+const CLASSIFY = ['observe-checks-unit.test.mjs', 'observe-pr-checks-settled.test.mjs']
 const PR_PUSH = ['pr-push.test.mjs', 'pr-push-unit.test.mjs']
 const BASE_MERGE = ['base-merge.test.mjs', 'base-merge-unit.test.mjs']
 
@@ -221,4 +224,37 @@ export const MUTATIONS = [
   { id: 'R15-replacement-counted-in-reservation', file: SRC, from: "new Set(['retained', 'replacement'])", to: "new Set(['retained'])", tests: WR_LEDGER, note: "置換後の worktree を予約の差し引きに数える（件数ゲートが上がらない）" },
   { id: 'R16-replacement-dedup-dropped', file: SRC, from: "  if (residualStartPathSet.has(p) || ephemeralWorktrees.some((e) => e.path === p)) return false\n  ephemeralWorktrees.push({ issue: issueNumber, kind: 'replacement', path: p })", to: "  ephemeralWorktrees.push({ issue: issueNumber, kind: 'replacement', path: p })", tests: WR_LEDGER, note: "置換後の worktree の重複排除を外す（2 回目の fix の旧を二重に数える）" },
   { id: 'R18-replacement-listed-as-disposable', file: SRC, from: "e.kind !== 'implement' && e.kind !== 'replacement' && e.kind !== 'retained')", to: "e.kind !== 'implement' && e.kind !== 'retained')", tests: WR_LEDGER, note: "現行の実装 worktree（置換後）を使い捨てとして案内する" },
+
+  // ---- observe-pr.sh checks --until settled（第 8 弾。gh pr checks --watch の置き換え）----
+  { id: 'K01-checkruns-fetch-fail-settles', file: OBS, from: 'gh_api --paginate "${repo_path}/commits/${HEAD}/check-runs" || { fail "check-runs"; return 1; }\n  # 分類に必要', to: 'gh_api --paginate "${repo_path}/commits/${HEAD}/check-runs" || return 0\n  # 分類に必要', tests: SETTLED, note: 'check-run の取得失敗を握りつぶして未完了 0 = 完了として返す（取得失敗を settled に倒す）' },
+  { id: 'K02-status-fetch-fail-settles', file: OBS, from: 'gh_api --paginate "${repo_path}/commits/${HEAD}/status" || { fail "combined status"; return 1; }', to: 'gh_api --paginate "${repo_path}/commits/${HEAD}/status" || return 0', tests: SETTLED, note: 'combined status の取得失敗を握りつぶして完了として返す（check-run が全部緑のあとに status が失敗しても met になる）' },
+  { id: 'K03-classify-failure-passes', file: OBS, from: 'cls=$(checks_classify "${runs}" "${sts}") || { fail "チェックの分類"; return 1; }', to: 'cls=$(checks_classify "${runs}" "${sts}") || cls="0 0 0"', tests: SETTLED, note: '分類の失敗（形の違う応答）を 0 0 0 = 完了として扱う' },
+  { id: 'K04-in-progress-not-pending', file: OBS_LIB, from: ' or .status == "in_progress" or', to: ' or', tests: CLASSIFY, note: 'in_progress を未完了に数えない（実行中のチェックを失敗扱いにして早く終わる）' },
+  { id: 'K05-queued-not-pending', file: OBS_LIB, from: '(.status == "queued" or ', to: '(', tests: CLASSIFY, note: 'queued を未完了に数えない' },
+  { id: 'K06-unknown-conclusion-passes', file: OBS_LIB, from: '          else "f" end\n      end;', to: '          else "p" end\n      end;', tests: CLASSIFY, note: '未知の conclusion を合格に倒す（fail-open）' },
+  { id: 'K07-status-error-passes', file: OBS_LIB, from: 'elif .state == "pending" then "w" else "f" end;', to: 'elif .state == "pending" then "w" else "p" end;', tests: CLASSIFY, note: 'commit status の failure / error / 未知を合格に倒す' },
+  { id: 'K08-conclusion-ignored', file: OBS_LIB, from: '(.conclusion // .status) as $v', to: '.status as $v', tests: CLASSIFY, note: 'conclusion を見ず status（completed）だけで分類する' },
+  { id: 'K09-met-without-pending-zero', file: OBS, from: 'if [ "${until_cond}" = settled ]; then [ "${O_PENDING}" -eq 0 ]; else', to: 'if [ "${until_cond}" = settled ]; then true; else', tests: SETTLED, note: '未完了が残っていても met にする（待たずに完了と読ませる）' },
+  { id: 'K10-pending-field-zero', file: OBS, from: 'then {passed: $pa, pending: $pe, failed: $fa} else {} end', to: 'then {passed: $pa, pending: 0, failed: $fa} else {} end', tests: SETTLED, note: 'payload の pending を常に 0 で出す' },
+  { id: 'K11-status-not-counted-in-total', file: OBS, from: 'O_RUNS=$nr; O_STATUSES=$ns; O_TOTAL=$((nr + ns))', to: 'O_RUNS=$nr; O_STATUSES=$ns; O_TOTAL=$nr', tests: SETTLED, note: '総数に commit status を足さない（commit status だけの CI を 0 件と読ませる）' },
+  { id: 'K12-attempt-bound-off', file: OBS, from: 'is_uint "${attempt}" && [ "${attempt}" -le "${max_attempts}" ] || usage', to: 'is_uint "${attempt}" || usage', tests: SETTLED, note: '--attempt の上限検査を外す（プロンプトが回数を増やせる）' },
+  { id: 'K13-settled-default-attempts-7', file: OBS, from: 'env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 30 40 1', to: 'env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 7 40 1', tests: [...SETTLED, 'observe-pr-host.test.mjs', 'observe-pr-push.test.mjs'], note: 'settled の待機上限を通常の 7 回（10 分）へ戻す（40 分の完了待ちが 10 分で切れる）' },
+  { id: 'K14-settled-attempts-env-unbounded', file: OBS, from: 'env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 30 40 1', to: 'env_int "${OBSERVE_PR_MAX_ATTEMPTS:-}" 30 9999 1', tests: SETTLED, note: '環境変数で settled の上限を際限なく引き上げられる' },
+  { id: 'K15-envelope-nonce-altered', file: OBS, from: 'so_emit "${nonce}" "${payload}" || {\n  echo "observe-pr: 出力封筒', to: 'so_emit "${nonce}x" "${payload}" || {\n  echo "observe-pr: 出力封筒', tests: SETTLED, note: '封筒の nonce を変える（nonce 照合が通らない）' },
+  { id: 'K16-until-not-bound-to-input', file: OBS, from: '${slug}${nl}${until_cond}"', to: '${slug}${nl}"', tests: SETTLED, note: '--until を入力の束縛 inputSha256 に含めない（settled の封筒を通常の checks の封筒と取り違える）' },
+  { id: 'K17-host-settle-constant-7', file: SRC, from: 'const OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS = 30', to: 'const OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS = 7', tests: ['observe-pr-host.test.mjs', 'required-context-presence.test.mjs'], note: 'ホストの定数（プロンプトの最大回数）がスクリプトの既定とずれる' },
+  { id: 'K18-host-input-binding-dropped', file: SRC, from: "if (inputSha256 !== undefined && raw.payload.inputSha256 !== inputSha256) return { ok: false, reason: 'input' }", to: '', tests: ['observe-pr-host.test.mjs'], note: 'ホストの封筒照合から入力束縛の検査を外す（--until settled の封筒など別の入力の封筒の total を採用する）' },
+  { id: 'K19-settled-polls-default-6', file: OBS, from: 'polls=$(env_int "${OBSERVE_PR_POLLS:-}" 4 10 1)', to: 'polls=$(env_int "${OBSERVE_PR_POLLS:-}" 6 10 1)', tests: [...SETTLED, 'observe-pr-host.test.mjs', 'observe-pr-push.test.mjs'], note: 'settled の 1 起動の観測回数を通常の 6 回へ戻す（25 秒間隔 × 6 で壁時計 90 秒を超える）' },
+  { id: 'K20-dedup-removed', file: OBS_LIB, from: '[($runs | dedup(rkey))[] | run_bucket]', to: '[$runs[] | run_bucket]', tests: CLASSIFY, note: '同名 check-run の重複排除を外す（古い cancelled が新しい success と並んで不合格に数えられ fix 予算を空費する）' },
+  { id: 'K21-dedup-picks-oldest', file: OBS_LIB, from: 'group_by(kf) | map(max_by(.id))', to: 'group_by(kf) | map(min_by(.id))', tests: CLASSIFY, note: '重複を最新でなく最古の 1 件に畳む' },
+  { id: 'K22-status-dedup-removed', file: OBS_LIB, from: '[($sts | dedup(skey))[] | st_bucket]', to: '[$sts[] | st_bucket]', tests: CLASSIFY, note: '同じ context の commit status の重複排除を外す' },
+  { id: 'K23-in-progress-with-conclusion-passes', file: OBS_LIB, from: '      if (.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "pending" or .status == "requested") then "w"\n      else', to: '      if false then "w"\n      else', tests: CLASSIFY, note: 'status が進行中でも conclusion があればそれで分類する' },
+  { id: 'K24-dedup-in-script-removed', file: OBS, from: 'runs=$(checks_latest runs "${runs}")', to: 'runs=$(printf \'%s\' "${runs}")', tests: SETTLED, note: 'observe-pr.sh が件数を数える前の重複排除を外す（checkRuns の件数が生の数になる）' },
+  { id: 'K26-classify-args-not-stdin', file: OBS_LIB, from: `| jq -r "\${CHECKS_JQ_DEFS}"'\n    def run_bucket:`, to: `| jq -r --argjson pad "\${1:-null}" "\${CHECKS_JQ_DEFS}"'\n    def run_bucket:`, tests: CLASSIFY, note: '分類の入力を引数（--argjson）でも渡す（巨大入力が 1 引数・全引数の上限に当たり、CI green でも monitor が止まる）' },
+  { id: 'K27-statuses-first-page-only', file: OBS, from: "jq -sec '[.[].statuses[] | {id, context, state}]'", to: "jq -sec '[.[0].statuses[] | {id, context, state}]'", tests: SETTLED, note: 'commit status の 2 ページ目以降を捨てる（100 件超の status を持つ CI で未完了・失敗を見落とす）' },
+  { id: 'K28-status-no-paginate', file: OBS, from: 'gh_api --paginate "${repo_path}/commits/${HEAD}/status" ||', to: 'gh_api "${repo_path}/commits/${HEAD}/status" ||', tests: SETTLED, note: 'combined status を 1 ページだけ取る（--paginate を外す）' },
+  { id: 'K29-3e-confirmed-total-not-updated', file: SRC, from: '3e の met で確定値を更新する: その total を直ちに手順 2 の確定値へ反映する', to: '3e の met の total は参考値にとどめ、手順 2 の確定値は変えない', tests: ['required-context-presence.test.mjs'], note: '3e の met で手順 2 の確定値を更新しない（確定値 0 のまま状態 2 が最優先になり 3e → --attempt 1 を繰り返し得る）' },
+  { id: 'K30-3e-roundtrip-unbounded', file: SRC, from: '3e → 手順 3 の往復は 1 ラウンドで最大 1 回（往復は 1 回）で、2 回目の 3e には入らない。', to: '', tests: ['required-context-presence.test.mjs'], note: '3e → 手順 3 の往復回数の上限の文を外す' },
+  { id: 'K31-3e-exhausted-to-timeout-directly', file: SRC, from: '状態 1 の exhausted の規則に従う（failed が 1 件以上なら c の needs-fix を優先、0 件なら timeout。checksTotal は更新後の確定値）', to: '状態 1 の timeout（checksTotal は更新後の確定値）', tests: ['required-context-presence.test.mjs'], note: '3e の exhausted で failed ≥ 1 の needs-fix 優先を外し timeout へ直送する' },
+  { id: 'K32-exhausted-rule-needs-fix-dropped', file: SRC, from: 'failed が 1 件以上なら timeout ではなく c の needs-fix を優先し（', to: 'failed の件数を問わず（', tests: ['required-context-presence.test.mjs'], note: '状態 1 の exhausted の規則から needs-fix 優先を外す' },
 ]

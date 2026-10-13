@@ -185,10 +185,10 @@ for (const bash of BASHES) {
 test('既定の待機は 30 秒間隔・1 起動 3 回観測・--attempt 最大 4 回（およそ 5 分）で、1 起動は壁時計 90 秒に収まる。他のモードの既定は変えない', () => {
   const sh = readFileSync(SCRIPT, 'utf8')
   const all = (name) => [...sh.matchAll(new RegExp(`env_int "\\$\\{${name}:-\\}" (\\d+) (\\d+) (\\d+)`, 'g'))].map((x) => Number(x[1]))
-  // 先頭が既定（monitor の各モード）、2 つ目が push の上書き
-  assert.deepEqual(all('OBSERVE_PR_POLLS'), [6, 3])
-  assert.deepEqual(all('OBSERVE_PR_SLEEP_SEC'), [15, 30])
-  assert.deepEqual(all('OBSERVE_PR_MAX_ATTEMPTS'), [7, 4])
+  // 先頭が既定（monitor の各モード）、2 つ目が push の上書き、3 つ目が checks --until settled の上書き（第 8 弾。別のテストが検査する）
+  assert.deepEqual(all('OBSERVE_PR_POLLS'), [6, 3, 4])
+  assert.deepEqual(all('OBSERVE_PR_SLEEP_SEC'), [15, 30, 25])
+  assert.deepEqual(all('OBSERVE_PR_MAX_ATTEMPTS'), [7, 4, 30])
   const polls = all('OBSERVE_PR_POLLS')[1]
   const sleep = all('OBSERVE_PR_SLEEP_SEC')[1]
   const maxAttempts = all('OBSERVE_PR_MAX_ATTEMPTS')[1]

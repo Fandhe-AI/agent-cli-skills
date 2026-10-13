@@ -90,6 +90,11 @@ if [ -n "$outf" ]; then
       prev=$a
     done
     if [ -n "$jq_expr" ]; then jq -r "$jq_expr" < "$outf"; else cat "$outf"; fi
+  elif [ "$key" = status ]; then
+    # --paginate なしの gh api はページの 1 つ目だけを返す（2 ページ目以降を取りこぼす変異を検出できるようにする）
+    pg=0
+    for a in "$@"; do [ "$a" = "--paginate" ] && pg=1; done
+    if [ "$pg" = 1 ]; then cat "$outf"; else head -n 1 "$outf"; fi
   else
     cat "$outf"
   fi
@@ -130,10 +135,10 @@ export function createObserveStub(routes = {}) {
   return stub
 }
 
-// 複数ページを返す経路（rules・check-runs・statuses・reviews）の応答を『ページの配列』の JSON で書くフィクスチャ用。
+// 複数ページを返す経路（rules・check-runs・status・statuses・reviews）の応答を『ページの配列』の JSON で書くフィクスチャ用。
 // 実際の gh api --paginate は、ページごとの JSON を 1 行ずつ連ねて出す（--slurp なし）。この変換が各ページを 1 行にする。
 // 配列でない応答（HTTP エラー本文・壊れた JSON）はそのまま返す。
-const PAGED_KEYS = new Set(['rules', 'check-runs', 'statuses', 'reviews'])
+const PAGED_KEYS = new Set(['rules', 'check-runs', 'status', 'statuses', 'reviews'])
 export function createObserveStubPages(routes = {}) {
   const convert = (key, spec) => {
     if (!PAGED_KEYS.has(key)) return spec
