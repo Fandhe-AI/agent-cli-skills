@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
+import { signedReply } from './lib/signed-output.mjs'
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
@@ -1137,12 +1138,13 @@ test('結合: ループ内のゲート実測が着手なしに呼び出しを消
   const hits = []
   for (let limit = 81; limit <= 90; limit++) {
     const run = await runScript({
-      args: { ...BASE_ARGS, maxResidualWorktreeBytes: 1073741824, agentCallLimit: limit },
+      args: { ...BASE_ARGS, maxResidualWorktreeBytes: 1073741824, agentCallLimit: limit, skillDir: '/opt/skills/implement-issue-tree' },
       leaves,
       saved: { 2: resumeSaved(2), 3: resumeSaved(3) },
+      // 測定は封筒（nonce・payload・sha256）で返す。プロンプトのコマンドから nonce を取り出して作る
       override: (label, ...rest) => {
-        if (label === 'worktree:residual-bytes') return { kib: 2 * 1024 * 1024, err: 0, missing: 0, count: 1 }
-        if (label === 'worktree:free-disk-bytes') return { freeKib: 1e10, err: 0 }
+        if (label === 'worktree:residual-bytes') return signedReply(rest[1], { kib: 2 * 1024 * 1024, err: 0, missing: 0, count: 1 })
+        if (label === 'worktree:free-disk-bytes') return signedReply(rest[1], { freeKib: 1e10, err: 0 })
         return withOneExtraWorktree(label, ...rest)
       },
     })
