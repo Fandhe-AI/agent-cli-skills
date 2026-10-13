@@ -73,7 +73,7 @@ test('prCreatePrompt: 手順 0（prepare）は push（手順 1）より前にあ
   assert.ok(prepareIdx >= 0 && pushIdx >= 0 && prepareIdx < pushIdx, 'prepare が push より前に現れない')
   assert.ok(prompt.includes('0. 起点の確立と push 前 base 最新化ゲート'))
   // 失敗の status は列挙され、先へ進めず prNumber: 0 で返す（fail-closed。コンフリクトのまま・base 未取り込みのまま push しない）
-  const list = 'routing-error・base-fetch-failed・branch-fetch-failed・local-missing・remote-ahead・diverged・checkout-failed・sha-mismatch・no-own-commits・merge-failed・error'
+  const list = 'routing-error・dirty-worktree・base-fetch-failed・branch-fetch-failed・local-missing・remote-ahead・diverged・checkout-failed・sha-mismatch・no-own-commits・merge-failed・error'
   assert.ok(prompt.includes(`それ以外の status（${list}）は先へ進めず`), '中止する status の列挙がない')
   assert.ok(prompt.includes('コンフリクトのまま・base 未取り込みのまま push してはならない'))
   assert.ok(prompt.includes('prNumber: 0 で返す'))

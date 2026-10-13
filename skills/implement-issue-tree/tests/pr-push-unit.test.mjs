@@ -28,7 +28,7 @@ i=0
 while IFS="$US" read -r fn a b c d; do
   rc=0
   out=""
-  PP_ORIGIN=""; PP_PR_STATUS=""; PP_PR_NUMBER=""
+  PP_ORIGIN=""; PP_PR_STATUS=""; PP_PR_NUMBER=""; PP_HEAD=""; PP_MILESTONE=""
   case "$fn" in
     origin) out=$(pp_decide_origin "$a" "$b" "$c" "$d" 2>&1) || rc=$?; pp_decide_origin "$a" "$b" "$c" "$d" >/dev/null 2>&1; true ;;
     classify) rows=$(printf '%s' "$c" | sed 's/@@/\\
@@ -36,11 +36,13 @@ while IFS="$US" read -r fn a b c d; do
     number) out=$(pp_pr_number_from_output "$(printf '%s' "$a" | sed 's/@@/\\
 /g')" 2>&1) || rc=$?; pp_pr_number_from_output "$(printf '%s' "$a" | sed 's/@@/\\
 /g')" >/dev/null 2>&1; true ;;
+    head) out=$(pp_head_status "$a" "$b" "$c" 2>&1) || rc=$?; pp_head_status "$a" "$b" "$c" >/dev/null 2>&1; true ;;
+    milestone) out=$(pp_milestone_status "$a" "$b" "$c" 2>&1) || rc=$?; pp_milestone_status "$a" "$b" "$c" >/dev/null 2>&1; true ;;
     title) out=$(pp_valid_title "$a" 2>&1) || rc=$?; true ;;
     path) out=$(pp_valid_path "$a" 2>&1) || rc=$?; true ;;
     *) echo "unknown fn $fn" >&2; exit 8 ;;
   esac
-  printf '%s %s [%s] [%s] [%s] [%s]\\n' "$i" "$rc" "$PP_ORIGIN" "$PP_PR_STATUS" "$PP_PR_NUMBER" "$out"
+  printf '%s %s [%s] [%s] [%s] [%s]\\n' "$i" "$rc" "$PP_ORIGIN$PP_HEAD$PP_MILESTONE" "$PP_PR_STATUS" "$PP_PR_NUMBER" "$out"
   i=$((i + 1))
 done
 `
@@ -131,5 +133,44 @@ for (const bash of availableBashes()) {
     const res = table(bash, [...titles.map(([t]) => ['title', t]), ...paths.map(([p]) => ['path', p])])
     const all = [...titles, ...paths]
     all.forEach(([v, rc], i) => assert.deepEqual({ rc: res[i].rc, out: res[i].out }, { rc, out: '' }, JSON.stringify(v)))
+  })
+
+  test(`${tag} pp_head_status: サーバー head が期待と一致するときだけ ok。取得失敗・形式不正は unknown、ブランチ無しは missing、不一致は mismatch`, () => {
+    // [期待, ls-remote の終了コード, サーバー head, 期待 rc, 期待 status]
+    const cases = [
+      [A, 0, A, 0, 'ok'],
+      [A, 0, B, 1, 'mismatch'], // push 後に第三者が積んだ（race）
+      [A, 0, '', 1, 'missing'],
+      [A, 1, '', 1, 'unknown'],
+      [A, 1, A, 1, 'unknown'], // 取得失敗の rc なら sha が入っていても採らない
+      [A, 0, 'A'.repeat(40), 1, 'unknown'], // 大文字・形式不正
+      [A, 0, A.slice(1), 1, 'unknown'],
+      ['', 0, A, 1, 'unknown'], // 期待が空（転記漏れ）なら一致扱いにしない
+      ['zz', 0, 'zz', 1, 'unknown'],
+    ]
+    const res = table(bash, cases.map(([e, rc, r]) => ['head', e, String(rc), r]))
+    cases.forEach(([e, lrc, r, rc, status], i) => {
+      assert.deepEqual({ rc: res[i].rc, status: res[i].origin, out: res[i].out }, { rc, status, out: '' }, JSON.stringify([e, lrc, r]))
+    })
+  })
+
+  test(`${tag} pp_milestone_status: 件数 0 は非運用（確認しない）、運用中は割当済み / 未割当、件数・Issue の取得失敗は fetch-failed（fail-closed）`, () => {
+    // [件数, issue view の終了コード, タイトル, 期待 rc, 期待 status]
+    const cases = [
+      ['0', 0, '', 0, 'not-used'],
+      ['0', 1, '', 0, 'not-used'], // 非運用なら Issue を見ない（rc は無視）
+      ['1', 0, 'v1.0', 0, 'assigned'],
+      ['12', 0, '', 0, 'unassigned'], // 未割当は警告つきで続行
+      ['2', 1, '', 1, 'fetch-failed'], // Issue の取得失敗
+      ['2', 1, 'v1.0', 1, 'fetch-failed'],
+      ['', 0, '', 1, 'fetch-failed'], // 件数の取得失敗を非運用と読み替えない
+      ['abc', 0, 'v1.0', 1, 'fetch-failed'],
+      ['-1', 0, 'v1.0', 1, 'fetch-failed'],
+      ['1.5', 0, 'v1.0', 1, 'fetch-failed'],
+    ]
+    const res = table(bash, cases.map(([c, rc, t]) => ['milestone', c, String(rc), t]))
+    cases.forEach(([c, vrc, t, rc, status], i) => {
+      assert.deepEqual({ rc: res[i].rc, status: res[i].origin, out: res[i].out }, { rc, status, out: '' }, JSON.stringify([c, vrc, t]))
+    })
   })
 }

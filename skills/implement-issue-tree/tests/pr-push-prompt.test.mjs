@@ -56,8 +56,8 @@ test('構造ガード: マーカーは 1 か所のみ存在し、対象 3 関数
 test('prCreatePrompt: prepare → push → pr の順に pr-push.sh を固定の引数で呼ぶ（--repo は args.repo から）', () => {
   const prompt = prCreatePrompt(item, impl, [])
   const prepare = prompt.indexOf(CMD(` --mode prepare --origin pr-create --branch ${B} --base main${R}`))
-  const push = prompt.indexOf(CMD(` --mode push --origin pr-create --branch ${B} --base main`))
-  const pr = prompt.indexOf(CMD(` --mode pr --branch ${B} --base main --title-file <タイトルファイル> --body-file <本文ファイル> --issue 466${R}`))
+  const push = prompt.indexOf(CMD(` --mode push --origin pr-create --branch ${B} --base main${R}`))
+  const pr = prompt.indexOf(CMD(` --mode pr --branch ${B} --base main --title-file <タイトルファイル> --body-file <本文ファイル> --issue 466 --expect-sha <headSha>${R}`))
   assert.ok(prepare >= 0 && push >= 0 && pr >= 0, `${prepare} ${push} ${pr}`)
   assert.ok(prepare < push && push < pr, '呼び出しの順序が崩れている')
   // push 後 CI 起動確認は PR 番号の確定後
@@ -78,10 +78,22 @@ test('prCreatePrompt: git / gh で手順を組み立て直す指示を持たな�
   assert.match(prompt, /1c\. （1b が reused を返したときのみ）/)
 })
 
-test('prCreatePrompt: push の status は push-failed・no-diff・merge-in-progress・error だけを中止、pushed・noop・race・unverified は PR 検出へ進む', () => {
+test('prCreatePrompt: push の status は race を含めて PR 作成を止める。進めるのは pushed・noop・unverified だけで、headSha を 1b の --expect-sha へ渡す', () => {
   const prompt = prCreatePrompt(item, impl, [])
-  assert.match(prompt, /push-failed・no-diff・merge-in-progress・error なら push していないので prNumber: 0/)
-  assert.match(prompt, /pushed・noop（再入でリモートが既に HEAD）・race・unverified なら push は届いている/)
+  assert.match(prompt, /push-failed・no-diff・merge-in-progress・base-not-fetched・base-not-merged（[^）]*）・routing-error・error なら push していないので prNumber: 0/)
+  assert.match(prompt, /race（[^）]*）も PR を作らず prNumber: 0 と race を理由として返す/)
+  assert.match(prompt, /pushed・noop（再入でリモートが既に HEAD）・unverified（[^）]*）なら push は届いているので、結果の headSha（40 桁の sha）を控えて手順 1b へ進む/)
+  assert.doesNotMatch(prompt, /pushed・noop[^。]*race[^。]*手順 1b へ進む/, 'race で PR 作成へ進めない')
+  // pr モードの失敗 status（サーバー head の照合・milestone）は PR を作らずに返す
+  assert.match(prompt, /head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch/)
+  assert.match(prompt, /milestone-check-failed（milestone を取得できない。PR は作っていない）/)
+})
+
+test('prCreatePrompt: 再利用 PR の本文取得・更新（gh pr view / gh pr edit）にも args.repo を -R で渡す。args.repo が無ければ付けない', () => {
+  const prompt = prCreatePrompt(item, impl, [])
+  assert.match(prompt, /gh pr view <番号> -R Fandhe-AI\/agent-cli-skills --json body --jq \.body > "\$f"/)
+  assert.match(prompt, /gh pr edit <番号> -R Fandhe-AI\/agent-cli-skills --body-file "\$f" && rm -f "\$f"/)
+  assert.match(prompt, /milestone が unassigned のときは、"\$f" の末尾にも「> \*\*警告\*\*/)
 })
 
 test('prCreatePrompt: PR 本文のテンプレートは 1b に 1 箇所だけあり、Closes 行・対象外節を含む。タイトルと本文はファイル経由で渡す', () => {
@@ -96,7 +108,7 @@ test('prCreatePrompt: PR 本文のテンプレートは 1b に 1 箇所だけあ
 test('fixPrompt(pushAfterFix: true): 手順 1 で prepare --origin fix、手順 4 で push --origin fix を呼び、git / gh で組み立て直さない', () => {
   const text = fixPrompt(item, impl, { summary: 'テスト用の指摘要約', unresolvedComments: [] }, true, [])
   const prepare = text.indexOf(CMD(` --mode prepare --origin fix --branch ${B} --base main${R}`))
-  const push = text.indexOf(CMD(` --mode push --origin fix --branch ${B} --base main`))
+  const push = text.indexOf(CMD(` --mode push --origin fix --branch ${B} --base main${R}`))
   assert.ok(prepare >= 0 && push >= 0)
   assert.ok(prepare < text.indexOf('2. 指摘を重要度を問わずすべて修正する') && text.indexOf('2. 指摘を重要度を問わずすべて修正する') < push, 'prepare は修正作業の前、push は修正のコミットの後')
   for (const re of FORBIDDEN.filter((r) => !/gh pr/.test(String(r)))) assert.doesNotMatch(text, re, String(re))
@@ -109,7 +121,12 @@ test('fixPrompt(pushAfterFix: true): push の status を pushed 判定へ結ぶ�
   assert.match(text, /status が pushed のときだけ pushed: true/)
   assert.match(text, /noop は pushed: false・summary に「変更なしのため push は no-op」（手順 5 の resolve を一切実行しない/)
   assert.match(text, /race は pushed: false・summary に「リモート head がローカル HEAD と不一致（並行 push 競合の可能性）」（resolve しない/)
-  assert.match(text, /merge-in-progress・error は push していないので、pushed: false・commitFailed: true/)
+  assert.match(text, /merge-in-progress・base-not-fetched・base-not-merged（[^）]*）・routing-error・error は push していないので、pushed: false・commitFailed: true/)
+  // 非 0 終了・結果の行なしは「push 不要」と区別できる commitFailed 側へ倒す
+  assert.match(text, /非 0 終了・結果の行なしも同じ扱い（pushed: false・commitFailed: true/)
+  assert.ok(text.includes(CMD(` --mode push --origin fix --branch ${B} --base main${R}`)), 'fix の push にも --repo を渡す')
+  assert.match(text, /gh pr view 777 -R Fandhe-AI\/agent-cli-skills --json body/)
+  assert.match(text, /gh pr edit 777 -R Fandhe-AI\/agent-cli-skills --body-file/)
 })
 
 test('fixPrompt(pushAfterFix: false): pr-push.sh を呼ばない（push 前の Review ループ。ローカル修正のみ）', () => {

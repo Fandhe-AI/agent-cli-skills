@@ -15,6 +15,8 @@
 PP_ORIGIN=""
 PP_PR_STATUS=""
 PP_PR_NUMBER=""
+PP_HEAD=""
+PP_MILESTONE=""
 
 pp_is_uint() {
   case "$1" in
@@ -168,4 +170,74 @@ pp_valid_path() {
     *[!A-Za-z0-9._/\ -]* | *..*) return 1 ;;
   esac
   [ "${#1}" -le 300 ]
+}
+
+# サーバー上のブランチ head（pv_remote_sha の結果）が、push した HEAD の sha と一致するかを分類する。
+#   $1 = 期待する sha（40 桁小文字 16 進）、$2 = pv_remote_sha の終了コード（0 = 取得できた）、$3 = 取得した sha（ブランチが無ければ空）
+# PP_HEAD:
+#   ok        サーバー head が期待と一致 → PR の作成・再利用へ進んでよい
+#   unknown   取得できない（ls-remote の失敗・形式不正）→ 止める（確認できない head を PR にしない）
+#   missing   サーバーにブランチが無い → 止める
+#   mismatch  期待と違う（push 後に第三者が積んだ・別ランが動かした）→ 止める
+# return 0 = ok、1 = それ以外
+pp_head_status() {
+  local expect=$1 lrc=$2 remote=$3
+  PP_HEAD=""
+  if ! pp_is_sha "${expect}"; then
+    PP_HEAD=unknown
+    return 1
+  fi
+  if [ "${lrc}" != 0 ]; then
+    PP_HEAD=unknown
+    return 1
+  fi
+  if [ -z "${remote}" ]; then
+    PP_HEAD=missing
+    return 1
+  fi
+  if ! pp_is_sha "${remote}"; then
+    PP_HEAD=unknown
+    return 1
+  fi
+  if [ "${remote}" = "${expect}" ]; then
+    PP_HEAD=ok
+    return 0
+  fi
+  PP_HEAD=mismatch
+  return 1
+}
+
+# Closes 対象 Issue の milestone の状態（create-pr スキル Step 2.5 の手順 3 と同じ判定）。
+#   $1 = リポジトリの milestone 件数（gh api の length。closed 含む。取得に失敗したら空）、
+#   $2 = Issue の milestone を取る gh issue view の終了コード（件数 0 のときは見ないので 0 を渡す）、
+#   $3 = Issue の milestone のタイトル（未割当なら空）
+# PP_MILESTONE:
+#   not-used      件数 0（milestone 非運用リポジトリ）→ 確認も警告もしない
+#   assigned      割当済み
+#   unassigned    未割当（警告つきで続行。自律運転では milestone を割り当てない）
+#   fetch-failed  件数が数値でない・Issue の取得が失敗 → 止める（fail-closed。取得失敗を非運用や割当済みと読み替えない）
+# return 0 = 続行してよい（not-used / assigned / unassigned）、1 = fetch-failed
+pp_milestone_status() {
+  local count=$1 vrc=$2 title=$3
+  PP_MILESTONE=""
+  case "${count}" in
+    '' | *[!0-9]*)
+      PP_MILESTONE=fetch-failed
+      return 1
+      ;;
+  esac
+  if [ "${count}" -eq 0 ]; then
+    PP_MILESTONE=not-used
+    return 0
+  fi
+  if [ "${vrc}" != 0 ]; then
+    PP_MILESTONE=fetch-failed
+    return 1
+  fi
+  if [ -n "${title}" ]; then
+    PP_MILESTONE=assigned
+  else
+    PP_MILESTONE=unassigned
+  fi
+  return 0
 }
