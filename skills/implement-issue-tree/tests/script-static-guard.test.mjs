@@ -69,6 +69,10 @@ const PATTERNS = [
   re('git push の --force 系', /\bgit\b[^\n|;&]*\bpush\b[^\n]*(--force\b|--force-with-lease|--mirror|--delete\b|--prune\b|--force-if-includes)/),
   re('git push の -f 系短縮オプション', /\bgit\b[^\n|;&]*\bpush\b[^\n]*\s-[a-zA-Z]*f[a-zA-Z]*(\s|$)/),
   re('git push の + refspec', /\bgit\b[^\n|;&]*\bpush\b[^\n]*\s['"]?\+/),
+  // 削除は自分が作った一時ファイルへの rm -f だけ（再帰削除・worktree の強制削除はスクリプトに置かない。確認と削除を同じスクリプトで行う
+  // 設計は独立の弾で扱う）
+  re('rm の再帰削除（-r / -R / -rf / --recursive）', /\brm\b[^\n|;&]*(\s-[A-Za-z]*[rR][A-Za-z]*(\s|$)|\s--recursive\b)/),
+  re('git worktree remove（強制削除を含む）', /\bgit\b[^\n|;&]*\bworktree\s+remove\b/),
   {
     label: 'git push は許可形（git push --no-follow-tags origin "HEAD:refs/heads/${branch}"）以外を拒否',
     test: (line) => GIT_PUSH_CALL.test(line) && !GIT_PUSH_ALLOWED.test(line),
@@ -163,6 +167,8 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
       'wget --post-data=a=b https://example.com', 'wget --post-file f https://example.com', 'wget --body-data=x https://example.com', 'wget --body-file f https://example.com',
     ],
     'git push の --force 系': ['git push --force origin HEAD', 'git push origin HEAD --force-with-lease', 'git push --mirror', 'git push origin --delete x'],
+    'rm の再帰削除（-r / -R / -rf / --recursive）': ['rm -rf "${dir}"', 'rm -r -- "${d}"', 'rm -fR x', 'rm --recursive x', 'rm -f a && rm -rf b'],
+    'git worktree remove（強制削除を含む）': ['git worktree remove --force -- "$p"', 'git worktree remove "$p"'],
     'git push の -f 系短縮オプション': ['git push -f origin HEAD', 'git push origin HEAD -f', 'git push -uf origin HEAD'],
     'git push の + refspec': ['git push origin +HEAD:refs/heads/x', 'git push origin "+HEAD:refs/heads/x"'],
     'git push は許可形（git push --no-follow-tags origin "HEAD:refs/heads/${branch}"）以外を拒否': [

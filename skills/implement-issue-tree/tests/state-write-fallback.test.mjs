@@ -44,7 +44,7 @@ const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const driverPart = source.slice(markerIndex)
 
 // globalThis.args を先に注入してから import する（review-diff-base.test.mjs と同じ前例）。
-globalThis.args = { parent: 1 }
+globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 
 const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-state-fallback-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-state-defs.mjs')
@@ -194,6 +194,19 @@ test('(g) マージは成功、掃除段の haiku が例外 → 掃除段だけ 
   for (const c of cleanupCalls) {
     assert.ok(!c.prompt.includes(untrustedMarker), '掃除プロンプトに patch 由来の自由文が混入してはならない（Issue #144 のコンテキスト分離）')
   }
+})
+
+test('(g2) 掃除プロンプトの手順 5（.worktree のクリア）は state.sh merge を呼ぶ。追跡中の worktree と別物を消すとき（preserveWorktreeField・新パス記録済み）は呼ばない', async () => {
+  const run = async (patch, options) => {
+    const { calls } = installAgentStub(() => ({ ok: true }))
+    assert.equal(await updateState(108, patch, options), true)
+    return calls.find((c) => c.opts.label.startsWith('state:cleanup:#108')).prompt
+  }
+  const cleared = await run({ status: 'merged' }, { cleanupWorktree: '/tmp/wt-108' })
+  assert.match(cleared, /state\.sh --file _\/issue-trees\/1\.json merge <<'STATE_EOF'\n\[\{"numbers":\[108\],"patch":\{"worktree":""\}\}\]\nSTATE_EOF\n/)
+  assert.doesNotMatch(cleared, /jq --argjson patch/)
+  assert.doesNotMatch(await run({ status: 'merged', worktree: '/tmp/wt-108-new' }, { cleanupWorktree: '/tmp/wt-108' }), /state\.sh/)
+  assert.doesNotMatch(await run({ status: 'merged' }, { cleanupWorktree: '/tmp/wt-108', preserveWorktreeField: true }), /state\.sh/)
 })
 
 test('(h) initAllPending は haiku・sonnet とも失敗しても reject しない', async () => {

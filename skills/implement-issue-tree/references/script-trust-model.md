@@ -14,6 +14,7 @@
 | `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail` / `push`（第 3 弾）。出力は 1 行の封筒（`threads-detail` だけは外部由来の自由文を含む非信頼データで、封筒ではない）。`--wait` は有界の待機 |
 | `scripts/base-merge.sh` | 自動 base 取り込みの本体（第 3 弾）。入力は PR 番号・branch・base・期待 owner/repo（引数）。**封筒を使わない**。出力の最後の 1 行は `BASE_MERGE_RESULT {…}`（キーは `BASE_MERGE_SCHEMA` と同じ） |
 | `scripts/pr-push.sh` | pr-create と fix の起点の確立・base 取り込み・push・PR 作成（第 4 弾）。モードは `prepare` / `push` / `pr`。**封筒を使わない**。出力の最後の 1 行は `PR_PUSH_RESULT {…}` |
+| `scripts/state.sh` | 状態ファイル（`_/issue-trees/<親>.json`）の書き込み（第 5 弾）。モードは `merge` / `init` / `hw-max` / `hw-set`。入力は標準入力の 1 行 JSON と引数。**封筒を使わない**。出力の最後の 1 行は `STATE_RESULT {"ok":…}` |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
 | `scripts/lib/push-verify.sh` | push の前後でリモート head を突き合わせる共通部（`pv_push_verified`。第 3 弾）。`base-merge.sh` が使い、以降 pr-create の push と fix の push 検証も同じ部品へ移す |
 | 生成物 `implement-issue-tree.js` の `SCRIPT_SHA256` | ビルダーが埋め込む期待ハッシュ。開発ファイルには置換前の目印を書き、`build-workflow.mjs` が置換する |
@@ -198,6 +199,30 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 ### `observe-pr.sh --repo`
 
 ホストが `args.repo` を持つときは、観測コマンドに `--repo OWNER/REPO` を渡し、スクリプト内の `gh` を対象リポジトリへ束縛する（`gh pr view -R`・`gh api repos/OWNER/REPO/…`・GraphQL の owner / name）。持たないランは従来どおり（`gh` が cwd のリポジトリに解決する）。`--repo` は封筒の `inputSha256` の材料に含まれるので、`--repo` を落として実行した出力は、repo 入りの入力を期待するホストの照合で `input` として拒否される。形式検証は `lib/base-merge-lib.sh` の `valid_repo` を共有する。
+
+## 第 5 弾: 状態ファイルの書き込み（`state.sh`）
+
+### 位置づけ: 封筒なしで足りる理由
+
+`state.sh` は状態ファイルへの書き込み（`.items[n]` へのマージ・一括初期化・高水位の更新）を、従来プロンプトに文章で書いていた `mktemp` → `jq` → `mv` の手順から、固定のコマンド列へ移した。ホストが読む値は従来のエージェントの返却値（`ok`）と同じで、新しく採用する値は無いため、`base-merge.sh` と同じく封筒を付けない（上の「測定値の使い方」の (c) 自己申告値を判定に使わない設計）。`ok` が偽って `true` で返ると、保存できていない回復情報（PR 番号・worktree）のまま次へ進み得る。これは従来のエージェントの自己申告と同じ水準で、悪化していない。改善した点は、手順の組み立て（クォート・一時ファイル・原子的な置換）がエージェントの文章解釈に依らなくなったことである。
+
+| 項目 | 従来（プロンプト） | `state.sh` |
+|------|------------------|-----------|
+| 書き込み先 | プロンプトの `STATE_FILE` | `_/issue-trees/<正の整数>.json` の 1 形だけ（それ以外は exit 2 で何も書かない） |
+| patch の渡し方 | 未信頼範囲の囲み + ヒアドキュメント + `--slurpfile` | ヒアドキュメント（終端は呼び出しごとの nonce で作り、本文から nonce を除く）+ `--slurpfile`。patch は jq のプログラム文字列に入らない |
+| 入力の形 | なし | `merge`: 番号は 1 以上の整数・patch はオブジェクト。`init`: type は `implement` / `verify-close`。形が違えば書かず `invalid-input` |
+| 壊れた状態ファイル | jq の失敗に任せる | 書き換え前に `.items` がオブジェクトかを確かめ、違えば書かない（`rewrite-failed`）。出力も同じ検査を通ってから置換する |
+| 並行書き込み | なし（ホストの直列化だけ） | スナップショットから計算し、置換の直前に元ファイルが変わっていないか確かめる。変わっていれば最初からやり直し、3 回続けば `changed-concurrently`（別ランの書き込みを失わない） |
+| 一時ファイル | 後始末はエージェント任せ | trap と各失敗経路で削除する（テストが残存 0 を確かめる） |
+
+- **`state.sh` が持たないもの。** 読み込み（`loadState` の読込・照合）と worktree / branch の削除（`state:cleanup`・最終スイープ）は移していない。削除は `--force` を使う別の安全判定を含み、確認と削除を同じスクリプトで行う独立の弾で扱う。掃除の手順 5（削除後の `.worktree` のクリア）だけは `state.sh merge` を呼ぶ。
+- **変更検知はアドバイザリで、排他ロックではない。** 検知から `mv` までの数ミリ秒の窓は残る。同一ランの書き込みはホストが直列化している（`enqueueStateWrite`）ので、検知が対象にするのは別ランが同じ状態ファイルを書いた場合である。
+- **失敗の返し方は従来と同じ。** 結果の行が出ない・非 0 終了・`ok: false` は、エージェントが `ok: false` を返し、ホストの既存の経路（`StructuredOutput` 未返却は sonnet へ 1 回フォールバック、応答した上での失敗はフォールバックしない）に乗る。`merge` が失敗したら掃除をしない（回復情報を保全する）契約も変えていない。
+- **静的ガード**（`tests/script-static-guard.test.mjs`）は `state.sh` と `lib/state-lib.sh` も走査する。`rm` は自分が作った一時ファイルへの `rm -f` だけで、`rm -rf`・`--force` の綴りは無い（ガードが固定する）。
+
+### `base-merge.sh` の共有 ref
+
+第 4 弾の持ち越し: `base-merge.sh` は branch と base の取得先を `refs/worktree/base-merge/*` に変え、並列 worktree が共有する `refs/remotes/origin/*` を削除しない（実 git の 2 worktree テストと変異 U40 が固定する）。`refs/worktree/` が worktree ごとに分かれることは、git 2.54 でしか実測していない（最低版 2.20 では未確認）。
 
 ## ハッシュ埋め込みと鮮度
 

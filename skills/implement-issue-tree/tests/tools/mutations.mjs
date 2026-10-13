@@ -11,6 +11,9 @@ const BW = 'scripts/build-workflow.mjs'
 const PP = 'scripts/pr-push.sh'
 const PP_LIB = 'scripts/lib/pr-push-lib.sh'
 const RV = 'scripts/run-verified.sh'
+const ST = 'scripts/state.sh'
+const ST_LIB = 'scripts/lib/state-lib.sh'
+const STATE_SCRIPT = ['state-script.test.mjs']
 const PR_PUSH = ['pr-push.test.mjs', 'pr-push-unit.test.mjs']
 const BASE_MERGE = ['base-merge.test.mjs', 'base-merge-unit.test.mjs']
 
@@ -66,6 +69,17 @@ export const MUTATIONS = [
   { id: 'P24-milestone-warn-after-edit', file: SRC, from: '    `   1b の結果の milestone が unassigned のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} に milestone が割り当てられていない。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,\n    optinRecordSection\n      ? `   本文への追記（Closes 行・対象外節・opt-in テスト記録節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`\n      : `   本文への追記（Closes 行・対象外節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`,\n    `     gh pr edit <番号>${repoArg ? ` -R ${repoArg}` : \'\'} --body-file "$f" && rm -f "$f"`,\n    `   （マージ時にイシューが自動クローズされないと監視が空転するため、Closes 行は必ず存在させる）`,\n', to: '    optinRecordSection\n      ? `   本文への追記（Closes 行・対象外節・opt-in テスト記録節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`\n      : `   本文への追記（Closes 行・対象外節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`,\n    `     gh pr edit <番号>${repoArg ? ` -R ${repoArg}` : \'\'} --body-file "$f" && rm -f "$f"`,\n    `   （マージ時にイシューが自動クローズされないと監視が空転するため、Closes 行は必ず存在させる）`,\n    `   1b の結果の milestone が unassigned のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} に milestone が割り当てられていない。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,\n', tests: ['pr-push-prompt.test.mjs'], note: 'milestone 警告の追記指示を最後の gh pr edit の後ろへ戻す（更新後に足しても PR へ反映されない）' },
   { id: 'P25-pr-create-no-security-check', file: SRC, from: '    `0e. push 前のセキュリティ確認（必須。fail-closed）: git rev-parse refs/worktree/pr-push/base で base の SHA（40 桁）を控え、git diff <その SHA> HEAD の差分（手順 0 で入った base 取り込み・コンフリクト解消コミットの変更を含む）を、skills/create-pr/SKILL.md Step 2 の観点（認証認可の漏れ・ハードコード秘密情報・XSS・入力バリデーション・OWASP Top 10）で確認する。秘密情報の検出は .claude/rules/security.md の方針に従う（追加行のみ対象・マッチ行は出力せず件数と終了コードで判定・grep が終了コード 2 以上なら検査失敗として中止）。問題を検出した、または検査自体が失敗した場合は push も PR 作成もせず prNumber: 0 と「セキュリティ確認で問題を検出（または検査失敗）: 種別と箇所の要旨（秘密値そのものは書かない）」を理由として返す。問題なしの場合のみ手順 1 へ進む。`,\n', to: '', tests: ['pr-push-prompt.test.mjs'], note: 'PR 作成前（prepare 後・push 前）のセキュリティ確認を外す（解消コミットの変更が未確認のまま push・PR 作成される）' },
   { id: 'P26-optin-0d-skips-0e', file: SRC, from: '両方成立した場合のみ手順 0e へ進む。', to: '両方成立した場合のみ手順 1 へ進む。', tests: ['pr-push-prompt.test.mjs'], note: 'opt-in テストがあるとき 0d の進み先を手順 1 に戻す（セキュリティ確認 0e を飛ばして push する）' },
+  // ---- state.sh（状態ファイルの書き込み。第 5 弾）----
+  { id: 'S01-state-file-any-path', file: ST_LIB, from: '    _/issue-trees/*.json) ;;\n    *) return 1 ;;', to: '    *) ;;\n    *) return 1 ;;', tests: STATE_SCRIPT, note: '書き込み先のパスを検証しない（_/issue-trees/ 以外・.. を含むパスへ書ける）' },
+  { id: 'S02-items-shape-unchecked', file: ST_LIB, from: "    if ! jq -e '.items | type == \"object\"' \"${snap}\" >/dev/null 2>&1 \\\n      || ! jq", to: '    if ! jq', tests: STATE_SCRIPT, note: '書き換え前に .items がオブジェクトかを確かめない（壊れた状態の上へ書き足す）' },
+  { id: 'S03-concurrent-change-undetected', file: ST_LIB, from: '    if cmp -s -- "${snap}" "${f}"; then', to: '    if true; then', tests: STATE_SCRIPT, note: '書き込み直前の変更検知を外す（別ランの書き込みを last-writer-wins で失う）' },
+  { id: 'S04-merge-replaces-item', file: ST_LIB, from: '((.items[($n|tostring)] // {}) + $g.patch)', to: '$g.patch', tests: STATE_SCRIPT, note: 'merge が項目全体を patch で置き換える（patch に無いキーの回復情報を失う）' },
+  { id: 'S05-init-overwrites', file: ST_LIB, from: 'if .items[($e.number|tostring)] == null then', to: 'if true then', tests: STATE_SCRIPT, note: 'init が既存の項目を pending で上書きする（進捗を失う）' },
+  { id: 'S06-hw-max-shrinks', file: ST_LIB, from: '!= $v) or ((.perWorktreeByteReserveHighWater // 0) < $hw)', to: '!= $v) or ((.perWorktreeByteReserveHighWater // 0) != $hw)', tests: STATE_SCRIPT, note: '高水位が縮む（同じ版で小さい値に置き換わる）' },
+  { id: 'S07-invalid-input-accepted', file: ST, from: '      st_valid_groups "${body}" || result invalid-input', to: '      :', tests: STATE_SCRIPT, note: 'merge の入力の形を検証しない（番号 0 などを書く）' },
+  { id: 'S08-failure-reported-ok', file: ST, from: '  *) result rewrite-failed ;;', to: '  *) result ok ;;', tests: STATE_SCRIPT, note: '書き換えの失敗を ok:true で返す（保存できていないのに保存済みとして進む）' },
+  { id: 'S09-host-delimiter-fixed', file: SRC, from: "const command = stateCommand(mode, rest, body.split(nonce).join(''), `STATE_EOF_${nonce}`)", to: "const command = stateCommand(mode, rest, body.split(nonce).join(''), 'STATE_EOF')", tests: ['blocked-batch-state-write.test.mjs'], note: 'ヒアドキュメントの終端が固定（patch の自由文が終端を偽装してコマンドを注入できる）' },
+  { id: 'S10-cleanup-step5-dropped', file: SRC, from: "stateCommand('merge', '', JSON.stringify([{ numbers: [issueNumber], patch: { worktree: '' } }]), 'STATE_EOF'),", to: "'',", tests: ['state-write-fallback.test.mjs'], note: '掃除後の .worktree のクリアを書かない（削除済みの worktree を状態が指し続ける）' },
   // ---- 起動時のハッシュ予検査（第 4 弾）----
   { id: 'P07-precheck-skew-accepted', file: SRC, from: '  if (p.mismatch === 0 && p.missing === 0) return { ok: true }', to: '  if (true) return { ok: true }', tests: ['script-hash-precheck.test.mjs'], note: 'ホストが不一致・欠落を一致扱いにする（版ずれのまま着手する）' },
   { id: 'P08-verify-only-mismatch-ok', file: RV, from: '    elif [ "${actual}" = "${expected}" ]; then\n      ok=$((ok + 1))', to: '    elif true; then\n      ok=$((ok + 1))', tests: ['script-hash-precheck.test.mjs'], note: '--verify-only がハッシュ不一致を一致として数える' },
