@@ -20,6 +20,7 @@ const WR_LIB = 'scripts/lib/worktree-remove-lib.sh'
 const WR_REAL = ['worktree-remove.test.mjs']
 const WR_ALL = ['worktree-remove.test.mjs', 'worktree-remove-unit.test.mjs']
 const WR_HOST = ['worktree-remove-host.test.mjs']
+const WR_LEDGER = ['worktree-retained-ledger.test.mjs']
 const STATE_SCRIPT = ['state-script.test.mjs']
 const MERGE_GATE = ['merge-gate.test.mjs', 'merge-gate-unit.test.mjs']
 const MERGE_GATE_HOST = ['merge-gate-host.test.mjs']
@@ -203,4 +204,12 @@ export const MUTATIONS = [
   { id: 'W50-guard-binding-old-regex', file: "tests/script-static-guard.test.mjs", from: "const refBinding = (line) => REF_NAME.test(line.replace(REF_READ, ''))", to: "const refBinding = (line) => /^\\s*(base_ref|branch_ref)=/.test(line)", tests: ['script-static-guard.test.mjs'], note: "束縛の検査を行頭の代入だけに戻す（local / readonly / read -r / printf -v などの形が素通りする）" },
   { id: 'W51-script-local-binding', file: 'scripts/base-merge.sh', from: 'base_ref="refs/worktree/base-merge/base"', to: 'local base_ref="refs/worktree/base-merge/base"', tests: ['script-static-guard.test.mjs'], note: "代入 1 行を local base_ref=… に書き換える（許可した決まった代入行以外の束縛を拒否する）" },
   { id: 'W52-script-assign-heads', file: 'scripts/pr-push.sh', from: 'branch_ref="refs/worktree/pr-push/branch"', to: 'branch_ref="refs/heads/main"', tests: ['script-static-guard.test.mjs'], note: "branch_ref を refs/heads/ 配下へ向ける" },
+  { id: 'R01-retained-not-registered', file: SRC, from: "if (cleanupWorktreePath && result?.cleanupRetained !== false) recordRetainedWorktree(issueNumber, cleanupWorktreePath)", to: "", tests: WR_LEDGER, note: "保持した旧 worktree を残置の台帳へ載せない（件数・バイトの両軸から漏れ、上限を超えても新規着手を許す）" },
+  { id: 'R02-retained-only-on-failure', file: SRC, from: "if (cleanupWorktreePath && result?.cleanupRetained !== false) recordRetainedWorktree", to: "if (cleanupWorktreePath && result?.cleanupOk === false && result?.cleanupRetained !== false) recordRetainedWorktree", tests: WR_LEDGER, note: "ok:true で保持（superseded の保持は非致命）したパスを載せない" },
+  { id: 'R03-retained-ledger-dedup-dropped', file: SRC, from: " || ephemeralWorktrees.some((e) => e.path === p)) return false", to: ") return false", tests: WR_LEDGER, note: "台帳に既にあるパスの重複排除を外す（同じパスを 2 回保持すると 2 件に数える・実装 worktree を二重に数える）" },
+  { id: 'R04-retained-start-observed-dedup-dropped', file: SRC, from: " || residualStartPathSet.has(p)", to: "", tests: WR_LEDGER, note: "開始時観測に含まれていたパスを台帳へ載せる（件数軸の「開始時観測 + 本ラン積み増し」で二重計上する）" },
+  { id: 'R05-retained-confirmed-removed-dedup-dropped', file: SRC, from: "if (!p || confirmedRemovedPaths.has(p) ||", to: "if (!p ||", tests: WR_LEDGER, note: "削除確認済みのパスを台帳へ載せる（既に消えたものを保持として数える）" },
+  { id: 'R06-sweep-not-removed-not-registered', file: SRC, from: "for (const p of candidates) if (!removed.includes(p)) recordRetainedWorktree(0, p)", to: "", tests: WR_LEDGER, note: "最終スイープで消えたと確認できなかった候補を台帳へ載せない" },
+  { id: 'R07-sweep-exception-not-registered', file: SRC, from: "    for (const p of candidates) recordRetainedWorktree(0, p)\n    return []", to: "    return []", tests: WR_LEDGER, note: "最終スイープが例外で終わったとき、候補を台帳へ載せない（fail-open）" },
+  { id: 'R08-sweep-removed-not-confirmed', file: SRC, from: "for (const p of removed) confirmedRemovedPaths.add(p)", to: "", tests: WR_LEDGER, note: "スイープで消えたパスを削除確認済みにしない（バイト軸が消えたパスを測り続ける）" },
 ]

@@ -3470,6 +3470,9 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
   // 保持した worktree（retained）は実体が残っているので数えない。
   const cleanupConfirmedRemoved = result?.cleanupOk === true && result?.cleanupRetained === false
   if (cleanupWorktreePath && cleanupConfirmedRemoved) confirmedRemovedPaths.add(cleanupWorktreePath)
+  // 消えたと確認できない旧 worktree（保持・結果なし・例外・状態マージ失敗による掃除スキップ）は、種別を問わず残置台帳へ載せる
+  // （件数・バイトの両軸の対象にする。fix の旧 worktree も含む）。retained === false の結果だけが「無くなった」と読める
+  if (cleanupWorktreePath && result?.cleanupRetained !== false) recordRetainedWorktree(issueNumber, cleanupWorktreePath)
   // superseded の試み、または discard で削除を確認できたパスは、スイープの除外から戻す（discard で保持したパスは除外のまま）
   if (cleanupWorktreePath && (cleanupMode !== 'discard' || cleanupConfirmedRemoved)) sweepHeldPaths.delete(cleanupWorktreePath)
   // AND 判定（分割前と同じ戻り値契約。どちらが失敗したかは上のログで判別できる）。
@@ -4383,6 +4386,8 @@ const confirmedRemovedPaths = new Set()
 // 本ランで新規作成された worktree の記録簿（残置上限ゲートの積み増し実測）。fix の worktree は
 // 記録しない（cleanup とペアで純増しない）。{ issue, kind, path } を追記し一覧をログ出力する。
 const ephemeralWorktrees = []
+// ラン開始時の観測に含まれていた残置パス（residualPathsAtStart と同じ内容。recordRetainedWorktree が二重計上を避けるのに使う）
+const residualStartPathSet = new Set()
 
 // 使い捨て worktree kind ごとの 1 イシュー当たり最大生成数（予約計上はこの合計から導出。未宣言
 // kind は警告のみ）。fix の終端は fix-terminal を共用。base-merge（Issue #441）は spawn 直後の
@@ -4425,6 +4430,16 @@ function recordEphemeralWorktree(issueNumber, rawPath, kind) {
   log(`#${issueNumber}: ${kind} worktree を記録した（自動削除はしない。${p}）`)
 }
 
+// 掃除で消えたと確認できなかった worktree（kind 'retained'）を残置台帳へ載せる。予約（EPHEMERAL_KIND_MAX）には含めず、保持が起きた
+// 事後に載せる。台帳・開始時観測・削除確認済みに既にあるパスは二重計上しない。戻り値は新規登録したか
+function recordRetainedWorktree(issueNumber, rawPath) {
+  const p = sanitizeWorktreePath(rawPath ?? '')
+  if (!p || confirmedRemovedPaths.has(p) || residualStartPathSet.has(p) || ephemeralWorktrees.some((e) => e.path === p)) return false
+  ephemeralWorktrees.push({ issue: issueNumber, kind: 'retained', path: p })
+  log(`${issueNumber ? `#${issueNumber}: ` : ''}消えたと確認できなかった worktree を残置の台帳へ載せた（${p}）`)
+  return true
+}
+
 const SWEEP_SCHEMA = {
   type: 'object',
   required: ['removed'],
@@ -4441,8 +4456,9 @@ const SWEEP_SCHEMA = {
 // 限定し推測しない。保持（failed / blocked / monitoring が記録した worktree）・登録の照合・lock・汚れの確認・削除は scripts/worktree-remove.sh
 // sweep が同じプロセスで行う。ホストは返ってきた removed を候補集合と突き合わせる（候補にないパスは数えない）。
 async function sweepClosedWorktrees(orphanPaths = []) {
+  let candidates = []
   try {
-    const candidates = [...new Set([...sweepEligiblePaths, ...orphanPaths])].map(sanitizeWorktreePath).filter((p) => p !== '' && !sweepHeldPaths.has(p))
+    candidates = [...new Set([...sweepEligiblePaths, ...orphanPaths])].map(sanitizeWorktreePath).filter((p) => p !== '' && !sweepHeldPaths.has(p))
     if (candidates.length === 0) {
       log('worktree スイープ: 削除を試みた worktree・検出した孤立 worktree がない（または discard で保持した worktree だけ）ため削除を行わない')
       return []
@@ -4467,6 +4483,9 @@ async function sweepClosedWorktrees(orphanPaths = []) {
     // 候補集合にないパスは数えない（結果の転記ミスで、削除していないパスを削除済みとして扱わない）
     const candidateSet = new Set(candidates)
     const removed = Array.isArray(v?.removed) ? v.removed.filter((p) => typeof p === 'string' && candidateSet.has(p)) : []
+    // 消えた候補は実測の対象から外し、消えたと確認できない候補（保持・結果なし）は残置台帳へ載せる
+    for (const p of removed) confirmedRemovedPaths.add(p)
+    for (const p of candidates) if (!removed.includes(p)) recordRetainedWorktree(0, p)
     if (removed.length > 0) {
       log(`worktree スイープ: ${removed.length} 件を削除した`)
     } else {
@@ -4476,6 +4495,7 @@ async function sweepClosedWorktrees(orphanPaths = []) {
   } catch (e) {
     // 例外を伝播させると run report の結果が失われるため吸収する（残骸は次ランのスイープが回収）。
     log(`⚠️ worktree スイープ中に例外が発生した（${e?.message ?? e}）。削除は行われなかった可能性がある`)
+    for (const p of candidates) recordRetainedWorktree(0, p)
     return []
   }
 }
@@ -6633,6 +6653,7 @@ if (!dryRunEnabled) {
     const residual = countResidualWorktrees(runStartOrphanEntries)
     residualObservedAtStart = residual.count
     residualPathsAtStart = residual.paths
+    for (const rp of residual.paths) residualStartPathSet.add(rp)
     // 「超過」判定は count > limit で発火（count === limit は許容）。0 は上限なし。
     if (maxResidualWorktrees > 0 && residual.count > maxResidualWorktrees) {
       latchNewStartSuppressed({
@@ -9873,7 +9894,7 @@ while (true) {
         if (item.kind === 'implement' && maxResidualWorktrees > 0 && residualObserved) {
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
-            recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+            if (e.kind !== 'retained') recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
           }
           let reservedTotal = 0
           for (const rn of newStartActive) {
@@ -9946,7 +9967,7 @@ while (true) {
           }
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
-            recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+            if (e.kind !== 'retained') recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
           }
           let reservedUnits = 0
           for (const rn of newStartActive) {
@@ -10044,7 +10065,7 @@ while (true) {
         if (item.kind === 'implement') {
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
-            recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+            if (e.kind !== 'retained') recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
           }
           let reservedTotal = 0
           for (const rn of newStartActive) {
@@ -10119,7 +10140,7 @@ while (true) {
         if (item.kind === 'implement') {
           const recordedByIssue = new Map()
           for (const e of ephemeralWorktrees) {
-            recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+            if (e.kind !== 'retained') recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
           }
           let reservedUnits = 0
           for (const rn of newStartActive) {
@@ -10470,7 +10491,7 @@ const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
 const disposableWorktrees = ephemeralWorktrees.filter((e) => e.kind !== 'implement')
 if (disposableWorktrees.length > 0) {
   log(`使い捨て worktree（review / pr-create / fix-routing-error）を ${disposableWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
-  for (const e of disposableWorktrees) log(`  #${e.issue} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
+  for (const e of disposableWorktrees) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
 // --- 残置 worktree 総数のサマリ報告 ---

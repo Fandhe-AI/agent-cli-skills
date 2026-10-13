@@ -3471,6 +3471,9 @@ return{mergeOk:false,cleanupOk:false,cleanupRetained:true,branchSha:'',outputMis
 const cleanupConfirmedRemoved=result?.cleanupOk===true&&result?.cleanupRetained===false
 if(cleanupWorktreePath&&cleanupConfirmedRemoved)confirmedRemovedPaths.add(cleanupWorktreePath)
 
+
+if(cleanupWorktreePath&&result?.cleanupRetained!==false)recordRetainedWorktree(issueNumber,cleanupWorktreePath)
+
 if(cleanupWorktreePath&&(cleanupMode!=='discard'||cleanupConfirmedRemoved))sweepHeldPaths.delete(cleanupWorktreePath)
 
 return{
@@ -4384,6 +4387,8 @@ const confirmedRemovedPaths=new Set()
 
 const ephemeralWorktrees=[]
 
+const residualStartPathSet=new Set()
+
 
 
 
@@ -4425,6 +4430,16 @@ ephemeralWorktrees.push({issue:issueNumber,kind,path:p})
 log(`#${issueNumber}: ${kind} worktree を記録した（自動削除はしない。${p}）`)
 }
 
+
+
+function recordRetainedWorktree(issueNumber,rawPath){
+const p=sanitizeWorktreePath(rawPath??'')
+if(!p||confirmedRemovedPaths.has(p)||residualStartPathSet.has(p)||ephemeralWorktrees.some((e)=>e.path===p))return false
+ephemeralWorktrees.push({issue:issueNumber,kind:'retained',path:p})
+log(`${issueNumber ? `#${issueNumber}: ` : ''}消えたと確認できなかった worktree を残置の台帳へ載せた（${p}）`)
+return true
+}
+
 const SWEEP_SCHEMA={
 type:'object',
 required:['removed'],
@@ -4441,8 +4456,9 @@ description:'結果の行の removed（削除した worktree の絶対パス一�
 
 
 async function sweepClosedWorktrees(orphanPaths=[]){
+let candidates=[]
 try{
-const candidates=[...new Set([...sweepEligiblePaths, ...orphanPaths])].map(sanitizeWorktreePath).filter((p)=>p!==''&& !sweepHeldPaths.has(p))
+candidates=[...new Set([...sweepEligiblePaths, ...orphanPaths])].map(sanitizeWorktreePath).filter((p)=>p!==''&& !sweepHeldPaths.has(p))
 if(candidates.length===0){
 log('worktree スイープ: 削除を試みた worktree・検出した孤立 worktree がない（または discard で保持した worktree だけ）ため削除を行わない')
 return[]
@@ -4467,6 +4483,9 @@ command,
 
 const candidateSet=new Set(candidates)
 const removed=Array.isArray(v?.removed)?v.removed.filter((p)=>typeof p==='string'&&candidateSet.has(p)):[]
+
+for(const p of removed)confirmedRemovedPaths.add(p)
+for(const p of candidates)if(!removed.includes(p))recordRetainedWorktree(0,p)
 if(removed.length>0){
 log(`worktree スイープ: ${removed.length} 件を削除した`)
 }else{
@@ -4476,6 +4495,7 @@ return removed
 }catch(e){
 
 log(`⚠️ worktree スイープ中に例外が発生した（${e?.message ?? e}）。削除は行われなかった可能性がある`)
+for(const p of candidates)recordRetainedWorktree(0,p)
 return[]
 }
 }
@@ -6633,6 +6653,7 @@ residualObserved=true
 const residual=countResidualWorktrees(runStartOrphanEntries)
 residualObservedAtStart=residual.count
 residualPathsAtStart=residual.paths
+for(const rp of residual.paths)residualStartPathSet.add(rp)
 
 if(maxResidualWorktrees>0&&residual.count>maxResidualWorktrees){
 latchNewStartSuppressed({
@@ -9873,7 +9894,7 @@ continue
 if(item.kind==='implement'&&maxResidualWorktrees>0&&residualObserved){
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
+if(e.kind!=='retained')recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedTotal=0
 for(const rn of newStartActive){
@@ -9946,7 +9967,7 @@ continue
 }
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
+if(e.kind!=='retained')recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedUnits=0
 for(const rn of newStartActive){
@@ -10044,7 +10065,7 @@ continue
 if(item.kind==='implement'){
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
+if(e.kind!=='retained')recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedTotal=0
 for(const rn of newStartActive){
@@ -10119,7 +10140,7 @@ continue
 if(item.kind==='implement'){
 const recordedByIssue=new Map()
 for(const e of ephemeralWorktrees){
-recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
+if(e.kind!=='retained')recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
 }
 let reservedUnits=0
 for(const rn of newStartActive){
@@ -10470,7 +10491,7 @@ const sweptWorktrees=await sweepClosedWorktrees(orphanDeleteCandidates)
 const disposableWorktrees=ephemeralWorktrees.filter((e)=>e.kind!=='implement')
 if(disposableWorktrees.length>0){
 log(`使い捨て worktree（review / pr-create / fix-routing-error）を ${disposableWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
-for(const e of disposableWorktrees)log(`  #${e.issue} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
+for(const e of disposableWorktrees)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
 
