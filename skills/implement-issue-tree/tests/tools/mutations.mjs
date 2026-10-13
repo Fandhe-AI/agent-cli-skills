@@ -71,8 +71,8 @@ export const MUTATIONS = [
   { id: 'P26-optin-0d-skips-0e', file: SRC, from: '両方成立した場合のみ手順 0e へ進む。', to: '両方成立した場合のみ手順 1 へ進む。', tests: ['pr-push-prompt.test.mjs'], note: 'opt-in テストがあるとき 0d の進み先を手順 1 に戻す（セキュリティ確認 0e を飛ばして push する）' },
   // ---- state.sh（状態ファイルの書き込み。第 5 弾）----
   { id: 'S01-state-file-any-path', file: ST_LIB, from: '    _/issue-trees/*.json) ;;\n    *) return 1 ;;', to: '    *) ;;\n    *) return 1 ;;', tests: STATE_SCRIPT, note: '書き込み先のパスを検証しない（_/issue-trees/ 以外・.. を含むパスへ書ける）' },
-  { id: 'S02-items-shape-unchecked', file: ST_LIB, from: "    if ! jq -e '.items | type == \"object\"' \"${snap}\" >/dev/null 2>&1 \\\n      || ! jq", to: '    if ! jq', tests: STATE_SCRIPT, note: '書き換え前に .items がオブジェクトかを確かめない（壊れた状態の上へ書き足す）' },
-  { id: 'S03-concurrent-change-undetected', file: ST_LIB, from: '    if cmp -s -- "${snap}" "${f}"; then', to: '    if true; then', tests: STATE_SCRIPT, note: '書き込み直前の変更検知を外す（別ランの書き込みを last-writer-wins で失う）' },
+  { id: 'S02-items-shape-unchecked', file: ST_LIB, from: "    if ! jq -e '.items | type == \"object\"' \"${ST_SNAP}\" >/dev/null 2>&1 \\\n      || ! jq", to: '    if ! jq', tests: STATE_SCRIPT, note: '書き換え前に .items がオブジェクトかを確かめない（壊れた状態の上へ書き足す）' },
+  { id: 'S03-concurrent-change-undetected', file: ST_LIB, from: '    if cmp -s -- "${ST_SNAP}" "${f}"; then', to: '    if true; then', tests: STATE_SCRIPT, note: '書き込み直前の変更検知を外す（別ランの書き込みを last-writer-wins で失う）' },
   { id: 'S04-merge-replaces-item', file: ST_LIB, from: '((.items[($n|tostring)] // {}) + $g.patch)', to: '$g.patch', tests: STATE_SCRIPT, note: 'merge が項目全体を patch で置き換える（patch に無いキーの回復情報を失う）' },
   { id: 'S05-init-overwrites', file: ST_LIB, from: 'if .items[($e.number|tostring)] == null then', to: 'if true then', tests: STATE_SCRIPT, note: 'init が既存の項目を pending で上書きする（進捗を失う）' },
   { id: 'S06-hw-max-shrinks', file: ST_LIB, from: '!= $v) or ((.perWorktreeByteReserveHighWater // 0) < $hw)', to: '!= $v) or ((.perWorktreeByteReserveHighWater // 0) != $hw)', tests: STATE_SCRIPT, note: '高水位が縮む（同じ版で小さい値に置き換わる）' },
@@ -80,6 +80,12 @@ export const MUTATIONS = [
   { id: 'S08-failure-reported-ok', file: ST, from: '  *) result rewrite-failed ;;', to: '  *) result ok ;;', tests: STATE_SCRIPT, note: '書き換えの失敗を ok:true で返す（保存できていないのに保存済みとして進む）' },
   { id: 'S09-host-delimiter-fixed', file: SRC, from: "const command = stateCommand(mode, rest, body.split(nonce).join(''), `STATE_EOF_${nonce}`)", to: "const command = stateCommand(mode, rest, body.split(nonce).join(''), 'STATE_EOF')", tests: ['blocked-batch-state-write.test.mjs'], note: 'ヒアドキュメントの終端が固定（patch の自由文が終端を偽装してコマンドを注入できる）' },
   { id: 'S10-cleanup-step5-dropped', file: SRC, from: "stateCommand('merge', '', JSON.stringify([{ numbers: [issueNumber], patch: { worktree: '' } }]), 'STATE_EOF'),", to: "'',", tests: ['state-write-fallback.test.mjs'], note: '掃除後の .worktree のクリアを書かない（削除済みの worktree を状態が指し続ける）' },
+  { id: 'S11-multi-value-accepted', file: ST_LIB, from: "jq -s -e 'length == 1 and (.[0] | type == \"array\" and length >= 1 and length <= 1000", to: "jq -s -e 'length >= 1 and (.[0] | type == \"array\" and length >= 1 and length <= 1000", tests: STATE_SCRIPT, note: 'merge の入力が複数の JSON 値でも通る（最後の値だけを検査し、先頭の値が書かれる）' },
+  { id: 'S12-trap-leaves-rewrite-temps', file: ST, from: '  pf=""\n  st_drop\n}', to: '  pf=""\n}', tests: STATE_SCRIPT, note: 'シグナルで中断されたとき st_rewrite のスナップショット・出力用一時ファイルが残る' },
+  { id: 'S13-retry-count-changed', file: ST_LIB, from: 'while [ "${try}" -lt 3 ]', to: 'while [ "${try}" -lt 2 ]', tests: STATE_SCRIPT, note: '変更検知の再試行が 3 回でなくなる' },
+  { id: 'S14-state-note-dropped', file: SRC, from: "    STATE_NOTE,\n    '返却: ok: true（成功時）", to: "    '返却: ok: true（成功時）", tests: ['state-write-fallback.test.mjs'], note: '書き込みプロンプトから STATE_RESULT の判定指示を外す（失敗を ok:true と返し得る）' },
+  { id: 'S15-cleanup-step5-note-dropped', file: SRC, from: "`   この手順 5 も同じ扱い: ${STATE_NOTE}", to: "`   この手順 5 も同じ扱い: ", tests: ['state-write-fallback.test.mjs'], note: '掃除の手順 5 に STATE_RESULT の判定指示が無い（state.sh の失敗を掃除の成功と返し得る）' },
+  { id: 'S16-init-empty-calls-script', file: SRC, from: '  if (initEntries.length === 0) return\n', to: '', tests: ['state-write-fallback.test.mjs'], note: 'open が 0 件でも state.sh init を空配列で呼び、偽の失敗を出す' },
   // ---- 起動時のハッシュ予検査（第 4 弾）----
   { id: 'P07-precheck-skew-accepted', file: SRC, from: '  if (p.mismatch === 0 && p.missing === 0) return { ok: true }', to: '  if (true) return { ok: true }', tests: ['script-hash-precheck.test.mjs'], note: 'ホストが不一致・欠落を一致扱いにする（版ずれのまま着手する）' },
   { id: 'P08-verify-only-mismatch-ok', file: RV, from: '    elif [ "${actual}" = "${expected}" ]; then\n      ok=$((ok + 1))', to: '    elif true; then\n      ok=$((ok + 1))', tests: ['script-hash-precheck.test.mjs'], note: '--verify-only がハッシュ不一致を一致として数える' },

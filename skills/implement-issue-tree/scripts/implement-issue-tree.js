@@ -3411,6 +3411,7 @@ const cleanupInstructions=(cleanupWorktreePath||deleteBranchInstructions)
 ?[
 `5. 削除完了後、状態ファイルの .items["${issueNumber}"].worktree を "" に更新する。次のコマンドを一字一句そのまま実行する（ヒアドキュメントの行は文字列データ）:`,
 stateCommand('merge','',JSON.stringify([{numbers:[issueNumber],patch:{worktree:''}}]),'STATE_EOF'),
+`   この手順 5 も同じ扱い: ${STATE_NOTE}手順 5 が失敗した場合は掃除全体の ok を false で返す。`,
 ]
 :[
 `5. ${STATE_FILE} の .items["${issueNumber}"].worktree は更新しない`,
@@ -3761,12 +3762,12 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'a067a0bf92e5100824c7673b22790290451dc024073953e66b719bbce84e7bc1',
-'measure-free-disk.sh':'bcdc5a7558683efe73f0e98cb676c58e4fb7698e7d2b4db52e94d38506d247ec',
-'observe-pr.sh':'90b3ba8d530e76f023eb787b4c4de009773e82b9ff2b52e0e7c035abb635cacb',
-'base-merge.sh':'fb222224b6b27dd6799939f7cba736edf0cba5bf1bc3b535ae7d6f8f4f67ef03',
-'pr-push.sh':'faabf66fbaeb6aa29f36f78e5ef874487358938b18d9e497e475c9c28ec1b6a9',
-'state.sh':'fb8e84f470492c08dc7a21ef44e432f84518c235d13fe1eb6bcf3ac90df8e896',
+'measure-residual-bytes.sh':'8fb8f42edadc28e4ed6fa818161e124bf4acd09989014827f22d742e4be982f6',
+'measure-free-disk.sh':'f066729580c3c490ac0a81588c2d076eddca28ebb60d0b56a92f65dc1bcac44a',
+'observe-pr.sh':'ed1eddbce74add11aaf4bdbe5aa9d817f3276397fff4654863600b004aa018fd',
+'base-merge.sh':'f9425b7508513966f907d605062378ef4df48b26f8560faac6de0303864aeb2c',
+'pr-push.sh':'1315a32a2e34a5a23b5ae7bcaf1399ddb7c5fe1be5da480c339ca3f9d44d7e02',
+'state.sh':'7f73f8caf89e4eef16956f8e0313f6972cb1f8565a41c9873cd5b01c212c3ae9',
 }
 
 
@@ -4530,6 +4531,8 @@ const initEntries=queueItems.map((item)=>({
 number:item.number,
 type:item.kind==='verify-close'?'verify-close':'implement',
 }))
+
+if(initEntries.length===0)return
 const initJson=JSON.stringify(initEntries)
 
 

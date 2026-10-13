@@ -72,6 +72,7 @@ pf=""
 cleanup() {
   [ -z "${pf}" ] || rm -f -- "${pf}"
   pf=""
+  st_drop
 }
 trap cleanup EXIT
 trap 'cleanup; exit 143' TERM INT HUP

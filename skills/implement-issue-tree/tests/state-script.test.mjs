@@ -77,6 +77,8 @@ test('lib: st_valid_groups / st_valid_entries は形の崩れた入力（番号 
     ['st_valid_groups', G([{ numbers: [1], patch: [] }]), false],
     ['st_valid_groups', G([{ numbers: [1], patch: null }]), false],
     ['st_valid_groups', G([{ numbers: [1] }]), false],
+    ['st_valid_groups', `${G([{ numbers: [1], patch: {} }])} ${G([{ numbers: [2], patch: {} }])}`, false],
+    ['st_valid_groups', `${G([{ numbers: [1], patch: {} }])} 5`, false],
     ['st_valid_groups', 'not json', false],
     ['st_valid_groups', '', false],
     ['st_valid_entries', G([{ number: 1, type: 'implement' }, { number: 2, type: 'verify-close' }]), true],
@@ -84,6 +86,7 @@ test('lib: st_valid_groups / st_valid_entries は形の崩れた入力（番号 
     ['st_valid_entries', G([{ number: 0, type: 'implement' }]), false],
     ['st_valid_entries', G([{ type: 'implement' }]), false],
     ['st_valid_entries', G([]), false],
+    ['st_valid_entries', `${G([{ number: 1, type: 'implement' }])} ${G([{ number: 2, type: 'implement' }])}`, false],
     ['st_valid_entries', G({ number: 1, type: 'implement' }), false],
   ]
   for (const res of table(rows.map(([f, a]) => [f, a]))) res.forEach(([rc], i) => assert.equal(rc === 0, rows[i][2], `${rows[i][0]} ${rows[i][1]}`))
@@ -131,7 +134,7 @@ for (const bash of BASHES) {
   test(`[${bash}] merge: 不正な入力・存在しないファイル・壊れたファイルは ok:false を返し、ファイルを変えない（一時ファイルも残さない）`, { skip: !jq }, () => {
     const sb = sandbox()
     const raw = readFileSync(join(sb.root, sb.file), 'utf8')
-    for (const input of ['', 'not json', G([{ numbers: [0], patch: {} }]), G([{ numbers: [1], patch: [] }])]) {
+    for (const input of ['', 'not json', G([{ numbers: [0], patch: {} }]), G([{ numbers: [1], patch: [] }]), `${G([{ numbers: [10], patch: { status: 'x' } }])}\n${G([{ numbers: [11], patch: { status: 'y' } }])}`]) {
       assert.deepEqual(lastResult(sb.run(bash, ['merge'], input)), { ok: false, reason: 'invalid-input' }, input)
     }
     assert.equal(readFileSync(join(sb.root, sb.file), 'utf8'), raw)
@@ -243,5 +246,16 @@ exec '${realCmp}' "$@"
     const items = sb.read().items
     assert.equal(items['10'].status, 'pending')
     assert.ok(items.c3)
+    assert.equal(readFileSync(join(sb.root, 'cmp-count'), 'utf8').trim(), '3', '3 回比べて諦める（4 回目は無い）')
+  })
+  test(`[${bash}] SIGTERM で中断されても st_rewrite のスナップショット・出力用一時ファイルを残さない（状態ファイルは変えない）`, { skip: !jq || realCmp === '' }, () => {
+    const sb = sandbox()
+    const before = readFileSync(join(sb.root, sb.file), 'utf8')
+    writeFileSync(join(sb.root, 'bin', 'cmp'), `#!/bin/sh\nkill -TERM "$PPID"\nsleep 1\nexec '${realCmp}' "$@"\n`)
+    chmodSync(join(sb.root, 'bin', 'cmp'), 0o755)
+    const r = sb.run(bash, ['merge'], G([{ numbers: [10], patch: { status: 'done' } }]), { PATH: `${join(sb.root, 'bin')}:${process.env.PATH}` })
+    assert.equal(r.status, 143, `exit ${r.status} / ${r.stderr}`)
+    assert.equal(readFileSync(join(sb.root, sb.file), 'utf8'), before)
+    assert.deepEqual(sb.leftovers(), [])
   })
 }

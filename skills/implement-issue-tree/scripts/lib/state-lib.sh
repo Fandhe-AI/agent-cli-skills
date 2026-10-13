@@ -55,37 +55,52 @@ st_uint() {
   [ "${#1}" -le 15 ]
 }
 
-# $1 = JSON 文字列。jq -e で形を確かめる（番号は 1 以上の整数。patch はオブジェクト）
+# $1 = JSON 文字列。jq -s -e で『ちょうど 1 個の値』であることと形を確かめる（番号は 1 以上の整数。patch はオブジェクト。
+# 複数の値が続く入力は、最後の値だけが検査され先頭の値が書かれる食い違いを避けるため拒否する）
 st_valid_groups() {
-  printf '%s' "$1" | jq -e 'type == "array" and length >= 1 and length <= 1000 and all(.[]; type == "object" and (.numbers | type == "array" and length >= 1 and all(.[]; type == "number" and . >= 1 and . == floor)) and (.patch | type == "object"))' >/dev/null 2>&1
+  printf '%s' "$1" | jq -s -e 'length == 1 and (.[0] | type == "array" and length >= 1 and length <= 1000 and all(.[]; type == "object" and (.numbers | type == "array" and length >= 1 and all(.[]; type == "number" and . >= 1 and . == floor)) and (.patch | type == "object")))' >/dev/null 2>&1
 }
 st_valid_entries() {
-  printf '%s' "$1" | jq -e 'type == "array" and length >= 1 and all(.[]; type == "object" and (.number | type == "number" and . >= 1 and . == floor) and (.type == "implement" or .type == "verify-close"))' >/dev/null 2>&1
+  printf '%s' "$1" | jq -s -e 'length == 1 and (.[0] | type == "array" and length >= 1 and all(.[]; type == "object" and (.number | type == "number" and . >= 1 and . == floor) and (.type == "implement" or .type == "verify-close")))' >/dev/null 2>&1
+}
+
+# 一時ファイルのパスは ST_SNAP / ST_TMP に持つ（呼び出し元の trap が、シグナルで中断されても消せるようにするため）
+ST_SNAP=""
+ST_TMP=""
+st_drop() {
+  [ -z "${ST_SNAP}" ] || rm -f -- "${ST_SNAP}"
+  [ -z "${ST_TMP}" ] || rm -f -- "${ST_TMP}"
+  ST_SNAP=""
+  ST_TMP=""
 }
 
 # $1 = 状態ファイル、$2 = jq プログラム、以降 = jq の追加オプション（--slurpfile / --argjson / --arg ts）
 st_rewrite() {
-  local f=$1 prog=$2 try=0 snap tmp
+  local f=$1 prog=$2 try=0
   shift 2
   while [ "${try}" -lt 3 ]; do
     try=$((try + 1))
     [ -f "${f}" ] || return 2
-    snap=$(mktemp "${TMPDIR:-/tmp}/state-snap.XXXXXX") || return 3
-    cp -- "${f}" "${snap}" || { rm -f "${snap}"; return 3; }
-    tmp=$(mktemp "${f}.XXXXXX") || { rm -f "${snap}"; return 3; }
-    if ! jq -e '.items | type == "object"' "${snap}" >/dev/null 2>&1 \
-      || ! jq "$@" "${prog}" "${snap}" >"${tmp}" 2>/dev/null \
-      || ! jq -e '.items | type == "object"' "${tmp}" >/dev/null 2>&1; then
-      rm -f "${snap}" "${tmp}"
+    ST_SNAP=$(mktemp "${TMPDIR:-/tmp}/state-snap.XXXXXX") || { ST_SNAP=""; return 3; }
+    cp -- "${f}" "${ST_SNAP}" || { st_drop; return 3; }
+    ST_TMP=$(mktemp "${f}.XXXXXX") || { ST_TMP=""; st_drop; return 3; }
+    if ! jq -e '.items | type == "object"' "${ST_SNAP}" >/dev/null 2>&1 \
+      || ! jq "$@" "${prog}" "${ST_SNAP}" >"${ST_TMP}" 2>/dev/null \
+      || ! jq -e '.items | type == "object"' "${ST_TMP}" >/dev/null 2>&1; then
+      st_drop
       return 1
     fi
-    if cmp -s -- "${snap}" "${f}"; then
-      rm -f "${snap}"
-      mv -f -- "${tmp}" "${f}" && return 0
-      rm -f "${tmp}"
+    if cmp -s -- "${ST_SNAP}" "${f}"; then
+      rm -f -- "${ST_SNAP}"
+      ST_SNAP=""
+      if mv -f -- "${ST_TMP}" "${f}"; then
+        ST_TMP=""
+        return 0
+      fi
+      st_drop
       return 1
     fi
-    rm -f "${snap}" "${tmp}"
+    st_drop
   done
   return 4
 }

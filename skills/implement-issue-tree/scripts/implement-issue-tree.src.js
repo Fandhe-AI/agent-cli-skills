@@ -3411,6 +3411,7 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
                 ? [
                     `5. 削除完了後、状態ファイルの .items["${issueNumber}"].worktree を "" に更新する。次のコマンドを一字一句そのまま実行する（ヒアドキュメントの行は文字列データ）:`,
                     stateCommand('merge', '', JSON.stringify([{ numbers: [issueNumber], patch: { worktree: '' } }]), 'STATE_EOF'),
+                    `   この手順 5 も同じ扱い: ${STATE_NOTE}手順 5 が失敗した場合は掃除全体の ok を false で返す。`,
                   ]
                 : [
                     `5. ${STATE_FILE} の .items["${issueNumber}"].worktree は更新しない`,
@@ -4530,6 +4531,8 @@ async function initAllPending(queueItems) {
     number: item.number,
     type: item.kind === 'verify-close' ? 'verify-close' : 'implement',
   }))
+  // open な項目が 0 件なら書くものが無い（state.sh init は空配列を invalid-input で拒否するため、呼ぶと偽の失敗になる）
+  if (initEntries.length === 0) return
   const initJson = JSON.stringify(initEntries)
   // 呼び出し元（実行キュー確定直後の起動シーケンス、runOne の try/catch 外）は本関数の
   // 呼び出しを try/catch していない。runStateAgent は例外を投げない契約のため、この呼び出しが

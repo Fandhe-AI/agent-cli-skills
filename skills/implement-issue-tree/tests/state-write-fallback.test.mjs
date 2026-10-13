@@ -209,6 +209,29 @@ test('(g2) 掃除プロンプトの手順 5（.worktree のクリア）は state
   assert.doesNotMatch(await run({ status: 'merged' }, { cleanupWorktree: '/tmp/wt-108', preserveWorktreeField: true }), /state\.sh/)
 })
 
+test('(g3) 書き込みプロンプトと掃除の手順 5 は STATE_RESULT の ok を返す・自分で書き直さない指示（STATE_NOTE）を含む', async () => {
+  const marker = '標準出力の最後の行 STATE_RESULT {json} の ok を ok として返す'
+  const { calls } = installAgentStub(() => ({ ok: true }))
+  assert.equal(await updateState(109, { status: 'merged' }, { cleanupWorktree: '/tmp/wt-109' }), true)
+  const merge = calls.find((c) => c.opts.label.startsWith('state:update:#109')).prompt
+  const cleanup = calls.find((c) => c.opts.label.startsWith('state:cleanup:#109')).prompt
+  for (const p of [merge, cleanup]) {
+    assert.ok(p.includes(marker), 'STATE_RESULT の判定指示')
+    assert.match(p, /jq \/ mv で状態ファイルを自分で書き直して代替しない/)
+  }
+  assert.match(cleanup, /手順 5 が失敗した場合は掃除全体の ok を false で返す/)
+})
+
+test('(h0) initAllPending は open が 0 件のとき state.sh init を呼ばない（空配列は invalid-input の偽失敗になる）', async () => {
+  const { calls, logs } = installAgentStub(() => ({ ok: true }))
+  await initAllPending([])
+  assert.equal(calls.length, 0)
+  assert.equal(logs.filter((l) => /一括初期化/.test(l)).length, 0)
+  await initAllPending([{ number: 3, kind: 'verify-close' }])
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].prompt, /init <<'STATE_EOF_/)
+})
+
 test('(h) initAllPending は haiku・sonnet とも失敗しても reject しない', async () => {
   installAgentStub(() => { throw new Error('boom') })
   await assert.doesNotReject(() => initAllPending([{ number: 1, kind: 'implement' }]))
