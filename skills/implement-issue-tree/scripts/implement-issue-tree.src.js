@@ -8605,8 +8605,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // 分岐 (b) の内容コンフリクト（PR #443 codex P1）、または分岐 (c) の hook 拒否（host
         // 固定 subject が commitlint 等に拒否された。PR #443 codex P0）: baseMergePrompt は検証
         // 権限（build/lint/test）も subject 決定権限も持たないため failed 終端せず fix 経路
-        // （push 前 base 最新化ゲート = runVerification=true。commitlint 対応 subject で解消・
-        // 検証・push できる）へ委譲する。conflict / hookRejected は自己申告だが誤申告の最悪は
+        // （fixPrompt の push 前 base 最新化ゲート = pushAfterFix: true の手順。commitlint 対応
+        // subject で解消・検証・push できる）へ委譲する。conflict / hookRejected は自己申告だが誤申告の最悪は
         // 有界（fixCount<=6）の fix 経路へ余分に回るだけで安全側。コミット未作成のため
         // baseMergeCount は消費せず noPushRounds も進めない（fix 側処理に委ねる）。
         const isConflict = b.conflict === true

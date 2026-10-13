@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,6 +43,19 @@ function result(r) {
   return v
 }
 const mutatingCalls = (sb) => sb.gitCalls().filter((c) => MUTATING.test(c))
+// URL に埋め込まれ得る認証情報の代用。どの出力にも現れてはならない
+const TOKEN = 'ghp_SECRETTOKEN0123456789abcdef'
+// タグにしか無いコミットを origin に置く（ブランチや base と同じ名前のタグ）。そのコミットの sha を返す
+function plantTag(sb, tag) {
+  git(sb.seed, 'checkout', '-q', '-b', 'tag-work', BASE)
+  writeFileSync(join(sb.seed, 'tag-only.txt'), 'tag\n')
+  git(sb.seed, 'add', 'tag-only.txt')
+  git(sb.seed, 'commit', '-q', '-m', 'tag only')
+  const sha = git(sb.seed, 'rev-parse', 'HEAD')
+  git(sb.seed, 'tag', tag)
+  git(sb.seed, 'push', '-q', 'origin', `refs/tags/${tag}`)
+  return sha
+}
 
 for (const bash of BASHES) {
   const tag = `[${bash}]`
@@ -80,10 +93,11 @@ for (const bash of BASHES) {
     const calls = sb.gitCalls()
     const at = (re) => calls.findIndex((c) => re.test(c))
     const order = [
-      at(/^remote get-url origin$/), at(new RegExp(`^fetch origin ${BRANCH}:refs/remotes/origin/${BRANCH}$`)), at(/^checkout --detach refs\/remotes\/origin\//),
-      at(new RegExp(`^fetch origin ${BASE}:refs/remotes/origin/${BASE}$`)), at(/^merge --no-ff --no-edit -F /), at(/^ls-remote origin /), at(/^push origin /),
+      at(/^remote get-url --all origin$/), at(new RegExp(`^fetch origin refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}$`)), at(/^checkout --detach refs\/remotes\/origin\//),
+      at(new RegExp(`^fetch origin refs/heads/${BASE}:refs/remotes/origin/${BASE}$`)), at(/^merge --no-ff --no-edit -F /), at(/^ls-remote origin /), at(/^push origin /),
     ]
     assert.ok(order.every((i) => i >= 0), JSON.stringify(order))
+    assert.ok(at(/^remote get-url --push --all origin$/) >= 0 && at(/^remote get-url --push --all origin$/) < order[1], 'push 先 URL の照合も fetch より前')
     assert.deepEqual([...order].sort((a, b) => a - b), order, '順序が崩れている')
     assert.equal(calls.filter((c) => /^ls-remote /.test(c)).length, 2, 'push の前後で 1 回ずつ')
     assert.ok(calls.findIndex((c, i) => /^ls-remote /.test(c) && i > order[6]) > order[6], '2 回目の ls-remote は push のあと')
@@ -215,7 +229,7 @@ for (const bash of BASHES) {
   t('routing: remote の host が github.com でない（同じ owner/repo の別ホスト・非 URL）は routingError。変更系の git を呼ばない', () => {
     for (const url of [
       `git@evil.example:${REPO}.git`, `https://evil.example/${REPO}`, `ssh://git@evil.example/${REPO}`,
-      `https://github.com.evil.example/${REPO}`, `https://token@github.com/${REPO}`, `/srv/git/${REPO}`, '',
+      `https://github.com.evil.example/${REPO}`, `/srv/git/${REPO}`, '',
     ]) {
       const sb = makeSandbox()
       const before = sb.remoteSha()
@@ -245,6 +259,227 @@ for (const bash of BASHES) {
     const v = result(run(bash, sb, { args: ['--pr', String(PR), '--branch', BRANCH, '--base', BASE, '--repo', ''] }))
     assert.deepEqual({ pushed: v.pushed, routingError: v.routingError }, { pushed: false, routingError: true })
     assert.deepEqual(mutatingCalls(sb), [])
+  })
+
+  // push 先だけが別の場所を指す設定の書き換え（隔離 worktree は本体の .git/config を共有するので、先行するエージェントが書ける）。
+  // fetch URL（get-url --all）だけを見るガードでは、これらの push が evil 側へ届く。evil は実在する bare で、ref が 1 つも
+  // 作られていないこと（= push が届いていない）まで確かめる
+  t('routing: push 先だけが別リポジトリを指す（pushurl・pushInsteadOf・url の追加）は routingError。変更系の git を呼ばず、evil 側に ref が作られない', () => {
+    const cases = {
+      'remote set-url --push': (sb, evil) => git(sb.wt, 'remote', 'set-url', '--push', 'origin', evil),
+      'url.<evil>.pushInsteadOf': (sb, evil) => git(sb.wt, 'config', `url.${evil}.pushInsteadOf`, sb.origin),
+      'remote set-url --add': (sb, evil) => git(sb.wt, 'remote', 'set-url', '--add', 'origin', evil),
+    }
+    for (const [name, apply] of Object.entries(cases)) {
+      const sb = makeSandbox()
+      const evil = sb.makeEvil() // sb.env() の前（= run の前）に呼ぶ。get-url の出力を見せ替える対応表を env に載せるため
+      apply(sb, evil)
+      const before = sb.remoteSha()
+      const r = run(bash, sb)
+      const v = result(r)
+      assert.deepEqual({ pushed: v.pushed, routingError: v.routingError }, { pushed: false, routingError: true }, name)
+      assert.deepEqual(mutatingCalls(sb), [], `${name}: 変更系の git を呼んでいない`)
+      assert.equal(git(evil, 'for-each-ref'), '', `${name}: evil 側に ref が 1 つも作られていない`)
+      assert.equal(sb.remoteSha(), before, name)
+      assert.doesNotMatch(r.stdout + r.stderr, new RegExp(evil.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')), `${name}: URL を出力しない`)
+    }
+  })
+
+  // 逆向き: fetch 元だけが別リポジトリ（push 先は正規）。取り込み元のすり替えで、evil 側のコミットが PR ブランチに入って push される
+  t('routing: fetch URL だけが別リポジトリを指す（push 先は正規）は routingError。evil 側の内容を取り込んで push しない', () => {
+    const sb = makeSandbox()
+    const evil = sb.makeEvil()
+    git(sb.seed, 'checkout', '-q', '-b', 'evil-work', BASE)
+    writeFileSync(join(sb.seed, 'evil.txt'), 'evil\n')
+    git(sb.seed, 'add', 'evil.txt')
+    git(sb.seed, 'commit', '-q', '-m', 'evil')
+    git(sb.seed, 'push', '-q', evil, `evil-work:refs/heads/${BRANCH}`, `evil-work:refs/heads/${BASE}`)
+    git(sb.wt, 'remote', 'set-url', 'origin', evil)
+    git(sb.wt, 'remote', 'set-url', '--push', 'origin', sb.origin)
+    const before = sb.remoteSha()
+    const v = result(run(bash, sb))
+    assert.deepEqual({ pushed: v.pushed, routingError: v.routingError }, { pushed: false, routingError: true })
+    assert.deepEqual(mutatingCalls(sb), [])
+    assert.equal(sb.remoteSha(), before)
+    assert.ok(!existsSync(join(sb.wt, 'evil.txt')))
+  })
+
+  t('routing: 実 config の書き換えが get-url に反映されることの対照（書き換えなしなら pushed: true・push 先は origin）', () => {
+    const sb = makeSandbox()
+    const evil = sb.makeEvil()
+    const v = result(run(bash, sb))
+    assert.equal(v.pushed, true)
+    assert.equal(git(evil, 'for-each-ref'), '')
+    const calls = sb.gitCalls()
+    assert.ok(calls.includes('remote get-url --all origin') && calls.includes('remote get-url --push --all origin'), '両方の照合を呼んでいる')
+  })
+
+  // fetch 元を修飾しないと、同名のタグが優先されてタグにしか無いコミットがブランチへ入る
+  t('タグ: PR ブランチと同名のタグがあっても refs/heads/ を取り込む（タグにしか無いコミットが push されない）', () => {
+    const sb = makeSandbox()
+    const tagSha = plantTag(sb, BRANCH)
+    const v = result(run(bash, sb))
+    assert.equal(v.pushed, true)
+    const hist = git(sb.origin, 'rev-list', `refs/heads/${BRANCH}`).split('\n')
+    assert.ok(!hist.includes(tagSha), 'タグ側のコミットがブランチ履歴に入っていない')
+    assert.ok(!existsSync(join(sb.wt, 'tag-only.txt')))
+    assert.equal(git(sb.origin, 'rev-parse', `refs/tags/${BRANCH}`), tagSha, 'タグ自体は動いていない')
+  })
+
+  t('タグ: base と同名のタグがあっても refs/heads/ の base を取り込む（タグ側のコミットが入らない）', () => {
+    const sb = makeSandbox()
+    const tagSha = plantTag(sb, BASE)
+    const baseTip = sb.remoteSha(BASE)
+    const v = result(run(bash, sb))
+    assert.equal(v.pushed, true)
+    const hist = git(sb.origin, 'rev-list', `refs/heads/${BRANCH}`).split('\n')
+    assert.ok(hist.includes(baseTip), 'base ブランチの先端が取り込まれている')
+    assert.ok(!hist.includes(tagSha), 'タグ側のコミットが入っていない')
+  })
+
+  t('追跡 ref: PR ブランチが force-push で書き換わっても、stale な追跡 ref に引きずられず書き換え後の head を取り込む', () => {
+    const sb = makeSandbox()
+    git(sb.seed, 'checkout', '-q', '-B', BRANCH, `origin/${BASE}~1`)
+    writeFileSync(join(sb.seed, 'rewritten.txt'), 'rewritten\n')
+    git(sb.seed, 'add', 'rewritten.txt')
+    git(sb.seed, 'commit', '-q', '-m', 'rewritten')
+    git(sb.seed, 'push', '-q', '--force', 'origin', BRANCH)
+    const rewritten = sb.remoteSha()
+    const v = result(run(bash, sb))
+    assert.equal(v.pushed, true)
+    const hist = git(sb.origin, 'rev-list', `refs/heads/${BRANCH}`).split('\n')
+    assert.ok(hist.includes(rewritten), '書き換え後の head が親に含まれている')
+  })
+
+  // ---- URL の解析（userinfo・ポート・.git・トークンの非出力） ----
+  t('URL: userinfo 付きの https（トークン入り）と標準ポート（https の 443・ssh の 22）は同じリポジトリとして受理する', () => {
+    for (const url of [
+      `https://x-access-token:${TOKEN}@github.com/${REPO}.git`, `https://${TOKEN}@github.com/${REPO}`, `https://github.com:443/${REPO}`,
+      `https://u:p@GitHub.com:443/${REPO}.git/`, `ssh://git@github.com:22/${REPO}.git`,
+    ]) {
+      const sb = makeSandbox()
+      const r = run(bash, sb, { env: { FAKE_REMOTE_URL: url } })
+      const v = result(r)
+      assert.equal(v.pushed, true, url)
+      assert.ok(!(r.stdout + r.stderr).includes(TOKEN), `${url}: トークンを出力しない`)
+    }
+  })
+
+  t('URL: userinfo の偽装（https://github.com@evil.example/…）・非標準ポート・.GIT・http・git・ssh の別ユーザー・後方一致は routingError。トークンを出力しない', () => {
+    for (const url of [
+      `https://github.com@evil.example/${REPO}`, `https://${TOKEN}@evil.example/${REPO}`, `https://x:${TOKEN}@github.com.evil.example/${REPO}`,
+      `https://github.com:8443/${REPO}`, `https://${TOKEN}@github.com:8443/${REPO}`, `ssh://git@github.com:2222/${REPO}`,
+      `https://github.com/${REPO}.GIT`, `git@github.com:${REPO}.GIT`,
+      `http://github.com/${REPO}`, `http://${TOKEN}@github.com/${REPO}`, `git://github.com/${REPO}`,
+      `ssh://evil@github.com/${REPO}`, `evil@github.com:${REPO}`, `${TOKEN}@github.com:${REPO}`, `GIT@github.com:${REPO}`,
+      `https://github.com/x/${REPO}`, `github.com/x/${REPO}`, `git@github.com:x/${REPO}`, `https://github.com/${REPO}\\evil`,
+      `https://github.com/${REPO}?x=${TOKEN}`, `https://github.com/${REPO}#${TOKEN}`,
+      // userinfo の中に区切り文字（バックスラッシュ・?・#）を置く偽装。WHATWG 系のパーサは \ ? # で authority を終えるので、本当の host は evil.example
+      `https://evil.example\\@github.com/${REPO}`, `https://evil.example?@github.com/${REPO}`, `https://evil.example#@github.com/${REPO}`,
+    ]) {
+      const sb = makeSandbox()
+      const before = sb.remoteSha()
+      const r = run(bash, sb, { env: { FAKE_REMOTE_URL: url } })
+      const v = result(r)
+      assert.deepEqual({ pushed: v.pushed, routingError: v.routingError }, { pushed: false, routingError: true }, url)
+      assert.deepEqual(mutatingCalls(sb), [], `${url}: 変更系の git を呼んでいない`)
+      assert.equal(sb.remoteSha(), before, url)
+      assert.ok(!(r.stdout + r.stderr).includes(TOKEN), `${url}: トークンを出力しない`)
+      assert.ok(!(r.stdout + r.stderr).includes('evil.example'), `${url}: URL を出力しない`)
+    }
+  })
+
+  t('URL: 空の --repo は URL が owner/repo を欠く（git@github.com: ・https://github.com/）場合も routingError。変更系の git を呼ばない', () => {
+    for (const url of ['git@github.com:', 'https://github.com/', `https://github.com/${REPO}`]) {
+      const sb = makeSandbox()
+      const v = result(run(bash, sb, { args: ['--pr', String(PR), '--branch', BRANCH, '--base', BASE, '--repo', ''], env: { FAKE_REMOTE_URL: url } }))
+      assert.deepEqual({ pushed: v.pushed, routingError: v.routingError }, { pushed: false, routingError: true }, url)
+      assert.match(v.summary, /期待リポジトリが未確定/, url)
+      assert.deepEqual(mutatingCalls(sb), [], url)
+    }
+  })
+
+  t('URL: git remote get-url が失敗する・空を返す（古い git など）は routingError。fetch URL・push URL のどちらでも変更系の git を呼ばない', () => {
+    for (const mode of ['fail-fetch', 'fail-push', 'empty-push']) {
+      const sb = makeSandbox()
+      const bin = join(sb.root, `getfail-${mode}`)
+      mkdirSync(bin, { recursive: true })
+      const cond = mode === 'fail-fetch' ? '[ "$3" = --all ]' : '[ "$3" = --push ]'
+      const act = mode === 'empty-push' ? 'exit 0' : 'exit 129'
+      writeFileSync(join(bin, 'git'), `#!/bin/sh\nif [ "$1" = remote ] && [ "$2" = get-url ] && ${cond}; then ${act}; fi\nexec "${sb.shimDir}/git" "$@"\n`)
+      chmodSync(join(bin, 'git'), 0o755)
+      const r = spawnSync(bash, [SCRIPT, ...ARGS], { cwd: sb.wt, encoding: 'utf8', env: { ...sb.env(), PATH: `${bin}:${sb.env().PATH}` } })
+      const v = result(r)
+      assert.deepEqual({ pushed: v.pushed, routingError: v.routingError }, { pushed: false, routingError: true }, mode)
+      assert.deepEqual(mutatingCalls(sb), [], mode)
+    }
+  })
+
+  // ---- gh pr view は期待リポジトリを -R で明示する ----
+  t('gh pr view は -R <期待リポジトリ> を付ける（GH_REPO や gh repo set-default で別リポジトリの PR を引かない）', () => {
+    const sb = makeSandbox()
+    const v = result(run(bash, sb, { env: { GH_REPO: 'other-org/other-repo' } }))
+    assert.equal(v.pushed, true)
+    const views = sb.stub.calls().filter((c) => /^pr view /.test(c))
+    assert.equal(views.length, 1)
+    const tok = views[0].split(' ')
+    assert.equal(tok[tok.indexOf('-R') + 1], REPO, views[0])
+    assert.ok(!views[0].includes('other-repo'))
+    // 呼び出し元が渡した表記（大文字小文字）をそのまま -R に渡す
+    const sb2 = makeSandbox()
+    result(run(bash, sb2, { args: ['--pr', String(PR), '--branch', BRANCH, '--base', BASE, '--repo', REPO.toUpperCase()] }))
+    const tok2 = sb2.stub.calls().find((c) => /^pr view /.test(c)).split(' ')
+    assert.equal(tok2[tok2.indexOf('-R') + 1], REPO.toUpperCase())
+  })
+
+  // ---- base の fetch 失敗は stale な追跡 ref があっても取り込まない ----
+  t('base の fetch 失敗: ローカルに stale な origin/<base> が残っていても、それを merge・push しない（summary は base fetch 失敗）', () => {
+    const sb = makeSandbox()
+    assert.ok(git(sb.wt, 'rev-parse', `refs/remotes/origin/${BASE}`), '前提: stale な追跡 ref がある')
+    git(sb.origin, 'update-ref', '-d', `refs/heads/${BASE}`)
+    const before = sb.remoteSha()
+    const v = result(run(bash, sb))
+    assert.deepEqual({ pushed: v.pushed, commitFailed: v.commitFailed }, { pushed: false, commitFailed: true })
+    assert.match(v.summary, /base fetch 失敗/)
+    assert.deepEqual(sb.gitCalls().filter((c) => /^(merge|push)( |$)/.test(c)), [])
+    assert.equal(sb.remoteSha(), before)
+  })
+
+  t('branch の fetch 失敗: ローカルに stale な origin/<branch> が残っていても、それを checkout・push しない（summary は branch fetch 失敗）', () => {
+    const sb = makeSandbox()
+    git(sb.origin, 'update-ref', '-d', `refs/heads/${BRANCH}`)
+    const v = result(run(bash, sb))
+    assert.match(v.summary, /branch fetch 失敗/)
+    assert.deepEqual(sb.gitCalls().filter((c) => /^(checkout|merge|push)( |$)/.test(c)), [])
+  })
+
+  // ---- サブモジュール ----
+  t('サブモジュールの中身が dirty（未コミットの変更）なら clean でないとして commitFailed。checkout も merge も push もしない', () => {
+    const sb = makeSandbox({ submodule: true })
+    sb.dirtySubmodule()
+    const before = sb.remoteSha()
+    const v = result(run(bash, sb))
+    assert.deepEqual({ pushed: v.pushed, commitFailed: v.commitFailed }, { pushed: false, commitFailed: true })
+    assert.match(v.summary, /clean でない/)
+    assert.deepEqual(sb.gitCalls().filter((c) => /^(checkout|merge|push)( |$)/.test(c)), [])
+    assert.equal(sb.remoteSha(), before)
+  })
+
+  t('サブモジュールが clean なら通常どおり取り込んで push する（対照）', () => {
+    const sb = makeSandbox({ submodule: true })
+    assert.equal(result(run(bash, sb)).pushed, true)
+  })
+
+  t('サブモジュールのポインタ（gitlink）のコンフリクトは自動解消せず conflict + commitFailed。abort して push しない', () => {
+    const sb = makeSandbox({ gitlinkConflict: true })
+    const before = sb.remoteSha()
+    const pre = git(sb.wt, 'rev-parse', `refs/remotes/origin/${BRANCH}`)
+    const v = result(run(bash, sb))
+    assert.deepEqual({ pushed: v.pushed, commitFailed: v.commitFailed, conflict: v.conflict }, { pushed: false, commitFailed: true, conflict: true })
+    assert.equal(sb.remoteSha(), before)
+    assert.equal(sb.headSha(), pre, 'abort して取り込み前に戻る')
+    assert.equal(existsSync(join(sb.wt, '.git', 'MERGE_HEAD')), false)
+    assert.deepEqual(sb.gitCalls().filter((c) => /^push( |$)/.test(c)), [])
   })
 
   t('routing: PR の headRefName が違う・PR 番号が違う・PR を解決できない（gh 取得失敗）は routingError。変更系の git を呼ばない', () => {
@@ -297,10 +532,28 @@ for (const bash of BASHES) {
     const bad = [
       ['--pr', String(PR), '--branch', BASE, '--base', BASE, '--repo', REPO],
       ['--pr', '0', '--branch', BRANCH, '--base', BASE, '--repo', REPO],
+      ['--pr', '012', '--branch', BRANCH, '--base', BASE, '--repo', REPO],
+      ['--pr', '00', '--branch', BRANCH, '--base', BASE, '--repo', REPO],
       ['--pr', '1x', '--branch', BRANCH, '--base', BASE, '--repo', REPO],
       ['--pr', String(PR), '--branch', 'a;touch pwned', '--base', BASE, '--repo', REPO],
       ['--pr', String(PR), '--branch', '$(touch pwned)', '--base', BASE, '--repo', REPO],
       ['--pr', String(PR), '--branch', '-x', '--base', BASE, '--repo', REPO],
+      ['--pr', String(PR), '--branch', 'refs/heads/feat/603-x', '--base', BASE, '--repo', REPO],
+      ['--pr', String(PR), '--branch', BRANCH, '--base', 'refs/heads/feat/603-x', '--repo', REPO],
+      ['--pr', String(PR), '--branch', 'refs/tags/x', '--base', BASE, '--repo', REPO],
+      ['--pr', String(PR), '--branch', BRANCH, '--base', 'refs/tags/x', '--repo', REPO],
+      ['--pr', String(PR), '--branch', 'HEAD', '--base', BASE, '--repo', REPO],
+      ['--pr', String(PR), '--branch', BRANCH, '--base', 'HEAD', '--repo', REPO],
+      ['--pr', String(PR), '--branch', 'main/', '--base', BASE, '--repo', REPO],
+      ['--pr', String(PR), '--branch', BRANCH, '--base', 'main/', '--repo', REPO],
+      ['--pr', String(PR), '--branch', 'main.lock', '--base', BASE, '--repo', REPO],
+      ['--pr', String(PR), '--branch', BRANCH, '--base', 'main.lock', '--repo', REPO],
+      ['--pr', String(PR), '--branch', 'a//b', '--base', BASE, '--repo', REPO],
+      ['--pr', String(PR), '--branch', BRANCH, '--base', 'a//b', '--repo', REPO],
+      ['--pr', String(PR), '--branch', 'a/.b', '--base', BASE, '--repo', REPO],
+      ['--pr', String(PR), '--branch', BRANCH, '--base', 'a/.b', '--repo', REPO],
+      ['--pr', String(PR), '--branch', 'feat/x.lock', '--base', BASE, '--repo', REPO],
+      ['--pr', String(PR), '--branch', BRANCH, '--base', 'feat/x.lock', '--repo', REPO],
       ['--pr', String(PR), '--branch', 'a..b', '--base', BASE, '--repo', REPO],
       ['--pr', String(PR), '--branch', BRANCH, '--base', 'a b', '--repo', REPO],
       ['--pr', String(PR), '--branch', BRANCH, '--base', BASE, '--repo', 'no-slash'],

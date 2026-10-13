@@ -7,10 +7,11 @@
 # 役割: baseMergePrompt（Issue #441）に文章で書いていた手順 0〜3 を、判断を挟まない決定的なコマンド列として持つ
 #       （Issue #603 第 3 弾）。レビュー指摘の修正・スレッドの resolve・PR 本文編集・マージ・クローズは行わない。
 #       担当するのは次だけである。
-#         0. worktree routing ガード: origin の host が github.com、owner/repo が --repo と完全一致（大文字小文字を
-#            区別しない）し、gh pr view の number と headRefName が --pr / --branch と一致すること。1 つでも外れたら
-#            fetch・checkout・merge・push を一切実行しない
-#         1. 対象ブランチの fetch → detached checkout → HEAD と origin のブランチの sha 照合
+#         0. worktree routing ガード: origin の fetch URL と push 先 URL の『全行』（git remote get-url --all / --push
+#            --all）が host github.com・owner/repo が --repo と完全一致（大文字小文字を区別しない）し、gh pr view -R の
+#            number と headRefName が --pr / --branch と一致すること。1 つでも外れたら fetch・checkout・merge・push を
+#            一切実行しない（git 2.7 以降。取得できない git では routingError に倒れる）
+#         1. 対象ブランチの fetch（refs/heads/ 修飾）→ detached checkout → HEAD と origin のブランチの sha 照合
 #         2. base の fetch → 埋め込み subject でマージ。コンフリクトは解消せず abort して報告する
 #         3. push 前後のリモート head の突き合わせ（lib/push-verify.sh。pushed になるのは二条件を満たしたときだけ）
 # 入力: 引数は検証済みの値だけを渡す。--branch と --base は同じ値にできない（base 自身への push の防止）。--repo は
@@ -41,6 +42,7 @@ export GIT_TERMINAL_PROMPT
 GIT_MERGE_AUTOEDIT=no
 export GIT_MERGE_AUTOEDIT
 
+command -v git >/dev/null 2>&1 || { echo "base-merge: git が無い" >&2; exit 3; }
 script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 3
 # shellcheck source=lib/push-verify.sh
 . "${script_dir}/lib/push-verify.sh" || exit 3
@@ -58,11 +60,12 @@ usage() {
   exit 2
 }
 
+# 正の整数（先頭ゼロは拒否: 012 を 12 と読み替えない。gh の応答との文字列比較が偶然止めるのに頼らない）
 is_uint() {
   case "$1" in
-    '' | *[!0-9]*) return 1 ;;
+    '' | *[!0-9]* | 0*) return 1 ;;
   esac
-  [ "${#1}" -le 9 ] && [ "$1" -ge 1 ]
+  [ "${#1}" -le 9 ]
 }
 # OWNER/REPO の形式（ホストの REPO_SLUG_RE と同じ厳格さ）。owner は英数字とハイフン・先頭末尾ハイフン不可・1〜39 文字、
 # repo は先頭がハイフン以外の英数字 . _ で . と .. だけは不可・1〜100 文字
@@ -113,7 +116,6 @@ pv_valid_branch "${base}" || usage "--base の形式が不正"
 [ "${branch}" != "${base}" ] || usage "--branch と --base は同じ値にできない"
 [ "${repo_given}" -eq 1 ] || usage "--repo が無い"
 [ -z "${repo}" ] || valid_repo "${repo}" || usage "--repo は OWNER/REPO 形式で指定する"
-command -v git >/dev/null 2>&1 || { echo "base-merge: git が無い" >&2; exit 3; }
 
 msgfile=""
 # shellcheck disable=SC2329  # trap 経由で呼ばれる
@@ -149,26 +151,87 @@ fail_commit() {
 }
 
 # ---- 0. worktree routing ガード ----
+# remote の URL を照合する。fetch URL（`git remote get-url --all`）と push 先 URL（`--push --all`）の『全行』が、許可ホストと
+# 期待 owner/repo に一致しなければならない。先頭 1 件だけを見ると、pushurl・pushInsteadOf・複数 url の追加で push だけが別の
+# リポジトリへ届く（隔離 worktree は本体の .git/config を共有するので、先行するエージェントが書ける位置にある）。
+# 許す形: https://[userinfo@]github.com[:443]/<owner>/<repo>[.git]、ssh://git@github.com[:22]/<owner>/<repo>[.git]、
+# git@github.com:<owner>/<repo>[.git]。userinfo は authority の最後の @ までを捨てて host を取り出す
+# （https://github.com@evil.example/… の host は evil.example）。URL はトークンを含み得るので、どの出力にも出さない。
+# `.git` の除去は小文字の `.git` だけ（`.GIT` は別名になり得るので受理しない）。owner/repo の比較は大文字小文字を区別しない
+url_allowed() {
+  local u=$1 want_slug=$2 scheme rest hostport host port path
+  case "${u}" in
+    '' | *[!A-Za-z0-9._~:/@%+-]*) return 1 ;;
+  esac
+  u=${u%/}
+  u=${u%.git}
+  case "${u}" in
+    ssh://git@*)
+      rest=${u#ssh://git@}
+      case "${rest}" in */*) ;; *) return 1 ;; esac
+      hostport=${rest%%/*}
+      path=${rest#*/}
+      case "${hostport}" in *@*) return 1 ;; esac
+      scheme=ssh
+      ;;
+    git@*:*)
+      rest=${u#git@}
+      hostport=${rest%%:*}
+      path=${rest#*:}
+      scheme=scp
+      ;;
+    https://*)
+      rest=${u#https://}
+      case "${rest}" in */*) ;; *) return 1 ;; esac
+      hostport=${rest%%/*}
+      hostport=${hostport##*@}
+      path=${rest#*/}
+      scheme=https
+      ;;
+    *) return 1 ;;
+  esac
+  case "${hostport}" in
+    *:*) host=${hostport%%:*}; port=${hostport#*:} ;;
+    *) host=${hostport}; port="" ;;
+  esac
+  # 標準ポートだけ許す（https の 443、ssh:// の 22）。scp 形式にポートは無い
+  case "${scheme}:${port}" in
+    ssh: | ssh:22 | https: | https:443 | scp:) ;;
+    *) return 1 ;;
+  esac
+  host=$(lower "${host}")
+  path=$(lower "${path}")
+  [ "${host}" = "${ALLOWED_REMOTE_HOST}" ] && [ -n "${path}" ] && [ "${path}" = "${want_slug}" ]
+}
+# $1 = ラベル（fetch / push）、残り = git remote get-url への追加オプション。0 = 全行が許可、1 = 1 行でも外れた、2 = 取得できない
+check_remote_urls() {
+  local label=$1 out line n=0
+  shift
+  out=$(git remote get-url "$@" origin 2>/dev/null) || return 2
+  [ -n "${out}" ] || return 2
+  while IFS= read -r line; do
+    n=$((n + 1))
+    url_allowed "${line}" "${want}" || { echo "base-merge: ${label} URL の ${n} 行目が許可ホスト・期待リポジトリと一致しない" >&2; return 1; }
+  done <<EOF
+${out}
+EOF
+  return 0
+}
+
 [ -n "${repo}" ] || fail_routing "期待リポジトリが空" "期待リポジトリが未確定（--repo が空）"
 want=$(lower "${repo}")
-url=$(git remote get-url origin 2>/dev/null) || fail_routing "git remote get-url origin が失敗" "origin の URL を取得できない"
-url=${url%/}
-url=${url%.git}
-case "${url}" in
-  ssh://git@*) rest=${url#ssh://git@}; got_host=${rest%%/*}; got_path=${rest#*/} ;;
-  git@*:*) rest=${url#git@}; got_host=${rest%%:*}; got_path=${rest#*:} ;;
-  https://*) rest=${url#https://}; got_host=${rest%%/*}; got_path=${rest#*/} ;;
-  *) got_host=""; got_path="" ;;
-esac
-got_host=$(lower "${got_host}")
-got_path=$(lower "${got_path}")
-if [ "${got_host}" != "${ALLOWED_REMOTE_HOST}" ]; then
-  fail_routing "remote の host=${got_host:-（解釈できない形式）}" "remote の host が許可ホストと不一致"
-fi
-if [ "${got_path}" != "${want}" ]; then
-  fail_routing "remote の owner/repo=${got_path} が期待 ${want} と不一致" "remote の owner/repo が期待リポジトリと不一致"
-fi
-pr_row=$(gh pr view "${pr}" --json number,headRefName --jq '[(.number | tostring), .headRefName] | join(" ")' 2>/dev/null) \
+for spec in "fetch:--all" "push:--push --all"; do
+  rc=0
+  # shellcheck disable=SC2086
+  check_remote_urls "${spec%%:*}" ${spec#*:} || rc=$?
+  case "${rc}" in
+    0) ;;
+    1) fail_routing "remote の ${spec%%:*} URL が不一致" "remote の URL（fetch / push）が許可ホスト・期待リポジトリと不一致" ;;
+    *) fail_routing "git remote get-url（${spec%%:*}）が失敗または空" "origin の URL（fetch / push）を取得できない" ;;
+  esac
+done
+# -R で期待リポジトリを明示する（GH_REPO や gh repo set-default で別リポジトリの PR を引かない）
+pr_row=$(gh pr view "${pr}" -R "${repo}" --json number,headRefName --jq '[(.number | tostring), .headRefName] | join(" ")' 2>/dev/null) \
   || fail_routing "gh pr view が失敗" "PR を解決できない（gh 取得失敗）"
 if [ "${pr_row}" != "${pr} ${branch}" ]; then
   fail_routing "PR の number / headRefName が対象と不一致" "PR の number または headRefName が対象と不一致"
@@ -178,7 +241,10 @@ fi
 # 作業ツリーに未コミットの変更があるとマージコミットへ混入し得る。隔離 worktree は clean のはず（clean でなければ中止）
 dirty=$(git status --porcelain --untracked-files=no 2>/dev/null) || fail_commit "git status が失敗" "worktree の状態を確認できない"
 [ -z "${dirty}" ] || fail_commit "作業ツリーに未コミットの変更がある" "worktree が clean でない"
-git fetch origin "${branch}:refs/remotes/origin/${branch}" >/dev/null || fail_commit "branch の fetch が失敗" "branch fetch 失敗"
+# fetch 元は refs/heads/ で修飾する（修飾しないと同名のタグが優先され、タグにしか無いコミットがブランチへ入る）。
+# 失敗した fetch が古い追跡 ref を残して、stale な内容を merge しないよう、先に追跡 ref を消す
+git update-ref -d "refs/remotes/origin/${branch}" >/dev/null 2>&1 || true
+git fetch origin "refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null || fail_commit "branch の fetch が失敗" "branch fetch 失敗"
 git checkout --detach "refs/remotes/origin/${branch}" >/dev/null 2>&1 || fail_commit "branch の checkout が失敗" "branch checkout 失敗"
 head_now=$(git rev-parse HEAD 2>/dev/null) || head_now=""
 remote_tip=$(git rev-parse "refs/remotes/origin/${branch}" 2>/dev/null) || remote_tip=""
@@ -187,7 +253,8 @@ if ! pv_is_sha "${head_now}" || [ "${head_now}" != "${remote_tip}" ]; then
 fi
 
 # ---- 2. base の取得とマージ ----
-git fetch origin "${base}:refs/remotes/origin/${base}" >/dev/null || fail_commit "base の fetch が失敗" "base fetch 失敗"
+git update-ref -d "refs/remotes/origin/${base}" >/dev/null 2>&1 || true
+git fetch origin "refs/heads/${base}:refs/remotes/origin/${base}" >/dev/null || fail_commit "base の fetch が失敗" "base fetch 失敗"
 base_ref="refs/remotes/origin/${base}"
 # ブランチの先頭が base に含まれている（独自のコミットが無い）なら、マージは fast-forward になり base の先端をそのまま
 # ブランチへ push してしまう。取り込む差分が無いので何もしない

@@ -34,12 +34,15 @@ PUSH_VERIFY_LIB_LOADED=1
 PV_SHA=""
 PV_OUTCOME=""
 
-# ブランチ名の形式（ホストの isValidBranchName と同じ。先頭は英数字、使える文字は英数字・. _ / -、".." を含まない）。
+# ブランチ名の形式。ホストの isValidBranchName（先頭は英数字、使える文字は英数字・. _ / -、".." を含まない）より厳しくてよい:
+# `refs/` 始まりは拒否する（refs/heads/x が通ると push 先が refs/heads/refs/heads/x になる）。HEAD は拒否する（ref 名として曖昧）。
+# 最後に git の ref 名規則（末尾の / や .lock・// など）を check-ref-format で確かめる。
 pv_valid_branch() {
   case "$1" in
-    '' | *..* | [!A-Za-z0-9]* | *[!A-Za-z0-9._/-]*) return 1 ;;
+    '' | *..* | [!A-Za-z0-9]* | *[!A-Za-z0-9._/-]* | refs/* | HEAD) return 1 ;;
   esac
-  [ "${#1}" -le 200 ]
+  [ "${#1}" -le 200 ] || return 1
+  git check-ref-format "refs/heads/$1" >/dev/null 2>&1
 }
 
 # 40 桁小文字 16 進か。

@@ -4,8 +4,11 @@
 // 構成: bare の origin（一時ディレクトリ）と、それを clone した作業用 worktree（スクリプトの cwd）を作る。
 //   - main: 初期コミット a.txt。ブランチ feat/603-x: main から分岐して feature.txt を追加。
 //   - main はその後 base.txt（または conflict: true なら a.txt の同じ行）を進める。
-// 偽の `git`（シム）: `git remote get-url origin` だけを環境変数 FAKE_REMOTE_URL の値で返す（実 remote はローカルの
-//   パスだが、スクリプトの routing ガードは github.com の URL を要求するため）。ls-remote は呼び出し回数ごとに
+// 偽の `git`（シム）: `git remote get-url …`（--push / --all を含む）は実 git に問い合わせた結果（実 config を反映する）を
+//   返したうえで、各行を置き換える。origin 自身のパス（SHIM_ORIGIN_PATH）は環境変数 FAKE_REMOTE_URL の値へ、その他のパスは
+//   SHIM_URL_MAP（「実パス|見せる URL」を 1 行ずつ）に載っていればその URL へ置き換える（実 remote はローカルのパスだが、
+//   スクリプトの routing ガードは github.com の URL を要求するため。pushurl・pushInsteadOf・url の追加といった実 config の
+//   書き換えは、そのまま get-url の出力に現れる）。ls-remote は呼び出し回数ごとに
 //   FAKE_LS_<n> = fail（失敗）/ head（今の HEAD をリモート head として返す）で差し替えられる。それ以外はすべて実 git へ
 //   exec する。すべての呼び出しを SHIM_LOG に 1 行ずつ記録するので、「routing 不一致のあとに fetch / merge / push を
 //   一切呼んでいない」ことを呼び出し履歴で確かめられる。
@@ -30,7 +33,20 @@ export const MERGE_SUBJECT = 'chore: base ブランチの変更を取り込む'
 const SHIM = `#!/bin/sh
 echo "$*" >> "\${SHIM_LOG:?}"
 if [ "$1" = remote ] && [ "$2" = get-url ]; then
-  printf '%s\\n' "\${FAKE_REMOTE_URL:?}"
+  out=$("\${REAL_GIT:?}" "$@") || exit $?
+  printf '%s\\n' "$out" | while IFS= read -r l; do
+    if [ "$l" = "\${SHIM_ORIGIN_PATH:-}" ]; then
+      printf '%s\\n' "\${FAKE_REMOTE_URL-$l}"
+      continue
+    fi
+    shown=$l
+    while IFS='|' read -r a b; do
+      if [ -n "$a" ] && [ "$a" = "$l" ]; then shown=$b; break; fi
+    done <<EOM
+\${SHIM_URL_MAP:-}
+EOM
+    printf '%s\\n' "$shown"
+  done
   exit 0
 fi
 if [ "$1" = ls-remote ]; then
@@ -77,8 +93,10 @@ function commit(dir, file, content, message) {
 //   baseAdvanced      main がブランチ分岐後に進んでいる（既定 true）。false なら main は分岐点のまま
 //   branchHasBase     ブランチが main の先頭をすでに取り込んでいる（Already up to date になる）
 //   branchBehindOnly  ブランチに独自コミットが無く、main だけが進んでいる（ブランチの先頭が base に含まれる）
+//   gitlinkConflict   サブモジュールのポインタ（gitlink）を main とブランチが別のコミットへ変える（マージでコンフリクト）
+//   submodule         実体のあるサブモジュール sub を持つ。wt は初期化済みで、dirtySubmodule() で未コミットの変更を作れる
 export function makeSandbox(opts = {}) {
-  const { conflict = false, baseAdvanced = true, branchHasBase = false, branchBehindOnly = false } = opts
+  const { conflict = false, baseAdvanced = true, branchHasBase = false, branchBehindOnly = false, gitlinkConflict = false, submodule = false } = opts
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'iit-base-merge-')))
   const origin = join(root, 'origin.git')
   const seed = join(root, 'seed')
@@ -91,14 +109,36 @@ export function makeSandbox(opts = {}) {
   commit(seed, 'a.txt', 'line1\nline2\n', 'init')
   git(seed, 'remote', 'add', 'origin', origin)
   git(seed, 'push', '-q', 'origin', BASE)
+  const gl = (n) => String(n).repeat(40)
+  const setGitlink = (n, msg) => {
+    git(seed, 'update-index', '--add', '--cacheinfo', `160000,${gl(n)},sub`)
+    git(seed, 'commit', '-q', '-m', msg)
+  }
+  if (gitlinkConflict) {
+    setGitlink('1', 'add sub')
+    git(seed, 'push', '-q', 'origin', BASE)
+  }
+  if (submodule) {
+    const subrepo = join(root, 'subrepo')
+    mkdirSync(subrepo, { recursive: true })
+    git(subrepo, 'init', '-q', '-b', 'main')
+    commit(subrepo, 's.txt', 's\n', 'sub init')
+    git(seed, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', subrepo, 'sub')
+    git(seed, 'commit', '-q', '-m', 'add submodule')
+    git(seed, 'push', '-q', 'origin', BASE)
+  }
   git(seed, 'checkout', '-q', '-b', BRANCH)
   if (!branchBehindOnly) {
     if (conflict) commit(seed, 'a.txt', 'line1\nbranch side\n', 'branch change')
     else commit(seed, 'feature.txt', 'feature\n', 'feature')
   }
+  if (gitlinkConflict) setGitlink('2', 'branch sub')
   git(seed, 'push', '-q', 'origin', BRANCH)
   git(seed, 'checkout', '-q', BASE)
-  if (baseAdvanced) {
+  if (gitlinkConflict) {
+    setGitlink('3', 'base sub')
+    git(seed, 'push', '-q', 'origin', BASE)
+  } else if (baseAdvanced) {
     if (conflict) commit(seed, 'a.txt', 'line1\nbase side\n', 'base change')
     else commit(seed, 'base.txt', 'base\n', 'base advance')
     git(seed, 'push', '-q', 'origin', BASE)
@@ -111,12 +151,25 @@ export function makeSandbox(opts = {}) {
   git(root, 'clone', '-q', origin, wt)
   git(wt, 'config', 'user.name', 'test')
   git(wt, 'config', 'user.email', 'test@example.com')
+  if (submodule) git(wt, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '-q')
   writeFileSync(join(shimDir, 'git'), SHIM)
   chmodSync(join(shimDir, 'git'), 0o755)
   writeFileSync(join(shimDir, 'calls.log'), '')
   const stub = createObserveStub({ prview: { out: JSON.stringify({ number: PR, headRefName: BRANCH }) } })
+  const urlMap = []
   return {
-    root, origin, seed, wt, shimDir, tmp, stub,
+    root, origin, seed, wt, shimDir, tmp, stub, urlMap,
+    // 別リポジトリを模す空の bare を作り、get-url で見せる URL（既定は owner が違う github.com の URL）を登録する
+    makeEvil(shownUrl = 'https://github.com/evil-org/evil-repo') {
+      const evil = join(root, 'evil.git')
+      mkdirSync(evil, { recursive: true })
+      git(evil, 'init', '-q', '--bare', '-b', BASE)
+      urlMap.push(`${evil}|${shownUrl}`)
+      return evil
+    },
+    dirtySubmodule() {
+      writeFileSync(join(wt, 'sub', 's.txt'), 'dirty\n')
+    },
     remoteSha: (b = BRANCH) => git(origin, 'rev-parse', `refs/heads/${b}`),
     headSha: () => git(wt, 'rev-parse', 'HEAD'),
     gitCalls: () => readFileSync(join(shimDir, 'calls.log'), 'utf8').split('\n').filter(Boolean),
@@ -134,6 +187,8 @@ export function makeSandbox(opts = {}) {
         GH_STUB_DIR: stub.dir,
         SHIM_LOG: join(shimDir, 'calls.log'),
         SHIM_DIR: shimDir,
+        SHIM_ORIGIN_PATH: origin,
+        SHIM_URL_MAP: urlMap.join('\n'),
         REAL_GIT,
         FAKE_REMOTE_URL: `https://github.com/${REPO}.git`,
         FAKE_LS_BRANCH: BRANCH,

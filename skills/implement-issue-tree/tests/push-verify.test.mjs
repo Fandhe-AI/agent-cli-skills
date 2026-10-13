@@ -109,12 +109,31 @@ for (const bash of BASHES) {
     const sb = makeSandbox()
     prepare(sb)
     const before = sb.remoteSha()
-    for (const bad of ['', '-x', 'a..b', 'a b', 'a;touch pwned', '$(touch pwned)', 'a:b', '+feat']) {
+    for (const bad of ['', '-x', 'a..b', 'a b', 'a;touch pwned', '$(touch pwned)', 'a:b', '+feat', 'refs/heads/x', 'refs/tags/x', 'HEAD', 'main/', 'main.lock', 'a//b', 'a/.b', 'feat/x.lock']) {
       const r = call(bash, sb, `pv_push_verified "$1"; printf '%s|%s' "$?" "$PV_OUTCOME"`.replace('"$1"', `'${bad}'`))
       assert.equal(r.stdout, '1|', JSON.stringify(bad))
     }
     assert.equal(sb.remoteSha(), before)
     assert.deepEqual(sb.gitCalls().filter((c) => /^push( |$)/.test(c)), [])
+  })
+
+  t('pv_valid_branch: 通常のブランチ名（feat/603-x・release/1.0・main）は受理する。HEAD を含む名前（HEAD2・head）は拒否しない', () => {
+    const sb = makeSandbox()
+    for (const ok of ['feat/603-x', 'release/1.0', 'main', 'HEAD2', 'head', 'a.b_c-d']) {
+      const r = call(bash, sb, `pv_valid_branch '${ok}'; printf '%s' "$?"`)
+      assert.equal(r.stdout, '0', ok)
+    }
+  })
+
+  t('同名のタグがあっても push は refs/heads/<branch> へ届き、タグは動かない', () => {
+    const sb = makeSandbox()
+    prepare(sb)
+    git(sb.seed, 'tag', BRANCH, `origin/${BRANCH}`)
+    git(sb.seed, 'push', '-q', 'origin', `refs/tags/${BRANCH}`)
+    const tagSha = git(sb.origin, 'rev-parse', `refs/tags/${BRANCH}`)
+    assert.deepEqual(outcomeOf(bash, sb), { rc: 0, outcome: 'pushed' })
+    assert.equal(sb.remoteSha(), sb.headSha())
+    assert.equal(git(sb.origin, 'rev-parse', `refs/tags/${BRANCH}`), tagSha)
   })
 
   t('pv_remote_sha: 完全一致の ref だけを採る（末尾一致する別の ref・ブランチ無しは空）', () => {
