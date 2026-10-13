@@ -34,7 +34,7 @@ const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-observe-host-')))
 const slicePath = join(sliceDir, 'defs.mjs')
 const SLICE_EXPORTS = [
   'applyChecksObservation', 'observeInputText', 'observeCommand', 'verifySignedOutput', 'monitorPrompt', 'agentRetryOnce',
-  'sha256Hex', 'canonicalJson', 'ensureBoundaryNonceSeed', 'boundaryNonce', 'OBSERVE_MAX_ATTEMPTS', 'MERGE_SCHEMA', 'SCRIPT_SHA256',
+  'sha256Hex', 'canonicalJson', 'ensureBoundaryNonceSeed', 'boundaryNonce', 'OBSERVE_MAX_ATTEMPTS', 'OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS', 'MERGE_SCHEMA', 'SCRIPT_SHA256',
 ]
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 const m = await import(pathToFileURL(slicePath).href)
@@ -315,6 +315,42 @@ test('OBSERVE_MAX_ATTEMPTS（プロンプトの「最大 N 回」）は observe-
   // 全体の待機はおよそ 10 分（現行の「最大 10 分」と同等）
   const total = m.OBSERVE_MAX_ATTEMPTS * (polls - 1) * sleep
   assert.ok(total >= 480 && total <= 660, `合計の待機 ${total} 秒が 10 分前後`)
+})
+
+test('applyChecksObservation: 手順 3 の --until settled の封筒は入力束縛（until）が別なので checksTotal に採用しない（転記しても採用されない）', () => {
+  const settledInput = m.sha256Hex(m.observeInputText({ mode: 'checks', pr: PR, until: 'settled' }))
+  assert.notEqual(settledInput, inputSha)
+  const settled = makeEnvelope(NONCE + 'w', goodPayload({ total: 5, attempt: 3, maxAttempts: 30, outcome: 'met', inputSha256: settledInput, passed: 5, pending: 0, failed: 0 }))
+  const r = apply({ ...base, checksTotal: 5, checksObservation: settled })
+  assert.equal(r.reason, 'input')
+  assert.ok(!('checksTotal' in r.result), '採用せず省略する（timeout は 0 件再判定を受けずに次ラウンドへ回る = fail-closed）')
+})
+
+// 第 8 弾: 手順 3 の完了待ち（checks --until settled）の上限は gh pr checks --watch の最長（およそ 40 分）と同じ。回数はスクリプトが
+// --attempt で強制し、ホストの定数（プロンプトの「最大 N 回」）と同じ値であること、1 起動の所要が壁時計上限に収まること、
+// 合計がおよそ 40 分になることを固定する（プロンプトが勝手に増やせない = スクリプトの既定が権威）
+test('OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS（手順 3 の「最大 N 回」）は observe-pr.sh の settled 既定値と同じで、合計はおよそ 40 分', () => {
+  const sh = readFileSync(OBSERVE_SH, 'utf8')
+  const all = (name) => [...sh.matchAll(new RegExp(`env_int "\\$\\{${name}:-\\}" (\\d+) (\\d+) (\\d+)`, 'g'))].map((x) => Number(x[1]))
+  // 先頭が既定、2 つ目が push、3 つ目が checks --until settled
+  assert.equal(all('OBSERVE_PR_MAX_ATTEMPTS')[2], m.OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS, 'スクリプトの既定値とホストの定数がずれている')
+  assert.equal(m.OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS, 30)
+  const polls = all('OBSERVE_PR_POLLS')[2]
+  const sleep = all('OBSERVE_PR_SLEEP_SEC')[2]
+  const window = all('OBSERVE_PR_WALL_SEC')[0]
+  assert.ok((polls - 1) * sleep < window, `内部 sleep の合計 ${(polls - 1) * sleep} 秒が壁時計上限 ${window} 秒未満`)
+  // 1 起動の所要はおよそ (観測回数 - 1) × 間隔 + 観測自体（gh 3 回 × 数秒）。名目 83 秒前後。合計は 40 分（2400 秒）を超えない最大と、
+  // 壁時計上限いっぱい使った場合の上限の間に収まる
+  const nominal = (polls - 1) * sleep + polls * 2
+  const totalNominal = m.OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS * nominal
+  assert.ok(totalNominal >= 2300 && totalNominal <= 2700, `名目の合計 ${totalNominal} 秒が 40 分前後（2400 秒）`)
+  assert.ok(m.OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS * window >= 2400, '壁時計いっぱい使った場合は 40 分以上待てる')
+  // 現行の --watch の最長（Bash の timeout 600000 × 再実行 4 回 = およそ 40 分）を上回らない: 名目の合計が 45 分を超えない
+  assert.ok(totalNominal <= 45 * 60)
+  // プロンプトは同じ回数を書く
+  const p = m.monitorPrompt(item, impl, [], true, true, false, '', NONCE)
+  assert.ok(p.includes(`最大 ${m.OBSERVE_CHECKS_SETTLE_MAX_ATTEMPTS} 回 = およそ 40 分`))
+  // 範囲外（上限超過）の --attempt はスクリプトが拒否する（プロンプトが回数を増やしても通らない）: 実行の検査は observe-pr-checks-settled.test.mjs
 })
 
 // --- 手順 2 と 3e の封筒を区別する（同じ nonce・同じ inputSha256 の 2 つの checks 封筒）---

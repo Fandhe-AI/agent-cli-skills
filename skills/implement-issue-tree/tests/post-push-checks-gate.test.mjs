@@ -199,7 +199,7 @@ test('チェック総数の取得失敗を 0 件扱いにしない（PR #480 cod
   }
 })
 
-test('monitorPrompt: 取得失敗時は checksTotal を省略し、--watch へ進む（0 件直行させない）', () => {
+test('monitorPrompt: 取得失敗時は checksTotal を省略し、手順 3 の完了待ちへ進む（0 件直行させない）', () => {
   const prompt = monitorPrompt(item, impl, [], true, true)
   const idx2 = prompt.indexOf('\n2. ')
   const section2 = prompt.slice(idx2, prompt.indexOf('\n3. ', idx2))
@@ -208,8 +208,8 @@ test('monitorPrompt: 取得失敗時は checksTotal を省略し、--watch へ�
     '取得失敗時に checksTotal を省略する指示がない（0 を返すとホストが timeout を conflicting へ誤って倒す）',
   )
   assert.ok(
-    section2.includes('取得に失敗した場合は次へ進む'),
-    '取得失敗時に --watch へ進む（0 件直行させない）指示がない',
+    section2.includes('取得に失敗した場合は手順 3 へ進む'),
+    '取得失敗時に手順 3 の完了待ちへ進む（0 件直行させない）指示がない',
   )
 })
 
@@ -250,7 +250,7 @@ test('normalizePushMergeable: enum 完全一致のみ受理し、それ以外は
 // (3) monitor プロンプト（0 件直行・timeout の限定）
 // ---------------------------------------------------------------------------
 
-test('monitorPrompt: 手順 2 は --watch の前に check-run 総数を取得し、0 件なら手順 3e へ直行する', () => {
+test('monitorPrompt: 手順 2 は完了待ち（手順 3）の前に check-run 総数を取得し、0 件なら手順 3e へ直行する', () => {
   const prompt = monitorPrompt(item, impl, [], true, true)
   const idx2 = prompt.indexOf('\n2. ')
   assert.ok(idx2 >= 0, '手順 2 が見つからない')
@@ -258,24 +258,25 @@ test('monitorPrompt: 手順 2 は --watch の前に check-run 総数を取得し
   assert.ok(idx3 > idx2, '手順 3 の開始位置を特定できない')
   const section2 = prompt.slice(idx2, idx3)
   const totalIdx = section2.indexOf('--mode checks')
-  // 集計定義の説明文にも「gh pr checks」の語が出るため、--watch 実行コマンドで位置決めする。
-  const watchIdx = section2.indexOf(`gh pr checks ${impl.prNumber} --watch`)
+  // 第 8 弾: 完了待ちは手順 3 の --until settled のコマンドへ移った。総数の取得（手順 2）が必ず先で、手順 2 は完了待ちを実行しない。
+  const settleIdx = prompt.indexOf('--mode checks --pr')
+  const settleCmdIdx = prompt.search(/--mode checks[^\n]*--until settled/)
   assert.ok(totalIdx >= 0, '手順 2 に check-run 総数の取得指示がない')
-  assert.ok(watchIdx >= 0, '手順 2 に --watch 監視の指示がない')
-  assert.ok(totalIdx < watchIdx, 'check-run 総数の取得が --watch より後にある（0 件のまま watch へ入ってしまう）')
+  assert.ok(!/--mode checks[^\n]*--until/.test(section2) && !section2.includes('--watch'), '手順 2 が完了待ちを実行している')
+  assert.ok(settleCmdIdx > idx3 && settleIdx < idx3, 'check-run 総数の取得が完了待ち（手順 3）より後にある（0 件のまま待ちへ入ってしまう）')
   assert.ok(section2.includes('手順 3e'), '総数 0 件時に手順 3e へ直行する指示がない')
   assert.ok(section2.includes('checksTotal'), '手順 2 に checksTotal の返却指示がない')
 })
 
-test('monitorPrompt: 手順 2 の再実行枯渇時は timeout を返さず手順 3 の総数確認へ進む', () => {
+test('monitorPrompt: 完了待ちの上限（exhausted）は総数 1 件以上の timeout に限り、0 件は timeout にせず手順 3e へ倒す', () => {
+  // 第 8 弾: 旧「--watch の再実行枯渇時は手順 3 の総数確認へ進む」は、完了待ちが exhausted になった場合に件数で状態を確定する形へ移った。
+  // exhausted は headSha を持つ（pending が残ったまま上限）ときだけ状態 1 で timeout、headSha が空なら取得不能（状態 3）。
   const prompt = monitorPrompt(item, impl, [], true, true)
-  const idx2 = prompt.indexOf('\n2. ')
-  const idx3 = prompt.indexOf('\n3. ', idx2)
-  const section2 = prompt.slice(idx2, idx3)
-  assert.ok(
-    section2.includes('再実行 4 回を使い切っても完了しない場合も、ここで timeout を返さず手順 3 の総数確認へ進む'),
-    '再実行枯渇時の接続（timeout ではなく手順 3 へ）が明記されていない',
-  )
+  const idx3 = prompt.indexOf('\n3. ')
+  const section3 = prompt.slice(idx3, prompt.indexOf('   c. ', idx3))
+  assert.ok(section3.includes('exhausted（headSha あり = pending が残ったまま待機上限）'), 'exhausted の扱い（状態 1 → timeout）が明記されていない')
+  assert.ok(section3.includes('headSha が空のまま exhausted'), '未観測の exhausted を取得不能にする旨がない')
+  assert.ok(section3.includes('state: timeout（手順 7。checksTotal は状態 1 の総数）'), 'timeout の総数の出所がない')
 })
 
 test('monitorPrompt: 手順 7 の timeout はチェック 1 件以上の pending 限定で、0 件は手順 3e へ倒す', () => {
