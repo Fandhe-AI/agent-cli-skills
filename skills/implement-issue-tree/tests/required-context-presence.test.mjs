@@ -150,13 +150,17 @@ test('monitorPrompt(autoMerge 無効): 手順 3g を含まない', () => {
   assert.ok(!monitorPrompt(item, impl, [], false, false).includes('3g.'))
 })
 
-test('mergeExecutePrompt (v-b): 未発行のみなら checks-not-green、未束縛・取得不能は issuer-unbound', () => {
-  const p = mergeExecutePrompt(item, impl, true, [], 'a'.repeat(40))
-  const i = p.indexOf('(v-b)')
-  assert.ok(i >= 0)
-  const s = p.slice(i)
-  assert.ok(/checks-not-green[^。]*未発行|未発行[^。]*checks-not-green/.test(s))
-  assert.ok(s.includes('issuer-unbound'))
+// 第 6 弾（#603）で (v-b) の判定はプロンプトからスクリプトへ移った。判定の中身は merge-gate-unit.test.mjs / merge-gate.test.mjs が
+// 検査する。ここでは語彙の対応（未発行のみ = 一過性の checks-not-green、未束縛・取得不能 = issuer-unbound）だけを固定する
+test('merge-gate.sh (v-b): 未発行のみなら checks-not-green、未束縛・取得不能は issuer-unbound', () => {
+  const text = readFileSync(new URL('../scripts/merge-gate.sh', import.meta.url), 'utf8')
+  assert.ok(text.includes('stop checks-not-green g0 unissued'))
+  assert.ok(text.includes('stop issuer-unbound g0 unbound'))
+  assert.ok(text.includes('stop issuer-unbound g0 rsc-format 1'))
+  // 未束縛の判定は未発行の判定より先（束縛できない構成を一過性として再監視へ回さない）
+  assert.ok(text.indexOf('stop issuer-unbound g0 unbound') < text.indexOf('stop checks-not-green g0 unissued'))
+  // プロンプトは判定語をそのまま reason にするだけで、(v-b) の手順を持たない
+  assert.ok(!mergeExecutePrompt(item, impl, true, [], 'a'.repeat(40), 'n1').includes('(v-b)'))
 })
 
 test('分類: issuer-unbound は blocked/quality、checks-not-green は timeout（再監視）、enum は維持', () => {

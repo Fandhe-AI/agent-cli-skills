@@ -634,7 +634,7 @@ test('駆動部: stopUnverified と dispatch 前の state-unverified は同じ�
 
 test('駆動部: merged 受理（already-merged を含む）は PR 照合を要求し、opt-in 前の MERGED 確認も照合する', () => {
   assert.match(driverPart, /const verifyBindIssue = prBindingProblem\(item\.number, impl\.branch, v\)/)
-  assert.match(driverPart, /if \(!\(verifyStateOk && verifyHeadOk && !verifyBindIssue\)\) \{/)
+  assert.match(driverPart, /if \(!\(verifyStateOk && verifyHeadOk && !verifyBindIssue && gateCheck\.ok\)\) \{/)
 })
 
 test('駆動部: opt-in 前の MERGED 確認で PR 照合が不一致なら state を問わず blocked で終端する（allowMerge へ fail-open しない）', () => {
