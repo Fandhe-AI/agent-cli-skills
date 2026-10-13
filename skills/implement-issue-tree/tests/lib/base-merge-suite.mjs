@@ -96,15 +96,15 @@ export function registerBaseMergeTests(bash) {
     // git の呼び出し順は routing 照合 → branch fetch → checkout → base fetch → merge → ls-remote → push → ls-remote
     const at = (re) => calls.findIndex((c) => re.test(c))
     const order = [
-      at(/^remote get-url --all origin$/), at(new RegExp(`^fetch origin refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}$`)), at(/^checkout --detach refs\/remotes\/origin\//),
-      at(new RegExp(`^fetch origin refs/heads/${BASE}:refs/remotes/origin/${BASE}$`)), at(/^merge --no-ff --no-edit -F /), at(/^ls-remote origin /), at(/^push --no-follow-tags origin /),
+      at(/^remote get-url --all origin$/), at(new RegExp(`^fetch origin refs/heads/${BRANCH}:refs/worktree/base-merge/branch$`)), at(/^checkout --detach refs\/worktree\/base-merge\/branch$/),
+      at(new RegExp(`^fetch origin refs/heads/${BASE}:refs/worktree/base-merge/base$`)), at(/^merge --no-ff --no-edit -F /), at(/^ls-remote origin /), at(/^push --no-follow-tags origin /),
     ]
     assert.ok(order.every((i) => i >= 0), JSON.stringify(order))
     assert.ok(at(/^remote get-url --push --all origin$/) >= 0 && at(/^remote get-url --push --all origin$/) < order[1], 'push 先 URL の照合も fetch より前')
     assert.deepEqual([...order].sort((a, b) => a - b), order, '順序が崩れている')
     assert.equal(calls.filter((c) => /^ls-remote /.test(c)).length, 2, 'push の前後で 1 回ずつ')
     // merge の引数は完全修飾の追跡 ref（短縮形 origin/<base> は同名のタグ refs/tags/origin/<base> に負ける）
-    assert.match(calls[order[4]], new RegExp(`^merge --no-ff --no-edit -F \\S+ refs/remotes/origin/${BASE}$`))
+    assert.match(calls[order[4]], new RegExp(`^merge --no-ff --no-edit -F \\S+ refs/worktree/base-merge/base$`))
     assert.ok(calls.findIndex((c, i) => /^ls-remote /.test(c) && i > order[6]) > order[6], '2 回目の ls-remote は push のあと')
 
     // gh pr view は -R <期待リポジトリ> を付ける（GH_REPO や gh repo set-default で別リポジトリの PR を引かない）
@@ -483,6 +483,26 @@ export function registerBaseMergeTests(bash) {
     assert.match(v.summary, /base fetch 失敗/)
     assert.deepEqual(sb.gitCalls().filter((c) => /^(merge|push)( |$)/.test(c)), [])
     assert.equal(sb.remoteSha(), before)
+  })
+
+  // 共有の refs/remotes/origin/<名前> は並列 worktree が参照する。ここを消す取り込みは、別 worktree の作業を巻き込んで失敗させる
+  t('並列 worktree: 取り込みは共有の refs/remotes/origin/* を削除せず（update-ref -d を呼ばない）、worktree ごとの ref に固定する。2 つの worktree が続けて取り込める', () => {
+    const sb = makeSandbox()
+    const wt2 = join(sb.root, 'wt2')
+    git(sb.wt, 'worktree', 'add', '-q', '--detach', wt2)
+    const shared = [`refs/remotes/origin/${BASE}`, `refs/remotes/origin/${BRANCH}`]
+    const before = shared.map((r) => git(sb.wt, 'rev-parse', r))
+    const v1 = result(run(bash, sb))
+    assert.equal(v1.pushed, true)
+    // 2 つ目の worktree は先行側の push 後のブランチを取り込み直す（取り込む差分が無ければ no-op）。共有 ref が残っていることが肝心
+    const v2 = result(run(bash, { ...sb, wt: wt2 }))
+    assert.equal(typeof v2.pushed, 'boolean')
+    for (const [i, r] of shared.entries()) assert.notEqual(git(sb.wt, 'for-each-ref', r), '', `${r} は消えていない`)
+    assert.equal(git(sb.wt, 'rev-parse', shared[0]), before[0], '共有の base 追跡 ref は書き換わっていない')
+    assert.deepEqual(sb.gitCalls().filter((c) => /^update-ref -d refs\/remotes\//.test(c)), [], '共有 ref の削除を呼んでいない')
+    // 各 worktree の固定 ref は worktree ごと（先行側の ref が後発に上書きされない）
+    assert.equal(git(sb.wt, 'rev-parse', 'refs/worktree/base-merge/base'), sb.remoteSha(BASE))
+    assert.notEqual(git(wt2, 'for-each-ref', 'refs/worktree/base-merge/base'), '')
   })
 
   t('branch の fetch 失敗（リモートのブランチが無い）: ローカルに stale な origin/<branch> が残っていても、それを checkout・push しない。commitFailed で、conflict / hookRejected は付かない', () => {

@@ -3819,7 +3819,7 @@ const SCRIPT_SHA256={
 'measure-residual-bytes.sh':'e8383bfe145b616b35202250ddb24cd06751fb5987cc95794f025d350e728f12',
 'measure-free-disk.sh':'c6ea7c52afc6257bd43d4f2f30bcce0de2a9ab73821a257794a0ae638417029f',
 'observe-pr.sh':'564e0801b86b8bf4720b13da207ffb2a1015c1a70fafe175ed607d54db9560f8',
-'base-merge.sh':'0d3fa0e65c3bfd76b7c4ffaba6775fee105df65a79122a132108087145371c17',
+'base-merge.sh':'9b4f147c0f55610ee9ca42d56104f97a29d60a17b8736def9f43394ecfcd267d',
 'pr-push.sh':'1631cbd4fa1abc3c15d76cd697367b012da1aac895e94840152575a5032d98bb',
 }
 
