@@ -217,7 +217,7 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 **削除ゲート（continue / discard 共通）**: Recover エージェントの返す `wipCommitted` は自己申告値であり、誤判定・異常応答・プロンプトインジェクションで真を騙られ得る。加えて Recover は「フック失敗等で退避できなかった場合は `wipCommitted: false` を返して続行する」契約のため、`continue` も退避失敗時に返り得る。そのため **continue / discard いずれの経路でも** worktree の削除は次の 2 条件を**両方**満たす場合にのみ実行する。
 
 1. **申告ゲート**: Recover エージェントが `wipCommitted: true` を返している（退避した場合、および退避すべき未 commit 変更が最初から無かった場合に true。フック失敗等で退避できなかった場合は false）
-2. **事実ゲート**: 削除と同じプロセスで動く `scripts/worktree-remove.sh remove --mode discard` が、対象 worktree に未 commit 変更（`git status --porcelain=v2 -uall --ignore-submodules=none` の出力。利用者の status 設定に左右されない形）も初期化済み submodule も無いことを確認し、`--force` を使わずに削除できている。lock が生きている agent のものである場合も削除せず保持する
+2. **事実ゲート**: 削除と同じプロセスで動く `scripts/worktree-remove.sh remove --mode discard` が、対象 worktree に未 commit 変更（`git -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none` の出力。利用者の status 設定とグローバルの除外ファイルに左右されない形）も初期化済み submodule も無いことを確認し、`--force` を使わずに削除できている。lock した Claude Code のセッションが生きている場合も削除せず保持する
 
 どちらか一方でも満たさない場合（スクリプトが worktree を保持した場合を含む）、あるいは掃除自体が失敗した場合は worktree / branch を削除せず `failed` で保全する（fail-safe）。保全された残骸は次回ランの Recover が再度判断する。worktree が無い branch のみの残骸は削除対象も未 commit 変更も存在しないため、このゲートの対象外とする。
 

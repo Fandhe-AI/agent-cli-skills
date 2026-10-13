@@ -27,14 +27,14 @@ i=0
 while IFS="$US" read -r fn a b c d; do
   rc=0
   out=""
-  WR_DIRTY=0; WR_SUB_DIRTY=0; WR_REGISTERED=0; WR_MAIN=0; WR_LOCKED=0; WR_LOCK_REASON=""; WR_LOCK_PID=""
+  WR_DIRTY=0; WR_SUB_DIRTY=0; WR_REGISTERED=0; WR_MAIN=0; WR_LOCKED=0; WR_LOCK_REASON=""; WR_LOCK_PID=""; WR_LOCK_START=""
   case "$fn" in
     wr_count_status) wr_count_status "$(nl "$a")" ;;
     wr_find_entry) wr_find_entry "$(nl "$a")" "$b" ;;
     wr_lock_pid) out=$(wr_lock_pid "$a" 2>&1) || rc=$?; wr_lock_pid "$a" || true ;;
     *) out=$("$fn" "$a" "$b" "$c" "$d" 2>&1) || rc=$? ;;
   esac
-  printf '%s %s [%s] [%s,%s,%s,%s,%s,%s,%s]\\n' "$i" "$rc" "$out" "$WR_DIRTY" "$WR_SUB_DIRTY" "$WR_REGISTERED" "$WR_MAIN" "$WR_LOCKED" "$WR_LOCK_REASON" "$WR_LOCK_PID"
+  printf '%s %s [%s] [%s,%s,%s,%s,%s,%s,%s;%s]\\n' "$i" "$rc" "$out" "$WR_DIRTY" "$WR_SUB_DIRTY" "$WR_REGISTERED" "$WR_MAIN" "$WR_LOCKED" "$WR_LOCK_REASON" "$WR_LOCK_PID" "$WR_LOCK_START"
   i=$((i + 1))
 done
 `
@@ -48,8 +48,9 @@ function table(bash, rows) {
   return lines.map((l, i) => {
     const m = /^(\d+) (\d+) \[(.*?)\] \[(.*)\]$/.exec(l)
     assert.ok(m && Number(m[1]) === i, l)
-    const [dirty, sub, reg, main, locked, reason, pid] = m[4].split(',')
-    return { rc: Number(m[2]), out: m[3], dirty: Number(dirty), sub: Number(sub), reg: Number(reg), main: Number(main), locked: Number(locked), reason, pid }
+    const [head, start] = m[4].split(';')
+    const [dirty, sub, reg, main, locked, reason, pid] = head.split(',')
+    return { rc: Number(m[2]), out: m[3], dirty: Number(dirty), sub: Number(sub), reg: Number(reg), main: Number(main), locked: Number(locked), reason, pid, start }
   })
 }
 
@@ -106,27 +107,51 @@ check(
   (g, r) => assert.equal(g.rc, r[1] === '_/issue-trees/1.json' || r[1] === '_/issue-trees/603.json' ? OK : NG, JSON.stringify(r[1])),
 )
 
+// Claude Code の実物: `claude agent agent-aa14453c88416c114 (pid 72544 start Mon Oct 12 02:48:39 2026)`（照合は
+// /^claude (?:agent|session) .{1,255} \(pid (\d{1,10})(?: start (.{1,255}))?\)$/）。pid はセッション（メインの claude プロセス）の pid
+const START = 'Mon Oct 12 02:48:39 2026'
+const LOCK_ROWS = [
+  // [理由, 期待する pid（null = 形が違う）, 期待する start]
+  ['claude agent agent-abc123 (pid 4242)', '4242', ''],
+  ['claude agent a (pid 1)', '1', ''],
+  ['claude agent two words (pid 9)', '9', ''],
+  [`claude agent agent-aa14453c88416c114 (pid 72544 start ${START})`, '72544', START],
+  ['claude agent agent-x (pid 5 start Mon Oct  5 02:48:39 2026)', '5', 'Mon Oct  5 02:48:39 2026'],
+  ['claude session sess-1 (pid 77)', '77', ''],
+  [`claude session sess-1 (pid 78 start ${START})`, '78', START],
+  ['claude agent agent-abc (pid 1234567890)', '1234567890', ''],
+  ['claude agent name (pid x) (pid 12)', '12', ''],
+  ['', null], ['manual lock', null], ['claude agent agent-abc', null], ['claude agent agent-abc (pid )', null],
+  ['claude agent agent-abc (pid x1)', null], ['claude agent agent-abc (pid 12x)', null], ['claude agent  (pid 1)', null],
+  ['claude agent agent-abc (pid 12345678901)', null], ['Claude agent agent-abc (pid 1)', null], ['claude agent agent-abc (pid 1) extra', null],
+  ['xclaude agent agent-abc (pid 1)', null], ['claude agent agent-abc (pid -1)', null],
+  ['claude other agent-abc (pid 1)', null], ['claude agent agent-abc (pid 1 start )', null], ['claude agent agent-abc (pid 1 start)', null],
+  ['claude agent agent-abc (pid 1 begin x)', null], ['claude agent agent-abc (pid 1 start x) y', null], ['claude agent agent-abc (pid 1 extra start x)', null],
+  [`claude agent ${'n'.repeat(256)} (pid 1)`, null], [`claude agent agent-abc (pid 1 start ${'s'.repeat(256)})`, null],
+  [`claude agent ${'n'.repeat(255)} (pid 1)`, '1', ''],
+]
 check(
-  'wr_lock_pid: `claude agent <名前> (pid <N>)` の形だけ pid を取り出す',
-  [
-    ['wr_lock_pid', 'claude agent agent-abc123 (pid 4242)'], ['wr_lock_pid', 'claude agent a (pid 1)'], ['wr_lock_pid', 'claude agent two words (pid 9)'],
-    ['wr_lock_pid', ''], ['wr_lock_pid', 'manual lock'], ['wr_lock_pid', 'claude agent agent-abc'], ['wr_lock_pid', 'claude agent agent-abc (pid )'],
-    ['wr_lock_pid', 'claude agent agent-abc (pid x1)'], ['wr_lock_pid', 'claude agent agent-abc (pid 12x)'], ['wr_lock_pid', 'claude agent  (pid 1)'],
-    ['wr_lock_pid', 'claude agent agent-abc (pid 1234567890)'], ['wr_lock_pid', 'Claude agent agent-abc (pid 1)'], ['wr_lock_pid', 'claude agent agent-abc (pid 1) extra'],
-    ['wr_lock_pid', 'xclaude agent agent-abc (pid 1)'], ['wr_lock_pid', 'claude agent agent-abc (pid -1)'],
-  ],
+  'wr_lock_pid: `claude agent|session <名前> (pid <N>[ start <lstart>])` の形だけ pid と start を取り出す（Claude Code の照合と同じ形）',
+  LOCK_ROWS.map((r) => ['wr_lock_pid', r[0]]),
   (g, r, i) => {
-    const pids = { 0: '4242', 1: '1', 2: '9' }
-    if (i in pids) {
-      assert.deepEqual([g.rc, g.pid], [OK, pids[i]], r[1])
-    } else {
-      assert.deepEqual([g.rc, g.pid], [NG, ''], r[1])
-    }
+    const [, pid, start] = LOCK_ROWS[i]
+    assert.deepEqual([g.rc, g.pid, g.start], pid === null ? [NG, '', ''] : [OK, pid, start], r[1])
   },
 )
 
+// wr_start_matches OBSERVED RECORDED
 check(
-  'wr_lock_action: lock なし → none / agent の形で pid が死んでいる → unlock / それ以外（生きている・形が違う・観測不能）→ retain',
+  'wr_start_matches: 空白の連なり・両端の空白を畳んで比べる。観測が空・違う値は不一致',
+  [
+    ['wr_start_matches', START, START], ['wr_start_matches', 'Mon Oct  5 02:48:39 2026', 'Mon Oct 5 02:48:39 2026'],
+    ['wr_start_matches', ' Mon Oct 12 02:48:39 2026 ', START], ['wr_start_matches', 'Mon Oct 12 02:48:39 2026', 'Mon Oct 12 02:48:40 2026'],
+    ['wr_start_matches', '', START], ['wr_start_matches', '', ''], ['wr_start_matches', START, ''], ['wr_start_matches', 'Mon Oct 12 02:48:39 2025', START],
+  ],
+  (g, r, i) => assert.equal(g.rc, [OK, OK, OK, NG, NG, NG, NG, NG][i], JSON.stringify(r)),
+)
+
+check(
+  'wr_lock_action: lock なし → none / Claude Code の形で pid が死んでいる（start つきは pid の再利用を含む）→ unlock / それ以外（生きている・形が違う・観測不能）→ retain',
   [
     ['wr_lock_action', '0', '', '1'], ['wr_lock_action', '0', '123', '0'],
     ['wr_lock_action', '1', '123', '0'], ['wr_lock_action', '1', '123', '1'], ['wr_lock_action', '1', '', '0'], ['wr_lock_action', '1', '', '1'],
@@ -210,10 +235,10 @@ check(
   (g, r, i) => assert.equal(g.out, ['none', 'keep-base', 'keep', 'absent', 'delete', 'delete', 'keep-base', 'keep', 'absent'][i], JSON.stringify(r)),
 )
 
-const WT = ['removed', 'not-registered', 'skipped', 'main', 'retained-dirty', 'retained-submodule', 'retained-locked', 'failed']
+const WT = ['removed', 'not-registered', 'skipped', 'main', 'cwd', 'retained-dirty', 'retained-submodule', 'retained-locked', 'failed']
 const BR = ['none', 'deleted', 'absent', 'keep-base', 'keep', 'failed']
 check(
-  'wr_ok / wr_retained / wr_wt_gone: superseded は worktree が残っても非致命（main だけ異常）、discard は worktree が無くなりブランチも無い・消えたときだけ ok',
+  'wr_ok / wr_retained / wr_wt_gone: superseded は worktree が残っても非致命（main・cwd だけ異常）、discard は worktree が無くなりブランチも無い・消えたときだけ ok',
   [
     ...WT.map((w) => ['wr_ok', 'superseded', w, 'none']),
     ...WT.flatMap((w) => BR.map((b) => ['wr_ok', 'discard', w, b])),
@@ -223,7 +248,7 @@ check(
   ],
   (g, r, i) => {
     let exp
-    if (r[0] === 'wr_ok' && r[1] === 'superseded') exp = r[2] !== 'main'
+    if (r[0] === 'wr_ok' && r[1] === 'superseded') exp = r[2] !== 'main' && r[2] !== 'cwd'
     else if (r[0] === 'wr_ok' && r[1] === 'discard') exp = ['removed', 'not-registered', 'skipped'].includes(r[2]) && ['none', 'deleted', 'absent', 'keep-base'].includes(r[3])
     else if (r[0] === 'wr_ok') exp = false
     else if (r[0] === 'wr_retained') exp = !['removed', 'not-registered', 'skipped'].includes(r[1])

@@ -3363,6 +3363,12 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
   // superseded: マージ済み・置き換え済みのため汚れていても消す（submodule に未記録の変更があれば保持する）。
   const cleanupMode = options.cleanupMode === 'discard' || deleteBranchName ? 'discard' : 'superseded'
   const hasCleanup = Boolean(cleanupWorktreePath || deleteBranchName)
+  // discard の掃除は、削除できたと確認できるまで最終スイープの候補から外しておく（例外・結果なしでも外れたまま）
+  if (cleanupWorktreePath && cleanupMode === 'discard') sweepHeldPaths.add(cleanupWorktreePath)
+  // discard で .worktree を空にする patch は、JSON マージには含めず、掃除エージェントの手順 2 に任せる（worktree が無くなったときだけ空にする）。
+  // 先に空にすると、保持したときに状態ファイルから worktree の記録が消え、failed の書き戻しが失敗した場合に最終スイープの保持対象から外れる
+  const deferWorktreeClear = cleanupMode === 'discard' && Boolean(cleanupWorktreePath) && clearWorktreeAfterCleanup && patchWorktree === ''
+  const mergePatch = deferWorktreeClear ? Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'worktree')) : patch
 
   // 掃除担当エージェントのプロンプト。受け取る値は sanitizeWorktreePath / isValidBranchName で検証済みのパス・ブランチ名と固定文字列のみで、
   // 未信頼由来の自由文（patchJson）は含まない。.worktree のクリア（手順 2）は、削除対象が追跡中の worktree そのものの場合に限り、
@@ -3409,7 +3415,7 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
           '状態ファイル更新タスク（JSON マージのみ。worktree / branch の削除は行わない）。',
           'merge',
           '',
-          JSON.stringify([{ numbers: [issueNumber], patch }]),
+          JSON.stringify([{ numbers: [issueNumber], patch: mergePatch }]),
           `state:${issueNumber}`,
         ),
         { label: `state:update:#${issueNumber}`, schema: STATE_WRITE_SCHEMA, isValid: isStateWriteValid },
@@ -3462,7 +3468,10 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
   // 削除成功が確認できたパスのみ confirmedRemovedPaths へ登録する（バイト軸実測し直しの du
   // フィルタ専用。sweepEligiblePaths は流用しない）。空文字（削除対象なし）は登録不要。
   // 保持した worktree（retained）は実体が残っているので数えない。
-  if (cleanupWorktreePath && result?.cleanupOk === true && result?.cleanupRetained === false) confirmedRemovedPaths.add(cleanupWorktreePath)
+  const cleanupConfirmedRemoved = result?.cleanupOk === true && result?.cleanupRetained === false
+  if (cleanupWorktreePath && cleanupConfirmedRemoved) confirmedRemovedPaths.add(cleanupWorktreePath)
+  // superseded の試み、または discard で削除を確認できたパスは、スイープの除外から戻す（discard で保持したパスは除外のまま）
+  if (cleanupWorktreePath && (cleanupMode !== 'discard' || cleanupConfirmedRemoved)) sweepHeldPaths.delete(cleanupWorktreePath)
   // AND 判定（分割前と同じ戻り値契約。どちらが失敗したかは上のログで判別できる）。
   return {
     ok: result?.mergeOk === true && result?.cleanupOk === true,
@@ -4360,6 +4369,13 @@ function findMainWorktreePath(entries) {
 // 推測は削除過多になるため採らない。未試行の worktree は構造的に候補にならない。
 const sweepEligiblePaths = new Set()
 
+// 破棄・継続（cleanupMode: 'discard'）で『削除できたと確認できていない』パス（保持・結果なし・例外）。最終スイープの候補から必ず外す。
+// discard は未コミット変更・初期化済み submodule を理由に保持することがあり、その worktree をラン終了時のスイープが superseded の規則
+// （--force）で消すと、保持した意味が無くなる。状態ファイルの保持対象（failed / blocked / monitoring が記録した worktree）は書き戻しの成否に
+// 依存するので、ホストのメモリ上でも外す（書き戻しが失敗しても消えない）。削除を試みる前に入れ、確認できたときだけ外す（例外でも残る）。
+// 同じパスへの後の試みが superseded なら、その試みの結果に従う（スイープで回収する）
+const sweepHeldPaths = new Set()
+
 // バイト軸の実測し直し専用の「削除成功が確認できた」パス集合。sweepEligiblePaths を流用すると
 // 削除失敗の残存実体が過小評価の fail-open になるため、ok:true の場合にのみ追加する別集合を持つ。
 const confirmedRemovedPaths = new Set()
@@ -4426,11 +4442,11 @@ const SWEEP_SCHEMA = {
 // sweep が同じプロセスで行う。ホストは返ってきた removed を候補集合と突き合わせる（候補にないパスは数えない）。
 async function sweepClosedWorktrees(orphanPaths = []) {
   try {
-    if (sweepEligiblePaths.size === 0 && orphanPaths.length === 0) {
-      log('worktree スイープ: 削除を試みた worktree・検出した孤立 worktree がないため削除を行わない')
+    const candidates = [...new Set([...sweepEligiblePaths, ...orphanPaths])].map(sanitizeWorktreePath).filter((p) => p !== '' && !sweepHeldPaths.has(p))
+    if (candidates.length === 0) {
+      log('worktree スイープ: 削除を試みた worktree・検出した孤立 worktree がない（または discard で保持した worktree だけ）ため削除を行わない')
       return []
     }
-    const candidates = [...new Set([...sweepEligiblePaths, ...orphanPaths])].map(sanitizeWorktreePath).filter((p) => p !== '')
     const candidatesJson = JSON.stringify(candidates)
     const nonce = boundaryNonce(`worktree-sweep:${candidatesJson}`)
     const delimiter = `SWEEP_EOF_${nonce}`

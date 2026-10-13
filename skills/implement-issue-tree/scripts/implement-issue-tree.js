@@ -3364,6 +3364,12 @@ const deleteBranchName=deleteBranchValidated&&deleteBranchValidated!==baseBranch
 const cleanupMode=options.cleanupMode==='discard'||deleteBranchName?'discard':'superseded'
 const hasCleanup=Boolean(cleanupWorktreePath||deleteBranchName)
 
+if(cleanupWorktreePath&&cleanupMode==='discard')sweepHeldPaths.add(cleanupWorktreePath)
+
+
+const deferWorktreeClear=cleanupMode==='discard'&&Boolean(cleanupWorktreePath)&&clearWorktreeAfterCleanup&&patchWorktree===''
+const mergePatch=deferWorktreeClear?Object.fromEntries(Object.entries(patch).filter(([k])=>k!=='worktree')):patch
+
 
 
 
@@ -3409,7 +3415,7 @@ stateWritePrompt(
 '状態ファイル更新タスク（JSON マージのみ。worktree / branch の削除は行わない）。',
 'merge',
 '',
-JSON.stringify([{numbers:[issueNumber],patch}]),
+JSON.stringify([{numbers:[issueNumber],patch:mergePatch}]),
 `state:${issueNumber}`,
 ),
 {label:`state:update:#${issueNumber}`,schema:STATE_WRITE_SCHEMA,isValid:isStateWriteValid},
@@ -3462,7 +3468,10 @@ return{mergeOk:false,cleanupOk:false,cleanupRetained:true,branchSha:'',outputMis
 
 
 
-if(cleanupWorktreePath&&result?.cleanupOk===true&&result?.cleanupRetained===false)confirmedRemovedPaths.add(cleanupWorktreePath)
+const cleanupConfirmedRemoved=result?.cleanupOk===true&&result?.cleanupRetained===false
+if(cleanupWorktreePath&&cleanupConfirmedRemoved)confirmedRemovedPaths.add(cleanupWorktreePath)
+
+if(cleanupWorktreePath&&(cleanupMode!=='discard'||cleanupConfirmedRemoved))sweepHeldPaths.delete(cleanupWorktreePath)
 
 return{
 ok:result?.mergeOk===true&&result?.cleanupOk===true,
@@ -3734,14 +3743,14 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'6ec7de56e7c9536813a9d8ac5324dcd6100ebda31867d723e22c823629870c47',
-'measure-free-disk.sh':'892a8886df32c0c1579986a4f811afca6d00636a1db7fbc063046b4631a7ab96',
-'observe-pr.sh':'f9a77f7c10f4823c0ce42ba11a53084e2544db7acbb8aae7bcf4a2aba6076798',
-'base-merge.sh':'ba0ba9848bb574e91a35088d26318d76768099c705e6d2500bec57a513b2fea1',
-'pr-push.sh':'c65fb6c37f8c42438ca7436188fb174cb741e892fd7901e1fb7554455b686e7f',
-'state.sh':'bf659d5ed00e7265d8cac03b2a9c1acf6801f55457e6638672238f5277a1f39c',
-'merge-gate.sh':'aa864fd09ae2eeb29307ba551323af56524a845ecd9b78977633b709b81b2f4d',
-'worktree-remove.sh':'6207ad7d57f762a7571cdc844485bc4946b123c3020f86970b33d210c5d30b9d',
+'measure-residual-bytes.sh':'4d4549a8c190480858605fb14e9e72918b5805dba78136fb14eeef037ae42a16',
+'measure-free-disk.sh':'69531bb0abe1ee85c71d2e91a12f9c8aac2967dc5dfb8f738d228c1131f53a3b',
+'observe-pr.sh':'607bc11df37be0bc8f73c8287781d92892ca8dcc23274aaa169da66d645c71a4',
+'base-merge.sh':'54b5902196a567a9258c96ac777ad23224d8dd0da112907d3556af18d6c12c8e',
+'pr-push.sh':'b10a25005f160b4883c8e31211908ee3741e6ea6f9cb6c1997737fc4df994ffa',
+'state.sh':'6cba77a8448866324881c5abbe4c8d2c386a8056e3069596c281cb464b89a5f4',
+'merge-gate.sh':'f15201fb85d1f618c5980e37ee31539542b6f43097436485f0925afe6f337b58',
+'worktree-remove.sh':'e9e1a385d19da967eddc3b436088a961b1819973b6c0526f34bd55b5942b55c5',
 }
 
 
@@ -4362,6 +4371,13 @@ const sweepEligiblePaths=new Set()
 
 
 
+
+
+
+const sweepHeldPaths=new Set()
+
+
+
 const confirmedRemovedPaths=new Set()
 
 
@@ -4426,11 +4442,11 @@ description:'結果の行の removed（削除した worktree の絶対パス一�
 
 async function sweepClosedWorktrees(orphanPaths=[]){
 try{
-if(sweepEligiblePaths.size===0&&orphanPaths.length===0){
-log('worktree スイープ: 削除を試みた worktree・検出した孤立 worktree がないため削除を行わない')
+const candidates=[...new Set([...sweepEligiblePaths, ...orphanPaths])].map(sanitizeWorktreePath).filter((p)=>p!==''&& !sweepHeldPaths.has(p))
+if(candidates.length===0){
+log('worktree スイープ: 削除を試みた worktree・検出した孤立 worktree がない（または discard で保持した worktree だけ）ため削除を行わない')
 return[]
 }
-const candidates=[...new Set([...sweepEligiblePaths, ...orphanPaths])].map(sanitizeWorktreePath).filter((p)=>p!=='')
 const candidatesJson=JSON.stringify(candidates)
 const nonce=boundaryNonce(`worktree-sweep:${candidatesJson}`)
 const delimiter=`SWEEP_EOF_${nonce}`

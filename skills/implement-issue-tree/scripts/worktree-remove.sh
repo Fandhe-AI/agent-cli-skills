@@ -14,15 +14,22 @@
 #               あれば worktree が無くなったあとでブランチも消す（消す前の先頭 sha を結果に出す。base と同名のブランチは消さない）。
 #   sweep       ラン終了時の残骸回収。候補ごとに superseded と同じ規則で消す。状態ファイルが failed / blocked / monitoring の
 #               イシューに記録した worktree、登録されていないパス、メイン worktree は消さない。状態ファイルを読めなければ何も消さない。
-# 確認の方法: `git status --porcelain=v2 -uall --ignore-submodules=none`（利用者の status.showUntrackedFiles や submodule の ignore
-#       設定に左右されない形。素の status は設定で未追跡を隠す）。ignore 対象（node_modules・dist 等）は汚れに数えず、中身ごと消える。
-# lock: `claude agent <名前> (pid N)` の形で、そのプロセスが死んでいる（kill -0・ps -p・/proc/<pid> のどれも見つからない）ときだけ外す。それ以外の lock は
-#       外さず、worktree を保持して結果に記録する（生きている agent の worktree を消さない）。
+# 確認の方法: `git -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none`（利用者の status.showUntrackedFiles や
+#       submodule の ignore 設定、グローバルの除外ファイル〔core.excludesFile・~/.config/git/ignore〕に左右されない形。素の status は設定で
+#       未追跡を隠す）。リポジトリの .gitignore と .git/info/exclude に載った ignore 対象（node_modules・dist 等）は汚れに数えず、中身ごと消える
+#       （--ignored は見ない）。残る限界は references/script-trust-model.md に記載。
+# lock: Claude Code の形（`claude agent|session <名前> (pid N)` と `… (pid N start <LC_ALL=C TZ=UTC ps -o lstart= の出力>)`）で、そのプロセスが
+#       死んでいる（kill -0・ps -p・/proc/<pid> のどれも見つからない）か、start が現在のプロセスの値と一致しない（pid の再利用）ときだけ外す。
+#       ps が使えない・失敗したときは生存扱い。それ以外の lock は外さず、worktree を保持して結果に記録する。この pid は agent ごとではなく
+#       セッション（メインの claude プロセス）の pid なので、同じセッションの中から実行すると lock は常に生存と判定されて保持になる
+#       （外れるのは、そのセッションが終わったあとの実行だけ）。
 # 自衛: メイン worktree（porcelain の先頭エントリ・実体のパスの一致）、登録されていないパス、カレントがその中にあるパスは消さない。
 #       rm の再帰削除は持たない（git worktree remove が消せなかったものは保持して報告する）。
 # 出力: 標準出力の最後の 1 行が `WORKTREE_REMOVE_RESULT {json}`。値は固定語彙と件数のみ（パスは sweep の removed だけで、
 #       検証済みの候補のパスに限る）。
-#   remove: {"ok":bool,"mode":"…","worktree":"removed|not-registered|skipped|main|retained-dirty|retained-submodule|retained-locked|failed",
+#           main = メイン worktree、cwd = カレントがその worktree の中（どちらも消さない）。
+#           branchSha は消す前（または消さなかった）ブランチの先頭 sha で、ブランチの削除に失敗したとき（failed）は空。
+#   remove: {"ok":bool,"mode":"…","worktree":"removed|not-registered|skipped|main|cwd|retained-dirty|retained-submodule|retained-locked|failed",
 #            "branch":"none|deleted|absent|keep-base|keep|failed","branchSha":"<40 桁 | 空>","dirty":N,"unlocked":bool,"retained":bool}
 #   sweep:  {"ok":true,"mode":"sweep","removed":["…"],"retained":N,"skipped":N,"failed":N,"reason":"…"}
 #           reason は空 / state-unreadable / invalid-input。state-unreadable と invalid-input では何も消さない。
@@ -81,7 +88,7 @@ T_DIRTY=0
 T_UNLOCKED=false
 # $1 = モード、$2 = パス
 remove_one() {
-  local m=$1 path=$2 list top real cwd_real plan lockact alive status_out sub_init gd rc
+  local m=$1 path=$2 list top real cwd_real plan lockact alive cur_start status_out sub_init gd rc
   T_WT=""
   T_DIRTY=0
   T_UNLOCKED=false
@@ -92,7 +99,7 @@ remove_one() {
   real=$(wr_real "${path}")
   cwd_real=$(pwd -P)
   case "${cwd_real}/" in
-    "${real}/"*) T_WT=main; return 0 ;; # カレントがこの worktree の中（自分が居る場所は消さない）
+    "${real}/"*) T_WT=cwd; return 0 ;; # カレントがこの worktree の中（自分が居る場所は消さない）
   esac
 
   # lock: agent の形で pid が死んでいるときだけ外す
@@ -102,6 +109,12 @@ remove_one() {
     if wr_lock_pid "${WR_LOCK_REASON}"; then
       # kill -0 は他ユーザーの生きたプロセス（EPERM）も失敗するので ps -p でも確かめる。ps -p を持たない環境（busybox）では /proc も見る
       if kill -0 "${WR_LOCK_PID}" 2>/dev/null || ps -p "${WR_LOCK_PID}" >/dev/null 2>&1 || [ -d "/proc/${WR_LOCK_PID}" ]; then alive=1; else alive=0; fi
+      # start つきの lock: 生きているプロセスの開始時刻が lock に書かれた値と違えば、pid が再利用された別のプロセス（= lock した側は死んでいる）。
+      # ps が無い・失敗・出力が空のときは観測できないので生存扱いのまま（保持側）
+      if [ "${alive}" = 1 ] && [ -n "${WR_LOCK_START}" ]; then
+        cur_start=$(LC_ALL=C TZ=UTC ps -o lstart= -p "${WR_LOCK_PID}" 2>/dev/null) || cur_start=""
+        if [ -n "${cur_start}" ] && ! wr_start_matches "${cur_start}" "${WR_LOCK_START}"; then alive=0; fi
+      fi
     fi
     lockact=$(wr_lock_action 1 "${WR_LOCK_PID}" "${alive}")
     if [ "${lockact}" = retain ]; then T_WT='retained-locked'; return 0; fi
@@ -114,7 +127,7 @@ remove_one() {
   sub_init=0
   if [ -d "${path}" ]; then
     top=$(git -C "${path}" rev-parse --show-toplevel 2>/dev/null) || top=""
-    if [ -n "${top}" ] && [ "$(wr_real "${top}")" = "${real}" ] && status_out=$(git -C "${path}" status --porcelain=v2 -uall --ignore-submodules=none 2>/dev/null); then
+    if [ -n "${top}" ] && [ "$(wr_real "${top}")" = "${real}" ] && status_out=$(git -C "${path}" -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none 2>/dev/null); then
       wr_count_status "${status_out}"
       # 初期化済み submodule（先頭が - の行は未初期化）と、このworktree専用の modules ディレクトリ（deinit 後もコミットが残り得る）
       sub_init=$(git -C "${path}" submodule status 2>/dev/null | awk 'substr($0,1,1) != "-" && NF > 0 { n++ } END { print n + 0 }') || sub_init=0
@@ -196,6 +209,8 @@ if [ "${cmd}" = remove ]; then
       *) T_BR=none ;;
     esac
     [ "${act}" = delete ] || [ "${act}" = keep-base ] || [ "${act}" = keep ] || sha=""
+    # 削除に失敗したときの sha は『消す前の先頭』ではなく『消えずに残った先頭』なので、復元の手がかりとしては出さない
+    [ "${T_BR}" != failed ] || sha=""
   fi
   emit_remove "${sha}"
 fi
@@ -217,6 +232,8 @@ input=$(cat) || usage "標準入力を読めない"
 printf '%s\n' "${input}" | jq -s -e 'length == 1 and (.[0] | type) == "array" and all(.[0][]; type == "string")' >/dev/null 2>&1 || sweep_result "" 0 0 0 invalid-input
 candidates=$(printf '%s\n' "${input}" | jq -r -s '.[0][]' 2>/dev/null) || sweep_result "" 0 0 0 invalid-input
 # 保持対象: failed / blocked / monitoring のイシューが記録した worktree。読めなければ（ファイル無し・壊れている）何も消さない
+# 空ファイル・空白だけ・2 値・items が無い／配列は jq が 0 終了で通すので、保持対象が空のまま進んで消すことのないよう、形を先に確かめる
+jq -s -e 'length == 1 and (.[0] | type) == "object" and (.[0].items | type) == "object"' "${file}" >/dev/null 2>&1 || sweep_result "" 0 0 0 state-unreadable
 retain_list=$(jq -r '.items | to_entries[] | select(.value.status == "failed" or .value.status == "blocked" or .value.status == "monitoring") | .value.worktree | select(type == "string" and . != "")' "${file}" 2>/dev/null) || sweep_result "" 0 0 0 state-unreadable
 retain_real=""
 while IFS= read -r r; do
@@ -246,7 +263,7 @@ EOF
   case "${T_WT}" in
     removed) removed="${removed}${p}
 " ;;
-    not-registered | main) n_skipped=$((n_skipped + 1)) ;;
+    not-registered | main | cwd) n_skipped=$((n_skipped + 1)) ;;
     failed) n_failed=$((n_failed + 1)) ;;
     *) n_retained=$((n_retained + 1)) ;;
   esac

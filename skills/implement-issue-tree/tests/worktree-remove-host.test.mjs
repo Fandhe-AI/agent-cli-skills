@@ -14,7 +14,7 @@ import { importDefinitions, runScript, BASE_ARGS, source } from './lib/stub-run.
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 const m = await importDefinitions(
-  ['updateStateDetailed', 'updateState', 'sweepClosedWorktrees', 'confirmedRemovedPaths', 'classifyStateWriteFailureStatus', 'ensureBoundaryNonceSeed', 'sha256Hex', 'canonicalJson'],
+  ['updateStateDetailed', 'updateState', 'sweepClosedWorktrees', 'sweepEligiblePaths', 'sweepHeldPaths', 'confirmedRemovedPaths', 'classifyStateWriteFailureStatus', 'ensureBoundaryNonceSeed', 'sha256Hex', 'canonicalJson'],
   'worktree-remove-host',
 )
 globalThis.agent = async (_p, opts) => (opts.label === 'nonce:seed' ? { seedHex: '0'.repeat(64) } : null)
@@ -189,6 +189,86 @@ test('sweep: 検証を通らない候補（引用符・.. ・相対）はヒア�
   assert.doesNotMatch(p, /a'b|\.\.\/x|"relative"/)
 })
 
+// ---- 2b. discard で保持した worktree は最終スイープの候補から外れる ----
+
+// 候補の集合（sweepEligiblePaths・sweepHeldPaths）はモジュール内に溜まるので、テストごとに新しいモジュールを読み込む
+async function freshAll(tag) {
+  const saved = globalThis.agent
+  globalThis.agent = async (_p, opts) => (opts.label === 'nonce:seed' ? { seedHex: '0'.repeat(64) } : null)
+  const mod = await importDefinitions(['updateStateDetailed', 'updateState', 'sweepClosedWorktrees', 'sweepEligiblePaths', 'sweepHeldPaths', 'confirmedRemovedPaths', 'ensureBoundaryNonceSeed'], tag)
+  await mod.ensureBoundaryNonceSeed()
+  globalThis.agent = saved
+  return mod
+}
+const sweepCalls = (calls) => calls.filter((c) => c.opts.label === 'worktree:sweep')
+
+test('discard が保持した worktree は sweepEligiblePaths に残っても最終スイープの候補に入らない（superseded で保持したものは回収対象のまま）', async () => {
+  const f = await freshAll('held-1')
+  const s1 = stub((opts) => (opts.label.startsWith('state:cleanup') ? { ok: false, retained: true } : { ok: true }))
+  await f.updateStateDetailed(30, { status: 'implementing', branch: 'feat/30-x', worktree: '' }, { cleanupWorktree: '/tmp/wt-30', cleanupMode: 'discard' })
+  assert.ok(f.sweepEligiblePaths.has('/tmp/wt-30') && f.sweepHeldPaths.has('/tmp/wt-30'))
+  assert.deepEqual(await f.sweepClosedWorktrees([]), [])
+  assert.equal(sweepCalls(s1.calls).length, 0, '候補が無いのでスイープのエージェントを起動しない')
+
+  // 同じスイープに別の候補（superseded で保持した worktree）があれば、そちらだけが候補になる
+  await f.updateStateDetailed(31, { status: 'merged' }, { cleanupWorktree: '/tmp/wt-31' })
+  const s2 = stub(() => ({ removed: ['/tmp/wt-31'] }))
+  assert.deepEqual(await f.sweepClosedWorktrees([]), ['/tmp/wt-31'])
+  const p = sweepCalls(s2.calls)[0].prompt
+  assert.match(p, /\["\/tmp\/wt-31"\]/)
+  assert.doesNotMatch(p, /wt-30/)
+  // orphan として渡されても同じ（除外のまま）
+  const s3 = stub(() => ({ removed: [] }))
+  await f.sweepClosedWorktrees(['/tmp/wt-30'])
+  assert.ok(sweepCalls(s3.calls).every((c) => !c.prompt.includes('wt-30')))
+})
+
+test('discard の掃除が結果なし（StructuredOutput 未返却）・例外・マージ段の失敗でも、スイープの候補から外れたまま。削除を確認できたときだけ外が戻る', async () => {
+  for (const [name, behavior] of [
+    ['結果なし', (opts) => (opts.label.startsWith('state:cleanup') ? null : { ok: true })],
+    ['無効な結果', (opts) => (opts.label.startsWith('state:cleanup') ? { ok: true } : { ok: true })],
+    ['掃除が例外', (opts) => { if (opts.label.startsWith('state:cleanup')) throw new Error('boom'); return { ok: true } }],
+    ['マージ段が失敗', () => ({ ok: false })],
+    ['ok だが保持', (opts) => (opts.label.startsWith('state:cleanup') ? { ok: true, retained: true } : { ok: true })],
+  ]) {
+    const f = await freshAll(`held-2-${name}`)
+    const s = stub(behavior)
+    await f.updateStateDetailed(32, { branch: 'feat/32-x' }, { cleanupWorktree: '/tmp/wt-32', cleanupMode: 'discard', deleteBranch: true }).catch(() => {})
+    assert.deepEqual(await f.sweepClosedWorktrees([]), [], name)
+    assert.equal(sweepCalls(s.calls).length, 0, `${name}: スイープを起動しない`)
+  }
+  // 削除を確認できた discard は除外に残らない（実体が無いので候補にしても無害だが、集合は確認の結果に従う）
+  const f = await freshAll('held-3')
+  stub(() => ({ ok: true, retained: false }))
+  await f.updateStateDetailed(33, { branch: 'feat/33-x' }, { cleanupWorktree: '/tmp/wt-33', cleanupMode: 'discard', deleteBranch: true })
+  assert.ok(!f.sweepHeldPaths.has('/tmp/wt-33'))
+  // 同じパスへの後の superseded の試みは、その結果に従う（discard で保持したあとでも回収対象に戻る）
+  stub((opts) => (opts.label.startsWith('state:cleanup') ? { ok: false, retained: true } : { ok: true }))
+  await f.updateStateDetailed(34, { status: 'implementing' }, { cleanupWorktree: '/tmp/wt-34', cleanupMode: 'discard' })
+  assert.ok(f.sweepHeldPaths.has('/tmp/wt-34'))
+  stub(() => ({ ok: true, retained: true }))
+  await f.updateStateDetailed(34, { status: 'merged' }, { cleanupWorktree: '/tmp/wt-34' })
+  assert.ok(!f.sweepHeldPaths.has('/tmp/wt-34'))
+})
+
+test('discard で .worktree を空にする patch は JSON マージに含めず、掃除エージェントの手順 2（worktree が無くなったときだけ）に任せる。superseded は従来どおり patch に含める', async () => {
+  const f = await freshAll('defer-1')
+  const d = stub(() => ({ ok: true, retained: false }))
+  await f.updateStateDetailed(35, { status: 'implementing', branch: 'feat/35-x', worktree: '' }, { cleanupWorktree: '/tmp/wt-35', cleanupMode: 'discard' })
+  const merge = d.calls.find((c) => c.opts.label === 'state:update:#35')
+  assert.match(merge.prompt, /"branch":"feat\/35-x"/)
+  assert.doesNotMatch(merge.prompt, /"worktree"/, 'worktree を空にする更新を先に書かない')
+  assert.match(d.calls.find((c) => c.opts.label === 'state:cleanup:#35').prompt, /"worktree":""/, '手順 2 が worktree の無くなったときだけ空にする')
+
+  const sp = stub(() => ({ ok: true, retained: false }))
+  await f.updateStateDetailed(36, { status: 'merged', worktree: '' }, { cleanupWorktree: '/tmp/wt-36' })
+  assert.match(sp.calls.find((c) => c.opts.label === 'state:update:#36').prompt, /"worktree":""/)
+  // 削除対象がない（worktree 指定なし）なら patch はそのまま
+  const nw = stub(() => ({ ok: true, retained: false }))
+  await f.updateStateDetailed(37, { status: 'planning', branch: '', worktree: '' }, {})
+  assert.match(nw.calls.find((c) => c.opts.label === 'state:update:#37').prompt, /"worktree":""/)
+})
+
 // ---- 3. Recover の流れ ----
 
 const ITEM = { type: 'implement', status: 'failed', pr: 0, branch: 'feat/2-x', worktree: '/repo/wt/old', fixCount: 0, note: '' }
@@ -260,6 +340,28 @@ test('Recover continue: wipCommitted:true なら --mode discard（--branch な�
   const undeclared = await recoverRun({ decision: 'continue', wipCommitted: false, cleanup: { ok: true, retained: false } })
   assert.ok(!labels(undeclared.calls).includes('state:cleanup:#2'))
   assert.ok(!labels(undeclared.calls).includes('impl:#2'))
+})
+
+test('Recover continue / discard: 掃除が保持し、failed の書き戻しも失敗しても、最終スイープは旧 worktree を消さない（スイープのエージェントにパスが渡らない）', async () => {
+  for (const decision of ['continue', 'discard']) {
+    let writes = 0
+    const { calls, result } = await runScript({
+      args: BASE_ARGS,
+      override: (label, opts, prompt) => {
+        if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: ITEM }, highWaterBytes: 0, highWaterVersion: 0 }
+        if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+        if (label === 'recover:#2') return { decision, branch: 'feat/2-x', wipCommitted: true, worktreeMissing: false, reason: 'test', brief: { done: 'd', remaining: 'r', broken: '' } }
+        if (label === 'state:cleanup:#2') return { ok: false, retained: true }
+        // Recover の掃除より後の状態書き込み（failed の書き戻し）をすべて失敗させる
+        if (label.startsWith('state:update:#2') || label.startsWith('state:#2')) { writes += 1; return writes > 1 ? { ok: false } : undefined }
+        return undefined
+      },
+    })
+    assert.ok(!labels(calls).includes('plan:#2') && !labels(calls).includes('impl:#2'), decision)
+    assert.ok(result.failures?.some((f) => f.issue === 2), decision)
+    const sweeps = calls.filter((c) => c.opts.label === 'worktree:sweep')
+    assert.ok(sweeps.every((c) => !c.prompt.includes('/repo/wt/old')), `${decision}: 保持した worktree をスイープに渡さない`)
+  }
 })
 
 // ---- ソース走査 ----

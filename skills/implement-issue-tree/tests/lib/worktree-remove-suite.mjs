@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { makeRepo, runScript } from './worktree-sandbox.mjs'
+import { gitEnv, makeRepo, runScript } from './worktree-sandbox.mjs'
 import { toolExists } from './signed-output.mjs'
 
 export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'worktree-remove.sh')
@@ -25,6 +25,13 @@ export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 
 function deadPid() {
   const r = spawnSync('sh', ['-c', 'echo $$'], { encoding: 'utf8' })
   return Number(r.stdout.trim())
+}
+
+// 実プロセス pid の開始時刻（スクリプトが lock の start と突き合わせる値と同じ形）。取れなければ null
+function lstart(pid) {
+  const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { PATH: process.env.PATH, LC_ALL: 'C', TZ: 'UTC' } })
+  const v = (r.stdout ?? '').trim()
+  return r.status === 0 && v !== '' ? v : null
 }
 
 export function registerWorktreeRemoveTests(bash) {
@@ -105,6 +112,42 @@ export function registerWorktreeRemoveTests(bash) {
     assert.equal(d.result.dirty, 1)
     assert.ok(existsSync(join(a.path, 'precious.txt')))
     assert.equal(sup(repo, a.path).result.dirty, 1)
+  })
+
+  test(`${tag} グローバルの除外（core.excludesFile・XDG の ignore）に載った未追跡ファイル（.env など）も汚れとして数え、discard は保持する。リポジトリの .gitignore は従う`, () => {
+    const repo = makeRepo()
+    const globalIgnore = join(repo.root, 'global-ignore')
+    writeFileSync(globalIgnore, '.env\n*.secret\n')
+    const globalConfig = join(repo.root, 'global-gitconfig')
+    writeFileSync(globalConfig, `[core]\n\texcludesFile = ${globalIgnore}\n`)
+    mkdirSync(join(repo.root, '.config', 'git'), { recursive: true })
+    writeFileSync(join(repo.root, '.config', 'git', 'ignore'), 'xdg.env\n')
+    // core.excludesFile を設定した環境と、設定しない環境（既定の XDG の ignore が効く）の両方
+    for (const [mode, name, file, env] of [
+      ['discard', 'a', '.env', { GIT_CONFIG_GLOBAL: globalConfig }],
+      ['discard', 'b', 'k.secret', { GIT_CONFIG_GLOBAL: globalConfig }],
+      ['discard', 'c', 'xdg.env', {}],
+      ['superseded', 'd', '.env', { GIT_CONFIG_GLOBAL: globalConfig }],
+    ]) {
+      const w = repo.addWorktree(name)
+      repo.write(w.path, file, 'KEY=1\n')
+      // 前提: 利用者の環境の素の status では見えない
+      const plain = spawnSync('git', ['status', '--porcelain'], { cwd: w.path, encoding: 'utf8', env: { ...gitEnv(repo.root), ...env } })
+      assert.equal(plain.stdout, '', `前提: ${file} は素の status に出ない`)
+      const r = run(repo, ['remove', '--mode', mode, '--path', w.path], { env })
+      if (mode === 'discard') {
+        assert.deepEqual([r.result.worktree, r.result.dirty], ['retained-dirty', 1], `${file}: ${JSON.stringify(r.result)}`)
+        assert.ok(existsSync(join(w.path, file)), `${file} が残る`)
+      } else {
+        // superseded は汚れていても消す（件数は記録される）
+        assert.deepEqual([r.result.worktree, r.result.dirty], ['removed', 1])
+      }
+    }
+    // リポジトリの .gitignore（node_modules/・dist/）は従う: 汚れに数えず消える
+    const g = repo.addWorktree('g')
+    repo.write(g.path, 'node_modules/x/i.js', 'i\n')
+    const rg = run(repo, ['remove', '--mode', 'discard', '--path', g.path], { env: { GIT_CONFIG_GLOBAL: globalConfig } })
+    assert.deepEqual([rg.result.worktree, rg.result.dirty], ['removed', 0])
   })
 
   test(`${tag} マージのコンフリクト中: superseded は消し、discard は保持する`, () => {
@@ -219,9 +262,69 @@ export function registerWorktreeRemoveTests(bash) {
     }
   })
 
+  // Claude Code の実物の形: `(pid N start <LC_ALL=C TZ=UTC ps -o lstart= の出力>)`。pid はセッション（メインの claude プロセス）の pid
+  const startTest = lstart(process.pid) === null ? test.skip : test
+  startTest(`${tag} lock（start つき）: 生きているプロセスで start が一致 → 保持。start が違う（pid の再利用）→ 外して消す。pid が死んでいる → 外して消す`, () => {
+    const repo = makeRepo()
+    const real = lstart(process.pid)
+    const live = repo.addWorktree('live')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', `claude agent agent-aa14453c88416c114 (pid ${process.pid} start ${real})`, live.path)
+    for (const r of [sup(repo, live.path), dis(repo, live.path)]) {
+      assert.deepEqual([r.result.worktree, r.result.unlocked, r.result.retained], ['retained-locked', false, true], JSON.stringify(r.result))
+    }
+    assert.ok(existsSync(live.path))
+    // ps の出力の空白の違い（日が 1 桁のときの 2 連スペースなど）では不一致にならない
+    const spaced = repo.addWorktree('spaced')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', `claude agent agent-aa (pid ${process.pid} start ${real.replace(/ /g, '  ')})`, spaced.path)
+    assert.equal(sup(repo, spaced.path).result.worktree, 'retained-locked')
+
+    for (const [mode, name, reason] of [
+      ['superseded', 'reuse1', `claude agent agent-r1 (pid ${process.pid} start Mon Jan  1 00:00:00 2001)`],
+      ['discard', 'reuse2', `claude agent agent-r2 (pid ${process.pid} start Mon Jan  1 00:00:00 2001)`],
+      ['superseded', 'dead1', `claude agent agent-d1 (pid ${deadPid()} start ${real})`],
+      ['discard', 'dead2', `claude agent agent-d2 (pid ${deadPid()} start ${real})`],
+    ]) {
+      const w = repo.addWorktree(name)
+      repo.git(repo.main, 'worktree', 'lock', '--reason', reason, w.path)
+      const r = mode === 'superseded' ? sup(repo, w.path) : dis(repo, w.path)
+      assert.deepEqual([name, r.result.worktree, r.result.unlocked, r.result.ok], [name, 'removed', true, true], JSON.stringify(r.result))
+      assert.ok(!existsSync(w.path))
+    }
+  })
+
+  startTest(`${tag} lock（start つき）: ps で開始時刻を観測できない（ps が失敗・出力が空）ときは生存扱いで保持する`, () => {
+    const repo = makeRepo()
+    const real = lstart(process.pid)
+    const shim = join(repo.root, 'psshim')
+    mkdirSync(shim)
+    const realPs = spawnSync('sh', ['-c', 'command -v ps'], { encoding: 'utf8' }).stdout.trim()
+    // lstart を求められたときだけ失敗（または空）にする。生死の確認（ps -p）は実物へ
+    for (const [name, body] of [['fail', 'exit 1'], ['empty', 'exit 0']]) {
+      writeFileSync(join(shim, 'ps'), `#!/bin/sh\ncase "$*" in\n  *lstart*) ${body} ;;\nesac\nexec ${realPs} "$@"\n`, { mode: 0o755 })
+      const env = { PATH: `${shim}:${process.env.PATH}` }
+      const w = repo.addWorktree(`mismatch-${name}`)
+      repo.git(repo.main, 'worktree', 'lock', '--reason', `claude agent agent-x (pid ${process.pid} start Mon Jan  1 00:00:00 2001)`, w.path)
+      const r = run(repo, ['remove', '--mode', 'superseded', '--path', w.path], { env })
+      assert.deepEqual([name, r.result.worktree, r.result.unlocked], [name, 'retained-locked', false], JSON.stringify(r.result))
+      assert.ok(existsSync(w.path))
+    }
+    assert.ok(real)
+  })
+
+  test(`${tag} lock: \`claude session …\` の形も agent と同じ規則（pid が生きていれば保持、死んでいれば外して消す）`, () => {
+    const repo = makeRepo()
+    const live = repo.addWorktree('live')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', `claude session sess-1 (pid ${process.pid})`, live.path)
+    assert.equal(sup(repo, live.path).result.worktree, 'retained-locked')
+    const dead = repo.addWorktree('dead')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', `claude session sess-2 (pid ${deadPid()})`, dead.path)
+    const r = sup(repo, dead.path)
+    assert.deepEqual([r.result.worktree, r.result.unlocked], ['removed', true])
+  })
+
   test(`${tag} lock: agent の形でない理由（手動の lock・理由なし・pid の形が違う）は pid が死んでいても外さない`, () => {
     const repo = makeRepo()
-    const reasons = [['manual', 'keep until review'], ['noreason', null], ['nopid', 'claude agent agent-abc'], ['badpid', 'claude agent agent-abc (pid x1)'], ['noname', 'claude agent  (pid 1)']]
+    const reasons = [['manual', 'keep until review'], ['noreason', null], ['nopid', 'claude agent agent-abc'], ['badpid', 'claude agent agent-abc (pid x1)'], ['noname', 'claude agent  (pid 1)'], ['emptystart', `claude agent agent-abc (pid ${deadPid()} start )`], ['other', `claude other agent-abc (pid ${deadPid()})`]]
     for (const [name, reason] of reasons) {
       const w = repo.addWorktree(name)
       repo.git(repo.main, 'worktree', 'lock', ...(reason === null ? [] : ['--reason', reason]), w.path)
@@ -277,7 +380,7 @@ export function registerWorktreeRemoveTests(bash) {
     assert.equal(sup(repo, w.path).result.worktree, 'removed')
     const w2 = repo.addWorktree('w2')
     const inside = run(repo, ['remove', '--mode', 'superseded', '--path', w2.path], { cwd: w2.path })
-    assert.equal(inside.result.worktree, 'main')
+    assert.deepEqual([inside.result.worktree, inside.result.ok, inside.result.retained], ['cwd', false, true], 'メインとは区別できる語')
     assert.ok(existsSync(w2.path))
   })
 
@@ -331,7 +434,7 @@ export function registerWorktreeRemoveTests(bash) {
     const c = repo.addWorktree('c')
     const d2 = repo.addWorktree('d')
     const f = dis(repo, c.path, ['--branch', d2.branch, '--base', 'main'])
-    assert.deepEqual([f.result.worktree, f.result.branch, f.result.ok], ['removed', 'failed', false])
+    assert.deepEqual([f.result.worktree, f.result.branch, f.result.ok, f.result.branchSha], ['removed', 'failed', false, ''], '削除に失敗したときは「削除前の先頭 sha」を出さない')
     assert.ok(repo.branches().includes(d2.branch))
   })
 
@@ -439,7 +542,9 @@ export function registerWorktreeRemoveTests(bash) {
   test(`${tag} sweep: 状態ファイルを読めない（無い・壊れている・items が無い）ときは何も消さない`, () => {
     const repo = makeRepo()
     const a = repo.addWorktree('a')
-    for (const [items, raw] of [[null, undefined], [{}, '{not json'], [{}, '{}'], [{}, '[]']]) {
+    // jq は空ファイル・空白だけの入力でも 0 終了するので、形（ちょうど 1 個の値・items がオブジェクト）を先に確かめる
+    const bad = [[null, undefined], [{}, '{not json'], [{}, '{}'], [{}, '[]'], [{}, ''], [{}, '  \n\t\n'], [{}, '{"items":{}}\n{"items":{}}'], [{}, '{"x":1}'], [{}, '{"items":[]}'], [{}, '{"items":null}'], [{}, '{"items":"x"}'], [{}, 'null'], [{}, '"s"'], [{}, '{"items":{"1":5}}']]
+    for (const [items, raw] of bad) {
       const r = sweep(repo, [a.path], items, { raw })
       assert.deepEqual([r.status, r.result.reason, r.result.removed], [0, 'state-unreadable', []], String(raw))
       assert.ok(existsSync(a.path))

@@ -20,6 +20,7 @@ WR_MAIN=0
 WR_LOCKED=0
 WR_LOCK_REASON=""
 WR_LOCK_PID=""
+WR_LOCK_START=""
 
 # 削除対象の worktree パス。ホストの sanitizeWorktreePath と同じ形（絶対パス・先頭は英数字・使える文字は英数字と - _ . / 空白・.. を含まない）
 wr_valid_path() {
@@ -60,30 +61,63 @@ wr_valid_file() {
   return 0
 }
 
-# lock 理由が Claude Code の agent worktree の形（`claude agent <名前> (pid <N>)`）なら、その pid を WR_LOCK_PID に入れる。
-# ほかの形は WR_LOCK_PID を空にして return 1（利用者が手で付けた lock など。解除しない）
+# lock 理由が Claude Code の worktree の形（`claude agent|session <名前> (pid <N>)` または `… (pid <N> start <ps -o lstart= の出力>)`。
+# Claude Code 側の照合は /^claude (?:agent|session) .{1,255} \(pid (\d{1,10})(?: start (.{1,255}))?\)$/）なら、pid を WR_LOCK_PID に、
+# start（あれば）を WR_LOCK_START に入れる。この pid は agent ごとではなく**セッション（メインの claude プロセス）の pid** で、
+# 同じセッションの中から実行すると常に生きている。ほかの形は WR_LOCK_PID を空にして return 1（利用者が手で付けた lock など。解除しない）
 wr_lock_pid() {
-  local r=$1 pid name
+  local r=$1 body tail pid rest name start=""
   WR_LOCK_PID=""
+  WR_LOCK_START=""
   case "${r}" in
-    'claude agent '*' (pid '*')') ;;
+    'claude agent '*')' | 'claude session '*')') ;;
     *) return 1 ;;
   esac
-  pid=${r%')'}
-  pid=${pid##*' (pid '}
+  body=${r%')'}
+  case "${body}" in
+    *' (pid '*) ;;
+    *) return 1 ;;
+  esac
+  tail=${body##*' (pid '}
+  name=${body%' (pid '"${tail}"}
+  case "${name}" in
+    'claude agent '*) name=${name#'claude agent '} ;;
+    *) name=${name#'claude session '} ;;
+  esac
+  case "${tail}" in
+    *' '*)
+      pid=${tail%% *}
+      rest=${tail#* }
+      case "${rest}" in
+        'start '*) start=${rest#'start '} ;;
+        *) return 1 ;;
+      esac
+      [ -n "${start}" ] && [ "${#start}" -le 255 ] || return 1
+      ;;
+    *) pid=${tail} ;;
+  esac
   case "${pid}" in
     '' | *[!0-9]*) return 1 ;;
   esac
-  [ "${#pid}" -le 9 ] || return 1
-  name=${r#'claude agent '}
-  name=${name%' (pid '*}
-  [ -n "${name}" ] || return 1
+  [ "${#pid}" -le 10 ] || return 1
+  [ -n "${name}" ] && [ "${#name}" -le 255 ] || return 1
   WR_LOCK_PID=${pid}
+  WR_LOCK_START=${start}
   return 0
 }
 
-# lock の扱い。$1 = locked か（0/1）、$2 = pid（wr_lock_pid の結果。空なら agent の形ではない）、$3 = その pid のプロセスが
-# 生きているか（0/1。観測できなければ 1 = 生きていると見なす）。標準出力: none（lock なし）/ unlock（agent の形で pid が死んでいる）/
+# lock 理由の start（ps -o lstart= の出力）と、いま観測した start が同じか。空白の連なり（BSD の ps は日が 1 桁のとき 2 連スペース）は
+# 1 個に畳み、両端の空白は無視して比べる。$1 = 観測した値、$2 = lock 理由の値。同じなら return 0
+wr_start_matches() {
+  local a b
+  a=$(printf '%s' "$1" | tr -s ' \t' '  ' | sed 's/^ //; s/ $//')
+  b=$(printf '%s' "$2" | tr -s ' \t' '  ' | sed 's/^ //; s/ $//')
+  [ -n "${a}" ] && [ "${a}" = "${b}" ]
+}
+
+# lock の扱い。$1 = locked か（0/1）、$2 = pid（wr_lock_pid の結果。空なら Claude Code の形ではない）、$3 = その pid のプロセスが
+# 生きているか（0/1。観測できなければ 1 = 生きていると見なす。start つきの lock では start が一致する同じプロセスか）。
+# 標準出力: none（lock なし）/ unlock（Claude Code の形で pid が死んでいる・pid が再利用されている）/
 # retain（それ以外。lock は外さず、worktree も消さない）
 wr_lock_action() {
   if [ "$1" = 0 ]; then
@@ -230,12 +264,12 @@ wr_wt_gone() {
 }
 
 # 結果の ok。$1 = モード、$2 = worktree の結果、$3 = ブランチの結果。
-# superseded: worktree が残っても非致命（ok。retained で区別する）。ただしメイン worktree を指していた（main）は異常として ok にしない。
+# superseded: worktree が残っても非致命（ok。retained で区別する）。ただしメイン worktree を指していた（main）・カレントがその中（cwd）は異常として ok にしない。
 # discard: worktree が無くなり、ブランチも（指定があれば）消えたか元から無いときだけ ok
 wr_ok() {
   case "$1" in
     superseded)
-      [ "$2" != main ] && return 0
+      [ "$2" != main ] && [ "$2" != cwd ] && return 0
       return 1
       ;;
     discard)
