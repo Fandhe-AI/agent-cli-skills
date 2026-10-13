@@ -229,7 +229,7 @@ observe_pr() {
     if (type == "object" and (.headRefOid | type) == "string" and (.state | type) == "string") then
       [ .state, .headRefOid, (.mergeable // ""),
         (if (.headRefName == $br and .baseRefName == $bs and .isCrossRepository == false
-             and ((.closingIssuesReferences // []) | (length == 0 or any(.[]; .number == $n)))) then "1" else "0" end) ]
+            and ((.closingIssuesReferences // []) | (length == 0 or any(.[]; .number == $n)))) then "1" else "0" end) ]
       | join(" ")
     else empty end' 2>/dev/null) || { fail "gh pr view の JSON"; return 1; }
   # shellcheck disable=SC2086
@@ -311,7 +311,7 @@ observe_reviews() {
         ($v | map(select(. == "success" or . == "neutral" or . == "skipped")) | length),
         ($v | map(select(. == "queued" or . == "in_progress" or . == "waiting" or . == "pending" or . == "requested")) | length),
         ($v | map(select(. != "success" and . != "neutral" and . != "skipped" and . != "queued" and . != "in_progress"
-                         and . != "waiting" and . != "pending" and . != "requested")) | length) ] | join(" ")' 2>/dev/null) || { fail "check-run の形式"; return 1; }
+                        and . != "waiting" and . != "pending" and . != "requested")) | length) ] | join(" ")' 2>/dev/null) || { fail "check-run の形式"; return 1; }
   # shellcheck disable=SC2086
   set -- ${cr}
   [ $# -eq 4 ] || { fail "check-run 件数の形式"; return 1; }

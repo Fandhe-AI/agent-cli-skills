@@ -3739,7 +3739,7 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 const SCRIPT_SHA256={
 'measure-residual-bytes.sh':'ab527279ba185bc1aabd19411f16acd42491d7d39840b153d68851175e21e29f',
 'measure-free-disk.sh':'13aea5d9ef3fc787d7a333740bec814a5ffdcfa30b3a8e08c2ffb00127c66036',
-'observe-pr.sh':'91d0b8f0b32717c7bdea4018bb800c799ceb21e34b65d490985310311fa9530c',
+'observe-pr.sh':'ec669b490cb2be668d9110c89523b319604c16dcb150638a71c5fb083b8a7a05',
 }
 
 
