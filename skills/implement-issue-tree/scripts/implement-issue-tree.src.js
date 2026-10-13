@@ -1229,7 +1229,7 @@ function subjectDecisionRules(failPre, failPost) {
 
 // base 取り込みマージコミットも commit-msg hook を通るため、固定 subject では type/scope-enum を
 // 持つリポで拒否され得る（hook 拒否は MERGE_HEAD が残る exit 1。3 分岐）。`git merge -F <file>`
-// は git merge 2.9+ の正規オプション。決定規則本文は subjectDecisionRules 参照（articles#52 P1）。
+// は git 2.20 以上の git merge の正規オプション（2.18.4 以前には無い）。決定規則本文は subjectDecisionRules 参照（articles#52 P1）。
 // 検証権限を持つ経路（pr-create・fix）専用で、コンフリクトの解消と subject の決定をエージェントが行う。
 // 検証権限を持たない自動 base 取り込みは scripts/base-merge.sh が行い（埋め込み subject・コンフリクトは
 // 解消せず fix 経路へ委譲）、この関数は使わない（Issue #603 第 3 弾）。
