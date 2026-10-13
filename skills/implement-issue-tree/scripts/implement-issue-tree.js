@@ -224,25 +224,43 @@ const securityReviewModel=securityReviewEnabled?(agentModels.securityReview??age
 
 
 
+
+
+
+const REVIEW_SIDE_MAX_BOTH=940
+const REVIEW_SIDE_MAX_ONE=1900
 const REVIEW_SEVERITY_ORDER=['none','low','medium','high','critical']
+function capSideSummary(str,max){
+let t=String(str)
+let excess=sanitize(t).length-max
+if(excess<=0)return t
+
+while(t.length>0&&excess>0){
+t=t.slice(0,Math.max(0,t.length-excess))
+excess=sanitize(t).length-max
+}
+return`${t}（省略）`
+}
 function combineReviews(main,sec){
-const sides=[['品質・セキュリティ（通常の Review）',main],['セキュリティ専用の Review',sec]]
+const sides=[['セキュリティ専用の Review',sec],['品質・セキュリティ（通常の Review）',main]]
 const isOk=(r)=>r?.state==='ok'
 const severity=(r)=>{
 if(isOk(r))return'none'
 const v=r?.highestSeverity
 return REVIEW_SEVERITY_ORDER.includes(v)&&v!=='none'?v:'medium'
 }
-const text=(name,r)=>`【${name}】${r?.summary ?? 'review エージェントが異常終了した'}`
+const join=(shown)=>shown
+.map(([name,r])=>`【${name}】${capSideSummary(r?.summary ?? 'review エージェントが異常終了した', shown.length > 1 ? REVIEW_SIDE_MAX_BOTH : REVIEW_SIDE_MAX_ONE)}`)
+.join('\n')
 const blocked=sides.filter(([,r])=>r?.state==='blocked')
 if(blocked.length>0){
-return{state:'blocked',highestSeverity:'none',summary:blocked.map(([n,r])=>text(n,r)).join('\n'),worktreePath:main?.worktreePath}
+return{state:'blocked',highestSeverity:'none',summary:join(blocked),worktreePath:main?.worktreePath}
 }
 if(isOk(main)&&isOk(sec)){
-return{state:'ok',highestSeverity:'none',summary:sides.map(([n,r])=>text(n,r)).join('\n'),worktreePath:main?.worktreePath}
+return{state:'ok',highestSeverity:'none',summary:join(sides),worktreePath:main?.worktreePath}
 }
 const highest=sides.map(([,r])=>severity(r)).reduce((a,b)=>(REVIEW_SEVERITY_ORDER.indexOf(b)>REVIEW_SEVERITY_ORDER.indexOf(a)?b:a))
-return{state:'needs-fix',highestSeverity:highest,summary:sides.filter(([,r])=> !isOk(r)).map(([n,r])=>text(n,r)).join('\n'),worktreePath:main?.worktreePath}
+return{state:'needs-fix',highestSeverity:highest,summary:join(sides.filter(([,r])=> !isOk(r))),worktreePath:main?.worktreePath}
 }
 
 
@@ -7625,12 +7643,14 @@ isolation:'worktree',
 let rMain
 let rSec=null
 let reviewRejection=null
+let secRejection=null
 if(securityReviewEnabled){
 const[sMain,sSec]=await Promise.allSettled([reviewCall,agent(reviewPrompt(item,impl,true),{label:`security-review:#${item.number}`,phase:'Review',model:securityReviewModel,effort:'medium',schema:REVIEW_SCHEMA,isolation:'worktree'})])
 rMain=sMain.status==='fulfilled'?sMain.value:null
 rSec=sSec.status==='fulfilled'?sSec.value:null
 
 reviewRejection=sMain.status==='rejected'?sMain:sSec.status==='rejected'?sSec:null
+secRejection=sSec.status==='rejected'?sSec:null
 }else{
 rMain=await reviewCall
 }
@@ -7640,7 +7660,14 @@ recordEphemeralWorktree(item.number,rMain?.worktreePath,'review')
 if(securityReviewEnabled)recordEphemeralWorktree(item.number,rSec?.worktreePath,'security-review')
 
 
-if(reviewRejection)throw reviewRejection.reason
+if(reviewRejection){
+
+
+if(secRejection&&secRejection!==reviewRejection){
+log(`#${item.number}: セキュリティ専用の Review も異常終了した: ${capText(sanitize(secRejection.reason?.message ?? secRejection.reason), 300)}`)
+}
+throw reviewRejection.reason
+}
 let r=rMain
 if(securityReviewEnabled){
 const brief=(x)=>`${sanitize(x?.state ?? '無効な結果')}（${sanitize(x?.highestSeverity ?? '-')}）`

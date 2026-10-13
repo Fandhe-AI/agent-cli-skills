@@ -215,6 +215,49 @@ test('結合: 両方 needs-fix なら fix に両方の指摘を合わせて渡�
   assert.match(fixes[0].prompt, /SEC-FINDING-2/)
 })
 
+// fixPrompt は summary 全体を 2000 文字で切る。通常の Review の summary が長くても、セキュリティ専用の
+// 指摘と見出しが fix のプロンプトから落ちないこと（側ごとに長さを制限し、セキュリティ側を先に並べる）。
+for (const mainLen of [500, 1990, 2500]) {
+  test(`結合: 通常の Review の summary が ${mainLen} 文字でも、fix のプロンプトにセキュリティ専用の指摘と見出しが残る`, async () => {
+    const { calls } = await runScript({
+      args: { ...BASE_ARGS, securityReview: true },
+      override: scriptedReviews([[nf('low', 'Q'.repeat(mainLen)), nf('critical', 'SECFIND-critical-injection')]]),
+    })
+    const fixes = labels(calls, 'fix:#')
+    assert.equal(fixes.length, 1)
+    assert.match(fixes[0].prompt, /【セキュリティ専用の Review】SECFIND-critical-injection/)
+    assert.match(fixes[0].prompt, /【品質・セキュリティ（通常の Review）】Q{20}/, '通常側も先頭は残る')
+    assert.ok(fixes[0].prompt.indexOf('【セキュリティ専用の Review】') < fixes[0].prompt.indexOf('【品質・セキュリティ（通常の Review）】'), 'セキュリティ側が先')
+    if (mainLen > 940) assert.match(fixes[0].prompt, /Q（省略）/, '切り詰めた印')
+  })
+}
+
+test('結合: 両方の summary が長くても、fix のプロンプトに両方の先頭が残る', async () => {
+  const { calls } = await runScript({
+    args: { ...BASE_ARGS, securityReview: true },
+    override: scriptedReviews([[nf('high', `MAINHEAD${'a'.repeat(3000)}`), nf('critical', `SECHEAD${'b'.repeat(3000)}`)]]),
+  })
+  const p = labels(calls, 'fix:#')[0].prompt
+  assert.match(p, /SECHEAD/)
+  assert.match(p, /MAINHEAD/)
+  assert.match(p, /b（省略）/)
+  assert.match(p, /a（省略）/)
+})
+
+test('combineReviews: 側ごとの上限は fixPrompt の 2000 文字に収まる（$ のように sanitize で広がる文字でも）', () => {
+  for (const ch of ['x', '$', '\\', '\n']) {
+    const r = combineReviews(nf('low', ch.repeat(5000)), nf('critical', ch.repeat(5000)))
+    const text = r.summary.replace(/\r?\n/g, ' ').replace(/`/g, "'").replace(/\\/g, '/').replace(/\$/g, '\\$')
+    assert.ok(text.length <= 2000, `${JSON.stringify(ch)}: sanitize 後 ${text.length} 文字`)
+    assert.match(r.summary, /【セキュリティ専用の Review】/)
+    assert.match(r.summary, /【品質・セキュリティ（通常の Review）】/)
+  }
+  // 片方だけ指摘があるなら、その側が全体の枠を使える（上限が緩む）
+  const one = combineReviews(ok(), nf('high', 'y'.repeat(1500)))
+  assert.doesNotMatch(one.summary, /省略/)
+  assert.equal(combineReviews(ok(), nf('high', 'short')).summary, '【セキュリティ専用の Review】short')
+})
+
 test('結合: セキュリティ専用の Review が blocked なら fix せず blocked で終わる', async () => {
   const { calls, result } = await runScript({
     args: { ...BASE_ARGS, securityReview: true },
@@ -303,6 +346,30 @@ test('例外: 両方 reject したらパス不明の 2 件を計上し、通常�
   })
   assert.deepEqual(reviewLedger(result), [['review', ''], ['security-review', '']])
   assert.deepEqual(result.failures.map((f) => f.reason), ['MAIN-BOOM'])
+})
+
+test('例外: 両方 reject したらセキュリティ側の理由を長さ制限つきで 1 行ログに残す（片方だけなら出さない）', async () => {
+  const both = await runScript({
+    args: { ...BASE_ARGS, securityReview: true },
+    override: (label) => {
+      if (label.startsWith('security-review:#')) throw new Error(`SEC-BOOM\n\`${'z'.repeat(1000)}`)
+      if (label.startsWith('review:#')) throw new Error('MAIN-BOOM')
+    },
+  })
+  const secLogs = both.logs.filter((l) => l.includes('セキュリティ専用の Review も異常終了した'))
+  assert.equal(secLogs.length, 1)
+  assert.match(secLogs[0], /SEC-BOOM '/, '改行・バッククォートは sanitize 済み')
+  assert.ok(secLogs[0].length < 400, `長さ制限: ${secLogs[0].length}`)
+  assert.match(secLogs[0], /（省略）$/)
+  assert.deepEqual(both.result.failures.map((f) => f.reason), ['MAIN-BOOM'])
+
+  for (const only of ['review:#', 'security-review:#']) {
+    const r = await runScript({
+      args: { ...BASE_ARGS, securityReview: true },
+      override: (label) => { if (label.startsWith(only)) throw new Error('ONE-BOOM') },
+    })
+    assert.equal(r.logs.filter((l) => l.includes('も異常終了した')).length, 0)
+  }
 })
 
 test('例外: 無効時の通常の Review の reject も同じ failed 経路（有効時はこの経路に揃えている）', async () => {

@@ -224,25 +224,43 @@ const securityReviewModel = securityReviewEnabled ? (agentModels.securityReview 
 // 無効な結果（null 等）は既存の単独 Review と同じく指摘あり（medium 相当）として扱い、needs-fix なのに
 // 重要度が none / 不明の矛盾出力も medium 相当に倒す（片方の low と合わせて最終ラウンドを通さないため）。
 // summary には指摘のある側（blocked なら blocked の側）だけを見出し付きで並べ、fix へそのまま渡せる形にする。
+// fixPrompt は summary 全体を 2000 文字で切るため、先頭の側が長いと後ろの側が丸ごと消える。そこで側ごとに
+// 長さを制限し（両側とも出すなら各 940 字・片側だけなら 1900 字。sanitize 後の長さで測る）、見落としの
+// 代償が大きいセキュリティ専用の側を先に並べる。切り詰めたときは capText と同じ（省略）を付ける。
+const REVIEW_SIDE_MAX_BOTH = 940
+const REVIEW_SIDE_MAX_ONE = 1900
 const REVIEW_SEVERITY_ORDER = ['none', 'low', 'medium', 'high', 'critical']
+function capSideSummary(str, max) {
+  let t = String(str)
+  let excess = sanitize(t).length - max
+  if (excess <= 0) return t
+  // sanitize は 1 文字を最大 2 文字へ広げる。超過ぶんの文字数だけ削れば必ず 1 回ごとに前進する。
+  while (t.length > 0 && excess > 0) {
+    t = t.slice(0, Math.max(0, t.length - excess))
+    excess = sanitize(t).length - max
+  }
+  return `${t}（省略）`
+}
 function combineReviews(main, sec) {
-  const sides = [['品質・セキュリティ（通常の Review）', main], ['セキュリティ専用の Review', sec]]
+  const sides = [['セキュリティ専用の Review', sec], ['品質・セキュリティ（通常の Review）', main]]
   const isOk = (r) => r?.state === 'ok'
   const severity = (r) => {
     if (isOk(r)) return 'none'
     const v = r?.highestSeverity
     return REVIEW_SEVERITY_ORDER.includes(v) && v !== 'none' ? v : 'medium'
   }
-  const text = (name, r) => `【${name}】${r?.summary ?? 'review エージェントが異常終了した'}`
+  const join = (shown) => shown
+    .map(([name, r]) => `【${name}】${capSideSummary(r?.summary ?? 'review エージェントが異常終了した', shown.length > 1 ? REVIEW_SIDE_MAX_BOTH : REVIEW_SIDE_MAX_ONE)}`)
+    .join('\n')
   const blocked = sides.filter(([, r]) => r?.state === 'blocked')
   if (blocked.length > 0) {
-    return { state: 'blocked', highestSeverity: 'none', summary: blocked.map(([n, r]) => text(n, r)).join('\n'), worktreePath: main?.worktreePath }
+    return { state: 'blocked', highestSeverity: 'none', summary: join(blocked), worktreePath: main?.worktreePath }
   }
   if (isOk(main) && isOk(sec)) {
-    return { state: 'ok', highestSeverity: 'none', summary: sides.map(([n, r]) => text(n, r)).join('\n'), worktreePath: main?.worktreePath }
+    return { state: 'ok', highestSeverity: 'none', summary: join(sides), worktreePath: main?.worktreePath }
   }
   const highest = sides.map(([, r]) => severity(r)).reduce((a, b) => (REVIEW_SEVERITY_ORDER.indexOf(b) > REVIEW_SEVERITY_ORDER.indexOf(a) ? b : a))
-  return { state: 'needs-fix', highestSeverity: highest, summary: sides.filter(([, r]) => !isOk(r)).map(([n, r]) => text(n, r)).join('\n'), worktreePath: main?.worktreePath }
+  return { state: 'needs-fix', highestSeverity: highest, summary: join(sides.filter(([, r]) => !isOk(r))), worktreePath: main?.worktreePath }
 }
 // agent() の opts に展開するモデル指定。上書きも既定も無い段階（plan の既定）は model キー自体を
 // 持たない（model: undefined を渡すとセッション継承と同じになる保証がランタイムの文書に無いため）。
@@ -7625,12 +7643,14 @@ async function runImplement(item) {
       let rMain
       let rSec = null
       let reviewRejection = null
+      let secRejection = null
       if (securityReviewEnabled) {
         const [sMain, sSec] = await Promise.allSettled([reviewCall, agent(reviewPrompt(item, impl, true), { label: `security-review:#${item.number}`, phase: 'Review', model: securityReviewModel, effort: 'medium', schema: REVIEW_SCHEMA, isolation: 'worktree' })])
         rMain = sMain.status === 'fulfilled' ? sMain.value : null
         rSec = sSec.status === 'fulfilled' ? sSec.value : null
         // 通常の Review を先に採る（単独の Review の reject と同じ原因を優先して伝える）。
         reviewRejection = sMain.status === 'rejected' ? sMain : sSec.status === 'rejected' ? sSec : null
+        secRejection = sSec.status === 'rejected' ? sSec : null
       } else {
         rMain = await reviewCall
       }
@@ -7640,7 +7660,14 @@ async function runImplement(item) {
       if (securityReviewEnabled) recordEphemeralWorktree(item.number, rSec?.worktreePath, 'security-review')
       // 片方でも reject したら、台帳へ記録した後に単独の Review の reject と同じ経路（runOne の catch-all）へ流す。
       // 無効な結果（null）へ倒して needs-fix にすると、agent の例外が fix の実行を誘発する別経路になる。
-      if (reviewRejection) throw reviewRejection.reason
+      if (reviewRejection) {
+        // 両方 reject すると通常の Review の原因だけが伝わり、セキュリティ側の原因がどこにも残らないため、
+        // 伝える原因と別の側の reject 理由をログへ 1 行残す（長さは制限する）。
+        if (secRejection && secRejection !== reviewRejection) {
+          log(`#${item.number}: セキュリティ専用の Review も異常終了した: ${capText(sanitize(secRejection.reason?.message ?? secRejection.reason), 300)}`)
+        }
+        throw reviewRejection.reason
+      }
       let r = rMain
       if (securityReviewEnabled) {
         const brief = (x) => `${sanitize(x?.state ?? '無効な結果')}（${sanitize(x?.highestSeverity ?? '-')}）`
