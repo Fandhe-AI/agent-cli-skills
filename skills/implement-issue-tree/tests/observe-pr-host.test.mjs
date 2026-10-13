@@ -286,3 +286,19 @@ test('MERGE_SCHEMA.checksObservation: 任意フィールド（旧応答形式と
   assert.ok(!m.MERGE_SCHEMA.required.includes('checksObservation'))
   assert.deepEqual(Object.keys(p.properties.payload.properties).sort(), ['attempt', 'checkRuns', 'err', 'headSha', 'inputSha256', 'maxAttempts', 'mode', 'outcome', 'statuses', 'total'])
 })
+
+// --- 待機の上限の整合 ---
+
+test('OBSERVE_MAX_ATTEMPTS（プロンプトの「最大 N 回」）は observe-pr.sh の既定値と同じで、1 回の起動は 90 秒に収まる', () => {
+  const sh = readFileSync(OBSERVE_SH, 'utf8')
+  const def = (name) => Number(new RegExp(`env_int "\\$\\{${name}:-\\}" (\\d+) (\\d+) (\\d+)`).exec(sh)?.[1])
+  assert.equal(def('OBSERVE_PR_MAX_ATTEMPTS'), m.OBSERVE_MAX_ATTEMPTS, 'スクリプトの既定値とホストの定数がずれている')
+  const polls = def('OBSERVE_PR_POLLS')
+  const sleep = def('OBSERVE_PR_SLEEP_SEC')
+  const window = def('OBSERVE_PR_WINDOW_SEC')
+  assert.ok((polls - 1) * sleep < 90, `内部 sleep の合計 ${(polls - 1) * sleep} 秒が 90 秒未満`)
+  assert.ok(window <= 90)
+  // 全体の待機はおよそ 10 分（現行の「最大 10 分」と同等）
+  const total = m.OBSERVE_MAX_ATTEMPTS * (polls - 1) * sleep
+  assert.ok(total >= 480 && total <= 660, `合計の待機 ${total} 秒が 10 分前後`)
+})
