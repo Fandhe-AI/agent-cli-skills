@@ -223,7 +223,7 @@ test('#603-8 a・b・c: failed が 1 件以上は needs-fix、pending が残る 
   const p = monitorPrompt(item, impl, [], true, true)
   assert.ok(p.includes('   a. 状態 1 で failed が 0 件であること。'))
   const b = p.split('\n').find((l) => l.startsWith('   b. '))
-  assert.ok(b.includes('pending が 0 件であること（met なら満たす）') && b.includes('exhausted は pending が残ったままなので満たさず、state: timeout'))
+  assert.ok(b.includes('pending が 0 件であること（met なら満たす）') && b.includes('exhausted は pending が残ったままなので満たさない') && b.includes('state: timeout（手順 7。checksTotal は状態 1 の総数）'))
   const c = p.split('\n').find((l) => l.startsWith('   c. '))
   assert.ok(c.includes('failed が 1 件以上の場合') && c.includes('gh run view <run-id> --log-failed') && c.includes('state: needs-fix'))
   // 3c は run-id の出所（gh run list --commit <HEAD sha>）を持つ。判定には gh pr checks の出力を使わないが、原因調査には gh run を使える
@@ -353,4 +353,25 @@ test('#603-8 3e が起動を確認した時点（met・total 1 以上）で手�
   // 状態表（手順 3 冒頭）は 3e より前にあり、状態 2 が最優先のまま。更新後は状態 2 に戻らない
   assert.ok(p.indexOf('   - 状態 2「') < p.indexOf('   e. チェック総数が 0 件'))
   assert.ok(s3e.includes('確定値 1 件以上なので状態 2 には戻らない'))
+})
+
+test('#603-8 exhausted の扱い（failed ≥ 1 は needs-fix 優先）は状態 1 に 1 か所だけ定義され、b と 3e はそれを参照する', () => {
+  const p = monitorPrompt(item, impl, [], true, true)
+  const state1 = p.indexOf('   - 状態 1「整合」')
+  const ruleAt = p.indexOf('exhausted の規則（exhausted の扱いの唯一の定義')
+  const b = p.indexOf('   b. pending が 0 件であること')
+  const s3e = p.indexOf('   e. チェック総数が 0 件')
+  // 定義は状態 1 の行の中にあり、b と 3e より前にある
+  assert.ok(state1 >= 0 && ruleAt > state1 && ruleAt < b && b < s3e, '規則の位置が 状態 1 < b < 3e の順になっていない')
+  assert.ok(p.slice(ruleAt, b).includes('failed が 1 件以上なら timeout ではなく c の needs-fix を優先'))
+  assert.ok(p.slice(ruleAt, b).includes('3e → 手順 3 の往復後の exhausted も同じ規則'))
+  // 規則の本体（needs-fix を優先する文）はプロンプト全体で 1 回だけ
+  assert.equal(p.split('timeout ではなく c の needs-fix を優先').length - 1, 1, '規則の本体が複数か所にある')
+  // b と 3e は状態 1 の規則を参照し、3e は timeout へ直送しない
+  const bText = p.slice(b, p.indexOf('   c. ', b))
+  assert.ok(bText.includes('状態 1 の exhausted の規則に従う'))
+  assert.ok(bText.includes('1 件以上なら c の needs-fix'))
+  const e3 = p.slice(s3e, p.indexOf('   f. '))
+  assert.ok(e3.includes('状態 1 の exhausted の規則に従う（failed が 1 件以上なら c の needs-fix を優先'))
+  assert.ok(!e3.includes('状態 1 の timeout'), '3e が exhausted を timeout へ直送している')
 })
