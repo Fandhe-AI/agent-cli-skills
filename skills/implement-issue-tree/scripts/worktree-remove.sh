@@ -213,7 +213,9 @@ sweep_result() { # $1 = removed（改行区切り）、$2 = retained、$3 = skip
 }
 
 input=$(cat) || usage "標準入力を読めない"
-candidates=$(printf '%s\n' "${input}" | jq -r -s -e 'if length == 1 and (.[0] | type) == "array" and all(.[0][]; type == "string") then .[0][] else error("bad") end' 2>/dev/null) || sweep_result "" 0 0 0 invalid-input
+# 形の検証（ちょうど 1 個の JSON 値が文字列の配列）と取り出しは分ける（空配列は有効で、取り出しの出力が 0 件になる）
+printf '%s\n' "${input}" | jq -s -e 'length == 1 and (.[0] | type) == "array" and all(.[0][]; type == "string")' >/dev/null 2>&1 || sweep_result "" 0 0 0 invalid-input
+candidates=$(printf '%s\n' "${input}" | jq -r -s '.[0][]' 2>/dev/null) || sweep_result "" 0 0 0 invalid-input
 # 保持対象: failed / blocked / monitoring のイシューが記録した worktree。読めなければ（ファイル無し・壊れている）何も消さない
 retain_list=$(jq -r '.items | to_entries[] | select(.value.status == "failed" or .value.status == "blocked" or .value.status == "monitoring") | .value.worktree | select(type == "string" and . != "")' "${file}" 2>/dev/null) || sweep_result "" 0 0 0 state-unreadable
 retain_real=""

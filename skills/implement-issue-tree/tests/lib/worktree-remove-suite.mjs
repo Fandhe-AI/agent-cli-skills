@@ -454,7 +454,8 @@ export function registerWorktreeRemoveTests(bash) {
       assert.deepEqual([r.status, r.result.reason, r.result.removed], [0, 'invalid-input', []], input)
       assert.ok(existsSync(a.path))
     }
-    assert.deepEqual(sweep(repo, [], {}).result.removed, [])
+    // 空配列は有効な入力（削除ゼロ）で、invalid-input ではない
+    assert.deepEqual(sweep(repo, [], {}).result, { ok: true, mode: 'sweep', removed: [], retained: 0, skipped: 0, failed: 0, reason: '' })
   })
 
   test(`${tag} 起動: run-verified.sh 経由（SHA-256 照合つき）で結果の行を出す`, async () => {

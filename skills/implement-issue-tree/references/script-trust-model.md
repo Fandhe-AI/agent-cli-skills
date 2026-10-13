@@ -299,6 +299,13 @@ G0 は適用 ruleset の `bypass_actors` を読むため `gh_api "${repo_path}/r
 
 `script-static-guard` の `git worktree remove` 全面禁止を、`git push` と同じ**行単位の許可形**に改めた: `git worktree remove -- "${path}"`・`git worktree remove --force -- "${path}"`・`git worktree unlock -- "${path}"`（後ろに `>/dev/null 2>&1 || rc=$?`）だけを許す。`git branch -d/-D/--delete`（短縮の連結を含む）を禁止するパターンを新設し、`git branch -D -- "${branch}"` の 1 形だけ許す。許可形が `worktree-remove.sh` にしか無く、決まった行（remove 2 形・unlock 1 形・branch -D 1 形）だけが存在することは専用テストで固定する。除外リストと `merge-guard-hook.sh` は変えていない（hook は worktree の削除を拒否する対象ではなく、スクリプトへ移しても実行時の防御層は弱まらない）。`rm` の再帰削除の禁止は変えず、`worktree-remove.sh` に `rm`・`git clean`・`git reset`・`git checkout`・`git stash` が無いことも専用テストで固定する。
 
+### 既知の挙動（旧プロンプトとの差）
+
+- **continue の保持条件が広がった（安全側への意図的な厳格化）**: 旧 continue は汚れ（素の `git status --porcelain`）だけを観測して `--force` で消した。新しい continue は discard と同じ `--mode discard` なので、初期化済み submodule や生きている agent の lock でも保持し、`failed` で保全する（分岐の意味 = 保持 → `failed` は不変）。submodule を `update --init` する運用のリポジトリでは、continue が通らず手動の対処が要り得る。
+- **superseded の保持は非致命で、状態ファイルの `.worktree` は保持したパスを指したまま残る**（`.worktree` のクリアは worktree が無くなったときだけ行うため）。回収は最終スイープか手動で、保持の理由（lock・submodule の未記録の変更・削除の失敗）はホストのログに出る。
+- **`git worktree list --porcelain` の `locked` 行が出ない版の git では、lock された worktree を lock なしと読み**、`git worktree remove` が lock を理由に拒否して `failed`（保持）に倒れる（unlock は決して行わない）。どの版から `locked` が出るかは未確認で、実測は git 2.54 のみ。`/proc/<pid>` の確認は Linux 限定（macOS は `kill -0` と `ps -p`）。
+- 新しい lib（`lib/worktree-remove-lib.sh`）を足したので、**全スクリプトのハッシュが変わる**（`run-verified.sh` は lib 全体をハッシュに含める）。同じ時期に別のスクリプトを変更している作業は、`SCRIPT_SHA256` の表・生成物・`script-static-guard.test.mjs` で競合する。後からマージする側は再ビルドが要る。
+
 ### この弾の検証範囲
 
 単体テスト（判断の表・実 git のサンドボックス〔clean・追跡変更・staged・未追跡・入れ子の独立 repo・ignore のみ・`showUntrackedFiles=no`・`ignoreSubmodules` 設定・submodule 未初期化 / 初期化済み / 内部の変更 / deinit 後・lock〔生存 pid / 死んだ pid / 他形式〕・実体なし・メイン worktree・未登録パス・`.git` 破損・空白を含むパス・ブランチの 5 状態・引数の誤り・sweep の保持照合と状態ファイルを読めない場合〕を bash 3.2 と 5 で・ホスト配線〔モード・引数の組み立て・`retained` の扱い・Recover の分岐〕）と変異（危険側 27 件）でのみ検証している。**実ランの隔離 worktree からの `run-verified.sh` 経由の起動は未検証**で、`ps -p` / `kill -0` による pid の生死判定は同一ホストの agent を前提にする（別ホストの worktree を共有しているランは想定しない）。
