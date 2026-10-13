@@ -1,6 +1,7 @@
 // Issue #577 の回帰テスト: monitor が ruleset の required context の揃う前に ready を返し、
 // merge-exec (v-b) が issuer-unbound（終端）で止まる経路を塞ぐ契約を固定する。
-//   (1) REQUIRED_MISSING_JQ の実動作（jq 実行）
+//   (1) required context 不足件数の算出（#603 第 2 弾で REQUIRED_MISSING_JQ は scripts/observe-pr.sh の required モードへ移った。
+//       jq 式と取得失敗の扱いはスクリプトを実際に走らせる observe-pr.test.mjs の 'required:' テスト群が固定する）
 //   (2) monitorPrompt 手順 3g（clientMergeActive 限定・有界待機・件数のみ）
 //   (3) merge-exec (v-b) の一過性（checks-not-green）/ 構成問題（issuer-unbound）分岐
 // 読み込み方式は post-push-checks-gate.test.mjs と同一のマーカー切り出しスライス方式。
@@ -20,30 +21,12 @@ if (markerIndex < 0) throw new Error(`テスト境界マーカー ${DRIVER_MARKE
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-reqctx-'))
 const slicePath = join(sliceDir, 'defs.mjs')
-const SLICE_EXPORTS = ['monitorPrompt', 'mergeExecutePrompt', 'classifyMergeExecDispatch', 'MERGE_EXEC_SCHEMA', 'REQUIRED_MISSING_JQ']
+const SLICE_EXPORTS = ['monitorPrompt', 'mergeExecutePrompt', 'classifyMergeExecDispatch', 'MERGE_EXEC_SCHEMA']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
-const { monitorPrompt, mergeExecutePrompt, classifyMergeExecDispatch, MERGE_EXEC_SCHEMA, REQUIRED_MISSING_JQ } = await import(pathToFileURL(slicePath).href)
+const { monitorPrompt, mergeExecutePrompt, classifyMergeExecDispatch, MERGE_EXEC_SCHEMA } = await import(pathToFileURL(slicePath).href)
 
 const item = { number: 577, title: 't' }
 const impl = { prNumber: 1, branch: 'fix/577-x' }
-
-const jqAvailable = spawnSync('jq', ['--version']).status === 0
-const missing = (req, have) => {
-  const r = spawnSync('jq', ['-n', '--argjson', 'r', JSON.stringify(req), '--argjson', 'h', JSON.stringify(have), REQUIRED_MISSING_JQ], { encoding: 'utf8' })
-  assert.equal(r.status, 0, r.stderr)
-  return Number(r.stdout.trim())
-}
-
-test('REQUIRED_MISSING_JQ: required が HEAD に無ければ不足件数を返す', { skip: !jqAvailable }, () => {
-  const req = Array.from({ length: 29 }, (_, i) => `ci-${i}`)
-  assert.equal(missing(req, ['bugbot', 'ai-review']), 29)
-  assert.equal(missing(req, [...req.slice(0, 20), 'bugbot']), 9)
-})
-
-test('REQUIRED_MISSING_JQ: 全て存在すれば 0、required 空でも 0', { skip: !jqAvailable }, () => {
-  assert.equal(missing(['a', 'b', 'c'], ['c', 'b', 'a', 'x']), 0)
-  assert.equal(missing([], ['x']), 0)
-})
 
 test('monitorPrompt(clientMergeActive): 手順 3g が手順 6 より前にあり有界待機と再判定を持つ', () => {
   const p = monitorPrompt(item, impl, [], true, true)
@@ -52,11 +35,11 @@ test('monitorPrompt(clientMergeActive): 手順 3g が手順 6 より前にあり
   const i6 = p.indexOf('\n6. ')
   assert.ok(i3g < i6, '3g は手順 6 より前')
   const s = p.slice(i3g, i6)
-  assert.ok(s.includes('rules/branches/'))
-  assert.ok(s.includes('check-runs') && s.includes('statuses'))
-  assert.ok(s.includes(REQUIRED_MISSING_JQ))
+  assert.match(s, /observe-pr\.sh --nonce \S+ --mode required --pr 1 --base main --wait --attempt 1/)
+  assert.ok(!s.includes('rules/branches/') && !s.includes('--slurp'), '旧: required 取得を gh api / jq の組み立てで書いている')
   assert.ok(s.includes('最大 10 分'))
-  assert.ok(s.includes('gh pr view') && s.includes('CONFLICTING'))
+  assert.ok(s.includes('--attempt を 1 増やして同じコマンド'), '待機は pending のたびに attempt を進めて再実行する')
+  assert.ok(s.includes('手順 1 のコマンドを再実行し') && s.includes('CONFLICTING'))
   assert.ok(s.includes('state: timeout') && s.includes('checksTotal'))
 })
 

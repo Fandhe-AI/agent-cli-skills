@@ -213,7 +213,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
   return { result, calls, logs, peak }
 }
 
-const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0 }
+const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: '/opt/skills/implement-issue-tree' }
 const LEAVES = [2, 3, 4, 5, 6, 7, 8, 9]
 
 test('結合: 上限が十分大きければ従来どおり全件に着手し、予算による停止は起きない', async () => {

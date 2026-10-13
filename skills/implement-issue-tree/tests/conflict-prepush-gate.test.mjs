@@ -327,7 +327,12 @@ test('fixPrompt(pushAfterFix: false): push 行も必須 base merge ゲートの�
 
 test('monitorPrompt: 手順 1 の取得フィールドに mergeable が含まれる', () => {
   const prompt = monitorPrompt(item, impl, [], true, true)
-  assert.ok(prompt.includes('--json state,headRefOid,mergeable'), '手順 1 の --json に mergeable が含まれない')
+  // #603 第 2 弾: 手順 1 の gh pr view は observe-pr.sh --mode pr へ移った。--json の項目（state,headRefOid,mergeable,…）と語彙の
+  // 検証は observe-pr.test.mjs の 'pr:' テスト群が固定する。ここでは手順 1 がスクリプトの mergeable を読むことを固定する。
+  const idx1 = prompt.indexOf('\n1. ')
+  const section1 = prompt.slice(idx1, prompt.indexOf('\n1c. ', idx1))
+  assert.match(section1, /--mode pr --pr \d+ --base main --branch fix\/\S+ --issue \d+/, '手順 1 が観測スクリプトの pr モードを実行していない')
+  assert.ok(section1.includes('payload の state・headSha・mergeable・bound'), '手順 1 が mergeable を payload から読んでいない')
 })
 
 test('monitorPrompt: CONFLICTING を検出したら state: OPEN 限定で conflicting へルーティングし、UNKNOWN を CONFLICTING と扱わない', () => {
@@ -525,8 +530,8 @@ test('monitorPrompt: 手順 3e は 10 分待機の後にも mergeable を再判�
   assert.ok(waitIdx < rematchIdx, 'mergeable 再判定が待機指示より前にしか現れない（待機後の再判定になっていない）')
   assert.ok(rematchIdx < blockedIdx, 'mergeable 再判定が blocked 結論より後に現れている（blocked へ倒す前に再判定する順序になっていない）')
   assert.ok(sectionE.includes('待機前の判定結果を流用しない'), '待機前の判定結果を流用しない旨の指示がない')
-  // UNKNOWN の扱いは手順 1c と同じ上限（30 秒 x 最大 3 回）に揃える。
-  const unknownIdx = sectionE.indexOf('手順 1c と同じ扱いで 30 秒程度あけて最大 3 回再取得')
+  // UNKNOWN の扱いは手順 1c と同じ（待機つきの手順 1 のコマンド。25 秒間隔で最大 4 回観測）に揃える。
+  const unknownIdx = sectionE.indexOf('手順 1c と同じ扱いで再取得し')
   assert.ok(unknownIdx >= 0, '待機後再判定の UNKNOWN の扱いが手順 1c と揃っていない')
   assert.ok(unknownIdx > rematchIdx && unknownIdx < blockedIdx, 'UNKNOWN の扱いが再判定〜blocked の間に現れない')
 })
@@ -540,7 +545,7 @@ test('monitorPrompt: 手順 3e の UNKNOWN リトライ途中で CONFLICTING に
   const idxE = prompt.indexOf('チェック総数が 0 件の場合は green とみなさず')
   assert.ok(idxE >= 0, '手順 3e の記述が見つからない')
   const sectionE = prompt.slice(idxE, idxE + 3200)
-  const unknownIdx = sectionE.indexOf('手順 1c と同じ扱いで 30 秒程度あけて最大 3 回再取得')
+  const unknownIdx = sectionE.indexOf('手順 1c と同じ扱いで再取得し')
   const blockedIdx = sectionE.indexOf('state: blocked / blockedReason: "quality"')
   assert.ok(unknownIdx >= 0 && blockedIdx >= 0, '手順 3e の UNKNOWN リトライ / blocked 終端の記述が見つからない')
   const retryBranch = sectionE.slice(unknownIdx, blockedIdx)

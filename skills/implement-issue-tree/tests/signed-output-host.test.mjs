@@ -477,12 +477,16 @@ async function runDriver(args) {
   return { error, calls }
 }
 
-test('起動時: 残置バイト軸が有効（既定）で dryRun でないランは、skillDir 未指定ならエージェントを 1 回も呼ばずエラーで停止する', async () => {
-  const { error, calls } = await runDriver({ parent: 1 })
-  assert.ok(error, 'エラーで停止する')
-  assert.match(error.message, /args\.skillDir にはスキルディレクトリ.*絶対パスを渡す/)
-  assert.match(error.message, /dryRun: true か maxResidualWorktreeBytes: 0/)
-  assert.deepEqual(calls, [])
+// #603 第 2 弾: monitor の観測スクリプト（observe-pr.sh）が残置バイト軸の有無に関わらず使われるため、dryRun でないラン
+// （= 実エージェントを起動するラン）は、バイト軸を 0 でオプトアウトしていても skillDir が要る。
+test('起動時: dryRun でないランは、既定でもバイト軸オプトアウトでも、skillDir 未指定ならエージェントを 1 回も呼ばずエラーで停止する', async () => {
+  for (const args of [{ parent: 1 }, { parent: 1, maxResidualWorktreeBytes: 0, maxResidualWorktrees: 0 }]) {
+    const { error, calls } = await runDriver(args)
+    assert.ok(error, `エラーで停止する: ${JSON.stringify(args)}`)
+    assert.match(error.message, /args\.skillDir にはスキルディレクトリ.*絶対パスを渡す/)
+    assert.match(error.message, /省略できるのは dryRun: true のときだけ/)
+    assert.deepEqual(calls, [])
+  }
 })
 
 test('起動時: skillDir の形式不正は、他の引数より先に起動時エラーになる（dryRun・バイト軸オプトアウトでも）', async () => {
@@ -493,8 +497,8 @@ test('起動時: skillDir の形式不正は、他の引数より先に起動時
   }
 })
 
-test('起動時: dryRun: true または maxResidualWorktreeBytes: 0 のランは skillDir を省略できる（測定スクリプトを使わない）', async () => {
-  for (const args of [{ parent: 1, dryRun: true }, { parent: 1, maxResidualWorktreeBytes: 0, maxResidualWorktrees: 0 }]) {
+test('起動時: dryRun: true のランは skillDir を省略できる（スクリプトを使うエージェントを起動しない）', async () => {
+  for (const args of [{ parent: 1, dryRun: true }]) {
     const { error } = await runDriver(args)
     assert.ok(!error || !/skillDir/.test(error.message), `${JSON.stringify(args)}: ${error?.message}`)
   }

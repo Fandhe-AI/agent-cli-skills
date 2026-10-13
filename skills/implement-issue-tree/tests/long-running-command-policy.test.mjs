@@ -78,7 +78,7 @@ test('B: retrySuffix 指定時は 2 回目のみプロンプトへ付加され�
 })
 
 test('B: monitor 再試行は観測専用 suffix 付きで書き込みを禁止する', () => {
-  assert.ok(driverPart.includes('MONITOR_RETRY_OBSERVE_ONLY)'))
+  assert.ok(driverPart.includes('MONITOR_RETRY_OBSERVE_ONLY, (p) => p.split('))
   assert.ok(m.MONITOR_RETRY_OBSERVE_ONLY.includes('gh run rerun'))
   assert.ok(m.MONITOR_RETRY_OBSERVE_ONLY.includes('@cursor review'))
 })

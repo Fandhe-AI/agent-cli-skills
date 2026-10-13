@@ -446,8 +446,11 @@ test('mergeVerifyPrompt は headRefName・baseRefName・closingIssuesReferences 
 
 test('monitorPrompt 手順 1 は PR 照合不一致で MERGED でも ready にせず blocked / unbound を返させる', () => {
   const p = monitorPrompt({ number: 365 }, { prNumber: 1366, branch: 'feat/365-bar' }, [], true, false)
-  const step1 = p.slice(p.indexOf('1. まず gh pr view'), p.indexOf('\n', p.indexOf('1. まず gh pr view')))
-  assert.ok(step1.includes('--json state,headRefOid,mergeable,headRefName,baseRefName,closingIssuesReferences,isCrossRepository'))
+  // #603 第 2 弾: 手順 1 の gh pr view は observe-pr.sh --mode pr へ移った（取得項目 headRefName・baseRefName・
+  // closingIssuesReferences・isCrossRepository の照合は observe-pr.test.mjs の 'pr:' テスト群が bound として固定する）
+  const step1 = p.slice(p.indexOf('\n1. ') + 1, p.indexOf('\n1c. '))
+  assert.match(step1, /observe-pr\.sh --nonce \S+ --mode pr --pr 1366 --base main --branch feat\/365-bar --issue 365/)
+  assert.ok(step1.includes('bound が 0'))
   assert.ok(step1.includes('baseRefName が "main" でない'))
   assert.ok(step1.includes('"feat/365-bar" と完全一致しない'))
   assert.ok(step1.includes('#365 を含まない'))

@@ -222,7 +222,7 @@ test('runMergeLoop: monitor 呼び出し・proof 観測・fix 起動がこの順
 
 test('runMergeLoop: monitor 呼び出しは resolveProof.head を prevSha として渡す（host 観測の入力を host 自身が用意する）', () => {
   assert.ok(
-    driverPart.includes('monitorPrompt(item, impl, externalCheckApps, externalChecksConfirmed, autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, forceThreadRescan, resolveProof.head)'),
+    driverPart.includes('monitorPrompt(item, impl, externalCheckApps, externalChecksConfirmed, autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, forceThreadRescan, resolveProof.head, observeNonces[0])'),
     'monitorPrompt の呼び出しに resolveProof.head（prevSha）が渡っていない',
   )
 })
