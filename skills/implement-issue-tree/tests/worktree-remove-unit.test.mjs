@@ -31,8 +31,8 @@ while IFS="$US" read -r fn a b c d; do
   case "$fn" in
     wr_count_status) wr_count_status "$(nl "$a")" ;;
     wr_find_entry) wr_find_entry "$(nl "$a")" "$b" ;;
-    *) out=$("$fn" "$a" "$b" "$c" "$d" 2>&1) || rc=$?
-       case "$fn" in wr_lock_pid) wr_lock_pid "$a" || true ;; esac ;;
+    wr_lock_pid) out=$(wr_lock_pid "$a" 2>&1) || rc=$?; wr_lock_pid "$a" || true ;;
+    *) out=$("$fn" "$a" "$b" "$c" "$d" 2>&1) || rc=$? ;;
   esac
   printf '%s %s [%s] [%s,%s,%s,%s,%s,%s,%s]\\n' "$i" "$rc" "$out" "$WR_DIRTY" "$WR_SUB_DIRTY" "$WR_REGISTERED" "$WR_MAIN" "$WR_LOCKED" "$WR_LOCK_REASON" "$WR_LOCK_PID"
   i=$((i + 1))

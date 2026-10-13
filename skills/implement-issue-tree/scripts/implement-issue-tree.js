@@ -3741,7 +3741,7 @@ const SCRIPT_SHA256={
 'pr-push.sh':'c65fb6c37f8c42438ca7436188fb174cb741e892fd7901e1fb7554455b686e7f',
 'state.sh':'bf659d5ed00e7265d8cac03b2a9c1acf6801f55457e6638672238f5277a1f39c',
 'merge-gate.sh':'aa864fd09ae2eeb29307ba551323af56524a845ecd9b78977633b709b81b2f4d',
-'worktree-remove.sh':'4e353da52e299dd088bf176cbae665faf844423557de744bd4adc737dee1a5b0',
+'worktree-remove.sh':'56f0fe5736a27035870919d427e366ade830c250f8ab5ceddb4cd26f3e1dfbc8',
 }
 
 

@@ -176,7 +176,7 @@ note・ログ文言の合成にのみ使われる。
 
 ### worktree の自動削除
 
-**merged 確定時**に、状態ファイルの更新と同じエージェント内で worktree を自動削除する。削除は `git worktree remove --force <path>` で実行し（squash merge 済みのため force でよい）、削除後に `git worktree prune` を実行する。削除完了後、状態ファイルの `worktree` フィールドは空文字に更新されるため、残骸の有無を状態ファイルから判別できる。`remove --force` が locked 等で失敗した場合は `git worktree unlock` してから再試行し、それでも失敗すれば実在確認・メインリポ非該当を確認した上で `rm -rf` にフォールバックする（さらに失敗しても非致命として継続し、次回ランのスイープに委ねる）。
+**merged 確定時**に、状態ファイルの更新に続けて worktree を自動削除する。削除は `scripts/worktree-remove.sh remove --mode superseded` の 1 回の呼び出しで行い（squash merge 済みのため汚れていても `git worktree remove --force` で消す）、登録の確認・lock の扱い・汚れの確認・削除・`git worktree prune` を同じプロセスで行う。削除できた（または元から無い）ときだけ、状態ファイルの `worktree` フィールドを空文字に更新するため、残骸の有無を状態ファイルから判別できる。保持した worktree の記録は消さない。**lock は `claude agent … (pid N)` の形で pid のプロセスが無いときだけ外す**（生きている agent の worktree と手動の lock は外さず保持する）。submodule に未記録の変更がある worktree、メイン worktree、登録されていないパスも消さない。`rm -rf` へのフォールバックは持たず、消せなかったものは保持して報告し、次回ランのスイープか手動に任せる（非致命）。詳細は `./script-trust-model.md` の「第 7 弾」節。
 
 **fix のたびに古い worktree は削除され、常に最新の 1 つだけが追跡される**。fix エージェントも `isolation: 'worktree'` で動作するため、fix のたびに新しい worktree が作成される。fix 完了後に旧 worktree を自動削除し、状態ファイルの `worktree` フィールドを新しいパスに更新する。これにより fix を複数回繰り返しても残骸 worktree が蓄積しない。
 

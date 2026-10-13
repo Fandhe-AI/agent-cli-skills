@@ -16,6 +16,7 @@
 | `scripts/pr-push.sh` | pr-create と fix の起点の確立・base 取り込み・push・PR 作成（第 4 弾）。モードは `prepare` / `push` / `pr`。**封筒を使わない**。出力の最後の 1 行は `PR_PUSH_RESULT {…}` |
 | `scripts/state.sh` | 状態ファイル（`_/issue-trees/<親>.json`）の書き込み（第 5 弾）。モードは `merge` / `init` / `hw-max` / `hw-set`。入力は標準入力の 1 行 JSON と引数。**封筒を使わない**。出力の最後の 1 行は `STATE_RESULT {"ok":…}` |
 | `scripts/merge-gate.sh` | merge-exec のマージ直前の読み取り専用検証（第 6 弾。G0 = サーバー側強制の実測と、チェック・未解決スレッド・mergeable・外部チェックの再検証）。入力は PR 番号・base・期待 sha・外部チェックの宣言（引数）。**封筒を使う**: payload は判定語（`verdict`。merge-exec の reason と同じ語彙）・段階・固定語の detail・整数の件数・40 桁 16 進の HEAD sha だけ。**マージの実行は含まない** |
+| `scripts/worktree-remove.sh` | worktree の破棄・掃除（第 7 弾）。確認と削除を同じプロセスで行う。サブコマンドは `remove --mode superseded|discard`（`--path`・`--branch`・`--base`）と `sweep --file`（候補は標準入力の JSON 配列）。**封筒を使わない**。出力の最後の 1 行は `WORKTREE_REMOVE_RESULT {…}` |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
 | `scripts/lib/push-verify.sh` | push の前後でリモート head を突き合わせる共通部（`pv_push_verified`。第 3 弾）。`base-merge.sh` が使い、以降 pr-create の push と fix の push 検証も同じ部品へ移す |
 | 生成物 `implement-issue-tree.js` の `SCRIPT_SHA256` | ビルダーが埋め込む期待ハッシュ。開発ファイルには置換前の目印を書き、`build-workflow.mjs` が置換する |
@@ -83,7 +84,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 残置バイト・空き容量の測定値は、**新規着手を止めるか（ディスク枯渇の防止）**、および**次回ラン開始時の 1 worktree あたり予約見積りの下限（クランプ済みの高水位）**にだけ使う。マージ可否・push・worktree の削除・PR/issue への書き込みの判定には使わない。偽の小さい値は着手を許す側に働き得るが、それが損なうのはローカルのディスク容量の保護で、リポジトリの内容・マージ・認証には影響しない。逆に偽の大きい値は着手を止める側（安全側）に働く。したがって、この弾の信頼水準は「事故を検出できる」で足りる。**悪意のあるエージェントがディスク枯渇防止の弁を迂回できる**ことは受け入れた制約である（件数軸の元になる `git worktree list` の転記も同じ自己申告である）。
 
-安全判定を含むスクリプト（G0・マージ実行・opt-in ゲート・`verifyDiscardSafety`・base 取り込み）を切り出す弾では、この水準では足りない。出力の用途がマージ可否に及ぶ場合は、(a) ホスト側の独立な再取得、(b) サーバー側強制（ruleset の実測）、(c) 自己申告値を判定に使わない設計、のいずれかで補うこと。nonce と sha256 の照合は補強にならない。
+安全判定を含むスクリプト（G0・マージ実行・opt-in ゲート・worktree の破棄の確認・base 取り込み）を切り出す弾では、この水準では足りない。出力の用途がマージ可否に及ぶ場合は、(a) ホスト側の独立な再取得、(b) サーバー側強制（ruleset の実測）、(c) 自己申告値を判定に使わない設計、のいずれかで補うこと。nonce と sha256 の照合は補強にならない。
 
 ## 第 3 弾: base 取り込みと push 後確認（`base-merge.sh`・`observe-pr.sh --mode push`）
 
@@ -271,6 +272,36 @@ G0 は適用 ruleset の `bypass_actors` を読むため `gh_api "${repo_path}/r
 ### この弾の検証範囲
 
 単体テスト（判定の表・偽 `gh` を差し替えたスクリプト全体・ホストの封筒照合・プロンプトの配線）と変異（危険側 38 件）でのみ検証している。**`autoMerge: true` の実ランでは未検証**（実 GitHub の ruleset / App に対する G0 の通過、`gh pr checks --json state --jq` の実出力と終了コード（pending で 8 を返すかは未確認。8 は一過性の `checks-not-green`、それ以外の非 0 終了は取得失敗で、どちらも合格に倒さない。exit 0 で PENDING が混じっても `checks-not-green`）、隔離 worktree からの `run-verified.sh` 経由の起動を含む）。なお `apps/<slug>`（外部チェック App の ID 取得）は GitHub 側がリポジトリに束縛できないグローバルな endpoint で、他の `gh` 呼び出しがすべて対象リポジトリを明示するのに対する唯一の例外である。
+
+## 第 7 弾: worktree の破棄・掃除（`worktree-remove.sh`）
+
+### 位置づけ: 確認と削除を同じプロセスで行う
+
+掃除プロンプト（merged・置き換え・Recover の continue / discard）と最終スイープのプロンプトは、(a) 登録の確認、(b) lock の扱い、(c) 汚れの確認、(d) `git worktree remove`、(e) ブランチ削除を、文章の手順として持っていた。Recover の汚れの確認だけは別の haiku エージェント（`verifyDiscardSafety`）が先に行い、その結果を見たホストが後から削除用エージェントを起動していた。これを `scripts/worktree-remove.sh`（判断は `lib/worktree-remove-lib.sh` の純関数）の 1 回の呼び出しに置き換え、**確認した状態のまま同じプロセスで削除する**ようにした。`verifyDiscardSafety` と `DISCARD_SAFETY_SCHEMA` は廃止した。`wipCommitted` の自己申告ゲートはホストに残る。
+
+封筒は使わない。ホストが読む値は従来の掃除エージェントの返却値（`ok`）に `retained`（worktree が残ったか）と `branchSha` を足したもので、削除の可否はスクリプトの中で閉じる（ホストが結果の値を判定に採用してマージ・push・設定変更へ進むことはない）。ホストは結果を採用する側でも、`retained` が真のパスを「削除成功」に数えない（残置バイトの実測から外さない）。スイープの `removed` は候補集合と突き合わせ、候補にないパスは数えない。
+
+### モード
+
+| モード | 使う場面 | 汚れ | submodule | ブランチ |
+|--------|----------|------|-----------|----------|
+| `superseded` | マージ済み・置き換え済み（fix の旧 worktree）・最終スイープ | 汚れていても `--force` で消す（件数を結果に記録） | 未記録の変更（追跡の変更・未追跡・新コミット）があれば保持 | 触れない |
+| `discard` | Recover の continue / discard | 汚れていれば保持。`--force` は使わない | 初期化済み（`submodule status` の先頭が `-` でない・または worktree 専用の `modules` に残りがある）なら保持 | `--branch` があれば、worktree が無くなったあとでだけ消す。消す前の先頭 sha を結果に出す。base と同名は消さない |
+| `sweep` | ラン終了時 | `superseded` と同じ規則を候補ごとに適用 | 同左 | 触れない |
+
+- **汚れの確認は `git status --porcelain=v2 -uall --ignore-submodules=none`**。利用者の `status.showUntrackedFiles=no` や `diff.ignoreSubmodules=all` に左右されない形で、実測では素の `git status --porcelain` が空でも未追跡が残り、`--force` なしの `git worktree remove` もその未追跡を黙って消す（git 2.54）。現行の `verifyDiscardSafety` の素の `git status --porcelain` にもこの穴があった。ignore 対象（`node_modules`・`dist` 等）は汚れに数えず、中身ごと消える。`git -C` の対象が worktree 自身であること（`rev-parse --show-toplevel` の実体の一致）を確かめ、`.git` が壊れて git が親の repo を見る場合は汚れを確認できなかった（-1）として保持する。
+- **lock は `claude agent <名前> (pid N)` の形で、その pid のプロセスが無い（`kill -0`・`ps -p`・`/proc/<pid>` のどれも見つからない）ときだけ外す**。Claude Code は実行中の agent の worktree をこの形で lock し、クラッシュで残る。旧プロンプトは無条件に `unlock` して `--force` で消していたので、生きている agent の worktree を消し得た。それ以外の形の lock（利用者が手で付けたもの・理由なし）は外さず、`retained-locked` として保持する。
+- **メイン worktree（`git worktree list --porcelain` の先頭エントリ・実体のパスの一致）、登録されていないパス、カレントがその中にあるパスは消さない**。`rm -rf` は持たない: 旧プロンプトの `rm -rf` フォールバックは、隔離 worktree（`<main>/.claude/worktrees/`）では「メインの下は消さない」の除外に当たって動いておらず、残りは次回のスイープか手動に任せる。
+- **ブランチ削除は `git branch -D -- "${branch}"` の 1 形**。worktree が残っている間は消さない（`keep`）。削除後の `git reflog --all` に WIP コミットは残らず（gc までの到達不能オブジェクトとして残るだけ）、旧コードの「削除後も reflog から復元できる」は誤りだった。復元の手がかりは結果の `branchSha` で、ホストはそれをログに残す（40 桁の 16 進だけを受け入れる）。
+- ok の定義: `superseded` は worktree が残っても非致命（`retained: true` で区別する。メイン worktree を指していた場合だけ異常で `ok: false`）。`discard` は worktree が無くなり、ブランチも（指定があれば）消えた（または元から無い・base と同名）ときだけ `ok: true`。保持は `ok: false`・`retained: true`・StructuredOutput は返っているので、ホストの終端は `blocked` ではなく `failed`（旧「安全確認が dirty → 保全して failed」と同じ）。
+
+### 静的ガード
+
+`script-static-guard` の `git worktree remove` 全面禁止を、`git push` と同じ**行単位の許可形**に改めた: `git worktree remove -- "${path}"`・`git worktree remove --force -- "${path}"`・`git worktree unlock -- "${path}"`（後ろに `>/dev/null 2>&1 || rc=$?`）だけを許す。`git branch -d/-D/--delete`（短縮の連結を含む）を禁止するパターンを新設し、`git branch -D -- "${branch}"` の 1 形だけ許す。許可形が `worktree-remove.sh` にしか無く、決まった行（remove 2 形・unlock 1 形・branch -D 1 形）だけが存在することは専用テストで固定する。除外リストと `merge-guard-hook.sh` は変えていない（hook は worktree の削除を拒否する対象ではなく、スクリプトへ移しても実行時の防御層は弱まらない）。`rm` の再帰削除の禁止は変えず、`worktree-remove.sh` に `rm`・`git clean`・`git reset`・`git checkout`・`git stash` が無いことも専用テストで固定する。
+
+### この弾の検証範囲
+
+単体テスト（判断の表・実 git のサンドボックス〔clean・追跡変更・staged・未追跡・入れ子の独立 repo・ignore のみ・`showUntrackedFiles=no`・`ignoreSubmodules` 設定・submodule 未初期化 / 初期化済み / 内部の変更 / deinit 後・lock〔生存 pid / 死んだ pid / 他形式〕・実体なし・メイン worktree・未登録パス・`.git` 破損・空白を含むパス・ブランチの 5 状態・引数の誤り・sweep の保持照合と状態ファイルを読めない場合〕を bash 3.2 と 5 で・ホスト配線〔モード・引数の組み立て・`retained` の扱い・Recover の分岐〕）と変異（危険側 27 件）でのみ検証している。**実ランの隔離 worktree からの `run-verified.sh` 経由の起動は未検証**で、`ps -p` / `kill -0` による pid の生死判定は同一ホストの agent を前提にする（別ホストの worktree を共有しているランは想定しない）。
 
 ## ハッシュ埋め込みと鮮度
 

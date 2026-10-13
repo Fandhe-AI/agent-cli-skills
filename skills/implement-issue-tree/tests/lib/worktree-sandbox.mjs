@@ -91,8 +91,8 @@ export function makeRepo({ submodule = false } = {}) {
 }
 
 // スクリプトを走らせる。結果の最後の 1 行（WORKTREE_REMOVE_RESULT {json}）を result に解釈して返す（無ければ null）
-export function runScript(bash, script, repo, args, { cwd = repo.main, input = '' } = {}) {
-  const r = spawnSync(bash, [script, ...args], { cwd, input, encoding: 'utf8', env: gitEnv(repo.root) })
+export function runScript(bash, script, repo, args, { cwd = repo.main, input = '', env = {} } = {}) {
+  const r = spawnSync(bash, [script, ...args], { cwd, input, encoding: 'utf8', env: { ...gitEnv(repo.root), ...env } })
   const lines = r.stdout.split('\n').filter((l) => l !== '')
   const last = lines[lines.length - 1] ?? ''
   const m = /^WORKTREE_REMOVE_RESULT (\{.*\})$/.exec(last)

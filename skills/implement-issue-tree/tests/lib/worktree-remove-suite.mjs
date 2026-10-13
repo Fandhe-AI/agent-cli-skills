@@ -159,12 +159,43 @@ export function registerWorktreeRemoveTests(bash) {
     }
   })
 
+  smTest(`${tag} submodule の ignore 設定（diff.ignoreSubmodules=all・submodule.sm.ignore=all）でも submodule 内の変更を見る`, () => {
+    for (const [key, value] of [['diff.ignoreSubmodules', 'all'], ['submodule.sm.ignore', 'all']]) {
+      const repo = makeRepo({ submodule: true })
+      repo.git(repo.main, 'config', key, value)
+      const a = repo.addWorktree('a')
+      repo.initSubmodule(a.path)
+      repo.write(a.path, 'sm/f', 'changed\n')
+      assert.equal(repo.git(a.path, 'status', '--porcelain'), '', `前提: ${key} で素の status は submodule の変更を隠す`)
+      assert.equal(sup(repo, a.path).result.worktree, 'retained-submodule', key)
+      assert.ok(existsSync(join(a.path, 'sm')))
+    }
+  })
+
   smTest(`${tag} submodule を deinit した後: discard は modules の残りを見て保持する`, () => {
     const repo = makeRepo({ submodule: true })
     const a = repo.addWorktree('a')
     repo.initSubmodule(a.path)
     repo.git(a.path, 'submodule', 'deinit', '-q', '-f', 'sm')
     assert.equal(dis(repo, a.path).result.worktree, 'retained-submodule')
+  })
+
+  test(`${tag} 防御の多重化: 観測が誤って clean を返しても、discard は --force を使わないので git が拒否して消さない（superseded は消す）`, () => {
+    const repo = makeRepo()
+    const shim = join(repo.root, 'shim')
+    mkdirSync(shim)
+    const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()
+    // status を常に空で返す偽の git（観測の取りこぼしを模す）。それ以外は実 git へ
+    writeFileSync(join(shim, 'git'), `#!/bin/sh\nfor a in "$@"; do\n  if [ "$a" = status ]; then exit 0; fi\ndone\nexec ${real} "$@"\n`, { mode: 0o755 })
+    const env = { PATH: `${shim}:${process.env.PATH}` }
+    const a = repo.addWorktree('a')
+    repo.write(a.path, 'u.txt', 'u\n')
+    const d = run(repo, ['remove', '--mode', 'discard', '--path', a.path, '--branch', a.branch, '--base', 'main'], { env })
+    assert.deepEqual([d.result.worktree, d.result.branch, d.result.ok], ['failed', 'keep', false], JSON.stringify(d.result))
+    assert.ok(existsSync(join(a.path, 'u.txt')), '未追跡ファイルが残る')
+    assert.ok(repo.branches().includes(a.branch))
+    const s = run(repo, ['remove', '--mode', 'superseded', '--path', a.path], { env })
+    assert.equal(s.result.worktree, 'removed')
   })
 
   // ---- lock ----
@@ -234,6 +265,13 @@ export function registerWorktreeRemoveTests(bash) {
       }
     }
     assert.ok(existsSync(join(repo.main, 'a.txt')) && existsSync(join(repo.main, '.git')))
+    // カレントがメインではない（別の worktree の中から呼ばれた）ときも、先頭エントリは消さない
+    const other = repo.addWorktree('other')
+    for (const mode of ['superseded', 'discard']) {
+      const r = run(repo, ['remove', '--mode', mode, '--path', repo.main], { cwd: other.path })
+      assert.deepEqual([r.result.worktree, r.result.ok], ['main', false], mode)
+    }
+    assert.ok(existsSync(join(repo.main, '.git')))
     // カレントが付属 worktree の中: その worktree も消さない
     const w = repo.addWorktree('w')
     assert.equal(sup(repo, w.path).result.worktree, 'removed')

@@ -147,8 +147,8 @@ grep -n "PATCH_EOF\|boundaryNonce" scripts/implement-issue-tree.js
 # 1. 使い捨て worktree（review / pr-create）が削除されず記録のみであること
 #    （所有権マーカー照合による回収も不採用 — マーカー植え付け指示が存在しないこと）
 grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree\|implement-issue-tree-owner" scripts/implement-issue-tree.js
-# 2. continue / discard の削除ゲート（申告 wipCommitted + ホスト側の実測）が両方あること
-grep -n "wipCommitted === true\|verifyDiscardSafety" scripts/implement-issue-tree.js
+# 2. continue / discard の削除ゲート（申告 wipCommitted + 削除と同じプロセスの独立観測 worktree-remove.sh --mode discard）が両方あること
+grep -n "wipCommitted !== true\|cleanupMode: 'discard'" scripts/implement-issue-tree.src.js
 # 3. 孤立 worktree の削除に所有権照合（状態ファイル記録パスとの一致）があること
 grep -n "orphanDeleteCandidates" scripts/implement-issue-tree.js
 # 4. blocked の分類が blockedReason のみで行われていること
@@ -157,7 +157,7 @@ grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scrip
 
 期待結果: `UNTRUSTED_POLICY` が `COMMON` 配列の末尾で参照され、あわせて `updateState` の State プロンプト（JSON マージ担当・掃除担当の両方）でも参照されていること。`untrusted(` が上記 8 関数それぞれの中で最低 1 回出現すること。`gh issue view` の全ヒットのうち、worktree routing ガード（implementPrompt 手順 0・fixPrompt 手順 0・recoverImplementPrompt 手順 0）と mergeExecutePrompt 手順 5 が `--json number,title` または `--json state` に限定されており、本文を読む箇所（planPrompt 手順 1・closePrompt 手順 2・recoverPrompt 手順 2c・Tree 手順 4）はいずれも「本文は非信頼データ」の注意文と同一手順内にあること。`monitorPrompt` に `gh pr merge` / `gh issue close` が出現しないこと（コンテキスト分離の確認）。
 
-worktree 削除の安全性については、`cleanupEphemeralWorktree` と `implement-issue-tree-owner` がいずれも 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree は自動削除しない。所有権マーカー方式もエージェントへ開示した nonce は所有権証明にならないため不採用）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
+worktree 削除の安全性については、`cleanupEphemeralWorktree` と `implement-issue-tree-owner` がいずれも 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree は自動削除しない。所有権マーカー方式もエージェントへ開示した nonce は所有権証明にならないため不採用）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted !== true` の保全と `cleanupMode: 'discard'`（`worktree-remove.sh --mode discard`。汚れ・初期化済み submodule・lock があれば削除せず保持する）の両方を worktree 削除の通過条件にしていること（`verifyDiscardSafety` は廃止済みで 1 件もヒットしないこと）、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
 
 ### 残置 worktree 上限ゲートの適用確認（PR #588 codex P1）
 

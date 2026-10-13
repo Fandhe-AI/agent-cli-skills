@@ -16,7 +16,7 @@
 #               イシューに記録した worktree、登録されていないパス、メイン worktree は消さない。状態ファイルを読めなければ何も消さない。
 # 確認の方法: `git status --porcelain=v2 -uall --ignore-submodules=none`（利用者の status.showUntrackedFiles や submodule の ignore
 #       設定に左右されない形。素の status は設定で未追跡を隠す）。ignore 対象（node_modules・dist 等）は汚れに数えず、中身ごと消える。
-# lock: `claude agent <名前> (pid N)` の形で、そのプロセスが死んでいる（kill -0 も ps -p も失敗）ときだけ外す。それ以外の lock は
+# lock: `claude agent <名前> (pid N)` の形で、そのプロセスが死んでいる（kill -0・ps -p・/proc/<pid> のどれも見つからない）ときだけ外す。それ以外の lock は
 #       外さず、worktree を保持して結果に記録する（生きている agent の worktree を消さない）。
 # 自衛: メイン worktree（porcelain の先頭エントリ・実体のパスの一致）、登録されていないパス、カレントがその中にあるパスは消さない。
 #       rm の再帰削除は持たない（git worktree remove が消せなかったものは保持して報告する）。
@@ -100,7 +100,8 @@ remove_one() {
   if [ "${WR_LOCKED}" = 1 ]; then
     alive=1
     if wr_lock_pid "${WR_LOCK_REASON}"; then
-      if kill -0 "${WR_LOCK_PID}" 2>/dev/null || ps -p "${WR_LOCK_PID}" >/dev/null 2>&1; then alive=1; else alive=0; fi
+      # kill -0 は他ユーザーの生きたプロセス（EPERM）も失敗するので ps -p でも確かめる。ps -p を持たない環境（busybox）では /proc も見る
+      if kill -0 "${WR_LOCK_PID}" 2>/dev/null || ps -p "${WR_LOCK_PID}" >/dev/null 2>&1 || [ -d "/proc/${WR_LOCK_PID}" ]; then alive=1; else alive=0; fi
     fi
     lockact=$(wr_lock_action 1 "${WR_LOCK_PID}" "${alive}")
     if [ "${lockact}" = retain ]; then T_WT='retained-locked'; return 0; fi

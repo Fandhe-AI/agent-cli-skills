@@ -15,6 +15,11 @@ const ST = 'scripts/state.sh'
 const ST_LIB = 'scripts/lib/state-lib.sh'
 const MG = 'scripts/merge-gate.sh'
 const MG_LIB = 'scripts/lib/merge-gate-lib.sh'
+const WR = 'scripts/worktree-remove.sh'
+const WR_LIB = 'scripts/lib/worktree-remove-lib.sh'
+const WR_REAL = ['worktree-remove.test.mjs']
+const WR_ALL = ['worktree-remove.test.mjs', 'worktree-remove-unit.test.mjs']
+const WR_HOST = ['worktree-remove-host.test.mjs']
 const STATE_SCRIPT = ['state-script.test.mjs']
 const MERGE_GATE = ['merge-gate.test.mjs', 'merge-gate-unit.test.mjs']
 const MERGE_GATE_HOST = ['merge-gate-host.test.mjs']
@@ -88,7 +93,7 @@ export const MUTATIONS = [
   { id: 'S12-trap-leaves-rewrite-temps', file: ST, from: '  pf=""\n  st_drop\n}', to: '  pf=""\n}', tests: STATE_SCRIPT, note: 'シグナルで中断されたとき st_rewrite のスナップショット・出力用一時ファイルが残る' },
   { id: 'S13-retry-count-changed', file: ST_LIB, from: 'while [ "${try}" -lt 3 ]', to: 'while [ "${try}" -lt 2 ]', tests: STATE_SCRIPT, note: '変更検知の再試行が 3 回でなくなる' },
   { id: 'S14-state-note-dropped', file: SRC, from: "    STATE_NOTE,\n    '返却: ok: true（成功時）", to: "    '返却: ok: true（成功時）", tests: ['state-write-fallback.test.mjs'], note: '書き込みプロンプトから STATE_RESULT の判定指示を外す（失敗を ok:true と返し得る）' },
-  { id: 'S15-cleanup-step5-note-dropped', file: SRC, from: "`   この手順 5 も同じ扱い: ${STATE_NOTE}", to: "`   この手順 5 も同じ扱い: ", tests: ['state-write-fallback.test.mjs'], note: '掃除の手順 5 に STATE_RESULT の判定指示が無い（state.sh の失敗を掃除の成功と返し得る）' },
+  { id: 'S15-cleanup-step2-note-dropped', file: SRC, from: "`   この手順 2 も同じ扱い: ${STATE_NOTE}", to: "`   この手順 2 も同じ扱い: ", tests: ['state-write-fallback.test.mjs'], note: '掃除の .worktree クリア手順に STATE_RESULT の判定指示が無い（state.sh の失敗を掃除の成功と返し得る）' },
   { id: 'S16-init-empty-calls-script', file: SRC, from: '  if (initEntries.length === 0) return\n', to: '', tests: ['state-write-fallback.test.mjs'], note: 'open が 0 件でも state.sh init を空配列で呼び、偽の失敗を出す' },
   // ---- 起動時のハッシュ予検査（第 4 弾）----
   { id: 'P07-precheck-skew-accepted', file: SRC, from: '  if (p.mismatch === 0 && p.missing === 0) return { ok: true }', to: '  if (true) return { ok: true }', tests: ['script-hash-precheck.test.mjs'], note: 'ホストが不一致・欠落を一致扱いにする（版ずれのまま着手する）' },
@@ -140,4 +145,32 @@ export const MUTATIONS = [
   { id: 'G40-context-max-256', file: MG, from: 'length >= 1 and length <= 255', to: 'length >= 1 and length <= 256', tests: ['merge-gate-context-parity.test.mjs'], note: 'context の長さ上限を 1 つ緩める（256 文字を受理する境界の食い違い）' },
   { id: 'G41-context-control-chars-allowed', file: MG, from: '(test("[\\\\p{Cc}\\u2028\\u2029]") | not)', to: 'true', tests: ['merge-gate-context-parity.test.mjs'], note: 'context の制御文字・U+2028/2029 の拒否を外す（ホストが拒否する入力を通す）' },
   { id: 'G42-context-trailing-space-allowed', file: MG, from: '\\ufeff]|[\\\\t\\\\v\\\\f ', to: '\\ufeff]|[Z', tests: ['merge-gate-context-parity.test.mjs'], note: 'context の末尾空白類の拒否を外す（ホストの c !== c.trim() が拒否する入力を通す）' },
+  // ---- worktree-remove.sh と lib/worktree-remove-lib.sh（第 7 弾。worktree の破棄・掃除。確認と削除を同じプロセスで行う）----
+  { id: 'W01-untracked-all-dropped', file: WR, from: 'git -C "${path}" status --porcelain=v2 -uall --ignore-submodules=none', to: 'git -C "${path}" status --porcelain=v2 --ignore-submodules=none', tests: WR_REAL, note: '汚れの確認から -uall を外す（status.showUntrackedFiles=no の利用者設定で未追跡が見えず、未追跡ファイルを消す）' },
+  { id: 'W02-ignore-submodules-dropped', file: WR, from: 'git -C "${path}" status --porcelain=v2 -uall --ignore-submodules=none', to: 'git -C "${path}" status --porcelain=v2 -uall', tests: WR_REAL, note: '汚れの確認から --ignore-submodules=none を外す（submodule の ignore 設定で、submodule 内の未コミットの変更が見えない）' },
+  { id: 'W03-superseded-submodule-dirty-forced', file: WR_LIB, from: '      elif [ "$3" -gt 0 ]; then\n        echo retain-submodule', to: '      elif false; then\n        echo retain-submodule', tests: WR_ALL, note: 'superseded が submodule に未記録の変更のある worktree も --force で消す（コミットが失われる）' },
+  { id: 'W04-live-agent-unlocked', file: WR_LIB, from: 'elif [ "$1" = 1 ] && [ -n "$2" ] && [ "$3" = 0 ]; then', to: 'elif [ "$1" = 1 ] && [ -n "$2" ]; then', tests: WR_ALL, note: '生きている agent の lock も外して消す' },
+  { id: 'W05-pid-always-dead', file: WR, from: 'if kill -0 "${WR_LOCK_PID}" 2>/dev/null || ps -p "${WR_LOCK_PID}" >/dev/null 2>&1 || [ -d "/proc/${WR_LOCK_PID}" ]; then alive=1; else alive=0; fi', to: 'alive=0', tests: WR_REAL, note: 'pid の生死を確かめず死んでいる扱いにする（実行中の agent の worktree を消す）' },
+  { id: 'W06-main-worktree-not-excluded', file: WR, from: "  if [ \"${WR_MAIN}\" = 1 ]; then T_WT=main; return 0; fi\n", to: '', tests: WR_REAL, note: 'メイン worktree（先頭エントリ）の除外を外す' },
+  { id: 'W07-cwd-inside-not-excluded', file: WR, from: '    "${real}/"*) T_WT=main; return 0 ;;', to: '    "${real}/"*) : ;;', tests: WR_REAL, note: 'カレントが削除対象の中でも消そうとする' },
+  { id: 'W08-discard-plan-forces', file: WR_LIB, from: '        echo plain\n', to: '        echo force\n', tests: WR_ALL, note: 'discard が --force で消す計画になる（観測の取りこぼしを git の拒否が止めなくなる）' },
+  { id: 'W09-branch-same-as-base-deleted', file: WR_LIB, from: '  elif [ -n "$2" ] && [ "$1" = "$2" ]; then\n    echo keep-base', to: '  elif false; then\n    echo keep-base', tests: WR_ALL, note: 'base と同名のブランチも消す' },
+  { id: 'W10-branch-deleted-while-worktree-kept', file: WR_LIB, from: '  elif [ "$3" != 1 ]; then\n    echo keep', to: '  elif false; then\n    echo keep', tests: WR_ALL, note: 'worktree が残っている（保持）のにブランチを消す' },
+  { id: 'W11-unregistered-path-removed', file: WR, from: "  if [ \"${WR_REGISTERED}\" != 1 ]; then T_WT='not-registered'; return 0; fi\n", to: '', tests: WR_REAL, note: '登録されていないパスの除外を外す' },
+  { id: 'W12-sweep-retain-ignored', file: WR, from: '  if [ "${held}" = 1 ]; then n_retained=$((n_retained + 1)); continue; fi', to: '  if false; then n_retained=$((n_retained + 1)); continue; fi', tests: WR_REAL, note: 'スイープが failed / blocked / monitoring の保持対象を無視して消す' },
+  { id: 'W13-sweep-state-unreadable-fail-open', file: WR, from: '2>/dev/null) || sweep_result "" 0 0 0 state-unreadable', to: '2>/dev/null) || retain_list=""', tests: WR_REAL, note: '状態ファイルを読めなくても削除を続ける（保持対象を知らないまま消す）' },
+  { id: 'W14-sweep-monitoring-not-retained', file: WR, from: ' or .value.status == "monitoring")', to: ')', tests: WR_REAL, note: 'monitoring のイシューが記録した worktree を保持しない' },
+  { id: 'W15-deinit-modules-unchecked', file: WR, from: '      if [ -n "${gd}" ] && [ -d "${gd}/modules" ] && [ -n "$(ls -A "${gd}/modules" 2>/dev/null)" ]; then sub_init=$((sub_init + 1)); fi', to: '      :', tests: WR_REAL, note: 'deinit 後も残る modules（コミットがそこにしか無いことがある）を見ない' },
+  { id: 'W16-broken-git-trusts-parent', file: WR, from: '[ "$(wr_real "${top}")" = "${real}" ] && ', to: '', tests: WR_REAL, note: '.git が壊れた worktree で、親（メイン）の repo の status を読んで汚れ判定する' },
+  { id: 'W17-branch-sha-not-recorded', file: WR, from: 'if sha=$(git rev-parse --verify -q "refs/heads/${branch}^{commit}" 2>/dev/null); then exists=1; else sha=""; fi', to: 'if git rev-parse --verify -q "refs/heads/${branch}^{commit}" >/dev/null 2>&1; then exists=1; sha=""; else sha=""; fi', tests: WR_REAL, note: 'ブランチを消す前の先頭 sha を結果に出さない（消した後は reflog に残らず復元の手がかりが無くなる）' },
+  { id: 'W18-superseded-unknown-dirty-forced', file: WR_LIB, from: '      if [ "$2" -lt 0 ]; then\n        echo retain-dirty\n      elif [ "$3" -gt 0 ]; then', to: '      if false; then\n        echo retain-dirty\n      elif [ "$3" -gt 0 ]; then', tests: WR_ALL, note: 'superseded が汚れを確認できなかった worktree も消す' },
+  { id: 'W19-rm-recursive-added', file: WR, from: '  if [ "${rc}" -eq 0 ]; then T_WT=removed; else T_WT=failed; fi', to: '  if [ "${rc}" -eq 0 ]; then T_WT=removed; else rm -rf -- "${path}"; T_WT=failed; fi', tests: ['script-static-guard.test.mjs'], note: '消せなかった worktree を rm の再帰削除で消すフォールバックを足す' },
+  { id: 'W20-remove-double-force', file: WR, from: '    git worktree remove -- "${path}" >/dev/null 2>&1 || rc=$?', to: '    git worktree remove -f -f -- "${path}" >/dev/null 2>&1 || rc=$?', tests: ['script-static-guard.test.mjs'], note: 'discard の削除に -f -f（lock も無視）を足す' },
+  { id: 'W21-guard-allowed-widened', file: 'tests/script-static-guard.test.mjs', from: '-- "\\$\\{path\\}"( >\\/dev\\/null 2>&1)? \\|\\| rc=\\$\\?\\s*$/', to: '-- \\S+.*$/', tests: ['script-static-guard.test.mjs'], note: '静的ガードの許可形を任意の引数・任意の後続へ緩める（変数以外のパスの削除を許す）' },
+  { id: 'W22-host-retained-counted-removed', file: SRC, from: 'result?.cleanupOk === true && result?.cleanupRetained === false', to: 'result?.cleanupOk === true', tests: WR_HOST, note: '保持した worktree も削除成功に数える（残置バイトの実測から外れる）' },
+  { id: 'W23-host-continue-superseded', file: SRC, from: "{ cleanupWorktree: sanitizedRecoverWorktree, cleanupMode: 'discard' }", to: '{ cleanupWorktree: sanitizedRecoverWorktree }', tests: WR_HOST, note: 'Recover の continue が --force 側（superseded）で旧 worktree を消す' },
+  { id: 'W24-host-discard-mode-dropped', file: SRC, from: "            cleanupMode: 'discard',\n            deleteBranch: true,", to: '            deleteBranch: true,', tests: WR_HOST, note: 'discard の掃除が、ブランチが base と同名のとき --force 側（superseded）へ倒れる' },
+  { id: 'W25-host-discard-wip-gate-dropped', file: SRC, from: "        if (recoverResult?.wipCommitted !== true) {\n          const reason = sanitize(\n            `discard 指示だが", to: "        if (false) {\n          const reason = sanitize(\n            `discard 指示だが", tests: WR_HOST, note: 'discard の wipCommitted 自己申告ゲートを外す' },
+  { id: 'W26-host-sweep-removed-unfiltered', file: SRC, from: "v.removed.filter((p) => typeof p === 'string' && candidateSet.has(p))", to: "v.removed.filter((p) => typeof p === 'string')", tests: WR_HOST, note: 'スイープの結果を候補集合と突き合わせない' },
+  { id: 'W27-host-retained-not-required', file: SRC, from: "const isWorktreeCleanupValid = (r) => typeof r?.ok === 'boolean' && typeof r?.retained === 'boolean'", to: "const isWorktreeCleanupValid = (r) => typeof r?.ok === 'boolean'", tests: WR_HOST, note: '掃除の返却に retained が無くても有効として受理する（削除成功に数える側へ倒れる）' },
 ]
