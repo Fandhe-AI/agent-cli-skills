@@ -61,7 +61,8 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
     "maxResidualWorktreeBytes": "<残置 worktree ディスク使用量の上限（バイト。0 以上の整数。省略時 53687091200 ＝ 50 GiB、0 でこの軸のみ上限なし。件数軸とは独立、Issue #348）>",
     "maxBaseMerges": "<PR が base とコンフリクト（mergeable: CONFLICTING）した際の自動 base 取り込みの回数上限（0〜10 の整数。省略時 3、0 で自動 base 取り込みを無効化しコンフリクトを即 blocked にする）。fixCount とは独立の予算軸（Issue #441）>",
     "agentCallLimit": "<新規着手・monitoring 再開を止める判断に使う、ランタイム上限の想定値（81〜1000 の整数。省略時 1000＝ランタイムの上限。呼び出しそのものは止めない。範囲外・非整数はエラーで停止。Issue #592）>",
-    "repo": "<対象リポジトリの owner/repo（例: \"Fandhe-AI/agent-cli-skills\"）。base 取り込み（maxBaseMerges > 0）の worktree routing ガードが期待する owner/repo として使うホスト側明示宣言。未指定時は base 取り込みの自動起動が無効化され、コンフリクトは blocked+quality で終端する（PR #443 codex P0: エージェント自己申告値は信頼境界に使わない）>"
+    "repo": "<対象リポジトリの owner/repo（例: \"Fandhe-AI/agent-cli-skills\"）。base 取り込み（maxBaseMerges > 0）の worktree routing ガードが期待する owner/repo として使うホスト側明示宣言。未指定時は base 取り込みの自動起動が無効化され、コンフリクトは blocked+quality で終端する（PR #443 codex P0: エージェント自己申告値は信頼境界に使わない）>",
+    "models": "<判断を伴う agent のモデルを段階ごとに上書きするオブジェクト（任意）。キーは plan / implement / review / fix / prCreate / baseMerge、値は haiku / sonnet / opus / fable。未指定の段階は既定（plan はセッションのモデルを継ぐ・それ以外は sonnet）。オブジェクト以外・未知のキー・許可外の値はエラーで停止>"
   }
 }
 ```
@@ -72,6 +73,15 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 {
   "scriptPath": ".claude/skills/implement-issue-tree/scripts/implement-issue-tree.js",
   "args": { "parent": 42, "skillDir": "/Users/me/repo/.claude/skills/implement-issue-tree", "branch": "main", "parallel": 3, "externalChecks": [{"app": "cursor", "context": "Cursor Bugbot"}] }
+}
+```
+
+例: 品質を優先して計画を `fable`、実装と fix を `opus` に上げる場合（Review・PR 作成・機械的な agent は既定のまま）:
+
+```json
+{
+  "scriptPath": ".claude/skills/implement-issue-tree/scripts/implement-issue-tree.js",
+  "args": { "parent": 42, "skillDir": "/Users/me/repo/.claude/skills/implement-issue-tree", "externalChecks": [], "models": { "plan": "fable", "implement": "opus", "fix": "opus" } }
 }
 ```
 
@@ -93,6 +103,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | `maxBaseMerges` | 任意 | `3` | **`args.repo` が未指定のランでは値によらず base 取り込みは起動しない**（`args.repo` の形式不正は起動時にエラーで停止しラン自体が始まらない。`repo` 行参照）。PR が base とコンフリクト（`mergeable: CONFLICTING`。monitor の `conflicting` 経路、または merge-exec の `not-mergeable` 写像のいずれか）した際に、fix 予算（`fixCount`）を消費せず自動起動する base 取り込み専用エージェント（`baseMergePrompt`）の回数上限（0〜10 の整数）。`monitorsLeft` と独立の第 2 の停止性ガードとして機能する。上限到達時は `blocked` / `blockedReason: "quality"` で終端する（halt 非カウント。fixCount 上限到達時の needs-fix と異なり、上限到達後も human が PR ブランチへ直接 base を取り込んで push すればコンフリクトが解消し、次回 monitor は `conflicting` を返さずこの分岐自体を再度通らないため `unrecoverable` は使わない。blocked 終端後の再実行は monitoring として直接再開する — Recover / PR Create フェーズは通らない。baseMergeCount は上限到達値のまま引き継がれるため、上限到達後の解消には人間が PR ブランチへ base を直接取り込んで push する必要がある）。`0` は自動 base 取り込みを無効化し、コンフリクト検出時点で即 `blocked` にする明示オプトアウト（この場合も `blockedReason: "quality"`）。**負値・非整数・小数はエラーで停止**（マージゲート入力と同じ厳格さ） |
 | `repo` | 任意（`maxBaseMerges > 0` で base 取り込みを使うなら実質必須） | 未指定（`""`） | 対象リポジトリの `owner/repo`（例: `"Fandhe-AI/agent-cli-skills"`）。`baseMergePrompt` の worktree routing ガードが期待する owner/repo（`expectedRepo`）として使う、人間が明示するホスト側入力。**エージェントの自己申告値（外部チェック観測エージェント等）は一切使わない**（自己申告値を信頼境界に使うと誤配置 worktree からの別リポジトリへの push を防げない）。未指定は `expectedRepo` を空文字のまま確定し、base 取り込み（`baseMergePrompt` の起動）を行わず conflicting は即 `blocked` / `blockedReason: "quality"` で終端する（fail-closed。実装・push 前 Review・PR 作成・CI 監視は値によらず自動で進む）。**形式不正（`isValidRepoSlug` の owner/repo 形式を通らない値）は起動時にエラーで停止**（マージゲート入力と同じ厳格さ。誤記を黙って未指定へ読み替えるとガードが静かに弱まるため） |
 | `agentCallLimit` | 任意 | `1000` | 1 ランのエージェント呼び出し数の予算の基準値（81〜1000 の整数。Issue #592）。**新規着手・monitoring 再開を止める判断に使うランタイム上限の想定値**で、呼び出しそのものは止めない（開始処理・終了処理・実行中の issue は値を超えても続行する。実行中の issue の途中で止めると半端な状態を作るため。ハードキャップはランタイムが持つ）。ランタイムは 1 ランあたり 1,000 エージェントで打ち切り、打ち切りは `completed` として返るため、予算を持たないと PR 作成直後の未監視のままランが終わる。そこで、新規着手（および monitoring 再開）の前に「残り呼び出し数 ≥ 実行中の件数 × 30 + 候補の目安（実装 30・monitoring 再開 12・verify-close 6）+ 終了処理の予備（20 + 未完了ノード数 ÷ 100 の切り上げ。このランで最初に着手する 1 件〔まだ 1 件も着手しておらず実行中も 0〕には切り上げの項を課さない前進保証）」を確認し、満たさなければ着手せず実行中の issue の完了を優先する（実行中が減れば再び着手する）。見送ったノードは `not-started`（note に予算不足）として返る（note は保留した時点の事実を報告する。下記）。使用数が値を超えた最初の 1 回だけ警告ログを出し、返却値 `agentBudget.reached` が `true` になる。根拠と目安の内訳は references/agent-call-budget.md。**下限〔開始処理 30 + 終了処理の予備 20 + 1 issue の目安 30 + 1 = 81〕未満・1,000 を超える値・非整数はエラーで停止**（開始処理だけで使い切る値は矛盾するため受理しない）。開始処理の 30 は固定の見積りで、依存宣言のチャンク数が多い大きなツリーでは実際の使用量が上回る。このランで 1 件も着手せず、予算だけが理由で保留したノードがあるときは、ランの終了時点で**予算枯渇による停滞**（返却値 `agentBudget.starved: true`）と判定する（着手の可否は monitoring 再開の worktree ゲートやラン中の前提解消などループ中にしか分からないため、起動時には断定しない）。保留ノードの note（状態ファイルに保存される blocked の note を含む）は、次ランの挙動を予測せず、**保留した時点の事実**だけを書く: 「予算不足で保留（保留時の使用 u/L、必要量 r。このランの着手 k 件）。保留した時点では `args.agentCallLimit` が N 以上なら予算検査を通った（次ランの必要量は、開始処理・先に着手するノード・ゲート実測で変わる）」。N = 保留時の使用量 + 保留時の必要量（ゲートが実際に使ったしきい値。上乗せしない）。N が 1,000 を超えるときは「（指定できる上限 1000 を超える）」という事実だけを添え、分割は案内しない（保留は `used + required > limit` でしか起きないので、既定の上限 1000 では N が常に 1,000 を超える）。返却値 `agentBudget.held` は予算で保留した全ノード（他の停止理由と併存するものも含む）の観測値 `{ issue, kind, resume, used, required, chunks, needed, budgetOnly }` を issue 番号の昇順で返す（プログラムから読むなら `held`、人が読むなら note）。`agentBudget.neededLimit` は `held` のうち `budgetOnly` なものの `needed` の最小値（着手の有無に関わらず、無ければ `null`。1,000 を超え得て、そのまま `agentCallLimit` に渡せる値とは限らない）、`starved` は着手 0 件でそのようなノードがあるとき。未着手・monitoring 再開の note は、成立している停止理由をすべて優先順（halt → 新規着手抑止〔残置 worktree 上限等〕→ 前提 → 再開ゲート → 予算）に並べる。前提は、まだ決着していないもの（「前提 #A が未完了のため待機」）と、既に失敗・ブロックとして記録されたもの（「前提 #B は完了していない（失敗・ブロックとして記録済み）」）を分けて書く。予算の断片は単独でも他の理由との併記でも同じ文言（他の理由が残るノードは `starved` / `neededLimit` の対象に数えず、`held` では `budgetOnly: false`。詳細は references/agent-call-budget.md の「終了時の note の停止理由」） |
+| `models` | 任意 | 未指定（`{}`） | **判断を伴う agent のモデルを段階ごとに上書きする**（`parseAgentModels`）。キーと対象の agent: `plan`（Plan。既定はモデルを渡さずセッションのモデルを継ぐ）・`implement`（Implement と回復の Implement）・`review`（push 前 Review）・`fix`（Review ループと Merge ループの fix）・`prCreate`（push + PR 作成）・`baseMerge`（base 取り込み）。`plan` 以外の既定は `sonnet`。値は `agent()` の `model` に渡すエイリアス `haiku` / `sonnet` / `opus` / `fable` のいずれか。指定しなかった段階は既定のまま、同じ段階の agent が複数あればすべてに同じ値が効く。返却値 `models` に正規化した値（上の段階の順。未指定なら `{}`）を載せる。**状態ファイル・worktree 走査・Tree・Recover の安全確認・monitor・merge-exec・merge-verify・pr-bind・close などの機械的な agent は対象外**（呼び出し回数が多く上書きすると固定費が増えるうえ、マージの安全側の判定に関わる agent のモデルを呼び出し側が変えられる経路を作らないため）。Recover の判断（継続 / 破棄）は Plan と同じくセッションのモデルを継ぐ。オブジェクト以外・未知のキー（機械的な agent の段階を含む）・許可外の値・大文字違いは起動時エラーで停止する（エージェントを 1 回も呼ばない。誤記を黙って既定へ読み替えない） |
 
 **`externalChecks` の 4 状態:**
 
