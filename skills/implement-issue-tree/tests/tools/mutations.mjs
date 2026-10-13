@@ -21,6 +21,12 @@ const WR_REAL = ['worktree-remove.test.mjs']
 const WR_ALL = ['worktree-remove.test.mjs', 'worktree-remove-unit.test.mjs']
 const WR_HOST = ['worktree-remove-host.test.mjs']
 const WR_LEDGER = ['worktree-retained-ledger.test.mjs']
+const RP = 'scripts/recover-prep.sh'
+const RP_LIB = 'scripts/lib/recover-prep-lib.sh'
+const RP_REAL = ['recover-prep.test.mjs']
+const RP_ALL = ['recover-prep.test.mjs', 'recover-prep-unit.test.mjs']
+const RP_UNIT = ['recover-prep-unit.test.mjs']
+const RP_HOST = ['recover-prep-host.test.mjs']
 const STATE_SCRIPT = ['state-script.test.mjs']
 const MERGE_GATE = ['merge-gate.test.mjs', 'merge-gate-unit.test.mjs']
 const MERGE_GATE_HOST = ['merge-gate-host.test.mjs']
@@ -221,4 +227,30 @@ export const MUTATIONS = [
   { id: 'R15-replacement-counted-in-reservation', file: SRC, from: "new Set(['retained', 'replacement'])", to: "new Set(['retained'])", tests: WR_LEDGER, note: "置換後の worktree を予約の差し引きに数える（件数ゲートが上がらない）" },
   { id: 'R16-replacement-dedup-dropped', file: SRC, from: "  if (residualStartPathSet.has(p) || ephemeralWorktrees.some((e) => e.path === p)) return false\n  ephemeralWorktrees.push({ issue: issueNumber, kind: 'replacement', path: p })", to: "  ephemeralWorktrees.push({ issue: issueNumber, kind: 'replacement', path: p })", tests: WR_LEDGER, note: "置換後の worktree の重複排除を外す（2 回目の fix の旧を二重に数える）" },
   { id: 'R18-replacement-listed-as-disposable', file: SRC, from: "e.kind !== 'implement' && e.kind !== 'replacement' && e.kind !== 'retained')", to: "e.kind !== 'implement' && e.kind !== 'retained')", tests: WR_LEDGER, note: "現行の実装 worktree（置換後）を使い捨てとして案内する" },
+  // ---- recover-prep.sh（Recover の機械手順。Issue #603 第 9 弾）----
+  { id: 'P01-hook-rejection-counts-as-committed', file: RP_LIB, from: "    none | committed | skipped) return 0 ;;", to: "    none | committed | skipped | commit-failed) return 0 ;;", tests: RP_ALL, note: "フックの拒否（commit-failed）を wipCommitted:true に倒す（退避できていないのに第 1 層のゲートが開く）" },
+  { id: 'P02-commit-rc-ignored', file: RP, from: 'R_WIP=$(rp_wip_after "${crc}" "${after_dirty}" "${after_sub}")', to: 'R_WIP=$(rp_wip_after 0 "${after_dirty}" "${after_sub}")', tests: RP_REAL, note: "add / commit の終了コードを見ない（フックの拒否が commit-failed にならない）" },
+  { id: 'P03-after-observation-skipped', file: RP, from: 'R_WIP=$(rp_wip_after "${crc}" "${after_dirty}" "${after_sub}")', to: 'R_WIP=$(rp_wip_after "${crc}" 0 0)', tests: RP_REAL, note: "コミット後の再観測を根拠にしない（フックによる書き換え・除外設定に載ったファイルが残っても退避完了にする）" },
+  { id: 'P04-untracked-all-dropped', file: RP, from: 'OBS_OUT=$(git -C "$1" -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none', to: 'OBS_OUT=$(git -C "$1" -c core.excludesFile= status --porcelain=v2 --ignore-submodules=none', tests: RP_REAL, note: "汚れの観測から -uall を外す（status.showUntrackedFiles=no の利用者設定で未追跡が見えず、WIP に入れずに退避完了とする）" },
+  { id: 'P05-ignore-submodules-dropped', file: RP, from: 'OBS_OUT=$(git -C "$1" -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none', to: 'OBS_OUT=$(git -C "$1" -c core.excludesFile= status --porcelain=v2 -uall', tests: RP_REAL, note: "汚れの観測から --ignore-submodules=none を外す（submodule の ignore 設定で submodule 内の未コミットの変更が見えない）" },
+  { id: 'P06-global-excludes-honored', file: RP, from: 'OBS_OUT=$(git -C "$1" -c core.excludesFile= status', to: 'OBS_OUT=$(git -C "$1" status', tests: RP_REAL, note: "汚れの観測がグローバルの除外設定に従う（worktree-remove.sh の観測と食い違い、退避完了のあとで discard が保持される）" },
+  { id: 'P07-state-branch-preferred', file: RP_LIB, from: "        RP_BRANCH=$3\n        RP_SOURCE=worktree", to: "        RP_BRANCH=${4:-$3}\n        RP_SOURCE=worktree", tests: RP_ALL, note: "worktree の HEAD と state のブランチが食い違うとき state を選ぶ（WIP は HEAD 側に積まれるのに別のブランチを対象にする）" },
+  { id: 'P08-detached-resolved', file: RP_LIB, from: '      if [ -z "$3" ]; then\n        RP_REASON=detached', to: '      if false; then\n        RP_REASON=detached', tests: RP_ALL, note: "detached HEAD を確定扱いにする（ブランチの無い WIP を積む・空のブランチで先へ進む）" },
+  { id: 'P09-base-branch-guard-dropped', file: RP_LIB, from: '      elif [ -n "$5" ] && [ "$3" = "$5" ]; then', to: '      elif false; then', tests: RP_ALL, note: "HEAD が base と同名でも確定する（base に WIP を積む）" },
+  { id: 'P10-toplevel-check-dropped', file: RP, from: '      if [ -n "${top}" ] && [ "$(wr_real "${top}")" = "$(wr_real "${path}")" ]; then', to: '      if [ -n "${top}" ]; then', tests: RP_REAL, note: "git の toplevel が対象のパス自身か確かめない（.git が壊れた worktree でメインの変更を WIP にする）" },
+  { id: 'P11-main-worktree-allowed', file: RP, from: '    if [ "${WR_MAIN}" = 1 ]; then\n      wtstate=main', to: '    if [ "${WR_MAIN}" = 1 ]; then\n      wtstate=live', tests: RP_REAL, note: "メイン worktree のパスを live として扱う（メインの変更を WIP コミットする）" },
+  { id: 'P12-unregistered-allowed', file: RP, from: '      wtstate=unregistered', to: '      wtstate=live', tests: RP_REAL, note: "登録されていないパスを live として扱う（無関係な repo に WIP を積む）" },
+  { id: 'P13-fetch-failure-uses-stale-ref', file: RP, from: '  if git fetch origin "refs/heads/${base}:refs/remotes/origin/${base}" >/dev/null 2>&1; then', to: '  if git fetch origin "refs/heads/${base}:refs/remotes/origin/${base}" >/dev/null 2>&1 || true; then', tests: RP_REAL, note: "base の取得に失敗しても残っている古い追跡 ref で差分を判定する（取得失敗を差分なしに倒す）" },
+  { id: 'P14-unfetched-diff-is-empty', file: RP_LIB, from: '  if [ "$1" != 1 ] || [ "$2" != 1 ]; then\n    echo unknown', to: '  if [ "$1" != 1 ] || [ "$2" != 1 ]; then\n    echo empty', tests: RP_ALL, note: "取得に失敗した・ブランチが無いときを差分なし（empty = discard の根拠）にする" },
+  { id: 'P15-diff-error-is-empty', file: RP_LIB, from: '    echo nonempty\n  else\n    echo unknown', to: '    echo nonempty\n  else\n    echo empty', tests: RP_UNIT, note: "git diff の実行失敗を差分なしにする" },
+  { id: 'P16-nested-repo-committed', file: RP_LIB, from: '  elif [ "$3" -gt 0 ]; then\n    echo nested-repo', to: '  elif false; then\n    echo nested-repo', tests: RP_ALL, note: "入れ子の git リポジトリを触る（ポインタだけが記録され、worktree を消すと中身が失われる）" },
+  { id: 'P17-unmerged-committed', file: RP_LIB, from: '  elif [ "$2" -gt 0 ]; then\n    echo unmerged', to: '  elif false; then\n    echo unmerged', tests: RP_ALL, note: "コンフリクト中のマーカー入りの内容を WIP として確定する" },
+  { id: 'P18-no-verify', file: RP, from: 'commit -q -m "wip(recover)', to: 'commit -q --no-verify -m "wip(recover)', tests: [...RP_REAL, 'script-static-guard.test.mjs'], note: "WIP コミットがフックを回避する" },
+  { id: 'P19-skipped-not-complete', file: RP_LIB, from: "    none | committed | skipped) return 0 ;;", to: "    none | committed) return 0 ;;", tests: RP_ALL, note: "dead worktree・branch だけの残骸（退避の対象が無い）を未完了にする（クリーンな残骸の discard が恒久的に保全へ倒れる）" },
+  { id: 'P20-submodule-only-misclassified', file: RP_LIB, from: '    if [ "$2" -gt 0 ] && [ "$2" -eq "$3" ]; then\n      echo submodule', to: '    if false; then\n      echo submodule', tests: RP_ALL, note: "commit できるものが無く失敗したとき、submodule 由来の汚れを commit-failed と分類する（語彙のずれ）" },
+  { id: 'P21-submodule-dirty-uncounted', file: RP, from: '        after_sub=${WR_SUB_DIRTY}', to: '        after_sub=0', tests: RP_REAL, note: "コミット後の submodule 由来の汚れを数えない（submodule 内の変更が残るのに residual-dirty と分類する）" },
+  { id: 'P22-host-worktree-arg-dropped', file: SRC, from: "${oldWorktree ? ` --worktree ${worktreeQuote(oldWorktree)}` : ''}", to: "", tests: RP_HOST, note: "recover-prep.sh へ旧 worktree を渡さない（branch だけの残骸として扱われ、WIP を取り残す）" },
+  { id: 'P23-host-branch-arg-dropped', file: SRC, from: "${branch ? ` --branch ${worktreeQuote(branch)}` : ''}`", to: "`", tests: RP_HOST, note: "recover-prep.sh へ記録のブランチを渡さない（dead worktree で対象を失う）" },
+  { id: 'P24-host-unknown-diff-as-empty', file: SRC, from: "空とは見なさず、discard の根拠にしない", to: "空として扱ってよい", tests: RP_HOST, note: "プロンプトが、取得失敗の unknown を差分なしとして扱ってよいと指示する" },
+  { id: 'P25-dirty-unverifiable-as-clean', file: RP, from: "    R_DIRTY=-1\n    rp_scan_status \"\"", to: "    R_DIRTY=0\n    rp_scan_status \"\"", tests: RP_REAL, note: "汚れを観測できなかったとき clean として退避完了にする（実 git では再現しにくいので、観測失敗は unit の rp_wip_plan が見張る）" },
 ]
