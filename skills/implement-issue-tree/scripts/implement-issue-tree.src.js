@@ -5615,7 +5615,7 @@ function prCreatePrompt(item, impl, outOfScope) {
       : []),
     ...optinTestExecutionLines(item, '0c', true),
     ...(Array.isArray(item.optinTests) && item.optinTests.length > 0
-      ? [`0d. push 前の不変確認（必須。fail-closed）: (1) git status --porcelain を実行し、終了コード 0 かつ出力が空であること、(2) git rev-parse HEAD を実行し、終了コード 0 かつ出力が手順 0b2 で控えた期待 SHA と完全一致すること、の両方を確認する（手順 0c のテスト入口が作業ツリーを変更したり、git commit・git reset・git checkout 等で HEAD を動かしたりしていないことの確認）。いずれかのコマンドが非 0 終了、または出力が空でない・期待 SHA と不一致の場合は push せず prNumber: 0 と「opt-in テスト実行後に作業ツリーまたは HEAD が変更されている（検査コマンドの失敗を含む）」を理由として返す。両方成立した場合のみ手順 1 へ進む。手順 1b・1c の記録節に書く <sha> は期待 SHA（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
+      ? [`0d. push 前の不変確認（必須。fail-closed）: (1) git status --porcelain を実行し、終了コード 0 かつ出力が空であること、(2) git rev-parse HEAD を実行し、終了コード 0 かつ出力が手順 0b2 で控えた期待 SHA と完全一致すること、の両方を確認する（手順 0c のテスト入口が作業ツリーを変更したり、git commit・git reset・git checkout 等で HEAD を動かしたりしていないことの確認）。いずれかのコマンドが非 0 終了、または出力が空でない・期待 SHA と不一致の場合は push せず prNumber: 0 と「opt-in テスト実行後に作業ツリーまたは HEAD が変更されている（検査コマンドの失敗を含む）」を理由として返す。両方成立した場合のみ手順 0e へ進む。手順 1b・1c の記録節に書く <sha> は期待 SHA（40 桁小文字 16 進のまま、省略・短縮しない）、<result> は手順 0c の各コマンドの結果へ実際に置き換える。detail・not-run の理由などの補足は記録節へ書かない（返却値にのみ残す）。`]
       : []),
     // PR 作成前のセキュリティ確認（旧 create-pr Step 2 相当。codex P0）。Review は prepare の base 取り込み・コンフリクト解消より前に
     // 終わるため代替にならない。対象は固定した base の SHA から最終 HEAD までの差分（解消コミットを含む）。

@@ -165,3 +165,16 @@ test('prCreatePrompt: push 前（prepare 後・push 前）に base の SHA か�
   assert.match(prompt, /\.claude\/rules\/security\.md の方針に従う（追加行のみ対象・マッチ行は出力せず件数と終了コードで判定・grep が終了コード 2 以上なら検査失敗として中止）/)
   assert.match(prompt, /push も PR 作成もせず prNumber: 0 と「セキュリティ確認で問題を検出/)
 })
+
+test('prCreatePrompt: 手順 0e を通らずに手順 1 へ進む指示がない（optinTests の有無どちらでも）。0d の進み先は 0e', () => {
+  for (const optinTests of [[], [{ command: 'npm run e2e' }]]) {
+    const prompt = prCreatePrompt({ ...item, optinTests }, impl, [])
+    // 「手順 1 へ進む」と書けるのは 0e だけ
+    const gotos = [...prompt.matchAll(/手順 1 へ進む/g)].map((m) => m.index)
+    const sec = prompt.indexOf('0e. push 前のセキュリティ確認')
+    assert.ok(sec >= 0)
+    assert.equal(gotos.length, 1, `手順 1 へ進む指示は 0e の 1 箇所だけ: ${gotos.length}`)
+    assert.ok(gotos[0] > sec && gotos[0] < prompt.indexOf('1. push（Bash の timeout'), '0e の本文内にある')
+    if (optinTests.length) assert.match(prompt, /0d\. [^\n]*両方成立した場合のみ手順 0e へ進む/)
+  }
+})
