@@ -53,7 +53,6 @@ checks_classify() {
       else
         (.conclusion // .status) as $v
         | if ($v == "success" or $v == "neutral" or $v == "skipped") then "p"
-          elif ($v == "queued" or $v == "in_progress" or $v == "waiting" or $v == "pending" or $v == "requested") then "w"
           else "f" end
       end;
     def st_bucket:
