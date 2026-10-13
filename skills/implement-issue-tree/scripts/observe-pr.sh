@@ -78,10 +78,11 @@
 #       foreground sleep はハーネスに拒否されるため 1 回を短くし、呼び出し側が「pending なら再実行」を最大 maxAttempts 回
 #       繰り返す。上限は --attempt で強制する（範囲外は exit 2）。--attempt を進めずに繰り返すこと自体は止められない。
 # 環境変数（テストが待機を短縮するために使う。範囲外は既定値へ戻す）:
-#       OBSERVE_PR_POLLS（既定 6・最大 10）、OBSERVE_PR_SLEEP_SEC（既定 15・最大 30）、
+#       OBSERVE_PR_POLLS（既定 6・最大 10。push は 3、checks --until settled は 4）、
+#       OBSERVE_PR_SLEEP_SEC（既定 15・最大 30。push は 30、checks --until settled は 25）、
 #       OBSERVE_PR_WALL_SEC（既定 90・最大 100）、OBSERVE_PR_GH_TIMEOUT_SEC（既定 25・最大 60）、
 #       OBSERVE_PR_MAX_OUT_BYTES（既定 16777216・最小 1000）、
-#       OBSERVE_PR_MAX_ATTEMPTS（既定 7・最大 20）、
+#       OBSERVE_PR_MAX_ATTEMPTS（既定 7・最大 20。push は既定 4、checks --until settled は既定 30・最大 40）、
 #       OBSERVE_PR_SETTLE_SEC（pr の --wait の再取得間隔。既定 25・最大 30。最大 4 回観測）
 # 終了コード:
 #   0  封筒を出力した（観測の成否は payload.err / outcome で判断する）。threads-detail は取得できたとき 0

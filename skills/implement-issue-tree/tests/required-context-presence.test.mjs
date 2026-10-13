@@ -225,7 +225,10 @@ test('#603-8 a・b・c: failed が 1 件以上は needs-fix、pending が残る 
   const b = p.split('\n').find((l) => l.startsWith('   b. '))
   assert.ok(b.includes('pending が 0 件であること（met なら満たす）') && b.includes('exhausted は pending が残ったままなので満たさず、state: timeout'))
   const c = p.split('\n').find((l) => l.startsWith('   c. '))
-  assert.ok(c.includes('failed が 1 件以上の場合') && c.includes('gh run view --log-failed') && c.includes('state: needs-fix'))
+  assert.ok(c.includes('failed が 1 件以上の場合') && c.includes('gh run view <run-id> --log-failed') && c.includes('state: needs-fix'))
+  // 3c は run-id の出所（gh run list --commit <HEAD sha>）を持つ。判定には gh pr checks の出力を使わないが、原因調査には gh run を使える
+  assert.ok(c.includes('gh run list --commit <手順 1 の HEAD sha>'), '3c に失敗 run の探し方がない')
+  assert.ok(observationSection(p).includes('失敗の原因調査だけは手順 3c の gh run を使う'))
   assert.ok(c.includes('--attempt 1 から再監視'), 'flaky の rerun 後は完了待ちを最初から')
 })
 
