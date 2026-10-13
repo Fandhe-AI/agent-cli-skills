@@ -15,6 +15,7 @@
 // 偽の `gh`: tests/lib/gh-observe-stub.mjs（pr view の応答を経路キー prview で設定する）。
 import { spawnSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { trackTmp } from './tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createObserveStub } from './gh-observe-stub.mjs'
@@ -97,7 +98,7 @@ function commit(dir, file, content, message) {
 //   submodule         実体のあるサブモジュール sub を持つ。wt は初期化済みで、dirtySubmodule() で未コミットの変更を作れる
 export function makeSandbox(opts = {}) {
   const { conflict = false, baseAdvanced = true, branchHasBase = false, branchBehindOnly = false, gitlinkConflict = false, submodule = false } = opts
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'iit-base-merge-')))
+  const root = realpathSync(trackTmp(mkdtempSync(join(tmpdir(), 'iit-base-merge-'))))
   const origin = join(root, 'origin.git')
   const seed = join(root, 'seed')
   const wt = join(root, 'wt')

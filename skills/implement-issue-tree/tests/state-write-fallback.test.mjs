@@ -16,6 +16,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -45,7 +46,7 @@ const driverPart = source.slice(markerIndex)
 // globalThis.args を先に注入してから import する（review-diff-base.test.mjs と同じ前例）。
 globalThis.args = { parent: 1 }
 
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-state-fallback-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-state-fallback-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-state-defs.mjs')
 // 実装スクリプトは `export const meta` 以外の top-level export を持てない（Workflow 起動制約）
 // ため、定義部は非 export のまま置き、切り出したスライス側で export 文を付与する。

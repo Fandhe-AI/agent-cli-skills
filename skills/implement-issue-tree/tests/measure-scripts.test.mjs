@@ -14,6 +14,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,7 +52,7 @@ function duKib(path) {
 
 // 実行する du / df の代わりに置く偽コマンドのディレクトリを作る
 function fakeBin(files) {
-  const dir = mkdtempSync(join(tmpdir(), 'iit-fakebin-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-fakebin-')))
   for (const [name, body] of Object.entries(files)) {
     const p = join(dir, name)
     writeFileSync(p, `#!/bin/sh\n${body}\n`)
@@ -61,7 +62,7 @@ function fakeBin(files) {
 }
 
 function withWork(fn) {
-  const work = mkdtempSync(join(tmpdir(), 'iit-measure-'))
+  const work = trackTmp(mkdtempSync(join(tmpdir(), 'iit-measure-')))
   try {
     return fn(work)
   } finally {
@@ -399,7 +400,7 @@ for (const bash of BASHES) {
 
   test(`${tag} residual: sha256sum / shasum が無ければ exit 3 で封筒を出さない`, () => {
     // dirname と du だけを置いた PATH。sha256sum / shasum は無い
-    const bin = mkdtempSync(join(tmpdir(), 'iit-nohash-'))
+    const bin = trackTmp(mkdtempSync(join(tmpdir(), 'iit-nohash-')))
     try {
       for (const t of ['dirname', 'du']) {
         const p = spawnSync('sh', ['-c', `command -v ${t}`], { encoding: 'utf8' }).stdout.trim()

@@ -15,6 +15,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -34,7 +35,7 @@ if (markerIndex < 0) {
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-residual-retry-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-residual-retry-')))
 const slicePath = join(sliceDir, 'defs.mjs')
 const SLICE_EXPORTS = [
   'classifyResidualByteReport',

@@ -11,6 +11,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -583,7 +584,7 @@ for (const bash of BASHES) {
 // 失敗終端する（tests/base-merge-host-flow.test.mjs の fallback）。ここは『動かない』『git に何も触れない』ことを固定する。
 const RUN_VERIFIED = join(dirname(SCRIPT), 'run-verified.sh')
 function cloneScripts(omit = []) {
-  const dir = mkdtempSync(join(tmpdir(), 'iit-bm-launch-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-bm-launch-')))
   const scripts = join(dir, 'scripts')
   mkdirSync(join(scripts, 'lib'), { recursive: true })
   for (const f of ['run-verified.sh', 'base-merge.sh']) if (!omit.includes(f)) copyFileSync(join(dirname(SCRIPT), f), join(scripts, f))

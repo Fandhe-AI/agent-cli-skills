@@ -10,6 +10,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -41,7 +42,7 @@ globalThis.agent = async () => null
 globalThis.log = () => {}
 const source = readFileSync(SRC, 'utf8')
 const def = source.slice(0, source.lastIndexOf('\n', source.indexOf(['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_'))))
-const slice = join(mkdtempSync(join(tmpdir(), 'iit-inconclusive-')), 'defs.mjs')
+const slice = join(trackTmp(mkdtempSync(join(tmpdir(), 'iit-inconclusive-'))), 'defs.mjs')
 writeFileSync(slice, `${def}\nexport { applyChecksObservation, observeInputText, sha256Hex }\n`)
 const m = await import(pathToFileURL(slice).href)
 const inputSha = m.sha256Hex(m.observeInputText({ mode: 'checks', pr: 5 }))

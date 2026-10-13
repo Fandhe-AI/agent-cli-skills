@@ -14,6 +14,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, realpathSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,7 +33,7 @@ const ARGS = ['--mode', 'push', '--pr', '12', '--base', 'main', '--branch', BRAN
 const WAIT = (n) => ['--wait', '--attempt', String(n)]
 
 function makeRepo() {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'iit-push-mode-')))
+  const dir = realpathSync(trackTmp(mkdtempSync(join(tmpdir(), 'iit-push-mode-'))))
   git(dir, 'init', '-q', '-b', 'main')
   git(dir, 'config', 'user.name', 'test')
   git(dir, 'config', 'user.email', 'test@example.com')
@@ -146,7 +147,7 @@ for (const bash of BASHES) {
 
   t('git の作業ディレクトリでない（HEAD を読めない）なら err=1 / error。待たずに推測もしない', () => {
     const stub = createObserveStub({ prview: { out: prJson(OLD) }, ...checks(1) })
-    const notRepo = { dir: realpathSync(mkdtempSync(join(tmpdir(), 'iit-push-norepo-'))) }
+    const notRepo = { dir: realpathSync(trackTmp(mkdtempSync(join(tmpdir(), 'iit-push-norepo-')))) }
     const r = run(bash, stub, notRepo, [...ARGS, ...WAIT(1)], { GIT_CEILING_DIRECTORIES: dirname(notRepo.dir) })
     assert.deepEqual(pick(payloadOf(r)), { o: 'error', e: 1, c: 0, m: 'UNKNOWN', t: 0 })
     assert.equal(stub.countOf('prview'), 0, 'HEAD を読めないなら PR も取りに行かない')

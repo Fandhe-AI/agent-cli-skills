@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -23,7 +24,7 @@ if (markerIndex < 0) {
 }
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const driverPart = source.slice(markerIndex)
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-optin-defs-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-optin-defs-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-optin-defs.mjs')
 const SLICE_EXPORTS = [
   'validateOptinCommandForm',
@@ -806,13 +807,17 @@ const EXPECTED_REMOVE_GREP = `grep -avE -e '^[[:space:]]*## opt-in テスト実�
 // env を渡すと子 bash の環境を差し替える（PATH を /usr/bin 先頭に固定して、macOS では BSD grep
 // 〔/usr/bin/grep〕で実行行を実際に走らせる確認に使う。PR #505 codex P1）。
 function applyRecordRewrite(bodyText, commands, sha, result, env) {
-  const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'optin-record-rewrite-')))
   const bodyPath = join(dir, 'body.md')
   writeFileSync(bodyPath, bodyText)
   return runRecordRewrite(bodyPath, commands, sha, result, env)
 }
 
-function runRecordRewrite(bodyPath, commands, sha, result, env = process.env) {
+function runRecordRewrite(bodyPath, commands, sha, result, baseEnv = process.env) {
+  // 実行行の g=$(mktemp) は、grep が非 0 で終わる経路（fail-closed）では mv されず残る。
+  // 実行行そのものは変えずに、子 bash の TMPDIR をテスト専用の追跡ディレクトリへ向けて、
+  // 残った一時ファイルがプロセス終了時にディレクトリごと消えるようにする。
+  const env = { ...baseEnv, TMPDIR: trackTmp(mkdtempSync(join(tmpdir(), 'optin-record-scratch-'))) }
   const lines = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
   const grepLine = lines.find((l) => l.trim().startsWith('g=$(mktemp); grep -avE')).trim()
   const hs = lines.indexOf(`cat >> "$f" <<'OPTIN_RECORD_EOF'`)
@@ -861,7 +866,7 @@ test('記録節の書き直し: 字下げ・CRLF 付きの旧記録行も固定�
 test('記録節の書き直し: 本文が記録節だけ（除去後に空）の場合は実行行が非 0 で終わり "$f" は元のまま残る（fail-closed。Issue #502）', () => {
   const commands = ['make e2e']
   const onlyRecord = `${OPTIN_RECORD_HEADING}\n${OPTIN_RECORD_HUMAN_PREFIX}make e2e => pass\n${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}\n`
-  const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'optin-record-rewrite-')))
   const bodyPath = join(dir, 'body.md')
   writeFileSync(bodyPath, onlyRecord)
   assert.throws(() => runRecordRewrite(bodyPath, commands, SHA_B, 'pass'), (e) => e.status === 3)

@@ -9,6 +9,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -24,7 +25,7 @@ const definitionPart = rawSource.slice(0, rawSource.lastIndexOf('\n', rawSource.
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 globalThis.agent = async () => null
 globalThis.log = () => {}
-const slicePath = join(mkdtempSync(join(tmpdir(), 'iit-observe-flow-')), 'defs.mjs')
+const slicePath = join(trackTmp(mkdtempSync(join(tmpdir(), 'iit-observe-flow-'))), 'defs.mjs')
 writeFileSync(slicePath, `${definitionPart}\nexport { declaredDepsChecksum, outOfTreeStateChecksum }\n`)
 const { declaredDepsChecksum, outOfTreeStateChecksum } = await import(pathToFileURL(slicePath).href)
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor

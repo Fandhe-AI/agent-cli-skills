@@ -18,6 +18,7 @@
 //   自身の sleep を残して返らない（タイムアウトと子プロセスの後始末の検証用）。
 // 呼び出しの記録: callsPath の各行が 1 回分の argv（空白区切り）。countOf(key) で経路ごとの呼び出し回数を読む。
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { trackTmp } from './tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -90,7 +91,7 @@ exit "$code"
 `
 
 export function createObserveStub(routes = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'iit-observe-stub-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-observe-stub-')))
   const ghPath = join(dir, 'gh')
   writeFileSync(ghPath, STUB_SH)
   chmodSync(ghPath, 0o755)
