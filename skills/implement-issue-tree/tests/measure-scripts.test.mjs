@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -202,7 +202,7 @@ for (const bash of BASHES) {
     })
   })
 
-  test(`${tag} residual: 桁あふれする du の出力は err（算術がラップして誤った値を err:0 で出さない）`, () => {
+  test(`${tag} residual: 1 件が 15 桁を超える du の出力は err（算術がラップして誤った値を err:0 で出さない）`, () => {
     withWork((work) => {
       const a = mkTree(work, 'wt-a')
       for (const out of ['99999999999999999999', '9223372036854775808', '18446744073709551617']) {
@@ -294,6 +294,97 @@ for (const bash of BASHES) {
       for (const e of [{ POSIXLY_CORRECT: '1' }, { BLOCKSIZE: '512' }, { BLOCK_SIZE: '1M' }, { DU_BLOCK_SIZE: '1M' }]) {
         const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n`, env: e }))
         assert.deepEqual(env.payload, env0.payload, JSON.stringify(e))
+      }
+    })
+  })
+
+  // --- Issue #603 第 2 弾の持ち越し（#611 の独立レビュー 2 回目）---
+
+  test(`${tag} residual: 1 件ずつは 15 桁以内でも、合計が 15 桁を超える加算は err（合計が桁あふれして負値にならない）`, () => {
+    withWork((work) => {
+      const paths = ['a', 'b', 'c'].map((n) => mkTree(work, n))
+      const bin = fakeBin({ du: "printf '999999999999999\\t%s\\n' \"$3\"" })
+      try {
+        const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${paths.join('\n')}\n`, env: { PATH: `${bin}:${process.env.PATH}` } }))
+        assert.equal(env.payload.count, 3)
+        assert.equal(env.payload.kib, 999999999999999, '15 桁以内の合計までは採用する')
+        assert.equal(env.payload.err, 2, '上限を超える 2 件目・3 件目は err に数え、kib に加算しない')
+        assert.ok(env.payload.kib >= 0)
+      } finally {
+        rmSync(bin, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test(`${tag} residual: du が POSIXLY_CORRECT・BLOCKSIZE 系の環境変数に反応する実装でも、スクリプトが外すので kib は変わらない（unset の効果）`, () => {
+    withWork((work) => {
+      const a = mkTree(work, 'wt-a')
+      // sh が bash の posix モードだと POSIXLY_CORRECT が（export されない）シェル変数として自動で立つため、export された環境だけを見る
+      const bin = fakeBin({ du: 'if env | grep -qE "^(POSIXLY_CORRECT|BLOCKSIZE|BLOCK_SIZE|DU_BLOCK_SIZE)="; then printf "999\\t%s\\n" "$3"; else printf "10\\t%s\\n" "$3"; fi' })
+      try {
+        for (const e of [{ POSIXLY_CORRECT: '1' }, { BLOCKSIZE: '512' }, { BLOCK_SIZE: '1M' }, { DU_BLOCK_SIZE: '1M' }, {}]) {
+          const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n`, env: { PATH: `${bin}:${process.env.PATH}`, ...e } }))
+          assert.equal(env.payload.kib, 10, JSON.stringify(e))
+        }
+      } finally {
+        rmSync(bin, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test(`${tag} free-disk: ロケールが翻訳されたヘッダを出す環境でも LC_ALL=C で固定して測れる（LC_ALL の効果）`, () => {
+    withWork((work) => {
+      const bin = fakeBin({
+        df: 'if [ "$LC_ALL" = C ]; then echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; else echo "Dateisystem 1024-Bl\u00f6cke Benutzt Verf\u00fcgbar Kapazit\u00e4t Eingeh\u00e4ngt auf"; fi; echo "/dev/x 1000 400 600 40% /"',
+      })
+      try {
+        for (const lc of ['de_DE.UTF-8', 'ja_JP.UTF-8', 'C']) {
+          const env = parseEnvelope(run(bash, FREE, ['--nonce', NONCE, '--', work], { env: { PATH: `${bin}:${process.env.PATH}`, LC_ALL: lc, LANG: lc } }))
+          assert.deepEqual(env.payload, { err: 0, freeKib: 600, inputSha256: inputSha256(work) }, lc)
+        }
+      } finally {
+        rmSync(bin, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test(`${tag} residual: 行末が CRLF になった貼り付けは CR を落として同じハッシュ・同じ測定結果になり、原因を標準エラーに出す`, () => {
+    withWork((work) => {
+      const a = mkTree(work, 'wt-a')
+      const b = mkTree(work, 'wt-b')
+      const lf = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n${b}\n` }))
+      const r = run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\r\n${b}\r\n` })
+      const crlf = parseEnvelope(r)
+      assert.deepEqual(crlf.payload, lf.payload)
+      assert.equal(crlf.payload.inputSha256, inputSha256(`${a}\n${b}`), 'ホストが送った LF のパス列のハッシュと一致する')
+      assert.match(r.stderr, /CR が 2 個あった/)
+    })
+  })
+
+  test(`${tag} residual: 行末の空白は別のパスなので落とさない（\`/a \` と \`/a\` は別のハッシュ）。空行・行末空白は標準エラーに件数を出す`, () => {
+    withWork((work) => {
+      const a = mkTree(work, 'wt-a')
+      const plain = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n` }))
+      const r = run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a} \n\n` })
+      const spaced = parseEnvelope(r)
+      assert.notEqual(spaced.payload.inputSha256, plain.payload.inputSha256, '空白付きを空白なしと同じハッシュにしない')
+      assert.equal(spaced.payload.inputSha256, inputSha256(`${a} \n`))
+      assert.equal(spaced.payload.count, 2)
+      assert.equal(spaced.payload.missing, 1, '空白付きは存在しない別のパスとして数える')
+      assert.equal(spaced.payload.err, 1, '空行は err')
+      assert.match(r.stderr, /空行 1 件・行末が空白の行 1 件/)
+    })
+  })
+
+  test(`${tag} residual: 標準入力を読めなければ（cat が失敗すれば）exit 3 で封筒を出さない（count:0, err:0 の封筒にならない）`, () => {
+    withWork((work) => {
+      const dirFd = openSync(work, 'r')
+      try {
+        const r = spawnSync(bash, [RESIDUAL, '--nonce', NONCE], { encoding: 'utf8', stdio: [dirFd, 'pipe', 'pipe'] })
+        assert.equal(r.status, 3, `exit ${r.status} / stdout: ${r.stdout}`)
+        assert.equal(r.stdout, '')
+      } finally {
+        closeSync(dirFd)
       }
     })
   })

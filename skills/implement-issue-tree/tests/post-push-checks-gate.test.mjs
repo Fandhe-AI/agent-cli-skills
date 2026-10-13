@@ -141,7 +141,6 @@ const COUNT_TARGETS = [
     mod.__setBoundaryNonceSeedForTest(NONCE)
     return fixPrompt(item, impl, { summary: 'テスト用の指摘', unresolvedComments: [] }, true)
   }],
-  ['monitorPrompt', () => monitorPrompt(item, impl, [], true, true)],
 ]
 
 test('チェック総数は check-run と commit status の合計で数える（PR #480）', () => {
@@ -154,6 +153,21 @@ test('チェック総数は check-run と commit status の合計で数える（
     )
     assert.ok(prompt.includes('合計'), `${name}: 両者を合算する指示がない`)
   }
+})
+
+// #603 第 2 弾: monitor の総数取得は observe-pr.sh --mode checks へ移った。集計定義（check-run の total_count + combined status の
+// 件数の合計）と取得失敗の扱い（片方でも失敗なら err=1 で 0 件に倒さない）は、スクリプトを実際に走らせる observe-pr.test.mjs
+// の 'checks:' テスト群が固定する。ここではプロンプトが総数をそのスクリプトから読み、取得失敗を 0 件扱いにしないことだけを固定する。
+test('monitorPrompt: チェック総数は observe-pr.sh の checks（check-run + commit status の合計）から読み、取得失敗を 0 件扱いにしない（PR #480）', () => {
+  const prompt = monitorPrompt(item, impl, [], true, true)
+  const idx2 = prompt.indexOf('\n2. ')
+  const section2 = prompt.slice(idx2, prompt.indexOf('\n3. ', idx2))
+  assert.ok(section2.includes('observe-pr.sh --nonce'), '手順 2 が観測スクリプトを実行していない')
+  assert.match(section2, /--mode checks --pr \d+/, '手順 2 のモードが checks でない')
+  assert.ok(section2.includes('check-run 件数（checkRuns）と commit status 件数（statuses）の合計'), '両者を合算する定義がない')
+  assert.ok(section2.includes('err が 1（どちらか一方でも取得失敗）の場合は取得失敗として扱い'), '片方の取得失敗を取得失敗として扱う指示がない')
+  assert.ok(section2.includes('0 件と同一視すると'), '取得失敗を 0 件と同一視しない旨の指示がない')
+  assert.ok(!prompt.includes("check-runs --jq '.total_count'"), '旧: 総数を gh api の組み立てで取る指示が残っている')
 })
 
 test('チェック総数の取得失敗を 0 件扱いにしない（PR #480 codex P1）', () => {
@@ -228,7 +242,7 @@ test('monitorPrompt: 手順 2 は --watch の前に check-run 総数を取得し
   const idx3 = prompt.indexOf('\n3. ', idx2)
   assert.ok(idx3 > idx2, '手順 3 の開始位置を特定できない')
   const section2 = prompt.slice(idx2, idx3)
-  const totalIdx = section2.indexOf("check-runs --jq '.total_count'")
+  const totalIdx = section2.indexOf('--mode checks')
   // 集計定義の説明文にも「gh pr checks」の語が出るため、--watch 実行コマンドで位置決めする。
   const watchIdx = section2.indexOf(`gh pr checks ${impl.prNumber} --watch`)
   assert.ok(totalIdx >= 0, '手順 2 に check-run 総数の取得指示がない')
@@ -317,7 +331,7 @@ test('駆動部: seed ラウンドは monitor を起動せず監視枠を消費�
   // monitor エージェント呼び出しは seed でない場合のみ。
   const callIdx = driverPart.indexOf('m = await agentRetryOnce(monitorPrompt(')
   assert.notEqual(callIdx, -1, 'monitor 呼び出しが見つからない')
-  assert.match(driverPart.slice(Math.max(0, callIdx - 300), callIdx), /if \(seededConflictRound\) \{/, 'monitor 呼び出しが seed 分岐の else 側に置かれていない')
+  assert.match(driverPart.slice(Math.max(0, callIdx - 1500), callIdx), /if \(seededConflictRound\) \{/, 'monitor 呼び出しが seed 分岐の else 側に置かれていない')
 })
 
 test('駆動部: checksTotal === 0 の timeout は受理せず conflicting へ再判定する', () => {
