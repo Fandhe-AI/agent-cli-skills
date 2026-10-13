@@ -17,6 +17,8 @@
 //   --tests A,B      定義の tests の代わりに、この tests/ 内のテストファイルだけを流す（どのテストが捕まえるかの切り分け用）
 //   --skill DIR      コピー元のスキルのディレクトリ（既定はこのファイルのあるスキル）。別の版（例: git archive で取り出した
 //                    main）に同じ変異を当てて、テストの検出力を版どうしで比べるために使う
+//   --timeout SEC    変異 1 件あたりの期限（秒・既定 600 = 10 分）。超えたら子プロセス群（孫を含む）を SIGKILL で止め、
+//                    `killed (by: timeout)` と報告する（ハングする変異体が全体を止めない）
 //   --keep           作業コピーを消さずにパスを出す（原因調査用）
 //   Node の版を変えて流すときは `volta run --node 22 node …` のように実行器ごと包む（テストも同じ node で走る）。
 //
@@ -29,6 +31,12 @@
 //          （スクリプトを変えると埋め込みハッシュが変わるので、再ビルドしないと『ハッシュ不一致』で偽の赤になる）。
 //          再ビルドがトークン照合などで中止したら、変異体は出荷用のビルドゲートで止まったので killed（by: build）と扱う
 //
+// 判定:
+//   killed   テストが赤（exit 非 0）、再ビルドが中止、または期限超過（by: timeout）
+//   survived テストが緑で、実際に 1 件以上のテストが通った
+//   invalid  置換が当たらない・ファイルが無い、テストが signal で終了した（exit が無い）、実行されたテストが 0 件（全 skip・0 件登録）
+//            のいずれか。invalid は検査が弱いのか判定できなかったという意味で、survived とも killed とも数えない
+//
 // 安全: 作業ツリーは一切書き換えない。スキルのディレクトリを一時ディレクトリへ（リポジトリ内の深さ skills/<name>/ を保って）
 //       コピーし、コピーの上で置換・再ビルド・テストを行う。作業コピーは終了時に必ず消す。
 // 終了コード: 0 = 実行した変異体がすべて killed、1 = survived・invalid が 1 つ以上、2 = 使い方の誤り
@@ -36,7 +44,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { spawnAsync } from '../lib/run-async.mjs'
+import { spawn } from 'node:child_process'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SKILL_DIR = resolve(HERE, '..', '..')
@@ -49,6 +57,61 @@ function childEnv(extra = {}) {
   const env = { ...process.env, ...extra }
   delete env.NODE_TEST_CONTEXT
   return env
+}
+
+const DEFAULT_TIMEOUT_SEC = 600
+
+// 子プロセスを専用のプロセスグループで走らせ、期限が来たらグループごと SIGKILL する（孫プロセスを残さない）。
+// 戻り値は { status, signal, stdout, stderr, timedOut }。期限は壁時計の ms
+function runGroup(cmd, args, { cwd, env, timeoutMs }) {
+  return new Promise((resolvePromise, reject) => {
+    const c = spawn(cmd, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+    let stdout = ''
+    let stderr = ''
+    let timedOut = false
+    c.stdout.setEncoding('utf8')
+    c.stderr.setEncoding('utf8')
+    c.stdout.on('data', (d) => (stdout += d))
+    c.stderr.on('data', (d) => (stderr += d))
+    const timer = setTimeout(() => {
+      timedOut = true
+      try {
+        process.kill(-c.pid, 'SIGKILL')
+      } catch {
+        c.kill('SIGKILL')
+      }
+    }, Math.max(1, timeoutMs))
+    c.on('error', (e) => {
+      clearTimeout(timer)
+      reject(e)
+    })
+    c.on('close', (status, signal) => {
+      clearTimeout(timer)
+      // 親が先に終わっても残った孫は、期限でなくても残さない（グループに誰もいなければ ESRCH で何も起きない）
+      try {
+        process.kill(-c.pid, 'SIGKILL')
+      } catch {}
+      resolvePromise({ status, signal, stdout, stderr, timedOut })
+    })
+  })
+}
+
+// spec reporter の出力から結果を読む。失敗した名前は『failing tests:』節より前（実行中の ✖ 行）だけから取る
+// （節の中の同じ ✖ 行を足すと 2 重に数える）。件数は末尾の要約（ℹ fail N / ℹ pass N）から読む
+export function parseSpecOutput(stdout) {
+  const lines = stdout.split('\n')
+  const cut = lines.findIndex((l) => /^\s*✖ failing tests:/.test(l))
+  const body = cut === -1 ? lines : lines.slice(0, cut)
+  const names = body.filter((l) => /^\s*✖ /.test(l)).map((l) => l.replace(/^\s*✖ /, '').replace(/ \([0-9.]+ms\)$/, '').slice(0, 70))
+  const num = (key) => {
+    const m = lines.map((l) => new RegExp(`^ℹ ${key} (\\d+)\\s*$`).exec(l)).find(Boolean)
+    return m ? Number(m[1]) : null
+  }
+  // テストを 1 件も登録しないファイルは、ランナーがファイル自体を 1 件の pass として数える（トップレベルに `✔ x.test.mjs` が出る）。
+  // それは実行されたテストではないので、pass から引く
+  const filePass = lines.filter((l) => /^✔ \S+\.mjs \(/.test(l)).length
+  const pass = num('pass')
+  return { names, fail: num('fail'), pass: pass === null ? null : pass - filePass }
 }
 
 // 置換が当たる回数（重ならない出現）
@@ -102,8 +165,10 @@ async function loadDefinitions(path) {
 }
 
 // 1 つの変異体を判定する。skillDir は変異の対象（既定は本物のスキル。コピー元として読むだけ）
-export async function runMutation(m, { skillDir = SKILL_DIR, keep = false, nodeBin = process.execPath, testsOverride = null } = {}) {
+export async function runMutation(m, { skillDir = SKILL_DIR, keep = false, nodeBin = process.execPath, testsOverride = null, timeoutSec = DEFAULT_TIMEOUT_SEC } = {}) {
   const started = Date.now()
+  const remainingMs = () => timeoutSec * 1000 - (Date.now() - started)
+  const timeoutResult = () => done('killed', { by: 'timeout', detail: `${timeoutSec} 秒の期限を超えたため子プロセス群を止めた` })
   const done = (status, extra = {}) => ({ id: m.id, status, seconds: (Date.now() - started) / 1000, ...extra })
   const work = realpathSync(mkdtempSync(join(tmpdir(), 'iit-mutate-')))
   try {
@@ -118,7 +183,8 @@ export async function runMutation(m, { skillDir = SKILL_DIR, keep = false, nodeB
     writeFileSync(target, applied.text)
 
     if (needsRebuild(m)) {
-      const b = await spawnAsync(nodeBin, [join(copy, 'scripts', 'build-workflow.mjs')], { cwd: copy, env: childEnv() })
+      const b = await runGroup(nodeBin, [join(copy, 'scripts', 'build-workflow.mjs')], { cwd: copy, env: childEnv(), timeoutMs: remainingMs() })
+      if (b.timedOut) return timeoutResult()
       if (b.status !== 0) return done('killed', { by: 'build', detail: (b.stderr || b.stdout).trim().split('\n').pop().slice(0, 160) })
     }
 
@@ -126,10 +192,19 @@ export async function runMutation(m, { skillDir = SKILL_DIR, keep = false, nodeB
     mkdirSync(tmp, { recursive: true })
     const files = (testsOverride ?? m.tests).map((t) => join('tests', t))
     for (const f of files) if (!existsSync(join(copy, f))) return done('invalid', { detail: `流すテストファイルが無い: ${f}` })
-    const t = await spawnAsync(nodeBin, ['--test', '--test-reporter=spec', ...files], { cwd: copy, env: childEnv({ TMPDIR: tmp }) })
-    if (t.status === 0) return done('survived')
-    const failed = t.stdout.split('\n').filter((l) => /^\s*✖ /.test(l) && !/failing tests:/.test(l)).map((l) => l.replace(/^\s*✖ /, '').replace(/ \([0-9.]+ms\)$/, '').slice(0, 70))
-    return done('killed', { by: 'tests', detail: failed.length > 0 ? `赤 ${failed.length} 件: ${failed.slice(0, 2).join(' / ')}` : `exit ${t.status}` })
+    const t = await runGroup(nodeBin, ['--test', '--test-reporter=spec', ...files], { cwd: copy, env: childEnv({ TMPDIR: tmp }), timeoutMs: remainingMs() })
+    if (t.timedOut) return timeoutResult()
+    // exit が無い = テストランナーが signal で終了した。赤とは言えない（緑とも言えない）ので killed にも survived にもしない
+    if (t.status === null) return done('invalid', { detail: `テストが signal ${t.signal} で終了した（exit なし）` })
+    const r = parseSpecOutput(t.stdout)
+    if (t.status === 0) {
+      // 全 skip・0 件登録は緑でも『検査が欠陥を見逃した』ではない。実行されたテストが無いので判定できない
+      if (r.pass === null) return done('invalid', { detail: 'テストの要約（ℹ pass N）を読めず、実行されたテスト数を確認できない' })
+      if (r.pass === 0) return done('invalid', { detail: '実行されたテストが 0 件（全 skip または 0 件登録）' })
+      return done('survived')
+    }
+    const count = r.fail ?? r.names.length
+    return done('killed', { by: 'tests', detail: r.names.length > 0 ? `赤 ${count} 件: ${r.names.slice(0, 2).join(' / ')}` : `exit ${t.status}` })
   } finally {
     if (keep) console.log(`作業コピー: ${work}`)
     else rmSync(work, { recursive: true, force: true })
@@ -137,17 +212,21 @@ export async function runMutation(m, { skillDir = SKILL_DIR, keep = false, nodeB
 }
 
 function parseArgs(argv) {
-  const out = { list: false, run: null, def: DEFAULT_DEF, keep: false, jobs: 4, tests: null, skill: SKILL_DIR, error: null }
+  const out = { list: false, run: null, def: DEFAULT_DEF, keep: false, jobs: 4, tests: null, skill: SKILL_DIR, timeoutSec: DEFAULT_TIMEOUT_SEC, error: null }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--list') out.list = true
     else if (a === '--keep') out.keep = true
-    else if (a === '--def' || a === '--jobs' || a === '--tests' || a === '--skill') {
+    else if (a === '--def' || a === '--jobs' || a === '--tests' || a === '--skill' || a === '--timeout') {
       const v = argv[++i]
       if (v === undefined || v.startsWith('--')) return { ...out, error: `${a} に値が無い` }
       if (a === '--def') out.def = v
       else if (a === '--skill') out.skill = resolve(v)
       else if (a === '--tests') out.tests = v.split(',').filter(Boolean)
+      else if (a === '--timeout') {
+        if (!/^[1-9][0-9]{0,5}$/.test(v)) return { ...out, error: '--timeout は 1〜999999 の整数（秒）' }
+        out.timeoutSec = Number(v)
+      }
       else if (/^[1-9][0-9]?$/.test(v)) out.jobs = Number(v)
       else return { ...out, error: '--jobs は 1〜99 の整数' }
     } else if (a === '--run') {
@@ -163,7 +242,7 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.error) {
-    console.error(`mutate: ${args.error}\n使い方: node mutate.mjs --list | --run ID...|all [--def FILE] [--jobs N] [--keep]`)
+    console.error(`mutate: ${args.error}\n使い方: node mutate.mjs --list | --run ID...|all [--def FILE] [--jobs N] [--timeout SEC] [--keep]`)
     return 2
   }
   let defs
@@ -188,7 +267,7 @@ async function main() {
   const worker = async () => {
     while (next < wanted.length) {
       const m = wanted[next++]
-      const r = await runMutation(m, { skillDir: args.skill, keep: args.keep, testsOverride: args.tests })
+      const r = await runMutation(m, { skillDir: args.skill, keep: args.keep, testsOverride: args.tests, timeoutSec: args.timeoutSec })
       results.push(r)
       const label = { killed: 'KILLED  ', survived: 'SURVIVED', invalid: 'INVALID ' }[r.status]
       console.log(`${label} ${r.id}${r.by ? ` (by: ${r.by})` : ''} ${r.seconds.toFixed(1)}s${r.detail ? ` — ${r.detail}` : ''}`)

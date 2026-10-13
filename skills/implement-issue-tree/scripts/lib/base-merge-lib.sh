@@ -14,9 +14,8 @@
 #
 # このファイルは単体実行しない。run-verified.sh のハッシュ照合は scripts/lib/*.sh も対象に含む
 # （ここを書き換えると、これを読み込む全スクリプトのハッシュが変わる）。
-
-[[ -n "${BASE_MERGE_LIB_LOADED:-}" ]] && return 0
-BASE_MERGE_LIB_LOADED=1
+# 読み込み済みを示す変数でのガードは置かない: 環境から継承した変数でこのファイルの定義が飛ばされ、export -f した偽の関数が使われるのを防ぐ
+#（定義だけのファイルなので毎回読み直して構わない）。
 
 # 許可するリモートのホスト。Fandhe-AI は GitHub.com 運用のため固定値とする（owner/repo だけを比較すると、同じ
 # owner/repo を持つ別ホストを一致とみなして別ホストへ push しうる。PR #443 codex P0）

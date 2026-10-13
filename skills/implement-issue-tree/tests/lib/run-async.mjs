@@ -22,9 +22,14 @@ export function spawnAsync(cmd, args, { cwd, env, input } = {}) {
   })
 }
 
-// ハングする偽 gh（GH_STUB_HANG）に渡す sleep の秒数。テスト・bash ごとに一意にする。
-// 残存する sleep を `sleep <秒数>` で探すので、同時に走る別のケースの sleep と取り違えないための値で、
-// base（テストごとの帯の先頭）+ プロセスごとの揺らぎ + bash の通し番号。
-export function hangSeconds(base, bashIndex) {
-  return String(base + (process.pid % 450) * 2 + bashIndex)
+// ハングする偽 gh（GH_STUB_HANG）に渡す sleep の秒数。同時に生きているプロセスの間でも、ファイル内のケース・bash の間でも一意にする。
+// 残存する sleep を `sleep <秒数>` で探すので、別のケースや別のプロセス（Node 24 と 22 の並列実行・mutate の --jobs）の sleep を
+// 数えて偽の赤にしないための値で、1000 + pid × 100 + slot × 10 + bashIndex。pid は同時に生きているプロセスで重ならず、
+// slot（ケースごとの番号 0〜9）と bashIndex（0〜9）は 1 桁ずつなので値は一意に決まる（桁が混ざらない）。
+// 上限は pid が 400 万台でも macOS の sleep が受け付ける範囲（10 桁未満）に収まる。
+export function hangSeconds(slot, bashIndex) {
+  if (!Number.isInteger(slot) || slot < 0 || slot > 9 || !Number.isInteger(bashIndex) || bashIndex < 0 || bashIndex > 9) {
+    throw new RangeError(`hangSeconds: slot・bashIndex は 0〜9 の整数: ${slot}, ${bashIndex}`)
+  }
+  return String(1000 + process.pid * 100 + slot * 10 + bashIndex)
 }

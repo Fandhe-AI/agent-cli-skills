@@ -148,3 +148,32 @@ for (const bash of BASHES) {
     })
   })
 }
+
+// lib は「読み込み済み」変数でのガードを持たない。環境から継承した LOADED 変数や export -f した偽の関数で、定義が飛ばされたり
+// 差し替えられたりしないこと（拒否すべき URL・ブランチ名・不正な nonce を、lib 自身の定義で拒否する）
+const LIB_DIR = dirname(LIB)
+// 子の bash が実行する検査。$1 = lib のディレクトリ、$2 = 期待 owner/repo。結果は key=rc の行で返す
+const INNER = `. "$1/base-merge-lib.sh" && . "$1/push-verify.sh" && . "$1/signed-output.sh" || exit 90
+url_allowed "https://evil.example/$2" "$2"; echo "url=$?"
+pv_valid_branch "refs/heads/x"; echo "branch=$?"
+so_valid_nonce "bad nonce!"; echo "nonce=$?"
+h=$(printf abc | so_sha256); echo "sha=$?"; echo "hash=$h"`
+// 親の bash が偽の関数を export -f してから子を起動する（bash の版ごとの輸出形式に依らない）
+const OUTER = `url_allowed() { return 0; }; pv_valid_branch() { return 0; }; so_valid_nonce() { return 0; }; so_sha256() { echo fake; }
+export -f url_allowed pv_valid_branch so_valid_nonce so_sha256
+exec "$0" -c "$INNER" inner "$LIBDIR" "$WANT"`
+for (const bash of BASHES) {
+  test(`[${bash}] lib は継承した環境（LOADED 変数・export -f の偽の関数）に左右されない`, () => {
+    const r = spawnSync(bash, ['-c', OUTER, bash], {
+      encoding: 'utf8',
+      env: { ...process.env, INNER, LIBDIR: LIB_DIR, WANT, BASE_MERGE_LIB_LOADED: '1', PUSH_VERIFY_LIB_LOADED: '1', SIGNED_OUTPUT_LIB_LOADED: '1' },
+    })
+    assert.equal(r.status, 0, `exit ${r.status} / stderr: ${r.stderr}`)
+    const got = Object.fromEntries(r.stdout.split('\n').filter((l) => /^[a-z]+=/.test(l)).map((l) => l.split('=')))
+    assert.equal(got.url, '1', `偽の url_allowed で拒否すべき URL が通った: ${r.stdout}`)
+    assert.equal(got.branch, '1', `偽の pv_valid_branch が使われた: ${r.stdout}`)
+    assert.equal(got.nonce, '1', `偽の so_valid_nonce が使われた: ${r.stdout}`)
+    assert.ok(!r.stdout.includes('fake'), `偽の so_sha256 が使われた: ${r.stdout}`)
+    assert.deepEqual({ sha: got.sha, hash: got.hash }, { sha: '0', hash: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' })
+  })
+}

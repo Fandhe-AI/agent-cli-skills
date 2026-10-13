@@ -79,6 +79,10 @@ node skills/implement-issue-tree/tests/tools/mutate.mjs --skill <スキルのデ
 volta run --node 22 node skills/implement-issue-tree/tests/tools/mutate.mjs --run all
 ```
 
+- `INVALID` は判定できなかった場合: 置換が当たらない、テストランナーが signal で終了した（exit なし）、実行されたテストが
+  0 件（全 skip・0 件登録）。緑でも `SURVIVED` とは数えない。
+- 変異 1 件ごとに期限がある（既定 600 秒、`--timeout SEC` で変更）。超えたら孫プロセスを含む子プロセス群を止めて
+  `KILLED (by: timeout)` と報告する。
 - 定義は `tests/tools/mutations.mjs`（`id`・`file`・`from`・`to`・`tests`・`note`）。`from` は対象ファイルにちょうど
   1 か所だけ当たること（0 か所・2 か所以上は `INVALID`）。実装を変えて当たらなくなった定義は
   `tests/mutate-tool.test.mjs` が赤にする。`--def FILE` で別の定義ファイルも読める。

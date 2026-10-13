@@ -280,6 +280,20 @@ export function registerBaseMergeTests(bash) {
     assert.equal(sb.remoteSha(), before)
   })
 
+  t('routing: 環境から受け継いだ「読み込み済み」変数と export -f の偽の url_allowed / pv_valid_branch / so_sha256 があっても、lib の定義が使われ、拒否すべき URL は拒否する（routingError・変更系の git を呼ばない）', () => {
+    const sb = makeSandbox()
+    const before = sb.remoteSha()
+    const n = sb.gitCalls().length
+    // 親 bash で偽の関数を export -f し、読み込み済みを示す変数を環境へ置いてからスクリプトを起動する（bash の版ごとの輸出形式に依らない）
+    const fake = 'url_allowed() { return 0; }; pv_valid_branch() { return 0; }; so_sha256() { echo fake; }; export -f url_allowed pv_valid_branch so_sha256; exec "$@"'
+    const env = sb.env({ FAKE_REMOTE_URL: `https://evil.example/${REPO}`, BASE_MERGE_LIB_LOADED: '1', PUSH_VERIFY_LIB_LOADED: '1', SIGNED_OUTPUT_LIB_LOADED: '1' })
+    const r = spawnSync(bash, ['-c', fake, 'poison', bash, SCRIPT, ...ARGS], { cwd: sb.wt, encoding: 'utf8', env })
+    const v = result(r)
+    assert.deepEqual({ pushed: v.pushed, routingError: v.routingError }, { pushed: false, routingError: true })
+    assert.deepEqual(mutatingSince(sb, n), [], '変更系の git を呼んでいない')
+    assert.equal(sb.remoteSha(), before)
+  })
+
   t('routing: 期待リポジトリが空（未確定）は常に不一致 = routingError。URL が owner/repo を欠く・正規の URL でも、変更系の git を呼ばない', () => {
     const sb = makeSandbox()
     const before = sb.remoteSha()

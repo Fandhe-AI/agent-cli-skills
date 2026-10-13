@@ -65,6 +65,9 @@ for (const bash of BASHES) {
     const stub = unmetStub()
     const r = await runA(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '1'], { ...SCALED, GH_STUB_DELAYS: '0 0 0 0 60' })
     const p = payloadOf(r)
+    // 前提の自己検証: 1 回目の観測が成功し（check-runs の件数取得まで届いた）、2 回目の pr view まで進んでいたこと。
+    // 極端な負荷で 1 回目の観測が壁時計に間に合わなかった場合、この検査が無いと『直前の件数を載せない』を見ないまま緑になる
+    assert.ok(stub.countOf('check-runs-total') >= 1 && stub.countOf('prview') >= 2, `前提が崩れた: 1 回目の観測が完了していない（prview=${stub.countOf('prview')} check-runs-total=${stub.countOf('check-runs-total')}）`)
     assert.deepEqual({ o: p.outcome, e: p.err, h: p.headSha, t: p.total, r: p.checkRuns, s: p.statuses }, { o: 'pending', e: 0, h: '', t: 0, r: 0, s: 0 })
     assert.match(r.stderr, /この起動では結論が出ていない/)
     assert.ok(!/取得に失敗した（gh pr view/.test(r.stderr.split('\n').filter((l) => l.includes('結論が出ていない')).join('')), '結論が出ていない行は取得失敗と言わない')

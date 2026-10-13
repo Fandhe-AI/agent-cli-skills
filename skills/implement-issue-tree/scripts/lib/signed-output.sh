@@ -11,15 +11,14 @@
 #         にする（jq の数値表記・エスケープ差に依存しないため、呼び出し側が printf で直接組み立てる）
 #       - nonce: ホストが呼び出しごとに決めて --nonce で渡す。出力は呼び出しに結び付く
 # 契約: 失敗は非ゼロ return。source 元のシェル状態を壊さないため set -e / set -u / trap / exit は
-#       置かない。二重 source は無害（ガードで即 return）。
+#       置かない。二重 source は無害。
 # 互換: macOS（BSD userland・bash 3.2）と Linux（GNU）の両方で動く書き方だけを使う。
 #       sha256sum が無ければ shasum -a 256 を使う（macOS に sha256sum は標準では無い）。
 #
 # このファイルは単体実行しない。run-verified.sh のハッシュ照合は scripts/lib/*.sh も対象に含む
 # （ここを書き換えると、これを読み込む全スクリプトのハッシュが変わる）。
-
-[[ -n "${SIGNED_OUTPUT_LIB_LOADED:-}" ]] && return 0
-SIGNED_OUTPUT_LIB_LOADED=1
+# 読み込み済みを示す変数でのガードは置かない: 環境から継承した変数でこのファイルの定義が飛ばされ、export -f した偽の関数が使われるのを防ぐ
+#（定義だけのファイルなので毎回読み直して構わない）。
 
 # 標準入力の SHA-256 を小文字 16 進 64 桁で stdout へ出す。ツールが無い・出力が想定外なら非ゼロ。
 so_sha256() {

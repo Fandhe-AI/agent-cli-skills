@@ -11,7 +11,7 @@
 //
 // 速度: 実時間を待つケース（遅い gh・ハングする gh・壁時計の窓の判定。縮尺は壁時計 1〜8 秒）は、縮尺を変えずに非同期で走らせ、
 // describe の concurrency で同時に待つ（旧: spawnSync で順に待ち、ファイル全体で約 54 秒。今: 最長の 1 本分 + 数秒）。
-// 同時に走るケースの sleep を取り違えないよう、ハングする gh の sleep 秒数はケース・bash ごとに一意にする（hangSeconds）。
+// 同時に走るケースの sleep を取り違えないよう、ハングする gh の sleep 秒数はケース・bash・プロセスごとに一意にする（hangSeconds）。
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
@@ -63,7 +63,7 @@ BASHES.forEach((bash, bi) => {
   })
 
   t('ハングする gh は時間制限で kill され、gh の孫プロセスも残さない。壁時計上限（WALL）を超えない', async () => {
-    const hang = hangSeconds(2000, bi)
+    const hang = hangSeconds(0, bi)
     const stub = createObserveStub({ prview: { out: prJson() } })
     const t0 = Date.now()
     const r = await runA(bash, stub, ['--mode', 'checks', '--pr', '12', '--wait', '--attempt', '1'], {
@@ -286,7 +286,7 @@ BASHES.forEach((bash, bi) => {
   })
 
   test(`[${bash}] 壁時計の残りで縮めた制限に掛かって kill した場合は pending、gh 自身の制限に掛かった場合は error（取得失敗）と区別する`, { skip: !jqAvailable }, async () => {
-    const hang = hangSeconds(3000, bi)
+    const hang = hangSeconds(1, bi)
     const stub = createObserveStub({ prview: { out: prJson() } })
     // 3 つは独立した起動。待ちを重ねるため同時に走らせる（縮尺は変えない）
     const t0 = Date.now()
@@ -307,7 +307,7 @@ BASHES.forEach((bash, bi) => {
   })
 
   test(`[${bash}] --attempt が上限のときの壁時計打ち切りは exhausted（pending のまま再実行させない）`, { skip: !jqAvailable }, async () => {
-    const hang = hangSeconds(3900, bi)
+    const hang = hangSeconds(2, bi)
     const stub = createObserveStub({ prview: { out: prJson() } })
     const p = payloadOf(await runA(bash, stub, ['--mode', 'checks', '--pr', '5', '--wait', '--attempt', '7'], { GH_STUB_HANG: hang, OBSERVE_PR_GH_TIMEOUT_SEC: '30', OBSERVE_PR_WALL_SEC: '2' }))
     assert.deepEqual({ o: p.outcome, e: p.err }, { o: 'exhausted', e: 0 })
