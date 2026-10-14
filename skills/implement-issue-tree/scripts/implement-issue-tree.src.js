@@ -4418,6 +4418,8 @@ const residualStartPathSet = new Set()
 // （planReplacementAccounting 参照）。新パスが不明だった数は slotUnknownLiveCount で持ち、バイトは物理一覧へフォールバックして測る
 const slotInheritedPaths = new Set()
 let slotUnknownLiveCount = 0
+// 引き継ぎ済みの新が後で保持された（消えなかった）パス → イシュー番号。件数は台帳の 1 件が数えているので台帳には載せず、ラン終了時の「保持した worktree」の案内にだけ出す
+const slotRetainedPaths = new Map()
 
 // 使い捨て worktree kind ごとの 1 イシュー当たり最大生成数（予約計上はこの合計から導出。未宣言
 // kind は警告のみ）。fix の終端は fix-terminal を共用。base-merge（Issue #441）は spawn 直後の
@@ -4460,11 +4462,24 @@ function recordEphemeralWorktree(issueNumber, rawPath, kind) {
   log(`#${issueNumber}: ${kind} worktree を記録した（自動削除はしない。${p}）`)
 }
 
+// 件数軸で既に数えられているパスか（開始時の観測・引き継ぎ済み・台帳のどれか）。重複排除の判定はここ 1 つに集約する
+function isWorktreeCounted(p) {
+  return p !== '' && (residualStartPathSet.has(p) || slotInheritedPaths.has(p) || ephemeralWorktrees.some((e) => e.path === p))
+}
+
+// 引き継ぎ済み（slotInheritedPaths）のパスが保持されたら、件数は動かさず案内用に覚える（台帳・開始時の観測にあるものは台帳側が案内に出る）
+function noteSlotRetained(issueNumber, p) {
+  if (p === '' || !slotInheritedPaths.has(p) || residualStartPathSet.has(p) || ephemeralWorktrees.some((e) => e.path === p)) return
+  if (!slotRetainedPaths.has(p)) slotRetainedPaths.set(p, issueNumber)
+}
+
 // 掃除で消えたと確認できなかった worktree（kind 'retained'）を残置台帳へ載せる。予約（EPHEMERAL_KIND_MAX）には含めず、保持が起きた
 // 事後に載せる。台帳・開始時観測・削除確認済みに既にあるパスは二重計上しない。戻り値は新規登録したか
 function recordRetainedWorktree(issueNumber, rawPath) {
   const p = sanitizeWorktreePath(rawPath ?? '')
-  if (!p || confirmedRemovedPaths.has(p) || residualStartPathSet.has(p) || ephemeralWorktrees.some((e) => e.path === p)) return false
+  if (!p || confirmedRemovedPaths.has(p)) return false
+  noteSlotRetained(issueNumber, p)
+  if (isWorktreeCounted(p)) return false
   ephemeralWorktrees.push({ issue: issueNumber, kind: 'retained', path: p })
   log(`${issueNumber ? `#${issueNumber}: ` : ''}消えたと確認できなかった worktree を残置の台帳へ載せた（${p}）`)
   return true
@@ -4473,15 +4488,19 @@ function recordRetainedWorktree(issueNumber, rawPath) {
 // 置換（fix が旧 worktree を消して新しい worktree に置き換える経路）の計上規則。件数軸は「開始時の観測 + 台帳」が物理的に存在しうる worktree を重複なく
 // 1 件ずつ数える。イシューごとの現行の worktree 1 本は、実装の記録（implement）またはラン開始時の観測が 1 件として数えている（パスが古くなっても
 // 台帳の 1 件は残る）。置換 1 回で物理的に増える本数は、旧が消えたことを確認できれば 0、確認できなければ（保持・結果なし・例外・旧のパスが空）1。
-// 旧が消えたときは件数を動かさず、新しい worktree をバイトの測定対象（slotInheritedPaths）にだけ入れる（新のパスが不明なら slotUnknownLiveCount を
+// 旧が消えたときは（旧が数えられていれば）件数を動かさず、新しい worktree をバイトの測定対象（slotInheritedPaths）にだけ入れる（新のパスが不明なら slotUnknownLiveCount を
 // 増やして物理一覧へのフォールバックで測る）。旧が消えなかったときは、旧のパスが既に数えられていなければ retained で 1 件、新を replacement で
 // 1 件（新のパスが空なら path '' の件数だけのエントリ）載せる。「数えられている」とは台帳・開始時の観測・slotInheritedPaths のどれかにあること。
-// これで連続した fix（旧が消えた次に保持された、パスを返さない fix の次に新しい fix、など）も、台帳の件数が物理の本数を超えず、下回らない
+// 旧が消えたが未計上のときは引き継ぎ先が無いので、新を replacement で 1 件載せる（過大側）。
+// これで連続した fix（旧が消えた次に保持された、パスを返さない fix の次に新しい fix、など）も、台帳の件数が物理の本数を下回らない（過大側には振れうる）
 // （Issue #624。個々の経路で台帳を継ぎ足す方式は 3 巡の連鎖指摘になった）。判定は純関数 planReplacementAccounting、適用は applyReplacementAccounting。
 // kind 'replacement' は状態ファイルが追跡中の現行の実装 worktree なので、使い捨ての案内には出さない。予約の差し引きにも数えない
 function planReplacementAccounting({ oldPath, oldRemoved, newPath, oldCounted, newCounted }) {
   if (oldRemoved && oldPath !== '') {
-    return { addRetainedOld: false, addReplacement: false, inheritPath: newPath, inheritUnknown: newPath === '' }
+    if (oldCounted) return { addRetainedOld: false, addReplacement: false, inheritPath: newPath, inheritUnknown: newPath === '' }
+    // 旧がどこでも数えられていない（例: 前ランの後に手動で消された旧を状態ファイルが指していた）と、新を引き継ぐ先の 1 件が無い。新を 1 件載せる
+    // （旧が別名で数えられていた場合は 1 件の過大になるが安全側）
+    return { addRetainedOld: false, addReplacement: newPath === '' || !newCounted, inheritPath: '', inheritUnknown: false }
   }
   const sameAsOld = newPath !== '' && newPath === oldPath
   return {
@@ -4496,9 +4515,9 @@ function planReplacementAccounting({ oldPath, oldRemoved, newPath, oldCounted, n
 // oldRemoved は旧の worktree が無くなったと確認できたか
 function applyReplacementAccounting(issueNumber, oldPath, rawNewPath, oldRemoved) {
   const newPath = sanitizeWorktreePath(rawNewPath ?? '')
-  const isCounted = (p) => p !== '' && (residualStartPathSet.has(p) || slotInheritedPaths.has(p) || ephemeralWorktrees.some((e) => e.path === p))
-  const plan = planReplacementAccounting({ oldPath, oldRemoved, newPath, oldCounted: isCounted(oldPath), newCounted: isCounted(newPath) })
+  const plan = planReplacementAccounting({ oldPath, oldRemoved, newPath, oldCounted: isWorktreeCounted(oldPath), newCounted: isWorktreeCounted(newPath) })
   if (plan.addRetainedOld) recordRetainedWorktree(issueNumber, oldPath)
+  else if (!oldRemoved) noteSlotRetained(issueNumber, oldPath)
   if (plan.addReplacement) recordReplacementWorktree(issueNumber, newPath)
   if (plan.inheritPath) slotInheritedPaths.add(plan.inheritPath)
   if (plan.inheritUnknown) {
@@ -10517,7 +10536,10 @@ if (disposableWorktrees.length > 0) {
 }
 // 掃除が削除せず保持した（またはスイープでも消せなかった）worktree。使い捨てとは別: 未コミットの変更や submodule の記録されていない変更を持つ
 // 場合があり、そのまま git worktree remove すると失われる。理由はエントリごとには持たない（掃除の結果行の語: retained-dirty / retained-locked / retained-submodule / retained-branch-mismatch）
-const retainedLedger = ephemeralWorktrees.filter((e) => e.kind === 'retained')
+const retainedLedger = [
+  ...ephemeralWorktrees.filter((e) => e.kind === 'retained'),
+  ...[...slotRetainedPaths].map(([path, issue]) => ({ issue, kind: 'retained', path })),
+]
 if (retainedLedger.length > 0) {
   log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
   for (const e of retainedLedger) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)

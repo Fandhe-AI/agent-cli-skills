@@ -34,7 +34,7 @@ async function fresh(tag) {
   globalThis.agent = async (_p, opts) => (opts.label === 'nonce:seed' ? { seedHex: '0'.repeat(64) } : null)
   globalThis.log = () => {}
   const mod = await importDefinitions(
-    ['updateStateDetailed', 'sweepClosedWorktrees', 'confirmedRemovedPaths', 'ephemeralWorktrees', 'residualStartPathSet', 'recordEphemeralWorktree', 'ensureBoundaryNonceSeed', 'planReplacementAccounting', 'slotInheritedPaths', 'slotUnknownLiveCount'],
+    ['updateStateDetailed', 'sweepClosedWorktrees', 'confirmedRemovedPaths', 'ephemeralWorktrees', 'residualStartPathSet', 'recordEphemeralWorktree', 'ensureBoundaryNonceSeed', 'planReplacementAccounting', 'slotInheritedPaths', 'slotUnknownLiveCount', 'slotRetainedPaths'],
     tag,
   )
   await mod.ensureBoundaryNonceSeed()
@@ -136,9 +136,10 @@ test('置換: 旧 worktree が保持されると、旧（台帳に無ければ r
   assert.deepEqual(retainedEntries(f), [{ issue: 60, kind: 'retained', path: '/tmp/old-60' }])
   assert.deepEqual(replacementEntries(f), [{ issue: 60, kind: 'replacement', path: '/tmp/new-60' }])
 
+  f.recordEphemeralWorktree(61, '/tmp/old-61', 'implement')
   stub(cleanupOf(GONE))
   await f.updateStateDetailed(61, { fixCount: 1, worktree: '/tmp/new-61' }, { cleanupWorktree: '/tmp/old-61', replacementWorktree: '/tmp/new-61' })
-  assert.equal(replacementEntries(f).length, 1, '旧が消えたなら台帳の 1 件が新へ引き継がれる（純増しない）')
+  assert.equal(replacementEntries(f).length, 1, '旧（台帳にある実装 worktree）が消えたなら台帳の 1 件が新へ引き継がれる（純増しない）')
 })
 
 test('置換: 旧が台帳にある実装 worktree なら旧は二重に載せず、新だけが載る（物理 2 本 = 台帳 2 件）', async () => {
@@ -353,9 +354,11 @@ test('planReplacementAccounting の表: 旧が消えたら件数は動かず新�
   const P = (o) => f({ oldPath: '/o', oldRemoved: false, newPath: '/n', oldCounted: false, newCounted: false, ...o })
   const none = { addRetainedOld: false, addReplacement: false, inheritPath: '', inheritUnknown: false }
   const rows = [
-    ['消えた・新あり', { oldRemoved: true }, { ...none, inheritPath: '/n' }],
-    ['消えた・新が不明', { oldRemoved: true, newPath: '' }, { ...none, inheritUnknown: true }],
-    ['消えた・旧が未計上でも件数は動かない', { oldRemoved: true, oldCounted: false }, { ...none, inheritPath: '/n' }],
+    ['消えた・旧が計上済みなら件数は動かず新を引き継ぐ', { oldRemoved: true, oldCounted: true }, { ...none, inheritPath: '/n' }],
+    ['消えた・旧が計上済み・新が不明', { oldRemoved: true, oldCounted: true, newPath: '' }, { ...none, inheritUnknown: true }],
+    ['消えた・旧が未計上なら引き継ぎ先が無いので新を 1 件載せる', { oldRemoved: true, oldCounted: false }, { ...none, addReplacement: true }],
+    ['消えた・旧が未計上・新が不明', { oldRemoved: true, oldCounted: false, newPath: '' }, { ...none, addReplacement: true }],
+    ['消えた・旧が未計上・新が計上済み', { oldRemoved: true, oldCounted: false, newCounted: true }, none],
     ['保持・旧が未計上・新あり', {}, { ...none, addRetainedOld: true, addReplacement: true }],
     ['保持・旧が計上済み・新あり', { oldCounted: true }, { ...none, addReplacement: true }],
     ['保持・旧が計上済み・新も計上済み', { oldCounted: true, newCounted: true }, none],
@@ -400,6 +403,23 @@ test('連続した置換の台帳: 消えた→保持、パスなしの fix の�
   await h.updateStateDetailed(72, { fixCount: 2 }, { cleanupWorktree: '/tmp/fix1-72', replacementWorktree: '/tmp/fix2-72' })
   assert.equal(h.ephemeralWorktrees.length, 1)
   assert.ok(h.confirmedRemovedPaths.has('/tmp/fix1-72') && h.slotInheritedPaths.has('/tmp/fix2-72'))
+})
+
+test('旧が未計上のまま消えた置換（手動削除済みのパスを状態ファイルが指していた monitoring 再開）は新を 1 件載せる。引き継ぎ済みのパスは retained で二重に載せない（Issue #624 レビュー）', async () => {
+  const f = await fresh('ledger-uncounted')
+  stub(cleanupOf(GONE))
+  await f.updateStateDetailed(74, { fixCount: 1 }, { cleanupWorktree: '/tmp/ghost-74', replacementWorktree: '/tmp/fix1-74' })
+  assert.deepEqual(f.ephemeralWorktrees.map((e) => [e.kind, e.path]), [['replacement', '/tmp/fix1-74']], '物理は新の 1 本なので件数も 1')
+  // 重複排除の集合は 1 つ: 引き継いだ新を replacementWorktree 無しの掃除（merged など）が保持しても二重に載せない
+  const g = await fresh('ledger-inherit-dedup')
+  g.recordEphemeralWorktree(75, '/tmp/impl-75', 'implement')
+  stub(cleanupOf(GONE))
+  await g.updateStateDetailed(75, { fixCount: 1 }, { cleanupWorktree: '/tmp/impl-75', replacementWorktree: '/tmp/fix1-75' })
+  stub(cleanupOf(KEPT))
+  await g.updateStateDetailed(75, { status: 'merged' }, { cleanupWorktree: '/tmp/fix1-75' })
+  assert.equal(g.ephemeralWorktrees.length, 1, '引き継ぎ済みの新は 1 件が数えている')
+  assert.equal(retainedEntries(g).length, 0)
+  assert.equal(g.slotRetainedPaths.get('/tmp/fix1-75'), 75, '台帳には載せないが、ラン終了時の「保持した worktree」の案内には出す')
 })
 
 test('開始時観測にある旧を消して置換しても件数は動かない。保持したら新の 1 件だけ載る（旧は観測が数えている）', async () => {
@@ -448,4 +468,83 @@ test('バイト軸（実装スクリプト全体）: fix がパスを返さず�
   })
   assert.ok(measured.some((paths) => paths.includes(PHYS)), '新のパスが不明なので物理一覧へフォールバックして測る')
   assert.equal(started3(calls), false, '物理一覧の実測が上限を超えるので #3 は着手しない')
+})
+
+// ---- 4. 配線の振る舞い（Issue #624 のレビュー指摘）----
+
+const MERGE_ARGS = { ...BASE_ARGS, maxResidualWorktreeBytes: 512 * 1024 * 1024, maxResidualWorktrees: 100 }
+// 測定の呼び出しと fix の起動を時系列で記録する（fix より後の測定だけを見るため）
+function timeline(events, pathBytes) {
+  return (label, opts, prompt) => {
+    if (label === 'fix:#2') events.push('fix')
+    if (label === 'worktree:residual-bytes') {
+      const input = commandInputOf(prompt) ?? ''
+      events.push(`measure:${input}`)
+      return signedReply(prompt, { kib: pathBytes(input), err: 0, missing: 0, count: input === '' ? 0 : input.split('\n').length })
+    }
+    if (label === 'worktree:free-disk-bytes') return signedReply(prompt, { freeKib: 1e10, err: 0 })
+    return undefined
+  }
+}
+
+test('ラン終了時の測定（実装スクリプト全体）: 旧が消えて引き継いだ新の worktree は終了時測定の対象に入る。パス不明の新があれば測定不成立へ倒す', async () => {
+  const events = []
+  const { result } = await runScript({
+    args: MERGE_ARGS,
+    leaves: [2],
+    override: overrides({ oldFixResult: GONE, fixRounds: 1, extra: timeline(events, () => 1024) }),
+  })
+  const afterFix = events.slice(events.indexOf('fix') + 1).filter((e) => e.startsWith('measure:'))
+  assert.ok(afterFix.length > 0, 'fix の後にも測定が走る（終了時測定）')
+  assert.ok(afterFix[afterFix.length - 1].includes(FIX_A), '終了時測定の対象に引き継いだ新が入る')
+  assert.equal(result.residualWorktrees.bytesEndObserved, true)
+
+  const unknown = await runScript({
+    args: MERGE_ARGS,
+    leaves: [2],
+    override: overrides({ oldFixResult: GONE, fixRounds: 1, fixPaths: [''], extra: timeline([], () => 1024) }),
+  })
+  assert.equal(unknown.result.residualWorktrees.bytesEndObserved, false, '新のパスが不明なら終了時の測定は成立させない（fail-closed）')
+})
+
+// Merge ループで fix を 1 回走らせる: 監視が needs-fix を 1 回返し、その後は打ち切る
+function mergeLoopFix({ saved, events, fixPath = FIX_A, bytes = () => 1024 }) {
+  let monitors = 0
+  return (label, opts, prompt) => {
+    if (label === 'merge:#2') {
+      monitors += 1
+      return monitors === 1
+        ? { state: 'needs-fix', summary: 'fix 要', unresolvedComments: [] }
+        : { state: 'blocked', blockedReason: 'quality', summary: '打ち切り', unresolvedComments: [] }
+    }
+    if (label === 'fix:#2') { events.push('fix'); return { pushed: false, summary: 'fixed', worktreePath: fixPath } }
+    if (label === 'state:cleanup:#2') return GONE
+    if (saved && label === 'state:load') return { ok: true, fileExisted: true, items: { 2: saved }, highWaterBytes: 0, highWaterVersion: 0 }
+    if (saved && label === 'state:load-verify') {
+      const hashes = { 2: sha256Hex(canonicalJson(saved)) }
+      return { fileExists: true, hashes, keysSha256: sha256Hex(canonicalJson(['2'])), keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+    }
+    return timeline(events, bytes)(label, opts, prompt)
+  }
+}
+const { sha256Hex, canonicalJson } = await importDefinitions(['sha256Hex', 'canonicalJson'], 'ledger-state-hash')
+
+test('Merge ループの fix（実装スクリプト全体）: 旧が消えても新のパスが測定の対象に入り、上限を超えると新規着手が止まる', async () => {
+  const events = []
+  const { calls } = await runScript({
+    args: MERGE_ARGS,
+    leaves: [2, 3],
+    override: mergeLoopFix({ events, bytes: (input) => (input.includes(FIX_A) ? GIB_KIB : 1024) }),
+  })
+  assert.ok(events.indexOf('fix') >= 0, 'Merge ループの fix が走る')
+  assert.ok(events.slice(events.indexOf('fix') + 1).some((e) => e.startsWith('measure:') && e.includes(FIX_A)), 'fix の後の測定に新のパスが入る（replacementWorktree に新のパスを渡す配線）')
+  assert.equal(started3(calls), false, '新の実測が上限を超えるので #3 は着手しない')
+})
+
+test('monitoring 再開で旧 worktree が未登録（手動削除済み）のまま fix が走ると、物理は新の 1 本なので件数も 1 件増える', async () => {
+  const saved = { type: 'implement', status: 'monitoring', pr: 1002, branch: 'feat/2-x', worktree: '/repo/wt/ghost', fixCount: 0 }
+  const events = []
+  const { result } = await runScript({ args: MERGE_ARGS, leaves: [2], override: mergeLoopFix({ saved, events }) })
+  assert.ok(events.includes('fix'), 'monitoring 再開から fix が走る')
+  assert.equal(result.residualWorktrees.addedThisRun, 1, '旧が台帳にも開始時観測にも無いので、新を 1 件計上する（引き継ぎ先が無い）')
 })

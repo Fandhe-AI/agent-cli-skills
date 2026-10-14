@@ -4419,6 +4419,8 @@ const residualStartPathSet=new Set()
 const slotInheritedPaths=new Set()
 let slotUnknownLiveCount=0
 
+const slotRetainedPaths=new Map()
+
 
 
 
@@ -4461,10 +4463,23 @@ log(`#${issueNumber}: ${kind} worktree を記録した（自動削除はしな�
 }
 
 
+function isWorktreeCounted(p){
+return p!==''&&(residualStartPathSet.has(p)||slotInheritedPaths.has(p)||ephemeralWorktrees.some((e)=>e.path===p))
+}
+
+
+function noteSlotRetained(issueNumber,p){
+if(p===''|| !slotInheritedPaths.has(p)||residualStartPathSet.has(p)||ephemeralWorktrees.some((e)=>e.path===p))return
+if(!slotRetainedPaths.has(p))slotRetainedPaths.set(p,issueNumber)
+}
+
+
 
 function recordRetainedWorktree(issueNumber,rawPath){
 const p=sanitizeWorktreePath(rawPath??'')
-if(!p||confirmedRemovedPaths.has(p)||residualStartPathSet.has(p)||ephemeralWorktrees.some((e)=>e.path===p))return false
+if(!p||confirmedRemovedPaths.has(p))return false
+noteSlotRetained(issueNumber,p)
+if(isWorktreeCounted(p))return false
 ephemeralWorktrees.push({issue:issueNumber,kind:'retained',path:p})
 log(`${issueNumber ? `#${issueNumber}: ` : ''}消えたと確認できなかった worktree を残置の台帳へ載せた（${p}）`)
 return true
@@ -4479,9 +4494,13 @@ return true
 
 
 
+
 function planReplacementAccounting({oldPath,oldRemoved,newPath,oldCounted,newCounted}){
 if(oldRemoved&&oldPath!==''){
-return{addRetainedOld:false,addReplacement:false,inheritPath:newPath,inheritUnknown:newPath===''}
+if(oldCounted)return{addRetainedOld:false,addReplacement:false,inheritPath:newPath,inheritUnknown:newPath===''}
+
+
+return{addRetainedOld:false,addReplacement:newPath===''|| !newCounted,inheritPath:'',inheritUnknown:false}
 }
 const sameAsOld=newPath!==''&&newPath===oldPath
 return{
@@ -4496,9 +4515,9 @@ inheritUnknown:false,
 
 function applyReplacementAccounting(issueNumber,oldPath,rawNewPath,oldRemoved){
 const newPath=sanitizeWorktreePath(rawNewPath??'')
-const isCounted=(p)=>p!==''&&(residualStartPathSet.has(p)||slotInheritedPaths.has(p)||ephemeralWorktrees.some((e)=>e.path===p))
-const plan=planReplacementAccounting({oldPath,oldRemoved,newPath,oldCounted:isCounted(oldPath),newCounted:isCounted(newPath)})
+const plan=planReplacementAccounting({oldPath,oldRemoved,newPath,oldCounted:isWorktreeCounted(oldPath),newCounted:isWorktreeCounted(newPath)})
 if(plan.addRetainedOld)recordRetainedWorktree(issueNumber,oldPath)
+else if(!oldRemoved)noteSlotRetained(issueNumber,oldPath)
 if(plan.addReplacement)recordReplacementWorktree(issueNumber,newPath)
 if(plan.inheritPath)slotInheritedPaths.add(plan.inheritPath)
 if(plan.inheritUnknown){
@@ -10517,7 +10536,10 @@ for(const e of disposableWorktrees)log(`  ${e.issue ? `#${e.issue}` : '(スイ�
 }
 
 
-const retainedLedger=ephemeralWorktrees.filter((e)=>e.kind==='retained')
+const retainedLedger=[
+...ephemeralWorktrees.filter((e)=>e.kind==='retained'),
+...[...slotRetainedPaths].map(([path,issue])=>({issue,kind:'retained',path})),
+]
 if(retainedLedger.length>0){
 log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
 for(const e of retainedLedger)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
