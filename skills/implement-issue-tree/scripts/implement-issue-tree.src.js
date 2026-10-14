@@ -3742,9 +3742,17 @@ function isValidBranchName(b) {
 // implement / 回復 implement が返した branch の受理判定（Review・push より前のゲート）。通れば空文字、通らなければ理由を返す。
 // 文字種（isValidBranchName）だけでは worktree の既定ブランチ名（例: worktree-wf_…-37）も通ってしまい、命名規約
 // <type>/<issueNumber>-<short-name> を外れたブランチが push・PR 作成まで進み、後段の checkPrBinding で初めて止まっていた。
+// 種別は 'invalid'（文字種不正。従来どおり failed で halt の連続失敗に数える）/ 'naming'（文字種は妥当だが命名規約違反。blocked で数えない）/ ''（受理）。
+function implBranchViolationKind(branch, issueNumber) {
+  if (!isValidBranchName(branch ?? '')) return 'invalid'
+  if (!branchMatchesIssue(branch, issueNumber)) return 'naming'
+  return ''
+}
+
 function implBranchViolation(branch, issueNumber) {
-  if (!isValidBranchName(branch ?? '')) return 'branch 名が不正'
-  if (!branchMatchesIssue(branch, issueNumber)) return `branch 名が命名規約 <type>/${issueNumber}-<short-name> に合わない`
+  const kind = implBranchViolationKind(branch, issueNumber)
+  if (kind === 'invalid') return 'branch 名が不正'
+  if (kind === 'naming') return `branch 名が命名規約 <type>/${issueNumber}-<short-name> に合わない`
   return ''
 }
 
@@ -7195,9 +7203,17 @@ async function runImplement(item) {
         }
         const recoverBranchViolation = implBranchViolation(impl.branch, item.number)
         if (recoverBranchViolation) {
-          // 通常経路と同じ理由で push 前に止め、違反 branch は状態ファイルへ書かない（worktree は台帳に載せ済み）。
           const reason = `回復 Implement の ${recoverBranchViolation}: ${sanitize(impl.branch ?? '(空)')}`
-          await updateState(item.number, { status: 'blocked', note: reason })
+          if (implBranchViolationKind(impl.branch, item.number) === 'invalid') {
+            // 文字種不正は implement が系統的に壊れた兆候のため、従来どおり failed で halt の連続失敗に数える。
+            await updateState(item.number, { status: 'failed', note: reason })
+            recordFailure({ issue: item.number, reason })
+            return false
+          }
+          // 命名規約違反は通常経路と同じ理由で push 前に止め、違反 branch は状態ファイルへ書かない（worktree は台帳に載せ済み）。
+          // pr: 0 を明示する。直前の continue 掃除が status: implementing / branch: effectiveBranch を書いており、以前の pr が
+          // 残ると blocked + 正規 branch + pr > 0 で isActiveMonitoring が真になり、次回ランが再実装でなく古い PR の監視再開へ入る。
+          await updateState(item.number, { status: 'blocked', pr: 0, note: reason })
           recordFailure({ issue: item.number, reason, status: 'blocked', worktree: impl.worktreePath })
           return false
         }
@@ -7376,9 +7392,16 @@ async function runImplement(item) {
       // エージェント返却の branch 名もブランチ名として有効な文字種のみ許可する
       const branchViolation = implBranchViolation(impl.branch, item.number)
       if (branchViolation) {
+        if (implBranchViolationKind(impl.branch, item.number) === 'invalid') {
+          // 文字種不正は implement が系統的に壊れた兆候のため、従来どおり failed で halt の連続失敗に数える。
+          const reason = `${branchViolation}: ${sanitize(impl.branch ?? '(空)')}`
+          await updateState(item.number, { status: 'failed', note: reason })
+          recordFailure({ issue: item.number, reason })
+          return false
+        }
         // 命名違反は push・PR 作成の前に止める。状態ファイルへ違反 branch を「本イシューのブランチ」として書かない
         // （書くと再実行が savedBranchMismatch で止まる）。worktree は recordEphemeralWorktree で台帳に載せ済みで、自動削除しない。
-        const reason = `${branchViolation}: ${sanitize(impl.branch ?? '(空)')}（push・PR 作成は行っていない。次回実行で再実装する）`
+        const reason = `${branchViolation}: ${sanitize(impl.branch ?? '(空)')}（push・PR 作成は行っていない。次回実行で再実装を試みる）`
         await updateState(item.number, { status: 'blocked', note: reason })
         recordFailure({ issue: item.number, reason, status: 'blocked', worktree: impl.worktreePath })
         return false

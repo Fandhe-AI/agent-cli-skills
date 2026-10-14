@@ -3742,9 +3742,17 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 
+
+function implBranchViolationKind(branch,issueNumber){
+if(!isValidBranchName(branch??''))return'invalid'
+if(!branchMatchesIssue(branch,issueNumber))return'naming'
+return''
+}
+
 function implBranchViolation(branch,issueNumber){
-if(!isValidBranchName(branch??''))return'branch 名が不正'
-if(!branchMatchesIssue(branch,issueNumber))return`branch 名が命名規約 <type>/${issueNumber}-<short-name> に合わない`
+const kind=implBranchViolationKind(branch,issueNumber)
+if(kind==='invalid')return'branch 名が不正'
+if(kind==='naming')return`branch 名が命名規約 <type>/${issueNumber}-<short-name> に合わない`
 return''
 }
 
@@ -7195,9 +7203,17 @@ return false
 }
 const recoverBranchViolation=implBranchViolation(impl.branch,item.number)
 if(recoverBranchViolation){
-
 const reason=`回復 Implement の ${recoverBranchViolation}: ${sanitize(impl.branch ?? '(空)')}`
-await updateState(item.number,{status:'blocked',note:reason})
+if(implBranchViolationKind(impl.branch,item.number)==='invalid'){
+
+await updateState(item.number,{status:'failed',note:reason})
+recordFailure({issue:item.number,reason})
+return false
+}
+
+
+
+await updateState(item.number,{status:'blocked',pr:0,note:reason})
 recordFailure({issue:item.number,reason,status:'blocked',worktree:impl.worktreePath})
 return false
 }
@@ -7376,9 +7392,16 @@ return false
 
 const branchViolation=implBranchViolation(impl.branch,item.number)
 if(branchViolation){
+if(implBranchViolationKind(impl.branch,item.number)==='invalid'){
+
+const reason=`${branchViolation}: ${sanitize(impl.branch ?? '(空)')}`
+await updateState(item.number,{status:'failed',note:reason})
+recordFailure({issue:item.number,reason})
+return false
+}
 
 
-const reason=`${branchViolation}: ${sanitize(impl.branch ?? '(空)')}（push・PR 作成は行っていない。次回実行で再実装する）`
+const reason=`${branchViolation}: ${sanitize(impl.branch ?? '(空)')}（push・PR 作成は行っていない。次回実行で再実装を試みる）`
 await updateState(item.number,{status:'blocked',note:reason})
 recordFailure({issue:item.number,reason,status:'blocked',worktree:impl.worktreePath})
 return false
