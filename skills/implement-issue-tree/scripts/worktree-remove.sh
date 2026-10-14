@@ -53,10 +53,16 @@
 #       この後始末の結果は --path の結果（worktree・dirty・unlocked）を上書きせず、結果の行の holder（removed / retained-… / failed。後始末をしたときだけ出る）に出す。
 #       holder が removed でなければブランチは keep。discard の ok は worktree が無くなり、ブランチも（指定があれば）消えたときだけ true なので、holder が保持・失敗なら false。
 #       実体の無いパスは実体のパス（祖先のシンボリックリンクを解決した形）でも照合する。大小だけ違う綴りは一致させない（大小を区別する FS では別の場所を消しかねない）。
+# 受容する限界（確認と削除の窓）:
+#   1. git には、確認と削除を原子的に行う手段が無い。
+#   2. 最終の観測（--require-missing / 第 6 引数 2 の実体の読み直し）は、唯一の変更コマンド（git worktree remove）の直前にだけ置く（unlock より後）。
+#   3. 有無を観測できない登録（親を検索・読み取りできない）があるプロセスでは、全体の prune をしない（prune はその登録を不在と扱って落とす）。
+#   4. 上記以外で、最終の観測と remove の間に残る窓（並行するプロセスがナノ秒単位で作り直すなど）は受容する。根拠と追跡は Fandhe-AI/agent-cli-skills#649。
 # prune: 全体の `git worktree prune` は safe_prune の 1 か所だけが呼ぶ。remove で実際に何かを消したとき（--path を removed にした、または --branch の後始末で登録を消した）、sweep で候補を 1 件でも消したときだけ呼ぶ（失敗しただけでは呼ばない。失敗した worktree remove は prune で片づく登録を残さない）。
 #       何も消さなかったとき（--path なしのブランチだけの discard・not-registered・main・cwd・保持・failed）は呼ばず、呼ぶときも
 #       実体の無い登録のうち detached または HEAD 0000… のもの（コミットの唯一の参照かもしれない・lock なしの prune 対象）が 1 件でもあれば全体をスキップする
-#       （prune は対象を絞れない。登録が残るだけで、結果の語は変わらない）。スキップした件数は結果の行の pruneSkipped（0 のときは出さない）。
+#       （prune は対象を絞れない。登録が残るだけで、結果の語は変わらない）。有無を観測できない登録（wr_path_state が unknown）が 1 件でもあるときも同じくスキップする。
+#       スキップした件数は結果の行の pruneSkipped（0 のときは出さない）。
 # 自衛: メイン worktree（porcelain の先頭エントリ・実体のパスの一致）、登録されていないパス、カレントがその中にあるパスは消さない。
 #       rm の再帰削除は持たない（git worktree remove が消せなかったものは保持して報告する）。
 # 出力: 標準出力の最後の 1 行が `WORKTREE_REMOVE_RESULT {json}`。値は固定語彙と件数のみ（パスは sweep の removed だけで、
@@ -292,19 +298,20 @@ remove_one() {
     esac
   fi
 
-  # 削除の直前にもう一度実体を読む（上の確認から削除までの間に作り直された場合）
+  rc=0
+  if [ "${lockact}" = unlock ]; then
+    git worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?
+    if [ "${rc}" -ne 0 ]; then T_WT='retained-locked'; return 0; fi
+    T_UNLOCKED=true
+  fi
+  # 削除の直前にもう一度実体を読む（上の確認から削除までの間に作り直された場合）。唯一の変更コマンド（下の git worktree remove）の直前に置く
+  # （unlock の後。unlock が間に挟まると、その間に古い登録が prune され同じパスに作り直された worktree を消してしまう）
   if [ "${req_missing}" != 0 ]; then
     case "$(wr_require_missing_check "${path}")" in
       ok) ;;
       unobservable) T_WT='retained-unobservable'; return 0 ;; # 有無を確かめられない（読めない親など）。「無い」と言えないので消さない
       *) T_WT='retained-present'; return 0 ;;
     esac
-  fi
-  rc=0
-  if [ "${lockact}" = unlock ]; then
-    git worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?
-    if [ "${rc}" -ne 0 ]; then T_WT='retained-locked'; return 0; fi
-    T_UNLOCKED=true
   fi
   if [ "${plan}" = force ]; then
     git worktree remove --force -- "${path}" >/dev/null 2>&1 || rc=$?
@@ -325,7 +332,9 @@ safe_prune() {
   PRUNE_SKIPPED=0
   plist=$(git worktree list --porcelain 2>/dev/null) || { PRUNE_SKIPPED=1; return 0; }
   wr_prune_risk "${plist}"
-  if [ "${WR_PRUNE_RISK}" -gt 0 ]; then PRUNE_SKIPPED=${WR_PRUNE_RISK}; return 0; fi
+  # 有無を観測できない登録（親を検索・読み取りできない）も数える。prune は stat の失敗を不在と扱い、その登録を落とす
+  wr_prune_unobservable "${plist}"
+  if [ "${WR_PRUNE_RISK}" -gt 0 ] || [ "${WR_PRUNE_UNOBS}" -gt 0 ]; then PRUNE_SKIPPED=$((WR_PRUNE_RISK + WR_PRUNE_UNOBS)); return 0; fi
   git worktree prune >/dev/null 2>&1 || true
 }
 
