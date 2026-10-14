@@ -312,6 +312,16 @@ wr_wt_gone() {
   return 1
 }
 
+# --branch / --expect-branch との照合。$1 = 結びつけられたブランチ（空 = 指定なし）、$2 = worktree が指すブランチ（detached・読めないときは空）。
+# 標準出力: ok（指定なし、または一致）/ retain（違う、detached、読めない）。ブランチを消すかどうかは判断しない（照合だけ）
+wr_branch_check() {
+  if [ -z "$1" ] || [ "$1" = "${2:-}" ]; then
+    echo ok
+  else
+    echo retain
+  fi
+}
+
 # --head（マージ済み PR の head）との照合。$1 = 指定された sha（空 = 指定なし）、$2 = worktree の HEAD のコミット（読めなければ空）、
 # $3 = worktree が指すブランチ（detached は空）。
 # 標準出力: ok（指定なし、または ブランチ上で一致）/ retain（違う、または読めない）/ retain-detached（一致していても detached）。

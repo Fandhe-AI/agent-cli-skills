@@ -511,6 +511,56 @@ export function registerWorktreeRemoveTests(bash) {
     assert.ok(!existsSync(a.path) && repo.branches().includes(b.branch))
   })
 
+  // --expect-branch: --branch と同じ位置・同じ判定で HEAD を照合するだけで、ブランチは消さない（規約外のブランチ名上の worktree の discard 用）
+  test(`${tag} --expect-branch: HEAD が一致すれば worktree だけ消えてブランチは残る。detached・別ブランチ・汚れは保持する`, () => {
+    const repo = makeRepo()
+    // 規約外の名前（worktree-wf_…）の worktree。一致 → removed・branch は none（消さない）・ブランチは残る
+    const a = repo.addWorktree('a', { branch: 'worktree-wf_ab12' })
+    const asha = repo.head(a.path)
+    const r1 = dis(repo, a.path, ['--expect-branch', 'worktree-wf_ab12'])
+    assert.deepEqual(r1.result, { ok: true, mode: 'discard', worktree: 'removed', branch: 'none', branchSha: '', dirty: 0, unlocked: false, retained: false })
+    assert.ok(!existsSync(a.path))
+    assert.ok(repo.branches().includes('worktree-wf_ab12'), 'ブランチは消さない')
+    assert.equal(repo.git(repo.main, 'rev-parse', 'worktree-wf_ab12'), asha)
+
+    // detached: 申告されたブランチ名が実在しても、HEAD がブランチ上に無いので保持する
+    const b = repo.addWorktree('b', { branch: 'worktree-wf_cd34' })
+    repo.git(b.path, 'checkout', '-q', '--detach')
+    const r2 = dis(repo, b.path, ['--expect-branch', 'worktree-wf_cd34'])
+    assert.deepEqual([r2.result.ok, r2.result.worktree, r2.result.branch, r2.result.retained], [false, 'retained-branch-mismatch', 'none', true])
+    assert.ok(existsSync(b.path))
+
+    // 申告されたブランチとは別のブランチにいる worktree: 保持する
+    const c = repo.addWorktree('c', { branch: 'worktree-wf_ef56' })
+    const r3 = dis(repo, c.path, ['--expect-branch', 'worktree-wf_other'])
+    assert.deepEqual([r3.result.ok, r3.result.worktree, r3.result.retained], [false, 'retained-branch-mismatch', true])
+    assert.ok(existsSync(c.path) && repo.branches().includes('worktree-wf_ef56'))
+
+    // 一致していても汚れていれば保持する（--force は使わない）
+    repo.write(c.path, 'u.txt', 'u\n')
+    const r4 = dis(repo, c.path, ['--expect-branch', 'worktree-wf_ef56'])
+    assert.deepEqual([r4.result.ok, r4.result.worktree], [false, 'retained-dirty'])
+    assert.ok(existsSync(c.path))
+
+    // --expect-branch なしの discard は従来どおり HEAD を照合せず消える（detached でも）
+    assert.equal(dis(repo, b.path).result.worktree, 'removed')
+  })
+
+  test(`${tag} --expect-branch: base と同名でも照合だけなので拒否しない（ブランチは消さない）。実体の無い worktree は読めないので従来どおり消える`, () => {
+    const repo = makeRepo()
+    const a = repo.addWorktree('a')
+    // a は main ではない別ブランチ上: 'main' を申告しても HEAD が違うので保持する（usage エラーにならない）
+    const r1 = dis(repo, a.path, ['--expect-branch', 'main'])
+    assert.equal(r1.status, 0, r1.stderr)
+    assert.deepEqual([r1.result.worktree, r1.result.branch], ['retained-branch-mismatch', 'none'])
+    // 実体の無い worktree（dead）
+    const d = repo.addWorktree('d')
+    rmSync(d.path, { recursive: true })
+    const r2 = dis(repo, d.path, ['--expect-branch', d.branch])
+    assert.deepEqual([r2.result.worktree, r2.result.ok, r2.result.branch], ['removed', true, 'none'])
+    assert.ok(repo.branches().includes(d.branch))
+  })
+
   test(`${tag} --branch を与えて worktree が detached HEAD: retained-branch-mismatch で保持する。--branch を与えなければ従来どおり消える（superseded も対象外）`, () => {
     const repo = makeRepo()
     const a = repo.addWorktree('a')
@@ -659,6 +709,15 @@ export function registerWorktreeRemoveTests(bash) {
       ['remove', '--mode', 'discard', '--path', w.path, '--head', 'HEAD'],
       ['remove', '--mode', 'discard', '--path', w.path, '--head', `${'a'.repeat(39)};`],
       ['remove', '--mode', 'discard', '--path', w.path, '--head'],
+      ['remove', '--mode', 'superseded', '--path', w.path, '--expect-branch', 'feat/x'],
+      ['remove', '--mode', 'discard', '--expect-branch', 'feat/x'],
+      ['remove', '--mode', 'discard', '--path', w.path, '--expect-branch'],
+      ['remove', '--mode', 'discard', '--path', w.path, '--expect-branch', ''],
+      ['remove', '--mode', 'discard', '--path', w.path, '--expect-branch', '-D'],
+      ['remove', '--mode', 'discard', '--path', w.path, '--expect-branch', 'a..b'],
+      ['remove', '--mode', 'discard', '--path', w.path, '--expect-branch', 'a b'],
+      ['remove', '--mode', 'discard', '--path', w.path, '--expect-branch', 'feat/x', '--branch', 'feat/x'],
+      ['sweep', '--file', '_/issue-trees/1.json', '--expect-branch', 'feat/x'],
       ['sweep', '--file', '_/issue-trees/1.json', '--head', 'a'.repeat(40)],
       ['remove', '--mode', 'superseded', '--path'],
       ['remove', '--mode', 'superseded', '--path', w.path, '--unknown', 'x'],

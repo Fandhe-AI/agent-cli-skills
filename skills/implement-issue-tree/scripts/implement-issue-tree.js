@@ -2442,6 +2442,14 @@ return''
 
 
 
+function prBindingValuesFetched(v){
+return v?.isCrossRepository===false&&typeof v.baseRefName==='string'&&v.baseRefName!==''&&typeof v.headRefName==='string'&&v.headRefName!==''&&
+Array.isArray(v.closingIssues)&& !v.closingIssues.includes(-1)
+}
+
+
+
+
 async function checkPrBinding(item,pr,branch){
 return(await fetchPrBinding(item,pr,branch)).problem
 }
@@ -3368,6 +3376,8 @@ const deleteBranchName=deleteBranchValidated&&deleteBranchValidated!==baseBranch
 
 
 const cleanupMode=options.cleanupMode==='discard'||deleteBranchName?'discard':'superseded'
+
+const expectBranchName=cleanupMode==='discard'&&cleanupWorktreePath&& !deleteBranchName&&typeof options.expectBranch==='string'?options.expectBranch:''
 const hasCleanup=Boolean(cleanupWorktreePath||deleteBranchName)
 
 if(cleanupWorktreePath&&cleanupMode==='discard')sweepHeldPaths.add(cleanupWorktreePath)
@@ -3387,7 +3397,7 @@ TEMP_FILE_POLICY,
 `対象は下記コマンドに明記されたパス・ブランチ名のみ。他のパス・ブランチには一切触れない。`,
 `1. 次のコマンドを一字一句そのまま（改変・条件追加・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:`,
 '```sh',
-worktreeRemoveCommand(cleanupMode,cleanupWorktreePath,deleteBranchName),
+worktreeRemoveCommand(cleanupMode,cleanupWorktreePath,deleteBranchName,'',expectBranchName),
 '```',
 WORKTREE_NOTE,
 ...(cleanupWorktreePath&&clearWorktreeAfterCleanup
@@ -3403,7 +3413,7 @@ stateCommand('merge','',JSON.stringify([{numbers:[issueNumber],patch:{worktree:'
 `   または review / pr-create の使い捨て worktree を削除した場合が該当する。上書きしないこと）。`,
 ]
 :[]),
-`返却: ok / retained / branchSha（上記のとおり）。`,
+`返却: ok / retained / branchSha / worktree（上記のとおり）。`,
 ].join('\n')
 :''
 
@@ -3561,10 +3571,11 @@ return text
 }
 const{problem,bind}=await fetchPrBinding(item,cand.pr,cand.branch)
 
+
 const known=bind?.state==='MERGED'||bind?.state==='CLOSED'
 if(problem){
 const text=`closed 後始末なし（PR #${cand.pr} の結び付きを確認できない: ${problem}）`
-return known?tried('binding',text):text
+return known&&prBindingValuesFetched(bind)?tried('binding',text):text
 }
 if(bind.state!=='MERGED'){
 const text=`closed 後始末なし（PR #${cand.pr} はマージ済みではない: ${sanitize(String(bind.state))}）`
@@ -3586,7 +3597,7 @@ TEMP_FILE_POLICY,
 worktreeRemoveCommand('discard',w,'',head),
 '```',
 WORKTREE_NOTE,
-`返却: ok / retained / branchSha（上記のとおり）。`,
+`返却: ok / retained / branchSha / worktree（上記のとおり）。`,
 ].join('\n')
 let removed=false
 let retainedReason=null
@@ -3883,15 +3894,15 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'ba749ddcc1d244ceffeab8bc590696421678f0cf8de38e17721645faecf72a3c',
-'measure-free-disk.sh':'3707b357a398ff8fedfb1f6d91a7240e1caabc171b99ed9e7b9800777a3d19c2',
-'observe-pr.sh':'9a9169fb9c4373ef28acdcfa4c7b229e4eb1db51b8bcfad93d032c7b3c90280e',
-'base-merge.sh':'f4fc1f1843f245d572b97d14304ed0586e879135f698d0effae2f5c74e5e1fb9',
-'pr-push.sh':'9786b08f84713e80996d7cb304e6ce7d4fe09098f1c0f36a1ea4a63915b2516e',
-'state.sh':'4ce5da0656b13ced1a9a451d84f84d982f84f07186a7a86a028932c948985623',
-'merge-gate.sh':'8817b28bbfb333d60e20b955a5a189924bb27bb72573b30c570906ddbc5dcde1',
-'worktree-remove.sh':'9cfc7ffac2402502282a19b84f02b72cd4ea7f0e97ab47f432553dbf06324b49',
-'recover-prep.sh':'5bd78a6a42ae40262f4b5c5aec750cbd4cf42ec91687add9a8714fd40dc1973d',
+'measure-residual-bytes.sh':'0c2ccc669ff06ef6f1652edcaa3a76b00150531dcd1ee06ca93892509a23f535',
+'measure-free-disk.sh':'57a6ed2e2af8f0aaffa350d5ebb86145e67cc4e555a5a9e33252401e2d6e4e9b',
+'observe-pr.sh':'95b3c067ceda1784be11fb321172d37e9447b161c568ac089706e4f4b7ae8e45',
+'base-merge.sh':'3f0369d2dc46b42b3c60a59ba7b05042dee3121868951d30051804acd88ad724',
+'pr-push.sh':'f4147174b10e474ca89a7176691f423cecbc5014a24fe1ea65cb3040e8a7c4c6',
+'state.sh':'f5cb0cd71bb9e48957e7d36ff7be9da6a66a69c1f05b593cddd8ad125ee1a2b2',
+'merge-gate.sh':'cac3a4e6c68f2873bd98639a896c6279761bb83d011385ca4533f8196cfc3644',
+'worktree-remove.sh':'8e79aa815bf4975446ccf8eba6c6859987c89c34e90e7cf0f7e8767268cecd22',
+'recover-prep.sh':'64dff4d5a4a41de98bf88293427b4afff7048ed2076e35e392e2b150a722231f',
 }
 
 
@@ -3935,7 +3946,7 @@ function worktreeQuote(v){
 if(typeof v!=='string'|| !/^[A-Za-z0-9._/ -]+$/.test(v)) throw new Error('worktree-remove.sh の引数に使えない文字が含まれる')
 return`'${v}'`
 }
-function worktreeRemoveCommand(mode,path,branch,head=''){
+function worktreeRemoveCommand(mode,path,branch,head='',expectBranch=''){
 const parts=['remove','--mode',mode]
 if(path)parts.push('--path',worktreeQuote(path))
 
@@ -3943,6 +3954,12 @@ if(path)parts.push('--path',worktreeQuote(path))
 if(head){
 if(!/^[0-9a-f]{40}$/.test(head)) throw new Error('worktree-remove.sh の --head は 40 桁の小文字 16 進')
 if(mode==='discard'&&path)parts.push('--head',worktreeQuote(head))
+}
+
+
+if(expectBranch){
+if(!isValidBranchName(expectBranch)||mode!=='discard'|| !path||branch)throw new Error('worktree-remove.sh の --expect-branch は discard・--path つき・妥当なブランチ名・--branch なしのときだけ')
+parts.push('--expect-branch',worktreeQuote(expectBranch))
 }
 if(branch){
 parts.push('--branch',worktreeQuote(branch))
@@ -7299,14 +7316,15 @@ const effectiveBranch=worktreeAlive
 
 
 
-const discardWorktreeOnly=async(what)=>{
-const attempt=await updateStateDetailed(item.number,{worktree:''},{cleanupWorktree:sanitizedRecoverWorktree,cleanupMode:'discard'})
+
+const discardWorktreeOnly=async(what,expectBranch)=>{
+const attempt=await updateStateDetailed(item.number,{worktree:''},{cleanupWorktree:sanitizedRecoverWorktree,cleanupMode:'discard',expectBranch})
 
 if(attempt.ok&&attempt.retained===false)return true
 const status=classifyStateWriteFailureStatus({outputMissing:attempt.outputMissing,terminalSaved:false,prNumber:0})
 const reason=sanitize(
 `discard の worktree 掃除を完了確認できなかった`+
-`（${status === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : attempt.mergeOk && attempt.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがあり、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。`+
+`（${status === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : attempt.mergeOk && attempt.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがある、または HEAD が解決したブランチ上に無く、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。`+
 `旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${status} にする。${what} を手動確認し、対処後に再実行すること`,
 )
 log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
@@ -7548,7 +7566,7 @@ recordFailure({issue:item.number,reason})
 return false
 }
 log(`#${item.number}: Recover → discard（解決した branch ${rejectedBranch} は命名規約 <type>/${item.number}-<short-name> に合わない）、旧 worktree のみ掃除して通常 Plan へ。branch は削除せず残す`)
-if(!(await discardWorktreeOnly(`branch ${rejectedBranch} と旧 worktree`)))return false
+if(!(await discardWorktreeOnly(`branch ${rejectedBranch} と旧 worktree`,rejectedBranch)))return false
 
 if(Number.isInteger(saved.pr)&&saved.pr>0)log(`#${item.number}: 保存済みの PR #${saved.pr} を pr: 0 で切り離して新規に実装する`)
 await updateState(item.number,{status:'planning',branch:'',pr:0,worktree:'',note:sanitize(`規約外ブランチ ${rejectedBranch} は削除せず残した`)})

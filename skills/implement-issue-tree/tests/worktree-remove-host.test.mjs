@@ -332,7 +332,8 @@ test('Recover discard: Recover が解決した branch が本イシューの命�
   const c = calls.filter((x) => x.opts.label === 'state:cleanup:#2' && x.prompt.includes('--mode discard'))
   assert.equal(c.length, 1)
   const cmd = CMD.exec(c[0].prompt)[0]
-  assert.match(cmd, /worktree-remove\.sh remove --mode discard --path '\/repo\/wt\/old'$/)
+  // 規約外の名前は --expect-branch で渡す（HEAD の照合だけ。--branch は渡さないので branch は消さない）
+  assert.match(cmd, /worktree-remove\.sh remove --mode discard --path '\/repo\/wt\/old' --expect-branch 'main'$/)
   assert.ok(!/--branch/.test(cmd), 'branch は消さない')
   assert.ok(labels(calls).includes('plan:#2'), '新規 Plan へ進む')
 })
@@ -389,11 +390,37 @@ test('verifyDiscardSafety / DISCARD_SAFETY_SCHEMA / discard-safety は残って�
 
 test('--head つきの呼び出し形は closed 後始末の 1 か所だけ。updateStateDetailed の掃除（superseded・discard・Recover）は --head を付けない', async () => {
   const calls = [...source.matchAll(/worktreeRemoveCommand\(([^\n]*)\)/g)].map((x) => x[1]).filter((a) => !a.startsWith('mode, path'))
-  assert.deepEqual(calls, ['cleanupMode, cleanupWorktreePath, deleteBranchName', "'discard', w, '', head"])
+  assert.deepEqual(calls, ['cleanupMode, cleanupWorktreePath, deleteBranchName, \'\', expectBranchName', "'discard', w, '', head"])
   // updateStateDetailed の経路は head を渡さないので、どのモードでも --head は付かない
   for (const [o, label] of [[{ cleanupWorktree: '/tmp/wt-40' }, 'superseded'], [{ cleanupWorktree: '/tmp/wt-40', cleanupMode: 'discard' }, 'discard'], [{ cleanupWorktree: '/tmp/wt-40', deleteBranch: true }, 'discard+branch']]) {
     const c = stub(() => ({ ok: true, retained: false }))
     await m.updateState(40, { status: 'merged', branch: 'feat/40-x' }, o)
     assert.doesNotMatch(cleanupCalls(c.calls, 40)[0].prompt, /--head/, label)
   }
+})
+
+// ---- 規約外ブランチの discard の HEAD 照合（--expect-branch）----
+
+test('--expect-branch: discard + expectBranch のときだけ付き、--branch は付かない。superseded・deleteBranch ありでは付かない。形式不正は掃除を起動せず失敗にする', async () => {
+  const run = async (o, patch = { status: 'planning' }) => {
+    const c = stub(() => ({ ok: true, retained: false }))
+    const ok = await m.updateState(41, patch, { cleanupWorktree: '/tmp/wt-41', ...o })
+    return { ok, cmds: cleanupCalls(c.calls, 41).map((x) => CMD.exec(x.prompt)?.[0] ?? '') }
+  }
+  const d = await run({ cleanupMode: 'discard', expectBranch: 'worktree-wf_ab12' })
+  assert.equal(d.cmds.length, 1)
+  assert.match(d.cmds[0], /worktree-remove\.sh remove --mode discard --path '\/tmp\/wt-41' --expect-branch 'worktree-wf_ab12'$/)
+  assert.doesNotMatch(d.cmds[0], /--branch|--head/)
+  // superseded（既定）では付けない（discard 専用）
+  assert.doesNotMatch((await run({ expectBranch: 'worktree-wf_ab12' })).cmds[0], /--expect-branch/)
+  // deleteBranch（--branch で照合する経路）とは併用しない
+  const del = (await run({ cleanupMode: 'discard', deleteBranch: true, expectBranch: 'worktree-wf_ab12' }, { status: 'planning', branch: 'feat/41-x' })).cmds[0]
+  assert.match(del, /--branch 'feat\/41-x'/)
+  assert.doesNotMatch(del, /--expect-branch/)
+  // expectBranch なしは従来どおり
+  assert.doesNotMatch((await run({ cleanupMode: 'discard' })).cmds[0], /--expect-branch/)
+  // 形式不正は黙って落とさない（落とすと HEAD の照合なしで消す呼び出しになる）。掃除エージェントを起動せず ok にしない
+  const c = stub(() => ({ ok: true, retained: false }))
+  await assert.rejects(m.updateState(41, { status: 'planning' }, { cleanupWorktree: '/tmp/wt-41', cleanupMode: 'discard', expectBranch: 'a b; rm' }), /--expect-branch/)
+  assert.deepEqual(cleanupCalls(c.calls, 41), [])
 })
