@@ -1545,7 +1545,7 @@ export function registerWorktreeRemoveTests(bash) {
       try {
         for (const [name, args] of variants) {
           const r = run(repo, args)
-          assert.deepEqual([r.result.worktree, r.result.retained], ['retained-unobservable', true], `mode ${mode.toString(8)} ${name}: ${JSON.stringify(r.result)}`)
+          assert.deepEqual([r.result.ok, r.result.worktree, r.result.retained], [name === 'superseded', 'retained-unobservable', true], `mode ${mode.toString(8)} ${name}: ${JSON.stringify(r.result)}`)
         }
       } finally {
         chmodSync(holder, 0o700)

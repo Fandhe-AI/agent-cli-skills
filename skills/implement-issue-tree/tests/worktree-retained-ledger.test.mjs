@@ -691,7 +691,7 @@ test('スイープが渡す削除できなかった候補（削除済みと確�
 // ---- AB: 同じ呼び出しで『削除を確認した』パスを、置換の新パスとして live に戻さない ----
 // Review fix と post-push fix は cleanupWorktree と replacementWorktree に同じパスを渡し得る。削除の確認と同じ呼び出しの中で live に戻すと、
 // 削除済みのパスが confirmedRemovedPaths と最終スイープの候補から外れ、バイト測定（1 件あたりの平均）とスイープの登録の片づけが狂う。
-// 新旧が同じパスのときは削除済み扱いを残す（作り直された実体かどうかは区別できない。Z より前の挙動 = 安全側）。
+// 新旧が同じパスのときは、削除を確認したときに限り削除済み扱いを残す（作り直された実体かどうかは区別できない。Z より前の挙動 = 安全側。確認できないときは AD）。
 const SAME = '/tmp/same-path-wt'
 const SAME_CASES = [
   ['旧が台帳にある（引き継ぎ経路）', (f) => f.ephemeralWorktrees.push({ issue: 60, kind: 'implement', path: SAME })],
