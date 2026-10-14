@@ -232,9 +232,7 @@ wr_count_status() {
         esac
         ;;
     esac
-  done <<EOF
-$1
-EOF
+  done <<<"$1"
   WR_DIRTY=${n}
   WR_SUB_DIRTY=${s}
 }
@@ -282,9 +280,7 @@ wr_find_entry() {
         fi
         ;;
     esac
-  done <<EOF
-$1
-EOF
+  done <<<"$1"
   WR_REGISTERED=${hit}
   WR_MAIN=${first}
   WR_LOCKED=${locked}
