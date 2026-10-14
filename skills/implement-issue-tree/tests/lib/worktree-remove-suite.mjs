@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gitEnv, makeRepo, runScript } from './worktree-sandbox.mjs'
@@ -1501,6 +1501,27 @@ export function registerWorktreeRemoveTests(bash) {
     assert.deepEqual([r.result.worktree, r.result.retained], ['retained-present', true], JSON.stringify(r.result))
     assert.ok(existsSync(a.path))
     assert.equal(repo.git(repo.main, 'cat-file', '-t', sha), 'commit')
+  })
+  // 親ディレクトリを検索できないとき stat は失敗するだけで、実体が無いとは言えない（AC）。root は権限が効かないので省略
+  test(`${tag} AC: --require-missing は実体の有無を確かめられない（親を検索・読み取りできない）とき、何も消さず retained-unobservable。登録も実体も残る`, { skip: typeof process.getuid === 'function' && process.getuid() === 0 }, () => {
+    const repo = makeRepo()
+    const holder = join(repo.root, 'holder')
+    mkdirSync(holder)
+    const wt = join(holder, 'wt')
+    repo.git(repo.main, 'worktree', 'add', '-q', '-b', 'b-ac', wt)
+    for (const mode of [0o000, 0o600]) {
+      chmodSync(holder, mode)
+      try {
+        const r = req(repo, wt)
+        assert.deepEqual([r.result.ok, r.result.worktree, r.result.retained], [false, 'retained-unobservable', true], `mode ${mode.toString(8)}: ${JSON.stringify(r.result)}`)
+      } finally {
+        chmodSync(holder, 0o700)
+      }
+      assert.ok(existsSync(wt) && repo.worktrees().includes(wt), `mode ${mode.toString(8)}: 登録も実体も残る`)
+      assert.ok(repo.branches().includes('b-ac'))
+    }
+    // 対照: 権限を戻せば実体が確認できて retained-present（clean な worktree を消さない）
+    assert.equal(req(repo, wt).result.worktree, 'retained-present')
   })
   test(`${tag} X: 登録が無いのに実体のあるパス（ファイル・シンボリックリンクを含む）は retained-unregistered。実体の無い detached・lock ありの登録は retained-detached・retained-locked（unlock もしない）`, () => {
     const repo = makeRepo()
