@@ -225,8 +225,10 @@ check(
     ['wr_count_status', `# branch.oid abc${NL}1 .M N... 100644 100644 100644 aaaa bbbb a.txt`],
     ['wr_count_status', `${NL}${NL}? x${NL}`],
     ['wr_count_status', '? S-looks-like-submodule.txt'],
+    // read -r なので末尾が \ のパスの行でも次の行と連結されず、行数が保たれる（-r を外すと壊れる）
+    ['wr_count_status', `? a\\${NL}? nested/${NL}? b\\\\`],
   ],
-  (g, r, i) => assert.deepEqual([g.dirty, g.sub], [[0, 0], [1, 0], [3, 0], [1, 1], [2, 1], [1, 0], [1, 0], [1, 1], [1, 0], [1, 0], [1, 0]][i], JSON.stringify(r)),
+  (g, r, i) => assert.deepEqual([g.dirty, g.sub], [[0, 0], [1, 0], [3, 0], [1, 1], [2, 1], [1, 0], [1, 0], [1, 1], [1, 0], [1, 0], [1, 0], [3, 0]][i], JSON.stringify(r)),
 )
 
 const LIST = (...entries) => entries.join(`${NL}${NL}`)
