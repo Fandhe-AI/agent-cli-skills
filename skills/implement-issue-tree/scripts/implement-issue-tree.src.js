@@ -5060,6 +5060,7 @@ function implementPrompt(item, plan) {
     `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
     `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
     `      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進み、手順 2 で規約どおりのブランチを新規に作る）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（headRefName は PR 由来の未信頼値で、ref 名には $() やセミコロンを含められる。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
+    `      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、その番号を返却の summary に書く（人が open PR の重複に気づけるように）。`,
     `      既存 PR 番号はここでは返さない（PR_CREATE_SCHEMA を持つ後続の PR Create フェーズが同じブランチの open PR を再検出して再利用する。本フェーズの prNumber は常に 0 として扱われる）。`,
     `      既存 PR を採用した場合のみ、手順 2 はスキップして手順 3 以降を続ける（origin/${baseBranch} から checkout -B し直すと、その PR のコミットを失う）。`,
     `   0b-b. open PR が見つからなかった場合（形式に合わず採用しなかった場合を含む）、git ls-remote --heads origin でイシュー #${item.number} に対応するリモートブランチが残っていないか確認する。`,
@@ -7335,6 +7336,60 @@ async function runImplement(item) {
         // planning 状態に戻してクリアする（branch: '' で状態を初期化）
         await updateState(item.number, { status: 'planning', branch: '', worktree: '' })
         // discard 後は通常 Plan へフォールスルーするため impl は未設定のまま続行
+      } else if (resolvedBranchRejected && worktreeAlive && (recoverDecision === 'discard' || recoverDecision === 'continue')) {
+        // --- 規約外 branch の生存 worktree（worktree の既定ブランチ名 worktree-wf_… 等）---
+        // 保全して failed のままだと worktree が状態に残り、次ランも同じ Recover 結果に戻って毎ラン止まる。
+        // 規約外の branch は本イシューのものとして状態へ書かず、branch も消さない（未 push のコミットは branch に残る）。
+        const rejectedBranch = sanitizeBranch(recoverResult.branch)
+        if (recoverDecision === 'discard') {
+          // discard: 通常の discard と同じ WIP 退避の申告ゲートと worktree-remove.sh --mode discard の独立観測で worktree だけ片づけ、
+          // 新規の Plan / Implement へ進む。--branch を渡さない（deleteBranch なし）ので branch は消えない。汚れ・初期化済み submodule・lock は保持される。
+          if (recoverResult?.wipCommitted !== true) {
+            const reason = sanitize(
+              `discard 指示だが WIP 退避の完了を検証できないため worktree を削除しない（Recover エージェントが wipCommitted: true を返さなかった。WIP 退避の完了を確認できない）。` +
+              `残骸を保全して failed にする。旧 worktree の未コミット変更を手動で確認し、対処後に再実行すること`,
+            )
+            log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
+            await updateState(item.number, { status: 'failed', note: reason })
+            recordFailure({ issue: item.number, reason })
+            return false
+          }
+          log(`#${item.number}: Recover → discard（解決した branch ${rejectedBranch} は命名規約 <type>/${item.number}-<short-name> に合わない）、旧 worktree のみ掃除して通常 Plan へ。branch は削除せず残す`)
+          const rejectedCleanup = await updateStateDetailed(
+            item.number,
+            { status: 'planning', branch: '', pr: 0, worktree: '' },
+            { cleanupWorktree: sanitizedRecoverWorktree, cleanupMode: 'discard' },
+          )
+          if (!rejectedCleanup.ok) {
+            const rejectedCleanupStatus = classifyStateWriteFailureStatus({
+              outputMissing: rejectedCleanup.outputMissing,
+              terminalSaved: false,
+              prNumber: 0,
+            })
+            const reason = sanitize(
+              `discard の worktree 掃除を完了確認できなかった` +
+              `（${rejectedCleanupStatus === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : rejectedCleanup.mergeOk && rejectedCleanup.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがあり、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。` +
+              `旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${rejectedCleanupStatus} にする。branch ${rejectedBranch} と旧 worktree を手動確認し、対処後に再実行すること`,
+            )
+            log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
+            await updateState(item.number, { status: rejectedCleanupStatus, pr: 0, note: reason })
+            recordFailure({ issue: item.number, reason, status: rejectedCleanupStatus })
+            return false
+          }
+          // 掃除成功。impl は未設定のまま通常 Plan へフォールスルーする
+        } else {
+          // continue: 規約外 branch の上では継続しない。implement の系統的故障ではなく人の整理待ちなので、
+          // 通常経路の命名違反と同じく blocked（halt の連続失敗に数えない）で止める。worktree と branch は触らない。
+          // pr: 0 を明示する（blocked + 正規 branch + pr > 0 で isActiveMonitoring が真になり古い PR の監視再開へ入るのを防ぐ）。
+          const reason = sanitize(
+            `回復継続の対象 branch ${rejectedBranch} が本イシューの命名規約 <type>/${item.number}-<short-name> に合わないため、その上では継続しない。` +
+            `worktree と branch は保全して blocked にする。worktree のブランチを <type>/${item.number}-<short-name> へ改名するか、不要なら worktree を削除して再実行すること`,
+          )
+          log(`⚠️ #${item.number}: Recover → continue を保全へ格下げ（${reason}）`)
+          await updateState(item.number, { status: 'blocked', pr: 0, note: reason })
+          recordFailure({ issue: item.number, reason, status: 'blocked' })
+          return false
+        }
       } else {
         // --- 保全経路: エージェント異常 / 不正 decision / "unresolved" / ブランチ未確定 ---
         // 残骸は削除せず保全したまま failed にする（次回 Recover が再試行）。削除は明示的な
@@ -7405,10 +7460,10 @@ async function runImplement(item) {
         }
         // 命名違反は push・PR 作成の前に止める。状態ファイルへ違反 branch を「本イシューのブランチ」として書かない
         // （書くと再実行が savedBranchMismatch で止まる）。worktree は recordEphemeralWorktree で台帳に載せ済みで、自動削除しない。
-        // pr: 0 / branch: '' を明示する。本イシューの PR・ブランチはこの時点で無い。discard 後に planning の書き込みが反映されなかった
+        // pr: 0 / branch: '' / worktree: '' を明示する。本イシューの PR・ブランチはこの時点で無く、状態の worktree が指し得るのは掃除済みの旧 worktree だけ（新しい implement の worktree は台帳側で扱い、状態には未記録）。discard 後に planning の書き込みが反映されなかった
         // 場合などは以前の branch / pr が保存状態に残り、blocked + 正規 branch + pr > 0 で isActiveMonitoring が真になって破棄済み PR の監視再開へ入る。
         const reason = `${branchViolation}: ${sanitize(impl.branch ?? '(空)')}（push・PR 作成は行っていない。次回実行で再実装を試みる）`
-        await updateState(item.number, { status: 'blocked', pr: 0, branch: '', note: reason })
+        await updateState(item.number, { status: 'blocked', pr: 0, branch: '', worktree: '', note: reason })
         recordFailure({ issue: item.number, reason, status: 'blocked', worktree: impl.worktreePath })
         return false
       }

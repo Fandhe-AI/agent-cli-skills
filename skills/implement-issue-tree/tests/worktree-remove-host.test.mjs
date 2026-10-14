@@ -327,12 +327,14 @@ test('Recover discard: 掃除対象のブランチが base と同名でも --mod
   assert.match(CMD.exec(c[0].prompt)[0], /worktree-remove\.sh remove --mode discard --path '\/repo\/wt\/old'$/)
 })
 
-test('Recover discard: Recover が解決した branch が本イシューの命名に合わない（base と同名の main 等）ときは掃除せず failed で保全する', async () => {
-  const { calls, result } = await recoverRun({ decision: 'discard', wipCommitted: true, cleanup: { ok: true, retained: false }, branch: 'main' })
-  assert.ok(!labels(calls).includes('state:cleanup:#2'))
-  assert.ok(!labels(calls).includes('plan:#2'))
-  assert.ok(failureOf(result), '失敗として記録される')
-  assert.equal(failureOf(result)?.status ?? 'failed', 'failed')
+test('Recover discard: Recover が解決した branch が本イシューの命名に合わない（base と同名の main 等）ときは worktree だけ掃除し、branch は消さない（--branch なし）', async () => {
+  const { calls } = await recoverRun({ decision: 'discard', wipCommitted: true, cleanup: { ok: true, retained: false }, branch: 'main' })
+  const c = calls.filter((x) => x.opts.label === 'state:cleanup:#2' && x.prompt.includes('--mode discard'))
+  assert.equal(c.length, 1)
+  const cmd = CMD.exec(c[0].prompt)[0]
+  assert.match(cmd, /worktree-remove\.sh remove --mode discard --path '\/repo\/wt\/old'$/)
+  assert.ok(!/--branch/.test(cmd), 'branch は消さない')
+  assert.ok(labels(calls).includes('plan:#2'), '新規 Plan へ進む')
 })
 
 test('Recover continue: wipCommitted:true なら --mode discard（--branch なし）で旧 worktree だけ掃除して Implement へ。保持なら Implement を起動せず failed。wipCommitted が true でなければ掃除しない', async () => {

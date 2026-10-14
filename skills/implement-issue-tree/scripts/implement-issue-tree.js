@@ -3771,15 +3771,15 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'7e70c891ee714e4ec2ae7e5272bb8eeff1a21ed4224730be9efa6e32e1bbf44d',
-'measure-free-disk.sh':'67c550757356ae7eca7dcfcb40b68f977f0de8fceb424124fe7d98da57362449',
-'observe-pr.sh':'9ca22b662c508a9b99ac2e113ba7ce3ffe7ec6cea80816dff73b504784c6a780',
-'base-merge.sh':'b18b896a8b41266bedccd85beca698ad578f249306fa800b40dc7f89ced3055e',
-'pr-push.sh':'df36b4140f8a95bf8fa996f037fa6702e312922b17dea235d20d178b4c810b42',
-'state.sh':'09c65b3af0c4a2fb8ba5b376dc02494f076b5d1422fe70e64f01557655267dd5',
-'merge-gate.sh':'1aa5a33a3aa3b4f3905c03307ea7fe9582eb2c61500fd97b4d001ec4b4fd45ca',
-'worktree-remove.sh':'9d21dc342866f19ff4e424ad9f4ff6806b8cd728cc4efd40981d9073543ff40b',
-'recover-prep.sh':'8be456189228db139e0e9445c96e24c53ca21fec59bc648b63ef54742a29aedc',
+'measure-residual-bytes.sh':'c0d899ccb75f2db07ae4eae814179106297d020faba01619ad131193f3569c3d',
+'measure-free-disk.sh':'01661646d34e36c23e399bce513a7e95cb69c310ac477221ed9079937a6721a9',
+'observe-pr.sh':'d7d1167d1f5ac63c55ce56216d4fb0d3ef7d958d9834ff71f542b04ed19a208c',
+'base-merge.sh':'71df2ef7b1261ebcbf3377642b0902cc5ff1f8230bf7f6f18d6e39816429a895',
+'pr-push.sh':'f09c07f7db50c9ccc067bf9ef0ae838cc662d4d1616c04c6642e19c4c79f1598',
+'state.sh':'7c17e0811cf843df9dad5a4c7d4b7bee02154ea7b03c36733ec9fc68a915a294',
+'merge-gate.sh':'898463483b49d793b591593d6943f0f86422207ddc12fb97c29b0ebbe4b8a75b',
+'worktree-remove.sh':'9ec43d71ddbd8603d37296779b6bf38af1926e6123982c455592ec6d8f944e9d',
+'recover-prep.sh':'6cebd1cf2886310f5084098e480388e26e2a5d4bb20481c1e44040c9708d7bc5',
 }
 
 
@@ -5060,6 +5060,7 @@ untrustedJson(planJson,'plan'),
 `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
 `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
 `      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進み、手順 2 で規約どおりのブランチを新規に作る）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（headRefName は PR 由来の未信頼値で、ref 名には $() やセミコロンを含められる。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
+`      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、その番号を返却の summary に書く（人が open PR の重複に気づけるように）。`,
 `      既存 PR 番号はここでは返さない（PR_CREATE_SCHEMA を持つ後続の PR Create フェーズが同じブランチの open PR を再検出して再利用する。本フェーズの prNumber は常に 0 として扱われる）。`,
 `      既存 PR を採用した場合のみ、手順 2 はスキップして手順 3 以降を続ける（origin/${baseBranch} から checkout -B し直すと、その PR のコミットを失う）。`,
 `   0b-b. open PR が見つからなかった場合（形式に合わず採用しなかった場合を含む）、git ls-remote --heads origin でイシュー #${item.number} に対応するリモートブランチが残っていないか確認する。`,
@@ -7335,6 +7336,60 @@ return false
 
 await updateState(item.number,{status:'planning',branch:'',worktree:''})
 
+}else if(resolvedBranchRejected&&worktreeAlive&&(recoverDecision==='discard'||recoverDecision==='continue')){
+
+
+
+const rejectedBranch=sanitizeBranch(recoverResult.branch)
+if(recoverDecision==='discard'){
+
+
+if(recoverResult?.wipCommitted!==true){
+const reason=sanitize(
+`discard 指示だが WIP 退避の完了を検証できないため worktree を削除しない（Recover エージェントが wipCommitted: true を返さなかった。WIP 退避の完了を確認できない）。`+
+`残骸を保全して failed にする。旧 worktree の未コミット変更を手動で確認し、対処後に再実行すること`,
+)
+log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
+await updateState(item.number,{status:'failed',note:reason})
+recordFailure({issue:item.number,reason})
+return false
+}
+log(`#${item.number}: Recover → discard（解決した branch ${rejectedBranch} は命名規約 <type>/${item.number}-<short-name> に合わない）、旧 worktree のみ掃除して通常 Plan へ。branch は削除せず残す`)
+const rejectedCleanup=await updateStateDetailed(
+item.number,
+{status:'planning',branch:'',pr:0,worktree:''},
+{cleanupWorktree:sanitizedRecoverWorktree,cleanupMode:'discard'},
+)
+if(!rejectedCleanup.ok){
+const rejectedCleanupStatus=classifyStateWriteFailureStatus({
+outputMissing:rejectedCleanup.outputMissing,
+terminalSaved:false,
+prNumber:0,
+})
+const reason=sanitize(
+`discard の worktree 掃除を完了確認できなかった`+
+`（${rejectedCleanupStatus === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : rejectedCleanup.mergeOk && rejectedCleanup.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがあり、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。`+
+`旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${rejectedCleanupStatus} にする。branch ${rejectedBranch} と旧 worktree を手動確認し、対処後に再実行すること`,
+)
+log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
+await updateState(item.number,{status:rejectedCleanupStatus,pr:0,note:reason})
+recordFailure({issue:item.number,reason,status:rejectedCleanupStatus})
+return false
+}
+
+}else{
+
+
+
+const reason=sanitize(
+`回復継続の対象 branch ${rejectedBranch} が本イシューの命名規約 <type>/${item.number}-<short-name> に合わないため、その上では継続しない。`+
+`worktree と branch は保全して blocked にする。worktree のブランチを <type>/${item.number}-<short-name> へ改名するか、不要なら worktree を削除して再実行すること`,
+)
+log(`⚠️ #${item.number}: Recover → continue を保全へ格下げ（${reason}）`)
+await updateState(item.number,{status:'blocked',pr:0,note:reason})
+recordFailure({issue:item.number,reason,status:'blocked'})
+return false
+}
 }else{
 
 
@@ -7408,7 +7463,7 @@ return false
 
 
 const reason=`${branchViolation}: ${sanitize(impl.branch ?? '(空)')}（push・PR 作成は行っていない。次回実行で再実装を試みる）`
-await updateState(item.number,{status:'blocked',pr:0,branch:'',note:reason})
+await updateState(item.number,{status:'blocked',pr:0,branch:'',worktree:'',note:reason})
 recordFailure({issue:item.number,reason,status:'blocked',worktree:impl.worktreePath})
 return false
 }
