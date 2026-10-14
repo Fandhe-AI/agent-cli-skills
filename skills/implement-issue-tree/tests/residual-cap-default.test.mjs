@@ -550,9 +550,9 @@ test('測定スクリプトは du の終了コードを if の条件式で個別
   // du | cut のパイプ直結は終了状態が cut のものになる fail-open（PR #390 codex-review P1）。
   // また `duout=$(du ...); durc=$?` の素の代入は errexit 下で失敗時に即終了し err 計上へ到達
   // しないため、終了状態は if の条件式で検査する（PR #390 codex-review P1 第 3 ラウンド）
-  assert.match(residualScript, /if duout=\$\(du -sk -- "\$\{p\}" 2>\/dev\/null\); then/)
+  assert.match(residualScript, /if duout=\$\(du -sk -- "\$\{real\}" 2>\/dev\/null\); then/)
   assert.match(residualScript, /else\n\s*err=\$\(\(err \+ 1\)\)\n\s*fi/)
-  assert.doesNotMatch(residualScript, /du -sk -- "\$\{p\}" 2>\/dev\/null \| cut/)
+  assert.doesNotMatch(residualScript, /du -sk -- "\$\{(?:p|real)\}" 2>\/dev\/null \| cut/)
   assert.doesNotMatch(residualScript, /durc=\$\?/)
   // 旧実装は jq を while ループへ直結すると jq の非 0 終了が「入力 0 件の正常測定」に化けた
   // （PR #390 codex-review P1）。パス一覧は標準入力の行として直接読み、jq の展開自体を持たない。

@@ -172,7 +172,7 @@ remove_one() {
   if [ "${WR_MAIN}" = 1 ]; then T_WT=main; return 0; fi
   if [ "${WR_REGISTERED}" != 1 ]; then
     # 登録は無いが実体のパスがある（登録だけが失われたチェックアウト）。--head / --expect-branch を結びつけられた discard で『登録が無い = もう無い』と返すと、ホストは消えたものとして
-    # 追跡から外す。未 push の作業が残っているかもしれないので、その結びつけがあるときは保持の語（記録対象）で返す。結びつけの無い呼び出し（superseded・sweep・後始末）は従来どおり
+    # 追跡から外す。未 push の作業が残っているかもしれないので、その結びつけがあるときは保持の語（記録対象）で返す。結びつけの無い呼び出し（superseded・sweep・後始末）は従来どおり not-registered。
     # 実体の有無を確かめられないとき（祖先を検索・読み取りできず stat が失敗する）は、読めない親の下の実体が『無い』ように見える。
     # 『もう無い』と言えないので、モードを問わず retained-unobservable（何も消さない・追跡から外さない）で返す。判定は check-absent / --require-missing と同じ wr_path_state
     if [ "$(wr_path_state "${path}")" = unknown ]; then T_WT='retained-unobservable'; return 0; fi
