@@ -2909,6 +2909,9 @@ const ORPHAN_COUNT_SCHEMA = {
 //   missing: 測定時点で既に存在しなかったパスの件数。並行 cleanup で消えたパスは 0 として扱い測定失敗に
 //        しない（Bugbot 指摘対応）。呼び出し側は平均算出の分母から差し引くため必須（欠落を 0 とみなすと
 //        存在しないパスが分母に残り 1 worktree あたりの見積りが過小になる fail-open）
+//   dup: 同じ実体の別の綴りとして測らなかった行数（kib・missing・err には足さない）。平均の分母は
+//        count - missing - dup（kib に足された実体の数）。dup を引かないと重複が分母に残り、平均が下がって
+//        空き容量の予約が過小になる fail-open（Bugbot 指摘 AJ）。missing + dup > count は封筒の不整合として拒否する
 //   count: スクリプトが処理した行数。ホストは送った対象パス数との一致を検証する（Issue #497: 入力の
 //        取り違え・空展開で 0 件や別集合を読んでも ERR=0 の正常終了に化けて容量ゲートを素通りする
 //        fail-open を、件数照合で塞ぐ）
@@ -2916,8 +2919,9 @@ const ORPHAN_COUNT_SCHEMA = {
 //        自分の送ったパス列から再計算した値との照合で拒否する（verifySignedOutput。Issue #603）
 const ORPHAN_BYTES_SCHEMA = {
   type: 'object',
-  required: ['kib', 'err', 'missing', 'count', 'inputSha256'],
+  required: ['kib', 'err', 'missing', 'dup', 'count', 'inputSha256'],
   properties: {
+    dup: { type: 'integer', minimum: 0, description: '同じ実体の別の綴りとして測らなかった行数' },
     inputSha256: { type: 'string', description: '標準入力の SHA-256（ホストが送ったパス列と照合する）' },
     kib: { type: 'integer', minimum: 0, description: 'du -sk 第1列の合計（KiB）' },
     err: { type: 'integer', minimum: 0, description: '測定失敗の件数（0 以外は失敗）' },
@@ -4155,7 +4159,7 @@ async function precheckScriptHashes() {
 // 再測定しても結果が変わらないため再測定しない。判定順は 欠落 → count 不一致 → err → 型・範囲。
 function classifyResidualByteReport(v, sentCount) {
   const isObj = v !== null && typeof v === 'object'
-  if (!isObj || [v.kib, v.err, v.missing, v.count].some((x) => x === undefined || x === null)) {
+  if (!isObj || [v.kib, v.err, v.missing, v.dup, v.count].some((x) => x === undefined || x === null)) {
     return { ok: false, retryable: true, reason: 'output-missing' }
   }
   if (!(Number.isInteger(v?.count) && v.count === sentCount)) {
@@ -4166,7 +4170,10 @@ function classifyResidualByteReport(v, sentCount) {
   if (!(Number.isInteger(v?.missing) && v.missing >= 0 && v.missing <= sentCount)) {
     return { ok: false, retryable: false, reason: 'schema' }
   }
-  return { ok: true, kib: v.kib, missing: v.missing }
+  if (!(Number.isInteger(v?.dup) && v.dup >= 0 && v.missing + v.dup <= sentCount)) {
+    return { ok: false, retryable: false, reason: 'schema' }
+  }
+  return { ok: true, kib: v.kib, missing: v.missing, dup: v.dup }
 }
 
 // 転記失敗・agent 例外・出力欠落時の再測定回数上限（合算で初回を含め最大 3 回）。再測定は別エージェント（sonnet）で行う。
@@ -4225,7 +4232,7 @@ async function measureResidualBytesOnce(sanitizedPaths, model) {
 // 差し引くための契約（Bugbot Medium 指摘）。count 不一致（転記失敗）・agent 例外・出力欠落／不完全は
 // 一過性のエージェント失敗として有界に再測定する（Issue #566・#571）。du 実失敗と型・範囲不正は再測定しない。
 async function measureResidualWorktreeBytesDetailed(paths) {
-  if (!Array.isArray(paths) || paths.length === 0) return { kib: 0, missing: 0 }
+  if (!Array.isArray(paths) || paths.length === 0) return { kib: 0, missing: 0, dup: 0 }
   // sanitizeWorktreePath へ強制検証してから渡す構造的防御（PR #390）。1 件でも外れれば全体中止。
   const sanitizedPaths = paths.map((p) => sanitizeWorktreePath(typeof p === 'string' ? p : ''))
   if (sanitizedPaths.some((p) => p === '')) {
@@ -4243,7 +4250,7 @@ async function measureResidualWorktreeBytesDetailed(paths) {
         if (r.missing > 0) {
           log(`残置 worktree ディスク使用量測定: 並行 cleanup 等により ${r.missing} 件のパスが測定時点で既に存在しなかった（0 として扱った）`)
         }
-        return { kib: r.kib, missing: r.missing }
+        return { kib: r.kib, missing: r.missing, dup: r.dup }
       }
       const rv = once.report
       if (r.retryable) {
@@ -6248,15 +6255,16 @@ function shouldSuppressForFreeDisk(freeDiskBytes, requiredFreeDiskBytes) {
 }
 
 // 実測合計から「1 worktree あたりの平均バイト数」を算出する純粋関数（Bugbot Medium 指摘）。
-// sentCount は測定へ送ったパス数、missing はそのうち測定時点で既に存在しなかった件数。分母は
-// 実在が確認できた件数（sentCount - missing）に限る — 並行 cleanup で消えたパスを分母へ残すと
-// 平均が希釈され、実ディスク空き容量ゲートの予約量が過小になる（fail-open）。分母が 0 以下・
+// sentCount は測定へ送ったパス数、missing はそのうち測定時点で既に存在しなかった件数、dup は同じ実体の
+// 別の綴りとして測らなかった件数。分母は kib に足された実体の数（sentCount - missing - dup）に限る —
+// 並行 cleanup で消えたパスや重複の綴りを分母へ残すと平均が希釈され、実ディスク空き容量ゲートの予約量が
+// 過小になる（fail-open）。分母が 0 以下・
 // 入力が不正なら null を返し、呼び出し側は「更新をスキップ」へ倒す（測定対象が無いだけで測定
 // 失敗ではないため latch はしない）。
-function computeAveragePerWorktreeBytes({ kib, sentCount, missing }) {
+function computeAveragePerWorktreeBytes({ kib, sentCount, missing, dup }) {
   if (!Number.isInteger(kib) || kib < 0) return null
-  if (!Number.isInteger(sentCount) || !Number.isInteger(missing)) return null
-  const denominator = sentCount - missing
+  if (!Number.isInteger(sentCount) || !Number.isInteger(missing) || !Number.isInteger(dup) || dup < 0) return null
+  const denominator = sentCount - missing - dup
   if (denominator <= 0) return null
   return Math.ceil((kib * 1024) / denominator)
 }
@@ -6957,7 +6965,7 @@ if (!dryRunEnabled) {
         ? null
         : verifiedResidualPaths.length > 0
           ? await measureResidualWorktreeBytesDetailed(verifiedResidualPaths)
-          : { kib: 0, missing: 0 } // 残置 0 件は合計 0 が既知の実測値（agent 呼び出し不要）
+          : { kib: 0, missing: 0, dup: 0 } // 残置 0 件は合計 0 が既知の実測値（agent 呼び出し不要）
       const kib = residualMeasured === null ? null : residualMeasured.kib
 
       const startFailure = classifyStartMeasurementFailure({ mainKib, kib, freeDiskKib })
@@ -6989,12 +6997,13 @@ if (!dryRunEnabled) {
             kib,
             sentCount: verifiedResidualPaths.length,
             missing: residualMeasured.missing,
+            dup: residualMeasured.dup,
           }) ?? 0
         // Issue #496: 永続化済み高水位をそのまま信頼する前に、汚染源（旧版・実測との大幅乖離）を
         // 排除する。decideRunStartHighWater は「旧版なら無効化」「現行版でも実測乖離が大きければ
         // 半減まで引き下げ」を純粋に決定し、rewriteBytes が非 null の場合は書き換えを永続化する
         // （raw 確定より前に完了させることで、書き込み順序が「是正 → 今回の raise」の順になる）。
-        const residualSampleCount = verifiedResidualPaths.length - residualMeasured.missing
+        const residualSampleCount = verifiedResidualPaths.length - residualMeasured.missing - residualMeasured.dup
         const highWaterDecision = decideRunStartHighWater({
           persistedBytes: persistedHighWaterBytes,
           persistedVersion: loadedHighWaterVersion,
@@ -9819,7 +9828,7 @@ async function remeasureResidualBytesNow() {
     ? null
     : targetPaths.length > 0
       ? await measureResidualWorktreeBytesDetailed(targetPaths)
-      : { kib: 0, missing: 0 }
+      : { kib: 0, missing: 0, dup: 0 }
   const kib = measured === null ? null : measured.kib
   // 間引きカウンタは測定成否に関わらず進める（失敗のたびに毎周回リトライすると agent コストが
   // 際限なく積み上がる）。失敗が続く間は kib===null 分岐の早期 return で baseline も更新されず
@@ -10019,6 +10028,7 @@ async function remeasureResidualBytesNow() {
         kib: implementMeasured.kib,
         sentCount: implementResidualCount,
         missing: implementMeasured.missing,
+        dup: implementMeasured.dup,
       })
       if (avgActualBytes === null) {
         log(
@@ -10048,6 +10058,7 @@ async function remeasureResidualBytesNow() {
       kib,
       sentCount: targetPaths.length,
       missing: measured.missing,
+      dup: measured.dup,
     })
     if (avgActualBytes === null) {
       log(

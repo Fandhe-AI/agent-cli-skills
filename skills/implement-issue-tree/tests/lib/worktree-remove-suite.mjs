@@ -1107,6 +1107,61 @@ export function registerWorktreeRemoveTests(bash) {
     const r2 = run(repo, ['remove', '--mode', 'discard', '--branch', z.branch, '--base', 'main'])
     assert.ok(repo.worktrees().includes(z.path), JSON.stringify(r2.result))
   })
+  // ---- 同期 PR の Bugbot 指摘 AL: ブランチを掴む実体の無い登録の後始末が、並行して登録が消えた（not-registered）ときの扱い ----
+  // 呼び出しの順は、1: 一覧（ブランチを持つ登録を探す）→ 2: remove_one の中の一覧 → 3: （not-registered のときだけ）読み直し。
+  // 2 回目の直前に実際に登録を prune して『後始末の時点で登録が既に無い』を作り、3 回目の一覧を差し替えて読み直しの分岐を検査する
+  const raceGit = (repo, name, third) => {
+    const shim = join(repo.root, name)
+    mkdirSync(shim)
+    const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()
+    const counter = join(repo.root, `${name}.count`)
+    const body = [
+      '#!/bin/sh',
+      'if [ "$1" = worktree ] && [ "$2" = list ]; then',
+      `  n=$(cat '${counter}' 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > '${counter}'`,
+      `  if [ "$n" = 2 ]; then ${real} worktree prune; fi`,
+      `  if [ "$n" = 3 ]; then ${third}`,
+      '  fi',
+      'fi',
+      `exec ${real} "$@"`,
+    ].join('\n')
+    writeFileSync(join(shim, 'git'), `${body}\n`, { mode: 0o755 })
+    return { PATH: `${shim}:${process.env.PATH}` }
+  }
+  test(`${tag} AL: 後始末の時点で登録が既に消えていた（not-registered）。読み直してブランチを掴む登録が無ければ、ブランチを消して ok`, () => {
+    const repo = makeRepo()
+    const h = deadBranchHolder(repo, 'racegone')
+    const env = raceGit(repo, 'shim-race-gone', ':')
+    const r = run(repo, ['remove', '--mode', 'discard', '--branch', h.branch, '--base', 'main'], { env })
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual([r.result.ok, r.result.branch, r.result.holder, r.result.retained], [true, 'deleted', 'not-registered', false], JSON.stringify(r.result))
+    assert.ok(!repo.branches().includes(h.branch))
+    assert.ok(!repo.worktrees().includes(h.path))
+  })
+  test(`${tag} AL: not-registered でも、読み直した一覧にまだブランチを掴む登録があれば消さない（keep）。一覧を読み直せないときも消さない`, () => {
+    const repo = makeRepo()
+    const h = deadBranchHolder(repo, 'raceheld')
+    // 3 回目の一覧に、そのブランチを持つ（メイン以外の）登録を足す
+    const still = `${join(repo.root, 'ghost-wt')}`
+    const env = raceGit(repo, 'shim-race-held', `${spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()} worktree list --porcelain; printf '\\nworktree ${still}\\nHEAD ${'0'.repeat(40)}\\nbranch refs/heads/${h.branch}\\n'; exit 0;`)
+    const r = run(repo, ['remove', '--mode', 'discard', '--branch', h.branch, '--base', 'main'], { env })
+    assert.deepEqual([r.result.ok, r.result.branch, r.result.holder], [false, 'keep', 'not-registered'], JSON.stringify(r.result))
+    assert.ok(repo.branches().includes(h.branch), 'ブランチは消えない')
+    const repo2 = makeRepo()
+    const h2 = deadBranchHolder(repo2, 'raceunread')
+    const env2 = raceGit(repo2, 'shim-race-unread', 'echo boom >&2; exit 1;')
+    const r2 = run(repo2, ['remove', '--mode', 'discard', '--branch', h2.branch, '--base', 'main'], { env: env2 })
+    assert.deepEqual([r2.result.ok, r2.result.branch, r2.result.holder], [false, 'keep', 'not-registered'], JSON.stringify(r2.result))
+    assert.ok(repo2.branches().includes(h2.branch), '読み直せないときもブランチは消えない')
+  })
+  test(`${tag} AL: 保持の語（lock 中の持ち主）は従来どおりブランチを消さない。読み直しに頼らない`, () => {
+    const repo = makeRepo()
+    const l = deadBranchHolder(repo, 'raceheldlock')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', 'portable', l.path)
+    const r = run(repo, ['remove', '--mode', 'discard', '--branch', l.branch, '--base', 'main'])
+    assert.deepEqual([r.result.ok, r.result.branch, r.result.holder], [false, 'keep', 'retained-locked'], JSON.stringify(r.result))
+    assert.ok(repo.branches().includes(l.branch))
+  })
   // ---- 同期 PR の Bugbot 指摘 J〜M・P ----
   // J: --path の結果は、ブランチを持つ登録の後始末で上書きしない（後始末の結果は holder とブランチの判断にだけ使う）
   test(`${tag} J: --path で消し終えたあと、ブランチを持つ別の登録が lock で保持されても、worktree は removed のまま。holder に保持の語・ブランチは keep・ok は false`, () => {
