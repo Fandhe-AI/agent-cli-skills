@@ -2914,10 +2914,14 @@ description:'git worktree list --porcelain | grep -c \'^worktree \' の出力数
 
 
 
+
+
+
 const ORPHAN_BYTES_SCHEMA={
 type:'object',
-required:['kib','err','missing','count','inputSha256'],
+required:['kib','err','missing','dup','count','inputSha256'],
 properties:{
+dup:{type:'integer',minimum:0,description:'同じ実体の別の綴りとして測らなかった行数'},
 inputSha256:{type:'string',description:'標準入力の SHA-256（ホストが送ったパス列と照合する）'},
 kib:{type:'integer',minimum:0,description:'du -sk 第1列の合計（KiB）'},
 err:{type:'integer',minimum:0,description:'測定失敗の件数（0 以外は失敗）'},
@@ -3913,14 +3917,14 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'0eab02c3cd10b51e5505a8e1acb8ea6ec179a16294f6f7e0726cb3184902483b',
+'measure-residual-bytes.sh':'3090626ac7c029b4c19eb5a1a8d407d802d4af5a12aa356161a8bd41f0236513',
 'measure-free-disk.sh':'9dab806473a31a412a8245924a9addebf025e2eb9b1c935c9171712b3410a94c',
 'observe-pr.sh':'53507dc72d98695aa25c5e7c264c0c87b3a4c30de583f4724370869551b67681',
 'base-merge.sh':'7a2641ce0560072e44f54b989b5ba325af2da4b8621c85b307c9689c3a6ceb53',
 'pr-push.sh':'0cff6b73986002d88b2d716b30f5642aae2e70f8b8540596634d4608b83e105b',
 'state.sh':'209f3d10e652cc0d86767ee90ec698b28441e24ba00852c7dbfc7ae94dea477d',
 'merge-gate.sh':'85e3fd636eaf276877a36eb31a5f1527be73f3921a631af055894359344c804c',
-'worktree-remove.sh':'35e8a60c4d4c7bf85c392389827ed17e8e1e3da659016e046d90db379b7e212f',
+'worktree-remove.sh':'7137c5dd716d711db95b995efe52d470f78fd77f8feef60d28d191352d32ebfd',
 'recover-prep.sh':'c8dff4a6c84dae35d80280fb4f049bd7eaf95caf8a33381c2ca14c866cc6df4d',
 }
 
@@ -4155,7 +4159,7 @@ throw new Error(`スクリプトのハッシュを検査できなかった（${l
 
 function classifyResidualByteReport(v,sentCount){
 const isObj=v!==null&&typeof v==='object'
-if(!isObj||[v.kib,v.err,v.missing,v.count].some((x)=>x===undefined||x===null)){
+if(!isObj||[v.kib,v.err,v.missing,v.dup,v.count].some((x)=>x===undefined||x===null)){
 return{ok:false,retryable:true,reason:'output-missing'}
 }
 if(!(Number.isInteger(v?.count)&&v.count===sentCount)){
@@ -4166,7 +4170,10 @@ if(!(Number.isInteger(v?.kib)&&v.kib>=0))return{ok:false,retryable:false,reason:
 if(!(Number.isInteger(v?.missing)&&v.missing>=0&&v.missing<=sentCount)){
 return{ok:false,retryable:false,reason:'schema'}
 }
-return{ok:true,kib:v.kib,missing:v.missing}
+if(!(Number.isInteger(v?.dup)&&v.dup>=0&&v.missing+v.dup<=sentCount)){
+return{ok:false,retryable:false,reason:'schema'}
+}
+return{ok:true,kib:v.kib,missing:v.missing,dup:v.dup}
 }
 
 
@@ -4225,7 +4232,7 @@ return signed.ok?{report:signed.payload}:{report:null,envelope:signed.reason}
 
 
 async function measureResidualWorktreeBytesDetailed(paths){
-if(!Array.isArray(paths)||paths.length===0)return{kib:0,missing:0}
+if(!Array.isArray(paths)||paths.length===0)return{kib:0,missing:0,dup:0}
 
 const sanitizedPaths=paths.map((p)=>sanitizeWorktreePath(typeof p==='string'?p:''))
 if(sanitizedPaths.some((p)=>p==='')){
@@ -4243,7 +4250,7 @@ if(r.ok){
 if(r.missing>0){
 log(`残置 worktree ディスク使用量測定: 並行 cleanup 等により ${r.missing} 件のパスが測定時点で既に存在しなかった（0 として扱った）`)
 }
-return{kib:r.kib,missing:r.missing}
+return{kib:r.kib,missing:r.missing,dup:r.dup}
 }
 const rv=once.report
 if(r.retryable){
@@ -6253,10 +6260,11 @@ return freeDiskBytes<requiredFreeDiskBytes
 
 
 
-function computeAveragePerWorktreeBytes({kib,sentCount,missing}){
+
+function computeAveragePerWorktreeBytes({kib,sentCount,missing,dup}){
 if(!Number.isInteger(kib)||kib<0)return null
-if(!Number.isInteger(sentCount)|| !Number.isInteger(missing))return null
-const denominator=sentCount-missing
+if(!Number.isInteger(sentCount)|| !Number.isInteger(missing)|| !Number.isInteger(dup)||dup<0)return null
+const denominator=sentCount-missing-dup
 if(denominator<=0)return null
 return Math.ceil((kib*1024) / denominator)
 }
@@ -6957,7 +6965,7 @@ const residualMeasured=hasUnverifiedResidualPath
 ?null
 :verifiedResidualPaths.length>0
 ?await measureResidualWorktreeBytesDetailed(verifiedResidualPaths)
-:{kib:0,missing:0}
+:{kib:0,missing:0,dup:0}
 const kib=residualMeasured===null?null:residualMeasured.kib
 
 const startFailure=classifyStartMeasurementFailure({mainKib,kib,freeDiskKib})
@@ -6989,12 +6997,13 @@ computeAveragePerWorktreeBytes({
 kib,
 sentCount:verifiedResidualPaths.length,
 missing:residualMeasured.missing,
+dup:residualMeasured.dup,
 })??0
 
 
 
 
-const residualSampleCount=verifiedResidualPaths.length-residualMeasured.missing
+const residualSampleCount=verifiedResidualPaths.length-residualMeasured.missing-residualMeasured.dup
 const highWaterDecision=decideRunStartHighWater({
 persistedBytes:persistedHighWaterBytes,
 persistedVersion:loadedHighWaterVersion,
@@ -9819,7 +9828,7 @@ const measured=measurementFailed
 ?null
 :targetPaths.length>0
 ?await measureResidualWorktreeBytesDetailed(targetPaths)
-:{kib:0,missing:0}
+:{kib:0,missing:0,dup:0}
 const kib=measured===null?null:measured.kib
 
 
@@ -10019,6 +10028,7 @@ const avgActualBytes=computeAveragePerWorktreeBytes({
 kib:implementMeasured.kib,
 sentCount:implementResidualCount,
 missing:implementMeasured.missing,
+dup:implementMeasured.dup,
 })
 if(avgActualBytes===null){
 log(
@@ -10048,6 +10058,7 @@ const avgActualBytes=computeAveragePerWorktreeBytes({
 kib,
 sentCount:targetPaths.length,
 missing:measured.missing,
+dup:measured.dup,
 })
 if(avgActualBytes===null){
 log(

@@ -327,6 +327,7 @@ safe_prune() {
 # 結果の行に足す holder（--branch を持っていた実体の無い登録の後始末の結果。removed / retained-… / failed。後始末をしなかったときは何も足さない）。
 # worktree・dirty・unlocked は --path の結果のまま保つ。語は remove_one の固定語彙だけなので、そのまま出す
 holder_word=""
+holder_free=0
 holder_field() {
   if [ -n "${holder_word}" ]; then printf ',"holder":"%s"' "${holder_word}"; fi
 }
@@ -434,6 +435,14 @@ if [ "${cmd}" = remove ]; then
       T_DIRTY=${keep_dirty}
       if [ "${keep_unlocked}" = true ] || [ "${T_UNLOCKED}" = true ]; then T_UNLOCKED=true; fi
       if [ "${holder_word}" = removed ]; then did_remove=1; fi
+      # not-registered は『後始末の時点で登録が既に無かった』（並行して消えた）。ブランチを掴むものが無くなった可能性が高いが、語だけでは信じず、
+      # 同じプロセスの中で登録の一覧を読み直し、ブランチを持つ登録が本当に無いことを確かめたときだけ『掴むものは無い』とする。読めない・まだ残るなら keep のまま
+      if [ "${holder_word}" = not-registered ]; then
+        if hl_again=$(git worktree list --porcelain 2>/dev/null); then
+          wr_branch_holder "${hl_again}" "${branch}"
+          if [ -z "${WR_HOLDER}" ]; then holder_free=1; fi
+        fi
+      fi
     fi
   fi
   # 何かを消したあとの登録情報の掃除。--path の worktree を消した、または後始末で登録を消したときだけ prune する（ブランチだけの discard や、
@@ -445,7 +454,7 @@ if [ "${cmd}" = remove ]; then
   if [ -n "${branch}" ]; then
     gone=0
     # 後始末が保持・失敗なら、ブランチはまだ登録が掴んでいるので消さない（keep）
-    { wr_wt_gone "${T_WT}" && { [ -z "${holder_word}" ] || [ "${holder_word}" = removed ]; }; } && gone=1
+    { wr_wt_gone "${T_WT}" && { [ -z "${holder_word}" ] || [ "${holder_word}" = removed ] || [ "${holder_free}" = 1 ]; }; } && gone=1
     exists=0
     if sha=$(git rev-parse --verify -q "refs/heads/${branch}^{commit}" 2>/dev/null); then exists=1; else sha=""; fi
     act=$(wr_branch_action "${branch}" "${base}" "${gone}" "${exists}")

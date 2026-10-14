@@ -566,7 +566,7 @@ test('ORPHAN_BYTES_SCHEMA は err・missing・count を必須フィールドと�
   // （欠落を 0 とみなすと分母に存在しないパスが残り予約が過小になる。Bugbot Medium 指摘）。
   // count は Issue #497 で追加した件数照合フィールド（一時ファイルの取り違え・空展開による
   // 0 件正常終了への fail-open を塞ぐ）。
-  assert.match(source, /required: \['kib', 'err', 'missing', 'count', 'inputSha256'\]/)
+  assert.match(source, /required: \['kib', 'err', 'missing', 'dup', 'count', 'inputSha256'\]/)
 })
 
 test('バイト軸は新規着手直前に台帳増分によらず実測し直す（PR #390 P1 第 4 ラウンド）', () => {

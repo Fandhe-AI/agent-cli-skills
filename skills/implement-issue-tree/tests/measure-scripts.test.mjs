@@ -89,10 +89,10 @@ for (const bash of BASHES) {
       const env = parseEnvelope(r)
       assert.equal(env.nonce, NONCE)
       // inputSha256 は標準入力のパス列（末尾の改行 1 つを除く）の SHA-256。ホストが送った列から再計算して照合する
-      assert.deepEqual(env.payload, { count: 3, err: 0, inputSha256: inputSha256(`${a}\n${b}\n${gone}`), kib: duKib(a) + duKib(b), missing: 1 })
+      assert.deepEqual(env.payload, { count: 3, dup: 0, err: 0, inputSha256: inputSha256(`${a}\n${b}\n${gone}`), kib: duKib(a) + duKib(b), missing: 1 })
       assert.equal(env.sha256, expectedSha256(NONCE, env.payload))
       // payload のキー順は昇順（ホストの canonicalJson と同じ正規形）
-      assert.match(r.stdout, /"payload":\{"count":\d+,"err":\d+,"inputSha256":"[0-9a-f]{64}","kib":\d+,"missing":\d+\}/)
+      assert.match(r.stdout, /"payload":\{"count":\d+,"dup":\d+,"err":\d+,"inputSha256":"[0-9a-f]{64}","kib":\d+,"missing":\d+\}/)
     })
   })
 
@@ -110,10 +110,63 @@ for (const bash of BASHES) {
       const spellings = [a, dotted, link, viaLinkDir, real, `${a}/`, `${work}//wt-a`]
       const input = [...spellings, other].join('\n')
       const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input }))
-      assert.deepEqual(env.payload, { count: spellings.length + 1, err: 0, inputSha256: inputSha256(input), kib: duKib(a) + duKib(other), missing: 0 })
+      assert.deepEqual(env.payload, { count: spellings.length + 1, dup: spellings.length - 1, err: 0, inputSha256: inputSha256(input), kib: duKib(a) + duKib(other), missing: 0 })
       // 対照: 別の実体は別々に数える
       const two = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n${other}` }))
       assert.equal(two.payload.kib, duKib(a) + duKib(other))
+    })
+  })
+
+  // AJ: 重複した行は dup に数える。ホストは平均の分母を count - missing - dup にする（dup を引かないと分母が膨らみ、平均が下がる）
+  test(`${tag} residual: 同じ実体の 2 つの綴り + 別の実体 + 存在しないパスは dup=1・missing=1 で、count - missing - dup が kib に足された実体の数と一致する`, () => {
+    withWork((work) => {
+      const a = mkTree(work, 'wt-a', 64)
+      const other = mkTree(work, 'wt-other', 32)
+      const link = join(work, 'link-to-a')
+      symlinkSync(a, link)
+      const input = [a, link, other, join(work, 'gone')].join('\n')
+      const p = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input })).payload
+      assert.deepEqual([p.count, p.dup, p.missing, p.err, p.kib], [4, 1, 1, 0, duKib(a) + duKib(other)])
+      assert.equal(p.count - p.missing - p.dup, 2, '平均の分母 = kib に足された実体の数')
+    })
+  })
+
+  // AK: 物理パスは文字列として比べる。許可文字に無い * ? [ を含む物理パスへのシンボリックリンクを渡しても、別のパスを重複と誤認して飛ばさない
+  test(`${tag} residual: 名前に * や [ を含む実ディレクトリへのシンボリックリンクと、それに似た名前の別の実体を、どちらも測る（dup=0）`, () => {
+    withWork((work) => {
+      const pairs = [
+        ['a*b', 'aXb'],
+        ['d[1]', 'd1'],
+        ['q?z', 'qYz'],
+      ]
+      for (const [odd, plain] of pairs) {
+        const o = mkTree(work, odd, 40)
+        const pl = mkTree(work, plain, 24)
+        const lo = join(work, `link-${plain}-odd`)
+        const lp = join(work, `link-${plain}-plain`)
+        symlinkSync(o, lo)
+        symlinkSync(pl, lp)
+        // 通常の名前の実体が先、* を含む名前が後（後者が前者を指すパターンになる向き）と、その逆の両方
+        for (const order of [[lp, lo], [lo, lp]]) {
+          const p = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: order.join('\n') })).payload
+          assert.deepEqual([p.count, p.dup, p.missing, p.err, p.kib], [2, 0, 0, 0, duKib(o) + duKib(pl)], `${odd} / ${plain}`)
+        }
+      }
+    })
+  })
+
+  test(`${tag} residual: 物理パスが改行を含む実体は重複と判定せず測る（過大に数える側。別のパスを誤って飛ばさない）`, () => {
+    withWork((work) => {
+      // 改行を含む物理パス `<work>/has\nnewline` を一覧に記録すると、行に分かれた `<work>/has` が実在する別のディレクトリと一致してしまう
+      const nlDir = mkTree(work, 'has\nnewline', 16)
+      const plain = mkTree(work, 'has', 8)
+      const l1 = join(work, 'l1')
+      const l2 = join(work, 'l2')
+      symlinkSync(nlDir, l1)
+      symlinkSync(nlDir, l2)
+      const p = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: [l1, plain, l2].join('\n') })).payload
+      assert.deepEqual([p.count, p.dup, p.missing, p.err], [3, 0, 0, 0])
+      assert.equal(p.kib, duKib(plain) + 2 * duKib(nlDir))
     })
   })
 
@@ -134,14 +187,14 @@ for (const bash of BASHES) {
 
   test(`${tag} residual: 0 件は count=0・err=0・kib=0 の正常な封筒（取得失敗とは err で区別する）`, () => {
     const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: '' }))
-    assert.deepEqual(env.payload, { count: 0, err: 0, inputSha256: inputSha256(''), kib: 0, missing: 0 })
+    assert.deepEqual(env.payload, { count: 0, dup: 0, err: 0, inputSha256: inputSha256(''), kib: 0, missing: 0 })
   })
 
   test(`${tag} residual: 末尾の改行が無い最終行も 1 件として処理する`, () => {
     withWork((work) => {
       const a = mkTree(work, 'wt-a')
       const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: a }))
-      assert.deepEqual(env.payload, { count: 1, err: 0, inputSha256: inputSha256(a), kib: duKib(a), missing: 0 })
+      assert.deepEqual(env.payload, { count: 1, dup: 0, err: 0, inputSha256: inputSha256(a), kib: duKib(a), missing: 0 })
     })
   })
 
@@ -174,7 +227,7 @@ for (const bash of BASHES) {
       ]
       const r = run(bash, RESIDUAL, ['--nonce', NONCE], { input: [good, ...bad].join('\n') + '\n' })
       const env = parseEnvelope(r)
-      assert.deepEqual(env.payload, { count: 1 + bad.length, err: bad.length, inputSha256: inputSha256([good, ...bad].join('\n')), kib: duKib(good), missing: 0 })
+      assert.deepEqual(env.payload, { count: 1 + bad.length, dup: 0, err: bad.length, inputSha256: inputSha256([good, ...bad].join('\n')), kib: duKib(good), missing: 0 })
       assert.equal(existsSync(marker), false, '入力がシェルに再評価されていない')
     })
   })
@@ -189,7 +242,7 @@ for (const bash of BASHES) {
       try {
         const r = run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n${b}\n`, env: { PATH: `${bin}:${process.env.PATH}` } })
         const env = parseEnvelope(r)
-        assert.deepEqual(env.payload, { count: 2, err: 1, inputSha256: inputSha256(`${a}\n${b}`), kib: duKib(b), missing: 0 })
+        assert.deepEqual(env.payload, { count: 2, dup: 0, err: 1, inputSha256: inputSha256(`${a}\n${b}`), kib: duKib(b), missing: 0 })
       } finally {
         rmSync(bin, { recursive: true, force: true })
       }
@@ -203,7 +256,7 @@ for (const bash of BASHES) {
         const bin = fakeBin({ du: body })
         try {
           const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n`, env: { PATH: `${bin}:${process.env.PATH}` } }))
-          assert.deepEqual(env.payload, { count: 1, err: 1, inputSha256: inputSha256(a), kib: 0, missing: 0 }, body)
+          assert.deepEqual(env.payload, { count: 1, dup: 0, err: 1, inputSha256: inputSha256(a), kib: 0, missing: 0 }, body)
         } finally {
           rmSync(bin, { recursive: true, force: true })
         }
@@ -223,7 +276,7 @@ for (const bash of BASHES) {
         lines.push(d)
       }
       const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: lines.join('\n') + '\n' }))
-      assert.deepEqual(env.payload, { count: 400, err: 0, inputSha256: inputSha256(lines.join('\n')), kib, missing: 100 })
+      assert.deepEqual(env.payload, { count: 400, dup: 0, err: 0, inputSha256: inputSha256(lines.join('\n')), kib, missing: 100 })
     })
   })
 
@@ -237,7 +290,7 @@ for (const bash of BASHES) {
         const bin = fakeBin({ du: `printf '${out}\\t%s\\n' "$3"` })
         try {
           const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n`, env: { PATH: `${bin}:${process.env.PATH}` } }))
-          assert.deepEqual(env.payload, { count: 1, err: 0, inputSha256: inputSha256(a), kib, missing: 0 }, out)
+          assert.deepEqual(env.payload, { count: 1, dup: 0, err: 0, inputSha256: inputSha256(a), kib, missing: 0 }, out)
         } finally {
           rmSync(bin, { recursive: true, force: true })
         }
