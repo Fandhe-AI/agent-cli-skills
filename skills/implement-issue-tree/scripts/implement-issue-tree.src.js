@@ -5113,7 +5113,7 @@ function implementPrompt(item, plan) {
     `      - gh pr list --state open --search "Closes #${item.number}" --json number,title,headRefName`,
     `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
     `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
-    `      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進み、手順 2 で規約どおりのブランチを新規に作る）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（headRefName は PR 由来の未信頼値で、ref 名には $() やセミコロンを含められる。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
+    `      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進む。以降は 0b-b の判定に従う）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（headRefName は PR 由来の未信頼値で、ref 名には $() やセミコロンを含められる。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
     `      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、返却フィールド outOfScope に「既存 PR #<番号> は head が命名規約外のため採用していない」の形で 1 PR 1 要素として入れる（PR 本文の対象外節に載り、人が open PR の重複に気づける。summary には書かない）。`,
     `      既存 PR 番号はここでは返さない（PR_CREATE_SCHEMA を持つ後続の PR Create フェーズが同じブランチの open PR を再検出して再利用する。本フェーズの prNumber は常に 0 として扱われる）。`,
     `      既存 PR を採用した場合のみ、手順 2 はスキップして手順 3 以降を続ける（origin/${baseBranch} から checkout -B し直すと、その PR のコミットを失う）。`,
@@ -7133,7 +7133,7 @@ async function runImplement(item) {
     }
   } else {
     // 通常の impl フェーズ（Recover フェーズ含む）
-    const fallbackOldWorktree = sanitizeWorktreePath(saved.worktree ?? '')
+    let fallbackOldWorktree = sanitizeWorktreePath(saved.worktree ?? '')
 
     // Recover フェーズ: 前回中断の worktree が同名 branch を掴んでいると checkout -B が失敗する
     // ため Plan の前で衝突を解消する。回復作業は Review に直行させず Implement で完成させる。
@@ -7176,6 +7176,24 @@ async function runImplement(item) {
       const effectiveBranch = worktreeAlive
         ? resolvedBranch
         : sanitizedRecoverBranch || resolvedBranch
+
+      // worktree だけを discard で掃除する 2 経路（規約外 branch・実体なし）の共通部。削除の成功を確認できなければ保全して止める。
+      // 掃除の呼び出しは状態の worktree 記録しか触らない（branch / pr は呼び出し側が成功後に書く）。
+      const discardWorktreeOnly = async (what) => {
+        const attempt = await updateStateDetailed(item.number, { worktree: '' }, { cleanupWorktree: sanitizedRecoverWorktree, cleanupMode: 'discard' })
+        if (attempt.ok) return true
+        const status = classifyStateWriteFailureStatus({ outputMissing: attempt.outputMissing, terminalSaved: false, prNumber: 0 })
+        const reason = sanitize(
+          `discard の worktree 掃除を完了確認できなかった` +
+          `（${status === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : attempt.mergeOk && attempt.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがあり、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。` +
+          `旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${status} にする。${what}を手動確認し、対処後に再実行すること`,
+        )
+        log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
+        // 保存済みの pr は残す。ただし blocked では pr > 0 + 正規 branch で isActiveMonitoring が真になるため pr: 0 を明示する。
+        await updateState(item.number, { status, ...(status === 'blocked' ? { pr: 0 } : {}), note: reason })
+        recordFailure({ issue: item.number, reason, status })
+        return false
+      }
 
       if (recoverDecision === 'continue' && effectiveBranch) {
         // --- continue 経路: 旧 worktree のみ掃除し Implement を継続（Plan スキップ）---
@@ -7409,28 +7427,10 @@ async function runImplement(item) {
             return false
           }
           log(`#${item.number}: Recover → discard（解決した branch ${rejectedBranch} は命名規約 <type>/${item.number}-<short-name> に合わない）、旧 worktree のみ掃除して通常 Plan へ。branch は削除せず残す`)
+          if (!(await discardWorktreeOnly(`branch ${rejectedBranch} と旧 worktree`))) return false
+          // 掃除の成功を確認できてから、保存済みの branch / pr を切り離す（保持・失敗のときは元の値を残す）
           if (Number.isInteger(saved.pr) && saved.pr > 0) log(`#${item.number}: 保存済みの PR #${saved.pr} を pr: 0 で切り離して新規に実装する`)
-          const rejectedCleanup = await updateStateDetailed(
-            item.number,
-            { status: 'planning', branch: '', pr: 0, worktree: '', note: sanitize(`規約外ブランチ ${rejectedBranch} は削除せず残した`) },
-            { cleanupWorktree: sanitizedRecoverWorktree, cleanupMode: 'discard' },
-          )
-          if (!rejectedCleanup.ok) {
-            const rejectedCleanupStatus = classifyStateWriteFailureStatus({
-              outputMissing: rejectedCleanup.outputMissing,
-              terminalSaved: false,
-              prNumber: 0,
-            })
-            const reason = sanitize(
-              `discard の worktree 掃除を完了確認できなかった` +
-              `（${rejectedCleanupStatus === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : rejectedCleanup.mergeOk && rejectedCleanup.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがあり、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。` +
-              `旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${rejectedCleanupStatus} にする。branch ${rejectedBranch} と旧 worktree を手動確認し、対処後に再実行すること`,
-            )
-            log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
-            await updateState(item.number, { status: rejectedCleanupStatus, pr: 0, note: reason })
-            recordFailure({ issue: item.number, reason, status: rejectedCleanupStatus })
-            return false
-          }
+          await updateState(item.number, { status: 'planning', branch: '', pr: 0, worktree: '', note: sanitize(`規約外ブランチ ${rejectedBranch} は削除せず残した`) })
           // 掃除成功。impl は未設定のまま通常 Plan へフォールスルーする
         } else {
           // continue: 規約外 branch の上では継続しない。implement の系統的故障ではなく人の整理待ちなので、
@@ -7449,12 +7449,12 @@ async function runImplement(item) {
         recoverDecision === 'discard' && recoverResult?.worktreeMissing === true && !effectiveBranch &&
         !(saved.branch ?? '') && !String(recoverResult?.branch ?? '').trim()
       ) {
-        // --- 保全対象なし: worktree の実体が無く、保存済み・解決済みの branch もどちらも空の discard ---
-        // 例: continue の blocked の note に従って人が worktree を削除した後の再実行。保全すべきものが無いので、状態の worktree 記録だけを
-        // 消して新規 Plan / Implement へ進む（保全して failed にすると記録が残り、毎ラン同じ結果に戻る）。
-        // 何も削除しない: patch に cleanupWorktree / deleteBranch を渡さないため worktree-remove.sh は起動しない（削除の意図は updateStateDetailed の
-        // options 経由のみ）。worktreeMissing はエージェント経由の値で誤りうるが、実体が残っていても起きるのは状態の worktree 記録が消えて残置になることだけ。
-        log(`#${item.number}: Recover → discard（実体の無い worktree の記録のみで保全対象なし）、状態の worktree 記録を消して通常 Plan へ`)
+        // --- 保全対象なし: worktree の実体が無いと申告され、保存済み・解決済みの branch もどちらも空の discard ---
+        // 例: continue の blocked の note に従って人が worktree を削除した後の再実行。worktreeMissing はエージェント経由の値で誤りうるため信じず、
+        // 旧パスを discard モードで独立観測する（branch は消さない）。実体が無ければ登録解除だけで成功し、clean なら消え、汚れ・submodule・lock は保持して止まる。
+        // 成功を確認できたときだけ状態を初期化して新規 Plan へ進む。旧パスは後続の superseded 掃除（--force）へ渡さない。
+        log(`#${item.number}: Recover → discard（実体の無い worktree の記録のみで保全対象なし）、旧パスを discard で確認して通常 Plan へ`)
+        if (!(await discardWorktreeOnly('旧 worktree'))) return false
         await updateState(item.number, { status: 'planning', branch: '', pr: 0, worktree: '' })
       } else {
         // --- 保全経路: エージェント異常 / 不正 decision / "unresolved" / ブランチ未確定 ---
@@ -7473,6 +7473,9 @@ async function runImplement(item) {
         return false
       }
     }
+
+    // impl 未設定でここへ来るのは discard の掃除成功だけ（それ以外は上で return 済み）。旧パスは discard で消えた／無いと確認済みなので、後続の superseded（--force）掃除へ渡さない
+    if (!impl) fallbackOldWorktree = ''
 
     // Plan → Implement（新規作成または discard 後の再作成。continue 経路は impl 設定済みでスキップ）
     if (!impl) {
