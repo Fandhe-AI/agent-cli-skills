@@ -19,7 +19,7 @@ const OTHER = 'd'.repeat(40)
 const WT = '/repo/wt/old'
 
 const m = await importDefinitions(
-  ['closedCleanupCandidate', 'cleanupClosedMergedWorktree', 'worktreeRemoveCommand', 'sweepClosedWorktrees', 'sweepEligiblePaths', 'sweepHeldPaths', 'confirmedRemovedPaths', 'ensureBoundaryNonceSeed', 'sha256Hex', 'canonicalJson'],
+  ['closedCleanupCandidate', 'closedCleanupGate', 'CLOSED_CLEANUP_PER_RUN_MAX', 'AGENT_CALLS_CLOSED_CLEANUP', 'AGENT_CALLS_TERMINAL_BASE', 'AGENT_CALLS_PER_ISSUE', 'cleanupClosedMergedWorktree', 'worktreeRemoveCommand', 'sweepClosedWorktrees', 'sweepEligiblePaths', 'sweepHeldPaths', 'confirmedRemovedPaths', 'ensureBoundaryNonceSeed', 'sha256Hex', 'canonicalJson'],
   'closed-skip-cleanup',
 )
 globalThis.agent = async (_p, opts) => (opts.label === 'nonce:seed' ? { seedHex: '0'.repeat(64) } : null)
@@ -38,6 +38,36 @@ test('closedCleanupCandidate: blocked / monitoring で worktree と pr（無け�
   // pr が無ければ unverifiedPr。両方あれば pr が先
   assert.equal(m.closedCleanupCandidate(impl, savedOf({ pr: 0, unverifiedPr: 88 }), ctx).pr, 88)
   assert.equal(m.closedCleanupCandidate(impl, savedOf({ pr: 77, unverifiedPr: 88 }), ctx).pr, 77)
+})
+
+test('closedCleanupCandidate: 試行済みの記録（closedCleanupTried）が今の pr と worktree に一致する間は候補にならない。どちらかが変われば再び候補になる', () => {
+  const tried = (pr, worktree) => savedOf({ closedCleanupTried: { pr, worktree, reason: 'retained' } })
+  assert.equal(m.closedCleanupCandidate(impl, tried(77, WT), ctx), null)
+  assert.equal(m.closedCleanupCandidate(impl, savedOf({ status: 'monitoring', closedCleanupTried: { pr: 77, worktree: WT, reason: 'binding' } }), ctx), null)
+  // pr か worktree が変わった（別の PR・Recover 後の新しい worktree）。unverifiedPr だけの項目は unverifiedPr で比べる
+  assert.deepEqual(m.closedCleanupCandidate(impl, tried(76, WT), ctx), { pr: 77, worktree: WT, branch: 'feat/2-x' })
+  assert.deepEqual(m.closedCleanupCandidate(impl, tried(77, '/repo/wt/other'), ctx), { pr: 77, worktree: WT, branch: 'feat/2-x' })
+  assert.equal(m.closedCleanupCandidate(impl, savedOf({ pr: 0, unverifiedPr: 88, closedCleanupTried: { pr: 88, worktree: WT, reason: 'binding' } }), ctx), null)
+  // 記録が壊れていても例外にせず候補のまま（null・文字列・pr が文字列）
+  for (const bad of [null, 'x', 5, {}, { pr: '77', worktree: WT }]) assert.ok(m.closedCleanupCandidate(impl, savedOf({ closedCleanupTried: bad }), ctx), JSON.stringify(bad))
+})
+
+test('closedCleanupGate: 1 ランの上限と予算不足を表で固定する（上限が先・予算は 6 + 20 + 30 以上の残りが要る）', () => {
+  const need = m.AGENT_CALLS_CLOSED_CLEANUP + m.AGENT_CALLS_TERMINAL_BASE + m.AGENT_CALLS_PER_ISSUE.implement
+  const cap = m.CLOSED_CLEANUP_PER_RUN_MAX
+  assert.equal(cap, 10)
+  const rows = [
+    [{ limit: 1000, used: 0, attempted: 0 }, 'run'],
+    [{ limit: 1000, used: 0, attempted: cap - 1 }, 'run'],
+    [{ limit: 1000, used: 0, attempted: cap }, 'defer-cap'],
+    [{ limit: 1000, used: 0, attempted: cap + 5 }, 'defer-cap'],
+    [{ limit: 100 + need, used: 100, attempted: 0 }, 'run'],
+    [{ limit: 100 + need, used: 101, attempted: 0 }, 'defer-budget'],
+    [{ limit: 100, used: 100, attempted: 0 }, 'defer-budget'],
+    [{ limit: 100, used: 150, attempted: 0 }, 'defer-budget'],
+    [{ limit: 100 + need, used: 101, attempted: cap }, 'defer-cap'],
+  ]
+  for (const [input, want] of rows) assert.equal(m.closedCleanupGate(input), want, JSON.stringify(input))
 })
 
 test('closedCleanupCandidate: 候補にならない条件（dryRun・照合未成立・state-unverified・種別・状態・worktree/pr の欠落や不正）', () => {
@@ -101,20 +131,25 @@ test('MERGED かつ結び付き成立: --head つきの discard で掃除し、�
   assert.ok(!m.sweepHeldPaths.has(WT))
 })
 
+// 4 番目: 決定的な不成立として試行済みを記録する理由（null = 一過性・あとで変わり得るので記録しない）
 const NO_CHANGE = [
-  ['未マージの CLOSED', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, state: 'CLOSED' } : undefined), /マージ済みではない/],
-  ['OPEN', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, state: 'OPEN' } : undefined), /マージ済みではない/],
-  ['取得失敗（UNKNOWN）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, state: 'UNKNOWN', headRefOid: '', headRefName: '', baseRefName: '', isCrossRepository: true, closingIssues: [-1] } : undefined), /結び付きを確認できない/],
-  ['結び付き不成立（head のブランチ名が違う）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefName: 'feat/3-x' } : undefined), /結び付きを確認できない/],
-  ['結び付き不成立（別イシューに紐付く）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, closingIssues: [3] } : undefined), /結び付きを確認できない/],
-  ['結び付き不成立（base が違う）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, baseRefName: 'dev' } : undefined), /結び付きを確認できない/],
-  ['結び付き不成立（fork）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, isCrossRepository: true } : undefined), /結び付きを確認できない/],
-  ['PR の取得が null', (o) => (o.label.startsWith('pr-bind:') ? null : undefined), /結び付きを確認できない/],
-  ['headRefOid が 40 桁でない', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefOid: 'abc123' } : undefined), /head を取得できない/],
-  ['headRefOid に大文字', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefOid: 'C'.repeat(40) } : undefined), /head を取得できない/],
+  ['未マージの CLOSED', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, state: 'CLOSED' } : undefined), /マージ済みではない/, 'not-merged'],
+  ['OPEN（あとでマージされ得る）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, state: 'OPEN' } : undefined), /マージ済みではない/, null],
+  ['取得失敗（UNKNOWN）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, state: 'UNKNOWN', headRefOid: '', headRefName: '', baseRefName: '', isCrossRepository: true, closingIssues: [-1] } : undefined), /結び付きを確認できない/, null],
+  ['結び付き不成立（head のブランチ名が違う）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefName: 'feat/3-x' } : undefined), /結び付きを確認できない/, 'binding'],
+  ['結び付き不成立（別イシューに紐付く）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, closingIssues: [3] } : undefined), /結び付きを確認できない/, 'binding'],
+  ['結び付き不成立（base が違う）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, baseRefName: 'dev' } : undefined), /結び付きを確認できない/, 'binding'],
+  ['結び付き不成立（fork）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, isCrossRepository: true } : undefined), /結び付きを確認できない/, 'binding'],
+  ['PR の取得が null', (o) => (o.label.startsWith('pr-bind:') ? null : undefined), /結び付きを確認できない/, null],
+  ['headRefOid が 40 桁でない', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefOid: 'abc123' } : undefined), /head を取得できない/, null],
+  ['headRefOid に大文字', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefOid: 'C'.repeat(40) } : undefined), /head を取得できない/, null],
 ]
-for (const [name, bindBehavior, expected] of NO_CHANGE) {
-  test(`状態も worktree も触らない: ${name}`, async () => {
+// 記録の書き込み: status・worktree・pr を含まない（sweep の保持照合から外れない）closedCleanupTried だけの更新
+const triedWrites = (calls) => calls.filter((c) => c.opts.label.startsWith('state:update:#2') && c.prompt.includes('closedCleanupTried'))
+// 記録の入れ子のオブジェクト（pr・worktree を持つ）を除いたうえで、トップレベルの status・worktree・pr の書き込みを探す
+const anyStatusWrite = (calls) => calls.filter((c) => c.opts.label.startsWith('state:update:#2') && /"(status|worktree|pr)"/.test(c.prompt.replace(/"closedCleanupTried":\{[^}]*\}/g, '')))
+for (const [name, bindBehavior, expected, reason] of NO_CHANGE) {
+  test(`状態も worktree も触らない: ${name}${reason ? `（試行済みを記録: ${reason}）` : '（記録しない）'}`, async () => {
     const s = stub((opts) => {
       const b = bindBehavior(opts)
       if (b !== undefined) return b
@@ -123,17 +158,27 @@ for (const [name, bindBehavior, expected] of NO_CHANGE) {
     })
     const note = await m.cleanupClosedMergedWorktree(impl, { pr: 77, worktree: WT, branch: 'feat/2-x' })
     assert.match(note, expected)
-    assert.deepEqual(labelsOf(s.calls), ['pr-bind:#2'], '掃除も状態の書き込みも起動しない')
+    assert.equal(labelsOf(s.calls).filter((l) => l.startsWith('state:cleanup')).length, 0, '掃除は起動しない')
+    const w = triedWrites(s.calls)
+    assert.equal(w.length, reason ? 1 : 0)
+    if (reason) {
+      assert.match(w[0].prompt, new RegExp(`"closedCleanupTried":\\{"pr":77,"worktree":"${WT}","reason":"${reason}"\\}`))
+      assert.equal(anyStatusWrite(s.calls).length, 0, 'status・worktree・pr は書かない')
+    } else {
+      assert.equal(s.calls.filter((c) => c.opts.label.startsWith('state:update')).length, 0, '状態の書き込みを起動しない')
+    }
   })
 }
 
 const RETAINED = [
   ['HEAD 不一致・lock・汚れなどで保持（ok:false・retained:true）', () => ({ ok: false, retained: true })],
   ['ok だが保持', () => ({ ok: true, retained: true })],
-  ['掃除の結果なし（StructuredOutput 未返却）', () => null],
-  ['掃除が例外', () => { throw new Error('boom') }],
+  ['掃除の結果なし（StructuredOutput 未返却）', () => null, false],
+  ['掃除が例外', () => { throw new Error('boom') }, false],
+  // 誤転記（ok:false なのに retained:false）は削除成功と見なさず、決定的な保持でもないので記録しない
+  ['ok:false かつ retained:false（誤転記）', () => ({ ok: false, retained: false }), false],
 ]
-for (const [name, cleanupBehavior] of RETAINED) {
+for (const [name, cleanupBehavior, decisive = true] of RETAINED) {
   test(`掃除が保持した: ${name} → 状態を書かず、最終スイープの候補にも載せない`, async () => {
     const s = stub((opts) => {
       if (opts.label.startsWith('pr-bind:')) return bindOk
@@ -141,9 +186,11 @@ for (const [name, cleanupBehavior] of RETAINED) {
       return { ok: true }
     })
     const note = await m.cleanupClosedMergedWorktree(impl, { pr: 77, worktree: '/repo/wt/keep', branch: 'feat/2-x' })
-    assert.match(note, /worktree を保持した。状態は変更しない/)
+    assert.match(note, /worktree を保持した。status は変更しない/)
     assert.equal(mergedWrites(s.calls).length, 0, 'merged を書かない')
-    assert.equal(s.calls.filter((c) => c.opts.label.startsWith('state:update')).length, 0, '状態の書き込みを一切起動しない')
+    assert.equal(anyStatusWrite(s.calls).length, 0, 'status・worktree・pr を書かない')
+    assert.equal(triedWrites(s.calls).length, decisive ? 1 : 0, decisive ? 'スクリプトが保持を返したときだけ試行済みを記録する' : '一過性の失敗は記録しない')
+    if (decisive) assert.match(triedWrites(s.calls)[0].prompt, /"reason":"retained"/)
     assert.ok(!m.confirmedRemovedPaths.has('/repo/wt/keep'))
     assert.ok(m.sweepHeldPaths.has('/repo/wt/keep'), '削除を確認できるまで最終スイープから除外したまま')
     const sw = stub(() => ({ removed: [] }))
@@ -167,7 +214,9 @@ test('worktreeRemoveCommand: --head は discard・--path・40 桁の小文字 16
   assert.doesNotMatch(m.worktreeRemoveCommand('discard', WT, ''), /--head/)
   assert.doesNotMatch(m.worktreeRemoveCommand('superseded', WT, '', SHA), /--head/)
   assert.doesNotMatch(m.worktreeRemoveCommand('discard', '', 'feat/2-x', SHA), /--head/)
-  for (const bad of ['abc', SHA.toUpperCase(), `${SHA}0`, `${SHA.slice(1)}'`, '$(x)', '']) assert.doesNotMatch(m.worktreeRemoveCommand('discard', WT, '', bad), /--head/, bad)
+  // 空は指定なし。空でない不正な値は黙って落とさず例外（落とすと照合なしで消す呼び出しになる）
+  assert.doesNotMatch(m.worktreeRemoveCommand('discard', WT, '', ''), /--head/)
+  for (const bad of ['abc', SHA.toUpperCase(), `${SHA}0`, `${SHA.slice(1)}'`, '$(x)']) assert.throws(() => m.worktreeRemoveCommand('discard', WT, '', bad), /--head/, bad)
 })
 
 // ---- 3. 実装スクリプト全体でのホスト結合 ----
@@ -255,6 +304,48 @@ for (const [name, opts, expect] of UNTOUCHED) {
 test('結合: dryRun は書き込み系を起動せず、後始末の対象見込みだけを返す', async () => {
   const { result, calls } = await run({ args: { ...BASE_ARGS, dryRun: true } })
   assert.equal(result.dryRun, true)
-  assert.deepEqual(result.closedCleanupPending, { count: 1, first: [2], maxAgentCalls: 6 })
+  assert.deepEqual(result.closedCleanupPending, { count: 1, first: [2], perRunMax: 10, maxAgentCalls: 6 })
   assert.equal(callsOf(calls, /^(pr-bind|state:cleanup|state:update)/).length, 0)
+})
+
+test('結合: 保持された結果は status を変えずに試行済みを記録し、結果の closedCleanup に件数を出す。記録のある項目は次の実行で pr-bind すら起動しない', async () => {
+  const first = await run({ cleanup: { ok: false, retained: true } })
+  const w = triedWrites(first.calls)
+  assert.equal(w.length, 1)
+  assert.match(w[0].prompt, /"closedCleanupTried":\{"pr":77,"worktree":"\/repo\/wt\/old","reason":"retained"\}/)
+  assert.equal(anyStatusWrite(first.calls).length, 0, 'status・worktree・pr は書かない（sweep の保持照合から外れない）')
+  assert.deepEqual(first.result.closedCleanup, { run: 1, 'defer-cap': 0, 'defer-budget': 0 })
+  // 記録された状態で再実行
+  const second = await run({ saved: savedOf({ closedCleanupTried: { pr: 77, worktree: WT, reason: 'retained' } }) })
+  assert.deepEqual(callsOf(second.calls, /^(pr-bind:#2|state:cleanup:#2|state:update:#2)/).map((c) => c.opts.label), [], '同じ条件では何も起動しない')
+  assert.deepEqual(second.result.closedCleanup, { run: 0, 'defer-cap': 0, 'defer-budget': 0 })
+  assert.equal(skipEntry(second.result).note, 'すでに closed')
+  assert.ok(callsOf(second.calls, /^worktree:sweep/).every((c) => !c.prompt.includes(WT)), '記録済みでも最終スイープに渡さない')
+  // worktree が変われば（人が直して新しい worktree を記録した等）再び試す
+  const third = await run({ saved: savedOf({ worktree: '/repo/wt/new', closedCleanupTried: { pr: 77, worktree: WT, reason: 'retained' } }) })
+  assert.equal(callsOf(third.calls, /^pr-bind:#2/).length, 1)
+})
+
+test('結合: 1 ランの後始末は上限 10 件で、超えた分は見送って次のランへ回す（件数は結果の closedCleanup に出る）', async () => {
+  const numbers = Array.from({ length: 12 }, (_, i) => i + 2)
+  const items = Object.fromEntries(numbers.map((n) => [n, { ...savedOf(), branch: `feat/${n}-x`, worktree: `/repo/wt/w${n}`, pr: 100 + n }]))
+  const hashes = Object.fromEntries(numbers.map((n) => [n, m.sha256Hex(m.canonicalJson(items[n]))]))
+  const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
+  const { result, calls } = await runScript({
+    args: BASE_ARGS,
+    leaves: numbers,
+    override: (label, _opts, prompt) => {
+      if (label === 'plan:issue-tree') return { nodes: [{ number: 1, title: 'root', state: 'open', parent: 0, siblingIndex: 0, dependsOn: [], subIssuesTotal: 12 }, ...numbers.map((n, i) => ({ number: n, title: `issue ${n}`, state: 'closed', parent: 1, siblingIndex: i, dependsOn: [], subIssuesTotal: 0 }))] }
+      if (label === 'state:load') return { ok: true, fileExisted: true, items, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: numbers.length, highWaterBytes: 0, highWaterVersion: 0 }
+      const mm = /^pr-bind:#(\d+)$/.exec(label)
+      if (mm) return { ...bindOk, headRefName: `feat/${mm[1]}-x`, closingIssues: [Number(mm[1])] }
+      if (label.startsWith('state:cleanup:')) return { ok: false, retained: true }
+      return undefined
+    },
+  })
+  assert.equal(callsOf(calls, /^pr-bind:/).length, 10, '試みるのは 10 件')
+  assert.deepEqual(result.closedCleanup, { run: 10, 'defer-cap': 2, 'defer-budget': 0 })
+  assert.equal(callsOf(calls, /^pr-bind:#(12|13)$/).length, 0, '後ろの 2 件は次のランへ')
+  assert.equal(calls.filter((c) => c.prompt.includes('closedCleanupTried')).length, 10, '試みた 10 件は記録される')
 })

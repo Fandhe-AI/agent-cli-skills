@@ -3521,10 +3521,22 @@ function closedCleanupCandidate(item, saved, { dryRun, verified, unverified }) {
   const pos = (v) => (Number.isInteger(v) && v > 0 ? v : 0)
   const pr = pos(saved.pr) || pos(saved.unverifiedPr)
   if (!worktree || !pr) return null
+  // 同じ pr と worktree で成立しなかった記録（closedCleanupTried）があれば再試行しない。pr か worktree が変われば別の候補。記録の消し方は recovery.md
+  const tried = saved.closedCleanupTried
+  if (tried && tried.pr === pr && tried.worktree === worktree) return null
   return { pr, worktree, branch: typeof saved.branch === 'string' ? saved.branch : '' }
 }
 // 1 候補あたりのエージェント呼び出し数の見込み（pr-bind 1 + 掃除 1 + 状態書込み 1 に、各フォールバックの余裕を加えた上限）。
 const AGENT_CALLS_CLOSED_CLEANUP = 6
+// 1 ランで後始末を試みる候補の上限。記録のない候補は直列で 1 件あたり 2〜3 回（最大 AGENT_CALLS_CLOSED_CLEANUP 回）のエージェント呼び出しを使うため、
+// 10 件で通常 30 回前後（最大 60 回）に抑える。超えた分は次の実行へ回る（成立しなかった候補は記録で飛ばされるので、上限が同じ候補で埋まり続けない）
+const CLOSED_CLEANUP_PER_RUN_MAX = 10
+// 候補 1 件を今試みてよいか。'run' / 'defer-cap'（1 ランの上限）/ 'defer-budget'（エージェント呼び出し数の予算不足）。純粋関数
+function closedCleanupGate({ limit, used, attempted }) {
+  if (attempted >= CLOSED_CLEANUP_PER_RUN_MAX) return 'defer-cap'
+  if (limit - used < AGENT_CALLS_CLOSED_CLEANUP + AGENT_CALLS_TERMINAL_BASE + AGENT_CALLS_PER_ISSUE.implement) return 'defer-budget'
+  return 'run'
+}
 
 // closed の実装ノードの worktree を、PR のマージ済みを独立に確認できたときだけ破棄し、状態を merged へ更新する。
 // 順序は『掃除 → 状態更新』: 確認できない場合（未マージの CLOSED・結び付き不成立・HEAD 不一致・lock・汚れ・掃除の結果なし）は状態ファイルも
@@ -3536,9 +3548,22 @@ const AGENT_CALLS_CLOSED_CLEANUP = 6
 // 戻り値は skip エントリの note に足す文字列。
 async function cleanupClosedMergedWorktree(item, cand) {
   const n = item.number
+  // 成立しなかった結果を記録して次の実行から飛ばす（pr と worktree が同じ間）。status と worktree は変えないので sweep の保持照合から外れない。書けなくても害はない（再試行されるだけ）
+  const tried = async (reason, text) => {
+    if (!(await updateState(n, { closedCleanupTried: { pr: cand.pr, worktree: cand.worktree, reason } }))) log(`⚠️ #${n}: closed 後始末の試行済み記録を書けなかった`)
+    return text
+  }
   const { problem, bind } = await fetchPrBinding(item, cand.pr, cand.branch)
-  if (problem) return `closed 後始末なし（PR #${cand.pr} の結び付きを確認できない: ${problem}）`
-  if (bind.state !== 'MERGED') return `closed 後始末なし（PR #${cand.pr} はマージ済みではない: ${sanitize(String(bind.state))}）`
+  // PR の取得に失敗した（bind が無い・state が読めない）一過性の失敗と OPEN（あとでマージされ得る）は記録しない
+  const known = bind?.state === 'MERGED' || bind?.state === 'CLOSED'
+  if (problem) {
+    const text = `closed 後始末なし（PR #${cand.pr} の結び付きを確認できない: ${problem}）`
+    return known ? tried('binding', text) : text
+  }
+  if (bind.state !== 'MERGED') {
+    const text = `closed 後始末なし（PR #${cand.pr} はマージ済みではない: ${sanitize(String(bind.state))}）`
+    return bind.state === 'CLOSED' ? tried('not-merged', text) : text
+  }
   const head = typeof bind.headRefOid === 'string' ? bind.headRefOid : ''
   if (!/^[0-9a-f]{40}$/.test(head)) return `closed 後始末なし（PR #${cand.pr} の head を取得できない）`
   const w = cand.worktree
@@ -3558,16 +3583,20 @@ async function cleanupClosedMergedWorktree(item, cand) {
     `返却: ok / retained / branchSha（上記のとおり）。`,
   ].join('\n')
   let removed = false
+  let decisive = false
   try {
     const { result, outputMissing } = await enqueueStateWrite(() => runStateAgent(prompt, { label: `state:cleanup:#${n}`, schema: WORKTREE_CLEANUP_SCHEMA, isValid: isWorktreeCleanupValid }))
     removed = !outputMissing && result?.ok === true && result?.retained === false
+    decisive = !outputMissing && result?.retained === true
   } catch (e) {
     log(`⚠️ #${n}: closed 後始末の掃除が例外終了した（${sanitize(String(e?.message ?? e))}）`)
   }
   if (!removed) {
     recordRetainedWorktree(n, w)
     log(`⚠️ #${n}: closed 後始末で worktree を保持した（PR #${cand.pr} の head と HEAD の不一致・lock・未コミット変更・初期化済み submodule・結果なしのいずれか。状態は変えない）`)
-    return `closed 後始末なし（PR #${cand.pr} はマージ済みだが worktree を保持した。状態は変更しない）`
+    const text = `closed 後始末なし（PR #${cand.pr} はマージ済みだが worktree を保持した。status は変更しない）`
+    // スクリプトが保持を返したときだけ記録する（結果なし・例外・誤転記は一過性として次の実行で再試行）
+    return decisive ? tried('retained', text) : text
   }
   confirmedRemovedPaths.add(w)
   sweepHeldPaths.delete(w)
@@ -3903,8 +3932,12 @@ function worktreeQuote(v) {
 function worktreeRemoveCommand(mode, path, branch, head = '') {
   const parts = ['remove', '--mode', mode]
   if (path) parts.push('--path', worktreeQuote(path))
-  // --head: マージ済み PR の head。worktree の HEAD が違えば（未 push のコミットがあり得る）スクリプトが保持する。discard で --path があるときだけ
-  if (head && mode === 'discard' && path && /^[0-9a-f]{40}$/.test(head)) parts.push('--head', worktreeQuote(head))
+  // --head: マージ済み PR の head。worktree の HEAD が違えば・detached なら（未 push のコミットがあり得る）スクリプトが保持する。discard で --path があるときだけ
+  // 空は『指定なし』。空でないのに形式が違うものは黙って落とさず例外にする（落とすと HEAD の照合なしで消す呼び出しになる）
+  if (head) {
+    if (!/^[0-9a-f]{40}$/.test(head)) throw new Error('worktree-remove.sh の --head は 40 桁の小文字 16 進')
+    if (mode === 'discard' && path) parts.push('--head', worktreeQuote(head))
+  }
   if (branch) {
     parts.push('--branch', worktreeQuote(branch))
     if (isValidBranchName(baseBranch)) parts.push('--base', worktreeQuote(baseBranch))
@@ -9111,6 +9144,8 @@ async function runOne(item) {
 // ファイル競合は待機せず後段の修正ループで解消する。
 const done = new Set()
 const failedSet = new Set()
+// closed 後始末の件数（run = 試みた件数・defer-* = 見送った件数。結果の closedCleanup に出す）
+const closedCleanupRun = { run: 0, 'defer-cap': 0, 'defer-budget': 0 }
 for (const item of queue) {
   if (item.state !== 'open') {
     const skipEntry = { issue: item.number, status: 'skipped', note: 'すでに closed' }
@@ -9119,10 +9154,12 @@ for (const item of queue) {
     // 人手マージで自動 close した実装ノードの後始末（Issue #632）。best-effort で done / failedSet には触れない。予算が足りなければ次の実行へ回す
     const cleanup = closedCleanupCandidate(item, savedItems[String(item.number)], { dryRun: dryRunEnabled, verified: savedItemsVerified, unverified: unverifiedIssues })
     if (cleanup) {
-      if (agentBudget.limit - agentBudget.used < AGENT_CALLS_CLOSED_CLEANUP + AGENT_CALLS_TERMINAL_BASE + AGENT_CALLS_PER_ISSUE.implement) {
-        log(`#${item.number}: closed 後始末を見送った（エージェント呼び出し数の予算不足。使用 ${agentBudget.used}/${agentBudget.limit}。次の実行で再試行する）`)
-      } else {
+      const gate = closedCleanupGate({ limit: agentBudget.limit, used: agentBudget.used, attempted: closedCleanupRun.run })
+      closedCleanupRun[gate]++
+      if (gate === 'run') {
         skipEntry.note = `すでに closed。${await cleanupClosedMergedWorktree(item, cleanup)}`
+      } else if (closedCleanupRun[gate] === 1) {
+        log(`#${item.number}: closed 後始末を見送った（${gate === 'defer-cap' ? `1 ランの上限 ${CLOSED_CLEANUP_PER_RUN_MAX} 件` : `エージェント呼び出し数の予算不足。使用 ${agentBudget.used}/${agentBudget.limit}`}。以降の見送り件数は結果の closedCleanup に出す。次の実行で再試行する）`)
       }
     }
   } else {
@@ -9417,7 +9454,7 @@ if (dryRunEnabled) {
     },
     preBlocked: plan.preBlocked,
     undetermined: plan.undetermined,
-    closedCleanupPending: { count: closedCleanupPending.length, first: closedCleanupPending.slice(0, 5), maxAgentCalls: closedCleanupPending.length * AGENT_CALLS_CLOSED_CLEANUP },
+    closedCleanupPending: { count: closedCleanupPending.length, first: closedCleanupPending.slice(0, 5), perRunMax: CLOSED_CLEANUP_PER_RUN_MAX, maxAgentCalls: Math.min(closedCleanupPending.length, CLOSED_CLEANUP_PER_RUN_MAX) * AGENT_CALLS_CLOSED_CLEANUP },
     outOfTreeDeps,
   }
 }
@@ -10573,10 +10610,10 @@ if (disposableWorktrees.length > 0) {
   for (const e of disposableWorktrees) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 // 掃除が削除せず保持した（またはスイープでも消せなかった）worktree。使い捨てとは別: 未コミットの変更や submodule の記録されていない変更を持つ
-// 場合があり、そのまま git worktree remove すると失われる。理由はエントリごとには持たない（掃除の結果行の語: retained-dirty / retained-locked / retained-submodule / retained-branch-mismatch）
+// 場合があり、そのまま git worktree remove すると失われる。理由はエントリごとには持たない（掃除の結果行の語: retained-dirty / retained-locked / retained-submodule / retained-branch-mismatch / retained-head-mismatch / retained-detached）
 const retainedLedger = ephemeralWorktrees.filter((e) => e.kind === 'retained')
 if (retainedLedger.length > 0) {
-  log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+  log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD〔retained-head-mismatch / retained-detached〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
   for (const e of retainedLedger) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
@@ -10662,4 +10699,4 @@ if (!mainHeadDiff.observed) {
 // residualWorktrees: 残置上限ゲート観測。prereqTransitions: 前提の外部完了遷移（Issue #442）。
 // mainWorktreeUntracked: メイン worktree への一時ファイル残置検出（Issue #497 AC2。削除はしない）。
 // mainWorktreeHead: メイン worktree の HEAD 変化検出（Issue #591。警告のみで戻さない）。
-return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, models: agentModels, securityReview: { enabled: securityReviewEnabled, model: securityReviewModel }, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, retainedWorktrees: retainedLedger, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }
+return { parent, baseBranch, parallel: concurrency, phaseGate: phaseGateEnabled, phaseOrder, models: agentModels, securityReview: { enabled: securityReviewEnabled, model: securityReviewModel }, autoMerge: autoMergeEnabled && externalChecksConfirmed && externalChecksContextsConfirmed, autoMergeRequested: autoMergeEnabled, externalChecks: externalCheckApps, externalCheckContexts: externalCheckEntries.map((e) => ({ app: e.app, contexts: e.contexts })), externalChecksConfirmed, externalChecksContextsConfirmed, externalChecksObserved: observedCheckApps, mergeGuard: { hookDenyOnly: true }, residualWorktrees: { observed: residualObserved, observedAtStart: residualObservedAtStart, addedThisRun: residualAddedThisRun, limit: maxResidualWorktrees, overLimit: residualOverLimit, suppressed: newStartSuppressed !== null, paths: residualPathsAtStart, bytesObserved: residualBytesObserved, bytesAtStart: residualBytesAtRunStart, bytesLastMeasured: residualBytesAtStart, bytesAtEnd: residualBytesAtEnd, bytesEndObserved: residualBytesEndObserved, bytesLimit: maxResidualWorktreeBytes, perWorktreeByteReserve }, total: queue.length, done: results, closedCleanup: closedCleanupRun, failures, outOfTreeDeps, notStarted, interrupted, halted, blockedStateWrite, agentBudget: { ...agentBudget, reached: agentBudget.used >= agentBudget.limit }, unmonitoredPrs: unmonitoredPrList, sweptWorktrees, ephemeralWorktrees: disposableWorktrees, retainedWorktrees: retainedLedger, prereqTransitions, mainWorktreeUntracked: { observed: mainUntrackedDiff.observed, baselineCount: mainUntrackedDiff.baselineCount, added: mainUntrackedDiff.added.slice(0, 50).map((p) => sanitize(p)) }, mainWorktreeHead: { observed: mainHeadDiff.observed, changed: mainHeadDiff.changed, shaChanged: mainHeadDiff.shaChanged, baselineRef: sanitize(mainHeadDiff.baselineRef ?? ''), endRef: sanitize(mainHeadDiff.endRef ?? '') } }

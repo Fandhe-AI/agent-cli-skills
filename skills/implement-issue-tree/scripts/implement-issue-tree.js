@@ -3521,10 +3521,22 @@ const worktree=sanitizeWorktreePath(saved.worktree??'')
 const pos=(v)=>(Number.isInteger(v)&&v>0?v:0)
 const pr=pos(saved.pr)||pos(saved.unverifiedPr)
 if(!worktree|| !pr)return null
+
+const tried=saved.closedCleanupTried
+if(tried&&tried.pr===pr&&tried.worktree===worktree)return null
 return{pr,worktree,branch:typeof saved.branch==='string'?saved.branch:''}
 }
 
 const AGENT_CALLS_CLOSED_CLEANUP=6
+
+
+const CLOSED_CLEANUP_PER_RUN_MAX=10
+
+function closedCleanupGate({limit,used,attempted}){
+if(attempted>=CLOSED_CLEANUP_PER_RUN_MAX)return'defer-cap'
+if(limit-used<AGENT_CALLS_CLOSED_CLEANUP+AGENT_CALLS_TERMINAL_BASE +AGENT_CALLS_PER_ISSUE.implement)return'defer-budget'
+return'run'
+}
 
 
 
@@ -3536,9 +3548,22 @@ const AGENT_CALLS_CLOSED_CLEANUP=6
 
 async function cleanupClosedMergedWorktree(item,cand){
 const n=item.number
+
+const tried=async(reason,text)=>{
+if(!(await updateState(n,{closedCleanupTried:{pr:cand.pr,worktree:cand.worktree,reason}})))log(`⚠️ #${n}: closed 後始末の試行済み記録を書けなかった`)
+return text
+}
 const{problem,bind}=await fetchPrBinding(item,cand.pr,cand.branch)
-if(problem)return`closed 後始末なし（PR #${cand.pr} の結び付きを確認できない: ${problem}）`
-if(bind.state!=='MERGED')return`closed 後始末なし（PR #${cand.pr} はマージ済みではない: ${sanitize(String(bind.state))}）`
+
+const known=bind?.state==='MERGED'||bind?.state==='CLOSED'
+if(problem){
+const text=`closed 後始末なし（PR #${cand.pr} の結び付きを確認できない: ${problem}）`
+return known?tried('binding',text):text
+}
+if(bind.state!=='MERGED'){
+const text=`closed 後始末なし（PR #${cand.pr} はマージ済みではない: ${sanitize(String(bind.state))}）`
+return bind.state==='CLOSED'?tried('not-merged',text):text
+}
 const head=typeof bind.headRefOid==='string'?bind.headRefOid:''
 if(!/^[0-9a-f]{40}$/.test(head)) return `closed 後始末なし（PR #${cand.pr} の head を取得できない）`
 const w=cand.worktree
@@ -3558,16 +3583,20 @@ WORKTREE_NOTE,
 `返却: ok / retained / branchSha（上記のとおり）。`,
 ].join('\n')
 let removed=false
+let decisive=false
 try{
 const{result,outputMissing}=await enqueueStateWrite(()=>runStateAgent(prompt,{label:`state:cleanup:#${n}`,schema:WORKTREE_CLEANUP_SCHEMA,isValid:isWorktreeCleanupValid}))
 removed= !outputMissing&&result?.ok===true&&result?.retained===false
+decisive= !outputMissing&&result?.retained===true
 }catch(e){
 log(`⚠️ #${n}: closed 後始末の掃除が例外終了した（${sanitize(String(e?.message ?? e))}）`)
 }
 if(!removed){
 recordRetainedWorktree(n,w)
 log(`⚠️ #${n}: closed 後始末で worktree を保持した（PR #${cand.pr} の head と HEAD の不一致・lock・未コミット変更・初期化済み submodule・結果なしのいずれか。状態は変えない）`)
-return`closed 後始末なし（PR #${cand.pr} はマージ済みだが worktree を保持した。状態は変更しない）`
+const text=`closed 後始末なし（PR #${cand.pr} はマージ済みだが worktree を保持した。status は変更しない）`
+
+return decisive?tried('retained',text):text
 }
 confirmedRemovedPaths.add(w)
 sweepHeldPaths.delete(w)
@@ -3848,15 +3877,15 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'752f1f6025aaf4a228c313553bb4d2258db3e3024d22391df54f3de84e0a7990',
-'measure-free-disk.sh':'ec4daf459022d60d26b7e126fb2bdcfd437466614e684827f34079d00c042cf1',
-'observe-pr.sh':'765caab83e66eafde8a744744bf8b1197814153360840f8b028dc0f59cfc3983',
-'base-merge.sh':'fa4419670ca021f47def19c377d2350b8819152b931db8c326cc53e577a8ecf6',
-'pr-push.sh':'c899911e742dde5a8f8dffad76f68e3dc083ae04186d59c129647eda7259d41a',
-'state.sh':'e2b4942809fe0adedcaf5aafa48eb5fc4a58f6516e12f4640bf1585a464be816',
-'merge-gate.sh':'28a5d9142c2cfd66d320ac8e06c13132c20ae2deb7d330da7d12627cafdcc489',
-'worktree-remove.sh':'a0d6c779bb634111952146cf670c4f6dcce3d205d9e6e47547359b576419612e',
-'recover-prep.sh':'5610b19da33fcd818eabfb37cd399ac201808ebdfc450850d9e5cf9731dbe09f',
+'measure-residual-bytes.sh':'430e0a2a18dbc5daa2e98e5d07489d270f7f54c7227e99a1ef72080767080a8d',
+'measure-free-disk.sh':'fc4f5aed7c081fd320aeeab695ef10c78d13743b1fd591a43b19d24bdc13c687',
+'observe-pr.sh':'2b403aeb99e578840c0bd9990f75a1cd66075da2ea96b35cd7f5e20b547acf9b',
+'base-merge.sh':'20a51efaef117d121e432b584ff8482c27debee7ff5f0be56af5a9456acda75b',
+'pr-push.sh':'411903afdac415ee2e8c9bb2194738d91e09b7764f4e4971fcad1a7ff55053ac',
+'state.sh':'f6c30ed778c81481836fac07f9ad70a7d576792ec6f285b686e09731a6ec474a',
+'merge-gate.sh':'b1b9d47a17b9cb433b6491533231d6da61f9f88b2d41b389aa43900c126c78c3',
+'worktree-remove.sh':'3d0e15339691ecfceedd105d4bf4c59031c6db1f56ca75537969a0ddf7901ae2',
+'recover-prep.sh':'e14effffc2f4c466eb014e7a2ce780f589fd8c2b8918bcb405f4abd8dd827775',
 }
 
 
@@ -3904,7 +3933,11 @@ function worktreeRemoveCommand(mode,path,branch,head=''){
 const parts=['remove','--mode',mode]
 if(path)parts.push('--path',worktreeQuote(path))
 
-if(head&&mode==='discard'&&path&& /^[0-9a-f]{40}$/.test(head)) parts.push('--head', worktreeQuote(head))
+
+if(head){
+if(!/^[0-9a-f]{40}$/.test(head)) throw new Error('worktree-remove.sh の --head は 40 桁の小文字 16 進')
+if(mode==='discard'&&path)parts.push('--head',worktreeQuote(head))
+}
 if(branch){
 parts.push('--branch',worktreeQuote(branch))
 if(isValidBranchName(baseBranch))parts.push('--base',worktreeQuote(baseBranch))
@@ -9111,6 +9144,8 @@ return{number:item.number,ok:false}
 
 const done=new Set()
 const failedSet=new Set()
+
+const closedCleanupRun={run:0,'defer-cap':0,'defer-budget':0}
 for(const item of queue){
 if(item.state!=='open'){
 const skipEntry={issue:item.number,status:'skipped',note:'すでに closed'}
@@ -9119,10 +9154,12 @@ done.add(item.number)
 
 const cleanup=closedCleanupCandidate(item,savedItems[String(item.number)],{dryRun:dryRunEnabled,verified:savedItemsVerified,unverified:unverifiedIssues})
 if(cleanup){
-if(agentBudget.limit-agentBudget.used<AGENT_CALLS_CLOSED_CLEANUP+AGENT_CALLS_TERMINAL_BASE +AGENT_CALLS_PER_ISSUE.implement){
-log(`#${item.number}: closed 後始末を見送った（エージェント呼び出し数の予算不足。使用 ${agentBudget.used}/${agentBudget.limit}。次の実行で再試行する）`)
-}else{
+const gate=closedCleanupGate({limit:agentBudget.limit,used:agentBudget.used,attempted:closedCleanupRun.run})
+closedCleanupRun[gate]++
+if(gate==='run'){
 skipEntry.note=`すでに closed。${await cleanupClosedMergedWorktree(item, cleanup)}`
+}else if(closedCleanupRun[gate]===1){
+log(`#${item.number}: closed 後始末を見送った（${gate === 'defer-cap' ? `1 ランの上限 ${CLOSED_CLEANUP_PER_RUN_MAX} 件` : `エージェント呼び出し数の予算不足。使用 ${agentBudget.used}/${agentBudget.limit}`}。以降の見送り件数は結果の closedCleanup に出す。次の実行で再試行する）`)
 }
 }
 }else{
@@ -9417,7 +9454,7 @@ savedBranchMismatch:{count:plan.blocked.savedBranchMismatch.length,first:plan.bl
 },
 preBlocked:plan.preBlocked,
 undetermined:plan.undetermined,
-closedCleanupPending:{count:closedCleanupPending.length,first:closedCleanupPending.slice(0,5),maxAgentCalls:closedCleanupPending.length*AGENT_CALLS_CLOSED_CLEANUP},
+closedCleanupPending:{count:closedCleanupPending.length,first:closedCleanupPending.slice(0,5),perRunMax:CLOSED_CLEANUP_PER_RUN_MAX,maxAgentCalls:Math.min(closedCleanupPending.length,CLOSED_CLEANUP_PER_RUN_MAX)*AGENT_CALLS_CLOSED_CLEANUP},
 outOfTreeDeps,
 }
 }
@@ -10576,7 +10613,7 @@ for(const e of disposableWorktrees)log(`  ${e.issue ? `#${e.issue}` : '(スイ�
 
 const retainedLedger=ephemeralWorktrees.filter((e)=>e.kind==='retained')
 if(retainedLedger.length>0){
-log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD〔retained-head-mismatch / retained-detached〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
 for(const e of retainedLedger)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
@@ -10662,4 +10699,4 @@ if(headWarning)log(headWarning)
 
 
 
-return{parent,baseBranch,parallel:concurrency,phaseGate:phaseGateEnabled,phaseOrder,models:agentModels,securityReview:{enabled:securityReviewEnabled,model:securityReviewModel},autoMerge:autoMergeEnabled&&externalChecksConfirmed&&externalChecksContextsConfirmed,autoMergeRequested:autoMergeEnabled,externalChecks:externalCheckApps,externalCheckContexts:externalCheckEntries.map((e)=>({app:e.app,contexts:e.contexts})),externalChecksConfirmed,externalChecksContextsConfirmed,externalChecksObserved:observedCheckApps,mergeGuard:{hookDenyOnly:true},residualWorktrees:{observed:residualObserved,observedAtStart:residualObservedAtStart,addedThisRun:residualAddedThisRun,limit:maxResidualWorktrees,overLimit:residualOverLimit,suppressed:newStartSuppressed!==null,paths:residualPathsAtStart,bytesObserved:residualBytesObserved,bytesAtStart:residualBytesAtRunStart,bytesLastMeasured:residualBytesAtStart,bytesAtEnd:residualBytesAtEnd,bytesEndObserved:residualBytesEndObserved,bytesLimit:maxResidualWorktreeBytes,perWorktreeByteReserve},total:queue.length,done:results,failures,outOfTreeDeps,notStarted,interrupted,halted,blockedStateWrite,agentBudget:{ ...agentBudget,reached:agentBudget.used>=agentBudget.limit},unmonitoredPrs:unmonitoredPrList,sweptWorktrees,ephemeralWorktrees:disposableWorktrees,retainedWorktrees:retainedLedger,prereqTransitions,mainWorktreeUntracked:{observed:mainUntrackedDiff.observed,baselineCount:mainUntrackedDiff.baselineCount,added:mainUntrackedDiff.added.slice(0,50).map((p)=>sanitize(p))},mainWorktreeHead:{observed:mainHeadDiff.observed,changed:mainHeadDiff.changed,shaChanged:mainHeadDiff.shaChanged,baselineRef:sanitize(mainHeadDiff.baselineRef??''),endRef:sanitize(mainHeadDiff.endRef??'')}}
+return{parent,baseBranch,parallel:concurrency,phaseGate:phaseGateEnabled,phaseOrder,models:agentModels,securityReview:{enabled:securityReviewEnabled,model:securityReviewModel},autoMerge:autoMergeEnabled&&externalChecksConfirmed&&externalChecksContextsConfirmed,autoMergeRequested:autoMergeEnabled,externalChecks:externalCheckApps,externalCheckContexts:externalCheckEntries.map((e)=>({app:e.app,contexts:e.contexts})),externalChecksConfirmed,externalChecksContextsConfirmed,externalChecksObserved:observedCheckApps,mergeGuard:{hookDenyOnly:true},residualWorktrees:{observed:residualObserved,observedAtStart:residualObservedAtStart,addedThisRun:residualAddedThisRun,limit:maxResidualWorktrees,overLimit:residualOverLimit,suppressed:newStartSuppressed!==null,paths:residualPathsAtStart,bytesObserved:residualBytesObserved,bytesAtStart:residualBytesAtRunStart,bytesLastMeasured:residualBytesAtStart,bytesAtEnd:residualBytesAtEnd,bytesEndObserved:residualBytesEndObserved,bytesLimit:maxResidualWorktreeBytes,perWorktreeByteReserve},total:queue.length,done:results,closedCleanup:closedCleanupRun,failures,outOfTreeDeps,notStarted,interrupted,halted,blockedStateWrite,agentBudget:{ ...agentBudget,reached:agentBudget.used>=agentBudget.limit},unmonitoredPrs:unmonitoredPrList,sweptWorktrees,ephemeralWorktrees:disposableWorktrees,retainedWorktrees:retainedLedger,prereqTransitions,mainWorktreeUntracked:{observed:mainUntrackedDiff.observed,baselineCount:mainUntrackedDiff.baselineCount,added:mainUntrackedDiff.added.slice(0,50).map((p)=>sanitize(p))},mainWorktreeHead:{observed:mainHeadDiff.observed,changed:mainHeadDiff.changed,shaChanged:mainHeadDiff.shaChanged,baselineRef:sanitize(mainHeadDiff.baselineRef??''),endRef:sanitize(mainHeadDiff.endRef??'')}}

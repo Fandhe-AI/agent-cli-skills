@@ -316,16 +316,21 @@ wr_wt_gone() {
   return 1
 }
 
-# --head（マージ済み PR の head）との照合。$1 = 指定された sha（空 = 指定なし）、$2 = worktree の HEAD のコミット（読めなければ空）。
-# 標準出力: ok（指定なし、または一致）/ retain（違う、または読めない）。sha だけで比べる（detached でも HEAD のコミットが一致すれば ok）。
-# squash マージでは base との差分で未 push のコミットを見分けられないため、PR の head と worktree の HEAD の一致だけを根拠にする
+# --head（マージ済み PR の head）との照合。$1 = 指定された sha（空 = 指定なし）、$2 = worktree の HEAD のコミット（読めなければ空）、
+# $3 = worktree が指すブランチ（detached は空）。
+# 標準出力: ok（指定なし、または ブランチ上で一致）/ retain（違う、または読めない）/ retain-detached（一致していても detached）。
+# squash マージでは base との差分で未 push のコミットを見分けられないため、PR の head と worktree の HEAD の一致だけを根拠にする。
+# detached HEAD 上のコミットは worktree を消すと含む ref が無くなり失われる（headRefOid は自己申告で HEAD と同じ値を返し得る）ため、
+# 実装 worktree が常にブランチ上にある前提で、一致していても保持する。sha の照合を先にする（読めない・違うは retain のまま）
 wr_head_check() {
   if [ -z "$1" ]; then
     echo ok
-  elif [ -n "$2" ] && [ "$1" = "$2" ]; then
-    echo ok
-  else
+  elif [ -z "$2" ] || [ "$1" != "$2" ]; then
     echo retain
+  elif [ -z "${3:-}" ]; then
+    echo retain-detached
+  else
+    echo ok
   fi
 }
 

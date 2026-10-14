@@ -34,8 +34,9 @@
 #           main = メイン worktree、cwd = カレントがその worktree の中（どちらも消さない）。
 #           retained-branch-mismatch = discard で --path と --branch を両方与えたとき、worktree の HEAD が --branch と違う（detached を含む。worktree もブランチも消さない）。
 #           retained-head-mismatch = discard で --head を与えたとき、worktree の HEAD のコミットが --head と違う（読めないときを含む。worktree もブランチも消さない）。
+#           retained-detached = discard で --head を与えたとき、HEAD が一致していても detached（detached 上の未 push のコミットは消すと失われる）。
 #           branchSha は消す前（または消さなかった）ブランチの先頭 sha で、ブランチの削除に失敗したとき（failed）は空。
-#   remove: {"ok":bool,"mode":"…","worktree":"removed|not-registered|skipped|main|cwd|retained-dirty|retained-submodule|retained-locked|retained-branch-mismatch|retained-head-mismatch|failed",
+#   remove: {"ok":bool,"mode":"…","worktree":"removed|not-registered|skipped|main|cwd|retained-dirty|retained-submodule|retained-locked|retained-branch-mismatch|retained-head-mismatch|retained-detached|failed",
 #            "branch":"none|deleted|absent|keep-base|keep|failed","branchSha":"<40 桁 | 空>","dirty":N,"unlocked":bool,"retained":bool}
 #   sweep:  {"ok":true,"mode":"sweep","removed":["…"],"retained":N,"skipped":N,"failed":N,"reason":"…"}
 #           reason は空 / state-unreadable / invalid-input。state-unreadable と invalid-input では何も消さない。
@@ -71,6 +72,7 @@ path=""
 branch=""
 base=""
 head=""
+head_set=0
 file=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -81,7 +83,7 @@ while [ $# -gt 0 ]; do
         --path) path=$2 ;;
         --branch) branch=$2 ;;
         --base) base=$2 ;;
-        --head) head=$2 ;;
+        --head) head=$2; head_set=1 ;;
         --file) file=$2 ;;
       esac
       shift 2
@@ -173,7 +175,13 @@ remove_one() {
 
   # --head を結びつけられた worktree は、HEAD のコミットが一致するときだけ消す（マージ済み PR の head に無いコミット = 未 push の作業を守る）。
   # 実体が無い worktree（dead）は読めない・失う作業も無いので従来どおり
-  if [ "${m}" = discard ] && [ -n "${expect_sha}" ] && [ -d "${path}" ] && [ "$(wr_head_check "${expect_sha}" "${wt_sha}")" != ok ]; then T_WT='retained-head-mismatch'; return 0; fi
+  if [ "${m}" = discard ] && [ -n "${expect_sha}" ] && [ -d "${path}" ]; then
+    case "$(wr_head_check "${expect_sha}" "${wt_sha}" "${wt_head}")" in
+      ok) ;;
+      retain-detached) T_WT='retained-detached'; return 0 ;;
+      *) T_WT='retained-head-mismatch'; return 0 ;;
+    esac
+  fi
 
   rc=0
   if [ "${lockact}" = unlock ]; then
@@ -212,7 +220,7 @@ if [ "${cmd}" = remove ]; then
     wr_valid_branch "${branch}" || usage "--branch の形が不正"
   fi
   if [ -n "${base}" ]; then wr_valid_branch "${base}" || usage "--base の形が不正"; fi
-  if [ -n "${head}" ]; then
+  if [ "${head_set}" -eq 1 ]; then
     [ "${mode}" = discard ] || usage "--head は discard 専用"
     [ -n "${path}" ] || usage "--head には --path が要る"
     wr_valid_head "${head}" || usage "--head は 40 桁の小文字 16 進"
@@ -252,7 +260,7 @@ if [ "${cmd}" = remove ]; then
 fi
 
 # --- sweep ---
-[ -z "${mode}${path}${branch}${base}${head}" ] || usage "sweep は --file だけを取る"
+[ -z "${mode}${path}${branch}${base}${head}" ] && [ "${head_set}" -eq 0 ] || usage "sweep は --file だけを取る"
 wr_valid_file "${file}" || usage "--file は _/issue-trees/N.json の形で指定する"
 command -v jq >/dev/null 2>&1 || { echo "worktree-remove: jq が無い" >&2; exit 3; }
 

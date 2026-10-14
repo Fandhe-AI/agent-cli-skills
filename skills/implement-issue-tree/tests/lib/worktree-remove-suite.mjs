@@ -553,22 +553,52 @@ export function registerWorktreeRemoveTests(bash) {
     assert.deepEqual([r4.result.ok, r4.result.worktree, r4.result.branch], [true, 'removed', 'deleted'])
   })
 
-  test(`${tag} --head: detached HEAD は HEAD のコミットで比べる（一致なら消える・違えば保持）`, () => {
+  // detached HEAD 上の未 push コミットは worktree を消すと含む ref が 0 件になり失われる。--head が一致していても detached なら保持する
+  // （実装 worktree は常にブランチ上。PR の head の自己申告が HEAD と一致しても守る）。--head なしの discard / superseded は従来どおり消える
+  test(`${tag} --head: detached HEAD は sha が一致していても retained-detached で保持する（違えば retained-head-mismatch）。--head なしは従来どおり`, () => {
     const repo = makeRepo()
     const a = repo.addWorktree('a')
     const base = repo.head(a.path)
     repo.git(a.path, 'checkout', '-q', '--detach')
     assert.equal(dis(repo, a.path, ['--head', 'f'.repeat(40)]).result.worktree, 'retained-head-mismatch')
+    const r1 = dis(repo, a.path, ['--head', base])
+    assert.deepEqual([r1.result.ok, r1.result.worktree, r1.result.retained], [false, 'retained-detached', true])
     assert.ok(existsSync(a.path))
-    assert.equal(dis(repo, a.path, ['--head', base]).result.worktree, 'removed')
     const b = repo.addWorktree('b')
     repo.write(b.path, 'x.txt', 'x\n')
     repo.git(b.path, 'add', 'x.txt')
-    repo.git(b.path, 'commit', '-q', '-m', 'x')
+    repo.git(b.path, 'commit', '-q', '-m', 'unpushed')
     repo.git(b.path, 'checkout', '-q', '--detach')
-    const detachedSha = repo.head(b.path)
+    const detachedSha = repo.git(b.path, 'rev-parse', 'HEAD')
     assert.equal(dis(repo, b.path, ['--head', base]).result.worktree, 'retained-head-mismatch')
-    assert.equal(dis(repo, b.path, ['--head', detachedSha]).result.worktree, 'removed')
+    const r2 = dis(repo, b.path, ['--head', detachedSha])
+    assert.deepEqual([r2.result.ok, r2.result.worktree], [false, 'retained-detached'])
+    assert.ok(existsSync(b.path) && repo.git(b.path, 'log', '-1', '--format=%s') === 'unpushed', '未 push のコミットを守る')
+    // --head を与えなければ従来どおり消える
+    assert.equal(dis(repo, a.path).result.worktree, 'removed')
+    const c = repo.addWorktree('c')
+    repo.git(c.path, 'checkout', '-q', '--detach')
+    assert.equal(sup(repo, c.path).result.worktree, 'removed')
+  })
+
+  test(`${tag} --head: コミットが無い（unborn）worktree は HEAD を読めないので retained-head-mismatch で保持する`, () => {
+    const repo = makeRepo()
+    const dir = join(repo.root, 'wts', 'orph')
+    mkdirSync(join(dir, '..'), { recursive: true })
+    repo.git(repo.main, 'worktree', 'add', '-q', '--orphan', '-b', 'orph-b', dir)
+    const r = dis(repo, dir, ['--head', repo.git(repo.main, 'rev-parse', 'HEAD')])
+    assert.deepEqual([r.result.ok, r.result.worktree, r.result.retained], [false, 'retained-head-mismatch', true])
+    assert.ok(existsSync(dir))
+  })
+
+  test(`${tag} --head の値が空・形式不正は usage エラー（exit 2）で何も消さない（照合が黙って無効にならない）`, () => {
+    const repo = makeRepo()
+    const a = repo.addWorktree('a')
+    for (const bad of ['', 'abc', 'A'.repeat(40), 'a'.repeat(41)]) {
+      const r = dis(repo, a.path, ['--head', bad])
+      assert.equal(r.status, 2, `--head ${JSON.stringify(bad)}`)
+      assert.ok(existsSync(a.path))
+    }
   })
 
   test(`${tag} --head: 汚れ・lock の保持が先に効く（一致していても --force は使わない）。実体の無い worktree は失う作業が無いので消せる。未登録・メインは消さない`, () => {

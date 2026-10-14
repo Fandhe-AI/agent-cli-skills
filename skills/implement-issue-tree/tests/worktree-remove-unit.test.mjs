@@ -109,15 +109,17 @@ check(
   (g, r) => assert.equal(g.rc, r[1] === 'a'.repeat(40) || r[1] === '0123456789abcdef0123456789abcdef01234567' ? OK : NG, JSON.stringify(r[1])),
 )
 
-// wr_head_check EXPECT ACTUAL
+// wr_head_check EXPECT ACTUAL BRANCH
+const H = 'a'.repeat(40)
 check(
-  'wr_head_check: 指定なし → ok / 一致 → ok / 違う・読めない（空）→ retain（sha だけで比べる）',
+  'wr_head_check: 指定なし → ok（detached でも）/ ブランチ上で一致 → ok / 違う・読めない → retain / 一致していても detached（BRANCH が空）→ retain-detached',
   [
-    ['wr_head_check', '', ''], ['wr_head_check', '', 'a'.repeat(40)], ['wr_head_check', 'a'.repeat(40), 'a'.repeat(40)],
-    ['wr_head_check', 'a'.repeat(40), 'b'.repeat(40)], ['wr_head_check', 'a'.repeat(40), ''], ['wr_head_check', 'a'.repeat(40), 'A'.repeat(40)],
-    ['wr_head_check', 'a'.repeat(40), 'a'.repeat(39)],
+    ['wr_head_check', '', '', ''], ['wr_head_check', '', H, ''], ['wr_head_check', '', H, 'feat/x'],
+    ['wr_head_check', H, H, 'feat/x'], ['wr_head_check', H, 'b'.repeat(40), 'feat/x'], ['wr_head_check', H, '', 'feat/x'],
+    ['wr_head_check', H, 'A'.repeat(40), 'feat/x'], ['wr_head_check', H, 'a'.repeat(39), 'feat/x'],
+    ['wr_head_check', H, H, ''], ['wr_head_check', H, 'b'.repeat(40), ''], ['wr_head_check', H, '', ''],
   ],
-  (g, r, i) => assert.equal(g.out, ['ok', 'ok', 'ok', 'retain', 'retain', 'retain', 'retain'][i], JSON.stringify(r)),
+  (g, r, i) => assert.equal(g.out, ['ok', 'ok', 'ok', 'ok', 'retain', 'retain', 'retain', 'retain', 'retain-detached', 'retain', 'retain'][i], JSON.stringify(r)),
 )
 
 check(
@@ -294,7 +296,7 @@ check(
   (g, r, i) => assert.equal(g.out, ['none', 'keep-base', 'keep', 'absent', 'delete', 'delete', 'keep-base', 'keep', 'absent'][i], JSON.stringify(r)),
 )
 
-const WT = ['removed', 'not-registered', 'skipped', 'main', 'cwd', 'retained-dirty', 'retained-submodule', 'retained-locked', 'retained-branch-mismatch', 'retained-head-mismatch', 'failed']
+const WT = ['removed', 'not-registered', 'skipped', 'main', 'cwd', 'retained-dirty', 'retained-submodule', 'retained-locked', 'retained-branch-mismatch', 'retained-head-mismatch', 'retained-detached', 'failed']
 const BR = ['none', 'deleted', 'absent', 'keep-base', 'keep', 'failed']
 check(
   'wr_ok / wr_retained / wr_wt_gone: superseded は worktree が残っても非致命（main・cwd だけ異常）、discard は worktree が無くなりブランチも無い・消えたときだけ ok',
