@@ -3531,10 +3531,17 @@ const AGENT_CALLS_CLOSED_CLEANUP=6
 
 const CLOSED_CLEANUP_PER_RUN_MAX=10
 
-function closedCleanupGate({limit,used,attempted}){
+
+function closedCleanupGate({limit,used,attempted,reserveImplement}){
 if(attempted>=CLOSED_CLEANUP_PER_RUN_MAX)return'defer-cap'
-if(limit-used<AGENT_CALLS_CLOSED_CLEANUP+AGENT_CALLS_TERMINAL_BASE +AGENT_CALLS_PER_ISSUE.implement)return'defer-budget'
+if(limit-used<AGENT_CALLS_CLOSED_CLEANUP+AGENT_CALLS_TERMINAL_BASE +(reserveImplement?AGENT_CALLS_PER_ISSUE.implement:0))return'defer-budget'
 return'run'
+}
+
+
+const CLOSED_CLEANUP_RECORDABLE=new Set(['retained-dirty','retained-submodule','retained-head-mismatch','retained-detached'])
+function closedCleanupRetainedReason(result,outputMissing){
+return!outputMissing&&result?.retained===true&&CLOSED_CLEANUP_RECORDABLE.has(result?.worktree)?'retained':null
 }
 
 
@@ -3582,11 +3589,11 @@ WORKTREE_NOTE,
 `返却: ok / retained / branchSha（上記のとおり）。`,
 ].join('\n')
 let removed=false
-let decisive=false
+let retainedReason=null
 try{
 const{result,outputMissing}=await enqueueStateWrite(()=>runStateAgent(prompt,{label:`state:cleanup:#${n}`,schema:WORKTREE_CLEANUP_SCHEMA,isValid:isWorktreeCleanupValid}))
 removed= !outputMissing&&result?.ok===true&&result?.retained===false
-decisive= !outputMissing&&result?.retained===true
+retainedReason=closedCleanupRetainedReason(result,outputMissing)
 }catch(e){
 log(`⚠️ #${n}: closed 後始末の掃除が例外終了した（${sanitize(String(e?.message ?? e))}）`)
 }
@@ -3595,7 +3602,7 @@ recordRetainedWorktree(n,w)
 log(`⚠️ #${n}: closed 後始末で worktree を保持した（PR #${cand.pr} の head と HEAD の不一致・lock・未コミット変更・初期化済み submodule・結果なしのいずれか。状態は変えない）`)
 const text=`closed 後始末なし（PR #${cand.pr} はマージ済みだが worktree を保持した。status は変更しない）`
 
-return decisive?tried('retained',text):text
+return retainedReason?tried(retainedReason,text):text
 }
 confirmedRemovedPaths.add(w)
 sweepHeldPaths.delete(w)
@@ -3943,7 +3950,7 @@ if(isValidBranchName(baseBranch))parts.push('--base',worktreeQuote(baseBranch))
 }
 return scriptInvocation('worktree-remove.sh',undefined,` ${parts.join(' ')}`)
 }
-const WORKTREE_NOTE='標準出力の最後の行 WORKTREE_REMOVE_RESULT {json} の ok・retained・branchSha をそのまま返す（branchSha が無ければ空文字）。非 0 終了・結果の行なしは ok: false・retained: true で返し（run-verified.sh の exit 3 / 4 はスクリプトの版ずれ・欠落）、git worktree remove / unlock・git branch -D・rm を自分で実行して代替しない。'
+const WORKTREE_NOTE='標準出力の最後の行 WORKTREE_REMOVE_RESULT {json} の ok・retained・branchSha をそのまま返す（branchSha が無ければ空文字）。結果の行の worktree の語は worktree に返す（無ければ空文字）。非 0 終了・結果の行なしは ok: false・retained: true・worktree: 空文字で返し（run-verified.sh の exit 3 / 4 はスクリプトの版ずれ・欠落）、git worktree remove / unlock・git branch -D・rm を自分で実行して代替しない。'
 const WORKTREE_CLEANUP_SCHEMA={
 type:'object',
 required:['ok','retained'],
@@ -3951,6 +3958,7 @@ properties:{
 ok:{type:'boolean',description:'結果の行の ok'},
 retained:{type:'boolean',description:'結果の行の retained（worktree が残った = 保持・失敗・メイン）'},
 branchSha:{type:'string',description:'結果の行の branchSha（40 桁の 16 進。無ければ空文字）'},
+worktree:{type:'string',description:'結果の行の worktree の語（removed・retained-dirty 等。結果の行が無い・非 0 終了のときは空文字）'},
 },
 }
 const isWorktreeCleanupValid=(r)=>typeof r?.ok==='boolean'&&typeof r?.retained==='boolean'
@@ -9200,6 +9208,7 @@ const done=new Set()
 const failedSet=new Set()
 
 const closedCleanupRun={run:0,'defer-cap':0,'defer-budget':0}
+const queueHasOpenImplement=queue.some((i)=>i.state==='open'&&i.kind==='implement')
 for(const item of queue){
 if(item.state!=='open'){
 const skipEntry={issue:item.number,status:'skipped',note:'すでに closed'}
@@ -9208,12 +9217,12 @@ done.add(item.number)
 
 const cleanup=closedCleanupCandidate(item,savedItems[String(item.number)],{dryRun:dryRunEnabled,verified:savedItemsVerified,unverified:unverifiedIssues})
 if(cleanup){
-const gate=closedCleanupGate({limit:agentBudget.limit,used:agentBudget.used,attempted:closedCleanupRun.run})
+const gate=closedCleanupGate({limit:agentBudget.limit,used:agentBudget.used,attempted:closedCleanupRun.run,reserveImplement:queueHasOpenImplement})
 closedCleanupRun[gate]++
 if(gate==='run'){
 skipEntry.note=`すでに closed。${await cleanupClosedMergedWorktree(item, cleanup)}`
 }else if(closedCleanupRun[gate]===1){
-log(`#${item.number}: closed 後始末を見送った（${gate === 'defer-cap' ? `1 ランの上限 ${CLOSED_CLEANUP_PER_RUN_MAX} 件` : `エージェント呼び出し数の予算不足。使用 ${agentBudget.used}/${agentBudget.limit}`}。以降の見送り件数は結果の closedCleanup に出す。次の実行で再試行する）`)
+log(`#${item.number}: closed 後始末を見送った（${gate === 'defer-cap' ? `1 ランの上限 ${CLOSED_CLEANUP_PER_RUN_MAX} 件` : `エージェント呼び出し数の予算不足${queueHasOpenImplement ? '（着手し得る実装ノード 1 件分を予約済み）' : ''}。使用 ${agentBudget.used}/${agentBudget.limit}`}。以降の見送り件数は結果の closedCleanup に出す。次の実行で再試行する）`)
 }
 }
 }else{

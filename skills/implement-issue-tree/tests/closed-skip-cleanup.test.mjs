@@ -19,7 +19,7 @@ const OTHER = 'd'.repeat(40)
 const WT = '/repo/wt/old'
 
 const m = await importDefinitions(
-  ['closedCleanupCandidate', 'closedCleanupGate', 'CLOSED_CLEANUP_PER_RUN_MAX', 'AGENT_CALLS_CLOSED_CLEANUP', 'AGENT_CALLS_TERMINAL_BASE', 'AGENT_CALLS_PER_ISSUE', 'cleanupClosedMergedWorktree', 'worktreeRemoveCommand', 'sweepClosedWorktrees', 'sweepEligiblePaths', 'sweepHeldPaths', 'confirmedRemovedPaths', 'ensureBoundaryNonceSeed', 'sha256Hex', 'canonicalJson'],
+  ['closedCleanupCandidate', 'closedCleanupGate', 'closedCleanupRetainedReason', 'CLOSED_CLEANUP_PER_RUN_MAX', 'AGENT_CALLS_CLOSED_CLEANUP', 'AGENT_CALLS_TERMINAL_BASE', 'AGENT_CALLS_PER_ISSUE', 'cleanupClosedMergedWorktree', 'worktreeRemoveCommand', 'sweepClosedWorktrees', 'sweepEligiblePaths', 'sweepHeldPaths', 'confirmedRemovedPaths', 'ensureBoundaryNonceSeed', 'sha256Hex', 'canonicalJson'],
   'closed-skip-cleanup',
 )
 globalThis.agent = async (_p, opts) => (opts.label === 'nonce:seed' ? { seedHex: '0'.repeat(64) } : null)
@@ -52,22 +52,42 @@ test('closedCleanupCandidate: 試行済みの記録（closedCleanupTried）が�
   for (const bad of [null, 'x', 5, {}, { pr: '77', worktree: WT }]) assert.ok(m.closedCleanupCandidate(impl, savedOf({ closedCleanupTried: bad }), ctx), JSON.stringify(bad))
 })
 
-test('closedCleanupGate: 1 ランの上限と予算不足を表で固定する（上限が先・予算は 6 + 20 + 30 以上の残りが要る）', () => {
+test('closedCleanupGate: 1 ランの上限と予算不足を表で固定する（上限が先・予算は 6 + 20 以上の残りが要り、open の実装ノードが残るときは + 30）', () => {
   const need = m.AGENT_CALLS_CLOSED_CLEANUP + m.AGENT_CALLS_TERMINAL_BASE + m.AGENT_CALLS_PER_ISSUE.implement
   const cap = m.CLOSED_CLEANUP_PER_RUN_MAX
   assert.equal(cap, 10)
   const rows = [
-    [{ limit: 1000, used: 0, attempted: 0 }, 'run'],
-    [{ limit: 1000, used: 0, attempted: cap - 1 }, 'run'],
-    [{ limit: 1000, used: 0, attempted: cap }, 'defer-cap'],
-    [{ limit: 1000, used: 0, attempted: cap + 5 }, 'defer-cap'],
-    [{ limit: 100 + need, used: 100, attempted: 0 }, 'run'],
-    [{ limit: 100 + need, used: 101, attempted: 0 }, 'defer-budget'],
-    [{ limit: 100, used: 100, attempted: 0 }, 'defer-budget'],
-    [{ limit: 100, used: 150, attempted: 0 }, 'defer-budget'],
-    [{ limit: 100 + need, used: 101, attempted: cap }, 'defer-cap'],
+    [{ limit: 1000, used: 0, attempted: 0, reserveImplement: true }, 'run'],
+    [{ limit: 1000, used: 0, attempted: cap - 1, reserveImplement: true }, 'run'],
+    [{ limit: 1000, used: 0, attempted: cap, reserveImplement: true }, 'defer-cap'],
+    [{ limit: 1000, used: 0, attempted: cap + 5, reserveImplement: true }, 'defer-cap'],
+    [{ limit: 100 + need, used: 100, attempted: 0, reserveImplement: true }, 'run'],
+    [{ limit: 100 + need, used: 101, attempted: 0, reserveImplement: true }, 'defer-budget'],
+    [{ limit: 100, used: 100, attempted: 0, reserveImplement: true }, 'defer-budget'],
+    [{ limit: 100, used: 150, attempted: 0, reserveImplement: true }, 'defer-budget'],
+    [{ limit: 100 + need, used: 101, attempted: cap, reserveImplement: true }, 'defer-cap'],
+    // open の実装ノードが残らない後始末だけの再実行は、実装 1 件分を予約しない（6 + 20 だけ要る）
+    [{ limit: 100 + need - m.AGENT_CALLS_PER_ISSUE.implement, used: 100, attempted: 0, reserveImplement: false }, 'run'],
+    [{ limit: 100 + need - m.AGENT_CALLS_PER_ISSUE.implement, used: 101, attempted: 0, reserveImplement: false }, 'defer-budget'],
+    [{ limit: 100 + need - m.AGENT_CALLS_PER_ISSUE.implement, used: 100, attempted: 0, reserveImplement: true }, 'defer-budget'],
+    [{ limit: 100 + need - m.AGENT_CALLS_PER_ISSUE.implement, used: 100, attempted: 0 }, 'run'],
+    // 合法な最小の agentCallLimit（開始処理 30 + 20 + 30 + 1 = 81）で開始処理を使い切った残り 51 でも、実装が残らなければ進む
+    [{ limit: 81, used: 30, attempted: 0, reserveImplement: false }, 'run'],
+    [{ limit: 81, used: 30, attempted: 0, reserveImplement: true }, 'defer-budget'],
   ]
   for (const [input, want] of rows) assert.equal(m.closedCleanupGate(input), want, JSON.stringify(input))
+})
+
+test('closedCleanupRetainedReason: スクリプトが結果行の固定語で保持を明示したときだけ記録する（結果なし・非 0 終了・launcher 不一致・lock・固定語以外は記録しない）', () => {
+  const r = (worktree, extra = {}) => ({ ok: false, retained: true, worktree, ...extra })
+  for (const w of ['retained-dirty', 'retained-submodule', 'retained-head-mismatch', 'retained-detached']) assert.equal(m.closedCleanupRetainedReason(r(w), false), 'retained', w)
+  // エージェントが非 0 終了・launcher の exit 3 / 4・結果の行なしを ok:false / retained:true / worktree 空で返す
+  assert.equal(m.closedCleanupRetainedReason({ ok: false, retained: true, worktree: '' }, false), null)
+  assert.equal(m.closedCleanupRetainedReason({ ok: false, retained: true }, false), null)
+  for (const w of ['retained-locked', 'retained-branch-mismatch', 'failed', 'main', 'cwd', 'removed', 'not-registered', 'skipped', 'retained-other', 'RETAINED-DIRTY', 5, null]) assert.equal(m.closedCleanupRetainedReason(r(w), false), null, String(w))
+  assert.equal(m.closedCleanupRetainedReason(r('retained-dirty'), true), null, '出力なし')
+  assert.equal(m.closedCleanupRetainedReason({ ...r('retained-dirty'), retained: false }, false), null)
+  assert.equal(m.closedCleanupRetainedReason(undefined, false), null)
 })
 
 test('closedCleanupCandidate: 候補にならない条件（dryRun・照合未成立・state-unverified・種別・状態・worktree/pr の欠落や不正）', () => {
@@ -171,8 +191,13 @@ for (const [name, bindBehavior, expected, reason] of NO_CHANGE) {
 }
 
 const RETAINED = [
-  ['HEAD 不一致・lock・汚れなどで保持（ok:false・retained:true）', () => ({ ok: false, retained: true })],
-  ['ok だが保持', () => ({ ok: true, retained: true })],
+  ['HEAD 不一致で保持（結果行が retained-head-mismatch）', () => ({ ok: false, retained: true, worktree: 'retained-head-mismatch' })],
+  ['汚れで保持（retained-dirty）', () => ({ ok: false, retained: true, worktree: 'retained-dirty' })],
+  ['ok だが保持（retained-detached）', () => ({ ok: true, retained: true, worktree: 'retained-detached' })],
+  // 非 0 終了・launcher の exit 3 / 4・結果の行なしはエージェントが ok:false / retained:true / worktree 空で返す。一過性なので記録しない
+  ['非 0 終了・結果行なし（ok:false・retained:true・worktree 空）', () => ({ ok: false, retained: true, worktree: '' }), false],
+  ['worktree の語を返さない旧形式の応答', () => ({ ok: false, retained: true }), false],
+  ['生きている lock（retained-locked）はセッション終了後に解消し得るので記録しない', () => ({ ok: false, retained: true, worktree: 'retained-locked' }), false],
   ['掃除の結果なし（StructuredOutput 未返却）', () => null, false],
   ['掃除が例外', () => { throw new Error('boom') }, false],
   // 誤転記（ok:false なのに retained:false）は削除成功と見なさず、決定的な保持でもないので記録しない
@@ -309,7 +334,7 @@ test('結合: dryRun は書き込み系を起動せず、後始末の対象見�
 })
 
 test('結合: 保持された結果は status を変えずに試行済みを記録し、結果の closedCleanup に件数を出す。記録のある項目は次の実行で pr-bind すら起動しない', async () => {
-  const first = await run({ cleanup: { ok: false, retained: true } })
+  const first = await run({ cleanup: { ok: false, retained: true, worktree: 'retained-dirty' } })
   const w = triedWrites(first.calls)
   assert.equal(w.length, 1)
   assert.match(w[0].prompt, /"closedCleanupTried":\{"pr":77,"worktree":"\/repo\/wt\/old","reason":"retained"\}/)
@@ -326,6 +351,15 @@ test('結合: 保持された結果は status を変えずに試行済みを記�
   assert.equal(callsOf(third.calls, /^pr-bind:#2/).length, 1)
 })
 
+test('結合: 結果の行なし・lock などの一過性の保持（worktree が固定語でない・retained-locked）は記録せず、次の実行で再試行する', async () => {
+  for (const cleanup of [{ ok: false, retained: true }, { ok: false, retained: true, worktree: '' }, { ok: false, retained: true, worktree: 'retained-locked' }, { ok: false, retained: true, worktree: 'failed' }]) {
+    const first = await run({ cleanup })
+    assert.equal(triedWrites(first.calls).length, 0, JSON.stringify(cleanup))
+    assert.equal(anyStatusWrite(first.calls).length, 0)
+    assert.equal(skipEntry(first.result).note.includes('worktree を保持した'), true)
+  }
+})
+
 test('結合: 1 ランの後始末は上限 10 件で、超えた分は見送って次のランへ回す（件数は結果の closedCleanup に出る）', async () => {
   const numbers = Array.from({ length: 12 }, (_, i) => i + 2)
   const items = Object.fromEntries(numbers.map((n) => [n, { ...savedOf(), branch: `feat/${n}-x`, worktree: `/repo/wt/w${n}`, pr: 100 + n }]))
@@ -340,7 +374,7 @@ test('結合: 1 ランの後始末は上限 10 件で、超えた分は見送っ
       if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: numbers.length, highWaterBytes: 0, highWaterVersion: 0 }
       const mm = /^pr-bind:#(\d+)$/.exec(label)
       if (mm) return { ...bindOk, headRefName: `feat/${mm[1]}-x`, closingIssues: [Number(mm[1])] }
-      if (label.startsWith('state:cleanup:')) return { ok: false, retained: true }
+      if (label.startsWith('state:cleanup:')) return { ok: false, retained: true, worktree: 'retained-dirty' }
       return undefined
     },
   })
