@@ -34,7 +34,7 @@ async function fresh(tag) {
   globalThis.agent = async (_p, opts) => (opts.label === 'nonce:seed' ? { seedHex: '0'.repeat(64) } : null)
   globalThis.log = () => {}
   const mod = await importDefinitions(
-    ['updateStateDetailed', 'sweepClosedWorktrees', 'confirmedRemovedPaths', 'ephemeralWorktrees', 'residualStartPathSet', 'recordEphemeralWorktree', 'ensureBoundaryNonceSeed', 'planReplacementAccounting', 'slotInheritedPaths', 'slotUnknownLiveCount', 'slotRetainedPaths', 'sweepEligiblePaths', 'sweepHeldPaths', 'recordReplacementWorktree', 'applyReplacementAccounting', 'recordRetainedWorktree'],
+    ['updateStateDetailed', 'sweepClosedWorktrees', 'confirmedRemovedPaths', 'ephemeralWorktrees', 'residualStartPathSet', 'recordEphemeralWorktree', 'ensureBoundaryNonceSeed', 'planReplacementAccounting', 'slotInheritedPaths', 'slotUnknownLiveCount', 'slotRetainedPaths', 'sweepEligiblePaths', 'sweepHeldPaths', 'recordReplacementWorktree', 'applyReplacementAccounting', 'recordRetainedWorktree', 'reviveAfterCleanup'],
     tag,
   )
   await mod.ensureBoundaryNonceSeed()
@@ -691,7 +691,7 @@ test('スイープが渡す削除できなかった候補（削除済みと確�
 // ---- AB: 同じ呼び出しで『削除を確認した』パスを、置換の新パスとして live に戻さない ----
 // Review fix と post-push fix は cleanupWorktree と replacementWorktree に同じパスを渡し得る。削除の確認と同じ呼び出しの中で live に戻すと、
 // 削除済みのパスが confirmedRemovedPaths と最終スイープの候補から外れ、バイト測定（1 件あたりの平均）とスイープの登録の片づけが狂う。
-// 新旧が同じパスのときは削除済み扱いを残す（作り直された実体かどうかは区別できない。Z より前の挙動 = 安全側）。
+// 新旧が同じパスのときは、削除を確認したときに限り削除済み扱いを残す（作り直された実体かどうかは区別できない。Z より前の挙動 = 安全側。確認できないときは AD）。
 const SAME = '/tmp/same-path-wt'
 const SAME_CASES = [
   ['旧が台帳にある（引き継ぎ経路）', (f) => f.ephemeralWorktrees.push({ issue: 60, kind: 'implement', path: SAME })],
@@ -711,12 +711,35 @@ for (const [name, setup] of SAME_CASES) {
   })
 }
 
-test('同じパスで旧が保持されたとき（削除を確認できない）も、スイープ候補から外さない', async () => {
-  const f = await fresh('ab-same-kept')
-  stub(cleanupOf(KEPT))
-  await f.updateStateDetailed(61, { fixCount: 1, worktree: SAME }, { cleanupWorktree: SAME, replacementWorktree: SAME, preserveWorktreeField: true })
-  assert.ok(!f.confirmedRemovedPaths.has(SAME))
-  assert.ok(f.sweepEligiblePaths.has(SAME), '保持した実体を最終スイープの候補から外さない')
+// ---- AD: 同じパスでも『削除を確認できなかった』（保持・掃除せず・失敗）なら実体は生きている → live に戻す ----
+// 不変条件: パスは『この呼び出しの流れで削除が確認された（confirmedRemovedPaths に入った）』場合に限り live に戻さない。それ以外は戻す。
+// 戻さないと superseded の最終スイープが --force で消し得る（reviewing は保持リストに無い）。
+const SAME_UNCONFIRMED = [
+  ['旧が保持された（retained: true）', (opts) => (opts.label.startsWith('state:cleanup') ? KEPT : { ok: true })],
+  ['掃除の結果なし', (opts) => (opts.label.startsWith('state:cleanup') ? null : { ok: true })],
+  ['掃除が例外', (opts) => { if (opts.label.startsWith('state:cleanup')) throw new Error('boom'); return { ok: true } }],
+  ['状態マージの失敗で掃除せず', () => ({ ok: false })],
+  ['worktree は消えたがブランチ削除が失敗（ok: false, retained: false）', (opts) => (opts.label.startsWith('state:cleanup') ? { ok: false, retained: false } : { ok: true })],
+]
+for (const [name, behavior] of SAME_UNCONFIRMED) {
+  test(`同じパスで削除を確認できない: ${name} → 最終スイープ候補と削除済みから外れる`, async () => {
+    const f = await fresh(`ad-same-${name.length}`)
+    stub(behavior)
+    await f.updateStateDetailed(61, { fixCount: 1, worktree: SAME }, { cleanupWorktree: SAME, replacementWorktree: SAME, preserveWorktreeField: true }).catch(() => {})
+    assert.ok(!f.confirmedRemovedPaths.has(SAME))
+    assert.ok(!f.sweepEligiblePaths.has(SAME), '生きた実体を最終スイープの候補に残さない（--force で消され得る）')
+    const sw = stub(() => ({ removed: [] }))
+    await f.sweepClosedWorktrees([])
+    assert.ok(sw.calls.every((c) => !c.prompt.includes(SAME)), 'スイープのエージェントにパスが渡らない')
+  })
+}
+
+test('applyReplacementAccounting: 新旧が同じパスは oldConfirmedRemoved が真のときだけ削除済みを残す（件数軸の oldRemoved とは独立）', async () => {
+  const f = await removedPath('ad-unit')
+  f.applyReplacementAccounting(70, REUSED, REUSED, true, true)
+  assert.ok(f.confirmedRemovedPaths.has(REUSED) && f.sweepEligiblePaths.has(REUSED), '削除を確認したので残る')
+  f.applyReplacementAccounting(70, REUSED, REUSED, true, false)
+  assert.ok(!f.confirmedRemovedPaths.has(REUSED) && !f.sweepEligiblePaths.has(REUSED), '確認していなければ戻す')
 })
 
 test('新旧が別のパスなら従来どおり: 新パスは live（削除済みと候補から外れ）、旧パスは削除済みと候補に残る', async () => {
@@ -751,10 +774,31 @@ test('revive の指定なしは従来どおり live に戻す（Z）', async () 
   assert.ok(!f.sweepEligiblePaths.has(REUSED))
 })
 
-test('post-push fix の optinFixState 再試行失敗の終端は、直前に削除を確認したパスを live に戻さない指定で記録する（配線）', () => {
+// ---- AE: revive は固定の false にしない。直前の updateState が同じパスの削除を確認したときだけ false ----
+test('reviveAfterCleanup: 別のパスは戻す（true）・同じパスで削除を確認したときだけ戻さない（false）・同じパスでも確認できなければ戻す', async () => {
+  const f = await removedPath('ae-revive')
+  assert.equal(f.reviveAfterCleanup(REUSED, REUSED), false, '同じパスで削除を確認')
+  assert.equal(f.reviveAfterCleanup('/tmp/other-new', REUSED), true, '別のパス')
+  assert.equal(f.reviveAfterCleanup(undefined, REUSED), true, 'パス不明')
+  assert.equal(f.reviveAfterCleanup(REUSED, ''), true, '旧が不明')
+  f.confirmedRemovedPaths.delete(REUSED)
+  assert.equal(f.reviveAfterCleanup(REUSED, REUSED), true, '同じパスでも削除を確認していない')
+})
+
+test('AE 結合: 別のパスを fix-terminal として記録すると live に戻り、同じパスで削除確認済みなら戻らない', async () => {
+  const f = await removedPath('ae-integration')
+  f.confirmedRemovedPaths.add('/tmp/ae-other')
+  f.sweepEligiblePaths.add('/tmp/ae-other')
+  f.recordEphemeralWorktree(54, '/tmp/ae-other', 'fix-terminal', { revive: f.reviveAfterCleanup('/tmp/ae-other', REUSED) })
+  assert.ok(!f.confirmedRemovedPaths.has('/tmp/ae-other') && !f.sweepEligiblePaths.has('/tmp/ae-other'), '別パスは live')
+  f.recordEphemeralWorktree(54, REUSED, 'fix-terminal', { revive: f.reviveAfterCleanup(REUSED, REUSED) })
+  assert.ok(f.confirmedRemovedPaths.has(REUSED) && f.sweepEligiblePaths.has(REUSED), '同じパスで削除確認は残る')
+})
+
+test('post-push fix の optinFixState 再試行失敗の終端は、revive を reviveAfterCleanup で決めて記録する（固定の false にしない。配線）', () => {
   const start = source.indexOf('const retryOk = await updateState(item.number, optinFixPatchArgs)')
   assert.ok(start > 0, '再試行の呼び出しが見つかる')
   const branch = source.slice(start, source.indexOf('failMergeTerminal(reason', start))
-  assert.match(branch, /recordEphemeralWorktree\(item\.number, f\?\.worktreePath, 'fix-terminal', \{ revive: false \}\)/)
+  assert.match(branch, /recordEphemeralWorktree\(item\.number, f\?\.worktreePath, 'fix-terminal', \{ revive: reviveAfterCleanup\(f\?\.worktreePath, oldWorktreePath\) \}\)/)
+  assert.doesNotMatch(branch, /revive: false/)
 })
-

@@ -62,6 +62,7 @@
 #           retained-head-mismatch = discard で --head を与えたとき、worktree の HEAD のコミットが --head と違う（読めないときを含む。worktree もブランチも消さない）。
 #           retained-unregistered = discard で --head か --expect-branch を与えたとき、git に登録されていないのに実体のパスがある（未 push の作業が残るかもしれない。
 #               not-registered〔もう無い〕とは言わず、何も消さない。ホストは決定的な保持として記録する。--branch だけ・superseded・sweep は従来どおり not-registered）。
+#               登録が無く、パスの有無を確かめられない（祖先を検索・読み取りできない）ときは、モードを問わず not-registered ではなく retained-unobservable。
 #           retained-present = discard で --require-missing を与えたとき、登録も実体もある（check-absent のあとに作り直された worktree かもしれない。何も消さない）。
 #               実体の有無を確かめられない（親ディレクトリを検索・読み取りできないなど）ときは retained-unobservable（「無い」と言えないので何も消さない）。
 #           retained-detached = discard で --head を与えたとき、HEAD が一致していても detached（detached 上の未 push のコミットは消すと失われる）。
@@ -171,7 +172,10 @@ remove_one() {
   if [ "${WR_MAIN}" = 1 ]; then T_WT=main; return 0; fi
   if [ "${WR_REGISTERED}" != 1 ]; then
     # 登録は無いが実体のパスがある（登録だけが失われたチェックアウト）。--head / --expect-branch を結びつけられた discard で『登録が無い = もう無い』と返すと、ホストは消えたものとして
-    # 追跡から外す。未 push の作業が残っているかもしれないので、その結びつけがあるときは保持の語（記録対象）で返す。結びつけの無い呼び出し（superseded・sweep・後始末）は従来どおり
+    # 追跡から外す。未 push の作業が残っているかもしれないので、その結びつけがあるときは保持の語（記録対象）で返す。結びつけの無い呼び出し（superseded・sweep・後始末）は従来どおり not-registered。
+    # 実体の有無を確かめられないとき（祖先を検索・読み取りできず stat が失敗する）は、読めない親の下の実体が『無い』ように見える。
+    # 『もう無い』と言えないので、モードを問わず retained-unobservable（何も消さない・追跡から外さない）で返す。判定は check-absent / --require-missing と同じ wr_path_state
+    if [ "$(wr_path_state "${path}")" = unknown ]; then T_WT='retained-unobservable'; return 0; fi
     if [ "${m}" = discard ] && [ "${unreg_guard}" = 1 ] && { [ -e "${path}" ] || [ -L "${path}" ]; }; then T_WT='retained-unregistered'; else T_WT='not-registered'; fi
     return 0
   fi

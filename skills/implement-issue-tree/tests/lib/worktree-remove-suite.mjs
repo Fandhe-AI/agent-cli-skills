@@ -1523,6 +1523,41 @@ export function registerWorktreeRemoveTests(bash) {
     // 対照: 権限を戻せば実体が確認できて retained-present（clean な worktree を消さない）
     assert.equal(req(repo, wt).result.worktree, 'retained-present')
   })
+  // 登録の無いパスでも、親を検索・読み取りできないと stat が失敗して『実体が無い』ように見える（AF）。not-registered は『もう無い』の意味でホストが追跡を外すので、
+  // discard の保護つき（--head / --expect-branch / --require-missing）はもちろん、保護なしと superseded も retained-unobservable で返す。root は権限が効かないので省略
+  test(`${tag} AF: 登録の無いパスの有無を確かめられない（親を検索・読み取りできない）とき not-registered にせず retained-unobservable。実体は残り、権限を戻せば従来の語`, { skip: typeof process.getuid === 'function' && process.getuid() === 0 }, () => {
+    const repo = makeRepo()
+    const holder = join(repo.root, 'holder-af')
+    mkdirSync(holder)
+    const stray = join(holder, 'stray')
+    mkdirSync(stray)
+    writeFileSync(join(stray, 'x'), 'x\n')
+    const sha = repo.git(repo.main, 'rev-parse', 'HEAD')
+    const variants = [
+      ['discard --head', ['remove', '--mode', 'discard', '--path', stray, '--head', sha]],
+      ['discard --expect-branch', ['remove', '--mode', 'discard', '--path', stray, '--expect-branch', 'feat/x']],
+      ['discard --require-missing', ['remove', '--mode', 'discard', '--path', stray, '--require-missing']],
+      ['discard 保護なし', ['remove', '--mode', 'discard', '--path', stray]],
+      ['superseded', ['remove', '--mode', 'superseded', '--path', stray]],
+    ]
+    for (const mode of [0o000, 0o600]) {
+      chmodSync(holder, mode)
+      try {
+        for (const [name, args] of variants) {
+          const r = run(repo, args)
+          assert.deepEqual([r.result.ok, r.result.worktree, r.result.retained], [name === 'superseded', 'retained-unobservable', true], `mode ${mode.toString(8)} ${name}: ${JSON.stringify(r.result)}`)
+        }
+      } finally {
+        chmodSync(holder, 0o700)
+      }
+      assert.ok(existsSync(join(stray, 'x')), `mode ${mode.toString(8)}: 実体は残る`)
+    }
+    // 対照: 権限を戻せば、保護つきは retained-unregistered・superseded は従来どおり not-registered
+    assert.equal(run(repo, variants[0][1]).result.worktree, 'retained-unregistered')
+    assert.equal(run(repo, variants[4][1]).result.worktree, 'not-registered')
+    // 対照: 親が読めて本当に無いパスは従来どおり not-registered（unobservable にしない）
+    assert.equal(run(repo, ['remove', '--mode', 'superseded', '--path', join(holder, 'gone')]).result.worktree, 'not-registered')
+  })
   test(`${tag} X: 登録が無いのに実体のあるパス（ファイル・シンボリックリンクを含む）は retained-unregistered。実体の無い detached・lock ありの登録は retained-detached・retained-locked（unlock もしない）`, () => {
     const repo = makeRepo()
     const stray = join(repo.root, 'stray-x')
