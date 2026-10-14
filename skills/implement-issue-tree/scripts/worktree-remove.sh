@@ -57,7 +57,11 @@
 #   1. git には、確認と削除を原子的に行う手段が無い。
 #   2. 最終の観測（--require-missing / 第 6 引数 2 の実体の読み直し）は、唯一の変更コマンド（git worktree remove）の直前にだけ置く（unlock より後）。
 #   3. 有無を観測できない登録（親を検索・読み取りできない）があるプロセスでは、全体の prune をしない（prune はその登録を不在と扱って落とす）。
-#   4. 上記以外で、最終の観測と remove の間に残る窓（並行するプロセスがナノ秒単位で作り直すなど）は受容する。根拠と追跡は Fandhe-AI/agent-cli-skills#649。
+#   4. 上記以外で、最終の観測と remove の間に残る窓（並行するプロセスがナノ秒単位で作り直すなど）は受容する。
+#   5. --branch の後始末（holder）が登録の無い実体を見つけて保持した結果（holder の retained-unregistered）は、そのプロセスの中でしか効かない。結果の行は固定語彙だけでパスを返さないため、
+#      ホストはその holder のパスを知らず、次の `discard --branch`（--path なし）では登録が無いので後始末が走らずブランチを消す。--path に渡すパスが登録の無い実体なら、--branch つきでも
+#      retained-unregistered で保持するので、ホスト経由（Recover の discard。状態の worktree を --path に渡し、保持したら記録を消さない）は次のランでも効く。残る窓は『ホストが知らないパスの holder』だけで、
+#      出力契約を広げない代わりに受容する。根拠は Fandhe-AI/agent-cli-skills#649。
 # prune: 全体の `git worktree prune` は safe_prune の 1 か所だけが呼ぶ。remove で実際に何かを消したとき（--path を removed にした、または --branch の後始末で登録を消した）、sweep で候補を 1 件でも消したときだけ呼ぶ（失敗しただけでは呼ばない。失敗した worktree remove は prune で片づく登録を残さない）。
 #       何も消さなかったとき（--path なしのブランチだけの discard・not-registered・main・cwd・保持・failed）は呼ばず、呼ぶときも
 #       実体の無い登録のうち detached または HEAD 0000… のもの（コミットの唯一の参照かもしれない・lock なしの prune 対象）が 1 件でもあれば全体をスキップする
@@ -70,8 +74,8 @@
 #           main = メイン worktree、cwd = カレントがその worktree の中（どちらも消さない）。
 #           retained-branch-mismatch = discard で --path と --branch（または --expect-branch）を与えたとき、worktree の HEAD が --branch と違う（detached を含む。worktree もブランチも消さない）。
 #           retained-head-mismatch = discard で --head を与えたとき、worktree の HEAD のコミットが --head と違う（読めないときを含む。worktree もブランチも消さない）。
-#           retained-unregistered = discard で --head か --expect-branch を与えたとき、git に登録されていないのに実体のパスがある（未 push の作業が残るかもしれない。
-#               not-registered〔もう無い〕とは言わず、何も消さない。ホストは決定的な保持として記録する。--branch だけ・superseded・sweep は従来どおり not-registered）。
+#           retained-unregistered = discard で --head・--expect-branch・--branch のいずれか（または --require-missing）を --path と一緒に与えたとき、git に登録されていないのに実体のパスがある（未 push の作業が残るかもしれない。
+#               not-registered〔もう無い〕とは言わず、何も消さない。--branch つきならブランチも残す〔keep・ok false〕ので、保持が次の呼び出しでも続く。ホストは決定的な保持として記録する。--path なしの --branch だけ・superseded・sweep は従来どおり not-registered）。
 #               登録が無く、パスの有無を確かめられない（祖先を検索・読み取りできない）ときは、モードを問わず not-registered ではなく retained-unobservable。
 #           retained-present = discard で --require-missing を与えたとき、登録も実体もある（check-absent のあとに作り直された worktree かもしれない。何も消さない）。
 #               実体の有無を確かめられない（親ディレクトリを検索・読み取りできないなど）ときは retained-unobservable（「無い」と言えないので何も消さない）。
@@ -424,7 +428,7 @@ if [ "${cmd}" = remove ]; then
 
   if [ -n "${path}" ]; then
     unreg_guard=0
-    if [ "${mode}" = discard ] && { [ -n "${head}" ] || [ -n "${expect_branch}" ] || [ "${require_missing}" -eq 1 ]; }; then unreg_guard=1; fi
+    if [ "${mode}" = discard ] && { [ -n "${head}" ] || [ -n "${expect_branch}" ] || [ -n "${branch}" ] || [ "${require_missing}" -eq 1 ]; }; then unreg_guard=1; fi
     remove_one "${mode}" "${path}" "${branch:-${expect_branch}}" "${head}" "${unreg_guard}" "${require_missing}"
   else
     T_WT=skipped
