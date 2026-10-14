@@ -3739,6 +3739,23 @@ function isValidBranchName(b) {
   return typeof b === 'string' && !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/.test(b)
 }
 
+// implement / 回復 implement が返した branch の受理判定（Review・push より前のゲート）。通れば空文字、通らなければ理由を返す。
+// 文字種（isValidBranchName）だけでは worktree の既定ブランチ名（例: worktree-wf_…-37）も通ってしまい、命名規約
+// <type>/<issueNumber>-<short-name> を外れたブランチが push・PR 作成まで進み、後段の checkPrBinding で初めて止まっていた。
+// 種別は 'invalid'（文字種不正。従来どおり failed で halt の連続失敗に数える）/ 'naming'（文字種は妥当だが命名規約違反。blocked で数えない）/ ''（受理）。
+function implBranchViolationKind(branch, issueNumber) {
+  if (!isValidBranchName(branch ?? '')) return 'invalid'
+  if (!branchMatchesIssue(branch, issueNumber)) return 'naming'
+  return ''
+}
+
+function implBranchViolation(branch, issueNumber) {
+  const kind = implBranchViolationKind(branch, issueNumber)
+  if (kind === 'invalid') return 'branch 名が不正'
+  if (kind === 'naming') return `branch 名が命名規約 <type>/${issueNumber}-<short-name> に合わない`
+  return ''
+}
+
 // --- 測定スクリプトの実行と出力封筒の照合（Issue #603 第 1 弾）---
 // 決定的な測定（残置バイト・空き容量）はプロンプトに書いたシェルではなく、スキル同梱のスクリプト
 // （scripts/measure-*.sh）が行う。エージェントは run-verified.sh 経由のコマンドを 1 回実行し、標準出力の
@@ -5015,7 +5032,7 @@ const IMPL_STEP5 = '5. 実装後に OWASP Top 10 観点でセキュリティチ�
 const IMPL_STEP6 = '6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。'
 const IMPL_STEP8 = '8. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。'
 const implementReturnLine = (item) => {
-  const base = '返却: branch / summary（実装内容の要約。失敗時は理由と現状）/ outOfScope（対象外項目の配列。なければ空配列）/ worktreePath（pwd の結果）'
+  const base = `返却: branch（<type>/${item.number}-<short-name> 形式のみ受理。worktree の既定ブランチ名のままの返却は拒否される）/ summary（実装内容の要約。失敗時は理由と現状）/ outOfScope（対象外項目の配列。なければ空配列）/ worktreePath（pwd の結果）`
   return Array.isArray(item.optinTests) && item.optinTests.length > 0 ? `${base}/ optinTestRuns（宣言された opt-in テストごとの実行結果）。` : `${base}。`
 }
 
@@ -7184,10 +7201,20 @@ async function runImplement(item) {
           recordFailure({ issue: item.number, reason })
           return false
         }
-        if (!isValidBranchName(impl.branch ?? '')) {
-          const reason = `回復 Implement の branch 名が不正: ${sanitize(impl.branch ?? '(空)')}`
-          await updateState(item.number, { status: 'failed', note: reason })
-          recordFailure({ issue: item.number, reason })
+        const recoverBranchViolation = implBranchViolation(impl.branch, item.number)
+        if (recoverBranchViolation) {
+          const reason = `回復 Implement の ${recoverBranchViolation}: ${sanitize(impl.branch ?? '(空)')}`
+          if (implBranchViolationKind(impl.branch, item.number) === 'invalid') {
+            // 文字種不正は implement が系統的に壊れた兆候のため、従来どおり failed で halt の連続失敗に数える。
+            await updateState(item.number, { status: 'failed', note: reason })
+            recordFailure({ issue: item.number, reason })
+            return false
+          }
+          // 命名規約違反は通常経路と同じ理由で push 前に止め、違反 branch は状態ファイルへ書かない（worktree は台帳に載せ済み）。
+          // pr: 0 を明示する。直前の continue 掃除が status: implementing / branch: effectiveBranch を書いており、以前の pr が
+          // 残ると blocked + 正規 branch + pr > 0 で isActiveMonitoring が真になり、次回ランが再実装でなく古い PR の監視再開へ入る。
+          await updateState(item.number, { status: 'blocked', pr: 0, note: reason })
+          recordFailure({ issue: item.number, reason, status: 'blocked', worktree: impl.worktreePath })
           return false
         }
         // opt-in テスト記録ゲート（Issue #495）。宣言が無ければ item.optinTests は空配列で
@@ -7363,10 +7390,20 @@ async function runImplement(item) {
         return false
       }
       // エージェント返却の branch 名もブランチ名として有効な文字種のみ許可する
-      if (!isValidBranchName(impl.branch ?? '')) {
-        const reason = `branch 名が不正: ${sanitize(impl.branch ?? '(空)')}`
-        await updateState(item.number, { status: 'failed', note: reason })
-        recordFailure({ issue: item.number, reason })
+      const branchViolation = implBranchViolation(impl.branch, item.number)
+      if (branchViolation) {
+        if (implBranchViolationKind(impl.branch, item.number) === 'invalid') {
+          // 文字種不正は implement が系統的に壊れた兆候のため、従来どおり failed で halt の連続失敗に数える。
+          const reason = `${branchViolation}: ${sanitize(impl.branch ?? '(空)')}`
+          await updateState(item.number, { status: 'failed', note: reason })
+          recordFailure({ issue: item.number, reason })
+          return false
+        }
+        // 命名違反は push・PR 作成の前に止める。状態ファイルへ違反 branch を「本イシューのブランチ」として書かない
+        // （書くと再実行が savedBranchMismatch で止まる）。worktree は recordEphemeralWorktree で台帳に載せ済みで、自動削除しない。
+        const reason = `${branchViolation}: ${sanitize(impl.branch ?? '(空)')}（push・PR 作成は行っていない。次回実行で再実装を試みる）`
+        await updateState(item.number, { status: 'blocked', note: reason })
+        recordFailure({ issue: item.number, reason, status: 'blocked', worktree: impl.worktreePath })
         return false
       }
       // worktreePath もホワイトリスト検証を通す。この時点では削除候補に登録しない

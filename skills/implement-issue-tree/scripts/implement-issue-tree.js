@@ -3743,6 +3743,23 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 
+function implBranchViolationKind(branch,issueNumber){
+if(!isValidBranchName(branch??''))return'invalid'
+if(!branchMatchesIssue(branch,issueNumber))return'naming'
+return''
+}
+
+function implBranchViolation(branch,issueNumber){
+const kind=implBranchViolationKind(branch,issueNumber)
+if(kind==='invalid')return'branch 名が不正'
+if(kind==='naming')return`branch 名が命名規約 <type>/${issueNumber}-<short-name> に合わない`
+return''
+}
+
+
+
+
+
 
 
 
@@ -5015,7 +5032,7 @@ const IMPL_STEP5='5. 実装後に OWASP Top 10 観点でセキュリティチェ
 const IMPL_STEP6='6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。'
 const IMPL_STEP8='8. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。'
 const implementReturnLine=(item)=>{
-const base='返却: branch / summary（実装内容の要約。失敗時は理由と現状）/ outOfScope（対象外項目の配列。なければ空配列）/ worktreePath（pwd の結果）'
+const base=`返却: branch（<type>/${item.number}-<short-name> 形式のみ受理。worktree の既定ブランチ名のままの返却は拒否される）/ summary（実装内容の要約。失敗時は理由と現状）/ outOfScope（対象外項目の配列。なければ空配列）/ worktreePath（pwd の結果）`
 return Array.isArray(item.optinTests)&&item.optinTests.length>0?`${base}/ optinTestRuns（宣言された opt-in テストごとの実行結果）。`:`${base}。`
 }
 
@@ -7184,10 +7201,20 @@ await updateState(item.number,{status:'failed',note:reason})
 recordFailure({issue:item.number,reason})
 return false
 }
-if(!isValidBranchName(impl.branch??'')){
-const reason=`回復 Implement の branch 名が不正: ${sanitize(impl.branch ?? '(空)')}`
+const recoverBranchViolation=implBranchViolation(impl.branch,item.number)
+if(recoverBranchViolation){
+const reason=`回復 Implement の ${recoverBranchViolation}: ${sanitize(impl.branch ?? '(空)')}`
+if(implBranchViolationKind(impl.branch,item.number)==='invalid'){
+
 await updateState(item.number,{status:'failed',note:reason})
 recordFailure({issue:item.number,reason})
+return false
+}
+
+
+
+await updateState(item.number,{status:'blocked',pr:0,note:reason})
+recordFailure({issue:item.number,reason,status:'blocked',worktree:impl.worktreePath})
 return false
 }
 
@@ -7363,10 +7390,20 @@ recordFailure({issue:item.number,reason})
 return false
 }
 
-if(!isValidBranchName(impl.branch??'')){
-const reason=`branch 名が不正: ${sanitize(impl.branch ?? '(空)')}`
+const branchViolation=implBranchViolation(impl.branch,item.number)
+if(branchViolation){
+if(implBranchViolationKind(impl.branch,item.number)==='invalid'){
+
+const reason=`${branchViolation}: ${sanitize(impl.branch ?? '(空)')}`
 await updateState(item.number,{status:'failed',note:reason})
 recordFailure({issue:item.number,reason})
+return false
+}
+
+
+const reason=`${branchViolation}: ${sanitize(impl.branch ?? '(空)')}（push・PR 作成は行っていない。次回実行で再実装を試みる）`
+await updateState(item.number,{status:'blocked',note:reason})
+recordFailure({issue:item.number,reason,status:'blocked',worktree:impl.worktreePath})
 return false
 }
 
