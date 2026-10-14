@@ -63,6 +63,7 @@
 #           retained-unregistered = discard で --head か --expect-branch を与えたとき、git に登録されていないのに実体のパスがある（未 push の作業が残るかもしれない。
 #               not-registered〔もう無い〕とは言わず、何も消さない。ホストは決定的な保持として記録する。--branch だけ・superseded・sweep は従来どおり not-registered）。
 #           retained-present = discard で --require-missing を与えたとき、登録も実体もある（check-absent のあとに作り直された worktree かもしれない。何も消さない）。
+#               実体の有無を確かめられない（親ディレクトリを検索・読み取りできないなど）ときは retained-unobservable（「無い」と言えないので何も消さない）。
 #           retained-detached = discard で --head を与えたとき、HEAD が一致していても detached（detached 上の未 push のコミットは消すと失われる）。
 #           retained-unobservable = 観測に失敗した（git status コマンドそのものの失敗・--head 指定時の HEAD のコミットの一過性の読み取り失敗）。何も消さない。
 #               retained-dirty / retained-head-mismatch / retained-broken は観測した結果の保持で、これは観測できなかったという別の語（ホストは前者を恒久の試行済みに記録し、これは次のランで再試行させる）。
@@ -175,7 +176,13 @@ remove_one() {
     return 0
   fi
   # --require-missing: 確認と削除を同じプロセスで行う。登録があるのに実体が（もう）ある = check-absent のあとに作り直された worktree かもしれないので消さない
-  if [ "${req_missing}" = 1 ] && [ "$(wr_require_missing_check "${path}")" != ok ]; then T_WT='retained-present'; return 0; fi
+  if [ "${req_missing}" = 1 ]; then
+    case "$(wr_require_missing_check "${path}")" in
+      ok) ;;
+      unobservable) T_WT='retained-unobservable'; return 0 ;; # 有無を確かめられない（読めない親など）。「無い」と言えないので消さない
+      *) T_WT='retained-present'; return 0 ;;
+    esac
+  fi
   real=$(wr_real "${path}")
   cwd_real=$(pwd -P)
   case "${cwd_real}/" in
@@ -277,7 +284,13 @@ remove_one() {
   fi
 
   # 削除の直前にもう一度実体を読む（上の確認から削除までの間に作り直された場合）
-  if [ "${req_missing}" = 1 ] && [ "$(wr_require_missing_check "${path}")" != ok ]; then T_WT='retained-present'; return 0; fi
+  if [ "${req_missing}" = 1 ]; then
+    case "$(wr_require_missing_check "${path}")" in
+      ok) ;;
+      unobservable) T_WT='retained-unobservable'; return 0 ;; # 有無を確かめられない（読めない親など）。「無い」と言えないので消さない
+      *) T_WT='retained-present'; return 0 ;;
+    esac
+  fi
   rc=0
   if [ "${lockact}" = unlock ]; then
     git worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?

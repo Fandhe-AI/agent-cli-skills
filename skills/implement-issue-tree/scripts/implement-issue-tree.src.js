@@ -4628,7 +4628,7 @@ const EPHEMERAL_RESERVE_PER_NEW_START = Object.values(EPHEMERAL_KIND_MAX).reduce
 // base-merge を最大 maxBaseMerges 件記録し得るため両方を見込む（Issue #441）。
 const EPHEMERAL_RESERVE_PER_MONITORING_RESUME = EPHEMERAL_KIND_MAX['fix-terminal'] + EPHEMERAL_KIND_MAX['base-merge']
 
-// 新しい worktree をこのランの台帳へ記録する入口（recordEphemeralWorktree / recordReplacementWorktree / 置換で引き継ぐパス）が共通で呼ぶ。
+// 新しい worktree をこのランの台帳へ記録する入口（recordEphemeralWorktree / 置換の新パス〔applyReplacementAccounting。新旧が同じパスのときは呼ばない〕）が共通で呼ぶ。
 // 同じランで『削除済みと確認した』パスに worktree が作り直された場合、その実体は生きている。削除済みの集合（confirmedRemovedPaths。
 // バイト測定から外れる）と最終スイープの削除候補（sweepEligiblePaths）に旧パスが残ると、生きた実体が測定から漏れ、スイープに --force で消され得る。
 // 外すのは『削除を試みた記録』だけで、削除が増える方向の変更ではない（候補が減るだけ）。保持の照合は状態ファイルの failed / blocked / monitoring の記録が
@@ -4718,8 +4718,11 @@ function applyReplacementAccounting(issueNumber, oldPath, rawNewPath, oldRemoved
   const plan = planReplacementAccounting({ oldPath, oldRemoved, newPath, oldCounted: isWorktreeCounted(oldPath), newCounted: isWorktreeCounted(newPath) })
   if (plan.addRetainedOld) recordRetainedWorktree(issueNumber, oldPath)
   else if (!oldRemoved) noteSlotRetained(issueNumber, oldPath)
-  // 新しい worktree は実在する（台帳の重複排除で載せなくても、削除済み・削除候補の記録は外す）
-  if (newPath) markWorktreeLive(newPath)
+  // 新しい worktree は実在する（台帳の重複排除で載せなくても、削除済み・削除候補の記録は外す）。ただし新旧が同じパスのときは外さない:
+  // Review fix と post-push fix は cleanupWorktree と replacementWorktree に同じパスを渡し得て、その旧は updateStateDetailed が今まさに削除を確認した
+  // （または保持した）パスである。ここで live に戻すと、削除済みのパスがバイト測定（1 件あたりの平均を下げる）と最終スイープの候補（登録の片づけ）から漏れる。
+  // 作り直された実体かどうかは同じ呼び出しの中では区別できないので、削除の記録を残す側（Z より前の挙動）へ倒す
+  if (newPath && newPath !== oldPath) markWorktreeLive(newPath)
   if (plan.addReplacement) recordReplacementWorktree(issueNumber, newPath)
   if (plan.inheritPath) slotInheritedPaths.add(plan.inheritPath)
   if (plan.inheritUnknown) {
@@ -4735,7 +4738,7 @@ function recordReplacementWorktree(issueNumber, rawPath) {
     log(`#${issueNumber}: 置換後の worktree のパスを取得できないまま旧 worktree を保持した（件数のみ 1 件計上する。git worktree list で確認すること）`)
     return true
   }
-  markWorktreeLive(p)
+  // live への戻しは呼び出し元の applyReplacementAccounting が新旧の同一判定つきで行う（ここで戻すと、同じ呼び出しで削除を確認した旧と同じパスの新を live にしてしまう）
   if (residualStartPathSet.has(p) || ephemeralWorktrees.some((e) => e.path === p)) return false
   ephemeralWorktrees.push({ issue: issueNumber, kind: 'replacement', path: p })
   log(`#${issueNumber}: 旧 worktree を保持したため、置換後の worktree も残置の台帳へ載せた（${p}）`)

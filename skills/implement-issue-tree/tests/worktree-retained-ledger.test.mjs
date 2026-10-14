@@ -648,7 +648,7 @@ async function removedPath(tag) {
 }
 const ENTRIES = [
   ['recordEphemeralWorktree', (f) => f.recordEphemeralWorktree(51, REUSED, 'implement')],
-  ['recordReplacementWorktree', (f) => f.recordReplacementWorktree(51, REUSED)],
+  ['置換の台帳記録（旧が保持された）', (f) => f.applyReplacementAccounting(51, '/tmp/old-51', REUSED, false)],
   ['置換で引き継ぐパス（旧が消えて計上済み）', (f) => {
     f.ephemeralWorktrees.push({ issue: 51, kind: 'implement', path: '/tmp/old-51' })
     f.applyReplacementAccounting(51, '/tmp/old-51', REUSED, true)
@@ -686,4 +686,49 @@ test('スイープが渡す削除できなかった候補（削除済みと確�
   assert.equal(f.recordRetainedWorktree(0, REUSED), false)
   assert.ok(f.confirmedRemovedPaths.has(REUSED))
   assert.equal(retainedEntries(f).length, 0)
+})
+
+// ---- AB: 同じ呼び出しで『削除を確認した』パスを、置換の新パスとして live に戻さない ----
+// Review fix と post-push fix は cleanupWorktree と replacementWorktree に同じパスを渡し得る。削除の確認と同じ呼び出しの中で live に戻すと、
+// 削除済みのパスが confirmedRemovedPaths と最終スイープの候補から外れ、バイト測定（1 件あたりの平均）とスイープの登録の片づけが狂う。
+// 新旧が同じパスのときは削除済み扱いを残す（作り直された実体かどうかは区別できない。Z より前の挙動 = 安全側）。
+const SAME = '/tmp/same-path-wt'
+const SAME_CASES = [
+  ['旧が台帳にある（引き継ぎ経路）', (f) => f.ephemeralWorktrees.push({ issue: 60, kind: 'implement', path: SAME })],
+  ['旧がどこにも数えられていない（置換の台帳へ載せる経路）', () => {}],
+]
+for (const [name, setup] of SAME_CASES) {
+  test(`同じパスを cleanup と replacement に渡して削除が確認された: ${name} → 削除済みと最終スイープ候補に残る`, async () => {
+    const f = await fresh(`ab-same-${name.length}`)
+    setup(f)
+    stub(cleanupOf(GONE))
+    await f.updateStateDetailed(60, { fixCount: 1, worktree: SAME }, { cleanupWorktree: SAME, replacementWorktree: SAME, preserveWorktreeField: true })
+    assert.ok(f.confirmedRemovedPaths.has(SAME), '削除を確認したパスが live に戻され、バイト測定の対象になる')
+    assert.ok(f.sweepEligiblePaths.has(SAME), '最終スイープの候補から外れ、登録の片づけが行われない')
+    const sw = stub(() => ({ removed: [SAME] }))
+    assert.deepEqual(await f.sweepClosedWorktrees([]), [SAME])
+    assert.ok(sw.calls.some((c) => c.prompt.includes(SAME)), 'スイープのエージェントにパスが渡る')
+  })
+}
+
+test('同じパスで旧が保持されたとき（削除を確認できない）も、スイープ候補から外さない', async () => {
+  const f = await fresh('ab-same-kept')
+  stub(cleanupOf(KEPT))
+  await f.updateStateDetailed(61, { fixCount: 1, worktree: SAME }, { cleanupWorktree: SAME, replacementWorktree: SAME, preserveWorktreeField: true })
+  assert.ok(!f.confirmedRemovedPaths.has(SAME))
+  assert.ok(f.sweepEligiblePaths.has(SAME), '保持した実体を最終スイープの候補から外さない')
+})
+
+test('新旧が別のパスなら従来どおり: 新パスは live（削除済みと候補から外れ）、旧パスは削除済みと候補に残る', async () => {
+  const f = await fresh('ab-diff')
+  stub(cleanupOf(GONE))
+  await f.updateStateDetailed(62, { fixCount: 1 }, { cleanupWorktree: '/tmp/ab-old' })
+  await f.updateStateDetailed(62, { fixCount: 1 }, { cleanupWorktree: '/tmp/ab-old2' })
+  f.confirmedRemovedPaths.add('/tmp/ab-new')
+  f.sweepEligiblePaths.add('/tmp/ab-new')
+  await f.updateStateDetailed(62, { fixCount: 2, worktree: '/tmp/ab-new' }, { cleanupWorktree: '/tmp/ab-old2', replacementWorktree: '/tmp/ab-new' })
+  assert.ok(!f.confirmedRemovedPaths.has('/tmp/ab-new'))
+  assert.ok(!f.sweepEligiblePaths.has('/tmp/ab-new'))
+  assert.ok(f.confirmedRemovedPaths.has('/tmp/ab-old2'))
+  assert.ok(f.sweepEligiblePaths.has('/tmp/ab-old2'))
 })
