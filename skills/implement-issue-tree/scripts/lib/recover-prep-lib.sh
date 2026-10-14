@@ -34,6 +34,7 @@ RP_UNMERGED=0
 # 規則:
 #   - branch だけの残骸は記録されたブランチを使う（食い違う実体が無い）。
 #   - dead worktree は記録されたブランチを使う（無ければ対象なし = 継続不能）。取り残すデータが無い。
+#   - どちらも、解決したブランチが base と同名なら確定しない（live と対称。base を継続・破棄の対象にしない）。
 #   - live は worktree の HEAD を使う。state のブランチは参考値で、食い違えば HEAD を優先する（WIP が積まれるのは HEAD 側）。
 #     HEAD がブランチを指さない・形が不正・base と同名なら確定しない（base に WIP を積むと discard で消せず、continue は壊れる）。
 #   - main・unregistered・mismatch は確定しない（メインや無関係な repo に WIP を積まない。実体があるのに git が見ていない領域は
@@ -45,22 +46,28 @@ rp_resolve() {
   RP_SOURCE="none"
   RP_WT_MISSING=0
   if [ "$1" != 1 ]; then
-    if [ -n "$4" ]; then
+    if [ -z "$4" ]; then
+      RP_REASON=no-target
+    elif [ -n "$5" ] && [ "$4" = "$5" ]; then
+      RP_REASON=base-branch
+    else
       RP_RESOLVED=1
       RP_BRANCH=$4
       RP_SOURCE=state
-    else
-      RP_REASON=no-target
     fi
     return 0
   fi
   case "$2" in
     missing)
-      RP_RESOLVED=1
-      RP_WT_MISSING=1
-      if [ -n "$4" ]; then
-        RP_BRANCH=$4
-        RP_SOURCE=state
+      if [ -n "$4" ] && [ -n "$5" ] && [ "$4" = "$5" ]; then
+        RP_REASON=base-branch
+      else
+        RP_RESOLVED=1
+        RP_WT_MISSING=1
+        if [ -n "$4" ]; then
+          RP_BRANCH=$4
+          RP_SOURCE=state
+        fi
       fi
       ;;
     main) RP_REASON=main-worktree ;;
@@ -82,7 +89,7 @@ rp_resolve() {
   return 0
 }
 
-# `git status --porcelain=v2 -uall --ignore-submodules=none` の出力（$1）から、未マージ行（`u `）の数を RP_UNMERGED に、独立した入れ子の
+# `git status --porcelain=v2 -z -uall --ignore-submodules=none` を 1 レコード 1 行にした出力（recover-prep.sh の observe が作る。パスは引用されない）から、未マージ行（`u `）の数を RP_UNMERGED に、独立した入れ子の
 # git リポジトリ（未追跡の行 `? <パス>/` のように末尾が / のもの。中身は親の WIP コミットに入らず、ポインタだけが記録される）の数を
 # RP_NESTED に入れる
 rp_scan_status() {
@@ -99,10 +106,12 @@ EOF
   RP_NESTED=${n}
 }
 
-# WIP コミットの要否。$1 = 汚れの行数（-1 = 確認できなかった）、$2 = 未マージ行の数、$3 = 入れ子の git リポジトリの数。標準出力:
+# WIP コミットの要否。$1 = 汚れの行数（-1 = 確認できなかった）、$2 = 未マージ行の数、$3 = 入れ子の git リポジトリの数、
+# $4 = マージ・cherry-pick・revert・rebase の途中か（0 / 1。省略は 0）。標準出力:
 #   none        汚れが無い（コミットは作らない）
 #   commit      コミットする
 #   unmerged    未マージのエントリがある（コンフリクトの途中。add -A がマーカー入りの内容を確定させてしまうので触らない）
+#   in-progress マージ・cherry-pick・revert・rebase の途中（add -A は未解決の途中状態を確定させる。触らない）
 #   nested-repo 入れ子の git リポジトリがある（add -A は中身ではなくポインタだけを記録し、worktree を消すと中身が失われる。触らない）
 #   unverified  汚れを確認できなかった
 rp_wip_plan() {
@@ -112,6 +121,8 @@ rp_wip_plan() {
     echo none
   elif [ "$2" -gt 0 ]; then
     echo unmerged
+  elif [ "${4:-0}" != 0 ]; then
+    echo in-progress
   elif [ "$3" -gt 0 ]; then
     echo nested-repo
   else
@@ -120,9 +131,12 @@ rp_wip_plan() {
 }
 
 # コミットを試みたあとの結果の分類。$1 = add -A と commit をあわせた終了コード、$2 = コミット後の汚れの行数（-1 = 確認できなかった）、
-# $3 = そのうち submodule 由来の行数。標準出力:
+# $3 = そのうち submodule 由来の行数、$4 = コミットの実体（made = HEAD が進み、前の HEAD との差分が空でない / それ以外 = 進んでいない・
+# 差分が空・確認できなかった。省略は made）。標準出力:
 #   committed      コミットが成功し、同じ観測でもう汚れが無い（退避完了）
 #   commit-failed  add か commit が失敗した（フックの拒否を含む。--no-verify で回避しない）
+#   empty-commit   終了コードは成功だが、HEAD が進んでいない・進んだが差分が空（フックが commit のあとで変更を捨てた〔reset --hard など〕）。
+#                  汚れが無くても退避できていない
 #   unverified     コミット後の汚れを確認できなかった
 #   submodule      コミット後も submodule 内の未コミットの変更が残る（親のコミットには入らない）。コミットできるものが無く commit が
 #                  失敗した場合〔残る汚れが全部 submodule 由来〕もここに入れる
@@ -136,6 +150,8 @@ rp_wip_after() {
     else
       echo commit-failed
     fi
+  elif [ "${4:-made}" != made ]; then
+    echo empty-commit
   elif [ "$2" -lt 0 ]; then
     echo unverified
   elif [ "$2" -eq 0 ]; then

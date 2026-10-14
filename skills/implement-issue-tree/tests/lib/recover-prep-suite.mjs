@@ -195,6 +195,113 @@ export function registerRecoverPrepTests(bash) {
     assert.equal(repo.head(a.path), before)
   })
 
+  // パスが C 引用で出る名前（非 ASCII・"・\・タブ・改行）の入れ子 repo。-z なしの status は `? "…/"` と出すので末尾 / の検出が取りこぼし、
+  // gitlink だけを WIP コミットして wipCommitted:true にしていた
+  const QUOTED_NAMES = [['非 ASCII', '日本語'], ['二重引用符', 'q"x'], ['バックスラッシュ', 'b\\s'], ['タブ', 'a\tb'], ['改行', 'n\nl'], ['空白', 'sp ace'], ['全部入り', '日"\\\t\nx']]
+  for (const [label, name] of QUOTED_NAMES) {
+    test(`${tag} 引用される名前（${label}）の入れ子の独立 git リポジトリ: nested-repo・wipCommitted:false。gitlink だけを WIP コミットしない`, () => {
+      const repo = makeRecoverRepo()
+      const a = repo.addWorktree('a')
+      mkdirSync(join(a.path, name), { recursive: true })
+      repo.git(join(a.path, name), 'init', '-q')
+      repo.write(a.path, `${name}/x`, 'x\n')
+      repo.write(a.path, 'u.txt', 'u\n')
+      const before = repo.head(a.path)
+      const r = prep(repo, a)
+      assert.equal(r.status, 0, r.stderr)
+      assert.deepEqual([r.result.wip, r.result.wipCommitted], ['nested-repo', false])
+      assert.equal(repo.head(a.path), before, '何もコミットしない')
+      assert.equal(readFileSync(join(a.path, name, 'x'), 'utf8'), 'x\n')
+    })
+  }
+
+  test(`${tag} 引用される名前の通常ファイルと rename: パスは無加工で数え（rename は 1 件）、WIP に積んで退避完了`, () => {
+    const repo = makeRecoverRepo()
+    const a = repo.addWorktree('a')
+    repo.git(a.path, 'mv', 'a.txt', 'r"enamed 日本.txt')
+    repo.write(a.path, 'q"y\t.txt', 'q\n')
+    repo.write(a.path, '日本語.txt', 'j\n')
+    const r = prep(repo, a)
+    assert.deepEqual([r.result.wip, r.result.wipCommitted, r.result.dirty], ['committed', true, 3], '改名 1 + 未追跡 2（改名の元のパスを別の件として数えない）')
+    assert.equal(repo.git(a.path, 'status', '--porcelain'), '')
+    assert.equal(logSubjects(repo, a.branch)[0], WIP_SUBJECT)
+  })
+
+  // マージ・cherry-pick・revert の途中は、HEAD がブランチを指したまま staged の変更が残る。add -A は途中状態を確定させるので触らない
+  const IN_PROGRESS_ROWS = [
+    ['マージ（--no-commit）', (repo, a) => {
+      repo.write(repo.main, 'm.txt', 'm\n')
+      repo.git(repo.main, 'add', 'm.txt')
+      repo.git(repo.main, 'commit', '-q', '-m', 'm')
+      repo.git(a.path, 'merge', '-q', '--no-commit', '--no-ff', 'main')
+      return 'MERGE_HEAD'
+    }],
+    ['cherry-pick（エディタが失敗して commit に至らず止まる）', (repo, a) => {
+      repo.write(repo.main, 'm.txt', 'm\n')
+      repo.git(repo.main, 'add', 'm.txt')
+      repo.git(repo.main, 'commit', '-q', '-m', 'm')
+      spawnSync('git', ['cherry-pick', '-e', 'main'], { cwd: a.path, env: { ...gitEnv(repo.root), GIT_EDITOR: 'false' }, encoding: 'utf8' })
+      return 'CHERRY_PICK_HEAD'
+    }],
+    ['revert（--no-commit で止まる）', (repo, a) => {
+      repo.write(a.path, 'v.txt', 'v\n')
+      repo.git(a.path, 'add', 'v.txt')
+      repo.git(a.path, 'commit', '-q', '-m', 'v')
+      spawnSync('git', ['revert', '-n', 'HEAD'], { cwd: a.path, env: gitEnv(repo.root), encoding: 'utf8' })
+      return 'REVERT_HEAD'
+    }],
+  ]
+  for (const [name, setup] of IN_PROGRESS_ROWS) {
+    test(`${tag} ${name}の途中: 触らず in-progress・wipCommitted:false。途中状態を確定させない`, () => {
+      const repo = makeRecoverRepo()
+      const a = repo.addWorktree('a')
+      const ref = setup(repo, a)
+      assert.ok(spawnSync('git', ['rev-parse', '-q', '--verify', ref], { cwd: a.path, env: gitEnv(repo.root) }).status === 0, `前提: ${ref} がある`)
+      assert.ok(Number(repo.git(a.path, 'status', '--porcelain').split('\n').filter(Boolean).length) >= 1, '前提: 汚れがある')
+      const before = repo.head(a.path)
+      const r = prep(repo, a)
+      assert.equal(r.status, 0, r.stderr)
+      assert.deepEqual([r.result.wip, r.result.wipCommitted], ['in-progress', false])
+      assert.equal(repo.head(a.path), before, 'コミットを作らない')
+      assert.equal(spawnSync('git', ['rev-parse', '-q', '--verify', ref], { cwd: a.path, env: gitEnv(repo.root) }).status, 0, `${ref} は残る`)
+    })
+  }
+
+  test(`${tag} フックが commit のあとで変更を捨てる（post-commit の reset --hard）: 終了コード成功・汚れ無しでも empty-commit・wipCommitted:false`, () => {
+    const repo = makeRecoverRepo()
+    hook(repo, 'post-commit', 'git reset -q --hard HEAD~1')
+    const a = repo.addWorktree('a')
+    repo.write(a.path, 'a.txt', 'changed\n')
+    const before = repo.head(a.path)
+    const r = prep(repo, a)
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual([r.result.wip, r.result.wipCommitted, r.result.resolved], ['empty-commit', false, true])
+    assert.equal(repo.head(a.path), before, 'HEAD は進んでいない')
+    assert.equal(repo.git(a.path, 'status', '--porcelain'), '', '汚れは無く見える（変更は捨てられた）')
+  })
+
+  test(`${tag} フックが commit のあとで変更を捨て、空のコミットを積む（HEAD は進むが前の HEAD との差分が空）: empty-commit・wipCommitted:false`, () => {
+    const repo = makeRecoverRepo()
+    hook(repo, 'post-commit', 'if [ -z "$RP_TEST_NESTED" ]; then RP_TEST_NESTED=1 git reset -q --hard HEAD~1 && RP_TEST_NESTED=1 git commit -q --allow-empty -m e; fi')
+    const a = repo.addWorktree('a')
+    repo.write(a.path, 'a.txt', 'changed\n')
+    const before = repo.head(a.path)
+    const r = prep(repo, a)
+    assert.deepEqual([r.result.wip, r.result.wipCommitted], ['empty-commit', false])
+    assert.notEqual(repo.head(a.path), before, '前提: HEAD は進んでいる')
+    assert.equal(repo.git(a.path, 'diff', '--name-only', before, 'HEAD'), '', '前提: 差分は空')
+  })
+
+  test(`${tag} コミット後の観測が失敗する（post-commit が index を壊す）: コミットは作られても unverified・wipCommitted:false。clean と見なさない`, () => {
+    const repo = makeRecoverRepo()
+    hook(repo, 'post-commit', 'echo garbage > "$(git rev-parse --git-path index)"')
+    const a = repo.addWorktree('a')
+    repo.write(a.path, 'a.txt', 'changed\n')
+    const r = prep(repo, a)
+    assert.deepEqual([r.result.wip, r.result.wipCommitted, r.result.dirty], ['unverified', false, 1], 'dirty は WIP の前の件数')
+    assert.equal(logSubjects(repo, a.branch)[0], WIP_SUBJECT)
+  })
+
   const smTest = toolExists('git') ? test : test.skip
   smTest(`${tag} submodule 初期化済み・clean: WIP は作らず wipCommitted:true（初期化済み submodule の保持は worktree-remove.sh が判定する）`, () => {
     const repo = makeRecoverRepo({ submodule: true })
@@ -393,6 +500,33 @@ export function registerRecoverPrepTests(bash) {
     repo.git(a.path, 'commit', '-q', '-m', 'remove')
     const r = prep(repo, a)
     assert.deepEqual([r.result.diff, r.result.commitsAhead, r.result.filesChanged], ['empty', 0, 0])
+  })
+
+  test(`${tag} base だけが origin で進み、ブランチに独自のコミットが無い: 三点差分は空（diff:empty）。先端同士の差分（二点）で nonempty にしない`, () => {
+    const repo = makeRecoverRepo()
+    const a = repo.addWorktree('a')
+    repo.write(repo.main, 'base-only.txt', 'b\n')
+    repo.git(repo.main, 'add', 'base-only.txt')
+    repo.git(repo.main, 'commit', '-q', '-m', 'base advance')
+    repo.git(repo.main, 'push', '-q', 'origin', 'main')
+    const r = prep(repo, a)
+    assert.deepEqual([r.result.wip, r.result.diff, r.result.commitsAhead, r.result.filesChanged], ['none', 'empty', 0, 0])
+  })
+
+  smTest(`${tag} submodule ポインタだけの変更: diff.ignoreSubmodules=all の利用者設定でも差分あり（nonempty）。empty にして discard の根拠にしない`, () => {
+    const repo = makeRecoverRepo({ submodule: true })
+    repo.git(repo.main, 'push', '-q', 'origin', 'main')
+    repo.git(repo.main, 'config', 'diff.ignoreSubmodules', 'all')
+    const a = repo.addWorktree('a')
+    repo.initSubmodule(a.path)
+    repo.write(a.path, 'sm/g', 'new\n')
+    repo.git(join(a.path, 'sm'), 'add', 'g')
+    repo.git(join(a.path, 'sm'), 'commit', '-q', '-m', 'sub change')
+    repo.git(a.path, 'add', 'sm')
+    repo.git(a.path, 'commit', '-q', '-m', 'bump sm')
+    assert.equal(repo.git(a.path, 'diff', '--name-only', 'main...HEAD'), '', '前提: 設定のもとで素の diff は submodule ポインタの変更を隠す')
+    const r = prep(repo, a)
+    assert.deepEqual([r.result.wip, r.result.diff, r.result.commitsAhead, r.result.filesChanged], ['none', 'nonempty', 1, 1])
   })
 
   test(`${tag} base の取得に失敗: diff:unknown・baseFetched:false。stale な追跡 ref が残っていても空とは言わない。WIP は積む`, () => {

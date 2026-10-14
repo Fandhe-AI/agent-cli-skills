@@ -3754,15 +3754,15 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'acceea9977a2e4af9472995c7b72842aadf1e1e36f0184895708b31147d2e57f',
-'measure-free-disk.sh':'15c61c74246d276938a6f6aaf9446b8b253777de3bf00f5f4be71db0a2974b1c',
-'observe-pr.sh':'57c0998eea5f27925d33096337da58c335cbc51daf2121a2dbde43cd8e65aad5',
-'base-merge.sh':'a702d5ebedabde57afc26222f7706af8d2fc848335281230aa5d9cd07b2693bc',
-'pr-push.sh':'4cd6c0d70a58db2151b30b875f9ef324ccc2653b9265ee6405c1748d6ac5d5b4',
-'state.sh':'91c4a34624d6d3c667855b4fbc4064b0fad99a54bab56cdd075ac5cad6de1086',
-'merge-gate.sh':'156b0069989a71b0ee9c62e89aba1ce87202b73edf69c9d28c1a16121a7c5bcf',
-'worktree-remove.sh':'09105de6da8615a23524fa732b47cb61ea83fadee740781ec0cf599c30cd2ccf',
-'recover-prep.sh':'43ee0079264ec203f1ab217c2699ed24d8e2ef0511bf9ea82e0ce12b8ecf8dc7',
+'measure-residual-bytes.sh':'dee7a63eca20ac757f31c98b1a4fdced21907e8a19d792fe844b271975554cc1',
+'measure-free-disk.sh':'3125a8cd45a584732f8d47c4622615a25fdb86c3713ca75eed81dde0e494a41d',
+'observe-pr.sh':'15f9aee992b664c472e2bab382ffcf19a00bc6eb00e47eb9a099307f9e66be74',
+'base-merge.sh':'1c23a0a901de778e81ca47cb61f9001313d2e3582cd58873e7e0c7b6a6970913',
+'pr-push.sh':'ff03b14276f56899111acaaa8b8bc0f8e493cc27947d250165ea9881b0cf43fd',
+'state.sh':'b810b60cb5a11288c42e55083c77e0c7723e6e676fba02955015b1e3646a4b07',
+'merge-gate.sh':'16e15fc7221717ef00dc12460aa3c539f9881a129c09f21dfbdf78687597aa69',
+'worktree-remove.sh':'7180bf21e0187ce5b502f39be6d28869ef3fdfa904e1ec2c9ed9aeb095375b37',
+'recover-prep.sh':'836a3aa30e1d8aba6f6c526e4568c47932b59a9d07bd30e3f9875e87fa47356b',
 }
 
 
@@ -10447,7 +10447,7 @@ for(const e of disposableWorktrees)log(`  ${e.issue ? `#${e.issue}` : '(スイ�
 
 const retainedLedger=ephemeralWorktrees.filter((e)=>e.kind==='retained')
 if(retainedLedger.length>0){
-log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
 for(const e of retainedLedger)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 

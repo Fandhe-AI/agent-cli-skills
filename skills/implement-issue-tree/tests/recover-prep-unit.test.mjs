@@ -68,6 +68,12 @@ const RESOLVE_ROWS = [
   [0, 'missing', '', 'feat/1-x', 'main', [1, '', 'feat/1-x', 'state', 0]],
   [0, 'live', 'other', 'feat/1-x', 'main', [1, '', 'feat/1-x', 'state', 0]],
   [0, 'missing', '', '', 'main', [0, 'no-target', '', 'none', 0]],
+  // 記録されたブランチが base と同名なら確定しない（live と対称。dead worktree・branch だけの残骸でも base を継続・破棄の対象にしない）
+  [0, 'missing', '', 'main', 'main', [0, 'base-branch', '', 'none', 0]],
+  [0, 'live', 'other', 'release/1.0', 'release/1.0', [0, 'base-branch', '', 'none', 0]],
+  [1, 'missing', '', 'main', 'main', [0, 'base-branch', '', 'none', 0]],
+  [1, 'missing', '', 'main', '', [1, '', 'main', 'state', 1]],
+  [0, 'missing', '', 'main', 'develop', [1, '', 'main', 'state', 0]],
   // dead worktree: 記録されたブランチを使う（無ければ空で確定 = 継続不能）。取り残すデータが無い
   [1, 'missing', '', 'feat/1-x', 'main', [1, '', 'feat/1-x', 'state', 1]],
   [1, 'missing', '', '', 'main', [1, '', '', 'none', 1]],
@@ -127,8 +133,11 @@ check(
     ['rp_wip_plan', '0', '0', '0'], ['rp_wip_plan', '0', '3', '2'], ['rp_wip_plan', '1', '0', '0'], ['rp_wip_plan', '5', '0', '0'],
     ['rp_wip_plan', '-1', '0', '0'], ['rp_wip_plan', '-1', '2', '1'], ['rp_wip_plan', '2', '1', '0'], ['rp_wip_plan', '2', '1', '1'],
     ['rp_wip_plan', '2', '0', '1'], ['rp_wip_plan', '1', '0', '2'],
+    // マージ・cherry-pick・revert・rebase の途中（4 つ目）: 汚れがあれば in-progress（unmerged が先、入れ子より先）。汚れ無し・確認不能はそちらが先
+    ['rp_wip_plan', '2', '0', '0', '1'], ['rp_wip_plan', '2', '1', '0', '1'], ['rp_wip_plan', '2', '0', '1', '1'], ['rp_wip_plan', '0', '0', '0', '1'],
+    ['rp_wip_plan', '-1', '0', '0', '1'], ['rp_wip_plan', '2', '0', '0', '0'],
   ],
-  (g, _r, i) => assert.equal(g.out, ['none', 'none', 'commit', 'commit', 'unverified', 'unverified', 'unmerged', 'unmerged', 'nested-repo', 'nested-repo'][i], String(i)),
+  (g, _r, i) => assert.equal(g.out, ['none', 'none', 'commit', 'commit', 'unverified', 'unverified', 'unmerged', 'unmerged', 'nested-repo', 'nested-repo', 'in-progress', 'unmerged', 'in-progress', 'none', 'unverified', 'commit'][i], String(i)),
 )
 
 check(
@@ -141,11 +150,14 @@ check(
     ['rp_wip_after', '0', '1', '0'], ['rp_wip_after', '0', '4', '0'],
     // commit が失敗しても、残る汚れが全部 submodule 由来ならコミットできるものが無かっただけ（submodule）。フックの拒否で staged が残るなら commit-failed
     ['rp_wip_after', '1', '2', '2'], ['rp_wip_after', '1', '3', '2'], ['rp_wip_after', '128', '1', '1'],
+    // コミットの実体（4 つ目）: 成功の終了コードでも made 以外（HEAD が進まない・差分が空・確認不能）は汚れが無くても退避できていない
+    ['rp_wip_after', '0', '0', '0', 'made'], ['rp_wip_after', '0', '0', '0', 'none'], ['rp_wip_after', '0', '0', '0', 'empty'], ['rp_wip_after', '0', '0', '0', 'unknown'],
+    ['rp_wip_after', '0', '1', '0', 'none'], ['rp_wip_after', '0', '-1', '0', 'empty'], ['rp_wip_after', '0', '-1', '0', 'made'], ['rp_wip_after', '1', '0', '0', 'none'],
   ],
-  (g, _r, i) => assert.equal(g.out, ['committed', 'commit-failed', 'commit-failed', 'commit-failed', 'commit-failed', 'unverified', 'submodule', 'submodule', 'residual-dirty', 'residual-dirty', 'submodule', 'commit-failed', 'submodule'][i], String(i)),
+  (g, _r, i) => assert.equal(g.out, ['committed', 'commit-failed', 'commit-failed', 'commit-failed', 'commit-failed', 'unverified', 'submodule', 'submodule', 'residual-dirty', 'residual-dirty', 'submodule', 'commit-failed', 'submodule', 'committed', 'empty-commit', 'empty-commit', 'empty-commit', 'empty-commit', 'empty-commit', 'unverified', 'commit-failed'][i], String(i)),
 )
 
-const WIP_WORDS = ['none', 'skipped', 'committed', 'commit-failed', 'unmerged', 'nested-repo', 'submodule', 'residual-dirty', 'unverified', '', 'bogus']
+const WIP_WORDS = ['none', 'skipped', 'committed', 'commit-failed', 'empty-commit', 'unmerged', 'in-progress', 'nested-repo', 'submodule', 'residual-dirty', 'unverified', '', 'bogus']
 check(
   'rp_wip_ok: 取り残す未コミット変更が無い語（none・skipped・committed）だけが完了、それ以外は未知の語を含めて未完了',
   WIP_WORDS.map((w) => ['rp_wip_ok', w]),

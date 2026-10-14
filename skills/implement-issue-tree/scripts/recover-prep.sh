@@ -12,20 +12,23 @@
 #   1. 旧 worktree の状態を調べる（無い = dead worktree、メイン worktree、登録されていない、git がそのパス自身を指さない、登録済みで実体が一致）。
 #      live なら `git symbolic-ref` の HEAD を対象ブランチにする（state のブランチと食い違えば HEAD を優先する）。dead は記録されたブランチを使う。
 #      メイン・未登録・不一致・detached・base と同名は確定せず（resolved:false）、何も書かない
-#   2. live のとき、未コミット変更があれば WIP コミットを作る。汚れの観測は worktree-remove.sh と同じ
-#      `git -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none`（利用者の status.showUntrackedFiles や submodule の ignore、
-#      グローバルの除外に左右されない）。フックは通す（--no-verify を使わない）。退避完了（wipCommitted:true）の根拠はコミットの終了コードではなく、
+#   2. live のとき、未コミット変更があれば WIP コミットを作る。汚れの観測は worktree-remove.sh と同じ対象の
+#      `git -c core.excludesFile= status --porcelain=v2 -z -uall --ignore-submodules=none`（利用者の status.showUntrackedFiles や submodule の ignore、
+#      グローバルの除外に左右されない。-z はパスの C 引用〔非 ASCII・"・\・タブ〕で入れ子の git リポジトリの検出が取りこぼすのを避けるため。
+#      worktree-remove.sh は行数だけを数え、引用で数は変わらないので -z なしのまま）。フックは通す（--no-verify を使わない）。退避完了（wipCommitted:true）の根拠はコミットの終了コードではなく、
 #      コミット後の同じ観測で汚れが無いこと。フックの拒否・フックによる書き換え・submodule 内の未コミットの変更・入れ子の git リポジトリ・
-#      未マージのエントリがあれば false（推測で true にしない）。拒否されたときの add は戻さない（staged は worktree-remove.sh が汚れとして保持する）
+#      未マージのエントリ・マージ／cherry-pick／revert／rebase の途中があれば false（推測で true にしない）。コミットの終了コードが成功でも、
+#      HEAD が進んでいない・進んだが前の HEAD との差分が空（フックが commit のあとで変更を捨てた）なら empty-commit・false。拒否されたときの add は戻さない（staged は worktree-remove.sh が汚れとして保持する）
 #   3. 対象ブランチが確定したら `git fetch origin refs/heads/<base>:refs/remotes/origin/<base>` で base を最新化し、
-#      `git diff --quiet <base>...<branch>` で差分の有無を調べる（fetch に失敗したら unknown。空とは扱わない）。差分があれば先行コミット数と変更ファイル数も出す
+#      `git diff --quiet --no-ext-diff --ignore-submodules=none <base>...<branch>` で差分の有無を調べる（利用者の diff.ignoreSubmodules や
+#      diff.external に左右されない。submodule ポインタだけの変更も差分に数える）（fetch に失敗したら unknown。空とは扱わない）。差分があれば先行コミット数と変更ファイル数も出す
 # 初期化済み submodule の扱い: 親の `git add -A` は submodule 内の未コミットの変更を記録しない。そうした変更はコミット後も汚れとして残るので wip:submodule・
 #       wipCommitted:false になる。submodule の変更が無いなら、初期化済みであること自体は WIP の判定に影響しない（discard の可否は worktree-remove.sh が
 #       初期化済み submodule の存在で保持として判定する）。
 # 出力: 標準出力の最後の 1 行が `RECOVER_PREP_RESULT {json}`。値は固定語彙・真偽・件数・40 桁 16 進の sha と、検証済みのブランチ名だけ
 #       （パス・hook の出力・外部由来の文字列を入れない。診断は標準エラーへ）。結果を出せたときは、失敗や未確定を含めて exit 0。
 #         {"resolved":bool,"reason":"…","branch":"…","source":"worktree|state|none","worktreeMissing":bool,
-#          "wip":"none|skipped|committed|commit-failed|unmerged|nested-repo|submodule|residual-dirty|unverified","wipCommitted":bool,"dirty":N,
+#          "wip":"none|skipped|committed|commit-failed|empty-commit|unmerged|in-progress|nested-repo|submodule|residual-dirty|unverified","wipCommitted":bool,"dirty":N,
 #          "branchExists":bool,"branchSha":"<40 桁 | 空>","baseFetched":bool,"baseSha":"<40 桁 | 空>","diff":"empty|nonempty|unknown",
 #          "commitsAhead":N,"filesChanged":N}
 #         reason は resolved:false のときの理由（main-worktree / not-registered / toplevel-mismatch / detached / base-branch / no-target / list-failed）。
@@ -98,12 +101,42 @@ emit() {
   exit 0
 }
 
-# 汚れの観測。worktree-remove.sh の確認と同じ形。結果は OBS_OUT（status の出力）・OBS_RC に入る
+# 汚れの観測。worktree-remove.sh の確認と同じ対象（同じ設定に左右されない形）を、NUL 区切り（-z）で読む。-z でないとパスが C 引用（非 ASCII・"・\・タブ）で
+# 出て、入れ子の git リポジトリ（`? パス/`）の検出が取りこぼす。シェル変数は NUL を持てないので、tr で改行→? と NUL→改行（パス中の改行を行区切りと
+# 紛れさせず、1 レコード 1 行にする）に変え、rename / copy レコード（`2 `）の直後の元のパスのレコードは awk で落とし、git の終了コードは末尾の
+# GITRC= の行で受け取る（パイプでは git の終了コードが消えるため）。結果は OBS_OUT（1 レコード 1 行）・OBS_RC に入る
 OBS_OUT=""
 OBS_RC=0
 observe() { # $1 = worktree のパス
+  local raw last
   OBS_RC=0
-  OBS_OUT=$(git -C "$1" -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none 2>/dev/null) || OBS_RC=$?
+  OBS_OUT=""
+  raw=$({ git -C "$1" -c core.excludesFile= status --porcelain=v2 -z -uall --ignore-submodules=none 2>/dev/null; printf 'GITRC=%s\0' "$?"; } |
+    tr '\012\000' '?\012' |
+    awk 'skip { skip = 0; next } { print } substr($0, 1, 2) == "2 " { skip = 1 }')
+  last=${raw##*$'\n'}
+  case "${last}" in
+    GITRC=*) OBS_RC=${last#GITRC=} ;;
+    *) OBS_RC=1 ;;
+  esac
+  case "${OBS_RC}" in '' | *[!0-9]*) OBS_RC=1 ;; esac
+  case "${raw}" in
+    *$'\n'*) OBS_OUT=${raw%$'\n'*} ;;
+  esac
+}
+
+# マージ・cherry-pick・revert・rebase の途中か（未解決の途中状態。add -A は確定させてしまうので触らない）。ref とディレクトリの両方で見る
+in_progress() { # $1 = worktree のパス
+  local ref d gp
+  for ref in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD REBASE_HEAD; do
+    if git -C "$1" rev-parse -q --verify "${ref}" >/dev/null 2>&1; then return 0; fi
+  done
+  for d in rebase-merge rebase-apply sequencer; do
+    gp=$(git -C "$1" rev-parse --git-path "${d}" 2>/dev/null) || continue
+    case "${gp}" in /*) ;; *) gp="$1/${gp}" ;; esac
+    if [ -d "${gp}" ]; then return 0; fi
+  done
+  return 1
 }
 
 # 1. 旧 worktree の状態
@@ -148,12 +181,36 @@ if [ "${wtstate}" = live ]; then
     R_DIRTY=${WR_DIRTY}
     rp_scan_status "${OBS_OUT}"
   fi
-  plan=$(rp_wip_plan "${R_DIRTY}" "${RP_UNMERGED}" "${RP_NESTED}")
+  ipg=0
+  if in_progress "${path}"; then ipg=1; fi
+  plan=$(rp_wip_plan "${R_DIRTY}" "${RP_UNMERGED}" "${RP_NESTED}" "${ipg}")
   case "${plan}" in
     commit)
       crc=0
+      old_head=$(git -C "${path}" rev-parse -q --verify HEAD 2>/dev/null) || old_head=""
       # stdin を閉じる（stdin 待ちのフックがハングしない）。フックの出力は標準エラーへ（標準出力の最後の 1 行を結果に保つ）
       git -C "${path}" add -A >&2 && git -C "${path}" commit -q -m "wip(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?
+      # コミットの実体: 成功の終了コードでも、フックがあとで変更を捨てると HEAD が進まない・進んでも差分が空になる（汚れは無く見える）
+      cstate=made
+      if [ "${crc}" = 0 ]; then
+        new_head=$(git -C "${path}" rev-parse -q --verify HEAD 2>/dev/null) || new_head=""
+        if [ -z "${new_head}" ] || [ "${new_head}" = "${old_head}" ]; then
+          cstate=none
+        else
+          from=${old_head}
+          [ -n "${from}" ] || from=$(git hash-object -t tree /dev/null 2>/dev/null) || from=""
+          xrc=2
+          if [ -n "${from}" ]; then
+            xrc=0
+            git -C "${path}" diff --quiet --no-ext-diff --ignore-submodules=none "${from}" "${new_head}" >/dev/null 2>&1 || xrc=$?
+          fi
+          case "${xrc}" in
+            1) cstate=made ;;
+            0) cstate=empty ;;
+            *) cstate=unknown ;;
+          esac
+        fi
+      fi
       observe "${path}"
       if [ "${OBS_RC}" -ne 0 ]; then
         after_dirty=-1
@@ -163,7 +220,7 @@ if [ "${wtstate}" = live ]; then
         after_dirty=${WR_DIRTY}
         after_sub=${WR_SUB_DIRTY}
       fi
-      R_WIP=$(rp_wip_after "${crc}" "${after_dirty}" "${after_sub}")
+      R_WIP=$(rp_wip_after "${crc}" "${after_dirty}" "${after_sub}" "${cstate}")
       ;;
     *) R_WIP=${plan} ;;
   esac
@@ -193,14 +250,14 @@ if [ -n "${RP_BRANCH}" ]; then
   drc=2
   if [ "${fetched}" = 1 ] && [ "${exists}" = 1 ]; then
     drc=0
-    git diff --quiet "${R_BASESHA}...${R_BSHA}" >/dev/null 2>&1 || drc=$?
+    git diff --quiet --no-ext-diff --ignore-submodules=none "${R_BASESHA}...${R_BSHA}" >/dev/null 2>&1 || drc=$?
   fi
   R_DIFF=$(rp_diff_state "${fetched}" "${exists}" "${drc}")
   if [ "${R_DIFF}" = nonempty ]; then
     n=$(git rev-list --count "${R_BASESHA}..${R_BSHA}" 2>/dev/null) || n=0
     case "${n}" in '' | *[!0-9]*) n=0 ;; esac
     R_AHEAD=${n}
-    files=$(git diff --name-only "${R_BASESHA}...${R_BSHA}" 2>/dev/null | awk 'END { print NR + 0 }') || files=0
+    files=$(git diff --name-only --no-ext-diff --ignore-submodules=none "${R_BASESHA}...${R_BSHA}" 2>/dev/null | awk 'END { print NR + 0 }') || files=0
     case "${files}" in '' | *[!0-9]*) files=0 ;; esac
     R_FILES=${files}
   fi
