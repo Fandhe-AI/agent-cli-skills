@@ -384,3 +384,16 @@ test('verifyDiscardSafety / DISCARD_SAFETY_SCHEMA / discard-safety は残って�
   const dist = readFileSync(new URL('../scripts/implement-issue-tree.js', import.meta.url), 'utf8')
   assert.match(dist, /'worktree-remove\.sh':'[0-9a-f]{64}'/)
 })
+
+// ---- closed 後始末（Issue #632）の呼び出し形 ----
+
+test('--head つきの呼び出し形は closed 後始末の 1 か所だけ。updateStateDetailed の掃除（superseded・discard・Recover）は --head を付けない', async () => {
+  const calls = [...source.matchAll(/worktreeRemoveCommand\(([^\n]*)\)/g)].map((x) => x[1]).filter((a) => !a.startsWith('mode, path'))
+  assert.deepEqual(calls, ['cleanupMode, cleanupWorktreePath, deleteBranchName', "'discard', w, '', head"])
+  // updateStateDetailed の経路は head を渡さないので、どのモードでも --head は付かない
+  for (const [o, label] of [[{ cleanupWorktree: '/tmp/wt-40' }, 'superseded'], [{ cleanupWorktree: '/tmp/wt-40', cleanupMode: 'discard' }, 'discard'], [{ cleanupWorktree: '/tmp/wt-40', deleteBranch: true }, 'discard+branch']]) {
+    const c = stub(() => ({ ok: true, retained: false }))
+    await m.updateState(40, { status: 'merged', branch: 'feat/40-x' }, o)
+    assert.doesNotMatch(cleanupCalls(c.calls, 40)[0].prompt, /--head/, label)
+  }
+})
