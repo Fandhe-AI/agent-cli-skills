@@ -3550,7 +3550,7 @@ return'run'
 }
 
 
-const CLOSED_CLEANUP_RECORDABLE=new Set(['retained-dirty','retained-submodule','retained-head-mismatch','retained-detached'])
+const CLOSED_CLEANUP_RECORDABLE=new Set(['retained-dirty','retained-submodule','retained-head-mismatch','retained-detached','retained-broken'])
 function closedCleanupRetainedReason(result,outputMissing){
 return!outputMissing&&result?.retained===true&&CLOSED_CLEANUP_RECORDABLE.has(result?.worktree)?'retained':null
 }
@@ -3895,15 +3895,15 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'67b4d9b68546a40eb27a3a64efe2178fe7a628a3306ba80c8034968be70dd273',
-'measure-free-disk.sh':'786e727177f3d6294a014649be86f2b0297478c046f9fbc8c3b4e2de5dc56d69',
-'observe-pr.sh':'42eebb03cdb652b0c3f1dcc5c206efa5cf22d39e1e6cdaa4ba45fc347bb915e9',
-'base-merge.sh':'5b8728bf9def69543c5180ea9e7e85a6045711ff99603a0fc549549a487ebdb2',
-'pr-push.sh':'13e5a20d87a04d2e82c2a11d9971b3aaaa59fe1b3da3a624e26797b2fca832c5',
-'state.sh':'7a08d5df443386a96da5b00642bfbaf6e737db9c8062503a51bb2e1872b0d768',
-'merge-gate.sh':'ea61726c3d37f6002a2ed592c5f129e87cdeb1a53d7764cb334353cb2c7ec35b',
-'worktree-remove.sh':'bb23a76012cdecc9eea6915810fc6a52a83154ec6d5add8a987d2d8c7ac9465c',
-'recover-prep.sh':'7cfd416881ba5cfd64a9af2229eebb8ca866dfe0ab8d993a01ff370827564473',
+'measure-residual-bytes.sh':'caa5a6657a311c84f9e1d7a5c09cea6eba850fbd7095c0cc5eca74e5d19d6a54',
+'measure-free-disk.sh':'be7e55405d54704b04eb51b707a4bbf34a1701569879c206cba7788f07818174',
+'observe-pr.sh':'810218e1cdfd49bf46b3425a4d52ab440a4fd01fa4b9ef90a7ba98a1527c15ea',
+'base-merge.sh':'b495159d54488965a308d7710de9a318c979dc3d50da3a3e328e0bb879f6d2c7',
+'pr-push.sh':'51a4216cfe7aa0086f4c7319754b2a9212866109c3f1f2d23dc9245fac77e059',
+'state.sh':'83e84cb79e366c52c32f9f24c45befb59eaca64134508f094ef5b90845ba8c1c',
+'merge-gate.sh':'a62ac43722aa0c69b35fc8f744824ed9b62a15c7215255dfdbd1727d74a3c3f0',
+'worktree-remove.sh':'cbd12707388107fd3dd247be81b0b0f8483069b658744e28a4608970e8e81b92',
+'recover-prep.sh':'e1a207c9786c490eb050ceb3410bba2b2817b6d58ff182789d3d90d9b0952a1a',
 }
 
 
@@ -3976,7 +3976,7 @@ properties:{
 ok:{type:'boolean',description:'結果の行の ok'},
 retained:{type:'boolean',description:'結果の行の retained（worktree が残った = 保持・失敗・メイン）'},
 branchSha:{type:'string',description:'結果の行の branchSha（40 桁の 16 進。無ければ空文字）'},
-worktree:{type:'string',description:'結果の行の worktree の語（removed・retained-dirty・retained-unobservable 等。結果の行が無い・非 0 終了のときは空文字）'},
+worktree:{type:'string',description:'結果の行の worktree の語（removed・retained-dirty・retained-broken・retained-unobservable 等。結果の行が無い・非 0 終了のときは空文字）'},
 },
 }
 const isWorktreeCleanupValid=(r)=>typeof r?.ok==='boolean'&&typeof r?.retained==='boolean'
@@ -10802,7 +10802,7 @@ const retainedLedger=[
 ...[...slotRetainedPaths].map(([path,issue])=>({issue,kind:'retained',path})),
 ]
 if(retainedLedger.length>0){
-log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・汚れや HEAD を観測できなかった〔retained-unobservable〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD〔retained-head-mismatch / retained-detached〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・git の対象が worktree 自身でない〔retained-broken〕・git status や HEAD を一過性に観測できなかった〔retained-unobservable〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD・実体の無い detached の登録〔retained-head-mismatch / retained-detached〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
 for(const e of retainedLedger)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 

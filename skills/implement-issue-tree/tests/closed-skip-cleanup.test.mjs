@@ -91,7 +91,7 @@ test('prBindingValuesFetched: 4 項目すべてが取得できた値のときだ
 
 test('closedCleanupRetainedReason: スクリプトが結果行の固定語で保持を明示したときだけ記録する（結果なし・非 0 終了・launcher 不一致・lock・固定語以外は記録しない）', () => {
   const r = (worktree, extra = {}) => ({ ok: false, retained: true, worktree, ...extra })
-  for (const w of ['retained-dirty', 'retained-submodule', 'retained-head-mismatch', 'retained-detached']) assert.equal(m.closedCleanupRetainedReason(r(w), false), 'retained', w)
+  for (const w of ['retained-dirty', 'retained-submodule', 'retained-head-mismatch', 'retained-detached', 'retained-broken']) assert.equal(m.closedCleanupRetainedReason(r(w), false), 'retained', w)
   // エージェントが非 0 終了・launcher の exit 3 / 4・結果の行なしを ok:false / retained:true / worktree 空で返す
   assert.equal(m.closedCleanupRetainedReason({ ok: false, retained: true, worktree: '' }, false), null)
   assert.equal(m.closedCleanupRetainedReason({ ok: false, retained: true }, false), null)
@@ -218,7 +218,8 @@ const RETAINED = [
   ['非 0 終了・結果行なし（ok:false・retained:true・worktree 空）', () => ({ ok: false, retained: true, worktree: '' }), false],
   ['worktree の語を返さない旧形式の応答', () => ({ ok: false, retained: true }), false],
   ['生きている lock（retained-locked）はセッション終了後に解消し得るので記録しない', () => ({ ok: false, retained: true, worktree: 'retained-locked' }), false],
-  ['観測の失敗（retained-unobservable: status を読めない・HEAD を読めない）は一過性かもしれないので記録せず、次のランで再試行させる', () => ({ ok: false, retained: true, worktree: 'retained-unobservable' }), false],
+  ['.git の破損・git の対象が worktree 自身でない（retained-broken）は決定的なので記録する', () => ({ ok: false, retained: true, worktree: 'retained-broken' })],
+  ['観測の失敗（retained-unobservable: git status コマンドの失敗・--head 指定時の HEAD の一過性の読み取り失敗）は一過性かもしれないので記録せず、次のランで再試行させる', () => ({ ok: false, retained: true, worktree: 'retained-unobservable' }), false],
   ['掃除の結果なし（StructuredOutput 未返却）', () => null, false],
   ['掃除が例外', () => { throw new Error('boom') }, false],
   // 誤転記（ok:false なのに retained:false）は削除成功と見なさず、決定的な保持でもないので記録しない

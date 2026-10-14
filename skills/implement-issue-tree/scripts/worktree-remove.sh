@@ -39,6 +39,10 @@
 #       観測できない・エラー・判定不能（ps が無い・失敗、/proc が無い、未知の kill のエラー）は生存扱い。それ以外の lock は外さず、worktree を保持して結果に記録する。この pid は agent ごとではなく
 #       セッション（メインの claude プロセス）の pid なので、同じセッションの中から実行すると lock は常に生存と判定されて保持になる
 #       （外れるのは、そのセッションが終わったあとの実行だけ）。
+# --branch の削除: そのブランチを持つ実体の無い登録が残っていると git branch -D が used by worktree で拒否する。全体の prune には頼らず、その登録だけを
+#       remove_one（同じ確認・同じ許可形の git worktree remove）で 1 件消してからブランチを消す。lock あり・実体の無い detached・HEAD 0000… は消さず保持の語を結果にし、
+#       ブランチも残す（keep）。実体のある別の worktree が持つブランチは触らない（branch -D が失敗する従来どおり）。
+#       実体の無いパスは実体のパス（祖先のシンボリックリンクを解決した形）でも照合する。大小だけ違う綴りは一致させない（大小を区別する FS では別の場所を消しかねない）。
 # prune: 全体の `git worktree prune` は safe_prune の 1 か所だけが呼ぶ。remove で何も消さなかったとき（not-registered・main・cwd・保持）は呼ばず、呼ぶときも
 #       実体の無い登録のうち detached または HEAD 0000… のもの（コミットの唯一の参照かもしれない・lock なしの prune 対象）が 1 件でもあれば全体をスキップする
 #       （prune は対象を絞れない。登録が残るだけで、結果の語は変わらない）。スキップした件数は結果の行の pruneSkipped（0 のときは出さない）。
@@ -50,11 +54,16 @@
 #           retained-branch-mismatch = discard で --path と --branch（または --expect-branch）を与えたとき、worktree の HEAD が --branch と違う（detached を含む。worktree もブランチも消さない）。
 #           retained-head-mismatch = discard で --head を与えたとき、worktree の HEAD のコミットが --head と違う（読めないときを含む。worktree もブランチも消さない）。
 #           retained-detached = discard で --head を与えたとき、HEAD が一致していても detached（detached 上の未 push のコミットは消すと失われる）。
-#           retained-unobservable = 観測に失敗した（status を読めない・git の対象が worktree 自身でない・--head 指定時に HEAD のコミットを読めない）。何も消さない。
-#               retained-dirty / retained-head-mismatch は観測した結果の保持で、これは観測できなかったという別の語（ホストは前者だけを恒久の試行済みに記録し、これは次のランで再試行させる）。
+#           retained-unobservable = 観測に失敗した（git status コマンドそのものの失敗・--head 指定時の HEAD のコミットの一過性の読み取り失敗）。何も消さない。
+#               retained-dirty / retained-head-mismatch / retained-broken は観測した結果の保持で、これは観測できなかったという別の語（ホストは前者を恒久の試行済みに記録し、これは次のランで再試行させる）。
+#           retained-broken = git の対象が worktree 自身でない（.git の破損・toplevel の不一致）。読み直しても変わらない決定的な状態なのでホストは記録する側。
+#               rev-parse の一過性の失敗と区別できないときも、毎ラン再試行して枠を食い続けるより安全なので、この語（記録側）へ倒す。何も消さない。
+#           unborn（コミットが無い）の HEAD に --head を渡したときは retained-head-mismatch（PR の head と一致し得ない決定的な状態。毎ラン再試行させない）。
+#           retained-detached は実体の無い登録にも使う: 実体が無く、detached または HEAD 0000…（ブランチ ref が無い）で lock の無い登録は、登録がコミットの唯一の参照かもしれず、
+#               消すと到達不能になるので superseded・discard・sweep のすべてで消さない。
 #           branchSha は消す前（または消さなかった）ブランチの先頭 sha で、ブランチの削除に失敗したとき（failed）は空。
 #   check-absent: remove と同じ形で mode が check-absent、worktree が上の語、branch は none、dirty は 0、retained は absent・prunable 以外で true。
-#   remove: {"ok":bool,"mode":"…","worktree":"removed|not-registered|skipped|main|cwd|retained-dirty|retained-submodule|retained-locked|retained-branch-mismatch|retained-head-mismatch|retained-detached|retained-unobservable|failed",
+#   remove: {"ok":bool,"mode":"…","worktree":"removed|not-registered|skipped|main|cwd|retained-dirty|retained-broken|retained-submodule|retained-locked|retained-branch-mismatch|retained-head-mismatch|retained-detached|retained-unobservable|failed",
 #            "branch":"none|deleted|absent|keep-base|keep|failed","branchSha":"<40 桁 | 空>","dirty":N,"unlocked":bool,"retained":bool[,"pruneSkipped":N]}
 #   sweep:  {"ok":true,"mode":"sweep","removed":["…"],"retained":N,"skipped":N,"failed":N,"reason":"…"[,"pruneSkipped":N]}
 #           reason は空 / state-unreadable / invalid-input。state-unreadable と invalid-input では何も消さない。
@@ -64,6 +73,8 @@
 
 set -u
 unset POSIXLY_CORRECT
+# 環境の GIT_DIR などが残っていると、git の対象が引数のパスでなく環境の指すリポジトリになる（wr_repo_matches が誤って一致し、登録を見落として absent を返し得る）
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
 LC_ALL=C
 export LC_ALL
 
@@ -122,12 +133,23 @@ T_DIRTY=0
 T_UNLOCKED=false
 # $1 = モード、$2 = パス、$3 = 結びつけるブランチ（discard の --branch。空 = 結びつけない）、$4 = 結びつける HEAD の sha（discard の --head。空 = 結びつけない）
 remove_one() {
-  local m=$1 path=$2 expect=${3:-} expect_sha=${4:-} wt_sha wt_head list top real cwd_real plan lockact alive cur_start status_out sub_init gd rc kmsg krc kw pw pself pout prc xw
+  local m=$1 path=$2 expect=${3:-} expect_sha=${4:-} wt_sha wt_head wt_unborn lreal list top real cwd_real plan lockact alive cur_start status_out sub_init gd rc kmsg krc kw pw pself pout prc xw
   T_WT=""
   T_DIRTY=0
   T_UNLOCKED=false
+  # 字面を正規化してから使う（末尾の / と /.・連続する /・途中の /./。.. は入力検証が拒否済み）。remove は実体の無いパスを自分では
+  # 解決せず、登録の字面と比べるので、正規化しない綴りで指すと登録を見つけても消せない
+  path=$(wr_norm_path "${path}")
   list=$(git worktree list --porcelain 2>/dev/null) || { T_WT=failed; return 0; }
   wr_find_entry "${list}" "${path}"
+  if [ "${WR_REGISTERED}" != 1 ] && [ ! -e "${path}" ] && [ ! -L "${path}" ]; then
+    # 実体の無いパスは字面のままでは登録（実体のパス）と照合できない（祖先がシンボリックリンクのとき）。check-absent と同じく、実在する祖先を実体にした形でも探す。
+    # 一致したらそのパスで以降を進める（git worktree remove は実体の無いパスを自分では解決しない）。大小だけ違う綴りは一致させない（大小を区別する
+    # ファイルシステムでは別の場所を消しかねない。照合できないなら従来どおり not-registered）
+    lreal=$(wr_loose_real "${path}")
+    wr_find_entry "${list}" "${lreal}"
+    if [ "${WR_REGISTERED}" = 1 ]; then path=${lreal}; fi
+  fi
   if [ "${WR_MAIN}" = 1 ]; then T_WT=main; return 0; fi
   if [ "${WR_REGISTERED}" != 1 ]; then T_WT='not-registered'; return 0; fi
   real=$(wr_real "${path}")
@@ -165,6 +187,10 @@ remove_one() {
     if [ "${lockact}" = retain ]; then T_WT='retained-locked'; return 0; fi
   fi
 
+  # 実体の無い登録で、detached または HEAD が 0000…（ブランチ ref が無い）ものは、登録がそのコミットの唯一の参照かもしれない（消すと到達不能になる）。
+  # 消さずに保持する（superseded・discard・sweep のすべて。lock を外すのもこの確認のあと）。ブランチ上の登録は HEAD をブランチ ref が持つので失うものが無い
+  if [ ! -e "${path}" ] && [ ! -L "${path}" ] && [ "${WR_DETACHED}" = 1 ]; then T_WT='retained-detached'; return 0; fi
+
   # 汚れの確認。実体があるときだけ。git の対象がこの worktree 自身であることを確かめる（.git が壊れていると git は親のリポジトリを
   # 見てしまい、メインの status を読んでしまう）
   WR_DIRTY=0
@@ -172,26 +198,35 @@ remove_one() {
   sub_init=0
   wt_head=""
   wt_sha=""
+  wt_unborn=0
   if [ -d "${path}" ]; then
     top=$(git -C "${path}" rev-parse --show-toplevel 2>/dev/null) || top=""
-    if [ -n "${top}" ] && [ "$(wr_real "${top}")" = "${real}" ] && status_out=$(git -C "${path}" -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none 2>/dev/null); then
+    if [ -z "${top}" ] || [ "$(wr_real "${top}")" != "${real}" ]; then
+      # git の対象がこの worktree 自身でない（.git の破損・toplevel の不一致）。読み直しても変わらない決定的な状態なので retained-broken（記録する側）。
+      # rev-parse の一過性の失敗もここへ入るが、区別できないときは恒久側へ倒す（毎ラン再試行して closed 後始末の枠を食い続けるより、記録して人に見せる）
+      WR_DIRTY=-2
+    elif status_out=$(git -C "${path}" -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none 2>/dev/null); then
       wr_count_status "${status_out}"
       # この worktree が実際に指すブランチ（toplevel がこの worktree 自身だと確かめた後に、削除と同じプロセスで読む）
       wt_head=$(git -C "${path}" symbolic-ref -q --short HEAD 2>/dev/null) || wt_head=""
       wt_sha=$(git -C "${path}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || wt_sha=""
+      # コミットを読めなかった理由の見分け: HEAD が指すブランチの ref が無ければ unborn（決定的）、ブランチの ref があるのに読めなければ一過性の失敗
+      if [ -z "${wt_sha}" ] && [ -n "${wt_head}" ] && ! git -C "${path}" show-ref --verify -q "refs/heads/${wt_head}" 2>/dev/null; then wt_unborn=1; fi
       # 初期化済み submodule（先頭が - の行は未初期化）と、このworktree専用の modules ディレクトリ（deinit 後もコミットが残り得る）
       sub_init=$(git -C "${path}" submodule status 2>/dev/null | awk 'substr($0,1,1) != "-" && NF > 0 { n++ } END { print n + 0 }') || sub_init=0
       gd=$(git -C "${path}" rev-parse --absolute-git-dir 2>/dev/null) || gd=""
       if [ -n "${gd}" ] && [ -d "${gd}/modules" ] && [ -n "$(ls -A "${gd}/modules" 2>/dev/null)" ]; then sub_init=$((sub_init + 1)); fi
     else
-      WR_DIRTY=-1
+      WR_DIRTY=-1 # git status コマンドそのものの失敗（一過性になり得る）
     fi
   fi
   T_DIRTY=${WR_DIRTY}
+  if [ "${T_DIRTY}" -lt -1 ]; then T_DIRTY=-1; fi
   plan=$(wr_plan "${m}" "${WR_DIRTY}" "${WR_SUB_DIRTY}" "${sub_init}")
   case "${plan}" in
     retain-dirty) T_WT='retained-dirty'; return 0 ;;
     retain-unobservable) T_WT='retained-unobservable'; return 0 ;;
+    retain-broken) T_WT='retained-broken'; return 0 ;;
     retain-submodule) T_WT='retained-submodule'; return 0 ;;
   esac
   # discard で --branch を結びつけられた worktree は、その HEAD が --branch と一致するときだけ消す（呼び出し側が別のブランチ名を渡しても、
@@ -201,7 +236,7 @@ remove_one() {
   # --head を結びつけられた worktree は、HEAD のコミットが一致するときだけ消す（マージ済み PR の head に無いコミット = 未 push の作業を守る）。
   # 実体が無い worktree（dead）は読めない・失う作業も無いので従来どおり
   if [ "${m}" = discard ] && [ -n "${expect_sha}" ] && [ -d "${path}" ]; then
-    case "$(wr_head_check "${expect_sha}" "${wt_sha}" "${wt_head}")" in
+    case "$(wr_head_check "${expect_sha}" "${wt_sha}" "${wt_head}" "${wt_unborn}")" in
       ok) ;;
       retain-detached) T_WT='retained-detached'; return 0 ;;
       retain-unobservable) T_WT='retained-unobservable'; return 0 ;;
@@ -313,6 +348,19 @@ if [ "${cmd}" = remove ]; then
     remove_one "${mode}" "${path}" "${branch:-${expect_branch}}" "${head}"
   else
     T_WT=skipped
+  fi
+  # --branch の削除は、そのブランチを持つ実体の無い登録が残っていると git に拒否される（used by worktree）。全体の prune に頼らず、
+  # そのブランチを持つ登録だけを remove_one で（同じ確認・同じ許可形の git worktree remove で）1 件消す。lock 中・detached・HEAD 0000… は
+  # remove_one が保持の語で返すので、その語を結果にしてブランチは残す。実体のある別の worktree が持つ場合は触れない（従来どおり branch -D が失敗する）
+  if [ -n "${branch}" ] && wr_wt_gone "${T_WT}"; then
+    hl=$(git worktree list --porcelain 2>/dev/null) || hl=""
+    wr_branch_holder "${hl}" "${branch}"
+    holder=${WR_HOLDER}
+    if [ -n "${holder}" ] && [ ! -e "${holder}" ] && [ ! -L "${holder}" ] && wr_valid_path "${holder}"; then
+      was_unlocked=${T_UNLOCKED}
+      remove_one discard "${holder}"
+      if [ "${was_unlocked}" = true ]; then T_UNLOCKED=true; fi
+    fi
   fi
   # 何かを消した（または元から無い）あとの登録情報の掃除。何も消さなかった（登録なし・メイン・カレント・保持）ときは prune しない。
   # 実体の無い登録のうちコミットの唯一の参照になり得るもの（detached・HEAD 0000…）があれば safe_prune がスキップする

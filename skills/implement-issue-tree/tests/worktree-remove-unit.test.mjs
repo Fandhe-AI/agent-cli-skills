@@ -36,6 +36,7 @@ while IFS="$US" read -r fn a b c d e f g; do
     wr_find_detached) wr_find_entry "$(nl "$a")" "$b"; out=$WR_DETACHED ;;
     wr_find_fold) wr_find_entry "$(nl "$a")" "$b" 1; out=$WR_REGISTERED ;;
     wr_prune_risk) wr_prune_risk "$(nl "$a")"; out=$WR_PRUNE_RISK ;;
+    wr_holder) wr_branch_holder "$(nl "$a")" "$b"; out=$WR_HOLDER ;;
     wr_lock_pid) out=$(wr_lock_pid "$a" 2>&1) || rc=$?; wr_lock_pid "$a" || true ;;
     *) out=$("$fn" "$a" "$b" "$c" "$d" "$e" "$f" "$g" 2>&1) || rc=$? ;;
   esac
@@ -139,8 +140,9 @@ check(
     ['wr_head_check', H, H, 'feat/x'], ['wr_head_check', H, 'b'.repeat(40), 'feat/x'], ['wr_head_check', H, '', 'feat/x'],
     ['wr_head_check', H, 'A'.repeat(40), 'feat/x'], ['wr_head_check', H, 'a'.repeat(39), 'feat/x'],
     ['wr_head_check', H, H, ''], ['wr_head_check', H, 'b'.repeat(40), ''], ['wr_head_check', H, '', ''],
+    ['wr_head_check', H, '', 'feat/x', '1'], ['wr_head_check', H, '', 'feat/x', '0'], ['wr_head_check', '', '', 'feat/x', '1'],
   ],
-  (g, r, i) => assert.equal(g.out, ['ok', 'ok', 'ok', 'ok', 'retain', 'retain-unobservable', 'retain', 'retain', 'retain-detached', 'retain', 'retain-unobservable'][i], JSON.stringify(r)),
+  (g, r, i) => assert.equal(g.out, ['ok', 'ok', 'ok', 'ok', 'retain', 'retain-unobservable', 'retain', 'retain', 'retain-detached', 'retain', 'retain-unobservable', 'retain', 'retain-unobservable', 'ok'][i], JSON.stringify(r)),
 )
 
 check(
@@ -250,8 +252,9 @@ check(
     ['wr_plan', 'superseded', '0', '0', '3'], ['wr_plan', 'superseded', '-1', '0', '0'],
     ['wr_plan', 'discard', '0', '0', '0'], ['wr_plan', 'discard', '1', '0', '0'], ['wr_plan', 'discard', '0', '0', '1'], ['wr_plan', 'discard', '2', '1', '1'],
     ['wr_plan', 'discard', '-1', '0', '0'], ['wr_plan', 'bogus', '0', '0', '0'], ['wr_plan', '', '0', '0', '0'],
+    ['wr_plan', 'superseded', '-2', '0', '0'], ['wr_plan', 'discard', '-2', '0', '0'],
   ],
-  (g, r, i) => assert.equal(g.out, ['force', 'force', 'retain-submodule', 'retain-submodule', 'force', 'retain-unobservable', 'plain', 'retain-dirty', 'retain-submodule', 'retain-dirty', 'retain-unobservable', 'retain-dirty', 'retain-dirty'][i], JSON.stringify(r)),
+  (g, r, i) => assert.equal(g.out, ['force', 'force', 'retain-submodule', 'retain-submodule', 'force', 'retain-unobservable', 'plain', 'retain-dirty', 'retain-submodule', 'retain-dirty', 'retain-unobservable', 'retain-dirty', 'retain-dirty', 'retain-broken', 'retain-broken'][i], JSON.stringify(r)),
 )
 
 // wr_count_status TEXT（v2 形式。@@ が改行）→ WR_DIRTY, WR_SUB_DIRTY
@@ -457,4 +460,18 @@ check(
     ['wr_prune_risk', LIST(MAIN, WR_BR_GONE, WR_DET_GONE)],
   ],
   (g, r, i) => assert.equal(g.out, ['1', '1', '2', '0', '0', '0', '1', '0', '0', '1'][i], JSON.stringify(r)),
+)
+
+// wr_branch_holder: ブランチを持つメイン以外の登録のパス（メイン・別のブランチ・detached・前方一致は拾わない）
+const WR_H1 = `worktree /r/h1${NL}HEAD aaaa${NL}branch refs/heads/feat/3-c`
+const WR_H2 = `worktree /r/h 2${NL}HEAD bbbb${NL}branch refs/heads/feat/3-cc`
+const WR_HD = `worktree /r/hd${NL}HEAD cccc${NL}detached`
+const MAIN_ON_C = `worktree /r/main${NL}HEAD dddd${NL}branch refs/heads/feat/3-c`
+check(
+  'wr_branch_holder: ブランチ名が完全一致するメイン以外の登録のパスを返す（メインが持つ・別名・前方一致・detached・一覧が空は空）',
+  [
+    ['wr_holder', LIST(MAIN, WR_H1), 'feat/3-c'], ['wr_holder', LIST(MAIN, WR_H2, WR_H1), 'feat/3-c'], ['wr_holder', LIST(MAIN, WR_H2), 'feat/3-c'],
+    ['wr_holder', LIST(MAIN_ON_C, WR_HD), 'feat/3-c'], ['wr_holder', LIST(MAIN, WR_HD), 'feat/3-c'], ['wr_holder', '', 'feat/3-c'], ['wr_holder', LIST(MAIN, WR_H2), 'feat/3-cc'],
+  ],
+  (g, r, i) => assert.equal(g.out, ['/r/h1', '/r/h1', '', '', '', '', '/r/h 2'][i], JSON.stringify(r)),
 )

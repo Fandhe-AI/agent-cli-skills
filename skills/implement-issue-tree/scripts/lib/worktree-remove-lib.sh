@@ -22,6 +22,7 @@ WR_LOCK_REASON=""
 WR_LOCK_PID=""
 WR_LOCK_START=""
 WR_DETACHED=0
+WR_HOLDER=""
 
 # 削除対象の worktree パス。ホストの sanitizeWorktreePath と同じ形（絶対パス・先頭は英数字・使える文字は英数字と - _ . / 空白・.. を含まない）
 wr_valid_path() {
@@ -188,13 +189,17 @@ wr_lock_action() {
 #   plain             --force なしで消す（discard で汚れも初期化済み submodule も無い）
 #   force             --force で消す（superseded。汚れていても消すが、submodule に未記録の変更があれば保持）
 #   retain-dirty      汚れがあるため保持する
-#   retain-unobservable  汚れを確認できなかった（status の失敗・git の対象が worktree 自身でない）ため保持する。汚れの有無は分からないので、
+#   retain-unobservable  汚れを確認できなかった（$2 = -1。git status コマンドそのものの失敗）ため保持する。汚れの有無は分からないので、
 #                        retain-dirty（汚れを観測した）とは別の語にする。ホストは後者を恒久の試行済み記録にするが、前者は一過性かもしれず次のランで再試行させる
+#   retain-broken     git の対象が worktree 自身でない（$2 = -2。.git の破損・toplevel の不一致）ため保持する。再試行しても解消しない決定的な状態なので、
+#                     ホストは retain-dirty と同じく恒久の試行済み記録にする（区別できない一過性の失敗もここへ倒す。毎ラン再試行して枠を食い続けるより安全）
 #   retain-submodule  submodule に未記録の変更（superseded）・初期化済み submodule（discard）があるため保持する
 wr_plan() {
   case "$1" in
     superseded)
-      if [ "$2" -lt 0 ]; then
+      if [ "$2" -lt -1 ]; then
+        echo retain-broken
+      elif [ "$2" -lt 0 ]; then
         echo retain-unobservable
       elif [ "$3" -gt 0 ]; then
         echo retain-submodule
@@ -203,7 +208,9 @@ wr_plan() {
       fi
       ;;
     discard)
-      if [ "$2" -lt 0 ]; then
+      if [ "$2" -lt -1 ]; then
+        echo retain-broken
+      elif [ "$2" -lt 0 ]; then
         echo retain-unobservable
       elif [ "$2" != 0 ]; then
         echo retain-dirty
@@ -415,6 +422,28 @@ wr_find_entry() {
   WR_DETACHED=${detached}
 }
 
+# `git worktree list --porcelain` の出力（$1）から、ブランチ $2 を持つ登録（メイン以外）のパスを WR_HOLDER に入れる（無ければ空）。
+# 実体の無い登録がブランチを持ち続けると `git branch -D` が used by worktree で拒否されるため、remove がその登録だけを消す相手を探すのに使う
+wr_branch_holder() {
+  local line cur="" idx=0
+  WR_HOLDER=""
+  while IFS= read -r line; do
+    case "${line}" in
+      'worktree '*)
+        cur=${line#worktree }
+        idx=$((idx + 1))
+        ;;
+      'branch refs/heads/'*)
+        if [ "${idx}" -gt 1 ] && [ "${line#branch refs/heads/}" = "$2" ]; then
+          WR_HOLDER=${cur}
+          return 0
+        fi
+        ;;
+    esac
+  done <<<"$1"
+  return 0
+}
+
 # 存在しないパスの実体化（check-absent 用）。実在する最も近い祖先を pwd -P で実体にし、残りの成分を付ける。git は実体のパスで登録する
 # ため、祖先がシンボリックリンク（macOS の /var → /private/var 等）だと、存在しないパスの字面では登録と照合できない。$1 = 絶対パス
 wr_loose_real() {
@@ -513,7 +542,7 @@ wr_branch_check() {
 }
 
 # --head（マージ済み PR の head）との照合。$1 = 指定された sha（空 = 指定なし）、$2 = worktree の HEAD のコミット（読めなければ空）、
-# $3 = worktree が指すブランチ（detached は空）。
+# $3 = worktree が指すブランチ（detached は空）、$4 = 1 のとき HEAD が指すブランチがまだ無い（unborn。省略は 0）。
 # 標準出力: ok（指定なし、または ブランチ上で一致）/ retain（違う）/ retain-unobservable（HEAD のコミットを読めなかった。不一致ではなく観測の失敗）/ retain-detached（一致していても detached）。
 # squash マージでは base との差分で未 push のコミットを見分けられないため、PR の head と worktree の HEAD の一致だけを根拠にする。
 # detached HEAD 上のコミットは worktree を消すと含む ref が無くなり失われる（headRefOid は自己申告で HEAD と同じ値を返し得る）ため、
@@ -522,7 +551,8 @@ wr_head_check() {
   if [ -z "$1" ]; then
     echo ok
   elif [ -z "$2" ]; then
-    echo retain-unobservable
+    # unborn（コミットが無い）は読み直しても変わらない決定的な状態で、PR の head と一致し得ないので不一致として扱う（毎ラン再試行させない）
+    if [ "${4:-0}" = 1 ]; then echo retain; else echo retain-unobservable; fi
   elif [ "$1" != "$2" ]; then
     echo retain
   elif [ -z "${3:-}" ]; then

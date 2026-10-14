@@ -411,6 +411,19 @@ test('git worktree remove / unlock と git branch -D の許可形は worktree-re
   for (const f of [...found.worktree, ...found.branch]) assert.ok(GIT_WORKTREE_RM_ALLOWED.test(f.l) || GIT_BRANCH_DELETE_ALLOWED.test(f.l), f.l)
 })
 
+test('git worktree prune は worktree-remove.sh の safe_prune の中の 1 行だけにある（ほかのスクリプト・ほかの位置・ほかの形は拒否する）', () => {
+  const found = []
+  for (const { name, path } of targets()) {
+    for (const { n, l } of codeLines(readFileSync(path, 'utf8'))) if (GIT_SUB('worktree').test(l) && /\bprune\b/.test(l)) found.push({ name, n, l: l.trim() })
+  }
+  assert.deepEqual(found.map((f) => [f.name, f.l]), [['worktree-remove.sh', 'git worktree prune >/dev/null 2>&1 || true']], JSON.stringify(found))
+  const lines = codeLines(readFileSync(targets().find((t) => t.name === 'worktree-remove.sh').path, 'utf8'))
+  const start = lines.findIndex((x) => x.l === 'safe_prune() {')
+  const end = lines.findIndex((x, i) => i > start && x.l === '}')
+  assert.ok(start >= 0 && end > start, 'safe_prune の定義がある')
+  assert.ok(found[0].n > lines[start].n && found[0].n < lines[end].n, `prune は safe_prune の中: ${found[0].n} / ${lines[start].n}-${lines[end].n}`)
+})
+
 test('worktree-remove.sh の check-absent ブロックは読み取り専用: git は worktree list --porcelain だけ、prune・remove・unlock・branch・rm を持たず、emit_remove で必ず exit する。許可形の 3 行列挙は増えない', () => {
   const src = readFileSync(targets().find((t) => t.name === 'worktree-remove.sh').path, 'utf8')
   const lines = codeLines(src).map((x) => x.l)
