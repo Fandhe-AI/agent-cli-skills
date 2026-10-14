@@ -3473,13 +3473,12 @@ const cleanupConfirmedRemoved=result?.cleanupOk===true&&result?.cleanupRetained=
 if(cleanupWorktreePath&&cleanupConfirmedRemoved)confirmedRemovedPaths.add(cleanupWorktreePath)
 
 
-if(cleanupWorktreePath&&result?.cleanupRetained!==false){
-recordRetainedWorktree(issueNumber,cleanupWorktreePath)
 
 
 if(typeof options.replacementWorktree==='string'){
-recordReplacementWorktree(issueNumber,options.replacementWorktree)
-}
+applyReplacementAccounting(issueNumber,cleanupWorktreePath,options.replacementWorktree,cleanupWorktreePath!==''&&result?.cleanupRetained===false)
+}else if(cleanupWorktreePath&&result?.cleanupRetained!==false){
+recordRetainedWorktree(issueNumber,cleanupWorktreePath)
 }
 
 if(cleanupWorktreePath&&(cleanupMode!=='discard'||cleanupConfirmedRemoved))sweepHeldPaths.delete(cleanupWorktreePath)
@@ -4417,6 +4416,10 @@ const ephemeralWorktrees=[]
 const residualStartPathSet=new Set()
 
 
+const slotInheritedPaths=new Set()
+let slotUnknownLiveCount=0
+
+
 
 
 const EPHEMERAL_KIND_MAX=Object.freeze({
@@ -4471,6 +4474,38 @@ return true
 
 
 
+
+
+
+
+
+function planReplacementAccounting({oldPath,oldRemoved,newPath,oldCounted,newCounted}){
+if(oldRemoved&&oldPath!==''){
+return{addRetainedOld:false,addReplacement:false,inheritPath:newPath,inheritUnknown:newPath===''}
+}
+const sameAsOld=newPath!==''&&newPath===oldPath
+return{
+addRetainedOld:oldPath!==''&& !oldCounted,
+addReplacement:newPath===''|| !(newCounted||sameAsOld),
+inheritPath:'',
+inheritUnknown:false,
+}
+}
+
+
+
+function applyReplacementAccounting(issueNumber,oldPath,rawNewPath,oldRemoved){
+const newPath=sanitizeWorktreePath(rawNewPath??'')
+const isCounted=(p)=>p!==''&&(residualStartPathSet.has(p)||slotInheritedPaths.has(p)||ephemeralWorktrees.some((e)=>e.path===p))
+const plan=planReplacementAccounting({oldPath,oldRemoved,newPath,oldCounted:isCounted(oldPath),newCounted:isCounted(newPath)})
+if(plan.addRetainedOld)recordRetainedWorktree(issueNumber,oldPath)
+if(plan.addReplacement)recordReplacementWorktree(issueNumber,newPath)
+if(plan.inheritPath)slotInheritedPaths.add(plan.inheritPath)
+if(plan.inheritUnknown){
+slotUnknownLiveCount+=1
+log(`⚠️ #${issueNumber}: 置換後の worktree のパスを取得できなかった（件数は引き継ぐ。バイトは物理一覧で測る。git worktree list で確認すること）`)
+}
+}
 
 function recordReplacementWorktree(issueNumber,rawPath){
 const p=sanitizeWorktreePath(rawPath??'')
@@ -9374,8 +9409,8 @@ byteRemeasureAtIterationSeq=dispatchIterationSeq
 
 const unverifiedEphemeralCount=ephemeralWorktrees.filter(
 (e)=>typeof e.path!=='string'||e.path===''||e.path.startsWith('(検証不可:'),
-).length
-let targetPaths=[...residualPathsAtStart, ...ephemeralWorktrees.map((e)=>e.path)].filter(
+).length+slotUnknownLiveCount
+let targetPaths=[...new Set([...residualPathsAtStart, ...ephemeralWorktrees.map((e)=>e.path), ...slotInheritedPaths])].filter(
 (p)=>typeof p==='string'&&p!==''&& !p.startsWith('(検証不可:')&& !confirmedRemovedPaths.has(p),
 )
 let fallbackDetail=''
@@ -10503,8 +10538,8 @@ let residualBytesEndObserved=false
 if(maxResidualWorktreeBytes>0&&residualBytesObserved){
 
 
-const rawEndPaths=[...residualPathsAtStart, ...ephemeralWorktrees.map((e)=>e.path)]
-const hasUnverifiedEndPath=rawEndPaths.some(
+const rawEndPaths=[...new Set([...residualPathsAtStart, ...ephemeralWorktrees.map((e)=>e.path), ...slotInheritedPaths])]
+const hasUnverifiedEndPath=slotUnknownLiveCount>0||rawEndPaths.some(
 (p)=>typeof p!=='string'||p===''||p.startsWith('(検証不可:'),
 )
 if(hasUnverifiedEndPath){
