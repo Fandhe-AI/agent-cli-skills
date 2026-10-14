@@ -3539,6 +3539,7 @@ return{pr,worktree,branch:typeof saved.branch==='string'?saved.branch:''}
 const AGENT_CALLS_CLOSED_CLEANUP=6
 
 
+
 const CLOSED_CLEANUP_PER_RUN_MAX=10
 
 
@@ -3894,15 +3895,15 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'0c2ccc669ff06ef6f1652edcaa3a76b00150531dcd1ee06ca93892509a23f535',
-'measure-free-disk.sh':'57a6ed2e2af8f0aaffa350d5ebb86145e67cc4e555a5a9e33252401e2d6e4e9b',
-'observe-pr.sh':'95b3c067ceda1784be11fb321172d37e9447b161c568ac089706e4f4b7ae8e45',
-'base-merge.sh':'3f0369d2dc46b42b3c60a59ba7b05042dee3121868951d30051804acd88ad724',
-'pr-push.sh':'f4147174b10e474ca89a7176691f423cecbc5014a24fe1ea65cb3040e8a7c4c6',
-'state.sh':'f5cb0cd71bb9e48957e7d36ff7be9da6a66a69c1f05b593cddd8ad125ee1a2b2',
-'merge-gate.sh':'cac3a4e6c68f2873bd98639a896c6279761bb83d011385ca4533f8196cfc3644',
-'worktree-remove.sh':'8e79aa815bf4975446ccf8eba6c6859987c89c34e90e7cf0f7e8767268cecd22',
-'recover-prep.sh':'64dff4d5a4a41de98bf88293427b4afff7048ed2076e35e392e2b150a722231f',
+'measure-residual-bytes.sh':'06dd99a1dea43b06430203b5a5fce730e4fb8f5765324cfca644bf2c56612abe',
+'measure-free-disk.sh':'d5a4cf4a1051051e6029cef256f2aad7dec5a165febcd965d65ecfc311d4442f',
+'observe-pr.sh':'bf6c94d9443a0a6224add023562d5337a6d989487d4a61b2cd59151f580d9bfd',
+'base-merge.sh':'e1d3e73f41ee7f924bf3f3025414edbdf82cd42099431ed9cc640ab1a4b804bc',
+'pr-push.sh':'f7e69b32856d00ae45133e0810aef9dbf466ccbf723beb7a0ce02d6ed39a97f7',
+'state.sh':'678446fcca0a2599471dd4a178da8da3611d3246309d022de40ed87757747bcb',
+'merge-gate.sh':'40fc51dae35f579c5ec848ad94aff1ee904db562cfec458c8c20f1702cfa36ec',
+'worktree-remove.sh':'c63f431189413257e4f4c3e3a90a8520159ac9547f03d7164ad98c53cd7dd2f9',
+'recover-prep.sh':'2f68360d71129143d1b7113584cc645afee2bd5151f1d214943baaed60b5089a',
 }
 
 
@@ -3979,6 +3980,30 @@ worktree:{type:'string',description:'結果の行の worktree の語（removed�
 },
 }
 const isWorktreeCleanupValid=(r)=>typeof r?.ok==='boolean'&&typeof r?.retained==='boolean'
+
+
+async function confirmWorktreeAbsent(issueNumber,path){
+try{
+const{result,outputMissing}=await runStateAgent(
+[
+`worktree 不在確認タスク（読み取り専用。何も削除・変更しない）。`,
+UNTRUSTED_POLICY,
+TEMP_FILE_POLICY,
+`次のコマンドを一字一句そのまま（改変・条件追加・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:`,
+'```sh',
+scriptInvocation('worktree-remove.sh',undefined,` check-absent --path ${worktreeQuote(path)}`),
+'```',
+WORKTREE_NOTE,
+`返却: ok / retained / worktree（上記のとおり）。`,
+].join('\n'),
+{label:`worktree:absent:#${issueNumber}`,schema:WORKTREE_CLEANUP_SCHEMA,isValid:isWorktreeCleanupValid},
+)
+return!outputMissing&&result?.ok===true&&result?.retained===false&&(result?.worktree==='absent'||result?.worktree==='prunable')
+}catch(e){
+log(`⚠️ #${issueNumber}: worktree の不在確認で想定外の例外（${sanitize(String(e?.message ?? e))}）。不在と見なさない`)
+return false
+}
+}
 
 
 function signedOutputSchema(payloadSchema){
@@ -7334,6 +7359,12 @@ recordFailure({issue:item.number,reason,status})
 return false
 }
 
+
+
+const absentCandidate=recoverDecision==='discard'&& !effectiveBranch&&Boolean(sanitizedRecoverWorktree)&&recoverResult?.worktreeMissing===true&&
+(recoverResult?.branch??'')===''&&(saved.branch??'')===''
+const absentConfirmed=absentCandidate?await confirmWorktreeAbsent(item.number,sanitizedRecoverWorktree):false
+
 if(recoverDecision==='continue'&&effectiveBranch){
 
 
@@ -7360,7 +7391,8 @@ log(`#${item.number}: Recover → continue（branch: ${sanitize(effectiveBranch)
 const continueCleanupAttempt=await updateStateDetailed(
 item.number,
 {status:'implementing',branch:effectiveBranch,worktree:''},
-sanitizedRecoverWorktree?{cleanupWorktree:sanitizedRecoverWorktree,cleanupMode:'discard'}:{},
+
+sanitizedRecoverWorktree?{cleanupWorktree:sanitizedRecoverWorktree,cleanupMode:'discard',expectBranch:effectiveBranch}:{},
 )
 if(!continueCleanupAttempt.ok){
 
@@ -7374,7 +7406,7 @@ prNumber:0,
 })
 const reason=sanitize(
 `旧 worktree の掃除または implementing 遷移の永続化を完了確認できなかった`+
-`（${continueCleanupStatus === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : continueCleanupAttempt.mergeOk && continueCleanupAttempt.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがあり、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。`+
+`（${continueCleanupStatus === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : continueCleanupAttempt.mergeOk && continueCleanupAttempt.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがある、または HEAD が継続するブランチ上に無く、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。`+
 `旧 worktree が branch を掴んだままだと新 worktree が同 branch を checkout できないため、`+
 `Implement を起動せず残骸を保全して ${continueCleanupStatus} にする。旧 worktree と branch を手動確認し、対処後に再実行すること`,
 )
@@ -7577,13 +7609,19 @@ await updateState(item.number,{status:'planning',branch:'',pr:0,worktree:'',note
 
 const reason=sanitize(
 `回復継続の対象 branch ${rejectedBranch} が本イシューの命名規約 <type>/${item.number}-<short-name> に合わないため、その上では継続しない。`+
-`worktree と branch は保全して blocked にする。worktree のブランチを <type>/${item.number}-<short-name> へ改名して再実行すること`,
+`worktree と branch は保全して blocked にする。worktree のブランチを <type>/${item.number}-<short-name> へ改名して再実行するか、`+
+`worktree（${sanitizedRecoverWorktree}）を git worktree remove で削除して再実行すること（削除後は不在を確認できれば新規に実装する）`,
 )
 log(`⚠️ #${item.number}: Recover → continue を保全へ格下げ（${reason}）`)
 await updateState(item.number,{status:'blocked',pr:0,note:reason})
 recordFailure({issue:item.number,reason,status:'blocked'})
 return false
 }
+}else if(absentConfirmed){
+
+
+log(`#${item.number}: Recover → discard（worktree ${sanitize(sanitizedRecoverWorktree)} の不在を確認した。保全対象なし）、記録を捨てて通常 Plan へ`)
+await updateState(item.number,{status:'planning',branch:'',pr:0,worktree:'',note:'worktree の不在を確認して新規に実装する'})
 }else{
 
 
@@ -7592,7 +7630,7 @@ const reason=sanitize(
 recoverDecision==='continue'&& !effectiveBranch
 ?`回復継続には有効な branch が必要だが state にも worktree HEAD からも解決できなかった${resolvedBranchRejected ? '（Recover が解決した branch は本イシューの命名規約 <type>/' + item.number + '-<short-name> に合わない）' : ''}。worktree/branch を保全して failed にする`
 :recoverDecision==='discard'&& !effectiveBranch
-?`discard 指示だが対象ブランチを確定できないため安全に削除できない${resolvedBranchRejected ? '（Recover が解決した branch は本イシューの命名規約に合わない）' : ''}。worktree/branch を保全して failed にする`
+?`discard 指示だが対象ブランチを確定できないため安全に削除できない${resolvedBranchRejected ? '（Recover が解決した branch は本イシューの命名規約に合わない）' : ''}${absentCandidate ? '（worktree の不在も確認できなかった）' : ''}。worktree/branch を保全して failed にする`
 :(recoverResult?.reason??'Recover エージェントが異常終了または不正な decision を返した。worktree/branch を保全して failed にする'),
 )
 log(`#${item.number}: Recover → 保全（decision: ${sanitize(recoverDecision ?? '(null)')}, effectiveBranch: ${sanitize(effectiveBranch || '(空)')}, reason: ${reason}）`)

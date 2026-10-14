@@ -26,15 +26,16 @@ US=$(printf '\\037')
 nl() { printf '%s' "$1" | sed 's/@@/\\
 /g'; }
 i=0
-while IFS="$US" read -r fn a b c d; do
+while IFS="$US" read -r fn a b c d e f; do
   rc=0
   out=""
   WR_DIRTY=0; WR_SUB_DIRTY=0; WR_REGISTERED=0; WR_MAIN=0; WR_LOCKED=0; WR_LOCK_REASON=""; WR_LOCK_PID=""; WR_LOCK_START=""
   case "$fn" in
     wr_count_status) wr_count_status "$(nl "$a")" ;;
     wr_find_entry) wr_find_entry "$(nl "$a")" "$b" ;;
+    wr_find_detached) wr_find_entry "$(nl "$a")" "$b"; out=$WR_DETACHED ;;
     wr_lock_pid) out=$(wr_lock_pid "$a" 2>&1) || rc=$?; wr_lock_pid "$a" || true ;;
-    *) out=$("$fn" "$a" "$b" "$c" "$d" 2>&1) || rc=$? ;;
+    *) out=$("$fn" "$a" "$b" "$c" "$d" "$e" "$f" 2>&1) || rc=$? ;;
   esac
   printf '%s %s [%s] [%s,%s,%s,%s,%s,%s,%s;%s]\\n' "$i" "$rc" "$out" "$WR_DIRTY" "$WR_SUB_DIRTY" "$WR_REGISTERED" "$WR_MAIN" "$WR_LOCKED" "$WR_LOCK_REASON" "$WR_LOCK_PID" "$WR_LOCK_START"
   i=$((i + 1))
@@ -302,6 +303,48 @@ check(
       [0, 0, 0, ''], [0, 0, 0, ''], [0, 0, 0, ''], [0, 0, 0, ''], [1, 0, 0, ''],
     ][i]
     assert.deepEqual([g.reg, g.main, g.locked, g.reason], exp, `${i}: ${JSON.stringify(r.slice(1))}`)
+  },
+)
+
+
+// wr_find_detached LIST TARGET → 対象のエントリが detached か（check-absent が prunable の保全に使う。別のエントリの detached を拾わない）
+check(
+  'wr_find_entry: 対象のエントリが detached のときだけ WR_DETACHED=1（別のエントリの detached・未登録・ブランチ上は 0）',
+  [
+    ['wr_find_detached', LIST(MAIN, W4, W1), '/r/w 4'],
+    ['wr_find_detached', LIST(MAIN, W4, W1), '/r/w1'],
+    ['wr_find_detached', LIST(MAIN, W1, W4), '/r/w1'],
+    ['wr_find_detached', LIST(MAIN, W1, W4), '/r/w 4'],
+    ['wr_find_detached', LIST(MAIN, W1), '/r/none'],
+    ['wr_find_detached', '', '/r/w1'],
+  ],
+  (g, r, i) => assert.equal(g.out, ['1', '0', '0', '1', '0', '0'][i], JSON.stringify(r)),
+)
+
+// wr_absent_word LIST_OK FS REGISTERED MAIN LOCKED DETACHED。不在として扱ってよいのは absent と prunable だけ（ホストが信じる語）
+const FSV = ['exists', 'missing', 'unknown']
+const ABS_ROWS = []
+for (const ok of ['1', '0']) for (const fs of FSV) for (const reg of ['0', '1']) for (const main of ['0', '1']) for (const lock of ['0', '1']) for (const det of ['0', '1']) ABS_ROWS.push(['wr_absent_word', ok, fs, reg, main, lock, det])
+function absentExpected([, ok, fs, reg, main, lock, det]) {
+  if (ok !== '1' || fs === 'unknown') return 'unknown'
+  if (main === '1') return 'main'
+  if (fs === 'exists') return reg === '1' ? 'present' : 'unregistered-present'
+  if (reg !== '1') return 'absent'
+  if (lock === '1') return 'prunable-locked'
+  if (det === '1') return 'prunable-detached'
+  return 'prunable'
+}
+check(
+  'wr_absent_word: 全組み合わせの表。登録が無くパスも無い → absent、登録だけ（lock なし・ブランチ上）→ prunable、detached・lock あり・実体あり・main・判定不能は不在扱いにしない',
+  ABS_ROWS,
+  (g, r) => assert.equal(g.out, absentExpected(r), JSON.stringify(r)),
+)
+check(
+  'wr_absent_word: 不在として読める語は absent と prunable の 2 語だけ（wr_ok check-absent が真・wr_retained が偽）。それ以外の語・未知の語は保全側',
+  ['absent', 'prunable', 'prunable-detached', 'prunable-locked', 'present', 'unregistered-present', 'main', 'unknown', '', 'removed', 'bogus'].flatMap((w) => [['wr_ok', 'check-absent', w, 'none'], ['wr_retained', w]]),
+  (g, r) => {
+    const gone = r[r.length - (r[0] === 'wr_ok' ? 2 : 1)] === 'absent' || r[r.length - (r[0] === 'wr_ok' ? 2 : 1)] === 'prunable'
+    assert.equal(g.rc, (r[0] === 'wr_ok' ? gone : !gone && !['removed'].includes(r[1])) ? OK : NG, JSON.stringify(r))
   },
 )
 

@@ -21,6 +21,7 @@ WR_LOCKED=0
 WR_LOCK_REASON=""
 WR_LOCK_PID=""
 WR_LOCK_START=""
+WR_DETACHED=0
 
 # 削除対象の worktree パス。ホストの sanitizeWorktreePath と同じ形（絶対パス・先頭は英数字・使える文字は英数字と - _ . / 空白・.. を含まない）
 wr_valid_path() {
@@ -250,13 +251,14 @@ wr_real() {
 # `git worktree list --porcelain` の出力（$1）から、対象（$2 = 与えられたパス）の登録状況を調べる。実体のパスでも照合する。
 # WR_REGISTERED = 登録されているか、WR_MAIN = 先頭のエントリ（メイン worktree）か、WR_LOCKED / WR_LOCK_REASON = lock の有無と理由
 wr_find_entry() {
-  local line cur="" idx=0 want real hit=0 first=0 locked=0 reason="" in_hit=0 cur_real
+  local line cur="" idx=0 want real hit=0 first=0 locked=0 reason="" in_hit=0 cur_real detached=0
   want=$2
   real=$(wr_real "${want}")
   WR_REGISTERED=0
   WR_MAIN=0
   WR_LOCKED=0
   WR_LOCK_REASON=""
+  WR_DETACHED=0
   while IFS= read -r line; do
     case "${line}" in
       'worktree '*)
@@ -270,7 +272,11 @@ wr_find_entry() {
           [ "${idx}" = 1 ] && first=1
           locked=0
           reason=""
+          detached=0
         fi
+        ;;
+      'detached')
+        [ "${in_hit}" = 1 ] && detached=1
         ;;
       'locked' | 'locked '*)
         if [ "${in_hit}" = 1 ]; then
@@ -285,6 +291,67 @@ wr_find_entry() {
   WR_MAIN=${first}
   WR_LOCKED=${locked}
   WR_LOCK_REASON=${reason}
+  WR_DETACHED=${detached}
+}
+
+# 存在しないパスの実体化（check-absent 用）。実在する最も近い祖先を pwd -P で実体にし、残りの成分を付ける。git は実体のパスで登録する
+# ため、祖先がシンボリックリンク（macOS の /var → /private/var 等）だと、存在しないパスの字面では登録と照合できない。$1 = 絶対パス
+wr_loose_real() {
+  local p=$1 rest="" base up
+  while [ "${p}" != / ] && [ -n "${p}" ] && [ ! -d "${p}" ]; do
+    base=${p##*/}
+    rest="/${base}${rest}"
+    p=${p%/*}
+  done
+  [ -n "${p}" ] || p=/
+  up=$(cd "${p}" 2>/dev/null && pwd -P) || up=${p}
+  [ "${up}" = / ] && up=""
+  printf '%s%s' "${up}" "${rest}"
+}
+
+# パスの実在の三値（check-absent 用）。標準出力: exists（パス自体がある。壊れたシンボリックリンクを含む）/ missing（無く、実在する最も近い祖先が
+# 検索可能なディレクトリと読めた）/ unknown（祖先を検索・読み取りできず、「無い」と言えない）。$1 = 絶対パス
+wr_path_state() {
+  local p=$1
+  if [ -e "${p}" ] || [ -L "${p}" ]; then
+    echo exists
+    return 0
+  fi
+  while [ "${p}" != / ] && [ -n "${p}" ]; do
+    p=${p%/*}
+    [ -n "${p}" ] || p=/
+    if [ -d "${p}" ]; then
+      if [ -x "${p}" ] && [ -r "${p}" ]; then echo missing; else echo unknown; fi
+      return 0
+    fi
+  done
+  echo unknown
+}
+
+# check-absent の判定。$1 = 一覧を取れたか（0/1）、$2 = パスの実在（wr_path_state の語）、$3 = 登録されているか、$4 = メイン worktree か、
+# $5 = lock されているか、$6 = 登録の HEAD が detached か（すべて 0/1）。標準出力（固定語彙）:
+#   absent             登録が無く、パスも無い（失うものが無い）
+#   prunable           登録は残るが実体が無い（lock なし・ブランチ上）。実体の無い登録の HEAD はブランチ ref が持つので、失うものが無い。このモードでは prune しない
+#   prunable-detached  登録だけ残り、HEAD が detached（その登録がコミットの唯一の参照かもしれず、prune で失われ得る）。保全する
+#   prunable-locked    登録だけ残り lock されている（git は lock された登録を prune しない。外付けの一時的な未接続かもしれない）。保全する
+#   present            登録があり実体もある。unregistered-present は登録が無いがパスがある。main はメイン worktree。unknown は一覧・実在を確定できない
+# ホストが不在として扱ってよい語は absent と prunable だけ
+wr_absent_word() {
+  if [ "$1" != 1 ] || [ "$2" = unknown ]; then
+    echo unknown
+  elif [ "$4" = 1 ]; then
+    echo main
+  elif [ "$2" = exists ]; then
+    if [ "$3" = 1 ]; then echo present; else echo unregistered-present; fi
+  elif [ "$3" != 1 ]; then
+    echo absent
+  elif [ "$5" = 1 ]; then
+    echo prunable-locked
+  elif [ "$6" = 1 ]; then
+    echo prunable-detached
+  else
+    echo prunable
+  fi
 }
 
 # 破棄時のブランチの扱い。$1 = ブランチ名（空 = 指定なし）、$2 = base ブランチ名、$3 = worktree が無くなったか（0/1）、
@@ -341,6 +408,7 @@ wr_head_check() {
 }
 
 # 結果の ok。$1 = モード、$2 = worktree の結果、$3 = ブランチの結果。
+# check-absent: 不在と読める語（absent・prunable）のときだけ ok
 # superseded: worktree が残っても非致命（ok。retained で区別する）。ただしメイン worktree を指していた（main）・カレントがその中（cwd）は異常として ok にしない。
 # discard: worktree が無くなり、ブランチも（指定があれば）消えたか元から無いときだけ ok
 wr_ok() {
@@ -348,6 +416,10 @@ wr_ok() {
     superseded)
       [ "$2" != main ] && [ "$2" != cwd ] && return 0
       return 1
+      ;;
+    check-absent)
+      [ "$2" = absent ] || [ "$2" = prunable ]
+      return $?
       ;;
     discard)
       wr_wt_gone "$2" || return 1
@@ -362,6 +434,7 @@ wr_ok() {
 
 # worktree が残った（保持・失敗・メイン）か。ホストはこれが true のパスを『削除成功』に数えない
 wr_retained() {
+  case "$1" in absent | prunable) return 1 ;; esac
   ! wr_wt_gone "$1"
 }
 

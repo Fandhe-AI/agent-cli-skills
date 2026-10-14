@@ -215,6 +215,8 @@ Recover の機械的な部分 — 対象ブランチの解決・WIP commit（フ
 
 **中断・失敗後の残骸 worktree は、再実行時に Recover phase が自動処理する**。continue 判定の残骸は Recover が worktree を削除してから Implement で既存 branch を checkout し、discard 判定（空 worktree・方向違い等）は Recover が worktree と branch を削除する。ただし worktree の削除は continue / discard いずれの経路でも「Recover の `wipCommitted: true` 申告」と「ホスト側の読み取り専用エージェントによる未 commit 変更なしの実測」の**両方**を満たした場合にのみ実行する（Step 2 の削除ゲート参照）。満たせない場合は残骸を削除せず `failed` で保全し、次回ランの Recover に委ねる。手動で worktree を削除したり、削除確認に答えたりする必要はない。
 
+**規約外ブランチで継続できず `blocked` にした後に、人が worktree を削除して再実行する場合**（Issue #637）。Recover が discard・worktree 実体なし（`worktreeMissing`）・保存済みと解決のブランチがどちらも空を返したときだけ、ホストが `worktree-remove.sh check-absent`（削除を一切しない）を 1 回呼ぶ。`absent`（登録も実体も無い）または `prunable`（登録だけ残り、lock なし・ブランチ上）を確認できたときに限り、状態を `planning`（branch・worktree 空・`pr: 0`）にして新規 Plan へ進み、旧パスを後続の superseded 掃除へ渡さない。実体がある・detached や lock のある prunable・判定できない・結果なしのときは従来どおり何も削除せず `failed` で止まる（登録の残りは手動で prune してから再実行する）。このモードは登録の掃除をしない。
+
 **failed / blocked の worktree のうち Recover が discard と判定しなかったものは削除しない**（デバッグ・手動再開用に残る）。不要になった場合は状態ファイルの `worktree` フィールドを参照して手動で削除する:
 
 ```bash

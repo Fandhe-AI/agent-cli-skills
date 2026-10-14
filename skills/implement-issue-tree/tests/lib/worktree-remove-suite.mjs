@@ -721,7 +721,20 @@ export function registerWorktreeRemoveTests(bash) {
       ['sweep', '--file', '_/issue-trees/1.json', '--head', 'a'.repeat(40)],
       ['remove', '--mode', 'superseded', '--path'],
       ['remove', '--mode', 'superseded', '--path', w.path, '--unknown', 'x'],
+      ['check-absent'],
+      ['check-absent', '--path'],
+      ['check-absent', '--path', 'relative/wt'],
+      ['check-absent', '--path', '/tmp/a;b'],
+      ['check-absent', '--path', '/tmp/../x'],
+      ['check-absent', '--path', w.path, '--mode', 'discard'],
+      ['check-absent', '--path', w.path, '--branch', 'feat/x'],
+      ['check-absent', '--path', w.path, '--base', 'main'],
+      ['check-absent', '--path', w.path, '--head', 'a'.repeat(40)],
+      ['check-absent', '--path', w.path, '--expect-branch', 'feat/x'],
+      ['check-absent', '--path', w.path, '--file', '_/issue-trees/1.json'],
+      ['check-absent', '--path', w.path, '--unknown', 'x'],
       ['sweep'],
+      ['sweep', '--file', '_/issue-trees/1.json', '--path', w.path],
       ['sweep', '--file', '/etc/passwd'],
       ['sweep', '--file', '_/issue-trees/0.json'],
       ['sweep', '--file', '_/issue-trees/1.json', '--mode', 'superseded'],
@@ -732,6 +745,140 @@ export function registerWorktreeRemoveTests(bash) {
       assert.equal(r.result, null, JSON.stringify(args))
     }
     assert.ok(existsSync(w.path))
+  })
+
+  // ---- check-absent（Issue #637）: 削除を一切しない不在専用の確認 ----
+  // 実行の前後で、登録の一覧・.git/worktrees の中身・全 ref・各パスの有無が同じであること（何も削除・prune・unlock・変更しない）を確かめる
+  const snap = (repo, paths) => ({
+    list: repo.git(repo.main, 'worktree', 'list', '--porcelain'),
+    admin: spawnSync('ls', ['-A', join(repo.main, '.git', 'worktrees')], { encoding: 'utf8' }).stdout,
+    refs: repo.git(repo.main, 'for-each-ref', '--format=%(refname) %(objectname)'),
+    exists: paths.map((p) => existsSync(p)),
+  })
+  const ca = (repo, path) => run(repo, ['check-absent', '--path', path])
+  const caWord = (repo, path, paths = [path]) => {
+    const before = snap(repo, paths)
+    const r = ca(repo, path)
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(snap(repo, paths), before, '何も削除・変更されない')
+    assert.equal(r.result.mode, 'check-absent')
+    assert.deepEqual([r.result.branch, r.result.branchSha, r.result.dirty, r.result.unlocked], ['none', '', 0, false])
+    return r.result
+  }
+
+  test(`${tag} check-absent: 登録が無くパスも無い → absent（ok・retained=false）。何も変わらない`, () => {
+    const repo = makeRepo()
+    const p = join(repo.root, 'wts', 'never')
+    assert.deepEqual(caWord(repo, p), { ok: true, mode: 'check-absent', worktree: 'absent', branch: 'none', branchSha: '', dirty: 0, unlocked: false, retained: false })
+    // 祖先ごと無いパスも absent
+    assert.equal(caWord(repo, join(repo.root, 'no', 'such', 'dir', 'wt')).worktree, 'absent')
+    // git worktree remove で正規に消した後も absent
+    const a = repo.addWorktree('a')
+    repo.git(repo.main, 'worktree', 'remove', a.path)
+    const r = caWord(repo, a.path)
+    assert.deepEqual([r.ok, r.worktree, r.retained], [true, 'absent', false])
+    assert.ok(repo.branches().includes(a.branch), 'ブランチも触らない')
+  })
+
+  test(`${tag} check-absent: 登録だけ残り実体が無い（rm で手消し）→ lock なし・ブランチ上は prunable（不在扱い）。登録は prune されず残る`, () => {
+    const repo = makeRepo()
+    const a = repo.addWorktree('a')
+    rmSync(a.path, { recursive: true })
+    const r = caWord(repo, a.path)
+    assert.deepEqual([r.ok, r.worktree, r.retained], [true, 'prunable', false])
+    assert.ok(repo.worktrees().includes(a.path), '登録が残る（このモードは prune しない）')
+    assert.ok(repo.branches().includes(a.branch))
+    // 続けて remove を走らせれば従来どおり prune されるが、check-absent 自体は何もしなかった
+  })
+
+  test(`${tag} check-absent: 登録だけ残り detached は prunable-detached、lock ありは prunable-locked（どちらも不在扱いにしない・保全）`, () => {
+    const repo = makeRepo()
+    const d = repo.addWorktree('d')
+    repo.write(d.path, 'q.txt', 'q\n')
+    repo.git(d.path, 'add', 'q.txt')
+    repo.git(d.path, 'checkout', '-q', '--detach')
+    repo.git(d.path, 'commit', '-q', '-m', 'unpushed')
+    const sha = repo.head(d.path)
+    rmSync(d.path, { recursive: true })
+    const rd = caWord(repo, d.path)
+    assert.deepEqual([rd.ok, rd.worktree, rd.retained], [false, 'prunable-detached', true])
+    assert.equal(repo.git(repo.main, 'cat-file', '-t', sha), 'commit', '未 push のコミットが残る')
+    const l = repo.addWorktree('l')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', 'portable', l.path)
+    rmSync(l.path, { recursive: true })
+    const rl = caWord(repo, l.path)
+    assert.deepEqual([rl.ok, rl.worktree, rl.retained], [false, 'prunable-locked', true])
+  })
+
+  test(`${tag} check-absent: 実体がある（clean・detached で未 push・汚れ・lock）→ present。何も消さない`, () => {
+    const repo = makeRepo()
+    const clean = repo.addWorktree('clean')
+    const det = repo.addWorktree('det')
+    repo.git(det.path, 'checkout', '-q', '--detach')
+    repo.write(det.path, 'n.txt', 'n\n')
+    repo.git(det.path, 'add', 'n.txt')
+    repo.git(det.path, 'commit', '-q', '-m', 'unpushed')
+    const detSha = repo.head(det.path)
+    const dirty = repo.addWorktree('dirty')
+    repo.write(dirty.path, 'u.txt', 'u\n')
+    const locked = repo.addWorktree('locked')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', lockReason(process.pid), locked.path)
+    const all = [clean.path, det.path, dirty.path, locked.path]
+    for (const w of all) {
+      const r = caWord(repo, w, all)
+      assert.deepEqual([r.ok, r.worktree, r.retained], [false, 'present', true], w)
+    }
+    assert.equal(repo.head(det.path), detSha)
+    assert.ok(all.every((w) => existsSync(w)))
+  })
+
+  test(`${tag} check-absent: 未登録だがディレクトリだけある・ファイルやシンボリックリンクがある → unregistered-present。メイン worktree → main。何も消さない`, () => {
+    const repo = makeRepo()
+    const stray = join(repo.root, 'stray')
+    mkdirSync(stray)
+    writeFileSync(join(stray, 'keep.txt'), 'k\n')
+    const file = join(repo.root, 'afile')
+    writeFileSync(file, 'x\n')
+    const link = join(repo.root, 'alink')
+    symlinkSync(join(repo.root, 'no-target'), link) // 壊れたシンボリックリンクも「ある」
+    for (const p of [stray, file, link]) {
+      const r = ca(repo, p)
+      assert.deepEqual([r.result.ok, r.result.worktree, r.result.retained], [false, 'unregistered-present', true], p)
+    }
+    assert.ok(existsSync(join(stray, 'keep.txt')))
+    assert.equal(ca(repo, repo.main).result.worktree, 'main')
+    // メイン worktree の中のパス（未登録・存在しない）は absent だが、メイン自身は main
+    assert.equal(ca(repo, join(repo.main, 'sub-never')).result.worktree, 'absent')
+  })
+
+  test(`${tag} check-absent: 祖先がシンボリックリンク経由でも、実体のパスで登録された prunable を absent と誤読しない`, () => {
+    const repo = makeRepo()
+    const a = repo.addWorktree('a')
+    const alias = join(repo.root, 'alias')
+    symlinkSync(join(repo.root, 'wts'), alias)
+    rmSync(a.path, { recursive: true })
+    const r = ca(repo, join(alias, 'a'))
+    assert.equal(r.result.worktree, 'prunable', '字面が alias/a でも登録（wts/a）と突き合わせる')
+    // 登録の無い名前は alias 経由でも absent
+    assert.equal(ca(repo, join(alias, 'other')).result.worktree, 'absent')
+  })
+
+  test(`${tag} check-absent: git worktree list が失敗する（git のリポジトリの外）→ unknown。absent に倒さない`, () => {
+    const repo = makeRepo()
+    const outside = join(repo.root, 'outside')
+    mkdirSync(outside)
+    const r = run(repo, ['check-absent', '--path', join(repo.root, 'wts', 'z')], { cwd: outside })
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual([r.result.ok, r.result.worktree, r.result.retained], [false, 'unknown', true])
+  })
+
+  test(`${tag} check-absent: カレントが対象の中にあっても読み取りだけで結果を返す（cwd として扱わない）`, () => {
+    const repo = makeRepo()
+    const a = repo.addWorktree('a')
+    const before = snap(repo, [a.path])
+    const r = run(repo, ['check-absent', '--path', a.path], { cwd: a.path })
+    assert.equal(r.result.worktree, 'present')
+    assert.deepEqual(snap(repo, [a.path]), before)
   })
 
   // ---- sweep ----

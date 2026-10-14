@@ -5,6 +5,7 @@
 #   bash worktree-remove.sh remove --mode superseded --path <worktree>
 #   bash worktree-remove.sh remove --mode discard [--path <worktree>] [--branch <branch> --base <base>] [--head <40 桁の sha>] [--expect-branch <branch>]
 #   bash worktree-remove.sh sweep --file _/issue-trees/N.json     （標準入力: 削除候補のパスの JSON 配列）
+#   bash worktree-remove.sh check-absent --path <worktree>        （読み取り専用: そのパスが不在かだけを観測する。何も削除・変更しない）
 #
 # 役割: 掃除プロンプトが文章で持っていた「登録の確認 → lock の扱い → 汚れの確認 → 削除 → ブランチ削除」を、固定のコマンド列として
 #       持つ（Issue #603 第 7 弾）。確認と削除を同じプロセスで行い、確認した状態のまま削除する。
@@ -19,6 +20,12 @@
 #               消さない。マージ済み PR の head との一致で『未 push のコミットを持たない』ことを確かめる用（squash マージは base との差分で見分けられない）。
 #   sweep       ラン終了時の残骸回収。候補ごとに superseded と同じ規則で消す。状態ファイルが failed / blocked / monitoring の
 #               イシューに記録した worktree、登録されていないパス、メイン worktree は消さない。状態ファイルを読めなければ何も消さない。
+#   check-absent  削除を一切しない不在専用の確認（Issue #637）。人が worktree を手で消した後の再実行で、状態の worktree 記録を捨ててよいかの根拠にする。
+#               worktree remove・unlock・prune・branch の削除を持たず、`git worktree list --porcelain` の読み取りとパスの実在の観測だけを行う。
+#               absent = 登録が無くパスも無い / prunable = 登録だけ残り実体が無い（lock なし・ブランチ上。HEAD はブランチ ref が持つので失うものが無い。
+#               登録の掃除はこのモードでしない）。ホストが不在として扱うのはこの 2 語だけ。ほかは保全側: prunable-detached = 登録だけ残り detached
+#               （登録がコミットの唯一の参照かもしれない）/ prunable-locked = 登録だけ残り lock あり（git は lock を prune しない・外付けの一時的な未接続かも
+#               しれない）/ present = 登録も実体もある / unregistered-present = 登録は無いがパスがある / main / unknown = 一覧・実在を確定できない。
 # 確認の方法: `git -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none`（利用者の status.showUntrackedFiles や
 #       submodule の ignore 設定、グローバルの除外ファイル〔core.excludesFile・~/.config/git/ignore〕に左右されない形。素の status は設定で
 #       未追跡を隠す）。リポジトリの .gitignore と .git/info/exclude に載った ignore 対象（node_modules・dist 等）は汚れに数えず、中身ごと消える
@@ -38,6 +45,7 @@
 #           retained-head-mismatch = discard で --head を与えたとき、worktree の HEAD のコミットが --head と違う（読めないときを含む。worktree もブランチも消さない）。
 #           retained-detached = discard で --head を与えたとき、HEAD が一致していても detached（detached 上の未 push のコミットは消すと失われる）。
 #           branchSha は消す前（または消さなかった）ブランチの先頭 sha で、ブランチの削除に失敗したとき（failed）は空。
+#   check-absent: remove と同じ形で mode が check-absent、worktree が上の語、branch は none、dirty は 0、retained は absent・prunable 以外で true。
 #   remove: {"ok":bool,"mode":"…","worktree":"removed|not-registered|skipped|main|cwd|retained-dirty|retained-submodule|retained-locked|retained-branch-mismatch|retained-head-mismatch|retained-detached|failed",
 #            "branch":"none|deleted|absent|keep-base|keep|failed","branchSha":"<40 桁 | 空>","dirty":N,"unlocked":bool,"retained":bool}
 #   sweep:  {"ok":true,"mode":"sweep","removed":["…"],"retained":N,"skipped":N,"failed":N,"reason":"…"}
@@ -57,7 +65,7 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 3
 . "${script_dir}/lib/worktree-remove-lib.sh" || exit 3
 
 usage() {
-  echo "使い方: worktree-remove.sh remove --mode (superseded|discard) [--path P] [--branch B --base BASE] [--head SHA] [--expect-branch B] / sweep --file _/issue-trees/N.json（候補は標準入力）" >&2
+  echo "使い方: worktree-remove.sh remove --mode (superseded|discard) [--path P] [--branch B --base BASE] [--head SHA] [--expect-branch B] / sweep --file _/issue-trees/N.json（候補は標準入力）/ check-absent --path P" >&2
   [ $# -eq 0 ] || echo "worktree-remove: $1" >&2
   exit 2
 }
@@ -65,8 +73,8 @@ usage() {
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case "${cmd}" in
-  remove | sweep) ;;
-  *) usage "サブコマンドは remove か sweep" ;;
+  remove | sweep | check-absent) ;;
+  *) usage "サブコマンドは remove か sweep か check-absent" ;;
 esac
 
 mode=""
@@ -213,6 +221,22 @@ emit_remove() {
 }
 
 T_BR=none
+# 不在専用の確認。ここで必ず exit する（remove の prune・sweep の処理へ落ちない）。--path 以外の引数は受け付けない
+if [ "${cmd}" = check-absent ]; then
+  [ -z "${mode}${branch}${base}${head}${expect_branch}${file}" ] && [ "${head_set}" -eq 0 ] && [ "${expect_set}" -eq 0 ] || usage "check-absent は --path だけを取る"
+  [ -n "${path}" ] && wr_valid_path "${path}" || usage "check-absent には妥当な --path が要る"
+  ca_ok=1
+  ca_list=$(git worktree list --porcelain 2>/dev/null) || { ca_ok=0; ca_list=""; }
+  ca_fs=$(wr_path_state "${path}")
+  wr_find_entry "${ca_list}" "${path}"
+  if [ "${WR_REGISTERED}" != 1 ] && [ "${ca_fs}" = missing ]; then
+    # 存在しないパスは字面のままでは登録（実体のパス）と照合できないので、実在する祖先を実体にした形でも探す
+    wr_find_entry "${ca_list}" "$(wr_loose_real "${path}")"
+  fi
+  T_WT=$(wr_absent_word "${ca_ok}" "${ca_fs}" "${WR_REGISTERED}" "${WR_MAIN}" "${WR_LOCKED}" "${WR_DETACHED}")
+  mode=check-absent
+  emit_remove ""
+fi
 if [ "${cmd}" = remove ]; then
   case "${mode}" in
     superseded | discard) ;;
