@@ -214,6 +214,16 @@ test('Recover discard が規約外 branch を解決: worktree は discard で掃
   assert.ok(labels.includes('plan:#2') && labels.includes('impl:#2'), '新規の Plan / Implement へ進む')
   for (const w of stateWrites(calls)) assert.ok(!wroteAsBranch(w, violating(2)), '規約外の branch を状態へ書いてはならない')
   assert.ok(stateWrites(calls).some((w) => w.includes('planning')), 'planning へ戻す')
+  // 残した規約外ブランチの名前を状態の note に残す（掃除成功後の planning 書き込みに載せる）
+  const planning = stateWrites(calls).find((w) => w.includes('planning') && w.includes('削除せず残した'))
+  assert.ok(planning, 'planning の書き込みに「削除せず残した」note がある')
+  assert.ok(planning.includes(violating(2)), 'note に規約外ブランチ名が入る')
+})
+
+test('Recover discard が規約外 branch を解決: 保存済みの pr が正なら、pr: 0 で切り離す前にその番号をログに残す', async () => {
+  const { calls, logs } = await nonconformingRun('discard', { saved: { pr: 77 } })
+  assert.ok(calls.some((c) => c.opts.label === 'plan:#2'))
+  assert.ok((logs ?? []).some((l) => /#77/.test(l) && /#2/.test(l)), '保存済み PR #77 をログに残す')
 })
 
 test('Recover discard が規約外 branch を解決: 掃除で worktree が保持されたら、既存の discard 保持時と同じく Plan へ進まず保全する', async () => {
@@ -272,7 +282,20 @@ test('implement のプロンプト: 規約外の headRefName を持つ既存 ope
   assert.match(p, /headRefName が <type>\/2-<short-name> 形式[^\n]*に合わない PR を本イシューの PR として採用しない[^\n]*0b-b へ進み/)
   assert.match(p, /0b-b\. open PR が見つからなかった場合（形式に合わず採用しなかった場合を含む）/)
   assert.match(p, /既存 PR を採用した場合のみ、手順 2 はスキップして/)
-  assert.match(p, /採用しなかった PR[^\n]*があれば、その番号を返却の summary に書く/)
+  // 成功経路でホストが読む返却項目 outOfScope（PR 本文の対象外節へ流れる）に入れさせる。summary は成功時に誰も読まない
+  assert.match(p, /採用しなかった PR[^\n]*があれば、返却フィールド outOfScope に「既存 PR #<番号> は head が命名規約外のため採用していない」の形で 1 PR 1 要素/)
+  assert.ok(!/その番号を返却の summary に書く/.test(p))
+})
+
+test('採用しなかった PR の申告は outOfScope 経由で pr-create のプロンプト（PR 本文の対象外節）に届く', async () => {
+  const note = '既存 PR #77 は head が命名規約外のため採用していない'
+  const { calls } = await runScript({
+    args: BASE_ARGS,
+    override: (label) => (label === 'impl:#2' ? { branch: 'feat/2-x', summary: 's', worktreePath: '/repo/wt/2', outOfScope: [note] } : undefined),
+  })
+  const pr = calls.find((c) => c.opts.label === 'pr-create:#2')
+  assert.ok(pr, 'pr-create まで進む')
+  assert.ok(pr.prompt.includes('## 対象外（out-of-scope）') && pr.prompt.includes(note), 'PR 本文の対象外節に載る')
 })
 
 test('配線: implement の 2 つの受理地点が同じ implBranchViolation を経由し、文字種だけの旧ゲートが残っていない', () => {
@@ -284,4 +307,56 @@ test('implement のプロンプトの返却仕様に branch の命名要件が�
   const { calls } = await runScript({ args: BASE_ARGS })
   const p = calls.find((c) => c.opts.label === 'impl:#2').prompt
   assert.match(p, /返却: branch（<type>\/2-<short-name> 形式のみ受理/)
+})
+
+// 保全対象が何も無い discard: continue の blocked の後に人が note に従って worktree を削除して再実行した形。
+// 状態は branch 空・worktree 記録あり、Recover は worktreeMissing: true / branch 空 で discard を返す（レビューアの再現形）。
+const gone = { status: 'blocked', branch: '', worktree: '/repo/wt/old', pr: 0, note: 'x' }
+const goneRecover = { decision: 'discard', branch: '', worktreeMissing: true, wipCommitted: true, reason: 'no commits' }
+const goneRun = (saved, recover) => {
+  const item = { ...gone, ...saved }
+  const hashes = { 2: m.sha256Hex(m.canonicalJson(item)) }
+  const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
+  return runScript({
+    args: BASE_ARGS,
+    override: (label) => {
+      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: item }, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'recover:#2') return { ...goneRecover, ...recover }
+      if (label === 'state:cleanup:#2') return { ok: true, retained: false }
+      if (label === 'impl:#2') return { branch: 'feat/2-x', summary: 's', worktreePath: '/repo/wt/2' }
+      return undefined
+    },
+  })
+}
+
+test('実体の無い worktree の記録だけが残る discard: 何も削除せず planning へ戻し、新規 Plan / Implement へ進む（毎ラン failed に戻らない）', async () => {
+  const { result, calls } = await goneRun({}, {})
+  const labels = calls.map((c) => c.opts.label)
+  assert.ok(labels.includes('plan:#2') && labels.includes('impl:#2'), '新規の Plan / Implement へ進む')
+  assert.ok(!calls.some((c) => c.opts.label === 'state:cleanup:#2' && c.prompt.includes('--mode discard')), '何も削除しない')
+  assert.ok(stateWrites(calls).some((w) => /"status":\s*"planning"/.test(w) && /"worktree":\s*""/.test(w) && /"branch":\s*""/.test(w) && /"pr":\s*0/.test(w)), '{planning, branch: "", pr: 0, worktree: ""} を書く')
+  assert.ok(!result.done.some((r) => r.issue === 2 && r.status === 'failed'))
+})
+
+test('実体の無い worktree の discard でも、branch がどちらかにあれば従来どおり（新しい分岐に入らない）', async () => {
+  // 保存済み branch あり: 既存の discard 経路（worktree と branch を掃除）
+  const a = await goneRun({ branch: 'feat/2-x' }, {})
+  assert.ok(a.calls.some((c) => c.opts.label === 'state:cleanup:#2' && c.prompt.includes('--branch')), '保存済み branch がある場合は branch を含む既存の discard 掃除')
+  // Recover が解決した branch あり（worktree 不在・保存済み branch なし）も既存の discard 経路（新しい分岐は使わない）
+  const b = await goneRun({}, { branch: 'feat/2-x' })
+  assert.ok(b.calls.some((c) => c.opts.label === 'state:cleanup:#2' && c.prompt.includes('--branch')))
+  // worktreeMissing が false なら従来の保全（failed）
+  const c = await goneRun({}, { worktreeMissing: false })
+  assert.ok(!c.calls.some((x) => /^(plan|impl):#2/.test(x.opts.label)))
+  assert.equal(c.result.done.find((r) => r.issue === 2).status, 'failed')
+})
+
+test('continue の blocked の対処 (a): ブランチを <type>/N-<name> へ改名して再実行すると継続できる', async () => {
+  const { result, calls } = await goneRun({}, { decision: 'continue', branch: 'feat/2-renamed', worktreeMissing: false, brief: { done: 'd', remaining: 'r', broken: '' } })
+  const labels = calls.map((c) => c.opts.label)
+  assert.ok(labels.includes('impl:#2'), '継続の Implement へ進む')
+  assert.ok(!labels.includes('plan:#2'), '継続なので Plan は起動しない')
+  assert.ok(labels.includes('pr-create:#2'), 'Review を通って PR 作成まで進む（命名ゲートで止まらない）')
+  assert.ok(!/命名規約/.test(result.done.find((r) => r.issue === 2)?.note ?? ''))
 })

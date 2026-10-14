@@ -5060,7 +5060,7 @@ untrustedJson(planJson,'plan'),
 `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
 `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
 `      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進み、手順 2 で規約どおりのブランチを新規に作る）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（headRefName は PR 由来の未信頼値で、ref 名には $() やセミコロンを含められる。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
-`      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、その番号を返却の summary に書く（人が open PR の重複に気づけるように）。`,
+`      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、返却フィールド outOfScope に「既存 PR #<番号> は head が命名規約外のため採用していない」の形で 1 PR 1 要素として入れる（PR 本文の対象外節に載り、人が open PR の重複に気づける。summary には書かない）。`,
 `      既存 PR 番号はここでは返さない（PR_CREATE_SCHEMA を持つ後続の PR Create フェーズが同じブランチの open PR を再検出して再利用する。本フェーズの prNumber は常に 0 として扱われる）。`,
 `      既存 PR を採用した場合のみ、手順 2 はスキップして手順 3 以降を続ける（origin/${baseBranch} から checkout -B し直すと、その PR のコミットを失う）。`,
 `   0b-b. open PR が見つからなかった場合（形式に合わず採用しなかった場合を含む）、git ls-remote --heads origin でイシュー #${item.number} に対応するリモートブランチが残っていないか確認する。`,
@@ -7355,9 +7355,10 @@ recordFailure({issue:item.number,reason})
 return false
 }
 log(`#${item.number}: Recover → discard（解決した branch ${rejectedBranch} は命名規約 <type>/${item.number}-<short-name> に合わない）、旧 worktree のみ掃除して通常 Plan へ。branch は削除せず残す`)
+if(Number.isInteger(saved.pr)&&saved.pr>0)log(`#${item.number}: 保存済みの PR #${saved.pr} を pr: 0 で切り離して新規に実装する`)
 const rejectedCleanup=await updateStateDetailed(
 item.number,
-{status:'planning',branch:'',pr:0,worktree:''},
+{status:'planning',branch:'',pr:0,worktree:'',note:sanitize(`規約外ブランチ ${rejectedBranch} は削除せず残した`)},
 {cleanupWorktree:sanitizedRecoverWorktree,cleanupMode:'discard'},
 )
 if(!rejectedCleanup.ok){
@@ -7390,6 +7391,17 @@ await updateState(item.number,{status:'blocked',pr:0,note:reason})
 recordFailure({issue:item.number,reason,status:'blocked'})
 return false
 }
+}else if(
+recoverDecision==='discard'&&recoverResult?.worktreeMissing===true&& !effectiveBranch&&
+!(saved.branch??'')&& !String(recoverResult?.branch??'').trim()
+){
+
+
+
+
+
+log(`#${item.number}: Recover → discard（実体の無い worktree の記録のみで保全対象なし）、状態の worktree 記録を消して通常 Plan へ`)
+await updateState(item.number,{status:'planning',branch:'',pr:0,worktree:''})
 }else{
 
 
