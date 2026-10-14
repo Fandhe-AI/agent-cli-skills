@@ -95,7 +95,7 @@ test('closedCleanupRetainedReason: スクリプトが結果行の固定語で保
   // エージェントが非 0 終了・launcher の exit 3 / 4・結果の行なしを ok:false / retained:true / worktree 空で返す
   assert.equal(m.closedCleanupRetainedReason({ ok: false, retained: true, worktree: '' }, false), null)
   assert.equal(m.closedCleanupRetainedReason({ ok: false, retained: true }, false), null)
-  for (const w of ['retained-locked', 'retained-branch-mismatch', 'failed', 'main', 'cwd', 'removed', 'not-registered', 'skipped', 'retained-other', 'RETAINED-DIRTY', 5, null]) assert.equal(m.closedCleanupRetainedReason(r(w), false), null, String(w))
+  for (const w of ['retained-unobservable', 'retained-locked', 'retained-branch-mismatch', 'failed', 'main', 'cwd', 'removed', 'not-registered', 'skipped', 'retained-other', 'RETAINED-DIRTY', 5, null]) assert.equal(m.closedCleanupRetainedReason(r(w), false), null, String(w))
   assert.equal(m.closedCleanupRetainedReason(r('retained-dirty'), true), null, '出力なし')
   assert.equal(m.closedCleanupRetainedReason({ ...r('retained-dirty'), retained: false }, false), null)
   assert.equal(m.closedCleanupRetainedReason(undefined, false), null)
@@ -218,6 +218,7 @@ const RETAINED = [
   ['非 0 終了・結果行なし（ok:false・retained:true・worktree 空）', () => ({ ok: false, retained: true, worktree: '' }), false],
   ['worktree の語を返さない旧形式の応答', () => ({ ok: false, retained: true }), false],
   ['生きている lock（retained-locked）はセッション終了後に解消し得るので記録しない', () => ({ ok: false, retained: true, worktree: 'retained-locked' }), false],
+  ['観測の失敗（retained-unobservable: status を読めない・HEAD を読めない）は一過性かもしれないので記録せず、次のランで再試行させる', () => ({ ok: false, retained: true, worktree: 'retained-unobservable' }), false],
   ['掃除の結果なし（StructuredOutput 未返却）', () => null, false],
   ['掃除が例外', () => { throw new Error('boom') }, false],
   // 誤転記（ok:false なのに retained:false）は削除成功と見なさず、決定的な保持でもないので記録しない
@@ -351,6 +352,12 @@ test('結合: dryRun は書き込み系を起動せず、後始末の対象見�
   assert.equal(result.dryRun, true)
   assert.deepEqual(result.closedCleanupPending, { count: 1, first: [2], perRunMax: 10, maxAgentCalls: 6 })
   assert.equal(callsOf(calls, /^(pr-bind|state:cleanup|state:update)/).length, 0)
+})
+
+test('結合: retained-unobservable は closedCleanupTried を書かない（retained-dirty は書く）', async () => {
+  const r = await run({ cleanup: { ok: false, retained: true, worktree: 'retained-unobservable' } })
+  assert.equal(triedWrites(r.calls).length, 0)
+  assert.equal(anyStatusWrite(r.calls).length, 0)
 })
 
 test('結合: 保持された結果は status を変えずに試行済みを記録し、結果の closedCleanup に件数を出す。記録のある項目は次の実行で pr-bind すら起動しない', async () => {

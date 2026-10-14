@@ -3895,15 +3895,15 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'06dd99a1dea43b06430203b5a5fce730e4fb8f5765324cfca644bf2c56612abe',
-'measure-free-disk.sh':'d5a4cf4a1051051e6029cef256f2aad7dec5a165febcd965d65ecfc311d4442f',
-'observe-pr.sh':'bf6c94d9443a0a6224add023562d5337a6d989487d4a61b2cd59151f580d9bfd',
-'base-merge.sh':'e1d3e73f41ee7f924bf3f3025414edbdf82cd42099431ed9cc640ab1a4b804bc',
-'pr-push.sh':'f7e69b32856d00ae45133e0810aef9dbf466ccbf723beb7a0ce02d6ed39a97f7',
-'state.sh':'678446fcca0a2599471dd4a178da8da3611d3246309d022de40ed87757747bcb',
-'merge-gate.sh':'40fc51dae35f579c5ec848ad94aff1ee904db562cfec458c8c20f1702cfa36ec',
-'worktree-remove.sh':'c63f431189413257e4f4c3e3a90a8520159ac9547f03d7164ad98c53cd7dd2f9',
-'recover-prep.sh':'2f68360d71129143d1b7113584cc645afee2bd5151f1d214943baaed60b5089a',
+'measure-residual-bytes.sh':'67b4d9b68546a40eb27a3a64efe2178fe7a628a3306ba80c8034968be70dd273',
+'measure-free-disk.sh':'786e727177f3d6294a014649be86f2b0297478c046f9fbc8c3b4e2de5dc56d69',
+'observe-pr.sh':'42eebb03cdb652b0c3f1dcc5c206efa5cf22d39e1e6cdaa4ba45fc347bb915e9',
+'base-merge.sh':'5b8728bf9def69543c5180ea9e7e85a6045711ff99603a0fc549549a487ebdb2',
+'pr-push.sh':'13e5a20d87a04d2e82c2a11d9971b3aaaa59fe1b3da3a624e26797b2fca832c5',
+'state.sh':'7a08d5df443386a96da5b00642bfbaf6e737db9c8062503a51bb2e1872b0d768',
+'merge-gate.sh':'ea61726c3d37f6002a2ed592c5f129e87cdeb1a53d7764cb334353cb2c7ec35b',
+'worktree-remove.sh':'bb23a76012cdecc9eea6915810fc6a52a83154ec6d5add8a987d2d8c7ac9465c',
+'recover-prep.sh':'7cfd416881ba5cfd64a9af2229eebb8ca866dfe0ab8d993a01ff370827564473',
 }
 
 
@@ -3976,10 +3976,11 @@ properties:{
 ok:{type:'boolean',description:'結果の行の ok'},
 retained:{type:'boolean',description:'結果の行の retained（worktree が残った = 保持・失敗・メイン）'},
 branchSha:{type:'string',description:'結果の行の branchSha（40 桁の 16 進。無ければ空文字）'},
-worktree:{type:'string',description:'結果の行の worktree の語（removed・retained-dirty 等。結果の行が無い・非 0 終了のときは空文字）'},
+worktree:{type:'string',description:'結果の行の worktree の語（removed・retained-dirty・retained-unobservable 等。結果の行が無い・非 0 終了のときは空文字）'},
 },
 }
 const isWorktreeCleanupValid=(r)=>typeof r?.ok==='boolean'&&typeof r?.retained==='boolean'
+
 
 
 async function confirmWorktreeAbsent(issueNumber,path){
@@ -3991,7 +3992,7 @@ UNTRUSTED_POLICY,
 TEMP_FILE_POLICY,
 `次のコマンドを一字一句そのまま（改変・条件追加・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:`,
 '```sh',
-scriptInvocation('worktree-remove.sh',undefined,` check-absent --path ${worktreeQuote(path)}`),
+scriptInvocation('worktree-remove.sh',undefined,` check-absent --path ${worktreeQuote(path)}${mainWorktreePath ? ` --repo-root ${worktreeQuote(mainWorktreePath)}` : ''}`),
 '```',
 WORKTREE_NOTE,
 `返却: ok / retained / worktree（上記のとおり）。`,
@@ -10801,7 +10802,7 @@ const retainedLedger=[
 ...[...slotRetainedPaths].map(([path,issue])=>({issue,kind:'retained',path})),
 ]
 if(retainedLedger.length>0){
-log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD〔retained-head-mismatch / retained-detached〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・汚れや HEAD を観測できなかった〔retained-unobservable〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD〔retained-head-mismatch / retained-detached〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
 for(const e of retainedLedger)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 

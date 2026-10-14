@@ -3549,7 +3549,7 @@ function closedCleanupGate({ limit, used, attempted, reserveImplement }) {
   return 'run'
 }
 // 試行済みに記録する保持理由。スクリプトが結果行の worktree で明示した固定語だけ 'retained'、それ以外（結果なし・非 0 終了・launcher の不一致・
-// 固定語以外・retained-locked）は null = 記録しない。retained-locked は生きている lock で、時間が経てば（セッション終了後に）解消し得る一過性のため除く。純粋関数
+// 固定語以外・retained-locked）は null = 記録しない。retained-locked は生きている lock で、時間が経てば（セッション終了後に）解消し得る一過性のため除く。retained-unobservable（status の失敗・HEAD を読めない）は観測の失敗で、汚れや不一致を確認したわけではないため記録せず、次のランで再試行させる。純粋関数
 const CLOSED_CLEANUP_RECORDABLE = new Set(['retained-dirty', 'retained-submodule', 'retained-head-mismatch', 'retained-detached'])
 function closedCleanupRetainedReason(result, outputMissing) {
   return !outputMissing && result?.retained === true && CLOSED_CLEANUP_RECORDABLE.has(result?.worktree) ? 'retained' : null
@@ -3976,11 +3976,12 @@ const WORKTREE_CLEANUP_SCHEMA = {
     ok: { type: 'boolean', description: '結果の行の ok' },
     retained: { type: 'boolean', description: '結果の行の retained（worktree が残った = 保持・失敗・メイン）' },
     branchSha: { type: 'string', description: '結果の行の branchSha（40 桁の 16 進。無ければ空文字）' },
-    worktree: { type: 'string', description: '結果の行の worktree の語（removed・retained-dirty 等。結果の行が無い・非 0 終了のときは空文字）' },
+    worktree: { type: 'string', description: '結果の行の worktree の語（removed・retained-dirty・retained-unobservable 等。結果の行が無い・非 0 終了のときは空文字）' },
   },
 }
 const isWorktreeCleanupValid = (r) => typeof r?.ok === 'boolean' && typeof r?.retained === 'boolean'
-// 不在専用の確認（worktree-remove.sh check-absent。Issue #637）。読み取り専用で、削除・prune・unlock をしない。ホストが信じるのは結果の行の worktree の語のうち
+// 不在専用の確認（worktree-remove.sh check-absent。Issue #637）。読み取り専用で、削除・prune・unlock をしない。ラン開始時に特定したメイン worktree があれば --repo-root で渡し、
+// スクリプトがカレントのリポジトリと照合する（違えば unknown = 不在と見なさない）。ホストが信じるのは結果の行の worktree の語のうち
 // absent（登録も実体も無い）と prunable（登録だけ残り、lock なし・ブランチ上）だけ。それ以外・結果なし・例外は不在と見なさない（呼び出し側が保全する）
 async function confirmWorktreeAbsent(issueNumber, path) {
   try {
@@ -3991,7 +3992,7 @@ async function confirmWorktreeAbsent(issueNumber, path) {
         TEMP_FILE_POLICY,
         `次のコマンドを一字一句そのまま（改変・条件追加・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:`,
         '```sh',
-        scriptInvocation('worktree-remove.sh', undefined, ` check-absent --path ${worktreeQuote(path)}`),
+        scriptInvocation('worktree-remove.sh', undefined, ` check-absent --path ${worktreeQuote(path)}${mainWorktreePath ? ` --repo-root ${worktreeQuote(mainWorktreePath)}` : ''}`),
         '```',
         WORKTREE_NOTE,
         `返却: ok / retained / worktree（上記のとおり）。`,
@@ -10795,13 +10796,13 @@ if (disposableWorktrees.length > 0) {
   for (const e of disposableWorktrees) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 // 掃除が削除せず保持した（またはスイープでも消せなかった）worktree。使い捨てとは別: 未コミットの変更や submodule の記録されていない変更を持つ
-// 場合があり、そのまま git worktree remove すると失われる。理由はエントリごとには持たない（掃除の結果行の語: retained-dirty / retained-locked / retained-submodule / retained-branch-mismatch / retained-head-mismatch / retained-detached）
+// 場合があり、そのまま git worktree remove すると失われる。理由はエントリごとには持たない（掃除の結果行の語: retained-dirty / retained-unobservable / retained-locked / retained-submodule / retained-branch-mismatch / retained-head-mismatch / retained-detached）
 const retainedLedger = [
   ...ephemeralWorktrees.filter((e) => e.kind === 'retained'),
   ...[...slotRetainedPaths].map(([path, issue]) => ({ issue, kind: 'retained', path })),
 ]
 if (retainedLedger.length > 0) {
-  log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD〔retained-head-mismatch / retained-detached〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+  log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・汚れや HEAD を観測できなかった〔retained-unobservable〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD〔retained-head-mismatch / retained-detached〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
   for (const e of retainedLedger) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 

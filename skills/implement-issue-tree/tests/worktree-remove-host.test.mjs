@@ -415,7 +415,7 @@ test('不在確認 absent / prunable: check-absent の 1 コマンドを 1 回�
     const { calls, logs } = await absentRun({ absent: { ok: true, retained: false, worktree: word } })
     const a = absentCalls(calls)
     assert.equal(a.length, 1, word)
-    assert.match(a[0].prompt, /worktree-remove\.sh check-absent --path '\/repo\/wt\/old'\n/)
+    assert.match(a[0].prompt, /worktree-remove\.sh check-absent --path '\/repo\/wt\/old' --repo-root '\/repo'\n/) // ラン開始時に特定したメイン worktree を渡し、スクリプトがカレントのリポジトリと照合する
     assert.doesNotMatch(a[0].prompt, /remove --mode|--force|--branch|--expect-branch|sweep/)
     assert.ok(labels(calls).includes('plan:#2'), `${word}: 新規 Plan へ進む`)
     assert.equal(removeCalls(calls).length, 0, `${word}: 旧パスを後続の掃除へ渡さない`)

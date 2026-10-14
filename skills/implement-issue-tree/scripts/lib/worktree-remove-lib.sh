@@ -187,13 +187,15 @@ wr_lock_action() {
 # $3 = 汚れのうち submodule 由来の行数、$4 = 初期化済み submodule の数。標準出力:
 #   plain             --force なしで消す（discard で汚れも初期化済み submodule も無い）
 #   force             --force で消す（superseded。汚れていても消すが、submodule に未記録の変更があれば保持）
-#   retain-dirty      汚れ（または確認できなかった）ため保持する
+#   retain-dirty      汚れがあるため保持する
+#   retain-unobservable  汚れを確認できなかった（status の失敗・git の対象が worktree 自身でない）ため保持する。汚れの有無は分からないので、
+#                        retain-dirty（汚れを観測した）とは別の語にする。ホストは後者を恒久の試行済み記録にするが、前者は一過性かもしれず次のランで再試行させる
 #   retain-submodule  submodule に未記録の変更（superseded）・初期化済み submodule（discard）があるため保持する
 wr_plan() {
   case "$1" in
     superseded)
       if [ "$2" -lt 0 ]; then
-        echo retain-dirty
+        echo retain-unobservable
       elif [ "$3" -gt 0 ]; then
         echo retain-submodule
       else
@@ -201,7 +203,9 @@ wr_plan() {
       fi
       ;;
     discard)
-      if [ "$2" != 0 ]; then
+      if [ "$2" -lt 0 ]; then
+        echo retain-unobservable
+      elif [ "$2" != 0 ]; then
         echo retain-dirty
       elif [ "$4" -gt 0 ]; then
         echo retain-submodule
@@ -238,21 +242,127 @@ wr_count_status() {
   WR_SUB_DIRTY=${s}
 }
 
-# パスの実体（存在しなければそのまま）
+# パスの字面の正規化（絶対パス前提）。連続する / を 1 つに、途中の /./ を / に、末尾の /. と / を落とす。.. は解決しない
+# （入力検証 wr_valid_path が .. を含むパスを拒否済み。解決して別の場所を指させない）。ファイルシステムには触れない
+wr_norm_path() {
+  local p=$1 prev=""
+  while [ "${p}" != "${prev}" ]; do
+    prev=${p}
+    case "${p}" in
+      *//*) p=${p//\/\//\/} ;;
+      */./*) p=${p//\/.\//\/} ;;
+      */.) p=${p%/.} ;;
+      */) p=${p%/} ;;
+    esac
+  done
+  [ -n "${p}" ] || p=/
+  printf '%s' "${p}"
+}
+
+# 英大文字を小文字へ（パスは ASCII の英数字・._/-空白だけ）。大小の区別が無いファイルシステム（macOS の既定）で、字面が違うだけの同じ場所を見分けないために使う
+wr_lower() {
+  printf '%s' "$1" | tr 'A-Z' 'a-z'
+}
+
+# パスの実体（存在しなければ字面を正規化したもの。末尾の / や /. が残って登録と照合できなくならないように）
 wr_real() {
   local r
   if [ -d "$1" ] && r=$(cd "$1" 2>/dev/null && pwd -P) && [ -n "${r}" ]; then
     printf '%s' "${r}"
   else
-    printf '%s' "$1"
+    wr_norm_path "$1"
   fi
 }
 
+# ディレクトリ（$1）が属するリポジトリの共通 git ディレクトリの実体。ディレクトリが無い・リポジトリの外なら何も出さず非 0
+wr_common_dir() {
+  local c
+  [ -d "$1" ] || return 1
+  c=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) && [ -n "${c}" ] || return 1
+  case "${c}" in
+    /*) ;;
+    *) c="$1/${c}" ;;
+  esac
+  [ -d "${c}" ] || return 1
+  (cd "${c}" 2>/dev/null && pwd -P)
+}
+
+# 対象のリポジトリの確認（check-absent 用）。$1 = ホストが渡したリポジトリの root（空 = 渡されていない）、$2 = 確認するパス。
+# カレントのリポジトリ（git worktree list を取る先）と対象のリポジトリの共通 git ディレクトリが一致するときだけ 0。
+# $1 が空のときは、パスの最寄りの実在する祖先から属するリポジトリを求める。求められない・違うときは非 0（呼び出し側は unknown に倒す）。
+# 別のリポジトリのカレントで実行されると、その一覧に対象が載らず absent に倒れてしまう（失うものがある登録を見落とす）のを防ぐ
+wr_repo_matches() {
+  local base=$1 p=$2 here there
+  if [ -z "${base}" ]; then
+    base=$p
+    while [ ! -d "${base}" ] && [ "${base}" != / ] && [ -n "${base}" ]; do
+      base=${base%/*}
+      [ -n "${base}" ] || base=/
+    done
+  fi
+  here=$(wr_common_dir .) || return 1
+  there=$(wr_common_dir "${base}") || return 1
+  [ -n "${here}" ] && [ "${here}" = "${there}" ]
+}
+
+# 2 つのパスが同じか。$1 = 一覧のエントリの字面、$2 = その実体、$3 = 探すパス、$4 = その実体、$5 = 1 のとき大小を区別しない
+wr_same_path() {
+  if [ "$5" = 1 ]; then
+    [ "$(wr_lower "$(wr_norm_path "$1")")" = "$(wr_lower "$(wr_norm_path "$3")")" ] || [ "$(wr_lower "$2")" = "$(wr_lower "$4")" ]
+  else
+    [ "$(wr_norm_path "$1")" = "$(wr_norm_path "$3")" ] || [ "$2" = "$4" ]
+  fi
+}
+
+# 全体の worktree prune で登録が消えると、コミットの唯一の参照を失い得る登録の数を WR_PRUNE_RISK に入れる。$1 = git worktree list --porcelain の出力。
+# 対象: メイン以外で lock が無く、実体が無い（または porcelain が prunable と言う）登録のうち、detached、または HEAD が 0000…（ブランチ ref が
+# 無く、そのコミットの最後の参照が worktree の HEAD の reflog だけ）のもの。ブランチ上の登録は HEAD をブランチ ref が持つので数えない。
+# lock された登録は git が prune しないので数えない
+wr_prune_risk() {
+  local line cur="" idx=0 head="" det=0 lk=0 pr=0 n=0 on=0
+  while IFS= read -r line; do
+    case "${line}" in
+      'worktree '* | '')
+        if [ "${on}" = 1 ] && [ "${idx}" -gt 1 ] && [ "${lk}" = 0 ] && { [ "${pr}" = 1 ] || [ ! -e "${cur}" ]; }; then
+          if [ "${det}" = 1 ]; then
+            n=$((n + 1))
+          else
+            case "${head}" in
+              '') ;;
+              *[!0]*) ;;
+              *) n=$((n + 1)) ;;
+            esac
+          fi
+        fi
+        on=0
+        head=""
+        det=0
+        lk=0
+        pr=0
+        case "${line}" in
+          'worktree '*)
+            cur=${line#worktree }
+            idx=$((idx + 1))
+            on=1
+            ;;
+        esac
+        ;;
+      'HEAD '*) head=${line#HEAD } ;;
+      'detached') det=1 ;;
+      'locked' | 'locked '*) lk=1 ;;
+      'prunable' | 'prunable '*) pr=1 ;;
+    esac
+  done <<<"$1"$'\n'
+  WR_PRUNE_RISK=${n}
+}
+
 # `git worktree list --porcelain` の出力（$1）から、対象（$2 = 与えられたパス）の登録状況を調べる。実体のパスでも照合する。
+# $3 = 1 のときは大小を区別せずに照合する（check-absent が、大小だけ違う登録を見落とさないため。この一致は『別の場所かもしれないが保全する』用）。
 # WR_REGISTERED = 登録されているか、WR_MAIN = 先頭のエントリ（メイン worktree）か、WR_LOCKED / WR_LOCK_REASON = lock の有無と理由
 wr_find_entry() {
-  local line cur="" idx=0 want real hit=0 first=0 locked=0 reason="" in_hit=0 cur_real detached=0
+  local line cur="" idx=0 want real hit=0 first=0 locked=0 reason="" in_hit=0 cur_real detached=0 fold sha
   want=$2
+  fold=${3:-0}
   real=$(wr_real "${want}")
   WR_REGISTERED=0
   WR_MAIN=0
@@ -266,7 +376,7 @@ wr_find_entry() {
         idx=$((idx + 1))
         in_hit=0
         cur_real=$(wr_real "${cur}")
-        if [ "${hit}" = 0 ] && { [ "${cur}" = "${want}" ] || [ "${cur_real}" = "${real}" ]; }; then
+        if [ "${hit}" = 0 ] && wr_same_path "${cur}" "${cur_real}" "${want}" "${real}" "${fold}"; then
           hit=1
           in_hit=1
           [ "${idx}" = 1 ] && first=1
@@ -277,6 +387,17 @@ wr_find_entry() {
         ;;
       'detached')
         [ "${in_hit}" = 1 ] && detached=1
+        ;;
+      'HEAD '*)
+        # HEAD が 0000…（ブランチ ref を update-ref -d で消した登録など）は、そのコミットの最後の参照が worktree の HEAD の reflog だけになる。
+        # detached と同じく、登録が唯一の参照かもしれないものとして扱う（prunable にしない）
+        if [ "${in_hit}" = 1 ]; then
+          sha=${line#HEAD }
+          case "${sha}" in
+            '' | *[!0]*) ;;
+            *) detached=1 ;;
+          esac
+        fi
         ;;
       'locked' | 'locked '*)
         if [ "${in_hit}" = 1 ]; then
@@ -297,7 +418,8 @@ wr_find_entry() {
 # 存在しないパスの実体化（check-absent 用）。実在する最も近い祖先を pwd -P で実体にし、残りの成分を付ける。git は実体のパスで登録する
 # ため、祖先がシンボリックリンク（macOS の /var → /private/var 等）だと、存在しないパスの字面では登録と照合できない。$1 = 絶対パス
 wr_loose_real() {
-  local p=$1 rest="" base up
+  local p rest="" base up
+  p=$(wr_norm_path "$1")
   while [ "${p}" != / ] && [ -n "${p}" ] && [ ! -d "${p}" ]; do
     base=${p##*/}
     rest="/${base}${rest}"
@@ -329,12 +451,12 @@ wr_path_state() {
 }
 
 # check-absent の判定。$1 = 一覧を取れたか（0/1）、$2 = パスの実在（wr_path_state の語）、$3 = 登録されているか、$4 = メイン worktree か、
-# $5 = lock されているか、$6 = 登録の HEAD が detached か（すべて 0/1）。標準出力（固定語彙）:
+# $5 = lock されているか、$6 = 登録の HEAD が detached か、または HEAD が 0000…（すべて 0/1）、$7 = 登録は無いが大小だけ違う登録がある（0/1。省略は 0）。標準出力（固定語彙）:
 #   absent             登録が無く、パスも無い（失うものが無い）
 #   prunable           登録は残るが実体が無い（lock なし・ブランチ上）。実体の無い登録の HEAD はブランチ ref が持つので、失うものが無い。このモードでは prune しない
-#   prunable-detached  登録だけ残り、HEAD が detached（その登録がコミットの唯一の参照かもしれず、prune で失われ得る）。保全する
+#   prunable-detached  登録だけ残り、HEAD が detached または 0000…（ブランチ ref が無い）（その登録がコミットの唯一の参照かもしれず、prune で失われ得る）。保全する
 #   prunable-locked    登録だけ残り lock されている（git は lock された登録を prune しない。外付けの一時的な未接続かもしれない）。保全する
-#   present            登録があり実体もある。unregistered-present は登録が無いがパスがある。main はメイン worktree。unknown は一覧・実在を確定できない
+#   present            登録があり実体もある。unregistered-present は登録が無いがパスがある。main はメイン worktree。unknown は一覧・実在・リポジトリを確定できない、または大小だけ違う登録がある
 # ホストが不在として扱ってよい語は absent と prunable だけ
 wr_absent_word() {
   if [ "$1" != 1 ] || [ "$2" = unknown ]; then
@@ -344,7 +466,8 @@ wr_absent_word() {
   elif [ "$2" = exists ]; then
     if [ "$3" = 1 ]; then echo present; else echo unregistered-present; fi
   elif [ "$3" != 1 ]; then
-    echo absent
+    # 大小だけが違う登録と一致する（$7 = 1）なら、同じ場所かもしれない。登録なしと見なさず保全側（unknown）に倒す
+    if [ "${7:-0}" = 1 ]; then echo unknown; else echo absent; fi
   elif [ "$5" = 1 ]; then
     echo prunable-locked
   elif [ "$6" = 1 ]; then
@@ -391,14 +514,16 @@ wr_branch_check() {
 
 # --head（マージ済み PR の head）との照合。$1 = 指定された sha（空 = 指定なし）、$2 = worktree の HEAD のコミット（読めなければ空）、
 # $3 = worktree が指すブランチ（detached は空）。
-# 標準出力: ok（指定なし、または ブランチ上で一致）/ retain（違う、または読めない）/ retain-detached（一致していても detached）。
+# 標準出力: ok（指定なし、または ブランチ上で一致）/ retain（違う）/ retain-unobservable（HEAD のコミットを読めなかった。不一致ではなく観測の失敗）/ retain-detached（一致していても detached）。
 # squash マージでは base との差分で未 push のコミットを見分けられないため、PR の head と worktree の HEAD の一致だけを根拠にする。
 # detached HEAD 上のコミットは worktree を消すと含む ref が無くなり失われる（headRefOid は自己申告で HEAD と同じ値を返し得る）ため、
 # 実装 worktree が常にブランチ上にある前提で、一致していても保持する。sha の照合を先にする（読めない・違うは retain のまま）
 wr_head_check() {
   if [ -z "$1" ]; then
     echo ok
-  elif [ -z "$2" ] || [ "$1" != "$2" ]; then
+  elif [ -z "$2" ]; then
+    echo retain-unobservable
+  elif [ "$1" != "$2" ]; then
     echo retain
   elif [ -z "${3:-}" ]; then
     echo retain-detached
