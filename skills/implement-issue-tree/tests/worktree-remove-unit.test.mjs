@@ -109,7 +109,7 @@ check(
   (g, r) => assert.equal(g.rc, r[1] === '_/issue-trees/1.json' || r[1] === '_/issue-trees/603.json' ? OK : NG, JSON.stringify(r[1])),
 )
 
-// Claude Code の実物: `claude agent agent-aa14453c88416c114 (pid 72544 start Mon Oct 12 02:48:39 2026)`（照合は
+// Claude Code の書式の例: `claude agent agent-0123456789abcdef0 (pid 12345 start Mon Jan  1 00:00:00 2026)`（照合は
 // /^claude (?:agent|session) .{1,255} \(pid (\d{1,10})(?: start (.{1,255}))?\)$/）。pid はセッション（メインの claude プロセス）の pid
 const START = 'Mon Oct 12 02:48:39 2026'
 const LOCK_ROWS = [
@@ -117,7 +117,7 @@ const LOCK_ROWS = [
   ['claude agent agent-abc123 (pid 4242)', '4242', ''],
   ['claude agent a (pid 1)', '1', ''],
   ['claude agent two words (pid 9)', '9', ''],
-  [`claude agent agent-aa14453c88416c114 (pid 72544 start ${START})`, '72544', START],
+  [`claude agent agent-0123456789abcdef0 (pid 12345 start ${START})`, '12345', START],
   ['claude agent agent-x (pid 5 start Mon Oct  5 02:48:39 2026)', '5', 'Mon Oct  5 02:48:39 2026'],
   ['claude session sess-1 (pid 77)', '77', ''],
   [`claude session sess-1 (pid 78 start ${START})`, '78', START],

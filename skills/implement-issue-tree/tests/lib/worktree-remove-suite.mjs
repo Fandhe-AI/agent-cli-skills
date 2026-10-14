@@ -268,7 +268,7 @@ export function registerWorktreeRemoveTests(bash) {
     const repo = makeRepo()
     const real = lstart(process.pid)
     const live = repo.addWorktree('live')
-    repo.git(repo.main, 'worktree', 'lock', '--reason', `claude agent agent-aa14453c88416c114 (pid ${process.pid} start ${real})`, live.path)
+    repo.git(repo.main, 'worktree', 'lock', '--reason', `claude agent agent-0123456789abcdef0 (pid ${process.pid} start ${real})`, live.path)
     for (const r of [sup(repo, live.path), dis(repo, live.path)]) {
       assert.deepEqual([r.result.worktree, r.result.unlocked, r.result.retained], ['retained-locked', false, true], JSON.stringify(r.result))
     }
