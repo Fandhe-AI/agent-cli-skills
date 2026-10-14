@@ -7181,12 +7181,13 @@ const effectiveBranch=worktreeAlive
 
 const discardWorktreeOnly=async(what)=>{
 const attempt=await updateStateDetailed(item.number,{worktree:''},{cleanupWorktree:sanitizedRecoverWorktree,cleanupMode:'discard'})
-if(attempt.ok)return true
+
+if(attempt.ok&&attempt.retained===false)return true
 const status=classifyStateWriteFailureStatus({outputMissing:attempt.outputMissing,terminalSaved:false,prNumber:0})
 const reason=sanitize(
 `discard の worktree 掃除を完了確認できなかった`+
 `（${status === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : attempt.mergeOk && attempt.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがあり、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。`+
-`旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${status} にする。${what}を手動確認し、対処後に再実行すること`,
+`旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${status} にする。${what} を手動確認し、対処後に再実行すること`,
 )
 log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
 

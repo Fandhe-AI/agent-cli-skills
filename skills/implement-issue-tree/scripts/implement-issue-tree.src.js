@@ -7181,12 +7181,13 @@ async function runImplement(item) {
       // 掃除の呼び出しは状態の worktree 記録しか触らない（branch / pr は呼び出し側が成功後に書く）。
       const discardWorktreeOnly = async (what) => {
         const attempt = await updateStateDetailed(item.number, { worktree: '' }, { cleanupWorktree: sanitizedRecoverWorktree, cleanupMode: 'discard' })
-        if (attempt.ok) return true
+        // 消えたと読めるのは ok かつ retained === false だけ（updateStateDetailed の cleanupConfirmedRemoved と同じ定義）
+        if (attempt.ok && attempt.retained === false) return true
         const status = classifyStateWriteFailureStatus({ outputMissing: attempt.outputMissing, terminalSaved: false, prNumber: 0 })
         const reason = sanitize(
           `discard の worktree 掃除を完了確認できなかった` +
           `（${status === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : attempt.mergeOk && attempt.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがあり、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。` +
-          `旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${status} にする。${what}を手動確認し、対処後に再実行すること`,
+          `旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${status} にする。${what} を手動確認し、対処後に再実行すること`,
         )
         log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
         // 保存済みの pr は残す。ただし blocked では pr > 0 + 正規 branch で isActiveMonitoring が真になるため pr: 0 を明示する。

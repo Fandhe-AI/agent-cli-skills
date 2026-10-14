@@ -371,7 +371,11 @@ test('worktreeMissing の申告が誤りで掃除が保持を返す: planning �
       },
     })
   }
-  const { result, calls } = await run({ ok: false, retained: true })
+  // ok: true でも retained: true なら消えたと読まない（ok だけで進むと、残った旧パスを状態から外したまま Plan へ進む）
+  for (const cleanup of [{ ok: false, retained: true }, { ok: true, retained: true }]) await assertHeld(await run(cleanup))
+})
+
+async function assertHeld({ result, calls }) {
   for (const l of calls.map((c) => c.opts.label)) assert.ok(!/^(plan|impl|review|pr-create|pr-bind|merge):#2/.test(l), `起動してはならない: ${l}`)
   assert.equal(oldSupersededCleanups(calls).length, 0, 'superseded の掃除を呼ばない')
   assert.ok(calls.some((c) => c.opts.label === 'state:cleanup:#2' && c.prompt.includes('--mode discard')), 'discard の掃除は 1 度試みる')
@@ -379,7 +383,7 @@ test('worktreeMissing の申告が誤りで掃除が保持を返す: planning �
   assert.ok(['failed', 'blocked'].includes(entry.status))
   assert.match(entry.note, /保持/)
   for (const w of stateWrites(calls)) assert.ok(!/"status":\s*"planning"/.test(w), '保持なら planning を書かない')
-})
+}
 
 test('実体の無い worktree の discard でも、branch がどちらかにあれば従来どおり（新しい分岐に入らない）', async () => {
   // 保存済み branch あり: 既存の discard 経路（worktree と branch を掃除）
