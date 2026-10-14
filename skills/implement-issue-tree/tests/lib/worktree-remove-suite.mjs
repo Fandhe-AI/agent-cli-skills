@@ -1270,6 +1270,28 @@ export function registerWorktreeRemoveTests(bash) {
     assert.ok(repo.worktrees().includes(wt), '観測できない登録は prune で落とさない')
   })
 
+  // ---- 同期 PR の Bugbot 指摘 AT: detached かつ有無を観測できない登録は、risk と unobservable の両方に当たっても 1 件と数える ----
+  test(`${tag} AT: detached で有無を観測できない登録 1 件のとき pruneSkipped は 1（remove・sweep とも。二重に数えない）`, { skip: typeof process.getuid === 'function' && process.getuid() === 0 }, () => {
+    const repo = makeRepo()
+    const holder = join(repo.root, 'holder-at')
+    mkdirSync(holder)
+    const wt = join(holder, 'wt')
+    repo.git(repo.main, 'worktree', 'add', '-q', '--detach', wt)
+    const a = repo.addWorktree('at-a')
+    const c = repo.addWorktree('at-c')
+    chmodSync(holder, 0o000)
+    let r, s
+    try {
+      r = sup(repo, a.path)
+      s = sweep(repo, [c.path], {})
+    } finally {
+      chmodSync(holder, 0o700)
+    }
+    assert.deepEqual([r.result.worktree, r.result.pruneSkipped], ['removed', 1], JSON.stringify(r.result))
+    assert.deepEqual([s.result.removed, s.result.pruneSkipped], [[c.path], 1], JSON.stringify(s.result))
+    assert.ok(repo.worktrees().includes(wt), '登録は prune で落とさない')
+  })
+
   // J: --path の結果は、ブランチを持つ登録の後始末で上書きしない（後始末の結果は holder とブランチの判断にだけ使う）
   test(`${tag} J: --path で消し終えたあと、ブランチを持つ別の登録が lock で保持されても、worktree は removed のまま。holder に保持の語・ブランチは keep・ok は false`, () => {
     const repo = makeRepo()

@@ -363,16 +363,32 @@ wr_prune_risk() {
   WR_PRUNE_RISK=${n}
 }
 
-# `git worktree list --porcelain` の出力（$1）の非 main 登録のうち、パスの有無を観測できないもの（wr_path_state が unknown。親を検索・読み取りできない）の件数を
-# WR_PRUNE_UNOBS に入れる。git worktree prune は stat の失敗を不在と扱ってその登録を落とすので、1 件でもあれば prune しない（lock 中の登録は prune されないので数えない）
+# `git worktree list --porcelain` の出力（$1）の非 main 登録のうち、パスの有無を観測できないもの（wr_path_state が unknown。親を検索・読み取りできない）で、
+# wr_prune_risk がまだ数えていないものの件数を WR_PRUNE_UNOBS に入れる。git worktree prune は stat の失敗を不在と扱ってその登録を落とすので、
+# wr_prune_risk と合わせて 1 件でもあれば prune しない（lock 中の登録は prune されないので数えない）。
+# 観測できない登録は実体が無い扱い（[ ! -e ]）なので、detached または HEAD 0000… のものは wr_prune_risk が数える。ここでは除き、同じ登録を二重に数えない
 wr_prune_unobservable() {
-  local line cur="" idx=0 lk=0 n=0 on=0
+  local line cur="" idx=0 lk=0 n=0 on=0 head="" det=0 risk=0
   while IFS= read -r line; do
     case "${line}" in
       'worktree '* | '')
-        if [ "${on}" = 1 ] && [ "${idx}" -gt 1 ] && [ "${lk}" = 0 ] && [ "$(wr_path_state "${cur}")" = unknown ]; then n=$((n + 1)); fi
+        if [ "${on}" = 1 ] && [ "${idx}" -gt 1 ] && [ "${lk}" = 0 ] && [ "$(wr_path_state "${cur}")" = unknown ]; then
+          risk=0
+          if [ "${det}" = 1 ]; then
+            risk=1
+          else
+            case "${head}" in
+              '') ;;
+              *[!0]*) ;;
+              *) risk=1 ;;
+            esac
+          fi
+          if [ "${risk}" = 0 ]; then n=$((n + 1)); fi
+        fi
         on=0
         lk=0
+        head=""
+        det=0
         case "${line}" in
           'worktree '*)
             cur=${line#worktree }
@@ -381,6 +397,8 @@ wr_prune_unobservable() {
             ;;
         esac
         ;;
+      'HEAD '*) head=${line#HEAD } ;;
+      'detached') det=1 ;;
       'locked' | 'locked '*) lk=1 ;;
     esac
   done <<<"$1"$'\n'
