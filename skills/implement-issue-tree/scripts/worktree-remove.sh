@@ -66,7 +66,7 @@
 #       何も消さなかったとき（--path なしのブランチだけの discard・not-registered・main・cwd・保持・failed）は呼ばず、呼ぶときも
 #       実体の無い登録のうち detached または HEAD 0000… のもの（コミットの唯一の参照かもしれない・lock なしの prune 対象）が 1 件でもあれば全体をスキップする
 #       （prune は対象を絞れない。登録が残るだけで、結果の語は変わらない）。有無を観測できない登録（wr_path_state が unknown）が 1 件でもあるときも同じくスキップする。
-#       スキップした件数は結果の行の pruneSkipped（0 のときは出さない）。
+#       スキップの原因になった登録の件数（重複なし。同じ登録を 2 つの条件で二重に数えない）は結果の行の pruneSkipped（0 のときは出さない）。
 # 自衛: メイン worktree（porcelain の先頭エントリ・実体のパスの一致）、登録されていないパス、カレントがその中にあるパスは消さない。
 #       rm の再帰削除は持たない（git worktree remove が消せなかったものは保持して報告する）。
 # 出力: 標準出力の最後の 1 行が `WORKTREE_REMOVE_RESULT {json}`。値は固定語彙と件数のみ（パスは sweep の removed だけで、
@@ -328,7 +328,7 @@ remove_one() {
 
 # 全体の worktree prune。prune はこの 1 か所だけが呼ぶ。実体の無い登録のうち、そのコミットの最後の参照になり得るもの（detached、または HEAD が
 # 0000… = wr_prune_risk）が 1 件でもあるときは、prune しない（登録ごと消えるとコミットが到達不能になる。git worktree prune は対象を絞れない）。
-# スキップした件数は PRUNE_SKIPPED に入り、結果の行に pruneSkipped として出る。スキップしても登録が残るだけで、ほかの結果の語は変わらない。
+# スキップの原因になった登録の件数（重複なし）は PRUNE_SKIPPED に入り、結果の行に pruneSkipped として出る。スキップしても登録が残るだけで、ほかの結果の語は変わらない。
 # 一覧を読めないときも prune しない（保全側）
 PRUNE_SKIPPED=0
 safe_prune() {
@@ -336,7 +336,7 @@ safe_prune() {
   PRUNE_SKIPPED=0
   plist=$(git worktree list --porcelain 2>/dev/null) || { PRUNE_SKIPPED=1; return 0; }
   wr_prune_risk "${plist}"
-  # 有無を観測できない登録（親を検索・読み取りできない）も数える。prune は stat の失敗を不在と扱い、その登録を落とす
+  # 有無を観測できない登録（親を検索・読み取りできない）も数える（wr_prune_risk が数えた登録は除く = 重複なし）。prune は stat の失敗を不在と扱い、その登録を落とす
   wr_prune_unobservable "${plist}"
   if [ "${WR_PRUNE_RISK}" -gt 0 ] || [ "${WR_PRUNE_UNOBS}" -gt 0 ]; then PRUNE_SKIPPED=$((WR_PRUNE_RISK + WR_PRUNE_UNOBS)); return 0; fi
   git worktree prune >/dev/null 2>&1 || true
