@@ -3,7 +3,7 @@
 #
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立て、掃除エージェントが 1 回実行する）:
 #   bash worktree-remove.sh remove --mode superseded --path <worktree>
-#   bash worktree-remove.sh remove --mode discard [--path <worktree>] [--branch <branch> --base <base>] [--head <40 桁の sha>]
+#   bash worktree-remove.sh remove --mode discard [--path <worktree>] [--branch <branch> --base <base>] [--head <40 桁の sha>] [--expect-branch <branch>]
 #   bash worktree-remove.sh sweep --file _/issue-trees/N.json     （標準入力: 削除候補のパスの JSON 配列）
 #
 # 役割: 掃除プロンプトが文章で持っていた「登録の確認 → lock の扱い → 汚れの確認 → 削除 → ブランチ削除」を、固定のコマンド列として
@@ -13,6 +13,8 @@
 #   discard     Recover の破棄・継続。汚れていれば、または初期化済み submodule があれば保持する（--force は使わない）。--branch が
 #               あれば worktree が無くなったあとでブランチも消す（消す前の先頭 sha を結果に出す。base と同名のブランチは消さない）。--path と --branch を
 #               両方与えたときは、削除の前に同じプロセスでその worktree の HEAD を読み、--branch と違えば worktree もブランチも消さない。
+#               --expect-branch <branch>（--path が要る・--branch とは併用しない）は --branch と同じ位置・同じ判定（HEAD が違う・detached なら保持）だけを行い、
+#               ブランチは消さない（規約外の名前のブランチ上の worktree を片づけるとき、HEAD の照合なしで消さないための引数。base と同名でも照合だけなので拒否しない）。
 #               --head <sha>（--path が要る）を与えたときは、同じプロセスで worktree の HEAD のコミットを読み、sha と違えば（読めないときも）
 #               消さない。マージ済み PR の head との一致で『未 push のコミットを持たない』ことを確かめる用（squash マージは base との差分で見分けられない）。
 #   sweep       ラン終了時の残骸回収。候補ごとに superseded と同じ規則で消す。状態ファイルが failed / blocked / monitoring の
@@ -32,7 +34,7 @@
 # 出力: 標準出力の最後の 1 行が `WORKTREE_REMOVE_RESULT {json}`。値は固定語彙と件数のみ（パスは sweep の removed だけで、
 #       検証済みの候補のパスに限る）。
 #           main = メイン worktree、cwd = カレントがその worktree の中（どちらも消さない）。
-#           retained-branch-mismatch = discard で --path と --branch を両方与えたとき、worktree の HEAD が --branch と違う（detached を含む。worktree もブランチも消さない）。
+#           retained-branch-mismatch = discard で --path と --branch（または --expect-branch）を与えたとき、worktree の HEAD が --branch と違う（detached を含む。worktree もブランチも消さない）。
 #           retained-head-mismatch = discard で --head を与えたとき、worktree の HEAD のコミットが --head と違う（読めないときを含む。worktree もブランチも消さない）。
 #           retained-detached = discard で --head を与えたとき、HEAD が一致していても detached（detached 上の未 push のコミットは消すと失われる）。
 #           branchSha は消す前（または消さなかった）ブランチの先頭 sha で、ブランチの削除に失敗したとき（failed）は空。
@@ -55,7 +57,7 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 3
 . "${script_dir}/lib/worktree-remove-lib.sh" || exit 3
 
 usage() {
-  echo "使い方: worktree-remove.sh remove --mode (superseded|discard) [--path P] [--branch B --base BASE] [--head SHA] / sweep --file _/issue-trees/N.json（候補は標準入力）" >&2
+  echo "使い方: worktree-remove.sh remove --mode (superseded|discard) [--path P] [--branch B --base BASE] [--head SHA] [--expect-branch B] / sweep --file _/issue-trees/N.json（候補は標準入力）" >&2
   [ $# -eq 0 ] || echo "worktree-remove: $1" >&2
   exit 2
 }
@@ -73,10 +75,12 @@ branch=""
 base=""
 head=""
 head_set=0
+expect_branch=""
+expect_set=0
 file=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --mode | --path | --branch | --base | --head | --file)
+    --mode | --path | --branch | --base | --head | --expect-branch | --file)
       [ $# -ge 2 ] || usage "$1 に値が無い"
       case "$1" in
         --mode) mode=$2 ;;
@@ -84,6 +88,7 @@ while [ $# -gt 0 ]; do
         --branch) branch=$2 ;;
         --base) base=$2 ;;
         --head) head=$2; head_set=1 ;;
+        --expect-branch) expect_branch=$2; expect_set=1 ;;
         --file) file=$2 ;;
       esac
       shift 2
@@ -171,7 +176,7 @@ remove_one() {
   esac
   # discard で --branch を結びつけられた worktree は、その HEAD が --branch と一致するときだけ消す（呼び出し側が別のブランチ名を渡しても、
   # 無関係な worktree とそのブランチを消さない。worktree もブランチも残る）。実体が無い worktree（dead）は読めないので従来どおり
-  if [ "${m}" = discard ] && [ -n "${expect}" ] && [ -d "${path}" ] && [ "${wt_head}" != "${expect}" ]; then T_WT='retained-branch-mismatch'; return 0; fi
+  if [ "${m}" = discard ] && [ -d "${path}" ] && [ "$(wr_branch_check "${expect}" "${wt_head}")" != ok ]; then T_WT='retained-branch-mismatch'; return 0; fi
 
   # --head を結びつけられた worktree は、HEAD のコミットが一致するときだけ消す（マージ済み PR の head に無いコミット = 未 push の作業を守る）。
   # 実体が無い worktree（dead）は読めない・失う作業も無いので従来どおり
@@ -220,6 +225,12 @@ if [ "${cmd}" = remove ]; then
     wr_valid_branch "${branch}" || usage "--branch の形が不正"
   fi
   if [ -n "${base}" ]; then wr_valid_branch "${base}" || usage "--base の形が不正"; fi
+  if [ "${expect_set}" -eq 1 ]; then
+    [ "${mode}" = discard ] || usage "--expect-branch は discard 専用"
+    [ -n "${path}" ] || usage "--expect-branch には --path が要る"
+    [ -z "${branch}" ] || usage "--expect-branch は --branch と併用しない"
+    wr_valid_branch "${expect_branch}" || usage "--expect-branch の形が不正"
+  fi
   if [ "${head_set}" -eq 1 ]; then
     [ "${mode}" = discard ] || usage "--head は discard 専用"
     [ -n "${path}" ] || usage "--head には --path が要る"
@@ -228,7 +239,7 @@ if [ "${cmd}" = remove ]; then
   [ -z "${file}" ] || usage "--file は sweep 専用"
 
   if [ -n "${path}" ]; then
-    remove_one "${mode}" "${path}" "${branch}" "${head}"
+    remove_one "${mode}" "${path}" "${branch:-${expect_branch}}" "${head}"
   else
     T_WT=skipped
   fi
@@ -260,7 +271,7 @@ if [ "${cmd}" = remove ]; then
 fi
 
 # --- sweep ---
-[ -z "${mode}${path}${branch}${base}${head}" ] && [ "${head_set}" -eq 0 ] || usage "sweep は --file だけを取る"
+[ -z "${mode}${path}${branch}${base}${head}${expect_branch}" ] && [ "${head_set}" -eq 0 ] && [ "${expect_set}" -eq 0 ] || usage "sweep は --file だけを取る"
 wr_valid_file "${file}" || usage "--file は _/issue-trees/N.json の形で指定する"
 command -v jq >/dev/null 2>&1 || { echo "worktree-remove: jq が無い" >&2; exit 3; }
 

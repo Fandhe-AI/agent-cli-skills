@@ -109,6 +109,24 @@ check(
   (g, r) => assert.equal(g.rc, r[1] === 'a'.repeat(40) || r[1] === '0123456789abcdef0123456789abcdef01234567' ? OK : NG, JSON.stringify(r[1])),
 )
 
+// wr_branch_check EXPECT WT_HEAD
+check(
+  'wr_branch_check: 指定なし → ok / 一致 → ok / 違う・detached（WT_HEAD が空）・読めない → retain（ブランチを消すかは判断しない）',
+  [
+    ['wr_branch_check', '', ''], ['wr_branch_check', '', 'feat/x'], ['wr_branch_check', 'feat/x', 'feat/x'],
+    ['wr_branch_check', 'worktree-wf_ab12', 'worktree-wf_ab12'], ['wr_branch_check', 'feat/x', 'feat/y'], ['wr_branch_check', 'feat/x', ''],
+    ['wr_branch_check', 'feat/x', 'feat/x2'], ['wr_branch_check', 'main', 'main'],
+  ],
+  (g, r, i) => assert.equal(g.out, ['ok', 'ok', 'ok', 'ok', 'retain', 'retain', 'retain', 'ok'][i], JSON.stringify(r)),
+)
+
+// --expect-branch の名前検証は --branch と同じ wr_valid_branch。規約外の名前（worktree-wf_…）も base と同名（main）も文字種として妥当なら通る
+check(
+  'wr_valid_branch: --expect-branch に渡す規約外の名前・base と同名は通り、不正な形は拒否する',
+  [['wr_valid_branch', 'worktree-wf_ab12'], ['wr_valid_branch', 'main'], ['wr_valid_branch', '-D'], ['wr_valid_branch', 'a..b'], ['wr_valid_branch', 'a b']],
+  (g, r, i) => assert.equal(g.rc, [OK, OK, NG, NG, NG][i], JSON.stringify(r)),
+)
+
 // wr_head_check EXPECT ACTUAL BRANCH
 const H = 'a'.repeat(40)
 check(

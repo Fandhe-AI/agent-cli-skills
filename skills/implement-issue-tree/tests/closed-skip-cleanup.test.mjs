@@ -19,7 +19,7 @@ const OTHER = 'd'.repeat(40)
 const WT = '/repo/wt/old'
 
 const m = await importDefinitions(
-  ['closedCleanupCandidate', 'closedCleanupGate', 'closedCleanupRetainedReason', 'CLOSED_CLEANUP_PER_RUN_MAX', 'AGENT_CALLS_CLOSED_CLEANUP', 'AGENT_CALLS_TERMINAL_BASE', 'AGENT_CALLS_PER_ISSUE', 'cleanupClosedMergedWorktree', 'worktreeRemoveCommand', 'sweepClosedWorktrees', 'sweepEligiblePaths', 'sweepHeldPaths', 'confirmedRemovedPaths', 'ensureBoundaryNonceSeed', 'sha256Hex', 'canonicalJson'],
+  ['closedCleanupCandidate', 'prBindingValuesFetched', 'closedCleanupGate', 'closedCleanupRetainedReason', 'CLOSED_CLEANUP_PER_RUN_MAX', 'AGENT_CALLS_CLOSED_CLEANUP', 'AGENT_CALLS_TERMINAL_BASE', 'AGENT_CALLS_PER_ISSUE', 'cleanupClosedMergedWorktree', 'worktreeRemoveCommand', 'sweepClosedWorktrees', 'sweepEligiblePaths', 'sweepHeldPaths', 'confirmedRemovedPaths', 'ensureBoundaryNonceSeed', 'sha256Hex', 'canonicalJson'],
   'closed-skip-cleanup',
 )
 globalThis.agent = async (_p, opts) => (opts.label === 'nonce:seed' ? { seedHex: '0'.repeat(64) } : null)
@@ -76,6 +76,17 @@ test('closedCleanupGate: 1 ランの上限と予算不足を表で固定する�
     [{ limit: 81, used: 30, attempted: 0, reserveImplement: true }, 'defer-budget'],
   ]
   for (const [input, want] of rows) assert.equal(m.closedCleanupGate(input), want, JSON.stringify(input))
+})
+
+test('prBindingValuesFetched: 4 項目すべてが取得できた値のときだけ true（番兵が 1 つでも混じれば false）', () => {
+  assert.equal(m.prBindingValuesFetched(bindOk), true)
+  assert.equal(m.prBindingValuesFetched({ ...bindOk, closingIssues: [] }), true, '空配列は紐付け無しの正当値')
+  assert.equal(m.prBindingValuesFetched({ ...bindOk, baseRefName: 'dev' }), true, '取得できた値が期待と違うのは実際の不成立')
+  for (const o of [{ isCrossRepository: true }, { isCrossRepository: undefined }, { headRefName: '' }, { baseRefName: '' }, { headRefName: 5 }, { closingIssues: [-1] }, { closingIssues: [2, -1] }, { closingIssues: null }, { closingIssues: undefined }]) {
+    assert.equal(m.prBindingValuesFetched({ ...bindOk, ...o }), false, JSON.stringify(o))
+  }
+  assert.equal(m.prBindingValuesFetched(null), false)
+  assert.equal(m.prBindingValuesFetched(undefined), false)
 })
 
 test('closedCleanupRetainedReason: スクリプトが結果行の固定語で保持を明示したときだけ記録する（結果なし・非 0 終了・launcher 不一致・lock・固定語以外は記録しない）', () => {
@@ -141,6 +152,8 @@ test('MERGED かつ結び付き成立: --head つきの discard で掃除し、�
   const cleanup = s.calls[1].prompt
   assert.match(cleanup, new RegExp(`worktree-remove\\.sh remove --mode discard --path '${WT}' --head '${SHA}'$`, 'm'))
   assert.doesNotMatch(cleanup, /--branch/, 'ブランチは消さない')
+  // 保持理由の記録は結果行の worktree の語に依る。返却行に明示して省かれないようにする（指摘 F）
+  assert.match(cleanup, /返却: ok \/ retained \/ branchSha \/ worktree（上記のとおり）/)
   assert.doesNotMatch(cleanup, /state\.sh/, '状態の書き込みは掃除エージェントに持たせない')
   const w = s.calls[2].prompt
   assert.match(w, /"status":\s*"merged"/)
@@ -159,7 +172,14 @@ const NO_CHANGE = [
   ['結び付き不成立（head のブランチ名が違う）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefName: 'feat/3-x' } : undefined), /結び付きを確認できない/, 'binding'],
   ['結び付き不成立（別イシューに紐付く）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, closingIssues: [3] } : undefined), /結び付きを確認できない/, 'binding'],
   ['結び付き不成立（base が違う）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, baseRefName: 'dev' } : undefined), /結び付きを確認できない/, 'binding'],
-  ['結び付き不成立（fork）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, isCrossRepository: true } : undefined), /結び付きを確認できない/, 'binding'],
+  // isCrossRepository: true は取得不能の番兵と本物の fork PR が同じ値で区別できないので、記録しない側に倒す
+  ['結び付き不成立（fork。番兵と区別できないので記録しない）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, isCrossRepository: true } : undefined), /結び付きを確認できない/, null],
+  // 部分的にしか取れなかった pr-bind（取得不能の番兵が混じる）は一過性。1 回の部分取得で永久に飛ばさない
+  ['部分取得（headRefName が空の番兵）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefName: '' } : undefined), /結び付きを確認できない/, null],
+  ['部分取得（baseRefName が空の番兵）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, baseRefName: '' } : undefined), /結び付きを確認できない/, null],
+  ['部分取得（closingIssues が [-1] の番兵）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, closingIssues: [-1] } : undefined), /結び付きを確認できない/, null],
+  ['部分取得（番兵が複数。state だけ MERGED）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefName: '', baseRefName: '', closingIssues: [-1], isCrossRepository: true } : undefined), /結び付きを確認できない/, null],
+  ['結び付き不成立（closingIssues が空でも別ブランチ名は取得値による不成立）', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefName: 'feat/3-x', closingIssues: [] } : undefined), /結び付きを確認できない/, 'binding'],
   ['PR の取得が null', (o) => (o.label.startsWith('pr-bind:') ? null : undefined), /結び付きを確認できない/, null],
   ['headRefOid が 40 桁でない', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefOid: 'abc123' } : undefined), /head を取得できない/, null],
   ['headRefOid に大文字', (o) => (o.label.startsWith('pr-bind:') ? { ...bindOk, headRefOid: 'C'.repeat(40) } : undefined), /head を取得できない/, null],

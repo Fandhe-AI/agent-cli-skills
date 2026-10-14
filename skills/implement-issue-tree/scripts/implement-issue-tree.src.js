@@ -2439,6 +2439,14 @@ function prBindingProblem(n, branch, v) {
   return ''
 }
 
+// prBindingProblem の不成立が『実際に取得できた値による』ものか（true）、取得不能の番兵（MERGE_VERIFY_SCHEMA の取得失敗値）かもしれないか（false）。
+// 番兵は isCrossRepository: true・headRefName ''・baseRefName ''・closingIssues [-1]。isCrossRepository: true は本物の fork PR と区別できないので、
+// 4 項目すべてが番兵でないときだけ true（部分取得で複数が番兵になり得る）。純粋関数
+function prBindingValuesFetched(v) {
+  return v?.isCrossRepository === false && typeof v.baseRefName === 'string' && v.baseRefName !== '' && typeof v.headRefName === 'string' && v.headRefName !== '' &&
+    Array.isArray(v.closingIssues) && !v.closingIssues.includes(-1)
+}
+
 // PR #pr を別コンテキストの読み取り専用エージェント（mergeVerifyPrompt）で取得し prBindingProblem で
 // 照合する（monitoring 再開前・新規 PR の Merge ループ投入前の共通経路）。例外・未返却は取得不能
 // として問題ありを返す（fail-closed）。
@@ -3368,6 +3376,8 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
   // 破棄・継続（Recover）は discard: 汚れていれば、初期化済み submodule があれば保持し --force を使わない。それ以外は
   // superseded: マージ済み・置き換え済みのため汚れていても消す（submodule に未記録の変更があれば保持する）。
   const cleanupMode = options.cleanupMode === 'discard' || deleteBranchName ? 'discard' : 'superseded'
+  // expectBranch: ブランチは消さず、worktree の HEAD がそのブランチ上にあるときだけ消させる（discard 専用・規約外ブランチ上の worktree の掃除用）
+  const expectBranchName = cleanupMode === 'discard' && cleanupWorktreePath && !deleteBranchName && typeof options.expectBranch === 'string' ? options.expectBranch : ''
   const hasCleanup = Boolean(cleanupWorktreePath || deleteBranchName)
   // discard の掃除は、削除できたと確認できるまで最終スイープの候補から外しておく（例外・結果なしでも外れたまま）
   if (cleanupWorktreePath && cleanupMode === 'discard') sweepHeldPaths.add(cleanupWorktreePath)
@@ -3387,7 +3397,7 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
         `対象は下記コマンドに明記されたパス・ブランチ名のみ。他のパス・ブランチには一切触れない。`,
         `1. 次のコマンドを一字一句そのまま（改変・条件追加・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:`,
         '```sh',
-        worktreeRemoveCommand(cleanupMode, cleanupWorktreePath, deleteBranchName),
+        worktreeRemoveCommand(cleanupMode, cleanupWorktreePath, deleteBranchName, '', expectBranchName),
         '```',
         WORKTREE_NOTE,
         ...(cleanupWorktreePath && clearWorktreeAfterCleanup
@@ -3403,7 +3413,7 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
                 `   または review / pr-create の使い捨て worktree を削除した場合が該当する。上書きしないこと）。`,
               ]
             : []),
-        `返却: ok / retained / branchSha（上記のとおり）。`,
+        `返却: ok / retained / branchSha / worktree（上記のとおり）。`,
       ].join('\n')
     : ''
 
@@ -3560,11 +3570,12 @@ async function cleanupClosedMergedWorktree(item, cand) {
     return text
   }
   const { problem, bind } = await fetchPrBinding(item, cand.pr, cand.branch)
-  // PR の取得に失敗した（bind が無い・state が読めない）一過性の失敗と OPEN（あとでマージされ得る）は記録しない
+  // PR の取得に失敗した（bind が無い・state が読めない）一過性の失敗と OPEN（あとでマージされ得る）は記録しない。
+  // 結び付きの不成立も、取得できた値によるもの（prBindingValuesFetched）だけ記録する（取得不能の番兵による不成立は次の実行で再取得する）
   const known = bind?.state === 'MERGED' || bind?.state === 'CLOSED'
   if (problem) {
     const text = `closed 後始末なし（PR #${cand.pr} の結び付きを確認できない: ${problem}）`
-    return known ? tried('binding', text) : text
+    return known && prBindingValuesFetched(bind) ? tried('binding', text) : text
   }
   if (bind.state !== 'MERGED') {
     const text = `closed 後始末なし（PR #${cand.pr} はマージ済みではない: ${sanitize(String(bind.state))}）`
@@ -3586,7 +3597,7 @@ async function cleanupClosedMergedWorktree(item, cand) {
     worktreeRemoveCommand('discard', w, '', head),
     '```',
     WORKTREE_NOTE,
-    `返却: ok / retained / branchSha（上記のとおり）。`,
+    `返却: ok / retained / branchSha / worktree（上記のとおり）。`,
   ].join('\n')
   let removed = false
   let retainedReason = null
@@ -3935,7 +3946,7 @@ function worktreeQuote(v) {
   if (typeof v !== 'string' || !/^[A-Za-z0-9._/ -]+$/.test(v)) throw new Error('worktree-remove.sh の引数に使えない文字が含まれる')
   return `'${v}'`
 }
-function worktreeRemoveCommand(mode, path, branch, head = '') {
+function worktreeRemoveCommand(mode, path, branch, head = '', expectBranch = '') {
   const parts = ['remove', '--mode', mode]
   if (path) parts.push('--path', worktreeQuote(path))
   // --head: マージ済み PR の head。worktree の HEAD が違えば・detached なら（未 push のコミットがあり得る）スクリプトが保持する。discard で --path があるときだけ
@@ -3943,6 +3954,12 @@ function worktreeRemoveCommand(mode, path, branch, head = '') {
   if (head) {
     if (!/^[0-9a-f]{40}$/.test(head)) throw new Error('worktree-remove.sh の --head は 40 桁の小文字 16 進')
     if (mode === 'discard' && path) parts.push('--head', worktreeQuote(head))
+  }
+  // --expect-branch: ブランチは消さず、worktree の HEAD がそのブランチ上にあるときだけ消させる。--branch とは併用しない。
+  // 形式が違うものは落とさず例外にする（落とすと HEAD の照合なしで消す呼び出しになる）
+  if (expectBranch) {
+    if (!isValidBranchName(expectBranch) || mode !== 'discard' || !path || branch) throw new Error('worktree-remove.sh の --expect-branch は discard・--path つき・妥当なブランチ名・--branch なしのときだけ')
+    parts.push('--expect-branch', worktreeQuote(expectBranch))
   }
   if (branch) {
     parts.push('--branch', worktreeQuote(branch))
@@ -7299,14 +7316,15 @@ async function runImplement(item) {
 
       // 規約外 branch の discard で worktree だけを掃除する部分。削除の成功を確認できなければ保全して止める。
       // 掃除の呼び出しは状態の worktree 記録しか触らない（branch / pr は呼び出し側が成功後に書く）。
-      const discardWorktreeOnly = async (what) => {
-        const attempt = await updateStateDetailed(item.number, { worktree: '' }, { cleanupWorktree: sanitizedRecoverWorktree, cleanupMode: 'discard' })
+      // expectBranch: Recover が解決した規約外ブランチ。ブランチは消さず、worktree の HEAD がそれと違えば（detached 含む）保持させる
+      const discardWorktreeOnly = async (what, expectBranch) => {
+        const attempt = await updateStateDetailed(item.number, { worktree: '' }, { cleanupWorktree: sanitizedRecoverWorktree, cleanupMode: 'discard', expectBranch })
         // 消えたと読めるのは ok かつ retained === false だけ（updateStateDetailed の cleanupConfirmedRemoved と同じ定義）
         if (attempt.ok && attempt.retained === false) return true
         const status = classifyStateWriteFailureStatus({ outputMissing: attempt.outputMissing, terminalSaved: false, prNumber: 0 })
         const reason = sanitize(
           `discard の worktree 掃除を完了確認できなかった` +
-          `（${status === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : attempt.mergeOk && attempt.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがあり、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。` +
+          `（${status === 'blocked' ? 'state 書込みエージェントが StructuredOutput を返さなかった' : attempt.mergeOk && attempt.retained ? '旧 worktree に未コミット変更・初期化済み submodule・lock のいずれかがある、または HEAD が解決したブランチ上に無く、削除せず保持した' : '状態マージ失敗による掃除スキップ、または掃除エージェント失敗'}）。` +
           `旧 worktree が残ったまま Plan へ進まず、残骸を保全して ${status} にする。${what} を手動確認し、対処後に再実行すること`,
         )
         log(`⚠️ #${item.number}: Recover → discard を保全へ格下げ（${reason}）`)
@@ -7548,7 +7566,7 @@ async function runImplement(item) {
             return false
           }
           log(`#${item.number}: Recover → discard（解決した branch ${rejectedBranch} は命名規約 <type>/${item.number}-<short-name> に合わない）、旧 worktree のみ掃除して通常 Plan へ。branch は削除せず残す`)
-          if (!(await discardWorktreeOnly(`branch ${rejectedBranch} と旧 worktree`))) return false
+          if (!(await discardWorktreeOnly(`branch ${rejectedBranch} と旧 worktree`, rejectedBranch))) return false
           // 掃除の成功を確認できてから、保存済みの branch / pr を切り離す（保持・失敗のときは元の値を残す）
           if (Number.isInteger(saved.pr) && saved.pr > 0) log(`#${item.number}: 保存済みの PR #${saved.pr} を pr: 0 で切り離して新規に実装する`)
           await updateState(item.number, { status: 'planning', branch: '', pr: 0, worktree: '', note: sanitize(`規約外ブランチ ${rejectedBranch} は削除せず残した`) })
