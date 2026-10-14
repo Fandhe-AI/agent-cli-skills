@@ -21,6 +21,12 @@
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
 | `scripts/lib/observe-checks-lib.sh` | `observe-pr.sh --mode checks --until settled` の分類（`checks_classify`。check-run と commit status を合格 / 未完了 / 不合格の件数にする純関数。第 8 弾） |
 | `scripts/lib/push-verify.sh` | push の前後でリモート head を突き合わせる共通部（`pv_push_verified`。第 3 弾）。`base-merge.sh` が使い、以降 pr-create の push と fix の push 検証も同じ部品へ移す |
+| `scripts/lib/base-merge-lib.sh` | `base-merge.sh` の入力検証と remote URL の照合の純関数（`is_uint` / `valid_repo` / `url_allowed` / `routing_check_remotes` と許可ホストの定数）。第 3 弾の `base-merge.sh` 本体からロジックを変えずに PR #616 で切り出したもの。`pr-push.sh`・`merge-gate.sh`・`observe-pr.sh` も source する |
+| `scripts/lib/pr-push-lib.sh` | `pr-push.sh` の判定だけの純関数（`pp_*`。起点の決定・既存 PR の分類・PR 番号の取り出し・形式検証。第 4 弾） |
+| `scripts/lib/state-lib.sh` | `state.sh` の入力検証と状態ファイルの書き換え（`st_valid_*`・`st_rewrite` と固定の jq プログラム。書き込み直前の変更検知つきで一時ファイルから `mv` する。第 5 弾） |
+| `scripts/lib/merge-gate-lib.sh` | `merge-gate.sh` の判定だけの純関数（`mg_*`。取得済みの JSON を判定語・件数へ畳む。想定外の形は非ゼロ return で返し、呼び出し側が fail-closed に倒す。第 6 弾） |
+| `scripts/lib/worktree-remove-lib.sh` | `worktree-remove.sh` の判断と入力検証の純関数（`wr_*`。削除・強制削除・保持の判断、lock の扱い、status の読み取り。`recover-prep.sh` も source する。第 7 弾） |
+| `scripts/lib/recover-prep-lib.sh` | `recover-prep.sh` の判断だけの純関数（`rp_*`。対象ブランチの解決・WIP コミットの要否と結果の分類・base との差分の三値判定。第 9 弾） |
 | 生成物 `implement-issue-tree.js` の `SCRIPT_SHA256` | ビルダーが埋め込む期待ハッシュ。開発ファイルには置換前の目印を書き、`build-workflow.mjs` が置換する |
 | `verifySignedOutput`（ホスト） | 転記された封筒を再計算して照合する |
 
