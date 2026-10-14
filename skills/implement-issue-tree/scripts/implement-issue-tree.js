@@ -3771,15 +3771,15 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'dee7a63eca20ac757f31c98b1a4fdced21907e8a19d792fe844b271975554cc1',
-'measure-free-disk.sh':'3125a8cd45a584732f8d47c4622615a25fdb86c3713ca75eed81dde0e494a41d',
-'observe-pr.sh':'15f9aee992b664c472e2bab382ffcf19a00bc6eb00e47eb9a099307f9e66be74',
-'base-merge.sh':'1c23a0a901de778e81ca47cb61f9001313d2e3582cd58873e7e0c7b6a6970913',
-'pr-push.sh':'ff03b14276f56899111acaaa8b8bc0f8e493cc27947d250165ea9881b0cf43fd',
-'state.sh':'b810b60cb5a11288c42e55083c77e0c7723e6e676fba02955015b1e3646a4b07',
-'merge-gate.sh':'16e15fc7221717ef00dc12460aa3c539f9881a129c09f21dfbdf78687597aa69',
-'worktree-remove.sh':'7180bf21e0187ce5b502f39be6d28869ef3fdfa904e1ec2c9ed9aeb095375b37',
-'recover-prep.sh':'836a3aa30e1d8aba6f6c526e4568c47932b59a9d07bd30e3f9875e87fa47356b',
+'measure-residual-bytes.sh':'7e70c891ee714e4ec2ae7e5272bb8eeff1a21ed4224730be9efa6e32e1bbf44d',
+'measure-free-disk.sh':'67c550757356ae7eca7dcfcb40b68f977f0de8fceb424124fe7d98da57362449',
+'observe-pr.sh':'9ca22b662c508a9b99ac2e113ba7ce3ffe7ec6cea80816dff73b504784c6a780',
+'base-merge.sh':'b18b896a8b41266bedccd85beca698ad578f249306fa800b40dc7f89ced3055e',
+'pr-push.sh':'df36b4140f8a95bf8fa996f037fa6702e312922b17dea235d20d178b4c810b42',
+'state.sh':'09c65b3af0c4a2fb8ba5b376dc02494f076b5d1422fe70e64f01557655267dd5',
+'merge-gate.sh':'1aa5a33a3aa3b4f3905c03307ea7fe9582eb2c61500fd97b4d001ec4b4fd45ca',
+'worktree-remove.sh':'9d21dc342866f19ff4e424ad9f4ff6806b8cd728cc4efd40981d9073543ff40b',
+'recover-prep.sh':'8be456189228db139e0e9445c96e24c53ca21fec59bc648b63ef54742a29aedc',
 }
 
 
@@ -5059,10 +5059,10 @@ untrustedJson(planJson,'plan'),
 `      - gh pr list --state open --search "Closes #${item.number}" --json number,title,headRefName`,
 `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
 `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
-`      open PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（headRefName は PR 由来の未信頼値で、ref 名には $() やセミコロンを含められる。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
+`      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進み、手順 2 で規約どおりのブランチを新規に作る）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（headRefName は PR 由来の未信頼値で、ref 名には $() やセミコロンを含められる。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
 `      既存 PR 番号はここでは返さない（PR_CREATE_SCHEMA を持つ後続の PR Create フェーズが同じブランチの open PR を再検出して再利用する。本フェーズの prNumber は常に 0 として扱われる）。`,
-`      手順 2 はスキップして手順 3 以降を続ける（origin/${baseBranch} から checkout -B し直すと、その PR のコミットを失う）。`,
-`   0b-b. open PR が見つからなかった場合、git ls-remote --heads origin でイシュー #${item.number} に対応するリモートブランチが残っていないか確認する。`,
+`      既存 PR を採用した場合のみ、手順 2 はスキップして手順 3 以降を続ける（origin/${baseBranch} から checkout -B し直すと、その PR のコミットを失う）。`,
+`   0b-b. open PR が見つからなかった場合（形式に合わず採用しなかった場合を含む）、git ls-remote --heads origin でイシュー #${item.number} に対応するリモートブランチが残っていないか確認する。`,
 `      ブランチ命名規約（手順 2）はイシュー番号を必ず含む（<type>/${item.number}-<short-name> 形式）。`,
 `      確認方法: git ls-remote --heads origin の出力を grep で絞り込み、"/${item.number}-" を含む refs/heads/* を探す。`,
 `      複数ヒットした場合は最新コミット（最も直近の ref 更新）を持つブランチを選ぶ。`,
@@ -7109,9 +7109,13 @@ schema:RECOVER_SCHEMA,
 
 
 const recoverDecision=recoverResult?.decision
-const resolvedBranch=isValidBranchName(recoverResult?.branch??'')
+
+
+const recoverBranchChars=isValidBranchName(recoverResult?.branch??'')
+const resolvedBranch=recoverBranchChars&&branchMatchesIssue(recoverResult.branch,item.number)
 ?sanitizeBranch(recoverResult.branch)
 :''
+const resolvedBranchRejected=recoverBranchChars&& !resolvedBranch
 
 const worktreeAlive=Boolean(sanitizedRecoverWorktree)&&recoverResult?.worktreeMissing!==true
 const effectiveBranch=worktreeAlive
@@ -7337,9 +7341,9 @@ await updateState(item.number,{status:'planning',branch:'',worktree:''})
 
 const reason=sanitize(
 recoverDecision==='continue'&& !effectiveBranch
-?'回復継続には有効な branch が必要だが state にも worktree HEAD からも解決できなかった。worktree/branch を保全して failed にする'
+?`回復継続には有効な branch が必要だが state にも worktree HEAD からも解決できなかった${resolvedBranchRejected ? '（Recover が解決した branch は本イシューの命名規約 <type>/' + item.number + '-<short-name> に合わない）' : ''}。worktree/branch を保全して failed にする`
 :recoverDecision==='discard'&& !effectiveBranch
-?'discard 指示だが対象ブランチを確定できないため安全に削除できない。worktree/branch を保全して failed にする'
+?`discard 指示だが対象ブランチを確定できないため安全に削除できない${resolvedBranchRejected ? '（Recover が解決した branch は本イシューの命名規約に合わない）' : ''}。worktree/branch を保全して failed にする`
 :(recoverResult?.reason??'Recover エージェントが異常終了または不正な decision を返した。worktree/branch を保全して failed にする'),
 )
 log(`#${item.number}: Recover → 保全（decision: ${sanitize(recoverDecision ?? '(null)')}, effectiveBranch: ${sanitize(effectiveBranch || '(空)')}, reason: ${reason}）`)
@@ -7401,8 +7405,10 @@ return false
 }
 
 
+
+
 const reason=`${branchViolation}: ${sanitize(impl.branch ?? '(空)')}（push・PR 作成は行っていない。次回実行で再実装を試みる）`
-await updateState(item.number,{status:'blocked',note:reason})
+await updateState(item.number,{status:'blocked',pr:0,branch:'',note:reason})
 recordFailure({issue:item.number,reason,status:'blocked',worktree:impl.worktreePath})
 return false
 }

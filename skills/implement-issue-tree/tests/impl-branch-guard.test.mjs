@@ -146,6 +146,75 @@ test('回復経路: 違反で止まった結果の状態で次ランを回すと
   assert.ok(ctl.some((c) => /^(pr-bind|merge):#2/.test(c.opts.label)), '対照: pr > 0 の blocked は監視再開へ入る')
 })
 
+// 通常経路（Recover が discard で Plan へ戻る）。保存状態に branch / pr が残った状態（discard 後の planning 書き込みが反映されなかった場合を模す）
+const normalRun = (saved) => {
+  const item = { status: 'failed', branch: 'feat/2-x', worktree: '/repo/wt/old', pr: 77, ...saved }
+  const hashes = { 2: m.sha256Hex(m.canonicalJson(item)) }
+  const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
+  return runScript({
+    args: BASE_ARGS,
+    override: (label) => {
+      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: item }, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'recover:#2') return { decision: 'discard', branch: 'feat/2-x', wipCommitted: true, worktreeMissing: false, reason: 'test' }
+      if (label === 'state:cleanup:#2') return { ok: true, retained: false }
+      if (label === 'impl:#2') return { branch: violating(2), summary: 's', worktreePath: '/repo/wt/2' }
+      return undefined
+    },
+  })
+}
+
+test('通常経路: 命名違反の blocked は pr: 0 と branch: "" を明示し、保存状態の pr: 77 / 正規 branch を残さない', async () => {
+  const { calls } = await normalRun({})
+  assert.ok(calls.some((c) => c.opts.label === 'impl:#2'), '通常経路の impl まで進んでいない（テストの前提が崩れた）')
+  const w = stateWrites(calls).find((p) => p.includes('blocked') && p.includes('命名規約'))
+  assert.ok(w, 'blocked の書き込みがある')
+  assert.match(w, /"pr":\s*0/, 'pr: 0 を含む')
+  assert.match(w, /"branch":\s*""/, 'branch を空へ戻す')
+})
+
+test('通常経路: 違反で止まった結果の状態で次ランを回しても pr-bind / merge へ直行しない（pr が残る状態は対照）', async () => {
+  const { calls: first } = await normalRun({})
+  const w = first.find((c) => c.opts.label.startsWith('state:') && c.prompt.includes('blocked') && c.prompt.includes('命名規約'))
+  const patch = JSON.parse(/\{[^{}]*"status":\s*"blocked"[^{}]*\}/.exec(w.prompt)[0])
+  const { calls } = await normalRun(patch)
+  for (const l of calls.map((c) => c.opts.label)) assert.ok(!/^(pr-bind|merge):#2/.test(l), `監視再開へ直行してはならない: ${l}`)
+  const { calls: ctl } = await normalRun({ status: 'blocked', branch: 'feat/2-x', pr: 77 })
+  assert.ok(ctl.some((c) => /^(pr-bind|merge):#2/.test(c.opts.label)), '対照: pr > 0 の blocked + 正規 branch は監視再開へ入る')
+})
+
+test('Recover が解決した branch が命名規約に合わない場合は状態へ書かず、Implement を起動せず failed で保全する', async () => {
+  for (const decision of ['continue', 'discard']) {
+    const item = { status: 'failed', branch: '', worktree: '/repo/wt/old', pr: 0 }
+    const hashes = { 2: m.sha256Hex(m.canonicalJson(item)) }
+    const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
+    const { result, calls } = await runScript({
+      args: BASE_ARGS,
+      override: (label) => {
+        if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: item }, highWaterBytes: 0, highWaterVersion: 0 }
+        if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+        if (label === 'recover:#2') return { decision, branch: violating(2), wipCommitted: true, worktreeMissing: false, reason: 'test', brief: { done: 'd', remaining: 'r', broken: '' } }
+        if (label === 'state:cleanup:#2') return { ok: true, retained: false }
+        return undefined
+      },
+    })
+    const labels = calls.map((c) => c.opts.label)
+    for (const l of labels) assert.ok(!/^(impl|plan|review|pr-create|pr-bind|merge):#2/.test(l), `${decision}: 起動してはならない: ${l}`)
+    for (const c of calls) assert.ok(!c.opts.label.startsWith('state:cleanup'), `${decision}: 掃除（branch 削除）を起動してはならない`)
+    for (const w of stateWrites(calls)) assert.ok(!wroteAsBranch(w, violating(2)), `${decision}: 規約外の branch を書いてはならない`)
+    const entry = result.done.find((r) => r.issue === 2)
+    assert.equal(entry.status, 'failed', decision)
+    assert.match(entry.note, /命名規約/, decision)
+  }
+})
+
+test('implement のプロンプト: 規約外の headRefName を持つ既存 open PR は本イシューの PR として採用しない', async () => {
+  const { calls } = await runScript({ args: BASE_ARGS })
+  const p = calls.find((c) => c.opts.label === 'impl:#2').prompt
+  assert.match(p, /headRefName が <type>\/2-<short-name> 形式[^\n]*に合わない PR を本イシューの PR として採用しない[^\n]*0b-b へ進み/)
+  assert.match(p, /0b-b\. open PR が見つからなかった場合（形式に合わず採用しなかった場合を含む）/)
+})
+
 test('配線: implement の 2 つの受理地点が同じ implBranchViolation を経由し、文字種だけの旧ゲートが残っていない', () => {
   assert.equal(source.split('implBranchViolation(impl.branch, item.number)').length - 1, 2)
   assert.ok(!/if \(!isValidBranchName\(impl\.branch \?\? ''\)\)/.test(source))
