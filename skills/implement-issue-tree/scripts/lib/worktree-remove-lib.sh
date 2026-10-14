@@ -46,6 +46,15 @@ wr_valid_branch() {
   return 0
 }
 
+# コミットの sha（--head）。40 桁の小文字 16 進だけ（短縮形・大文字・空は不可。ホストが GitHub の headRefOid を正規化して渡す）
+wr_valid_head() {
+  [ "${#1}" -eq 40 ] || return 1
+  case "$1" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  return 0
+}
+
 # 状態ファイルのパス（_/issue-trees/<正の整数>.json）。書き込みはしないが、sweep が読む先をこの形に限る
 wr_valid_file() {
   local n
@@ -305,6 +314,19 @@ wr_wt_gone() {
     removed | not-registered | skipped) return 0 ;;
   esac
   return 1
+}
+
+# --head（マージ済み PR の head）との照合。$1 = 指定された sha（空 = 指定なし）、$2 = worktree の HEAD のコミット（読めなければ空）。
+# 標準出力: ok（指定なし、または一致）/ retain（違う、または読めない）。sha だけで比べる（detached でも HEAD のコミットが一致すれば ok）。
+# squash マージでは base との差分で未 push のコミットを見分けられないため、PR の head と worktree の HEAD の一致だけを根拠にする
+wr_head_check() {
+  if [ -z "$1" ]; then
+    echo ok
+  elif [ -n "$2" ] && [ "$1" = "$2" ]; then
+    echo ok
+  else
+    echo retain
+  fi
 }
 
 # 結果の ok。$1 = モード、$2 = worktree の結果、$3 = ブランチの結果。

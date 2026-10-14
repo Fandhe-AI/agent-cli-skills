@@ -525,6 +525,72 @@ export function registerWorktreeRemoveTests(bash) {
     assert.equal(sup(repo, b.path).result.worktree, 'removed')
   })
 
+  // --head <sha>: マージ済み PR の head。worktree の HEAD のコミットが違えば（未 push のコミットがあり得る）、削除と同じプロセスで保持する。
+  // squash マージでは base との差分で未 push のコミットを見分けられないため、PR の head との一致だけを根拠にする（Issue #632）
+  test(`${tag} --head: HEAD のコミットが一致すれば消える（ブランチは --branch を与えなければ消さない）。違えば retained-head-mismatch で worktree もブランチも残す`, () => {
+    const repo = makeRepo()
+    const a = repo.addWorktree('a')
+    const pushed = repo.head(a.path)
+    // 一致: 消える。ブランチは触らない
+    const r1 = dis(repo, a.path, ['--head', pushed])
+    assert.deepEqual(r1.result, { ok: true, mode: 'discard', worktree: 'removed', branch: 'none', branchSha: '', dirty: 0, unlocked: false, retained: false })
+    assert.ok(!existsSync(a.path) && repo.branches().includes(a.branch))
+    // 不一致（PR の head のあとに未 push のコミットがある）: 保持
+    const b = repo.addWorktree('b')
+    const prHead = repo.head(b.path)
+    repo.write(b.path, 'late.txt', 'late\n')
+    repo.git(b.path, 'add', 'late.txt')
+    repo.git(b.path, 'commit', '-q', '-m', 'late')
+    const r2 = dis(repo, b.path, ['--head', prHead, '--branch', b.branch, '--base', 'main'])
+    assert.deepEqual([r2.result.ok, r2.result.worktree, r2.result.branch, r2.result.retained], [false, 'retained-head-mismatch', 'keep', true])
+    assert.ok(existsSync(b.path) && repo.branches().includes(b.branch))
+    assert.equal(repo.git(b.path, 'log', '-1', '--format=%s'), 'late', '保持した worktree の作業は残る')
+    // 実在しない sha でも同じ
+    const r3 = dis(repo, b.path, ['--head', 'e'.repeat(40)])
+    assert.deepEqual([r3.result.ok, r3.result.worktree], [false, 'retained-head-mismatch'])
+    // 一致すれば --branch も消える
+    const r4 = dis(repo, b.path, ['--head', repo.head(b.path), '--branch', b.branch, '--base', 'main'])
+    assert.deepEqual([r4.result.ok, r4.result.worktree, r4.result.branch], [true, 'removed', 'deleted'])
+  })
+
+  test(`${tag} --head: detached HEAD は HEAD のコミットで比べる（一致なら消える・違えば保持）`, () => {
+    const repo = makeRepo()
+    const a = repo.addWorktree('a')
+    const base = repo.head(a.path)
+    repo.git(a.path, 'checkout', '-q', '--detach')
+    assert.equal(dis(repo, a.path, ['--head', 'f'.repeat(40)]).result.worktree, 'retained-head-mismatch')
+    assert.ok(existsSync(a.path))
+    assert.equal(dis(repo, a.path, ['--head', base]).result.worktree, 'removed')
+    const b = repo.addWorktree('b')
+    repo.write(b.path, 'x.txt', 'x\n')
+    repo.git(b.path, 'add', 'x.txt')
+    repo.git(b.path, 'commit', '-q', '-m', 'x')
+    repo.git(b.path, 'checkout', '-q', '--detach')
+    const detachedSha = repo.head(b.path)
+    assert.equal(dis(repo, b.path, ['--head', base]).result.worktree, 'retained-head-mismatch')
+    assert.equal(dis(repo, b.path, ['--head', detachedSha]).result.worktree, 'removed')
+  })
+
+  test(`${tag} --head: 汚れ・lock の保持が先に効く（一致していても --force は使わない）。実体の無い worktree は失う作業が無いので消せる。未登録・メインは消さない`, () => {
+    const repo = makeRepo()
+    const a = repo.addWorktree('a')
+    const sha = repo.head(a.path)
+    repo.write(a.path, 'u.txt', 'u\n')
+    assert.equal(dis(repo, a.path, ['--head', sha]).result.worktree, 'retained-dirty')
+    assert.ok(existsSync(join(a.path, 'u.txt')))
+    const l = repo.addWorktree('l')
+    repo.git(repo.main, 'worktree', 'lock', '--reason', 'manual', l.path)
+    assert.equal(dis(repo, l.path, ['--head', repo.head(l.path)]).result.worktree, 'retained-locked')
+    // 実体が無い（登録だけが残っている）worktree は HEAD を読めないが、失う作業も無いので従来どおり掃除する
+    const d = repo.addWorktree('d')
+    rmSync(d.path, { recursive: true, force: true })
+    const r = dis(repo, d.path, ['--head', sha])
+    assert.deepEqual([r.result.ok, r.result.worktree], [true, 'removed'])
+    // 登録されていないパス・メイン worktree は --head があっても消さない
+    assert.equal(dis(repo, join(repo.root, 'nope'), ['--head', sha]).result.worktree, 'not-registered')
+    assert.equal(dis(repo, repo.main, ['--head', repo.head(repo.main)]).result.worktree, 'main')
+  })
+
   test(`${tag} worktree 指定なし（--path 省略）の discard: ブランチだけを消す`, () => {
     const repo = makeRepo()
     repo.git(repo.main, 'branch', 'feat/orphan')
@@ -553,6 +619,17 @@ export function registerWorktreeRemoveTests(bash) {
       ['remove', '--mode', 'discard', '--path', w.path, '--branch', 'a b'],
       ['remove', '--mode', 'discard', '--path', w.path, '--base', 'x y'],
       ['remove', '--mode', 'superseded', '--path', w.path, '--file', '_/issue-trees/1.json'],
+      ['remove', '--mode', 'superseded', '--path', w.path, '--head', 'a'.repeat(40)],
+      ['remove', '--mode', 'discard', '--head', 'a'.repeat(40)],
+      ['remove', '--mode', 'discard', '--branch', 'feat/x', '--head', 'a'.repeat(40)],
+      ['remove', '--mode', 'discard', '--path', w.path, '--head', 'a'.repeat(39)],
+      ['remove', '--mode', 'discard', '--path', w.path, '--head', 'a'.repeat(41)],
+      ['remove', '--mode', 'discard', '--path', w.path, '--head', 'A'.repeat(40)],
+      ['remove', '--mode', 'discard', '--path', w.path, '--head', 'g'.repeat(40)],
+      ['remove', '--mode', 'discard', '--path', w.path, '--head', 'HEAD'],
+      ['remove', '--mode', 'discard', '--path', w.path, '--head', `${'a'.repeat(39)};`],
+      ['remove', '--mode', 'discard', '--path', w.path, '--head'],
+      ['sweep', '--file', '_/issue-trees/1.json', '--head', 'a'.repeat(40)],
       ['remove', '--mode', 'superseded', '--path'],
       ['remove', '--mode', 'superseded', '--path', w.path, '--unknown', 'x'],
       ['sweep'],

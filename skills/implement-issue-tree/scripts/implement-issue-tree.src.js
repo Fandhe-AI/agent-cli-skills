@@ -2443,6 +2443,11 @@ function prBindingProblem(n, branch, v) {
 // 照合する（monitoring 再開前・新規 PR の Merge ループ投入前の共通経路）。例外・未返却は取得不能
 // として問題ありを返す（fail-closed）。
 async function checkPrBinding(item, pr, branch) {
+  return (await fetchPrBinding(item, pr, branch)).problem
+}
+// checkPrBinding の本体。同じ 1 回の取得から、照合の結果（problem。空 = 成立）と取得値（bind。state・headRefOid を読む呼び出し側用）を返す。
+// closed 後始末（cleanupClosedMergedWorktree）は MERGED と headRefOid を同じスナップショットで使う
+async function fetchPrBinding(item, pr, branch) {
   let bind = null
   try {
     bind = await agent(mergeVerifyPrompt(item, { prNumber: pr }), {
@@ -2451,7 +2456,7 @@ async function checkPrBinding(item, pr, branch) {
   } catch (e) {
     log(`⚠️ #${item.number}: pr-bind 例外（${sanitize(String(e?.message ?? e))}）`)
   }
-  return prBindingProblem(item.number, branch, bind)
+  return { problem: prBindingProblem(item.number, branch, bind), bind }
 }
 
 // opt-in テスト記録ゲート（Issue #495）の検証エージェントの返却スキーマ。PR 本文は読み取り専用
@@ -3502,6 +3507,78 @@ async function updateState(issueNumber, patch, options = {}) {
   return (await updateStateDetailed(issueNumber, patch, options)).ok
 }
 
+// --- closed 後始末（Issue #632）---
+// 既定の autoMerge: false で止まった PR を人手でマージすると、PR 本文の Closes #N で子イシューが自動 close し、再実行はそのノードを
+// 「すでに closed」で skip する。skip は状態ファイルを読まず掃除の入口も通らないため、blocked / monitoring が記録した実装 worktree が
+// 残り、状態も blocked のままになる（recovery.md の約束と食い違う）。skip 分岐から次の条件がすべて揃うときだけ後始末する。
+// 候補の特定は状態ファイルの worktree と pr（無ければ unverifiedPr）。ブランチ名の照合には頼らない（branch は PR の head 名との結び付きの確認に使う）。
+// 戻り値は { pr, worktree, branch } か null（後始末しない）。純粋関数: エージェントも状態も触らない。
+// dryRun は常に null（書き込み系エージェントを起動しない）。状態の内容照合が成立していない、またはその項目が state-unverified のときも null。
+function closedCleanupCandidate(item, saved, { dryRun, verified, unverified }) {
+  if (dryRun || !verified || item?.kind !== 'implement' || unverified?.has(item.number)) return null
+  if (saved?.status !== 'blocked' && saved?.status !== 'monitoring') return null
+  const worktree = sanitizeWorktreePath(saved.worktree ?? '')
+  const pos = (v) => (Number.isInteger(v) && v > 0 ? v : 0)
+  const pr = pos(saved.pr) || pos(saved.unverifiedPr)
+  if (!worktree || !pr) return null
+  return { pr, worktree, branch: typeof saved.branch === 'string' ? saved.branch : '' }
+}
+// 1 候補あたりのエージェント呼び出し数の見込み（pr-bind 1 + 掃除 1 + 状態書込み 1 に、各フォールバックの余裕を加えた上限）。
+const AGENT_CALLS_CLOSED_CLEANUP = 6
+
+// closed の実装ノードの worktree を、PR のマージ済みを独立に確認できたときだけ破棄し、状態を merged へ更新する。
+// 順序は『掃除 → 状態更新』: 確認できない場合（未マージの CLOSED・結び付き不成立・HEAD 不一致・lock・汚れ・掃除の結果なし）は状態ファイルも
+// worktree も触らず（blocked / monitoring のまま・worktree の記録も残る。次の実行で再試行できる）、ログと note だけを返す。
+// 状態更新（merged）を先に書くと、保持された場合に merged + worktree 記録のまま再試行の入口（blocked / monitoring）を失う。
+// 掃除が済んだあとで状態更新が失敗しても、次の実行で worktree は登録済みでなくなっており（not-registered）同じ経路で merged へ進む。
+// 削除は worktree-remove.sh remove --mode discard --head <PR の head>: 汚れ・初期化済み submodule・lock は保持し --force を使わず、HEAD が違えば保持する
+// （squash マージは base との差分で未 push のコミットを見分けられないため、PR の head との一致で確かめる）。ブランチは消さない。
+// 戻り値は skip エントリの note に足す文字列。
+async function cleanupClosedMergedWorktree(item, cand) {
+  const n = item.number
+  const { problem, bind } = await fetchPrBinding(item, cand.pr, cand.branch)
+  if (problem) return `closed 後始末なし（PR #${cand.pr} の結び付きを確認できない: ${problem}）`
+  if (bind.state !== 'MERGED') return `closed 後始末なし（PR #${cand.pr} はマージ済みではない: ${sanitize(String(bind.state))}）`
+  const head = typeof bind.headRefOid === 'string' ? bind.headRefOid : ''
+  if (!/^[0-9a-f]{40}$/.test(head)) return `closed 後始末なし（PR #${cand.pr} の head を取得できない）`
+  const w = cand.worktree
+  // 削除を試みるパスは最終スイープ候補へ載せ、削除を確認できるまで除外しておく（discard の掃除と同じ扱い）
+  sweepEligiblePaths.add(w)
+  sweepHeldPaths.add(w)
+  const prompt = [
+    `worktree 掃除タスク（イシュー #${n} は closed。マージ済み PR #${cand.pr} の実装 worktree を、PR の head と一致するときだけ破棄する）。`,
+    UNTRUSTED_POLICY,
+    TEMP_FILE_POLICY,
+    `対象は下記コマンドに明記されたパスのみ。他のパス・ブランチには一切触れない。`,
+    `次のコマンドを一字一句そのまま（改変・条件追加・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:`,
+    '```sh',
+    worktreeRemoveCommand('discard', w, '', head),
+    '```',
+    WORKTREE_NOTE,
+    `返却: ok / retained / branchSha（上記のとおり）。`,
+  ].join('\n')
+  let removed = false
+  try {
+    const { result, outputMissing } = await enqueueStateWrite(() => runStateAgent(prompt, { label: `state:cleanup:#${n}`, schema: WORKTREE_CLEANUP_SCHEMA, isValid: isWorktreeCleanupValid }))
+    removed = !outputMissing && result?.ok === true && result?.retained === false
+  } catch (e) {
+    log(`⚠️ #${n}: closed 後始末の掃除が例外終了した（${sanitize(String(e?.message ?? e))}）`)
+  }
+  if (!removed) {
+    recordRetainedWorktree(n, w)
+    log(`⚠️ #${n}: closed 後始末で worktree を保持した（PR #${cand.pr} の head と HEAD の不一致・lock・未コミット変更・初期化済み submodule・結果なしのいずれか。状態は変えない）`)
+    return `closed 後始末なし（PR #${cand.pr} はマージ済みだが worktree を保持した。状態は変更しない）`
+  }
+  confirmedRemovedPaths.add(w)
+  sweepHeldPaths.delete(w)
+  const ok = await updateState(n, { status: 'merged', pr: cand.pr, unverifiedPr: 0, worktree: '', note: `PR #${cand.pr} のマージ済みを確認し、closed 後始末で worktree を破棄した` })
+  if (!ok) {
+    log(`⚠️ #${n}: closed 後始末で worktree は破棄したが、状態ファイルの merged 更新に失敗した（次の実行で同じ経路が再試行する）`)
+    return `closed 後始末: worktree を破棄した（PR #${cand.pr} はマージ済み）。状態の更新に失敗`
+  }
+  return `closed 後始末: PR #${cand.pr} のマージ済みを確認し、worktree を破棄して状態を merged にした`
+}
+
 // rawPerWorktreeByteReserve の永続化済み高水位を更新すべきか・更新後の値を純粋に決定する
 // （Issue #471）。呼び出し側は非 null を受け取ったら in-memory の高水位を更新してから
 // persistPerWorktreeByteReserveHighWater で書き戻す。Math.max（縮めない）と同じ安全側の方針。
@@ -3823,9 +3900,11 @@ function worktreeQuote(v) {
   if (typeof v !== 'string' || !/^[A-Za-z0-9._/ -]+$/.test(v)) throw new Error('worktree-remove.sh の引数に使えない文字が含まれる')
   return `'${v}'`
 }
-function worktreeRemoveCommand(mode, path, branch) {
+function worktreeRemoveCommand(mode, path, branch, head = '') {
   const parts = ['remove', '--mode', mode]
   if (path) parts.push('--path', worktreeQuote(path))
+  // --head: マージ済み PR の head。worktree の HEAD が違えば（未 push のコミットがあり得る）スクリプトが保持する。discard で --path があるときだけ
+  if (head && mode === 'discard' && path && /^[0-9a-f]{40}$/.test(head)) parts.push('--head', worktreeQuote(head))
   if (branch) {
     parts.push('--branch', worktreeQuote(branch))
     if (isValidBranchName(baseBranch)) parts.push('--base', worktreeQuote(baseBranch))
@@ -9034,8 +9113,18 @@ const done = new Set()
 const failedSet = new Set()
 for (const item of queue) {
   if (item.state !== 'open') {
-    results.push({ issue: item.number, status: 'skipped', note: 'すでに closed' })
+    const skipEntry = { issue: item.number, status: 'skipped', note: 'すでに closed' }
+    results.push(skipEntry)
     done.add(item.number)
+    // 人手マージで自動 close した実装ノードの後始末（Issue #632）。best-effort で done / failedSet には触れない。予算が足りなければ次の実行へ回す
+    const cleanup = closedCleanupCandidate(item, savedItems[String(item.number)], { dryRun: dryRunEnabled, verified: savedItemsVerified, unverified: unverifiedIssues })
+    if (cleanup) {
+      if (agentBudget.limit - agentBudget.used < AGENT_CALLS_CLOSED_CLEANUP + AGENT_CALLS_TERMINAL_BASE + AGENT_CALLS_PER_ISSUE.implement) {
+        log(`#${item.number}: closed 後始末を見送った（エージェント呼び出し数の予算不足。使用 ${agentBudget.used}/${agentBudget.limit}。次の実行で再試行する）`)
+      } else {
+        skipEntry.note = `すでに closed。${await cleanupClosedMergedWorktree(item, cleanup)}`
+      }
+    }
   } else {
     // 状態ファイルで merged/closed でも GitHub 上は open で矛盾しているため無条件 skip しない:
     // verify-close は冪等のため再実行 / merged + 再開情報有効は monitoring へ格下げして再投入。
@@ -9302,6 +9391,8 @@ if (dryRunEnabled) {
     }
   }
   const plan = estimateDispatch(work, depsMap, done, new Set(failedSet), { outOfTreeWait, phaseGateEdgeKeys, selfBlocked })
+  // closed 後始末の対象見込み（dryRun では実行しない。通常実行で 1 件あたり最大 AGENT_CALLS_CLOSED_CLEANUP 回のエージェント呼び出しを使う）
+  const closedCleanupPending = queue.filter((q) => q.state !== 'open' && closedCleanupCandidate(q, savedItems[String(q.number)], { dryRun: false, verified: savedItemsVerified, unverified: unverifiedIssues })).map((q) => q.number)
   const blockedCount = Object.values(plan.blocked).reduce((sum, list) => sum + list.length, 0)
   log(`dryRun: 着手見込み ${plan.startable.length} 件（今すぐ ${plan.readyNow} 件）・blocked 見込み ${blockedCount} 件（ツリー外前提待ち ${plan.blocked.outOfTree.length}・phaseGate ${plan.blocked.phaseGate.length}・下流 ${plan.blocked.downstream.length}・opt-in 宣言不備 ${plan.blocked.optinTestsInvalid.length}・保存済み branch 不一致 ${plan.blocked.savedBranchMismatch.length}）・ツリー外の open な前提 ${outOfTreeDeps.open.length} 件。状態ファイル・worktree・PR・issue へは何も書いていない`)
   return {
@@ -9326,6 +9417,7 @@ if (dryRunEnabled) {
     },
     preBlocked: plan.preBlocked,
     undetermined: plan.undetermined,
+    closedCleanupPending: { count: closedCleanupPending.length, first: closedCleanupPending.slice(0, 5), maxAgentCalls: closedCleanupPending.length * AGENT_CALLS_CLOSED_CLEANUP },
     outOfTreeDeps,
   }
 }

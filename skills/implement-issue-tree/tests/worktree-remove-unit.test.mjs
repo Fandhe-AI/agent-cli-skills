@@ -99,6 +99,28 @@ check(
 )
 
 check(
+  'wr_valid_head: 40 桁の小文字 16 進だけ（短縮形・大文字・記号・空・HEAD などの名前は不可）',
+  [
+    ['wr_valid_head', 'a'.repeat(40)], ['wr_valid_head', '0123456789abcdef0123456789abcdef01234567'],
+    ['wr_valid_head', ''], ['wr_valid_head', 'a'.repeat(39)], ['wr_valid_head', 'a'.repeat(41)], ['wr_valid_head', 'A'.repeat(40)],
+    ['wr_valid_head', 'g'.repeat(40)], ['wr_valid_head', 'HEAD'], ['wr_valid_head', `${'a'.repeat(39)};`], ['wr_valid_head', `${'a'.repeat(39)} `],
+    ['wr_valid_head', '-'.repeat(40)], ['wr_valid_head', `${'a'.repeat(20)}${'b'.repeat(19)}'`],
+  ],
+  (g, r) => assert.equal(g.rc, r[1] === 'a'.repeat(40) || r[1] === '0123456789abcdef0123456789abcdef01234567' ? OK : NG, JSON.stringify(r[1])),
+)
+
+// wr_head_check EXPECT ACTUAL
+check(
+  'wr_head_check: 指定なし → ok / 一致 → ok / 違う・読めない（空）→ retain（sha だけで比べる）',
+  [
+    ['wr_head_check', '', ''], ['wr_head_check', '', 'a'.repeat(40)], ['wr_head_check', 'a'.repeat(40), 'a'.repeat(40)],
+    ['wr_head_check', 'a'.repeat(40), 'b'.repeat(40)], ['wr_head_check', 'a'.repeat(40), ''], ['wr_head_check', 'a'.repeat(40), 'A'.repeat(40)],
+    ['wr_head_check', 'a'.repeat(40), 'a'.repeat(39)],
+  ],
+  (g, r, i) => assert.equal(g.out, ['ok', 'ok', 'ok', 'retain', 'retain', 'retain', 'retain'][i], JSON.stringify(r)),
+)
+
+check(
   'wr_valid_file: _/issue-trees/<正の整数>.json だけ',
   [
     ['wr_valid_file', '_/issue-trees/1.json'], ['wr_valid_file', '_/issue-trees/603.json'],
@@ -272,7 +294,7 @@ check(
   (g, r, i) => assert.equal(g.out, ['none', 'keep-base', 'keep', 'absent', 'delete', 'delete', 'keep-base', 'keep', 'absent'][i], JSON.stringify(r)),
 )
 
-const WT = ['removed', 'not-registered', 'skipped', 'main', 'cwd', 'retained-dirty', 'retained-submodule', 'retained-locked', 'retained-branch-mismatch', 'failed']
+const WT = ['removed', 'not-registered', 'skipped', 'main', 'cwd', 'retained-dirty', 'retained-submodule', 'retained-locked', 'retained-branch-mismatch', 'retained-head-mismatch', 'failed']
 const BR = ['none', 'deleted', 'absent', 'keep-base', 'keep', 'failed']
 check(
   'wr_ok / wr_retained / wr_wt_gone: superseded は worktree が残っても非致命（main・cwd だけ異常）、discard は worktree が無くなりブランチも無い・消えたときだけ ok',
