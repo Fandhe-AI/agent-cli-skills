@@ -1300,6 +1300,39 @@ export function registerWorktreeRemoveTests(bash) {
     assert.ok(!repo.worktrees().includes(bystander.path), '消えたときは全体の prune が走り、実体の無いブランチ上の登録も片づく')
   })
 
+  // U（Bugbot 指摘）: Recover の prunable（登録だけ残る旧パス）の片づけは、--branch なしの discard の 1 回。ブランチ ref は残し、
+  // 実体の無いブランチ上の登録だけを消す。detached・HEAD 0000…・lock ありの登録は保持する（ホストはどの結果でも planning へ進める）
+  test(`${tag} U: --branch なしの discard で、実体の無いブランチ上の登録だけが消え、ブランチ ref は残る。detached・lock ありの登録は保持される`, () => {
+    const repo = makeRepo()
+    const dead = deadBranchHolder(repo, 'u-dead')
+    const r = dis(repo, dead.path)
+    assert.deepEqual([r.result.ok, r.result.worktree, r.result.branch, r.result.retained], [true, 'removed', 'none', false], JSON.stringify(r.result))
+    assert.ok(!repo.worktrees().includes(dead.path), '登録は消える')
+    assert.ok(repo.branches().includes(dead.branch), 'ブランチ ref は残す')
+
+    const det = mkDetachedGone(repo, 'u-det')
+    assert.equal(dis(repo, det.path).result.worktree, 'retained-detached')
+    assert.ok(repo.worktrees().includes(det.path))
+
+    const locked = KINDS['prunable-locked'].make(repo, 'u-lock')
+    assert.equal(dis(repo, locked.path).result.worktree, 'retained-locked')
+    assert.ok(repo.worktrees().includes(locked.path))
+  })
+
+  // T（Bugbot 指摘）: sweep は何も消せなかった（候補の削除が失敗）ときも全体の prune を呼ばない。remove 側（K）と揃える。
+  // 失敗した git worktree remove は prune で片づく半端な登録を残さない（実測: 削除に失敗しても登録は git 自身が先に消すか、残っても gitdir が実在するので prune の対象外）ため、
+  // 失敗を理由に prune すると、候補と無関係な実体の無い登録だけが巻き添えで消える
+  test(`${tag} sweep: 候補の削除が失敗しただけ（removed が空）なら全体の prune を呼ばない。実体の無い別の登録に触れない`, () => {
+    const repo = makeRepo()
+    const bystander = deadBranchHolder(repo, 'bystander-failed')
+    const cand = repo.addWorktree('cand-failed')
+    const env = failingGit(repo, 'shim-remove', 'for a in "$@"; do\n  if [ "$a" = remove ]; then echo boom >&2; exit 1; fi\ndone')
+    const s = sweep(repo, [cand.path], {}, { env })
+    assert.deepEqual([s.result.removed, s.result.failed], [[], 1], JSON.stringify(s.result))
+    assert.ok(existsSync(cand.path), '失敗したので候補は残る')
+    assert.ok(repo.worktrees().includes(bystander.path), '何も消していないので prune しない')
+  })
+
   // ---- 観測の失敗は保持の語 retained-unobservable（retained-dirty / retained-head-mismatch と区別する） ----
   const failingGit = (repo, name, cond) => {
     const shim = join(repo.root, name)

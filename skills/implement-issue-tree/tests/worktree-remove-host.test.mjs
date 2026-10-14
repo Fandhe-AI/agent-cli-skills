@@ -402,7 +402,7 @@ test('Recover continue: 掃除が HEAD の不一致で保持した（detached・
 
 const BLOCKED = { type: 'implement', status: 'blocked', pr: 0, branch: '', worktree: '/repo/wt/old', fixCount: 0, note: 'x' }
 const bKeysSha = m.sha256Hex(m.canonicalJson(['2']))
-function absentRun({ absent, recover = {}, saved = BLOCKED }) {
+function absentRun({ absent, recover = {}, saved = BLOCKED, cleanup = { ok: true, retained: false } }) {
   const h = { 2: m.sha256Hex(m.canonicalJson(saved)) }
   return runScript({
     args: BASE_ARGS,
@@ -411,7 +411,7 @@ function absentRun({ absent, recover = {}, saved = BLOCKED }) {
       if (label === 'state:load-verify') return { fileExists: true, hashes: h, keysSha256: bKeysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
       if (label === 'recover:#2') return { decision: 'discard', branch: '', wipCommitted: false, worktreeMissing: true, reason: 'test', ...recover }
       if (label === 'worktree:absent:#2') { if (absent instanceof Error) throw absent; return absent }
-      if (label === 'state:cleanup:#2') return { ok: true, retained: false }
+      if (label === 'state:cleanup:#2') { if (cleanup instanceof Error) throw cleanup; return cleanup }
       return undefined
     },
   })
@@ -419,20 +419,59 @@ function absentRun({ absent, recover = {}, saved = BLOCKED }) {
 const absentCalls = (calls) => calls.filter((c) => c.opts.label.startsWith('worktree:absent:#2'))
 const removeCalls = (calls) => calls.filter((c) => c.opts.label.startsWith('state:cleanup:#2') || /worktree-remove\.sh remove/.test(c.prompt))
 
-test('不在確認 absent / prunable: check-absent の 1 コマンドを 1 回だけ呼び、planning へ進む。旧パスの掃除（superseded・discard）は一切呼ばれない', async () => {
-  for (const word of ['absent', 'prunable']) {
-    const { calls, logs } = await absentRun({ absent: { ok: true, retained: false, worktree: word } })
-    const a = absentCalls(calls)
-    assert.equal(a.length, 1, word)
-    assert.match(a[0].prompt, /worktree-remove\.sh check-absent --path '\/repo\/wt\/old' --repo-root '\/repo'\n/) // ラン開始時に特定したメイン worktree を渡し、スクリプトがカレントのリポジトリと照合する
-    assert.doesNotMatch(a[0].prompt, /remove --mode|--force|--branch|--expect-branch|sweep/)
-    assert.ok(labels(calls).includes('plan:#2'), `${word}: 新規 Plan へ進む`)
-    assert.equal(removeCalls(calls).length, 0, `${word}: 旧パスを後続の掃除へ渡さない`)
-    assert.ok(calls.every((c) => !/--mode superseded --path '\/repo\/wt\/old'/.test(c.prompt)))
-    assert.ok(logs.some((l) => /不在を確認した/.test(l)))
-    // 状態: planning・branch/worktree/pr を空にする書き込みがある
-    assert.ok(calls.some((c) => c.opts.label.startsWith('state:update:#2') && /"status":"planning"/.test(c.prompt) && /"worktree":""/.test(c.prompt) && /"branch":""/.test(c.prompt) && /"pr":0/.test(c.prompt)))
+test('不在確認 absent: check-absent の 1 コマンドを 1 回だけ呼び、planning へ進む。旧パスの掃除（superseded・discard）は一切呼ばれない', async () => {
+  const { calls, logs } = await absentRun({ absent: { ok: true, retained: false, worktree: 'absent' } })
+  const a = absentCalls(calls)
+  assert.equal(a.length, 1)
+  assert.match(a[0].prompt, /worktree-remove\.sh check-absent --path '\/repo\/wt\/old' --repo-root '\/repo'\n/) // ラン開始時に特定したメイン worktree を渡し、スクリプトがカレントのリポジトリと照合する
+  assert.doesNotMatch(a[0].prompt, /remove --mode|--force|--branch|--expect-branch|sweep/)
+  assert.ok(labels(calls).includes('plan:#2'), '新規 Plan へ進む')
+  assert.equal(removeCalls(calls).length, 0, '旧パスを後続の掃除へ渡さない')
+  assert.ok(calls.every((c) => !/--mode superseded --path '\/repo\/wt\/old'/.test(c.prompt)))
+  assert.ok(logs.some((l) => /不在を確認した/.test(l)))
+  // 状態: planning・branch/worktree/pr を空にする書き込みがある
+  assert.ok(calls.some((c) => c.opts.label.startsWith('state:update:#2') && /"status":"planning"/.test(c.prompt) && /"worktree":""/.test(c.prompt) && /"branch":""/.test(c.prompt) && /"pr":0/.test(c.prompt)))
+})
+
+// U（Bugbot 指摘・防御）: prunable（登録だけ残る旧パス）は、planning へ進む前にその登録だけを discard の 1 回で片づける。check-absent 自体は読み取り専用のまま。
+// 旧パスを superseded 掃除へ渡さない方針（#637）は崩さない（--force なし・--branch なし = ブランチ ref は残す・--head / --expect-branch なし）
+test('不在確認 prunable: check-absent は読み取り専用のまま。planning へ進む前に旧パスを discard の掃除で 1 回だけ片づける（--branch なし・superseded なし）', async () => {
+  const { calls, logs } = await absentRun({ absent: { ok: true, retained: false, worktree: 'prunable' } })
+  const a = absentCalls(calls)
+  assert.equal(a.length, 1)
+  assert.doesNotMatch(a[0].prompt, /remove --mode|--force|--branch|--expect-branch|sweep/, 'check-absent は読み取り専用')
+  const r = removeCalls(calls)
+  assert.equal(r.length, 1, '片づけの掃除はちょうど 1 回')
+  assert.equal(r[0].opts.label, 'state:cleanup:#2')
+  assert.match(r[0].prompt, /worktree-remove\.sh remove --mode discard --path '\/repo\/wt\/old'\n/)
+  assert.doesNotMatch(r[0].prompt, /--branch|--base|--force|--expect-branch|--head|--mode superseded/, 'ブランチは消さない・照合の引数も付けない')
+  assert.ok(calls.every((c) => !/--mode superseded --path '\/repo\/wt\/old'/.test(c.prompt)), '旧パスを superseded 掃除へ渡さない')
+  // 順序: 不在確認 → 掃除 → Plan（planning へ進む前に片づける）
+  const order = labels(calls)
+  assert.ok(order.indexOf('worktree:absent:#2') < order.indexOf('state:cleanup:#2') && order.indexOf('state:cleanup:#2') < order.indexOf('plan:#2'), order.join(','))
+  assert.ok(logs.some((l) => /不在を確認した/.test(l)))
+  assert.ok(calls.some((c) => c.opts.label.startsWith('state:update:#2') && /"status":"planning"/.test(c.prompt) && /"pr":0/.test(c.prompt)))
+})
+
+test('不在確認 prunable の片づけが removed でない（保持・失敗・結果なし・例外）でも planning へ進む。消えたと確認できない旧登録は残置の台帳に載る', async () => {
+  const cleanups = [
+    { ok: false, retained: true, worktree: 'retained-detached' },
+    { ok: false, retained: true, worktree: 'retained-locked' },
+    { ok: false, retained: true, worktree: 'failed' },
+    null,
+    new Error('boom'),
+  ]
+  for (const cleanup of cleanups) {
+    const tag = cleanup instanceof Error ? 'throw' : JSON.stringify(cleanup)
+    const { calls, result, logs } = await absentRun({ absent: { ok: true, retained: false, worktree: 'prunable' }, cleanup })
+    assert.ok(labels(calls).includes('plan:#2'), `${tag}: 登録が残るだけなので Plan へ進む`)
+    assert.ok(removeCalls(calls).some((c) => c.opts.label === 'state:cleanup:#2'), tag)
+    assert.ok(logs.some((l) => /片づけられなかった/.test(l)), `${tag}: ログにだけ残す`)
+    assert.ok(result.retainedWorktrees.some((e) => e.path === '/repo/wt/old'), `${tag}: 消えたと確認できない登録は台帳（保持した worktree）に載る`)
   }
+  // 消えたと確認できたときは台帳に載らない
+  const ok = await absentRun({ absent: { ok: true, retained: false, worktree: 'prunable' } })
+  assert.ok(!ok.result.retainedWorktrees.some((e) => e.path === '/repo/wt/old'))
 })
 
 test('不在確認が不在と言わない（実体あり・保全の語・判定不能・ok:false・retained:true・結果なし・例外・schema 不適合）: 何も削除せず failed で止まり、Plan へ進まない', async () => {

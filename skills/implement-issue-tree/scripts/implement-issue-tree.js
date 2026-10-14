@@ -3902,7 +3902,7 @@ const SCRIPT_SHA256={
 'pr-push.sh':'51a4216cfe7aa0086f4c7319754b2a9212866109c3f1f2d23dc9245fac77e059',
 'state.sh':'83e84cb79e366c52c32f9f24c45befb59eaca64134508f094ef5b90845ba8c1c',
 'merge-gate.sh':'a62ac43722aa0c69b35fc8f744824ed9b62a15c7215255dfdbd1727d74a3c3f0',
-'worktree-remove.sh':'8879ae9e24b9da0133a7d087c443b5fa716accb5959ca3eddc510a1ce9c9b1aa',
+'worktree-remove.sh':'1a2d39c11faa9d69319389065438157caa04bd66fe4a802a300c7c991a950b13',
 'recover-prep.sh':'e1a207c9786c490eb050ceb3410bba2b2817b6d58ff182789d3d90d9b0952a1a',
 }
 
@@ -3983,6 +3983,7 @@ const isWorktreeCleanupValid=(r)=>typeof r?.ok==='boolean'&&typeof r?.retained==
 
 
 
+
 async function confirmWorktreeAbsent(issueNumber,path){
 try{
 const{result,outputMissing}=await runStateAgent(
@@ -3999,10 +4000,10 @@ WORKTREE_NOTE,
 ].join('\n'),
 {label:`worktree:absent:#${issueNumber}`,schema:WORKTREE_CLEANUP_SCHEMA,isValid:isWorktreeCleanupValid},
 )
-return!outputMissing&&result?.ok===true&&result?.retained===false&&(result?.worktree==='absent'||result?.worktree==='prunable')
+return!outputMissing&&result?.ok===true&&result?.retained===false&&(result?.worktree==='absent'||result?.worktree==='prunable')?result.worktree:''
 }catch(e){
 log(`⚠️ #${issueNumber}: worktree の不在確認で想定外の例外（${sanitize(String(e?.message ?? e))}）。不在と見なさない`)
-return false
+return''
 }
 }
 
@@ -6349,6 +6350,23 @@ return{ok:true,paths:uniquePaths}
 
 
 
+function unionMeasurePaths(physicalPaths,ledgerPaths){
+const seen=new Set()
+const out=[]
+for(const p of[...(Array.isArray(physicalPaths)?physicalPaths:[]), ...(Array.isArray(ledgerPaths)?ledgerPaths:[])]){
+if(typeof p!=='string'||p==='')continue
+const key=p.replace(/\/{2,}/g, '/').replace(/(.)\/+$/, '$1')
+if(seen.has(key))continue
+seen.add(key)
+out.push(p)
+}
+return out
+}
+
+
+
+
+
 
 
 
@@ -7364,7 +7382,8 @@ return false
 
 const absentCandidate=recoverDecision==='discard'&& !effectiveBranch&&Boolean(sanitizedRecoverWorktree)&&recoverResult?.worktreeMissing===true&&
 (recoverResult?.branch??'')===''&&(saved.branch??'')===''
-const absentConfirmed=absentCandidate?await confirmWorktreeAbsent(item.number,sanitizedRecoverWorktree):false
+const absentWord=absentCandidate?await confirmWorktreeAbsent(item.number,sanitizedRecoverWorktree):''
+const absentConfirmed=absentWord!==''
 
 if(recoverDecision==='continue'&&effectiveBranch){
 
@@ -7622,7 +7641,18 @@ return false
 
 
 log(`#${item.number}: Recover → discard（worktree ${sanitize(sanitizedRecoverWorktree)} の不在を確認した。保全対象なし）、記録を捨てて通常 Plan へ`)
-await updateState(item.number,{status:'planning',branch:'',pr:0,worktree:'',note:'worktree の不在を確認して新規に実装する'})
+const absentPatch={status:'planning',branch:'',pr:0,worktree:'',note:'worktree の不在を確認して新規に実装する'}
+if(absentWord==='prunable'){
+
+
+
+const prunableCleanup=await updateStateDetailed(item.number,absentPatch,{cleanupWorktree:sanitizedRecoverWorktree,cleanupMode:'discard'})
+if(!(prunableCleanup.ok&&prunableCleanup.retained===false)){
+log(`#${item.number}: 実体の無い旧登録 ${sanitize(sanitizedRecoverWorktree)} を片づけられなかった（保持・失敗・結果なし）。登録が残るだけなので新規 Plan へ進む`)
+}
+}else{
+await updateState(item.number,absentPatch)
+}
 }else{
 
 
@@ -9703,7 +9733,7 @@ if(fallback.ok){
 
 
 
-targetPaths=fallback.paths
+targetPaths=unionMeasurePaths(fallback.paths,targetPaths)
 log(
 `残置 worktree バイト実測: 台帳に未検証エントリ ${unverifiedEphemeralCount} 件があるため`+
 `物理一覧 ${targetPaths.length} 件へフォールバックして実測する`,
@@ -10831,7 +10861,7 @@ let endFallbackPaths=null
 if(!hasUnverifiedEndPath&&slotUnknownLiveCount>0){
 const[entries,independentCount]=await Promise.all([scanOrphanWorktrees(),countWorktreeRecords()])
 const fallback=buildPhysicalByteMeasureTargets(entries,independentCount)
-if(fallback.ok)endFallbackPaths=fallback.paths
+if(fallback.ok)endFallbackPaths=unionMeasurePaths(fallback.paths,rawEndPaths.filter((p)=> !confirmedRemovedPaths.has(p)))
 else hasUnverifiedEndPath=true
 }
 if(hasUnverifiedEndPath){

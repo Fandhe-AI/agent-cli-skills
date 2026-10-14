@@ -27,7 +27,7 @@
 #               一致するときは、同じ場所かもしれない（大小を区別しないファイルシステム）として不在と言わず unknown にする。一覧はカレントのリポジトリから取るので、
 #               --repo-root（無ければパスの最寄りの実在する祖先）の属するリポジトリとカレントの共通 git ディレクトリを照合し、違う・求められないときは unknown。
 #               absent = 登録が無くパスも無い / prunable = 登録だけ残り実体が無い（lock なし・ブランチ上〔HEAD が 0000… でない〕。HEAD はブランチ ref が持つので失うものが無い。
-#               登録の掃除はこのモードでしない）。ホストが不在として扱うのはこの 2 語だけ。ほかは保全側: prunable-detached = 登録だけ残り detached、または HEAD が 0000…（ブランチ ref を update-ref -d で消した形）
+#               登録の掃除はこのモードでしない。prunable のときホストが planning の前に remove --mode discard --path <旧パス> を 1 回呼んで登録だけ片づける）。ホストが不在として扱うのはこの 2 語だけ。ほかは保全側: prunable-detached = 登録だけ残り detached、または HEAD が 0000…（ブランチ ref を update-ref -d で消した形）
 #               （登録がコミットの唯一の参照かもしれない）/ prunable-locked = 登録だけ残り lock あり（git は lock を prune しない・外付けの一時的な未接続かも
 #               しれない）/ present = 登録も実体もある / unregistered-present = 登録は無いがパスがある / main / unknown = 一覧・実在を確定できない。
 # 確認の方法: `git -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none`（利用者の status.showUntrackedFiles や
@@ -46,7 +46,7 @@
 #       この後始末の結果は --path の結果（worktree・dirty・unlocked）を上書きせず、結果の行の holder（removed / retained-… / failed。後始末をしたときだけ出る）に出す。
 #       holder が removed でなければブランチは keep。discard の ok は worktree が無くなり、ブランチも（指定があれば）消えたときだけ true なので、holder が保持・失敗なら false。
 #       実体の無いパスは実体のパス（祖先のシンボリックリンクを解決した形）でも照合する。大小だけ違う綴りは一致させない（大小を区別する FS では別の場所を消しかねない）。
-# prune: 全体の `git worktree prune` は safe_prune の 1 か所だけが呼ぶ。remove で実際に何かを消したとき（--path を removed にした、または --branch の後始末で登録を消した）だけ呼ぶ。
+# prune: 全体の `git worktree prune` は safe_prune の 1 か所だけが呼ぶ。remove で実際に何かを消したとき（--path を removed にした、または --branch の後始末で登録を消した）、sweep で候補を 1 件でも消したときだけ呼ぶ（失敗しただけでは呼ばない。失敗した worktree remove は prune で片づく登録を残さない）。
 #       何も消さなかったとき（--path なしのブランチだけの discard・not-registered・main・cwd・保持・failed）は呼ばず、呼ぶときも
 #       実体の無い登録のうち detached または HEAD 0000… のもの（コミットの唯一の参照かもしれない・lock なしの prune 対象）が 1 件でもあれば全体をスキップする
 #       （prune は対象を絞れない。登録が残るだけで、結果の語は変わらない）。スキップした件数は結果の行の pruneSkipped（0 のときは出さない）。
@@ -489,5 +489,5 @@ EOF
 done <<EOF
 ${candidates}
 EOF
-if [ -n "${removed}" ] || [ "${n_failed}" -gt 0 ]; then safe_prune; fi
+if [ -n "${removed}" ]; then safe_prune; fi
 sweep_result "${removed}" "${n_retained}" "${n_skipped}" "${n_failed}" ""

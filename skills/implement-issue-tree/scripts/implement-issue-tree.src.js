@@ -3982,7 +3982,8 @@ const WORKTREE_CLEANUP_SCHEMA = {
 const isWorktreeCleanupValid = (r) => typeof r?.ok === 'boolean' && typeof r?.retained === 'boolean'
 // 不在専用の確認（worktree-remove.sh check-absent。Issue #637）。読み取り専用で、削除・prune・unlock をしない。ラン開始時に特定したメイン worktree があれば --repo-root で渡し、
 // スクリプトがカレントのリポジトリと照合する（違えば unknown = 不在と見なさない）。ホストが信じるのは結果の行の worktree の語のうち
-// absent（登録も実体も無い）と prunable（登録だけ残り、lock なし・ブランチ上）だけ。それ以外・結果なし・例外は不在と見なさない（呼び出し側が保全する）
+// absent（登録も実体も無い）と prunable（登録だけ残り、lock なし・ブランチ上）だけ。それ以外・結果なし・例外は不在と見なさない（呼び出し側が保全する）。
+// 戻り値は確認できた語（'absent' | 'prunable'）。不在と見なせないときは空文字（呼び出し側は prunable のときだけ登録の片づけを足す）
 async function confirmWorktreeAbsent(issueNumber, path) {
   try {
     const { result, outputMissing } = await runStateAgent(
@@ -3999,10 +4000,10 @@ async function confirmWorktreeAbsent(issueNumber, path) {
       ].join('\n'),
       { label: `worktree:absent:#${issueNumber}`, schema: WORKTREE_CLEANUP_SCHEMA, isValid: isWorktreeCleanupValid },
     )
-    return !outputMissing && result?.ok === true && result?.retained === false && (result?.worktree === 'absent' || result?.worktree === 'prunable')
+    return !outputMissing && result?.ok === true && result?.retained === false && (result?.worktree === 'absent' || result?.worktree === 'prunable') ? result.worktree : ''
   } catch (e) {
     log(`⚠️ #${issueNumber}: worktree の不在確認で想定外の例外（${sanitize(String(e?.message ?? e))}）。不在と見なさない`)
-    return false
+    return ''
   }
 }
 
@@ -6345,6 +6346,23 @@ function buildPhysicalByteMeasureTargets(entries, independentCount) {
   return { ok: true, paths: uniquePaths }
 }
 
+// 物理一覧フォールバックの測定対象 = 物理一覧 ∪ 台帳でパスが分かっている項目（Bugbot 指摘 R）。物理一覧は git に登録された
+// worktree だけなので、置き換えると台帳にあるが未登録の実在ディレクトリ（retained-unregistered 等）が測定から漏れ、
+// bytesEndObserved が true のまま上限判定が甘くなる。重複は連続スラッシュと末尾スラッシュを正規化して除く（先に出た表記を残す）。
+// 測定専用で削除経路へは流さない。パス検証は measure 側（許可文字外は fail-closed）に委ねる
+function unionMeasurePaths(physicalPaths, ledgerPaths) {
+  const seen = new Set()
+  const out = []
+  for (const p of [...(Array.isArray(physicalPaths) ? physicalPaths : []), ...(Array.isArray(ledgerPaths) ? ledgerPaths : [])]) {
+    if (typeof p !== 'string' || p === '') continue
+    const key = p.replace(/\/{2,}/g, '/').replace(/(.)\/+$/, '$1')
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(p)
+  }
+  return out
+}
+
 // セクション 6: 実行: Restore → Tree → State（状態読込・ツリー取得・外部チェック判定・
 // 依存グラフ/キュー構築・pending 初期化）
 // __IMPLEMENT_ISSUE_TREE_DRIVER_START__（テスト境界マーカー。削除・移動しないこと）
@@ -7364,7 +7382,8 @@ async function runImplement(item) {
       // 不在専用の確認（読み取り専用）で確かめたときだけ、新規の Plan へ進める。実体がある・判定できない・結果なしなら従来どおり保全して止める
       const absentCandidate = recoverDecision === 'discard' && !effectiveBranch && Boolean(sanitizedRecoverWorktree) && recoverResult?.worktreeMissing === true &&
         (recoverResult?.branch ?? '') === '' && (saved.branch ?? '') === ''
-      const absentConfirmed = absentCandidate ? await confirmWorktreeAbsent(item.number, sanitizedRecoverWorktree) : false
+      const absentWord = absentCandidate ? await confirmWorktreeAbsent(item.number, sanitizedRecoverWorktree) : ''
+      const absentConfirmed = absentWord !== ''
 
       if (recoverDecision === 'continue' && effectiveBranch) {
         // --- continue 経路: 旧 worktree のみ掃除し Implement を継続（Plan スキップ）---
@@ -7622,7 +7641,18 @@ async function runImplement(item) {
         // --- 不在確認済みの discard: 実体も登録上の損失もない旧 worktree の記録を捨てて新規に実装する ---
         // 確認は削除を一切しない。ここで状態の worktree を空にし、impl 未設定のまま Plan へ落ちるので旧パスは後続の superseded 掃除へ渡らない（下の fallbackOldWorktree のクリア）
         log(`#${item.number}: Recover → discard（worktree ${sanitize(sanitizedRecoverWorktree)} の不在を確認した。保全対象なし）、記録を捨てて通常 Plan へ`)
-        await updateState(item.number, { status: 'planning', branch: '', pr: 0, worktree: '', note: 'worktree の不在を確認して新規に実装する' })
+        const absentPatch = { status: 'planning', branch: '', pr: 0, worktree: '', note: 'worktree の不在を確認して新規に実装する' }
+        if (absentWord === 'prunable') {
+          // 登録だけ残る旧パス（lock なし・ブランチ上）は、planning へ進む前にその登録だけを片づける（Bugbot 指摘 U の防御）。旧パスを対象にした discard の 1 回
+          // （--branch なし = ブランチ ref は残す。実体なし・lock なし・ブランチ上の登録だけを許可形の git worktree remove で消し、detached や lock ありは保持する）。
+          // 結果が removed でなくても（保持・失敗・結果なし・例外）planning へは進む。登録が残るだけで、消えたと確認できなければ updateStateDetailed が台帳へ載せる（件数・バイトを過小に数えない）
+          const prunableCleanup = await updateStateDetailed(item.number, absentPatch, { cleanupWorktree: sanitizedRecoverWorktree, cleanupMode: 'discard' })
+          if (!(prunableCleanup.ok && prunableCleanup.retained === false)) {
+            log(`#${item.number}: 実体の無い旧登録 ${sanitize(sanitizedRecoverWorktree)} を片づけられなかった（保持・失敗・結果なし）。登録が残るだけなので新規 Plan へ進む`)
+          }
+        } else {
+          await updateState(item.number, absentPatch)
+        }
       } else {
         // --- 保全経路: エージェント異常 / 不正 decision / "unresolved" / ブランチ未確定 ---
         // 残骸は削除せず保全したまま failed にする（次回 Recover が再試行）。削除は明示的な
@@ -9703,7 +9733,7 @@ async function remeasureResidualBytesNow() {
       // 物理一覧は測定専用の差し替えで削除経路へは流さない。confirmedRemovedPaths による除外も
       // 行わない（fallback.paths は今この瞬間の確定スナップショットで、除外は過小評価の
       // fail-open になる。Issue #404）。全パスを測定する。
-      targetPaths = fallback.paths
+      targetPaths = unionMeasurePaths(fallback.paths, targetPaths)
       log(
         `残置 worktree バイト実測: 台帳に未検証エントリ ${unverifiedEphemeralCount} 件があるため` +
           `物理一覧 ${targetPaths.length} 件へフォールバックして実測する`,
@@ -10831,7 +10861,7 @@ if (maxResidualWorktreeBytes > 0 && residualBytesObserved) {
   if (!hasUnverifiedEndPath && slotUnknownLiveCount > 0) {
     const [entries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
     const fallback = buildPhysicalByteMeasureTargets(entries, independentCount)
-    if (fallback.ok) endFallbackPaths = fallback.paths
+    if (fallback.ok) endFallbackPaths = unionMeasurePaths(fallback.paths, rawEndPaths.filter((p) => !confirmedRemovedPaths.has(p)))
     else hasUnverifiedEndPath = true
   }
   if (hasUnverifiedEndPath) {
