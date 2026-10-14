@@ -392,7 +392,6 @@ test('Recover continue: 掃除が HEAD の不一致で保持した（detached・
 // ---- 規約外ブランチで blocked → 人が worktree を消した後の再実行（Issue #637）----
 
 const BLOCKED = { type: 'implement', status: 'blocked', pr: 0, branch: '', worktree: '/repo/wt/old', fixCount: 0, note: 'x' }
-const bHashes = { 2: m.sha256Hex(m.canonicalJson(BLOCKED)) }
 const bKeysSha = m.sha256Hex(m.canonicalJson(['2']))
 function absentRun({ absent, recover = {}, saved = BLOCKED }) {
   const h = { 2: m.sha256Hex(m.canonicalJson(saved)) }
