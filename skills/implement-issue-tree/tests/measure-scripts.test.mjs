@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -93,6 +93,42 @@ for (const bash of BASHES) {
       assert.equal(env.sha256, expectedSha256(NONCE, env.payload))
       // payload のキー順は昇順（ホストの canonicalJson と同じ正規形）
       assert.match(r.stdout, /"payload":\{"count":\d+,"err":\d+,"inputSha256":"[0-9a-f]{64}","kib":\d+,"missing":\d+\}/)
+    })
+  })
+
+  // AH: 同じ実体の別の綴り（/./ 混じり・/var と /private/var・シンボリックリンク経由・末尾スラッシュ）を物理パスに解決して 1 回だけ測る。
+  // count は入力の行数のまま（ホストは送った件数との一致を検証する）、封筒の形（キーの集合）は変えない
+  test(`${tag} residual: 同じ実体の別の綴り（/./ 混じり・シンボリックリンク経由・末尾スラッシュ・/private 付き）は 1 回だけ数え、count は入力の行数のまま`, () => {
+    withWork((work) => {
+      const a = mkTree(work, 'wt-a', 64)
+      const other = mkTree(work, 'wt-other', 32)
+      const link = join(work, 'link-to-a')
+      symlinkSync(a, link)
+      const dotted = `${work}/./wt-a`
+      const viaLinkDir = `${link}/`
+      const real = realpathSync(a)
+      const spellings = [a, dotted, link, viaLinkDir, real, `${a}/`, `${work}//wt-a`]
+      const input = [...spellings, other].join('\n')
+      const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input }))
+      assert.deepEqual(env.payload, { count: spellings.length + 1, err: 0, inputSha256: inputSha256(input), kib: duKib(a) + duKib(other), missing: 0 })
+      // 対照: 別の実体は別々に数える
+      const two = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${a}\n${other}` }))
+      assert.equal(two.payload.kib, duKib(a) + duKib(other))
+    })
+  })
+
+  test(`${tag} residual: シンボリックリンクだけを渡しても、指す実体を測る。ファイルの別の綴り（/./）も 1 回だけ。存在しないパスの別の綴りは従来どおり missing`, () => {
+    withWork((work) => {
+      const a = mkTree(work, 'wt-a', 64)
+      const link = join(work, 'link-to-a')
+      symlinkSync(a, link)
+      const only = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: link }))
+      assert.deepEqual([only.payload.kib, only.payload.err, only.payload.missing], [duKib(a), 0, 0])
+      const f = join(a, 'f.bin')
+      const file = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${f}\n${a}/./f.bin` }))
+      assert.deepEqual([file.payload.kib, file.payload.count, file.payload.err], [duKib(f), 2, 0])
+      const gone = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: `${work}/gone\n${work}/./gone` }))
+      assert.deepEqual([gone.payload.kib, gone.payload.count, gone.payload.missing, gone.payload.err], [0, 2, 2, 0])
     })
   })
 
@@ -177,11 +213,17 @@ for (const bash of BASHES) {
 
   test(`${tag} residual: 多数件（400 件）でも件数と合計が崩れない`, () => {
     withWork((work) => {
-      const base = mkTree(work, 'wt-base', 4)
+      // 同じ実体は 1 回しか数えない（AH）ので、合計の検査には別々のディレクトリを使う
       const lines = []
-      for (let i = 0; i < 400; i++) lines.push(i % 4 === 3 ? join(work, `gone-${i}`) : base)
+      let kib = 0
+      for (let i = 0; i < 400; i++) {
+        if (i % 4 === 3) { lines.push(join(work, `gone-${i}`)); continue }
+        const d = mkTree(work, `wt-${i}`, 4)
+        kib += duKib(d)
+        lines.push(d)
+      }
       const env = parseEnvelope(run(bash, RESIDUAL, ['--nonce', NONCE], { input: lines.join('\n') + '\n' }))
-      assert.deepEqual(env.payload, { count: 400, err: 0, inputSha256: inputSha256(lines.join('\n')), kib: duKib(base) * 300, missing: 100 })
+      assert.deepEqual(env.payload, { count: 400, err: 0, inputSha256: inputSha256(lines.join('\n')), kib, missing: 100 })
     })
   })
 

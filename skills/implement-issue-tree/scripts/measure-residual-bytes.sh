@@ -19,7 +19,9 @@
 #                 同じ値を再計算して照合する。エージェントがコマンド中のパスを書き換えて実行すると
 #                 別の値になり、件数が同じでも拒否される（封筒が入力を束縛する）
 #       - count   処理した行数（ホストは送った件数と一致することを検証する）
-#       - kib     実在したパス全件に du -sk を実行した第 1 列の合計（存在しないパスは 0 として加算）。合計は 15 桁以内に
+#       - kib     実在したパスに du -sk を実行した第 1 列の合計（存在しないパスは 0 として加算）。同じ実体を指す別の綴り
+#                 （/./ 混じり・/var と /private/var・シンボリックリンク経由）は物理パスに解決して 1 回だけ測る（count はそのまま入力の行数。
+#                 重複行は kib・missing・err のどれにも足さない）。物理パスに解決できないものは渡された綴りのまま測る。合計は 15 桁以内に
 #                 限る（超える加算は err に数え、負値や桁あふれの値を封筒に入れない）
 #       - missing 測定時点で存在しなかった（test -e が偽の）件数。並行 cleanup との競合で消えたパスを
 #                 測定失敗にしない既存の契約。「0 KiB だった」とは区別して返す
@@ -92,7 +94,23 @@ input_sha=$(printf '%s' "${input}" | so_sha256) || {
   exit 3
 }
 
+# 実在するパス（$1。絶対・許可文字のみ・存在確認済み）の物理パス。ディレクトリは cd -P で、それ以外は親を cd -P で解決して末尾の名前を足す。
+# 解決できなければ非 0（呼び出し側が渡された綴りのまま測る）。cd はサブシェル内で行い、CDPATH は外す
+phys_path() {
+  local d b
+  if [ -d "$1" ]; then
+    (unset CDPATH; cd -P -- "$1" 2>/dev/null && pwd -P)
+    return
+  fi
+  d=${1%/*}
+  b=${1##*/}
+  [ -n "${d}" ] || d=/
+  d=$(unset CDPATH; cd -P -- "${d}" 2>/dev/null && pwd -P) || return 1
+  if [ "${d}" = / ]; then printf '/%s' "${b}"; else printf '%s/%s' "${d}" "${b}"; fi
+}
+
 sp=' '
+seen=${nl}
 total=0
 missing=0
 err=0
@@ -121,8 +139,15 @@ trail=0
     missing=$((missing + 1))
     continue
   fi
+  # 同じ実体を別の綴り（/./ 混じり・/var と /private/var・シンボリックリンク経由）で 2 回渡されても 1 回だけ数える。物理パスに解決できたものを
+  # 測定の対象にし、解決できないときは渡された綴りのまま測る（重複を除けないだけで、過少には振れない）。重複した行は count には数え、kib・missing・err には足さない
+  real=$(phys_path "${p}") && [ -n "${real}" ] || real=${p}
+  case "${seen}" in
+    *"${nl}${real}${nl}"*) continue ;;
+  esac
+  seen="${seen}${real}${nl}"
   # du の終了状態は if 条件で検査する（パイプ直結だと後段の終了状態に化けて失敗が消える）
-  if duout=$(du -sk -- "${p}" 2>/dev/null); then
+  if duout=$(du -sk -- "${real}" 2>/dev/null); then
     sz=${duout%%[[:space:]]*}
     case "${sz}" in
       '' | *[!0-9]*) err=$((err + 1)) ;;

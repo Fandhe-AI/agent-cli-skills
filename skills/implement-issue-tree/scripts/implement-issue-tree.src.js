@@ -3493,7 +3493,7 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
   // 置換（呼び出し側が replacementWorktree に新パスを渡す。パス不明は空文字）は計上規則を 1 か所にまとめた applyReplacementAccounting が扱う
   // （旧のパスが空でも新しい worktree は実在するため、cleanupWorktreePath の有無に依らず呼ぶ）
   if (typeof options.replacementWorktree === 'string') {
-    applyReplacementAccounting(issueNumber, cleanupWorktreePath, options.replacementWorktree, cleanupWorktreePath !== '' && result?.cleanupRetained === false)
+    applyReplacementAccounting(issueNumber, cleanupWorktreePath, options.replacementWorktree, cleanupWorktreePath !== '' && result?.cleanupRetained === false, cleanupWorktreePath !== '' && cleanupConfirmedRemoved)
   } else if (cleanupWorktreePath && result?.cleanupRetained !== false) {
     recordRetainedWorktree(issueNumber, cleanupWorktreePath)
   }
@@ -4628,7 +4628,7 @@ const EPHEMERAL_RESERVE_PER_NEW_START = Object.values(EPHEMERAL_KIND_MAX).reduce
 // base-merge を最大 maxBaseMerges 件記録し得るため両方を見込む（Issue #441）。
 const EPHEMERAL_RESERVE_PER_MONITORING_RESUME = EPHEMERAL_KIND_MAX['fix-terminal'] + EPHEMERAL_KIND_MAX['base-merge']
 
-// 新しい worktree をこのランの台帳へ記録する入口（recordEphemeralWorktree / 置換の新パス〔applyReplacementAccounting。新旧が同じパスのときは呼ばない〕）が共通で呼ぶ。
+// 新しい worktree をこのランの台帳へ記録する入口（recordEphemeralWorktree / 置換の新パス〔applyReplacementAccounting。新旧が同じパスで削除を確認したときは呼ばない〕）が共通で呼ぶ。
 // 同じランで『削除済みと確認した』パスに worktree が作り直された場合、その実体は生きている。削除済みの集合（confirmedRemovedPaths。
 // バイト測定から外れる）と最終スイープの削除候補（sweepEligiblePaths）に旧パスが残ると、生きた実体が測定から漏れ、スイープに --force で消され得る。
 // 外すのは『削除を試みた記録』だけで、削除が増える方向の変更ではない（候補が減るだけ）。保持の照合は状態ファイルの failed / blocked / monitoring の記録が
@@ -4642,8 +4642,15 @@ function markWorktreeLive(p) {
 
 // 使い捨て worktree・fix-terminal・実装 worktree を記録する。**この関数は削除をしない**
 // （Issue #142）。worktreePath は照合できない自己申告値のため自動削除しない。
-// 第 4 引数 { revive: false } は『同じ呼び出しの流れで直前に updateState が削除を確認したパスかもしれない』記録で使う（post-push fix の
-// optinFixState 再試行失敗の終端が該当）。既定は live に戻す（Z）。false は削除済み・スイープ候補の記録を残す（AB と同じ安全側。台帳には載せる）
+// 第 4 引数 { revive: false } は『同じ呼び出しの流れで直前に updateState が削除を確認したパス』の記録で使う（post-push fix の
+// optinFixState 再試行失敗の終端が該当。reviveAfterCleanup が決める）。既定は live に戻す（Z）。false は削除済み・スイープ候補の記録を残す（台帳には載せる）
+// recordEphemeralWorktree の revive 引数を決める。直前の updateState（cleanupWorktree: oldRawPath）が rawPath と同じパスの削除を確認した
+// （confirmedRemovedPaths にある）ときだけ false（live に戻さない）。別のパス・削除を確認できなかったパスは実体が生きているので true（AE。AD と同じ不変条件）
+function reviveAfterCleanup(rawPath, oldRawPath) {
+  const p = sanitizeWorktreePath(rawPath ?? '')
+  return !(p !== '' && p === sanitizeWorktreePath(oldRawPath ?? '') && confirmedRemovedPaths.has(p))
+}
+
 function recordEphemeralWorktree(issueNumber, rawPath, kind, { revive = true } = {}) {
   // 未宣言 kind は予約を過小にする実装ミスのため警告する。記録は継続する（落とすと実測まで
   // 過小になり上限 latch が弱まる。予約が過小でも実測超過の時点で新規着手は停止する）。
@@ -4714,17 +4721,19 @@ function planReplacementAccounting({ oldPath, oldRemoved, newPath, oldCounted, n
 }
 
 // 置換の計上を適用する唯一の入口（updateStateDetailed が replacementWorktree つきの呼び出しで使う）。oldPath は掃除を試みた旧のパス（試みなし・不明は ''）、
-// oldRemoved は旧の worktree が無くなったと確認できたか
-function applyReplacementAccounting(issueNumber, oldPath, rawNewPath, oldRemoved) {
+// oldRemoved は旧の worktree が無くなったと確認できたか（件数軸の計上用。ブランチ削除だけが失敗した場合も true）。
+// oldConfirmedRemoved は updateStateDetailed がこの呼び出しで confirmedRemovedPaths へ載せたか（cleanupOk かつ retained:false。省略は oldRemoved）
+function applyReplacementAccounting(issueNumber, oldPath, rawNewPath, oldRemoved, oldConfirmedRemoved = oldRemoved) {
   const newPath = sanitizeWorktreePath(rawNewPath ?? '')
   const plan = planReplacementAccounting({ oldPath, oldRemoved, newPath, oldCounted: isWorktreeCounted(oldPath), newCounted: isWorktreeCounted(newPath) })
   if (plan.addRetainedOld) recordRetainedWorktree(issueNumber, oldPath)
   else if (!oldRemoved) noteSlotRetained(issueNumber, oldPath)
-  // 新しい worktree は実在する（台帳の重複排除で載せなくても、削除済み・削除候補の記録は外す）。ただし新旧が同じパスのときは外さない:
-  // Review fix と post-push fix は cleanupWorktree と replacementWorktree に同じパスを渡し得て、その旧は updateStateDetailed が今まさに削除を確認した
-  // （または保持した）パスである。ここで live に戻すと、削除済みのパスがバイト測定（1 件あたりの平均を下げる）と最終スイープの候補（登録の片づけ）から漏れる。
-  // 作り直された実体かどうかは同じ呼び出しの中では区別できないので、削除の記録を残す側（Z より前の挙動）へ倒す
-  if (newPath && newPath !== oldPath) markWorktreeLive(newPath)
+  // 不変条件: パスは『この呼び出しの流れで削除が確認された（confirmedRemovedPaths に入った）』場合に限り live に戻さない。それ以外で台帳に記録する・
+  // 置換の新パスになるパスは live（削除済み・削除候補から外す）。Review fix と post-push fix は cleanupWorktree と replacementWorktree に同じパスを渡し得る。
+  // 同じパスで削除を確認したときは、削除済みがバイト測定（1 件あたりの平均を下げる）と最終スイープの候補（登録の片づけ）から漏れないよう、削除の記録を残す
+  // （作り直された実体かどうかは同じ呼び出しの中では区別できないので安全側）。同じパスでも保持・掃除せず・状態マージ失敗・結果なし・例外のときは、実体が生きており
+  // superseded の最終スイープに --force で消され得るので live に戻す（AD）
+  if (newPath && (newPath !== oldPath || !oldConfirmedRemoved)) markWorktreeLive(newPath)
   if (plan.addReplacement) recordReplacementWorktree(issueNumber, newPath)
   if (plan.inheritPath) slotInheritedPaths.add(plan.inheritPath)
   if (plan.inheritUnknown) {
@@ -6393,7 +6402,8 @@ function buildPhysicalByteMeasureTargets(entries, independentCount) {
 // 物理一覧フォールバックの測定対象 = 物理一覧 ∪ 台帳でパスが分かっている項目（Bugbot 指摘 R）。物理一覧は git に登録された
 // worktree だけなので、置き換えると台帳にあるが未登録の実在ディレクトリ（retained-unregistered 等）が測定から漏れ、
 // bytesEndObserved が true のまま上限判定が甘くなる。重複は連続スラッシュと末尾スラッシュを正規化して除く（先に出た表記を残す）。
-// 測定専用で削除経路へは流さない。パス検証は measure 側（許可文字外は fail-closed）に委ねる
+// 測定専用で削除経路へは流さない。パス検証は measure 側（許可文字外は fail-closed）に委ねる。
+// /./ 混じり・/var と /private/var・シンボリックリンク経由の別綴りは字面では同一にできないので、measure-residual-bytes.sh が物理パスに解決して 1 回だけ測る（AH）
 function unionMeasurePaths(physicalPaths, ledgerPaths) {
   const seen = new Set()
   const out = []
@@ -9285,8 +9295,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         if (!retryOk) {
           const reason = 'post-push fix の opt-in テスト実測（optinFixState）を状態ファイルへ永続化できなかった（再試行後も失敗）。'
             + 'この実測を次回 monitoring 再開時に復元できないと、PR 本文更新の失敗・省略時に古い記録だけでマージ前ゲートを通過し得るため、fail-closed で終端する'
-          // 直前の updateState（cleanupWorktree: oldWorktreePath）がこのラウンドで削除を確認したパスを fix が返した場合に、live へ戻さない（AB）
-          recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal', { revive: false })
+          // 直前の updateState（cleanupWorktree: oldWorktreePath）がこのラウンドで削除を確認したパスを fix が返した場合だけ live へ戻さない（AB）。別のパスは戻す（AE）
+          recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal', { revive: reviveAfterCleanup(f?.worktreePath, oldWorktreePath) })
           return await failMergeTerminal(reason, 'blocked')
         }
       }
