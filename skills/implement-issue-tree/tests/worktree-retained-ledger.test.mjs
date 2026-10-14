@@ -732,3 +732,29 @@ test('新旧が別のパスなら従来どおり: 新パスは live（削除済�
   assert.ok(f.confirmedRemovedPaths.has('/tmp/ab-old2'))
   assert.ok(f.sweepEligiblePaths.has('/tmp/ab-old2'))
 })
+
+// ---- AC: 同じ呼び出しの流れで削除を確認したパスを fix-terminal として記録しても live に戻さない ----
+// post-push fix の optinFixState 再試行失敗の終端は、updateState（cleanupWorktree: 旧）が削除を確認した直後に fix の worktreePath を記録する。
+// fix が旧と同じパスを返すと、revive の既定では削除済みが live に戻る。{ revive: false } なら削除済み・スイープ候補の記録が残り、台帳には載る。
+test('revive: false で記録すると、削除を確認したパスが削除済みとスイープ候補に残り、台帳には載る', async () => {
+  const f = await removedPath('ac-norevive')
+  f.recordEphemeralWorktree(53, REUSED, 'fix-terminal', { revive: false })
+  assert.ok(f.confirmedRemovedPaths.has(REUSED), '削除を確認したパスが live に戻される')
+  assert.ok(f.sweepEligiblePaths.has(REUSED), '最終スイープの候補から外れる')
+  assert.ok(f.ephemeralWorktrees.some((e) => e.path === REUSED && e.kind === 'fix-terminal'), '台帳には載せる')
+})
+
+test('revive の指定なしは従来どおり live に戻す（Z）', async () => {
+  const f = await removedPath('ac-default')
+  f.recordEphemeralWorktree(53, REUSED, 'fix-terminal')
+  assert.ok(!f.confirmedRemovedPaths.has(REUSED))
+  assert.ok(!f.sweepEligiblePaths.has(REUSED))
+})
+
+test('post-push fix の optinFixState 再試行失敗の終端は、直前に削除を確認したパスを live に戻さない指定で記録する（配線）', () => {
+  const start = source.indexOf('const retryOk = await updateState(item.number, optinFixPatchArgs)')
+  assert.ok(start > 0, '再試行の呼び出しが見つかる')
+  const branch = source.slice(start, source.indexOf('failMergeTerminal(reason', start))
+  assert.match(branch, /recordEphemeralWorktree\(item\.number, f\?\.worktreePath, 'fix-terminal', \{ revive: false \}\)/)
+})
+

@@ -4642,7 +4642,9 @@ function markWorktreeLive(p) {
 
 // 使い捨て worktree・fix-terminal・実装 worktree を記録する。**この関数は削除をしない**
 // （Issue #142）。worktreePath は照合できない自己申告値のため自動削除しない。
-function recordEphemeralWorktree(issueNumber, rawPath, kind) {
+// 第 4 引数 { revive: false } は『同じ呼び出しの流れで直前に updateState が削除を確認したパスかもしれない』記録で使う（post-push fix の
+// optinFixState 再試行失敗の終端が該当）。既定は live に戻す（Z）。false は削除済み・スイープ候補の記録を残す（AB と同じ安全側。台帳には載せる）
+function recordEphemeralWorktree(issueNumber, rawPath, kind, { revive = true } = {}) {
   // 未宣言 kind は予約を過小にする実装ミスのため警告する。記録は継続する（落とすと実測まで
   // 過小になり上限 latch が弱まる。予約が過小でも実測超過の時点で新規着手は停止する）。
   if (!(kind in EPHEMERAL_KIND_MAX)) {
@@ -4657,7 +4659,7 @@ function recordEphemeralWorktree(issueNumber, rawPath, kind) {
     ephemeralWorktrees.push({ issue: issueNumber, kind, path: '' })
     return
   }
-  markWorktreeLive(p)
+  if (revive) markWorktreeLive(p)
   ephemeralWorktrees.push({ issue: issueNumber, kind, path: p })
   log(`#${issueNumber}: ${kind} worktree を記録した（自動削除はしない。${p}）`)
 }
@@ -9283,7 +9285,8 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         if (!retryOk) {
           const reason = 'post-push fix の opt-in テスト実測（optinFixState）を状態ファイルへ永続化できなかった（再試行後も失敗）。'
             + 'この実測を次回 monitoring 再開時に復元できないと、PR 本文更新の失敗・省略時に古い記録だけでマージ前ゲートを通過し得るため、fail-closed で終端する'
-          recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')
+          // 直前の updateState（cleanupWorktree: oldWorktreePath）がこのラウンドで削除を確認したパスを fix が返した場合に、live へ戻さない（AB）
+          recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal', { revive: false })
           return await failMergeTerminal(reason, 'blocked')
         }
       }

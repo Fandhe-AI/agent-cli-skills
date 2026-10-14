@@ -4642,7 +4642,9 @@ sweepEligiblePaths.delete(p)
 
 
 
-function recordEphemeralWorktree(issueNumber,rawPath,kind){
+
+
+function recordEphemeralWorktree(issueNumber,rawPath,kind,{revive=true}={}){
 
 
 if(!(kind in EPHEMERAL_KIND_MAX)){
@@ -4657,7 +4659,7 @@ log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できなかっ�
 ephemeralWorktrees.push({issue:issueNumber,kind,path:''})
 return
 }
-markWorktreeLive(p)
+if(revive)markWorktreeLive(p)
 ephemeralWorktrees.push({issue:issueNumber,kind,path:p})
 log(`#${issueNumber}: ${kind} worktree を記録した（自動削除はしない。${p}）`)
 }
@@ -9283,7 +9285,8 @@ const retryOk=await updateState(item.number,optinFixPatchArgs)
 if(!retryOk){
 const reason='post-push fix の opt-in テスト実測（optinFixState）を状態ファイルへ永続化できなかった（再試行後も失敗）。'
 +'この実測を次回 monitoring 再開時に復元できないと、PR 本文更新の失敗・省略時に古い記録だけでマージ前ゲートを通過し得るため、fail-closed で終端する'
-recordEphemeralWorktree(item.number,f?.worktreePath,'fix-terminal')
+
+recordEphemeralWorktree(item.number,f?.worktreePath,'fix-terminal',{revive:false})
 return await failMergeTerminal(reason,'blocked')
 }
 }
