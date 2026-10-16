@@ -4026,15 +4026,15 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'6db28f795b35c5cf7085c101d338335b8025d832bd5cac627990b1b2c363349d',
-'measure-free-disk.sh':'d4af0cc18c91b8251cdb88adbb9abbe79cff3fcd449de18df0e4a6438e531f9a',
-'observe-pr.sh':'4fe17cc0be0d50f029bf8de130543fb2df3a370c313bb1de5032cc8bee3e6100',
-'base-merge.sh':'131e66f0534d8b65ba5d95dcccce6766cb43ab2eacfd119c476b476982de66cf',
-'pr-push.sh':'916a6be27c1c396996ecffef4b77e012349d1970851640096a4034d720b70644',
-'state.sh':'b3c21e3b74d25d8ce7c35bcb85277759f4cce6b87d16d0cd666280ecc518034b',
-'merge-gate.sh':'899fa73e3f27960f1d1c0eb56a19aa1cd5de0c2cbdc7e2ded794d1a7371ca4c1',
-'worktree-remove.sh':'dc30a443507a435981ef53ed2bdd3941fc0ab9ae07e3f674849a62509260b060',
-'recover-prep.sh':'97b590d411a9b546b0819708e64736dea70089cd8da0ffd2403f93f23abf4fbc',
+'measure-residual-bytes.sh':'4de29454672ab140483a4e099777bd2478da9b2f5624ce1114b290df6f9e7cfd',
+'measure-free-disk.sh':'1f77e635b9aaa99734c698e95b800b82c03ff2d4f72583558d18e2c7c34067eb',
+'observe-pr.sh':'b91747e29a6b0537683d3e7775ebe67b079d71e2e87d0e7a01ad0f4693aca0fd',
+'base-merge.sh':'24bc354e5523255cb2214ad36426c96d881db63fe776c7b574afe22bbbb127ec',
+'pr-push.sh':'f38215298108d483da3dc6911eb5b934ba41384355e0226e7a8b585aa214a7ad',
+'state.sh':'bcb9f14e53bfaf4f65f1c26ae7c88fbbaa32086e10e83d4629b4a20c6c339fe8',
+'merge-gate.sh':'3aed46531cdf246b38760b67743acce43a91e02880db75073f7756218ea20e96',
+'worktree-remove.sh':'968ed04c71ff1d7dd10da9cef9509b0b4df4713748012074466987dd245b12b0',
+'recover-prep.sh':'459fce7fb18aa3d6e0816210fa231207f14a1e0b47b438e2586563c173bacd43',
 }
 
 
@@ -5264,6 +5264,7 @@ COMMON,
 '   - 実装ステップ（順番に実行可能な具体的手順）',
 '   - 検証方法（ビルド・lint・テスト・動作確認の手順）',
 '   - OWASP Top 10 観点のセキュリティ考慮事項',
+addedFileNamingPolicy(),
 '4. 計画本文を plan フィールドに markdown 形式で返す。plan に Issue 本文の生の引用ブロックを含めない。',
 '返却: plan（実装計画の本文 markdown）/ summary（計画の 1 行要約）。',
 ].join('\n')
@@ -5414,6 +5415,14 @@ commands,
 
 
 
+
+
+
+
+function addedFileNamingPolicy(repo=repoArg){
+const r=repo?` -R ${repo}`:''
+return`   - 連番付きのファイル（docs/decisions/0063-*.md・migrations/0018_*.sql のように名前の先頭が番号のもの）を新設するときは、base だけでなく open PR の追加ファイル（gh pr list${r} --state open --json number で列挙し、gh pr view <番号>${r} --json files で確かめる。並列で作業中の兄弟イシューの PR を含む）も見て、どちらでも使われていない番号を選ぶ。成果物の置き場ファイル（工程の記録・確認結果をまとめる文書など）が base か open PR に既にあれば、別名で新設せずそれに追記する`
+}
 const IMPL_STEP4='4. 完了条件: 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して pass すること。フォーマッタ・静的解析があればコミット前に通す。'
 const IMPL_STEP5='5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む。'
 const IMPL_STEP6='6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。'
@@ -5469,6 +5478,7 @@ untrustedJson(planJson,'plan'),
 '1. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
 `2. （0b-a で既存 open PR のブランチを取得した場合、または 0b-b でリモートブランチを再利用した場合はこの手順をスキップして手順 3 へ進む。既存ブランチを origin/${baseBranch} から作り直すと push 済みコミットを失うため）git fetch origin && git checkout -B <type>/${item.number}-<short-name> origin/${baseBranch} で作業ブランチを作成する（type は feat / fix 等の Conventional Commits 規約。並列実行時のブランチ名衝突を防ぐためイシュー番号を必ず含める）。`,
 '3. 渡された計画に従って実装する（計画立案は Plan フェーズで完了済み。ここでは計画に記載の実装ステップを実行するのみ）。実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い役割単位で委譲する。対象リポジトリの CLAUDE.md・rules（migration・スキーマ等の不変条件を含む）を必ず守る。',
+addedFileNamingPolicy(),
 CODE_COMMENT_POLICY,
 IMPL_STEP4,
 ...optinTestExecutionLines(item,'4b'),
@@ -5512,7 +5522,10 @@ const PR_NUMBER_PLACEHOLDER='<PR 番号>'
 
 
 function observeInputText(f){
-return['observe-pr',f.mode,String(f.pr),f.repo!==undefined?f.repo:repoArg,f.base||'',f.branch||'',String(f.issue??''),f.slug||'',f.until||''].join('\n')
+const lines=['observe-pr',f.mode,String(f.pr),f.repo!==undefined?f.repo:repoArg,f.base||'',f.branch||'',String(f.issue??''),f.slug||'',f.until||'']
+
+if(f.mode==='added-files')lines.push((f.peers??[]).join(','))
+return lines.join('\n')
 }
 
 
@@ -5522,6 +5535,9 @@ if(f.pr!==PR_NUMBER_PLACEHOLDER&&(!Number.isInteger(f.pr)||f.pr<=0))throw new Er
 if(f.base!==undefined&& !isValidBranchName(f.base))throw new Error('observeCommand: base の形式が不正')
 if(f.branch!==undefined&& !isValidBranchName(f.branch))throw new Error('observeCommand: branch の形式が不正')
 if(f.slug!==undefined&& !EXTERNAL_CHECK_APP_SLUG_RE.test(f.slug))throw new Error('observeCommand: slug の形式が不正')
+if(f.peers!==undefined&&(!Array.isArray(f.peers)||f.peers.length>ADDED_FILES_PEERS_MAX|| !f.peers.every((n)=>Number.isInteger(n)&&n>0&&n!==f.pr)||new Set(f.peers).size!==f.peers.length)){
+throw new Error('observeCommand: peers の形式が不正')
+}
 
 const repo=f.repo!==undefined?f.repo:repoArg
 if(repo!==''&& !isValidRepoSlug(repo))throw new Error('observeCommand: repo の形式が不正')
@@ -5533,6 +5549,7 @@ f.branch!==undefined?` --branch ${f.branch}`:'',
 f.issue!==undefined?` --issue ${f.issue}`:'',
 f.slug!==undefined?` --slug ${f.slug}`:'',
 f.until?` --until ${f.until}`:'',
+f.peers!==undefined&&f.peers.length>0?` --peers ${f.peers.join(',')}`:'',
 attempt>0?(f.mode==='pr'?' --wait':` --wait --attempt ${attempt}`):'',
 ].join('')
 
@@ -5564,6 +5581,132 @@ else if(!Number.isInteger(signed.payload.total)||signed.payload.total<0)reason='
 else if(typeof signed.payload.headSha!=='string'|| !/^[0-9a-f]{40}$/.test(signed.payload.headSha)) reason = 'inconclusive'
 else total=signed.payload.total
 return{result:total===undefined?rest:{ ...rest,checksTotal:total},reason,claimed:checksTotal}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const ADDED_FILES_PEERS_MAX=30
+const ADDED_FILE_COLLISION_FIX_MAX=2
+const ADDED_FILES_PAYLOAD_SCHEMA={
+type:'object',
+required:['mode','inputSha256','outcome','err','state','added','numbered','samePath','seqPeer','seqBase','truncated','pathPeers','seqPeers'],
+properties:{
+mode:{type:'string'},
+inputSha256:{type:'string'},
+outcome:{type:'string'},
+err:{type:'integer'},
+attempt:{type:'integer'},
+maxAttempts:{type:'integer'},
+state:{type:'string'},
+added:{type:'integer'},
+numbered:{type:'integer'},
+samePath:{type:'integer'},
+seqPeer:{type:'integer'},
+seqBase:{type:'integer'},
+truncated:{type:'integer'},
+pathPeers:{type:'array',items:{type:'integer'}},
+seqPeers:{type:'array',items:{type:'integer'}},
+},
+description:'標準出力 JSON の payload をそのまま転記する',
+}
+
+
+
+function addedFilesPeers(issueNumber,prNumber,knownPrs,savedEntries){
+const set=new Set()
+const take=(n,pr)=>{
+if(n!==issueNumber&&Number.isInteger(pr)&&pr>0&&pr<prNumber)set.add(pr)
+}
+for(const[n,pr]of knownPrs??[])take(n,pr)
+for(const[k,v]of savedEntries??[]){
+if(v&&v.status!=='merged'&&v.status!=='closed')take(Number(k),v.pr)
+}
+return[...set].sort((a,b)=>b-a).slice(0,ADDED_FILES_PEERS_MAX).sort((a,b)=>a-b)
+}
+
+
+
+function classifyAddedFiles(raw,nonce,inputSha,peers){
+const signed=verifySignedOutput(raw,nonce,inputSha)
+if(!signed.ok)return{kind:'skip',reason:`envelope:${signed.reason}`}
+const p=signed.payload
+if(p.mode!=='added-files')return{kind:'skip',reason:'mode'}
+if(p.err!==0||p.outcome!=='observed')return{kind:'skip',reason:'fetch-error'}
+const isCount=(x)=>Number.isInteger(x)&&x>=0&&x<=100000
+const want=new Set(peers)
+const isPeers=(a)=>Array.isArray(a)&&a.length<=ADDED_FILES_PEERS_MAX&&a.every((n)=>want.has(n))
+if(![p.added,p.numbered,p.samePath,p.seqPeer,p.seqBase,p.truncated].every(isCount)|| !isPeers(p.pathPeers)|| !isPeers(p.seqPeers)){
+return{kind:'skip',reason:'payload'}
+}
+if(!['OPEN','MERGED','CLOSED'].includes(p.state))return{kind:'skip',reason:'payload'}
+const base={samePath:p.samePath,seqPeer:p.seqPeer,seqBase:p.seqBase,truncated:p.truncated,pathPeers:p.pathPeers,seqPeers:p.seqPeers}
+if(p.state!=='OPEN')return{kind:'none',reason:'not-open', ...base}
+if(p.samePath>0&&p.pathPeers.length>0)return{kind:'path',reason:'', ...base}
+if((p.seqPeer>0&&p.seqPeers.length>0)||p.seqBase>0)return{kind:'seq',reason:'', ...base}
+return{kind:'none',reason:'', ...base}
+}
+
+const prRefs=(list)=>list.map((n)=>`#${n}`).join(', ')
+
+function addedFileSeqFindingSummary(prNumber,c,repo=repoArg){
+const r=repo?` -R ${repo}`:''
+const where=[
+...(c.seqBase>0?[`base（origin/${baseBranch}）の同じディレクトリの既存ファイルと ${c.seqBase} 件`]:[]),
+...(c.seqPeer>0?[`同じランの先行 PR ${prRefs(c.seqPeers)} の新規追加ファイルと ${c.seqPeer} 件`]:[]),
+].join('、')
+return`PR #${prNumber} が新規に追加した連番付きのファイル（basename の先頭が 3 桁以上の数字 + - / _）の番号が衝突している（${where}。同じディレクトリで番号が同じ・名前の . より前が違うもの。Issue #658 のホスト判定）。`
++`git diff --name-status --diff-filter=A origin/${baseBranch}...HEAD で本 PR の追加ファイルを確かめ、origin/${baseBranch} の同じディレクトリと、open PR の追加ファイル（gh pr list${r} --state open --json number で列挙し、gh pr view <番号>${r} --json files で確かめる）のどちらでも使われていない番号へ、本 PR 側の該当ファイルを改番する（git mv）。`
++'本 PR の中と既存の文書からの参照（ファイル名・番号の言及）も新しい番号へ直す。先行 PR・base のファイルは変更しない。改番後にビルド・lint・テストを通して push する'
+}
+function addedFilePathBlockedReason(prNumber,c){
+return`PR #${prNumber} は同じランの先行 PR ${prRefs(c.pathPeers)} と同じパスのファイルを新規に追加している（${c.samePath} 件。Issue #658 のホスト判定）。`
++'先行 PR がマージされる前には内容を統合できないため停止した。先行 PR の内容を確かめ、本 PR の該当ファイルを先行 PR の内容を前提とした差分にする（先行 PR のマージ後に同じ args で再実行すると、base 取り込み〔コンフリクトの解消〕から継続する）か、別の置き場へ移す'
+}
+
+let addedFilesSeq=0
+
+
+async function observeAddedFileCollisions(item,prNumber,peers){
+let last={kind:'skip',reason:'not-run'}
+for(let attempt=0;attempt<2;attempt+=1){
+addedFilesSeq+=1
+const nonce=boundaryNonce(`added-files:${item.number}:${prNumber}:${addedFilesSeq}`)
+const f={mode:'added-files',pr:prNumber,base:baseBranch,peers}
+let raw
+try{
+raw=await agent(
+[
+`PR #${prNumber} の新規追加ファイルの衝突の観測タスク（読み取り専用。何も変更しない）。`,
+UNTRUSTED_POLICY,
+TEMP_FILE_POLICY,
+'次のコマンドを一字一句そのまま（改変・引数の追加削除・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:',
+'```sh',
+observeCommand(nonce,f),
+'```',
+SIGNED_OUTPUT_INSTRUCTION,
+].join('\n'),
+{label:`merge:added-files:#${item.number}`,phase:'Merge',model:attempt===0?'haiku':'sonnet',effort:'low',schema:signedOutputSchema(ADDED_FILES_PAYLOAD_SCHEMA)},
+)
+}catch(e){
+last={kind:'skip',reason:`agent 例外（${sanitize(String(e?.message ?? e)).slice(0, 120)}）`}
+continue
+}
+last=classifyAddedFiles(raw,nonce,sha256Hex(observeInputText(f)),peers)
+if(last.kind!=='skip'||last.reason==='mode'||last.reason==='payload')return last
+}
+return last
 }
 
 
@@ -8412,6 +8555,8 @@ let rescueTimeoutQualityBlock=false
 
 let lastExecDeferralNote=''
 
+let addedFileCollisionFixes=0
+
 
 
 let roundTimeoutExecReason=''
@@ -8611,6 +8756,36 @@ terminalReasonOverride=`${terminalReasonOverride}。${EXTERNAL_CHECKS_CONTEXT_UN
 if(Array.isArray(m?.unresolvedComments)&&m.unresolvedComments.length>0){
 lastUnresolvedInfo=capText(m.unresolvedComments.map(unresolvedCommentText).join(' / '))
 lastUnresolvedComments=normalizeUnresolvedComments(m.unresolvedComments)
+}
+}
+
+
+
+
+if(lastState==='ready'){
+const peers=addedFilesPeers(item.number,impl.prNumber,knownPrByIssue,Object.entries(savedItems))
+const collision=await observeAddedFileCollisions(item,impl.prNumber,peers)
+if(collision.kind==='skip'){
+log(`⚠️ #${item.number}: 新規追加ファイルの衝突を確かめられなかった（${collision.reason}）。この判定を飛ばして続行する`)
+}else if(collision.truncated>0){
+log(`⚠️ #${item.number}: ファイルが 100 件を超える PR が ${collision.truncated} 本あり、新規追加ファイルの衝突は先頭 100 件だけで確かめた`)
+}
+if(collision.kind==='path'){
+const reason=addedFilePathBlockedReason(impl.prNumber,collision)
+log(`⚠️ #${item.number}: ${reason}`)
+return await failMergeTerminal(capText(reason),'blocked')
+}
+if(collision.kind==='seq'){
+if(addedFileCollisionFixes>=ADDED_FILE_COLLISION_FIX_MAX){
+const reason=`PR #${impl.prNumber} の新規追加ファイルの連番の衝突が fix ${ADDED_FILE_COLLISION_FIX_MAX} 回で解消しなかった（base と ${collision.seqBase} 件・先行 PR ${prRefs(collision.seqPeers) || 'なし'} と ${collision.seqPeer} 件）。未使用の番号へ改番してから同じ args で再実行する`
+log(`⚠️ #${item.number}: ${reason}`)
+return await failMergeTerminal(capText(reason),'blocked')
+}
+addedFileCollisionFixes++
+log(`#${item.number}: 新規追加ファイルの連番が衝突している（base と ${collision.seqBase} 件・先行 PR ${prRefs(collision.seqPeers) || 'なし'} と ${collision.seqPeer} 件）。改番の fix へ回す（${addedFileCollisionFixes}/${ADDED_FILE_COLLISION_FIX_MAX} 回目）`)
+lastState='needs-fix'
+finding={summary:addedFileSeqFindingSummary(impl.prNumber,collision),unresolvedComments:[]}
+if(monitorsLeft<1)monitorsLeft=1
 }
 }
 
