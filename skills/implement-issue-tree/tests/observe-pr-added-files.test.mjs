@@ -96,6 +96,18 @@ for (const bash of BASHES) {
     assert.deepEqual([p.err, p.truncated, p.samePath], [0, 2, 1])
   })
 
+  t('上限いっぱい（peers 30 本 × 100 件・長いパス）の一覧でも判定できる（集約 JSON を引数で渡さない。E2BIG 回避）', () => {
+    const long = (pr, i) => [`docs/very/long/directory/name/for/testing/argument/limits/pr${pr}/file-${'x'.repeat(40)}-${i}.md`]
+    const peers = Array.from({ length: 30 }, (_, i) => i + 10)
+    const self = prNode(5, [...Array.from({ length: 99 }, (_, i) => long(5, i)), ['docs/decisions/0063-self.md']])
+    const others = peers.map((n) => prNode(n, n === 39 ? [['docs/decisions/0063-other.md']] : Array.from({ length: 100 }, (_, i) => long(n, i))))
+    const resp = filesResp([self, ...others])
+    assert.ok(resp.length > 200 * 1024, `応答は 200 KiB を超える（${resp.length}）`)
+    const stub = createObserveStub({ graphql: [{ out: resp }, { out: treeResp([[]]) }] })
+    const p = envelope(run(bash, stub, ['--pr', '5', '--base', 'main', '--peers', peers.join(',')]))
+    assert.deepEqual([p.err, p.added, p.seqPeer, p.seqPeers], [0, 100, 1, [39]])
+  })
+
   t('取得失敗・形の違う応答・peers の欠落・ディレクトリ数の超過は err=1 で、件数を 0 にする', () => {
     const many = Array.from({ length: 21 }, (_, i) => [`d${i}/0001-a.md`])
     const cases = [

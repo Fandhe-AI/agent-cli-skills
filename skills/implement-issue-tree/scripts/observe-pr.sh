@@ -720,8 +720,9 @@ observe_added_files() {
             elif ($o.entries | type) == "array" and all($o.entries[]; (.name | type) == "string") then .[$dirs[$i]] = [$o.entries[].name]
             else error("shape") end)' 2>/dev/null) || { fail "base の木の形式"; return 1; }
   fi
-  res=$(jq -nc --argjson f "${files}" --argjson b "${base_map}" '{files: $f, base: $b}' | added_files_classify) || { fail "衝突の判定"; return 1; }
-  row=$(printf '%s' "${res}" | jq -r --argjson f "${files}" '[$f.self.state, .added, .numbered, .samePath, .seqPeer, .seqBase, .truncated] | map(tostring) | join(" ")') || { fail "判定結果の形式"; return 1; }
+  # 集約した一覧は引数ではなく標準入力で渡す（30 本 × 100 件のパスは Linux の 1 引数 128 KiB を超え得る。E2BIG で jq が起動できない）
+  res=$(printf '%s\n%s\n' "${files}" "${base_map}" | jq -sc '{files: .[0], base: .[1]}' | added_files_classify) || { fail "衝突の判定"; return 1; }
+  row=$(printf '%s\n%s\n' "${files}" "${res}" | jq -rs '.[0].self.state as $st | .[1] | [$st, .added, .numbered, .samePath, .seqPeer, .seqBase, .truncated] | map(tostring) | join(" ")') || { fail "判定結果の形式"; return 1; }
   # shellcheck disable=SC2086
   set -- ${row}
   [ $# -eq 7 ] || { fail "判定結果の形式"; return 1; }
