@@ -589,7 +589,9 @@ const SIBLINGS = [
   { number: 761, parent: 753, title: 'docs: TASK-97-8 重複 A' },
   { number: 762, parent: 753, title: 'docs: TASK-97-8 重複 B' },
   { number: 763, parent: 753, title: 'docs: TASK-97-9 ID の後ろが重複の工程' },
+  { number: 764, parent: 753, title: 'docs: ID の無いタイトル' },
   { number: 801, parent: 800, title: 'feat: TASK-97-5 別の親の同じ ID' },
+  { number: 901, parent: 900, title: 'docs: ID の無いタイトルだけの親' },
 ]
 const SIB_BUILT = buildSiblingTaskTable(SIBLINGS)
 
@@ -626,7 +628,9 @@ test('buildSiblingTaskTable: 親ごとに ID → 番号を作り、重複 ID は
   assert.deepEqual(SIB_BUILT.nodes.get(757), { parent: 753, prev: 0 }, 'TASK-97-3 の兄弟が無ければ前の工程は無い')
   assert.deepEqual(SIB_BUILT.nodes.get(763), { parent: 753, prev: 0 }, '重複で落とした TASK-97-8 へは解決しない')
   assert.deepEqual(SIB_BUILT.nodes.get(753), { parent: 1, prev: 0 }, '工程番号が 1 段の ID は前の工程を持たない')
-  assert.equal(SIB_BUILT.nodes.get(761), undefined)
+  assert.deepEqual(SIB_BUILT.nodes.get(761), { parent: 753, prev: 0 }, '自分の ID が重複していても兄弟の明示 ID は解決できるよう載せる')
+  assert.deepEqual(SIB_BUILT.nodes.get(764), { parent: 753, prev: 0 }, 'タイトルに ID が無いノードも載せる')
+  assert.equal(SIB_BUILT.nodes.get(901), undefined, '兄弟の ID が 1 件も無い親のノードは載せない')
   assert.deepEqual(SIB_BUILT.families.get(800), [['TASK-97-5', 801]], '別の親の同じ ID は別の表')
   const many = Array.from({ length: SIBLING_TASK_IDS_MAX_PER_PARENT + 1 }, (_, i) => ({ number: 10 + i, parent: 5, title: `feat: X-1-${i + 1} t` }))
   const big = buildSiblingTaskTable(many)
@@ -677,6 +681,14 @@ test('ID を書かない「前の工程」は自分の工程番号を 1 つ戻�
   assert.deepEqual(runSib(759, '前工程\n'), [758])
   assert.deepEqual(runSib(757, '前の工程の結果を踏まえている\n'), [], '前の工程の兄弟が無い')
   assert.deepEqual(runSib(759, '前の工程（TASK-97-77）の結果を踏まえている\n'), [], '表に無い ID を書いたときは前の工程へ読み替えない')
+  assert.deepEqual(runSib(759, 'TASK-97-1 の後、前の工程の結果を踏まえる\n'), [754, 758], '明示 ID と ID を書かない前の工程は和集合')
+})
+
+test('タイトルに ID が無い・自分の ID が重複するイシューの本文でも、兄弟の明示 ID は解決する (#657)', () => {
+  assert.deepEqual(runSib(764, 'Depends on TASK-97-5\n'), [758])
+  assert.deepEqual(runSib(764, '前の工程の結果を踏まえる\n'), [], '自分の ID が無ければ ID を書かない前の工程は解決しない')
+  assert.deepEqual(runSib(761, 'TASK-97-6 の後\n'), [759])
+  assert.deepEqual(runSib(901, 'TASK-97-5 の後\n'), [], '別の親の ID は解決しない')
 })
 
 test('ID だけの言及・関連 / 参考・否定・表に無い ID・曖昧な ID・自分自身は依存にしない (#657)', () => {

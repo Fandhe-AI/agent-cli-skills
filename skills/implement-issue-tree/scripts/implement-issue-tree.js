@@ -1474,7 +1474,7 @@ String.raw`def sibhead($id): "^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\
 String.raw`def prevword: test("前の?工程(?:[ \t]*$|[ \t]*[^ \t（(])");`,
 String.raw`def sibrefs($me; $insec): . as $t | if ($me.s | length) == 0 or ($t | neg) then [] else`,
 String.raw`[$me.s[] | select(. as $e | $t | test(sibpat($e[0]) + (if $insec then "|" + sibhead($e[0]) else "" end))) | .[1]] as $hit`,
-String.raw`| if ($hit | length) > 0 then $hit elif $me.p > 0 and ($t | prevword) then [$me.p] else [] end end;`,
+String.raw`| $hit + (if $me.p > 0 and ($t | prevword) then [$me.p] else [] end) end;`,
 String.raw`def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline) | .in as $insec | .me as $me | .d += ($t | sibrefs($me; $insec));`,
 String.raw`def flush: if (.buf | length) == 0 then . else (.buf | join("\n") | stripcode | split("\n")) as $ls | reduce $ls[] as $t (.; extract($t)) | .buf = [] end;`,
 ]
@@ -1527,11 +1527,15 @@ return m?m[1]:''
 
 
 
+
+
 function buildSiblingTaskTable(nodes){
 const byParent=new Map()
+const members=[]
 for(const n of nodes){
 if(!Number.isInteger(n?.number)|| !Number.isInteger(n?.parent)||n.parent<=0)continue
 const id=titleTaskId(n.title)
+members.push({number:n.number,parent:n.parent,id})
 if(!id)continue
 if(!byParent.has(n.parent))byParent.set(n.parent,new Map())
 const ids=byParent.get(n.parent)
@@ -1548,14 +1552,13 @@ continue
 if(entries.length>0)families.set(p,entries)
 }
 const nodeInfo=new Map()
-for(const[p,entries]of families){
-const byId=new Map(entries)
-for(const[id,num]of entries){
+for(const{number,parent,id}of members){
+const entries=families.get(parent)
+if(!entries)continue
 const m= /^([A-Z][A-Z0-9]*(?:-[0-9]+)+)-([0-9]+)$/.exec(id)
 const step=m?Number(m[2]):0
-const prev=step>=2?(byId.get(`${m[1]}-${step - 1}`)??0):0
-nodeInfo.set(num,{parent:p,prev})
-}
+const prevNum=step>=2?(new Map(entries).get(`${m[1]}-${step - 1}`)??0):0
+nodeInfo.set(number,{parent,prev:prevNum===number?0:prevNum})
 }
 return{families,nodes:nodeInfo,skipped}
 }

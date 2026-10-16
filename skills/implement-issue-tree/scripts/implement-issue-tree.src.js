@@ -1474,7 +1474,7 @@ const DECLARED_DEPS_JQ_DEFS = [
   String.raw`def prevword: test("前の?工程(?:[ \t]*$|[ \t]*[^ \t（(])");`,
   String.raw`def sibrefs($me; $insec): . as $t | if ($me.s | length) == 0 or ($t | neg) then [] else`,
   String.raw`[$me.s[] | select(. as $e | $t | test(sibpat($e[0]) + (if $insec then "|" + sibhead($e[0]) else "" end))) | .[1]] as $hit`,
-  String.raw`| if ($hit | length) > 0 then $hit elif $me.p > 0 and ($t | prevword) then [$me.p] else [] end end;`,
+  String.raw`| $hit + (if $me.p > 0 and ($t | prevword) then [$me.p] else [] end) end;`,
   String.raw`def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline) | .in as $insec | .me as $me | .d += ($t | sibrefs($me; $insec));`,
   String.raw`def flush: if (.buf | length) == 0 then . else (.buf | join("\n") | stripcode | split("\n")) as $ls | reduce $ls[] as $t (.; extract($t)) | .buf = [] end;`,
 ]
@@ -1525,13 +1525,17 @@ function titleTaskId(title) {
   return m ? m[1] : ''
 }
 // tree.nodes から親ごとの「ID → 番号」と、各ノードの「前の工程」（自分の ID の末尾の工程番号 - 1 の兄弟）を作る。
-// 兄弟の中で同じ ID が 2 件以上あれば、その ID は曖昧として表から落とす。戻り値の families は
-// Map(親番号 → [[ID, 番号], …])、nodes は Map(番号 → { parent, prev })（prev は無ければ 0）。
+// 兄弟の中で同じ ID が 2 件以上あれば、その ID は曖昧として表から落とす。参照する側（本文を読む側）は
+// 自分のタイトルに ID が無くても・自分の ID が重複していても兄弟の明示 ID を解決できるよう、親を持つ全ノードを
+// nodes に載せる（自分の ID は「前の工程」の計算にだけ使う）。戻り値の families は Map(親番号 → [[ID, 番号], …])、
+// nodes は Map(番号 → { parent, prev })（prev は無ければ 0。兄弟の ID が 1 件も無い親のノードは載せない）。
 function buildSiblingTaskTable(nodes) {
   const byParent = new Map()
+  const members = []
   for (const n of nodes) {
     if (!Number.isInteger(n?.number) || !Number.isInteger(n?.parent) || n.parent <= 0) continue
     const id = titleTaskId(n.title)
+    members.push({ number: n.number, parent: n.parent, id })
     if (!id) continue
     if (!byParent.has(n.parent)) byParent.set(n.parent, new Map())
     const ids = byParent.get(n.parent)
@@ -1548,14 +1552,13 @@ function buildSiblingTaskTable(nodes) {
     if (entries.length > 0) families.set(p, entries)
   }
   const nodeInfo = new Map()
-  for (const [p, entries] of families) {
-    const byId = new Map(entries)
-    for (const [id, num] of entries) {
-      const m = /^([A-Z][A-Z0-9]*(?:-[0-9]+)+)-([0-9]+)$/.exec(id)
-      const step = m ? Number(m[2]) : 0
-      const prev = step >= 2 ? (byId.get(`${m[1]}-${step - 1}`) ?? 0) : 0
-      nodeInfo.set(num, { parent: p, prev })
-    }
+  for (const { number, parent, id } of members) {
+    const entries = families.get(parent)
+    if (!entries) continue
+    const m = /^([A-Z][A-Z0-9]*(?:-[0-9]+)+)-([0-9]+)$/.exec(id)
+    const step = m ? Number(m[2]) : 0
+    const prevNum = step >= 2 ? (new Map(entries).get(`${m[1]}-${step - 1}`) ?? 0) : 0
+    nodeInfo.set(number, { parent, prev: prevNum === number ? 0 : prevNum })
   }
   return { families, nodes: nodeInfo, skipped }
 }
