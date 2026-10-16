@@ -62,7 +62,7 @@ added_files_classify() {
           pr: $q.pr,
           path: ([$S[] | . as $s | select(any($q.added[]; . == $s))] | length),
           seq: ([$N[] | . as $s | select(any($q.added[];
-                   . != $s and dname == ($s | dname) and seqno == ($s | seqno) and stem != ($s | stem)))] | length)
+                    . != $s and dname == ($s | dname) and seqno == ($s | seqno) and stem != ($s | stem)))] | length)
         }] as $per
       | {
           added: ($S | length),
