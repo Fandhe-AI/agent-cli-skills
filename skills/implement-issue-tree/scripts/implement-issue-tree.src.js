@@ -5264,7 +5264,7 @@ function planPrompt(item) {
     '   - 実装ステップ（順番に実行可能な具体的手順）',
     '   - 検証方法（ビルド・lint・テスト・動作確認の手順）',
     '   - OWASP Top 10 観点のセキュリティ考慮事項',
-    ADDED_FILE_NAMING_POLICY,
+    addedFileNamingPolicy(),
     '4. 計画本文を plan フィールドに markdown 形式で返す。plan に Issue 本文の生の引用ブロックを含めない。',
     '返却: plan（実装計画の本文 markdown）/ summary（計画の 1 行要約）。',
   ].join('\n')
@@ -5418,7 +5418,11 @@ function optinRecordUpdateInstructions(item, impl, stepNo) {
 // 連番付きの新規ファイルと置き場ファイルの選び方（Issue #658 の (a)。補助で、決定的な検出は衝突ゲート〔ADDED_FILES_PEERS_MAX 付近〕が担う）。
 // 並列の兄弟は各 worktree が origin/<base> から切られるため、base だけを見ると同じ「次の番号」・同じ置き場を別々に新設する。
 // 呼び出し元: planPrompt（計画に書く）・implementPrompt（手順 3）。
-const ADDED_FILE_NAMING_POLICY = '   - 連番付きのファイル（docs/decisions/0063-*.md・migrations/0018_*.sql のように名前の先頭が番号のもの）を新設するときは、base だけでなく open PR の追加ファイル（gh pr list --state open --json number で列挙し、gh pr view <番号> --json files で確かめる。並列で作業中の兄弟イシューの PR を含む）も見て、どちらでも使われていない番号を選ぶ。成果物の置き場ファイル（工程の記録・確認結果をまとめる文書など）が base か open PR に既にあれば、別名で新設せずそれに追記する'
+// gh の対象リポジトリは args.repo（repoArg）があれば -R で束縛する（推測されたリポジトリの PR を見て番号を選ばないため）。
+function addedFileNamingPolicy(repo = repoArg) {
+  const r = repo ? ` -R ${repo}` : ''
+  return `   - 連番付きのファイル（docs/decisions/0063-*.md・migrations/0018_*.sql のように名前の先頭が番号のもの）を新設するときは、base だけでなく open PR の追加ファイル（gh pr list${r} --state open --json number で列挙し、gh pr view <番号>${r} --json files で確かめる。並列で作業中の兄弟イシューの PR を含む）も見て、どちらでも使われていない番号を選ぶ。成果物の置き場ファイル（工程の記録・確認結果をまとめる文書など）が base か open PR に既にあれば、別名で新設せずそれに追記する`
+}
 const IMPL_STEP4 = '4. 完了条件: 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して pass すること。フォーマッタ・静的解析があればコミット前に通す。'
 const IMPL_STEP5 = '5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む。'
 const IMPL_STEP6 = '6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。'
@@ -5474,7 +5478,7 @@ function implementPrompt(item, plan) {
     '1. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
     `2. （0b-a で既存 open PR のブランチを取得した場合、または 0b-b でリモートブランチを再利用した場合はこの手順をスキップして手順 3 へ進む。既存ブランチを origin/${baseBranch} から作り直すと push 済みコミットを失うため）git fetch origin && git checkout -B <type>/${item.number}-<short-name> origin/${baseBranch} で作業ブランチを作成する（type は feat / fix 等の Conventional Commits 規約。並列実行時のブランチ名衝突を防ぐためイシュー番号を必ず含める）。`,
     '3. 渡された計画に従って実装する（計画立案は Plan フェーズで完了済み。ここでは計画に記載の実装ステップを実行するのみ）。実装は対象リポジトリの delegation ルール・専門サブエージェントがあればそれに従い役割単位で委譲する。対象リポジトリの CLAUDE.md・rules（migration・スキーマ等の不変条件を含む）を必ず守る。',
-    ADDED_FILE_NAMING_POLICY,
+    addedFileNamingPolicy(),
     CODE_COMMENT_POLICY,
     IMPL_STEP4,
     ...optinTestExecutionLines(item, '4b'),
@@ -5656,13 +5660,14 @@ function classifyAddedFiles(raw, nonce, inputSha, peers) {
 
 const prRefs = (list) => list.map((n) => `#${n}`).join(', ')
 // 連番の衝突を fix へ渡す合成 finding の本文（ホストの整数と固定文だけで作る。パスは封筒に無いので fix が自分で確かめる）
-function addedFileSeqFindingSummary(prNumber, c) {
+function addedFileSeqFindingSummary(prNumber, c, repo = repoArg) {
+  const r = repo ? ` -R ${repo}` : ''
   const where = [
     ...(c.seqBase > 0 ? [`base（origin/${baseBranch}）の同じディレクトリの既存ファイルと ${c.seqBase} 件`] : []),
     ...(c.seqPeer > 0 ? [`同じランの先行 PR ${prRefs(c.seqPeers)} の新規追加ファイルと ${c.seqPeer} 件`] : []),
   ].join('、')
   return `PR #${prNumber} が新規に追加した連番付きのファイル（basename の先頭が 3 桁以上の数字 + - / _）の番号が衝突している（${where}。同じディレクトリで番号が同じ・名前の . より前が違うもの。Issue #658 のホスト判定）。`
-    + `git diff --name-status --diff-filter=A origin/${baseBranch}...HEAD で本 PR の追加ファイルを確かめ、origin/${baseBranch} の同じディレクトリと、open PR の追加ファイル（gh pr list --state open --json number で列挙し、gh pr view <番号> --json files で確かめる）のどちらでも使われていない番号へ、本 PR 側の該当ファイルを改番する（git mv）。`
+    + `git diff --name-status --diff-filter=A origin/${baseBranch}...HEAD で本 PR の追加ファイルを確かめ、origin/${baseBranch} の同じディレクトリと、open PR の追加ファイル（gh pr list${r} --state open --json number で列挙し、gh pr view <番号>${r} --json files で確かめる）のどちらでも使われていない番号へ、本 PR 側の該当ファイルを改番する（git mv）。`
     + '本 PR の中と既存の文書からの参照（ファイル名・番号の言及）も新しい番号へ直す。先行 PR・base のファイルは変更しない。改番後にビルド・lint・テストを通して push する'
 }
 function addedFilePathBlockedReason(prNumber, c) {

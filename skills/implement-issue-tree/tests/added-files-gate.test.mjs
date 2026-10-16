@@ -14,10 +14,10 @@ import { inputSha256, makeEnvelope, nonceOf } from './lib/signed-output.mjs'
 
 const {
   addedFilesPeers, classifyAddedFiles, observeInputText, observeCommand, addedFileSeqFindingSummary, addedFilePathBlockedReason,
-  planPrompt, implementPrompt, ADDED_FILES_PEERS_MAX, ADDED_FILE_COLLISION_FIX_MAX, ADDED_FILE_NAMING_POLICY,
+  planPrompt, implementPrompt, ADDED_FILES_PEERS_MAX, ADDED_FILE_COLLISION_FIX_MAX, addedFileNamingPolicy,
 } = await importDefinitions(
   ['addedFilesPeers', 'classifyAddedFiles', 'observeInputText', 'observeCommand', 'addedFileSeqFindingSummary', 'addedFilePathBlockedReason',
-    'planPrompt', 'implementPrompt', 'ADDED_FILES_PEERS_MAX', 'ADDED_FILE_COLLISION_FIX_MAX', 'ADDED_FILE_NAMING_POLICY'],
+    'planPrompt', 'implementPrompt', 'ADDED_FILES_PEERS_MAX', 'ADDED_FILE_COLLISION_FIX_MAX', 'addedFileNamingPolicy'],
   'added-files-gate',
 )
 
@@ -81,6 +81,9 @@ test('合成 finding と blocked の理由はホストの整数と固定文だ�
   assert.match(s, /PR #1003/)
   assert.match(s, /base（origin\/main）の同じディレクトリの既存ファイルと 1 件、同じランの先行 PR #990, #1002 の新規追加ファイルと 2 件/)
   assert.match(s, /gh pr view <番号> --json files/)
+  const pinned = addedFileSeqFindingSummary(1003, { seqBase: 1, seqPeer: 0, seqPeers: [] }, 'o/r')
+  assert.match(pinned, /gh pr list -R o\/r --state open --json number/)
+  assert.match(pinned, /gh pr view <番号> -R o\/r --json files/)
   assert.match(s, /先行 PR・base のファイルは変更しない/)
   assert.doesNotMatch(addedFileSeqFindingSummary(1003, { seqBase: 0, seqPeer: 1, seqPeers: [1002] }), /base（origin/)
   assert.match(addedFilePathBlockedReason(1003, { samePath: 1, pathPeers: [1002] }), /先行 PR #1002 と同じパスのファイルを新規に追加している（1 件/)
@@ -88,10 +91,15 @@ test('合成 finding と blocked の理由はホストの整数と固定文だ�
 
 test('Plan と Implement のプロンプトに連番ファイル・置き場ファイルの選び方を書く（(a) の補助）', () => {
   const item = { number: 3, title: 't', optinTests: [] }
-  assert.ok(planPrompt(item).includes(ADDED_FILE_NAMING_POLICY))
-  assert.ok(implementPrompt(item, 'p').includes(ADDED_FILE_NAMING_POLICY))
-  assert.match(ADDED_FILE_NAMING_POLICY, /open PR の追加ファイル/)
-  assert.match(ADDED_FILE_NAMING_POLICY, /別名で新設せず/)
+  assert.ok(planPrompt(item).includes(addedFileNamingPolicy()))
+  assert.ok(implementPrompt(item, 'p').includes(addedFileNamingPolicy()))
+  assert.match(addedFileNamingPolicy(), /open PR の追加ファイル/)
+  assert.match(addedFileNamingPolicy(), /別名で新設せず/)
+  assert.match(addedFileNamingPolicy(), /gh pr list --state open --json number/, 'args.repo が無ければ -R を付けない')
+  // args.repo があれば gh を -R で束縛する（Bugbot: gh -R follows args.repo）
+  const pinned = addedFileNamingPolicy('o/r')
+  assert.match(pinned, /gh pr list -R o\/r --state open/)
+  assert.match(pinned, /gh pr view <番号> -R o\/r --json files/)
 })
 
 test('ゲートは ready の後・recoveryOnly とマージ実行より前に置く', () => {
