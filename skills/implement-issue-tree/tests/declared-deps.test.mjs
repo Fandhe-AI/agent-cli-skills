@@ -589,6 +589,8 @@ const SIBLINGS = [
   { number: 761, parent: 753, title: 'docs: TASK-97-8 重複 A' },
   { number: 762, parent: 753, title: 'docs: TASK-97-8 重複 B' },
   { number: 763, parent: 753, title: 'docs: TASK-97-9 ID の後ろが重複の工程' },
+  { number: 770, parent: 753, title: 'docs: TASK-97-08 ゼロ埋めの工程' },
+  { number: 771, parent: 753, title: 'docs: TASK-97-09 ゼロ埋めの次の工程' },
   { number: 764, parent: 753, title: 'docs: ID の無いタイトル' },
   { number: 801, parent: 800, title: 'feat: TASK-97-5 別の親の同じ ID' },
   { number: 901, parent: 900, title: 'docs: ID の無いタイトルだけの親' },
@@ -622,6 +624,7 @@ test('titleTaskId: タイトル先頭のタスク ID だけを取り出す (#657
 test('buildSiblingTaskTable: 親ごとに ID → 番号を作り、重複 ID は落とし、前の工程を工程番号から解決する (#657)', () => {
   assert.deepEqual(SIB_BUILT.families.get(753), [
     ['TASK-97-1', 754], ['TASK-97-4', 757], ['TASK-97-5', 758], ['TASK-97-6', 759], ['TASK-97-9', 763],
+    ['TASK-97-08', 770], ['TASK-97-09', 771],
   ])
   assert.deepEqual(SIB_BUILT.nodes.get(759), { parent: 753, prev: 758 })
   assert.deepEqual(SIB_BUILT.nodes.get(758), { parent: 753, prev: 757 })
@@ -636,6 +639,30 @@ test('buildSiblingTaskTable: 親ごとに ID → 番号を作り、重複 ID は
   const big = buildSiblingTaskTable(many)
   assert.deepEqual(big.skipped, [5])
   assert.equal(big.families.size, 0)
+})
+
+test('buildSiblingTaskTable: 前の工程の ID は元の桁数のゼロ埋めで引く (TASK-97-09 は TASK-97-08) (#657)', () => {
+  assert.deepEqual(SIB_BUILT.nodes.get(771), { parent: 753, prev: 770 })
+  assert.deepEqual(SIB_BUILT.nodes.get(770), { parent: 753, prev: 0 }, 'TASK-97-07 の兄弟が無ければ前の工程は無い')
+  const t = buildSiblingTaskTable([
+    { number: 1, parent: 9, title: 'x: A-1-9 a' },
+    { number: 2, parent: 9, title: 'x: A-1-10 b' },
+  ])
+  assert.deepEqual(t.nodes.get(2), { parent: 9, prev: 1 }, 'ゼロ埋めの無い ID は従来どおり A-1-9')
+  const z = buildSiblingTaskTable([
+    { number: 1, parent: 9, title: 'x: A-1-09 a' },
+    { number: 2, parent: 9, title: 'x: A-1-10 b' },
+  ])
+  assert.deepEqual(z.nodes.get(2), { parent: 9, prev: 1 }, 'A-1-10 の前は桁を保った A-1-09')
+})
+
+test('見出し行の兄弟 ID 参照（Depends on TASK-97-5）も依存にする (#657)', () => {
+  assert.deepEqual(runSib(759, '## Depends on TASK-97-5\n'), [758])
+  assert.deepEqual(runSib(759, '# Blocked by TASK-97-4\n'), [757])
+  assert.deepEqual(runSib(759, '## 関連: Depends on TASK-97-5\n'), [], '否定語を含む見出しは拾わない')
+  assert.deepEqual(runSib(759, '## 概要\n- TASK-97-5\n'), [], '見出しの拡張で依存節の外の行頭 ID は拾わない')
+  assert.deepEqual(runSib(759, '## Depends on TASK-97-5\n## 依存\n- TASK-97-1\n'), [754, 758])
+  assert.deepEqual(runSib(759, '## Depends on #12\n'), [12], '従来の Depends on #N は変わらない')
 })
 
 test('siblingTaskTableFor: 依頼する番号の分だけを埋め込み、表に単一引用符を含めない (#657)', () => {

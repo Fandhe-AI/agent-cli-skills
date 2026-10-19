@@ -1490,6 +1490,7 @@ String.raw`elif ($l | test("^[ ]{0,3}>")) or ($l | test("^[ \t]*$")) then flush`
 String.raw`elif ($l | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then flush`,
 String.raw`| .in = ($l | stripcode | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
 String.raw`| .d += ($l | stripcode | inline)`,
+String.raw`| .me as $me | .d += ($l | stripcode | sibrefs($me; false))`,
 String.raw`elif ($l | test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]")) then flush | .buf = [$l]`,
 String.raw`else .buf += [$l]`,
 String.raw`end) | flush)`,
@@ -1557,7 +1558,11 @@ const entries=families.get(parent)
 if(!entries)continue
 const m= /^([A-Z][A-Z0-9]*(?:-[0-9]+)+)-([0-9]+)$/.exec(id)
 const step=m?Number(m[2]):0
-const prevNum=step>=2?(new Map(entries).get(`${m[1]}-${step - 1}`)??0):0
+
+const prevStep=String(step- 1)
+const idMap=new Map(entries)
+const padded=m?idMap.get(`${m[1]}-${prevStep.padStart(m[2].length, '0')}`)??0:0
+const prevNum=step>=2?padded||(idMap.get(`${m[1]}-${prevStep}`)??0):0
 nodeInfo.set(number,{parent,prev:prevNum===number?0:prevNum})
 }
 return{families,nodes:nodeInfo,skipped}
@@ -4026,15 +4031,15 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'4de29454672ab140483a4e099777bd2478da9b2f5624ce1114b290df6f9e7cfd',
-'measure-free-disk.sh':'1f77e635b9aaa99734c698e95b800b82c03ff2d4f72583558d18e2c7c34067eb',
-'observe-pr.sh':'b91747e29a6b0537683d3e7775ebe67b079d71e2e87d0e7a01ad0f4693aca0fd',
-'base-merge.sh':'24bc354e5523255cb2214ad36426c96d881db63fe776c7b574afe22bbbb127ec',
-'pr-push.sh':'f38215298108d483da3dc6911eb5b934ba41384355e0226e7a8b585aa214a7ad',
-'state.sh':'bcb9f14e53bfaf4f65f1c26ae7c88fbbaa32086e10e83d4629b4a20c6c339fe8',
-'merge-gate.sh':'3aed46531cdf246b38760b67743acce43a91e02880db75073f7756218ea20e96',
-'worktree-remove.sh':'968ed04c71ff1d7dd10da9cef9509b0b4df4713748012074466987dd245b12b0',
-'recover-prep.sh':'459fce7fb18aa3d6e0816210fa231207f14a1e0b47b438e2586563c173bacd43',
+'measure-residual-bytes.sh':'f63ea9097d7312d835aee5b1a76ba9e38c87bdb453d65ee51eb6a9d57060bdee',
+'measure-free-disk.sh':'b0a091b7468e7abd9bbf03536358832be681a832c17188b167461412372b57a5',
+'observe-pr.sh':'6a603cbaede077637061571e6b19fe9eb44d86fc7ed0cf132e3dd1830612cb36',
+'base-merge.sh':'a733915a036399cd516a02813bb8f8d06daa68e63f0d19ef240858bf17528819',
+'pr-push.sh':'89ff82f4ff950276a34e766d423ef73c7bdddec364d679c1c6d744f496a780b6',
+'state.sh':'609a3ccaba9e4d7ed570bff67802d3485890630e15ee63b6a98aa99354a85dd8',
+'merge-gate.sh':'e669fa1ec540d845573c2899219b679e145535c2a893f57031df313ff1383a45',
+'worktree-remove.sh':'a14785c9d205f33e30eb425364dc5824c7ea8efb28dceacf9a57722a1927a9ac',
+'recover-prep.sh':'3162dede2fa3b1602c9b199d83c9a5a1268764258b0b5e42c8e3125b3368b982',
 }
 
 
