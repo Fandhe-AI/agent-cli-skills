@@ -1490,6 +1490,7 @@ const DECLARED_DEPS_JQ_MAIN = [
   String.raw`elif ($l | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then flush`,
   String.raw`| .in = ($l | stripcode | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
   String.raw`| .d += ($l | stripcode | inline)`,
+  String.raw`| .me as $me | .d += ($l | stripcode | sibrefs($me; false))`,
   String.raw`elif ($l | test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]")) then flush | .buf = [$l]`,
   String.raw`else .buf += [$l]`,
   String.raw`end) | flush)`,
@@ -1557,7 +1558,11 @@ function buildSiblingTaskTable(nodes) {
     if (!entries) continue
     const m = /^([A-Z][A-Z0-9]*(?:-[0-9]+)+)-([0-9]+)$/.exec(id)
     const step = m ? Number(m[2]) : 0
-    const prevNum = step >= 2 ? (new Map(entries).get(`${m[1]}-${step - 1}`) ?? 0) : 0
+    // 前の工程の ID は元の工程番号の桁数でゼロ埋めした形（09 → 08・10 → 09）を先に、無ければ埋めない形（TASK-97-8）を引く。
+    const prevStep = String(step - 1)
+    const idMap = new Map(entries)
+    const padded = m ? idMap.get(`${m[1]}-${prevStep.padStart(m[2].length, '0')}`) ?? 0 : 0
+    const prevNum = step >= 2 ? padded || (idMap.get(`${m[1]}-${prevStep}`) ?? 0) : 0
     nodeInfo.set(number, { parent, prev: prevNum === number ? 0 : prevNum })
   }
   return { families, nodes: nodeInfo, skipped }
