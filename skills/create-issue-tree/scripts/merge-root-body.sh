@@ -79,7 +79,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/tree-lib.sh" 2>/dev/null \
 
 # trap を mktemp より先に登録する（mktemp 失敗時も作成済みファイルを削除するため）
 SEC_FILE=''
-trap 'rm -f "${SEC_FILE}"' EXIT
+CHK_FILE=''
+trap 'rm -f "${SEC_FILE}" "${CHK_FILE}"' EXIT
 
 CURRENT_BODY=$(gh issue view "${ROOT_NUMBER}" --json body --jq '.body') \
   || die 1 "ルート issue #${ROOT_NUMBER} の本文を取得できません。中止します。"
@@ -138,8 +139,9 @@ PHASE_ROW="| Phase ${PHASE} | #${PHASE_NUMBER} ${PTITLE} | ${DIRECT} | ${TOTAL} 
 # 行（1 行）は ENVIRON で渡し、いずれもシェル構文・awk 構文として再評価させない
 SEC_FILE=$(mktemp) && printf '%s\n' "${PHASE_SECTION}" > "${SEC_FILE}" \
   || die 1 "Phase セクションの一時ファイルを作成できません。中止します。"
+CHK_FILE=$(mktemp) || die 1 "検査用の一時ファイルを作成できません。中止します。"
 rc=0
-NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="${SEC_FILE}" awk '
+NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="${SEC_FILE}" CHKF="${CHK_FILE}" awk '
   # 開きフェンス行なら 1 を返し、記号 fch と長さ flen を保存する。info 文字列に ` を含む ``` 行は開きではない
   function fence_open(line,    ind, rest, len, info) {
     match(line, /^ */); ind = RLENGTH
@@ -166,6 +168,11 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     len = RLENGTH
     return (len >= flen && substr(rest, len + 1) ~ /^[ \t\r]*$/)
   }
+  # 本文へ 1 行出力する。passthru = 1（素通しの退避部分）でなければ検査用ファイルにも書く
+  function emit(text, passthru) {
+    print text
+    if (!passthru) print text > ENVIRON["CHKF"]
+  }
   BEGIN {
     sec = ""; n = 0
     while ((rc = (getline sl < ENVIRON["SECF"])) > 0) { sec = (n++ ? sec "\n" : "") sl }
@@ -191,7 +198,7 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     }
     if (nb > 1 || ne > 1 || nb != ne || (nb == 1 && bpos > epos)) exit 6
     for (k = 1; k <= NR; k++) {
-      if (nb == 1 && (k <= bpos || k >= epos)) X[k] = 1
+      if (nb == 1 && (k <= bpos || k >= epos)) { X[k] = 1; XO[k] = 1 }
       if (F[k]) { if (depth > 0) X[k] = 1; continue }
       if (L[k] ~ /^[ \t]*<details/) {
         opens = 1; X[k] = 1
@@ -213,22 +220,25 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     if (last == 0 && tmpl == 0) exit 3
     for (i = 1; i <= NR; i++) {
       line = L[i]
-      if (skip && (X[i] || (!F[i] && line ~ /^(<!--|[ \t]*<details|[ \t]*<\/details>)/))) { skip = 0; print "" }
-      if (F[i]) { if (skip) continue; print line; continue }
+      # 旧節の除去は次の見出しか区間の外へ出る境界（end マーカー）まで続ける。途中の通常コメント行・表は旧節の一部として落とし、
+      # 保護対象の <details>（退避節）だけは落とさず出力する
+      if (skip && XO[i]) { skip = 0; emit("", 0) }
+      if (skip && X[i]) { emit(line, 1); continue }
+      if (F[i] && !X[i]) { if (skip) continue; emit(line, 0); continue }
       if (X[i]) {
         # マーカー区間の末尾で、置換対象の節がまだ無ければ区間の内側（end マーカーの直前）へ新節を入れる
-        if (nb == 1 && i == epos && !sec_done && !has_sec) { print sec; print ""; sec_done = 1 }
-        print line; continue
+        if (nb == 1 && i == epos && !sec_done && !has_sec) { emit(sec, 0); emit("", 0); sec_done = 1 }
+        emit(line, 1); continue
       }
-      if (skip) { if (line ~ /^(#|##|###) /) { skip = 0; print "" } else continue }
-      if (i in T) { if (last == 0 && i == tmpl && !row_done) { print ENVIRON["ROW"]; row_done = 1 }; continue }
-      if (line ~ row_re) { if (!row_done) { print ENVIRON["ROW"]; row_done = 1 }; continue }
-      if (line ~ sec_re) { if (!sec_done) { print sec; sec_done = 1 }; skip = 1; continue }
-      if (line ~ /^## 運用/ && !sec_done && !has_sec) { print sec; print ""; sec_done = 1 }
-      print line
-      if (i == last && !row_done) { print ENVIRON["ROW"]; row_done = 1 }
+      if (skip) { if (line ~ /^(#|##|###) /) { skip = 0; emit("", 0) } else continue }
+      if (i in T) { if (last == 0 && i == tmpl && !row_done) { emit(ENVIRON["ROW"], 0); row_done = 1 }; continue }
+      if (line ~ row_re) { if (!row_done) { emit(ENVIRON["ROW"], 0); row_done = 1 }; continue }
+      if (line ~ sec_re) { if (!sec_done) { emit(sec, 0); sec_done = 1 }; skip = 1; continue }
+      if (line ~ /^## 運用/ && !sec_done && !has_sec) { emit(sec, 0); emit("", 0); sec_done = 1 }
+      emit(line, 0)
+      if (i == last && !row_done) { emit(ENVIRON["ROW"], 0); row_done = 1 }
     }
-    if (!sec_done) { print ""; print sec }
+    if (!sec_done) { emit("", 0); emit(sec, 0) }
     # 唯一のプレースホルダー行が置換対象セクション内にあると skip 分岐で読み飛ばされ、行を出力しないまま終わる
     if (!row_done) exit 3
   }') || rc=$?
@@ -242,10 +252,12 @@ elif [ "${rc}" -ne 0 ]; then
   die 1 "本文の Phase 別表に追記位置（'| Phase N |' 行または '| (作成後に更新) |' 行）がないか、Phase 行を出力できませんでした。中止します。"
 fi
 
-# 検査は追記を全て終えた最終本文（NEW_BODY）に対し、gh issue edit の直前で行う（fail-closed）。
+# 検査は追記を全て終えた最終本文のうち、今回生成・置換した範囲（awk が CHK_FILE へ書いた、素通しの退避部分
+# = 管理マーカー区間の外と <details> 内を除く行）に対し、gh issue edit の直前で行う（fail-closed）。
+# 退避された Step 3 表のプレースホルダーは update-issue-tree が保持するため、検査対象にすると移行済みルートが更新できない。
 # 追記前に検査すると、追記部分に残ったプレースホルダーが検査を素通りする。
 # grep の終了コードは 0=ヒット / 1=なし / 2 以上=失敗。2 以上は「残りなし」へ倒さず中止する
-rc=0; printf '%s\n' "${NEW_BODY}" | grep -qE "${TREE_PLACEHOLDER_RE}" || rc=$?
+rc=0; grep -qE "${TREE_PLACEHOLDER_RE}" "${CHK_FILE}" || rc=$?
 [ "${rc}" -eq 1 ] \
   || die 1 "本文にプレースホルダーが残っている、または検査に失敗した（grep exit ${rc}）。ルート本文は更新しません。"
 

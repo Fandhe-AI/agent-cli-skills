@@ -991,3 +991,45 @@ test('(B6) 管理マーカーが 1 組でない本文は edit せず exit 1 で�
   assert.equal(edits.length, 0)
   assert.match(r.stderr, /管理マーカー/)
 })
+
+test('(B7) 退避された Step 3 表のプレースホルダー行（details 内・マーカー区間外）が残っていても更新できる', () => {
+  const root = MANAGED_ROOT()
+    .replace('| #12 | legacy | - |', '| #12 | legacy | - |\n| (作成後に更新) | | |')
+    .replace('OPS-KEEP-MARKER', 'OPS-KEEP-MARKER\n\n| (作成後に更新) |')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(body.split('(作成後に更新)').length - 1, 2, '退避部分のプレースホルダーが保持されていない')
+  assert.ok(body.includes('</details>'))
+  assert.match(body, /\| #111 \| feat: 新しい子 \| - \|/)
+})
+
+test('(B8) 区間内に生成物以外のプレースホルダーが残れば従来どおり中止する', () => {
+  const root = MANAGED_ROOT().replace('| #21 | b | - |', '| #21 | b | - |\n\n残り: <phase1_number>')
+  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.notEqual(r.status, 0)
+  assert.equal(edits.length, 0)
+})
+
+test('(B9) 置換対象の節と旧表の間にコメント行・details があっても旧表は次の見出しまで除去され、details は保持される', () => {
+  const root = MANAGED_ROOT().replace(
+    '### Phase 1: A\n\n| Issue',
+    '### Phase 1: A\n\n<!-- note -->\n\n<details><summary>メモ</summary>\n\nKEEP-DETAILS\n\n</details>\n\n| Issue',
+  )
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(!body.includes('| #11 | old |'), '旧表が新節の後に残っている')
+  assert.ok(!body.includes('<!-- note -->'))
+  assert.ok(body.includes('KEEP-DETAILS'), '保護対象の details が消えた')
+  assert.ok(body.includes(END_M))
+  assert.ok(body.includes('| #12 | legacy | - |'))
+  assert.match(body, /### Phase 2: B/)
+})
+
+test('(B10) マーカー無しでも節と旧表の間のコメント行で除去が止まらない', () => {
+  const root = ROOT_BODY.replace('### Phase 1: 古い\n', '### Phase 1: 古い\n\n<!-- note -->\n')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(!body.includes('古い子'))
+  assert.ok(!body.includes('OLD-DETAIL-MARKER'))
+  assert.match(body, /### Phase 2: 後続\n\nPHASE2-KEEP-MARKER/)
+})
