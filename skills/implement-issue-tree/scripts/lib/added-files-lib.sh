@@ -12,7 +12,7 @@
 #       base   {"<ディレクトリ>": [名前…]…}（ルートは ""。base に無いディレクトリはキーごと無い）
 # 判定:
 #       連番     basename の先頭が 3 桁以上の数字に `-` か `_` が続く名前（例: 0063-scope.md・0018_create.sql）。その数字を連番とする。
-#                ただし日付接頭辞（YYYY-MM-DD・YYYY_MM_DD・YYYYMMDD。年は 19xx / 20xx・月日は実在の範囲）は連番にしない
+#                ただし日付接頭辞（YYYY-MM-DD・YYYY_MM_DD・YYYYMMDD。年は 19xx / 20xx・月日は実在の範囲。直後は `-` `_` `.`〔拡張子〕か名前の終わり）は連番にしない
 #                （2026-01-01-notes.md と 2026-10-19-notes.md が年の一致だけで衝突にならないようにする）
 #       幹       basename の最初の `.` より前（0018_create.up.sql と 0018_create.down.sql は同じ幹 = 1 組のファイルとして衝突にしない。
 #                0001-intro.md と 0001-intro.ja.md も同じ）
@@ -31,7 +31,7 @@
 ADDED_FILES_JQ_DEFS='
   def bname: split("/") | last;
   def dname: split("/") | .[:-1] | join("/");
-  def datepre: bname | test("^(?:(?:19|20)[0-9]{2}[-_](?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12][0-9]|3[01])|(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01]))(?:[-_]|$)");
+  def datepre: bname | test("^(?:(?:19|20)[0-9]{2}[-_](?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12][0-9]|3[01])|(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01]))(?:[-_.]|$)");
   def seqno: if datepre then null else [bname | capture("^(?<n>[0-9]{3,})[-_]") | .n] | first // null end;
   def stem: bname | split(".") | first;
   def strs: type == "array" and all(.[]; type == "string");
