@@ -781,5 +781,5 @@ test('declaredDepsPrompt は兄弟の表を埋め込んだフィルタを使い�
 test('駆動部はタイトルから兄弟の表を作って抽出へ渡す (#657)', () => {
   assert.ok(driverPart.includes('const siblingTasks = buildSiblingTaskTable(tree.nodes)'))
   assert.ok(driverPart.includes('await extractDeclaredDeps(chunks, undefined, (pending) => siblingTaskTableFor(pending, siblingTasks))'))
-  assert.match(driverPart, /前の工程（TASK-x-y）の結果を踏まえている/, 'Tree エージェントの手順 4 にも書く')
+  assert.match(definitionPart, /前の工程（TASK-x-y）の結果を踏まえている/, 'Tree エージェントの手順 4 にも書く')
 })

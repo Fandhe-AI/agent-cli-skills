@@ -660,7 +660,7 @@ open のサブイシューが残っている場合、または受入基準が未
 
 | エージェント | model | effort | 根拠 |
 |------------|-------|--------|------|
-| `plan:issue-tree`（Tree 取得・依存抽出） | sonnet | medium | 本文読解・依存判断 |
+| `plan:issue-tree`（Tree 取得・依存抽出） | sonnet | medium | 本文読解・依存判断。取得直後に全欄一致の重複ノードを畳んで完全性を検査し、失敗は `plan:issue-tree-retry` で 1 回だけ取り直す（返却値 `treeFetch` に `attempts`・`foldedDuplicates`） |
 | `plan:declared-deps-*`（本文の依存宣言の機械抽出） | haiku | low | 定型コマンド出力の転記（判断なし） |
 | `plan:out-of-tree-deps-*` / `plan:root-ancestors-<round>`（ツリー外前提の state・ルートの祖先チェーンの機械取得） | haiku | low | 定型コマンド出力の転記（判断なし）。ツリー外の前提がある場合のみ起動。祖先チェーンはラウンドごとにラベルが変わる（`plan:root-ancestors-1` 等、最大 5 ラウンド） |
 | `detect:external-checks`（外部チェック判定） | haiku | low | 定型コマンド集計 |
