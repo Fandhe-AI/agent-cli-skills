@@ -72,7 +72,7 @@ JQ_ROW="${FT_JQ_DISP}"'
 def okint(lo): type == "number" and . == floor and . >= lo and . < 1000000000;
 def row($parent; $sib):
   if (.number | okint(1)) and (.state == "open" or .state == "closed") and (.title | type == "string")
-     and (.sub_issues_summary | type == "object") and (.sub_issues_summary.total | okint(0))
+    and (.sub_issues_summary | type == "object") and (.sub_issues_summary.total | okint(0))
   then [(.number | tostring), ($parent | tostring), ($sib | tostring), .state, (.sub_issues_summary.total | tostring), (.title | disp)] | join("\t")
   else error("bad-node") end;'
 
@@ -120,9 +120,11 @@ EOF_KIDS
 done
 
 count=$(printf '%s\n' "${rows}" | grep -c '')
-[ "${#rows}" -le "${MAX_TSV_BYTES}" ] || { echo "fetch-tree: 出力が大きすぎる（${#rows} バイト > ${MAX_TSV_BYTES}）" >&2; exit 7; }
 
 nodes_sha=$(printf '%s\n' "${rows}" | ft_nodes_digest) || { echo "fetch-tree: ノードのダイジェストを作れなかった" >&2; exit 3; }
 envelope=$(so_emit "${nonce}" "$(printf '{"count":%d,"inputSha256":"%s","nodesSha256":"%s"}' "${count}" "${input_sha}" "${nodes_sha}")") \
   || { echo "fetch-tree: 出力封筒を作れなかった（sha256sum / shasum が無い等）" >&2; exit 3; }
+# 上限は封筒を含む最終出力全体のバイト数で判定する（TSV だけだと上限付近で封筒が切れる）。
+out_bytes=$(printf '%s\n%s\n' "${rows}" "${envelope}" | wc -c | tr -d ' ')
+[ "${out_bytes}" -le "${MAX_TSV_BYTES}" ] || { echo "fetch-tree: 出力が大きすぎる（${out_bytes} バイト > ${MAX_TSV_BYTES}）" >&2; exit 7; }
 printf '%s\n%s\n' "${rows}" "${envelope}"
