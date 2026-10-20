@@ -1053,6 +1053,13 @@ test('(C2) `>` を伴わず行末で終わる <details は開きタグとして�
   assert.equal(edits.length, 0)
 })
 
+test('(C2b) CRLF 本文で行末が CR の <details 単独行も開きタグとして数え、閉じなければ中止する', () => {
+  const root = ROOT_BODY.replace('### Phase 1: 古い', '<details\n\n### Phase 1: 古い').replace(/\n/g, '\r\n')
+  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 1, r.stderr)
+  assert.equal(edits.length, 0)
+})
+
 test('(C3) <detailsfoo> のように <details で始まるだけの行は除外扱いにならず、後ろの節が置換される', () => {
   const root = ROOT_BODY.replace('### Phase 1: 古い', '<detailsfoo>\n\n### Phase 1: 古い')
   const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])

@@ -24,7 +24,7 @@
 #   - update-issue-tree の管理マーカー（`<!-- update-issue-tree:phase-plan:begin/end -->`）がある本文では区間の内側だけを
 #     置換対象にし、外側は素通しする。マーカーが無くても `<details>` 内（update-issue-tree が退避した旧表など）は対象外。
 #     マーカーが 1 組でない・除外後も同名の見出しが複数ある・`<details>` が閉じていない本文は、置換先を決められないため中止する。
-#     `<details` は直後が空白・`>`・行末のときだけ開きタグとして数える（`<detailsfoo>` 等は通常行）。
+#     `<details` は直後が空白・CR・`>`・行末のときだけ開きタグとして数える（`<detailsfoo>` 等は通常行）。
 #   - 一時ファイルは成否によらず削除する（trap は mktemp より先に登録）。
 #   - granularity マーカーは常に GRANULARITY で先頭へ 1 行だけ書き直す。
 #
@@ -201,7 +201,7 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     for (k = 1; k <= NR; k++) {
       if (nb == 1 && (k <= bpos || k >= epos)) { X[k] = 1; XO[k] = 1 }
       if (F[k]) { if (depth > 0) X[k] = 1; continue }
-      if (L[k] ~ /^[ \t]*<details([ \t>]|$)/) {
+      if (L[k] ~ /^[ \t]*<details([ \t\r>]|$)/) {
         opens = 1; X[k] = 1
         if (L[k] ~ /<\/details>[ \t\r]*$/) opens = 0
         depth += opens
