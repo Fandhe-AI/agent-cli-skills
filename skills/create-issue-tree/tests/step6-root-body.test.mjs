@@ -1033,3 +1033,67 @@ test('(B10) マーカー無しでも節と旧表の間のコメント行で除�
   assert.ok(!body.includes('OLD-DETAIL-MARKER'))
   assert.match(body, /### Phase 2: 後続\n\nPHASE2-KEEP-MARKER/)
 })
+
+// <details> の閉じ忘れ・タグ名の前方一致: depth が閉じないまま本文末に達すると以降の行が全て除外され、
+// 後ろの '### Phase N:' 見出しが置換対象から外れて節が重複したままマージが成功していた。
+test('(C1) 閉じ忘れの <details> の後ろに置換対象の節がある本文は edit せず exit 1 で中止する', () => {
+  const root = ROOT_BODY.replace('### Phase 1: 古い', '<details><summary>閉じ忘れ</summary>\n\n### Phase 1: 古い')
+  const { r, body, edits, leftovers } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 1, r.stderr)
+  assert.equal(edits.length, 0)
+  assert.equal(body, null)
+  assert.match(r.stderr, /<details> が閉じていない/)
+  assert.deepEqual(leftovers, [])
+})
+
+test('(C2) `>` を伴わず行末で終わる <details は開きタグとして数え、閉じなければ中止する', () => {
+  const root = ROOT_BODY.replace('### Phase 1: 古い', '<details\n\n### Phase 1: 古い')
+  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 1, r.stderr)
+  assert.equal(edits.length, 0)
+})
+
+test('(C2b) CRLF 本文で行末が CR の <details 単独行も開きタグとして数え、閉じなければ中止する', () => {
+  const root = ROOT_BODY.replace('### Phase 1: 古い', '<details\n\n### Phase 1: 古い').replace(/\n/g, '\r\n')
+  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 1, r.stderr)
+  assert.equal(edits.length, 0)
+})
+
+test('(C3) <detailsfoo> のように <details で始まるだけの行は除外扱いにならず、後ろの節が置換される', () => {
+  const root = ROOT_BODY.replace('### Phase 1: 古い', '<detailsfoo>\n\n### Phase 1: 古い')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(!body.includes('古い子'), '旧節が残っている')
+  assert.ok(!body.includes('OLD-DETAIL-MARKER'))
+  assert.equal(phase1Headings(body), 1)
+  assert.match(body, /### Phase 2: 後続\n\nPHASE2-KEEP-MARKER/)
+  assert.ok(body.includes('<detailsfoo>'), '無関係な行は素通しされる')
+})
+
+test('(C4) 属性つき <details open> と 1 行で開閉する <details>…</details> は従来どおり除外され、閉じていれば中止しない', () => {
+  const root = ROOT_BODY.replace(
+    '### Phase 1: 古い',
+    '<details open>\n\n### Phase 1: 退避済み\n\nKEEP-OPEN-ATTR\n\n</details>\n\n<details><summary>x</summary>y</details>\n\n### Phase 1: 古い',
+  )
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('KEEP-OPEN-ATTR'), '属性つき details 内が消えた')
+  assert.ok(body.includes('<details><summary>x</summary>y</details>'))
+  assert.ok(!body.includes('古い子'))
+  assert.equal(phase1Headings(body), 2)
+})
+
+test('(C5) 閉じタグが `>` を欠く </details は閉じとして数えず、閉じ忘れとして中止する', () => {
+  const root = ROOT_BODY.replace('### Phase 1: 古い', '<details><summary>x</summary>\n\n</details\n\n### Phase 1: 古い')
+  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 1, r.stderr)
+  assert.equal(edits.length, 0)
+})
+
+test('(C6) update-issue-tree が退避する <details><summary>…</summary>…</details> は引き続き除外され、閉じていれば中止しない', () => {
+  const { r, body } = runRoot(MANAGED_ROOT(), [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('| #12 | legacy | - |'))
+  assert.ok(body.includes('</details>'))
+})

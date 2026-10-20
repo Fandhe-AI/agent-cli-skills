@@ -23,7 +23,8 @@
 #     終端に見えて旧内容が残るのを防ぐ）。閉じ忘れのフェンスは追記位置を判定できないため中止する（Issue #557）。
 #   - update-issue-tree の管理マーカー（`<!-- update-issue-tree:phase-plan:begin/end -->`）がある本文では区間の内側だけを
 #     置換対象にし、外側は素通しする。マーカーが無くても `<details>` 内（update-issue-tree が退避した旧表など）は対象外。
-#     マーカーが 1 組でない・除外後も同名の見出しが複数ある本文は、置換先を決められないため中止する。
+#     マーカーが 1 組でない・除外後も同名の見出しが複数ある・`<details>` が閉じていない本文は、置換先を決められないため中止する。
+#     `<details` は直後が空白・CR・`>`・行末のときだけ開きタグとして数える（`<detailsfoo>` 等は通常行）。
 #   - 一時ファイルは成否によらず削除する（trap は mktemp より先に登録）。
 #   - granularity マーカーは常に GRANULARITY で先頭へ 1 行だけ書き直す。
 #
@@ -133,7 +134,7 @@ PHASE_ROW="| Phase ${PHASE} | #${PHASE_NUMBER} ${PTITLE} | ${DIRECT} | ${TOTAL} 
 # コードフェンス（行頭 0〜3 空白の ``` / ~~~、閉じは同記号で開き以上の長さ）の内側の行は F[] で印を付け、
 # 見出し・表行・プレースホルダー・運用見出しの判定から外す。ユーザー編集可能な本文で閉じ忘れフェンスがあると
 # 以降が全てフェンス内扱いになり実セクションを消し得るため、閉じていなければ exit 5 で本文未更新のまま中止する。
-# 管理マーカー区間と <details> の内側は X[] で対象外にし、マーカーの不整合は exit 6、除外後も置換対象の見出しが複数なら exit 7 で中止する。
+# 管理マーカー区間と <details> の内側は X[] で対象外にし、マーカーの不整合は exit 6、除外後も置換対象の見出しが複数なら exit 7、<details> の閉じ忘れは exit 8 で中止する。
 # 区間指定 {n,m} や gawk 拡張は mawk・BSD awk 非対応のため使わない。
 # セクションは全子 issue の行を含み環境変数・引数の長さ上限を超え得るため、一時ファイル経由で渡す。
 # 行（1 行）は ENVIRON で渡し、いずれもシェル構文・awk 構文として再評価させない
@@ -200,7 +201,7 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     for (k = 1; k <= NR; k++) {
       if (nb == 1 && (k <= bpos || k >= epos)) { X[k] = 1; XO[k] = 1 }
       if (F[k]) { if (depth > 0) X[k] = 1; continue }
-      if (L[k] ~ /^[ \t]*<details/) {
+      if (L[k] ~ /^[ \t]*<details([ \t\r>]|$)/) {
         opens = 1; X[k] = 1
         if (L[k] ~ /<\/details>[ \t\r]*$/) opens = 0
         depth += opens
@@ -208,6 +209,8 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
         X[k] = 1; if (depth > 0) depth--
       } else if (depth > 0) X[k] = 1
     }
+    # 閉じ忘れの <details> は、以降の行が全て除外されて後ろの見出しが置換対象から外れるため、範囲を判定できず中止する
+    if (depth > 0) exit 8
     # 追記位置（最終 Phase 行・プレースホルダー行）と置換対象の見出し数は、対象範囲の行だけから数える
     nsec = 0
     for (k = 1; k <= NR; k++) {
@@ -248,6 +251,8 @@ elif [ "${rc}" -eq 6 ]; then
   die 1 "update-issue-tree の管理マーカー（phase-plan:begin / end）が 1 組になっていないため、置換対象の範囲を判定できません。ルート本文は更新しません。"
 elif [ "${rc}" -eq 7 ]; then
   die 1 "置換対象の '### Phase ${PHASE}:' 見出しが管理マーカー・<details> を除いても複数あり、どれを置換するか判定できません。ルート本文は更新しません。"
+elif [ "${rc}" -eq 8 ]; then
+  die 1 "ルート本文の <details> が閉じていないため置換対象の範囲を判定できません。ルート本文は更新しません。"
 elif [ "${rc}" -ne 0 ]; then
   die 1 "本文の Phase 別表に追記位置（'| Phase N |' 行または '| (作成後に更新) |' 行）がないか、Phase 行を出力できませんでした。中止します。"
 fi
