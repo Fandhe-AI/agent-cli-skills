@@ -1601,6 +1601,7 @@ description:'本文の `<!-- optin-tests: <コマンド> -->` マーカーの値
 
 
 
+
 const EMPTY_SIBLING_TASK_TABLE={f:{},n:{}}
 const DECLARED_DEPS_JQ_DEFS=[
 String.raw`def refs: [scan("#([0-9]+)") | .[0] | tonumber];`,
@@ -1621,10 +1622,10 @@ String.raw`+ "|(?:^|[^A-Za-z0-9_-])" + $id + "[ \t]*[）)]?[ \t]*(?:の(?:結果
 String.raw`+ "|(?i:after|depends on|blocked by|builds on|requires)[ \t]+" + $id + idend;`,
 String.raw`def sibhead($id): "^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + $id + idend;`,
 String.raw`def prevword: test("前の?工程(?:[ \t]*$|[ \t]*[^ \t（(])");`,
-String.raw`def sibrefs($me; $insec): . as $t | if ($me.s | length) == 0 or ($t | neg) then [] else`,
+String.raw`def sibrefs($me; $insec; $prev): . as $t | if ($me.s | length) == 0 or ($t | neg) then [] else`,
 String.raw`[$me.s[] | select(. as $e | $t | test(sibpat($e[0]) + (if $insec then "|" + sibhead($e[0]) else "" end))) | .[1]] as $hit`,
-String.raw`| $hit + (if $me.p > 0 and ($t | prevword) then [$me.p] else [] end) end;`,
-String.raw`def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline) | .in as $insec | .me as $me | .d += ($t | sibrefs($me; $insec));`,
+String.raw`| $hit + (if $prev and $me.p > 0 and ($t | prevword) then [$me.p] else [] end) end;`,
+String.raw`def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline) | .in as $insec | .me as $me | .d += ($t | sibrefs($me; $insec; true));`,
 String.raw`def flush: if (.buf | length) == 0 then . else (.buf | join("\n") | stripcode | split("\n")) as $ls | reduce $ls[] as $t (.; extract($t)) | .buf = [] end;`,
 ]
 const DECLARED_DEPS_JQ_MAIN=[
@@ -1639,7 +1640,7 @@ String.raw`elif ($l | test("^[ ]{0,3}>")) or ($l | test("^[ \t]*$")) then flush`
 String.raw`elif ($l | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then flush`,
 String.raw`| .in = ($l | stripcode | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
 String.raw`| .d += ($l | stripcode | inline)`,
-String.raw`| .me as $me | .d += ($l | stripcode | sibrefs($me; false))`,
+String.raw`| .me as $me | .d += ($l | stripcode | sibrefs($me; false; false))`,
 String.raw`elif ($l | test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]")) then flush | .buf = [$l]`,
 String.raw`else .buf += [$l]`,
 String.raw`end) | flush)`,

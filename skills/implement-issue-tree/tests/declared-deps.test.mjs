@@ -703,6 +703,15 @@ test('ID の直後に先行を表す語が続く形・英語の前置詞・依�
   assert.deepEqual(runSib(759, '## 依存\n- TASK-97-5\n- [ ] TASK-97-1（確認）\n'), [754, 758].sort((a, b) => a - b))
 })
 
+test('見出し行の ID を伴わない「前の工程」は節見出しであり依存にしない（ID を伴う形と本文行は従来どおり）', () => {
+  assert.deepEqual(runSib(759, '## 前の工程\n'), [], '見出しの前の工程は依存にしない')
+  assert.deepEqual(runSib(759, '### 前工程の振り返り\n'), [], '見出しの前工程は依存にしない')
+  assert.deepEqual(runSib(759, '### Depends on TASK-97-5\n'), [758], '見出しの Depends on ID は拾う（退行ガード）')
+  assert.deepEqual(runSib(759, '## 前の工程（TASK-97-5）の後に\n'), [758], '見出しの ID を伴う前の工程は拾う')
+  assert.deepEqual(runSib(759, '前の工程の結果を踏まえ、実装する\n'), [758], '本文行の前の工程は従来どおり')
+  assert.deepEqual(runSib(759, '- [ ] 前の工程の結果を踏まえている\n'), [758], 'リスト行の前の工程は従来どおり')
+})
+
 test('ID を書かない「前の工程」は自分の工程番号を 1 つ戻した兄弟に解決する (#657)', () => {
   assert.deepEqual(runSib(759, '- [ ] 前の工程の結果を踏まえている\n'), [758])
   assert.deepEqual(runSib(759, '前工程\n'), [758])

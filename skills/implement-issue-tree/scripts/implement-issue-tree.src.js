@@ -1592,7 +1592,8 @@ const TREE_SCHEMA = {
 //   `after` / `depends on` / `blocked by` / `builds on` / `requires` の直後の ID・依存見出し節の行頭の ID。
 //   ID だけの言及（「親 TASK-97「…」の工程 6/6」等）は拾わない。ID を書かない「前の工程」は、自分の
 //   タイトルの ID の末尾の工程番号を 1 つ戻した兄弟（TASK-97-6 なら TASK-97-5）に解決する。関連・参考・
-//   否定（neg）を含む行は拾わない。表に無い ID・兄弟の中で重複する ID は解決しない（依存にしない）。
+//   否定（neg）を含む行は拾わない。見出し行（`#`）は ID を伴う形だけ拾い、ID を書かない「前の工程」は節見出し
+//   （「## 前の工程」等）であって依存ではないため解決しない。表に無い ID・兄弟の中で重複する ID は解決しない（依存にしない）。
 //   ID の前後は英数字・`_`・`-` 以外の文字か行頭・行末であることを要求し、TASK-97-5 を TASK-97-50 や
 //   TASK-97-5-1 の一部として読まない。gh api --jq は gojq（Go の RE2）で動くため、先読み・後読み・
 //   後方参照は使わない。
@@ -1621,10 +1622,10 @@ const DECLARED_DEPS_JQ_DEFS = [
   String.raw`+ "|(?i:after|depends on|blocked by|builds on|requires)[ \t]+" + $id + idend;`,
   String.raw`def sibhead($id): "^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?:\\[[ xX]\\][ \t]+)?" + $id + idend;`,
   String.raw`def prevword: test("前の?工程(?:[ \t]*$|[ \t]*[^ \t（(])");`,
-  String.raw`def sibrefs($me; $insec): . as $t | if ($me.s | length) == 0 or ($t | neg) then [] else`,
+  String.raw`def sibrefs($me; $insec; $prev): . as $t | if ($me.s | length) == 0 or ($t | neg) then [] else`,
   String.raw`[$me.s[] | select(. as $e | $t | test(sibpat($e[0]) + (if $insec then "|" + sibhead($e[0]) else "" end))) | .[1]] as $hit`,
-  String.raw`| $hit + (if $me.p > 0 and ($t | prevword) then [$me.p] else [] end) end;`,
-  String.raw`def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline) | .in as $insec | .me as $me | .d += ($t | sibrefs($me; $insec));`,
+  String.raw`| $hit + (if $prev and $me.p > 0 and ($t | prevword) then [$me.p] else [] end) end;`,
+  String.raw`def extract($t): (if .in and ($t | neg | not) then .d += ($t | linehead) else . end) | .d += ($t | inline) | .in as $insec | .me as $me | .d += ($t | sibrefs($me; $insec; true));`,
   String.raw`def flush: if (.buf | length) == 0 then . else (.buf | join("\n") | stripcode | split("\n")) as $ls | reduce $ls[] as $t (.; extract($t)) | .buf = [] end;`,
 ]
 const DECLARED_DEPS_JQ_MAIN = [
@@ -1639,7 +1640,7 @@ const DECLARED_DEPS_JQ_MAIN = [
   String.raw`elif ($l | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then flush`,
   String.raw`| .in = ($l | stripcode | test("^[ ]{0,3}#{1,6}[ \t]*(依存|依存関係|前提|Depends on|Dependencies|Blocked by)[ \t]*:?[ \t]*$"; "i"))`,
   String.raw`| .d += ($l | stripcode | inline)`,
-  String.raw`| .me as $me | .d += ($l | stripcode | sibrefs($me; false))`,
+  String.raw`| .me as $me | .d += ($l | stripcode | sibrefs($me; false; false))`,
   String.raw`elif ($l | test("^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]")) then flush | .buf = [$l]`,
   String.raw`else .buf += [$l]`,
   String.raw`end) | flush)`,
