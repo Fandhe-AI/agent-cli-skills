@@ -35,8 +35,8 @@ const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const driverPart = source.slice(markerIndex)
 const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-tree-completeness-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-defs.mjs')
-writeFileSync(slicePath, `${definitionPart}\nexport { findIncompleteTreeNodes, dedupeIdenticalTreeNodes, treeFetchPrompt, closePrompt, TREE_SCHEMA }\n`)
-const { findIncompleteTreeNodes, dedupeIdenticalTreeNodes, treeFetchPrompt, closePrompt, TREE_SCHEMA } = await import(pathToFileURL(slicePath).href)
+writeFileSync(slicePath, `${definitionPart}\nexport { findIncompleteTreeNodes, dedupeIdenticalTreeNodes, closePrompt, TREE_SCHEMA }\n`)
+const { findIncompleteTreeNodes, dedupeIdenticalTreeNodes, closePrompt, TREE_SCHEMA } = await import(pathToFileURL(slicePath).href)
 
 const node = (number, parent, subIssuesTotal, state = 'open') => (
   { number, title: `t${number}`, state, parent, siblingIndex: 0, dependsOn: [], subIssuesTotal }
@@ -91,17 +91,21 @@ test('TREE_SCHEMA は subIssuesTotal を 0 以上の整数・required で宣言�
   assert.equal(items.properties.subIssuesTotal.minimum, 0)
 })
 
-const treePrompt = () => treeFetchPrompt()
-
-test('(f) Tree 取得プロンプトは closed も辿る・total 0 のみ leaf・全ノードで sub_issues を呼ぶ', () => {
-  const p = treePrompt()
-  assert.match(p, /closed のノードも必ず辿る/)
-  assert.match(p, /`sub_issues_summary\.total` が 0 のノードだけ/)
-  assert.match(p, /それ以外の全ノードで `sub_issues` を呼ぶ/)
-  assert.match(p, /subIssuesTotal/)
-  assert.match(p, /--paginate/)
-  assert.match(p, /ホストも同照合する/)
+// 取得手順（closed の貫通・total 0 のみ leaf・ページ送り・件数の自己点検）は scripts/fetch-tree.sh へ移った（Issue #668）。
+// その挙動は tests/fetch-tree.test.mjs が実スクリプトで固定する。ここではプロンプトがスクリプト起動と書き写しの規則を持つことを確かめる
+test('(f) Tree 取得プロンプトは fetch-tree.sh を launcher 経由で 1 回実行させ、全行の書き写しと封筒の転記を求める', async () => {
+  const { runScript: rs, BASE_ARGS: BA } = await import('./lib/stub-run.mjs')
+  const { calls } = await rs({ args: { ...BA, repo: 'o/r' }, leaves: [2, 3] })
+  const p = calls.find((c) => c.opts.label === 'plan:issue-tree').prompt
+  assert.match(p, /bash '[^']+\/scripts\/run-verified\.sh' [0-9a-f]{0,64}\S* fetch-tree\.sh --nonce [0-9a-z]{28} --root 1 --repo o\/r\n/)
+  assert.match(p, /一字一句そのまま/)
+  assert.match(p, /欠落・追加・並べ替え・加工なしで nodes へ写す/)
   assert.match(p, /同じノードを 2 回書かない/)
+  assert.match(p, /観測値のまま StructuredOutput へ転記する/)
+  assert.match(p, /failure/)
+  assert.ok(!/--paginate/.test(p), '取得手順そのものはプロンプトに書かない')
+  assert.match(p, /dependsOn/)
+  assert.match(p, /optin-tests/)
 })
 
 test('(g) クローズ検証プロンプトは直下だけでなく子孫を再帰確認する', () => {
