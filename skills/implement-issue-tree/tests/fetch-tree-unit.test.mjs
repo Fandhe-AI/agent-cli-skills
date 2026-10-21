@@ -39,6 +39,10 @@ while IFS="$US" read -r fn a b c d e f; do
     line) out=$(ft_row_digest_line "$a" "$b" "$c" "$d" "$e" "$f") || rc=$? ;;
     nodes) out=$(printf '%s\\n' "$a" | ft_nodes_digest) || rc=$? ;;
     input) out=$(ft_input_sha "$a" "$b") || rc=$? ;;
+    pcount) out=$(printf '%s\\n' "$a" | ft_page_count "$b") || rc=$? ;;
+    pcount0) out=$(printf '' | ft_page_count "$b") || rc=$? ;;
+    pslice) out=$(printf '%s\\n' "$a" | ft_page_slice "$b" "$c") || rc=$? ;;
+    dname) ft_page_dir_name_ok "$a" || rc=$? ;;
     *) echo "unknown fn $fn" >&2; exit 8 ;;
   esac
   printf '%s %s %s\\n' "$i" "$rc" "$(printf '%s' "$out" | od -An -tx1 | tr -d ' \\n')"
@@ -94,6 +98,26 @@ for (const bash of availableBashes()) {
       ['nodes', nodesTsv],
       ['input', '12', 'o/r'],
       ['input', '12', ''],
+      // ページ分割（Issue #673）。1 行は「長さ + 改行 1」で数え、上限を超える手前で次のページへ回す
+      ['pcount', 'aaaa@@bbbb@@cccc', '10'], // 5 + 5 / 5 → 2 ページ
+      ['pcount', 'aaaa@@bbbb@@cccc', '15'], // 1 ページ
+      ['pcount', 'aaaa@@bbbb@@cccc', '14'], // 10 + 5 > 14 → 2 ページ
+      ['pcount', 'toolongline@@x', '5'], // 1 行が上限超過 → その行だけで 1 ページ、x が 2 ページ目
+      ['pcount', '日本語@@日本語', '10'], // 1 行 10 バイト（9 + 改行 1）× 2 → 2 ページ
+      ['pcount0', '', '10'],
+      ['pcount', 'a', '0'],
+      ['pslice', 'aaaa@@bbbb@@cccc', '10', '1'],
+      ['pslice', 'aaaa@@bbbb@@cccc', '10', '2'],
+      ['pslice', 'aaaa@@bbbb@@cccc', '10', '3'],
+      ['pslice', 'aaaa@@bbbb@@cccc', '10', '0'],
+      ['dname', '/tmp/iit-tree.AbC123'],
+      ['dname', '/var/folders/ab/c_d1/T/iit-tree.AbC123'],
+      ['dname', 'tmp/iit-tree.AbC123'],
+      ['dname', '/tmp/other.AbC123'],
+      ['dname', '/tmp/iit-tree.'],
+      ['dname', '/tmp/iit-tree.a b'],
+      ['dname', '/tmp/../etc/iit-tree.x'],
+      ['dname', '/tmp/iit-tree.x;rm'],
     ])
     assert.deepEqual(res.slice(0, 6).map((x) => x.out), ['plain', 'a b', 'x y', '   ', '日本語 🎉', ''])
     assert.deepEqual(res.slice(6, 10).map((x) => x.rc), [0, 0, 1, 1])
@@ -103,6 +127,11 @@ for (const bash of availableBashes()) {
     assert.deepEqual([res[17].rc, res[17].out], [0, expectNodes])
     assert.equal(res[18].out, sha('fetch-tree\n12\no/r'))
     assert.equal(res[19].out, sha('fetch-tree\n12\n'))
+    assert.deepEqual(res.slice(20, 25).map((x) => [x.rc, x.out]), [[0, '2'], [0, '1'], [0, '2'], [0, '2'], [0, '2']])
+    assert.equal(res[25].rc, 1)
+    assert.equal(res[26].rc, 2)
+    assert.deepEqual(res.slice(27, 31).map((x) => [x.rc, x.out]), [[0, 'aaaa\nbbbb'], [0, 'cccc'], [1, ''], [2, '']])
+    assert.deepEqual(res.slice(31).map((x) => x.rc), [0, 0, 1, 1, 1, 1, 1, 1])
     void hex
   })
 }

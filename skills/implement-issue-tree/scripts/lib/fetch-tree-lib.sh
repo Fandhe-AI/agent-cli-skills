@@ -11,6 +11,9 @@
 #       signed-output.sh（so_sha256）を先に source しておくこと。
 # 互換: macOS（BSD userland・bash 3.2）と Linux（GNU・busybox）。連想配列・mapfile・GNU 専用フラグを使わない。
 #
+# ページ分割（Issue #673）: ft_page_count / ft_page_slice / ft_page_dir_name_ok / ft_is_page_dir を追加した。
+#       大きなツリーの TSV を 1 回の Bash 出力に収まる単位（ページ）に分け、エージェントが 1 ページずつ読めるようにする。
+#
 # このファイルは単体実行しない。run-verified.sh のハッシュ照合は scripts/lib/*.sh も対象に含む。
 # 読み込み済みを示す変数でのガードは置かない（環境から継承した変数で定義が飛ばされ、偽の関数が使われるのを防ぐ）。
 
@@ -76,4 +79,70 @@ ft_nodes_digest() {
 # 入力の束縛: sha256("fetch-tree\n" + root + "\n" + repo)（repo 未指定は空文字）。$1 = root、$2 = repo。
 ft_input_sha() {
   printf 'fetch-tree\n%s\n%s' "$1" "$2" | so_sha256
+}
+
+_ft_posint() {
+  case "$1" in
+    '' | *[!0-9]* | 0*) return 1 ;;
+  esac
+  [ "${#1}" -le 9 ]
+}
+
+# ページ分割の詰め方（ft_page_count と ft_page_slice で共通）: 標準入力の TSV 行を貪欲に詰める。
+# 1 行のバイト数は「行の長さ + 改行 1」。次の行を足すとページ上限を超えるなら次のページへ回す。
+# 1 行だけでページ上限を超える場合は、その行だけで 1 ページにする。LC_ALL=C の awk でバイト数を数える
+# （BSD awk / GNU awk / mawk で動く書き方だけを使う）。$1 = ページ上限（バイト）、$2 = 出力するページ（0 なら総数を出す）。
+_ft_paginate() {
+  LC_ALL=C awk -v pb="$1" -v want="$2" '
+    { cost = length($0) + 1
+      if (cur > 0 && cur + cost > pb) { page++; cur = 0 }
+      if (page == 0) page = 1
+      cur += cost
+      if (want > 0 && page == want) print $0 }
+    END { if (want == 0) { if (page == 0) exit 1; print page } }'
+}
+
+# 標準入力の TSV 行をページ上限 $1 バイトで詰めたときのページ数を stdout へ。空入力は非 0。
+ft_page_count() {
+  _ft_posint "$1" || return 2
+  _ft_paginate "$1" 0
+}
+
+# 同じ詰め方で $2 番目（1 始まり）のページの行だけを stdout へ。範囲外（行が 1 つも無い）は非 0。
+ft_page_slice() {
+  local out
+  _ft_posint "$1" && _ft_posint "$2" || return 2
+  out=$(_ft_paginate "$1" "$2"; echo x) || return 1
+  [ "${out}" != "x" ] || return 1
+  printf '%s' "${out%x}"
+}
+
+# ページ用ディレクトリの名前の形だけを検査する（ファイルシステムは見ない）。絶対パス・許可文字集合 [A-Za-z0-9._/-]
+# （_ は macOS の TMPDIR に現れる）・basename が iit-tree. で始まる。
+ft_page_dir_name_ok() {
+  case "$1" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9._/-]*) return 1 ;;
+    */../* | */.. | */./* | */.) return 1 ;;
+  esac
+  case "${1##*/}" in
+    iit-tree.?*) return 0 ;;
+  esac
+  return 1
+}
+
+# --page / --release に渡された --dir の検証。名前の形に加え、ディレクトリで、シンボリックリンクでなく、
+# 自分の所有で、中身が tree.tsv のみ（空も可）であること。パスの写し間違いで他のディレクトリを読み・消さないための防御。
+ft_is_page_dir() {
+  local ls_out
+  ft_page_dir_name_ok "$1" || return 1
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] || return 1
+  ls_out=$(ls -A "$1" 2>/dev/null) || return 1
+  case "${ls_out}" in
+    '' | tree.tsv) return 0 ;;
+  esac
+  return 1
 }

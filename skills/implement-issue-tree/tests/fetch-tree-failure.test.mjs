@@ -78,8 +78,8 @@ test('exit 6（番号の重複）でも終了コードと意味が出る', async
 })
 
 test('exit 7（出力過大）: 終了コードと意味が出る', async () => {
-  const kids = Array.from({ length: 90 }, (_, i) => issue(100 + i, { title: 'x'.repeat(300) }))
-  const stub = makeGhTreeStub({ [`${P}/issues/1`]: issue(1, { total: 90 }), [`${P}/issues/1/sub_issues`]: { pages: [kids] } })
+  const kids = Array.from({ length: 2600 }, (_, i) => issue(100 + i, { title: 'x'.repeat(300) }))
+  const stub = makeGhTreeStub({ [`${P}/issues/1`]: issue(1, { total: 2600 }), [`${P}/issues/1/sub_issues`]: { pages: [kids] } })
   const { err } = await failRun(stub)
   assert.match(err.message, /exit 7/)
   assert.match(err.message, /出力過大/)
