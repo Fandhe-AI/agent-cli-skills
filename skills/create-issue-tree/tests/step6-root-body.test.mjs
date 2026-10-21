@@ -1048,18 +1048,20 @@ test('(C1) 閉じ忘れの <details> の後ろに置換対象の節がある本�
   assert.deepEqual(leftovers, [])
 })
 
-test('(C2) `>` を伴わず行末で終わる <details は開きタグとして数え、閉じなければ中止する', () => {
-  const root = ROOT_BODY.replace('### Phase 1: 古い', '<details\n\n### Phase 1: 古い')
-  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 1, r.stderr)
-  assert.equal(edits.length, 0)
+test('(C2) `>` を伴わず行末で終わる <details は複数行にまたがるタグとして判定できず、edit せず中止する', () => {
+  abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<details\n\n### Phase 1: 古い'), 'C2')
 })
 
-test('(C2b) CRLF 本文で行末が CR の <details 単独行も開きタグとして数え、閉じなければ中止する', () => {
-  const root = ROOT_BODY.replace('### Phase 1: 古い', '<details\n\n### Phase 1: 古い').replace(/\n/g, '\r\n')
-  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 1, r.stderr)
-  assert.equal(edits.length, 0)
+test('(C2b) CRLF 本文で行末が CR の <details 単独行も判定できず中止する', () => {
+  abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<details\n\n### Phase 1: 古い').replace(/\n/g, '\r\n'), 'C2b')
+})
+
+test('(C2c) 属性付き <details open> を含む本文は中止する', () => {
+  abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<details open>\n\n### Phase 1: 退避済み\n\nKEEP\n\n</details>\n\n### Phase 1: 古い'), 'C2c')
+})
+
+test('(C2d) 属性値に </details> を含む開きタグ（codex P1）は同じ行で depth が戻らず、退避内容を消さずに中止する', () => {
+  abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<details title="</details>">\n\n### Phase 1: 退避済み\n\nKEEP-ATTR\n\n</details>\n\n### Phase 1: 古い'), 'C2d')
 })
 
 test('(C3) <detailsfoo> のように <details で始まるだけの行は除外扱いにならず、後ろの節が置換される', () => {
@@ -1073,14 +1075,14 @@ test('(C3) <detailsfoo> のように <details で始まるだけの行は除外�
   assert.ok(body.includes('<detailsfoo>'), '無関係な行は素通しされる')
 })
 
-test('(C4) 属性つき <details open> と 1 行で開閉する <details>…</details> は従来どおり除外され、閉じていれば中止しない', () => {
+test('(C4) 属性の無い複数行 <details> と 1 行で開閉する <details>…</details> は除外され、閉じていれば中止しない', () => {
   const root = ROOT_BODY.replace(
     '### Phase 1: 古い',
-    '<details open>\n\n### Phase 1: 退避済み\n\nKEEP-OPEN-ATTR\n\n</details>\n\n<details><summary>x</summary>y</details>\n\n### Phase 1: 古い',
+    '<details>\n\n### Phase 1: 退避済み\n\nKEEP-OPEN-ATTR\n\n</details>\n\n<details><summary>x</summary>y</details>\n\n### Phase 1: 古い',
   )
   const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
-  assert.ok(body.includes('KEEP-OPEN-ATTR'), '属性つき details 内が消えた')
+  assert.ok(body.includes('KEEP-OPEN-ATTR'), 'details 内が消えた')
   assert.ok(body.includes('<details><summary>x</summary>y</details>'))
   assert.ok(!body.includes('古い子'))
   assert.equal(phase1Headings(body), 2)
@@ -1092,6 +1094,7 @@ const abortsAmbiguous = (root, label) => {
   assert.equal(edits.length, 0, `${label}: gh issue edit が呼ばれた`)
   assert.match(r.stderr, /判定できません/, label)
   assert.match(r.stderr, /バッククォート・<!--・-->・バックスラッシュ/, label)
+  assert.match(r.stderr, /属性付きの <details> タグ/, label)
   assert.deepEqual(leftovers, [], label)
 }
 
@@ -1103,11 +1106,8 @@ test('(C4c) 複数行 HTML コメントを含む本文も、本文を書き換�
   abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<details>\n\n<!--\n</details>\n<details>\n-->\n\n### Phase 1: 退避済み\n\nKEEP-MULTI\n\n</details>\n\n### Phase 1: 古い'), 'C4c')
 })
 
-test('(C5) 閉じタグが `>` を欠く </details は閉じとして数えず、閉じ忘れとして中止する', () => {
-  const root = ROOT_BODY.replace('### Phase 1: 古い', '<details><summary>x</summary>\n\n</details\n\n### Phase 1: 古い')
-  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 1, r.stderr)
-  assert.equal(edits.length, 0)
+test('(C5) 閉じタグが `>` を欠く </details は閉じと判定できず、edit せず中止する', () => {
+  abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<details><summary>x</summary>\n\n</details\n\n### Phase 1: 古い'), 'C5')
 })
 
 test('(C6) update-issue-tree が退避する <details><summary>…</summary>…</details> は引き続き除外され、閉じていれば中止しない', () => {
