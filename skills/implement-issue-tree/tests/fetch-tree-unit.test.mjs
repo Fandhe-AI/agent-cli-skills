@@ -165,6 +165,10 @@ const WS_PARITY_TITLES = [
   ['TASK-1\u3000x', 'TASK-1'],
   ['TASK-1\u0085x', ''],
   ['TASK-1\uFEFFx', 'TASK-1'],
+  // scope の {0,64} はコードポイント単位で両側一致させる（絵文字はホストで UTF-16 の 2 単位になる）
+  [`feat(${'\u{1F600}'.repeat(33)}): TASK-1 x`, 'TASK-1'],
+  [`feat(${'\u{1F600}'.repeat(64)}): TASK-1 x`, 'TASK-1'],
+  [`feat(${'\u{1F600}'.repeat(65)}): TASK-1 x`, ''],
 ]
 for (const bash of availableBashes()) {
   test(`[${bash}] ft_task_id_digest は JS の空白集合と一致する（U+FEFF / U+0085・Issue #687）`, () => {

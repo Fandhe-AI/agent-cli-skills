@@ -1745,7 +1745,8 @@ const DECLARED_DEPS_JQ=declaredDepsJq()
 
 
 
-const TITLE_TASK_ID_RE= /^[ \t\n\r\f\v\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]*(?:[a-z]+(?:\([^()\n]{0,64}\))?!?:[ \t\n\r\f\v\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]*)?[[【]?([A-Z][A-Z0-9]{0,19}(?:-[0-9]{1,6}){1,4})(?=$|[ \t\n\r\f\v\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF\]】:：])/
+
+const TITLE_TASK_ID_RE= /^[ \t\n\r\f\v\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]*(?:[a-z]+(?:\([^()\n]{0,64}\))?!?:[ \t\n\r\f\v\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]*)?[[【]?([A-Z][A-Z0-9]{0,19}(?:-[0-9]{1,6}){1,4})(?=$|[ \t\n\r\f\v\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF\]】:：])/u
 
 
 const SIBLING_TASK_IDS_MAX_PER_PARENT=100
