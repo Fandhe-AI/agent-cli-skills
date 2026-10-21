@@ -146,24 +146,33 @@ CHK_FILE=$(mktemp) || die 1 "検査用の一時ファイルを作成できませ
 rc=0
 NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="${SEC_FILE}" CHKF="${CHK_FILE}" awk '
   # 開きフェンス行なら 1 を返し、記号 fch と長さ flen を保存する。info 文字列に ` を含む ``` 行は開きではない
-  # 開始と同じ長さのバッククォート列で閉じるコードスパンを除く。コードスパンは改行をまたげるため、閉じが行内に無い開きは
+  # 開始と同じ長さのバッククォート列で閉じるコードスパンと HTML コメント（複数行可）を 1 回の走査で除く（コメント内のバッククォートはコードスパンの開きにしない）。コードスパンは改行をまたげるため、閉じが行内に無い開きは
   # pend（開きの長さ）として次の行へ持ち越し、閉じが見つかるまでの行は丸ごと除く。持ち越し中に読み飛ばした行へ <details> / </details> が
   # あれば pend_hit = 1 とし、段落の切れ目（空行・フェンス・表行・見出し行・本文末）までに閉じなければ、バッククォートは文字だったことになり
   # 読み飛ばしたタグを数え損ねるため、呼び出し側が exit 9 で中止する（fail-closed）
-  function strip_code(s,    out, i, n, rest, pos, j, p, m, found) {
+  function strip_code(s,    out, i, c, n, rest, pos, j, p, m, found) {
     out = ""
-    if (pend > 0) {
-      rest = s; pos = 1; found = 0
-      while (pos <= length(rest)) {
-        j = index(substr(rest, pos), "`"); if (!j) break
-        p = pos + j - 1; m = 0; while (substr(rest, p + m, 1) == "`") m++
-        if (m == pend) { found = 1; s = substr(rest, p + m); break }
-        pos = p + m
+    while (s != "") {
+      if (incomment) {
+        # HTML コメントの中ではコードスパン状態を変えない（バッククォートは文字）。閉じ記号までを読み飛ばす
+        p = index(s, "-->")
+        if (p == 0) return out
+        s = substr(s, p + 3); incomment = 0; continue
       }
-      if (!found) { if (rest ~ /<[\/]?details/) pend_hit = 1; return "" }
-      pend = 0; pend_hit = 0
-    }
-    while ((i = index(s, "`")) > 0) {
+      if (pend > 0) {
+        rest = s; pos = 1; found = 0
+        while (pos <= length(rest)) {
+          j = index(substr(rest, pos), "`"); if (!j) break
+          p = pos + j - 1; m = 0; while (substr(rest, p + m, 1) == "`") m++
+          if (m == pend) { found = 1; s = substr(rest, p + m); break }
+          pos = p + m
+        }
+        if (!found) { if (rest ~ /<[\/]?details/) pend_hit = 1; return out }
+        pend = 0; pend_hit = 0; continue
+      }
+      i = index(s, "`"); c = index(s, "<!--")
+      if (c > 0 && (i == 0 || c < i)) { out = out substr(s, 1, c - 1); s = substr(s, c + 4); incomment = 1; continue }
+      if (i == 0) { out = out s; break }
       out = out substr(s, 1, i - 1); s = substr(s, i)
       n = 0; while (substr(s, n + 1, 1) == "`") n++
       rest = substr(s, n + 1); pos = 1; found = 0
@@ -174,9 +183,9 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
         pos = p + m
       }
       if (found) s = rest
-      else { pend = n; pend_hit = (rest ~ /<[\/]?details/) ? 1 : 0; s = ""; break }
+      else { pend = n; pend_hit = (rest ~ /<[\/]?details/) ? 1 : 0; return out }
     }
-    return out s
+    return out
   }
   function fence_open(line,    ind, rest, len, info) {
     match(line, /^ */); ind = RLENGTH
@@ -241,23 +250,10 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
       # タグはインラインコードスパンを除いた行から数える（バッククォート内の言及は対象外）。
       # 表行・見出し行は子 issue のタイトルが入り、CELL は < を無害化しないため、タグを一切数えない（閉じとして数えるのは表行・見出し行以外の行のみ）。
       # それ以外の行は行内の開き・閉じを左から全て数える（1 行開閉・行末で閉じる退避節を通す）
+      # 表行・見出し行は元の行で判定し、strip_code を通さない（タイトル由来のバッククォート・コメント記号でコードスパン・コメント状態を変えず、タグも数えない。退避節の内側なら除外のまま）
+      if (L[k] ~ /^[ \t]*[|]/ || L[k] ~ /^[ \t]*#+[ \t]/) { if (depth > 0) X[k] = 1; continue }
+      # コードスパンと HTML コメント（複数行にまたがるものを含む）の中のタグは数えない。除いた残りだけを解析する
       s = strip_code(L[k])
-      # 表行・見出し行はタイトル由来のコメント開始・終了記号でコメント状態を変えず、タグも数えない（退避節の内側なら除外のまま）
-      if (s ~ /^[ \t]*[|]/ || s ~ /^[ \t]*#+[ \t]/) { if (depth > 0) X[k] = 1; continue }
-      # HTML コメント（複数行にまたがるものを含む）の中のタグは数えない。コメント部分を除いた残りだけを解析する
-      out = ""
-      while (s != "") {
-        if (incomment) {
-          p = index(s, "-->")
-          if (p == 0) { s = ""; break }
-          s = substr(s, p + 3); incomment = 0
-        } else {
-          p = index(s, "<!--")
-          if (p == 0) { out = out s; s = ""; break }
-          out = out substr(s, 1, p - 1); s = substr(s, p + 4); incomment = 1
-        }
-      }
-      s = out
       # Markdown のバックスラッシュエスケープ（\<details> / \</details>）は文字として表示されるだけで構造タグではない。
       # 先に \\（エスケープされたバックスラッシュ）を空白へ置き換えてから \< を置き換え、\\<details> は本物のタグとして残す
       gsub(/[\\][\\]/, "  ", s); gsub(/[\\]</, "  ", s)

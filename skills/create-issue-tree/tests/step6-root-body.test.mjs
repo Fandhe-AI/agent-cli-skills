@@ -1304,3 +1304,30 @@ test('(D10) 見出し行に <!-- を含んでも後続の <details> を認識し
   assert.ok(body.includes('### Phase 1: 退避済み'))
   assert.ok(!body.includes('古い子'))
 })
+
+// PR #679 codex 指摘: コードスパンと HTML コメントを 1 回の走査で扱い、表・見出し行は元の行で判定する。
+const KEEP = '### Phase 1: 退避済み'
+const keepsEscaped = (head) => {
+  const { r, body, edits } = runRootFull(withOld(head), [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(edits.length, 1)
+  assert.ok(body.includes(KEEP), '退避済みの節が置換された')
+  assert.ok(!body.includes('古い子'))
+  assert.equal(phase1Headings(body), 2)
+}
+
+test('(E4) HTML コメント内のバッククォートをコードスパンとして次の行へ持ち越さず、続く <details> を数える', () => {
+  keepsEscaped(`<!-- メモ \` -->\n<details><summary>退避</summary>\n\n${KEEP}\n\n</details>`)
+})
+
+test('(E5) 複数行にまたがる HTML コメント内のバッククォート・<details> は数えず、コメント後の <details> は数える', () => {
+  keepsEscaped(`<!-- 注 \`\n<details> は閉じない\n-->\n<details><summary>退避</summary>\n\n${KEEP}\n\n</details>`)
+})
+
+test('(E6) インラインコード内の <!-- はコメントの開始にならず、続く <details> を数える', () => {
+  keepsEscaped(`メモ \`<!--\` です\n\n<details><summary>退避</summary>\n\n${KEEP}\n\n</details>`)
+})
+
+test('(E7) 退避節内の表行・見出し行のバッククォートはコードスパン状態を持ち越さず、中止せず更新できる', () => {
+  keepsEscaped(`<details><summary>退避</summary>\n\n${KEEP}\n\n| #9 | fix: \` <details> |\n\n### Phase 3: fix \` </details>\n\n</details>`)
+})
