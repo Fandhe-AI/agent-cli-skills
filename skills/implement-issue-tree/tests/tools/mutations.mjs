@@ -36,6 +36,7 @@ const CLASSIFY = ['observe-checks-unit.test.mjs', 'observe-pr-checks-settled.tes
 const PR_PUSH = ['pr-push.test.mjs', 'pr-push-unit.test.mjs']
 const BASE_MERGE = ['base-merge.test.mjs', 'base-merge-unit.test.mjs']
 const FETCH_TREE_HOST = ['fetch-tree-host.test.mjs']
+const FETCH_TREE_FAILURE = ['fetch-tree-failure.test.mjs']
 const FETCH_TREE_SCRIPT = ['fetch-tree.test.mjs', 'fetch-tree-alt-bash.test.mjs']
 
 export const MUTATIONS = [
@@ -411,4 +412,7 @@ export const MUTATIONS = [
   { id: 'FT8-script-digest-drops-title', file: 'scripts/lib/fetch-tree-lib.sh', from: "  tsha=$(printf '%s' \"$6\" | so_sha256) || return 1\n", to: "  tsha=none\n", tests: [...FETCH_TREE_SCRIPT, 'fetch-tree-unit.test.mjs'], note: "ダイジェストに title を含めない（title の書き写しの誤りが見つからない）" },
   { id: 'FT9-dedupe-by-number-only', file: SRC, from: '    const sig = stableStringify(n)\n', to: '    const sig = String(n.number)\n', tests: ['tree-completeness.test.mjs'], note: "#667: 重複を number だけで畳む（内容の違う重複が畳まれて見えなくなる）" },
   { id: 'FT10-shape-check-skipped', file: SRC, from: "const verified = shape === '' ?", to: "const verified = true ?", tests: FETCH_TREE_HOST, note: "書き写された 6 欄の型・値域の検査を飛ばす（state が open / closed でない値が通る）" },
+  { id: 'FT11-failure-checked-after-nodes', file: SRC, from: "    if (result?.failure !== undefined && result?.failure !== null && result?.failure !== '') {\n      lastReason = treeFetchFailureReason(result.failure, attempt)", to: "    if (false) {\n      lastReason = treeFetchFailureReason(result.failure, attempt)", tests: [...FETCH_TREE_HOST, ...FETCH_TREE_FAILURE], note: "#676: failure 申告を先に見ない（理由が「検査値が一致しない」「封筒の欠落」に化ける）" },
+  { id: 'FT12-first-attempt-says-unresolved', file: SRC, from: "return attempt < 2 ? '。1 回だけ取り直す'", to: "return attempt < 99 ? `。取り直しても解消しなかった。${finalHint}`", tests: FETCH_TREE_FAILURE, note: "#676: 1 回目のログにも「取り直しても解消しなかった」を出す" },
+  { id: 'FT13-exit-code-hidden', file: SRC, from: "const code = d.exitCode === null ? '' : `exit ${d.exitCode}: `", to: "const code = ''", tests: FETCH_TREE_FAILURE, note: "#676: 失敗ログに終了コードを出さない" },
 ]
