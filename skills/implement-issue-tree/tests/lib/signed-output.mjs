@@ -126,7 +126,7 @@ export function treeFetchReply(prompt, nodes, opts = {}) {
   const repo = /--repo ([A-Za-z0-9._/-]+)/.exec(String(prompt))?.[1] ?? ''
   if (nonce === null || root === undefined) throw new Error('プロンプトに fetch-tree.sh のコマンドが無い')
   const truth = opts.digestNodes ?? nodes
-  const payload = { count: truth.length, inputSha256: treeInputSha256(root, repo), nodesSha256: treeNodesSha256(truth), ...(opts.payload ?? {}) }
+  const payload = { count: truth.length, inputSha256: treeInputSha256(root, repo), nodesSha256: treeNodesSha256(truth), pages: 1, ...(opts.payload ?? {}) }
   const env = makeEnvelope(opts.nonce ?? nonce, payload)
   const out = { nodes, nonce: env.nonce, payload: env.payload, sha256: opts.sha256 ?? env.sha256 }
   for (const k of opts.omit ?? []) delete out[k]
