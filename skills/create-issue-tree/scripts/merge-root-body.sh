@@ -25,7 +25,7 @@
 #     置換対象にし、外側は素通しする。マーカーが無くても `<details>` 内（update-issue-tree が退避した旧表など）は対象外。
 #     マーカーが 1 組でない・除外後も同名の見出しが複数ある・`<details>` が閉じていない本文は、置換先を決められないため中止する。
 #     `<details` は直後が空白・CR・`>`・行末のときだけ開きタグとして数える（`<detailsfoo>` 等は通常行）。
-#     行内・行末の `</details>` も閉じとして数え、バッククォート内の言及は数えない。表行・見出し行はタイトル由来の
+#     行内・行末の `</details>` も閉じとして数え、バッククォート内・HTML コメント内（複数行含む）の言及は数えない。表行・見出し行はタイトル由来の
 #     誤検出を避けるためタグを数えない（退避節の閉じは表行・見出し行以外の行で行う。閉じが無ければ未閉じ扱いで中止＝安全側）。
 #   - 一時ファイルは成否によらず削除する（trap は mktemp より先に登録）。
 #   - granularity マーカーは常に GRANULARITY で先頭へ 1 行だけ書き直す。
@@ -211,7 +211,7 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     # 管理マーカー区間（update-issue-tree の phase-plan）と <details> は置換対象から外す（X[] = 1）。
     # マーカーがあれば区間の内側だけが対象で外側は素通し。無ければ <details> の外側が対象。
     # マーカーの個数・順序が不整合なら対象範囲を決められないため exit 6 で中止する
-    nb = 0; ne = 0; depth = 0
+    nb = 0; ne = 0; depth = 0; incomment = 0
     for (k = 1; k <= NR; k++) {
       if (F[k]) continue
       if (L[k] ~ /^[ \t]*<!-- update-issue-tree:phase-plan:begin -->[ \t\r]*$/) { nb++; bpos = k }
@@ -225,6 +225,20 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
       # 表行・見出し行は子 issue のタイトルが入り、CELL は < を無害化しないため、タグを一切数えない（閉じとして数えるのは表行・見出し行以外の行のみ）。
       # それ以外の行は行内の開き・閉じを左から全て数える（1 行開閉・行末で閉じる退避節を通す）
       s = strip_code(L[k])
+      # HTML コメント（複数行にまたがるものを含む）の中のタグは数えない。コメント部分を除いた残りだけを解析する
+      out = ""
+      while (s != "") {
+        if (incomment) {
+          p = index(s, "-->")
+          if (p == 0) { s = ""; break }
+          s = substr(s, p + 3); incomment = 0
+        } else {
+          p = index(s, "<!--")
+          if (p == 0) { out = out s; s = ""; break }
+          out = out substr(s, 1, p - 1); s = substr(s, p + 4); incomment = 1
+        }
+      }
+      s = out
       before = depth; touched = 0
       # タイトル由来の行末 </details> は退避節の閉じと区別できないため、表行・見出し行は数えない（閉じが他に無ければ exit 8 で中止）
       if (!(s ~ /^[ \t]*[|]/ || s ~ /^[ \t]*#+[ \t]/)) {

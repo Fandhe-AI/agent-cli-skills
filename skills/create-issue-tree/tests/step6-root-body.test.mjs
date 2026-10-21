@@ -1084,6 +1084,29 @@ test('(C4) 属性つき <details open> と 1 行で開閉する <details>…</de
   assert.equal(phase1Headings(body), 2)
 })
 
+test('(C4b) HTML コメント内の </details> は閉じとして数えず、退避済み節は置換されない', () => {
+  const root = ROOT_BODY.replace(
+    '### Phase 1: 古い',
+    '<details>\n\n<!-- </details> -->\n\n### Phase 1: 退避済み\n\nKEEP-COMMENT\n\n</details>\n\n### Phase 1: 古い',
+  )
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('KEEP-COMMENT'), '退避済み節が書き換えられた')
+  assert.ok(body.includes('### Phase 1: 退避済み'))
+  assert.equal(phase1Headings(body), 2)
+})
+
+test('(C4c) 複数行 HTML コメント内の </details> / <details> も数えない', () => {
+  const root = ROOT_BODY.replace(
+    '### Phase 1: 古い',
+    '<details>\n\n<!--\n</details>\n<details>\n-->\n\n### Phase 1: 退避済み\n\nKEEP-MULTI\n\n</details>\n\n### Phase 1: 古い',
+  )
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('KEEP-MULTI'))
+  assert.equal(phase1Headings(body), 2)
+})
+
 test('(C5) 閉じタグが `>` を欠く </details は閉じとして数えず、閉じ忘れとして中止する', () => {
   const root = ROOT_BODY.replace('### Phase 1: 古い', '<details><summary>x</summary>\n\n</details\n\n### Phase 1: 古い')
   const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
