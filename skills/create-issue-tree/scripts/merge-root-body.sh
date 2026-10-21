@@ -25,8 +25,10 @@
 #     置換対象にし、外側は素通しする。マーカーが無くても `<details>` 内（update-issue-tree が退避した旧表など）は対象外。
 #     マーカーが 1 組でない・除外後も同名の見出しが複数ある・`<details>` が閉じていない本文は、置換先を決められないため中止する。
 #     `<details` は直後が空白・CR・`>`・行末のときだけ開きタグとして数える（`<detailsfoo>` 等は通常行）。
-#     行内・行末の `</details>` も閉じとして数え、バックスラッシュでエスケープした `\<details>` `\</details>` は数えず、バッククォート内・HTML コメント内（複数行含む）の言及は数えない。表行・見出し行はタイトル由来の
-#     誤検出を避けるためタグを数えない（退避節の閉じは表行・見出し行以外の行で行う。閉じが無ければ未閉じ扱いで中止＝安全側）。
+#     行内・行末の `</details>` も閉じとして数え、表行・見出し行も区別しない（1 行に複数あれば全て数える）。
+#     コードスパン・HTML コメント・エスケープの状態は追わない。判定範囲（管理マーカーがあれば区間の内側、無ければ本文全体。
+#     コードフェンス内と先頭の granularity マーカー行を除く）の行にバッククォート・`<!--`・`-->`・バックスラッシュのいずれかが
+#     あれば、タグが文字か構造か決められないため何も書かず中止する（exit 1・stderr に理由。awk 内部では exit 9）。
 #   - 一時ファイルは成否によらず削除する（trap は mktemp より先に登録）。
 #   - granularity マーカーは常に GRANULARITY で先頭へ 1 行だけ書き直す。
 #
@@ -136,7 +138,7 @@ PHASE_ROW="| Phase ${PHASE} | #${PHASE_NUMBER} ${PTITLE} | ${DIRECT} | ${TOTAL} 
 # コードフェンス（行頭 0〜3 空白の ``` / ~~~、閉じは同記号で開き以上の長さ）の内側の行は F[] で印を付け、
 # 見出し・表行・プレースホルダー・運用見出しの判定から外す。ユーザー編集可能な本文で閉じ忘れフェンスがあると
 # 以降が全てフェンス内扱いになり実セクションを消し得るため、閉じていなければ exit 5 で本文未更新のまま中止する。
-# 管理マーカー区間と <details> の内側は X[] で対象外にし、マーカーの不整合は exit 6、除外後も置換対象の見出しが複数なら exit 7、<details> の閉じ忘れは exit 8 で中止する。
+# 管理マーカー区間と <details> の内側は X[] で対象外にし、マーカーの不整合は exit 6、除外後も置換対象の見出しが複数なら exit 7、<details> の閉じ忘れは exit 8、判定範囲内の曖昧な記号（バッククォート・<!--・-->・バックスラッシュ）は exit 9 で中止する。
 # 区間指定 {n,m} や gawk 拡張は mawk・BSD awk 非対応のため使わない。
 # セクションは全子 issue の行を含み環境変数・引数の長さ上限を超え得るため、一時ファイル経由で渡す。
 # 行（1 行）は ENVIRON で渡し、いずれもシェル構文・awk 構文として再評価させない
@@ -146,47 +148,6 @@ CHK_FILE=$(mktemp) || die 1 "検査用の一時ファイルを作成できませ
 rc=0
 NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="${SEC_FILE}" CHKF="${CHK_FILE}" awk '
   # 開きフェンス行なら 1 を返し、記号 fch と長さ flen を保存する。info 文字列に ` を含む ``` 行は開きではない
-  # 開始と同じ長さのバッククォート列で閉じるコードスパンと HTML コメント（複数行可）を 1 回の走査で除く（コメント内のバッククォートはコードスパンの開きにしない）。コードスパンは改行をまたげるため、閉じが行内に無い開きは
-  # pend（開きの長さ）として次の行へ持ち越し、閉じが見つかるまでの行は丸ごと除く。持ち越し中に読み飛ばした行へ <details> / </details> が
-  # あれば pend_hit = 1 とし、段落の切れ目（空行・フェンス・表行・見出し行・本文末）までに閉じなければ、バッククォートは文字だったことになり
-  # 読み飛ばしたタグを数え損ねるため、呼び出し側が exit 9 で中止する（fail-closed）
-  function strip_code(s,    out, i, c, n, rest, pos, j, p, m, found) {
-    out = ""
-    while (s != "") {
-      if (incomment) {
-        # HTML コメントの中ではコードスパン状態を変えない（バッククォートは文字）。閉じ記号までを読み飛ばす
-        p = index(s, "-->")
-        if (p == 0) return out
-        s = substr(s, p + 3); incomment = 0; continue
-      }
-      if (pend > 0) {
-        rest = s; pos = 1; found = 0
-        while (pos <= length(rest)) {
-          j = index(substr(rest, pos), "`"); if (!j) break
-          p = pos + j - 1; m = 0; while (substr(rest, p + m, 1) == "`") m++
-          if (m == pend) { found = 1; s = substr(rest, p + m); break }
-          pos = p + m
-        }
-        if (!found) { if (rest ~ /<[\/]?details/) pend_hit = 1; return out }
-        pend = 0; pend_hit = 0; continue
-      }
-      i = index(s, "`"); c = index(s, "<!--")
-      if (c > 0 && (i == 0 || c < i)) { out = out substr(s, 1, c - 1); s = substr(s, c + 4); incomment = 1; continue }
-      if (i == 0) { out = out s; break }
-      out = out substr(s, 1, i - 1); s = substr(s, i)
-      n = 0; while (substr(s, n + 1, 1) == "`") n++
-      rest = substr(s, n + 1); pos = 1; found = 0
-      while (pos <= length(rest)) {
-        j = index(substr(rest, pos), "`"); if (!j) break
-        p = pos + j - 1; m = 0; while (substr(rest, p + m, 1) == "`") m++
-        if (m == n) { found = 1; rest = substr(rest, p + m); break }
-        pos = p + m
-      }
-      if (found) s = rest
-      else { pend = n; pend_hit = (rest ~ /<[\/]?details/) ? 1 : 0; return out }
-    }
-    return out
-  }
   function fence_open(line,    ind, rest, len, info) {
     match(line, /^ */); ind = RLENGTH
     if (ind > 3) return 0
@@ -234,41 +195,36 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     # 管理マーカー区間（update-issue-tree の phase-plan）と <details> は置換対象から外す（X[] = 1）。
     # マーカーがあれば区間の内側だけが対象で外側は素通し。無ければ <details> の外側が対象。
     # マーカーの個数・順序が不整合なら対象範囲を決められないため exit 6 で中止する
-    nb = 0; ne = 0; depth = 0; incomment = 0
+    nb = 0; ne = 0; depth = 0
     for (k = 1; k <= NR; k++) {
       if (F[k]) continue
       if (L[k] ~ /^[ \t]*<!-- update-issue-tree:phase-plan:begin -->[ \t\r]*$/) { nb++; bpos = k }
       else if (L[k] ~ /^[ \t]*<!-- update-issue-tree:phase-plan:end -->[ \t\r]*$/) { ne++; epos = k }
     }
     if (nb > 1 || ne > 1 || nb != ne || (nb == 1 && bpos > epos)) exit 6
-    pend = 0; pend_hit = 0
-    for (k = 1; k <= NR; k++) {
-      if (nb == 1 && (k <= bpos || k >= epos)) { X[k] = 1; XO[k] = 1 }
-      # 段落の切れ目では持ち越し中のコードスパンを確定する。閉じなかった開きが <details> 系のタグを読み飛ばしていたら判定できないので中止する
-      if (pend > 0 && (F[k] || L[k] ~ /^[ \t\r]*$/ || L[k] ~ /^[ \t]*[|]/ || L[k] ~ /^[ \t]*#+[ \t]/)) { if (pend_hit) exit 9; pend = 0 }
+    # 判定範囲: 管理マーカーがあれば区間の内側だけ（外側は常に素通しで <details> の判定に関わらない）、無ければ本文全体。
+    # 範囲内の行にコードスパン・HTML コメント・エスケープの記号（バッククォート・<!--・-->・バックスラッシュ）があると、
+    # <details> の開閉が文字か構造かを状態追跡なしには決められないため、何も書かず exit 9 で中止する（fail-closed）。
+    # コードフェンス内の行（F[]）は走査しない。先頭の granularity マーカー行（本スクリプトが付ける 1 行）は記号を含むが対象外。
+    # 記号が無ければ状態を追わず、表行・見出し行も区別せず各行の開き・閉じタグを左から全て数える。
+    lo = 1; hi = NR
+    if (nb == 1) {
+      lo = bpos + 1; hi = epos - 1
+      for (k = 1; k <= NR; k++) if (k <= bpos || k >= epos) { X[k] = 1; XO[k] = 1 }
+    }
+    for (k = lo; k <= hi; k++) {
       if (F[k]) { if (depth > 0) X[k] = 1; continue }
-      # タグはインラインコードスパンを除いた行から数える（バッククォート内の言及は対象外）。
-      # 表行・見出し行は子 issue のタイトルが入り、CELL は < を無害化しないため、タグを一切数えない（閉じとして数えるのは表行・見出し行以外の行のみ）。
-      # それ以外の行は行内の開き・閉じを左から全て数える（1 行開閉・行末で閉じる退避節を通す）
-      # 表行・見出し行は元の行で判定し、strip_code を通さない（タイトル由来のバッククォート・コメント記号でコードスパン・コメント状態を変えず、タグも数えない。退避節の内側なら除外のまま）
-      if (L[k] ~ /^[ \t]*[|]/ || L[k] ~ /^[ \t]*#+[ \t]/) { if (depth > 0) X[k] = 1; continue }
-      # コードスパンと HTML コメント（複数行にまたがるものを含む）の中のタグは数えない。除いた残りだけを解析する
-      s = strip_code(L[k])
-      # Markdown のバックスラッシュエスケープ（\<details> / \</details>）は文字として表示されるだけで構造タグではない。
-      # 先に \\（エスケープされたバックスラッシュ）を空白へ置き換えてから \< を置き換え、\\<details> は本物のタグとして残す
-      gsub(/[\\][\\]/, "  ", s); gsub(/[\\]</, "  ", s)
+      s = L[k]
+      if (s ~ /^<!-- granularity: [1-9][0-9]*h -->[ \t\r]*$/) continue
+      if (index(s, "`") || index(s, "<!--") || index(s, "-->") || index(s, "\\")) exit 9
       before = depth; touched = 0
-      # タイトル由来の行末 </details> は退避節の閉じと区別できないため、表行・見出し行は数えない（閉じが他に無ければ exit 8 で中止）
-      if (!(s ~ /^[ \t]*[|]/ || s ~ /^[ \t]*#+[ \t]/)) {
-        while (match(s, /<\/details>|<details([ \t\r>]|$)/)) {
-          if (substr(s, RSTART, 2) == "</") { if (depth > 0) depth--; touched = 1 }
-          else { depth++; touched = 1 }
-          s = substr(s, RSTART + RLENGTH)
-        }
+      while (match(s, /<\/details>|<details([ \t\r>]|$)/)) {
+        if (substr(s, RSTART, 2) == "</") { if (depth > 0) depth--; touched = 1 }
+        else { depth++; touched = 1 }
+        s = substr(s, RSTART + RLENGTH)
       }
       if (before > 0 || touched) X[k] = 1
     }
-    if (pend > 0 && pend_hit) exit 9
     # 閉じ忘れの <details> は、以降の行が全て除外されて後ろの見出しが置換対象から外れるため、範囲を判定できず中止する
     if (depth > 0) exit 8
     # 追記位置（最終 Phase 行・プレースホルダー行）と置換対象の見出し数は、対象範囲の行だけから数える
@@ -314,7 +270,7 @@ elif [ "${rc}" -eq 7 ]; then
 elif [ "${rc}" -eq 8 ]; then
   die 1 "ルート本文の <details> が閉じていないため置換対象の範囲を判定できません。ルート本文は更新しません。"
 elif [ "${rc}" -eq 9 ]; then
-  die 1 "ルート本文のコードスパンが閉じておらず、行をまたいで <details> の開閉を判定できません。ルート本文は更新しません。"
+  die 1 "ルート本文の <details> を判定する範囲に、バッククォート・<!--・-->・バックスラッシュのいずれかを含む行があり、<details> の開閉を判定できません。該当記号を取り除くか、update-issue-tree の管理マーカー区間の外へ移してください。ルート本文は更新しません。"
 elif [ "${rc}" -ne 0 ]; then
   die 1 "本文の Phase 別表に追記位置（'| Phase N |' 行または '| (作成後に更新) |' 行）がないか、Phase 行を出力できませんでした。中止します。"
 fi

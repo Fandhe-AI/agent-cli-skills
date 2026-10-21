@@ -1010,23 +1010,23 @@ test('(B8) 区間内に生成物以外のプレースホルダーが残れば従
   assert.equal(edits.length, 0)
 })
 
-test('(B9) 置換対象の節と旧表の間にコメント行・details があっても旧表は次の見出しまで除去され、details は保持される', () => {
+test('(B9) 置換対象の節と旧表の間に通常の行・details があっても旧表は次の見出しまで除去され、details は保持される', () => {
   const root = MANAGED_ROOT().replace(
     '### Phase 1: A\n\n| Issue',
-    '### Phase 1: A\n\n<!-- note -->\n\n<details><summary>メモ</summary>\n\nKEEP-DETAILS\n\n</details>\n\n| Issue',
+    '### Phase 1: A\n\nNOTE-LINE\n\n<details><summary>メモ</summary>\n\nKEEP-DETAILS\n\n</details>\n\n| Issue',
   )
   const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
   assert.ok(!body.includes('| #11 | old |'), '旧表が新節の後に残っている')
-  assert.ok(!body.includes('<!-- note -->'))
+  assert.ok(!body.includes('NOTE-LINE'))
   assert.ok(body.includes('KEEP-DETAILS'), '保護対象の details が消えた')
   assert.ok(body.includes(END_M))
   assert.ok(body.includes('| #12 | legacy | - |'))
   assert.match(body, /### Phase 2: B/)
 })
 
-test('(B10) マーカー無しでも節と旧表の間のコメント行で除去が止まらない', () => {
-  const root = ROOT_BODY.replace('### Phase 1: 古い\n', '### Phase 1: 古い\n\n<!-- note -->\n')
+test('(B10) マーカー無しでも節と旧表の間の通常の行で除去が止まらない', () => {
+  const root = ROOT_BODY.replace('### Phase 1: 古い\n', '### Phase 1: 古い\n\nNOTE-LINE\n')
   const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
   assert.ok(!body.includes('古い子'))
@@ -1084,27 +1084,21 @@ test('(C4) 属性つき <details open> と 1 行で開閉する <details>…</de
   assert.equal(phase1Headings(body), 2)
 })
 
-test('(C4b) HTML コメント内の </details> は閉じとして数えず、退避済み節は置換されない', () => {
-  const root = ROOT_BODY.replace(
-    '### Phase 1: 古い',
-    '<details>\n\n<!-- </details> -->\n\n### Phase 1: 退避済み\n\nKEEP-COMMENT\n\n</details>\n\n### Phase 1: 古い',
-  )
-  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 0, r.stderr)
-  assert.ok(body.includes('KEEP-COMMENT'), '退避済み節が書き換えられた')
-  assert.ok(body.includes('### Phase 1: 退避済み'))
-  assert.equal(phase1Headings(body), 2)
+const abortsAmbiguous = (root, label) => {
+  const { r, edits, leftovers } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 1, `${label}: ${r.stderr}`)
+  assert.equal(edits.length, 0, `${label}: gh issue edit が呼ばれた`)
+  assert.match(r.stderr, /判定できません/, label)
+  assert.match(r.stderr, /バッククォート・<!--・-->・バックスラッシュ/, label)
+  assert.deepEqual(leftovers, [], label)
+}
+
+test('(C4b) HTML コメントを含む行が判定範囲にあれば、コメント内の </details> を数えず推測もせず中止する', () => {
+  abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<details>\n\n<!-- </details> -->\n\n### Phase 1: 退避済み\n\nKEEP-COMMENT\n\n</details>\n\n### Phase 1: 古い'), 'C4b')
 })
 
-test('(C4c) 複数行 HTML コメント内の </details> / <details> も数えない', () => {
-  const root = ROOT_BODY.replace(
-    '### Phase 1: 古い',
-    '<details>\n\n<!--\n</details>\n<details>\n-->\n\n### Phase 1: 退避済み\n\nKEEP-MULTI\n\n</details>\n\n### Phase 1: 古い',
-  )
-  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 0, r.stderr)
-  assert.ok(body.includes('KEEP-MULTI'))
-  assert.equal(phase1Headings(body), 2)
+test('(C4c) 複数行 HTML コメントを含む本文も、本文を書き換えず中止する', () => {
+  abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<details>\n\n<!--\n</details>\n<details>\n-->\n\n### Phase 1: 退避済み\n\nKEEP-MULTI\n\n</details>\n\n### Phase 1: 古い'), 'C4c')
 })
 
 test('(C5) 閉じタグが `>` を欠く </details は閉じとして数えず、閉じ忘れとして中止する', () => {
@@ -1144,21 +1138,22 @@ test('(D1b) 退避節内に同名見出しがあっても素通しされ、外�
   assert.equal(phase1Headings(body), 2)
 })
 
-test('(D1c) 退避節内の見出し・表行末の </details>（タイトル由来）を閉じと数えず、退避済み節を置換しない', () => {
-  const root = withOld('<details><summary>退避</summary>\n\n### Phase 2: fix </details>\n\n### Phase 1: 退避済み\n\n| #9 | t </details>\n\n</details>')
+test('(D1c) 見出し行の </details> も他の行と同じく閉じと数える（表・見出し行を特別扱いしない）', () => {
+  const root = withOld('<details><summary>退避</summary>\n\n| #9 | old |\n\n### Phase 2: fix </details>')
   const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
   assert.ok(body.includes('### Phase 2: fix </details>'))
-  assert.ok(body.includes('### Phase 1: 退避済み'))
-  assert.ok(body.includes('| #9 | t </details>'))
+  assert.ok(body.includes('| #9 | old |'))
   assert.ok(!body.includes('古い子'))
-  assert.equal(phase1Headings(body), 2)
+  assert.equal(phase1Headings(body), 1)
 })
 
-test('(D1d) 閉じが表行末の </details> だけの退避節は区別できないため中止する', () => {
+test('(D1d) 退避節が表行末の </details> で閉じていても、閉じと数えて更新できる', () => {
   const root = withOld('<details><summary>退避</summary>\n\n| #9 | old |</details>')
-  const { r } = runRoot(root, [issue(111, 'feat: 新しい子')])
-  assert.notEqual(r.status, 0)
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('| #9 | old |</details>'))
+  assert.ok(!body.includes('古い子'))
 })
 
 test('(D2) 1 行で開閉したあとに文字が続く行でも中止せず、素通しされる', () => {
@@ -1197,137 +1192,122 @@ test('(D5) 1 行内の入れ子は閉じが 2 つなら通り、1 つなら中�
   assert.equal(ng.edits.length, 0)
 })
 
-test('(D6) バッククォート内の <details> / </details> は数えない', () => {
-  const open = runRoot(withOld('`<details>` を使う説明'), [issue(111, 'feat: 新しい子')])
-  assert.equal(open.r.status, 0, open.r.stderr)
-  assert.ok(!open.body.includes('古い子'))
-  const close = runRootFull(withOld('<details><summary>x</summary>\n\n`</details>` の説明'), [issue(111, 'feat: 新しい子')])
-  assert.equal(close.r.status, 1, close.r.stderr)
-  assert.equal(close.edits.length, 0)
+test('(D6) バッククォートを含む行が判定範囲にあれば、<details> の言及でも中止する', () => {
+  abortsAmbiguous(withOld('`<details>` を使う説明'), 'D6 open')
+  abortsAmbiguous(withOld('<details><summary>x</summary>\n\n`</details>` の説明'), 'D6 close')
 })
 
-test('(D6b) 複数バッククォートのコードスパン内の </details> は数えず、退避済み Phase 見出しを保持する', () => {
-  const root = withOld('<details><summary>退避</summary>\n\n`` </details> ``\n\n### Phase 1: 退避済み\n\n</details>')
-  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 0, r.stderr)
-  assert.ok(body.includes('### Phase 1: 退避済み'))
+test('(D6b) 複数バッククォートのコードスパンを含む本文も中止する', () => {
+  abortsAmbiguous(withOld('<details><summary>退避</summary>\n\n`` </details> ``\n\n### Phase 1: 退避済み\n\n</details>'), 'D6b')
 })
 
-test('(D7) タイトルに <details> を含む子 issue の表行・見出しを再マージしても未閉じ扱いにならない（冪等）', () => {
-  const kids = [issue(111, 'fix: <details> の閉じ忘れ'), issue(112, 'fix: </details> を数えず')]
+test('(D7) タイトルに <details> を含む子 issue の行も数えるため、未閉じになった再マージは edit せず exit 8 で中止する', () => {
+  const kids = [issue(111, 'fix: <details> の閉じ忘れ')]
   const first = runRoot(ROOT_BODY, kids)
   assert.equal(first.r.status, 0, first.r.stderr)
-  const second = runRoot(first.body, kids)
-  assert.equal(second.r.status, 0, second.r.stderr)
-  assert.equal(phase1Headings(second.body), 1)
+  const second = runRootFull(first.body, kids)
+  assert.equal(second.r.status, 1, second.r.stderr)
+  assert.equal(second.edits.length, 0)
+  assert.match(second.r.stderr, /<details> が閉じていない/)
 })
 
-test('(D8) 表行の行中の </details> は閉じと数えず、行末でなければ未閉じとして中止する（安全側）', () => {
+test('(D8) 表行の行中の </details> も閉じと数える', () => {
   const root = withOld('<details><summary>退避</summary>\n\n| #5 | fix: </details> を数えず | - |')
-  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 1, r.stderr)
-  assert.equal(edits.length, 0)
-})
-
-test('(D9) 退避節内の表行タイトルの <!-- はコメント状態を変えず、後続の </details> で閉じる', () => {
-  const root = withOld('<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n| #9 | fix: <!-- の説明 |\n\n</details>')
   const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
-  assert.ok(body.includes('| #9 | fix: <!-- の説明 |'))
-  assert.ok(body.includes('### Phase 1: 退避済み'))
+  assert.ok(body.includes('| #5 | fix: </details> を数えず | - |'))
   assert.ok(!body.includes('古い子'))
+})
+
+test('(D9) 表行のタイトルに <!-- を含む本文は、状態を追わず中止する', () => {
+  abortsAmbiguous(withOld('<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n| #9 | fix: <!-- の説明 |\n\n</details>'), 'D9')
 })
 
 // バックスラッシュでエスケープした details タグは文字として表示されるだけで、深さを変えない（PR #679 レビュー）。
-test('(D11) 説明文中のエスケープした \\<details> は開きタグと数えず、中止せず旧節だけが置換される', () => {
-  const root = withOld('タグは \\<details> と書く')
-  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 0, r.stderr)
-  assert.ok(body.includes('タグは \\<details> と書く'))
-  assert.ok(!body.includes('古い子'))
+test('(D11) 説明文中のバックスラッシュ（\<details>）を含む行は、エスケープを解釈せず中止する', () => {
+  abortsAmbiguous(withOld('タグは \\<details> と書く'), 'D11')
 })
 
-test('(D12) 退避節内のエスケープした \\</details> を閉じと数えず、退避済み節を置換しない', () => {
-  const root = withOld('<details><summary>退避</summary>\n\n説明: \\</details> は文字\n\n### Phase 1: 退避済み\n\n</details>')
-  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 0, r.stderr)
-  assert.ok(body.includes('### Phase 1: 退避済み'))
-  assert.ok(body.includes('説明: \\</details> は文字'))
-  assert.ok(!body.includes('古い子'))
-  assert.equal(phase1Headings(body), 2)
+test('(D12) 退避節内のバックスラッシュを含む行（\</details>）も中止する', () => {
+  abortsAmbiguous(withOld('<details><summary>退避</summary>\n\n説明: \\</details> は文字\n\n### Phase 1: 退避済み\n\n</details>'), 'D12')
 })
 
-test('(D13) エスケープされたバックスラッシュ直後の <details> は本物のタグとして数え、閉じなければ中止する', () => {
-  const root = withOld('\\\\<details>')
-  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 1, r.stderr)
-  assert.equal(edits.length, 0)
+test('(D13) 二重バックスラッシュ直後の <details> も中止する', () => {
+  abortsAmbiguous(withOld('\\\\<details>'), 'D13')
 })
 
-// PR #679 レビュー指摘: gawk では `\<` が単語境界演算子になるため、エスケープ除去を文字クラスで書く。
-test('(E1) エスケープ除去は文字クラスで書かれ、未閉じ <details> は edit せず中止し、エスケープ済みは数えない', () => {
+test('(D10) 見出し行に <!-- を含む本文は中止する', () => {
+  abortsAmbiguous(withOld('### メモ <!-- 注\n\n<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n</details>'), 'D10')
+})
+
+// 方針（Issue #678）: コードスパン・HTML コメント・エスケープの状態は追わない。判定範囲に曖昧な記号があれば中止する。
+test('(E1) 状態追跡のコード（strip_code・pend・incomment・エスケープ除去）を持たず、未閉じ <details> は edit せず中止する', () => {
   const src = readFileSync(new URL('../scripts/merge-root-body.sh', import.meta.url), 'utf8')
-  assert.ok(src.includes('gsub(/[\\\\]</, "  ", s)'), '`\\<` を正規表現リテラルで直接書いている')
+  for (const dead of ['strip_code', 'pend_hit', 'incomment', 'gsub(/[\\\\]<']) assert.ok(!src.includes(dead), `${dead} が残っている`)
   const ng = runRootFull(withOld('<details><summary>x</summary>'), [issue(111, 'feat: 新しい子')])
   assert.equal(ng.r.status, 1, ng.r.stderr)
   assert.equal(ng.edits.length, 0)
   assert.match(ng.r.stderr, /<details> が閉じていない/)
-  const ok = runRoot(withOld('\\<details> は文字 \\</details> も文字'), [issue(111, 'feat: 新しい子')])
-  assert.equal(ok.r.status, 0, ok.r.stderr)
 })
 
-// PR #679 レビュー指摘: コードスパンは改行をまたげる。持ち越した状態で、スパン内の </details> を閉じと数えない。
-test('(E2) 複数行のコードスパン内の </details> は閉じと数えず、退避済みの節を置換しない', () => {
-  const root = withOld('<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n説明 `例:\nfoo </details>\n終わり`\n\n</details>')
-  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 0, r.stderr)
-  assert.ok(body.includes('### Phase 1: 退避済み'))
-  assert.ok(body.includes('foo </details>'))
-  assert.ok(!body.includes('古い子'))
-  assert.equal(phase1Headings(body), 2)
+test('(E2) 複数行のコードスパンを含む本文は、スパン内の </details> を数えず推測もせず中止する', () => {
+  abortsAmbiguous(withOld('<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n説明 `例:\nfoo </details>\n終わり`\n\n</details>'), 'E2')
 })
 
-test('(E3) 閉じないバッククォートが <details> 系タグを読み飛ばしたまま段落が終わる本文は edit せず中止する', () => {
-  for (const head of ['<details><summary>退避</summary>\n\n説明 `例:\nfoo </details>\n\n続き', '説明 `例:\n<details>x']) {
-    const { r, edits, leftovers } = runRootFull(withOld(head), [issue(111, 'feat: 新しい子')])
-    assert.equal(r.status, 1, r.stderr)
-    assert.equal(edits.length, 0)
-    assert.match(r.stderr, /コードスパン/)
-    assert.deepEqual(leftovers, [])
-  }
+test('(E3) 閉じないバッククォートを含む本文は中止する', () => {
+  for (const head of ['<details><summary>退避</summary>\n\n説明 `例:\nfoo </details>\n\n続き', '説明 `例:\n<details>x']) abortsAmbiguous(withOld(head), 'E3')
 })
 
-test('(D10) 見出し行に <!-- を含んでも後続の <details> を認識し、退避内容を落とさない', () => {
-  const root = withOld('### メモ <!-- 注\n\n<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n</details>')
-  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 0, r.stderr)
-  assert.ok(body.includes('### Phase 1: 退避済み'))
-  assert.ok(!body.includes('古い子'))
-})
-
-// PR #679 codex 指摘: コードスパンと HTML コメントを 1 回の走査で扱い、表・見出し行は元の行で判定する。
 const KEEP = '### Phase 1: 退避済み'
-const keepsEscaped = (head) => {
+const ESC = `<details><summary>退避</summary>\n\n${KEEP}\n\nKEEP-BODY\n\n</details>`
+
+// レビュー指摘 1（Bugbot High）: 閉じないバッククォートで行の残りを読み飛ばすと、その中の --> も読み飛ばして後続の <details> を見落とした。
+test('(E4) 閉じないバッククォートと --> を持つ本文は中止し、退避済みの節を消さない', () => {
+  abortsAmbiguous(withOld(`説明 \`未閉じ -->\n${ESC}`), 'E4 backtick+-->')
+  abortsAmbiguous(withOld(`<!-- 注 \`\n-->\n${ESC}`), 'E4 comment')
+})
+
+// レビュー指摘 2（codex P1）: 見出し・表行の中で閉じるコメントを検出できなかった。
+test('(E5) 見出し行・表行の中で閉じる --> を含む本文は中止する', () => {
+  abortsAmbiguous(withOld(`<!-- 開始\n# 注記 -->\n${ESC}`), 'E5 heading')
+  abortsAmbiguous(withOld(`<!-- 開始\n| 注記 -->\n${ESC}`), 'E5 table')
+})
+
+// レビュー指摘 3（codex P1）: エスケープされたバッククォート・<!-- をコードスパン・コメントの開始として扱った。
+test('(E6) エスケープされたバッククォート・<!-- を含む本文は中止する', () => {
+  abortsAmbiguous(withOld(`文字の \\\` です\n${ESC}`), 'E6 backtick')
+  abortsAmbiguous(withOld(`文字の \\<!-- です\n${ESC}`), 'E6 comment')
+})
+
+test('(F1) 判定範囲に記号が無ければ、行内に複数の <details> / </details> があっても数えて更新できる', () => {
+  const head = `<details>a</details> 補足 <details><details>b</details></details>\n\n${ESC}\n\n行頭 </details> を余分に閉じても深さは負にならない`
   const { r, body, edits } = runRootFull(withOld(head), [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
   assert.equal(edits.length, 1)
-  assert.ok(body.includes(KEEP), '退避済みの節が置換された')
+  assert.ok(body.includes('KEEP-BODY'))
+  assert.ok(body.includes(KEEP))
   assert.ok(!body.includes('古い子'))
   assert.equal(phase1Headings(body), 2)
-}
-
-test('(E4) HTML コメント内のバッククォートをコードスパンとして次の行へ持ち越さず、続く <details> を数える', () => {
-  keepsEscaped(`<!-- メモ \` -->\n<details><summary>退避</summary>\n\n${KEEP}\n\n</details>`)
 })
 
-test('(E5) 複数行にまたがる HTML コメント内のバッククォート・<details> は数えず、コメント後の <details> は数える', () => {
-  keepsEscaped(`<!-- 注 \`\n<details> は閉じない\n-->\n<details><summary>退避</summary>\n\n${KEEP}\n\n</details>`)
+test('(F2) 管理マーカーの外にあるバッククォート・コメント・バックスラッシュでは止まらず、内側だけを判定する', () => {
+  const root = MANAGED_ROOT()
+    .replace('OPS-KEEP-MARKER', 'OPS `code` <!-- c --> \\ KEEP')
+    .replace('## Phase 別表\n', '## Phase 別表\n\n説明 `x` と <!-- メモ --> と \\\n')
+  const { r, body, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(edits.length, 1)
+  assert.ok(body.includes('OPS `code` <!-- c --> \\ KEEP'))
+  assert.ok(body.includes('| #12 | legacy | - |'))
 })
 
-test('(E6) インラインコード内の <!-- はコメントの開始にならず、続く <details> を数える', () => {
-  keepsEscaped(`メモ \`<!--\` です\n\n<details><summary>退避</summary>\n\n${KEEP}\n\n</details>`)
+test('(F3) 管理マーカーの内側にバッククォートがあれば中止する', () => {
+  abortsAmbiguous(MANAGED_ROOT().replace('| #11 | old | - |', '| #11 | `old` | - |'), 'F3')
 })
 
-test('(E7) 退避節内の表行・見出し行のバッククォートはコードスパン状態を持ち越さず、中止せず更新できる', () => {
-  keepsEscaped(`<details><summary>退避</summary>\n\n${KEEP}\n\n| #9 | fix: \` <details> |\n\n### Phase 3: fix \` </details>\n\n</details>`)
+test('(F4) コードフェンス内の記号は走査せず、フェンス外に記号が無ければ更新できる', () => {
+  const root = withOld('```\n`x` <!-- y --> \\\n```')
+  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(edits.length, 1)
 })
