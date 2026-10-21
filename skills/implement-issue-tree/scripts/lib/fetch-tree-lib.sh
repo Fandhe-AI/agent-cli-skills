@@ -4,7 +4,7 @@
 # 呼び出し元: fetch-tree.sh（Issue #668）。ツリー取得の出力（ノードごとの TSV 行）から検査値を作る定義の置き場。
 #             ホスト（implement-issue-tree.src.js の treeRowDigestLine / treeNodesDigest）は同じ定義を JavaScript で
 #             計算し直して照合する。定義を変えるときは両方と tests/fetch-tree-unit.test.mjs の表を同時に直す。
-# 役割: 1) title の表示形（制御文字を半角スペースへ置換）、2) 行ダイジェスト、3) ノード全体のダイジェスト nodesSha256、
+# 役割: 0) 構造 5 欄だけのダイジェスト structSha256（Issue #687）、1) title の表示形（制御文字を半角スペースへ置換）、2) 行ダイジェスト、3) ノード全体のダイジェスト nodesSha256、
 #       4) 入力の束縛 inputSha256 の定義を 1 箇所に持つ。
 # 契約: どの関数も exit せず、git・gh・ネットワークを呼ばない。結果は stdout と return 値で返す。
 #       source 元のシェル状態を壊さないため set -e / set -u / trap / exit は置かない。二重 source は無害。
@@ -74,6 +74,41 @@ ft_nodes_digest() {
   [ -n "${lines}" ] || return 1
   sorted=$(printf '%s' "${lines}" | LC_ALL=C sort -t "${tab}" -k1,1n) || return 1
   printf '%s' "${sorted}" | so_sha256
+}
+
+# 標準入力の TSV の structSha256（Issue #687）を stdout へ。title を除く 5 欄（number / parent / siblingIndex / state /
+# subIssuesTotal）だけの行を number の昇順（数値）に並べ、改行で連結（末尾改行なし）して SHA-256 を取る。
+# title の書き写し誤りと構造の誤りを分けて扱うための検査値（ホストの treeStructDigest と同じ定義）。
+ft_struct_digest() {
+  local tab num parent sib state total title lines sorted
+  tab=$(printf '\t')
+  lines=""
+  while IFS="${tab}" read -r num parent sib state total title || [ -n "${num}" ]; do
+    [ -n "${num}" ] || continue
+    lines="${lines}${num}${tab}${parent}${tab}${sib}${tab}${state}${tab}${total}
+"
+  done
+  [ -n "${lines}" ] || return 1
+  sorted=$(printf '%s' "${lines}" | LC_ALL=C sort -t "${tab}" -k1,1n) || return 1
+  printf '%s' "${sorted}" | so_sha256
+}
+
+# タスク ID の抽出（Issue #687 の追補）。ホストの TITLE_TASK_ID_RE（implement-issue-tree.src.js）と同じ定義の Oniguruma 版。
+# タイトル先頭の `type(scope)!: ` と `[` / `【` の後ろのタスク ID（例: TASK-97-6）。依存の解決（兄弟のタスク ID 表）に使われる値で、
+# title のダイジェスト不一致を許容する場合でも、ここは別に検査して書き写し誤りを許さない。定義を変えるときはホストと表を同時に直す。
+# 空白は \s に頼らず明示した集合にする（Oniguruma の \s は U+0085 を含み U+FEFF を含まず、JS は逆。ホストの空白集合と一致させる）。
+FT_TASK_ID_RE='^[ \t\n\r\f\v\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]*(?:[a-z]+(?:\([^()\n]{0,64}\))?!?:[ \t\n\r\f\v\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]*)?[\[【]?(?<id>[A-Z][A-Z0-9]{0,19}(?:-[0-9]{1,6}){1,4})(?=$|[ \t\n\r\f\v\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}\]】:：])'
+
+# 標準入力の TSV の taskIdSha256 を stdout へ。各行の「number TAB タスク ID（無ければ空）」を number の昇順（数値）に並べ、
+# 改行で連結（末尾改行なし）して SHA-256 を取る。title の他の部分の書き写し誤りは見ず、依存解決に効く ID だけを束縛する。
+ft_task_id_digest() {
+  local lines
+  lines=$(jq -Rrs --arg re "${FT_TASK_ID_RE}" '
+    split("\n") | map(select(length > 0) | split("\t"))
+    | map({n: (.[0] | tonumber), id: (((.[5] // "") | capture($re) | .id) // "")})
+    | sort_by(.n) | map("\(.n)\t\(.id)") | join("\n")') || return 1
+  [ -n "${lines}" ] || return 1
+  printf '%s' "${lines}" | so_sha256
 }
 
 # 入力の束縛: sha256("fetch-tree\n" + root + "\n" + repo)（repo 未指定は空文字）。$1 = root、$2 = repo。

@@ -15,11 +15,13 @@
 #   前半  ノードごとに 1 行の TSV: number TAB parent TAB siblingIndex TAB state TAB subIssuesTotal TAB title
 #         （発見順。ルートは parent 0・siblingIndex 0。title は制御文字を半角スペースへ置換した表示形）
 #         ページ数が 2 以上のときは 1 ページ目の行だけで、続けて FETCH_TREE_DIR=<絶対パス> の 1 行を出す
-#   最終行  封筒 1 行 {nonce, payload, sha256}。payload は {"count":N,"inputSha256":"...","nodesSha256":"...","pages":P}
-#         - count        全ページ合計の行数
+#   最終行  封筒 1 行 {nonce, payload, sha256}。payload は {"count":N,"inputSha256":"...","nodesSha256":"...","pages":P,"structSha256":"...","taskIdSha256":"..."}
+#         - count       全ページ合計の行数
 #         - inputSha256  sha256("fetch-tree\n" + root + "\n" + repo)。ルート・対象リポジトリを束縛する
 #         - nodesSha256  lib/fetch-tree-lib.sh の ft_nodes_digest（6 欄を網羅。title は SHA-256 の 16 進にして含める）
-#         - pages        ページ数（封筒の sha256 が束縛する。ページの読み飛ばしは count / nodesSha256 の不一致として検出される）
+#         - structSha256 lib/fetch-tree-lib.sh の ft_struct_digest（title を除く 5 欄。title の書き写し誤りと構造の誤りを分けて扱う・Issue #687）
+#         - taskIdSha256 lib/fetch-tree-lib.sh の ft_task_id_digest（title 先頭のタスク ID だけ。依存解決に使う値で、title の不一致を許容する場合でも別に検査する）
+#         - pages        ページ数（封筒の sha256 が束縛する。ページの読み飛ばしは count / structSha256 / nodesSha256 の不一致として検出される）
 # 出力（--page モード）: 指定ページの TSV 行だけ（封筒なし）。gh・jq・nonce を使わない。
 # 終了コード:
 #   0  成功（取得モードは封筒を出力した）
@@ -169,9 +171,11 @@ done
 count=$(printf '%s\n' "${rows}" | grep -c '')
 
 nodes_sha=$(printf '%s\n' "${rows}" | ft_nodes_digest) || { echo "fetch-tree: ノードのダイジェストを作れなかった" >&2; exit 3; }
+struct_sha=$(printf '%s\n' "${rows}" | ft_struct_digest) || { echo "fetch-tree: 構造のダイジェストを作れなかった" >&2; exit 3; }
+task_sha=$(printf '%s\n' "${rows}" | ft_task_id_digest) || { echo "fetch-tree: タスク ID のダイジェストを作れなかった" >&2; exit 3; }
 pages=$(printf '%s\n' "${rows}" | ft_page_count "${PAGE_BYTES}") || { echo "fetch-tree: ページ数を数えられなかった" >&2; exit 4; }
 [ "${pages}" -le "${MAX_PAGES}" ] || { echo "fetch-tree: ツリーが大きすぎる（${pages} ページ > ${MAX_PAGES}）" >&2; exit 7; }
-envelope=$(so_emit "${nonce}" "$(printf '{"count":%d,"inputSha256":"%s","nodesSha256":"%s","pages":%d}' "${count}" "${input_sha}" "${nodes_sha}" "${pages}")") \
+envelope=$(so_emit "${nonce}" "$(printf '{"count":%d,"inputSha256":"%s","nodesSha256":"%s","pages":%d,"structSha256":"%s","taskIdSha256":"%s"}' "${count}" "${input_sha}" "${nodes_sha}" "${pages}" "${struct_sha}" "${task_sha}")") \
   || { echo "fetch-tree: 出力封筒を作れなかった（sha256sum / shasum が無い等）" >&2; exit 3; }
 
 out_dir=""

@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 import { availableBashes } from './lib/signed-output.mjs'
 
 const LIBDIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib')
@@ -38,6 +39,8 @@ while IFS="$US" read -r fn a b c d e f; do
     count) ft_count_ok "$a" "$b" || rc=$? ;;
     line) out=$(ft_row_digest_line "$a" "$b" "$c" "$d" "$e" "$f") || rc=$? ;;
     nodes) out=$(printf '%s\\n' "$a" | ft_nodes_digest) || rc=$? ;;
+    taskid) out=$(printf '%s\\n' "$a" | ft_task_id_digest) || rc=$? ;;
+    struct) out=$(printf '%s\\n' "$a" | ft_struct_digest) || rc=$? ;;
     input) out=$(ft_input_sha "$a" "$b") || rc=$? ;;
     pcount) out=$(printf '%s\\n' "$a" | ft_page_count "$b") || rc=$? ;;
     pcount0) out=$(printf '' | ft_page_count "$b") || rc=$? ;;
@@ -133,5 +136,71 @@ for (const bash of availableBashes()) {
     assert.deepEqual(res.slice(27, 31).map((x) => [x.rc, x.out]), [[0, 'aaaa\nbbbb'], [0, 'cccc'], [1, ''], [2, '']])
     assert.deepEqual(res.slice(31).map((x) => x.rc), [0, 0, 1, 1, 1, 1, 1, 1])
     void hex
+  })
+
+  test(`[${bash}] ft_struct_digest（title を除く 5 欄・順序非依存・Issue #687）`, () => {
+    const expect = sha(['1\t0\t0\topen\t1', '2\t1\t0\tclosed\t0', '10\t1\t1\topen\t0'].join('\n'))
+    const a = ['2\t1\t0\tclosed\t0\tb', '1\t0\t0\topen\t1\ta', '10\t1\t1\topen\t0\tc d'].join('\n')
+    const retitled = ['2\t1\t0\tclosed\t0\tB!', '1\t0\t0\topen\t1\t日本語', '10\t1\t1\topen\t0\t'].join('\n')
+    const sib = ['2\t1\t0\tclosed\t0\tb', '1\t0\t0\topen\t1\ta', '10\t1\t2\topen\t0\tc d'].join('\n')
+    const res = table(bash, [['struct', a], ['struct', retitled], ['struct', sib], ['struct', '']])
+    assert.deepEqual([res[0].rc, res[0].out], [0, expect])
+    assert.deepEqual([res[1].rc, res[1].out], [0, expect])
+    assert.equal(res[2].rc, 0)
+    assert.notEqual(res[2].out, expect)
+    assert.notEqual(res[3].rc, 0)
+  })
+}
+
+// jq/Oniguruma の \s と JS の \s は U+FEFF・U+0085 で食い違う。両側が同じ明示集合を使い、抽出結果が一致すること（Issue #687）。
+// ホスト側の TITLE_TASK_ID_RE を実ソースから取り出す（テスト側に正規表現を複製しない）。
+const SRC_RE_LINE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js'), 'utf8')
+  .split('\n').find((l) => l.startsWith('const TITLE_TASK_ID_RE ='))
+const SRC_RE = new Function(`return ${SRC_RE_LINE.replace('const TITLE_TASK_ID_RE =', '')}`)()
+const WS_PARITY_TITLES = [
+  ['\uFEFFTASK-1 x', 'TASK-1'],
+  ['\u0085TASK-1 x', ''],
+  ['\u00A0TASK-1 x', 'TASK-1'],
+  ['feat:\u3000TASK-1 x', 'TASK-1'],
+  ['TASK-1\u3000x', 'TASK-1'],
+  ['TASK-1\u0085x', ''],
+  ['TASK-1\uFEFFx', 'TASK-1'],
+  // scope の {0,64} はコードポイント単位で両側一致させる（絵文字はホストで UTF-16 の 2 単位になる）
+  [`feat(${'\u{1F600}'.repeat(33)}): TASK-1 x`, 'TASK-1'],
+  [`feat(${'\u{1F600}'.repeat(64)}): TASK-1 x`, 'TASK-1'],
+  [`feat(${'\u{1F600}'.repeat(65)}): TASK-1 x`, ''],
+]
+for (const bash of availableBashes()) {
+  test(`[${bash}] ft_task_id_digest は JS の空白集合と一致する（U+FEFF / U+0085・Issue #687）`, () => {
+    for (const [title, want] of WS_PARITY_TITLES) {
+      const jsId = (SRC_RE.exec(title) || [])[1] || ''
+      assert.equal(jsId, want, `JS: ${JSON.stringify(title)}`)
+      const res = table(bash, [['taskid', `1\t0\t0\topen\t0\t${title}`]])
+      assert.deepEqual([res[0].rc, res[0].out], [0, sha(`1\t${want}`)], `jq: ${JSON.stringify(title)}`)
+    }
+  })
+}
+
+for (const bash of availableBashes()) {
+  test(`[${bash}] ft_task_id_digest（タイトル先頭のタスク ID だけ・順序非依存・Issue #687）`, () => {
+    const rows = [
+      '1\t0\t0\topen\t1\tfeat(x)!: [TASK-97-6] foo',
+      '2\t1\t0\topen\t0\tno id',
+      '3\t1\t1\topen\t0\t【ABC-1-2】x',
+      '4\t1\t2\topen\t0\tTASK-97-5x',
+      '5\t1\t3\topen\t0\tTASK-97-5',
+      '10\t1\t4\topen\t0\t',
+    ]
+    const expect = sha(['1\tTASK-97-6', '2\t', '3\tABC-1-2', '4\t', '5\tTASK-97-5', '10\t'].join('\n'))
+    const reordered = [rows[5], rows[2], rows[0], rows[4], rows[1], rows[3]].join('\n')
+    const retitled = rows.map((r) => r.replace('foo', 'bar')).join('\n')
+    const dropped = rows.map((r) => r.replace('[TASK-97-6] ', '')).join('\n')
+    const res = table(bash, [['taskid', rows.join('\n')], ['taskid', reordered], ['taskid', retitled], ['taskid', dropped], ['taskid', '']])
+    assert.deepEqual([res[0].rc, res[0].out], [0, expect])
+    assert.deepEqual([res[1].rc, res[1].out], [0, expect])
+    assert.deepEqual([res[2].rc, res[2].out], [0, expect])
+    assert.equal(res[3].rc, 0)
+    assert.notEqual(res[3].out, expect)
+    assert.notEqual(res[4].rc, 0)
   })
 }
