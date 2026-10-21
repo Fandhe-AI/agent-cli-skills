@@ -1395,11 +1395,14 @@ test('(G4) & は最初に変換され、文字参照が二重変換されない'
   assert.ok(body.includes('| #111 | a&amp;b &lt;c&gt; &#96;d&#96; e&#92;f g&#124;h | - |'))
 })
 
-test('(G5) 旧形式のエスケープ（\\|）が残る本文は中止し、旧形式の可能性と回避策を案内する', () => {
+test('(G5) 旧形式のエスケープ（\\|）が残る本文は中止し、文字参照で手直しする案内を出す', () => {
   const root = ROOT_BODY.replace('| #901 | 古い子 | - |', '| #901 | a \\| b | - |')
   const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 1, r.stderr)
   assert.equal(edits.length, 0)
   assert.match(r.stderr, /旧形式のエスケープ/)
-  assert.match(r.stderr, /update-issue-tree/)
+  assert.match(r.stderr, /文字参照/)
+  assert.match(r.stderr, /&#124;/)
+  assert.match(r.stderr, /管理マーカー区間内の行も対象/)
+  assert.doesNotMatch(r.stderr, /update-issue-tree で本文を更新してください/)
 })
