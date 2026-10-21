@@ -1166,6 +1166,13 @@ test('(D6) バッククォート内の <details> / </details> は数えない', 
   assert.equal(close.edits.length, 0)
 })
 
+test('(D6b) 複数バッククォートのコードスパン内の </details> は数えず、退避済み Phase 見出しを保持する', () => {
+  const root = withOld('<details><summary>退避</summary>\n\n`` </details> ``\n\n### Phase 1: 退避済み\n\n</details>')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('### Phase 1: 退避済み'))
+})
+
 test('(D7) タイトルに <details> を含む子 issue の表行・見出しを再マージしても未閉じ扱いにならない（冪等）', () => {
   const kids = [issue(111, 'fix: <details> の閉じ忘れ'), issue(112, 'fix: </details> を数えず')]
   const first = runRoot(ROOT_BODY, kids)

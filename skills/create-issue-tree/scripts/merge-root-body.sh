@@ -146,6 +146,24 @@ CHK_FILE=$(mktemp) || die 1 "検査用の一時ファイルを作成できませ
 rc=0
 NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="${SEC_FILE}" CHKF="${CHK_FILE}" awk '
   # 開きフェンス行なら 1 を返し、記号 fch と長さ flen を保存する。info 文字列に ` を含む ``` 行は開きではない
+  # 開始と同じ長さのバッククォート列で閉じるコードスパンを除く。閉じる列が無ければバッククォートはそのまま残す
+  function strip_code(s,    out, i, n, rest, pos, j, p, m, found) {
+    out = ""
+    while ((i = index(s, "`")) > 0) {
+      out = out substr(s, 1, i - 1); s = substr(s, i)
+      n = 0; while (substr(s, n + 1, 1) == "`") n++
+      rest = substr(s, n + 1); pos = 1; found = 0
+      while (pos <= length(rest)) {
+        j = index(substr(rest, pos), "`"); if (!j) break
+        p = pos + j - 1; m = 0; while (substr(rest, p + m, 1) == "`") m++
+        if (m == n) { found = 1; rest = substr(rest, p + m); break }
+        pos = p + m
+      }
+      if (found) s = rest
+      else { out = out substr(s, 1, n); s = substr(s, n + 1) }
+    }
+    return out s
+  }
   function fence_open(line,    ind, rest, len, info) {
     match(line, /^ */); ind = RLENGTH
     if (ind > 3) return 0
@@ -206,7 +224,7 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
       # タグはインラインコードスパンを除いた行から数える（バッククォート内の言及は対象外）。
       # 表行・見出し行は子 issue のタイトルが入り、CELL は < を無害化しないため、行末の </details> だけを閉じとして数える。
       # それ以外の行は行内の開き・閉じを左から全て数える（1 行開閉・行末で閉じる退避節を通す）
-      s = L[k]; gsub(/`[^`]*`/, "", s)
+      s = strip_code(L[k])
       before = depth; touched = 0
       if (s ~ /^[ \t]*[|]/ || s ~ /^[ \t]*#+[ \t]/) {
         if (depth > 0 && s ~ /<\/details>[ \t\r]*$/) { depth--; touched = 1 }
