@@ -1238,6 +1238,32 @@ test('(D9) 退避節内の表行タイトルの <!-- はコメント状態を変
   assert.ok(!body.includes('古い子'))
 })
 
+// バックスラッシュでエスケープした details タグは文字として表示されるだけで、深さを変えない（PR #679 レビュー）。
+test('(D11) 説明文中のエスケープした \\<details> は開きタグと数えず、中止せず旧節だけが置換される', () => {
+  const root = withOld('タグは \\<details> と書く')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('タグは \\<details> と書く'))
+  assert.ok(!body.includes('古い子'))
+})
+
+test('(D12) 退避節内のエスケープした \\</details> を閉じと数えず、退避済み節を置換しない', () => {
+  const root = withOld('<details><summary>退避</summary>\n\n説明: \\</details> は文字\n\n### Phase 1: 退避済み\n\n</details>')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('### Phase 1: 退避済み'))
+  assert.ok(body.includes('説明: \\</details> は文字'))
+  assert.ok(!body.includes('古い子'))
+  assert.equal(phase1Headings(body), 2)
+})
+
+test('(D13) エスケープされたバックスラッシュ直後の <details> は本物のタグとして数え、閉じなければ中止する', () => {
+  const root = withOld('\\\\<details>')
+  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 1, r.stderr)
+  assert.equal(edits.length, 0)
+})
+
 test('(D10) 見出し行に <!-- を含んでも後続の <details> を認識し、退避内容を落とさない', () => {
   const root = withOld('### メモ <!-- 注\n\n<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n</details>')
   const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
