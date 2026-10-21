@@ -146,9 +146,23 @@ CHK_FILE=$(mktemp) || die 1 "検査用の一時ファイルを作成できませ
 rc=0
 NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="${SEC_FILE}" CHKF="${CHK_FILE}" awk '
   # 開きフェンス行なら 1 を返し、記号 fch と長さ flen を保存する。info 文字列に ` を含む ``` 行は開きではない
-  # 開始と同じ長さのバッククォート列で閉じるコードスパンを除く。閉じる列が無ければバッククォートはそのまま残す
+  # 開始と同じ長さのバッククォート列で閉じるコードスパンを除く。コードスパンは改行をまたげるため、閉じが行内に無い開きは
+  # pend（開きの長さ）として次の行へ持ち越し、閉じが見つかるまでの行は丸ごと除く。持ち越し中に読み飛ばした行へ <details> / </details> が
+  # あれば pend_hit = 1 とし、段落の切れ目（空行・フェンス・表行・見出し行・本文末）までに閉じなければ、バッククォートは文字だったことになり
+  # 読み飛ばしたタグを数え損ねるため、呼び出し側が exit 9 で中止する（fail-closed）
   function strip_code(s,    out, i, n, rest, pos, j, p, m, found) {
     out = ""
+    if (pend > 0) {
+      rest = s; pos = 1; found = 0
+      while (pos <= length(rest)) {
+        j = index(substr(rest, pos), "`"); if (!j) break
+        p = pos + j - 1; m = 0; while (substr(rest, p + m, 1) == "`") m++
+        if (m == pend) { found = 1; s = substr(rest, p + m); break }
+        pos = p + m
+      }
+      if (!found) { if (rest ~ /<[\/]?details/) pend_hit = 1; return "" }
+      pend = 0; pend_hit = 0
+    }
     while ((i = index(s, "`")) > 0) {
       out = out substr(s, 1, i - 1); s = substr(s, i)
       n = 0; while (substr(s, n + 1, 1) == "`") n++
@@ -160,7 +174,7 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
         pos = p + m
       }
       if (found) s = rest
-      else { out = out substr(s, 1, n); s = substr(s, n + 1) }
+      else { pend = n; pend_hit = (rest ~ /<[\/]?details/) ? 1 : 0; s = ""; break }
     }
     return out s
   }
@@ -218,8 +232,11 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
       else if (L[k] ~ /^[ \t]*<!-- update-issue-tree:phase-plan:end -->[ \t\r]*$/) { ne++; epos = k }
     }
     if (nb > 1 || ne > 1 || nb != ne || (nb == 1 && bpos > epos)) exit 6
+    pend = 0; pend_hit = 0
     for (k = 1; k <= NR; k++) {
       if (nb == 1 && (k <= bpos || k >= epos)) { X[k] = 1; XO[k] = 1 }
+      # 段落の切れ目では持ち越し中のコードスパンを確定する。閉じなかった開きが <details> 系のタグを読み飛ばしていたら判定できないので中止する
+      if (pend > 0 && (F[k] || L[k] ~ /^[ \t\r]*$/ || L[k] ~ /^[ \t]*[|]/ || L[k] ~ /^[ \t]*#+[ \t]/)) { if (pend_hit) exit 9; pend = 0 }
       if (F[k]) { if (depth > 0) X[k] = 1; continue }
       # タグはインラインコードスパンを除いた行から数える（バッククォート内の言及は対象外）。
       # 表行・見出し行は子 issue のタイトルが入り、CELL は < を無害化しないため、タグを一切数えない（閉じとして数えるのは表行・見出し行以外の行のみ）。
@@ -243,7 +260,7 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
       s = out
       # Markdown のバックスラッシュエスケープ（\<details> / \</details>）は文字として表示されるだけで構造タグではない。
       # 先に \\（エスケープされたバックスラッシュ）を空白へ置き換えてから \< を置き換え、\\<details> は本物のタグとして残す
-      gsub(/\\\\/, "  ", s); gsub(/\\</, "  ", s)
+      gsub(/[\\][\\]/, "  ", s); gsub(/[\\]</, "  ", s)
       before = depth; touched = 0
       # タイトル由来の行末 </details> は退避節の閉じと区別できないため、表行・見出し行は数えない（閉じが他に無ければ exit 8 で中止）
       if (!(s ~ /^[ \t]*[|]/ || s ~ /^[ \t]*#+[ \t]/)) {
@@ -255,6 +272,7 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
       }
       if (before > 0 || touched) X[k] = 1
     }
+    if (pend > 0 && pend_hit) exit 9
     # 閉じ忘れの <details> は、以降の行が全て除外されて後ろの見出しが置換対象から外れるため、範囲を判定できず中止する
     if (depth > 0) exit 8
     # 追記位置（最終 Phase 行・プレースホルダー行）と置換対象の見出し数は、対象範囲の行だけから数える
@@ -299,6 +317,8 @@ elif [ "${rc}" -eq 7 ]; then
   die 1 "置換対象の '### Phase ${PHASE}:' 見出しが管理マーカー・<details> を除いても複数あり、どれを置換するか判定できません。ルート本文は更新しません。"
 elif [ "${rc}" -eq 8 ]; then
   die 1 "ルート本文の <details> が閉じていないため置換対象の範囲を判定できません。ルート本文は更新しません。"
+elif [ "${rc}" -eq 9 ]; then
+  die 1 "ルート本文のコードスパンが閉じておらず、行をまたいで <details> の開閉を判定できません。ルート本文は更新しません。"
 elif [ "${rc}" -ne 0 ]; then
   die 1 "本文の Phase 別表に追記位置（'| Phase N |' 行または '| (作成後に更新) |' 行）がないか、Phase 行を出力できませんでした。中止します。"
 fi

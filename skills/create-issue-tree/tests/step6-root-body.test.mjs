@@ -1264,6 +1264,39 @@ test('(D13) エスケープされたバックスラッシュ直後の <details> 
   assert.equal(edits.length, 0)
 })
 
+// PR #679 レビュー指摘: gawk では `\<` が単語境界演算子になるため、エスケープ除去を文字クラスで書く。
+test('(E1) エスケープ除去は文字クラスで書かれ、未閉じ <details> は edit せず中止し、エスケープ済みは数えない', () => {
+  const src = readFileSync(new URL('../scripts/merge-root-body.sh', import.meta.url), 'utf8')
+  assert.ok(src.includes('gsub(/[\\\\]</, "  ", s)'), '`\\<` を正規表現リテラルで直接書いている')
+  const ng = runRootFull(withOld('<details><summary>x</summary>'), [issue(111, 'feat: 新しい子')])
+  assert.equal(ng.r.status, 1, ng.r.stderr)
+  assert.equal(ng.edits.length, 0)
+  assert.match(ng.r.stderr, /<details> が閉じていない/)
+  const ok = runRoot(withOld('\\<details> は文字 \\</details> も文字'), [issue(111, 'feat: 新しい子')])
+  assert.equal(ok.r.status, 0, ok.r.stderr)
+})
+
+// PR #679 レビュー指摘: コードスパンは改行をまたげる。持ち越した状態で、スパン内の </details> を閉じと数えない。
+test('(E2) 複数行のコードスパン内の </details> は閉じと数えず、退避済みの節を置換しない', () => {
+  const root = withOld('<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n説明 `例:\nfoo </details>\n終わり`\n\n</details>')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('### Phase 1: 退避済み'))
+  assert.ok(body.includes('foo </details>'))
+  assert.ok(!body.includes('古い子'))
+  assert.equal(phase1Headings(body), 2)
+})
+
+test('(E3) 閉じないバッククォートが <details> 系タグを読み飛ばしたまま段落が終わる本文は edit せず中止する', () => {
+  for (const head of ['<details><summary>退避</summary>\n\n説明 `例:\nfoo </details>\n\n続き', '説明 `例:\n<details>x']) {
+    const { r, edits, leftovers } = runRootFull(withOld(head), [issue(111, 'feat: 新しい子')])
+    assert.equal(r.status, 1, r.stderr)
+    assert.equal(edits.length, 0)
+    assert.match(r.stderr, /コードスパン/)
+    assert.deepEqual(leftovers, [])
+  }
+})
+
 test('(D10) 見出し行に <!-- を含んでも後続の <details> を認識し、退避内容を落とさない', () => {
   const root = withOld('### メモ <!-- 注\n\n<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n</details>')
   const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
