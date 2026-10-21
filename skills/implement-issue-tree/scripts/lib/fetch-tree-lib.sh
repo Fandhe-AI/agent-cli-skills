@@ -93,6 +93,23 @@ ft_struct_digest() {
   printf '%s' "${sorted}" | so_sha256
 }
 
+# タスク ID の抽出（Issue #687 の追補）。ホストの TITLE_TASK_ID_RE（implement-issue-tree.src.js）と同じ定義の Oniguruma 版。
+# タイトル先頭の `type(scope)!: ` と `[` / `【` の後ろのタスク ID（例: TASK-97-6）。依存の解決（兄弟のタスク ID 表）に使われる値で、
+# title のダイジェスト不一致を許容する場合でも、ここは別に検査して書き写し誤りを許さない。定義を変えるときはホストと表を同時に直す。
+FT_TASK_ID_RE='^\s*(?:[a-z]+(?:\([^()\n]{0,64}\))?!?:\s*)?[\[【]?(?<id>[A-Z][A-Z0-9]{0,19}(?:-[0-9]{1,6}){1,4})(?=$|[\s\]】:：])'
+
+# 標準入力の TSV の taskIdSha256 を stdout へ。各行の「number TAB タスク ID（無ければ空）」を number の昇順（数値）に並べ、
+# 改行で連結（末尾改行なし）して SHA-256 を取る。title の他の部分の書き写し誤りは見ず、依存解決に効く ID だけを束縛する。
+ft_task_id_digest() {
+  local lines
+  lines=$(jq -Rrs --arg re "${FT_TASK_ID_RE}" '
+    split("\n") | map(select(length > 0) | split("\t"))
+    | map({n: (.[0] | tonumber), id: (((.[5] // "") | capture($re) | .id) // "")})
+    | sort_by(.n) | map("\(.n)\t\(.id)") | join("\n")') || return 1
+  [ -n "${lines}" ] || return 1
+  printf '%s' "${lines}" | so_sha256
+}
+
 # 入力の束縛: sha256("fetch-tree\n" + root + "\n" + repo)（repo 未指定は空文字）。$1 = root、$2 = repo。
 ft_input_sha() {
   printf 'fetch-tree\n%s\n%s' "$1" "$2" | so_sha256

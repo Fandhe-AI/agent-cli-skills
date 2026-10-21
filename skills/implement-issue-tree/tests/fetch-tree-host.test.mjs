@@ -125,7 +125,40 @@ test('約 570 ノード規模で title が 1〜2 件違っても止まらない'
   assert.equal(result.treeFetch.titleMismatch, true)
 })
 
+// タスク ID は依存の解決に使うため、title の不一致を許容する場合でも書き写し誤りを許さない（Issue #687 の追補）
+const withId = () => baseNodes().map((n) => (n.number === 2 ? { ...n, title: 'feat: TASK-97-1 a' } : n.number === 3 ? { ...n, title: 'feat: TASK-97-2 b' } : n))
+const idDropped = (p) => treeFetchReply(p, withId().map((n) => (n.number === 2 ? { ...n, title: 'feat: a' } : n)), { digestNodes: withId() })
+
+test('タスク ID が転記で欠落した返却は、構造が一致していても取り直し、2 回続けば停止する（fail-closed）', async () => {
+  const seen = []
+  await assert.rejects(
+    runScript({
+      args: BASE_ARGS,
+      leaves: [2, 3],
+      override: (label, _opts, prompt) => {
+        seen.push(label)
+        return isTree(label) ? idDropped(prompt) : undefined
+      },
+    }),
+    /検査値/,
+  )
+  assert.equal(seen.filter(isTree).length, 2)
+  assert.ok(!seen.some((l) => POST.test(l)))
+})
+
+test('タスク ID が正しく title の他の部分だけが違う返却は、警告つきで続行する', async () => {
+  const off = (p) => treeFetchReply(p, withId().map((n) => (n.number === 3 ? { ...n, title: 'feat: TASK-97-2 bb' } : n)), { digestNodes: withId() })
+  const { result } = await run([off, off])
+  assert.equal(result.treeFetch.titleMismatch, true)
+})
+
 const BROKEN = {
+  'taskIdSha256 の転記漏れ': (p) => {
+    const r = treeFetchReply(p, baseNodes())
+    delete r.payload.taskIdSha256
+    return r
+  },
+  'taskIdSha256 の書き換え（sha256 も整合）': (p) => treeFetchReply(p, baseNodes(), { payload: { taskIdSha256: 'a'.repeat(64) } }),
   'structSha256 の転記漏れ': (p) => {
     const r = treeFetchReply(p, baseNodes())
     delete r.payload.structSha256

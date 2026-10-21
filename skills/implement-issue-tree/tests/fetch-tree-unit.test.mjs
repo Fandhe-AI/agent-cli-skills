@@ -38,6 +38,7 @@ while IFS="$US" read -r fn a b c d e f; do
     count) ft_count_ok "$a" "$b" || rc=$? ;;
     line) out=$(ft_row_digest_line "$a" "$b" "$c" "$d" "$e" "$f") || rc=$? ;;
     nodes) out=$(printf '%s\\n' "$a" | ft_nodes_digest) || rc=$? ;;
+    taskid) out=$(printf '%s\\n' "$a" | ft_task_id_digest) || rc=$? ;;
     struct) out=$(printf '%s\\n' "$a" | ft_struct_digest) || rc=$? ;;
     input) out=$(ft_input_sha "$a" "$b") || rc=$? ;;
     pcount) out=$(printf '%s\\n' "$a" | ft_page_count "$b") || rc=$? ;;
@@ -147,5 +148,29 @@ for (const bash of availableBashes()) {
     assert.equal(res[2].rc, 0)
     assert.notEqual(res[2].out, expect)
     assert.notEqual(res[3].rc, 0)
+  })
+}
+
+for (const bash of availableBashes()) {
+  test(`[${bash}] ft_task_id_digest（タイトル先頭のタスク ID だけ・順序非依存・Issue #687）`, () => {
+    const rows = [
+      '1\t0\t0\topen\t1\tfeat(x)!: [TASK-97-6] foo',
+      '2\t1\t0\topen\t0\tno id',
+      '3\t1\t1\topen\t0\t【ABC-1-2】x',
+      '4\t1\t2\topen\t0\tTASK-97-5x',
+      '5\t1\t3\topen\t0\tTASK-97-5',
+      '10\t1\t4\topen\t0\t',
+    ]
+    const expect = sha(['1\tTASK-97-6', '2\t', '3\tABC-1-2', '4\t', '5\tTASK-97-5', '10\t'].join('\n'))
+    const reordered = [rows[5], rows[2], rows[0], rows[4], rows[1], rows[3]].join('\n')
+    const retitled = rows.map((r) => r.replace('foo', 'bar')).join('\n')
+    const dropped = rows.map((r) => r.replace('[TASK-97-6] ', '')).join('\n')
+    const res = table(bash, [['taskid', rows.join('\n')], ['taskid', reordered], ['taskid', retitled], ['taskid', dropped], ['taskid', '']])
+    assert.deepEqual([res[0].rc, res[0].out], [0, expect])
+    assert.deepEqual([res[1].rc, res[1].out], [0, expect])
+    assert.deepEqual([res[2].rc, res[2].out], [0, expect])
+    assert.equal(res[3].rc, 0)
+    assert.notEqual(res[3].out, expect)
+    assert.notEqual(res[4].rc, 0)
   })
 }
