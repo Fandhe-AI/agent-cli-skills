@@ -1064,15 +1064,8 @@ test('(C2d) 属性値に </details> を含む開きタグ（codex P1）は同じ
   abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<details title="</details>">\n\n### Phase 1: 退避済み\n\nKEEP-ATTR\n\n</details>\n\n### Phase 1: 古い'), 'C2d')
 })
 
-test('(C3) <detailsfoo> のように <details で始まるだけの行は除外扱いにならず、後ろの節が置換される', () => {
-  const root = ROOT_BODY.replace('### Phase 1: 古い', '<detailsfoo>\n\n### Phase 1: 古い')
-  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
-  assert.equal(r.status, 0, r.stderr)
-  assert.ok(!body.includes('古い子'), '旧節が残っている')
-  assert.ok(!body.includes('OLD-DETAIL-MARKER'))
-  assert.equal(phase1Headings(body), 1)
-  assert.match(body, /### Phase 2: 後続\n\nPHASE2-KEEP-MARKER/)
-  assert.ok(body.includes('<detailsfoo>'), '無関係な行は素通しされる')
+test('(C3) <detailsfoo> のような許可リスト外のタグは別名でも中止する（旧: 通常行として素通し）', () => {
+  abortsAmbiguous(ROOT_BODY.replace('### Phase 1: 古い', '<detailsfoo>\n\n### Phase 1: 古い'), 'C3')
 })
 
 test('(C4) 属性の無い複数行 <details> と 1 行で開閉する <details>…</details> は除外され、閉じていれば中止しない', () => {
@@ -1094,7 +1087,7 @@ const abortsAmbiguous = (root, label) => {
   assert.equal(edits.length, 0, `${label}: gh issue edit が呼ばれた`)
   assert.match(r.stderr, /判定できません/, label)
   assert.match(r.stderr, /バッククォート・<!--・-->・バックスラッシュ/, label)
-  assert.match(r.stderr, /属性付きの <details> タグ/, label)
+  assert.match(r.stderr, /許可していない HTML タグ/, label)
   assert.deepEqual(leftovers, [], label)
 }
 
@@ -1115,6 +1108,45 @@ test('(C6) update-issue-tree が退避する <details><summary>…</summary>…<
   assert.equal(r.status, 0, r.stderr)
   assert.ok(body.includes('| #12 | legacy | - |'))
   assert.ok(body.includes('</details>'))
+})
+
+// 許可リスト（Issue #678・codex P1）: < は <details> </details> <summary> </summary> の素の形の一部のときだけ許す。
+const ESCAPED_ATTR = '<details>\n<span title="</details>">説明</span>\n\n### Phase 1: 退避済み\n\nKEEP\n\n</details>'
+
+test('(H1) 属性値に </details> を持つ別タグ（codex P1）は depth が 0 に戻って見えても、edit せず中止する', () => {
+  abortsAmbiguous(withOld(ESCAPED_ATTR), 'H1')
+})
+
+test('(H2) <span>・<br>・<a href> を含む判定範囲は中止する', () => {
+  for (const tag of ['<span>x</span>', 'a<br>b', '<a href="x">link</a>']) abortsAmbiguous(withOld(tag), `H2 ${tag}`)
+})
+
+test('(H3) update-issue-tree 形式の退避節（summary 付き details・旧表・</details>）は中止せず更新でき、退避節が保持される', () => {
+  const esc = '<details><summary>移行前の Phase 別表（update-issue-tree が退避）</summary>\n\n| Issue | タイトル | 分解 |\n|---|---|---|\n| #9 | KEEP-OLD | - |\n\n</details>'
+  const { r, body, edits } = runRootFull(withOld(esc), [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(edits.length, 1)
+  assert.ok(body.includes(esc), '退避節が保持されていない')
+  assert.ok(!body.includes('古い子'))
+})
+
+test('(H4) 管理マーカーの外にある HTML タグは中止の対象にならない', () => {
+  const root = MANAGED_ROOT().replace('OPS-KEEP-MARKER', '<span title="</details>">KEEP</span><br>')
+  const { r, body, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(edits.length, 1)
+  assert.ok(body.includes('<span title="</details>">KEEP</span><br>'))
+})
+
+test('(H5) 管理マーカーの内側の HTML タグは中止する', () => {
+  abortsAmbiguous(MANAGED_ROOT().replace('| #11 | old | - |', '| #11 | <b>old</b> | - |'), 'H5')
+})
+
+test('(H6) > 単独の行（a > b）は中止しない', () => {
+  const { r, body, edits } = runRootFull(withOld('a > b\n\n> 引用'), [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(edits.length, 1)
+  assert.ok(body.includes('a > b'))
 })
 
 // 行内・行末の </details>: 閉じている本文でも行頭以外の閉じタグを数えず exit 8 になっていた（Issue #678）。
