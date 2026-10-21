@@ -105,7 +105,7 @@ function treeNodeShapeProblem(nodes) {
   return ''
 }
 
-// ツリー取得の返却の検査値の照合（純粋関数）。封筒（nonce・payload・sha256）→ 入力の束縛 → 件数 → nodesSha256 の順。
+// ツリー取得の返却の検査値の照合（純粋関数）。呼び出し側で畳み込みと型の検査を済ませた後の、封筒（nonce・payload・sha256）→ 入力の束縛 → 件数 → nodesSha256 の順。
 // 戻り値: { ok: true } か { ok: false, reason }（reason は固定語彙: failure / missing / nonce / sha256 / input / count / digest）。
 // 検出するのは書き写しの誤りと別呼び出しの出力の流用で、sha256 を自分で計算できる悪意あるエージェントの捏造は防がない
 // （ツリーの内容はマージ・push・削除の可否に使わない = references/script-trust-model.md）。
@@ -124,7 +124,7 @@ const TREE_FETCH_EXIT_MEANINGS = {
   0: '終了コード 0 だが封筒が無い',
   2: '使い方の誤り',
   3: 'ハッシュ不一致（launcher）または封筒を作れない（jq・sha256sum が無い）',
-  4: 'スクリプトが無い・読めない（launcher）',
+  4: 'スクリプトが無い・読めない（launcher）、または fetch-tree.sh の一時ディレクトリ・ファイルの作成失敗、ページの読み書き失敗、--dir の検証失敗（TMPDIR・--dir を確認）',
   5: 'gh の失敗または応答が想定外の形（権限・API 障害・レート制限・存在しない issue）',
   6: '不完全（子の件数が subIssuesTotal と不一致、または番号の重複。取得中の追加・削除や読めない sub-issue でも起きる）',
   7: '出力過大（約 350 ノード超。取り直しても解消しない）',
@@ -177,7 +177,7 @@ function treeFetchPrompt(attempt) {
   ].join('\n')
 }
 
-// ツリー取得（Issue #667・#668）。取得直後に封筒の照合 → 畳み込み → 型の検査 → ダイジェストの照合 → 完全性検査を行い、
+// ツリー取得（Issue #667・#668）。取得直後に畳み込み → 型の検査 → 封筒の照合 → 件数・ダイジェストの照合 → 完全性検査の順で行い、
 // 失敗したら 1 回だけ取り直す。検査を依存宣言の抽出などの agent より前に置き、不完全なツリーのまま後続 agent を無駄に起動しない。
 // 戻り値: { nodes, attempts, folded }（folded は採用した試行で畳んだ記録）
 async function fetchTree() {
