@@ -1228,3 +1228,20 @@ test('(D8) 表行の行中の </details> は閉じと数えず、行末でなけ
   assert.equal(r.status, 1, r.stderr)
   assert.equal(edits.length, 0)
 })
+
+test('(D9) 退避節内の表行タイトルの <!-- はコメント状態を変えず、後続の </details> で閉じる', () => {
+  const root = withOld('<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n| #9 | fix: <!-- の説明 |\n\n</details>')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('| #9 | fix: <!-- の説明 |'))
+  assert.ok(body.includes('### Phase 1: 退避済み'))
+  assert.ok(!body.includes('古い子'))
+})
+
+test('(D10) 見出し行に <!-- を含んでも後続の <details> を認識し、退避内容を落とさない', () => {
+  const root = withOld('### メモ <!-- 注\n\n<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n</details>')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('### Phase 1: 退避済み'))
+  assert.ok(!body.includes('古い子'))
+})
