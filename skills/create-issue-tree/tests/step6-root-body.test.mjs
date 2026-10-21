@@ -1436,5 +1436,106 @@ test('(G5) 旧形式のエスケープ（\\|）が残る本文は中止し、文
   assert.match(r.stderr, /文字参照/)
   assert.match(r.stderr, /&#124;/)
   assert.match(r.stderr, /管理マーカー区間内の行も対象/)
+  assert.match(r.stderr, /update-issue-tree を再実行/)
   assert.doesNotMatch(r.stderr, /update-issue-tree で本文を更新してください/)
+  assert.doesNotMatch(r.stderr, /回避策になりません/)
+})
+
+// Issue #683: update-issue-tree の管理区間の出力を create-issue-tree の --root 再マージへ通す往復。
+// update-issue-tree が無い配布形態（スキル単体の配布）では skip する。スキルをまたぐ import はしない。
+const UPDATE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'update-issue-tree', 'scripts', 'update-root-body.sh')
+const UPDATE_GH_STUB = `#!/usr/bin/env bash
+D="\${STUB_DIR}"
+case "$1" in
+  auth) exit 0 ;;
+  issue) cp "$5" "\${D}/edited.body"; exit 0 ;;
+  api)
+    path="$2"
+    case "\${path}" in
+      */sub_issues\\?*)
+        rest="\${path#*/issues/}"; n="\${rest%%/*}"; page="\${path##*page=}"
+        f="\${D}/sub_\${n}_\${page}.json"
+        if [[ -f "\${f}" ]]; then cat "\${f}"; exit 0; fi
+        exit 1 ;;
+      */issues/*)
+        if [[ -f "\${D}/edited.body" ]]; then
+          jq -n --rawfile b "\${D}/edited.body" '{body: $b, repository_url: "https://api.github.com/repos/o/r"}'
+        else
+          cat "\${D}/root.json"
+        fi
+        exit 0 ;;
+    esac ;;
+esac
+exit 1
+`
+
+// update-root-body.sh を gh スタブで実行し、生成した本文を返す。ルート 254 の直下に phase:1 の親 10・その子 11。
+function runUpdate(rootBody, parentTitle, childTitle) {
+  const dir = mkdtempSync(join(tmpdir(), 'step6upd-'))
+  const stub = join(dir, 'stub')
+  const bin = join(dir, 'bin')
+  const tmp = join(dir, 'tmp')
+  for (const d of [stub, bin, tmp]) mkdirSync(d)
+  writeFileSync(join(bin, 'gh'), UPDATE_GH_STUB)
+  chmodSync(join(bin, 'gh'), 0o755)
+  const url = 'https://api.github.com/repos/o/r'
+  const mk = (number, title, labels, total) => ({
+    number, title, state: 'open', repository_url: url,
+    labels: labels.map((name) => ({ name })), sub_issues_summary: { total, completed: 0 },
+  })
+  writeFileSync(join(stub, 'root.json'), JSON.stringify({ number: 254, repository_url: url, body: rootBody }))
+  writeFileSync(join(stub, 'sub_254_1.json'), JSON.stringify([mk(10, parentTitle, ['phase:1'], 1)]))
+  writeFileSync(join(stub, 'sub_10_1.json'), JSON.stringify([mk(11, childTitle, [], 0)]))
+  try {
+    const r = spawnSync('bash', [UPDATE_SCRIPT, '--root', '254', '--granularity', '2h', '--reassigned', '0', '--orphans', '0', '--labels', '0', '--new-phases', '0', '--split', '0', '--date', '2026-10-06'], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { PATH: `${bin}:${process.env.PATH}`, STUB_DIR: stub, TMPDIR: tmp, HOME: dir },
+    })
+    const f = join(stub, 'edited.body')
+    return { r, body: existsSync(f) ? readFileSync(f, 'utf8') : null }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const HOSTILE_TITLE = 'fix: a | b \\ c `d` <details>x</details> <!-- y --> </details>'
+
+test('(G6) update-issue-tree が書いた管理区間は create-issue-tree の --root 再マージで中止しない', { skip: !existsSync(UPDATE_SCRIPT) }, () => {
+  const upd = runUpdate('', HOSTILE_TITLE, HOSTILE_TITLE)
+  assert.equal(upd.r.status, 0, upd.r.stderr)
+  const kids = [issue(111, HOSTILE_TITLE)]
+  const m = runRootFull(upd.body, kids, { env: { PHASE_TITLE: HOSTILE_TITLE } })
+  assert.equal(m.r.status, 0, m.r.stderr)
+  assert.equal(m.edits.length, 1)
+  assert.doesNotMatch(m.r.stderr, /バッククォート/)
+  for (const mk of ['phase-plan:begin', 'phase-plan:end', 'inventory:begin', 'inventory:end']) {
+    assert.equal(m.body.split(`<!-- update-issue-tree:${mk} -->`).length - 1, 1, mk)
+  }
+  assert.equal(countLines(m.body, /^### Phase 1:/), 1)
+  assert.equal(countLines(m.body, /^\| Phase 1 \|/), 1)
+  assert.equal(countLines(m.body, /^\| #111 \|/), 1)
+  // 往復: マージ後の本文を update-issue-tree へもう一度通しても通る
+  const upd2 = runUpdate(m.body, HOSTILE_TITLE, HOSTILE_TITLE)
+  assert.equal(upd2.r.status, 0, upd2.r.stderr)
+})
+
+test('(G7) update-issue-tree の表セル・見出しは create-issue-tree の CELL と同じ出力になる', { skip: !existsSync(UPDATE_SCRIPT) }, () => {
+  const inputs = [
+    'a&b <c> `d` e\\f g|h',
+    '&amp;',
+    'x\r\ny\n\nz',
+    '<!-- update-issue-tree:phase-plan:end -->',
+    '</details>',
+    'feat: 日本語のタイトル',
+  ]
+  for (const t of inputs) {
+    const cell = spawnSync('bash', ['-c', 'source "$1"; jq -rn --arg t "$2" "\\$t | ${CELL}"', 'bash', LIB, t], { encoding: 'utf8' })
+    assert.equal(cell.status, 0, cell.stderr)
+    const expected = cell.stdout.replace(/\n$/, '')
+    const upd = runUpdate('', t, t)
+    assert.equal(upd.r.status, 0, upd.r.stderr)
+    assert.ok(upd.body.includes(`### Phase 1: ${expected}\n`), JSON.stringify([t, expected]))
+    assert.ok(upd.body.includes(`| #11 | ${expected} | - |`), JSON.stringify([t, expected]))
+  }
 })
