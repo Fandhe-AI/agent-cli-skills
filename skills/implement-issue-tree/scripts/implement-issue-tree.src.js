@@ -105,7 +105,7 @@ function treeNodeShapeProblem(nodes) {
   return ''
 }
 
-// ツリー取得の返却の検査値の照合（純粋関数）。封筒（nonce・payload・sha256）→ 入力の束縛 → 件数 → nodesSha256 の順。
+// ツリー取得の返却の検査値の照合（純粋関数）。呼び出し側で畳み込みと型の検査を済ませた後の、封筒（nonce・payload・sha256）→ 入力の束縛 → 件数 → nodesSha256 の順。
 // 戻り値: { ok: true } か { ok: false, reason }（reason は固定語彙: failure / missing / nonce / sha256 / input / count / digest）。
 // 検出するのは書き写しの誤りと別呼び出しの出力の流用で、sha256 を自分で計算できる悪意あるエージェントの捏造は防がない
 // （ツリーの内容はマージ・push・削除の可否に使わない = references/script-trust-model.md）。
@@ -139,7 +139,7 @@ function treeFetchPrompt(attempt) {
   ].join('\n')
 }
 
-// ツリー取得（Issue #667・#668）。取得直後に封筒の照合 → 畳み込み → 型の検査 → ダイジェストの照合 → 完全性検査を行い、
+// ツリー取得（Issue #667・#668）。取得直後に畳み込み → 型の検査 → 封筒の照合 → 件数・ダイジェストの照合 → 完全性検査の順で行い、
 // 失敗したら 1 回だけ取り直す。検査を依存宣言の抽出などの agent より前に置き、不完全なツリーのまま後続 agent を無駄に起動しない。
 // 戻り値: { nodes, attempts, folded }（folded は採用した試行で畳んだ記録）
 async function fetchTree() {
