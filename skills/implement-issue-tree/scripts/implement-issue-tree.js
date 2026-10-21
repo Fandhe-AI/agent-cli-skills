@@ -1744,7 +1744,8 @@ const DECLARED_DEPS_JQ=declaredDepsJq()
 
 
 
-const TITLE_TASK_ID_RE= /^\s*(?:[a-z]+(?:\([^()\n]{0,64}\))?!?:\s*)?[[【]?([A-Z][A-Z0-9]{0,19}(?:-[0-9]{1,6}){1,4})(?=$|[\s\]】:：])/
+
+const TITLE_TASK_ID_RE= /^[ \t\n\r\f\v\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]*(?:[a-z]+(?:\([^()\n]{0,64}\))?!?:[ \t\n\r\f\v\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]*)?[[【]?([A-Z][A-Z0-9]{0,19}(?:-[0-9]{1,6}){1,4})(?=$|[ \t\n\r\f\v\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF\]】:：])/
 
 
 const SIBLING_TASK_IDS_MAX_PER_PARENT=100
@@ -4258,16 +4259,16 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'ecdee311018675191b848226b411e8b2df555659a5537a128fdca5beefde268e',
-'measure-free-disk.sh':'e238e5aa10c625bf37c5fc3e901c4248019c6952d51a048e97824aacbafe058a',
-'observe-pr.sh':'80236287d633c9231bb1511add9563d1de1875c5f7371e78d6b0a3bf658933df',
-'base-merge.sh':'37c313f5d7e91607e9a9e74593e1d4a91a69098e68fd68a0a2a79dd187f92087',
-'pr-push.sh':'c066b7555cf1161576fdb2a810fb222ea4d75e9ff5fb11de51c7d140e2e7bd78',
-'state.sh':'f70a94bd60b1588824b6a52ec19c85cd07a72fe201ff5c1042096bd90f2adcb4',
-'merge-gate.sh':'680865fc06c664c2d24dcf35a51a3abcaaf017bca6dce8a831f9eaf413ab07d1',
-'worktree-remove.sh':'dc70b59b9854ff35b8acaabd52e735cd28707bcc53f638b88e8d0e8ac024a4d7',
-'recover-prep.sh':'c63fd3f393903273d2cc0cb03f18f80d080c7225eb0aefbdac3a038706452281',
-'fetch-tree.sh':'b7cbad8f9ef1cd9d1a8a029ef8a31a783becca3a926c97b7bf09e00c2de717f6',
+'measure-residual-bytes.sh':'8f1b7bffc7ccf4ecac53d7dc2d5bd733bfc09dc964964e07ac3e996d78fc0a50',
+'measure-free-disk.sh':'9078385c270b3cacd3233b9329d26d86e55d626f54d1fd60db7dc20856249e69',
+'observe-pr.sh':'b1230b13af2c983b65e7e730aa5a9e9523bd4af8d047c278adce9fb729a8a5fe',
+'base-merge.sh':'cceba5b70feeb5e0865b7757c393097aecef22e77d895864a2e7e46b8db745b2',
+'pr-push.sh':'d91158c2b9c500eb9e0909c00d8bbbb3859fa2d140b4d32b19e36f24010416d5',
+'state.sh':'dba8d17c1e7c25ac6dcc27c5abc68870d5539c589e7fb63789c3880e60f8f708',
+'merge-gate.sh':'4b43e6b1158b679e1232a540c9546abb204902461b7d0e2670f9695e3cc1362d',
+'worktree-remove.sh':'aaed1c26feee2c3d9566832abcd38f7dd9bb32ab1ea70a38e3720cff3760ba08',
+'recover-prep.sh':'78a64366545686f7e990afbf91f3d957690794d06f412f9cbe674f7bf412b779',
+'fetch-tree.sh':'5de6f3af6e3f4c4a7f083193c677e2468414cfa316c4004544fdb77f41ed769d',
 }
 
 

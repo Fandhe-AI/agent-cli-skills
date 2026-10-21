@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 import { availableBashes } from './lib/signed-output.mjs'
 
 const LIBDIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib')
@@ -148,6 +149,31 @@ for (const bash of availableBashes()) {
     assert.equal(res[2].rc, 0)
     assert.notEqual(res[2].out, expect)
     assert.notEqual(res[3].rc, 0)
+  })
+}
+
+// jq/Oniguruma の \s と JS の \s は U+FEFF・U+0085 で食い違う。両側が同じ明示集合を使い、抽出結果が一致すること（Issue #687）。
+// ホスト側の TITLE_TASK_ID_RE を実ソースから取り出す（テスト側に正規表現を複製しない）。
+const SRC_RE_LINE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js'), 'utf8')
+  .split('\n').find((l) => l.startsWith('const TITLE_TASK_ID_RE ='))
+const SRC_RE = new Function(`return ${SRC_RE_LINE.replace('const TITLE_TASK_ID_RE =', '')}`)()
+const WS_PARITY_TITLES = [
+  ['\uFEFFTASK-1 x', 'TASK-1'],
+  ['\u0085TASK-1 x', ''],
+  ['\u00A0TASK-1 x', 'TASK-1'],
+  ['feat:\u3000TASK-1 x', 'TASK-1'],
+  ['TASK-1\u3000x', 'TASK-1'],
+  ['TASK-1\u0085x', ''],
+  ['TASK-1\uFEFFx', 'TASK-1'],
+]
+for (const bash of availableBashes()) {
+  test(`[${bash}] ft_task_id_digest は JS の空白集合と一致する（U+FEFF / U+0085・Issue #687）`, () => {
+    for (const [title, want] of WS_PARITY_TITLES) {
+      const jsId = (SRC_RE.exec(title) || [])[1] || ''
+      assert.equal(jsId, want, `JS: ${JSON.stringify(title)}`)
+      const res = table(bash, [['taskid', `1\t0\t0\topen\t0\t${title}`]])
+      assert.deepEqual([res[0].rc, res[0].out], [0, sha(`1\t${want}`)], `jq: ${JSON.stringify(title)}`)
+    }
   })
 }
 
