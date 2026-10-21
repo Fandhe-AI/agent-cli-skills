@@ -436,6 +436,7 @@ monitor の手順 2〜3 は、HEAD sha のチェックの完了を `gh pr checks
 
 ツリー取得（`plan:issue-tree`）は、エージェントが毎回幅優先の取得を自分で書き、結果を StructuredOutput の `nodes` へ書き写す作りだった。Issue #667 で「全欄一致の重複を畳む」「失敗時に 1 回取り直す」までは入ったが、取得手順そのものの誤り（ページの取り落とし）と、内容の違う書き写しの誤り（`siblingIndex`・`parent`・`state`・`subIssuesTotal`・番号・title）は残っていた。取得を `scripts/fetch-tree.sh` に切り出し、書き写しを検査値で確かめる。
 
+- **失敗は封筒を出さず、理由をホストのログへ届ける（Issue #676）**。非 0 終了または封筒が無いとき、エージェントは `failure: { exitCode, stderr（先頭 300 文字の転記） }` を返し、nonce・payload・sha256 は書かない（捏造しない）。ホストは `failure` を nodes・封筒の検査より先に見て、終了コードを固定語彙の表（2 使い方 / 3 封筒を作れない / 5 gh 失敗 / 6 不完全 / 7 出力過大）で意味に引き、stderr の `#N` を数値として抽出する。stderr の自由記述は未信頼値として sanitize・切り詰めた抜粋だけを出す。1 回目の失敗ログは「取り直す」旨、「取り直しても解消しなかった」は取り直し後の最終例外だけに出す。
 - **検査値は封筒（nonce + sha256）**。`payload.nodesSha256` は、各ノードの `number TAB parent TAB siblingIndex TAB state TAB subIssuesTotal TAB sha256hex(title)` の行を number 昇順に改行で連結した文字列の SHA-256（title は 16 進ダイジェストにして payload の規約〔整数・固定語彙・16 進〕を守る）。ホストは `nodes` の 6 欄から同じ値を計算し直して照合し、`payload.count` と `payload.inputSha256`（`sha256("fetch-tree\n" + root + "\n" + repo)`）も照合する。行ごとの多項式 `sig`（`plan:declared-deps`）は採らなかった: title の検査が弱く、行の脱落・並べ替え・別呼び出しの流用を封筒ほど捉えられないため。
 - **照合の順序**: agent 例外・`nodes` の形 → 封筒（`failure` 申告・欠落・nonce・sha256・入力）→ 全欄一致の重複の畳み込み → 6 欄の型・値域 → 件数とダイジェスト → 既存の完全性検査（子の件数・`subIssuesTotal`・番号重複）。どれかが落ちたら固定語彙の理由をログに出して、`plan:issue-tree-retry` で 1 回だけ取り直す（上限は #667 と同じ 2 試行）。nonce は試行ごとに変わる。
 - **検出するもの**: 書き写しの誤り（6 欄のどれか 1 欄でも）、行の脱落・追加、別呼び出し・別入力（ルート・リポジトリ違い）の出力の流用、スクリプトを実行せず値を作ったこと（sha256 が合わない）。

@@ -110,12 +110,47 @@ function treeNodeShapeProblem(nodes) {
 // 検出するのは書き写しの誤りと別呼び出しの出力の流用で、sha256 を自分で計算できる悪意あるエージェントの捏造は防がない
 // （ツリーの内容はマージ・push・削除の可否に使わない = references/script-trust-model.md）。
 function verifyTreeFetchResult(result, nonce, inputSha, nodes) {
-  if (typeof result?.failure === 'string' && result.failure !== '') return { ok: false, reason: 'failure' }
+  if (result?.failure !== undefined && result?.failure !== null && result?.failure !== '') return { ok: false, reason: 'failure' }
   const signed = verifySignedOutput({ nonce: result?.nonce, payload: result?.payload, sha256: result?.sha256 }, nonce, inputSha)
   if (!signed.ok) return { ok: false, reason: signed.reason }
   if (signed.payload.count !== nodes.length) return { ok: false, reason: 'count' }
   if (signed.payload.nodesSha256 !== treeNodesDigest(nodes)) return { ok: false, reason: 'digest' }
   return { ok: true }
+}
+
+// fetch-tree.sh の終了コードの意味（固定語彙）。エージェントが返す failure は未信頼値なので、表引きと数値抽出だけを行い、
+// 自由記述は sanitize + 切り詰めた抜粋としてのみ出す。
+const TREE_FETCH_EXIT_MEANINGS = {
+  0: '終了コード 0 だが封筒が無い',
+  2: '使い方の誤り',
+  3: 'ハッシュ不一致（launcher）または封筒を作れない（jq・sha256sum が無い）',
+  4: 'スクリプトが無い・読めない（launcher）',
+  5: 'gh の失敗または応答が想定外の形（権限・API 障害・レート制限・存在しない issue）',
+  6: '不完全（子の件数が subIssuesTotal と不一致、または番号の重複。取得中の追加・削除や読めない sub-issue でも起きる）',
+  7: '出力過大（約 350 ノード超。取り直しても解消しない）',
+}
+
+// ツリー取得 agent の failure 申告を、ログ用の { exitCode, meaning, numbers, excerpt } に解釈する（純粋関数）。
+function describeTreeFetchFailure(failure) {
+  if (typeof failure === 'string') return { exitCode: null, meaning: '理由不明（旧形式の申告）', numbers: [], excerpt: capText(sanitize(failure), 200) }
+  const code = failure?.exitCode
+  const exitCode = Number.isInteger(code) && code >= 0 && code <= 255 ? code : null
+  const stderr = typeof failure?.stderr === 'string' ? failure.stderr : ''
+  const numbers = [...stderr.matchAll(/#(\d+)/g)].slice(0, 10).map((m) => Number(m[1]))
+  return { exitCode, meaning: exitCode === null ? '終了コード不明' : (TREE_FETCH_EXIT_MEANINGS[exitCode] ?? '想定外の終了コード'), numbers, excerpt: capText(sanitize(stderr), 200) }
+}
+
+// 試行位置で文面を分ける。最終試行より前は「取り直す」だけを言い、「解消しなかった」は取り直し後（最終）にだけ使う。
+function treeFetchRetrySuffix(attempt, finalHint) {
+  return attempt < 2 ? '。1 回だけ取り直す' : `。取り直しても解消しなかった。${finalHint}`
+}
+
+function treeFetchFailureReason(failure, attempt) {
+  const d = describeTreeFetchFailure(failure)
+  const nums = d.numbers.length > 0 ? `、該当 ${d.numbers.map((n) => `#${n}`).join(' ')}` : ''
+  const code = d.exitCode === null ? '' : `exit ${d.exitCode}: `
+  return `fetch-tree.sh が失敗（${code}${d.meaning}${nums}）${d.excerpt === '' ? '' : `: ${d.excerpt}`}` +
+    treeFetchRetrySuffix(attempt, '終了コードの意味に従い原因を除く（exit 5 なら gh の認証・権限・API 状態、exit 7 ならツリー規模）。手元で scripts/fetch-tree.sh を実行して確かめる')
 }
 
 // ツリー取得 agent のプロンプト。取得そのもの（幅優先・ページ送り・siblingIndex・件数の自己点検）は scripts/fetch-tree.sh が行い、
@@ -131,7 +166,7 @@ function treeFetchPrompt(attempt) {
   `GitHub イシューツリー取得タスク。ルートはイシュー #${parent}。`,
   COMMON,
   '手順:',
-  `1. 次のコマンドを一字一句そのまま、1 回の Bash 呼び出しで実行する（組み立て直し・gh での代替・再実行での加工をしない）。非 0 終了または封筒が無いときは、他の方法で取得せず、StructuredOutput の failure に固定文「fetch-tree 失敗」を書き、nodes は空配列で返す。\n${command}`,
+  `1. 次のコマンドを一字一句そのまま、1 回の Bash 呼び出しで実行する（組み立て直し・gh での代替・再実行での加工をしない）。非 0 終了または封筒が無いときは、他の方法で取得せず、StructuredOutput の failure に { exitCode: 終了コード（封筒が無いだけなら 0）, stderr: 標準エラーの先頭 300 文字の転記 } を書き、nodes は空配列で返し、nonce・payload・sha256 は書かない（作らない・推測しない）。成功時は failure を書かない。\n${command}`,
   '2. 標準出力の前半は 1 ノード 1 行の TSV（number, parent, siblingIndex, state, subIssuesTotal, title の順にタブ区切り）。全行を欠落・追加・並べ替え・加工なしで nodes へ写す（number / parent / siblingIndex / subIssuesTotal は数値、state・title は文字列のまま。title の前後の空白や文字を変えない）。同じノードを 2 回書かない。FETCH_TREE_DIR= の行と最終行の封筒は TSV ではないので nodes に入れない。',
   `3. 封筒の payload.pages が 2 以上のときだけ、FETCH_TREE_DIR= の値を <DIR> として、p = 2 から pages まで順に 1 回ずつ実行し、出力の TSV 行を nodes の続きへ同じ規則で写す（ページの読み飛ばし・重複をしない）。\n${pageCommand}\n最後に（途中で失敗したときも）次を実行する。\n${releaseCommand}`,
   '4. 標準出力の最終行は封筒の 1 行 JSON。nonce・payload（count / inputSha256 / nodesSha256 / pages）・sha256 を観測値のまま StructuredOutput へ転記する（再計算・補完・修正をしない）。ホストが nodes から再計算して照合し、1 欄でも違えば 1 回だけ取り直しを求められ、2 回目も違えば停止する。',
@@ -159,6 +194,11 @@ async function fetchTree() {
       log(`⚠️ （試行 ${attempt}）${lastReason}`)
       continue
     }
+    if (result?.failure !== undefined && result?.failure !== null && result?.failure !== '') {
+      lastReason = treeFetchFailureReason(result.failure, attempt)
+      log(`⚠️ （試行 ${attempt}）${lastReason}`)
+      continue
+    }
     if (!Array.isArray(result?.nodes) || result.nodes.some((n) => n === null || typeof n !== 'object' || Array.isArray(n))) {
       lastReason = 'ツリー取得の返却に nodes 配列が無い、またはオブジェクトでない要素を含む'
       log(`⚠️ （試行 ${attempt}）${lastReason}`)
@@ -171,7 +211,7 @@ async function fetchTree() {
     const shape = treeNodeShapeProblem(nodes)
     const verified = shape === '' ? verifyTreeFetchResult(result, nonce, inputSha, nodes) : { ok: false, reason: shape }
     if (!verified.ok) {
-      lastReason = `ツリー取得の検査値が一致しない（${sanitize(String(verified.reason))}）。エージェントの書き写しの誤り、または取得スクリプトの失敗の可能性がある。取り直しても解消しなかった。再実行し、再現するなら scripts/fetch-tree.sh を手元で実行して出力を確かめる`
+      lastReason = `ツリー取得の検査値が一致しない（${sanitize(String(verified.reason))}）` + treeFetchRetrySuffix(attempt, 'エージェントの書き写しの誤り、または取得スクリプトの失敗の可能性がある。再実行し、再現するなら scripts/fetch-tree.sh を手元で実行して出力を確かめる')
       log(`⚠️ （試行 ${attempt}）${lastReason}`)
       continue
     }
@@ -179,7 +219,7 @@ async function fetchTree() {
     if (incomplete.length === 0) return { nodes, attempts: attempt, folded }
     lastReason = `ツリー取得が不完全（子の件数不一致・subIssuesTotal 不正・番号重複）: ` +
       incomplete.slice(0, 20).map((x) => `#${sanitize(String(x.number))}（期待 ${sanitize(String(x.expected))} / 実際 ${sanitize(String(x.actual))}）`).join(', ') +
-      '。最下層まで取得できていない可能性がある。取り直しても解消しなかった。再実行し、再現するなら該当イシューの sub-issue を確認する（取得中の追加・削除、認証で読めない sub-issue でも起きる）'
+      treeFetchRetrySuffix(attempt, '最下層まで取得できていない可能性がある。再実行し、再現するなら該当イシューの sub-issue を確認する（取得中の追加・削除、認証で読めない sub-issue でも起きる）')
     log(`⚠️ （試行 ${attempt}）${lastReason}`)
   }
   throw new Error(lastReason)
@@ -1511,10 +1551,11 @@ const BASE_MERGE_CONTEXT_COMMON = [
 
 const TREE_SCHEMA = {
   type: 'object',
-  required: ['nodes', 'nonce', 'payload', 'sha256'],
+  required: ['nodes'],
   properties: {
+    // 封筒の欄は成功時のみ（失敗時は書かせない）。欠落はホストの verifySignedOutput が missing として拒否する
     // scripts/fetch-tree.sh の封筒（Issue #668）。観測値をそのまま転記し、ホストが nodes から再計算して照合する
-    nonce: { type: 'string', description: '標準出力最終行 JSON の nonce をそのまま転記する' },
+    nonce: { type: 'string', description: '成功時のみ。標準出力最終行 JSON の nonce をそのまま転記する' },
     payload: {
       type: 'object',
       required: ['count', 'inputSha256', 'nodesSha256', 'pages'],
@@ -1525,8 +1566,16 @@ const TREE_SCHEMA = {
         nodesSha256: { type: 'string', description: '標準出力 JSON の値をそのまま転記する' },
       },
     },
-    sha256: { type: 'string', description: '標準出力最終行 JSON の sha256 をそのまま転記する（再計算しない）' },
-    failure: { type: 'string', maxLength: 300, description: 'コマンドが非 0 終了、または封筒が無いときだけ固定文「fetch-tree 失敗」。成功時は省略' },
+    sha256: { type: 'string', description: '成功時のみ。標準出力最終行 JSON の sha256 をそのまま転記する（再計算しない）' },
+    failure: {
+      type: 'object',
+      required: ['exitCode'],
+      properties: {
+        exitCode: { type: 'integer', minimum: 0, maximum: 255, description: 'fetch-tree.sh の終了コード（封筒が無いだけなら 0）' },
+        stderr: { type: 'string', maxLength: 300, description: '標準エラーの先頭 300 文字をそのまま転記する' },
+      },
+      description: 'コマンドが非 0 終了、または封筒が無いときだけ。成功時は省略',
+    },
     nodes: {
       type: 'array',
       items: {
