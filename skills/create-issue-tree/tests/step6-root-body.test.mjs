@@ -139,7 +139,7 @@ test('(b) タイトルの | と改行で表の列数が崩れない', () => {
     assert.equal(r.status, 0, r.stderr)
     const row = body.split('\n').find((l) => l.startsWith('| #111 '))
     assert.ok(row, '#111 行がある')
-    assert.equal(row, '| #111 | feat: a \\| b c | sub-issue あり |')
+    assert.equal(row, '| #111 | feat: a &#124; b c | sub-issue あり |')
   } finally {
     rmSync(ctx.dir, { recursive: true, force: true })
   }
@@ -307,7 +307,9 @@ function runRootFull(rootBody, children, { args = ROOT_ARGS, env = {} } = {}) {
   writeFileSync(join(bin, 'gh'), ROOT_GH_STUB)
   chmodSync(join(bin, 'gh'), 0o755)
   writeFileSync(join(fx, 'root_body.md'), rootBody)
-  writeFileSync(join(fx, 'sub_101_1.json'), JSON.stringify(children))
+  const pnIdx = args.indexOf('--phase-number')
+  const pn = pnIdx >= 0 ? args[pnIdx + 1] : '101'
+  writeFileSync(join(fx, `sub_${pn}_1.json`), JSON.stringify(children))
   for (const c of children) writeFileSync(join(fx, `sub_${c.number}_1.json`), '[]')
   const callLog = join(dir, 'calls.log')
   const allLog = join(dir, 'all.log')
@@ -1201,14 +1203,15 @@ test('(D6b) 複数バッククォートのコードスパンを含む本文も�
   abortsAmbiguous(withOld('<details><summary>退避</summary>\n\n`` </details> ``\n\n### Phase 1: 退避済み\n\n</details>'), 'D6b')
 })
 
-test('(D7) タイトルに <details> を含む子 issue の行も数えるため、未閉じになった再マージは edit せず exit 8 で中止する', () => {
+test('(D7) タイトルに <details> を含む子 issue は文字参照で書かれ、再マージしても未閉じ扱いで中止しない', () => {
   const kids = [issue(111, 'fix: <details> の閉じ忘れ')]
   const first = runRoot(ROOT_BODY, kids)
   assert.equal(first.r.status, 0, first.r.stderr)
+  assert.ok(first.body.includes('fix: &lt;details&gt; の閉じ忘れ'))
   const second = runRootFull(first.body, kids)
-  assert.equal(second.r.status, 1, second.r.stderr)
-  assert.equal(second.edits.length, 0)
-  assert.match(second.r.stderr, /<details> が閉じていない/)
+  assert.equal(second.r.status, 0, second.r.stderr)
+  assert.equal(second.edits.length, 1)
+  assert.equal(phase1Headings(second.body), 1)
 })
 
 test('(D8) 表行の行中の </details> も閉じと数える', () => {
@@ -1310,4 +1313,93 @@ test('(F4) コードフェンス内の記号は走査せず、フェンス外に
   const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
   assert.equal(edits.length, 1)
+})
+
+// ---- CELL を HTML 文字参照へ変更（Issue #678 追加指摘）----
+// タイトル由来の | \ ` < > & が生成行に残ると、次回以降の --root 再マージが判定範囲の記号で中止したり、
+// タグに触れた行が置換対象から外れて Phase が二重化した。生成時に文字参照へ変換して無害化する。
+const countLines = (body, re) => body.split('\n').filter((l) => re.test(l)).length
+
+test('(G1) | と \\ を含むタイトルで create-root-body.sh → --root 再マージを 2 回続けても中止せず、Phase 行は重複しない', () => {
+  const ptitle = 'feat(phase-1): a | b \\ c'
+  const ctitle = 'feat: x | y \\ z'
+  const ctx = setup({
+    'sub_100_1.json': [issue(101, ptitle, 'open', ['phase:1'])],
+    'sub_101_1.json': [issue(111, ctitle)],
+    'sub_111_1.json': [],
+  })
+  let created
+  try {
+    created = run(ctx)
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+  assert.equal(created.r.status, 0, created.r.stderr)
+  assert.ok(created.body.includes('&#124;') && created.body.includes('&#92;'), '文字参照が出ていない')
+  assert.ok(!created.body.includes('\\'), 'バックスラッシュが残っている')
+  const kids = [issue(111, ctitle)]
+  const env = { PHASE_TITLE: ptitle }
+  const m1 = runRootFull(created.body, kids, { env })
+  assert.equal(m1.r.status, 0, m1.r.stderr)
+  const m2 = runRootFull(m1.body, kids, { env })
+  assert.equal(m2.r.status, 0, m2.r.stderr)
+  assert.equal(m2.edits.length, 1)
+  assert.equal(countLines(m2.body, /^\| Phase 1 \|/), 1)
+  assert.equal(phase1Headings(m2.body), 1)
+  assert.equal(countLines(m2.body, /^\| #111 \|/), 1)
+})
+
+test('(G2) Phase 親タイトルが </details> / <details>x</details> でも表行・節が置換され、1 つずつしか無い', () => {
+  const t1 = 'fix: </details>'
+  const t2 = 'fix: <details>x</details>'
+  const a1 = ['--root', '100', '--granularity', '2h', '--phase', '1', '--phase-number', '101']
+  const a2 = ['--root', '100', '--granularity', '2h', '--phase', '2', '--phase-number', '102']
+  const kids = [issue(111, 'feat: 新しい子')]
+  let body = ROOT_BODY
+  for (let round = 0; round < 2; round++) {
+    const r1 = runRootFull(body, kids, { args: a1, env: { PHASE_TITLE: t1 } })
+    assert.equal(r1.r.status, 0, `round ${round} phase1: ${r1.r.stderr}`)
+    const r2 = runRootFull(r1.body, kids, { args: a2, env: { PHASE_TITLE: t2 } })
+    assert.equal(r2.r.status, 0, `round ${round} phase2: ${r2.r.stderr}`)
+    body = r2.body
+  }
+  assert.equal(countLines(body, /^\| Phase 1 \|/), 1)
+  assert.equal(countLines(body, /^\| Phase 2 \|/), 1)
+  assert.equal(phase1Headings(body), 1)
+  assert.equal(countLines(body, /^### Phase 2:/), 1)
+  assert.ok(body.includes('fix: &lt;/details&gt;'))
+  assert.ok(body.includes('fix: &lt;details&gt;x&lt;/details&gt;'))
+  assert.ok(!body.includes('古い子') && !body.includes('PHASE2-KEEP-MARKER'), '旧節が残っている')
+  assert.ok(body.includes('OPS-KEEP-MARKER'))
+})
+
+test('(G3) バッククォート・<!--・--> を含むタイトルでも 2 回の再マージが通り、生成行に記号が残らない', () => {
+  const t = 'feat: `x` <!-- y --> z'
+  const kids = [issue(111, t)]
+  const env = { PHASE_TITLE: t }
+  const m1 = runRootFull(ROOT_BODY, kids, { env })
+  assert.equal(m1.r.status, 0, m1.r.stderr)
+  const m2 = runRootFull(m1.body, kids, { env })
+  assert.equal(m2.r.status, 0, m2.r.stderr)
+  const gen = m2.body.split('\n').filter((l) => /^(\| Phase 1 \||### Phase 1:|\| #111 \|)/.test(l))
+  assert.equal(gen.length, 3)
+  for (const l of gen) assert.ok(!/[`\\]|<!--|-->/.test(l), `生成行に記号が残る: ${l}`)
+  assert.ok(m2.body.includes('&#96;x&#96; &lt;!-- y --&gt; z'))
+  assert.equal(phase1Headings(m2.body), 1)
+})
+
+test('(G4) & は最初に変換され、文字参照が二重変換されない', () => {
+  const kids = [issue(111, 'a&b <c> `d` e\\f g|h')]
+  const { r, body } = runRootFull(ROOT_BODY, kids)
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('| #111 | a&amp;b &lt;c&gt; &#96;d&#96; e&#92;f g&#124;h | - |'))
+})
+
+test('(G5) 旧形式のエスケープ（\\|）が残る本文は中止し、旧形式の可能性と回避策を案内する', () => {
+  const root = ROOT_BODY.replace('| #901 | 古い子 | - |', '| #901 | a \\| b | - |')
+  const { r, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 1, r.stderr)
+  assert.equal(edits.length, 0)
+  assert.match(r.stderr, /旧形式のエスケープ/)
+  assert.match(r.stderr, /update-issue-tree/)
 })
