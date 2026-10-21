@@ -1099,26 +1099,43 @@ test('(C6) update-issue-tree が退避する <details><summary>…</summary>…<
 })
 
 // 行内・行末の </details>: 閉じている本文でも行頭以外の閉じタグを数えず exit 8 になっていた（Issue #678）。
-// 表行・見出し行は子 issue のタイトルが入る（CELL は < を無害化しない）ため、行末の </details> だけを閉じと数える。
+// 表行・見出し行は子 issue のタイトルが入る（CELL は < を無害化しない）ため、タグを数えない（閉じは行全体が </details> の行など表行・見出し行以外）。
 const withOld = (head) => ROOT_BODY.replace('### Phase 1: 古い', `${head}\n\n### Phase 1: 古い`)
 
-test('(D1) 内容行の末尾で閉じる退避節（| #9 | old |</details>）でも中止せず、退避節の外だけが置換される', () => {
-  const root = withOld('<details><summary>退避</summary>\n\n| Issue | タイトル |\n|---|---|\n| #9 | old |</details>')
+test('(D1) 単独行 </details> で閉じる退避節でも中止せず、退避節の外だけが置換される', () => {
+  const root = withOld('<details><summary>退避</summary>\n\n| Issue | タイトル |\n|---|---|\n| #9 | old |\n\n</details>')
   const { r, body, edits } = runRootFull(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
   assert.equal(edits.length, 1)
-  assert.ok(body.includes('| #9 | old |</details>'))
+  assert.ok(body.includes('| #9 | old |'))
   assert.ok(!body.includes('古い子'), '旧節が残っている')
   assert.equal(phase1Headings(body), 1)
 })
 
 test('(D1b) 退避節内に同名見出しがあっても素通しされ、外側の旧節だけが置換される', () => {
-  const root = withOld('<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n| #9 | old |</details>')
+  const root = withOld('<details><summary>退避</summary>\n\n### Phase 1: 退避済み\n\n| #9 | old |\n\n</details>')
   const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
   assert.ok(body.includes('### Phase 1: 退避済み'))
   assert.ok(!body.includes('古い子'))
   assert.equal(phase1Headings(body), 2)
+})
+
+test('(D1c) 退避節内の見出し・表行末の </details>（タイトル由来）を閉じと数えず、退避済み節を置換しない', () => {
+  const root = withOld('<details><summary>退避</summary>\n\n### Phase 2: fix </details>\n\n### Phase 1: 退避済み\n\n| #9 | t </details>\n\n</details>')
+  const { r, body } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(body.includes('### Phase 2: fix </details>'))
+  assert.ok(body.includes('### Phase 1: 退避済み'))
+  assert.ok(body.includes('| #9 | t </details>'))
+  assert.ok(!body.includes('古い子'))
+  assert.equal(phase1Headings(body), 2)
+})
+
+test('(D1d) 閉じが表行末の </details> だけの退避節は区別できないため中止する', () => {
+  const root = withOld('<details><summary>退避</summary>\n\n| #9 | old |</details>')
+  const { r } = runRoot(root, [issue(111, 'feat: 新しい子')])
+  assert.notEqual(r.status, 0)
 })
 
 test('(D2) 1 行で開閉したあとに文字が続く行でも中止せず、素通しされる', () => {
