@@ -82,7 +82,9 @@ const BROKEN = {
   'sha256 不一致': (p) => treeFetchReply(p, baseNodes(), { sha256: 'f'.repeat(64) }),
   '入力（root）違い': (p) => treeFetchReply(p, baseNodes(), { payload: { inputSha256: 'e'.repeat(64) } }),
   '件数違い': (p) => treeFetchReply(p, baseNodes(), { payload: { count: 9 } }),
-  'failure 申告': (p) => treeFetchReply(p, [], { failure: 'fetch-tree 失敗' }),
+  'failure 申告': (p) => treeFetchReply(p, [], { failure: { exitCode: 5, stderr: 'fetch-tree: gh の失敗' } }),
+  'failure 申告（封筒つき）': (p) => treeFetchReply(p, [], { failure: { exitCode: 5, stderr: '' }, withEnvelope: true }),
+  'failure 申告（旧形式の文字列）': (p) => treeFetchReply(p, [], { failure: 'fetch-tree 失敗' }),
   'null 返却': () => null,
   'agent 例外': new Error('boom'),
 }
