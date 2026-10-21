@@ -25,6 +25,8 @@
 #     置換対象にし、外側は素通しする。マーカーが無くても `<details>` 内（update-issue-tree が退避した旧表など）は対象外。
 #     マーカーが 1 組でない・除外後も同名の見出しが複数ある・`<details>` が閉じていない本文は、置換先を決められないため中止する。
 #     `<details` は直後が空白・CR・`>`・行末のときだけ開きタグとして数える（`<detailsfoo>` 等は通常行）。
+#     行内・行末の `</details>` も閉じとして数え、バッククォート内の言及は数えない。表行・見出し行はタイトル由来の
+#     誤検出を避けるため行末の `</details>` だけを閉じと数える（行中で閉じて後ろが続く場合は未閉じ扱いで中止＝安全側）。
 #   - 一時ファイルは成否によらず削除する（trap は mktemp より先に登録）。
 #   - granularity マーカーは常に GRANULARITY で先頭へ 1 行だけ書き直す。
 #
@@ -201,13 +203,21 @@ NEW_BODY=$(printf '%s\n' "${NEW_BODY}" | PH="${PHASE}" ROW="${PHASE_ROW}" SECF="
     for (k = 1; k <= NR; k++) {
       if (nb == 1 && (k <= bpos || k >= epos)) { X[k] = 1; XO[k] = 1 }
       if (F[k]) { if (depth > 0) X[k] = 1; continue }
-      if (L[k] ~ /^[ \t]*<details([ \t\r>]|$)/) {
-        opens = 1; X[k] = 1
-        if (L[k] ~ /<\/details>[ \t\r]*$/) opens = 0
-        depth += opens
-      } else if (L[k] ~ /^[ \t]*<\/details>/) {
-        X[k] = 1; if (depth > 0) depth--
-      } else if (depth > 0) X[k] = 1
+      # タグはインラインコードスパンを除いた行から数える（バッククォート内の言及は対象外）。
+      # 表行・見出し行は子 issue のタイトルが入り、CELL は < を無害化しないため、行末の </details> だけを閉じとして数える。
+      # それ以外の行は行内の開き・閉じを左から全て数える（1 行開閉・行末で閉じる退避節を通す）
+      s = L[k]; gsub(/`[^`]*`/, "", s)
+      before = depth; touched = 0
+      if (s ~ /^[ \t]*[|]/ || s ~ /^[ \t]*#+[ \t]/) {
+        if (depth > 0 && s ~ /<\/details>[ \t\r]*$/) { depth--; touched = 1 }
+      } else {
+        while (match(s, /<\/details>|<details([ \t\r>]|$)/)) {
+          if (substr(s, RSTART, 2) == "</") { if (depth > 0) depth--; touched = 1 }
+          else { depth++; touched = 1 }
+          s = substr(s, RSTART + RLENGTH)
+        }
+      }
+      if (before > 0 || touched) X[k] = 1
     }
     # 閉じ忘れの <details> は、以降の行が全て除外されて後ろの見出しが置換対象から外れるため、範囲を判定できず中止する
     if (depth > 0) exit 8
