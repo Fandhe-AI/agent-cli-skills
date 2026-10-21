@@ -33,6 +33,15 @@ export function independentNodesSha(rows) {
       .join('\n'),
   )
 }
+// 独立実装: 構造 5 欄（title を除く）のダイジェスト（Issue #687）
+export function independentStructSha(rows) {
+  return sha(
+    [...rows]
+      .sort((a, b) => a.number - b.number)
+      .map((r) => [r.number, r.parent, r.siblingIndex, r.state, r.subIssuesTotal].join('\t'))
+      .join('\n'),
+  )
+}
 export const inputShaOf = (root, repo = '') => sha(`fetch-tree\n${root}\n${repo}`)
 
 export function run(bash, stub, args, { script = SCRIPT, launcher = null, env = {} } = {}) {
@@ -87,7 +96,7 @@ export function registerFetchTreeTests(bash) {
       [5, 4, 0, 'open', 0],
     ])
     assert.equal(rows[1].title, '日本語 🎉 title')
-    assert.deepEqual(envelope.payload, { count: 5, inputSha256: inputShaOf(1, 'o/r'), nodesSha256: independentNodesSha(rows), pages: 1 })
+    assert.deepEqual(envelope.payload, { count: 5, inputSha256: inputShaOf(1, 'o/r'), nodesSha256: independentNodesSha(rows), pages: 1, structSha256: independentStructSha(rows) })
     assert.equal(envelope.nonce, NONCE)
     assert.equal(envelope.sha256, expectedSha256(NONCE, envelope.payload))
     assert.equal(stub.callsTo('issues/3/sub_issues'), 0)
@@ -195,6 +204,7 @@ export function registerFetchTreeTests(bash) {
     assert.equal(envelope.payload.count, all.length)
     assert.deepEqual(all.map((x) => x.number), [1, ...Array.from({ length: 90 }, (_, i) => 100 + i)])
     assert.equal(envelope.payload.nodesSha256, independentNodesSha(all))
+    assert.equal(envelope.payload.structSha256, independentStructSha(all))
     assert.equal(envelope.sha256, expectedSha256(NONCE, envelope.payload))
     // ページ範囲外は exit 2。--page は gh を呼ばない
     const callsBefore = stub.calls().length
@@ -318,6 +328,7 @@ export function registerFetchTreeTests(bash) {
     assert.equal(rows.length, 1)
     assert.equal(rows[0].title, 'a b c d e  ')
     assert.equal(envelope.payload.nodesSha256, independentNodesSha(rows))
+    assert.equal(envelope.payload.structSha256, independentStructSha(rows))
   })
 
   test(`${tag} run-verified.sh 経由で起動でき、スクリプトか lib を書き換えるとハッシュ不一致で起動しない`, () => {

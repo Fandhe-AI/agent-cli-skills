@@ -4,7 +4,7 @@
 # 呼び出し元: fetch-tree.sh（Issue #668）。ツリー取得の出力（ノードごとの TSV 行）から検査値を作る定義の置き場。
 #             ホスト（implement-issue-tree.src.js の treeRowDigestLine / treeNodesDigest）は同じ定義を JavaScript で
 #             計算し直して照合する。定義を変えるときは両方と tests/fetch-tree-unit.test.mjs の表を同時に直す。
-# 役割: 1) title の表示形（制御文字を半角スペースへ置換）、2) 行ダイジェスト、3) ノード全体のダイジェスト nodesSha256、
+# 役割: 0) 構造 5 欄だけのダイジェスト structSha256（Issue #687）、1) title の表示形（制御文字を半角スペースへ置換）、2) 行ダイジェスト、3) ノード全体のダイジェスト nodesSha256、
 #       4) 入力の束縛 inputSha256 の定義を 1 箇所に持つ。
 # 契約: どの関数も exit せず、git・gh・ネットワークを呼ばない。結果は stdout と return 値で返す。
 #       source 元のシェル状態を壊さないため set -e / set -u / trap / exit は置かない。二重 source は無害。
@@ -69,6 +69,23 @@ ft_nodes_digest() {
     [ -n "${num}" ] || continue
     line=$(ft_row_digest_line "${num}" "${parent}" "${sib}" "${state}" "${total}" "${title}") || return 1
     lines="${lines}${line}
+"
+  done
+  [ -n "${lines}" ] || return 1
+  sorted=$(printf '%s' "${lines}" | LC_ALL=C sort -t "${tab}" -k1,1n) || return 1
+  printf '%s' "${sorted}" | so_sha256
+}
+
+# 標準入力の TSV の structSha256（Issue #687）を stdout へ。title を除く 5 欄（number / parent / siblingIndex / state /
+# subIssuesTotal）だけの行を number の昇順（数値）に並べ、改行で連結（末尾改行なし）して SHA-256 を取る。
+# title の書き写し誤りと構造の誤りを分けて扱うための検査値（ホストの treeStructDigest と同じ定義）。
+ft_struct_digest() {
+  local tab num parent sib state total title lines sorted
+  tab=$(printf '\t')
+  lines=""
+  while IFS="${tab}" read -r num parent sib state total title || [ -n "${num}" ]; do
+    [ -n "${num}" ] || continue
+    lines="${lines}${num}${tab}${parent}${tab}${sib}${tab}${state}${tab}${total}
 "
   done
   [ -n "${lines}" ] || return 1

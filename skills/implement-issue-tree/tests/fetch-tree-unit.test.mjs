@@ -38,6 +38,7 @@ while IFS="$US" read -r fn a b c d e f; do
     count) ft_count_ok "$a" "$b" || rc=$? ;;
     line) out=$(ft_row_digest_line "$a" "$b" "$c" "$d" "$e" "$f") || rc=$? ;;
     nodes) out=$(printf '%s\\n' "$a" | ft_nodes_digest) || rc=$? ;;
+    struct) out=$(printf '%s\\n' "$a" | ft_struct_digest) || rc=$? ;;
     input) out=$(ft_input_sha "$a" "$b") || rc=$? ;;
     pcount) out=$(printf '%s\\n' "$a" | ft_page_count "$b") || rc=$? ;;
     pcount0) out=$(printf '' | ft_page_count "$b") || rc=$? ;;
@@ -133,5 +134,18 @@ for (const bash of availableBashes()) {
     assert.deepEqual(res.slice(27, 31).map((x) => [x.rc, x.out]), [[0, 'aaaa\nbbbb'], [0, 'cccc'], [1, ''], [2, '']])
     assert.deepEqual(res.slice(31).map((x) => x.rc), [0, 0, 1, 1, 1, 1, 1, 1])
     void hex
+  })
+
+  test(`[${bash}] ft_struct_digest（title を除く 5 欄・順序非依存・Issue #687）`, () => {
+    const expect = sha(['1\t0\t0\topen\t1', '2\t1\t0\tclosed\t0', '10\t1\t1\topen\t0'].join('\n'))
+    const a = ['2\t1\t0\tclosed\t0\tb', '1\t0\t0\topen\t1\ta', '10\t1\t1\topen\t0\tc d'].join('\n')
+    const retitled = ['2\t1\t0\tclosed\t0\tB!', '1\t0\t0\topen\t1\t日本語', '10\t1\t1\topen\t0\t'].join('\n')
+    const sib = ['2\t1\t0\tclosed\t0\tb', '1\t0\t0\topen\t1\ta', '10\t1\t2\topen\t0\tc d'].join('\n')
+    const res = table(bash, [['struct', a], ['struct', retitled], ['struct', sib], ['struct', '']])
+    assert.deepEqual([res[0].rc, res[0].out], [0, expect])
+    assert.deepEqual([res[1].rc, res[1].out], [0, expect])
+    assert.equal(res[2].rc, 0)
+    assert.notEqual(res[2].out, expect)
+    assert.notEqual(res[3].rc, 0)
   })
 }
