@@ -8,10 +8,17 @@
 # 方式: allow-list（fail-closed）。コメント行と空行を除いた有効行を 1 行ずつ許可パターンと
 #       突き合わせ、未知のキー・想定外の値は不合格にする。YAML パーサは使わない
 #       （bash 3.2 と GNU bash の両方で動かすため、外部依存を持たない）。
+#       値は「キーごとに許可する文法」へ完全一致させる（共通の文字集合で緩く受けない）:
+#       with の値は 1 行の plain scalar（または全体を 1 組の引用符で囲んだ文字列）に限り、
+#       `: `・`#`・anchor・tag・flow 記法は拒否する。types / branches / skip-branch-prefixes 等の
+#       列挙は要素に分割し、各要素の前後の空白だけを除いて許可語・要素の文法へ完全一致させる
+#       （要素内部の空白・空要素・重複は拒否）。判断に迷う入力は拒否する。
 # 出力: 結果行（OK / NG と違反項目名・行番号）のみ。ファイル内容は出力しない
 #       （検出器が内容の漏洩経路にならないようにする）。
 # 終了コード: 0 = 合格 / 1 = 検査不合格 / 2 = 使い方の誤り・検査自体の失敗。
 set -u
+# 文字クラス・範囲の解釈をロケールに依存させない
+export LC_ALL=C
 
 EXPECTED_USES='Fandhe-AI/actions/.github/workflows/ai-review.yml@latest'
 
@@ -36,10 +43,11 @@ job_prw=0       # ジョブ側 permissions に pull-requests: write があった
 job_sub=""      # jobs 配下のインデント 4 の直近キー（with / secrets / permissions / その他）
 on_seen=0       # トップレベル on があった
 pr_seen=0       # on 直下（インデント 2）の pull_request があった
+on_sub=""       # on 直下（インデント 2）の直近キー（types / branches を置けるのは pull_request の直下だけ）
 seen=" "         # 出現済みキーの集合（スコープ/キー を空白区切りで保持。重複キー検出用）
 cur_job=""       # jobs 配下の直近のジョブ ID
 job_count=0      # jobs 直下のジョブ数（uses と権限を同じジョブに束縛するため 1 件に限定する）
-types_bad=0      # on.pull_request.types が必須イベントを欠く
+list_els=" "     # parse_list が集めた要素（空白区切り。重複と必須要素の判定に使う）
 n=0
 
 # 同一 mapping 内のキー重複を検出する。YAML では後勝ち・解釈系で差が出るため fail-closed で拒否する
@@ -57,12 +65,109 @@ ng() {
   violations=$((violations + 1))
 }
 
-# with: 配下で許可するキー（テンプレートの「よく使う調整」と運用中の wrapper が使うもの）。
-# 値は block scalar・anchor・tag・コメントを含められない文字集合に限る
-re_with_key='^(provider|runner|model|reasoning-effort|block-priorities|collaborators-only|allowed-bot-actors|skip-branch-prefixes|post-feedback-runner|max-diff-bytes|reviewer-id|reviewer-name|api-base-url|prompt-path):[[:space:]]+[][A-Za-z0-9_.,:/"'"'"'$ {}-]+$'
-re_free='^[^|>&*!]+$'
-re_types='^types:[[:space:]]+\[[a-z_, ]+\][[:space:]]*$'
-re_branches='^branches:[[:space:]]+\[[A-Za-z0-9_./*, -]+\][[:space:]]*$'
+# 値の文法。いずれも bash 3.2 で動く（連想配列・mapfile・${x,,} は使わない）。
+RE_TOKEN='^[A-Za-z0-9_.][A-Za-z0-9_./-]*$'            # 空白・コロン・記号を含まない 1 語
+RE_WORDS='^[A-Za-z0-9_.-]+( [A-Za-z0-9_.-]+)*$'       # 空白 1 個区切りの語
+RE_EXPR_VARS='^\$\{\{ vars\.[A-Za-z0-9_]+ \}\}$'      # 組織・リポジトリ変数の参照だけを式として許可
+RE_URL='^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_./-]*)?$'
+RE_BOT='^[A-Za-z0-9_-]+(\[bot\])?$'
+RE_EVENT='^(opened|synchronize|reopened|ready_for_review)$'
+RE_BRANCH='^[A-Za-z0-9_.][A-Za-z0-9_./*-]*$'
+RE_PREFIX='^[A-Za-z0-9_.][A-Za-z0-9_./-]*$'
+RE_WITH_LINE='^([a-z][a-z-]*):[ ]+(.+)$'
+RE_NAME_LINE='^name:[ ]+(.+)$'
+RE_GROUP_LINE='^group:[ ]+(.+)$'
+RE_TYPES_LINE='^types:[ ]+(.+)$'
+RE_BRANCHES_LINE='^branches:[ ]+(.+)$'
+
+# 前後の空白（半角スペースのみ。タブは先に拒否済み）を除く。結果は trimmed に入れる
+trim() {
+  trimmed="$1"
+  trimmed="${trimmed#"${trimmed%%[! ]*}"}"
+  trimmed="${trimmed%"${trimmed##*[! ]}"}"
+}
+
+# 全体を 1 組の同じ引用符で囲んだ値は内側を unq に入れる。引用符なしはそのまま。
+# 開き引用符だけ・開閉が食い違う値は return 1（内側の引用符は各キーの文法が拒否する）
+unquote() {
+  unq="$1"
+  case "$1" in
+    \"*) case "$1" in \"?*\") unq="${1#\"}"; unq="${unq%\"}" ;; *) return 1 ;; esac ;;
+    \'*) case "$1" in \'?*\') unq="${1#\'}"; unq="${unq%\'}" ;; *) return 1 ;; esac ;;
+  esac
+  return 0
+}
+
+# 区切りが , の要素列を分割し、各要素の前後の空白だけを除いて ERE ($2) へ完全一致させる。
+# 空要素・不一致・重複は return 1。通った要素は list_els に " a b c " の形で残す
+parse_list() {
+  local rest="$1," el
+  list_els=" "
+  while [ -n "${rest}" ]; do
+    el="${rest%%,*}"
+    rest="${rest#*,}"
+    trim "${el}"
+    el="${trimmed}"
+    [[ "${el}" =~ $2 ]] || return 1
+    case "${list_els}" in *" ${el} "*) return 1 ;; esac
+    list_els="${list_els}${el} "
+  done
+  return 0
+}
+
+# on.pull_request 配下の [a, b] 形式。角括弧で囲まれた 1 行のフロー配列だけを受け、要素は parse_list で検査する。
+# 成功時は list_els に要素を残す
+parse_flow_list() {
+  local v="$1"
+  [[ "${v}" =~ ^\[(.*)\]$ ]] || return 1
+  parse_list "${BASH_REMATCH[1]}" "$2"
+}
+
+# concurrency.group: 語と、許可した github 式の並び。許可外の式・閉じていない式は残るので文字集合で落ちる
+check_group() {
+  local g="$1" e
+  # 置換パターンは変数経由で渡す（単引用符の解釈が bash のバージョンで異なるため）
+  for e in '${{ github.ref }}' '${{ github.head_ref }}' '${{ github.workflow }}' '${{ github.event.pull_request.number }}'; do
+    g="${g//"${e}"/X}"
+  done
+  [[ "${g}" =~ ^[A-Za-z0-9_.-]+$ ]]
+}
+
+# 引用符なしの列挙（a,b）は空白を含められない。空白で区切りたい場合は全体を引用符で囲む
+# （plain scalar の中の「, 」を要素の区切りと読むかは受け側で異なるため、曖昧な形は拒否する）
+unquoted_list_ok() {
+  case "$1" in
+    \"*|\'*) return 0 ;;
+  esac
+  case "$1" in
+    *" "*) return 1 ;;
+  esac
+  return 0
+}
+
+# with の値を、キーごとの文法へ完全一致させる。通れば return 0。収集は呼び出し側が wunq から行う
+check_with_value() {
+  local key="$1" val="$2"
+  trim "${val}"
+  val="${trimmed}"
+  unquote "${val}" || return 1
+  wunq="${unq}"
+  case "${key}" in
+    provider)             [[ "${unq}" =~ ^(codex|claude|gemini|grok|openai-compatible)$ ]] ;;
+    runner|model)         [[ "${unq}" =~ $RE_TOKEN ]] || [[ "${unq}" =~ $RE_EXPR_VARS ]] ;;
+    api-base-url)         [[ "${unq}" =~ $RE_URL ]] || [[ "${unq}" =~ $RE_EXPR_VARS ]] ;;
+    reasoning-effort|post-feedback-runner|reviewer-id)
+                          [[ "${unq}" =~ $RE_TOKEN ]] ;;
+    reviewer-name)        [[ "${unq}" =~ $RE_WORDS ]] ;;
+    max-diff-bytes)       [[ "${unq}" =~ ^[0-9]+$ ]] ;;
+    prompt-path)          [[ "${unq}" =~ $RE_TOKEN ]] && [[ "${unq}" != *..* ]] ;;
+    collaborators-only)   [ "${unq}" = "true" ] ;;
+    skip-branch-prefixes) unquoted_list_ok "${val}" && parse_list "${unq}" "${RE_PREFIX}" ;;
+    allowed-bot-actors)   unquoted_list_ok "${val}" && parse_list "${unq}" "${RE_BOT}" ;;
+    block-priorities)     return 0 ;;   # 要素の検査は呼び出し側（P0 と P1 の必須判定が要る）
+    *)                    return 2 ;;   # 許可リストにないキー
+  esac
+}
 
 while IFS= read -r line || [ -n "${line}" ]; do
   n=$((n + 1))
@@ -136,31 +241,52 @@ while IFS= read -r line || [ -n "${line}" ]; do
 
   # 親キーごとの allow-list（親を追跡し、on 配下は pull_request のみ・任意名は jobs 直下のみ）
   if [ "${indent}" -eq 0 ]; then
-    if [[ "${body}" =~ ^name:[[:space:]]+ ]] && [[ "${body#name:}" =~ ${re_free} ]]; then once "top/name" || true; continue; fi
+    if [[ "${body}" =~ ${RE_NAME_LINE} ]]; then
+      trim "${BASH_REMATCH[1]}"
+      if unquote "${trimmed}" && [[ "${unq}" =~ ${RE_WORDS} ]]; then once "top/name" || true; else ng "name の値が許可する文法に一致しない"; fi
+      continue
+    fi
     if [[ "${body}" =~ ^(on|concurrency|jobs):[[:space:]]*$ ]]; then continue; fi
     ng "許可リストにないトップレベルキー"; continue
   fi
   case "${section}" in
     on)
-      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^pull_request:[[:space:]]*$ ]]; then once "on/pull_request" || true; pr_seen=1; continue; fi
-      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_types} ]]; then
-        once "on/types" || true
-        # PR の再レビューに必要な opened・synchronize・reopened をすべて含まない値は拒否する
-        tval="${body#*:}"
-        tval="${tval//[[:space:]\[\]]/}"
-        for ev in opened synchronize reopened; do
-          case ",${tval}," in
-            *,"${ev}",*) ;;
-            *) types_bad=1 ;;
-          esac
-        done
-        if [ "${types_bad}" -eq 1 ]; then ng "types に opened・synchronize・reopened が必要"; fi
-        continue
+      if [ "${indent}" -eq 2 ]; then
+        on_sub=""
+        if [[ "${body}" =~ ^pull_request:[[:space:]]*$ ]]; then once "on/pull_request" || true; pr_seen=1; on_sub="pull_request"; continue; fi
+        ng "on 配下は pull_request（types・branches）のみ許可"; continue
       fi
-      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_branches} ]]; then once "on/branches" || true; continue; fi
+      if [ "${indent}" -eq 4 ] && [ "${on_sub}" = "pull_request" ]; then
+        if [[ "${body}" =~ ${RE_TYPES_LINE} ]]; then
+          once "on/types" || true
+          trim "${BASH_REMATCH[1]}"
+          # 要素ごとに許可語へ完全一致させ、PR の再レビューに必要な 3 イベントが要素として揃うことを確かめる
+          if ! parse_flow_list "${trimmed}" "${RE_EVENT}"; then
+            ng "types は [a, b] 形式で、各要素が opened・synchronize・reopened・ready_for_review のいずれかであること（空要素・重複・内部の空白は不可）"
+          else
+            for ev in opened synchronize reopened; do
+              case "${list_els}" in
+                *" ${ev} "*) ;;
+                *) ng "types に ${ev} が必要"; ;;
+              esac
+            done
+          fi
+          continue
+        fi
+        if [[ "${body}" =~ ${RE_BRANCHES_LINE} ]]; then
+          once "on/branches" || true
+          trim "${BASH_REMATCH[1]}"
+          if ! parse_flow_list "${trimmed}" "${RE_BRANCH}"; then ng "branches は [a, b] 形式で、各要素が 1 語のブランチ名であること（空要素・重複・内部の空白は不可）"; fi
+          continue
+        fi
+      fi
       ng "on 配下は pull_request（types・branches）のみ許可"; continue ;;
     concurrency)
-      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^group:[[:space:]]+ ]] && [[ "${body#group:}" =~ ${re_free} ]]; then once "concurrency/group" || true; continue; fi
+      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ${RE_GROUP_LINE} ]]; then
+        trim "${BASH_REMATCH[1]}"
+        if unquote "${trimmed}" && check_group "${unq}"; then once "concurrency/group" || true; else ng "concurrency.group の値が許可する文法に一致しない"; fi
+        continue
+      fi
       if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^cancel-in-progress:[[:space:]]+(true|false)[[:space:]]*$ ]]; then once "concurrency/cancel" || true; continue; fi
       ng "concurrency 配下の許可外の行"; continue ;;
     jobs) ;;
@@ -170,7 +296,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
   # jobs 配下: インデント 2 = ジョブ ID、4 = ジョブのキー、6 = with / secrets の子
   if [ "${indent}" -eq 2 ]; then
     job_sub=""
-    if [[ "${body}" =~ ^[A-Za-z0-9_-]+:[[:space:]]*$ ]]; then
+    if [[ "${body}" =~ ^[A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$ ]]; then
       cur_job="${body%%:*}"
       once "jobs/${cur_job}" || true
       job_count=$((job_count + 1))
@@ -188,48 +314,40 @@ while IFS= read -r line || [ -n "${line}" ]; do
       fi
       continue
     fi
-    if [[ "${body}" =~ ^name:[[:space:]]+ ]] && [[ "${body#name:}" =~ ${re_free} ]]; then continue; fi
+    if [[ "${body}" =~ ${RE_NAME_LINE} ]]; then
+      trim "${BASH_REMATCH[1]}"
+      if unquote "${trimmed}" && [[ "${unq}" =~ ${RE_WORDS} ]]; then continue; fi
+      ng "ジョブの name の値が許可する文法に一致しない"; continue
+    fi
     if [[ "${body}" =~ ^(with|secrets):[[:space:]]*$ ]]; then job_sub="${body%%:*}"; continue; fi
     ng "ジョブ直下の許可リストにないキー（uses は直下に必要）"; continue
   fi
   if [ "${indent}" -eq 6 ]; then
-    if [ "${job_sub}" = "with" ] && [[ "${body}" =~ ${re_with_key} ]]; then
-      wkey="${body%%:*}"
+    if [ "${job_sub}" = "with" ] && [[ "${body}" =~ ${RE_WITH_LINE} ]]; then
+      wkey="${BASH_REMATCH[1]}"
+      wraw="${BASH_REMATCH[2]}"
       once "job:${cur_job}/with/${wkey}" || continue
-      wval="${body#*:}"
-      wval="${wval//[[:space:]\"\'\[\]]/}"
+      # 値はキーごとの文法へ完全一致させる。許可外のキーもここで不合格にする
+      wrc=0
+      check_with_value "${wkey}" "${wraw}" || wrc=$?
+      if [ "${wrc}" -eq 2 ]; then
+        ng "with に許可リストにないキー"
+        continue
+      elif [ "${wrc}" -ne 0 ]; then
+        ng "with の値が、そのキーに許可する文法に一致しない"
+        continue
+      fi
       case "${wkey}" in
-        collaborators-only)
-          # 既定の true 以外は外部コントリビューターのレビュー実行を許すため拒否する
-          if [ "${wval}" != "true" ]; then ng "collaborators-only は true のみ許可"; fi ;;
         block-priorities)
           # 外側の引用符と各要素の前後の空白だけを正規化し、要素ごとに P0〜P3 へ完全一致させる。
-          # 内部の空白・引用符（'P0,P 1' 等）は配置後のファイルに残り P1 の指定にならないため拒否する
-          bp="${body#*:}"
-          bp="${bp#"${bp%%[![:space:]]*}"}"
-          bp="${bp%"${bp##*[![:space:]]}"}"
-          case "${bp}" in
-            \"*\") bp="${bp#\"}"; bp="${bp%\"}" ;;
-            \'*\') bp="${bp#\'}"; bp="${bp%\'}" ;;
-          esac
-          bp_p0=0; bp_p1=0; bp_bad=0
-          bp_rest="${bp},"
-          while [ -n "${bp_rest}" ]; do
-            el="${bp_rest%%,*}"
-            bp_rest="${bp_rest#*,}"
-            el="${el#"${el%%[![:space:]]*}"}"
-            el="${el%"${el##*[![:space:]]}"}"
-            case "${el}" in
-              P0) bp_p0=1 ;;
-              P1) bp_p1=1 ;;
-              P2|P3) ;;
-              *) bp_bad=1 ;;
-            esac
-          done
-          if [ "${bp_bad}" -eq 1 ]; then ng "block-priorities の要素は P0〜P3 のみ許可（内部の空白・引用符・空要素は不可）"; fi
-          # P0 と P1 の両方を含まない値は既存のブロックゲートを外すため拒否する
-          if [ "${bp_p0}" -ne 1 ]; then ng "block-priorities に P0 が必要"; fi
-          if [ "${bp_p1}" -ne 1 ]; then ng "block-priorities に P1 が必要"; fi ;;
+          # 内部の空白・引用符・空要素・重複（'P0,P 1' 等）は配置後のファイルに残り P1 の指定にならないため拒否する
+          if ! parse_list "${wunq}" '^P[0-3]$'; then
+            ng "block-priorities の要素は P0〜P3 のみ許可（内部の空白・引用符・空要素・重複は不可）"
+          else
+            # P0 と P1 の両方を含まない値は既存のブロックゲートを外すため拒否する
+            case "${list_els}" in *" P0 "*) ;; *) ng "block-priorities に P0 が必要" ;; esac
+            case "${list_els}" in *" P1 "*) ;; *) ng "block-priorities に P1 が必要" ;; esac
+          fi ;;
       esac
       continue
     fi
