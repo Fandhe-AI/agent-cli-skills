@@ -1,0 +1,102 @@
+# ai-review wrapper テンプレート（単一 provider）。
+# 呼び出し側リポジトリの .github/workflows/ai-review.yml へコピーして使う。
+# 導入手順は Fandhe-AI/actions の ai-review/README.md「セットアップ」を参照。
+#
+# provider を切り替えるときは `provider:` と（必要なら）`runner:` / `secrets:` を書き換える。
+# runner の既定値:
+#   - codex / claude / gemini（agentic）: provider と同名の用途ラベル（codex / claude / gemini）
+#   - grok / openai-compatible（API）: private リポジトリは self-hosted、public は ubuntu-latest
+#   - preflight / post_feedback（資格情報に触れない）: private は self-hosted、public は ubuntu-latest
+# 別のラベルを使う場合は runner: に単一ラベルか JSON 配列を渡す（例: '["self-hosted","no-sudo"]'）。
+name: AI PR review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+# reusable workflow のトップレベル concurrency は機能しないため呼び出し側で設定する
+concurrency:
+  group: ai-review-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ジョブ ID が check 名の先頭になる（例: "codex / review"）。required status check に
+  # するときはこの名前で登録する
+  codex:
+    uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      provider: codex
+      # 有効化スイッチ: Actions variable CODEX_HOME_DIR（runner 上のログイン済み CODEX_HOME）。
+      # 未設定の間はレビュージョブが skip される。API キーで動かす場合は secrets.API_KEY を渡す
+      #
+      # --- よく使う調整 ---
+      # runner: codex                    # review ジョブの runner ラベル（JSON 配列も可）
+      # model: gpt-6-astra               # 深いレビューが要る場合（quota 消費が大きい）
+      # reasoning-effort: medium
+      # block-priorities: "P0,P1,P2"     # P2 もブロック対象に追加（P0/P1 は除外不可）
+      # collaborators-only: false        # write 未満の actor もレビュー対象にする（既定 true）
+      # allowed-bot-actors: "dependabot[bot],renovate[bot]"  # 権限によらず許可する bot（既定 dependabot[bot]）
+      # skip-branch-prefixes: chore/skills-update-,chore/submodule-update-
+      #   ↑ 自動生成 PR（日次同期 PR 等）を対象外にする。push できる主体はブランチ名で gate を
+      #     回避できる（受容済み残留リスク。第三者の write コラボレーターがいる場合は指定しない）
+    # secrets:
+    #   API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+  # --- 他の provider の例（上の codex ジョブと置き換える） ---
+  #
+  # claude:
+  #   uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest
+  #   permissions:
+  #     contents: read
+  #     pull-requests: write
+  #   with:
+  #     provider: claude
+  #     # 有効化: Actions variable CLAUDE_HOME_DIR（ログイン済み CLAUDE_CONFIG_DIR）または secret
+  #   secrets:
+  #     # Anthropic API キー、または `claude setup-token` の OAuth トークン（sk-ant-oat…）
+  #     API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  #
+  # gemini:
+  #   uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest
+  #   permissions:
+  #     contents: read
+  #     pull-requests: write
+  #   with:
+  #     provider: gemini
+  #     # 有効化: Actions variable GEMINI_HOME_DIR（ログイン済み GEMINI_CLI_HOME）または secret
+  #   secrets:
+  #     API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  #
+  # grok:
+  #   uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest
+  #   permissions:
+  #     contents: read
+  #     pull-requests: write
+  #   with:
+  #     provider: grok
+  #     model: ${{ vars.GROK_MODEL }}    # xAI のモデル名（必須）
+  #   secrets:
+  #     API_KEY: ${{ secrets.XAI_API_KEY }}  # 未設定の間は skip
+  #
+  # local-llm:
+  #   uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest
+  #   permissions:
+  #     contents: read
+  #     pull-requests: write
+  #   with:
+  #     provider: openai-compatible
+  #     reviewer-id: local-llm
+  #     reviewer-name: Local LLM
+  #     # 例 http://llm-node:8000/v1。Actions variable AI_REVIEW_API_BASE_URLS（送信先の
+  #     # 許可リスト。同じ値を登録）と完全一致が必要。どちらかが未設定の間は skip
+  #     api-base-url: ${{ vars.LOCAL_LLM_BASE_URL }}
+  #     model: ${{ vars.LOCAL_LLM_MODEL }}
+  #     runner: self-hosted              # LLM サーバーへ到達できる LAN 内の runner
+  #     max-diff-bytes: 600000           # モデルのコンテキスト長に合わせる
