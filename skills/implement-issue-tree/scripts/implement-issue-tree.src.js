@@ -6447,7 +6447,7 @@ function prCreatePrompt(item, impl, outOfScope) {
 // fix プロンプト。pushAfterFix: true = Merge ループ（修正後 push）/ false = Review ループ。
 // resolve と PR 本文記録は true のみ: (a) push 成功時は自分が修正対応したスレッド限定、(b) push
 // なしは permittedNoPushResolveIds（Issue #430）限定。対象外は記録のみ。
-// fixPrompt 手順 4 の push と反映の確認（#441・#436・#443）。push は HEAD:refs/heads/<branch> の 1 形で、push 前後のリモート head を
+// fixPrompt 手順 4 の push と反映の確認（#441・#436・#443）。push の refspec は HEAD:refs/heads/<branch> の 1 形で（メッセージだけの書き直しはスクリプトが同等性を確かめて lease つきで送る）、push 前後のリモート head を
 // ローカル HEAD と突き合わせる二条件の判定（pushed になるのは前 sha ≠ HEAD かつ後 sha == HEAD のときだけ）は scripts/pr-push.sh
 // （scripts/lib/push-verify.sh。自動 base 取り込みの base-merge.sh と共有）が行う（Issue #603 第 4 弾）。エージェントは status を読んで返す。
 function fixPushInstruction(branch) {
