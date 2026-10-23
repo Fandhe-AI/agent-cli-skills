@@ -4347,16 +4347,16 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'b364d4aaef84d3bd2d2ba00165194ae16487d331806d3e4c3bec8a64826ba795',
-'measure-free-disk.sh':'5dd04884ab2ee0c9e4a5a94ad7e81477d5381376b2670f68bacefc64c9939e33',
-'observe-pr.sh':'452c6921171b4b051960ba11d41dd356f0909dce2e878be1850a0d0582fcfa01',
-'base-merge.sh':'5f7b6e8caae9df53c73bcc2ac1cf185306121a7407fdb6d4fb549babb2c51a45',
-'pr-push.sh':'bfbea820ac6deedf559893dfa93b03155faf6d082131a24b2490bb8b119647b1',
-'state.sh':'9138ed02f6a20bdf3650ceafcf96aec7b301ac3b720bedf7ab937d142c1a0046',
-'merge-gate.sh':'dd91925735626b57e7ae548e7bbf10b81266e348878c94d5ff371a463db23a0e',
-'worktree-remove.sh':'2fc7651a710b8573d1d710dfc789dafa13a08be1d93ea978af3b6a02dc54bfdb',
-'recover-prep.sh':'b40dbb88d7e112fb91c70d6a410acb8b1782a28b098078386667c5406ec2c64f',
-'fetch-tree.sh':'5bdaaa6109955885b3b7802aa9a9019bc4fd1535c67279a3855460f91c719f85',
+'measure-residual-bytes.sh':'ca6773db1fba50b3fe5e27bd6b395e32b8278d59ee13528b7f345415a1c40e8e',
+'measure-free-disk.sh':'1164c4b7ec1e2778330ad8b6eed9737079896ce6e5f30fa3cf9d46a70fb86bd0',
+'observe-pr.sh':'535a470fdbae779832a3856985a280cf115ef76cc3060f140619e9912b104b42',
+'base-merge.sh':'7835fc24396d3a442bcddac4be8ee764f510357eb7e213b343790777074eeab9',
+'pr-push.sh':'ebae4022c10af7d08d0965774c135b4ef02cf2eee2acef9c0330be3228d48f73',
+'state.sh':'5053a965abf6bc79bf50e559a1fccf609346518120c02ff26ed8aedc924e4ebe',
+'merge-gate.sh':'17f022728251f8125259f4f7d98caab53400920136c9353a8d018e36fe9d5a71',
+'worktree-remove.sh':'96501c0b2887bbce5278fad8359ca95286e9aa615068088c833aaf7a84530ac3',
+'recover-prep.sh':'265aa7edd3ce837c295ee4a27666ed057108e6c0a13f67ef19265a268a02ca9b',
+'fetch-tree.sh':'1336882d98eb443536f7548f851db9b1e0f8d42ade45ce93b44dc81f5ce008e7',
 }
 
 
@@ -6452,7 +6452,7 @@ optinRecordSection
 
 function fixPushInstruction(branch){
 const cmd=prPushBlock(` --mode push --origin fix --branch ${branch} --base ${baseBranch}${repoArg ? ` --repo ${repoArg}` : ''}`)
-return`次の push コマンドを実行する（一字一句そのまま。base 取り込みだけの HEAD でも必ず実行する — push を省略すると取り込み・コンフリクト解消の作業が worktree 破棄で失われる。push は detached HEAD の内容を HEAD:refs/heads/${branch} へ送る 1 形で、push 前後のリモート head をローカル HEAD と突き合わせる判定もスクリプトが行う）:\n${cmd}\n${PR_PUSH_NOTE}status が pushed のときだけ pushed: true（自分のコミットがリモート head として反映済みである確認）。noop は pushed: false・summary に「変更なしのため push は no-op」（手順 5 の resolve を一切実行しない。実際の変更を伴わない push を根拠にレビュースレッドを resolve してはならない）。race は pushed: false・summary に「リモート head がローカル HEAD と不一致（並行 push 競合の可能性）」（resolve しない。競合の解消は次ラウンドの monitor / fix に委ねる）。unverified・push-failed は pushed: false・summary にその status（resolve しない。unverified は push 自体は実行済みで前後の確認ができなかっただけ）。merge-in-progress・base-not-fetched・base-not-merged（base 未取り込み）・routing-error・error は push していないので、pushed: false・commitFailed: true・routingError なしで summary に status を書いて返す。非 0 終了・結果の行なしも同じ扱い（pushed: false・commitFailed: true。「push 不要」と区別するため）。`
+return`次の push コマンドを実行する（一字一句そのまま。base 取り込みだけの HEAD でも必ず実行する — push を省略すると取り込み・コンフリクト解消の作業が worktree 破棄で失われる。push は detached HEAD の内容を HEAD:refs/heads/${branch} へ送る 1 形で、push 前後のリモート head をローカル HEAD と突き合わせる判定もスクリプトが行う）:\n${cmd}\n${PR_PUSH_NOTE}CI に拒否されたコミットは、内容と親を変えずメッセージだけを書き直してよい（git commit --amend 等。push は同じコマンド。同等性が崩れていれば push-failed）。status が pushed・pushed-rewritten のときだけ pushed: true（自分のコミットがリモート head として反映済みである確認）。noop は pushed: false・summary に「変更なしのため push は no-op」（手順 5 の resolve を一切実行しない。実際の変更を伴わない push を根拠にレビュースレッドを resolve してはならない）。race は pushed: false・summary に「リモート head がローカル HEAD と不一致（並行 push 競合の可能性）」（resolve しない。競合の解消は次ラウンドの monitor / fix に委ねる）。unverified・push-failed は pushed: false・summary にその status（resolve しない。unverified は push 自体は実行済みで前後の確認ができなかっただけ）。merge-in-progress・base-not-fetched・base-not-merged（base 未取り込み）・routing-error・error は push していないので、pushed: false・commitFailed: true・routingError なしで summary に status を書いて返す。非 0 終了・結果の行なしも同じ扱い（pushed: false・commitFailed: true。「push 不要」と区別するため）。`
 }
 
 

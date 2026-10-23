@@ -6447,12 +6447,12 @@ function prCreatePrompt(item, impl, outOfScope) {
 // fix プロンプト。pushAfterFix: true = Merge ループ（修正後 push）/ false = Review ループ。
 // resolve と PR 本文記録は true のみ: (a) push 成功時は自分が修正対応したスレッド限定、(b) push
 // なしは permittedNoPushResolveIds（Issue #430）限定。対象外は記録のみ。
-// fixPrompt 手順 4 の push と反映の確認（#441・#436・#443）。push は HEAD:refs/heads/<branch> の 1 形で、push 前後のリモート head を
+// fixPrompt 手順 4 の push と反映の確認（#441・#436・#443）。push の refspec は HEAD:refs/heads/<branch> の 1 形で（メッセージだけの書き直しはスクリプトが同等性を確かめて lease つきで送る）、push 前後のリモート head を
 // ローカル HEAD と突き合わせる二条件の判定（pushed になるのは前 sha ≠ HEAD かつ後 sha == HEAD のときだけ）は scripts/pr-push.sh
 // （scripts/lib/push-verify.sh。自動 base 取り込みの base-merge.sh と共有）が行う（Issue #603 第 4 弾）。エージェントは status を読んで返す。
 function fixPushInstruction(branch) {
   const cmd = prPushBlock(` --mode push --origin fix --branch ${branch} --base ${baseBranch}${repoArg ? ` --repo ${repoArg}` : ''}`)
-  return `次の push コマンドを実行する（一字一句そのまま。base 取り込みだけの HEAD でも必ず実行する — push を省略すると取り込み・コンフリクト解消の作業が worktree 破棄で失われる。push は detached HEAD の内容を HEAD:refs/heads/${branch} へ送る 1 形で、push 前後のリモート head をローカル HEAD と突き合わせる判定もスクリプトが行う）:\n${cmd}\n${PR_PUSH_NOTE}status が pushed のときだけ pushed: true（自分のコミットがリモート head として反映済みである確認）。noop は pushed: false・summary に「変更なしのため push は no-op」（手順 5 の resolve を一切実行しない。実際の変更を伴わない push を根拠にレビュースレッドを resolve してはならない）。race は pushed: false・summary に「リモート head がローカル HEAD と不一致（並行 push 競合の可能性）」（resolve しない。競合の解消は次ラウンドの monitor / fix に委ねる）。unverified・push-failed は pushed: false・summary にその status（resolve しない。unverified は push 自体は実行済みで前後の確認ができなかっただけ）。merge-in-progress・base-not-fetched・base-not-merged（base 未取り込み）・routing-error・error は push していないので、pushed: false・commitFailed: true・routingError なしで summary に status を書いて返す。非 0 終了・結果の行なしも同じ扱い（pushed: false・commitFailed: true。「push 不要」と区別するため）。`
+  return `次の push コマンドを実行する（一字一句そのまま。base 取り込みだけの HEAD でも必ず実行する — push を省略すると取り込み・コンフリクト解消の作業が worktree 破棄で失われる。push は detached HEAD の内容を HEAD:refs/heads/${branch} へ送る 1 形で、push 前後のリモート head をローカル HEAD と突き合わせる判定もスクリプトが行う）:\n${cmd}\n${PR_PUSH_NOTE}CI に拒否されたコミットは、内容と親を変えずメッセージだけを書き直してよい（git commit --amend 等。push は同じコマンド。同等性が崩れていれば push-failed）。status が pushed・pushed-rewritten のときだけ pushed: true（自分のコミットがリモート head として反映済みである確認）。noop は pushed: false・summary に「変更なしのため push は no-op」（手順 5 の resolve を一切実行しない。実際の変更を伴わない push を根拠にレビュースレッドを resolve してはならない）。race は pushed: false・summary に「リモート head がローカル HEAD と不一致（並行 push 競合の可能性）」（resolve しない。競合の解消は次ラウンドの monitor / fix に委ねる）。unverified・push-failed は pushed: false・summary にその status（resolve しない。unverified は push 自体は実行済みで前後の確認ができなかっただけ）。merge-in-progress・base-not-fetched・base-not-merged（base 未取り込み）・routing-error・error は push していないので、pushed: false・commitFailed: true・routingError なしで summary に status を書いて返す。非 0 終了・結果の行なしも同じ扱い（pushed: false・commitFailed: true。「push 不要」と区別するため）。`
 }
 
 // push 直後の CI 起動確認指示（Issue #479）。prCreatePrompt 手順 3b / fixPrompt(pushAfterFix:
