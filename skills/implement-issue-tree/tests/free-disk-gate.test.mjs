@@ -42,7 +42,7 @@ const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-free-
 const slicePath = join(sliceDir, 'implement-issue-tree-free-disk-defs.mjs')
 // 実装スクリプトは `export const meta` 以外の top-level export を持てない（Workflow 起動制約）
 // ため、定義部は非 export のまま置き、切り出したスライス側で export 文を付与する。
-const SLICE_EXPORTS = ['shouldSuppressForFreeDisk', 'projectFreeDiskReserveBytes', 'computeUnmeasuredLedgerIncrement', 'DISK_FREE_SCHEMA', 'computeFreeDiskReserveUnits', 'splitNewStartReserve', 'splitResumeReserve', 'effectiveCheckoutByteReserve', 'EPHEMERAL_RESERVE_PER_NEW_START', 'EPHEMERAL_RESERVE_PER_MONITORING_RESUME']
+const SLICE_EXPORTS = ['shouldSuppressForFreeDisk', 'projectFreeDiskReserveBytes', 'computeUnmeasuredLedgerIncrement', 'DISK_FREE_SCHEMA', 'computeFreeDiskReserveUnits', 'splitNewStartReserve', 'splitResumeReserve', 'effectiveCheckoutByteReserve', 'computeCheckoutByteReserve', 'EPHEMERAL_RESERVE_PER_NEW_START', 'EPHEMERAL_RESERVE_PER_MONITORING_RESUME']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
 const mod = await import(pathToFileURL(slicePath).href)
@@ -216,7 +216,7 @@ test('新規着手ブロック: latch reason の予約件数表示に unmeasured
 
 // Issue #691: 予約をビルドあり / チェックアウトのみに分ける純関数の表テスト
 const GiB = 1024 * 1024 * 1024
-const { computeFreeDiskReserveUnits, splitNewStartReserve, splitResumeReserve, effectiveCheckoutByteReserve, EPHEMERAL_RESERVE_PER_NEW_START: PER_NEW, EPHEMERAL_RESERVE_PER_MONITORING_RESUME: PER_RESUME } = mod
+const { computeFreeDiskReserveUnits, splitNewStartReserve, splitResumeReserve, effectiveCheckoutByteReserve, computeCheckoutByteReserve, EPHEMERAL_RESERVE_PER_NEW_START: PER_NEW, EPHEMERAL_RESERVE_PER_MONITORING_RESUME: PER_RESUME } = mod
 
 test('splitNewStartReserve: pr-create と fix-terminal を含めてビルドあり側に数え、合計は perNewStart を超えない', () => {
   const sp = splitNewStartReserve(PER_NEW)
@@ -309,4 +309,12 @@ test('Issue #691 レビュー指摘: free-disk の defer 判定は種別ごと�
   assert.match(block, /if \(freeDiskReservedUnits > 0\) continue/)
   assert.doesNotMatch(block, /if \(reservedUnits > 0\) continue/)
   assert.match(source, /const freeDiskReservedUnits = fuNew\.build \+ fuNew\.checkout/)
+})
+
+test('computeCheckoutByteReserve: 小さな残置平均でも現在のメイン worktree を下限にし、raw で頭打ち', () => {
+  const raw = 20 * GiB
+  assert.equal(computeCheckoutByteReserve({ mainBytes: 10 * GiB, avgResidualBytes: GiB, rawPerWorktreeByteReserve: raw }), 10 * GiB)
+  assert.equal(computeCheckoutByteReserve({ mainBytes: GiB, avgResidualBytes: 4 * GiB, rawPerWorktreeByteReserve: raw }), 4 * GiB)
+  assert.equal(computeCheckoutByteReserve({ mainBytes: 10 * GiB, avgResidualBytes: 0, rawPerWorktreeByteReserve: raw }), 10 * GiB)
+  assert.equal(computeCheckoutByteReserve({ mainBytes: 30 * GiB, avgResidualBytes: GiB, rawPerWorktreeByteReserve: raw }), raw)
 })

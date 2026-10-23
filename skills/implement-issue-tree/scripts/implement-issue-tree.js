@@ -6722,6 +6722,12 @@ return Math.max(0,ledgerLength-measuredAtLedgerCount)
 }
 
 
+function computeCheckoutByteReserve({mainBytes,avgResidualBytes,rawPerWorktreeByteReserve}){
+const floor=Math.max(mainBytes>0?mainBytes:0,avgResidualBytes>0?avgResidualBytes:0)
+return Math.min(rawPerWorktreeByteReserve,floor)
+}
+
+
 function effectiveCheckoutByteReserve(checkoutByteReserve,rawPerWorktreeByteReserve){
 return Number.isInteger(checkoutByteReserve)&&checkoutByteReserve>0
 ?Math.min(checkoutByteReserve,rawPerWorktreeByteReserve)
@@ -7575,7 +7581,8 @@ rawPerWorktreeByteReserve=Math.max(mainKib*1024,avgResidualBytes,persistedHighWa
 await raiseAndPersistHighWater(avgResidualBytes)
 
 
-freeDiskCheckoutByteReserve=Math.min(rawPerWorktreeByteReserve,avgResidualBytes>0?avgResidualBytes:mainKib*1024)
+
+freeDiskCheckoutByteReserve=computeCheckoutByteReserve({mainBytes:mainKib*1024,avgResidualBytes,rawPerWorktreeByteReserve})
 
 
 

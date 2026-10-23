@@ -6721,6 +6721,12 @@ function computeUnmeasuredLedgerIncrement({ ledgerLength = 0, measuredAtLedgerCo
   return Math.max(0, ledgerLength - measuredAtLedgerCount)
 }
 
+// チェックアウトだけの worktree の単価: max(メイン worktree の内容, 残置の実測平均) を raw で頭打ちにする。
+function computeCheckoutByteReserve({ mainBytes, avgResidualBytes, rawPerWorktreeByteReserve }) {
+  const floor = Math.max(mainBytes > 0 ? mainBytes : 0, avgResidualBytes > 0 ? avgResidualBytes : 0)
+  return Math.min(rawPerWorktreeByteReserve, floor)
+}
+
 // チェックアウト単価の確定（表示と投影の共通式）。正の整数ならそれを raw で頭打ちにし、0・非整数・負なら raw へ戻す。
 function effectiveCheckoutByteReserve(checkoutByteReserve, rawPerWorktreeByteReserve) {
   return Number.isInteger(checkoutByteReserve) && checkoutByteReserve > 0
@@ -7574,8 +7580,9 @@ if (!dryRunEnabled) {
         // （残置が実在しない）の場合は computeNextHighWater が null を返し永続化しない。
         await raiseAndPersistHighWater(avgResidualBytes)
         // Issue #691: ビルドしない worktree 用の単価。残置の実測平均があればそれ、無ければメイン worktree の内容。
-        // 高水位（implement のビルド成果物込み）は含めず、raw を超えない。
-        freeDiskCheckoutByteReserve = Math.min(rawPerWorktreeByteReserve, avgResidualBytes > 0 ? avgResidualBytes : mainKib * 1024)
+        // 高水位（implement のビルド成果物込み）は含めず、raw を超えない。現在のメイン worktree の内容を下限にする
+        // （古い小さな残置の平均だけで新規チェックアウトの予約が過小になるのを防ぐ）。
+        freeDiskCheckoutByteReserve = computeCheckoutByteReserve({ mainBytes: mainKib * 1024, avgResidualBytes, rawPerWorktreeByteReserve })
         // クランプの設計根拠は clampPerWorktreeByteReserve 定義側のコメントを参照
         // （Issue #348 codex-review High 指摘: mainKib が gitignored なビルド成果物を含み
         // 過大評価になり得るため、1 件目の着手候補が予約のみで恒久停止しないよう上限を課す）。
