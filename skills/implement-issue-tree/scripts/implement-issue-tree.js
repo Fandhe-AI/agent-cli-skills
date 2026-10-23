@@ -6751,32 +6751,43 @@ return(reservedUnits+extraReserveUnits+unmeasuredLedgerIncrement)*rawPerWorktree
 
 
 
-function splitNewStartReserve(perNewStart,isBuild){
-const build=(isBuild?2:1)+EPHEMERAL_KIND_MAX['fix-terminal']
+
+
+function splitNewStartReserve(perNewStart){
+const build=2 +EPHEMERAL_KIND_MAX['fix-terminal']
 return{build,checkout:Math.max(0,perNewStart-build)}
 }
 
 
 
-function computeFreeDiskReserveUnits({ledger,newStartIssues,resumeIssues,perNewStart,perResume,isBuildIssue}){
+function splitResumeReserve(perResume){
+const build=Math.min(perResume,EPHEMERAL_KIND_MAX['fix-terminal'])
+return{build,checkout:perResume -build}
+}
+
+
+
+function computeFreeDiskReserveUnits({ledger,newStartIssues,resumeIssues,perNewStart,perResume}){
 const rec=new Map()
 for(const e of ledger){
 if(LEDGER_ONLY_KINDS.has(e.kind))continue
 const r=rec.get(e.issue)??[0,0]
-r[e.kind==='implement'||e.kind==='fix-terminal'||(e.kind==='pr-create'&&isBuildIssue(e.issue))?0:1]+=1
+r[e.kind==='implement'||e.kind==='fix-terminal'||e.kind==='pr-create'?0:1]+=1
 rec.set(e.issue,r)
 }
 let build=0
 let checkout=0
 for(const rn of newStartIssues){
 const[b,c]=rec.get(rn)??[0,0]
-const sp=splitNewStartReserve(perNewStart,isBuildIssue(rn))
+const sp=splitNewStartReserve(perNewStart)
 build+=Math.max(0,sp.build-b)
 checkout+=Math.max(0,sp.checkout-c)
 }
+const rsp=splitResumeReserve(perResume)
 for(const rn of resumeIssues){
 const[b,c]=rec.get(rn)??[0,0]
-checkout+=Math.max(0,perResume -b-c)
+build+=Math.max(0,rsp.build-b)
+checkout+=Math.max(0,rsp.checkout-c)
 }
 return{build,checkout}
 }
@@ -7611,7 +7622,7 @@ implementOnly:true,
 }else{
 freeDiskBytesAtStart=freeDiskKib*1024
 freeDiskMeasuredAtLedgerCount=ephemeralWorktrees.length
-const startSplit=splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START,true)
+const startSplit=splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START)
 const requiredFreeDiskBytes=projectFreeDiskReserveBytes({
 reservedUnits:0,
 extraReserveUnits:startSplit.build,
@@ -10319,8 +10330,6 @@ const running=new Map()
 
 const newStartActive=new Set()
 
-const isBuildIssueForReserve=(num)=>(work.find((q)=>q.number===num)?.optinTests?.length??0)>0
-
 
 
 const monitoringResumeActive=new Set()
@@ -10984,12 +10993,12 @@ newStartIssues:newStartActive,
 resumeIssues:monitoringResumeActive,
 perNewStart:EPHEMERAL_RESERVE_PER_NEW_START,
 perResume:EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
-isBuildIssue:isBuildIssueForReserve,
 })
+const resumeSplit=splitResumeReserve(EPHEMERAL_RESERVE_PER_MONITORING_RESUME)
 const requiredFreeDiskBytesResume=projectFreeDiskReserveBytes({
 reservedUnits:fuResume.build,
-extraReserveUnits:0,
-checkoutUnits:fuResume.checkout+EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+extraReserveUnits:resumeSplit.build,
+checkoutUnits:fuResume.checkout+resumeSplit.checkout,
 checkoutByteReserve:freeDiskCheckoutByteReserve,
 rawPerWorktreeByteReserve,
 ledgerLength:ephemeralWorktrees.length,
@@ -11170,9 +11179,11 @@ newStartIssues:newStartActive,
 resumeIssues:monitoringResumeActive,
 perNewStart:EPHEMERAL_RESERVE_PER_NEW_START,
 perResume:EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
-isBuildIssue:isBuildIssueForReserve,
 })
-const candSplit=splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START,isBuildIssueForReserve(n))
+const candSplit=splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START)
+
+
+const freeDiskReservedUnits=fuNew.build+fuNew.checkout
 const fdArgs={
 reservedUnits:fuNew.build,
 extraReserveUnits:candSplit.build,
@@ -11186,7 +11197,7 @@ ledgerLength:ephemeralWorktrees.length,
 measuredAtLedgerCount:freeDiskMeasuredAtLedgerCount,
 })
 if(shouldSuppressForFreeDisk(freeDiskBytesAtStart,requiredFreeDiskBytes)){
-if(reservedUnits>0)continue
+if(freeDiskReservedUnits>0)continue
 
 
 

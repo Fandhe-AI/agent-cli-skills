@@ -6749,34 +6749,45 @@ function projectFreeDiskReserveBytes({
 }
 
 // 新規着手 1 イシューの最大増分 perNewStart を『ビルドあり / チェックアウトのみ』に分ける。ビルドありは
-// implement 1 件と、opt-in テストを pr-create の worktree で実行するイシューの pr-create 1 件。fix-terminal も新しい
-// worktree でテスト・ビルドを実行し得るのでビルドあり側に数え、台帳の記録もビルドあり側で差し引く（過小予約にしない）。
-function splitNewStartReserve(perNewStart, isBuild) {
-  const build = (isBuild ? 2 : 1) + EPHEMERAL_KIND_MAX['fix-terminal']
+// implement 1 件・pr-create 1 件・fix-terminal。pr-create は base とのコンフリクトを解消したとき opt-in テストの有無によらず
+// ビルド・lint・テストを実行するため、イシューごとに分けず常にビルドあり側へ数える（候補ごとに必要量が変わらないので、
+// 開始時の判定と dispatch 時の候補別判定も一致する）。残りの review / security-review / base-merge はチェックアウト単価。
+// 台帳の記録もビルドあり側で差し引く（過小予約にしない）。
+function splitNewStartReserve(perNewStart) {
+  const build = 2 + EPHEMERAL_KIND_MAX['fix-terminal']
   return { build, checkout: Math.max(0, perNewStart - build) }
 }
 
+// monitoring 再開 1 イシューの最大増分 perResume の内訳。再開から起動する fix は隔離 worktree でビルド・テストを
+// 実行するので、fix-terminal 枠はビルドあり側、base-merge 枠はチェックアウト単価で数える。
+function splitResumeReserve(perResume) {
+  const build = Math.min(perResume, EPHEMERAL_KIND_MAX['fix-terminal'])
+  return { build, checkout: perResume - build }
+}
+
 // 実行中イシューの未消費予約を区分ごとに数える（台帳の kind で区分し、記録済み分を差し引く）。
-// monitoring 再開の枠（perResume）は base-merge 中心なので全件チェックアウト単価で数える（fix-terminal の記録は build 側）。LEDGER_ONLY_KINDS は数えない。
-function computeFreeDiskReserveUnits({ ledger, newStartIssues, resumeIssues, perNewStart, perResume, isBuildIssue }) {
+// monitoring 再開の枠（perResume）は splitResumeReserve で fix-terminal（build）と base-merge（checkout）に分ける。LEDGER_ONLY_KINDS は数えない。
+function computeFreeDiskReserveUnits({ ledger, newStartIssues, resumeIssues, perNewStart, perResume }) {
   const rec = new Map()
   for (const e of ledger) {
     if (LEDGER_ONLY_KINDS.has(e.kind)) continue
     const r = rec.get(e.issue) ?? [0, 0]
-    r[e.kind === 'implement' || e.kind === 'fix-terminal' || (e.kind === 'pr-create' && isBuildIssue(e.issue)) ? 0 : 1] += 1
+    r[e.kind === 'implement' || e.kind === 'fix-terminal' || e.kind === 'pr-create' ? 0 : 1] += 1
     rec.set(e.issue, r)
   }
   let build = 0
   let checkout = 0
   for (const rn of newStartIssues) {
     const [b, c] = rec.get(rn) ?? [0, 0]
-    const sp = splitNewStartReserve(perNewStart, isBuildIssue(rn))
+    const sp = splitNewStartReserve(perNewStart)
     build += Math.max(0, sp.build - b)
     checkout += Math.max(0, sp.checkout - c)
   }
+  const rsp = splitResumeReserve(perResume)
   for (const rn of resumeIssues) {
     const [b, c] = rec.get(rn) ?? [0, 0]
-    checkout += Math.max(0, perResume - b - c)
+    build += Math.max(0, rsp.build - b)
+    checkout += Math.max(0, rsp.checkout - c)
   }
   return { build, checkout }
 }
@@ -7611,7 +7622,7 @@ if (!dryRunEnabled) {
         } else {
           freeDiskBytesAtStart = freeDiskKib * 1024
           freeDiskMeasuredAtLedgerCount = ephemeralWorktrees.length
-          const startSplit = splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START, true) // 開始時は候補未確定なので opt-in ありの最大側
+          const startSplit = splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START) // 候補ごとに必要量は変わらないため dispatch 時の候補別判定と同じ値
           const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
             reservedUnits: 0,
             extraReserveUnits: startSplit.build,
@@ -10318,8 +10329,6 @@ const running = new Map()
 // 残置 worktree 上限ゲートの予約計上。新規着手 1 イシューの最大積み増し数は EPHEMERAL_KIND_MAX
 // の合計から導出される。本ランで新規着手し未完了のイシュー番号の集合。
 const newStartActive = new Set()
-// 空き容量ゲートの予約区分（Issue #691）: opt-in テストを持つイシューは pr-create もビルドする。
-const isBuildIssueForReserve = (num) => (work.find((q) => q.number === num)?.optinTests?.length ?? 0) > 0
 // 本ランで monitoring 再開し未完了の implement イシュー番号の集合（verify-close は予約 0 のため
 // 載せない）。再開は fix-routing-error を最大 1 件記録し得るため予約計上する。予約は新規着手側
 // の投入判定に加え monitoring 再開自身の開始判定にも使う。
@@ -10984,12 +10993,12 @@ while (true) {
             resumeIssues: monitoringResumeActive,
             perNewStart: EPHEMERAL_RESERVE_PER_NEW_START,
             perResume: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
-            isBuildIssue: isBuildIssueForReserve,
           })
+          const resumeSplit = splitResumeReserve(EPHEMERAL_RESERVE_PER_MONITORING_RESUME)
           const requiredFreeDiskBytesResume = projectFreeDiskReserveBytes({
             reservedUnits: fuResume.build,
-            extraReserveUnits: 0,
-            checkoutUnits: fuResume.checkout + EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+            extraReserveUnits: resumeSplit.build,
+            checkoutUnits: fuResume.checkout + resumeSplit.checkout,
             checkoutByteReserve: freeDiskCheckoutByteReserve,
             rawPerWorktreeByteReserve,
             ledgerLength: ephemeralWorktrees.length,
@@ -11170,9 +11179,11 @@ while (true) {
             resumeIssues: monitoringResumeActive,
             perNewStart: EPHEMERAL_RESERVE_PER_NEW_START,
             perResume: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
-            isBuildIssue: isBuildIssueForReserve,
           })
-          const candSplit = splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START, isBuildIssueForReserve(n))
+          const candSplit = splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START)
+          // 種別ごとの残り（build + checkout）で実行中の予約有無を判定する。件数軸の合算 reservedUnits は
+          // 台帳が片方の区分に偏ると 0 になっても分割後の残りが正のままになり得るため、latch の defer には使わない。
+          const freeDiskReservedUnits = fuNew.build + fuNew.checkout
           const fdArgs = {
             reservedUnits: fuNew.build,
             extraReserveUnits: candSplit.build,
@@ -11186,7 +11197,7 @@ while (true) {
             measuredAtLedgerCount: freeDiskMeasuredAtLedgerCount,
           })
           if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
-            if (reservedUnits > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
+            if (freeDiskReservedUnits > 0) continue // 実行中タスクの予約解放を待つ（次周回で再評価）
             // unmeasuredLedgerIncrement（df 実測〜この判定までの間に積み増された未測定分）だけが
             // 抑止条件を満たした原因の場合、それは次の remeasureFreeDiskNow で measuredAtLedgerCount
             // が追いつけば解消する一時的な計測ギャップであり、実ディスクの持続的な不足ではない
