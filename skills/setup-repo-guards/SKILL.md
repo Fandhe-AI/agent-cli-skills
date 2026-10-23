@@ -51,30 +51,43 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
 
 **束縛の安全性（検証より前に生の入力をシェルへ入れない）**: 引数値を `repo="<入力>"` のように
 ダブルクォートへ直接展開してコマンド文字列に埋め込まない（`"; cmd; "` や `$(...)` を含む入力が検証前に
-実行される）。次のどちらかで束縛する。
+実行される）。クォート付き HEREDOC も、入力が区切り語の単独行とそれに続くコマンドを含むと HEREDOC を抜けて
+後続行が実行されるため、それだけでは安全ではない。次の手順で束縛する。
 
-1. 先に文字列として照合する: 入力が `^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`（visibility は `public` / `private`）に
-   一致しないと判断した時点で、シェルコマンドを組み立てずに中止する
-2. 一致する値だけを、クォート付き HEREDOC（展開が起きない）で束縛する
+1. 先に文字列として照合する（シェルへ渡す前）: 入力が単一行で、改行・CR・区切り語（下記 `ARG_EOF_` 接頭辞の行）を
+   含まず、`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`（visibility は `public` / `private`）に一致することを確かめる。
+   一致しない、または改行を含むと判断した時点で、シェルコマンドを組み立てずに中止する
+2. 一致した値だけを、推測されにくい区切り語のクォート付き HEREDOC（展開が起きない）で束縛する。
+   区切り語は実行ごとにランダムな値にし、入力に含まれないことを手順 1 で確認済みの前提で使う
+3. 束縛後も全体が 1 行であることを検査する。`read -r` は先頭行しか取らず残りを黙って捨てるため、
+   改行を含む値を切り詰めたまま検証に通さない
 
 ```bash
 # bash 3.2（macOS）と zsh の両方で動く。正規表現は変数に入れて unquoted で使う
 # 束縛: クォート付き HEREDOC は展開を行わない（値に $ や ` や " があっても実行されない）
-IFS= read -r repo <<'ARG_EOF'
+# 区切り語 ARG_EOF_7f3a9c は例。実行ごとに別のランダム値にし、入力に現れないことを事前に確かめる
+IFS= read -r repo <<'ARG_EOF_7f3a9c'
 Fandhe-AI/my-repo
-ARG_EOF
-IFS= read -r visibility <<'ARG_EOF'
+ARG_EOF_7f3a9c
+IFS= read -r visibility <<'ARG_EOF_7f3a9c'
 public
-ARG_EOF
+ARG_EOF_7f3a9c
 
-# 単一の組の検証。一括適用ではこのブロックを組ごとの関数（validate_pair）に包み、
-# 不正なら return 1 で当該組だけ除外して次の組へ進む（exit 1 はシェルごと終了するため使わない）
-repo_re='^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
-if ! [[ "${repo}" =~ ${repo_re} ]]; then echo "不正な repo: 形式外"; exit 1; fi
-name="${repo#*/}"
-case "${repo}" in -*) echo "不正な repo: 先頭が -"; exit 1 ;; esac
-case "${name}" in .|..) echo "不正な repo: . / .. は不可"; exit 1 ;; esac
-case "${visibility}" in public|private) ;; *) echo "不正な visibility"; exit 1 ;; esac
+# 単一の組の検証。一括適用では組ごとに関数として呼ぶ。不正なら return 1 で当該組だけ除外して
+# 次の組へ進む（exit 1 はシェルごと終了するため使わない）
+validate_pair() {
+  local repo="$1" visibility="$2" name
+  local repo_re='^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
+  # 改行・CR を含む値は拒否する（全体が 1 行であること）
+  case "${repo}${visibility}" in *$'\n'*|*$'\r'*) echo "不正な入力: 改行を含む"; return 1 ;; esac
+  if ! [[ "${repo}" =~ ${repo_re} ]]; then echo "不正な repo: 形式外"; return 1; fi
+  name="${repo#*/}"
+  case "${repo}" in -*) echo "不正な repo: 先頭が -"; return 1 ;; esac
+  case "${name}" in .|..) echo "不正な repo: . / .. は不可"; return 1 ;; esac
+  case "${visibility}" in public|private) ;; *) echo "不正な visibility"; return 1 ;; esac
+}
+# 一括適用の例: 組ごとに呼び、失敗した組だけ完了報告へ回して次へ進む
+validate_pair "${repo}" "${visibility}" || echo "除外: 検証失敗"
 ```
 
 - 拒否する値: 余分な `/` を含む値、先頭が `-` の値（`gh` のオプションと取り違えられる）、
@@ -204,6 +217,8 @@ ai-review は **PR の base コミットの AGENTS.md** をリポジトリ固有
     - 適用後（下記「検証」）に `review` ジョブが実際に実行されたことを確認する。確認できない、
       または skipped のままなら、直ちに `required_approving_review_count` を 1 以上へ戻す
       （適用前には確認できないため、条件ではなく適用後の事後確認として扱う）
+      適用から確認までの間は `review` ジョブがまだ動いておらず、レビューゲートなしでマージできる窓が残る。
+      この間は PR をマージしない（確認を済ませるまで自動マージも走らせない）
     - 条件を満たさない場合の代替: `required_approving_review_count` を 1 以上にする（可能なら CODEOWNERS と併用）。
       approver がいない単独運用ではマージが止まり、人間 approve を前提としない `implement-issue-tree` の
       自動マージも止まり得るため、運用者に確認してから設定する
