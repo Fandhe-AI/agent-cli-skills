@@ -143,24 +143,37 @@ Step 4 の書き込み系呼び出し（PATCH / PUT / POST / DELETE）は、**4.
   - Dependabot alerts・automated security fixes・private vulnerability reporting: 各エンドポイントの HTTP status で有効 / 無効を記録する
 - 取得失敗（403 / 404 以外の異常を含む）は「未取得」と明示し、未取得の項目は変更しない。取得失敗を「現在値なし」に倒して
   新規作成・上書きしない（判定不能を green に倒さない方針と同じ）
+- 退避の完了条件は「取得に成功した全 `*.json` が `jq -e .` で JSON として妥当」であること。取得失敗時は壊れたファイル（空・エラー本文）を残さず、そのファイルは「未取得」として扱う（4.2 の差分・4.4 の復旧の入力に使わない）
 - 退避した JSON の件数と sha256 を表示し、保存を確認してから 4.2 へ進む。保存先のパスと内容は PR 本文・コミット・ログへ貼らない（要約のみ）
 
 ```bash
 repo="Fandhe-AI/<REPO>"
 case "${repo}" in */*) ;; *) echo "repo は owner/repo 形式" >&2; exit 1 ;; esac
 backup="$(mktemp -d)" && chmod 700 "${backup}" && echo "退避先: ${backup}"
-gh api "repos/${repo}/rulesets" > "${backup}/rulesets.json" || { echo "退避失敗: ruleset 一覧" >&2; exit 1; }
+# gh api は HTTP エラー本文を stdout に出すため、直接リダイレクトせず一時ファイルへ書く。
+# 成功（終了コード 0）かつ jq -e . で JSON として妥当なときだけ mv し、失敗時は一時ファイルを消して退避ファイルを残さない
+fetch_json() {  # fetch_json <出力ファイル名> <gh api の引数...>
+  out="${backup}/$1"; shift
+  if gh api "$@" > "${out}.tmp" 2>/dev/null && jq -e . "${out}.tmp" > /dev/null 2>&1; then
+    mv "${out}.tmp" "${out}"
+  else
+    rm -f "${out}.tmp"; echo "未取得: ${out##*/}（変更しない）" >&2; return 1
+  fi
+}
+fetch_json rulesets.json "repos/${repo}/rulesets" || { echo "退避失敗: ruleset 一覧" >&2; exit 1; }
 jq -r '.[] | select(.source_type == "Repository") | .id' "${backup}/rulesets.json" |
 while read -r id; do
-  gh api "repos/${repo}/rulesets/${id}" > "${backup}/ruleset-${id}.json" || echo "未取得: ruleset ${id}（変更しない）"
+  fetch_json "ruleset-${id}.json" "repos/${repo}/rulesets/${id}"
 done
-gh api "repos/${repo}" --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, delete_branch_on_merge, allow_auto_merge, squash_merge_commit_title, squash_merge_commit_message, has_wiki, has_projects, allow_forking, security_and_analysis}' > "${backup}/repo.json" || echo "未取得: リポジトリ本体（変更しない）"
-gh api "repos/${repo}/actions/permissions/workflow" > "${backup}/actions-workflow.json" || echo "未取得: Actions workflow 権限（変更しない）"
-gh api "repos/${repo}/actions/permissions" > "${backup}/actions.json" || echo "未取得: Actions 権限（変更しない）"
+fetch_json repo.json "repos/${repo}" --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, delete_branch_on_merge, allow_auto_merge, squash_merge_commit_title, squash_merge_commit_message, has_wiki, has_projects, allow_forking, security_and_analysis}'
+fetch_json actions-workflow.json "repos/${repo}/actions/permissions/workflow"
+fetch_json actions.json "repos/${repo}/actions/permissions"
 for ep in vulnerability-alerts automated-security-fixes private-vulnerability-reporting; do
   code="$(gh api -i "repos/${repo}/${ep}" 2>/dev/null | awk 'NR==1{print $2}')"
   printf '%s\n' "${code:-unknown}" > "${backup}/${ep}.status"   # 204 = 有効 / 404 = 無効 / 他 = 判定不能（変更しない）
 done
+# 完了条件: 退避された *.json がすべて JSON として妥当であること
+for f in "${backup}"/*.json; do jq -e . "${f}" > /dev/null || echo "不正な退避: ${f##*/}（変更しない）" >&2; done
 (cd "${backup}" && ls -1 && shasum -a 256 -- * )
 ```
 
