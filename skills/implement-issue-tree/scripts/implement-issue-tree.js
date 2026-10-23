@@ -6722,6 +6722,13 @@ return Math.max(0,ledgerLength-measuredAtLedgerCount)
 }
 
 
+function effectiveCheckoutByteReserve(checkoutByteReserve,rawPerWorktreeByteReserve){
+return Number.isInteger(checkoutByteReserve)&&checkoutByteReserve>0
+?Math.min(checkoutByteReserve,rawPerWorktreeByteReserve)
+:rawPerWorktreeByteReserve
+}
+
+
 
 
 
@@ -6737,19 +6744,15 @@ ledgerLength=0,
 measuredAtLedgerCount=0,
 }){
 const unmeasuredLedgerIncrement=computeUnmeasuredLedgerIncrement({ledgerLength,measuredAtLedgerCount})
-const ck=
-Number.isInteger(checkoutByteReserve)&&checkoutByteReserve>0
-?Math.min(checkoutByteReserve,rawPerWorktreeByteReserve)
-:rawPerWorktreeByteReserve
+const ck=effectiveCheckoutByteReserve(checkoutByteReserve,rawPerWorktreeByteReserve)
 return(reservedUnits+extraReserveUnits+unmeasuredLedgerIncrement)*rawPerWorktreeByteReserve +checkoutUnits*ck
 }
 
 
 
 
-
 function splitNewStartReserve(perNewStart,isBuild){
-const build=isBuild?2:1
+const build=(isBuild?2:1)+EPHEMERAL_KIND_MAX['fix-terminal']
 return{build,checkout:Math.max(0,perNewStart-build)}
 }
 
@@ -6760,7 +6763,7 @@ const rec=new Map()
 for(const e of ledger){
 if(LEDGER_ONLY_KINDS.has(e.kind))continue
 const r=rec.get(e.issue)??[0,0]
-r[e.kind==='implement'||(e.kind==='pr-create'&&isBuildIssue(e.issue))?0:1]+=1
+r[e.kind==='implement'||e.kind==='fix-terminal'||(e.kind==='pr-create'&&isBuildIssue(e.issue))?0:1]+=1
 rec.set(e.issue,r)
 }
 let build=0
@@ -7608,7 +7611,7 @@ implementOnly:true,
 }else{
 freeDiskBytesAtStart=freeDiskKib*1024
 freeDiskMeasuredAtLedgerCount=ephemeralWorktrees.length
-const startSplit=splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START,false)
+const startSplit=splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START,true)
 const requiredFreeDiskBytes=projectFreeDiskReserveBytes({
 reservedUnits:0,
 extraReserveUnits:startSplit.build,
@@ -7622,7 +7625,7 @@ if(shouldSuppressForFreeDisk(freeDiskBytesAtStart,requiredFreeDiskBytes)){
 const detail=
 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
 `容量予約（ビルドあり ${startSplit.build} 件 × ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB` +
-` + チェックアウト ${startSplit.checkout} 件 × ${Math.round(Math.min(freeDiskCheckoutByteReserve || rawPerWorktreeByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
+` + チェックアウト ${startSplit.checkout} 件 × ${Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
 ` = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
 if(
 !latchNewStartSuppressed({
@@ -11207,7 +11210,7 @@ reason:
 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
 `込みの必要量（ビルドあり ${fdArgs.reservedUnits + fdArgs.extraReserveUnits + unmeasuredLedgerIncrement} 件 × `+
 `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB + チェックアウト ${fdArgs.checkoutUnits} 件 × ` +
-`${Math.round(Math.min(freeDiskCheckoutByteReserve || rawPerWorktreeByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
+`${Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
 `（うち df 実測後の未測定台帳増分 ${unmeasuredLedgerIncrement} 件） = `+
 `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
 `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を`+

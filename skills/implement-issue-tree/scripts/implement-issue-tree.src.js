@@ -6721,8 +6721,15 @@ function computeUnmeasuredLedgerIncrement({ ledgerLength = 0, measuredAtLedgerCo
   return Math.max(0, ledgerLength - measuredAtLedgerCount)
 }
 
+// チェックアウト単価の確定（表示と投影の共通式）。正の整数ならそれを raw で頭打ちにし、0・非整数・負なら raw へ戻す。
+function effectiveCheckoutByteReserve(checkoutByteReserve, rawPerWorktreeByteReserve) {
+  return Number.isInteger(checkoutByteReserve) && checkoutByteReserve > 0
+    ? Math.min(checkoutByteReserve, rawPerWorktreeByteReserve)
+    : rawPerWorktreeByteReserve
+}
+
 // Issue #691: 予約を『ビルドあり worktree（reservedUnits / extraReserveUnits。単価 raw）』と『チェックアウト
-// だけの worktree（checkoutUnits。単価 checkoutByteReserve）』に分ける。review / base-merge / fix-terminal /
+// だけの worktree（checkoutUnits。単価 checkoutByteReserve）』に分ける。review / base-merge /
 // opt-in 無しの pr-create はビルドしないので、implement の実測（ビルド成果物込み）で予約すると必要量が
 // 1 桁過大になり、残置 0 件でも着手できなくなる。checkoutByteReserve が不明（0・非整数）なら raw を使い、
 // 単価は raw を超えない（分割前と同じ式へ戻る = 緩むのは実測できたときだけ）。df 実測後の未測定台帳増分は
@@ -6737,30 +6744,26 @@ function projectFreeDiskReserveBytes({
   measuredAtLedgerCount = 0,
 }) {
   const unmeasuredLedgerIncrement = computeUnmeasuredLedgerIncrement({ ledgerLength, measuredAtLedgerCount })
-  const ck =
-    Number.isInteger(checkoutByteReserve) && checkoutByteReserve > 0
-      ? Math.min(checkoutByteReserve, rawPerWorktreeByteReserve)
-      : rawPerWorktreeByteReserve
+  const ck = effectiveCheckoutByteReserve(checkoutByteReserve, rawPerWorktreeByteReserve)
   return (reservedUnits + extraReserveUnits + unmeasuredLedgerIncrement) * rawPerWorktreeByteReserve + checkoutUnits * ck
 }
 
 // 新規着手 1 イシューの最大増分 perNewStart を『ビルドあり / チェックアウトのみ』に分ける。ビルドありは
-// implement 1 件と、opt-in テストを pr-create の worktree で実行するイシューの pr-create 1 件。fix は新しい
-// worktree で implement の枠を置き換えるので数え増さないが、fix 実行中は旧 implement と並ぶ一時的な重なりが
-// あり、fix-terminal はチェックアウト扱いにとどめる（毎回の df 実測と高水位の引き上げで補う）。
+// implement 1 件と、opt-in テストを pr-create の worktree で実行するイシューの pr-create 1 件。fix-terminal も新しい
+// worktree でテスト・ビルドを実行し得るのでビルドあり側に数え、台帳の記録もビルドあり側で差し引く（過小予約にしない）。
 function splitNewStartReserve(perNewStart, isBuild) {
-  const build = isBuild ? 2 : 1
+  const build = (isBuild ? 2 : 1) + EPHEMERAL_KIND_MAX['fix-terminal']
   return { build, checkout: Math.max(0, perNewStart - build) }
 }
 
 // 実行中イシューの未消費予約を区分ごとに数える（台帳の kind で区分し、記録済み分を差し引く）。
-// monitoring 再開は fix-terminal と base-merge だけなので全件チェックアウト。LEDGER_ONLY_KINDS は数えない。
+// monitoring 再開の枠（perResume）は base-merge 中心なので全件チェックアウト単価で数える（fix-terminal の記録は build 側）。LEDGER_ONLY_KINDS は数えない。
 function computeFreeDiskReserveUnits({ ledger, newStartIssues, resumeIssues, perNewStart, perResume, isBuildIssue }) {
   const rec = new Map()
   for (const e of ledger) {
     if (LEDGER_ONLY_KINDS.has(e.kind)) continue
     const r = rec.get(e.issue) ?? [0, 0]
-    r[e.kind === 'implement' || (e.kind === 'pr-create' && isBuildIssue(e.issue)) ? 0 : 1] += 1
+    r[e.kind === 'implement' || e.kind === 'fix-terminal' || (e.kind === 'pr-create' && isBuildIssue(e.issue)) ? 0 : 1] += 1
     rec.set(e.issue, r)
   }
   let build = 0
@@ -7608,7 +7611,7 @@ if (!dryRunEnabled) {
         } else {
           freeDiskBytesAtStart = freeDiskKib * 1024
           freeDiskMeasuredAtLedgerCount = ephemeralWorktrees.length
-          const startSplit = splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START, false)
+          const startSplit = splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START, true) // 開始時は候補未確定なので opt-in ありの最大側
           const requiredFreeDiskBytes = projectFreeDiskReserveBytes({
             reservedUnits: 0,
             extraReserveUnits: startSplit.build,
@@ -7622,7 +7625,7 @@ if (!dryRunEnabled) {
             const detail =
               `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
               `容量予約（ビルドあり ${startSplit.build} 件 × ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB` +
-              ` + チェックアウト ${startSplit.checkout} 件 × ${Math.round(Math.min(freeDiskCheckoutByteReserve || rawPerWorktreeByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
+              ` + チェックアウト ${startSplit.checkout} 件 × ${Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
               ` = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
             if (
               !latchNewStartSuppressed({
@@ -11207,7 +11210,7 @@ while (true) {
                 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
                 `込みの必要量（ビルドあり ${fdArgs.reservedUnits + fdArgs.extraReserveUnits + unmeasuredLedgerIncrement} 件 × ` +
                 `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB + チェックアウト ${fdArgs.checkoutUnits} 件 × ` +
-                `${Math.round(Math.min(freeDiskCheckoutByteReserve || rawPerWorktreeByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
+                `${Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
                 `（うち df 実測後の未測定台帳増分 ${unmeasuredLedgerIncrement} 件） = ` +
                 `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
                 `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を` +

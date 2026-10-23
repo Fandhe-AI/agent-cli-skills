@@ -42,7 +42,7 @@ const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-free-
 const slicePath = join(sliceDir, 'implement-issue-tree-free-disk-defs.mjs')
 // 実装スクリプトは `export const meta` 以外の top-level export を持てない（Workflow 起動制約）
 // ため、定義部は非 export のまま置き、切り出したスライス側で export 文を付与する。
-const SLICE_EXPORTS = ['shouldSuppressForFreeDisk', 'projectFreeDiskReserveBytes', 'computeUnmeasuredLedgerIncrement', 'DISK_FREE_SCHEMA', 'computeFreeDiskReserveUnits', 'splitNewStartReserve']
+const SLICE_EXPORTS = ['shouldSuppressForFreeDisk', 'projectFreeDiskReserveBytes', 'computeUnmeasuredLedgerIncrement', 'DISK_FREE_SCHEMA', 'computeFreeDiskReserveUnits', 'splitNewStartReserve', 'effectiveCheckoutByteReserve', 'EPHEMERAL_RESERVE_PER_NEW_START', 'EPHEMERAL_RESERVE_PER_MONITORING_RESUME']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
 const mod = await import(pathToFileURL(slicePath).href)
@@ -211,4 +211,78 @@ test('新規着手ブロック: latch reason の予約件数表示に unmeasured
   const fnEnd = source.indexOf('\n          }\n', fnStart)
   const block = source.slice(fnStart, fnEnd)
   assert.match(block, /ビルドあり \$\{fdArgs\.reservedUnits \+ fdArgs\.extraReserveUnits \+ unmeasuredLedgerIncrement\} 件/)
+})
+
+
+// Issue #691: 予約をビルドあり / チェックアウトのみに分ける純関数の表テスト
+const GiB = 1024 * 1024 * 1024
+const { computeFreeDiskReserveUnits, splitNewStartReserve, effectiveCheckoutByteReserve, EPHEMERAL_RESERVE_PER_NEW_START: PER_NEW, EPHEMERAL_RESERVE_PER_MONITORING_RESUME: PER_RESUME } = mod
+
+test('splitNewStartReserve: ビルド有無で build / checkout の内訳が決まり合計は perNewStart を超えない', () => {
+  const noOptin = splitNewStartReserve(PER_NEW, false)
+  const optin = splitNewStartReserve(PER_NEW, true)
+  assert.equal(optin.build, noOptin.build + 1)
+  assert.equal(noOptin.build + noOptin.checkout, PER_NEW)
+  assert.equal(optin.build + optin.checkout, PER_NEW)
+  assert.equal(splitNewStartReserve(1, true).checkout, 0)
+})
+
+test('effectiveCheckoutByteReserve: 0・非整数・負・NaN は raw へ戻り、raw 超過は raw で頭打ち', () => {
+  const raw = 8 * GiB
+  for (const bad of [0, -1, 1.5, NaN, undefined, null, '3']) assert.equal(effectiveCheckoutByteReserve(bad, raw), raw)
+  assert.equal(effectiveCheckoutByteReserve(raw * 2, raw), raw)
+  assert.equal(effectiveCheckoutByteReserve(GiB, raw), GiB)
+})
+
+test('projectFreeDiskReserveBytes: checkoutByteReserve が 0・非整数・raw 超過なら raw 単価（分割前と同じ式）に収束する', () => {
+  const raw = 8 * GiB
+  const base = { reservedUnits: 1, extraReserveUnits: 1, rawPerWorktreeByteReserve: raw, checkoutUnits: 3 }
+  for (const ck of [0, 1.5, raw * 3, undefined]) {
+    assert.equal(projectFreeDiskReserveBytes({ ...base, checkoutByteReserve: ck }), 5 * raw)
+  }
+  assert.equal(projectFreeDiskReserveBytes({ ...base, checkoutByteReserve: GiB }), 2 * raw + 3 * GiB)
+})
+
+test('projectFreeDiskReserveBytes: 未測定台帳増分はビルドあり単価（raw）で数える', () => {
+  const raw = 8 * GiB
+  const r = projectFreeDiskReserveBytes({ reservedUnits: 0, extraReserveUnits: 0, rawPerWorktreeByteReserve: raw, checkoutUnits: 0, checkoutByteReserve: GiB, ledgerLength: 3, measuredAtLedgerCount: 1 })
+  assert.equal(r, 2 * raw)
+})
+
+test('computeFreeDiskReserveUnits: 台帳の記録済み分を kind ごとに差し引く（implement / pr-create / fix-terminal / その他）', () => {
+  const args = (ledger, isBuild) => ({ ledger, newStartIssues: [1], resumeIssues: [], perNewStart: PER_NEW, perResume: PER_RESUME, isBuildIssue: () => isBuild })
+  const none = computeFreeDiskReserveUnits(args([], false))
+  const sp = splitNewStartReserve(PER_NEW, false)
+  assert.deepEqual(none, sp)
+  // implement 記録 -> build が 1 減る
+  assert.equal(computeFreeDiskReserveUnits(args([{ issue: 1, kind: 'implement' }], false)).build, sp.build - 1)
+  // review 記録 -> checkout が 1 減る
+  assert.deepEqual(computeFreeDiskReserveUnits(args([{ issue: 1, kind: 'review' }], false)), { build: sp.build, checkout: sp.checkout - 1 })
+  // pr-create は opt-in 有無で振り分け
+  assert.equal(computeFreeDiskReserveUnits(args([{ issue: 1, kind: 'pr-create' }], true)).build, splitNewStartReserve(PER_NEW, true).build - 1)
+  assert.equal(computeFreeDiskReserveUnits(args([{ issue: 1, kind: 'pr-create' }], false)).checkout, sp.checkout - 1)
+  // fix-terminal はビルドあり側
+  assert.equal(computeFreeDiskReserveUnits(args([{ issue: 1, kind: 'fix-terminal' }], false)).build, sp.build - 1)
+  // 台帳専用 kind と他イシューの記録は差し引かない
+  assert.deepEqual(computeFreeDiskReserveUnits(args([{ issue: 1, kind: 'retained' }, { issue: 2, kind: 'implement' }], false)), sp)
+})
+
+test('computeFreeDiskReserveUnits: 記録が枠を超えても負にならず、monitoring 再開はチェックアウト扱い', () => {
+  const ledger = Array.from({ length: 50 }, () => ({ issue: 1, kind: 'implement' }))
+  const r = computeFreeDiskReserveUnits({ ledger, newStartIssues: [1], resumeIssues: [7], perNewStart: PER_NEW, perResume: PER_RESUME, isBuildIssue: () => false })
+  assert.equal(r.build, 0)
+  assert.ok(r.checkout >= PER_RESUME)
+})
+
+test('Issue #691 再現: 残置 0 件でチェックアウト単価が小さいとき、小さい空き容量でも着手できる（raw 単価では止まる）', () => {
+  const raw = 20 * GiB // implement のビルド成果物込み実測
+  const ck = GiB // チェックアウトだけの実測
+  const u = computeFreeDiskReserveUnits({ ledger: [], newStartIssues: [], resumeIssues: [], perNewStart: PER_NEW, perResume: PER_RESUME, isBuildIssue: () => false })
+  const sp = splitNewStartReserve(PER_NEW, false)
+  const split = projectFreeDiskReserveBytes({ reservedUnits: u.build, extraReserveUnits: sp.build, checkoutUnits: u.checkout + sp.checkout, checkoutByteReserve: ck, rawPerWorktreeByteReserve: raw })
+  const legacy = projectFreeDiskReserveBytes({ reservedUnits: 0, extraReserveUnits: PER_NEW, rawPerWorktreeByteReserve: raw })
+  const free = 100 * GiB
+  assert.equal(shouldSuppressForFreeDisk(free, split), false)
+  assert.ok(legacy > free, '分割前の式では必要量が空き容量を超えて止まっていた')
+  assert.ok(split < legacy)
 })
