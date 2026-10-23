@@ -31,7 +31,13 @@ Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）
 - **危険指示の混入（P0）**: `--no-verify`・`--force`（force push）・フック回避・
   `rm -rf` の広域削除・`sudo` を促す手順をスキルへ埋め込まない。既存スキルの安全弁
   （create-commit のシークレット混入チェック、contribute-skill の `Fandhe-AI/` 以外への
-  push 中止等）を削除・弱体化する差分は P0
+  push 中止等）を削除・弱体化する差分は P0。
+  **例外**: `implement-issue-tree` の `scripts/pr-push.sh --mode push --origin fix` が
+  使う `--force-with-lease=refs/heads/<branch>:<sha>` は指摘しない（2026-10-23・
+  オーナー判断。Issue #696）。使えるのはコミットメッセージだけの書き直しに限る:
+  新 HEAD とリモート head で各コミットの tree と親の対応が一致し、lease の期待値は
+  スクリプトが fetch で観測した sha（エージェントの申告値ではない）で、pr-create 経路
+  では使わない。この条件を緩める差分・素の `--force` / `+refspec` を足す差分は従来どおり P0
 - **秘密情報の混入（P0）**: 実トークン・実 API キーをスキル本文・sample・テストに
   書かない（例示はダミー値・パターン表記に限る）
 - **TLS 検証無効化の拡大（P1）**: `GIT_SSL_NO_VERIFY=1` は sandbox 環境の
