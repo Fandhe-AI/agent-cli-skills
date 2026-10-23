@@ -203,15 +203,33 @@ while IFS= read -r line || [ -n "${line}" ]; do
           # 既定の true 以外は外部コントリビューターのレビュー実行を許すため拒否する
           if [ "${wval}" != "true" ]; then ng "collaborators-only は true のみ許可"; fi ;;
         block-priorities)
-          # P0 と P1 の両方を含まない値は既存のブロックゲートを外すため拒否する
-          case ",${wval}," in
-            *,P0,*) ;;
-            *) ng "block-priorities に P0 が必要" ;;
+          # 外側の引用符と各要素の前後の空白だけを正規化し、要素ごとに P0〜P3 へ完全一致させる。
+          # 内部の空白・引用符（'P0,P 1' 等）は配置後のファイルに残り P1 の指定にならないため拒否する
+          bp="${body#*:}"
+          bp="${bp#"${bp%%[![:space:]]*}"}"
+          bp="${bp%"${bp##*[![:space:]]}"}"
+          case "${bp}" in
+            \"*\") bp="${bp#\"}"; bp="${bp%\"}" ;;
+            \'*\') bp="${bp#\'}"; bp="${bp%\'}" ;;
           esac
-          case ",${wval}," in
-            *,P1,*) ;;
-            *) ng "block-priorities に P1 が必要" ;;
-          esac ;;
+          bp_p0=0; bp_p1=0; bp_bad=0
+          bp_rest="${bp},"
+          while [ -n "${bp_rest}" ]; do
+            el="${bp_rest%%,*}"
+            bp_rest="${bp_rest#*,}"
+            el="${el#"${el%%[![:space:]]*}"}"
+            el="${el%"${el##*[![:space:]]}"}"
+            case "${el}" in
+              P0) bp_p0=1 ;;
+              P1) bp_p1=1 ;;
+              P2|P3) ;;
+              *) bp_bad=1 ;;
+            esac
+          done
+          if [ "${bp_bad}" -eq 1 ]; then ng "block-priorities の要素は P0〜P3 のみ許可（内部の空白・引用符・空要素は不可）"; fi
+          # P0 と P1 の両方を含まない値は既存のブロックゲートを外すため拒否する
+          if [ "${bp_p0}" -ne 1 ]; then ng "block-priorities に P0 が必要"; fi
+          if [ "${bp_p1}" -ne 1 ]; then ng "block-priorities に P1 が必要"; fi ;;
       esac
       continue
     fi
