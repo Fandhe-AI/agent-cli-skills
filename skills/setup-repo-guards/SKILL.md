@@ -145,7 +145,7 @@ Step 4 の書き込み系呼び出し（PATCH / PUT / POST / DELETE）は、**4.
     status では判別できない。本文の `enabled` を JSON として退避する
 - 取得失敗（403 / 404 以外の異常を含む）は「未取得」と明示し、未取得の項目は変更しない。取得失敗を「現在値なし」に倒して
   新規作成・上書きしない（判定不能を green に倒さない方針と同じ）
-- 退避の完了条件は「取得に成功した全 `*.json` が `jq -e .` で JSON として妥当」かつ「ruleset 一覧にある Repository ruleset の全 id の詳細が退避済み」であること。未取得 id が 1 件でもあれば列挙して 4.2 へ進まない（ゲート。その ruleset は変更しない）。取得失敗時は壊れたファイル（空・エラー本文）を残さず、そのファイルは「未取得」として扱う（4.2 の差分・4.4 の復旧の入力に使わない）
+- 退避の完了条件は「ruleset 一覧を全ページ取得（`--paginate --slurp` + `jq 'add'`）して単一配列に統合できた」かつ「取得に成功した全 `*.json` が `jq -e .` で JSON として妥当」かつ「ruleset 一覧にある Repository ruleset の全 id の詳細が退避済み」であること。未取得 id が 1 件でもあれば列挙して 4.2 へ進まない（ゲート。その ruleset は変更しない）。取得失敗時は壊れたファイル（空・エラー本文）を残さず、そのファイルは「未取得」として扱う（4.2 の差分・4.4 の復旧の入力に使わない）
 - Bash ツールは呼び出しをまたいでシェル変数を保持しない。4.1 から 4.4 を複数回の呼び出しに分けるときは、各呼び出しの先頭で `repo` と `backup`（4.1 で表示した絶対パス）を再束縛し、`[ -d "${backup}" ]` を確認してから使う（空の変数のまま実行しない）
 - 退避した JSON の件数と sha256 を表示し、保存を確認してから 4.2 へ進む。保存先のパスと内容は PR 本文・コミット・ログへ貼らない（要約のみ）
 
@@ -163,7 +163,14 @@ fetch_json() {  # fetch_json <出力ファイル名> <gh api の引数...>
     rm -f "${out}.tmp"; echo "未取得: ${out##*/}（変更しない）" >&2; return 1
   fi
 }
-fetch_json rulesets.json "repos/${repo}/rulesets" || { echo "退避失敗: ruleset 一覧" >&2; exit 1; }
+# ruleset 一覧は既定では最初のページしか返らない。--paginate --slurp で全ページを配列の配列として取り、jq 'add' で単一配列へ統合する。
+# 統合結果が配列でない場合・取得失敗は退避失敗として止める（後段の詳細取得と完了判定は、この統合済みの rulesets.json だけを使う）
+if gh api --paginate --slurp "repos/${repo}/rulesets" 2>/dev/null | jq -e 'add // [] | if type == "array" then . else error("not array") end' > "${backup}/rulesets.json.tmp" 2>/dev/null; then
+  mv "${backup}/rulesets.json.tmp" "${backup}/rulesets.json"
+else
+  rm -f "${backup}/rulesets.json.tmp"; echo "退避失敗: ruleset 一覧（全ページ取得不可）" >&2; exit 1
+fi
+echo "ruleset 一覧: $(jq 'length' "${backup}/rulesets.json") 件（0 件なら新規作成のみ。既存を変更する前提にしない）"
 jq -r '.[] | select(.source_type == "Repository") | .id' "${backup}/rulesets.json" |
 while read -r id; do
   fetch_json "ruleset-${id}.json" "repos/${repo}/rulesets/${id}"
@@ -319,8 +326,8 @@ gh api "repos/${repo}" --jq '{allow_squash_merge, allow_merge_commit, allow_reba
 # コマンド全文・判定表は実行環境に .claude/rules/ruleset-policy.md があれば「一括更新後の検証」節を参照。
 # 無ければ下記 Step 4-a/4-b のコマンド・判定表をそのまま用いる
 org="${repo%%/*}"
-gh api "repos/${repo}/rulesets" \
-  --jq '.[] | select(.target == "branch") | [(.id|tostring), .name, (.source_type // "unknown")] | @tsv' |
+gh api --paginate --slurp "repos/${repo}/rulesets" |
+  jq -r 'add // [] | .[] | select(.target == "branch") | [(.id|tostring), .name, (.source_type // "unknown")] | @tsv' |
 while IFS=$'\t' read -r id name src; do
   case "${src}" in
     Repository)   path="repos/${repo}/rulesets/${id}" ;;
