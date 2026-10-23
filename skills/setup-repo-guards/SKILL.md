@@ -55,14 +55,38 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
   レビューが動かない状態になっている。Fandhe-AI/actions の `ai-review/README.md`「codex-review からの移行」の
   手順（入力名の対応表・required check 名の差し替え順序）に従って置き換える
 
-wrapper は単一 provider テンプレートをそのままコピーして作る（既定は `provider: codex`、ジョブ ID `codex`）:
+wrapper は単一 provider テンプレートをコピーして作る（既定は `provider: codex`、ジョブ ID `codex`）。
+取得元を commit SHA に固定し、配置前に構造検査を通す。テンプレートを ref 指定なし・無検証で配置すると、
+取得元の改ざん・誤更新がそのまま対象リポジトリの workflow になるため。
+
+- `@latest` を wrapper に残すのは Fandhe-AI/actions の組織規約として受容した残留リスクである
+  （実行時の reusable workflow の内容は wrapper 側で固定しない）。本手順の固定取得と検査が塞ぐのは
+  「wrapper ファイル自体の改ざん・誤配置」だけで、`latest` タグ自体の改ざんは検査と目視で補う限界がある
+- 検査スクリプト（`scripts/verify-ai-review-wrapper.sh`）は allow-list 方式で、`uses:` が期待値と完全一致で
+  ちょうど 1 件・特権トリガー無し・`run:` / `steps:` / `env:` 無し・`secrets: inherit` 無し・権限が
+  `contents: read`（ジョブ側のみ加えて `pull-requests: write`）に限られることを確かめる。ファイル内容は出力しない
 
 ```bash
-mkdir -p .github/workflows
-gh api -H 'Accept: application/vnd.github.raw' \
+tmp="$(mktemp -d)" || exit 1
+trap 'rm -rf "${tmp}"' EXIT
+# latest を commit SHA に解決（取得中にタグが動いても同じ commit を使う）
+sha="$(gh api repos/Fandhe-AI/actions/commits/latest --jq .sha)" || exit 1
+printf '%s' "${sha}" | grep -Eq '^[0-9a-f]{40}$' || { echo "SHA の形式が不正のため中止"; exit 1; }
+# gh api はエラー本文も stdout へ出すため、成否は終了コードで判定する
+gh api --method GET -H 'Accept: application/vnd.github.raw' -f ref="${sha}" \
   repos/Fandhe-AI/actions/contents/ai-review/templates/ai-review.single.yml \
-  > .github/workflows/ai-review.yml
+  > "${tmp}/ai-review.yml" || { echo "取得失敗のため中止"; exit 1; }
+# 構造検査（不合格なら配置しない。<skill-dir> はこのスキルのディレクトリ）
+bash <skill-dir>/scripts/verify-ai-review-wrapper.sh "${tmp}/ai-review.yml" || exit 1
+mkdir -p .github/workflows
+cp "${tmp}/ai-review.yml" .github/workflows/ai-review.yml
+echo "取得元: Fandhe-AI/actions@${sha}"
 ```
+
+- 配置後は `cat .github/workflows/ai-review.yml` で全文を目視確認し、コミット本文に
+  `取得元: Fandhe-AI/actions@<上で出力した SHA>` を記録する
+- 検査が不合格のときは配置せず、取得内容を目視で確かめる。上流の正当な変更なら、先に
+  `verify-ai-review-wrapper.sh` の許可リストを更新する PR を出す（検査を緩めて通さない）
 
 - 書き方・適用条件（fork PR 拒否・sudo なし runner 等）は Fandhe-AI/actions の `ai-review/README.md` と
   `ai-review/docs/runner-exception.md`、既存導入リポジトリ（fandhe-frontend 等）の wrapper を参照して揃える
@@ -182,6 +206,8 @@ ai-review は **PR の base コミットの AGENTS.md** をリポジトリ固有
 repo="Fandhe-AI/<REPO>"
 # Step 1: wrapper の存在と @latest 参照（@main・旧 codex-review.yml が残っていないこと）
 grep -n "uses: Fandhe-AI/actions" .github/workflows/ai-review.yml
+# Step 1: 配置済み wrapper が構造検査（uses 1 件・特権トリガー無し・権限最小）に合格すること
+bash <skill-dir>/scripts/verify-ai-review-wrapper.sh .github/workflows/ai-review.yml
 test ! -e .github/workflows/codex-review.yml && echo "旧 wrapper なし"
 # Step 1: 直近 run でジョブ単位に review が実行されたこと（skipped は「workflow 成功」に見える）
 # head_branch は検証対象の PR（導入 PR 等）の head ブランチ名
@@ -251,6 +277,7 @@ Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須�
 | 旧 ruleset / classic BP の掃き漏らしで未束縛・strict=true が残る | Step 4-a/4-b: 全 branch ruleset を列挙して掃き、classic BP は `defaultBranchRef` 解決 + status 分岐で別枠確認する |
 | AGENTS.md に自動マージの G0 契約を書く際 strict を要件として列挙し、実装より強い契約が AI レビューの P0 の根拠になる | Step 2: G0 契約を書くなら strict は「意図的な非要件」と明記する（実行環境に `.claude/rules/ruleset-policy.md` があれば参照） |
 | autoMerge 運用で外部アプリ・post_feedback 等を required から外すと G0 (f) が server-enforcement-missing で辞退し自動マージが静かに恒久停止する | Step 4: autoMerge を使う場合は PR HEAD の全 context を required に列挙する（外部アプリ・ai-review の全ジョブを含む） |
+| ai-review テンプレートを ref 指定なし・無検証で配置し、取得元の改ざん・誤更新がそのまま workflow になる | Step 1: `latest` を commit SHA に解決して固定取得し、`verify-ai-review-wrapper.sh` と `cat` の目視を通してから配置する |
 | 旧 `codex-review.yml` wrapper を新規導入する・残したままにする（Fandhe-AI/actions から削除済みで workflow を解決できない） | Step 1: `ai-review/templates/ai-review.single.yml` から導入し、旧 wrapper は「codex-review からの移行」で置き換える |
 | ai-review の `preflight` を required から外し、actor 判定の失敗で review が skipped のまま必須チェックを満たす | Step 4: `<job> / preflight` を必ず required に含める |
 | 資格情報未設定で review が skipped なのに workflow 全体の成功を見て導入完了とする | 検証: `gh run view --json jobs` でジョブ単位に `review` の実行を確認する |
