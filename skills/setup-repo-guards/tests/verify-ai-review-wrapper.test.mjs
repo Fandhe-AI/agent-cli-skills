@@ -58,6 +58,12 @@ test('実テンプレート同形・コメント追加・空行追加は合格�
   assert.equal(verify('# 追加コメント\n\n' + GOOD + '\n\n# 末尾\n').code, 0);
 });
 
+test('旧パスのカスタム prompt を保持する prompt-path 指定は合格する', () => {
+  const s = GOOD.replace('      provider: codex\n', '      provider: codex\n      prompt-path: .github/ai-review/prompt.md\n');
+  assert.notEqual(s, GOOD);
+  assert.equal(verify(s).code, 0);
+});
+
 const mutations = {
   'uses が @main': (s) => s.replace('@latest', '@main'),
   'uses が SHA': (s) => s.replace('@latest', '@8df2fb1bfff527731dcf74fa5cedc4bd6ee040af'),

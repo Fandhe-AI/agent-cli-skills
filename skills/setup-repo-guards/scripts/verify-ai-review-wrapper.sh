@@ -43,7 +43,7 @@ ng() {
 
 # with: 配下で許可するキー（テンプレートの「よく使う調整」と運用中の wrapper が使うもの）。
 # 値は block scalar・anchor・tag・コメントを含められない文字集合に限る
-re_with_key='^(provider|runner|model|reasoning-effort|block-priorities|collaborators-only|allowed-bot-actors|skip-branch-prefixes|post-feedback-runner|max-diff-bytes|reviewer-id|reviewer-name|api-base-url):[[:space:]]+[][A-Za-z0-9_.,:/"'"'"'$ {}-]+$'
+re_with_key='^(provider|runner|model|reasoning-effort|block-priorities|collaborators-only|allowed-bot-actors|skip-branch-prefixes|post-feedback-runner|max-diff-bytes|reviewer-id|reviewer-name|api-base-url|prompt-path):[[:space:]]+[][A-Za-z0-9_.,:/"'"'"'$ {}-]+$'
 re_free='^[^|>&*!]+$'
 re_types='^types:[[:space:]]+\[[a-z_, ]+\][[:space:]]*$'
 re_branches='^branches:[[:space:]]+\[[A-Za-z0-9_./*, -]+\][[:space:]]*$'
