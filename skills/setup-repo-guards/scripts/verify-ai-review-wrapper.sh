@@ -33,6 +33,9 @@ section=""      # 直近のトップレベルキー（on / concurrency / jobs / 
 top_perm_ok=0   # トップレベル permissions に contents: read があった
 job_contents=0  # ジョブ側 permissions に contents: read があった
 job_prw=0       # ジョブ側 permissions に pull-requests: write があった
+job_sub=""      # jobs 配下のインデント 4 の直近キー（with / secrets / permissions / その他）
+on_seen=0       # トップレベル on があった
+pr_seen=0       # on 直下（インデント 2）の pull_request があった
 n=0
 
 ng() {
@@ -79,15 +82,18 @@ while IFS= read -r line || [ -n "${line}" ]; do
 
   if [ "${indent}" -eq 0 ] && [[ "${body}" =~ ^(on|concurrency|jobs|permissions):[[:space:]]*$ ]]; then
     section="${body%%:*}"
+    job_sub=""
+    if [ "${section}" = "on" ]; then on_seen=1; fi
   fi
   if [[ "${body}" =~ ^permissions:[[:space:]]*$ ]]; then
     perm_indent="${indent}"
     if [ "${indent}" -eq 0 ]; then
       perm_scope="top"
-    elif [ "${section}" = "jobs" ]; then
+    elif [ "${section}" = "jobs" ] && [ "${indent}" -eq 4 ]; then
       perm_scope="job"
+      job_sub="permissions"
     else
-      ng "jobs 以外での permissions"
+      ng "jobs の各ジョブ直下以外での permissions"
     fi
     continue
   fi
@@ -115,7 +121,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
   fi
   case "${section}" in
     on)
-      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^pull_request:[[:space:]]*$ ]]; then continue; fi
+      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^pull_request:[[:space:]]*$ ]]; then pr_seen=1; continue; fi
       if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_types} ]]; then continue; fi
       if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_branches} ]]; then continue; fi
       ng "on 配下は pull_request（types・branches）のみ許可"; continue ;;
@@ -127,25 +133,40 @@ while IFS= read -r line || [ -n "${line}" ]; do
     *) ng "許可外のセクション配下の行"; continue ;;
   esac
 
-  # jobs 配下
-  if [[ "${body}" =~ ^uses: ]]; then
-    uses_count=$((uses_count + 1))
-    if [ "${body}" != "uses: ${EXPECTED_USES}" ]; then
-      ng "uses が期待値と一致しない"
-    fi
-    continue
+  # jobs 配下: インデント 2 = ジョブ ID、4 = ジョブのキー、6 = with / secrets の子
+  if [ "${indent}" -eq 2 ]; then
+    job_sub=""
+    if [[ "${body}" =~ ^[A-Za-z0-9_-]+:[[:space:]]*$ ]]; then continue; fi
+    ng "jobs 直下はジョブ ID のみ許可"; continue
   fi
-  if [[ "${body}" =~ ^name:[[:space:]]+ ]] && [[ "${body#name:}" =~ ${re_free} ]]; then continue; fi
-  if [[ "${body}" =~ ^(with|secrets):[[:space:]]*$ ]]; then continue; fi
-  if [[ "${body}" =~ ^[A-Za-z0-9_-]+:[[:space:]]*$ ]] && [ "${indent}" -eq 2 ]; then continue; fi
-  if [[ "${body}" =~ ${re_with_key} ]]; then continue; fi
-  if [[ "${body}" =~ ^API_KEY:[[:space:]]+\$\{\{[[:space:]]*secrets\.[A-Za-z0-9_]+[[:space:]]*\}\}[[:space:]]*$ ]]; then continue; fi
+  if [ "${indent}" -eq 4 ]; then
+    job_sub="other"
+    if [[ "${body}" =~ ^uses: ]]; then
+      uses_count=$((uses_count + 1))
+      if [ "${body}" != "uses: ${EXPECTED_USES}" ]; then
+        ng "uses が期待値と一致しない"
+      fi
+      continue
+    fi
+    if [[ "${body}" =~ ^name:[[:space:]]+ ]] && [[ "${body#name:}" =~ ${re_free} ]]; then continue; fi
+    if [[ "${body}" =~ ^(with|secrets):[[:space:]]*$ ]]; then job_sub="${body%%:*}"; continue; fi
+    ng "ジョブ直下の許可リストにないキー（uses は直下に必要）"; continue
+  fi
+  if [ "${indent}" -eq 6 ]; then
+    if [ "${job_sub}" = "with" ] && [[ "${body}" =~ ${re_with_key} ]]; then continue; fi
+    if [ "${job_sub}" = "secrets" ] && [[ "${body}" =~ ^API_KEY:[[:space:]]+\$\{\{[[:space:]]*secrets\.[A-Za-z0-9_]+[[:space:]]*\}\}[[:space:]]*$ ]]; then continue; fi
+  fi
 
   ng "許可リストにない行"
 done < "${target}"
 
 if [ "${uses_count}" -ne 1 ]; then
   echo "NG: uses が ${uses_count} 件（ちょうど 1 件必要。空ファイル・エラー応答を含む）"
+  violations=$((violations + 1))
+fi
+
+if [ "${on_seen}" -ne 1 ] || [ "${pr_seen}" -ne 1 ]; then
+  echo "NG: トップレベル on とその直下の pull_request トリガーが必要"
   violations=$((violations + 1))
 fi
 
