@@ -13,6 +13,12 @@
 #       `: `・`#`・anchor・tag・flow 記法は拒否する。types / branches / skip-branch-prefixes 等の
 #       列挙は要素に分割し、各要素の前後の空白だけを除いて許可語・要素の文法へ完全一致させる
 #       （要素内部の空白・空要素・重複は拒否）。判断に迷う入力は拒否する。
+#       文字列でなければならない位置（name・ジョブ ID・concurrency.group・with の文字列キー・
+#       on.pull_request.branches の要素）では、引用符なしで書かれると YAML が null・真偽値・数値・
+#       日付に解決する値（null・~・true・yes・on・1・1_000・0x1F・1.5・.inf・2026-10-24 等。
+#       YAML 1.1 と 1.2 の和集合）を拒否する（is_typed_plain_scalar）。引用符で囲んだ値は文字列なので許可する。
+#       concurrency は任意だが、あるときは group が必須（group の無い concurrency は GitHub Actions が
+#       workflow を無効にする）。
 #       構造は位置に依存しない状態機械で追う: インデント 0 の行ごとにセクションを切り替え、
 #       jobs の内側ではジョブ ID の行の後ろ（現在のジョブ）でだけ設定を受理し、uses・permissions・
 #       with.provider は現在のジョブに帰属させて、ジョブを終える時点（次のジョブ ID・jobs を抜ける
@@ -50,6 +56,8 @@ job_prw=0       # 現在のジョブの permissions に pull-requests: write が
 job_provider=0  # 現在のジョブの with に provider があった
 job_sub=""      # jobs 配下のインデント 4 の直近キー（with / secrets / permissions / その他）
 on_seen=0       # トップレベル on があった
+conc_seen=0     # トップレベル concurrency があった
+group_seen=0    # concurrency 直下に group の行があった（値の良否は別途検査する）
 pr_seen=0       # on 直下（インデント 2）の pull_request があった
 on_sub=""       # on 直下（インデント 2）の直近キー（types / branches を置けるのは pull_request の直下だけ）
 seen=" "         # 出現済みキーの集合（スコープ/キー を空白区切りで保持。重複キー検出用）
@@ -108,6 +116,47 @@ RE_GROUP_LINE='^group:[ ]+(.+)$'
 RE_TYPES_LINE='^types:[ ]+(.+)$'
 RE_BRANCHES_LINE='^branches:[ ]+(.+)$'
 
+# YAML が文字列以外に解決する plain scalar の形（YAML 1.1 と 1.2 の和集合。どちらかの方言で
+# 文字列にならなければ拒否する）。GitHub Actions のパーサがどちらの方言に従うかに判定を依存させない
+RE_TY_INT='^[-+]?[0-9][0-9_]*$'                       # 10 進・先頭 0 の 8 進（1.1）・_ 区切り
+RE_TY_HEX='^[-+]?0[xX][0-9a-fA-F_]+$'
+RE_TY_OCT='^0o[0-7_]+$'                               # 1.2 の 8 進
+RE_TY_BIN='^[-+]?0[bB][01_]+$'                        # 1.1 の 2 進
+RE_TY_FLOAT='^[-+]?([0-9][0-9_]*)?\.[0-9_]*([eE][-+]?[0-9]+)?$'   # 1.5・.5・1.・1.5e3
+RE_TY_EXP='^[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+$'        # 1.2 の 1e3（小数点なし）
+RE_TY_INF='^[-+]?\.(inf|Inf|INF)$'
+RE_TY_NAN='^\.(nan|NaN|NAN)$'
+# 日付。時刻つきの形はコロンを含み、どの文法もコロンを拒否するためここでは日付のみを見る
+RE_TY_DATE='^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}$'
+
+# 引用符なしで書かれたとき、YAML が文字列以外（null・真偽値・数値・日付など）に解決する値なら return 0。
+# 拒否する形:
+#   null     : null Null NULL ~
+#   真偽値   : true/false・yes/no・on/off・y/n（大文字始まり・全大文字を含む）
+#   整数     : 10 進（+-・_ 区切り・先頭 0 の 8 進）・0x… ・0o… ・0b…
+#   浮動小数 : 1.5 .5 1. 1.5e3 1e3 ±.inf .nan
+#   日付     : YYYY-M-D
+#   その他   : = と <<（YAML 1.1 の value / merge）
+# 引用符で囲まれた値は文字列なので、呼び出し側は unq_quoted=0 のときだけ呼ぶ
+is_typed_plain_scalar() {
+  case "$1" in
+    null|Null|NULL|'~') return 0 ;;
+    true|True|TRUE|false|False|FALSE) return 0 ;;
+    yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF) return 0 ;;
+    y|Y|n|N|'='|'<<') return 0 ;;
+  esac
+  [[ "$1" =~ ${RE_TY_INT} ]] && return 0
+  [[ "$1" =~ ${RE_TY_HEX} ]] && return 0
+  [[ "$1" =~ ${RE_TY_OCT} ]] && return 0
+  [[ "$1" =~ ${RE_TY_BIN} ]] && return 0
+  [[ "$1" =~ ${RE_TY_FLOAT} ]] && return 0
+  [[ "$1" =~ ${RE_TY_EXP} ]] && return 0
+  [[ "$1" =~ ${RE_TY_INF} ]] && return 0
+  [[ "$1" =~ ${RE_TY_NAN} ]] && return 0
+  [[ "$1" =~ ${RE_TY_DATE} ]] && return 0
+  return 1
+}
+
 # 前後の空白（半角スペースのみ。タブは先に拒否済み）を除く。結果は trimmed に入れる
 trim() {
   trimmed="$1"
@@ -116,18 +165,21 @@ trim() {
 }
 
 # 全体を 1 組の同じ引用符で囲んだ値は内側を unq に入れる。引用符なしはそのまま。
+# 引用符の有無は unq_quoted（0 / 1）に残す（引用符つきは文字列なので is_typed_plain_scalar の対象外）。
 # 開き引用符だけ・開閉が食い違う値は return 1（内側の引用符は各キーの文法が拒否する）
 unquote() {
   unq="$1"
+  unq_quoted=0
   case "$1" in
-    \"*) case "$1" in \"?*\") unq="${1#\"}"; unq="${unq%\"}" ;; *) return 1 ;; esac ;;
-    \'*) case "$1" in \'?*\') unq="${1#\'}"; unq="${unq%\'}" ;; *) return 1 ;; esac ;;
+    \"*) case "$1" in \"?*\") unq="${1#\"}"; unq="${unq%\"}"; unq_quoted=1 ;; *) return 1 ;; esac ;;
+    \'*) case "$1" in \'?*\') unq="${1#\'}"; unq="${unq%\'}"; unq_quoted=1 ;; *) return 1 ;; esac ;;
   esac
   return 0
 }
 
 # 区切りが , の要素列を分割し、各要素の前後の空白だけを除いて ERE ($2) へ完全一致させる。
-# 空要素・不一致・重複は return 1。通った要素は list_els に " a b c " の形で残す
+# 空要素・不一致・重複は return 1。$3 が 1 の要素列（フロー配列。要素ごとに独立した YAML scalar）では、
+# 引用符なしで文字列以外に解決される要素を return 3 にする。通った要素は list_els に " a b c " の形で残す
 parse_list() {
   local rest="$1," el
   list_els=" "
@@ -137,6 +189,7 @@ parse_list() {
     trim "${el}"
     el="${trimmed}"
     [[ "${el}" =~ $2 ]] || return 1
+    if [ "${3:-0}" = "1" ] && is_typed_plain_scalar "${el}"; then return 3; fi
     case "${list_els}" in *" ${el} "*) return 1 ;; esac
     list_els="${list_els}${el} "
   done
@@ -144,11 +197,11 @@ parse_list() {
 }
 
 # on.pull_request 配下の [a, b] 形式。角括弧で囲まれた 1 行のフロー配列だけを受け、要素は parse_list で検査する。
-# 成功時は list_els に要素を残す
+# $3 が 1 のときは要素の型付き scalar を return 3 で拒否する（parse_list 参照）。成功時は list_els に要素を残す
 parse_flow_list() {
   local v="$1"
   [[ "${v}" =~ ^\[(.*)\]$ ]] || return 1
-  parse_list "${BASH_REMATCH[1]}" "$2"
+  parse_list "${BASH_REMATCH[1]}" "$2" "${3:-0}"
 }
 
 # concurrency.group: 語と、許可した github 式の並び。許可外の式・閉じていない式は残るので文字集合で落ちる
@@ -180,6 +233,12 @@ check_with_value() {
   val="${trimmed}"
   unquote "${val}" || return 1
   wunq="${unq}"
+  # 文字列でなければならないキーは、引用符なしで文字列以外に解決される値を拒否する（return 3）。
+  # max-diff-bytes（数値）・collaborators-only（真偽値）は意図した型なので対象外。provider は固定語
+  case "${key}" in
+    runner|model|api-base-url|reasoning-effort|post-feedback-runner|reviewer-id|reviewer-name|prompt-path|skip-branch-prefixes|allowed-bot-actors|block-priorities)
+      if [ "${unq_quoted}" -eq 0 ] && is_typed_plain_scalar "${unq}"; then return 3; fi ;;
+  esac
   case "${key}" in
     provider)             [[ "${unq}" =~ ^(codex|claude|gemini|grok|openai-compatible)$ ]] ;;
     runner|model)         [[ "${unq}" =~ $RE_TOKEN ]] || [[ "${unq}" =~ $RE_EXPR_VARS ]] ;;
@@ -244,6 +303,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
       section="${body%%:*}"
       if [ "${section}" = "on" ]; then on_seen=1; fi
       if [ "${section}" = "jobs" ]; then jobs_seen=1; fi
+      if [ "${section}" = "concurrency" ]; then conc_seen=1; fi
     fi
   fi
   if [[ "${body}" =~ ^permissions:[[:space:]]*$ ]]; then
@@ -279,7 +339,11 @@ while IFS= read -r line || [ -n "${line}" ]; do
   if [ "${indent}" -eq 0 ]; then
     if [[ "${body}" =~ ${RE_NAME_LINE} ]]; then
       trim "${BASH_REMATCH[1]}"
-      if ! { unquote "${trimmed}" && [[ "${unq}" =~ ${RE_WORDS} ]]; }; then ng "name の値が許可する文法に一致しない"; fi
+      if ! { unquote "${trimmed}" && [[ "${unq}" =~ ${RE_WORDS} ]]; }; then
+        ng "name の値が許可する文法に一致しない"
+      elif [ "${unq_quoted}" -eq 0 ] && is_typed_plain_scalar "${unq}"; then
+        ng "name の値が YAML で文字列以外に解決される（null・真偽値・数値・日付）"
+      fi
       continue
     fi
     if [[ "${body}" =~ ^(on|concurrency|jobs):[[:space:]]*$ ]]; then continue; fi
@@ -312,7 +376,13 @@ while IFS= read -r line || [ -n "${line}" ]; do
         if [[ "${body}" =~ ${RE_BRANCHES_LINE} ]]; then
           once "on/branches" || true
           trim "${BASH_REMATCH[1]}"
-          if ! parse_flow_list "${trimmed}" "${RE_BRANCH}"; then ng "branches は [a, b] 形式で、各要素が 1 語のブランチ名であること（空要素・重複・内部の空白は不可）"; fi
+          brc=0
+          parse_flow_list "${trimmed}" "${RE_BRANCH}" 1 || brc=$?
+          if [ "${brc}" -eq 3 ]; then
+            ng "branches の要素が YAML で文字列以外に解決される（null・真偽値・数値・日付）"
+          elif [ "${brc}" -ne 0 ]; then
+            ng "branches は [a, b] 形式で、各要素が 1 語のブランチ名であること（空要素・重複・内部の空白は不可）"
+          fi
           continue
         fi
       fi
@@ -320,7 +390,14 @@ while IFS= read -r line || [ -n "${line}" ]; do
     concurrency)
       if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ${RE_GROUP_LINE} ]]; then
         trim "${BASH_REMATCH[1]}"
-        if unquote "${trimmed}" && check_group "${unq}"; then once "concurrency/group" || true; else ng "concurrency.group の値が許可する文法に一致しない"; fi
+        group_seen=1
+        if ! { unquote "${trimmed}" && check_group "${unq}"; }; then
+          ng "concurrency.group の値が許可する文法に一致しない"
+        elif [ "${unq_quoted}" -eq 0 ] && is_typed_plain_scalar "${unq}"; then
+          ng "concurrency.group の値が YAML で文字列以外に解決される（null・真偽値・数値・日付）"
+        else
+          once "concurrency/group" || true
+        fi
         continue
       fi
       if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^cancel-in-progress:[[:space:]]+(true|false)[[:space:]]*$ ]]; then once "concurrency/cancel" || true; continue; fi
@@ -341,6 +418,10 @@ while IFS= read -r line || [ -n "${line}" ]; do
     job_sub=""
     finish_job
     if [[ "${body}" =~ ^[A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$ ]]; then
+      if is_typed_plain_scalar "${body%%:*}"; then
+        # キーが null・真偽値などに解決されるジョブ ID（null:・true:・yes:・on: 等）。後続の行が誤帰属しないよう cur_job は空のまま
+        ng "ジョブ ID が YAML で文字列以外に解決される（null・真偽値）"; continue
+      fi
       cur_job="${body%%:*}"
       job_uses=0; job_contents=0; job_prw=0; job_provider=0
       once "jobs/${cur_job}" || true
@@ -362,7 +443,12 @@ while IFS= read -r line || [ -n "${line}" ]; do
     fi
     if [[ "${body}" =~ ${RE_NAME_LINE} ]]; then
       trim "${BASH_REMATCH[1]}"
-      if unquote "${trimmed}" && [[ "${unq}" =~ ${RE_WORDS} ]]; then continue; fi
+      if unquote "${trimmed}" && [[ "${unq}" =~ ${RE_WORDS} ]]; then
+        if [ "${unq_quoted}" -eq 0 ] && is_typed_plain_scalar "${unq}"; then
+          ng "ジョブの name の値が YAML で文字列以外に解決される（null・真偽値・数値・日付）"
+        fi
+        continue
+      fi
       ng "ジョブの name の値が許可する文法に一致しない"; continue
     fi
     if [[ "${body}" =~ ^(with|secrets):[[:space:]]*$ ]]; then job_sub="${body%%:*}"; continue; fi
@@ -378,6 +464,9 @@ while IFS= read -r line || [ -n "${line}" ]; do
       check_with_value "${wkey}" "${wraw}" || wrc=$?
       if [ "${wrc}" -eq 2 ]; then
         ng "with に許可リストにないキー"
+        continue
+      elif [ "${wrc}" -eq 3 ]; then
+        ng "with の値が YAML で文字列以外に解決される（null・真偽値・数値・日付。文字列にするなら引用符で囲む）"
         continue
       elif [ "${wrc}" -ne 0 ]; then
         ng "with の値が、そのキーに許可する文法に一致しない"
@@ -409,6 +498,12 @@ finish_job
 
 if [ "${jobs_seen}" -ne 1 ] || [ "${job_count}" -ne 1 ]; then
   echo "NG: トップレベル jobs の下にジョブがちょうど 1 件必要（現在 ${job_count} 件。uses と権限を同じジョブに束縛するため。空ファイル・エラー応答を含む）"
+  violations=$((violations + 1))
+fi
+
+# concurrency は任意だが、あるなら group が必要（group の無い mapping は workflow を無効にする）
+if [ "${conc_seen}" -eq 1 ] && [ "${group_seen}" -ne 1 ]; then
+  echo "NG: concurrency には group が必要"
   violations=$((violations + 1))
 fi
 

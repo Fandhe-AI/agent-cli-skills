@@ -33,8 +33,8 @@ skills/                               -- スキル本体（各ディレクトリ
     tests/                            -- node:test 回帰テスト（DELETE 失敗時に POST が呼ばれないこと、Step 8 の既存本文保持・移行・冪等・並行編集検知・マーカー不整合停止等・タイトルの文字参照変換〔create-issue-tree の CELL と同じ出力〕・旧形式の書き直し・create-issue-tree の --root 再マージとの往復〔相手のスキルが無ければ skip〕）、lib/ に gh スタブ（作る一時ディレクトリは tmp-track.mjs でプロセス終了時に消す）
   update-claude/
   setup-repo-guards/
-    scripts/                          -- verify-ai-review-wrapper.sh（Step 1 で commit SHA 固定取得した ai-review wrapper の配置前検査。allow-list 方式〔with の値はキーごとの 1 行 plain scalar・types / branches は要素ごとの完全一致〕・ジョブ構造は状態機械で追い uses・権限・provider を現在のジョブへ束縛・uses 完全一致 1 件・特権トリガー／run／secrets: inherit／過剰権限を拒否・ファイル内容は出力しない・exit 0 合格 / 1 不合格 / 2 使い方の誤り）
-    tests/                            -- node:test 回帰テスト（合格形・1 項目ずつの変異で不合格・空ファイルとエラー JSON・使い方の誤り・出力に内容を含めないこと）
+    scripts/                          -- verify-ai-review-wrapper.sh（Step 1 で commit SHA 固定取得した ai-review wrapper の配置前検査。allow-list 方式〔with の値はキーごとの 1 行 plain scalar・types / branches は要素ごとの完全一致・文字列の位置〔name・ジョブ ID・group・with の文字列キー・branches の要素〕では引用符なしで null・真偽値・数値・日付に解決される値を拒否〔YAML 1.1 と 1.2 の和集合・引用符で囲めば許可〕・concurrency は任意だがあれば group 必須〕・ジョブ構造は状態機械で追い uses・権限・provider を現在のジョブへ束縛・uses 完全一致 1 件・特権トリガー／run／secrets: inherit／過剰権限を拒否・ファイル内容は出力しない・exit 0 合格 / 1 不合格 / 2 使い方の誤り）
+    tests/                            -- node:test 回帰テスト（合格形・1 項目ずつの変異で不合格・型付き scalar × 文字列の位置の直積と引用符つきの対照・concurrency の group 必須・実行できる全 bash〔/bin/bash 3.2 と PATH の bash 5〕で結果が一致すること・上流テンプレートの実物 fixture〔fixtures/〕・PyYAML による oracle〔値の型まで str を要求〕・空ファイルとエラー JSON・使い方の誤り・出力に内容を含めないこと）
   project-init/
   project-add-items/
   project-create-issues/

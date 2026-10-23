@@ -1,10 +1,12 @@
 // verify-ai-review-wrapper.sh の回帰テスト。
 // 取得した ai-review wrapper を配置前に検査する関門（allow-list・fail-closed）の契約を固定する:
 // 合格は実テンプレートの有効行と同形のみ、1 項目ずつの変異は不合格、使い方の誤りは exit 2、
-// 出力にファイル内容を含めない。
+// 出力にファイル内容を含めない。YAML が文字列以外に解決する引用符なしの値（null・真偽値・数値・日付）は
+// 文字列の位置ごとに拒否し、引用符で囲んだ値は文字列として許可する（Issue #710）。
+// すべての検査を、実行できる bash（macOS の /bin/bash 3.2 と PATH の bash 5 等）で走らせ、結果が一致することを確かめる。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, realpathSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -41,17 +43,52 @@ jobs:
       post-feedback-runner: ubuntu-latest
 `;
 
-function verify(content, args) {
+// 実行できる bash の一覧（実体パスで重複除去）。macOS では /bin/bash（3.2）と Homebrew の bash が両方あり得る。
+// PATH の bash（既定 bash）も含める。どれも見つからなければ PATH の bash を 1 つだけ返す。
+// このスキルは単独で vendoring されるため、他スキルのテストヘルパーは import せず複製する
+function availableBashes() {
+  const seen = new Set();
+  const out = [];
+  const onPath = spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
+  for (const p of ['/bin/bash', '/usr/bin/bash', '/opt/homebrew/bin/bash', '/usr/local/bin/bash', onPath]) {
+    if (!p || !existsSync(p)) continue;
+    const real = realpathSync(p);
+    if (seen.has(real)) continue;
+    seen.add(real);
+    out.push(p);
+  }
+  if (out.length === 0) out.push('bash');
+  return out;
+}
+const BASHES = availableBashes();
+
+function runBash(bash, file, args) {
+  const r = spawnSync(bash, [SCRIPT, ...(args ?? [file])], { encoding: 'utf8' });
+  return { code: r.status, out: r.stdout + r.stderr };
+}
+
+// 全 bash で実行し、終了コードと出力が一致することを確かめて返す（bash のバージョン差による判定のずれを検出する）
+function verify(content, args, bashes = BASHES) {
   const dir = mkdtempSync(join(tmpdir(), 'verify-wrapper-'));
   try {
     const f = join(dir, 'ai-review.yml');
     if (content !== undefined) writeFileSync(f, content);
-    const r = spawnSync('bash', [SCRIPT, ...(args ?? [f])], { encoding: 'utf8' });
-    return { code: r.status, out: r.stdout + r.stderr };
+    const results = bashes.map((b) => ({ bash: b, ...runBash(b, f, args) }));
+    const [first, ...rest] = results;
+    for (const r of rest) {
+      assert.ok(r.code === first.code && r.out === first.out,
+        `bash 間で結果が食い違う: ${first.bash} は exit ${first.code}、${r.bash} は exit ${r.code}\n--- ${first.bash}\n${first.out}\n--- ${r.bash}\n${r.out}`);
+    }
+    return { code: first.code, out: first.out };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+test('検査を走らせる bash の一覧（macOS では /bin/bash 3.2 と PATH の bash を含む）', (t) => {
+  t.diagnostic(BASHES.map((b) => `${b}: ${spawnSync(b, ['--version'], { encoding: 'utf8' }).stdout.split('\n')[0]}`).join(' / '));
+  assert.ok(BASHES.length >= 1);
+});
 
 test('実テンプレート同形・コメント追加・空行追加は合格する', () => {
   assert.equal(verify(GOOD).code, 0);
@@ -102,6 +139,22 @@ const accepted = {
   'skip-branch-prefixes が 1 件': GOOD.replace('chore/skills-update-,chore/submodule-update-', 'chore/skills-update-'),
   'concurrency group が別の式': GOOD.replace('ai-review-${{ github.ref }}', 'ai-review-${{ github.workflow }}-${{ github.ref }}'),
   'secrets の API_KEY': GOOD + '    secrets:\n      API_KEY: ${{ secrets.OPENAI_API_KEY }}\n',
+  // --- 型付き scalar に見えるが文字列になる値（#710）。引用符で囲んだ値は文字列、予約語・数値の一部だけを含む語も文字列 ---
+  'runner が引用符付き "yes"': withLine('runner: "yes"'),
+  'runner が引用符付き \'null\'': withLine("runner: 'null'"),
+  'model が引用符付き "1.5"': withLine('model: "1.5"'),
+  'reviewer-id が引用符付き "123"': withLine('reviewer-id: "123"'),
+  'reviewer-name が引用符付き "true"': withLine('reviewer-name: "true"'),
+  'skip-branch-prefixes が引用符付き "2024"': GOOD.replace('chore/skills-update-,chore/submodule-update-', '"2024"'),
+  'skip-branch-prefixes が数字を含む列挙': GOOD.replace('chore/skills-update-,chore/submodule-update-', '2024,2025'),
+  'concurrency group が引用符付き "1.5"': GOOD.replace('ai-review-${{ github.ref }}', '"1.5"'),
+  'トップの name が引用符付き "null"': GOOD.replace('name: AI PR review', 'name: "null"'),
+  'ジョブの name が引用符付き "123"': GOOD.replace('    uses:', '    name: "123"\n    uses:'),
+  'ジョブの name が数字を含む語': GOOD.replace('    uses:', '    name: Review 2\n    uses:'),
+  'トップの name が予約語で始まる語': GOOD.replace('name: AI PR review', 'name: Yes we review'),
+  'branches が数字・予約語を含む語': replaceBranches('[1.0.0, v1, 2026-10-24-hotfix, nullable, on-call, yesterday, 0x1G, 1e3x]'),
+  'ジョブ ID が予約語で始まる語': GOOD.replace('  codex:\n', '  nullable:\n'),
+  'max-diff-bytes と collaborators-only は意図した数値・真偽値': withLine('max-diff-bytes: 600000').replace('      provider: codex\n', '      provider: codex\n      collaborators-only: true\n'),
 };
 for (const [name, content] of Object.entries(accepted)) {
   test(`合格: ${name}`, () => {
@@ -110,11 +163,21 @@ for (const [name, content] of Object.entries(accepted)) {
   });
 }
 
-test('合格: リポジトリ自身の .github/workflows/ai-review.yml', (t) => {
+test('合格: リポジトリ自身の .github/workflows/ai-review.yml（全 bash）', (t) => {
   const f = resolve(dirname(SCRIPT), '../../../.github/workflows/ai-review.yml');
   if (!existsSync(f)) return t.skip('このリポジトリ外（vendoring 先）では存在しない');
-  const r = spawnSync('bash', [SCRIPT, f], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const r = verify(undefined, [f]);
+  assert.equal(r.code, 0, r.out);
+});
+
+// Fandhe-AI/actions@8df2fb1bfff527731dcf74fa5cedc4bd6ee040af の ai-review/templates/ai-review.single.yml をそのまま保存した fixture。
+// 最小化した GOOD ではなく、上流の実物（コメント・他 provider の例を含む）が合格することを固定する
+// （上流テンプレートが更新されたら、固定取得の SHA とともにこの fixture も差し替える）
+test('合格: 上流テンプレート ai-review.single.yml（Fandhe-AI/actions@8df2fb1b の実物・全 bash）', () => {
+  const f = resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures/ai-review.single@8df2fb1b.yml');
+  assert.ok(readFileSync(f, 'utf8').includes('uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest'));
+  const r = verify(undefined, [f]);
+  assert.equal(r.code, 0, r.out);
 });
 
 const mutations = {
@@ -156,6 +219,18 @@ const mutations = {
   'ジョブ側 permissions の重複': (s) => s + '    permissions:\n      contents: read\n      pull-requests: write\n',
   'permissions 内キーの重複': (s) => s.replace('      pull-requests: write\n', '      pull-requests: write\n      pull-requests: write\n'),
   'concurrency の重複': (s) => s + '\nconcurrency:\n  group: x\n',
+  // --- Issue #710: concurrency は任意だが、あるなら group が必須（PR #707 thread PRRT_kwDORuXFg86vr1N1） ---
+  'concurrency の group 欠落（cancel-in-progress のみ）': (s) => s.replace('  group: ai-review-${{ github.ref }}\n', ''),
+  'concurrency が空（子なし）': (s) => s.replace('  group: ai-review-${{ github.ref }}\n  cancel-in-progress: true\n', ''),
+  'concurrency の group の値が空': (s) => s.replace('group: ai-review-${{ github.ref }}', 'group:'),
+  // --- Issue #710: branches の要素が YAML で文字列以外になる値（PR #707 thread PRRT_kwDORuXFg86vr1N_） ---
+  'branches が [null]': (s) => s.replace('[main]', '[null]'),
+  'branches が [true]': (s) => s.replace('[main]', '[true]'),
+  'branches の 2 要素目が [main, null]': (s) => s.replace('[main]', '[main, null]'),
+  'branches の要素が引用符付き（["1.0"]。引用符つき要素は未対応で拒否のまま）': (s) => s.replace('[main]', '["1.0"]'),
+  'ジョブ ID が null:': (s) => s.replace('  codex:\n', '  null:\n'),
+  'ジョブ ID が true:': (s) => s.replace('  codex:\n', '  true:\n'),
+  'ジョブ ID が yes:': (s) => s.replace('  codex:\n', '  yes:\n'),
   'collaborators-only: false': (s) => s.replace('      provider: codex\n', '      provider: codex\n      collaborators-only: false\n'),
   'collaborators-only が任意値': (s) => s.replace('      provider: codex\n', '      provider: codex\n      collaborators-only: maybe\n'),
   'block-priorities: P3': (s) => s.replace('      provider: codex\n', '      provider: codex\n      block-priorities: P3\n'),
@@ -259,6 +334,85 @@ for (const [name, mutate] of Object.entries(mutations)) {
   });
 }
 
+// --- Issue #710: 型付き scalar × 文字列の位置 の直積 ---
+// 引用符なしで書くと YAML が文字列以外（null・真偽値・数値・日付）に解決する値を、文字列でなければならない
+// すべての位置で拒否する。位置ごとに個別の指摘が連鎖していた（branches → group → name → with → ジョブ ID）ため、
+// 1 つの表で位置と値の全組を固定する。YAML 1.1 と 1.2 の和集合を拒否し、どちらかの方言で文字列にならない値は残さない。
+// 値の一覧（拒否する形の表）は scripts/verify-ai-review-wrapper.sh の is_typed_plain_scalar のコメントと対応させる
+const TYPED_SCALARS = [
+  'null', 'Null', 'NULL', '~',
+  'true', 'True', 'TRUE', 'false', 'False', 'FALSE',
+  'yes', 'Yes', 'YES', 'no', 'No', 'NO', 'on', 'On', 'ON', 'off', 'Off', 'OFF', 'y', 'Y', 'n', 'N',
+  '1', '0', '+1', '-1', '1_000', '0777', '0x1F', '0o17', '0b101',
+  '1.5', '.5', '1.', '-1.5', '1.5e3', '1e3', '1E+3', '.inf', '.Inf', '.INF', '-.inf', '.nan', '.NaN', '.NAN',
+  '2026-10-24', '2026-1-5',
+  '=', '<<',
+];
+const TYPED_SLOTS = {
+  'branches の要素': (v) => replaceBranches(`[${v}]`),
+  'branches の 2 要素目': (v) => replaceBranches(`[main, ${v}]`),
+  'concurrency.group': (v) => GOOD.replace('ai-review-${{ github.ref }}', v),
+  'トップの name': (v) => GOOD.replace('name: AI PR review', `name: ${v}`),
+  'ジョブの name': (v) => GOOD.replace('    uses:', `    name: ${v}\n    uses:`),
+  'ジョブ ID': (v) => GOOD.replace('  codex:\n', `  ${v}:\n`),
+  'with.runner': (v) => withLine(`runner: ${v}`),
+  'with.model': (v) => withLine(`model: ${v}`),
+  'with.api-base-url': (v) => withLine(`api-base-url: ${v}`),
+  'with.reasoning-effort': (v) => withLine(`reasoning-effort: ${v}`),
+  'with.post-feedback-runner': (v) => GOOD.replace('post-feedback-runner: ubuntu-latest', `post-feedback-runner: ${v}`),
+  'with.reviewer-id': (v) => withLine(`reviewer-id: ${v}`),
+  'with.reviewer-name': (v) => withLine(`reviewer-name: ${v}`),
+  'with.prompt-path': (v) => withLine(`prompt-path: ${v}`),
+  'with.skip-branch-prefixes': (v) => GOOD.replace('chore/skills-update-,chore/submodule-update-', v),
+  'with.allowed-bot-actors': (v) => withLine(`allowed-bot-actors: ${v}`),
+  'with.block-priorities': (v) => withLine(`block-priorities: ${v}`),
+};
+// 各位置の文法だけなら受理される値（型の拒否が効いていることを理由メッセージで確かめる対象）。
+// 先頭が英数字・_ ・. で、英数字・_ ・. ・- だけの値。ジョブ ID は先頭が英字・_ の値のみ
+const GRAMMAR_SAFE = /^[A-Za-z0-9_.][A-Za-z0-9_.-]*$/;
+const NO_DOT_SLOTS = new Set(['with.allowed-bot-actors', 'with.block-priorities']);
+for (const [slot, build] of Object.entries(TYPED_SLOTS)) {
+  test(`不合格: ${slot} に型付き scalar（${TYPED_SCALARS.length} 値）`, () => {
+    const failures = [];
+    for (const v of TYPED_SCALARS) {
+      const r = verify(build(v));
+      if (r.code !== 1 || !/NG/.test(r.out)) failures.push(`${v} → exit ${r.code}`);
+      // 位置の文法だけなら通る値は、型の拒否の理由で落ちていること（文法の偶然に頼らない）
+      const reasonable = GRAMMAR_SAFE.test(v) && !(slot === 'ジョブ ID' && !/^[A-Za-z_]/.test(v)) && !(NO_DOT_SLOTS.has(slot) && v.includes('.'));
+      if (reasonable && slot !== 'with.block-priorities' && !/文字列以外/.test(r.out)) failures.push(`${v} → 型の拒否ではない理由で不合格: ${r.out.trim().split('\n')[0]}`);
+    }
+    assert.deepEqual(failures, []);
+  });
+}
+
+// 引用符で囲めば文字列なので、同じ値でも合格する対照（引用符を受け付けない branches の要素は含めない）
+const QUOTABLE_SLOTS = ['concurrency.group', 'トップの name', 'ジョブの name', 'with.runner', 'with.model', 'with.reasoning-effort', 'with.reviewer-id', 'with.reviewer-name', 'with.prompt-path', 'with.skip-branch-prefixes'];
+for (const slot of QUOTABLE_SLOTS) {
+  test(`合格（対照）: ${slot} は同じ値でも引用符で囲めば文字列`, () => {
+    const safe = TYPED_SCALARS.filter((v) => GRAMMAR_SAFE.test(v) && !(slot === 'with.prompt-path' && v.includes('..')));
+    const failures = [];
+    for (const v of safe) {
+      for (const q of ['"', "'"]) {
+        const r = verify(TYPED_SLOTS[slot](`${q}${v}${q}`));
+        if (r.code !== 0) failures.push(`${q}${v}${q} → exit ${r.code}: ${r.out.trim().split('\n')[0]}`);
+      }
+    }
+    assert.deepEqual(failures, []);
+  });
+}
+
+test('不合格: concurrency に group が無い形は子の構成によらず拒否し、concurrency 自体の省略は合格する', () => {
+  const noConc = GOOD.replace(/concurrency:\n  group: .*\n  cancel-in-progress: true\n\n/, '');
+  assert.notEqual(noConc, GOOD);
+  assert.equal(verify(noConc).code, 0);   // concurrency は任意
+  for (const body of ['', '  cancel-in-progress: true\n', '  cancel-in-progress: false\n']) {
+    const r = verify(GOOD.replace(/concurrency:\n  group: .*\n  cancel-in-progress: true\n/, `concurrency:\n${body}`));
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /concurrency/);
+  }
+  const grouped = verify(GOOD.replace('  cancel-in-progress: true\n', ''));
+  assert.equal(grouped.code, 0, grouped.out);   // group だけなら合格
+});
 
 // 行ベースの検査器と YAML の意味のずれを機械的に確かめる安全網。GOOD の構造行を移動・削除・複製・
 // インデント変更した変異のうち、検査器が合格にしたものを実際の YAML パーサで読み、
@@ -290,15 +444,29 @@ def check(text):
         if not isinstance(pr["types"], list) or not {"opened","synchronize","reopened"} <= set(pr["types"]) or len(set(pr["types"])) != len(pr["types"]): return "types が期待と違う"
     if "branches" in pr:
         if not isinstance(pr["branches"], list) or not all(isinstance(b, str) and b and " " not in b for b in pr["branches"]): return "branches が期待と違う"
+    if "name" in doc and not isinstance(doc["name"], str): return "name が文字列でない"
+    if "concurrency" in doc:
+        c = doc["concurrency"]
+        if not isinstance(c, dict) or not isinstance(c.get("group"), str) or not c["group"]: return "concurrency に文字列の group がない"
+        if set(c.keys()) - {"group","cancel-in-progress"}: return "concurrency に余計なキー"
+        if "cancel-in-progress" in c and not isinstance(c["cancel-in-progress"], bool): return "cancel-in-progress が真偽値でない"
     jobs = doc.get("jobs")
     if not isinstance(jobs, dict) or len(jobs) != 1: return "jobs がちょうど 1 件でない"
     (jid, job), = jobs.items()
+    if not isinstance(jid, str): return "ジョブ ID が文字列でない"
     if not isinstance(job, dict): return "ジョブがマップでない"
+    if "name" in job and not isinstance(job["name"], str): return "ジョブの name が文字列でない"
     if job.get("uses") != EXPECTED: return "jobs.<id>.uses が期待と違う"
     if job.get("permissions") != {"contents": "read", "pull-requests": "write"}: return "ジョブ permissions が期待と違う"
     if set(job.keys()) - {"name","uses","permissions","with","secrets"}: return "ジョブに余計なキー"
     w = job.get("with", {})
     if not isinstance(w, dict) or set(w.keys()) - WITH_KEYS: return "with が期待と違う"
+    for k, v in w.items():
+        if k == "max-diff-bytes":
+            if not (isinstance(v, int) and not isinstance(v, bool)) and not (isinstance(v, str) and v.isdigit()): return "max-diff-bytes が数値でない"
+        elif k == "collaborators-only":
+            if v is not True and v != "true": return "collaborators-only が true でない"
+        elif not isinstance(v, str): return "with.%s が文字列でない" % k
     if w.get("provider") not in ("codex","claude","gemini","grok","openai-compatible"): return "provider が期待と違う"
     if "collaborators-only" in w and w["collaborators-only"] is not True and w["collaborators-only"] != "true": return "collaborators-only が true でない"
     return None
@@ -352,14 +520,43 @@ test('検査器が合格にした変異は YAML パーサで読んでも期待�
   const probed = JSON.parse(probe.stdout);
   if (!Array.isArray(probed)) return t.skip(probed.skip);
 
-  const candidates = [GOOD, ...Object.values(accepted), ...structuralMutants(GOOD, Number(process.env.FUZZ_COUNT ?? 400), Number(process.env.FUZZ_SEED ?? 705))];
-  const passed = candidates.filter((c) => verify(c).code === 0);
+  // 値の変異（型付き scalar を各位置へ・引用符つきの対照）は、ここで検査器が合格にしたものを oracle が
+  // str として読み直す。構造だけを動かす変異では [null] のような値の型の穴を一度も見られなかった（#710）
+  const ORACLE_VALUES = ['null', '~', 'true', 'yes', 'on', '1', '1_000', '0x1F', '0o17', '1.5', '.inf', '2026-10-24'];   // 全値は上の直積テストで検査済み。ここは oracle の代表値
+  const valueMutants = [];
+  for (const build of Object.values(TYPED_SLOTS)) {
+    for (const v of ORACLE_VALUES) valueMutants.push(build(v), build(`"${v}"`));
+  }
+  const candidates = [GOOD, ...Object.values(accepted), ...valueMutants, ...structuralMutants(GOOD, Number(process.env.FUZZ_COUNT ?? 400), Number(process.env.FUZZ_SEED ?? 705))];
+  // 候補ごとに bash を順繰りに 1 つだけ使う（全 bash での一致は他のテストが固定済み。ここは件数が多く時間がかかるため）
+  const passed = candidates.filter((c, i) => verify(c, undefined, [BASHES[i % BASHES.length]]).code === 0);
+  // 値の変異のうち合格したものは引用符つきの文字列だけで、型付き scalar の素の値は 1 件も残らない
+  assert.ok(passed.some((c) => /: "(yes|null|1\.5)"/.test(c)), '引用符つきの対照が合格に含まれない');
   assert.ok(passed.length >= Object.keys(accepted).length + 1, '合格ケースが少なすぎる');
   const r = spawnSync('python3', ['-I', '-c', PYTHON_CHECK], { input: JSON.stringify(passed), encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   const results = JSON.parse(r.stdout);
   const bad = results.map((m, i) => (m === null ? null : `${m}\n---\n${passed[i]}`)).filter(Boolean);
   assert.equal(bad.length, 0, `検査器が合格にしたが YAML の意味が期待と違う ${bad.length} 件:\n${bad.slice(0, 3).join('\n=====\n')}`);
+});
+
+test('oracle 自体の自己テスト: 型付き scalar と group 欠落を YAML パーサの側でも検出できる（oracle が素通しになっていない）', (t) => {
+  const probe = spawnSync('python3', ['-I', '-c', PYTHON_CHECK], { input: '[]', encoding: 'utf8' });
+  if (probe.status !== 0) return t.skip('python3 を実行できない');
+  if (!Array.isArray(JSON.parse(probe.stdout))) return t.skip('PyYAML なし');
+  const bad = [
+    replaceBranches('[null]'), replaceBranches('[true]'), replaceBranches('[2026-10-24]'),
+    GOOD.replace('  group: ai-review-${{ github.ref }}\n', ''),
+    GOOD.replace('name: AI PR review', 'name: on'),
+    GOOD.replace('ai-review-${{ github.ref }}', '1.5'),
+    GOOD.replace('  codex:\n', '  null:\n'),
+    withLine('runner: yes'),
+    withLine('model: null'),
+  ];
+  const r = spawnSync('python3', ['-I', '-c', PYTHON_CHECK], { input: JSON.stringify([GOOD, ...bad]), encoding: 'utf8' });
+  const res = JSON.parse(r.stdout);
+  assert.equal(res[0], null, `GOOD は oracle も合格: ${res[0]}`);
+  res.slice(1).forEach((m, i) => assert.notEqual(m, null, `oracle が見逃した: ${bad[i]}`));
 });
 
 test('不合格: 空ファイルと HTTP エラー JSON（uses 0 件）', () => {
