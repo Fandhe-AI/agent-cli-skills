@@ -139,6 +139,7 @@ wrapper は単一 provider テンプレートをコピーして作る（既定�
   ちょうど 1 件・特権トリガー無し・`run:` / `steps:` / `env:` 無し・`secrets: inherit` 無し・権限が
   `contents: read`（ジョブ側のみ加えて `pull-requests: write`）に限られ、両 permissions が欠落していないこと、
   `on:` 配下が `pull_request` のみであることを確かめる（親キーを追跡し、任意のジョブ名は `jobs:` 直下だけ許可）。
+  構造は行の位置に依存しない状態機械で追い、ジョブの設定はジョブ ID の行より後ろ（現在のジョブ）でだけ受理して、そのジョブ自身が `uses`・権限・`with.provider` を揃えていることを確かめる（ジョブ ID を末尾へ移す等の並べ替えは不可）。
   値はキーごとに許可する文法へ完全一致させる（`with` の値は 1 行の plain scalar か全体を引用符で囲んだ文字列で、`: `・`#`・anchor・tag・flow 記法は不可。
   `types` / `branches` は `[a, b]` を要素に分割し、各要素の前後の空白だけを除いて許可語と完全一致、`types` は `opened` / `synchronize` / `reopened` が要素として揃うこと。空要素・要素内部の空白・重複は不可）。ファイル内容は出力しない
 

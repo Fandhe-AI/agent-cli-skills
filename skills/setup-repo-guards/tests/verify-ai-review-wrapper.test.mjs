@@ -232,6 +232,22 @@ const mutations = {
   'concurrency group の式が閉じていない': (s) => s.replace('${{ github.ref }}', '${{ github.ref'),
   'ジョブ ID が数字始まり': (s) => s.replace('  codex:\n', '  1codex:\n'),
   'ジョブの name に ": "': (s) => s.replace('    uses:', '    name: a: b\n    uses:'),
+  // --- ジョブ構造（PR #707 の指摘 vrYoY: 設定行はジョブ ID より後・ジョブ内でのみ受理する） ---
+  'ジョブ ID の行を末尾へ移動': (s) => s.replace('  codex:\n', '') + '  codex:\n',
+  'ジョブ ID の行をジョブ設定の途中へ移動': (s) => s.replace('  codex:\n', '').replace('    with:\n', '  codex:\n    with:\n'),
+  'ジョブ ID より前の permissions': (s) => s.replace('  codex:\n', '    permissions:\n      contents: read\n      pull-requests: write\n  codex:\n').replace(/(  codex:\n    uses: .*\n)    permissions:\n      contents: read\n      pull-requests: write\n/, '$1'),
+  'ジョブ ID より前の uses': (s) => s.replace('  codex:\n    uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest\n', '    uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest\n  codex:\n'),
+  'ジョブ ID より前の with': (s) => s.replace('  codex:\n', '    with:\n      provider: codex\n  codex:\n'),
+  'ジョブが空': (s) => s.replace(/  codex:\n[\s\S]*$/, '  codex:\n'),
+  'jobs が空': (s) => s.replace(/jobs:\n[\s\S]*$/, 'jobs:\n'),
+  'uses が 2 ジョブに分散（uses のないジョブ）': (s) => s.replace('    uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest\n', '') + '  second:\n    uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest\n',
+  'ジョブが uses を持たない（権限だけ）': (s) => s.replace('    uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest\n', ''),
+  'jobs より前のジョブキー': (s) => s.replace('jobs:\n', '    uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest\njobs:\n').replace('  codex:\n    uses: Fandhe-AI/actions/.github/workflows/ai-review.yml@latest\n', '  codex:\n'),
+  'トップレベル name の後ろにジョブのキー': (s) => s.replace('name: AI PR review\n', '') + 'name: tail\n    permissions:\n      contents: read\n',
+  'トップレベル name の後ろに on の子': (s) => s.replace('name: AI PR review\n', 'name: AI PR review\n  pull_request:\n'),
+  'jobs の後ろのトップレベル name の下にジョブ ID': (s) => s.replace('name: AI PR review\n', '') + 'name: tail\n  other:\n',
+  'on より前に pull_request': (s) => s.replace('on:\n', '  pull_request:\non:\n'),
+  'concurrency の外の group': (s) => s.replace('concurrency:\n', '').replace('  group:', '    group:'),
   'with 値にコマンド置換風の文字': (s) => s.replace('provider: codex', 'provider: codex; rm -rf /'),
 };
 
@@ -242,6 +258,109 @@ for (const [name, mutate] of Object.entries(mutations)) {
     assert.match(r.out, /NG/);
   });
 }
+
+
+// 行ベースの検査器と YAML の意味のずれを機械的に確かめる安全網。GOOD の構造行を移動・削除・複製・
+// インデント変更した変異のうち、検査器が合格にしたものを実際の YAML パーサで読み、
+// jobs.<id>.uses と permissions などが期待の構造であることを確認する。
+// パーサ（python3 + PyYAML）が無い環境では skip する（新規依存は追加しない）。
+const PYTHON_CHECK = `
+import json, sys
+try:
+    import yaml
+except Exception:
+    print(json.dumps({"skip": "PyYAML なし"})); sys.exit(0)
+EXPECTED = "Fandhe-AI/actions/.github/workflows/ai-review.yml@latest"
+WITH_KEYS = {"provider","runner","model","reasoning-effort","block-priorities","collaborators-only","allowed-bot-actors","skip-branch-prefixes","post-feedback-runner","max-diff-bytes","reviewer-id","reviewer-name","api-base-url","prompt-path"}
+def check(text):
+    try:
+        doc = yaml.safe_load(text)
+    except Exception as e:
+        return "YAML として読めない: " + str(e)[:80]
+    if not isinstance(doc, dict): return "トップがマップでない"
+    on = doc.get("on", doc.get(True))
+    extra = set(map(str, doc.keys())) - {"name","on","True","concurrency","permissions","jobs"}
+    if extra: return "トップレベルに余計なキー: %s" % sorted(extra)
+    if doc.get("permissions") != {"contents": "read"}: return "トップレベル permissions が期待と違う"
+    if not isinstance(on, dict) or set(on.keys()) != {"pull_request"}: return "on が pull_request のみでない"
+    pr = on["pull_request"] if on["pull_request"] is not None else {}   # 子なし = 既定のイベント
+    if not isinstance(pr, dict): return "pull_request がマップでない"
+    if set(pr.keys()) - {"types","branches"}: return "pull_request の子が余計"
+    if "types" in pr:
+        if not isinstance(pr["types"], list) or not {"opened","synchronize","reopened"} <= set(pr["types"]) or len(set(pr["types"])) != len(pr["types"]): return "types が期待と違う"
+    if "branches" in pr:
+        if not isinstance(pr["branches"], list) or not all(isinstance(b, str) and b and " " not in b for b in pr["branches"]): return "branches が期待と違う"
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict) or len(jobs) != 1: return "jobs がちょうど 1 件でない"
+    (jid, job), = jobs.items()
+    if not isinstance(job, dict): return "ジョブがマップでない"
+    if job.get("uses") != EXPECTED: return "jobs.<id>.uses が期待と違う"
+    if job.get("permissions") != {"contents": "read", "pull-requests": "write"}: return "ジョブ permissions が期待と違う"
+    if set(job.keys()) - {"name","uses","permissions","with","secrets"}: return "ジョブに余計なキー"
+    w = job.get("with", {})
+    if not isinstance(w, dict) or set(w.keys()) - WITH_KEYS: return "with が期待と違う"
+    if w.get("provider") not in ("codex","claude","gemini","grok","openai-compatible"): return "provider が期待と違う"
+    if "collaborators-only" in w and w["collaborators-only"] is not True and w["collaborators-only"] != "true": return "collaborators-only が true でない"
+    return None
+cases = json.load(sys.stdin)
+print(json.dumps([check(c) for c in cases]))
+`;
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function structuralMutants(base, count, seed = 705) {
+  const rnd = mulberry32(seed);
+  const lines = base.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  const out = [];
+  const pick = () => Math.floor(rnd() * lines.length);
+  for (let i = 0; i < count; i++) {
+    const ls = lines.slice();
+    const steps = 1 + Math.floor(rnd() * 2);
+    for (let k = 0; k < steps; k++) {
+      const a = Math.min(pick(), ls.length - 1);
+      const kind = Math.floor(rnd() * 4);
+      if (kind === 0) { // 移動
+        const [l] = ls.splice(a, 1);
+        ls.splice(Math.floor(rnd() * (ls.length + 1)), 0, l);
+      } else if (kind === 1) { // 削除
+        ls.splice(a, 1);
+      } else if (kind === 2) { // 複製
+        ls.splice(Math.floor(rnd() * (ls.length + 1)), 0, ls[a]);
+      } else { // インデント変更
+        ls[a] = rnd() < 0.5 ? '  ' + ls[a] : ls[a].replace(/^ {1,2}/, '');
+      }
+      if (ls.length === 0) ls.push('');
+    }
+    out.push(ls.join('\n') + '\n');
+  }
+  return out;
+}
+
+test('検査器が合格にした変異は YAML パーサで読んでも期待の構造になる（行ベースと YAML の意味のずれの検出）', (t) => {
+  const probe = spawnSync('python3', ['-I', '-c', PYTHON_CHECK], { input: '[]', encoding: 'utf8' });
+  if (probe.status !== 0) return t.skip('python3 を実行できない');
+  const probed = JSON.parse(probe.stdout);
+  if (!Array.isArray(probed)) return t.skip(probed.skip);
+
+  const candidates = [GOOD, ...Object.values(accepted), ...structuralMutants(GOOD, Number(process.env.FUZZ_COUNT ?? 400), Number(process.env.FUZZ_SEED ?? 705))];
+  const passed = candidates.filter((c) => verify(c).code === 0);
+  assert.ok(passed.length >= Object.keys(accepted).length + 1, '合格ケースが少なすぎる');
+  const r = spawnSync('python3', ['-I', '-c', PYTHON_CHECK], { input: JSON.stringify(passed), encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const results = JSON.parse(r.stdout);
+  const bad = results.map((m, i) => (m === null ? null : `${m}\n---\n${passed[i]}`)).filter(Boolean);
+  assert.equal(bad.length, 0, `検査器が合格にしたが YAML の意味が期待と違う ${bad.length} 件:\n${bad.slice(0, 3).join('\n=====\n')}`);
+});
 
 test('不合格: 空ファイルと HTTP エラー JSON（uses 0 件）', () => {
   assert.equal(verify('').code, 1);

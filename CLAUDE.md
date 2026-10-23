@@ -33,7 +33,7 @@ skills/                               -- スキル本体（各ディレクトリ
     tests/                            -- node:test 回帰テスト（DELETE 失敗時に POST が呼ばれないこと、Step 8 の既存本文保持・移行・冪等・並行編集検知・マーカー不整合停止等・タイトルの文字参照変換〔create-issue-tree の CELL と同じ出力〕・旧形式の書き直し・create-issue-tree の --root 再マージとの往復〔相手のスキルが無ければ skip〕）、lib/ に gh スタブ（作る一時ディレクトリは tmp-track.mjs でプロセス終了時に消す）
   update-claude/
   setup-repo-guards/
-    scripts/                          -- verify-ai-review-wrapper.sh（Step 1 で commit SHA 固定取得した ai-review wrapper の配置前検査。allow-list 方式〔with の値はキーごとの 1 行 plain scalar・types / branches は要素ごとの完全一致〕・uses 完全一致 1 件・特権トリガー／run／secrets: inherit／過剰権限を拒否・ファイル内容は出力しない・exit 0 合格 / 1 不合格 / 2 使い方の誤り）
+    scripts/                          -- verify-ai-review-wrapper.sh（Step 1 で commit SHA 固定取得した ai-review wrapper の配置前検査。allow-list 方式〔with の値はキーごとの 1 行 plain scalar・types / branches は要素ごとの完全一致〕・ジョブ構造は状態機械で追い uses・権限・provider を現在のジョブへ束縛・uses 完全一致 1 件・特権トリガー／run／secrets: inherit／過剰権限を拒否・ファイル内容は出力しない・exit 0 合格 / 1 不合格 / 2 使い方の誤り）
     tests/                            -- node:test 回帰テスト（合格形・1 項目ずつの変異で不合格・空ファイルとエラー JSON・使い方の誤り・出力に内容を含めないこと）
   project-init/
   project-add-items/

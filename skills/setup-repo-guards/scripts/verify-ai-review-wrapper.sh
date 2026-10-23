@@ -13,6 +13,10 @@
 #       `: `・`#`・anchor・tag・flow 記法は拒否する。types / branches / skip-branch-prefixes 等の
 #       列挙は要素に分割し、各要素の前後の空白だけを除いて許可語・要素の文法へ完全一致させる
 #       （要素内部の空白・空要素・重複は拒否）。判断に迷う入力は拒否する。
+#       構造は位置に依存しない状態機械で追う: インデント 0 の行ごとにセクションを切り替え、
+#       jobs の内側ではジョブ ID の行の後ろ（現在のジョブ）でだけ設定を受理し、uses・permissions・
+#       with.provider は現在のジョブに帰属させて、ジョブを終える時点（次のジョブ ID・jobs を抜ける
+#       トップレベルキー・ファイル末尾）に揃っていることを確かめる。
 # 出力: 結果行（OK / NG と違反項目名・行番号）のみ。ファイル内容は出力しない
 #       （検出器が内容の漏洩経路にならないようにする）。
 # 終了コード: 0 = 合格 / 1 = 検査不合格 / 2 = 使い方の誤り・検査自体の失敗。
@@ -33,22 +37,46 @@ if [ ! -f "${target}" ] || [ ! -r "${target}" ]; then
 fi
 
 violations=0
-uses_count=0
+jobs_seen=0     # トップレベル jobs があった
 perm_scope=""   # "" / top / job
 perm_indent=0
 section=""      # 直近のトップレベルキー（on / concurrency / jobs / permissions）
 top_perm_ok=0   # トップレベル permissions に contents: read があった
-job_contents=0  # ジョブ側 permissions に contents: read があった
-job_prw=0       # ジョブ側 permissions に pull-requests: write があった
+# 以下 job_* は「現在のジョブ」（cur_job）に帰属する。ジョブ ID の行で初期化し、
+# 次のジョブ ID・jobs を抜けるトップレベルキー・ファイル末尾で finish_job が必須項目を確認する
+job_uses=0      # 現在のジョブに期待値と一致する uses があった
+job_contents=0  # 現在のジョブの permissions に contents: read があった
+job_prw=0       # 現在のジョブの permissions に pull-requests: write があった
+job_provider=0  # 現在のジョブの with に provider があった
 job_sub=""      # jobs 配下のインデント 4 の直近キー（with / secrets / permissions / その他）
 on_seen=0       # トップレベル on があった
 pr_seen=0       # on 直下（インデント 2）の pull_request があった
 on_sub=""       # on 直下（インデント 2）の直近キー（types / branches を置けるのは pull_request の直下だけ）
 seen=" "         # 出現済みキーの集合（スコープ/キー を空白区切りで保持。重複キー検出用）
-cur_job=""       # jobs 配下の直近のジョブ ID
+cur_job=""       # 現在のジョブ ID。空 = ジョブの内側にいない（jobs の外、または jobs 直下でジョブ ID より前）
 job_count=0      # jobs 直下のジョブ数（uses と権限を同じジョブに束縛するため 1 件に限定する）
 list_els=" "     # parse_list が集めた要素（空白区切り。重複と必須要素の判定に使う）
 n=0
+
+# 現在のジョブを終える。必須の uses・権限・provider が、そのジョブ自身に揃っていなければ不合格にする。
+# 呼び出し: 次のジョブ ID の行・jobs を抜けるトップレベルキー・ファイル末尾。
+# 終えたら cur_job を空にし、以後の字下げ付き行がこのジョブへ誤って帰属しないようにする
+finish_job() {
+  [ -n "${cur_job}" ] || return 0
+  if [ "${job_uses}" -ne 1 ]; then
+    echo "NG: ジョブ ${cur_job} に期待値と一致する uses がない"
+    violations=$((violations + 1))
+  fi
+  if [ "${job_contents}" -ne 1 ] || [ "${job_prw}" -ne 1 ]; then
+    echo "NG: ジョブ ${cur_job} の permissions に contents: read と pull-requests: write が必要"
+    violations=$((violations + 1))
+  fi
+  if [ "${job_provider}" -ne 1 ]; then
+    echo "NG: ジョブ ${cur_job} の with に provider が必要"
+    violations=$((violations + 1))
+  fi
+  cur_job=""
+}
 
 # 同一 mapping 内のキー重複を検出する。YAML では後勝ち・解釈系で差が出るため fail-closed で拒否する
 once() {
@@ -190,7 +218,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
       ng "permissions の子キーのインデントが不正"
       continue
     fi
-    once "perm:${perm_scope}:${cur_job}/${body%%:*}" || continue
+    once "perm:${perm_scope}:${cur_job}/${body%%:*}" || continue   # top のとき cur_job は空
     if [[ "${body}" =~ ^contents:[[:space:]]+read[[:space:]]*$ ]]; then
       if [ "${perm_scope}" = "top" ]; then top_perm_ok=1; else job_contents=1; fi
       continue
@@ -204,22 +232,30 @@ while IFS= read -r line || [ -n "${line}" ]; do
   fi
   perm_scope=""
 
-  if [ "${indent}" -eq 0 ] && [[ "${body}" =~ ^(on|concurrency|jobs|permissions):[[:space:]]*$ ]]; then
-    once "top/${body%%:*}" || continue
-    section="${body%%:*}"
+  # インデント 0 の行はトップレベルの新しいセクションの開始。jobs を抜けるときは現在のジョブを終える。
+  # 許可リストにないキーでもセクションを切り替える（直前のセクションの子として誤読しない）
+  if [ "${indent}" -eq 0 ]; then
+    finish_job
+    section="other"
     job_sub=""
-    if [ "${section}" = "on" ]; then on_seen=1; fi
+    on_sub=""
+    if [[ "${body}" =~ ^(on|concurrency|jobs|permissions|name):([[:space:]]|$) ]]; then
+      once "top/${body%%:*}" || continue
+      section="${body%%:*}"
+      if [ "${section}" = "on" ]; then on_seen=1; fi
+      if [ "${section}" = "jobs" ]; then jobs_seen=1; fi
+    fi
   fi
   if [[ "${body}" =~ ^permissions:[[:space:]]*$ ]]; then
     perm_indent="${indent}"
     if [ "${indent}" -eq 0 ]; then
       perm_scope="top"
-    elif [ "${section}" = "jobs" ] && [ "${indent}" -eq 4 ]; then
+    elif [ "${section}" = "jobs" ] && [ "${indent}" -eq 4 ] && [ -n "${cur_job}" ]; then
       once "job:${cur_job}/permissions" || continue
       perm_scope="job"
       job_sub="permissions"
     else
-      ng "jobs の各ジョブ直下以外での permissions"
+      ng "ジョブ ID の後ろ・各ジョブ直下以外での permissions"
     fi
     continue
   fi
@@ -243,7 +279,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
   if [ "${indent}" -eq 0 ]; then
     if [[ "${body}" =~ ${RE_NAME_LINE} ]]; then
       trim "${BASH_REMATCH[1]}"
-      if unquote "${trimmed}" && [[ "${unq}" =~ ${RE_WORDS} ]]; then once "top/name" || true; else ng "name の値が許可する文法に一致しない"; fi
+      if ! { unquote "${trimmed}" && [[ "${unq}" =~ ${RE_WORDS} ]]; }; then ng "name の値が許可する文法に一致しない"; fi
       continue
     fi
     if [[ "${body}" =~ ^(on|concurrency|jobs):[[:space:]]*$ ]]; then continue; fi
@@ -290,14 +326,23 @@ while IFS= read -r line || [ -n "${line}" ]; do
       if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^cancel-in-progress:[[:space:]]+(true|false)[[:space:]]*$ ]]; then once "concurrency/cancel" || true; continue; fi
       ng "concurrency 配下の許可外の行"; continue ;;
     jobs) ;;
-    *) ng "許可外のセクション配下の行"; continue ;;
+    *) ng "許可外のセクション配下の行（トップレベルの親キーの内側でのみ設定を受け付ける）"; continue ;;
   esac
+
+  # ここから jobs の内側。インデント 2 = ジョブ ID、4 以上 = ジョブの設定。
+  # ジョブの設定はジョブ ID の行より後ろ（cur_job が設定済み）でだけ受理する。
+  # ジョブ ID より前の設定行・jobs: より前のジョブキーを、後続のジョブ ID で後から成立させない
+  if [ "${indent}" -ne 2 ] && [ -z "${cur_job}" ]; then
+    ng "ジョブ ID より前、またはジョブの外にある設定行"; continue
+  fi
 
   # jobs 配下: インデント 2 = ジョブ ID、4 = ジョブのキー、6 = with / secrets の子
   if [ "${indent}" -eq 2 ]; then
     job_sub=""
+    finish_job
     if [[ "${body}" =~ ^[A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$ ]]; then
       cur_job="${body%%:*}"
+      job_uses=0; job_contents=0; job_prw=0; job_provider=0
       once "jobs/${cur_job}" || true
       job_count=$((job_count + 1))
       continue
@@ -308,9 +353,10 @@ while IFS= read -r line || [ -n "${line}" ]; do
     job_sub="other"
     once "job:${cur_job}/${body%%:*}" || continue
     if [[ "${body}" =~ ^uses: ]]; then
-      uses_count=$((uses_count + 1))
       if [ "${body}" != "uses: ${EXPECTED_USES}" ]; then
         ng "uses が期待値と一致しない"
+      else
+        job_uses=1
       fi
       continue
     fi
@@ -338,6 +384,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
         continue
       fi
       case "${wkey}" in
+        provider) job_provider=1 ;;
         block-priorities)
           # 外側の引用符と各要素の前後の空白だけを正規化し、要素ごとに P0〜P3 へ完全一致させる。
           # 内部の空白・引用符・空要素・重複（'P0,P 1' 等）は配置後のファイルに残り P1 の指定にならないため拒否する
@@ -357,13 +404,11 @@ while IFS= read -r line || [ -n "${line}" ]; do
   ng "許可リストにない行"
 done < "${target}"
 
-if [ "${job_count}" -ne 1 ]; then
-  echo "NG: ジョブが ${job_count} 件（ちょうど 1 件必要。uses と権限を同じジョブに束縛するため）"
-  violations=$((violations + 1))
-fi
+# 最後のジョブを終える（ファイル末尾）。各ジョブの uses・権限・provider は finish_job が確認する
+finish_job
 
-if [ "${uses_count}" -ne 1 ]; then
-  echo "NG: uses が ${uses_count} 件（ちょうど 1 件必要。空ファイル・エラー応答を含む）"
+if [ "${jobs_seen}" -ne 1 ] || [ "${job_count}" -ne 1 ]; then
+  echo "NG: トップレベル jobs の下にジョブがちょうど 1 件必要（現在 ${job_count} 件。uses と権限を同じジョブに束縛するため。空ファイル・エラー応答を含む）"
   violations=$((violations + 1))
 fi
 
@@ -372,13 +417,10 @@ if [ "${on_seen}" -ne 1 ] || [ "${pr_seen}" -ne 1 ]; then
   violations=$((violations + 1))
 fi
 
-# 権限の欠落は GITHUB_TOKEN をリポジトリ・組織の既定値に委ねるため不合格にする
+# トップレベル permissions の欠落は GITHUB_TOKEN をリポジトリ・組織の既定値に委ねるため不合格にする
+# （ジョブ側の permissions は finish_job が、そのジョブ自身に対して確認する）
 if [ "${top_perm_ok}" -ne 1 ]; then
   echo "NG: トップレベル permissions の contents: read がない"
-  violations=$((violations + 1))
-fi
-if [ "${job_contents}" -ne 1 ] || [ "${job_prw}" -ne 1 ]; then
-  echo "NG: ジョブ側 permissions の contents: read と pull-requests: write が必要"
   violations=$((violations + 1))
 fi
 
