@@ -164,11 +164,18 @@ fetch_json() {  # fetch_json <出力ファイル名> <gh api の引数...>
   fi
 }
 # ruleset 一覧は既定では最初のページしか返らない。--paginate --slurp で全ページを配列の配列として取り、jq 'add' で単一配列へ統合する。
-# 統合結果が配列でない場合・取得失敗は退避失敗として止める（後段の詳細取得と完了判定は、この統合済みの rulesets.json だけを使う）
-if gh api --paginate --slurp "repos/${repo}/rulesets" 2>/dev/null | jq -e 'add // [] | if type == "array" then . else error("not array") end' > "${backup}/rulesets.json.tmp" 2>/dev/null; then
+# gh の終了コードは jq と切り離して独立に確認する（パイプだと pipefail 無しでは末尾の jq の終了コードしか見えず、gh が失敗して無出力でも空の一覧が保存される）。
+# 1) gh の出力を一時ファイルへ取得し、gh が 0 以外・空出力なら未取得として止める
+# 2) 取得した JSON を統合し、配列であることを検証できたときだけ rulesets.json として確定する
+# 後段の詳細取得と完了判定は、この統合済みの rulesets.json だけを使う
+raw="${backup}/rulesets.raw.tmp"
+if gh api --paginate --slurp "repos/${repo}/rulesets" > "${raw}" 2>/dev/null \
+   && [ -s "${raw}" ] \
+   && jq -e 'add // [] | if type == "array" then . else error("not array") end' "${raw}" > "${backup}/rulesets.json.tmp" 2>/dev/null; then
   mv "${backup}/rulesets.json.tmp" "${backup}/rulesets.json"
+  rm -f "${raw}"
 else
-  rm -f "${backup}/rulesets.json.tmp"; echo "退避失敗: ruleset 一覧（全ページ取得不可）" >&2; exit 1
+  rm -f "${raw}" "${backup}/rulesets.json.tmp"; echo "退避失敗: ruleset 一覧（全ページ取得不可）" >&2; exit 1
 fi
 echo "ruleset 一覧: $(jq 'length' "${backup}/rulesets.json") 件（0 件なら新規作成のみ。既存を変更する前提にしない）"
 jq -r '.[] | select(.source_type == "Repository") | .id' "${backup}/rulesets.json" |
