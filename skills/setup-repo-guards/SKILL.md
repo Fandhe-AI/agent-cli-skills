@@ -59,17 +59,21 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
    一致しない、または改行を含むと判断した時点で、シェルコマンドを組み立てずに中止する
 2. 一致した値だけを、推測されにくい区切り語のクォート付き HEREDOC（展開が起きない）で束縛する。
    区切り語は実行ごとにランダムな値にし、入力に含まれないことを手順 1 で確認済みの前提で使う
-3. 束縛後も全体が 1 行であることを検査する。`read -r` は先頭行しか取らず残りを黙って捨てるため、
-   改行を含む値を切り詰めたまま検証に通さない
+3. 束縛と同時に、入力が 1 行だけであることを検査する。`read -r` は先頭行しか取らず残りを黙って捨てるため、
+   束縛後の値に改行は残らず、値に対する改行の検査は常に素通りする（検査として機能しない）。
+   そこで 1 行目を読んだ後に 2 行目を読もうとし、読めた（= 2 行以上ある、空の 2 行目を含む）場合は
+   `bind_ok=0` にして検証へ進まない。CR は `read -r` が除去しないため、束縛後の値に対する検査が有効に働く
 
 ```bash
 # bash 3.2（macOS）と zsh の両方で動く。正規表現は変数に入れて unquoted で使う
 # 束縛: クォート付き HEREDOC は展開を行わない（値に $ や ` や " があっても実行されない）
 # 区切り語 ARG_EOF_7f3a9c は例。実行ごとに別のランダム値にし、入力に現れないことを事前に確かめる
-IFS= read -r repo <<'ARG_EOF_7f3a9c'
+# 2 行目が読めたら複数行入力として bind_ok=0 にする（1 行目しか束縛されず残りが捨てられるのを防ぐ）
+bind_ok=1
+{ IFS= read -r repo && ! IFS= read -r _extra; } <<'ARG_EOF_7f3a9c' || bind_ok=0
 Fandhe-AI/my-repo
 ARG_EOF_7f3a9c
-IFS= read -r visibility <<'ARG_EOF_7f3a9c'
+{ IFS= read -r visibility && ! IFS= read -r _extra; } <<'ARG_EOF_7f3a9c' || bind_ok=0
 public
 ARG_EOF_7f3a9c
 
@@ -78,8 +82,8 @@ ARG_EOF_7f3a9c
 validate_pair() {
   local repo="$1" visibility="$2" name
   local repo_re='^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
-  # 改行・CR を含む値は拒否する（全体が 1 行であること）
-  case "${repo}${visibility}" in *$'\n'*|*$'\r'*) echo "不正な入力: 改行を含む"; return 1 ;; esac
+  # CR は read -r が除去しないため、束縛後の値で検出できる（改行は束縛時の bind_ok で検査済み）
+  case "${repo}${visibility}" in *$'\r'*) echo "不正な入力: CR を含む"; return 1 ;; esac
   if ! [[ "${repo}" =~ ${repo_re} ]]; then echo "不正な repo: 形式外"; return 1; fi
   name="${repo#*/}"
   case "${repo}" in -*) echo "不正な repo: 先頭が -"; return 1 ;; esac
@@ -87,7 +91,8 @@ validate_pair() {
   case "${visibility}" in public|private) ;; *) echo "不正な visibility"; return 1 ;; esac
 }
 # 一括適用の例: 組ごとに呼び、失敗した組だけ完了報告へ回して次へ進む
-validate_pair "${repo}" "${visibility}" || echo "除外: 検証失敗"
+if [ "${bind_ok}" -ne 1 ]; then echo "除外: 複数行または空の入力"
+elif ! validate_pair "${repo}" "${visibility}"; then echo "除外: 検証失敗"; fi
 ```
 
 - 拒否する値: 余分な `/` を含む値、先頭が `-` の値（`gh` のオプションと取り違えられる）、
