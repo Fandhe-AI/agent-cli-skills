@@ -18,7 +18,7 @@ Step 1 → 4 の順に、各 Step を PR → CI 全 pass → レビュースレ�
 1. ai-review（PR 自動レビュー workflow の wrapper）
 2. AGENTS.md（AI レビューが読むレビュー観点集）
 3. CI 必須チェックの集約ジョブ（`ci-complete` 等）
-4. branch protection ruleset・リポジトリ追加ガード（GitHub API のみ、コミット不要）
+4. branch protection ruleset・リポジトリ追加ガード（GitHub API のみ、コミット不要。適用前に退避・差分提示・明示承認を必須とする）
 
 この順序を守る理由: 「必須チェックに入れる集約ジョブが先に存在する」「AGENTS.md は PR の base コミット参照のため
 マージ後の次の PR から実効」という依存関係が、この順で自然に満たされる。
@@ -40,6 +40,8 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
 - `jq` がインストールされていること（`command -v jq` で確認）
 - Fandhe-AI/actions（reusable workflow の提供元）への参照権限があること
 - 対象リポジトリを clone 済みで、CLAUDE.md・既存 workflow を読める状態であること
+- Step 4 の適用可否に利用者が応答できること（対話可能であること）。応答できない自動運転環境では Step 4 の書き込みを実行せず、差分と退避先を報告して停止する
+- 退避先（`mktemp -d` が作る作業ツリー外のディレクトリ）に書き込めること
 
 ## フロー
 
@@ -120,6 +122,77 @@ ai-review は **PR の base コミットの AGENTS.md** をリポジトリ固有
 
 ### Step 4: branch protection / リポジトリ設定（GitHub API のみ、コミット不要）
 
+Step 4 の書き込み系呼び出し（PATCH / PUT / POST / DELETE）は、**4.1 退避 → 4.2 差分提示と明示承認 → 4.3 適用**
+の順を必ず踏む。承認が得られない場合は何も変更せず中止する（fail-closed）。誤適用したときは 4.4 で戻す。
+`PUT /rulesets/{id}` は `required_status_checks.parameters` を丸ごと置換し、`integration_id` 束縛などが
+黙って脱落し得るため、現在値の保存と差分の確認なしに送らない。
+
+#### 4.1 退避（変更前の現在値を作業ツリーの外へ保存）
+
+- 保存先は `mktemp -d` が返す絶対パスのディレクトリにする。対象リポジトリの作業ツリー内・`.claude/` 配下には
+  置かない（誤コミット防止）。`chmod 700` を付け、パスを利用者へ表示して復旧まで保持する旨を伝える。
+  複数リポジトリの一括適用ではリポジトリごとに別ディレクトリにする
+- リポジトリ名は `owner/repo` 形式を検証してから使う
+- 退避対象（取得は 1 件ごとに成否を確認し、存在判定は終了コードではなく HTTP status で行う。`gh api` のエラー本文は stdout に出る）:
+  - 全 branch ruleset: 一覧と、各 ruleset の詳細 JSON（`Repository` は `repos/{repo}/rulesets/{id}`、`Organization` は
+    読み取りのみ。org 継承 ruleset はリポジトリ側 API で変更しない）。tag ruleset を扱う場合はその一覧と詳細も
+  - リポジトリ本体: `GET repos/{repo}` の `allow_squash_merge` / `allow_merge_commit` / `allow_rebase_merge` /
+    `delete_branch_on_merge` / `allow_auto_merge` / `squash_merge_commit_title` / `squash_merge_commit_message` /
+    `has_wiki` / `has_projects` / `allow_forking` / `security_and_analysis`
+  - Actions 権限: `GET repos/{repo}/actions/permissions` と `GET repos/{repo}/actions/permissions/workflow`
+  - Dependabot alerts・automated security fixes・private vulnerability reporting: 各エンドポイントの HTTP status で有効 / 無効を記録する
+- 取得失敗（403 / 404 以外の異常を含む）は「未取得」と明示し、未取得の項目は変更しない。取得失敗を「現在値なし」に倒して
+  新規作成・上書きしない（判定不能を green に倒さない方針と同じ）
+- 退避した JSON の件数と sha256 を表示し、保存を確認してから 4.2 へ進む。保存先のパスと内容は PR 本文・コミット・ログへ貼らない（要約のみ）
+
+```bash
+repo="Fandhe-AI/<REPO>"
+case "${repo}" in */*) ;; *) echo "repo は owner/repo 形式" >&2; exit 1 ;; esac
+backup="$(mktemp -d)" && chmod 700 "${backup}" && echo "退避先: ${backup}"
+gh api "repos/${repo}/rulesets" > "${backup}/rulesets.json" || { echo "退避失敗: ruleset 一覧" >&2; exit 1; }
+jq -r '.[] | select(.source_type == "Repository") | .id' "${backup}/rulesets.json" |
+while read -r id; do
+  gh api "repos/${repo}/rulesets/${id}" > "${backup}/ruleset-${id}.json" || echo "未取得: ruleset ${id}（変更しない）"
+done
+gh api "repos/${repo}" --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, delete_branch_on_merge, allow_auto_merge, squash_merge_commit_title, squash_merge_commit_message, has_wiki, has_projects, allow_forking, security_and_analysis}' > "${backup}/repo.json" || echo "未取得: リポジトリ本体（変更しない）"
+gh api "repos/${repo}/actions/permissions/workflow" > "${backup}/actions-workflow.json" || echo "未取得: Actions workflow 権限（変更しない）"
+gh api "repos/${repo}/actions/permissions" > "${backup}/actions.json" || echo "未取得: Actions 権限（変更しない）"
+for ep in vulnerability-alerts automated-security-fixes private-vulnerability-reporting; do
+  code="$(gh api -i "repos/${repo}/${ep}" 2>/dev/null | awk 'NR==1{print $2}')"
+  printf '%s\n' "${code:-unknown}" > "${backup}/${ep}.status"   # 204 = 有効 / 404 = 無効 / 他 = 判定不能（変更しない）
+done
+(cd "${backup}" && ls -1 && shasum -a 256 -- * )
+```
+
+#### 4.2 差分提示と明示承認
+
+- 適用予定の本文（PUT / PATCH / POST の body）を退避先と同じディレクトリの一時ファイルに作り、現在値との差分を
+  `jq -S` で正規化した JSON 同士の `diff` で提示する（キー順の差を無視する）
+- 最低限、次の増減を明示する: `required_status_checks` の `context` 一覧と各エントリの `integration_id` の有無（脱落）/
+  `strict_required_status_checks_policy` / `bypass_actors` の件数 / `enforcement` / `required_review_thread_resolution` /
+  `allowed_merge_methods`
+- 新規作成（POST）で現在値が無い場合は「新規作成」と明記し、復旧は DELETE であることを併記する
+
+```bash
+diff <(jq -S . "${backup}/ruleset-<ID>.json") <(jq -S . "${backup}/ruleset-<ID>.new.json")
+# integration_id の脱落を直接確認（現在値で束縛済みの context のうち、新 body で束縛が無くなったものを列挙）
+jq -rn --slurpfile a "${backup}/ruleset-<ID>.json" --slurpfile b "${backup}/ruleset-<ID>.new.json" '
+  def bound($x): [$x.rules[]? | select(.type=="required_status_checks") | .parameters.required_status_checks[]? | select(.integration_id != null) | .context];
+  (bound($a[0]) - bound($b[0]))[]'
+```
+
+- 利用者へ「適用してよいか」を尋ね、肯定の明示返答を得てから 4.3 へ進む。無返答・曖昧な返答・質問できない自動運転環境では
+  適用せず、差分と退避先を報告して停止する
+- 承認はそのリポジトリの、その差分 1 回分に限る。差分が変わったら再提示して再承認を得る。一括適用でもリポジトリごとに承認を取る
+- 承認を事実以上に記述しない。得ていない承認を完了報告・PR 本文に「承認済み」と書かない
+
+#### 4.3 適用（4.2 で承認された差分の範囲でのみ実行）
+
+ruleset を更新する PUT は、4.1 で退避した JSON の `required_status_checks` 等の必要箇所だけを差し替えた body を
+`--input <file>` で送る（丸ごと新規構築しない・本文を文字列連結しない）。適用後は直ちに下記「検証」の
+Step 4-a / 4-b スイープを実行し、崩れていたら 4.4 で戻す。新規作成した ruleset の id・変更項目一覧・退避先パスを
+完了報告に記録する。
+
 - マージ設定（`gh api -X PATCH repos/...`）: squash のみ（merge commit / rebase 禁止）、
   マージ後ブランチ自動削除、auto-merge 許可、squash タイトル = PR_TITLE / 本文 = PR_BODY
 - ruleset `main-protection`（target: branch、`~DEFAULT_BRANCH`、enforcement: active、bypass_actors 空）:
@@ -174,6 +247,26 @@ ai-review は **PR の base コミットの AGENTS.md** をリポジトリ固有
   （private なら）forking 禁止 / 未使用の wiki・projects 無効化
 - プラン制限（403/422）に当たった項目は「ユーザー操作が必要」として記録し、他を続行する
 
+#### 4.4 復旧（退避した JSON で元に戻す）
+
+復旧自体も書き込みなので、実行前に復旧内容を利用者へ提示して承認を得る。復旧に失敗した項目は握りつぶさず報告する。
+
+- 既存 ruleset の復旧: 退避した詳細 JSON から PUT 可能なフィールド（`name` / `target` / `enforcement` / `bypass_actors` /
+  `conditions` / `rules`）だけを抽出し、`PUT repos/{repo}/rulesets/{id}` へ `--input` で送る。読み取り専用フィールド
+  （`id` / `source` / `source_type` / `node_id` / `_links` / `created_at` / `updated_at` / `current_user_can_bypass`）は送らない。
+  復旧後は 3 軸スイープで退避時点と同じ値（strict / bypass / `integration_id` / total）に戻ったことを実測する
+- 新規作成した ruleset の復旧: 記録した id のみ `DELETE repos/{repo}/rulesets/{id}`（他の ruleset は触らない）
+- リポジトリ本体: 退避した値のうち変更した項目だけを `PATCH repos/{repo}` で戻す
+- 追加ガード: 退避時の状態へ対応する API で戻す（Dependabot alerts / automated security fixes / private vulnerability
+  reporting は `PUT` / `DELETE`、Actions 権限は `PUT actions/permissions/workflow`、secret scanning / push protection は
+  `security_and_analysis` の PATCH）
+- 退避ディレクトリは復旧不要と確認できるまで削除しない。削除は自分が `mktemp -d` で作ったものだけに限る
+
+```bash
+jq '{name, target, enforcement, bypass_actors, conditions, rules}' "${backup}/ruleset-<ID>.json" > "${backup}/ruleset-<ID>.restore.json" \
+  && gh api -X PUT "repos/${repo}/rulesets/<ID>" --input "${backup}/ruleset-<ID>.restore.json"
+```
+
 ## 検証
 
 各 Step の完了は以下で確認する:
@@ -191,6 +284,9 @@ gh run view "${run_id}" --repo "${repo}" --json jobs --jq '.jobs[] | {name, stat
 grep -n "P0\|P1\|P2" AGENTS.md | head
 # Step 3: 直近 PR の check runs で集約ジョブが報告されること
 gh pr checks "$(gh pr list --repo "${repo}" --state merged --limit 1 --json number --jq '.[0].number')" --repo "${repo}"
+# Step 4: 退避ファイルの存在と件数（4.1）
+ls -1 "${backup}" | wc -l
+# Step 4: 適用後の ruleset が承認済みの差分と一致すること（4.2 の新 body と現在値を jq -S で比較し、差分が空であること）
 # Step 4: ruleset とマージ設定
 gh api "repos/${repo}/rulesets" --jq '.[] | {id, name, enforcement}'
 gh api "repos/${repo}" --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, delete_branch_on_merge, allow_auto_merge}'
@@ -234,7 +330,7 @@ squash merge のみ許可・スレッド resolve 必須が実際に効いてい�
 ## 完了報告
 
 Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須チェック一覧、適用できなかった項目
-（理由付き）を表でまとめて報告する。
+（理由付き）、退避先パス（内容は貼らない）、承認の有無（得た場合のみ事実どおりに記載）を表でまとめて報告する。
 
 ## よくある失敗
 
@@ -254,11 +350,16 @@ Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須�
 | 旧 `codex-review.yml` wrapper を新規導入する・残したままにする（Fandhe-AI/actions から削除済みで workflow を解決できない） | Step 1: `ai-review/templates/ai-review.single.yml` から導入し、旧 wrapper は「codex-review からの移行」で置き換える |
 | ai-review の `preflight` を required から外し、actor 判定の失敗で review が skipped のまま必須チェックを満たす | Step 4: `<job> / preflight` を必ず required に含める |
 | 資格情報未設定で review が skipped なのに workflow 全体の成功を見て導入完了とする | 検証: `gh run view --json jobs` でジョブ単位に `review` の実行を確認する |
+| 現在値を保存せずに PUT し、`integration_id` の脱落・設定項目の消失に気づけず復旧できない | Step 4.1: 変更前に作業ツリー外へ退避する |
+| 差分を示さず承認なしで適用する | Step 4.2: 差分提示と明示承認を取り、得られなければ停止する |
+| 退避ファイルを作業ツリー内に置いてコミットしてしまう | Step 4.1: 作業ツリー外の `mktemp -d` に保存する |
+| 取得失敗を「現在値なし」として扱い、誤って新規作成・上書きする | Step 4.1: 取得失敗は未取得とし、その項目は変更しない |
 
 ## 注意事項
 
 - コミットは日本語 Conventional Commits 形式で作成し、対象リポジトリのコミット規約・フッター運用に従う。`--no-verify` は使用しない
 - シェル変数は `"${var}"` 形式でクォートする
+- 承認を得るまで Step 4 の書き込み系 API を実行しない。自動運転などで承認を取れない場合は適用せず停止する
 - AI レビューの指摘が正当なら修正で応える（テスト・ゲートの弱体化やスキップでごまかさない）。
   スレッドへ対応内容を返信して resolve してからマージする
 - スコープ外の発見は Issue 化をユーザーに提案する（勝手に起票しない）
