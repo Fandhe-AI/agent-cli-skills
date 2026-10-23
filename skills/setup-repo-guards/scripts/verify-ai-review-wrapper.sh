@@ -38,6 +38,8 @@ on_seen=0       # トップレベル on があった
 pr_seen=0       # on 直下（インデント 2）の pull_request があった
 seen=" "         # 出現済みキーの集合（スコープ/キー を空白区切りで保持。重複キー検出用）
 cur_job=""       # jobs 配下の直近のジョブ ID
+job_count=0      # jobs 直下のジョブ数（uses と権限を同じジョブに束縛するため 1 件に限定する）
+types_bad=0      # on.pull_request.types が必須イベントを欠く
 n=0
 
 # 同一 mapping 内のキー重複を検出する。YAML では後勝ち・解釈系で差が出るため fail-closed で拒否する
@@ -78,6 +80,11 @@ while IFS= read -r line || [ -n "${line}" ]; do
 
   # permissions ブロックの内側（親より深いインデント）は権限キーだけを許可する
   if [ -n "${perm_scope}" ] && [ "${indent}" -gt "${perm_indent}" ]; then
+    # 子キーは親のちょうど +2 のインデントに限る（不正な入れ子・過剰インデントを拒否）
+    if [ "${indent}" -ne $((perm_indent + 2)) ]; then
+      ng "permissions の子キーのインデントが不正"
+      continue
+    fi
     once "perm:${perm_scope}:${cur_job}/${body%%:*}" || continue
     if [[ "${body}" =~ ^contents:[[:space:]]+read[[:space:]]*$ ]]; then
       if [ "${perm_scope}" = "top" ]; then top_perm_ok=1; else job_contents=1; fi
@@ -136,7 +143,20 @@ while IFS= read -r line || [ -n "${line}" ]; do
   case "${section}" in
     on)
       if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^pull_request:[[:space:]]*$ ]]; then once "on/pull_request" || true; pr_seen=1; continue; fi
-      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_types} ]]; then once "on/types" || true; continue; fi
+      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_types} ]]; then
+        once "on/types" || true
+        # PR の再レビューに必要な opened・synchronize・reopened をすべて含まない値は拒否する
+        tval="${body#*:}"
+        tval="${tval//[[:space:]\[\]]/}"
+        for ev in opened synchronize reopened; do
+          case ",${tval}," in
+            *,"${ev}",*) ;;
+            *) types_bad=1 ;;
+          esac
+        done
+        if [ "${types_bad}" -eq 1 ]; then ng "types に opened・synchronize・reopened が必要"; fi
+        continue
+      fi
       if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_branches} ]]; then once "on/branches" || true; continue; fi
       ng "on 配下は pull_request（types・branches）のみ許可"; continue ;;
     concurrency)
@@ -153,6 +173,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
     if [[ "${body}" =~ ^[A-Za-z0-9_-]+:[[:space:]]*$ ]]; then
       cur_job="${body%%:*}"
       once "jobs/${cur_job}" || true
+      job_count=$((job_count + 1))
       continue
     fi
     ng "jobs 直下はジョブ ID のみ許可"; continue
@@ -199,6 +220,11 @@ while IFS= read -r line || [ -n "${line}" ]; do
 
   ng "許可リストにない行"
 done < "${target}"
+
+if [ "${job_count}" -ne 1 ]; then
+  echo "NG: ジョブが ${job_count} 件（ちょうど 1 件必要。uses と権限を同じジョブに束縛するため）"
+  violations=$((violations + 1))
+fi
 
 if [ "${uses_count}" -ne 1 ]; then
   echo "NG: uses が ${uses_count} 件（ちょうど 1 件必要。空ファイル・エラー応答を含む）"

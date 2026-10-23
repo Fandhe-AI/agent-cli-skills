@@ -115,6 +115,11 @@ const mutations = {
   'block-priorities: P3': (s) => s.replace('      provider: codex\n', '      provider: codex\n      block-priorities: P3\n'),
   'block-priorities に P1 欠落': (s) => s.replace('      provider: codex\n', '      provider: codex\n      block-priorities: P0\n'),
   'block-priorities に P0 欠落': (s) => s.replace('      provider: codex\n', '      provider: codex\n      block-priorities: P1,P2\n'),
+  'permissions の子キーが親+4 のインデント': (s) => s.replace('      contents: read\n      pull-requests: write\n', '      contents: read\n        pull-requests: write\n'),
+  'permissions の子キーが親+1 のインデント': (s) => s.replace('      contents: read\n      pull-requests: write\n', '     contents: read\n     pull-requests: write\n'),
+  'uses と permissions が別ジョブ': (s) => s.replace('    permissions:\n      contents: read\n      pull-requests: write\n', '') + '  other:\n    permissions:\n      contents: read\n      pull-requests: write\n',
+  'types が closed のみ': (s) => s.replace('[opened, synchronize, reopened]', '[closed]'),
+  'types に reopened 欠落': (s) => s.replace('[opened, synchronize, reopened]', '[opened, synchronize]'),
   'with 値にコマンド置換風の文字': (s) => s.replace('provider: codex', 'provider: codex; rm -rf /'),
 };
 
