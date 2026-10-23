@@ -318,3 +318,11 @@ test('computeCheckoutByteReserve: 小さな残置平均でも現在のメイン 
   assert.equal(computeCheckoutByteReserve({ mainBytes: 10 * GiB, avgResidualBytes: 0, rawPerWorktreeByteReserve: raw }), 10 * GiB)
   assert.equal(computeCheckoutByteReserve({ mainBytes: 30 * GiB, avgResidualBytes: GiB, rawPerWorktreeByteReserve: raw }), raw)
 })
+
+test('Issue #691 レビュー指摘: ckMiB は巻き上げられる関数宣言で、起動時の free-disk latch が初期化前に呼んでも TDZ の ReferenceError にならない', () => {
+  assert.match(source, /^function ckMiB\(\)/m, 'ckMiB は function 宣言であること')
+  assert.doesNotMatch(source, /^\s*(const|let|var)\s+ckMiB\b/m, 'ckMiB を const / let / var で宣言しない（TDZ 再発防止）')
+  const callIdx = source.indexOf('${ckMiB()}')
+  const declIdx = source.search(/^function ckMiB\(\)/m)
+  assert.ok(callIdx > 0 && callIdx < declIdx, '起動時判定の呼び出しが宣言より前にある前提（巻き上げに依存）')
+})

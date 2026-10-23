@@ -10440,7 +10440,7 @@ for(const rn of monitoringResumeActive)t+=Math.max(0,EPHEMERAL_RESERVE_PER_MONIT
 return t
 }
 
-const ckMiB=()=>Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve,rawPerWorktreeByteReserve) / (1024 * 1024))
+function ckMiB(){return Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve,rawPerWorktreeByteReserve) / (1024 * 1024)) }
 
 
 const monitoringResumeGateDeferred=new Map()

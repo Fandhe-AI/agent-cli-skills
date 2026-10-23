@@ -10440,7 +10440,7 @@ const reservedUnitsNow = () => {
   return t
 }
 // 表示用: 実効チェックアウト単価（MiB）。
-const ckMiB = () => Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))
+function ckMiB() { return Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024)) }
 // 上限ゲートにより monitoring 再開を defer したイシューの記録（n → 理由文字列）。既定の
 // 「再実行すると monitor から再開する」案内は上限超過 defer では誤りのため個別に理由を上書きする。
 const monitoringResumeGateDeferred = new Map()
