@@ -140,10 +140,13 @@ Step 4 の書き込み系呼び出し（PATCH / PUT / POST / DELETE）は、**4.
     `delete_branch_on_merge` / `allow_auto_merge` / `squash_merge_commit_title` / `squash_merge_commit_message` /
     `has_wiki` / `has_projects` / `allow_forking` / `security_and_analysis`
   - Actions 権限: `GET repos/{repo}/actions/permissions` と `GET repos/{repo}/actions/permissions/workflow`
-  - Dependabot alerts・automated security fixes・private vulnerability reporting: 各エンドポイントの HTTP status で有効 / 無効を記録する
+  - Dependabot alerts（`vulnerability-alerts`）: HTTP status で有効 / 無効を記録する（204 = 有効 / 404 = 無効）
+  - automated security fixes・private vulnerability reporting: 有効でも無効でも 200 と `{"enabled": bool}` を返すため、
+    status では判別できない。本文の `enabled` を JSON として退避する
 - 取得失敗（403 / 404 以外の異常を含む）は「未取得」と明示し、未取得の項目は変更しない。取得失敗を「現在値なし」に倒して
   新規作成・上書きしない（判定不能を green に倒さない方針と同じ）
-- 退避の完了条件は「取得に成功した全 `*.json` が `jq -e .` で JSON として妥当」であること。取得失敗時は壊れたファイル（空・エラー本文）を残さず、そのファイルは「未取得」として扱う（4.2 の差分・4.4 の復旧の入力に使わない）
+- 退避の完了条件は「取得に成功した全 `*.json` が `jq -e .` で JSON として妥当」かつ「ruleset 一覧にある Repository ruleset の全 id の詳細が退避済み」であること。未取得 id が 1 件でもあれば列挙して 4.2 へ進まない（ゲート。その ruleset は変更しない）。取得失敗時は壊れたファイル（空・エラー本文）を残さず、そのファイルは「未取得」として扱う（4.2 の差分・4.4 の復旧の入力に使わない）
+- Bash ツールは呼び出しをまたいでシェル変数を保持しない。4.1 から 4.4 を複数回の呼び出しに分けるときは、各呼び出しの先頭で `repo` と `backup`（4.1 で表示した絶対パス）を再束縛し、`[ -d "${backup}" ]` を確認してから使う（空の変数のまま実行しない）
 - 退避した JSON の件数と sha256 を表示し、保存を確認してから 4.2 へ進む。保存先のパスと内容は PR 本文・コミット・ログへ貼らない（要約のみ）
 
 ```bash
@@ -165,13 +168,20 @@ jq -r '.[] | select(.source_type == "Repository") | .id' "${backup}/rulesets.jso
 while read -r id; do
   fetch_json "ruleset-${id}.json" "repos/${repo}/rulesets/${id}"
 done
+# ゲート: 一覧にある Repository ruleset の詳細が全件退避されたこと（未取得 id があれば 4.2 へ進まない）
+missing=0
+for id in $(jq -r '.[] | select(.source_type == "Repository") | .id' "${backup}/rulesets.json"); do
+  [ -s "${backup}/ruleset-${id}.json" ] || { echo "未退避の ruleset id: ${id}（変更しない）" >&2; missing=1; }
+done
+[ "${missing}" -eq 0 ] || { echo "退避未完了: 4.2 へ進まない" >&2; exit 1; }
 fetch_json repo.json "repos/${repo}" --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, delete_branch_on_merge, allow_auto_merge, squash_merge_commit_title, squash_merge_commit_message, has_wiki, has_projects, allow_forking, security_and_analysis}'
 fetch_json actions-workflow.json "repos/${repo}/actions/permissions/workflow"
 fetch_json actions.json "repos/${repo}/actions/permissions"
-for ep in vulnerability-alerts automated-security-fixes private-vulnerability-reporting; do
-  code="$(gh api -i "repos/${repo}/${ep}" 2>/dev/null | awk 'NR==1{print $2}')"
-  printf '%s\n' "${code:-unknown}" > "${backup}/${ep}.status"   # 204 = 有効 / 404 = 無効 / 他 = 判定不能（変更しない）
-done
+code="$(gh api -i "repos/${repo}/vulnerability-alerts" 2>/dev/null | awk 'NR==1{print $2}')"
+printf '%s\n' "${code:-unknown}" > "${backup}/vulnerability-alerts.status"   # 204 = 有効 / 404 = 無効 / 他 = 判定不能（変更しない）
+# この 2 つは status ではなく本文の {"enabled": bool} で判別する
+fetch_json automated-security-fixes.json "repos/${repo}/automated-security-fixes"
+fetch_json private-vulnerability-reporting.json "repos/${repo}/private-vulnerability-reporting"
 # 完了条件: 退避された *.json がすべて JSON として妥当であること
 for f in "${backup}"/*.json; do jq -e . "${f}" > /dev/null || echo "不正な退避: ${f##*/}（変更しない）" >&2; done
 (cd "${backup}" && ls -1 && shasum -a 256 -- * )
