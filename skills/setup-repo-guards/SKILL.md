@@ -64,7 +64,8 @@ wrapper は単一 provider テンプレートをコピーして作る（既定�
   「wrapper ファイル自体の改ざん・誤配置」だけで、`latest` タグ自体の改ざんは検査と目視で補う限界がある
 - 検査スクリプト（`scripts/verify-ai-review-wrapper.sh`）は allow-list 方式で、`uses:` が期待値と完全一致で
   ちょうど 1 件・特権トリガー無し・`run:` / `steps:` / `env:` 無し・`secrets: inherit` 無し・権限が
-  `contents: read`（ジョブ側のみ加えて `pull-requests: write`）に限られることを確かめる。ファイル内容は出力しない
+  `contents: read`（ジョブ側のみ加えて `pull-requests: write`）に限られ、両 permissions が欠落していないこと、
+  `on:` 配下が `pull_request` のみであることを確かめる（親キーを追跡し、任意のジョブ名は `jobs:` 直下だけ許可）。ファイル内容は出力しない
 
 ```bash
 tmp="$(mktemp -d)" || exit 1

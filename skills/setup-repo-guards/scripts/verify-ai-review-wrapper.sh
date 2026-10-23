@@ -29,6 +29,10 @@ violations=0
 uses_count=0
 perm_scope=""   # "" / top / job
 perm_indent=0
+section=""      # 直近のトップレベルキー（on / concurrency / jobs / permissions）
+top_perm_ok=0   # トップレベル permissions に contents: read があった
+job_contents=0  # ジョブ側 permissions に contents: read があった
+job_prw=0       # ジョブ側 permissions に pull-requests: write があった
 n=0
 
 ng() {
@@ -61,9 +65,11 @@ while IFS= read -r line || [ -n "${line}" ]; do
   # permissions ブロックの内側（親より深いインデント）は権限キーだけを許可する
   if [ -n "${perm_scope}" ] && [ "${indent}" -gt "${perm_indent}" ]; then
     if [[ "${body}" =~ ^contents:[[:space:]]+read[[:space:]]*$ ]]; then
+      if [ "${perm_scope}" = "top" ]; then top_perm_ok=1; else job_contents=1; fi
       continue
     fi
     if [ "${perm_scope}" = "job" ] && [[ "${body}" =~ ^pull-requests:[[:space:]]+write[[:space:]]*$ ]]; then
+      job_prw=1
       continue
     fi
     ng "許可外の権限"
@@ -71,9 +77,18 @@ while IFS= read -r line || [ -n "${line}" ]; do
   fi
   perm_scope=""
 
+  if [ "${indent}" -eq 0 ] && [[ "${body}" =~ ^(on|concurrency|jobs|permissions):[[:space:]]*$ ]]; then
+    section="${body%%:*}"
+  fi
   if [[ "${body}" =~ ^permissions:[[:space:]]*$ ]]; then
     perm_indent="${indent}"
-    if [ "${indent}" -eq 0 ]; then perm_scope="top"; else perm_scope="job"; fi
+    if [ "${indent}" -eq 0 ]; then
+      perm_scope="top"
+    elif [ "${section}" = "jobs" ]; then
+      perm_scope="job"
+    else
+      ng "jobs 以外での permissions"
+    fi
     continue
   fi
   if [[ "${body}" =~ ^permissions: ]]; then
@@ -92,6 +107,27 @@ while IFS= read -r line || [ -n "${line}" ]; do
     ng "secrets: inherit"; continue
   fi
 
+  # 親キーごとの allow-list（親を追跡し、on 配下は pull_request のみ・任意名は jobs 直下のみ）
+  if [ "${indent}" -eq 0 ]; then
+    if [[ "${body}" =~ ^name:[[:space:]]+ ]] && [[ "${body#name:}" =~ ${re_free} ]]; then continue; fi
+    if [[ "${body}" =~ ^(on|concurrency|jobs):[[:space:]]*$ ]]; then continue; fi
+    ng "許可リストにないトップレベルキー"; continue
+  fi
+  case "${section}" in
+    on)
+      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^pull_request:[[:space:]]*$ ]]; then continue; fi
+      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_types} ]]; then continue; fi
+      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_branches} ]]; then continue; fi
+      ng "on 配下は pull_request（types・branches）のみ許可"; continue ;;
+    concurrency)
+      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^group:[[:space:]]+ ]] && [[ "${body#group:}" =~ ${re_free} ]]; then continue; fi
+      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^cancel-in-progress:[[:space:]]+(true|false)[[:space:]]*$ ]]; then continue; fi
+      ng "concurrency 配下の許可外の行"; continue ;;
+    jobs) ;;
+    *) ng "許可外のセクション配下の行"; continue ;;
+  esac
+
+  # jobs 配下
   if [[ "${body}" =~ ^uses: ]]; then
     uses_count=$((uses_count + 1))
     if [ "${body}" != "uses: ${EXPECTED_USES}" ]; then
@@ -99,14 +135,8 @@ while IFS= read -r line || [ -n "${line}" ]; do
     fi
     continue
   fi
-
-  # 構造キーの allow-list
   if [[ "${body}" =~ ^name:[[:space:]]+ ]] && [[ "${body#name:}" =~ ${re_free} ]]; then continue; fi
-  if [[ "${body}" =~ ^(on|pull_request|concurrency|jobs|with|secrets):[[:space:]]*$ ]]; then continue; fi
-  if [[ "${body}" =~ ${re_types} ]]; then continue; fi
-  if [[ "${body}" =~ ${re_branches} ]]; then continue; fi
-  if [[ "${body}" =~ ^group:[[:space:]]+ ]] && [[ "${body#group:}" =~ ${re_free} ]]; then continue; fi
-  if [[ "${body}" =~ ^cancel-in-progress:[[:space:]]+(true|false)[[:space:]]*$ ]]; then continue; fi
+  if [[ "${body}" =~ ^(with|secrets):[[:space:]]*$ ]]; then continue; fi
   if [[ "${body}" =~ ^[A-Za-z0-9_-]+:[[:space:]]*$ ]] && [ "${indent}" -eq 2 ]; then continue; fi
   if [[ "${body}" =~ ${re_with_key} ]]; then continue; fi
   if [[ "${body}" =~ ^API_KEY:[[:space:]]+\$\{\{[[:space:]]*secrets\.[A-Za-z0-9_]+[[:space:]]*\}\}[[:space:]]*$ ]]; then continue; fi
@@ -116,6 +146,16 @@ done < "${target}"
 
 if [ "${uses_count}" -ne 1 ]; then
   echo "NG: uses が ${uses_count} 件（ちょうど 1 件必要。空ファイル・エラー応答を含む）"
+  violations=$((violations + 1))
+fi
+
+# 権限の欠落は GITHUB_TOKEN をリポジトリ・組織の既定値に委ねるため不合格にする
+if [ "${top_perm_ok}" -ne 1 ]; then
+  echo "NG: トップレベル permissions の contents: read がない"
+  violations=$((violations + 1))
+fi
+if [ "${job_contents}" -ne 1 ] || [ "${job_prw}" -ne 1 ]; then
+  echo "NG: ジョブ側 permissions の contents: read と pull-requests: write が必要"
   violations=$((violations + 1))
 fi
 
