@@ -42,7 +42,7 @@ const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-free-
 const slicePath = join(sliceDir, 'implement-issue-tree-free-disk-defs.mjs')
 // 実装スクリプトは `export const meta` 以外の top-level export を持てない（Workflow 起動制約）
 // ため、定義部は非 export のまま置き、切り出したスライス側で export 文を付与する。
-const SLICE_EXPORTS = ['shouldSuppressForFreeDisk', 'projectFreeDiskReserveBytes', 'computeUnmeasuredLedgerIncrement', 'DISK_FREE_SCHEMA']
+const SLICE_EXPORTS = ['shouldSuppressForFreeDisk', 'projectFreeDiskReserveBytes', 'computeUnmeasuredLedgerIncrement', 'DISK_FREE_SCHEMA', 'computeFreeDiskReserveUnits', 'splitNewStartReserve']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
 const mod = await import(pathToFileURL(slicePath).href)
@@ -210,5 +210,5 @@ test('新規着手ブロック: latch reason の予約件数表示に unmeasured
   const fnStart = source.indexOf('if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {', anchorIdx)
   const fnEnd = source.indexOf('\n          }\n', fnStart)
   const block = source.slice(fnStart, fnEnd)
-  assert.match(block, /予約 \$\{reservedUnits \+ EPHEMERAL_RESERVE_PER_NEW_START \+ unmeasuredLedgerIncrement\} 件/)
+  assert.match(block, /ビルドあり \$\{fdArgs\.reservedUnits \+ fdArgs\.extraReserveUnits \+ unmeasuredLedgerIncrement\} 件/)
 })

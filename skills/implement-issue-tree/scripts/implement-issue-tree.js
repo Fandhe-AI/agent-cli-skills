@@ -6721,15 +6721,61 @@ function computeUnmeasuredLedgerIncrement({ledgerLength=0,measuredAtLedgerCount=
 return Math.max(0,ledgerLength-measuredAtLedgerCount)
 }
 
+
+
+
+
+
+
 function projectFreeDiskReserveBytes({
 reservedUnits,
 extraReserveUnits,
 rawPerWorktreeByteReserve,
+checkoutUnits=0,
+checkoutByteReserve=0,
 ledgerLength=0,
 measuredAtLedgerCount=0,
 }){
 const unmeasuredLedgerIncrement=computeUnmeasuredLedgerIncrement({ledgerLength,measuredAtLedgerCount})
-return(reservedUnits+extraReserveUnits+unmeasuredLedgerIncrement)*rawPerWorktreeByteReserve
+const ck=
+Number.isInteger(checkoutByteReserve)&&checkoutByteReserve>0
+?Math.min(checkoutByteReserve,rawPerWorktreeByteReserve)
+:rawPerWorktreeByteReserve
+return(reservedUnits+extraReserveUnits+unmeasuredLedgerIncrement)*rawPerWorktreeByteReserve +checkoutUnits*ck
+}
+
+
+
+
+
+function splitNewStartReserve(perNewStart,isBuild){
+const build=isBuild?2:1
+return{build,checkout:Math.max(0,perNewStart-build)}
+}
+
+
+
+function computeFreeDiskReserveUnits({ledger,newStartIssues,resumeIssues,perNewStart,perResume,isBuildIssue}){
+const rec=new Map()
+for(const e of ledger){
+if(LEDGER_ONLY_KINDS.has(e.kind))continue
+const r=rec.get(e.issue)??[0,0]
+r[e.kind==='implement'||(e.kind==='pr-create'&&isBuildIssue(e.issue))?0:1]+=1
+rec.set(e.issue,r)
+}
+let build=0
+let checkout=0
+for(const rn of newStartIssues){
+const[b,c]=rec.get(rn)??[0,0]
+const sp=splitNewStartReserve(perNewStart,isBuildIssue(rn))
+build+=Math.max(0,sp.build-b)
+checkout+=Math.max(0,sp.checkout-c)
+}
+for(const rn of resumeIssues){
+const[b,c]=rec.get(rn)??[0,0]
+checkout+=Math.max(0,perResume -b-c)
+}
+return{build,checkout}
 }
 
 
@@ -7274,6 +7320,7 @@ let lastByteRemeasureOutcome={failed:false,exceeded:false,reserveStale:false}
 
 
 let mainWorktreePath=''
+let freeDiskCheckoutByteReserve=0
 let rawPerWorktreeByteReserve=0
 
 
@@ -7514,6 +7561,9 @@ rawPerWorktreeByteReserve=Math.max(mainKib*1024,avgResidualBytes,persistedHighWa
 await raiseAndPersistHighWater(avgResidualBytes)
 
 
+freeDiskCheckoutByteReserve=Math.min(rawPerWorktreeByteReserve,avgResidualBytes>0?avgResidualBytes:mainKib*1024)
+
+
 
 perWorktreeByteReserve=clampPerWorktreeByteReserve(
 rawPerWorktreeByteReserve,
@@ -7558,9 +7608,12 @@ implementOnly:true,
 }else{
 freeDiskBytesAtStart=freeDiskKib*1024
 freeDiskMeasuredAtLedgerCount=ephemeralWorktrees.length
+const startSplit=splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START,false)
 const requiredFreeDiskBytes=projectFreeDiskReserveBytes({
 reservedUnits:0,
-extraReserveUnits:EPHEMERAL_RESERVE_PER_NEW_START,
+extraReserveUnits:startSplit.build,
+checkoutUnits:startSplit.checkout,
+checkoutByteReserve:freeDiskCheckoutByteReserve,
 rawPerWorktreeByteReserve,
 ledgerLength:ephemeralWorktrees.length,
 measuredAtLedgerCount:freeDiskMeasuredAtLedgerCount,
@@ -7568,8 +7621,9 @@ measuredAtLedgerCount:freeDiskMeasuredAtLedgerCount,
 if(shouldSuppressForFreeDisk(freeDiskBytesAtStart,requiredFreeDiskBytes)){
 const detail=
 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
-`容量予約（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
-`最大増分 ${EPHEMERAL_RESERVE_PER_NEW_START} 件 = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
+`容量予約（ビルドあり ${startSplit.build} 件 × ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB` +
+` + チェックアウト ${startSplit.checkout} 件 × ${Math.round(Math.min(freeDiskCheckoutByteReserve || rawPerWorktreeByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
+` = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
 if(
 !latchNewStartSuppressed({
 reason:
@@ -10262,6 +10316,8 @@ const running=new Map()
 
 const newStartActive=new Set()
 
+const isBuildIssueForReserve=(num)=>(work.find((q)=>q.number===num)?.optinTests?.length??0)>0
+
 
 
 const monitoringResumeActive=new Set()
@@ -10919,9 +10975,19 @@ continue
 
 
 const freeDiskRemeasure=await remeasureFreeDiskNow()
+const fuResume=computeFreeDiskReserveUnits({
+ledger:ephemeralWorktrees,
+newStartIssues:newStartActive,
+resumeIssues:monitoringResumeActive,
+perNewStart:EPHEMERAL_RESERVE_PER_NEW_START,
+perResume:EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+isBuildIssue:isBuildIssueForReserve,
+})
 const requiredFreeDiskBytesResume=projectFreeDiskReserveBytes({
-reservedUnits,
-extraReserveUnits:EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+reservedUnits:fuResume.build,
+extraReserveUnits:0,
+checkoutUnits:fuResume.checkout+EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+checkoutByteReserve:freeDiskCheckoutByteReserve,
 rawPerWorktreeByteReserve,
 ledgerLength:ephemeralWorktrees.length,
 measuredAtLedgerCount:freeDiskMeasuredAtLedgerCount,
@@ -11095,10 +11161,24 @@ continue
 const freeDiskRemeasure=await remeasureFreeDiskNow()
 
 if(freeDiskRemeasure.failed||newStartSuppressed)continue
-const requiredFreeDiskBytes=projectFreeDiskReserveBytes({
-reservedUnits,
-extraReserveUnits:EPHEMERAL_RESERVE_PER_NEW_START,
+const fuNew=computeFreeDiskReserveUnits({
+ledger:ephemeralWorktrees,
+newStartIssues:newStartActive,
+resumeIssues:monitoringResumeActive,
+perNewStart:EPHEMERAL_RESERVE_PER_NEW_START,
+perResume:EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+isBuildIssue:isBuildIssueForReserve,
+})
+const candSplit=splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START,isBuildIssueForReserve(n))
+const fdArgs={
+reservedUnits:fuNew.build,
+extraReserveUnits:candSplit.build,
+checkoutUnits:fuNew.checkout+candSplit.checkout,
+checkoutByteReserve:freeDiskCheckoutByteReserve,
 rawPerWorktreeByteReserve,
+}
+const requiredFreeDiskBytes=projectFreeDiskReserveBytes({
+...fdArgs,
 ledgerLength:ephemeralWorktrees.length,
 measuredAtLedgerCount:freeDiskMeasuredAtLedgerCount,
 })
@@ -11116,9 +11196,7 @@ measuredAtLedgerCount:freeDiskMeasuredAtLedgerCount,
 })
 if(unmeasuredLedgerIncrement>0){
 const requiredWithoutGap=projectFreeDiskReserveBytes({
-reservedUnits,
-extraReserveUnits:EPHEMERAL_RESERVE_PER_NEW_START,
-rawPerWorktreeByteReserve,
+...fdArgs,
 ledgerLength:freeDiskMeasuredAtLedgerCount,
 measuredAtLedgerCount:freeDiskMeasuredAtLedgerCount,
 })
@@ -11127,8 +11205,9 @@ if(!shouldSuppressForFreeDisk(freeDiskBytesAtStart,requiredWithoutGap))continue
 latchNewStartSuppressed({
 reason:
 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
-`込みの必要量（1 worktree あたり ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB × ` +
-`予約 ${reservedUnits + EPHEMERAL_RESERVE_PER_NEW_START + unmeasuredLedgerIncrement} 件`+
+`込みの必要量（ビルドあり ${fdArgs.reservedUnits + fdArgs.extraReserveUnits + unmeasuredLedgerIncrement} 件 × `+
+`${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB + チェックアウト ${fdArgs.checkoutUnits} 件 × ` +
+`${Math.round(Math.min(freeDiskCheckoutByteReserve || rawPerWorktreeByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
 `（うち df 実測後の未測定台帳増分 ${unmeasuredLedgerIncrement} 件） = `+
 `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
 `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を`+
