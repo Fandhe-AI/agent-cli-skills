@@ -210,7 +210,7 @@ test('新規着手ブロック: latch reason の予約件数表示に unmeasured
   const fnStart = source.indexOf('if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {', anchorIdx)
   const fnEnd = source.indexOf('\n          }\n', fnStart)
   const block = source.slice(fnStart, fnEnd)
-  assert.match(block, /ビルドあり \$\{fdArgs\.reservedUnits \+ fdArgs\.extraReserveUnits \+ unmeasuredLedgerIncrement\} 件/)
+  assert.match(block, /ビルド \$\{fdArgs\.reservedUnits \+ fdArgs\.extraReserveUnits \+ unmeasuredLedgerIncrement\} 件/)
 })
 
 

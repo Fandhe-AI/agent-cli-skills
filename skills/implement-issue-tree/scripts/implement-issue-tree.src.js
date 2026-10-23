@@ -2367,6 +2367,29 @@ function outOfTreeBlockNote(deps) {
   return `ツリー外の前提イシュー ${formatIssueList(deps)} が open のため未着手（close 後に再実行すると着手する）`
 }
 
+// IMPL / FIX / PR_CREATE 共通の optinTestRuns 要素と、push 直後の CI 起動確認（Issue #479）の自己申告プロパティ。
+const OPTIN_RUN_ITEM_SCHEMA = {
+  type: 'object',
+  required: ['command', 'result'],
+  properties: {
+    command: { type: 'string', maxLength: 300 },
+    result: { type: 'string', enum: OPTIN_RECORD_RESULTS },
+    exitCode: { type: 'integer' },
+    detail: { type: 'string', maxLength: 300 },
+  },
+}
+const PUSH_CI_PROPS = {
+  checksStarted: {
+    type: 'boolean',
+    description: 'push 後の head sha に対するチェック（check-run + commit status の合計。gh pr checks と同じ集計定義。Issue #480）が 1 件以上起動したか（完了は待たない）。観測不能・取得失敗は false（「0 件だった」ことの主張ではない）。診断・分岐ヒント専用。',
+  },
+  mergeableAfterPush: {
+    type: 'string',
+    enum: ['MERGEABLE', 'CONFLICTING', 'UNKNOWN'],
+    description: 'push 後に有界（30 秒間隔・最大 5 分）で確定を待った mergeable の値。未確定・取得不能は UNKNOWN（推測で MERGEABLE / CONFLICTING を返さない）。診断・分岐ヒント専用。',
+  }
+}
+
 const WORKTREE_PATH_PROP = { type: 'string', description: 'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字' }
 // prNumber は push 前 review フローでは未作成（0）のため必須外（PR 作成は Review 通過後）。
 // worktreePath は required（Issue #404）: 省略されると台帳計上が path: '' となりバイト実測
@@ -2395,16 +2418,7 @@ const IMPL_SCHEMA = {
     optinTestRuns: {
       type: 'array',
       maxItems: OPTIN_TESTS_MAX,
-      items: {
-        type: 'object',
-        required: ['command', 'result'],
-        properties: {
-          command: { type: 'string', maxLength: 300 },
-          result: { type: 'string', enum: OPTIN_RECORD_RESULTS },
-          exitCode: { type: 'integer' },
-          detail: { type: 'string', maxLength: 300 },
-        },
-      },
+      items: OPTIN_RUN_ITEM_SCHEMA,
       description: '宣言された opt-in テストごとの実行結果（1 コマンド 1 要素）。宣言が無ければ空配列または省略',
     },
   },
@@ -3044,31 +3058,14 @@ const FIX_SCHEMA = {
     // には使わない（ホストは mergeableAfterPush === 'CONFLICTING' を base 取り込み分岐へ直行する
     // ヒントとしてのみ使い、誤申告の最悪ケースは baseMergeCount を 1 消費するだけで有界）。
     // 旧エージェント出力との互換のため required にはしない（省略時はヒントなしとして扱われる）。
-    checksStarted: {
-      type: 'boolean',
-      description: 'push 後の head sha に対するチェック（check-run + commit status の合計。gh pr checks と同じ集計定義。Issue #480）が 1 件以上起動したか（完了は待たない）。観測不能・取得失敗は false（「0 件だった」ことの主張ではない）。診断・分岐ヒント専用。',
-    },
-    mergeableAfterPush: {
-      type: 'string',
-      enum: ['MERGEABLE', 'CONFLICTING', 'UNKNOWN'],
-      description: 'push 後に有界（30 秒間隔・最大 5 分）で確定を待った mergeable の値。未確定・取得不能は UNKNOWN（推測で MERGEABLE / CONFLICTING を返さない）。診断・分岐ヒント専用。',
-    },
+    ...PUSH_CI_PROPS,
     // opt-in テスト記録ゲート（Issue #495 Medium 指摘）。post-push fix（pushAfterFix: true）が
     // item.optinTests 宣言済みイシューで再実行した結果。IMPL_SCHEMA.optinTestRuns と同一定義
     // （宣言が無いイシューのプロンプトには手順自体が出ないため、モデルが返しても未使用）。
     optinTestRuns: {
       type: 'array',
       maxItems: OPTIN_TESTS_MAX,
-      items: {
-        type: 'object',
-        required: ['command', 'result'],
-        properties: {
-          command: { type: 'string', maxLength: 300 },
-          result: { type: 'string', enum: OPTIN_RECORD_RESULTS },
-          exitCode: { type: 'integer' },
-          detail: { type: 'string', maxLength: 300 },
-        },
-      },
+      items: OPTIN_RUN_ITEM_SCHEMA,
       description: '宣言された opt-in テストごとの再実行結果（1 コマンド 1 要素）。宣言が無ければ空配列または省略',
     },
     // optinTestRuns が対象とした HEAD の sha（PR #503 3 巡目 codex P1）。optinRecordUpdateInstructions
@@ -3169,31 +3166,14 @@ const PR_CREATE_SCHEMA = {
     // には使わない（ホストは mergeableAfterPush === 'CONFLICTING' を base 取り込み分岐へ直行する
     // ヒントとしてのみ使い、誤申告の最悪ケースは baseMergeCount を 1 消費するだけで有界）。
     // 旧エージェント出力との互換のため required にはしない（省略時はヒントなしとして扱われる）。
-    checksStarted: {
-      type: 'boolean',
-      description: 'push 後の head sha に対するチェック（check-run + commit status の合計。gh pr checks と同じ集計定義。Issue #480）が 1 件以上起動したか（完了は待たない）。観測不能・取得失敗は false（「0 件だった」ことの主張ではない）。診断・分岐ヒント専用。',
-    },
-    mergeableAfterPush: {
-      type: 'string',
-      enum: ['MERGEABLE', 'CONFLICTING', 'UNKNOWN'],
-      description: 'push 後に有界（30 秒間隔・最大 5 分）で確定を待った mergeable の値。未確定・取得不能は UNKNOWN（推測で MERGEABLE / CONFLICTING を返さない）。診断・分岐ヒント専用。',
-    },
+    ...PUSH_CI_PROPS,
     // opt-in テスト記録ゲート（PR #503 3 巡目 codex P1）。手順 0c で push 前に再実行した結果。
     // マージ判定には PR 本文へ書いた sha 束縛マーカー（手順 1c・2）を主とし、これは診断ログ専用
     // （FIX_SCHEMA.optinTestRuns と同型）。
     optinTestRuns: {
       type: 'array',
       maxItems: OPTIN_TESTS_MAX,
-      items: {
-        type: 'object',
-        required: ['command', 'result'],
-        properties: {
-          command: { type: 'string', maxLength: 300 },
-          result: { type: 'string', enum: OPTIN_RECORD_RESULTS },
-          exitCode: { type: 'integer' },
-          detail: { type: 'string', maxLength: 300 },
-        },
-      },
+      items: OPTIN_RUN_ITEM_SCHEMA,
       description: '手順 0c で再実行した宣言済み opt-in テストごとの結果（1 コマンド 1 要素）。宣言が無ければ空配列または省略',
     },
   },
@@ -6828,6 +6808,21 @@ function computeUnmeasuredLedgerIncrement({ ledgerLength = 0, measuredAtLedgerCo
   return Math.max(0, ledgerLength - measuredAtLedgerCount)
 }
 
+// implement 返却の worktreePath と opt-in テスト記録を検証して差し替える。pass 以外があれば警告する。
+function sanitizeImplResult(impl, item) {
+  const out = {
+    ...impl,
+    worktreePath: sanitizeWorktreePath(impl.worktreePath ?? ''),
+    prNumber: 0,
+    optinTestRuns: sanitizeOptinTestRuns(impl.optinTestRuns, item.optinTests),
+  }
+  const bad = out.optinTestRuns.filter((r) => r.result !== 'pass')
+  if (bad.length) {
+    log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${bad.map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
+  }
+  return out
+}
+
 // チェックアウトだけの worktree の単価: max(メイン worktree の内容, 残置の実測平均) を raw で頭打ちにする。
 function computeCheckoutByteReserve({ mainBytes, avgResidualBytes, rawPerWorktreeByteReserve }) {
   const floor = Math.max(mainBytes > 0 ? mainBytes : 0, avgResidualBytes > 0 ? avgResidualBytes : 0)
@@ -6890,17 +6885,12 @@ function computeFreeDiskReserveUnits({ ledger, newStartIssues, resumeIssues, per
   }
   let build = 0
   let checkout = 0
-  for (const rn of newStartIssues) {
-    const [b, c] = rec.get(rn) ?? [0, 0]
-    const sp = splitNewStartReserve(perNewStart)
-    build += Math.max(0, sp.build - b)
-    checkout += Math.max(0, sp.checkout - c)
-  }
-  const rsp = splitResumeReserve(perResume)
-  for (const rn of resumeIssues) {
-    const [b, c] = rec.get(rn) ?? [0, 0]
-    build += Math.max(0, rsp.build - b)
-    checkout += Math.max(0, rsp.checkout - c)
+  for (const [issues, sp] of [[newStartIssues, splitNewStartReserve(perNewStart)], [resumeIssues, splitResumeReserve(perResume)]]) {
+    for (const rn of issues) {
+      const [b, c] = rec.get(rn) ?? [0, 0]
+      build += Math.max(0, sp.build - b)
+      checkout += Math.max(0, sp.checkout - c)
+    }
   }
   return { build, checkout }
 }
@@ -7749,9 +7739,7 @@ if (!dryRunEnabled) {
           if (shouldSuppressForFreeDisk(freeDiskBytesAtStart, requiredFreeDiskBytes)) {
             const detail =
               `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
-              `容量予約（ビルドあり ${startSplit.build} 件 × ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB` +
-              ` + チェックアウト ${startSplit.checkout} 件 × ${Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
-              ` = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
+              `容量予約（ビルド ${startSplit.build} 件 + チェックアウト ${startSplit.checkout} 件 × ${ckMiB()} MiB = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
             if (
               !latchNewStartSuppressed({
                 reason:
@@ -8203,15 +8191,7 @@ async function runImplement(item) {
         }
         // opt-in テスト記録ゲート（Issue #495）。宣言が無ければ item.optinTests は空配列で
         // sanitizeOptinTestRuns は空配列を返す（後続のプロンプト・判定に一切影響しない。R3）。
-        impl = {
-          ...impl,
-          worktreePath: sanitizeWorktreePath(impl.worktreePath ?? ''),
-          prNumber: 0,
-          optinTestRuns: sanitizeOptinTestRuns(impl.optinTestRuns, item.optinTests),
-        }
-        if (impl.optinTestRuns.some((r) => r.result !== 'pass')) {
-          log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${impl.optinTestRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
-        }
+        impl = sanitizeImplResult(impl, item)
         // impl 完了直後: reviewing に遷移し branch/worktree を記録（continue 経路では
         // cleanupWorktree なし）。重要遷移のため成功を検証し、失敗時は 1 回リトライ、それでも
         // 失敗なら failed 終端（push 前のため副作用なし）。
@@ -8456,15 +8436,7 @@ async function runImplement(item) {
       // （実装 worktree はレビュー・マージまで生存。登録は削除を試みる地点でのみ）。
       // opt-in テスト記録ゲート（Issue #495）。宣言が無ければ item.optinTests は空配列で
       // sanitizeOptinTestRuns は空配列を返す（後続のプロンプト・判定に一切影響しない。R3）。
-      impl = {
-        ...impl,
-        worktreePath: sanitizeWorktreePath(impl.worktreePath ?? ''),
-        prNumber: 0,
-        optinTestRuns: sanitizeOptinTestRuns(impl.optinTestRuns, item.optinTests),
-      }
-      if (impl.optinTestRuns.some((r) => r.result !== 'pass')) {
-        log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${impl.optinTestRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
-      }
+      impl = sanitizeImplResult(impl, item)
       // impl 完了直後: reviewing に遷移し branch/worktree を記録（pr: 0）。重要遷移のため
       // 成功を検証する。失敗時は 1 回リトライし、それでも失敗なら failed 終端。
       const reviewingPatch = {
@@ -10447,6 +10419,28 @@ const newStartActive = new Set()
 // 載せない）。再開は fix-routing-error を最大 1 件記録し得るため予約計上する。予約は新規着手側
 // の投入判定に加え monitoring 再開自身の開始判定にも使う。
 const monitoringResumeActive = new Set()
+// 実行中イシューの未消費予約（ビルドあり / チェックアウト）。実ディスク空き容量ゲートの 2 か所から使う。
+const freeDiskUnits = () =>
+  computeFreeDiskReserveUnits({
+    ledger: ephemeralWorktrees,
+    newStartIssues: newStartActive,
+    resumeIssues: monitoringResumeActive,
+    perNewStart: EPHEMERAL_RESERVE_PER_NEW_START,
+    perResume: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+  })
+// 件数軸・バイト軸の予約（実行中イシューの未消費の枠の合計）。
+const reservedUnitsNow = () => {
+  const recordedByIssue = new Map()
+  for (const e of ephemeralWorktrees) {
+    if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
+  }
+  let t = 0
+  for (const rn of newStartActive) t += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
+  for (const rn of monitoringResumeActive) t += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
+  return t
+}
+// 表示用: 実効チェックアウト単価（MiB）。
+const ckMiB = () => Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))
 // 上限ゲートにより monitoring 再開を defer したイシューの記録（n → 理由文字列）。既定の
 // 「再実行すると monitor から再開する」案内は上限超過 defer では誤りのため個別に理由を上書きする。
 const monitoringResumeGateDeferred = new Map()
@@ -10990,17 +10984,7 @@ while (true) {
           continue
         }
         if (item.kind === 'implement' && maxResidualWorktrees > 0 && residualObserved) {
-          const recordedByIssue = new Map()
-          for (const e of ephemeralWorktrees) {
-            if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
-          }
-          let reservedTotal = 0
-          for (const rn of newStartActive) {
-            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
-          }
-          for (const rn of monitoringResumeActive) {
-            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
-          }
+          const reservedTotal = reservedUnitsNow()
           const projected =
             residualObservedAtStart + ephemeralWorktrees.length + reservedTotal + EPHEMERAL_RESERVE_PER_MONITORING_RESUME
           if (projected > maxResidualWorktrees) {
@@ -11063,17 +11047,7 @@ while (true) {
             log(`⚠️ #${n}: ${deferReason}`)
             continue
           }
-          const recordedByIssue = new Map()
-          for (const e of ephemeralWorktrees) {
-            if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
-          }
-          let reservedUnits = 0
-          for (const rn of newStartActive) {
-            reservedUnits += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
-          }
-          for (const rn of monitoringResumeActive) {
-            reservedUnits += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
-          }
+          const reservedUnits = reservedUnitsNow()
           // residualBytesAtStart は直近の実測基準（開始時 or ラン中実測し直し）を指す。
           // projectResidualBytes が基準以降の台帳増分にのみ floor 予約を課す
           // （K8Dc 対応: ephemeralWorktrees.length を素で使うと基準確定済み分を二重計上する）。
@@ -11101,13 +11075,7 @@ while (true) {
           // 自身の最大増分）を反映した必要バイト数と実測を比較する（raw 値を使う理由は
           // projectFreeDiskReserveBytes 定義側コメント参照）。
           const freeDiskRemeasure = await remeasureFreeDiskNow()
-          const fuResume = computeFreeDiskReserveUnits({
-            ledger: ephemeralWorktrees,
-            newStartIssues: newStartActive,
-            resumeIssues: monitoringResumeActive,
-            perNewStart: EPHEMERAL_RESERVE_PER_NEW_START,
-            perResume: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
-          })
+          const fuResume = freeDiskUnits()
           const resumeSplit = splitResumeReserve(EPHEMERAL_RESERVE_PER_MONITORING_RESUME)
           const requiredFreeDiskBytesResume = projectFreeDiskReserveBytes({
             reservedUnits: fuResume.build,
@@ -11171,18 +11139,7 @@ while (true) {
         // verify-close にも効く。空き容量起因の latch を verify-close が通過した後に件数軸・
         // バイト軸が発火した場合は、latchNewStartSuppressed が全 kind 停止へ昇格させる）。
         if (item.kind === 'implement') {
-          const recordedByIssue = new Map()
-          for (const e of ephemeralWorktrees) {
-            if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
-          }
-          let reservedTotal = 0
-          for (const rn of newStartActive) {
-            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
-          }
-          // monitoring 再開中も fix-routing-error を最大 1 件積み増し得るため予約に含める。
-          for (const rn of monitoringResumeActive) {
-            reservedTotal += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
-          }
+          const reservedTotal = reservedUnitsNow()
           const projected =
             residualObservedAtStart + ephemeralWorktrees.length + reservedTotal + EPHEMERAL_RESERVE_PER_NEW_START
           if (projected > maxResidualWorktrees) {
@@ -11246,17 +11203,7 @@ while (true) {
         // perWorktreeByteReserve で換算しバイト単位に投影する。判定は候補が implement の場合のみ
         // （count 軸 (b) と同じ理由）。
         if (item.kind === 'implement') {
-          const recordedByIssue = new Map()
-          for (const e of ephemeralWorktrees) {
-            if (!LEDGER_ONLY_KINDS.has(e.kind)) recordedByIssue.set(e.issue, (recordedByIssue.get(e.issue) ?? 0) + 1)
-          }
-          let reservedUnits = 0
-          for (const rn of newStartActive) {
-            reservedUnits += Math.max(0, EPHEMERAL_RESERVE_PER_NEW_START - (recordedByIssue.get(rn) ?? 0))
-          }
-          for (const rn of monitoringResumeActive) {
-            reservedUnits += Math.max(0, EPHEMERAL_RESERVE_PER_MONITORING_RESUME - (recordedByIssue.get(rn) ?? 0))
-          }
+          const reservedUnits = reservedUnitsNow()
           // residualBytesAtStart は直近の実測基準を指すため、projectResidualBytes が
           // floor 予約を基準以降の増分にのみ課す（K8Dc 対応時の二重計上防止）。
           const projectedBytes = projectResidualBytes({
@@ -11287,13 +11234,7 @@ while (true) {
           const freeDiskRemeasure = await remeasureFreeDiskNow()
           // 失敗時は remeasureFreeDiskNow 側が newStartSuppressed を設定済み（fail-closed）。
           if (freeDiskRemeasure.failed || newStartSuppressed) continue
-          const fuNew = computeFreeDiskReserveUnits({
-            ledger: ephemeralWorktrees,
-            newStartIssues: newStartActive,
-            resumeIssues: monitoringResumeActive,
-            perNewStart: EPHEMERAL_RESERVE_PER_NEW_START,
-            perResume: EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
-          })
+          const fuNew = freeDiskUnits()
           const candSplit = splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START)
           // 種別ごとの残り（build + checkout）で実行中の予約有無を判定する。件数軸の合算 reservedUnits は
           // 台帳が片方の区分に偏ると 0 になっても分割後の残りが正のままになり得るため、latch の defer には使わない。
@@ -11333,9 +11274,8 @@ while (true) {
             latchNewStartSuppressed({
               reason:
                 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
-                `込みの必要量（ビルドあり ${fdArgs.reservedUnits + fdArgs.extraReserveUnits + unmeasuredLedgerIncrement} 件 × ` +
-                `${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB + チェックアウト ${fdArgs.checkoutUnits} 件 × ` +
-                `${Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
+                `込みの必要量（ビルド ${fdArgs.reservedUnits + fdArgs.extraReserveUnits + unmeasuredLedgerIncrement} 件 + ` +
+                `チェックアウト ${fdArgs.checkoutUnits} 件 × ${ckMiB()} MiB` +
                 `（うち df 実測後の未測定台帳増分 ${unmeasuredLedgerIncrement} 件） = ` +
                 `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
                 `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を` +

@@ -2367,6 +2367,29 @@ function outOfTreeBlockNote(deps){
 return`ツリー外の前提イシュー ${formatIssueList(deps)} が open のため未着手（close 後に再実行すると着手する）`
 }
 
+
+const OPTIN_RUN_ITEM_SCHEMA={
+type:'object',
+required:['command','result'],
+properties:{
+command:{type:'string',maxLength:300},
+result:{type:'string',enum:OPTIN_RECORD_RESULTS},
+exitCode:{type:'integer'},
+detail:{type:'string',maxLength:300},
+},
+}
+const PUSH_CI_PROPS={
+checksStarted:{
+type:'boolean',
+description:'push 後の head sha に対するチェック（check-run + commit status の合計。gh pr checks と同じ集計定義。Issue #480）が 1 件以上起動したか（完了は待たない）。観測不能・取得失敗は false（「0 件だった」ことの主張ではない）。診断・分岐ヒント専用。',
+},
+mergeableAfterPush:{
+type:'string',
+enum:['MERGEABLE','CONFLICTING','UNKNOWN'],
+description:'push 後に有界（30 秒間隔・最大 5 分）で確定を待った mergeable の値。未確定・取得不能は UNKNOWN（推測で MERGEABLE / CONFLICTING を返さない）。診断・分岐ヒント専用。',
+}
+}
+
 const WORKTREE_PATH_PROP={type:'string',description:'pwd の結果（worktree の絶対パス）。省略不可。pwd を確定できない場合のみ空文字'}
 
 
@@ -2395,16 +2418,7 @@ description:'現スコープ外と判断した項目のみを列挙（1 項目 1
 optinTestRuns:{
 type:'array',
 maxItems:OPTIN_TESTS_MAX,
-items:{
-type:'object',
-required:['command','result'],
-properties:{
-command:{type:'string',maxLength:300},
-result:{type:'string',enum:OPTIN_RECORD_RESULTS},
-exitCode:{type:'integer'},
-detail:{type:'string',maxLength:300},
-},
-},
+items:OPTIN_RUN_ITEM_SCHEMA,
 description:'宣言された opt-in テストごとの実行結果（1 コマンド 1 要素）。宣言が無ければ空配列または省略',
 },
 },
@@ -3044,31 +3058,14 @@ description:
 
 
 
-checksStarted:{
-type:'boolean',
-description:'push 後の head sha に対するチェック（check-run + commit status の合計。gh pr checks と同じ集計定義。Issue #480）が 1 件以上起動したか（完了は待たない）。観測不能・取得失敗は false（「0 件だった」ことの主張ではない）。診断・分岐ヒント専用。',
-},
-mergeableAfterPush:{
-type:'string',
-enum:['MERGEABLE','CONFLICTING','UNKNOWN'],
-description:'push 後に有界（30 秒間隔・最大 5 分）で確定を待った mergeable の値。未確定・取得不能は UNKNOWN（推測で MERGEABLE / CONFLICTING を返さない）。診断・分岐ヒント専用。',
-},
+...PUSH_CI_PROPS,
 
 
 
 optinTestRuns:{
 type:'array',
 maxItems:OPTIN_TESTS_MAX,
-items:{
-type:'object',
-required:['command','result'],
-properties:{
-command:{type:'string',maxLength:300},
-result:{type:'string',enum:OPTIN_RECORD_RESULTS},
-exitCode:{type:'integer'},
-detail:{type:'string',maxLength:300},
-},
-},
+items:OPTIN_RUN_ITEM_SCHEMA,
 description:'宣言された opt-in テストごとの再実行結果（1 コマンド 1 要素）。宣言が無ければ空配列または省略',
 },
 
@@ -3169,31 +3166,14 @@ worktreePath:WORKTREE_PATH_PROP,
 
 
 
-checksStarted:{
-type:'boolean',
-description:'push 後の head sha に対するチェック（check-run + commit status の合計。gh pr checks と同じ集計定義。Issue #480）が 1 件以上起動したか（完了は待たない）。観測不能・取得失敗は false（「0 件だった」ことの主張ではない）。診断・分岐ヒント専用。',
-},
-mergeableAfterPush:{
-type:'string',
-enum:['MERGEABLE','CONFLICTING','UNKNOWN'],
-description:'push 後に有界（30 秒間隔・最大 5 分）で確定を待った mergeable の値。未確定・取得不能は UNKNOWN（推測で MERGEABLE / CONFLICTING を返さない）。診断・分岐ヒント専用。',
-},
+...PUSH_CI_PROPS,
 
 
 
 optinTestRuns:{
 type:'array',
 maxItems:OPTIN_TESTS_MAX,
-items:{
-type:'object',
-required:['command','result'],
-properties:{
-command:{type:'string',maxLength:300},
-result:{type:'string',enum:OPTIN_RECORD_RESULTS},
-exitCode:{type:'integer'},
-detail:{type:'string',maxLength:300},
-},
-},
+items:OPTIN_RUN_ITEM_SCHEMA,
 description:'手順 0c で再実行した宣言済み opt-in テストごとの結果（1 コマンド 1 要素）。宣言が無ければ空配列または省略',
 },
 },
@@ -6829,6 +6809,21 @@ return Math.max(0,ledgerLength-measuredAtLedgerCount)
 }
 
 
+function sanitizeImplResult(impl,item){
+const out={
+...impl,
+worktreePath:sanitizeWorktreePath(impl.worktreePath??''),
+prNumber:0,
+optinTestRuns:sanitizeOptinTestRuns(impl.optinTestRuns,item.optinTests),
+}
+const bad=out.optinTestRuns.filter((r)=>r.result!=='pass')
+if(bad.length){
+log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${bad.map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
+}
+return out
+}
+
+
 function computeCheckoutByteReserve({mainBytes,avgResidualBytes,rawPerWorktreeByteReserve}){
 const floor=Math.max(mainBytes>0?mainBytes:0,avgResidualBytes>0?avgResidualBytes:0)
 return Math.min(rawPerWorktreeByteReserve,floor)
@@ -6890,17 +6885,12 @@ rec.set(e.issue,r)
 }
 let build=0
 let checkout=0
-for(const rn of newStartIssues){
+for(const[issues,sp]of[[newStartIssues,splitNewStartReserve(perNewStart)],[resumeIssues,splitResumeReserve(perResume)]]){
+for(const rn of issues){
 const[b,c]=rec.get(rn)??[0,0]
-const sp=splitNewStartReserve(perNewStart)
 build+=Math.max(0,sp.build-b)
 checkout+=Math.max(0,sp.checkout-c)
 }
-const rsp=splitResumeReserve(perResume)
-for(const rn of resumeIssues){
-const[b,c]=rec.get(rn)??[0,0]
-build+=Math.max(0,rsp.build-b)
-checkout+=Math.max(0,rsp.checkout-c)
 }
 return{build,checkout}
 }
@@ -7749,9 +7739,7 @@ measuredAtLedgerCount:freeDiskMeasuredAtLedgerCount,
 if(shouldSuppressForFreeDisk(freeDiskBytesAtStart,requiredFreeDiskBytes)){
 const detail=
 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が新規 1 件分の` +
-`容量予約（ビルドあり ${startSplit.build} 件 × ${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB` +
-` + チェックアウト ${startSplit.checkout} 件 × ${Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
-` = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
+`容量予約（ビルド ${startSplit.build} 件 + チェックアウト ${startSplit.checkout} 件 × ${ckMiB()} MiB = ${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る`
 if(
 !latchNewStartSuppressed({
 reason:
@@ -8203,15 +8191,7 @@ return false
 }
 
 
-impl={
-...impl,
-worktreePath:sanitizeWorktreePath(impl.worktreePath??''),
-prNumber:0,
-optinTestRuns:sanitizeOptinTestRuns(impl.optinTestRuns,item.optinTests),
-}
-if(impl.optinTestRuns.some((r)=>r.result!=='pass')){
-log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${impl.optinTestRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
-}
+impl=sanitizeImplResult(impl,item)
 
 
 
@@ -8456,15 +8436,7 @@ return false
 
 
 
-impl={
-...impl,
-worktreePath:sanitizeWorktreePath(impl.worktreePath??''),
-prNumber:0,
-optinTestRuns:sanitizeOptinTestRuns(impl.optinTestRuns,item.optinTests),
-}
-if(impl.optinTestRuns.some((r)=>r.result!=='pass')){
-log(`⚠️ #${item.number}: opt-in テストに pass 以外の結果あり（${impl.optinTestRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文へ記録し、マージ前ゲートで停止する`)
-}
+impl=sanitizeImplResult(impl,item)
 
 
 const reviewingPatch={
@@ -10448,6 +10420,28 @@ const newStartActive=new Set()
 
 const monitoringResumeActive=new Set()
 
+const freeDiskUnits=()=>
+computeFreeDiskReserveUnits({
+ledger:ephemeralWorktrees,
+newStartIssues:newStartActive,
+resumeIssues:monitoringResumeActive,
+perNewStart:EPHEMERAL_RESERVE_PER_NEW_START,
+perResume:EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
+})
+
+const reservedUnitsNow=()=>{
+const recordedByIssue=new Map()
+for(const e of ephemeralWorktrees){
+if(!LEDGER_ONLY_KINDS.has(e.kind))recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
+}
+let t=0
+for(const rn of newStartActive)t+=Math.max(0,EPHEMERAL_RESERVE_PER_NEW_START-(recordedByIssue.get(rn)??0))
+for(const rn of monitoringResumeActive)t+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME -(recordedByIssue.get(rn)??0))
+return t
+}
+
+const ckMiB=()=>Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve,rawPerWorktreeByteReserve) / (1024 * 1024))
+
 
 const monitoringResumeGateDeferred=new Map()
 
@@ -10990,17 +10984,7 @@ log(`⚠️ #${n}: ${deferReason}`)
 continue
 }
 if(item.kind==='implement'&&maxResidualWorktrees>0&&residualObserved){
-const recordedByIssue=new Map()
-for(const e of ephemeralWorktrees){
-if(!LEDGER_ONLY_KINDS.has(e.kind))recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
-}
-let reservedTotal=0
-for(const rn of newStartActive){
-reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_NEW_START-(recordedByIssue.get(rn)??0))
-}
-for(const rn of monitoringResumeActive){
-reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME -(recordedByIssue.get(rn)??0))
-}
+const reservedTotal=reservedUnitsNow()
 const projected=
 residualObservedAtStart+ephemeralWorktrees.length+reservedTotal+EPHEMERAL_RESERVE_PER_MONITORING_RESUME
 if(projected>maxResidualWorktrees){
@@ -11063,17 +11047,7 @@ monitoringResumeGateDeferred.set(n,deferReason)
 log(`⚠️ #${n}: ${deferReason}`)
 continue
 }
-const recordedByIssue=new Map()
-for(const e of ephemeralWorktrees){
-if(!LEDGER_ONLY_KINDS.has(e.kind))recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
-}
-let reservedUnits=0
-for(const rn of newStartActive){
-reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_NEW_START-(recordedByIssue.get(rn)??0))
-}
-for(const rn of monitoringResumeActive){
-reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME -(recordedByIssue.get(rn)??0))
-}
+const reservedUnits=reservedUnitsNow()
 
 
 
@@ -11101,13 +11075,7 @@ continue
 
 
 const freeDiskRemeasure=await remeasureFreeDiskNow()
-const fuResume=computeFreeDiskReserveUnits({
-ledger:ephemeralWorktrees,
-newStartIssues:newStartActive,
-resumeIssues:monitoringResumeActive,
-perNewStart:EPHEMERAL_RESERVE_PER_NEW_START,
-perResume:EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
-})
+const fuResume=freeDiskUnits()
 const resumeSplit=splitResumeReserve(EPHEMERAL_RESERVE_PER_MONITORING_RESUME)
 const requiredFreeDiskBytesResume=projectFreeDiskReserveBytes({
 reservedUnits:fuResume.build,
@@ -11171,18 +11139,7 @@ continue
 
 
 if(item.kind==='implement'){
-const recordedByIssue=new Map()
-for(const e of ephemeralWorktrees){
-if(!LEDGER_ONLY_KINDS.has(e.kind))recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
-}
-let reservedTotal=0
-for(const rn of newStartActive){
-reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_NEW_START-(recordedByIssue.get(rn)??0))
-}
-
-for(const rn of monitoringResumeActive){
-reservedTotal+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME -(recordedByIssue.get(rn)??0))
-}
+const reservedTotal=reservedUnitsNow()
 const projected=
 residualObservedAtStart+ephemeralWorktrees.length+reservedTotal+EPHEMERAL_RESERVE_PER_NEW_START
 if(projected>maxResidualWorktrees){
@@ -11246,17 +11203,7 @@ continue
 
 
 if(item.kind==='implement'){
-const recordedByIssue=new Map()
-for(const e of ephemeralWorktrees){
-if(!LEDGER_ONLY_KINDS.has(e.kind))recordedByIssue.set(e.issue,(recordedByIssue.get(e.issue)??0)+ 1)
-}
-let reservedUnits=0
-for(const rn of newStartActive){
-reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_NEW_START-(recordedByIssue.get(rn)??0))
-}
-for(const rn of monitoringResumeActive){
-reservedUnits+=Math.max(0,EPHEMERAL_RESERVE_PER_MONITORING_RESUME -(recordedByIssue.get(rn)??0))
-}
+const reservedUnits=reservedUnitsNow()
 
 
 const projectedBytes=projectResidualBytes({
@@ -11287,13 +11234,7 @@ continue
 const freeDiskRemeasure=await remeasureFreeDiskNow()
 
 if(freeDiskRemeasure.failed||newStartSuppressed)continue
-const fuNew=computeFreeDiskReserveUnits({
-ledger:ephemeralWorktrees,
-newStartIssues:newStartActive,
-resumeIssues:monitoringResumeActive,
-perNewStart:EPHEMERAL_RESERVE_PER_NEW_START,
-perResume:EPHEMERAL_RESERVE_PER_MONITORING_RESUME,
-})
+const fuNew=freeDiskUnits()
 const candSplit=splitNewStartReserve(EPHEMERAL_RESERVE_PER_NEW_START)
 
 
@@ -11333,9 +11274,8 @@ if(!shouldSuppressForFreeDisk(freeDiskBytesAtStart,requiredWithoutGap))continue
 latchNewStartSuppressed({
 reason:
 `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
-`込みの必要量（ビルドあり ${fdArgs.reservedUnits + fdArgs.extraReserveUnits + unmeasuredLedgerIncrement} 件 × `+
-`${Math.round(rawPerWorktreeByteReserve / (1024 * 1024))} MiB + チェックアウト ${fdArgs.checkoutUnits} 件 × ` +
-`${Math.round(effectiveCheckoutByteReserve(freeDiskCheckoutByteReserve, rawPerWorktreeByteReserve) / (1024 * 1024))} MiB` +
+`込みの必要量（ビルド ${fdArgs.reservedUnits + fdArgs.extraReserveUnits + unmeasuredLedgerIncrement} 件 + `+
+`チェックアウト ${fdArgs.checkoutUnits} 件 × ${ckMiB()} MiB`+
 `（うち df 実測後の未測定台帳増分 ${unmeasuredLedgerIncrement} 件） = `+
 `${Math.round(requiredFreeDiskBytes / (1024 * 1024))} MiB）を下回る。残置 worktree の合計` +
 `サイズは容量上限以内でも、実ディスクが先に枯渇するおそれがあるため新規イシューの着手を`+
