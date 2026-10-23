@@ -36,7 +36,18 @@ job_prw=0       # ジョブ側 permissions に pull-requests: write があった
 job_sub=""      # jobs 配下のインデント 4 の直近キー（with / secrets / permissions / その他）
 on_seen=0       # トップレベル on があった
 pr_seen=0       # on 直下（インデント 2）の pull_request があった
+seen=" "         # 出現済みキーの集合（スコープ/キー を空白区切りで保持。重複キー検出用）
+cur_job=""       # jobs 配下の直近のジョブ ID
 n=0
+
+# 同一 mapping 内のキー重複を検出する。YAML では後勝ち・解釈系で差が出るため fail-closed で拒否する
+once() {
+  case "${seen}" in
+    *" $1 "*) ng "重複キー"; return 1 ;;
+  esac
+  seen="${seen}$1 "
+  return 0
+}
 
 ng() {
   # 違反項目名と行番号のみを出す（行の内容は出さない）
@@ -67,6 +78,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
 
   # permissions ブロックの内側（親より深いインデント）は権限キーだけを許可する
   if [ -n "${perm_scope}" ] && [ "${indent}" -gt "${perm_indent}" ]; then
+    once "perm:${perm_scope}:${cur_job}/${body%%:*}" || continue
     if [[ "${body}" =~ ^contents:[[:space:]]+read[[:space:]]*$ ]]; then
       if [ "${perm_scope}" = "top" ]; then top_perm_ok=1; else job_contents=1; fi
       continue
@@ -81,6 +93,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
   perm_scope=""
 
   if [ "${indent}" -eq 0 ] && [[ "${body}" =~ ^(on|concurrency|jobs|permissions):[[:space:]]*$ ]]; then
+    once "top/${body%%:*}" || continue
     section="${body%%:*}"
     job_sub=""
     if [ "${section}" = "on" ]; then on_seen=1; fi
@@ -90,6 +103,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
     if [ "${indent}" -eq 0 ]; then
       perm_scope="top"
     elif [ "${section}" = "jobs" ] && [ "${indent}" -eq 4 ]; then
+      once "job:${cur_job}/permissions" || continue
       perm_scope="job"
       job_sub="permissions"
     else
@@ -115,19 +129,19 @@ while IFS= read -r line || [ -n "${line}" ]; do
 
   # 親キーごとの allow-list（親を追跡し、on 配下は pull_request のみ・任意名は jobs 直下のみ）
   if [ "${indent}" -eq 0 ]; then
-    if [[ "${body}" =~ ^name:[[:space:]]+ ]] && [[ "${body#name:}" =~ ${re_free} ]]; then continue; fi
+    if [[ "${body}" =~ ^name:[[:space:]]+ ]] && [[ "${body#name:}" =~ ${re_free} ]]; then once "top/name" || true; continue; fi
     if [[ "${body}" =~ ^(on|concurrency|jobs):[[:space:]]*$ ]]; then continue; fi
     ng "許可リストにないトップレベルキー"; continue
   fi
   case "${section}" in
     on)
-      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^pull_request:[[:space:]]*$ ]]; then pr_seen=1; continue; fi
-      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_types} ]]; then continue; fi
-      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_branches} ]]; then continue; fi
+      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^pull_request:[[:space:]]*$ ]]; then once "on/pull_request" || true; pr_seen=1; continue; fi
+      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_types} ]]; then once "on/types" || true; continue; fi
+      if [ "${indent}" -eq 4 ] && [[ "${body}" =~ ${re_branches} ]]; then once "on/branches" || true; continue; fi
       ng "on 配下は pull_request（types・branches）のみ許可"; continue ;;
     concurrency)
-      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^group:[[:space:]]+ ]] && [[ "${body#group:}" =~ ${re_free} ]]; then continue; fi
-      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^cancel-in-progress:[[:space:]]+(true|false)[[:space:]]*$ ]]; then continue; fi
+      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^group:[[:space:]]+ ]] && [[ "${body#group:}" =~ ${re_free} ]]; then once "concurrency/group" || true; continue; fi
+      if [ "${indent}" -eq 2 ] && [[ "${body}" =~ ^cancel-in-progress:[[:space:]]+(true|false)[[:space:]]*$ ]]; then once "concurrency/cancel" || true; continue; fi
       ng "concurrency 配下の許可外の行"; continue ;;
     jobs) ;;
     *) ng "許可外のセクション配下の行"; continue ;;
@@ -136,11 +150,16 @@ while IFS= read -r line || [ -n "${line}" ]; do
   # jobs 配下: インデント 2 = ジョブ ID、4 = ジョブのキー、6 = with / secrets の子
   if [ "${indent}" -eq 2 ]; then
     job_sub=""
-    if [[ "${body}" =~ ^[A-Za-z0-9_-]+:[[:space:]]*$ ]]; then continue; fi
+    if [[ "${body}" =~ ^[A-Za-z0-9_-]+:[[:space:]]*$ ]]; then
+      cur_job="${body%%:*}"
+      once "jobs/${cur_job}" || true
+      continue
+    fi
     ng "jobs 直下はジョブ ID のみ許可"; continue
   fi
   if [ "${indent}" -eq 4 ]; then
     job_sub="other"
+    once "job:${cur_job}/${body%%:*}" || continue
     if [[ "${body}" =~ ^uses: ]]; then
       uses_count=$((uses_count + 1))
       if [ "${body}" != "uses: ${EXPECTED_USES}" ]; then
@@ -153,8 +172,29 @@ while IFS= read -r line || [ -n "${line}" ]; do
     ng "ジョブ直下の許可リストにないキー（uses は直下に必要）"; continue
   fi
   if [ "${indent}" -eq 6 ]; then
-    if [ "${job_sub}" = "with" ] && [[ "${body}" =~ ${re_with_key} ]]; then continue; fi
-    if [ "${job_sub}" = "secrets" ] && [[ "${body}" =~ ^API_KEY:[[:space:]]+\$\{\{[[:space:]]*secrets\.[A-Za-z0-9_]+[[:space:]]*\}\}[[:space:]]*$ ]]; then continue; fi
+    if [ "${job_sub}" = "with" ] && [[ "${body}" =~ ${re_with_key} ]]; then
+      wkey="${body%%:*}"
+      once "job:${cur_job}/with/${wkey}" || continue
+      wval="${body#*:}"
+      wval="${wval//[[:space:]\"\'\[\]]/}"
+      case "${wkey}" in
+        collaborators-only)
+          # 既定の true 以外は外部コントリビューターのレビュー実行を許すため拒否する
+          if [ "${wval}" != "true" ]; then ng "collaborators-only は true のみ許可"; fi ;;
+        block-priorities)
+          # P0 と P1 の両方を含まない値は既存のブロックゲートを外すため拒否する
+          case ",${wval}," in
+            *,P0,*) ;;
+            *) ng "block-priorities に P0 が必要" ;;
+          esac
+          case ",${wval}," in
+            *,P1,*) ;;
+            *) ng "block-priorities に P1 が必要" ;;
+          esac ;;
+      esac
+      continue
+    fi
+    if [ "${job_sub}" = "secrets" ] && once "job:${cur_job}/secrets/API_KEY" && [[ "${body}" =~ ^API_KEY:[[:space:]]+\$\{\{[[:space:]]*secrets\.[A-Za-z0-9_]+[[:space:]]*\}\}[[:space:]]*$ ]]; then continue; fi
   fi
 
   ng "許可リストにない行"

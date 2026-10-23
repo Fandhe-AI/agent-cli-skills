@@ -64,6 +64,13 @@ test('旧パスのカスタム prompt を保持する prompt-path 指定は合�
   assert.equal(verify(s).code, 0);
 });
 
+test('安全値の collaborators-only・block-priorities は合格する', () => {
+  const s = GOOD.replace('      provider: codex\n', '      provider: codex\n      collaborators-only: true\n      block-priorities: P0,P1,P2\n');
+  assert.equal(verify(s).code, 0);
+  const q = GOOD.replace('      provider: codex\n', '      provider: codex\n      block-priorities: "P0, P1"\n');
+  assert.equal(verify(q).code, 0);
+});
+
 const mutations = {
   'uses が @main': (s) => s.replace('@latest', '@main'),
   'uses が SHA': (s) => s.replace('@latest', '@8df2fb1bfff527731dcf74fa5cedc4bd6ee040af'),
@@ -93,6 +100,21 @@ const mutations = {
   '未知キー': (s) => s + '      unknown-key: x\n',
   'block scalar': (s) => s.replace('provider: codex', 'provider: |'),
   'CR を含む': (s) => s.replace('provider: codex', 'provider: codex\r'),
+  'jobs: の再出現': (s) => s + '\njobs:\n',
+  'トップレベル on の重複': (s) => s + '\non:\n  pull_request:\n',
+  'トップレベル name の重複': (s) => s + '\nname: x\n',
+  'トップレベル permissions の重複': (s) => s + '\npermissions:\n  contents: read\n',
+  'ジョブ ID の重複': (s) => s + '  codex:\n',
+  'ジョブ直下 with の重複': (s) => s + '    with:\n      provider: codex\n',
+  'with キーの重複': (s) => s + '      provider: claude\n',
+  'ジョブ側 permissions の重複': (s) => s + '    permissions:\n      contents: read\n      pull-requests: write\n',
+  'permissions 内キーの重複': (s) => s.replace('      pull-requests: write\n', '      pull-requests: write\n      pull-requests: write\n'),
+  'concurrency の重複': (s) => s + '\nconcurrency:\n  group: x\n',
+  'collaborators-only: false': (s) => s.replace('      provider: codex\n', '      provider: codex\n      collaborators-only: false\n'),
+  'collaborators-only が任意値': (s) => s.replace('      provider: codex\n', '      provider: codex\n      collaborators-only: maybe\n'),
+  'block-priorities: P3': (s) => s.replace('      provider: codex\n', '      provider: codex\n      block-priorities: P3\n'),
+  'block-priorities に P1 欠落': (s) => s.replace('      provider: codex\n', '      provider: codex\n      block-priorities: P0\n'),
+  'block-priorities に P0 欠落': (s) => s.replace('      provider: codex\n', '      provider: codex\n      block-priorities: P1,P2\n'),
   'with 値にコマンド置換風の文字': (s) => s.replace('provider: codex', 'provider: codex; rm -rf /'),
 };
 
