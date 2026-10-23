@@ -49,8 +49,26 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
 許可リストで検証する（A03 インジェクション・パス注入の防止）。複数リポジトリの一括適用では組ごとに検証し、
 不正な組は処理せず完了報告に載せて、他の組は続行する。
 
+**束縛の安全性（検証より前に生の入力をシェルへ入れない）**: 引数値を `repo="<入力>"` のように
+ダブルクォートへ直接展開してコマンド文字列に埋め込まない（`"; cmd; "` や `$(...)` を含む入力が検証前に
+実行される）。次のどちらかで束縛する。
+
+1. 先に文字列として照合する: 入力が `^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`（visibility は `public` / `private`）に
+   一致しないと判断した時点で、シェルコマンドを組み立てずに中止する
+2. 一致する値だけを、クォート付き HEREDOC（展開が起きない）で束縛する
+
 ```bash
 # bash 3.2（macOS）と zsh の両方で動く。正規表現は変数に入れて unquoted で使う
+# 束縛: クォート付き HEREDOC は展開を行わない（値に $ や ` や " があっても実行されない）
+IFS= read -r repo <<'ARG_EOF'
+Fandhe-AI/my-repo
+ARG_EOF
+IFS= read -r visibility <<'ARG_EOF'
+public
+ARG_EOF
+
+# 単一の組の検証。一括適用ではこのブロックを組ごとの関数（validate_pair）に包み、
+# 不正なら return 1 で当該組だけ除外して次の組へ進む（exit 1 はシェルごと終了するため使わない）
 repo_re='^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
 if ! [[ "${repo}" =~ ${repo_re} ]]; then echo "不正な repo: 形式外"; exit 1; fi
 name="${repo#*/}"
@@ -71,7 +89,8 @@ case "${visibility}" in public|private) ;; *) echo "不正な visibility"; exit 
   - `full_name` が入力と一致すること
   - `private` が引数の visibility と整合すること（`public` なら false、`private` なら true）。
     不一致なら中止して報告し、勝手に補正しない
-  - `admin == true` かつ `archived == false` であること
+  - `admin == true` かつ `archived == false` であること（ruleset の作成・更新には admin 権限が必要で、
+    archived は読み取り専用で変更できないため。満たさなければ後続 Step が必ず失敗する）
   - 取得失敗時は `gh api` のエラーが stdout に出るため終了コードだけで判断せず、
     HTTP status（403 / 404 等）を確認して「判定不能」として中止する。通過に倒さない
 - 以降の Step で使う `repo` / `visibility` は、この検証を通った値だけにする。
@@ -111,10 +130,15 @@ gh api -H 'Accept: application/vnd.github.raw' \
   `skip-branch-prefixes: chore/skills-update-,chore/submodule-update-` を指定する。push できる主体は
   ブランチ名で gate を回避できる受容済み残留リスクがある（`ai-review/README.md`
   「`skip-branch-prefixes` の受容済み残留リスク」）ため、**指定する前に受容条件を確認する**:
-  - 確認手順（読み取りのみ）:
-    `gh api "repos/${repo}/collaborators?affiliation=all&permission=push" --paginate --jq '.[].login'`
-    で write 以上の主体を列挙する。org チームなど collaborators API に出ない経路（チーム権限・fork からの
-    外部 push 経路）も確認対象に含める
+  - 確認手順（読み取りのみ。`permission` で絞らず全件取得し、各主体の `role_name` / `permissions` で判定する）:
+    - 個人: `gh api "repos/${repo}/collaborators?affiliation=all" --paginate --jq '.[] | {login, role_name, permissions}'`
+      で全件取得し、`role_name` が `write` / `maintain` / `admin`（または `permissions.push == true`）の主体を write 以上とみなす。
+      `affiliation=all` は組織メンバー・チーム経由の権限も返すため、outside collaborator は
+      `affiliation=outside` で別途列挙して第三者の有無を確認する
+    - チーム: `gh api "repos/${repo}/teams" --paginate --jq '.[] | {slug, permission}'` で、
+      `permission` が `push` / `maintain` / `admin` のチームを列挙し、メンバーが信頼済み主体だけか確認する
+    - fork 経路: `gh api "repos/${repo}" --jq '{fork, allow_forking}'` と
+      `gh api "repos/${repo}/forks" --paginate --jq '.[].full_name'` で外部 fork の有無を確認する
   - 受容してよい条件（すべて満たすこと）: write 以上の権限者が org 内の信頼済み主体に限られる／
     skip 対象の prefix が `chore/skills-update-` と `chore/submodule-update-` に限られる／
     該当ブランチの PR が update-external の自動生成に限られる
@@ -176,8 +200,10 @@ ai-review は **PR の base コミットの AGENTS.md** をリポジトリ固有
     - **0 承認では ai-review の必須チェックが唯一のレビューゲートになる**。これは設計上の受容事項であり、
       次の条件をすべて満たすリポジトリでのみ適用する（strict false の規定とは独立の論点）:
       人間 approver 不在の運用を意図している／必須チェックに `preflight`・`review`・`post_feedback`
-      （または `ai-review-gate`）が入っている／検証で `review` ジョブの実行を確認済み／
-      `collaborators-only` が既定の `true`／bypass_actors が空
+      （または `ai-review-gate`）が入っている／`collaborators-only` が既定の `true`／bypass_actors が空
+    - 適用後（下記「検証」）に `review` ジョブが実際に実行されたことを確認する。確認できない、
+      または skipped のままなら、直ちに `required_approving_review_count` を 1 以上へ戻す
+      （適用前には確認できないため、条件ではなく適用後の事後確認として扱う）
     - 条件を満たさない場合の代替: `required_approving_review_count` を 1 以上にする（可能なら CODEOWNERS と併用）。
       approver がいない単独運用ではマージが止まり、人間 approve を前提としない `implement-issue-tree` の
       自動マージも止まり得るため、運用者に確認してから設定する
