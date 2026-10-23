@@ -30,8 +30,8 @@ setup-repo-guards Fandhe-AI/my-repo public
 setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
 ```
 
-- 第 1 引数: 対象リポジトリ名（`owner/repo`）
-- 第 2 引数: visibility（`public` / `private`）。runner 方針の分岐に使う（public は ubuntu ホステッド、private は self-hosted。ai-review の review ジョブのみ self-hosted の専用 runner の例外）
+- 第 1 引数: 対象リポジトリ名（`owner/repo`）。許容形式は `^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$` のみ（Step 0 で検証する）
+- 第 2 引数: visibility（`public` / `private` の完全一致のみ。Step 0 で検証する）。runner 方針の分岐に使う（public は ubuntu ホステッド、private は self-hosted。ai-review の review ジョブのみ self-hosted の専用 runner の例外）
 - 複数リポジトリへ一括適用する場合はリポジトリと visibility の組を列挙する。各リポジトリのセッション（または並列 agent）で順次消化する
 
 ## 前提条件
@@ -44,6 +44,77 @@ setup-repo-guards Fandhe-AI/repo-a public Fandhe-AI/repo-b private
 - 退避先（`mktemp -d` が作る作業ツリー外のディレクトリ）に書き込めること
 
 ## フロー
+
+### Step 0: 引数の検証（最初に実行）
+
+引数の値は `gh api` のパスや runner 方針の分岐にそのまま入るため、`gh` を含むコマンドを実行する前に
+許可リストで検証する（A03 インジェクション・パス注入の防止）。複数リポジトリの一括適用では組ごとに検証し、
+不正な組は処理せず完了報告に載せて、他の組は続行する。
+
+**束縛の安全性（検証より前に生の入力をシェルへ入れない）**: 引数値を `repo="<入力>"` のように
+ダブルクォートへ直接展開してコマンド文字列に埋め込まない（`"; cmd; "` や `$(...)` を含む入力が検証前に
+実行される）。クォート付き HEREDOC も、入力が区切り語の単独行とそれに続くコマンドを含むと HEREDOC を抜けて
+後続行が実行されるため、それだけでは安全ではない。次の手順で束縛する。
+
+1. 先に文字列として照合する（シェルへ渡す前）: 入力が単一行で、改行・CR・区切り語（下記 `ARG_EOF_` 接頭辞の行）を
+   含まず、`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`（visibility は `public` / `private`）に一致することを確かめる。
+   一致しない、または改行を含むと判断した時点で、シェルコマンドを組み立てずに中止する
+2. 一致した値だけを、推測されにくい区切り語のクォート付き HEREDOC（展開が起きない）で束縛する。
+   区切り語は実行ごとにランダムな値にし、入力に含まれないことを手順 1 で確認済みの前提で使う
+3. 束縛と同時に、入力が 1 行だけであることを検査する。`read -r` は先頭行しか取らず残りを黙って捨てるため、
+   束縛後の値に改行は残らず、値に対する改行の検査は常に素通りする（検査として機能しない）。
+   そこで 1 行目を読んだ後に 2 行目を読もうとし、読めた（= 2 行以上ある、空の 2 行目を含む）場合は
+   `bind_ok=0` にして検証へ進まない。CR は `read -r` が除去しないため、束縛後の値に対する検査が有効に働く
+
+```bash
+# bash 3.2（macOS）と zsh の両方で動く。正規表現は変数に入れて unquoted で使う
+# 束縛: クォート付き HEREDOC は展開を行わない（値に $ や ` や " があっても実行されない）
+# 区切り語 ARG_EOF_7f3a9c は例。実行ごとに別のランダム値にし、入力に現れないことを事前に確かめる
+# 2 行目が読めたら複数行入力として bind_ok=0 にする（1 行目しか束縛されず残りが捨てられるのを防ぐ）
+bind_ok=1
+{ IFS= read -r repo && ! IFS= read -r _extra; } <<'ARG_EOF_7f3a9c' || bind_ok=0
+Fandhe-AI/my-repo
+ARG_EOF_7f3a9c
+{ IFS= read -r visibility && ! IFS= read -r _extra; } <<'ARG_EOF_7f3a9c' || bind_ok=0
+public
+ARG_EOF_7f3a9c
+
+# 単一の組の検証。一括適用では組ごとに関数として呼ぶ。不正なら return 1 で当該組だけ除外して
+# 次の組へ進む（exit 1 はシェルごと終了するため使わない）
+validate_pair() {
+  local repo="$1" visibility="$2" name
+  local repo_re='^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
+  # CR は read -r が除去しないため、束縛後の値で検出できる（改行は束縛時の bind_ok で検査済み）
+  case "${repo}${visibility}" in *$'\r'*) echo "不正な入力: CR を含む"; return 1 ;; esac
+  if ! [[ "${repo}" =~ ${repo_re} ]]; then echo "不正な repo: 形式外"; return 1; fi
+  name="${repo#*/}"
+  case "${repo}" in -*) echo "不正な repo: 先頭が -"; return 1 ;; esac
+  case "${name}" in .|..) echo "不正な repo: . / .. は不可"; return 1 ;; esac
+  case "${visibility}" in public|private) ;; *) echo "不正な visibility"; return 1 ;; esac
+}
+# 一括適用の例: 組ごとに呼び、失敗した組だけ完了報告へ回して次へ進む
+if [ "${bind_ok}" -ne 1 ]; then echo "除外: 複数行または空の入力"
+elif ! validate_pair "${repo}" "${visibility}"; then echo "除外: 検証失敗"; fi
+```
+
+- 拒否する値: 余分な `/` を含む値、先頭が `-` の値（`gh` のオプションと取り違えられる）、
+  リポジトリ名が `.` / `..` だけの値、空文字、空白・改行・`;` 等を含む値
+- 大文字小文字の違いや末尾の空白・改行を暗黙に補正しない（補正せず拒否する）
+- 実在確認: 形式検証を通った後に読み取りのみで確かめる
+
+  ```bash
+  gh api "repos/${repo}" --jq '{full_name, private, archived, admin: .permissions.admin}'
+  ```
+
+  - `full_name` が入力と一致すること
+  - `private` が引数の visibility と整合すること（`public` なら false、`private` なら true）。
+    不一致なら中止して報告し、勝手に補正しない
+  - `admin == true` かつ `archived == false` であること（ruleset の作成・更新には admin 権限が必要で、
+    archived は読み取り専用で変更できないため。満たさなければ後続 Step が必ず失敗する）
+  - 取得失敗時は `gh api` のエラーが stdout に出るため終了コードだけで判断せず、
+    HTTP status（403 / 404 等）を確認して「判定不能」として中止する。通過に倒さない
+- 以降の Step で使う `repo` / `visibility` は、この検証を通った値だけにする。
+  検証に失敗した場合は `gh` を含むコマンドを一切実行せず中止し、理由を報告する
 
 ### Step 1: ai-review の導入（未導入の場合のみ）
 
@@ -77,8 +148,26 @@ gh api -H 'Accept: application/vnd.github.raw' \
   `ai-review/README.md`「セットアップ」手順 3 に従ってリポジトリへ設定する
 - `update-external` の日次同期 PR（`chore/skills-update-*` / `chore/submodule-update-*`）がある場合は
   `skip-branch-prefixes: chore/skills-update-,chore/submodule-update-` を指定する。push できる主体は
-  ブランチ名で gate を回避できる受容済み残留リスクがあるため、第三者の write コラボレーターがいる
-  リポジトリでは指定しない（`ai-review/README.md`「`skip-branch-prefixes` の受容済み残留リスク」）
+  ブランチ名で gate を回避できる受容済み残留リスクがある（`ai-review/README.md`
+  「`skip-branch-prefixes` の受容済み残留リスク」）ため、**指定する前に受容条件を確認する**:
+  - 確認手順（読み取りのみ。`permission` で絞らず全件取得し、各主体の `role_name` / `permissions` で判定する）:
+    - 個人: `gh api "repos/${repo}/collaborators?affiliation=all" --paginate --jq '.[] | {login, role_name, permissions}'`
+      で全件取得し、`role_name` が `write` / `maintain` / `admin`（または `permissions.push == true`）の主体を write 以上とみなす。
+      `affiliation=all` は組織メンバー・チーム経由の権限も返すため、outside collaborator は
+      `affiliation=outside` で別途列挙して第三者の有無を確認する
+    - チーム: `gh api "repos/${repo}/teams" --paginate --jq '.[] | {slug, permission}'` で、
+      `permission` が `push` / `maintain` / `admin` のチームを列挙し、メンバーが信頼済み主体だけか確認する
+    - fork 経路: `gh api "repos/${repo}" --jq '{fork, allow_forking}'` と
+      `gh api "repos/${repo}/forks" --paginate --jq '.[].full_name'` で外部 fork の有無を確認する
+  - 受容してよい条件（すべて満たすこと）: write 以上の権限者が org 内の信頼済み主体に限られる／
+    skip 対象の prefix が `chore/skills-update-` と `chore/submodule-update-` に限られる／
+    該当ブランチの PR が update-external の自動生成に限られる
+  - 受容しない条件（1 つでも当たれば指定しない）: 第三者の write コラボレーターや outside collaborator がいる／
+    fork からの外部 push 経路がある／確認結果を取得できない（判定不能は受容に倒さない）
+  - 受容しない場合の代替: `skip-branch-prefixes` を指定せず、同期 PR にも通常どおり ai-review を走らせる。
+    同期 PR の負荷が問題なら別対策として Issue 化をユーザーに提案する（ruleset のブランチ名ルール制限は
+    本スキルの範囲外。提案にとどめる）
+  - 確認結果と判断（受容した／しなかった、根拠）を完了報告に 1 行で記録する
 - `collaborators-only`（write 未満の actor のイベントでは `preflight` を失敗させる）は既定の `true` のまま使う
 - 資格情報が使えない間は review ジョブが `skipped` になり、workflow 全体では成功に見える。
   導入 PR では必ずジョブ単位で `review` が実行されたことを確認する（下記「検証」）
@@ -236,6 +325,24 @@ Step 4-a / 4-b スイープを実行し、崩れていたら 4.4 で戻す。新
   - deletion 禁止 / non_fast_forward（force push 禁止）
   - pull_request: required_approving_review_count 0（人間 approver 不在の AI 運用。レビューゲートは
     ai-review の必須チェックで担保）・required_review_thread_resolution true・allowed_merge_methods ["squash"]
+    - **0 承認では ai-review の必須チェックが唯一のレビューゲートになる**。これは設計上の受容事項であり、
+      次の条件をすべて満たすリポジトリでのみ適用する（strict false の規定とは独立の論点）:
+      人間 approver 不在の運用を意図している／必須チェックに `preflight`・`review`・`post_feedback`
+      （または `ai-review-gate`）が入っている／`collaborators-only` が既定の `true`／bypass_actors が空
+    - 適用後（下記「検証」）に `review` ジョブが実際に実行されたことを確認する（適用前には確認できないため、
+      条件ではなく適用後の事後確認として扱う）。確認できない、または skipped のままなら、受容条件を満たさない
+      ものとして `required_approving_review_count` を 1 以上へ是正する。**この是正も ruleset の書き込みであり、
+      4.4（復旧）とは別物**（4.4 は退避した元の値へ戻す操作で、既存の 0 承認 ruleset では 0 に戻るだけで是正にならない）。
+      したがって 4.1（是正前の現在値を再度退避）→ 4.2（`jq -S` 差分の提示と明示承認）→ 4.3（GET した ruleset JSON の
+      `pull_request` ルールの `required_approving_review_count` だけを差し替えて `--input <file>` で PUT する。
+      `required_status_checks` の `integration_id` 束縛を含む他フィールドを保持し、素朴な PUT をしない）の順に通し、
+      適用後に `.claude/rules/ruleset-policy.md` の 3 軸 + classic BP 検証（下記 Step 4-a / 4-b）を実行する。
+      承認が得られない場合は書き込まず、受容不可として完了報告に記録して停止する
+      適用から確認までの間は `review` ジョブがまだ動いておらず、レビューゲートなしでマージできる窓が残る。
+      この間は PR をマージしない（確認を済ませるまで自動マージも走らせない）
+    - 条件を満たさない場合の代替: `required_approving_review_count` を 1 以上にする（可能なら CODEOWNERS と併用）。
+      approver がいない単独運用ではマージが止まり、人間 approve を前提としない `implement-issue-tree` の
+      自動マージも止まり得るため、運用者に確認してから設定する
   - required_status_checks（**strict false は必須**。true にすると 1 件マージするたびに他の open PR の
     base が陳腐化し、implement-issue-tree の並列ランが収束しなくなる。strict は鮮度制御であって
     bypass 不能性の制御ではないため、false でもクライアント側自動マージの G0 は通過する。
@@ -309,7 +416,7 @@ jq '{name, target, enforcement, bypass_actors, conditions, rules}' "${backup}/ru
 各 Step の完了は以下で確認する:
 
 ```bash
-repo="Fandhe-AI/<REPO>"
+repo="Fandhe-AI/<REPO>"   # Step 0 の検証を通過した値のみ
 # Step 1: wrapper の存在と @latest 参照（@main・旧 codex-review.yml が残っていないこと）
 grep -n "uses: Fandhe-AI/actions" .github/workflows/ai-review.yml
 test ! -e .github/workflows/codex-review.yml && echo "旧 wrapper なし"
@@ -368,6 +475,9 @@ squash merge のみ許可・スレッド resolve 必須が実際に効いてい�
 
 Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須チェック一覧、適用できなかった項目
 （理由付き）、退避先パス（内容は貼らない）、承認の有無（得た場合のみ事実どおりに記載）を表でまとめて報告する。
+受容判断の記録欄として、`skip-branch-prefixes`（指定した／しなかった、write 権限者の確認結果）と
+`required_approving_review_count 0`（受容した／1 以上にした、根拠）を各 1 行で含める。
+Step 0 で拒否した引数があれば理由付きで載せる。
 
 ## よくある失敗
 
@@ -387,6 +497,9 @@ Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須�
 | 旧 `codex-review.yml` wrapper を新規導入する・残したままにする（Fandhe-AI/actions から削除済みで workflow を解決できない） | Step 1: `ai-review/templates/ai-review.single.yml` から導入し、旧 wrapper は「codex-review からの移行」で置き換える |
 | ai-review の `preflight` を required から外し、actor 判定の失敗で review が skipped のまま必須チェックを満たす | Step 4: `<job> / preflight` を必ず required に含める |
 | 資格情報未設定で review が skipped なのに workflow 全体の成功を見て導入完了とする | 検証: `gh run view --json jobs` でジョブ単位に `review` の実行を確認する |
+| 引数を検証せず `gh api` のパスや分岐に渡す | Step 0: 許可リスト検証と実在確認を `gh` 実行前に行う |
+| 第三者 write ありのリポジトリで `skip-branch-prefixes` を指定し、ブランチ名でレビューを回避される | Step 1: write 権限者を列挙して受容条件を確認し、満たさなければ指定しない |
+| 0 承認の受容条件を確認せずに適用し、ai-review が唯一のゲートなのに `review` が動いていない | Step 4.3: 受容条件を確認し、満たさなければ 1 以上にする。適用後に `review` が動かなければ 4.1 → 4.2 → 4.3 を通して是正する（4.4 の復旧では是正にならない） |
 | 現在値を保存せずに PUT し、`integration_id` の脱落・設定項目の消失に気づけず復旧できない | Step 4.1: 変更前に作業ツリー外へ退避する |
 | 差分を示さず承認なしで適用する | Step 4.2: 差分提示と明示承認を取り、得られなければ停止する |
 | 退避ファイルを作業ツリー内に置いてコミットしてしまう | Step 4.1: 作業ツリー外の `mktemp -d` に保存する |
@@ -396,6 +509,7 @@ Step ごとの PR 番号、AGENTS.md の観点構成、ruleset の最終必須�
 
 - コミットは日本語 Conventional Commits 形式で作成し、対象リポジトリのコミット規約・フッター運用に従う。`--no-verify` は使用しない
 - シェル変数は `"${var}"` 形式でクォートする
+- Step 0 の検証を通っていない値を `gh` に渡さない
 - 承認を得るまで Step 4 の書き込み系 API を実行しない。自動運転などで承認を取れない場合は適用せず停止する
 - AI レビューの指摘が正当なら修正で応える（テスト・ゲートの弱体化やスキップでごまかさない）。
   スレッドへ対応内容を返信して resolve してからマージする
