@@ -7,11 +7,15 @@
 
 ## 流し方
 
-CI と同じ全体（`failglob` でテストが 1 件も見つからない事故を落とす）:
+CI と同じテスト集合の全体実行。CI は `shopt -s globstar failglob; node --test skills/*/tests/**/*.test.mjs`（ubuntu の bash 5）だが、macOS 標準の `/bin/bash` 3.2 には `globstar` が無く、`**` が 1 階層にしか当たらないため `tests/` 直下のテストが漏れても成功する。そこでシェルの展開に頼らず `find` で一覧を作る（zsh・bash 3.2・bash 5 のどれに貼っても同じ動き）:
 
 ```bash
-bash -c 'shopt -s globstar failglob; node --test skills/*/tests/**/*.test.mjs'
+bash -c 'files=$(find skills/*/tests -type f -name "*.test.mjs" -not -path "*/.*" | sort); [ -n "$files" ] || { echo "テストが 1 件も見つからない" >&2; exit 1; }; echo "$files" | xargs node --test'
 ```
+
+- CI の `globstar` と同じ集合になる: `tests/` 直下とサブディレクトリの両方を含み、ドット始まりのパスは除き（`-not -path "*/.*"`）、symlink は辿らない（`find` の既定）。
+- 0 件のときは node を起動せず非 0 で止まる（CI の `failglob` に相当。`node --test` は 1 件も無くても成功しうる）。
+- パスに空白・改行が無いことを前提にしている（このリポジトリのテストは満たす）。
 
 1 ファイルだけ（スクリプトや lib を変えたときは、そのテストと、同じスクリプトを検査するファイルだけを流す）:
 
@@ -23,8 +27,8 @@ Node 24 と 22 を並列に流す（`TMPDIR` を別々の空ディレクトリ�
 
 ```bash
 t24=$(mktemp -d); t22=$(mktemp -d)
-TMPDIR="$t24" bash -c 'shopt -s globstar failglob; node --test skills/*/tests/**/*.test.mjs' > "$t24.log" 2>&1 &
-TMPDIR="$t22" bash -c 'shopt -s globstar failglob; volta run --node 22 node --test skills/*/tests/**/*.test.mjs' > "$t22.log" 2>&1 &
+TMPDIR="$t24" bash -c 'files=$(find skills/*/tests -type f -name "*.test.mjs" -not -path "*/.*" | sort); [ -n "$files" ] || exit 1; echo "$files" | xargs node --test' > "$t24.log" 2>&1 &
+TMPDIR="$t22" bash -c 'files=$(find skills/*/tests -type f -name "*.test.mjs" -not -path "*/.*" | sort); [ -n "$files" ] || exit 1; echo "$files" | xargs volta run --node 22 node --test' > "$t22.log" 2>&1 &
 wait
 ls "$t24" "$t22"   # 空であること（テストが作った一時ディレクトリは trackTmp で消える）
 ```
