@@ -11,7 +11,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gitEnv, makeRepo } from './worktree-sandbox.mjs'
@@ -114,9 +115,19 @@ export function registerRecoverPrepTests(bash) {
   })
 
   test(`${tag} 同じ型限定フックの検査式は旧件名 wip(recover) を拒否し chore(recover) を通す（回帰の対照）`, () => {
-    const check = (subject) => spawnSync('sh', ['-c', TYPE_HOOK, 'sh', '/dev/stdin'], { input: `${subject}\n`, encoding: 'utf8' }).status
-    assert.equal(check('wip(recover): 中断時の未コミット変更を退避'), 1)
-    assert.equal(check(WIP_SUBJECT), 0)
+    // 実 git のフックと同じく件名はファイル経由で渡す（/dev/stdin は環境差が出る）
+    const dir = mkdtempSync(join(tmpdir(), 'recover-hook-'))
+    try {
+      const check = (subject) => {
+        const f = join(dir, 'msg')
+        writeFileSync(f, `${subject}\n`)
+        return spawnSync('sh', ['-c', TYPE_HOOK, 'sh', f], { encoding: 'utf8' }).status
+      }
+      assert.equal(check('wip(recover): 中断時の未コミット変更を退避'), 1)
+      assert.equal(check(WIP_SUBJECT), 0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test(`${tag} ignore 対象のみ（node_modules・dist）: 汚れに数えず WIP は作らない`, () => {
