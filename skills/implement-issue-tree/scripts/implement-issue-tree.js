@@ -1791,14 +1791,15 @@ description:'本文の `<!-- optin-tests: <コマンド> -->` マーカーの値
 
 
 
+
 const EMPTY_SIBLING_TASK_TABLE={f:{},n:{}}
 const DECLARED_DEPS_JQ_DEFS=[
 String.raw`def refs: [scan("#([0-9]+)") | .[0] | tonumber];`,
 String.raw`def run: "(#[0-9]+(?:(?:[ \t,、/]|and|および|及び)+#[0-9]+)*)";`,
-String.raw`def inline: gsub("(?i)(?:\\b(?:not|no longer|never)\\b|n\u0027t)(?:[ \t]+[A-Za-z]+)?[ \t]+(?:depends on|blocked by)[ \t]*:?[ \t]*" + run; "") | [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];`,
-String.raw`def neg: test("(?i)関連|参考|参照|任意|なし|不要|\\b(related|see also|optional|none|no longer|not|never|unnecessary)\\b|n\u0027t");`,
-String.raw`def fenceof: (capture("^[ ]{0,3}(?<f>\u0060{3,}|~{3,})") | .f) // null;`,
-String.raw`def stripcode: . as $s | [match("\u0060+"; "g") | {o: .offset, l: .length}] as $r`,
+String.raw`def inline: gsub("(?i)(?:\\b(?:not|no longer|never)\\b|n\\x27t)(?:[ \t]+[A-Za-z]+)?[ \t]+(?:depends on|blocked by)[ \t]*:?[ \t]*" + run; "") | [scan("(?i)(?:depends on|blocked by)[ \t]*:?[ \t]*" + run) | .[0] | refs[]];`,
+String.raw`def neg: test("(?i)関連|参考|参照|任意|なし|不要|\\b(related|see also|optional|none|no longer|not|never|unnecessary)\\b|n\\x27t");`,
+String.raw`def fenceof: (capture("^[ ]{0,3}(?<f>\\x60{3,}|~{3,})") | .f) // null;`,
+String.raw`def stripcode: . as $s | [match("\\x60+"; "g") | {o: .offset, l: .length}] as $r`,
 String.raw`| def go($i): if $i >= ($r | length) then []`,
 String.raw`else (first(range($i + 1; $r | length) | select($r[.].l == $r[$i].l)) // null) as $j`,
 String.raw`| if $j == null then go($i + 1) else [[$r[$i].o, $r[$j].o + $r[$j].l]] + go($j + 1) end end;`,
@@ -1823,7 +1824,7 @@ String.raw`| (reduce .[] as $raw ({in: false, fence: null, buf: [], d: [], me: $
 String.raw`($raw | sub("\r$"; "")) as $l`,
 String.raw`| ($l | fenceof) as $f`,
 String.raw`| if .fence != null then`,
-String.raw`(if $f != null and ($f[0:1] == .fence[0:1]) and (($f | length) >= (.fence | length)) and ($l | test("^[ ]{0,3}[\u0060~]+[ \t]*$")) then .fence = null else . end)`,
+String.raw`(if $f != null and ($f[0:1] == .fence[0:1]) and (($f | length) >= (.fence | length)) and ($l | test("^[ ]{0,3}[\\x60~]+[ \t]*$")) then .fence = null else . end)`,
 String.raw`elif $f != null then flush | .fence = $f`,
 String.raw`elif ($l | test("^[ ]{0,3}>")) or ($l | test("^[ \t]*$")) then flush`,
 String.raw`elif ($l | test("^[ ]{0,3}#{1,6}([ \t]|$)")) then flush`,
