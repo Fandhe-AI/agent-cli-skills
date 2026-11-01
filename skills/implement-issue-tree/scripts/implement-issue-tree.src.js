@@ -490,7 +490,7 @@ function parseSkipLabels(raw) {
   const out = []
   for (const v of raw) {
     if (typeof v !== 'string' || v !== v.trim() || !SKIP_LABEL_RE.test(v)) {
-      throw new Error(`args.skipLabels の要素は 1〜50 文字（制御文字・改行・`,`・前後空白は不可）: ${String(v).slice(0, 80)}`)
+      throw new Error(`args.skipLabels の要素は 1〜50 文字（制御文字・改行・「,」・前後空白は不可）: ${String(v).slice(0, 80)}`)
     }
     if (!out.includes(v)) out.push(v)
   }
@@ -2979,6 +2979,9 @@ function applyPrereqTransitions(probe, targets, done, failedSet, prHints, branch
 // targets の前提完了を確認するプローブエージェント向けプロンプト（Issue #442）。読み取り専用の
 // 3 コマンドに限定し、Issue/PR の本文・タイトル・コメントは一切取得させない（非信頼自由文を
 // ホストの遷移判定へ持ち込まない設計。mergeVerifyPrompt と同型の権限境界）。
+// 実装プロンプトと修正プロンプトで共通の定型句（文言は変えない。生成物の予算のため定数化）
+const NO_PUSH_STEP = '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。'
+const NO_PR_NUMBER_NOTE = '（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）'
 const WT_RM_NOTE = '不要な worktree を git worktree remove で手動削除してから再実行すること'
 const DISK_HALT_NOTE = 'ディスク枯渇防止のため以降の' + HALT_NEW + '。'
 const PR_VIEW_FIELDS = 'state,headRefName,baseRefName,isCrossRepository,closingIssuesReferences'
@@ -5976,13 +5979,13 @@ function implementPrompt(item, plan) {
     IMPL_STEP6,
     commitlintCheckInstruction,
     // push・PR 作成は Review 通過後（Review 収束失敗時は CI を一切起動しない）。
-    '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
+    NO_PUSH_STEP,
     '   （push と PR 作成は後続の Review が全通過した後に別エージェントが行う）',
     '   実装の過程で現スコープ外と判断した事項（未対応の改善・別機能・技術的負債・後続作業）は',
     '   返却フィールド outOfScope に 1 項目 1 要素の配列として列挙する（summary には含めなくてよい。push 後の PR 本文への記録は後続エージェントが行う）。',
     IMPL_STEP8,
     implementReturnLine(item),
-    '（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）',
+    NO_PR_NUMBER_NOTE,
   ].join('\n')
 }
 
@@ -6917,12 +6920,12 @@ function recoverImplementPrompt(item, brief, branch) {
     IMPL_STEP5,
     IMPL_STEP6,
     commitlintCheckInstruction,
-    '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
+    NO_PUSH_STEP,
     '   （push と PR 作成は後続の Review が全通過した後に別エージェントが行う）',
     '   実装の過程で現スコープ外と判断した事項は返却フィールド outOfScope に 1 項目 1 要素の配列として列挙する（summary には含めなくてよい）。',
     IMPL_STEP8,
     implementReturnLine(item),
-    '（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）',
+    NO_PR_NUMBER_NOTE,
   ].join('\n')
 }
 
@@ -10491,8 +10494,12 @@ const prClearPatch = (n, b = savedItems[String(n)]?.branch) => (unverifiedIssues
 // writeBlockedStateBatch が 1 回で書く（1 件 1 エージェントの state:update を避ける。Issue #585）。
 const blockedStateBatch = []
 // 対象外ラベルの blocked も同じ一括書き込みで記録する。内容照合できない項目・再開情報が有効な項目は書き換えない。
+// 保存状態が merged / closed の項目は書かない（ラベル判定が merged→monitoring の正規化と closed 矛盾の確認より前に
+// continue するため、書くと再開情報・矛盾の手掛かりが消える。ラベルを外した次回ランがそれらを通常どおり扱う）。
+// 対象外は「このランで着手しない」だけなので pr / branch は消さない（prClearPatch を使わない）。
 for (const { number, note } of skipLabelBlocked) {
-  if (!unverifiedIssues.has(number) && !isActiveMonitoring(number)) blockedStateBatch.push({ number, patch: { status: 'blocked', note, ...prClearPatch(number) } })
+  const st = savedItems[String(number)]?.status
+  if (!unverifiedIssues.has(number) && !isActiveMonitoring(number) && st !== 'merged' && st !== 'closed') blockedStateBatch.push({ number, patch: { status: 'blocked', note } })
 }
 
 async function markBlockedByDeps(item, allFailedDeps) {

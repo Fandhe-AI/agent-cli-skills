@@ -22,7 +22,7 @@ import { importDefinitions, runScript, BASE_ARGS } from './lib/stub-run.mjs'
 import { trackTmp } from './lib/tmp-track.mjs'
 
 const D = await importDefinitions(
-  ['parseSkipLabels', 'collectSkipLabelEntries', 'classifySkipLabels', 'skipLabelNote', 'skipLabelsPrompt', 'notifyBlockedPrompt', 'declaredDepsChecksum', 'estimateDispatch'],
+  ['parseSkipLabels', 'collectSkipLabelEntries', 'classifySkipLabels', 'skipLabelNote', 'skipLabelsPrompt', 'notifyBlockedPrompt', 'declaredDepsChecksum', 'estimateDispatch', 'sha256Hex', 'canonicalJson'],
   'skip-labels',
 )
 
@@ -52,6 +52,10 @@ test('parseSkipLabels: 未指定・null・空配列は指定なし、重複は�
   assert.equal(D.parseSkipLabels(null), undefined)
   assert.equal(D.parseSkipLabels([]), undefined)
   assert.deepEqual(D.parseSkipLabels(['owner:human', 'owner:joint', 'owner:human']), ['owner:human', 'owner:joint'])
+})
+
+test('parseSkipLabels: エラーメッセージが途中で切れず、不正な要素を含む', () => {
+  assert.throws(() => D.parseSkipLabels(['a,b']), (e) => e.message.includes('「,」') && e.message.endsWith(': a,b'))
 })
 
 test('parseSkipLabels: 正常形（: と空白を許す・50 文字・10 件・日本語）', () => {
@@ -479,6 +483,50 @@ test('notifyBlocked: ラン中に close された対象外ノードは待機中�
   assert.ok(labelsOf(calls).includes('prereq:probe'), '前提完了プローブが走っていない')
   assert.deepEqual(result.blockedWaiting.skippedLabel, [])
   assert.ok(!labelsOf(calls).includes('notify-blocked'), '待ちが無いのに通知した')
+})
+
+// --- 保存状態を壊さない（merged / closed は書かず、pr / branch は消さない） ---
+// 葉 2 に保存済みの状態 saved があり、対象外ラベルが付いたランで、一括書き込みのプロンプトを集める。
+const withSaved = (saved, o = {}) => {
+  const items = { 2: saved }
+  const hashes = { 2: D.sha256Hex(D.canonicalJson(saved)) }
+  const keysSha256 = D.sha256Hex(D.canonicalJson(['2']))
+  const labels = ['owner:human', 'owner:joint']
+  return runScript({
+    args: ARGS({ skipLabels: labels }),
+    leaves: [2],
+    override: (label) => {
+      if (label === 'state:load') return { ok: true, fileExisted: true, items, highWaterBytes: 0, highWaterVersion: 2 }
+      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256, keysCount: 1, highWaterBytes: 0, highWaterVersion: 2 }
+      if (label.startsWith('plan:skip-labels')) return o.failClosed ? { entries: [labelEntry(1, [])] } : skipReply(labels, { 'owner:human': [2] })
+      return undefined
+    },
+  })
+}
+// 一括書き込みの JSON 行（[{"numbers":[...],"patch":{...}}]）を集める
+const batchEntries = (calls) => calls
+  .filter((c) => c.opts.label.startsWith('state:update-batch'))
+  .flatMap((c) => c.prompt.split('\n').filter((l) => l.startsWith('[{"numbers"')).flatMap((l) => JSON.parse(l)))
+const batchNumbers = (calls) => batchEntries(calls).flatMap((e) => e.numbers)
+
+for (const [name, o] of [['対象外ラベル', {}], ['取得失敗の fail-closed', { failClosed: true }]]) {
+  test(`${name}: 保存状態が merged（pr・branch あり）で open のノードは、一括書き込みに含めない`, async () => {
+    const { result, calls } = await withSaved({ status: 'merged', branch: 'feat/2-x', pr: 77 }, o)
+    assert.ok(!batchNumbers(calls).includes(2), `merged の #2 を書いた: ${JSON.stringify(batchEntries(calls))}`)
+    assert.equal(result.done.find((r) => r.issue === 2).status, 'blocked', 'このランでは着手しない')
+    assert.equal(startedLabels(calls).filter((l) => l.endsWith('#2')).length, 0)
+  })
+  test(`${name}: 保存状態が closed で open のノードも、一括書き込みに含めない`, async () => {
+    const { calls } = await withSaved({ status: 'closed', pr: 0 }, o)
+    assert.ok(!batchNumbers(calls).includes(2), `closed の #2 を書いた: ${JSON.stringify(batchEntries(calls))}`)
+  })
+}
+
+test('保存状態が blocked・pr>0（再開情報としては無効な branch なし）のノードを対象外にしても、書き込む patch に pr:0 を入れない', async () => {
+  const { calls } = await withSaved({ status: 'blocked', note: 'old', pr: 77 })
+  const e = batchEntries(calls).find((x) => x.numbers.includes(2))
+  assert.ok(e && e.patch.status === 'blocked' && e.patch.note.includes('対象外ラベル（owner:human）のため未着手'), `対象外の blocked を書いていない: ${JSON.stringify(batchEntries(calls))}`)
+  assert.ok(!('pr' in e.patch), `pr を書いた（pr・branch を保つ）: ${JSON.stringify(e.patch)}`)
 })
 
 // --- リポジトリへの束縛 ---
