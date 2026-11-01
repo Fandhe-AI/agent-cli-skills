@@ -137,11 +137,10 @@ fetch_sub_issues "${ROOT_NUMBER}"
 
 棚卸し対象の一覧をユーザーに提示し、方針確認を取ってから変更を実行する。
 
-owner ラベル付き issue は Step 1 で記録したラベルから抽出する。追加取得が要る場合は
-`gh issue list --label "owner:human" --state open --json number,title` と
-`gh issue list --label "owner:joint" --state open --json number,title` を使う。`--label` を複数渡すと AND になるため、
-**ラベルごとに 1 回ずつ**取得する。gh のエラーは stdout に出るため、出力の有無ではなく**終了コード**で成否を判定する
-（失敗を「該当なし」と読まない）。
+owner ラベル付き issue は、Step 1 のツリーマップ（sub_issues API の応答の `labels`）に記録したラベルからだけ抽出する。
+対象は Step 1 のツリーに含まれる番号に限る（リポジトリ全体の `gh issue list` は 30 件上限で別ツリーも混ざるため使わない）。
+ラベルが不明な番号だけ `gh issue view "${N}" --json number,labels` で取得し、gh のエラーは stdout に出るため
+**終了コード**で成否を判定する（失敗を「該当なし」と読まない）。
 これらの issue は `implement-issue-tree` を `skipLabels: ["owner:human","owner:joint"]` 付きで呼ぶと自動実装の対象外になる。
 
 **承認された対象を Step 3 / Step 4 が読む 2 つの計画配列へ落とす。** 配列は必ず宣言する
