@@ -11665,7 +11665,9 @@ log(`monitor 再開可能な中断: ${formatIssueList(interrupted)}`)
 
 
 
-const blockedStateWrite=await writeBlockedStateBatch(blockedStateBatch,savedItems)
+
+
+const blockedStateWrite=await writeBlockedStateBatch(blockedStateBatch.filter((e)=> !done.has(e.number)),savedItems)
 if(blockedStateWrite.requested>0){
 log(`blocked の状態ファイル記録: 対象 ${blockedStateWrite.requested} 件（保存済みと同一で省略 ${blockedStateWrite.unchanged} 件・書き込み ${blockedStateWrite.written} / ${blockedStateWrite.attempted} 件・エージェント ${blockedStateWrite.chunks} 回）`)
 }
@@ -11679,7 +11681,7 @@ log(`⚠️ blocked の状態ファイル記録: ${blockedStateWrite.unwritten} 
 const ascending=(a,b)=>a-b
 const blockedWaiting={
 outOfTree:failures.filter((f)=>f.status==='blocked'&&f.outOfTreeDeps?.length>0).map((f)=>f.issue).sort(ascending),
-skippedLabel:[...skipLabelHit.keys()].sort(ascending),
+skippedLabel:[...skipLabelHit.keys()].filter((n)=> !done.has(n)).sort(ascending),
 waitingOn:[...outOfTreeWait].sort(ascending),
 }
 if(notifyBlockedEnabled&&(blockedWaiting.outOfTree.length>0||blockedWaiting.skippedLabel.length>0)){

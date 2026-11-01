@@ -450,6 +450,37 @@ test('notifyBlocked: コメントの agent が失敗してもランは完了す�
   assert.ok(logs.some((m) => m.includes('コメントに失敗した（非致命）')))
 })
 
+// --- ラン中に人手で close された対象外ノード ---
+// 葉 2 は対象外ラベル、葉 3 は 2 に依存する。前提完了プローブで 2 が CLOSED と確認されたら done に入る。
+// 開始時の blocked の予約や通知の対象をそのまま使うと、完了済みの 2 を古い blocked で上書き・通知してしまう。
+const closedLeafOverride = (tree) => (label) => {
+  if (label.startsWith('plan:issue-tree')) return { nodes: tree }
+  if (label === 'plan:skip-labels') return skipReply(['owner:human'], { 'owner:human': [2] })
+  if (label === 'prereq:probe') return { results: [{ issue: 2, issueState: 'CLOSED', prState: 'NONE', pr: 0, headRefName: '', baseRefName: '', isCrossRepository: true, closingIssues: [-1] }] }
+  return undefined
+}
+
+test('ラン中に close された対象外ノードを、終了時の blocked 一括書き込みで上書きしない', async () => {
+  const { calls } = await runScript({
+    args: ARGS({ skipLabels: ['owner:human'] }),
+    override: closedLeafOverride(flat([2, 3], { 3: { dependsOn: [2] } })),
+  })
+  assert.ok(labelsOf(calls).includes('prereq:probe'), '前提完了プローブが走っていない')
+  const batch = calls.filter((c) => c.opts.label.startsWith('state:update-batch'))
+  assert.ok(!batch.some((c) => c.prompt.includes('対象外ラベル（owner:human）のため未着手')), '完了済みの #2 を blocked で書いた')
+  assert.ok(!batch.some((c) => /#2\b/.test(c.prompt)), '一括書き込みに #2 が含まれる')
+})
+
+test('notifyBlocked: ラン中に close された対象外ノードは待機中として通知・返却しない', async () => {
+  const { result, calls } = await runScript({
+    args: ARGS({ skipLabels: ['owner:human'], notifyBlocked: true }),
+    override: closedLeafOverride(flat([2, 3], { 3: { dependsOn: [2] } })),
+  })
+  assert.ok(labelsOf(calls).includes('prereq:probe'), '前提完了プローブが走っていない')
+  assert.deepEqual(result.blockedWaiting.skippedLabel, [])
+  assert.ok(!labelsOf(calls).includes('notify-blocked'), '待ちが無いのに通知した')
+})
+
 // --- リポジトリへの束縛 ---
 
 test('args.repo があれば、ラベル一覧・issue 一覧・通知コメントの全 gh 呼び出しが対象リポジトリに束縛される', async () => {

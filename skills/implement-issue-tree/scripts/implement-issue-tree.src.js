@@ -11665,7 +11665,9 @@ if (interrupted.length > 0) {
 // loadState 再読込（孤立 worktree 判定）より前に完了させ、ラン内の全書込みを反映した状態を正本にする。
 // 保存済みと同一（status・note・pr が一致）の項目は書かない。失敗は続行し、記録しようとした件数と
 // 書けた件数の差をログと返却値（blockedStateWrite）で報告する。
-const blockedStateWrite = await writeBlockedStateBatch(blockedStateBatch, savedItems)
+// ラン中に前提完了プローブ等で done に入ったノードは、開始時の blocked の予約があっても書かない（古い blocked で上書きしない）。
+// 除外分は requested に数えない。
+const blockedStateWrite = await writeBlockedStateBatch(blockedStateBatch.filter((e) => !done.has(e.number)), savedItems)
 if (blockedStateWrite.requested > 0) {
   log(`blocked の状態ファイル記録: 対象 ${blockedStateWrite.requested} 件（保存済みと同一で省略 ${blockedStateWrite.unchanged} 件・書き込み ${blockedStateWrite.written} / ${blockedStateWrite.attempted} 件・エージェント ${blockedStateWrite.chunks} 回）`)
 }
@@ -11679,7 +11681,7 @@ if (blockedStateWrite.unwritten > 0) {
 const ascending = (a, b) => a - b
 const blockedWaiting = {
   outOfTree: failures.filter((f) => f.status === 'blocked' && f.outOfTreeDeps?.length > 0).map((f) => f.issue).sort(ascending),
-  skippedLabel: [...skipLabelHit.keys()].sort(ascending),
+  skippedLabel: [...skipLabelHit.keys()].filter((n) => !done.has(n)).sort(ascending),
   waitingOn: [...outOfTreeWait].sort(ascending),
 }
 if (notifyBlockedEnabled && (blockedWaiting.outOfTree.length > 0 || blockedWaiting.skippedLabel.length > 0)) {
