@@ -60,12 +60,29 @@ gh auth status >/dev/null 2>&1 || { echo "gh が未認証。gh auth login を案
 
 ### Step 1: 棚卸し（haiku サブエージェントに委譲）
 
-1. 対象リポ: `gh repo list Fandhe-AI --limit 300 --no-archived --json name,pushedAt` のうち、`pushedAt` が N 日以内のもの。
-2. open の同期 PR: 次の 2 通りで検索し、和集合を取る。`chore/submodule-update-*`（docs/spec などの submodule 更新）はスキル同期ではないので、報告に載せるだけで対象外にする。
+1. 対象リポ: `gh repo list Fandhe-AI --limit 300 --no-archived --json name,pushedAt` のうち、`pushedAt` が N 日以内のもの。結果を改行区切りの変数 `repos` に入れる（以降の手順で共通に使う）。`days` は数字だけであることを確かめてから渡す。
    ```bash
-   gh search prs --owner Fandhe-AI --state open "エージェントスキルを最新に更新"
-   gh search prs --owner Fandhe-AI --state open --head chore/skills-update-   # head は前方一致（実測済み）
+   case "$days" in ''|*[!0-9]*) echo "days は整数で指定する"; exit 1 ;; esac
+   repos=$(gh repo list Fandhe-AI --limit 300 --no-archived --json name,pushedAt \
+     | jq -r --argjson d "$days" '(now - ($d * 86400)) as $c | .[] | select((.pushedAt | fromdateiso8601) >= $c) | .name')
    ```
+   一覧が 300 件に達したら打ち切りの可能性があるので、その旨を報告する。
+2. open の同期 PR: **取得方法はここが唯一の定義**で、Step 7 の完了確認も同じ手順を使う。`chore/submodule-update-*`（docs/spec などの submodule 更新）はスキル同期ではないので、報告に載せるだけで対象外にする。
+   `gh search prs` は `--limit` を付けないと 30 件で打ち切られるため、主経路にしない。1 で作った `repos` をリポごとにループし、`gh pr list` を `--limit 100` で呼ぶ。head が `chore/skills-update-` で始まるか、タイトルに「エージェントスキルを最新に更新」を含むものを jq で絞る（2 条件の和集合）。zsh でも壊れないよう、ループは `while read -r r` で書く。
+   ```bash
+   limit=100
+   printf '%s\n' "$repos" | while read -r r; do
+     [ -n "$r" ] || continue
+     out=$(gh pr list -R "Fandhe-AI/$r" --state open --json number,headRefName,title --limit "$limit") \
+       || { echo "取得失敗: $r（判定不能として報告する。0 件とは扱わない）"; continue; }
+     printf '%s\n' "$out" | jq -r --arg r "$r" '.[]
+       | select((.headRefName | startswith("chore/skills-update-")) or (.title | contains("エージェントスキルを最新に更新")))
+       | "\($r)\t\(.number)\t\(.headRefName)"'
+     n=$(printf '%s\n' "$out" | jq length)
+     [ "$n" -lt "$limit" ] || echo "打ち切りの可能性あり: $r（取得 ${n} 件が limit に到達）"
+   done
+   ```
+   取得件数が limit に達したリポは「打ち切りの可能性あり」として報告に載せ、`--limit` を増やすか `--search "head:chore/skills-update-"` で絞って取り直す。補助として全体検索（`gh search prs --owner Fandhe-AI --state open --head chore/skills-update- --limit 1000`）を併用してもよいが、結果が 1000 件に達したら期間やリポで分割して取り直す。補助の結果だけで「0 件」と判定しない。
 3. 各リポの同期 workflow の最新 run。workflow 名はここで 1 か所だけ定義し、Step 7 と `references/triage.md` でも同じ定義を使う。
    ```bash
    W=$([ "$r" = actions ] && echo update-external-self.yml || echo update-external.yml)
@@ -112,7 +129,7 @@ PR ごとに下表の入口で類型を決め、対処の詳細は `references/t
 
 `references/triage.md` の類型ごとの手順を実行する。次の規則は本節が正典で、triage.md は本節を参照する。
 
-承認なしで進めてよい操作: 棚卸し、誤検出の実測検証、上流修正 PR の作成（上流のマージは通常の CI と Bugbot のゲートに従う）、dispatch(保護ゲート通過後。下記)、返信コメントの投稿（resolve を伴わないもの）、`@cursor review`、rerun、`gh pr update-branch`、`gh pr merge --disable-auto`（武装の解除）。`resolveReviewThread`・`gh pr merge --auto`・`gh pr merge --squash` はここに含まれず、Step 4 の承認ゲートを通す。
+承認なしで進めてよい操作: 棚卸し、誤検出の実測検証、上流修正 PR の作成（上流のマージは通常の CI と Bugbot のゲートに従う）、dispatch(保護ゲート通過後。下記)、返信コメントの投稿（resolve を伴わないもの）、`@cursor review`、rerun、`gh pr update-branch`、`gh pr merge --disable-auto`（武装の解除）。`resolveReviewThread`・`gh pr merge --auto`・`gh pr merge --squash`・issue の起票はここに含まれず、Step 4 の承認ゲートを通す。
 
 **上流修正の順序。** 実在するバグの指摘は上流（agent-cli-skills）を直す。PR 側で直しても再同期の force-push で消える。順序は次のとおり。
 
@@ -152,9 +169,10 @@ gh api "repos/Fandhe-AI/$r/rules/branches/$db_enc" --jq '{
 **3 巡ルール。** 同じ箇所への指摘が 3 巡続いたら、修正しない。
 
 1. スレッドは**未解決のまま**残す。
-2. 上流で issue 化し、スレッドに issue へのリンクを返信する（resolve はしない）。
-3. 停止してオーナーの判断を待つ。報告に「オーナー判断待ち」として載せる。
-4. リポに `required_review_thread_resolution` が無く auto-merge が武装済みなら、`gh pr merge <n> -R "Fandhe-AI/$r" --disable-auto` で解除し、報告する。
+2. 上流への issue 起票案（タイトル・本文の案・対象リポ）を作る。**起票は承認なしで行わない。** Step 4 の承認一覧に載せ、承認を得てから作る。承認が無ければ起票せず、起票案を報告に載せるだけにする。
+3. スレッドへの「issue へのリンク」の返信は、issue を起票した後に限る（resolve はしない）。
+4. 停止してオーナーの判断を待つ。報告に「オーナー判断待ち」として載せる。
+5. リポに `required_review_thread_resolution` が無く auto-merge が武装済みなら、`gh pr merge <n> -R "Fandhe-AI/$r" --disable-auto` で解除し、報告する。
 
 オーナーが「直して」と明示したら続ける。
 
@@ -163,6 +181,7 @@ gh api "repos/Fandhe-AI/$r/rules/branches/$db_enc" --jq '{
 スキルは人間が呼ぶ対話セッションで動く。次の操作は、オーナーが同じセッションで明示的に承認した場合に限り実行する。承認は AskUserQuestion で取る。対象を一覧にして根拠を添えたうえで、まとめて 1 回で取ってよい。
 
 - `resolveReviewThread`(誤検出への返信 + resolve、修正配布後に残ったスレッドの resolve のどちらも)
+- issue の起票(3 巡ルールで止めた指摘の上流 issue 化など。`gh issue create`)
 - `gh pr merge --auto`(auto-merge の武装)
 - `gh pr merge --squash`(手動マージ)
 
@@ -173,6 +192,7 @@ gh api "repos/Fandhe-AI/$r/rules/branches/$db_enc" --jq '{
 - リポジトリ・PR 番号
 - HEAD sha(main が直前に `gh pr view <n> -R Fandhe-AI/<r> --json headRefOid` で自分で取得したもの)
 - スレッド ID(resolve の場合)
+- 起票するタイトル・本文の案・対象リポ(issue 起票の場合)
 - 根拠。誤検出なら実測のコマンドと結果。修正済みなら、修正が入った上流 PR と、新しい HEAD の該当箇所が直っていることの diff または grep の結果。
 
 **マージ系操作の前提(fail-closed)。** 武装と手動マージの前に、main が自分で次を確認する。サブエージェントの申告値は使わない。1 つでも確認できなければ、武装もマージもせずに報告する。
@@ -213,11 +233,8 @@ gh pr merge <n> -R "Fandhe-AI/$r" --squash --match-head-commit "${approved_sha}"
    ```bash
    gh pr view <n> -R Fandhe-AI/<r> --json state,mergedAt
    ```
-2. open の同期 PR が 0 件であることを、2 通りの検索の両方で示す。
-   ```bash
-   gh search prs --owner Fandhe-AI --state open "エージェントスキルを最新に更新"
-   gh search prs --owner Fandhe-AI --state open --head chore/skills-update-
-   ```
+2. open の同期 PR が 0 件であることを、head 前方一致・タイトル一致の 2 条件の絞り込み結果で示す。
+   Step 1 の 2 で定義した取得手順(リポごとの `gh pr list --limit 100`)を、同じ `repos` に対してもう一度実行する。「打ち切りの可能性あり」「取得失敗」が 1 件でもあれば 0 件とは宣言せず、取り直すか報告に載せる。
 3. 対象リポの同期 run の最新結論に success 以外が無いことを、Step 1 の `W` の定義で示す。
    ```bash
    gh run list --workflow "$W" -R "Fandhe-AI/$r" -L 1 --json conclusion
@@ -230,16 +247,16 @@ gh pr merge <n> -R "Fandhe-AI/$r" --squash --match-head-commit "${approved_sha}"
 ## 検証
 
 - [ ] 対象 PR 全件で `gh pr view` が MERGED を返すことを確認した
-- [ ] 2 通りの open 検索が 0 件であることを確認した
+- [ ] open の同期 PR が 0 件であることを、打ち切り・取得失敗なしの取得結果で確認した
 - [ ] 対象リポの同期 run の最新結論に success 以外が無いことを確認した
 - [ ] マージした PR ごとに、HEAD sha に対する `Cursor Bugbot` の完了とスレッド 0 件を確認した
 - [ ] サブエージェントが報告した PR・マージは `gh pr view` で実在を確認した
-- [ ] resolve・武装・マージの各操作に、同じセッションでのオーナー承認があった(承認のない項目は実行せず報告に載せた)
+- [ ] resolve・武装・マージ・issue 起票の各操作に、同じセッションでのオーナー承認があった(承認のない項目は実行せず報告に載せた)
 - [ ] 残件があるときは「一部完了」と宣言した
 
 ## 注意事項
 
-- **承認が要る操作。** `resolveReviewThread`・`gh pr merge --auto`・`gh pr merge --squash` は Step 4 の承認ゲートを通す。加えて `gh pr merge --admin` と、ruleset・bypass_actors の一時変更は、オーナーの明示承認がある場合に限り、一時的に行い、マージ後すぐ戻す。
+- **承認が要る操作。** `resolveReviewThread`・`gh pr merge --auto`・`gh pr merge --squash`・issue の起票は Step 4 の承認ゲートを通す。加えて `gh pr merge --admin` と、ruleset・bypass_actors の一時変更は、オーナーの明示承認がある場合に限り、一時的に行い、マージ後すぐ戻す。
 - **force push は一切行わない。** `--force`・`--force-with-lease` を含め、このスキルでは承認があっても行わない。履歴を動かす必要があるときは、通常の push か、`git/commits` と `PATCH git/refs`(`force=false`)で足す。
 - **秘密情報とメールアドレス。** トークン・メールアドレスをコマンド・PR 本文・サブエージェントへの指示に含めない。外部 API を叩くサブエージェントには、ユーザーのメールアドレスを UA などに入れないよう明記する。秘密情報を検出した場合は処理を中止してユーザーに警告する（`.claude/rules/security.md`）。
 - **CI の広域失敗。** 広い範囲での失敗を、自分の操作のせいと即断しない。GitHub status と runner の状態で先に反証する。
