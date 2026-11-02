@@ -29,8 +29,9 @@ resolve・`--auto` の武装・手動マージは、いずれも `SKILL.md` Step
   2. `SKILL.md` Step 4 のマージ系操作の前提(サーバー側強制の実測など)を、main が自分で確認する。確認できなければ武装せず報告する。
   3. 前提を満たしたら、承認一覧に載せる。承認を得たものだけ武装する。
      ```bash
-     gh pr merge <n> -R "Fandhe-AI/$r" --auto --squash
+     gh pr merge <n> -R "Fandhe-AI/$r" --auto --squash --match-head-commit "${approved_sha}"
      ```
+     `approved_sha` は承認一覧に載せた HEAD sha(main が自分で取得したもの)。不一致で失敗したら停止し、HEAD を取り直して再承認を得る。
 - 事例: 2026-11-02 の fandhe-frontend。同期 run の PR 作成ステップが GraphQL の一時エラーで失敗し、PR はできたが auto-merge の有効化が飛んだ。この日は承認ゲートを通さずに武装したが、現行の手順は上のとおりゲートつきである。
   - → 判断基準: PR があって autoMergeRequest が null なら、原因確認 → 前提確認 → 承認、の順を省略しない。
 
@@ -87,8 +88,10 @@ resolve・`--auto` の武装・手動マージは、いずれも `SKILL.md` Step
 マージ判定(`SKILL.md` Step 5)の 4 条件を確かめ、Step 4 の前提を満たしたうえで、手動マージを承認一覧に載せる。承認を得たものだけ実行する。
 
 ```bash
-gh pr merge <n> -R "Fandhe-AI/$r" --squash
+gh pr merge <n> -R "Fandhe-AI/$r" --squash --match-head-commit "${approved_sha}"
 ```
+
+`approved_sha` は承認一覧に載せた HEAD sha。不一致で失敗したら停止し、HEAD を取り直して再承認を得る。
 
 ## run 異常(cancel / ハング)
 

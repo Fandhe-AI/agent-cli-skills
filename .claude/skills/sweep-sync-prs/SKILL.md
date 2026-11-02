@@ -26,7 +26,23 @@ argument-hint: "[days] (例: sweep-sync-prs 7。既定 7 日)"
 | --- | --- | --- |
 | `days` | 任意 | 棚卸し対象の日数 N（既定 7） |
 
-前提: `gh` が認証済みで、`Fandhe-AI` 組織のリポジトリを参照できること。ネットワーク越しの GitHub 操作（`gh`・`git fetch`）を必須とするため、該当コマンドはコマンド単位で sandbox 無効にして実行する（`docs/sandbox-tls.md` 参照）。ネットワーク遮断を解除できない環境では実行できない。
+前提(ツール):
+
+| 区分 | コマンド |
+| --- | --- |
+| 常時必要 | `gh`(認証済み)、`git`、`jq`、`awk`(Step 1 の canary 判定で使用)、`wc`・`printf`(POSIX 標準) |
+| 上流修正のときだけ必要 | `node`(implement-issue-tree のビルド `build-workflow.mjs` とテスト `node --test`) |
+
+開始時に次を実行し、不足があれば処理を始めずに停止して、導入を案内する(`gh` は `brew install gh` など、`jq` は `brew install jq` など)。`Fandhe-AI` 組織のリポジトリを参照できない場合も停止して報告する。
+
+```bash
+missing=""
+for c in gh git jq awk; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done
+[ -z "$missing" ] || { echo "未導入のコマンド:$missing。導入してから再実行する"; exit 1; }
+gh auth status >/dev/null 2>&1 || { echo "gh が未認証。gh auth login を案内して停止する"; exit 1; }
+```
+
+上流修正を行う場合は、そのときに `command -v node` も確認する。ネットワーク越しの GitHub 操作（`gh`・`git fetch`）を必須とするため、該当コマンドはコマンド単位で sandbox 無効にして実行する（`docs/sandbox-tls.md` 参照）。ネットワーク遮断を解除できない環境では実行できない。
 
 ## 進め方の原則
 
@@ -174,7 +190,11 @@ Step 4 の承認と前提を満たしたうえで、次をすべて満たすと�
 - 未解決スレッドが 0 件であること。
 - mergeStateStatus が CLEAN であること。
 
-マージは `gh pr merge <n> -R Fandhe-AI/<r> --squash` で行う(`--admin` は付けない)。
+マージは次の形で行う(`--admin` は付けない)。`approved_sha` は承認一覧に載せた HEAD sha(main が自分で取得したもの)で、マージコマンドでも固定する。承認後に HEAD が動いていれば、コマンドは不一致で失敗する。
+```bash
+gh pr merge <n> -R "Fandhe-AI/$r" --squash --match-head-commit "${approved_sha}"
+```
+不一致で失敗したら停止し、HEAD を取り直して再承認を得る。auto-merge の武装(`--auto --squash`)にも同じ `--match-head-commit "${approved_sha}"` を付ける。
 
 ### Step 6: 上流を修正するとき
 
