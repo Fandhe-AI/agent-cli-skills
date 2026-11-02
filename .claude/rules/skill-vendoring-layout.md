@@ -75,7 +75,7 @@ downstream リポジトリにおけるスキルの配置（`.claude/skills/<name
 
 - **本リポジトリ（`agent-cli-skills`）はこの方針の対象外。** 上流ソースとして
   `skills/<name>/` を実体、`.claude/skills/<name>` をそこへの symlink とする構成を維持する
-  （`create-skill` / `create-agent` の 2 件のみ実ディレクトリ。
+  （`create-skill` / `create-agent` / `sweep-sync-prs` の 3 件のみ実ディレクトリ。
   `.github/scripts/check-skill-structure.sh` が CI で検証している）
 
 ## 関連

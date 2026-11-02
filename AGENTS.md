@@ -130,7 +130,7 @@ Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）
   name 不一致・symlink リンク切れは CI（structure ジョブ）でも落ちる
 - **symlink 構成の維持（P1）**: 新スキル追加時は `.claude/skills/<name>` への symlink と
   `CLAUDE.md` のスキル一覧更新を伴う（`create-skill` スキルの手順）。実ディレクトリ配置は
-  リポジトリ管理スキル（create-skill / create-agent）・参照スキルの既存例外に限る
+  リポジトリ管理スキル（create-skill / create-agent / sweep-sync-prs）・参照スキルの既存例外に限る
 - **エージェント・ルールの責務境界（P1）**: `.claude/agents/` は research（読み取り専用）/
   author / quality（読み取り専用）のカテゴリ責務に従う。読み取り専用エージェントへ
   編集責務を足す変更、`dotclaude-via-temp.md`（`.claude/` 直接編集の禁止）に反する

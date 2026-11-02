@@ -24,7 +24,7 @@ npx skills add Fandhe-AI/agent-cli-skills --all
 
 ## リポジトリ構成
 
-Claude Code の Claude Skills として使用するスキルは、原則として `skills/` 配下に実体があり、`.claude/skills/` からシンボリックリンクで参照されます。例外が 2 種あります: リポジトリ管理スキル（create-skill / create-agent）は `.claude/skills/` 内の実ディレクトリで `skills/` 側に対応物を持たず、参照スキル（github-docs / anthropic-claude-code / anthropic-claude-code-extend）は `.agents/skills/` に実体を持ちます。Agents・Rules・その他ディレクトリツリーの詳細は [CLAUDE.md](./CLAUDE.md) を参照してください。
+Claude Code の Claude Skills として使用するスキルは、原則として `skills/` 配下に実体があり、`.claude/skills/` からシンボリックリンクで参照されます。例外が 2 種あります: リポジトリ管理スキル（create-skill / create-agent / sweep-sync-prs）は `.claude/skills/` 内の実ディレクトリで `skills/` 側に対応物を持たず、参照スキル（github-docs / anthropic-claude-code / anthropic-claude-code-extend）は `.agents/skills/` に実体を持ちます。Agents・Rules・その他ディレクトリツリーの詳細は [CLAUDE.md](./CLAUDE.md) を参照してください。
 
 ## スキル一覧
 
@@ -53,6 +53,7 @@ Claude Code の Claude Skills として使用するスキルは、原則とし�
 |--------|------|
 | **create-skill** | 新規スキルを scaffold し、symlink 作成・update-docs 実行まで自動化する（skill-explorer/skill-author/skill-reviewer/frontmatter-linter へ委譲） |
 | **create-agent** | 新規サブエージェントを scaffold する（agent-author へ委譲、dotclaude-via-temp 準拠） |
+| **sweep-sync-prs** | Fandhe-AI 組織のスキル同期 PR を棚卸しし、詰まりの類型ごとに対処して全件マージまで見届ける（下流へは配布しない） |
 
 ### Claude Code セットアップ
 

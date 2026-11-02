@@ -82,6 +82,7 @@ skills/                               -- スキル本体（各ディレクトリ
   skills/                             -- skills/ へのシンボリックリンク（一部実ディレクトリ）
     create-skill/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に SKILL 雛形）
     create-agent/                     -- リポジトリ管理スキル（実ディレクトリ、sample/ に Agent 雛形）
+    sweep-sync-prs/                   -- リポジトリ管理スキル（実ディレクトリ、references/ に詰まり類型の判定表）
     github-docs                       -- 参照スキル（symlink）
     anthropic-claude-code             -- 参照スキル（symlink）
     anthropic-claude-code-extend      -- 参照スキル（symlink）
@@ -188,7 +189,7 @@ contribute-skill, sync-skills-lock
 
 ### リポジトリ管理スキル（.claude/skills/ に配置）
 
-create-skill, create-agent
+create-skill, create-agent, sweep-sync-prs
 
 ### 参照スキル（.claude/skills/ に配置）
 
