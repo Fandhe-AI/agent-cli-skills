@@ -63,10 +63,16 @@ gh auth status >/dev/null 2>&1 || { echo "gh が未認証。gh auth login を案
 1. 対象リポ: `gh repo list Fandhe-AI --limit 300 --no-archived --json name,pushedAt` のうち、`pushedAt` が N 日以内のもの。結果を改行区切りの変数 `repos` に入れる（以降の手順で共通に使う）。`days` は数字だけであることを確かめてから渡す。
    ```bash
    case "$days" in ''|*[!0-9]*) echo "days は整数で指定する"; exit 1 ;; esac
-   repos=$(gh repo list Fandhe-AI --limit 300 --no-archived --json name,pushedAt \
-     | jq -r --argjson d "$days" '(now - ($d * 86400)) as $c | .[] | select((.pushedAt | fromdateiso8601) >= $c) | .name')
+   raw=$(gh repo list Fandhe-AI --limit 300 --no-archived --json name,pushedAt) \
+     || { echo "リポ一覧の取得に失敗。判定不能として停止する"; exit 1; }
+   total=$(printf '%s\n' "$raw" | jq length) \
+     || { echo "リポ一覧の解析に失敗。判定不能として停止する"; exit 1; }
+   repos=$(printf '%s\n' "$raw" | jq -r --argjson d "$days" '(now - ($d * 86400)) as $c | .[] | select((.pushedAt | fromdateiso8601) >= $c) | .name') \
+     || { echo "リポ一覧の絞り込みに失敗。判定不能として停止する"; exit 1; }
+   [ "$total" -lt 300 ] || echo "打ち切りの可能性あり: 取得 ${total} 件が limit に到達"
+   [ -n "$repos" ] || echo "対象 0 件: 取得は成功したが直近 ${days} 日に更新のあるリポが無い（取得失敗ではない）"
    ```
-   一覧が 300 件に達したら打ち切りの可能性があるので、その旨を報告する。
+   `gh` と `jq` の終了コードを段ごとに確認し、取得失敗を空の一覧にしない。失敗したときは停止して「判定不能」と報告する。取得に成功して一覧が空なら、「対象 0 件」と明示して報告し、取得失敗と区別する。一覧が 300 件に達したら打ち切りの可能性があるので、その旨を報告する。以降の手順と Step 7 が `repos` を使うのは、この取得が成功したときに限る。
 2. open の同期 PR: **取得方法はここが唯一の定義**で、Step 7 の完了確認も同じ手順を使う。`chore/submodule-update-*`（docs/spec などの submodule 更新）はスキル同期ではないので、報告に載せるだけで対象外にする。
    `gh search prs` は `--limit` を付けないと 30 件で打ち切られるため、主経路にしない。1 で作った `repos` をリポごとにループし、`gh pr list` を `--limit 100` で呼ぶ。head が `chore/skills-update-` で始まるか、タイトルに「エージェントスキルを最新に更新」を含むものを jq で絞る（2 条件の和集合）。zsh でも壊れないよう、ループは `while read -r r` で書く。
    ```bash
@@ -234,7 +240,7 @@ gh pr merge <n> -R "Fandhe-AI/$r" --squash --match-head-commit "${approved_sha}"
    gh pr view <n> -R Fandhe-AI/<r> --json state,mergedAt
    ```
 2. open の同期 PR が 0 件であることを、head 前方一致・タイトル一致の 2 条件の絞り込み結果で示す。
-   Step 1 の 2 で定義した取得手順(リポごとの `gh pr list --limit 100`)を、同じ `repos` に対してもう一度実行する。「打ち切りの可能性あり」「取得失敗」が 1 件でもあれば 0 件とは宣言せず、取り直すか報告に載せる。
+   Step 1 の 2 で定義した取得手順(リポごとの `gh pr list --limit 100`)を、Step 1 の 1 が成功して得た同じ `repos` に対してもう一度実行する。リポ一覧の取得に失敗していたら、0 件とは宣言しない。「対象 0 件」(取得成功で一覧が空)は取得失敗と区別して報告する。「打ち切りの可能性あり」「取得失敗」が 1 件でもあれば 0 件とは宣言せず、取り直すか報告に載せる。
 3. 対象リポの同期 run の最新結論に success 以外が無いことを、Step 1 の `W` の定義で示す。
    ```bash
    gh run list --workflow "$W" -R "Fandhe-AI/$r" -L 1 --json conclusion
