@@ -76,7 +76,13 @@ resolve・`--auto` の武装・手動マージは、いずれも `SKILL.md` Step
 ## 古い base・required check の固着
 
 - `gh pr update-branch` を試す。
-- それでも解消しないときは、オーナーの承認を得て、同じ tree の空コミットで head を動かす。
+- それでも解消しないときは、オーナーの承認を得て、同じ tree の空コミットで head を動かす。force push ではなく、`git/commits` で親を現在の HEAD・tree を同じにしたコミットを作り、`PATCH git/refs` を `force=false` で行う(早送りのみ許可される)。force push は承認があっても行わない(`SKILL.md` 注意事項)。
+  ```bash
+  tree=$(gh api "repos/Fandhe-AI/$r/git/commits/${sha}" --jq .tree.sha)
+  new=$(gh api "repos/Fandhe-AI/$r/git/commits" -f message="chore: CI 再起動用の空コミット" -f tree="$tree" -f "parents[]=${sha}" --jq .sha)
+  gh api -X PATCH "repos/Fandhe-AI/$r/git/refs/heads/${branch}" -f sha="$new" -F force=false
+  ```
+  `sha` は main が取得した現在の HEAD sha、`branch` は PR の head ブランチ。
 
 ## Bugbot 対象外(TOO_LARGE_TO_REVIEW)
 
@@ -95,7 +101,7 @@ gh pr merge <n> -R "Fandhe-AI/$r" --squash --match-head-commit "${approved_sha}"
 
 ## run 異常(cancel / ハング)
 
-同期 run が cancel またはハングして PR が無い場合は、`SKILL.md` Step 3 の経路 (ii) の前提を確かめてから再 dispatch する。
+同期 run が cancel またはハングして PR が無い場合は、`SKILL.md` Step 3 の保護ゲートと経路 (ii) の前提を確かめてから再 dispatch する。保護ゲートを通らないリポには dispatch しない。
 
 ```bash
 gh workflow run "$W" -R "Fandhe-AI/$r" -f target=skill
@@ -105,6 +111,8 @@ gh workflow run "$W" -R "Fandhe-AI/$r" -f target=skill
 
 - 症状: schedule が一度も起動していない、`dependencies` / `automated` ラベルが無い(PR 作成で exit 1)、ruleset が無い。
 - 分類: run 0 件(終了コード 0・出力が空)は「run なし」、workflow が存在せず終了コード 1 で失敗するのは「workflow なし」。報告では分けて載せる。
-- 対処: ラベルを作成し(承認不要・報告に載せる)、`SKILL.md` Step 3 の経路 (ii) の前提を確かめて dispatch する。ruleset が無いことは、`SKILL.md` Step 4 に従い武装もマージもせず、オーナーへ報告して `setup-repo-guards` の導入を提案するだけにする。
-- 事例: 2026-11-02 の fandhe-auth。ruleset が無く、同期 PR が CI の完了前に即マージされた。
-  - → 判断基準: 新設リポは、ラベル・初回 dispatch・ruleset の 3 点を順に確かめる。ruleset 導入は提案までで、勝手に適用しない。
+- 対処: 次の順に進める。
+  1. `SKILL.md` Step 3 の保護ゲートを確認する。通らなければ、ラベル作成も dispatch もマージ系操作もせず、報告して `setup-repo-guards` の導入を提案するだけにして停止する。
+  2. 通ったら、ラベルを作成し(承認不要・報告に載せる)、経路 (ii) の前提を確かめて dispatch する。
+- 事例: 2026-11-02 の fandhe-auth。保護なしで dispatch したため、同期 PR が CI の完了前にマージされた(現行手順では dispatch しない)。
+  - → 判断基準: 新設リポは、まず保護(ruleset)を確かめる。無ければ報告して停止し、導入は提案までで、勝手に適用しない。
