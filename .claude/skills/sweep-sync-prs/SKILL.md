@@ -98,19 +98,35 @@ gh auth status >/dev/null 2>&1 || { echo "gh が未認証。gh auth login を案
    - success / failure / cancelled / in_progress
    - run なし（workflow はあるが run 0 件）
    - workflow なし
-4. PR が無いリポは open PR の検索だけでは漏れる。canary の blob sha で鮮度を判定する。
+4. PR が無いリポは open PR の検索だけでは漏れる。canary の blob sha で鮮度を判定する。`.claude/skills/<name>` は symlink でも実ディレクトリでもよい（`.claude/rules/skill-vendoring-layout.md`）ので、取得先は 2 か所を順に試す。まず `.agents/skills/...`、404 のときだけ `.claude/skills/...`。
    ```bash
    git fetch origin
    git rev-parse origin/main:skills/implement-issue-tree/scripts/implement-issue-tree.src.js
-   f=repos/Fandhe-AI/$r/contents/.agents/skills/implement-issue-tree/scripts/implement-issue-tree.src.js
-   code=$(gh api -i "$f" 2>/dev/null | awk 'NR==1{print $2}')
-   case "$code" in
-     200) gh api "$f" --jq .sha ;;
-     404) echo "canary なし（未導入。鮮度は判定不能として報告）" ;;
-     *)   echo "判定不能 (HTTP ${code:-?})" ;;
+   p=skills/implement-issue-tree/scripts/implement-issue-tree.src.js
+   # 出力は "file <sha>" / "other <type>" / "404" / "unknown <HTTP>" のいずれか 1 行
+   probe() {
+     f="repos/Fandhe-AI/$r/contents/$1/$p"
+     code=$(gh api -i "$f" 2>/dev/null | awk 'NR==1{print $2}')
+     case "$code" in
+       200) gh api "$f" --jq 'if type=="array" then "other dir" elif .type=="file" then "file \(.sha)" else "other \(.type)" end' \
+              || echo "unknown $code" ;;
+       404) echo 404 ;;
+       *)   echo "unknown ${code:-?}" ;;
+     esac
+   }
+   a=$(probe .agents)
+   case "$a" in
+     404) c=$(probe .claude) ;;
+     *)   c="" ;;
    esac
+   echo "agents: $a / claude: ${c:--}"
    ```
-   2 つの sha が一致しなければ古い。
+   判定は次のとおり。比較に使うのは `type` が `file` のときの `.sha` だけ。
+   - `.agents` が `file` なら、その sha を使う（`.claude` 側は見ない）。
+   - `.agents` が 404 で `.claude` が `file` なら、その sha を使う（実ディレクトリ配置）。
+   - 両方が 404 のときだけ「未導入」とし、鮮度は判定不能として報告する。
+   - 上記以外（403・5xx などの `unknown`、`symlink`・`dir` など `file` でない `other`）は「判定不能」とする。`.agents` が 404 で `.claude` が symlink の場合は、`.agents` 側に実体が無い壊れた配置なので、「判定不能(symlink)」として報告する。
+   取得した sha と `origin/main` の sha が一致しなければ古い。
 5. 各 PR について、mergeStateStatus・autoMergeRequest・失敗または pending のチェック・未解決のレビュースレッド（GraphQL の `reviewThreads`）・`Cursor Bugbot` の check-run の有無と、それが HEAD に対するものかを取得する。
 
 ### Step 2: 詰まりの類型を判定する
