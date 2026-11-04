@@ -73,8 +73,8 @@ import yaml
 # ない」という構造的事実はハードコードに頼らず下の workflow_call 自動判定で扱う。
 #
 # **未解決 issue を根拠に追加してはならない。** issue が閉じても除外は残り続け、当該リポの
-# 乖離を恒久的に検知できなくなる（実例: `yadori` はイシュー #263 を根拠に除外していたが、
-# #263 は close 済みで yadori は PR Fandhe-AI/yadori#665 により wrapper へ移行済みだった。
+# 乖離を恒久的に検知できなくなる（実例: `example-app` はイシュー #263 を根拠に除外していたが、
+# #263 は close 済みで example-app は PR Fandhe-AI/example-app#665 により wrapper へ移行済みだった。
 # 除外を解除するまで検知対象外のままだった)。除外が必要な場合は archived・reusable 定義本体の
 # ような**観測可能で恒久的な条件**を使い、可能ならリポ名ではなく構造条件で判定する。
 EXCLUDED_REPOS: dict[str, str] = {}
@@ -996,7 +996,7 @@ def list_target_repos(org: str, token: str) -> list[str]:
     """組織の非アーカイブリポジトリを全件列挙する。
 
     **「直近 1 週間に push があった」フィルタは使わない。** 2026-08-17 の
-    スイープで、最終 push が 2026-05-03 の ``hobby-keyboard`` が skills を
+    スイープで、最終 push が 2026-05-03 の ``example-stale-repo`` が skills を
     vendor していながら同期 CI 未導入であることが判明した。乖離は push で
     生まれるとは限らず「放置されて古いまま」も乖離であるため、1 週間フィルタ
     では取りこぼす。全非アーカイブリポ（約 120）を対象にする。

@@ -968,7 +968,7 @@ class TestScanEndToEnd(unittest.TestCase):
             # 検査不能 → UNKNOWN（黙って green にしない）
             "forbidden": {"workflow": (403, "")},
             # 旧・恒久除外リポ。除外解除により通常判定へ戻る（LEGACY として検知される）
-            "yadori": {"workflow": (200, FIXTURE_LEGACY)},
+            "example-app": {"workflow": (200, FIXTURE_LEGACY)},
         })
 
         cats = self._findings_by_repo(result)
@@ -1005,9 +1005,9 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertNotIn("unrelated", cats)
         self.assertIn("Fandhe-AI/unrelated", result.no_workflow_ok)
 
-        # yadori の恒久除外を解除した（イシュー #344）。通常判定へ戻り LEGACY として検知される
-        self.assertEqual(len(cats["yadori"]), 1)
-        self.assertEqual(cats["yadori"][0][0], "LEGACY")
+        # example-app の恒久除外を解除した（イシュー #344）。通常判定へ戻り LEGACY として検知される
+        self.assertEqual(len(cats["example-app"]), 1)
+        self.assertEqual(cats["example-app"][0][0], "LEGACY")
 
         excluded = {r.split("/")[1] for r, _ in result.excluded}
         self.assertEqual(excluded, {"actions"})
@@ -1017,8 +1017,8 @@ class TestScanEndToEnd(unittest.TestCase):
         self.assertTrue(all(m["ok"] for m in result.upstream_markers))
 
         # 軸 5: schedule トリガを持つ 4 リポ（fresh-wrapper / stale-wrapper /
-        # legacy-repo / yadori）が候補になり、既定の健全な sched fixture で全て OK。
-        # yadori は恒久除外の解除（イシュー #344）により軸 5 の対象へも戻る。
+        # legacy-repo / example-app）が候補になり、既定の健全な sched fixture で全て OK。
+        # example-app は恒久除外の解除（イシュー #344）により軸 5 の対象へも戻る。
         self.assertEqual(result.schedule_candidates, 4)
         self.assertEqual(result.schedule_forbidden, 0)
         self.assertEqual(
@@ -1027,11 +1027,11 @@ class TestScanEndToEnd(unittest.TestCase):
                 "Fandhe-AI/fresh-wrapper",
                 "Fandhe-AI/stale-wrapper",
                 "Fandhe-AI/legacy-repo",
-                "Fandhe-AI/yadori",
+                "Fandhe-AI/example-app",
             },
         )
 
-        # レポートは乖離 0 件でも全量を出す契約。除外解除で yadori の LEGACY が 1 件増え 6 件。
+        # レポートは乖離 0 件でも全量を出す契約。除外解除で example-app の LEGACY が 1 件増え 6 件。
         report = cud.render_report(result, "https://example.invalid/run/1")
         self.assertIn("乖離: **6 件**", report)
         self.assertIn("検査不能 (UNKNOWN): **1 件**", report)
@@ -1522,7 +1522,7 @@ class ExcludedReposPolicyTest(unittest.TestCase):
     """除外リストが issue 番号を根拠に増えていないことを固定する（イシュー #344）。
 
     未解決 issue を根拠にリポ名を除外すると、issue が閉じても除外だけが残り、当該リポの
-    乖離を恒久的に検知できなくなる（実例: yadori / イシュー #263）。除外は archived や
+    乖離を恒久的に検知できなくなる（実例: example-app / イシュー #263）。除外は archived や
     reusable 定義本体のような観測可能で恒久的な条件に限る。
     """
 
@@ -1534,8 +1534,8 @@ class ExcludedReposPolicyTest(unittest.TestCase):
                 f"{repo}: 除外理由に issue 番号を書かない（issue が閉じても除外が残る）",
             )
 
-    def test_yadori_is_not_permanently_excluded(self) -> None:
-        self.assertNotIn("yadori", cud.EXCLUDED_REPOS)
+    def test_example_app_is_not_permanently_excluded(self) -> None:
+        self.assertNotIn("example-app", cud.EXCLUDED_REPOS)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
