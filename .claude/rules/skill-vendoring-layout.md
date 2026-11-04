@@ -21,9 +21,9 @@ downstream リポジトリにおけるスキルの配置（`.claude/skills/<name
 
 | リポジトリ | run | 結果 |
 |-----------|-----|------|
-| `baby-tasks-app` | [31981615238](https://github.com/Fandhe-AI/baby-tasks-app/actions/runs/31981615238)（schedule） | `Update agent skills` success |
-| `yadori` | [32058767791](https://github.com/Fandhe-AI/yadori/actions/runs/32058767791) | success・同期 PR #666 作成 |
-| `life-plan-app` | [32052423709](https://github.com/Fandhe-AI/life-plan-app/actions/runs/32052423709) | スキル更新完走・push 到達 |
+| `private-repo-08` | 31981615238（schedule） | `Update agent skills` success |
+| `private-repo-19` | 32058767791 | success・同期 PR #666 作成 |
+| `private-repo-11` | 32052423709 | スキル更新完走・push 到達 |
 
 同期が壊れないなら、配置統一は「Claude Code のスキル解決挙動へ影響しうる変更を多数のリポジトリへ
 加える」コストだけを払って得るものが無い。個別事情で同期を外す必要がある場合は、配置を変えるのでは
@@ -36,16 +36,16 @@ downstream リポジトリにおけるスキルの配置（`.claude/skills/<name
 
 | 配下エントリの構成 | 件数 | リポジトリ |
 |------------------|------|-----------|
-| 全て symlink（`120000`） | 14 | `actions` `automation` `automation-spec` `baby-tasks-app` `brain-training-app` `desktop-automation-app` `fandhe-backend` `fandhe-frontend` `fandhe-multi-platform` `hobby-keyboard` `local-llm-server` `pronunciation-vocab-app` `rust-ai-library` `team-hub-spec` |
-| 混在（`040000` と `120000`） | 16 | `agent-cli-skills` `agent-reference-skills` `aliz-corporate-web` `articles` `automation-app` `ideas` `life-plan-app` `local-server` `mcp_hub-spec` `mirror-ui` `pet-hub` `team-hub` `template-articles` `template-frontend-react_router` `template-ideas` `yadori` |
-| 全て実ディレクトリ（`040000`） | 2 | `mcp_hub-app-frontend` `my-ime` |
+| 全て symlink（`120000`） | 14 | `actions` `automation` `private-repo-07` `private-repo-08` `private-repo-09` `private-repo-05` `fandhe-backend` `fandhe-frontend` `fandhe-multi-platform` `private-repo-10` `private-repo-12` `private-repo-17` `rust-ai-library` `private-repo-01` |
+| 混在（`040000` と `120000`） | 16 | `agent-cli-skills` `agent-reference-skills` `private-repo-04` `articles` `private-repo-06` `ideas` `private-repo-11` `private-repo-13` `private-repo-03` `private-repo-14` `private-repo-16` `private-repo-18` `template-articles` `template-frontend-react_router` `template-ideas` `private-repo-19` |
+| 全て実ディレクトリ（`040000`） | 2 | `private-repo-02` `private-repo-15` |
 
 「3 リポだけが実ディレクトリで他 19 リポは symlink」という当初の整理は**実測と一致しない**。
 混在は特定リポの事故ではなく、フリート全体で常態である。
 
 `npx skills update <name> --project` は対象スキルの実体だけを `.agents/skills/<name>/` へ移し
 `.claude/skills/<name>` をそこへの symlink に張り替えるため、CLI 経由で個別更新したスキルだけ
-配置が変わる。`life-plan-app` #204 / `baby-tasks-app` #15 で実際にそうなっており、
+配置が変わる。`private-repo-11` #204 / `private-repo-08` #15 で実際にそうなっており、
 この状態を正として受け入れる（revert しない）。
 
 ## How to apply

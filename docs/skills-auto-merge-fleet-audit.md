@@ -12,7 +12,7 @@ skills-auto-merge を fail-closed にするか決める」であり、当初の�
 であり、これは ruleset 構造の実測（`.claude/rules/ruleset-policy.md` の 3 軸 + classic BP）とは
 **別軸**である（4 節・4.2 節参照）。4 節の実測どおり棚卸し対象 25 リポ中 24 リポは branch
 ruleset で構造的に保護されているが、この構造的 green は PR レベル実測の代替にならない。
-25 リポのうち PR レベルの `BLOCKED` を実際に確認できたのは `team-hub-spec`（#342 実測時の
+25 リポのうち PR レベルの `BLOCKED` を実際に確認できたのは `private-repo-01`（#342 実測時の
 PR #58）の 1 リポのみであり、`agent-cli-skills` 自身を含む残り 24 リポは PR レベル実測が
 **未確認**のまま組織変数追従で運用されている状態にある。
 **本エージェントの書き込み対象は `agent-cli-skills` 自身に限られる。同リポは branch ruleset
@@ -52,16 +52,16 @@ PR #58）の 1 リポのみであり、`agent-cli-skills` 自身を含む残り 
 | 分類 | 件数 | 内訳 |
 |------|-----:|------|
 | 上流 reusable workflow 本体（対象外） | 1 | `actions` |
-| `skills-auto-merge: 'false'` 明示済み（#342 で対応済み・再確認のみ） | 4 | `aliz-corporate-web` / `automation-spec` / `hobby-keyboard` / `mcp_hub-spec` |
+| `skills-auto-merge: 'false'` 明示済み（#342 で対応済み・再確認のみ） | 4 | `private-repo-04` / `private-repo-07` / `private-repo-10` / `private-repo-03` |
 | 組織変数追従（`VARS_FOLLOW`） = 本監査の対象 | 25 | 下表 |
 
 `VARS_FOLLOW` 25 リポ: `agent-cli-skills` `agent-reference-skills` `articles`
-`automation` `automation-app` `baby-tasks-app` `brain-training-app`
-`desktop-automation-app` `fandhe-backend` `fandhe-frontend` `fandhe-multi-platform`
-`ideas` `life-plan-app` `local-llm-server` `local-server` `mirror-ui`
-`pet-hub` `pronunciation-vocab-app` `rust-ai-library` `team-hub` `team-hub-spec`
+`automation` `private-repo-06` `private-repo-08` `private-repo-09`
+`private-repo-05` `fandhe-backend` `fandhe-frontend` `fandhe-multi-platform`
+`ideas` `private-repo-11` `private-repo-12` `private-repo-13` `private-repo-14`
+`private-repo-16` `private-repo-17` `rust-ai-library` `private-repo-18` `private-repo-01`
 `template-articles` `template-frontend-react_router` `template-ideas`
-`yadori`
+`private-repo-19`
 
 （`agent-cli-skills` 自身も `VARS_FOLLOW` だった。本リポは 4 節のとおり ruleset 構造が
 保護ありと決定的に測定できるが、5 節の判定基準（PR レベル `BLOCKED` 実測）は満たさない。
@@ -99,7 +99,7 @@ ruleset が列挙される・`total >= 1` であることだけでは「既定�
 （「実際に PR が required checks の完了を待って `BLOCKED` になることを確認した」場合に
 限り組織変数追従を許容する）に合わせ、構造的実測（ruleset 設定）だけでなく個別 PR レベルの
 サーバー側強制についても 25 リポ全件で確認を試みた。手順・生の測定結果は 4.2 節を参照。
-`team-hub-spec` のみ #342 実測時に同期 PR #58 の `BLOCKED` を確認済みであり、それ以外の
+`private-repo-01` のみ #342 実測時に同期 PR #58 の `BLOCKED` を確認済みであり、それ以外の
 24 リポ（`agent-cli-skills` と `fandhe-backend` を含む。両リポの `ruleset-policy.md` 記録は
 構造的実測に留まり PR レベル確認ではない）では測定日時点で確認対象となる open な同期 PR が
 存在せず、PR レベルの確認は判定不能だった。この判定不能の扱い（構造的実測が green の
@@ -117,27 +117,27 @@ ruleset が列挙される・`total >= 1` であることだけでは「既定�
 | `agent-reference-skills` | active/0/9/[] | 404 | 保護あり |
 | `articles` | active/0/8/[] | 404 | 保護あり |
 | `automation` | active/0/14/[] | 404 | 保護あり |
-| `automation-app` | active/0/30/[] | 404 | 保護あり |
-| `baby-tasks-app` | active/0/6/[] | 404 | 保護あり |
-| `brain-training-app` | active/0/8/[] | 200（strict: none, unbound: []） | 保護あり |
-| `desktop-automation-app` | active/0/9/[] | 200（strict: none, unbound: []） | 保護あり |
+| `private-repo-06` | active/0/30/[] | 404 | 保護あり |
+| `private-repo-08` | active/0/6/[] | 404 | 保護あり |
+| `private-repo-09` | active/0/8/[] | 200（strict: none, unbound: []） | 保護あり |
+| `private-repo-05` | active/0/9/[] | 200（strict: none, unbound: []） | 保護あり |
 | `fandhe-backend` | active/0/18/[] | 404 | 保護あり |
 | `fandhe-frontend` | active/0/25/[] | 404 | 保護あり |
 | `fandhe-multi-platform` | active/0/9/[] | 404 | 保護あり |
 | `ideas` | active/0/8/[] | 404 | 保護あり |
-| `life-plan-app` | active/0/8/[] | 404 | 保護あり |
-| `local-llm-server` | active/0/21/[] | 404 | 保護あり |
-| `local-server` | active/0/8/[] | 404 | 保護あり |
-| `mirror-ui` | active/0/7/[] | 404 | 保護あり |
-| `pet-hub` | active/0/9/[] | 404 | 保護あり |
-| `pronunciation-vocab-app` | active/0/3/[] | 404 | 保護あり |
+| `private-repo-11` | active/0/8/[] | 404 | 保護あり |
+| `private-repo-12` | active/0/21/[] | 404 | 保護あり |
+| `private-repo-13` | active/0/8/[] | 404 | 保護あり |
+| `private-repo-14` | active/0/7/[] | 404 | 保護あり |
+| `private-repo-16` | active/0/9/[] | 404 | 保護あり |
+| `private-repo-17` | active/0/3/[] | 404 | 保護あり |
 | `rust-ai-library` | active/0/15/[] | 404 | 保護あり |
-| `team-hub` | active/0/23/[] | 404 | 保護あり |
-| `team-hub-spec` | active/0/4/[] | 404 | 保護あり（#342 実測: PR #58 の `BLOCKED` も確認済み） |
+| `private-repo-18` | active/0/23/[] | 404 | 保護あり |
+| `private-repo-01` | active/0/4/[] | 404 | 保護あり（#342 実測: PR #58 の `BLOCKED` も確認済み） |
 | `template-articles` | **ruleset 0 件** | **404** | **保護なし** |
 | `template-frontend-react_router` | active/0/12/[]（ruleset 名「Code Quality Copilot review for default branch」） | 404 | 保護あり |
 | `template-ideas` | active/0/8/[] | 404 | 保護あり |
-| `yadori` | active/0/12/[] | 404 | 保護あり |
+| `private-repo-19` | active/0/12/[] | 404 | 保護あり |
 
 **結果: 25 リポ中 24 リポが保護あり、`template-articles` のみ保護なし。**
 
@@ -169,27 +169,27 @@ ruleset が列挙される・`total >= 1` であることだけでは「既定�
 | `agent-reference-skills` | 1 | 9/[] |
 | `articles` | 1 | 8/[] |
 | `automation` | 1 | 14/[] |
-| `automation-app` | 1 | 30/[] |
-| `baby-tasks-app` | 1 | 6/[] |
-| `brain-training-app` | 1 | 8/[] |
-| `desktop-automation-app` | 1 | 9/[] |
+| `private-repo-06` | 1 | 30/[] |
+| `private-repo-08` | 1 | 6/[] |
+| `private-repo-09` | 1 | 8/[] |
+| `private-repo-05` | 1 | 9/[] |
 | `fandhe-backend` | 1 | 18/[] |
 | `fandhe-frontend` | 1 | 25/[] |
 | `fandhe-multi-platform` | 1 | 9/[] |
 | `ideas` | 1 | 8/[] |
-| `life-plan-app` | 1 | 8/[] |
-| `local-llm-server` | 1 | 21/[] |
-| `local-server` | 1 | 8/[] |
-| `mirror-ui` | 1 | 7/[] |
-| `pet-hub` | 1 | 9/[] |
-| `pronunciation-vocab-app` | 1 | 3/[] |
+| `private-repo-11` | 1 | 8/[] |
+| `private-repo-12` | 1 | 21/[] |
+| `private-repo-13` | 1 | 8/[] |
+| `private-repo-14` | 1 | 7/[] |
+| `private-repo-16` | 1 | 9/[] |
+| `private-repo-17` | 1 | 3/[] |
 | `rust-ai-library` | 1 | 15/[] |
-| `team-hub` | 1 | 23/[] |
-| `team-hub-spec` | 1 | 4/[] |
+| `private-repo-18` | 1 | 23/[] |
+| `private-repo-01` | 1 | 4/[] |
 | `template-articles` | **0** | **0/[]** |
 | `template-frontend-react_router` | 1 | 12/[] |
 | `template-ideas` | 1 | 8/[] |
-| `yadori` | 1 | 12/[] |
+| `private-repo-19` | 1 | 12/[] |
 
 `template-articles` のみ既定ブランチにマッチする ruleset が 0 件（effective
 `required_status_checks` も 0 件）であり、他 24 リポは既定ブランチにマッチする ruleset が
@@ -208,7 +208,7 @@ required checks の完了を待って `BLOCKED` になることを確認した�
 （同ファイル 121 行・158 行）。3〜4.1 節の構造的実測（ruleset 設定）だけではこの基準を
 満たさないため、これを埋める確認を行った。
 
-`VARS_FOLLOW` 25 リポのうち、`team-hub-spec` は #342 実測時に同期 PR #58 が実際に
+`VARS_FOLLOW` 25 リポのうち、`private-repo-01` は #342 実測時に同期 PR #58 が実際に
 `BLOCKED` で待機していることを確認済み（`docs/update-external-rollout.md` 158 行）で
 あり、25 リポ中唯一の PR レベル確認済みリポジトリである。残り 24 リポ
 （`template-articles` を含む）について、上流スキル同期 PR の open 状態を次のコマンドで
@@ -259,7 +259,7 @@ PR レベル実測条件を満たしたことにならず、`template-articles` 
 （`agent-cli-skills` 自身を含む）とする。** ruleset 構造の green（4・4.1 節）は
 `ruleset-policy.md` が定義する別軸の検証であり、`update-external-rollout.md` が要求する
 PR レベル実測の免除条件ではない（4.2 節で区別を記載）。25 リポ中 PR レベル実測を満たすのは
-`team-hub-spec`（#342 実測時の PR #58 の `BLOCKED` 確認）のみであり、この 1 リポだけを
+`private-repo-01`（#342 実測時の PR #58 の `BLOCKED` 確認）のみであり、この 1 リポだけを
 組織変数追従の継続対象とする。
 
 - 案 a は #342 と同一の前例があり、変更が wrapper 1 行 + コメントに閉じ、可逆で、他の運用
@@ -316,7 +316,7 @@ PR レベル実測の免除条件ではない（4.2 節で区別を記載）。2
 +      skills-auto-merge: 'false'
 ```
 
-`template-articles` 以外の 22 リポ（`team-hub-spec` を除く `VARS_FOLLOW` 24 リポから
+`template-articles` 以外の 22 リポ（`private-repo-01` を除く `VARS_FOLLOW` 24 リポから
 `agent-cli-skills` を除いたもの）も同型の変更を要する。個別リポの ruleset 構造は green の
 ため、コメント文言はリポジトリごとに「branch ruleset は保護あり（`main-protection` 等）だが
 PR レベル `BLOCKED` 実測が未確認」である旨に差し替える（6.1 節のコメントを参照）。
@@ -352,7 +352,7 @@ push/PR 作成が許可されたエージェント、またはユーザー自身
 
 5 節の決定（案 a: `'false'` 固定）は、2026-08-30 のオーナー判断で**撤回**し、Fandhe-AI 配下の
 wrapper を組織変数追従（`skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}`）へ統一する
-方針に改めた。実施済み範囲は 9.1 節のとおり（直近 1 週間に push のあったリポが対象。`automation-spec`
+方針に改めた。実施済み範囲は 9.1 節のとおり（直近 1 週間に push のあったリポが対象。`private-repo-07`
 は未適用）。1〜7 節は監査時点の記録として残す（本節が現行方針）。
 
 ### 9.1 適用した変更
@@ -365,16 +365,16 @@ wrapper を組織変数追従（`skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE |
 | `agent-cli-skills` | #460 | codex P0（承認境界の後退）×2 を受容済み類型として resolve。codex が required のため bypass 一時付与 → admin squash → 即復元 → 3 軸 green（bypass 0 / strict false / total 12 / unbound 0） |
 | `agent-specialist-skills` | #4 | codex P1 → 返信・resolve → squash |
 | `template-skills` | #4 | 同上 |
-| `mcp_hub-spec` | #117 | ruleset 新規適用後に auto-merge 完走 |
-| `hobby-keyboard` | #55 | 同上 |
-| `aliz-corporate-web` | #17 | 同上 |
+| `private-repo-03` | #117 | ruleset 新規適用後に auto-merge 完走 |
+| `private-repo-10` | #55 | 同上 |
+| `private-repo-04` | #17 | 同上 |
 
-走査枠外（最終 push 2026-08-19）の `automation-spec` は `'false'` 固定・ruleset 0 件のまま**未変更**。
+走査枠外（最終 push 2026-08-19）の `private-repo-07` は `'false'` 固定・ruleset 0 件のまま**未変更**。
 
 ### 9.2 保護なしリポへの ruleset 適用
 
-2 節で「`'false'` 明示済み」としていた 4 リポのうち `mcp_hub-spec` / `hobby-keyboard` /
-`aliz-corporate-web` へ、同日 `setup-repo-guards` Step 4 相当を適用した（Step 1〜3 の
+2 節で「`'false'` 明示済み」としていた 4 リポのうち `private-repo-03` / `private-repo-10` /
+`private-repo-04` へ、同日 `setup-repo-guards` Step 4 相当を適用した（Step 1〜3 の
 codex-review / AGENTS.md / ci-complete は未導入。3 リポとも CI workflow を持たず、
 常時報告されるチェックは Cursor Bugbot のみ）。
 
@@ -397,7 +397,7 @@ classic BP: HTTP 404
 
 - `agent-cli-skills#460`: codex rerun 中に `mergeStateStatus=BLOCKED`・pending check 1 件で停止し、
   完了後も required check `codex-review / codex` の FAILURE により BLOCKED を維持した
-- `mcp_hub-spec#117` / `hobby-keyboard#55` / `aliz-corporate-web#17`: ruleset 適用直後の push で
+- `private-repo-03#117` / `private-repo-10#55` / `private-repo-04#17`: ruleset 適用直後の push で
   `BLOCKED`（Cursor Bugbot pending）→ 完了後にのみ auto-merge が完走した
 
 以上により、判定基準の 3 条件は agent-cli-skills と上記 3 リポで満たされている。残る 20 リポ

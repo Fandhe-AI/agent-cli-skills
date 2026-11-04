@@ -14,11 +14,11 @@
 
 | リポジトリ | 既定ブランチ | ruleset | classic BP | `.gitmodules` | `.agents/skills` エントリ数 | 既存 workflow |
 |---|---|---|---|---|---|---|
-| `Fandhe-AI/aliz-corporate-web` | main | なし（`[]`） | 404 | あり（8 件） | 35 | なし |
-| `Fandhe-AI/automation-spec` | main | なし | 404 | なし | 17 | なし |
-| `Fandhe-AI/hobby-keyboard` | main | なし | 404 | なし | 14 | なし |
-| `Fandhe-AI/mcp_hub-spec` | main | なし | 404 | なし | 9 | markdownlint / openapi |
-| `Fandhe-AI/team-hub-spec` | main | `main-protection`（active・bypass 0） | 404 | なし | 17 | ci / codex-review |
+| `Fandhe-AI/private-repo-04` | main | なし（`[]`） | 404 | あり（8 件） | 35 | なし |
+| `Fandhe-AI/private-repo-07` | main | なし | 404 | なし | 17 | なし |
+| `Fandhe-AI/private-repo-10` | main | なし | 404 | なし | 14 | なし |
+| `Fandhe-AI/private-repo-03` | main | なし | 404 | なし | 9 | markdownlint / openapi |
+| `Fandhe-AI/private-repo-01` | main | `main-protection`（active・bypass 0） | 404 | なし | 17 | ci / codex-review |
 
 2026-08-18 実測（`gh api repos/{repo}/rulesets` の件数、`gh api repos/{repo}/contents/.github/workflows/update-external.yml` の 404）で再確認済み。ruleset・既存 workflow の有無は変わっていない。
 
@@ -130,33 +130,33 @@ jobs:
 
 | リポジトリ | `enable-submodule` | `skills-auto-merge` |
 |---|---|---|
-| `automation-spec` | 既定（渡さない） | `'false'` 固定（ruleset 未整備・2026-08-30 時点で未変更） |
-| `hobby-keyboard` / `mcp_hub-spec` | 既定（渡さない） | **組織変数追従へ変更**（2026-08-30・ruleset `main-protection` 適用済み。hobby-keyboard#55 / mcp_hub-spec#117） |
-| `aliz-corporate-web` | **`false` を明示** | **組織変数追従へ変更**（2026-08-30・ruleset `main-protection` 適用済み。aliz-corporate-web#17） |
-| `team-hub-spec` | 既定（渡さない） | **`${{ vars.SKILLS_AUTO_MERGE \|\| 'false' }}` へ変更**（保護を実測済みのため組織変数追従） |
+| `private-repo-07` | 既定（渡さない） | `'false'` 固定（ruleset 未整備・2026-08-30 時点で未変更） |
+| `private-repo-10` / `private-repo-03` | 既定（渡さない） | **組織変数追従へ変更**（2026-08-30・ruleset `main-protection` 適用済み。private-repo-10#55 / private-repo-03#117） |
+| `private-repo-04` | **`false` を明示** | **組織変数追従へ変更**（2026-08-30・ruleset `main-protection` 適用済み。private-repo-04#17） |
+| `private-repo-01` | 既定（渡さない） | **`${{ vars.SKILLS_AUTO_MERGE \|\| 'false' }}` へ変更**（保護を実測済みのため組織変数追従） |
 
 - `enable-submodule` は**リポジトリで分かれる**:
-  - `.gitmodules` を持たない 4 リポ（`automation-spec` / `hobby-keyboard` / `mcp_hub-spec` /
-    `team-hub-spec`）は渡さない（既定 `true`）。submodule ジョブは checkout 前の存在判定で
+  - `.gitmodules` を持たない 4 リポ（`private-repo-07` / `private-repo-10` / `private-repo-03` /
+    `private-repo-01`）は渡さない（既定 `true`）。submodule ジョブは checkout 前の存在判定で
     no-op になるため明示不要。
-  - `.gitmodules` を持つ `aliz-corporate-web` のみ **`enable-submodule: false` を明示する**。
+  - `.gitmodules` を持つ `private-repo-04` のみ **`enable-submodule: false` を明示する**。
     起草時は「要否はスコープ外なので既定のまま観測に留める」としていたが、既定 `true` のまま
     導入すると**評価していない submodule 更新 PR が初回実行で作られてしまう**（観測ではなく
     副作用の発生）。要否の判断をスコープ外に保ったまま副作用を出さないため、明示的に無効化して
     導入した。有効化が必要になった時点で別イシューとして扱う。
 - `skills-auto-merge` も**リポジトリで分かれる**（2026-08-30 に現行状態へ更新）:
   - テンプレート既定は組織変数追従 `${{ vars.SKILLS_AUTO_MERGE || 'false' }}`（2026-08-30
-    オーナー判断で Fandhe-AI 全リポを統一）。`hobby-keyboard` / `mcp_hub-spec` /
-    `aliz-corporate-web` は同日 ruleset `main-protection`（`active`・`bypass_actors` 0・
+    オーナー判断で Fandhe-AI 全リポを統一）。`private-repo-10` / `private-repo-03` /
+    `private-repo-04` は同日 ruleset `main-protection`（`active`・`bypass_actors` 0・
     required check `Cursor Bugbot` を integration_id 束縛）を適用したうえでこの既定へ切り替えた
     （`docs/skills-auto-merge-fleet-audit.md` 9 節）。
-  - `team-hub-spec` は #342 導入時から組織変数追従。同リポは ruleset `main-protection` が
+  - `private-repo-01` は #342 導入時から組織変数追従。同リポは ruleset `main-protection` が
     `active`・`bypass_actors` 0・required checks 4 件であり、**同期 PR #58 が実際に `BLOCKED` で
     待機している**ことまで実測済み（「自動マージ」節を参照）。
-  - `automation-spec` のみ固定 `'false'` のまま（ruleset 未整備・2026-08-30 時点で未変更）。
+  - `private-repo-07` のみ固定 `'false'` のまま（ruleset 未整備・2026-08-30 時点で未変更）。
 
   したがって配置したファイルは、テンプレートのプレースホルダ置換だけでは
-  `aliz-corporate-web` 分を再現できない。同リポは上記 1 行を `runner-json` の直後へ加えた
+  `private-repo-04` 分を再現できない。同リポは上記 1 行を `runner-json` の直後へ加えた
   ものを配置している（実測: 同リポの初回 run で `Update submodule references` が `skipped`）。
 - `cron` は本リポの既存 wrapper と同じ `0 0 * * *` に統一する（ずらさない）。
 - `base-branch` は渡さない（既定 `main` = 5 リポとも既定ブランチ）。
@@ -283,22 +283,22 @@ SUBMODULE_PAT visibility=all
 
 | リポジトリ | ラベル | wrapper 導入 | 初回実行 run | 同期 PR |
 |---|---|---|---|---|
-| `mcp_hub-spec` | 作成済 | `fc2d67d8`（main 直接） | [32087993215](https://github.com/Fandhe-AI/mcp_hub-spec/actions/runs/32087993215) success | [#109](https://github.com/Fandhe-AI/mcp_hub-spec/pull/109) MERGED |
-| `hobby-keyboard` | 作成済 | `69a75e7c`（main 直接） | [32087990615](https://github.com/Fandhe-AI/hobby-keyboard/actions/runs/32087990615) success | [#49](https://github.com/Fandhe-AI/hobby-keyboard/pull/49) MERGED |
-| `automation-spec` | 作成済 | `e95f01e2`（main 直接） | [32087988457](https://github.com/Fandhe-AI/automation-spec/actions/runs/32087988457) success | [#76](https://github.com/Fandhe-AI/automation-spec/pull/76) MERGED |
-| `aliz-corporate-web` | 作成済 | `7966d371`（main 直接） | [32087996118](https://github.com/Fandhe-AI/aliz-corporate-web/actions/runs/32087996118) success（`target=skill`） | [#11](https://github.com/Fandhe-AI/aliz-corporate-web/pull/11) MERGED |
-| `team-hub-spec` | 作成済 | [PR #57](https://github.com/Fandhe-AI/team-hub-spec/pull/57) MERGED | [32088353084](https://github.com/Fandhe-AI/team-hub-spec/actions/runs/32088353084) success | [#58](https://github.com/Fandhe-AI/team-hub-spec/pull/58) OPEN（auto-merge 予約済み・必須チェック待ち） |
+| `private-repo-03` | 作成済 | `fc2d67d8`（main 直接） | 32087993215 success | #109 MERGED |
+| `private-repo-10` | 作成済 | `69a75e7c`（main 直接） | 32087990615 success | #49 MERGED |
+| `private-repo-07` | 作成済 | `e95f01e2`（main 直接） | 32087988457 success | #76 MERGED |
+| `private-repo-04` | 作成済 | `7966d371`（main 直接） | 32087996118 success（`target=skill`） | #11 MERGED |
+| `private-repo-01` | 作成済 | PR #57 MERGED | 32088353084 success | #58 OPEN（auto-merge 予約済み・必須チェック待ち） |
 
 **5 リポすべてで初回実行が success し、同期 PR が作成された**（受け入れ条件 4 を充足）。
-`team-hub-spec` の #58 だけが open なのは、同リポのみ必須チェック 4 件を持つため
+`private-repo-01` の #58 だけが open なのは、同リポのみ必須チェック 4 件を持つため
 auto-merge がその完了を待っている状態であり、失敗ではない（`EditorConfig (strict)` /
 `PoC rustfmt --check` / `Broken link check (lychee)` は既に success）。
 
-`team-hub-spec` のみ branch ruleset（`main-protection`・active・bypass 0・required check 4 件）
+`private-repo-01` のみ branch ruleset（`main-protection`・active・bypass 0・required check 4 件）
 があるため PR 経由にした。残り 4 リポは ruleset も classic branch protection も無い
 （`branches/main/protection` が HTTP 404）ため main へ直接配置した。
 
-**`aliz-corporate-web` の `enable-submodule: false` は効いている。** 同リポの run で
+**`private-repo-04` の `enable-submodule: false` は効いている。** 同リポの run で
 `Update submodule references` ジョブが `skipped` であることを実測した。本リポジトリだけ
 `.gitmodules` を持つため、評価していない submodule 更新 PR が初回実行で作られることを
 避ける目的で明示した（要否の判断自体はスコープ外のまま）。段階確認の方針どおり
@@ -306,7 +306,7 @@ auto-merge がその完了を待っている状態であり、失敗ではない
 
 ### 自動マージ: 保護の無い 4 リポで fail-closed 化した（PR #356 codex-review P0）
 
-初回実行で作られた同期 PR は、`team-hub-spec` を除く 4 リポで**作成直後に自動マージされた**。
+初回実行で作られた同期 PR は、`private-repo-01` を除く 4 リポで**作成直後に自動マージされた**。
 原因は組織変数:
 
 ```
@@ -333,15 +333,15 @@ required status checks をサーバー側で強制していることを**実測�
 
 | リポジトリ | `skills-auto-merge` | 根拠 |
 |-----------|--------------------|------|
-| `aliz-corporate-web` | **`'false'` を明示** | ruleset なし・classic BP 404。サーバー側強制を実測できない |
-| `automation-spec` | 同上 | 同上 |
-| `hobby-keyboard` | 同上 | 同上 |
-| `mcp_hub-spec` | 同上 | 同上 |
-| `team-hub-spec` | 組織既定のまま | ruleset `main-protection` が `active`・`bypass_actors` 0・required checks 4 件。同期 PR #58 が実際に `BLOCKED` で待機しており、サーバー側強制が働くことを実測済み |
+| `private-repo-04` | **`'false'` を明示** | ruleset なし・classic BP 404。サーバー側強制を実測できない |
+| `private-repo-07` | 同上 | 同上 |
+| `private-repo-10` | 同上 | 同上 |
+| `private-repo-03` | 同上 | 同上 |
+| `private-repo-01` | 組織既定のまま | ruleset `main-protection` が `active`・`bypass_actors` 0・required checks 4 件。同期 PR #58 が実際に `BLOCKED` で待機しており、サーバー側強制が働くことを実測済み |
 
 **既に自動マージされた 4 件は revert しない。** 内容は正当な上流スキル更新であり、revert の方が
 破壊的である。ただし**レビューを経ずにマージされた事実は記録に残す**:
-`mcp_hub-spec#109` / `hobby-keyboard#49` / `automation-spec#76` / `aliz-corporate-web#11`。
+`private-repo-03#109` / `private-repo-10#49` / `private-repo-07#76` / `private-repo-04#11`。
 
 **運用上の帰結**: 自動マージを止めた 4 リポにはレビュアーも CI も無いため、日次の同期 PR が
 open のまま溜まる。上流には `skills-close-superseded`（最新日付ブランチ以外を close する）が
@@ -377,10 +377,10 @@ run [32088779994](https://github.com/Fandhe-AI/agent-cli-skills/actions/runs/320
 
 | リスク | 影響 | 対処 |
 |---|---|---|
-| 同期 PR が下流の lint（`team-hub-spec` の editorconfig / lychee、`mcp_hub-spec` の markdownlint）で赤になる | 同期 PR がマージできない | 受入条件は「PR が作成されること」。事象を記録し後続イシューを起票する |
-| `team-hub-spec` で `Cursor Bugbot` が起動しない | 導入 PR が恒久的にマージ不能 | ruleset を緩めず、状況をイシューへ記録して停止・エスカレーションする |
+| 同期 PR が下流の lint（`private-repo-01` の editorconfig / lychee、`private-repo-03` の markdownlint）で赤になる | 同期 PR がマージできない | 受入条件は「PR が作成されること」。事象を記録し後続イシューを起票する |
+| `private-repo-01` で `Cursor Bugbot` が起動しない | 導入 PR が恒久的にマージ不能 | ruleset を緩めず、状況をイシューへ記録して停止・エスカレーションする |
 | 低活動 3 リポで schedule が自動無効化される | 同期が止まる | 軸 5 が検知 → `docs/update-external-schedule.md` の復旧手順。導入直後は猶予判定で偽陽性なし |
-| `aliz-corporate-web` の submodule ジョブ失敗 | 日次 run が赤 → 将来 SCHEDULE-FAILING | **解消済み（対処不要）**。同リポは `enable-submodule: false` を明示して導入したため submodule ジョブは常に `skipped` になり、失敗経路自体が無い（実測: 初回 run・`target=all` run とも `Update submodule references = skipped`）。将来 `enable-submodule` を有効化する別イシューを立てる際に、このリスクを再評価する |
+| `private-repo-04` の submodule ジョブ失敗 | 日次 run が赤 → 将来 SCHEDULE-FAILING | **解消済み（対処不要）**。同リポは `enable-submodule: false` を明示して導入したため submodule ジョブは常に `skipped` になり、失敗経路自体が無い（実測: 初回 run・`target=all` run とも `Update submodule references = skipped`）。将来 `enable-submodule` を有効化する別イシューを立てる際に、このリスクを再評価する |
 | 導入直後に `PIN-STALE` として再登場 | レポート件数は `SYNC-CI-ABSENT` 単独では減らない | 判定ゲートは `SYNC-CI-ABSENT == 0` のみ。**解消済み**: 参照を `@latest` へ統一したため pin の鮮度という概念自体が無くなった（2026-08-18） |
 
 ## スコープ外
