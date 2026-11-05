@@ -70,6 +70,7 @@ resolve・`--auto` の武装・手動マージは、いずれも `SKILL.md` Step
   - ETXTBSY
   - browser test の p95 しきい値超過
   - runner の rustup 欠落
+  - runner のディスク枯渇（`No space left on device`）
 - `rerun` は以前に解決した reusable workflow の版で動く。新しい版で走らせたいときは、新しい push が要る。
 - 広域失敗の扱いは `SKILL.md` 注意事項に従う(自分の操作のせいと即断しない)。
 
