@@ -5294,7 +5294,7 @@ function recordEphemeralWorktree(issueNumber, rawPath, kind, { revive = true } =
     // パスを検証できなくても「1 件生成された事実」は path: '' で計上する。スキップすると実測が
     // 実際のディスク増加より過小になり fail-closed が弱まる。空エントリは「パス不明」と表示し、
     // 手動掃除は git worktree list からの突き合わせに委ねる。
-    log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できなかった（件数のみ計上する。git worktree list で残骸を確認すること）`)
+    log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できなかった（件数のみ計上。git worktree list で確認すること）`)
     ephemeralWorktrees.push({ issue: issueNumber, kind, path: '' })
     return
   }
@@ -5384,7 +5384,7 @@ function recordReplacementWorktree(issueNumber, rawPath) {
   // live への戻しは呼び出し元の applyReplacementAccounting が新旧の同一判定つきで行う（ここで戻すと、同じ呼び出しで削除を確認した旧と同じパスの新を live にしてしまう）
   if (residualStartPathSet.has(p) || ephemeralWorktrees.some((e) => e.path === p)) return false
   ephemeralWorktrees.push({ issue: issueNumber, kind: 'replacement', path: p })
-  log(`#${issueNumber}: 旧 worktree を保持したため、置換後の worktree も残置の台帳へ載せた（${p}）`)
+  log(`#${issueNumber}: 旧を保持したため置換後の worktree も台帳へ載せた（${p}）`)
   return true
 }
 
@@ -8867,14 +8867,16 @@ async function runImplement(item) {
         // routingError と同じく台帳へ記録してから終端する。
         const reason = `Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
         warnIssue(item, reason)
-        recordEphemeralWorktree(item.number, fReview?.worktreePath, 'fix-terminal')
+        // 新しい detached worktree は状態へ書いて Recover が引き取る（未回収コミットの唯一の実体のため使い捨てとして記録しない）。パス不明のときだけ件数を計上する
+        if (!newWorktreePathReview) recordEphemeralWorktree(item.number, '', 'fix-terminal')
         // 新しい detached worktree を状態へ書くとき、ブランチを保持している旧 worktree も cleanupWorktree で渡す。
         // 渡さないと旧 worktree が残り、Recover が対象ブランチを in-use と判定して fix コミットを付け直せない（Issue #731）。
-        // 同一パス・新が不明なら旧が唯一の実体のため片づけない。異なるときは discard（汚れは保持）で渡す。
+        // 同一パス・新が不明なら旧が唯一の実体のため片づけない。異なるときは discard + --expect-branch（on-branch の旧だけ消す。前回 fix の detached は保持）で渡す。
         const wt = (p) => p.replace(/\/+/g, '/').replace(/\/$/, '')
+        // impl.branch は上の命名ゲート（implBranchViolation）を通過済みで expectBranch に渡せる
         await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason, worktree: newWorktreePathReview || oldWorktreePathReview },
           newWorktreePathReview && wt(newWorktreePathReview) !== wt(oldWorktreePathReview)
-            ? { cleanupWorktree: oldWorktreePathReview, cleanupMode: 'discard', replacementWorktree: newWorktreePathReview }
+            ? { cleanupWorktree: oldWorktreePathReview, cleanupMode: 'discard', expectBranch: impl.branch, replacementWorktree: newWorktreePathReview }
             : {})
         recordFailure({ issue: item.number, reason })
         return false

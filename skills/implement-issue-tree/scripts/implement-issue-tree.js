@@ -5294,7 +5294,7 @@ if(!p){
 
 
 
-log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できなかった（件数のみ計上する。git worktree list で残骸を確認すること）`)
+log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できなかった（件数のみ計上。git worktree list で確認すること）`)
 ephemeralWorktrees.push({issue:issueNumber,kind,path:''})
 return
 }
@@ -5384,7 +5384,7 @@ return true
 
 if(residualStartPathSet.has(p)||ephemeralWorktrees.some((e)=>e.path===p))return false
 ephemeralWorktrees.push({issue:issueNumber,kind:'replacement',path:p})
-log(`#${issueNumber}: 旧 worktree を保持したため、置換後の worktree も残置の台帳へ載せた（${p}）`)
+log(`#${issueNumber}: 旧を保持したため置換後の worktree も台帳へ載せた（${p}）`)
 return true
 }
 
@@ -8867,14 +8867,16 @@ if(fReview.commitFailed===true){
 
 const reason=`Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
 warnIssue(item,reason)
-recordEphemeralWorktree(item.number,fReview?.worktreePath,'fix-terminal')
+
+if(!newWorktreePathReview)recordEphemeralWorktree(item.number,'','fix-terminal')
 
 
 
 const wt=(p)=>p.replace(/\/+/g, '/').replace(/\/$/, '')
+
 await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason,worktree:newWorktreePathReview||oldWorktreePathReview},
 newWorktreePathReview&&wt(newWorktreePathReview)!==wt(oldWorktreePathReview)
-?{cleanupWorktree:oldWorktreePathReview,cleanupMode:'discard',replacementWorktree:newWorktreePathReview}
+?{cleanupWorktree:oldWorktreePathReview,cleanupMode:'discard',expectBranch:impl.branch,replacementWorktree:newWorktreePathReview}
 :{})
 recordFailure({issue:item.number,reason})
 return false
