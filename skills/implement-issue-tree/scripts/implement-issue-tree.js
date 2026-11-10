@@ -4516,16 +4516,16 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'ca6773db1fba50b3fe5e27bd6b395e32b8278d59ee13528b7f345415a1c40e8e',
-'measure-free-disk.sh':'1164c4b7ec1e2778330ad8b6eed9737079896ce6e5f30fa3cf9d46a70fb86bd0',
-'observe-pr.sh':'535a470fdbae779832a3856985a280cf115ef76cc3060f140619e9912b104b42',
-'base-merge.sh':'7835fc24396d3a442bcddac4be8ee764f510357eb7e213b343790777074eeab9',
-'pr-push.sh':'ebae4022c10af7d08d0965774c135b4ef02cf2eee2acef9c0330be3228d48f73',
-'state.sh':'5053a965abf6bc79bf50e559a1fccf609346518120c02ff26ed8aedc924e4ebe',
-'merge-gate.sh':'17f022728251f8125259f4f7d98caab53400920136c9353a8d018e36fe9d5a71',
-'worktree-remove.sh':'96501c0b2887bbce5278fad8359ca95286e9aa615068088c833aaf7a84530ac3',
-'recover-prep.sh':'6e3a18783102f3716c99187666620f42ae4f9438d26a8db89ecb59de438437cb',
-'fetch-tree.sh':'fddce55942793541d9829050350a53105c9155e0630b5a89e104e02774a58708',
+'measure-residual-bytes.sh':'c3953c0c7c7d1bcbe461568b07bd10d3ee4e3f58710d6da7b2eba63b38937e29',
+'measure-free-disk.sh':'9ace496365d310f94c5ac7ccccdd5853a75f2b78202da9404f7277c2130eb344',
+'observe-pr.sh':'6ed1f5f376be43b178a80952f23032f567919ca6d3e8de58f1a758355f472340',
+'base-merge.sh':'2f95fcf66d9456fec12f0675dad0d5b4dd5c7c8331697cc5346fefdc7ddbc6f9',
+'pr-push.sh':'53351c8a9c95c276cae36965d0927e71a3b23e3957c2bb1bc09a419c30279133',
+'state.sh':'5d14b6f7c0911197a627c309144f8f7a660e05a64b128d0f49b8f7d4c438d867',
+'merge-gate.sh':'b7e06df6dab6976abd52a15936c3a96a9af2385db03e1044a5a813c30038ab99',
+'worktree-remove.sh':'0a82201d28672690d5e49df62ae048164ce12a70dd5cf509871106ec084b98b5',
+'recover-prep.sh':'60b35ea6d1587bde6698178154a92063ea5d35272d45aadf976e2c1fdf6e88d9',
+'fetch-tree.sh':'c25ba1de1ed018708c83316e5c3230e0f9e5a29ec271b1091479dea2a778c800',
 }
 
 
@@ -6570,7 +6570,7 @@ outOfScopeSection,
 '   ```',
 `   次のコマンドを実行する（<タイトルファイル>・<本文ファイル> はそれぞれ書いたファイルの絶対パスへ、<headSha> は手順 1 の結果の headSha へ置き換え、他は一字一句そのまま。open PR の検出と作成はスクリプトが行う）:`,
 prPushBlock(` --mode pr --branch ${branch} --base ${baseBranch} --title-file <タイトルファイル> --body-file <本文ファイル> --issue ${item.number} --expect-sha <headSha>${repoArg ? ` --repo ${repoArg}` : ''}`),
-`   <headSha> は手順 1 の結果の headSha（40 桁の sha をそのまま転記。コマンドの出力を推測で補わない）。スクリプトは milestone も確認する（Closes 対象 Issue の milestone。リポジトリに milestone が無ければ確認しない）。結果の milestone が unassigned のとき、created なら本文に警告を足してある。status が created ならその prNumber を返す（手順 1c はスキップして手順 3 へ）。reused は base と head の sha が一致する既存の open PR を再利用する場合で、その prNumber で手順 1c へ進む。head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch（サーバー上の head が push した HEAD と違う）・milestone-check-failed（milestone を取得できない。PR は作っていない）・routing-error・head-mismatch・base-mismatch・ambiguous・list-failed・create-failed・body-invalid・title-invalid・error は再利用も新規作成もせず prNumber: 0 と status（prNumber が付いていれば「既存 open PR #<番号>」）を理由として返す。`,
+`   <headSha> は手順 1 の結果の headSha（40 桁の sha をそのまま転記。コマンドの出力を推測で補わない）。スクリプトは milestone も確認する（Closes 対象 Issue の milestone。リポジトリに milestone が無ければ確認しない）。結果の milestone が unassigned / unknown のとき、created なら本文に警告を足してある。status が created ならその prNumber を返す（手順 1c はスキップして手順 3 へ）。reused は base と head の sha が一致する既存の open PR を再利用する場合で、その prNumber で手順 1c へ進む。head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch・milestone-check-failed（milestone を取得できない。PR は作っていない）・routing-error・head-mismatch・base-mismatch・ambiguous・list-failed・create-failed・body-invalid・title-invalid・error は再利用も新規作成もせず prNumber: 0 と status（prNumber が付いていれば「既存 open PR #<番号>」）を理由として返す。`,
 `1c. （1b が reused を返したときのみ）既存本文に「Closes #${item.number}」があるか確認し、無ければ追記する。`,
 `   既存本文は未信頼データのため、シェルコマンド文字列・HEREDOC へ一切埋め込まず、ファイルへ直接落として扱う（本文中の行単独 EOF 等による HEREDOC 早期終端と任意コマンド実行を構造的に防ぐ）:`,
 `     f=$(mktemp)`,
@@ -6600,7 +6600,7 @@ item.optinTests,
 ),
 ]
 :[]),
-`   1b の結果の milestone が unassigned のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} に milestone が割り当てられていない。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,
+`   1b の結果の milestone が unassigned / unknown のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} の milestone が未割当、または確認できなかった。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,
 optinRecordSection
 ?`   本文への追記（Closes 行・対象外節・opt-in テスト記録節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`
 :`   本文への追記（Closes 行・対象外節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`,
