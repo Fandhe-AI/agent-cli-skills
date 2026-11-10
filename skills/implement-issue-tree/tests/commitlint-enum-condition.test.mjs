@@ -208,7 +208,7 @@ test('host: commitFailed 終端は routingError と同じく fix worktree を台
     assert.ok(termIdx > recIdx, `${label}: recordEphemeralWorktree が終端処理より後にある`)
     // routingError ハンドラも同じ kind・引数で記録している（両者の整合）
     // Review ループは新しい detached worktree を状態へ残して Recover が引き取るため、パス不明のときだけ件数を計上する（PR #733）
-    if (label === 'Review ループ') return
+    if (label === 'Review ループ') continue
     const routingIdx = driverPart.lastIndexOf(path, condIdx)
     assert.ok(routingIdx >= 0 && routingIdx < condIdx, `${label}: routingError ハンドラ側の同一引数の記録がない`)
   }
