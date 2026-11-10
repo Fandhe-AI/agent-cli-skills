@@ -177,6 +177,27 @@ export function registerPrPushTests(bash) {
     assert.deepEqual(sb3.gitCalls().filter((c) => /^(merge |push )/.test(c)), [])
   })
 
+  t('prepare pr-create: 分岐したローカルへリモート tip を merge（回復 Implement の手順 2・#730）すれば local ahead になり、force なしの通常 push で反映される', () => {
+    const sb = makeSandbox()
+    localBranch(sb)
+    git(sb.wt, 'checkout', '-q', BRANCH)
+    commitOn(sb.wt, 'mine.txt', 'mine')
+    git(sb.seed, 'checkout', '-q', BRANCH)
+    commitOn(sb.seed, 'theirs.txt', 'theirs')
+    git(sb.seed, 'push', '-q', 'origin', BRANCH)
+    git(sb.wt, 'fetch', '-q', 'origin', `${BRANCH}:refs/remotes/origin/${BRANCH}`)
+    git(sb.wt, 'checkout', '-q', '--detach')
+    assert.equal(prepare(sb, 'pr-create').status, 'diverged', '対照: merge 前は diverged')
+    git(sb.wt, 'checkout', '-q', BRANCH)
+    git(sb.wt, 'merge', '-q', '--no-edit', `refs/remotes/origin/${BRANCH}`)
+    git(sb.wt, 'checkout', '-q', '--detach')
+    assert.deepEqual(prepare(sb, 'pr-create'), { mode: 'prepare', status: 'merged', start: 'local' })
+    const r = push(sb, 'pr-create')
+    assert.equal(r.status, 'pushed')
+    assert.equal(sb.remoteSha(), git(sb.wt, 'rev-parse', 'HEAD'))
+    assert.deepEqual(sb.gitCalls().filter((c) => /^push( |$)/.test(c) && /force|lease|^push .*\+/.test(c)), [])
+  })
+
   t('prepare: checkout 後の HEAD が起点の sha と違う（隔離 worktree に残っていた無関係な HEAD）なら sha-mismatch。merge も push もしない（旧 Issue #466 の回帰）', () => {
     for (const kind of ['pr-create', 'fix']) {
       const sb = makeSandbox()
