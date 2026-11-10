@@ -8919,7 +8919,8 @@ cl
 ?{cleanupWorktree:oldWorktreePathReview,cleanupMode:'discard',expectBranch:impl.branch,replacementWorktree:newWorktreePathReview}
 :{})
 
-const bad= !u.mergeOk?'状態の書込みに失敗（状態の worktree は旧のまま・fix コミットは新にある）':cl&&u.retained?'旧 worktree の削除を確認できない（lock・変更・submodule 等。手で片づけて再実行すると Recover が新を引き取る）':''
+const keep=cl&&(!u.mergeOk||u.retained)
+const bad=[!u.mergeOk?'状態の書込みに失敗（状態の worktree は旧のまま・fix コミットは新にある）':'',keep?'旧 worktree がブランチを保持している（削除未実施または確認不能。先に worktree-remove.sh の確認つき経路で旧を片づけてから、状態の worktree を新へ直して再実行すると Recover が新を引き取る）':''].filter(Boolean).join('。さらに')
 const h= /\b[0-9a-f]{40}\b/.exec(fReview.summary ?? '')
 const ex=bad?`。${bad}: 新 ${newWorktreePathReview || '不明'}・旧 ${sanitizeWorktreePath(oldWorktreePathReview) || '不明'}・ブランチ ${impl.branch}・HEAD ${h ? h[0] : '不明'}`:''
 if(ex)warnIssue(item,ex)

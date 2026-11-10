@@ -51,15 +51,23 @@ test('commitFailed 終端 (a): 状態書込み失敗は新旧パスと HEAD sha 
 test('commitFailed 終端 (b): 旧 worktree が保持されたら旧パスとブランチを警告と失敗記録に出す（Issue #743）', async () => {
   const { logs, result } = await run((label, _o, prompt) =>
     label.startsWith('state:cleanup:#2') && prompt.includes('/repo/wt/f2a') ? { ok: false, retained: true, worktree: 'retained-locked' } : undefined)
-  assert.ok(warnLine(logs, '削除を確認できない', '/repo/wt/f2a', 'feat/2-x', '/repo/wt/f2b'), '警告に旧パスとブランチがない')
+  assert.ok(warnLine(logs, '旧 worktree がブランチを保持', '/repo/wt/f2a', 'feat/2-x', '/repo/wt/f2b'), '警告に旧パスとブランチがない')
   const note = result.done.find((r) => r.issue === 2).note
   for (const n of ['/repo/wt/f2a', 'feat/2-x']) assert.ok(note.includes(n), `note に ${n} がない`)
+})
+
+test('commitFailed 終端 (c): 書込み失敗かつ旧 worktree 保持は両方を併記し、書き換えて再実行とは案内しない（PR #747 Bugbot）', async () => {
+  const { logs, result } = await run((label, _o, prompt) =>
+    label === 'state:update:#2' && prompt.includes('/repo/wt/f2b') ? { ok: false } : undefined)
+  assert.ok(warnLine(logs, '状態の書込みに失敗', '旧 worktree がブランチを保持', '確認つき経路で旧を片づけてから', '/repo/wt/f2a', 'feat/2-x'), '警告に両方の文言がない')
+  const note = result.done.find((r) => r.issue === 2).note
+  for (const n of ['状態の書込みに失敗', '旧 worktree がブランチを保持']) assert.ok(note.includes(n), `note に ${n} がない`)
 })
 
 test('commitFailed 終端 対照: 書込み成功かつ旧を削除できたら追記しない（Issue #743）', async () => {
   const { logs, result } = await run((label) =>
     label.startsWith('state:cleanup:#2') ? { ok: true, retained: false, worktree: 'removed' } : undefined)
-  for (const n of ['状態の書込みに失敗', '削除を確認できない']) {
+  for (const n of ['状態の書込みに失敗', '旧 worktree がブランチを保持']) {
     assert.ok(!logs.some((l) => l.includes(n)), `ログに ${n} が出ている`)
     assert.ok(!result.done.find((r) => r.issue === 2).note.includes(n), `note に ${n} が出ている`)
   }
