@@ -1672,6 +1672,8 @@ const MON_NOT_OPEN = 'state が OPEN でなければ待機せず手順 1 の該�
 const SCOPE_NOTE = '（直前コミットの scope や base ブランチ名由来の値は always の許可リストに含まれる保証が無いため使わない）。'
 const MERGED_RECOVER = '手順 1 で state が MERGED だった場合（前回ランのマージ済み PR の回復、またはサーバー側 auto-merge によるマージ完了）'
 const hasOptin = (item) => Array.isArray(item.optinTests) && item.optinTests.length > 0
+// 'issue #N' 接頭辞つきの警告ログ（⚠️ 付き）。呼び出し側の重複する定型句を 1 か所に集約する。
+const warnIssue = (item, m) => log(`⚠️ issue #${item.number}: ${m}`)
 const warnItem = (item, m) => log(`⚠️ #${item.number}: ${m}`)
 const BLOCK_Q = 'state: blocked / blockedReason: "quality"'
 const BOTH_NO_OUT = 'haiku / sonnet いずれも StructuredOutput を返さなかった'
@@ -3331,6 +3333,8 @@ const PR_CREATE_SCHEMA = {
     // pr-create の worktree は push 完了時点で origin に成果が存在するため保持価値がない。
     // 呼び出し元が返却直後に削除して残骸の蓄積を防ぐ（イシュー close 時まで残さない）。
     worktreePath: WORKTREE_PATH_PROP,
+    // prepare が diverged のときだけ [localSha, remoteSha]。自己申告で、使い道は failed と blocked の振り分けだけ（マージ・削除の判断には使わない。誤申告の最悪ケースは halt を 1 回数えないこと）。required にしない（旧出力との互換）。
+    divergedShas: { type: 'array', maxItems: 2, items: { type: 'string' } },
     // push 直後の CI 起動確認（Issue #479）。いずれもエージェントの自己申告値でありマージ判定
     // には使わない（ホストは mergeableAfterPush === 'CONFLICTING' を base 取り込み分岐へ直行する
     // ヒントとしてのみ使い、誤申告の最悪ケースは baseMergeCount を 1 消費するだけで有界）。
@@ -4472,6 +4476,27 @@ async function countWorktreeRecords() {
   }
 }
 
+// 残置観測の「一覧 + 独立カウント」の組を同時に取り、件数が食い違えば組ごと取り直す（Issue #735）。
+// 同じリポジトリで別の親ツリーのランが並行して worktree を作成・削除すると、転記が正しくても
+// 2 回の観測の間に件数が本当に変わる。1 組照合のままでは転記ミスと区別できず、並行ランの間は
+// 再実行しても新規着手が止まり続けた。一致した組だけを採用し、食い違う組は採らない（大きい方の
+// 採用は一覧の脱落をバイト測定から漏らす fail-open になる）。一覧とカウントは別エージェントの
+// 独立取得のまま保つ（同一エージェントに両方返させると行の脱落を検出できない）。転記ミスが続く
+// 場合は WT_OBSERVE_TRIES 組とも不一致になり、最後の組を返して呼び出し元が従来どおり fail-closed
+// にする。一覧が空・カウントが null は取得失敗であり取り直さない。待機は入れない（エージェントの
+// 再起動で間が空く）。戻り値は [entries, count, 組数]。
+const WT_OBSERVE_TRIES = 3
+function worktreeCountsDiffer(entries, count) {
+  return Array.isArray(entries) && entries.length > 0 && Number.isInteger(count) && count !== entries.length
+}
+async function observeWorktreeList() {
+  let r
+  let i = 0
+  do r = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
+  while (++i < WT_OBSERVE_TRIES && worktreeCountsDiffer(...r))
+  return [...r, i]
+}
+
 // 実装ブランチ命名規約（<type>/<issueNumber>-<short-name>）へのアンカー付き一致判定（孤立
 // worktree 検出・再開判定 isActiveMonitoring / runOne の merged 再監視判定で使う）。非アンカーの部分一致だと手動作成ブランチが誤結合するため形式一致を要求。
 function branchMatchesIssue(branch, issueNumber) {
@@ -5489,6 +5514,7 @@ const AGENT_RUN_LIMIT = 1000
 // ツリー外前提の取得・init-all・孤立スキャン・残置の観測・HEAD 検査）が着手前に使う呼び出し数の見込み。
 // 依存宣言はチャンク数に比例するため約 20 に余裕 10 を足した。スクリプトハッシュの予検査（script-hash-precheck。1 回、転記ミス・
 // 例外のときだけ 2 回）はこの余裕の内（下限 81 は変えない。Issue #603 第 4 弾）。
+// 開始時の観測は残置観測の組の取り直し（最大 +4 回。Issue #735）を含めても余裕内に収まる。
 const AGENT_CALLS_START = 30
 function parseAgentCallLimit(raw) {
   if (raw === undefined || raw === null) return AGENT_RUN_LIMIT
@@ -5919,6 +5945,8 @@ function addedFileNamingPolicy(repo = repoArg) {
 const IMPL_STEP4 = '4. 完了条件: 対象リポジトリのテスト実行規約に従い、ビルド・lint・テストを実行して pass すること。フォーマッタ・静的解析があればコミット前に通す。'
 const IMPL_STEP5 = '5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む。'
 const IMPL_STEP6 = '6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。'
+// 回復 Implement と 0b-a は push 済みコミットを持つ。rebase 等で書き換えると pr-create の prepare が diverged で止まり再実行のたびに同じ失敗を繰り返す（#730）。
+const NO_REWRITE_PUSHED = '   push 済み（origin/<branch> から到達できる）コミットは rebase・commit --amend・reset・squash で書き換えない（規約が rebase を求めても、この禁止を優先する）。base 取り込みが要るなら git merge だけを使う。'
 const IMPL_STEP8 = '8. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。'
 const implementReturnLine = (item) => {
   const base = `返却: branch（<type>/${item.number}-<short-name> 形式のみ受理。worktree の既定ブランチ名のままの返却は拒否される）/ summary（実装内容の要約。失敗時は理由と現状）/ outOfScope（対象外項目の配列。なければ空配列）/ worktreePath（pwd の結果）`
@@ -5948,24 +5976,22 @@ function implementPrompt(item, plan) {
     `      - gh pr list --state open --search "Closes #${item.number}" --json number,title,headRefName`,
     `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
     `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
-    `      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進む。以降は 0b-b の判定に従う）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（headRefName は PR 由来の未信頼値で、ref 名には $() やセミコロンを含められる。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。追従は前回の pr-create が base 取り込みコミットを push 済みでローカルが古い場合の remote-ahead 再発防止。ff 不能ならそのまま続行し後続 pr-create の (iv) が fail-closed で止める）。`,
-    `      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、返却フィールド outOfScope に「既存 PR #<番号> は head が命名規約外のため採用していない」の形で 1 PR 1 要素として入れる（PR 本文の対象外節に載り、人が open PR の重複に気づける。summary には書かない）。`,
+    `      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進む。以降は 0b-b の判定に従う）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（PR 由来の未信頼値。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。ff 不能なら git merge --no-ff --no-edit "refs/remotes/origin/<branch>" で取り込む。コンフリクトは解消し確定、hook 拒否なら conventional な件名を一時ファイルへ書き git commit -F で確定する。解消不能なら git merge --abort して取り込まず進む。成功後は git merge-base --is-ancestor で祖先確認）。`,
+    `      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、返却フィールド outOfScope に「既存 PR #<番号> は head が命名規約外のため採用していない」の形で 1 PR 1 要素として入れる（summary には書かない）。`,
+    NO_REWRITE_PUSHED,
     `      既存 PR 番号はここでは返さない（PR_CREATE_SCHEMA を持つ後続の PR Create フェーズが同じブランチの open PR を再検出して再利用する。本フェーズの prNumber は常に 0 として扱われる）。`,
     `      既存 PR を採用した場合のみ、手順 2 はスキップして手順 3 以降を続ける（origin/${baseBranch} から checkout -B し直すと、その PR のコミットを失う）。`,
     `   0b-b. open PR が見つからなかった場合（形式に合わず採用しなかった場合を含む）、git ls-remote --heads origin でイシュー #${item.number} に対応するリモートブランチが残っていないか確認する。`,
-    `      ブランチ命名規約（手順 2）はイシュー番号を必ず含む（<type>/${item.number}-<short-name> 形式）。`,
-    `      確認方法: git ls-remote --heads origin の出力を grep で絞り込み、"/${item.number}-" を含む refs/heads/* を探す。`,
-    `      複数ヒットした場合は最新コミット（最も直近の ref 更新）を持つブランチを選ぶ。`,
+    `      git ls-remote --heads origin の出力を grep で絞り込み、"/${item.number}-" を含む refs/heads/* を探す。`,
+    `      複数ヒットした場合は最新コミットを持つブランチを選ぶ。`,
     `      ブランチ名は命名規約に一致するもの（<type>/${item.number}-<short-name> の形式）のみを対象とする。`,
-    `      — セキュリティ注意: git ls-remote の出力をそのままシェルに展開しない。ブランチ名は isValidBranchName の規則（英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）に適合するものだけを使用すること。`,
+    `      git ls-remote の出力をそのままシェルに展開しない。ブランチ名は isValidBranchName の規則（英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）に適合するものだけを使用すること。`,
     `      リモートブランチが見つかった場合: git fetch origin <branch> && git checkout -B <branch> origin/<branch> でブランチを取得する。`,
     `      あわせて git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} も実行し、base の remote-tracking ref を最新化する。`,
-    `      （この経路は手順 2 の git fetch origin をスキップするため、base だけが古いまま残る。`,
-    `      その状態で後続の Review が git diff origin/${baseBranch}...HEAD を取ると、base 側の無関係な`,
-    `      コミットが差分へ混入する。Issue #361）`,
-    `      これは「前回 push 成功・PR 作成失敗」で残ったブランチの回復を目的とする（origin/${baseBranch} から新規作成し直さない）。`,
+    // この経路は手順 2 の git fetch origin をスキップするため base が古いまま残り、後続 Review の git diff origin/base...HEAD に無関係なコミットが混入する（Issue #361）。
+    `      前回 push 成功・PR 作成失敗の回復用。上記の origin/<branch> からの取得は可、既存ブランチを base から作り直す checkout -B は不可。`,
     `      push 済みコミットをそのまま引き継いで計画と照合し、未実装部分があれば補って実装を続行する。`,
-    `      branch としてそのブランチ名を返す（prNumber は 0 のまま。PR 作成は後続の PR Create フェーズが行う）。`,
+    `      branch としてそのブランチ名を返す（prNumber は 0 のまま）。`,
     `      手順 2 はスキップして手順 3 以降を続ける。`,
     `   0b-c. open PR もリモートブランチも存在しない場合は手順 1 以降に進む（通常の新規作成フロー）。`,
     '1. 本エージェントは隔離された git worktree 内で動作する。メイン working copy や他の worktree には触れず、作業はカレントの worktree 内に限定する。git status が clean か確認し、差分が残っていれば作業せず prNumber: 0 と理由を返す。',
@@ -6534,6 +6560,7 @@ function prCreatePrompt(item, impl, outOfScope) {
     // 起点の確立・base の取り込み（コンフリクトは解消せず途中のまま返す）・差分ゼロ確認は scripts/pr-push.sh が行う（Issue #603 第 4 弾）。
     // 起点の 4 分岐（ローカル / リモート / remote-ahead / diverged）は lib/pr-push-lib.sh の pp_decide_origin。
     `0. 起点の確立と push 前 base 最新化ゲート: ${basePrepareInstruction('pr-create', branch, 'prNumber: 0 で返す')}`,
+    `   status が diverged なら prNumber: 0 に加え divergedShas に [localSha, remoteSha] を入れて返す。`,
     // opt-in テスト記録ゲート（PR #503 3 巡目 codex P1）: Implement 時点の結果は手順 0 の base
     // 取り込みで陳腐化し得るため、push 前のこの時点（＝これから push する内容そのもの）で
     // 必ず再実行する。テスト前に控える期待 SHA と対にして手順 1c・2 の記録節へ書く。
@@ -6701,7 +6728,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
         commitlintCheckInstruction,
         `   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に old=$(git rev-parse HEAD) を控え（ref≠$old なら中止）、git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
-        `   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が $old のときだけ git -C <path> merge --ff-only <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> "$old"。`,
+        `   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が $old のときだけ git -C <path> merge --ff-only --no-overwrite-ignore <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> "$old"。`,
         `   条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
         `   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
       ]
@@ -6904,8 +6931,13 @@ function recoverImplementPrompt(item, brief, branch) {
     // 既存 branch を checkout（checkout -B は使わない）。WIP commit を含む既存コミットを保持し、
     // Recover が退避した作業を引き継ぐ。branch 名は検証済みの値を明示して誤 checkout を防ぐ。
     `2. Recover フェーズで特定された既存 branch ${branchJson} を checkout する（git fetch origin && git checkout ${branchJson}）。`,
-    `   checkout 後に git fetch origin -- ${branchJson}:refs/remotes/origin/${branchJson} を実行する（${branchJson} はホスト側で isValidBranchName 検証済みの値。引用符付きのまま展開し、リモートに同名ブランチが無ければ失敗してよく、以降の追従はスキップして手順 3 へ進む）。取得できたら git merge --ff-only refs/remotes/origin/${branchJson} でローカルをリモート tip へ追従させる（前回ランの pr-create は base 取り込みのマージコミットを detached HEAD から push しローカル refs/heads は更新しないため、PR 作成失敗後はリモートだけが先行する。追従せずに実装を積むと次の pr-create が remote-ahead / diverged で再び失敗し回復がループする）。ff 不能（真の diverged）なら merge は失敗するがそのまま続行してよい — 後続 pr-create の (iv) が fail-closed で止める。追従したリモートのコミットは以降の Implement・Review でレビュー対象に乗ってから push される（0b-b と同じ考え方）。`,
-    `   （origin/${baseBranch} からの新規作成（checkout -B）は行わない。既存コミット・WIP commit を保持するため）`,
+    // 追従の根拠: pr-create は base 取り込みのマージコミットを detached HEAD から push しローカル refs/heads を更新しないため、
+    // PR 作成失敗後はリモートだけが先行する。追従せず積むと次の pr-create が remote-ahead / diverged で止まり回復がループする。
+    // rebase 等でローカルが書き換わり既に分岐したブランチも、force を使わず merge でリモート tip を祖先に取り込めば local ahead になり通常 push が通る（#730）。
+    `   checkout 後に git fetch origin -- ${branchJson}:refs/remotes/origin/${branchJson} を実行する（リモートに無ければ失敗してよく、追従をスキップして手順 3 へ）。取得できたら git merge --ff-only refs/remotes/origin/${branchJson} で追従させる。ff 不能（分岐）なら git merge --no-ff --no-edit refs/remotes/origin/${branchJson} でリモート tip を取り込む（コンフリクトは解消し git add 後 git commit --no-edit で確定し MERGE_HEAD を残さない。hook 拒否なら手順 6 の subject を一時ファイルへ書き git commit -F で確定。解消不能なら git merge --abort して続行可）。`,
+    NO_REWRITE_PUSHED,
+    `   返却前（リモートに branch があるとき）git merge-base --is-ancestor refs/remotes/origin/${branchJson} HEAD を確認し、偽なら merge で取り込み直す。`,
+    `   （origin/${baseBranch} からの checkout -B 作り直しは行わない）`,
     `   指定の branch ${branchJson} が見つからない場合は git ls-remote --heads origin で確認し、"/${item.number}-" を含む refs/heads/* を探す。`,
     `3. 回復ブリーフに従って実装を完成させる:`,
     `   - broken（壊れ・未完で要修正）の箇所から優先して修正する。`,
@@ -7684,7 +7716,15 @@ const prereqTransitions = [] // レポートへ返す遷移記録（{issue, kind
 // 孤立 worktree の状態ファイルへの記録・残置上限ゲートの実測・高水位の永続化は実行時のみ必要で、
 // いずれも書き込みを伴い得るため dryRun では丸ごと行わない（Issue #585）。
 if (!dryRunEnabled) {
-  const runStartOrphanEntries = await scanOrphanWorktrees()
+  // 上限ゲートが有効なら一覧と独立カウントを組で取る（食い違えば取り直し。Issue #735）。孤立記録の
+  // 状態書き込みループは観測の後に置き、2 回の観測の間隔に含めない。無効なら一覧だけ取る。
+  const residualGateActive = maxResidualWorktrees > 0 || maxResidualWorktreeBytes > 0
+  let runStartOrphanEntries, independentCount, observeTries
+  if (residualGateActive) [runStartOrphanEntries, independentCount, observeTries] = await observeWorktreeList()
+  else runStartOrphanEntries = await scanOrphanWorktrees()
+  if (observeTries > 1 && !worktreeCountsDiffer(runStartOrphanEntries, independentCount)) {
+    log(`残置観測の食い違いを取り直した（${observeTries} 組目で一致。並行ランの変化か）`)
+  }
   mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
   // メイン worktree を特定できないスキャン（isMain 転記の不整合・観測失敗）では孤立記録を
   // 全体として見送る（fail-closed）。isMain とパス一致の両除外が効かない状態で続行すると、
@@ -7724,14 +7764,12 @@ if (!dryRunEnabled) {
   // --- 残置 worktree 上限ゲート ---
   // 複数ラン累積の残置総数に上限を設けディスク枯渇を防ぐ（メイン worktree 除外の物理総数）。
   // 観測成立は空チェック + countWorktreeRecords 照合。不成立は有効な軸があれば新規着手を抑止する。
-  const residualGateActive = maxResidualWorktrees > 0 || maxResidualWorktreeBytes > 0
   let scanFailureDetail = runStartOrphanEntries.length === 0 ? 'git worktree list を取得できず' : ''
   if (!scanFailureDetail && residualGateActive) {
-    const independentCount = await countWorktreeRecords()
     if (independentCount === null) {
       scanFailureDetail = `一覧転記の完全性を照合する独立レコードカウントを取得できず（一覧側 ${runStartOrphanEntries.length} 件）`
     } else if (independentCount !== runStartOrphanEntries.length) {
-      scanFailureDetail = `一覧転記が不完全な疑い（一覧側 ${runStartOrphanEntries.length} 件 ≠ 独立カウント ${independentCount} 件）`
+      scanFailureDetail = `${observeTries} 組観測しても不一致（一覧側 ${runStartOrphanEntries.length} 件 ≠ 独立カウント ${independentCount} 件。転記不完全か並行ランの worktree 作成・削除の疑い）`
     }
   }
   if (scanFailureDetail) {
@@ -7743,7 +7781,7 @@ if (!dryRunEnabled) {
           `（件数上限 ${maxResidualWorktrees > 0 ? `${maxResidualWorktrees} 件` : 'なし'}・` +
           `容量上限 ${maxResidualWorktreeBytes > 0 ? `${residualMiB()} MiB` : 'なし'}）を` +
           `適用できず、新規イシューの着手を停止し、implement の monitoring 再開も defer した（fail-closed）。` +
-          `git worktree list が実行できる状態を確認してから再実行すること`,
+          `git worktree list が実行できる状態を確認し（並行ランは終了を待って）再実行すること`,
         paths: [],
       })
     } else {
@@ -8223,7 +8261,7 @@ async function runImplement(item) {
       // 倒れないため、警告ログに留めて監視を継続する。
       const resumeOk = await updateState(item.number, { status: 'monitoring', pr: impl.prNumber, unverifiedPr: 0 })
       if (!resumeOk) {
-        log(`⚠️ issue #${item.number}: monitoring 再開時の status 同期書き込みに失敗（再開情報は保持済みのため監視は継続する）`)
+        warnIssue(item, `monitoring 再開時の status 同期書き込みに失敗（再開情報は保持済みのため監視は継続する）`)
       }
     }
   } else {
@@ -8425,7 +8463,7 @@ async function runImplement(item) {
             `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
             `永続化できなかった（${continueReviewingTerminalStatus === 'blocked' ? STATE_NO_OUT : 'エージェント応答上のシステム的失敗'}）。` +
             `重複実装防止のため Review・push へ進まず停止する（${STATE_FILE} を手動確認すること）`
-          log(`⚠️ issue #${item.number}: ${reason}`)
+          warnIssue(item, reason)
           // best-effort で終端状態と回復メタデータの保存を試みる（一過性の失敗なら永続化でき、
           // 次回実行が手順 0b のブランチ再利用で回復できる）。
           const failedSaved = await updateState(item.number, {
@@ -8437,7 +8475,7 @@ async function runImplement(item) {
             note: reason,
           })
           if (!failedSaved) {
-            log(`⚠️ issue #${item.number}: ${continueReviewingTerminalStatus} 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
+            warnIssue(item, `${continueReviewingTerminalStatus} 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
           }
           recordFailure({ issue: item.number, reason, status: continueReviewingTerminalStatus })
           return false
@@ -8655,7 +8693,7 @@ async function runImplement(item) {
           `実装 branch / worktree（${impl.branch} / ${impl.worktreePath}）の記録を状態ファイルへ` +
           `永続化できなかった（${reviewingTerminalStatus === 'blocked' ? STATE_NO_OUT : 'エージェント応答上のシステム的失敗'}）。` +
           `重複実装防止のため Review・push へ進まず停止する（${STATE_FILE} を手動確認すること）`
-        log(`⚠️ issue #${item.number}: ${reason}`)
+        warnIssue(item, reason)
         // best-effort で終端状態と回復メタデータを保存する。cleanupWorktree は旧 worktree
         // のみ（実装 worktree を未永続化のまま削除すると回復手段を失う）。
         const failedSaved = await updateState(item.number, {
@@ -8669,7 +8707,7 @@ async function runImplement(item) {
           ? { cleanupWorktree: fallbackOldWorktree, preserveWorktreeField: true, replacementWorktree: impl.worktreePath }
           : {})
         if (!failedSaved) {
-          log(`⚠️ issue #${item.number}: ${reviewingTerminalStatus} 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
+          warnIssue(item, `${reviewingTerminalStatus} 状態の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
         }
         recordFailure({ issue: item.number, reason, status: reviewingTerminalStatus })
         return false
@@ -8684,7 +8722,7 @@ async function runImplement(item) {
           replacementWorktree: impl.worktreePath,
         })
         if (!cleanedOk) {
-          log(`⚠️ issue #${item.number}: フォールバック前の旧 worktree（${fallbackOldWorktree}）の削除に失敗した（非致命。最終スイープで回収する）`)
+          warnIssue(item, `フォールバック前の旧 worktree（${fallbackOldWorktree}）の削除に失敗した（非致命。最終スイープで回収する）`)
         }
       }
     }
@@ -8807,7 +8845,7 @@ async function runImplement(item) {
       const fixReviewSucceeded = fReview !== null && fReview !== undefined && typeof fReview.pushed === 'boolean'
       if (!fixReviewSucceeded) {
         const fixFailReason = `Review fix エージェントが無効な結果を返した（${fixCount + 1} 回目）`
-        log(`⚠️ issue #${item.number}: ${fixFailReason}`)
+        warnIssue(item, fixFailReason)
         // push 前のため pr: 0 のまま記録する（PR 未作成）
         await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: fixFailReason })
         recordFailure({ issue: item.number, reason: fixFailReason })
@@ -8828,7 +8866,7 @@ async function runImplement(item) {
         // だけでは検出できないため専用シグナルで failed 終端する。fix worktree は残留するため
         // routingError と同じく台帳へ記録してから終端する。
         const reason = `Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
-        log(`⚠️ issue #${item.number}: ${reason}`)
+        warnIssue(item, reason)
         recordEphemeralWorktree(item.number, fReview?.worktreePath, 'fix-terminal')
         // 新しい detached worktree を状態へ書くとき、ブランチを保持している旧 worktree も cleanupWorktree で渡す。
         // 渡さないと旧 worktree が残り、Recover が対象ブランチを in-use と判定して fix コミットを付け直せない（Issue #731）。
@@ -8844,7 +8882,7 @@ async function runImplement(item) {
       fixCount++
       currentWorktreePath = newWorktreePathReview
       if (!currentWorktreePath) {
-        log(`⚠️ issue #${item.number}: Review fix worktree パスを取得できず追跡不能`)
+        warnIssue(item, `Review fix worktree パスを取得できず追跡不能`)
       }
       await updateState(item.number, { fixCount, worktree: currentWorktreePath }, { cleanupWorktree: oldWorktreePathReview, replacementWorktree: currentWorktreePath })
     }
@@ -8883,7 +8921,15 @@ async function runImplement(item) {
       const reason = sanitize(prCreateResult?.summary ?? 'push・PR 作成エージェントが異常終了した、または prNumber が不正')
       // push 成功の可能性があるため branch を保存し、次回ランの Recover → 回復 Implement 手順 2
       // （git merge --ff-only refs/remotes/origin/<branch>）で push 済みコミットへ追従して回復させる。
-      const prCreateNote = `${reason}。push が成功した可能性あり。再実行時は Recover → 回復 Implement 手順 2 の ff 追従（git merge --ff-only refs/remotes/origin/<branch>）で push 済みコミットを引き継いで回復する`
+      const prCreateNote = `${reason}。push が成功した可能性あり。再実行時は Recover → 回復 Implement が push 済みコミットを引き継いで回復する`
+      // diverged（#730）: 回復 Implement の手順 2 が治すはずの分岐が残った。halt を数えず sha を残す。blocked + pr: 0 + branch でも次ランは Recover → continue に入る（再試行は止まらない）。
+      const dv = Array.isArray(prCreateResult?.divergedShas) ? prCreateResult.divergedShas.map(sanitizeSha) : []
+      if (dv.length === 2 && dv[0] && dv[1] && dv[0] !== dv[1]) {
+        const note = `pr-create の prepare が diverged（local ${dv[0]} / remote ${dv[1]}）。再実行時は回復 Implement が merge で取り込む。治らなければ人がどちらを正とするか決める`
+        await updateState(item.number, { status: 'blocked', pr: 0, branch: impl.branch, fixCount, note })
+        recordFailure({ issue: item.number, reason: note, status: 'blocked' })
+        return false
+      }
       await updateState(item.number, { status: 'failed', pr: 0, branch: impl.branch, fixCount, note: prCreateNote })
       recordFailure({ issue: item.number, reason })
       return false
@@ -8936,7 +8982,7 @@ async function runImplement(item) {
           `PR #${impl.prNumber} 作成後の monitoring 遷移（pr 記録）を状態ファイルへ永続化できなかった` +
           `（${monitoringAttempt.outputMissing ? STATE_NO_OUT : 'エージェント応答上のシステム的失敗'}）。` +
           `重複 PR 防止のためマージ監視へ進まず停止する（${STATE_FILE} と PR #${impl.prNumber} を手動確認すること）`
-        log(`⚠️ issue #${item.number}: ${reason}`)
+        warnIssue(item, reason)
         // best-effort で終端状態と回復メタデータの保存を試みる（classifyStateWriteFailureStatus
         // に一元化。outputMissing でも PR 実在時はこの 'blocked' 保存の成否＝terminalSaved で
         // 'blocked'/'failed' を分ける。Issue #493 codex 指摘）。
@@ -8949,7 +8995,7 @@ async function runImplement(item) {
           note: reason,
         })
         if (!blockedSaved) {
-          log(`⚠️ issue #${item.number}: blocked 状態（監視再開情報）の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
+          warnIssue(item, `blocked 状態（監視再開情報）の保存にも失敗した（${STATE_FILE} の書き込み権限・容量を確認すること）`)
         }
         const monitoringTerminalStatus = classifyStateWriteFailureStatus({
           outputMissing: monitoringAttempt.outputMissing,
@@ -9277,7 +9323,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // のみ設定する。
     if (lastState === 'agent-output-missing') {
       terminalReasonOverride = `監視エージェントが StructuredOutput を返さず終了した（${existingPrNote(impl)}）`
-      warnItem(item, `${terminalReasonOverride}`)
+      warnItem(item, terminalReasonOverride)
     } else if (lastState === 'unresolved-comments') {
       const rawInfo =
         Array.isArray(m?.unresolvedComments) && m.unresolvedComments.length > 0
@@ -9340,13 +9386,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       if (collision.kind === 'path') {
         const reason = addedFilePathBlockedReason(impl.prNumber, collision)
-        warnItem(item, `${reason}`)
+        warnItem(item, reason)
         return await failMergeTerminal(capText(reason), 'blocked')
       }
       if (collision.kind === 'seq') {
         if (addedFileCollisionFixes >= ADDED_FILE_COLLISION_FIX_MAX) {
           const reason = `PR #${impl.prNumber} の新規追加ファイルの連番の衝突が fix ${ADDED_FILE_COLLISION_FIX_MAX} 回で解消しなかった（base と ${collision.seqBase} 件・先行 PR ${prRefs(collision.seqPeers) || 'なし'} と ${collision.seqPeer} 件）。未使用の番号へ改番してから同じ args で再実行する`
-          warnItem(item, `${reason}`)
+          warnItem(item, reason)
           return await failMergeTerminal(capText(reason), 'blocked')
         }
         addedFileCollisionFixes++
@@ -9498,7 +9544,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
               : `イシューで宣言された opt-in テストの実行記録（pass、かつ現在の HEAD sha に束縛された記録）が PR 本文に確認できないためマージを停止した（不足: ${missingList}）${runsNote}。`
                 + `テストを実行し、現在の HEAD に対する opt-in テスト実行記録節のマーカー行を pass で更新してから同じ args で再実行すれば monitoring 再開で継続する`,
           )
-          warnItem(item, `${optinReason}`)
+          warnItem(item, optinReason)
           return await failMergeTerminal(optinReason, 'blocked')
         }
       }
@@ -9584,7 +9630,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             }
             // AUTO_MERGE_DISABLED_REASON はここでは添えない（虚偽文言の禁止）: マージ済みか否か
             // 不明な停止に「PR はマージ可能状態」の文言は一致しない。
-            warnItem(item, `${terminalReasonOverride}`)
+            warnItem(item, terminalReasonOverride)
           } else {
             // 独立確認の実測値を summary に追記する（合成に使うのは検証済みの値のみ）。
             mergeExecSummary = capText(
@@ -9677,7 +9723,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             `PR のマージ先が想定と異なる（base ブランチ不一致）か draft のままのためマージを停止した。`
             + `GitHub 上で base ブランチの修正または draft 解除を行ってから再実行すれば monitoring 再開で継続する: ${execSummaryText}`,
           )
-          warnItem(item, `${terminalReasonOverride}`)
+          warnItem(item, terminalReasonOverride)
         } else if (execReason === 'external-review-missing') {
           // 監視 ready と「外部チェック 0 件」の不一致。再監視でも到着を保証できないため
           // fail-open せず blocked + quality で終端する（チェック到着後の再実行で継続可能）。
@@ -9699,7 +9745,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             + (passConditionParts.length ? `${passConditionParts.join('。')}。` : '')
             + `チェック到着後に再実行すれば monitoring 再開で継続する。再実行しても解消しない場合は args.externalChecks の slug 誤記、または当該 App が本リポジトリで動作していない可能性があるため、App の導入状況を確認するか args.externalChecks から当該 slug を除外して再実行する: ${execSummaryText}`,
           )
-          warnItem(item, `${terminalReasonOverride}`)
+          warnItem(item, terminalReasonOverride)
         } else if (execReason === 'pr-closed') {
           // 未マージクローズは再監視で回復し得ないため blocked + unrecoverable で終端
           // （'quality' に誤分類すると毎ラン再開で halt 防御を迂回する。Issue #142）。
@@ -9714,7 +9760,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             `ベースブランチのサーバー側強制（required status checks の bypass 不能性・レビュースレッド解消の必須化・合格判定対象チェック context の required 化（client-only チェックの不在）・外部チェック App の宣言 context + App ID 組束縛の required 化）を確認できないためクライアント側自動マージを停止した（G0 ゲート）。`
             + `対象ブランチへ ruleset で required status checks（1 件以上・bypass actor なし。PR で実行される全チェックの context を含める。strict = base 最新化必須は並列ランを止めるため false にする）と required_review_thread_resolution を構成し、args.externalChecks で App を確定している場合は宣言した context の required check を当該 App の App ID（integration_id）束縛付きで追加してから再実行するか、autoMerge を外して人間がマージする（org 継承 ruleset のリポジトリはサーバー側 auto-merge workflow へ委譲する）: ${execSummaryText}`,
           )
-          warnItem(item, `${terminalReasonOverride}`)
+          warnItem(item, terminalReasonOverride)
         } else if (execReason === 'classic-unsupported') {
           // G0 (ii): ruleset の required status checks を確認できず classic 経路は非対応として辞退。
           // classic の bypass 不能性は write トークンで証明できず、検証可能な通過条件が存在しない。
@@ -9723,7 +9769,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             `ruleset の required status checks を確認できないため、classic branch protection 経路はクライアント側自動マージ非対応として停止した（G0 (ii)。classic の bypass 不能性は write 権限の実行トークンから証明できず fail-closed で辞退する）。`
             + `ruleset ベースの branch protection（bypass_actors 空 + 宣言 context の integration_id 束縛。read 権限で検証可能）へ移行するか、サーバー側 auto-merge workflow（upstream の docs/implement-issue-tree/auto-merge-sample.yml 参照）へ委譲するか、autoMerge を外して人間がマージする: ${execSummaryText}`,
           )
-          warnItem(item, `${terminalReasonOverride}`)
+          warnItem(item, terminalReasonOverride)
         } else if (execReason === 'issuer-unbound') {
           // G0 (v-b): 発行元束縛を検証できなかった（integration_id 非数値・取得不能のみ。束縛 check-run 未発行は checks-not-green）。integration_id 未設定の required check は
           // 同名の成功 commit status で偽装可能なため合格根拠にせず、宣言 integration_id と一致
@@ -9733,7 +9779,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             `ベースブランチの required status checks の発行元束縛を検証できないためクライアント側自動マージを停止した（G0 (v-b)。integration_id 未設定の required check は同名 commit status で偽装可能なため fail-closed で辞退する）。`
             + `required checks を GitHub App 発行の check-run に統一し、ruleset の required status checks 全エントリへ発行元 App の integration_id を設定してから再実行するか、autoMerge を外して人間がマージする（またはサーバー側 auto-merge workflow へ委譲する）: ${execSummaryText}`,
           )
-          warnItem(item, `${terminalReasonOverride}`)
+          warnItem(item, terminalReasonOverride)
         } else if (execReason === 'head-moved' || execReason === 'checks-not-green' || execReason === 'merge-failed') {
           // いずれも一過性。timeout として次ラウンドへ回し、見送り理由は timeout 終端時の note に
           // 残す。merge-failed はサーバー側スレッド解消強制による拒否を含むため確認案内を添える。
@@ -9789,10 +9835,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         const mergedOpts = { cleanupWorktree: currentWorktreePath }
         const mergedOk = await updateState(item.number, mergedPatch, mergedOpts)
         if (!mergedOk) {
-          log(`⚠️ issue #${item.number}: merged 状態のリトライ書き込みを試みる`)
+          warnIssue(item, `merged 状態のリトライ書き込みを試みる`)
           const retryOk = await updateState(item.number, mergedPatch, mergedOpts)
           if (!retryOk) {
-            log(`⚠️ issue #${item.number}: merged 終端の状態ファイル更新または worktree 掃除に失敗（どちらが失敗したかは直前の警告ログを参照。${STATE_FILE} と git worktree list を手動確認すること）。PR はマージ済みのため成功として扱う。次回実行時は monitor が MERGED を検出して即終端する`)
+            warnIssue(item, `merged 終端の状態ファイル更新または worktree 掃除に失敗（どちらが失敗したかは直前の警告ログを参照。${STATE_FILE} と git worktree list を手動確認すること）。PR はマージ済みのため成功として扱う。次回実行時は monitor が MERGED を検出して即終端する`)
             mergedResult.note = `${mergedResult.note}（注意: merged 終端の状態ファイル更新または worktree 掃除に失敗。次回実行時は monitor が PR の MERGED 状態を検出して即終端する）`
           }
         }
@@ -9852,7 +9898,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // （再試行しない）。PR は既存のため 'blocked'（次回実行の monitoring 再開で継続。
         // Issue #465）で終端する。
         const baseMergeFailReason = `base 取り込みエージェントが例外終了した（${baseMergeCount + 1} 回目。${existingPrNote(impl)}。${sanitize(String(baseMergeAgentError?.message ?? baseMergeAgentError))}）`
-        log(`⚠️ issue #${item.number}: ${baseMergeFailReason}`)
+        warnIssue(item, baseMergeFailReason)
         return await failMergeTerminal(baseMergeFailReason, 'blocked')
       }
       if (b == null) {
@@ -9860,7 +9906,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // b が非 null だが typeof b.pushed !== 'boolean'（shape 不正）は StructuredOutput 自体は
         // 返っているため下の 'failed' 分岐のまま変更しない。
         const baseMergeFailReason = `base 取り込みエージェントが StructuredOutput を返さなかった（${baseMergeCount + 1} 回目。${existingPrNote(impl)}）`
-        log(`⚠️ issue #${item.number}: ${baseMergeFailReason}`)
+        warnIssue(item, baseMergeFailReason)
         return await failMergeTerminal(baseMergeFailReason, 'blocked')
       }
       const baseMergeSucceeded = typeof b.pushed === 'boolean'
@@ -9868,7 +9914,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // fix と同じ契約: shape 不正な結果は baseMergeCount を消費せず即失敗終端（再試行しない）。
         // 台帳計上は上で完了済み。StructuredOutput 自体は返っているため 'failed'（既定）のまま。
         const baseMergeFailReason = `base 取り込みエージェントが無効な結果を返した（${baseMergeCount + 1} 回目）`
-        log(`⚠️ issue #${item.number}: ${baseMergeFailReason}`)
+        warnIssue(item, baseMergeFailReason)
         return await failMergeTerminal(baseMergeFailReason)
       }
       if (b.routingError) {
@@ -9902,7 +9948,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // conflict / hookRejected なし（base fetch 失敗・branch fetch / checkout 失敗・subject
         // 未確定等）は自動回復不能クラスのため従来どおり失敗終端する。
         const reason = `base 取り込みがコミットを作成できず未反映: ${sanitize(b.summary ?? '')}`
-        log(`⚠️ issue #${item.number}: ${reason}`)
+        warnIssue(item, reason)
         // 台帳計上は上で完了済み。
         return await failMergeTerminal(reason)
       } else {
@@ -9956,14 +10002,14 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // （再試行しない）。PR は既存のため 'blocked'（次回実行の monitoring 再開で継続。Issue #465）。
         recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')
         const fixFailReason = `fix エージェントが例外終了した（${fixCount + 1} 回目。${existingPrNote(impl)}。${sanitize(String(fixAgentError?.message ?? fixAgentError))}）`
-        log(`⚠️ issue #${item.number}: ${fixFailReason}`)
+        warnIssue(item, fixFailReason)
         return await failMergeTerminal(fixFailReason, 'blocked')
       }
       if (f == null) {
         // 例外ではないが StructuredOutput 未返却（Issue #465）。同じく台帳へ記録してから終端する。
         recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')
         const fixFailReason = `fix エージェントが StructuredOutput を返さなかった（${fixCount + 1} 回目。${existingPrNote(impl)}）`
-        log(`⚠️ issue #${item.number}: ${fixFailReason}`)
+        warnIssue(item, fixFailReason)
         return await failMergeTerminal(fixFailReason, 'blocked')
       }
       const newWorktreePath = sanitizeWorktreePath(f?.worktreePath ?? '')
@@ -9973,7 +10019,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // 終端（再試行しない。'failed' のまま変更なし）。収集済みの追跡情報を破棄しないよう、
         // 直接 updateState せず必ず共通終端ヘルパーを経由する。
         const fixFailReason = `fix エージェントが無効な結果を返した（${fixCount + 1} 回目）`
-        log(`⚠️ issue #${item.number}: ${fixFailReason}`)
+        warnIssue(item, fixFailReason)
         return await failMergeTerminal(fixFailReason)
       }
       if (f.routingError) {
@@ -9995,7 +10041,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         // 不能を含む。pushed: false の「修正済み・push 不要」と区別する）。routingError と同じ
         // く台帳へ記録してから終端する。
         const reason = `fix がコミットを作成できず修正未反映: ${sanitize(f.summary ?? '')}`
-        log(`⚠️ issue #${item.number}: ${reason}`)
+        warnIssue(item, reason)
         recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')
         return await failMergeTerminal(reason)
       }
@@ -10132,7 +10178,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 旧パスは stale になるため有効・無効を問わず必ず新値で上書きする
       currentWorktreePath = newWorktreePath
       if (!newWorktreePath) {
-        log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡不能`)
+        warnIssue(item, `fix worktree パスを取得できず追跡不能。git worktree prune での手動掃除が必要な場合あり`)
       }
       // fix 実行後: fixCount・新 worktree・追跡データ（outOfScopeLog / lastUnresolved* /
       // outOfScopeSeen / optinFixState）を更新し旧 worktree を削除する（中断・再起動後も復元でき
@@ -10256,7 +10302,7 @@ async function runOne(item) {
         pr: knownPr,
       })
       if (!terminalSaved) {
-        log(`⚠️ issue #${item.number}: catch-all の blocked 状態（PR #${knownPr} の監視再開情報）永続化に失敗した。重複 PR 防止のため failed（halt カウント対象）へ倒す（${STATE_FILE} を手動確認すること）`)
+        warnIssue(item, `catch-all の blocked 状態（PR #${knownPr} の監視再開情報）永続化に失敗した。重複 PR 防止のため failed（halt カウント対象）へ倒す（${STATE_FILE} を手動確認すること）`)
       }
     } else {
       await updateState(item.number, { status: 'failed', note: reason })
@@ -10665,6 +10711,11 @@ function ckMiB() { return Math.round(effectiveCheckoutByteReserve(freeDiskChecko
 // 上限ゲートにより monitoring 再開を defer したイシューの記録（n → 理由文字列）。既定の
 // 「再実行すると monitor から再開する」案内は上限超過 defer では誤りのため個別に理由を上書きする。
 const monitoringResumeGateDeferred = new Map()
+// monitoring 再開を defer した理由を記録し警告ログへ出す（再開ゲートの 6 か所で共通）。
+const deferResume = (n, r) => {
+  monitoringResumeGateDeferred.set(n, r)
+  log(`⚠️ #${n}: ${r}`)
+}
 // rawPerWorktreeByteReserve が永続化済み高水位を上回ったときだけ高水位を更新・永続化する
 // （Issue #471）。in-memory の persistedHighWaterBytes を先に更新してから非同期書き込みを
 // 投げることで、同一 candidateBytes に対する重複書き込みを避ける（enqueueStateWrite の
@@ -10706,7 +10757,7 @@ async function remeasureResidualBytesNow() {
   // ここで取る物理一覧は全件測定の対象差し替え（Issue #404）専用。未検証 implement エントリの
   // パス解決には使い回さない（この後の await を挟んだ時点で古くなるため、解決側は直前に取り直す）。
   if (unverifiedEphemeralCount > 0) {
-    const [entries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
+    const [entries, independentCount] = await observeWorktreeList()
     const fallback = buildPhysicalByteMeasureTargets(entries, independentCount)
     if (fallback.ok) {
       // 物理一覧は測定専用の差し替えで削除経路へは流さない。confirmedRemovedPaths による除外も
@@ -10836,7 +10887,7 @@ async function remeasureResidualBytesNow() {
     // 候補 0 件 → 解決不能 → 恒久 latch へ落ちる。入口の physicalEntries は全件測定のフォール
     // バック専用に留め、ここでは今この瞬間の一覧で解決する。再スキャンが取得できなかった場合
     // （null / 空配列）のみ解決不能として扱う。
-    const [freshEntries, freshIndependentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
+    const [freshEntries, freshIndependentCount] = await observeWorktreeList()
     const claimedPaths = ephemeralWorktrees.map((e) => e.path).filter((v) => !isUnverifiedPath(v))
     const resolution = resolveUnverifiedImplementPaths({
       issues: unverifiedImplementIssues,
@@ -11200,8 +11251,7 @@ while (true) {
             `ラン開始時の worktree 残置観測に失敗しているため monitoring 再開を defer した` +
             `（観測失敗時は fix-routing-error worktree の新規作成で残置総数を確認できないまま上限を` +
             `超過し得るため fail-closed で待機する）。git worktree list が実行できる状態を確認してから再実行すること`
-          monitoringResumeGateDeferred.set(n, deferReason)
-          log(`⚠️ #${n}: ${deferReason}`)
+          deferResume(n, deferReason)
           continue
         }
         if (item.kind === 'implement' && maxResidualWorktrees > 0 && residualObserved) {
@@ -11214,8 +11264,7 @@ while (true) {
               `（開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${ephemeralWorktrees.length} 件＋` +
               `実行中タスクの残余予約 ${reservedTotal} 件＋再開候補の最大増分 ${EPHEMERAL_RESERVE_PER_MONITORING_RESUME} 件）。` +
               WT_RM_NOTE
-            monitoringResumeGateDeferred.set(n, deferReason)
-            log(`⚠️ #${n}: ${deferReason}`)
+            deferResume(n, deferReason)
             continue
           }
         }
@@ -11227,8 +11276,7 @@ while (true) {
             `ラン開始時の worktree 残置ディスク使用量観測に失敗しているため monitoring 再開を defer した` +
             `（観測失敗時は fix-routing-error worktree の新規作成で容量を確認できないまま上限を` +
             `超過し得るため fail-closed で待機する）。du が実行できる状態を確認してから再実行すること`
-          monitoringResumeGateDeferred.set(n, deferReason)
-          log(`⚠️ #${n}: ${deferReason}`)
+          deferResume(n, deferReason)
           continue
         }
         if (item.kind === 'implement' && maxResidualWorktreeBytes > 0 && residualBytesObserved) {
@@ -11264,8 +11312,7 @@ while (true) {
                   `defer した（全件測定自体は成功しており容量超過は確定していないが、予約見積りが` +
                   `stale なまま再開すると fix-routing-error worktree の追加作成で容量上限を超過し` +
                   `得るため fail-closed で待機する）。原因を解消してから再実行すること`
-            monitoringResumeGateDeferred.set(n, deferReason)
-            log(`⚠️ #${n}: ${deferReason}`)
+            deferResume(n, deferReason)
             continue
           }
           const reservedUnits = reservedUnitsNow()
@@ -11287,8 +11334,7 @@ while (true) {
               `基準以降の積み増し・実行中タスク予約・再開候補分の見積り合計 ` +
               `${Math.round((projectedBytes - residualBytesAtStart) / (1024 * 1024))} MiB）。` +
               WT_RM_NOTE
-            monitoringResumeGateDeferred.set(n, deferReason)
-            log(`⚠️ #${n}: ${deferReason}`)
+            deferResume(n, deferReason)
             continue
           }
           // 実ディスク空き容量ゲートのラン中再評価（Issue #467 P0/High 再指摘対応）。バイト軸の
@@ -11315,8 +11361,7 @@ while (true) {
               : `実ディスク空き容量 ${Math.round(freeDiskBytesAtStart / (1024 * 1024))} MiB が投入済み予約` +
                 `込みの必要量 ${Math.round(requiredFreeDiskBytesResume / (1024 * 1024))} MiB を下回るため` +
                 `monitoring 再開を defer した。空き容量を確保してから再実行すること`
-            monitoringResumeGateDeferred.set(n, deferReason)
-            log(`⚠️ #${n}: ${deferReason}`)
+            deferResume(n, deferReason)
             continue
           }
         }
@@ -11831,7 +11876,7 @@ if (maxResidualWorktreeBytes > 0 && residualBytesObserved) {
   // フォールバックが成立しないときだけ測定不能（fail-closed）にする。フォールバックの対象は今この瞬間の確定スナップショットなので confirmedRemovedPaths で除外しない
   let endFallbackPaths = null
   if (!hasUnverifiedEndPath && slotUnknownLiveCount > 0) {
-    const [entries, independentCount] = await Promise.all([scanOrphanWorktrees(), countWorktreeRecords()])
+    const [entries, independentCount] = await observeWorktreeList()
     const fallback = buildPhysicalByteMeasureTargets(entries, independentCount)
     if (fallback.ok) endFallbackPaths = unionMeasurePaths(fallback.paths, rawEndPaths.filter((p) => !confirmedRemovedPaths.has(p)))
     else hasUnverifiedEndPath = true

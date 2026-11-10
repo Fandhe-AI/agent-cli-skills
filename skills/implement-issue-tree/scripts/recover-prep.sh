@@ -13,7 +13,7 @@
 #      live なら `git symbolic-ref` の HEAD を対象ブランチにする（state のブランチと食い違えば HEAD を優先する）。dead は記録されたブランチを使う。
 #      メイン・未登録・不一致・detached・base と同名は確定せず（resolved:false）、何も書かない
 #      例外（Issue #731）: live で detached のとき、状態のブランチ先端が HEAD の祖先・どの worktree も使用中でない・途中状態でない、をすべて満たせば
-#      `git update-ref`（旧値つき）でブランチを HEAD まで進め、`git symbolic-ref HEAD` で worktree をそのブランチへ付け直してから通常の live として進める
+#      `git update-ref`（旧値つき）でブランチを HEAD まで進め、update-ref の 1 トランザクション（HEAD の旧値つき symref-update + ブランチ先端の verify）で worktree をそのブランチへ付け直してから通常の live として進める
 #   2. live のとき、未コミット変更があれば WIP コミットを作る。汚れの観測は worktree-remove.sh と同じ対象の
 #      `git -c core.excludesFile= status --porcelain=v2 -z -uall --ignore-submodules=none`（利用者の status.showUntrackedFiles や submodule の ignore、
 #      グローバルの除外に左右されない。-z はパスの C 引用〔非 ASCII・"・\・タブ〕で入れ子の git リポジトリの検出が取りこぼすのを避けるため。
@@ -194,8 +194,9 @@ if [ "${wtstate}" = live ] && [ -z "${head_branch}" ]; then
     R_DETACHED=$(rp_detached_plan "${adopt_branch}" "${base}" "${adopt_exists}" "${adopt_use}" "${adopt_ahead}" "${adopt_ip}")
     if [ "${R_DETACHED}" = adopt ]; then
       # 付け直しの間に生存中の agent が detached HEAD を進め得る（lock は無視する）。観測した adopt_head から HEAD が動いていたら付け直さず保全する。
-      # 確認は ref 更新の前と直後の 2 回。付け直し自体は HEAD の旧値（oid）を指定した symref-update の 1 トランザクションで行い、確認と書き換えの間に
-      # 積まれたコミットを上書きしない（旧値が違えば git が拒否する）。symref-update を持たない git（2.51 未満）では失敗し、付け直さず保全する
+      # 確認は ref 更新の前と直後の 2 回。付け直し自体は 1 つの update-ref --stdin トランザクションで行う。HEAD の旧値（oid）を指定した symref-update と、付け直し先
+      # refs/heads/<branch> が adopt_head のままであることの verify を同じトランザクションに入れ、確認と書き換えの間に積まれたコミットや
+      # ブランチ先端の移動があれば git が全体を拒否する（HEAD が未観測のコミットへ付け替わらず detached のまま保全される）。symref-update を持たない git（2.51 未満）では失敗し、付け直さず保全する
       arc=0
       adopt_same() { [ "$(git -C "${path}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" = "${adopt_head}" ] && [ "$(git -C "${path}" rev-parse --abbrev-ref HEAD 2>/dev/null)" = HEAD ]; }
       adopt_same || arc=1
@@ -205,7 +206,7 @@ if [ "${wtstate}" = live ] && [ -z "${head_branch}" ]; then
         if [ "${arc}" = 0 ] && ! adopt_same; then arc=1; fi
       fi
       if [ "${arc}" = 0 ]; then
-        printf 'symref-update HEAD refs/heads/%s oid %s\n' "${adopt_branch}" "${adopt_head}" | git -C "${path}" update-ref --no-deref --stdin >/dev/null 2>&1 || arc=$?
+        printf 'start\nverify refs/heads/%s %s\nsymref-update HEAD refs/heads/%s oid %s\nprepare\ncommit\n' "${adopt_branch}" "${adopt_head}" "${adopt_branch}" "${adopt_head}" | git -C "${path}" update-ref --no-deref --stdin >/dev/null 2>&1 || arc=$?
       fi
       # 付け直し後の HEAD がブランチ経由で adopt_head のままであること（回収成功の根拠）
       if [ "${arc}" = 0 ] && [ "$(git -C "${path}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" != "${adopt_head}" ]; then arc=1; fi

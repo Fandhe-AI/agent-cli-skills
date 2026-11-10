@@ -443,4 +443,7 @@ export const MUTATIONS = [
   { id: 'D3-detached-cas-dropped', file: RP, from: '"${adopt_head}" "${adopt_tip}" >/dev/null 2>&1 || arc=$?', to: '"${adopt_head}" >/dev/null 2>&1 || arc=$?', tests: ['script-static-guard.test.mjs'], note: "#731: ブランチの更新から旧値（CAS）を外す（競合した更新を上書きし得る）" },
   { id: 'D4-detached-in-progress-ignored', file: RP_LIB, from: '  elif [ "$6" != 0 ]; then\n    echo in-progress', to: '  elif false; then\n    echo in-progress', tests: RP_ALL, note: "#731: マージ等の途中の detached を付け直す" },
   { id: 'D5-detached-base-allowed', file: RP_LIB, from: '  elif [ -n "$2" ] && [ "$1" = "$2" ]; then\n    echo base-branch\n  elif [ "$3" != 1 ]', to: '  elif [ "$3" != 1 ]', tests: RP_ALL, note: "#731: base と同名のブランチを付け直しの対象にする" },
+  { id: 'WO1-observe-no-retry', file: SRC, from: 'const WT_OBSERVE_TRIES = 3', to: 'const WT_OBSERVE_TRIES = 1', tests: ['worktree-observe-retry.test.mjs'], note: "#735: 食い違いを取り直さない（並行ランの作成・削除で新規着手が止まる）" },
+  { id: 'WO2-observe-never-differs', file: SRC, from: 'Number.isInteger(count) && count !== entries.length', to: 'Number.isInteger(count) && count === entries.length', tests: ['worktree-observe-retry.test.mjs'], note: "#735: 食い違いの判定を反転する" },
+  { id: 'WO3-observe-unbounded', file: SRC, from: 'while (++i < WT_OBSERVE_TRIES && worktreeCountsDiffer(...r))', to: 'while (worktreeCountsDiffer(...r))', tests: ['worktree-observe-retry.test.mjs'], note: "#735: 取り直しに上限を設けない" },
 ]
