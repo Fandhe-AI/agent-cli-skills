@@ -176,6 +176,8 @@ note・ログ文言の合成にのみ使われる。
 
 Recover の機械的な部分 — 対象ブランチの解決・WIP commit（フックを通す。`--no-verify` なし）・`origin/<base>` の取得・base との差分の有無 — は `scripts/recover-prep.sh`（`run-verified.sh` 経由。Issue #603 第 9 弾）が決定的に行い、Recover エージェントは結果の行 `RECOVER_PREP_RESULT {…}` の `branch`・`worktreeMissing`・`wipCommitted` を返却へ写して、継続か破棄かの判断と回復ブリーフの作成だけを行う。退避完了（`wipCommitted: true`）の根拠はコミットの終了コードではなく、コミット後の同じ観測（`git -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none`）が空であること。フックの拒否・フックによる書き換え・submodule 内の未コミットの変更・入れ子の git リポジトリ・コンフリクト中・観測不能は `false` で、`failed` で保全される。メイン worktree・未登録のパス・git がそのパス自身を指さない worktree・detached HEAD・base と同名の HEAD は対象を確定せず（`resolved: false`）、何も書かない。base の取得に失敗したときの差分は `unknown`（空とは見なさない）。詳細は `./script-trust-model.md` の第 9 弾。
 
+**detached の worktree に残った子孫コミット（Issue #731）**: Review の fix が detached HEAD にコミットしたままブランチの ref へ反映されずに終わると、live の worktree が detached になり、対象ブランチを HEAD から確定できない。`recover-prep.sh` は、状態ファイルのブランチ先端が worktree の HEAD の祖先（または同一）で、そのブランチをどの worktree も checkout しておらず、マージ等の途中でもないときだけ、旧値つきの `git update-ref` でブランチを HEAD まで fast-forward し、`git symbolic-ref HEAD` で worktree をそのブランチへ付け直してから通常の live として進める（結果の行の `detached:"attached"`）。分岐・先行・使用中・途中状態・記録なし・ref の更新失敗は従来どおり `resolved:false`・`reason:detached` で保全する（`detached` に理由の語が入る）。付け直しのあとは `worktree-remove.sh --expect-branch` の照合が通るので、継続・破棄とも自動で進む。
+
 状態ファイルの `worktree` フィールドには実装エージェントが動作した worktree の絶対パスが記録される。Recover phase はこのフィールドと `git worktree list --porcelain` を使って残骸を特定する（`recover-prep.sh` が一覧との照合まで行う）。
 
 ### worktree の自動削除

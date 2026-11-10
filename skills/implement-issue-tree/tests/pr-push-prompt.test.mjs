@@ -139,7 +139,11 @@ test('fixPrompt(pushAfterFix: true): push の status を pushed 判定へ結ぶ�
 test('fixPrompt(pushAfterFix: false): pr-push.sh を呼ばない（push 前の Review ループ。ローカル修正のみ）', () => {
   const text = fixPrompt(item, impl, { summary: 's', unresolvedComments: [] }, false, [])
   assert.doesNotMatch(text, /pr-push\.sh/)
-  assert.match(text, /git branch -f/)
+  // Issue #731: git branch -f は別 worktree が checkout 中だと拒否されるため update-ref で更新し、反映を確認する
+  assert.ok(text.includes(`git update-ref refs/heads/${B} HEAD`))
+  assert.ok(text.includes(`git rev-parse refs/heads/${B} が HEAD の sha と一致`))
+  assert.match(text, /commitFailed: true/)
+  assert.doesNotMatch(text, new RegExp(`git branch -f ${B}`))
 })
 
 test('baseMergePrompt（自動 base 取り込み）は pr-push.sh を呼ばない（base-merge.sh のまま）', () => {

@@ -4516,16 +4516,16 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'ca6773db1fba50b3fe5e27bd6b395e32b8278d59ee13528b7f345415a1c40e8e',
-'measure-free-disk.sh':'1164c4b7ec1e2778330ad8b6eed9737079896ce6e5f30fa3cf9d46a70fb86bd0',
-'observe-pr.sh':'535a470fdbae779832a3856985a280cf115ef76cc3060f140619e9912b104b42',
-'base-merge.sh':'7835fc24396d3a442bcddac4be8ee764f510357eb7e213b343790777074eeab9',
-'pr-push.sh':'ebae4022c10af7d08d0965774c135b4ef02cf2eee2acef9c0330be3228d48f73',
-'state.sh':'5053a965abf6bc79bf50e559a1fccf609346518120c02ff26ed8aedc924e4ebe',
-'merge-gate.sh':'17f022728251f8125259f4f7d98caab53400920136c9353a8d018e36fe9d5a71',
-'worktree-remove.sh':'96501c0b2887bbce5278fad8359ca95286e9aa615068088c833aaf7a84530ac3',
-'recover-prep.sh':'6e3a18783102f3716c99187666620f42ae4f9438d26a8db89ecb59de438437cb',
-'fetch-tree.sh':'fddce55942793541d9829050350a53105c9155e0630b5a89e104e02774a58708',
+'measure-residual-bytes.sh':'d61366b7b86d64198cf4e0dc302ff4308962084c66f84f5ec2a3e67319afd603',
+'measure-free-disk.sh':'900a57fc72b6c5b78781f8f7f71fd1a27bef8c87eacc5f112b5c175c785f024d',
+'observe-pr.sh':'9c714adb9889263437d7371be5d84f6d7c2bb13a4a3678a509282b2823b87dd7',
+'base-merge.sh':'740cd19b9ab68551b687fb2b1fd4b9f5eeb376906cb2622ceb47311a9d283d4a',
+'pr-push.sh':'2ac90785586877ba721105bb742899f61ea18559662cd165fff788f7581adbd6',
+'state.sh':'77e50d560763c57e1aacfeed7a8bf06c662d8942b761380be1a6a9b720d5d46b',
+'merge-gate.sh':'b540aef1846062c4886ef8d7a58354ced86271cc29c938441d240481e0a2f333',
+'worktree-remove.sh':'d4af83623d550ddc4d84b2200926d3ae55f9f471ed55af2363b3c75048026533',
+'recover-prep.sh':'44284b65198386a5c9bbb16ba0b66d7b02fe67d75dbf30c0989183aeb9add716',
+'fetch-tree.sh':'81a1f3860b725bf9e8be7807062e404314910d5d8f84f357b19e755c217e1127',
 }
 
 
@@ -6688,9 +6688,7 @@ const checkoutInstructions=pushAfterFix
 `   git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
 `   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
 `   マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で base を最新化してから git merge origin/${baseBranch} を実行して解消する（Issue #361）`,
-`   （ローカルの ${baseBranch} ではなく origin/${baseBranch} を使う。ローカル base が origin より`,
-`   進んでいる場合にローカル限定コミットがブランチへ混入し、次ラウンドの Review がそれを`,
-`   ブランチの変更として誤検出する再発経路を防ぐため。Issue #315）。`,
+`   （ローカルの ${baseBranch} ではなく origin/${baseBranch} を使う。ローカル限定コミットの混入を防ぐ。Issue #315）。`,
 ]
 const commitAndPushInstructions=pushAfterFix
 ?[
@@ -6703,8 +6701,8 @@ commitlintCheckInstruction,
 :[
 `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
 commitlintCheckInstruction,
-`   コミット後に git branch -f ${branch} HEAD でローカルブランチの先端を更新する`,
-`   （detached HEAD 作業後のブランチ先端を確実に更新するため）。`,
+`   コミット後に git update-ref refs/heads/${branch} HEAD でブランチ先端を更新する（git branch -f は別 worktree が checkout 中だと拒否される）。`,
+`   続けて git rev-parse refs/heads/${branch} が HEAD の sha と一致することを確認し、一致しなければ pushed: false・commitFailed: true で summary に HEAD の sha を書いて返す。`,
 `   レビュースレッドの resolve は行わない（本経路は push 前の Review ループであり、resolve を実行してよいのは Merge ループの fix が修正のリモート head への反映を確認した後 — 修正 push の成功直後、または過去ラウンド push 済み分の反映確認後 — のみ）。`,
 ]
 return[

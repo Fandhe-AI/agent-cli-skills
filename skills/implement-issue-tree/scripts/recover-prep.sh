@@ -12,6 +12,8 @@
 #   1. 旧 worktree の状態を調べる（無い = dead worktree、メイン worktree、登録されていない、git がそのパス自身を指さない、登録済みで実体が一致）。
 #      live なら `git symbolic-ref` の HEAD を対象ブランチにする（state のブランチと食い違えば HEAD を優先する）。dead は記録されたブランチを使う。
 #      メイン・未登録・不一致・detached・base と同名は確定せず（resolved:false）、何も書かない
+#      例外（Issue #731）: live で detached のとき、状態のブランチ先端が HEAD の祖先・どの worktree も使用中でない・途中状態でない、をすべて満たせば
+#      `git update-ref`（旧値つき）でブランチを HEAD まで進め、`git symbolic-ref HEAD` で worktree をそのブランチへ付け直してから通常の live として進める
 #   2. live のとき、未コミット変更があれば WIP コミットを作る。汚れの観測は worktree-remove.sh と同じ対象の
 #      `git -c core.excludesFile= status --porcelain=v2 -z -uall --ignore-submodules=none`（利用者の status.showUntrackedFiles や submodule の ignore、
 #      グローバルの除外に左右されない。-z はパスの C 引用〔非 ASCII・"・\・タブ〕で入れ子の git リポジトリの検出が取りこぼすのを避けるため。
@@ -36,6 +38,8 @@
 #         wipCommitted はホストの削除の第 1 層のゲートに使われるが、封筒は付けない（削除の実効ゲートは worktree-remove.sh が削除と同じプロセスで行う独立観測で、
 #         この値の偽装では破れない。references/script-trust-model.md の第 9 弾）。
 # 終了コード: 0 結果の行を出力した / 2 使い方の誤り（結果の行は出さない）/ 3 git が無い
+#       detached は live の worktree が detached だったときの取り込み結果（none|attached|failed、または取り込まなかった理由の語
+#       no-state-branch / base-branch / no-ref / in-use / in-progress / diverged / unknown）。attached は付け直して branch が確定したこと（Issue #731）。
 # 互換: macOS（BSD userland・bash 3.2）と Linux（GNU・busybox）。paste・bc・mapfile・GNU 専用フラグを使わない。
 
 set -u
@@ -91,13 +95,14 @@ R_BASESHA=""
 R_DIFF=unknown
 R_AHEAD=0
 R_FILES=0
+R_DETACHED=none
 
 emit() {
   local resolved=false wtm=false
   [ "${RP_RESOLVED}" = 1 ] && resolved=true
   [ "${RP_WT_MISSING}" = 1 ] && wtm=true
-  printf 'RECOVER_PREP_RESULT {"resolved":%s,"reason":"%s","branch":"%s","source":"%s","worktreeMissing":%s,"wip":"%s","wipCommitted":%s,"dirty":%s,"branchExists":%s,"branchSha":"%s","baseFetched":%s,"baseSha":"%s","diff":"%s","commitsAhead":%s,"filesChanged":%s}\n' \
-    "${resolved}" "${RP_REASON}" "${RP_BRANCH}" "${RP_SOURCE}" "${wtm}" "${R_WIP}" "${R_WIPOK}" "${R_DIRTY}" "${R_EXISTS}" "${R_BSHA}" "${R_FETCHED}" "${R_BASESHA}" "${R_DIFF}" "${R_AHEAD}" "${R_FILES}"
+  printf 'RECOVER_PREP_RESULT {"resolved":%s,"reason":"%s","branch":"%s","source":"%s","worktreeMissing":%s,"wip":"%s","wipCommitted":%s,"dirty":%s,"branchExists":%s,"branchSha":"%s","baseFetched":%s,"baseSha":"%s","diff":"%s","commitsAhead":%s,"filesChanged":%s,"detached":"%s"}\n' \
+    "${resolved}" "${RP_REASON}" "${RP_BRANCH}" "${RP_SOURCE}" "${wtm}" "${R_WIP}" "${R_WIPOK}" "${R_DIRTY}" "${R_EXISTS}" "${R_BSHA}" "${R_FETCHED}" "${R_BASESHA}" "${R_DIFF}" "${R_AHEAD}" "${R_FILES}" "${R_DETACHED}"
   exit 0
 }
 
@@ -161,6 +166,44 @@ if [ -n "${path}" ]; then
         wr_valid_branch "${head_branch}" || head_branch=""
       else
         wtstate=mismatch
+      fi
+    fi
+  fi
+fi
+# live で detached のとき、状態ファイルのブランチ先端が HEAD の祖先で、どの worktree も使っておらず途中状態でもなければ、ブランチを HEAD まで
+# fast-forward し worktree の HEAD をそのブランチへ付け直す（Issue #731）。Review の fix が detached HEAD に残したコミットを回収するための例外で、
+# ref の更新は旧値つき（CAS）の update-ref 1 形だけ。条件を満たさない・失敗したときは head_branch を空のまま、従来どおり detached で確定せず保全する
+R_DETACHED=none
+if [ "${wtstate}" = live ] && [ -z "${head_branch}" ]; then
+  adopt_branch=${branch}
+  R_DETACHED=no-state-branch
+  if [ -n "${adopt_branch}" ]; then
+    adopt_head=$(git -C "${path}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || adopt_head=""
+    adopt_tip=$(git rev-parse -q --verify "refs/heads/${adopt_branch}^{commit}" 2>/dev/null) || adopt_tip=""
+    adopt_exists=0
+    adopt_use=1
+    adopt_ahead=""
+    adopt_ip=0
+    if rp_is_sha "${adopt_head}" && rp_is_sha "${adopt_tip}"; then
+      adopt_exists=1
+      adopt_list=$(git worktree list --porcelain 2>/dev/null) || adopt_list=""
+      if [ -n "${adopt_list}" ] && ! rp_branch_in_use "${adopt_list}" "${adopt_branch}"; then adopt_use=0; fi
+      adopt_ahead=$(git rev-list --count "${adopt_head}..${adopt_tip}" 2>/dev/null) || adopt_ahead=""
+      if in_progress "${path}"; then adopt_ip=1; fi
+    fi
+    R_DETACHED=$(rp_detached_plan "${adopt_branch}" "${base}" "${adopt_exists}" "${adopt_use}" "${adopt_ahead}" "${adopt_ip}")
+    if [ "${R_DETACHED}" = adopt ]; then
+      arc=0
+      git update-ref "refs/heads/${adopt_branch}" "${adopt_head}" "${adopt_tip}" >/dev/null 2>&1 || arc=$?
+      if [ "${arc}" = 0 ]; then
+        git -C "${path}" symbolic-ref HEAD "refs/heads/${adopt_branch}" >/dev/null 2>&1 || arc=$?
+      fi
+      if [ "${arc}" = 0 ]; then
+        head_branch=${adopt_branch}
+        R_DETACHED=attached
+      else
+        R_DETACHED=failed
+        echo "recover-prep: detached の付け直しに失敗（ブランチ ${adopt_branch}）。保全する" >&2
       fi
     fi
   fi

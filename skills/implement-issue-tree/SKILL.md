@@ -223,6 +223,7 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 **Recover の判断軸は Review とは別**である。Review は「実装が正しいか・マージできるか」を判定するのに対し、Recover は「この途中作業から継続するのが妥当か」を判断する。動かない・未完成でも方向が妥当なら continue（残りは Implement が完成させる）。
 
 **未 commit 変更は WIP commit として branch へ退避してから worktree を削除する**ため、continue / discard どちらの経路でもデータを失わない。対象ブランチの解決・WIP commit（フックを通す）・`origin/<base>` の取得・差分の有無は `scripts/recover-prep.sh` が決定的に行い（`references/script-trust-model.md` の第 9 弾）、Recover エージェントに残るのは継続か破棄かの判断と回復ブリーフの作成だけである。discard の場合は WIP commit を残した状態で branch を削除する。**削除後は reflog に残らない**（gc までの到達不能オブジェクトとして残るだけ）ため、`worktree-remove.sh` は消す前のブランチ先頭 sha を結果に出し、ホストがログに残す（`git branch <名前> <sha>` で gc までの間は復元できる）。
+detached の worktree に fix のコミットだけが残った場合（ブランチ先端が HEAD の祖先で未使用）は、`recover-prep.sh` がブランチを fast-forward して worktree を付け直してから継続・破棄を判断する（Issue #731。`references/recovery.md`）。
 
 **削除ゲート（continue / discard 共通）**: Recover エージェントの返す `wipCommitted` は（`recover-prep.sh` の結果の行を写した）エージェントの返却値であり、誤判定・異常応答・プロンプトインジェクションで真を騙られ得る。加えて Recover は「フック失敗等で退避できなかった場合は `wipCommitted: false` を返して続行する」契約のため、`continue` も退避失敗時に返り得る。そのため **continue / discard いずれの経路でも** worktree の削除は次の 2 条件を**両方**満たす場合にのみ実行する。
 

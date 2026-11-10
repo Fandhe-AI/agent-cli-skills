@@ -408,6 +408,7 @@ monitor の手順 2〜3 は、HEAD sha のチェックの完了を `gh pr checks
 - **ホスト側の引数の検査**: `--base`・`--worktree`・`--branch` はホストの `sanitizeBranch` / `sanitizeWorktreePath`（どちらも `worktreeQuote` の許可文字の部分集合）を通った値で、`worktreeQuote` が例外を投げる経路は無い（`baseBranch` が不正なら起動時の `sanitizeBranch` で既に停止している）。
 - **base の取得は共有の追跡 ref**（`refs/remotes/origin/<base>`）へ書く。並列に走る Recover が同じ ref を更新し得るが、git の ref ロックで直列化され、どちらも最新の base に進むだけで害は無い（`base-merge.sh` / `pr-push.sh` が worktree ごとの ref を使うのは、取り込む側が取得した sha に固定する必要があるため。この弾は読み取りの判定だけで、sha を結果の `baseSha` に固定して使う）。
 - 新しい lib（`lib/recover-prep-lib.sh`）を足したので、**全スクリプトのハッシュが変わる**。同じ時期に別のスクリプトを変更している作業（例: `observe-pr.sh` の修正）は、`SCRIPT_SHA256` の表・生成物・`script-static-guard.test.mjs` で競合する。後からマージする側は再ビルドが要る。
+- **detached の取り込み（Issue #731）**: live で detached の worktree は、`rp_detached_plan` が `adopt` を返したときだけ（状態のブランチが実在・base と同名でない・どの worktree も未使用・途中状態でない・`git rev-list --count HEAD..branch` が 0）、`git update-ref "refs/heads/${adopt_branch}" "${adopt_head}" "${adopt_tip}"`（旧値つき = 非 fast-forward や競合では更新されない）と `git -C "${path}" symbolic-ref HEAD "refs/heads/${adopt_branch}"` の 2 行で付け直す。結果の行に `detached`（`none` / `attached` / `failed` / 取り込まなかった理由の語）を足した。静的ガードはこの 2 行を `recover-prep.sh` 専用の許可形として固定し（`update-ref -d` の許可形は従来どおり `base-merge.sh` と `pr-push.sh` だけ）、旧値なし・別の変数・別のスクリプトの書き込みを拒否する。
 
 ### この弾の検証範囲
 

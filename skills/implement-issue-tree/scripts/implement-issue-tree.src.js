@@ -6676,7 +6676,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
             : []),
         ]
       : []
-  // push しない Review fix では detach で取得し、修正コミット後に `git branch -f` で先端更新する。
+  // push しない Review fix では detach で取得し、修正コミット後に `git update-ref` で先端更新する。
   const checkoutInstructions = pushAfterFix
     ? [
         // 修正作業（手順 2〜3）の前に base 取り込みを済ませておく。作業後に base コンフリクトを検出すると、そのコミットは
@@ -6688,9 +6688,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         `   git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
         `   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
         `   マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で base を最新化してから git merge origin/${baseBranch} を実行して解消する（Issue #361）`,
-        `   （ローカルの ${baseBranch} ではなく origin/${baseBranch} を使う。ローカル base が origin より`,
-        `   進んでいる場合にローカル限定コミットがブランチへ混入し、次ラウンドの Review がそれを`,
-        `   ブランチの変更として誤検出する再発経路を防ぐため。Issue #315）。`,
+        `   （ローカルの ${baseBranch} ではなく origin/${baseBranch} を使う。ローカル限定コミットの混入を防ぐ。Issue #315）。`,
       ]
   const commitAndPushInstructions = pushAfterFix
     ? [
@@ -6703,8 +6701,8 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     : [
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
         commitlintCheckInstruction,
-        `   コミット後に git branch -f ${branch} HEAD でローカルブランチの先端を更新する`,
-        `   （detached HEAD 作業後のブランチ先端を確実に更新するため）。`,
+        `   コミット後に git update-ref refs/heads/${branch} HEAD でブランチ先端を更新する（git branch -f は別 worktree が checkout 中だと拒否される）。`,
+        `   続けて git rev-parse refs/heads/${branch} が HEAD の sha と一致することを確認し、一致しなければ pushed: false・commitFailed: true で summary に HEAD の sha を書いて返す。`,
         `   レビュースレッドの resolve は行わない（本経路は push 前の Review ループであり、resolve を実行してよいのは Merge ループの fix が修正のリモート head への反映を確認した後 — 修正 push の成功直後、または過去ラウンド push 済み分の反映確認後 — のみ）。`,
       ]
   return [
