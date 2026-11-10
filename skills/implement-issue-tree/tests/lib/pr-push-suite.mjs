@@ -720,11 +720,21 @@ export function registerPrPushTests(bash) {
     const rb = prRun(sbB, {}, [], { PR_PUSH_MS_ATTEMPTS: 'x', PR_PUSH_MS_WAIT_S: '-1', GHPR_MS_ERR_TEXT: RL })
     assert.equal(rb.milestoneAttempts, 3)
     // 先頭ゼロ付き（08 / 09）は八進数扱いで異常終了せず、十進として結果の行を返す
-    for (const w of ['08', '09', '00']) {
+    // 待機の 08 / 09 は 1 試行に絞り、最初の失敗で打ち切って実時間の sleep を発生させない（パースだけを通す）
+    for (const w of ['08', '09']) {
       const sbZ = makeSandbox()
-      const rz = prRun(sbZ, {}, [], { PR_PUSH_MS_ATTEMPTS: '03', PR_PUSH_MS_WAIT_S: w, GHPR_MS_ERR_TEXT: RL })
-      assert.equal(rz.milestoneAttempts, 3, `WAIT_S=${w}`)
+      const rz = prRun(sbZ, {}, [], { PR_PUSH_MS_ATTEMPTS: '01', PR_PUSH_MS_WAIT_S: w, GHPR_MS_ERR_TEXT: RL })
+      assert.equal(rz.milestoneAttempts, undefined, `WAIT_S=${w}: 1 試行のみ（結果に出ない）`)
+      assert.equal(rz.milestone, 'unknown', `WAIT_S=${w}`)
     }
+    // 試行回数の 08 / 09 は十進で上限超過 → 既定 3 へ戻る。待機は 0 で sleep しない
+    for (const a of ['08', '09']) {
+      const sbA = makeSandbox()
+      const ra = prRun(sbA, {}, [], { PR_PUSH_MS_ATTEMPTS: a, PR_PUSH_MS_WAIT_S: '00', GHPR_MS_ERR_TEXT: RL })
+      assert.equal(ra.milestoneAttempts, 3, `ATTEMPTS=${a}`)
+    }
+    const sbZ0 = makeSandbox()
+    assert.equal(prRun(sbZ0, {}, [], { PR_PUSH_MS_ATTEMPTS: '03', PR_PUSH_MS_WAIT_S: '00', GHPR_MS_ERR_TEXT: RL }).milestoneAttempts, 3)
   })
 
   t('pr: 入力が不正なら gh を呼ばず止まる（タイトルが空・制御文字、body に「Closes #N」の行が無い・空）', () => {
