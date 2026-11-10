@@ -6685,10 +6685,9 @@ const checkoutInstructions=pushAfterFix
 ]
 :[
 `1. 本エージェントは隔離された git worktree 内で動作する。push 前のローカル修正のため fetch は不要。`,
-`   git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
-`   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
-`   マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で base を最新化してから git merge origin/${baseBranch} を実行して解消する（Issue #361）`,
-`   （ローカルの ${baseBranch} ではなく origin/${baseBranch} を使う。ローカル限定コミットの混入を防ぐ。Issue #315）。`,
+`   git checkout --detach ${branch} で detached HEAD として取得する（別 worktree で checkout 済みでも衝突しない）。`,
+`   マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で最新化してから git merge origin/${baseBranch} で解消する（Issue #361）`,
+`   （ローカル ${baseBranch} でなく origin/${baseBranch} を使う。Issue #315）。`,
 ]
 const commitAndPushInstructions=pushAfterFix
 ?[
@@ -6701,9 +6700,10 @@ commitlintCheckInstruction,
 :[
 `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
 commitlintCheckInstruction,
-`   コミット後に git update-ref refs/heads/${branch} HEAD でブランチ先端を更新する（git branch -f は別 worktree が checkout 中だと拒否される）。`,
-`   続けて git rev-parse refs/heads/${branch} が HEAD の sha と一致することを確認し、一致しなければ pushed: false・commitFailed: true で summary に HEAD の sha を書いて返す。`,
-`   レビュースレッドの resolve は行わない（本経路は push 前の Review ループであり、resolve を実行してよいのは Merge ループの fix が修正のリモート head への反映を確認した後 — 修正 push の成功直後、または過去ラウンド push 済み分の反映確認後 — のみ）。`,
+`   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に old=$(git rev-parse refs/heads/${branch}) を控え、git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
+`   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が $old のときだけ git -C <path> merge --ff-only <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> "$old"。`,
+`   条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
+`   レビュースレッドの resolve は行わない（push 前の Review ループ。resolve してよいのは Merge ループの fix が反映確認した後のみ）。`,
 ]
 return[
 

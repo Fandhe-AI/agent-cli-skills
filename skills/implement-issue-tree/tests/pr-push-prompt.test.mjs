@@ -140,8 +140,11 @@ test('fixPrompt(pushAfterFix: false): pr-push.sh を呼ばない（push 前の R
   const text = fixPrompt(item, impl, { summary: 's', unresolvedComments: [] }, false, [])
   assert.doesNotMatch(text, /pr-push\.sh/)
   // Issue #731: git branch -f は別 worktree が checkout 中だと拒否されるため update-ref で更新し、反映を確認する
-  assert.ok(text.includes(`git update-ref refs/heads/${B} HEAD`))
-  assert.ok(text.includes(`git rev-parse refs/heads/${B} が HEAD の sha と一致`))
+  assert.ok(!text.includes(`git update-ref refs/heads/${B} HEAD`), '旧値なしの update-ref は使わない')
+  assert.match(text, /merge --ff-only/, '使用中 worktree は ff-only で一緒に進める')
+  assert.ok(text.includes(`git update-ref refs/heads/${B} <HEAD の sha> "$old"`), '未使用なら旧値つき')
+  assert.match(text, /status --porcelain=v2 -uall/, '使用中 worktree の clean 確認')
+  assert.ok(text.includes(`git rev-parse refs/heads/${B} が HEAD と不一致`))
   assert.match(text, /commitFailed: true/)
   assert.doesNotMatch(text, new RegExp(`git branch -f ${B}`))
 })
