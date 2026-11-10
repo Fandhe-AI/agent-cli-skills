@@ -6700,7 +6700,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     : [
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
         commitlintCheckInstruction,
-        `   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に old=$(git rev-parse refs/heads/${branch}) を控え、git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
+        `   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に old=$(git rev-parse HEAD) を控え（ref≠$old なら中止）、git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
         `   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が $old のときだけ git -C <path> merge --ff-only <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> "$old"。`,
         `   条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
         `   レビュースレッドの resolve は行わない（push 前の Review ループ。resolve してよいのは Merge ループの fix が反映確認した後のみ）。`,
