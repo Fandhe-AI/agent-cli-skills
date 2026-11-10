@@ -154,6 +154,11 @@ test('fixPrompt(pushAfterFix: false): pr-push.sh を呼ばない（push 前の R
   assert.ok(!text.includes('ref≠'))
   assert.match(text, /status --porcelain=v2 -uall/, '使用中 worktree の clean 確認')
   assert.ok(text.includes(`git rev-parse refs/heads/${B} が HEAD と不一致`))
+  // #751: 先端更新の照合失敗（中止）は条件不成立と同じ pushed: false・commitFailed: true で返す
+  const abortIdx = text.indexOf(`git rev-parse refs/heads/${B} が <old> と違えば中止`)
+  const failLine = `中止・条件不成立・失敗・git rev-parse refs/heads/${B} が HEAD と不一致なら pushed: false・commitFailed: true`
+  assert.ok(text.includes(failLine), '中止が commitFailed の返し方に結ばれていない')
+  assert.ok(abortIdx >= 0 && abortIdx < text.indexOf(failLine))
   assert.match(text, /commitFailed: true/)
   assert.doesNotMatch(text, new RegExp(`git branch -f ${B}`))
 })

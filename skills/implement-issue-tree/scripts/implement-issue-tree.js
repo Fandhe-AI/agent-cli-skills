@@ -6768,7 +6768,7 @@ commitlintCheckInstruction,
 commitlintCheckInstruction,
 `   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に git rev-parse HEAD の値を <old> として字面で控え（シェル変数不可）、更新直前に git rev-parse refs/heads/${branch} が <old> と違えば中止。git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
 `   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が <old> のときだけ git -C <path> merge --ff-only --no-overwrite-ignore <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> <old>。`,
-`   条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
+`   中止・条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
 `   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
 ]
 return[
@@ -6975,7 +6975,7 @@ untrustedJson(briefJson,'recover-brief'),
 
 `   checkout 後に git fetch origin -- ${branchJson}:refs/remotes/origin/${branchJson} を実行する（リモートに無ければ失敗してよく、追従をスキップして手順 3 へ）。取得できたら git merge --ff-only refs/remotes/origin/${branchJson} で追従させる。ff 不能（分岐）なら git merge --no-ff --no-edit refs/remotes/origin/${branchJson} でリモート tip を取り込む（${MRG}hook 拒否なら手順 6 の subject を一時ファイルへ書き git commit -F で確定。解消不能なら git merge --abort して続行可）。`,
 NO_REWRITE_PUSHED,
-`   返却前（リモートに branch があるとき）${ANC(`refs/remotes/origin/${branchJson}`)}。`,
+`   返却前（リモートに branch があるとき）${ANC(`refs/remotes/origin/${branchJson}`)}（abort して続行した場合は確認を省略し、その旨を summary に書く）。`,
 `   （origin/${baseBranch} からの checkout -B 作り直しは行わない）`,
 `   指定の branch ${branchJson} が見つからない場合は git ls-remote --heads origin で確認し、"/${item.number}-" を含む refs/heads/* を探す。`,
 `3. 回復ブリーフに従って実装を完成させる:`,
