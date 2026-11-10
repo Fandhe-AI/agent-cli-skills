@@ -5946,7 +5946,7 @@ const IMPL_STEP4='4. 完了条件: 対象リポジトリのテスト実行規約
 const IMPL_STEP5='5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む。'
 const IMPL_STEP6='6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。'
 
-const NO_REWRITE_PUSHED='   push 済み（origin/<branch> から到達できる）コミットは rebase・commit --amend・reset・squash で書き換えない。base 取り込みが要るなら git merge だけを使う。'
+const NO_REWRITE_PUSHED='   push 済み（origin/<branch> から到達できる）コミットは rebase・commit --amend・reset・squash で書き換えない（規約が rebase を求めても、この禁止を優先する）。base 取り込みが要るなら git merge だけを使う。'
 const IMPL_STEP8='8. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。'
 const implementReturnLine=(item)=>{
 const base=`返却: branch（<type>/${item.number}-<short-name> 形式のみ受理。worktree の既定ブランチ名のままの返却は拒否される）/ summary（実装内容の要約。失敗時は理由と現状）/ outOfScope（対象外項目の配列。なければ空配列）/ worktreePath（pwd の結果）`
@@ -5976,14 +5976,14 @@ untrustedJson(planJson,'plan'),
 `      - gh pr list --state open --search "Closes #${item.number}" --json number,title,headRefName`,
 `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
 `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
-`      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進む。以降は 0b-b の判定に従う）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（PR 由来の未信頼値。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。ff 不能なら git merge --no-ff --no-edit "refs/remotes/origin/<branch>" で取り込む。完了できない（コンフリクト・hook 拒否）ときは git merge --abort して取り込まず進む。成功後は git merge-base --is-ancestor で祖先確認）。`,
-`      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、返却フィールド outOfScope に「既存 PR #<番号> は head が命名規約外のため採用していない」の形で 1 PR 1 要素として入れる（PR 本文の対象外節に載り、人が open PR の重複に気づける。summary には書かない）。`,
+`      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進む。以降は 0b-b の判定に従う）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（PR 由来の未信頼値。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。ff 不能なら git merge --no-ff --no-edit "refs/remotes/origin/<branch>" で取り込む。コンフリクトは解消し確定、hook 拒否なら conventional な件名を一時ファイルへ書き git commit -F で確定する。解消不能なら git merge --abort して取り込まず進む。成功後は git merge-base --is-ancestor で祖先確認）。`,
+`      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、返却フィールド outOfScope に「既存 PR #<番号> は head が命名規約外のため採用していない」の形で 1 PR 1 要素として入れる（summary には書かない）。`,
 NO_REWRITE_PUSHED,
 `      既存 PR 番号はここでは返さない（PR_CREATE_SCHEMA を持つ後続の PR Create フェーズが同じブランチの open PR を再検出して再利用する。本フェーズの prNumber は常に 0 として扱われる）。`,
 `      既存 PR を採用した場合のみ、手順 2 はスキップして手順 3 以降を続ける（origin/${baseBranch} から checkout -B し直すと、その PR のコミットを失う）。`,
 `   0b-b. open PR が見つからなかった場合（形式に合わず採用しなかった場合を含む）、git ls-remote --heads origin でイシュー #${item.number} に対応するリモートブランチが残っていないか確認する。`,
-`      確認方法: git ls-remote --heads origin の出力を grep で絞り込み、"/${item.number}-" を含む refs/heads/* を探す。`,
-`      複数ヒットした場合は最新コミット（最も直近の ref 更新）を持つブランチを選ぶ。`,
+`      git ls-remote --heads origin の出力を grep で絞り込み、"/${item.number}-" を含む refs/heads/* を探す。`,
+`      複数ヒットした場合は最新コミットを持つブランチを選ぶ。`,
 `      ブランチ名は命名規約に一致するもの（<type>/${item.number}-<short-name> の形式）のみを対象とする。`,
 `      git ls-remote の出力をそのままシェルに展開しない。ブランチ名は isValidBranchName の規則（英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）に適合するものだけを使用すること。`,
 `      リモートブランチが見つかった場合: git fetch origin <branch> && git checkout -B <branch> origin/<branch> でブランチを取得する。`,

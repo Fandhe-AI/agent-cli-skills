@@ -410,6 +410,13 @@ test('implementPrompt: 0b-a にも push 済みコミットの書き換え禁止�
   const i = prompt.indexOf('0b-a.')
   const j = prompt.indexOf('0b-b.')
   assert.match(prompt.slice(i, j), /rebase・commit --amend・reset・squash で書き換えない/)
+  assert.match(prompt.slice(i, j), /規約が rebase を求めても、この禁止を優先する/)
+  assert.match(prompt.slice(i, j), /hook 拒否なら conventional な件名を一時ファイルへ書き git commit -F で確定する/)
+})
+
+test('recoverImplementPrompt: 書き換え禁止が規約より優先される', () => {
+  const prompt = recoverImplementPrompt(item, { done: [], remaining: [], broken: [] }, 'fix/42-noop')
+  assert.match(prompt, /規約が rebase を求めても、この禁止を優先する/)
 })
 
 test('implementPrompt: 0b-a で既存 open PR のブランチ取得後にリモート tip へ ff-only 追従する', () => {
