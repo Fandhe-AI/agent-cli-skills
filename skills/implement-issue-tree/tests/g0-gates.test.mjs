@@ -398,8 +398,8 @@ test('recoverImplementPrompt: 手順 2 で checkout 後にリモート tip へ f
   assert.ok(checkoutIdx >= 0, 'checkout 指示がない')
   assert.ok(ffIdx > checkoutIdx, 'checkout 後の git merge --ff-only refs/remotes/origin/<branch> 追従指示がない')
   // #730: ff 不能（分岐）は続行せず merge でリモート tip を取り込む。push 済みコミットの書き換えは禁止。
-  const mergeIdx = prompt.indexOf('git merge --no-edit refs/remotes/origin/')
-  assert.ok(mergeIdx > ffIdx, 'ff 失敗時の git merge --no-edit refs/remotes/origin/<branch> がない')
+  const mergeIdx = prompt.indexOf('git merge --no-ff --no-edit refs/remotes/origin/')
+  assert.ok(mergeIdx > ffIdx, 'ff 失敗時の git merge --no-ff --no-edit refs/remotes/origin/<branch> がない')
   assert.ok(prompt.includes('merge-base --is-ancestor refs/remotes/origin/'), '返却前の祖先確認がない')
   assert.ok(!prompt.includes('(iv) が fail-closed で止める'), '旧文言（ff 不能でも続行）が残っている')
   assert.match(prompt, /rebase・commit --amend・reset・squash で書き換えない/)

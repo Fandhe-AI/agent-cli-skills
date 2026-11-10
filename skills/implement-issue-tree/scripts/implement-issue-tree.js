@@ -5922,7 +5922,7 @@ const IMPL_STEP4='4. 完了条件: 対象リポジトリのテスト実行規約
 const IMPL_STEP5='5. 実装後に OWASP Top 10 観点でセキュリティチェックを実施する（API キーのハードコード・インジェクション等）。問題が見つかった場合は修正してから次へ進む。'
 const IMPL_STEP6='6. 実装が完了したら create-commit スキルに従い Conventional Commits で実装コミットを 1 つ作成する（type/scope は英語、件名は対象リポジトリの言語規約に従う）。'
 
-const NO_REWRITE_PUSHED='   push 済み（origin/<branch> から到達できる）コミットは rebase・commit --amend・reset・squash で書き換えない（規約が rebase を求めても従わない）。base 取り込みが要るなら git merge だけを使う。'
+const NO_REWRITE_PUSHED='   push 済み（origin/<branch> から到達できる）コミットは rebase・commit --amend・reset・squash で書き換えない。base 取り込みが要るなら git merge だけを使う。'
 const IMPL_STEP8='8. pwd の結果を worktreePath として返す（worktree の絶対パスを記録するため）。'
 const implementReturnLine=(item)=>{
 const base=`返却: branch（<type>/${item.number}-<short-name> 形式のみ受理。worktree の既定ブランチ名のままの返却は拒否される）/ summary（実装内容の要約。失敗時は理由と現状）/ outOfScope（対象外項目の配列。なければ空配列）/ worktreePath（pwd の結果）`
@@ -5952,7 +5952,7 @@ untrustedJson(planJson,'plan'),
 `      - gh pr list --state open --search "Closes #${item.number}" --json number,title,headRefName`,
 `      - gh pr list --state open --search "${item.number} in:title" --json number,title,headRefName`,
 `      両コマンドの出力を合わせてイシュー #${item.number} に対応する open PR を探す。`,
-`      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進む。以降は 0b-b の判定に従う）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（PR 由来の未信頼値。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。ff 不能なら git merge --no-edit "refs/remotes/origin/<branch>" で取り込む）。`,
+`      open PR が見つかった場合は、headRefName が <type>/${item.number}-<short-name> 形式（正規表現 ^[a-z]+/${item.number}-）に合わない PR を本イシューの PR として採用しない（人が作った別系統の PR として扱い、fetch / checkout / merge をせず、見つからなかった場合と同様に 0b-b へ進む。以降は 0b-b の判定に従う）。形式に合う PR が見つかった場合は新規 PR を作らず、まず headRefName を 0b-b と同じ安全文字集合（isValidBranchName の規則: 英数字・ハイフン・アンダースコア・スラッシュ・ドットのみ）で検証する（PR 由来の未信頼値。不適合なら fetch / checkout / merge を一切実行せず prNumber: 0 と「open PR の headRefName が安全文字集合に不適合」を理由として返す fail-closed）。検証済みの値のみを二重引用符で囲んで展開し、git fetch origin && git checkout "<branch>" で取得し、続けて git fetch origin -- "<branch>:refs/remotes/origin/<branch>" && git merge --ff-only "refs/remotes/origin/<branch>" でローカルをリモート tip へ追従させてから続きから作業し、そのブランチ名を branch として返す（0b-b には進まない。ff 不能なら git merge --no-ff --no-edit "refs/remotes/origin/<branch>" で取り込む。完了できない（コンフリクト・hook 拒否）ときは git merge --abort して取り込まず進む。成功後は git merge-base --is-ancestor で祖先確認）。`,
 `      採用しなかった PR（headRefName が規約に合わず除外した、Closes #${item.number} を持つ open PR）があれば、返却フィールド outOfScope に「既存 PR #<番号> は head が命名規約外のため採用していない」の形で 1 PR 1 要素として入れる（PR 本文の対象外節に載り、人が open PR の重複に気づける。summary には書かない）。`,
 NO_REWRITE_PUSHED,
 `      既存 PR 番号はここでは返さない（PR_CREATE_SCHEMA を持つ後続の PR Create フェーズが同じブランチの open PR を再検出して再利用する。本フェーズの prNumber は常に 0 として扱われる）。`,
@@ -5965,7 +5965,7 @@ NO_REWRITE_PUSHED,
 `      リモートブランチが見つかった場合: git fetch origin <branch> && git checkout -B <branch> origin/<branch> でブランチを取得する。`,
 `      あわせて git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} も実行し、base の remote-tracking ref を最新化する。`,
 
-`      前回 push 成功・PR 作成失敗の回復用なので checkout -B で作り直さない。`,
+`      前回 push 成功・PR 作成失敗の回復用。上記の origin/<branch> からの取得は可、既存ブランチを base から作り直す checkout -B は不可。`,
 `      push 済みコミットをそのまま引き継いで計画と照合し、未実装部分があれば補って実装を続行する。`,
 `      branch としてそのブランチ名を返す（prNumber は 0 のまま）。`,
 `      手順 2 はスキップして手順 3 以降を続ける。`,
@@ -6912,10 +6912,10 @@ untrustedJson(briefJson,'recover-brief'),
 
 
 
-`   checkout 後に git fetch origin -- ${branchJson}:refs/remotes/origin/${branchJson} を実行する（引用符付きで展開。リモートに無ければ失敗してよく、追従をスキップして手順 3 へ進む）。取得できたら git merge --ff-only refs/remotes/origin/${branchJson} で追従させる。ff 不能（分岐）なら git merge --no-edit refs/remotes/origin/${branchJson} でリモート tip を取り込む（コンフリクトは CLAUDE.md・rules を遵守して解消し git add で確定。hook に拒否されたら手順 6 の規則で決めた subject を一時ファイルへ書き git commit -F で確定する。解消不能なら git merge --abort して続行してよい）。取り込んだコミットは以降の Review 対象に乗ってから push される。`,
+`   checkout 後に git fetch origin -- ${branchJson}:refs/remotes/origin/${branchJson} を実行する（リモートに無ければ失敗してよく、追従をスキップして手順 3 へ）。取得できたら git merge --ff-only refs/remotes/origin/${branchJson} で追従させる。ff 不能（分岐）なら git merge --no-ff --no-edit refs/remotes/origin/${branchJson} でリモート tip を取り込む（コンフリクトは規約に従い解消し git add で確定。hook に拒否されたら手順 6 の規則で決めた subject を一時ファイルへ書き git commit -F で確定する。解消不能なら git merge --abort して続行してよい）。`,
 NO_REWRITE_PUSHED,
 `   返却前（リモートに branch があるとき）git merge-base --is-ancestor refs/remotes/origin/${branchJson} HEAD を確認し、偽なら merge で取り込み直す。`,
-`   （origin/${baseBranch} からの新規作成（checkout -B）は行わない。既存コミット・WIP commit を保持するため）`,
+`   （origin/${baseBranch} からの checkout -B 作り直しは行わない）`,
 `   指定の branch ${branchJson} が見つからない場合は git ls-remote --heads origin で確認し、"/${item.number}-" を含む refs/heads/* を探す。`,
 `3. 回復ブリーフに従って実装を完成させる:`,
 `   - broken（壊れ・未完で要修正）の箇所から優先して修正する。`,
