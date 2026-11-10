@@ -8919,11 +8919,13 @@ cl
 ?{cleanupWorktree:oldWorktreePathReview,cleanupMode:'discard',expectBranch:impl.branch,replacementWorktree:newWorktreePathReview}
 :{})
 
-const keep=cl&&(!u.mergeOk||u.retained)
-const bad=[!u.mergeOk?'状態の書込みに失敗（状態の worktree は旧のまま・fix コミットは新にある）':'',keep?'旧 worktree がブランチを保持している（削除未実施または確認不能。先に worktree-remove.sh の確認つき経路で旧を片づけてから、状態の worktree を新へ直して再実行すると Recover が新を引き取る）':''].filter(Boolean).join('。さらに')
+
+const o=sanitizeWorktreePath(oldWorktreePathReview)
+const keep=cl&&Boolean(o)&&(!u.mergeOk||u.retained)
+const bad=[!u.mergeOk?`状態の書込みに失敗（状態の worktree は旧のまま・${newWorktreePathReview ? 'fix コミットは新にある' : 'fix コミットの所在は不明（HEAD の sha を手掛かりに探す）'}）`:'',keep?'旧 worktree がブランチを保持している（削除未実施または確認不能。先に worktree-remove.sh の確認つき経路で旧を片づけてから、状態の worktree を新へ直して再実行すると Recover が新を引き取る）':''].filter(Boolean).join('。さらに')
 const h= /\b[0-9a-f]{40}\b/.exec(fReview.summary ?? '')
-const ex=bad?`。${bad}: 新 ${newWorktreePathReview || '不明'}・旧 ${sanitizeWorktreePath(oldWorktreePathReview) || '不明'}・ブランチ ${impl.branch}・HEAD ${h ? h[0] : '不明'}`:''
-if(ex)warnIssue(item,ex)
+const ex=bad?`。${bad}: 新 ${newWorktreePathReview || '不明'}・旧 ${o || '不明'}・ブランチ ${impl.branch}・HEAD ${h ? h[0] : '不明'}`:''
+if(ex)warnIssue(item,ex.slice(1))
 recordFailure({issue:item.number,reason:reason+ex})
 return false
 }
