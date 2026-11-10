@@ -126,7 +126,7 @@ test('commitlintCheckInstruction: fail-closed 返却はホストが検出する�
   // ホスト側: Review ループ・Merge ループの両 fix 呼び出し直後で commitFailed を失敗終端として扱う
   const reviewIdx = driverPart.indexOf('fReview.commitFailed === true')
   assert.ok(reviewIdx >= 0, 'Review ループの host が fReview.commitFailed を判定していない')
-  const reviewSection = driverPart.slice(reviewIdx, reviewIdx + 2000)
+  const reviewSection = driverPart.slice(reviewIdx, reviewIdx + 3200)
   assert.ok(reviewSection.includes("status: 'failed'") && reviewSection.includes('recordFailure') && reviewSection.includes('return false'), 'Review ループの commitFailed が failed 終端になっていない')
   // コミット後のブランチ反映失敗でも修正 HEAD を持つ新 worktree を状態へ残し、Recover が取り込めるようにする（Issue #731）
   assert.ok(reviewSection.includes('worktree: newWorktreePathReview || oldWorktreePathReview'), 'Review ループの commitFailed が新 worktree を状態へ保存していない')
@@ -196,12 +196,12 @@ test('host: commitFailed 終端は routingError と同じく fix worktree を台
   assert.equal(EPHEMERAL_KIND_MAX['fix-terminal'], 1, 'EPHEMERAL_KIND_MAX に fix-terminal が宣言されていない')
   assert.ok(!('fix-routing-error' in EPHEMERAL_KIND_MAX), '旧 kind fix-routing-error が残っている')
   for (const [label, cond, path, terminal] of [
-    ['Review ループ', 'fReview.commitFailed === true', "recordEphemeralWorktree(item.number, '', 'fix-terminal')", "await updateState(item.number, { status: 'failed'"],
+    ['Review ループ', 'fReview.commitFailed === true', "recordEphemeralWorktree(item.number, '', 'fix-terminal')", "await updateStateDetailed(item.number, { status: 'failed'"],
     ['Merge ループ', 'f.commitFailed === true', "recordEphemeralWorktree(item.number, f?.worktreePath, 'fix-terminal')", 'return await failMergeTerminal('],
   ]) {
     const condIdx = driverPart.indexOf(cond)
     assert.ok(condIdx >= 0, `${label}: commitFailed 判定がない`)
-    const section = driverPart.slice(condIdx, condIdx + 1800)
+    const section = driverPart.slice(condIdx, condIdx + 3000)
     const recIdx = section.indexOf(path)
     const termIdx = section.indexOf(terminal)
     assert.ok(recIdx >= 0, `${label}: commitFailed 終端で recordEphemeralWorktree が呼ばれていない`)
@@ -218,14 +218,14 @@ test('host: Review の commitFailed 終端は新しい worktree を残すとき�
   // 渡さないと旧 worktree が残り、Recover が対象ブランチを in-use と判定して fix コミットを付け直せない。
   const condIdx = driverPart.indexOf('fReview.commitFailed === true')
   assert.ok(condIdx >= 0, 'commitFailed 判定がない')
-  const section = driverPart.slice(condIdx, condIdx + 1800)
-  const termIdx = section.indexOf("await updateState(item.number, { status: 'failed'")
+  const section = driverPart.slice(condIdx, condIdx + 3000)
+  const termIdx = section.indexOf("await updateStateDetailed(item.number, { status: 'failed'")
   assert.ok(termIdx >= 0, '終端の updateState がない')
   const after = section.slice(termIdx)
   assert.ok(/cleanupWorktree:\s*oldWorktreePathReview/.test(after), '旧 worktree が cleanupWorktree に渡されていない')
   assert.ok(/expectBranch:\s*impl\.branch/.test(after), '旧 worktree の破棄に --expect-branch（on-branch の同一性束縛）が付いていない（PR #733）')
   assert.ok(/replacementWorktree:\s*newWorktreePathReview/.test(after), '新 worktree が replacementWorktree に渡されていない')
-  assert.ok(/wt\(newWorktreePathReview\)\s*!==\s*wt\(oldWorktreePathReview\)\s*\?\s*\{\s*cleanupWorktree/.test(after), '新が不明・新旧同一のとき（旧が唯一の実体）の保護条件がない')
+  assert.ok(/wt\(newWorktreePathReview\)\s*!==\s*wt\(oldWorktreePathReview\)[\s\S]*\?\s*\{\s*cleanupWorktree/.test(section), '新が不明・新旧同一のとき（旧が唯一の実体）の保護条件がない')
   // 新旧の同一性を正規化して比較し、異なるときも discard（汚れていれば保持）で渡す
   assert.ok(/cleanupMode:\s*'discard'/.test(after), '旧 worktree の削除が discard でない（汚れを強制削除する）')
 })

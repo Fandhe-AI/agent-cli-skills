@@ -8913,11 +8913,18 @@ async function runImplement(item) {
         // 同一パス・新が不明なら旧が唯一の実体のため片づけない。異なるときは discard + --expect-branch（on-branch の旧だけ消す。前回 fix の detached は保持）で渡す。
         const wt = (p) => p.replace(/\/+/g, '/').replace(/\/$/, '')
         // impl.branch は上の命名ゲート（implBranchViolation）を通過済みで expectBranch に渡せる
-        await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason, worktree: newWorktreePathReview || oldWorktreePathReview },
-          newWorktreePathReview && wt(newWorktreePathReview) !== wt(oldWorktreePathReview)
+        const cl = newWorktreePathReview && wt(newWorktreePathReview) !== wt(oldWorktreePathReview)
+        const u = await updateStateDetailed(item.number, { status: 'failed', pr: 0, fixCount, note: reason, worktree: newWorktreePathReview || oldWorktreePathReview },
+          cl
             ? { cleanupWorktree: oldWorktreePathReview, cleanupMode: 'discard', expectBranch: impl.branch, replacementWorktree: newWorktreePathReview }
             : {})
-        recordFailure({ issue: item.number, reason })
+        // Issue #743: 書込み失敗（状態は旧のまま）と旧の保持（ブランチが旧に残る）は手で復旧する情報を警告と失敗記録に残す。state の note は書込み時点で確定のため入らない
+        const keep = cl && (!u.mergeOk || u.retained)
+        const bad = [!u.mergeOk ? '状態の書込みに失敗（状態の worktree は旧のまま・fix コミットは新にある）' : '', keep ? '旧 worktree がブランチを保持している（削除未実施または確認不能。先に worktree-remove.sh の確認つき経路で旧を片づけてから、状態の worktree を新へ直して再実行すると Recover が新を引き取る）' : ''].filter(Boolean).join('。さらに')
+        const h = /\b[0-9a-f]{40}\b/.exec(fReview.summary ?? '')
+        const ex = bad ? `。${bad}: 新 ${newWorktreePathReview || '不明'}・旧 ${sanitizeWorktreePath(oldWorktreePathReview) || '不明'}・ブランチ ${impl.branch}・HEAD ${h ? h[0] : '不明'}` : ''
+        if (ex) warnIssue(item, ex)
+        recordFailure({ issue: item.number, reason: reason + ex })
         return false
       }
       fixCount++
