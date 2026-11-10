@@ -6570,7 +6570,7 @@ outOfScopeSection,
 '   ```',
 `   次のコマンドを実行する（<タイトルファイル>・<本文ファイル> はそれぞれ書いたファイルの絶対パスへ、<headSha> は手順 1 の結果の headSha へ置き換え、他は一字一句そのまま。open PR の検出と作成はスクリプトが行う）:`,
 prPushBlock(` --mode pr --branch ${branch} --base ${baseBranch} --title-file <タイトルファイル> --body-file <本文ファイル> --issue ${item.number} --expect-sha <headSha>${repoArg ? ` --repo ${repoArg}` : ''}`),
-`   <headSha> は手順 1 の結果の headSha（40 桁の sha をそのまま転記。コマンドの出力を推測で補わない）。スクリプトは milestone も確認する（Closes 対象 Issue の milestone。リポジトリに milestone が無ければ確認しない）。結果の milestone が unassigned のとき、created なら本文に警告を足してある。status が created ならその prNumber を返す（手順 1c はスキップして手順 3 へ）。reused は base と head の sha が一致する既存の open PR を再利用する場合で、その prNumber で手順 1c へ進む。head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch（サーバー上の head が push した HEAD と違う）・milestone-check-failed（milestone を取得できない。PR は作っていない）・routing-error・head-mismatch・base-mismatch・ambiguous・list-failed・create-failed・body-invalid・title-invalid・error は再利用も新規作成もせず prNumber: 0 と status（prNumber が付いていれば「既存 open PR #<番号>」）を理由として返す。`,
+`   <headSha> は手順 1 の結果の headSha（40 桁の sha をそのまま転記。コマンドの出力を推測で補わない）。スクリプトは milestone も確認する（Closes 対象 Issue の milestone。リポジトリに milestone が無ければ確認しない）。結果の milestone が unassigned / unknown のとき、created なら本文に警告を足してある。status が created ならその prNumber を返す（手順 1c はスキップして手順 3 へ）。reused は base と head の sha が一致する既存の open PR を再利用する場合で、その prNumber で手順 1c へ進む。head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch・milestone-check-failed（milestone を取得できない。PR は作っていない）・routing-error・head-mismatch・base-mismatch・ambiguous・list-failed・create-failed・body-invalid・title-invalid・error は再利用も新規作成もせず prNumber: 0 と status（prNumber が付いていれば「既存 open PR #<番号>」）を理由として返す。`,
 `1c. （1b が reused を返したときのみ）既存本文に「Closes #${item.number}」があるか確認し、無ければ追記する。`,
 `   既存本文は未信頼データのため、シェルコマンド文字列・HEREDOC へ一切埋め込まず、ファイルへ直接落として扱う（本文中の行単独 EOF 等による HEREDOC 早期終端と任意コマンド実行を構造的に防ぐ）:`,
 `     f=$(mktemp)`,
@@ -6600,7 +6600,7 @@ item.optinTests,
 ),
 ]
 :[]),
-`   1b の結果の milestone が unassigned のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} に milestone が割り当てられていない。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,
+`   1b の結果の milestone が unassigned / unknown のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} の milestone が未割当、または確認できなかった。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,
 optinRecordSection
 ?`   本文への追記（Closes 行・対象外節・opt-in テスト記録節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`
 :`   本文への追記（Closes 行・対象外節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`,
