@@ -72,3 +72,36 @@ test('commitFailed 終端 対照: 書込み成功かつ旧を削除できたら�
     assert.ok(!result.done.find((r) => r.issue === 2).note.includes(n), `note に ${n} が出ている`)
   }
 })
+
+// 旧パスが空（前回 fix が worktreePath を返さなかった）で新が非空の commitFailed。fix:#2 を自前で返す
+const fixSeq = (second) => {
+  let n = 0
+  return (label) => {
+    if (label !== 'fix:#2') return undefined
+    n++
+    return n === 1 ? { pushed: false, summary: 'fixed', worktreePath: '' } : second
+  }
+}
+const finalWrite = (label, prompt, p) => label === 'state:update:#2' && prompt.includes(p) && prompt.includes('failed')
+
+test('commitFailed 終端 (d): 旧パスが空なら書込み失敗でも旧 worktree の保持と報告せず、先頭が「。」でない（Issue #750）', async () => {
+  const seq = fixSeq({ pushed: false, commitFailed: true, summary: 'ブランチ反映失敗 HEAD ' + SHA, worktreePath: '/repo/wt/f2b' })
+  const { logs, result } = await run((label, _o, prompt) =>
+    seq(label) ?? (finalWrite(label, prompt, '/repo/wt/f2b') ? { ok: false } : undefined))
+  const note = result.done.find((r) => r.issue === 2).note
+  assert.ok(warnLine(logs, '状態の書込みに失敗', '/repo/wt/f2b', SHA), '警告に書込み失敗・新パス・sha がない')
+  assert.ok(note.includes('状態の書込みに失敗'), 'note に書込み失敗がない')
+  assert.ok(!logs.some((l) => l.includes('旧 worktree がブランチを保持')), 'ログに保持の誤報告が出ている')
+  assert.ok(!note.includes('旧 worktree がブランチを保持'), 'note に保持の誤報告が出ている')
+  assert.ok(!logs.some((l) => l.includes('⚠️ issue #2: 。')), '警告の先頭が「。」になっている')
+})
+
+test('commitFailed 終端 (e): 新パスが空の書込み失敗は fix コミットの所在不明と書く（Issue #750）', async () => {
+  const seq = fixSeq({ pushed: false, commitFailed: true, summary: 'ブランチ反映失敗 HEAD ' + SHA, worktreePath: '' })
+  const { logs, result } = await run((label, _o, prompt) =>
+    seq(label) ?? (finalWrite(label, prompt, '') ? { ok: false } : undefined))
+  const note = result.done.find((r) => r.issue === 2).note
+  assert.ok(warnLine(logs, '状態の書込みに失敗', 'fix コミットの所在は不明', SHA), '警告に所在不明がない')
+  assert.ok(note.includes('fix コミットの所在は不明'), 'note に所在不明がない')
+  assert.ok(!logs.some((l) => l.includes('fix コミットは新にある')) && !note.includes('fix コミットは新にある'), '新にあると誤記している')
+})

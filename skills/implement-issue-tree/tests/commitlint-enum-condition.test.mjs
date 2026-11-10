@@ -225,7 +225,8 @@ test('host: Review の commitFailed 終端は新しい worktree を残すとき�
   assert.ok(/cleanupWorktree:\s*oldWorktreePathReview/.test(after), '旧 worktree が cleanupWorktree に渡されていない')
   assert.ok(/expectBranch:\s*impl\.branch/.test(after), '旧 worktree の破棄に --expect-branch（on-branch の同一性束縛）が付いていない（PR #733）')
   assert.ok(/replacementWorktree:\s*newWorktreePathReview/.test(after), '新 worktree が replacementWorktree に渡されていない')
-  assert.ok(/wt\(newWorktreePathReview\)\s*!==\s*wt\(oldWorktreePathReview\)[\s\S]*\?\s*\{\s*cleanupWorktree/.test(section), '新が不明・新旧同一のとき（旧が唯一の実体）の保護条件がない')
+  assert.ok(/const cl = [^\n]*wt\(newWorktreePathReview\)\s*!==\s*wt\(oldWorktreePathReview\)/.test(section), 'cl が新旧の正規化比較で定義されていない')
+  assert.ok(/\bcl\s*\?\s*\{\s*cleanupWorktree/.test(section), 'cl が掃除オプションの三項条件になっていない（旧が唯一の実体のときの保護条件がない）')
   // 新旧の同一性を正規化して比較し、異なるときも discard（汚れていれば保持）で渡す
   assert.ok(/cleanupMode:\s*'discard'/.test(after), '旧 worktree の削除が discard でない（汚れを強制削除する）')
 })
