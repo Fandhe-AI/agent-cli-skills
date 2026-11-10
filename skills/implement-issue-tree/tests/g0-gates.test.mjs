@@ -435,6 +435,18 @@ test('implementPrompt: 0b-a で既存 open PR のブランチ取得後にリモ�
   assert.ok(section0ba.includes('git fetch origin -- "<branch>:refs/remotes/origin/<branch>"'), 'ff 追従の fetch が -- とクォート付きで書かれていない')
 })
 
+test('implementPrompt: 0b-a は分岐取り込みのコンフリクトを commit --no-edit で確定し、引数つきで祖先確認する', () => {
+  const prompt = implementPrompt(item, { steps: ['noop'] })
+  const sec = prompt.slice(prompt.indexOf('0b-a.'), prompt.indexOf('0b-b.'))
+  assert.match(sec, /git add[^。]*git commit --no-edit/)
+  assert.ok(sec.includes('MERGE_HEAD'), 'MERGE_HEAD を残さない指示がない')
+  assert.ok(sec.includes('--is-ancestor "refs/remotes/origin/<branch>" HEAD'), '引数つきの祖先確認がない')
+  assert.ok(sec.includes('偽なら merge で取り込み直す'), '偽のときの取り込み直しがない')
+  assert.match(sec, /hook 拒否なら conventional な件名を一時ファイルへ書き git commit -F で確定する/)
+  assert.ok(!sec.includes('コンフリクトは解消し確定'), '旧文言が残っている')
+  assert.ok(!sec.includes('--is-ancestor で祖先確認'), '旧文言が残っている')
+})
+
 test('fixPrompt: pushAfterFix の両分岐で commitlint 事前確認の指示を含む', () => {
   // fixPrompt は boundaryNonce() を内部で使うため、テスト専用 setter で seed を注入する
   // （本番では ensureBoundaryNonceSeed() がラン開始時に 1 回だけ行う）。
