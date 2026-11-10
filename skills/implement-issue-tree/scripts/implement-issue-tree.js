@@ -8913,11 +8913,17 @@ if(!newWorktreePathReview)recordEphemeralWorktree(item.number,'','fix-terminal')
 
 const wt=(p)=>p.replace(/\/+/g, '/').replace(/\/$/, '')
 
-await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason,worktree:newWorktreePathReview||oldWorktreePathReview},
-newWorktreePathReview&&wt(newWorktreePathReview)!==wt(oldWorktreePathReview)
+const cl=newWorktreePathReview&&wt(newWorktreePathReview)!==wt(oldWorktreePathReview)
+const u=await updateStateDetailed(item.number,{status:'failed',pr:0,fixCount,note:reason,worktree:newWorktreePathReview||oldWorktreePathReview},
+cl
 ?{cleanupWorktree:oldWorktreePathReview,cleanupMode:'discard',expectBranch:impl.branch,replacementWorktree:newWorktreePathReview}
 :{})
-recordFailure({issue:item.number,reason})
+
+const bad= !u.mergeOk?'状態の書込みに失敗（状態の worktree は旧のまま・fix コミットは新にある）':cl&&u.retained?'旧 worktree の削除を確認できない（lock・変更・submodule 等。手で片づけて再実行すると Recover が新を引き取る）':''
+const h= /\b[0-9a-f]{40}\b/.exec(fReview.summary ?? '')
+const ex=bad?`。${bad}: 新 ${newWorktreePathReview || '不明'}・旧 ${sanitizeWorktreePath(oldWorktreePathReview) || '不明'}・ブランチ ${impl.branch}・HEAD ${h ? h[0] : '不明'}`:''
+if(ex)warnIssue(item,ex)
+recordFailure({issue:item.number,reason:reason+ex})
 return false
 }
 fixCount++
