@@ -26,11 +26,16 @@ const GH_STUB = `#!/bin/sh
 echo "$*" >> "\${GHPR_LOG:?}"
 if [ "$1" = api ]; then
   [ "\${GHPR_MS_API_FAIL:-}" = 1 ] && exit 1
+  if [ -n "\${GHPR_MS_ERR_TEXT:-}" ]; then
+    n=$(grep -c '^api ' "\${GHPR_LOG}")
+    if [ "$n" -le "\${GHPR_MS_ERR_UNTIL:-999}" ]; then echo "\${GHPR_MS_ERR_TEXT}" >&2; exit 1; fi
+  fi
   printf '%s\\n' "\${GHPR_MS_COUNT-0}"
   exit 0
 fi
 if [ "$1" = issue ] && [ "$2" = view ]; then
   [ "\${GHPR_ISSUE_FAIL:-}" = 1 ] && exit 1
+  if [ -n "\${GHPR_ISSUE_ERR_TEXT:-}" ]; then echo "\${GHPR_ISSUE_ERR_TEXT}" >&2; exit 1; fi
   printf '%s\\n' "\${GHPR_ISSUE_MS:-}"
   exit 0
 fi
@@ -74,7 +79,7 @@ function result(r) {
   assert.match(lines[0], /^PR_PUSH_RESULT \{/)
   const v = JSON.parse(lines[0].slice('PR_PUSH_RESULT '.length))
   for (const [k, x] of Object.entries(v)) {
-    if (k === 'prNumber') assert.ok(Number.isInteger(x) && x > 0)
+    if (k === 'prNumber' || k === 'milestoneAttempts') assert.ok(Number.isInteger(x) && x > 0)
     else if (k === 'localSha' || k === 'remoteSha' || k === 'headSha' || k === 'replacedSha') assert.match(x, /^[0-9a-f]{40}$/)
     else assert.match(String(x), /^[a-z-]+$/, `${k}: 固定語彙だけ`)
   }
@@ -662,6 +667,58 @@ export function registerPrPushTests(bash) {
       assert.equal(prRun(sbF, {}, [], env).status, 'milestone-check-failed', JSON.stringify(env))
       assert.ok(!ghCalls(sbF).some((c) => /^pr (list|create)/.test(c)), `${JSON.stringify(env)}: PR を作らない`)
     }
+  })
+
+  tj('pr: レート制限で milestone を取得できなくても failed にせず unknown で続行する。原因は固定語彙で結果に出し、本文に確認不能の警告を足す。再試行は有界で、一過性でない原因は fail-closed', () => {
+    const FAST = { PR_PUSH_MS_WAIT_S: '0' }
+    const RL = 'HTTP 403: API rate limit exceeded for user ID 1. SECRET_EXTERNAL_TEXT'
+    const apiCount = (sb) => ghCalls(sb).filter((c) => c.startsWith('api ')).length
+    // 件数取得が全試行でレート制限: 作成を続け unknown・cause・試行回数。警告つき、原本は不変、一時ファイルは残らない
+    const sb1 = makeSandbox()
+    const r1 = prRun(sb1, {}, [], { ...FAST, GHPR_MS_ERR_TEXT: RL })
+    assert.deepEqual(r1, { mode: 'pr', status: 'created', prNumber: 77, milestone: 'unknown', cause: 'rate-limited', milestoneAttempts: 3 })
+    assert.equal(apiCount(sb1), 3)
+    const body1 = readFileSync(join(sb1.root, 'ghpr', 'calls.log.body'), 'utf8')
+    assert.match(body1, /> \*\*警告\*\*: Closes 対象の #603 の milestone を確認できなかった/)
+    assert.equal(readFileSync(join(sb1.tmp, 'body.md'), 'utf8'), 'body\n\nCloses #603\n')
+    assert.deepEqual(readdirSync(sb1.tmp).filter((f) => f.startsWith('pr-push-')), [], '一時ファイルが残らない')
+    // Issue 取得がレート制限
+    const sb2 = makeSandbox()
+    const r2 = prRun(sb2, {}, [], { ...FAST, GHPR_MS_COUNT: '2', GHPR_ISSUE_ERR_TEXT: 'GraphQL: API rate limit already exceeded (HTTP 403)' })
+    assert.deepEqual(r2, { mode: 'pr', status: 'created', prNumber: 77, milestone: 'unknown', cause: 'rate-limited', milestoneAttempts: 3 })
+    // 1 回目だけレート制限で 2 回目に成功: 再試行して通常の判定に戻る
+    const sb3 = makeSandbox()
+    const r3 = prRun(sb3, {}, [], { ...FAST, GHPR_MS_ERR_TEXT: RL, GHPR_MS_ERR_UNTIL: '1', GHPR_MS_COUNT: '0' })
+    assert.deepEqual(r3, { mode: 'pr', status: 'created', prNumber: 77, milestone: 'not-used', milestoneAttempts: 2 })
+    // 一過性でない原因は再試行せず fail-closed（cause を添える）。PR は作らない
+    const nonRetry = [
+      ['HTTP 403: Resource not accessible by integration', 'forbidden'],
+      ['HTTP 404: Not Found', 'not-found'],
+      ['something odd', 'other'],
+    ]
+    for (const [text, cause] of nonRetry) {
+      const sbF = makeSandbox()
+      const v = prRun(sbF, {}, [], { ...FAST, GHPR_MS_ERR_TEXT: text })
+      assert.deepEqual(v, { mode: 'pr', status: 'milestone-check-failed', cause })
+      assert.equal(apiCount(sbF), 1, `${cause}: 再試行しない`)
+      assert.ok(!ghCalls(sbF).some((c) => /^pr (list|create)/.test(c)))
+    }
+    // 5xx・ネットワークは再試行したうえで、続くなら fail-closed
+    for (const [text, cause] of [['HTTP 503: Service Unavailable', 'server-error'], ['dial tcp: connection reset by peer', 'network']]) {
+      const sbF = makeSandbox()
+      const v = prRun(sbF, {}, [], { ...FAST, GHPR_MS_ERR_TEXT: text })
+      assert.deepEqual(v, { mode: 'pr', status: 'milestone-check-failed', cause, milestoneAttempts: 3 })
+      assert.ok(!ghCalls(sbF).some((c) => /^pr (list|create)/.test(c)))
+    }
+    // 既存 PR の再利用でも milestone: unknown を結果に出す
+    const sbR = makeSandbox()
+    const rr = prRun(sbR, {}, [], { ...FAST, GHPR_MS_ERR_TEXT: RL, GHPR_LIST_JSON: JSON.stringify([{ number: 12, baseRefName: BASE, headRefOid: sbR.remoteSha(), isCrossRepository: false }]) })
+    assert.equal(rr.status, 'reused')
+    assert.equal(rr.milestone, 'unknown')
+    // 無効な試行回数・待機の指定は既定（3 回）へ戻る
+    const sbB = makeSandbox()
+    const rb = prRun(sbB, {}, [], { PR_PUSH_MS_ATTEMPTS: 'x', PR_PUSH_MS_WAIT_S: '-1', GHPR_MS_ERR_TEXT: RL })
+    assert.equal(rb.milestoneAttempts, 3)
   })
 
   t('pr: 入力が不正なら gh を呼ばず止まる（タイトルが空・制御文字、body に「Closes #N」の行が無い・空）', () => {
