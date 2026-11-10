@@ -438,4 +438,7 @@ export const MUTATIONS = [
   { id: 'RW4-rewrite-lease-valueless', file: PV, from: '--force-with-lease="refs/heads/${branch}:${lease}"', to: '--force-with-lease', tests: PR_PUSH, note: "#696: lease の期待値を落とす（値なしの lease は追跡 ref に依存し、観測後の並行 push を守れない）" },
   { id: 'RW5-rewrite-not-fix-only', file: PP, from: 'if [ "${origin_kind}" = fix ]; then\n    try_rewrite_push', to: 'if true; then\n    try_rewrite_push', tests: PR_PUSH, note: "#696: 書き直し経路を fix 限定にしない（pr-create でも force 系の push に入る）" },
   { id: 'RW6-rewrite-race-as-push-failed', file: PV, from: 'PV_OUTCOME=race\n    else\n      PV_OUTCOME=push-failed', to: 'PV_OUTCOME=push-failed\n    else\n      PV_OUTCOME=push-failed', tests: PR_PUSH, note: "#696: lease で拒否された並行 push（リモート head が観測値とも HEAD とも違う）を race と区別しない" },
+  { id: 'WO1-observe-no-retry', file: SRC, from: 'const WT_OBSERVE_TRIES = 3', to: 'const WT_OBSERVE_TRIES = 1', tests: ['worktree-observe-retry.test.mjs'], note: "#735: 食い違いを取り直さない（並行ランの作成・削除で新規着手が止まる）" },
+  { id: 'WO2-observe-never-differs', file: SRC, from: 'Number.isInteger(count) && count !== entries.length', to: 'Number.isInteger(count) && count === entries.length', tests: ['worktree-observe-retry.test.mjs'], note: "#735: 食い違いの判定を反転する" },
+  { id: 'WO3-observe-unbounded', file: SRC, from: 'while (++i < WT_OBSERVE_TRIES && worktreeCountsDiffer(...r))', to: 'while (worktreeCountsDiffer(...r))', tests: ['worktree-observe-retry.test.mjs'], note: "#735: 取り直しに上限を設けない" },
 ]
