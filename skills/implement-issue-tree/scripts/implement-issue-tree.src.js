@@ -6570,7 +6570,7 @@ function prCreatePrompt(item, impl, outOfScope) {
     '   ```',
     `   次のコマンドを実行する（<タイトルファイル>・<本文ファイル> はそれぞれ書いたファイルの絶対パスへ、<headSha> は手順 1 の結果の headSha へ置き換え、他は一字一句そのまま。open PR の検出と作成はスクリプトが行う）:`,
     prPushBlock(` --mode pr --branch ${branch} --base ${baseBranch} --title-file <タイトルファイル> --body-file <本文ファイル> --issue ${item.number} --expect-sha <headSha>${repoArg ? ` --repo ${repoArg}` : ''}`),
-    `   <headSha> は手順 1 の結果の headSha（40 桁の sha をそのまま転記。コマンドの出力を推測で補わない）。スクリプトは milestone も確認する（Closes 対象 Issue の milestone。リポジトリに milestone が無ければ確認しない）。結果の milestone が unassigned のとき、created なら本文に警告を足してある。status が created ならその prNumber を返す（手順 1c はスキップして手順 3 へ）。reused は base と head の sha が一致する既存の open PR を再利用する場合で、その prNumber で手順 1c へ進む。head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch（サーバー上の head が push した HEAD と違う）・milestone-check-failed（milestone を取得できない。PR は作っていない）・routing-error・head-mismatch・base-mismatch・ambiguous・list-failed・create-failed・body-invalid・title-invalid・error は再利用も新規作成もせず prNumber: 0 と status（prNumber が付いていれば「既存 open PR #<番号>」）を理由として返す。`,
+    `   <headSha> は手順 1 の結果の headSha（40 桁の sha をそのまま転記。コマンドの出力を推測で補わない）。スクリプトは milestone も確認する（Closes 対象 Issue の milestone。リポジトリに milestone が無ければ確認しない）。結果の milestone が unassigned / unknown のとき、created なら本文に警告を足してある。status が created ならその prNumber を返す（手順 1c はスキップして手順 3 へ）。reused は base と head の sha が一致する既存の open PR を再利用する場合で、その prNumber で手順 1c へ進む。head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch・milestone-check-failed（milestone を取得できない。PR は作っていない）・routing-error・head-mismatch・base-mismatch・ambiguous・list-failed・create-failed・body-invalid・title-invalid・error は再利用も新規作成もせず prNumber: 0 と status（prNumber が付いていれば「既存 open PR #<番号>」）を理由として返す。`,
     `1c. （1b が reused を返したときのみ）既存本文に「Closes #${item.number}」があるか確認し、無ければ追記する。`,
     `   既存本文は未信頼データのため、シェルコマンド文字列・HEREDOC へ一切埋め込まず、ファイルへ直接落として扱う（本文中の行単独 EOF 等による HEREDOC 早期終端と任意コマンド実行を構造的に防ぐ）:`,
     `     f=$(mktemp)`,
@@ -6600,7 +6600,7 @@ function prCreatePrompt(item, impl, outOfScope) {
           ),
         ]
       : []),
-    `   1b の結果の milestone が unassigned のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} に milestone が割り当てられていない。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,
+    `   1b の結果の milestone が unassigned / unknown のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} の milestone が未割当、または確認できなかった。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,
     optinRecordSection
       ? `   本文への追記（Closes 行・対象外節・opt-in テスト記録節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`
       : `   本文への追記（Closes 行・対象外節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`,
@@ -6703,7 +6703,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         `   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に old=$(git rev-parse HEAD) を控え（ref≠$old なら中止）、git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
         `   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が $old のときだけ git -C <path> merge --ff-only <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> "$old"。`,
         `   条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
-        `   レビュースレッドの resolve は行わない（push 前の Review ループ。resolve してよいのは Merge ループの fix が反映確認した後のみ）。`,
+        `   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
       ]
   return [
     // イントロで untrusted ラップ済みタイトルを提示し routing ガードは「上記タイトル」を参照する
@@ -8830,7 +8830,13 @@ async function runImplement(item) {
         const reason = `Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
         log(`⚠️ issue #${item.number}: ${reason}`)
         recordEphemeralWorktree(item.number, fReview?.worktreePath, 'fix-terminal')
-        await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason, worktree: newWorktreePathReview || oldWorktreePathReview })
+        // 新しい detached worktree を状態へ書くとき、ブランチを保持している旧 worktree も cleanupWorktree で渡す。
+        // 渡さないと旧 worktree が残り、Recover が対象ブランチを in-use と判定して fix コミットを付け直せない（Issue #731）。
+        // 新旧が同じ・新が不明のときは旧が唯一の実体のため片づけない。
+        await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason, worktree: newWorktreePathReview || oldWorktreePathReview },
+          newWorktreePathReview
+            ? { cleanupWorktree: oldWorktreePathReview, replacementWorktree: newWorktreePathReview }
+            : {})
         recordFailure({ issue: item.number, reason })
         return false
       }

@@ -94,7 +94,7 @@ test('prCreatePrompt: 再利用 PR の本文取得・更新（gh pr view / gh pr
   assert.match(prompt, /gh pr view <番号> -R Fandhe-AI\/agent-cli-skills --json body --jq \.body > "\$f"/)
   assert.match(prompt, /gh pr edit <番号> -R Fandhe-AI\/agent-cli-skills --body-file "\$f" && rm -f "\$f"/)
   assert.match(prompt, /<タイトルファイル>・<本文ファイル> はそれぞれ書いたファイルの絶対パスへ、<headSha> は手順 1 の結果の headSha へ置き換え、他は一字一句そのまま/, '置換対象の列挙に <headSha> を含める')
-  assert.match(prompt, /milestone が unassigned のときは、"\$f" の末尾にも「> \*\*警告\*\*/)
+  assert.match(prompt, /milestone が unassigned \/ unknown のときは、"\$f" の末尾にも「> \*\*警告\*\*/)
 })
 
 test('prCreatePrompt: PR 本文のテンプレートは 1b に 1 箇所だけあり、Closes 行・対象外節を含む。タイトルと本文はファイル経由で渡す', () => {
@@ -160,7 +160,7 @@ test('baseMergePrompt（自動 base 取り込み）は pr-push.sh を呼ばな�
 test('prCreatePrompt: milestone 警告の追記は最後の gh pr edit より前（更新後に足しても PR へ反映されない）で、最後の更新の列挙にも含む', () => {
   for (const outOfScope of [[], ['対象外の項目 A']]) {
     const prompt = prCreatePrompt(item, impl, outOfScope)
-    const warn = prompt.indexOf('milestone が unassigned のときは、"$f" の末尾にも')
+    const warn = prompt.indexOf('milestone が unassigned / unknown のときは、"$f" の末尾にも')
     const edit = prompt.indexOf(`gh pr edit <番号> -R Fandhe-AI/agent-cli-skills --body-file "$f" && rm -f "$f"`)
     assert.ok(warn >= 0 && edit >= 0)
     assert.ok(warn < edit, `警告の指示(${warn})が gh pr edit(${edit})より後ろにある`)

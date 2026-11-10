@@ -4516,16 +4516,16 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'d61366b7b86d64198cf4e0dc302ff4308962084c66f84f5ec2a3e67319afd603',
-'measure-free-disk.sh':'900a57fc72b6c5b78781f8f7f71fd1a27bef8c87eacc5f112b5c175c785f024d',
-'observe-pr.sh':'9c714adb9889263437d7371be5d84f6d7c2bb13a4a3678a509282b2823b87dd7',
-'base-merge.sh':'740cd19b9ab68551b687fb2b1fd4b9f5eeb376906cb2622ceb47311a9d283d4a',
-'pr-push.sh':'2ac90785586877ba721105bb742899f61ea18559662cd165fff788f7581adbd6',
-'state.sh':'77e50d560763c57e1aacfeed7a8bf06c662d8942b761380be1a6a9b720d5d46b',
-'merge-gate.sh':'b540aef1846062c4886ef8d7a58354ced86271cc29c938441d240481e0a2f333',
-'worktree-remove.sh':'d4af83623d550ddc4d84b2200926d3ae55f9f471ed55af2363b3c75048026533',
-'recover-prep.sh':'44284b65198386a5c9bbb16ba0b66d7b02fe67d75dbf30c0989183aeb9add716',
-'fetch-tree.sh':'81a1f3860b725bf9e8be7807062e404314910d5d8f84f357b19e755c217e1127',
+'measure-residual-bytes.sh':'a204c0c3d3eb987eee99041dd225e608432e09f3d49da65ccc4b98adf6120052',
+'measure-free-disk.sh':'f74ddcd0909b78d2dd2ae8a52e8acc98a78555b9967c4886cea97634f76ff2c4',
+'observe-pr.sh':'e08a8a6701d778f8b497102b0ab5906edb72dcaeada0039c3c033726394ef636',
+'base-merge.sh':'9f09051df3bc5966a3b6fb19970653e5c5985f3848b7aed4cc38083ec07b1275',
+'pr-push.sh':'c431441d4010ce56a8e19d1b5c7c62fb818d57940e9571989c1c0544872bde9a',
+'state.sh':'6545d61167288289c103ffe78268d30be9332c6663c85d091e00d5d0569e8145',
+'merge-gate.sh':'ed2effacadc1a34380464fba0f91d70e489e0da87b3fd46513f0bec465cc5a3d',
+'worktree-remove.sh':'aaac3f408af096c209609fe884332035273316dfad4e215f2a238ddf2027e467',
+'recover-prep.sh':'140797611a68de5a440bc9c096b417ce6b3b03217c2d6d595fec80b81092af15',
+'fetch-tree.sh':'49e2b05228e70eae821568fb61d4398490ed1c1de0b7de596438dc0507543870',
 }
 
 
@@ -6570,7 +6570,7 @@ outOfScopeSection,
 '   ```',
 `   次のコマンドを実行する（<タイトルファイル>・<本文ファイル> はそれぞれ書いたファイルの絶対パスへ、<headSha> は手順 1 の結果の headSha へ置き換え、他は一字一句そのまま。open PR の検出と作成はスクリプトが行う）:`,
 prPushBlock(` --mode pr --branch ${branch} --base ${baseBranch} --title-file <タイトルファイル> --body-file <本文ファイル> --issue ${item.number} --expect-sha <headSha>${repoArg ? ` --repo ${repoArg}` : ''}`),
-`   <headSha> は手順 1 の結果の headSha（40 桁の sha をそのまま転記。コマンドの出力を推測で補わない）。スクリプトは milestone も確認する（Closes 対象 Issue の milestone。リポジトリに milestone が無ければ確認しない）。結果の milestone が unassigned のとき、created なら本文に警告を足してある。status が created ならその prNumber を返す（手順 1c はスキップして手順 3 へ）。reused は base と head の sha が一致する既存の open PR を再利用する場合で、その prNumber で手順 1c へ進む。head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch（サーバー上の head が push した HEAD と違う）・milestone-check-failed（milestone を取得できない。PR は作っていない）・routing-error・head-mismatch・base-mismatch・ambiguous・list-failed・create-failed・body-invalid・title-invalid・error は再利用も新規作成もせず prNumber: 0 と status（prNumber が付いていれば「既存 open PR #<番号>」）を理由として返す。`,
+`   <headSha> は手順 1 の結果の headSha（40 桁の sha をそのまま転記。コマンドの出力を推測で補わない）。スクリプトは milestone も確認する（Closes 対象 Issue の milestone。リポジトリに milestone が無ければ確認しない）。結果の milestone が unassigned / unknown のとき、created なら本文に警告を足してある。status が created ならその prNumber を返す（手順 1c はスキップして手順 3 へ）。reused は base と head の sha が一致する既存の open PR を再利用する場合で、その prNumber で手順 1c へ進む。head-moved・remote-head-missing・remote-head-unknown・remote-head-mismatch・milestone-check-failed（milestone を取得できない。PR は作っていない）・routing-error・head-mismatch・base-mismatch・ambiguous・list-failed・create-failed・body-invalid・title-invalid・error は再利用も新規作成もせず prNumber: 0 と status（prNumber が付いていれば「既存 open PR #<番号>」）を理由として返す。`,
 `1c. （1b が reused を返したときのみ）既存本文に「Closes #${item.number}」があるか確認し、無ければ追記する。`,
 `   既存本文は未信頼データのため、シェルコマンド文字列・HEREDOC へ一切埋め込まず、ファイルへ直接落として扱う（本文中の行単独 EOF 等による HEREDOC 早期終端と任意コマンド実行を構造的に防ぐ）:`,
 `     f=$(mktemp)`,
@@ -6600,7 +6600,7 @@ item.optinTests,
 ),
 ]
 :[]),
-`   1b の結果の milestone が unassigned のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} に milestone が割り当てられていない。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,
+`   1b の結果の milestone が unassigned / unknown のときは、"$f" の末尾にも「> **警告**: Closes 対象の #${item.number} の milestone が未割当、または確認できなかった。」の行を（無ければ）足す（gh pr edit より前に済ませる。更新後に足しても PR へ反映されない）。`,
 optinRecordSection
 ?`   本文への追記（Closes 行・対象外節・opt-in テスト記録節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`
 :`   本文への追記（Closes 行・対象外節・milestone 警告）をすべて終えてから、最後に 1 回だけ更新して一時ファイルを削除する:`,
@@ -6703,7 +6703,7 @@ commitlintCheckInstruction,
 `   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に old=$(git rev-parse HEAD) を控え（ref≠$old なら中止）、git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
 `   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が $old のときだけ git -C <path> merge --ff-only <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> "$old"。`,
 `   条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
-`   レビュースレッドの resolve は行わない（push 前の Review ループ。resolve してよいのは Merge ループの fix が反映確認した後のみ）。`,
+`   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
 ]
 return[
 
@@ -8830,7 +8830,13 @@ if(fReview.commitFailed===true){
 const reason=`Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
 log(`⚠️ issue #${item.number}: ${reason}`)
 recordEphemeralWorktree(item.number,fReview?.worktreePath,'fix-terminal')
-await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason,worktree:newWorktreePathReview||oldWorktreePathReview})
+
+
+
+await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason,worktree:newWorktreePathReview||oldWorktreePathReview},
+newWorktreePathReview
+?{cleanupWorktree:oldWorktreePathReview,replacementWorktree:newWorktreePathReview}
+:{})
 recordFailure({issue:item.number,reason})
 return false
 }

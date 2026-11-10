@@ -193,11 +193,21 @@ if [ "${wtstate}" = live ] && [ -z "${head_branch}" ]; then
     fi
     R_DETACHED=$(rp_detached_plan "${adopt_branch}" "${base}" "${adopt_exists}" "${adopt_use}" "${adopt_ahead}" "${adopt_ip}")
     if [ "${R_DETACHED}" = adopt ]; then
+      # 付け直しの間に生存中の agent が detached HEAD を進め得る（lock は無視する）。観測した adopt_head から HEAD が動いていたら付け直さず保全する。
+      # 確認は ref 更新の前と、symbolic-ref の直前の 2 回（symbolic-ref 自体に旧値指定は無いため、残る窓は直前確認から実行までの間だけ）
       arc=0
-      git update-ref "refs/heads/${adopt_branch}" "${adopt_head}" "${adopt_tip}" >/dev/null 2>&1 || arc=$?
+      adopt_same() { [ "$(git -C "${path}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" = "${adopt_head}" ] && [ "$(git -C "${path}" rev-parse --abbrev-ref HEAD 2>/dev/null)" = HEAD ]; }
+      adopt_same || arc=1
+      if [ "${arc}" = 0 ]; then
+        git update-ref "refs/heads/${adopt_branch}" "${adopt_head}" "${adopt_tip}" >/dev/null 2>&1 || arc=$?
+        # 競合: ブランチは観測した adopt_head（HEAD の祖先）まで進んだだけで失われるコミットは無い。worktree は触らず detached のまま保全する
+        if [ "${arc}" = 0 ] && ! adopt_same; then arc=1; fi
+      fi
       if [ "${arc}" = 0 ]; then
         git -C "${path}" symbolic-ref HEAD "refs/heads/${adopt_branch}" >/dev/null 2>&1 || arc=$?
       fi
+      # 付け直し後の HEAD がブランチ経由で adopt_head のままであること（回収成功の根拠）
+      if [ "${arc}" = 0 ] && [ "$(git -C "${path}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" != "${adopt_head}" ]; then arc=1; fi
       if [ "${arc}" = 0 ]; then
         head_branch=${adopt_branch}
         R_DETACHED=attached

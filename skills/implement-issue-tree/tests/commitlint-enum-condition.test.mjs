@@ -126,7 +126,7 @@ test('commitlintCheckInstruction: fail-closed 返却はホストが検出する�
   // ホスト側: Review ループ・Merge ループの両 fix 呼び出し直後で commitFailed を失敗終端として扱う
   const reviewIdx = driverPart.indexOf('fReview.commitFailed === true')
   assert.ok(reviewIdx >= 0, 'Review ループの host が fReview.commitFailed を判定していない')
-  const reviewSection = driverPart.slice(reviewIdx, reviewIdx + 900)
+  const reviewSection = driverPart.slice(reviewIdx, reviewIdx + 1400)
   assert.ok(reviewSection.includes("status: 'failed'") && reviewSection.includes('recordFailure') && reviewSection.includes('return false'), 'Review ループの commitFailed が failed 終端になっていない')
   // コミット後のブランチ反映失敗でも修正 HEAD を持つ新 worktree を状態へ残し、Recover が取り込めるようにする（Issue #731）
   assert.ok(reviewSection.includes('worktree: newWorktreePathReview || oldWorktreePathReview'), 'Review ループの commitFailed が新 worktree を状態へ保存していない')
@@ -210,4 +210,17 @@ test('host: commitFailed 終端は routingError と同じく fix worktree を台
     const routingIdx = driverPart.lastIndexOf(path, condIdx)
     assert.ok(routingIdx >= 0 && routingIdx < condIdx, `${label}: routingError ハンドラ側の同一引数の記録がない`)
   }
+})
+
+test('host: Review の commitFailed 終端は新しい worktree を残すとき、ブランチを保持する旧 worktree を cleanupWorktree で渡す（Issue #731）', () => {
+  // 渡さないと旧 worktree が残り、Recover が対象ブランチを in-use と判定して fix コミットを付け直せない。
+  const condIdx = driverPart.indexOf('fReview.commitFailed === true')
+  assert.ok(condIdx >= 0, 'commitFailed 判定がない')
+  const section = driverPart.slice(condIdx, condIdx + 1800)
+  const termIdx = section.indexOf("await updateState(item.number, { status: 'failed'")
+  assert.ok(termIdx >= 0, '終端の updateState がない')
+  const after = section.slice(termIdx)
+  assert.ok(/cleanupWorktree:\s*oldWorktreePathReview/.test(after), '旧 worktree が cleanupWorktree に渡されていない')
+  assert.ok(/replacementWorktree:\s*newWorktreePathReview/.test(after), '新 worktree が replacementWorktree に渡されていない')
+  assert.ok(/newWorktreePathReview\s*\?\s*\{\s*cleanupWorktree/.test(after), '新が不明のとき（旧が唯一の実体）の保護条件がない')
 })

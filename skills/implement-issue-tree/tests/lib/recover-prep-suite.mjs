@@ -551,6 +551,26 @@ export function registerRecoverPrepTests(bash) {
     expectKept(repo, a, prep(repo, a), 'in-progress', before)
   })
 
+  test(`${tag} detached の付け直しの途中で生存 agent が HEAD を進めた: 付け直さず保全し、ブランチも元へ戻す（Issue #731）`, () => {
+    const repo = makeRecoverRepo()
+    const a = detachedWith(repo)
+    const before = snap(repo, a)
+    // ブランチ ref の更新が確定した直後（symbolic-ref の前）に、worktree の detached HEAD へ空コミットを積む
+    const hook = join(repo.main, '.git', 'hooks', 'reference-transaction')
+    const marker = join(repo.root, 'raced')
+    writeFileSync(hook, `#!/bin/sh\n[ "$1" = committed ] || exit 0\n[ -e '${marker}' ] && exit 0\ngrep -q "refs/heads/${a.branch}" || exit 0\n: > '${marker}'\ngit -C '${a.path}' commit -q --allow-empty -m race </dev/null >/dev/null 2>&1\nexit 0\n`)
+    chmodSync(hook, 0o755)
+    const r = prep(repo, a)
+    assert.ok(existsSync(marker), '競合が注入された')
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(r.result.detached, 'failed')
+    assert.equal(r.result.resolved, false)
+    assert.equal(repo.git(a.path, 'rev-parse', '--abbrev-ref', 'HEAD'), 'HEAD', 'detached のまま（競合で積まれたコミットを上書きしない）')
+    assert.notEqual(repo.head(a.path), before.head, '競合のコミットが HEAD に残る')
+    assert.equal(repo.head(repo.main, `refs/heads/${a.branch}`), before.head, 'ブランチは観測した HEAD（競合コミットの祖先）まで。競合コミットは含まない')
+    assert.ok(existsSync(a.path), 'worktree は削除されない')
+  })
+
   test(`${tag} detached でブランチ ref の更新に失敗（lock 競合）: detached:failed で確定せず、HEAD もブランチも動かさない`, () => {
     const repo = makeRecoverRepo()
     const a = detachedWith(repo)
