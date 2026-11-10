@@ -139,7 +139,17 @@ test('fixPrompt(pushAfterFix: true): push の status を pushed 判定へ結ぶ�
 test('fixPrompt(pushAfterFix: false): pr-push.sh を呼ばない（push 前の Review ループ。ローカル修正のみ）', () => {
   const text = fixPrompt(item, impl, { summary: 's', unresolvedComments: [] }, false, [])
   assert.doesNotMatch(text, /pr-push\.sh/)
-  assert.match(text, /git branch -f/)
+  // Issue #731: git branch -f は別 worktree が checkout 中だと拒否されるため update-ref で更新し、反映を確認する
+  assert.ok(!text.includes(`git update-ref refs/heads/${B} HEAD`), '旧値なしの update-ref は使わない')
+  assert.match(text, /merge --ff-only/, '使用中 worktree は ff-only で一緒に進める')
+  assert.match(text, /merge --ff-only --no-overwrite-ignore /, 'ignored ファイルを上書きしない（上書きが必要なら失敗して保全）')
+  assert.ok(text.includes(`git update-ref refs/heads/${B} <HEAD の sha> "$old"`), '未使用なら旧値つき')
+  assert.ok(text.includes('old=$(git rev-parse HEAD)'), '旧値は detach 直後の HEAD（ブランチ ref の読み直しは不可）')
+  assert.ok(!text.includes(`old=$(git rev-parse refs/heads/${B})`))
+  assert.match(text, /status --porcelain=v2 -uall/, '使用中 worktree の clean 確認')
+  assert.ok(text.includes(`git rev-parse refs/heads/${B} が HEAD と不一致`))
+  assert.match(text, /commitFailed: true/)
+  assert.doesNotMatch(text, new RegExp(`git branch -f ${B}`))
 })
 
 test('baseMergePrompt（自動 base 取り込み）は pr-push.sh を呼ばない（base-merge.sh のまま）', () => {

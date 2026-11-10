@@ -4541,16 +4541,16 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'c3953c0c7c7d1bcbe461568b07bd10d3ee4e3f58710d6da7b2eba63b38937e29',
-'measure-free-disk.sh':'9ace496365d310f94c5ac7ccccdd5853a75f2b78202da9404f7277c2130eb344',
-'observe-pr.sh':'6ed1f5f376be43b178a80952f23032f567919ca6d3e8de58f1a758355f472340',
-'base-merge.sh':'2f95fcf66d9456fec12f0675dad0d5b4dd5c7c8331697cc5346fefdc7ddbc6f9',
-'pr-push.sh':'53351c8a9c95c276cae36965d0927e71a3b23e3957c2bb1bc09a419c30279133',
-'state.sh':'5d14b6f7c0911197a627c309144f8f7a660e05a64b128d0f49b8f7d4c438d867',
-'merge-gate.sh':'b7e06df6dab6976abd52a15936c3a96a9af2385db03e1044a5a813c30038ab99',
-'worktree-remove.sh':'0a82201d28672690d5e49df62ae048164ce12a70dd5cf509871106ec084b98b5',
-'recover-prep.sh':'60b35ea6d1587bde6698178154a92063ea5d35272d45aadf976e2c1fdf6e88d9',
-'fetch-tree.sh':'c25ba1de1ed018708c83316e5c3230e0f9e5a29ec271b1091479dea2a778c800',
+'measure-residual-bytes.sh':'a204c0c3d3eb987eee99041dd225e608432e09f3d49da65ccc4b98adf6120052',
+'measure-free-disk.sh':'f74ddcd0909b78d2dd2ae8a52e8acc98a78555b9967c4886cea97634f76ff2c4',
+'observe-pr.sh':'e08a8a6701d778f8b497102b0ab5906edb72dcaeada0039c3c033726394ef636',
+'base-merge.sh':'9f09051df3bc5966a3b6fb19970653e5c5985f3848b7aed4cc38083ec07b1275',
+'pr-push.sh':'c431441d4010ce56a8e19d1b5c7c62fb818d57940e9571989c1c0544872bde9a',
+'state.sh':'6545d61167288289c103ffe78268d30be9332c6663c85d091e00d5d0569e8145',
+'merge-gate.sh':'ed2effacadc1a34380464fba0f91d70e489e0da87b3fd46513f0bec465cc5a3d',
+'worktree-remove.sh':'aaac3f408af096c209609fe884332035273316dfad4e215f2a238ddf2027e467',
+'recover-prep.sh':'ab0ee00f5c1acad69b12e1c3d0ab5878bb6021c01d4dfaced9533e243d846adb',
+'fetch-tree.sh':'49e2b05228e70eae821568fb61d4398490ed1c1de0b7de596438dc0507543870',
 }
 
 
@@ -5294,7 +5294,7 @@ if(!p){
 
 
 
-log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できなかった（件数のみ計上する。git worktree list で残骸を確認すること）`)
+log(`⚠️ #${issueNumber}: ${kind} worktree のパスを検証できなかった（件数のみ計上。git worktree list で確認すること）`)
 ephemeralWorktrees.push({issue:issueNumber,kind,path:''})
 return
 }
@@ -5384,7 +5384,7 @@ return true
 
 if(residualStartPathSet.has(p)||ephemeralWorktrees.some((e)=>e.path===p))return false
 ephemeralWorktrees.push({issue:issueNumber,kind:'replacement',path:p})
-log(`#${issueNumber}: 旧 worktree を保持したため、置換後の worktree も残置の台帳へ載せた（${p}）`)
+log(`#${issueNumber}: 旧を保持したため置換後の worktree も台帳へ載せた（${p}）`)
 return true
 }
 
@@ -6712,12 +6712,9 @@ const checkoutInstructions=pushAfterFix
 ]
 :[
 `1. 本エージェントは隔離された git worktree 内で動作する。push 前のローカル修正のため fetch は不要。`,
-`   git checkout --detach ${branch} でローカルブランチを detached HEAD として取得する。`,
-`   （ブランチが別 worktree で checkout 済みでも detach なら衝突しない）`,
-`   マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で base を最新化してから git merge origin/${baseBranch} を実行して解消する（Issue #361）`,
-`   （ローカルの ${baseBranch} ではなく origin/${baseBranch} を使う。ローカル base が origin より`,
-`   進んでいる場合にローカル限定コミットがブランチへ混入し、次ラウンドの Review がそれを`,
-`   ブランチの変更として誤検出する再発経路を防ぐため。Issue #315）。`,
+`   git checkout --detach ${branch} で detached HEAD として取得する（別 worktree で checkout 済みでも衝突しない）。`,
+`   マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で最新化してから git merge origin/${baseBranch} で解消する（Issue #361）`,
+`   （ローカル ${baseBranch} でなく origin/${baseBranch} を使う。Issue #315）。`,
 ]
 const commitAndPushInstructions=pushAfterFix
 ?[
@@ -6730,9 +6727,10 @@ commitlintCheckInstruction,
 :[
 `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
 commitlintCheckInstruction,
-`   コミット後に git branch -f ${branch} HEAD でローカルブランチの先端を更新する`,
-`   （detached HEAD 作業後のブランチ先端を確実に更新するため）。`,
-`   レビュースレッドの resolve は行わない（本経路は push 前の Review ループであり、resolve を実行してよいのは Merge ループの fix が修正のリモート head への反映を確認した後 — 修正 push の成功直後、または過去ラウンド push 済み分の反映確認後 — のみ）。`,
+`   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に old=$(git rev-parse HEAD) を控え（ref≠$old なら中止）、git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
+`   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が $old のときだけ git -C <path> merge --ff-only --no-overwrite-ignore <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> "$old"。`,
+`   条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
+`   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
 ]
 return[
 
@@ -8869,8 +8867,17 @@ if(fReview.commitFailed===true){
 
 const reason=`Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
 warnIssue(item,reason)
-recordEphemeralWorktree(item.number,fReview?.worktreePath,'fix-terminal')
-await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason})
+
+if(!newWorktreePathReview)recordEphemeralWorktree(item.number,'','fix-terminal')
+
+
+
+const wt=(p)=>p.replace(/\/+/g, '/').replace(/\/$/, '')
+
+await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason,worktree:newWorktreePathReview||oldWorktreePathReview},
+newWorktreePathReview&&wt(newWorktreePathReview)!==wt(oldWorktreePathReview)
+?{cleanupWorktree:oldWorktreePathReview,cleanupMode:'discard',expectBranch:impl.branch,replacementWorktree:newWorktreePathReview}
+:{})
 recordFailure({issue:item.number,reason})
 return false
 }
@@ -11844,7 +11851,7 @@ const retainedLedger=[
 ...[...slotRetainedPaths].map(([path,issue])=>({issue,kind:'retained',path})),
 ]
 if(retainedLedger.length>0){
-log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・git の対象が worktree 自身でない〔retained-broken〕・git status や HEAD を一過性に観測できなかった〔retained-unobservable〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD・実体の無い detached の登録〔retained-head-mismatch / retained-detached〕・登録は無いが実体のあるパス〔retained-unregistered〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・git の対象が worktree 自身でない〔retained-broken〕・git status や HEAD を一過性に観測できなかった〔retained-unobservable〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・head の不一致や detached〔retained-head-mismatch / retained-detached〕・未登録の実体〔retained-unregistered〕など。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること:`)
 for(const e of retainedLedger)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
