@@ -430,9 +430,10 @@ check_milestone() {
   max=${PR_PUSH_MS_ATTEMPTS:-3}
   wait=${PR_PUSH_MS_WAIT_S:-5}
   # 環境変数は数値と上限を検証し、不正なら既定へ戻す（再試行の長さを無制限にしない）
-  case "${max}" in '' | *[!0-9]* | 0) max=3 ;; esac
-  [ "${max}" -le 5 ] || max=3
-  case "${wait}" in '' | *[!0-9]*) wait=5 ;; esac
+  # 先頭ゼロ付き（08 等）は算術展開で八進数と解釈され異常終了するため、桁数を絞ったうえで 10# で十進へ正規化する
+  case "${max}" in '' | *[!0-9]* | ???*) max=3 ;; *) max=$((10#${max})) ;; esac
+  { [ "${max}" -ge 1 ] && [ "${max}" -le 5 ]; } || max=3
+  case "${wait}" in '' | *[!0-9]* | ???*) wait=5 ;; *) wait=$((10#${wait})) ;; esac
   [ "${wait}" -le 30 ] || wait=5
   if [ -n "${repo}" ]; then api_path="repos/${repo}/milestones?state=all&per_page=1"; else api_path='repos/{owner}/{repo}/milestones?state=all&per_page=1'; fi
   errfile=$(mktemp "${TMPDIR:-/tmp}/pr-push-err.XXXXXX") || fail error "一時ファイルを作れない"

@@ -719,6 +719,12 @@ export function registerPrPushTests(bash) {
     const sbB = makeSandbox()
     const rb = prRun(sbB, {}, [], { PR_PUSH_MS_ATTEMPTS: 'x', PR_PUSH_MS_WAIT_S: '-1', GHPR_MS_ERR_TEXT: RL })
     assert.equal(rb.milestoneAttempts, 3)
+    // 先頭ゼロ付き（08 / 09）は八進数扱いで異常終了せず、十進として結果の行を返す
+    for (const w of ['08', '09', '00']) {
+      const sbZ = makeSandbox()
+      const rz = prRun(sbZ, {}, [], { PR_PUSH_MS_ATTEMPTS: '03', PR_PUSH_MS_WAIT_S: w, GHPR_MS_ERR_TEXT: RL })
+      assert.equal(rz.milestoneAttempts, 3, `WAIT_S=${w}`)
+    }
   })
 
   t('pr: 入力が不正なら gh を呼ばず止まる（タイトルが空・制御文字、body に「Closes #N」の行が無い・空）', () => {
