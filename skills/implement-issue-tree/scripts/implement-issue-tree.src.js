@@ -6936,7 +6936,7 @@ function recoverImplementPrompt(item, brief, branch) {
     // 追従の根拠: pr-create は base 取り込みのマージコミットを detached HEAD から push しローカル refs/heads を更新しないため、
     // PR 作成失敗後はリモートだけが先行する。追従せず積むと次の pr-create が remote-ahead / diverged で止まり回復がループする。
     // rebase 等でローカルが書き換わり既に分岐したブランチも、force を使わず merge でリモート tip を祖先に取り込めば local ahead になり通常 push が通る（#730）。
-    `   checkout 後に git fetch origin -- ${branchJson}:refs/remotes/origin/${branchJson} を実行する（リモートに無ければ失敗してよく、追従をスキップして手順 3 へ）。取得できたら git merge --ff-only refs/remotes/origin/${branchJson} で追従させる。ff 不能（分岐）なら git merge --no-ff --no-edit refs/remotes/origin/${branchJson} でリモート tip を取り込む（コンフリクトは規約に従い解消し git add で確定。hook に拒否されたら手順 6 の規則で決めた subject を一時ファイルへ書き git commit -F で確定する。解消不能なら git merge --abort して続行してよい）。`,
+    `   checkout 後に git fetch origin -- ${branchJson}:refs/remotes/origin/${branchJson} を実行する（リモートに無ければ失敗してよく、追従をスキップして手順 3 へ）。取得できたら git merge --ff-only refs/remotes/origin/${branchJson} で追従させる。ff 不能（分岐）なら git merge --no-ff --no-edit refs/remotes/origin/${branchJson} でリモート tip を取り込む（コンフリクトは解消し git add 後 git commit --no-edit で確定し MERGE_HEAD を残さない。hook 拒否なら手順 6 の subject を一時ファイルへ書き git commit -F で確定。解消不能なら git merge --abort して続行可）。`,
     NO_REWRITE_PUSHED,
     `   返却前（リモートに branch があるとき）git merge-base --is-ancestor refs/remotes/origin/${branchJson} HEAD を確認し、偽なら merge で取り込み直す。`,
     `   （origin/${baseBranch} からの checkout -B 作り直しは行わない）`,

@@ -53,3 +53,17 @@ test('対照: divergedShas なし・短い・大文字・同一値・3 要素は
     assert.equal(entry.status, 'failed', JSON.stringify(c))
   }
 })
+
+// 回復 Implement の手順 2: 分岐のマージを取り込むとき、コンフリクト解消後に git commit --no-edit で
+// マージコミットを確定させる。git add だけでは MERGE_HEAD が残り is-ancestor 検査が通らない（PR #736 指摘）。
+test('回復 Implement のプロンプトは、コンフリクト解消後に git add だけでなく git commit --no-edit で確定させる', async () => {
+  const { calls } = await run({ divergedShas: [A, B] })
+  const impl = calls.find((c) => c.opts.label === 'impl:#2')
+  assert.ok(impl, 'impl:#2 が起動している')
+  const at = impl.prompt.indexOf('git merge --no-ff --no-edit')
+  assert.ok(at >= 0, '分岐取り込みの手順がある')
+  const seg = impl.prompt.slice(at, at + 400)
+  assert.match(seg, /git add[^。]*git commit --no-edit/)
+  assert.match(seg, /MERGE_HEAD/)
+  assert.ok(!impl.prompt.includes('--no-verify で'), '--no-verify を勧めない')
+})
