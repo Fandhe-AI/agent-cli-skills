@@ -405,6 +405,15 @@ test('recoverImplementPrompt: 手順 2 で checkout 後にリモート tip へ f
   assert.match(prompt, /rebase・commit --amend・reset・squash で書き換えない/)
 })
 
+test('祖先確認の省略: Recover は abort 続行時に省略して summary に書き、0b-a には入らない（#751）', () => {
+  const rec = recoverImplementPrompt(item, { done: [], remaining: [], broken: [] }, 'fix/42-noop')
+  assert.match(rec, /返却前（リモートに branch があるとき）git merge-base --is-ancestor [^。]*偽なら merge で取り込み直す（abort して続行した場合は確認を省略し、その旨を summary に書く）。/)
+  const p = implementPrompt(item, { steps: ['noop'] })
+  const sec = p.slice(p.indexOf('0b-a.'), p.indexOf('0b-b.'))
+  assert.ok(!sec.includes('確認を省略'), '0b-a に省略条件が入っている')
+  assert.ok(sec.includes('成功後は git merge-base --is-ancestor'), '0b-a の成功後の祖先確認が消えている')
+})
+
 test('implementPrompt: 0b-a にも push 済みコミットの書き換え禁止が入る', () => {
   const prompt = implementPrompt(item, 'plan')
   const i = prompt.indexOf('0b-a.')
