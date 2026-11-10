@@ -8833,9 +8833,10 @@ recordEphemeralWorktree(item.number,fReview?.worktreePath,'fix-terminal')
 
 
 
+const wt=(p)=>p.replace(/\/+/g, '/').replace(/\/$/, '')
 await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason,worktree:newWorktreePathReview||oldWorktreePathReview},
-newWorktreePathReview
-?{cleanupWorktree:oldWorktreePathReview,replacementWorktree:newWorktreePathReview}
+newWorktreePathReview&&wt(newWorktreePathReview)!==wt(oldWorktreePathReview)
+?{cleanupWorktree:oldWorktreePathReview,cleanupMode:'discard',replacementWorktree:newWorktreePathReview}
 :{})
 recordFailure({issue:item.number,reason})
 return false
@@ -11803,7 +11804,7 @@ const retainedLedger=[
 ...[...slotRetainedPaths].map(([path,issue])=>({issue,kind:'retained',path})),
 ]
 if(retainedLedger.length>0){
-log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・git の対象が worktree 自身でない〔retained-broken〕・git status や HEAD を一過性に観測できなかった〔retained-unobservable〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・マージ済み PR の head との不一致や detached HEAD・実体の無い detached の登録〔retained-head-mismatch / retained-detached〕・登録は無いが実体のあるパス〔retained-unregistered〕のいずれか。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること（未コミットの変更や未マージの成果を失わないよう、確認せずに git worktree remove しない）:`)
+log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・git の対象が worktree 自身でない〔retained-broken〕・git status や HEAD を一過性に観測できなかった〔retained-unobservable〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・head の不一致や detached〔retained-head-mismatch / retained-detached〕・未登録の実体〔retained-unregistered〕など。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること:`)
 for(const e of retainedLedger)log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 

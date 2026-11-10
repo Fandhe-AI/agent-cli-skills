@@ -222,5 +222,7 @@ test('host: Review の commitFailed 終端は新しい worktree を残すとき�
   const after = section.slice(termIdx)
   assert.ok(/cleanupWorktree:\s*oldWorktreePathReview/.test(after), '旧 worktree が cleanupWorktree に渡されていない')
   assert.ok(/replacementWorktree:\s*newWorktreePathReview/.test(after), '新 worktree が replacementWorktree に渡されていない')
-  assert.ok(/newWorktreePathReview\s*\?\s*\{\s*cleanupWorktree/.test(after), '新が不明のとき（旧が唯一の実体）の保護条件がない')
+  assert.ok(/wt\(newWorktreePathReview\)\s*!==\s*wt\(oldWorktreePathReview\)\s*\?\s*\{\s*cleanupWorktree/.test(after), '新が不明・新旧同一のとき（旧が唯一の実体）の保護条件がない')
+  // 新旧の同一性を正規化して比較し、異なるときも discard（汚れていれば保持）で渡す
+  assert.ok(/cleanupMode:\s*'discard'/.test(after), '旧 worktree の削除が discard でない（汚れを強制削除する）')
 })
