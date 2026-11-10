@@ -8830,7 +8830,7 @@ async function runImplement(item) {
         const reason = `Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
         log(`⚠️ issue #${item.number}: ${reason}`)
         recordEphemeralWorktree(item.number, fReview?.worktreePath, 'fix-terminal')
-        await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason })
+        await updateState(item.number, { status: 'failed', pr: 0, fixCount, note: reason, worktree: newWorktreePathReview || oldWorktreePathReview })
         recordFailure({ issue: item.number, reason })
         return false
       }
@@ -10125,7 +10125,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // 旧パスは stale になるため有効・無効を問わず必ず新値で上書きする
       currentWorktreePath = newWorktreePath
       if (!newWorktreePath) {
-        log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡不能。git worktree prune での手動掃除が必要な場合あり`)
+        log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡不能`)
       }
       // fix 実行後: fixCount・新 worktree・追跡データ（outOfScopeLog / lastUnresolved* /
       // outOfScopeSeen / optinFixState）を更新し旧 worktree を削除する（中断・再起動後も復元でき

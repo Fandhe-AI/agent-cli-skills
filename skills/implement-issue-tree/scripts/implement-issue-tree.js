@@ -8830,7 +8830,7 @@ if(fReview.commitFailed===true){
 const reason=`Review fix がコミットを作成できず修正未反映: ${sanitize(fReview.summary ?? '')}`
 log(`⚠️ issue #${item.number}: ${reason}`)
 recordEphemeralWorktree(item.number,fReview?.worktreePath,'fix-terminal')
-await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason})
+await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason,worktree:newWorktreePathReview||oldWorktreePathReview})
 recordFailure({issue:item.number,reason})
 return false
 }
@@ -10125,7 +10125,7 @@ log(`#${item.number}: fix エージェントが対象外と判断したコメン
 
 currentWorktreePath=newWorktreePath
 if(!newWorktreePath){
-log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡不能。git worktree prune での手動掃除が必要な場合あり`)
+log(`⚠️ issue #${item.number}: fix worktree パスを取得できず追跡不能`)
 }
 
 

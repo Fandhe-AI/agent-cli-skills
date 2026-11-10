@@ -128,6 +128,8 @@ test('commitlintCheckInstruction: fail-closed 返却はホストが検出する�
   assert.ok(reviewIdx >= 0, 'Review ループの host が fReview.commitFailed を判定していない')
   const reviewSection = driverPart.slice(reviewIdx, reviewIdx + 900)
   assert.ok(reviewSection.includes("status: 'failed'") && reviewSection.includes('recordFailure') && reviewSection.includes('return false'), 'Review ループの commitFailed が failed 終端になっていない')
+  // コミット後のブランチ反映失敗でも修正 HEAD を持つ新 worktree を状態へ残し、Recover が取り込めるようにする（Issue #731）
+  assert.ok(reviewSection.includes('worktree: newWorktreePathReview || oldWorktreePathReview'), 'Review ループの commitFailed が新 worktree を状態へ保存していない')
   const mergeIdx = driverPart.indexOf('f.commitFailed === true')
   assert.ok(mergeIdx >= 0, 'Merge ループの host が f.commitFailed を判定していない')
   const mergeSection = driverPart.slice(mergeIdx, mergeIdx + 500)
