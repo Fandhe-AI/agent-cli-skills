@@ -24,8 +24,9 @@
 #   3. 対象ブランチが確定したら `git fetch origin refs/heads/<base>:refs/remotes/origin/<base>` で base を最新化し、
 #      `git diff --quiet --no-ext-diff --ignore-submodules=none <base>...<branch>` で差分の有無を調べる（利用者の diff.ignoreSubmodules や
 #      diff.external に左右されない。submodule ポインタだけの変更も差分に数える）（fetch に失敗したら unknown。空とは扱わない）。差分があれば先行コミット数と変更ファイル数も出す
-# 使用中ブランチの解放（Issue #755）: detached の取り込みの前に、ブランチを checkout 中のメイン以外の worktree が使い捨て（lock の理由が Claude Code の形・clean・HEAD が先端・途中状態なし。
-#       pid の生死は問わない。同一セッションでは常に生きており、解放は先端のコミットへ detached にするだけの非破壊の ref 操作）なら、旧値つきの `update-ref --no-deref HEAD` 1 形で解放する。
+# 使用中ブランチの解放（Issue #755）: detached の取り込みの前に、ブランチを checkout 中のメイン以外の worktree が使い捨て（lock の理由が Claude Code の形・clean・HEAD が先端・途中状態なし）で、
+#       かつこのランが所有する・終了済み（lock の pid が死んでいる、またはこのスクリプトの祖先 = 同じセッション）なら、HEAD.lock を排他作成した下で symref と先端を確かめ、先端のコミットへ detached にして解放する
+#       （非破壊。稼働中の別セッションの worktree は clean な瞬間でも解放しない。所有を確認できなければ保全）。
 #       先端が HEAD の祖先で途中状態でないときだけ。1 件でも資格の無い握り手があれば何も書かず従来どおり in-use で保全する。
 #       `--mode free --base BASE --branch BRANCH [--worktree PATH]` は解放だけを行う（WIP コミット・base の取得・差分は行わない）。resolved:false・reason:free-only で、
 #       detached は freed / none / in-use / failed / no-ref / base-branch。結果は助言的（ホストは判断に使わない）。
@@ -154,7 +155,7 @@ in_progress() { # $1 = worktree のパス
 }
 
 # 使用中ブランチの握り手の解放（Issue #755）。ブランチ $1 を checkout 中のメイン以外の worktree が、使い捨てのもの（Claude Code の lock・clean・HEAD が先端 $2 と一致・
-# 途中状態なし）だけなら、各握り手を先端のコミットへ detached にする（旧値つきの update-ref --no-deref HEAD 1 形。コミットも作業ツリーも動かない）。$3 は握り手から除外する
+# 途中状態なし）だけなら、各握り手を先端のコミットへ detached にする（HEAD.lock を排他作成した下で symref と先端を確かめて rename で確定する。コミットも作業ツリーも動かない）。$3 は握り手から除外する
 # 回復対象自身のパス（空でよい）。1 件でも資格が無い握り手があれば何も書かず in-use にする。結果は FH_WORD（none / freed / in-use / failed）、解放できた（または握り手が無い）とき 0
 FH_WORD=none
 # 登録のパス $1 が、このリポジトリに登録された worktree 自身であるかを確かめる（Issue #755）。.git が実在し、toplevel がパス自身、共通 git ディレクトリがこのリポジトリのもの、
@@ -166,8 +167,8 @@ holder_is_registered_worktree() {
   top=$(git -C "${p}" rev-parse --show-toplevel 2>/dev/null) || return 1
   [ "$(wr_real "${top}")" = "$(wr_real "${p}")" ] || return 1
   gd=$(git -C "${p}" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-  cd_h=$(git -C "${p}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  cd_s=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  cd_h=$(wr_common_dir "${p}") || return 1
+  cd_s=$(wr_common_dir .) || return 1
   [ "$(wr_real "${cd_h}")" = "$(wr_real "${cd_s}")" ] || return 1
   [ "$(wr_real "$(dirname "${gd}")")" = "$(wr_real "${cd_s}")/worktrees" ] || return 1
   gdir_file="${gd}/gitdir"
@@ -177,8 +178,56 @@ holder_is_registered_worktree() {
   return 0
 }
 
+# pid $1 がこのスクリプトの祖先プロセス（= 同じ Claude セッション）か。ps が使えない・祖先をたどれないときは非 0（所有を確認できないので保全側）
+pid_is_ancestor() {
+  local want=$1 p=$$ i=0
+  while [ "${i}" -lt 64 ] && [ -n "${p}" ] && [ "${p}" != 0 ] && [ "${p}" != 1 ]; do
+    [ "${p}" = "${want}" ] && return 0
+    p=$(ps -o ppid= -p "${p}" 2>/dev/null | tr -d ' \t') || p=""
+    case "${p}" in *[!0-9]*) p="" ;; esac
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# 握り手の lock の理由 $1 が、解放してよい所有を示すか（Issue #755）。Claude Code の形で、pid が終了済み（kill -0 が ESRCH・start つきで開始時刻が食い違う = pid の再利用）、
+# またはこのスクリプトの祖先（= このランのセッション）のときだけ 0。稼働中の別セッション・観測できない場合は非 0
+holder_owned() {
+  local pid start kmsg krc=0 cur
+  wr_lock_pid "$1" || return 1
+  pid=${WR_LOCK_PID}
+  start=${WR_LOCK_START}
+  kmsg=$(builtin kill -0 "${pid}" 2>&1 >/dev/null) || krc=$?
+  [ "$(wr_kill_class "${krc}" "${kmsg}")" = esrch ] && return 0
+  if [ -n "${start}" ]; then
+    cur=$(LC_ALL=C TZ=UTC ps -o lstart= -p "${pid}" 2>/dev/null) || cur=""
+    if [ -n "${cur}" ] && ! wr_start_matches "${cur}" "${start}"; then return 0; fi
+  fi
+  pid_is_ancestor "${pid}"
+}
+
+# 握り手 $1 の HEAD を、symref が refs/heads/$2 のままのときだけ先端 $3 のコミットへ detached にする。git の update-ref は同じ HEAD を symref-verify と更新の
+# 1 トランザクションに入れられない（multiple updates for ref）ため、git 自身の更新と同じ HEAD.lock の排他作成を取り、ロック中に symref と先端を確かめて rename で確定する
+# （確認と書き込みの間の切り替えは、ロックを取る git の更新が失敗するので起きない）。files ref バックエンド以外・ロックが取れない・確認が崩れたときは書かず非 0
+detach_holder_locked() {
+  local hd=$1 hgd hlock cur
+  [ "$(git -C "${hd}" rev-parse --show-ref-format 2>/dev/null)" = files ] || return 1
+  hgd=$(git -C "${hd}" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  hlock="${hgd}/HEAD.lock"
+  ( set -C; printf '%s\n' "$3" >"${hlock}" ) 2>/dev/null || return 1
+  cur=""
+  IFS= read -r cur <"${hgd}/HEAD" || true
+  if [ "${cur}" != "ref: refs/heads/$2" ] || [ "$(git -C "${hd}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" != "$3" ]; then
+    # 確認が崩れたときは HEAD を元のバイト列のまま書き戻してロックを手放す（rm を使わない。読めなければロックを残して失敗にする = git の更新が失敗して気づける）
+    cat "${hgd}/HEAD" >"${hlock}" 2>/dev/null || return 1
+    mv -f "${hlock}" "${hgd}/HEAD"
+    return 1
+  fi
+  mv -f "${hlock}" "${hgd}/HEAD"
+}
+
 free_holders() {
-  local list ents hp hs hl hr hself hdirty hip htip plan frees="" hsym hrc holder holder_tip hold_sym
+  local list ents hp hs hl hr hself hdirty hip htip howned plan frees="" hsym hrc holder holder_tip hold_sym
   FH_WORD=none
   list=$(git worktree list --porcelain 2>/dev/null) || { FH_WORD=failed; return 1; }
   ents=$(rp_holder_entries "${list}" "$1")
@@ -213,7 +262,9 @@ free_holders() {
     if in_progress "${hp}"; then hip=1; fi
     htip=0
     if [ "${hs}" = "$2" ] && [ "$(git -C "${hp}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" = "$2" ]; then htip=1; fi
-    plan=$(rp_holder_plan "${hself}" "${htip}" "${hdirty}" "${hip}" "${hr}")
+    howned=0
+    if holder_owned "${hr}"; then howned=1; fi
+    plan=$(rp_holder_plan "${hself}" "${htip}" "${hdirty}" "${hip}" "${hr}" "${howned}")
     if [ "${plan}" != free ]; then
       echo "recover-prep: ブランチ ${1} を使用中の worktree は解放できない（${plan}）。保全する" >&2
       FH_WORD=in-use
@@ -232,7 +283,7 @@ free_holders() {
       FH_WORD=failed
       return 1
     fi
-    git -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?
+    detach_holder_locked "${holder}" "$1" "${holder_tip}" || hrc=$?
     hsym=$(git -C "${holder}" symbolic-ref -q HEAD 2>/dev/null) || hsym=""
     if [ "${hrc}" != 0 ] || [ -n "${hsym}" ] || [ "$(git -C "${holder}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" != "${holder_tip}" ]; then
       echo "recover-prep: 使用中ブランチの worktree の解放に失敗した。保全する" >&2

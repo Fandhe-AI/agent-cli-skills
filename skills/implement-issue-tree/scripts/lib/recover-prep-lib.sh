@@ -142,14 +142,18 @@ rp_holder_entries() {
 }
 
 # 使用中ブランチの握り手を解放してよいかの判定（Issue #755）。引数: $1 = 握り手が回復対象の worktree 自身か（0 / 1）、$2 = 握り手の HEAD がブランチ先端と一致するか（0 / 1）、
-# $3 = 汚れの行数（-1 = 確認できなかった）、$4 = マージ・cherry-pick・revert・rebase の途中か（0 / 1）、$5 = lock の理由。標準出力は固定語:
-#   free（解放してよい）/ self / not-agent（lock が Claude Code の worktree の形でない = 利用者の worktree かもしれない）/ unobservable / dirty / in-progress / moved
-# lock の pid の生死は問わない。同一セッション内では pid が常に生きており、解放は先端のコミットへ detached にするだけの非破壊の ref 操作（clean・HEAD と先端の一致・旧値つき）だから
+# $3 = 汚れの行数（-1 = 確認できなかった）、$4 = マージ・cherry-pick・revert・rebase の途中か（0 / 1）、$5 = lock の理由、$6 = このランが所有する、または終了済みの握り手か
+# （0 / 1。lock の pid が死んでいる、またはこのスクリプトの祖先 = 同じセッション、のときだけ 1。確認できなければ 0）。標準出力は固定語:
+#   free（解放してよい）/ self / not-agent（lock が Claude Code の worktree の形でない = 利用者の worktree かもしれない）/ foreign（稼働中の別セッションかもしれない）/
+#   unobservable / dirty / in-progress / moved
+# 稼働中の別の Claude セッションの worktree は、clean な瞬間でも解放しない（解放後のコミットがその worktree の detached HEAD に積まれるため）。所有を確認できなければ保全する
 rp_holder_plan() {
   if [ "$1" = 1 ]; then
     echo self
   elif ! wr_lock_pid "$5"; then
     echo not-agent
+  elif [ "$6" != 1 ]; then
+    echo foreign
   elif [ "$3" -lt 0 ]; then
     echo unobservable
   elif [ "$3" -gt 0 ]; then

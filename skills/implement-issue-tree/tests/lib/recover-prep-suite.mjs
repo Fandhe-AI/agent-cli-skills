@@ -10,7 +10,7 @@
 //   - base の取得: 失敗しても差分が空とは言わない（unknown）。stale な追跡 ref が残っていても同じ。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -550,7 +550,7 @@ export function registerRecoverPrepTests(bash) {
   }
 
   for (const [label, lock] of [
-    ['生きた pid（同一セッション相当）', `claude agent x (pid ${process.pid})`],
+    ['生きた pid（このランのセッション = 祖先）', `claude agent x (pid ${process.pid})`],
     ['死んだ pid', 'claude agent x (pid 999999)'],
     ['start つき', `claude agent x (pid ${process.pid} start 123)`],
     ['session 形', `claude session x (pid ${process.pid})`],
@@ -680,24 +680,36 @@ export function registerRecoverPrepTests(bash) {
     expectHolderKept(repo, a, h, 'in-use')
   })
 
-  test(`${tag} 解放の瞬間に握り手の HEAD が動く競合: 失敗して保全する。ブランチも握り手も付け直しも動かない（Issue #755）`, () => {
+  test(`${tag} 握り手の HEAD.lock が取られている（解放の瞬間に別の更新が走る競合）: 書かず失敗して保全する。ブランチも握り手も付け直しも動かない（Issue #755）`, () => {
     const repo = makeRecoverRepo()
     const a = detachedWith(repo)
     const h = holderOf(repo, a)
     const hh = repo.head(h)
     const before = snap(repo, a)
-    // detach の update-ref（HEAD の symref を外す）の前に、握り手のブランチ先端を動かす
-    const hk = join(repo.main, '.git', 'hooks', 'reference-transaction')
-    const marker = join(repo.root, 'raced755')
-    writeFileSync(hk, `#!/bin/sh\n[ "$1" = prepared ] || exit 0\n[ -e "${marker}" ] && exit 0\ncase "$(cat)" in *HEAD*) : > "${marker}"; exit 1 ;; esac\nexit 0\n`)
-    chmodSync(hk, 0o755)
+    const lock = join(repo.git(h, 'rev-parse', '--absolute-git-dir'), 'HEAD.lock')
+    writeFileSync(lock, 'other\n')
     const r = prep(repo, a)
     assert.equal(r.status, 0, r.stderr)
     assert.equal(r.result.detached, 'in-use')
+    assert.equal(readFileSync(lock, 'utf8'), 'other\n', '他者のロックは消さない')
+    rmSync(lock)
     assert.equal(repo.head(repo.main, `refs/heads/${a.branch}`), before.tip)
     assert.equal(repo.head(a.path), before.head)
     assert.equal(repo.git(a.path, 'rev-parse', '--abbrev-ref', 'HEAD'), 'HEAD')
     assert.equal(repo.head(h), hh)
+    assert.ok(holderHeld(repo, h, a))
+  })
+
+  test(`${tag} 握り手の lock が稼働中の別セッション（祖先でない生きた pid）: clean でも解放せず in-use のまま保全する（Issue #755）`, () => {
+    const other = spawn('sleep', ['120'], { detached: true, stdio: 'ignore' })
+    try {
+      const repo = makeRecoverRepo()
+      const a = detachedWith(repo)
+      const h = holderOf(repo, a, { lock: `claude agent x (pid ${other.pid})` })
+      expectHolderKept(repo, a, h, 'in-use')
+    } finally {
+      other.kill()
+    }
   })
 
   test(`${tag} --mode free: 使い捨ての握り手を解放して freed。WIP コミットも fetch も行わず、--worktree のパスには触れない（Issue #755）`, () => {

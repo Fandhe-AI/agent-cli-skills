@@ -99,7 +99,7 @@ const RESOLVE_ROWS = [
 ]
 check(
   'rp_resolve: 対象ブランチの解決（live は HEAD を優先・dead と branch だけの残骸は記録を使う・メイン／未登録／不一致／detached／base 同名は確定しない）',
-  RESOLVE_ROWS.map((r) => ['rp_resolve', ...r.slice(0, 5)]),
+  RESOLVE_ROWS.map((r) => ['rp_resolve', ...r.slice(0, 6)]),
   (g, _r, i) => {
     const [resolved, reason, branch, source, wtm] = RESOLVE_ROWS[i][5]
     assert.deepEqual(
@@ -228,26 +228,28 @@ check(
   (g, _r, i) => assert.equal(g.rc, IN_USE_ROWS[i][2], JSON.stringify(IN_USE_ROWS[i])),
 )
 
-// rp_holder_plan の表（Issue #755）。[自身か, HEAD が先端か, 汚れの行数, 途中状態か, lock の理由, 期待語]。lock の pid の生死は問わない（形だけを見る）
+// rp_holder_plan の表（Issue #755）。[自身か, HEAD が先端か, 汚れの行数, 途中状態か, lock の理由, 所有か, 期待語]
 const HOLDER_ROWS = [
-  [0, 1, 0, 0, 'claude agent agent-a1 (pid 999999)', 'free'],
-  [0, 1, 0, 0, 'claude agent agent-a1 (pid 1)', 'free'],
-  [0, 1, 0, 0, 'claude session s1 (pid 4242)', 'free'],
-  [0, 1, 0, 0, 'claude agent agent-a1 (pid 4242 start 12345)', 'free'],
-  [1, 1, 0, 0, 'claude agent agent-a1 (pid 999999)', 'self'],
-  [0, 1, 0, 0, '', 'not-agent'],
-  [0, 1, 0, 0, 'manual lock by user', 'not-agent'],
-  [0, 1, 0, 0, 'claude agent agent-a1', 'not-agent'],
-  [0, 1, 0, 0, 'claude agent agent-a1 (pid abc)', 'not-agent'],
-  [0, 1, -1, 0, 'claude agent agent-a1 (pid 1)', 'unobservable'],
-  [0, 1, 2, 0, 'claude agent agent-a1 (pid 1)', 'dirty'],
-  [0, 1, 0, 1, 'claude agent agent-a1 (pid 1)', 'in-progress'],
-  [0, 0, 0, 0, 'claude agent agent-a1 (pid 1)', 'moved'],
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid 999999)', 1, 'free'],
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid 1)', 1, 'free'],
+  [0, 1, 0, 0, 'claude session s1 (pid 4242)', 1, 'free'],
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid 4242 start 12345)', 1, 'free'],
+  [1, 1, 0, 0, 'claude agent agent-a1 (pid 999999)', 1, 'self'],
+  [0, 1, 0, 0, '', 1, 'not-agent'],
+  [0, 1, 0, 0, 'manual lock by user', 1, 'not-agent'],
+  [0, 1, 0, 0, 'claude agent agent-a1', 1, 'not-agent'],
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid abc)', 1, 'not-agent'],
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid 4242)', 0, 'foreign'],
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid 4242)', '', 'foreign'],
+  [0, 1, -1, 0, 'claude agent agent-a1 (pid 1)', 1, 'unobservable'],
+  [0, 1, 2, 0, 'claude agent agent-a1 (pid 1)', 1, 'dirty'],
+  [0, 1, 0, 1, 'claude agent agent-a1 (pid 1)', 1, 'in-progress'],
+  [0, 0, 0, 0, 'claude agent agent-a1 (pid 1)', 1, 'moved'],
 ]
 check(
-  'rp_holder_plan: 解放してよいのは Claude の lock・clean・HEAD が先端・途中状態なしのときだけ。pid の生死は問わず、それ以外は理由の語（Issue #755）',
-  HOLDER_ROWS.map((r) => ['rp_holder_plan', ...r.slice(0, 5)]),
-  (g, _r, i) => assert.equal(g.out, HOLDER_ROWS[i][5], JSON.stringify(HOLDER_ROWS[i])),
+  'rp_holder_plan: 解放してよいのは Claude の lock・clean・HEAD が先端・途中状態なしのときだけ。所有（pid が終了済み、またはこのランのセッション）を確認できたものだけで、それ以外は理由の語（Issue #755）',
+  HOLDER_ROWS.map((r) => ['rp_holder_plan', ...r.slice(0, 6)]),
+  (g, _r, i) => assert.equal(g.out, HOLDER_ROWS[i][6], JSON.stringify(HOLDER_ROWS[i])),
 )
 
 const HLIST = [
