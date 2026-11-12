@@ -61,6 +61,10 @@ const GIT_UPDATE_REF_CAS_ALLOWED = /^\s*git update-ref "refs\/heads\/\$\{adopt_b
 // HEAD の付け直しは symbolic-ref ではなく、HEAD の旧値（oid）を指定した symref-update と付け直し先ブランチ先端の verify を update-ref --stdin の 1 トランザクションで行う（確認と書き換えの間に
 // 積まれたコミットやブランチ先端の移動を上書きしない）。許可形は recover-prep.sh の 1 行だけ。symbolic-ref の書き込みは一切許可しない（読み取り -q [--short] HEAD 2>/dev/null は許す）
 const GIT_SYMREF_UPDATE_ALLOWED = /^\s*printf 'start\\nverify refs\/heads\/%s %s\\nsymref-update HEAD refs\/heads\/%s oid %s\\nprepare\\ncommit\\n' "\$\{adopt_branch\}" "\$\{adopt_head\}" "\$\{adopt_branch\}" "\$\{adopt_head\}" \| git -C "\$\{path\}" update-ref --no-deref --stdin >\/dev\/null 2>&1 \|\| arc=\$\?\s*$/
+// 3 つ目の許可形（Issue #755）: ブランチを握ったままの使い捨て worktree を、先端のコミットへ detached にして解放する。HEAD の symref を外して旧値（先端）の oid に
+// 張り替えるだけで、コミットも作業ツリーも動かない。対象は `git -C "${holder}"`（free_holders が clean・Claude の lock・HEAD = 先端・途中状態なしを確かめた握り手）、
+// 新値と旧値は同じ ${holder_tip}。refs/heads/ を書く形・旧値なし・別の変数・-d・--stdin は許可形ではない。許可形が recover-prep.sh にしか無いことは専用テストで固定する
+const GIT_UPDATE_REF_DETACH_ALLOWED = /^\s*git -C "\$\{holder\}" update-ref --no-deref HEAD "\$\{holder_tip\}" "\$\{holder_tip\}" >\/dev\/null 2>&1 \|\| hrc=\$\?\s*$/
 const GIT_SYMREF_CALL = GIT_SUB('symbolic-ref')
 const GIT_SYMREF_READ = /\bsymbolic-ref -q( --short)? HEAD 2>\/dev\/null\)/
 const REF_NAME = /\b(base_ref|branch_ref)\b/
@@ -134,7 +138,7 @@ const PATTERNS = [
   },
   {
     label: 'git update-ref は許可形（git update-ref -d "${base_ref}" / "${branch_ref}"、recover-prep.sh の旧値つき 1 形）以外を拒否',
-    test: (line) => GIT_UPDATE_REF_CALL.test(line) && !GIT_UPDATE_REF_ALLOWED.test(line) && !GIT_UPDATE_REF_CAS_ALLOWED.test(line) && !GIT_SYMREF_UPDATE_ALLOWED.test(line),
+    test: (line) => GIT_UPDATE_REF_CALL.test(line) && !GIT_UPDATE_REF_ALLOWED.test(line) && !GIT_UPDATE_REF_CAS_ALLOWED.test(line) && !GIT_SYMREF_UPDATE_ALLOWED.test(line) && !GIT_UPDATE_REF_DETACH_ALLOWED.test(line),
   },
   {
     label: 'git symbolic-ref の書き込みは一切拒否（HEAD の付け直しは update-ref の symref-update 1 形）',
@@ -280,6 +284,12 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
       'git update-ref "refs/heads/${adopt_branch}" "${adopt_head}" "${adopt_tip}" >/dev/null 2>&1 || arc=$?; git update-ref -d x',
       'git update-ref -d "refs/heads/main"', 'git update-ref -d refs/heads/${branch}', 'git update-ref -d "refs/remotes/origin/${base}"', 'git update-ref "refs/heads/main" HEAD',
       'git update-ref -d "${other_ref}"', 'git update-ref -d "${base_ref}"', 'git update-ref -d "${base_ref}" "${old}" >/dev/null 2>&1 || true', 'git update-ref --delete "${base_ref}" >/dev/null 2>&1 || true',
+      // 解放（detach）の許可形の崩し方（Issue #755）: 旧値なし・新旧が別の変数・-d・refs/heads/ を書く形・対象の変数違い・git -C なし・|| true・連結
+      'git -C "${holder}" update-ref --no-deref HEAD "${holder_tip}"', 'git -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${other}" >/dev/null 2>&1 || hrc=$?',
+      'git -C "${holder}" update-ref --no-deref HEAD "${adopt_head}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?', 'git -C "${holder}" update-ref -d HEAD "${holder_tip}" >/dev/null 2>&1 || hrc=$?',
+      'git -C "${holder}" update-ref --no-deref "refs/heads/main" "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?', 'git -C "${path}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?',
+      'git update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?', 'git -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || true',
+      'git -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?; git update-ref -d x', 'git -C "${holder}" update-ref --stdin', '"git" -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?',
       '"git" update-ref -d "refs/heads/x"', 'git "update-ref" -d "refs/heads/x"', 'git -C x update-ref -d "refs/heads/x"', "git update-ref -d 'refs/heads/x'",
     ],
     'git add / git commit は許可形（recover-prep.sh の WIP コミットの 1 行）以外を拒否': [
@@ -372,6 +382,8 @@ test('自己検査: 正当な行（読み取りの gh api・graphql の query・
     'git update-ref -d "${branch_ref}" >/dev/null 2>&1 || true',
     'git update-ref "refs/heads/${adopt_branch}" "${adopt_head}" "${adopt_tip}" >/dev/null 2>&1 || arc=$?',
     'printf \'start\\nverify refs/heads/%s %s\\nsymref-update HEAD refs/heads/%s oid %s\\nprepare\\ncommit\\n\' "${adopt_branch}" "${adopt_head}" "${adopt_branch}" "${adopt_head}" | git -C "${path}" update-ref --no-deref --stdin >/dev/null 2>&1 || arc=$?',
+    'git -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?',
+    'hsym=$(git -C "${holder}" symbolic-ref -q HEAD 2>/dev/null) || hsym=""',
     'head_branch=$(git -C "${path}" symbolic-ref -q --short HEAD 2>/dev/null) || head_branch=""',
     'wt_full=$(git -C "${path}" symbolic-ref -q HEAD 2>/dev/null) || wt_full=""',
     'git rev-parse --verify -q "${base_ref}^{commit}"',
@@ -529,23 +541,28 @@ test('recover-prep.sh はブランチの削除・reset・checkout・clean・stas
 })
 
 test('recover-prep.sh の update-ref と symbolic-ref の書き込みは旧値つき 1 行と付け直し 1 行だけで、ほかのスクリプトに旧値つきの許可形・書き込みの symbolic-ref が無い（Issue #731）', () => {
-  const found = { cas: [], symWrite: [], symrefUpdate: [] }
+  const found = { cas: [], symWrite: [], symrefUpdate: [], detach: [] }
   for (const { name, path } of targets()) {
     for (const { n, l } of codeLines(readFileSync(path, 'utf8'))) {
       if (GIT_UPDATE_REF_CAS_ALLOWED.test(l)) found.cas.push({ name, n })
       if (GIT_SYMREF_UPDATE_ALLOWED.test(l)) found.symrefUpdate.push({ name, n })
+      if (GIT_UPDATE_REF_DETACH_ALLOWED.test(l)) found.detach.push({ name, n })
       if (GIT_SYMREF_CALL.test(l) && !GIT_SYMREF_READ.test(l)) found.symWrite.push({ name, n, l: l.trim() })
     }
   }
   assert.deepEqual(found.cas.map((f) => f.name), ['recover-prep.sh'], JSON.stringify(found.cas))
+  assert.deepEqual(found.detach.map((f) => f.name), ['recover-prep.sh'], JSON.stringify(found.detach))
   assert.deepEqual(found.symWrite, [], JSON.stringify(found.symWrite))
   assert.deepEqual(found.symrefUpdate.map((f) => f.name), ['recover-prep.sh'], JSON.stringify(found.symrefUpdate))
   // recover-prep.sh の update-ref は旧値つきの 1 行だけ（-d を含まない）
   const code = codeLines(readFileSync(targets().find((t) => t.name === 'recover-prep.sh').path, 'utf8'))
   const refCalls = code.filter((x) => GIT_UPDATE_REF_CALL.test(x.l))
-  assert.equal(refCalls.length, 2)
-  assert.ok(GIT_UPDATE_REF_CAS_ALLOWED.test(refCalls[0].l), refCalls[0].l)
-  assert.ok(GIT_SYMREF_UPDATE_ALLOWED.test(refCalls[1].l), refCalls[1].l)
+  assert.equal(refCalls.length, 3)
+  // 1 つ目は握り手の解放（Issue #755。free_holders が先に定義される）。HEAD を旧値つきで detached にする 1 形で、refs/heads/ を書かない
+  assert.ok(GIT_UPDATE_REF_DETACH_ALLOWED.test(refCalls[0].l), refCalls[0].l)
+  assert.doesNotMatch(refCalls[0].l, /refs\/heads/)
+  assert.ok(GIT_UPDATE_REF_CAS_ALLOWED.test(refCalls[1].l), refCalls[1].l)
+  assert.ok(GIT_SYMREF_UPDATE_ALLOWED.test(refCalls[2].l), refCalls[2].l)
   // 付け直しの対象は adopt_* の変数で、base_ref / branch_ref の束縛とは別名
   for (const c of refCalls) assert.doesNotMatch(c.l, /base_ref|branch_ref/)
 })
@@ -560,7 +577,7 @@ test('git update-ref の -d の許可形は base-merge.sh と pr-push.sh だけ�
     }
   }
   assert.deepEqual([...new Set(calls.map((c) => c.name))].sort(), ['base-merge.sh', 'pr-push.sh', 'recover-prep.sh'], JSON.stringify(calls))
-  for (const c of calls) assert.ok(c.name === 'recover-prep.sh' ? GIT_UPDATE_REF_CAS_ALLOWED.test(c.l) || GIT_SYMREF_UPDATE_ALLOWED.test(c.l) : GIT_UPDATE_REF_ALLOWED.test(c.l), c.l)
+  for (const c of calls) assert.ok(c.name === 'recover-prep.sh' ? GIT_UPDATE_REF_CAS_ALLOWED.test(c.l) || GIT_SYMREF_UPDATE_ALLOWED.test(c.l) || GIT_UPDATE_REF_DETACH_ALLOWED.test(c.l) : GIT_UPDATE_REF_ALLOWED.test(c.l), c.l)
   assert.ok(assigns.length >= 4, `代入が見つかる: ${JSON.stringify(assigns)}`)
   for (const a of assigns) assert.ok(!refBindingRejected(a.l) && REF_ASSIGN_ALLOWED.test(a.l), `${a.name}:${a.n} ${a.l}`)
 })

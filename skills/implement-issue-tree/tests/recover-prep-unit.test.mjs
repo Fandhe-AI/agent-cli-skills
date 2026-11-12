@@ -33,6 +33,7 @@ while IFS="$US" read -r fn a b c d e f; do
     rp_resolve) rp_resolve "$a" "$b" "$c" "$d" "$e" ;;
     rp_scan_status) rp_scan_status "$(nl "$a")" ;;
     rp_branch_in_use) rp_branch_in_use "$(nl "$a")" "$b" || rc=$? ;;
+    rp_holder_entries) out=$(rp_holder_entries "$(nl "$a")" "$b" | tr '\t\n' '|;') || rc=$? ;;
     *) out=$("$fn" "$a" "$b" "$c" "$d" "$e" "$f" 2>&1) || rc=$? ;;
   esac
   printf '%s %s [%s] [%s,%s,%s,%s,%s,%s,%s]\\n' "$i" "$rc" "$out" "$RP_RESOLVED" "$RP_REASON" "$RP_BRANCH" "$RP_SOURCE" "$RP_WT_MISSING" "$RP_NESTED" "$RP_UNMERGED"
@@ -225,4 +226,46 @@ check(
   'rp_branch_in_use: branch 行の完全一致だけ使用中（前方一致・detached・空のリストは使用中ではない）',
   IN_USE_ROWS.map((r) => ['rp_branch_in_use', r[0], r[1]]),
   (g, _r, i) => assert.equal(g.rc, IN_USE_ROWS[i][2], JSON.stringify(IN_USE_ROWS[i])),
+)
+
+// rp_holder_plan の表（Issue #755）。[自身か, HEAD が先端か, 汚れの行数, 途中状態か, lock の理由, 期待語]。lock の pid の生死は問わない（形だけを見る）
+const HOLDER_ROWS = [
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid 999999)', 'free'],
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid 1)', 'free'],
+  [0, 1, 0, 0, 'claude session s1 (pid 4242)', 'free'],
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid 4242 start 12345)', 'free'],
+  [1, 1, 0, 0, 'claude agent agent-a1 (pid 999999)', 'self'],
+  [0, 1, 0, 0, '', 'not-agent'],
+  [0, 1, 0, 0, 'manual lock by user', 'not-agent'],
+  [0, 1, 0, 0, 'claude agent agent-a1', 'not-agent'],
+  [0, 1, 0, 0, 'claude agent agent-a1 (pid abc)', 'not-agent'],
+  [0, 1, -1, 0, 'claude agent agent-a1 (pid 1)', 'unobservable'],
+  [0, 1, 2, 0, 'claude agent agent-a1 (pid 1)', 'dirty'],
+  [0, 1, 0, 1, 'claude agent agent-a1 (pid 1)', 'in-progress'],
+  [0, 0, 0, 0, 'claude agent agent-a1 (pid 1)', 'moved'],
+]
+check(
+  'rp_holder_plan: 解放してよいのは Claude の lock・clean・HEAD が先端・途中状態なしのときだけ。pid の生死は問わず、それ以外は理由の語（Issue #755）',
+  HOLDER_ROWS.map((r) => ['rp_holder_plan', ...r.slice(0, 5)]),
+  (g, _r, i) => assert.equal(g.out, HOLDER_ROWS[i][5], JSON.stringify(HOLDER_ROWS[i])),
+)
+
+const HLIST = [
+  'worktree /r/main', 'HEAD aaa', 'branch refs/heads/feat/1-x', '',
+  'worktree /r/my wt', 'HEAD bbb', 'branch refs/heads/feat/1-x', 'locked claude agent a (pid 7)', '',
+  'worktree /r/ab', 'HEAD ccc', 'branch refs/heads/feat/1-xy', '',
+  'worktree /r/plain', 'HEAD ddd', 'branch refs/heads/feat/1-x', '',
+  'worktree /r/det', 'HEAD eee', 'detached',
+].join(NL)
+const HOLDER_ENTRY_ROWS = [
+  [HLIST, 'feat/1-x', '/r/my wt|bbb|1|claude agent a (pid 7);/r/plain|ddd|0|;'],
+  [HLIST, 'feat/1-xy', '/r/ab|ccc|0|;'],
+  [HLIST, 'feat/1', ''],
+  [HLIST, 'main', ''],
+  ['', 'feat/1-x', ''],
+]
+check(
+  'rp_holder_entries: メイン worktree を除き、ブランチ行の完全一致の登録だけをパス・sha・lock の有無・理由で返す（パスの空白は保つ。Issue #755）',
+  HOLDER_ENTRY_ROWS.map((r) => ['rp_holder_entries', r[0], r[1]]),
+  (g, _r, i) => assert.equal(g.out, HOLDER_ENTRY_ROWS[i][2], JSON.stringify(HOLDER_ENTRY_ROWS[i])),
 )
