@@ -623,6 +623,41 @@ export function registerRecoverPrepTests(bash) {
     assert.equal(repo.git(repo.main, 'rev-parse', '--abbrev-ref', 'HEAD'), a.branch)
   })
 
+  test(`${tag} 握り手の登録のパスが worktree 自身でない（.git が無い・別 clone が置かれた）: 何も書かず in-use のまま保全する（Issue #755）`, () => {
+    {
+      const repo = makeRecoverRepo()
+      const a = detachedWith(repo)
+      const h = holderOf(repo, a)
+      rmSync(join(h, '.git'))
+      const before = snap(repo, a)
+      expectKept(repo, a, prep(repo, a), 'in-use', before)
+      assert.equal(repo.git(repo.main, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main')
+    }
+    {
+      const repo = makeRecoverRepo()
+      const a = detachedWith(repo)
+      const h = holderOf(repo, a)
+      rmSync(h, { recursive: true, force: true })
+      repo.git(repo.main, 'clone', '-q', repo.main, h)
+      const cloneHead = repo.head(h)
+      const before = snap(repo, a)
+      expectKept(repo, a, prep(repo, a), 'in-use', before)
+      assert.equal(repo.head(h), cloneHead, '別 clone の HEAD は動かない')
+      assert.equal(repo.git(h, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main')
+    }
+  })
+
+  test(`${tag} 握り手が別 worktree へ移された（gitdir の逆参照がパスと食い違う）: 保全する（Issue #755）`, () => {
+    const repo = makeRecoverRepo()
+    const a = detachedWith(repo)
+    const h = holderOf(repo, a)
+    const gd = repo.git(h, 'rev-parse', '--absolute-git-dir')
+    writeFileSync(join(gd, 'gitdir'), `${join(repo.root, 'wts', 'elsewhere', '.git')}\n`)
+    const before = snap(repo, a)
+    expectKept(repo, a, prep(repo, a), 'in-use', before)
+    assert.ok(holderHeld(repo, h, a))
+  })
+
   test(`${tag} 握り手が 2 つで 1 つだけ資格が無い: どちらにも触れず in-use のまま保全する（Issue #755）`, () => {
     const repo = makeRecoverRepo()
     const a = detachedWith(repo)

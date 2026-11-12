@@ -157,8 +157,28 @@ in_progress() { # $1 = worktree のパス
 # 途中状態なし）だけなら、各握り手を先端のコミットへ detached にする（旧値つきの update-ref --no-deref HEAD 1 形。コミットも作業ツリーも動かない）。$3 は握り手から除外する
 # 回復対象自身のパス（空でよい）。1 件でも資格が無い握り手があれば何も書かず in-use にする。結果は FH_WORD（none / freed / in-use / failed）、解放できた（または握り手が無い）とき 0
 FH_WORD=none
+# 登録のパス $1 が、このリポジトリに登録された worktree 自身であるかを確かめる（Issue #755）。.git が実在し、toplevel がパス自身、共通 git ディレクトリがこのリポジトリのもの、
+# git ディレクトリが <共通>/worktrees/ 配下（メインでない）、その gitdir ファイルがパスの .git を指す、をすべて満たすときだけ 0。.git が無く親リポジトリへ探索が抜ける
+# 別の clone・メイン worktree などは非 0（保全側）
+holder_is_registered_worktree() {
+  local p=$1 top gd cd_h cd_s gdir_file back
+  [ -e "${p}/.git" ] || return 1
+  top=$(git -C "${p}" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$(wr_real "${top}")" = "$(wr_real "${p}")" ] || return 1
+  gd=$(git -C "${p}" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  cd_h=$(git -C "${p}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  cd_s=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$(wr_real "${cd_h}")" = "$(wr_real "${cd_s}")" ] || return 1
+  [ "$(wr_real "$(dirname "${gd}")")" = "$(wr_real "${cd_s}")/worktrees" ] || return 1
+  gdir_file="${gd}/gitdir"
+  [ -f "${gdir_file}" ] || return 1
+  IFS= read -r back <"${gdir_file}" || [ -n "${back}" ] || return 1
+  [ "$(wr_real "$(dirname "${back}")")" = "$(wr_real "${p}")" ] || return 1
+  return 0
+}
+
 free_holders() {
-  local list ents hp hs hl hr hself hdirty hip htip plan frees="" hsym hrc holder holder_tip
+  local list ents hp hs hl hr hself hdirty hip htip plan frees="" hsym hrc holder holder_tip hold_sym
   FH_WORD=none
   list=$(git worktree list --porcelain 2>/dev/null) || { FH_WORD=failed; return 1; }
   ents=$(rp_holder_entries "${list}" "$1")
@@ -169,6 +189,19 @@ free_holders() {
     if [ -n "$3" ] && [ "$(wr_real "${hp}")" = "$(wr_real "$3")" ]; then hself=1; fi
     # 回復対象自身は握り手に数えない（呼び出し側が別に扱う）
     [ "${hself}" = 1 ] && continue
+    # 登録のパスが worktree 自身を指すこと（別 clone が置かれた・.git が無い・メインを指す場合は書かずに保全する）
+    if ! holder_is_registered_worktree "${hp}"; then
+      echo "recover-prep: ブランチ ${1} を使用中の登録のパスが worktree 自身と確認できない。保全する" >&2
+      FH_WORD=in-use
+      return 1
+    fi
+    # HEAD の symref が対象ブランチ自身であること（oid の一致だけでは別ブランチへ切り替わった握り手を見分けられない）
+    hold_sym=$(git -C "${hp}" symbolic-ref -q HEAD 2>/dev/null) || hold_sym=""
+    if [ "${hold_sym}" != "refs/heads/$1" ]; then
+      echo "recover-prep: 使用中の worktree の HEAD がブランチ ${1} を指していない。保全する" >&2
+      FH_WORD=in-use
+      return 1
+    fi
     observe "${hp}"
     if [ "${OBS_RC}" -ne 0 ]; then
       hdirty=-1
@@ -192,6 +225,13 @@ free_holders() {
   while IFS= read -r holder; do
     [ -n "${holder}" ] || continue
     hrc=0
+    # 書き込み直前にもう一度、パスの同一性と HEAD の symref を確かめる（一覧取得後に切り替わった握り手へは書かない）
+    hold_sym=$(git -C "${holder}" symbolic-ref -q HEAD 2>/dev/null) || hold_sym=""
+    if ! holder_is_registered_worktree "${holder}" || [ "${hold_sym}" != "refs/heads/$1" ]; then
+      echo "recover-prep: 使用中ブランチの worktree が解放の直前に変わった。保全する" >&2
+      FH_WORD=failed
+      return 1
+    fi
     git -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?
     hsym=$(git -C "${holder}" symbolic-ref -q HEAD 2>/dev/null) || hsym=""
     if [ "${hrc}" != 0 ] || [ -n "${hsym}" ] || [ "$(git -C "${holder}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" != "${holder_tip}" ]; then
