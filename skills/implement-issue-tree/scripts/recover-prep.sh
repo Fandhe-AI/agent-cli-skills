@@ -210,8 +210,10 @@ holder_owned() {
 # 1 トランザクションに入れられない（multiple updates for ref）ため、git 自身の更新と同じ HEAD.lock の排他作成を取り、ロック中に symref と先端を確かめて rename で確定する
 # （確認と書き込みの間の切り替えは、ロックを取る git の更新が失敗するので起きない）。files ref バックエンド以外・ロックが取れない・確認が崩れたときは書かず非 0
 detach_holder_locked() {
-  local hd=$1 hgd hlock cur
-  [ "$(git -C "${hd}" rev-parse --show-ref-format 2>/dev/null)" = files ] || return 1
+  local hd=$1 hgd hlock cur fmt
+  # --show-ref-format は Git 2.45 以降のみ。それより前は出力が空（またはオプションをそのまま返す）で、files バックエンドしか無いので files とみなして続ける。files 以外が明示されたときだけ書かない
+  fmt=$(git -C "${hd}" rev-parse --show-ref-format 2>/dev/null) || fmt=""
+  case "${fmt}" in files | "" | --show-ref-format) ;; *) return 1 ;; esac
   hgd=$(git -C "${hd}" rev-parse --absolute-git-dir 2>/dev/null) || return 1
   hlock="${hgd}/HEAD.lock"
   ( set -C; printf '%s\n' "$3" >"${hlock}" ) 2>/dev/null || return 1

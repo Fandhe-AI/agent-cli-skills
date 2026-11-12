@@ -728,6 +728,27 @@ export function registerRecoverPrepTests(bash) {
     assert.equal(repo.git(a.path, 'status', '--porcelain'), '?? u.txt', 'WIP コミットは作らない')
   })
 
+  // git の rev-parse --show-ref-format だけを差し替える PATH 先頭の git ラッパー（out は標準出力・rc は終了コード）
+  const shimGit = (repo, out, rc) => {
+    const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()
+    const dir = mkdtempSync(join(repo.root, 'shim-'))
+    writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase " $* " in *" rev-parse --show-ref-format "*) printf '%s' '${out}'; exit ${rc};; esac\nexec '${real}' "$@"\n`)
+    chmodSync(join(dir, 'git'), 0o755)
+    return { PATH: `${dir}:${process.env.PATH}` }
+  }
+
+  for (const [label, out, rc, word] of [['Git 2.45 未満（オプションをそのまま返す）', '--show-ref-format', 0, 'freed'], ['Git 2.45 未満（出力が空で非 0）', '', 1, 'freed'], ['reftable が明示された', 'reftable', 0, 'failed']]) {
+    test(`${tag} --mode free: ${label}ときの握り手の解放は ${word}（Issue #755）`, () => {
+      const repo = makeRecoverRepo()
+      const a = detachedWith(repo)
+      const h = holderOf(repo, a)
+      const r = run(repo, ['--mode', 'free', '--branch', a.branch, '--base', 'main', '--worktree', a.path], { env: shimGit(repo, out, rc) })
+      assert.equal(r.status, 0, r.stderr)
+      assert.equal(r.result.detached, word)
+      assert.equal(repo.git(h, 'rev-parse', '--abbrev-ref', 'HEAD') === 'HEAD', word === 'freed')
+    })
+  }
+
   test(`${tag} --mode free: 握り手なしは none、資格の無い握り手は in-use、ブランチが無ければ no-ref、base と同名は base-branch、--worktree 自身は握り手に数えない（Issue #755）`, () => {
     const repo = makeRecoverRepo()
     const a = repo.addWorktree('a')
