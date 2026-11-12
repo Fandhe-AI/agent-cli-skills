@@ -3018,7 +3018,10 @@ function applyPrereqTransitions(probe, targets, done, failedSet, prHints, branch
 // 3 コマンドに限定し、Issue/PR の本文・タイトル・コメントは一切取得させない（非信頼自由文を
 // ホストの遷移判定へ持ち込まない設計。mergeVerifyPrompt と同型の権限境界）。
 // 実装プロンプトと修正プロンプトで共通の定型句（文言は変えない。生成物の予算のため定数化）
-const NO_PUSH_STEP = '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。'
+// 最後の detach: 後続の Review fix は隔離された別 worktree で動き、自分の worktree の外へ git -C・cd で触れられない。実装 worktree がブランチを
+// checkout したままだと、fix は先端を進められず commitFailed で終わる（使用中のブランチだけを update-ref で動かすと、その worktree の index と食い違う）。
+// detach 済みの worktree は、中断後の再実行で recover-prep.sh がブランチへ付け直す（Issue #731 と同じ経路）。
+const NO_PUSH_STEP = '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチの先端を更新できない）。'
 const NO_PR_NUMBER_NOTE = '（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）'
 const WT_RM_NOTE = '不要な worktree を git worktree remove で手動削除してから再実行すること'
 const DISK_HALT_NOTE = 'ディスク枯渇防止のため以降の' + HALT_NEW + '。'
@@ -6742,7 +6745,8 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
             : []),
         ]
       : []
-  // push しない Review fix では detach で取得し、修正コミット後に旧値確認つきで先端更新する（使用中 worktree は ff-only で一緒に進める）。
+  // push しない Review fix では detach で取得し、修正コミット後に旧値確認つきで先端更新する。ブランチを checkout 中の worktree があれば中止する
+  // （隔離されたエージェントは自分の worktree の外へ git -C・cd で触れられず、使用中 worktree を一緒に進める手段が無い。実装側が NO_PUSH_STEP で detach 済みなら未使用になる）。
   const checkoutInstructions = pushAfterFix
     ? [
         // 修正作業（手順 2〜3）の前に base 取り込みを済ませておく。作業後に base コンフリクトを検出すると、そのコミットは
@@ -6767,7 +6771,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
         commitlintCheckInstruction,
         `   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に git rev-parse HEAD の値を <old> として字面で控え（シェル変数不可）、更新直前に git rev-parse refs/heads/${branch} が <old> と違えば中止。git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
-        `   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が <old> のときだけ git -C <path> merge --ff-only --no-overwrite-ignore <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> <old>。`,
+        `   あれば中止（その worktree を含め、カレントの worktree の外には一切触れない。使用中のブランチだけを動かすと、その worktree の index・作業ツリーと食い違う）。無ければ git update-ref refs/heads/${branch} <HEAD の sha> <old>。`,
         `   中止・条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
         `   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
       ]

@@ -278,7 +278,7 @@ detached の worktree に fix のコミットだけが残った場合（ブラ�
    （`scope-enum` を設定したリポでは必ず落ち、Review 3 巡を消費した後の push で初めて検出される）。
    イシューとの紐付けは footer の `Refs #<N>` と PR 本文の `Closes #<N>` で行う。
    push 前 base 最新化ゲート（Step 5・Merge ループの fix）で作る base 取り込みマージコミットの subject も同じ手順で type / scope を決める（固定の `chore:` は `type-enum` / `scope-enum` を持つリポの commit-msg hook に拒否される。拒否されたら `git merge --abort` して push せず fail-closed）
-7. **push・PR 作成はここでは行わない**。ローカルブランチにコミットを積んだ状態で終了し、後続の Review フェーズへ渡す
+7. **push・PR 作成はここでは行わない**。ローカルブランチにコミットを積んだら `git checkout --detach` でブランチを worktree から外して終了し、後続の Review フェーズへ渡す（Review の fix は隔離された別 worktree からブランチ先端を更新する。自分の worktree の外へは触れられないため、ブランチを checkout 中の worktree が残っていると先端を進められず `commitFailed` で終わる）
 
 ```bash
 # 作業ブランチ作成例（並列時の衝突回避のためイシュー番号を含める）
