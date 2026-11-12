@@ -4580,16 +4580,16 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'a204c0c3d3eb987eee99041dd225e608432e09f3d49da65ccc4b98adf6120052',
-'measure-free-disk.sh':'f74ddcd0909b78d2dd2ae8a52e8acc98a78555b9967c4886cea97634f76ff2c4',
-'observe-pr.sh':'e08a8a6701d778f8b497102b0ab5906edb72dcaeada0039c3c033726394ef636',
-'base-merge.sh':'9f09051df3bc5966a3b6fb19970653e5c5985f3848b7aed4cc38083ec07b1275',
-'pr-push.sh':'c431441d4010ce56a8e19d1b5c7c62fb818d57940e9571989c1c0544872bde9a',
-'state.sh':'6545d61167288289c103ffe78268d30be9332c6663c85d091e00d5d0569e8145',
-'merge-gate.sh':'ed2effacadc1a34380464fba0f91d70e489e0da87b3fd46513f0bec465cc5a3d',
-'worktree-remove.sh':'aaac3f408af096c209609fe884332035273316dfad4e215f2a238ddf2027e467',
-'recover-prep.sh':'ab0ee00f5c1acad69b12e1c3d0ab5878bb6021c01d4dfaced9533e243d846adb',
-'fetch-tree.sh':'49e2b05228e70eae821568fb61d4398490ed1c1de0b7de596438dc0507543870',
+'measure-residual-bytes.sh':'c66a6884102581dae0afb278f07bb175b34cd6096ee556e825440dedbe0c75a8',
+'measure-free-disk.sh':'b81fa61d670b8d10b48d0693fd4a6494152944e45954c439fa37f93167cab49f',
+'observe-pr.sh':'97e57b762c79e69dcdc7bcd7a6de2101bd8c05acb84c664b575a426d533caad0',
+'base-merge.sh':'45c60caf526e380c378fc3c70c64010718d73acfc67a86240509aaa7991615ef',
+'pr-push.sh':'edfd269332ac69078ce27a3905e0b4439526dd4e73c8cfff821b8ac7f9004b78',
+'state.sh':'b8f16bbd0794593f5c5ee6850351e8ffaf5159a47737bd48990ee4bd06e271b0',
+'merge-gate.sh':'8ce8c18a3253188b7dbc208190cd2244d5c6fe40f22e59e5a9ed6d47c6f4d3ad',
+'worktree-remove.sh':'4d4ba8e0e94633042fc3c3a991495aef92a7457d0061050c5c246dd7d7418d90',
+'recover-prep.sh':'ca094de7d45ce509481276d762c77233148462f180101817e60452cca7b5607c',
+'fetch-tree.sh':'3c0047300a1d2616f75cdf8e46e9e802bbaa0b6a11a2e2c7fa966b64b650e564',
 }
 
 
@@ -4671,6 +4671,26 @@ worktree:strD('結果の行の worktree の語（removed・retained-dirty・reta
 },
 }
 const isWorktreeCleanupValid=(r)=>typeof r?.ok==='boolean'&&typeof r?.retained==='boolean'
+
+
+async function freeHeldBranch(item,branch){
+try{
+await agent(
+[
+`ブランチ解放タスク（#${item.number}）。`,
+COMMON,
+`${RUN_VERBATIM}（失敗しても代替・再実行しない。終了コード 0 なら ok: true、他は false）:`,
+'```sh',
+scriptInvocation('recover-prep.sh',undefined,` --mode free --base ${worktreeQuote(baseBranch)} --branch ${worktreeQuote(branch)}`),
+'```',
+].join('\n'),
+{label:`free:#${item.number}`,phase:'Implement',model:'haiku',effort:'low',schema:{type:'object',required:['ok'],properties:{ok:{type:'boolean'}}}},
+)
+}catch(e){
+log(`⚠️ #${item.number}: ブランチ解放の実行で例外（${errText(e)}）。続行する`)
+}
+}
+
 
 
 
@@ -8876,6 +8896,7 @@ return false
 }
 
 const oldWorktreePathReview=currentWorktreePath
+if(fixCount===0)await freeHeldBranch(item,impl.branch)
 const fReview=await agent(fixPrompt(item,impl,{summary:lastReviewSummary},false),{
 label:`fix:#${item.number}`,
 phase:'Implement',

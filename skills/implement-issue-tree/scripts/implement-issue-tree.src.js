@@ -4671,6 +4671,26 @@ const WORKTREE_CLEANUP_SCHEMA = {
   },
 }
 const isWorktreeCleanupValid = (r) => typeof r?.ok === 'boolean' && typeof r?.retained === 'boolean'
+// 最初の Review fix の前に、作業ブランチを握ったままの使い捨て worktree を先端のコミットへ detached にして解放する（Issue #755）。fix は隔離された worktree の外へ触れず、
+// ブランチを握る worktree があると先端を更新できず commitFailed になるため、非隔離のここで 1 回だけ行う。結果は助言的で何の判断にも使わない（失敗しても fix は走る）
+async function freeHeldBranch(item, branch) {
+  try {
+    await agent(
+      [
+        `ブランチ解放タスク（#${item.number}）。`,
+        COMMON,
+        `${RUN_VERBATIM}（失敗しても代替・再実行しない。終了コード 0 なら ok: true、他は false）:`,
+        '```sh',
+        scriptInvocation('recover-prep.sh', undefined, ` --mode free --base ${worktreeQuote(baseBranch)} --branch ${worktreeQuote(branch)}`),
+        '```',
+      ].join('\n'),
+      { label: `free:#${item.number}`, phase: 'Implement', model: 'haiku', effort: 'low', schema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } } },
+    )
+  } catch (e) {
+    log(`⚠️ #${item.number}: ブランチ解放の実行で例外（${errText(e)}）。続行する`)
+  }
+}
+
 // 不在専用の確認（worktree-remove.sh check-absent。Issue #637）。読み取り専用で、削除・prune・unlock をしない。ラン開始時に特定したメイン worktree があれば --repo-root で渡し、
 // スクリプトがカレントのリポジトリと照合する（違えば unknown = 不在と見なさない）。ホストが信じるのは結果の行の worktree の語のうち
 // absent（登録も実体も無い）と prunable（登録だけ残り、lock なし・ブランチ上）だけ。それ以外・結果なし・例外は不在と見なさない（呼び出し側が保全する）。
@@ -8876,6 +8896,7 @@ async function runImplement(item) {
       }
       // Review ループの fix は push しない（収束失敗時に CI を起動させないため）。
       const oldWorktreePathReview = currentWorktreePath
+      if (fixCount === 0) await freeHeldBranch(item, impl.branch)
       const fReview = await agent(fixPrompt(item, impl, { summary: lastReviewSummary }, false), {
         label: `fix:#${item.number}`,
         phase: 'Implement',
