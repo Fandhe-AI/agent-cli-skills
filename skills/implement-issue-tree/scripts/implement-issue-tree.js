@@ -3018,7 +3018,10 @@ return transitions
 
 
 
-const NO_PUSH_STEP='7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。'
+
+
+
+const NO_PUSH_STEP='7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチの先端を更新できない）。'
 const NO_PR_NUMBER_NOTE='（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）'
 const WT_RM_NOTE='不要な worktree を git worktree remove で手動削除してから再実行すること'
 const DISK_HALT_NOTE='ディスク枯渇防止のため以降の'+HALT_NEW+'。'
@@ -6743,6 +6746,7 @@ return`- threadId: ${tid || '(不明・対象外記録の対象外)'} / ${text}`
 ]
 :[]
 
+
 const checkoutInstructions=pushAfterFix
 ?[
 
@@ -6767,7 +6771,7 @@ commitlintCheckInstruction,
 `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
 commitlintCheckInstruction,
 `   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に git rev-parse HEAD の値を <old> として字面で控え（シェル変数不可）、更新直前に git rev-parse refs/heads/${branch} が <old> と違えば中止。git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
-`   あれば、その worktree が clean（git -C <path> status --porcelain=v2 -uall が空）かつ HEAD が <old> のときだけ git -C <path> merge --ff-only --no-overwrite-ignore <HEAD の sha>。無ければ git update-ref refs/heads/${branch} <HEAD の sha> <old>。`,
+`   あれば中止（その worktree を含め、カレントの worktree の外には一切触れない。使用中のブランチだけを動かすと、その worktree の index・作業ツリーと食い違う）。無ければ git update-ref refs/heads/${branch} <HEAD の sha> <old>。`,
 `   中止・条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
 `   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
 ]
