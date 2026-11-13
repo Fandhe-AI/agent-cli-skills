@@ -1350,7 +1350,7 @@ function routingTitleCheck(n) {
 
 // fix エージェントの議論コメント投稿禁止（Issue #564）。外部 AI レビューの P0 指摘に対し fix がコードを直さず「既存実装も同じ方式」と反論するコメントをレビュースレッドへ投稿した事例の再発防止。 gh 認証はラン起動者本人のため、投稿は利用者本人の発言として公開される。修正しない判断はコメントではなく手順 2 の返却（P0/P1 は pushed: false で blocked、それ以外は outOfScopeComments）で返す。 fixPrompt の COMMON 直後（UNTRUSTED 境界の外側）へ push / no-push 両経路で入れる。
 const FIX_NO_DISCUSSION_POLICY =
-  '議論コメント禁止: レビュースレッドへの返信・gh pr comment / gh pr review 等の議論投稿はしない（gh 認証は利用者本人）。例外は手順が明示する resolve・PR 本文更新・外部レビュー App の再実行依頼のみ。修正しない判断も反論で済ませず手順 2 に従う（P0/P1・セキュリティは pushed: false と理由、それ以外は outOfScopeComments）。'
+  '議論コメント禁止: レビュースレッドへの返信・gh pr comment / gh pr review 等の議論投稿はしない（gh 認証は利用者本人）。例外は手順が明示する reply-resolve.sh（resolve と、その前の sha・ブランチ名だけの定型の対応報告）・PR 本文更新・外部レビュー App の再実行依頼のみ。修正しない判断も反論で済ませず手順 2 に従う（P0/P1・セキュリティは pushed: false と理由、それ以外は outOfScopeComments）。'
 
 // monitor の対応案から「反論・返信で済ませる案」を排除する（Issue #564）。monitor の summary は fix へそのまま渡り実行候補になるため、修正以外の対応案が書かれると fix が反論コメント投稿に流れる。 monitorPrompt の既存「権限境界」行の直後へ入れる。"@cursor review" 等の定型投稿手順は従来どおり。
 const MONITOR_NO_REBUTTAL_POLICY =
@@ -2593,7 +2593,7 @@ const FIX_SCHEMA = obj(['pushed', 'summary', 'worktreePath'], {
         description: 'resolve に成功した review thread の GraphQL ノード id（「未解決スレッド一覧」からそのままコピーした値のみ）',
       },
       description:
-        '修正がリモート head に反映済み（今回の push 成功後、または過去ラウンド push 済みの反映確認後）に resolveReviewThread mutation で resolve したスレッドの threadId 一覧（1件1要素、最大 20 件）。resolve していなければ空配列または省略。Review ループ（push なし fix）では常に省略する。記録専用でマージ判定には使われない。',
+        '修正がリモート head に反映済み（今回の push 成功後、または過去ラウンド push 済みの反映確認後）に reply-resolve.sh が定型の返信後に resolve したスレッドの threadId 一覧（結果行の resolved。1件1要素、最大 20 件）。resolve していなければ空配列または省略。Review ループ（push なし fix）では常に省略する。記録専用でマージ判定には使われない。',
     },
     // push 直後の CI 起動確認（Issue #479）。いずれもエージェントの自己申告値でありマージ判定には使わない（ホストは mergeableAfterPush === 'CONFLICTING' を base 取り込み分岐へ直行するヒントとしてのみ使い、誤申告の最悪ケースは baseMergeCount を 1 消費するだけで有界）。旧エージェント出力との互換のため required にはしない（省略時はヒントなしとして扱われる）。
     ...PUSH_CI_PROPS,
@@ -3601,6 +3601,7 @@ const SCRIPT_SHA256 = {
   'observe-pr.sh': '@@SCRIPT_SHA256:observe-pr.sh@@',
   'base-merge.sh': '@@SCRIPT_SHA256:base-merge.sh@@',
   'pr-push.sh': '@@SCRIPT_SHA256:pr-push.sh@@',
+  'reply-resolve.sh': '@@SCRIPT_SHA256:reply-resolve.sh@@',
   'state.sh': '@@SCRIPT_SHA256:state.sh@@',
   'merge-gate.sh': '@@SCRIPT_SHA256:merge-gate.sh@@',
   'worktree-remove.sh': '@@SCRIPT_SHA256:worktree-remove.sh@@',
@@ -5398,6 +5399,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
   const permittedIds = (arr(permittedNoPushResolveIds))
     .map((v) => sanitizeThreadId(v))
     .filter((v) => v)
+  const allowIds = [...new Set((Array.isArray(finding?.unresolvedComments) ? finding.unresolvedComments.slice(0, 20).map((c) => sanitizeThreadId(c?.threadId ?? '')) : []).filter((v) => v))].join(',')
   const titleTag = untrusted(item.title, 'issue-title')
   // finding.unresolvedComments は threadId 付きスレッド一覧（fix が対象外判断時の正確なコピー用提示。text は注入経路ではない）。データ境界トークンは呼び出しごとに使い捨て（境界偽装防止のため埋め込み前に除去）。nonce は「未信頼データ + イシュー番号」から seed 鍵付きで導出し、並列実行・resume でも同じ論理呼び出しが同じ値を再現する。
   const nonce = boundaryNonce(`fix:${item?.number ?? 0}:${JSON.stringify(finding ?? '')}`)
@@ -5473,9 +5475,16 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     ...(pushAfterFix ? optinRecordUpdateInstructions(item, impl, '4b') : []),
     ...(pushAfterFix
       ? [
-          `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示・前後で sha が変化したことだけでは足りない。pushed: false のラウンド — 空振り push・並行 push 競合・ls-remote 判定不能 — は (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
-          `   gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`,
-          '   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、mutation が失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
+          `5. 手順 4 の push 後 CI 起動確認の後に、修正対応したスレッドを resolve する（返信と resolve は reply-resolve.sh だけが行う。gh api graphql・gh pr comment 等で自分では返信も resolve もしない）。outOfScopeComments 記録分はいずれの経路も対象にしない。(b) の許可リストはホストが決定的に算出済み（fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）。--thread-id には「未解決スレッド一覧」の値のみを足す（複数可）。`,
+          `   (a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ、自分が修正対応したスレッドについて次の 1 コマンドを一字一句そのまま実行する（pushed: false のラウンドは実行しない）:`,
+          `   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber} --repo '${repoArg}' --branch ${branch} --allow '${allowIds}' --thread-id <threadId>`,
+          ...(permittedIds.length
+            ? [
+                `   (b) push しなかった場合（過去ラウンドで修正・push 済み）は、(a) とは別に次の 1 コマンドだけを実行してよい（--allow は許可リストの ID のみ）:`,
+                `   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber} --repo '${repoArg}' --branch ${branch} --allow '${permittedIds.join(',')}' --thread-id <threadId>`,
+              ]
+            : ['   (b) push しなかった場合の許可リストは(空。(b) の resolve は行わない)。']),
+          '   最後の行 REPLY_RESOLVE_RESULT {json} の status が done のときだけ、その resolved 配列をそのまま resolvedThreadIds で返す（定型の返信が成功したスレッドだけが入る。replyFailed・resolveFailed は未解決のまま残り次周回の監視が拾う。件数を summary に書く）。非 0 終了・結果行なし・done 以外なら resolvedThreadIds は空。status が head-mismatch または observe-failed のとき（何も書き込んでいない）に限り 1 回だけ再実行してよい。それ以外は再実行しない。今回 push 済みなら pushed: true のまま報告してよい。(b) で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
           '6. 手順 2 で outOfScopeComments に記録した対象外の指摘がある場合のみ、PR 本文へ記録する（該当がなければこの手順は省略してよい）。',
           `   a. gh pr view ${impl.prNumber}${repoArg ? ` -R ${repoArg}` : ''} --json body で現在の本文を取得する。`,
           '   b. 「## 対象外（out-of-scope）」節が本文になければ末尾に新設し、既にあれば節内へ箇条書きで追記する。追記前に既存の節内容を確認し、同じ指摘（同一スレッド）が既に記載されていれば重複追記しない。書式は必ず `[threadId: <該当スレッドの threadId>]` を先頭に含めること（threadId は改変・省略不可。最終レポート確認時に人間が未解決スレッドとこの記録を threadId で突き合わせて issue 化・手動 resolve を判断するため）。書式例: `- [threadId: <threadId>] <指摘要約> — 理由: <理由> / 対応案: <対応案>（切り出し先 Issue: TBD）`',

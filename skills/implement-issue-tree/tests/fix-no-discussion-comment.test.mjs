@@ -40,7 +40,7 @@ test('FIX_NO_DISCUSSION_POLICY: 返信・議論投稿の禁止、定型操作の
   for (const s of ['レビュースレッドへの返信', 'gh pr comment', 'gh pr review', '議論投稿はしない']) {
     assert.ok(p.includes(s), `禁止対象に ${s} が無い`)
   }
-  assert.match(p, /例外は.*resolve.*再実行依頼のみ/)
+  assert.match(p, /例外は.*reply-resolve\.sh.*定型の対応報告.*再実行依頼のみ/)
   assert.match(p, /修正しない判断も反論で済ませず手順 2 に従う（P0\/P1・セキュリティは pushed: false と理由、それ以外は outOfScopeComments）/)
 })
 
@@ -70,4 +70,14 @@ test('monitorPrompt: 外部チェックなし・cursor あり双方で固定文�
   // 固定文は既存の権限境界行の直後にある
   const boundaryAt = cursor.indexOf('権限境界: 本エージェントはマージ・クローズの実行権限を持たない')
   assert.ok(boundaryAt >= 0 && cursor.indexOf(m.MONITOR_NO_REBUTTAL_POLICY) > boundaryAt)
+})
+
+test('fixPrompt(push): 返信・resolve は reply-resolve.sh の 1 コマンドだけで、自由な返信コマンドを指示しない（Issue #759）', () => {
+  const f = { summary: 's', unresolvedComments: [{ threadId: 'PRRT_a', text: 't' }] }
+  const out = m.fixPrompt(item, impl, f, true)
+  assert.ok(out.includes('reply-resolve.sh --pr'))
+  assert.ok(!out.includes('addPullRequestReviewThreadReply') && !out.includes('resolveReviewThread'))
+  assert.match(out, /gh api graphql・gh pr comment 等で自分では返信も resolve もしない/)
+  const none = m.fixPrompt(item, impl, f, false)
+  assert.ok(!none.includes('reply-resolve.sh --pr'))
 })
