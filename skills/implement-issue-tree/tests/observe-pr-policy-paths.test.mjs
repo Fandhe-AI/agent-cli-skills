@@ -55,6 +55,20 @@ for (const bash of availableBashes()) {
     assert.match(calls[1], /--paginate repos\/o\/r\/pulls\/7\/files\?per_page=100/)
   })
 
+  t('pulls/files は filename / previous_filename だけへ --jq で射影して取る（巨大な patch を含む応答でも成功する）', () => {
+    const big = 'x'.repeat(200000)
+    const raw = JSON.stringify([
+      { filename: 'src/a.js', status: 'modified', patch: big },
+      { filename: 'docs/x.yml', previous_filename: '.github/workflows/old.yml', status: 'renamed', patch: big },
+    ])
+    const stub = createObserveStub({ pulls: { out: pull({ changed_files: 2 }) }, 'pulls-files': { out: raw } })
+    const p = envelope(run(bash, stub, ['--pr', '7', '--repo', 'o/r']))
+    assert.equal(p.err, 0)
+    assert.equal(p.files, 2)
+    assert.equal(p.policy, 1)
+    assert.match(stub.calls()[1], /--jq \[\.\[\] \| \{filename, previous_filename\}\]/)
+  })
+
   t('--allow なしは方針パスが全件計画外。--repo なしは gh のプレースホルダ', () => {
     const stub = createObserveStub({ pulls: { out: pull({ changed_files: 1 }) }, 'pulls-files': { out: page(['.github/workflows/ci.yml']) } })
     const p = envelope(run(bash, stub, ['--pr', '7']))

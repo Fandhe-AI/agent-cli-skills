@@ -785,7 +785,8 @@ observe_policy_paths() {
   case "$2" in '' | *[!0-9]*) fail "changed_files の形式"; return 1 ;; esac
   changed=$2
   [ "${O_PP_STATE}" = OPEN ] || return 0
-  gh_api --paginate "${repo_path}/pulls/${pr}/files?per_page=100" || { fail "pulls files"; return 1; }
+  # --jq でページごとに filename / previous_filename だけへ射影する（各ファイルの patch 本文が stdout 上限と gh の時間制限に掛かり、計画外の変更が無くても取得失敗で止まるのを避ける）
+  gh_api --paginate "${repo_path}/pulls/${pr}/files?per_page=100" --jq '[.[] | {filename, previous_filename}]' || { fail "pulls files"; return 1; }
   files=$(printf '%s' "${OUT}" | jq -sec '[.[] | if type == "array" then .[] else error("shape") end]
     | if all(.[]; type == "object" and (.filename | type) == "string") then map({filename, previous_filename: (.previous_filename // null)}) else error("shape") end' 2>/dev/null) || { fail "pulls files の形式"; return 1; }
   O_PP_FILES=$(printf '%s' "${files}" | jq 'length') || { fail "件数"; return 1; }

@@ -3604,7 +3604,7 @@ return''
 const SCRIPT_SHA256={
 'measure-residual-bytes.sh':'d73079d35f38b971f00f8fb9aa09617492410427b1a1cb010953928afac7438e',
 'measure-free-disk.sh':'ceb9b8133bb50e69774bff448b58f949e06f0adc25e5bbec04132168b34407d7',
-'observe-pr.sh':'9d35b80dcd835be842c0b7f75b8100981645d10a23e051821e74d3329ce18652',
+'observe-pr.sh':'2230ea0a92ab33114c8851974d39025fad1e868c9c1f682880f93ec0d412bfcd',
 'base-merge.sh':'b3ff7e6dfc4c7ec3c3ab11780a9c5a6cab1e50db0ed6dbab74e887ffaa860dbd',
 'pr-push.sh':'2924cbeefd51e6012e257b30ee2fe8bc5e7f6d24fdda06c897d7c7fceed71874',
 'reply-resolve.sh':'074cda5f53482a6f5e141ccba4c3644e351c64eb241f6ffc8c81f17bd61d26de',

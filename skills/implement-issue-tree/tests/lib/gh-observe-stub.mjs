@@ -94,6 +94,15 @@ if [ -n "$outf" ]; then
       prev=$a
     done
     if [ -n "$jq_expr" ]; then jq -r "$jq_expr" < "$outf"; else cat "$outf"; fi
+  elif [ "$key" = pulls-files ]; then
+    # --jq が付けば実 gh --paginate と同じく、ページ（1 行 1 ページ）ごとに jq -c を当てる
+    jq_expr=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "--jq" ] && jq_expr=$a
+      prev=$a
+    done
+    if [ -n "$jq_expr" ]; then jq -c "$jq_expr" < "$outf" || exit 1; else cat "$outf"; fi
   elif [ "$key" = status ]; then
     # --paginate なしの gh api はページの 1 つ目だけを返す（2 ページ目以降を取りこぼす変異を検出できるようにする）
     pg=0
