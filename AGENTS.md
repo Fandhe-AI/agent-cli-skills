@@ -75,6 +75,10 @@ Fandhe-AI/actions の reusable workflow を `@latest` で呼び出す wrapper）
   受容する。未信頼テキスト（レビュー本文）を読む fix の自己判断が
   `required_review_thread_resolution` ゲートの解除に影響することを認識したうえで、
   レビュー指摘→修正 push→resolve→自動マージの無人ループ成立を優先する判断である。
+  Issue #759: resolve は fix が同梱スクリプト `reply-resolve.sh`（ハッシュ照合つきの 1 コマンド）で実行し、resolve の前に
+  sha とブランチ名だけの定型の対応報告をスレッドへ返す。返信が SUBMITTED で成功したスレッドだけを resolve し、失敗したスレッドは
+  未解決のまま残す。返信本文は定数テンプレート（レビュー本文・fix の自由文を含まない）で、sha はスクリプトが観測した値
+  （fix の申告ではない）。これは #564（議論コメント禁止）の唯一の例外で、条件 (a)〜(d) は緩めない。
   例外の成立条件: (a) resolve 実行主体は Merge ループの fix（pushAfterFix=true）のみ
   （monitor / merge-exec / merge-verify / Review ループは実行しない）、(b) resolve は
   対象修正がリモート head（`origin/<branch>`）に反映済みであることを前提とする。成立

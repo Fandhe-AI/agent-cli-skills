@@ -1350,7 +1350,7 @@ return`0. worktree routing ガード（他のどの gh / git 操作よりも先�
 
 
 const FIX_NO_DISCUSSION_POLICY=
-'議論コメント禁止: レビュースレッドへの返信・gh pr comment / gh pr review 等の議論投稿はしない（gh 認証は利用者本人）。例外は手順が明示する resolve・PR 本文更新・外部レビュー App の再実行依頼のみ。修正しない判断も反論で済ませず手順 2 に従う（P0/P1・セキュリティは pushed: false と理由、それ以外は outOfScopeComments）。'
+'議論コメント禁止: レビュースレッドへの返信・gh pr comment / gh pr review 等の議論投稿はしない（gh 認証は利用者本人）。例外は手順が明示する reply-resolve.sh（resolve と、その前の sha・ブランチ名だけの定型の対応報告）・PR 本文更新・外部レビュー App の再実行依頼のみ。修正しない判断も反論で済ませず手順 2 に従う（P0/P1・セキュリティは pushed: false と理由、それ以外は outOfScopeComments）。'
 
 
 const MONITOR_NO_REBUTTAL_POLICY=
@@ -2593,7 +2593,7 @@ maxLength:100,
 description:'resolve に成功した review thread の GraphQL ノード id（「未解決スレッド一覧」からそのままコピーした値のみ）',
 },
 description:
-'修正がリモート head に反映済み（今回の push 成功後、または過去ラウンド push 済みの反映確認後）に resolveReviewThread mutation で resolve したスレッドの threadId 一覧（1件1要素、最大 20 件）。resolve していなければ空配列または省略。Review ループ（push なし fix）では常に省略する。記録専用でマージ判定には使われない。',
+'修正がリモート head に反映済み（今回の push 成功後、または過去ラウンド push 済みの反映確認後）に reply-resolve.sh が定型の返信後に resolve したスレッドの threadId 一覧（結果行の resolved。1件1要素、最大 20 件）。resolve していなければ空配列または省略。Review ループ（push なし fix）では常に省略する。記録専用でマージ判定には使われない。',
 },
 
 ...PUSH_CI_PROPS,
@@ -3596,16 +3596,17 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'c66a6884102581dae0afb278f07bb175b34cd6096ee556e825440dedbe0c75a8',
-'measure-free-disk.sh':'b81fa61d670b8d10b48d0693fd4a6494152944e45954c439fa37f93167cab49f',
-'observe-pr.sh':'97e57b762c79e69dcdc7bcd7a6de2101bd8c05acb84c664b575a426d533caad0',
-'base-merge.sh':'45c60caf526e380c378fc3c70c64010718d73acfc67a86240509aaa7991615ef',
-'pr-push.sh':'edfd269332ac69078ce27a3905e0b4439526dd4e73c8cfff821b8ac7f9004b78',
-'state.sh':'b8f16bbd0794593f5c5ee6850351e8ffaf5159a47737bd48990ee4bd06e271b0',
-'merge-gate.sh':'8ce8c18a3253188b7dbc208190cd2244d5c6fe40f22e59e5a9ed6d47c6f4d3ad',
-'worktree-remove.sh':'4d4ba8e0e94633042fc3c3a991495aef92a7457d0061050c5c246dd7d7418d90',
-'recover-prep.sh':'ca094de7d45ce509481276d762c77233148462f180101817e60452cca7b5607c',
-'fetch-tree.sh':'3c0047300a1d2616f75cdf8e46e9e802bbaa0b6a11a2e2c7fa966b64b650e564',
+'measure-residual-bytes.sh':'6459c33c891b0c2708b69d9f95d1be189d71d0c115a162676eac5b1accdd273c',
+'measure-free-disk.sh':'65381b113c287ca7090baa048affbf59eac4990146f47e52d81d30193c42abf9',
+'observe-pr.sh':'40f6d07cf2aaa6e5492764f74d71d738e0f496177dca2e0486e4caa16e383dc5',
+'base-merge.sh':'091658c4ce2c8835905ea239ac1e17dd4448fe9c730ad62a5930353e759c4be2',
+'pr-push.sh':'5bbde471e48bc4214a95b47dfafd72633d67df742857a0e74e2cbebd872551ce',
+'reply-resolve.sh':'f9f610ceae27b1ac0d6180b1c7a965d4e2bc059757ffc0f6268bd013903a3c36',
+'state.sh':'bb489dc63b9c75df8df0542263726bf2ea6c47421252f288e040132f8d10e146',
+'merge-gate.sh':'52a68a7e890745c2374158e006fee54696765aead1ad82b94a78bcc6a8614595',
+'worktree-remove.sh':'9dd8bbf18079025de5b4dac8a5d0c09464f39f13630fc9e60ef9a2793f514d2d',
+'recover-prep.sh':'89d878ee8e123fd03f818f2034ebafab54490f5f8232ce044a4416cf7f4bf46a',
+'fetch-tree.sh':'260265d69534f0be95ceeb32fb9f5810670e90368c0ae91805bccdf19669b43d',
 }
 
 
@@ -5398,6 +5399,7 @@ const branch=sanitizeBranch(impl.branch)
 const permittedIds=(arr(permittedNoPushResolveIds))
 .map((v)=>sanitizeThreadId(v))
 .filter((v)=>v)
+const allowIds=[...new Set((Array.isArray(finding?.unresolvedComments)?finding.unresolvedComments.slice(0,20).map((c)=>sanitizeThreadId(c?.threadId??'')):[]).filter((v)=>v))].join(',')
 const titleTag=untrusted(item.title,'issue-title')
 
 const nonce=boundaryNonce(`fix:${item?.number ?? 0}:${JSON.stringify(finding ?? '')}`)
@@ -5473,9 +5475,16 @@ summaryText,
 ...(pushAfterFix?optinRecordUpdateInstructions(item,impl,'4b'):[]),
 ...(pushAfterFix
 ?[
-`5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示・前後で sha が変化したことだけでは足りない。pushed: false のラウンド — 空振り push・並行 push 競合・ls-remote 判定不能 — は (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
-`   gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`,
-'   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、mutation が失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
+`5. 手順 4 の push 後 CI 起動確認の後に、修正対応したスレッドを resolve する（返信と resolve は reply-resolve.sh だけが行う。gh api graphql・gh pr comment 等で自分では返信も resolve もしない）。outOfScopeComments 記録分はいずれの経路も対象にしない。(b) の許可リストはホストが決定的に算出済み（fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）。--thread-id には「未解決スレッド一覧」の値のみを足す（複数可）。`,
+`   (a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ、自分が修正対応したスレッドについて次の 1 コマンドを一字一句そのまま実行する（pushed: false のラウンドは実行しない）:`,
+`   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber}${repoArg ? ` --repo '${repoArg}'` : ''} --branch ${branch} --allow '${allowIds}' --thread-id <threadId>`,
+...(permittedIds.length
+?[
+`   (b) push しなかった場合（過去ラウンドで修正・push 済み）は、(a) とは別に次の 1 コマンドだけを実行してよい（--allow は許可リストの ID のみ）:`,
+`   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber}${repoArg ? ` --repo '${repoArg}'` : ''} --branch ${branch} --allow '${permittedIds.join(',')}' --thread-id <threadId>`,
+]
+:['   (b) push しなかった場合の許可リストは(空。(b) の resolve は行わない)。']),
+'   最後の行 REPLY_RESOLVE_RESULT {json} の status が done のときだけ、その resolved 配列をそのまま resolvedThreadIds で返す（定型の返信が成功したスレッドだけが入る。replyFailed・resolveFailed は未解決のまま残り次周回の監視が拾う。件数を summary に書く）。非 0 終了・結果行なし・done 以外なら resolvedThreadIds は空。status が head-mismatch または observe-failed のとき（何も書き込んでいない）に限り 1 回だけ再実行してよい。それ以外は再実行しない。今回 push 済みなら pushed: true のまま報告してよい。(b) で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
 '6. 手順 2 で outOfScopeComments に記録した対象外の指摘がある場合のみ、PR 本文へ記録する（該当がなければこの手順は省略してよい）。',
 `   a. gh pr view ${impl.prNumber}${repoArg ? ` -R ${repoArg}` : ''} --json body で現在の本文を取得する。`,
 '   b. 「## 対象外（out-of-scope）」節が本文になければ末尾に新設し、既にあれば節内へ箇条書きで追記する。追記前に既存の節内容を確認し、同じ指摘（同一スレッド）が既に記載されていれば重複追記しない。書式は必ず `[threadId: <該当スレッドの threadId>]` を先頭に含めること（threadId は改変・省略不可。最終レポート確認時に人間が未解決スレッドとこの記録を threadId で突き合わせて issue 化・手動 resolve を判断するため）。書式例: `- [threadId: <threadId>] <指摘要約> — 理由: <理由> / 対応案: <対応案>（切り出し先 Issue: TBD）`',
