@@ -2,7 +2,7 @@
 # reply-resolve.sh — 修正したレビュースレッドへ定型の対応報告を返してから resolve する
 #
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立て、Merge ループの fix が 1 回実行する）:
-#   bash reply-resolve.sh --pr NUM --repo OWNER/REPO --branch BRANCH --allow ID[,ID...] --thread-id ID [--thread-id ID ...]
+#   bash reply-resolve.sh --pr NUM [--repo OWNER/REPO] --branch BRANCH --allow ID[,ID...] --thread-id ID [--thread-id ID ...]
 #
 # 役割: fixPrompt が文章で指示していた resolve（Issue #119）に、resolve の前の定型の返信（Issue #759）を足し、順序と本文を
 #       エージェントの判断ではなく機械的な実行にする。fix の push 後にレビューした人や bot が、どのコミットで直ったかを
@@ -46,7 +46,7 @@ RR_RESOLVE_QUERY='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){
 RR_READ_QUERY='query($tid:ID!){node(id:$tid){... on PullRequestReviewThread{isResolved pullRequest{number repository{nameWithOwner}} comments(last:100){nodes{viewerDidAuthor state body}}}}}'
 
 usage() {
-  echo "使い方: reply-resolve.sh --pr NUM --repo OWNER/REPO --branch BRANCH --allow ID[,ID...] --thread-id ID [--thread-id ID ...]" >&2
+  echo "使い方: reply-resolve.sh --pr NUM [--repo OWNER/REPO] --branch BRANCH --allow ID[,ID...] --thread-id ID [--thread-id ID ...]" >&2
   [ $# -eq 0 ] || echo "reply-resolve: $1" >&2
   exit 2
 }
@@ -84,7 +84,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 is_uint "${pr}" || usage "--pr は正の整数で指定する"
-valid_repo "${repo}" || usage "--repo は OWNER/REPO 形式で指定する"
+[ -z "${repo}" ] || valid_repo "${repo}" || usage "--repo は OWNER/REPO 形式で指定する"
 pv_valid_branch "${branch}" || usage "--branch の形式が不正"
 [ -n "${allow}" ] || usage "--allow が空"
 n_allow=0
@@ -101,7 +101,15 @@ for t in ${threads}; do
   rr_in_allow "${t}" "${allow}" || usage "--thread-id が --allow に含まれない"
 done
 
-want=$(lower "${repo}")
+# --repo 省略時（args.repo 未指定の導入先）は routing の remote 照合を行わず、gh の対象はカレントのリポジトリにする（pr-push.sh と同じ扱い）。
+# スレッドの所属リポジトリ照合に使う期待値はカレントから解決し、解決できなければ何も書かずに中止する
+if [ -n "${repo}" ]; then
+  want=$(lower "${repo}")
+else
+  want=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || want=""
+  valid_repo "${want}" || { echo "reply-resolve: カレントのリポジトリを解決できない" >&2; rr_result observe-failed "" "" "" "" ""; exit 0; }
+  want=$(lower "${want}")
+fi
 
 fail() {
   echo "reply-resolve: $2" >&2
@@ -111,7 +119,7 @@ fail() {
 
 # ---- 1. 前提の確認（読み取りのみ） ----
 rc=0
-routing_check_remotes "${want}" || rc=$?
+if [ -n "${repo}" ]; then routing_check_remotes "${want}" || rc=$?; fi
 [ "${rc}" -eq 0 ] || fail routing-error "origin の URL が許可ホスト・期待リポジトリと不一致、または取得できない"
 
 local_head=$(git rev-parse HEAD 2>/dev/null) || fail observe-failed "git rev-parse HEAD が失敗"
@@ -129,7 +137,7 @@ case "${wait_s}" in '' | *[!0-9]*) wait_s=3 ;; esac
 attempt=0
 while :; do
   attempt=$((attempt + 1))
-  pr_row=$(gh pr view "${pr}" -R "${repo}" --json state,headRefName,headRefOid --jq '[.state, .headRefName, .headRefOid] | join(" ")' 2>/dev/null) \
+  pr_row=$(gh pr view "${pr}" ${repo:+-R "${repo}"} --json state,headRefName,headRefOid --jq '[.state, .headRefName, .headRefOid] | join(" ")' 2>/dev/null) \
     || fail observe-failed "gh pr view が失敗"
   [ "${pr_row}" = "OPEN ${branch} ${local_head}" ] && break
   [ "${attempt}" -lt 3 ] || fail head-mismatch "PR の状態・ブランチ・head が対象と不一致"

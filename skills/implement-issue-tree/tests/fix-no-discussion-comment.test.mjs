@@ -31,6 +31,12 @@ writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')
 const m = await import(pathToFileURL(slicePath).href)
 m.__setBoundaryNonceSeedForTest('a'.repeat(64))
 
+// args.repo 指定ありの定義部（repoArg が空でないときの fixPrompt を確かめる）
+const slicePathRepo = join(sliceDir, 'implement-issue-tree-no-discussion-defs-repo.mjs')
+writeFileSync(slicePathRepo, `const args = { repo: 'Fandhe-AI/agent-cli-skills' }\n${definitionPart}\nexport { fixPrompt }\n${TEST_ONLY_SETTER}`)
+const mRepo = await import(pathToFileURL(slicePathRepo).href)
+mRepo.__setBoundaryNonceSeedForTest('a'.repeat(64))
+
 const item = { number: 42, title: 'サンプルイシュー', optinTests: [] }
 const impl = { prNumber: 123, branch: 'fix/42-noop', worktreePath: '/tmp/wt-42', summary: 's' }
 const finding = { summary: 'テスト用の指摘', unresolvedComments: [] }
@@ -80,4 +86,16 @@ test('fixPrompt(push): 返信・resolve は reply-resolve.sh の 1 コマンド�
   assert.match(out, /gh api graphql・gh pr comment 等で自分では返信も resolve もしない/)
   const none = m.fixPrompt(item, impl, f, false)
   assert.ok(!none.includes('reply-resolve.sh --pr'))
+})
+
+test('fixPrompt(push): args.repo 省略時は reply-resolve.sh に --repo を渡さず、指定時は渡す（Issue #759 の退行修正）', () => {
+  const f = { summary: 's', unresolvedComments: [{ threadId: 'PRRT_a', text: 't' }] }
+  const lineOf = (out) => out.split('\n').filter((l) => l.includes('reply-resolve.sh --pr'))
+  const omitted = lineOf(m.fixPrompt(item, impl, f, true))
+  assert.equal(omitted.length, 1)
+  assert.ok(!omitted[0].includes('--repo'), `--repo が残っている: ${omitted[0]}`)
+  assert.ok(!omitted[0].includes("''"), '空の引数が残っている')
+  const given = lineOf(mRepo.fixPrompt(item, impl, f, true))
+  assert.equal(given.length, 1)
+  assert.ok(given[0].includes("--repo 'Fandhe-AI/agent-cli-skills' --branch"))
 })

@@ -5477,11 +5477,11 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
       ? [
           `5. 手順 4 の push 後 CI 起動確認の後に、修正対応したスレッドを resolve する（返信と resolve は reply-resolve.sh だけが行う。gh api graphql・gh pr comment 等で自分では返信も resolve もしない）。outOfScopeComments 記録分はいずれの経路も対象にしない。(b) の許可リストはホストが決定的に算出済み（fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）。--thread-id には「未解決スレッド一覧」の値のみを足す（複数可）。`,
           `   (a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ、自分が修正対応したスレッドについて次の 1 コマンドを一字一句そのまま実行する（pushed: false のラウンドは実行しない）:`,
-          `   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber} --repo '${repoArg}' --branch ${branch} --allow '${allowIds}' --thread-id <threadId>`,
+          `   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber}${repoArg ? ` --repo '${repoArg}'` : ''} --branch ${branch} --allow '${allowIds}' --thread-id <threadId>`,
           ...(permittedIds.length
             ? [
                 `   (b) push しなかった場合（過去ラウンドで修正・push 済み）は、(a) とは別に次の 1 コマンドだけを実行してよい（--allow は許可リストの ID のみ）:`,
-                `   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber} --repo '${repoArg}' --branch ${branch} --allow '${permittedIds.join(',')}' --thread-id <threadId>`,
+                `   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber}${repoArg ? ` --repo '${repoArg}'` : ''} --branch ${branch} --allow '${permittedIds.join(',')}' --thread-id <threadId>`,
               ]
             : ['   (b) push しなかった場合の許可リストは(空。(b) の resolve は行わない)。']),
           '   最後の行 REPLY_RESOLVE_RESULT {json} の status が done のときだけ、その resolved 配列をそのまま resolvedThreadIds で返す（定型の返信が成功したスレッドだけが入る。replyFailed・resolveFailed は未解決のまま残り次周回の監視が拾う。件数を summary に書く）。非 0 終了・結果行なし・done 以外なら resolvedThreadIds は空。status が head-mismatch または observe-failed のとき（何も書き込んでいない）に限り 1 回だけ再実行してよい。それ以外は再実行しない。今回 push 済みなら pushed: true のまま報告してよい。(b) で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',

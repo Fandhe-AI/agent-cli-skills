@@ -37,6 +37,7 @@ if [ "$1" = pr ] && [ "$2" = view ]; then
   if [ -n "$FAKE_PRVIEW_FIRST" ] && [ ! -f "$STUB/pv1" ]; then : > "$STUB/pv1"; echo "$FAKE_PRVIEW_FIRST"; exit 0; fi
   echo "$FAKE_PRVIEW"; exit 0
 fi
+if [ "$1" = repo ] && [ "$2" = view ]; then echo "\${FAKE_CUR_REPO:-Fandhe-AI/agent-cli-skills}"; exit 0; fi
 if [ "$1" = api ] && [ "$2" = graphql ]; then
   tid=""; kind=read
   for a in "$@"; do
@@ -99,6 +100,15 @@ for (const bash of availableBashes()) {
     assert.deepEqual(o.result, { status: 'done', sha: SHA, resolved: ['T1'], replyFailed: [], resolveFailed: [], skipped: [] })
     assert.equal(readFileSync(join(o.dir, 'body.T1'), 'utf8'), `${MARKER}\n${SHA} で対応した（ブランチ ${BRANCH}）`)
     leak(o)
+  })
+
+  test(`--repo 省略時はカレントのリポジトリを解決して処理し、gh pr view に -R を付けない（${bash}）`, () => {
+    const s = setup(bash, { threads: { T1: { reply: 'C1 SUBMITTED', resolve: 'true' } } })
+    const o = s.run(base(['T1']).filter((a, i, arr) => a !== '--repo' && arr[i - 1] !== '--repo'))
+    assert.equal(o.r.status, 0, o.r.stderr)
+    assert.equal(o.result.status, 'done', o.r.stderr)
+    assert.deepEqual(o.result.resolved, ['T1'])
+    assert.ok(!/gh pr view .* -R /.test(o.log), o.log)
   })
 
   test(`返信に失敗した（HTTP 失敗・PENDING・id なし）スレッドは resolve しない（${bash}）`, () => {

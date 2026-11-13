@@ -507,7 +507,7 @@ test('fixPrompt: pushAfterFix=true はリモート head 反映済み前提の re
   const finding = { summary: 'テスト用の指摘', unresolvedComments: [{ threadId: 'PRRT_abc123', text: '指摘テキスト' }] }
   const prompt = fixPrompt(item, { ...impl, branch: 'fix/42-noop' }, finding, true)
   assert.ok(prompt.includes(RESOLVE_MUTATION_MARKER), 'pushAfterFix=true の fixPrompt に reply-resolve.sh の指示がない')
-  assert.ok(/reply-resolve\.sh --pr 123 --repo '[^']*' --branch fix\/42-noop --allow 'PRRT_abc123' --thread-id <threadId>/.test(prompt), 'reply-resolve.sh のコマンド形が期待どおりでない')
+  assert.ok(/reply-resolve\.sh --pr 123(?: --repo '[^']+')? --branch fix\/42-noop --allow 'PRRT_abc123' --thread-id <threadId>/.test(prompt), 'reply-resolve.sh のコマンド形が期待どおりでない')
   assert.ok(!prompt.includes('resolveReviewThread') && !prompt.includes('addPullRequestReviewThreadReply'), '生の mutation が fixPrompt に残っている')
   assert.ok(prompt.includes('resolvedThreadIds'), 'resolve 済み threadId の報告フィールド（resolvedThreadIds）の指示がない')
   // resolve の前提条件: (a) 今回 push 成功、または (b) ホストが決定的に算出した許可リスト

@@ -3601,7 +3601,7 @@ const SCRIPT_SHA256={
 'observe-pr.sh':'40f6d07cf2aaa6e5492764f74d71d738e0f496177dca2e0486e4caa16e383dc5',
 'base-merge.sh':'091658c4ce2c8835905ea239ac1e17dd4448fe9c730ad62a5930353e759c4be2',
 'pr-push.sh':'5bbde471e48bc4214a95b47dfafd72633d67df742857a0e74e2cbebd872551ce',
-'reply-resolve.sh':'82660971ae8a5092627262ac0842654097531b896093cc3760229af01be966f2',
+'reply-resolve.sh':'f9f610ceae27b1ac0d6180b1c7a965d4e2bc059757ffc0f6268bd013903a3c36',
 'state.sh':'bb489dc63b9c75df8df0542263726bf2ea6c47421252f288e040132f8d10e146',
 'merge-gate.sh':'52a68a7e890745c2374158e006fee54696765aead1ad82b94a78bcc6a8614595',
 'worktree-remove.sh':'9dd8bbf18079025de5b4dac8a5d0c09464f39f13630fc9e60ef9a2793f514d2d',
@@ -5477,11 +5477,11 @@ summaryText,
 ?[
 `5. 手順 4 の push 後 CI 起動確認の後に、修正対応したスレッドを resolve する（返信と resolve は reply-resolve.sh だけが行う。gh api graphql・gh pr comment 等で自分では返信も resolve もしない）。outOfScopeComments 記録分はいずれの経路も対象にしない。(b) の許可リストはホストが決定的に算出済み（fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）。--thread-id には「未解決スレッド一覧」の値のみを足す（複数可）。`,
 `   (a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ、自分が修正対応したスレッドについて次の 1 コマンドを一字一句そのまま実行する（pushed: false のラウンドは実行しない）:`,
-`   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber} --repo '${repoArg}' --branch ${branch} --allow '${allowIds}' --thread-id <threadId>`,
+`   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber}${repoArg ? ` --repo '${repoArg}'` : ''} --branch ${branch} --allow '${allowIds}' --thread-id <threadId>`,
 ...(permittedIds.length
 ?[
 `   (b) push しなかった場合（過去ラウンドで修正・push 済み）は、(a) とは別に次の 1 コマンドだけを実行してよい（--allow は許可リストの ID のみ）:`,
-`   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber} --repo '${repoArg}' --branch ${branch} --allow '${permittedIds.join(',')}' --thread-id <threadId>`,
+`   bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['reply-resolve.sh']} reply-resolve.sh --pr ${impl.prNumber}${repoArg ? ` --repo '${repoArg}'` : ''} --branch ${branch} --allow '${permittedIds.join(',')}' --thread-id <threadId>`,
 ]
 :['   (b) push しなかった場合の許可リストは(空。(b) の resolve は行わない)。']),
 '   最後の行 REPLY_RESOLVE_RESULT {json} の status が done のときだけ、その resolved 配列をそのまま resolvedThreadIds で返す（定型の返信が成功したスレッドだけが入る。replyFailed・resolveFailed は未解決のまま残り次周回の監視が拾う。件数を summary に書く）。非 0 終了・結果行なし・done 以外なら resolvedThreadIds は空。status が head-mismatch または observe-failed のとき（何も書き込んでいない）に限り 1 回だけ再実行してよい。それ以外は再実行しない。今回 push 済みなら pushed: true のまま報告してよい。(b) で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
