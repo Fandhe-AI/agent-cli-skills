@@ -2418,9 +2418,9 @@ function applyPrereqTransitions(probe, targets, done, failedSet, prHints, branch
   return transitions
 }
 
-// targets の前提完了を確認するプローブエージェント向けプロンプト（Issue #442）。読み取り専用の 3 コマンドに限定し、Issue/PR の本文・タイトル・コメントは一切取得させない（非信頼自由文をホストの遷移判定へ持ち込まない設計。mergeVerifyPrompt と同型の権限境界）。実装プロンプトと修正プロンプトで共通の定型句（文言は変えない。生成物の予算のため定数化）最後の detach: 後続の Review fix は隔離された別 worktree で動き、自分の worktree の外へ git -C・cd で触れられない。実装 worktree がブランチを
+// targets の前提完了を確認するプローブエージェント向けプロンプト（Issue #442）。読み取り専用の 3 コマンドに限定し、Issue/PR の本文・タイトル・コメントは一切取得させない（非信頼自由文をホストの遷移判定へ持ち込まない設計。mergeVerifyPrompt と同型の権限境界）。実装プロンプトと修正プロンプトで共通の定型句（生成物の予算のため定数化。1 か所の変更が両プロンプトに効く。改行は入れない: テストが 1 行として照合する）。detach の前に追跡ファイルの未コミット変更を確かめる（Issue #761。detach 自体は作業ツリーに触れず変更は失われないが、確認を明記して同種の指摘を防ぐ）。確認は未追跡ファイルを対象外とし（ビルド成果物でも失敗にしない）、add -u で追跡ファイルに限る（秘密情報や成果物を混ぜない）。push 済みの先端を書き換えないよう amend せず追加のコミットにし、積めなくても失敗終端にしない。最後の detach: 後続の Review fix は隔離された別 worktree で動き、自分の worktree の外へ git -C・cd で触れられない。実装 worktree がブランチを
 // checkout したままだと、fix は先端を進められず commitFailed で終わる（使用中のブランチだけを update-ref で動かすと、その worktree の index と食い違う）。 detach 済みの worktree は、中断後の再実行で recover-prep.sh がブランチへ付け直す（Issue #731 と同じ経路）。
-const NO_PUSH_STEP = '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチの先端を更新できない）。'
+const NO_PUSH_STEP = '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、まず git status --porcelain --untracked-files=no の出力が空であること（追跡ファイルに未コミットの変更が無いこと。未追跡ファイルは対象外）を確かめる。空でない（またはコマンドが失敗した）ときは git add -u で追跡ファイルの変更だけを加え、手順 6 と同じ規約で追加のコミットとして積む（既存コミットの amend はしない）。積めなければ変更を残したまま進み summary にその旨を書く（失敗にはしない）。続けて、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチの先端を更新できない）。'
 const NO_PR_NUMBER_NOTE = '（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）'
 const WT_RM_NOTE = '不要な worktree を git worktree remove で手動削除してから再実行すること'
 const DISK_HALT_NOTE = 'ディスク枯渇防止のため以降の' + HALT_NEW + '。'

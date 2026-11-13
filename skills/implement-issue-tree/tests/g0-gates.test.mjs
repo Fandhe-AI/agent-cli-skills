@@ -396,6 +396,20 @@ test('implementPrompt / recoverImplementPrompt: コミット後に git checkout 
   }
 })
 
+// Issue #761: detach の前に追跡ファイルの未コミット変更を確かめる。amend せず追加コミット・未追跡は対象外・失敗にしない。
+test('implementPrompt / recoverImplementPrompt: detach の前に追跡ファイルの clean を確かめる', () => {
+  for (const prompt of [implementPrompt(item, { steps: ['noop'] }), recoverImplementPrompt(item, { done: [], remaining: [], broken: [] }, 'fix/42-noop')]) {
+    const line = prompt.split('\n').find((l) => l.includes('7. push・PR 作成はここでは行わない。'))
+    assert.ok(line, '手順 7 の行が無い')
+    const check = line.indexOf('git status --porcelain --untracked-files=no')
+    assert.ok(check >= 0 && check < line.indexOf('git checkout --detach'), '確認が detach より前に無い')
+    assert.ok(line.includes('git add -u'))
+    assert.ok(line.includes('amend はしない'))
+    assert.ok(line.includes('失敗にはしない'))
+    assert.ok(!line.includes('git add -A') && !line.includes('git add .'))
+  }
+})
+
 // Bugbot（PR #436 追補）: pr-create は base 取り込みコミットを detached HEAD から push しローカル
 // refs/heads を更新しないため、PR 作成失敗後の Recover → 回復 Implement が古いローカル tip を掴むと
 // 次の pr-create が remote-ahead / diverged で再失敗しループする。checkout 後の ff 追従を固定する。

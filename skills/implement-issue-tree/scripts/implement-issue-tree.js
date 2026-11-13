@@ -2420,7 +2420,7 @@ return transitions
 
 
 
-const NO_PUSH_STEP='7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチの先端を更新できない）。'
+const NO_PUSH_STEP='7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、まず git status --porcelain --untracked-files=no の出力が空であること（追跡ファイルに未コミットの変更が無いこと。未追跡ファイルは対象外）を確かめる。空でない（またはコマンドが失敗した）ときは git add -u で追跡ファイルの変更だけを加え、手順 6 と同じ規約で追加のコミットとして積む（既存コミットの amend はしない）。積めなければ変更を残したまま進み summary にその旨を書く（失敗にはしない）。続けて、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチの先端を更新できない）。'
 const NO_PR_NUMBER_NOTE='（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）'
 const WT_RM_NOTE='不要な worktree を git worktree remove で手動削除してから再実行すること'
 const DISK_HALT_NOTE='ディスク枯渇防止のため以降の'+HALT_NEW+'。'
