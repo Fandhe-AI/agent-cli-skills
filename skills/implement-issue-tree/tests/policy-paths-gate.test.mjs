@@ -83,6 +83,14 @@ test('プロンプト: plan に policyPaths の指示がある。fix に範囲�
   assert.equal(definitionPart.split('fixScopePolicy(item),').length, 2, 'fixPrompt の共通部に 1 か所だけ')
 })
 
+test('許可の取り方: fix の固定文とゲートは同じ policyAllowOf を使う（再開で Plan を飛ばしても保存済みの宣言と食い違わない）', () => {
+  assert.match(definitionPart, /const policyAllowOf = \(item\) => planPolicyPathsByIssue\.get\(item\.number\) \?\? \[\]/)
+  assert.match(driverPart, /planPolicyPathsByIssue\.set\(Number\(k\), sanitizePolicyPaths\(v\.planPolicyPaths\)\)/)
+  assert.match(definitionPart, /\(policyAllowOf\(item\)\.join\(','\) \|\| 'なし'\)/)
+  assert.match(definitionPart, /const allow = policyAllowOf\(item\)\n/)
+  assert.equal(definitionPart.split('planPolicyPathsByIssue.get(').length, 2, '直接参照は policyAllowOf の 1 か所だけ')
+})
+
 test('ゲートは ready の後・added-files ゲートと recoveryOnly とマージ実行より前に置き、fixCount > 0 に限る', () => {
   const gate = driverPart.indexOf('__POLICY_PATHS_GATE__')
   assert.ok(gate > 0)

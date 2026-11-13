@@ -1352,7 +1352,7 @@ return`0. worktree routing ガード（他のどの gh / git 操作よりも先�
 
 const fixScopePolicy=(item)=>
 '範囲: 指摘が直接求めた変更だけを行う。CI 構成（ジョブ・check 名の追加削除、timeout-minutes 等の上限）・CODEOWNERS・ruleset などの方針は、計画の policyPaths（'+
-((planPolicyPathsByIssue.get(item.number)??[]).join(',')||'なし')+
+(policyAllowOf(item).join(',')||'なし')+
 '）にない限り変えない。必要と判断しても変えず、手順 2 の修正不能と同じく pushed: false と理由を返す（ホストがマージ前に検出して blocked にする）。'
 const FIX_NO_DISCUSSION_POLICY=
 '議論コメント禁止: レビュースレッドへの返信・gh pr comment / gh pr review 等の議論投稿はしない（gh 認証は利用者本人）。例外は手順が明示する reply-resolve.sh（resolve と、その前の sha・ブランチ名だけの定型の対応報告）・PR 本文更新・外部レビュー App の再実行依頼のみ。修正しない判断も反論で済ませず手順 2 に従う（P0/P1・セキュリティは pushed: false と理由、それ以外は outOfScopeComments）。'
@@ -5088,8 +5088,10 @@ if(c.kind==='truncated')return`${head}の変更の有無を確かめられない
 if(c.kind==='skip')return`${head}の変更の有無を観測できなかった（${c.reason}）。止めないと計画外の方針がそのままマージされ得るため停止した。同じ args で再実行する`
 return''
 }
+
+const policyAllowOf=(item)=>planPolicyPathsByIssue.get(item.number)??[]
 const observePolicyPaths=(item,prNumber)=>{
-const allow=planPolicyPathsByIssue.get(item.number)??sanitizePolicyPaths(savedItems[String(item.number)]?.planPolicyPaths)
+const allow=policyAllowOf(item)
 return observeGate(item,{mode:'policy-paths',pr:prNumber,allow},'policy-paths','方針パス変更',POLICY_PATHS_PAYLOAD_SCHEMA,(raw,n,sha)=>classifyPolicyPaths(raw,n,sha))
 }
 
@@ -6006,6 +6008,7 @@ unverified:stateUnverified,
 
 const unverifiedIssues=new Set(stateUnverified)
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
+for(const[k,v]of Object.entries(savedItems))if(Array.isArray(v?.planPolicyPaths))planPolicyPathsByIssue.set(Number(k),sanitizePolicyPaths(v.planPolicyPaths))
 
 
 phase('Tree')
