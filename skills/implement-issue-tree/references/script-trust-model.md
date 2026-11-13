@@ -11,7 +11,7 @@
 | `args.skillDir` | スキルディレクトリ（`scripts/` の 1 つ上）の絶対パス。人間（起動手順）が渡す。形式だけをホストが検証する |
 | `scripts/run-verified.sh` | 実行前にスクリプトの SHA-256 を照合する launcher。`bash "<skillDir>/scripts/run-verified.sh" <sha256> <name>.sh …` で起動する（実行ビットに依存しない） |
 | `scripts/measure-residual-bytes.sh` / `measure-free-disk.sh` | 測定本体。入力はパスの一覧（標準入力）または 1 件（引数）。出力は 1 行の封筒 |
-| `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail` / `push`（第 3 弾）/ `added-files`（Issue #658。下の「新規追加ファイルの衝突ゲート」節）。出力は 1 行の封筒（`threads-detail` だけは外部由来の自由文を含む非信頼データで、封筒ではない）。`--wait` は有界の待機 |
+| `scripts/observe-pr.sh` | monitor の観測本体（第 2 弾）。入力は PR 番号・base・branch・issue・App slug（引数）。モードは `pr` / `checks` / `required` / `reviews` / `threads` / `threads-detail` / `push`（第 3 弾）/ `added-files`（Issue #658。下の「新規追加ファイルの衝突ゲート」節）/ `policy-paths`（Issue #760。下の「方針パスのゲート」節）。出力は 1 行の封筒（`threads-detail` だけは外部由来の自由文を含む非信頼データで、封筒ではない）。`--wait` は有界の待機 |
 | `scripts/base-merge.sh` | 自動 base 取り込みの本体（第 3 弾）。入力は PR 番号・branch・base・期待 owner/repo（引数）。**封筒を使わない**。出力の最後の 1 行は `BASE_MERGE_RESULT {…}`（キーは `BASE_MERGE_SCHEMA` と同じ） |
 | `scripts/pr-push.sh` | pr-create と fix の起点の確立・base 取り込み・push・PR 作成（第 4 弾）。モードは `prepare` / `push` / `pr`。**封筒を使わない**。出力の最後の 1 行は `PR_PUSH_RESULT {…}` |
 | `scripts/reply-resolve.sh` | Merge ループの fix による定型の対応報告の返信と resolve（Issue #759）。**封筒を使わない**（進捗専用）。出力の最後の 1 行は `REPLY_RESOLVE_RESULT {…}`。書き込みは返信と resolve の 2 mutation だけ（静的ガードが決め打ちの 2 行だけを許可）。防ぐもの: 返信本文への未信頼入力の混入・返信失敗スレッドの resolve・`--allow` 外のスレッド・HEAD/origin/PR head 不一致での投稿。防がないもの: 許可リスト内の修正していないスレッドへの定型返信 |
@@ -23,6 +23,7 @@
 | `scripts/fetch-tree.sh` | イシューツリーの取得（Issue #668）。入力は `--nonce`・`--root`（親イシュー番号）・`--repo`（任意）。`gh api` の GET だけで、`sub_issues` のページ送り・closed ノードの貫通・siblingIndex の付与・件数と番号重複の自己点検を決定的に行う。出力は 1 ノード 1 行の TSV（ページ数が 2 以上のときは封筒だけで、payload に `dir`・`tsvSha256` が加わる。`--nonce <nonce> --page <P> --dir <dir>` が 1 ページぶんの行とそのページの封筒を返す。Issue #690）（number / parent / siblingIndex / state / subIssuesTotal / title）と、最後の 1 行の封筒（payload は `count`・`inputSha256`・`nodesSha256`）。**封筒を使う**。取得失敗・件数不一致・出力過大（約 350 ノード超）は封筒を出さず非 0 で終わる。出力が 1 ページに収まらないときは専用の一時ディレクトリへ全行を書いて `--page` で読み、`--release` で片づける（Issue #673）。 |
 | `scripts/lib/fetch-tree-lib.sh` | `fetch-tree.sh` の判定とダイジェストの関数（`ft_*`。title の表示形・行ダイジェスト・`nodesSha256`・`structSha256`・`taskIdSha256`・入力の束縛。ホストの `treeNodesDigest` と同じ定義を共有する） |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
+| `scripts/lib/policy-paths-lib.sh` | `observe-pr.sh --mode policy-paths` の判定（`policy_paths_count`。方針パス = `.github/workflows/`・`.github/actions/`・CODEOWNERS 3 箇所の件数と、`--allow` に無い件数。リネームは新旧を数える。純関数・source 専用。Issue #760） |
 | `scripts/lib/added-files-lib.sh` | `observe-pr.sh --mode added-files` の判定（`added_files_numbered_dirs` / `added_files_classify`。新規追加ファイルの同じパス・同じディレクトリの同じ連番の衝突を数える純関数。Issue #658） |
 | `scripts/lib/observe-checks-lib.sh` | `observe-pr.sh --mode checks --until settled` の分類（`checks_classify`。check-run と commit status を合格 / 未完了 / 不合格の件数にする純関数。第 8 弾） |
 | `scripts/lib/push-verify.sh` | push の前後でリモート head を突き合わせる共通部（`pv_push_verified`。第 3 弾）。`base-merge.sh` が使い、以降 pr-create の push と fix の push 検証も同じ部品へ移す |
@@ -107,6 +108,16 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - **payload にパスの文字列を入れない**: 件数（`added` / `numbered` / `samePath` / `seqPeer` / `seqBase` / `truncated`）・state の語彙・依頼した peers の部分集合の PR 番号だけ。fix へ渡す合成 finding もホストの整数と固定文だけで作り、改番の対象は fix が自分で `git diff` と `gh pr view <番号> --json files` から確かめる
 - **パスはクエリに埋め込まない**: PR 番号（検証済みの正の整数）だけを GraphQL のエイリアスに使い、base の木を引く式（`<base>:<dir>`）は GraphQL 変数（`-f`）で渡す
 - **範囲を限る**: 比べる PR は同じランのものだけ（30 本まで）・新規追加（`ADDED`）だけ・同じディレクトリの中だけ。ファイルが 100 件を超える PR は先頭 100 件だけで比べ（見逃す側に倒れる）、連番ファイルのディレクトリが 20 を超える PR は取得失敗として扱う
+
+## 方針パスのゲート（`observe-pr.sh --mode policy-paths`。Issue #760）
+
+`fixCount > 0` の PR が `ready` になった後、added-files ゲートとマージ実行の前に、計画で宣言していない方針パス（CI 構成・CODEOWNERS）の変更を検出して `blocked` にする。専用の転記エージェント（`merge:policy-paths:#N`）が固定コマンドを実行し、ホストが封筒の nonce・入力のハッシュ（他のモードの 9 行に `--allow` の並びの行を足したもの）・sha256 を照合して `classifyPolicyPaths` で分類する。fix の summary や monitor の `changedFiles` は使わない（自己申告）。
+
+- **防ぐもの**: 指示に従ったうえでの範囲外の変更（指摘に応える過程で入る CI 方針の変更）。自己申告に依らず、PR と base の差分のファイル一覧と計画の宣言から決定的に判定する。fix のコミット範囲は base 取り込みの差分が混ざるため比べない
+- **フェイルクローズ**: 判定は止める方向にしか効かないが、added-files と違い、観測できない場合（封筒の不一致・取得失敗・一覧が REST の上限 3,000 件で切り詰められた）も飛ばさず `blocked` にする。飛ばすと計画外の CI 方針がそのまま自動マージされ得るため。止まる範囲は `fixCount > 0` の PR だけで、同じ args の再実行で解ける
+- **入力の検証**: 許可（`planPolicyPaths`）は Issue 本文を読んだ Plan エージェント由来で、コマンド行と `inputSha256` に載る。ホスト（`sanitizePolicyPaths`・`observeCommand`）とスクリプト（`--allow`）の双方で、文字集合 `[A-Za-z0-9._/-]`・先頭 `-` `/` 不可・`..` `//` 不可・20 件・重複不可を強制する。jq には `--arg` で渡す
+- **payload にパスの文字列を入れない**: 件数（`files` / `policy` / `unplanned` / `truncated`）と state の語彙だけ
+- **防がないもの**: 封筒を偽造する悪意あるエージェント（偽の「計画外 0 件」は従来の挙動に戻るだけ）、宣言済みのパスの中での過剰な変更、ファイルでない設定変更（API による ruleset 変更は既存の `REPO_SETTINGS_POLICY` が扱う）。fix を経ていない PR の Implement による計画外変更は対象外
 
 ## 第 3 弾: base 取り込みと push 後確認（`base-merge.sh`・`observe-pr.sh --mode push`）
 

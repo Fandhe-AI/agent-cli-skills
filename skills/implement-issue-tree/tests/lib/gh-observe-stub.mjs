@@ -10,6 +10,8 @@
 //   statuses      gh api … …/commits/<sha>/statuses
 //   rules         gh api … …/rules/branches/<base>
 //   reviews       gh api … …/pulls/<n>/reviews
+//   pulls         gh api …/pulls/<n>（policy-paths: state・merged・changed_files）
+//   pulls-files   gh api … …/pulls/<n>/files?per_page=100（policy-paths: ページごとの配列）
 //   graphql       gh api graphql …
 //   prchecks      gh pr checks <n> [-R repo] --json state [--jq …]（--jq は prview と同じ扱い。第 6 弾 merge-gate.sh）
 //   rulesets-<id> gh api …/rulesets/<id>（merge-gate.sh の G0 が bypass_actors と enforcement を読む）
@@ -58,6 +60,8 @@ elif [ "$1" = "api" ]; then
       repos/*/rulesets/*) key=rulesets-\${a##*/} ;;
       apps/*) key=apps-\${a##*/} ;;
       repos/*/pulls/*/reviews) key=reviews ;;
+      repos/*/pulls/*/files*) key=pulls-files ;;
+      repos/*/pulls/[0-9]*) key=pulls ;;
     esac
   done
 fi
