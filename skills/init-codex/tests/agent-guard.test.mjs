@@ -127,6 +127,8 @@ const GIT_DENY = [
 ]
 
 const GIT_ALLOW = [
+  'git -ccolor.ui=never status',
+  'git -cuser.name=x commit -m y',
   // -n が commit 以外・--no-verify でない -n
   'git log -n 5',
   'git log --oneline -n 3 | head',
@@ -210,6 +212,11 @@ const FIX_DENY = [
   ['git --config-env=core.hooksPath=HP commit -m x', 'no-verify'],
   ['git --config-env core.hooksPath=HP commit -m x', 'no-verify'],
   ['git -c alias.p=push p -f', 'no-verify'],
+  // -c の連結形（-c<key>=<value>）と --config-env の = 連結形
+  ['git -ccore.hooksPath=/dev/null commit -m x', 'no-verify'],
+  ['git -calias.p=push p -f', 'no-verify'],
+  ['git -cCore.HooksPath=x commit -m y', 'no-verify'],
+  ['git --config-env=core.hooksPath=HP push', 'no-verify'],
   ['git -c alias.c="commit -n" c', 'no-verify'],
   ['git -c alias.l=log l', 'no-verify'], // 値を解決せず alias の定義自体を拒否する（設計上の over-deny）
   ['HUSKY=0 git commit -m x', 'no-verify'],
@@ -369,6 +376,12 @@ const MG_MERGE_DENY = [
   'gh -R o/r pr review 5 -a',
   'gh pr review 5 -ca',
   'gh pr review 5 -b "x; y" -a',
+  // フルパス・相対パスの gh
+  '/usr/bin/gh pr review 5 -a',
+  '/opt/homebrew/bin/gh pr review -a 5',
+  './gh pr review 5 -a',
+  'gh pr review 5 -b gh -a',
+  'gh pr review 5 -b /usr/bin/gh -a',
   '(gh pr review 5 -a)',
   'gh pr review 5 -c -b ok; gh pr review 6 -a',
   'gh pr review 5 -ab ok && ls',
@@ -413,6 +426,7 @@ const MG_OBFUSCATED_DENY = [
 ]
 
 const MG_ALLOW = [
+  '/usr/bin/gh pr review 5 -c -b ok',
   `gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/main" | jq '[.[][] | select(.type == "required_status_checks")] | length'`,
   `gh api "repos/{owner}/{repo}/rulesets/<id>" --jq '.bypass_actors | type == "array" and length == 0'`,
   'gh api repos/o/r/rulesets/123 --jq .enforcement',

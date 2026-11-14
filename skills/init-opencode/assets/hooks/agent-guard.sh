@@ -187,6 +187,7 @@ function git_args(j, hk,   t, scmd, k, a, hooked, dd, eq, nm) {
   while (j <= ntok) {
     t = tok[j]
     if (t == "-c" || t == "--config-env") { if (conf_bad(tok[j + 1])) setv("no-verify"); j += 2 }
+    else if (substr(t, 1, 2) == "-c" && length(t) > 2) { if (conf_bad(substr(t, 3))) setv("no-verify"); j++ }
     else if (t == "-C" || t == "--git-dir" || t == "--work-tree" || t == "--namespace" || t == "--super-prefix") j += 2
     else if (substr(t, 1, 12) == "--config-env" && conf_bad(substr(t, 14))) { setv("no-verify"); j++ }
     else if (substr(t, 1, 1) == "-") j++
@@ -662,6 +663,11 @@ review_short_approve() {
   esac
   while IFS= read -r tok; do
     if [ "$tok" = "$SEP_MARK" ]; then st=0; skip=0; continue; fi
+    # コマンド名はフルパス・相対パスでも basename で比較する（normalize_gh_tokens と同じ基準）。
+    case "$tok" in
+      */gh) tok=gh ;;
+      */git) tok=git ;;
+    esac
     if [ "$st" -lt 3 ]; then
       case "$tok" in
         -*) continue ;;
@@ -673,11 +679,12 @@ review_short_approve() {
       esac
       continue
     fi
+    # 値トークン（-b gh の gh 等）をコマンド名と読まないよう、skip を先に消化する。
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
     case "$tok" in
       gh) st=1; skip=0; continue ;;
       git) st=0; skip=0; continue ;;
     esac
-    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
     case "$tok" in
       --body|--body-file) skip=1 ;;
       --*) : ;;
