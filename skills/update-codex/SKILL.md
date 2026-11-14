@@ -382,7 +382,7 @@ BSD と GNU で戻り値が異なる）。
 |-----------|------|
 | 無い | 宛先の親を作って移動する |
 | 有り・内容が同一 | 退避側のファイルを捨てる |
-| 有り・内容が異なる | 移動せず差分を提示する。承認済みの更新（hooks・rules・hooks.json）は、差分を確認した利用者が `APPLY_DIFF=1` を付けて再実行したときだけ置き換える。agent ファイルは利用者の編集を守るため、`APPLY_DIFF=1` でも置き換えない |
+| 有り・内容が異なる | 移動せず差分を提示する。承認済みの更新（hooks・rules・hooks.json）は、差分を確認した利用者が `APPLY_DIFF=1` を付けて再実行したときだけ置き換える。agent ファイルは利用者の編集を守るため、`APPLY_DIFF=1` でも置き換えず、退避側のファイルは削除する |
 
 ユーザーに提示するコマンド（ユーザー自身が、権限のある端末で実行する）。配列には承認済みの名前だけを入れて渡す。
 
@@ -413,7 +413,8 @@ for f in "${approved_rules[@]}"; do place "${S}/rules/${f}" ".codex/rules/${f}" 
 for a in "${approved_agents[@]}"; do
   if [ -e "${S}/agents/${a}.toml" ] && [ -e ".codex/agents/${a}.toml" ] \
      && ! cmp -s -- "${S}/agents/${a}.toml" ".codex/agents/${a}.toml"; then
-    echo "既存を保持（スキップ）: .codex/agents/${a}.toml"   # 利用者の編集を守る。失敗には数えない
+    echo "既存を保持（スキップ・退避側は削除）: .codex/agents/${a}.toml"   # 利用者の編集を守る。失敗には数えない
+    rm -f -- "${S}/agents/${a}.toml"   # 退避側は不要。残すと後始末の rmdir が失敗する
   else
     place "${S}/agents/${a}.toml" ".codex/agents/${a}.toml" || rc=1
   fi
