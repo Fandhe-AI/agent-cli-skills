@@ -288,6 +288,28 @@ describe('opencode-config-merge', { concurrency: true }, () => {
     assert.equal(statSync(t).mode & 0o777, 0o600)
   })
 
+  // umask を指定した子シェルから実行する。新規作成は 0666 & ~umask（シェル版 2 本と同じ）、
+  // 既存ファイルの置換は元のモードを保つ（umask に影響されない）。
+  async function mergeUmask(umask, target) {
+    const r = await run('/bin/sh', ['-c', `umask ${umask}; exec "$0" "$@"`, process.execPath, SCRIPT, '--target', target, '--template', TEMPLATE])
+    return r.stdout.trimEnd().split('\n').pop()
+  }
+
+  it('新規作成のモードは umask に従う（077 → 0600・002 → 0664・022 → 0644）', async () => {
+    for (const [umask, mode] of [['077', 0o600], ['002', 0o664], ['022', 0o644]]) {
+      const d = tmp(); const t = join(d, 'opencode.jsonc')
+      assert.equal(await mergeUmask(umask, t), 'OPENCODE_CONFIG_MERGE_RESULT created')
+      assert.equal(statSync(t).mode & 0o777, mode, `umask ${umask}`)
+    }
+  })
+
+  it('既存ファイルの置換は元のモードを保つ（umask 077 でも 0664 のまま）', async () => {
+    const d = tmp(); const t = write(d, { permissions: [] })
+    const { chmodSync } = await import('node:fs'); chmodSync(t, 0o664)
+    assert.equal(await mergeUmask('077', t), 'OPENCODE_CONFIG_MERGE_RESULT merged')
+    assert.equal(statSync(t).mode & 0o777, 0o664)
+  })
+
   it('引数の誤りは error-usage（終了コード 2）', async () => {
     const r = await run(process.execPath, [SCRIPT, '--target']).catch((e) => e)
     assert.equal(r.code, 2); assert.match(r.stdout, /OPENCODE_CONFIG_MERGE_RESULT error-usage/)

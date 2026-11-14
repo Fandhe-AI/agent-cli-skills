@@ -92,6 +92,8 @@ function judge(command, subagent, timeoutMs) {
     input: JSON.stringify({ command, subagent }),
     encoding: "utf8",
     timeout: timeoutMs,
+    // 既定の SIGTERM は無視・遅延され得る。時間切れのときに確実に止めて、同期待ちを timeoutMs で打ち切る。
+    killSignal: "SIGKILL",
   })
   // error は起動失敗・時間切れ（ETIMEDOUT）、signal は kill された場合。
   if (r.error || r.signal || typeof r.stdout !== "string") return { deny: true, message: MSG_GUARD_FAILED }

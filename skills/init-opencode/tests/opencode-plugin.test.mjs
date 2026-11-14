@@ -505,7 +505,7 @@ describe('ガードの同期実行の合計上限（#781）', () => {
     const orig = cp.spawnSync
     const calls = []
     cp.spawnSync = (file, args, opts) => {
-      calls.push({ timeout: opts.timeout })
+      calls.push({ timeout: opts.timeout, killSignal: opts.killSignal })
       mock.timers.tick(body.costMs)
       return { status: 0, signal: null, stdout: 'AGENT_GUARD_RESULT allow\n', stderr: '' }
     }
@@ -525,6 +525,20 @@ describe('ガードの同期実行の合計上限（#781）', () => {
       assert.match(event.message, /上限を超えた/)
       // 1 回目・2 回目は 5 秒、3 回目は残り 2 秒だけ待てる。4 回目以降は実行されない。
       assert.deepEqual(fake.calls.map((c) => c.timeout), [5000, 5000, 2000])
+    } finally {
+      fake.restore()
+      mock.timers.reset()
+    }
+  })
+
+  it('spawnSync に killSignal: SIGKILL を渡す（時間切れでガードの bash を確実に止める）', async () => {
+    const url = layout()
+    mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+    const fake = withFakeSpawn({ costMs: 100 })
+    try {
+      const { evaluate } = await load(url, 'main')
+      await evaluate(shellEvent(['git status', 'git log']))
+      assert.deepEqual(fake.calls.map((c) => c.killSignal), ['SIGKILL', 'SIGKILL'])
     } finally {
       fake.restore()
       mock.timers.reset()

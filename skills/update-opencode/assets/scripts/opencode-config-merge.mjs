@@ -182,7 +182,8 @@ function main() {
   if (st === null) {
     if (!args.check) {
       mkdirSync(dirname(target), { recursive: true })
-      atomicWrite(target, templateRaw.endsWith('\n') ? templateRaw : `${templateRaw}\n`, 0o644, null)
+      // 新規作成は umask に従う（シェル版 2 本と同じ 0666 & ~umask）。既存ファイルの置換は元のモードを引き継ぐ（下の merged 経路）。
+      atomicWrite(target, templateRaw.endsWith('\n') ? templateRaw : `${templateRaw}\n`, 0o666 & ~process.umask(), null)
     }
     finish('created')
   }
