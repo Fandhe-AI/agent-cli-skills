@@ -139,6 +139,8 @@ cp "${ASSETS}/opencode/agents/"*.md "${TARGET}/.opencode/agents/"
 
 - plugin は `import.meta.url` から `../../hooks/agent-guard.sh` を解決するため、上の相対配置を崩さない（パスの書き換えは不要）
 - `opencode.jsonc` は既存なら上書きしない（`[ -e ... ] ||` で飛ばす）。Step 2 で設定が無いことを確認済みだが、念のためである
+- `opencode.jsonc` は補助層で、plugin（主判定）が読み込めない状態でも典型形の force push と `--no-verify` だけは止める。字面一致のため `git push origin main --force` のような順序違いは通る（plugin が止める）。末尾の ` *` は引数なしにも一致する。`--force-with-lease` / `--force-if-includes` も既存コミットを消せるため止める
+- 生成する `opencode.jsonc` にはコメントを書かない。コメントがあると、後から利用者が規則を足したときに `update-opencode` の自動マージが `needs-manual`（手動経路）になるため、説明はこの SKILL.md に置く
 - plugin は package.json も import も要らない素の object export。`ask` は使わない（`--auto` 下で自動承認されるため、deny だけを使う）
 - agents の本文は、対象リポジトリの言語・構成に合わせて必要なら追記する（承認済みの範囲で）
 - 秘密情報（トークン・パスワード）をどのファイルにも書かない
@@ -223,11 +225,27 @@ OpenCode・Claude Code・端末から実行している場合は、この節を�
 ```bash
 cd "<target>"
 set -o pipefail
+CFG="$(pwd -P)/opencode.jsonc"   # debug config の path は物理パスで返る
+
+# debug config は設定ソースごとの {info,path,type} の配列で、トップレベルに .permissions は無い。
+# path が CFG の要素の .info を取り出す。配列でない・該当要素が 1 件でないときは失敗し、0 件扱いにしない
+proj_info() {
+  opencode debug config --standalone | jq -ce --arg p "${CFG}" '
+    if type != "array" then error("出力が配列でない") else . end
+    | [.[] | select(.path == $p and (.info | type) == "object")] as $m
+    | if ($m | length) == 1 then $m[0].info else error("該当要素が 1 件でない") end'
+}
 
 # 1) permissions / policies が解決後の設定に残っている（未知キーは黙って消えるため必須）
-opencode debug config --standalone \
-  | jq -r '"permissions_deny_shell=\([.permissions[]? | select(.action=="shell" and .effect=="deny")] | length) policies_deny=\([.policies[]? | select(.effect=="deny")] | length)"'
-echo "exit=$?"
+if info="$(proj_info)" && [ -n "${info}" ]; then
+  printf '%s' "${info}" | jq -er '
+    def arr(k): (.[k] // []) | if type == "array" then . else error("\(k) が配列でない") end;
+    "permissions_deny_shell=\([arr("permissions")[] | select(.action=="shell" and .effect=="deny")] | length) policies_deny=\([arr("policies")[] | select(.effect=="deny")] | length)"'
+  echo "exit=$?"
+else
+  echo "検証不能: debug config の出力から ${CFG} の要素を取り出せない（0 件とは扱わない）"
+fi
+unset info
 
 # 2) 3 つの agent が見える（plugin の setup 完了まで待つ。出力は表示せず名前の有無だけ見る）
 out="$(opencode debug agents --standalone 2>&1)"; rc=$?
@@ -257,7 +275,7 @@ grep -c 'agent-cli-skills:agents-md:start' AGENTS.md
 
 | 確認 | 期待 |
 |------|------|
-| 1) 設定の残存 | `permissions_deny_shell` が 1 以上、`policies_deny` が 1 以上、終了コード 0。0 なら未知キーとして消えている |
+| 1) 設定の残存 | `permissions_deny_shell` が 1 以上、`policies_deny` が 1 以上、終了コード 0。0 なら未知キーとして消えている。`検証不能` と出たら完了とせず、出力の形・`opencode.jsonc` のパスを確かめる |
 | 2) agents | `debug agents exit=0` かつ 3 件とも `agent ok` |
 | 3) force push | 最終行 `AGENT_GUARD_RESULT deny force-push`、終了コード 2 |
 | 4) 通常コミット | 最終行 `AGENT_GUARD_RESULT allow`、終了コード 0 |
@@ -277,10 +295,19 @@ grep -c 'agent-cli-skills:agents-md:start' AGENTS.md
 SANDBOX="$(mktemp -d)"
 git init --bare "${SANDBOX}/origin.git"
 git init "${SANDBOX}/work" && cd "${SANDBOX}/work"
+git config user.name t && git config user.email t@example.invalid   # 使い捨てのローカル設定。対照の git commit も通す
 git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
+# 初期コミットを作り bare へ初回 push しておく（force push の拒否を remote の sha で判定できるようにする）
+git commit --allow-empty -m "chore: init"
+git push -u origin HEAD
+git ls-remote origin   # 実行前の sha を控える
 # 対象の .opencode/ と opencode.jsonc をここへコピーし、OpenCode（`opencode run --auto` でもよい）を
 # このディレクトリで起動して `git push --force` が拒否されることを確かめる（--auto でも deny は効く。ask を使わないため）
 ```
+
+プロンプトには「使い捨てリポジトリでのガードの動作テストである」ことを明示する。配布した AGENTS.md の指示により、
+モデルが禁止コマンドを自分から実行しないことがあるためである。判定はモデルの発言ではなく、拒否メッセージ
+（`Permission denied: shell` / `agent-guard:`）と副作用の無さ（`git ls-remote origin` の sha が実行前と同じ）で行う。
 
 確認後は `${SANDBOX}` を利用者が自分で削除する。`rm -rf` は案内しない。使い捨てを用意できないときは、実セッションの確認は行わず「未検証」と報告する。
 
@@ -304,7 +331,7 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 完了とみなす条件は、Step 5 の 6 項目が期待どおりで、証拠（出力と終了コード）を報告に引用していること。
 具体的には次のとおり。
 
-- `opencode debug config --standalone` の jq 抜粋で `permissions` / `policies` の deny が 1 件以上残っている（opencode 未導入なら「未検証」と明記）
+- `opencode debug config --standalone` の出力のうち `opencode.jsonc` に対応する要素の jq 抜粋で `permissions` / `policies` の deny が 1 件以上残っている（`検証不能` は不合格。opencode 未導入なら「未検証」と明記）
 - `opencode debug agents --standalone` が終了コード 0 で、3 agent が見える
 - ガードが force push で deny、通常コミットで allow、サブエージェントのマージで deny を返す
 - AGENTS.md の管理区間の開始マーカー数が 1
