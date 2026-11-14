@@ -4,13 +4,14 @@
 // 対象リポジトリでの配置（.opencode/plugins/agent-guard/index.js と .opencode/hooks/agent-guard.sh）を
 // 一時ディレクトリへ再現し、plugin を動的 import して ctx をスタブで渡す。実際の OpenCode は起動しない。
 // event の形は OpenCode v2.2.7 の実測値（permission.evaluate の shell event）を書き写したもの。
-// ctx.session.get の呼び方（{ sessionID }）と返り値（子だけ parentID を持つ）も同じ実測による。
+// ctx.session.get の呼び方（{ sessionID }）と返り値（`{ id, projectID, agent, ... }` の平らなオブジェクトで、
+// 子だけが `parentID` を持つ。包まれていない）も同じ実測による。
 //
 // 実時間の待機は行わない。ガードの時間切れ（5 秒）は実際には待たず、signal で kill された場合
 // （spawnSync の r.signal が立つ点は時間切れと同じ分岐）で代用する。
-import { describe, it, after } from 'node:test'
+import { describe, it, after, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, rmSync, chmodSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -37,15 +38,32 @@ function layout(guard = 'real') {
   return pathToFileURL(join(pluginDir, 'index.js')).href
 }
 
-// session: 'main' = parentID なし / 'sub' = parentID あり / 'throw' = get が例外 / 'null' = 返り値なし
+// session: 'main' = parentID なし / 'sub' = parentID あり / 'throw' = get が例外 / 'null' = 返り値なし /
+// 'wrapped' = { data: {...} } に包まれた形 / 'idmismatch' = 別セッションの id / 'noid' = id なし /
+// 'noproject' = projectID なし / 'parent-null' = parentID が null / 'parent-empty' = 空文字 / 'parent-number' = 数値 /
+// 'parent-alias' = parentId（別綴り）/ 'parent-other' = parent / 'hang' = 応答しない
+// main・sub の形は v2.2.7 の実測（`{ id, [parentID,] projectID, agent, cost, tokens, time, title, location }`）。
+const PROJECT_ID = '162d4e7639e760ecdba7c373e38461850969ff16'
+const PARENT_ID = 'ses_parent0000000000000000'
 function sessionStub(kind, calls) {
   return {
     async get(arg) {
       calls.push(arg)
+      const base = { id: arg.sessionID, projectID: PROJECT_ID, agent: 'build', title: 'main' }
       if (kind === 'throw') throw new Error('session not found')
+      if (kind === 'hang') return new Promise(() => {})
       if (kind === 'null') return null
-      if (kind === 'sub') return { id: arg.sessionID, parentID: 'ses_parent0000000000000000', agent: 'general', title: 'child' }
-      return { id: arg.sessionID, title: 'main' }
+      if (kind === 'sub') return { ...base, parentID: PARENT_ID, agent: 'general', title: 'child' }
+      if (kind === 'wrapped') return { data: { ...base, parentID: PARENT_ID } }
+      if (kind === 'idmismatch') return { ...base, id: 'ses_other00000000000000000000' }
+      if (kind === 'noid') { const { id, ...rest } = base; return rest }
+      if (kind === 'noproject') { const { projectID, ...rest } = base; return rest }
+      if (kind === 'parent-null') return { ...base, parentID: null }
+      if (kind === 'parent-empty') return { ...base, parentID: '' }
+      if (kind === 'parent-number') return { ...base, parentID: 42 }
+      if (kind === 'parent-alias') return { ...base, parentId: PARENT_ID }
+      if (kind === 'parent-other') return { ...base, parent: PARENT_ID }
+      return base
     },
   }
 }
@@ -180,6 +198,221 @@ describe('agent-guard plugin', { concurrency: true }, () => {
     }
   })
 
+  // #778: session.get の返り値の形が想定と違うとき、main 扱い（マージ制限を外す）に倒れない。
+  describe('サブエージェント判定は形を確かめたときだけ main と判定する（#778）', { concurrency: true }, () => {
+    const odd = [
+      ['返り値が { data: {...} } に包まれている（子のはずが parentID を読めない）', 'wrapped'],
+      ['返り値の id が sessionID と違う', 'idmismatch'],
+      ['返り値に id が無い', 'noid'],
+      ['parentID が空文字', 'parent-empty'],
+      ['parentID が数値', 'parent-number'],
+      ['parentID が null（親を表すキーがあるため main と確定しない）', 'parent-null'],
+      ['別綴りの親キー parentId がある', 'parent-alias'],
+      ['親を表す別のキー parent がある', 'parent-other'],
+      ['形を確かめるキー projectID が無い', 'noproject'],
+    ]
+    for (const [name, kind] of odd) {
+      it(`${name} → 判定不能（null）としてマージ系を deny・通常コマンドは不変`, async () => {
+        const url = layout()
+        const merge = await run(url, kind, shellEvent(['gh pr merge 1 --squash']))
+        assert.equal(merge.event.effect, 'deny')
+        assert.match(merge.event.message, /サブエージェント/)
+        const normal = await run(url, kind, shellEvent(['git status']))
+        assert.equal(normal.event.effect, 'allow')
+      })
+    }
+
+    it('id が一致し、projectID があり、親を表すキーがどれも無いときだけ main と判定してマージ系を許す', async () => {
+      const { event } = await run(layout(), 'main', shellEvent(['gh pr merge 1 --squash']))
+      assert.equal(event.effect, 'allow')
+    })
+
+    it('id が一致し parentID が非空の文字列なら子としてマージ系を deny', async () => {
+      const { event } = await run(layout(), 'sub', shellEvent(['gh pr merge 1 --squash']))
+      assert.equal(event.effect, 'deny')
+    })
+  })
+
+  // #778: shell 以外の action 名を「全面素通し」にしない。
+  describe('action の判定（#778）', { concurrency: true }, () => {
+    it('shell・edit 以外の既知の組み込み action は触らず（保護パスの read も不変） session.get も呼ばない', async () => {
+      for (const action of ['read', 'glob', 'grep', 'subagent', 'skill', 'question', 'webfetch', 'websearch', 'external_directory', 'browser']) {
+        const { event, calls } = await run(layout(), 'main', shellEvent(['git push origin main --force'], { action }))
+        assert.equal(event.effect, 'allow', action)
+        assert.equal(calls.length, 0, action)
+      }
+    })
+
+    it('action 名が shell から変わっても、未知の action の resources をガードへ渡して deny する', async () => {
+      for (const action of ['bash', 'shell_exec', 'Shell', 'terminal']) {
+        const { event } = await run(layout(), 'main', shellEvent(['git push origin main --force'], { action }))
+        assert.equal(event.effect, 'deny', action)
+        assert.match(event.message, /force/)
+      }
+    })
+
+    it('未知の action でもガードが allow のコマンド・MCP 風の resource `*` は不変（誤 deny しない）', async () => {
+      const a = await run(layout(), 'main', shellEvent(['git status'], { action: 'bash' }))
+      assert.equal(a.event.effect, 'allow')
+      const mcp = await run(layout(), 'main', shellEvent(['*'], { action: 'github_create_issue' }))
+      assert.equal(mcp.event.effect, 'allow')
+      assert.equal(mcp.event.message, undefined)
+      for (const kind of ['sub', 'throw', 'wrapped']) {
+        const e = await run(layout(), kind, shellEvent(['*'], { action: 'github_create_issue' }))
+        assert.equal(e.event.effect, 'allow', kind)
+      }
+    })
+
+    it('未知の action でもサブエージェントのマージ系は deny（subagent 判定も同じ経路）', async () => {
+      const { event } = await run(layout(), 'sub', shellEvent(['gh pr merge 1'], { action: 'bash' }))
+      assert.equal(event.effect, 'deny')
+    })
+
+    it('action が文字列でない event は deny', async () => {
+      for (const action of [undefined, null, 42, {}]) {
+        const { event } = await run(layout(), 'main', shellEvent(['git status'], { action }))
+        assert.equal(event.effect, 'deny', String(action))
+        assert.match(event.message, /^agent-guard: /)
+      }
+    })
+
+    it('すでに deny の未知 action は変えない', async () => {
+      const { event } = await run(layout(), 'main', shellEvent(['git push --force origin main'], { action: 'bash', effect: 'deny', message: '他の hook' }))
+      assert.equal(event.message, '他の hook')
+    })
+  })
+
+  // #777: config の deny が効かない書き方（大文字・./・..）の edit を plugin が止める補助層。
+  describe('ガード・plugin・設定への edit の deny（#777）', { concurrency: true }, () => {
+    const protectedPaths = [
+      '.opencode/hooks/agent-guard.sh',
+      '.opencode/plugins/agent-guard/index.js',
+      '.opencode/plugins/other/index.js',
+      '.opencode/opencode.jsonc',
+      '.opencode/opencode.json',
+      'opencode.jsonc',
+      'opencode.json',
+      '.OPENCODE/hooks/agent-guard.sh',
+      '.Opencode/Plugins/agent-guard/INDEX.js',
+      'OpenCode.JSONC',
+      './.opencode/hooks/agent-guard.sh',
+      'src/../.opencode/hooks/agent-guard.sh',
+      '.opencode\\hooks\\agent-guard.sh',
+      // サブディレクトリから起動したときの相対パス・絶対パス・入れ子の設定
+      '../.opencode/hooks/agent-guard.sh',
+      '../../.OPENCODE/Plugins/agent-guard/index.js',
+      '../opencode.jsonc',
+      '/work/repo/.opencode/hooks/agent-guard.sh',
+      'packages/a/opencode.json',
+      // 単数形の plugin ディレクトリ・直置きの .js（v2.2.7 の実機で読み込まれて実行されることを確認）
+      '.opencode/plugin/agent-guard/index.js',
+      '.opencode/plugin/x.js',
+      '.opencode/plugins/direct.js',
+      // Unicode の大文字小文字の畳み込み・互換文字（ſ は大文字化すると S になる）
+      '.opencode/hookſ/agent-guard.sh',
+      '.opencode/pluginſ/agent-guard/index.js',
+      '.opencode/ｈｏｏｋｓ/agent-guard.sh',
+      '.opencode/plugıns/x.js',
+    ]
+    for (const path of protectedPaths) {
+      it(`edit ${path} → deny（固定文・session.get も呼ばない）`, async () => {
+        const { event, calls } = await run(layout(), 'main', shellEvent([path], { action: 'edit' }))
+        assert.equal(event.effect, 'deny')
+        assert.match(event.message, /^agent-guard: /)
+        assert.equal(calls.length, 0)
+      })
+    }
+
+    it('deny の message に入力のパス文字列を含めない', async () => {
+      const marker = 'SECRET_MARKER_8f3a'
+      const { event } = await run(layout(), 'main', shellEvent([`.opencode/hooks/${marker}.sh`], { action: 'edit' }))
+      assert.equal(event.effect, 'deny')
+      assert.ok(!event.message.includes(marker))
+    })
+
+    const allowedPaths = ['file.txt', 'src/index.js', '.opencode/agents/implementer.md', 'AGENTS.md', '.opencode/skills/x/SKILL.md', 'docs/opencode.jsonc.md', 'myopencode.jsonc', '../src/index.js', '.opencode/plugin-notes.md', '.opencode/tool/t.js', '.opencode/commands/c.md']
+    for (const path of allowedPaths) {
+      it(`edit ${path} は不変`, async () => {
+        const { event } = await run(layout(), 'main', shellEvent([path], { action: 'edit' }))
+        assert.equal(event.effect, 'allow')
+        assert.equal(event.message, undefined)
+      })
+    }
+
+    it('複数 resources（patch）のうち 1 つでも保護対象なら deny', async () => {
+      const { event } = await run(layout(), 'main', shellEvent(['file.txt', '.OPENCODE/hooks/agent-guard.sh'], { action: 'edit' }))
+      assert.equal(event.effect, 'deny')
+    })
+
+    it('resources が配列でない・文字列でない要素を含む edit は deny', async () => {
+      assert.equal((await run(layout(), 'main', shellEvent('file.txt', { action: 'edit' }))).event.effect, 'deny')
+      assert.equal((await run(layout(), 'main', shellEvent(['file.txt', 42], { action: 'edit' }))).event.effect, 'deny')
+    })
+
+    it('すでに deny の edit は変えない', async () => {
+      const { event } = await run(layout(), 'main', shellEvent(['.opencode/hooks/agent-guard.sh'], { action: 'edit', effect: 'deny', message: '他の hook' }))
+      assert.equal(event.message, '他の hook')
+    })
+  })
+
+  describe('未知の action でも保護パスは守る・execute は素通しにしない（#777 追補）', { concurrency: true }, () => {
+    it('write・patch 等の名前違いの action でも resources が保護パスなら deny（ガードへは渡さない）', async () => {
+      for (const action of ['write', 'patch', 'apply_patch', 'file_write', 'Edit', 'edit_file']) {
+        const { event, calls } = await run(layout(), 'main', shellEvent(['.opencode/hooks/agent-guard.sh'], { action }))
+        assert.equal(event.effect, 'deny', action)
+        assert.match(event.message, /編集できない/, action)
+        assert.equal(calls.length, 0, action)
+      }
+    })
+
+    it('名前違いの action でも ſ・全角・大文字の保護パスは deny、通常のパスは不変', async () => {
+      for (const path of ['.opencode/hookſ/agent-guard.sh', '.opencode/ｈｏｏｋｓ/agent-guard.sh', '.OPENCODE/Plugins/x.js', '../opencode.jsonc']) {
+        const { event } = await run(layout(), 'main', shellEvent([path], { action: 'write' }))
+        assert.equal(event.effect, 'deny', path)
+      }
+      const ok = await run(layout(), 'main', shellEvent(['file.txt', '.opencode/agents/implementer.md'], { action: 'write' }))
+      assert.equal(ok.event.effect, 'allow')
+    })
+
+    it('shell の resources はパスではなくコマンドなので、保護パスを文字列に含んでも git diff 等は不変', async () => {
+      const { event } = await run(layout(), 'main', shellEvent(['git diff ../.opencode/hooks/agent-guard.sh']))
+      assert.equal(event.effect, 'allow')
+    })
+
+    it('execute は素通しにせず resources をガードへ渡す（`*` は allow・コマンド形の force push は deny）', async () => {
+      const ok = await run(layout(), 'main', shellEvent(['*'], { action: 'execute' }))
+      assert.equal(ok.event.effect, 'allow')
+      assert.equal(ok.calls.length, 1)
+      const bad = await run(layout(), 'main', shellEvent(['git push origin main --force'], { action: 'execute' }))
+      assert.equal(bad.event.effect, 'deny')
+    })
+  })
+
+  describe('例外でも deny を試みる（#778 追補）', { concurrency: true }, () => {
+    it('resources の取得が例外を投げる event は deny（例外を呼び出し元へ漏らさない）', async () => {
+      const { evaluate } = await load(layout(), 'main')
+      const e = shellEvent(['git status'])
+      Object.defineProperty(e, 'resources', { get() { throw new Error('boom') } })
+      await evaluate(e)
+      assert.equal(e.effect, 'deny')
+      assert.match(e.message, /^agent-guard: /)
+      assert.ok(!e.message.includes('boom'))
+    })
+
+    it('action の取得が例外を投げる event も deny', async () => {
+      const { evaluate } = await load(layout(), 'main')
+      const e = shellEvent(['git status'])
+      Object.defineProperty(e, 'action', { get() { throw new Error('boom') } })
+      await evaluate(e)
+      assert.equal(e.effect, 'deny')
+    })
+
+    it('deny を書き込めない event（null）は握りつぶさず例外のまま', async () => {
+      const { evaluate } = await load(layout(), 'main')
+      await assert.rejects(() => evaluate(null))
+    })
+  })
+
   describe('fail-closed', { concurrency: true }, () => {
     const cases = [
       ['guard が無い', 'none'],
@@ -213,5 +446,52 @@ describe('agent-guard plugin', { concurrency: true }, () => {
       const { event } = await run(layout(), 'main', shellEvent([]))
       assert.equal(event.effect, 'allow')
     })
+  })
+})
+
+// 実時間を待たないため setTimeout を差し替える。差し替え中は他のテストと並行させない（top-level の describe は逐次）。
+describe('ctx.session.get の時間切れ（#778 追補）', () => {
+  it('応答しない session.get は 3 秒で判定不能（null）になり、マージ系は deny・通常コマンドは不変', async () => {
+    const url = layout()
+    mock.timers.enable({ apis: ['setTimeout'] })
+    try {
+      const results = []
+      for (const cmd of ['gh pr merge 1 --squash', 'git status']) {
+        const { evaluate } = await load(url, 'hang')
+        const event = shellEvent([cmd])
+        const p = evaluate(event).then(() => 'done')
+        mock.timers.tick(2999)
+        await new Promise((r) => setImmediate(r))
+        assert.equal(event.effect, 'allow', '3 秒に満たないうちは待つ')
+        mock.timers.tick(1)
+        const state = await Promise.race([p, new Promise((r) => setImmediate(() => r('hung')))])
+        assert.equal(state, 'done')
+        results.push(event.effect)
+      }
+      assert.deepEqual(results, ['deny', 'allow'])
+    } finally {
+      mock.timers.reset()
+    }
+  })
+})
+
+// PATH の先頭に偽の bash を置いても使われない（PATH 探索に頼らず /bin/bash か /usr/bin/bash を固定で使う）。
+describe('spawn する bash の固定（#778 追補）', () => {
+  const fixed = ['/bin/bash', '/usr/bin/bash'].find((p) => existsSync(p))
+  it('PATH 先頭の偽 bash は実行されない', { skip: fixed ? false : '/bin/bash も /usr/bin/bash も無い環境' }, async () => {
+    const fake = mkdtempSync(join(tmpdir(), 'oc-fakebash-'))
+    tmpDirs.push(fake)
+    const marker = join(fake, 'marker')
+    writeFileSync(join(fake, 'bash'), `#!/bin/sh\ntouch "${marker}"\necho "AGENT_GUARD_RESULT allow"\nexit 0\n`)
+    chmodSync(join(fake, 'bash'), 0o755)
+    const oldPath = process.env.PATH
+    process.env.PATH = `${fake}:${oldPath}`
+    try {
+      const { event } = await run(layout(), 'main', shellEvent(['git push origin main --force']))
+      assert.equal(event.effect, 'deny', '偽 bash の allow に騙されず、実物のガードが deny する')
+      assert.ok(!existsSync(marker), '偽 bash が実行された')
+    } finally {
+      process.env.PATH = oldPath
+    }
   })
 })

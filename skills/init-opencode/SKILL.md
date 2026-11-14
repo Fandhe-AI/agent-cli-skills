@@ -98,7 +98,7 @@ head -20 skills-lock.json 2>/dev/null || true
 | 区分 | 作るもの | 補足 |
 |------|---------|------|
 | AGENTS.md | 管理区間（新規作成・追記・差し替えのどれか） | `agents-md-block.sh --check` で結果語彙を先に示す。管理区間の外は変えない |
-| 設定 | `opencode.jsonc`（直下） | `permissions` / `policies` で典型形の deny。字面一致のため順序違いは止められない補助層 |
+| 設定 | `opencode.jsonc`（直下） | `permissions` / `policies` で典型形の deny。字面一致のため順序違いは止められない補助層。ガード本体・plugin・設定ファイルへの edit の deny も含む（エージェントが置換してガードを無効にするのを防ぐ） |
 | ガード | `.opencode/hooks/agent-guard.sh` と `.opencode/plugins/agent-guard/index.js` | 主判定。plugin が `agent-guard.sh` を呼び、deny ならコマンドを止める。判定は 1 本の bash スクリプトに集約 |
 | agents | `.opencode/agents/` の `researcher.md`・`implementer.md`・`reviewer.md` | researcher / reviewer は shell 不可の読み取り専用 |
 | スキル | 未導入のワークフロースキル（9 件のうち） | `.agents/skills/` に導入。OpenCode 上の動作は保証しない（Step 6 参照） |
@@ -140,6 +140,10 @@ cp "${ASSETS}/opencode/agents/"*.md "${TARGET}/.opencode/agents/"
 - plugin は `import.meta.url` から `../../hooks/agent-guard.sh` を解決するため、上の相対配置を崩さない（パスの書き換えは不要）
 - `opencode.jsonc` は既存なら上書きしない（`[ -e ... ] ||` で飛ばす）。Step 2 で設定が無いことを確認済みだが、念のためである
 - `opencode.jsonc` は補助層で、plugin（主判定）が読み込めない状態でも典型形の force push と `--no-verify` だけは止める。字面一致のため `git push origin main --force` のような順序違いは通る（plugin が止める）。末尾の ` *` は引数なしにも一致する。`--force-with-lease` / `--force-if-includes` も既存コミットを消せるため止める
+- `opencode.jsonc` には、ガード本体・plugin・設定ファイルへの `edit` の deny（`*.opencode/hooks/*`・`*.opencode/plugins/*`・`*.opencode/plugin/*`（単数形も OpenCode v2.2.7 が plugin として読み込む）・`opencode.jsonc`・`*/opencode.jsonc`・`opencode.json`・`*/opencode.json`。先頭の `*` は、サブディレクトリから起動したときの `../.opencode/...` や絶対パスにも一致させるため）も入る。
+  `edit` は write・patch のツールにも掛かるため、エージェントがこれらを置換してガードを無効にする経路を塞ぐ。deny は main のエージェントにも効く。
+  このスキルや `update-opencode` が資産を更新する経路は、上の `cp`・`mkdir` とスクリプトなどシェルコマンドだけで、`edit` の deny の対象外である。
+  OpenCode のセッション内でこのスキルを実行するエージェントは、write・edit のツールで資産を書かず、記載のコマンドで書く。コマンドが拒否されたら、そのコマンドを利用者に提示して端末で実行してもらう
 - 生成する `opencode.jsonc` にはコメントを書かない。コメントがあると、後から利用者が規則を足したときに `update-opencode` の自動マージが `needs-manual`（手動経路）になるため、説明はこの SKILL.md に置く
 - plugin は package.json も import も要らない素の object export。`ask` は使わない（`--auto` 下で自動承認されるため、deny だけを使う）
 - agents の本文は、対象リポジトリの言語・構成に合わせて必要なら追記する（承認済みの範囲で）
@@ -240,7 +244,7 @@ proj_info() {
 if info="$(proj_info)" && [ -n "${info}" ]; then
   printf '%s' "${info}" | jq -er '
     def arr(k): (.[k] // []) | if type == "array" then . else error("\(k) が配列でない") end;
-    "permissions_deny_shell=\([arr("permissions")[] | select(.action=="shell" and .effect=="deny")] | length) policies_deny=\([arr("policies")[] | select(.effect=="deny")] | length)"'
+    "permissions_deny_shell=\([arr("permissions")[] | select(.action=="shell" and .effect=="deny")] | length) permissions_deny_edit=\([arr("permissions")[] | select(.action=="edit" and .effect=="deny")] | length) policies_deny=\([arr("policies")[] | select(.effect=="deny")] | length)"'
   echo "exit=$?"
 else
   echo "検証不能: debug config の出力から ${CFG} の要素を取り出せない（0 件とは扱わない）"
@@ -275,7 +279,7 @@ grep -c 'agent-cli-skills:agents-md:start' AGENTS.md
 
 | 確認 | 期待 |
 |------|------|
-| 1) 設定の残存 | `permissions_deny_shell` が 1 以上、`policies_deny` が 1 以上、終了コード 0。0 なら未知キーとして消えている。`検証不能` と出たら完了とせず、出力の形・`opencode.jsonc` のパスを確かめる |
+| 1) 設定の残存 | `permissions_deny_shell` が 1 以上、`permissions_deny_edit` が 7、`policies_deny` が 1 以上、終了コード 0。0 なら未知キーとして消えている。`検証不能` と出たら完了とせず、出力の形・`opencode.jsonc` のパスを確かめる |
 | 2) agents | `debug agents exit=0` かつ 3 件とも `agent ok` |
 | 3) force push | 最終行 `AGENT_GUARD_RESULT deny force-push`、終了コード 2 |
 | 4) 通常コミット | 最終行 `AGENT_GUARD_RESULT allow`、終了コード 0 |
@@ -319,6 +323,7 @@ git ls-remote origin   # 実行前の sha を控える
 - 導入したスキルと、導入済みで飛ばしたスキル
 - Step 5 の各検証の結果（証拠として出力・終了コードを引用）。未実施のものは「未検証」と明記
 - 次の点を必ず明記する。
+  - ガード本体・plugin・設定ファイルへの `edit` は deny される（main のエージェントにも効く）。これらを変えたいときは `update-opencode` か、人間が端末・エディタで行う
   - ワークフロースキル 9 件は OpenCode 上の動作を、後続の計画（スキルのツール中立化）が終わるまで**保証しない**。導入しただけの状態である
   - ガードは best-effort の攻撃面削減で、**承認境界ではない**。実強制はサーバー側の branch protection と人間によるマージ
   - 9 スキルは `-a codex -a opencode` で入れたため `.claude/skills` には出ない。Claude Code の一覧にも出したい場合は
@@ -352,6 +357,7 @@ git ls-remote origin   # 実行前の sha を控える
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形
   - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
+  - ガード本体・plugin・設定ファイルの保護は `edit` の deny（write・patch を含む）と plugin の edit 判定が担う。シェルでの書き換え（`echo … >`・`sed -i`・`cp`・`mv` 等）は止めない。シンボリックリンク経由の書き換えも検証していない。`.opencode/tool(s)/`・`command(s)/`・`agents/`・`skills/` は edit の deny の対象外（v2.2.7 の実機では tool(s)・command(s) は読み込まれず実行もされなかった。agents と skills は利用者が育てる前提の資産）。`plugins` に任意のディレクトリを列挙する設定は `opencode.jsonc` の保護に頼る。配布先の git の差分で気づく運用に頼る
   - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。`permissions` / `policies` は字面一致のため `git push origin main --force` 等の順序違いは拾えない（plugin が止める）
 - ガードは `jq` が無い・入力を読めない・plugin から呼べないときに deny へ倒れる（fail-closed）。plugin が読み込めないと宣言層だけが効く
 - `skills` CLI は固定版で実行する。失敗しても未固定 `npx` へフォールバックしない（付録参照）

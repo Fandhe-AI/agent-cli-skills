@@ -109,9 +109,74 @@ describe('opencode-config-merge', { concurrency: true }, () => {
     assert.deepEqual(read(t), o)
   })
 
+  // #777: edit deny（ガード本体・plugin・設定ファイルへの edit）を追加した新テンプレートを、
+  // edit deny を持たない旧テンプレート（shell の deny だけ）で導入済みの利用先へ当てる。
+  describe('旧テンプレートで導入済みの設定へ edit deny を追加する（#777）', { concurrency: true }, () => {
+    const oldPerm = own.permissions.filter((r) => r.action === 'shell')
+    const oldPol = own.policies.filter((p) => p.resource.startsWith('shell:'))
+    const editPerm = own.permissions.filter((r) => r.action === 'edit')
+    const editPol = own.policies.filter((p) => p.resource.startsWith('edit:'))
+
+    it('template が edit の deny を permissions と policies に持ち、旧テンプレートは shell のみ', () => {
+      assert.ok(editPerm.length >= 6 && editPol.length >= 6)
+      assert.equal(oldPerm.length + editPerm.length, own.permissions.length)
+      assert.equal(oldPol.length + editPol.length, own.policies.length)
+      assert.ok(oldPerm.length > 0 && oldPol.length > 0)
+    })
+
+    it('旧テンプレート + 利用者の規則の target は merged で edit deny だけが末尾へ付き、利用者の規則と順序は不変・2 回目は unchanged', async () => {
+      const d = tmp()
+      const t = write(d, { model: 'a/b', permissions: [userAllow, ...oldPerm], policies: [userPolicy, ...oldPol] })
+      const r = await merge(t)
+      assert.equal(r.word, 'merged'); assert.equal(r.code, 0)
+      const o = read(t)
+      assert.deepEqual(o.permissions, [userAllow, ...oldPerm, ...editPerm])
+      assert.deepEqual(o.policies, [userPolicy, ...oldPol, ...editPol])
+      assert.equal(o.model, 'a/b')
+      assert.equal((await merge(t)).word, 'unchanged')
+    })
+
+    it('--check は旧テンプレートの target を merged と判定し、書かない', async () => {
+      const d = tmp()
+      const t = write(d, { permissions: [...oldPerm], policies: [...oldPol] })
+      const before = readFileSync(t, 'utf8')
+      const r = await merge(t, ['--check'])
+      assert.equal(r.word, 'merged'); assert.equal(r.code, 0)
+      assert.equal(readFileSync(t, 'utf8'), before)
+    })
+
+    it('利用者の edit 全許可（後続の allow）があれば edit deny を末尾へ再追加し、最後に一致する規則が deny になる', async () => {
+      const d = tmp()
+      const editAll = { action: 'edit', resource: '*', effect: 'allow' }
+      const t = write(d, { permissions: [...oldPerm, ...editPerm, editAll], policies: [...oldPol, ...editPol] })
+      const r = await merge(t)
+      assert.equal(r.word, 'merged')
+      const o = read(t)
+      const at = o.permissions.findIndex((x) => JSON.stringify(x) === JSON.stringify(editAll))
+      assert.ok(at >= 0)
+      assert.deepEqual(o.permissions.slice(-own.permissions.length), own.permissions)
+      // 利用者の allow より後ろに、保護対象ごとの edit deny が戻っている
+      for (const e of editPerm) assert.ok(o.permissions.map((x) => JSON.stringify(x)).lastIndexOf(JSON.stringify(e)) > at, e.resource)
+      assert.equal((await merge(t)).word, 'unchanged')
+    })
+
+    it('コメント付きの旧テンプレート target は needs-manual で edit deny だけを JSON で出し、ファイルは不変', async () => {
+      const d = tmp()
+      const body = `{\n  // 利用者のコメント\n  "permissions": ${JSON.stringify(oldPerm)},\n  "policies": ${JSON.stringify(oldPol)}\n}\n`
+      const t = write(d, body)
+      const r = await merge(t)
+      assert.equal(r.word, 'needs-manual'); assert.equal(r.code, 3)
+      assert.equal(readFileSync(t, 'utf8'), body)
+      const out = JSON.parse(r.stdout.slice(0, r.stdout.lastIndexOf('OPENCODE_CONFIG_MERGE_RESULT')))
+      assert.deepEqual(out.permissions, editPerm)
+      assert.deepEqual(out.policies, editPol)
+    })
+  })
+
   it('template 自体がコメント・末尾カンマを含まない（生成物が自動マージを通る前提）', () => {
     const t = readFileSync(TEMPLATE, 'utf8')
-    assert.ok(!/^\s*\/\//m.test(t) && !t.includes('/*'), 'コメントがある')
+    // 文字列リテラルの中の `/*`（パスの glob）はコメントではないので、文字列を除いてから検査する
+    assert.ok(!/\/\/|\/\*/.test(t.replace(/"(?:[^"\\]|\\.)*"/g, '""')), 'コメントがある')
     assert.doesNotThrow(() => JSON.parse(t))
   })
 

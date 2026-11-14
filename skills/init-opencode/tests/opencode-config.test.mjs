@@ -64,7 +64,9 @@ describe('opencode.jsonc', () => {
   // コメント付きの生成物は update-opencode の自動マージ（opencode-config-merge.mjs）が needs-manual にする。
   it('コメントを含まない純粋な JSON である（利用者が規則を足しても自動マージを通る）', () => {
     const raw = readFileSync(join(OC, 'opencode.jsonc'), 'utf8')
-    assert.ok(!/^\s*\/\//m.test(raw) && !raw.includes('/*'))
+    // 文字列リテラルの中の `/*`（パスの glob）はコメントではないので、文字列を除いてから検査する
+    const outsideStrings = raw.replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    assert.ok(!/\/\/|\/\*/.test(outsideStrings))
     assert.doesNotThrow(() => JSON.parse(raw))
   })
 
@@ -89,12 +91,12 @@ describe('opencode.jsonc', () => {
     }
   })
 
-  it('policies は tool.use の deny で shell: 接頭辞の規則がある', () => {
+  it('policies は tool.use の deny で、shell:git ... か edit:<保護パス> の接頭辞の規則だけがある', () => {
     assert.ok(Array.isArray(cfg.policies) && cfg.policies.length > 0)
     for (const p of cfg.policies) {
       assert.equal(p.action, 'tool.use')
       assert.equal(p.effect, 'deny')
-      assert.ok(p.resource.startsWith('shell:git '), p.resource)
+      assert.ok(p.resource.startsWith('shell:git ') || p.resource.startsWith('edit:'), p.resource)
     }
     assert.ok(cfg.policies.some((p) => p.resource.startsWith('shell:git push --force')))
     assert.ok(cfg.policies.some((p) => p.resource.includes('--no-verify')))
@@ -107,28 +109,60 @@ describe('opencode.jsonc', () => {
     const re = body.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
     return new RegExp(`^${re}${trailing ? '( .*)?' : ''}$`)
   }
+  // shell の照合は shell の規則だけで行う（edit の path glob を shell のコマンドに当てない）
+  const shellPerm = cfg.permissions.filter((r) => r.action === 'shell')
+  const shellPol = cfg.policies.filter((p) => p.resource.startsWith('shell:'))
   const blockedBy = (cmds, rules, prefix) => cmds.filter((c) => rules.some((r) => globToRegExp(r.resource.slice(prefix.length)).test(c)))
 
   it('--force-with-lease / --force-if-includes も permissions・policies の両方に一致する（lease 付きでも既存コミットを消せる）', () => {
     const denied = ['git push --force-with-lease', 'git push --force-with-lease origin main', 'git push --force-with-lease=main:abc origin main', 'git push --force-if-includes', 'git push --force-if-includes origin main']
-    assert.deepEqual(blockedBy(denied, cfg.permissions, ''), denied)
-    assert.deepEqual(blockedBy(denied, cfg.policies, 'shell:'), denied)
+    assert.deepEqual(blockedBy(denied, shellPerm, ''), denied)
+    assert.deepEqual(blockedBy(denied, shellPol, 'shell:'), denied)
   })
 
   it('通常の git push は permissions・policies のどの規則にも一致しない', () => {
     const allowed = ['git push', 'git push origin main', 'git push -u origin feat/x']
-    assert.deepEqual(blockedBy(allowed, cfg.permissions, ''), [])
-    assert.deepEqual(blockedBy(allowed, cfg.policies, 'shell:'), [])
+    assert.deepEqual(blockedBy(allowed, shellPerm, ''), [])
+    assert.deepEqual(blockedBy(allowed, shellPol, 'shell:'), [])
   })
 
   it('引数なし・引数ありの --force / -f / --no-verify は policies に一致する', () => {
     const denied = ['git push --force', 'git push --force origin main', 'git push -f', 'git push -f origin main', 'git commit --no-verify', 'git commit --no-verify -m x', 'git push --no-verify']
-    assert.deepEqual(blockedBy(denied, cfg.policies, 'shell:'), denied)
-    assert.deepEqual(blockedBy(denied, cfg.permissions, ''), denied)
+    assert.deepEqual(blockedBy(denied, shellPol, 'shell:'), denied)
+    assert.deepEqual(blockedBy(denied, shellPerm, ''), denied)
   })
 
-  it('policies の resource に接頭辞一致の `*`（空白なしの末尾 *）が無い', () => {
-    for (const p of cfg.policies) assert.ok(!/[^ ]\*$/.test(p.resource), p.resource)
+  it('shell の policies の resource に接頭辞一致の `*`（空白なしの末尾 *）が無い', () => {
+    // edit: の規則は path の glob（`.opencode/hooks/*` の `*` は「配下すべて」）なので対象外
+    for (const p of cfg.policies.filter((x) => x.resource.startsWith('shell:'))) assert.ok(!/[^ ]\*$/.test(p.resource), p.resource)
+  })
+
+  // #777: エージェントが edit / write / patch でガード本体・plugin・設定を置換すると、次のコマンドからガードが無効になる。
+  // v2.2.7 の実機で、write・edit ツールの action はどちらも `edit`・resource は相対パスで、絶対パス・`./` 付き・
+  // `src/../` 付きも同じ規則で拒否されることを確かめた（policies は接頭辞が `edit:`。`write:` は一致しない）。
+  // サブディレクトリから起動すると resource が `../.opencode/hooks/...` の形になる（実測）ため、ディレクトリ側は先頭を `*` にする。
+  const EDIT_PROTECTED = ['*.opencode/hooks/*', '*.opencode/plugins/*', '*.opencode/plugin/*', 'opencode.jsonc', '*/opencode.jsonc', 'opencode.json', '*/opencode.json']
+
+  it('ガード本体・plugin・設定ファイルへの edit の deny が permissions と policies の両方にある', () => {
+    const permEdit = cfg.permissions.filter((r) => r.action === 'edit').map((r) => r.resource)
+    const polEdit = cfg.policies.filter((p) => p.resource.startsWith('edit:')).map((p) => p.resource.slice('edit:'.length))
+    assert.deepEqual([...permEdit].sort(), [...EDIT_PROTECTED].sort())
+    assert.deepEqual([...polEdit].sort(), [...EDIT_PROTECTED].sort())
+  })
+
+  it('保護対象の edit は deny に一致し、通常のファイル・agents・AGENTS.md には一致しない', () => {
+    const denied = [
+      '.opencode/hooks/agent-guard.sh', '.opencode/plugins/agent-guard/index.js', '.opencode/plugins/new/index.js', '.opencode/opencode.jsonc', '.opencode/opencode.json', 'opencode.jsonc', 'opencode.json',
+      // サブディレクトリからの起動・絶対パス・入れ子の設定
+      '../.opencode/hooks/agent-guard.sh', '../../.opencode/plugins/agent-guard/index.js', '.opencode/plugin/agent-guard/index.js', '.opencode/plugin/x.js', '.opencode/plugins/direct.js', '../opencode.jsonc', '../.opencode/opencode.json', '/work/repo/.opencode/hooks/agent-guard.sh', 'packages/a/opencode.jsonc',
+    ]
+    const allowed = ['file.txt', 'src/index.js', 'AGENTS.md', '.opencode/agents/implementer.md', '../.opencode/agents/implementer.md', '.opencode/skills/x/SKILL.md', 'docs/opencode.jsonc.md', 'myopencode.jsonc', '.opencode/plugin-notes.md', '.opencode/tool/t.js', '.opencode/commands/c.md']
+    const editPerm = cfg.permissions.filter((r) => r.action === 'edit')
+    const editPol = cfg.policies.filter((p) => p.resource.startsWith('edit:'))
+    assert.deepEqual(blockedBy(denied, editPerm, ''), denied)
+    assert.deepEqual(blockedBy(denied, editPol, 'edit:'), denied)
+    assert.deepEqual(blockedBy(allowed, editPerm, ''), [])
+    assert.deepEqual(blockedBy(allowed, editPol, 'edit:'), [])
   })
 
   it('ask / allow の規則を含まない（ガードは deny のみ）', () => {
