@@ -1,23 +1,41 @@
 {
-  "version": 1,
+  "version": 2,
   "skills": {
     "anthropic-claude-code": {
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/anthropic-claude-code/SKILL.md",
-      "computedHash": "78df6edc0987abcfe99a7d051d5cc06ffb6e5e4b08e62d67e3accee78dc7c854"
+      "computedHash": "6063a9c3c2c9352567bb5abe8c9fd88ab1e86f18cad2e23094099d3185da23e0"
     },
     "anthropic-claude-code-extend": {
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/anthropic-claude-code-extend/SKILL.md",
-      "computedHash": "044c2f631b71edec73c06771c12cd2c19b6a9b58d4a1aa81d52b69bc0cf701e1"
+      "computedHash": "75e20eaedc4c2622d12095eb9904520eaa4f2e02698ea18d383645141fa500c4"
     },
     "github-docs": {
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/github-docs/SKILL.md",
-      "computedHash": "6214a8088a7b8ca99f4dfc66535cc12893afb1954accac63fe537bb605efb181"
+      "computedHash": "84141a01a75e19b8683ea39c0fafe16e0b6a8ab23bcc0c4f90740ad03dd27118"
+    },
+    "openai-codex": {
+      "source": "Fandhe-AI/agent-reference-skills",
+      "sourceType": "github",
+      "skillPath": "skills/openai-codex/SKILL.md",
+      "computedHash": "de6c721269ac08b9f76e090b252a63dd0763c3c470622ed0d6ff481ba9aeac86"
+    },
+    "opencode-build": {
+      "source": "Fandhe-AI/agent-reference-skills",
+      "sourceType": "github",
+      "skillPath": "skills/opencode-build/SKILL.md",
+      "computedHash": "f498886f0153701818698b5e0a885e21ac9c241ba6dee411cb8b2280f6974aa2"
+    },
+    "opencode-usage": {
+      "source": "Fandhe-AI/agent-reference-skills",
+      "sourceType": "github",
+      "skillPath": "skills/opencode-usage/SKILL.md",
+      "computedHash": "e2f48d357f1e66a4fe237b54e1bfd82f801a290512344c7aecec39c2be46c29c"
     }
   }
 }

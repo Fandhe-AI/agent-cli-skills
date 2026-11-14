@@ -86,6 +86,9 @@ skills/                               -- スキル本体（各ディレクトリ
     github-docs                       -- 参照スキル（symlink）
     anthropic-claude-code             -- 参照スキル（symlink）
     anthropic-claude-code-extend      -- 参照スキル（symlink）
+    openai-codex                      -- 参照スキル（symlink）
+    opencode-usage                    -- 参照スキル（symlink）
+    opencode-build                    -- 参照スキル（symlink）
     (他 create-commit 等は skills/ への symlink)
   workflows/
     implement-issue-tree.js           -- イシューツリー自動開発 Workflow（symlink: ../../skills/implement-issue-tree/scripts/implement-issue-tree.js）
@@ -193,7 +196,7 @@ create-skill, create-agent, sweep-sync-prs
 
 ### 参照スキル（.claude/skills/ に配置）
 
-github-docs, anthropic-claude-code, anthropic-claude-code-extend
+github-docs, anthropic-claude-code, anthropic-claude-code-extend, openai-codex, opencode-usage, opencode-build
 
 ## Conventions
 
