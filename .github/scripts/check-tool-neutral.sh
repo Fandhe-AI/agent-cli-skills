@@ -25,8 +25,10 @@ set -uo pipefail
 # -w の語境界を日本語の直前直後でも安定させるため、バイト単位で照合する。
 export LC_ALL=C
 
-# 規約の例外と同じ 7 件。ここに無いスキルはすべて対象。
-EXCLUDED="implement-issue-tree init-claude update-claude init-codex update-codex init-opencode update-opencode"
+# 規約の適用外（Claude Code 専用）の 3 件だけを外す。init/update-codex・opencode は
+# 自分の対象ツール名を書いてよいだけで、Claude Code 専用の記述の禁止と sandbox 節の必須は
+# 適用されるため検査する（.claude/rules/tool-neutral-skills.md「適用範囲と例外」）。
+EXCLUDED="implement-issue-tree init-claude update-claude"
 MARKER='<!-- tool-neutral: allow -->'
 TAB="$(printf '\t')"
 NL='

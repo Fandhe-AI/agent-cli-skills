@@ -14,7 +14,7 @@ paths:
 |------|--------|------|
 | 適用対象 | `skills/` の全スキル（下記の適用外を除く） | 本規約に従う |
 | 適用外（Claude Code 専用） | implement-issue-tree・init-claude・update-claude | 本規約の対象外。implement-issue-tree は別計画で追随する |
-| ツール名を書いてよい | init-codex・update-codex・init-opencode・update-opencode | ツールごとの分岐を書くスキルなので、ツール名・ツール固有の仕様を書いてよい |
+| 適用対象（ツール名を書いてよい） | init-codex・update-codex・init-opencode・update-opencode | Codex / OpenCode のツール名・固有の仕様を書いてよい。それ以外（Claude Code 専用の記述〔`$ARGUMENTS`・`AskUserQuestion` 等〕の禁止・sandbox 節の必須）は適用対象と同じで、静的検査の対象 |
 
 ## 決定: 手順はツール固有の機構に依存させない
 
@@ -134,6 +134,8 @@ bash .github/scripts/check-tool-neutral.sh --strict
 | `Co-Authored-By: Claude` | 固定の共著者表記 |
 | `Generated with [Claude Code]` | 固定の生成表記 |
 | `.claude/agents` の agent 名（`Explore Agent` 等） | 委譲先の固有名（`.claude/agents/**/*.md` の `name:` から機械的に作る） |
+
+検査から外すのは適用外の 3 件（implement-issue-tree・init-claude・update-claude）だけで、init/update-codex・opencode は検査する。
 
 加えて、「sandbox 環境での実行」見出しが適用対象のすべてにあることを検査する（節の中身の妥当性はレビューで見る）。
 

@@ -54,7 +54,7 @@ tools: [Bash, Read, Write]     # 使用するツールを明示する場合（�
 雛形文（操作特性を平文で述べる文）だけを置く。
 SKILL.md には「sandbox 環境での実行」節を置く（`./tool-neutral-skills.md` の適用対象では必須で、
 `.github/scripts/check-tool-neutral.sh` が見出しを検査する。適用外の implement-issue-tree・init-claude・
-update-claude と init/update-codex・opencode では任意）。節には、ネットワークを使う手順と、Codex の既定
+update-claude では任意）。節には、ネットワークを使う手順と、Codex の既定
 sandbox で書けない場所（`.git`・`.agents`・`.codex`）に書く手順も明記する。
 
 **禁止事項:** 「ファイルシステムへの書き込みが必要」自体を sandbox 不可の根拠にしない。根拠に使えるのは

@@ -92,6 +92,17 @@ class CheckToolNeutralTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual(counts(proc), (0, 0, 0))
 
+    def test_3b_setup_skills_are_checked(self) -> None:
+        # init/update-codex・opencode は自分の対象ツール名を書いてよいだけで、
+        # Claude Code 専用の記述の禁止と sandbox 節の必須は適用される（除外しない）。
+        for name in ("init-codex", "update-codex", "init-opencode", "update-opencode"):
+            self.skill(name, CLEAN_BODY + "$ARGUMENTS\n")
+        self.skill("update-opencode-x", "# 手順\n")  # 名前の前方一致で除外されないこと
+        proc = run(self.root, "--strict")
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertEqual(counts(proc), (4, 1, 0))
+        self.assertIn("skills/init-codex/SKILL.md:", proc.stdout)
+
     def test_4_missing_sandbox(self) -> None:
         self.skill("a", "# 手順\n\n本文のみ\n")
         proc = run(self.root, "--strict")
