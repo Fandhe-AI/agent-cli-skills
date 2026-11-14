@@ -8,18 +8,25 @@ applies_to: skill-author, skill-reviewer
 
 # スキル著作規約
 
+スキル本文の書き方（委譲・確認と承認・引数・同梱スクリプト・主語など、Claude Code / Codex / OpenCode のどれでも同じ手順で動かすための規約）は `./tool-neutral-skills.md` に従う。
+
 ## frontmatter 規約
 
 ```yaml
 ---
-name: kebab-case-name          # ディレクトリ名と一致させる（必須）
-description: "役割の説明。「〜して」「〜作って」など発火トリガー語を含める。関連スキルへの導線も記載。"
+name: kebab-case-name          # ディレクトリ名と一致させる・64 文字以内（必須）
+description: "役割の説明。「〜して」「〜作って」など発火トリガー語を含める。関連スキルへの導線も記載。"  # 1,024 文字以内（必須）
 model: haiku | sonnet | opus   # 下記の選定基準に従う
 user-invocable: true           # ユーザーが直接呼び出す場合（任意）
 argument-hint: "<引数説明>"    # 引数を取る場合（任意）
 tools: [Bash, Read, Write]     # 使用するツールを明示する場合（任意）
 ---
 ```
+
+### 3 ツールでの frontmatter キーの扱い
+
+- `name`・`description` は Claude Code・Codex・OpenCode の 3 ツール共通で効く必須キー。`name` はディレクトリ名と一致する 64 文字以内の kebab-case、`description` は 1,024 文字以内にする。
+- `model`・`user-invocable`・`argument-hint` は Claude Code 用のキー。Codex / OpenCode は警告なしで無視する。残してよいが、手順をこれらのキーに依存させない（詳細は `./tool-neutral-skills.md`）。
 
 ### user-invocable の既定値
 
@@ -44,8 +51,11 @@ tools: [Bash, Read, Write]     # 使用するツールを明示する場合（�
 
 **SKILL.md に判定値の文字列（`不要` / `一部要` / `要（本スキルは read-only）` 等）を書かない。**
 判定値を宣言する場所は `docs/sandbox-tls.md`「全スキル判定一覧」だけであり、SKILL.md には対応する
-雛形文（操作特性を平文で述べる文）だけを置く。SKILL.md 側に「sandbox 環境での実行」節を設けるかどうかは
-任意であり、節が無いスキルの判定も正典の一覧で宣言される。
+雛形文（操作特性を平文で述べる文）だけを置く。
+SKILL.md には「sandbox 環境での実行」節を置く（`./tool-neutral-skills.md` の適用対象では必須で、
+`.github/scripts/check-tool-neutral.sh` が見出しを検査する。適用外の implement-issue-tree・init-claude・
+update-claude と init/update-codex・opencode では任意）。節には、ネットワークを使う手順と、Codex の既定
+sandbox で書けない場所（`.git`・`.agents`・`.codex`）に書く手順も明記する。
 
 **禁止事項:** 「ファイルシステムへの書き込みが必要」自体を sandbox 不可の根拠にしない。根拠に使えるのは
 (a) ネットワーク到達性の要否、(b) ワークスペース外への書き込みの有無（ユーザー指定の任意引数で到達可能な
@@ -206,6 +216,7 @@ SKILL.md を作成・編集した後、以下を確認する（詳細は `./secu
 
 | ファイル | 概要 |
 |---------|------|
+| `./tool-neutral-skills.md` | スキル本文の 3 ツール中立の書き方・静的検査の検出語 |
 | `./verification.md` | 完了ゲート規約。`## 検証` セクションの記述基準 |
 | `./debugging.md` | 根本原因デバッグ規約。実装系スキルのデバッグ手順 |
 | `./description-style.md` | description フィールドの書き方・発火率最適化 |
