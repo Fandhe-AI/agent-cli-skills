@@ -8,7 +8,14 @@
     { "action": "shell", "resource": "git push --force-if-includes *", "effect": "deny" },
     { "action": "shell", "resource": "git commit --no-verify *", "effect": "deny" },
     { "action": "shell", "resource": "git commit -n *", "effect": "deny" },
-    { "action": "shell", "resource": "git push --no-verify *", "effect": "deny" }
+    { "action": "shell", "resource": "git push --no-verify *", "effect": "deny" },
+    { "action": "edit", "resource": "*.opencode/hooks/*", "effect": "deny" },
+    { "action": "edit", "resource": "*.opencode/plugins/*", "effect": "deny" },
+    { "action": "edit", "resource": "*.opencode/plugin/*", "effect": "deny" },
+    { "action": "edit", "resource": "opencode.jsonc", "effect": "deny" },
+    { "action": "edit", "resource": "*/opencode.jsonc", "effect": "deny" },
+    { "action": "edit", "resource": "opencode.json", "effect": "deny" },
+    { "action": "edit", "resource": "*/opencode.json", "effect": "deny" }
   ],
   "policies": [
     { "action": "tool.use", "resource": "shell:git push --force *", "effect": "deny" },
@@ -18,6 +25,13 @@
     { "action": "tool.use", "resource": "shell:git push --force-if-includes *", "effect": "deny" },
     { "action": "tool.use", "resource": "shell:git commit --no-verify *", "effect": "deny" },
     { "action": "tool.use", "resource": "shell:git commit -n *", "effect": "deny" },
-    { "action": "tool.use", "resource": "shell:git push --no-verify *", "effect": "deny" }
+    { "action": "tool.use", "resource": "shell:git push --no-verify *", "effect": "deny" },
+    { "action": "tool.use", "resource": "edit:*.opencode/hooks/*", "effect": "deny" },
+    { "action": "tool.use", "resource": "edit:*.opencode/plugins/*", "effect": "deny" },
+    { "action": "tool.use", "resource": "edit:*.opencode/plugin/*", "effect": "deny" },
+    { "action": "tool.use", "resource": "edit:opencode.jsonc", "effect": "deny" },
+    { "action": "tool.use", "resource": "edit:*/opencode.jsonc", "effect": "deny" },
+    { "action": "tool.use", "resource": "edit:opencode.json", "effect": "deny" },
+    { "action": "tool.use", "resource": "edit:*/opencode.json", "effect": "deny" }
   ]
 }

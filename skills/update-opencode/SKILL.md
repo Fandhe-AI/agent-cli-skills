@@ -176,6 +176,8 @@ done
   利用者の規則の件数と順序は変えない。自分の規則が既にあっても、その後ろに利用者の規則があれば末尾へ再追加する（語彙は `merged`）。
   この優先関係を承認前に利用者へ伝え、了承を得る
 - 設定の追加は `opencode-config-merge.mjs` だけで行い、手で編集しない
+- **edit の deny が加わる**: 配る deny 規則には、ガード本体・plugin・設定ファイルへの `edit`（`*.opencode/hooks/*`・`*.opencode/plugins/*`・`*.opencode/plugin/*`（単数形も OpenCode v2.2.7 が plugin として読み込む）・`opencode.jsonc`・`*/opencode.jsonc`・`opencode.json`・`*/opencode.json`。先頭の `*` は、サブディレクトリから起動したときの `../.opencode/...` や絶対パスにも一致させるため）の deny が含まれる。
+  追加後は main のエージェントも、write・edit・patch のツールでこれらを書き換えられなくなる（このスキルのシェルコマンドは対象外）。承認前に利用者へ伝える
 - ガードは best-effort の攻撃面削減で、承認境界ではない（注意事項参照）
 - 9 スキルは `.claude/skills` には出ない（Claude Code 側は `update-claude` の担当）
 - OpenCode の組み込みスキル ID（`opencode`・`report`・`browser`）と同名のスキルは警告なしで上書きされる。9 スキルは該当しない
@@ -394,7 +396,7 @@ proj_info() {
 if info="$(proj_info)" && [ -n "${info}" ]; then
   printf '%s' "${info}" | jq -er '
     def arr(k): (.[k] // []) | if type == "array" then . else error("\(k) が配列でない") end;
-    "permissions_deny_shell=\([arr("permissions")[] | select(.action=="shell" and .effect=="deny")] | length) policies_deny=\([arr("policies")[] | select(.effect=="deny")] | length) permissions_total=\(arr("permissions") | length) policies_total=\(arr("policies") | length)"'
+    "permissions_deny_shell=\([arr("permissions")[] | select(.action=="shell" and .effect=="deny")] | length) permissions_deny_edit=\([arr("permissions")[] | select(.action=="edit" and .effect=="deny")] | length) policies_deny=\([arr("policies")[] | select(.effect=="deny")] | length) permissions_total=\(arr("permissions") | length) policies_total=\(arr("policies") | length)"'
   echo "exit=$?"
 else
   echo "検証不能: debug config の出力から ${CFG} の要素を取り出せない（0 件とは扱わない）"
@@ -445,7 +447,7 @@ unset info
 
 | 確認 | 期待 |
 |------|------|
-| 1) 設定の残存 | `permissions_deny_shell` と `policies_deny` が 1 以上、終了コード 0。0 なら未知キーとして消えている。`検証不能` と出たら完了とせず、出力の形・`<config>` のパスを確かめる |
+| 1) 設定の残存 | `permissions_deny_shell` と `policies_deny` が 1 以上、`permissions_deny_edit` が 7 以上、終了コード 0。0 なら未知キーとして消えている。`検証不能` と出たら完了とせず、出力の形・`<config>` のパスを確かめる |
 | 2) agents | `debug agents exit=0` かつ承認した agent がすべて `agent ok`（承認した agent が無ければ exit=0 のみ） |
 | 3) force push | 最終行 `AGENT_GUARD_RESULT deny force-push`、終了コード 2 |
 | 4) 通常コミット | 最終行 `AGENT_GUARD_RESULT allow`、終了コード 0 |
@@ -492,6 +494,7 @@ git ls-remote origin   # 実行前の sha を控える
 - Step 6 の各検証の結果（出力・終了コードを引用）。未実施のものは「未検証」と明記
 - 次の点を明記する。
   - 追加した deny 規則は各配列の末尾にあり、最後に一致した規則が勝つため、利用者の allow より優先される
+  - ガード本体・plugin・設定ファイルへの `edit` は deny される（main のエージェントにも効く）。変えたいときは人間が端末・エディタで行う
   - ワークフロースキル 9 件は OpenCode 上の動作を後続の計画（スキルのツール中立化）が終わるまで**保証しない**
   - ガードは best-effort の攻撃面削減で、**承認境界ではない**。実強制はサーバー側の branch protection と人間によるマージ
   - Codex にも同じ体系を入れるなら `init-codex` / `update-codex`（AGENTS.md の管理区間は共有され 1 つのまま）
@@ -516,6 +519,7 @@ git ls-remote origin   # 実行前の sha を控える
 - 設定は必ず `opencode-config-merge.mjs` で更新する。手で編集しない。`needs-manual` では利用者が手で追加し、`--check` で `unchanged` を確認する。`error-*` は中止して報告する
 - 追加する deny は各配列の末尾に置く。最後に一致した規則が勝つため、利用者の allow より優先される。承認前に必ず説明する
 - `.opencode/opencode.jsonc` は `opencode.jsonc` を全上書きする。実際に効く 1 つだけを対象にし、両方を作らない
+- ガード・plugin・設定ファイルは `edit` の deny の対象で、write・edit のツールでは書けない。OpenCode のセッション内でこのスキルを実行するエージェントは、記載のシェルコマンド（`cp`・`node opencode-config-merge.mjs`）だけで書く。拒否されたら、そのコマンドを利用者に提示して端末で実行してもらう（deny を外す設定変更はしない）
 - ガード・plugin の差し替えは差分を提示して承認を取る。既存の同名 agent は上書きしない。利用者の agent は触らない
 - **`opencode debug config` の全文を表示・保存しない。** グローバル設定由来の秘密が含まれ得る。`jq` で件数・ハッシュ・プロジェクト由来のキーだけを抜き出す
 - 未知キーは黙って消える。更新後は `debug config` でキーの残存を必ず確認する。`ask` は `--auto` で自動承認されるため使わない
@@ -525,6 +529,7 @@ git ls-remote origin   # 実行前の sha を控える
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形
   - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
+  - ガード本体・plugin・設定ファイルの保護は `edit` の deny（write・patch を含む）と plugin の edit 判定が担う。シェルでの書き換え（`echo … >`・`sed -i`・`cp`・`mv` 等）は止めない。シンボリックリンク経由の書き換えも検証していない。`.opencode/tool(s)/`・`command(s)/`・`agents/`・`skills/` は edit の deny の対象外（v2.2.7 の実機では tool(s)・command(s) は読み込まれず実行もされなかった。agents と skills は利用者が育てる前提の資産）。`plugins` に任意のディレクトリを列挙する設定は `opencode.jsonc` の保護に頼る。配布先の git の差分で気づく運用に頼る
   - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。`permissions` / `policies` は字面一致のため順序違いは拾えない（plugin が止める）
 - ガードは `jq` が無い・入力を読めない・plugin から呼べないときに deny へ倒れる（fail-closed）
 - `skills` CLI は固定版で実行する。失敗しても未固定 `npx` へフォールバックしない（付録参照）
