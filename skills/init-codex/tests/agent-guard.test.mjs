@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mkdtempSync, symlinkSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, symlinkSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const GUARD = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'hooks', 'agent-guard.sh')
@@ -306,6 +306,391 @@ const FIX_ALLOW = [
   'echo mirror',
 ]
 
+// --- 入れ子の解析（Issue #776 / #779 / #782）-----------------------------------------------
+// bash -c / sh -c / eval / heredoc / here-string の中身、ダブルクォート内の $(…)、env -S の代入を
+// 同じ解析器で再帰的に見る。深さ・件数の上限を超えたら fail-closed（deny nesting-limit）。
+// `"$(` を n 段重ねた文字列（payload は最内）。引用符のエスケープが要らないので長さは段数に比例する。
+const nestSub = (n, payload) => (n === 0 ? payload : `echo "$(${nestSub(n - 1, payload)})"`)
+const MANY_SUBS = (n) => `echo ${Array.from({ length: n }, () => '"$(date)"').join(' ')}`
+
+const NEST_DENY = [
+  // #776 の再現入力
+  ["bash -c 'git push --force origin main'", 'force-push'],
+  ['sh -c "git commit -n -m x"', 'no-verify'],
+  ["bash <<'EOF'\ngit push -f\nEOF", 'force-push'],
+  ['eval "git push -f"', 'force-push'],
+  // シェルの種類・パス・オプション
+  ['bash -c "git push --force"', 'force-push'],
+  ["sh -c 'git commit --no-verify'", 'no-verify'],
+  ["zsh -c 'git push -f'", 'force-push'],
+  ["dash -c 'git push -f'", 'force-push'],
+  ["ksh -c 'git commit -n'", 'no-verify'],
+  ["/bin/bash -c 'git push -f'", 'force-push'],
+  ["/usr/bin/env bash -c 'git push -f'", 'force-push'],
+  ["BASH -c 'git push -f'", 'force-push'],
+  ["bash -lc 'git push -f'", 'force-push'],
+  ["bash -ec 'git commit -n'", 'no-verify'],
+  ["bash -l -c 'git push -f'", 'force-push'],
+  ["bash -c -l 'git push -f'", 'force-push'],
+  ["bash -o pipefail -c 'git push -f'", 'force-push'],
+  ["bash --norc -c 'git push -f'", 'force-push'],
+  ["bash --rcfile x -c 'git push -f'", 'force-push'],
+  ["bash -c 'git push -f' _ arg", 'force-push'],
+  ["bash -- -c 'git status'\nbash -c 'git push -f'", 'force-push'],
+  ["env bash -c 'git push -f'", 'force-push'],
+  ["sudo sh -c 'git push -f'", 'force-push'],
+  ["xargs -I{} sh -c 'git push -f {}'", 'force-push'],
+  ["echo a && bash -c 'git push -f'", 'force-push'],
+  ["bash -c 'echo ok; git push -f'", 'force-push'],
+  ["bash -c 'git status\ngit push -f'", 'force-push'],
+  ["bash -c 'true # x\ngit push -f'", 'force-push'],
+  ['bash -c "git commit -m \\"x\\" -n"', 'no-verify'],
+  ["bash -c 'git commit -m x --no-verify'", 'no-verify'],
+  ["bash -c 'git -c core.hooksPath=/dev/null commit -m x'", 'no-verify'],
+  // eval（引数を空白で結合して再解析する）
+  ["eval 'git push -f'", 'force-push'],
+  ["eval 'git' 'push' '-f'", 'force-push'],
+  ["eval git push -f", 'force-push'],
+  ['eval "git add .; git commit -n"', 'no-verify'],
+  // 入れ子の shell（2 段・3 段）
+  ['bash -c "bash -c \'git push -f\'"', 'force-push'],
+  ['bash -c \'bash -c "git commit -n"\'', 'no-verify'],
+  ['bash -c "bash -c \\"bash -c \'git push -f\'\\""', 'force-push'],
+  ["eval \"bash -c 'git push -f'\"", 'force-push'],
+  ['sh -c "eval \'git commit -n\'"', 'no-verify'],
+  // 呼び出し元の HUSKY=0 は子のシェルへ引き継がれる
+  ["HUSKY=0 bash -c 'git commit -m x'", 'no-verify'],
+  ["export HUSKY=0; sh -c 'git commit -m x'", 'no-verify'],
+  ["bash -c 'HUSKY=0 git commit -m x'", 'no-verify'],
+  // heredoc（引用符つき / なし / <<-）と here-string
+  ['bash <<EOF\ngit push -f\nEOF', 'force-push'],
+  ['sh <<EOF\necho hi\ngit commit -n\nEOF', 'no-verify'],
+  ["bash <<-EOF\n\tgit push -f\n\tEOF", 'force-push'],
+  ['bash <<"EOF"\ngit push -f\nEOF', 'force-push'],
+  ['bash -s <<EOF\ngit push -f\nEOF', 'force-push'],
+  ['bash -s -- a b <<EOF\ngit push -f\nEOF', 'force-push'],
+  ['cat <<EOF | bash\ngit push -f\nEOF', 'force-push'],
+  ['bash <<EOF && echo done\ngit push -f\nEOF', 'force-push'],
+  ['ssh host bash <<EOF\ngit push -f\nEOF', 'force-push'],
+  ["bash <<< 'git push -f'", 'force-push'],
+  ['sh <<<"git commit -n"', 'no-verify'],
+  // shell の heredoc の後ろの行も検査する
+  ['bash <<EOF\nls\nEOF\ngit push -f', 'force-push'],
+  // #779: $(…) 内の引用符の食い違いが後続行を隠さない
+  ['echo "$(echo \'"\')"\ngit push -f', 'force-push'],
+  ['echo "$(echo \'"\')" "$(echo \'"\')"\ngit commit -n', 'no-verify'],
+  ['echo "$(echo ")")"\ngit push -f', 'force-push'],
+  ['echo "$(echo \\")"\ngit push -f', 'force-push'],
+  ['echo "$(printf %s \'"\')"; git commit -n', 'no-verify'],
+  ["git commit -m \"$(cat <<'EOF'\nfeat: 5\" screen\nEOF\n)\"\ngit push -f", 'force-push'],
+  ['echo "$(( 1<<2 ))"\ngit push -f', 'force-push'],
+  // ダブルクォート内の $(…) の中身を検査する
+  ['echo "$(git push -f)"', 'force-push'],
+  ['echo "pre $(git commit -n) post"', 'no-verify'],
+  ['x="$(git push --force)"', 'force-push'],
+  ['echo "$(echo "$(git push -f)")"', 'force-push'],
+  ['echo "$(echo hi; git push -f)"', 'force-push'],
+  ['git commit -m "$(git push -f)"', 'force-push'],
+  ['echo "$(bash -c \'git push -f\')"', 'force-push'],
+  ['bash -c "$(echo)"; git push -f', 'force-push'],
+  // #782: env -S で渡した代入と、同じ env 呼び出しの後続の git
+  ["env -S 'HUSKY=0' git commit -m x", 'no-verify'],
+  ["env -S 'HUSKY_SKIP_HOOKS=1' git push origin x", 'no-verify'],
+  ["env -SHUSKY=0 git commit -m x", 'no-verify'],
+  ["env --split-string=HUSKY=0 git push", 'no-verify'],
+  ["env --split-string 'HUSKY=0' git commit -m x", 'no-verify'],
+  ["env -S 'HUSKY=0 FOO=1' git commit -m x", 'no-verify'],
+  ["env -i -S 'HUSKY=0' git commit -m x", 'no-verify'],
+  ["env -S 'FOO=1 HUSKY=0' /usr/bin/git commit -m x", 'no-verify'],
+  // env -S の値そのものも解析する
+  ["env -S 'git push -f'", 'force-push'],
+  ["env -S 'git commit -n'", 'no-verify'],
+  ["env --split-string='git push --force'", 'force-push'],
+  // 引数なしの - は標準入力を script として読む / 素の $(…)
+  ['bash - <<EOF\ngit push -f\nEOF', 'force-push'],
+  ['sh - <<EOF\ngit commit -n\nEOF', 'no-verify'],
+  ['$(git push -f)', 'force-push'],
+  ['echo $(git commit -n)', 'no-verify'],
+  // env 経由の echo は読み飛ばしが近似なので除外しない（-a は argv0 の指定で git を実行する）
+  ['env -a echo git push -f', 'force-push'],
+  ['env echo git push -f', 'force-push'],
+  // ダブルクォート内の $( の閉じを見つけられないときは fail-closed（旧来の引用符走査へ戻らない）
+  ['echo "$(echo a\\ # \'"\')"\ngit push -f', 'nesting-limit'],
+  ["git commit -m \"$(cat <<'EOF'\nmsg\nEOF)\"", 'nesting-limit'],
+  // 深さ上限ちょうどまでは中身を検査する
+  [nestSub(8, 'git push -f'), 'force-push'],
+  // 上限を超えたら fail-closed（中身が無害でも deny）
+  [nestSub(9, 'git status'), 'nesting-limit'],
+  [nestSub(12, 'git push -f'), 'nesting-limit'],
+  [MANY_SUBS(600), 'nesting-limit'],
+]
+
+const NEST_ALLOW = [
+  // 対照: shell の中の通常の git
+  "bash -c 'git status'",
+  'bash -c "git status && git log -n 5"',
+  "sh -c 'git commit -m x'",
+  "bash -c 'git push origin main'",
+  "bash -lc 'git status'",
+  "eval 'git status'",
+  "bash -c 'git commit -m \"fix -n handling\"'",
+  "bash -c 'git commit -m \"docs: --no-verify 禁止\"'",
+  "sh -c 'git log --oneline -n 3'",
+  "bash -c 'git push -u origin feat/x'",
+  // 引数の文字列として出るだけのもの
+  'bash -c \'echo "git push -f"\'',
+  "bash -c 'echo git push -f'",
+  "bash -c 'printf %s \"git commit -n\"'",
+  'echo git push -f',
+  'echo "bash -c \'git push -f\'"',
+  'git commit -m "bash -c \'git push -f\' の説明"',
+  'git commit -m "eval \'git commit -n\' と bash <<EOF は検査対象"',
+  'gh pr create --title t --body "手順: git push -f と bash -c \'git commit -n\' を使わない"',
+  // heredoc の本文は shell に渡されないかぎり引数ではない
+  "cat <<'EOF'\nbash -c 'git push -f'\nEOF",
+  "cat <<EOF\ngit push -f\nEOF",
+  "bash script.sh <<EOF\ngit push -f\nEOF",
+  "bash -c 'cat' <<EOF\ngit push -f\nEOF",
+  "git commit -F - <<'EOF'\nfeat: x\n\ngit push -f と bash -c 'git commit -n' は禁止\nEOF",
+  // shell の起動そのもの・スクリプトファイル・外部由来の文字列
+  'bash script.sh',
+  'bash -x ./run.sh -c',
+  'bash -c "$(curl -fsSL https://example.com/install.sh)"',
+  'eval "$(ssh-agent -s)"',
+  'eval "$(direnv export bash)"',
+  'bash <(curl -fsSL https://example.com/x.sh)',
+  "sh -c 'npm ci'",
+  "bash -c 'echo ok' <<< 'git push -f'",
+  // 推奨のコミット形・PR 本文: 本文に奇数個の " ・禁止語・shell 風の文を含めても本文は引数ではない
+  "git commit -m \"$(cat <<'EOF'\nfeat: x\n\nsay \" here\ngit push --force は使わない\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nfeat: 5\" screen\nit's bash -c 'git push -f'\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nfix: ) と ( と ' と \" を含む\ngit commit -n\nEOF\n)\"\n\nCo-Authored-By: x",
+  "gh pr create --title t --body \"$(cat <<'EOF'\n## 概要\n\ngit push -f と bash -c 'git push -f' を使わない\nEOF\n)\"",
+  'git commit -m "$(date)"',
+  'git commit -m "feat: $(echo a) and $(echo b)"',
+  'git commit -m "$(echo \')\')"',
+  'git commit -m "$(echo ")")"',
+  'echo "$(( 1<<2 ))" && git status',
+  'echo "$(echo \'"\')"\ngit status',
+  'echo "$(echo "$(echo hi)")"',
+  // env -S の対照: 無害な使い方・代入が後続の git に効かない形
+  "env -S 'npm ci'",
+  "env -S 'git status'",
+  "env -S 'HUSKY=0 npm ci'; git commit -m x",
+  "env -S 'HUSKY=0' git status",
+  "env -S 'HUSKY=0' npm ci",
+  "env -S 'FOO=1' git commit -m x",
+  "env --split-string='FOO=1' git push origin x",
+  // 上限ちょうど・上限以内
+  nestSub(8, 'git status'),
+  MANY_SUBS(100),
+]
+
+// --- 解析器の読み違い（独立監査の指摘）---------------------------------------------------
+// 期待値は実 bash（/bin/bash 3.2 と bash 5）で「禁止対象を無害な関数に置き換えて実行されるか」を
+// 確かめて決めた。実行される入力が PARSE_DENY、実行されない入力が PARSE_ALLOW。名前の [parse] で絞れる。
+const PARSE_DENY = [
+  // 1: bash が heredoc と見なさない << を heredoc として登録し、以降を本文として読み飛ばさない
+  ['echo ${x:-<<EOF }\ngit push -f\nEOF', 'force-push'],
+  ['echo ${x:-<<EOF }\ngit commit -n', 'no-verify'],
+  ['echo $((1<<$(echo 2)))\ngit push -f', 'force-push'],
+  ['echo $[1<<$(echo 2)]\ngit push -f', 'force-push'],
+  ['x[1<<2]=y\ngit push -f\n2]=y', 'force-push'],
+  ['echo "$(echo ${x:-<<EOF }\n)"\ngit push -f\nEOF\n)"', 'force-push'],
+  ['echo "$(echo $((1<<$(echo 2))))"\ngit push -f', 'force-push'],
+  // 1: 1 つの単位として読んだ中身（コマンド置換）は隠さない
+  ['echo ${x:-$(git push -f)}', 'force-push'],
+  ['echo ${x:-`git push -f`}', 'force-push'],
+  ['echo ${x:-${y:-$(git commit -n)}}', 'no-verify'],
+  ['echo $((1<<$(git push -f)))', 'force-push'],
+  ['echo $[1<<$(git push -f)]', 'force-push'],
+  ['echo "$(( $(git push -f) ))"', 'force-push'],
+  ['x[$(git push -f)]=1', 'force-push'],
+  ['cat <(git push -f)', 'force-push'],
+  ['>"$(git push -f)"', 'force-push'],
+  // 1: 区切り子が見つからないまま末尾に達したら中身を見切れないので fail-closed
+  ['cat <<EOF\ngit push -f', 'nesting-limit'],
+  ['cat <<EOF', 'nesting-limit'],
+  ['cat <<A <<B\nx\nA\ny', 'nesting-limit'],
+  // 2: リダイレクトの対象はコマンドでも引数でもない
+  ['>echo git push -f', 'force-push'],
+  ['<<<echo git push -f', 'force-push'],
+  ['>/dev/null HUSKY=0 git commit -m x', 'no-verify'],
+  ['git 2>&1 push -f', 'force-push'],
+  ['git >/dev/null push -f', 'force-push'],
+  ['git <in.txt push -f', 'force-push'],
+  ['2>/dev/null git push -f', 'force-push'],
+  ['git &>/dev/null push -f', 'force-push'],
+  ['git {fd}>out push -f', 'force-push'],
+  ['>x echo a; git push -f', 'force-push'],
+  // 3: コマンド位置の前置語・env の別形・declare -x
+  ['{ HUSKY=0 git commit -m x; }', 'no-verify'],
+  ['if x; then HUSKY=0 git commit -m x; fi', 'no-verify'],
+  ['while x; do HUSKY=0 git commit -m x; done', 'no-verify'],
+  ['if x; then :; else HUSKY=0 git commit -m x; fi', 'no-verify'],
+  ['! HUSKY=0 git commit -m x', 'no-verify'],
+  ['time HUSKY=0 git commit -m x', 'no-verify'],
+  ['time -p HUSKY=0 git commit -m x', 'no-verify'],
+  ['sudo HUSKY=0 git commit -m x', 'no-verify'],
+  ['sudo -u root HUSKY=0 git commit -m x', 'no-verify'],
+  ['sudo -E -u root env HUSKY=0 git commit -m x', 'no-verify'],
+  ['doas -u root HUSKY=0 git commit -m x', 'no-verify'],
+  ['sudo -u echo git push -f', 'force-push'],
+  ["then env -S 'git push -f'", 'force-push'],
+  ["if x; then env -S 'git push -f'; fi", 'force-push'],
+  ["/usr/bin/env -S 'git push -f'", 'force-push'],
+  ["env -iS 'git push -f'", 'force-push'],
+  ["env -vS 'git push -f'", 'force-push'],
+  ["env -ivS 'git push -f'", 'force-push'],
+  ["env -iS 'HUSKY=0 git commit -m x'", 'no-verify'],
+  ["env -iSHUSKY=0 git commit -m x", 'no-verify'],
+  ["{ env -S 'HUSKY=0' git commit -m x; }", 'no-verify'],
+  ["sudo env -S 'git push -f'", 'force-push'],
+  ['declare -x HUSKY=0; git commit -m x', 'no-verify'],
+  ['typeset -x HUSKY_SKIP_HOOKS=1; git commit -m x', 'no-verify'],
+  ['{ export HUSKY=0; }; git commit -m x', 'no-verify'],
+  // 4: リダイレクトの記号を escape した直後の & | は制御演算子（直前の文字ではなく解釈済みかどうかで決める）
+  ['echo \\>|git push -f', 'force-push'],
+  ['echo \\>&git push -f', 'force-push'],
+  ['echo \\<&git push -f', 'force-push'],
+  ['echo \\<|git push -f', 'force-push'],
+  ['echo a \\> b &git push -f', 'force-push'],
+  // 5: ANSI-C 引用符は \' で閉じない（subagent が true / null でも git の判定が先に出る）
+  ["echo $'\\'' ; git push -f ; echo $'x'", 'force-push'],
+  ["echo $'a\\\\' ; git push -f ; echo $'b'", 'force-push'],
+  ["cat <<$'EOF'\nx\nEOF\ngit push -f", 'force-push'],
+  ["cat <<$'E\\x4fF'\nx\nEOF\ngit push -f", 'force-push'],
+  ['cat <<$"EOF"\nx\nEOF\ngit push -f', 'force-push'],
+  ["$'g\\x69t' push -f", 'force-push'],
+  ["echo \"$(echo $'\\'' ; git push -f ; echo $'x')\"", 'force-push'],
+  ["echo \"$(cat <<$'EOF'\nx\nEOF\n)\"\ngit push -f", 'force-push'],
+  // 6: ダブルクォート内のバッククォートと、引用符なし heredoc 本文のコマンド置換
+  [': "`git push -f`"', 'force-push'],
+  ['echo "a `git commit -n` b"', 'no-verify'],
+  ['echo "$(echo "`git push -f`")"', 'force-push'],
+  ['echo "x `echo \\`git push -f\\`` y"', 'force-push'],
+  ['cat <<EOF\n$(git push -f)\nEOF', 'force-push'],
+  ['cat <<EOF\n`git commit -n`\nEOF', 'no-verify'],
+  ['cat <<EOF\nok ${x:-$(git push -f)}\nEOF', 'force-push'],
+  ['cat <<-EOF\n\t$(git commit -n)\n\tEOF', 'no-verify'],
+  ['cat <<EOF\nline\n$(echo $(git push -f))\nEOF', 'force-push'],
+  ['echo "$(cat <<EOF\n$(git push -f)\nEOF\n)"', 'force-push'],
+  ['cat <<EOF\n$(git push -f\nEOF', 'nesting-limit'],
+  ['echo "unclosed `git status"', 'nesting-limit'],
+  // 1（再監査）: 1 単位として読む中身は、引用符の中でも heredoc 本文でも置換を検査する。算術式の中は引用符が引用にならない
+  ['echo ${x:-"$(git push -f)"}', 'force-push'],
+  ['echo ${x:-"${y:-$(git push -f)}"}', 'force-push'],
+  ['echo ${x:-"`git push -f`"}', 'force-push'],
+  ["echo ${x:-'}'$(git push -f)}", 'force-push'],
+  ['echo $(( "$(git push -f)" ))', 'force-push'],
+  ["echo $(( '$(git push -f)' ))", 'force-push'],
+  ['echo $(( "`git push -f`" ))', 'force-push'],
+  ['echo $[ "$(git push -f)" ]', 'force-push'],
+  ['x["$(git push -f)"]=1', 'force-push'],
+  ["cat <<EOF\n${x:-'$(git push -f)'}\nEOF", 'force-push'],
+  ['cat <<EOF\n${x:-"$(git push -f)"}\nEOF', 'force-push'],
+  ["cat <<EOF\n$(( '$(git push -f)' ))\nEOF", 'force-push'],
+  // 1（再監査）: 添字・複合代入は代入を置ける位置だけ 1 語にする。引数の位置では bash も 1 語にしない
+  ['ls x[; git push -f; y]=1', 'force-push'],
+  ['ls x[1; git push -f; y]=1', 'force-push'],
+  ['a=([1<<2]=y)\ngit push -f\n2]=y', 'force-push'],
+  ['a=([1<<2 ]=y)\ngit push -f\n2', 'force-push'],
+  ['a=(x [1<<2]=y)\ngit push -f\n2]=y', 'force-push'],
+  ['x[1<<2 ]=y\ngit push -f\n2', 'force-push'],
+  ['x[1<<2]+=y\ngit push -f\n2]+=y', 'force-push'],
+  ['declare a[1<<2]=y\ngit push -f\n2]=y', 'force-push'],
+  ['a=($(git push -f))', 'force-push'],
+  ['a=("$(git push -f)")', 'force-push'],
+  ['declare -a a=(`git commit -n`)', 'no-verify'],
+  ['a=("x)" y); git push -f', 'force-push'],
+  // 1（再監査）: bash 5.3 の ${ cmd; } / ${| cmd; } は中身がコマンドそのもの（読み違えず fail-closed）
+  ['x=${ git push -f; }', 'force-push'],
+  ['x=${| git push -f; }', 'force-push'],
+  ['echo ${ git push -f; }', 'nesting-limit'],
+  ['echo "${ git push -f; }"', 'nesting-limit'],
+  ['cat <<EOF\n${ git push -f; }\nEOF', 'nesting-limit'],
+  // 3（再監査）: time は -p だけ読み飛ばす（外部コマンドの time -o の値を echo と取り違えない）
+  ['\\time -o echo git push -f', 'force-push'],
+  ['FOO=1 time -o echo git push -f', 'force-push'],
+  // 7: --mirror の略記
+  ['git push --m', 'force-push'],
+  ['git push --mi origin', 'force-push'],
+  ['git push --mir', 'force-push'],
+  ['git push origin --mirr', 'force-push'],
+  ['git push --mirror', 'force-push'],
+]
+
+const PARSE_ALLOW = [
+  // 1: 単位として読むだけで、本物の heredoc と通常の記法は壊さない
+  'echo ${x:-<<EOF }\ngit status',
+  'echo ${x:-a b} && git status',
+  'git push ${A} origin',
+  'echo $((1<<$(echo 2)))',
+  'echo $[1<<$(echo 2)]\ngit status',
+  'x[1<<2]=y\ngit status',
+  'echo "$(( 1<<$(date +%s) ))" && git status',
+  'echo "$(echo ${x:-<<EOF }\n)"\ngit status',
+  'cat <<EOF\ntext\nEOF',
+  'cat <<A <<B\nx\nA\ny\nB',
+  'git commit -F - <<EOF\nmsg\nEOF',
+  // 2: 対象の名前が git でも、リダイレクト先であって実行しない
+  'echo x >git push -f',
+  'cat <<< git push -f',
+  'git log >out.txt 2>&1',
+  'git push origin feat 2>/dev/null',
+  'git push {fd}>out origin feat',
+  'cat <in.txt | head',
+  // 3: 前置語の対照（無害な使い方・echo は表示するだけ）
+  'time git status',
+  'time -p git log -n 3',
+  'sudo ls -la',
+  'sudo -u root git status',
+  'if x; then echo git push -f; fi',
+  '{ echo git push -f; }',
+  'time echo git push -f',
+  'if x; then HUSKY=0 npm ci; fi',
+  '{ HUSKY=0 npm ci; }',
+  'declare -x FOO=1; git commit -m x',
+  "env -iS 'npm ci'",
+  "/usr/bin/env -S 'git status'",
+  '/usr/bin/env FOO=1 git status',
+  // 1・3（再監査）: bash が代入・heredoc と読む形は、読み違えて deny しない
+  'a=(git push -f)',
+  'a=(x [1<<2]=y)\ngit status',
+  'echo a[1<<2]\ngit push -f\n2]',
+  'time -p echo git push -f',
+  'time echo git push -f',
+  'cat <<EOF\n${x:-\'a\'} ${y:-"b"} $(( 1 << 2 ))\nEOF',
+  // 4: 字面どおりに escape した記号は echo の引数
+  'echo \\>\\|git push -f',
+  'echo \\>\\&git push -f',
+  'echo \\<\\&git push -f',
+  // 5・6: 引用符つき heredoc の本文は読まない。escape した置換は実行されない
+  "cat <<'EOF'\n$(git push -f)\nEOF",
+  'cat <<\\EOF\n$(git push -f)\nEOF',
+  'cat <<"EOF"\n`git push -f`\nEOF',
+  'cat <<EOF\n\\$(git push -f)\nEOF',
+  'cat <<EOF\n\\`git push -f\\`\nEOF',
+  'echo "\\`git push -f\\`"',
+  "echo 'use `git push -f` carefully'",
+  'echo "`date`"',
+  'git commit -m "feat: `foo` handling"',
+  // 6: 推奨のコミット形・PR 本文。奇数個のバッククォート・コードフェンス・閉じない $( や ${ を本文に書いても本文は引数ではない
+  "git commit -m \"$(cat <<'EOF'\nfeat: x\n\n```sh\ngit push -f\n```\nuse `foo and ${ and $( here\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nfeat: x\n\n`a` and `b` and ` c\n${x:-$(git push -f)} $((1<<2 $( \nEOF\n)\"",
+  "gh pr create --title t --body \"$(cat <<'EOF'\n## 概要\n\n```\ngit push -f\n```\n` と ${ と $( と \" を含む\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nfix: a\nEOF\n)\"\n\ngit status",
+]
+
+// `$'` を含む対照。subagent が true / null のときは obfuscated で落ちるので main セッション専用。
+const PARSE_ALLOW_MAIN = [
+  "echo $'\\'' ; git status",
+  "git commit -m $'a\\'b'",
+  "cat <<$'EOF'\ngit push -f\nEOF",
+  "cat <<$'EOF'\nx\nEOF\ngit status",
+  "git commit -m \"$(cat <<'EOF'\nfeat: x\n\nit's $'a' and `b and ${ and $(\nEOF\n)\"",
+]
+
 // --- merge-guard-hook.sh 由来（subagent が true / null のときだけ）-----------------------
 // merge-guard-repo-settings.test.mjs の deny / allow ケースの移植。
 const MG_REPO_DENY = [
@@ -411,6 +796,47 @@ const MG_MERGE_DENY = [
   'gh api graphql -F query=@q.graphql',
   'gh api graphql --input q.json',
   'gh -R o/r pr review 5 --approve;echo',
+  // 監査対応: GET 免除は置かない（コマンド全体の `-X GET` の字面で成立させない。GET でも event は検査する）
+  'gh api -X GET repos/o/r/pulls/1/reviews >/dev/null; gh api repos/o/r/pulls/5/reviews -f event=APPROVE',
+  'gh api repos/o/r/pulls/5/reviews -f event=APPROVE # -X GET',
+  'gh api --method GET repos/o/r/pulls/5/reviews -F per_page=100 -f event=APPROVE',
+  'gh api -X GET repos/o/r/pulls/5/reviews -f event=APPROVE',
+  '/usr/bin/gh api repos/o/r/pulls/5/reviews -f event=APPROVE',
+  // パス中のコマンド置換・末尾スラッシュ（reviews / merge の両方）
+  'gh api repos/{owner}/{repo}/pulls/$(gh pr view --json number -q .number)/reviews -f event=APPROVE',
+  'gh api repos/{owner}/{repo}/pulls/`gh pr view --json number -q .number`/reviews -f event=APPROVE',
+  'gh api repos/o/r/pulls/5/reviews/ -f event=APPROVE',
+  'gh api -X PUT repos/{owner}/{repo}/pulls/$(gh pr view --json number -q .number)/merge',
+  // 引用符の中・コメントの中のコマンド（-a の走査が見落とさない）
+  `bash -c 'gh pr review 5 -a'`,
+  `sh -c "gh pr review 5 -a"`,
+  `eval 'gh pr review 5 -a'`,
+  `gh pr review 5 -c; bash -c 'gh pr review 6 -a'`,
+  "echo # don't\ngh pr review 5 -a",
+  "echo # don't\ngh api repos/o/r/pulls/5/reviews -f event=APPROVE",
+  // 全体走査でも gh / git の語で状態を戻さない
+  'gh pr review 5 -b "see $(git rev-parse HEAD)" -a',
+  'gh pr review fix/git -a',
+  'gh pr review gh -a',
+  'gh pr review git -a',
+  // GraphQL: graphql の語が /graphql や URL の形でも、event が literal でないものは deny
+  `gh api /graphql -f query='mutation{addPullRequestReview(input:{pullRequestId:"x",event:APPROVE}){clientMutationId}}'`,
+  `gh api https://api.github.com/graphql -f query='mutation{submitPullRequestReview(input:{pullRequestId:"x",event:APPROVE}){clientMutationId}}'`,
+  `gh api graphql -f query='mutation($e:PullRequestReviewEvent!){submitPullRequestReview(input:{event:$e}){clientMutationId}}' -f e=COMMENT`,
+  `gh api graphql -f query='mutation{addPullRequestReview(input:{pullRequestId:"x"}){clientMutationId}}'`,
+  `gh api graphql -f query='mutation{addPullRequestReview(input:{pullRequestId:"x",event:COMMENT,body:"ok"}){clientMutationId}}' -F input=@in.json`,
+  `gh api graphql -f query='mutation{addPullRequestReview(input:{event:COMMENT}){x}}' -f query2=1 -f query="$Q"`,
+  'gh api graphql -f query=$Q',
+  'gh api graphql -f query="$(cat q.graphql)"',
+  'gh api /graphql --input q.json',
+  'gh api https://api.github.com/graphql -F query=@q.graphql',
+  // コマンド名の大文字小文字
+  'GH pr review 5 -a',
+  'Gh pr review 5 --approve',
+  '/usr/bin/GH pr review 5 -a',
+  'GH pr merge 5',
+  'GH api repos/o/r/pulls/5/reviews -f event=APPROVE',
+  'GH -R o/r pr merge 5',
   'gh alias set m "pr merge"',
   'gh alias import a.yml',
   'gh extension install o/gh-x',
@@ -420,12 +846,30 @@ const MG_MERGE_DENY = [
 ]
 
 const MG_OBFUSCATED_DENY = [
+  // 判定の区切り目印（SEP_MARK \001・引用符内の空白 \002）を偽造できる制御文字
+  'gh pr review 5 -c -b "x\u0001SEP y"',
+  'gh pr review 5 -c\u0001',
+  'gh pr comment 5 --body x\u0002y',
+  'echo \u007f',
   "echo $'\\x67\\x68'",
   'gh${IFS}pr${IFS}merge 1',
   'gh$IFS pr merge 1',
 ]
 
 const MG_ALLOW = [
+  // GraphQL: literal の COMMENT / REQUEST_CHANGES は許可（スレッド返信は従来どおり許可）
+  `gh api graphql -f query='mutation{addPullRequestReview(input:{pullRequestId:"x",event:COMMENT,body:"ok"}){clientMutationId}}'`,
+  `gh api graphql -f query='mutation{submitPullRequestReview(input:{pullRequestReviewId:"x",event: REQUEST_CHANGES}){clientMutationId}}'`,
+  `gh api graphql -f query='mutation{addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:"x",body:"event: APPROVE"}){clientMutationId}}'`,
+  // 日本語・タブを含むコマンドは制御文字として扱わない
+  "gh pr comment 5 --body '確認しました\tOK'",
+  // コメントの中のアポストロフィでも、-a を持たなければ止めない
+  "echo # don't\ngh pr review 5 -c -b ok",
+  // 全体走査でも -a の無い承認でない review は止めない
+  'gh pr review 5 -b "see $(git rev-parse HEAD)" -c',
+  // 大文字小文字違いでも読み取り・コメントは止めない
+  'GH pr view 5 --json state',
+  'gh api repos/o/r/pulls/5/reviews/ --jq length',
   '/usr/bin/gh pr review 5 -c -b ok',
   `gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/main" | jq '[.[][] | select(.type == "required_status_checks")] | length'`,
   `gh api "repos/{owner}/{repo}/rulesets/<id>" --jq '.bypass_actors | type == "array" and length == 0'`,
@@ -479,7 +923,6 @@ const MG_ALLOW = [
   `gh api repos/o/r/pulls/5/reviews --jq '.[] | select(.event=="APPROVE")'`,
   `gh api repos/o/r/pulls/5/reviews -q '.[] | select(.event=="APPROVE")'`,
   `gh api -X GET repos/o/r/pulls/5/reviews -f per_page=100`,
-  `gh api --method GET repos/o/r/pulls/5/reviews -F per_page=100 -f event=APPROVE`,
 ]
 
 for (const bash of BASHES) {
@@ -497,6 +940,23 @@ for (const bash of BASHES) {
         }
         for (const cmd of FIX_ALLOW) {
           it(`allow: ${JSON.stringify(cmd)}`, async () => expectAllow(await run(bash, cmd, subagent)))
+        }
+        for (const [cmd, reason] of NEST_DENY) {
+          it(`deny ${reason}: ${JSON.stringify(cmd.length > 200 ? `${cmd.slice(0, 60)}…(${cmd.length}字)` : cmd)}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
+        }
+        for (const cmd of NEST_ALLOW) {
+          it(`allow: ${JSON.stringify(cmd.length > 200 ? `${cmd.slice(0, 60)}…(${cmd.length}字)` : cmd)}`, async () => expectAllow(await run(bash, cmd, subagent)))
+        }
+        for (const [cmd, reason] of PARSE_DENY) {
+          it(`[parse] deny ${reason}: ${JSON.stringify(cmd)}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
+        }
+        for (const cmd of PARSE_ALLOW) {
+          it(`[parse] allow: ${JSON.stringify(cmd)}`, async () => expectAllow(await run(bash, cmd, subagent)))
+        }
+        if (subagent === false) {
+          for (const cmd of PARSE_ALLOW_MAIN) {
+            it(`[parse] allow: ${JSON.stringify(cmd)}`, async () => expectAllow(await run(bash, cmd, subagent)))
+          }
         }
       })
     }
@@ -572,6 +1032,47 @@ for (const bash of BASHES) {
         const r = await runRaw(bash, JSON.stringify({ command: 'git status', subagent: false }), { PATH: dir })
         expectDeny(r, 'no-jq')
       })
+    })
+
+    describe('判定に必要な基盤コマンドが無い環境（subagent のマージ系判定は fail-closed）', () => {
+      for (const missing of ['awk', 'grep', 'sed', 'tr']) {
+        it(`${missing} が無ければ deny internal-error`, async () => {
+          const dir = mkdtempSync(join(tmpdir(), 'agent-guard-nocmd-'))
+          try {
+            for (const c of ['cat', 'awk', 'sed', 'tr', 'grep', 'jq']) {
+              if (c === missing) continue
+              symlinkSync(execFileSync('/bin/sh', ['-c', `command -v ${c}`]).toString().trim(), join(dir, c))
+            }
+            const r = await runRaw(bash, JSON.stringify({ command: 'gh pr view 5', subagent: true }), { PATH: dir })
+            expectDeny(r, 'internal-error')
+          } finally {
+            rmSync(dir, { recursive: true, force: true })
+          }
+        })
+      }
+    })
+
+    it('結果を出さずに異常終了したら（未定義変数）EXIT trap が deny internal-error を出す', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'agent-guard-trap-'))
+      try {
+        const src = readFileSync(GUARD, 'utf8')
+        const needle = "| jq -r '.subagent | tostring') || finish deny bad-input\n"
+        assert.ok(src.includes(needle))
+        const mod = join(dir, 'agent-guard.sh')
+        writeFileSync(mod, src.replace(needle, `${needle}: "$__ag_undefined_var"\n`))
+        chmodSync(mod, 0o755)
+        const r = await new Promise((resolve, reject) => {
+          const p = spawn(bash, [mod], { stdio: ['pipe', 'pipe', 'ignore'] })
+          let out = ''
+          p.stdout.on('data', (d) => { out += d })
+          p.on('error', reject)
+          p.on('close', (code) => resolve({ code, out, last: out.split('\n').filter((l) => l !== '').pop() ?? '' }))
+          p.stdin.end(JSON.stringify({ command: 'ls', subagent: false }))
+        })
+        expectDeny(r, 'internal-error')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
     })
 
     describe('出力に入力の文字列を含めない', { concurrency: 8 }, () => {

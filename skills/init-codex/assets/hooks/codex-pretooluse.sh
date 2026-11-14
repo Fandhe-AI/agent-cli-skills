@@ -25,6 +25,7 @@ reason_for() {
     merge-guard) printf '%s' 'サブエージェントによるマージ・承認は禁止されている。人間または親が実行すること' ;;
     repo-settings) printf '%s' 'サブエージェントによるリポジトリ設定・ruleset の変更は禁止されている' ;;
     obfuscated) printf '%s' '難読化されたコマンド（$'"'"'...'"'"' や $IFS 展開）は拒否される' ;;
+    nesting-limit) printf '%s' 'コマンドの入れ子が深い、または $( ・バッククォート・ヒアドキュメントの閉じを解析できないため拒否した' ;;
     bad-input) printf '%s' 'hook 入力を解釈できないため拒否した' ;;
     no-jq) printf '%s' 'jq が見つからないため拒否した（fail-closed）' ;;
     *) printf '%s' 'ガードの判定により拒否した' ;;
