@@ -27,7 +27,8 @@
 # 書かずに非 0 で止める条件（ファイルは変えない）:
 #   - 自マーカーが片方のみ・2 組以上・逆順（error-markers）
 #   - 自マーカーが agents-md 管理区間の内側にある、または自区間の内側に agents-md 管理区間がある。
-#     閉じていない agents-md 区間への追記も、区間の内側に入るため止める（error-nested）
+#     閉じていない agents-md 区間への追記も、区間の内側に入るため止める（error-nested）。自区間の
+#     後ろにある閉じていない agents-md 区間は、差し替え・unchanged では元の状態のまま許す
 #   - 対象のコードフェンスが閉じていない（error-fence）
 #   - --block の中身にどちらかのマーカー文字列（自分のもの・agents-md のもの）が含まれる
 #     （error-block-marker。フェンスの内外を問わない）
@@ -185,10 +186,13 @@ fi
 [[ "${nested}" -eq 0 ]] || fail 4 error-nested "update-docs の区間と agents-md 管理区間が入れ子になっている。ファイルは変更しない"
 
 # 書く結果が 1 組のマーカーとして読め、フェンスが閉じていること（中身のフェンス閉じ忘れの検出）
+# 末尾で開いたままの agents-md 区間は、元ファイルと同じ状態（open_other）なら許す。差し替え・unchanged は
+# 自区間の外を変えないため、既存の状態を保っている。増えたときだけ、--block が区間を壊したとみなす。
+# 追記は上で open_other = 0 を要求済みなので、ここでは 0 のままであることを意味する。
 SCAN2="${WORK}/scan2"
 scan "${NEW}" > "${SCAN2}" || fail 2 error-io "書き込み結果を走査できない"
 read -r _ _ ns2 ne2 infence2 nested2 open2 < "${SCAN2}" || fail 2 error-io "走査結果を読めない"
-if [[ "${ns2}" -ne 1 || "${ne2}" -ne 1 || "${infence2}" -ne 0 || "${nested2}" -ne 0 || "${open2}" -ne 0 ]]; then
+if [[ "${ns2}" -ne 1 || "${ne2}" -ne 1 || "${infence2}" -ne 0 || "${nested2}" -ne 0 || "${open2}" -ne "${open_other}" ]]; then
   fail 4 error-block-fence "--block のコードフェンスが閉じていないなど、書くと区間を読み取れなくなる"
 fi
 

@@ -365,6 +365,57 @@ describe('agents-section', { concurrency: true }, () => {
       }
     })
 
+    it(`${tag} 自区間の後ろに閉じていない agents-md 区間があっても、差し替え・unchanged・--check は通る（既存の状態を保つ）`, async () => {
+      const t = setup()
+      try {
+        const body = `# a\n\n${START}\n古\n${END}\n\n${A_START}\n管理（閉じていない）\n`
+        writeFileSync(t.target, body)
+        const orig = Buffer.from(body)
+        const before = split(orig, START, END)
+        // --check は書かない
+        const h = sha(t.target)
+        const c = await run(bash, t.target, t.block('b.md', '新\n'), ['--check'])
+        assert.equal(c.status, 0, c.stderr)
+        assert.equal(c.result, 'replaced')
+        assert.equal(sha(t.target), h)
+        // 差し替え: 区間外のバイトは不変
+        const r = await run(bash, t.target, t.block('b.md', '新\n'))
+        assert.equal(r.status, 0, r.stderr)
+        assert.equal(r.result, 'replaced')
+        const now = readFileSync(t.target)
+        const after = split(now, START, END)
+        assert.ok(after.before.equals(before.before))
+        assert.ok(after.after.equals(before.after))
+        assert.equal(now.toString('utf8'), `# a\n\n${START}\n新\n${END}\n\n${A_START}\n管理（閉じていない）\n`)
+        // 同じ内容なら unchanged（書かない）
+        const h2 = sha(t.target)
+        const u = await run(bash, t.target, t.block('b.md', '新\n'))
+        assert.equal(u.status, 0, u.stderr)
+        assert.equal(u.result, 'unchanged')
+        assert.equal(sha(t.target), h2)
+        noTmp(t, ['AGENTS.md', 'b.md'])
+      } finally {
+        t.cleanup()
+      }
+    })
+
+    it(`${tag} 同じ構成でも --block のフェンスが閉じていなければ error-block-fence で書かない`, async () => {
+      const t = setup()
+      try {
+        writeFileSync(t.target, `${START}\n古\n${END}\n\n${A_START}\n管理（閉じていない）\n`)
+        const h = sha(t.target)
+        for (const extra of [[], ['--check']]) {
+          const r = await run(bash, t.target, t.block('b.md', '```bash\nls\n'), extra)
+          assert.equal(r.status, 4)
+          assert.equal(r.result, 'error-block-fence')
+          assert.equal(sha(t.target), h)
+        }
+        noTmp(t, ['AGENTS.md', 'b.md'])
+      } finally {
+        t.cleanup()
+      }
+    })
+
     it(`${tag} 自区間の外の agents-md 区間は何組あっても通し、バイトは不変`, async () => {
       const t = setup()
       try {
