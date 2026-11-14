@@ -323,7 +323,7 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 - 読み取り専用の agent（researcher / reviewer）は shell を使えない。差分は呼び出し元が渡す
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
-  - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形（上流 Fandhe-AI/agent-cli-skills#782 で追跡）
+  - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形
   - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
   - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。`permissions` / `policies` は字面一致のため `git push origin main --force` 等の順序違いは拾えない（plugin が止める）
 - ガードは `jq` が無い・入力を読めない・plugin から呼べないときに deny へ倒れる（fail-closed）。plugin が読み込めないと宣言層だけが効く
@@ -332,6 +332,12 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 - `--no-verify` を含むコマンドを plugin や手順に仕込まない
 - コミットを伴う場合は対象リポジトリの規約（CLAUDE.md / AGENTS.md / CONTRIBUTING 等）に従う。規約が無ければ `type(scope): subject`（subject は 72 文字以内）とし、`--no-verify` は使わない（このスキル自体はコミットしない）
 - 出力・報告は日本語で書く
+
+## sandbox 環境での実行
+
+ローカルの診断・ファイル配置（`.opencode/`・`AGENTS.md` の生成、ガードの入力検証）はネットワーク不要で、sandbox 内でも実行できる。一方、Step 4-4 の `npx skills add`（skills CLI による GitHub からのスキル取得）と前提確認の `gh auth status` はネットワークを要する。該当コマンドだけをコマンド単位で sandbox 無効にして実行する。ネットワーク遮断を解除できない環境では、その手順だけ実行できない（ローカル完結の手順は進められる）。
+
+書き込み制限（既存の代替経路の対象）はネットワーク遮断とは別の問題であり、それぞれの記述に従う。
 
 ## 付録: skills CLI のバージョン固定と更新手順
 

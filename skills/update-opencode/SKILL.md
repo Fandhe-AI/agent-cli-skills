@@ -326,10 +326,10 @@ opencode debug config --standalone \
   | jq -r '"permissions_deny_shell=\([.permissions[]? | select(.action=="shell" and .effect=="deny")] | length) policies_deny=\([.policies[]? | select(.effect=="deny")] | length) permissions_total=\((.permissions // []) | length) policies_total=\((.policies // []) | length)"'
 echo "exit=$?"
 
-# 2) 3 つの agent が見える（出力は表示せず名前の有無だけ見る）
+# 2) 承認した agent が見える（出力は表示せず名前の有無だけ見る。<承認した agent> は Step 4 で承認した名前だけを空白区切りで入れる。見送った agent は含めない）
 out="$(opencode debug agents --standalone 2>&1)"; rc=$?
 echo "debug agents exit=${rc}"
-for a in researcher implementer reviewer; do
+for a in <承認した agent>; do
   printf '%s' "${out}" | grep -qw -- "${a}" && echo "agent ok: ${a}" || echo "agent missing: ${a}"
 done
 unset out
@@ -360,7 +360,7 @@ opencode debug config --standalone \
 | 確認 | 期待 |
 |------|------|
 | 1) 設定の残存 | `permissions_deny_shell` と `policies_deny` が 1 以上、終了コード 0。0 なら未知キーとして消えている |
-| 2) agents | `debug agents exit=0` かつ 3 件とも `agent ok` |
+| 2) agents | `debug agents exit=0` かつ承認した agent がすべて `agent ok`（承認した agent が無ければ exit=0 のみ） |
 | 3) force push | 最終行 `AGENT_GUARD_RESULT deny force-push`、終了コード 2 |
 | 4) 通常コミット | 最終行 `AGENT_GUARD_RESULT allow`、終了コード 0 |
 | 5) サブエージェントのマージ | 最終行が `AGENT_GUARD_RESULT deny ...`、終了コード 2 |
@@ -371,8 +371,8 @@ opencode debug config --standalone \
 更新前に件数 0 だった場合は N・M を 0 として、空配列同士の一致を確かめる。
 ハッシュが一致しない場合は、グローバル設定の合成順による差かを `<config>` を直接読んで切り分け、原因を特定するまで完了と報告しない。
 
-加えて `.agents/skills/` に 9 スキルがあり、`skills-lock.json` が妥当な JSON であること（`jq . skills-lock.json >/dev/null && echo OK`）を確認する。
-承認されなかった項目は検証の対象外として「未実施（承認なし）」と書く。`opencode` が無く 1) 2) 7) を実行できなかった場合は「未検証」と書く。
+加えて、追加を承認したスキルが `.agents/skills/` にあり、`skills-lock.json` が妥当な JSON であること（`jq . skills-lock.json >/dev/null && echo OK`）を確認する。
+標準 3 agent・9 スキルの全件存在は要求しない。承認されなかった項目は検証の対象外として「見送り」と書き、失敗として扱わない（未承認の項目を入れて埋めない）。`opencode` が無く 1) 2) 7) を実行できなかった場合は「未検証」と書く。
 
 3)〜5) は plugin を介さずガードを直接検査するもので、plugin が実セッションで呼ばれることの証明ではない。
 実セッションでの確認を案内する場合は、**対象リポジトリでは危険なコマンドを実行させない**。
@@ -406,11 +406,11 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 完了とみなす条件は、承認された項目について Step 6 の確認が期待どおりで、証拠を報告に引用していること。
 
 - `opencode debug config --standalone` の jq 抜粋で deny 規則が残り、更新前の利用者の規則が先頭に保たれている
-- `opencode debug agents --standalone` が終了コード 0 で 3 agent が見える
+- `opencode debug agents --standalone` が終了コード 0 で、承認した agent が見える（見送った agent は「見送り」と報告し失敗にしない）
 - ガードが force push で deny、通常コミットで allow、サブエージェントのマージで deny を返す
 - AGENTS.md の管理区間の開始マーカー数が 1
 - `opencode-config-merge.mjs --check` が `unchanged`（`needs-manual` 経由で手で追加した場合も含む）
-- `.agents/skills/` に 9 スキルがあり、`skills-lock.json` が妥当
+- 追加を承認したスキルが `.agents/skills/` にあり、`skills-lock.json` が妥当（見送ったスキルは「見送り」と報告し失敗にしない）
 
 「動くはず」での完了報告はしない。実行していない検証は未検証と書く。
 
@@ -428,7 +428,7 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 - 読み取り専用の agent（researcher / reviewer）は shell を使えない
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
-  - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形（上流 Fandhe-AI/agent-cli-skills#782 で追跡）
+  - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形
   - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
   - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。`permissions` / `policies` は字面一致のため順序違いは拾えない（plugin が止める）
 - ガードは `jq` が無い・入力を読めない・plugin から呼べないときに deny へ倒れる（fail-closed）
@@ -437,6 +437,12 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 - `--no-verify` を含むコマンドを plugin や手順に仕込まない
 - コミットを伴う場合は対象リポジトリの規約（CLAUDE.md / AGENTS.md / CONTRIBUTING 等）に従う。規約が無ければ `type(scope): subject`（subject は 72 文字以内）とし、`--no-verify` は使わない（このスキル自体はコミットしない）
 - 出力・報告は日本語で書く
+
+## sandbox 環境での実行
+
+ローカルの診断・差分提示・ファイル更新はネットワーク不要で、sandbox 内でも実行できる。一方、Step 5-4 の `npx skills add`（skills CLI による GitHub からのスキル取得。不足スキルを承認した場合のみ）と前提確認の `gh auth status` はネットワークを要する。該当コマンドだけをコマンド単位で sandbox 無効にして実行する。ネットワーク遮断を解除できない環境では、その手順だけ実行できない（ローカル完結の手順は進められる）。
+
+書き込み制限（既存の代替経路の対象）はネットワーク遮断とは別の問題であり、それぞれの記述に従う。
 
 ## 付録: skills CLI のバージョン固定と更新手順
 
