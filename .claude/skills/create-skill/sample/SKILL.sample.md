@@ -78,3 +78,14 @@ gh api \
 - `.env` や認証情報ファイルが含まれる場合は警告してコミットを中止する
 - 破壊的操作（削除等）の前は必ずユーザーの確認を得る
 - **sandbox 環境での `GIT_SSL_NO_VERIFY=1` 併用**：詳細は `docs/sandbox-tls.md` を参照
+
+## sandbox 環境での実行
+
+<!-- 雛形文は .claude/rules/skill-authoring.md「sandbox 節の定型文」から、スキルの操作特性に合うものを選んで置く。判定値の文字列は SKILL.md に書かない。 -->
+
+<このスキルの操作特性を述べる雛形文を置く。ネットワーク越しの操作の有無と、ワークスペース外への書き込みの有無を根拠にする>
+
+- ネットワークを使う手順（`gh` / `git fetch` / `git push` 等）があれば、該当するステップとコマンドを明記する。
+- Codex の既定 sandbox で書けない場所（`.git`・`.agents`・`.codex`）へ書く手順（commit 等）があれば、該当するステップを明記する。
+- Codex の `codex exec` では昇格要求が出ないため、書けなかった場合は報告して止める。案内は「`.git` を書き込み可にした permissions プロファイルで実行し直す」か「ユーザーが自分で実行する」。
+- `GIT_SSL_NO_VERIFY=1` の併用は上の注意事項と `docs/sandbox-tls.md` に従う。

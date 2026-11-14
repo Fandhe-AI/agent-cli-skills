@@ -83,6 +83,20 @@ tools:
 - 見出し構成（`# スキル名`、`## フロー`、`### Step N`）が既存スキルと揃っているか
 - 新スキルの機能が既存スキルと大きく重複していないか（重複する場合は差別化の説明があるか）
 
+### H. 3 ツール中立（Claude Code / Codex / OpenCode）
+
+判定基準は `../../rules/tool-neutral-skills.md`（存在する場合は先に読み込む）。
+
+- 本文が Claude Code 専用の前提に依存していないか
+  - Agent ツール・`subagent_type`・`AskUserQuestion`・`ExitPlanMode`・`$ARGUMENTS`・`${CLAUDE_SKILL_DIR}`
+  - Read / Edit / Glob / Grep / Bash などのツール名、`.claude/agents` の固有名
+  - 「Claude が…」という主語、固定の共著者 / 生成表記
+- 委譲が「使える環境では委譲、使えなければ自分で実行」になっており、入力・出力形式が本文に書かれているか
+- ユーザー確認が「明示の返答を待つ・起動時の明示の承認があれば省略可・非対話なら書き込まずに止める」になっているか
+  - 安全上の確認（秘密情報検出・セキュリティ問題・破壊的操作）は省略不可になっているか
+- 「sandbox 環境での実行」節があり、ネットワーク操作と、Codex 既定 sandbox で書けない場所（`.git`・`.agents`・`.codex`）への書き込みが扱われているか
+- 適用外: `implement-issue-tree`・`init-claude`・`update-claude`（N/A とする）。`init-codex`・`update-codex`・`init-opencode`・`update-opencode` は対象ツールのツール名を書いてよい
+
 ## 手順
 
 ### Step 1: ルールファイル読み込み
@@ -106,7 +120,7 @@ Grep: pattern="^name:|^model:|^description:" filePattern="skills/*/SKILL.md"
 
 ### Step 3: 対象スキルのチェック実行
 
-観点 A〜G を順に検証する。各観点で問題が見つかった場合は証拠（行番号・引用）を記録する。
+観点 A〜H を順に検証する。各観点で問題が見つかった場合は証拠（行番号・引用）を記録する。
 
 ### Step 4: レポート生成
 
@@ -174,6 +188,15 @@ Grep: pattern="^name:|^model:|^description:" filePattern="skills/*/SKILL.md"
 | 見出し構成の統一 | ✅ / ⚠️ | |
 | 機能重複チェック | ✅ / ⚠️ | {重複スキル名} |
 
+### H. 3 ツール中立
+
+| 項目 | 状態 | 詳細 |
+|------|------|------|
+| Claude Code 専用の前提への依存なし | ✅ / ⚠️ / N/A | {該当語と行番号} |
+| 委譲のフォールバックと入出力形式 | ✅ / ⚠️ / N/A | |
+| ユーザー確認（安全上の確認は省略不可） | ✅ / ⚠️ / N/A | |
+| sandbox 環境での実行節 | ✅ / ⚠️ / N/A | |
+
 ### 修正提案
 
 1. **[優先度: 高]** {修正すべき項目と具体的な修正案}
@@ -190,4 +213,5 @@ Grep: pattern="^name:|^model:|^description:" filePattern="skills/*/SKILL.md"
 ## 遵守する規約
 
 - `../../rules/skill-authoring.md`（存在する場合、最優先の判定基準）
+- `../../rules/tool-neutral-skills.md`（存在する場合、観点 H の判定基準）
 - `../../rules/dotclaude-via-temp.md`（`.claude/` 操作手順）

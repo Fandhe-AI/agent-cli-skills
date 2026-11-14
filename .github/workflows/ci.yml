@@ -36,6 +36,9 @@ jobs:
       - name: Validate skill structure
         run: bash .github/scripts/check-skill-structure.sh
 
+      - name: Check tool neutrality
+        run: bash .github/scripts/check-tool-neutral.sh
+
   # --------------------------------------------------
   # js-tests（implement-issue-tree G0 ゲート等の決定的回帰テスト）
   # --------------------------------------------------
@@ -108,6 +111,7 @@ jobs:
           # runner イメージ同梱の PyYAML 有無は契約されていないため明示的に入れる。
           python3 -m pip install --disable-pip-version-check --quiet 'PyYAML==6.0.2'
           python3 .github/scripts/test_check_update_external_drift.py
+          python3 .github/scripts/test_check_tool_neutral.py
 
   # --------------------------------------------------
   # lint-docs（ドキュメント／設定ファイル系 lint）
