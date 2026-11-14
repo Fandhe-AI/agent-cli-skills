@@ -90,7 +90,7 @@ SKILL.md との二重管理になり乖離します。
 | `comment-code` | 不要 | ファイル読解・コメント追記のみで完結。`gh` / `git push` 等のネットワーク越し操作を行わない |
 | `create-commit` | 不要 | `git status` / `git diff` / `git commit` 等ローカル操作のみで完結（`git push` を含まない） |
 | `create-plan` | 不要 | コードベース調査と `_/local-plans/` へのファイル作成のみで完結 |
-| `update-docs` | 不要 | 差分検出と CLAUDE.md 更新はローカルの `git log` / ファイル I/O のみで完結 |
+| `update-docs` | 不要 | 差分検出と CLAUDE.md か AGENTS.md（ある方）の更新はローカルの `git log` / ファイル I/O のみで完結 |
 | `create-issue-tree` | 要（本スキルは主に API 経由） | `gh issue create` / `gh label create` / `gh api .../sub_issues` で Issue ツリーを新規作成 |
 | `update-issue-tree` | 要（本スキルは主に API 経由） | `gh issue create` / `gh issue edit` / `gh api .../sub_issues`（`scripts/reassign-sub-issue.sh` 経由含む）でツリーを更新 |
 | `init-claude` | 要 | `.claude/` 体系の生成自体（Step 1〜3 の大半）はローカル完結だが、Step 3 の Skills 導入は `npx skills add Fandhe-AI/agent-cli-skills` の実行が主要フローに含まれ省略不可（任意ステップではない）。加えて Step 4「implement-issue-tree の動作前提を確認する」で `gh auth status` / `gh api .../sub_issues`（読み取りのみ）も要する |

@@ -34,6 +34,8 @@ skills/                               -- スキル本体（各ディレクトリ
     assets/                           -- opencode（plugins/agent-guard・opencode.jsonc・agents）・hooks/agent-guard.sh（共通ガード）・scripts/agents-md-block.sh（AGENTS.md 管理区間）
     tests/                            -- node:test 回帰テスト（opencode-plugin・opencode-config・asset-sync・version-pin）
   update-docs/
+    scripts/                          -- select-target.sh（更新対象の選択。CLAUDE.md があれば claude、無く AGENTS.md があれば agents、同一ファイルは agents、どちらも無ければ none）、agents-section.sh（AGENTS.md の update-docs 専用区間だけを追記・差し替え。区間外はバイト不変・マーカー不整合と agents-md 区間との入れ子は書かず停止・32 KiB 超は警告）
+    tests/                            -- node:test 回帰テスト（select-target の選択と無変更・agents-section の追記・差し替え・unchanged・停止条件・フェンス・32768 バイト境界・init-codex との往復、SKILL.md Step 0 のフェンス）
   update-issue-tree/
     scripts/                          -- reassign-sub-issue.sh（closed 親下の残置 open issue 付け替え・孤児再配置。DELETE→POST を単一プロセスで冪等に実行。cross-repository sub-issue は非対応で exit 2）、reassign-lib.sh（Step 3/4 の呼び出し側共有ヘルパー。計画配列の存在・型検証と終了ステータス解釈。両フェンスが自己完結的に source する）、update-root-body.sh（Step 8 のルート本文部分更新。マーカー間の管理ブロックのみ差し替え・既存本文は保持・マーカー無し本文は旧 Phase 表を details へ退避して移行・exit 4/5 で fail-closed）
     tests/                            -- node:test 回帰テスト（DELETE 失敗時に POST が呼ばれないこと、Step 8 の既存本文保持・移行・冪等・並行編集検知・マーカー不整合停止等・タイトルの文字参照変換〔create-issue-tree の CELL と同じ出力〕・旧形式の書き直し・create-issue-tree の --root 再マージとの往復〔相手のスキルが無ければ skip〕）、lib/ に gh スタブ（作る一時ディレクトリは tmp-track.mjs でプロセス終了時に消す）
