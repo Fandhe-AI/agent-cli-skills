@@ -234,7 +234,7 @@ Step 4-1 が途中まで成功してから 4-4 で拒否された場合など、
 |-----------|------|
 | 無い | 宛先の親を作って移動する |
 | 有り・内容が同一 | 退避側のファイルを捨てる |
-| 有り・内容が異なる | 移動せず差分を提示し、上書きするかを利用者が判断する |
+| 有り・内容が異なる | 移動せず差分を提示し、上書きするかを利用者が判断する（agent ファイルは既存を保持してスキップし、失敗に数えない） |
 
 ユーザーに提示するコマンド（ユーザー自身が、権限のある端末で実行する）。
 
@@ -258,7 +258,13 @@ done
 place "${S}/hooks.json" ".codex/hooks.json" || rc=1
 place "${S}/rules/agent-guard.rules" ".codex/rules/agent-guard.rules" || rc=1
 for a in "${S}/agents/"*.toml; do
-  place "${a}" ".codex/agents/$(basename -- "${a}")" || rc=1
+  [ -e "${a}" ] || continue
+  d=".codex/agents/$(basename -- "${a}")"
+  if [ -e "${d}" ] && ! cmp -s -- "${a}" "${d}"; then
+    echo "既存を保持（スキップ）: ${d}"   # 利用者の編集を守る。失敗には数えない
+  else
+    place "${a}" "${d}" || rc=1
+  fi
 done
 [ "${rc}" -eq 0 ] || echo "差分のあるファイルは未反映。内容を確認し、上書きするなら手動で mv する"
 
@@ -409,8 +415,9 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 - `agents-md-block.sh` は AGENTS.md の管理区間の外をバイト単位で変えない。マーカーが不整合なら書かずに中断する。区間は常に 1 つ（ユーザーが明示承認した区間外への追記は別操作）
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
-  - `git -c core.hooksPath=` によるフックの無効化は検出しない
-  - eval・base64 復元・変数間接呼び出しなどの文字列照合で見抜けない形は通る。rules は先頭一致のため `git push origin main --force` 等は拾えない
+  - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形（上流 Fandhe-AI/agent-cli-skills#782 で追跡）
+  - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
+  - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。rules は先頭一致のため `git push origin main --force` 等は拾えない
 - `skills` CLI は固定版で実行する。失敗しても未固定 `npx` へフォールバックしない（付録参照）
 - コマンドへ渡すパスやスキル名は常に `"${var}"` でクォートする。外部入力を `bash -c` や `eval` へ渡さない
 - `--no-verify` を含むコマンドを hook や手順に仕込まない

@@ -404,13 +404,20 @@ place() {   # $1=退避側のファイル $2=宛先 $3=overwrite なら APPLY_DI
 S="_/codex-setup/.codex"
 approved_hooks=(agent-guard.sh codex-pretooluse.sh codex-session-start.sh)   # 承認済みだけに書き換える
 approved_rules=(agent-guard.rules)
-approved_agents=(researcher implementer reviewer)
+approved_agents=(researcher implementer reviewer)   # 承認された名前だけを入れる
 
 for f in "${approved_hooks[@]}"; do
   place "${S}/hooks/${f}" ".codex/hooks/${f}" overwrite && chmod +x ".codex/hooks/${f}" || rc=1
 done
 for f in "${approved_rules[@]}"; do place "${S}/rules/${f}" ".codex/rules/${f}" overwrite || rc=1; done
-for a in "${approved_agents[@]}"; do place "${S}/agents/${a}.toml" ".codex/agents/${a}.toml" || rc=1; done
+for a in "${approved_agents[@]}"; do
+  if [ -e "${S}/agents/${a}.toml" ] && [ -e ".codex/agents/${a}.toml" ] \
+     && ! cmp -s -- "${S}/agents/${a}.toml" ".codex/agents/${a}.toml"; then
+    echo "既存を保持（スキップ）: .codex/agents/${a}.toml"   # 利用者の編集を守る。失敗には数えない
+  else
+    place "${S}/agents/${a}.toml" ".codex/agents/${a}.toml" || rc=1
+  fi
+done
 # hooks.json の更新を承認した場合だけ（マージ済みのコピーで置き換える）
 place "${S}/hooks.json" ".codex/hooks.json" overwrite || rc=1
 [ "${rc}" -eq 0 ] || echo "差分のあるファイルは未反映。内容を確認し、承認済みの更新なら APPLY_DIFF=1 で再実行する"
@@ -583,8 +590,9 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 - `agents-md-block.sh` は AGENTS.md の管理区間の外をバイト単位で変えない。マーカーが不整合なら書かずに中断する。区間は常に 1 つ
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
-  - `git -c core.hooksPath=` によるフックの無効化は検出しない
-  - eval・base64 復元・変数間接呼び出しなどの文字列照合で見抜けない形は通る。rules は先頭一致のため `git push origin main --force` 等は拾えない
+  - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形（上流 Fandhe-AI/agent-cli-skills#782 で追跡）
+  - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
+  - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。rules は先頭一致のため `git push origin main --force` 等は拾えない
 - `skills` CLI は固定版で実行する。失敗しても未固定 `npx` へフォールバックしない（付録参照）
 - コマンドへ渡すパスやスキル名は常に `"${var}"` でクォートする。外部入力を `bash -c` や `eval` へ渡さない
 - `--no-verify` を含むコマンドを hook や手順に仕込まない。`rm -rf` は使わない

@@ -412,8 +412,9 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 - 読み取り専用の agent（researcher / reviewer）は shell を使えない
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
-  - `git -c core.hooksPath=` によるフックの無効化は検出しない
-  - eval・base64 復元・変数間接呼び出しなどの文字列照合で見抜けない形は通る。`permissions` / `policies` は字面一致のため順序違いは拾えない（plugin が止める）
+  - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形（上流 Fandhe-AI/agent-cli-skills#782 で追跡）
+  - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
+  - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。`permissions` / `policies` は字面一致のため順序違いは拾えない（plugin が止める）
 - ガードは `jq` が無い・入力を読めない・plugin から呼べないときに deny へ倒れる（fail-closed）
 - `skills` CLI は固定版で実行する。失敗しても未固定 `npx` へフォールバックしない（付録参照）
 - コマンドへ渡すパスやスキル名は常に `"${var}"` でクォートする。外部入力を `bash -c` や `eval` へ渡さない
