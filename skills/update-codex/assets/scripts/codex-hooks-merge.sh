@@ -89,15 +89,15 @@ cat > "${WORK}/merge.jq" <<'JQEOF'
 def selfk:
   if type == "object" and ((.command | type) == "string") then
     (if (.command | contains($A)) then $A
-     elif (.command | contains($B)) then $B
-     else null end)
+      elif (.command | contains($B)) then $B
+      else null end)
   else null end;
 
 def valid_groups:
   if type == "array"
-     and all(.[]; type == "object"
+    and all(.[]; type == "object"
                   and ((has("hooks") | not)
-                       or ((.hooks | type) == "array" and all(.hooks[]; type == "object"))))
+                        or ((.hooks | type) == "array" and all(.hooks[]; type == "object"))))
   then . else error("type") end;
 
 # target の event へ、テンプレートのハンドラ $h（所属グループ $g）を反映する。
@@ -127,8 +127,8 @@ try (
           reduce (($g.hooks // [])[] | select(selfk != null)) as $h (.;
             apply($name; $g; $h))))
   | { result: (if (.st | index("updated")) then "updated"
-               elif (.st | index("added")) then "added"
-               else "unchanged" end),
+                elif (.st | index("added")) then "added"
+                else "unchanged" end),
       doc: .doc }
 ) catch { err: . }
 JQEOF
