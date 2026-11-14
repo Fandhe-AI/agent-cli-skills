@@ -173,6 +173,51 @@ describe('同梱の Codex 設定資産', () => {
       assert.notEqual(check(...cmd).decision, 'forbidden', cmd.join(' '))
     }
   })
+
+  // 安全上の確認の対象（Issue #786）。スキル本文の文言は Codex 0.164.0 では起動時の「確認なしで」に負けるため、
+  // 実行側で止める。prompt は、非対話（codex exec。approval never）では拒否になる（実機）。対話の承認要求は参照文書による（実機は未検証）。
+  it('rules: 取り消せない操作・公開範囲や設定の変更は prompt', { skip: !hasCodex && 'codex が PATH に無い' }, () => {
+    for (const cmd of [
+      ['gh', 'project', 'item-delete', '1', '--owner', 'o', '--id', 'X'],
+      ['gh', 'project', 'edit', '1', '--owner', 'o', '--visibility', 'PUBLIC'],
+      ['gh', 'project', 'edit', '1', '--owner', 'o', '--description', 'd', '--visibility', 'PRIVATE'],
+      ['gh', 'api', '-X', 'PUT', 'repos/o/r/rulesets/1', '--input', 'x.json'],
+      ['gh', 'api', '--method', 'PATCH', 'repos/o/r', '-F', 'allow_merge_commit=false'],
+      ['gh', 'api', '-X', 'DELETE', 'repos/o/r/rulesets/1'],
+      ['gh', 'api', '-XPATCH', 'repos/o/r'],
+      ['gh', 'api', '--method=PUT', 'repos/o/r/rulesets/1'],
+    ]) {
+      assert.equal(check(...cmd).decision, 'prompt', cmd.join(' '))
+    }
+  })
+
+  it('rules: 読み取りと通常の書き込みは止めない（対照）', { skip: !hasCodex && 'codex が PATH に無い' }, () => {
+    for (const cmd of [
+      ['gh', 'project', 'item-list', '1', '--owner', 'o'],
+      ['gh', 'project', 'item-edit', '--id', 'X', '--project-id', 'P', '--field-id', 'F'],
+      ['gh', 'project', 'item-archive', '1', '--owner', 'o', '--id', 'X'],
+      ['gh', 'project', 'create', '--owner', 'o', '--title', 't'],
+      ['gh', 'project', 'view', '1', '--owner', 'o'],
+      ['gh', 'api', 'repos/o/r/rulesets'],
+      ['gh', 'api', '-X', 'GET', 'repos/o/r/rulesets/1'],
+      ['gh', 'api', '--method', 'POST', 'repos/o/r/milestones', '-f', 'title=v1'],
+      ['gh', 'api', 'graphql', '-f', 'query=query{viewer{login}}'],
+      ['gh', 'pr', 'view', '1'],
+    ]) {
+      assert.equal(check(...cmd).decision ?? null, null, cmd.join(' '))
+    }
+  })
+
+  it('rules: すべての規則に justification と match / not_match がある', () => {
+    const t = readFileSync(RULES, 'utf8')
+    const blocks = t.split(/^prefix_rule\(/m).slice(1)
+    assert.ok(blocks.length >= 8, `規則の数が少ない: ${blocks.length}`)
+    for (const b of blocks) {
+      assert.match(b, /justification = "[^"]+"/, b.slice(0, 80))
+      assert.match(b, /match = \[/, b.slice(0, 80))
+      assert.match(b, /not_match = \[/, b.slice(0, 80))
+    }
+  })
 })
 
 // 起動コマンドの fail-closed（実機 0.164.0: コマンドが exit 127 / exit 1 / stderr 無しの exit 2 で終わると

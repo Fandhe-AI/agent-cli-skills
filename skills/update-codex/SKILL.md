@@ -198,7 +198,7 @@ trust の状態はこのスキルが読み書きせず、確認方法を案内�
 | AGENTS.md 管理区間 | 診断の語彙（created / appended / replaced / unchanged） | 作成・追記・差し替え | `replaced` は区間内の手編集が消える。区間の外は変えない |
 | hooks.json | 診断の語彙（created / added / updated / unchanged） | `codex-hooks-merge.sh` で自エントリのみ追加・更新 | 利用者エントリは変えない（空白の整形のみ変わり得る） |
 | hooks スクリプト | なし / 差分あり / 同一 | 追加、または差分提示のうえ差し替え | 差し替えは手編集が消える。差分を見せて承認 |
-| rules | なし / 差分あり / 同一 | 追加、または差分提示のうえ差し替え | 同上 |
+| rules | なし / 差分あり / 同一 | 追加、または差分提示のうえ差し替え。旧版（force push と `--no-verify` の forbidden だけ）からの差し替えでは、取り消せない操作・公開範囲や設定の変更（`gh project item-delete`・`gh project edit`・`gh api` の PUT / PATCH / DELETE）の prompt が加わる | 同上。非対話の Codex では、この prompt により `gh project edit`（PRIVATE や説明だけの変更を含む）と `gh api` の PUT / PATCH / DELETE も拒否される。差し替えは `agent-guard.rules` 全体で、利用者が足した規則は消える。利用者の規則は別名の `.rules` ファイルに置く（このスキルは `agent-guard.rules` だけを扱い、他の `.rules` は触れない） |
 | agents | 無いもの / 差分ありのもの | 無いものだけ追加。差分ありは提示のみ | なし（上書きしない） |
 | スキル | 未導入の一覧 | 未導入のものだけ `.agents/skills/` に追加 | なし（既存は触れない） |
 | trust | 案内のみ | Step 6 の操作を案内 | なし |
@@ -543,6 +543,9 @@ cd "<target>"
 # 1) rules: force push が forbidden になる（codex が無ければ「未検証」と報告）
 codex execpolicy check --rules .codex/rules/agent-guard.rules -- git push --force origin main
 echo "exit=$?"
+# 1b) rules: 取り消せない操作は prompt、読み取りは一致なし
+codex execpolicy check --rules .codex/rules/agent-guard.rules -- gh project item-delete 1 --owner o --id X
+codex execpolicy check --rules .codex/rules/agent-guard.rules -- gh project item-list 1 --owner o
 
 # 2) アダプタに deny 入力を流して deny JSON が返る
 printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}' \
@@ -587,6 +590,7 @@ bash "<skill-dir>/assets/scripts/codex-hooks-merge.sh" \
 | 確認 | 期待 |
 |------|------|
 | 1) execpolicy | 結果の decision が `forbidden`、終了コード 0 |
+| 1b) execpolicy | `gh project item-delete` は decision が `prompt`、`gh project item-list` は `decision` を含まない（一致なし）。どちらも終了コード 0 |
 | 2) deny 入力 | stdout に `"permissionDecision":"deny"` を含む JSON、exit 0 |
 | 3) allow 入力 | stdout 空、exit 0 |
 | 4) サブエージェントのマージ | `"permissionDecision":"deny"` を含む JSON、exit 0 |
@@ -660,7 +664,7 @@ git rev-parse HEAD; git -C "${SANDBOX}/origin.git" rev-parse main   # 実行前�
 完了とみなす条件は、Step 7 の項目が期待どおりで、証拠（出力と終了コード）を報告に引用していること。
 具体的には次のとおり。
 
-- `codex execpolicy check ...` が forbidden（codex 未導入なら「未検証」と明記）
+- `codex execpolicy check ...` が forbidden（codex 未導入なら「未検証」と明記）。取り消せない操作は prompt、読み取りは一致なし
 - アダプタが deny 入力で deny JSON、allow 入力で空出力（どちらも exit 0）
 - `git commit --no-verify` がアダプタで deny、execpolicy で forbidden
 - `jq . .codex/hooks.json` が成功し、AGENTS.md の管理区間の開始マーカー数が 1
@@ -684,6 +688,7 @@ git rev-parse HEAD; git -C "${SANDBOX}/origin.git" rev-parse main   # 実行前�
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形
   - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
   - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。rules は先頭一致のため `git push origin main --force` 等は拾えない
+- **rules の prompt の効果と限界**（Codex 0.164.0 の実機）: 「確認なしで進めてよい」と指示されても、`gh project item-delete`・`gh project edit`（`--visibility PUBLIC` を含む）・`gh api -X PUT|PATCH|DELETE` は、一致する形なら `codex exec` では実行されない（拒否。実機で、規則なしは 3 回中 3 回実行・prompt は 0 回）。対話では利用者への承認要求になる想定だが実機は未検証で、`approvals_reviewer = auto_review` の設定や承認を迂回する起動オプションでの挙動も未検証。止められない形は、変数・置換・リダイレクト・制御構文を含む 1 本のシェルスクリプト、`gh -R x api …` のようにオプションを前置した形、`gh api repos/x -X PUT` のようにメソッドをパスの後ろに置いた形、`gh api graphql` の mutation、`reassign-sub-issue.sh` 等のスクリプトの実行。`gh api -X POST` は通常の作成系（マイルストーン等）に使うため対象外
 - `skills` CLI は固定版で実行する。失敗しても未固定 `npx` へフォールバックしない（付録参照）
 - コマンドへ渡すパスやスキル名は常に `"${var}"` でクォートする。外部入力を `bash -c` や `eval` へ渡さない
 - `--no-verify` を含むコマンドを hook や手順に仕込まない。`rm -rf` は使わない

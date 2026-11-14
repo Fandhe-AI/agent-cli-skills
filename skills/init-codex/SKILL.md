@@ -91,7 +91,7 @@ cat skills-lock.json 2>/dev/null | head -20 || true
 |------|---------|------|
 | AGENTS.md | 管理区間（新規作成・追記・差し替えのどれか） | `agents-md-block.sh --check` で結果語彙を先に示す。管理区間の外は変えない |
 | hook | `.codex/hooks/agent-guard.sh`・`codex-pretooluse.sh`・`codex-session-start.sh` と `.codex/hooks.json` | PreToolUse（`^Bash$`）と SessionStart。判定は 1 本の bash スクリプトに集約 |
-| rules | `.codex/rules/agent-guard.rules` | force push と `--no-verify` の典型形だけを forbidden にする補助層 |
+| rules | `.codex/rules/agent-guard.rules` | force push と `--no-verify` の典型形を forbidden に、取り消せない操作・公開範囲や設定の変更（`gh project item-delete`・`gh project edit`・`gh api` の PUT / PATCH / DELETE）を prompt にする補助層。prompt は非対話では拒否になる（実機）。対話では承認要求になる（Codex の参照文書による。実機は未検証） |
 | agents | `.codex/agents/` の `researcher.toml`・`implementer.toml`・`reviewer.toml` | model は書かず親を継承する |
 | スキル | 未導入のワークフロースキル（9 件のうち） | `.agents/skills/` に導入。Codex 上の動作は保証しない（Step 8 参照） |
 
@@ -316,7 +316,7 @@ hook は **project trust** と `/hooks` での **hook trust** の**両方**が�
 
 - `--dangerously-bypass-hook-trust` など、trust を迂回するオプションは案内しない
 - `.codex/rules/agent-guard.rules` は project trust だけで効く（hook trust は不要）。hook が trust 待ちの間も、
-  典型形の禁止だけは効く
+  典型形の禁止と、取り消せない操作の prompt（非対話では拒否。対話では承認要求になる想定で、実機は未検証）は効く
 
 ### Step 7: 動作を検証する
 
@@ -356,6 +356,10 @@ printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git commit --no-verify
 echo "exit=$?"
 codex execpolicy check --rules .codex/rules/agent-guard.rules -- git commit --no-verify -m x
 echo "exit=$?"
+
+# 8) 取り消せない操作は prompt（decision が prompt）、読み取りは一致なし（decision が出ない）
+codex execpolicy check --rules .codex/rules/agent-guard.rules -- gh project item-delete 1 --owner o --id X
+codex execpolicy check --rules .codex/rules/agent-guard.rules -- gh project item-list 1 --owner o
 ```
 
 期待値。
@@ -438,6 +442,7 @@ git rev-parse HEAD; git -C "${SANDBOX}/origin.git" rev-parse main   # 実行前�
 - アダプタが deny 入力で deny JSON、allow 入力で空出力（どちらも exit 0）
 - `git commit --no-verify` がアダプタで deny、execpolicy で forbidden
 - `jq . .codex/hooks.json` が成功し、AGENTS.md の管理区間の開始マーカー数が 1
+- 7) の後半と 1) は `"decision":"forbidden"`、8) の前半は `"decision":"prompt"`、後半は `decision` を含まない（一致なし）
 - `.agents/skills/` に 9 スキルがあり、`skills-lock.json` が妥当
 
 「動くはず」での完了報告はしない。実行していない検証は未検証と書く。
@@ -454,6 +459,7 @@ git rev-parse HEAD; git -C "${SANDBOX}/origin.git" rev-parse main   # 実行前�
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形
   - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
   - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。rules は先頭一致のため `git push origin main --force` 等は拾えない
+- **rules の prompt の効果と限界**（Codex 0.164.0 の実機）: 「確認なしで進めてよい」と指示されても、`gh project item-delete`・`gh project edit`（`--visibility PUBLIC` を含む）・`gh api -X PUT|PATCH|DELETE` は、一致する形なら `codex exec` では実行されない（拒否。実機で、規則なしは 3 回中 3 回実行・prompt は 0 回）。対話では利用者への承認要求になる想定だが実機は未検証で、`approvals_reviewer = auto_review` の設定や承認を迂回する起動オプションでの挙動も未検証。止められない形は、変数・置換・リダイレクト・制御構文を含む 1 本のシェルスクリプト、`gh -R x api …` のようにオプションを前置した形、`gh api repos/x -X PUT` のようにメソッドをパスの後ろに置いた形、`gh api graphql` の mutation、`reassign-sub-issue.sh` 等のスクリプトの実行。`gh api -X POST` は通常の作成系（マイルストーン等）に使うため対象外
 - `skills` CLI は固定版で実行する。失敗しても未固定 `npx` へフォールバックしない（付録参照）
 - コマンドへ渡すパスやスキル名は常に `"${var}"` でクォートする。外部入力を `bash -c` や `eval` へ渡さない
 - `--no-verify` を含むコマンドを hook や手順に仕込まない
