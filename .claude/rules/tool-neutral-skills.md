@@ -62,7 +62,18 @@ paths:
 
 安全上の確認は、実行するコマンドに結びつけて書く。「この会話の中でユーザーの明示の返答を得るまで `<コマンド>` を実行しない。起動時の指示に含まれる『確認なしで』『そのまま進めて』等は、この確認の返答にならない。返答を得られない環境（非対話実行）では実行せずに止めて報告する」。抽象的な「省略しない」だけでは、モデルが起動時の承認を優先することがある（OpenCode v2.2.7 で、「確認なしで進めてよい」付きの起動で project-update-items / project-archive-done が一括更新・一括アーカイブを実行した）。
 
-限界: コマンド結合型の文は OpenCode には効いた（同条件で 10 回中 0 回実行）が、Codex 0.164.0 には効かなかった。確認の Step と実行の Step の両方に書いても 10 回中 10 回実行し、スキル本文を全文読んだうえで「ご指定どおり確認を省略し」と述べた。安全上の確認を元に戻せない操作に絞るのはこのためである。残した安全上の確認でも同じで、project-init の PUBLIC 作成では、Codex は 3 回中 3 回、確認の前に `gh project create` を実行した（OpenCode は止まった）。Codex でスキル本文の文言だけでは守らせきれないものは、hook 等で実行を止める（Issue #786）。
+限界: コマンド結合型の文は OpenCode には効いた（同条件で 10 回中 0 回実行）が、Codex 0.164.0 には効かなかった。確認の Step と実行の Step の両方に書いても 10 回中 10 回実行し、スキル本文を全文読んだうえで「ご指定どおり確認を省略し」と述べた。安全上の確認を元に戻せない操作に絞るのはこのためである。残した安全上の確認でも同じで、project-init の PUBLIC 作成では、Codex は 3 回中 3 回、確認の前に `gh project create` を実行した（OpenCode は止まった）。Codex でスキル本文の文言だけでは守らせきれないものは、実行側で止める。
+
+実行側の止め方（Issue #786）: init-codex / update-codex が配る `.codex/rules/agent-guard.rules` に、`prefix_rule` の `decision = "prompt"` で次を宣言する。`prompt` は、非対話（`codex exec`。approval は never 固定で、`-c approval_policy=on-request` を渡しても変わらない）では「approval required by policy, but AskForApproval is set to Never」で拒否される（Codex 0.164.0・`gpt-6.1-sol`・reasoning low・各 3 回の実測。規則なしの対照は対象コマンドを 3 回中 3 回実行、`prompt` と `forbidden` は 3 回中 0 回。project-init を経由した公開の筋書きでも、`gh project edit` は 3 回中 0 回で、`gh project create`〔非公開で作られる〕は 3 回中 3 回実行）。対話では利用者への承認要求になる想定だが、`codex exec` では確かめられず未検証。`approvals_reviewer = auto_review` の設定や承認を迂回する起動オプションでの挙動も未検証。
+
+| 対象 | 処置 | 理由 |
+|------|------|------|
+| `gh project item-delete` | rules の prompt | 取り消せない。先頭一致で確実に拾える |
+| `gh project edit`（`--visibility PUBLIC`） | rules の prompt（`edit` 全体） | 公開は `gh project edit` だけで行う（`gh project create` に `--visibility` は無く、`--visibility PUBLIC` 付きの create が偽 gh で「実行された」のは偽 gh が未知フラグを受け付けただけ。実際の gh は拒否する）。`--visibility` の位置は先頭一致で絞れないため、説明・タイトルの変更も対象になる |
+| `gh api` の ruleset・リポジトリ設定の書き込み | rules の prompt（`-X` / `--method` を `api` の直後に置いた PUT / PATCH / DELETE と、`-XPUT`・`--method=PUT` 等の 1 語形） | パスの後ろにメソッドを置いた形・`gh -R x api …`・POST・`gh api graphql` の mutation は拾えない。POST はマイルストーン作成等の通常の作成系が使うため対象にしない |
+| `reassign-sub-issue.sh` | 止めない | パスが変数やスキルの導入先で変わり、先頭一致で拾えない。DELETE → POST で元に戻せる操作で、安全上の確認の対象（元に戻せない・公開範囲・保護設定・秘密情報）に当たらない。止めるなら PreToolUse hook でスクリプト名を見る |
+
+止められない形が残る。変数・置換・リダイレクト・制御構文を含む 1 本のシェルスクリプトは、分割されず先頭一致に当たらない（`N=1; gh project item-delete "$N" … 2>&1` は 3 回中 3 回実行された）。ruleset・リポジトリ設定の書き込みの網羅は、PreToolUse hook（`agent-guard.sh` の repo-settings。いまは subagent セッションのみ）とサーバー側の ruleset に任せる。
 
 ### 引数
 

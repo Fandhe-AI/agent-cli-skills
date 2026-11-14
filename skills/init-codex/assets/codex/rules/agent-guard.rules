@@ -1,7 +1,17 @@
-# agent-guard.rules: Codex の execpolicy による補助層。典型形の禁止だけを宣言する。
+# agent-guard.rules: Codex の execpolicy による補助層。典型形だけを宣言する。
 # 主層は .codex/hooks/agent-guard.sh（PreToolUse hook）で、こちらは hook が効かない経路への
 # 保険。pattern は先頭一致のため、オプションが別位置にある形（git -C x push --force 等）は
 # 拾えない。網羅は hook と、サーバー側の branch protection に任せる。
+#
+# 2 種類の decision を使い分ける。
+#   forbidden: 常に止める（履歴の書き換え・フックの迂回）。
+#   prompt:    取り消せない・公開範囲や設定を変える操作。非対話（codex exec。approval が never）では
+#              拒否される（実機で確認済み）。対話では利用者への承認要求になる（Codex の参照文書による。
+#              実機は未検証）。スキル本文の「確認なしで進めてよい」より優先して止めるための層
+#              （Codex 0.164.0 は起動時の指示をスキル本文の確認より優先するため、文言だけでは守れない）。
+# 止められない形（パスや引数が変数・置換・リダイレクト・制御構文を含む 1 本のシェルスクリプト、
+# `gh -R x api -X PUT` のようにオプションを前置した形、`gh api repos/x -X PUT` のようにメソッドを
+# パスの後に置いた形、`gh api graphql` の mutation、スクリプトの実行）は既知の限界。
 prefix_rule(
     pattern = ["git", "push", ["--force", "-f"]],
     decision = "forbidden",
@@ -29,4 +39,34 @@ prefix_rule(
     justification = "--no-verify は禁止。フックの失敗は原因を直して再実行する",
     match = ["git push --no-verify origin main"],
     not_match = ["git push origin main"],
+)
+
+# --- 取り消せない・公開範囲や設定を変える操作（prompt） ---
+prefix_rule(
+    pattern = ["gh", "project", "item-delete"],
+    decision = "prompt",
+    justification = "Projects のアイテム削除は取り消せない。対象の件数とタイトルを示して利用者の承認を得る",
+    match = ["gh project item-delete 1 --owner o --id X"],
+    not_match = ["gh project item-list 1 --owner o", "gh project item-archive 1 --owner o --id X"],
+)
+prefix_rule(
+    pattern = ["gh", "project", "edit"],
+    decision = "prompt",
+    justification = "gh project edit は --visibility PUBLIC で公開範囲を変える（引数の位置で絞れないため edit 全体が対象）。公開の影響を示して利用者の承認を得る",
+    match = ["gh project edit 1 --owner o --visibility PUBLIC", "gh project edit 1 --owner o --description d"],
+    not_match = ["gh project view 1 --owner o", "gh project create --owner o --title t"],
+)
+prefix_rule(
+    pattern = ["gh", "api", ["-X", "--method"], ["PUT", "PATCH", "DELETE"]],
+    decision = "prompt",
+    justification = "ruleset・branch protection・リポジトリ設定への書き込みになり得る。変更内容を示して利用者の承認を得る",
+    match = ["gh api -X PUT repos/o/r/rulesets/1 --input x.json", "gh api --method PATCH repos/o/r -F allow_merge_commit=false", "gh api -X DELETE repos/o/r/rulesets/1"],
+    not_match = ["gh api -X GET repos/o/r/rulesets/1", "gh api --method POST repos/o/r/milestones -f title=v1", "gh api repos/o/r/rulesets"],
+)
+prefix_rule(
+    pattern = ["gh", "api", ["-XPUT", "-XPATCH", "-XDELETE", "--method=PUT", "--method=PATCH", "--method=DELETE"]],
+    decision = "prompt",
+    justification = "ruleset・branch protection・リポジトリ設定への書き込みになり得る（メソッドを 1 語で書く形）。変更内容を示して利用者の承認を得る",
+    match = ["gh api -XPATCH repos/o/r", "gh api --method=PUT repos/o/r/rulesets/1"],
+    not_match = ["gh api -XGET repos/o/r", "gh api --method=GET repos/o/r"],
 )
