@@ -61,6 +61,13 @@ const agentFiles = readdirSync(join(OC, 'agents')).filter((f) => f.endsWith('.md
 const agents = agentFiles.map((f) => ({ file: f, id: f.replace(/\.md$/, ''), ...parseFrontmatter(readFileSync(join(OC, 'agents', f), 'utf8')) }))
 
 describe('opencode.jsonc', () => {
+  // コメント付きの生成物は update-opencode の自動マージ（opencode-config-merge.mjs）が needs-manual にする。
+  it('コメントを含まない純粋な JSON である（利用者が規則を足しても自動マージを通る）', () => {
+    const raw = readFileSync(join(OC, 'opencode.jsonc'), 'utf8')
+    assert.ok(!/^\s*\/\//m.test(raw) && !raw.includes('/*'))
+    assert.doesNotThrow(() => JSON.parse(raw))
+  })
+
   it('$schema がある', () => assert.equal(cfg.$schema, 'https://opencode.ai/config.json'))
 
   it('v1 のキーが無い', () => {

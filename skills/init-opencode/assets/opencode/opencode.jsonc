@@ -1,8 +1,4 @@
 {
-  // 補助層。plugins/agent-guard（主判定）が読み込めない状態でも、典型形の force push と
-  // --no-verify だけは止める。字面一致のため `git push origin main --force` のような
-  // 順序違いは通る（主判定の plugin が止める）。末尾の ` *` は引数なしにも一致する（公式 docs）。
-  // 語の境界を空白で作る。--force-with-lease / --force-if-includes も既存コミットを消せるため止める。
   "$schema": "https://opencode.ai/config.json",
   "permissions": [
     { "action": "shell", "resource": "git push --force *", "effect": "deny" },

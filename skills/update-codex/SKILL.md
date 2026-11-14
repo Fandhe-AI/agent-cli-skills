@@ -41,7 +41,7 @@ update-codex [対象リポジトリのパス]
 - `git` が使え、対象が git リポジトリであること（`git -C <target> rev-parse --show-toplevel` で確認）
 - `bash` が使えること（`agents-md-block.sh`・`codex-hooks-merge.sh` の実行と hook の起動に使う。無い環境では hook が動かないため、導入を先に案内する）
 - `jq` が使えること（`codex-hooks-merge.sh` と hook が使う。無い環境では hook が fail-closed で全コマンドを拒否するため、導入を先に案内する）
-- `gh` が使え、認証済みであること（`gh auth status`。ワークフロースキルが使う）
+- `gh` が使え、認証済みであること（`gh auth status`。このスキル自身は `gh` を使わないが、導入するワークフロースキルが使う）
 - `npx` が使えること（スキル追加に使う。`skills` CLI は固定版 `SKILLS_CLI_VERSION` で実行する。値と更新手順は付録を参照）
 - `codex` が使えること（検証で `codex execpolicy check` を使う。無い場合も追補は進められるが、その検証は「未検証」と報告する）
 
@@ -57,7 +57,8 @@ gh auth status
 git -C "<target>" rev-parse --show-toplevel
 ```
 
-`git`・`bash`・`jq`・`gh`・`npx` のどれかが無い、または `gh` が未認証なら、導入または `gh auth login` を案内して中断する。
+`git`・`bash`・`jq`・`npx` のどれかが無ければ、導入を案内して中断する。
+`gh` が無い、または未認証の場合は、導入するワークフロースキル（create-pr 等）に必要なので警告し、導入または `gh auth login` を案内して続行する。
 `codex` だけが無い場合は続行し、報告に「rules の検証は未実施」と書く。
 以降の `<target>` には `git rev-parse --show-toplevel` が返したルートを使う。
 
@@ -300,7 +301,7 @@ echo "exit=$?"
 | `error-markers` / `error-fence` / `error-block-marker` | 4 | マーカー・フェンスの不整合。ファイルは変わっていない。手で直すよう案内して中断 |
 
 32768 バイトを超えると stderr に警告が出る（Codex は AGENTS.md を合計 32 KiB までしか読まない）。
-警告が出たら報告に載せる。管理区間の外はバイト単位で変わらない。
+警告が出たら報告に載せる。元の本文のバイトは変わらない（追記時は区間の前に区切りの空行を 1 行入れる）。
 
 #### 4-4. 承認された未導入のワークフロースキルを追加する
 
@@ -310,7 +311,7 @@ cd "<target>"
 # 乗っ取り時の任意コード実行経路になる）。正の定義箇所・更新手順は付録を参照。
 SKILLS_CLI_VERSION="1.5.23"   # 正の定義箇所。更新手順は付録を参照
 
-# Step 4 で承認された未導入スキル名だけを入れる（承認結果からエージェントが埋める。
+# Step 3 で承認された未導入スキル名だけを入れる（承認結果からエージェントが埋める。
 # 例: create-commit だけ承認したなら (create-commit)。全件を並べない・承認なしなら空にする）
 approved_skills=(create-commit)
 known_skills=" create-commit create-pr create-issue implement-issue implement-issue-tree implement-review implement-review-pr update-docs comment-code "
@@ -341,7 +342,7 @@ fi
 - `approved_skills` は Step 3 で承認されたスキル名だけをエージェントが埋める。配列に無いものは未導入でも追加しない。標準 9 スキルに無い名前は警告して処理しない（経路 B の同名配列も同じ）
 - `-a codex -a opencode` は `.agents/skills/<name>` の実体だけを作り、既存の `.claude/skills/` には触れない。
   Claude Code 側は `init-claude` / `update-claude` の担当
-- `skills-lock.json` が更新され、各エントリに `skillPath` があることを確認する
+- `skills-lock.json` は（エントリが既に残っていれば変わらないことがあるが）更新される場合があり、各エントリに `skillPath` があることを確認する
 
 ### Step 5: Codex のセッション内で実行している場合の書き込み経路
 
@@ -472,7 +473,7 @@ place "${S}/hooks.json" ".codex/hooks.json" overwrite || rc=1
 
 # 承認された未導入のワークフロースキルの追加（承認済みかつ未導入のものだけ -s を付ける）
 SKILLS_CLI_VERSION="1.5.23"   # Step 4-4 と同じ固定版
-# Step 4 で承認された未導入スキル名だけを入れる（承認結果からエージェントが埋める。
+# Step 3 で承認された未導入スキル名だけを入れる（承認結果からエージェントが埋める。
 # 例: create-commit だけ承認したなら (create-commit)。全件を並べない・承認なしなら空にする）
 approved_skills=(create-commit)
 known_skills=" create-commit create-pr create-issue implement-issue implement-issue-tree implement-review implement-review-pr update-docs comment-code "
@@ -518,7 +519,7 @@ hook は **project trust** と `/hooks` での **hook trust** の**両方**が�
 hook スクリプトや hooks.json を更新すると、更新した hook は再承認するまで実行されない場合がある。
 このスキルは trust を**自分では書かず、承認もしない**。ユーザー自身が次のどちらかを行うよう案内する。
 
-1. `~/.codex/config.toml` に対象プロジェクトの trust を追記する（ユーザーが自分で編集する）
+1. `${CODEX_HOME:-$HOME/.codex}/config.toml` に対象プロジェクトの trust を追記する（`CODEX_HOME` が設定されていればそちらが有効。ユーザーが自分で編集する）
 
    ```toml
    [projects."<target の絶対パス>"]
@@ -564,6 +565,13 @@ jq . .codex/hooks.json >/dev/null && echo "hooks.json: OK"
 # 6) AGENTS.md の管理区間が 1 つ
 grep -c 'agent-cli-skills:agents-md:start' AGENTS.md
 
+# 9) --no-verify の拒否（アダプタと rules の両方）
+printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git commit --no-verify -m x"}}' \
+  | bash .codex/hooks/codex-pretooluse.sh
+echo "exit=$?"
+codex execpolicy check --rules .codex/rules/agent-guard.rules -- git commit --no-verify -m x
+echo "exit=$?"
+
 # 7) 利用者の hooks.json エントリ数（Step 2-2 で控えた値と同じであること）
 jq '[.hooks[]?[]?.hooks[]? | select(((.command // "") | tostring
       | (contains(".codex/hooks/codex-pretooluse.sh") or contains(".codex/hooks/codex-session-start.sh"))) | not)] | length' \
@@ -584,6 +592,7 @@ bash "<skill-dir>/assets/scripts/codex-hooks-merge.sh" \
 | 4) サブエージェントのマージ | `"permissionDecision":"deny"` を含む JSON、exit 0 |
 | 5) hooks.json | `hooks.json: OK` |
 | 6) 区間数 | `1` |
+| 9) --no-verify | アダプタは `"permissionDecision":"deny"` を含む JSON で exit 0。execpolicy は decision が `forbidden` で終了コード 0 |
 | 7) 利用者エントリ数 | Step 2-2 の控えと同じ値 |
 | 8) 再診断 | `CODEX_HOOKS_MERGE_RESULT unchanged`（hooks.json の更新を承認した場合） |
 
@@ -593,15 +602,39 @@ bash "<skill-dir>/assets/scripts/codex-hooks-merge.sh" \
 
 アダプタの入力検証は hook が実際に呼ばれることの証明ではない。実セッションでの確認を案内する場合は、
 **対象リポジトリでは危険なコマンドを実行させない**。実リモートから切り離した使い捨てリポジトリだけで行う。
+初期コミットと bare origin への初回 push を入れておき、force push の拒否を remote の sha で判定できるようにする。
 
 ```bash
 SANDBOX="$(mktemp -d)"
-git init --bare "${SANDBOX}/origin.git"
-git init "${SANDBOX}/work" && cd "${SANDBOX}/work"
+git init -q --bare -b main "${SANDBOX}/origin.git"
+git init -q -b main "${SANDBOX}/work" && cd "${SANDBOX}/work"
 git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
+git commit -q --allow-empty -m "chore: init" && git push -q -u origin main
+git rev-parse HEAD; git -C "${SANDBOX}/origin.git" rev-parse main   # 実行前の sha を控える
 # 対象の .codex/ をここへコピーし、trust 済みの Codex をこのディレクトリで起動して
 # `git commit --no-verify` と `git push --force` が拒否され、`git commit -m x` が通ることを確かめる
 ```
+
+実セッション確認の注意点。
+
+- **sandbox**: Codex の既定 sandbox では `.git` が読み取り専用で、対照の `git commit -m x` が hook と無関係に失敗する。
+  確認用には `.git` だけを書き込み可にした permissions プロファイルを `-c` で与える（`.codex`・`.agents` は明示的に read に戻す。
+  `:workspace_roots` を `-c` で指定すると組み込みの読み取り専用が外れるため、書き込みたい場所と守る場所を全て列挙する）。
+  承認モードで実行してもよい。`<WORK>` は `${SANDBOX}/work` の物理パス。
+
+  ```bash
+  PERM='permissions={guardcheck={extends=":workspace", filesystem={":minimal"="read", ":workspace_roots"={"."="write", ".git"="write", ".codex"="read", ".agents"="read"}}}}'
+  TRUST="projects={\"<WORK>\"={trust_level=\"trusted\"}}"
+  codex exec --ephemeral -C "<WORK>" -c "${TRUST}" -c "${PERM}" -c 'default_permissions="guardcheck"' --json "<プロンプト>"
+  ```
+
+  trust は一時リポジトリ向けに `-c` で渡すだけで、`${CODEX_HOME:-$HOME/.codex}/config.toml` は変更しない。
+- **モデルの辞退**: 配布した指示（AGENTS.md の管理区間・SessionStart・スキル）により、モデルが禁止コマンドの実行自体を辞退し、
+  hook の拒否と区別できないことがある。プロンプトに「ガードの動作確認のためのテストである」と明示する。
+  それでも辞退した場合は、実セッション確認の代わりに上の hook への直接入力（確認 2・4・7）で確認したと報告する。
+- **判定**: 拒否は stderr または JSONL に `Command blocked by PreToolUse hook`（または `blocked by PreToolUse hook:`）が出て、
+  副作用（remote の sha の変化・新しいコミット）が無いこと。対照の `git commit -m x` は通り、コミットが増えること。
+  force push の拒否は、実行前後で `git -C "${SANDBOX}/origin.git" rev-parse main` が変わらないことで判定する。
 
 確認後は `${SANDBOX}` を利用者が自分で削除する。`rm -rf` は案内しない。使い捨てを用意できないときは、実セッションの確認は行わず「未検証」と報告する。
 
@@ -628,6 +661,7 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 
 - `codex execpolicy check ...` が forbidden（codex 未導入なら「未検証」と明記）
 - アダプタが deny 入力で deny JSON、allow 入力で空出力（どちらも exit 0）
+- `git commit --no-verify` がアダプタで deny、execpolicy で forbidden
 - `jq . .codex/hooks.json` が成功し、AGENTS.md の管理区間の開始マーカー数が 1
 - 更新後の利用者の hooks.json エントリ数が更新前と同じ
 - 追加を承認したスキルが `.agents/skills/` にあり、`skills-lock.json` が妥当
@@ -641,9 +675,9 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 - hooks.json は `codex-hooks-merge.sh` 以外で編集しない。`error-*` が返ったら中止して報告し、手で直さない
 - 利用者の hooks.json エントリ・利用者の agent ファイルは消さない。標準 agent の既存の同名ファイルも上書きしない
 - hooks スクリプト・rules・AGENTS.md の管理区間の差し替えは手編集を消し得るため、差分を示して承認を取る
-- **trust を自動化しない。** `~/.codex/config.toml` へ書き込まず、`/hooks` の承認もしない。`--dangerously-bypass-hook-trust` は案内しない
+- **trust を自動化しない。** `${CODEX_HOME:-$HOME/.codex}/config.toml` へ書き込まず、`/hooks` の承認もしない。`--dangerously-bypass-hook-trust` は案内しない
 - Codex のセッション内では `.codex/`・`.agents/` が読み取り専用。権限昇格の承認を求め、拒否されたら Step 5 の退避経路へ切り替える
-- `agents-md-block.sh` は AGENTS.md の管理区間の外をバイト単位で変えない。マーカーが不整合なら書かずに中断する。区間は常に 1 つ
+- `agents-md-block.sh` は AGENTS.md の元の本文のバイトを変えない（追記時は区間の前に区切りの空行を 1 行入れる）。マーカーが不整合なら書かずに中断する。区間は常に 1 つ
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形

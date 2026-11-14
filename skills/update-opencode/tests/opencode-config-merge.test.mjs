@@ -109,6 +109,29 @@ describe('opencode-config-merge', { concurrency: true }, () => {
     assert.deepEqual(read(t), o)
   })
 
+  it('template 自体がコメント・末尾カンマを含まない（生成物が自動マージを通る前提）', () => {
+    const t = readFileSync(TEMPLATE, 'utf8')
+    assert.ok(!/^\s*\/\//m.test(t) && !t.includes('/*'), 'コメントがある')
+    assert.doesNotThrow(() => JSON.parse(t))
+  })
+
+  it('template の生成物の末尾に利用者の規則を足しても needs-manual にならず merged で deny が末尾へ戻る', async () => {
+    const d = tmp()
+    const t = join(d, 'opencode.jsonc')
+    assert.equal((await merge(t)).word, 'created')
+    // 利用者が permissions 配列の末尾へ手で 1 件足した形（テキスト編集）
+    const edited = readFileSync(t, 'utf8').replace('\n  ],\n  "policies"', `,\n    ${JSON.stringify(userAllow)}\n  ],\n  "policies"`)
+    assert.notEqual(edited, readFileSync(t, 'utf8'))
+    writeFileSync(t, edited)
+    const r = await merge(t)
+    assert.equal(r.word, 'merged'); assert.equal(r.code, 0)
+    const o = read(t)
+    assert.deepEqual(o.permissions.slice(-own.permissions.length), own.permissions)
+    assert.deepEqual(o.permissions[own.permissions.length], userAllow)
+    assert.deepEqual(o.policies, own.policies)
+    assert.equal((await merge(t)).word, 'unchanged')
+  })
+
   it('コメント付きで deny の後ろに利用者の規則があれば needs-manual で同じ判定の不足分を出す', async () => {
     const d = tmp()
     const broad = { action: 'shell', resource: '*', effect: 'allow' }

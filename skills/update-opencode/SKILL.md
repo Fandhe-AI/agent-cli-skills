@@ -85,10 +85,21 @@ head -20 skills-lock.json 2>/dev/null || true
 | `.opencode/opencode.jsonc` がある | これ。`opencode.jsonc` を**全上書き**するため、直下の設定は効かない |
 | 直下の `opencode.jsonc` だけがある | これ |
 | 直下の `opencode.json` だけがある | これ |
-| 直下に `opencode.jsonc` と `opencode.json` が両方ある | どちらが効くか断定せず、利用者に確認する（`opencode debug config --standalone` のキー件数で確かめてよい） |
+| 直下に `opencode.jsonc` と `opencode.json` が両方ある | どちらが効くか断定せず、利用者に確認する（下記のとおり読み込まれているソースと件数は確かめられるが、優先関係は断定しない） |
 | 設定が 1 つも無く `.opencode/` だけがある | 直下の `opencode.jsonc` を新規作成する |
 
 以降、対象の設定ファイルのパスを `<config>` と書く。
+
+`opencode debug config --standalone` の出力は、合成後の設定ではなく**設定ソースごとの `{info,path,type}` の配列**である
+（グローバル設定・プロジェクトの設定ファイル・ディレクトリが別の要素になり、トップレベルに `.permissions` は無い）。
+読み込まれているソースと件数だけを確かめるなら、次のようにする（規則の中身は出さない）。
+
+```bash
+opencode debug config --standalone \
+  | jq -er '.[] | select((.info | type) == "object") | "\(.path) permissions=\((.info.permissions // []) | length) policies=\((.info.policies // []) | length)"'
+```
+
+配列でない出力や jq の失敗は「検証不能」であり、0 件とは読まない。
 
 ### Step 3: 診断する（読み取りのみ）
 
@@ -182,16 +193,35 @@ cd "<target>"
 set -o pipefail
 # SHA-256 は sha256sum（GNU）が無ければ shasum -a 256（macOS）を使う
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
-# 更新前の permissions / policies の件数とハッシュ（内容は表示しない）
-opencode debug config --standalone \
-  | jq -r '"permissions=\((.permissions // []) | length) policies=\((.policies // []) | length)"'
-opencode debug config --standalone \
-  | jq -c '[(.permissions // []), (.policies // [])]' | sha256
+CFG="$(pwd -P)/<config の相対パス>"   # debug config の path は物理パスで返る。例: <target>/opencode.jsonc
+
+# debug config は設定ソースごとの {info,path,type} の配列。path が CFG の要素の .info を取り出す。
+# 配列でない・該当要素が 1 件でないときは失敗する（0 件扱いにしない）
+proj_info() {
+  opencode debug config --standalone | jq -ce --arg p "${CFG}" '
+    if type != "array" then error("出力が配列でない") else . end
+    | [.[] | select(.path == $p and (.info | type) == "object")] as $m
+    | if ($m | length) == 1 then $m[0].info else error("該当要素が 1 件でない") end'
+}
+# [permissions, policies] を返す。配列でなければ失敗する
+proj_rules() {
+  proj_info | jq -ce 'def arr(k): (.[k] // []) | if type == "array" then . else error("\(k) が配列でない") end;
+    [arr("permissions"), arr("policies")]'
+}
+
+# 更新前の permissions / policies の件数とハッシュ（内容は表示しない）。取れなければ更新に進まない
+before="$(proj_rules)" && [ -n "${before}" ] \
+  || { echo "検証不能: 更新前の規則を取り出せない。更新に進まない"; exit 1; }
+printf '%s' "${before}" | jq -r '"permissions=\(.[0] | length) policies=\(.[1] | length)"'
+printf '%s' "${before}" | jq -c . | sha256 | awk '{print $1}'
+unset before
 ```
+
+設定ファイルがまだ無い（Step 3 (b) が `created`）場合は該当要素が無いため、この取得は行わず、更新前を「件数 0・空」として Step 6 の 7) を省く。
 
 `opencode debug config` の出力にはグローバル設定（`~/.config/opencode` など）由来の秘密が含まれ得る。
 **全文を表示・保存しない。** 上のように `jq` で件数とハッシュだけを抜き出す。
-`opencode` が無い場合は、対象の設定ファイルを `jq` で読める形式のときだけ同様に控え、それ以外は「未検証」とする。
+`opencode` が無い場合、または `検証不能` で止まった場合は、対象の設定ファイルを `jq` で読める形式のときだけ同様に控え、それ以外は「未検証」とする。
 
 #### 5-1. AGENTS.md の管理区間
 
@@ -221,9 +251,12 @@ echo "exit=$?"
 | 結果語彙 | 終了コード | 対応 |
 |---------|-----------|------|
 | `created` / `merged` / `unchanged` | 0 | 成功 |
-| `needs-manual` | 3 | **何も書かれていない。** stdout の JSON（追加すべき規則）を利用者に提示し、`permissions` と `policies` それぞれの**配列の末尾**に貼るよう案内する。貼った後に `--check` を再実行し、`unchanged` になることを確認する。ならなければ貼り間違いとして原因を一緒に探す |
+| `needs-manual` | 3 | **何も書かれていない。** stdout の JSON は**不足分だけ**（`permissions` / `policies` ごとの、追加すべき規則の配列。全件ではない）。利用者に提示し、各配列の**末尾**へ、出力の配列の**要素だけ**を貼るよう案内する（外側の `{` `}` やキー名は貼らない。直前の要素の後ろにカンマを足す）。既存の自分の規則は消さず、全件を貼り直さない。貼った後に `--check` を再実行し、`unchanged` になることを確認する。ならなければ貼り間違いとして原因を一緒に探す |
 | `error-usage` | 2 | コマンドを見直す |
 | その他の `error-*` | 1 | 中止して原因を報告する。手で書き直して続行しない |
+
+自分の規則が既に配列の前の方にあり、その後ろに利用者の規則がある場合も、出力には再追加分として含まれる。貼ると同じ規則が前後に 2 つ残るが、
+最後に一致した規則が勝つため害はない（前の古い複製を消すかは利用者が決める。消さなくても `unchanged` になる）。
 
 `needs-manual` の理由は、コメントや末尾カンマを JSON として書き戻すと消えるためである。
 未知キーは OpenCode が黙って捨てるので、壊れた設定は気づかれない。壊すくらいなら止める。
@@ -233,31 +266,48 @@ echo "exit=$?"
 ```bash
 ASSETS="<skill-dir>/assets"
 TARGET="<target>"
-mkdir -p "${TARGET}/.opencode/hooks" "${TARGET}/.opencode/plugins/agent-guard" "${TARGET}/.opencode/agents"
 
-# 不在の場合だけ追加する（既存は上書きしない）
-[ -e "${TARGET}/.opencode/hooks/agent-guard.sh" ] \
-  || cp "${ASSETS}/hooks/agent-guard.sh" "${TARGET}/.opencode/hooks/agent-guard.sh"
-chmod +x "${TARGET}/.opencode/hooks/agent-guard.sh"
-[ -e "${TARGET}/.opencode/plugins/agent-guard/index.js" ] \
-  || cp "${ASSETS}/opencode/plugins/agent-guard/index.js" "${TARGET}/.opencode/plugins/agent-guard/index.js"
+# Step 4 で承認された項目の名前だけをエージェントが埋める（承認なしなら空のまま。全件を並べない）。
+# approved_add: 不在のガード・plugin の追加（名前は guard / plugin）
+# approved_replace: 差分があり、差し替え（上書き）が承認されたガード・plugin（名前は guard / plugin）
+# approved_agents: 不在の標準 agent の追加（名前は researcher / implementer / reviewer）
+# 例: ガードの追加と researcher だけ承認したなら approved_add=(guard) approved_agents=(researcher)
+approved_add=()
+approved_replace=()
+approved_agents=()
 
-# Step 4 で承認された「不在」の標準 agent 名だけを入れる（承認結果からエージェントが埋める。
-# 例: researcher だけ承認したなら (researcher)。全件を並べない・承認なしなら空にする）
-approved_agents=(researcher)
+# place <guard|plugin> <add|replace>: add は不在のときだけ配置し、replace は上書きする
+place() {
+  local src dst
+  case "$1" in
+    guard)  src="${ASSETS}/hooks/agent-guard.sh"; dst="${TARGET}/.opencode/hooks/agent-guard.sh" ;;
+    plugin) src="${ASSETS}/opencode/plugins/agent-guard/index.js"; dst="${TARGET}/.opencode/plugins/agent-guard/index.js" ;;
+    *) echo "警告: ガード・plugin に無い名前のため処理しない: $1" >&2; return 0 ;;
+  esac
+  if [ "$2" = add ] && [ -e "${dst}" ]; then
+    echo "既存のため追加しない（差し替えは approved_replace で承認する）: $1"; return 0
+  fi
+  mkdir -p "$(dirname "${dst}")" && cp "${src}" "${dst}" || return 1
+  if [ "$1" = guard ]; then chmod +x "${dst}"; fi
+  echo "配置した: $1 ($2)"
+}
+for k in "${approved_add[@]}"; do place "${k}" add; done
+for k in "${approved_replace[@]}"; do place "${k}" replace; done
+
 for a in "${approved_agents[@]}"; do
   case "${a}" in
     researcher|implementer|reviewer) ;;
     *) echo "警告: 標準 agent に無い名前のため処理しない: ${a}" >&2; continue ;;
   esac
+  mkdir -p "${TARGET}/.opencode/agents"
   # 既存は上書きしない（不在のものだけ追加する）
   [ -e "${TARGET}/.opencode/agents/${a}.md" ] || cp "${ASSETS}/opencode/agents/${a}.md" "${TARGET}/.opencode/agents/${a}.md"
 done
 ```
 
 - plugin は `import.meta.url` から `../../hooks/agent-guard.sh` を解決するため、相対配置を崩さない
-- **ガード・plugin に差分があり、差し替えが承認された場合だけ**、`diff -u` を見せたうえで該当ファイルを `cp`（上書き）する。承認がなければ触らない
-- `approved_agents` と 5-4 の `approved_skills` は、Step 4 で承認された項目の名前だけをエージェントが埋める。配列に無いものは、不在・未導入でも追加しない。既知の名前（標準 3 agent・標準 9 スキル）に無い名前は警告して処理しない
+- 差し替えは `diff -u` を見せて承認された名前だけを `approved_replace` に入れる。承認がなければ配列は空のままで、ガード・plugin のどちらにも触れない（`chmod +x` もガードを配置したときだけ走る）
+- `approved_add`・`approved_replace`・`approved_agents` と 5-4 の `approved_skills` は、Step 4 で承認された項目の名前だけをエージェントが埋める。配列に無いものは、不在・未導入でも追加しない。既知の名前（ガード・plugin の `guard` / `plugin`、標準 3 agent、標準 9 スキル）に無い名前は警告して処理しない
 - 既存の同名 agent は上書きしない。差分は提示するだけで、取り込むかは利用者が決める。利用者が作った別名の agent には触れない
 - `ask` は使わない（`--auto` 下で自動承認されるため、deny だけを使う）
 - 秘密情報（トークン・パスワード）をどのファイルにも書かない
@@ -320,11 +370,25 @@ OpenCode・Claude Code・端末から実行している場合は、この節を�
 cd "<target>"
 set -o pipefail
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
+CFG="$(pwd -P)/<config の相対パス>"   # Step 5 と同じ値
+
+# Step 5 と同じ定義（debug config はソースごとの配列。該当要素が取れなければ失敗し、0 件扱いにしない）
+proj_info() {
+  opencode debug config --standalone | jq -ce --arg p "${CFG}" '
+    if type != "array" then error("出力が配列でない") else . end
+    | [.[] | select(.path == $p and (.info | type) == "object")] as $m
+    | if ($m | length) == 1 then $m[0].info else error("該当要素が 1 件でない") end'
+}
 
 # 1) permissions / policies が解決後の設定に残っている（未知キーは黙って消えるため必須）
-opencode debug config --standalone \
-  | jq -r '"permissions_deny_shell=\([.permissions[]? | select(.action=="shell" and .effect=="deny")] | length) policies_deny=\([.policies[]? | select(.effect=="deny")] | length) permissions_total=\((.permissions // []) | length) policies_total=\((.policies // []) | length)"'
-echo "exit=$?"
+if info="$(proj_info)" && [ -n "${info}" ]; then
+  printf '%s' "${info}" | jq -er '
+    def arr(k): (.[k] // []) | if type == "array" then . else error("\(k) が配列でない") end;
+    "permissions_deny_shell=\([arr("permissions")[] | select(.action=="shell" and .effect=="deny")] | length) policies_deny=\([arr("policies")[] | select(.effect=="deny")] | length) permissions_total=\(arr("permissions") | length) policies_total=\(arr("policies") | length)"'
+  echo "exit=$?"
+else
+  echo "検証不能: debug config の出力から ${CFG} の要素を取り出せない（0 件とは扱わない）"
+fi
 
 # 2) 承認した agent が見える（出力は表示せず名前の有無だけ見る。<承認した agent> は Step 4 で承認した名前だけを空白区切りで入れる。見送った agent は含めない）
 out="$(opencode debug agents --standalone 2>&1)"; rc=$?
@@ -349,30 +413,40 @@ echo "exit=$?"
 # 6) AGENTS.md の管理区間が 1 つ
 grep -c 'agent-cli-skills:agents-md:start' AGENTS.md
 
-# 7) 利用者の規則が先頭に保たれている（N・M は Step 5 で控えた更新前の件数）
-opencode debug config --standalone \
-  | jq -c --argjson n "<更新前の permissions 件数>" --argjson m "<更新前の policies 件数>" \
-      '[(.permissions // [])[:$n], (.policies // [])[:$m]]' | sha256
+# 7) 利用者の規則が先頭に保たれている（N・M は Step 5 で控えた更新前の件数、BEFORE_HASH は Step 5 で控えたハッシュ）
+# 失敗・空出力は「検証不能」で止める。jq が失敗した空入力のハッシュ（e3b0c442…）を「同一」と読まない
+EMPTY_SHA="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+BEFORE_HASH="<Step 5 で控えたハッシュ>"
+if after_hash="$(printf '%s' "${info}" | jq -ce --argjson n "<更新前の permissions 件数>" --argjson m "<更新前の policies 件数>" '
+      def arr(k): (.[k] // []) | if type == "array" then . else error("\(k) が配列でない") end;
+      [arr("permissions")[:$n], arr("policies")[:$m]]' | sha256 | awk '{print $1}')" \
+   && [ -n "${after_hash}" ] && [ "${after_hash}" != "${EMPTY_SHA}" ] \
+   && [ -n "${BEFORE_HASH}" ] && [ "${BEFORE_HASH}" != "${EMPTY_SHA}" ]; then
+  [ "${after_hash}" = "${BEFORE_HASH}" ] && echo "7) 一致" || echo "7) 不一致"
+else
+  echo "7) 検証不能（jq の失敗・空出力・ハッシュ未取得）。一致とは扱わない"
+fi
+unset info
 ```
 
 期待値。
 
 | 確認 | 期待 |
 |------|------|
-| 1) 設定の残存 | `permissions_deny_shell` と `policies_deny` が 1 以上、終了コード 0。0 なら未知キーとして消えている |
+| 1) 設定の残存 | `permissions_deny_shell` と `policies_deny` が 1 以上、終了コード 0。0 なら未知キーとして消えている。`検証不能` と出たら完了とせず、出力の形・`<config>` のパスを確かめる |
 | 2) agents | `debug agents exit=0` かつ承認した agent がすべて `agent ok`（承認した agent が無ければ exit=0 のみ） |
 | 3) force push | 最終行 `AGENT_GUARD_RESULT deny force-push`、終了コード 2 |
 | 4) 通常コミット | 最終行 `AGENT_GUARD_RESULT allow`、終了コード 0 |
 | 5) サブエージェントのマージ | 最終行が `AGENT_GUARD_RESULT deny ...`、終了コード 2 |
 | 6) 区間数 | `1` |
-| 7) 利用者の規則 | 更新前の先頭 N 件・M 件のハッシュ（Step 5 の 2 本目）と同一。件数は更新前以上で、利用者の規則の件数と順序が先頭に保たれている |
+| 7) 利用者の規則 | `7) 一致`（更新前の先頭 N 件・M 件のハッシュと同一）。件数は更新前以上で、利用者の規則の件数と順序が先頭に保たれている。`7) 不一致` / `7) 検証不能` は完了としない |
 
 7) は、更新前の配列が更新後の配列の先頭と同じであることの確認である（追加は末尾だけのため）。
 更新前に件数 0 だった場合は N・M を 0 として、空配列同士の一致を確かめる。
-ハッシュが一致しない場合は、グローバル設定の合成順による差かを `<config>` を直接読んで切り分け、原因を特定するまで完了と報告しない。
+`info` は `path` で選んだ設定ソース 1 つ分であり、グローバル設定など他のソースの規則は混ざらない。ハッシュが一致しない場合は、`<config>` を直接読んで利用者の規則が先頭から動いていないかを切り分け、原因を特定するまで完了と報告しない。`検証不能` は「同一」ではなく、jq の失敗や出力形の想定違いを直してから再実行する。
 
 加えて、追加を承認したスキルが `.agents/skills/` にあり、`skills-lock.json` が妥当な JSON であること（`jq . skills-lock.json >/dev/null && echo OK`）を確認する。
-標準 3 agent・9 スキルの全件存在は要求しない。承認されなかった項目は検証の対象外として「見送り」と書き、失敗として扱わない（未承認の項目を入れて埋めない）。`opencode` が無く 1) 2) 7) を実行できなかった場合は「未検証」と書く。
+標準 3 agent・9 スキルの全件存在は要求しない。承認されなかった項目は検証の対象外として「見送り」と書き、失敗として扱わない（未承認の項目を入れて埋めない）。`opencode` が無く 1) 2) 7) を実行できなかった場合は「未検証」と書く。`検証不能` と出た項目も未検証として扱い、合格と書かない。
 
 3)〜5) は plugin を介さずガードを直接検査するもので、plugin が実セッションで呼ばれることの証明ではない。
 実セッションでの確認を案内する場合は、**対象リポジトリでは危険なコマンドを実行させない**。
@@ -383,9 +457,17 @@ SANDBOX="$(mktemp -d)"
 git init --bare "${SANDBOX}/origin.git"
 git init "${SANDBOX}/work" && cd "${SANDBOX}/work"
 git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
+# 初期コミットを作り bare へ初回 push しておく（force push の拒否を remote の sha で判定できるようにする）
+git -c user.name=t -c user.email=t@example.invalid commit --allow-empty -m "chore: init"
+git push -u origin HEAD
+git ls-remote origin   # 実行前の sha を控える
 # 対象の .opencode/ と opencode.jsonc をここへコピーし、OpenCode をこのディレクトリで起動して
 # `git push --force` が拒否されることを確かめる
 ```
+
+プロンプトには「使い捨てリポジトリでのガードの動作テストである」ことを明示する。配布した AGENTS.md の指示により、
+モデルが禁止コマンドを自分から実行しないことがあるためである。判定はモデルの発言ではなく、拒否メッセージ
+（`Permission denied: shell` / `agent-guard:`）と副作用の無さ（`git ls-remote origin` の sha が実行前と同じ）で行う。
 
 確認後は `${SANDBOX}` を利用者が自分で削除する。`rm -rf` は案内しない。使い捨てを用意できないときは、実セッションの確認は行わず「未検証」と報告する。
 
@@ -405,7 +487,7 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 
 完了とみなす条件は、承認された項目について Step 6 の確認が期待どおりで、証拠を報告に引用していること。
 
-- `opencode debug config --standalone` の jq 抜粋で deny 規則が残り、更新前の利用者の規則が先頭に保たれている
+- `opencode debug config --standalone` の出力のうち `<config>` に対応する要素の jq 抜粋で deny 規則が残り、更新前の利用者の規則が先頭に保たれている（`検証不能` は不合格）
 - `opencode debug agents --standalone` が終了コード 0 で、承認した agent が見える（見送った agent は「見送り」と報告し失敗にしない）
 - ガードが force push で deny、通常コミットで allow、サブエージェントのマージで deny を返す
 - AGENTS.md の管理区間の開始マーカー数が 1
