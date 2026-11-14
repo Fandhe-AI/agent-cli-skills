@@ -17,6 +17,84 @@ permissions:
   - action: "read"
     resource: "*.env.*"
     effect: deny
+  - action: "read"
+    resource: "*.envrc"
+    effect: deny
+  - action: "read"
+    resource: "*.npmrc"
+    effect: deny
+  - action: "read"
+    resource: "*.pem"
+    effect: deny
+  - action: "read"
+    resource: "credentials"
+    effect: deny
+  - action: "read"
+    resource: "*/credentials"
+    effect: deny
+  - action: "read"
+    resource: "credentials.json"
+    effect: deny
+  - action: "read"
+    resource: "*/credentials.json"
+    effect: deny
+  - action: "read"
+    resource: "*.netrc"
+    effect: deny
+  - action: "read"
+    resource: "*.git-credentials"
+    effect: deny
+  - action: "read"
+    resource: "*.pypirc"
+    effect: deny
+  - action: "read"
+    resource: "id_rsa"
+    effect: deny
+  - action: "read"
+    resource: "*/id_rsa"
+    effect: deny
+  - action: "read"
+    resource: "id_rsa_*"
+    effect: deny
+  - action: "read"
+    resource: "*/id_rsa_*"
+    effect: deny
+  - action: "read"
+    resource: "id_ed25519"
+    effect: deny
+  - action: "read"
+    resource: "*/id_ed25519"
+    effect: deny
+  - action: "read"
+    resource: "id_ed25519_*"
+    effect: deny
+  - action: "read"
+    resource: "*/id_ed25519_*"
+    effect: deny
+  - action: "read"
+    resource: "*.key"
+    effect: deny
+  - action: "read"
+    resource: "*.p12"
+    effect: deny
+  - action: "read"
+    resource: "*.pfx"
+    effect: deny
+  - action: "read"
+    resource: "*.ENV"
+    effect: deny
+  - action: "read"
+    resource: "*.ENV.*"
+    effect: deny
+  - action: "read"
+    resource: "*.Env"
+    effect: deny
+  - action: "read"
+    resource: "*.Env.*"
+    effect: deny
+  - action: "read"
+    resource: "*.PEM"
+    effect: deny
 ---
 
 あなたは読み取り専用のレビュー担当である。ファイルの編集・シェルコマンドの実行は行わない（権限で禁止されている）。シェルを使えないため、差分が必要なときは呼び出し元が差分または変更ファイルの一覧をプロンプトに含める。

@@ -15,6 +15,8 @@ import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, rmSync, chmodSync,
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import cp from 'node:child_process'
+import { syncBuiltinESMExports } from 'node:module'
 
 const ASSETS = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets')
 const PLUGIN_SRC = join(ASSETS, 'opencode', 'plugins', 'agent-guard', 'index.js')
@@ -492,6 +494,70 @@ describe('spawn する bash の固定（#778 追補）', () => {
       assert.ok(!existsSync(marker), '偽 bash が実行された')
     } finally {
       process.env.PATH = oldPath
+    }
+  })
+})
+
+// spawnSync の差し替えと Date の模擬を使うため、他のテストと並行させない（top-level の describe は逐次）。
+// 実時間は待たない。guard の 1 回の実行が模擬時計で 4 秒かかったとして、合計の上限（10 秒）で打ち切られることを見る。
+describe('ガードの同期実行の合計上限（#781）', () => {
+  function withFakeSpawn(body) {
+    const orig = cp.spawnSync
+    const calls = []
+    cp.spawnSync = (file, args, opts) => {
+      calls.push({ timeout: opts.timeout, killSignal: opts.killSignal })
+      mock.timers.tick(body.costMs)
+      return { status: 0, signal: null, stdout: 'AGENT_GUARD_RESULT allow\n', stderr: '' }
+    }
+    syncBuiltinESMExports()
+    return { calls, restore() { cp.spawnSync = orig; syncBuiltinESMExports() } }
+  }
+
+  it('resources が多く合計が 10 秒に達したら、残りは実行せず deny にする', async () => {
+    const url = layout()
+    mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+    const fake = withFakeSpawn({ costMs: 4000 })
+    try {
+      const { evaluate } = await load(url, 'main')
+      const event = shellEvent(['git status', 'git log', 'git diff', 'git show', 'git branch'])
+      await evaluate(event)
+      assert.equal(event.effect, 'deny')
+      assert.match(event.message, /上限を超えた/)
+      // 1 回目・2 回目は 5 秒、3 回目は残り 2 秒だけ待てる。4 回目以降は実行されない。
+      assert.deepEqual(fake.calls.map((c) => c.timeout), [5000, 5000, 2000])
+    } finally {
+      fake.restore()
+      mock.timers.reset()
+    }
+  })
+
+  it('spawnSync に killSignal: SIGKILL を渡す（時間切れでガードの bash を確実に止める）', async () => {
+    const url = layout()
+    mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+    const fake = withFakeSpawn({ costMs: 100 })
+    try {
+      const { evaluate } = await load(url, 'main')
+      await evaluate(shellEvent(['git status', 'git log']))
+      assert.deepEqual(fake.calls.map((c) => c.killSignal), ['SIGKILL', 'SIGKILL'])
+    } finally {
+      fake.restore()
+      mock.timers.reset()
+    }
+  })
+
+  it('合計が上限内なら従来どおり全件を判定して allow のまま（対照）', async () => {
+    const url = layout()
+    mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+    const fake = withFakeSpawn({ costMs: 100 })
+    try {
+      const { evaluate } = await load(url, 'main')
+      const event = shellEvent(['git status', 'git log', 'git diff'])
+      await evaluate(event)
+      assert.equal(event.effect, 'allow')
+      assert.deepEqual(fake.calls.map((c) => c.timeout), [5000, 5000, 5000])
+    } finally {
+      fake.restore()
+      mock.timers.reset()
     }
   })
 })

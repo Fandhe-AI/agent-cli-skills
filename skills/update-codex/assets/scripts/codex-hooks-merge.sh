@@ -32,18 +32,33 @@
 #   書き出しは jq の整形（インデント 2 桁）になるため、利用者が手で整えた空白は変わりうるが、
 #   キーと配列の順序・値は変わらない。
 #
-# 終了コード: 0 成功 / 1 使い方の誤り / 2 入出力・前提（jq 無し・symlink 等） / 4 内容の不整合
+# 終了コード: 0 成功 / 1 使い方の誤り / 2 入出力・前提（jq 無し・symlink・error-changed 等） / 4 内容の不整合
 # stdout の最終行は固定語彙の CODEX_HOOKS_MERGE_RESULT
 #   <created|added|updated|unchanged|error-usage|error-no-jq|error-symlink|error-io|error-template|
-#    error-target|error-json|error-type|error-duplicate|error-matcher>
-#   error-json: target が JSON として不正（空ファイル含む）/ error-type: 期待する型でない
+#    error-target|error-json|error-type|error-duplicate|error-matcher|error-changed>
+#   error-json: target が JSON として不正（空ファイル・`{}{}` のような複数文書を含む）/ error-type: 期待する型でない
 #   （トップレベルがオブジェクトでない・hooks がオブジェクトでない・イベントが配列でない・
 #   グループやハンドラがオブジェクトでない等）/ error-duplicate: 同じイベントに同じ自エントリが 2 つ以上
 #   / error-matcher（exit 4）: PreToolUse の自エントリ（codex-pretooluse.sh）の所属グループの matcher が
 #   テンプレートの該当グループの matcher と異なる（例: `^Edit$` のグループにある）。Bash に発火せずガードが
 #   静かに無効になるため unchanged / updated を返さない。利用者の matcher は書き換えない。
 #   SessionStart の自エントリは matcher を検査しない
+#   error-changed（exit 2）: 読み込んだあとに target が書き換えられた（target が無いと見て作ろうとしたら
+#   他者が先に作っていた場合を含む）。他者の更新を上書きしないため書かずに止める。読み込みの前に
+#   target を一時ディレクトリへコピーし、結果はそのコピーから作る。置換（mv）の直前に target がコピーと
+#   同じかを比べ、違えば書かない。比べてから mv までの短い間は排他しない（update-docs の agents-section.sh と
+#   同じ方式）。再実行すれば最新の内容から作り直す。
 #   エラー時は target を一切変更しない。
+#
+# パスの扱い:
+#   - `-` で始まる --target / --template は `./` を前置し、jq・cp・mv などへオプションとして渡らないようにする。
+#   - --target の親ディレクトリがシンボリックリンクのときは、リンク先の実体のディレクトリへ書くことを
+#     stderr に警告する（止めない。.codex を共有ディレクトリへ向けた構成を許すため。ファイル自体の
+#     symlink は従来どおり error-symlink）。
+#   - jq の stderr は結果へ載せない（jq の実行時エラーは対象のデータ断片を含み得るため。固定文だけを出す）。
+# 一時ファイル: 書き込み用の一時ファイル（<target>.tmp.XXXXXX）は置換の直前に作り、正常・異常終了と
+#   TERM を受けたときも EXIT trap で消す（bash は終了時に EXIT trap を走らせる。TERM で実測）。SIGKILL は捕捉できないため、その瞬間に残り得る
+#   .tmp.* は人が消す（target は無傷。作ってから mv までの窓は数ミリ秒）。
 #
 # 単体実行専用（source しない）。bash 3.2 と jq 1.5 以降で動く。
 set -euo pipefail
@@ -74,13 +89,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "${TARGET}" && -n "${TEMPLATE}" ]] || fail 1 error-usage "--target と --template は必須"
+# `-` 始まりのパスがコマンドのオプションとして解釈されないよう、相対パスに ./ を前置する
+case "${TARGET}" in -*) TARGET="./${TARGET}" ;; esac
+case "${TEMPLATE}" in -*) TEMPLATE="./${TEMPLATE}" ;; esac
 command -v jq > /dev/null 2>&1 || fail 2 error-no-jq "jq が見つからない（jq を入れてから再実行する）"
 [[ -f "${TEMPLATE}" && -r "${TEMPLATE}" ]] || fail 2 error-template "--template のファイルを読めない"
 jq -e 'type == "object" and ((.hooks | type) == "object")' "${TEMPLATE}" > /dev/null 2>&1 \
   || fail 2 error-template "--template が hooks オブジェクトを持つ JSON ではない"
 [[ ! -L "${TARGET}" ]] || fail 2 error-symlink "--target はシンボリックリンク（mv で置換すると実体を壊すため扱わない）"
 [[ ! -e "${TARGET}" || -f "${TARGET}" ]] || fail 2 error-target "--target は通常ファイルではない"
-[[ -d "$(dirname -- "${TARGET}")" ]] || fail 2 error-io "--target の親ディレクトリが無い"
+PARENT=$(dirname -- "${TARGET}")
+[[ -d "${PARENT}" ]] || fail 2 error-io "--target の親ディレクトリが無い"
+if [[ -L "${PARENT}" ]]; then
+  echo "警告: --target の親ディレクトリ（${PARENT}）はシンボリックリンク。リンク先の実体のディレクトリへ書く" >&2
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/codex-hooks-merge.XXXXXX") || fail 2 error-io "一時ディレクトリを作れない"
 TMP_OUT=""
@@ -140,24 +162,30 @@ try (
 ) catch { err: . }
 JQEOF
 
+# 読み込みの前に target のコピーを取り、以降の判定と結果の生成はすべてこのコピー（SNAP）から行う。
+# 置換の直前に target がコピーと同じかを比べ、読んだあとの他者の更新を上書きしない。
 NEW="${WORK}/new"
+SNAP="${WORK}/snap"
 if [[ ! -e "${TARGET}" ]]; then
   mode=created
   cat "${TEMPLATE}" > "${NEW}"
 else
-  # 空ファイルは jq が何も出さず exit 4、不正 JSON は exit 2 になる。どちらも JSON として扱えない
-  jq -e true "${TARGET}" > /dev/null 2>&1 || fail 4 error-json "--target が JSON として不正（空ファイルを含む）。ファイルは変更しない"
+  cat "${TARGET}" > "${SNAP}" || fail 2 error-io "--target を読めない"
+  # 空ファイルは文書数 0、不正 JSON は jq が非 0 で終わる。`{}{}` のような複数文書は文書数が 2 以上になる。
+  # 最初の文書だけを書き戻すと後ろの文書を消すため、ちょうど 1 文書のときだけ先へ進む
+  jq -e -s 'length == 1' "${SNAP}" > /dev/null 2>&1 \
+    || fail 4 error-json "--target が JSON として不正（空ファイル・複数文書を含む）。ファイルは変更しない"
   RES="${WORK}/res.json"
   jq -c --slurpfile tmpl "${TEMPLATE}" --arg A "${SELF_A}" --arg B "${SELF_B}" \
-    -f "${WORK}/merge.jq" "${TARGET}" > "${RES}" 2> "${WORK}/jq.err" \
-    || fail 2 error-io "jq の実行に失敗: $(head -c 300 "${WORK}/jq.err")"
+    -f "${WORK}/merge.jq" "${SNAP}" > "${RES}" 2> /dev/null \
+    || fail 2 error-io "jq の実行に失敗した（対象のデータは出力しない）"
   err=$(jq -r '.err // empty' "${RES}")
   case "${err}" in
     "") ;;
     type) fail 4 error-type "期待する型でない（トップレベル・hooks はオブジェクト、イベントは配列、グループとハンドラはオブジェクト）。ファイルは変更しない" ;;
     matcher) fail 4 error-matcher "PreToolUse の自エントリ（codex-pretooluse.sh）が、テンプレートと違う matcher のグループにある。Bash に発火せずガードが無効になるため、利用者の matcher は書き換えずファイルを変更しない（自エントリをテンプレートの matcher のグループへ移すか、そのグループの matcher を直す）" ;;
     duplicate) fail 4 error-duplicate "同じイベントに同じ自エントリが 2 つ以上ある。どれを残すか決められないためファイルは変更しない" ;;
-    *) fail 2 error-io "想定外のエラー: ${err}" ;;
+    *) fail 2 error-io "想定外のエラー（jq の実行時エラー。対象のデータは出力しない）" ;;
   esac
   mode=$(jq -r '.result' "${RES}")
   if [[ "${mode}" != "unchanged" ]]; then
@@ -172,13 +200,21 @@ fi
 
 # ---- 原子的な書き込み（同一ディレクトリの一時ファイル -> mv） ----
 TMP_OUT=$(mktemp "${TARGET}.tmp.XXXXXX") || fail 2 error-io "一時ファイルを作れない"
-if [[ -e "${TARGET}" ]]; then
+if [[ "${mode}" != "created" ]]; then
   cp -p "${TARGET}" "${TMP_OUT}" || fail 2 error-io "権限を引き継げない"
 else
   m=$(umask)
   chmod "$(printf '%03o' $((0666 & ~0${m})))" "${TMP_OUT}" || fail 2 error-io "権限を設定できない"
 fi
 cat "${NEW}" > "${TMP_OUT}" || fail 2 error-io "一時ファイルへ書けない"
+# 置換の直前に、読んだときの状態から変わっていないことを確かめる（変わっていたら他者の更新を上書きしない）
+if [[ "${mode}" == "created" ]]; then
+  [[ ! -e "${TARGET}" && ! -L "${TARGET}" ]] \
+    || fail 2 error-changed "target が無いと見て作る間に他者が作った。他の更新を上書きしないため書かない（再実行する）"
+else
+  cmp -s "${TARGET}" "${SNAP}" \
+    || fail 2 error-changed "読み込んだあとに target が書き換えられた。他の更新を上書きしないため書かない（再実行する）"
+fi
 mv -f "${TMP_OUT}" "${TARGET}" || fail 2 error-io "置換できない"
 TMP_OUT=""
 echo "CODEX_HOOKS_MERGE_RESULT ${mode}"

@@ -248,6 +248,7 @@ echo "exit=$?"
 | `created` / `appended` / `replaced` / `unchanged` | 0 | 成功 |
 | `error-usage` | 1 | 引数の誤り。コマンドを見直す |
 | `error-block-unreadable` / `error-block-empty` / `error-symlink` / `error-target` / `error-io` | 2 | 原因を報告して中断 |
+| `error-changed` | 2 | 読み込んだあとに AGENTS.md が他で書き換えられたため、上書きせずに止めた（ファイルは変わっていない）。別のエディタ・セッションの作業が終わってから 1 回だけ再実行し、続けて出るなら原因を報告して中断 |
 | `error-markers` / `error-fence` / `error-block-marker` | 4 | 手で直すよう案内して中断（ファイルは変わっていない） |
 
 32768 バイトを超えると stderr に警告が出る。出たら報告に載せる。
@@ -265,6 +266,7 @@ echo "exit=$?"
 | `created` / `merged` / `unchanged` | 0 | 成功 |
 | `needs-manual` | 3 | **何も書かれていない。** stdout の JSON は**不足分だけ**（`permissions` / `policies` ごとの、追加すべき規則の配列。全件ではない）。利用者に提示し、各配列の**末尾**へ、出力の配列の**要素だけ**を貼るよう案内する（外側の `{` `}` やキー名は貼らない。直前の要素の後ろにカンマを足す）。既存の自分の規則は消さず、全件を貼り直さない。貼った後に `--check` を再実行し、`unchanged` になることを確認する。ならなければ貼り間違いとして原因を一緒に探す |
 | `error-usage` | 2 | コマンドを見直す |
+| `error-changed` | 1 | 読み込んだあとに設定ファイルが他で書き換えられたため、上書きせずに止めた（ファイルは変わっていない）。別のエディタ・セッションの作業が終わってから 1 回だけ再実行し、続けて出るなら原因を報告して中断 |
 | その他の `error-*` | 1 | 中止して原因を報告する。手で書き直して続行しない |
 
 自分の規則が既に配列の前の方にあり、その後ろに利用者の規則がある場合も、出力には再追加分として含まれる。貼ると同じ規則が前後に 2 つ残るが、
@@ -525,6 +527,10 @@ git ls-remote origin   # 実行前の sha を控える
 - 未知キーは黙って消える。更新後は `debug config` でキーの残存を必ず確認する。`ask` は `--auto` で自動承認されるため使わない
 - `agents-md-block.sh` は AGENTS.md の管理区間の外をバイト単位で変えない。マーカーが不整合なら書かずに中断する。区間は常に 1 つ
 - 読み取り専用の agent（researcher / reviewer）は shell を使えない
+- 読み取り専用の agent（researcher / reviewer）の配布版は、`.env` 系・`.envrc`・`.npmrc`・`.netrc`・`.git-credentials`・`.pypirc`・`*.pem`・`*.key`・`*.p12`・`*.pfx`・SSH 秘密鍵（`id_rsa`・`id_ed25519` と `id_rsa_<名前>` の形）・名前が `credentials` / `credentials.json` のファイルの `read` も権限で deny する（OpenCode v2.2.7 の実機で、`.npmrc`・`*.pem`・`.aws/credentials`・`.envrc`・`.netrc`・`.git-credentials`・`.pypirc`・`.ssh/id_rsa`・`.ssh/id_ed25519`・`*.key`・`*.p12`・`*.pfx` の read が `Permission denied: read` になり、`src/credentials_service.ts`・`src/keyboard.ts`・`.ssh/id_rsa.pub` は読めることを確認した）。**この deny が入るのは、このスキルが新しく追加する agent だけ**で、導入済みの researcher / reviewer は上書きしないため入らない。既存の agent に入れたいときは、利用者が `.opencode/agents/` の該当ファイルへ `read` の deny を足す（配布版の `researcher.md` の `permissions` が見本）。`*credentials*` や `*id_rsa*` のように広げないのは、名前に含むだけのソース・公開鍵まで止めて調査を妨げるため（`id_rsa_work.pub` のように `id_rsa_` で始まる公開鍵は止まる）。
+  - **大文字小文字は区別して照合される**（v2.2.7 の実機で、`.env` の deny が `.ENV`・`.eNv` の read を止めないことを確認した。`[eE]` のような文字クラスの glob も効かなかった）。大文字小文字を区別しないファイルシステム（macOS・Windows の既定）では、`.env` を `.ENV` と綴るだけで deny をすり抜けて同じファイルを読める。配布する deny は実在しうる代表的な変種（`*.ENV`・`*.ENV.*`・`*.Env`・`*.Env.*`・`*.PEM`）だけを足しており、任意の綴り（`.eNv` など）は止められない。この限りで読み取りの deny は秘密情報の完全な遮断ではなく、事故を減らす層と位置づける
+  - 上記以外の秘密のファイル（`.NETRC` などの大文字の変種、`*.jks`・`*.kdbx` など）は対象外で、必要なら `.opencode/agents/` の deny に利用者が足す
+- plugin がガードを同期実行して待つ時間は、1 つの shell 実行（resources の全件）で合計 10 秒まで（1 回は 5 秒まで）。超えたら残りのコマンドは実行せず deny にする。待っている間は OpenCode 全体のイベントループが止まるため、件数に比例して固まるのを防ぐ上限である
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形

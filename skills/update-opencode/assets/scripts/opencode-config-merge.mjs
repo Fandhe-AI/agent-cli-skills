@@ -34,8 +34,18 @@
 //   error-symlink           1  target が symlink（リンク先を書き換えない）
 //   error-not-file          1  target が通常ファイルでない
 //   error-io                1  読み書きの失敗
+//   error-changed           1  読み込んだあとに target が書き換えられた（target が無いと見て作る間に他者が
+//                              作った場合を含む）。他者の更新を上書きしないため書かずに止める。置換
+//                              （rename）の直前に target を読み直して読み込んだ内容と比べる。比べてから
+//                              rename までの短い間は排他しない。再実行すれば最新の内容から作り直す
+// 親ディレクトリがシンボリックリンクのときは、リンク先の実体のディレクトリへ書くことを stderr に警告する
+// （止めない。target 自体の symlink は error-symlink）。`--` 始まりの値は引数として受け付けない
+// （error-usage）。このスクリプトはシェルのコマンドへパスを渡さず fs API だけを使うため、`-` 始まりの
+// 相対パスがオプションとして解釈されることは無い。一時ファイルは置換の直前に作り、失敗時は消す。
+// SIGKILL は捕捉できないが、作ってから rename までは同期処理で数ミリ秒のため、残り得る
+// `.<名前>.tmp-*` は人が消す（target は無傷）。
 // `--check` は書かずに同じ語彙（created / merged は「そうなる」意味）と終了コードを返す。
-import { lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, chmodSync } from 'node:fs'
+import { lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, chmodSync, existsSync } from 'node:fs'
 import { dirname, basename, join, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
 
@@ -167,10 +177,13 @@ function main() {
   let st = null
   try { st = lstatSync(target) } catch (e) { if (e.code !== 'ENOENT') fail('error-io', `target を調べられない: ${e.code}`) }
 
+  warnSymlinkParent(target)
+
   if (st === null) {
     if (!args.check) {
       mkdirSync(dirname(target), { recursive: true })
-      atomicWrite(target, templateRaw.endsWith('\n') ? templateRaw : `${templateRaw}\n`, 0o644)
+      // 新規作成は umask に従う（シェル版 2 本と同じ 0666 & ~umask）。既存ファイルの置換は元のモードを引き継ぐ（下の merged 経路）。
+      atomicWrite(target, templateRaw.endsWith('\n') ? templateRaw : `${templateRaw}\n`, 0o666 & ~process.umask(), null)
     }
     finish('created')
   }
@@ -198,22 +211,44 @@ function main() {
   }
 
   for (const k of KEYS) if (r.missing[k].length > 0) obj[k] = [...(obj[k] ?? []), ...r.missing[k]]
-  if (!args.check) atomicWrite(target, `${JSON.stringify(obj, null, 2)}\n`, st.mode & 0o777)
+  if (!args.check) atomicWrite(target, `${JSON.stringify(obj, null, 2)}\n`, st.mode & 0o777, raw)
   finish('merged')
 }
 
+// target の親ディレクトリがシンボリックリンクなら、実体のディレクトリへ書くことを警告する。
+function warnSymlinkParent(target) {
+  const parent = dirname(target)
+  try {
+    if (lstatSync(parent).isSymbolicLink()) console.error(`警告: target の親ディレクトリ（${parent}）はシンボリックリンク。リンク先の実体のディレクトリへ書く`)
+  } catch { /* 親が無いときは後続の mkdir・読み込みが扱う */ }
+}
+
 // 同一ディレクトリの一時ファイルへ書いてから rename する。途中で失敗しても target は
-// 元のまま（半端なファイルを残さない）。
-function atomicWrite(path, content, mode) {
+// 元のまま（半端なファイルを残さない）。original は読み込んだときの target の内容で、rename の直前に
+// target を読み直して一致を確かめる（他者の更新を上書きしない）。null は「target が無い」の意味。
+function atomicWrite(path, content, mode, original) {
   const tmp = join(dirname(path), `.${basename(path)}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`)
   try {
     writeFileSync(tmp, content, { flag: 'wx', mode })
     chmodSync(tmp, mode)
+    if (!unchangedSince(path, original)) {
+      try { unlinkSync(tmp) } catch { /* 消せなくても下の fail で止める */ }
+      fail('error-changed', '読み込んだあとに target が書き換えられた。他の更新を上書きしないため書かない（再実行する）')
+    }
     renameSync(tmp, path)
   } catch (e) {
     try { unlinkSync(tmp) } catch { /* 作れていなければ消すものは無い */ }
     fail('error-io', `書き込みに失敗: ${e.code ?? e.message}`)
   }
+}
+
+// 置換の直前の確認。original が null なら target がまだ無いこと、文字列ならその内容のままであること。
+function unchangedSince(path, original) {
+  if (original === null) {
+    try { lstatSync(path) } catch (e) { return e.code === 'ENOENT' }
+    return false
+  }
+  try { return readFileSync(path, 'utf8') === original } catch { return false }
 }
 
 import { fileURLToPath } from 'node:url'

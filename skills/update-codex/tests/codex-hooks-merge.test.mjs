@@ -8,7 +8,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync, readdirSync, symlinkSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync, readdirSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -286,6 +286,161 @@ for (const bash of BASHES) describe(`[${bash}]`, { concurrency: true }, () => {
     const r = await spawnAsync(bash, [SCRIPT, '--target', '/nonexistent/x.json'])
     assert.equal(r.status, 1)
     assert.match(r.stdout, /CODEX_HOOKS_MERGE_RESULT error-usage/)
+  })
+
+  // ---- 複数文書（`{}{}`）は最初の文書だけを書き戻さず error-json で止める ----
+
+  it(`${tag} 複数の JSON 文書を持つ target は error-json で非 0・ファイル不変`, async () => {
+    for (const body of ['{}{}', '{"hooks":{}}\n{"hooks":{}}\n', '{} []', '{"hooks":{}} 1']) {
+      const t = setup()
+      try {
+        t.write(body)
+        const h = sha(t.target)
+        for (const extra of [[], ['--check']]) {
+          const r = await run(bash, t.target, extra)
+          assert.equal(r.status, 4, `${JSON.stringify(body)} ${extra}: ${r.stderr}`)
+          assert.equal(r.result, 'error-json')
+        }
+        assert.equal(sha(t.target), h)
+        assert.deepEqual(readdirSync(t.dir), ['hooks.json'])
+      } finally {
+        t.cleanup()
+      }
+    }
+  })
+
+  // ---- 読み込みから置換までの間の変更（lost update）の検知 ----
+  // 偽の jq・chmod を PATH の先頭に置き、マージ用の jq 実行の直後・一時ファイル作成の直後に
+  // target を書き換えさせる。本物のスクリプトにテスト用のフックは持たせない。
+
+  function fakeBin(t, name, body) {
+    const bin = join(t.dir, 'bin')
+    mkdirSync(bin, { recursive: true })
+    const real = spawnSync('bash', ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim()
+    writeFileSync(join(bin, name), `#!/bin/sh\n${body.replaceAll('REAL', real)}\n`)
+    chmodSync(join(bin, name), 0o755)
+    return bin
+  }
+
+  function runEnv(bash, args, env, cwd) {
+    return new Promise((resolve, reject) => {
+      const p = spawn(bash, [SCRIPT, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env }, cwd })
+      let stdout = ''
+      let stderr = ''
+      p.stdout.setEncoding('utf8').on('data', (d) => { stdout += d })
+      p.stderr.setEncoding('utf8').on('data', (d) => { stderr += d })
+      p.on('error', reject)
+      p.on('close', (status) => resolve({ status, stdout, stderr, result: stdout.trim().split('\n').pop().replace('CODEX_HOOKS_MERGE_RESULT ', '') }))
+    })
+  }
+
+  const noTmp = (t) => assert.deepEqual(readdirSync(t.dir).filter((f) => f.includes('.tmp.')), [], '一時ファイルが残っている')
+
+  it(`${tag} 読み込んだあとに target が書き換わったら error-changed で上書きしない`, async () => {
+    const t = setup()
+    try {
+      t.write({ hooks: { PreToolUse: [userPre] } })
+      const racer = readFileSync(t.target, 'utf8') + '\n'
+      const flag = join(t.dir, 'flag')
+      // マージ用の jq（-f を使う呼び出し）の直後に 1 回だけ target を書き換える
+      const bin = fakeBin(t, 'jq', `case " $* " in *" -f "*) REAL "$@"; rc=$?; if [ ! -e "$FAKE_FLAG" ]; then : > "$FAKE_FLAG"; printf '\\n' >> "$FAKE_TARGET"; fi; exit $rc;; *) exec REAL "$@";; esac`)
+      const r = await runEnv(bash, ['--target', t.target, '--template', TEMPLATE], { PATH: `${bin}:${process.env.PATH}`, FAKE_FLAG: flag, FAKE_TARGET: t.target })
+      assert.equal(r.status, 2, r.stderr)
+      assert.equal(r.result, 'error-changed')
+      assert.equal(readFileSync(t.target, 'utf8'), racer, '他者の変更が残る')
+      noTmp(t)
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  it(`${tag} 作成: 無いと見たあとに他者が作ったら error-changed で上書きしない`, async () => {
+    const t = setup()
+    try {
+      const bin = fakeBin(t, 'chmod', `REAL "$@"; rc=$?; [ -e "$FAKE_TARGET" ] || printf '{"x":1}\\n' > "$FAKE_TARGET"; exit $rc`)
+      const r = await runEnv(bash, ['--target', t.target, '--template', TEMPLATE], { PATH: `${bin}:${process.env.PATH}`, FAKE_TARGET: t.target })
+      assert.equal(r.status, 2, r.stderr)
+      assert.equal(r.result, 'error-changed')
+      assert.equal(readFileSync(t.target, 'utf8'), '{"x":1}\n')
+      noTmp(t)
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  it(`${tag} 何も書き換わらなければ通常どおり書ける（対照）`, async () => {
+    const t = setup()
+    try {
+      t.write({ hooks: { PreToolUse: [userPre] } })
+      const bin = fakeBin(t, 'jq', 'exec REAL "$@"')
+      const r = await runEnv(bash, ['--target', t.target, '--template', TEMPLATE], { PATH: `${bin}:${process.env.PATH}` })
+      assert.equal(r.status, 0, r.stderr)
+      assert.equal(r.result, 'added')
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  // ---- jq の stderr（対象データの断片を含み得る）をエラーへ載せない ----
+
+  it(`${tag} jq の実行が失敗しても stderr の断片を結果へ出さない`, async () => {
+    const t = setup()
+    try {
+      t.write({ hooks: { PreToolUse: [userPre] } })
+      const h = sha(t.target)
+      const bin = fakeBin(t, 'jq', `case " $* " in *" -f "*) echo 'Cannot index string ("SENTINEL-SECRET-VALUE")' >&2; exit 5;; *) exec REAL "$@";; esac`)
+      const r = await runEnv(bash, ['--target', t.target, '--template', TEMPLATE], { PATH: `${bin}:${process.env.PATH}` })
+      assert.equal(r.status, 2, r.stderr)
+      assert.equal(r.result, 'error-io')
+      assert.doesNotMatch(r.stdout + r.stderr, /SENTINEL-SECRET-VALUE/)
+      assert.equal(sha(t.target), h)
+      noTmp(t)
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  // ---- `-` で始まるパスがオプションとして解釈されない ----
+
+  it(`${tag} --target / --template が - 始まりの相対パスでも通常のファイルとして扱う`, async () => {
+    const t = setup()
+    try {
+      writeFileSync(join(t.dir, '-t.json'), JSON.stringify({ hooks: { PreToolUse: [userPre] } }) + '\n')
+      writeFileSync(join(t.dir, '-tmpl.json'), readFileSync(TEMPLATE))
+      const r = await runEnv(bash, ['--target', '-t.json', '--template', '-tmpl.json'], {}, t.dir)
+      assert.equal(r.status, 0, r.stdout + r.stderr)
+      assert.equal(r.result, 'added')
+      assert.deepEqual(JSON.parse(readFileSync(join(t.dir, '-t.json'), 'utf8')).hooks.PreToolUse.length, 2)
+      const r2 = await runEnv(bash, ['--target', '-new.json', '--template', '-tmpl.json'], {}, t.dir)
+      assert.equal(r2.result, 'created', r2.stdout + r2.stderr)
+      noTmp(t)
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  // ---- 親ディレクトリがシンボリックリンク ----
+
+  it(`${tag} --target の親ディレクトリが symlink なら警告して実体のディレクトリへ書く`, async () => {
+    const t = setup()
+    try {
+      const real = join(t.dir, 'real')
+      mkdirSync(real)
+      const link = join(t.dir, 'link')
+      symlinkSync(real, link)
+      writeFileSync(join(real, 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [userPre] } }) + '\n')
+      const r = await run(bash, join(link, 'hooks.json'))
+      assert.equal(r.status, 0, r.stderr)
+      assert.equal(r.result, 'added')
+      assert.match(r.stderr, /親ディレクトリ.*シンボリックリンク/)
+      assert.equal(JSON.parse(readFileSync(join(real, 'hooks.json'), 'utf8')).hooks.PreToolUse.length, 2)
+      assert.deepEqual(readdirSync(real), ['hooks.json'])
+      // 通常の親ディレクトリでは警告しない（対照）
+      t.write({ hooks: {} })
+      assert.doesNotMatch((await run(bash, t.target)).stderr, /シンボリックリンク/)
+    } finally {
+      t.cleanup()
+    }
   })
 })
 })

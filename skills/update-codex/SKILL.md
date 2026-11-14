@@ -280,7 +280,8 @@ echo "exit=$?"
 | `created` / `added` / `updated` / `unchanged` | 0 | 成功。`unchanged` は既に最新 |
 | `error-usage` | 1 | 引数の誤り。コマンドを見直す |
 | `error-no-jq` / `error-symlink` / `error-io` / `error-template` / `error-target` | 2 | 入出力・前提の問題。原因を報告して中断 |
-| `error-json` / `error-type` / `error-duplicate` | 4 | hooks.json の内容の不整合。ファイルは変わっていない。手で直すよう案内して中断 |
+| `error-changed` | 2 | 読み込んだあとに hooks.json が他で書き換えられたため、上書きせずに止めた（ファイルは変わっていない）。別のエディタ・セッションの作業が終わってから 1 回だけ再実行し、続けて出るなら原因を報告して中断 |
+| `error-json` / `error-type` / `error-duplicate` | 4 | hooks.json の内容の不整合（`error-json` は不正な JSON・空ファイル・`{}{}` のような複数文書）。ファイルは変わっていない。手で直すよう案内して中断 |
 | `error-matcher` | 4 | 自エントリ `codex-pretooluse.sh` が matcher `^Bash$` 以外のグループにあるため、書かずに停止した（利用者の matcher は書き換えない）。該当グループの matcher を確認して手で直すか、自エントリを `^Bash$` のグループへ移すよう案内して中断 |
 
 `error-*` が返ったら、以降の項目へ進まず、原因と対処を報告して**中止**する。
@@ -298,6 +299,7 @@ echo "exit=$?"
 | `created` / `appended` / `replaced` / `unchanged` | 0 | 成功 |
 | `error-usage` | 1 | 引数の誤り。コマンドを見直す |
 | `error-block-unreadable` / `error-block-empty` / `error-symlink` / `error-target` / `error-io` | 2 | 入出力・前提の問題。原因を報告して中断 |
+| `error-changed` | 2 | 読み込んだあとに AGENTS.md が他で書き換えられたため、上書きせずに止めた（ファイルは変わっていない）。別のエディタ・セッションの作業が終わってから 1 回だけ再実行し、続けて出るなら原因を報告して中断 |
 | `error-markers` / `error-fence` / `error-block-marker` | 4 | マーカー・フェンスの不整合。ファイルは変わっていない。手で直すよう案内して中断 |
 
 32768 バイトを超えると stderr に警告が出る（Codex は AGENTS.md を合計 32 KiB までしか読まない）。
@@ -688,6 +690,8 @@ git rev-parse HEAD; git -C "${SANDBOX}/origin.git" rev-parse main   # 実行前�
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形
   - `bash -c` / `sh -c` / `eval`・ヒアドキュメントや here-string の中身、`$(…)` 内の引用符の食い違いは見ない
   - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。rules は先頭一致のため `git push origin main --force` 等は拾えない
+  - PreToolUse の matcher は `^Bash$` だけで、Bash 以外のツールは判定しない。Codex 0.164.0 の実機では、`*` の matcher なら `apply_patch` も `tool_name = apply_patch` で PreToolUse に届くが、`^Bash$` の hook には届かなかった。このガードは git / gh のコマンドを見るもので、`apply_patch` による編集は止めない（編集できる範囲は sandbox の書き込み範囲で決まる。`.codex/`・`.agents/` は既定で読み取り専用）
+  - `.codex/agents/` の researcher / reviewer が「読み取り専用」なのは指示文だけで、権限の制限ではない。参照した公式ドキュメントでは、サブエージェントは親セッションの sandbox を引き継ぎ、agent の TOML に書いた `sandbox_mode` は親の設定を上書きしないとされている（実機では未確認のため、TOML に `sandbox_mode` は書いていない）。読み取り専用を強制したい作業は、親セッションを `read-only` の sandbox で起動する
 - **rules の prompt の効果と限界**（Codex 0.164.0 の実機）: 「確認なしで進めてよい」と指示されても、`gh project item-delete`・`gh project edit`（`--visibility PUBLIC` を含む）・`gh api -X PUT|PATCH|DELETE` は、一致する形なら `codex exec` では実行されない（拒否。実機で、規則なしは 3 回中 3 回実行・prompt は 0 回）。対話では利用者への承認要求になる想定だが実機は未検証で、`approvals_reviewer = auto_review` の設定や承認を迂回する起動オプションでの挙動も未検証。止められない形は、変数・置換・リダイレクト・制御構文を含む 1 本のシェルスクリプト、`gh -R x api …` のようにオプションを前置した形、`gh api repos/x -X PUT` のようにメソッドをパスの後ろに置いた形、`gh api graphql` の mutation、`reassign-sub-issue.sh` 等のスクリプトの実行。`gh api -X POST` は通常の作成系（マイルストーン等）に使うため対象外
 - `skills` CLI は固定版で実行する。失敗しても未固定 `npx` へフォールバックしない（付録参照）
 - コマンドへ渡すパスやスキル名は常に `"${var}"` でクォートする。外部入力を `bash -c` や `eval` へ渡さない

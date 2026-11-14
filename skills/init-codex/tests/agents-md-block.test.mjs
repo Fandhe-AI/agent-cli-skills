@@ -7,7 +7,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync, readdirSync, symlinkSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync, readdirSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -306,6 +306,140 @@ for (const bash of BASHES) describe(`[${bash}]`, { concurrency: true }, () => {
       assert.equal(r.result, 'error-symlink')
       assert.equal(sha(real), h)
       assert.equal(readFileSync(real, 'utf8'), '# 実体\n')
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  // ---- 走査から置換までの間の変更（lost update）の検知 ----
+  // 偽のコマンドを PATH の先頭に置き、走査（awk）の直後・一時ファイルの作成（chmod）の直後に
+  // AGENTS.md を書き換えさせる。本物のスクリプトにテスト用のフックは持たせない。
+
+  function fakeBin(t, name, body) {
+    const bin = join(t.dir, 'bin')
+    mkdirSync(bin, { recursive: true })
+    const real = spawnSync('bash', ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim()
+    writeFileSync(join(bin, name), `#!/bin/sh\n${body.replaceAll('REAL', real)}\n`)
+    chmodSync(join(bin, name), 0o755)
+    return bin
+  }
+
+  function runEnv(bash, args, env, cwd) {
+    return new Promise((resolve, reject) => {
+      const p = spawn(bash, [SCRIPT, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env }, cwd })
+      let stdout = ''
+      let stderr = ''
+      p.stdout.setEncoding('utf8').on('data', (d) => { stdout += d })
+      p.stderr.setEncoding('utf8').on('data', (d) => { stderr += d })
+      p.on('error', reject)
+      p.on('close', (status) => resolve({ status, stdout, stderr, result: stdout.trim().split('\n').pop().replace('AGENTS_MD_BLOCK_RESULT ', '') }))
+    })
+  }
+
+  const noTmp = (t) => assert.deepEqual(readdirSync(t.dir).filter((f) => f.includes('.tmp.')), [], '一時ファイルが残っている')
+
+  for (const [name, body] of [['追記', '# a\n'], ['差し替え', `# a\n${START}\n古\n${END}\n`]]) {
+    it(`${tag} ${name}: 走査のあとに AGENTS.md が書き換わったら error-changed で上書きしない`, async () => {
+      const t = setup()
+      try {
+        writeFileSync(t.target, body)
+        const flag = join(t.dir, 'flag')
+        const bin = fakeBin(t, 'awk', `REAL "$@"; rc=$?; if [ ! -e "$FAKE_FLAG" ]; then : > "$FAKE_FLAG"; printf 'racer\\n' >> "$FAKE_TARGET"; fi; exit $rc`)
+        const r = await runEnv(bash, ['--target', t.target, '--block', t.block('b.md', '新\n')], { PATH: `${bin}:${process.env.PATH}`, FAKE_FLAG: flag, FAKE_TARGET: t.target })
+        assert.equal(r.status, 2, r.stderr)
+        assert.equal(r.result, 'error-changed')
+        assert.equal(readFileSync(t.target, 'utf8'), `${body}racer\n`, '他者の変更が残る')
+        noTmp(t)
+      } finally {
+        t.cleanup()
+      }
+    })
+  }
+
+  it(`${tag} 作成: 無いと見たあとに他者が作ったら error-changed で上書きしない`, async () => {
+    const t = setup()
+    try {
+      const bin = fakeBin(t, 'chmod', `REAL "$@"; rc=$?; [ -e "$FAKE_TARGET" ] || printf 'racer\\n' > "$FAKE_TARGET"; exit $rc`)
+      const r = await runEnv(bash, ['--target', t.target, '--block', t.block('b.md', '新\n')], { PATH: `${bin}:${process.env.PATH}`, FAKE_TARGET: t.target })
+      assert.equal(r.status, 2, r.stderr)
+      assert.equal(r.result, 'error-changed')
+      assert.equal(readFileSync(t.target, 'utf8'), 'racer\n')
+      noTmp(t)
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  it(`${tag} 何も書き換わらなければ通常どおり書ける（対照）`, async () => {
+    const t = setup()
+    try {
+      writeFileSync(t.target, '# a\n')
+      const bin = fakeBin(t, 'awk', `REAL "$@"`)
+      const r = await runEnv(bash, ['--target', t.target, '--block', t.block('b.md', '新\n')], { PATH: `${bin}:${process.env.PATH}` })
+      assert.equal(r.status, 0, r.stderr)
+      assert.equal(r.result, 'appended')
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  // ---- 走査（awk）の失敗は結果語彙つきで止める ----
+
+  it(`${tag} awk が失敗したら error-io（結果語彙つき・exit 2）でファイルは不変`, async () => {
+    const t = setup()
+    try {
+      writeFileSync(t.target, '# a\n')
+      const h = sha(t.target)
+      const bin = fakeBin(t, 'awk', 'exit 2')
+      const r = await runEnv(bash, ['--target', t.target, '--block', t.block('b.md', '新\n')], { PATH: `${bin}:${process.env.PATH}` })
+      assert.equal(r.status, 2, r.stdout + r.stderr)
+      assert.equal(r.result, 'error-io')
+      assert.equal(sha(t.target), h)
+      noTmp(t)
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  // ---- `-` で始まるパスがオプションとして解釈されない ----
+
+  it(`${tag} --target / --block が - 始まりの相対パスでも通常のファイルとして扱う`, async () => {
+    const t = setup()
+    try {
+      writeFileSync(join(t.dir, '-n'), '# a\n')
+      writeFileSync(join(t.dir, '-b.md'), '指示\n')
+      const r = await runEnv(bash, ['--target', '-n', '--block', '-b.md'], {}, t.dir)
+      assert.equal(r.status, 0, r.stdout + r.stderr)
+      assert.equal(r.result, 'appended')
+      assert.equal(readFileSync(join(t.dir, '-n'), 'utf8'), `# a\n\n${START}\n指示\n${END}\n`)
+      const r2 = await runEnv(bash, ['--target', '-new.md', '--block', '-b.md'], {}, t.dir)
+      assert.equal(r2.result, 'created', r2.stdout + r2.stderr)
+      assert.equal(readFileSync(join(t.dir, '-new.md'), 'utf8'), `${START}\n指示\n${END}\n`)
+      noTmp(t)
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  // ---- 親ディレクトリがシンボリックリンク ----
+
+  it(`${tag} --target の親ディレクトリが symlink なら警告して実体のディレクトリへ書く`, async () => {
+    const t = setup()
+    try {
+      const real = join(t.dir, 'real')
+      mkdirSync(real)
+      const link = join(t.dir, 'link')
+      symlinkSync(real, link)
+      writeFileSync(join(real, 'AGENTS.md'), '# a\n')
+      const r = await run(bash, join(link, 'AGENTS.md'), t.block('b.md', '指示\n'))
+      assert.equal(r.status, 0, r.stderr)
+      assert.equal(r.result, 'appended')
+      assert.match(r.stderr, /親ディレクトリ.*シンボリックリンク/)
+      assert.ok(readFileSync(join(real, 'AGENTS.md'), 'utf8').includes(START))
+      assert.deepEqual(readdirSync(real), ['AGENTS.md'])
+      // 通常の親ディレクトリでは警告しない（対照）
+      const r2 = await run(bash, t.target, t.block('b.md', '指示\n'))
+      assert.doesNotMatch(r2.stderr, /シンボリックリンク/)
     } finally {
       t.cleanup()
     }
