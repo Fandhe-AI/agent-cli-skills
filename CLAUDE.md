@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Claude Code 向けの CLI ワークフロースキル集。コミット・PR・Issue・レビューなどの開発ワークフローを Conventional Commits 準拠で自動化する。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用。
+Claude Code・Codex・OpenCode 向けの CLI ワークフロースキル集。コミット・PR・Issue・レビューなどの開発ワークフローを Conventional Commits 準拠で自動化する。インストールは [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用。
 
 ## Repository Structure
 
@@ -27,11 +27,23 @@ skills/                               -- スキル本体（各ディレクトリ
   implement-review/
   implement-review-pr/
   init-claude/
+  init-codex/
+    assets/                           -- hooks（agent-guard.sh 共通ガード・codex-pretooluse.sh・codex-session-start.sh）・codex（hooks.json・rules・agents）・scripts/agents-md-block.sh（AGENTS.md 管理区間）
+    tests/                            -- node:test 回帰テスト（agent-guard・codex-adapter・agents-md-block・asset-sync・version-pin）
+  init-opencode/
+    assets/                           -- opencode（plugins/agent-guard・opencode.jsonc・agents）・hooks/agent-guard.sh（共通ガード）・scripts/agents-md-block.sh（AGENTS.md 管理区間）
+    tests/                            -- node:test 回帰テスト（opencode-plugin・opencode-config・asset-sync・version-pin）
   update-docs/
   update-issue-tree/
     scripts/                          -- reassign-sub-issue.sh（closed 親下の残置 open issue 付け替え・孤児再配置。DELETE→POST を単一プロセスで冪等に実行。cross-repository sub-issue は非対応で exit 2）、reassign-lib.sh（Step 3/4 の呼び出し側共有ヘルパー。計画配列の存在・型検証と終了ステータス解釈。両フェンスが自己完結的に source する）、update-root-body.sh（Step 8 のルート本文部分更新。マーカー間の管理ブロックのみ差し替え・既存本文は保持・マーカー無し本文は旧 Phase 表を details へ退避して移行・exit 4/5 で fail-closed）
     tests/                            -- node:test 回帰テスト（DELETE 失敗時に POST が呼ばれないこと、Step 8 の既存本文保持・移行・冪等・並行編集検知・マーカー不整合停止等・タイトルの文字参照変換〔create-issue-tree の CELL と同じ出力〕・旧形式の書き直し・create-issue-tree の --root 再マージとの往復〔相手のスキルが無ければ skip〕）、lib/ に gh スタブ（作る一時ディレクトリは tmp-track.mjs でプロセス終了時に消す）
   update-claude/
+  update-codex/
+    assets/                           -- init-codex と同じ資産（hooks・codex・scripts/agents-md-block.sh）・scripts/codex-hooks-merge.sh（hooks.json のマージ）
+    tests/                            -- node:test 回帰テスト（asset-sync・codex-hooks-merge・version-pin）
+  update-opencode/
+    assets/                           -- init-opencode と同じ資産（opencode・hooks・scripts/agents-md-block.sh）・scripts/opencode-config-merge.mjs（opencode.jsonc のマージ）
+    tests/                            -- node:test 回帰テスト（asset-sync・opencode-config-merge・version-pin）
   setup-repo-guards/
     scripts/                          -- verify-ai-review-wrapper.sh（Step 1 で commit SHA 固定取得した ai-review wrapper の配置前検査。allow-list 方式〔with の値はキーごとの 1 行 plain scalar・types / branches は要素ごとの完全一致・文字列の位置〔name・ジョブ ID・group・with の文字列キー・branches の要素〕では引用符なしで null・真偽値・数値・日付に解決される値を拒否〔YAML 1.1 と 1.2 の和集合・引用符で囲めば許可〕・concurrency は任意だがあれば group 必須〕・ジョブ構造は状態機械で追い uses・権限・provider を現在のジョブへ束縛・uses 完全一致 1 件・特権トリガー／run／secrets: inherit／過剰権限を拒否・ファイル内容は出力しない・exit 0 合格 / 1 不合格 / 2 使い方の誤り）
     tests/                            -- node:test 回帰テスト（合格形・1 項目ずつの変異で不合格・型付き scalar × 文字列の位置の直積と引用符つきの対照・concurrency の group 必須・実行できる全 bash〔/bin/bash 3.2 と PATH の bash 5〕で結果が一致すること・上流テンプレートの実物 fixture〔fixtures/〕・PyYAML による oracle〔値の型まで str を要求〕・空ファイルとエラー JSON・使い方の誤り・出力に内容を含めないこと）
@@ -172,7 +184,7 @@ main の役割は **対話・計画・委譲・報告** に徹する。token を
 | `skill-vendoring-layout.md` | downstream リポジトリの構成を触る全作業 | スキル配置方針（`.claude/skills` の symlink / 実ディレクトリ混在を許容・配置統一の移行はしない・同期除外は対象限定入力で行う） |
 | `github-actions.md` | `.github/workflows/` を変更する作業 / `skills/` の lockfile を変更する作業 | GitHub Actions のキャッシュ方針（容量上限と課金の前提・効果測定・保存は main への push だけ・ルートの lockfile だけをハッシュ・PR チェックリスト・配布物の lockfile が利用側のキャッシュキーに与える影響） |
 
-## Current Skills (24)
+## Current Skills (28)
 
 ### 開発ワークフロー (12)
 
@@ -182,9 +194,9 @@ comment-code, create-commit, create-issue, create-issue-tree, create-plan, creat
 
 project-init, project-add-items, project-create-issues, project-view-status, project-update-items, project-sync-issues, project-archive-done
 
-### Claude Code セットアップ (3)
+### エージェントセットアップ (7)
 
-init-claude, update-claude, setup-repo-guards
+init-claude, update-claude, setup-repo-guards, init-codex, update-codex, init-opencode, update-opencode
 
 ### 上流貢献 (2)
 

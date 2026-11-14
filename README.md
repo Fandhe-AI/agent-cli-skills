@@ -1,6 +1,6 @@
 # Agent CLI Skills
 
-Claude Code 向けの CLI ワークフロースキル集です。コミット作成、PR 作成、Issue 管理、コードレビューなど、日常的な開発ワークフローを Conventional Commits 準拠で自動化します。
+Claude Code・Codex・OpenCode 向けの CLI ワークフロースキル集です。コミット作成、PR 作成、Issue 管理、コードレビューなど、日常的な開発ワークフローを Conventional Commits 準拠で自動化します。
 
 インストールには [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI を使用します。
 
@@ -24,7 +24,7 @@ npx skills add Fandhe-AI/agent-cli-skills --all
 
 ## リポジトリ構成
 
-Claude Code の Claude Skills として使用するスキルは、原則として `skills/` 配下に実体があり、`.claude/skills/` からシンボリックリンクで参照されます。例外が 2 種あります: リポジトリ管理スキル（create-skill / create-agent / sweep-sync-prs）は `.claude/skills/` 内の実ディレクトリで `skills/` 側に対応物を持たず、参照スキル（github-docs / anthropic-claude-code / anthropic-claude-code-extend / openai-codex / opencode-usage / opencode-build）は `.agents/skills/` に実体を持ちます。Agents・Rules・その他ディレクトリツリーの詳細は [CLAUDE.md](./CLAUDE.md) を参照してください。
+Claude Code では、スキルは原則として `skills/` 配下に実体があり、`.claude/skills/` からシンボリックリンクで参照されます。例外が 2 種あります: リポジトリ管理スキル（create-skill / create-agent / sweep-sync-prs）は `.claude/skills/` 内の実ディレクトリで `skills/` 側に対応物を持たず、参照スキル（github-docs / anthropic-claude-code / anthropic-claude-code-extend / openai-codex / opencode-usage / opencode-build）は `.agents/skills/` に実体を持ちます。Codex・OpenCode へは `init-codex` / `init-opencode`（既存体系は `update-codex` / `update-opencode`）で `.agents/skills/` に導入します。Agents・Rules・その他ディレクトリツリーの詳細は [CLAUDE.md](./CLAUDE.md) を参照してください。
 
 ## スキル一覧
 
@@ -55,13 +55,17 @@ Claude Code の Claude Skills として使用するスキルは、原則とし�
 | **create-agent** | 新規サブエージェントを scaffold する（agent-author へ委譲、dotclaude-via-temp 準拠） |
 | **sweep-sync-prs** | Fandhe-AI 組織のスキル同期 PR を棚卸しし、詰まりの類型ごとに対処して全件マージまで見届ける（下流へは配布しない） |
 
-### Claude Code セットアップ
+### エージェントセットアップ
 
 | スキル | 説明 |
 |--------|------|
 | **init-claude** | 任意のリポジトリに Claude Code の `.claude/` 体系（Agents・Rules・Skills・hooks）を初期セットアップ |
 | **update-claude** | 既存の `.claude/` 体系を診断し、理想形との差分を提示・追補する（破壊なし） |
 | **setup-repo-guards** | 対象リポジトリへ組織標準の CI ガード一式（ai-review / AGENTS.md / 必須チェック集約ジョブ / branch protection ruleset）を導入する |
+| **init-codex** | 任意のリポジトリに OpenAI Codex の体系（AGENTS.md・.codex の hooks / rules / agents・ワークフロースキル 9 件）を初期セットアップ |
+| **update-codex** | 既存の Codex 体系を診断し、ギャップを表で提示して承認後に追補する（利用者の設定は消さない） |
+| **init-opencode** | 任意のリポジトリに OpenCode の体系（opencode.jsonc・.opencode の agents / plugin ガード・AGENTS.md・ワークフロースキル 9 件）を初期セットアップ |
+| **update-opencode** | 既存の OpenCode 体系を診断し、差分を承認後に追補する（利用者の規則・agent は消さない） |
 
 ### GitHub Projects 管理
 

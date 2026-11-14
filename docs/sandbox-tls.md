@@ -95,6 +95,10 @@ SKILL.md との二重管理になり乖離します。
 | `update-issue-tree` | 要（本スキルは主に API 経由） | `gh issue create` / `gh issue edit` / `gh api .../sub_issues`（`scripts/reassign-sub-issue.sh` 経由含む）でツリーを更新 |
 | `init-claude` | 要 | `.claude/` 体系の生成自体（Step 1〜3 の大半）はローカル完結だが、Step 3 の Skills 導入は `npx skills add Fandhe-AI/agent-cli-skills` の実行が主要フローに含まれ省略不可（任意ステップではない）。加えて Step 4「implement-issue-tree の動作前提を確認する」で `gh auth status` / `gh api .../sub_issues`（読み取りのみ）も要する |
 | `update-claude` | 要 | 既存 `.claude/` の調査・差分診断はローカル完結だが、Step 4-3「不足スキルを補完する」で不足スキルがある場合 `npx skills add Fandhe-AI/agent-cli-skills` の実行が主要フローに含まれ省略不可（任意ステップではない）。加えて Step 2-6「implement-issue-tree 前提診断」で `gh auth status` / `gh api .../sub_issues`（読み取りのみ）も要する |
+| `init-codex` | 要 | 体系の生成自体はローカル完結だが、Step 4-4「ワークフロースキルを導入する」の固定版 skills CLI による `add Fandhe-AI/agent-cli-skills`（`npx --yes "skills@<固定版>"`）の実行が主要フローに含まれ省略不可（任意ステップではない）。加えて前提確認で `gh auth status`（読み取りのみ）も要する |
+| `update-codex` | 要 | 既存体系の診断・差分提示はローカル完結だが、Step 4-4「未導入のワークフロースキルを追加する」で不足スキルがある場合、固定版 skills CLI による `add Fandhe-AI/agent-cli-skills` の実行が主要フローに含まれ省略不可（任意ステップではない）。加えて前提確認で `gh auth status`（読み取りのみ）も要する |
+| `init-opencode` | 要 | 体系の生成自体はローカル完結だが、Step 4-4「ワークフロースキルを導入する」の固定版 skills CLI による `add Fandhe-AI/agent-cli-skills`（`npx --yes "skills@<固定版>"`）の実行が主要フローに含まれ省略不可（任意ステップではない）。加えて前提確認で `gh auth status`（読み取りのみ）も要する |
+| `update-opencode` | 要 | 既存体系の診断・差分提示はローカル完結だが、Step 5-4「ワークフロースキルの補完」で不足スキルがある場合、固定版 skills CLI による `add Fandhe-AI/agent-cli-skills` の実行が主要フローに含まれ省略不可（任意ステップではない）。加えて前提確認で `gh auth status`（読み取りのみ）も要する |
 
 **注記:** `create-html-report` / `setup-firebase-hosting` は [Fandhe-AI/agent-util-skills](https://github.com/Fandhe-AI/agent-util-skills) へ移設しました。該当スキルの要件は同リポジトリの `docs/skill-network-requirements.md` を参照してください。
 

@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/codex-session-start.sh\"",
+            "timeout": 10,
+            "statusMessage": "Loading session reminders"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "root=$(git rev-parse --show-toplevel 2>/dev/null) && [ -f \"$root/.codex/hooks/codex-pretooluse.sh\" ] && bash \"$root/.codex/hooks/codex-pretooluse.sh\" || { echo \"Codex guard hook failed to run; blocking Bash command (fail-closed)\" >&2; exit 2; }",
+            "timeout": 30,
+            "statusMessage": "Checking Bash command"
+          }
+        ]
+      }
+    ]
+  }
+}
