@@ -233,14 +233,26 @@ approved_rules=(agent-guard.rules)
 approved_agents=(researcher implementer reviewer)   # 「なし」の標準 agent だけを入れる
 
 for f in "${approved_hooks[@]}"; do
+  case "${f}" in
+    agent-guard.sh|codex-pretooluse.sh|codex-session-start.sh) ;;
+    *) echo "警告: 標準のhookに無い名前のため処理しない: ${f}" >&2; continue ;;
+  esac
   cp "${ASSETS}/hooks/${f}" "${TARGET}/.codex/hooks/${f}"
   chmod +x "${TARGET}/.codex/hooks/${f}"
 done
 for f in "${approved_rules[@]}"; do
+  case "${f}" in
+    agent-guard.rules) ;;
+    *) echo "警告: 標準のrulesに無い名前のため処理しない: ${f}" >&2; continue ;;
+  esac
   cp "${ASSETS}/codex/rules/${f}" "${TARGET}/.codex/rules/${f}"
 done
 # agent は既存の同名ファイルを上書きしない（既存なら飛ばす）
 for a in "${approved_agents[@]}"; do
+  case "${a}" in
+    researcher|implementer|reviewer) ;;
+    *) echo "警告: 標準 agent に無い名前のため処理しない: ${a}" >&2; continue ;;
+  esac
   dst="${TARGET}/.codex/agents/${a}.toml"
   [ -e "${dst}" ] || cp "${ASSETS}/codex/agents/${a}.toml" "${dst}"
 done
@@ -290,7 +302,7 @@ echo "exit=$?"
 32768 バイトを超えると stderr に警告が出る（Codex は AGENTS.md を合計 32 KiB までしか読まない）。
 警告が出たら報告に載せる。管理区間の外はバイト単位で変わらない。
 
-#### 4-4. 未導入のワークフロースキルを追加する
+#### 4-4. 承認された未導入のワークフロースキルを追加する
 
 ```bash
 cd "<target>"
@@ -298,9 +310,17 @@ cd "<target>"
 # 乗っ取り時の任意コード実行経路になる）。正の定義箇所・更新手順は付録を参照。
 SKILLS_CLI_VERSION="1.5.23"   # 正の定義箇所。更新手順は付録を参照
 
+# Step 4 で承認された未導入スキル名だけを入れる（承認結果からエージェントが埋める。
+# 例: create-commit だけ承認したなら (create-commit)。全件を並べない・承認なしなら空にする）
+approved_skills=(create-commit)
+known_skills=" create-commit create-pr create-issue implement-issue implement-issue-tree implement-review implement-review-pr update-docs comment-code "
+
 skill_args=()
-for s in create-commit create-pr create-issue implement-issue implement-issue-tree \
-         implement-review implement-review-pr update-docs comment-code; do
+for s in "${approved_skills[@]}"; do
+  case "${known_skills}" in
+    *" ${s} "*) ;;
+    *) echo "警告: 標準 9 スキルに無い名前のため処理しない: ${s}" >&2; continue ;;
+  esac
   if [ -e ".agents/skills/${s}" ]; then
     echo "導入済みのためスキップ: ${s}"
   else
@@ -309,7 +329,7 @@ for s in create-commit create-pr create-issue implement-issue implement-issue-tr
 done
 
 if [ "${#skill_args[@]}" -eq 0 ]; then
-  echo "9 スキルとも導入済み"
+  echo "承認されたスキルは追加不要（承認なし、またはすべて導入済み）"
 else
   npx --yes "skills@${SKILLS_CLI_VERSION}" add Fandhe-AI/agent-cli-skills "${skill_args[@]}" -a codex -a opencode -y || {
     echo "エラー: skills@${SKILLS_CLI_VERSION} の実行が失敗した（該当版の不存在・レジストリ障害・書き込み拒否等、原因は問わない）。未固定 npx へのフォールバックは行わない。原因を確認してから再実行する。" >&2
@@ -318,6 +338,7 @@ else
 fi
 ```
 
+- `approved_skills` は Step 3 で承認されたスキル名だけをエージェントが埋める。配列に無いものは未導入でも追加しない。標準 9 スキルに無い名前は警告して処理しない（経路 B の同名配列も同じ）
 - `-a codex -a opencode` は `.agents/skills/<name>` の実体だけを作り、既存の `.claude/skills/` には触れない。
   Claude Code 側は `init-claude` / `update-claude` の担当
 - `skills-lock.json` が更新され、各エントリに `skillPath` があることを確認する
@@ -350,12 +371,24 @@ approved_rules=(agent-guard.rules)
 approved_agents=(researcher implementer reviewer)   # 「なし」の標準 agent だけ
 
 for f in "${approved_hooks[@]}"; do
+  case "${f}" in
+    agent-guard.sh|codex-pretooluse.sh|codex-session-start.sh) ;;
+    *) echo "警告: 標準のhookに無い名前のため処理しない: ${f}" >&2; continue ;;
+  esac
   cp "${ASSETS}/hooks/${f}" "${STAGE}/.codex/hooks/${f}" && printf '%s\n' "${STAGE}/.codex/hooks/${f}" >> "${MANIFEST}"
 done
 for f in "${approved_rules[@]}"; do
+  case "${f}" in
+    agent-guard.rules) ;;
+    *) echo "警告: 標準のrulesに無い名前のため処理しない: ${f}" >&2; continue ;;
+  esac
   cp "${ASSETS}/codex/rules/${f}" "${STAGE}/.codex/rules/${f}" && printf '%s\n' "${STAGE}/.codex/rules/${f}" >> "${MANIFEST}"
 done
 for a in "${approved_agents[@]}"; do
+  case "${a}" in
+    researcher|implementer|reviewer) ;;
+    *) echo "警告: 標準 agent に無い名前のため処理しない: ${a}" >&2; continue ;;
+  esac
   cp "${ASSETS}/codex/agents/${a}.toml" "${STAGE}/.codex/agents/${a}.toml" && printf '%s\n' "${STAGE}/.codex/agents/${a}.toml" >> "${MANIFEST}"
 done
 
@@ -407,10 +440,24 @@ approved_rules=(agent-guard.rules)
 approved_agents=(researcher implementer reviewer)   # 承認された名前だけを入れる
 
 for f in "${approved_hooks[@]}"; do
+  case "${f}" in
+    agent-guard.sh|codex-pretooluse.sh|codex-session-start.sh) ;;
+    *) echo "警告: 標準のhookに無い名前のため処理しない: ${f}" >&2; continue ;;
+  esac
   place "${S}/hooks/${f}" ".codex/hooks/${f}" overwrite && chmod +x ".codex/hooks/${f}" || rc=1
 done
-for f in "${approved_rules[@]}"; do place "${S}/rules/${f}" ".codex/rules/${f}" overwrite || rc=1; done
+for f in "${approved_rules[@]}"; do
+  case "${f}" in
+    agent-guard.rules) ;;
+    *) echo "警告: 標準のrulesに無い名前のため処理しない: ${f}" >&2; continue ;;
+  esac
+  place "${S}/rules/${f}" ".codex/rules/${f}" overwrite || rc=1
+done
 for a in "${approved_agents[@]}"; do
+  case "${a}" in
+    researcher|implementer|reviewer) ;;
+    *) echo "警告: 標準 agent に無い名前のため処理しない: ${a}" >&2; continue ;;
+  esac
   if [ -e "${S}/agents/${a}.toml" ] && [ -e ".codex/agents/${a}.toml" ] \
      && ! cmp -s -- "${S}/agents/${a}.toml" ".codex/agents/${a}.toml"; then
     echo "既存を保持（スキップ・退避側は削除）: .codex/agents/${a}.toml"   # 利用者の編集を守る。失敗には数えない
@@ -423,11 +470,19 @@ done
 place "${S}/hooks.json" ".codex/hooks.json" overwrite || rc=1
 [ "${rc}" -eq 0 ] || echo "差分のあるファイルは未反映。内容を確認し、承認済みの更新なら APPLY_DIFF=1 で再実行する"
 
-# 未導入のワークフロースキルの追加（未導入のものだけ -s を付ける）
+# 承認された未導入のワークフロースキルの追加（承認済みかつ未導入のものだけ -s を付ける）
 SKILLS_CLI_VERSION="1.5.23"   # Step 4-4 と同じ固定版
+# Step 4 で承認された未導入スキル名だけを入れる（承認結果からエージェントが埋める。
+# 例: create-commit だけ承認したなら (create-commit)。全件を並べない・承認なしなら空にする）
+approved_skills=(create-commit)
+known_skills=" create-commit create-pr create-issue implement-issue implement-issue-tree implement-review implement-review-pr update-docs comment-code "
+
 skill_args=()
-for s in create-commit create-pr create-issue implement-issue implement-issue-tree \
-         implement-review implement-review-pr update-docs comment-code; do
+for s in "${approved_skills[@]}"; do
+  case "${known_skills}" in
+    *" ${s} "*) ;;
+    *) echo "警告: 標準 9 スキルに無い名前のため処理しない: ${s}" >&2; continue ;;
+  esac
   [ -e ".agents/skills/${s}" ] || skill_args+=(-s "${s}")
 done
 [ "${#skill_args[@]}" -eq 0 ] || npx --yes "skills@${SKILLS_CLI_VERSION}" add Fandhe-AI/agent-cli-skills "${skill_args[@]}" -a codex -a opencode -y

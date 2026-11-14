@@ -242,21 +242,29 @@ chmod +x "${TARGET}/.opencode/hooks/agent-guard.sh"
 [ -e "${TARGET}/.opencode/plugins/agent-guard/index.js" ] \
   || cp "${ASSETS}/opencode/plugins/agent-guard/index.js" "${TARGET}/.opencode/plugins/agent-guard/index.js"
 
-# agents は不在のものだけ追加する
-for a in researcher implementer reviewer; do
+# Step 4 で承認された「不在」の標準 agent 名だけを入れる（承認結果からエージェントが埋める。
+# 例: researcher だけ承認したなら (researcher)。全件を並べない・承認なしなら空にする）
+approved_agents=(researcher)
+for a in "${approved_agents[@]}"; do
+  case "${a}" in
+    researcher|implementer|reviewer) ;;
+    *) echo "警告: 標準 agent に無い名前のため処理しない: ${a}" >&2; continue ;;
+  esac
+  # 既存は上書きしない（不在のものだけ追加する）
   [ -e "${TARGET}/.opencode/agents/${a}.md" ] || cp "${ASSETS}/opencode/agents/${a}.md" "${TARGET}/.opencode/agents/${a}.md"
 done
 ```
 
 - plugin は `import.meta.url` から `../../hooks/agent-guard.sh` を解決するため、相対配置を崩さない
 - **ガード・plugin に差分があり、差し替えが承認された場合だけ**、`diff -u` を見せたうえで該当ファイルを `cp`（上書き）する。承認がなければ触らない
+- `approved_agents` と 5-4 の `approved_skills` は、Step 4 で承認された項目の名前だけをエージェントが埋める。配列に無いものは、不在・未導入でも追加しない。既知の名前（標準 3 agent・標準 9 スキル）に無い名前は警告して処理しない
 - 既存の同名 agent は上書きしない。差分は提示するだけで、取り込むかは利用者が決める。利用者が作った別名の agent には触れない
 - `ask` は使わない（`--auto` 下で自動承認されるため、deny だけを使う）
 - 秘密情報（トークン・パスワード）をどのファイルにも書かない
 
 #### 5-4. ワークフロースキルの補完
 
-未導入のものだけを導入する。導入済みは入れ直さない。
+承認されたスキルのうち未導入のものだけを導入する（承認リストと未導入項目の共通部分）。承認されていないスキル・導入済みのスキルは触れない。
 
 ```bash
 cd "<target>"
@@ -264,9 +272,17 @@ cd "<target>"
 # 乗っ取り時の任意コード実行経路になる）。正の定義箇所・更新手順は付録を参照。
 SKILLS_CLI_VERSION="1.5.23"   # 正の定義箇所。更新手順は付録を参照
 
+# Step 4 で承認された未導入スキル名だけを入れる（承認結果からエージェントが埋める。
+# 例: create-commit だけ承認したなら (create-commit)。全件を並べない・承認なしなら空にする）
+approved_skills=(create-commit)
+known_skills=" create-commit create-pr create-issue implement-issue implement-issue-tree implement-review implement-review-pr update-docs comment-code "
+
 skill_args=()
-for s in create-commit create-pr create-issue implement-issue implement-issue-tree \
-         implement-review implement-review-pr update-docs comment-code; do
+for s in "${approved_skills[@]}"; do
+  case "${known_skills}" in
+    *" ${s} "*) ;;
+    *) echo "警告: 標準 9 スキルに無い名前のため処理しない: ${s}" >&2; continue ;;
+  esac
   if [ -e ".agents/skills/${s}" ]; then
     echo "導入済みのためスキップ: ${s}"
   else
@@ -275,7 +291,7 @@ for s in create-commit create-pr create-issue implement-issue implement-issue-tr
 done
 
 if [ "${#skill_args[@]}" -eq 0 ]; then
-  echo "9 スキルとも導入済み"
+  echo "承認されたスキルは追加不要（承認なし、またはすべて導入済み）"
 else
   npx --yes "skills@${SKILLS_CLI_VERSION}" add Fandhe-AI/agent-cli-skills "${skill_args[@]}" -a codex -a opencode -y || {
     echo "エラー: skills@${SKILLS_CLI_VERSION} の実行が失敗した（該当版の不存在・レジストリ障害等、原因は問わない）。未固定 npx へのフォールバックは行わない。原因を確認してから再実行する。" >&2
