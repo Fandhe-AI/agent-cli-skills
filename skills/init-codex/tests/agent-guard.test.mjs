@@ -219,6 +219,16 @@ const FIX_DENY = [
   ['export HUSKY=0; git commit -m x', 'no-verify'],
   ['HUSKY=0\ngit commit -m x', 'no-verify'],
   ['HUSKY_SKIP_HOOKS=1 git commit -m x', 'no-verify'],
+  // env の値を取るオプションを引数ごと読み飛ばしたうえで後続の代入を見る
+  ['env -u X HUSKY=0 git commit -m x', 'no-verify'],
+  ['env --unset=X HUSKY=0 git commit -m x', 'no-verify'],
+  ['env --unset X HUSKY=0 git commit -m x', 'no-verify'],
+  ['env -C /tmp HUSKY=0 git commit -m x', 'no-verify'],
+  ['env --chdir=/tmp HUSKY_SKIP_HOOKS=1 git commit -m x', 'no-verify'],
+  ['env -i HUSKY=0 git commit -m x', 'no-verify'],
+  ['env -i -u X -C /tmp HUSKY=0 git commit -m x', 'no-verify'],
+  ["env -S 'HUSKY=0 git commit -m x'", 'no-verify'],
+  ["env --split-string='HUSKY=0 git commit -m x'", 'no-verify'],
   ['git config core.hooksPath /dev/null', 'no-verify'],
   ['git config --global core.hooksPath /dev/null', 'no-verify'],
   ['git config core.hooksPath /dev/null --local', 'no-verify'],
@@ -277,6 +287,10 @@ const FIX_ALLOW = [
   'git status 2>&1 | head',
   'git diff <(echo a) <(echo b)',
   'git log -n 5 >out.txt',
+  'env -u X git commit -m x',
+  'env -u HUSKY git commit -m x',
+  'env -C /tmp git commit -m x',
+  'env -i git status',
   'HUSKY=0 npm ci',
   'HUSKY=0 npm ci; git commit -m x',
   'export FOO=1; git commit -m x',
@@ -354,6 +368,12 @@ const MG_MERGE_DENY = [
   'gh pr review 5 -b ok -a',
   'gh -R o/r pr review 5 -a',
   'gh pr review 5 -ca',
+  'gh pr review 5 -b "x; y" -a',
+  '(gh pr review 5 -a)',
+  'gh pr review 5 -c -b ok; gh pr review 6 -a',
+  'gh pr review 5 -ab ok && ls',
+  'gh api -X GET repos/o/r/pulls/5/reviews -X POST -f event=APPROVE',
+  'gh api repos/o/r/pulls/5/reviews --jq x -f event=APPROVE',
   // API 経由の承認: REST（reviews 作成・events 送信）
   'gh api -X POST repos/o/r/pulls/5/reviews -f event=APPROVE',
   'gh api repos/o/r/pulls/5/reviews -f event=APPROVE -f body=ok',
@@ -430,6 +450,22 @@ const MG_ALLOW = [
   'gh api -X POST repos/o/r/pulls/5/reviews/9/events -f event=COMMENT',
   'gh api repos/o/r/pulls/5/reviews -f body=pending',
   'gh api repos/o/r/pulls/5/comments -f body=x',
+  // 後続の別コマンドの -a は gh pr review の引数ではない
+  'gh pr review 5 -c -b ok && ls -la',
+  'gh pr review 5 -c -b ok; cp -a x y',
+  'gh pr review 5 --comment -b x | grep -a y',
+  'gh pr review 5 -c -b ok || ls -a',
+  'gh pr review 5 -c -b ok\nls -la',
+  // GraphQL: 別名の mutation・enum APPROVED は承認ではない
+  `gh api graphql -f query='mutation{addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:"x",body:"ok"}){clientMutationId}}'`,
+  `gh api graphql -f query='mutation{addPullRequestReviewComment(input:{pullRequestReviewId:"x",body:"APPROVE me"}){clientMutationId}}'`,
+  `gh api graphql -f query='query{repository(owner:"o",name:"r"){pullRequest(number:5){reviewDecision}}}' --jq '.. | select(. == "APPROVED")?'`,
+  `gh api graphql -f query='query{repository(owner:"o",name:"r"){pullRequest(number:5){reviews(states:APPROVED,first:10){nodes{id}}}}}'`,
+  // REST reviews の GET: jq フィルタ内の event= はフィールド指定ではない
+  `gh api repos/o/r/pulls/5/reviews --jq '.[] | select(.event=="APPROVE")'`,
+  `gh api repos/o/r/pulls/5/reviews -q '.[] | select(.event=="APPROVE")'`,
+  `gh api -X GET repos/o/r/pulls/5/reviews -f per_page=100`,
+  `gh api --method GET repos/o/r/pulls/5/reviews -F per_page=100 -f event=APPROVE`,
 ]
 
 for (const bash of BASHES) {

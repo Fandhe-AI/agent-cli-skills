@@ -113,13 +113,20 @@ function isws(c) { return (c == " " || c == "\t" || c == "\r") }
 function emit_tok() { if (have) { ntok++; tok[ntok] = cur }; cur = ""; have = 0 }
 function setv(v) { if (verdict == "") verdict = v }
 function end_seg() { emit_tok(); if (ntok > 0) analyze(); ntok = 0 }
-function analyze(   i, t, lt, p, seg_h, sawenv, hk) {
+function split_has_bypass(v) { return (v ~ /(^|[ \t])(HUSKY=0|HUSKY_SKIP_HOOKS=1)([ \t]|$)/ && tolower(v) ~ /(^|[ \t\/])git([ \t]|$)/) }
+function analyze(   i, t, lt, p, v, seg_h, sawenv, isenv, hk) {
   # 先頭の代入（FOO=1 HUSKY=0 git ...）・env・export を読み飛ばし、フック回避の代入を拾う。
-  p = 1; seg_h = 0; sawenv = 0
+  # env の値を取るオプション（-u / --unset・-C / --chdir）は次トークンを引数ごと読み飛ばす
+  # （`env -u X HUSKY=0 git ...` の X を代入列の終端と誤認しない）。-S / --split-string は値の
+  # 文字列に回避の代入と git の語が両方あれば deny（他の中身は追わない）。
+  p = 1; seg_h = 0; sawenv = 0; isenv = 0
   while (p <= ntok) {
     t = tok[p]
     if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { if (t == "HUSKY=0" || t == "HUSKY_SKIP_HOOKS=1") seg_h = 1; p++ }
-    else if (t == "env" || t == "export") { sawenv = 1; p++ }
+    else if (t == "env" || t == "export") { sawenv = 1; if (t == "env") isenv = 1; p++ }
+    else if (isenv && (t == "-S" || t == "--split-string")) { if (p < ntok && split_has_bypass(tok[p + 1])) setv("no-verify"); p += 2 }
+    else if (isenv && (t ~ /^-S./ || t ~ /^--split-string=/)) { v = t; sub(/^(--split-string=|-S)/, "", v); if (split_has_bypass(v)) setv("no-verify"); p++ }
+    else if (isenv && (t == "--unset" || t == "--chdir" || t ~ /^-[iv0]*[uC]$/)) p += 2
     else if (sawenv && substr(t, 1, 1) == "-") p++
     else break
   }
@@ -461,6 +468,43 @@ evidence() {
   printf '%s' "$tokenized" | grep -qE "$1"
 }
 
+# コマンド全体を引用符を考慮してトークンに分け、1 行 1 トークンで出す。引用符の外の ; | &
+# 改行はトークンの代わりに区切り行（SEP_MARK）を出す（>& &> >| のリダイレクトは区切りにしない）。
+# 引用符の中の空白は \002 に置き換えて 1 トークンに保つ（呼び出し側が必要なら空白へ戻す）。
+# $1 が keep のとき ( ) { } ` $ < > をトークン文字として残し、それ以外は空白と同じ扱いにする。
+SEP_MARK=$'\001SEP'
+shell_tokens() {
+  printf '%s\n' "$cmd" | awk -v keep="$1" '
+    function flush() { if (have) print cur; cur = ""; have = 0 }
+    { text = text $0 "\n" }
+    END {
+      len = length(text); q = 0; cur = ""; have = 0
+      for (i = 1; i <= len; i++) {
+        ch = substr(text, i, 1)
+        if (q == 1) { if (ch == "\047") q = 0; else cur = cur ((ch ~ /[ \t\n]/) ? "\002" : ch); continue }
+        if (q == 2) {
+          if (ch == "\"") q = 0
+          else if (ch == "\\") { i++; cur = cur substr(text, i, 1) }
+          else cur = cur ((ch ~ /[ \t\n]/) ? "\002" : ch)
+          continue
+        }
+        if (ch == "\\") { i++; nx = substr(text, i, 1); if (nx != "\n") { cur = cur nx; have = 1 }; continue }
+        if (ch == "\047") { q = 1; have = 1; continue }
+        if (ch == "\"") { q = 2; have = 1; continue }
+        if (ch == " " || ch == "\t" || ch == "\r") { flush(); continue }
+        if (ch == "\n" || ch == ";" || ch == "|" || ch == "&") {
+          pv = substr(text, i - 1, 1); nt = substr(text, i + 1, 1)
+          flush()
+          if ((ch == "&" && (pv == ">" || pv == "<" || nt == ">")) || (ch == "|" && pv == ">")) continue
+          print "\001SEP"; continue
+        }
+        if (keep != "keep" && index("(){}`$<>", ch) > 0) { flush(); continue }
+        cur = cur ch; have = 1
+      }
+      flush()
+    }'
+}
+
 # `-` で始まるトークン（フラグ）を除いたトークン列。値トークンは孤立して残るが、後段が
 # 語順の部分列一致なので over-deny 側にしか働かない（移植元 L361-370）。
 strip_flags() {
@@ -519,7 +563,27 @@ if contains_subsequence "$all_nf" gh api; then
     if printf '%s' "$tokenized" | grep -qE '(^|[[:space:]])--input([[:space:]]|=|$)'; then
       finish deny merge-guard
     fi
-    ev_vals=$(printf '%s' "$norm" | grep -oiE 'event[[:space:]]*=[[:space:]]*[^[:space:]]*') || ev_vals=""
+    # event の検査はフィールド指定の引数に限る。--jq / -q / --template / -t の値（フィルタ式）は
+    # 除く。明示の GET（書き込みのメソッドが無いもの）は読み取りなので event を検査しない
+    # （フィールドは問い合わせ文字列になる）。
+    ev_vals=""
+    if ! { printf '%s' "$norm" | grep -qE '(^|[[:space:]])(-[A-Za-z]*X|--method)(=|[[:space:]]*)[Gg][Ee][Tt]([^A-Za-z]|$)' \
+      && ! printf '%s' "$norm" | grep -qE '(^|[[:space:]])(-[A-Za-z]*X|--method)(=|[[:space:]]*)([Pp][Uu][Tt]|[Pp][Aa][Tt][Cc][Hh]|[Pp][Oo][Ss][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee])([^A-Za-z]|$)'; }; then
+      rest_text=""; rest_drop=0
+      while IFS= read -r rest_tok; do
+        if [ "$rest_drop" -eq 1 ]; then rest_drop=0; continue; fi
+        case "$rest_tok" in
+          --jq|--template) rest_drop=1; continue ;;
+          --jq=*|--template=*) continue ;;
+          -[qt]|-[A-Za-z]*[qt]) rest_drop=1; continue ;;
+          -[qt]?*) continue ;;
+        esac
+        rest_text="$rest_text ${rest_tok//$'\002'/ }"
+      done <<EOF_RT
+$(shell_tokens keep)
+EOF_RT
+      ev_vals=$(printf '%s' "$rest_text" | grep -oiE 'event[[:space:]]*=[[:space:]]*[^[:space:]]*') || ev_vals=""
+    fi
     while IFS= read -r ev_line; do
       [ -n "$ev_line" ] || continue
       ev_v=${ev_line#*=}
@@ -535,7 +599,8 @@ EOF_EV
   # GraphQL: レビュー作成・送信の mutation に APPROVE が含まれる（変数経由の -f e=APPROVE も同じ
   # コマンド文字列に現れる）。query を @file や --input で渡す形は中身を見られないので deny。
   if contains_subsequence "$all_nf" gh api graphql; then
-    if evidence 'addPullRequestReview|submitPullRequestReview' && evidence 'APPROVE'; then
+    if evidence '(addPullRequestReview|submitPullRequestReview)([^A-Za-z0-9_]|$)' \
+      && evidence '(^|[^A-Za-z0-9_])APPROVE([^A-Za-z0-9_]|$)'; then
       finish deny merge-guard
     fi
     if evidence '(^|[[:space:]])(-[A-Za-z]*[fF]|--(raw-)?field)[[:space:]=]*query[[:space:]]*=[[:space:]]*@' \
@@ -588,8 +653,15 @@ fi
 # 来たらそれ以降は値（-ba の a は本文）。値を取るオプションの次トークンも値として読み飛ばす。
 # gh pr review の後ろだけを見て、次の gh / git で打ち切る。
 review_short_approve() {
-  local tok st=0 skip=0 body m ch
-  for tok in $tokenized; do
+  local tok st=0 skip=0 body m ch rt
+  # ; | & 改行の区切りで gh pr review の走査を打ち切る（次のコマンドの -a は対象外）。
+  # $( ` <( >( <<（区切りが隠れる形）はトークン化した全体を区切りなしで走査する（従来どおり）。
+  case "$cmd" in
+    *'$('*|*'`'*|*'<('*|*'>('*|*'<<'*) rt=$(printf '%s' "$tokenized" | tr ' ' '\n') ;;
+    *) rt=$(shell_tokens strip) ;;
+  esac
+  while IFS= read -r tok; do
+    if [ "$tok" = "$SEP_MARK" ]; then st=0; skip=0; continue; fi
     if [ "$st" -lt 3 ]; then
       case "$tok" in
         -*) continue ;;
@@ -602,7 +674,8 @@ review_short_approve() {
       continue
     fi
     case "$tok" in
-      gh|git) return 1 ;;
+      gh) st=1; skip=0; continue ;;
+      git) st=0; skip=0; continue ;;
     esac
     if [ "$skip" -eq 1 ]; then skip=0; continue; fi
     case "$tok" in
@@ -621,7 +694,9 @@ review_short_approve() {
         done
         ;;
     esac
-  done
+  done <<EOF_RV
+$rt
+EOF_RV
   return 1
 }
 if review_short_approve; then
