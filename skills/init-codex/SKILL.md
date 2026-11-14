@@ -382,6 +382,7 @@ echo "exit=$?"
 SANDBOX="$(mktemp -d)"
 git init -q --bare -b main "${SANDBOX}/origin.git"
 git init -q -b main "${SANDBOX}/work" && cd "${SANDBOX}/work"
+git config user.name t && git config user.email t@example.invalid   # 使い捨てのローカル設定。対照の git commit も通す
 git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
 git commit -q --allow-empty -m "chore: init" && git push -q -u origin main
 git rev-parse HEAD; git -C "${SANDBOX}/origin.git" rev-parse main   # 実行前の sha を控える

@@ -203,17 +203,26 @@ proj_info() {
     | [.[] | select(.path == $p and (.info | type) == "object")] as $m
     | if ($m | length) == 1 then $m[0].info else error("該当要素が 1 件でない") end'
 }
-# [permissions, policies] を返す。配列でなければ失敗する
-proj_rules() {
-  proj_info | jq -ce 'def arr(k): (.[k] // []) | if type == "array" then . else error("\(k) が配列でない") end;
+# [permissions, policies] を返す。stdin から読み、配列でなければ失敗する。
+# 更新後（Step 6 の 7）と同じ射影・-S（キー順を正規化）にして、控えの出どころが違っても比べられる形にする
+rules_of() {
+  jq -cSe 'def arr(k): (.[k] // []) | if type == "array" then . else error("\(k) が配列でない") end;
     [arr("permissions"), arr("policies")]'
 }
 
-# 更新前の permissions / policies の件数とハッシュ（内容は表示しない）。取れなければ更新に進まない
-before="$(proj_rules)" && [ -n "${before}" ] \
-  || { echo "検証不能: 更新前の規則を取り出せない。更新に進まない"; exit 1; }
-printf '%s' "${before}" | jq -r '"permissions=\(.[0] | length) policies=\(.[1] | length)"'
-printf '%s' "${before}" | jq -c . | sha256 | awk '{print $1}'
+# 更新前の permissions / policies の件数とハッシュ（内容は表示しない）。
+# 控えは検証用であって更新の前提ではない。取れなくても更新は止めず「未取得」とする。
+# 1) debug config から 2) だめなら設定ファイル（コメントなしの JSON のとき）から 3) それも失敗なら未取得
+before="$(proj_info | rules_of)" && [ -n "${before}" ] || before=""
+if [ -z "${before}" ]; then
+  before="$(rules_of < "${CFG}")" && [ -n "${before}" ] || before=""
+fi
+if [ -n "${before}" ]; then
+  printf '%s' "${before}" | jq -r '"permissions=\(.[0] | length) policies=\(.[1] | length)"'
+  printf '%s\n' "${before}" | sha256 | awk '{print $1}'
+else
+  echo "更新前: 未取得（Step 6 の 7) は検証不能になる。更新は続ける）"
+fi
 unset before
 ```
 
@@ -221,7 +230,8 @@ unset before
 
 `opencode debug config` の出力にはグローバル設定（`~/.config/opencode` など）由来の秘密が含まれ得る。
 **全文を表示・保存しない。** 上のように `jq` で件数とハッシュだけを抜き出す。
-`opencode` が無い場合、または `検証不能` で止まった場合は、対象の設定ファイルを `jq` で読める形式のときだけ同様に控え、それ以外は「未検証」とする。
+`opencode` が無い場合や `debug config` の取得に失敗した場合は、設定ファイルが `jq` で読める形式（コメントなしの JSON）のときだけファイルから同じ射影で控える。
+それも失敗したら「更新前: 未取得」と出して更新は続け、Step 6 の 7) は「検証不能（更新前を取得できなかった）」とする。一致とは扱わない。
 
 #### 5-1. AGENTS.md の管理区間
 
@@ -416,8 +426,10 @@ grep -c 'agent-cli-skills:agents-md:start' AGENTS.md
 # 7) 利用者の規則が先頭に保たれている（N・M は Step 5 で控えた更新前の件数、BEFORE_HASH は Step 5 で控えたハッシュ）
 # 失敗・空出力は「検証不能」で止める。jq が失敗した空入力のハッシュ（e3b0c442…）を「同一」と読まない
 EMPTY_SHA="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-BEFORE_HASH="<Step 5 で控えたハッシュ>"
-if after_hash="$(printf '%s' "${info}" | jq -ce --argjson n "<更新前の permissions 件数>" --argjson m "<更新前の policies 件数>" '
+BEFORE_HASH="<Step 5 で控えたハッシュ。「更新前: 未取得」だったときは空>"
+if [ -z "${BEFORE_HASH}" ]; then
+  echo "7) 検証不能（更新前を取得できなかった）。一致とは扱わない"
+elif after_hash="$(printf '%s' "${info}" | jq -cSe --argjson n "<更新前の permissions 件数>" --argjson m "<更新前の policies 件数>" '
       def arr(k): (.[k] // []) | if type == "array" then . else error("\(k) が配列でない") end;
       [arr("permissions")[:$n], arr("policies")[:$m]]' | sha256 | awk '{print $1}')" \
    && [ -n "${after_hash}" ] && [ "${after_hash}" != "${EMPTY_SHA}" ] \
@@ -439,7 +451,7 @@ unset info
 | 4) 通常コミット | 最終行 `AGENT_GUARD_RESULT allow`、終了コード 0 |
 | 5) サブエージェントのマージ | 最終行が `AGENT_GUARD_RESULT deny ...`、終了コード 2 |
 | 6) 区間数 | `1` |
-| 7) 利用者の規則 | `7) 一致`（更新前の先頭 N 件・M 件のハッシュと同一）。件数は更新前以上で、利用者の規則の件数と順序が先頭に保たれている。`7) 不一致` / `7) 検証不能` は完了としない |
+| 7) 利用者の規則 | `7) 一致`（更新前の先頭 N 件・M 件のハッシュと同一）。件数は更新前以上で、利用者の規則の件数と順序が先頭に保たれている。`7) 不一致` / `7) 検証不能`（更新前を取得できなかった場合を含む）は完了としない |
 
 7) は、更新前の配列が更新後の配列の先頭と同じであることの確認である（追加は末尾だけのため）。
 更新前に件数 0 だった場合は N・M を 0 として、空配列同士の一致を確かめる。
@@ -456,9 +468,10 @@ unset info
 SANDBOX="$(mktemp -d)"
 git init --bare "${SANDBOX}/origin.git"
 git init "${SANDBOX}/work" && cd "${SANDBOX}/work"
+git config user.name t && git config user.email t@example.invalid   # 使い捨てのローカル設定。対照の git commit も通す
 git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
 # 初期コミットを作り bare へ初回 push しておく（force push の拒否を remote の sha で判定できるようにする）
-git -c user.name=t -c user.email=t@example.invalid commit --allow-empty -m "chore: init"
+git commit --allow-empty -m "chore: init"
 git push -u origin HEAD
 git ls-remote origin   # 実行前の sha を控える
 # 対象の .opencode/ と opencode.jsonc をここへコピーし、OpenCode をこのディレクトリで起動して

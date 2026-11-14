@@ -295,9 +295,10 @@ grep -c 'agent-cli-skills:agents-md:start' AGENTS.md
 SANDBOX="$(mktemp -d)"
 git init --bare "${SANDBOX}/origin.git"
 git init "${SANDBOX}/work" && cd "${SANDBOX}/work"
+git config user.name t && git config user.email t@example.invalid   # 使い捨てのローカル設定。対照の git commit も通す
 git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
 # 初期コミットを作り bare へ初回 push しておく（force push の拒否を remote の sha で判定できるようにする）
-git -c user.name=t -c user.email=t@example.invalid commit --allow-empty -m "chore: init"
+git commit --allow-empty -m "chore: init"
 git push -u origin HEAD
 git ls-remote origin   # 実行前の sha を控える
 # 対象の .opencode/ と opencode.jsonc をここへコピーし、OpenCode（`opencode run --auto` でもよい）を
