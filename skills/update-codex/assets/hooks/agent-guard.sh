@@ -5,8 +5,9 @@
 # 4 スキル（init-codex / init-opencode / update-codex / update-opencode）で同一内容を保つ
 # 配布物であり、このファイル単体で完結する（他ファイルを source しない）。
 #
-# 位置づけ: best-effort の攻撃面削減であり、承認境界ではない。文字列照合では eval・base64 復元・
-# 変数間接呼び出し・ダブルクォート内のコマンド置換・ブレース／glob 展開による難読化を防げない。
+# 位置づけ: best-effort の攻撃面削減であり、承認境界ではない。文字列照合では base64 復元・
+# 変数間接呼び出し・ブレース／glob 展開・別のコマンドが生成した文字列の実行による難読化を防げない
+# （bash -c / eval / heredoc / ダブルクォート内の $(...) の中身は再帰的に解析する。下記参照）。
 # 実強制はサーバー側の branch protection（ruleset）と、人間がマージする運用が担う。
 # 判定ロジックの設計経緯（なぜセグメント分割しないか・なぜ over-deny 側に倒すか）は
 # implement-issue-tree の scripts/merge-guard-hook.sh の冒頭コメントが正典。
@@ -35,7 +36,11 @@
 #                  gh extension（subagent が true / null のとき）
 #   repo-settings  ruleset・branch protection・リポジトリ本体の書き込み・gh repo edit 等
 #                  （subagent が true / null のとき）
-#   obfuscated     ANSI-C クォート $'...' や $IFS 展開を含むコマンド（subagent が true / null のとき）
+#   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
+#                  C0 と DEL）を含むコマンド（subagent が true / null のとき）
+#   nesting-limit  bash -c / eval / heredoc / $(...) / env -S の入れ子が解析の上限（深さ 8・件数 512）を
+#                  超えた、またはダブルクォート内の $( の閉じを見つけられない。中身を見切れないため
+#                  拒否する（fail-closed。全セッション）
 #   bad-input      stdin が空・JSON として不正・command が文字列でない・subagent が真偽値 / null でない
 #   no-jq          jq が見つからない
 #   internal-error 想定外の異常終了（結果行を出す前にスクリプトが落ちた場合の保険）
@@ -97,12 +102,21 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 # リダイレクト（< > >> &> >& >|）と here-string（<<<）は語の区切りで、その後ろに置いた引数も
 # 検査する。算術式（((...)) / $((...)) / $[...]）内の << は heredoc とみなさない（コマンド置換・
 # 引用符を含む式や閉じのない式は算術式とみなさず通常どおり検査する）。
+# 入れ子の解析: 次の中身は元の文字列と別に積み、同じ解析器で順に再解析する（再帰ではなく作業キュー。
+# 深さ 8・件数 512 を超えたら deny nesting-limit）。
+#   - bash / sh / zsh / dash / ksh の -c の値（-lc 等の束ね書き・-o / -O の値・`--` を読み飛ばす）と eval の引数
+#   - -c を持たない shell（`bash <<EOF`・`cat <<EOF | bash`・`bash <<< '...'`）が同じ行で読む
+#     ヒアドキュメント本体と here-string。-c 付きや `bash script.sh` への heredoc は入力データなので見ない
+#   - ダブルクォート内の $(...)（対応する ) は引用符・入れ子・ヒアドキュメント本体・コメント・算術式を
+#     読み飛ばして探す）。`git commit -m "$(cat <<'EOF' ...)"` の本文は heredoc として読み飛ばすため
+#     誤検知せず、本文に奇数個の " があっても後続行を引用符の中と取り違えない
+#   - env -S / --split-string の値（呼び出し元の HUSKY=0 は子へ引き継ぐ）
+# echo / printf のセグメントは引数を表示するだけなので git の語があっても見ない（`echo git push -f` は許可）。
 # 残存ギャップ（未対応。best-effort の限界であり、実強制は ruleset が担う）:
-#   - ダブルクォート内の $(...) は 1 トークンとして扱い中身を検査しない（`git commit -m
-#     "$(cat <<'EOF' ...)"` の本文を誤検知しないための意図的な選択）。そのため $(...) 内の
-#     コマンド・引用符の食い違い（本文に奇数個の " を含むと以降が裸の語として検査され誤 deny、
-#     逆に中身の実コマンドは見逃す）は扱えない
-#   - bash -c / sh -c / eval / ヒアドキュメントや here-string を shell へ渡す形の中身
+#   - パイプで shell へ渡す文字列（`echo 'git push -f' | bash`）・`cat > x.sh <<EOF` のあとで実行する形・
+#     bash -c の追加引数（`bash -c 'git "$@"' _ push -f`）・source / `.` / `bash <(…)`・
+#     `bash -c "$(cat <<EOF …)"` のように別のコマンドが生成した文字列
+#   - ダブルクォート内のバッククォート置換・引用符なし heredoc 本文の $(...)・$(...) 内の case 文の `)`
 #   - main セッションでの難読化（変数間接・base64 復元・ブレース / glob 展開。obfuscated の
 #     判定は subagent が true / null のときだけ）
 #   - alias は -c と git config での定義だけを止める。利用者の設定ファイルに既にある alias、
@@ -112,30 +126,76 @@ read -r -d '' GIT_AWK <<'AWK' || true
 function isws(c) { return (c == " " || c == "\t" || c == "\r") }
 function emit_tok() { if (have) { ntok++; tok[ntok] = cur }; cur = ""; have = 0 }
 function setv(v) { if (verdict == "") verdict = v }
-function end_seg() { emit_tok(); if (ntok > 0) analyze(); ntok = 0 }
-function split_has_bypass(v) { return (v ~ /(^|[ \t])(HUSKY=0|HUSKY_SKIP_HOOKS=1)([ \t]|$)/ && tolower(v) ~ /(^|[ \t\/])git([ \t]|$)/) }
-function analyze(   i, t, lt, p, v, seg_h, sawenv, isenv, hk) {
+function end_seg() { emit_tok(); if (ntok > 0) analyze(); ntok = 0; split("", hsmark) }
+# 入れ子の中身（bash -c の値・eval の引数・ヒアドキュメント本体・$(...) の中・env -S の値）を作業キューへ積む。
+# 深さ・件数の上限を超えたら中身を見切れないので limit を立てる（結果は deny nesting-limit）。
+function enqueue(s, h) {
+  if (cdepth + 1 > MAXD || nq >= MAXQ) { limit = 1; return }
+  nq++; qs[nq] = s; qd[nq] = cdepth + 1; qh[nq] = h
+}
+function split_has_h(v) { return (v ~ /(^|[ \t\n])(HUSKY=0|HUSKY_SKIP_HOOKS=1)([ \t\n]|$)/) }
+function join_from(k,   s) {
+  s = ""
+  for (; k <= ntok; k++) s = s (s == "" ? "" : " ") tok[k]
+  return s
+}
+# shell（bash 等）の引数列。-c の値を積んで 1 を返す。-c も入力ファイルも無く標準入力を読むなら 0
+# （heredoc / here-string が本体になる）。ファイル名を取るなら 2（heredoc は入力データ）。
+function shell_args(j, hk,   t, cf, sf, b, lc) {
+  cf = 0; sf = 0
+  for (; j <= ntok; j++) {
+    if (hsmark[j]) continue
+    t = tok[j]
+    if (t == "--" || t == "-") { j++; break }
+    if (t ~ /^--/) { if (t == "--rcfile" || t == "--init-file") j++; continue }
+    if (t ~ /^[-+][^-+]/) {
+      b = substr(t, 2)
+      if (substr(t, 1, 1) == "-") { if (index(b, "c") > 0) cf = 1; if (index(b, "s") > 0) sf = 1 }
+      lc = substr(b, length(b), 1)
+      if (lc == "o" || lc == "O") j++
+      continue
+    }
+    break
+  }
+  while (j <= ntok && hsmark[j]) j++
+  if (j > ntok) return 0
+  if (cf) { enqueue(tok[j], hk); return 1 }
+  return (sf ? 0 : 2)
+}
+function analyze(   i, m, t, lt, p, v, seg_h, seg_s, sawenv, isenv, hk, st, cap) {
   # 先頭の代入（FOO=1 HUSKY=0 git ...）・env・export を読み飛ばし、フック回避の代入を拾う。
   # env の値を取るオプション（-u / --unset・-C / --chdir）は次トークンを引数ごと読み飛ばす
-  # （`env -u X HUSKY=0 git ...` の X を代入列の終端と誤認しない）。-S / --split-string は値の
-  # 文字列に回避の代入と git の語が両方あれば deny（他の中身は追わない）。
-  p = 1; seg_h = 0; sawenv = 0; isenv = 0
+  # （`env -u X HUSKY=0 git ...` の X を代入列の終端と誤認しない）。-S / --split-string の値は
+  # 回避の代入があれば同じセグメントの後続の git に効くものとして扱い（seg_s。後のセグメントへは持ち越さない）、
+  # 値そのものも別に解析する（`env -S 'HUSKY=0 git commit'`・`env -S 'git push -f'`）。
+  p = 1; seg_h = 0; seg_s = 0; sawenv = 0; isenv = 0
   while (p <= ntok) {
     t = tok[p]
     if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { if (t == "HUSKY=0" || t == "HUSKY_SKIP_HOOKS=1") seg_h = 1; p++ }
     else if (t == "env" || t == "export") { sawenv = 1; if (t == "env") isenv = 1; p++ }
-    else if (isenv && (t == "-S" || t == "--split-string")) { if (p < ntok && split_has_bypass(tok[p + 1])) setv("no-verify"); p += 2 }
-    else if (isenv && (t ~ /^-S./ || t ~ /^--split-string=/)) { v = t; sub(/^(--split-string=|-S)/, "", v); if (split_has_bypass(v)) setv("no-verify"); p++ }
+    else if (isenv && (t == "-S" || t == "--split-string")) { if (p < ntok) { if (split_has_h(tok[p + 1])) seg_s = 1; enqueue(tok[p + 1], (seg_h || husky_persist)) }; p += 2 }
+    else if (isenv && (t ~ /^-S./ || t ~ /^--split-string=/)) { v = t; sub(/^(--split-string=|-S)/, "", v); if (split_has_h(v)) seg_s = 1; enqueue(v, (seg_h || husky_persist)); p++ }
     else if (isenv && (t == "--unset" || t == "--chdir" || t ~ /^-[iv0]*[uC]$/)) p += 2
     else if (sawenv && substr(t, 1, 1) == "-") p++
     else break
   }
   hk = husky_persist
-  if (p > ntok) { if (seg_h) husky_persist = 1 } else if (seg_h) hk = 1
+  if (p > ntok) { if (seg_h) husky_persist = 1 } else if (seg_h || seg_s) hk = 1
+  # echo / printf は引数を表示するだけで、git の語があっても実行しない。
+  # env 経由は読み飛ばしが近似（`env -a echo git push -f` は argv0 指定で git を実行する）なので対象にしない。
+  if (p <= ntok && !sawenv) { lt = tolower(tok[p]); if (lt == "echo" || lt == "printf") return }
+  cap = 0
   for (i = 1; i <= ntok; i++) {
     t = tok[i]; lt = tolower(t)
     if (lt == "git" || lt ~ /\/git$/) git_args(i + 1, hk)
+    else if (lt == "eval") enqueue(join_from(i + 1), hk)
+    else if (lt ~ /(^|\/)(bash|sh|zsh|dash|ksh)$/) {
+      st = shell_args(i + 1, hk)
+      if (st == 0) { cap = 1; linecap = 1; linehk = hk }
+    }
   }
+  # -c の無い shell は here-string の語を、同じ行のヒアドキュメント本体（newline の処理で読む）とともに script として読む。
+  if (cap) for (m = 1; m <= ntok; m++) if (hsmark[m]) enqueue(tok[m], hk)
 }
 # 短縮オプションの束ね書きを走査する。stop に含まれる文字は以降が値なので打ち切る。
 function short_has(a, target, stop,   m, ch) {
@@ -249,9 +309,96 @@ function br_end(k,   c) {
   }
   return 0
 }
-{ text = text $0 "\n" }
-END {
-  len = length(text); i = 1; cur = ""; have = 0; ntok = 0; hdn = 0; verdict = ""; husky_persist = 0
+# ダブルクォート文字列の終端（閉じの `"` の次の位置）。k は開きの `"` の次。中の $(...) は sub_end で読み飛ばす。
+# 閉じが見つからなければ 0。
+function dq_end(k,   c, r) {
+  while (k <= len) {
+    c = substr(text, k, 1)
+    if (c == "\\") { k += 2; continue }
+    if (c == "\"") return k + 1
+    if (c == "$" && substr(text, k + 1, 1) == "(") {
+      if (substr(text, k + 2, 1) == "(") { r = arith_end(k + 3); if (r > 0) { k = r; continue } }
+      r = sub_end(k + 2)
+      if (r == 0) return 0
+      k = r + 1; continue
+    }
+    k++
+  }
+  return 0
+}
+# コマンド置換 $( の次の位置 k から、対応する `)` の位置を返す（見つからなければ 0）。
+# 単一引用符・ダブルクォート（入れ子の $(...) を含む）・バッククォート・算術式・コメント・
+# ヒアドキュメント本体（本文の括弧や引用符を数えない）を読み飛ばして括弧の深さを数える。
+function sub_end(k,   d, c, c2, r, pend, pc, w, dash, line, hw, hd, rest, p) {
+  d = 1; pend = ""
+  while (k <= len) {
+    c = substr(text, k, 1)
+    if (c == "\\") { k += 2; continue }
+    if (c == "\047") {
+      k++
+      while (k <= len && substr(text, k, 1) != "\047") k++
+      if (k > len) return 0
+      k++; continue
+    }
+    if (c == "\"") { k = dq_end(k + 1); if (k == 0) return 0; continue }
+    if (c == "`") {
+      k++
+      while (k <= len && substr(text, k, 1) != "`") { if (substr(text, k, 1) == "\\") k++; k++ }
+      if (k > len) return 0
+      k++; continue
+    }
+    if (c == "$" && substr(text, k + 1, 1) == "[") { r = br_end(k + 2); if (r > 0) { k = r; continue } }
+    if (c == "(" && substr(text, k + 1, 1) == "(") { r = arith_end(k + 2); if (r > 0) { k = r; continue } }
+    if (c == "(") { d++; k++; continue }
+    if (c == ")") { d--; if (d == 0) return k; k++; continue }
+    if (c == "#") {
+      pc = substr(text, k - 1, 1)
+      if (pc == " " || pc == "\t" || pc == "\n" || pc == ";" || pc == "&" || pc == "|" || pc == "(") {
+        while (k <= len && substr(text, k, 1) != "\n") k++
+        continue
+      }
+    }
+    if (c == "<" && substr(text, k, 3) == "<<<") { k += 3; continue }
+    if (c == "<" && substr(text, k, 2) == "<<") {
+      k += 2; dash = 0
+      if (substr(text, k, 1) == "-") { dash = 1; k++ }
+      while (k <= len && isws(substr(text, k, 1))) k++
+      w = ""
+      while (k <= len) {
+        c2 = substr(text, k, 1)
+        if (c2 == "\047" || c2 == "\"") {
+          line = c2; k++
+          while (k <= len && substr(text, k, 1) != line) { w = w substr(text, k, 1); k++ }
+          k++
+        } else if (c2 == "\\") { w = w substr(text, k + 1, 1); k += 2 }
+        else if (isws(c2) || c2 == "\n" || index(";&|<>()", c2) > 0) break
+        else { w = w c2; k++ }
+      }
+      pend = pend dash w "\001"
+      continue
+    }
+    if (c == "\n" && pend != "") {
+      k++
+      while (pend != "") {
+        p = index(pend, "\001"); hw = substr(pend, 1, p - 1); pend = substr(pend, p + 1)
+        hd = substr(hw, 1, 1); hw = substr(hw, 2)
+        while (k <= len) {
+          rest = substr(text, k); p = index(rest, "\n")
+          if (p == 0) { line = rest; k = len + 1 } else { line = substr(rest, 1, p - 1); k += p }
+          if (hd == "1") sub(/^\t+/, "", line)
+          if (line == hw) break
+        }
+      }
+      continue
+    }
+    k++
+  }
+  return 0
+}
+# 1 つの文字列をトークン化して各セグメントを解析する。入れ子の中身は enqueue で積み、END が順に流す。
+function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, q, i, body) {
+  text = txt; len = length(text); i = 1; cur = ""; have = 0; ntok = 0; hdn = 0; linecap = 0; linehk = 0
+  split("", hsmark); cdepth = dp; husky_persist = hkin
   while (i <= len) {
     ch = substr(text, i, 1)
     if (ch == "\\") {
@@ -261,7 +408,7 @@ END {
     }
     if (ch == "\047") {
       have = 1; i++
-      while (i <= len && (c2 = substr(text, i, 1)) != "\047") { cur = cur ((c2 == "\n") ? " " : c2); i++ }
+      while (i <= len && (c2 = substr(text, i, 1)) != "\047") { cur = cur c2; i++ }
       i++; continue
     }
     if (ch == "\"") {
@@ -274,7 +421,13 @@ END {
           if (nx == "\"" || nx == "\\" || nx == "$" || nx == "`") { cur = cur nx; i += 2; continue }
           if (nx == "\n") { i += 2; continue }
         }
-        cur = cur ((c2 == "\n") ? " " : c2); i++
+        if (c2 == "$" && substr(text, i + 1, 1) == "(") {
+          if (substr(text, i + 2, 1) == "(") { r = arith_end(i + 3); if (r > 0) { cur = cur substr(text, i, r - i); i = r; continue } }
+          r = sub_end(i + 2)
+          if (r > 0) { enqueue(substr(text, i + 2, r - i - 2), husky_persist); cur = cur "$()"; i = r + 1; continue }
+          limit = 1
+        }
+        cur = cur c2; i++
       }
       i++; continue
     }
@@ -286,17 +439,20 @@ END {
     if (ch == "\n") {
       end_seg(); i++
       for (h = 1; h <= hdn; h++) {
+        body = ""
         while (i <= len) {
           rest = substr(text, i)
           p = index(rest, "\n")
           if (p == 0) { line = rest; i = len + 1 } else { line = substr(rest, 1, p - 1); i += p }
           if (hdd[h]) sub(/^\t+/, "", line)
           if (line == hdw[h]) break
+          if (linecap) body = body line "\n"
         }
+        if (linecap && body != "") enqueue(body, linehk)
       }
-      hdn = 0; continue
+      hdn = 0; linecap = 0; continue
     }
-    if (ch == "<" && substr(text, i, 3) == "<<<") { emit_tok(); i += 3; continue }
+    if (ch == "<" && substr(text, i, 3) == "<<<") { emit_tok(); hsmark[ntok + 1] = 1; i += 3; continue }
     if (ch == "$" && substr(text, i + 1, 1) == "[") { r = br_end(i + 2); if (r > 0) { cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
     if (ch == "(" && substr(text, i + 1, 1) == "(") { r = arith_end(i + 2); if (r > 0) { cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
     if (ch == "&" && (substr(text, i - 1, 1) == ">" || substr(text, i - 1, 1) == "<" || substr(text, i + 1, 1) == ">")) { emit_tok(); i++; continue }
@@ -324,6 +480,13 @@ END {
     cur = cur ch; have = 1; i++
   }
   end_seg()
+}
+{ alltext = alltext $0 "\n" }
+END {
+  verdict = ""; limit = 0; nq = 0; MAXD = 8; MAXQ = 512
+  scan(alltext, 0, 0)
+  for (qi = 1; qi <= nq && verdict == ""; qi++) scan(qs[qi], qd[qi], qh[qi])
+  if (verdict == "" && limit) verdict = "nesting-limit"
   printf "%s\n", (verdict == "") ? "ok" : verdict
 }
 AWK
@@ -333,6 +496,7 @@ case "$git_verdict" in
   ok) : ;;
   no-verify) finish deny no-verify ;;
   force-push) finish deny force-push ;;
+  nesting-limit) finish deny nesting-limit ;;
   *) finish deny internal-error ;;
 esac
 
@@ -340,11 +504,25 @@ esac
 [ "$subagent" = false ] && finish allow
 
 # --- subagent（true）と判別不能（null）: merge-guard-hook.sh の deny 対象 ---------------
-# 以下は implement-issue-tree/scripts/merge-guard-hook.sh の判定を移植したもの。元ファイルは
-# 変更していない。違いは入出力（hook JSON ではなく上記契約）と deny の出し方（理由コード）だけ。
+# 以下は implement-issue-tree/scripts/merge-guard-hook.sh と同じ判定（レビュー承認の判定を含む。
+# 制御文字の拒否・基盤コマンドの存在確認・pipefail・gh の大文字小文字・REST / GraphQL の承認の検査・
+# -a の normal / flat 走査も同じ）。違いは入出力（hook JSON ではなく上記契約）と deny の出し方
+# （理由コード）だけ。判定を直すときは両方を同じ内容に保つ。行番号では対応づけない
+# （どちらのファイルも編集で行がずれる）。
+
+# 判定に使う基盤コマンドが無いと、証拠照合が黙って不成立（= 許可）になる。不在は deny に倒す。
+for _ag_cmd in awk grep sed tr; do
+  command -v "$_ag_cmd" >/dev/null 2>&1 || finish deny internal-error
+done
+
+# 制御文字（\t・\n・\r を除く）を含むコマンドは deny する。\001 は区切りの目印（SEP_MARK）、\002 は
+# 引用符内の空白の目印として判定内部で使うため、コマンド文字列に混ぜられると走査の区切りを偽造できる。
+# 正当なコマンドは使わない（過検知は fail-closed 方向で安全）。git の判定は全セッションで先に済んでいる。
+cmd_clean=$(printf '%s' "$cmd" | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177') || finish deny internal-error
+[ "$cmd_clean" = "$cmd" ] || finish deny obfuscated
 
 # デコード用プリミティブ（ANSI-C クォート・IFS 展開）は文字削除の正規化では意味が復元できない
-# ため、構文の存在自体を raw のコマンドに対して deny する（移植元 L194-199）。
+# ため、構文の存在自体を raw のコマンドに対して deny する（merge-guard-hook.sh と同じ判定）。
 if printf '%s' "$cmd" | grep -qE "[$]'"; then
   finish deny obfuscated
 fi
@@ -353,8 +531,11 @@ if printf '%s' "$cmd" | grep -qE '[$]\{?IFS'; then
 fi
 
 # 正規化 第1段: 行継続・改行・${IFS}・クォート・バックスラッシュを除去して文字レベルの
-# 難読化（g''h・g\h・gh${IFS}pr）を潰す。トークン境界は変えない（移植元 L218-227）。
+# 難読化（g''h・g\h・gh${IFS}pr）を潰す。トークン境界は変えない（merge-guard-hook.sh の norm_of と同じ）。
 norm_of() {
+  # パイプの途中（awk 等）の失敗を呼び出し側へ伝える（$(...) 内で呼ぶので他の判定へは波及しない。
+  # グローバルの pipefail は grep -q の SIGPIPE で fail-open になるため使わない）
+  set -o pipefail
   printf '%s\n' "$1" \
     | awk '{ if (sub(/\\$/, "")) printf "%s", $0; else print }' \
     | tr '\n' ' ' \
@@ -363,15 +544,16 @@ norm_of() {
     | tr -d "\\\\" \
     | tr -s '[:space:]' ' '
 }
-norm=$(norm_of "$cmd")
+norm=$(norm_of "$cmd") || finish deny internal-error
 
 # トークン全体が「非空白プレフィックス + /gh」のときだけ "gh" に置換する basename 正規化。
-# 部分削除はしない（同一トークン内の deny 証拠を消さないため。移植元 L234-243）。
+# 部分削除はしない（同一トークン内の deny 証拠を消さないため。merge-guard-hook.sh の normalize_gh_tokens と同じ）。
 normalize_gh_tokens() {
   local s="$1" tok out=""
   for tok in $s; do
+    # 大文字小文字を区別しない（macOS の FS 対策。`GH pr merge` も gh として動く）
     case "$tok" in
-      */gh) tok="gh" ;;
+      */[Gg][Hh]|[Gg][Hh]) tok="gh" ;;
     esac
     out="$out $tok"
   done
@@ -379,21 +561,21 @@ normalize_gh_tokens() {
 }
 
 # 正規化 第2段: シェルメタ文字を空白にしてトークン境界を確定 → basename 正規化。
-# 順序が本質（メタ文字が先。移植元 L253-259）。
+# 順序が本質（メタ文字が先。merge-guard-hook.sh の tokenize_of と同じ）。
 tokenize_of() {
   local t
-  t=$(printf '%s' "$1" \
+  t=$(set -o pipefail; printf '%s' "$1" \
     | sed -e 's/[;&|<>(){}`$]/ /g' \
-    | tr -s '[:space:]' ' ')
+    | tr -s '[:space:]' ' ') || return 1
   normalize_gh_tokens "$t"
 }
-tokenized=$(tokenize_of "$norm")
+tokenized=$(tokenize_of "$norm") || finish deny internal-error
 
 # 暗黙 POST の判定だけに使う走査対象。`gh api ... | grep -F key=value` の grep -F を gh api の
 # フィールド指定と誤認しないよう、先頭が既知の読み取りフィルタで gh を含まないセグメントを
 # 除く。区切りが隠れる状況（$( ` <( >( <<・引用符の閉じ忘れ・awk 異常）は全体を走査して
 # fail-closed に倒す。マージ系・REST / GraphQL 証拠・明示の書き込み判定は常に全体で行う
-# （移植元 L281-341・Issue #537）。
+# （merge-guard-hook.sh の segment_scan_text と同じ・Issue #537）。
 segment_scan_text() {
   printf '%s\n' "$1" | awk '
     BEGIN {
@@ -411,7 +593,7 @@ segment_scan_text() {
         c = seg
         gsub("[;&|<>(){}`$\047\"\\\\]", " ", c)
         m = split(c, w, /[ \t]+/)
-        for (j = 1; j <= m; j++) if (w[j] == "gh" || w[j] ~ /\/gh$/) hasgh = 1
+        for (j = 1; j <= m; j++) if (tolower(w[j]) == "gh" || tolower(w[j]) ~ /\/gh$/) hasgh = 1
         if (!hasgh) { seg = ""; return }
       }
       out = out " ; " seg
@@ -453,8 +635,8 @@ case "$cmd" in
     fi
     ;;
 esac
-scan_norm=$(norm_of "$scan_src")
-scan_tok=$(tokenize_of "$scan_norm")
+scan_norm=$(norm_of "$scan_src") || finish deny internal-error
+scan_tok=$(tokenize_of "$scan_norm") || finish deny internal-error
 
 # 暗黙 POST 用の証拠照合（走査対象のみ）。
 scan_evidence() {
@@ -503,11 +685,13 @@ shell_tokens() {
         cur = cur ch; have = 1
       }
       flush()
+      # 引用符が閉じないまま終わった（コメント中のアポストロフィ等）。以降のトークンは信用できない
+      if (q != 0) exit 3
     }'
 }
 
 # `-` で始まるトークン（フラグ）を除いたトークン列。値トークンは孤立して残るが、後段が
-# 語順の部分列一致なので over-deny 側にしか働かない（移植元 L361-370）。
+# 語順の部分列一致なので over-deny 側にしか働かない（merge-guard-hook.sh の strip_flags と同じ）。
 strip_flags() {
   local s="$1" tok out=""
   for tok in $s; do
@@ -541,11 +725,13 @@ if contains_subsequence "$all_nf" gh pr merge; then
   finish deny merge-guard
 fi
 
-# gh api 経由のマージ・設定変更（移植元 L397-449）
+# gh api 経由のマージ・設定変更（merge-guard-hook.sh の gh api 判定と同じ）
 if contains_subsequence "$all_nf" gh api; then
   # REST merge（pulls/<n>/merge）・REST ブランチマージ（repos/<o>/<r>/merges）・
   # GraphQL の merge 系 mutation（mergeBranch は PR を経由せず直接マージできる迂回経路）
-  if evidence 'pulls/[^[:space:]]*/merge'; then
+  # パスの途中にコマンド置換（`pulls/$(gh pr view ... -q .number)/merge`）があると空白で語が割れるため、
+  # 空白を許す緩い形で照合する（過検知は fail-closed 方向で安全）。
+  if evidence 'pulls/.*/merge'; then
     finish deny merge-guard
   fi
   if evidence '/merges([[:space:]?]|$)'; then
@@ -559,32 +745,35 @@ if contains_subsequence "$all_nf" gh api; then
   # pulls/<n>/reviews/<id>/events（送信）で、event フィールドが COMMENT / REQUEST_CHANGES の
   # リテラル以外（APPROVE・@file・変数・判定できない値）なら deny する。--input は本文を
   # ファイル / stdin から渡すため中身が見えず deny する。event を持たない書き込み（保留レビュー
-  # の作成）と GET の読み取りは許可。
-  if evidence 'pulls/[^/[:space:]]+/reviews(/[^/[:space:]]+/events)?([?[:space:]]|$)'; then
+  # の作成）と、event を持たない読み取りは許可。
+  # パスの照合は、途中にコマンド置換（`pulls/$(gh pr view ... -q .number)/reviews`）があって空白で
+  # 語が割れる形と、末尾スラッシュ（`reviews/`）も拾うよう緩くする。
+  # 明示の GET でも event は検査する（GET の免除は、コマンド全体の `-X GET` の字面が別の gh api
+  # 呼び出しやコメント（`... -f event=APPROVE # -X GET`）にあるだけで成立してしまうため置かない。
+  # `GET ... -f event=APPROVE` を deny するのは意図した過検知）。
+  if evidence 'pulls/.*/reviews([?/[:space:]]|$)'; then
     if printf '%s' "$tokenized" | grep -qE '(^|[[:space:]])--input([[:space:]]|=|$)'; then
       finish deny merge-guard
     fi
-    # event の検査はフィールド指定の引数に限る。--jq / -q / --template / -t の値（フィルタ式）は
-    # 除く。明示の GET（書き込みのメソッドが無いもの）は読み取りなので event を検査しない
-    # （フィールドは問い合わせ文字列になる）。
-    ev_vals=""
-    if ! { printf '%s' "$norm" | grep -qE '(^|[[:space:]])(-[A-Za-z]*X|--method)(=|[[:space:]]*)[Gg][Ee][Tt]([^A-Za-z]|$)' \
-      && ! printf '%s' "$norm" | grep -qE '(^|[[:space:]])(-[A-Za-z]*X|--method)(=|[[:space:]]*)([Pp][Uu][Tt]|[Pp][Aa][Tt][Cc][Hh]|[Pp][Oo][Ss][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee])([^A-Za-z]|$)'; }; then
-      rest_text=""; rest_drop=0
-      while IFS= read -r rest_tok; do
-        if [ "$rest_drop" -eq 1 ]; then rest_drop=0; continue; fi
-        case "$rest_tok" in
-          --jq|--template) rest_drop=1; continue ;;
-          --jq=*|--template=*) continue ;;
-          -[qt]|-[A-Za-z]*[qt]) rest_drop=1; continue ;;
-          -[qt]?*) continue ;;
-        esac
-        rest_text="$rest_text ${rest_tok//$'\002'/ }"
-      done <<EOF_RT
-$(shell_tokens keep)
+    # event の検査はフィールド指定の引数に限る。--jq / -q / --template / -t の値（フィルタ式）は除く。
+    # 引用符を追う分割が信用できない（閉じ忘れ・awk 失敗）ときは、引用符を除いた norm を空白で割る。
+    rt_keep=$(shell_tokens keep) || rt_keep=$(printf '%s' "$norm" | tr ' ' '\n')
+    rest_text=""; rest_drop=0
+    while IFS= read -r rest_tok; do
+      if [ "$rest_drop" -eq 1 ]; then rest_drop=0; continue; fi
+      case "$rest_tok" in
+        --jq|--template) rest_drop=1; continue ;;
+        --jq=*|--template=*) continue ;;
+        -[qt]|-[A-Za-z]*[qt]) rest_drop=1; continue ;;
+        -[qt]?*) continue ;;
+      esac
+      rest_text="$rest_text ${rest_tok//$'\002'/ }"
+    done <<EOF_RT
+$rt_keep
 EOF_RT
-      ev_vals=$(printf '%s' "$rest_text" | grep -oiE 'event[[:space:]]*=[[:space:]]*[^[:space:]]*') || ev_vals=""
-    fi
+    rc=0
+    ev_vals=$(printf '%s' "$rest_text" | grep -oiE 'event[[:space:]]*=[[:space:]]*[^[:space:]]*') || rc=$?
+    [ "$rc" -le 1 ] || finish deny internal-error
     while IFS= read -r ev_line; do
       [ -n "$ev_line" ] || continue
       ev_v=${ev_line#*=}
@@ -597,14 +786,35 @@ EOF_RT
 $ev_vals
 EOF_EV
   fi
-  # GraphQL: レビュー作成・送信の mutation に APPROVE が含まれる（変数経由の -f e=APPROVE も同じ
-  # コマンド文字列に現れる）。query を @file や --input で渡す形は中身を見られないので deny。
-  if contains_subsequence "$all_nf" gh api graphql; then
-    if evidence '(addPullRequestReview|submitPullRequestReview)([^A-Za-z0-9_]|$)' \
-      && evidence '(^|[^A-Za-z0-9_])APPROVE([^A-Za-z0-9_]|$)'; then
+  # GraphQL: レビュー作成・送信の mutation（addPullRequestReviewThreadReply 等の別名は対象外）。
+  # `gh api graphql` の語の位置に依らず（`/graphql`・URL 形も）mutation 名で判定する。mutation がある
+  # 場合は event が COMMENT / REQUEST_CHANGES のリテラルで、$var・@file・$(...) を含まない形だけを許可
+  # する（event を持たない・変数経由・引用符内の値は判定できないので deny。APPROVE の語も deny）。
+  if evidence '(addPullRequestReview|submitPullRequestReview)([^A-Za-z0-9_]|$)'; then
+    rc=0
+    gq_vals=$(printf '%s' "$norm" | grep -oE 'event[[:space:]]*:[[:space:]]*[^[:space:],})]*') || rc=$?
+    [ "$rc" -le 1 ] || finish deny internal-error
+    gq_n=0
+    while IFS= read -r gq_line; do
+      [ -n "$gq_line" ] || continue
+      gq_v=${gq_line#*:}
+      gq_v=$(printf '%s' "$gq_v" | tr -d '[:space:]')
+      case "$gq_v" in
+        COMMENT|REQUEST_CHANGES) gq_n=$((gq_n + 1)) ;;
+        *) finish deny merge-guard ;;
+      esac
+    done <<EOF_GQ
+$gq_vals
+EOF_GQ
+    [ "$gq_n" -ge 1 ] || finish deny merge-guard
+    if evidence '(^|[^A-Za-z0-9_])APPROVE([^A-Za-z0-9_]|$)' \
+      || printf '%s' "$norm" | grep -qE '=[[:space:]]*@'; then
       finish deny merge-guard
     fi
-    if evidence '(^|[[:space:]])(-[A-Za-z]*[fF]|--(raw-)?field)[[:space:]=]*query[[:space:]]*=[[:space:]]*@' \
+  fi
+  # GraphQL の query を @file / 変数 / コマンド置換（先頭が @ か $）や --input で渡す形は中身を見られない。
+  if evidence '(^|[^A-Za-z0-9_])graphql([^A-Za-z0-9_]|$)'; then
+    if evidence '(^|[[:space:]])(-[A-Za-z]*[fF]|--(raw-)?field)[[:space:]=]*query[[:space:]]*=[[:space:]]*[@$]' \
       || printf '%s' "$tokenized" | grep -qE '(^|[[:space:]])--input([[:space:]]|=|$)'; then
       finish deny merge-guard
     fi
@@ -650,41 +860,47 @@ if contains_subsequence "$all_nf" gh pr review \
   finish deny merge-guard
 fi
 
-# 短縮 -a（--approve の略）。束ね書き（-ab 等）は pflag と同じく先頭から読み、値を取る -b / -F が
-# 来たらそれ以降は値（-ba の a は本文）。値を取るオプションの次トークンも値として読み飛ばす。
-# gh pr review の後ろだけを見て、次の gh / git で打ち切る。
-review_short_approve() {
-  local tok st=0 skip=0 body m ch rt
-  # ; | & 改行の区切りで gh pr review の走査を打ち切る（次のコマンドの -a は対象外）。
-  # $( ` <( >( <<（区切りが隠れる形）はトークン化した全体を区切りなしで走査する（従来どおり）。
-  case "$cmd" in
-    *'$('*|*'`'*|*'<('*|*'>('*|*'<<'*) rt=$(printf '%s' "$tokenized" | tr ' ' '\n') ;;
-    *) rt=$(shell_tokens strip) ;;
-  esac
+# 短縮 -a（--approve の略）。束ね書き（-ab 等）は pflag と同じく先頭から読み、値を取る
+# -b / -F が来たらそれ以降は値（-ba の a は本文）。値を取るオプションの次トークンも値として読み飛ばす。
+# gh pr review の後ろだけを見る。
+# 走査は 2 モード:
+#   normal: 引用符を追うトークン化（shell_tokens strip）。引用符の外の ; | & 改行で状態を戻し、
+#           `gh pr review 5 -c -b ok; cp -a x y` の -a（別コマンドの引数）を承認と誤認しない。
+#   flat:   トークン化済みの全体（tokenized）を区切りなしで走査する（over-deny 側）。引用符の中の
+#           コマンド（`bash -c 'gh pr review 5 -a'`・eval）、$( ` <( >( << で区切りが隠れる形、
+#           引用符を追えない形で使う。git の判定のような再帰的な再解析はせず、この flat が bash -c / eval の
+#           中の gh を担う（引用符を除いた全体を見るので二重の解析にならない）。
+# gh / git の語では状態を戻さない（`gh pr review 5 -b "see $(git rev-parse HEAD)" -a`・
+# `gh pr review fix/git -a` のように引数に現れても -a を見失わないため。次のコマンドの境界は normal の区切りだけが担う）。
+# 戻り値: 0 = 承認あり / 1 = なし / 2 = 引用符を追えず信用できない（normal のみ）。REV_N に review への突入回数を残す。
+REV_N=0
+review_scan() {
+  local mode="$1" tok st=0 skip=0 body m ch rt
+  REV_N=0
+  if [ "$mode" = normal ]; then
+    rt=$(shell_tokens strip) || return 2
+  else
+    rt=$(printf '%s' "$tokenized" | tr ' ' '\n') || return 2
+  fi
   while IFS= read -r tok; do
-    if [ "$tok" = "$SEP_MARK" ]; then st=0; skip=0; continue; fi
-    # コマンド名はフルパス・相対パスでも basename で比較する（normalize_gh_tokens と同じ基準）。
-    case "$tok" in
-      */gh) tok=gh ;;
-      */git) tok=git ;;
-    esac
+    if [ "$mode" = normal ] && [ "$tok" = "$SEP_MARK" ]; then st=0; skip=0; continue; fi
     if [ "$st" -lt 3 ]; then
+      # コマンド名はフルパス・相対パス・大文字小文字違いでも gh として比較する（normalize_gh_tokens と同じ基準）。
+      case "$tok" in
+        */[Gg][Hh]|[Gg][Hh]) tok=gh ;;
+      esac
       case "$tok" in
         -*) continue ;;
       esac
       case "$st:$tok" in
         0:gh) st=1 ;;
         1:pr) st=2 ;;
-        2:review) st=3 ;;
+        2:review) st=3; REV_N=$((REV_N + 1)) ;;
       esac
       continue
     fi
-    # 値トークン（-b gh の gh 等）をコマンド名と読まないよう、skip を先に消化する。
+    # 値トークン（-b gh の gh 等）を先に消化する。
     if [ "$skip" -eq 1 ]; then skip=0; continue; fi
-    case "$tok" in
-      gh) st=1; skip=0; continue ;;
-      git) st=0; skip=0; continue ;;
-    esac
     case "$tok" in
       --body|--body-file) skip=1 ;;
       --*) : ;;
@@ -704,6 +920,39 @@ review_short_approve() {
   done <<EOF_RV
 $rt
 EOF_RV
+  return 1
+}
+
+# gh → pr → review の語順が（フラグ除去後に）何回現れるか。
+count_gh_pr_review() {
+  local tok idx=0 n=0
+  for tok in $1; do
+    case "$idx:$tok" in
+      0:gh) idx=1 ;;
+      1:pr) idx=2 ;;
+      2:review) n=$((n + 1)); idx=0 ;;
+    esac
+  done
+  printf '%s' "$n"
+}
+
+review_short_approve() {
+  local rc=0 n_flat
+  case "$cmd" in
+    *'$('*|*'`'*|*'<('*|*'>('*|*'<<'*)
+      review_scan flat && return 0
+      return 1
+      ;;
+  esac
+  review_scan normal || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq 1 ]; then
+    # 引用符の中のコマンド（bash -c '...'・eval '...'）は normal では 1 トークンになり review 状態に入らない。
+    # 全体に gh pr review が normal の見た回数より多く現れるときは、flat で見直す。
+    n_flat=$(count_gh_pr_review "$all_nf")
+    [ "$n_flat" -gt "$REV_N" ] || return 1
+  fi
+  review_scan flat && return 0
   return 1
 }
 if review_short_approve; then

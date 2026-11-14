@@ -45,6 +45,7 @@ const MESSAGES = {
   "merge-guard": "agent-guard: サブエージェントからのマージ・承認・gh の alias / extension 実行は禁止されている",
   "repo-settings": "agent-guard: サブエージェントからのリポジトリ設定・ruleset の変更は禁止されている",
   obfuscated: "agent-guard: 難読化されたコマンド（$'...'・$IFS 展開）は許可されない",
+  "nesting-limit": "agent-guard: コマンドの入れ子が深い、または $( の閉じを解析できないため拒否した",
   "bad-input": "agent-guard: ガードがコマンドを解釈できなかったため拒否した",
   "no-jq": "agent-guard: jq が見つからないため拒否した（jq を導入すること）",
   "internal-error": "agent-guard: ガードが内部エラーで終了したため拒否した",
