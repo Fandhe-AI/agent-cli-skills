@@ -93,6 +93,31 @@ describe('opencode.jsonc', () => {
     assert.ok(cfg.policies.some((p) => p.resource.includes('--no-verify')))
   })
 
+  // 公式 docs の照合規則: `*` は 0 文字以上・`?` は 1 文字・末尾の ` *` は引数なしの形にも一致する。
+  const globToRegExp = (pat) => {
+    const trailing = pat.endsWith(' *')
+    const body = trailing ? pat.slice(0, -2) : pat
+    const re = body.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+    return new RegExp(`^${re}${trailing ? '( .*)?' : ''}$`)
+  }
+  const blockedBy = (cmds, rules, prefix) => cmds.filter((c) => rules.some((r) => globToRegExp(r.resource.slice(prefix.length)).test(c)))
+
+  it('--force-with-lease 系は permissions・policies のどの規則にも一致しない', () => {
+    const allowed = ['git push --force-with-lease', 'git push --force-with-lease=main:abc origin main', 'git push --force-if-includes']
+    assert.deepEqual(blockedBy(allowed, cfg.permissions, ''), [])
+    assert.deepEqual(blockedBy(allowed, cfg.policies, 'shell:'), [])
+  })
+
+  it('引数なし・引数ありの --force / -f / --no-verify は policies に一致する', () => {
+    const denied = ['git push --force', 'git push --force origin main', 'git push -f', 'git push -f origin main', 'git commit --no-verify', 'git commit --no-verify -m x', 'git push --no-verify']
+    assert.deepEqual(blockedBy(denied, cfg.policies, 'shell:'), denied)
+    assert.deepEqual(blockedBy(denied, cfg.permissions, ''), denied)
+  })
+
+  it('policies の resource に接頭辞一致の `*`（空白なしの末尾 *）が無い', () => {
+    for (const p of cfg.policies) assert.ok(!/[^ ]\*$/.test(p.resource), p.resource)
+  })
+
   it('ask / allow の規則を含まない（ガードは deny のみ）', () => {
     for (const r of [...cfg.permissions, ...cfg.policies]) assert.equal(r.effect, 'deny')
   })

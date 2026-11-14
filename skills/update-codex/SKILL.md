@@ -39,6 +39,7 @@ update-codex [対象リポジトリのパス]
 ## 前提条件
 
 - `git` が使え、対象が git リポジトリであること（`git -C <target> rev-parse --show-toplevel` で確認）
+- `bash` が使えること（`agents-md-block.sh`・`codex-hooks-merge.sh` の実行と hook の起動に使う。無い環境では hook が動かないため、導入を先に案内する）
 - `jq` が使えること（`codex-hooks-merge.sh` と hook が使う。無い環境では hook が fail-closed で全コマンドを拒否するため、導入を先に案内する）
 - `gh` が使え、認証済みであること（`gh auth status`。ワークフロースキルが使う）
 - `npx` が使えること（スキル追加に使う。`skills` CLI は固定版 `SKILLS_CLI_VERSION` で実行する。値と更新手順は付録を参照）
@@ -49,14 +50,14 @@ update-codex [対象リポジトリのパス]
 ### Step 1: 前提を確認する
 
 ```bash
-for c in git jq gh npx codex; do
+for c in git bash jq gh npx codex; do
   command -v "$c" >/dev/null 2>&1 && echo "ok: $c" || echo "missing: $c"
 done
 gh auth status
 git -C "<target>" rev-parse --show-toplevel
 ```
 
-`git`・`jq`・`gh`・`npx` のどれかが無い、または `gh` が未認証なら、導入または `gh auth login` を案内して中断する。
+`git`・`bash`・`jq`・`gh`・`npx` のどれかが無い、または `gh` が未認証なら、導入または `gh auth login` を案内して中断する。
 `codex` だけが無い場合は続行し、報告に「rules の検証は未実施」と書く。
 以降の `<target>` には `git rev-parse --show-toplevel` が返したルートを使う。
 
@@ -114,7 +115,8 @@ echo "exit=$?"
 | `added` | 自エントリが無い（または一部だけ無い） | 追加候補 |
 | `updated` | 自エントリの内容が違う | 更新候補 |
 | `created` | hooks.json が無い | 新規作成候補 |
-| `error-*` | 不正な JSON・型の不整合・自エントリの重複・symlink 等 | ファイルを変えずに原因を報告して中断 |
+| `error-matcher` | 自エントリ `codex-pretooluse.sh` が matcher `^Bash$` 以外のグループにある（exit 4） | ファイルを変えずに停止。利用者の matcher は書き換えない。該当グループの matcher を確認して手で直すか、自エントリを `^Bash$` のグループへ移すよう案内して中断 |
+| `error-*`（上記以外） | 不正な JSON・型の不整合・自エントリの重複・symlink 等 | ファイルを変えずに原因を報告して中断 |
 
 自エントリは、`command` が `.codex/hooks/codex-pretooluse.sh` または `.codex/hooks/codex-session-start.sh` を
 含むハンドラ。それ以外は利用者のエントリとして一切変えない。更新前に、利用者のエントリ数を控える
@@ -266,6 +268,7 @@ echo "exit=$?"
 | `error-usage` | 1 | 引数の誤り。コマンドを見直す |
 | `error-no-jq` / `error-symlink` / `error-io` / `error-template` / `error-target` | 2 | 入出力・前提の問題。原因を報告して中断 |
 | `error-json` / `error-type` / `error-duplicate` | 4 | hooks.json の内容の不整合。ファイルは変わっていない。手で直すよう案内して中断 |
+| `error-matcher` | 4 | 自エントリ `codex-pretooluse.sh` が matcher `^Bash$` 以外のグループにあるため、書かずに停止した（利用者の matcher は書き換えない）。該当グループの matcher を確認して手で直すか、自エントリを `^Bash$` のグループへ移すよう案内して中断 |
 
 `error-*` が返ったら、以降の項目へ進まず、原因と対処を報告して**中止**する。
 
@@ -335,16 +338,26 @@ hooks.json は既存ファイルのコピーに対してマージを実行し、
 STAGE="<target>/_/codex-setup"
 ASSETS="<skill-dir>/assets"
 
+# 既に存在する退避先は以前の作業や利用者のファイルを含み得るため使わない（ユーザーに確認して中断する）
+[ ! -e "${STAGE}" ] || { echo "退避先が既に存在する: ${STAGE}"; exit 1; }
 mkdir -p "${STAGE}/.codex/hooks" "${STAGE}/.codex/rules" "${STAGE}/.codex/agents"
+MANIFEST="${STAGE}/.created-paths"   # 作ったファイルの記録（後始末で使う）
+: > "${MANIFEST}"
 
 # 承認されたファイル名だけを列挙して退避先へ置く（Step 4-1 と同じ配列。見送ったものは外す）
 approved_hooks=(agent-guard.sh codex-pretooluse.sh codex-session-start.sh)
 approved_rules=(agent-guard.rules)
 approved_agents=(researcher implementer reviewer)   # 「なし」の標準 agent だけ
 
-for f in "${approved_hooks[@]}"; do cp "${ASSETS}/hooks/${f}" "${STAGE}/.codex/hooks/${f}"; done
-for f in "${approved_rules[@]}"; do cp "${ASSETS}/codex/rules/${f}" "${STAGE}/.codex/rules/${f}"; done
-for a in "${approved_agents[@]}"; do cp "${ASSETS}/codex/agents/${a}.toml" "${STAGE}/.codex/agents/${a}.toml"; done
+for f in "${approved_hooks[@]}"; do
+  cp "${ASSETS}/hooks/${f}" "${STAGE}/.codex/hooks/${f}" && printf '%s\n' "${STAGE}/.codex/hooks/${f}" >> "${MANIFEST}"
+done
+for f in "${approved_rules[@]}"; do
+  cp "${ASSETS}/codex/rules/${f}" "${STAGE}/.codex/rules/${f}" && printf '%s\n' "${STAGE}/.codex/rules/${f}" >> "${MANIFEST}"
+done
+for a in "${approved_agents[@]}"; do
+  cp "${ASSETS}/codex/agents/${a}.toml" "${STAGE}/.codex/agents/${a}.toml" && printf '%s\n' "${STAGE}/.codex/agents/${a}.toml" >> "${MANIFEST}"
+done
 
 # hooks.json: 既存のコピーに自エントリだけをマージする（既存が無ければテンプレートから作られる）
 if [ -f "<target>/.codex/hooks.json" ]; then
@@ -352,7 +365,10 @@ if [ -f "<target>/.codex/hooks.json" ]; then
 fi
 bash "${ASSETS}/scripts/codex-hooks-merge.sh" \
   --target "${STAGE}/.codex/hooks.json" --template "${ASSETS}/codex/hooks.json"
+printf '%s\n' "${STAGE}/.codex/hooks.json" >> "${MANIFEST}"
 ```
+
+AGENTS.md を退避先へ書いた場合は、そのパス（`${STAGE}/AGENTS.md`）も `${MANIFEST}` に追記する。
 
 `AGENTS.md` はリポジトリ直下で書き込める場合が多いため、Step 4-3 のとおり直接書く。書き込めない場合は、
 既存の AGENTS.md を `${STAGE}/AGENTS.md` へコピーしてから `--target "${STAGE}/AGENTS.md"` で書き、置き換えを案内する。
@@ -395,14 +411,21 @@ done
 空になったディレクトリだけ `rmdir` で消す。`rm -rf` は使わない。`_/` 配下に他の内容があれば残す。
 
 ```bash
-rm -f "<target>/_/codex-setup/AGENTS.md" "<target>/_/codex-setup/.codex/hooks.json" \
-      "<target>/_/codex-setup/.codex/rules/agent-guard.rules"
-rm -f "<target>/_/codex-setup/.codex/hooks/"*.sh "<target>/_/codex-setup/.codex/agents/"*.toml
-rmdir "<target>/_/codex-setup/.codex/hooks" "<target>/_/codex-setup/.codex/rules" \
-      "<target>/_/codex-setup/.codex/agents" "<target>/_/codex-setup/.codex" 2>/dev/null
-rmdir "<target>/_/codex-setup" 2>/dev/null
+STAGE="<target>/_/codex-setup"
+MANIFEST="${STAGE}/.created-paths"
+# 記録したパスだけを 1 件ずつ削除する（ワイルドカードで一括削除しない）
+if [ -f "${MANIFEST}" ]; then
+  while IFS= read -r p; do
+    case "${p}" in "${STAGE}/"*) rm -f -- "${p}" ;; esac   # 退避先の外は消さない
+  done < "${MANIFEST}"
+  rm -f -- "${MANIFEST}"
+fi
+rmdir "${STAGE}/.codex/hooks" "${STAGE}/.codex/rules" "${STAGE}/.codex/agents" "${STAGE}/.codex" 2>/dev/null
+rmdir "${STAGE}" 2>/dev/null
 rmdir "<target>/_" 2>/dev/null
 ```
+
+記録に無いファイルが残ったディレクトリは `rmdir` が失敗して残る。残ったファイルは利用者のものとして触れず、報告に書く。
 
 `_/codex-setup/` が `.gitignore` に入っているかを確認し、入っていなければコミット対象に含めないよう案内する。
 
@@ -485,8 +508,19 @@ bash "<skill-dir>/assets/scripts/codex-hooks-merge.sh" \
 （`jq . skills-lock.json >/dev/null && echo OK`）。期待と異なる結果が 1 つでもあれば、原因を特定して直すまで
 完了と報告しない。見送った項目に関する確認は「見送り」と書き、失敗として扱わない。
 
-アダプタの入力検証は hook が実際に呼ばれることの証明ではない。trust が済んだ Codex セッションで、
-`git commit --no-verify` と `git push --force` が拒否され、`git commit -m x` が通ることをユーザーに試してもらう手順も案内する。
+アダプタの入力検証は hook が実際に呼ばれることの証明ではない。実セッションでの確認を案内する場合は、
+**対象リポジトリでは危険なコマンドを実行させない**。実リモートから切り離した使い捨てリポジトリだけで行う。
+
+```bash
+SANDBOX="$(mktemp -d)"
+git init --bare "${SANDBOX}/origin.git"
+git init "${SANDBOX}/work" && cd "${SANDBOX}/work"
+git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
+# 対象の .codex/ をここへコピーし、trust 済みの Codex をこのディレクトリで起動して
+# `git commit --no-verify` と `git push --force` が拒否され、`git commit -m x` が通ることを確かめる
+```
+
+確認後は `${SANDBOX}` を利用者が自分で削除する。`rm -rf` は案内しない。使い捨てを用意できないときは、実セッションの確認は行わず「未検証」と報告する。
 
 ### Step 8: 結果を報告する
 

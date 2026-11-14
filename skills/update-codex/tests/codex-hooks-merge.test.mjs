@@ -119,12 +119,12 @@ for (const bash of BASHES) describe(`[${bash}]`, { concurrency: true }, () => {
     try {
       const old = { type: 'command', command: 'bash "$(git rev-parse --show-toplevel)/.codex/hooks/codex-pretooluse.sh"', timeout: 1 }
       const mine = { type: 'command', command: 'echo mine' }
-      t.write({ hooks: { PreToolUse: [userPre, { matcher: 'Bash', hooks: [mine, old] }], SessionStart: [selfStart()] } })
+      t.write({ hooks: { PreToolUse: [userPre, { matcher: '^Bash$', hooks: [mine, old] }], SessionStart: [selfStart()] } })
       const r = await run(bash, t.target)
       assert.equal(r.status, 0)
       assert.equal(r.result, 'updated')
       const j = t.read()
-      assert.deepEqual(j.hooks.PreToolUse, [userPre, { matcher: 'Bash', hooks: [mine, selfPre().hooks[0]] }])
+      assert.deepEqual(j.hooks.PreToolUse, [userPre, { matcher: '^Bash$', hooks: [mine, selfPre().hooks[0]] }])
       assert.deepEqual(j.hooks.SessionStart, [selfStart()])
     } finally {
       t.cleanup()
@@ -160,6 +160,40 @@ for (const bash of BASHES) describe(`[${bash}]`, { concurrency: true }, () => {
       assert.equal(r.result, 'error-duplicate')
       assert.equal(sha(t.target), h)
       assert.deepEqual(readdirSync(t.dir), ['hooks.json'])
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  it(`${tag} 自エントリが ^Edit$ のグループにあれば error-matcher（exit 4）でファイル不変・--check でも同じ`, async () => {
+    const t = setup()
+    try {
+      const wrong = { ...selfPre(), matcher: '^Edit$' }
+      // 内容が同一でも（unchanged になりうる形）、古い内容でも（updated になりうる形）止める。
+      const stale = { matcher: '^Edit$', hooks: [{ ...selfPre().hooks[0], timeout: 1 }] }
+      for (const doc of [{ hooks: { PreToolUse: [wrong] } }, { hooks: { PreToolUse: [userPre, stale] } }]) {
+        t.write(doc)
+        const h = sha(t.target)
+        for (const extra of [[], ['--check']]) {
+          const r = await run(bash, t.target, extra)
+          assert.equal(r.status, 4)
+          assert.equal(r.result, 'error-matcher')
+          assert.equal(sha(t.target), h)
+        }
+        assert.deepEqual(readdirSync(t.dir), ['hooks.json'])
+      }
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  it(`${tag} SessionStart の自エントリは matcher が違っても error-matcher にしない`, async () => {
+    const t = setup()
+    try {
+      t.write({ hooks: { SessionStart: [{ ...selfStart(), matcher: 'startup' }], PreToolUse: [selfPre()] } })
+      const r = await run(bash, t.target)
+      assert.equal(r.status, 0)
+      assert.equal(r.result, 'unchanged')
     } finally {
       t.cleanup()
     }

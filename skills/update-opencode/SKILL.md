@@ -40,7 +40,7 @@ update-opencode [対象リポジトリのパス]
 ## 前提条件
 
 - `git` が使え、対象が git リポジトリであること
-- `bash`・`jq`・`node` が使えること（ガードが `jq` を、設定のマージが `node` を使う。`jq` が無いとガードが fail-closed で全 shell コマンドを拒否するため、導入を先に案内する）
+- `bash`・`jq`・`node` が使えること（plugin が `bash` を spawn してガードを実行する。ガードが `jq` を、設定のマージが `node` を使う。`jq` が無いとガードが fail-closed で全 shell コマンドを拒否するため、導入を先に案内する）
 - `gh` が使え、認証済みであること（`gh auth status`。ワークフロースキルが使う）
 - `npx` が使えること（スキル補完に使う。`skills` CLI は固定版 `SKILLS_CLI_VERSION` で実行する。値と更新手順は付録を参照）
 - `opencode` が使えること（検証で `opencode debug config` / `opencode debug agents` を使う。無い場合も追補は進められるが、その検証は「未検証」と報告する）
@@ -137,7 +137,7 @@ done
 | (a) | `unchanged` | 最新 |
 | (a) | `error-*` | マーカーが片方だけ・2 組以上・フェンス閉じ忘れ・シンボリックリンク等。ファイルは変わっていない。原因を報告して、この項目は対象外にする |
 | (b) | `created`（0） | 設定ファイルが無く、template をそのまま作る |
-| (b) | `merged`（0） | 不足する規則を各配列の末尾へ追加する |
+| (b) | `merged`（0） | 不足する規則を各配列の末尾へ追加する。自分の規則が、自分の規則以外の全要素より後ろにあるときだけ既存とみなす。利用者の規則が自分の規則より後ろにあれば、自分の規則を末尾へ再追加する（最後に一致した規則が勝つため、後ろの allow に負けないようにする） |
 | (b) | `unchanged`（0） | 追加すべき規則が無い |
 | (b) | `needs-manual`（3） | コメントまたは末尾カンマがあり、不足規則がある。自動では書かない（Step 5-2 参照） |
 | (b) | `error-*`（1）/ `error-usage`（2） | JSON が読めない・配列でない・symlink 等。中止して報告する |
@@ -162,7 +162,8 @@ done
 
 - **設定の追加位置**: 追加する deny 規則は `permissions` / `policies` の**各配列の末尾**に置く。
   OpenCode は**最後に一致した規則が勝つ**ため、末尾に置いた deny は、利用者が先に書いた allow より**優先される**。
-  利用者の規則の件数と順序は変えない。この優先関係を承認前に利用者へ伝え、了承を得る
+  利用者の規則の件数と順序は変えない。自分の規則が既にあっても、その後ろに利用者の規則があれば末尾へ再追加する（語彙は `merged`）。
+  この優先関係を承認前に利用者へ伝え、了承を得る
 - 設定の追加は `opencode-config-merge.mjs` だけで行い、手で編集しない
 - ガードは best-effort の攻撃面削減で、承認境界ではない（注意事項参照）
 - 9 スキルは `.claude/skills` には出ない（Claude Code 側は `update-claude` の担当）
@@ -358,7 +359,19 @@ opencode debug config --standalone \
 承認されなかった項目は検証の対象外として「未実施（承認なし）」と書く。`opencode` が無く 1) 2) 7) を実行できなかった場合は「未検証」と書く。
 
 3)〜5) は plugin を介さずガードを直接検査するもので、plugin が実セッションで呼ばれることの証明ではない。
-OpenCode のセッションで `git push --force` が拒否されることを、ユーザーに試してもらう手順も案内する。
+実セッションでの確認を案内する場合は、**対象リポジトリでは危険なコマンドを実行させない**。
+実リモートから切り離した使い捨てリポジトリだけで行う。
+
+```bash
+SANDBOX="$(mktemp -d)"
+git init --bare "${SANDBOX}/origin.git"
+git init "${SANDBOX}/work" && cd "${SANDBOX}/work"
+git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
+# 対象の .opencode/ と opencode.jsonc をここへコピーし、OpenCode をこのディレクトリで起動して
+# `git push --force` が拒否されることを確かめる
+```
+
+確認後は `${SANDBOX}` を利用者が自分で削除する。`rm -rf` は案内しない。使い捨てを用意できないときは、実セッションの確認は行わず「未検証」と報告する。
 
 ### Step 7: 結果を報告する
 

@@ -104,6 +104,13 @@ const GIT_DENY = [
   // 実機 fixture（Codex c1 PreToolUse・OpenCode permission.evaluate の resources）
   ['git push --force origin main', 'force-push'],
   ['git push origin main --force', 'force-push'],
+  // 値を取るオプションの読み飛ばしの対照: 値の後ろのフラグは判定する
+  ['git commit -am msg --no-verify', 'no-verify'],
+  ['git commit -F msg.txt -n', 'no-verify'],
+  ['git commit --message=x --no-verify', 'no-verify'],
+  ['git commit --author=a -m x -n', 'no-verify'],
+  ['git push -o x --force', 'force-push'],
+  ['git push --push-option=x -f', 'force-push'],
 ]
 
 const GIT_ALLOW = [
@@ -121,6 +128,19 @@ const GIT_ALLOW = [
   "git commit -F - <<'EOF'\nmessage git commit -n and git push --force\nEOF",
   'git commit -F - <<-EOF\n\tgit push -f\n\tEOF',
   'git commit -m "$(cat <<\'EOF\'\nfeat: x --no-verify を禁止\ngit push --force\nEOF\n)"',
+  // 値を取るオプションの値（フラグに見えても値）と `--` 以降
+  "git commit -m '--no-verify'",
+  'git commit -m "-n"',
+  'git commit --message=--no-verify',
+  'git commit --message --no-verify',
+  'git commit -F --no-verify.txt',
+  'git commit -am -n',
+  'git commit -m x -C -n',
+  'git commit --author --no-verify -m x',
+  'git push -o --force origin main',
+  'git push --push-option=--force origin main',
+  'git push origin -- --force',
+  'git commit -m x -- --no-verify',
   // -m の値に n が含まれる
   'git commit -mn',
   'git commit -mrefactor',

@@ -37,6 +37,7 @@ init-codex [対象リポジトリのパス]
 ## 前提条件
 
 - `git` が使え、対象が git リポジトリであること（`git -C <target> rev-parse --show-toplevel` で確認）
+- `bash` が使えること（`agents-md-block.sh` の実行と hook の起動に使う。無い環境では hook が動かないため、導入を先に案内する）
 - `jq` が使えること（hook が判定に使う。無い環境では hook が fail-closed で全コマンドを拒否するため、導入を先に案内する）
 - `gh` が使え、認証済みであること（`gh auth status`。ワークフロースキルが使う）
 - `npx` が使えること（スキル導入に使う。`skills` CLI は固定版 `SKILLS_CLI_VERSION` で実行する。値と更新手順は付録を参照）
@@ -47,14 +48,14 @@ init-codex [対象リポジトリのパス]
 ### Step 1: 前提を確認する
 
 ```bash
-for c in git jq gh npx codex; do
+for c in git bash jq gh npx codex; do
   command -v "$c" >/dev/null 2>&1 && echo "ok: $c" || echo "missing: $c"
 done
 gh auth status
 git -C "<target>" rev-parse --show-toplevel
 ```
 
-`git`・`jq`・`gh`・`npx` のどれかが無い、または `gh` が未認証なら、導入または `gh auth login` を案内して中断する。
+`git`・`bash`・`jq`・`gh`・`npx` のどれかが無い、または `gh` が未認証なら、導入または `gh auth login` を案内して中断する。
 `codex` だけが無い場合は続行し、報告に「rules の検証は未実施」と書く。
 以降の `<target>` には `git rev-parse --show-toplevel` が返したルートを使う。
 
@@ -210,7 +211,8 @@ Step 4-1 と 4-4 の書き込みは拒否され得る。OpenCode・Claude Code�
 STAGE="<target>/_/codex-setup"
 ASSETS="<skill-dir>/assets"
 
-# 作ったパスを記録する（後で自分のものだけを消すため）
+# 既に存在する退避先は以前の作業や利用者のファイルを含み得るため使わない（ユーザーに確認して中断する）
+[ ! -e "${STAGE}" ] || { echo "退避先が既に存在する: ${STAGE}"; exit 1; }
 mkdir -p "${STAGE}/.codex/hooks" "${STAGE}/.codex/rules" "${STAGE}/.codex/agents"
 cp "${ASSETS}/hooks/agent-guard.sh" "${ASSETS}/hooks/codex-pretooluse.sh" \
    "${ASSETS}/hooks/codex-session-start.sh" "${STAGE}/.codex/hooks/"
@@ -246,8 +248,9 @@ done
 空になったディレクトリだけ `rmdir` で消す。`rm -rf` は使わない。`_/` 配下に他の内容があれば残す。
 
 ```bash
-# 例: 自分が作ったファイルを 1 つずつ消し、深い方から rmdir する（空でなければ rmdir は失敗して残る）
-rm -f "<target>/_/codex-setup/AGENTS.md"
+# 自分が作ったパスだけを 1 つずつ消し、深い方から rmdir する（空でなければ rmdir は失敗して残る）
+# AGENTS.md は、退避先へ書いた場合だけ存在する
+rm -f -- "<target>/_/codex-setup/AGENTS.md"
 rmdir "<target>/_/codex-setup/.codex/hooks" "<target>/_/codex-setup/.codex/rules" \
       "<target>/_/codex-setup/.codex/agents" "<target>/_/codex-setup/.codex" 2>/dev/null
 rmdir "<target>/_/codex-setup" 2>/dev/null
@@ -325,8 +328,19 @@ grep -c 'agent-cli-skills:agents-md:start' AGENTS.md
 （`jq . skills-lock.json >/dev/null && echo OK`）。期待と異なる結果が 1 つでもあれば、
 原因（`jq` の有無・パス・配置漏れ）を特定して直すまで完了と報告しない。
 
-アダプタの入力検証は hook が実際に呼ばれることの証明ではない。trust が済んだ Codex セッションで、
-`git commit --no-verify` と `git push --force` が拒否され、`git commit -m x` が通ることをユーザーに試してもらう手順も案内する。
+アダプタの入力検証は hook が実際に呼ばれることの証明ではない。実セッションでの確認を案内する場合は、
+**対象リポジトリでは危険なコマンドを実行させない**。実リモートから切り離した使い捨てリポジトリだけで行う。
+
+```bash
+SANDBOX="$(mktemp -d)"
+git init --bare "${SANDBOX}/origin.git"
+git init "${SANDBOX}/work" && cd "${SANDBOX}/work"
+git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
+# 対象の .codex/ をここへコピーし、trust 済みの Codex をこのディレクトリで起動して
+# `git commit --no-verify` と `git push --force` が拒否され、`git commit -m x` が通ることを確かめる
+```
+
+確認後は `${SANDBOX}` を利用者が自分で削除する。`rm -rf` は案内しない。使い捨てを用意できないときは、実セッションの確認は行わず「未検証」と報告する。
 
 ### Step 8: 結果を報告する
 

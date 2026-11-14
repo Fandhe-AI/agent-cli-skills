@@ -135,6 +135,19 @@ function short_has(a, target, stop,   m, ch) {
   }
   return 0
 }
+# a の次のトークンがオプションの値か。longs は値を取る完全一致のオプション列（空白区切り）、
+# stops は値を取る短縮オプション文字。束ね書きは最初の stops 文字が末尾のときだけ次トークンが値
+# （-am msg の m は末尾 = 次が値・-mfoo は連結形 = 次は値ではない）。
+function opt_val_next(a, longs, stops,   m, ch) {
+  if (index(" " longs " ", " " a " ") > 0) return 1
+  if (a ~ /^-[^-]/) {
+    for (m = 2; m <= length(a); m++) {
+      ch = substr(a, m, 1)
+      if (index(stops, ch) > 0) return (m == length(a))
+    }
+  }
+  return 0
+}
 # git の設定キー（-c の値・git config のキー）がフック・alias の差し替えか。
 function conf_bad(kv,   lk) {
   lk = tolower(kv)
@@ -175,6 +188,8 @@ function git_args(j, hk,   t, scmd, k, a, hooked) {
   if (hk && hooked) setv("no-verify")
   for (k = j + 1; k <= ntok; k++) {
     a = tok[k]
+    # `--` 以降は引数（パス・ref 名）でありフラグ判定しない。値を取るオプションの次トークンは値なので、ループ末尾で読み飛ばす。
+    if (a == "--") break
     if (hooked && length(a) >= 6 && length(a) <= 11 && substr(a, 1, 6) == "--no-v" && index("--no-verify", a) == 1) setv("no-verify")
     if (scmd == "commit" && a ~ /^-[^-]/ && short_has(a, "n", "mFCctuS")) setv("no-verify")
     if (scmd == "push") {
@@ -183,6 +198,9 @@ function git_args(j, hk,   t, scmd, k, a, hooked) {
       else if (a ~ /^-[^-]/) { if (short_has(a, "f", "o")) setv("force-push") }
       else if (length(a) >= 2 && substr(a, 1, 1) == "+") setv("force-push")
     }
+    # 束ね書きの -nm x の n は上で判定済み。ここで次トークン（値）を読み飛ばす。
+    if (scmd == "commit" && opt_val_next(a, "-m -F -C -c -t --message --file --author --date --template --reuse-message --reedit-message --fixup --squash --trailer --cleanup --pathspec-from-file", "mFCct")) k++
+    else if (scmd == "push" && opt_val_next(a, "-o --push-option --receive-pack --exec --repo", "o")) k++
   }
 }
 # 算術式 ((...)) / $((...)) の終端（`))` の次の位置）。コマンド置換・引用符・バッククォートを含む、

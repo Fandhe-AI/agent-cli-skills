@@ -8,11 +8,14 @@
 // だけを担う。それ以外のキー・利用者が足した規則・配列内の順序は一切変えない。
 //
 // 識別規則: template の `permissions` / `policies` の各要素（オブジェクト）を「自分の規則」とし、
-// target の同じ配列に「キー順に依らない深い等価」な要素があれば既存とみなす。既存の規則は
-// 位置を動かさず、無ければ配列の末尾へ template の順で追加する。
+// 「キー順に依らない深い等価」で照合する。自分の規則が既存とみなされるのは、target の同じ配列で
+// 「自分の規則以外の全要素より後ろ」に等価な要素があるときだけ（= 最後の利用者の規則より後ろ）。
+// 利用者の規則（包括的な allow 等）が自分の deny の後ろにあれば、その deny は効かないため不足
+// 扱いにして、配列の末尾へ template の順で再追加する（同じ規則が前にも残る重複は許容。末尾の
+// 1 件が効く）。既存の要素は位置を動かさず削除もしない。
 //
 // 末尾に置く理由: OpenCode の permissions / policies は「最後に一致した規則が勝つ」。利用者が
-// 後から足した allow が、先頭に置いた自分の deny に勝ってしまわないよう、deny は必ず末尾にする。
+// 後から足した allow が、自分の deny に勝ってしまわないよう、deny は必ず末尾にする。
 //
 // コメント付き・末尾カンマ付きのファイルを自動編集しない理由: JSON.parse で読んで書き戻すと
 // コメントが消える。書き戻しをやめて、追加すべき規則を JSON で stdout へ出し、利用者に手で
@@ -125,7 +128,11 @@ export function missingRules(targetObj, templateObj) {
     if (!Array.isArray(own)) return { error: `template の ${key} が配列でない` }
     const current = targetObj[key]
     if (current !== undefined && !Array.isArray(current)) return { error: `target の ${key} が配列でない` }
-    missing[key] = own.filter((rule) => !(current ?? []).some((r) => deepEqual(r, rule)))
+    const cur = current ?? []
+    // 自分の規則以外の最後の要素の位置。これより後ろにある自分の規則だけが、利用者の規則に負けない。
+    let lastForeign = -1
+    cur.forEach((r, i) => { if (!own.some((rule) => deepEqual(r, rule))) lastForeign = i })
+    missing[key] = own.filter((rule) => !cur.some((r, i) => i > lastForeign && deepEqual(r, rule)))
   }
   return { missing }
 }

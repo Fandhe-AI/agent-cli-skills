@@ -39,7 +39,7 @@ init-opencode [対象リポジトリのパス]
 ## 前提条件
 
 - `git` が使え、対象が git リポジトリであること（`git -C <target> rev-parse --show-toplevel` で確認）
-- `bash` と `jq` が使えること（ガードが判定に使う。`jq` が無い環境ではガードが fail-closed で全 shell コマンドを拒否するため、導入を先に案内する）
+- `bash` と `jq` が使えること（plugin が `bash` を spawn してガードを実行する。ガードが判定に使う。`jq` が無い環境ではガードが fail-closed で全 shell コマンドを拒否するため、導入を先に案内する）
 - `gh` が使え、認証済みであること（`gh auth status`。ワークフロースキルが使う）
 - `npx` が使えること（スキル導入に使う。`skills` CLI は固定版 `SKILLS_CLI_VERSION` で実行する。値と更新手順は付録を参照）
 - `opencode` が使えること（検証で `opencode debug config` / `opencode debug agents` を使う。無い場合も生成は進められるが、その検証は「未検証」と報告する）
@@ -270,8 +270,19 @@ grep -c 'agent-cli-skills:agents-md:start' AGENTS.md
 `opencode` が無く 1) 2) を実行できなかった場合は「未検証」と書く。
 
 3)〜5) は plugin を介さずガードを直接検査するもので、plugin が実セッションで呼ばれることの証明ではない。
-OpenCode のセッション（`opencode run --auto` でもよい）で `git push --force` が拒否されることをユーザーに試してもらう手順も案内する。
-`--auto` で起動しても deny は効く（ask を使わないため）。
+実セッションでの確認を案内する場合は、**対象リポジトリでは危険なコマンドを実行させない**。
+実リモートから切り離した使い捨てリポジトリだけで行う。
+
+```bash
+SANDBOX="$(mktemp -d)"
+git init --bare "${SANDBOX}/origin.git"
+git init "${SANDBOX}/work" && cd "${SANDBOX}/work"
+git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare のみ
+# 対象の .opencode/ と opencode.jsonc をここへコピーし、OpenCode（`opencode run --auto` でもよい）を
+# このディレクトリで起動して `git push --force` が拒否されることを確かめる（--auto でも deny は効く。ask を使わないため）
+```
+
+確認後は `${SANDBOX}` を利用者が自分で削除する。`rm -rf` は案内しない。使い捨てを用意できないときは、実セッションの確認は行わず「未検証」と報告する。
 
 ### Step 6: 結果を報告する
 

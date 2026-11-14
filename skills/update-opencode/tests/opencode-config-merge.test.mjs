@@ -76,7 +76,7 @@ describe('opencode-config-merge', { concurrency: true }, () => {
     assert.equal(statSync(t).mtimeMs, old.getTime()); assert.equal(readFileSync(t, 'utf8'), before)
   })
 
-  it('既存の自分の規則は位置を動かさず、キー順違いでも同一とみなし、不足分だけ追加する', async () => {
+  it('利用者の規則より後ろにある自分の規則は既存、前にあるもの（キー順違いを含む）は不足として末尾へ再追加し、既存要素は動かさない', async () => {
     const d = tmp()
     const reordered = { effect: 'deny', resource: own.permissions[1].resource, action: 'shell' }
     const t = write(d, { permissions: [reordered, userAllow, own.permissions[0]], policies: own.policies })
@@ -84,8 +84,42 @@ describe('opencode-config-merge', { concurrency: true }, () => {
     assert.equal(r.word, 'merged')
     const o = read(t)
     assert.deepEqual(o.permissions.slice(0, 3), [reordered, userAllow, own.permissions[0]])
-    assert.deepEqual(o.permissions.slice(3), [own.permissions[2], own.permissions[3], own.permissions[4]])
+    // own[0] は userAllow より後ろなので既存。own[1] は前にしか無いので再追加される。
+    assert.deepEqual(o.permissions.slice(3), [own.permissions[1], own.permissions[2], own.permissions[3], own.permissions[4]])
     assert.deepEqual(o.policies, own.policies)
+    assert.equal((await merge(t)).word, 'unchanged')
+  })
+
+  it('自分の deny 一式の後ろに利用者の包括 allow があれば、末尾へ全件を再追加し利用者分は順序不変・2 回目は unchanged', async () => {
+    const d = tmp()
+    const broad = { action: 'shell', resource: '*', effect: 'allow' }
+    const broadPolicy = { action: 'tool.use', resource: 'shell:*', effect: 'allow' }
+    const t = write(d, { permissions: [...own.permissions, broad], policies: [userPolicy, ...own.policies, broadPolicy] })
+    const r = await merge(t)
+    assert.equal(r.word, 'merged'); assert.equal(r.code, 0)
+    const o = read(t)
+    assert.deepEqual(o.permissions, [...own.permissions, broad, ...own.permissions])
+    assert.deepEqual(o.policies, [userPolicy, ...own.policies, broadPolicy, ...own.policies])
+    // 利用者の規則だけを取り出すと元の順序のまま。
+    assert.deepEqual(o.permissions.filter((x) => x === undefined || !own.permissions.some((q) => JSON.stringify(q) === JSON.stringify(x))), [broad])
+    // 末尾の自分の規則が最後に一致する = 包括 allow に負けない。
+    assert.deepEqual(o.permissions.slice(-own.permissions.length), own.permissions)
+    const again = await merge(t)
+    assert.equal(again.word, 'unchanged')
+    assert.deepEqual(read(t), o)
+  })
+
+  it('コメント付きで deny の後ろに利用者の規則があれば needs-manual で同じ判定の不足分を出す', async () => {
+    const d = tmp()
+    const broad = { action: 'shell', resource: '*', effect: 'allow' }
+    const text = `{\n // c\n "permissions": ${JSON.stringify([...own.permissions, broad])}, "policies": ${JSON.stringify(own.policies)}\n}\n`
+    const t = write(d, text)
+    const r = await merge(t)
+    assert.equal(r.word, 'needs-manual'); assert.equal(r.code, 3)
+    assert.equal(readFileSync(t, 'utf8'), text)
+    const json = JSON.parse(r.stdout.slice(0, r.stdout.lastIndexOf('OPENCODE_CONFIG_MERGE_RESULT')))
+    assert.deepEqual(json.permissions, own.permissions)
+    assert.equal(json.policies, undefined)
   })
 
   for (const [name, text] of [

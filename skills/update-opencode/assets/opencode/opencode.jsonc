@@ -1,7 +1,8 @@
 {
   // 補助層。plugins/agent-guard（主判定）が読み込めない状態でも、典型形の force push と
   // --no-verify だけは止める。字面一致のため `git push origin main --force` のような
-  // 順序違いは通る（主判定の plugin が止める）。
+  // 順序違いは通る（主判定の plugin が止める）。末尾の ` *` は引数なしにも一致する（公式 docs）。
+  // 語の境界を空白で作り、`--force*` のような接頭辞一致で --force-with-lease を止めない。
   "$schema": "https://opencode.ai/config.json",
   "permissions": [
     { "action": "shell", "resource": "git push --force *", "effect": "deny" },
@@ -11,10 +12,10 @@
     { "action": "shell", "resource": "git push --no-verify *", "effect": "deny" }
   ],
   "policies": [
-    { "action": "tool.use", "resource": "shell:git push --force*", "effect": "deny" },
-    { "action": "tool.use", "resource": "shell:git push -f*", "effect": "deny" },
-    { "action": "tool.use", "resource": "shell:git commit --no-verify*", "effect": "deny" },
+    { "action": "tool.use", "resource": "shell:git push --force *", "effect": "deny" },
+    { "action": "tool.use", "resource": "shell:git push -f *", "effect": "deny" },
+    { "action": "tool.use", "resource": "shell:git commit --no-verify *", "effect": "deny" },
     { "action": "tool.use", "resource": "shell:git commit -n *", "effect": "deny" },
-    { "action": "tool.use", "resource": "shell:git push --no-verify*", "effect": "deny" }
+    { "action": "tool.use", "resource": "shell:git push --no-verify *", "effect": "deny" }
   ]
 }

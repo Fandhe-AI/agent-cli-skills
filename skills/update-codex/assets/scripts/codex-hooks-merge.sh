@@ -16,7 +16,8 @@
 #     .codex/hooks/codex-pretooluse.sh
 #     .codex/hooks/codex-session-start.sh
 #   テンプレート側のハンドラも同じ規則で識別し、含むスクリプト名ごとに 1 つの管理対象とする。
-#   matcher・timeout・statusMessage は識別に使わない（利用者が matcher を変えていても自エントリ）。
+#   matcher・timeout・statusMessage は識別に使わない（利用者が matcher を変えていても自エントリ。
+#   ただし PreToolUse の自エントリは matcher がテンプレートと違うと error-matcher で止める）。
 #   テンプレートのグループ内で自エントリでないハンドラは管理対象外（追加時にも持ち込まない）。
 #
 # 挙動（テンプレートの自エントリごと・同じイベントの中で）:
@@ -25,6 +26,7 @@
 #                                         追加（added）。イベント自体が無ければ配列ごと作る
 #   - 自エントリが 1 つで内容が違う    -> そのハンドラだけテンプレートの内容に置き換え（updated）。
 #                                         所属グループの matcher と他のハンドラは変えない
+#                                         （PreToolUse の自エントリは先に matcher を照合する・下記 error-matcher）
 #   - すべて同一                       -> 書かない（unchanged。mtime も変えない）
 #   added と updated が混ざるときの語彙は updated。
 #   書き出しは jq の整形（インデント 2 桁）になるため、利用者が手で整えた空白は変わりうるが、
@@ -33,10 +35,14 @@
 # 終了コード: 0 成功 / 1 使い方の誤り / 2 入出力・前提（jq 無し・symlink 等） / 4 内容の不整合
 # stdout の最終行は固定語彙の CODEX_HOOKS_MERGE_RESULT
 #   <created|added|updated|unchanged|error-usage|error-no-jq|error-symlink|error-io|error-template|
-#    error-target|error-json|error-type|error-duplicate>
+#    error-target|error-json|error-type|error-duplicate|error-matcher>
 #   error-json: target が JSON として不正（空ファイル含む）/ error-type: 期待する型でない
 #   （トップレベルがオブジェクトでない・hooks がオブジェクトでない・イベントが配列でない・
 #   グループやハンドラがオブジェクトでない等）/ error-duplicate: 同じイベントに同じ自エントリが 2 つ以上
+#   / error-matcher（exit 4）: PreToolUse の自エントリ（codex-pretooluse.sh）の所属グループの matcher が
+#   テンプレートの該当グループの matcher と異なる（例: `^Edit$` のグループにある）。Bash に発火せずガードが
+#   静かに無効になるため unchanged / updated を返さない。利用者の matcher は書き換えない。
+#   SessionStart の自エントリは matcher を検査しない
 #   エラー時は target を一切変更しない。
 #
 # 単体実行専用（source しない）。bash 3.2 と jq 1.5 以降で動く。
@@ -112,6 +118,7 @@ def apply($name; $g; $h):
       | if ($pos | length) == 0 then
           .doc.hooks[$name] += [$g | .hooks = [$h]] | .st += ["added"]
         elif ($pos | length) > 1 then error("duplicate")
+        elif $k == $A and (($groups[$pos[0][0]].matcher // null) != ($g.matcher // null)) then error("matcher")
         elif ($groups[$pos[0][0]].hooks[$pos[0][1]]) == $h then .st += ["unchanged"]
         else .doc.hooks[$name][$pos[0][0]].hooks[$pos[0][1]] = $h | .st += ["updated"]
         end
@@ -148,6 +155,7 @@ else
   case "${err}" in
     "") ;;
     type) fail 4 error-type "期待する型でない（トップレベル・hooks はオブジェクト、イベントは配列、グループとハンドラはオブジェクト）。ファイルは変更しない" ;;
+    matcher) fail 4 error-matcher "PreToolUse の自エントリ（codex-pretooluse.sh）が、テンプレートと違う matcher のグループにある。Bash に発火せずガードが無効になるため、利用者の matcher は書き換えずファイルを変更しない（自エントリをテンプレートの matcher のグループへ移すか、そのグループの matcher を直す）" ;;
     duplicate) fail 4 error-duplicate "同じイベントに同じ自エントリが 2 つ以上ある。どれを残すか決められないためファイルは変更しない" ;;
     *) fail 2 error-io "想定外のエラー: ${err}" ;;
   esac
