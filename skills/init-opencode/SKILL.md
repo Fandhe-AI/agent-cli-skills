@@ -329,7 +329,7 @@ git remote add origin "${SANDBOX}/origin.git"   # origin はローカルの bare
 - `skills` CLI は固定版で実行する。失敗しても未固定 `npx` へフォールバックしない（付録参照）
 - コマンドへ渡すパスやスキル名は常に `"${var}"` でクォートする。外部入力を `bash -c` や `eval` へ渡さない
 - `--no-verify` を含むコマンドを plugin や手順に仕込まない
-- コミットを伴う場合は `.claude/rules/conventional-commits.md` に従う（このスキル自体はコミットしない）
+- コミットを伴う場合は対象リポジトリの規約（CLAUDE.md / AGENTS.md / CONTRIBUTING 等）に従う。規約が無ければ `type(scope): subject`（subject は 72 文字以内）とし、`--no-verify` は使わない（このスキル自体はコミットしない）
 - 出力・報告は日本語で書く
 
 ## 付録: skills CLI のバージョン固定と更新手順

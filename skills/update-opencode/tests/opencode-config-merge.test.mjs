@@ -85,7 +85,7 @@ describe('opencode-config-merge', { concurrency: true }, () => {
     const o = read(t)
     assert.deepEqual(o.permissions.slice(0, 3), [reordered, userAllow, own.permissions[0]])
     // own[0] は userAllow より後ろなので既存。own[1] は前にしか無いので再追加される。
-    assert.deepEqual(o.permissions.slice(3), [own.permissions[1], own.permissions[2], own.permissions[3], own.permissions[4]])
+    assert.deepEqual(o.permissions.slice(3), own.permissions.slice(1))
     assert.deepEqual(o.policies, own.policies)
     assert.equal((await merge(t)).word, 'unchanged')
   })

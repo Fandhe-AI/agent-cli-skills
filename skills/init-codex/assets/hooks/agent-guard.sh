@@ -26,9 +26,12 @@
 #                  core.hooksPath の設定・解除、コマンド先頭の HUSKY=0 / HUSKY_SKIP_HOOKS=1、
 #                  alias の定義（-c alias.* と git config alias.*。値は解決せず定義自体を拒否）
 #                  （全セッション）
-#   force-push     git push の --force / -f / --mirror / +<refspec>（--force-with-lease は許可。
-#                  全セッション）
-#   merge-guard    gh pr merge・REST / GraphQL のマージ・gh pr review --approve・gh alias・
+#   force-push     git push の --force / -f / --mirror / +<refspec>（`--` の後の + 始まりも）/
+#                  --force-with-lease（= 形・略記を含む）/ --force-if-includes。lease 付きでも
+#                  既存コミットを消せるため許可しない（全セッション）
+#   merge-guard    gh pr merge・REST / GraphQL のマージ・承認（gh pr review の --approve / -a、
+#                  reviews API の event=APPROVE・判定できない --input / @file 形、GraphQL の
+#                  addPullRequestReview / submitPullRequestReview + APPROVE）・gh alias・
 #                  gh extension（subagent が true / null のとき）
 #   repo-settings  ruleset・branch protection・リポジトリ本体の書き込み・gh repo edit 等
 #                  （subagent が true / null のとき）
@@ -88,7 +91,8 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 # 検査するもの（git のグローバルオプション -c / -C / --git-dir 等はサブコマンドの前で読み飛ばす）:
 #   - hook を飛ばせるサブコマンドの --no-verify（git の一意な略記 --no-v… も同一視）
 #   - commit の短縮 -n（-an のような束ね書きも。-m 等の値を取るオプション以降は値として扱う）
-#   - push の --force / -f（束ね書きも。-o 以降は値）/ 先頭 + の refspec
+#   - push の --force / -f（束ね書きも。-o 以降は値）/ --force-with-lease / --force-if-includes /
+#     先頭 + の refspec（`--` の後ろでも見る。`--` はオプション解析を終えるだけで refspec は残る）
 # コマンド名の git は大文字小文字を区別せず照合する（macOS の FS 対策。パス付きも）。
 # リダイレクト（< > >> &> >& >|）と here-string（<<<）は語の区切りで、その後ろに置いた引数も
 # 検査する。算術式（((...)) / $((...)) / $[...]）内の << は heredoc とみなさない（コマンド置換・
@@ -172,7 +176,7 @@ function config_args(k,   a, ro, wflag, np, key, nkey) {
   }
   if (key != "" && conf_bad(key) && (wflag || (!ro && nkey >= 2))) setv("no-verify")
 }
-function git_args(j, hk,   t, scmd, k, a, hooked) {
+function git_args(j, hk,   t, scmd, k, a, hooked, dd, eq, nm) {
   while (j <= ntok) {
     t = tok[j]
     if (t == "-c" || t == "--config-env") { if (conf_bad(tok[j + 1])) setv("no-verify"); j += 2 }
@@ -188,13 +192,23 @@ function git_args(j, hk,   t, scmd, k, a, hooked) {
   if (hk && hooked) setv("no-verify")
   for (k = j + 1; k <= ntok; k++) {
     a = tok[k]
-    # `--` 以降は引数（パス・ref 名）でありフラグ判定しない。値を取るオプションの次トークンは値なので、ループ末尾で読み飛ばす。
-    if (a == "--") break
+    # `--` 以降は引数（パス・ref 名）でありフラグ判定しない。ただし push の + 始まりの refspec は
+    # `--` の後ろでも force push なので見続ける。値を取るオプションの次トークンはループ末尾で読み飛ばす。
+    if (a == "--") { dd = 1; continue }
+    if (dd) {
+      if (scmd == "push" && length(a) >= 2 && substr(a, 1, 1) == "+") setv("force-push")
+      continue
+    }
     if (hooked && length(a) >= 6 && length(a) <= 11 && substr(a, 1, 6) == "--no-v" && index("--no-verify", a) == 1) setv("no-verify")
     if (scmd == "commit" && a ~ /^-[^-]/ && short_has(a, "n", "mFCctuS")) setv("no-verify")
     if (scmd == "push") {
       if (a == "--force") setv("force-push")
       else if (length(a) >= 5 && length(a) <= 8 && index("--mirror", a) == 1) setv("force-push")
+      else if (substr(a, 1, 8) == "--force-") {
+        # --force-with-lease[=<値>] と --force-if-includes（git の一意な略記も）。lease 付きでも既存コミットを消せる。
+        eq = index(a, "="); nm = (eq > 0) ? substr(a, 1, eq - 1) : a
+        if (index("--force-with-lease", nm) == 1 || index("--force-if-includes", nm) == 1) setv("force-push")
+      }
       else if (a ~ /^-[^-]/) { if (short_has(a, "f", "o")) setv("force-push") }
       else if (length(a) >= 2 && substr(a, 1, 1) == "+") setv("force-push")
     }
@@ -496,6 +510,40 @@ if contains_subsequence "$all_nf" gh api; then
     finish deny merge-guard
   fi
 
+  # API 経由の承認（外部レビューゲートの自作自演）。REST は pulls/<n>/reviews（作成）と
+  # pulls/<n>/reviews/<id>/events（送信）で、event フィールドが COMMENT / REQUEST_CHANGES の
+  # リテラル以外（APPROVE・@file・変数・判定できない値）なら deny する。--input は本文を
+  # ファイル / stdin から渡すため中身が見えず deny する。event を持たない書き込み（保留レビュー
+  # の作成）と GET の読み取りは許可。
+  if evidence 'pulls/[^/[:space:]]+/reviews(/[^/[:space:]]+/events)?([?[:space:]]|$)'; then
+    if printf '%s' "$tokenized" | grep -qE '(^|[[:space:]])--input([[:space:]]|=|$)'; then
+      finish deny merge-guard
+    fi
+    ev_vals=$(printf '%s' "$norm" | grep -oiE 'event[[:space:]]*=[[:space:]]*[^[:space:]]*') || ev_vals=""
+    while IFS= read -r ev_line; do
+      [ -n "$ev_line" ] || continue
+      ev_v=${ev_line#*=}
+      ev_v=$(printf '%s' "$ev_v" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+      case "$ev_v" in
+        COMMENT|REQUEST_CHANGES) : ;;
+        *) finish deny merge-guard ;;
+      esac
+    done <<EOF_EV
+$ev_vals
+EOF_EV
+  fi
+  # GraphQL: レビュー作成・送信の mutation に APPROVE が含まれる（変数経由の -f e=APPROVE も同じ
+  # コマンド文字列に現れる）。query を @file や --input で渡す形は中身を見られないので deny。
+  if contains_subsequence "$all_nf" gh api graphql; then
+    if evidence 'addPullRequestReview|submitPullRequestReview' && evidence 'APPROVE'; then
+      finish deny merge-guard
+    fi
+    if evidence '(^|[[:space:]])(-[A-Za-z]*[fF]|--(raw-)?field)[[:space:]=]*query[[:space:]]*=[[:space:]]*@' \
+      || printf '%s' "$tokenized" | grep -qE '(^|[[:space:]])--input([[:space:]]|=|$)'; then
+      finish deny merge-guard
+    fi
+  fi
+
   # ruleset・branch protection・リポジトリ本体への書き込み。明示のメソッド、または gh api が
   # 暗黙に POST へ切り替えるフィールド指定（-f/-F は key=value 形に限り grep -F・jq -f を
   # 誤検知しない）。明示の GET は免除。リポジトリ本体は GET が常用されるため明示の書き込みのみ。
@@ -533,6 +581,50 @@ done
 # 残らないため、フラグ除去前の tokenized に対して判定する。
 if contains_subsequence "$all_nf" gh pr review \
   && printf '%s' "$tokenized" | grep -qE '(^|[[:space:]])--approve([[:space:]]|$|=)'; then
+  finish deny merge-guard
+fi
+
+# 短縮 -a（--approve の略）。束ね書き（-ab 等）は pflag と同じく先頭から読み、値を取る -b / -F が
+# 来たらそれ以降は値（-ba の a は本文）。値を取るオプションの次トークンも値として読み飛ばす。
+# gh pr review の後ろだけを見て、次の gh / git で打ち切る。
+review_short_approve() {
+  local tok st=0 skip=0 body m ch
+  for tok in $tokenized; do
+    if [ "$st" -lt 3 ]; then
+      case "$tok" in
+        -*) continue ;;
+      esac
+      case "$st:$tok" in
+        0:gh) st=1 ;;
+        1:pr) st=2 ;;
+        2:review) st=3 ;;
+      esac
+      continue
+    fi
+    case "$tok" in
+      gh|git) return 1 ;;
+    esac
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    case "$tok" in
+      --body|--body-file) skip=1 ;;
+      --*) : ;;
+      -?*)
+        body=${tok#-}
+        m=0
+        while [ "$m" -lt "${#body}" ]; do
+          ch=${body:$m:1}
+          case "$ch" in
+            a) return 0 ;;
+            b|F) [ "$m" -eq $((${#body} - 1)) ] && skip=1; break ;;
+          esac
+          m=$((m + 1))
+        done
+        ;;
+    esac
+  done
+  return 1
+}
+if review_short_approve; then
   finish deny merge-guard
 fi
 

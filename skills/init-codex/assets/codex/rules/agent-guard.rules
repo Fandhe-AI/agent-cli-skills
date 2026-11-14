@@ -5,9 +5,16 @@
 prefix_rule(
     pattern = ["git", "push", ["--force", "-f"]],
     decision = "forbidden",
-    justification = "force push は禁止。--force-with-lease を検討する",
+    justification = "履歴を書き換える push は禁止。必要なら人間に依頼する",
     match = ["git push --force origin main", "git push -f origin main"],
-    not_match = ["git push origin main", "git push --force-with-lease origin main"],
+    not_match = ["git push origin main"],
+)
+prefix_rule(
+    pattern = ["git", "push", ["--force-with-lease", "--force-if-includes"]],
+    decision = "forbidden",
+    justification = "lease 付きでも既存コミットを消せるため禁止。必要なら人間に依頼する",
+    match = ["git push --force-with-lease origin main", "git push --force-if-includes origin main"],
+    not_match = ["git push origin main"],
 )
 prefix_rule(
     pattern = ["git", "commit", ["--no-verify", "-n"]],

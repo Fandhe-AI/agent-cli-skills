@@ -158,6 +158,8 @@ describe('同梱の Codex 設定資産', () => {
     for (const cmd of [
       ['git', 'push', '--force', 'origin', 'main'],
       ['git', 'push', '-f', 'origin', 'main'],
+      ['git', 'push', '--force-with-lease', 'origin', 'main'],
+      ['git', 'push', '--force-if-includes', 'origin', 'main'],
       ['git', 'push', '--no-verify'],
       ['git', 'commit', '--no-verify', '-m', 'x'],
       ['git', 'commit', '-n', '-m', 'x'],
@@ -166,7 +168,6 @@ describe('同梱の Codex 設定資産', () => {
     }
     for (const cmd of [
       ['git', 'push', 'origin', 'main'],
-      ['git', 'push', '--force-with-lease', 'origin', 'main'],
       ['git', 'commit', '-m', 'x'],
     ]) {
       assert.notEqual(check(...cmd).decision, 'forbidden', cmd.join(' '))

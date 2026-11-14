@@ -17,7 +17,7 @@ permissions:
 
 ## 禁止
 
-- `git commit --no-verify`・`git commit -n`・force push（`--force-with-lease` は可）
+- `git commit --no-verify`・`git commit -n`・履歴を書き換える push（`--force`・`--force-with-lease`・`+refspec`。必要なら人間に依頼する）
 - マージ・承認・ブランチ保護の変更（人間が行う）
 - 秘密情報（トークン・パスワード・`.env` の値）のコミットとログ出力
 - 根拠のない完了宣言。テストが無い場合は「テストなし」と報告する

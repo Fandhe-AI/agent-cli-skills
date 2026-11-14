@@ -102,8 +102,14 @@ describe('opencode.jsonc', () => {
   }
   const blockedBy = (cmds, rules, prefix) => cmds.filter((c) => rules.some((r) => globToRegExp(r.resource.slice(prefix.length)).test(c)))
 
-  it('--force-with-lease 系は permissions・policies のどの規則にも一致しない', () => {
-    const allowed = ['git push --force-with-lease', 'git push --force-with-lease=main:abc origin main', 'git push --force-if-includes']
+  it('--force-with-lease / --force-if-includes も permissions・policies の両方に一致する（lease 付きでも既存コミットを消せる）', () => {
+    const denied = ['git push --force-with-lease', 'git push --force-with-lease origin main', 'git push --force-with-lease=main:abc origin main', 'git push --force-if-includes', 'git push --force-if-includes origin main']
+    assert.deepEqual(blockedBy(denied, cfg.permissions, ''), denied)
+    assert.deepEqual(blockedBy(denied, cfg.policies, 'shell:'), denied)
+  })
+
+  it('通常の git push は permissions・policies のどの規則にも一致しない', () => {
+    const allowed = ['git push', 'git push origin main', 'git push -u origin feat/x']
     assert.deepEqual(blockedBy(allowed, cfg.permissions, ''), [])
     assert.deepEqual(blockedBy(allowed, cfg.policies, 'shell:'), [])
   })

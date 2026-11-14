@@ -23,7 +23,7 @@ const GUARD_TIMEOUT_MS = 5000
 // 理由コード → ユーザーとモデルに返す固定文。入力のコマンド文字列は一切含めない。
 const MESSAGES = {
   "no-verify": "agent-guard: git の --no-verify（および commit の -n）は禁止されている",
-  "force-push": "agent-guard: git push の force（--force / -f / +refspec）は禁止されている。--force-with-lease は使える",
+  "force-push": "agent-guard: 履歴を書き換える git push（--force / -f / --force-with-lease / --force-if-includes / +refspec）は禁止されている。必要なら人間に依頼すること",
   "merge-guard": "agent-guard: サブエージェントからのマージ・承認・gh の alias / extension 実行は禁止されている",
   "repo-settings": "agent-guard: サブエージェントからのリポジトリ設定・ruleset の変更は禁止されている",
   obfuscated: "agent-guard: 難読化されたコマンド（$'...'・$IFS 展開）は許可されない",
