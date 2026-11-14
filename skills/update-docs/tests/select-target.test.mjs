@@ -9,7 +9,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,8 +36,10 @@ async function select(bash, root, extra = []) {
   const r = await spawnAsync(bash, [SCRIPT, '--root', root, ...extra])
   const lines = r.stdout.trim().split('\n')
   const last = lines[lines.length - 1]
-  return { ...r, last, target: last.replace('UPDATE_DOCS_TARGET ', '') }
+  const writePath = lines.filter((l) => l.startsWith('UPDATE_DOCS_WRITE_PATH ')).map((l) => l.slice('UPDATE_DOCS_WRITE_PATH '.length))
+  return { ...r, last, target: last.replace('UPDATE_DOCS_TARGET ', ''), writePath }
 }
+const PRINT = ['--print-write-path']
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'select-target-test-'))
@@ -306,6 +308,160 @@ describe('select-target', { concurrency: true }, () => {
       } finally {
         t.cleanup()
       }
+    })
+
+    // ---- --print-write-path: 選択と同じ検証を通った書き込み先の物理パス ----
+    describe(`${tag} --print-write-path`, { concurrency: true }, () => {
+      const phys = (p) => realpathSync(p)
+
+      it(`${tag} 通常ファイルの AGENTS.md は、その物理パス（symlink 経由のルートでも物理化）`, async () => {
+        const t = setup()
+        try {
+          const root = join(t.dir, 'repo')
+          mkdirSync(root)
+          writeFileSync(join(root, 'AGENTS.md'), '# a\n')
+          const r = await select(bash, root, PRINT)
+          assert.equal(r.status, 0, r.stderr)
+          assert.equal(r.target, 'agents')
+          assert.deepEqual(r.writePath, [join(phys(root), 'AGENTS.md')])
+          symlinkSync(root, join(t.dir, 'link'))
+          const r2 = await select(bash, join(t.dir, 'link'), PRINT)
+          assert.deepEqual(r2.writePath, [join(phys(root), 'AGENTS.md')])
+        } finally {
+          t.cleanup()
+        }
+      })
+
+      it(`${tag} CLAUDE.md なし・AGENTS.md が docs/agents.md への symlink -> agents と docs/agents.md`, async () => {
+        const t = setup()
+        try {
+          mkdirSync(join(t.dir, 'docs'))
+          writeFileSync(join(t.dir, 'docs', 'agents.md'), '# a\n')
+          symlinkSync('docs/agents.md', join(t.dir, 'AGENTS.md'))
+          const r = await select(bash, t.dir, PRINT)
+          assert.equal(r.status, 0, r.stderr)
+          assert.equal(r.target, 'agents')
+          assert.deepEqual(r.writePath, [join(phys(t.dir), 'docs', 'agents.md')])
+        } finally {
+          t.cleanup()
+        }
+      })
+
+      it(`${tag} 両方が同じ docs/x.md への symlink -> agents と docs/x.md`, async () => {
+        const t = setup()
+        try {
+          mkdirSync(join(t.dir, 'docs'))
+          writeFileSync(join(t.dir, 'docs', 'x.md'), '# x\n')
+          symlinkSync('docs/x.md', join(t.dir, 'AGENTS.md'))
+          symlinkSync('docs/x.md', join(t.dir, 'CLAUDE.md'))
+          const r = await select(bash, t.dir, PRINT)
+          assert.equal(r.status, 0, r.stderr)
+          assert.equal(r.target, 'agents')
+          assert.deepEqual(r.writePath, [join(phys(t.dir), 'docs', 'x.md')])
+        } finally {
+          t.cleanup()
+        }
+      })
+
+      it(`${tag} 既存の両方向の symlink は実体のパス`, async () => {
+        for (const [real, link] of [['AGENTS.md', 'CLAUDE.md'], ['CLAUDE.md', 'AGENTS.md']]) {
+          const t = setup()
+          try {
+            writeFileSync(join(t.dir, real), '# r\n')
+            symlinkSync(real, join(t.dir, link))
+            const r = await select(bash, t.dir, PRINT)
+            assert.equal(r.target, 'agents', link)
+            assert.deepEqual(r.writePath, [join(phys(t.dir), real)], link)
+          } finally {
+            t.cleanup()
+          }
+        }
+      })
+
+      it(`${tag} 多段のリンクと空白を含むディレクトリも最後まで辿る`, async () => {
+        const t = setup()
+        try {
+          mkdirSync(join(t.dir, 'my docs'))
+          writeFileSync(join(t.dir, 'my docs', 'agents.md'), '# a\n')
+          symlinkSync('my docs/agents.md', join(t.dir, 'a.md'))
+          symlinkSync('a.md', join(t.dir, 'AGENTS.md'))
+          const r = await select(bash, t.dir, PRINT)
+          assert.equal(r.status, 0, r.stderr)
+          assert.deepEqual(r.writePath, [join(phys(t.dir), 'my docs', 'agents.md')])
+        } finally {
+          t.cleanup()
+        }
+      })
+
+      it(`${tag} claude と none ではパスを出さない`, async () => {
+        const t = setup()
+        try {
+          const none = await select(bash, t.dir, PRINT)
+          assert.equal(none.target, 'none')
+          assert.deepEqual(none.writePath, [])
+          writeFileSync(join(t.dir, 'CLAUDE.md'), '# c\n')
+          writeFileSync(join(t.dir, 'AGENTS.md'), '# a\n')
+          const claude = await select(bash, t.dir, PRINT)
+          assert.equal(claude.target, 'claude')
+          assert.deepEqual(claude.writePath, [])
+        } finally {
+          t.cleanup()
+        }
+      })
+
+      it(`${tag} 範囲外・壊れた・ハードリンクは従来どおり止まり、パスを出さない`, async () => {
+        const t = setup()
+        try {
+          const root = join(t.dir, 'repo')
+          mkdirSync(root)
+          writeFileSync(join(t.dir, 'outside.md'), '# 外\n')
+          symlinkSync(join(t.dir, 'outside.md'), join(root, 'AGENTS.md'))
+          const out = await select(bash, root, PRINT)
+          assert.equal(out.status, 3)
+          assert.equal(out.target, 'error-symlink')
+          assert.deepEqual(out.writePath, [])
+          rmSync(join(root, 'AGENTS.md'))
+          writeFileSync(join(root, 'AGENTS.md'), '# a\n')
+          linkSync(join(root, 'AGENTS.md'), join(root, 'CLAUDE.md'))
+          const hard = await select(bash, root, PRINT)
+          assert.equal(hard.status, 3)
+          assert.equal(hard.target, 'error-hardlink')
+          assert.deepEqual(hard.writePath, [])
+        } finally {
+          t.cleanup()
+        }
+      })
+
+      it(`${tag} 別々の symlink がハードリンク同士の実体を指すときは error-hardlink（書くと mv でリンクが切れる）`, async () => {
+        const t = setup()
+        try {
+          mkdirSync(join(t.dir, 'docs'))
+          writeFileSync(join(t.dir, 'docs', 'a.md'), '# a\n')
+          linkSync(join(t.dir, 'docs', 'a.md'), join(t.dir, 'docs', 'b.md'))
+          symlinkSync('docs/a.md', join(t.dir, 'CLAUDE.md'))
+          symlinkSync('docs/b.md', join(t.dir, 'AGENTS.md'))
+          for (const extra of [[], PRINT]) {
+            const r = await select(bash, t.dir, extra)
+            assert.equal(r.status, 3, extra.join())
+            assert.equal(r.target, 'error-hardlink', extra.join())
+            assert.deepEqual(r.writePath, [])
+          }
+        } finally {
+          t.cleanup()
+        }
+      })
+
+      it(`${tag} 引数なしの既定出力にパス行は出ない`, async () => {
+        const t = setup()
+        try {
+          writeFileSync(join(t.dir, 'AGENTS.md'), '# a\n')
+          const r = await select(bash, t.dir)
+          assert.deepEqual(r.writePath, [])
+          assert.equal(r.stdout.trim(), 'UPDATE_DOCS_TARGET agents')
+        } finally {
+          t.cleanup()
+        }
+      })
     })
 
     it(`${tag} 引数の誤り・ルート不在は非 0 で、結果語彙は固定`, async () => {

@@ -58,7 +58,7 @@ bash "${SELECT_TARGET}" --root .
 | 結果 | 更新する指示ファイル | 以降の扱い |
 |------|---------------------|-----------|
 | `claude` | `CLAUDE.md` | 従来どおり直接編集する（`CLAUDE.md` がリポジトリ内への symlink のときも可）。`AGENTS.md` があっても読み書きしない（バイト単位で変えない） |
-| `agents` | `AGENTS.md` | **update-docs 専用のマーカー区間の中だけ**を `agents-section.sh` で書く（後述）。区間の外は変更しない。`CLAUDE.md` と `AGENTS.md` が同じファイルで、どちらかがシンボリックリンクのときも `agents` になり、stderr に警告が出る。`CLAUDE.md` として直接書き換えると init-codex 等の管理区間とレビュー観点集を壊し得るためで、`CLAUDE.md` は直接編集しない |
+| `agents` | `AGENTS.md` | **update-docs 専用のマーカー区間の中だけ**を `agents-section.sh` で書く（後述）。区間の外は変更しない。`CLAUDE.md` と `AGENTS.md` が同じファイルで、どちらかがシンボリックリンクのときも `agents` になり、stderr に警告が出る（両方が同じ実体への別々のリンクでも同じ）。`AGENTS.md` 自体がリポジトリ内の別ファイルへのシンボリックリンクのときは、リンクを保ったままリンク先の実体へ書く。`CLAUDE.md` として直接書き換えると init-codex 等の管理区間とレビュー観点集を壊し得るためで、`CLAUDE.md` は直接編集しない |
 | `none` | なし | ファイルを作らずに、`CLAUDE.md` も `AGENTS.md` も無かったことを報告して止める（Step 1 以降へ進まない） |
 | `error-symlink`（終了コード 3） | なし | `CLAUDE.md` か `AGENTS.md` が symlink で、リンク先がリポジトリの外にある・壊れている・通常ファイルでない。リポジトリ外のファイルを書き換えないため、書かずに報告して止める（Step 1 以降へ進まない）。リンクの修正はユーザーに任せる |
 | `error-hardlink`（終了コード 3） | なし | `CLAUDE.md` と `AGENTS.md` が同じファイルへのハードリンク。置換でリンクが切れるため、書かずに報告して止める。どちらかを symlink か別ファイルにするようユーザーに案内する |
@@ -72,10 +72,10 @@ bash "${SELECT_TARGET}" --root .
 - 書くのは `<!-- agent-cli-skills:update-docs:start -->` 〜 `<!-- agent-cli-skills:update-docs:end -->` の中身だけ。区間が無ければ末尾へ追記される。区間の外（管理区間・見出し・観点集）はバイト単位で変わらない。
 - 区間に書く内容は、スキル一覧と構成の節（Step 3 の `## Current Skills (N)`・リポジトリ管理スキル・参照スキルの各節と、Repository Structure）。区間の中身を読み、`CLAUDE.md` の場合と同じ更新を施した**全文**を `_/update-docs-section.md` へ書いて（`_/` が無ければ作る）`--block` に渡す。中身に 2 つのマーカー（`update-docs` 用と `agents-md` 用の start / end）の文字列は含めない。
 - 区間の外にある同名の節や手書きの記述は更新しない。
-- 次のときは書かずに止まるので、結果語彙を報告してユーザーに対応を求める: 自マーカーが片方のみ・重複・逆順（`error-markers`）、`agents-md` 管理区間の内側にある、または内側に含む（`error-nested`）、コードフェンスが閉じていない（`error-fence`）、中身にマーカーがある（`error-block-marker`）、`AGENTS.md` か中身のファイルがシンボリックリンク（`error-symlink`）、走査のあとに `AGENTS.md` が書き換えられた（`error-changed`。他の更新を上書きしないため。内容を確かめてから再実行する）。自分でマーカーを直したり、スクリプトを迂回したりしない。
+- 次のときは書かずに止まるので、結果語彙を報告してユーザーに対応を求める: 自マーカーが片方のみ・重複・逆順（`error-markers`）、`agents-md` 管理区間の内側にある、または内側に含む（`error-nested`）、コードフェンスが閉じていない（`error-fence`）、中身にマーカーがある（`error-block-marker`）、`--block` の中身のファイルがシンボリックリンク（`error-symlink`）、走査のあとに `AGENTS.md` が書き換えられた（`error-changed`。他の更新を上書きしないため。内容を確かめてから再実行する）。自分でマーカーを直したり、スクリプトを迂回したりしない。
 - 書き込み後の `AGENTS.md` が 32768 バイト（Codex の既定の読み込み上限）を超えると stderr に警告が出る。書き込みは行われる。報告に警告を含め、一覧の簡素化をユーザーに提案する。
 
-書き込みの手順（Step 3 で区間の中身の全文を `_/update-docs-section.md` へ書いたあとに実行する。ファイルが無いとスクリプトが止まる）:
+書き込みの手順（Step 3 で区間の中身の全文を `_/update-docs-section.md` へ書いたあとに実行する。ファイルが無いとスクリプトが止まる）。書き込み先は `select-target.sh --print-write-path` が返す物理パスで、`AGENTS.md` がリポジトリ内の別ファイルへのシンボリックリンクでも、リンクは壊さずリンク先の実体へ区間だけを書く。`select-target.sh` がエラー語彙（`error-symlink`・`error-hardlink`）で止めた場合は、その語彙と終了コードをそのまま報告して止まる（上の表と同じ扱い）:
 
 ```bash
 AGENTS_SECTION=""
@@ -93,11 +93,29 @@ if [[ -z "${AGENTS_SECTION}" ]]; then
   exit 1
 fi
 
-# 書き込み先は AGENTS.md。AGENTS.md が CLAUDE.md（実ファイル）へのシンボリックリンクの
-# ときは、スクリプトがリンクを扱わないため、実体の CLAUDE.md を指定する（どちらも同じファイル）
-TARGET_FILE="AGENTS.md"
-if [[ -L AGENTS.md && -f CLAUDE.md && ! -L CLAUDE.md && CLAUDE.md -ef AGENTS.md ]]; then
-  TARGET_FILE="CLAUDE.md"
+# 書き込み先は select-target.sh が決める。--print-write-path は、選択と同じ検証（リポジトリ内の
+# 通常ファイル・symlink を最後まで辿る・ハードリンクは拒否）を通った物理パスだけを返す。
+# select-target.sh は agents-section.sh と同じディレクトリにある。
+SELECT_TARGET="$(dirname "${AGENTS_SECTION}")/select-target.sh"
+if [[ ! -f "${SELECT_TARGET}" ]]; then
+  echo "エラー: select-target.sh が見つからない（agents-section.sh と同じディレクトリに無い）" >&2
+  exit 1
+fi
+sel_status=0
+SEL_OUT="$(bash "${SELECT_TARGET}" --root . --print-write-path)" || sel_status=$?
+if (( sel_status != 0 )); then
+  printf '%s\n' "${SEL_OUT}"
+  echo "exit=${sel_status}" >&2
+  exit "${sel_status}"
+fi
+if [[ "$(printf '%s\n' "${SEL_OUT}" | tail -n 1)" != "UPDATE_DOCS_TARGET agents" ]]; then
+  echo "エラー: 更新対象が AGENTS.md ではないため、区間を書かずに止める（Step 0 の結果を確認する）" >&2
+  exit 1
+fi
+TARGET_FILE="$(printf '%s\n' "${SEL_OUT}" | sed -n 's/^UPDATE_DOCS_WRITE_PATH //p')"
+if [[ -z "${TARGET_FILE}" ]]; then
+  echo "エラー: 書き込み先のパスを得られないため、区間を書かずに止める" >&2
+  exit 1
 fi
 
 # 書き込み前に --check で結果語彙（appended / replaced / unchanged）を確かめ、
@@ -115,7 +133,7 @@ if (( status != 0 )); then
 fi
 ```
 
-最終行は `UPDATE_DOCS_SECTION_RESULT <appended|replaced|unchanged|error-...>`。`unchanged` なら `AGENTS.md` は書き換えられていない。
+最終行は `UPDATE_DOCS_SECTION_RESULT <appended|replaced|unchanged|error-...>`。`unchanged` なら `AGENTS.md`（リンクのときはリンク先の実体）は書き換えられていない。
 
 ### Step 1: 前回の更新コミットを確認する
 

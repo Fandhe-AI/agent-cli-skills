@@ -6,9 +6,18 @@
 #       変えない。選んだあとの書き込み（AGENTS.md の区間の差し替え）は agents-section.sh が行う。
 #       あわせて、書き込み先がリポジトリの外へ逃げないこと（symlink）と、mv で壊れないこと
 #       （ハードリンク）を確かめ、危ない構成なら書かせずに止める。
+#       --print-write-path を付けると、選択と同じ検証を通った書き込み先の物理パスも返す。
+#       書き込み先の解決はこのスクリプトだけが持ち、SKILL.md のフェンスは重複して持たない。
 #
 # 使い方:
-#   select-target.sh --root <リポジトリのルート>
+#   select-target.sh --root <リポジトリのルート> [--print-write-path]
+#
+# --print-write-path: 結果が agents のときだけ、最終行の直前に
+#   UPDATE_DOCS_WRITE_PATH <物理パス>
+#   を 1 行出す（claude・none・エラーでは出さない）。物理パスは symlink を最後まで辿った先で、ルートの
+#   物理パスの配下の通常ファイルであることを確かめ済み。agents-section.sh の --target へそのまま渡す
+#   （AGENTS.md が symlink でも、リンクは壊さず実体へ区間を書ける）。改行を含むパスは出さずに
+#   error-symlink で止める。指定しないときの出力は従来と同じ。
 #
 # 選び方（通常ファイルか、リポジトリ内の通常ファイルへのシンボリックリンクだけを「ある」とみなす）:
 #   CLAUDE.md がある                  -> claude（AGENTS.md があっても読むだけで触らない）
@@ -17,8 +26,9 @@
 #   例外 1: CLAUDE.md と AGENTS.md が同じファイルで、どちらかが symlink のときは agents を返し、
 #   stderr に警告を出す。CLAUDE.md として直接書き換えると AGENTS.md の管理区間やレビュー観点集を
 #   壊し得るため、update-docs 専用の区間だけを agents-section.sh で更新する。
-#   例外 2: 同じファイルでどちらも symlink でない（ハードリンク）ときは error-hardlink で止まる。
-#   置換（mv）でリンクが切れて 2 つのファイルが別物になるため。
+#   例外 2: 同じファイルなのに、物理的なリンク先のパスが両者で一致しない（ハードリンク）ときは
+#   error-hardlink で止まる（どちらも symlink でない場合、別々の symlink がハードリンク同士の実体を
+#   指す場合を含む）。置換（mv）でリンクが切れて 2 つのファイルが別物になるため。
 #   CLAUDE.md・AGENTS.md のどちらかが symlink で、物理的なリンク先がルートの物理パスの配下の
 #   通常ファイルでなければ（リポジトリ外を指す・壊れている・ループ・ディレクトリ）error-symlink で
 #   止まる。リポジトリ外のファイルを書き換えさせないため。
@@ -38,7 +48,7 @@ fail() {
   exit "$1"
 }
 
-ROOT=""
+ROOT="" PRINT_PATH=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --root)
@@ -46,7 +56,11 @@ while [[ $# -gt 0 ]]; do
       ROOT="$2"
       shift 2
       ;;
-    *) fail 1 error-usage "未知の引数: $1（使い方: --root <リポジトリのルート>）" ;;
+    --print-write-path)
+      PRINT_PATH=1
+      shift
+      ;;
+    *) fail 1 error-usage "未知の引数: $1（使い方: --root <リポジトリのルート> [--print-write-path]）" ;;
   esac
 done
 [[ -n "${ROOT}" ]] || fail 1 error-usage "--root は必須"
@@ -90,16 +104,38 @@ check_link() {
 check_link "${CLAUDE}" CLAUDE.md
 check_link "${AGENTS}" AGENTS.md
 
+# agents を返す。--print-write-path のときは AGENTS.md の物理パスを先に 1 行出す。
+# check_link で範囲内の通常ファイルであることは確認済み。
+emit_agents() {
+  local real
+  if [[ "${PRINT_PATH}" -eq 1 ]]; then
+    real=$(resolve_final "${AGENTS}") || fail 3 error-symlink "AGENTS.md のリンク先を辿れない"
+    case "${real}" in
+      "${ROOT_PHYS%/}"/*) ;;
+      *) fail 3 error-symlink "AGENTS.md のリンク先がリポジトリの外にある。外のファイルを書き換えないため止める" ;;
+    esac
+    case "${real}" in
+      *$'\n'*) fail 3 error-symlink "AGENTS.md の物理パスに改行が含まれる。書き込み先として扱えないため止める" ;;
+    esac
+    echo "UPDATE_DOCS_WRITE_PATH ${real}"
+  fi
+  echo "UPDATE_DOCS_TARGET agents"
+}
+
 if [[ -f "${CLAUDE}" && -f "${AGENTS}" && "${CLAUDE}" -ef "${AGENTS}" ]]; then
-  if [[ ! -L "${CLAUDE}" && ! -L "${AGENTS}" ]]; then
+  # 同じファイル。物理的なリンク先のパスが一致するときだけ（一方がもう一方への symlink、または
+  # 両方が同じ実体への symlink）、その実体を書き込み先にする。一致しないのはハードリンク。
+  CLAUDE_REAL=$(resolve_final "${CLAUDE}") || fail 3 error-symlink "CLAUDE.md のリンク先を辿れない"
+  AGENTS_REAL=$(resolve_final "${AGENTS}") || fail 3 error-symlink "AGENTS.md のリンク先を辿れない"
+  if [[ "${CLAUDE_REAL}" != "${AGENTS_REAL}" ]]; then
     fail 3 error-hardlink "CLAUDE.md と AGENTS.md は同じファイルへのハードリンク。置換でリンクが切れるため書き込まずに止める（どちらかを symlink か別ファイルにしてから再実行する）"
   fi
   echo "警告: CLAUDE.md と AGENTS.md は同じファイルなので、AGENTS.md として update-docs 専用の区間だけを更新する（CLAUDE.md は直接書き換えない）" >&2
-  echo "UPDATE_DOCS_TARGET agents"
+  emit_agents
 elif [[ -f "${CLAUDE}" ]]; then
   echo "UPDATE_DOCS_TARGET claude"
 elif [[ -f "${AGENTS}" ]]; then
-  echo "UPDATE_DOCS_TARGET agents"
+  emit_agents
 else
   echo "CLAUDE.md も AGENTS.md も無い。ファイルは作らない（報告して止める）" >&2
   echo "UPDATE_DOCS_TARGET none"

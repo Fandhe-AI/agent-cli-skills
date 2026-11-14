@@ -6,7 +6,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -93,6 +93,122 @@ describe('SKILL.md Step 0 のフェンス', () => {
         assert.equal(readFileSync(join(root, link), 'utf8'), expected)
         // 管理区間とその前のバイトは先頭からそのまま残る。
         assert.ok(readFileSync(join(root, real), 'utf8').startsWith(original))
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  }
+
+  // 選択（フェンス 1）から書き込み（フェンス 2）までを通しで流す。リンクは symlink のまま残り、
+  // 物理的なリンク先の実体にだけ区間が書かれる。
+  const through = (bash, root) => {
+    const sel = run(bash, root, fences[0])
+    assert.equal(sel.status, 0, sel.stderr)
+    assert.equal(sel.stdout.trim().split('\n').pop(), 'UPDATE_DOCS_TARGET agents')
+    mkdirSync(join(root, '_'), { recursive: true })
+    writeFileSync(join(root, '_', 'update-docs-section.md'), '## Current Skills (1)\n\nfoo\n')
+    return run(bash, root, fences[1])
+  }
+  const BODY = `\n${START}\n## Current Skills (1)\n\nfoo\n${END}\n`
+  const THROUGH_CASES = {
+    'AGENTS.md -> docs/agents.md（CLAUDE.md なし）': {
+      make: (root) => { symlinkSync('docs/agents.md', join(root, 'AGENTS.md')) },
+      real: 'docs/agents.md', links: ['AGENTS.md'],
+    },
+    'CLAUDE.md と AGENTS.md が同じ docs/x.md を指す': {
+      make: (root) => { symlinkSync('docs/x.md', join(root, 'AGENTS.md')); symlinkSync('docs/x.md', join(root, 'CLAUDE.md')) },
+      real: 'docs/x.md', links: ['AGENTS.md', 'CLAUDE.md'],
+    },
+    '多段のリンク AGENTS.md -> a.md -> docs/agents.md': {
+      make: (root) => { symlinkSync('docs/agents.md', join(root, 'a.md')); symlinkSync('a.md', join(root, 'AGENTS.md')) },
+      real: 'docs/agents.md', links: ['AGENTS.md', 'a.md'],
+    },
+    '空白を含むディレクトリ越しのリンク': {
+      make: (root) => { mkdirSync(join(root, 'my docs')); writeFileSync(join(root, 'my docs', 'agents.md'), '# 実体\n'); symlinkSync('my docs/agents.md', join(root, 'AGENTS.md')) },
+      real: 'my docs/agents.md', links: ['AGENTS.md'],
+    },
+  }
+  for (const bash of BASHES) for (const [name, c] of Object.entries(THROUGH_CASES)) {
+    it(`[${bash}] ${name}: 実体へ区間だけを書き、リンクは symlink のまま`, () => {
+      const root = makeRepo('skills')
+      try {
+        mkdirSync(join(root, 'docs'), { recursive: true })
+        const original = '# 実体\n\n## 1. セキュリティ観点\n\n- 項目\n'
+        writeFileSync(join(root, 'docs', 'agents.md'), original)
+        writeFileSync(join(root, 'docs', 'x.md'), original)
+        c.make(root)
+        const realPath = join(root, c.real)
+        const before = readFileSync(realPath, 'utf8')
+        const w = through(bash, root)
+        assert.equal(w.status, 0, w.stderr)
+        assert.equal(w.stdout.trim().split('\n').pop(), 'UPDATE_DOCS_SECTION_RESULT appended')
+        assert.equal(readFileSync(realPath, 'utf8'), `${before}${BODY}`)
+        for (const l of c.links) {
+          assert.equal(lstatSync(join(root, l)).isSymbolicLink(), true, `${l} は symlink のまま`)
+          assert.equal(readFileSync(join(root, l), 'utf8'), `${before}${BODY}`)
+        }
+        assert.equal(lstatSync(realPath).isSymbolicLink(), false)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  }
+
+  for (const bash of BASHES) {
+    it(`[${bash}] 範囲外を指すリンクは選択で止まり、書き込みフェンスだけを流しても外のファイルを変えない`, () => {
+      const root = makeRepo('skills')
+      const outside = join(root, '..', `${root.split('/').pop()}-outside.md`)
+      try {
+        writeFileSync(outside, '# 外\n')
+        symlinkSync(outside, join(root, 'AGENTS.md'))
+        const sel = run(bash, root, fences[0])
+        assert.equal(sel.status, 3)
+        assert.equal(sel.stdout.trim().split('\n').pop(), 'UPDATE_DOCS_TARGET error-symlink')
+        mkdirSync(join(root, '_'))
+        writeFileSync(join(root, '_', 'update-docs-section.md'), '## Current Skills (1)\n')
+        const w = run(bash, root, fences[1])
+        assert.notEqual(w.status, 0)
+        assert.doesNotMatch(w.stdout, /UPDATE_DOCS_SECTION_RESULT (appended|replaced|unchanged)/)
+        assert.equal(readFileSync(outside, 'utf8'), '# 外\n')
+        assert.equal(lstatSync(join(root, 'AGENTS.md')).isSymbolicLink(), true)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+        rmSync(outside, { force: true })
+      }
+    })
+
+    it(`[${bash}] CLAUDE.md が別にあるとき（claude）、書き込みフェンスは AGENTS.md へも CLAUDE.md へも書かない`, () => {
+      const root = makeRepo('skills')
+      try {
+        writeFileSync(join(root, 'CLAUDE.md'), '# c\n')
+        writeFileSync(join(root, 'AGENTS.md'), '# a\n')
+        mkdirSync(join(root, '_'))
+        writeFileSync(join(root, '_', 'update-docs-section.md'), '## Current Skills (1)\n')
+        const w = run(bash, root, fences[1])
+        assert.notEqual(w.status, 0)
+        assert.equal(readFileSync(join(root, 'CLAUDE.md'), 'utf8'), '# c\n')
+        assert.equal(readFileSync(join(root, 'AGENTS.md'), 'utf8'), '# a\n')
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+    it(`[${bash}] 別々の symlink がハードリンク同士の実体を指すときは選択で止まり、書き込まない`, () => {
+      const root = makeRepo('skills')
+      try {
+        mkdirSync(join(root, 'docs'))
+        writeFileSync(join(root, 'docs', 'a.md'), '# a\n')
+        linkSync(join(root, 'docs', 'a.md'), join(root, 'docs', 'b.md'))
+        symlinkSync('docs/a.md', join(root, 'CLAUDE.md'))
+        symlinkSync('docs/b.md', join(root, 'AGENTS.md'))
+        const sel = run(bash, root, fences[0])
+        assert.equal(sel.status, 3)
+        assert.equal(sel.stdout.trim().split('\n').pop(), 'UPDATE_DOCS_TARGET error-hardlink')
+        mkdirSync(join(root, '_'))
+        writeFileSync(join(root, '_', 'update-docs-section.md'), '## Current Skills (1)\n')
+        const w = run(bash, root, fences[1])
+        assert.notEqual(w.status, 0)
+        assert.equal(readFileSync(join(root, 'docs', 'a.md'), 'utf8'), '# a\n')
       } finally {
         rmSync(root, { recursive: true, force: true })
       }
