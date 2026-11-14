@@ -37,7 +37,7 @@ jobs:
         run: bash .github/scripts/check-skill-structure.sh
 
       - name: Check tool neutrality
-        run: bash .github/scripts/check-tool-neutral.sh
+        run: bash .github/scripts/check-tool-neutral.sh --strict
 
   # --------------------------------------------------
   # js-tests（implement-issue-tree G0 ゲート等の決定的回帰テスト）
