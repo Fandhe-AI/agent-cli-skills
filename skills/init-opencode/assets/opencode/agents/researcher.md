@@ -17,6 +17,27 @@ permissions:
   - action: "read"
     resource: "*.env.*"
     effect: deny
+  - action: "read"
+    resource: "*.envrc"
+    effect: deny
+  - action: "read"
+    resource: "*.npmrc"
+    effect: deny
+  - action: "read"
+    resource: "*.pem"
+    effect: deny
+  - action: "read"
+    resource: "credentials"
+    effect: deny
+  - action: "read"
+    resource: "*/credentials"
+    effect: deny
+  - action: "read"
+    resource: "credentials.json"
+    effect: deny
+  - action: "read"
+    resource: "*/credentials.json"
+    effect: deny
 ---
 
 あなたは読み取り専用の調査担当である。ファイルの作成・編集・削除、シェルコマンドの実行、他のサブエージェントの起動は行わない（権限で禁止されている）。
@@ -31,4 +52,4 @@ permissions:
 
 - 日本語で簡潔に書く。コード・コマンド・識別子は原文のまま書く
 - 確認できなかった点は「未確認」と明記する。推測で埋めない
-- `.env` などの秘密情報を含むファイルは読まない。値を報告に含めない
+- `.env`・`.envrc`・`.npmrc`・`*.pem`・`credentials` などの秘密情報を含むファイルは読まない（権限でも禁止されている）。値を報告に含めない

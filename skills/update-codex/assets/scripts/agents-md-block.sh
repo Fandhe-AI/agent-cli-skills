@@ -30,7 +30,20 @@
 #
 # 32768 バイト超: Codex が AGENTS.md を読む上限。書き込みは行い、stderr へ警告だけ出す。
 #
-# 終了コード: 0 成功 / 1 使い方の誤り / 2 入出力・前提 / 4 マーカー・フェンス不整合
+# 読み込みと書き込みの間の更新（lost update）: 走査の前に --target を一時ディレクトリへコピーし、
+#   判定と結果の生成はすべてそのコピーから行う。置換（mv）の直前に --target がコピーと同じかを比べ、
+#   違えば書かずに error-changed で止める（target が無いと見て作る間に他者が作った場合も同じ）。
+#   他者の更新を上書きしないための検知で、比べてから mv までの短い間は排他しない。再実行すれば最新の
+#   内容から作り直す。update-docs の agents-section.sh と同じ方式。
+# パスの扱い: `-` で始まる --target / --block は `./` を前置し、cat・cp・mv などへオプションとして
+#   渡らないようにする。--target の親ディレクトリがシンボリックリンクのときは、リンク先の実体の
+#   ディレクトリへ書くことを stderr に警告する（止めない。ファイル自体の symlink は従来どおり
+#   error-symlink）。
+# 一時ファイル: 書き込み用の一時ファイル（<target>.tmp.XXXXXX）は置換の直前に作り、正常・異常終了と
+#   TERM を受けたときも EXIT trap で消す（bash は終了時に EXIT trap を走らせる。TERM で実測）。SIGKILL は捕捉できないため、その瞬間に残り得る .tmp.* は
+#   人が消す（target は無傷。作ってから mv までの窓は数ミリ秒）。
+#
+# 終了コード: 0 成功 / 1 使い方の誤り / 2 入出力・前提（error-changed を含む）/ 4 マーカー・フェンス不整合
 # stdout の最終行は固定語彙の AGENTS_MD_BLOCK_RESULT <created|appended|replaced|unchanged|error-...>。
 #
 # 単体実行専用（source しない）。bash 3.2 と BSD/GNU の POSIX ツールだけで動く。
@@ -63,10 +76,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "${TARGET}" && -n "${BLOCK}" ]] || fail 1 error-usage "--target と --block は必須"
+# `-` 始まりのパスがコマンドのオプションとして解釈されないよう、相対パスに ./ を前置する
+case "${TARGET}" in -*) TARGET="./${TARGET}" ;; esac
+case "${BLOCK}" in -*) BLOCK="./${BLOCK}" ;; esac
 [[ -f "${BLOCK}" && -r "${BLOCK}" ]] || fail 2 error-block-unreadable "--block のファイルを読めない"
 [[ ! -L "${TARGET}" ]] || fail 2 error-symlink "--target はシンボリックリンク（mv で置換すると実体を壊すため扱わない）"
 [[ ! -e "${TARGET}" || -f "${TARGET}" ]] || fail 2 error-target "--target は通常ファイルではない"
-[[ -d "$(dirname -- "${TARGET}")" ]] || fail 2 error-io "--target の親ディレクトリが無い"
+PARENT=$(dirname -- "${TARGET}")
+[[ -d "${PARENT}" ]] || fail 2 error-io "--target の親ディレクトリが無い"
+if [[ -L "${PARENT}" ]]; then
+  echo "警告: --target の親ディレクトリ（${PARENT}）はシンボリックリンク。リンク先の実体のディレクトリへ書く" >&2
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/agents-md-block.XXXXXX") || fail 2 error-io "一時ディレクトリを作れない"
 TMP_OUT=""
@@ -78,20 +98,20 @@ trap cleanup EXIT
 
 # ---- 区間の中身の検査 ----
 # 中身にマーカー文字列があると区間が壊れる。フェンスの内外を問わず拒否する。
-if grep -qF -e "${START}" -e "${END}" "${BLOCK}"; then
+if grep -qF -e "${START}" -e "${END}" -- "${BLOCK}"; then
   fail 4 error-block-marker "--block の中身に管理マーカーの文字列が含まれている"
 fi
 [[ -s "${BLOCK}" ]] || fail 2 error-block-empty "--block が空"
 
 # 末尾改行を保証した中身（コマンド置換は末尾改行を落とすため、ファイルのまま扱う）
 BLK="${WORK}/blk"
-cat "${BLOCK}" > "${BLK}"
+cat -- "${BLOCK}" > "${BLK}"
 if [[ -n "$(tail -c 1 "${BLK}")" ]]; then printf '\n' >> "${BLK}"; fi
 
 # ---- 走査: フェンス外のマーカー位置 ----
 # 出力 1 行: <start行> <end行> <startの数> <endの数> <フェンスが閉じていないとき 1>
 scan() {
-  awk -v S="${START}" -v E="${END}" '
+  LC_ALL=C awk -v S="${START}" -v E="${END}" '
     function rtrim(s) { sub(/[ \t\r]+$/, "", s); return s }
     {
       t = $0; sub(/\r$/, "", t); sub(/^ ? ? ?/, "", t)
@@ -121,19 +141,24 @@ warn_size() {
 }
 
 NEW="${WORK}/new"
+SNAP="${WORK}/snap"
 if [[ ! -e "${TARGET}" ]]; then
   mode=created
   { printf '%s\n' "${START}"; cat "${BLK}"; printf '%s\n' "${END}"; } > "${NEW}"
 else
-  read -r sl el ns ne infence < <(scan "${TARGET}")
+  # 以降の判定と結果の生成はすべてこのコピーから行う（置換の直前に --target と比べる）
+  cat -- "${TARGET}" > "${SNAP}" || fail 2 error-io "AGENTS.md を読めない"
+  SCAN1="${WORK}/scan1"
+  scan "${SNAP}" > "${SCAN1}" || fail 2 error-io "AGENTS.md を走査できない"
+  read -r sl el ns ne infence < "${SCAN1}" || fail 2 error-io "走査結果を読めない"
   [[ "${infence}" -eq 0 ]] \
     || fail 4 error-fence "コードフェンスが閉じていない。マーカーの位置を判定できないため変更しない（フェンスを閉じてから再実行する）"
   if [[ "${ns}" -eq 0 && "${ne}" -eq 0 ]]; then
     mode=appended
     {
-      cat "${TARGET}"
-      if [[ -s "${TARGET}" ]]; then
-        if [[ -n "$(tail -c 1 "${TARGET}")" ]]; then printf '\n'; fi
+      cat "${SNAP}"
+      if [[ -s "${SNAP}" ]]; then
+        if [[ -n "$(tail -c 1 "${SNAP}")" ]]; then printf '\n'; fi
         printf '\n'
       fi
       printf '%s\n' "${START}"
@@ -143,14 +168,14 @@ else
   elif [[ "${ns}" -eq 1 && "${ne}" -eq 1 && "${sl}" -lt "${el}" ]]; then
     mode=replaced
     {
-      head -n "${sl}" "${TARGET}"
+      head -n "${sl}" "${SNAP}"
       cat "${BLK}"
-      tail -n +"${el}" "${TARGET}"
+      tail -n +"${el}" "${SNAP}"
     } > "${NEW}"
   else
     fail 4 error-markers "管理マーカーが不整合（片方のみ・2 組以上・逆順のいずれか）。ファイルは変更しない"
   fi
-  if cmp -s "${NEW}" "${TARGET}"; then mode=unchanged; fi
+  if cmp -s "${NEW}" "${SNAP}"; then mode=unchanged; fi
 fi
 
 if [[ "${mode}" == "unchanged" || "${CHECK}" -eq 1 ]]; then
@@ -160,16 +185,24 @@ if [[ "${mode}" == "unchanged" || "${CHECK}" -eq 1 ]]; then
 fi
 
 # ---- 原子的な書き込み（同一ディレクトリの一時ファイル -> mv） ----
-TMP_OUT=$(mktemp "${TARGET}.tmp.XXXXXX") || fail 2 error-io "一時ファイルを作れない"
-if [[ -e "${TARGET}" ]]; then
+TMP_OUT=$(mktemp -- "${TARGET}.tmp.XXXXXX") || fail 2 error-io "一時ファイルを作れない"
+if [[ "${mode}" != "created" ]]; then
   # 権限・所有を引き継ぐため、既存ファイルのコピーへ内容だけ上書きする
-  cp -p "${TARGET}" "${TMP_OUT}" || fail 2 error-io "権限を引き継げない"
+  cp -p -- "${TARGET}" "${TMP_OUT}" || fail 2 error-io "権限を引き継げない"
 else
   m=$(umask)
   chmod "$(printf '%03o' $((0666 & ~0${m})))" "${TMP_OUT}" || fail 2 error-io "権限を設定できない"
 fi
 cat "${NEW}" > "${TMP_OUT}" || fail 2 error-io "一時ファイルへ書けない"
-mv -f "${TMP_OUT}" "${TARGET}" || fail 2 error-io "置換できない"
+# 置換の直前に、走査したときの内容から変わっていないことを確かめる（変わっていたら他者の更新を上書きしない）
+if [[ "${mode}" == "created" ]]; then
+  [[ ! -e "${TARGET}" && ! -L "${TARGET}" ]] \
+    || fail 2 error-changed "AGENTS.md が無いと見て作る間に他者が作った。他の更新を上書きしないため書かない（再実行する）"
+else
+  cmp -s "${TARGET}" "${SNAP}" \
+    || fail 2 error-changed "走査のあとに AGENTS.md が書き換えられた。他の更新を上書きしないため書かない（再実行する）"
+fi
+mv -f -- "${TMP_OUT}" "${TARGET}" || fail 2 error-io "置換できない"
 TMP_OUT=""
 warn_size "${TARGET}"
 echo "AGENTS_MD_BLOCK_RESULT ${mode}"

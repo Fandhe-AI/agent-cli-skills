@@ -29,6 +29,10 @@ import { fileURLToPath } from "node:url"
 const GUARD_PATH = fileURLToPath(new URL("../../hooks/agent-guard.sh", import.meta.url))
 const GUARD_TIMEOUT_MS = 5000
 const SESSION_TIMEOUT_MS = 3000
+// 1 つの event でガードの同期実行（spawnSync）に使える時間の合計。spawnSync は OpenCode 全体のイベントループを
+// 止めるため、resources が多いと「件数 × 5 秒」の間ほかの処理がすべて止まる。合計がこの値に達したら、残りの
+// コマンドは実行せず deny にする（fail-closed）。1 回の実行は 5 秒の上限のまま、残りが 5 秒に満たなければ残りまで。
+const TOTAL_BLOCK_BUDGET_MS = 10000
 
 // ガードを動かす bash。PATH 先頭に置かれた偽の bash に差し替えられないよう、固定の場所を先に探し、
 // どちらも無い環境だけ PATH 探索（"bash"）に落とす。
@@ -47,6 +51,7 @@ const MESSAGES = {
 }
 const MSG_GUARD_MISSING = "agent-guard: .opencode/hooks/agent-guard.sh が見つからないため拒否した"
 const MSG_GUARD_FAILED = "agent-guard: ガードの実行に失敗した（異常終了・時間切れ・結果行なし）ため拒否した"
+const MSG_BUDGET = "agent-guard: 1 つの shell 実行に含まれるコマンドが多く、判定に使える時間の上限を超えたため拒否した。コマンドを分けて実行すること"
 const MSG_INTERNAL = "agent-guard: 判定中に例外が発生したため拒否した"
 const MSG_BAD_EVENT = "agent-guard: shell の対象を解釈できなかったため拒否した"
 const MSG_PROTECTED_EDIT = "agent-guard: ガード本体・plugin・設定ファイル（.opencode/hooks・.opencode/plugins・opencode.jsonc）はエージェントから編集できない。更新は人間が setup スキル（update-opencode）か端末で行うこと"
@@ -80,13 +85,13 @@ const RESULT_LINE = /^AGENT_GUARD_RESULT (allow|deny(?: ([a-z-]+))?)$/
  * 1 コマンドをガードへ渡して判定する。
  * @returns {{ deny: false } | { deny: true, message: string }}
  */
-function judge(command, subagent) {
+function judge(command, subagent, timeoutMs) {
   if (!existsSync(GUARD_PATH)) return { deny: true, message: MSG_GUARD_MISSING }
 
   const r = spawnSync(BASH, [GUARD_PATH], {
     input: JSON.stringify({ command, subagent }),
     encoding: "utf8",
-    timeout: GUARD_TIMEOUT_MS,
+    timeout: timeoutMs,
   })
   // error は起動失敗・時間切れ（ETIMEDOUT）、signal は kill された場合。
   if (r.error || r.signal || typeof r.stdout !== "string") return { deny: true, message: MSG_GUARD_FAILED }
@@ -159,8 +164,13 @@ async function evaluate(ctx, event) {
   if (resources.length === 0) return
 
   const subagent = await detectSubagent(ctx, event.sessionID)
+  // 同期実行の合計時間を TOTAL_BLOCK_BUDGET_MS までに抑える。使い切ったら残りは実行せず deny にする。
+  const deadline = Date.now() + TOTAL_BLOCK_BUDGET_MS
   for (const command of resources) {
-    const verdict = typeof command === "string" ? judge(command, subagent) : { deny: true, message: MSG_BAD_EVENT }
+    if (typeof command !== "string") return deny(event, MSG_BAD_EVENT)
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return deny(event, MSG_BUDGET)
+    const verdict = judge(command, subagent, Math.min(GUARD_TIMEOUT_MS, remaining))
     if (verdict.deny) return deny(event, verdict.message)
   }
 }

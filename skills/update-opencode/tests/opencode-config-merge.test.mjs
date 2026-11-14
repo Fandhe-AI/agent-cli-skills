@@ -5,9 +5,10 @@ import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdtempSync, writeFileSync, readFileSync, statSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, statSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
 
 const run = promisify(execFile)
@@ -290,5 +291,97 @@ describe('opencode-config-merge', { concurrency: true }, () => {
   it('引数の誤りは error-usage（終了コード 2）', async () => {
     const r = await run(process.execPath, [SCRIPT, '--target']).catch((e) => e)
     assert.equal(r.code, 2); assert.match(r.stdout, /OPENCODE_CONFIG_MERGE_RESULT error-usage/)
+  })
+
+  // ---- 読み込みから置換までの間の変更（lost update）の検知 ----
+  // --import で fs の読み書きを差し替える前処理を流し込み、target の最初の読み込み直後（既存）・一時ファイルの
+  // chmod 直後（作成）に target を書き換えさせる。本物のスクリプトにテスト用のフックは持たせない。
+  function racePreload(dir, mode) {
+    const p = join(dir, 'race-preload.mjs')
+    writeFileSync(p, [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'let done = false',
+      `if (${JSON.stringify(mode)} === 'read') {`,
+      '  const orig = fs.readFileSync',
+      '  fs.readFileSync = function (p, ...a) {',
+      '    const r = orig.call(this, p, ...a)',
+      "    if (!done && String(p) === process.env.RACE_TARGET) { done = true; fs.appendFileSync(p, '\\n') }",
+      '    return r',
+      '  }',
+      '} else {',
+      '  const orig = fs.chmodSync',
+      '  fs.chmodSync = function (...a) {',
+      '    const r = orig.apply(this, a)',
+      "    if (!done && !fs.existsSync(process.env.RACE_TARGET)) { done = true; fs.writeFileSync(process.env.RACE_TARGET, '{\"x\":1}\\n') }",
+      '    return r',
+      '  }',
+      '}',
+      'syncBuiltinESMExports()',
+      '',
+    ].join('\n'))
+    return pathToFileURL(p).href
+  }
+
+  async function mergeRace(target, preload) {
+    let r
+    try { r = await run(process.execPath, ['--import', preload, SCRIPT, '--target', target, '--template', TEMPLATE], { env: { ...process.env, RACE_TARGET: target } }) }
+    catch (e) { r = { stdout: e.stdout ?? '', stderr: e.stderr ?? '', code: e.code } }
+    return { code: r.code ?? 0, stderr: r.stderr, word: r.stdout.trimEnd().split('\n').pop().replace('OPENCODE_CONFIG_MERGE_RESULT ', '') }
+  }
+
+  it('読み込んだあとに target が書き換わったら error-changed で上書きしない', async () => {
+    const d = tmp(); const t = write(d, { permissions: [userAllow] })
+    const before = readFileSync(t, 'utf8')
+    const r = await mergeRace(t, racePreload(d, 'read'))
+    assert.equal(r.word, 'error-changed', r.stderr); assert.notEqual(r.code, 0)
+    assert.equal(readFileSync(t, 'utf8'), `${before}\n`, '他者の変更が残る')
+    assert.deepEqual(readdirSync(d).filter((f) => f.includes('.tmp-')), [], '一時ファイルが残っている')
+  })
+
+  it('作成: 無いと見たあとに他者が作ったら error-changed で上書きしない', async () => {
+    const d = tmp(); const t = join(d, 'opencode.jsonc')
+    const r = await mergeRace(t, racePreload(d, 'create'))
+    assert.equal(r.word, 'error-changed', r.stderr); assert.notEqual(r.code, 0)
+    assert.equal(readFileSync(t, 'utf8'), '{"x":1}\n')
+    assert.deepEqual(readdirSync(d).filter((f) => f.includes('.tmp-')), [], '一時ファイルが残っている')
+  })
+
+  it('前処理を入れても何も書き換わらなければ通常どおり書ける（対照）', async () => {
+    const d = tmp(); const t = write(d, { permissions: [userAllow] })
+    const pre = join(d, 'noop.mjs'); writeFileSync(pre, 'export {}\n')
+    const r = await mergeRace(t, pathToFileURL(pre).href)
+    assert.equal(r.word, 'merged', r.stderr)
+  })
+
+  // ---- 複数文書・オプション風のパス・親ディレクトリの symlink ----
+
+  it('複数の JSON 文書（{}{}）は error-invalid-json でファイル不変', async () => {
+    const d = tmp(); const t = write(d, '{}{}')
+    const r = await merge(t)
+    assert.equal(r.word, 'error-invalid-json'); assert.notEqual(r.code, 0)
+    assert.equal(readFileSync(t, 'utf8'), '{}{}')
+  })
+
+  it('- 始まりの相対パスの target も通常のファイルとして扱う', async () => {
+    const d = tmp(); write(d, { permissions: [userAllow] }, '-opencode.jsonc')
+    let r
+    try { r = await run(process.execPath, [SCRIPT, '--target', '-opencode.jsonc', '--template', TEMPLATE], { cwd: d }) } catch (e) { r = e }
+    assert.match(r.stdout, /OPENCODE_CONFIG_MERGE_RESULT merged/, r.stderr)
+    assert.equal(read(join(d, '-opencode.jsonc')).permissions.length, 1 + own.permissions.length)
+  })
+
+  it('親ディレクトリが symlink なら警告して実体のディレクトリへ書く', async () => {
+    const d = tmp(); const real = join(d, 'real'); mkdirSync(real)
+    const link = join(d, 'link'); symlinkSync(real, link)
+    write(real, { permissions: [userAllow] })
+    const r = await run(process.execPath, [SCRIPT, '--target', join(link, 'opencode.jsonc'), '--template', TEMPLATE])
+    assert.match(r.stdout, /OPENCODE_CONFIG_MERGE_RESULT merged/)
+    assert.match(r.stderr, /親ディレクトリ.*シンボリックリンク/)
+    assert.equal(read(join(real, 'opencode.jsonc')).permissions.length, 1 + own.permissions.length)
+    assert.deepEqual(readdirSync(real), ['opencode.jsonc'])
+    // 通常の親ディレクトリでは警告しない（対照）
+    const t = write(d, { permissions: [userAllow] }, 'plain.jsonc')
+    assert.doesNotMatch((await run(process.execPath, [SCRIPT, '--target', t, '--template', TEMPLATE])).stderr, /シンボリックリンク/)
   })
 })

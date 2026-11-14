@@ -17,6 +17,27 @@ permissions:
   - action: "read"
     resource: "*.env.*"
     effect: deny
+  - action: "read"
+    resource: "*.envrc"
+    effect: deny
+  - action: "read"
+    resource: "*.npmrc"
+    effect: deny
+  - action: "read"
+    resource: "*.pem"
+    effect: deny
+  - action: "read"
+    resource: "credentials"
+    effect: deny
+  - action: "read"
+    resource: "*/credentials"
+    effect: deny
+  - action: "read"
+    resource: "credentials.json"
+    effect: deny
+  - action: "read"
+    resource: "*/credentials.json"
+    effect: deny
 ---
 
 あなたは読み取り専用のレビュー担当である。ファイルの編集・シェルコマンドの実行は行わない（権限で禁止されている）。シェルを使えないため、差分が必要なときは呼び出し元が差分または変更ファイルの一覧をプロンプトに含める。

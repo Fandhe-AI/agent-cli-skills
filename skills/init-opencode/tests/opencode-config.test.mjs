@@ -60,6 +60,15 @@ const cfg = parseJsonc(readFileSync(join(OC, 'opencode.jsonc'), 'utf8'))
 const agentFiles = readdirSync(join(OC, 'agents')).filter((f) => f.endsWith('.md')).sort()
 const agents = agentFiles.map((f) => ({ file: f, id: f.replace(/\.md$/, ''), ...parseFrontmatter(readFileSync(join(OC, 'agents', f), 'utf8')) }))
 
+// 公式 docs の照合規則: `*` は 0 文字以上・`?` は 1 文字・末尾の ` *` は引数なしの形にも一致する。
+const globToRegExp = (pat) => {
+  const trailing = pat.endsWith(' *')
+  const body = trailing ? pat.slice(0, -2) : pat
+  const re = body.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+  return new RegExp(`^${re}${trailing ? '( .*)?' : ''}$`)
+}
+const blockedBy = (cmds, rules, prefix) => cmds.filter((c) => rules.some((r) => globToRegExp(r.resource.slice(prefix.length)).test(c)))
+
 describe('opencode.jsonc', () => {
   // コメント付きの生成物は update-opencode の自動マージ（opencode-config-merge.mjs）が needs-manual にする。
   it('コメントを含まない純粋な JSON である（利用者が規則を足しても自動マージを通る）', () => {
@@ -102,17 +111,9 @@ describe('opencode.jsonc', () => {
     assert.ok(cfg.policies.some((p) => p.resource.includes('--no-verify')))
   })
 
-  // 公式 docs の照合規則: `*` は 0 文字以上・`?` は 1 文字・末尾の ` *` は引数なしの形にも一致する。
-  const globToRegExp = (pat) => {
-    const trailing = pat.endsWith(' *')
-    const body = trailing ? pat.slice(0, -2) : pat
-    const re = body.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
-    return new RegExp(`^${re}${trailing ? '( .*)?' : ''}$`)
-  }
   // shell の照合は shell の規則だけで行う（edit の path glob を shell のコマンドに当てない）
   const shellPerm = cfg.permissions.filter((r) => r.action === 'shell')
   const shellPol = cfg.policies.filter((p) => p.resource.startsWith('shell:'))
-  const blockedBy = (cmds, rules, prefix) => cmds.filter((c) => rules.some((r) => globToRegExp(r.resource.slice(prefix.length)).test(c)))
 
   it('--force-with-lease / --force-if-includes も permissions・policies の両方に一致する（lease 付きでも既存コミットを消せる）', () => {
     const denied = ['git push --force-with-lease', 'git push --force-with-lease origin main', 'git push --force-with-lease=main:abc origin main', 'git push --force-if-includes', 'git push --force-if-includes origin main']
@@ -202,6 +203,28 @@ describe('agents/*.md', () => {
       const lastAllow = perms.map((p) => p.effect).lastIndexOf('allow')
       const envDeny = perms.map((p, i) => (p.action === 'read' && p.resource.includes('.env') && p.effect === 'deny' ? i : -1)).filter((i) => i >= 0)
       assert.ok(envDeny.length >= 2 && envDeny.every((i) => i > lastAllow))
+    })
+  }
+
+  // 読み取り専用 agent が秘密情報を含みやすいファイルを read できない。resource は起動ディレクトリからの相対パス
+  // （サブディレクトリからの起動では `../` 付き、絶対パスもある）で、`*` は `/` を含む 0 文字以上に一致する。
+  // `credentials*` や `*credentials*` にすると src/credentials_service.ts のようなソースまで止めるため、
+  // 名前が `credentials` / `credentials.json` に一致するファイルだけを対象にする。
+  for (const id of ['researcher', 'reviewer']) {
+    it(`${id} は .env 系・.envrc・.npmrc・*.pem・credentials 系の read を deny し、通常のソースは止めない`, () => {
+      const a = agents.find((x) => x.id === id)
+      const readDeny = a.fm.permissions.filter((p) => p.action === 'read' && p.effect === 'deny')
+      const denied = [
+        '.env', '.env.local', 'config/prod.env', '../.env', '/work/repo/.env.production',
+        '.envrc', 'sub/.envrc', '../.envrc', '.npmrc', 'packages/a/.npmrc', '/home/u/.npmrc',
+        'certs/server.pem', 'key.pem', '../tls/ca.pem',
+        'credentials', '.aws/credentials', '/home/u/.aws/credentials', 'credentials.json', 'config/credentials.json', '../credentials.json',
+      ]
+      const allowed = [
+        'src/index.js', 'README.md', 'docs/envrc.md', 'src/credentials_service.ts', 'src/credentials/index.ts', 'docs/credentials.md', 'test/fixtures/pem-parser.js', 'package.json', '.npmrc.md', 'environment.ts',
+      ]
+      assert.deepEqual(blockedBy(denied, readDeny, ''), denied)
+      assert.deepEqual(blockedBy(allowed, readDeny, ''), [])
     })
   }
 

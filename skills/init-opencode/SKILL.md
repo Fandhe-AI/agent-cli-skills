@@ -139,7 +139,7 @@ cp "${ASSETS}/opencode/agents/"*.md "${TARGET}/.opencode/agents/"
 
 - plugin は `import.meta.url` から `../../hooks/agent-guard.sh` を解決するため、上の相対配置を崩さない（パスの書き換えは不要）
 - `opencode.jsonc` は既存なら上書きしない（`[ -e ... ] ||` で飛ばす）。Step 2 で設定が無いことを確認済みだが、念のためである
-- `opencode.jsonc` は補助層で、plugin（主判定）が読み込めない状態でも典型形の force push と `--no-verify` だけは止める。字面一致のため `git push origin main --force` のような順序違いは通る（plugin が止める）。末尾の ` *` は引数なしにも一致する。`--force-with-lease` / `--force-if-includes` も既存コミットを消せるため止める
+- `opencode.jsonc` は補助層で、plugin（主判定）が読み込めない状態でも典型形の force push と `--no-verify` だけは止める。字面一致のため `git push origin main --force` のような順序違いは通る（plugin が止める）。末尾の ` *` は引数なしにも一致する（v2.2.7 の実機で、`permissions` と `policies` のどちらでも `git push --force`・`git commit --no-verify` の引数なしの形が拒否されることを確認した）。`--force-with-lease` / `--force-if-includes` も既存コミットを消せるため止める
 - `opencode.jsonc` には、ガード本体・plugin・設定ファイルへの `edit` の deny（`*.opencode/hooks/*`・`*.opencode/plugins/*`・`*.opencode/plugin/*`（単数形も OpenCode v2.2.7 が plugin として読み込む）・`opencode.jsonc`・`*/opencode.jsonc`・`opencode.json`・`*/opencode.json`。先頭の `*` は、サブディレクトリから起動したときの `../.opencode/...` や絶対パスにも一致させるため）も入る。
   `edit` は write・patch のツールにも掛かるため、エージェントがこれらを置換してガードを無効にする経路を塞ぐ。deny は main のエージェントにも効く。
   このスキルや `update-opencode` が資産を更新する経路は、上の `cp`・`mkdir` とスクリプトなどシェルコマンドだけで、`edit` の deny の対象外である。
@@ -164,6 +164,7 @@ echo "exit=$?"
 | `created` / `appended` / `replaced` / `unchanged` | 0 | 成功。`unchanged` は既に最新 |
 | `error-usage` | 1 | 引数の誤り。コマンドを見直す |
 | `error-block-unreadable` / `error-block-empty` / `error-symlink` / `error-target` / `error-io` | 2 | 入出力・前提の問題。原因を報告して中断 |
+| `error-changed` | 2 | 読み込んだあとに AGENTS.md が他で書き換えられたため、上書きせずに止めた（ファイルは変わっていない）。別のエディタ・セッションの作業が終わってから 1 回だけ再実行し、続けて出るなら原因を報告して中断 |
 | `error-markers` / `error-fence` / `error-block-marker` | 4 | マーカー・フェンスの不整合。ファイルは変わっていない。手で直すよう案内して中断 |
 
 32768 バイトを超えると stderr に警告が出る（Codex が AGENTS.md を合計 32 KiB までしか読まないため、共有する場合に効く）。
@@ -353,6 +354,8 @@ git ls-remote origin   # 実行前の sha を控える
 - 未知キーは黙って消える。設定を書いたら `debug config` でキーの残存を必ず確認する。`ask` は `--auto` で自動承認されるため使わない
 - `agents-md-block.sh` は AGENTS.md の管理区間の外をバイト単位で変えない。マーカーが不整合なら書かずに中断する。区間は常に 1 つ（ユーザーが明示承認した区間外への追記は別操作）
 - 読み取り専用の agent（researcher / reviewer）は shell を使えない。差分は呼び出し元が渡す
+- 読み取り専用の agent（researcher / reviewer）は、`.env` 系・`.envrc`・`.npmrc`・`*.pem`・名前が `credentials` / `credentials.json` のファイルの `read` も権限で deny する（OpenCode v2.2.7 の実機で、`.npmrc`・`*.pem`・`.aws/credentials`・`.envrc` の read が `Permission denied: read` になり、`src/credentials_service.ts` は読めることを確認した）。`*credentials*` のように広げないのは、名前に含むだけのソースまで止めて調査を妨げるため。`*.key`・`.netrc`・`id_rsa` など、これら以外の秘密のファイルは対象外で、必要なら `.opencode/agents/` の deny に利用者が足す
+- plugin がガードを同期実行して待つ時間は、1 つの shell 実行（resources の全件）で合計 10 秒まで（1 回は 5 秒まで）。超えたら残りのコマンドは実行せず deny にする。待っている間は OpenCode 全体のイベントループが止まるため、件数に比例して固まるのを防ぐ上限である
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`、`env -S` で代入だけ渡し後続に git を置く形
