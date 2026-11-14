@@ -225,12 +225,42 @@ cp "${ASSETS}/codex/agents/"*.toml "${STAGE}/.codex/agents/"
 `--target` を `${STAGE}/AGENTS.md` にして書き、移動を案内する（既存の AGENTS.md があるときは上書き移動せず、
 利用者に `agents-md-block.sh` の実行を案内する）。
 
+Step 4-1 が途中まで成功してから 4-4 で拒否された場合など、`<target>/.codex/` が既にあることがある。
+このとき `mv _/codex-setup/.codex .codex` はしない（`.codex/.codex/` に入り反映されない）。
+ディレクトリ単位では動かさず、ファイル単位で次の分岐にする。移動前に必ず宛先の有無を確認し、`mv -n` には頼らない
+（BSD と GNU で戻り値が異なる）。
+
+| 宛先の状態 | 動作 |
+|-----------|------|
+| 無い | 宛先の親を作って移動する |
+| 有り・内容が同一 | 退避側のファイルを捨てる |
+| 有り・内容が異なる | 移動せず差分を提示し、上書きするかを利用者が判断する |
+
 ユーザーに提示するコマンド（ユーザー自身が、権限のある端末で実行する）。
 
 ```bash
 cd "<target>"
-mv _/codex-setup/.codex .codex
-chmod +x .codex/hooks/*.sh
+rc=0
+place() {   # $1=退避側のファイル $2=宛先。移動または同一なら 0、差分ありなら 1
+  [ -e "$1" ] || return 0   # 退避側が無い（配置済み）なら何もしない
+  if [ ! -e "$2" ]; then
+    mkdir -p -- "$(dirname -- "$2")" && mv -- "$1" "$2"
+  elif cmp -s -- "$1" "$2"; then
+    rm -f -- "$1"
+  else
+    echo "差分あり（移動しない）: $2"; diff -u -- "$2" "$1"; return 1
+  fi
+}
+S="_/codex-setup/.codex"
+for f in agent-guard.sh codex-pretooluse.sh codex-session-start.sh; do
+  place "${S}/hooks/${f}" ".codex/hooks/${f}" && chmod +x ".codex/hooks/${f}" || rc=1
+done
+place "${S}/hooks.json" ".codex/hooks.json" || rc=1
+place "${S}/rules/agent-guard.rules" ".codex/rules/agent-guard.rules" || rc=1
+for a in "${S}/agents/"*.toml; do
+  place "${a}" ".codex/agents/$(basename -- "${a}")" || rc=1
+done
+[ "${rc}" -eq 0 ] || echo "差分のあるファイルは未反映。内容を確認し、上書きするなら手動で mv する"
 
 # ワークフロースキルの導入（未導入のものだけ -s を付ける）
 SKILLS_CLI_VERSION="1.5.23"   # Step 4-4 と同じ固定版

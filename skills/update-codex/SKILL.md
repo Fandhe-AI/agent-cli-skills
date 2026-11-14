@@ -373,27 +373,47 @@ AGENTS.md を退避先へ書いた場合は、そのパス（`${STAGE}/AGENTS.md
 `AGENTS.md` はリポジトリ直下で書き込める場合が多いため、Step 4-3 のとおり直接書く。書き込めない場合は、
 既存の AGENTS.md を `${STAGE}/AGENTS.md` へコピーしてから `--target "${STAGE}/AGENTS.md"` で書き、置き換えを案内する。
 
-ユーザーに提示するコマンド（ユーザー自身が、権限のある端末で実行する）。移動は**承認済みの項目だけ**にし、
-ワイルドカードで全件を上書きしない。既存の agent ファイルも上書きしない。配列には承認済みの名前だけを入れて渡す。
+update では `<target>/.codex/` が既にある。したがって `mv _/codex-setup/.codex .codex` は使わない
+（`.codex/.codex/` に入り反映されない）。ディレクトリ単位では動かさず、**承認済みのファイルだけ**をファイル単位で
+次の分岐で反映する。ワイルドカードで全件を動かさず、移動前に必ず宛先の有無を確認する（`mv -n` には頼らない。
+BSD と GNU で戻り値が異なる）。
+
+| 宛先の状態 | 動作 |
+|-----------|------|
+| 無い | 宛先の親を作って移動する |
+| 有り・内容が同一 | 退避側のファイルを捨てる |
+| 有り・内容が異なる | 移動せず差分を提示する。承認済みの更新（hooks・rules・hooks.json）は、差分を確認した利用者が `APPLY_DIFF=1` を付けて再実行したときだけ置き換える。agent ファイルは利用者の編集を守るため、`APPLY_DIFF=1` でも置き換えない |
+
+ユーザーに提示するコマンド（ユーザー自身が、権限のある端末で実行する）。配列には承認済みの名前だけを入れて渡す。
 
 ```bash
 cd "<target>"
-mkdir -p .codex/hooks .codex/rules .codex/agents
+rc=0
+place() {   # $1=退避側のファイル $2=宛先 $3=overwrite なら APPLY_DIFF=1 のとき差分ありでも置き換える
+  [ -e "$1" ] || return 0   # 退避側が無い（反映済み）なら何もしない
+  if [ ! -e "$2" ]; then
+    mkdir -p -- "$(dirname -- "$2")" && mv -- "$1" "$2"
+  elif cmp -s -- "$1" "$2"; then
+    rm -f -- "$1"
+  elif [ "${3:-}" = overwrite ] && [ "${APPLY_DIFF:-}" = 1 ]; then
+    mv -f -- "$1" "$2"
+  else
+    echo "差分あり（移動しない）: $2"; diff -u -- "$2" "$1"; return 1
+  fi
+}
+S="_/codex-setup/.codex"
 approved_hooks=(agent-guard.sh codex-pretooluse.sh codex-session-start.sh)   # 承認済みだけに書き換える
 approved_rules=(agent-guard.rules)
 approved_agents=(researcher implementer reviewer)
 
 for f in "${approved_hooks[@]}"; do
-  cp "_/codex-setup/.codex/hooks/${f}" ".codex/hooks/${f}"
-  chmod +x ".codex/hooks/${f}"
+  place "${S}/hooks/${f}" ".codex/hooks/${f}" overwrite && chmod +x ".codex/hooks/${f}" || rc=1
 done
-for f in "${approved_rules[@]}"; do cp "_/codex-setup/.codex/rules/${f}" ".codex/rules/${f}"; done
-for a in "${approved_agents[@]}"; do
-  dst=".codex/agents/${a}.toml"
-  [ -e "${dst}" ] || cp "_/codex-setup/.codex/agents/${a}.toml" "${dst}"
-done
+for f in "${approved_rules[@]}"; do place "${S}/rules/${f}" ".codex/rules/${f}" overwrite || rc=1; done
+for a in "${approved_agents[@]}"; do place "${S}/agents/${a}.toml" ".codex/agents/${a}.toml" || rc=1; done
 # hooks.json の更新を承認した場合だけ（マージ済みのコピーで置き換える）
-cp _/codex-setup/.codex/hooks.json .codex/hooks.json
+place "${S}/hooks.json" ".codex/hooks.json" overwrite || rc=1
+[ "${rc}" -eq 0 ] || echo "差分のあるファイルは未反映。内容を確認し、承認済みの更新なら APPLY_DIFF=1 で再実行する"
 
 # 未導入のワークフロースキルの追加（未導入のものだけ -s を付ける）
 SKILLS_CLI_VERSION="1.5.23"   # Step 4-4 と同じ固定版
