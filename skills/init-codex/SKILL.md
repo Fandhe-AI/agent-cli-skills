@@ -458,7 +458,7 @@ git rev-parse HEAD; git -C "${SANDBOX}/origin.git" rev-parse main   # 実行前�
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`
-  - `bash -c` / `sh -c` / `eval`・shell へ渡すヒアドキュメントと here-string・ダブルクォート内の `$(…)`・`env -S` の値は、同じ解析器で再帰的に検査する（深さ 8・件数 512 を超えたら deny）。拾えないのは、パイプで shell へ渡す文字列・`bash -c "$(cat <<EOF …)"` のように生成した文字列・ダブルクォート内のバッククォート置換・引用符なしヒアドキュメント本文の `$(…)`
+  - `bash -c` / `sh -c` / `eval`・shell へ渡すヒアドキュメントと here-string・ダブルクォート内の `$(…)` とバッククォート・引用符なしヒアドキュメント本文の `$(…)`・`env -S` の値は、同じ解析器で再帰的に検査する（深さ 8・件数 512 を超える・ヒアドキュメントの区切り子が無い・置換の閉じが無いときは deny）。拾えないのは、パイプで shell へ渡す文字列・`bash -c "$(cat <<EOF …)"` のように生成した文字列
   - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。rules は先頭一致のため `git push origin main --force` 等は拾えない
   - PreToolUse の matcher は `^Bash$` だけで、Bash 以外のツールは判定しない。Codex 0.164.0 の実機では、`*` の matcher なら `apply_patch` も `tool_name = apply_patch` で PreToolUse に届くが、`^Bash$` の hook には届かなかった。このガードは git / gh のコマンドを見るもので、`apply_patch` による編集は止めない（編集できる範囲は sandbox の書き込み範囲で決まる。`.codex/`・`.agents/` は既定で読み取り専用）
   - `.codex/agents/` の researcher / reviewer が「読み取り専用」なのは指示文だけで、権限の制限ではない。参照した公式ドキュメントでは、サブエージェントは親セッションの sandbox を引き継ぎ、agent の TOML に書いた `sandbox_mode` は親の設定を上書きしないとされている（実機では未確認のため、TOML に `sandbox_mode` は書いていない）。読み取り専用を強制したい作業は、親セッションを `read-only` の sandbox で起動する

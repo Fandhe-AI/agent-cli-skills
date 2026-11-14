@@ -361,7 +361,7 @@ git ls-remote origin   # 実行前の sha を控える
 - **ガードの残存ギャップ**:
   - メインセッションでの `$'...'` による難読化は通る（難読化の拒否はサブエージェントのみ）
   - フックの無効化・alias の定義（`-c` / `--config-env` / `git config` の `core.hooksPath` と `alias.*`、先頭の `HUSKY=0` / `HUSKY_SKIP_HOOKS=1`）は検出して deny する。拾えないのは、利用者の設定ファイルに既にある alias・`include.path`・`GIT_CONFIG_*` 環境変数・`SKIP=`・別の呼び出しで export 済みの `HUSKY`
-  - `bash -c` / `sh -c` / `eval`・shell へ渡すヒアドキュメントと here-string・ダブルクォート内の `$(…)`・`env -S` の値は、同じ解析器で再帰的に検査する（深さ 8・件数 512 を超えたら deny）。拾えないのは、パイプで shell へ渡す文字列・`bash -c "$(cat <<EOF …)"` のように生成した文字列・ダブルクォート内のバッククォート置換・引用符なしヒアドキュメント本文の `$(…)`
+  - `bash -c` / `sh -c` / `eval`・shell へ渡すヒアドキュメントと here-string・ダブルクォート内の `$(…)` とバッククォート・引用符なしヒアドキュメント本文の `$(…)`・`env -S` の値は、同じ解析器で再帰的に検査する（深さ 8・件数 512 を超える・ヒアドキュメントの区切り子が無い・置換の閉じが無いときは deny）。拾えないのは、パイプで shell へ渡す文字列・`bash -c "$(cat <<EOF …)"` のように生成した文字列
   - ガード本体・plugin・設定ファイルの保護は `edit` の deny（write・patch を含む）と plugin の edit 判定が担う。シェルでの書き換え（`echo … >`・`sed -i`・`cp`・`mv` 等）は止めない。シンボリックリンク経由の書き換えも検証していない。`.opencode/tool(s)/`・`command(s)/`・`agents/`・`skills/` は edit の deny の対象外（v2.2.7 の実機では tool(s)・command(s) は読み込まれず実行もされなかった。agents と skills は利用者が育てる前提の資産）。`plugins` に任意のディレクトリを列挙する設定は `opencode.jsonc` の保護に頼る。配布先の git の差分で気づく運用に頼る
   - base64 復元・変数間接呼び出し・ブレース / glob 展開などの文字列照合で見抜けない形は通る。`permissions` / `policies` は字面一致のため `git push origin main --force` 等の順序違いは拾えない（plugin が止める）
 - ガードは `jq` が無い・入力を読めない・plugin から呼べないときに deny へ倒れる（fail-closed）。plugin が読み込めないと宣言層だけが効く

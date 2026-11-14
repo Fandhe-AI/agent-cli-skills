@@ -39,7 +39,8 @@
 #   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
 #                  C0 と DEL）を含むコマンド（subagent が true / null のとき）
 #   nesting-limit  bash -c / eval / heredoc / $(...) / env -S の入れ子が解析の上限（深さ 8・件数 512）を
-#                  超えた、またはダブルクォート内の $( の閉じを見つけられない。中身を見切れないため
+#                  超えた、ダブルクォート内の $( や `（引用符なし heredoc 本文の $( や `）の閉じを見つけられない、
+#                  または heredoc の区切り子が見つからないまま入力の末尾に達した。中身を見切れないため
 #                  拒否する（fail-closed。全セッション）
 #   bad-input      stdin が空・JSON として不正・command が文字列でない・subagent が真偽値 / null でない
 #   no-jq          jq が見つからない
@@ -99,24 +100,40 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 #   - push の --force / -f（束ね書きも。-o 以降は値）/ --force-with-lease / --force-if-includes /
 #     先頭 + の refspec（`--` の後ろでも見る。`--` はオプション解析を終えるだけで refspec は残る）
 # コマンド名の git は大文字小文字を区別せず照合する（macOS の FS 対策。パス付きも）。
-# リダイレクト（< > >> &> >& >|）と here-string（<<<）は語の区切りで、その後ろに置いた引数も
-# 検査する。算術式（((...)) / $((...)) / $[...]）内の << は heredoc とみなさない（コマンド置換・
-# 引用符を含む式や閉じのない式は算術式とみなさず通常どおり検査する）。
+# コマンド位置の前置語（{ then do else elif if while until ! time（option は -p だけ）と、env（basename で照合・-iS 等の束ね書きも）・
+# sudo / doas / nice・nohup・command・exec・builtin・export・declare・typeset とその option）と代入は読み飛ばし、
+# その後ろの HUSKY=0・env -S・echo / printf を判定する（sudo 等の後の echo は読み違いが迂回になるので対象にしない）。
+# リダイレクト（< > >> &> >& >|）は語の区切りで、その後ろに置いた引数も検査する。リダイレクトの対象（ファイル名・
+# fd。`2>` `{fd}>` の指定も）はコマンドでも引数でもないので語に積まない（`>echo git push -f` の echo を
+# コマンドと取り違えない）。here-string の語も別に持ち、shell が読む場合だけ解析する。`>` `<` の後ろの `&` `|` は
+# 直前の文字ではなく、解釈済みのリダイレクト演算子かどうかで決める（escape した `\>&` の & は制御演算子）。
+# 算術式（((...)) / $((...)) / $[...]）・${...}・配列の添字つき代入（x[1<<2]=y）と複合代入（a=([1<<2]=y)。どちらも
+# 代入を置ける位置だけ）内の << は heredoc とみなさない（中のコマンド置換・バッククォートは引用符の中でも読んで検査する。
+# 閉じのない式は算術式とみなさず通常どおり検査する）。bash 5.3 の ${ cmd; } / ${| cmd; } は中身がコマンドそのものなので
+# 値として読まず deny nesting-limit にする。
+# ANSI-C 引用符 $'...' は \ の解釈つきで読み（\' では閉じない・\n \xHH \NNN を解釈する）、heredoc の区切り子の
+# $'...' / $"..." も bash と同じに外す。heredoc の区切り子が見つからないまま入力の末尾に達したら、読み違いで
+# 後続の実コマンドを隠していないか判定できないので deny nesting-limit にする。
 # 入れ子の解析: 次の中身は元の文字列と別に積み、同じ解析器で順に再解析する（再帰ではなく作業キュー。
 # 深さ 8・件数 512 を超えたら deny nesting-limit）。
 #   - bash / sh / zsh / dash / ksh の -c の値（-lc 等の束ね書き・-o / -O の値・`--` を読み飛ばす）と eval の引数
 #   - -c を持たない shell（`bash <<EOF`・`cat <<EOF | bash`・`bash <<< '...'`）が同じ行で読む
 #     ヒアドキュメント本体と here-string。-c 付きや `bash script.sh` への heredoc は入力データなので見ない
-#   - ダブルクォート内の $(...)（対応する ) は引用符・入れ子・ヒアドキュメント本体・コメント・算術式を
-#     読み飛ばして探す）。`git commit -m "$(cat <<'EOF' ...)"` の本文は heredoc として読み飛ばすため
+#   - ダブルクォート内の $(...) とバッククォート置換（対応する ) は引用符・入れ子・${...}・ヒアドキュメント本体・
+#     コメント・算術式を読み飛ばして探す）。`git commit -m "$(cat <<'EOF' ...)"` の本文は heredoc として読み飛ばすため
 #     誤検知せず、本文に奇数個の " があっても後続行を引用符の中と取り違えない
+#   - 引用符なしヒアドキュメント（`<<EOF`）の本文のコマンド置換（$(...)・バッククォート・${...} 内）。bash が展開
+#     するため。引用符つき（`<<'EOF'` `<<\EOF`）の本文は展開されないので読まない
+#   - ${...}・算術式・配列添字の中のコマンド置換
 #   - env -S / --split-string の値（呼び出し元の HUSKY=0 は子へ引き継ぐ）
 # echo / printf のセグメントは引数を表示するだけなので git の語があっても見ない（`echo git push -f` は許可）。
 # 残存ギャップ（未対応。best-effort の限界であり、実強制は ruleset が担う）:
 #   - パイプで shell へ渡す文字列（`echo 'git push -f' | bash`）・`cat > x.sh <<EOF` のあとで実行する形・
 #     bash -c の追加引数（`bash -c 'git "$@"' _ push -f`）・source / `.` / `bash <(…)`・
 #     `bash -c "$(cat <<EOF …)"` のように別のコマンドが生成した文字列
-#   - ダブルクォート内のバッククォート置換・引用符なし heredoc 本文の $(...)・$(...) 内の case 文の `)`
+#   - $(...) 内の case 文の `)`・$'...' の \u \U \c（解釈せず残す）・sudo / doas / nice の未知の値を取る option・
+#     sudo 等のラッパーを挟んだ echo の読み飛ばし（対象にしない = 誤って deny する側）
+#   - merge-guard 側（subagent が true / null のときの判定）の `>&` `>|` は従来どおり直前の文字で判定する
 #   - main セッションでの難読化（変数間接・base64 復元・ブレース / glob 展開。obfuscated の
 #     判定は subagent が true / null のときだけ）
 #   - alias は -c と git config での定義だけを止める。利用者の設定ファイルに既にある alias、
@@ -124,9 +141,23 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 #   - HUSKY=0 は同じコマンド文字列内の代入だけを見る（別の呼び出しで export 済みのものは見えない）
 read -r -d '' GIT_AWK <<'AWK' || true
 function isws(c) { return (c == " " || c == "\t" || c == "\r") }
-function emit_tok() { if (have) { ntok++; tok[ntok] = cur }; cur = ""; have = 0 }
+# 語を確定する。リダイレクトの直後の語（rd == 1。対象のファイル名・fd）はコマンドでも引数でもないので積まない。
+# here-string の語（rd == 2）は shell が script として読むときのために tok と別の hs へ積む。
+function emit_tok() {
+  if (have) {
+    if (rd == 1) rd = 0
+    else if (rd == 2) { nhs++; hs[nhs] = cur; rd = 0 }
+    else { ntok++; tok[ntok] = cur }
+  }
+  cur = ""; have = 0
+}
+# リダイレクト演算子（< > <<<）の手前の語を片づける。`2>` `{fd}>` の fd 指定は語ではないので捨てる。
+function redir_flush() {
+  if (have && (cur ~ /^[0-9]+$/ || cur ~ /^[{][A-Za-z_][A-Za-z0-9_]*[}]$/)) { cur = ""; have = 0 }
+  else emit_tok()
+}
 function setv(v) { if (verdict == "") verdict = v }
-function end_seg() { emit_tok(); if (ntok > 0) analyze(); ntok = 0; split("", hsmark) }
+function end_seg() { emit_tok(); if (ntok > 0) analyze(); ntok = 0; nhs = 0; rd = 0; split("", hs) }
 # 入れ子の中身（bash -c の値・eval の引数・ヒアドキュメント本体・$(...) の中・env -S の値）を作業キューへ積む。
 # 深さ・件数の上限を超えたら中身を見切れないので limit を立てる（結果は deny nesting-limit）。
 function enqueue(s, h) {
@@ -144,7 +175,6 @@ function join_from(k,   s) {
 function shell_args(j, hk,   t, cf, sf, b, lc) {
   cf = 0; sf = 0
   for (; j <= ntok; j++) {
-    if (hsmark[j]) continue
     t = tok[j]
     if (t == "--" || t == "-") { j++; break }
     if (t ~ /^--/) { if (t == "--rcfile" || t == "--init-file") j++; continue }
@@ -157,33 +187,63 @@ function shell_args(j, hk,   t, cf, sf, b, lc) {
     }
     break
   }
-  while (j <= ntok && hsmark[j]) j++
   if (j > ntok) return 0
   if (cf) { enqueue(tok[j], hk); return 1 }
   return (sf ? 0 : 2)
 }
-function analyze(   i, m, t, lt, p, v, seg_h, seg_s, sawenv, isenv, hk, st, cap) {
-  # 先頭の代入（FOO=1 HUSKY=0 git ...）・env・export を読み飛ばし、フック回避の代入を拾う。
-  # env の値を取るオプション（-u / --unset・-C / --chdir）は次トークンを引数ごと読み飛ばす
-  # （`env -u X HUSKY=0 git ...` の X を代入列の終端と誤認しない）。-S / --split-string の値は
-  # 回避の代入があれば同じセグメントの後続の git に効くものとして扱い（seg_s。後のセグメントへは持ち越さない）、
-  # 値そのものも別に解析する（`env -S 'HUSKY=0 git commit'`・`env -S 'git push -f'`）。
-  p = 1; seg_h = 0; seg_s = 0; sawenv = 0; isenv = 0
+# env -S / --split-string の値を作業キューへ積み、回避の代入を含むかを返す。
+function env_split(v, hh) { enqueue(v, hh); return split_has_h(v) }
+function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap, ch, rest) {
+  # コマンド位置の前置語（{ then do else ! time 等のキーワードと env・sudo・export・declare 等のラッパー）・
+  # 代入（FOO=1 HUSKY=0 git ...）・ラッパーの option を読み飛ばし、フック回避の代入を拾う。
+  # env は basename で照合し、値を取る短縮 option（-u -C -P -a -S）は束ね書き（-iS）も 1 文字ずつ読む。
+  # -S / --split-string の値は回避の代入があれば同じセグメントの後続の git に効くものとして扱い（seg_s。
+  # 後のセグメントへは持ち越さない）、値そのものも別に解析する（`env -S 'HUSKY=0 git commit'`・`env -S 'git push -f'`）。
+  # sudo / doas / nice の値を取る option も同様に読み飛ばす（`sudo -u root HUSKY=0 git ...`）。
+  p = 1; seg_h = 0; seg_s = 0; noecho = 0; wr = ""
   while (p <= ntok) {
-    t = tok[p]
+    t = tok[p]; lt = tolower(t)
     if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { if (t == "HUSKY=0" || t == "HUSKY_SKIP_HOOKS=1") seg_h = 1; p++ }
-    else if (t == "env" || t == "export") { sawenv = 1; if (t == "env") isenv = 1; p++ }
-    else if (isenv && (t == "-S" || t == "--split-string")) { if (p < ntok) { if (split_has_h(tok[p + 1])) seg_s = 1; enqueue(tok[p + 1], (seg_h || husky_persist)) }; p += 2 }
-    else if (isenv && (t ~ /^-S./ || t ~ /^--split-string=/)) { v = t; sub(/^(--split-string=|-S)/, "", v); if (split_has_h(v)) seg_s = 1; enqueue(v, (seg_h || husky_persist)); p++ }
-    else if (isenv && (t == "--unset" || t == "--chdir" || t ~ /^-[iv0]*[uC]$/)) p += 2
-    else if (sawenv && substr(t, 1, 1) == "-") p++
+    else if (t ~ /^([{]|then|do|else|elif|if|while|until|!)$/) { wr = ""; p++ }
+    else if (t == "time") { wr = "time"; p++ }
+    else if (lt ~ /(^|\/)(env|sudo|doas|nice|nohup|command|exec|builtin)$/ || lt == "export" || lt == "declare" || lt == "typeset") {
+      noecho = 1; wr = lt; sub(/^.*\//, "", wr); p++
+    }
+    else if (wr == "time" && t == "-p") p++
+    else if (wr != "" && wr != "time" && t ~ /^-./) {
+      if (wr == "env" && t ~ /^--/) {
+        if (t == "--split-string") { if (p < ntok && env_split(tok[p + 1], (seg_h || husky_persist))) seg_s = 1; p += 2 }
+        else if (t ~ /^--split-string=/) { v = t; sub(/^--split-string=/, "", v); if (env_split(v, (seg_h || husky_persist))) seg_s = 1; p++ }
+        else if (t == "--unset" || t == "--chdir" || t == "--argv0") p += 2
+        else p++
+      }
+      else if (wr == "env") {
+        for (m = 2; m <= length(t); m++) if (index("uCSPa", substr(t, m, 1)) > 0) break
+        if (m > length(t)) p++
+        else {
+          ch = substr(t, m, 1); rest = substr(t, m + 1)
+          if (rest == "") { v = (p < ntok) ? tok[p + 1] : ""; p += 2 } else { v = rest; p++ }
+          if (ch == "S" && v != "" && env_split(v, (seg_h || husky_persist))) seg_s = 1
+        }
+      }
+      else if (wr == "sudo" || wr == "doas" || wr == "nice") {
+        if (t ~ /^--/) p += (t ~ /^--(user|group|host|prompt|chdir|chroot|role|type|other-user|close-from|command-timeout)$/) ? 2 : 1
+        else {
+          vl = (wr == "sudo") ? "ugphCDRTUrt" : ((wr == "doas") ? "uC" : "n")
+          for (m = 2; m <= length(t); m++) if (index(vl, substr(t, m, 1)) > 0) break
+          if (m > length(t) || m < length(t)) p++; else p += 2
+        }
+      }
+      else p++
+    }
     else break
   }
   hk = husky_persist
   if (p > ntok) { if (seg_h) husky_persist = 1 } else if (seg_h || seg_s) hk = 1
   # echo / printf は引数を表示するだけで、git の語があっても実行しない。
-  # env 経由は読み飛ばしが近似（`env -a echo git push -f` は argv0 指定で git を実行する）なので対象にしない。
-  if (p <= ntok && !sawenv) { lt = tolower(tok[p]); if (lt == "echo" || lt == "printf") return }
+  # env・sudo 等のラッパー経由は読み飛ばしが近似（`env -a echo git push -f` は argv0 指定で git を実行する。
+  # sudo の値を取る option の読み違いは echo の語を値として読む迂回になる）なので対象にしない。
+  if (p <= ntok && !noecho) { lt = tolower(tok[p]); if (lt == "echo" || lt == "printf") return }
   cap = 0
   for (i = 1; i <= ntok; i++) {
     t = tok[i]; lt = tolower(t)
@@ -195,7 +255,7 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, sawenv, isenv, hk, st, cap)
     }
   }
   # -c の無い shell は here-string の語を、同じ行のヒアドキュメント本体（newline の処理で読む）とともに script として読む。
-  if (cap) for (m = 1; m <= ntok; m++) if (hsmark[m]) enqueue(tok[m], hk)
+  if (cap) for (m = 1; m <= nhs; m++) enqueue(hs[m], hk)
 }
 # 短縮オプションの束ね書きを走査する。stop に含まれる文字は以降が値なので打ち切る。
 function short_has(a, target, stop,   m, ch) {
@@ -271,7 +331,7 @@ function git_args(j, hk,   t, scmd, k, a, hooked, dd, eq, nm) {
     if (scmd == "commit" && a ~ /^-[^-]/ && short_has(a, "n", "mFCctuS")) setv("no-verify")
     if (scmd == "push") {
       if (a == "--force") setv("force-push")
-      else if (length(a) >= 5 && length(a) <= 8 && index("--mirror", a) == 1) setv("force-push")
+      else if (length(a) >= 3 && length(a) <= 8 && index("--mirror", a) == 1) setv("force-push")
       else if (substr(a, 1, 8) == "--force-") {
         # --force-with-lease[=<値>] と --force-if-includes（git の一意な略記も）。lease 付きでも既存コミットを消せる。
         eq = index(a, "="); nm = (eq > 0) ? substr(a, 1, eq - 1) : a
@@ -285,39 +345,210 @@ function git_args(j, hk,   t, scmd, k, a, hooked, dd, eq, nm) {
     else if (scmd == "push" && opt_val_next(a, "-o --push-option --receive-pack --exec --repo", "o")) k++
   }
 }
-# 算術式 ((...)) / $((...)) の終端（`))` の次の位置）。コマンド置換・引用符・バッククォートを含む、
-# または閉じが見つからないものは算術式とみなさず 0 を返し、通常のトークン化に任せる。
-function arith_end(k,   d, c) {
+# 算術式 ((...)) / $((...)) の終端（`))` の次の位置）。br が 1 のときは旧式の $[...]（`]` の次の位置）。
+# 中のコマンド置換・バッククォートは読み飛ばし、その本文を ab へ集める（en が 1 で成功したときだけ作業キューへ積む。
+# 呼び出し側の text 全体は別途 sub_end 等で読み直されることがあるので、en = 0 で本文を重複して積まない）。
+# 算術式の中は引用符が引用にならず（`$(( "$(cmd)" ))` の $( も展開される）、引用符は特別扱いしない。
+# 閉じが見つからない・`$((cmd); cmd)` のような算術式でないものは 0 を返し、通常のトークン化に任せる。
+function arith_end(k, en, br,   base, r, j) {
+  base = abn; r = arith_scan(k, br)
+  if (r > 0 && en) for (j = base + 1; j <= abn; j++) enqueue(ab[j], husky_persist)
+  abn = base
+  return r
+}
+function br_end(k, en) { return arith_end(k, en, 1) }
+function arith_scan(k, br,   d, c, r) {
   d = 0
   while (k <= len) {
     c = substr(text, k, 1)
-    if (c == "(") d++
-    else if (c == ")") { if (d == 0) return (substr(text, k + 1, 1) == ")") ? k + 2 : 0; d-- }
-    else if (c == "`" || c == "\"" || c == "\047") return 0
-    else if (c == "$" && substr(text, k + 1, 1) == "(") return 0
+    if (c == "\\") { k += 2; continue }
+    if (br) {
+      if (c == "[") d++
+      else if (c == "]") { if (d == 0) return k + 1; d-- }
+      else if (c == "\n") return 0
+    } else {
+      if (c == "(") d++
+      else if (c == ")") { if (d == 0) return (substr(text, k + 1, 1) == ")") ? k + 2 : 0; d-- }
+    }
+    if (c == "`") { r = bq_end(k + 1); if (r == 0) return 0; abn++; ab[abn] = bq_unesc(substr(text, k + 1, r - k - 2)); k = r; continue }
+    if (c == "$" && substr(text, k + 1, 1) == "(") {
+      if (!br && substr(text, k + 2, 1) == "(") { r = arith_scan(k + 3, 0); if (r > 0) { k = r; continue } }
+      r = sub_end(k + 2)
+      if (r == 0) return 0
+      abn++; ab[abn] = substr(text, k + 2, r - k - 2); k = r + 1; continue
+    }
     k++
   }
   return 0
 }
-# 旧式の算術展開 $[...] の終端（`]` の次の位置）。同じく危うい内容は 0。
-function br_end(k,   c) {
+# バッククォート置換の終端（閉じの `` ` `` の次の位置）。k は開きの次。閉じが無ければ 0。
+function bq_end(k,   c) {
   while (k <= len) {
     c = substr(text, k, 1)
-    if (c == "]") return k + 1
-    if (c == "`" || c == "\"" || c == "\047" || c == "\n" || (c == "$" && substr(text, k + 1, 1) == "(")) return 0
+    if (c == "\\") { k += 2; continue }
+    if (c == "`") return k + 1
     k++
   }
   return 0
 }
-# ダブルクォート文字列の終端（閉じの `"` の次の位置）。k は開きの `"` の次。中の $(...) は sub_end で読み飛ばす。
-# 閉じが見つからなければ 0。
+# バッククォートの中身を再解析する文字列へ戻す（\\ \$ \` の \ を外す）。
+function bq_unesc(s,   o, n, i, c, nx) {
+  o = ""; n = length(s)
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (c == "\\") { nx = substr(s, i + 1, 1); if (nx == "\\" || nx == "$" || nx == "`") { o = o nx; i++; continue } }
+    o = o c
+  }
+  return o
+}
+# パラメータ展開 ${...} の終端（閉じの `}` の次の位置）と、複合代入 name=(...) の終端（閉じの `)` の次の位置）。
+# k は `${` / `(` の次。中の引用符・コマンド置換・入れ子の ${...} を読み飛ばすので、`${x:-<<EOF }` の << を
+# heredoc と取り違えない。ダブルクォートの中（q）は `'` が引用にならず閉じ記号も数えない。dqc が 1 のときは
+# 呼び出し元が既にダブルクォートと同じ文脈（引用符なし heredoc 本文）なので `'` も引用にならない。
+# en が 1 のとき中のコマンド置換の本文を作業キューへ積む（`${x:-"$(git push -f)"}`）。閉じが見つからなければ 0。
+# bash 5.3 の ${ cmd; } / ${| cmd; } は中身がコマンドそのものなので単位として読まない（0）。
+function ws_end(k, en, dqc, cl,   c, c2, r, q, d) {
+  if (cl == "}" && substr(text, k, 1) ~ /^[ \t\n|]$/) return 0
+  q = 0; d = 0
+  while (k <= len) {
+    c = substr(text, k, 1)
+    if (c == "\\") { k += 2; continue }
+    if (c == "\047" && !q && !dqc) { r = index(substr(text, k + 1), "\047"); if (r == 0) return 0; k += r + 1; continue }
+    if (c == "\"") { q = !q; k++; continue }
+    if (c == "`") {
+      r = bq_end(k + 1)
+      if (r == 0) return 0
+      if (en) enqueue(bq_unesc(substr(text, k + 1, r - k - 2)), husky_persist)
+      k = r; continue
+    }
+    if (c == "$") {
+      c2 = substr(text, k + 1, 1)
+      if (c2 == "(") {
+        if (substr(text, k + 2, 1) == "(") { r = arith_end(k + 3, en, 0); if (r > 0) { k = r; continue } }
+        r = sub_end(k + 2)
+        if (r == 0) return 0
+        if (en) enqueue(substr(text, k + 2, r - k - 2), husky_persist)
+        k = r + 1; continue
+      }
+      if (c2 == "{") { r = ws_end(k + 2, en, (dqc || q), "}"); if (r == 0) return 0; k = r; continue }
+    }
+    if (!q) {
+      if (cl == "}" && c == "}") return k + 1
+      if (cl == ")") {
+        if (c == "(") d++
+        else if (c == ")") { if (d == 0) return k + 1; d-- }
+      }
+    }
+    k++
+  }
+  return 0
+}
+function pe_end(k, en, dqc) { return ws_end(k, en, dqc, "}") }
+function ca_end(k, en) { return ws_end(k, en, 0, ")") }
+# ANSI-C 引用符 $'...' の終端（閉じの `'` の次の位置）。k は `$'` の次。単一引用符と違い \ で閉じの `'` を
+# escape できる（`$'\''` は `'` 1 文字）。閉じが無ければ 0。
+function ansi_end(k,   c) {
+  while (k <= len) {
+    c = substr(text, k, 1)
+    if (c == "\\") { k += 2; continue }
+    if (c == "\047") return k + 1
+    k++
+  }
+  return 0
+}
+function hexv(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+function chr(v) { return (v >= 1 && v < 128) ? sprintf("%c", v) : "?" }
+# $'...' の中身の \ 表記を bash と同じ値にする（\n \t \xHH \NNN 等。\u \U \c は解釈せずそのまま残す）。
+function ansi_dec(s,   o, n, i, c, nx, v, j, d, e) {
+  o = ""; n = length(s); i = 1
+  while (i <= n) {
+    c = substr(s, i, 1)
+    if (c != "\\") { o = o c; i++; continue }
+    nx = substr(s, i + 1, 1); i += 2
+    if (nx == "n") o = o "\n"
+    else if (nx == "t") o = o "\t"
+    else if (nx == "r") o = o "\r"
+    else if (nx == "a") o = o chr(7)
+    else if (nx == "b") o = o chr(8)
+    else if (nx == "e" || nx == "E") o = o chr(27)
+    else if (nx == "f") o = o chr(12)
+    else if (nx == "v") o = o chr(11)
+    else if (nx == "\\" || nx == "\047" || nx == "\"" || nx == "?") o = o nx
+    else if (nx == "x") {
+      v = 0; e = 0
+      for (j = 0; j < 2; j++) { d = hexv(substr(s, i + j, 1)); if (d < 0) break; v = v * 16 + d; e++ }
+      if (e == 0) o = o "\\x"; else { o = o chr(v); i += e }
+    }
+    else if (nx ~ /^[0-7]$/) {
+      v = nx + 0; e = 0
+      for (j = 0; j < 2; j++) { d = substr(s, i + j, 1); if (d !~ /^[0-7]$/) break; v = v * 8 + d; e++ }
+      o = o chr(v); i += e
+    }
+    else o = o "\\" nx
+  }
+  return o
+}
+# ヒアドキュメントの区切り語を k から読む。引用符・\・$'...'・$"..." を bash と同じに外した値を返し、
+# 読み終えた次の位置を hdpos、引用符や \ があったか（本文でコマンド置換が展開されないか）を hdquoted に残す。
+function hd_word(k,   w, c, q, r) {
+  w = ""; hdquoted = 0
+  while (k <= len) {
+    c = substr(text, k, 1)
+    if (c == "\047" || c == "\"") {
+      hdquoted = 1; q = c; k++
+      while (k <= len && substr(text, k, 1) != q) { w = w substr(text, k, 1); k++ }
+      k++
+    } else if (c == "$" && substr(text, k + 1, 1) == "\047") {
+      r = ansi_end(k + 2)
+      if (r > 0) { hdquoted = 1; w = w ansi_dec(substr(text, k + 2, r - k - 3)); k = r } else { w = w c; k++ }
+    } else if (c == "$" && substr(text, k + 1, 1) == "\"") k++
+    else if (c == "\\") { hdquoted = 1; w = w substr(text, k + 1, 1); k += 2 }
+    else if (isws(c) || c == "\n" || index(";&|<>()", c) > 0) break
+    else { w = w c; k++ }
+  }
+  hdpos = k
+  return w
+}
+# 引用符なしヒアドキュメントの本文は bash が展開するので、コマンド置換（$(...)・バッククォート・${...} 内）を
+# 作業キューへ積む。\ で escape した置換は対象外。閉じが見つからなければ中身を見切れないので limit。
+function heredoc_subs(b,   st, sl, k, c, c2, r) {
+  st = text; sl = len; text = b; len = length(b); k = 1
+  while (k <= len) {
+    c = substr(text, k, 1)
+    if (c == "\\") { k += 2; continue }
+    if (c == "`") {
+      r = bq_end(k + 1)
+      if (r == 0) { limit = 1; break }
+      enqueue(bq_unesc(substr(text, k + 1, r - k - 2)), husky_persist); k = r; continue
+    }
+    if (c == "$") {
+      c2 = substr(text, k + 1, 1)
+      if (c2 == "(") {
+        if (substr(text, k + 2, 1) == "(") { r = arith_end(k + 3, 1, 0); if (r > 0) { k = r; continue } }
+        r = sub_end(k + 2)
+        if (r == 0) { limit = 1; break }
+        enqueue(substr(text, k + 2, r - k - 2), husky_persist); k = r + 1; continue
+      }
+      if (c2 == "{") {
+        if (substr(text, k + 2, 1) ~ /^[ \t\n|]$/) { limit = 1; break }
+        r = pe_end(k + 2, 1, 1); if (r > 0) { k = r; continue }
+      }
+      if (c2 == "[") { r = br_end(k + 2, 1); if (r > 0) { k = r; continue } }
+    }
+    k++
+  }
+  text = st; len = sl
+}
+# ダブルクォート文字列の終端（閉じの `"` の次の位置）。k は開きの `"` の次。中の $(...) は sub_end で、
+# バッククォートは bq_end で読み飛ばす。閉じが見つからなければ 0。
 function dq_end(k,   c, r) {
   while (k <= len) {
     c = substr(text, k, 1)
     if (c == "\\") { k += 2; continue }
     if (c == "\"") return k + 1
+    if (c == "`") { r = bq_end(k + 1); if (r == 0) return 0; k = r; continue }
     if (c == "$" && substr(text, k + 1, 1) == "(") {
-      if (substr(text, k + 2, 1) == "(") { r = arith_end(k + 3); if (r > 0) { k = r; continue } }
+      if (substr(text, k + 2, 1) == "(") { r = arith_end(k + 3, 0, 0); if (r > 0) { k = r; continue } }
       r = sub_end(k + 2)
       if (r == 0) return 0
       k = r + 1; continue
@@ -327,13 +558,15 @@ function dq_end(k,   c, r) {
   return 0
 }
 # コマンド置換 $( の次の位置 k から、対応する `)` の位置を返す（見つからなければ 0）。
-# 単一引用符・ダブルクォート（入れ子の $(...) を含む）・バッククォート・算術式・コメント・
+# 単一引用符・ANSI-C 引用符・ダブルクォート（入れ子の $(...) を含む）・バッククォート・${...}・算術式・コメント・
 # ヒアドキュメント本体（本文の括弧や引用符を数えない）を読み飛ばして括弧の深さを数える。
-function sub_end(k,   d, c, c2, r, pend, pc, w, dash, line, hw, hd, rest, p) {
+function sub_end(k,   d, c, r, pend, pc, w, dash, line, hw, hd, rest, p) {
   d = 1; pend = ""
   while (k <= len) {
     c = substr(text, k, 1)
     if (c == "\\") { k += 2; continue }
+    if (c == "$" && substr(text, k + 1, 1) == "\047") { r = ansi_end(k + 2); if (r == 0) return 0; k = r; continue }
+    if (c == "$" && substr(text, k + 1, 1) == "{") { r = pe_end(k + 2, 0, 0); if (r > 0) { k = r; continue } }
     if (c == "\047") {
       k++
       while (k <= len && substr(text, k, 1) != "\047") k++
@@ -341,14 +574,9 @@ function sub_end(k,   d, c, c2, r, pend, pc, w, dash, line, hw, hd, rest, p) {
       k++; continue
     }
     if (c == "\"") { k = dq_end(k + 1); if (k == 0) return 0; continue }
-    if (c == "`") {
-      k++
-      while (k <= len && substr(text, k, 1) != "`") { if (substr(text, k, 1) == "\\") k++; k++ }
-      if (k > len) return 0
-      k++; continue
-    }
-    if (c == "$" && substr(text, k + 1, 1) == "[") { r = br_end(k + 2); if (r > 0) { k = r; continue } }
-    if (c == "(" && substr(text, k + 1, 1) == "(") { r = arith_end(k + 2); if (r > 0) { k = r; continue } }
+    if (c == "`") { r = bq_end(k + 1); if (r == 0) return 0; k = r; continue }
+    if (c == "$" && substr(text, k + 1, 1) == "[") { r = br_end(k + 2, 0); if (r > 0) { k = r; continue } }
+    if (c == "(" && substr(text, k + 1, 1) == "(") { r = arith_end(k + 2, 0, 0); if (r > 0) { k = r; continue } }
     if (c == "(") { d++; k++; continue }
     if (c == ")") { d--; if (d == 0) return k; k++; continue }
     if (c == "#") {
@@ -363,17 +591,7 @@ function sub_end(k,   d, c, c2, r, pend, pc, w, dash, line, hw, hd, rest, p) {
       k += 2; dash = 0
       if (substr(text, k, 1) == "-") { dash = 1; k++ }
       while (k <= len && isws(substr(text, k, 1))) k++
-      w = ""
-      while (k <= len) {
-        c2 = substr(text, k, 1)
-        if (c2 == "\047" || c2 == "\"") {
-          line = c2; k++
-          while (k <= len && substr(text, k, 1) != line) { w = w substr(text, k, 1); k++ }
-          k++
-        } else if (c2 == "\\") { w = w substr(text, k + 1, 1); k += 2 }
-        else if (isws(c2) || c2 == "\n" || index(";&|<>()", c2) > 0) break
-        else { w = w c2; k++ }
-      }
+      w = hd_word(k); k = hdpos
       pend = pend dash w "\001"
       continue
     }
@@ -395,16 +613,30 @@ function sub_end(k,   d, c, c2, r, pend, pc, w, dash, line, hw, hd, rest, p) {
   }
   return 0
 }
+# 現在の語が代入を置ける位置か（前に積んだ語が代入・キーワード・export 等とその option だけ）。
+function assign_pos(   m, t) {
+  for (m = 1; m <= ntok; m++) {
+    t = tok[m]
+    if (t ~ /^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?[+]?=/ || t ~ /^([{]|then|do|else|elif|if|while|until|!|time|export|declare|typeset|local|readonly)$/ || t ~ /^-./) continue
+    return 0
+  }
+  return 1
+}
 # 1 つの文字列をトークン化して各セグメントを解析する。入れ子の中身は enqueue で積み、END が順に流す。
-function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, q, i, body) {
-  text = txt; len = length(text); i = 1; cur = ""; have = 0; ntok = 0; hdn = 0; linecap = 0; linehk = 0
-  split("", hsmark); cdepth = dp; husky_persist = hkin
+function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body, found) {
+  text = txt; len = length(text); i = 1; cur = ""; have = 0; ntok = 0; nhs = 0; rd = 0; rdpos = -5; rdc = ""
+  abn = 0; hdn = 0; linecap = 0; linehk = 0
+  split("", hs); cdepth = dp; husky_persist = hkin
   while (i <= len) {
     ch = substr(text, i, 1)
     if (ch == "\\") {
       nx = substr(text, i + 1, 1)
       if (nx != "\n") { cur = cur nx; have = 1 }
       i += 2; continue
+    }
+    if (ch == "$" && substr(text, i + 1, 1) == "\047") {
+      r = ansi_end(i + 2)
+      if (r > 0) { cur = cur ansi_dec(substr(text, i + 2, r - i - 3)); have = 1; i = r; continue }
     }
     if (ch == "\047") {
       have = 1; i++
@@ -422,11 +654,17 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, q, i, b
           if (nx == "\n") { i += 2; continue }
         }
         if (c2 == "$" && substr(text, i + 1, 1) == "(") {
-          if (substr(text, i + 2, 1) == "(") { r = arith_end(i + 3); if (r > 0) { cur = cur substr(text, i, r - i); i = r; continue } }
+          if (substr(text, i + 2, 1) == "(") { r = arith_end(i + 3, 1, 0); if (r > 0) { cur = cur substr(text, i, r - i); i = r; continue } }
           r = sub_end(i + 2)
           if (r > 0) { enqueue(substr(text, i + 2, r - i - 2), husky_persist); cur = cur "$()"; i = r + 1; continue }
           limit = 1
         }
+        if (c2 == "`") {
+          r = bq_end(i + 1)
+          if (r > 0) { enqueue(bq_unesc(substr(text, i + 1, r - i - 2)), husky_persist); cur = cur "``"; i = r; continue }
+          limit = 1
+        }
+        if (c2 == "$" && substr(text, i + 1, 1) == "{" && substr(text, i + 2, 1) ~ /^[ \t\n|]$/) limit = 1
         cur = cur c2; i++
       }
       i++; continue
@@ -439,47 +677,59 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, q, i, b
     if (ch == "\n") {
       end_seg(); i++
       for (h = 1; h <= hdn; h++) {
-        body = ""
+        body = ""; found = 0
         while (i <= len) {
           rest = substr(text, i)
           p = index(rest, "\n")
           if (p == 0) { line = rest; i = len + 1 } else { line = substr(rest, 1, p - 1); i += p }
           if (hdd[h]) sub(/^\t+/, "", line)
-          if (line == hdw[h]) break
-          if (linecap) body = body line "\n"
+          if (line == hdw[h]) { found = 1; break }
+          if (linecap || !hdq[h]) body = body line "\n"
         }
-        if (linecap && body != "") enqueue(body, linehk)
+        # 区切り子が見つからないまま入力の末尾に達した。bash は残り全部を本文として読むが、これが本物の
+        # heredoc でなく読み違いだと後続の実コマンドを隠す（攻撃側が区切り子の行を用意できる）ので中身を見切れない。
+        if (!found) limit = 1
+        if (body != "") { if (linecap) enqueue(body, linehk); else heredoc_subs(body) }
       }
       hdn = 0; linecap = 0; continue
     }
-    if (ch == "<" && substr(text, i, 3) == "<<<") { emit_tok(); hsmark[ntok + 1] = 1; i += 3; continue }
-    if (ch == "$" && substr(text, i + 1, 1) == "[") { r = br_end(i + 2); if (r > 0) { cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
-    if (ch == "(" && substr(text, i + 1, 1) == "(") { r = arith_end(i + 2); if (r > 0) { cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
-    if (ch == "&" && (substr(text, i - 1, 1) == ">" || substr(text, i - 1, 1) == "<" || substr(text, i + 1, 1) == ">")) { emit_tok(); i++; continue }
-    if (ch == "|" && substr(text, i - 1, 1) == ">") { emit_tok(); i++; continue }
+    if (ch == "<" && substr(text, i, 3) == "<<<") { redir_flush(); rd = 2; i += 3; continue }
+    if (ch == "$" && substr(text, i + 1, 1) == "[") { r = br_end(i + 2, 1); if (r > 0) { cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
+    if (ch == "$" && substr(text, i + 1, 1) == "{") {
+      # bash 5.3 の ${ cmd; } / ${| cmd; } は中身がコマンドそのもの。値として読まず（echo の引数として見逃さない）fail-closed にする。
+      if (substr(text, i + 2, 1) ~ /^[ \t\n|]$/) limit = 1
+      else { r = pe_end(i + 2, 1, 0); if (r > 0) { cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
+    }
+    # 配列の添字つき代入 x[1<<2]=y と複合代入 a=([1<<2]=y) は、代入を置ける位置では添字・中身を含めて 1 語
+    # （その << は heredoc でない）。引数の位置（`ls x[; cmd; y]=1`）では bash も 1 語にしないので読まない。
+    if (ch == "(" && have && cur ~ /^[A-Za-z_][A-Za-z0-9_]*[+]?=$/ && assign_pos()) {
+      r = ca_end(i + 1, 0)
+      if (r > 0) { ca_end(i + 1, 1); cur = cur substr(text, i, r - i); i = r; continue }
+    }
+    if (ch == "[" && have && cur ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && assign_pos()) {
+      r = br_end(i + 1, 0)
+      if (r > 0 && (substr(text, r, 1) == "=" || substr(text, r, 2) == "+=")) { br_end(i + 1, 1); cur = cur substr(text, i, r - i); i = r; continue }
+    }
+    if (ch == "(" && substr(text, i + 1, 1) == "(") { r = arith_end(i + 2, 1, 0); if (r > 0) { cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
+    # >& <& &> >| の & | はリダイレクトの一部。直前の文字ではなく、直前の < > を演算子として解釈したか（rdpos）で決める
+    # （`echo \>&git push -f` の escape した > の後ろの & は制御演算子）。
+    if (ch == "&" && (rdpos == i - 1 || substr(text, i + 1, 1) == ">")) { emit_tok(); i++; continue }
+    if (ch == "|" && rdpos == i - 1 && rdc == ">") { emit_tok(); i++; continue }
     if (ch == ";" || ch == "|" || ch == "&" || ch == "(" || ch == ")" || ch == "`") { end_seg(); i++; continue }
-    if (ch == "<" && substr(text, i, 2) == "<<" && substr(text, i, 3) != "<<<") {
+    if (ch == "<" && substr(text, i, 2) == "<<") {
+      redir_flush()
       i += 2; dash = 0
       if (substr(text, i, 1) == "-") { dash = 1; i++ }
       while (i <= len && isws(substr(text, i, 1))) i++
-      w = ""
-      while (i <= len) {
-        c2 = substr(text, i, 1)
-        if (c2 == "\047" || c2 == "\"") {
-          q = c2; i++
-          while (i <= len && substr(text, i, 1) != q) { w = w substr(text, i, 1); i++ }
-          i++
-        } else if (c2 == "\\") { w = w substr(text, i + 1, 1); i += 2 }
-        else if (isws(c2) || c2 == "\n" || index(";&|<>()", c2) > 0) break
-        else { w = w c2; i++ }
-      }
-      hdn++; hdw[hdn] = w; hdd[hdn] = dash
+      w = hd_word(i); i = hdpos
+      hdn++; hdw[hdn] = w; hdd[hdn] = dash; hdq[hdn] = hdquoted
       continue
     }
-    if (ch == "<" || ch == ">") { emit_tok(); i++; continue }
+    if (ch == "<" || ch == ">") { redir_flush(); rd = 1; rdpos = i; rdc = ch; i++; continue }
     cur = cur ch; have = 1; i++
   }
   end_seg()
+  if (hdn > 0) limit = 1
 }
 { alltext = alltext $0 "\n" }
 END {
