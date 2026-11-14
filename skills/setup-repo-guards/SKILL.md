@@ -4,7 +4,8 @@ description: >
   Fandhe-AI 組織標準の CI ガード一式（ai-review 導入 / AGENTS.md レビュー観点集 / 必須チェック集約ジョブ /
   branch protection ruleset・追加ガード）を対象リポジトリへ導入する。「リポジトリガード入れて」「CI ガード導入して」
   「branch protection セットアップ」「ai-review 導入して」「AGENTS.md 整備して」などで使用。
-  複数リポジトリへの一括適用にも対応。.claude/ 体系の初期セットアップは init-claude、既存体系の充実は update-claude を参照。
+  複数リポジトリへの一括適用にも対応。.claude/ 体系の初期セットアップは init-claude、既存体系の充実は update-claude、
+  Codex は init-codex / update-codex、OpenCode は init-opencode / update-opencode を参照。
 model: opus
 user-invocable: true
 argument-hint: "<対象リポジトリ名 (owner/repo)> <public|private> [追加のリポジトリ...]"

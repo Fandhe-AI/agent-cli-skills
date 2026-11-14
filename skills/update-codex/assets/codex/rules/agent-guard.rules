@@ -1,0 +1,25 @@
+# agent-guard.rules: Codex の execpolicy による補助層。典型形の禁止だけを宣言する。
+# 主層は .codex/hooks/agent-guard.sh（PreToolUse hook）で、こちらは hook が効かない経路への
+# 保険。pattern は先頭一致のため、オプションが別位置にある形（git -C x push --force 等）は
+# 拾えない。網羅は hook と、サーバー側の branch protection に任せる。
+prefix_rule(
+    pattern = ["git", "push", ["--force", "-f"]],
+    decision = "forbidden",
+    justification = "force push は禁止。--force-with-lease を検討する",
+    match = ["git push --force origin main", "git push -f origin main"],
+    not_match = ["git push origin main", "git push --force-with-lease origin main"],
+)
+prefix_rule(
+    pattern = ["git", "commit", ["--no-verify", "-n"]],
+    decision = "forbidden",
+    justification = "--no-verify は禁止。フックの失敗は原因を直して再実行する",
+    match = ["git commit --no-verify -m x", "git commit -n -m x"],
+    not_match = ["git commit -m x"],
+)
+prefix_rule(
+    pattern = ["git", "push", "--no-verify"],
+    decision = "forbidden",
+    justification = "--no-verify は禁止。フックの失敗は原因を直して再実行する",
+    match = ["git push --no-verify origin main"],
+    not_match = ["git push origin main"],
+)
