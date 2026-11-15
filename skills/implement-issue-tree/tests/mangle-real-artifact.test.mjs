@@ -41,4 +41,8 @@ test('実物の変異: 参照を別の束縛・自由なグローバル・未宣
   const r = await alphaVerify(mutants.map((m, i) => ({ name: `m${i}`, before: stage1, after: m.text })))
   const survived = mutants.filter((m, i) => r.get(`m${i}`).ok).map((m) => `${m.kind} ${m.from}→${m.to} @${m.at}`)
   assert.deepEqual(survived, [])
+  // 止めた理由が束縛の判定であること（関数の名前・ソースの観測の一律の拒否は束縛の確認より後に見るので、
+  // ここに当たる変異体は束縛の判定をすり抜けている）
+  const byObservation = mutants.filter((m, i) => /観測し得る構文/.test(r.get(`m${i}`).detail)).map((m) => `${m.kind} ${m.from}→${m.to} @${m.at}`)
+  assert.deepEqual(byObservation, [])
 })
