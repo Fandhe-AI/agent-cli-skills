@@ -93,3 +93,22 @@ test('Step 2 と Step 3 に非対話で全書き込みを止める形の文言�
     assert.doesNotMatch(s, /実行せずに、対象（件数・タイトル等）と確認事項を報告して止める/);
   }
 });
+
+test('Step 2 は付け替えの受け皿としてだけ要る新 Phase 親をスキップ時に作らないと書く', () => {
+  const s = section(2);
+  assert.match(s, /付け替え・再配置の受け皿としてだけ必要になった新 Phase 親は、付け替えをスキップしたときは作らない/);
+});
+
+test('検証節はスキップした付け替え対象の残置を Step 9 の記録と突き合わせる例外にする', () => {
+  const start = text.indexOf('\n## 検証');
+  assert.ok(start >= 0, '検証節が無い');
+  const rest = text.slice(start + 1);
+  const m = rest.match(/\n## /);
+  const v = m ? rest.slice(0, m.index + 1) : rest;
+  assert.match(v, /Step 3 \/ Step 4 をスキップした対象は、残置のままになるためこの確認の例外として扱い/);
+});
+
+test('Step 2 に「全書き込みを止める」の字面が残っていない', () => {
+  assert.doesNotMatch(section(2), /全書き込みを止める/);
+  assert.doesNotMatch(section(3), /全書き込みを止める/);
+});
