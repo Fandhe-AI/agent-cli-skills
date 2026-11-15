@@ -30,14 +30,15 @@
 #   force-push     git push の --force / -f / --mirror / +<refspec>（`--` の後の + 始まりも）/
 #                  --force-with-lease（= 形・略記を含む）/ --force-if-includes。lease 付きでも
 #                  既存コミットを消せるため許可しない（全セッション）
-#   merge-guard    gh pr merge・REST / GraphQL のマージ・承認（gh pr review の --approve / -a、
+#   merge-guard    gh pr merge（本文・題名の値だけに merge の語がある `gh pr create|comment` は除く。下記）・REST / GraphQL のマージ・承認（gh pr review の --approve / -a、
 #                  reviews API の event=APPROVE・判定できない --input / @file 形、GraphQL の
 #                  addPullRequestReview / submitPullRequestReview + APPROVE）・gh alias・
 #                  gh extension（subagent が true / null のとき）
 #   repo-settings  ruleset・branch protection・リポジトリ本体の書き込み・gh repo edit 等
 #                  （subagent が true / null のとき）
 #   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
-#                  C0 と DEL）を含むコマンド（subagent が true / null のとき）
+#                  C0 と DEL）を含むコマンド（subagent が true / null のとき）。単一引用符の末尾の `$` で閉じる形
+#                  （`grep -c '^hi$' f`）は ANSI-C クォートではないので除く。下記
 #   nesting-limit  bash -c / eval / heredoc / $(...) / env -S の入れ子が解析の上限（深さ 8・件数 512）を
 #                  超えた、ダブルクォート内の $( や `（引用符なし heredoc 本文の $( や `）の閉じを見つけられない、
 #                  または heredoc の区切り子が見つからないまま入力の末尾に達した。中身を見切れないため
@@ -147,7 +148,7 @@ function emit_tok() {
   if (have) {
     if (rd == 1) rd = 0
     else if (rd == 2) { nhs++; hs[nhs] = cur; rd = 0 }
-    else { ntok++; tok[ntok] = cur }
+    else { ntok++; tok[ntok] = cur; tS[ntok] = tok0; tE[ntok] = ipos }
   }
   cur = ""; have = 0
 }
@@ -240,6 +241,9 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap
   }
   hk = husky_persist
   if (p > ntok) { if (seg_h) husky_persist = 1 } else if (seg_h || seg_s) hk = 1
+  # obfuscated（$'）とマージ判定の例外（下の gh_cand）が使う観測。どちらも「例外を認めない」側へ倒す材料。
+  note_shellish(p)
+  if (cdepth == 0) { nseg0++; if (nseg0 == 1) gh_cand() }
   # echo / printf は引数を表示するだけで、git の語があっても実行しない。
   # env・sudo 等のラッパー経由は読み飛ばしが近似（`env -a echo git push -f` は argv0 指定で git を実行する。
   # sudo の値を取る option の読み違いは echo の語を値として読む迂回になる）なので対象にしない。
@@ -256,6 +260,97 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap
   }
   # -c の無い shell は here-string の語を、同じ行のヒアドキュメント本体（newline の処理で読む）とともに script として読む。
   if (cap) for (m = 1; m <= nhs; m++) enqueue(hs[m], hk)
+}
+# 文字列を評価して実行しうる語（shell・eval・source・xargs・find の -exec 等）がコマンド列のどこかにあるか、コマンド位置の語が
+# 変数・置換を含むか。`'gh pr $'` のように `$` で終わる単一引用符の文字列を別の引数と連結して実行できるため、
+# その場合は後述の `$'` の例外を認めない。
+function note_shellish(p,   i, b) {
+  for (i = 1; i <= ntok; i++) {
+    b = tolower(tok[i]); sub(/^.*\//, "", b)
+    if (b ~ /^(eval|bash|sh|zsh|dash|ksh|source|\.|xargs|exec|-exec|-execdir|-ok|-okdir)$/) shellish = 1
+  }
+  if (p <= ntok && (index(tok[p], "$") > 0 || index(tok[p], "`") > 0)) shellish = 1
+}
+# `gh pr create|comment` の本文・題名の値（引用符つき 1 語・または記号を含まない語）か。`"$(cat <<'W' ... W)"` の形だけ別に見る。
+function inert_value(r,   n, c, mid) {
+  n = length(r)
+  if (n == 0) return 0
+  c = substr(r, 1, 1)
+  if (c == "\047") return (n >= 2 && substr(r, n, 1) == "\047" && index(substr(r, 2, n - 2), "\047") == 0)
+  if (c == "\"") {
+    if (n < 2 || substr(r, n, 1) != "\"") return 0
+    mid = substr(r, 2, n - 2)
+    if (index(mid, "\"") > 0 || index(mid, "$") > 0 || index(mid, "`") > 0 || index(mid, "\\") > 0) return cat_hd_ok(r)
+    return 1
+  }
+  return (r ~ "^[A-Za-z0-9._/@:+,%-]+$")
+}
+# 引用符つき区切り子のヒアドキュメントを cat するだけの `"$(cat <<'W'` 改行 本文 改行 `W` 改行 `)"` か（本文は展開されない）。
+function cat_hd_ok(r,   p, q, w, dash, nl, ln, found) {
+  if (substr(r, 1, 6) != "\"$(cat") return 0
+  p = 7
+  if (!isws(substr(r, p, 1))) return 0
+  while (isws(substr(r, p, 1))) p++
+  if (substr(r, p, 2) != "<<") return 0
+  p += 2; dash = 0
+  if (substr(r, p, 1) == "-") { dash = 1; p++ }
+  while (isws(substr(r, p, 1))) p++
+  if (substr(r, p, 1) != "\047") return 0
+  q = index(substr(r, p + 1), "\047")
+  if (q == 0) return 0
+  w = substr(r, p + 1, q - 1)
+  if (w !~ "^[A-Za-z0-9_]+$") return 0
+  p += q + 1
+  while (isws(substr(r, p, 1))) p++
+  if (substr(r, p, 1) != "\n") return 0
+  p++; found = 0
+  while (p <= length(r)) {
+    nl = index(substr(r, p), "\n")
+    if (nl == 0) return 0
+    ln = substr(r, p, nl - 1); p += nl
+    if (dash) sub(/^\t+/, "", ln)
+    if (ln == w) { found = 1; break }
+  }
+  if (!found) return 0
+  return (substr(r, p) ~ "^[ \t\n]*[)]\"$")
+}
+function try_mask(s, e) {
+  if (inert_value(substr(text, s, e - s))) { nm++; ms[nm] = s; me[nm] = e }
+}
+# マージ判定の例外の候補。コマンド全体が `gh pr create|comment` の単純コマンド 1 つ（先頭の語が gh・前置語なし・他のセグメントなし）
+# のときだけ、--body / -b / --title / -t の値（上の inert_value を満たすもの）を覆い隠す対象にする。
+function gh_cand(   lt, k, t, raw) {
+  cand_ok = 0
+  if (ntok < 3) return
+  lt = tolower(tok[1])
+  if (!(lt == "gh" || lt ~ /\/gh$/)) return
+  if (tok[2] != "pr" || (tok[3] != "create" && tok[3] != "comment")) return
+  cand_ok = 1
+  for (k = 4; k <= ntok; k++) {
+    t = tok[k]; raw = substr(text, tS[k], tE[k] - tS[k])
+    if (t == "--body" || t == "-b" || t == "--title" || t == "-t") { if (k < ntok) { k++; try_mask(tS[k], tE[k]) } }
+    else if (substr(raw, 1, 7) == "--body=") try_mask(tS[k] + 7, tE[k])
+    else if (substr(raw, 1, 8) == "--title=") try_mask(tS[k] + 8, tE[k])
+  }
+}
+# 覆い隠し対象を X に置き換えた元の文字列（対象が無い・例外の条件を満たさないときは元のまま）。
+function build_mask(   n, i, j, k, ts, te, out, pos) {
+  if (limit || !cand_ok || nseg0 != 1) return alltext
+  n = 0
+  for (i = 1; i <= nm; i++) { n++; as[n] = ms[i]; ae[n] = me[i] }
+  for (i = 1; i <= nhm; i++) { n++; as[n] = hms[i]; ae[n] = hme[i] }
+  for (i = 2; i <= n; i++) {
+    ts = as[i]; te = ae[i]; j = i - 1
+    while (j >= 1 && as[j] > ts) { as[j + 1] = as[j]; ae[j + 1] = ae[j]; j-- }
+    as[j + 1] = ts; ae[j + 1] = te
+  }
+  out = ""; pos = 1
+  for (k = 1; k <= n; k++) {
+    if (as[k] < pos) continue
+    out = out substr(alltext, pos, as[k] - pos) "X"
+    pos = ae[k]
+  }
+  return out substr(alltext, pos)
 }
 # 短縮オプションの束ね書きを走査する。stop に含まれる文字は以降が値なので打ち切る。
 function short_has(a, target, stop,   m, ch) {
@@ -629,6 +724,8 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
   split("", hs); cdepth = dp; husky_persist = hkin
   while (i <= len) {
     ch = substr(text, i, 1)
+    ipos = i
+    if (!have) tok0 = i
     if (ch == "\\") {
       nx = substr(text, i + 1, 1)
       if (nx != "\n") { cur = cur nx; have = 1 }
@@ -639,8 +736,13 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
       if (r > 0) { cur = cur ansi_dec(substr(text, i + 2, r - i - 3)); have = 1; i = r; continue }
     }
     if (ch == "\047") {
-      have = 1; i++
+      have = 1; i++; sq0 = i
       while (i <= len && (c2 = substr(text, i, 1)) != "\047") { cur = cur c2; i++ }
+      # `...$'` で閉じる単一引用符（`grep -c '^hi$' f`）の `$` は ANSI-C 引用符の開きではない。閉じの直後が語の区切りのものだけ数える。
+      if (cdepth == 0 && i <= len && i > sq0 && substr(text, i - 1, 1) == "$") {
+        nx2 = substr(text, i + 1, 1)
+        if (nx2 == "" || index(" \t\r\n;&|<>()", nx2) > 0) nben++
+      }
       i++; continue
     }
     if (ch == "\"") {
@@ -677,7 +779,7 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
     if (ch == "\n") {
       end_seg(); i++
       for (h = 1; h <= hdn; h++) {
-        body = ""; found = 0
+        body = ""; found = 0; hbs = i
         while (i <= len) {
           rest = substr(text, i)
           p = index(rest, "\n")
@@ -689,6 +791,7 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
         # 区切り子が見つからないまま入力の末尾に達した。bash は残り全部を本文として読むが、これが本物の
         # heredoc でなく読み違いだと後続の実コマンドを隠す（攻撃側が区切り子の行を用意できる）ので中身を見切れない。
         if (!found) limit = 1
+        if (cdepth == 0 && found && hdq[h]) { nhm++; hms[nhm] = hbs; hme[nhm] = i }
         if (body != "") { if (linecap) enqueue(body, linehk); else heredoc_subs(body) }
       }
       hdn = 0; linecap = 0; continue
@@ -728,6 +831,7 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
     if (ch == "<" || ch == ">") { redir_flush(); rd = 1; rdpos = i; rdc = ch; i++; continue }
     cur = cur ch; have = 1; i++
   }
+  ipos = len + 1
   end_seg()
   if (hdn > 0) limit = 1
 }
@@ -737,11 +841,22 @@ END {
   scan(alltext, 0, 0)
   for (qi = 1; qi <= nq && verdict == ""; qi++) scan(qs[qi], qd[qi], qh[qi])
   if (verdict == "" && limit) verdict = "nesting-limit"
-  printf "%s\n", (verdict == "") ? "ok" : verdict
+  if (MODE == "mask") { printf "%s", build_mask(); exit }
+  # $' の検出（obfuscated）。元の文字列の `$'` を数え、単一引用符を閉じるだけの `$`（nben）を除いて 1 つでも残れば ansic。
+  # 入れ子の解析が走った・文字列を評価して実行しうる語がある・関数定義・バッククォート・${ $[ があるときは、解析の読み違いや
+  # 連結による `$'` の組み立てを排除できないので例外を認めず（従来どおり 1 つでもあれば ansic）にする。
+  rawn = 0; rp = 1
+  while ((rq = index(substr(alltext, rp), "$\047")) > 0) { rawn++; rp += rq + 1 }
+  nvoid = (nq > 0 || shellish || index(alltext, "`") > 0 || index(alltext, "${") > 0 || index(alltext, "$[") > 0 \
+    || alltext ~ "[A-Za-z0-9_.:-]+[ \t]*[(][ \t]*[)]" || alltext ~ "(^|[^A-Za-z0-9_])function[ \t]")
+  printf "%s %s\n", (verdict == "") ? "ok" : verdict, (rawn > (nvoid ? 0 : nben)) ? "ansic" : "clean"
 }
 AWK
 
 git_verdict=$(printf '%s\n' "$cmd" | awk "$GIT_AWK") || finish deny internal-error
+# awk の出力は「判定 ansic|clean」の 1 行。ansic は元のコマンドに ANSI-C 引用符（$'...'）が残るという意味。
+git_ansic=${git_verdict#* }
+git_verdict=${git_verdict%% *}
 case "$git_verdict" in
   ok) : ;;
   no-verify) finish deny no-verify ;;
@@ -757,8 +872,9 @@ esac
 # 以下は implement-issue-tree/scripts/merge-guard-hook.sh と同じ判定（レビュー承認の判定を含む。
 # 制御文字の拒否・基盤コマンドの存在確認・pipefail・gh の大文字小文字・REST / GraphQL の承認の検査・
 # -a の normal / flat 走査も同じ）。違いは入出力（hook JSON ではなく上記契約）と deny の出し方
-# （理由コード）だけ。判定を直すときは両方を同じ内容に保つ。行番号では対応づけない
-# （どちらのファイルも編集で行がずれる）。
+# （理由コード）、および Issue #805 の 2 つの例外（下の `$'` と `gh pr create|comment` の値）。この 2 つの例外は
+# このファイルだけにあり、merge-guard-hook.sh には無い。ほかの判定を直すときは両方を同じ内容に保つ。
+# 行番号では対応づけない（どちらのファイルも編集で行がずれる）。
 
 # 判定に使う基盤コマンドが無いと、証拠照合が黙って不成立（= 許可）になる。不在は deny に倒す。
 for _ag_cmd in awk grep sed tr; do
@@ -772,8 +888,11 @@ cmd_clean=$(printf '%s' "$cmd" | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'
 [ "$cmd_clean" = "$cmd" ] || finish deny obfuscated
 
 # デコード用プリミティブ（ANSI-C クォート・IFS 展開）は文字削除の正規化では意味が復元できない
-# ため、構文の存在自体を raw のコマンドに対して deny する（merge-guard-hook.sh と同じ判定）。
-if printf '%s' "$cmd" | grep -qE "[$]'"; then
+# ため、構文の存在自体を raw のコマンドに対して deny する。`$'` の判定は GIT_AWK の末尾の ansic（元の
+# コマンドに残る `$'` の数が、単一引用符の末尾の `$` で閉じる形を除いて 1 つ以上）で行う。その例外は、
+# 閉じの直後が語の区切りで、入れ子の解析・文字列を評価しうる語・関数定義・バッククォート・${ $[ が無いときだけ
+# 認める（`'gh pr $'` と別の語を連結して評価する形を通さないため）。IFS は従来どおり raw に対して判定する。
+if [ "$git_ansic" != clean ]; then
   finish deny obfuscated
 fi
 if printf '%s' "$cmd" | grep -qE '[$]\{?IFS'; then
@@ -970,9 +1089,25 @@ contains_subsequence() {
 
 all_nf=$(strip_flags "$tokenized")
 
-# gh pr merge（あらゆる形）
+# gh pr merge（あらゆる形）。例外は「コマンド全体が `gh pr create|comment` の単純コマンド 1 つ」で、その --body / -b / --title / -t
+# の値（引用符つき 1 語。記号を含まない語。引用符つき区切り子の heredoc を cat するだけの "$(cat <<'W' ... W)"・同じコマンドの
+# 標準入力になる引用符つき heredoc の本文）にだけ merge の語がある場合。その値を覆い隠した文字列でもう一度判定し、覆い隠しても
+# 残るなら（別のコマンド・値の外の語・展開を含む値）従来どおり deny する。覆い隠した後に ` ${ $[ が残るときは信用しない。
 if contains_subsequence "$all_nf" gh pr merge; then
-  finish deny merge-guard
+  merge_hit=1
+  masked=$(printf '%s\n' "$cmd" | awk -v MODE=mask "$GIT_AWK") || finish deny internal-error
+  if [ "$masked" != "$cmd" ]; then
+    case "$masked" in
+      *'`'*|*'${'*|*'$['*) : ;;
+      *)
+        m_norm=$(norm_of "$masked") || finish deny internal-error
+        m_tok=$(tokenize_of "$m_norm") || finish deny internal-error
+        m_nf=$(strip_flags "$m_tok")
+        contains_subsequence "$m_nf" gh pr merge || merge_hit=0
+        ;;
+    esac
+  fi
+  [ "$merge_hit" -eq 1 ] && finish deny merge-guard
 fi
 
 # gh api 経由のマージ・設定変更（merge-guard-hook.sh の gh api 判定と同じ）
