@@ -18,6 +18,11 @@ const CONVERSIONS = [
   ['catch 引数と catch 本体の宣言は同じ名前にしない', 'try{}catch(error){const value=1;use(value)}', 'try{}catch(a){const b=1;use(b)}'],
   ['関数宣言の巻き上げ', 'function f(){return inner();function inner(){return 1}}', 'function f(){return a();function a(){return 1}}'],
   ['for-of の束縛', 'function f(xs){for(const item of xs){use(item)}}', 'function f(a){for(const b of a){use(b)}}'],
+  // for-in / for-of の本体は頭部と別のスコープ（同名の宣言は早期エラーにならない）。ループ変数を本体・クロージャから
+  // 参照するときは衝突として別名になる
+  ['for-of の本体の宣言は頭部と同名になり得る（本体はループ変数を参照しない）', 'function f(xs){for(const item of xs){const other=1;use(other)}}', 'function f(a){for(const b of a){const a=1;use(a)}}'],
+  ['for-of の本体のクロージャがループ変数と本体の局所を捕まえる', 'function f(xs){const fs=[];for(const item of xs){const other=10;fs.push(()=>item+other)}return fs}', 'function f(a){const b=[];for(const c of a){const a=10;b.push(()=>c+a)}return b}'],
+  ['for-in の本体でループ変数と本体の局所を使う', "function f(o){const fs=[];for(const key in o){const other=key+'!';fs.push(()=>[key,other])}return fs}", "function f(o){const a=[];for(const b in o){const c=b+'!';a.push(()=>[b,c])}return a}"],
   ['for の束縛はループの外から見えない（外の同名は自由変数のまま）', 'function f(xs){for(const item of xs){use(item)}return item}', 'function f(a){for(const b of a){use(b)}return item}'],
   ['catch 引数は catch の外から見えない', 'function f(){try{}catch(error){use(error)}return error}', 'function f(){try{}catch(a){use(a)}return error}'],
   ['名前つき関数式は自身の名前スコープ', 'const g=function named(){return named}', 'const g=function a(){return a}'],

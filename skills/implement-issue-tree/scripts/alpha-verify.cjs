@@ -7,13 +7,25 @@
 // - AST の形・リテラル・テンプレートの地の文・演算子・フラグが完全に同じ（プロンプト本文が 1 文字も変わらない）
 // - 参照と束縛の対応が同じ（各参照の解決先の宣言が、改名後も同じ位置の宣言になる）・自由変数は同名のまま・
 //   参照でない識別子（非計算のキー・メンバー名）は同名のまま・最上位の meta は改名しない・行数が同じ
-// - 新しい宣言名が特別な名前でない・関数値を文字列化していない（改名で関数の名前・ソース文字列が変わるため）。
-//   関数値として追うのは宣言・関数式の束縛・const / 代入による別名まで。引数・オブジェクト・配列を経由した流出は
-//   追わない（その先の文字列化は見えない。現状の生成物では名前ベースの走査で関数値の文字列化は 0 件）
-// 保証しないこと: パーサは改名器と同じ Node 同梱の acorn なので、acorn が誤った AST を返す共通故障は見えない。
-// それは照合 1（token-diff.cjs が src と stage1 のトークン列を照合済み）と CI の V8 バイトコードオラクル
-// （tests/lib/v8-bytecode-oracle.cjs）で補う。対応外の構文（var・class・with・ラベル・eval・arguments・
-// ブロック内 / switch 内の関数宣言）はスコープ規則を持たないので、両テキストとも拒否する。
+// - 新しい宣言名が特別な名前でない
+// - 関数の名前・ソース文字列を観測しない（改名で変わるため）。観測の形を 1 つずつ追うと収束しないので、
+//   受け手が関数かを追わずに次を一律に拒否する:
+//   (i) プロパティ name・toString・toSource を読む構文すべて（非計算メンバー・文字列 / 式なしテンプレートの
+//       計算メンバー・optional chaining・分割代入と引数パターンのキー・Reflect.get 等の呼び出しにリテラルで渡すキー）。
+//       例外は受け手が構文上必ず数値になる式（数値リテラル・単項 + - ~・算術とビット演算の二項式。括弧つきを含む）だけ
+//   (ii) 関数式・アロー関数そのものを String() の引数・テンプレートの式・+ の被演算子・+= の右辺・concat() の引数にする形
+//   加えて、宣言・関数式の束縛・既定値・const / 代入による別名で関数値を追い、その束縛の文字列化
+//   （String()・テンプレート・+・+=・.length・計算プロパティ・分割代入）を拒否する
+// 保証しないこと（残るリスク）:
+// - 別名を経た暗黙の文字列化は静的には完全に検出できない。追跡の外の束縛（引数・オブジェクト・配列・戻り値を
+//   経た関数値）に対する String(alias)・`${alias}`・alias + '' や、[f].join() などの配列を経た暗黙の変換、
+//   追跡外の受け手への動的な計算キー（o[k]・o['na' + 'me']）、キーを持たない反射（Object.getOwnPropertyDescriptors）、
+//   Error の stack（関数名を含む）は見えない。改名後の生成物で全テスト（stub-run を含む）を流すことが補償になる
+// - パーサは改名器と同じ Node 同梱の acorn なので、acorn が誤った AST を返す共通故障は見えない。
+//   それは照合 1（token-diff.cjs が src と stage1 のトークン列を照合済み）と CI の V8 バイトコードオラクル
+//   （tests/lib/v8-bytecode-oracle.cjs）で補う
+// 対応外の構文（var・class・with・ラベル・eval・arguments・ブロック内 / switch 内の関数宣言）はスコープ規則を
+// 持たないので、両テキストとも拒否する。
 //
 // CLI: `node --expose-internals alpha-verify.cjs`（acorn は内部モジュールなので --expose-internals が要る）
 // 入力（stdin）: JSON `[{ "name": string, "before": string, "after": string }]`
@@ -44,6 +56,10 @@ const GOALS = {
 
 const POSITION_KEYS = new Set(['start', 'end', 'loc', 'range'])
 const STRINGIFY_MEMBERS = new Set(['name', 'toString', 'length'])
+// 関数の名前・ソース文字列を返し得るプロパティ。受け手が関数かを追わず、読む構文を一律に拒否する
+const OBSERVED_PROPS = new Set(['name', 'toString', 'toSource'])
+// 結果が必ず数値（Number / BigInt）になる二項演算子。`+` は文字列連結にもなるので含めない
+const NUMERIC_BINARY = new Set(['-', '*', '/', '%', '**', '&', '|', '^', '<<', '>>', '>>>'])
 
 class Mismatch extends Error {}
 
@@ -150,6 +166,54 @@ function stringifySite(id, parent) {
   return null
 }
 
+// キーの静的な文字列値（非計算の識別子・文字列リテラル・式を持たないテンプレート）。決まらなければ null
+function staticKey(key, computed) {
+  if (!computed && key.type === 'Identifier') return key.name
+  if (key.type === 'Literal' && typeof key.value === 'string') return key.value
+  if (key.type === 'TemplateLiteral' && key.expressions.length === 0) return key.quasis[0].value.cooked
+  return null
+}
+
+// 構文上必ず数値になる式（数値リテラル・単項 + - ~・算術とビット演算の二項式。括弧は AST に残らない）
+const isNumeric = (e) => (e.type === 'Literal' && (typeof e.value === 'number' || typeof e.value === 'bigint')) ||
+  (e.type === 'UnaryExpression' && (e.operator === '+' || e.operator === '-' || e.operator === '~')) ||
+  (e.type === 'BinaryExpression' && NUMERIC_BINARY.has(e.operator))
+
+const isFunctionValue = (e) => e.type === 'FunctionExpression' || e.type === 'ArrowFunctionExpression'
+
+// 関数の名前・ソース文字列を観測し得る構文か（受け手が関数かは追わない）。当たれば固定の語彙の説明、当たらなければ null。
+// 説明に入力の文字列は入れない（プロパティ名は OBSERVED_PROPS の 3 語のどれかに限る）
+function observeSite(n, parent) {
+  if (n.type === 'MemberExpression') {
+    const k = n.property.type === 'PrivateIdentifier' ? null : staticKey(n.property, n.computed)
+    if (k !== null && OBSERVED_PROPS.has(k) && !isNumeric(n.object)) return `${n.computed ? '計算メンバー' : 'メンバー'}の ${k}`
+  }
+  if (n.type === 'ObjectPattern') {
+    for (const p of n.properties) {
+      const k = p.type === 'Property' ? staticKey(p.key, p.computed) : null
+      if (k !== null && OBSERVED_PROPS.has(k)) return `分割代入・引数パターンのキー ${k}`
+    }
+  }
+  // Reflect.get(f, 'name')・Object.getOwnPropertyDescriptor(f, 'name') など、キーをリテラルで渡す呼び出し
+  if (n.type === 'CallExpression' || n.type === 'NewExpression') {
+    for (const a of n.arguments) {
+      const k = a.type === 'Literal' || a.type === 'TemplateLiteral' ? staticKey(a, true) : null
+      if (k !== null && OBSERVED_PROPS.has(k)) return `呼び出しの引数のキー ${k}`
+    }
+  }
+  // 関数式・アローそのものを文字列にする（別名を経た文字列化は構文では決まらない。冒頭の「保証しないこと」）
+  if (isFunctionValue(n) && parent) {
+    if (parent.type === 'CallExpression' && parent.arguments.includes(n)) {
+      if (parent.callee.type === 'Identifier' && parent.callee.name === 'String') return '関数式を String() の引数にする'
+      if (parent.callee.type === 'MemberExpression' && staticKey(parent.callee.property, parent.callee.computed) === 'concat') return '関数式を concat() の引数にする'
+    }
+    if (parent.type === 'TemplateLiteral' && parent.expressions.includes(n)) return '関数式をテンプレートの式にする'
+    if (parent.type === 'BinaryExpression' && parent.operator === '+') return '関数式を + の被演算子にする'
+    if (parent.type === 'AssignmentExpression' && parent.operator === '+=' && parent.right === n) return '関数式を += の右辺にする'
+  }
+  return null
+}
+
 // 1 つの AST を 1 回の走査で解析する。res: 識別子 → 宣言の識別子 | 'free'（acorn-walk が辿らない識別子は入らない）
 function analyze(ast, goal) {
   const cache = new Map()
@@ -158,6 +222,7 @@ function analyze(ast, goal) {
   const sites = []
   const aliases = [] // [別名の宣言 | 代入先の識別子, 値の識別子]（const a = f / a = f）
   const assignedFns = [] // 後から関数式を代入される識別子（let a; a = () => 1）
+  const observed = [] // 関数の名前・ソースを観測し得る構文（受け手を問わない一律の拒否）
   let bad = null
   walk.fullAncestor(ast, (n, _s, anc) => {
     if (bad) return
@@ -170,7 +235,11 @@ function analyze(ast, goal) {
     else if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init && (n.init.type === 'FunctionExpression' || n.init.type === 'ArrowFunctionExpression')) fnDecls.add(n.id)
     else if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init && n.init.type === 'Identifier') aliases.push([n.id, n.init])
     else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && n.right.type === 'Identifier') aliases.push([n.left, n.right])
-    else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && (n.right.type === 'FunctionExpression' || n.right.type === 'ArrowFunctionExpression')) assignedFns.push(n.left)
+    else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && isFunctionValue(n.right)) assignedFns.push(n.left)
+    // 既定値が関数の束縛（function f(g = () => 1)・const {g = () => 1} = o）も関数値を受け取り得る
+    else if (n.type === 'AssignmentPattern' && n.left.type === 'Identifier' && isFunctionValue(n.right)) assignedFns.push(n.left)
+    const seen = observeSite(n, anc[anc.length - 2])
+    if (seen) observed.push({ why: seen, start: n.start })
     if (n.type !== 'Identifier') return
     const site = stringifySite(n, anc[anc.length - 2])
     if (site) sites.push({ id: n, ...site })
@@ -206,7 +275,7 @@ function analyze(ast, goal) {
   // 最上位（module は Program、script は包み関数の本体）の meta 宣言
   const top = goal === 'module' ? ast.body : ast.body[0].expression.body.body
   const topMeta = new Set(lexicalIds(top).filter((id) => id.name === 'meta'))
-  return { res, bad, stringified, topMeta }
+  return { res, bad, stringified, observed, topMeta }
 }
 
 // 2 つの AST を同じ形で辿り、識別子の組を集める。位置情報と Property.shorthand 以外の差は不一致
@@ -333,6 +402,14 @@ function verifyGoal(before, after, goal) {
       if (stringified.length > 0) {
         const s = stringified[0]
         throw new Mismatch(`${tag} ${side}: 関数値の文字列化 ${stringified.length} 件。最初は ${s.id.name} が${s.why}（offset ${at(s.id)}）`)
+      }
+    }
+    // 受け手を追わない一律の拒否。束縛の確認より後に見る（先に見ると、変異体の束縛不一致がこの理由に隠れる）
+    for (const [side, X] of sides) {
+      const { observed } = X.info
+      if (observed.length > 0) {
+        const s = observed[0]
+        throw new Mismatch(`${tag} ${side}: 関数の名前・ソースを観測し得る構文 ${observed.length} 件。最初は ${s.why}（offset ${at(s)}）`)
       }
     }
     return { ok: true, stats: { identifiers: pairs.length, bound, free, nonref } }

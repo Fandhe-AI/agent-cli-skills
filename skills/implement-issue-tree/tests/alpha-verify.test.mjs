@@ -2,7 +2,8 @@
 //
 // 検証は次の系統:
 //   (a) 合成ケース — 捕捉・自由変数・巻き上げ・ブロック・catch・キー・shorthand・既定値・TDZ・名前つき関数式・
-//       注入名・行数・リテラル・最上位 / 局所の meta・関数値の文字列化（手順 6）・対応外の構文・パース不能。
+//       注入名・行数・リテラル・最上位 / 局所の meta・関数値の文字列化（手順 6）・関数の名前・ソースを観測し得る
+//       構文の一律の拒否と数値の受け手の例外・対応外の構文・パース不能。
 //       全ケースを 1 回の子プロセスで流し、結果を名前で引いて表明する（テスト時間を抑える）
 //   (b) CLI の異常系 — 入力の形が違えば非ゼロ終了し、stdout に何も書かない（呼び出し側が一致と誤読しない）
 //   (c) 実物 — src から作った stage1 の恒等が一致し（手順 6 が実物で 0 件であることを含む）、
@@ -101,7 +102,9 @@ const CASES = [
   ['fnstr-name', 'const f=function(){};use(f.name)', 'const f=function(){};use(f.name)', false, 'mismatch', /関数値の文字列化.*\.name のオブジェクト.*offset \d+/],
   ['fnstr-toString', 'function f(){}use(f.toString())', 'function f(){}use(f.toString())', false, 'mismatch', /関数値の文字列化.*\.toString のオブジェクト/],
   ['fnstr-length', 'const f=()=>1;use(f.length)', 'const f=()=>1;use(f.length)', false, 'mismatch', /関数値の文字列化.*\.length のオブジェクト/],
-  ['fnstr-member-local-ok', 'function f(){}function g(){const f=[1];return f.length+f.name+f.toString()}use(g)', 'function f(){}function g(){const f=[1];return f.length+f.name+f.toString()}use(g)', true, 'match'],
+  // .length は関数値の追跡だけで見る（関数でない同名の局所は通る）。.name・.toString は受け手を問わない一律の拒否に当たる
+  ['fnstr-member-local-ok', 'function f(){}function g(){const f=[1];return f.length}use(g)', 'function f(){}function g(){const f=[1];return f.length}use(g)', true, 'match'],
+  ['fnstr-member-local-name', 'function f(){}function g(){const f=[1];return f.name}use(g)', 'function f(){}function g(){const f=[1];return f.name}use(g)', false, 'mismatch', /観測し得る構文 1 件。最初は メンバーの name/],
   // 計算プロパティ（文字列キー・動的キー）と、const / 代入で別名へ移した関数値も拒否する
   ['fnstr-computed-string', 'function longName(){}use(longName["name"])', 'function IA(){}use(IA["name"])', false, 'mismatch', /関数値の文字列化.*計算プロパティのオブジェクト/],
   ['fnstr-computed-dynamic', 'function longName(){}use(longName[k])', 'function IA(){}use(IA[k])', false, 'mismatch', /関数値の文字列化.*計算プロパティのオブジェクト/],
@@ -110,8 +113,49 @@ const CASES = [
   ['fnstr-assigned-later', 'function f(){let longName;longName=()=>1;return longName.name}use(f)', 'function f(){let a;a=()=>1;return a.name}use(f)', false, 'mismatch', /関数値の文字列化.*\.name のオブジェクト/],
   ['fnstr-destructure-const', 'function f(){const longName=()=>1;const {name}=longName;return name}use(f)', 'function f(){const a=()=>1;const {name}=a;return name}use(f)', false, 'mismatch', /関数値の文字列化.*分割代入の元/],
   ['fnstr-destructure-assign', 'function f(){const longName=()=>1;let name;({name}=longName);return name}use(f)', 'function f(){const a=()=>1;let name;({name}=a);return name}use(f)', false, 'mismatch', /関数値の文字列化.*分割代入の元/],
-  ['fnstr-destructure-object-ok', 'function f(){const o={name:1};const {name}=o;return name}use(f)', 'function f(){const a={name:1};const {name}=a;return name}use(f)', true, 'match'],
+  ['fnstr-destructure-object', 'function f(){const o={name:1};const {name}=o;return name}use(f)', 'function f(){const a={name:1};const {name}=a;return name}use(f)', false, 'mismatch', /観測し得る構文 1 件。最初は 分割代入・引数パターンのキー name/],
   ['fnstr-alias-array-ok', 'function f(){const xs=[1];const alias=xs;return alias.length}use(f)', 'function f(){const a=[1];const b=a;return b.length}use(f)', true, 'match'],
+  // 既定値が関数の束縛（引数・分割代入）も関数値として追う
+  ['fnstr-param-default', 'function f(longValue=()=>1){return String(longValue)}use(f)', 'function f(a=()=>1){return String(a)}use(f)', false, 'mismatch', /関数値の文字列化.*String\(\) の引数/],
+  ['fnstr-destructure-default', 'function f(){const {longValue=()=>1}={};return `${longValue}`}use(f)', 'function f(){const {longValue:a=()=>1}={};return `${a}`}use(f)', false, 'mismatch', /関数値の文字列化.*テンプレートの式/],
+
+  // 関数の名前・ソースを返し得るプロパティ（name・toString・toSource）を読む構文は、受け手を問わず一律に拒否する。
+  // レビューで挙がった例（改名器の実際の出力との組）。どれも改名で戻り値が変わる
+  ['observe-param-default-name', 'function f(longValue=()=>1){return longValue.name}use(f)', 'function f(a=()=>1){return a.name}use(f)', false, 'mismatch'],
+  ['observe-destructure-default-name', 'function f(){const {longValue=()=>1}={};return longValue.name}use(f)', 'function f(){const {longValue:a=()=>1}={};return a.name}use(f)', false, 'mismatch'],
+  ['observe-fnexpr-toString', 'function f(){return (function(){const longName=1;return longName}).toString()}use(f)', 'function f(){return (function(){const a=1;return a}).toString()}use(f)', false, 'mismatch', /観測し得る構文 1 件。最初は メンバーの toString/],
+  ['observe-fnexpr-name', 'use((function longName(){}).name)', 'use((function a(){}).name)', false, 'mismatch', /観測し得る構文 1 件。最初は メンバーの name/],
+  ['observe-fnexpr-name-self', 'use((function longName(){return longName}).name)', 'use((function a(){return a}).name)', false, 'mismatch', /観測し得る構文 1 件。最初は メンバーの name/],
+  ['observe-via-argument', 'function readName(value){return value.name}function longName(){}use(readName(longName))', 'function Ly(a){return a.name}function Gu(){}use(Ly(Gu))', false, 'mismatch', /観測し得る構文 1 件。最初は メンバーの name/],
+  // 書き方の網羅（恒等で拒否されること = 改名の有無によらない）
+  ['observe-member-toSource', 'use(o.toSource())', 'use(o.toSource())', false, 'mismatch', /メンバーの toSource/],
+  ['observe-computed-string', 'use(o["name"])', 'use(o["name"])', false, 'mismatch', /計算メンバーの name/],
+  ['observe-computed-template', 'use(o[`toString`]())', 'use(o[`toString`]())', false, 'mismatch', /計算メンバーの toString/],
+  ['observe-optional', 'use(o?.name)', 'use(o?.name)', false, 'mismatch', /メンバーの name/],
+  ['observe-optional-computed', 'use(o?.["toSource"])', 'use(o?.["toSource"])', false, 'mismatch', /計算メンバーの toSource/],
+  ['observe-pattern-param', 'function f({name}){return name}use(f)', 'function f({name}){return name}use(f)', false, 'mismatch', /分割代入・引数パターンのキー name/],
+  ['observe-pattern-string-key', 'const {"toString":t}=o;use(t)', 'const {"toString":t}=o;use(t)', false, 'mismatch', /分割代入・引数パターンのキー toString/],
+  ['observe-pattern-computed-key', 'const {["name"]:n}=o;use(n)', 'const {["name"]:n}=o;use(n)', false, 'mismatch', /分割代入・引数パターンのキー name/],
+  ['observe-pattern-assign', 'let n;({name:n}=o);use(n)', 'let n;({name:n}=o);use(n)', false, 'mismatch', /分割代入・引数パターンのキー name/],
+  ['observe-pattern-nested', 'const [{toSource:s}]=xs;use(s)', 'const [{toSource:s}]=xs;use(s)', false, 'mismatch', /分割代入・引数パターンのキー toSource/],
+  ['observe-reflect-get', 'use(Reflect.get(o,"name"))', 'use(Reflect.get(o,"name"))', false, 'mismatch', /呼び出しの引数のキー name/],
+  ['observe-descriptor', 'use(Object.getOwnPropertyDescriptor(o,`toString`))', 'use(Object.getOwnPropertyDescriptor(o,`toString`))', false, 'mismatch', /呼び出しの引数のキー toString/],
+  ['observe-paren-plus', 'use((a+b).toString())', 'use((a+b).toString())', false, 'mismatch', /メンバーの toString/],
+  ['observe-sequence', 'use((0,o).name)', 'use((0,o).name)', false, 'mismatch', /メンバーの name/],
+  ['observe-identifier-radix', 'const pad=(h)=>h.toString(36);use(pad)', 'const a=(b)=>b.toString(36);use(a)', false, 'mismatch', /メンバーの toString/],
+  // 関数式・アローそのものの文字列化
+  ['observe-String-fnexpr', 'use(String(function longName(){}))', 'use(String(function a(){}))', false, 'mismatch', /関数式を String\(\) の引数にする/],
+  ['observe-template-arrow', 'use(`${(longName)=>longName}`)', 'use(`${(a)=>a}`)', false, 'mismatch', /関数式をテンプレートの式にする/],
+  ['observe-plus-fnexpr', 'use(""+function(){const longName=1})', 'use(""+function(){const a=1})', false, 'mismatch', /関数式を \+ の被演算子にする/],
+  ['observe-plus-assign-arrow', 'let s="";s+=()=>1;use(s)', 'let s="";s+=()=>1;use(s)', false, 'mismatch', /関数式を \+= の右辺にする/],
+  ['observe-concat-fnexpr', 'use("".concat(function(){}))', 'use("".concat(function(){}))', false, 'mismatch', /関数式を concat\(\) の引数にする/],
+  // 例外は受け手が構文上必ず数値になる式だけ（数値リテラル・単項 + - ~・算術とビット演算の二項式）
+  ['observe-numeric-literal-ok', 'use((255).toString(16),1.5.toString(),5n.toString(2))', 'use((255).toString(16),1.5.toString(),5n.toString(2))', true, 'match'],
+  ['observe-numeric-unary-ok', 'const pad=(h)=>(+h).toString(36);const neg=(x)=>(-x).toString(2)+(~x).toString(2);use(pad,neg)', 'const a=(b)=>(+b).toString(36);const c=(d)=>(-d).toString(2)+(~d).toString(2);use(a,c)', true, 'match'],
+  ['observe-numeric-binary-ok', 'const hex=(x)=>(x>>>0).toString(16)+(x*2).toString()+(x%7).toString()+(x|0).toString(8);use(hex)', 'const a=(b)=>(b>>>0).toString(16)+(b*2).toString()+(b%7).toString()+(b|0).toString(8);use(a)', true, 'match'],
+  // name という束縛・オブジェクトリテラルのキー（定義であって読み取りではない）は対象外
+  ['observe-binding-and-key-ok', 'const name=1;const o={name,toString:2,"toSource":3};use(o,name)', 'const a=1;const o={name:a,toString:2,"toSource":3};use(o,a)', true, 'match'],
+
   // {__proto__} はデータプロパティ、{__proto__: x} はプロトタイプの設定。shorthand の展開を拒否する
   ['proto-shorthand-expanded', 'function f(){const __proto__={x:1};return {__proto__}}use(f)', 'function f(){const a={x:1};return {__proto__:a}}use(f)', false, 'mismatch', /__proto__ の shorthand/],
   ['proto-shorthand-kept-ok', 'function f(){const __proto__={x:1};return {__proto__}}use(f)', 'function f(){const __proto__={x:1};return {__proto__}}use(f)', true, 'match'],
@@ -161,6 +205,20 @@ test('合成: 最上位の meta の改名は mismatch', async () => {
   assert.equal(r.ok, false)
   assert.equal(r.kind, 'mismatch', r.detail)
   assert.match(r.detail, /最上位の meta が改名された/)
+})
+
+test('合成: 一律の拒否の説明は固定の語彙と offset だけで、入力の名前を含まない', async () => {
+  const res = await SYNTH
+  for (const [name, words] of [
+    ['observe-via-argument', ['readName', 'longName', 'value', 'Ly', 'Gu']],
+    ['observe-String-fnexpr', ['longName']],
+    ['observe-pattern-string-key', ['"toString"', 't']],
+  ]) {
+    const r = res.get(name)
+    assert.match(r.detail, /^\[module\] 変換前: 関数の名前・ソースを観測し得る構文 \d+ 件。最初は [^（]+（offset \d+）$/, `${name}: ${r.detail}`)
+    const reason = r.detail.replace(/^.*最初は /, '').replace(/（offset \d+）$/, '')
+    for (const w of words) assert.ok(!new RegExp(`(^|[^A-Za-z])${w}([^A-Za-z]|$)`).test(reason), `${name}: 説明に入力の ${w} が入っている: ${r.detail}`)
+  }
 })
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 // パーサもスコープ解析も V8 なので、acorn を共有する改名器（mangle-identifiers.cjs）と検証器（alpha-verify.cjs）の
 // 共通故障を補う。両テキストを注入 8 名を引数に持つ async 関数で包み、`node --no-lazy --print-bytecode` で
 // 全関数のバイトコードを出して関数ごとに比べる。
-// - 正規化: アドレス・関数名・ソース位置は捨てる。ジャンプはバイトオフセットを命令の添字に直す（定数プールの添字が
+// - 正規化: アドレス・関数名・ソース位置は捨てる（定数プールの文字列の中身は 16 進表記も含めて捨てない）。ジャンプはバイトオフセットを命令の添字に直す（定数プールの添字が
 //   256 を跨ぐと .Wide で命令長が変わるため）。定数プールを指すオペランドは添字ではなく値で比べる。値が違ってよいのは
 //   ThrowReferenceErrorIfHole の名前（TDZ エラー文の局所名）だけ
 // - fail-closed: 表に無い opcode・命令境界でないオフセット・範囲外の定数・V8 の異常終了は例外（非ゼロ終了）
@@ -110,11 +110,14 @@ function parse(text) {
     if (inPool) {
       cur.poolLines.push(l)
       // 同じ値が続く項目は `N-M: 値` にまとめて出力される。文字列の値は生の制御文字（\r・改行）を含み得るので
-      // s フラグで読み、項目でない続きの行は直前の項目の値へつなぐ
+      // s フラグで読み、項目でない続きの行は直前の項目の値へつなぐ。
+      // アドレスを消すのは項目の先頭（次の正規表現で外す）と、文字列でない項目のメタデータ（ボイラープレートが抱える
+      // 配列のアドレス等）だけ。文字列の項目は中身がデータなので、"0xdead" のような 16 進表記も含めてそのまま比べる
       const m = l.match(/^\s+(\d+)(?:-(\d+))?: (?:0x[0-9a-f]+ )?(.*)$/s)
-      const norm = (v) => v.replace(/0x[0-9a-f]+/g, '').replace(/<SharedFunctionInfo[^>]*>/, '<SFI>')
+      const norm = (v) => (cur.lastIsString ? v : v.replace(/0x[0-9a-f]+/g, '').replace(/<SharedFunctionInfo[^>]*>/, '<SFI>'))
       if (m) {
         cur.last = [+m[1], +(m[2] ?? m[1])]
+        cur.lastIsString = m[3].startsWith('<String[')
         for (let k = cur.last[0]; k <= cur.last[1]; k++) cur.pool[k] = norm(m[3])
       } else if (cur.last) {
         for (let k = cur.last[0]; k <= cur.last[1]; k++) cur.pool[k] += `\n${norm(l)}`
