@@ -77,9 +77,9 @@ test('2 回とも不一致なら後続 agent を 1 件も起動せず、メッ�
 
 // 1 ページの封筒の payload は dir・tsvSha256 を持たない（空文字の欄は転記で落ちやすく、欠けると sha256 が毎回不一致になるため）。
 // 観測値の sha256 のまま、転記で欄が欠けた・余った返却は検査値の不一致として 2 回とも拒否される（fail-closed）。
-test('1 ページの封筒の payload は 7 欄だけで、dir・tsvSha256 を含まない', () => {
+test('1 ページの封筒の payload は 8 欄だけで（repo を含む。Issue #808）、dir・tsvSha256 を含まない', () => {
   const r = honest('--nonce abc123 --root 1')
-  assert.deepEqual(Object.keys(r.payload).sort(), ['count', 'inputSha256', 'nodesSha256', 'optinSha256', 'pages', 'structSha256', 'taskIdSha256'])
+  assert.deepEqual(Object.keys(r.payload).sort(), ['count', 'inputSha256', 'nodesSha256', 'optinSha256', 'pages', 'repo', 'structSha256', 'taskIdSha256'])
 })
 
 for (const [name, tamper] of [

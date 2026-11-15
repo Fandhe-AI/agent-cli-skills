@@ -16,10 +16,13 @@
 # このファイルは単体実行しない。run-verified.sh のハッシュ照合は scripts/lib/*.sh も対象に含む。
 # 読み込み済みを示す変数でのガードは置かない（環境から継承した変数で定義が飛ばされ、偽の関数が使われるのを防ぐ）。
 
-# 直近の merged PR の head の check-runs から GitHub Actions 以外の App の slug を取り出す gh --jq（gojq）の定義。
-# 旧コマンドの '[.check_runs[] | select(.app.slug != "github-actions") | .app.slug] | .[]' との違いは、slug が文字列でないもの（`.app` が null の check-run）を落とすだけ。
-# 旧版はこれを文字列 null として出し、外部 App「null」として待たせ得た。
-RS_APPS_JQ='[.check_runs[] | select(.app.slug != "github-actions") | .app.slug | select(type == "string")] | .[]'
+# 直近の merged PR の head の check-runs の 1 ページから、1 行目にそのページの check-run の件数、2 行目以降に GitHub Actions 以外の App の slug を
+# 出す gh --jq（gojq）の定義。件数はページ送りの終わりの判定に使い（Issue #809。100 件未満なら最後のページ）、slug の候補には混ぜない
+# （slug だけでは github-actions を除いた後なので、ページが埋まっていたか分からない）。
+# slug の部分の旧コマンド '[.check_runs[] | select(.app.slug != "github-actions") | .app.slug] | .[]' との違いは、slug が文字列でないもの
+# （`.app` が null の check-run）を落とすだけ。旧版はこれを文字列 null として出し、外部 App「null」として待たせ得た。
+# check_runs が配列でない応答は `.check_runs[]` が失敗し、gh が非 0 で終わる（取得失敗として errs に数える）。
+RS_APPS_JQ='(.check_runs | length), ([.check_runs[] | select(.app.slug != "github-actions") | .app.slug | select(type == "string")] | .[])'
 # 対象リポジトリの open issue（PR を除く）の番号。旧コマンドと同一
 RS_ISSUES_JQ='.[]|select(.pull_request==null)|.number'
 # リポジトリのラベル名の一覧。旧コマンドと同一
@@ -30,6 +33,13 @@ RS_SLUG_MAX=64         # App slug の長さ（GitHub の slug は小文字英数
 RS_LABELS_MAX=10       # ホストの parseSkipLabels の上限と同じ
 RS_LABEL_MAX_BYTES=200 # ラベル 1 件の長さ。ホストは 50 文字までで、日本語は 1 文字 3 バイト（LC_ALL=C のバイト数）に収まる余裕を持たせる
 RS_NUMBER_MAX_LEN=9    # イシュー番号の桁数（is_uint と同じ。10 億未満）
+# check-runs のページ送りの上限（1 ページ 100 件。Issue #809）。3 件の PR × 10 ページ = gh api 最大 30 回で、1 回の Bash 呼び出しの
+# 時間に収まる範囲にとどめる。上限のページまで埋まっていたら（続きを読まずに止めたので）取りこぼしとして errs に数える
+RS_CHECK_PAGES_MAX=10
+RS_CHECK_PAGE_SIZE=100
+# --numbers（ツリーの open ノードの番号のカンマ区切り。Issue #807）の長さの上限。Linux の 1 引数の上限（MAX_ARG_STRLEN 131,072 B）より
+# 小さく取る。fetch-tree.sh の上限（約 4,500 ノード）× 9 桁 + カンマでも 45,000 B で収まり、超えるのは想定外の入力だけ
+RS_NUMBERS_MAX_BYTES=100000
 
 # App slug の形式（小文字英数字とハイフン・先頭は英数字・1〜64 文字）。slug は後でホストのプロンプトに入るので、形を限って返す。
 rs_valid_slug() {
@@ -55,6 +65,34 @@ rs_valid_number() {
   [ "${#1}" -le "${RS_NUMBER_MAX_LEN}" ]
 }
 
+# --numbers の形式（Issue #807）: 番号（rs_valid_number）のカンマ区切りで、狭義の昇順（重複なし）・1 件以上・RS_NUMBERS_MAX_BYTES 以下。
+# 並びを 1 通りに固定するので、inputSha256 に入れた文字列がそのまま集合を表す（ホストは昇順に並べて渡す）。
+# 区切りの分解（tr）が失敗して空になった場合も、空行が番号の形でないので非ゼロ（fail-closed）。
+rs_valid_numbers_csv() {
+  local n prev=0
+  case "$1" in
+    '' | *[!0-9,]* | ,* | *, | *,,*) return 1 ;;
+  esac
+  [ "${#1}" -le "${RS_NUMBERS_MAX_BYTES}" ] || return 1
+  while IFS= read -r n; do
+    rs_valid_number "${n}" || return 1
+    [ "${n}" -gt "${prev}" ] || return 1
+    prev=${n}
+  done <<RS_EOF
+$(printf '%s\n' "$1" | tr ',' '\n')
+RS_EOF
+  return 0
+}
+
+# 番号の交わり（Issue #807）: $2（ラベルの open issue の番号。rs_sorted_numbers の出力 = 昇順のカンマ区切り。空可）のうち、
+# $1（ツリーの open ノードの番号。rs_valid_numbers_csv 済み）にあるものだけを、$2 の順のままカンマ区切りで出す（空なら空行）。
+# リポジトリ全体の数千件をそのまま出すと封筒の上限（exit 7）を超え、ツリー全体が待機になるため、ツリーと交わる番号だけを返す。
+# 数千件を jq --arg に渡すと 1 引数の上限に当たり得るので、標準入力で渡す。jq の失敗は非ゼロ（呼び出し側がそのラベルを failed にする）。
+rs_intersect_numbers() {
+  [ -n "$2" ] || return 0
+  printf '%s\n%s\n' "$1" "$2" | jq -R -s -r 'split("\n") | (.[0] | split(",") | reduce .[] as $k ({}; .[$k] = true)) as $s | [.[1] | split(",")[] | select($s[.] == true)] | join(",")' 2>/dev/null
+}
+
 # ラベル 1 件の形式。空・制御文字（改行を含む）・カンマ（labels= はカンマで AND になる）・長さ超過は不可。前後の空白もホストの検査に揃えて不可
 rs_valid_label() {
   case "$1" in
@@ -63,9 +101,10 @@ rs_valid_label() {
   [ "${#1}" -le "${RS_LABEL_MAX_BYTES}" ]
 }
 
-# 入力の束縛 inputSha256: sha256("repo-scan\n" + mode + "\n" + repo + ["\n" + label …])。repo は省いたとき空文字。末尾に改行を付けない。
-# ホストの repoScanInputSha256 と同じ定義（ホストは ['repo-scan', mode, repo, ...labels].join('\n') を計算する）。
-# $1 = モード、$2 = repo、$3... = ラベル（順序込み。添字がラベルの意味を決める）。stdout に 16 進 64 桁。ツールが無ければ非ゼロ。
+# 入力の束縛 inputSha256: sha256("repo-scan\n" + mode + "\n" + repo + ["\n" + 欄 …])。末尾に改行を付けない。
+# ホストの repoScanInputSha256 と同じ定義（ホストは ['repo-scan', mode, repo, ...rest].join('\n') を計算する）。
+# $1 = モード、$2 = repo、$3... = 残りの欄。skip-labels は --numbers（ツリーの open ノードの番号。Issue #807）を先頭の固定位置に置き、
+# 続けてラベル（順序込み。添字がラベルの意味を決める）。external-checks は残りの欄なし。stdout に 16 進 64 桁。ツールが無ければ非ゼロ。
 rs_input_sha() {
   local mode=$1 repo=$2 text l
   shift 2
@@ -80,7 +119,8 @@ ${l}"
 }
 
 # 複数行の slug の候補（$1）から、形式の正しいものを昇順・重複なしで RS_APPS（改行区切り）へ、捨てた件数（形式不正の行の数。同じ不正な値が重複していても行ごとに数える）を RS_DROPPED へ入れる。
-# 件数の上限は設けない（3 件の PR × check-runs の 1 ページ 100 件なので高々 300 件。ホストが 100 件以内を検査する）。
+# 件数の上限は設けない（3 件の PR × check-runs の 10 ページ × 100 件なので高々 3,000 件。重複を除いた apps が封筒の上限を超えれば
+# exit 7 で、ホストは観測を採用しない。ホストは 100 件以内を検査する）。
 # 並びは LC_ALL=C の sort -u で固定する（ロケールで並びが変わらない）。空行は数えない。sort の失敗（入力があるのに結果が空の場合を含む）は return 1（RS_APPS は空）。
 rs_collect_apps() {
   local line valid=""

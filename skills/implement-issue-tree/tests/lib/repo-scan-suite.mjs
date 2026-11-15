@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeGhRepoScanStub, checkRuns, issueList } from './gh-repo-scan-stub.mjs'
-import { expectedSha256, repoScanInputSha256, toolExists } from './signed-output.mjs'
+import { expectedSha256, repoScanInputSha256, skipLabelsInputSha256, toolExists } from './signed-output.mjs'
 import { importDefinitions } from './stub-run.mjs'
 import { bundleSha256 } from '../../scripts/build-workflow.mjs'
 
@@ -24,6 +24,10 @@ const FIXTURES = join(HERE, '..', 'fixtures')
 const OLD_EXTERNAL = readFileSync(join(FIXTURES, 'repo-scan-old-external-checks-main.txt'), 'utf8')
 const OLD_SKIP = readFileSync(join(FIXTURES, 'repo-scan-old-skip-labels-main.txt'), 'utf8').trim()
 const NONCE = 'abc123nonce'
+export const REPO = 'o/r'
+// skip-labels の既定の --numbers（ツリーの open ノード。Issue #807）。既存のケースの番号（1000 以下）をすべて含み、交わりで結果が変わらない
+const chunk = (a, n) => Array.from({ length: Math.ceil(a.length / n) }, (_, k) => a.slice(k * n, k * n + n))
+export const NUMS = Array.from({ length: 1000 }, (_, k) => k + 1).join(',')
 const A = 'a'.repeat(40)
 const B = 'b'.repeat(40)
 const C = 'c'.repeat(40)
@@ -63,8 +67,12 @@ const EMPTY_SUCCESS = 'cat >/dev/null; exit 0' // 何も出さずに成功（入
 
 export function registerRepoScanTests(bash) {
   const T = (name, fn, o = {}) => test(`[${bash}] ${name}`, { skip: !haveJq && 'jq が無い', ...o }, fn)
-  const ext = (stub, extra = [], opts = {}) => run(bash, stub, ['--mode', 'external-checks', '--nonce', NONCE, ...extra], opts)
-  const skip = (stub, labels, extra = [], opts = {}) => run(bash, stub, ['--mode', 'skip-labels', '--nonce', NONCE, ...extra, '--', ...labels], opts)
+  // --repo は必須（Issue #808）。extra に --repo が無ければ既定の REPO を付ける
+  const withRepo = (extra) => (extra.includes('--repo') ? extra : ['--repo', REPO, ...extra])
+  const ext = (stub, extra = [], opts = {}) => run(bash, stub, ['--mode', 'external-checks', '--nonce', NONCE, ...withRepo(extra)], opts)
+  // skip-labels は --numbers も必須（Issue #807）。extra に無ければ既定の NUMS を付ける
+  const withNums = (extra) => (extra.includes('--numbers') ? extra : [...extra, '--numbers', NUMS])
+  const skip = (stub, labels, extra = [], opts = {}) => run(bash, stub, ['--mode', 'skip-labels', '--nonce', NONCE, ...withNums(withRepo(extra)), '--', ...labels], opts)
 
   // ---------------- external-checks ----------------
 
@@ -75,20 +83,21 @@ export function registerRepoScanTests(bash) {
     })
     const r = ext(stub)
     const e = envelopeOf(r)
-    assert.deepEqual(e.payload, { apps: ['codecov', 'cursor'], dropped: 0, errs: 0, inputSha256: repoScanInputSha256('external-checks', ''), prs: 3 })
+    assert.deepEqual(e.payload, { apps: ['codecov', 'cursor'], dropped: 0, errs: 0, inputSha256: repoScanInputSha256('external-checks', REPO), prs: 3 })
     // 実スクリプトの標準出力をホストの verifySignedOutput に通す（正準形のずれはスタブ製の封筒では見つからない）
-    const signed = H.verifySignedOutput(e, NONCE, H.repoScanInputSha256('external-checks', undefined))
+    const signed = H.verifySignedOutput(e, NONCE, H.repoScanInputSha256('external-checks', REPO))
     assert.equal(signed.ok, true, JSON.stringify(signed))
   })
 
-  T('external-checks: gh の呼び出しは pr list 1 回 + 各 PR の check-runs 1 回（per_page=100・ページ送りなし・GET だけ）で、cwd のリポジトリ（{owner}/{repo}）を使う', () => {
+  T('external-checks: gh の呼び出しは pr list 1 回 + 各 PR の check-runs 1 回（per_page=100・GET だけ）で、--repo のリポジトリだけを使う（cwd の {owner}/{repo} に倒れない）', () => {
     const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }, { headRefOid: B }], checkRuns: { [A]: checkRuns(['x']), [B]: checkRuns(['y']) } })
     assert.equal(ext(stub).status, 0)
     const calls = stub.calls()
     assert.equal(calls.length, 3)
-    assert.match(calls[0], /^pr list --state merged --limit 3 --json headRefOid --jq /)
-    assert.ok(!calls[0].includes(' -R '))
-    assert.ok(calls[1].startsWith(`api repos/{owner}/{repo}/commits/${A}/check-runs?per_page=100 --jq `) && !calls.some((c) => c.includes('--paginate')))
+    assert.match(calls[0], /^pr list -R o\/r --state merged --limit 3 --json headRefOid --jq /)
+    // 1 ページ目が 100 件未満なら 2 ページ目を読まない（page= を数えるページ送り。--paginate は上限を置けないので使わない。Issue #809）
+    assert.ok(calls[1].startsWith(`api repos/o/r/commits/${A}/check-runs?per_page=100&page=1 --jq `) && !calls.some((c) => c.includes('--paginate')))
+    assert.ok(!calls.some((c) => c.includes('{owner}')))
     assert.ok(!calls.some((c) => /-X |-f |-F |--method|--input/.test(c)), '書き込み系の指定がある')
   })
 
@@ -96,7 +105,7 @@ export function registerRepoScanTests(bash) {
     const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns(['cursor']) } })
     const e = envelopeOf(ext(stub, ['--repo', 'Fandhe-AI/target']))
     assert.equal(e.payload.inputSha256, repoScanInputSha256('external-checks', 'Fandhe-AI/target'))
-    assert.notEqual(e.payload.inputSha256, repoScanInputSha256('external-checks', ''))
+    assert.notEqual(e.payload.inputSha256, repoScanInputSha256('external-checks', REPO))
     const calls = stub.calls()
     assert.match(calls[0], /^pr list -R Fandhe-AI\/target --state merged /)
     assert.ok(calls[1].includes('repos/Fandhe-AI/target/commits/'))
@@ -205,6 +214,67 @@ export function registerRepoScanTests(bash) {
     assert.deepEqual(envelopeOf(ext(makeGhRepoScanStub(data))).payload.apps, ['late-app'])
   })
 
+  // ---------------- external-checks のページ送り（Issue #809）----------------
+  const actions = (n) => Array.from({ length: n }, () => 'github-actions')
+
+  T('external-checks: check-runs をページ送りし、150 件目にだけある外部 App も apps に入る（件数行は slug に混ぜない）', () => {
+    const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns([...actions(149), 'late-app']) } })
+    const e = envelopeOf(ext(stub))
+    assert.deepEqual(e.payload.apps, ['late-app'])
+    assert.deepEqual([e.payload.errs, e.payload.dropped, e.payload.prs], [0, 0, 1], '件数行（100・50）を slug の候補や dropped に数えない')
+    assert.deepEqual(stub.calls().filter((c) => c.includes('check-runs')).map((c) => c.split(' ')[1]), [`repos/o/r/commits/${A}/check-runs?per_page=100&page=1`, `repos/o/r/commits/${A}/check-runs?per_page=100&page=2`])
+  })
+
+  T('external-checks: ちょうど 100 件なら 2 ページ目（0 件）まで読んで終わる', () => {
+    const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns([...actions(99), 'edge-app']) } })
+    const e = envelopeOf(ext(stub))
+    assert.deepEqual([e.payload.apps, e.payload.errs], [['edge-app'], 0])
+    assert.equal(stub.callsTo('check-runs'), 2)
+  })
+
+  T('external-checks: ページの取得失敗は errs に数え、読めたページの App は返し、その PR の残りのページは読まない', () => {
+    for (const fail of [{ exit: 1 }, { raw: '{"message":"boom secret-token"}', exit: 1 }]) {
+      const stub = makeGhRepoScanStub({
+        prs: [{ headRefOid: A }, { headRefOid: B }],
+        checkRuns: { [A]: checkRuns([...actions(99), 'first-page', ...actions(100), 'third-page']), [`${A}@2`]: fail, [B]: checkRuns(['other']) },
+      })
+      const r = ext(stub)
+      const e = envelopeOf(r)
+      assert.deepEqual([e.payload.apps, e.payload.errs, e.payload.prs], [['first-page', 'other'], 1, 2])
+      assert.ok(!stub.calls().some((c) => c.includes(`${A}/check-runs?per_page=100&page=3`)), '失敗したページの後を読んだ')
+      assert.ok(!r.stdout.includes('boom') && !r.stdout.includes('secret'))
+    }
+  })
+
+  T('external-checks: 件数行が整数でない応答（check_runs が配列でない等）は errs に数える', () => {
+    for (const resp of [{ raw: 'x\ncursor\n', exit: 0 }, { total_count: 1, check_runs: null }]) {
+      const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: resp } })
+      const e = envelopeOf(ext(stub))
+      assert.deepEqual([e.payload.apps, e.payload.errs], [[], 1], JSON.stringify(resp))
+    }
+  })
+
+  T('external-checks: ページ数の上限（10 ページ = 1,000 件）まで埋まっていれば読むのを止めて errs に数え、取りこぼしを黙らない', () => {
+    const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns([...actions(500), 'mid-app', ...actions(599), 'beyond-app']) } })
+    const e = envelopeOf(ext(stub))
+    assert.deepEqual([e.payload.apps, e.payload.errs], [['mid-app'], 1])
+    assert.equal(stub.callsTo('check-runs'), 10, '上限を超えて読んだ')
+    // 1,000 件未満なら上限に当たらない
+    const ok = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns([...actions(998), 'last-app']) } })
+    assert.deepEqual(Object.values(envelopeOf(ext(ok)).payload).slice(0, 3), [['last-app'], 0, 0])
+  })
+
+  T('external-checks: 3 件の PR がすべて上限まで読んでも、封筒は上限内で時間の見積り（gh api 30 回 + pr list 1 回）に収まる', () => {
+    const many = checkRuns([...actions(990), ...Array.from({ length: 10 }, (_, k) => `app-${k}`)])
+    const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }, { headRefOid: B }, { headRefOid: C }], checkRuns: { [A]: many, [B]: many, [C]: many } })
+    const r = ext(stub)
+    const e = envelopeOf(r)
+    assert.equal(e.payload.apps.length, 10)
+    assert.equal(e.payload.errs, 3, '3 件とも上限のページまで埋まっていた')
+    assert.equal(stub.calls().length, 31)
+    assert.ok(r.stdout.length < 24000)
+  })
+
   T('external-checks: slug の整列（sort）が失敗しても、入力があるのに空の結果で成功しても、apps を空の成功にせず errs に数える', () => {
     for (const action of [FAIL_STATUS, EMPTY_SUCCESS]) {
       const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns(['cursor', 'codecov']) } })
@@ -232,9 +302,9 @@ export function registerRepoScanTests(bash) {
       absent: [],
       entries: [{ i: 1, numbers: [3, 5, 9] }, { i: 2, numbers: [] }],
       failed: [],
-      inputSha256: repoScanInputSha256('skip-labels', '', ['owner:human', 'owner:joint']),
+      inputSha256: skipLabelsInputSha256(REPO, NUMS, ['owner:human', 'owner:joint']),
     })
-    const signed = H.verifySignedOutput(e, NONCE, H.repoScanInputSha256('skip-labels', undefined, ['owner:human', 'owner:joint']))
+    const signed = H.verifySignedOutput(e, NONCE, H.repoScanInputSha256('skip-labels', REPO, [NUMS, ...['owner:human', 'owner:joint']]))
     assert.equal(signed.ok, true, JSON.stringify(signed))
     const c = H.collectSkipLabelEntries([1, 2], signed.payload, 2)
     assert.deepEqual([[...c.byIndex], c.missing, c.absent], [[[1, [3, 5, 9]], [2, []]], [], []])
@@ -244,7 +314,7 @@ export function registerRepoScanTests(bash) {
     const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }], issues: { a: issueList([1]) } })
     assert.equal(skip(stub, ['a']).status, 0)
     const calls = stub.calls()
-    assert.deepEqual(calls.map((c) => c.split(' --')[0]), ['api repos/{owner}/{repo}/labels?per_page=100', 'api repos/{owner}/{repo}/issues?state=open&labels=a&per_page=100'])
+    assert.deepEqual(calls.map((c) => c.split(' --')[0]), ['api repos/o/r/labels?per_page=100', 'api repos/o/r/issues?state=open&labels=a&per_page=100'])
     assert.ok(calls.every((c) => c.includes('--paginate')))
     assert.ok(!calls.some((c) => /(^| )(-f|-F|-X|--field|--raw-field|--input|--method)( |$)/.test(c)))
   })
@@ -256,21 +326,21 @@ export function registerRepoScanTests(bash) {
     const e = envelopeOf(skip(stub, labels))
     assert.deepEqual(e.payload.entries, labels.map((_, k) => ({ i: k + 1, numbers: [100 + k] })), '各ラベルが自分の応答（取り違えなし）')
     assert.deepEqual([e.payload.absent, e.payload.failed], [[], []])
-    assert.equal(e.payload.inputSha256, repoScanInputSha256('skip-labels', '', labels))
+    assert.equal(e.payload.inputSha256, skipLabelsInputSha256(REPO, NUMS, labels))
   })
 
   T('skip-labels: --repo はラベル一覧・issue 一覧の全 gh 呼び出しと入力の束縛に入る', () => {
     const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }], issues: { a: issueList([1]) } })
     const e = envelopeOf(skip(stub, ['a'], ['--repo', 'Fandhe-AI/target']))
-    assert.equal(e.payload.inputSha256, repoScanInputSha256('skip-labels', 'Fandhe-AI/target', ['a']))
+    assert.equal(e.payload.inputSha256, skipLabelsInputSha256('Fandhe-AI/target', NUMS, ['a']))
     const calls = stub.calls()
     assert.ok(calls.length === 2 && calls.every((c) => c.includes('repos/Fandhe-AI/target/')) && !calls.some((c) => c.includes('{owner}')))
   })
 
   T('skip-labels: 入力の束縛はラベルの並び（添字）を区別する', () => {
-    assert.notEqual(repoScanInputSha256('skip-labels', '', ['a', 'b']), repoScanInputSha256('skip-labels', '', ['b', 'a']))
-    assert.notEqual(repoScanInputSha256('skip-labels', '', ['a', 'b']), repoScanInputSha256('skip-labels', '', ['a']))
-    assert.notEqual(repoScanInputSha256('skip-labels', '', ['a']), repoScanInputSha256('external-checks', '', []))
+    assert.notEqual(skipLabelsInputSha256(REPO, NUMS, ['a', 'b']), skipLabelsInputSha256(REPO, NUMS, ['b', 'a']))
+    assert.notEqual(skipLabelsInputSha256(REPO, NUMS, ['a', 'b']), skipLabelsInputSha256(REPO, NUMS, ['a']))
+    assert.notEqual(skipLabelsInputSha256(REPO, NUMS, ['a']), repoScanInputSha256('external-checks', REPO, []))
     const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }, { name: 'b' }], issues: { a: issueList([1]), b: issueList([2]) } })
     const ab = envelopeOf(skip(stub, ['a', 'b'])).payload
     const ba = envelopeOf(skip(stub, ['b', 'a'])).payload
@@ -345,15 +415,65 @@ export function registerRepoScanTests(bash) {
     assert.deepEqual([e.payload.entries, e.payload.failed], [[], [1]])
   })
 
-  T('skip-labels: 出力が大きすぎる（封筒が 24000 バイトを超える）なら封筒を出さず exit 7', () => {
+  // Issue #807: open issue が 5,000 件あるラベルでも、ツリーの open ノード（--numbers）と交わらない番号は出力に入らず、封筒の上限を超えない
+  T('skip-labels: 5,000 件のラベルでもツリーの open ノードとの交わりだけを返し、封筒は上限内（交わらない番号は出力に入らない）', () => {
+    const many = Array.from({ length: 5000 }, (_, k) => 100000 + k)
+    const stub = makeGhRepoScanStub({ labels: [{ name: 'big' }, { name: 'none' }], issues: { big: { pages: chunk(issueList(many), 100) }, none: issueList([3, 4, 5]) } })
+    const nodes = [1, 2, 100003, 101234, 104999, 200000]
+    const r = skip(stub, ['big', 'none'], ['--numbers', nodes.join(',')])
+    const e = envelopeOf(r)
+    assert.deepEqual(e.payload.entries, [{ i: 1, numbers: [100003, 101234, 104999] }, { i: 2, numbers: [] }])
+    assert.deepEqual(e.payload.failed, [])
+    assert.ok(r.stdout.length < 1000, `封筒は交わりの大きさで抑えられる（${r.stdout.length} バイト）`)
+    assert.ok(!r.stdout.includes('100000,') && !r.stdout.includes('104998'), '交わらない番号が出力に入った')
+    assert.equal(e.payload.inputSha256, skipLabelsInputSha256(REPO, nodes.join(','), ['big', 'none']))
+    // 大量ノード（fetch-tree.sh の上限 約 4,500 件 × 6 桁）の --numbers も 1 引数で渡せる（約 31,500 バイト < MAX_ARG_STRLEN 131,072）
+    const bigNodes = Array.from({ length: 4500 }, (_, k) => 300000 + k * 2)
+    const big = skip(stub, ['big'], ['--numbers', bigNodes.join(',')])
+    assert.deepEqual(envelopeOf(big).payload.entries, [{ i: 1, numbers: [] }])
+  })
+
+  T('skip-labels: 交わりが封筒の上限（24000 バイト）を超えると封筒を出さず exit 7（ホストは取得できなかったものとして全 open ノードを待たせる）', () => {
     const many = Array.from({ length: 4000 }, (_, k) => 100000 + k)
     const stub = makeGhRepoScanStub({ labels: [{ name: 'big' }], issues: { big: issueList(many) } })
-    const r = skip(stub, ['big'])
+    const r = skip(stub, ['big'], ['--numbers', many.join(',')])
     assert.equal(r.status, 7)
     assert.equal(r.stdout, '')
     // 収まる大きさなら通る
-    const ok = makeGhRepoScanStub({ labels: [{ name: 'big' }], issues: { big: issueList(many.slice(0, 1500)) } })
-    assert.equal(envelopeOf(skip(ok, ['big'])).payload.entries[0].numbers.length, 1500)
+    const ok = skip(stub, ['big'], ['--numbers', many.slice(0, 1500).join(',')])
+    assert.equal(envelopeOf(ok).payload.entries[0].numbers.length, 1500)
+  })
+
+  T('skip-labels: 番号の形が違う行があれば、交わりの外でもそのラベルは failed（絞り込みは全行の形式検査の後）', () => {
+    const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }], issues: { a: { raw: '3\n007\n', exit: 0 } } })
+    const e = envelopeOf(skip(stub, ['a'], ['--numbers', '3']))
+    assert.deepEqual([e.payload.entries, e.payload.failed], [[], [1]])
+  })
+
+  T('skip-labels: 入力の束縛はノード番号の集合を区別する', () => {
+    const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }], issues: { a: issueList([1, 2]) } })
+    const a = envelopeOf(skip(stub, ['a'], ['--numbers', '1,2'])).payload
+    const b = envelopeOf(skip(stub, ['a'], ['--numbers', '1'])).payload
+    assert.notEqual(a.inputSha256, b.inputSha256)
+    assert.deepEqual([a.entries[0].numbers, b.entries[0].numbers], [[1, 2], [1]])
+    assert.notEqual(skipLabelsInputSha256(REPO, '1', ['a']), skipLabelsInputSha256(REPO, '', ['1', 'a']))
+  })
+
+  T('skip-labels: --numbers の誤り（無い・空・昇順でない・重複・先頭 0・0・10 桁・数字以外・前後のカンマ・長すぎる・external-checks に付ける）は gh を呼ばず exit 2', () => {
+    const stub = makeGhRepoScanStub({ labels: [], issues: {} })
+    const base = ['--mode', 'skip-labels', '--nonce', NONCE, '--repo', REPO]
+    const cases = [
+      [...base, '--', 'x'],
+      ...['', '2,1', '1,1', '01', '0', '1234567890', '1,a', ',1', '1,', '1,,2', '1 2', '-1', Array.from({ length: 20000 }, (_, k) => k + 1).join(',')].map((n) => [...base, '--numbers', n, '--', 'x']),
+      [...base, '--numbers', '1', '--numbers', '1', '--', 'x'],
+      ['--mode', 'external-checks', '--nonce', NONCE, '--repo', REPO, '--numbers', '1'],
+    ]
+    for (const args of cases) {
+      const r = run(bash, stub, args)
+      assert.equal(r.status, 2, JSON.stringify(args).slice(0, 120))
+      assert.equal(r.stdout, '')
+    }
+    assert.equal(stub.calls().length, 0, 'gh を呼んだ')
   })
 
   T('skip-labels: ロケールに依存しない（番号の並び・absent は LC_ALL が違っても同じ）', () => {
@@ -425,11 +545,14 @@ export function registerRepoScanTests(bash) {
       ['--mode', 'external-checks', '--nonce', NONCE, '--repo', 'bad repo'],
       ['--mode', 'external-checks', '--nonce', NONCE, '--repo', ''],
       ['--mode', 'external-checks', '--nonce', NONCE, '--repo', 'a/b', '--repo', 'a/b'],
-      ['--mode', 'external-checks', '--mode', 'skip-labels', '--nonce', NONCE, '--', 'x'],
+      ['--mode', 'external-checks', '--mode', 'skip-labels', '--nonce', NONCE, '--repo', REPO, '--numbers', '1', '--', 'x'],
       ['--mode', 'external-checks', '--nonce', NONCE, '--bogus'],
       ['--mode', 'external-checks', '--nonce', NONCE, '--', 'label'],
       ['--mode', 'skip-labels', '--nonce', NONCE, '--repo', '--', 'x'],
       ['--mode'],
+      // --repo の省略（Issue #808。他は正しい起動行。省くと gh がカレントのリポジトリへ倒れるため使い方の誤り）
+      ['--mode', 'external-checks', '--nonce', NONCE],
+      ['--mode', 'skip-labels', '--nonce', NONCE, '--numbers', '1', '--', 'x'],
     ]
     for (const args of cases) {
       const r = run(bash, stub, args)
@@ -441,7 +564,7 @@ export function registerRepoScanTests(bash) {
 
   T('run-verified.sh 経由（SHA-256 照合つき）で起動でき、スクリプトのハッシュが違えば起動しない', () => {
     const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns(['cursor']) } })
-    const ok = run(bash, stub, ['--mode', 'external-checks', '--nonce', NONCE], { launcher: true })
+    const ok = run(bash, stub, ['--mode', 'external-checks', '--nonce', NONCE, '--repo', REPO], { launcher: true })
     assert.deepEqual(envelopeOf(ok).payload.apps, ['cursor'])
     const bad = spawnSync(bash, [RUN_VERIFIED, '0'.repeat(64), 'repo-scan.sh', '--mode', 'external-checks', '--nonce', NONCE], { env: stub.env(), encoding: 'utf8' })
     assert.equal(bad.status, 3)

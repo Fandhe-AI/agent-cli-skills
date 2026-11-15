@@ -6,7 +6,7 @@
 //   受け付ける呼び出し:
 //     gh repo view --json owner,name --jq F                                      → repoview.json（旧コマンドの実行用。既定は o/r）
 //     gh pr list [-R repo] --state merged --limit 3 --json headRefOid --jq F   → prs.json（応答は [{headRefOid}, ...]）
-//     gh api [--paginate] repos/…/commits/<sha>/check-runs [--jq F]            → check_<sha>.json
+//     gh api [--paginate] repos/…/commits/<sha>/check-runs[?per_page=100&page=N] [--jq F]  → check_<sha>.json の N ページ目（既定 1）
 //     gh api [--paginate] repos/…/labels?per_page=100 [--jq F]                  → labels.json
 //     gh api [--paginate] repos/…/issues?state=open&labels=<ENC>&per_page=100    → issues_<ENC の % を = にした文字列>.json
 //     （旧コマンドの形 `gh api -X GET repos/…/issues -f labels=<L> …` と `repos/…/labels -f per_page=100` も同じ応答に解決する）
@@ -53,6 +53,10 @@ case "$1" in
         r=\${route%%\\?*}; sha=\${r%/check-runs}; key="check_\${sha##*/}"
         # 実 GitHub は per_page を省くと 30 件で切る。per_page=100 を付けた呼び出しだけ 100 件まで返す（偽 gh もその挙動に揃える）
         case "$route" in *per_page=100*) cap=100 ;; *) cap=30 ;; esac
+        # page=N（既定 1）は N ページ目を切り出す（Issue #809）。<sha>@N で登録したページ単位の応答があればそれを返す（失敗の注入）
+        pg=$(printf '%s' "$route" | sed -n 's/.*[?&]page=\\([0-9][0-9]*\\).*/\\1/p')
+        [ -n "$pg" ] || pg=1
+        if [ -f "$dir/r/\${key}_p$pg.out" ]; then key="\${key}_p$pg"; cap=""; fi
         ;;
       */labels|*/labels\\?*) key="labels" ;;
       */issues\\?*) enc=\${route#*labels=}; enc=\${enc%%&*}; key="issues_$(printf '%s' "$enc" | tr '%' '=')" ;;
@@ -67,7 +71,7 @@ if [ -f "$dir/r/$key.out" ]; then
   [ -f "$dir/r/$key.rc" ] && rc=$(cat "$dir/r/$key.rc")
   src="$dir/r/$key.out"
   if [ -n "$cap" ] && [ ! -f "$dir/r/$key.raw" ]; then
-    jq -c ".check_runs |= .[:$cap]" < "$src" > "$dir/r/$key.cap" || exit 5
+    jq -c ".check_runs |= .[$(( (pg - 1) * cap )):$(( pg * cap ))]" < "$src" > "$dir/r/$key.cap" || exit 5
     src="$dir/r/$key.cap"
   fi
   if [ -n "$jqf" ] && [ ! -f "$dir/r/$key.raw" ]; then
@@ -129,7 +133,8 @@ export function makeGhRepoScanStub({ prs, checkRuns = {}, labels, issues = {}, r
   }
   put('prs', prs)
   put('repoview', repoView)
-  for (const [sha, resp] of Object.entries(checkRuns)) put(`check_${sha}`, resp)
+  // キー <sha>@N は N ページ目だけの応答（失敗の注入など。Issue #809）
+  for (const [sha, resp] of Object.entries(checkRuns)) put(`check_${sha.replace('@', '_p')}`, resp)
   put('labels', labels)
   for (const [label, resp] of Object.entries(issues)) put(keyForLabel(label), resp)
   return {

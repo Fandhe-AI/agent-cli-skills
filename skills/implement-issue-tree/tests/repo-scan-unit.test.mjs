@@ -98,6 +98,27 @@ const CASES = [
   ['収集: 空', 'collect_apps', '', '', '', 0, '|0'],
   ['収集: 文字列 null は slug の形式なので残る（null の check-run は jq が落とす）', 'collect_apps', 'null', '', '', 0, 'null|0'],
   ['収集: LC_ALL=C の並び（数字 < 英小文字・ハイフンは数字の前）', 'collect_apps', 'b\\na-b\\na1\\na\\n1', '', '', 0, '1~a~a-b~a1~b|0'],
+  // --numbers（ツリーの open ノードの番号。Issue #807）
+  ['numbers: 昇順のカンマ区切り（数値として比べる）', 'rs_valid_numbers_csv', '1,2,10,100', '', '', 0, ''],
+  ['numbers: 1 件', 'rs_valid_numbers_csv', '7', '', '', 0, ''],
+  ['numbers: 9 桁まで', 'rs_valid_numbers_csv', '999999999', '', '', 0, ''],
+  ['numbers: 空は不可', 'rs_valid_numbers_csv', '', '', '', 1, ''],
+  ['numbers: 昇順でない', 'rs_valid_numbers_csv', '10,9', '', '', 1, ''],
+  ['numbers: 重複', 'rs_valid_numbers_csv', '3,3', '', '', 1, ''],
+  ['numbers: 先頭 0', 'rs_valid_numbers_csv', '1,02', '', '', 1, ''],
+  ['numbers: 0', 'rs_valid_numbers_csv', '0,1', '', '', 1, ''],
+  ['numbers: 10 桁', 'rs_valid_numbers_csv', '1234567890', '', '', 1, ''],
+  ['numbers: 数字以外', 'rs_valid_numbers_csv', '1,x', '', '', 1, ''],
+  ['numbers: 空白', 'rs_valid_numbers_csv', '1, 2', '', '', 1, ''],
+  ['numbers: 先頭のカンマ', 'rs_valid_numbers_csv', ',1', '', '', 1, ''],
+  ['numbers: 末尾のカンマ', 'rs_valid_numbers_csv', '1,', '', '', 1, ''],
+  ['numbers: 連続するカンマ', 'rs_valid_numbers_csv', '1,,2', '', '', 1, ''],
+  ['numbers: 改行', 'rs_valid_numbers_csv', '1\\n2', '', '', 1, ''],
+  // 交わり（Issue #807）
+  ['交わり: ラベルの番号のうちノードにあるものだけ（ラベル側の順）', 'rs_intersect_numbers', '2,5,9,100', '1,2,3,9,10,100', '', 0, '2,9,100'],
+  ['交わり: 交わらなければ空', 'rs_intersect_numbers', '2,5', '1,3,4', '', 0, ''],
+  ['交わり: ラベルの番号が空なら空', 'rs_intersect_numbers', '2,5', '', '', 0, ''],
+  ['交わり: 桁の違う番号を前方一致で取り違えない', 'rs_intersect_numbers', '1,12', '11,120,121,12', '', 0, '12'],
   // JSON
   ['JSON: slug の配列', 'rs_json_slugs', 'a\\nb-1', '', '', 0, '["a","b-1"]'],
   ['JSON: 空の配列', 'rs_json_slugs', '', '', '', 0, '[]'],
@@ -146,7 +167,7 @@ for (const bash of availableBashes()) {
     const [pe, ps, i1, i2] = r.stdout.split('\n')
     assert.equal(pe, '{"apps":["a"],"dropped":0,"errs":1,"inputSha256":"h","prs":3}')
     assert.equal(ps, '{"absent":[2],"entries":[{"i":1,"numbers":[3]}],"failed":[3],"inputSha256":"h"}')
-    assert.equal(i1, repoScanInputSha256('skip-labels', 'Fandhe-AI/x', ['owner:human', '人手 x', "it's"]))
+    assert.equal(i1, repoScanInputSha256('skip-labels', 'Fandhe-AI/x', ['owner:human', '人手 x', "it's"]), '残りの欄を順に連結する（skip-labels のスクリプトは numbers を先頭に渡す）')
     assert.equal(i2, repoScanInputSha256('skip-labels', '', ['a']))
     // 正規形は JSON として読め、キーが昇順である
     for (const line of [pe, ps]) {

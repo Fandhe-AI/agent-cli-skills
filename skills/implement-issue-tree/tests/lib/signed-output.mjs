@@ -86,22 +86,26 @@ export function policyPathsReply(prompt, over = {}) {
 }
 
 // ---- repo-scan.sh（外部チェック App の観測・対象外ラベルの取得）----
-// 入力の束縛 inputSha256 は sha256("repo-scan\n" + mode + "\n" + repo + 各ラベルを "\n" で連結)。ホスト・スクリプトの実装とは独立に計算する
-export function repoScanInputSha256(mode, repo = '', labels = []) {
-  return inputSha256(['repo-scan', mode, repo, ...labels].join('\n'))
+// 入力の束縛 inputSha256 は sha256("repo-scan\n" + mode + "\n" + repo + 残りの欄を "\n" で連結)。ホスト・スクリプトの実装とは独立に計算する。
+// skip-labels の残りの欄は [ノード番号のカンマ区切り（--numbers。Issue #807）, ...ラベル]。skipLabelsInputSha256 が組み立てる
+export function repoScanInputSha256(mode, repo = '', rest = []) {
+  return inputSha256(['repo-scan', mode, repo, ...rest].join('\n'))
+}
+export function skipLabelsInputSha256(repo, numbers, labels) {
+  return repoScanInputSha256('skip-labels', repo, [numbers, ...labels])
 }
 
-// プロンプトの起動行 `... repo-scan.sh --mode M --nonce N [--repo R] [-- 'ラベル' ...]` を解釈する（単一引用符内の '\'' は ' に戻す）
+// プロンプトの起動行 `... repo-scan.sh --mode M --nonce N [--repo R] [--numbers 1,2] [-- 'ラベル' ...]` を解釈する（単一引用符内の '\'' は ' に戻す）
 export function parseRepoScanCommand(prompt) {
-  const m = /repo-scan\.sh --mode (external-checks|skip-labels) --nonce (\S+?)(?: --repo (\S+?))?(?: -- (.*))?$/m.exec(String(prompt))
+  const m = /repo-scan\.sh --mode (external-checks|skip-labels) --nonce (\S+?)(?: --repo (\S+?))?(?: --numbers ([0-9,]+))?(?: -- (.*))?$/m.exec(String(prompt))
   if (m === null) throw new Error('プロンプトに repo-scan.sh の起動行が無い')
   const labels = []
-  if (m[4] !== undefined) {
+  if (m[5] !== undefined) {
     const re = /'((?:[^']|'\\'')*)'(?: |$)/g
     let t
-    while ((t = re.exec(m[4])) !== null) labels.push(t[1].replace(/'\\''/g, "'"))
+    while ((t = re.exec(m[5])) !== null) labels.push(t[1].replace(/'\\''/g, "'"))
   }
-  return { mode: m[1], nonce: m[2], repo: m[3] ?? '', labels }
+  return { mode: m[1], nonce: m[2], repo: m[3] ?? '', numbers: m[4] ?? '', labels }
 }
 
 // 外部チェック観測（mode external-checks）の正直な応答。payload の既定は apps なし・失敗なし
@@ -115,7 +119,7 @@ export function skipLabelsReply(prompt, { entries = [], absent = [], failed, ...
   const c = parseRepoScanCommand(prompt)
   const have = new Set(entries.map((e) => e.i))
   const miss = c.labels.map((_, k) => k + 1).filter((i) => !have.has(i))
-  return makeEnvelope(c.nonce, { absent, entries, failed: failed ?? miss, inputSha256: repoScanInputSha256('skip-labels', c.repo, c.labels), ...over })
+  return makeEnvelope(c.nonce, { absent, entries, failed: failed ?? miss, inputSha256: skipLabelsInputSha256(c.repo, c.numbers, c.labels), ...over })
 }
 
 // 既存テストの平らな応答 { entries: [{ i, x, numbers }] }（x = 1 は存在しないラベル）を封筒つきにする薄いアダプタ。
@@ -210,6 +214,9 @@ export function treeInputSha256(root, repo = '') {
   return inputSha256(`fetch-tree\n${root}\n${repo}`)
 }
 
+// args.repo を渡さないランで、ツリー取得の封筒が返すツリーのリポジトリ（ホストはこれで repo-scan.sh を束縛する。Issue #808）
+export const TREE_DEFAULT_REPO = 'o/r'
+
 // プロンプトのコマンド `... --nonce N --root R [--repo O/R]` から封筒を作る（正直なエージェントが fetch-tree.sh を実行して転記した結果）。
 // nodes = エージェントが書き写した nodes。opts.digestNodes = スクリプトが見た『真の内容』（既定は nodes）で、書き写しの誤りを模すには
 // nodes だけを書き換える。opts.nonce / opts.payload / opts.sha256 / opts.omit / opts.failure で封筒の欠落・不整合・失敗申告を模す。
@@ -219,7 +226,8 @@ export function treeFetchReply(prompt, nodes, opts = {}) {
   const repo = /--repo ([A-Za-z0-9._/-]+)/.exec(String(prompt))?.[1] ?? ''
   if (nonce === null || root === undefined) throw new Error('プロンプトに fetch-tree.sh のコマンドが無い')
   const truth = opts.digestNodes ?? nodes
-  const payload = { count: truth.length, inputSha256: treeInputSha256(root, repo), nodesSha256: treeNodesSha256(truth), optinSha256: treeOptinSha256(truth), pages: 1, structSha256: treeStructSha256(truth), taskIdSha256: treeTaskIdSha256(truth), ...(opts.payload ?? {}) }
+  // repo: fetch-tree.sh は --repo があればその値、無ければルートの repository_url（偽 gh の既定は o/r）を出す（Issue #808）
+  const payload = { count: truth.length, inputSha256: treeInputSha256(root, repo), nodesSha256: treeNodesSha256(truth), optinSha256: treeOptinSha256(truth), pages: 1, repo: repo || TREE_DEFAULT_REPO, structSha256: treeStructSha256(truth), taskIdSha256: treeTaskIdSha256(truth), ...(opts.payload ?? {}) }
   const env = makeEnvelope(opts.nonce ?? nonce, payload)
   const out = { nodes, nonce: env.nonce, payload: env.payload, sha256: opts.sha256 ?? env.sha256 }
   // failure 申告（{ exitCode, stderr } か旧形式の文字列）。正直なエージェントは封筒を作らないので既定では封筒の欄を出さない

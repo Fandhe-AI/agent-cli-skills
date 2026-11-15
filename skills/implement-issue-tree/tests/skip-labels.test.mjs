@@ -85,10 +85,10 @@ test('parseSkipLabels: 形式不正は throw（配列でない・11 件・空文
 // --- 取得コマンドと転記の照合（純粋関数） ---
 
 test('skipLabelsPrompt: 起動行は run-verified.sh 経由の repo-scan.sh の 1 行で、ラベルは単一引用符化し、gh・jq のコマンドを含まない', () => {
-  const p = D.skipLabelsPrompt(['owner:human', "it's $(rm -rf x) `y`"], 'n0nce')
+  const p = D.skipLabelsPrompt(['owner:human', "it's $(rm -rf x) `y`"], 'n0nce', 'o/r', '1,2,30')
   const line = p.split('\n').find((l) => l.includes('repo-scan.sh'))
-  assert.match(line, /^bash '<skillDir>\/scripts\/run-verified\.sh' \S+ repo-scan\.sh --mode skip-labels --nonce n0nce -- 'owner:human' 'it'\\''s \$\(rm -rf x\) `y`'$/)
-  assert.deepEqual(parseRepoScanCommand(p), { mode: 'skip-labels', nonce: 'n0nce', repo: '', labels: ['owner:human', "it's $(rm -rf x) `y`"] })
+  assert.match(line, /^bash '<skillDir>\/scripts\/run-verified\.sh' \S+ repo-scan\.sh --mode skip-labels --nonce n0nce --repo o\/r --numbers 1,2,30 -- 'owner:human' 'it'\\''s \$\(rm -rf x\) `y`'$/)
+  assert.deepEqual(parseRepoScanCommand(p), { mode: 'skip-labels', nonce: 'n0nce', repo: 'o/r', numbers: '1,2,30', labels: ['owner:human', "it's $(rm -rf x) `y`"] })
   assert.ok(!/gh api repos|--paginate|jq -|grep -F/.test(p), '転記させるコマンドがプロンプトに残っている')
   assert.ok(!p.includes('\\n') || !line.includes('\\\\'), '起動行にバックスラッシュの重ね書きが無い')
 })
@@ -576,15 +576,17 @@ test('args.repo があれば、取得の起動行と通知コメントが対象�
   })
   const fetchPrompt = calls.find((c) => c.opts.label === 'plan:skip-labels').prompt
   assert.deepEqual(parseRepoScanCommand(fetchPrompt).repo, 'Fandhe-AI/target')
-  assert.ok(fetchPrompt.includes('--nonce ') && fetchPrompt.includes(' --repo Fandhe-AI/target -- '))
+  assert.ok(fetchPrompt.includes('--nonce ') && fetchPrompt.includes(' --repo Fandhe-AI/target --numbers 1,2 -- '))
   const notify = calls.find((c) => c.opts.label === 'notify-blocked').prompt
   assert.ok(notify.includes("gh issue comment 1 -R Fandhe-AI/target --body"))
 })
 
-test('args.repo が無ければ、起動行に --repo を付けず（スクリプトがカレントのリポジトリ {owner}/{repo} で解決する）、入力の束縛は repo 空で計算する', () => {
-  const p = D.skipLabelsPrompt(['a'], 'n')
-  assert.ok(!p.includes('--repo'))
-  assert.equal(D.repoScanInputSha256('skip-labels', undefined, ['a']), D.sha256Hex('repo-scan\nskip-labels\n\na'))
+test('起動行の --repo は呼び出し側が渡すリポジトリ（args.repo が無いランではツリーのリポジトリ。Issue #808）で、入力の束縛にも同じ値が入る', () => {
+  const p = D.skipLabelsPrompt(['a'], 'n', 'Fandhe-AI/tree', '3,4')
+  assert.ok(p.includes('--repo Fandhe-AI/tree --numbers 3,4 -- '))
+  // ノード番号の集合は repo の次の固定位置（Issue #807）
+  assert.equal(D.repoScanInputSha256('skip-labels', 'Fandhe-AI/tree', ['3,4', 'a']), D.sha256Hex('repo-scan\nskip-labels\nFandhe-AI/tree\n3,4\na'))
+  // 通知コメントは args.repo だけに束縛する（ツリーの repo へは広げない）
   assert.ok(D.notifyBlockedPrompt(7, { outOfTree: [1], skippedLabel: [], waitingOn: [] }).includes('gh issue comment 7 --body'))
 })
 
@@ -624,4 +626,39 @@ test('存在しないラベル: dryRun の skippedLabels.absent にも出る', a
 test('存在するラベルだけなら absent は空', async () => {
   const { result } = await runScript({ args: ARGS({ skipLabels: ['a'] }), leaves: [2] })
   assert.deepEqual(result.skippedLabels.absent, [])
+})
+
+// --- Issue #807: ツリーの open ノードの番号（--numbers）を渡し、交わりだけを受け取る ---
+
+test('起動行の --numbers はツリーの open ノードの番号（昇順・closed を除く）で、期待する inputSha256 にも入る', async () => {
+  const tree = [node(1, 0, { sub: 3 }), node(30, 1, { si: 0 }), node(4, 1, { si: 1, state: 'closed' }), node(12, 1, { si: 2 })]
+  const { result, calls } = await runScript({ args: ARGS({ skipLabels: ['owner:human'] }), override: skipOverride({ 'owner:human': [12] }, tree) })
+  const c = parseRepoScanCommand(calls.find((x) => x.opts.label === 'plan:skip-labels').prompt)
+  assert.equal(c.numbers, '1,12,30')
+  assert.deepEqual(result.skippedLabels.matched, [12])
+})
+
+test('ノード番号の集合を束縛しない封筒（--numbers 無しの旧い入力・別の集合）は入力の束縛で拒否され、取得できなかったラベルとして全 open ノードを待たせる', async () => {
+  for (const numbers of [null, '1,2']) {
+    const { result, logs } = await runScript({
+      args: ARGS({ skipLabels: ['a'] }),
+      leaves: [2, 3],
+      override: (label, opts, prompt) => {
+        if (!label.startsWith('plan:skip-labels')) return undefined
+        const c = parseRepoScanCommand(prompt)
+        const rest = numbers === null ? c.labels : [numbers, ...c.labels]
+        return makeEnvelope(c.nonce, { absent: [], entries: [{ i: 1, numbers: [] }], failed: [], inputSha256: D.sha256Hex(['repo-scan', 'skip-labels', c.repo, ...rest].join('\n')) })
+      },
+    })
+    assert.deepEqual(result.skippedLabels.unknown, ['a'], String(numbers))
+    assert.deepEqual(result.skippedLabels.matched, [1, 2, 3], String(numbers))
+    assert.ok(logs.some((m) => m.includes('出力封筒の照合に失敗した（input）')), String(numbers))
+  }
+})
+
+test('open ノードが無ければ対象外ラベルの取得を起動しない（待たせる対象が無い）', async () => {
+  const tree = [node(1, 0, { sub: 1, state: 'closed' }), node(2, 1, { state: 'closed' })]
+  const { result, calls } = await runScript({ args: ARGS({ skipLabels: ['a'] }), override: skipOverride({}, tree) })
+  assert.equal(calls.filter((c) => c.opts.label.startsWith('plan:skip-labels')).length, 0)
+  assert.deepEqual(result.skippedLabels, { labels: ['a'], matched: [], unknown: [], absent: [] })
 })
