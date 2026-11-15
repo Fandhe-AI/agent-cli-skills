@@ -712,7 +712,7 @@ test('駆動部: 新規 PR は pr-create 直後・Merge ループ投入前に PR
 })
 
 test('駆動部: state-unverified の issue は dispatch 前に blocked（halt 非カウント）で止め、後続も止める', () => {
-  assert.match(driverPart, /unverified: stateUnverified,\s*\} = await loadState\(\)/)
+  assert.match(driverPart, /unverified: stateUnverified,\s*keys: stateKeys,\s*\} = await loadState\(\)/)
   const idx = driverPart.indexOf('if (unverifiedIssues.has(item.number)) {')
   const preloop = driverPart.indexOf('const failedSet = new Set()')
   const work = driverPart.indexOf('const work = queue.filter(')

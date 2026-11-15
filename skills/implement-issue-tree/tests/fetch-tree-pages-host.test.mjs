@@ -5,6 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { runScript, BASE_ARGS, importDefinitions, source } from './lib/stub-run.mjs'
 import { treePagesFetchReply, treePageReply } from './lib/signed-output.mjs'
 import { filterOfPrompt, requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
@@ -148,6 +149,32 @@ test('呼び出し数の上限が小さいと、ページ読みの前の事前�
   )
   assert.ok(!seen.some(isPage))
   assert.ok(seen.includes('plan:issue-tree-release'))
+})
+
+// 終了時の照合の予備（PR #810 codex P1）: 事前検査の必要量には、開始時の状態ファイルのキーから見積もった終了時の照合の 2 ページ目以降も入る。
+// 状態 1000 件 = 10 ページ → 予備 2 × 9 = 18。20 ページのツリーの必要量は 2 × 20 + 1 + 2 + 20 + 18 = 81（予備が無ければ 63 で通ってしまう残り）
+test('事前検査の必要量は、開始時の状態ファイルの件数から見積もった終了時の照合の予備を含む (PR #810)', async () => {
+  const item = { status: 'merged' }
+  const keys = Array.from({ length: 1000 }, (_, i) => String(10 + i)).sort()
+  const h = createHash('sha256').update(JSON.stringify(item)).digest('hex')
+  const check = { fileExists: true, hashes: Object.fromEntries(keys.map((k) => [k, h])), keysSha256: createHash('sha256').update(JSON.stringify(keys)).digest('hex'), keysCount: 1000, highWaterBytes: 0, highWaterVersion: 2 }
+  const seen = []
+  const err = await runScript({
+    args: { ...BASE_ARGS, agentCallLimit: 81 },
+    leaves: LEAVES,
+    override: (label, _o, prompt) => {
+      seen.push(label)
+      if (label === 'state:load') return { ok: true, fileExisted: true, items: Object.fromEntries(keys.map((k) => [k, item])), highWaterBytes: 0, highWaterVersion: 2 }
+      if (label.startsWith('state:load-verify')) return check
+      return isMain(label) ? treePagesFetchReply(prompt, truth(), { pages: 20, dir: DIR, tsvSha: TSV }) : label === 'plan:issue-tree-release' ? { ok: true } : undefined
+    },
+  }).then(() => null, (e) => e)
+  assert.equal(seen.filter((l) => l.startsWith('state:load-verify')).length, 10, '前提: 開始時の照合は 10 ページ')
+  const m = /必要なエージェント呼び出し数（(\d+)）が残り（(\d+)）を超える（20 ページ・5 ノード）/.exec(err?.message ?? '')
+  assert.ok(m, String(err?.message))
+  assert.equal(Number(m[1]), 2 * 20 + 1 + 2 + 20 + 18)
+  assert.ok(Number(m[2]) >= 2 * 20 + 1 + 2 + 20, `前提: 予備が無ければ通る残り（${m[2]}）`)
+  assert.ok(!seen.some(isPage))
 })
 
 // opt-in テスト宣言（第 7 欄 optinTests）。ページ読みの封筒はそのページの行だけの optinSha256 を持ち、連結後は取得時の封筒の optinSha256 と照合する

@@ -218,7 +218,7 @@ log(`⚠️ ツリー取得の一時ディレクトリの片づけに失敗（�
 async function fetchTreePages(main,mainNonce,inputSha){
 const{pages,dir,tsvSha256:tsvSha,count}=main.payload
 if(agentBudget.enforced){
-const need=2*pages+ 1 + 2*Math.ceil(count / DECLARED_DEPS_CHUNK_SIZE) + AGENT_CALLS_TERMINAL_BASE
+const need=2*pages+ 1 + 2*Math.ceil(count / DECLARED_DEPS_CHUNK_SIZE) + AGENT_CALLS_TERMINAL_BASE + agentBudget.terminalVerify
 if(agentBudget.limit-agentBudget.used<need){
 await releaseTreeDir(dir)
 throw new Error(`ツリー取得のページ読みに必要なエージェント呼び出し数（${need}）が残り（${agentBudget.limit - agentBudget.used}）を超える（${pages} ページ・${count} ノード）。args.agentCallLimit を上げるか、親イシューを分けて実行する`)
@@ -3126,6 +3126,7 @@ return{
 items:adopted,
 verified,
 unverified:unverified.map(Number),
+keys:hwOk?Object.keys(check.hashes):[],
 highWaterBytes:hwOk?result.highWaterBytes:0,
 highWaterVersion:hwOk?result.highWaterVersion:0,
 }
@@ -3625,19 +3626,19 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'164f83d1ac2b3be574f19f49079ffeb581eafc94578c3a621a1d6b6d523338cb',
-'measure-free-disk.sh':'e491401f3484ee639c5480ff341d800ac3f4eaece19bcdd397ee2c97703c3ca8',
-'observe-pr.sh':'732aeb28fe457112ba8bf27457357acc28458e236ae30eceb621605117e0befc',
-'base-merge.sh':'6dc236d2e8dd0404a747deddfef3be8de04885d906b0b94948a686193b61a0cd',
-'pr-push.sh':'3091b487eddb384e6b874553bb76dbb6c637da70a7e6f10863db05bdf9d7bc71',
-'reply-resolve.sh':'d467dcf74c84b82b979a1716b195f8e4f681e32635d41ec40a335e1ec03af675',
-'state.sh':'7e4a92d81e599b2c1ed92ccf7a602f56bb5a272ad1392b2085a6ad9ec1bb59c9',
-'merge-gate.sh':'9041441ce7424c952f544d49e3fb33ecad57689d71cf326280c795c63a02f442',
-'worktree-remove.sh':'cc34ce11780e9f9243ba47b651c54e72dd7ea5defd4260cb59cc352a3429c705',
-'recover-prep.sh':'48b23c0bea7083804232f1de59530da0f83f9915e494af9c69dc7026de0a5441',
-'fetch-tree.sh':'8c101884cfc23e01248dd26746440f1421f463774b7e2e7103464c5eeb8eaeaf',
-'declared-deps.sh':'d967b275aed919ba16d981bb78920bd892215f5cf36aa9b600b41bc5d08ae461',
-'repo-scan.sh':'a3b2600d5172c29ca239630ffc863ccc56e3edc4ffefc4fb25ad4645cc7288af',
+'measure-residual-bytes.sh':'c60fd8d4622298dcfb1a1d6a8220fd30539ba890dd168fd09605fe93af8c1902',
+'measure-free-disk.sh':'2a3979141631aa5649d5311952bf61a50f5c2c0b1115e8a39c6610464783b1b7',
+'observe-pr.sh':'4b4f571e21abbcbc0fb05109491845d8081e1c4fac3b058fe89fbff13b36ef4e',
+'base-merge.sh':'4bea6d962ff1844ec5d06ad52c5e11c512bd98ca1a3515a6162aa2805e80e6af',
+'pr-push.sh':'bfd18314a6e60f8ac4bd724659f66ebee8f42550a3176dab355d1e4c1630ae01',
+'reply-resolve.sh':'ec13b8b753a5983cc5ea40584af177c01fc1800339a1e741400c0f0082799d6b',
+'state.sh':'3535cc46e8fbe07a656f78d8610631aeb041f24babb717618c4dec6c4c31ab50',
+'merge-gate.sh':'b77cb9f0456d045a6ab78b19da94651f067e4a42bcff14bc97e445205d24f8b7',
+'worktree-remove.sh':'e9dfe3eab64ab95512270374295935f2cd8a39d24168f571a5b3c2a82d045eeb',
+'recover-prep.sh':'7f5030cf1facb952cf8fd481109c6418a86930ca2ba69b03adbdc814d11efc76',
+'fetch-tree.sh':'b1aba669ea67f0b6cfd6c779a03109a6d2bbb7939f774de5f6d02fe59af33800',
+'declared-deps.sh':'a25b724ea827312f563ee5a6d6fa89203ab2771d3e289a2d6215a8ef34d77aa1',
+'repo-scan.sh':'1ee48ae14cf8bf07bbeca1b07cf4bce82490acf8f4ad9948a3dcf90d1f63ca10',
 }
 
 
@@ -4468,7 +4469,11 @@ return raw
 const AGENT_CALLS_PER_ISSUE={implement:30 +(securityReviewEnabled?2:0),resume:12,close:6}
 
 const AGENT_CALLS_TERMINAL_BASE=20
-const agentBudget={limit:parseAgentCallLimit(argOf('agentCallLimit')),used:0,enforced:false,stoppedDispatchAt:null,starts:0,starved:false,neededLimit:null,held:[]}
+
+function terminalVerifyReserve(n){
+return STATE_AGENT_MODEL_CHAIN.length*(Math.min(Math.max(Math.ceil(n / 100), 1), STATE_VERIFY_MAX_PAGES) - 1)
+}
+const agentBudget={limit:parseAgentCallLimit(argOf('agentCallLimit')),used:0,terminalVerify:0,enforced:false,stoppedDispatchAt:null,starts:0,starved:false,neededLimit:null,held:[]}
 
 function wrapAgentCounting(raw,budget,warn=()=>{}){
 let warned=false
@@ -4487,7 +4492,7 @@ function agentBudgetHold(budget,{running,kind,pending}){
 const remaining=budget.limit-budget.used
 const first=running===0&&(budget.starts??0)===0
 const chunks=Math.ceil(Math.max(pending,0) / BLOCKED_STATE_CHUNK_SIZE)
-const required=AGENT_CALLS_PER_ISSUE.implement*running+AGENT_CALLS_PER_ISSUE[kind]+AGENT_CALLS_TERMINAL_BASE +(first?0:chunks)
+const required=AGENT_CALLS_PER_ISSUE.implement*running+AGENT_CALLS_PER_ISSUE[kind]+AGENT_CALLS_TERMINAL_BASE +(budget.terminalVerify??0)+(first?0:chunks)
 
 return remaining<required?{remaining,required,chunks,needed:budget.used+required}:null
 }
@@ -6038,7 +6043,9 @@ highWaterBytes:loadedHighWaterBytes,
 highWaterVersion:loadedHighWaterVersion,
 verified:savedItemsVerified,
 unverified:stateUnverified,
+keys:stateKeys,
 }=await loadState()
+agentBudget.terminalVerify=terminalVerifyReserve(stateKeys.length)
 
 const unverifiedIssues=new Set(stateUnverified)
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
@@ -6281,6 +6288,10 @@ unreachable.map((n)=>`#${n.number}（parent: ${n.parent}）`).join(', '),
 }
 const openImpl=queue.filter((q)=>q.kind==='implement'&&q.state==='open').length
 log(`実行キュー ${queue.length} 件（うち実装対象 ${openImpl} 件）を post-order で構築した（並列度 ${concurrency}）`)
+
+const endStateMax=new Set([...stateKeys, ...queue.map((q)=>String(q.number))]).size
+agentBudget.terminalVerify=terminalVerifyReserve(endStateMax)
+if(agentBudget.terminalVerify>0)log(`終了時の状態ファイル照合の予備 ${agentBudget.terminalVerify} 回（項目の上限 ${endStateMax} 件）を予算判定に加える`)
 
 
 if(!dryRunEnabled)await initAllPending(queue.filter((q)=>q.state==='open'))
@@ -8454,7 +8465,7 @@ warnItem(item,`状態ファイルは ${saved.status} だが GitHub では open�
 }
 
 for(const{item,cleanup,skipEntry,attempts}of orderClosedCleanupCandidates(closedCleanupWork)){
-const gate=closedCleanupGate({limit:agentBudget.limit,used:agentBudget.used,attempted:closedCleanupRun.run,reserveImplement:queueHasOpenImplement})
+const gate=closedCleanupGate({limit:agentBudget.limit-agentBudget.terminalVerify,used:agentBudget.used,attempted:closedCleanupRun.run,reserveImplement:queueHasOpenImplement})
 closedCleanupRun[gate]++
 if(gate==='run'){
 const outcome={settled:false}

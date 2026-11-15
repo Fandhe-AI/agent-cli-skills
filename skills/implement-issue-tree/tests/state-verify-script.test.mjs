@@ -269,6 +269,24 @@ for (const bash of BASHES) {
     }
   })
 
+  test(`[${bash}] ページの値をまとめて取る jq の出力が 1 行欠ける・1 行余る・失敗するなら error（ハッシュを詰めて返さない）`, { skip: !jq }, () => {
+    const sb = sandbox({ parent: 1, items: itemsOf(3) })
+    const realJq = spawnSync('sh', ['-c', 'command -v jq'], { encoding: 'utf8' }).stdout.trim()
+    const ok = envelope(sb.verify(bash)).payload
+    assert.equal(ok.entries.length, 3)
+    // ページの値の取得（--argjson ks）だけを書き換える偽の jq。ほかの呼び出しは本物へそのまま渡す
+    for (const [name, filter] of [['drop', `| sed '$d'`], ['extra', `; printf '{}\\n'`], ['fail', '; exit 5']]) {
+      const bin = join(sb.root, `jq-${name}`)
+      mkdirSync(bin)
+      const body = name === 'drop' ? `"${realJq}" "$@" ${filter}` : `{ "${realJq}" "$@"${filter}; }`
+      writeFileSync(join(bin, 'jq'), `#!/bin/sh\ncase " $* " in *" --argjson ks "*) ${body} ;; *) exec "${realJq}" "$@" ;; esac\n`)
+      chmodSync(join(bin, 'jq'), 0o755)
+      const p = envelope(sb.verify(bash, 0, { PATH: `${bin}:${process.env.PATH}` })).payload
+      assert.equal(p.outcome, 'error', name)
+      assert.deepEqual(p.entries, [], name)
+    }
+  })
+
   test(`[${bash}] ハッシュ計算のツールが無ければ封筒を作れず exit 3（空のハッシュを返さない）`, { skip: !jq }, () => {
     const sb = sandbox({ parent: 1, items: itemsOf(2) })
     const bin = join(sb.root, 'nobin')
@@ -310,6 +328,8 @@ for (const bash of BASHES) {
     const cases = {
       sample: JSON.parse(readFileSync(join(SCRIPTS, '..', 'sample', 'state-example.json'), 'utf8')),
       unicodeDel: { parent: 1, perWorktreeByteReserveHighWater: 53687091200, perWorktreeByteReserveHighWaterVersion: 2, items: { 3: { note: 'a\u007fb\u0001\t\n\\" é😀 全角　空白', n: [1, -2, 0, 123456789], o: { b: 1, a: { d: [], c: {} } } }, 12: { status: 'x' }, 9: null, 10: 5, 11: [1, { z: 1, a: 2 }], 13: true } },
+      // 項目そのものが文字列（jq -j は生のまま出す。改行・末尾の改行・印と同じ " 1 文字・空文字を含む）。スクリプトは 1 件ずつ取り直す経路で従来と同じハッシュを返す
+      stringItems: { parent: 1, items: { 4: 'a\nb', 5: 'tail\n\n', 6: '"', 7: '', 8: { s: 'x' }, 9: '日本語' } },
       oddKeys: { parent: 1, items: { 5: { a: 1 }, '007': { a: 2 }, x: { a: 3 }, '-1': { a: 4 }, '1.5': { a: 5 }, ' 6': { a: 6 }, '８': { a: 7 }, '': { a: 8 }, '12345678901234': { a: 9 } } },
       noItems: { parent: 1 },
       nullItems: { parent: 1, items: null },

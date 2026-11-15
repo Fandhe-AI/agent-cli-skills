@@ -54,10 +54,14 @@ sv_uint() {
 
 # $1 = ファイルの内容、$2 = キーの一覧（1 行 1 件）、$3 = 開始位置、$4 = 終了位置（含まない）、$5 = 件数。該当ページの entries
 # （カンマ区切りの {"h":…,"k":…}）を出す。戻り値: 0 / 1（キーの形・桁数・行数の不一致・項目のハッシュを取れない）。
-# 必ずコマンド置換（サブシェル）で呼ぶ: set -f と IFS の変更を呼び出し元へ漏らさない。キーの一覧は here-document にしない（bash 3.2 は
-# here-document を一時ファイルで実装するため、一時ファイルを作らない契約を守れない）。キーは数字だけなので、改行だけで単語分割すれば足りる
+# 必ずコマンド置換（サブシェル）で呼ぶ: set -f と IFS・位置引数の変更を呼び出し元へ漏らさない。キーの一覧は here-document にしない（bash 3.2 は
+# here-document を一時ファイルで実装するため、一時ファイルを作らない契約を守れない）。キーは数字だけなので、改行だけで単語分割すれば足りる。
+# 項目の値はページの分を 1 回の jq でまとめて取る（1 件ごとに jq を起動するとファイル全体を 100 回パースし、5000 件の状態で遅い）。
+# jq -jcS の出力は値の中に改行を含まない（文字列の中の改行は \n へエスケープされる）ので 1 件 1 行で区切れ、各行は従来の 1 件ごとの
+# jq -jcS --arg k "$k" '.items[$k]' の出力と同じバイト列になる（同じフラグの同じ出力器）。例外は項目そのものが文字列の場合で、-j は文字列を
+# 生のまま出す（改行を含み得る）。その項目の行は印の 1 文字 " にして（JSON の値の compact 表現が " 1 文字になることは無い）、従来どおり 1 件ずつ取る
 sv_items() {
-  local content=$1 keys=$2 start=$3 end=$4 count=$5 idx=0 k val h out=""
+  local content=$1 keys=$2 start=$3 end=$4 count=$5 idx=0 k sel="" list="" vals val h out=""
   set -f
   IFS='
 '
@@ -68,14 +72,33 @@ sv_items() {
         '' | *[!0-9]* | 0*) return 1 ;;
       esac
       [ "${#k}" -le 15 ] || return 1
-      # 項目の値は jq -jcS の出力そのまま（末尾の改行も含めて保つため、番兵 x を付けて外す）。jq の失敗はハッシュへ畳まない
-      val=$(printf '%s' "${content}" | jq -jcS --arg k "${k}" '.items[$k]' 2>/dev/null && printf x) || return 1
-      h=$(printf '%s' "${val%x}" | so_sha256) || return 1
-      out="${out}${out:+,}{\"h\":\"${h}\",\"k\":\"${k}\"}"
+      sel="${sel}${sel:+,}\"${k}\""
+      list="${list}${k}
+"
     fi
     idx=$((idx + 1))
   done
   [ "${idx}" -eq "${count}" ] || return 1
+  [ -n "${sel}" ] || return 0
+  # jq の失敗はハッシュへ畳まない（パイプの最後が jq なので、その終了コードで止める）
+  vals=$(printf '%s' "${content}" | jq -jcS --argjson ks "[${sel}]" '$ks[] as $k | (.items[$k] | if type == "string" then "\"" else . end), "\n"' 2>/dev/null) || return 1
+  # shellcheck disable=SC2086  # 意図した単語分割（キーは数字だけ）
+  set -- ${list}
+  # shellcheck disable=SC2086  # 意図した単語分割（1 件 1 行。空の行は出ない）
+  for val in ${vals}; do
+    [ $# -gt 0 ] || return 1
+    k=$1
+    shift
+    if [ "${val}" = '"' ]; then
+      # 項目が文字列: 値は jq -jcS の出力そのまま（末尾の改行も含めて保つため、番兵 x を付けて外す）
+      val=$(printf '%s' "${content}" | jq -jcS --arg k "${k}" '.items[$k]' 2>/dev/null && printf x) || return 1
+      val=${val%x}
+    fi
+    h=$(printf '%s' "${val}" | so_sha256) || return 1
+    out="${out}${out:+,}{\"h\":\"${h}\",\"k\":\"${k}\"}"
+  done
+  # 行数がキーの数と合わない（jq の出力が欠けた・余った）ものは受理しない
+  [ $# -eq 0 ] || return 1
   printf '%s' "${out}"
 }
 

@@ -218,7 +218,7 @@ async function releaseTreeDir(dir) {
 async function fetchTreePages(main, mainNonce, inputSha) {
   const { pages, dir, tsvSha256: tsvSha, count } = main.payload
   if (agentBudget.enforced) {
-    const need = 2 * pages + 1 + 2 * Math.ceil(count / DECLARED_DEPS_CHUNK_SIZE) + AGENT_CALLS_TERMINAL_BASE
+    const need = 2 * pages + 1 + 2 * Math.ceil(count / DECLARED_DEPS_CHUNK_SIZE) + AGENT_CALLS_TERMINAL_BASE + agentBudget.terminalVerify
     if (agentBudget.limit - agentBudget.used < need) {
       await releaseTreeDir(dir)
       throw new Error(`ツリー取得のページ読みに必要なエージェント呼び出し数（${need}）が残り（${agentBudget.limit - agentBudget.used}）を超える（${pages} ページ・${count} ノード）。args.agentCallLimit を上げるか、親イシューを分けて実行する`)
@@ -3126,6 +3126,7 @@ async function loadState() {
     items: adopted,
     verified,
     unverified: unverified.map(Number),
+    keys: hwOk ? Object.keys(check.hashes) : [],
     highWaterBytes: hwOk ? result.highWaterBytes : 0,
     highWaterVersion: hwOk ? result.highWaterVersion : 0,
   }
@@ -3311,7 +3312,7 @@ function closedCleanupCandidate(item, saved, { dryRun, verified, unverified }) {
 const AGENT_CALLS_CLOSED_CLEANUP = 6
 // 1 ランで後始末を試みる候補の上限。記録のない候補は直列で 1 件あたり 2〜3 回（最大 AGENT_CALLS_CLOSED_CLEANUP 回）のエージェント呼び出しを使うため、 10 件で通常 30 回前後（最大 60 回）に抑える。超えた分は次の実行へ回る。保持した候補は記録で飛ばされるが、fork PR や取得不能の番兵のように記録しない候補は毎ラン枠を使い得る（上限があるので 1 ランの消費は有界。記録の対象は CLOSED_CLEANUP_RECORDABLE）
 const CLOSED_CLEANUP_PER_RUN_MAX = 10
-// 候補 1 件を今試みてよいか。'run' / 'defer-cap'（1 ランの上限）/ 'defer-budget'（エージェント呼び出し数の予算不足）。純粋関数
+// 候補 1 件を今試みてよいか。'run' / 'defer-cap'（1 ランの上限）/ 'defer-budget'（エージェント呼び出し数の予算不足）。純粋関数。呼び出し側は limit から終了時の照合の予備（agentBudget.terminalVerify）を差し引いて渡す
 // reserveImplement: このランで着手し得る open の実装ノードが残るとき true（その 1 件分を予約する）。残らない後始末だけの再実行では予約しない
 function closedCleanupGate({ limit, used, attempted, reserveImplement }) {
   if (attempted >= CLOSED_CLEANUP_PER_RUN_MAX) return 'defer-cap'
@@ -4451,7 +4452,7 @@ const BLOCKED_STATE_CHUNK_SIZE = 100
 // 数え方: 本スクリプトの agent(...) 1 回 = ランタイムのエージェント 1 件。runStateAgent の sonnet フォールバック・agentRetryOnce の再試行・fix の再起動も agent() を呼び直すので、呼び出し箇所を書き換えず駆動部で agent を数える関数へ差し替えれば（wrapAgentCounting）実際の起動数と一致する。 pipeline() は使わない。呼ぶ前に数えるため、例外・null 返却の呼び出しも 1 件に入る（起動はした）。
 // 引数 agentCallLimit は「新規着手・monitoring 再開を止める判断に使う、ランタイム上限の想定値」で、呼び出しそのものは止めない。開始処理・終了処理・実行中の issue は上限を超えても続行する: 実行中の issue の途中で呼び出しを止めると、本機構が防ぎたい半端な状態をスクリプト自身が作るため。ハードキャップはランタイムが持つ。値は下限（AGENT_CALL_LIMIT_MIN）以上 1000 以下に限り、矛盾する入力（開始処理だけで使い切る値）は受理しない。
 const AGENT_RUN_LIMIT = 1000
-// 開始処理（未追跡検査・nonce・loadState と照合・ツリー取得・外部チェック観測・依存宣言と祖先とツリー外前提の取得・init-all・孤立スキャン・残置の観測・HEAD 検査）が着手前に使う呼び出し数の見込み。依存宣言はチャンク数に比例するため約 20 に余裕 10 を足した。スクリプトハッシュの予検査（script-hash-precheck。1 回、転記ミス・例外のときだけ 2 回）はこの余裕の内（下限 81 は変えない。Issue #603 第 4 弾）。開始時の観測は残置観測の組の取り直し（最大 +4 回。Issue #735）を含めても余裕内に収まる。loadState の照合（state:load-verify）は ceil(状態ファイルの項目数 / 100) 回（転記ミスは各ページ +1 回の sonnet）で、101 件以上の 2 ページ目以降はこの見積りに入っていない（1,000 件で +9。Issue #603 計画 C の P5）。
+// 開始処理（未追跡検査・nonce・loadState と照合・ツリー取得・外部チェック観測・依存宣言と祖先とツリー外前提の取得・init-all・孤立スキャン・残置の観測・HEAD 検査）が着手前に使う呼び出し数の見込み。依存宣言はチャンク数に比例するため約 20 に余裕 10 を足した。スクリプトハッシュの予検査（script-hash-precheck。1 回、転記ミス・例外のときだけ 2 回）はこの余裕の内（下限 81 は変えない。Issue #603 第 4 弾）。開始時の観測は残置観測の組の取り直し（最大 +4 回。Issue #735）を含めても余裕内に収まる。開始時の loadState の照合（state:load-verify。ceil(状態ファイルの項目数 / 100) 回、転記ミスは各ページ +1 回の sonnet）は予算ゲートより前に終わり、実数が used に入る（Issue #603 計画 C の P5）。
 const AGENT_CALLS_START = 30
 function parseAgentCallLimit(raw) {
   if (raw == null) return AGENT_RUN_LIMIT
@@ -4466,9 +4467,13 @@ function parseAgentCallLimit(raw) {
 // 上限は fix 6 回・monitor 7 回・Review 往復で 60 を超えるが、実行中の issue は既にその一部を使っているため、残り全量を最悪値で見積もると着手を止めすぎる。これに 8 を足して 30 とする。 resume は monitoring 再開（Review までを省く。monitor 3 + fix/再 monitor 2 + 状態書込み 4 + merge 2 に余裕）、close は verify-close（close 1 + 状態書込み 2 + 余裕）。
 // セキュリティ専用の Review を有効にしたランは、見積りの Review 2 回ぶん（各ラウンド 1 体）を足す。
 const AGENT_CALLS_PER_ISSUE = { implement: 30 + (securityReviewEnabled ? 2 : 0), resume: 12, close: 6 }
-// 終了処理の予備の固定分。ループ後に走るのは writeBlockedStateBatch（下の chunks 分を別に加える）、 scanOrphanWorktrees、終了時 loadState、容量の終了時実測、スイープ、メイン worktree の未追跡検査と HEAD 検査（worktree:head-scan。開始時 1 回は使用済みに入り、終了時 1 回がここ）で、再測定の再試行を含めても約 20 に収まる。いずれも予算ゲートの対象ではなく無条件に実行される。終了時 loadState の照合も ceil(項目数 / 100) 回で、2 ページ目以降はこの固定分に入っていない（開始処理と同じ）。
+// 終了処理の予備の固定分。ループ後に走るのは writeBlockedStateBatch（下の chunks 分を別に加える）、 scanOrphanWorktrees、終了時 loadState、容量の終了時実測、スイープ、メイン worktree の未追跡検査と HEAD 検査（worktree:head-scan。開始時 1 回は使用済みに入り、終了時 1 回がここ）で、再測定の再試行を含めても約 20 に収まる。いずれも予算ゲートの対象ではなく無条件に実行される。終了時 loadState の照合は 1 ページ目だけがこの固定分の内で、2 ページ目以降は terminalVerifyReserve が別に見積もる。
 const AGENT_CALLS_TERMINAL_BASE = 20
-const agentBudget = { limit: parseAgentCallLimit(argOf('agentCallLimit')), used: 0, enforced: false, stoppedDispatchAt: null, starts: 0, starved: false, neededLimit: null, held: [] }
+// 終了時 loadState の照合（state:load-verify）の 2 ページ目以降の予備（PR #810 codex P1）。n は終了時の状態ファイルの項目数の上限（開始時のキー ∪ キューの番号。ラン中に項目を書く init-all・updateState・blocked の一括記録はキューのノードだけ）。1 ページ 100 件、各ページは haiku → sonnet のフォールバックで最大 STATE_AGENT_MODEL_CHAIN.length 回。1 ページ（100 件以下）は 0。上限ページ（STATE_VERIFY_MAX_PAGES）を超える状態は終了時の loadState が 1 ページ目の直後に止まるので上限で打ち切る
+function terminalVerifyReserve(n) {
+  return STATE_AGENT_MODEL_CHAIN.length * (Math.min(Math.max(Math.ceil(n / 100), 1), STATE_VERIFY_MAX_PAGES) - 1)
+}
+const agentBudget = { limit: parseAgentCallLimit(argOf('agentCallLimit')), used: 0, terminalVerify: 0, enforced: false, stoppedDispatchAt: null, starts: 0, starved: false, neededLimit: null, held: [] }
 // 上限（budget.limit）を超えても呼び出しは止めない（上のコメント参照）。超えた最初の 1 回だけ warn で知らせる。
 function wrapAgentCounting(raw, budget, warn = () => {}) {
   let warned = false
@@ -4481,13 +4486,13 @@ function wrapAgentCounting(raw, budget, warn = () => {}) {
     return raw(...a)
   }
 }
-// 新規着手（kind: implement / resume / close）を止めるべきなら { remaining, required } を返す。必要量 = 実行中の件数 × implement の目安 + 候補の目安 + 終了処理の予備（固定 + 未完了ノードの blocked 一括記録 chunks）。非ラッチ: 実行中の issue が終わって running が減れば再び通る。前進保証: このランでまだ 1 件も着手しておらず実行中も 0 の最初の着手には、blocked 一括記録の chunks 分
+// 新規着手（kind: implement / resume / close）を止めるべきなら { remaining, required } を返す。必要量 = 実行中の件数 × implement の目安 + 候補の目安 + 終了処理の予備（固定 + 終了時の照合の 2 ページ目以降 budget.terminalVerify + 未完了ノードの blocked 一括記録 chunks）。照合の項は最初の着手にも課す（終了時の loadState は無条件に走り、打ち切られると孤立 worktree の判定まで届かない。項は最大 98 で、chunks のように未完了ノード数で際限なく増えない）。非ラッチ: 実行中の issue が終わって running が減れば再び通る。前進保証: このランでまだ 1 件も着手しておらず実行中も 0 の最初の着手には、blocked 一括記録の chunks 分
 // （未完了ノード数に比例）を課さない。未完了ノードが多いと chunks だけで limit を超え、実行中 0・使用量が少ないのに全件が未着手になる（limit を下限に近い値にした大きなツリー）ため。最初の 1 件を終えれば残りは未着手として記録され、chunks 分が limit を超える分は想定上限の超過（警告のみ・呼び出しは止めない）。
 function agentBudgetHold(budget, { running, kind, pending }) {
   const remaining = budget.limit - budget.used
   const first = running === 0 && (budget.starts ?? 0) === 0
   const chunks = Math.ceil(Math.max(pending, 0) / BLOCKED_STATE_CHUNK_SIZE)
-  const required = AGENT_CALLS_PER_ISSUE.implement * running + AGENT_CALLS_PER_ISSUE[kind] + AGENT_CALLS_TERMINAL_BASE + (first ? 0 : chunks)
+  const required = AGENT_CALLS_PER_ISSUE.implement * running + AGENT_CALLS_PER_ISSUE[kind] + AGENT_CALLS_TERMINAL_BASE + (budget.terminalVerify ?? 0) + (first ? 0 : chunks)
   // needed: 保留した時点のしきい値そのもの = 保留時の使用量 + required（ゲートが実際に使った必要量。上乗せしない）。保留した時点で、上限がこの値以上なら予算検査を通った、という観測事実。chunks は観測値として返す（first では required に入らない）。
   return remaining < required ? { remaining, required, chunks, needed: budget.used + required } : null
 }
@@ -6038,7 +6043,9 @@ const {
   highWaterVersion: loadedHighWaterVersion,
   verified: savedItemsVerified,
   unverified: stateUnverified,
+  keys: stateKeys,
 } = await loadState()
+agentBudget.terminalVerify = terminalVerifyReserve(stateKeys.length)
 // state-unverified で止めた issue の集合（dispatch 前の内容照合不一致 + runImplement の stopUnverified）。これらの issue の保存済み pr は未照合のため、前提完了プローブのホスト既知 PR（prHints）に渡さない（照合に失敗した MERGED PR を根拠に前提を done にして後続を解放しないため。Bugbot High）。
 const unverifiedIssues = new Set(stateUnverified)
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
@@ -6281,6 +6288,10 @@ if (unreachable.length > 0) {
 }
 const openImpl = queue.filter((q) => q.kind === 'implement' && q.state === 'open').length
 log(`実行キュー ${queue.length} 件（うち実装対象 ${openImpl} 件）を post-order で構築した（並列度 ${concurrency}）`)
+// 終了時の照合の予備は、ラン中に増え得る項目（キューのノード）を足した上限で見積もり直す（以後の予算判定・closed の後始末のゲートが使う）
+const endStateMax = new Set([...stateKeys, ...queue.map((q) => String(q.number))]).size
+agentBudget.terminalVerify = terminalVerifyReserve(endStateMax)
+if (agentBudget.terminalVerify > 0) log(`終了時の状態ファイル照合の予備 ${agentBudget.terminalVerify} 回（項目の上限 ${endStateMax} 件）を予算判定に加える`)
 
 // --- キュー確定後: 全ノードを pending で一括初期化（既存エントリは保持）--- closed の issue は pending で初期化しない。実行スキップ対象のため状態ファイルに残しても再開・目視確認を誤らせる。 open の issue のみを初期化対象とする dryRun（Issue #585）は状態ファイルへ一切書かないため、初期化もここで行わない。
 if (!dryRunEnabled) await initAllPending(queue.filter((q) => q.state === 'open'))
@@ -8454,7 +8465,7 @@ for (const item of queue) {
 }
 // 後始末は試行回数の少ない候補から（未試行が先・同数はキュー順）。results の順序は上のキュー順のまま変えない
 for (const { item, cleanup, skipEntry, attempts } of orderClosedCleanupCandidates(closedCleanupWork)) {
-  const gate = closedCleanupGate({ limit: agentBudget.limit, used: agentBudget.used, attempted: closedCleanupRun.run, reserveImplement: queueHasOpenImplement })
+  const gate = closedCleanupGate({ limit: agentBudget.limit - agentBudget.terminalVerify, used: agentBudget.used, attempted: closedCleanupRun.run, reserveImplement: queueHasOpenImplement })
   closedCleanupRun[gate]++
   if (gate === 'run') {
     const outcome = { settled: false }
