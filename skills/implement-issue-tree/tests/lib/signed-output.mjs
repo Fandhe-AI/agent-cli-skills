@@ -137,6 +137,13 @@ export function treeTaskIdSha256(nodes) {
   return h([...nodes].sort((a, b) => a.number - b.number).map((n) => `${n.number}\t${TASK_ID_RE.exec(n.title)?.[1] ?? ''}`).join('\n'))
 }
 
+// opt-in テスト宣言（第 7 欄 optinTests）の optinSha256。ホストの treeOptinDigest とは独立に計算する。
+// 行 = number TAB optinTests の compact JSON（無ければ []）、number 昇順・改行連結で SHA-256。
+export function treeOptinSha256(nodes) {
+  const h = (s) => createHash('sha256').update(String(s), 'utf8').digest('hex')
+  return h([...nodes].sort((a, b) => a.number - b.number).map((n) => `${n.number}\t${JSON.stringify(n.optinTests ?? [])}`).join('\n'))
+}
+
 export function treeInputSha256(root, repo = '') {
   return inputSha256(`fetch-tree\n${root}\n${repo}`)
 }
@@ -150,7 +157,7 @@ export function treeFetchReply(prompt, nodes, opts = {}) {
   const repo = /--repo ([A-Za-z0-9._/-]+)/.exec(String(prompt))?.[1] ?? ''
   if (nonce === null || root === undefined) throw new Error('プロンプトに fetch-tree.sh のコマンドが無い')
   const truth = opts.digestNodes ?? nodes
-  const payload = { count: truth.length, inputSha256: treeInputSha256(root, repo), nodesSha256: treeNodesSha256(truth), pages: 1, structSha256: treeStructSha256(truth), taskIdSha256: treeTaskIdSha256(truth), ...(opts.payload ?? {}) }
+  const payload = { count: truth.length, inputSha256: treeInputSha256(root, repo), nodesSha256: treeNodesSha256(truth), optinSha256: treeOptinSha256(truth), pages: 1, structSha256: treeStructSha256(truth), taskIdSha256: treeTaskIdSha256(truth), ...(opts.payload ?? {}) }
   const env = makeEnvelope(opts.nonce ?? nonce, payload)
   const out = { nodes, nonce: env.nonce, payload: env.payload, sha256: opts.sha256 ?? env.sha256 }
   // failure 申告（{ exitCode, stderr } か旧形式の文字列）。正直なエージェントは封筒を作らないので既定では封筒の欄を出さない
@@ -179,6 +186,7 @@ export function treePageReply(prompt, nodes, tsvSha, opts = {}) {
     count: truth.length,
     inputSha256: inputSha256(`fetch-tree-page\n${tsvSha}\n${page}`),
     nodesSha256: treeNodesSha256(truth),
+    optinSha256: treeOptinSha256(truth),
     page,
     structSha256: treeStructSha256(truth),
     taskIdSha256: treeTaskIdSha256(truth),
@@ -188,11 +196,11 @@ export function treePageReply(prompt, nodes, tsvSha, opts = {}) {
   return { nodes, nonce: env.nonce, payload: env.payload, sha256: env.sha256 }
 }
 
-// 全欄（6 欄）が一致する重複を 1 件にした配列（スクリプトは重複を出さないので、真の内容にはこちらを使う）
-function uniqueBySixFields(nodes) {
+// 全欄（7 欄）が一致する重複を 1 件にした配列（スクリプトは重複を出さないので、真の内容にはこちらを使う）
+function uniqueBySevenFields(nodes) {
   const seen = new Set()
   return nodes.filter((n) => {
-    const k = JSON.stringify([n.number, n.parent, n.siblingIndex, n.state, n.subIssuesTotal, n.title])
+    const k = JSON.stringify([n.number, n.parent, n.siblingIndex, n.state, n.subIssuesTotal, n.title, n.optinTests ?? []])
     if (seen.has(k)) return false
     seen.add(k)
     return true
@@ -200,11 +208,13 @@ function uniqueBySixFields(nodes) {
 }
 
 // 既存テストの agent スタブが返していた `{ nodes }` を封筒つきに変える薄いアダプタ。nodes が配列でない・オブジェクト以外を含む・
-// 既に封筒の形のもの・null / Error はそのまま返す（ホストが封筒より前に検査する異常系を温存するため）
+// 既に封筒の形のもの・null / Error はそのまま返す（ホストが封筒より前に検査する異常系を温存するため）。
+// optinTests の無いノードには、正直な取得エージェントが必ず写す第 7 欄（宣言なし = 空配列）を補う
 export function wrapTreeReply(prompt, value) {
   if (value === null || value === undefined || value instanceof Error) return value
   if (typeof value !== 'object' || !Array.isArray(value.nodes)) return value
   if (['nonce', 'payload', 'sha256', 'failure'].some((k) => k in value)) return value
   if (value.nodes.some((n) => n === null || typeof n !== 'object' || Array.isArray(n))) return value
-  return treeFetchReply(prompt, value.nodes, { digestNodes: uniqueBySixFields(value.nodes) })
+  const nodes = value.nodes.map((n) => ('optinTests' in n ? n : { ...n, optinTests: [] }))
+  return treeFetchReply(prompt, nodes, { digestNodes: uniqueBySevenFields(nodes) })
 }
