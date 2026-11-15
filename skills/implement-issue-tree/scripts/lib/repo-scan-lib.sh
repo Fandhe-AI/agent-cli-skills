@@ -16,10 +16,13 @@
 # このファイルは単体実行しない。run-verified.sh のハッシュ照合は scripts/lib/*.sh も対象に含む。
 # 読み込み済みを示す変数でのガードは置かない（環境から継承した変数で定義が飛ばされ、偽の関数が使われるのを防ぐ）。
 
-# 直近の merged PR の head の check-runs から GitHub Actions 以外の App の slug を取り出す gh --jq（gojq）の定義。
-# 旧コマンドの '[.check_runs[] | select(.app.slug != "github-actions") | .app.slug] | .[]' との違いは、slug が文字列でないもの（`.app` が null の check-run）を落とすだけ。
-# 旧版はこれを文字列 null として出し、外部 App「null」として待たせ得た。
-RS_APPS_JQ='[.check_runs[] | select(.app.slug != "github-actions") | .app.slug | select(type == "string")] | .[]'
+# 直近の merged PR の head の check-runs の 1 ページから、1 行目にそのページの check-run の件数、2 行目以降に GitHub Actions 以外の App の slug を
+# 出す gh --jq（gojq）の定義。件数はページ送りの終わりの判定に使い（Issue #809。100 件未満なら最後のページ）、slug の候補には混ぜない
+# （slug だけでは github-actions を除いた後なので、ページが埋まっていたか分からない）。
+# slug の部分の旧コマンド '[.check_runs[] | select(.app.slug != "github-actions") | .app.slug] | .[]' との違いは、slug が文字列でないもの
+# （`.app` が null の check-run）を落とすだけ。旧版はこれを文字列 null として出し、外部 App「null」として待たせ得た。
+# check_runs が配列でない応答は `.check_runs[]` が失敗し、gh が非 0 で終わる（取得失敗として errs に数える）。
+RS_APPS_JQ='(.check_runs | length), ([.check_runs[] | select(.app.slug != "github-actions") | .app.slug | select(type == "string")] | .[])'
 # 対象リポジトリの open issue（PR を除く）の番号。旧コマンドと同一
 RS_ISSUES_JQ='.[]|select(.pull_request==null)|.number'
 # リポジトリのラベル名の一覧。旧コマンドと同一
@@ -30,6 +33,10 @@ RS_SLUG_MAX=64         # App slug の長さ（GitHub の slug は小文字英数
 RS_LABELS_MAX=10       # ホストの parseSkipLabels の上限と同じ
 RS_LABEL_MAX_BYTES=200 # ラベル 1 件の長さ。ホストは 50 文字までで、日本語は 1 文字 3 バイト（LC_ALL=C のバイト数）に収まる余裕を持たせる
 RS_NUMBER_MAX_LEN=9    # イシュー番号の桁数（is_uint と同じ。10 億未満）
+# check-runs のページ送りの上限（1 ページ 100 件。Issue #809）。3 件の PR × 10 ページ = gh api 最大 30 回で、1 回の Bash 呼び出しの
+# 時間に収まる範囲にとどめる。上限のページまで埋まっていたら（続きを読まずに止めたので）取りこぼしとして errs に数える
+RS_CHECK_PAGES_MAX=10
+RS_CHECK_PAGE_SIZE=100
 # --numbers（ツリーの open ノードの番号のカンマ区切り。Issue #807）の長さの上限。Linux の 1 引数の上限（MAX_ARG_STRLEN 131,072 B）より
 # 小さく取る。fetch-tree.sh の上限（約 4,500 ノード）× 9 桁 + カンマでも 45,000 B で収まり、超えるのは想定外の入力だけ
 RS_NUMBERS_MAX_BYTES=100000
@@ -112,7 +119,8 @@ ${l}"
 }
 
 # 複数行の slug の候補（$1）から、形式の正しいものを昇順・重複なしで RS_APPS（改行区切り）へ、捨てた件数（形式不正の行の数。同じ不正な値が重複していても行ごとに数える）を RS_DROPPED へ入れる。
-# 件数の上限は設けない（3 件の PR × check-runs の 1 ページ 100 件なので高々 300 件。ホストが 100 件以内を検査する）。
+# 件数の上限は設けない（3 件の PR × check-runs の 10 ページ × 100 件なので高々 3,000 件。重複を除いた apps が封筒の上限を超えれば
+# exit 7 で、ホストは観測を採用しない。ホストは 100 件以内を検査する）。
 # 並びは LC_ALL=C の sort -u で固定する（ロケールで並びが変わらない）。空行は数えない。sort の失敗（入力があるのに結果が空の場合を含む）は return 1（RS_APPS は空）。
 rs_collect_apps() {
   local line valid=""

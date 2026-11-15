@@ -95,7 +95,8 @@ export function registerRepoScanTests(bash) {
     const calls = stub.calls()
     assert.equal(calls.length, 3)
     assert.match(calls[0], /^pr list -R o\/r --state merged --limit 3 --json headRefOid --jq /)
-    assert.ok(calls[1].startsWith(`api repos/o/r/commits/${A}/check-runs?per_page=100`) && !calls.some((c) => c.includes('--paginate')))
+    // 1 ページ目が 100 件未満なら 2 ページ目を読まない（page= を数えるページ送り。--paginate は上限を置けないので使わない。Issue #809）
+    assert.ok(calls[1].startsWith(`api repos/o/r/commits/${A}/check-runs?per_page=100&page=1 --jq `) && !calls.some((c) => c.includes('--paginate')))
     assert.ok(!calls.some((c) => c.includes('{owner}')))
     assert.ok(!calls.some((c) => /-X |-f |-F |--method|--input/.test(c)), '書き込み系の指定がある')
   })
@@ -211,6 +212,67 @@ export function registerRepoScanTests(bash) {
     assert.equal(old.status, 0, old.stderr)
     assert.deepEqual(old.stdout.split('\n').filter((l) => l !== ''), [], '旧コマンドは 31 件目以降の App を取りこぼす（前提の自己検証）')
     assert.deepEqual(envelopeOf(ext(makeGhRepoScanStub(data))).payload.apps, ['late-app'])
+  })
+
+  // ---------------- external-checks のページ送り（Issue #809）----------------
+  const actions = (n) => Array.from({ length: n }, () => 'github-actions')
+
+  T('external-checks: check-runs をページ送りし、150 件目にだけある外部 App も apps に入る（件数行は slug に混ぜない）', () => {
+    const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns([...actions(149), 'late-app']) } })
+    const e = envelopeOf(ext(stub))
+    assert.deepEqual(e.payload.apps, ['late-app'])
+    assert.deepEqual([e.payload.errs, e.payload.dropped, e.payload.prs], [0, 0, 1], '件数行（100・50）を slug の候補や dropped に数えない')
+    assert.deepEqual(stub.calls().filter((c) => c.includes('check-runs')).map((c) => c.split(' ')[1]), [`repos/o/r/commits/${A}/check-runs?per_page=100&page=1`, `repos/o/r/commits/${A}/check-runs?per_page=100&page=2`])
+  })
+
+  T('external-checks: ちょうど 100 件なら 2 ページ目（0 件）まで読んで終わる', () => {
+    const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns([...actions(99), 'edge-app']) } })
+    const e = envelopeOf(ext(stub))
+    assert.deepEqual([e.payload.apps, e.payload.errs], [['edge-app'], 0])
+    assert.equal(stub.callsTo('check-runs'), 2)
+  })
+
+  T('external-checks: ページの取得失敗は errs に数え、読めたページの App は返し、その PR の残りのページは読まない', () => {
+    for (const fail of [{ exit: 1 }, { raw: '{"message":"boom secret-token"}', exit: 1 }]) {
+      const stub = makeGhRepoScanStub({
+        prs: [{ headRefOid: A }, { headRefOid: B }],
+        checkRuns: { [A]: checkRuns([...actions(99), 'first-page', ...actions(100), 'third-page']), [`${A}@2`]: fail, [B]: checkRuns(['other']) },
+      })
+      const r = ext(stub)
+      const e = envelopeOf(r)
+      assert.deepEqual([e.payload.apps, e.payload.errs, e.payload.prs], [['first-page', 'other'], 1, 2])
+      assert.ok(!stub.calls().some((c) => c.includes(`${A}/check-runs?per_page=100&page=3`)), '失敗したページの後を読んだ')
+      assert.ok(!r.stdout.includes('boom') && !r.stdout.includes('secret'))
+    }
+  })
+
+  T('external-checks: 件数行が整数でない応答（check_runs が配列でない等）は errs に数える', () => {
+    for (const resp of [{ raw: 'x\ncursor\n', exit: 0 }, { total_count: 1, check_runs: null }]) {
+      const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: resp } })
+      const e = envelopeOf(ext(stub))
+      assert.deepEqual([e.payload.apps, e.payload.errs], [[], 1], JSON.stringify(resp))
+    }
+  })
+
+  T('external-checks: ページ数の上限（10 ページ = 1,000 件）まで埋まっていれば読むのを止めて errs に数え、取りこぼしを黙らない', () => {
+    const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns([...actions(500), 'mid-app', ...actions(599), 'beyond-app']) } })
+    const e = envelopeOf(ext(stub))
+    assert.deepEqual([e.payload.apps, e.payload.errs], [['mid-app'], 1])
+    assert.equal(stub.callsTo('check-runs'), 10, '上限を超えて読んだ')
+    // 1,000 件未満なら上限に当たらない
+    const ok = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns([...actions(998), 'last-app']) } })
+    assert.deepEqual(Object.values(envelopeOf(ext(ok)).payload).slice(0, 3), [['last-app'], 0, 0])
+  })
+
+  T('external-checks: 3 件の PR がすべて上限まで読んでも、封筒は上限内で時間の見積り（gh api 30 回 + pr list 1 回）に収まる', () => {
+    const many = checkRuns([...actions(990), ...Array.from({ length: 10 }, (_, k) => `app-${k}`)])
+    const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }, { headRefOid: B }, { headRefOid: C }], checkRuns: { [A]: many, [B]: many, [C]: many } })
+    const r = ext(stub)
+    const e = envelopeOf(r)
+    assert.equal(e.payload.apps.length, 10)
+    assert.equal(e.payload.errs, 3, '3 件とも上限のページまで埋まっていた')
+    assert.equal(stub.calls().length, 31)
+    assert.ok(r.stdout.length < 24000)
   })
 
   T('external-checks: slug の整列（sort）が失敗しても、入力があるのに空の結果で成功しても、apps を空の成功にせず errs に数える', () => {

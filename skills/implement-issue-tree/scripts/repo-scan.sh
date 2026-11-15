@@ -16,7 +16,8 @@
 #   external-checks   payload {"apps":[…],"dropped":N,"errs":N,"inputSha256":"…","prs":N}
 #         - apps          直近 3 件の merged PR の head の check-runs にある GitHub Actions 以外の App の slug（昇順・重複なし・形式検査済み）
 #         - prs           head の sha を得られた PR の件数（0〜3）
-#         - errs          gh の失敗の件数（PR 一覧の失敗 1 件 + check-runs の取得失敗。個々の失敗は無視して部分結果を返す = 旧コマンドと同じ）
+#         - errs          gh の失敗の件数（PR 一覧の失敗 1 件 + check-runs のページの取得失敗・上限 10 ページで読み切れなかった PR。個々の失敗は
+#                         無視して部分結果を返す = 旧コマンドと同じ。check-runs は per_page=100 でページ送りする。Issue #809）
 #         - dropped       形式が slug でないため捨てた値の件数
 #         - inputSha256   sha256("repo-scan\nexternal-checks\n" + repo)
 #   skip-labels       payload {"absent":[i,…],"entries":[{"i":i,"numbers":[…]},…],"failed":[i,…],"inputSha256":"…"}
@@ -111,6 +112,8 @@ emit() {
   printf '%s\n' "${env}"
 }
 
+nl='
+'
 if [ "${mode}" = external-checks ]; then
   errs=0
   prs=0
@@ -124,13 +127,32 @@ if [ "${mode}" = external-checks ]; then
     [ "${seen}" -le 3 ] || break
     if ! rs_valid_sha "${s}"; then errs=$((errs + 1)); continue; fi
     prs=$((prs + 1))
-    # check-runs はページ送りなし。per_page=100 で 1 ページ目に最大 100 件（旧コマンドは既定の 30 件で、31 件目以降の App を取りこぼした）。取得できなかった PR は無視して続ける
-    if out=$(gh api "${base}/commits/${s}/check-runs?per_page=100" --jq "${RS_APPS_JQ}" 2>/dev/null </dev/null); then
-      raw="${raw}${out}
-"
-    else
-      errs=$((errs + 1))
-    fi
+    # check-runs は per_page=100 でページ送りする（Issue #809。以前は 1 ページ目だけで、101 件目以降にしか無い App を取りこぼした。
+    # 旧コマンドは既定の 30 件）。--paginate は上限を置けないので page= を数えて読み、そのページが 100 件未満なら終わる。
+    # ページの取得失敗・件数行の形の違い・上限（RS_CHECK_PAGES_MAX）のページまで埋まっていた場合は errs に数え、その PR の残りは読まない
+    # （取りこぼしを黙らない）。読めたページの slug は使う（部分結果。旧コマンドの失敗の扱いと同じ向き）
+    p=1
+    while :; do
+      if ! out=$(gh api "${base}/commits/${s}/check-runs?per_page=${RS_CHECK_PAGE_SIZE}&page=${p}" --jq "${RS_APPS_JQ}" 2>/dev/null </dev/null); then
+        errs=$((errs + 1))
+        break
+      fi
+      # 1 行目はこのページの check-run の件数（slug の候補に混ぜない）、2 行目以降が slug
+      n=${out%%"${nl}"*}
+      case "${out}" in *"${nl}"*) out=${out#*"${nl}"} ;; *) out="" ;; esac
+      # 件数は 0 か正の整数（is_uint は 0 を通さない）
+      if [ "${n}" != 0 ] && ! is_uint "${n}"; then
+        errs=$((errs + 1))
+        break
+      fi
+      raw="${raw}${out}${nl}"
+      [ "${n}" -ge "${RS_CHECK_PAGE_SIZE}" ] || break
+      if [ "${p}" -ge "${RS_CHECK_PAGES_MAX}" ]; then
+        errs=$((errs + 1))
+        break
+      fi
+      p=$((p + 1))
+    done
   done <<RS_EOF
 ${shas}
 RS_EOF
