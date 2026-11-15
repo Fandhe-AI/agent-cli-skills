@@ -16,7 +16,8 @@
 #   ページ数 1   ノードごとに 1 行の TSV: number TAB parent TAB siblingIndex TAB state TAB subIssuesTotal TAB title TAB optinTests
 #                （発見順。ルートは parent 0・siblingIndex 0。title は制御文字を半角スペースへ置換した表示形。optinTests は本文の
 #                `<!-- optin-tests: ... -->` 宣言の値を正規化した文字列配列の compact JSON〔open ノードだけ・無ければ `[]`。
-#                抽出と正規化・上限は lib/fetch-tree-lib.sh の FT_JQ_OPTIN〕）に続けて封筒
+#                抽出と正規化・上限は lib/fetch-tree-lib.sh の FT_JQ_OPTIN。同じ行で閉じない宣言〔#802〕・値の合計 1,000 文字超〔#803〕は `["?"]`。
+#                第 7 欄は 1 ノード最大 1,061 バイト〕）に続けて封筒
 #   ページ数 2 以上  封筒 1 行だけ（行は --page で読む）
 #   封筒 {nonce, payload, sha256}。payload は {"count":N,"dir":"...","inputSha256":"...","nodesSha256":"...","optinSha256":"...","pages":P,"structSha256":"...","taskIdSha256":"...","tsvSha256":"..."}
 #   （P が 1 のときは dir・tsvSha256 を含まない 7 欄。空文字の欄の転記漏れで署名が合わなくなるのを避ける）
