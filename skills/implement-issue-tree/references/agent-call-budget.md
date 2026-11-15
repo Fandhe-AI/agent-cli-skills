@@ -189,7 +189,7 @@ n = |開始時の状態ファイルのキー ∪ キューの issue 番号|
 | マージ後の fix と再 monitor | 2 |
 | merge-exec・merge-verify | 2 |
 
-opt-in テスト記録ゲート（宣言のあるイシューだけ）は、マージ前の 1 ラウンドごとに観測 1〜2 回、合格なら独立な 2 回目の観測（Issue #804）の 1〜2 回を足して最大 4 回を使う。目安の余裕 8 の内で受け、`AGENT_CALLS_PER_ISSUE` は変えていない。
+opt-in テスト記録ゲート（宣言のあるイシューだけ）は、ready のラウンドごとに観測 1〜2 回、合格なら独立な 2 回目の観測（Issue #804）の 1〜2 回を足して最大 4 回を使う。merge-exec が見送って ready へ戻るたびに繰り返す。ready のラウンドが 1 回なら目安の余裕 8 の内で受ける。`AGENT_CALLS_PER_ISSUE` は変えていない。
 
 `args.securityReview` を有効にしたランは、Review ラウンドごとにセキュリティ専用の Review が 1 回増えるため、上の Review 2 回ぶんの 2 を足して 32 とする（`agentCallLimit` の下限も 81 から 83 に上がる）。無効なら 30 のまま。
 
