@@ -39,10 +39,19 @@ ft_title_display() {
 # 上限（fail-closed）: スキーマの上限（1 値 300 文字・20 件）を超えて schema エラーになる・黙って切り詰めて valid になることを避ける。
 #       1 値が 300 文字を超えるときは先頭 299 文字 + `?`（ホストの許可形式は 200 文字までなので必ず invalid）。
 #       件数が 20 を超えるときは先頭 19 件 + `?` の 1 件（`?` は invalid なので blocked）。件数 11〜20 はホストの parseOptinTestDeclarations が OPTIN_TESTS_MAX（10）超として invalid にする。
+# 閉じない宣言（Issue #802）: 開始 `<!--[ \t]*optin-tests:` があり、同じ行（`\n` 区切り）でその後ろに `-->` が無いときは、宣言の値を出さず `["?"]` にする
+#       （書き損じを「宣言なし」にして記録ゲートを静かに外さない fail-closed。本文中の構文の説明でもノードは blocked になる）。判定は「行の最後の `-->` より後ろに開始がある」で、
+#       `-->` は開始の文字と重ならないので、最後の `-->` の手前にある開始はすべて閉じている。正規表現を使わず split / explode だけの線形の処理（optin_open）。
+#       閉じない開始があると scan は行末まで探して二次時間になるため、scan を走らせる前に判定して飛ばす。
+# 1 ノードの合計（Issue #803）: 上の 2 つの上限を当てた後の値の文字数の合計が 1,000 を超えるときは、配列全体を `["?"]` に置き換える（黙って切らない・invalid = blocked）。
+#       これで第 7 欄は 1 ノード最大 1,061 バイト（値 1,000 + 引用符 40 + カンマ 19 + 括弧 2）になり、取得出力のページ数（30 ページの上限）を宣言で膨らませない。
 FT_JQ_OPTIN='def optin_norm: explode | map(if . == 9 then 32 elif (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122) or . == 32 or . == 95 or . == 46 or . == 47 or . == 58 or . == 61 or . == 64 or . == 43 or . == 44 or . == 45 then . else 63 end) | implode;
 def optin_trim: explode as $c | ($c | length) as $n | (first(range(0; $n) | select($c[.] != 32 and $c[.] != 9)) // $n) as $s | (first(range($n - 1; $s - 1; -1) | select($c[.] != 32 and $c[.] != 9)) // ($s - 1)) as $e | $c[$s:$e + 1] | implode;
 def optin_cap: if length > 300 then .[:299] + "?" else . end;
-def optin_list: if .state != "open" then [] else [(.body // "") | scan("<!--[ \t]*optin-tests:([^\n]*?)-->") | .[0] | optin_trim | optin_norm | optin_cap] | if length > 20 then .[:19] + ["?"] else . end end;'
+def optin_head: explode as $c | ($c | length) as $n | (first(range(0; $n) | select($c[.] != 32 and $c[.] != 9)) // $n) as $s | $c[$s:$s + 12] == [111,112,116,105,110,45,116,101,115,116,115,58];
+def optin_open: split("\n") | any(.[]; ((split("-->") | last) // "") | split("<!--") | .[1:] | any(.[]; optin_head));
+def optin_total: if (map(length) | add // 0) > 1000 then ["?"] else . end;
+def optin_list: if .state != "open" then [] elif (.body // "") | optin_open then ["?"] else [(.body // "") | scan("<!--[ \t]*optin-tests:([^\n]*?)-->") | .[0] | optin_trim | optin_norm | optin_cap] | if length > 20 then .[:19] + ["?"] else . end | optin_total end;'
 
 # state は open / closed のみ。
 ft_valid_state() {

@@ -125,6 +125,28 @@ for (const bash of availableBashes()) {
     assert.ok(15 > host.OPTIN_TESTS_MAX)
   })
 
+  test(`${tag} 閉じない宣言（#802）・合計 1,000 文字超（#803）のノードは ["?"] で、ホストの照合（optinSha256）を通ったうえで承認一覧の有無によらず invalid（blocked）`, () => {
+    const big = Array.from({ length: 4 }, () => mark('make e2e')).join('\n') + '\n' + Array.from({ length: 4 }, (_, i) => mark(`make ${String(i).repeat(295)}`)).join('\n')
+    const { nodes, result } = fetchAsHost(bash, [
+      `${mark('make e2e')}\n<!-- optin-tests: npm run e2e`,
+      '宣言は `<!-- optin-tests:` で始める',
+      big,
+      mark('make e2e'),
+    ])
+    assert.deepEqual(nodes.slice(1).map((n) => n.optinTests), [['?'], ['?'], ['?'], ['make e2e']])
+    assert.equal(host.treeNodeShapeProblem(nodes), '')
+    assert.deepEqual(verify(result, nodes), { ok: true, titleMismatch: false })
+    for (const approved of [APPROVED, host.parseOptinTestCommands([])]) {
+      for (const n of nodes.slice(1, 4)) assert.deepEqual(host.parseOptinTestDeclarations(n.optinTests, approved), { commands: [], invalid: ['?'] }, `#${n.number}`)
+    }
+    assert.deepEqual(host.parseOptinTestDeclarations(nodes[4].optinTests, APPROVED), { commands: ['make e2e'], invalid: [] })
+    // ["?"] を宣言なし（[]）や閉じた値へ書き換えた返却は digest 不一致
+    for (const bad of [[], ['make e2e']]) {
+      const mutated = nodes.map((x) => (x.number === 2 ? { ...x, optinTests: bad } : x))
+      assert.deepEqual(verify(result, mutated), { ok: false, reason: 'digest' }, JSON.stringify(bad))
+    }
+  })
+
   test(`${tag} closed のノードの宣言は取り込まれない（[] のまま）`, () => {
     const { nodes, result } = fetchAsHost(bash, [mark('make e2e'), mark('npm run e2e')], { states: ['open', 'closed'] })
     assert.deepEqual(nodes.map((n) => n.optinTests), [[], ['make e2e'], []])

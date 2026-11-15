@@ -401,10 +401,32 @@ export function registerFetchTreeTests(bash) {
   })
 
   test(`${tag} optinTests: コードフェンス内の宣言も拾い、空の宣言は空文字、前後の空白は落とす（従来の scan と同じ意味）`, () => {
-    const body = ['説明', '```', mark('node --test'), '```', '<!--  optin-tests:   make a   -->', '<!-- optin-tests: -->', '<!-- OPTIN-TESTS: make upper -->', '<!-- optin-tests: no close'].join('\n')
+    const body = ['説明', '```', mark('node --test'), '```', '<!--  optin-tests:   make a   -->', '<!-- optin-tests: -->', '<!-- OPTIN-TESTS: make upper -->'].join('\n')
     const { r, rows } = withBodies([body])
     assert.equal(r.status, 0, r.stderr)
     assert.deepEqual(rows[0].optinTests, ['node --test', 'make a', ''])
+  })
+
+  test(`${tag} optinTests: 同じ行で --> が閉じない宣言があるノードは ["?"] 1 件（閉じた宣言があっても値は出さない・本文中の構文の説明でも止まる）。Issue #802`, () => {
+    const closed = ['説明', mark('node --test'), mark('make a')].join('\n')
+    const { r, rows } = withBodies([
+      `${closed}\n<!-- optin-tests: no close`,
+      '<!-- optin-tests: make a\n-->',
+      '宣言は `<!-- optin-tests:` で始める',
+      closed,
+    ])
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(rows.map((x) => x.optinTests), [['?'], ['?'], ['?'], ['node --test', 'make a']])
+  })
+
+  test(`${tag} optinTests: 1 ノードの宣言の合計が 1,000 文字を超えたら ["?"]（1,000 ちょうどは変えない）。第 7 欄は 1 ノード 1,061 バイト以下。Issue #803`, () => {
+    const decls = (n, len) => Array.from({ length: n }, (_, i) => mark(`make ${String.fromCharCode(97 + i).repeat(len - 5)}`)).join('\n')
+    const { r, rows } = withBodies([decls(20, 50), decls(4, 300), `${decls(3, 250)}\n${mark(`make ${'z'.repeat(246)}`)}`, Array.from({ length: 500 }, () => mark(`make ${'q'.repeat(295)}`)).join('\n')])
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(rows[0].optinTests.length, 20)
+    assert.equal(rows[0].optin.length, 1061)
+    assert.deepEqual(rows.slice(1).map((x) => x.optinTests), [['?'], ['?'], ['?']])
+    for (const x of rows) assert.ok(Buffer.byteLength(x.optin) <= 1061, `#${x.number} ${x.optin.length}`)
   })
 
   test(`${tag} optinTests: タブは空白 1 つ・許可文字の外（NBSP・全角・シェルのメタ文字・引用符・バックスラッシュ・CR・制御文字・絵文字）は 1 文字ずつ ?`, () => {
@@ -436,9 +458,11 @@ export function registerFetchTreeTests(bash) {
     const over = `make ${'a'.repeat(296)}`
     const huge = `make ${'b'.repeat(5000)}`
     const wide = `make ${'日'.repeat(400)}` // 正規化後は ? が並ぶ（バイト数ではなく文字数で切る）
-    const { r, rows } = withBodies([[exact, over, huge, wide].map(mark).join('\n')])
+    // 4 値を 1 ノードに置くと合計 1,200 文字で合計の上限（Issue #803）に掛かるため、1 ノード 1 値にする
+    const { r, rows } = withBodies([exact, over, huge, wide].map(mark))
     assert.equal(r.status, 0, r.stderr)
-    const [a, b, c, d] = rows[0].optinTests
+    assert.deepEqual(rows.map((x) => x.optinTests.length), [1, 1, 1, 1])
+    const [a, b, c, d] = rows.map((x) => x.optinTests[0])
     assert.equal(exact.length, 300)
     assert.equal(a, exact)
     for (const v of [b, c, d]) {
@@ -514,13 +538,24 @@ export function registerFetchTreeTests(bash) {
 
   // 抽出の正規表現がバックトラックしない回帰。値の前後に [ \t]* を置いた形は、システムの jq 1.7.1（Oniguruma）で空白の長い行に対し
   // 約 15 秒後に retry-limit-in-match over で異常終了し（exit 5 = ツリー取得全体が停止）、旧経路の gojq は線形だった。
+  // 閉じない宣言の判定（Issue #802）も正規表現を足さない線形の処理で、閉じない開始のある本文では scan を走らせない。e〜m は GitHub の本文の上限（65,536 文字）近くの最悪形。
   {
     const sp = (n) => ' '.repeat(n)
+    const fit = (unit) => unit.repeat(Math.floor(65000 / unit.length))
     const longCases = [
-      ['a 閉じない宣言 + 空白 65000', `<!-- optin-tests:${sp(65000)}`, []],
-      ['b 空白 65000 のあとに改行と -->', `<!-- optin-tests:${sp(65000)}\n-->`, []],
+      ['a 閉じない宣言 + 空白 65000', `<!-- optin-tests:${sp(65000)}`, ['?']],
+      ['b 空白 65000 のあとに改行と -->', `<!-- optin-tests:${sp(65000)}\n-->`, ['?']],
       ['c 値の途中に空白 60000', `<!-- optin-tests: x${sp(60000)}y -->`, [`x${sp(298)}?`]],
-      ['d 閉じない宣言を 3000 個並べた行', '<!-- optin-tests:'.repeat(3000), []],
+      ['d 閉じない宣言を 3000 個並べた行', '<!-- optin-tests:'.repeat(3000), ['?']],
+      ['e <!-- の連続', fit('<!--'), []],
+      ['f --> の連続', fit('-->'), []],
+      ['g 閉じない開始と改行の連続', fit('<!-- optin-tests:\n'), ['?']],
+      ['h 閉じた宣言の連続の最後に閉じない開始', `${fit(mark('make a'))}<!-- optin-tests:`, ['?']],
+      ['i 閉じた宣言の連続（1 行）', fit(mark('make a')), [...Array(19).fill('make a'), '?']],
+      ['j <!-- の後ろに空白 64000（開始ではない）', `<!--${sp(64000)}x`, []],
+      ['k <!-- の後ろにタブ 64000 と閉じない開始', `<!--${'\t'.repeat(64000)}optin-tests:`, ['?']],
+      ['l 日本語と <!-- と空白の混在', fit('日本<!-- \t'), []],
+      ['m 開始の後ろに <!-- の連続（閉じない）', `<!-- optin-tests:${fit('<!--')}`, ['?']],
     ]
     for (const [name, body, expected] of longCases) {
       test(`${tag} optinTests: 長い入力でもバックトラックしない（${name}）。exit 0 で 5 秒未満`, () => {

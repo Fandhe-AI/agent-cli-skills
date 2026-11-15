@@ -272,3 +272,117 @@ for (const bash of availableBashes()) {
     assert.equal(res[2].out, treeStructDigest(nodes))
   })
 }
+
+// ---- FT_JQ_OPTIN の optin_list（第 7 欄の抽出・正規化）を表で検査する（Issue #802 / #803）----
+// 1 回の bash 起動・1 回の jq 起動で、ノード（{state, body}）の配列の全ケースを流す。期待値は下の独立実装（JS の正規表現）と手書きの値。
+const OPTIN_DRIVER = `
+. "$1/fetch-tree-lib.sh" || exit 9
+jq -c "\${FT_JQ_OPTIN} .[] | optin_list"
+`
+function optinTable(bash, nodes) {
+  const r = spawnSync(bash, ['-c', OPTIN_DRIVER, 'driver', LIBDIR], { input: JSON.stringify(nodes), encoding: 'utf8' })
+  assert.equal(r.status, 0, `exit ${r.status} / stderr: ${r.stderr}`)
+  const lines = r.stdout.split('\n').filter((l) => l !== '')
+  assert.equal(lines.length, nodes.length)
+  return lines
+}
+// 独立実装: 閉じない開始（同じ行で後ろに --> が無い <!--[ \t]*optin-tests:）があれば ["?"]、無ければ scan → 前後の空白とタブを落とす → 正規化 → 1 値 300 → 20 件 → 合計 1,000
+const START_RE = /<!--[ \t]*optin-tests:/g
+const DECL_RE = /<!--[ \t]*optin-tests:([^\n]*?)-->/g
+const normV = (v) => [...v.replace(/^[ \t]+|[ \t]+$/g, '').replace(/\t/g, ' ')].map((c) => (/^[A-Za-z0-9 _./:=@+,-]$/.test(c) ? c : '?')).join('')
+function expectedOptin({ state, body }) {
+  if (state !== 'open') return []
+  const b = body ?? ''
+  const open = b.split('\n').some((line) => [...line.matchAll(START_RE)].some((m) => !line.includes('-->', m.index + m[0].length)))
+  if (open) return ['?']
+  let vs = [...b.matchAll(DECL_RE)].map((m) => normV(m[1])).map((v) => ([...v].length > 300 ? `${[...v].slice(0, 299).join('')}?` : v))
+  if (vs.length > 20) vs = [...vs.slice(0, 19), '?']
+  return vs.reduce((n, v) => n + v.length, 0) > 1000 ? ['?'] : vs
+}
+const OPTIN_COL_MAX = 1000 + 20 * 2 + 19 + 2 // 値 1,000 文字 + 引用符 + カンマ + 括弧 = 第 7 欄の 1 ノードの最大バイト数
+
+for (const bash of availableBashes()) {
+  test(`[${bash}] optin_list: 閉じない宣言は ["?"] 1 件（行の最後の --> より後ろに開始がある）・閉じた宣言の抽出は変わらない`, () => {
+    const m = (v) => `<!-- optin-tests: ${v} -->`
+    const cases = [
+      ['閉じた宣言', m('make a'), ['make a']],
+      ['閉じた宣言 2 件と構文外の行', `説明\n${m('make a')}\n\`\`\`\n${m('npm run e2e')}\n\`\`\``, ['make a', 'npm run e2e']],
+      ['入れ子の開始は同じ --> で閉じる（scan の 1 件のまま）', '<!-- optin-tests: a <!-- optin-tests: b -->', ['a ??-- optin-tests: b']],
+      ['<!--> の --> でも閉じる', '<!-- optin-tests: a <!-->', ['a ??']],
+      ['閉じた宣言の後ろに閉じない開始', '<!-- optin-tests: a --> <!-- optin-tests: b', ['?']],
+      ['2 行目が閉じない', `x\n${m('make a')}\n<!-- optin-tests: no close`, ['?']],
+      ['次の行の --> では閉じない', '<!-- optin-tests: a\n-->', ['?']],
+      ['--> が開始より前にだけある', '--> <!-- optin-tests: x', ['?']],
+      ['閉じない開始が複数でも ? は 1 件', '<!-- optin-tests: a\n<!-- optin-tests: b\n<!--optin-tests:', ['?']],
+      ['開始の間の空白とタブ', '<!--\t \toptin-tests: x', ['?']],
+      ['本文中の構文の説明でも止まる', '宣言は `<!-- optin-tests:` で始めて、閉じる記号は次の行に書く\n`-->`', ['?']],
+      ['構文の説明が同じ行で閉じていれば値として抽出（? を含むので invalid）', '例: `<!-- optin-tests: <cmd> -->`', ['?cmd?']],
+      ['日本語の後ろの閉じない開始', '日本語の説明<!-- optin-tests: make a', ['?']],
+      ['CR は行を分けない（CRLF の閉じた宣言はそのまま）', `${m('make a')}\r\n${m('make b')}\r\n`, ['make a', 'make b']],
+      ['CRLF の閉じない宣言', '<!-- optin-tests: make a\r\n', ['?']],
+      ['大文字は開始ではない', '<!-- OPTIN-TESTS: x', []],
+      ['名前違いは開始ではない', '<!-- optin-test: x\n<!-- optin-testsx', []],
+      ['<!-- の無い optin-tests: は開始ではない', 'optin-tests: x', []],
+      ['NBSP を挟んだものは開始ではない（正規表現の [ \\t] と同じ）', '<!-- optin-tests: x', []],
+      ['<!-- だけ・--> だけ', '<!--\n-->\n<!-- x', []],
+      ['空の本文', '', []],
+    ]
+    const nodes = [
+      ...cases.map(([, body]) => ({ state: 'open', body })),
+      { state: 'open', body: null },
+      { state: 'closed', body: '<!-- optin-tests: x' },
+    ]
+    const out = optinTable(bash, nodes)
+    cases.forEach(([name, , exp], i) => assert.equal(out[i], JSON.stringify(exp), name))
+    assert.equal(out[cases.length], '[]', 'null の本文')
+    assert.equal(out[cases.length + 1], '[]', 'closed は閉じない宣言があっても []')
+    nodes.forEach((n, i) => assert.equal(out[i], JSON.stringify(expectedOptin(n)), `独立実装との一致 ${i}`))
+  })
+
+  test(`[${bash}] optin_list: 1 ノードの合計が 1,000 文字を超えたら ["?"] に置き換える（1,000 ちょうどは通す）。第 7 欄は最大 ${OPTIN_COL_MAX} バイト`, () => {
+    const m = (v) => `<!-- optin-tests: ${v} -->`
+    const val = (len, c = 'a') => `make ${c.repeat(len - 5)}`
+    const decls = (n, len) => Array.from({ length: n }, (_, i) => m(val(len, String.fromCharCode(97 + (i % 26))))).join('\n')
+    const cases = [
+      ['20 件 × 50 文字 = 1,000 ちょうど', decls(20, 50), 'keep'],
+      ['4 件 × 250 文字 = 1,000 ちょうど', decls(4, 250), 'keep'],
+      ['1,001 文字', `${decls(3, 250)}\n${m(val(251))}`, 'cap'],
+      ['4 件 × 300 文字 = 1,200', decls(4, 300), 'cap'],
+      ['1 値の 300 文字の切り詰めの後で数える（2 件 × 5,000 → 300 + 300 = 600）', decls(2, 5000), 'keep'],
+      ['1 値の切り詰めの後で 1,000 を超える（4 件 × 400 → 1,200）', decls(4, 400), 'cap'],
+      ['20 件の切り詰めの後で数える（21 件 × 50 → 19 件 950 + ? = 951）', decls(21, 50), 'keep'],
+      ['20 件の切り詰めの後で 1,000 を超える（25 件 × 60 → 1,141）', decls(25, 60), 'cap'],
+      ['500 件 × 300 文字', decls(500, 300), 'cap'],
+    ]
+    const out = optinTable(bash, cases.map(([, body]) => ({ state: 'open', body })))
+    cases.forEach(([name, body, kind], i) => {
+      const exp = expectedOptin({ state: 'open', body })
+      assert.equal(out[i], JSON.stringify(exp), name)
+      if (kind === 'cap') assert.equal(out[i], '["?"]', name)
+      else assert.notEqual(out[i], '["?"]', name)
+      assert.ok(Buffer.byteLength(out[i]) <= OPTIN_COL_MAX, `${name}: ${Buffer.byteLength(out[i])} バイト`)
+    })
+    assert.equal(Buffer.byteLength(out[0]), OPTIN_COL_MAX, '上限ちょうどの宣言が第 7 欄の最大バイト数')
+  })
+
+  test(`[${bash}] optin_list: 生成した本文で独立実装と一致し、第 7 欄は ${OPTIN_COL_MAX} バイト以下`, () => {
+    // 固定シードの線形合同法。部品は開始・終端・その断片・空白・改行・日本語・長い値
+    let seed = 802803
+    const rnd = (n) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648
+      return seed % n
+    }
+    const parts = ['<!--', '-->', ' optin-tests:', 'optin-tests:', '<!-- optin-tests: ', ' -->', '\n', '\r\n', ' ', '\t', 'make e2e', '-', '>', '<!-->', '日本', 'x'.repeat(90), ';']
+    const nodes = Array.from({ length: 400 }, () => ({ state: 'open', body: Array.from({ length: 1 + rnd(40) }, () => parts[rnd(parts.length)]).join('') }))
+    const out = optinTable(bash, nodes)
+    let opened = 0
+    let extracted = 0
+    nodes.forEach((n, i) => {
+      assert.equal(out[i], JSON.stringify(expectedOptin(n)), JSON.stringify(n.body))
+      assert.ok(Buffer.byteLength(out[i]) <= OPTIN_COL_MAX)
+      if (out[i] === '["?"]') opened += 1
+      else if (out[i] !== '[]') extracted += 1
+    })
+    assert.ok(opened > 20 && extracted > 20, `生成の偏り: ? ${opened} 件・抽出 ${extracted} 件`)
+  })
+}
