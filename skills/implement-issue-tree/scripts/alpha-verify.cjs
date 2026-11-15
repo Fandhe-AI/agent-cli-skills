@@ -9,18 +9,24 @@
 //   参照でない識別子（非計算のキー・メンバー名）は同名のまま・最上位の meta は改名しない・行数が同じ
 // - 新しい宣言名が特別な名前でない
 // - 関数の名前・ソース文字列を観測しない（改名で変わるため）。観測の形を 1 つずつ追うと収束しないので、
-//   受け手が関数かを追わずに次を一律に拒否する:
-//   (i) プロパティ name・toString・toSource を読む構文すべて（非計算メンバー・文字列 / 式なしテンプレートの
+//   次の 2 つで拒否する:
+//   (i) 受け手が関数かを追わない一律の拒否。プロパティ name・toString・toSource を読む構文すべて（非計算メンバー・文字列 / 式なしテンプレートの
 //       計算メンバー・optional chaining・分割代入と引数パターンのキー・Reflect.get 等の呼び出しにリテラルで渡すキー）。
 //       例外は受け手が構文上必ず数値になる式（数値リテラル・単項 + - ~・算術とビット演算の二項式。括弧つきを含む）だけ
-//   (ii) 関数式・アロー関数そのものを String() の引数・テンプレートの式・+ の被演算子・+= の右辺・concat() の引数にする形
-//   加えて、宣言・関数式の束縛・既定値・const / 代入による別名で関数値を追い、その束縛の文字列化
-//   （String()・テンプレート・+・+=・.length・計算プロパティ・分割代入）を拒否する
+//   (ii) 関数値の位置の許可リスト（手順 6）。直接の関数式・アロー関数と、追跡済みの関数束縛（宣言・関数式の束縛・
+//       既定値・const / 代入による別名）の参照は、親ノードでの位置が許可リストにあるときだけ通す。許可するのは、
+//       宣言・代入・既定値・オブジェクトの値（非計算キー）・return・アローの本体・呼び出しの callee・呼び出しの引数
+//       （String・Symbol・RegExp 等の自由変数の既知の関数と、concat・join・split・includes 等の既知のメソッドの
+//       引数を除く。replace / replaceAll は第 1 引数だけを除く）・非計算のメンバーの object（name・toString・
+//       toSource・toLocaleString を除く。f.call・f.length 等）。括弧・カンマ式の最後・条件式の枝・論理式は親の位置を
+//       引き継ぎ、配列リテラルの要素は配列の位置で判定する（配列では join・concat 等のメンバーも除く）。それ以外の
+//       位置（計算キー・in・比較・+・テンプレート・タグ・typeof・文の式など）はすべて拒否する
 // 保証しないこと（残るリスク）:
-// - 別名を経た暗黙の文字列化は静的には完全に検出できない。追跡の外の束縛（引数・オブジェクト・配列・戻り値を
-//   経た関数値）に対する String(alias)・`${alias}`・alias + '' や、[f].join() などの配列を経た暗黙の変換、
-//   追跡外の受け手への動的な計算キー（o[k]・o['na' + 'me']）、キーを持たない反射（Object.getOwnPropertyDescriptors）、
-//   Error の stack（関数名を含む）は見えない。改名後の生成物で全テスト（stub-run を含む）を流すことが補償になる
+// - 直接の関数式と追跡済みの束縛については、許可リスト外の位置をすべて拒否する。残るのは追跡外の別名だけで、
+//   引数・オブジェクトのプロパティ・配列の要素・戻り値を経た関数値（function g(x){return `${x}`}g(f)・
+//   o.m = f; String(o.m)・const xs = [f]; xs.join() など）は、その先の文字列化が見えない。キーを持たない反射
+//   （Object.getOwnPropertyDescriptors）・Error の stack（関数名を含む）も見えない。改名後の生成物で全テスト
+//   （stub-run を含む）を流すことが補償になる
 // - パーサは改名器と同じ Node 同梱の acorn なので、acorn が誤った AST を返す共通故障は見えない。
 //   それは照合 1（token-diff.cjs が src と stage1 のトークン列を照合済み）と CI の V8 バイトコードオラクル
 //   （tests/lib/v8-bytecode-oracle.cjs）で補う
@@ -55,7 +61,6 @@ const GOALS = {
 }
 
 const POSITION_KEYS = new Set(['start', 'end', 'loc', 'range'])
-const STRINGIFY_MEMBERS = new Set(['name', 'toString', 'length'])
 // 関数の名前・ソース文字列を返し得るプロパティ。受け手が関数かを追わず、読む構文を一律に拒否する
 const OBSERVED_PROPS = new Set(['name', 'toString', 'toSource'])
 // 結果が必ず数値（Number / BigInt）になる二項演算子。`+` は文字列連結にもなるので含めない
@@ -145,25 +150,94 @@ function unsupported(n, anc) {
   return null
 }
 
-// 関数値の文字列化に当たる位置か（手順 6）。当たれば位置の説明、当たらなければ null。
-// (c) は String が自由変数のときだけ当たるので、呼び出しの callee も返して解決後に判定する
-function stringifySite(id, parent) {
-  if (parent.type === 'TemplateLiteral' && parent.expressions.includes(id)) return { why: 'テンプレートの式' }
-  if (parent.type === 'BinaryExpression' && parent.operator === '+') return { why: '+ の被演算子' }
-  if (parent.type === 'AssignmentExpression' && parent.operator === '+=' && parent.right === id) return { why: '+= の右辺' }
-  if (parent.type === 'CallExpression' && parent.callee.type === 'Identifier' && parent.callee.name === 'String' && parent.arguments.includes(id)) {
-    return { why: 'String() の引数', callee: parent.callee }
+// 関数値を文字列化しない（引数として渡す・呼ぶ・束縛する等）と確かめた位置の許可リスト（手順 6）。
+// 直接の関数式・アローと、追跡済みの関数束縛の参照について、親ノードでの位置がこのリストに無ければ拒否する
+// （計算キー・in・比較・+・テンプレート・タグ・concat・Symbol などを位置の列挙なしにまとめて塞ぐ）。
+// 文字列化する既知の関数（自由変数の名前で呼ぶもの）。その引数の位置は許可しない
+const STRINGIFY_CALLEES = new Set(['String', 'Symbol', 'RegExp', 'Number', 'parseInt', 'parseFloat', 'encodeURI',
+  'encodeURIComponent', 'decodeURI', 'decodeURIComponent', 'escape', 'unescape', 'Error'])
+// 引数を文字列化する既知のメソッド。replace / replaceAll は第 1 引数だけ（第 2 引数の関数は置換関数として呼ばれる）
+const STRINGIFY_METHODS = new Set(['concat', 'join', 'split', 'includes', 'indexOf', 'startsWith', 'endsWith', 'padStart',
+  'padEnd', 'localeCompare', 'replace', 'replaceAll'])
+const FIRST_ARG_ONLY = new Set(['replace', 'replaceAll'])
+// 関数値のメンバーで、名前・ソースを返し得るもの（Object.prototype.toLocaleString は this.toString() を呼ぶ）
+const SOURCE_MEMBERS = new Set([...OBSERVED_PROPS, 'toLocaleString'])
+
+// 呼び出し p の引数 child が文字列化されるか（callee が自由変数の既知の関数・既知のメソッド）
+function stringifyingCall(p, child, res) {
+  const c = p.callee
+  if (c.type === 'Identifier') return STRINGIFY_CALLEES.has(c.name) && res.get(c) === 'free'
+  if (c.type !== 'MemberExpression') return false
+  const k = staticKey(c.property, c.computed)
+  if (k === null || !STRINGIFY_METHODS.has(k)) return false
+  return !FIRST_ARG_ONLY.has(k) || p.arguments[0] === child
+}
+
+// anc[i] にある値が許可された位置にあるか。許可されなければ位置の説明（固定の語彙: ノードの型とキー）、許可されれば null。
+// mode は 'value'（関数値そのもの）か 'container'（関数値を要素に持つ配列リテラル）
+function fnPositionDenied(anc, i, mode, res) {
+  const child = anc[i]
+  const p = anc[i - 1]
+  if (!p) return 'Program'
+  const up = (m = mode) => fnPositionDenied(anc, i - 1, m, res)
+  const key = Object.keys(p).find((k) => p[k] === child || (Array.isArray(p[k]) && p[k].includes(child))) ?? '?'
+  const label = `${p.type}.${key}${mode === 'container' ? '（配列の要素）' : ''}`
+  switch (p.type) {
+    // 値を引き継ぐ位置は親の位置で判定する
+    case 'ParenthesizedExpression':
+      return up()
+    case 'SequenceExpression':
+      return p.expressions[p.expressions.length - 1] === child ? up() : label
+    case 'ConditionalExpression':
+      return p.test === child ? label : up()
+    case 'LogicalExpression':
+      return up()
+    case 'ArrayExpression':
+      return up('container')
+    // 束縛・代入
+    case 'VariableDeclarator':
+      return null
+    case 'AssignmentExpression':
+      if (p.operator !== '=') return label
+      if (p.left === child) return null
+      return p.left.type === 'Identifier' || p.left.type === 'MemberExpression' ? null : label
+    case 'AssignmentPattern':
+    case 'ArrayPattern':
+    case 'ObjectPattern':
+    case 'RestElement':
+    case 'CatchClause':
+      return null
+    case 'ForInStatement':
+    case 'ForOfStatement':
+      return p.left === child ? null : label
+    case 'FunctionDeclaration':
+    case 'FunctionExpression':
+      return p.id === child || p.params.includes(child) ? null : label
+    case 'ArrowFunctionExpression':
+      return p.body === child || p.params.includes(child) ? null : label
+    case 'Property': {
+      const gp = anc[i - 2]
+      return gp && gp.type === 'ObjectExpression' && p.value === child && !p.computed ? null : label
+    }
+    case 'ReturnStatement':
+    case 'ExportDefaultDeclaration':
+    case 'MethodDefinition':
+    case 'PropertyDefinition':
+      return null
+    // 呼ぶ・渡す
+    case 'CallExpression':
+    case 'NewExpression':
+      if (p.callee === child) return mode === 'value' ? null : label
+      return stringifyingCall(p, child, res) ? `${label}（文字列化する呼び出し）` : null
+    case 'MemberExpression': {
+      if (p.object !== child || p.computed) return label
+      const k = p.property.type === 'Identifier' ? p.property.name : null
+      if (k === null || SOURCE_MEMBERS.has(k) || (mode === 'container' && STRINGIFY_METHODS.has(k))) return label
+      return null
+    }
+    default:
+      return label
   }
-  if (parent.type === 'MemberExpression' && parent.object === id) {
-    if (!parent.computed && STRINGIFY_MEMBERS.has(parent.property.name)) return { why: `.${parent.property.name} のオブジェクト` }
-    // 計算プロパティ（f["name"]・f[k]）はキーを判定しきれないので、関数値に対しては一律に拒否する
-    if (parent.computed) return { why: '計算プロパティのオブジェクト' }
-  }
-  // 分割代入（const {name} = f・({name} = f)）で関数のプロパティを取り出す
-  const pattern = (parent.type === 'VariableDeclarator' && parent.init === id && parent.id) ||
-    (parent.type === 'AssignmentExpression' && parent.right === id && parent.left)
-  if (pattern && pattern.type === 'ObjectPattern') return { why: '分割代入の元' }
-  return null
 }
 
 // キーの静的な文字列値（非計算の識別子・文字列リテラル・式を持たないテンプレート）。決まらなければ null
@@ -183,7 +257,7 @@ const isFunctionValue = (e) => e.type === 'FunctionExpression' || e.type === 'Ar
 
 // 関数の名前・ソース文字列を観測し得る構文か（受け手が関数かは追わない）。当たれば固定の語彙の説明、当たらなければ null。
 // 説明に入力の文字列は入れない（プロパティ名は OBSERVED_PROPS の 3 語のどれかに限る）
-function observeSite(n, parent) {
+function observeSite(n) {
   if (n.type === 'MemberExpression') {
     const k = n.property.type === 'PrivateIdentifier' ? null : staticKey(n.property, n.computed)
     if (k !== null && OBSERVED_PROPS.has(k) && !isNumeric(n.object)) return `${n.computed ? '計算メンバー' : 'メンバー'}の ${k}`
@@ -201,16 +275,6 @@ function observeSite(n, parent) {
       if (k !== null && OBSERVED_PROPS.has(k)) return `呼び出しの引数のキー ${k}`
     }
   }
-  // 関数式・アローそのものを文字列にする（別名を経た文字列化は構文では決まらない。冒頭の「保証しないこと」）
-  if (isFunctionValue(n) && parent) {
-    if (parent.type === 'CallExpression' && parent.arguments.includes(n)) {
-      if (parent.callee.type === 'Identifier' && parent.callee.name === 'String') return '関数式を String() の引数にする'
-      if (parent.callee.type === 'MemberExpression' && staticKey(parent.callee.property, parent.callee.computed) === 'concat') return '関数式を concat() の引数にする'
-    }
-    if (parent.type === 'TemplateLiteral' && parent.expressions.includes(n)) return '関数式をテンプレートの式にする'
-    if (parent.type === 'BinaryExpression' && parent.operator === '+') return '関数式を + の被演算子にする'
-    if (parent.type === 'AssignmentExpression' && parent.operator === '+=' && parent.right === n) return '関数式を += の右辺にする'
-  }
   return null
 }
 
@@ -223,6 +287,8 @@ function analyze(ast, goal) {
   const aliases = [] // [別名の宣言 | 代入先の識別子, 値の識別子]（const a = f / a = f）
   const assignedFns = [] // 後から関数式を代入される識別子（let a; a = () => 1）
   const observed = [] // 関数の名前・ソースを観測し得る構文（受け手を問わない一律の拒否）
+  // script ゴールの包み関数（検証器が足したもの。入力の関数式ではない）
+  const wrapper = goal === 'script' ? ast.body[0].expression : null
   let bad = null
   walk.fullAncestor(ast, (n, _s, anc) => {
     if (bad) return
@@ -238,11 +304,16 @@ function analyze(ast, goal) {
     else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && isFunctionValue(n.right)) assignedFns.push(n.left)
     // 既定値が関数の束縛（function f(g = () => 1)・const {g = () => 1} = o）も関数値を受け取り得る
     else if (n.type === 'AssignmentPattern' && n.left.type === 'Identifier' && isFunctionValue(n.right)) assignedFns.push(n.left)
-    const seen = observeSite(n, anc[anc.length - 2])
+    const seen = observeSite(n)
     if (seen) observed.push({ why: seen, start: n.start })
+    // 直接の関数式・アローは常に、識別子は関数束縛に解決されたときだけ（解決後に絞る）、許可リスト外の位置を拒否する
+    if (isFunctionValue(n) && n !== wrapper) {
+      const deny = fnPositionDenied(anc, anc.length - 1, 'value', res)
+      if (deny) sites.push({ node: n, direct: true, why: deny })
+    }
     if (n.type !== 'Identifier') return
-    const site = stringifySite(n, anc[anc.length - 2])
-    if (site) sites.push({ id: n, ...site })
+    const deny = fnPositionDenied(anc, anc.length - 1, 'value', res)
+    if (deny) sites.push({ node: n, direct: false, why: deny })
     for (let i = anc.length - 2; i >= 0; i--) {
       const s = anc[i]
       const m = declaredBy(s, anc[i + 1], cache)
@@ -271,7 +342,7 @@ function analyze(ast, goal) {
       }
     }
   }
-  const stringified = sites.filter((x) => fnDecls.has(res.get(x.id)) && (!x.callee || res.get(x.callee) === 'free'))
+  const stringified = sites.filter((x) => x.direct || fnDecls.has(res.get(x.node)))
   // 最上位（module は Program、script は包み関数の本体）の meta 宣言
   const top = goal === 'module' ? ast.body : ast.body[0].expression.body.body
   const topMeta = new Set(lexicalIds(top).filter((id) => id.name === 'meta'))
@@ -396,20 +467,21 @@ function verifyGoal(before, after, goal) {
       seenDecl.set(dy, dx)
       bound++
     }
-    // 束縛の対応を確かめた後に見る（変換後だけで当たるのは束縛不一致の症状なので、先に束縛の不一致として報告する）
-    for (const [side, X] of sides) {
-      const { stringified } = X.info
-      if (stringified.length > 0) {
-        const s = stringified[0]
-        throw new Mismatch(`${tag} ${side}: 関数値の文字列化 ${stringified.length} 件。最初は ${s.id.name} が${s.why}（offset ${at(s.id)}）`)
-      }
-    }
-    // 受け手を追わない一律の拒否。束縛の確認より後に見る（先に見ると、変異体の束縛不一致がこの理由に隠れる）
+    // 束縛の対応を確かめた後に見る（変換後だけで当たるのは束縛不一致の症状なので、先に束縛の不一致として報告する。
+    // 先に見ると、変異体の束縛不一致がこれらの理由に隠れる）。説明は固定の語彙と offset だけ（入力の名前を入れない）
     for (const [side, X] of sides) {
       const { observed } = X.info
       if (observed.length > 0) {
         const s = observed[0]
         throw new Mismatch(`${tag} ${side}: 関数の名前・ソースを観測し得る構文 ${observed.length} 件。最初は ${s.why}（offset ${at(s)}）`)
+      }
+    }
+    for (const [side, X] of sides) {
+      const { stringified } = X.info
+      if (stringified.length > 0) {
+        const s = stringified[0]
+        const what = s.direct ? '関数式' : '関数の束縛'
+        throw new Mismatch(`${tag} ${side}: 関数値を許可されない位置で使う ${stringified.length} 件。最初は ${what}が ${s.why}（offset ${at(s.node)}）`)
       }
     }
     return { ok: true, stats: { identifiers: pairs.length, bound, free, nonref } }
