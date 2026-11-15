@@ -88,7 +88,7 @@ function treeFetchInputSha256(root, repo) {
   return sha256Hex(`fetch-tree\n${root}\n${repo ?? ''}`)
 }
 
-// 書き写された 6 欄の型・値域の検査。不正なら理由、問題なければ ''。ダイジェストの計算前に必ず通す（title が文字列でなければ sha256Hex が別の文字列に化けて比較が意味を失うため）。
+// 書き写された 7 欄（optinTests を含む）の型・値域の検査。不正なら理由、問題なければ ''。ダイジェストの計算前に必ず通す（title が文字列でなければ sha256Hex が別の文字列に化けて比較が意味を失うため）。
 function treeNodeShapeProblem(nodes) {
   const isIntMin = (x, lo) => isInt(x) && x >= lo
   for (const n of nodes) {
@@ -1110,7 +1110,7 @@ const optinTestCommandsInput = parseOptinTestCommands(
   argOf('optinTestCommands'),
 )
 
-// イシュー本文由来の宣言値（Tree フェーズが抽出した生値）を受け取り、正規化後に approved （args.optinTestCommands の検証済み一覧。呼び出し元は駆動部 Tree フェーズで optinTestCommandsInput を渡す）のいずれかと**文字列完全一致**したものだけを commands へ採用する。一致しない宣言・approved が未指定/空の状態での宣言はすべて invalid（fail-closed。 PR #503 codex P0: 本文だけでは新しいコマンドを持ち込めない設計。上記 parseOptinTestCommands
+// イシュー本文由来の宣言値（fetch-tree.sh が本文から抽出して正規化した値）を受け取り、正規化後に approved （args.optinTestCommands の検証済み一覧。呼び出し元は駆動部 Tree フェーズで optinTestCommandsInput を渡す）のいずれかと**文字列完全一致**したものだけを commands へ採用する。一致しない宣言・approved が未指定/空の状態での宣言はすべて invalid（fail-closed。 PR #503 codex P0: 本文だけでは新しいコマンドを持ち込めない設計。上記 parseOptinTestCommands
 // のコメント参照）。approved 側で既に validateOptinCommandForm を通過済みのため、ここでの判定は正規化 + 完全一致のみで足りる（形式検証の再実施は不要）。
 function parseOptinTestDeclarations(raw, approved) {
   const approvedList = arr(approved)
@@ -6074,7 +6074,7 @@ for (const n of tree.nodes) {
   if (!isStr(n.state)) throw new Error(`tree.nodes[].state が string ではない（issue #${n.number}）`)
   // dependsOn はイシュー番号（正の整数）のみ許可。プロンプト指示は信頼境界ではないため返却値が契約を満たすかをここで構造的に検証する。
   for (const d of n.dependsOn ?? []) assertInt(d, `tree.nodes[].dependsOn[]（issue #${n.number}）`)
-  // opt-in テスト記録ゲート（Issue #495 / PR #503 codex P0）。Tree エージェントの生値（イシュー本文由来）を、起動時に確定済みの承認一覧 optinTestCommandsInput（args. optinTestCommands）と完全一致するものだけへ絞り込み、n.optinTests を採用コマンド配列へ置き換える（invalid は runImplement 冒頭が blocked 終端の判定に使う）。queue item は { ...node } で作られるためそのまま伝播する。
+  // opt-in テスト記録ゲート（Issue #495 / PR #503 codex P0）。fetch-tree.sh が正規化した値（イシュー本文由来）を、起動時に確定済みの承認一覧 optinTestCommandsInput（args. optinTestCommands）と完全一致するものだけへ絞り込み、n.optinTests を採用コマンド配列へ置き換える（invalid は runImplement 冒頭が blocked 終端の判定に使う）。queue item は { ...node } で作られるためそのまま伝播する。
   const optinParsed = parseOptinTestDeclarations(n.optinTests, optinTestCommandsInput)
   // verify-close（子を持つ親ノード）判定。kind の確定は visit() 後だが、ここでは byParent 構築前のため children の有無で代替判定する。
   const hasChildren = tree.nodes.some((m) => m.parent === n.number)

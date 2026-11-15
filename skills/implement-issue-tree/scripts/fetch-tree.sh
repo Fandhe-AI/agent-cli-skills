@@ -141,11 +141,13 @@ nl='
 
 # 1 ノードぶんの検証を jq で行い TSV 行へ。number は正の整数、state は open / closed、
 # sub_issues_summary.total は 0 以上の整数でなければ jq がエラー終了する（応答の形が想定外 = exit 5）。
-# 第 7 欄 optinTests は同じ応答の body から FT_JQ_OPTIN が作る（API 呼び出しは増やさない。body が文字列・null 以外なら exit 5）。
+# 第 7 欄 optinTests は同じ応答の body から FT_JQ_OPTIN が作る（API 呼び出しは増やさない）。body は open / closed を問わず、キーがあり値が
+# 文字列か null であることを要求する（キーの欠落や別の型を「宣言なし」として黙って通さない = exit 5。エラーは固定語彙で本文を含まない）。
 JQ_ROW="${FT_JQ_DISP}${FT_JQ_OPTIN}"'
 def okint(lo): type == "number" and . == floor and . >= lo and . < 1000000000;
 def row($parent; $sib):
   if (.number | okint(1)) and (.state == "open" or .state == "closed") and (.title | type == "string")
+    and has("body") and (.body | type == "string" or . == null)
     and (.sub_issues_summary | type == "object") and (.sub_issues_summary.total | okint(0))
   then [(.number | tostring), ($parent | tostring), ($sib | tostring), .state, (.sub_issues_summary.total | tostring), (.title | disp), (optin_list | tojson)] | join("\t")
   else error("bad-node") end;'

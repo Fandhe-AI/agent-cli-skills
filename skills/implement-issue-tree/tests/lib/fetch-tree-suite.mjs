@@ -4,7 +4,7 @@
 // bash ごとにファイルを分けると所要が bash の数ではなく 1 つ分で済む（base-merge-suite と同じ分割）。
 //
 // 期待する検査値（nodesSha256 など）は、ホストの実装・スクリプトの実装とは独立に node:crypto で計算する。
-// TSV の第 7 欄 optinTests（本文の opt-in テスト宣言。Issue P2）は、open ノードの本文から jq が抽出・正規化した compact JSON で、
+// TSV の第 7 欄 optinTests（本文の opt-in テスト宣言）は、open ノードの本文から jq が抽出・正規化した compact JSON で、
 // optinSha256 が束縛する。値の正規化（許可外の文字は 1 文字ずつ ?）と上限（1 値 300 文字・20 件）は独立に期待値を書く。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -482,6 +482,57 @@ export function registerFetchTreeTests(bash) {
     assert.ok(!ok.r.stderr.includes(secret))
     assert.ok(!ok.r.stdout.includes(secret), '本文は標準出力にも出ない（宣言の値だけ）')
   })
+
+  test(`${tag} optinTests: body キーの欠落（子・ルート）とルートの body が文字列でも null でもない応答は exit 5 で封筒なし。本文は標準エラーに出さない`, () => {
+    const noBody = (n, o = {}) => {
+      const x = issue(n, o)
+      delete x.body
+      return x
+    }
+    const secret = 'SECRET-BODY-MARKER-456'
+    const cases = {
+      '子の body 欠落': { [`${P}/issues/1`]: issue(1, { total: 1 }), [`${P}/issues/1/sub_issues`]: { pages: [[noBody(2)]] } },
+      '閉じた子の body 欠落': { [`${P}/issues/1`]: issue(1, { total: 1 }), [`${P}/issues/1/sub_issues`]: { pages: [[noBody(2, { state: 'closed' })]] } },
+      'ルートの body 欠落': { [`${P}/issues/1`]: noBody(1) },
+      'ルートの body が数値': { [`${P}/issues/1`]: issue(1, { body: 123 }) },
+      '閉じた子の body が数値': { [`${P}/issues/1`]: issue(1, { total: 1 }), [`${P}/issues/1/sub_issues`]: { pages: [[issue(2, { state: 'closed', body: { x: secret } })]] } },
+    }
+    for (const [name, routes] of Object.entries(cases)) {
+      const r = run(bash, makeGhTreeStub(routes), ARGS)
+      assert.equal(r.status, 5, name)
+      assert.equal(r.stdout, '', name)
+      assert.ok(!r.stderr.includes(secret), name)
+    }
+  })
+
+  test(`${tag} optinTests: 値の前後は ASCII の空白とタブだけ落とす。末尾・先頭の NBSP・全角空白は ? になって残る（旧経路のホストの trim() とは異なり invalid = blocked）`, () => {
+    const body = ['<!--\toptin-tests:\t \tmake a\t \t-->', '<!-- optin-tests:\u00a0make b\u00a0-->', '<!-- optin-tests: make c\u3000 -->', '<!--optin-tests:-->', '<!-- optin-tests: \t -->'].join('\n')
+    const { r, rows } = withBodies([body])
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(rows[0].optinTests, ['make a', '?make b?', 'make c?', '', ''])
+  })
+
+  // 抽出の正規表現がバックトラックしない回帰。値の前後に [ \t]* を置いた形は、システムの jq 1.7.1（Oniguruma）で空白の長い行に対し
+  // 約 15 秒後に retry-limit-in-match over で異常終了し（exit 5 = ツリー取得全体が停止）、旧経路の gojq は線形だった。
+  {
+    const sp = (n) => ' '.repeat(n)
+    const longCases = [
+      ['a 閉じない宣言 + 空白 65000', `<!-- optin-tests:${sp(65000)}`, []],
+      ['b 空白 65000 のあとに改行と -->', `<!-- optin-tests:${sp(65000)}\n-->`, []],
+      ['c 値の途中に空白 60000', `<!-- optin-tests: x${sp(60000)}y -->`, [`x${sp(298)}?`]],
+      ['d 閉じない宣言を 3000 個並べた行', '<!-- optin-tests:'.repeat(3000), []],
+    ]
+    for (const [name, body, expected] of longCases) {
+      test(`${tag} optinTests: 長い入力でもバックトラックしない（${name}）。exit 0 で 5 秒未満`, () => {
+        const t0 = Date.now()
+        const { r, rows } = withBodies([body])
+        const ms = Date.now() - t0
+        assert.equal(r.status, 0, r.stderr)
+        assert.deepEqual(rows[0].optinTests, expected)
+        assert.ok(ms < 5000, `${ms} ms`)
+      })
+    }
+  }
 
   test(`${tag} optinTests: 宣言の値だけが optinSha256 を変える（title・構造の検査値は変わらない）`, () => {
     const a = withBodies([mark('make a')])
