@@ -49,7 +49,9 @@ const NO_CONST = new Set(('Add AddSmi BitwiseAnd BitwiseAndSmi BitwiseNot Bitwis
 
 const wrap = (body) => `(async function(${RUNTIME_INJECTED.join(',')}){${body.replace(/^export const meta\b/, 'const meta')}\n})\n`
 
-// 出力はパイプでなくファイルへ受ける（数 MB の出力をパイプで受けると、負荷の高い CI で行が欠けた）
+// 出力はファイルへ受け、latin1（バイトそのまま）で読む。V8 は 2 バイト文字列の 0x80〜0xFF の文字を生のバイトで
+// 出すので UTF-8 として不正な行がある。UTF-8 で読むと CI（ubuntu・同じ Node 22）でだけ定数プールの行が欠けた
+// （手元の macOS・amd64 の Linux コンテナでは再現しない）。背景タスクも止めて出力の順序を 1 通りにする
 function dump(body, tmpDir) {
   const f = path.join(tmpDir, `oracle-${process.pid}.js`)
   const o = path.join(tmpDir, `oracle-${process.pid}.out`)
@@ -57,11 +59,11 @@ function dump(body, tmpDir) {
   try {
     fs.writeFileSync(f, wrap(body))
     fd = fs.openSync(o, 'w')
-    const r = spawnSync(process.execPath, ['--no-lazy', '--print-bytecode', f], { stdio: ['ignore', fd, 'pipe'], encoding: 'utf8' })
+    const r = spawnSync(process.execPath, ['--single-threaded', '--no-lazy', '--print-bytecode', f], { stdio: ['ignore', fd, 'pipe'], encoding: 'utf8' })
     fs.closeSync(fd)
     fd = null
     if (r.error || r.status !== 0) throw new Error(`V8 のバイトコード出力に失敗: ${r.error ? r.error.message : `status ${r.status}`} ${r.stderr}`)
-    return fs.readFileSync(o, 'utf8')
+    return fs.readFileSync(o, 'latin1')
   } finally {
     if (fd !== null) fs.closeSync(fd)
     fs.rmSync(f, { force: true })
@@ -72,9 +74,10 @@ function dump(body, tmpDir) {
 // 関数ごとに、命令のバイト数の合計 = Bytecode length、定数プールの項目 = size を確かめる（出力の欠けを比較の前に止める）
 function assertComplete(fn, i) {
   if (fn.len === null || fn.bytes !== fn.len) throw new Error(`V8 の出力が欠けている: 関数 ${i} の命令 ${fn.bytes} B ≠ Bytecode length ${fn.len}`)
-  const filled = fn.pool.filter((v) => v !== undefined).length
-  if (fn.poolSize === null || fn.pool.length !== fn.poolSize || filled !== fn.poolSize) {
-    throw new Error(`V8 の出力が欠けている: 関数 ${i} の定数プール ${filled} 件 ≠ size ${fn.poolSize}`)
+  const missing = []
+  for (let k = 0; k < (fn.poolSize ?? 0); k++) if (fn.pool[k] === undefined) missing.push(k)
+  if (fn.poolSize === null || fn.pool.length !== fn.poolSize || missing.length) {
+    throw new Error(`V8 の出力が欠けている: 関数 ${i} の定数プール size ${fn.poolSize}・読めた ${fn.pool.length}・欠けた添字 [${missing.slice(0, 5).join(',')}]`)
   }
 }
 
