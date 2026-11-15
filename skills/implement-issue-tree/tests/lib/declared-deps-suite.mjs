@@ -102,6 +102,16 @@ function run(bash, stub, args, { launcher = null, env = null, raw = false } = {}
   const r = spawnSync(bash, argv, { env: env ?? stub.env(), encoding: 'utf8' })
   return { status: r.status, stdout: r.stdout, stderr: r.stderr }
 }
+// 表の長さを丁度 len 文字にした表（`["A-1",1]` の列の最後の番号の桁で端数を埋める）。
+function tableOfLength(len) {
+  const k = Math.floor((len - 20) / 10)
+  const pad = len - (10 * k + 20)
+  const entries = Array.from({ length: k }, () => '["A-1",1]')
+  entries[k - 1] = `["A-1",${'1'.repeat(pad + 1)}]`
+  const t = `{"f":{"1":[${entries.join(',')}]},"n":{}}`
+  assert.equal(t.length, len)
+  return t
+}
 const lines = (out) => out.split('\n').filter((l) => l !== '').map((l) => JSON.parse(l))
 
 export function registerDeclaredDepsTests(bash) {
@@ -466,7 +476,8 @@ export function registerDeclaredDepsTests(bash) {
     ['--table の番号が文字列', ['--numbers', '1', '--table', '{"f":{"1":[["TASK-1","2"]]},"n":{}}']],
     ['--table の末尾に余分な文字', ['--numbers', '1', '--table', '{"f":{},"n":{}}x']],
     ['--table の先頭に余分な文字', ['--numbers', '1', '--table', 'x{"f":{},"n":{}}']],
-    ['--table が長すぎる', ['--numbers', '1', '--table', `{"f":{"1":[${Array.from({ length: 8000 }, () => '["TASK-1-2",12345678]').join(',')}]},"n":{}}`]],
+    // 上限（DD_TABLE_MAX = 120000）を 1 文字だけ超える表。Linux は 1 引数 131072 B（MAX_ARG_STRLEN）を超えると spawn が E2BIG で失敗するため、それ未満に収める
+    ['--table が長すぎる（上限 + 1 文字）', ['--numbers', '1', '--table', tableOfLength(120001)]],
     ['--rate-limit に他の引数', ['--rate-limit', '--repo', 'a/b']],
     ['--print-filter に --repo', ['--print-filter', '--repo', 'a/b']],
     ['--print-filter の --table が不正', ['--print-filter', '--table', 'x']],
@@ -500,6 +511,16 @@ export function registerDeclaredDepsTests(bash) {
     assert.equal(r.status, 0, r.stderr)
     assert.ok(r.stdout.includes(` ${literal} as $T |`))
     assert.ok(Date.now() - t0 < 10000, '検証が極端に遅くない')
+  })
+
+  test(label('表が上限（120000 文字）ちょうどなら検証を通り、フィルタへそのまま入る（1 文字超は引数の誤りで拒否）'), () => {
+    const stub = makeStub()
+    stub.issue(1, 'Depends on #2\n')
+    const literal = tableOfLength(120000)
+    const r = run(bash, stub, ['--numbers', '1', '--table', literal])
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(lines(r.stdout).map((e) => e.number), [1])
+    assert.equal(run(bash, stub, ['--numbers', '1', '--table', tableOfLength(120001)]).status, 2)
   })
 
   // ---- launcher ----
