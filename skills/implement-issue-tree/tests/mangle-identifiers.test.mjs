@@ -18,6 +18,8 @@ const CONVERSIONS = [
   ['catch 引数と catch 本体の宣言は同じ名前にしない', 'try{}catch(error){const value=1;use(value)}', 'try{}catch(a){const b=1;use(b)}'],
   ['関数宣言の巻き上げ', 'function f(){return inner();function inner(){return 1}}', 'function f(){return a();function a(){return 1}}'],
   ['for-of の束縛', 'function f(xs){for(const item of xs){use(item)}}', 'function f(a){for(const b of a){use(b)}}'],
+  ['for の束縛はループの外から見えない（外の同名は自由変数のまま）', 'function f(xs){for(const item of xs){use(item)}return item}', 'function f(a){for(const b of a){use(b)}return item}'],
+  ['catch 引数は catch の外から見えない', 'function f(){try{}catch(error){use(error)}return error}', 'function f(){try{}catch(a){use(a)}return error}'],
   ['名前つき関数式は自身の名前スコープ', 'const g=function named(){return named}', 'const g=function a(){return a}'],
   ['テンプレートの式は改名し地の文は不変', 'function f(value){return `value=${value}`}', 'function f(a){return `value=${a}`}'],
   ['非計算のキー・メンバー名は不変、計算キーは参照', 'function f(key){return {[key]:1,key:2}.key+o.key}', 'function f(a){return {[a]:1,key:2}.key+o.key}'],

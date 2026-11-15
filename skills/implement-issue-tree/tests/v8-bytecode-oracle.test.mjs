@@ -1,13 +1,14 @@
 // V8 バイトコードオラクル（tests/lib/v8-bytecode-oracle.cjs）のテスト。CI（Node 22）で毎 PR 走る第 3 の照合。
 // 実物の stage1 ↔ 改名器の出力が一致すること、合成の意味変化を止めること、関数の数の検査で空振りを止めることを確かめる。
-// opcode 表は Node 22 / 24 の出力から作ったため、それ以外のメジャー版では理由を明示して飛ばす（CI は 22 で必ず走る）。
+// opcode 表は Node 22 / 24 の出力から作ったため、手元のそれ以外のメジャー版では理由を明示して飛ばす。
+// CI（環境変数 CI がある）では版に関わらず飛ばさない（Node が上がって照合が黙って消えないよう、未知の opcode で止める）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { buildStage1, mangleText, refswapMutants, v8Oracle } from './lib/mangle-harness.mjs'
 
 const MAJOR = Number(process.versions.node.split('.')[0])
 const SUPPORTED = MAJOR === 22 || MAJOR === 24
-const skip = SUPPORTED ? false : `opcode 表は Node 22 / 24 で作成（実行中は ${process.version}）`
+const skip = SUPPORTED || process.env.CI ? false : `opcode 表は Node 22 / 24 で作成（実行中は ${process.version}）`
 
 const H = 'export const meta={name:"x"}\n'
 // 合成ケースは関数 f・g を返して参照させる（V8 は参照されない関数をコンパイルしないため）
