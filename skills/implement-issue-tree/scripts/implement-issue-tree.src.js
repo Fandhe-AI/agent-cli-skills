@@ -1141,7 +1141,7 @@ function parseOptinTestDeclarations(raw, approved) {
   return { commands, invalid }
 }
 
-// PR 本文記録節の機械可読マーカー行（固定書式）。描画（renderOptinRecordSection）・マージ前検証（optinRecordVerifyPrompt）・回帰テストの 3 者で本関数を共有し、書式のずれを防ぐ。
+// PR 本文記録節の機械可読マーカー行（固定書式）。描画（renderOptinRecordSection）・マージ前検証（scripts/lib/optin-record-lib.sh）・回帰テストの 3 者で本関数を共有し、書式のずれを防ぐ。
 //
 // sha を先頭に持つ理由（PR #503 3 巡目 codex P1）: 当初の書式は `<!-- optin-test-record: <command> => <result> -->` で、記録がどの HEAD に対する結果かを一切束縛していなかった。 base 取り込み（baseMergePrompt）や別の push で HEAD が変わっても、古い pass 記録が PR 本文に残っていればマージ前ゲートを通過し得た。40 桁 sha（形式固定・空白を含まない）と result（3 値
 // enum・空白を含まない）をコマンド文字列の前に置くことで、`grep -cxF` の完全一致 1 発で「この HEAD・この結果の記録が何件あるか」を一意にパースできる（コマンド文字列は空白を含み得るため、末尾に置かないと固定文字列一致の切れ目が曖昧になる）。
@@ -1261,14 +1261,15 @@ function renderOptinRecordSection(commands) {
   return `\n\n${optinRecordLines('<sha>', '<result>', list).join('\n')}`
 }
 
-// マージ前記録ゲート（optinRecordVerifyPrompt）の返却を判定する純粋関数。declared が空なら常に ok（既定無効・R3）。verifyResult は件数のみを持つ想定で、取得失敗・件数不一致・非整数・負数はすべて不合格側へ倒す（fail-closed）。
+// マージ前記録ゲート（observeOptinRecord）の返却を判定する純粋関数。declared が空なら常に ok（既定無効・R3）。verifyResult は件数のみを持つ想定で、取得失敗・件数不一致・非整数・負数はすべて不合格側へ倒す（fail-closed）。
 //
-// headRefOid の検証（PR #503 3 巡目 codex P1）: verifyResult.counts は optinRecordVerifyPrompt が「現在の headRefOid に対する」マーカー行だけを grep した件数という契約だが、その headRefOid 自体が 40 桁 sha として取得できていなければ counts の意味自体が保証されない（取得失敗時に 0 埋めで返す等の実装ミスを区別できない）。そのため headRefOid が sanitizeSha を通らない場合は fetchFailed と同じ扱いで全件不合格にする。
+// headRefOid の検証（PR #503 3 巡目 codex P1）: verifyResult.counts は observe-pr.sh --mode optin-record が「現在の headRefOid に対する」マーカー行だけを grep した件数という契約だが、その headRefOid 自体が 40 桁 sha として取得できていなければ counts の意味自体が保証されない（取得失敗時に 0 埋めで返す等の実装ミスを区別できない）。そのため headRefOid が sanitizeSha を通らない場合は fetchFailed と同じ扱いで全件不合格にする。
 function classifyOptinRecordGate(declared, verifyResult) {
   const declaredList = arr(declared)
   if (declaredList.length === 0) return { ok: true, missing: [] }
   const headSha = sanitizeSha(verifyResult?.headRefOid)
   const counts = verifyResult && Array.isArray(verifyResult.counts) ? verifyResult.counts : null
+  // fetchFailed は旧形の入力（観測の失敗を verifyResult.fetchFailed で返していた形）との互換と安全側の分岐。現在の観測（classifyOptinRecordObservation）は失敗を verify に載せず skip で返すため、新しい入力ではこの値は立たない（残しても fail-closed に倒れるだけ）
   if (verifyResult?.fetchFailed === true || !headSha || !counts || counts.length !== declaredList.length) {
     return { ok: false, missing: declaredList.map((_, i) => i) }
   }
@@ -2494,25 +2495,6 @@ async function fetchPrBinding(item, pr, branch) {
   }
   return { problem: prBindingProblem(item.number, branch, bind), bind }
 }
-
-// opt-in テスト記録ゲート（Issue #495）の検証エージェントの返却スキーマ。PR 本文は読み取り専用エージェントが一時ファイル経由で件数のみへ正規化する（本文テキスト・コマンド文字列は返さない。 merge-exec と同じコンテキスト分離契約）。
-const OPTIN_RECORD_VERIFY_SCHEMA = obj(['counts'], {
-    fetchFailed: boolD('PR 本文または headRefOid の取得に失敗した場合のみ true'),
-    // マーカー行のカウントがどの HEAD に対するものかを判定に使う束縛値（PR #503 3 巡目 codex P1。MERGE_VERIFY_SCHEMA.headRefOid と同型）。40 桁小文字 16 進でなければホスト側 classifyOptinRecordGate が fetchFailed と同じ扱いで全件不合格にする。
-    headRefOid: {
-      type: 'string',
-      description: 'gh pr view --json headRefOid の取得値（40 桁 sha）。counts はこの値に対して grep した件数のみを表す契約。取得失敗時は空文字を返す',
-    },
-    counts: {
-      type: 'array',
-      items: obj(['index', 'pass', 'nonPass'], {
-          index: uintD('宣言コマンド配列内の 0-indexed 位置'),
-          pass: uintD('該当コマンドの pass マーカー行数'),
-          nonPass: uintD('該当コマンドの pass 以外のマーカー行数'),
-        }),
-      description: '宣言コマンドごとの件数のみ（本文テキスト・コマンド文字列は含めない）',
-    },
-  })
 
 // 前提イシューの外部完了プローブの返却スキーマ（Issue #442）。自由文フィールドを持たせず、ホスト側 applyPrereqTransitions の enum 許可リスト + targets 集合の二重フィルタで受理する。
 const PREREQ_PROBE_SCHEMA = obj(['results'], {
@@ -4731,7 +4713,7 @@ function optinTestExecutionLines(item, stepNo, noFix = false) {
 }
 
 // PR 本文の「## opt-in テスト実行記録」節を、post-push fix（pushAfterFix: true）が再実行した結果へ更新させる手順（Issue #495 Medium 指摘 → PR #503 3 巡目 codex P1 でマーカーに HEAD sha 束縛を追加）。renderOptinRecordSection は prCreatePrompt 呼び出し時点（PR 作成時の 1 回のみ）でしか呼ばれておらず、fix はこの呼び出し内で push まで完結するため host 側が結果を受け取って
-// から renderOptinRecordSection を呼ぶ機会がない。そのためマーカー書式（optinRecordMarkerLine）をエージェント自身に厳密に再現させ、マージ前ゲート（optinRecordVerifyPrompt の固定文字列 grep）が古い pass 記録のまま停止せず通過してしまう陳腐化を防ぐ。item.optinTests が空なら [] を返す（宣言なしイシューでは fixPrompt の出力を完全に不変に保つ。R3 と同じ方針）。
+// から renderOptinRecordSection を呼ぶ機会がない。そのためマーカー書式（optinRecordMarkerLine）をエージェント自身に厳密に再現させ、マージ前ゲート（optin-record-lib.sh の固定文字列 grep）が古い pass 記録のまま停止せず通過してしまう陳腐化を防ぐ。item.optinTests が空なら [] を返す（宣言なしイシューでは fixPrompt の出力を完全に不変に保つ。R3 と同じ方針）。
 function optinRecordUpdateInstructions(item, impl, stepNo) {
   const commands = arr(item.optinTests)
   if (commands.length === 0) return []
@@ -4835,7 +4817,7 @@ function implementPrompt(item, plan) {
 }
 
 // --- monitor の観測スクリプト（scripts/observe-pr.sh。Issue #603 第 2 弾）--- monitor が毎回プロンプトの文章から組み立てていた gh / jq の観測（PR の state・チェック総数・required context の不足・外部 App のレビュー到着・未解決スレッド数）と有界の待機を、スキル同梱のスクリプトへ移した。monitor は「コマンドを実行し、1 行 JSON 封筒の payload（整数と固定語彙）を読む」だけにする。封筒の値は助言的判定の材料にすぎず、マージ・
-// クローズ・push・削除の可否には使わない（マージ可否は merge-exec が自分で再取得して判定する）。ホストが封筒を照合して採用するのはチェック総数の 1 点だけ（applyChecksObservation）。信頼モデルは references/script-trust-model.md。待機の回数はスクリプトが --attempt で強制し（上限 OBSERVE_MAX_ATTEMPTS。scripts/observe-pr.sh の既定と同じ値）、
+// クローズ・push・削除の可否には使わない（マージ可否は merge-exec が自分で再取得して判定する）。ホストが封筒を照合して採用するのはチェック総数の 1 点だけ（applyChecksObservation）。例外: 後段の署名済み観測ゲートのうち optin-record（observeOptinRecord）の封筒は、opt-in テスト記録ゲートの合否の材料になる（classifyOptinRecordGate。偽の pass は post-push fix の実測との AND〔combineOptinRecordGate。fix をしていなければ働かない〕・merge-exec の再検証・サーバー側の強制が受け止める範囲を超えない。封筒の sha256 に鍵は無く nonce もプロンプトにあるので、照合で検出できるのは転記の誤り・別の入力・別の呼び出しの流用までで、観測エージェント自身の捏造は検出できない）。信頼モデルは references/script-trust-model.md。待機の回数はスクリプトが --attempt で強制し（上限 OBSERVE_MAX_ATTEMPTS。scripts/observe-pr.sh の既定と同じ値）、
 // ホストが再起動しない: 1 回の起動は壁時計 90 秒 + 数秒以内（遅い・ハングする gh を含めてスクリプトが保証）に収まるため、エージェントが pending のたびに同じコマンドを再実行する。ホストが 1 回ごとにエージェントを呼び直すと agentCallLimit を最大 7 回/待機消費する。
 const OBSERVE_MAX_ATTEMPTS = 7
 // checks --until settled（手順 3 の CI 完了待ち。gh pr checks --watch の置き換え）の待機回数の上限。現行の --watch の最長（およそ 40 分）と同じにする: 1 起動は 25 秒間隔・4 観測でおよそ 83 秒 × 30 回。値は scripts/observe-pr.sh の既定と同じで、スクリプトが --attempt で強制する（プロンプトの文面で増やせない。tests/observe-pr-host.test.mjs が両者の一致を検査する）
@@ -4853,6 +4835,7 @@ function observeInputText(f) {
   // added-files だけ peers の並び（--peers の引数の文字列そのもの）を最後の行に足す（他のモードの定義は変えない。Issue #658）
   if (f.mode === 'added-files') lines.push((f.peers ?? []).join(','))
   if (f.mode === 'policy-paths') lines.push((f.allow ?? []).join(','))
+  if (f.mode === 'optin-record') lines.push(String(f.optinCommands.length), ...f.optinCommands)
   return lines.join('\n')
 }
 
@@ -4866,6 +4849,9 @@ function observeCommand(nonce, f, attempt = 0) {
     throw new Error('observeCommand: peers の形式が不正')
   }
   if (f.allow !== undefined && (!Array.isArray(f.allow) || sanitizePolicyPaths(f.allow).length !== f.allow.length)) throw new Error('observeCommand: allow の形式が不正')
+  if (f.optinCommands !== undefined && (!Array.isArray(f.optinCommands) || f.optinCommands.length < 1 || f.optinCommands.length > OPTIN_TESTS_MAX || new Set(f.optinCommands).size !== f.optinCommands.length || !f.optinCommands.every((c) => isStr(c) && OPTIN_TEST_COMMAND_RE.test(c)))) {
+    throw new Error('observeCommand: optinCommands の形式が不正')
+  }
   // 対象リポジトリはホストが args.repo で持つときだけ渡す（スクリプトの gh 呼び出しが -R 付きになる）。未指定は従来どおり
   const repo = f.repo !== undefined ? f.repo : repoArg
   if (repo !== '' && !isValidRepoSlug(repo)) throw new Error('observeCommand: repo の形式が不正')
@@ -4879,6 +4865,7 @@ function observeCommand(nonce, f, attempt = 0) {
     f.until ? ` --until ${f.until}` : '',
     f.peers !== undefined && f.peers.length > 0 ? ` --peers ${f.peers.join(',')}` : '',
     f.allow !== undefined && f.allow.length > 0 ? ` --allow ${f.allow.join(',')}` : '',
+    f.optinCommands !== undefined ? f.optinCommands.map((c) => ` --optin-cmd ${shellSingleQuote(c)}`).join('') : '',
     attempt > 0 ? (f.mode === 'pr' ? ' --wait' : ` --wait --attempt ${attempt}`) : '',
   ].join('')
   // skillDir・nonce が未指定の呼び出し（プロンプトの文面だけを検査する単体テスト）はプレースホルダを書く。実ランでは駆動部冒頭の検証（skillDir）と駆動部の nonce 生成で必ず値が入り、プレースホルダのままならスクリプトが exit 2 で拒否する（fail-closed）。
@@ -4986,7 +4973,19 @@ function addedFilePathBlockedReason(prNumber, c) {
 
 const gateSeq = {}
 // 署名済み観測ゲートの共通部（呼び出し元: observeAddedFileCollisions・observePolicyPaths）。エージェント 1 回（転記ミス・例外・取得失敗なら sonnet で 1 回だけ取り直す）で observe-pr.sh を実行し、封筒を照合して分類を返す。失敗は kind: 'skip'（飛ばすか止めるかは呼び出し側）
-async function observeGate(item, f, key, desc, schema, classify) {
+function observeGatePrompt(f, desc, nonce, common = [UNTRUSTED_POLICY, TEMP_FILE_POLICY]) {
+  return [
+    `PR #${f.pr} の${desc}の観測タスク（読み取り専用。何も変更しない）。`,
+    ...common,
+    '次のコマンドを一字一句そのまま（改変・引数の追加削除・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:',
+    '```sh',
+    observeCommand(nonce, f),
+    '```',
+    SIGNED_OUTPUT_INSTRUCTION,
+  ].join('\n')
+}
+// extra.label / extra.common（プロンプトの共通規則の配列）で差し替えられる（opt-in テスト記録ゲートが使う）
+async function observeGate(item, f, key, desc, schema, classify, extra = {}) {
   let last = { kind: 'skip', reason: 'not-run' }
   for (let attempt = 0; attempt < 2; attempt += 1) {
     gateSeq[key] = (gateSeq[key] ?? 0) + 1
@@ -4994,17 +4993,8 @@ async function observeGate(item, f, key, desc, schema, classify) {
     let raw
     try {
       raw = await agent(
-        [
-          `PR #${f.pr} の${desc}の観測タスク（読み取り専用。何も変更しない）。`,
-          UNTRUSTED_POLICY,
-          TEMP_FILE_POLICY,
-          '次のコマンドを一字一句そのまま（改変・引数の追加削除・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:',
-          '```sh',
-          observeCommand(nonce, f),
-          '```',
-          SIGNED_OUTPUT_INSTRUCTION,
-        ].join('\n'),
-        { label: `merge:${key}:#${item.number}`, phase: 'Merge', model: attempt === 0 ? 'haiku' : 'sonnet', effort: 'low', schema: signedOutputSchema(schema) },
+        observeGatePrompt(f, desc, nonce, extra.common),
+        { label: extra.label ?? `merge:${key}:#${item.number}`, phase: 'Merge', model: attempt === 0 ? 'haiku' : 'sonnet', effort: 'low', schema: signedOutputSchema(schema) },
       )
     } catch (e) {
       last = { kind: 'skip', reason: `agent 例外（${errText(e).slice(0, 120)}）` }
@@ -5073,6 +5063,41 @@ const observePolicyPaths = (item, prNumber) => {
   const allow = policyAllowOf(item)
   return observeGate(item, { mode: 'policy-paths', pr: prNumber, allow }, 'policy-paths', '方針パス変更', POLICY_PATHS_PAYLOAD_SCHEMA, (raw, n, sha) => classifyPolicyPaths(raw, n, sha))
 }
+
+// --- opt-in テスト記録ゲート（Issue #495）の観測 --- observe-pr.sh --mode optin-record の封筒の分類（純粋関数）。kind は ok（verify に classifyOptinRecordGate が読む { headRefOid, counts } を入れる）/ skip（照合・取得・形の失敗。呼び出し側は観測できなかったものとして全件不合格に倒す）。
+// 封筒の入力（モード・PR・repo・宣言コマンドの個数と並び）は observeInputText が決め、ホストが引数から再計算して照合する。headSha は 40 桁 16 進、pass / nonPass はコマンドと同じ個数の 0 以上の整数でなければ受理しない。
+const OPTIN_RECORD_PAYLOAD_SCHEMA = {
+  type: 'object',
+  required: ['mode', 'inputSha256', 'outcome', 'err', 'headSha', 'pass', 'nonPass'],
+  properties: {
+    mode: { type: 'string' },
+    inputSha256: { type: 'string' },
+    outcome: { type: 'string' },
+    err: { type: 'integer' },
+    headSha: { type: 'string' },
+    pass: { type: 'array', items: { type: 'integer' } },
+    nonPass: { type: 'array', items: { type: 'integer' } },
+  },
+  description: '標準出力 JSON の payload をそのまま転記する',
+}
+function classifyOptinRecordObservation(raw, nonce, inputSha, commands) {
+  const sg = verifySignedOutput(raw, nonce, inputSha)
+  if (!sg.ok) return { kind: 'skip', reason: `envelope:${sg.reason}` }
+  const p = sg.payload
+  if (p.mode !== 'optin-record') return { kind: 'skip', reason: 'mode' }
+  if (p.err !== 0 || p.outcome !== 'observed') return { kind: 'skip', reason: 'fetch-error' }
+  const n = arr(commands).length
+  const counts = (a) => Array.isArray(a) && a.length === n && a.every((x) => isInt(x) && x >= 0 && x <= 100000)
+  if (!sanitizeSha(p.headSha) || !counts(p.pass) || !counts(p.nonPass)) return { kind: 'skip', reason: 'payload' }
+  return { kind: 'ok', reason: '', verify: { headRefOid: p.headSha, counts: p.pass.map((x, i) => ({ index: i, pass: x, nonPass: p.nonPass[i] })) } }
+}
+// 観測エージェントは固定コマンドを実行して封筒を転記するだけで、PR 本文は読まず・返さない（かつては gh pr view・正規化・コマンドごとの固定文字列 grep を 1 KB 超のインラインのコマンド列として書き写させていたが、書き写しの誤りで結果が黙って変わるため scripts/observe-pr.sh --mode optin-record へ移した。Issue #603）。
+// merge-exec と同じコンテキスト分離契約のため、共通規則は MERGE_CONTEXT_COMMON を使う。commands は runMergeLoop が item.optinTests から渡す（ホストで parseOptinTestDeclarations 検証済み）。
+// 観測エージェントの権限境界（旧プロンプトの「本文は件数だけを使い、内容・要約・引用を返さない。gh pr merge や git push などはしない」に当たる）。スクリプトが失敗しても別の手段で測り直さない = 失敗は封筒の err として返り、ホストが取り直す
+const OPTIN_RECORD_OBSERVE_RULE = 'PR 本文を取得・転記・要約しない（件数はスクリプトが数え、本文は返さない）。スクリプトが失敗しても、gh・jq・grep などの別の手段で測り直さない。gh pr merge・git push など PR・リポジトリを変更する操作はしない。'
+const observeOptinRecord = (item, impl, commands) =>
+  observeGate(item, { mode: 'optin-record', pr: impl.prNumber, optinCommands: commands }, 'optin-record', `opt-in テスト実行記録（イシュー #${item.number}）`, OPTIN_RECORD_PAYLOAD_SCHEMA,
+    (raw, n, sha) => classifyOptinRecordObservation(raw, n, sha, commands), { label: `optin-record-verify:#${item.number}`, common: [MERGE_CONTEXT_COMMON, OPTIN_RECORD_OBSERVE_RULE] })
 
 // outcome が error（取得失敗）のときの共通の扱い。待機を持つ手順（3e・3g・4x・4b・4c）で揃える。結論が出ていないので先へ進まない。
 const OBSERVE_ERROR_RULE = 'outcome が error の場合は 1 回だけ同じコマンドを再実行し、なお error なら取得不能として扱い（0 件・不足 0・レビューなしとみなさない）、手順に指定が無ければ ' + BLOCK_Q + ' を返す。'
@@ -5291,40 +5316,6 @@ function mergeVerifyPrompt(item, impl) {
     `   期待値との一致判定はすべてホスト側で行う（期待 HEAD sha は本エージェントへ意図的に渡していない）。`,
     `3. コマンド失敗・取得不能時は state: "UNKNOWN"、headRefOid: ""（空文字）、headRefName: ""、baseRefName: ""、isCrossRepository: true、closingIssues: [-1] を返す（推測で MERGED を返さない。ホスト側が fail-closed で処理）。`,
     '返却: state / headRefOid / mergeCommitOid / headRefName / baseRefName / isCrossRepository / closingIssues。自由文の説明フィールドは返さない。',
-  ].join('\n')
-}
-
-// opt-in テスト記録ゲート（Issue #495）の検証エージェント。merge-exec と同じ「本文・レビューコメント・Issue 本文は一切読まず、件数・enum のみを自己取得する」コンテキスト分離契約（Issue #145 / #160）を踏襲する読み取り専用エージェント。PR 本文は一時ファイルへ落とし、宣言コマンドごとの pass / 非 pass のマーカー行数だけを返す（本文テキスト・コマンド文字列は返却値にもコンテキストにも載せない）。commands は runMergeLoop が item.optinTests から渡す
-// （ホストで parseOptinTestDeclarations 検証済み）。
-function optinRecordVerifyPrompt(item, impl, commands) {
-  const list = arr(commands)
-  return [
-    `PR #${impl.prNumber}（イシュー #${item.number}）の opt-in テスト実行記録の確認担当。イシューで宣言された opt-in テストの実行記録（pass）が、現在の HEAD に対して PR 本文に存在するかを、件数のみで読み取り専用に確認する。`,
-    MERGE_CONTEXT_COMMON,
-    `権限境界: 本エージェントは読み取り専用である。PR 本文は一時ファイルへ落として grep の件数を数えるためだけに使い、本文の内容・要約・引用はコンテキストにも返却値にも含めない。gh pr merge / gh issue close / gh pr edit / git push / コード変更 / レビュースレッドの resolve は一切行わない。`,
-    '手順:',
-    // headRefOid を本文と同じ 1 回の gh pr view で取得する（PR #503 3 巡目 codex P1: マーカーがどの HEAD に対する記録かをここで確定しないと、件数だけ返しても呼び出し元が束縛できない）。
-    `1. j=$(mktemp); gh pr view ${impl.prNumber} --json body,headRefOid > "$j" を実行する。この取得コマンドの終了コードが非 0 の場合は fetchFailed: true・headRefOid: ""・counts: [] を返して終了する（推測で件数を返さない）。`,
-    `2. H=$(jq -r '.headRefOid // ""' "$j") で HEAD sha を取り出す。H が 40 桁の小文字 16 進数（正規表現 ^[0-9a-f]{40}$）でなければ fetchFailed: true・headRefOid: ""・counts: [] を返して終了する（取得できたが形式不正の値をそのまま信用しない）。形式が妥当なら手順 4 以降の返却値 headRefOid にこの H をそのまま使う。`,
-    `3. f=$(mktemp); jq -r '.body // ""' "$j" > "$f" で本文を取り出し、g=$(mktemp); tr -d '\\r' < "$f" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' > "$g" で正規化した作業用ファイルを作る（CRLF・末尾 CR の除去と行頭・行末の空白除去。マーカー行は行頭インデントなしで書き写す契約だが、人手による復旧編集で空白が付くことがあるため、両側とも実際の内容比較には影響しない範囲で許容する）。`,
-    ...(list.length
-      ? [
-          // command は OPTIN_TEST_COMMAND_RE で検証済み（許可文字集合に " $ ` \ を含まない）ため、 H（形式検証済みの 40 桁 hex）とともにダブルクォート内へ直接展開してよい（シェル特殊文字の混入経路が構造的に無い）。単一引用符化（shellSingleQuote）ではなく変数展開が必要なため、ここだけダブルクォートを使う。
-          `4. 宣言されたコマンドごとに、次の固定文字列で grep の件数のみを数える（正規表現ではなく固定文字列一致 -F を使う。grep コマンド自体・比較対象の文字列は改変しない）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、2 以上（構文エラー等）が 1 回でも発生した時点で残りのコマンドの確認を打ち切り、直ちに fetchFailed: true・headRefOid: ""・counts: [] を返して終了する（推測で件数を埋めない。取得不能を「0 件」と区別する）:`,
-          ...list.flatMap((c, i) => [
-            `   - index ${i}（コマンド ${JSON.stringify(c)} は表示・転記しない。件数の取得にのみ使う）:`,
-            `     pass=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H pass ${c} -->" "$g"); rc=$?`,
-            `     fail=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H fail ${c} -->" "$g"); rc=$?`,
-            `     notrun=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H not-run ${c} -->" "$g"); rc=$?`,
-          ]),
-          `   nonPass はコマンドごとに fail + notrun として算出する（$H と一致しないマーカー行はどの grep にも一致せず自動的に集計から除外される。古い HEAD・base 取り込み前・fix 前の記録が存在しないものとして扱われる契約はこれで成立する）。`,
-          `5. counts に宣言コマンドの数だけ { index, pass, nonPass }（いずれも 0 以上の整数）を入れて返す（index は上記の 0-indexed 位置と一致させる）。`,
-        ]
-      : [
-          '4. 宣言コマンドが無いため counts: [] を返す（headRefOid は手順 2 で確定した H をそのまま返す）。',
-        ]),
-    '6. 手順 1〜5 に記載した以外のコマンド・gh api 呼び出しは実行しない（Issue 本文・レビューコメント・チェック名の取得も行わない）。',
-    '返却: fetchFailed（取得失敗・headRefOid 形式不正時のみ true）/ headRefOid（手順 2 で確定した 40 桁 sha。取得・検証に失敗した場合は空文字）/ counts（index・pass・nonPass の配列）。自由文の説明フィールド・本文テキスト・コマンド文字列は返さない。',
   ].join('\n')
 }
 
@@ -7713,18 +7704,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       // opt-in テスト記録ゲート（Issue #495）。merge-exec は Issue/PR 本文を一切読まない契約（MERGE_CONTEXT_COMMON・権限境界段落）のため、その契約を保ったまま「宣言テストの pass 記録が PR 本文にある」を合格条件へ加えるには、merge-exec の外側・呼び出し直前で別コンテキストの読み取り専用エージェントによりゲートする（automerge-design.md 参照）。新規マージ経路（allowMerge）に限り適用し、回復専用経路（recoveryOnly）、および新規マージ経路でも
       // 上記の独立確認により PR が既に MERGED と判明した経路（prAlreadyMerged。Issue #509）では検証エージェントを起動しない（新規マージをしない経路にゲートを課しても意味がなく、後者は latch からの正規の復旧手段 (b) を機能させるために必須）。
       if (allowMerge && Array.isArray(item.optinTests) && item.optinTests.length > 0) {
-        let optinVerify = null
-        try {
-          optinVerify = await agent(optinRecordVerifyPrompt(item, impl, item.optinTests), {
-            label: `optin-record-verify:#${item.number}`,
-            phase: 'Merge',
-            model: 'sonnet',
-            effort: 'low',
-            schema: OPTIN_RECORD_VERIFY_SCHEMA,
-          })
-        } catch (e) {
-          warnItem(item, `opt-in テスト記録検証${agentThrew(e)}`)
-        }
+        // 観測は封筒を照合して採る（失敗は観測 agent の 1 回取り直しのあと skip → optinVerify が null で全件不合格に倒れる = fail-closed）
+        const optinObs = await observeOptinRecord(item, impl, item.optinTests)
+        const optinVerify = optinObs.kind === 'ok' ? optinObs.verify : null
+        if (!optinVerify) warnItem(item, `opt-in テスト記録の観測に失敗した（${optinObs.reason}）`)
         optinGateHeadSha = sanitizeSha(optinVerify?.headRefOid)
         // combineOptinRecordGate は PR 本文ベースの gate（headRefOid 束縛済み。PR #503 3 巡目 codex P1）に、ホストが保持する直近 post-push fix の実測（lastFixOptin）を AND で重ねる（Issue #495 Medium 2）。fix 未実施ラウンド・fix の headSha が現在の HEAD と不一致のラウンドは override が働かず gate をそのまま返す（combineOptinRecordGate 参照）。
         // ただし lastFixOptin.unbound === true（headSha を確定できなかった場合。セキュリティ監査 Medium）はこの限りでなく、headSha 一致判定を無視して無条件で override する。
