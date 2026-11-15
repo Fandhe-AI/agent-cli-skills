@@ -92,6 +92,40 @@ test('detect:external-checks: 封筒が通れば observed として返却値に�
   assert.ok(!logs.some((m) => m.includes('観測を採用しない')))
 })
 
+// Issue #806: 観測が判断に載るのは未確定時の停止理由だけ。明示時と dryRun では起動しない（観測で App が見つかる応答を置いても呼ばれないことで確かめる）
+const cursorObserved = (label, opts, prompt) => (label === 'detect:external-checks' ? externalChecksReply(prompt, { apps: ['cursor'] }) : undefined)
+const detectCalls = (calls) => calls.filter((c) => c.opts.label === 'detect:external-checks').length
+
+test('detect:external-checks: 未指定なら起動し、停止理由の文言に観測した apps が入る', async () => {
+  const { calls, logs } = await runScript({ args: ARGS(), override: cursorObserved })
+  assert.equal(detectCalls(calls), 1)
+  assert.ok(logs.some((m) => m.includes('明示されていないため自動マージを停止した') && m.includes('観測結果は参考値: cursor。')), '停止理由に apps')
+})
+
+test('detect:external-checks: externalChecks を明示（[] を含む）したランでは起動しない。返却値・ログは未観測の形', async () => {
+  for (const externalChecks of [[], [{ app: 'cursor', context: 'Cursor Bugbot' }], ['codecov']]) {
+    const name = JSON.stringify(externalChecks)
+    const { result, calls, logs } = await runScript({ args: ARGS({ externalChecks }), override: cursorObserved })
+    assert.equal(detectCalls(calls), 0, name)
+    assert.deepEqual(result.externalChecksObserved, [], name)
+    assert.equal(result.externalChecksConfirmed, true, name)
+    assert.deepEqual(result.externalChecks, externalChecks.map((e) => e.app ?? e), name)
+    assert.ok(!logs.some((m) => m.includes('観測を採用しない') || m.includes('観測結果は参考値')), name)
+    assert.ok(logs.some((m) => m.includes(externalChecks.length ? '外部チェック（args.externalChecks による明示指定）' : '外部チェックなし（args.externalChecks: [] による明示確定）')), name)
+  }
+})
+
+test('detect:external-checks: dryRun では起動せず、見積りの返却は観測の有無で変わらない', async () => {
+  for (const extra of [{}, { externalChecks: [] }]) {
+    const name = JSON.stringify(extra)
+    const { result, calls, logs } = await runScript({ args: ARGS({ dryRun: true, ...extra }), override: cursorObserved })
+    assert.equal(result.dryRun, true, name)
+    assert.equal(detectCalls(calls), 0, name)
+    assert.ok(!Object.keys(result).some((k) => k.startsWith('externalChecks')), `${name}: 見積りの返却に観測を載せない`)
+    if (!extra.externalChecks) assert.ok(logs.some((m) => m.includes('観測結果は参考値: 未観測。')), `${name}: 未観測を「なし」と書かない`)
+  }
+})
+
 test('detect:external-checks: 封筒が通らなければ apps: [] で続行し、警告を出す（再試行も throw もしない）', async () => {
   for (const [name, mk] of [
     ['旧形式の平らな応答', () => ({ apps: ['cursor'] })],

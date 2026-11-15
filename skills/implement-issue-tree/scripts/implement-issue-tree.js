@@ -6066,10 +6066,11 @@ const treeFetch=await fetchTree()
 const tree={nodes:treeFetch.nodes}
 
 
-const detectNonce=boundaryNonce(`detect-external-checks:${repoArg}`)
-const detectResult=await agent(externalChecksPrompt(detectNonce),{label:'detect:external-checks',phase:'Tree',model:'haiku',effort:'low',schema:EXTERNAL_CHECKS_SCHEMA})
 
-const detected=observedExternalApps(detectResult,detectNonce)
+const detectSkip=externalChecksInput||dryRunEnabled
+const detectNonce=boundaryNonce(`detect-external-checks:${repoArg}`)
+
+const detected=detectSkip?{apps:[]}:observedExternalApps(await agent(externalChecksPrompt(detectNonce),{label:'detect:external-checks',phase:'Tree',model:'haiku',effort:'low',schema:EXTERNAL_CHECKS_SCHEMA}),detectNonce)
 if(!detected)log('⚠️ 外部チェックの観測を採用しない（出力封筒の照合失敗）。観測なしで続行する')
 else if(detected.errs>0)log(`⚠️ 外部チェックの観測で gh の失敗が ${detected.errs} 件あった（取得できた分だけで続行する）`)
 const observedCheckApps=detected?.apps??[]
@@ -6084,7 +6085,7 @@ externalChecksInput!==undefined&&externalChecksInput.every((e)=>e.contexts.lengt
 
 const externalCheckEntries=externalChecksInput??observedCheckApps.map((a)=>({app:a,contexts:[]}))
 
-const observedAppsNote=observedCheckApps.length>0?observedCheckApps.map(sanitize).join(', '):'なし'
+const observedAppsNote=detectSkip?'未観測':observedCheckApps.length>0?observedCheckApps.map(sanitize).join(', '):'なし'
 
 const EXTERNAL_CHECKS_UNCONFIRMED_REASON=
 '外部チェック（GitHub Actions 以外の CI / レビュー App）の構成が args.externalChecks で明示されていないため自動マージを停止した'
@@ -6096,8 +6097,8 @@ const EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON=
 if(externalChecksInput!==undefined){
 log(
 externalCheckApps.length>0
-?`外部チェック（args.externalChecks による明示指定）: ${externalChecksInput.map((e) => `${sanitize(e.app)}${e.contexts.length > 0 ? `（信頼済み context: ${e.contexts.map(sanitize).join(' / ')}）` : '（context 未宣言。クライアント側自動マージは fail-closed）'}`).join(', ')}（観測結果は参考値: ${observedAppsNote}）`
-:`外部チェックなし（args.externalChecks: [] による明示確定）。GitHub Actions の green のみで判定する（観測結果は参考値: ${observedAppsNote}）`,
+?`外部チェック（args.externalChecks による明示指定）: ${externalChecksInput.map((e) => `${sanitize(e.app)}${e.contexts.length > 0 ? `（信頼済み context: ${e.contexts.map(sanitize).join(' / ')}）` : '（context 未宣言。クライアント側自動マージは fail-closed）'}`).join(', ')}`
+:'外部チェックなし（args.externalChecks: [] による明示確定）。GitHub Actions の green のみで判定する',
 )
 }else{
 log(`⚠️ ${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`)
