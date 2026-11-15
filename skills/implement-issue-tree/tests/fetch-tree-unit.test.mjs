@@ -352,7 +352,7 @@ for (const bash of availableBashes()) {
       ['1 値の切り詰めの後で 1,000 を超える（4 件 × 400 → 1,200）', decls(4, 400), 'cap'],
       ['20 件の切り詰めの後で数える（21 件 × 50 → 19 件 950 + ? = 951）', decls(21, 50), 'keep'],
       ['20 件の切り詰めの後で 1,000 を超える（25 件 × 60 → 1,141）', decls(25, 60), 'cap'],
-      ['500 件 × 300 文字', decls(500, 300), 'cap'],
+      ['200 件 × 300 文字（本文の上限 65,536 文字以内）', decls(200, 300), 'cap'],
     ]
     const out = optinTable(bash, cases.map(([, body]) => ({ state: 'open', body })))
     cases.forEach(([name, body, kind], i) => {
