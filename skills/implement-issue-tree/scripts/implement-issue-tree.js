@@ -2000,19 +2000,19 @@ failed:INT_ARRAY_SCHEMA,
 inputSha256:{type:'string'},
 }))
 
-function repoScanInputSha256(mode,repo,labels=[]){
-return sha256Hex(['repo-scan',mode,repo??'', ...labels].join('\n'))
+function repoScanInputSha256(mode,repo,rest=[]){
+return sha256Hex(['repo-scan',mode,repo??'', ...rest].join('\n'))
 }
 
 function repoScanCommand(mode,nonce,repo,rest=''){
 return`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['repo-scan.sh']} repo-scan.sh --mode ${mode} --nonce ${nonce || 'NONCE_NOT_PROVIDED'} --repo ${repo}${rest}`
 }
-function skipLabelsPrompt(labels,nonce,repo){
+function skipLabelsPrompt(labels,nonce,repo,nums){
 return[
 '対象外ラベルの付いた open issue の番号を機械取得するタスク（判断・補完はしない）。',
 MERGE_CONTEXT_COMMON,
 '次のコマンドを 1 回だけ一字一句そのまま実行する（引用符内はラベル名のデータ）:',
-repoScanCommand('skip-labels',nonce,repo,` -- ${labels.map(shellSingleQuote).join(' ')}`),
+repoScanCommand('skip-labels',nonce,repo,` --numbers ${nums} -- ${labels.map(shellSingleQuote).join(' ')}`),
 SIGNED_OUTPUT_INSTRUCTION,
 ].join('\n')
 }
@@ -3628,19 +3628,19 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'9d0e26fee6d4551db4d0a9d51473ca836f9b9d2011bf47971c8f39673795198c',
-'measure-free-disk.sh':'c393bbfa2829c5fb9abb8518ddbd554bad46a636ad84f3775fa89d9852c566ac',
-'observe-pr.sh':'a88eed797405752a7cab4f0f46e3ab006c3efa795d432c4c9f8f428d02073d55',
-'base-merge.sh':'13737b25c2127e33faf403867ba56d9ea4bd77040e6141165a582627670190a6',
-'pr-push.sh':'77527ac069dd894dc6f7b01a2a6c19ec1ae63a201cb1312047830293f87e9b25',
-'reply-resolve.sh':'40ed2eaeec87b84acb0718d041531175572f64e05d4310d7fc94df5daa3e7e1b',
-'state.sh':'c9e5370d61c4a24f27c07e676828646dc9f4ed7804b92a82e5e9a1ebcd7b12fb',
-'merge-gate.sh':'079a2db97e251450ab58c50f376289e9524b96ac20fae5e5a518e631f2df74a1',
-'worktree-remove.sh':'4018ced64495bea0f54029f1350076b73b2fb0a1a721aec1401dbc7599c44a40',
-'recover-prep.sh':'d148c8b86ce0985b20910eec28436e6f649fa9b5477c5af6da8086112846b539',
-'fetch-tree.sh':'9f0116d996dadacdbda4293432a2cafaaaf48eacc662bd547b4c32674d5818af',
-'declared-deps.sh':'9bf3683b2b7772c4f93bdac226a58278e54be51f9d8520894bd098472d46fef1',
-'repo-scan.sh':'b1d1e1c216c8d142ca9474def1f566c0d16d7538fc40fcef251f9ac2387d142f',
+'measure-residual-bytes.sh':'5b13fea4f87c820c5df097099ee57f96944cb8354564dfef6340354440427adb',
+'measure-free-disk.sh':'1c67debffcfcd450034fb1415acf17e0db02caf8a935e3ccdcacd4d4a16df35f',
+'observe-pr.sh':'7541aac9a60f7988997fcea606bb82d99d8517a133be130396071d538bc05916',
+'base-merge.sh':'fe4e2c211ff8c6a1a73e919c56b1346eae3372d2e7d704754655d252ecd55b68',
+'pr-push.sh':'e815b27fdcf5b8d59630317d4a680dc3f8eb5632e083506bf53a5d3be53ccde0',
+'reply-resolve.sh':'41061bc1e57d282890cb8d2370e1bead4b3f5674ce421f55cc5a8486efde26da',
+'state.sh':'db65eca27bbe9b6542262831d41cab18049467693a257f91988e1c5dbe263da6',
+'merge-gate.sh':'931d8289205b7b313f53d346c5c7a92f9cec0185ce024fc533c0198f54f209aa',
+'worktree-remove.sh':'87074d4c423f5fe1e767bf4e8ce4baf1adf7bc7191848a6d8c3bf8f4f036c129',
+'recover-prep.sh':'d6968113e1170208fdd1c2fb1f54910ce15c4ba26ae774bccf9343a88dbf9ff9',
+'fetch-tree.sh':'50725cdfd78f824fab5667eb882fedb88f3678e5fbe6e420f270a4834a6578d7',
+'declared-deps.sh':'97523e32f572faaeb37035cacb0ad63c4f5949fc26cd781b7bdfd21fbf045c55',
+'repo-scan.sh':'76f00a8b51c9e7d1d383380964f0caa95ff10c84d7b27a945ce21342d0be368b',
 }
 
 
@@ -6237,7 +6237,9 @@ if(requested.length>0)log(`ツリー外の前提イシュー: open ${outOfTreeDe
 
 const skipLabelHit=new Map()
 const skippedLabels={labels:skipLabelsInput??[],matched:[],unknown:[],absent:[]}
-if(skipLabelsInput){
+
+const skipNums=tree.nodes.filter((n)=>n.state==='open').map((n)=>n.number).sort((a,b)=>a-b).join(',')
+if(skipLabelsInput&&skipNums){
 const byIndex=new Map()
 const absent=new Set()
 let pending=skipLabelsInput.map((_,k)=>k+ 1)
@@ -6245,8 +6247,8 @@ for(let attempt=1;attempt<=2&&pending.length>0&&scanRepo;attempt++){
 try{
 
 const nonce=boundaryNonce(`skip-labels:${attempt}:${scanRepo}:${pending.join(',')}`)
-const reply=await agent(skipLabelsPrompt(skipLabelsInput,nonce,scanRepo),{label:`plan:skip-labels${attempt > 1 ? '-retry' : ''}`,phase:'Tree',model:'haiku',effort:'low',schema:SKIP_LABELS_SCHEMA})
-const signed=verifySignedOutput(reply,nonce,repoScanInputSha256('skip-labels',scanRepo,skipLabelsInput))
+const reply=await agent(skipLabelsPrompt(skipLabelsInput,nonce,scanRepo,skipNums),{label:`plan:skip-labels${attempt > 1 ? '-retry' : ''}`,phase:'Tree',model:'haiku',effort:'low',schema:SKIP_LABELS_SCHEMA})
+const signed=verifySignedOutput(reply,nonce,repoScanInputSha256('skip-labels',scanRepo,[skipNums, ...skipLabelsInput]))
 if(!signed.ok){
 log(`⚠️ 対象外ラベルの取得（${attempt} 回目）を破棄した: 出力封筒の照合に失敗した（${signed.reason}）`)
 continue

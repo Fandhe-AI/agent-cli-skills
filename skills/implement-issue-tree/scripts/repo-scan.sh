@@ -3,7 +3,8 @@
 #
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立てる）:
 #   bash repo-scan.sh --mode external-checks --nonce <nonce> --repo <owner/repo>
-#   bash repo-scan.sh --mode skip-labels --nonce <nonce> --repo <owner/repo> -- <ラベル> [<ラベル> ...]
+#   bash repo-scan.sh --mode skip-labels --nonce <nonce> --repo <owner/repo> --numbers <n,n,...> -- <ラベル> [<ラベル> ...]
+#   --numbers は skip-labels だけの必須引数（Issue #807）: ツリーの open ノードの番号（昇順・重複なしのカンマ区切り）。出力はこの集合との交わりだけ。
 #   --repo は必須（Issue #808）。省くと gh がカレントのリポジトリを走査し、ツリーと違うリポジトリを読み得るため使い方の誤り（exit 2）にする。
 #   ホストは args.repo、無ければツリー取得の封筒の repo（fetch-tree.sh がルートの repository_url から解決）を渡す。
 #
@@ -20,10 +21,11 @@
 #         - inputSha256   sha256("repo-scan\nexternal-checks\n" + repo)
 #   skip-labels       payload {"absent":[i,…],"entries":[{"i":i,"numbers":[…]},…],"failed":[i,…],"inputSha256":"…"}
 #         - i             ラベルの 1 始まりの添字（引数の順。ホストは添字だけでラベルを引き、スクリプトが返した文字列は使わない）
-#         - entries       取得できたラベルごとの open issue の番号（昇順・重複なし・PR を除く）。0 件でも行は出る
+#         - entries       取得できたラベルごとの open issue の番号のうち --numbers にあるもの（昇順・重複なし・PR を除く）。0 件でも行は出る。
+#                         リポジトリ全体の番号は形式を全行検査してから交わりへ絞る（数千件のラベルでも出力はツリーの open ノード数で抑えられる）
 #         - absent        リポジトリにラベルが存在しない添字（typo・未作成。ラベル一覧を取得できなかったときは判定しない）
 #         - failed        取得に失敗した添字（entries に含めない。ホストが欠落として再取得し、それでも取れなければ全 open ノードを待たせる）
-#         - inputSha256   sha256("repo-scan\nskip-labels\n" + repo + 各ラベルを "\n" で連結)。ラベルの並びを束縛する（添字がラベルの意味を決める）
+#         - inputSha256   sha256("repo-scan\nskip-labels\n" + repo + "\n" + numbers + 各ラベルを "\n" で連結)。ノード番号の集合とラベルの並びを束縛する（添字がラベルの意味を決める）
 # 終了コード:
 #   0  封筒を出力した（個々の gh の失敗は payload の errs / failed に出る）
 #   2  使い方の誤り（引数の欠落・形式不正・未知の引数・モードに合わない引数）
@@ -50,7 +52,7 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 MAX_OUT_BYTES=24000
 
 usage() {
-  echo "使い方: repo-scan.sh --mode external-checks --nonce NONCE --repo OWNER/REPO | --mode skip-labels --nonce NONCE --repo OWNER/REPO -- LABEL [LABEL ...]" >&2
+  echo "使い方: repo-scan.sh --mode external-checks --nonce NONCE --repo OWNER/REPO | --mode skip-labels --nonce NONCE --repo OWNER/REPO --numbers N,N,... -- LABEL [LABEL ...]" >&2
   [ $# -eq 0 ] || echo "repo-scan: $1" >&2
   exit 2
 }
@@ -59,18 +61,27 @@ mode=""
 nonce=""
 repo=""
 have_repo=0
+numbers=""
+have_numbers=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode) [ $# -ge 2 ] || usage "--mode に値が無い"; [ -z "${mode}" ] || usage "--mode は 1 回だけ"; mode=$2; shift 2 ;;
     --nonce) [ $# -ge 2 ] || usage "--nonce に値が無い"; [ -z "${nonce}" ] || usage "--nonce は 1 回だけ"; nonce=$2; shift 2 ;;
     --repo) [ $# -ge 2 ] || usage "--repo に値が無い"; [ "${have_repo}" -eq 0 ] || usage "--repo は 1 回だけ"; repo=$2; have_repo=1; shift 2 ;;
+    --numbers) [ $# -ge 2 ] || usage "--numbers に値が無い"; [ "${have_numbers}" -eq 0 ] || usage "--numbers は 1 回だけ"; numbers=$2; have_numbers=1; shift 2 ;;
     --) shift; break ;;
     *) usage "未知の引数" ;;
   esac
 done
 case "${mode}" in
-  external-checks) [ $# -eq 0 ] || usage "external-checks はラベルを取らない" ;;
+  external-checks)
+    [ $# -eq 0 ] || usage "external-checks はラベルを取らない"
+    [ "${have_numbers}" -eq 0 ] || usage "external-checks は --numbers を取らない"
+    ;;
   skip-labels)
+    # ツリーの open ノードの番号（Issue #807）。形を検査してから使う（交わりの計算と入力の束縛に入る）
+    [ "${have_numbers}" -eq 1 ] || usage "skip-labels は --numbers が必須"
+    rs_valid_numbers_csv "${numbers}" || usage "--numbers の形式が不正（昇順・重複なしの番号のカンマ区切り・${RS_NUMBERS_MAX_BYTES} バイト以内）"
     [ $# -ge 1 ] && [ $# -le "${RS_LABELS_MAX}" ] || usage "ラベルは 1〜${RS_LABELS_MAX} 件"
     for l in "$@"; do rs_valid_label "${l}" || usage "ラベルの形式が不正（空・制御文字・カンマ・前後の空白・長さ超過）"; done
     ;;
@@ -83,7 +94,12 @@ valid_repo "${repo}" || usage "--repo は OWNER/REPO の形で指定する"
 
 command -v gh >/dev/null 2>&1 || { echo "repo-scan: gh が無い" >&2; exit 3; }
 command -v jq >/dev/null 2>&1 || { echo "repo-scan: jq が無い" >&2; exit 3; }
-input_sha=$(rs_input_sha "${mode}" "${repo}" "$@") || { echo "repo-scan: 入力のハッシュを計算できない（sha256sum / shasum が無い等）" >&2; exit 3; }
+# skip-labels は --numbers を repo の次の固定位置に入れる（ノード番号の集合を束縛する。Issue #807）。external-checks はラベルも番号も無い
+if [ "${mode}" = skip-labels ]; then
+  input_sha=$(rs_input_sha "${mode}" "${repo}" "${numbers}" "$@")
+else
+  input_sha=$(rs_input_sha "${mode}" "${repo}")
+fi || { echo "repo-scan: 入力のハッシュを計算できない（sha256sum / shasum が無い等）" >&2; exit 3; }
 
 base="repos/${repo}"
 
@@ -125,6 +141,8 @@ RS_EOF
 fi
 
 # skip-labels: ラベルごとにリポジトリ全体の open issue 番号を列挙する（labels= はカンマで AND になるためラベルごとに呼ぶ）。
+# 全行の形式を検査してから（rs_sorted_numbers。番号でない行があればそのラベルは failed）、ツリーの open ノード（--numbers）との交わりへ絞る
+# （Issue #807。数千件のラベルでも封筒の上限を超えて全 open ノードが待機になる経路を塞ぐ）。
 # ラベル一覧は存在確認用で、取得できなければ absent を判定しない（旧コマンドの k=0）。
 if names=$(gh api "${base}/labels?per_page=100" --paginate --jq "${RS_NAMES_JQ}" 2>/dev/null </dev/null); then names_ok=1; else names_ok=0; fi
 i=0
@@ -138,7 +156,8 @@ for l in "$@"; do
   nums=""
   if [ -n "${enc}" ] \
     && out=$(gh api "${base}/issues?state=open&labels=${enc}&per_page=100" --paginate --jq "${RS_ISSUES_JQ}" 2>/dev/null </dev/null) \
-    && nums=$(rs_sorted_numbers "${out}"); then
+    && nums=$(rs_sorted_numbers "${out}") \
+    && nums=$(rs_intersect_numbers "${numbers}" "${nums}"); then
     entries="${entries}${entries:+,}{\"i\":${i},\"numbers\":[${nums}]}"
     if [ "${names_ok}" -eq 1 ]; then
       rc=0

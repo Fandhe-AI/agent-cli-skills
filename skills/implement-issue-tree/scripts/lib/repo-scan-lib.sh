@@ -30,6 +30,9 @@ RS_SLUG_MAX=64         # App slug の長さ（GitHub の slug は小文字英数
 RS_LABELS_MAX=10       # ホストの parseSkipLabels の上限と同じ
 RS_LABEL_MAX_BYTES=200 # ラベル 1 件の長さ。ホストは 50 文字までで、日本語は 1 文字 3 バイト（LC_ALL=C のバイト数）に収まる余裕を持たせる
 RS_NUMBER_MAX_LEN=9    # イシュー番号の桁数（is_uint と同じ。10 億未満）
+# --numbers（ツリーの open ノードの番号のカンマ区切り。Issue #807）の長さの上限。Linux の 1 引数の上限（MAX_ARG_STRLEN 131,072 B）より
+# 小さく取る。fetch-tree.sh の上限（約 4,500 ノード）× 9 桁 + カンマでも 45,000 B で収まり、超えるのは想定外の入力だけ
+RS_NUMBERS_MAX_BYTES=100000
 
 # App slug の形式（小文字英数字とハイフン・先頭は英数字・1〜64 文字）。slug は後でホストのプロンプトに入るので、形を限って返す。
 rs_valid_slug() {
@@ -55,6 +58,34 @@ rs_valid_number() {
   [ "${#1}" -le "${RS_NUMBER_MAX_LEN}" ]
 }
 
+# --numbers の形式（Issue #807）: 番号（rs_valid_number）のカンマ区切りで、狭義の昇順（重複なし）・1 件以上・RS_NUMBERS_MAX_BYTES 以下。
+# 並びを 1 通りに固定するので、inputSha256 に入れた文字列がそのまま集合を表す（ホストは昇順に並べて渡す）。
+# 区切りの分解（tr）が失敗して空になった場合も、空行が番号の形でないので非ゼロ（fail-closed）。
+rs_valid_numbers_csv() {
+  local n prev=0
+  case "$1" in
+    '' | *[!0-9,]* | ,* | *, | *,,*) return 1 ;;
+  esac
+  [ "${#1}" -le "${RS_NUMBERS_MAX_BYTES}" ] || return 1
+  while IFS= read -r n; do
+    rs_valid_number "${n}" || return 1
+    [ "${n}" -gt "${prev}" ] || return 1
+    prev=${n}
+  done <<RS_EOF
+$(printf '%s\n' "$1" | tr ',' '\n')
+RS_EOF
+  return 0
+}
+
+# 番号の交わり（Issue #807）: $2（ラベルの open issue の番号。rs_sorted_numbers の出力 = 昇順のカンマ区切り。空可）のうち、
+# $1（ツリーの open ノードの番号。rs_valid_numbers_csv 済み）にあるものだけを、$2 の順のままカンマ区切りで出す（空なら空行）。
+# リポジトリ全体の数千件をそのまま出すと封筒の上限（exit 7）を超え、ツリー全体が待機になるため、ツリーと交わる番号だけを返す。
+# 数千件を jq --arg に渡すと 1 引数の上限に当たり得るので、標準入力で渡す。jq の失敗は非ゼロ（呼び出し側がそのラベルを failed にする）。
+rs_intersect_numbers() {
+  [ -n "$2" ] || return 0
+  printf '%s\n%s\n' "$1" "$2" | jq -R -s -r 'split("\n") | (.[0] | split(",") | reduce .[] as $k ({}; .[$k] = true)) as $s | [.[1] | split(",")[] | select($s[.] == true)] | join(",")' 2>/dev/null
+}
+
 # ラベル 1 件の形式。空・制御文字（改行を含む）・カンマ（labels= はカンマで AND になる）・長さ超過は不可。前後の空白もホストの検査に揃えて不可
 rs_valid_label() {
   case "$1" in
@@ -63,9 +94,10 @@ rs_valid_label() {
   [ "${#1}" -le "${RS_LABEL_MAX_BYTES}" ]
 }
 
-# 入力の束縛 inputSha256: sha256("repo-scan\n" + mode + "\n" + repo + ["\n" + label …])。repo は省いたとき空文字。末尾に改行を付けない。
-# ホストの repoScanInputSha256 と同じ定義（ホストは ['repo-scan', mode, repo, ...labels].join('\n') を計算する）。
-# $1 = モード、$2 = repo、$3... = ラベル（順序込み。添字がラベルの意味を決める）。stdout に 16 進 64 桁。ツールが無ければ非ゼロ。
+# 入力の束縛 inputSha256: sha256("repo-scan\n" + mode + "\n" + repo + ["\n" + 欄 …])。末尾に改行を付けない。
+# ホストの repoScanInputSha256 と同じ定義（ホストは ['repo-scan', mode, repo, ...rest].join('\n') を計算する）。
+# $1 = モード、$2 = repo、$3... = 残りの欄。skip-labels は --numbers（ツリーの open ノードの番号。Issue #807）を先頭の固定位置に置き、
+# 続けてラベル（順序込み。添字がラベルの意味を決める）。external-checks は残りの欄なし。stdout に 16 進 64 桁。ツールが無ければ非ゼロ。
 rs_input_sha() {
   local mode=$1 repo=$2 text l
   shift 2

@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { importDefinitions, runScript, BASE_ARGS } from './lib/stub-run.mjs'
-import { availableBashes, externalChecksReply, makeEnvelope, parseRepoScanCommand, repoScanInputSha256, skipLabelsReply, toolExists, treeFetchReply, TREE_DEFAULT_REPO } from './lib/signed-output.mjs'
+import { availableBashes, externalChecksReply, makeEnvelope, parseRepoScanCommand, repoScanInputSha256, skipLabelsInputSha256, skipLabelsReply, toolExists, treeFetchReply, TREE_DEFAULT_REPO } from './lib/signed-output.mjs'
 import { makeGhRepoScanStub, checkRuns, issueList } from './lib/gh-repo-scan-stub.mjs'
 import { SCRIPT } from './lib/repo-scan-suite.mjs'
 
@@ -208,7 +208,7 @@ test('args.repo 未指定: 別の repo（空の repo を含む）で作った封
         if (label !== 'detect:external-checks' && !label.startsWith('plan:skip-labels')) return undefined
         const c = parseRepoScanCommand(prompt)
         if (label === 'detect:external-checks') return makeEnvelope(c.nonce, { apps: ['cursor'], dropped: 0, errs: 0, inputSha256: repoScanInputSha256('external-checks', bad), prs: 3 })
-        if (label.startsWith('plan:skip-labels')) return makeEnvelope(c.nonce, { absent: [], entries: [{ i: 1, numbers: [] }], failed: [], inputSha256: repoScanInputSha256('skip-labels', bad, c.labels) })
+        if (label.startsWith('plan:skip-labels')) return makeEnvelope(c.nonce, { absent: [], entries: [{ i: 1, numbers: [] }], failed: [], inputSha256: skipLabelsInputSha256(bad, c.numbers, c.labels) })
         return undefined
       },
     })
@@ -246,7 +246,7 @@ test('detect:external-checks の返却スキーマは封筒（nonce・payload・
 // プロンプトの起動行を解釈して、実際の repo-scan.sh を偽 gh で走らせ、標準出力の封筒をそのまま返す（正直なエージェント）
 function runRealScan(bash, stub, prompt) {
   const c = parseRepoScanCommand(prompt)
-  const argv = [SCRIPT, '--mode', c.mode, '--nonce', c.nonce, ...(c.repo ? ['--repo', c.repo] : []), ...(c.mode === 'skip-labels' ? ['--', ...c.labels] : [])]
+  const argv = [SCRIPT, '--mode', c.mode, '--nonce', c.nonce, ...(c.repo ? ['--repo', c.repo] : []), ...(c.mode === 'skip-labels' ? ['--numbers', c.numbers, '--', ...c.labels] : [])]
   const r = spawnSync(bash, argv, { env: stub.env(), encoding: 'utf8' })
   assert.equal(r.status, 0, r.stderr)
   return JSON.parse(r.stdout)
@@ -279,6 +279,26 @@ for (const bash of availableBashes()) {
     assert.equal(calls.filter((c) => c.opts.label.startsWith('plan:skip-labels')).length, 1, '1 回で取れた')
   })
 
+  // Issue #807: リポジトリ全体で 5,000 件の open issue を持つラベルでも、交わるノードだけが blocked になり（全待機にならない）、封筒は上限内
+  test(`[${bash}] 実スクリプト結合: 5,000 件の open issue を持つラベルでも、ツリーと交わるノードだけが blocked になる`, { skip: !toolExists('jq') && 'jq が無い' }, async () => {
+    const many = issueList(Array.from({ length: 5000 }, (_, k) => 3 + k * 2)) // 3, 5, 7, … （偶数のノードとは交わらない）
+    const stub = makeGhRepoScanStub({ labels: [{ name: 'owner:human' }], issues: { 'owner:human': { pages: Array.from({ length: 50 }, (_, p) => many.slice(p * 100, p * 100 + 100)) } } })
+    let bytes = 0
+    const { result, calls } = await runScript({
+      args: ARGS({ skipLabels: ['owner:human'] }),
+      leaves: [2, 4, 5, 6],
+      override: (label, opts, prompt) => {
+        if (label !== 'plan:skip-labels') return undefined
+        const env = runRealScan(bash, stub, prompt)
+        bytes = JSON.stringify(env).length
+        return env
+      },
+    })
+    assert.deepEqual(result.skippedLabels, { labels: ['owner:human'], matched: [5], unknown: [], absent: [] })
+    assert.ok(bytes < 1000, `封筒は交わりの大きさ（${bytes} バイト）`)
+    assert.deepEqual(labelsOf(calls).filter((l) => /^plan:#/.test(l)), ['plan:#2', 'plan:#4', 'plan:#6'], '交わらないノードは待たせない')
+  })
+
   test(`[${bash}] 実スクリプト結合: 取得できなかったラベルがあれば（failed）再試行し、なお取れなければ open ノードを全て待たせる`, { skip: !toolExists('jq') && 'jq が無い' }, async () => {
     const labels = ['a', 'b']
     const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }, { name: 'b' }], issues: { a: issueList([2]), b: { exit: 1 } } })
@@ -305,8 +325,8 @@ test('取り違え: ラベルの並びが違う入力で作られた封筒は採
       n++
       const c = parseRepoScanCommand(prompt)
       // 1 回目: 2 つのラベルを入れ替えた入力で走らせた封筒（2 番目のラベルの結果が 1 番目として届く）
-      if (n === 1) return makeEnvelope(c.nonce, { absent: [], entries: [{ i: 1, numbers: [3] }, { i: 2, numbers: [] }], failed: [], inputSha256: repoScanInputSha256('skip-labels', c.repo, [...c.labels].reverse()) })
-      return makeEnvelope(c.nonce, { absent: [], entries: [{ i: 1, numbers: [2] }, { i: 2, numbers: [] }], failed: [], inputSha256: repoScanInputSha256('skip-labels', c.repo, c.labels) })
+      if (n === 1) return makeEnvelope(c.nonce, { absent: [], entries: [{ i: 1, numbers: [3] }, { i: 2, numbers: [] }], failed: [], inputSha256: skipLabelsInputSha256(c.repo, c.numbers, [...c.labels].reverse()) })
+      return makeEnvelope(c.nonce, { absent: [], entries: [{ i: 1, numbers: [2] }, { i: 2, numbers: [] }], failed: [], inputSha256: skipLabelsInputSha256(c.repo, c.numbers, c.labels) })
     },
   })
   assert.deepEqual(result.skippedLabels.matched, [2], '入れ替わった封筒の結果（3 が一致）を採っていない')

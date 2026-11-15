@@ -126,8 +126,10 @@ volta run --node 22 node skills/implement-issue-tree/tests/tools/mutate.mjs --ru
   - 旧コマンド（切り出し前の origin/main がプロンプトへ埋め込んでいた文字列）は `tests/fixtures/repo-scan-old-external-checks-main.txt` と `repo-scan-old-skip-labels-main.txt` に凍結し、同じ偽 gh の応答で実行した結果と新スクリプトの結果を突き合わせる（apps・番号・存在確認・失敗が一致）。差が出る入力は『意図した差』として別テストで固定する（app が null の check-run を新版は落とす・check-runs の取得失敗の HTTP エラー本文を新版は apps に混ぜない）。
   - ロケール: `LC_ALL` を `C` / `en_US.UTF-8` / `ja_JP.UTF-8` に変えても出力が同じこと（並び・番号の数値順・全角文字の absent）。
   - 取り違え: ラベルの並びが違う入力で作られた封筒はホストの入力の束縛で拒否され、そのラベルの結果として採られない（`repo-scan-host`）。
+  - リポジトリの束縛（Issue #808）: `--repo` の省略は exit 2。`args.repo` が無いランでは起動行の `--repo` と期待する `inputSha256` がツリー取得の封筒の `repo` になり、`args.repo` の束縛先（base 取り込み・通知コメントなど）には入らない。封筒の `repo` が形式不正なら repo-scan.sh を起動しない（`repo-scan-host`）。`fetch-tree.sh` は `--repo` を省くとルートの `repository_url` から `repo` を出し、形が違えば exit 5（`fetch-tree`）。
+  - 交わり（Issue #807）: 5,000 件の open issue を持つラベルでも、`--numbers` と交わらない番号は出力に入らず封筒は上限内。交わりが上限を超えれば exit 7。`--numbers` の形（昇順・重複なし・上限 100,000 バイト）の誤りは exit 2。番号の形の違う行があれば交わりの外でもそのラベルは failed。ホストは open ノードだけを昇順で渡し、集合を束縛しない封筒を拒否する（`repo-scan`・`repo-scan-unit`・`skip-labels`・`repo-scan-host` の実スクリプト結合）。
 - 既存テストの stub が `plan:skip-labels` に平らな `{ entries: [{ i, x, numbers }] }` を返す場合は、`tests/lib/stub-run.mjs` が封筒に包む（`wrapSkipLabelsReply`。x = 1 は absent、entries に無い添字は failed）。`detect:external-checks` の既定の応答は `externalChecksReply(prompt)`。
-- 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run RS1-script-null-app-kept …`（`RS1`〜`RS22`）。
+- 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run RS1-script-null-app-kept …`（`RS1`〜`RS31`・`FT-repo-from-cwd-blank`）。
 
 ## 状態ファイルのハッシュ取得 `state.sh verify`（Issue #603 計画 C の P5）
 

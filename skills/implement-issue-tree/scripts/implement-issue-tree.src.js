@@ -1989,8 +1989,8 @@ function outOfTreeBlockNote(deps) {
   return `ツリー外の前提イシュー ${formatIssueList(deps)} が open のため未着手（close 後に再実行すると着手する）`
 }
 
-// 対象外ラベル（Issue #720）の取得。ノードごとには引かず、ラベルごとにリポジトリ全体の open issue 番号を 1 エージェントで列挙し（labels= はカンマで AND になるためラベルごとのループ）、ホストがツリーのノード番号と突き合わせる。ホストは添字だけでラベルを引き、エージェントが返した文字列は使わない。
-// 取得は scripts/repo-scan.sh --mode skip-labels（以前はプロンプトに埋め込んだ gh + jq のコマンドをエージェントが転記して実行していた）。エージェントは起動行を実行して封筒（nonce・payload・sha256）を転記するだけで、ホストは封筒を再計算して照合する（verifySignedOutput）。payload の inputSha256 はラベルの並びと repo を束縛する（添字がラベルの意味を決めるため。転記でラベルが欠けたり入れ替わったりした出力を別のラベルの結果として採らない）。
+// 対象外ラベル（Issue #720）の取得。ノードごとには引かず、ラベルごとにリポジトリ全体の open issue 番号を 1 エージェントで列挙し（labels= はカンマで AND になるためラベルごとのループ）、スクリプトがツリーの open ノードの番号（--numbers。Issue #807）との交わりへ絞って返し、ホストもツリーのノード番号と突き合わせる。ホストは添字だけでラベルを引き、エージェントが返した文字列は使わない。
+// 取得は scripts/repo-scan.sh --mode skip-labels（以前はプロンプトに埋め込んだ gh + jq のコマンドをエージェントが転記して実行していた）。エージェントは起動行を実行して封筒（nonce・payload・sha256）を転記するだけで、ホストは封筒を再計算して照合する（verifySignedOutput）。payload の inputSha256 はラベルの並び・repo・ノード番号の集合を束縛する（添字がラベルの意味を決めるため。転記でラベルが欠けたり入れ替わったりした出力を別のラベルの結果として採らない）。
 // 失敗は payload.failed の添字（entries に含めない）。ラベル一覧を取得できなかったときは absent を判定しない。
 const INT_ARRAY_SCHEMA = { type: 'array', items: { type: 'integer' } }
 const SKIP_LABELS_SCHEMA = signedOutputSchema(obj(['absent', 'entries', 'failed', 'inputSha256'], {
@@ -1999,20 +1999,20 @@ const SKIP_LABELS_SCHEMA = signedOutputSchema(obj(['absent', 'entries', 'failed'
     failed: INT_ARRAY_SCHEMA,
     inputSha256: { type: 'string' },
   }))
-// repo-scan.sh の入力の束縛（scripts/lib/repo-scan-lib.sh の rs_input_sha と同じ定義）。mode は external-checks か skip-labels
-function repoScanInputSha256(mode, repo, labels = []) {
-  return sha256Hex(['repo-scan', mode, repo ?? '', ...labels].join('\n'))
+// repo-scan.sh の入力の束縛（scripts/lib/repo-scan-lib.sh の rs_input_sha と同じ定義）。mode は external-checks か skip-labels。rest は skip-labels の [ノード番号のカンマ区切り, ...ラベル]（Issue #807）
+function repoScanInputSha256(mode, repo, rest = []) {
+  return sha256Hex(['repo-scan', mode, repo ?? '', ...rest].join('\n'))
 }
 // repo-scan.sh を run-verified.sh 経由で起動する 1 行。repo は駆動部の scanRepo（args.repo、無ければツリー取得の封筒のリポジトリ。isValidRepoSlug 済み。スクリプトは --repo の省略を exit 2 にする。Issue #808）。rest は --repo の後ろ。skillDir・nonce 未指定（プロンプトの文面だけを検査する単体テスト）はプレースホルダを書く（実ランでは駆動部冒頭の検証で必ず値が入る）
 function repoScanCommand(mode, nonce, repo, rest = '') {
   return `bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['repo-scan.sh']} repo-scan.sh --mode ${mode} --nonce ${nonce || 'NONCE_NOT_PROVIDED'} --repo ${repo}${rest}`
 }
-function skipLabelsPrompt(labels, nonce, repo) {
+function skipLabelsPrompt(labels, nonce, repo, nums) {
   return [
     '対象外ラベルの付いた open issue の番号を機械取得するタスク（判断・補完はしない）。',
     MERGE_CONTEXT_COMMON,
     '次のコマンドを 1 回だけ一字一句そのまま実行する（引用符内はラベル名のデータ）:',
-    repoScanCommand('skip-labels', nonce, repo, ` -- ${labels.map(shellSingleQuote).join(' ')}`),
+    repoScanCommand('skip-labels', nonce, repo, ` --numbers ${nums} -- ${labels.map(shellSingleQuote).join(' ')}`),
     SIGNED_OUTPUT_INSTRUCTION,
   ].join('\n')
 }
@@ -6237,7 +6237,9 @@ const outOfTreeDeps = { open: [], unknown: [], closed: [], ancestors: [] }
 // 対象外ラベル（args.skipLabels。Issue #720）の open ノードを毎ラン取得する（状態ファイルへは保存しない。 dryRun でも読み取りとして行う）。未指定なら agent を 1 回も呼ばない。1 回再試行しても取得できないラベルがあれば、open ノードを全て対象外にする（fail-closed。classifySkipLabels）。適用は実行キュー構築後の closed ループ。
 const skipLabelHit = new Map()
 const skippedLabels = { labels: skipLabelsInput ?? [], matched: [], unknown: [], absent: [] }
-if (skipLabelsInput) {
+// スクリプトへ渡すツリーの open ノードの番号（昇順のカンマ区切り。Issue #807）。スクリプトはこの集合との交わりだけを返し、入力の束縛にも入れる（リポジトリ全体の数千件で封筒の上限を超え、全 open ノードが待機になる経路を塞ぐ）。classifySkipLabels も open ノードとしか突き合わせない。open ノードが無ければ待たせる対象も無いので呼ばない
+const skipNums = tree.nodes.filter((n) => n.state === 'open').map((n) => n.number).sort((a, b) => a - b).join(',')
+if (skipLabelsInput && skipNums) {
   const byIndex = new Map()
   const absent = new Set()
   let pending = skipLabelsInput.map((_, k) => k + 1)
@@ -6245,8 +6247,8 @@ if (skipLabelsInput) {
     try {
       // 呼び出しごとの nonce（試行・依頼する添字で変える。前回の封筒を実行せず流用しても受理されない）。封筒の照合に通らない転記は契約違反としてこの回を破棄する
       const nonce = boundaryNonce(`skip-labels:${attempt}:${scanRepo}:${pending.join(',')}`)
-      const reply = await agent(skipLabelsPrompt(skipLabelsInput, nonce, scanRepo), { label: `plan:skip-labels${attempt > 1 ? '-retry' : ''}`, phase: 'Tree', model: 'haiku', effort: 'low', schema: SKIP_LABELS_SCHEMA })
-      const signed = verifySignedOutput(reply, nonce, repoScanInputSha256('skip-labels', scanRepo, skipLabelsInput))
+      const reply = await agent(skipLabelsPrompt(skipLabelsInput, nonce, scanRepo, skipNums), { label: `plan:skip-labels${attempt > 1 ? '-retry' : ''}`, phase: 'Tree', model: 'haiku', effort: 'low', schema: SKIP_LABELS_SCHEMA })
+      const signed = verifySignedOutput(reply, nonce, repoScanInputSha256('skip-labels', scanRepo, [skipNums, ...skipLabelsInput]))
       if (!signed.ok) {
         log(`⚠️ 対象外ラベルの取得（${attempt} 回目）を破棄した: 出力封筒の照合に失敗した（${signed.reason}）`)
         continue
