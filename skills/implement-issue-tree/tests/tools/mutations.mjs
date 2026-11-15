@@ -454,6 +454,7 @@ export const MUTATIONS = [
   { id: 'RS14-host-partition-unchecked', file: SRC, from: 'ids.length + p.failed.length !== total || ', to: '', tests: ['skip-labels.test.mjs'], note: "P4: entries と failed が全添字を覆うことを検査しない（欠落した添字が missing にも failed にも出ない）" },
   { id: 'RS15-host-skip-nonce-fixed', file: SRC, from: 'boundaryNonce(`skip-labels:${attempt}:', to: 'boundaryNonce(`skip-labels:1:', tests: ['skip-labels.test.mjs'], note: "P4: 再試行の nonce を 1 回目と同じにする（前回の封筒を流用しても通る）" },
   { id: 'RS16-host-external-input-unbound', file: SRC, from: "verifySignedOutput(reply, nonce, repoScanInputSha256('external-checks', repoArg))", to: 'verifySignedOutput(reply, nonce)', tests: RS_HOST, note: "P4: 外部チェック観測の封筒の入力の束縛（repo）を照合しない" },
+  { id: 'RS17-host-envelope-failure-fail-open', file: SRC, from: "log(`⚠️ 対象外ラベルの取得（${attempt} 回目）を破棄した: 出力封筒の照合に失敗した（${signed.reason}）`)\n        continue", to: "pending = []\n        continue", tests: ['skip-labels.test.mjs'], note: "P4: 封筒の照合に失敗した回で依頼を空にする（取得できていないのに missing が無くなり、open ノードを待たせずに着手する fail-open）" },
   // ページ経路（Issue #690）
   { id: 'FP1-page-input-unchecked', file: SRC, from: "checkTreeNodes(result, nonce, pageInput, attempt)", to: "checkTreeNodes(result, nonce, undefined, attempt)", tests: FETCH_TREE_PAGES, note: "#690: ページの封筒が tsvSha256 とページ番号に束縛されていること（inputSha256）を照合しない（別ページの出力の流用が通る）" },
   { id: 'FP2-page-dir-unchecked', file: SRC, from: "if (!treePageDirOk(p.dir)) return", to: "if (false) return", tests: FETCH_TREE_PAGES, note: "#690: エージェントが返した dir の形を検査せずにコマンドへ埋め込む" },

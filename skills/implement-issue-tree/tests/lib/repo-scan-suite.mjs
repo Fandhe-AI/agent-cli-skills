@@ -259,6 +259,16 @@ export function registerRepoScanTests(bash) {
     }
   })
 
+  T('skip-labels: ラベル一覧もページ送りを跨ぐ（2 ページ目にあるラベルは absent にならない）', () => {
+    const stub = makeGhRepoScanStub({
+      labels: { pages: [[{ name: 'first' }], [{ name: 'second-page' }]] },
+      issues: { first: issueList([1]), 'Second-Page': issueList([2]), nope: issueList([]) },
+    })
+    const e = envelopeOf(skip(stub, ['first', 'Second-Page', 'nope']))
+    assert.deepEqual(e.payload.absent, [3])
+    assert.deepEqual(e.payload.entries.map((x) => x.numbers), [[1], [2], []])
+  })
+
   T('skip-labels: ラベル一覧が空（ラベルが 1 件も無いリポジトリ）なら全ラベルが absent', () => {
     const stub = makeGhRepoScanStub({ labels: [], issues: { a: issueList([]), b: issueList([]) } })
     assert.deepEqual(envelopeOf(skip(stub, ['a', 'b'])).payload.absent, [1, 2])

@@ -27,7 +27,6 @@ RS_NAMES_JQ='.[].name'
 
 # 検査の上限
 RS_SLUG_MAX=64         # App slug の長さ（GitHub の slug は小文字英数字とハイフン）
-RS_APPS_MAX=100        # 返す slug の件数（3 件の PR × 1 ページ 30 件の check-run なので実際は 90 件以下）
 RS_LABELS_MAX=10       # ホストの parseSkipLabels の上限と同じ
 RS_LABEL_MAX_BYTES=200 # ラベル 1 件の長さ。ホストは 50 文字までで、日本語は 1 文字 3 バイト（LC_ALL=C のバイト数）に収まる余裕を持たせる
 RS_NUMBER_MAX_LEN=9    # イシュー番号の桁数（is_uint と同じ。10 億未満）
@@ -80,7 +79,8 @@ ${l}"
   printf '%s' "${text}" | so_sha256
 }
 
-# 複数行の slug の候補（$1）から、形式の正しいものを昇順・重複なしで RS_APPS（改行区切り）へ、捨てた件数（重複を除いた形式不正の行の数）を RS_DROPPED へ入れる。
+# 複数行の slug の候補（$1）から、形式の正しいものを昇順・重複なしで RS_APPS（改行区切り）へ、捨てた件数（形式不正の行の数。同じ不正な値が重複していても行ごとに数える）を RS_DROPPED へ入れる。
+# 件数の上限は設けない（3 件の PR × check-runs の 1 ページ 30 件なので高々 90 件。ホストが 100 件以内を検査する）。
 # 並びは LC_ALL=C の sort -u で固定する（ロケールで並びが変わらない）。空行は数えない。
 rs_collect_apps() {
   local line valid=""

@@ -427,7 +427,7 @@ function parseDryRun(raw) {
   return raw
 }
 const dryRunEnabled = parseDryRun(argOf('dryRun'))
-// 対象外ラベル args.skipLabels（Issue #720）。人手の issue を同じツリーに置き、ラベルの付いた open ノードを自動実装の対象から外して blocked で待たせる。ラベルは付いたノード自身にだけ効き子孫へは継承しない。 1〜50 文字（制御文字・改行・前後空白は不可。`:` と空白は可）× 10 件まで。重複は除く。空配列と未指定は同じ（undefined = 取得もしない）。シェルと jq へ渡す経路は skipLabelsPrompt（単一引用符化 + --arg）。
+// 対象外ラベル args.skipLabels（Issue #720）。人手の issue を同じツリーに置き、ラベルの付いた open ノードを自動実装の対象から外して blocked で待たせる。ラベルは付いたノード自身にだけ効き子孫へは継承しない。 1〜50 文字（制御文字・改行・前後空白は不可。`:` と空白は可）× 10 件まで。重複は除く。空配列と未指定は同じ（undefined = 取得もしない）。シェルと jq へ渡す経路は skipLabelsPrompt（起動行の単一引用符化）と scripts/repo-scan.sh（jq の --arg → @uri でクエリ文字列へ）。
 // `,` は labels= で AND 指定になるため拒否する。
 const SKIP_LABEL_RE = /^[^\p{Cc},]{1,50}$/u
 function parseSkipLabels(raw) {

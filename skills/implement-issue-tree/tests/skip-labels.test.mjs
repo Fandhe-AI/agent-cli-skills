@@ -93,10 +93,6 @@ test('skipLabelsPrompt: 起動行は run-verified.sh 経由の repo-scan.sh の 
   assert.ok(!p.includes('\\n') || !line.includes('\\\\'), '起動行にバックスラッシュの重ね書きが無い')
 })
 
-test('skipLabelsPrompt: args.repo は --repo で束縛する', () => {
-  assert.ok(D.skipLabelsPrompt(['a'], 'n').includes('repo-scan.sh --mode skip-labels --nonce n -- \'a\''))
-})
-
 // 封筒の payload（スクリプトの出力）→ 依頼した添字の取得結果。entries = [{ i, numbers }]
 const pl = (entries, o = {}) => ({ absent: [], failed: [], entries, inputSha256: 'x', ...o })
 
@@ -321,6 +317,22 @@ test('封筒の不一致（sha256・nonce・入力の束縛）は 1 回だけ再
     assert.deepEqual(result.skippedLabels, { labels, matched: [2], unknown: [], absent: [] }, broken)
     assert.ok(labelsOf(calls).includes('plan:#3'), broken)
     assert.ok(!labelsOf(calls).includes('plan:#2'), broken)
+  }
+})
+
+test('封筒の照合に 2 回とも失敗したら、open ノードを全て待たせて何も着手しない（fail-closed）', async () => {
+  const labels = ['owner:human']
+  for (const broken of [(prompt) => ({ ...skipLabelsReply(prompt, { entries: [{ i: 1, numbers: [] }] }), sha256: '0'.repeat(64) }), () => null]) {
+    const { result, calls, logs } = await runScript({
+      args: ARGS({ skipLabels: labels }),
+      leaves: [2, 3],
+      override: (label, opts, prompt) => (label.startsWith('plan:skip-labels') ? broken(prompt) : undefined),
+    })
+    assert.deepEqual(labelsOf(calls).filter((l) => l.startsWith('plan:skip-labels')), ['plan:skip-labels', 'plan:skip-labels-retry'])
+    assert.deepEqual(startedLabels(calls), [], '取得できないのに着手した')
+    assert.deepEqual(result.skippedLabels, { labels, matched: [1, 2, 3], unknown: ['owner:human'], absent: [] })
+    assert.ok(logs.some((m) => m.includes('出力封筒の照合に失敗した（sha256）') || m.includes('出力封筒の照合に失敗した（missing）')))
+    for (const n of [1, 2, 3]) assert.equal(result.done.find((r) => r.issue === n).status, 'blocked')
   }
 })
 

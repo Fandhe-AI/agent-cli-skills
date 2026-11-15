@@ -155,15 +155,15 @@ for (const bash of availableBashes()) {
     }
   })
 
-  test(`[${bash}] repo-scan-lib: 判定の関数がロケールに依存しない（LC_ALL を変えても [a-z] が大文字・非 ASCII に広がらない）`, () => {
+  test(`[${bash}] repo-scan-lib: LC_ALL=C のとき slug の判定は ASCII の小文字英数字とハイフンだけ（大文字・全角・アクセント付きは不可）`, () => {
     const drv = `
 set -u
 . "$1" || exit 9
 . "$2" || exit 9
 for s in Cursor Ａ é a_b ok; do rs_valid_slug "$s" && printf 'T' || printf 'F'; done
 `
-    // 呼び出し元のスクリプトが LC_ALL=C を設定する前提の lib。環境が別のロケールでも、スクリプト経由なら C になることはスイートが確かめる。
-    // ここでは LC_ALL=C のとき期待どおり（ok だけが slug）になることだけを固定する
+    // lib は呼び出し元のスクリプトが LC_ALL=C を設定する前提（ここでも C にして流す）。環境のロケールが違ってもスクリプト経由なら C になることは
+    // repo-scan.test.mjs の「LC_ALL を変えても同じ出力」が確かめる
     const r = spawnSync(bash, ['-c', `LC_ALL=C; export LC_ALL; ${drv}`, 'driver', SIGNED, LIB], { encoding: 'utf8' })
     assert.equal(r.stdout, 'FFFFT')
   })
