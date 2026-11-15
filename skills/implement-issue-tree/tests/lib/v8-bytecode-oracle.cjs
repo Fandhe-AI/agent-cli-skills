@@ -92,7 +92,10 @@ function parse(text) {
 }
 
 function canon(fn, insn) {
-  const base = insn.op.replace(/\.(Wide|ExtraWide)$/, '').replace(/^Star\d+$/, 'Star')
+  const raw = insn.op.replace(/\.(Wide|ExtraWide)$/, '')
+  // 短縮形 StarN は代入先のレジスタを opcode 名に持つので、レジスタを残して Star と同じ扱いにする
+  const star = /^Star(\d+)$/.exec(raw)
+  const base = star ? 'Star' : raw
   const idx = (off) => {
     const i = fn.at.get(+off)
     if (i === undefined) throw new Error(`命令境界でないオフセット ${off}`)
@@ -112,7 +115,7 @@ function canon(fn, insn) {
     if (v === undefined) throw new Error(`定数プールの範囲外: ${insn.op} ${insn.args}`)
     return `[=${v}]`
   })
-  return `${base} ${args}`
+  return `${base}${star ? ` r${star[1]}` : ''} ${args}`
 }
 
 function countFunctions(code) {

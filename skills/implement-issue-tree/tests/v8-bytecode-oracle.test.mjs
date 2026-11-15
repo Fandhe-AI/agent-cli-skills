@@ -34,6 +34,7 @@ const CASES = [
   ['名前つき関数式の捕捉', 'function f(){const h=1;return function g(){return h}}', 'function f(){const h=1;return function h(){return h}}', false],
   ['束縛の入れ替え（正しい）', 'function f(){const a=1,b=2;return [a,b]}', 'function f(){const b=1,a=2;return [b,a]}', true],
   ['参照だけの入れ替え', 'function f(){const a=1,b=2;return [a,b]}', 'function f(){const a=1,b=2;return [b,a]}', false],
+  ['代入先レジスタの入れ替え', 'function f(){let a,b;a=1;b=2;return a-b}', 'function f(){let a,b;b=1;a=2;return a-b}', false],
   ['注入名の捕捉', 'function f(){const q=1;return agent(q)}', 'function f(){const agent=1;return agent(agent)}', false],
   // 盲点の記録: オブジェクトリテラルのキーは boilerplate に入りバイトコードに出ない（検証器が見る）
   ['盲点: オブジェクトのキー', 'function f(){return {foo:1}}', 'function f(){return {a:1}}', true],

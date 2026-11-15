@@ -27,6 +27,7 @@ const CONVERSIONS = [
   ['自由変数の名前は新しい名前に使わない', 'function f(){const longName=1;return a(longName)}', 'function f(){const b=1;return a(b)}'],
   ['分割代入の代入（宣言でない）の shorthand', 'function f(o){let value;({value}=o);return value}', 'function f(o){let a;({value:a}=o);return a}'],
   ['直下のブロックから外側の束縛を参照（捕捉しない）', 'function f(){const outerName=1;{const innerName=2;use(outerName,innerName)}}', 'function f(){const a=1;{const b=2;use(a,b)}}'],
+  ['__proto__ の束縛は改名しない（shorthand を展開するとプロトタイプの設定になる）', 'function f(){const __proto__={x:1};const value=2;return {__proto__,value}}', 'function f(){const __proto__={x:1};const a=2;return {__proto__,value:a}}'],
   ['rest 引数と配列パターン', 'function f(...rest){const [first,,third]=rest;return first+third}', 'function f(...a){const [b,,c]=a;return b+c}'],
 ]
 

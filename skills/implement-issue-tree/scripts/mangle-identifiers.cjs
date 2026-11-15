@@ -274,7 +274,9 @@ function assignNames(bindings, conflicts, forbidden) {
   const newName = new Array(bindings.length).fill(null)
   const top = []
   for (const b of bindings) {
-    if (b.scope.kind !== 'program') continue
+    // {__proto__} の shorthand は展開すると意味が変わる（プロトタイプの設定になる）ので、この名前は改名しない
+    if (b.name === '__proto__') newName[b.idx] = b.name
+    if (b.scope.kind !== 'program' || newName[b.idx] !== null) continue
     if (b.name === 'meta' || b.name.length <= 2) newName[b.idx] = b.name
     else top.push(b)
   }

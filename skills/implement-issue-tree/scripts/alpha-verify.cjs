@@ -136,8 +136,10 @@ function stringifySite(id, parent) {
   if (parent.type === 'CallExpression' && parent.callee.type === 'Identifier' && parent.callee.name === 'String' && parent.arguments.includes(id)) {
     return { why: 'String() の引数', callee: parent.callee }
   }
-  if (parent.type === 'MemberExpression' && !parent.computed && parent.object === id && STRINGIFY_MEMBERS.has(parent.property.name)) {
-    return { why: `.${parent.property.name} のオブジェクト` }
+  if (parent.type === 'MemberExpression' && parent.object === id) {
+    if (!parent.computed && STRINGIFY_MEMBERS.has(parent.property.name)) return { why: `.${parent.property.name} のオブジェクト` }
+    // 計算プロパティ（f["name"]・f[k]）はキーを判定しきれないので、関数値に対しては一律に拒否する
+    if (parent.computed) return { why: '計算プロパティのオブジェクト' }
   }
   return null
 }
@@ -148,6 +150,7 @@ function analyze(ast, goal) {
   const res = new Map()
   const fnDecls = new Set()
   const sites = []
+  const aliases = [] // [別名の宣言 | 代入先の識別子, 値の識別子]（const a = f / a = f）
   let bad = null
   walk.fullAncestor(ast, (n, _s, anc) => {
     if (bad) return
@@ -158,6 +161,8 @@ function analyze(ast, goal) {
     }
     if (n.type === 'FunctionDeclaration' || (n.type === 'FunctionExpression' && n.id)) fnDecls.add(n.id)
     else if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init && (n.init.type === 'FunctionExpression' || n.init.type === 'ArrowFunctionExpression')) fnDecls.add(n.id)
+    else if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init && n.init.type === 'Identifier') aliases.push([n.id, n.init])
+    else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && n.right.type === 'Identifier') aliases.push([n.left, n.right])
     if (n.type !== 'Identifier') return
     const site = stringifySite(n, anc[anc.length - 2])
     if (site) sites.push({ id: n, ...site })
@@ -176,6 +181,18 @@ function analyze(ast, goal) {
     }
     res.set(n, 'free')
   })
+  // 関数値を別名へ移した束縛も関数に解決されるものとして扱う（不動点まで。別名の別名を含む）
+  const declOf = (id) => (res.get(id) === 'free' ? null : res.get(id) ?? null)
+  for (let changed = true; changed;) {
+    changed = false
+    for (const [target, value] of aliases) {
+      const t = declOf(target)
+      if (t && !fnDecls.has(t) && fnDecls.has(declOf(value))) {
+        fnDecls.add(t)
+        changed = true
+      }
+    }
+  }
   const stringified = sites.filter((x) => fnDecls.has(res.get(x.id)) && (!x.callee || res.get(x.callee) === 'free'))
   // 最上位（module は Program、script は包み関数の本体）の meta 宣言
   const top = goal === 'module' ? ast.body : ast.body[0].expression.body.body
@@ -204,7 +221,13 @@ function pairUp(a, b, pairs, owner, key) {
   const at = typeof a.type === 'string' ? a : owner
   for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
     if (POSITION_KEYS.has(k)) continue
-    if (k === 'shorthand' && a.type === 'Property') continue
+    if (k === 'shorthand' && a.type === 'Property') {
+      // {__proto__} はデータプロパティ、{__proto__: x} はプロトタイプの設定で意味が違う
+      if (a.shorthand !== b.shorthand && !a.computed && (a.key.name ?? a.key.value) === '__proto__') {
+        throw new Mismatch(`__proto__ の shorthand が変わった（offset ${a.start}）`)
+      }
+      continue
+    }
     if (k === 'value' && a.type === 'Literal' && a.regex) continue // 正規表現は regex（pattern・flags）と raw で比べる
     pairUp(a[k], b[k], pairs, at, k)
   }

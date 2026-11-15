@@ -102,6 +102,15 @@ const CASES = [
   ['fnstr-toString', 'function f(){}use(f.toString())', 'function f(){}use(f.toString())', false, 'mismatch', /関数値の文字列化.*\.toString のオブジェクト/],
   ['fnstr-length', 'const f=()=>1;use(f.length)', 'const f=()=>1;use(f.length)', false, 'mismatch', /関数値の文字列化.*\.length のオブジェクト/],
   ['fnstr-member-local-ok', 'function f(){}function g(){const f=[1];return f.length+f.name+f.toString()}use(g)', 'function f(){}function g(){const f=[1];return f.length+f.name+f.toString()}use(g)', true, 'match'],
+  // 計算プロパティ（文字列キー・動的キー）と、const / 代入で別名へ移した関数値も拒否する
+  ['fnstr-computed-string', 'function longName(){}use(longName["name"])', 'function IA(){}use(IA["name"])', false, 'mismatch', /関数値の文字列化.*計算プロパティのオブジェクト/],
+  ['fnstr-computed-dynamic', 'function longName(){}use(longName[k])', 'function IA(){}use(IA[k])', false, 'mismatch', /関数値の文字列化.*計算プロパティのオブジェクト/],
+  ['fnstr-alias-const', 'function f(){const longValue=()=>1;const alias=longValue;return alias.name}use(f)', 'function f(){const a=()=>1;const b=a;return b.name}use(f)', false, 'mismatch', /関数値の文字列化.*\.name のオブジェクト/],
+  ['fnstr-alias-assign', 'function f(){const longValue=()=>1;let alias;alias=longValue;return `${alias}`}use(f)', 'function f(){const a=()=>1;let b;b=a;return `${b}`}use(f)', false, 'mismatch', /関数値の文字列化.*テンプレートの式/],
+  ['fnstr-alias-array-ok', 'function f(){const xs=[1];const alias=xs;return alias.length}use(f)', 'function f(){const a=[1];const b=a;return b.length}use(f)', true, 'match'],
+  // {__proto__} はデータプロパティ、{__proto__: x} はプロトタイプの設定。shorthand の展開を拒否する
+  ['proto-shorthand-expanded', 'function f(){const __proto__={x:1};return {__proto__}}use(f)', 'function f(){const a={x:1};return {__proto__:a}}use(f)', false, 'mismatch', /__proto__ の shorthand/],
+  ['proto-shorthand-kept-ok', 'function f(){const __proto__={x:1};return {__proto__}}use(f)', 'function f(){const __proto__={x:1};return {__proto__}}use(f)', true, 'match'],
 
   // 対応外の構文は改名が無くても（恒等でも）拒否する。with は module では構文エラーなので ok: false だけを表明する
   ['reject-var', 'function f(){var a=1;return a}use(f)', 'function f(){var a=1;return a}use(f)', false, 'mismatch', /対応外の構文 var/],
