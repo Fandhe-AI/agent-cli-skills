@@ -2,11 +2,10 @@
 name: anthropic-claude-code-extend
 description: >
   Claude Code (code.claude.com) の拡張機能リファレンス。
-  Agent Skills (SKILL.md), slash commands, output styles, subagents (cross-session messaging),
-  agent teams, agent view, workflows, routines, scheduled tasks, hooks (PreToolUse / PostToolUse),
-  mods (Claude Code mods), plugins, plugin eval, plugin marketplace (marketplace.json),
-  MCP 設定 (.mcp.json / claude mcp add), managed MCP,
-  channels (--channels / claude/channel push events, webhook / telegram / discord / imessage), tools-reference, advisor, ultrareview。
+  Agent Skills (SKILL.md), slash commands, output styles, subagents, agent teams,
+  workflows, routines, scheduled tasks, hooks (PreToolUse / PostToolUse), plugins,
+  plugin marketplace (marketplace.json), MCP 設定 (.mcp.json / claude mcp add),
+  channels (--channels, webhook / telegram / discord / imessage), tools-reference, advisor, ultrareview。
 user-invocable: false
 ---
 
@@ -16,6 +15,8 @@ Claude Code (code.claude.com) — CLI 本体を拡張する機能群のリファ
 slash commands・output styles、subagents / agent teams / agent view / workflows / routines /
 scheduled tasks、hooks、plugins / plugin marketplace、MCP 設定、channels（`--channels` /
 `claude/channel` push events）、built-in tools（advisor / ultrareview 含む）をカバーする。
+
+対象: Claude Code 2.1.325（2026-11-13）まで。ページ先頭の `last verified` が各ページの取得日（2026-11-14 または 2026-10-17 / 2026-08-07）。
 
 CLI 本体（インストール・設定・セッション）は `anthropic-claude-code`、Agent SDK の Skills / MCP /
 subagents / hooks は `anthropic-agent-sdk`、Claude API 側の Agent Skills / Skills API / MCP connector は

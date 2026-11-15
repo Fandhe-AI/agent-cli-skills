@@ -5,37 +5,37 @@
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/anthropic-claude-code/SKILL.md",
-      "computedHash": "6063a9c3c2c9352567bb5abe8c9fd88ab1e86f18cad2e23094099d3185da23e0"
+      "computedHash": "cd71b1039d5ae7b620978e550bbdfa542cb926d616f705cbd0bdbfe3b5351aaa"
     },
     "anthropic-claude-code-extend": {
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/anthropic-claude-code-extend/SKILL.md",
-      "computedHash": "75e20eaedc4c2622d12095eb9904520eaa4f2e02698ea18d383645141fa500c4"
+      "computedHash": "be8c4fe97b2f2383675e28979735a98dfe86761d24c47909bd845c364218a01c"
     },
     "github-docs": {
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/github-docs/SKILL.md",
-      "computedHash": "84141a01a75e19b8683ea39c0fafe16e0b6a8ab23bcc0c4f90740ad03dd27118"
+      "computedHash": "2ab64e8f268329ec2a8e311702e7393b6c35729c466bbcf0df6d40c7e9aa8f64"
     },
     "openai-codex": {
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/openai-codex/SKILL.md",
-      "computedHash": "de6c721269ac08b9f76e090b252a63dd0763c3c470622ed0d6ff481ba9aeac86"
+      "computedHash": "e99be6d9af3234bfd5c55a660844961ebb995c039df6fe4689e8231c82cd0fb0"
     },
     "opencode-build": {
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/opencode-build/SKILL.md",
-      "computedHash": "f498886f0153701818698b5e0a885e21ac9c241ba6dee411cb8b2280f6974aa2"
+      "computedHash": "02d2742f6f62d9b0926069dc72b74a623279e0050d7974cd21f8eec110adc107"
     },
     "opencode-usage": {
       "source": "Fandhe-AI/agent-reference-skills",
       "sourceType": "github",
       "skillPath": "skills/opencode-usage/SKILL.md",
-      "computedHash": "e2f48d357f1e66a4fe237b54e1bfd82f801a290512344c7aecec39c2be46c29c"
+      "computedHash": "5e74b06707746fc8b96428a08dac9bd18f3910b1165fe7f2fda12a4edbe27bd8"
     }
   }
 }
