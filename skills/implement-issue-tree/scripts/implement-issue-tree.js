@@ -294,7 +294,7 @@ const pagesProblem=treePagesProblem(signed.payload)
 if(pagesProblem===''){
 const got=await fetchTreePages({ ...result,payload:signed.payload},nonce,inputSha)
 if(got.titleMismatch)log(TITLE_WARN)
-return{ ...got,attempts:attempt,pages:signed.payload.pages}
+return{ ...got,attempts:attempt,pages:signed.payload.pages,repo:signed.payload.repo}
 }
 if(treePageDirOk(signed.payload.dir))await releaseTreeDir(signed.payload.dir)
 lastReason=`ツリー取得の封筒が不正（${pagesProblem}）`+treeFetchRetrySuffix(attempt,'ツリー規模（exit 7 の上限 30 ページ）と取得スクリプトの出力を確かめる')
@@ -306,8 +306,9 @@ if(c.reason!==undefined){lastReason=c.reason;log(`⚠️ （試行 ${attempt}）
 const{nodes,folded,verified}=c
 const incomplete=findIncompleteTreeNodes(nodes)
 if(incomplete.length===0){
-if(!verified.titleMismatch)return{nodes,attempts:attempt,folded,titleMismatch:false,pages:1}
-titleFallback={nodes,attempts:attempt,folded,titleMismatch:true,pages:1}
+const repo=result.payload.repo
+if(!verified.titleMismatch)return{nodes,attempts:attempt,folded,titleMismatch:false,pages:1,repo}
+titleFallback={nodes,attempts:attempt,folded,titleMismatch:true,pages:1,repo}
 if(attempt===1){log('⚠️ （試行 1）title だけの書き写し誤りの可能性（構造は一致）。1 回だけ取り直す');continue}
 log(TITLE_WARN)
 return titleFallback
@@ -1473,6 +1474,7 @@ nodesSha256:strD('封筒の値をそのまま転記'),
 optinSha256:strD('封筒の値をそのまま転記'),
 structSha256:strD('封筒の値をそのまま転記'),
 taskIdSha256:strD('封筒の値をそのまま転記'),
+repo:strD('取得の封筒だけ。転記'),
 }),
 sha256:strD('成功時のみ。標準出力最終行 JSON の sha256 をそのまま転記する（再計算しない）'),
 failure:{
@@ -2002,15 +2004,15 @@ function repoScanInputSha256(mode,repo,labels=[]){
 return sha256Hex(['repo-scan',mode,repo??'', ...labels].join('\n'))
 }
 
-function repoScanCommand(mode,nonce,rest=''){
-return`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['repo-scan.sh']} repo-scan.sh --mode ${mode} --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${repoArg ? ` --repo ${repoArg}` : ''}${rest}`
+function repoScanCommand(mode,nonce,repo,rest=''){
+return`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['repo-scan.sh']} repo-scan.sh --mode ${mode} --nonce ${nonce || 'NONCE_NOT_PROVIDED'} --repo ${repo}${rest}`
 }
-function skipLabelsPrompt(labels,nonce){
+function skipLabelsPrompt(labels,nonce,repo){
 return[
 '対象外ラベルの付いた open issue の番号を機械取得するタスク（判断・補完はしない）。',
 MERGE_CONTEXT_COMMON,
 '次のコマンドを 1 回だけ一字一句そのまま実行する（引用符内はラベル名のデータ）:',
-repoScanCommand('skip-labels',nonce,` -- ${labels.map(shellSingleQuote).join(' ')}`),
+repoScanCommand('skip-labels',nonce,repo,` -- ${labels.map(shellSingleQuote).join(' ')}`),
 SIGNED_OUTPUT_INSTRUCTION,
 ].join('\n')
 }
@@ -2619,18 +2621,18 @@ inputSha256:{type:'string'},
 prs:{type:'integer'},
 }))
 
-function externalChecksPrompt(nonce){
+function externalChecksPrompt(nonce,repo){
 return[
 '外部チェック観測タスク（結果は参考値。構成の確定は args.externalChecks の明示入力で行う）。',
 COMMON,
 '次のコマンドを 1 回だけ一字一句そのまま実行する:',
-repoScanCommand('external-checks',nonce),
+repoScanCommand('external-checks',nonce,repo),
 SIGNED_OUTPUT_INSTRUCTION,
 ].join('\n')
 }
 
-function observedExternalApps(reply,nonce){
-const s=verifySignedOutput(reply,nonce,repoScanInputSha256('external-checks',repoArg))
+function observedExternalApps(reply,nonce,repo){
+const s=verifySignedOutput(reply,nonce,repoScanInputSha256('external-checks',repo))
 const a=s.payload?.apps
 const ok=s.ok&&Array.isArray(a)&&a.length<=100&&a.every((x,k)=>isStr(x)&& /^[a-z0-9][a-z0-9-]{0,63}$/.test(x) && (k === 0 || x > a[k - 1])) && isInt(s.payload.errs) && s.payload.errs >= 0
 return ok?{apps:a,errs:s.payload.errs}:null
@@ -3636,9 +3638,9 @@ const SCRIPT_SHA256={
 'merge-gate.sh':'079a2db97e251450ab58c50f376289e9524b96ac20fae5e5a518e631f2df74a1',
 'worktree-remove.sh':'4018ced64495bea0f54029f1350076b73b2fb0a1a721aec1401dbc7599c44a40',
 'recover-prep.sh':'d148c8b86ce0985b20910eec28436e6f649fa9b5477c5af6da8086112846b539',
-'fetch-tree.sh':'0437aaad889c42bee74356446f7aa5551b274cc88c79f39ba8b4862bdd0c5224',
+'fetch-tree.sh':'9f0116d996dadacdbda4293432a2cafaaaf48eacc662bd547b4c32674d5818af',
 'declared-deps.sh':'9bf3683b2b7772c4f93bdac226a58278e54be51f9d8520894bd098472d46fef1',
-'repo-scan.sh':'9ece5c2fa5df7e6e3d4bb21657a313418e253f094bb907401dc49e26dd6b540f',
+'repo-scan.sh':'b1d1e1c216c8d142ca9474def1f566c0d16d7538fc40fcef251f9ac2387d142f',
 }
 
 
@@ -6065,12 +6067,14 @@ phase('Tree')
 const treeFetch=await fetchTree()
 const tree={nodes:treeFetch.nodes}
 
+const scanRepo=repoArg||(isValidRepoSlug(treeFetch.repo)?treeFetch.repo:'')
 
 
-const detectSkip=externalChecksInput||dryRunEnabled
-const detectNonce=boundaryNonce(`detect-external-checks:${repoArg}`)
 
-const detected=detectSkip?{apps:[]}:observedExternalApps(await agent(externalChecksPrompt(detectNonce),{label:'detect:external-checks',phase:'Tree',model:'haiku',effort:'low',schema:EXTERNAL_CHECKS_SCHEMA}),detectNonce)
+const detectSkip=externalChecksInput||dryRunEnabled|| !scanRepo
+const detectNonce=boundaryNonce(`detect-external-checks:${scanRepo}`)
+
+const detected=detectSkip?{apps:[]}:observedExternalApps(await agent(externalChecksPrompt(detectNonce,scanRepo),{label:'detect:external-checks',phase:'Tree',model:'haiku',effort:'low',schema:EXTERNAL_CHECKS_SCHEMA}),detectNonce,scanRepo)
 if(!detected)log('⚠️ 外部チェックの観測を採用しない（出力封筒の照合失敗）。観測なしで続行する')
 else if(detected.errs>0)log(`⚠️ 外部チェックの観測で gh の失敗が ${detected.errs} 件あった（取得できた分だけで続行する）`)
 const observedCheckApps=detected?.apps??[]
@@ -6237,12 +6241,12 @@ if(skipLabelsInput){
 const byIndex=new Map()
 const absent=new Set()
 let pending=skipLabelsInput.map((_,k)=>k+ 1)
-for(let attempt=1;attempt<=2&&pending.length>0;attempt++){
+for(let attempt=1;attempt<=2&&pending.length>0&&scanRepo;attempt++){
 try{
 
-const nonce=boundaryNonce(`skip-labels:${attempt}:${repoArg}:${pending.join(',')}`)
-const reply=await agent(skipLabelsPrompt(skipLabelsInput,nonce),{label:`plan:skip-labels${attempt > 1 ? '-retry' : ''}`,phase:'Tree',model:'haiku',effort:'low',schema:SKIP_LABELS_SCHEMA})
-const signed=verifySignedOutput(reply,nonce,repoScanInputSha256('skip-labels',repoArg,skipLabelsInput))
+const nonce=boundaryNonce(`skip-labels:${attempt}:${scanRepo}:${pending.join(',')}`)
+const reply=await agent(skipLabelsPrompt(skipLabelsInput,nonce,scanRepo),{label:`plan:skip-labels${attempt > 1 ? '-retry' : ''}`,phase:'Tree',model:'haiku',effort:'low',schema:SKIP_LABELS_SCHEMA})
+const signed=verifySignedOutput(reply,nonce,repoScanInputSha256('skip-labels',scanRepo,skipLabelsInput))
 if(!signed.ok){
 log(`⚠️ 対象外ラベルの取得（${attempt} 回目）を破棄した: 出力封筒の照合に失敗した（${signed.reason}）`)
 continue

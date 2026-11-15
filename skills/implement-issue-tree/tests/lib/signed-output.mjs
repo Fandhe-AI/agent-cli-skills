@@ -210,6 +210,9 @@ export function treeInputSha256(root, repo = '') {
   return inputSha256(`fetch-tree\n${root}\n${repo}`)
 }
 
+// args.repo を渡さないランで、ツリー取得の封筒が返すツリーのリポジトリ（ホストはこれで repo-scan.sh を束縛する。Issue #808）
+export const TREE_DEFAULT_REPO = 'o/r'
+
 // プロンプトのコマンド `... --nonce N --root R [--repo O/R]` から封筒を作る（正直なエージェントが fetch-tree.sh を実行して転記した結果）。
 // nodes = エージェントが書き写した nodes。opts.digestNodes = スクリプトが見た『真の内容』（既定は nodes）で、書き写しの誤りを模すには
 // nodes だけを書き換える。opts.nonce / opts.payload / opts.sha256 / opts.omit / opts.failure で封筒の欠落・不整合・失敗申告を模す。
@@ -219,7 +222,8 @@ export function treeFetchReply(prompt, nodes, opts = {}) {
   const repo = /--repo ([A-Za-z0-9._/-]+)/.exec(String(prompt))?.[1] ?? ''
   if (nonce === null || root === undefined) throw new Error('プロンプトに fetch-tree.sh のコマンドが無い')
   const truth = opts.digestNodes ?? nodes
-  const payload = { count: truth.length, inputSha256: treeInputSha256(root, repo), nodesSha256: treeNodesSha256(truth), optinSha256: treeOptinSha256(truth), pages: 1, structSha256: treeStructSha256(truth), taskIdSha256: treeTaskIdSha256(truth), ...(opts.payload ?? {}) }
+  // repo: fetch-tree.sh は --repo があればその値、無ければルートの repository_url（偽 gh の既定は o/r）を出す（Issue #808）
+  const payload = { count: truth.length, inputSha256: treeInputSha256(root, repo), nodesSha256: treeNodesSha256(truth), optinSha256: treeOptinSha256(truth), pages: 1, repo: repo || TREE_DEFAULT_REPO, structSha256: treeStructSha256(truth), taskIdSha256: treeTaskIdSha256(truth), ...(opts.payload ?? {}) }
   const env = makeEnvelope(opts.nonce ?? nonce, payload)
   const out = { nodes, nonce: env.nonce, payload: env.payload, sha256: opts.sha256 ?? env.sha256 }
   // failure 申告（{ exitCode, stderr } か旧形式の文字列）。正直なエージェントは封筒を作らないので既定では封筒の欄を出さない

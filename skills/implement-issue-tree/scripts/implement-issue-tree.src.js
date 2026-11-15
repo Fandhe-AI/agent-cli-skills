@@ -269,7 +269,7 @@ async function fetchTreePages(main, mainNonce, inputSha) {
 }
 
 // ツリー取得（Issue #667・#668）。取得直後に畳み込み → 型の検査 → 封筒の照合 → 件数・ダイジェストの照合 → 完全性検査の順で行い、失敗したら 1 回だけ取り直す。検査を依存宣言の抽出などの agent より前に置き、不完全なツリーのまま後続 agent を無駄に起動しない。 title だけの不一致（titleMismatch）は構造検証・完全性検査を通ったものに限り 1 回取り直し、再度でも残れば警告つきで続行する（Issue #687）。
-// 封筒の pages が 2 以上なら fetchTreePages（ページごとの検証済み断片の連結）へ進む（Issue #690）。戻り値: { nodes, attempts, folded, titleMismatch, pages }（folded は採用した試行で畳んだ記録）
+// 封筒の pages が 2 以上なら fetchTreePages（ページごとの検証済み断片の連結）へ進む（Issue #690）。戻り値: { nodes, attempts, folded, titleMismatch, pages, repo }（folded は採用した試行で畳んだ記録。repo は照合済みの封筒のツリーのリポジトリで、形式は未検査）
 async function fetchTree() {
   let lastReason = ''
   let titleFallback = null
@@ -294,7 +294,7 @@ async function fetchTree() {
       if (pagesProblem === '') {
         const got = await fetchTreePages({ ...result, payload: signed.payload }, nonce, inputSha)
         if (got.titleMismatch) log(TITLE_WARN)
-        return { ...got, attempts: attempt, pages: signed.payload.pages }
+        return { ...got, attempts: attempt, pages: signed.payload.pages, repo: signed.payload.repo }
       }
       if (treePageDirOk(signed.payload.dir)) await releaseTreeDir(signed.payload.dir)
       lastReason = `ツリー取得の封筒が不正（${pagesProblem}）` + treeFetchRetrySuffix(attempt, 'ツリー規模（exit 7 の上限 30 ページ）と取得スクリプトの出力を確かめる')
@@ -306,8 +306,9 @@ async function fetchTree() {
     const { nodes, folded, verified } = c
     const incomplete = findIncompleteTreeNodes(nodes)
     if (incomplete.length === 0) {
-      if (!verified.titleMismatch) return { nodes, attempts: attempt, folded, titleMismatch: false, pages: 1 }
-      titleFallback = { nodes, attempts: attempt, folded, titleMismatch: true, pages: 1 }
+      const repo = result.payload.repo
+      if (!verified.titleMismatch) return { nodes, attempts: attempt, folded, titleMismatch: false, pages: 1, repo }
+      titleFallback = { nodes, attempts: attempt, folded, titleMismatch: true, pages: 1, repo }
       if (attempt === 1) { log('⚠️ （試行 1）title だけの書き写し誤りの可能性（構造は一致）。1 回だけ取り直す'); continue }
       log(TITLE_WARN)
       return titleFallback
@@ -1473,6 +1474,7 @@ const TREE_SCHEMA = obj(['nodes'], {
         optinSha256: strD('封筒の値をそのまま転記'),
         structSha256: strD('封筒の値をそのまま転記'),
         taskIdSha256: strD('封筒の値をそのまま転記'),
+        repo: strD('取得の封筒だけ。転記'),
       }),
     sha256: strD('成功時のみ。標準出力最終行 JSON の sha256 をそのまま転記する（再計算しない）'),
     failure: {
@@ -2001,16 +2003,16 @@ const SKIP_LABELS_SCHEMA = signedOutputSchema(obj(['absent', 'entries', 'failed'
 function repoScanInputSha256(mode, repo, labels = []) {
   return sha256Hex(['repo-scan', mode, repo ?? '', ...labels].join('\n'))
 }
-// repo-scan.sh を run-verified.sh 経由で起動する 1 行。rest は --repo の後ろ。repoArg は isValidRepoSlug 済み。skillDir・nonce 未指定（プロンプトの文面だけを検査する単体テスト）はプレースホルダを書く（実ランでは駆動部冒頭の検証で必ず値が入る）
-function repoScanCommand(mode, nonce, rest = '') {
-  return `bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['repo-scan.sh']} repo-scan.sh --mode ${mode} --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${repoArg ? ` --repo ${repoArg}` : ''}${rest}`
+// repo-scan.sh を run-verified.sh 経由で起動する 1 行。repo は駆動部の scanRepo（args.repo、無ければツリー取得の封筒のリポジトリ。isValidRepoSlug 済み。スクリプトは --repo の省略を exit 2 にする。Issue #808）。rest は --repo の後ろ。skillDir・nonce 未指定（プロンプトの文面だけを検査する単体テスト）はプレースホルダを書く（実ランでは駆動部冒頭の検証で必ず値が入る）
+function repoScanCommand(mode, nonce, repo, rest = '') {
+  return `bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['repo-scan.sh']} repo-scan.sh --mode ${mode} --nonce ${nonce || 'NONCE_NOT_PROVIDED'} --repo ${repo}${rest}`
 }
-function skipLabelsPrompt(labels, nonce) {
+function skipLabelsPrompt(labels, nonce, repo) {
   return [
     '対象外ラベルの付いた open issue の番号を機械取得するタスク（判断・補完はしない）。',
     MERGE_CONTEXT_COMMON,
     '次のコマンドを 1 回だけ一字一句そのまま実行する（引用符内はラベル名のデータ）:',
-    repoScanCommand('skip-labels', nonce, ` -- ${labels.map(shellSingleQuote).join(' ')}`),
+    repoScanCommand('skip-labels', nonce, repo, ` -- ${labels.map(shellSingleQuote).join(' ')}`),
     SIGNED_OUTPUT_INSTRUCTION,
   ].join('\n')
 }
@@ -2619,18 +2621,18 @@ const EXTERNAL_CHECKS_SCHEMA = signedOutputSchema(obj(['apps', 'dropped', 'errs'
     prs: { type: 'integer' },
   }))
 // 外部チェック観測のプロンプト（nonce は呼び出しごと）。gh pr list・check-runs の取得・slug の絞り込みは repo-scan.sh が持つ
-function externalChecksPrompt(nonce) {
+function externalChecksPrompt(nonce, repo) {
   return [
     '外部チェック観測タスク（結果は参考値。構成の確定は args.externalChecks の明示入力で行う）。',
     COMMON,
     '次のコマンドを 1 回だけ一字一句そのまま実行する:',
-    repoScanCommand('external-checks', nonce),
+    repoScanCommand('external-checks', nonce, repo),
     SIGNED_OUTPUT_INSTRUCTION,
   ].join('\n')
 }
 // 観測の返却の照合（純粋関数）。封筒（nonce・入力の束縛・sha256）が通り、apps が slug の形式（小文字英数字とハイフン・64 文字以内）・昇順・重複なし・100 件以内のときだけ { apps, errs } を返し、通らなければ null（呼び出し側は apps: [] で続行する。この観測は参考値で、マージ・push の可否には使わない）。
-function observedExternalApps(reply, nonce) {
-  const s = verifySignedOutput(reply, nonce, repoScanInputSha256('external-checks', repoArg))
+function observedExternalApps(reply, nonce, repo) {
+  const s = verifySignedOutput(reply, nonce, repoScanInputSha256('external-checks', repo))
   const a = s.payload?.apps
   const ok = s.ok && Array.isArray(a) && a.length <= 100 && a.every((x, k) => isStr(x) && /^[a-z0-9][a-z0-9-]{0,63}$/.test(x) && (k === 0 || x > a[k - 1])) && isInt(s.payload.errs) && s.payload.errs >= 0
   return ok ? { apps: a, errs: s.payload.errs } : null
@@ -6064,13 +6066,15 @@ for (const [k, v] of Object.entries(savedItems)) if (Array.isArray(v?.planPolicy
 phase('Tree')
 const treeFetch = await fetchTree()
 const tree = { nodes: treeFetch.nodes }
+// repo-scan.sh の束縛先（Issue #808）: args.repo、無ければツリー取得の封筒のリポジトリ（fetch-tree.sh がルートの repository_url から解決）。カレントが別のリポジトリでもツリーと同じリポジトリを走査する。repoArg は上書きしない（base-merge・merge-gate は args.repo だけに束縛する）。形式不正なら '' で repo-scan.sh を呼ばない（観測は未観測、対象外ラベルは全 open ノード待機）
+const scanRepo = repoArg || (isValidRepoSlug(treeFetch.repo) ? treeFetch.repo : '')
 
 // 外部チェック観測: 直前 3 件の merged PR の check-runs から GitHub Actions 以外の App slug を抽出する（scripts/repo-scan.sh）。観測は参考値で、構成の確定は args.externalChecks の明示入力のみ（Issue #147）。
 // 観測が判断の材料として載るのは未確定時の停止理由だけなので、externalChecks の明示時（parseExternalChecks は配列か undefined を返すので [] も真）と dryRun（見積りの返却に載らない）では起動せず、未観測（apps: []・停止理由の観測欄は「未観測」）とする（Issue #806）。
-const detectSkip = externalChecksInput || dryRunEnabled
-const detectNonce = boundaryNonce(`detect-external-checks:${repoArg}`)
+const detectSkip = externalChecksInput || dryRunEnabled || !scanRepo
+const detectNonce = boundaryNonce(`detect-external-checks:${scanRepo}`)
 // 観測結果（参考値）。取得失敗（null）・封筒の照合失敗時は空配列として扱う。
-const detected = detectSkip ? { apps: [] } : observedExternalApps(await agent(externalChecksPrompt(detectNonce), { label: 'detect:external-checks', phase: 'Tree', model: 'haiku', effort: 'low', schema: EXTERNAL_CHECKS_SCHEMA }), detectNonce)
+const detected = detectSkip ? { apps: [] } : observedExternalApps(await agent(externalChecksPrompt(detectNonce, scanRepo), { label: 'detect:external-checks', phase: 'Tree', model: 'haiku', effort: 'low', schema: EXTERNAL_CHECKS_SCHEMA }), detectNonce, scanRepo)
 if (!detected) log('⚠️ 外部チェックの観測を採用しない（出力封筒の照合失敗）。観測なしで続行する')
 else if (detected.errs > 0) log(`⚠️ 外部チェックの観測で gh の失敗が ${detected.errs} 件あった（取得できた分だけで続行する）`)
 const observedCheckApps = detected?.apps ?? []
@@ -6237,12 +6241,12 @@ if (skipLabelsInput) {
   const byIndex = new Map()
   const absent = new Set()
   let pending = skipLabelsInput.map((_, k) => k + 1)
-  for (let attempt = 1; attempt <= 2 && pending.length > 0; attempt++) {
+  for (let attempt = 1; attempt <= 2 && pending.length > 0 && scanRepo; attempt++) {
     try {
       // 呼び出しごとの nonce（試行・依頼する添字で変える。前回の封筒を実行せず流用しても受理されない）。封筒の照合に通らない転記は契約違反としてこの回を破棄する
-      const nonce = boundaryNonce(`skip-labels:${attempt}:${repoArg}:${pending.join(',')}`)
-      const reply = await agent(skipLabelsPrompt(skipLabelsInput, nonce), { label: `plan:skip-labels${attempt > 1 ? '-retry' : ''}`, phase: 'Tree', model: 'haiku', effort: 'low', schema: SKIP_LABELS_SCHEMA })
-      const signed = verifySignedOutput(reply, nonce, repoScanInputSha256('skip-labels', repoArg, skipLabelsInput))
+      const nonce = boundaryNonce(`skip-labels:${attempt}:${scanRepo}:${pending.join(',')}`)
+      const reply = await agent(skipLabelsPrompt(skipLabelsInput, nonce, scanRepo), { label: `plan:skip-labels${attempt > 1 ? '-retry' : ''}`, phase: 'Tree', model: 'haiku', effort: 'low', schema: SKIP_LABELS_SCHEMA })
+      const signed = verifySignedOutput(reply, nonce, repoScanInputSha256('skip-labels', scanRepo, skipLabelsInput))
       if (!signed.ok) {
         log(`⚠️ 対象外ラベルの取得（${attempt} 回目）を破棄した: 出力封筒の照合に失敗した（${signed.reason}）`)
         continue

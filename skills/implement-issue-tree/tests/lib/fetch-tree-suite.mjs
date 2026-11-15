@@ -117,7 +117,7 @@ export function registerFetchTreeTests(bash) {
     assert.equal(rows[1].title, '日本語 🎉 title')
     // 第 7 欄: open ノードだけ本文の宣言を抽出（root・#3）。closed の #2 と宣言の無い #4・#5（body: null）は []
     assert.deepEqual(rows.map((x) => x.optinTests), [['make e2e'], [], ['npm run e2e', 'cargo test -- --ignored'], [], []])
-    assert.deepEqual(envelope.payload, { count: 5, inputSha256: inputShaOf(1, 'o/r'), nodesSha256: independentNodesSha(rows), optinSha256: independentOptinSha(rows), pages: 1, structSha256: independentStructSha(rows), taskIdSha256: independentTaskIdSha(rows) })
+    assert.deepEqual(envelope.payload, { count: 5, inputSha256: inputShaOf(1, 'o/r'), nodesSha256: independentNodesSha(rows), optinSha256: independentOptinSha(rows), pages: 1, repo: 'o/r', structSha256: independentStructSha(rows), taskIdSha256: independentTaskIdSha(rows) })
     assert.equal(envelope.nonce, NONCE)
     assert.equal(envelope.sha256, expectedSha256(NONCE, envelope.payload))
     assert.equal(stub.callsTo('issues/3/sub_issues'), 0)
@@ -362,6 +362,27 @@ export function registerFetchTreeTests(bash) {
     assert.equal(pb.inputSha256, inputShaOf(7, ''))
     assert.notEqual(pa.inputSha256, pb.inputSha256)
     assert.equal(parseOut(a.stdout).envelope.nonce, NONCE)
+    // 封筒の repo（Issue #808）: --repo があればその値、無ければルートの repository_url の末尾 2 成分（ホストが repo-scan.sh の --repo に使う）
+    assert.equal(pa.repo, 'o/r')
+    assert.equal(pb.repo, 'o/r')
+  })
+
+  test(`${tag} --repo を省いた取得は、ルートの repository_url からツリーのリポジトリを封筒の repo に出す（取れない・形が違えば exit 5 で封筒を出さない）`, () => {
+    const ok = makeGhTreeStub({ 'repos/{owner}/{repo}/issues/7': issue(7, { repositoryUrl: 'https://ghe.example.com/api/v3/repos/Fandhe-AI/tree-repo' }) })
+    const r = run(bash, ok, ['--nonce', NONCE, '--root', '7'])
+    assert.equal(r.status, 0, r.stderr)
+    const e = parseOut(r.stdout).envelope
+    assert.equal(e.payload.repo, 'Fandhe-AI/tree-repo')
+    assert.equal(e.sha256, expectedSha256(NONCE, e.payload))
+    // --repo があれば repository_url は見ない（パスの束縛と同じ値を出す）
+    const given = run(bash, makeGhTreeStub({ [`${P}/issues/7`]: issue(7, { repositoryUrl: null }) }), ['--nonce', NONCE, '--root', '7', '--repo', 'o/r'])
+    assert.equal(parseOut(given.stdout).envelope.payload.repo, 'o/r')
+    for (const repositoryUrl of [null, 1, '', 'https://api.github.com/repos/bad repo/x', 'https://api.github.com/repos/-a/x', 'x']) {
+      const b = run(bash, makeGhTreeStub({ 'repos/{owner}/{repo}/issues/7': issue(7, { repositoryUrl }) }), ['--nonce', NONCE, '--root', '7'])
+      assert.equal(b.status, 5, `${JSON.stringify(repositoryUrl)}: ${b.stderr}`)
+      assert.equal(b.stdout, '')
+      assert.ok(!b.stderr.includes('bad repo'), '外部由来の文字列を標準エラーへ出さない')
+    }
   })
 
   test(`${tag} title の制御文字（タブ・改行）は空白に置換され、置換後の文字列でハッシュされる`, () => {

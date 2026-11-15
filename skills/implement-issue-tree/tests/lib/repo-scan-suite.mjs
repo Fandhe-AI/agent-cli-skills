@@ -24,6 +24,7 @@ const FIXTURES = join(HERE, '..', 'fixtures')
 const OLD_EXTERNAL = readFileSync(join(FIXTURES, 'repo-scan-old-external-checks-main.txt'), 'utf8')
 const OLD_SKIP = readFileSync(join(FIXTURES, 'repo-scan-old-skip-labels-main.txt'), 'utf8').trim()
 const NONCE = 'abc123nonce'
+export const REPO = 'o/r'
 const A = 'a'.repeat(40)
 const B = 'b'.repeat(40)
 const C = 'c'.repeat(40)
@@ -63,8 +64,10 @@ const EMPTY_SUCCESS = 'cat >/dev/null; exit 0' // 何も出さずに成功（入
 
 export function registerRepoScanTests(bash) {
   const T = (name, fn, o = {}) => test(`[${bash}] ${name}`, { skip: !haveJq && 'jq が無い', ...o }, fn)
-  const ext = (stub, extra = [], opts = {}) => run(bash, stub, ['--mode', 'external-checks', '--nonce', NONCE, ...extra], opts)
-  const skip = (stub, labels, extra = [], opts = {}) => run(bash, stub, ['--mode', 'skip-labels', '--nonce', NONCE, ...extra, '--', ...labels], opts)
+  // --repo は必須（Issue #808）。extra に --repo が無ければ既定の REPO を付ける
+  const withRepo = (extra) => (extra.includes('--repo') ? extra : ['--repo', REPO, ...extra])
+  const ext = (stub, extra = [], opts = {}) => run(bash, stub, ['--mode', 'external-checks', '--nonce', NONCE, ...withRepo(extra)], opts)
+  const skip = (stub, labels, extra = [], opts = {}) => run(bash, stub, ['--mode', 'skip-labels', '--nonce', NONCE, ...withRepo(extra), '--', ...labels], opts)
 
   // ---------------- external-checks ----------------
 
@@ -75,20 +78,20 @@ export function registerRepoScanTests(bash) {
     })
     const r = ext(stub)
     const e = envelopeOf(r)
-    assert.deepEqual(e.payload, { apps: ['codecov', 'cursor'], dropped: 0, errs: 0, inputSha256: repoScanInputSha256('external-checks', ''), prs: 3 })
+    assert.deepEqual(e.payload, { apps: ['codecov', 'cursor'], dropped: 0, errs: 0, inputSha256: repoScanInputSha256('external-checks', REPO), prs: 3 })
     // 実スクリプトの標準出力をホストの verifySignedOutput に通す（正準形のずれはスタブ製の封筒では見つからない）
-    const signed = H.verifySignedOutput(e, NONCE, H.repoScanInputSha256('external-checks', undefined))
+    const signed = H.verifySignedOutput(e, NONCE, H.repoScanInputSha256('external-checks', REPO))
     assert.equal(signed.ok, true, JSON.stringify(signed))
   })
 
-  T('external-checks: gh の呼び出しは pr list 1 回 + 各 PR の check-runs 1 回（per_page=100・ページ送りなし・GET だけ）で、cwd のリポジトリ（{owner}/{repo}）を使う', () => {
+  T('external-checks: gh の呼び出しは pr list 1 回 + 各 PR の check-runs 1 回（per_page=100・GET だけ）で、--repo のリポジトリだけを使う（cwd の {owner}/{repo} に倒れない）', () => {
     const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }, { headRefOid: B }], checkRuns: { [A]: checkRuns(['x']), [B]: checkRuns(['y']) } })
     assert.equal(ext(stub).status, 0)
     const calls = stub.calls()
     assert.equal(calls.length, 3)
-    assert.match(calls[0], /^pr list --state merged --limit 3 --json headRefOid --jq /)
-    assert.ok(!calls[0].includes(' -R '))
-    assert.ok(calls[1].startsWith(`api repos/{owner}/{repo}/commits/${A}/check-runs?per_page=100 --jq `) && !calls.some((c) => c.includes('--paginate')))
+    assert.match(calls[0], /^pr list -R o\/r --state merged --limit 3 --json headRefOid --jq /)
+    assert.ok(calls[1].startsWith(`api repos/o/r/commits/${A}/check-runs?per_page=100`) && !calls.some((c) => c.includes('--paginate')))
+    assert.ok(!calls.some((c) => c.includes('{owner}')))
     assert.ok(!calls.some((c) => /-X |-f |-F |--method|--input/.test(c)), '書き込み系の指定がある')
   })
 
@@ -96,7 +99,7 @@ export function registerRepoScanTests(bash) {
     const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns(['cursor']) } })
     const e = envelopeOf(ext(stub, ['--repo', 'Fandhe-AI/target']))
     assert.equal(e.payload.inputSha256, repoScanInputSha256('external-checks', 'Fandhe-AI/target'))
-    assert.notEqual(e.payload.inputSha256, repoScanInputSha256('external-checks', ''))
+    assert.notEqual(e.payload.inputSha256, repoScanInputSha256('external-checks', REPO))
     const calls = stub.calls()
     assert.match(calls[0], /^pr list -R Fandhe-AI\/target --state merged /)
     assert.ok(calls[1].includes('repos/Fandhe-AI/target/commits/'))
@@ -232,9 +235,9 @@ export function registerRepoScanTests(bash) {
       absent: [],
       entries: [{ i: 1, numbers: [3, 5, 9] }, { i: 2, numbers: [] }],
       failed: [],
-      inputSha256: repoScanInputSha256('skip-labels', '', ['owner:human', 'owner:joint']),
+      inputSha256: repoScanInputSha256('skip-labels', REPO, ['owner:human', 'owner:joint']),
     })
-    const signed = H.verifySignedOutput(e, NONCE, H.repoScanInputSha256('skip-labels', undefined, ['owner:human', 'owner:joint']))
+    const signed = H.verifySignedOutput(e, NONCE, H.repoScanInputSha256('skip-labels', REPO, ['owner:human', 'owner:joint']))
     assert.equal(signed.ok, true, JSON.stringify(signed))
     const c = H.collectSkipLabelEntries([1, 2], signed.payload, 2)
     assert.deepEqual([[...c.byIndex], c.missing, c.absent], [[[1, [3, 5, 9]], [2, []]], [], []])
@@ -244,7 +247,7 @@ export function registerRepoScanTests(bash) {
     const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }], issues: { a: issueList([1]) } })
     assert.equal(skip(stub, ['a']).status, 0)
     const calls = stub.calls()
-    assert.deepEqual(calls.map((c) => c.split(' --')[0]), ['api repos/{owner}/{repo}/labels?per_page=100', 'api repos/{owner}/{repo}/issues?state=open&labels=a&per_page=100'])
+    assert.deepEqual(calls.map((c) => c.split(' --')[0]), ['api repos/o/r/labels?per_page=100', 'api repos/o/r/issues?state=open&labels=a&per_page=100'])
     assert.ok(calls.every((c) => c.includes('--paginate')))
     assert.ok(!calls.some((c) => /(^| )(-f|-F|-X|--field|--raw-field|--input|--method)( |$)/.test(c)))
   })
@@ -256,7 +259,7 @@ export function registerRepoScanTests(bash) {
     const e = envelopeOf(skip(stub, labels))
     assert.deepEqual(e.payload.entries, labels.map((_, k) => ({ i: k + 1, numbers: [100 + k] })), '各ラベルが自分の応答（取り違えなし）')
     assert.deepEqual([e.payload.absent, e.payload.failed], [[], []])
-    assert.equal(e.payload.inputSha256, repoScanInputSha256('skip-labels', '', labels))
+    assert.equal(e.payload.inputSha256, repoScanInputSha256('skip-labels', REPO, labels))
   })
 
   T('skip-labels: --repo はラベル一覧・issue 一覧の全 gh 呼び出しと入力の束縛に入る', () => {
@@ -268,9 +271,9 @@ export function registerRepoScanTests(bash) {
   })
 
   T('skip-labels: 入力の束縛はラベルの並び（添字）を区別する', () => {
-    assert.notEqual(repoScanInputSha256('skip-labels', '', ['a', 'b']), repoScanInputSha256('skip-labels', '', ['b', 'a']))
-    assert.notEqual(repoScanInputSha256('skip-labels', '', ['a', 'b']), repoScanInputSha256('skip-labels', '', ['a']))
-    assert.notEqual(repoScanInputSha256('skip-labels', '', ['a']), repoScanInputSha256('external-checks', '', []))
+    assert.notEqual(repoScanInputSha256('skip-labels', REPO, ['a', 'b']), repoScanInputSha256('skip-labels', REPO, ['b', 'a']))
+    assert.notEqual(repoScanInputSha256('skip-labels', REPO, ['a', 'b']), repoScanInputSha256('skip-labels', REPO, ['a']))
+    assert.notEqual(repoScanInputSha256('skip-labels', REPO, ['a']), repoScanInputSha256('external-checks', REPO, []))
     const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }, { name: 'b' }], issues: { a: issueList([1]), b: issueList([2]) } })
     const ab = envelopeOf(skip(stub, ['a', 'b'])).payload
     const ba = envelopeOf(skip(stub, ['b', 'a'])).payload
@@ -430,6 +433,9 @@ export function registerRepoScanTests(bash) {
       ['--mode', 'external-checks', '--nonce', NONCE, '--', 'label'],
       ['--mode', 'skip-labels', '--nonce', NONCE, '--repo', '--', 'x'],
       ['--mode'],
+      // --repo の省略（Issue #808。他は正しい起動行。省くと gh がカレントのリポジトリへ倒れるため使い方の誤り）
+      ['--mode', 'external-checks', '--nonce', NONCE],
+      ['--mode', 'skip-labels', '--nonce', NONCE, '--', 'x'],
     ]
     for (const args of cases) {
       const r = run(bash, stub, args)
@@ -441,7 +447,7 @@ export function registerRepoScanTests(bash) {
 
   T('run-verified.sh 経由（SHA-256 照合つき）で起動でき、スクリプトのハッシュが違えば起動しない', () => {
     const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns(['cursor']) } })
-    const ok = run(bash, stub, ['--mode', 'external-checks', '--nonce', NONCE], { launcher: true })
+    const ok = run(bash, stub, ['--mode', 'external-checks', '--nonce', NONCE, '--repo', REPO], { launcher: true })
     assert.deepEqual(envelopeOf(ok).payload.apps, ['cursor'])
     const bad = spawnSync(bash, [RUN_VERIFIED, '0'.repeat(64), 'repo-scan.sh', '--mode', 'external-checks', '--nonce', NONCE], { env: stub.env(), encoding: 'utf8' })
     assert.equal(bad.status, 3)

@@ -2,8 +2,10 @@
 # repo-scan.sh — Tree フェーズの読み取り専用の観測 2 つ（外部チェック App の観測・対象外ラベルの open issue の取得）
 #
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立てる）:
-#   bash repo-scan.sh --mode external-checks --nonce <nonce> [--repo <owner/repo>]
-#   bash repo-scan.sh --mode skip-labels --nonce <nonce> [--repo <owner/repo>] -- <ラベル> [<ラベル> ...]
+#   bash repo-scan.sh --mode external-checks --nonce <nonce> --repo <owner/repo>
+#   bash repo-scan.sh --mode skip-labels --nonce <nonce> --repo <owner/repo> -- <ラベル> [<ラベル> ...]
+#   --repo は必須（Issue #808）。省くと gh がカレントのリポジトリを走査し、ツリーと違うリポジトリを読み得るため使い方の誤り（exit 2）にする。
+#   ホストは args.repo、無ければツリー取得の封筒の repo（fetch-tree.sh がルートの repository_url から解決）を渡す。
 #
 # 役割: プロンプトに埋め込まれていた gh + jq のコマンド（`detect:external-checks` はバックスラッシュ 5 か所の xargs + sh -c、
 #       `plan:skip-labels` は単一引用符・`\n`・jq を含む for ループ）を、スクリプトへ切り出したもの。エージェントが転記する際に
@@ -48,7 +50,7 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 MAX_OUT_BYTES=24000
 
 usage() {
-  echo "使い方: repo-scan.sh --mode external-checks --nonce NONCE [--repo OWNER/REPO] | --mode skip-labels --nonce NONCE [--repo OWNER/REPO] -- LABEL [LABEL ...]" >&2
+  echo "使い方: repo-scan.sh --mode external-checks --nonce NONCE --repo OWNER/REPO | --mode skip-labels --nonce NONCE --repo OWNER/REPO -- LABEL [LABEL ...]" >&2
   [ $# -eq 0 ] || echo "repo-scan: $1" >&2
   exit 2
 }
@@ -75,14 +77,15 @@ case "${mode}" in
   *) usage "--mode は external-checks か skip-labels" ;;
 esac
 so_valid_nonce "${nonce}" || usage "--nonce の形式が不正"
-# --repo '' は省略と同じ扱いにしない（空のまま gh が現在のリポジトリへ倒れるのを防ぐ）
-if [ "${have_repo}" -eq 1 ]; then valid_repo "${repo}" || usage "--repo は OWNER/REPO の形で指定する"; fi
+# --repo は必須で、空文字も不可（省略・空のまま gh がカレントのリポジトリへ倒れ、ツリーと別のリポジトリを走査するのを防ぐ。Issue #808）
+[ "${have_repo}" -eq 1 ] || usage "--repo は必須"
+valid_repo "${repo}" || usage "--repo は OWNER/REPO の形で指定する"
 
 command -v gh >/dev/null 2>&1 || { echo "repo-scan: gh が無い" >&2; exit 3; }
 command -v jq >/dev/null 2>&1 || { echo "repo-scan: jq が無い" >&2; exit 3; }
 input_sha=$(rs_input_sha "${mode}" "${repo}" "$@") || { echo "repo-scan: 入力のハッシュを計算できない（sha256sum / shasum が無い等）" >&2; exit 3; }
 
-if [ "${have_repo}" -eq 1 ]; then base="repos/${repo}"; else base='repos/{owner}/{repo}'; fi
+base="repos/${repo}"
 
 # 封筒を出す。大きすぎれば exit 7
 emit() {
@@ -97,11 +100,7 @@ if [ "${mode}" = external-checks ]; then
   prs=0
   raw=""
   # 直近 3 件の merged PR の head。失敗は errs に数えて続行する（旧コマンドは失敗を空の出力として扱い、apps: [] へ倒れていた）
-  if [ "${have_repo}" -eq 1 ]; then
-    shas=$(gh pr list -R "${repo}" --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' 2>/dev/null </dev/null) || { errs=$((errs + 1)); shas=""; }
-  else
-    shas=$(gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' 2>/dev/null </dev/null) || { errs=$((errs + 1)); shas=""; }
-  fi
+  shas=$(gh pr list -R "${repo}" --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' 2>/dev/null </dev/null) || { errs=$((errs + 1)); shas=""; }
   seen=0
   while IFS= read -r s; do
     [ -n "${s}" ] || continue

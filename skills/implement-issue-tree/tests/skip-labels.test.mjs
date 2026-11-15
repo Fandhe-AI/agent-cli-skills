@@ -85,10 +85,10 @@ test('parseSkipLabels: 形式不正は throw（配列でない・11 件・空文
 // --- 取得コマンドと転記の照合（純粋関数） ---
 
 test('skipLabelsPrompt: 起動行は run-verified.sh 経由の repo-scan.sh の 1 行で、ラベルは単一引用符化し、gh・jq のコマンドを含まない', () => {
-  const p = D.skipLabelsPrompt(['owner:human', "it's $(rm -rf x) `y`"], 'n0nce')
+  const p = D.skipLabelsPrompt(['owner:human', "it's $(rm -rf x) `y`"], 'n0nce', 'o/r')
   const line = p.split('\n').find((l) => l.includes('repo-scan.sh'))
-  assert.match(line, /^bash '<skillDir>\/scripts\/run-verified\.sh' \S+ repo-scan\.sh --mode skip-labels --nonce n0nce -- 'owner:human' 'it'\\''s \$\(rm -rf x\) `y`'$/)
-  assert.deepEqual(parseRepoScanCommand(p), { mode: 'skip-labels', nonce: 'n0nce', repo: '', labels: ['owner:human', "it's $(rm -rf x) `y`"] })
+  assert.match(line, /^bash '<skillDir>\/scripts\/run-verified\.sh' \S+ repo-scan\.sh --mode skip-labels --nonce n0nce --repo o\/r -- 'owner:human' 'it'\\''s \$\(rm -rf x\) `y`'$/)
+  assert.deepEqual(parseRepoScanCommand(p), { mode: 'skip-labels', nonce: 'n0nce', repo: 'o/r', labels: ['owner:human', "it's $(rm -rf x) `y`"] })
   assert.ok(!/gh api repos|--paginate|jq -|grep -F/.test(p), '転記させるコマンドがプロンプトに残っている')
   assert.ok(!p.includes('\\n') || !line.includes('\\\\'), '起動行にバックスラッシュの重ね書きが無い')
 })
@@ -581,10 +581,11 @@ test('args.repo があれば、取得の起動行と通知コメントが対象�
   assert.ok(notify.includes("gh issue comment 1 -R Fandhe-AI/target --body"))
 })
 
-test('args.repo が無ければ、起動行に --repo を付けず（スクリプトがカレントのリポジトリ {owner}/{repo} で解決する）、入力の束縛は repo 空で計算する', () => {
-  const p = D.skipLabelsPrompt(['a'], 'n')
-  assert.ok(!p.includes('--repo'))
-  assert.equal(D.repoScanInputSha256('skip-labels', undefined, ['a']), D.sha256Hex('repo-scan\nskip-labels\n\na'))
+test('起動行の --repo は呼び出し側が渡すリポジトリ（args.repo が無いランではツリーのリポジトリ。Issue #808）で、入力の束縛にも同じ値が入る', () => {
+  const p = D.skipLabelsPrompt(['a'], 'n', 'Fandhe-AI/tree')
+  assert.ok(p.includes('--repo Fandhe-AI/tree -- '))
+  assert.equal(D.repoScanInputSha256('skip-labels', 'Fandhe-AI/tree', ['a']), D.sha256Hex('repo-scan\nskip-labels\nFandhe-AI/tree\na'))
+  // 通知コメントは args.repo だけに束縛する（ツリーの repo へは広げない）
   assert.ok(D.notifyBlockedPrompt(7, { outOfTree: [1], skippedLabel: [], waitingOn: [] }).includes('gh issue comment 7 --body'))
 })
 
