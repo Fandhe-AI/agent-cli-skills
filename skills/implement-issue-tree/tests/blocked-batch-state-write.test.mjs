@@ -22,6 +22,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { hashPrecheckReply, wrapTreeReply } from './lib/signed-output.mjs'
+import { requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
 
 const SCRIPT_PATH = process.env.IIT_BLOCKED_BATCH_SCRIPT_PATH ?? join(
   dirname(fileURLToPath(import.meta.url)),
@@ -342,8 +343,7 @@ async function runScript({ args, nodes, saved = null, ootStates = { [OOT]: 'OPEN
     if (label === 'plan:issue-tree') return wrapTreeReply(prompt, { nodes: structuredClone(nodes) })
     if (label === 'detect:external-checks') return { apps: [] }
     if (label.startsWith('plan:declared-deps')) {
-      const m = /for n in ([0-9 ]+); do/.exec(prompt)
-      return { entries: m[1].trim().split(' ').map(Number).map((n) => ({ number: n, deps: [], sig: declaredDepsChecksum(n, []) })) }
+            return { entries: requestedNumbersOf(prompt).map((n) => ({ number: n, deps: [], sig: declaredDepsChecksum(n, []) })) }
     }
     if (label.startsWith('plan:root-ancestors')) return { fetched: true, chain: [{ number: args.parent, parent: 0 }] }
     if (label.startsWith('plan:out-of-tree-deps')) {

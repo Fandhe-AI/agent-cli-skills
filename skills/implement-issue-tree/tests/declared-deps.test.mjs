@@ -1,4 +1,4 @@
-// 本文の依存宣言の機械抽出（DECLARED_DEPS_JQ・collectDeclaredDeps・mergeDeclaredDeps）の
+// 本文の依存宣言の機械抽出（scripts/declared-deps.sh のフィルタ・collectDeclaredDeps・mergeDeclaredDeps）の
 // 決定的回帰テスト。optin-tests-gate.test.mjs と同じスライス方式（DRIVER マーカーより上を切り出し
 // export を付与して import する）で、モデル出力に依存しない純粋関数と jq フィルタ自体を検証する。
 import { test } from 'node:test'
@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { trackTmp } from './lib/tmp-track.mjs'
+import { DECLARED_DEPS_SH, requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -26,7 +27,6 @@ const driverPart = source.slice(markerIndex)
 const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-declared-deps-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-declared-deps-defs.mjs')
 const SLICE_EXPORTS = [
-  'DECLARED_DEPS_JQ',
   'DECLARED_DEPS_MAX_PER_NODE',
   'DECLARED_DEPS_SIG_JQ',
   'declaredDepsChecksum',
@@ -40,7 +40,7 @@ const SLICE_EXPORTS = [
   'mapBounded',
   'parseRateLimit',
   'extractDeclaredDeps',
-  'declaredDepsJq',
+  'declaredDepsTableArg',
   'titleTaskId',
   'buildSiblingTaskTable',
   'siblingTaskTableFor',
@@ -52,7 +52,6 @@ const exportList = SLICE_EXPORTS.map((n) => `__opt_${n} as ${n}`).join(', ')
 writeFileSync(slicePath, `${definitionPart}\n${optionalExports}\nexport { ${exportList} }\n`)
 
 const {
-  DECLARED_DEPS_JQ,
   DECLARED_DEPS_MAX_PER_NODE,
   DECLARED_DEPS_SIG_JQ,
   declaredDepsChecksum,
@@ -66,20 +65,29 @@ const {
   mapBounded,
   parseRateLimit,
   extractDeclaredDeps,
-  declaredDepsJq,
+  declaredDepsTableArg,
   titleTaskId,
   buildSiblingTaskTable,
   siblingTaskTableFor,
   SIBLING_TASK_IDS_MAX_PER_PARENT,
 } = await import(pathToFileURL(slicePath).href)
 
-// プロンプトに埋め込むのと同じ形（{number, deps}）で jq を実行する。
+// フィルタ本体は scripts/lib/declared-deps-lib.sh にあり、scripts/declared-deps.sh --print-filter が出す（ネットワークを使わない）。
+// プロンプトのコマンドが gh api --jq へ渡すのと同じ文字列（{number, deps} に sig を足した完全な形）を、ローカルの jq で本文に流す。
+const filterCache = new Map()
+function filterFor(table) {
+  const arg = table === null ? null : JSON.stringify(table)
+  if (!filterCache.has(arg)) {
+    const argv = [DECLARED_DEPS_SH, '--print-filter', ...(arg === null ? [] : ['--table', arg])]
+    filterCache.set(arg, execFileSync('bash', argv, { encoding: 'utf8' }).replace(/\n$/, ''))
+  }
+  return filterCache.get(arg)
+}
+const DECLARED_DEPS_FILTER = filterFor(null)
+const SCRIPT_TEXT = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', name), 'utf8')
+
 function runFilter(body) {
-  const out = execFileSync(
-    'jq',
-    ['-c', `{number: .number, deps: (${DECLARED_DEPS_JQ})}`],
-    { input: JSON.stringify({ number: 1, body }) },
-  )
+  const out = execFileSync('jq', ['-c', DECLARED_DEPS_FILTER], { input: JSON.stringify({ number: 1, body }) })
   return JSON.parse(out.toString()).deps
 }
 
@@ -201,12 +209,20 @@ test('依存宣言がなければ空配列・body が null でも失敗しない
   assert.deepEqual(runFilter(null), [])
 })
 
-test('declaredDepsPrompt は整数の対象番号と jq フィルタを単一引用符で埋め込む', () => {
+test('declaredDepsPrompt は整数の対象番号だけを run-verified.sh 経由の declared-deps.sh へ渡し、jq フィルタを埋め込まない', () => {
   const p = declaredDepsPrompt([34, 45])
-  assert.match(p, /for n in 34 45; do out=\$\(gh api "repos\/\{owner\}\/\{repo\}\/issues\/\$n" --jq '/)
-  assert.match(p, /\) && printf '%s\\n' "\$out" \|\| echo "FAILED #\$n" >&2; done/)
-  assert.ok(p.includes(DECLARED_DEPS_JQ))
-  assert.ok(!DECLARED_DEPS_JQ.includes("'"), 'jq フィルタに単一引用符を含めない（シェル埋め込みが壊れる）')
+  assert.match(p, /bash '[^']*\/scripts\/run-verified\.sh' \S+ declared-deps\.sh --numbers 34,45(\n|$)/)
+  assert.deepEqual(requestedNumbersOf(p), [34, 45])
+  assert.ok(!p.includes("--jq '") && !p.includes('gh api rate_limit'), 'プロンプトに jq フィルタ・gh api を書かない（転記させない）')
+  assert.ok(!p.includes('def refs'), 'フィルタ本体はスクリプトにある')
+  assert.ok(!p.includes('\\'), 'エスケープの階層が壊れるバックスラッシュをプロンプトに含めない')
+  assert.ok(!DECLARED_DEPS_FILTER.includes("'"), 'jq フィルタに単一引用符を含めない')
+})
+
+test('declaredDepsPrompt は表なしなら --table を付けず、表があれば JSON を単一引用符で渡す', () => {
+  assert.doesNotMatch(declaredDepsPrompt([1]), /--table/)
+  assert.doesNotMatch(declaredDepsPrompt([1], { f: {}, n: {} }), /--table/)
+  assert.ok(declaredDepsPrompt([1], { f: { 1: [['TASK-1-2', 12]] }, n: { 12: ['1', 0] } }).includes(` --table '{"f":{"1":[["TASK-1-2",12]]},"n":{"12":["1",0]}}'`))
 })
 
 // Issue #589: 本文の取得は REST（core 枠）で行い、GraphQL 枠をイシュー 1 件ごとに消費しない。
@@ -214,7 +230,11 @@ test('declaredDepsPrompt は gh issue view（GraphQL）を使わず gh api（RES
   const p = declaredDepsPrompt([1])
   assert.ok(!p.includes('gh issue view'), 'GraphQL を使う gh issue view を指示しない')
   assert.ok(!p.includes('gh repo view'), 'リポジトリ解決で GraphQL を使わない（{owner}/{repo} は gh がローカルで展開する）')
-  assert.match(p, /gh api "repos\/\{owner\}\/\{repo\}\/issues\/\$n"/)
+  // gh の呼び出しはスクリプトにある。REST の core 枠で、リポジトリは gh が展開する {owner}/{repo}（--repo 指定時はそれ）
+  const sh = SCRIPT_TEXT('declared-deps.sh')
+  assert.ok(sh.includes('gh api "repos/${repo_path}/issues/${n}" --jq "${filter}"'))
+  assert.ok(sh.includes("repo_path='{owner}/{repo}'"))
+  assert.ok(!sh.includes('gh issue view') && !sh.includes('gh repo view') && !sh.includes('graphql'))
 })
 
 test('declaredDepsPrompt は gh を sandbox 無効で実行する指示を含む', () => {
@@ -232,11 +252,7 @@ test('jq が出力する sig はホストの declaredDepsChecksum と一致す�
     [999999, 'Depends on #99997, #99998, #99999\n'],
   ]
   for (const [number, body] of samples) {
-    const out = JSON.parse(execFileSync(
-      'jq',
-      ['-c', `{number: .number, deps: (${DECLARED_DEPS_JQ})} | ${DECLARED_DEPS_SIG_JQ}`],
-      { input: JSON.stringify({ number, body }) },
-    ).toString())
+    const out = JSON.parse(execFileSync('jq', ['-c', DECLARED_DEPS_FILTER], { input: JSON.stringify({ number, body }) }).toString())
     assert.equal(out.sig, declaredDepsChecksum(number, out.deps))
   }
 })
@@ -331,7 +347,7 @@ test('抽出関数は ignored を警告ログに出す (#558)', () => {
 
 const logs = []
 globalThis.log = (m) => { logs.push(m) }
-const requestedOf = (prompt) => /for n in ([0-9 ]+); do/.exec(prompt)[1].trim().split(' ').map(Number)
+const requestedOf = requestedNumbersOf
 const okEntries = (prompt) => ({ entries: requestedOf(prompt).map((n) => e(n, [])) })
 const chunksOf = (total, size = 3) => Array.from({ length: Math.ceil(total / size) }, (_, i) =>
   Array.from({ length: Math.min(size, total - i * size) }, (_, j) => i * size + j + 1))
@@ -492,7 +508,9 @@ test('declaredDepsPrompt: レート制限と判定するのはメッセージに
   const p = declaredDepsPrompt([1])
   assert.match(p, /rate limit・secondary rate limit・RATE_LIMITED/, 'メッセージ側の判定語')
   assert.match(p, /remaining/, 'core の残量（remaining）で判定する')
-  assert.match(p, /gh api rate_limit --jq '\.resources\.core \| \{remaining,/, 'remaining を取得するコマンド')
+  assert.match(p, /declared-deps\.sh --rate-limit/, 'remaining を取得するコマンド（スクリプトの --rate-limit）')
+  assert.ok(!p.includes('gh api rate_limit'), 'rate_limit の jq はプロンプトに転記させずスクリプトに置く')
+  assert.ok(SCRIPT_TEXT('lib/declared-deps-lib.sh').includes(`DD_RATE_LIMIT_JQ='.resources.core | {remaining, resetAt: (.reset | todate), waitSeconds: ([.reset - now, 0] | max | ceil)}'`))
   assert.match(p, /remaining が 0 のときだけ rateLimited を true/, '条件を限定する')
   assert.match(p, /権限・SSO など他の 403 は rateLimited にしない/, '権限系の 403 は対象外と明記')
   assert.match(p, /通常の失敗として扱う/)
@@ -597,9 +615,9 @@ const SIBLINGS = [
 ]
 const SIB_BUILT = buildSiblingTaskTable(SIBLINGS)
 
-// 兄弟の表を埋め込んだフィルタで jq を実行する（declaredDepsPrompt と同じ形）。
+// 兄弟の表を埋め込んだフィルタ（scripts/declared-deps.sh --print-filter --table …）で jq を実行する。
 function runSib(number, body, numbers = [number]) {
-  const f = `{number: .number, deps: (${declaredDepsJq(siblingTaskTableFor(numbers, SIB_BUILT))})}`
+  const f = filterFor(siblingTaskTableFor(numbers, SIB_BUILT))
   return JSON.parse(execFileSync('jq', ['-c', f], { input: JSON.stringify({ number, body }) }).toString()).deps
 }
 
@@ -669,8 +687,9 @@ test('siblingTaskTableFor: 依頼する番号の分だけを埋め込み、表�
   const t = siblingTaskTableFor([759, 999], SIB_BUILT)
   assert.deepEqual(t.n, { 759: ['753', 758] })
   assert.deepEqual(Object.keys(t.f), ['753'])
-  assert.ok(!declaredDepsJq(t).includes("'"))
-  assert.throws(() => declaredDepsJq({ f: { 1: [["X-1'", 2]] }, n: {} }), /埋め込めない/)
+  assert.ok(!declaredDepsTableArg(t).includes("'"))
+  assert.throws(() => declaredDepsTableArg({ f: { 1: [["X-1'", 2]] }, n: {} }), /埋め込めない/)
+  assert.throws(() => declaredDepsTableArg({ f: { 1: [['X-1\\', 2]] }, n: {} }), /埋め込めない/)
 })
 
 test('兄弟の前の工程を指す受け入れ条件（下流 #759・#758 の形）を番号へ解決する (#657)', () => {
@@ -760,7 +779,7 @@ test('兄弟の表は親ごとに分かれ、別の親の同じ ID へは解決�
 })
 
 test('兄弟の表を埋め込んでも従来の宣言の抽出は変わらず、sig はホストの再計算と一致する (#657)', () => {
-  const f = `{number: .number, deps: (${declaredDepsJq(siblingTaskTableFor([759], SIB_BUILT))})} | ${DECLARED_DEPS_SIG_JQ}`
+  const f = filterFor(siblingTaskTableFor([759], SIB_BUILT))
   const body = '## 依存\n- #78\n前の工程（TASK-97-5）の結果を踏まえている\nDepends on #12\n'
   const out = JSON.parse(execFileSync('jq', ['-c', f], { input: JSON.stringify({ number: 759, body }) }).toString())
   assert.deepEqual(out.deps, [12, 78, 758])
@@ -771,7 +790,7 @@ test('兄弟の表を埋め込んでも従来の宣言の抽出は変わらず�
 test('declaredDepsPrompt は兄弟の表を埋め込んだフィルタを使い、extractDeclaredDeps は再試行でも依頼番号の表を渡す (#657)', async () => {
   const table = siblingTaskTableFor([759], SIB_BUILT)
   const p = declaredDepsPrompt([759], table)
-  assert.ok(p.includes(declaredDepsJq(table)))
+  assert.ok(p.includes(` --table '${JSON.stringify(table)}'`))
   assert.ok(p.includes('"759":["753",758]'))
   const seen = []
   let n = 0
@@ -795,22 +814,27 @@ test('駆動部はタイトルから兄弟の表を作って抽出へ渡す (#65
 
 // Issue #716: Claude Code はツール入力中の \uXXXX を実行前に文字へ変換する。フィルタやプロンプトに
 // \uXXXX が残ると、' が単一引用符に戻って --jq '...' の引用が途中で閉じる。\x27 / \x60 の形なら変換されない。
-test('declaredDepsPrompt / フィルタに \\uXXXX の形が無く、変換を模擬しても文字列が変わらない (#716)', () => {
-  const table = { f: { 1: [['TASK-1-2', 12]] }, n: { 12: [1, 0] } }
+test('declaredDepsPrompt / フィルタ / スクリプトに \\uXXXX の形が無く、変換を模擬しても文字列が変わらない (#716)', () => {
+  const table = { f: { 1: [['TASK-1-2', 12]] }, n: { 12: ['1', 0] } }
   const toChars = (s) => s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-  const texts = [DECLARED_DEPS_JQ, declaredDepsJq(table), declaredDepsPrompt([1, 2]), declaredDepsPrompt([1], table)]
+  const texts = [DECLARED_DEPS_FILTER, filterFor(table), declaredDepsPrompt([1, 2]), declaredDepsPrompt([1], table), SCRIPT_TEXT('declared-deps.sh'), SCRIPT_TEXT('lib/declared-deps-lib.sh')]
   for (const t of texts) {
     assert.doesNotMatch(t, /\\u[0-9a-fA-F]{4}/)
     assert.equal(toChars(t), t)
   }
 })
 
-test('変換を模擬したあとも --jq の単一引用符の中に単一引用符が現れない (#716)', () => {
+test('--table の単一引用符の中に単一引用符・バックスラッシュが現れない (#716)', () => {
   const toChars = (s) => s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-  const p = toChars(declaredDepsPrompt([1, 2]))
-  assert.ok(p.includes(DECLARED_DEPS_JQ), '変換後もフィルタ全体がそのまま埋め込まれる')
-  assert.ok(p.includes("--jq '"))
-  assert.ok(!toChars(DECLARED_DEPS_JQ).includes("'"))
+  const p = toChars(declaredDepsPrompt([1, 2], { f: { 1: [['TASK-1-2', 12]] }, n: { 12: ['1', 0] } }))
+  const m = / --table '([^\n]*)'(\n|$)/.exec(p)
+  assert.ok(m, '--table の単一引用符で閉じた形')
+  assert.ok(!m[1].includes("'") && !m[1].includes('\\'))
+})
+
+test('スクリプトのフィルタの sig の式はホストの DECLARED_DEPS_SIG_JQ（out-of-tree・skip-labels も共用）と同一', () => {
+  assert.ok(DECLARED_DEPS_FILTER.endsWith(` | ${DECLARED_DEPS_SIG_JQ}`))
+  assert.ok(filterFor({ f: { 1: [['TASK-1-2', 12]] }, n: { 12: ['1', 0] } }).endsWith(` | ${DECLARED_DEPS_SIG_JQ}`))
 })
 
 test("否定の n't とバッククォートのコードスパン / フェンスの除去は \\x27 / \\x60 化後も同じ結果 (#716)", () => {
