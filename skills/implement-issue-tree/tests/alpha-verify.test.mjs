@@ -38,8 +38,10 @@ const verifyCases = async (cases) => {
 // ---------------------------------------------------------------------------
 // (a) 合成ケース
 
-// 実物と同じく先頭に `export const meta` を置く（script ゴールで export を外す規則を通すため）
-const H = 'export const meta={name:"x"}\n'
+// 実物と同じく先頭に `export const meta` を置く（script ゴールで export を外す規則を通すため）。
+// 合成ケースの値の受け口 use はプログラム内で束縛した関数にする（自由変数の呼び出し先へ関数値を渡すと、
+// 引数の位置の許可リストで拒否されるため。use 自身は改名しない 3 文字の最上位の名前）
+const H = 'export const meta={name:"x"}\nfunction use(){}'
 
 // [名前, 変換前, 変換後, ok, kind?, detail の正規表現?]。変換前・変換後には H を前置する
 const CASES = [
@@ -99,7 +101,7 @@ const CASES = [
   ['fnstr-plus-right', 'const f=()=>1;use(""+f)', 'const f=()=>1;use(""+f)', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数の束縛が BinaryExpression\.right/],
   ['fnstr-plus-assign', 'const f=()=>1;let s="";s+=f;use(s)', 'const f=()=>1;let s="";s+=f;use(s)', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数の束縛が AssignmentExpression\.right/],
   ['fnstr-plus-local-ok', 'const f=()=>1;function g(){const f=1;let s="";s+=f;return f+1}use(f,g)', 'const f=()=>1;function g(){const f=1;let s="";s+=f;return f+1}use(f,g)', true, 'match'],
-  ['fnstr-String', 'const g=function f(){return String(f)};use(g)', 'const g=function f(){return String(f)};use(g)', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数の束縛が CallExpression\.arguments（文字列化する呼び出し）（offset \d+）/],
+  ['fnstr-String', 'const g=function f(){return String(f)};use(g)', 'const g=function f(){return String(f)};use(g)', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数の束縛が CallExpression\.arguments（許可されない呼び出し先）（offset \d+）/],
   ['fnstr-String-local-ok', 'function f(){}function g(f){return String(f)}use(g)', 'function f(){}function g(f){return String(f)}use(g)', true, 'match'],
   ['fnstr-String-bound-ok', 'function f(){}function g(String){return String(f)}use(g)', 'function f(){}function g(String){return String(f)}use(g)', true, 'match'],
   ['fnstr-name', 'const f=function(){};use(f.name)', 'const f=function(){};use(f.name)', false, 'mismatch', /関数の名前・ソースを観測し得る構文 1 件。最初は メンバーの name（offset \d+）/],
@@ -120,7 +122,7 @@ const CASES = [
   ['fnstr-destructure-object', 'function f(){const o={name:1};const {name}=o;return name}use(f)', 'function f(){const a={name:1};const {name}=a;return name}use(f)', false, 'mismatch', /観測し得る構文 1 件。最初は 分割代入・引数パターンのキー name/],
   ['fnstr-alias-array-ok', 'function f(){const xs=[1];const alias=xs;return alias.length}use(f)', 'function f(){const a=[1];const b=a;return b.length}use(f)', true, 'match'],
   // 既定値が関数の束縛（引数・分割代入）も関数値として追う
-  ['fnstr-param-default', 'function f(longValue=()=>1){return String(longValue)}use(f)', 'function f(a=()=>1){return String(a)}use(f)', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数の束縛が CallExpression\.arguments（文字列化する呼び出し）/],
+  ['fnstr-param-default', 'function f(longValue=()=>1){return String(longValue)}use(f)', 'function f(a=()=>1){return String(a)}use(f)', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
   ['fnstr-destructure-default', 'function f(){const {longValue=()=>1}={};return `${longValue}`}use(f)', 'function f(){const {longValue:a=()=>1}={};return `${a}`}use(f)', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数の束縛が TemplateLiteral\.expressions/],
 
   // 関数の名前・ソースを返し得るプロパティ（name・toString・toSource）を読む構文は、受け手を問わず一律に拒否する。
@@ -148,33 +150,65 @@ const CASES = [
   ['observe-sequence', 'use((0,o).name)', 'use((0,o).name)', false, 'mismatch', /メンバーの name/],
   ['observe-identifier-radix', 'const pad=(h)=>h.toString(36);use(pad)', 'const a=(b)=>b.toString(36);use(a)', false, 'mismatch', /メンバーの toString/],
   // 関数式・アローそのものの文字列化
-  ['observe-String-fnexpr', 'use(String(function longName(){}))', 'use(String(function a(){}))', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数式が CallExpression\.arguments（文字列化する呼び出し）/],
+  ['observe-String-fnexpr', 'use(String(function longName(){}))', 'use(String(function a(){}))', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数式が CallExpression\.arguments（許可されない呼び出し先）/],
   ['observe-template-arrow', 'use(`${(longName)=>longName}`)', 'use(`${(a)=>a}`)', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数式が TemplateLiteral\.expressions/],
   ['observe-plus-fnexpr', 'use(""+function(){const longName=1})', 'use(""+function(){const a=1})', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数式が BinaryExpression\.right/],
   ['observe-plus-assign-arrow', 'let s="";s+=()=>1;use(s)', 'let s="";s+=()=>1;use(s)', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数式が AssignmentExpression\.right/],
-  ['observe-concat-fnexpr', 'use("".concat(function(){}))', 'use("".concat(function(){}))', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数式が CallExpression\.arguments（文字列化する呼び出し）/],
+  ['observe-concat-fnexpr', 'use("".concat(function(){}))', 'use("".concat(function(){}))', false, 'mismatch', /関数値を許可されない位置で使う 1 件。最初は 関数式が CallExpression\.arguments（許可されない呼び出し先）/],
   // 関数値の位置の許可リスト（直接の関数式・追跡済みの関数束縛）。許可リストに無い位置はすべて拒否する。
   // レビューで挙がった 2 例（計算キーの ToPropertyKey・追跡済みの束縛の concat）と、文字列化し得る位置の代表
   ['pos-fn-computed-key', 'function f(){return {[function longName(){}]:1}}use(f)', 'function f(){return {[function a(){}]:1}}use(f)', false, 'mismatch', /関数式が Property\.key（offset \d+）/],
-  ['pos-bound-concat', 'function f(){const longValue=()=>1;return "".concat(longValue)}use(f)', 'function f(){const a=()=>1;return "".concat(a)}use(f)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（文字列化する呼び出し）/],
+  ['pos-bound-concat', 'function f(){const longValue=()=>1;return "".concat(longValue)}use(f)', 'function f(){const a=()=>1;return "".concat(a)}use(f)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
   ['pos-bound-computed-key', 'function f(){const longValue=()=>1;return {[longValue]:1}}use(f)', 'function f(){const a=()=>1;return {[a]:1}}use(f)', false, 'mismatch', /関数の束縛が Property\.key/],
   ['pos-fn-member-key', 'use(o[function longName(){}])', 'use(o[function a(){}])', false, 'mismatch', /関数式が MemberExpression\.property/],
   ['pos-bound-member-key', 'const longName=()=>1;use(o[longName])', 'const a=()=>1;use(o[a])', false, 'mismatch', /関数の束縛が MemberExpression\.property/],
   ['pos-fn-in', 'use((function longName(){}) in o)', 'use((function a(){}) in o)', false, 'mismatch', /関数式が BinaryExpression\.left/],
   ['pos-bound-in', 'const longName=()=>1;use(longName in o)', 'const a=()=>1;use(a in o)', false, 'mismatch', /関数の束縛が BinaryExpression\.left/],
-  ['pos-fn-Symbol', 'use(Symbol(function longName(){}))', 'use(Symbol(function a(){}))', false, 'mismatch', /関数式が CallExpression\.arguments（文字列化する呼び出し）/],
-  ['pos-bound-Symbol', 'const longName=()=>1;use(Symbol(longName))', 'const a=()=>1;use(Symbol(a))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（文字列化する呼び出し）/],
+  ['pos-fn-Symbol', 'use(Symbol(function longName(){}))', 'use(Symbol(function a(){}))', false, 'mismatch', /関数式が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-bound-Symbol', 'const longName=()=>1;use(Symbol(longName))', 'const a=()=>1;use(Symbol(a))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
   ['pos-fn-tagged', 'use(tag`${function longName(){}}`)', 'use(tag`${function a(){}}`)', false, 'mismatch', /関数式が TemplateLiteral\.expressions/],
   ['pos-bound-tagged', 'const longName=()=>1;use(tag`${longName}`)', 'const a=()=>1;use(tag`${a}`)', false, 'mismatch', /関数の束縛が TemplateLiteral\.expressions/],
   ['pos-fn-compare', 'use((function longName(){})=="")', 'use((function a(){})=="")', false, 'mismatch', /関数式が BinaryExpression\.left/],
   ['pos-bound-compare', 'const longName=()=>1;use(longName=="")', 'const a=()=>1;use(a=="")', false, 'mismatch', /関数の束縛が BinaryExpression\.left/],
-  ['pos-fn-join', 'use([function longName(){}].join())', 'use([function a(){}].join())', false, 'mismatch', /関数式が MemberExpression\.object（配列の要素）/],
+  ['pos-fn-join', 'use([function longName(){}].join())', 'use([function a(){}].join())', false, 'mismatch', /関数式が MemberExpression\.object（配列の要素）（offset/],
   ['pos-bound-join', 'const longName=()=>1;use([longName].join())', 'const a=()=>1;use([a].join())', false, 'mismatch', /関数の束縛が MemberExpression\.object（配列の要素）/],
-  ['pos-fn-new-String', 'use(new String(()=>1))', 'use(new String(()=>1))', false, 'mismatch', /関数式が NewExpression\.arguments（文字列化する呼び出し）/],
-  ['pos-bound-replace-pattern', 'const longName=()=>1;use("x".replace(longName,"y"))', 'const a=()=>1;use("x".replace(a,"y"))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（文字列化する呼び出し）/],
+  ['pos-fn-new-String', 'use(new String(()=>1))', 'use(new String(()=>1))', false, 'mismatch', /関数式が NewExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-bound-replace-pattern', 'const longName=()=>1;use("x".replace(longName,"y"))', 'const a=()=>1;use("x".replace(a,"y"))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
   ['pos-bound-conditional-template', 'const longName=()=>1;use(`${c?longName:0}`)', 'const a=()=>1;use(`${c?a:0}`)', false, 'mismatch', /関数の束縛が TemplateLiteral\.expressions/],
   ['pos-bound-toLocaleString', 'const longName=()=>1;use(longName.toLocaleString())', 'const a=()=>1;use(a.toLocaleString())', false, 'mismatch', /関数の束縛が MemberExpression\.object/],
   ['pos-bound-typeof', 'const longName=()=>1;use(typeof longName)', 'const a=()=>1;use(typeof a)', false, 'mismatch', /関数の束縛が UnaryExpression\.argument/],
+  // 呼び出しの引数も許可リスト。呼び出し先が (a) 束縛された識別子 (b) 名前空間でない object の既知のコールバックメソッド
+  // (c) setTimeout 等・new Promise のどれでもなければ拒否する（自由変数の別名・名前空間経由・反射を含む）
+  ['pos-bound-globalThis-String', 'function longName(){}use(globalThis.String(longName))', 'function Gu(){}use(globalThis.String(Gu))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-fn-globalThis-String', 'use(globalThis.String(function longName(){}))', 'use(globalThis.String(function a(){}))', false, 'mismatch', /関数式が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-bound-reflect-apply', 'const longName=()=>1;use(Reflect.apply(String,null,[longName]))', 'const a=()=>1;use(Reflect.apply(String,null,[a]))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（配列の要素）（許可されない呼び出し先）/],
+  ['pos-fn-reflect-apply', 'use(Reflect.apply(String,null,[()=>1]))', 'use(Reflect.apply(String,null,[()=>1]))', false, 'mismatch', /関数式が CallExpression\.arguments（配列の要素）（許可されない呼び出し先）/],
+  ['pos-bound-map-String', 'const longName=()=>1;use([longName].map(String))', 'const a=()=>1;use([a].map(String))', false, 'mismatch', /関数の束縛が MemberExpression\.object（配列の要素）（許可されない反復）/],
+  ['pos-fn-map-String', 'use([()=>1].map(String))', 'use([()=>1].map(String))', false, 'mismatch', /関数式が MemberExpression\.object（配列の要素）（許可されない反復）/],
+  ['pos-bound-sort-default', 'const longName=()=>1;use([longName,()=>2].sort())', 'const a=()=>1;use([a,()=>2].sort())', false, 'mismatch', /（許可されない反復）/],
+  // Function.prototype.toString.call(f) は .toString を読むので一律の拒否が先に当たる。別名を経た形は位置の判定で止まる
+  ['pos-bound-fn-proto-toString', 'const longName=()=>1;use(Function.prototype.toString.call(longName))', 'const a=()=>1;use(Function.prototype.toString.call(a))', false, 'mismatch', /観測し得る構文 1 件。最初は メンバーの toString/],
+  ['pos-fn-fn-proto-toString', 'use(Function.prototype.toString.call(()=>1))', 'use(Function.prototype.toString.call(()=>1))', false, 'mismatch', /観測し得る構文 1 件。最初は メンバーの toString/],
+  ['pos-bound-proto-alias-call', 'const ts=Function.prototype.toLocaleString;const longName=()=>1;use(ts.call(longName))', 'const ts=Function.prototype.toLocaleString;const a=()=>1;use(ts.call(a))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-fn-proto-alias-call', 'const ts=Function.prototype.toLocaleString;use(ts.call(()=>1))', 'const ts=Function.prototype.toLocaleString;use(ts.call(()=>1))', false, 'mismatch', /関数式が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-bound-console-log', 'const longName=()=>1;console.log(longName)', 'const a=()=>1;console.log(a)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-fn-console-log', 'console.log(()=>1)', 'console.log(()=>1)', false, 'mismatch', /関数式が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-bound-String-alias', 'const S=String;const longName=()=>1;use(S(longName))', 'const S=String;const a=()=>1;use(S(a))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-fn-String-alias', 'const S=String;use(S(()=>1))', 'const S=String;use(S(()=>1))', false, 'mismatch', /関数式が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-bound-member-alias', 'const lg=console.log;const longName=()=>1;lg(longName)', 'const lg=console.log;const a=()=>1;lg(a)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-bound-destructured-global', 'const {log:lg}=console;const longName=()=>1;lg(longName)', 'const {log:lg}=console;const a=()=>1;lg(a)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-bound-alias-of-alias', 'const S=String;const T=S;const longName=()=>1;use(T(longName))', 'const S=String;const T=S;const a=()=>1;use(T(a))', false, 'mismatch', /（許可されない呼び出し先）/],
+  ['pos-bound-String-call', 'const longName=()=>1;use(String.call(null,longName))', 'const a=()=>1;use(String.call(null,a))', false, 'mismatch', /（許可されない呼び出し先）/],
+  ['pos-bound-free-String', 'const longName=()=>1;use(String(longName))', 'const a=()=>1;use(String(a))', false, 'mismatch', /（許可されない呼び出し先）/],
+  ['pos-bound-computed-callee', 'const longName=()=>1;use(o["map"](longName))', 'const a=()=>1;use(o["map"](a))', false, 'mismatch', /（許可されない呼び出し先）/],
+  ['pos-bound-call-result-callee', 'const longName=()=>1;use(g()(longName))', 'const a=()=>1;use(g()(a))', false, 'mismatch', /（許可されない呼び出し先）/],
+  ['pos-bound-namespace-chain', 'const longName=()=>1;use(process.argv.map(longName))', 'const a=()=>1;use(process.argv.map(a))', false, 'mismatch', /（許可されない呼び出し先）/],
+  ['pos-bound-free-callee', 'const longName=()=>1;foo(longName)', 'const a=()=>1;foo(a)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  // 許可される呼び出し先（束縛された関数・既知のコールバックメソッド・setTimeout 等・new Promise・Array.from）
+  ['pos-args-allowed-ok', 'function pool(list,cb){return list.map(cb)}function run(xs){const longName=(x)=>x;const m=new Map();const st=new Set();xs.map(longName);xs.filter((x)=>x).forEach(longName);xs.reduce((a,b)=>a+b,0);Promise.resolve(1).then(longName).catch(()=>0).finally(()=>0);setTimeout(longName,1);setInterval(()=>0,1);queueMicrotask(()=>0);m.set("k",longName);st.add(longName);xs.push(longName);Array.from(xs,longName);"x".replace(/x/g,longName);[longName].map((g)=>g());[longName].forEach(pool);longName.call(null,longName);pool(xs,longName);return [new Promise((r)=>r(1)),pool(xs,(x)=>x)]}use(run)',
+   'function pool(a,b){return a.map(b)}function run(a){const b=(c)=>c;const c=new Map();const d=new Set();a.map(b);a.filter((e)=>e).forEach(b);a.reduce((e,f)=>e+f,0);Promise.resolve(1).then(b).catch(()=>0).finally(()=>0);setTimeout(b,1);setInterval(()=>0,1);queueMicrotask(()=>0);c.set("k",b);d.add(b);a.push(b);Array.from(a,b);"x".replace(/x/g,b);[b].map((e)=>e());[b].forEach(pool);b.call(null,b);pool(a,b);return [new Promise((e)=>e(1)),pool(a,(e)=>e)]}use(run)', true, 'match'],
+  ['pos-bound-replace-first-arg', 'const longName=()=>1;use("x".replace(longName,"y"))', 'const a=()=>1;use("x".replace(a,"y"))', false, 'mismatch', /（許可されない呼び出し先）/],
+
   // 許可される位置（呼ぶ・引数に渡す・代入・return・.call 等・既定値・配列リテラル経由の引数・置換関数）
   ['pos-allowed-ok', 'function f(longCb){return longCb()}const longName=()=>1;let other;other=longName;const o={m:longName,longName};use(f(longName),(()=>2)(),longName.call(null),longName.apply(null,[]),longName.bind(null),longName.length,o,other,[longName].map((g)=>g()),"x".replace(/x/g,()=>"y"),c?longName:null,c||longName);function g(h=()=>1){return h}use(g,function(){return longName})',
    'function f(a){return a()}const b=()=>1;let c0;c0=b;const o={m:b,longName:b};use(f(b),(()=>2)(),b.call(null),b.apply(null,[]),b.bind(null),b.length,o,c0,[b].map((g)=>g()),"x".replace(/x/g,()=>"y"),c?b:null,c||b);function g(h=()=>1){return h}use(g,function(){return b})', true, 'match'],
@@ -248,7 +282,7 @@ test('合成: 一律の拒否・位置の拒否の説明は固定の語彙と of
     ['pos-bound-in', ['longName', 'o']],
   ]) {
     const r = res.get(name)
-    assert.match(r.detail, /^\[module\] 変換前: (関数の名前・ソースを観測し得る構文|関数値を許可されない位置で使う) \d+ 件。最初は [^（]+(（文字列化する呼び出し）)?（offset \d+）$/, `${name}: ${r.detail}`)
+    assert.match(r.detail, /^\[module\] 変換前: (関数の名前・ソースを観測し得る構文|関数値を許可されない位置で使う) \d+ 件。最初は [^（]+(（許可されない呼び出し先）|（許可されない反復）)?（offset \d+）$/, `${name}: ${r.detail}`)
     const reason = r.detail.replace(/^.*最初は /, '').replace(/（offset \d+）$/, '')
     for (const w of words) assert.ok(!new RegExp(`(^|[^A-Za-z])${w}([^A-Za-z]|$)`).test(reason), `${name}: 説明に入力の ${w} が入っている: ${r.detail}`)
   }
@@ -300,5 +334,5 @@ test('実物: stage1 の恒等は一致し（手順 6 は 0 件）、関数値�
   assert.equal(s.identifiers, m.identifiers + 8, id.detail)
   const st = res.get('stringified')
   assert.equal(st.kind, 'mismatch', st.detail)
-  assert.match(st.detail, /関数値を許可されない位置で使う 1 件。最初は 関数の束縛が CallExpression\.arguments（文字列化する呼び出し）/)
+  assert.match(st.detail, /関数値を許可されない位置で使う 1 件。最初は 関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/)
 })

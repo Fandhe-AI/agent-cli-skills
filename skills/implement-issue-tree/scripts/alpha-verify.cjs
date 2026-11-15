@@ -15,15 +15,18 @@
 //       例外は受け手が構文上必ず数値になる式（数値リテラル・単項 + - ~・算術とビット演算の二項式。括弧つきを含む）だけ
 //   (ii) 関数値の位置の許可リスト（手順 6）。直接の関数式・アロー関数と、追跡済みの関数束縛（宣言・関数式の束縛・
 //       既定値・const / 代入による別名）の参照は、親ノードでの位置が許可リストにあるときだけ通す。許可するのは、
-//       宣言・代入・既定値・オブジェクトの値（非計算キー）・return・アローの本体・呼び出しの callee・呼び出しの引数
-//       （String・Symbol・RegExp 等の自由変数の既知の関数と、concat・join・split・includes 等の既知のメソッドの
-//       引数を除く。replace / replaceAll は第 1 引数だけを除く）・非計算のメンバーの object（name・toString・
-//       toSource・toLocaleString を除く。f.call・f.length 等）。括弧・カンマ式の最後・条件式の枝・論理式は親の位置を
-//       引き継ぎ、配列リテラルの要素は配列の位置で判定する（配列では join・concat 等のメンバーも除く）。それ以外の
-//       位置（計算キー・in・比較・+・テンプレート・タグ・typeof・文の式など）はすべて拒否する
+//       宣言・代入・既定値・オブジェクトの値（非計算キー）・return・アローの本体・呼び出しの callee・非計算のメンバーの
+//       object（name・toString・toSource・toLocaleString を除く。f.call・f.length 等）・呼び出しの引数。
+//       呼び出しの引数も許可リストで、呼び出し先が (a) プログラム内で束縛された識別子（自由変数の別名〔const S = String・
+//       const lg = console.log・const {log} = console〕を除く）(b) 既知のコールバックメソッド（map・then・call 等。object が自由変数を根に持つ
+//       名前空間なら Array・Promise・Object の直下だけ。call・apply・bind は object が関数値のときだけ。replace /
+//       replaceAll は第 2 引数だけ）(c) setTimeout・setInterval・queueMicrotask・new Promise のどれかのときだけ通す。
+//       括弧・カンマ式の最後・条件式の枝・論理式は親の位置を引き継ぎ、配列リテラルの要素は配列の位置で判定する
+//       （配列を object にしてよいのは length と、第 1 引数が関数式か束縛された関数の反復メソッドだけ）。それ以外の位置
+//       （計算キー・in・比較・+・テンプレート・タグ・typeof・自由変数や名前空間の関数の引数など）はすべて拒否する
 // 保証しないこと（残るリスク）:
 // - 直接の関数式と追跡済みの束縛については、許可リスト外の位置をすべて拒否する。残るのは追跡外の別名だけで、
-//   引数・オブジェクトのプロパティ・配列の要素・戻り値を経た関数値（function g(x){return `${x}`}g(f)・
+//   束縛された関数の引数・オブジェクトのプロパティ・配列の要素・戻り値を経た関数値（function g(x){return `${x}`}g(f)・
 //   o.m = f; String(o.m)・const xs = [f]; xs.join() など）は、その先の文字列化が見えない。キーを持たない反射
 //   （Object.getOwnPropertyDescriptors）・Error の stack（関数名を含む）も見えない。改名後の生成物で全テスト
 //   （stub-run を含む）を流すことが補償になる
@@ -153,27 +156,28 @@ function unsupported(n, anc) {
 // 関数値を文字列化しない（引数として渡す・呼ぶ・束縛する等）と確かめた位置の許可リスト（手順 6）。
 // 直接の関数式・アローと、追跡済みの関数束縛の参照について、親ノードでの位置がこのリストに無ければ拒否する
 // （計算キー・in・比較・+・テンプレート・タグ・concat・Symbol などを位置の列挙なしにまとめて塞ぐ）。
-// 文字列化する既知の関数（自由変数の名前で呼ぶもの）。その引数の位置は許可しない
-const STRINGIFY_CALLEES = new Set(['String', 'Symbol', 'RegExp', 'Number', 'parseInt', 'parseFloat', 'encodeURI',
-  'encodeURIComponent', 'decodeURI', 'decodeURIComponent', 'escape', 'unescape', 'Error'])
-// 引数を文字列化する既知のメソッド。replace / replaceAll は第 1 引数だけ（第 2 引数の関数は置換関数として呼ばれる）
-const STRINGIFY_METHODS = new Set(['concat', 'join', 'split', 'includes', 'indexOf', 'startsWith', 'endsWith', 'padStart',
-  'padEnd', 'localeCompare', 'replace', 'replaceAll'])
-const FIRST_ARG_ONLY = new Set(['replace', 'replaceAll'])
+// 呼び出しの引数に渡せるのは、呼び出し先が次の許可リストに当たるときだけ（引数の位置も許可リストで判定する）:
+//   (a) プログラム内で束縛された識別子（自由変数・自由変数の別名〔const S = String 等〕を除く）
+//   (b) 非計算のメンバーで、名前が CALLBACK_METHODS にあるもの。object が自由変数（とその別名）を根に持つ名前空間なら
+//       許可しない（例外は NAMESPACE_OK の組だけ）。call・apply・bind は object が関数値そのもののときだけ
+//   (c) 自由変数の CALLBACK_FREE（setTimeout 等）と、new の呼び出し先の Promise
+// 関数を引数に受け取り、文字列化せずに呼ぶ・保持するだけの既知のメソッド。replace / replaceAll は第 2 引数だけ
+const CALLBACK_METHODS = new Set(['map', 'filter', 'forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex',
+  'reduce', 'reduceRight', 'flatMap', 'sort', 'then', 'catch', 'finally', 'call', 'apply', 'bind', 'replace', 'replaceAll',
+  'push', 'unshift', 'set', 'add', 'get', 'has', 'from'])
+const SECOND_ARG_ONLY = new Set(['replace', 'replaceAll'])
+const SELF_CALL = new Set(['call', 'apply', 'bind'])
+// 自由変数の名前空間のうち、CALLBACK_METHODS のメソッドに限って関数値を渡してよいもの（Array.from 等）
+const NAMESPACE_OK = new Set(['Array', 'Promise', 'Object'])
+const CALLBACK_FREE = new Set(['setTimeout', 'setInterval', 'queueMicrotask'])
+// 関数値を要素に持つ配列リテラルを object にしてよい反復メソッド（第 1 引数が関数式か束縛された関数のとき）
+const ITERATE_METHODS = new Set(['map', 'filter', 'forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex',
+  'reduce', 'reduceRight', 'flatMap', 'sort'])
 // 関数値のメンバーで、名前・ソースを返し得るもの（Object.prototype.toLocaleString は this.toString() を呼ぶ）
 const SOURCE_MEMBERS = new Set([...OBSERVED_PROPS, 'toLocaleString'])
 
-// 呼び出し p の引数 child が文字列化されるか（callee が自由変数の既知の関数・既知のメソッド）
-function stringifyingCall(p, child, res) {
-  const c = p.callee
-  if (c.type === 'Identifier') return STRINGIFY_CALLEES.has(c.name) && res.get(c) === 'free'
-  if (c.type !== 'MemberExpression') return false
-  const k = staticKey(c.property, c.computed)
-  if (k === null || !STRINGIFY_METHODS.has(k)) return false
-  return !FIRST_ARG_ONLY.has(k) || p.arguments[0] === child
-}
-
 // anc[i] にある値が許可された位置にあるか。許可されなければ位置の説明（固定の語彙: ノードの型とキー）、許可されれば null。
+// 呼び出しの引数と配列の反復は { label, arg | iterate } を返し、解決後に argAllowed / iterateAllowed で判定する。
 // mode は 'value'（関数値そのもの）か 'container'（関数値を要素に持つ配列リテラル）
 function fnPositionDenied(anc, i, mode, res) {
   const child = anc[i]
@@ -228,12 +232,20 @@ function fnPositionDenied(anc, i, mode, res) {
     case 'CallExpression':
     case 'NewExpression':
       if (p.callee === child) return mode === 'value' ? null : label
-      return stringifyingCall(p, child, res) ? `${label}（文字列化する呼び出し）` : null
+      // 呼び出し先が許可リストに当たるかは、全識別子の解決と関数束縛の追跡の後に判定する
+      return { label: `${label}（許可されない呼び出し先）`, arg: { call: p, child } }
     case 'MemberExpression': {
       if (p.object !== child || p.computed) return label
       const k = p.property.type === 'Identifier' ? p.property.name : null
-      if (k === null || SOURCE_MEMBERS.has(k) || (mode === 'container' && STRINGIFY_METHODS.has(k))) return label
-      return null
+      if (k === null || SOURCE_MEMBERS.has(k)) return label
+      if (mode === 'value') return null
+      // 配列リテラル: 要素数だけを見る length と、反復の呼び出し（第 1 引数のコールバックを解決後に判定）だけを許可する
+      if (k === 'length') return null
+      const call = anc[i - 2]
+      if (ITERATE_METHODS.has(k) && call && call.type === 'CallExpression' && call.callee === p) {
+        return { label: `${label}（許可されない反復）`, iterate: call }
+      }
+      return label
     }
     default:
       return label
@@ -286,6 +298,7 @@ function analyze(ast, goal) {
   const sites = []
   const aliases = [] // [別名の宣言 | 代入先の識別子, 値の識別子]（const a = f / a = f）
   const assignedFns = [] // 後から関数式を代入される識別子（let a; a = () => 1）
+  const derivedCands = [] // [束縛 | 代入先の識別子, 初期値のメンバー連鎖 | 識別子]（const S = String・const log = console.log）
   const observed = [] // 関数の名前・ソースを観測し得る構文（受け手を問わない一律の拒否）
   // script ゴールの包み関数（検証器が足したもの。入力の関数式ではない）
   const wrapper = goal === 'script' ? ast.body[0].expression : null
@@ -304,16 +317,19 @@ function analyze(ast, goal) {
     else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && isFunctionValue(n.right)) assignedFns.push(n.left)
     // 既定値が関数の束縛（function f(g = () => 1)・const {g = () => 1} = o）も関数値を受け取り得る
     else if (n.type === 'AssignmentPattern' && n.left.type === 'Identifier' && isFunctionValue(n.right)) assignedFns.push(n.left)
+    // 分割代入（const {log} = console）は、取り出した束縛すべてを候補にする
+    if (n.type === 'VariableDeclarator' && n.init && (n.init.type === 'Identifier' || n.init.type === 'MemberExpression')) for (const id of boundIds(n.id)) derivedCands.push([id, n.init])
+    else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && (n.right.type === 'Identifier' || n.right.type === 'MemberExpression')) derivedCands.push([n.left, n.right])
     const seen = observeSite(n)
     if (seen) observed.push({ why: seen, start: n.start })
     // 直接の関数式・アローは常に、識別子は関数束縛に解決されたときだけ（解決後に絞る）、許可リスト外の位置を拒否する
     if (isFunctionValue(n) && n !== wrapper) {
       const deny = fnPositionDenied(anc, anc.length - 1, 'value', res)
-      if (deny) sites.push({ node: n, direct: true, why: deny })
+      if (deny) sites.push({ node: n, direct: true, deny })
     }
     if (n.type !== 'Identifier') return
     const deny = fnPositionDenied(anc, anc.length - 1, 'value', res)
-    if (deny) sites.push({ node: n, direct: false, why: deny })
+    if (deny) sites.push({ node: n, direct: false, deny })
     for (let i = anc.length - 2; i >= 0; i--) {
       const s = anc[i]
       const m = declaredBy(s, anc[i + 1], cache)
@@ -342,7 +358,53 @@ function analyze(ast, goal) {
       }
     }
   }
-  const stringified = sites.filter((x) => x.direct || fnDecls.has(res.get(x.node)))
+  // 自由変数（とそのメンバー連鎖）を初期値に持つ束縛は、自由変数の別名として扱う（const S = String; S(f) を (a) で通さない）
+  const derived = new Set()
+  const rootOf = (e) => {
+    while (e.type === 'MemberExpression') e = e.object
+    return e
+  }
+  const isGlobal = (id) => id.type === 'Identifier' && (res.get(id) === 'free' || derived.has(declOf(id)))
+  for (let changed = true; changed;) {
+    changed = false
+    for (const [target, init] of derivedCands) {
+      const t = declOf(target)
+      if (t && !derived.has(t) && isGlobal(rootOf(init))) {
+        derived.add(t)
+        changed = true
+      }
+    }
+  }
+  const isFnValue = (e) => isFunctionValue(e) || (e.type === 'Identifier' && fnDecls.has(res.get(e)))
+  // 呼び出しの引数に関数値を渡してよいか（冒頭の (a)〜(c)）
+  const argAllowed = ({ call, child }) => {
+    const c = call.callee
+    if (c.type === 'Identifier') {
+      if (res.get(c) === 'free') return call.type === 'NewExpression' ? c.name === 'Promise' : CALLBACK_FREE.has(c.name)
+      return !derived.has(declOf(c))
+    }
+    if (c.type !== 'MemberExpression' || c.computed || c.property.type !== 'Identifier') return false
+    const k = c.property.name
+    if (!CALLBACK_METHODS.has(k)) return false
+    if (SECOND_ARG_ONLY.has(k) && call.arguments[1] !== child) return false
+    if (SELF_CALL.has(k)) return isFnValue(c.object)
+    if (!isGlobal(rootOf(c.object))) return true
+    return c.object.type === 'Identifier' && res.get(c.object) === 'free' && NAMESPACE_OK.has(c.object.name)
+  }
+  // 関数値を要素に持つ配列の反復: 第 1 引数が関数式か、束縛された（自由変数の別名でない）識別子のとき
+  const iterateAllowed = (call) => {
+    const cb = call.arguments[0]
+    if (!cb) return false
+    if (isFunctionValue(cb)) return true
+    return cb.type === 'Identifier' && res.get(cb) !== 'free' && !derived.has(declOf(cb))
+  }
+  const denied = (x) => {
+    if (typeof x.deny === 'string') return true
+    if (x.deny.arg) return !argAllowed(x.deny.arg)
+    return !iterateAllowed(x.deny.iterate)
+  }
+  const stringified = sites.filter((x) => (x.direct || fnDecls.has(res.get(x.node))) && denied(x))
+    .map((x) => ({ ...x, why: typeof x.deny === 'string' ? x.deny : x.deny.label }))
   // 最上位（module は Program、script は包み関数の本体）の meta 宣言
   const top = goal === 'module' ? ast.body : ast.body[0].expression.body.body
   const topMeta = new Set(lexicalIds(top).filter((id) => id.name === 'meta'))
