@@ -82,7 +82,22 @@ function sigOf(number, deps) {
   return Number(((BigInt(number) * 7919n) % M + sum) % M)
 }
 
-function run(bash, stub, args, { launcher = null, env = null } = {}) {
+// 入力の束縛の正準文字列（ホストの declaredDepsFetchCommand・lib の dd_input_sha と独立に書いた定義）。
+// "declared-deps\n" + numbers + "\n" + repo（無ければ空）+ "\n" + table（無ければ空）。末尾に改行を付けない。
+export const inputShaOf = (numbers, repo = '', table = '') => sha(`declared-deps\n${numbers}\n${repo}\n${table}`)
+
+// --numbers モードの引数から、スクリプトへ渡された値そのままで束縛のハッシュを付ける（ホストが起動行へ付けるのと同じ形）。
+// 引数の誤りのテストでも、ハッシュは正しい値を付ける（= 拒否の理由が検証であって INPUT_MISMATCH ではないことを確かめられる）。
+function withHash(args) {
+  if (!args.includes('--numbers') || args.includes('--input-sha256')) return args
+  // 末尾が値を取るフラグのままだと、足したハッシュがその値になってしまい「値が無い」の検査の意味が変わる
+  if (['--numbers', '--repo', '--table'].includes(args[args.length - 1])) return args
+  const val = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] ?? '' : '' }
+  return [...args, '--input-sha256', inputShaOf(val('--numbers'), val('--repo'), val('--table'))]
+}
+
+function run(bash, stub, args, { launcher = null, env = null, raw = false } = {}) {
+  if (!raw) args = withHash(args)
   const argv = launcher ? [launcher.runVerified, launcher.sha, launcher.name, ...args] : [SCRIPT, ...args]
   const r = spawnSync(bash, argv, { env: env ?? stub.env(), encoding: 'utf8' })
   return { status: r.status, stdout: r.stdout, stderr: r.stderr }
@@ -217,6 +232,130 @@ export function registerDeclaredDepsTests(bash) {
     assert.ok(filter.includes(`.number as $self | ${JSON.stringify(SAMPLE_TABLE)} as $T |`), '表がフィルタのリテラルとして入る')
   })
 
+  // ---- 入力の束縛（監査 M-1）: --input-sha256 ----
+  // 転記で --table のエントリ・--repo・番号を落としても、sig は number と deps だけから計算されるので出力はつじつまが合う。
+  // 束縛が無いと、表が欠けて兄弟の依存が解決されない・cwd の別リポジトリの同じ番号を読む、がホストの照合を通ってしまう。
+  const BIND_TABLE = { f: { 100: [['TASK-97-5', 105], ['TASK-97-6', 106]], 200: [['TASK-98-1', 201]] }, n: { 106: ['100', 105], 201: ['200', 0] } }
+  const BIND_NUMBERS = '105,106,201'
+  const BIND_REPO = 'Fandhe-AI/agent-cli-skills'
+  const bindingArgs = (over = {}) => {
+    const a = { numbers: BIND_NUMBERS, repo: BIND_REPO, table: JSON.stringify(BIND_TABLE), ...over }
+    const argv = ['--numbers', a.numbers]
+    if (a.repo !== null) argv.push('--repo', a.repo)
+    if (a.table !== null) argv.push('--table', a.table)
+    return argv
+  }
+  const goodHash = inputShaOf(BIND_NUMBERS, BIND_REPO, JSON.stringify(BIND_TABLE))
+  const seedBinding = (stub) => { for (const n of [105, 106, 201]) stub.issue(n, '前の工程（TASK-97-5）の結果を踏まえている\n') }
+  const expectMismatch = (name, argv) => test(label(`入力の束縛: ${name} は exit 2・INPUT_MISMATCH・gh を呼ばない`), () => {
+    const stub = makeStub()
+    seedBinding(stub)
+    const r = run(bash, stub, argv, { raw: true })
+    assert.equal(r.status, 2, r.stderr)
+    assert.equal(r.stdout, '', '出力（つじつまの合った sig を含む行）を出さない')
+    assert.match(r.stderr, /INPUT_MISMATCH/)
+    assert.ok(!r.stderr.includes(goodHash), '期待値を出力しない（転記し直しで通せない）')
+    assert.equal(stub.calls().length, 0, 'gh を 1 回も呼ばない')
+  })
+
+  test(label('入力の束縛: 正しい起動行（--numbers・--repo・--table・--input-sha256）は通り、フラグの順序に依存しない'), () => {
+    const stub = makeStub()
+    seedBinding(stub)
+    const r = run(bash, stub, [...bindingArgs(), '--input-sha256', goodHash], { raw: true })
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(lines(r.stdout).map((o) => o.number), [105, 106, 201])
+    assert.equal(stub.calls().length, 3)
+    // 順序を入れ替えても、同じ引数の値なら通る（束縛は値の組であって並びではない）
+    const stub2 = makeStub()
+    seedBinding(stub2)
+    const r2 = run(bash, stub2, ['--input-sha256', goodHash, '--table', JSON.stringify(BIND_TABLE), '--repo', BIND_REPO, '--numbers', BIND_NUMBERS], { raw: true })
+    assert.equal(r2.status, 0, r2.stderr)
+    assert.deepEqual(lines(r2.stdout), lines(r.stdout))
+    // ホストが付ける形（表も --repo も無い）の起動行も、空文字を入れた正準文字列で通る
+    const stub3 = makeStub()
+    stub3.issue(1, 'Depends on #2\n')
+    const r3 = run(bash, stub3, ['--numbers', '1', '--input-sha256', inputShaOf('1')], { raw: true })
+    assert.equal(r3.status, 0, r3.stderr)
+  })
+
+  // 表の転記の欠落（--table の 1 エントリ・句ごと・全体）
+  const tableWith = (mut) => { const t = JSON.parse(JSON.stringify(BIND_TABLE)); mut(t); return JSON.stringify(t) }
+  const goodArgs = (over) => [...bindingArgs(over), '--input-sha256', goodHash]
+  expectMismatch('--table の f の 1 エントリの欠落（TASK-97-6）', goodArgs({ table: tableWith((t) => { t.f[100].pop() }) }))
+  expectMismatch('--table の f の 1 つの家族の欠落（親 200）', goodArgs({ table: tableWith((t) => { delete t.f[200] }) }))
+  expectMismatch('--table の n の 1 エントリの欠落（番号 201）', goodArgs({ table: tableWith((t) => { delete t.n[201] }) }))
+  expectMismatch('--table の f 句ごとの欠落（f が空）', goodArgs({ table: tableWith((t) => { t.f = {} }) }))
+  expectMismatch('--table の n 句ごとの欠落（n が空）', goodArgs({ table: tableWith((t) => { t.n = {} }) }))
+  expectMismatch('--table 全体の欠落（フラグごと省略）', goodArgs({ table: null }))
+  expectMismatch('--table が既定の空の表（渡した値は省略と区別する）', goodArgs({ table: '{"f":{},"n":{}}' }))
+  expectMismatch('--table の番号の書き換え（TASK-97-6 の番号が 106 → 107）', goodArgs({ table: tableWith((t) => { t.f[100][1][1] = 107 }) }))
+  // --repo の欠落・別リポジトリ
+  expectMismatch('--repo の欠落（cwd のリポジトリの同じ番号を読む事故）', goodArgs({ repo: null }))
+  expectMismatch('--repo の別のリポジトリへの書き換え', goodArgs({ repo: 'Fandhe-AI/other-repo' }))
+  // --numbers の欠落・並べ替え・追加
+  expectMismatch('--numbers の 1 個の欠落（先頭）', goodArgs({ numbers: '106,201' }))
+  expectMismatch('--numbers の 1 個の欠落（末尾）', goodArgs({ numbers: '105,106' }))
+  expectMismatch('--numbers の並べ替え', goodArgs({ numbers: '106,105,201' }))
+  expectMismatch('--numbers への 1 個の追加', goodArgs({ numbers: '105,106,201,202' }))
+  // --input-sha256 自体
+  const flip = (h) => h.slice(0, -1) + (h.endsWith('0') ? '1' : '0')
+  expectMismatch('--input-sha256 の 1 文字違い（末尾）', [...bindingArgs(), '--input-sha256', flip(goodHash)])
+  expectMismatch('--input-sha256 の 1 文字違い（先頭）', [...bindingArgs(), '--input-sha256', (goodHash[0] === '0' ? '1' : '0') + goodHash.slice(1)])
+  expectMismatch('--input-sha256 の大文字化', [...bindingArgs(), '--input-sha256', goodHash.toUpperCase()])
+  expectMismatch('--input-sha256 の短縮', [...bindingArgs(), '--input-sha256', goodHash.slice(0, 63)])
+  expectMismatch('--input-sha256 が空文字', [...bindingArgs(), '--input-sha256', ''])
+  expectMismatch('--input-sha256 の欠落', bindingArgs())
+  expectMismatch('--input-sha256 が別の入力のハッシュ（表なし）', [...bindingArgs(), '--input-sha256', inputShaOf(BIND_NUMBERS, BIND_REPO, '')])
+  expectMismatch('正準文字列の区切りを変えたハッシュ（先頭の語・改行の有無）', [...bindingArgs(), '--input-sha256', sha(`declared-deps\n${BIND_NUMBERS}\n${BIND_REPO}\n${JSON.stringify(BIND_TABLE)}\n`)])
+  expectMismatch('隣の欄に値をずらしたハッシュ（repo の欄へ表を入れる）', [...bindingArgs(), '--input-sha256', sha(`declared-deps\n${BIND_NUMBERS}\n${JSON.stringify(BIND_TABLE)}\n${BIND_REPO}`)])
+
+  test(label('入力の束縛: 引数の検証（形式）は束縛より先に働く（不正な値は INPUT_MISMATCH ではなく使い方の誤り）'), () => {
+    const stub = makeStub()
+    const r = run(bash, stub, ['--numbers', '1,a', '--input-sha256', inputShaOf('1,a')], { raw: true })
+    assert.equal(r.status, 2)
+    assert.match(r.stderr, /使い方/)
+    assert.doesNotMatch(r.stderr, /INPUT_MISMATCH/)
+  })
+
+  test(label('入力の束縛: --rate-limit と --print-filter は束縛の対象外（ハッシュなしで動く）'), () => {
+    const stub = makeStub()
+    stub.rate({ resources: { core: { limit: 5000, remaining: 1, reset: 4102444800 } } })
+    assert.equal(run(bash, stub, ['--rate-limit'], { raw: true }).status, 0)
+    assert.equal(run(bash, stub, ['--print-filter'], { raw: true }).status, 0)
+  })
+
+  for (const tool of ['sha256sum', 'shasum']) {
+    const which = spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim()
+    test(label(`入力の束縛: ${tool} だけが使える環境でも同じ正準文字列で通る`), { skip: which === '' }, () => {
+      const stub = makeStub()
+      stub.issue(1, 'Depends on #2\n')
+      const only = join(stub.dir, `only-${tool}`)
+      mkdirSync(only)
+      symlinkSync(join(stub.bin, 'gh'), join(only, 'gh'))
+      for (const t of ['dirname', 'jq', tool, ...(tool === 'shasum' ? ['perl'] : [])]) {
+        const p = spawnSync('sh', ['-c', `command -v ${t}`], { encoding: 'utf8' }).stdout.trim()
+        if (p) symlinkSync(p, join(only, t))
+      }
+      const env = { PATH: only, GH_STUB_DIR: stub.dir, HOME: stub.dir }
+      const r = run(bash, stub, ['--numbers', '1', '--repo', 'a/b', '--input-sha256', inputShaOf('1', 'a/b')], { raw: true, env })
+      assert.equal(r.status, 0, r.stderr)
+      assert.deepEqual(lines(r.stdout), [{ number: 1, deps: [2], sig: sigOf(1, [2]) }])
+    })
+  }
+
+  test(label('入力の束縛: ハッシュを計算できない環境（sha256sum も shasum も無い）は exit 3 で gh を呼ばない'), () => {
+    const stub = makeStub()
+    stub.issue(1, 'x\n')
+    const only = join(stub.dir, 'only-nohash')
+    mkdirSync(only)
+    symlinkSync(join(stub.bin, 'gh'), join(only, 'gh'))
+    for (const t of ['dirname', 'jq']) symlinkSync(spawnSync('sh', ['-c', `command -v ${t}`], { encoding: 'utf8' }).stdout.trim(), join(only, t))
+    const r = run(bash, stub, ['--numbers', '1', '--input-sha256', inputShaOf('1')], { raw: true, env: { PATH: only, GH_STUB_DIR: stub.dir, HOME: stub.dir } })
+    assert.equal(r.status, 3, r.stderr)
+    assert.equal(r.stdout, '')
+    assert.equal(stub.calls().length, 0)
+  })
+
   test(label('gh の失敗: 失敗したイシューは行を出さず FAILED #N を標準エラーへ。gh の標準エラーは通し、他のイシューは続ける'), () => {
     const stub = makeStub()
     stub.issue(1, 'Depends on #9\n')
@@ -304,6 +443,14 @@ export function registerDeclaredDepsTests(bash) {
     ['番号が 101 個', ['--numbers', Array.from({ length: 101 }, (_, i) => i + 1).join(',')]],
     ['番号にコマンド置換', ['--numbers', '$(touch x)']],
     ['--repo の形式', ['--numbers', '1', '--repo', 'no-slash']],
+    ['--repo が空文字（省略と同じ扱いにしない）', ['--numbers', '1', '--repo', '']],
+    ['--repo が 2 回', ['--numbers', '1', '--repo', 'a/b', '--repo', 'a/b']],
+    ['--input-sha256 が 2 回', ['--numbers', '1', '--input-sha256', 'a', '--input-sha256', 'a']],
+    ['--input-sha256 の値が無い', ['--numbers', '1', '--input-sha256']],
+    ['--rate-limit に --input-sha256', ['--rate-limit', '--input-sha256', 'a']],
+    ['--print-filter に --input-sha256', ['--print-filter', '--input-sha256', 'a']],
+    ['--rate-limit に空の --repo', ['--rate-limit', '--repo', '']],
+    ['--print-filter に空の --repo', ['--print-filter', '--repo', '']],
     ['--repo に空白', ['--numbers', '1', '--repo', 'a/b c']],
     ['--repo に引用符', ['--numbers', '1', '--repo', "a/b'c"]],
     ['--repo が先頭ハイフンの owner', ['--numbers', '1', '--repo', '-a/b']],
@@ -332,6 +479,8 @@ export function registerDeclaredDepsTests(bash) {
       assert.equal(r.stdout, '')
       assert.equal(stub.calls().length, 0)
       assert.match(r.stderr, /使い方/)
+      assert.doesNotMatch(r.stderr, /INPUT_MISMATCH/, '束縛ではなく引数の検証が拒否する')
+      if (name.includes('値が無い')) assert.match(r.stderr, /に値が無い/, '到達する分岐は「値が無い」（足したハッシュが値として消費されない）')
       assert.ok(!existsSync(join(process.cwd(), 'x')), '番号にコマンド置換を含めても実行されない')
     })
   }
@@ -373,6 +522,17 @@ export function registerDeclaredDepsTests(bash) {
 
   // ---- lib の検証関数（1 回の bash 起動で表を検査） ----
   const libCheck = (fn, value) => spawnSync(bash, ['-c', `. "${LIB}"; ${fn} "$1"`, 'x', value], { encoding: 'utf8' }).status
+  test(label('lib: dd_input_sha は独立に書いた正準文字列の SHA-256 と一致する（空の欄・表あり・末尾に改行なし）'), () => {
+    const SIGNED = join(SCRIPTS, 'lib', 'signed-output.sh')
+    const dd = (...a) => spawnSync(bash, ['-c', `. "${SIGNED}"; . "${LIB}"; dd_input_sha "$1" "$2" "$3"`, 'x', ...a], { encoding: 'utf8' })
+    for (const [n, r, t] of [['1', '', ''], ['1,2', 'a/b', ''], ['105,106', 'Fandhe-AI/x', JSON.stringify(SAMPLE_TABLE)], ['7', '', JSON.stringify(SAMPLE_TABLE)]]) {
+      const out = dd(n, r, t)
+      assert.equal(out.status, 0, out.stderr)
+      assert.equal(out.stdout, inputShaOf(n, r, t))
+      assert.match(out.stdout, /^[0-9a-f]{64}$/)
+    }
+    assert.notEqual(inputShaOf('1', 'a/b', ''), inputShaOf('1', '', 'a/b'), '欄を入れ替えると別の値')
+  })
   test(label('lib: dd_valid_numbers / dd_valid_repo / dd_valid_table の受理と拒否'), () => {
     for (const v of ['1', '1,2,3', '1234567890', '9,8,7']) assert.equal(libCheck('dd_valid_numbers', v), 0, v)
     for (const v of ['', '0', '01', ',1', '1,', '1,,2', '1,1', 'a', '1 2', '12345678901', '-1']) assert.equal(libCheck('dd_valid_numbers', v), 1, v)

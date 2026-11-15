@@ -1608,6 +1608,8 @@ function siblingTaskTableFor(numbers, built) {
 const DECLARED_DEPS_CHUNK_SIZE = 40
 // 1 イシューあたりの依存宣言数の上限（本文由来の過大な配列で depsMap を膨らませない）。
 const DECLARED_DEPS_MAX_PER_NODE = 100
+// --table の長さの上限。scripts/lib/declared-deps-lib.sh の DD_TABLE_MAX と同じ値（Linux の 1 引数の上限 128 KiB に収める）。超える表はスクリプトが exit 2 にするので、ホストは起動前に検査する。
+const DECLARED_DEPS_TABLE_MAX = 120000
 // 転記の検査値。ホストはシェルを持たずコマンド出力を直接照合できないため、jq がイシュー番号と deps から計算した sig をエージェントに転記させ、ホストが返却 deps から同じ式で再計算して照合する（deps の脱落・書き換え・並べ替えといった転記の誤りを契約違反として検出し再試行へ回す）。保証の範囲は偶発的な転記の誤りの検出に限る（抽出エージェントは本文テキストを読まず、式を意図的に再計算して検査値を偽造する前提は置かない）。各項を法 1000000007 で丸め、jq（倍精度）・gojq・JS の整数演算が一致する範囲に収める。
 const DECLARED_DEPS_SIG_MOD = 1000000007
 const DECLARED_DEPS_SIG_JQ =
@@ -1640,9 +1642,12 @@ const MACHINE_SCOPE_LINE = '複数イシューに触れるユーザー発言が�
 function declaredDepsCommand(rest) {
   return `bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['declared-deps.sh']} declared-deps.sh${rest}`
 }
+// 入力の束縛（監査 M-1）。sha256("declared-deps\n" + numbers + "\n" + repo + "\n" + table)。repo・table は起動行に付けないとき空文字、末尾に改行を付けない。scripts/lib/declared-deps-lib.sh の dd_input_sha と同じ定義。sig は number と deps だけから計算されるため、エージェントが --table のエントリ・--repo・番号を転記で落としても整合した出力が出る。スクリプトは受け取った引数から同じ値を計算し直し、不一致なら gh を呼ばずに INPUT_MISMATCH で exit 2 にする。
 function declaredDepsFetchCommand(numbers, table) {
-  const tableArg = declaredDepsTableArg(table)
-  return declaredDepsCommand(` --numbers ${numbers.join(',')}${repoArg ? ` --repo ${repoArg}` : ''}${tableArg === declaredDepsTableArg() ? '' : ` --table '${tableArg}'`}`)
+  const lit = declaredDepsTableArg(table)
+  const tableArg = lit === declaredDepsTableArg() ? '' : lit
+  const nums = numbers.join(',')
+  return declaredDepsCommand(` --numbers ${nums}${repoArg ? ` --repo ${repoArg}` : ''}${tableArg ? ` --table '${tableArg}'` : ''} --input-sha256 ${sha256Hex(`declared-deps\n${nums}\n${repoArg || ''}\n${tableArg}`)}`)
 }
 
 // 依存宣言抽出エージェントのプロンプト。numbers は Tree 返却値を assertInt 済みの整数のみ。table は siblingTaskTableFor の戻り値（兄弟のタスク ID の表。省略時は表なし = 従来の抽出だけ）。
@@ -1657,7 +1662,7 @@ function declaredDepsPrompt(numbers, table = EMPTY_SIBLING_TASK_TABLE) {
     // 成功したイシューの行だけが標準出力へ出る（gh / jq が途中で失敗したイシューの出力を空の宣言と取り違えないため。失敗分は FAILED が標準エラーへ出て欠落になり、ホストの全件照合が検出して再試行する）。
     declaredDepsFetchCommand(numbers, table),
     '標準出力は成功したイシューにつき 1 行の JSON（{"number": N, "deps": [...], "sig": S}）。標準出力の全行を entries 配列へそのまま転記して返す（number・deps〔要素の順序も含む〕・sig を出力どおりに写す。行の省略以外の加工・推測による追加をしない。sig はホストが deps との整合を検査する値）。',
-    '標準エラーに FAILED と出たイシューは entries に含めない（ホストが欠落を検出して再試行する）。' + RV_EXIT + '（entries を空で返し、gh / jq で代替して抽出しない）。',
+    '標準エラーに FAILED と出たイシューは entries に含めない（ホストが欠落を検出して再試行する）。' + RV_EXIT + '（entries を空で返し、gh / jq で代替して抽出しない）。declared-deps.sh の exit 2（標準エラーは INPUT_MISMATCH または使い方）は起動行の転記ミス（entries を空で返す。ホストが欠落として再試行する）。',
     // REST の core 枠を使う（GraphQL 枠を消費しない）。待機はホストが行うため自分で sleep しない。 HTTP 403 を無条件にレート制限とみなさない: 権限不足・SSO 等の恒久的な 403 で core の復帰まで待って「一過性」と報告すると、再実行しても同じ 403 で失敗する。レート制限と確認できたときだけ待たせ、それ以外は rateLimited を立てず通常の失敗（再試行・抽出失敗による停止）へ回す。secondary rate limit は
     // core の reset と無関係なので retry-after（無ければ省略。ホストが 60 秒に余裕 5 秒を足して 65 秒待つ）を waitSeconds に使う。
     `標準エラーのメッセージに rate limit・secondary rate limit・RATE_LIMITED がある、または HTTP 403・429 で ${declaredDepsCommand(' --rate-limit')} を一字一句そのまま実行した出力の remaining が 0 のときだけ rateLimited を true にする。権限・SSO など他の 403 は rateLimited にしない（通常の失敗として扱う）。core の枯渇なら resetAt と waitSeconds を出力どおりに返し、secondary rate limit なら resetAt は省略して waitSeconds に retry-after の秒数を入れる（無ければ省略）。待機はホストが行う。sleep しない。`,
@@ -1762,19 +1767,28 @@ async function extractDeclaredDeps(chunks, sleep = typeof setTimeout === 'functi
     let calls = 0
     let waits = 0
     let rate = null
+    let oversize = 0
     for (let attempt = 1; attempt <= 2 && pending.length > 0;) {
       if (signal.aborted) return merged
       let result = null
-      try {
-        result = await agent(declaredDepsPrompt(pending, tableFor(pending)), {
-          label: `plan:declared-deps-${index + 1}${calls++ > 0 ? '-retry' : ''}`,
-          phase: 'Tree',
-          model: 'haiku',
-          effort: 'low',
-          schema: DECLARED_DEPS_SCHEMA,
-        })
-      } catch (e) {
-        log(`⚠️ 依存宣言の抽出（チャンク ${index + 1}・${attempt} 回目）が失敗した: ${errText(e)}`)
+      const table = tableFor(pending)
+      oversize = declaredDepsTableArg(table).length
+      if (oversize > DECLARED_DEPS_TABLE_MAX) {
+        // スクリプトの表の上限（DD_TABLE_MAX）を超える表は起動しても exit 2 になるだけなので、エージェントを呼ばず欠落として扱う（再試行しても同じ表なので最後は停止する）。
+        log(`⚠️ 依存宣言の抽出（チャンク ${index + 1}・${attempt} 回目）: 兄弟のタスク ID の表が ${oversize} 文字で上限 ${DECLARED_DEPS_TABLE_MAX} を超えるため起動しなかった`)
+      } else {
+        oversize = 0
+        try {
+          result = await agent(declaredDepsPrompt(pending, table), {
+            label: `plan:declared-deps-${index + 1}${calls++ > 0 ? '-retry' : ''}`,
+            phase: 'Tree',
+            model: 'haiku',
+            effort: 'low',
+            schema: DECLARED_DEPS_SCHEMA,
+          })
+        } catch (e) {
+          log(`⚠️ 依存宣言の抽出（チャンク ${index + 1}・${attempt} 回目）が失敗した: ${errText(e)}`)
+        }
       }
       if (signal.aborted) return merged
       rate = parseRateLimit(result)
@@ -1803,6 +1817,7 @@ async function extractDeclaredDeps(chunks, sleep = typeof setTimeout === 'functi
           `GitHub API のレート制限により本文の依存宣言を抽出できなかった（${pending.map((n) => `#${n}`).join(', ')}）。一過性のため停止した。復帰時刻 ${rate.resetAt || '不明'}（あと約 ${rate.waitSeconds ?? '不明'} 秒）以降に同じ args で再実行すること（依存を取りこぼしたまま着手しないため停止した）`,
         )
       }
+      if (oversize) throw new Error(`本文の依存宣言を抽出できなかった（${pending.map((n) => `#${n}`).join(', ')}）。依頼する番号の兄弟のタスク ID の表が ${oversize} 文字で上限 ${DECLARED_DEPS_TABLE_MAX} を超える。ツリーを分けて（親イシューを絞って）実行すること（依存を取りこぼしたまま着手しないため停止した）`)
       throw new Error(
         `本文の依存宣言を抽出できなかったイシューがある（${pending.map((n) => `#${n}`).join(', ')}）。`
         + '直前のログ（抽出失敗・契約違反の理由）を確認し、gh の認証・レート制限などの一過性要因なら同じ args で再実行すること。本文由来の契約違反（1 イシューあたりの依存宣言が上限超過等）なら本文を修正すること（依存を取りこぼしたまま着手しないため停止した）',

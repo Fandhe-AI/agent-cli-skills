@@ -93,6 +93,14 @@ DD_TABLE_MAX=120000
 # 1 回に依頼できる番号の数の上限（ホストの DECLARED_DEPS_CHUNK_SIZE は 40）
 DD_NUMBERS_MAX=100
 
+# 入力の束縛（Issue #603 の監査 M-1）: sha256("declared-deps\n" + numbers + "\n" + repo + "\n" + table)。末尾に改行を付けない。
+# $1 = --numbers の値、$2 = --repo の値（省いたときは空文字）、$3 = --table の値（省いたときは空文字）。いずれも検証済みの値だけを渡すこと
+# （番号は数字とカンマ・リポジトリは英数字と . _ - /・表は dd_valid_table が許した文字だけなので、区切りの改行は値に現れず境界があいまいにならない）。
+# ホストの declaredDepsInputSha256 と同じ定義。so_sha256 は lib/signed-output.sh（呼び出し元が先に source する）。
+dd_input_sha() {
+  printf 'declared-deps\n%s\n%s\n%s' "$1" "$2" "$3" | so_sha256
+}
+
 # $1 = 兄弟のタスク ID の表（JSON）を埋め込んだ完全なフィルタを stdout へ（改行なし）。表は dd_valid_table を通したものだけを渡すこと。
 dd_filter() {
   printf '%s %s %s' "${DD_JQ_HEAD}" "$1" "${DD_JQ_TAIL}"

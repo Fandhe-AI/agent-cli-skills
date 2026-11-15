@@ -4,6 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { DECLARED_DEPS_SH, requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
@@ -28,6 +29,7 @@ const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-decla
 const slicePath = join(sliceDir, 'implement-issue-tree-declared-deps-defs.mjs')
 const SLICE_EXPORTS = [
   'DECLARED_DEPS_MAX_PER_NODE',
+  'DECLARED_DEPS_TABLE_MAX',
   'DECLARED_DEPS_SIG_JQ',
   'declaredDepsChecksum',
   'declaredDepsPrompt',
@@ -53,6 +55,7 @@ writeFileSync(slicePath, `${definitionPart}\n${optionalExports}\nexport { ${expo
 
 const {
   DECLARED_DEPS_MAX_PER_NODE,
+  DECLARED_DEPS_TABLE_MAX,
   DECLARED_DEPS_SIG_JQ,
   declaredDepsChecksum,
   declaredDepsPrompt,
@@ -211,7 +214,7 @@ test('依存宣言がなければ空配列・body が null でも失敗しない
 
 test('declaredDepsPrompt は整数の対象番号だけを run-verified.sh 経由の declared-deps.sh へ渡し、jq フィルタを埋め込まない', () => {
   const p = declaredDepsPrompt([34, 45])
-  assert.match(p, /bash '[^']*\/scripts\/run-verified\.sh' \S+ declared-deps\.sh --numbers 34,45(\n|$)/)
+  assert.match(p, /bash '[^']*\/scripts\/run-verified\.sh' \S+ declared-deps\.sh --numbers 34,45 --input-sha256 [0-9a-f]{64}(\n|$)/)
   assert.deepEqual(requestedNumbersOf(p), [34, 45])
   assert.ok(!p.includes("--jq '") && !p.includes('gh api rate_limit'), 'プロンプトに jq フィルタ・gh api を書かない（転記させない）')
   assert.ok(!p.includes('def refs'), 'フィルタ本体はスクリプトにある')
@@ -827,7 +830,7 @@ test('declaredDepsPrompt / フィルタ / スクリプトに \\uXXXX の形が�
 test('--table の単一引用符の中に単一引用符・バックスラッシュが現れない (#716)', () => {
   const toChars = (s) => s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
   const p = toChars(declaredDepsPrompt([1, 2], { f: { 1: [['TASK-1-2', 12]] }, n: { 12: ['1', 0] } }))
-  const m = / --table '([^\n]*)'(\n|$)/.exec(p)
+  const m = / --table '([^\n]*)' --input-sha256 [0-9a-f]{64}(\n|$)/.exec(p)
   assert.ok(m, '--table の単一引用符で閉じた形')
   assert.ok(!m[1].includes("'") && !m[1].includes('\\'))
 })
@@ -843,4 +846,69 @@ test("否定の n't とバッククォートのコードスパン / フェンス
   assert.deepEqual(runFilter('`Depends on #8` と ``blocked by #9``\n'), [])
   assert.deepEqual(runFilter('```\nDepends on #10\n```\nDepends on #11\n'), [11])
   assert.deepEqual(runFilter('~~~\nDepends on #12\n~~~\n'), [])
+})
+
+// ---------------------------------------------------------------------------
+// 入力の束縛（監査 M-1）と表の長さの上限（監査 L-1）
+// ---------------------------------------------------------------------------
+
+// 正準文字列: "declared-deps\n" + numbers + "\n" + repo（無ければ空）+ "\n" + table（無ければ空）。末尾に改行を付けない。ホストの実装とは独立に書いた定義。
+const bindingSha = (numbers, repo, table) => createHash('sha256').update(`declared-deps\n${numbers}\n${repo}\n${table}`, 'utf8').digest('hex')
+const cmdOf = (prompt) => prompt.split('\n').find((l) => l.includes('declared-deps.sh --numbers'))
+
+test('declaredDepsPrompt: 起動行の --input-sha256 は正準文字列の SHA-256 で、番号・表の違いで値が変わる', () => {
+  const t1 = { f: { 100: [['TASK-97-5', 105], ['TASK-97-6', 106]] }, n: { 106: ['100', 105] } }
+  const cmd0 = cmdOf(declaredDepsPrompt([105, 106]))
+  assert.ok(cmd0.endsWith(` --numbers 105,106 --input-sha256 ${bindingSha('105,106', '', '')}`), '表なし・repo なしは空文字を入れた正準文字列')
+  const cmd1 = cmdOf(declaredDepsPrompt([105, 106], t1))
+  assert.ok(cmd1.endsWith(` --numbers 105,106 --table '${JSON.stringify(t1)}' --input-sha256 ${bindingSha('105,106', '', JSON.stringify(t1))}`), '表ありは表の JSON を入れた正準文字列。ハッシュは起動行の末尾')
+  assert.notEqual(bindingSha('105,106', '', ''), bindingSha('105,106', '', JSON.stringify(t1)))
+  // 既定の空の表は --table を付けない = 表の欄は空文字（空の表のリテラルではない）
+  assert.ok(cmdOf(declaredDepsPrompt([1], { f: {}, n: {} })).endsWith(` --input-sha256 ${bindingSha('1', '', '')}`))
+  // 番号の 1 つの欠落でも値が変わる
+  assert.notEqual(cmdOf(declaredDepsPrompt([1, 2])).slice(-64), cmdOf(declaredDepsPrompt([1])).slice(-64))
+})
+
+test('declaredDepsPrompt: スクリプトの exit 2（INPUT_MISMATCH）は起動行の転記ミスとして entries を空で返させる', () => {
+  const p = declaredDepsPrompt([1])
+  assert.match(p, /declared-deps\.sh の exit 2（標準エラーは INPUT_MISMATCH または使い方）は起動行の転記ミス（entries を空で返す。ホストが欠落として再試行する）/)
+  assert.ok(!p.includes('\\'), 'プロンプトにバックスラッシュを含めない')
+})
+
+// 表の長さを丁度 len 文字にした表（["A-1",1] の列の最後の番号の桁で端数を埋める）。
+function tableOfLength(len) {
+  const make = (k, pad) => ({ f: { 1: [...Array.from({ length: k }, () => ['A-1', 1]), ['A-1', Number('1'.repeat(pad + 1))]] }, n: {} })
+  const size = (t) => JSON.stringify(t).length
+  let k = 0
+  while (size(make(k + 1, 0)) <= len) k++
+  const pad = len - size(make(k, 0))
+  assert.ok(pad >= 0 && pad <= 14, `端数 ${pad}`)
+  const t = make(k, pad)
+  assert.equal(size(t), len)
+  return t
+}
+
+test('extractDeclaredDeps: 表が上限（DECLARED_DEPS_TABLE_MAX）ちょうどなら起動し、1 文字超えるとエージェントを呼ばず欠落 → 再試行 → 停止する (L-1)', async () => {
+  assert.equal(DECLARED_DEPS_TABLE_MAX, 120000)
+  assert.ok(SCRIPT_TEXT('lib/declared-deps-lib.sh').includes(`DD_TABLE_MAX=${DECLARED_DEPS_TABLE_MAX}\n`), 'ホストの上限はスクリプトの DD_TABLE_MAX と同じ値')
+  let calls = 0
+  globalThis.agent = async (prompt) => { calls++; return okEntries(prompt) }
+  const at = await extractDeclaredDeps([[1, 2]], NO_SLEEP, () => tableOfLength(DECLARED_DEPS_TABLE_MAX))
+  assert.deepEqual([...at.keys()], [1, 2])
+  assert.equal(calls, 1, '上限ちょうどは起動する')
+
+  calls = 0
+  logs.length = 0
+  await assert.rejects(
+    extractDeclaredDeps([[1, 2]], NO_SLEEP, () => tableOfLength(DECLARED_DEPS_TABLE_MAX + 1)),
+    (err) => /#1, #2/.test(err.message) && err.message.includes(`${DECLARED_DEPS_TABLE_MAX + 1} 文字で上限 ${DECLARED_DEPS_TABLE_MAX} を超える`) && err.message.includes('ツリーを分けて（親イシューを絞って）実行すること'),
+  )
+  assert.equal(calls, 0, '起動しても exit 2 になるだけなのでエージェントを呼ばない')
+  assert.equal(logs.filter((l) => l.includes('上限') && l.includes('起動しなかった')).length, 2, '初回と再試行の両方で原因をログに残す')
+})
+
+test('extractDeclaredDeps: 表が上限を超えるチャンクだけが止まり、通常のチャンクは抽出される前に他のチャンクの失敗で全体が止まる（fail-closed）', async () => {
+  globalThis.agent = async (prompt) => okEntries(prompt)
+  const big = tableOfLength(DECLARED_DEPS_TABLE_MAX + 1)
+  await assert.rejects(extractDeclaredDeps([[1], [2]], NO_SLEEP, (pending) => (pending[0] === 2 ? big : { f: {}, n: {} })), /#2/)
 })
