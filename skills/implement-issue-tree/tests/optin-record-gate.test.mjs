@@ -7,6 +7,8 @@
 //   - 観測の失敗（照合・取得・形）は観測 agent を sonnet で 1 回だけ取り直し、なお失敗なら全件不合格 = blocked に倒す（fail-closed）
 //   - 判定（pass が 1 件以上かつ pass 以外が 0 件）は従来どおり classifyOptinRecordGate。封筒の headSha が merge-exec の期待 HEAD になる
 //   - プロンプトは固定コマンドの実行と封筒の転記だけを指示する
+//   - 合格の観測は、別のエージェント（optin-record-reverify）・別の nonce で取り直した 2 回目と一致したときだけ採る（Issue #804）。
+//     封筒に鍵が無いので 1 回の観測は捏造を検出できない。片方だけの捏造・不一致・2 回目の観測失敗は merge-exec を起動せず blocked
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -17,8 +19,8 @@ import { availableBashes, inputSha256, makeEnvelope, nonceOf, toolExists } from 
 import { createObserveStub } from './lib/gh-observe-stub.mjs'
 import { bundleSha256 } from '../scripts/build-workflow.mjs'
 
-const { classifyOptinRecordObservation, classifyOptinRecordGate, observeInputText, observeCommand } = await importDefinitions(
-  ['classifyOptinRecordObservation', 'classifyOptinRecordGate', 'observeInputText', 'observeCommand'],
+const { classifyOptinRecordObservation, classifyOptinRecordGate, observeInputText, observeCommand, pairOptinRecordObservations } = await importDefinitions(
+  ['classifyOptinRecordObservation', 'classifyOptinRecordGate', 'observeInputText', 'observeCommand', 'pairOptinRecordObservations'],
   'optin-record-gate',
 )
 
@@ -129,7 +131,9 @@ for (const bash of availableBashes()) {
 }
 
 test('プロンプトの配線: 観測は observeGate を extra（label・common）つきで呼び、旧プロンプトの手順は残っていない', () => {
-  assert.match(definitionPart, /label: `optin-record-verify:#\$\{item\.number\}`, common: \[MERGE_CONTEXT_COMMON, OPTIN_RECORD_OBSERVE_RULE\]/)
+  assert.match(definitionPart, /label: `optin-record-\$\{k\}:#\$\{item\.number\}`, common: \[MERGE_CONTEXT_COMMON, OPTIN_RECORD_OBSERVE_RULE\], model \}/)
+  assert.match(definitionPart, /const a = await o\('verify'\)\n/)
+  assert.match(definitionPart, /pairOptinRecordObservations\(a, await o\('reverify', 'sonnet'\)\)/)
   assert.match(definitionPart, /const OPTIN_RECORD_OBSERVE_RULE = 'PR 本文を取得・転記・要約しない[^']*スクリプトが失敗しても、gh・jq・grep などの別の手段で測り直さない[^']*gh pr merge・git push/)
   assert.ok(!definitionPart.includes('OPTIN_RECORD_VERIFY_SCHEMA'))
   assert.ok(!definitionPart.includes('function optinRecordVerifyPrompt'))
@@ -158,9 +162,9 @@ async function runGate(reply) {
       if (label === 'plan:issue-tree') return { nodes: structuredClone(TREE) }
       if (label.startsWith('pr-bind:#') || label.startsWith('merged-probe:#')) return { state: 'OPEN', headRefOid: HEAD, headRefName: 'feat/2-x', baseRefName: 'main', isCrossRepository: false, closingIssues: [2] }
       if (label.startsWith('merge:#')) return { state: 'ready', summary: 'マージ条件充足', headSha: HEAD }
-      if (label.startsWith('optin-record-verify:#')) {
-        observed.push({ model: opts.model, prompt })
-        return reply({ prompt, call: observed.length })
+      if (label.startsWith('optin-record-verify:#') || label.startsWith('optin-record-reverify:#')) {
+        observed.push({ model: opts.model, prompt, label })
+        return reply({ prompt, call: observed.length, label })
       }
       if (label.startsWith('merge-exec:#')) return { merged: false, reason: 'not-mergeable', summary: '見送り', issueClosed: false }
       return undefined
@@ -171,13 +175,14 @@ async function runGate(reply) {
 const labelsOf = (calls) => calls.map((c) => c.opts.label)
 const resultOf = (result) => [...(result.done ?? []), ...(result.failed ?? []), ...(result.blocked ?? [])].find((d) => d.issue === 2)
 
-test('結合: 記録が揃っていれば封筒を採って merge-exec へ進み、封筒の headSha が期待 HEAD として渡る', async () => {
+test('結合: 記録が揃っていれば別のエージェント・別の nonce で取り直した 2 回目と一致したときだけ merge-exec へ進み、封筒の headSha が期待 HEAD として渡る', async () => {
   const { calls, observed } = await runGate(({ prompt }) => honest(prompt))
-  assert.equal(observed.length, 1)
-  assert.equal(observed[0].model, 'haiku')
-  assert.deepEqual(cmdsOf(observed[0].prompt), ['make e2e'])
+  assert.deepEqual(observed.map((o) => [o.label, o.model]), [['optin-record-verify:#2', 'haiku'], ['optin-record-reverify:#2', 'sonnet']])
+  assert.equal(new Set(observed.map((o) => nonceOf(o.prompt))).size, 2, '2 回の観測の nonce は別')
+  assert.deepEqual(observed.map((o) => cmdsOf(o.prompt)), [['make e2e'], ['make e2e']])
   const labels = labelsOf(calls)
-  assert.ok(labels.indexOf('merge-exec:#2') > labels.indexOf('optin-record-verify:#2'))
+  assert.ok(labels.indexOf('merge-exec:#2') > labels.indexOf('optin-record-reverify:#2'))
+  assert.ok(labels.indexOf('optin-record-reverify:#2') > labels.indexOf('optin-record-verify:#2'))
   assert.ok(calls.find((c) => c.opts.label === 'merge-exec:#2').prompt.includes(HEAD))
 })
 
@@ -198,7 +203,7 @@ test('結合: プロンプトは固定コマンドの実行と封筒の転記だ
 test('結合: pass が無い・pass 以外がある記録は、封筒が正しくても merge-exec を起動せず blocked', async () => {
   for (const over of [{ pass: [0], nonPass: [0] }, { pass: [1], nonPass: [1] }, { pass: [0], nonPass: [2] }]) {
     const { calls, observed, result } = await runGate(({ prompt }) => honest(prompt, over))
-    assert.equal(observed.length, 1, '正しい封筒の不合格は取り直さない')
+    assert.equal(observed.length, 1, '正しい封筒の不合格は取り直さない（2 回目の観測もしない）')
     assert.ok(!labelsOf(calls).includes('merge-exec:#2'))
     const r = resultOf(result)
     assert.equal(r.status, 'blocked')
@@ -229,7 +234,7 @@ test('結合: 観測できない（封筒の欠落・nonce・sha256・入力の�
 
 test('結合: 1 回目だけ失敗しても取り直しで通れば続行する。前の呼び出しの封筒の流用は通らない', async () => {
   const flaky = await runGate(({ prompt, call }) => (call === 1 ? { ...honest(prompt), sha256: '0'.repeat(64) } : honest(prompt)))
-  assert.deepEqual(flaky.observed.map((o) => o.model), ['haiku', 'sonnet'])
+  assert.deepEqual(flaky.observed.map((o) => o.model), ['haiku', 'sonnet', 'sonnet'])
   assert.ok(labelsOf(flaky.calls).includes('merge-exec:#2'))
   let first = null
   const replay = await runGate(({ prompt, call }) => {
@@ -254,4 +259,58 @@ test('結合: 宣言のないイシューでは観測エージェントを起動
   })
   assert.ok(labelsOf(calls).includes('merge-exec:#2'))
   assert.ok(!labelsOf(calls).some((l) => l.startsWith('optin-record-verify')))
+})
+
+// ---- Issue #804: 独立な 2 回の観測の一致 ----
+const okObs = (pass, nonPass, headRefOid = SHA) => ({ kind: 'ok', reason: '', verify: { headRefOid, counts: pass.map((p, i) => ({ index: i, pass: p, nonPass: nonPass[i] })) } })
+
+test('pairOptinRecordObservations: 件数と headSha がすべて一致したときだけ 1 回目を採り、不一致・2 回目の失敗は pair 付きの skip', () => {
+  const a = okObs([1, 2], [0, 0])
+  assert.equal(pairOptinRecordObservations(a, okObs([1, 2], [0, 0])), a)
+  for (const b of [okObs([1, 1], [0, 0]), okObs([1, 2], [0, 1]), okObs([1, 2], [0, 0], 'b'.repeat(40)), okObs([1], [0])]) {
+    const r = pairOptinRecordObservations(a, b)
+    assert.deepEqual([r.kind, r.pair, r.verify], ['skip', 1, undefined], JSON.stringify(b))
+    assert.match(r.reason, /不一致/)
+  }
+  const f = pairOptinRecordObservations(a, { kind: 'skip', reason: 'envelope:nonce' })
+  assert.deepEqual([f.kind, f.pair, f.reason], ['skip', 1, '再観測:envelope:nonce'])
+})
+
+// 1 回目の観測エージェント（optin-record-verify）だけが捏造した合格・2 回目だけが捏造・両方が別の値・2 回目の観測失敗は、どれも merge-exec を起動しない
+const byLabel = (first, second) => ({ prompt, label }) => (label.startsWith('optin-record-verify:#') ? first : second)(prompt)
+const notPass = (prompt) => honest(prompt, { pass: [0], nonPass: [1] })
+const fake = (prompt) => honest(prompt)
+const pairCases = {
+  '1 回目が捏造した合格・2 回目は正直（実際は fail）': [fake, notPass, 2],
+  '1 回目が捏造した合格・2 回目は正直（実際は記録なし）': [fake, (p) => honest(p, { pass: [0], nonPass: [0] }), 2],
+  '1 回目が捏造した合格・2 回目は正直（実際は古い HEAD の記録 = 別の headSha）': [fake, (p) => honest(p, { headSha: 'b'.repeat(40) }), 2],
+  '両方が合格だが件数が違う': [fake, (p) => honest(p, { pass: [2] }), 2],
+  '2 回目の観測が 2 回とも失敗（取得失敗）': [fake, (p) => honest(p, { err: 1, outcome: 'error', headSha: '', pass: [], nonPass: [] }), 3],
+  '2 回目の観測が 2 回とも例外': [fake, () => { throw new Error('boom') }, 3],
+  '2 回目が別の nonce の封筒を返す': [fake, (p) => makeEnvelope('othernonce1', honest(p).payload), 3],
+}
+for (const [name, [first, second, n]] of Object.entries(pairCases)) {
+  test(`結合（Issue #804）: ${name} → merge-exec を起動せず blocked（fail-closed）`, async () => {
+    const { calls, observed, result } = await runGate(byLabel(first, second))
+    assert.equal(observed.length, n)
+    assert.deepEqual(observed.slice(1).map((o) => o.label), Array(n - 1).fill('optin-record-reverify:#2'))
+    assert.ok(!labelsOf(calls).includes('merge-exec:#2'))
+    const r = resultOf(result)
+    assert.equal(r.status, 'blocked')
+    assert.match(r.note, /別のエージェント・別の nonce で取り直した 2 回目の観測が裏付けなかった/)
+  })
+}
+
+test('結合（Issue #804）: 2 回目だけが捏造した合格（1 回目は正直に不合格）は 2 回目を起動せず blocked', async () => {
+  const { calls, observed, result } = await runGate(byLabel(notPass, fake))
+  assert.deepEqual(observed.map((o) => o.label), ['optin-record-verify:#2'])
+  assert.ok(!labelsOf(calls).includes('merge-exec:#2'))
+  assert.equal(resultOf(result).status, 'blocked')
+})
+
+test('結合（Issue #804）: 2 回目の観測の初回だけが失敗しても、取り直しで一致すれば merge-exec へ進む', async () => {
+  let n = 0
+  const { calls, observed } = await runGate(byLabel(fake, (p) => ((n += 1) === 1 ? { ...honest(p), sha256: '0'.repeat(64) } : honest(p))))
+  assert.deepEqual(observed.map((o) => o.model), ['haiku', 'sonnet', 'sonnet'])
+  assert.ok(labelsOf(calls).includes('merge-exec:#2'))
 })
