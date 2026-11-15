@@ -1,10 +1,10 @@
-// Step 3 / Step 4 の付け替え（reassign-sub-issue.sh）の確認を、通常の確認として固定する回帰テスト。
+// Step 3 / Step 4 の付け替え（reassign-sub-issue.sh）の明示承認を固定する回帰テスト。
 //
-// Step 2 は起動時の「確認なしで進めてよい」で確認を省けるとする一方、Step 3 は安全上の確認の
-// 定型文（「確認なしで」等は返答にならない）を置いていたため、非対話で Step 2 の承認を得ていても
-// Step 3 で止まっていた。付け替えは DELETE → POST で元に戻せる操作で、規約
-// （.claude/rules/tool-neutral-skills.md）は安全上の確認の対象に当たらないとしている。
-// Step 3 / Step 4 に安全上の確認の定型文が無く、Step 2 の承認に結びついていることを確かめる。
+// 付け替えは DELETE → POST で元に戻せるが、変更前は対象を提示した後のユーザーの明示の返答が
+// 必須だった。起動時の包括的な指示（「確認なしで進めてよい」）だけで非対話に実行できるようにすると、
+// ベースの AGENTS.md が禁じる承認境界の後退になる（PR #812 の codex 指摘）。
+// そのため付け替えの承認は Step 2 / Step 3 とも、起動時の「確認なしで」では省けない形で書く。
+// Step 2 は付け替え以外の確認だけ起動時の省略を認め、Step 3 の定型文と矛盾しないことを確かめる。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -23,29 +23,35 @@ function section(n) {
   return m ? rest.slice(0, m.index + 1) : rest;
 }
 
-const SAFETY_PHRASES = [
-  /返答にならない/,
-  /この会話の中でユーザーの明示の返答を得るまで/,
-  /起動時の指示に含まれる「確認なしで」/,
-];
-
-for (const n of [3, 4]) {
-  test(`Step ${n} に安全上の確認の定型文が無い`, () => {
-    const s = section(n);
-    for (const re of SAFETY_PHRASES) assert.doesNotMatch(s, re);
-  });
-}
-
-test('Step 3 は Step 2 で承認された計画配列の対象にだけ実行し、非対話で承認が無ければ止める', () => {
+test('Step 3 は「確認なしで」が返答にならない明示承認の定型文を持つ', () => {
   const s = section(3);
-  assert.match(s, /Step 2 で承認された計画配列/);
-  assert.match(s, /起動時の指示に確認を省くことの明示/);
-  assert.match(s, /このスキルを起動する依頼そのものは承認にならない/);
-  assert.match(s, /非対話実行）では実行せずに/);
+  assert.match(s, /この会話の中でユーザーの明示の返答を得るまで `scripts\/reassign-sub-issue\.sh`/);
+  assert.match(s, /起動時の指示に含まれる「確認なしで」「そのまま進めて」等は、この確認の返答にならない/);
+  assert.match(s, /返答を得られない環境（非対話実行）では実行せずに/);
 });
 
-test('Step 2 は起動時の明示で確認を省ける通常の確認のまま', () => {
+test('Step 3 に起動時の確認省略の明示を承認とみなす文が無い', () => {
+  const s = section(3);
+  assert.doesNotMatch(s, /起動時の指示に確認を省くことの明示/);
+  assert.doesNotMatch(s, /省くことの明示（例: 「確認なしで進めてよい」）が含まれている場合/);
+  assert.doesNotMatch(s, /通常の確認で足りる/);
+});
+
+test('Step 4 に付け替えの承認を緩める文が無い', () => {
+  const s = section(4);
+  assert.doesNotMatch(s, /起動時の指示に確認を省くことの明示/);
+});
+
+test('Step 2 は付け替えの確認を起動時の「確認なしで」で省けないと明記する', () => {
   const s = section(2);
-  assert.match(s, /起動時の指示にこの確認を省くことの明示/);
-  assert.doesNotMatch(s, /返答にならない/);
+  assert.match(s, /付け替え（`REASSIGN_PLAN` \/ `ORPHAN_PLAN` の対象/);
+  assert.match(s, /起動時の「確認なしで」では省けない/);
+  assert.match(s, /対象を提示した後のユーザーの明示の返答に限り承認とみなす/);
+});
+
+test('Step 2 の起動時の確認省略は付け替え以外の変更に限られる', () => {
+  const s = section(2);
+  assert.match(s, /付け替え以外の変更（ラベル同期・新 Phase 親の新設・分解）の確認は省いて続行してよい/);
+  // 省略を認める文が付け替えを含む包括的な形に戻っていないこと
+  assert.doesNotMatch(s, /に限り、確認を省いて続行してよい/);
 });
