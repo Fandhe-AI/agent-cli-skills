@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description: Conventional Commits 形式で GitHub PR を作成する。OWASP Top 10 のセキュリティチェック必須で、問題があれば PR 作成を中止。Summary/Test plan/Design を含む body を生成。「PR 作って」「プルリク」「`gh pr create`」などで使用。別リポジトリ (upstream) への貢献は contribute-skill。
+description: Conventional Commits 形式で GitHub PR を作成する。OWASP Top 10 のセキュリティチェック必須で、HIGH / MEDIUM の問題があれば PR 作成を中止（LOW は記載して続行）。Summary/Test plan/Design を含む body を生成。「PR 作って」「プルリク」「`gh pr create`」などで使用。別リポジトリ (upstream) への貢献は contribute-skill。
 model: sonnet
 user-invocable: true
 ---
@@ -41,7 +41,10 @@ git diff main...HEAD --stat
 - 入力バリデーションの欠如
 - OWASP Top 10
 
-問題を検出した場合は、`git push` と `gh pr create` を実行せずに中止し、ユーザーに警告して対処を案内する。この会話の中でユーザーが問題の対処（または誤検知であること）を明示して返答するまで、これらを実行しない。起動時の指示に含まれる「確認なしで」「PR 作成まで進めて」等は、この確認の返答にならない。返答を得られない環境（非対話実行）では、検出内容を報告して止める。対処後は PR 作成を再試行する。
+検出した問題は重大度で扱いを分ける。重大度の判定に迷う指摘は MEDIUM として扱う（安全側に倒す）。
+
+- **HIGH と MEDIUM:** `git push` と `gh pr create` を実行せずに中止し、ユーザーに警告して対処を案内する。この会話の中でユーザーが問題の対処（または誤検知であること）を明示して返答するまで、これらを実行しない。起動時の指示に含まれる「確認なしで」「PR 作成まで進めて」等は、この確認の返答にならない。返答を得られない環境（非対話実行）では、検出内容を報告して止める。対処後は PR 作成を再試行する。
+- **LOW:** 中止しない。検出内容（`ファイル:行`・説明）を Step 4 の PR body に「セキュリティチェックの LOW 指摘」として書いて続行し、最後の報告にも含める。
 
 ### Step 2.5: Closes 対象 Issue の milestone 確認
 
@@ -111,7 +114,13 @@ fix(api): レスポンスのエラーハンドリングを修正
 ## Design
 
 - Figma: （あれば記載）
+
+## セキュリティチェックの LOW 指摘
+
+- `ファイル:行` — 説明
 ```
+
+「セキュリティチェックの LOW 指摘」の節は、Step 2 で LOW の指摘があったときだけ書く。指摘が無いときは節ごと省く。
 
 スキルからは生成表記（「Generated with …」等）を付けない。
 
@@ -145,7 +154,8 @@ gh pr checks <pr-number>
 
 | 問題 | 回避策 |
 |------|--------|
-| セキュリティ問題を検出しても PR 作成を続行する | Step 2 で問題を発見したら即座に処理を中止し、ユーザーに警告して修正を依頼する |
+| HIGH / MEDIUM のセキュリティ問題を検出しても PR 作成を続行する | Step 2 で HIGH / MEDIUM を発見したら即座に処理を中止し、ユーザーに警告して修正を依頼する |
+| LOW の指摘だけで PR 作成を止める、または LOW の指摘を PR body・報告に書かず握りつぶす | LOW は中止せず、Step 4 の PR body と最後の報告に検出内容を記載して続行する。重大度に迷う指摘は MEDIUM として扱う |
 | PR URL を返さずに完了する | `gh pr create` の出力から PR URL を取得してユーザーに提示する |
 | Conventional Commits 形式に準拠しないタイトルをつける | `type(scope): subject`（72文字以内）の形式を厳守する |
 | Closes 対象 Issue が milestone 未割当のまま PR 作成 → CI で初めて失敗する | Step 2.5 で必ず確認する。milestone を決めきれない場合も PR body に警告を残す |
@@ -153,7 +163,7 @@ gh pr checks <pr-number>
 ## 注意事項
 
 - ベースブランチはリポジトリの規約に従う
-- セキュリティ問題が未解決の場合は PR 作成を中止する
+- HIGH / MEDIUM のセキュリティ問題が未解決の場合は PR 作成を中止する（LOW は PR body と報告に記載して続行する）
 - Step 2.5 の milestone 確認は省略しない（Closes 対象がない場合は Step 2.5 全体を、milestone 非運用リポジトリでは手順 3 のみをスキップ可）
 
 ## sandbox 環境での実行
