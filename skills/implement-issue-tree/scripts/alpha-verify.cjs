@@ -33,7 +33,9 @@
 // 保証しないこと（残るリスク）:
 // - 直接の関数式と追跡済みの束縛については、許可リスト外の位置をすべて拒否する。残るのは追跡外の別名だけで、
 //   束縛された関数の引数・オブジェクトのプロパティ・配列の要素・戻り値を経た関数値（function g(x){return `${x}`}g(f)・
-//   o.m = f; String(o.m)・const xs = [f]; xs.join() など）は、その先の文字列化が見えない。キーを持たない反射
+//   o.m = f; String(o.m)・const xs = [f]; xs.join() など）は、その先の文字列化が見えない。引数で受け取った自由変数の
+//   関数（function g(S){return S(f)}g(String)）と、呼び出しの結果として返る名前空間（const R = getReflect(); R.get(o, f)。
+//   狭い派生は呼び出しの結果を別名にしない）も見えない。キーを持たない反射
 //   （Object.getOwnPropertyDescriptors）・Error の stack（関数名を含む）も見えない。改名後の生成物で全テスト
 //   （stub-run を含む）を流すことが補償になる
 // - パーサは改名器と同じ Node 同梱の acorn なので、acorn が誤った AST を返す共通故障は見えない。
