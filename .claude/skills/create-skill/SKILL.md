@@ -7,6 +7,8 @@ description: >
 model: sonnet
 user-invocable: true
 argument-hint: "<skill-name> (例: create-skill summarize-pr)"
+metadata:
+  internal: "true"
 ---
 
 # create-skill
