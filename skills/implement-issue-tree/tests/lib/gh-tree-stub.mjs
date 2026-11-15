@@ -74,7 +74,7 @@ export function makeGhTreeStub(routes) {
   }
 }
 
-/** API の issue オブジェクト（テスト用の最小形） */
-export function issue(number, { title = `issue ${number}`, state = 'open', total = 0 } = {}) {
-  return { number, title, state, sub_issues_summary: { total, completed: 0, percent_completed: 0 } }
+/** API の issue オブジェクト（テスト用の最小形）。body は本文（opt-in テスト宣言の抽出元。issues/<n> と sub_issues の応答に入る。既定は null = 本文なし） */
+export function issue(number, { title = `issue ${number}`, state = 'open', total = 0, body = null } = {}) {
+  return { number, title, state, body, sub_issues_summary: { total, completed: 0, percent_completed: 0 } }
 }

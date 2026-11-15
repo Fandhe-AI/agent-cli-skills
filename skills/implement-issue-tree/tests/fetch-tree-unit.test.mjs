@@ -9,6 +9,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
 import { availableBashes } from './lib/signed-output.mjs'
+import { importDefinitions } from './lib/stub-run.mjs'
+
+// ホストの treeOptinDigest（実ソースの定義部を読み込む）。シェルの ft_optin_digest と同じ値になること
+const { treeOptinDigest, treeNodesDigest, treeStructDigest } = await importDefinitions(['treeOptinDigest', 'treeNodesDigest', 'treeStructDigest'], 'fetch-tree-unit')
 
 const LIBDIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib')
 const sha = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
@@ -41,6 +45,7 @@ while IFS="$US" read -r fn a b c d e f; do
     nodes) out=$(printf '%s\\n' "$a" | ft_nodes_digest) || rc=$? ;;
     taskid) out=$(printf '%s\\n' "$a" | ft_task_id_digest) || rc=$? ;;
     struct) out=$(printf '%s\\n' "$a" | ft_struct_digest) || rc=$? ;;
+    optin) out=$(printf '%s\\n' "$a" | ft_optin_digest) || rc=$? ;;
     input) out=$(ft_input_sha "$a" "$b") || rc=$? ;;
     pcount) out=$(printf '%s\\n' "$a" | ft_page_count "$b") || rc=$? ;;
     pcount0) out=$(printf '' | ft_page_count "$b") || rc=$? ;;
@@ -205,5 +210,65 @@ for (const bash of availableBashes()) {
     assert.equal(res[3].rc, 0)
     assert.notEqual(res[3].out, expect)
     assert.notEqual(res[4].rc, 0)
+  })
+}
+
+// 第 7 欄 optinTests（本文の opt-in テスト宣言）。optinSha256 は number 昇順の `number TAB 第 7 欄の JSON` の SHA-256。
+// nodesSha256 / structSha256 は 7 欄の行でも第 7 欄を見ず、title が空でも分割がずれない（タブの連続を畳まない）。
+for (const bash of availableBashes()) {
+  test(`[${bash}] ft_optin_digest（第 7 欄だけ・順序非依存）と、7 欄の行での ft_nodes_digest / ft_struct_digest の不変`, () => {
+    const rows7 = ['2\t1\t0\tclosed\t0\tb\t[]', '1\t0\t0\topen\t1\ta\t["make e2e"]', '10\t1\t1\topen\t0\tc d\t["npm run e2e","node --test"]']
+    const expectOptin = sha(['1\t["make e2e"]', '2\t[]', '10\t["npm run e2e","node --test"]'].join('\n'))
+    const reordered = [rows7[2], rows7[0], rows7[1]].join('\n')
+    const retitled = rows7.map((r) => r.replace('\ta\t', '\tA!\t').replace('\tb\t', '\t\t')).join('\n') // title を変える・空にしても optin は同じ
+    const changed = rows7.map((r) => r.replace('make e2e', 'make e2f')).join('\n')
+    const dropped = rows7.map((r) => r.replace('\t[]', '\t[""]')).join('\n')
+    // 6 欄の旧形式の行（第 7 欄なし）でも nodes / struct は従来と同じ値
+    const rows6 = rows7.map((r) => r.slice(0, r.lastIndexOf('\t')))
+    const withEmptyTitle = '3\t1\t2\topen\t0\t\t["x"]'
+    const res = table(bash, [
+      ['optin', rows7.join('\n')],
+      ['optin', reordered],
+      ['optin', retitled],
+      ['optin', changed],
+      ['optin', dropped],
+      ['optin', ''],
+      ['nodes', rows7.join('\n')],
+      ['nodes', rows6.join('\n')],
+      ['struct', rows7.join('\n')],
+      ['struct', rows6.join('\n')],
+      ['nodes', withEmptyTitle],
+      ['nodes', '3\t1\t2\topen\t0\t'],
+      ['optin', withEmptyTitle],
+    ])
+    assert.deepEqual([res[0].rc, res[0].out], [0, expectOptin])
+    assert.deepEqual([res[1].rc, res[1].out], [0, expectOptin])
+    assert.deepEqual([res[2].rc, res[2].out], [0, expectOptin])
+    assert.equal(res[3].rc, 0)
+    assert.notEqual(res[3].out, expectOptin)
+    assert.equal(res[4].rc, 0)
+    assert.notEqual(res[4].out, expectOptin)
+    assert.notEqual(res[5].rc, 0)
+    assert.equal(res[6].out, res[7].out)
+    assert.equal(res[8].out, res[9].out)
+    // 空の title は 6 欄の行と 7 欄の行で同じ nodesSha256（第 7 欄が title に詰められない）
+    assert.deepEqual([res[10].rc, res[10].out], [0, res[11].out])
+    assert.equal(res[10].out, sha(['3', '1', '2', 'open', '0', sha('')].join('\t')))
+    assert.equal(res[12].out, sha('3\t["x"]'))
+  })
+
+  test(`[${bash}] シェルの ft_*_digest とホストの tree*Digest が同じ値（JS とシェルのダイジェストの一致）`, () => {
+    const nodes = [
+      { number: 7, parent: 1, siblingIndex: 1, state: 'open', subIssuesTotal: 0, title: 'chore: 日本語 🎉', optinTests: ['make e2e', 'npm run e2e', 'cargo test -- --ignored', 'go test ./...', 'a?b', ''] },
+      { number: 1, parent: 0, siblingIndex: 0, state: 'open', subIssuesTotal: 2, title: 'root', optinTests: [] },
+      { number: 12, parent: 1, siblingIndex: 0, state: 'closed', subIssuesTotal: 0, title: '', optinTests: [] },
+      { number: 100, parent: 1, siblingIndex: 2, state: 'open', subIssuesTotal: 0, title: 'x y', optinTests: ['pnpm run test:e2e', 'make t@v1+2,3=4_5.6-7/8:9'] },
+    ]
+    const tsv = nodes.map((n) => [n.number, n.parent, n.siblingIndex, n.state, n.subIssuesTotal, n.title, JSON.stringify(n.optinTests)].join('\t')).join('\n')
+    const res = table(bash, [['optin', tsv], ['nodes', tsv], ['struct', tsv]])
+    assert.deepEqual(res.map((x) => x.rc), [0, 0, 0])
+    assert.equal(res[0].out, treeOptinDigest(nodes))
+    assert.equal(res[1].out, treeNodesDigest(nodes))
+    assert.equal(res[2].out, treeStructDigest(nodes))
   })
 }

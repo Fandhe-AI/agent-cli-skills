@@ -4,6 +4,8 @@
 // bash ごとにファイルを分けると所要が bash の数ではなく 1 つ分で済む（base-merge-suite と同じ分割）。
 //
 // 期待する検査値（nodesSha256 など）は、ホストの実装・スクリプトの実装とは独立に node:crypto で計算する。
+// TSV の第 7 欄 optinTests（本文の opt-in テスト宣言。Issue P2）は、open ノードの本文から jq が抽出・正規化した compact JSON で、
+// optinSha256 が束縛する。値の正規化（許可外の文字は 1 文字ずつ ?）と上限（1 値 300 文字・20 件）は独立に期待値を書く。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -42,6 +44,10 @@ export function independentStructSha(rows) {
       .join('\n'),
   )
 }
+// 独立実装: 第 7 欄 optinTests のダイジェスト（number 昇順・`number TAB compact JSON`）
+export function independentOptinSha(rows) {
+  return sha([...rows].sort((a, b) => a.number - b.number).map((r) => `${r.number}\t${JSON.stringify(r.optinTests)}`).join('\n'))
+}
 // 独立実装: タイトル先頭のタスク ID のダイジェスト（Issue #687）
 export function independentTaskIdSha(rows) {
   const re = /^\s*(?:[a-z]+(?:\([^()\n]{0,64}\))?!?:\s*)?[[【]?([A-Z][A-Z0-9]{0,19}(?:-[0-9]{1,6}){1,4})(?=$|[\s\]】:：])/
@@ -49,7 +55,7 @@ export function independentTaskIdSha(rows) {
 }
 export const inputShaOf = (root, repo = '') => sha(`fetch-tree\n${root}\n${repo}`)
 // 独立実装: tree.tsv 全体（各行 + 改行）の SHA-256 と、--page の入力の束縛（Issue #690）
-const tsvLine = (r) => [r.number, r.parent, r.siblingIndex, r.state, r.subIssuesTotal, r.title].join('\t')
+const tsvLine = (r) => [r.number, r.parent, r.siblingIndex, r.state, r.subIssuesTotal, r.title, JSON.stringify(r.optinTests)].join('\t')
 export const independentTsvSha = (rows) => sha(rows.map((r) => `${tsvLine(r)}\n`).join(''))
 export const pageInputShaOf = (tsvSha, page) => sha(`fetch-tree-page\n${tsvSha}\n${page}`)
 
@@ -59,9 +65,13 @@ export function run(bash, stub, args, { script = SCRIPT, launcher = null, env = 
   return { status: r.status, stdout: r.stdout, stderr: r.stderr }
 }
 
+// 第 7 欄は compact JSON のまま持つ（optin）と、解釈した配列（optinTests）の両方。ASCII だけの JSON なので、再 stringify と一致する（エスケープが出ない契約）
 function parseRow(l) {
-  const [number, parent, siblingIndex, state, subIssuesTotal, ...t] = l.split('\t')
-  return { number: Number(number), parent: Number(parent), siblingIndex: Number(siblingIndex), state, subIssuesTotal: Number(subIssuesTotal), title: t.join('\t') }
+  const f = l.split('\t')
+  assert.equal(f.length, 7, `TSV は 7 欄: ${JSON.stringify(l)}`)
+  const optinTests = JSON.parse(f[6])
+  assert.equal(JSON.stringify(optinTests), f[6], '第 7 欄は compact JSON')
+  return { number: Number(f[0]), parent: Number(f[1]), siblingIndex: Number(f[2]), state: f[3], subIssuesTotal: Number(f[4]), title: f[5], optin: f[6], optinTests }
 }
 
 // --page の出力（TSV 行だけ）を行オブジェクトにする
@@ -82,8 +92,8 @@ const P = 'repos/o/r'
 // 3 階層: 1 -> (2 closed, 3) ; 2 -> (4) ; 4 -> (5)
 function smallTree() {
   return {
-    [`${P}/issues/1`]: issue(1, { title: 'root', total: 2 }),
-    [`${P}/issues/1/sub_issues`]: { pages: [[issue(2, { state: 'closed', total: 1, title: '日本語 🎉 title' }), issue(3, { title: 'plain' })]] },
+    [`${P}/issues/1`]: issue(1, { title: 'root', total: 2, body: '<!-- optin-tests: make e2e -->' }),
+    [`${P}/issues/1/sub_issues`]: { pages: [[issue(2, { state: 'closed', total: 1, title: '日本語 🎉 title', body: '<!-- optin-tests: make closed -->' }), issue(3, { title: 'plain', body: 'a\n<!-- optin-tests: npm run e2e -->\n<!--optin-tests:\tcargo test -- --ignored -->' })]] },
     [`${P}/issues/2/sub_issues`]: { pages: [[issue(4, { total: 1 })]] },
     [`${P}/issues/4/sub_issues`]: { pages: [[issue(5)]] },
   }
@@ -105,7 +115,9 @@ export function registerFetchTreeTests(bash) {
       [5, 4, 0, 'open', 0],
     ])
     assert.equal(rows[1].title, '日本語 🎉 title')
-    assert.deepEqual(envelope.payload, { count: 5, inputSha256: inputShaOf(1, 'o/r'), nodesSha256: independentNodesSha(rows), pages: 1, structSha256: independentStructSha(rows), taskIdSha256: independentTaskIdSha(rows) })
+    // 第 7 欄: open ノードだけ本文の宣言を抽出（root・#3）。closed の #2 と宣言の無い #4・#5（body: null）は []
+    assert.deepEqual(rows.map((x) => x.optinTests), [['make e2e'], [], ['npm run e2e', 'cargo test -- --ignored'], [], []])
+    assert.deepEqual(envelope.payload, { count: 5, inputSha256: inputShaOf(1, 'o/r'), nodesSha256: independentNodesSha(rows), optinSha256: independentOptinSha(rows), pages: 1, structSha256: independentStructSha(rows), taskIdSha256: independentTaskIdSha(rows) })
     assert.equal(envelope.nonce, NONCE)
     assert.equal(envelope.sha256, expectedSha256(NONCE, envelope.payload))
     assert.equal(stub.callsTo('issues/3/sub_issues'), 0)
@@ -181,7 +193,7 @@ export function registerFetchTreeTests(bash) {
 
   // 大きなツリー（Issue #673）: 1 回の Bash 出力（24000 バイト）に収まらない TSV は一時ファイルへ書き出し、1 ページずつ読む
   const bigTree = (n, titleLen) => {
-    const kids = Array.from({ length: n }, (_, i) => issue(100 + i, { title: `${i}-`.padEnd(titleLen, 'x') }))
+    const kids = Array.from({ length: n }, (_, i) => issue(100 + i, { title: `${i}-`.padEnd(titleLen, 'x'), body: i % 7 === 0 ? `<!-- optin-tests: make e2e-${i} -->` : null }))
     return { [`${P}/issues/1`]: issue(1, { total: n }), [`${P}/issues/1/sub_issues`]: { pages: [kids.slice(0, 100), kids.slice(100)].filter((x) => x.length > 0) } }
   }
   const tmpBase = () => trackTmp(mkdtempSync(join(tmpdir(), 'iit-ft-tmp-')))
@@ -217,6 +229,7 @@ export function registerFetchTreeTests(bash) {
         count: rows.length,
         inputSha256: pageInputShaOf(envelope.payload.tsvSha256, p),
         nodesSha256: independentNodesSha(rows),
+        optinSha256: independentOptinSha(rows),
         page: p,
         structSha256: independentStructSha(rows),
         taskIdSha256: independentTaskIdSha(rows),
@@ -228,6 +241,8 @@ export function registerFetchTreeTests(bash) {
     assert.deepEqual(all.map((x) => x.number), [1, ...Array.from({ length: 90 }, (_, i) => 100 + i)])
     assert.equal(envelope.payload.tsvSha256, independentTsvSha(all))
     assert.equal(envelope.payload.nodesSha256, independentNodesSha(all))
+    assert.equal(envelope.payload.optinSha256, independentOptinSha(all))
+    assert.deepEqual(all.filter((x) => x.optinTests.length > 0).map((x) => x.optinTests[0]), Array.from({ length: 13 }, (_, k) => `make e2e-${k * 7}`))
     assert.equal(envelope.payload.structSha256, independentStructSha(all))
     assert.equal(envelope.payload.taskIdSha256, independentTaskIdSha(all))
     // ページ範囲外は exit 2。--page は gh を呼ばない
@@ -357,8 +372,139 @@ export function registerFetchTreeTests(bash) {
     assert.equal(rows.length, 1)
     assert.equal(rows[0].title, 'a b c d e  ')
     assert.equal(envelope.payload.nodesSha256, independentNodesSha(rows))
+    assert.equal(envelope.payload.optinSha256, independentOptinSha(rows))
     assert.equal(envelope.payload.structSha256, independentStructSha(rows))
     assert.equal(envelope.payload.taskIdSha256, independentTaskIdSha(rows))
+  })
+
+  // ---- 第 7 欄 optinTests（本文の opt-in テスト宣言）。ルートの本文と子の本文の両方から、jq 1 本で抽出・正規化する ----
+  // 本文 bodies を持つ子 #2, #3, ... を持つツリーを走らせ、{ r, rows（ルートを除く）} を返す
+  const withBodies = (bodies, { states = [] } = {}) => {
+    const kids = bodies.map((b, i) => issue(2 + i, { body: b, state: states[i] ?? 'open' }))
+    const stub = makeGhTreeStub({
+      [`${P}/issues/1`]: issue(1, { total: kids.length }),
+      [`${P}/issues/1/sub_issues`]: { pages: [kids] },
+    })
+    const r = run(bash, stub, ARGS)
+    return { r, rows: r.status === 0 ? parseOut(r.stdout).rows.slice(1) : [], stub }
+  }
+  const mark = (v) => `<!-- optin-tests: ${v} -->`
+  // 期待値の独立実装: タブは空白 1 つ、許可文字 [A-Za-z0-9 _./:=@+,-] の外は 1 コードポイントごとに ?
+  const norm = (v) => [...v.replace(/\t/g, ' ')].map((c) => (/^[A-Za-z0-9 _./:=@+,-]$/.test(c) ? c : '?')).join('')
+
+  test(`${tag} optinTests: 値に n を含む宣言が落ちずに残る（jq の \\n が n に化けて n を含む値が消える fail-open の回帰）`, () => {
+    const values = ['npm run e2e', 'node --test', 'cargo nextest run', 'make e2e-three-client', 'pnpm run test:nightly -- --grep nn']
+    const { r, rows } = withBodies([values.map(mark).join('\n')])
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(rows[0].optinTests, values)
+    assert.equal(r.stderr, '')
+  })
+
+  test(`${tag} optinTests: コードフェンス内の宣言も拾い、空の宣言は空文字、前後の空白は落とす（従来の scan と同じ意味）`, () => {
+    const body = ['説明', '```', mark('node --test'), '```', '<!--  optin-tests:   make a   -->', '<!-- optin-tests: -->', '<!-- OPTIN-TESTS: make upper -->', '<!-- optin-tests: no close'].join('\n')
+    const { r, rows } = withBodies([body])
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(rows[0].optinTests, ['node --test', 'make a', ''])
+  })
+
+  test(`${tag} optinTests: タブは空白 1 つ・許可文字の外（NBSP・全角・シェルのメタ文字・引用符・バックスラッシュ・CR・制御文字・絵文字）は 1 文字ずつ ?`, () => {
+    const raw = [
+      'make\te2e',
+      'make e2e', // NBSP
+      'make　e2e', // 全角空白
+      'make e2e; rm -rf x',
+      'make $(id) `id` "q" \'s\' \\ | & < > ( ) { }',
+      'cargo test\r',
+      'go test 🎉',
+      'ｍａｋｅ',
+      'make e2e\u0001',
+    ]
+    const { r, rows } = withBodies([raw.map(mark).join('\n')])
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(rows[0].optinTests, raw.map(norm))
+    assert.deepEqual(rows[0].optinTests.slice(0, 3), ['make e2e', 'make?e2e', 'make?e2e'])
+    assert.equal(rows[0].optinTests[3], 'make e2e? rm -rf x')
+    assert.equal(rows[0].optinTests[5], 'cargo test?')
+    assert.equal(rows[0].optinTests[6], 'go test ?')
+    for (const v of rows[0].optinTests) assert.match(v, /^[A-Za-z0-9 _./:=@+,?-]*$/)
+    // JSON のエスケープが出ない（jq の tojson と JS の JSON.stringify が同じバイト列）
+    assert.doesNotMatch(r.stdout.split('\n')[1], /\\/)
+  })
+
+  test(`${tag} optinTests: 1 値が 300 文字を超えると先頭 299 文字 + ? に切り（必ず invalid）、300 文字ちょうどは切らない`, () => {
+    const exact = `make ${'a'.repeat(295)}`
+    const over = `make ${'a'.repeat(296)}`
+    const huge = `make ${'b'.repeat(5000)}`
+    const wide = `make ${'日'.repeat(400)}` // 正規化後は ? が並ぶ（バイト数ではなく文字数で切る）
+    const { r, rows } = withBodies([[exact, over, huge, wide].map(mark).join('\n')])
+    assert.equal(r.status, 0, r.stderr)
+    const [a, b, c, d] = rows[0].optinTests
+    assert.equal(exact.length, 300)
+    assert.equal(a, exact)
+    for (const v of [b, c, d]) {
+      assert.equal(v.length, 300)
+      assert.ok(v.endsWith('?'))
+    }
+    assert.equal(b, `${over.slice(0, 299)}?`)
+    assert.equal(c, `${huge.slice(0, 299)}?`)
+    assert.equal(d, `make ${'?'.repeat(295)}`)
+  })
+
+  test(`${tag} optinTests: 宣言が 20 件ちょうどはそのまま、21 件以上は先頭 19 件 + ? の 20 件（スキーマの上限内・必ず invalid を含む）`, () => {
+    const decls = (n) => Array.from({ length: n }, (_, i) => mark(`make t${i}`)).join('\n')
+    const { r, rows } = withBodies([decls(20), decls(21), decls(500)])
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(rows[0].optinTests, Array.from({ length: 20 }, (_, i) => `make t${i}`))
+    for (const k of [1, 2]) {
+      assert.equal(rows[k].optinTests.length, 20)
+      assert.deepEqual(rows[k].optinTests.slice(0, 19), Array.from({ length: 19 }, (_, i) => `make t${i}`))
+      assert.equal(rows[k].optinTests[19], '?')
+    }
+  })
+
+  test(`${tag} optinTests: closed のノードは宣言があっても []、宣言の無い・本文が null のノードも []（空欄にしない）`, () => {
+    const { r, rows } = withBodies([mark('make a'), mark('make b'), null, ''], { states: ['open', 'closed', 'open', 'open'] })
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(rows.map((x) => x.optinTests), [['make a'], [], [], []])
+    for (const line of r.stdout.split('\n').slice(0, -2)) assert.equal(line.split('\t').length, 7, line)
+  })
+
+  test(`${tag} optinTests: 本文が文字列でも null でもない応答は exit 5 で封筒なし。本文は標準エラーにも標準出力にも出さない`, () => {
+    const secret = 'SECRET-BODY-MARKER-123'
+    for (const body of [123, { x: secret }, [secret]]) {
+      const { r } = withBodies([body])
+      assert.equal(r.status, 5, JSON.stringify(body))
+      assert.equal(r.stdout, '')
+      assert.ok(!r.stderr.includes(secret), r.stderr)
+    }
+    const ok = withBodies([`${secret}\n${mark('make a')}`])
+    assert.equal(ok.r.status, 0)
+    assert.ok(!ok.r.stderr.includes(secret))
+    assert.ok(!ok.r.stdout.includes(secret), '本文は標準出力にも出ない（宣言の値だけ）')
+  })
+
+  test(`${tag} optinTests: 宣言の値だけが optinSha256 を変える（title・構造の検査値は変わらない）`, () => {
+    const a = withBodies([mark('make a')])
+    const b = withBodies([mark('make b')])
+    const pa = parseOut(a.r.stdout).envelope.payload
+    const pb = parseOut(b.r.stdout).envelope.payload
+    assert.notEqual(pa.optinSha256, pb.optinSha256)
+    assert.equal(pa.nodesSha256, pb.nodesSha256)
+    assert.equal(pa.structSha256, pb.structSha256)
+    assert.equal(pa.optinSha256, independentOptinSha(parseOut(a.r.stdout).rows))
+  })
+
+  test(`${tag} optinTests: title が空・空白だけでも 7 欄の分割がずれず、nodesSha256 は title までの 6 欄のまま`, () => {
+    const stub = makeGhTreeStub({
+      [`${P}/issues/1`]: issue(1, { total: 2, title: '', body: mark('make a') }),
+      [`${P}/issues/1/sub_issues`]: { pages: [[issue(2, { title: '\t', body: mark('make b') }), issue(3, { title: 'x', body: null })]] },
+    })
+    const r = run(bash, stub, ARGS)
+    assert.equal(r.status, 0, r.stderr)
+    const { rows, envelope } = parseOut(r.stdout)
+    assert.deepEqual(rows.map((x) => [x.title, x.optinTests]), [['', ['make a']], [' ', ['make b']], ['x', []]])
+    assert.equal(envelope.payload.nodesSha256, independentNodesSha(rows))
+    assert.equal(envelope.payload.optinSha256, independentOptinSha(rows))
   })
 
   test(`${tag} run-verified.sh 経由で起動でき、スクリプトか lib を書き換えるとハッシュ不一致で起動しない`, () => {
