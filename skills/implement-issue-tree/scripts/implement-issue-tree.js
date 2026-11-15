@@ -218,7 +218,7 @@ log(`⚠️ ツリー取得の一時ディレクトリの片づけに失敗（�
 async function fetchTreePages(main,mainNonce,inputSha){
 const{pages,dir,tsvSha256:tsvSha,count}=main.payload
 if(agentBudget.enforced){
-const need=2*pages+ 1 + 2*Math.ceil(count / DECLARED_DEPS_CHUNK_SIZE) + AGENT_CALLS_TERMINAL_BASE
+const need=2*pages+ 1 + 2*Math.ceil(count / DECLARED_DEPS_CHUNK_SIZE) + AGENT_CALLS_TERMINAL_BASE + agentBudget.terminalVerify
 if(agentBudget.limit-agentBudget.used<need){
 await releaseTreeDir(dir)
 throw new Error(`ツリー取得のページ読みに必要なエージェント呼び出し数（${need}）が残り（${agentBudget.limit - agentBudget.used}）を超える（${pages} ページ・${count} ノード）。args.agentCallLimit を上げるか、親イシューを分けて実行する`)
@@ -2981,14 +2981,65 @@ isNonNegInt(r.keysCount)&&isNonNegInt(r.highWaterBytes)&&isNonNegInt(r.highWater
 const STATE_FILL_SCHEMA=obj(['items'],{items:{type:'object',additionalProperties:true}})
 const isValidStateFillResult=(r)=>r?.items!==null&&typeof r?.items==='object'&& !Array.isArray(r.items)
 
-const STATE_VERIFY_SCHEMA=obj(['fileExists','hashes','keysSha256','keysCount','highWaterBytes','highWaterVersion'],{
-fileExists:{type:'boolean'},
-hashes:{type:'object',additionalProperties:{type:'string'}},
-keysSha256:{type:'string'},
-keysCount:{type:'integer',minimum:0},
-highWaterBytes:{type:'integer',minimum:0},
-highWaterVersion:{type:'integer',minimum:0},
+
+const SV_INT={type:'integer'}
+const SV_STR={type:'string'}
+const STATE_VERIFY_PAYLOAD_SCHEMA=obj(['entries','highWaterBytes','highWaterVersion','inputSha256','keysCount','keysSha256','mode','outcome','page','pages'],{
+entries:{type:'array',items:obj(['h','k'],{h:SV_STR,k:SV_STR})},
+highWaterBytes:SV_INT,highWaterVersion:SV_INT,inputSha256:SV_STR,keysCount:SV_INT,keysSha256:SV_STR,mode:SV_STR,outcome:SV_STR,page:SV_INT,pages:SV_INT,
 })
+
+
+const STATE_VERIFY_MAX_PAGES=50
+function isValidStateVerifyEnvelope(r,nonce,page){
+const s=verifySignedOutput(r,nonce,sha256Hex(`${STATE_FILE}\n${page}`))
+const p=s.payload
+return s.ok&&p.mode==='verify'&&p.page===page&&['ok','nofile','error'].includes(p.outcome)&&Array.isArray(p.entries)&&isInt(p.pages)&&p.pages>=1
+}
+
+
+function mergeStateVerify(ps){
+const p0=ps[0]
+if(p0?.outcome==='nofile')return{fileExists:false,hashes:{},keysSha256:'',keysCount:0,highWaterBytes:0,highWaterVersion:0}
+if(p0?.outcome!=='ok'||ps.length!==p0.pages)return null
+const hashes={}
+for(const p of ps){
+if(['outcome','pages','keysSha256','keysCount','highWaterBytes','highWaterVersion'].some((f)=>p[f]!==p0[f]))return null
+for(const{k,h}of p.entries){
+if(!/^[1-9]\d*$/.test(k) || hasOwn(hashes, k)) return null
+hashes[k]=h
+}
+}
+const r={fileExists:true,hashes,keysSha256:p0.keysSha256,keysCount:p0.keysCount,highWaterBytes:p0.highWaterBytes,highWaterVersion:p0.highWaterVersion}
+return isValidStateVerifyResult(r)?r:null
+}
+
+
+let stateVerifySeq=0
+async function readStateVerify(){
+const seq=(stateVerifySeq+=1)
+const ps=[]
+for(let page=0;page===0||page<ps[0].pages;page++){
+const nonce=boundaryNonce(`state-verify:${seq}:${page}`)
+const{result}=await runStateAgent(
+[
+`状態ファイルのハッシュ取得（読み取り専用。何も変更しない）。`,
+TEMP_FILE_POLICY,
+`${RUN_VERBATIM}:`,
+'```sh',
+scriptInvocation('state.sh',nonce,` --file ${STATE_FILE} verify --page ${page}`),
+'```',
+SIGNED_OUTPUT_INSTRUCTION,
+`payload の entries は件数が多くても省略せず、全件を出力の順のまま転記する。ハッシュを jq / sha256sum で自分で計算して代替しない（${RV_EXIT}）。`,
+].join('\n'),
+{label:page===0?'state:load-verify':`state:load-verify:p${page}`,schema:signedOutputSchema(STATE_VERIFY_PAYLOAD_SCHEMA),isValid:(r)=>isValidStateVerifyEnvelope(r,nonce,page)},
+)
+if(!result)return null
+ps.push(result.payload)
+if(ps[0].pages>STATE_VERIFY_MAX_PAGES)throw new Error(`状態ファイル（${STATE_FILE}）の項目数が照合の上限 ${STATE_VERIFY_MAX_PAGES * 100} 件を超えるため停止した`)
+}
+return mergeStateVerify(ps)
+}
 
 
 
@@ -3031,15 +3082,7 @@ throw new Error(
 }
 }
 
-const{result:check}=await runStateAgent(
-[
-TEMP_FILE_POLICY,
-`状態ファイルのハッシュ取得（読み取り専用）。次をそのまま実行し出力を転記する（推測しない。キー行が切れたら R=1,20 のように行範囲を指定して同じコマンドを分割実行し全件を取得する）:`,
-`f=${STATE_FILE}; h() { sha256sum 2>/dev/null || shasum -a 256; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[.perWorktreeByteReserveHighWater // 0, .perWorktreeByteReserveHighWaterVersion // 0]' "$f"; jq -r "$K | .[]" "$f" | sed -n "\${R:-1,\\$}p" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`,
-`返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他 0。他は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行を hashes。`,
-].join('\n'),
-{label:'state:load-verify',schema:STATE_VERIFY_SCHEMA,isValid:isValidStateVerifyResult},
-)
+const check=await readStateVerify()
 
 
 if(!check||(check.fileExists===false&&result.fileExisted)||
@@ -3083,6 +3126,7 @@ return{
 items:adopted,
 verified,
 unverified:unverified.map(Number),
+keys:hwOk?Object.keys(check.hashes):[],
 highWaterBytes:hwOk?result.highWaterBytes:0,
 highWaterVersion:hwOk?result.highWaterVersion:0,
 }
@@ -3582,19 +3626,19 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'844e355be055010409a326d24a6c7474efe116415715a55d28ef607fc7afa61b',
-'measure-free-disk.sh':'4088b0f98745c8ee3e16f1b25ad6c6ef53d733f74f169e8fdbefbad079774e9d',
-'observe-pr.sh':'aa398a97cf9e32d7ec5cb5ffd19882c148058fb16f61e34530f3a01e39a90c64',
-'base-merge.sh':'81725e7e8e2b6121984694bff11234c053974af3267bbb047958a0865d11b3e5',
-'pr-push.sh':'338ec248b232849a75cdde2d4dabd9bba67f33af8eef00cdf8f045da6f01f5bc',
-'reply-resolve.sh':'deacd4c5935917297a2f257e269edbc9d1304917e7419ec43defe6db651879b4',
-'state.sh':'df865edd9fd62281a27029fda3c54c40510a63549762751e4867a646e90c1864',
-'merge-gate.sh':'c69cb5429bd2f4c90e51c62f8bf5645dd00b0c22a493c91314897209e506bb74',
-'worktree-remove.sh':'866cd957f4599a6f057bfbf6906878e8fab7ffa17232d45a95fa293e579a478e',
-'recover-prep.sh':'84c77b83135e111fb1a2a0679f88b84a9b5da6f2fc0be9c478ba1446ba824352',
-'fetch-tree.sh':'96924ecd76bec6aef8fc9b0dea96199dd26f0d03ec754f55d4153ffce0aa7102',
-'declared-deps.sh':'c4bf5ed5835aaf9812c536d821b4afc7b7e857776570568ffd02086a6bcb52d3',
-'repo-scan.sh':'c52c3cb1cc9180cad945bce9cd820222757e17290b69b851fa93774dcfe9ec04',
+'measure-residual-bytes.sh':'c60fd8d4622298dcfb1a1d6a8220fd30539ba890dd168fd09605fe93af8c1902',
+'measure-free-disk.sh':'2a3979141631aa5649d5311952bf61a50f5c2c0b1115e8a39c6610464783b1b7',
+'observe-pr.sh':'4b4f571e21abbcbc0fb05109491845d8081e1c4fac3b058fe89fbff13b36ef4e',
+'base-merge.sh':'4bea6d962ff1844ec5d06ad52c5e11c512bd98ca1a3515a6162aa2805e80e6af',
+'pr-push.sh':'bfd18314a6e60f8ac4bd724659f66ebee8f42550a3176dab355d1e4c1630ae01',
+'reply-resolve.sh':'ec13b8b753a5983cc5ea40584af177c01fc1800339a1e741400c0f0082799d6b',
+'state.sh':'3535cc46e8fbe07a656f78d8610631aeb041f24babb717618c4dec6c4c31ab50',
+'merge-gate.sh':'b77cb9f0456d045a6ab78b19da94651f067e4a42bcff14bc97e445205d24f8b7',
+'worktree-remove.sh':'e9dfe3eab64ab95512270374295935f2cd8a39d24168f571a5b3c2a82d045eeb',
+'recover-prep.sh':'7f5030cf1facb952cf8fd481109c6418a86930ca2ba69b03adbdc814d11efc76',
+'fetch-tree.sh':'b1aba669ea67f0b6cfd6c779a03109a6d2bbb7939f774de5f6d02fe59af33800',
+'declared-deps.sh':'a25b724ea827312f563ee5a6d6fa89203ab2771d3e289a2d6215a8ef34d77aa1',
+'repo-scan.sh':'1ee48ae14cf8bf07bbeca1b07cf4bce82490acf8f4ad9948a3dcf90d1f63ca10',
 }
 
 
@@ -4425,7 +4469,11 @@ return raw
 const AGENT_CALLS_PER_ISSUE={implement:30 +(securityReviewEnabled?2:0),resume:12,close:6}
 
 const AGENT_CALLS_TERMINAL_BASE=20
-const agentBudget={limit:parseAgentCallLimit(argOf('agentCallLimit')),used:0,enforced:false,stoppedDispatchAt:null,starts:0,starved:false,neededLimit:null,held:[]}
+
+function terminalVerifyReserve(n){
+return STATE_AGENT_MODEL_CHAIN.length*(Math.min(Math.max(Math.ceil(n / 100), 1), STATE_VERIFY_MAX_PAGES) - 1)
+}
+const agentBudget={limit:parseAgentCallLimit(argOf('agentCallLimit')),used:0,terminalVerify:0,enforced:false,stoppedDispatchAt:null,starts:0,starved:false,neededLimit:null,held:[]}
 
 function wrapAgentCounting(raw,budget,warn=()=>{}){
 let warned=false
@@ -4444,7 +4492,7 @@ function agentBudgetHold(budget,{running,kind,pending}){
 const remaining=budget.limit-budget.used
 const first=running===0&&(budget.starts??0)===0
 const chunks=Math.ceil(Math.max(pending,0) / BLOCKED_STATE_CHUNK_SIZE)
-const required=AGENT_CALLS_PER_ISSUE.implement*running+AGENT_CALLS_PER_ISSUE[kind]+AGENT_CALLS_TERMINAL_BASE +(first?0:chunks)
+const required=AGENT_CALLS_PER_ISSUE.implement*running+AGENT_CALLS_PER_ISSUE[kind]+AGENT_CALLS_TERMINAL_BASE +(budget.terminalVerify??0)+(first?0:chunks)
 
 return remaining<required?{remaining,required,chunks,needed:budget.used+required}:null
 }
@@ -5995,7 +6043,9 @@ highWaterBytes:loadedHighWaterBytes,
 highWaterVersion:loadedHighWaterVersion,
 verified:savedItemsVerified,
 unverified:stateUnverified,
+keys:stateKeys,
 }=await loadState()
+agentBudget.terminalVerify=terminalVerifyReserve(stateKeys.length)
 
 const unverifiedIssues=new Set(stateUnverified)
 log(`状態ファイルを読み込んだ（既存エントリ: ${Object.keys(savedItems).length} 件）`)
@@ -6238,6 +6288,10 @@ unreachable.map((n)=>`#${n.number}（parent: ${n.parent}）`).join(', '),
 }
 const openImpl=queue.filter((q)=>q.kind==='implement'&&q.state==='open').length
 log(`実行キュー ${queue.length} 件（うち実装対象 ${openImpl} 件）を post-order で構築した（並列度 ${concurrency}）`)
+
+const endStateMax=new Set([...stateKeys, ...queue.map((q)=>String(q.number))]).size
+agentBudget.terminalVerify=terminalVerifyReserve(endStateMax)
+if(agentBudget.terminalVerify>0)log(`終了時の状態ファイル照合の予備 ${agentBudget.terminalVerify} 回（項目の上限 ${endStateMax} 件）を予算判定に加える`)
 
 
 if(!dryRunEnabled)await initAllPending(queue.filter((q)=>q.state==='open'))
@@ -8411,7 +8465,7 @@ warnItem(item,`状態ファイルは ${saved.status} だが GitHub では open�
 }
 
 for(const{item,cleanup,skipEntry,attempts}of orderClosedCleanupCandidates(closedCleanupWork)){
-const gate=closedCleanupGate({limit:agentBudget.limit,used:agentBudget.used,attempted:closedCleanupRun.run,reserveImplement:queueHasOpenImplement})
+const gate=closedCleanupGate({limit:agentBudget.limit-agentBudget.terminalVerify,used:agentBudget.used,attempted:closedCleanupRun.run,reserveImplement:queueHasOpenImplement})
 closedCleanupRun[gate]++
 if(gate==='run'){
 const outcome={settled:false}

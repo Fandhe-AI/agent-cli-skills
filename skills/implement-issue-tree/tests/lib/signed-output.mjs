@@ -127,6 +127,26 @@ export function wrapSkipLabelsReply(prompt, value) {
   return skipLabelsReply(prompt, { entries, absent: value.entries.filter((e) => e.x === 1).map((e) => e.i) })
 }
 
+// 状態ファイルのハッシュ取得（label: state:load-verify[:pN]。scripts/state.sh verify。Issue #603 計画 C の P5）への正直な応答。
+// 従来のスタブが返していた平らな照合入力 { fileExists, hashes, keysSha256, keysCount, highWaterBytes, highWaterVersion } を、
+// プロンプトのコマンド（--nonce・--file・--page）に合わせた封筒へ変換する（1 ページ 100 件）。hashes を持たない不正な応答・
+// null・Error・既に封筒のものはそのまま返す（フォールバックや停止の経路を試すテストのため）。
+// 検証側の実装とは独立に node:crypto で組む。outcome は over で差し替えられる（error・nofile の観測）
+export const STATE_VERIFY_PAGE = 100
+export function stateVerifyReply(prompt, check, over = {}) {
+  if (check === null || check === undefined || check instanceof Error || typeof check !== 'object') return check
+  if ('payload' in check && 'sha256' in check) return check
+  if (!('hashes' in check) || !('keysSha256' in check)) return check
+  const nonce = nonceOf(prompt)
+  const file = /--file (\S+)/.exec(String(prompt))?.[1]
+  const page = Number(/--page (\d+)/.exec(String(prompt))?.[1] ?? 0)
+  if (nonce === null || !file) throw new Error('プロンプトに state.sh verify のコマンドが無い')
+  const keys = check.hashes && typeof check.hashes === 'object' ? Object.keys(check.hashes).sort() : []
+  const entries = keys.slice(page * STATE_VERIFY_PAGE, (page + 1) * STATE_VERIFY_PAGE).map((k) => ({ h: check.hashes[k], k }))
+  const base = { entries, highWaterBytes: check.highWaterBytes, highWaterVersion: check.highWaterVersion, inputSha256: inputSha256(`${file}\n${page}`), keysCount: check.keysCount, keysSha256: check.keysSha256, mode: 'verify', outcome: check.fileExists ? 'ok' : 'nofile', page, pages: Math.max(1, Math.ceil(keys.length / STATE_VERIFY_PAGE)) }
+  return makeEnvelope(nonce, { ...base, ...over })
+}
+
 export function wrapAgentReply(prompt, value) {
   if (value === null || value === undefined || value instanceof Error) return value
   if (typeof value !== 'object' || Array.isArray(value)) return value
