@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
-import { hashPrecheckReply, signedReply, wrapTreeReply } from './lib/signed-output.mjs'
+import { externalChecksReply, hashPrecheckReply, signedReply, skipLabelsReply, wrapTreeReply } from './lib/signed-output.mjs'
 import { requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
@@ -181,7 +181,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
     if (label === 'state:load') return { ok: true, fileExisted: saved !== null, items: saved ?? {}, highWaterBytes: 0, highWaterVersion: saved ? 2 : 0 }
     if (label === 'state:load-verify') return saved === null ? { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 } : { ...stateVerifyFor(saved), highWaterVersion: 2 }
     if (label === 'plan:issue-tree') return wrapTreeReply(prompt, { nodes: structuredClone(nodes) })
-    if (label === 'detect:external-checks') return { apps: [] }
+    if (label === 'detect:external-checks') return externalChecksReply(prompt)
     if (label.startsWith('plan:declared-deps')) {
             return { entries: requestedNumbersOf(prompt).map((x) => ({ number: x, deps: [], sig: declaredDepsChecksum(x, []) })) }
     }
@@ -191,7 +191,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
       return { entries: m[1].trim().split(' ').map(Number).map((x) => ({ number: x, state: 'OPEN', sig: outOfTreeStateChecksum(x, 'OPEN') })) }
     }
     // 対象外ラベル（args.skipLabels）の既定の応答: どのラベルにも該当する open issue なし。通知コメントは成功
-    if (label.startsWith('plan:skip-labels')) return { entries: [...new Set(args.skipLabels ?? [])].map((_, k) => ({ i: k + 1, x: 0, numbers: [], sig: declaredDepsChecksum((k + 1) * 2, []) })) }
+    if (label.startsWith('plan:skip-labels')) return skipLabelsReply(prompt, { entries: [...new Set(args.skipLabels ?? [])].map((_, k) => ({ i: k + 1, numbers: [] })) })
     if (label === 'notify-blocked') return { ok: true }
     if (label === 'worktree:orphan-scan') return { entries: [{ path: '/repo', branch: 'main', isMain: true }] }
     if (label === 'worktree:record-count') return { count: 1 }

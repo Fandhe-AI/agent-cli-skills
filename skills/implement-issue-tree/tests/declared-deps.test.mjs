@@ -30,7 +30,6 @@ const slicePath = join(sliceDir, 'implement-issue-tree-declared-deps-defs.mjs')
 const SLICE_EXPORTS = [
   'DECLARED_DEPS_MAX_PER_NODE',
   'DECLARED_DEPS_TABLE_MAX',
-  'DECLARED_DEPS_SIG_JQ',
   'declaredDepsChecksum',
   'declaredDepsPrompt',
   'collectDeclaredDeps',
@@ -56,7 +55,6 @@ writeFileSync(slicePath, `${definitionPart}\n${optionalExports}\nexport { ${expo
 const {
   DECLARED_DEPS_MAX_PER_NODE,
   DECLARED_DEPS_TABLE_MAX,
-  DECLARED_DEPS_SIG_JQ,
   declaredDepsChecksum,
   declaredDepsPrompt,
   collectDeclaredDeps,
@@ -835,7 +833,9 @@ test('--table の単一引用符の中に単一引用符・バックスラッシ
   assert.ok(!m[1].includes("'") && !m[1].includes('\\'))
 })
 
-test('スクリプトのフィルタの sig の式はホストの DECLARED_DEPS_SIG_JQ（out-of-tree・skip-labels も共用）と同一', () => {
+// ホストは sig の式を jq として持たない（スクリプトだけが持つ）。ホストの declaredDepsChecksum と同じ式を、独立にここへ書く。
+const DECLARED_DEPS_SIG_JQ = '.sig = ((((.number * 7919) % 1000000007) + ([.deps | to_entries[] | (((.key + 1) * .value * 104729) % 1000000007)] | add // 0)) % 1000000007)'
+test('スクリプトのフィルタの sig の式はホストの declaredDepsChecksum と同じ式（独立に書いた文字列）と同一', () => {
   assert.ok(DECLARED_DEPS_FILTER.endsWith(` | ${DECLARED_DEPS_SIG_JQ}`))
   assert.ok(filterFor({ f: { 1: [['TASK-1-2', 12]] }, n: { 12: ['1', 0] } }).endsWith(` | ${DECLARED_DEPS_SIG_JQ}`))
 })

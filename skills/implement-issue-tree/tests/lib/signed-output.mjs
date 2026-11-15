@@ -85,6 +85,48 @@ export function policyPathsReply(prompt, over = {}) {
   })
 }
 
+// ---- repo-scan.sh（外部チェック App の観測・対象外ラベルの取得）----
+// 入力の束縛 inputSha256 は sha256("repo-scan\n" + mode + "\n" + repo + 各ラベルを "\n" で連結)。ホスト・スクリプトの実装とは独立に計算する
+export function repoScanInputSha256(mode, repo = '', labels = []) {
+  return inputSha256(['repo-scan', mode, repo, ...labels].join('\n'))
+}
+
+// プロンプトの起動行 `... repo-scan.sh --mode M --nonce N [--repo R] [-- 'ラベル' ...]` を解釈する（単一引用符内の '\'' は ' に戻す）
+export function parseRepoScanCommand(prompt) {
+  const m = /repo-scan\.sh --mode (external-checks|skip-labels) --nonce (\S+?)(?: --repo (\S+?))?(?: -- (.*))?$/m.exec(String(prompt))
+  if (m === null) throw new Error('プロンプトに repo-scan.sh の起動行が無い')
+  const labels = []
+  if (m[4] !== undefined) {
+    const re = /'((?:[^']|'\\'')*)'(?: |$)/g
+    let t
+    while ((t = re.exec(m[4])) !== null) labels.push(t[1].replace(/'\\''/g, "'"))
+  }
+  return { mode: m[1], nonce: m[2], repo: m[3] ?? '', labels }
+}
+
+// 外部チェック観測（mode external-checks）の正直な応答。payload の既定は apps なし・失敗なし
+export function externalChecksReply(prompt, over = {}) {
+  const c = parseRepoScanCommand(prompt)
+  return makeEnvelope(c.nonce, { apps: [], dropped: 0, errs: 0, inputSha256: repoScanInputSha256('external-checks', c.repo), prs: 3, ...over })
+}
+
+// 対象外ラベル取得（mode skip-labels）の正直な応答。entries = [{ i, numbers }]、failed の既定は entries に無い添字すべて
+export function skipLabelsReply(prompt, { entries = [], absent = [], failed, ...over } = {}) {
+  const c = parseRepoScanCommand(prompt)
+  const have = new Set(entries.map((e) => e.i))
+  const miss = c.labels.map((_, k) => k + 1).filter((i) => !have.has(i))
+  return makeEnvelope(c.nonce, { absent, entries, failed: failed ?? miss, inputSha256: repoScanInputSha256('skip-labels', c.repo, c.labels), ...over })
+}
+
+// 既存テストの平らな応答 { entries: [{ i, x, numbers }] }（x = 1 は存在しないラベル）を封筒つきにする薄いアダプタ。
+// 平らな形でない・null / Error・既に封筒の形のものはそのまま返す
+export function wrapSkipLabelsReply(prompt, value) {
+  if (value === null || value === undefined || value instanceof Error) return value
+  if (typeof value !== 'object' || !Array.isArray(value.entries) || ['nonce', 'payload', 'sha256'].some((k) => k in value)) return value
+  const entries = value.entries.map((e) => ({ i: e.i, numbers: e.numbers }))
+  return skipLabelsReply(prompt, { entries, absent: value.entries.filter((e) => e.x === 1).map((e) => e.i) })
+}
+
 export function wrapAgentReply(prompt, value) {
   if (value === null || value === undefined || value instanceof Error) return value
   if (typeof value !== 'object' || Array.isArray(value)) return value
