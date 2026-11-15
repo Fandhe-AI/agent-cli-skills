@@ -1269,6 +1269,7 @@ const declaredList=arr(declared)
 if(declaredList.length===0)return{ok:true,missing:[]}
 const headSha=sanitizeSha(verifyResult?.headRefOid)
 const counts=verifyResult&&Array.isArray(verifyResult.counts)?verifyResult.counts:null
+
 if(verifyResult?.fetchFailed===true|| !headSha|| !counts||counts.length!==declaredList.length){
 return{ok:false,missing:declaredList.map((_,i)=>i)}
 }
@@ -3561,18 +3562,18 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'e438b7b569dd42d34aa77d993cfcc6ea3470e5378e4cb8a182c76e805a9bffe8',
-'measure-free-disk.sh':'3676bad309dfa0d0f421f7cab00abd2fb20d6aad270c700b1c6383afa37bc5ed',
-'observe-pr.sh':'3a2a2c4464f2c0814ec6b37bb50c5d14036ee368cfe1e7536a7de7f0867269f1',
-'base-merge.sh':'3354652b3228bc9c39d3d91fe9a6d083bd944aea54ae42eae73f80a2371b234a',
-'pr-push.sh':'93d3031c4fbc6079b5d86bd9c6dfba752e8697734760da0f870ae277d522ae2c',
-'reply-resolve.sh':'a9d1582dc18d6ca75a4d2a73f5a9cefc9b99bb467f93242ecfc89c9bd5e689f1',
-'state.sh':'05b8d2c68a2150f48febb3c1f46ec705d5a98cc442b5180383b2be4362370322',
-'merge-gate.sh':'0bb3d4251e2e9bb7d9129ae2f821d204e7a6c8694407f05cda612299e2d89d2c',
-'worktree-remove.sh':'2c7a8222371eff83fb52a5bc90459ced5bba3e210ba3aeea5b82ffe254d889de',
-'recover-prep.sh':'4387a73de56dde3e03b1043385989eb5e322e7c986bfc9a5bb6b8d78fe3b6230',
-'fetch-tree.sh':'ac227906d4d381a2cd4682d8c454daa9731a3b961fb82237f9a1b66cb0ee5655',
-'declared-deps.sh':'4fc9484fcef3935f06c5ef344088202677e32b59bb10f94ebbc22af5c56721af',
+'measure-residual-bytes.sh':'61acdb4bb57e7a47f41ed809f283fb18554d9392a23b27e07dde62787e7e44b6',
+'measure-free-disk.sh':'9acfbd385cd029bbf07b541035c54d3af0cad55feddb70d0562e5363e1c61085',
+'observe-pr.sh':'bbff778f1ae922b9b92b14ba878c8b51bd9ece2c36685b7e785cc2c9bcba6208',
+'base-merge.sh':'7d296084633386c125cbe9dfb1981f5be4d5f7d0589a3cd92e0710fb869ff8b6',
+'pr-push.sh':'2f11936598c3e9ae9d5254ac4cbd0f63ae230a5204755e8d5be0735a1288046e',
+'reply-resolve.sh':'9aa4aec034b533330ebc308192b231a4c860449372cffbe50be4092f6abb6ebd',
+'state.sh':'55c2dcd23e74f9a7f20f2cce57cd70fa94048ad13a1561a1952585fb7eda9991',
+'merge-gate.sh':'90877f074c5c7ec75f177f7e93882ed825d68d72121ad542f2fce6ceb134926c',
+'worktree-remove.sh':'3342464e9defc08d3a5f6157054f13aff691694f4d6a1177f717d7019a9178de',
+'recover-prep.sh':'a44354014dbe61f82a0221d0c8e607350527a381b7829909e9bb2676b42721a5',
+'fetch-tree.sh':'5acb390b4189a2c70abc8446d456b9a4eef710a49cc806964fac1c37c530cede',
+'declared-deps.sh':'6060d3dd25a30d4848764742c719d4136e786459fc27c8e3593ede41a5a38702',
 }
 
 
@@ -5092,9 +5093,11 @@ return{kind:'ok',reason:'',verify:{headRefOid:p.headSha,counts:p.pass.map((x,i)=
 }
 
 
+
+const OPTIN_RECORD_OBSERVE_RULE='PR 本文を取得・転記・要約しない（件数はスクリプトが数え、本文は返さない）。スクリプトが失敗しても、gh・jq・grep などの別の手段で測り直さない。gh pr merge・git push など PR・リポジトリを変更する操作はしない。'
 const observeOptinRecord=(item,impl,commands)=>
 observeGate(item,{mode:'optin-record',pr:impl.prNumber,optinCommands:commands},'optin-record',`opt-in テスト実行記録（イシュー #${item.number}）`,OPTIN_RECORD_PAYLOAD_SCHEMA,
-(raw,n,sha)=>classifyOptinRecordObservation(raw,n,sha,commands),{label:`optin-record-verify:#${item.number}`,common:[MERGE_CONTEXT_COMMON]})
+(raw,n,sha)=>classifyOptinRecordObservation(raw,n,sha,commands),{label:`optin-record-verify:#${item.number}`,common:[MERGE_CONTEXT_COMMON,OPTIN_RECORD_OBSERVE_RULE]})
 
 
 const OBSERVE_ERROR_RULE='outcome が error の場合は 1 回だけ同じコマンドを再実行し、なお error なら取得不能として扱い（0 件・不足 0・レビューなしとみなさない）、手順に指定が無ければ '+BLOCK_Q+' を返す。'

@@ -25,7 +25,7 @@
 | `scripts/declared-deps.sh` | イシュー本文の依存宣言の機械抽出（`plan:declared-deps-N`）。入力は `--numbers N,N,…`・`--repo`（任意。空文字は使い方の誤り）・`--table`（兄弟のタスク ID の表。任意）・`--input-sha256`（必須。入力の束縛）。`gh api repos/<repo>/issues/<N> --jq <フィルタ>` の GET だけで、成功したイシューごとに 1 行 `{"number","deps","sig"}` を標準出力へ、失敗したイシューは `FAILED #N` を標準エラーへ出す。`--rate-limit` は `gh api rate_limit` の core 枠、`--print-filter` はフィルタ文字列の確認（gh を呼ばない）。**出力は封筒を使わない**: ホストは従来どおりエージェントが転記した `entries` を `sig` と `collectDeclaredDeps` の検査で照合する。**入力の束縛**: `sig` は `number` と `deps` だけから計算されるので、エージェントが `--table` のエントリ・`--repo`・番号を転記で落としてもつじつまの合った出力が出てホストの照合を通る（兄弟の依存が解決されない・cwd の別リポジトリの同じ番号を読む）。そこでホストが `sha256("declared-deps\n" + numbers + "\n" + repo + "\n" + table)`（repo・table は起動行に付けないとき空文字・末尾に改行なし。`lib/declared-deps-lib.sh` の `dd_input_sha` と同じ定義）を起動行の `--input-sha256` に付け、スクリプトは受け取った引数から計算し直して、不一致・欠落は gh を呼ぶ前に標準エラーへ `INPUT_MISMATCH` を出して exit 2（期待値は出力しない）。プロンプトは exit 2 を転記ミスとして entries を空で返させ、ホストが欠落として再試行する。`--table` は 120000 文字（`DD_TABLE_MAX` = ホストの `DECLARED_DEPS_TABLE_MAX`）を超えるとホストが起動せず、欠落 → 再試行 → 停止の経路に流す。`--rate-limit` と `--print-filter` は対象外。切り出しの目的は、3.9〜4.9 KB の jq コマンドの転記でバックスラッシュが半減する事故（`\\b` → `\b` は jq でエラーにならずバックスペースになり、単語境界が黙って効かなくなる。`sig` は誤った結果と整合するのでホストの照合では見つからない）を、フィルタをハッシュで固定して防ぐこと |
 | `scripts/lib/declared-deps-lib.sh` | `declared-deps.sh` の jq フィルタ本体（引用符つきヒアドキュメントで置くのでエスケープは jq の 1 段だけ。切り出し前の実行時の文字列との文字単位の一致を `tests/declared-deps-script.test.mjs` が固定する）・rate_limit の jq・番号 / リポジトリ / 表の検証の関数（`dd_*`。source 専用） |
 | `scripts/lib/signed-output.sh` | 封筒の組み立て（`so_emit`）。sha256 の入力の定義はここと `verifySignedOutput` が共有する |
-| `scripts/lib/optin-record-lib.sh` | `observe-pr.sh --mode optin-record` の判定（`optin_cmd_valid` = 宣言コマンドの許可形・`optin_record_normalize` = 本文の CR と行頭行末の空白の除去・`optin_record_counts` = 現在の HEAD の sha に対する pass と pass 以外〔fail + not-run〕のマーカー行数を固定文字列の行全体一致で数える。純関数・source 専用。Issue #603） |
+| `scripts/lib/optin-record-lib.sh` | `observe-pr.sh --mode optin-record` の判定（`optin_cmd_valid` = 宣言コマンドの許可形・`optin_record_normalize` = 本文の CR と行頭行末の空白の除去・`optin_record_counts` = 現在の HEAD の sha に対する pass と pass 以外〔fail + not-run〕のマーカー行数を固定文字列で数える。pass は行全体の一致・pass 以外は行内の部分一致。純関数・source 専用。Issue #603） |
 | `scripts/lib/policy-paths-lib.sh` | `observe-pr.sh --mode policy-paths` の判定（`policy_paths_count`。方針パス = `.github/workflows/`・`.github/actions/`・CODEOWNERS 3 箇所の件数と、`--allow` に無い件数。リネームは新旧を数える。純関数・source 専用。Issue #760） |
 | `scripts/lib/added-files-lib.sh` | `observe-pr.sh --mode added-files` の判定（`added_files_numbered_dirs` / `added_files_classify`。新規追加ファイルの同じパス・同じディレクトリの同じ連番の衝突を数える純関数。Issue #658） |
 | `scripts/lib/observe-checks-lib.sh` | `observe-pr.sh --mode checks --until settled` の分類（`checks_classify`。check-run と commit status を合格 / 未完了 / 不合格の件数にする純関数。第 8 弾） |
@@ -101,7 +101,9 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 残置バイト・空き容量の測定値は、**新規着手を止めるか（ディスク枯渇の防止）**、および**次回ラン開始時の 1 worktree あたり予約見積りの下限（クランプ済みの高水位）**にだけ使う。マージ可否・push・worktree の削除・PR/issue への書き込みの判定には使わない。偽の小さい値は着手を許す側に働き得るが、それが損なうのはローカルのディスク容量の保護で、リポジトリの内容・マージ・認証には影響しない。逆に偽の大きい値は着手を止める側（安全側）に働く。したがって、この弾の信頼水準は「事故を検出できる」で足りる。**悪意のあるエージェントがディスク枯渇防止の弁を迂回できる**ことは受け入れた制約である（件数軸の元になる `git worktree list` の転記も同じ自己申告である）。
 
-安全判定を含むスクリプト（G0・マージ実行・opt-in ゲート・worktree の破棄の確認・base 取り込み）を切り出す弾では、この水準では足りない。出力の用途がマージ可否に及ぶ場合は、(a) ホスト側の独立な再取得、(b) サーバー側強制（ruleset の実測）、(c) 自己申告値を判定に使わない設計、のいずれかで補うこと。nonce と sha256 の照合は補強にならない。
+安全判定を含むスクリプト（G0・マージ実行・opt-in ゲート・worktree の破棄の確認・base 取り込み）を切り出す弾では、この水準では足りない。出力の用途がマージ可否に及ぶ場合は、(a) ホスト側の独立な再取得、(b) サーバー側強制（ruleset の実測）、(c) 自己申告値を判定に使わない設計、のいずれかで補うこと。nonce と sha256 の照合は補強にならない（封筒の sha256 に鍵は無く、nonce もプロンプトに載っているため、照合で検出できるのは転記の誤り・別の入力・別の呼び出しの流用までで、観測エージェント自身の捏造は検出できない）。
+
+**例外: `optin-record`（次々節）**。この観測の封筒は opt-in テスト記録ゲートの合否の材料になるが、この水準のまま使う。理由: (1) 旧版は封筒すら無い自己申告で、ホストは何も照合していなかった。今回の変更で信頼水準は下がらず、転記の誤り（コマンドの欠け・順序違い・別の PR・別の呼び出しの流用）をホストが検出できるようになった。(2) 観測エージェントのコンテキストには PR 本文などの非信頼テキストが載らない（本文はスクリプトの中だけで読み、封筒は整数と 40 桁 16 進だけ）ので、本文経由のプロンプト注入で件数を操作される経路が無い。(3) 偽の pass が通る範囲は、post-push fix の実測との AND・merge-exec の再検証・サーバー側の強制の内側に収まる（下記「防がないもの」）。ホスト側の独立な再取得（(a)）は、merge-exec の「PR 本文を読まない」契約と衝突するため設計判断が要る。別の Issue の候補として残す。
 
 ## 新規追加ファイルの衝突ゲート（`observe-pr.sh --mode added-files`。Issue #658）
 
@@ -121,8 +123,19 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - **payload**: `headSha`（40 桁 16 進）と `pass` / `nonPass`（宣言コマンドと同じ個数の整数の配列）。コマンド・本文の文字列を含めない。`nonPass` = `fail` + `not-run` のマーカー行数。HEAD の sha に一致しない行はどの件数にも入らない（古い HEAD・base 取り込み前・fix 前の記録は存在しないものとして扱う）
 - **引数の検証**: `--optin-cmd` は 1〜10 個・重複不可・先頭が英数字で `[A-Za-z0-9 _./:=@+,-]` だけ・200 文字以内（ホストの `OPTIN_TEST_COMMAND_RE` と同じ）。改行や許可外の文字は `grep -F` のパターンを複数行に化かしシェル特殊文字を持ち込むため、gh を呼ぶ前に exit 2 で拒否する。コマンド行では単一引用符で囲む（許可文字に `'` が無いので引用の崩れは起きない）
 - **取得失敗は 0 件にしない**: `gh pr view` の失敗・応答の形の違い・`headRefOid` が 40 桁 16 進でない・`body` が文字列でも null でもない・`grep` が 0 / 1 以外で終了、はすべて `err:1`（`headSha` は空・配列は空）。ホストは観測エージェントを sonnet で 1 回だけ取り直し、なお失敗なら全件不合格 = `blocked`（従来は 1 回の観測で、失敗は同じ全件不合格）。`body` が null は空の本文として 0 件（`err:0`）
-- **意味の変化**: 件数の定義・判定・fail-closed の側は変えていない。変わるのは (1) 書き写しの誤りで結果が変わらなくなる、(2) 観測失敗の取り直しが 1 回入る（haiku → sonnet。以前は sonnet 1 回）、(3) `args.repo` があるとき `gh pr view` が `-R` で束縛される、(4) `[[:space:]]` が ASCII の空白だけになる（`LC_ALL=C`。以前はエージェントのシェルのロケール依存）
-- **防がないもの**: 封筒を偽造する悪意あるエージェント（偽の「pass 1 件」は、`optinFixState` の実測との AND と merge-exec の再検証、サーバー側の強制が受け止める。この観測は従来と同じ信頼水準）
+- **意味の変化**（旧版との差の一覧。判定そのもの = pass が 1 件以上かつ pass 以外が 0 件は変えていない）:
+  1. 書き写しの誤りで結果が変わらなくなる（コマンド列を書き写さない）。
+  2. 観測失敗の取り直しが 1 回入る（haiku → sonnet。以前は sonnet 1 回）。取り直しで観測エージェントの呼び出しが最大 1 回増える（予算の消費は `agent-call-budget.md`）。
+  3. `args.repo` があるとき `gh pr view` が `-R` で束縛される。
+  4. `[[:space:]]` が ASCII の空白だけになる（`LC_ALL=C`。以前はエージェントのシェルのロケール依存で、macOS の sed は UTF-8 のロケールで U+3000・NBSP・U+2028 なども削った）。この差を次の 5 で吸収する。
+  5. **pass 以外（fail + not-run）は正規化後の本文への部分一致（`grep -cF`。1 行につき 1 件）で数える**。マーカーの末尾 ` -->` と前の `<sha> fail ` が境界になるので、`make e2e` の検索は `make e2e-x -->` にも `xmake e2e` にも当たらない。旧版の行全体一致の上位集合なので、pass 以外の件数はどのロケールでも旧版より減らない（`LC_ALL=C` のまま行全体一致にすると、先頭に全角空白・末尾に NBSP・先頭に U+2028 が付いた fail / not-run 行が数えられず、旧版が `blocked` にした本文がゲートを通る fail-open になる）。行の途中に埋め込まれたマーカーも数える（止める側にだけ厳しくなる）。人が読む形の行（`- opt-in テスト結果: … => fail`）はマーカーの接頭辞を含まないので数えない。
+  6. **pass は行全体の一致のまま**。そのため先頭に NBSP などの削られない空白が付いた pass 行は数えない（pass の件数が減る = 厳しくなる側の変化。人手の復旧編集でそうした空白が入ると pass 0 件で `blocked` になり、行頭の空白を ASCII にするか削れば解ける）。
+  7. `outcome === 'observed'` を必須にした（`err` が 0 でも `outcome` が `error` / `pending` なら採らない = skip。旧版には無い検査）。
+  8. 本文はコマンド置換の変数で受けるので、NUL と末尾の改行が落ちる（マーカー行は 1 行の ASCII なので件数には影響しない）。
+  9. 正規化のパイプ（`tr | sed`）と件数のパイプ（`printf | grep -c`）は各段の終了コードを見て、0 以外（`grep` は 0 と 1 だけが正常）があれば `err:1` にする（途中の失敗を 0 件へ畳まない）。
+
+  fail-closed の側（取得失敗・形の不正・件数不一致を不合格へ倒す）は変えていない。ただし 5・6 は件数の定義を動かす変更であり、5 は fail-closed を強める、6 は pass を減らす側にだけ働く。
+- **防がないもの**: 観測エージェント自身の捏造（封筒の sha256 に鍵は無く nonce もプロンプトにあるため、照合では検出できない）。偽の「pass 1 件」を受け止めるのは、post-push fix の実測との AND（`combineOptinRecordGate`）・merge-exec の再検証・サーバー側の強制だが、`combineOptinRecordGate` が働くのは post-push fix の実測があるとき（fix を経た PR）だけである。fix をしていない PR では AND の相手がいないので、偽の pass はこのゲートでは受け止められず、merge-exec の再検証とサーバー側の強制（G0）に任せる。旧版の自己申告（照合なし）より下がらず、転記の誤りは検出できる、という水準である
 
 ## 方針パスのゲート（`observe-pr.sh --mode policy-paths`。Issue #760）
 

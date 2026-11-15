@@ -108,8 +108,29 @@ for (const bash of availableBashes()) {
   })
 }
 
+// LC_ALL=C が削らない Unicode の空白が付いた fail / not-run 行でも、実スクリプトの件数からゲートが不合格になる（監査 MEDIUM の再現）。
+// 旧版（利用者のロケールの sed）は pass 1・pass 以外 1 で blocked にしていた。pass 以外が 0 件に減ると fail-open になる
+for (const bash of availableBashes()) {
+  const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'optin-record-lib.sh')
+  const bodies = {
+    全角空白付きの_fail: `${marker(SHA, 'pass', 'make e2e')}\n\u3000${marker(SHA, 'fail', 'make e2e')}`,
+    末尾_NBSP_付きの_fail: `${marker(SHA, 'pass', 'make e2e')}\n${marker(SHA, 'fail', 'make e2e')}\u00a0`,
+    先頭_U2028_付きの_not_run: `${marker(SHA, 'pass', 'make e2e')}\n\u2028${marker(SHA, 'not-run', 'make e2e')}`,
+  }
+  for (const [name, body] of Object.entries(bodies)) {
+    test(`[${bash}] Unicode の空白付きの pass 以外の行でもゲートは不合格: ${name}`, () => {
+      const r = spawnSync(bash, ['-c', 'export LC_ALL=C; . "$1" && b=$(printf "%s\\n" "$2" | optin_record_normalize) && optin_record_counts "$b" "$3" "make e2e"', 'x', LIB, body, SHA], { encoding: 'utf8' })
+      assert.equal(r.status, 0, r.stderr)
+      const [pass, nonPass] = r.stdout.trim().split(' ').map(Number)
+      assert.deepEqual([pass, nonPass], [1, 1])
+      assert.deepEqual(classifyOptinRecordGate(['make e2e'], { headRefOid: SHA, counts: [{ index: 0, pass, nonPass }] }), { ok: false, missing: [0] })
+    })
+  }
+}
+
 test('プロンプトの配線: 観測は observeGate を extra（label・common）つきで呼び、旧プロンプトの手順は残っていない', () => {
-  assert.match(definitionPart, /label: `optin-record-verify:#\$\{item\.number\}`, common: \[MERGE_CONTEXT_COMMON\]/)
+  assert.match(definitionPart, /label: `optin-record-verify:#\$\{item\.number\}`, common: \[MERGE_CONTEXT_COMMON, OPTIN_RECORD_OBSERVE_RULE\]/)
+  assert.match(definitionPart, /const OPTIN_RECORD_OBSERVE_RULE = 'PR 本文を取得・転記・要約しない[^']*スクリプトが失敗しても、gh・jq・grep などの別の手段で測り直さない[^']*gh pr merge・git push/)
   assert.ok(!definitionPart.includes('OPTIN_RECORD_VERIFY_SCHEMA'))
   assert.ok(!definitionPart.includes('function optinRecordVerifyPrompt'))
   assert.ok(!definitionPart.includes('grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H'), '固定文字列 grep の手順はスクリプトの lib にある')
@@ -167,6 +188,10 @@ test('結合: プロンプトは固定コマンドの実行と封筒の転記だ
   const cmdPart = p.slice(p.indexOf('次のコマンドを'))
   assert.doesNotMatch(cmdPart, /gh pr view|jq |grep|tr -d|sed -e/)
   assert.match(p, /一字一句そのまま/)
+  // 権限境界（旧プロンプトの「本文は件数だけを使い…gh pr merge や git push などはしない」に当たる）が観測プロンプトに入っている
+  assert.match(p, /PR 本文を取得・転記・要約しない/)
+  assert.match(p, /スクリプトが失敗しても、gh・jq・grep などの別の手段で測り直さない/)
+  assert.match(p, /gh pr merge・git push など PR・リポジトリを変更する操作はしない/)
   assert.match(p, /nonce・payload・sha256/)
 })
 

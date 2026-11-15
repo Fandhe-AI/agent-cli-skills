@@ -116,7 +116,7 @@ volta run --node 22 node skills/implement-issue-tree/tests/tools/mutate.mjs --ru
 
 ## opt-in テスト記録ゲートの観測（Issue #603）
 
-- `tests/optin-record-unit.test.mjs`（`scripts/lib/optin-record-lib.sh` の表: 宣言コマンドの許可形・本文の正規化・マーカー行の行全体の固定文字列一致・pass と pass 以外の件数。bash ごと）・`tests/observe-pr-optin-record.test.mjs`（偽 gh で実スクリプトを bash 3.2 / 5 の両方で実行: 件数・`gh pr view` が 1 回・`-R` 束縛・取得失敗と応答の形の違いは `err:1`・`body` が null は 0 件・引数の誤りは exit 2 で gh を呼ばない・`inputSha256` が個数と順序を束縛）・`tests/optin-record-gate.test.mjs`（ホスト: 封筒の nonce・sha256・入力の不一致と payload の形の拒否、観測失敗の haiku → sonnet の 1 回取り直しと全件不合格、プロンプトが固定コマンドの実行と転記だけであること）。マーカー行の書式（writer = `optinRecordMarkerLine`・`optinRecordRewriteLines`、reader = lib）の往復は `optin-tests-gate.test.mjs` の群 F が本物の lib で検査する。
+- `tests/optin-record-unit.test.mjs`（`scripts/lib/optin-record-lib.sh` の表: 宣言コマンドの許可形・本文の正規化・マーカー行の固定文字列一致〔pass は行全体・fail と not-run は部分一致で、U+3000・NBSP・U+2028 が付いた行も数える〕・pass と pass 以外の件数・パイプの途中の失敗は偽の tr / sed / grep で `return 1`。bash ごと）・`tests/observe-pr-optin-record.test.mjs`（偽 gh で実スクリプトを bash 3.2 / 5 の両方で実行: 件数・`gh pr view` が 1 回・`-R` 束縛・取得失敗と応答の形の違いは `err:1`・`body` が null は 0 件・引数の誤りは exit 2 で gh を呼ばない・`inputSha256` が個数と順序を束縛・全角空白付きの fail 行・本文の文字列が標準出力と標準エラーに出ないこと・偽の tr の失敗は `err:1`）・`tests/optin-record-gate.test.mjs`（ホスト: 封筒の nonce・sha256・入力の不一致と payload の形の拒否、観測失敗の haiku → sonnet の 1 回取り直しと全件不合格、プロンプトが固定コマンドの実行と転記だけであること・本文を取得せず測り直さない権限境界の文が入っていること・Unicode の空白付きの pass 以外の行でゲートが不合格になること）。マーカー行の書式（writer = `optinRecordMarkerLine`・`optinRecordRewriteLines`、reader = lib）の往復は `optin-tests-gate.test.mjs` の群 F が本物の lib で検査する。
 - 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run OR1-optin-count-substring …`（`OR1`〜`OR10`）。
 
 ## ツリー取得（Issue #668）

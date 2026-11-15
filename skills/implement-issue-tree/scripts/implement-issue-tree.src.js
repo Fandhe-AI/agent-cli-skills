@@ -1269,6 +1269,7 @@ function classifyOptinRecordGate(declared, verifyResult) {
   if (declaredList.length === 0) return { ok: true, missing: [] }
   const headSha = sanitizeSha(verifyResult?.headRefOid)
   const counts = verifyResult && Array.isArray(verifyResult.counts) ? verifyResult.counts : null
+  // fetchFailed は旧形の入力（観測の失敗を verifyResult.fetchFailed で返していた形）との互換と安全側の分岐。現在の観測（classifyOptinRecordObservation）は失敗を verify に載せず skip で返すため、新しい入力ではこの値は立たない（残しても fail-closed に倒れるだけ）
   if (verifyResult?.fetchFailed === true || !headSha || !counts || counts.length !== declaredList.length) {
     return { ok: false, missing: declaredList.map((_, i) => i) }
   }
@@ -4816,7 +4817,7 @@ function implementPrompt(item, plan) {
 }
 
 // --- monitor の観測スクリプト（scripts/observe-pr.sh。Issue #603 第 2 弾）--- monitor が毎回プロンプトの文章から組み立てていた gh / jq の観測（PR の state・チェック総数・required context の不足・外部 App のレビュー到着・未解決スレッド数）と有界の待機を、スキル同梱のスクリプトへ移した。monitor は「コマンドを実行し、1 行 JSON 封筒の payload（整数と固定語彙）を読む」だけにする。封筒の値は助言的判定の材料にすぎず、マージ・
-// クローズ・push・削除の可否には使わない（マージ可否は merge-exec が自分で再取得して判定する）。ホストが封筒を照合して採用するのはチェック総数の 1 点だけ（applyChecksObservation）。信頼モデルは references/script-trust-model.md。待機の回数はスクリプトが --attempt で強制し（上限 OBSERVE_MAX_ATTEMPTS。scripts/observe-pr.sh の既定と同じ値）、
+// クローズ・push・削除の可否には使わない（マージ可否は merge-exec が自分で再取得して判定する）。ホストが封筒を照合して採用するのはチェック総数の 1 点だけ（applyChecksObservation）。例外: 後段の署名済み観測ゲートのうち optin-record（observeOptinRecord）の封筒は、opt-in テスト記録ゲートの合否の材料になる（classifyOptinRecordGate。偽の pass は post-push fix の実測との AND〔combineOptinRecordGate。fix をしていなければ働かない〕・merge-exec の再検証・サーバー側の強制が受け止める範囲を超えない。封筒の sha256 に鍵は無く nonce もプロンプトにあるので、照合で検出できるのは転記の誤り・別の入力・別の呼び出しの流用までで、観測エージェント自身の捏造は検出できない）。信頼モデルは references/script-trust-model.md。待機の回数はスクリプトが --attempt で強制し（上限 OBSERVE_MAX_ATTEMPTS。scripts/observe-pr.sh の既定と同じ値）、
 // ホストが再起動しない: 1 回の起動は壁時計 90 秒 + 数秒以内（遅い・ハングする gh を含めてスクリプトが保証）に収まるため、エージェントが pending のたびに同じコマンドを再実行する。ホストが 1 回ごとにエージェントを呼び直すと agentCallLimit を最大 7 回/待機消費する。
 const OBSERVE_MAX_ATTEMPTS = 7
 // checks --until settled（手順 3 の CI 完了待ち。gh pr checks --watch の置き換え）の待機回数の上限。現行の --watch の最長（およそ 40 分）と同じにする: 1 起動は 25 秒間隔・4 観測でおよそ 83 秒 × 30 回。値は scripts/observe-pr.sh の既定と同じで、スクリプトが --attempt で強制する（プロンプトの文面で増やせない。tests/observe-pr-host.test.mjs が両者の一致を検査する）
@@ -5092,9 +5093,11 @@ function classifyOptinRecordObservation(raw, nonce, inputSha, commands) {
 }
 // 観測エージェントは固定コマンドを実行して封筒を転記するだけで、PR 本文は読まず・返さない（かつては gh pr view・正規化・コマンドごとの固定文字列 grep を 1 KB 超のインラインのコマンド列として書き写させていたが、書き写しの誤りで結果が黙って変わるため scripts/observe-pr.sh --mode optin-record へ移した。Issue #603）。
 // merge-exec と同じコンテキスト分離契約のため、共通規則は MERGE_CONTEXT_COMMON を使う。commands は runMergeLoop が item.optinTests から渡す（ホストで parseOptinTestDeclarations 検証済み）。
+// 観測エージェントの権限境界（旧プロンプトの「本文は件数だけを使い、内容・要約・引用を返さない。gh pr merge や git push などはしない」に当たる）。スクリプトが失敗しても別の手段で測り直さない = 失敗は封筒の err として返り、ホストが取り直す
+const OPTIN_RECORD_OBSERVE_RULE = 'PR 本文を取得・転記・要約しない（件数はスクリプトが数え、本文は返さない）。スクリプトが失敗しても、gh・jq・grep などの別の手段で測り直さない。gh pr merge・git push など PR・リポジトリを変更する操作はしない。'
 const observeOptinRecord = (item, impl, commands) =>
   observeGate(item, { mode: 'optin-record', pr: impl.prNumber, optinCommands: commands }, 'optin-record', `opt-in テスト実行記録（イシュー #${item.number}）`, OPTIN_RECORD_PAYLOAD_SCHEMA,
-    (raw, n, sha) => classifyOptinRecordObservation(raw, n, sha, commands), { label: `optin-record-verify:#${item.number}`, common: [MERGE_CONTEXT_COMMON] })
+    (raw, n, sha) => classifyOptinRecordObservation(raw, n, sha, commands), { label: `optin-record-verify:#${item.number}`, common: [MERGE_CONTEXT_COMMON, OPTIN_RECORD_OBSERVE_RULE] })
 
 // outcome が error（取得失敗）のときの共通の扱い。待機を持つ手順（3e・3g・4x・4b・4c）で揃える。結論が出ていないので先へ進まない。
 const OBSERVE_ERROR_RULE = 'outcome が error の場合は 1 回だけ同じコマンドを再実行し、なお error なら取得不能として扱い（0 件・不足 0・レビューなしとみなさない）、手順に指定が無ければ ' + BLOCK_Q + ' を返す。'

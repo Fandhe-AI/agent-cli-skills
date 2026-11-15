@@ -60,7 +60,8 @@
 #             `<!-- optin-test-record: <sha> <pass|fail|not-run> <コマンド> -->` を、PR の現在の HEAD sha に対して、--optin-cmd で渡した
 #             宣言コマンドごとに数える（pass の件数と、fail + not-run の件数）。--optin-cmd は繰り返し指定する（1〜10 個・重複不可・
 #             先頭が英数字で [A-Za-z0-9 _./:=@+,-] だけ・200 文字以内。順序が payload の配列の添字になる）。gh pr view の
-#             1 回の呼び出しで body と headRefOid を取り、本文を lib/optin-record-lib.sh で正規化して固定文字列の完全一致で数える。
+#             1 回の呼び出しで body と headRefOid を取り、本文を lib/optin-record-lib.sh で正規化して固定文字列で数える（pass は行全体の一致、fail と not-run は行内の部分一致 =
+#             LC_ALL=C が削らない Unicode の空白が付いた行も数える）。
 #             payload は headSha（40 桁 16 進）と pass / nonPass（コマンドごとの整数の配列）だけで、本文・コマンドの文字列は含めない。
 #             取得失敗・headRefOid の形式不正・本文が文字列でも null でもない・grep の異常終了は err:1（件数を 0 件へ畳み込まない）。
 #             判定（pass が 1 件以上かつ pass 以外が 0 件）はホストの classifyOptinRecordGate が行う。--wait は取らない

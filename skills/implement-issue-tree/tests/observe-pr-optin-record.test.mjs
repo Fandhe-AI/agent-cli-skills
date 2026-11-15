@@ -22,6 +22,8 @@ const NONCE = 'or0b1c2d3e4f5a6b7c8d9e0f'
 const jqAvailable = toolExists('jq')
 const SHA = 'a'.repeat(40)
 const OLD = 'b'.repeat(40)
+// 本文に入れる固有の文字列。標準出力にも標準エラーにも現れてはならない（本文は件数にだけ使い、内容を返さない）
+const CANARY = 'CANARY-本文-9f3c1d7e'
 const marker = (sha, result, cmd) => `<!-- optin-test-record: ${sha} ${result} ${cmd} -->`
 const view = (body, over = {}) => JSON.stringify({ body, headRefOid: SHA, ...over })
 const inputOf = ({ pr, repo = '', cmds }) => ['observe-pr', 'optin-record', pr, repo, '', '', '', '', '', String(cmds.length), ...cmds].join('\n')
@@ -32,6 +34,7 @@ function run(bash, stub, args) {
 }
 function envelope(r) {
   assert.equal(r.status, 0, `exit ${r.status} / stderr: ${r.stderr}`)
+  assert.ok(!r.stdout.includes(CANARY) && !r.stderr.includes(CANARY), '本文の文字列が標準出力・標準エラーへ出ていない')
   assert.match(r.stdout, /^[^\n]+\n$/, '標準出力は 1 行')
   const e = JSON.parse(r.stdout)
   assert.equal(e.nonce, NONCE)
@@ -45,7 +48,7 @@ for (const bash of availableBashes()) {
   t('宣言コマンドごとに、現在の HEAD の pass と pass 以外を渡した順に数える。gh は 1 回だけ（-R 束縛）', () => {
     const cmds = ['make e2e', 'cargo test -- --ignored', 'make none']
     const body = [
-      'ふつうの本文',
+      `ふつうの本文 ${CANARY}`,
       marker(SHA, 'pass', 'make e2e'),
       `  ${marker(SHA, 'fail', 'make e2e')}\r`,
       marker(SHA, 'pass', 'cargo test -- --ignored'),
@@ -61,6 +64,24 @@ for (const bash of availableBashes()) {
     })
     assert.doesNotMatch(JSON.stringify(p), /make|cargo|ふつう/)
     assert.deepEqual(stub.calls(), ['pr view 7 -R o/r --json body,headRefOid'])
+  })
+
+  t('LC_ALL=C が削らない Unicode の空白（全角空白・NBSP・U+2028）が付いた fail / not-run 行も pass 以外に数える。先頭 NBSP の pass 行は数えない', () => {
+    const cmds = ['make e2e', 'make b', 'make c', 'make d']
+    const body = [
+      `${CANARY}`,
+      marker(SHA, 'pass', 'make e2e'),
+      `\u3000${marker(SHA, 'fail', 'make e2e')}`,
+      marker(SHA, 'pass', 'make b'),
+      `${marker(SHA, 'fail', 'make b')}\u00a0`,
+      marker(SHA, 'pass', 'make c'),
+      `\u2028${marker(SHA, 'not-run', 'make c')}`,
+      `\u00a0${marker(SHA, 'pass', 'make d')}`,
+      '- opt-in テスト結果: make d => fail',
+    ].join('\n')
+    const stub = createObserveStub({ prview: { out: view(body) } })
+    const p = envelope(run(bash, stub, ['--pr', '7', ...cmdArgs(cmds)]))
+    assert.deepEqual([p.err, p.pass, p.nonPass], [0, [1, 1, 1, 0], [1, 1, 1, 0]])
   })
 
   t('--repo なしは gh の既定の解決。大きな本文の末尾のマーカーも数える。正規表現の記号は固定文字列として扱う', () => {
@@ -157,6 +178,14 @@ for (const bash of availableBashes()) {
     writeFileSync(join(stub.dir, 'grep'), '#!/bin/sh\necho x\nexit 0\n')
     const q = envelope(run(bash, stub, ['--pr', '7', ...cmdArgs(['make e2e'])]))
     assert.deepEqual([q.err, q.headSha, q.pass], [1, '', []])
+  })
+
+  t('正規化の tr が失敗する（偽の tr が exit 1）と 0 件に畳まず err=1', () => {
+    const stub = createObserveStub({ prview: { out: view(marker(SHA, 'pass', 'make e2e')) } })
+    writeFileSync(join(stub.dir, 'tr'), '#!/bin/sh\ncat >/dev/null\nexit 1\n')
+    chmodSync(join(stub.dir, 'tr'), 0o755)
+    const p = envelope(run(bash, stub, ['--pr', '7', ...cmdArgs(['make e2e'])]))
+    assert.deepEqual([p.err, p.outcome, p.headSha, p.pass, p.nonPass], [1, 'error', '', [], []])
   })
 
   t('200 文字のコマンドも通る（許可形の上限）。記号 _./:=@+,- を含む', () => {
