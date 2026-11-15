@@ -2889,7 +2889,7 @@ function isValidStateLoadResult(r) {
 
 // --- 状態ファイル読込の内容照合（state:load の推測防止）--- 事故（Phase 6 ラン）: state:load の haiku が約 48KB の状態ファイルをツール出力の 2KB プレビューでしか見られず、残りの items を推測で埋めて返した（PR 番号は issue 番号 + 定数の連番の捏造。件数は実ファイルと一致）。isValidStateLoadResult は型と形しか見ないため採用され、別 issue の MERGED PR で未実装 issue が close された。
 //
-// 方式: 項目単位のハッシュ照合（fail-closed）。Workflow ランタイムのホスト側には fs / process / crypto が無く（状態ファイルを直接読めるのは agent() だけ）、ホストで実行できるのは純 JS のみ。そこで (1) 別コンテキストの検証エージェント（state:load-verify）に `jq -jcS '.items[$k]'` の sha256 を項目ごとに計算させ（出力は 64 桁 hex の短い行のみでプレビュー切り詰めの影響を受けにくい・読込エージェントの返却値を一切見せないので鸚鵡返し・結託ができない）、(2) ホストが
+// 方式: 項目単位のハッシュ照合（fail-closed）。Workflow ランタイムのホスト側には fs / process / crypto が無く（状態ファイルを直接読めるのは agent() だけ）、ホストで実行できるのは純 JS のみ。そこで (1) 別コンテキストの検証エージェント（state:load-verify）に scripts/state.sh verify（読み取り専用。`jq -jcS '.items[$k]'` の sha256 を項目ごとに計算し、封筒 {nonce, payload, sha256} で 1 回 100 件のページとして返す。Issue #603 計画 C の P5。以前はこの計算のコマンドをプロンプトに埋め込みエージェントが書き写していた）を実行させ（出力は 64 桁 hex の短い行のみでプレビュー切り詰めの影響を受けにくい・読込エージェントの返却値を一切見せないので鸚鵡返し・結託ができない）、(2) ホストが
 // 読込エージェントの返した各項目を jq -cS と同じ正規形へ直列化して純 JS の sha256 で再計算し、一致した項目だけを採用する。捏造・転記ミスのある項目は一致しないため採用されず「状態なし」になる（件数ではなく内容で照合する）。全文ハッシュではなく項目単位にしたのは、1 項目の転記ミスで全項目を捨てず影響をその issue に限定するため（各 item は issue ごとに独立で、項目間の不変条件を持たない）。検証エージェントが値を捏造しても不一致→不採用に倒れるだけで fail-open にはならない（捏造データのハッシュは捏造データを見ない限り作れない）。
 //
 // 正規形の前提: jq -S はキーをコードポイント順（UTF-8 バイト順）で並べ、JS の sort は UTF-16 コード単位順で並べる。両者は BMP 外の文字と U+E000〜U+FFFF を比べる場合のみ食い違うが、状態ファイルのキーは issue 番号とフィールド名（ASCII）なので一致する。値の差は jq が DEL （U+007F）を \u007f へエスケープする点のみを吸収する。jq 1.7+ は数値リテラルの精度を保持する（1.0 を 1.0 のまま出す）ため小数を含む項目は一致しないことがあるが、状態ファイルの数値は
@@ -2942,7 +2942,7 @@ function canonicalJson(v) {
   return enc(v).replace(/\x7f/g, '\\u007f')
 }
 
-// 読込エージェントの items を検証エージェントのハッシュ（STATE_VERIFY_SCHEMA）と照合し、一致した項目だけを採用する純粋関数。キーは issue 番号（正の整数の 10 進表記）のみ受理する（__proto__ 等の特殊キーで採用先オブジェクトを汚染しないため）。verified は「全項目が一致し、かつ検証が成立した」場合のみ true（ラン末尾の worktree 削除判定はこれが true のときだけ行う）。
+// 読込エージェントの items を検証エージェントのハッシュ（readStateVerify の戻り値）と照合し、一致した項目だけを採用する純粋関数。キーは issue 番号（正の整数の 10 進表記）のみ受理する（__proto__ 等の特殊キーで採用先オブジェクトを汚染しないため）。verified は「全項目が一致し、かつ検証が成立した」場合のみ true（ラン末尾の worktree 削除判定はこれが true のときだけ行う）。
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 const isNonNegInt = (x) => isInt(x) && x >= 0
 
@@ -2981,14 +2981,64 @@ function isValidStateVerifyResult(r) {
 const STATE_FILL_SCHEMA = obj(['items'], { items: { type: 'object', additionalProperties: true } })
 const isValidStateFillResult = (r) => r?.items !== null && typeof r?.items === 'object' && !Array.isArray(r.items)
 
-const STATE_VERIFY_SCHEMA = obj(['fileExists', 'hashes', 'keysSha256', 'keysCount', 'highWaterBytes', 'highWaterVersion'], {
-    fileExists: { type: 'boolean' },
-    hashes: { type: 'object', additionalProperties: { type: 'string' } },
-    keysSha256: { type: 'string' },
-    keysCount: { type: 'integer', minimum: 0 },
-    highWaterBytes: { type: 'integer', minimum: 0 },
-    highWaterVersion: { type: 'integer', minimum: 0 },
+// state:load-verify の返却（scripts/state.sh verify の封筒。Issue #603 計画 C の P5）。payload は固定欄と entries（[{k: 項目番号, h: そのハッシュ}]）だけで、自由形式の object を持たない。
+const SV_INT = { type: 'integer' }
+const SV_STR = { type: 'string' }
+const STATE_VERIFY_PAYLOAD_SCHEMA = obj(['entries', 'highWaterBytes', 'highWaterVersion', 'inputSha256', 'keysCount', 'keysSha256', 'mode', 'outcome', 'page', 'pages'], {
+    entries: { type: 'array', items: obj(['h', 'k'], { h: SV_STR, k: SV_STR }) },
+    highWaterBytes: SV_INT, highWaterVersion: SV_INT, inputSha256: SV_STR, keysCount: SV_INT, keysSha256: SV_STR, mode: SV_STR, outcome: SV_STR, page: SV_INT, pages: SV_INT,
   })
+
+// 封筒（ページ page）の isValid。転記ミス・別の呼び出しの流用・別のページの観測を弾く（sonnet へフォールバックする）。outcome が error の封筒は正しい観測なので受理する（フォールバックせず、mergeStateVerify が null にして呼び出し側が停止する）
+const STATE_VERIFY_MAX_PAGES = 50
+function isValidStateVerifyEnvelope(r, nonce, page) {
+  const s = verifySignedOutput(r, nonce, sha256Hex(`${STATE_FILE}\n${page}`))
+  const p = s.payload
+  return s.ok && p.mode === 'verify' && p.page === page && ['ok', 'nofile', 'error'].includes(p.outcome) && Array.isArray(p.entries) && isInt(p.pages) && p.pages >= 1 && p.pages <= STATE_VERIFY_MAX_PAGES
+}
+
+// 全ページの payload（検証済み）を従来の照合入力 { fileExists, hashes, keysSha256, keysCount, highWaterBytes, highWaterVersion } へ戻す純粋関数。nofile は「ファイルなし」、error（壊れた・読めない）・ページ間の食い違い（pages・keysSha256・keysCount・高水位・outcome）・不正なキーと重複キーは null（呼び出し側が停止する）。キーの欠落・追加は loadState の keysSha256 / keysCount の照合が止める
+function mergeStateVerify(ps) {
+  const p0 = ps[0]
+  if (p0?.outcome === 'nofile') return { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 }
+  if (p0?.outcome !== 'ok' || ps.length !== p0.pages) return null
+  const hashes = {}
+  for (const p of ps) {
+    if (['outcome', 'pages', 'keysSha256', 'keysCount', 'highWaterBytes', 'highWaterVersion'].some((f) => p[f] !== p0[f])) return null
+    for (const { k, h } of p.entries) {
+      if (!/^[1-9]\d*$/.test(k) || hasOwn(hashes, k)) return null
+      hashes[k] = h
+    }
+  }
+  const r = { fileExists: true, hashes, keysSha256: p0.keysSha256, keysCount: p0.keysCount, highWaterBytes: p0.highWaterBytes, highWaterVersion: p0.highWaterVersion }
+  return isValidStateVerifyResult(r) ? r : null
+}
+
+// 状態ファイルの項目ハッシュを scripts/state.sh verify で取る（読み取り専用）。1 回 100 件のページを順に取り、各ページを封筒で照合する。nonce はラン内の呼び出し連番（loadState はラン開始時と終了時に呼ばれる）とページごとに一意。失敗（エージェントが haiku / sonnet とも有効な封筒を返せない・ページの食い違い・error）は null
+let stateVerifySeq = 0
+async function readStateVerify() {
+  const seq = (stateVerifySeq += 1)
+  const ps = []
+  for (let page = 0; page === 0 || page < ps[0].pages; page++) {
+    const nonce = boundaryNonce(`state-verify:${seq}:${page}`)
+    const { result } = await runStateAgent(
+      [
+        `状態ファイルのハッシュ取得（読み取り専用。何も変更しない）。`,
+        TEMP_FILE_POLICY,
+        `${RUN_VERBATIM}:`,
+        '```sh',
+        scriptInvocation('state.sh', nonce, ` --file ${STATE_FILE} verify --page ${page}`),
+        '```',
+        SIGNED_OUTPUT_INSTRUCTION,
+        `payload の entries は件数が多くても省略せず、全件を出力の順のまま転記する。ハッシュを jq / sha256sum で自分で計算して代替しない（${RV_EXIT}）。`,
+      ].join('\n'),
+      { label: page === 0 ? 'state:load-verify' : `state:load-verify:p${page}`, schema: signedOutputSchema(STATE_VERIFY_PAYLOAD_SCHEMA), isValid: (r) => isValidStateVerifyEnvelope(r, nonce, page) },
+    )
+    if (!result) return null
+    ps.push(result.payload)
+  }
+  return mergeStateVerify(ps)
+}
 
 // --- 状態ファイル操作ヘルパー ---
 
@@ -3031,15 +3081,7 @@ async function loadState() {
     }
   }
   // 内容照合（上の「状態ファイル読込の内容照合」節参照）。検証エージェントには読込結果を渡さない（独立観測を崩さないため）。未返却（outputMissing）は全項目不採用＝状態なしに倒す。
-  const { result: check } = await runStateAgent(
-    [
-      TEMP_FILE_POLICY,
-      `状態ファイルのハッシュ取得（読み取り専用）。次をそのまま実行し出力を転記する（推測しない。キー行が切れたら R=1,20 のように行範囲を指定して同じコマンドを分割実行し全件を取得する）:`,
-      `f=${STATE_FILE}; h() { sha256sum 2>/dev/null || shasum -a 256; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[.perWorktreeByteReserveHighWater // 0, .perWorktreeByteReserveHighWaterVersion // 0]' "$f"; jq -r "$K | .[]" "$f" | sed -n "\${R:-1,\\$}p" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`,
-      `返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他 0。他は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行を hashes。`,
-    ].join('\n'),
-    { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult },
-  )
+  const check = await readStateVerify()
   // 照合自体が成立しない（検証エージェントが haiku / sonnet とも不成立、または読込側が既存と申告したファイルを検証側が見つけられない）場合は停止する（Codex P1）。全項目を状態なしにして続行すると、既存の monitoring 状態・PR 番号を失ったまま再実装・PR 作成へ進み得るため。ファイルが無く読込側が新規作成した場合（fileExisted: false）は従来どおり状態なしで続行する。検証側が返した hashes のキー集合を、jq が実ファイルから直接ハッシュ化したキー一覧（keysSha256）と
   // 照合する（Codex P1）。両エージェントが同じ項目を読み落としても、件数を合わせて捏造しても、 sha256 は推測で合わせられないため不一致になり停止する。正規形は jq の keys と同じ文字列昇順の JSON 配列（末尾改行なし）。KEYS 行（ダイジェストと件数）はコマンド出力の先頭に出し、プレビューが切れても必ず見えるようにする（Bugbot 指摘: 末尾だと切れた出力から推測した値と自己参照で一致し得る）。件数（keysCount）も hashes の件数と照合する。
   if (!check || (check.fileExists === false && result.fileExisted) ||

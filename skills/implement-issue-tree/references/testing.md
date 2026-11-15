@@ -129,6 +129,12 @@ volta run --node 22 node skills/implement-issue-tree/tests/tools/mutate.mjs --ru
 - 既存テストの stub が `plan:skip-labels` に平らな `{ entries: [{ i, x, numbers }] }` を返す場合は、`tests/lib/stub-run.mjs` が封筒に包む（`wrapSkipLabelsReply`。x = 1 は absent、entries に無い添字は failed）。`detect:external-checks` の既定の応答は `externalChecksReply(prompt)`。
 - 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run RS1-script-null-app-kept …`（`RS1`〜`RS22`）。
 
+## 状態ファイルのハッシュ取得 `state.sh verify`（Issue #603 計画 C の P5）
+
+- `tests/state-verify-script.test.mjs`（`scripts/lib/state-verify-lib.sh` と `state.sh verify` を実 jq で実行。bash 3.2 と 5 の両方）: 封筒（正規形・sha256・nonce・`inputSha256` がファイルとページを束縛）・100 件ごとのページ送り（250 件 = 3 ページ・ちょうど 100 件 = 1 ページ・0 件 = 1 ページ）・`nofile` と `error` の区別（壊れた JSON・空・配列・`items` の型違い・非整数の高水位・16 桁以上のキー・ディレクトリ・権限なし）・外部由来の文字列を出さない・引数の誤りは exit 2・ロケール（C / UTF-8 / 未設定）で同じ封筒・sha256 のツールが無ければ exit 3・**何も書かないこと**（バイト・mtime・inode・ディレクトリの内容・`TMPDIR` が不変、無いファイルのとき `_/issue-trees` を作らない、書き込み不可でも成功、ライブラリのコード行に書き込みの綴りが無い、verify の分岐が `trap`・一時ファイル・`st_rewrite` より前にある）。差分テストは、P5 より前のインラインのコマンド（`OLD_COMMAND`）を同じ入力に流し、キーのダイジェスト・件数・高水位・項目ごとのハッシュの一致（サンプル・DEL と日本語・入れ子・数字以外のキー・先頭ゼロ・`items` なし / null・257 件）と、従来が黙って誤った値を返し得た入力が `error` になることを確かめる。5000 件の最終ページの時間も測る。
+- `tests/state-verify-host.test.mjs`（ホスト。stub agent が `tests/lib/signed-output.mjs` の `stateVerifyReply` で、従来の平らな照合入力を node:crypto で独立に封筒へ変換して返す）: 250 件の 3 ページ（label・`--page`・nonce がページごと）・転記ミスは sonnet で取り直す・別の呼び出しの nonce の流用は停止・別のページ / 別のファイルの封筒を受理しない・`error` は sonnet へ回さず停止し `nofile` に倒さない（読込側が新規作成を申告していても）・ページ間の食い違い・重複キー・不正なキーは null・ページ上限 50・返却スキーマに自由形式の object が無い。既存の `state:load-verify` のスタブは `tests/lib/stub-run.mjs` が封筒に包む（`stateVerifyReply`。ほかの自前のハンドラは各テストが包む）。`tests/state-load-verify.test.mjs` は `verifyLoadedItems` の表と `loadState` の振る舞いを意味を変えずに維持する。
+- 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run SV1-verify-error-as-nofile …`（`SV1`〜`SV11`。ホストの nonce・入力の束縛・error の扱い・ページの一致・上限、スクリプトのページ位置・キーの選別・書き込みの混入・書き込みモードの引数）。
+
 ## ツリー取得（Issue #668）
 
 - `tests/fetch-tree-unit.test.mjs`（lib の表）・`tests/fetch-tree.test.mjs` と `tests/fetch-tree-alt-bash.test.mjs`（偽 gh `tests/lib/gh-tree-stub.mjs` で実スクリプトを bash ごとに並列実行。本体は `tests/lib/fetch-tree-suite.mjs`）・`tests/fetch-tree-host.test.mjs`（stub agent で実装スクリプト全体を実行し、検査値の照合と取り直しを確かめる）。`tests/fetch-tree-failure.test.mjs`（偽 gh の実スクリプトの終了コード 5 / 6 / 7 と stderr をホストのログ・最終例外で確かめる。1 回目と最終の文面の出し分け・未信頼値の扱い・schema）。期待する検査値は `tests/lib/signed-output.mjs` の `treeFetchReply` が node:crypto で独立に計算する。

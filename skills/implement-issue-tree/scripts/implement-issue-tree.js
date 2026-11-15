@@ -2981,14 +2981,64 @@ isNonNegInt(r.keysCount)&&isNonNegInt(r.highWaterBytes)&&isNonNegInt(r.highWater
 const STATE_FILL_SCHEMA=obj(['items'],{items:{type:'object',additionalProperties:true}})
 const isValidStateFillResult=(r)=>r?.items!==null&&typeof r?.items==='object'&& !Array.isArray(r.items)
 
-const STATE_VERIFY_SCHEMA=obj(['fileExists','hashes','keysSha256','keysCount','highWaterBytes','highWaterVersion'],{
-fileExists:{type:'boolean'},
-hashes:{type:'object',additionalProperties:{type:'string'}},
-keysSha256:{type:'string'},
-keysCount:{type:'integer',minimum:0},
-highWaterBytes:{type:'integer',minimum:0},
-highWaterVersion:{type:'integer',minimum:0},
+
+const SV_INT={type:'integer'}
+const SV_STR={type:'string'}
+const STATE_VERIFY_PAYLOAD_SCHEMA=obj(['entries','highWaterBytes','highWaterVersion','inputSha256','keysCount','keysSha256','mode','outcome','page','pages'],{
+entries:{type:'array',items:obj(['h','k'],{h:SV_STR,k:SV_STR})},
+highWaterBytes:SV_INT,highWaterVersion:SV_INT,inputSha256:SV_STR,keysCount:SV_INT,keysSha256:SV_STR,mode:SV_STR,outcome:SV_STR,page:SV_INT,pages:SV_INT,
 })
+
+
+const STATE_VERIFY_MAX_PAGES=50
+function isValidStateVerifyEnvelope(r,nonce,page){
+const s=verifySignedOutput(r,nonce,sha256Hex(`${STATE_FILE}\n${page}`))
+const p=s.payload
+return s.ok&&p.mode==='verify'&&p.page===page&&['ok','nofile','error'].includes(p.outcome)&&Array.isArray(p.entries)&&isInt(p.pages)&&p.pages>=1&&p.pages<=STATE_VERIFY_MAX_PAGES
+}
+
+
+function mergeStateVerify(ps){
+const p0=ps[0]
+if(p0?.outcome==='nofile')return{fileExists:false,hashes:{},keysSha256:'',keysCount:0,highWaterBytes:0,highWaterVersion:0}
+if(p0?.outcome!=='ok'||ps.length!==p0.pages)return null
+const hashes={}
+for(const p of ps){
+if(['outcome','pages','keysSha256','keysCount','highWaterBytes','highWaterVersion'].some((f)=>p[f]!==p0[f]))return null
+for(const{k,h}of p.entries){
+if(!/^[1-9]\d*$/.test(k) || hasOwn(hashes, k)) return null
+hashes[k]=h
+}
+}
+const r={fileExists:true,hashes,keysSha256:p0.keysSha256,keysCount:p0.keysCount,highWaterBytes:p0.highWaterBytes,highWaterVersion:p0.highWaterVersion}
+return isValidStateVerifyResult(r)?r:null
+}
+
+
+let stateVerifySeq=0
+async function readStateVerify(){
+const seq=(stateVerifySeq+=1)
+const ps=[]
+for(let page=0;page===0||page<ps[0].pages;page++){
+const nonce=boundaryNonce(`state-verify:${seq}:${page}`)
+const{result}=await runStateAgent(
+[
+`状態ファイルのハッシュ取得（読み取り専用。何も変更しない）。`,
+TEMP_FILE_POLICY,
+`${RUN_VERBATIM}:`,
+'```sh',
+scriptInvocation('state.sh',nonce,` --file ${STATE_FILE} verify --page ${page}`),
+'```',
+SIGNED_OUTPUT_INSTRUCTION,
+`payload の entries は件数が多くても省略せず、全件を出力の順のまま転記する。ハッシュを jq / sha256sum で自分で計算して代替しない（${RV_EXIT}）。`,
+].join('\n'),
+{label:page===0?'state:load-verify':`state:load-verify:p${page}`,schema:signedOutputSchema(STATE_VERIFY_PAYLOAD_SCHEMA),isValid:(r)=>isValidStateVerifyEnvelope(r,nonce,page)},
+)
+if(!result)return null
+ps.push(result.payload)
+}
+return mergeStateVerify(ps)
+}
 
 
 
@@ -3031,15 +3081,7 @@ throw new Error(
 }
 }
 
-const{result:check}=await runStateAgent(
-[
-TEMP_FILE_POLICY,
-`状態ファイルのハッシュ取得（読み取り専用）。次をそのまま実行し出力を転記する（推測しない。キー行が切れたら R=1,20 のように行範囲を指定して同じコマンドを分割実行し全件を取得する）:`,
-`f=${STATE_FILE}; h() { sha256sum 2>/dev/null || shasum -a 256; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[.perWorktreeByteReserveHighWater // 0, .perWorktreeByteReserveHighWaterVersion // 0]' "$f"; jq -r "$K | .[]" "$f" | sed -n "\${R:-1,\\$}p" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`,
-`返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他 0。他は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行を hashes。`,
-].join('\n'),
-{label:'state:load-verify',schema:STATE_VERIFY_SCHEMA,isValid:isValidStateVerifyResult},
-)
+const check=await readStateVerify()
 
 
 if(!check||(check.fileExists===false&&result.fileExisted)||
@@ -3582,19 +3624,19 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'844e355be055010409a326d24a6c7474efe116415715a55d28ef607fc7afa61b',
-'measure-free-disk.sh':'4088b0f98745c8ee3e16f1b25ad6c6ef53d733f74f169e8fdbefbad079774e9d',
-'observe-pr.sh':'aa398a97cf9e32d7ec5cb5ffd19882c148058fb16f61e34530f3a01e39a90c64',
-'base-merge.sh':'81725e7e8e2b6121984694bff11234c053974af3267bbb047958a0865d11b3e5',
-'pr-push.sh':'338ec248b232849a75cdde2d4dabd9bba67f33af8eef00cdf8f045da6f01f5bc',
-'reply-resolve.sh':'deacd4c5935917297a2f257e269edbc9d1304917e7419ec43defe6db651879b4',
-'state.sh':'df865edd9fd62281a27029fda3c54c40510a63549762751e4867a646e90c1864',
-'merge-gate.sh':'c69cb5429bd2f4c90e51c62f8bf5645dd00b0c22a493c91314897209e506bb74',
-'worktree-remove.sh':'866cd957f4599a6f057bfbf6906878e8fab7ffa17232d45a95fa293e579a478e',
-'recover-prep.sh':'84c77b83135e111fb1a2a0679f88b84a9b5da6f2fc0be9c478ba1446ba824352',
-'fetch-tree.sh':'96924ecd76bec6aef8fc9b0dea96199dd26f0d03ec754f55d4153ffce0aa7102',
-'declared-deps.sh':'c4bf5ed5835aaf9812c536d821b4afc7b7e857776570568ffd02086a6bcb52d3',
-'repo-scan.sh':'c52c3cb1cc9180cad945bce9cd820222757e17290b69b851fa93774dcfe9ec04',
+'measure-residual-bytes.sh':'dd605c2280c7a83e8a393f7d01bc6b001399d008ba6c0173cdce6dabab75bbf1',
+'measure-free-disk.sh':'c9e77d4e87783909ffe24ed8ab11156ab72e6c96a7c889426747b27bdeb39891',
+'observe-pr.sh':'d218eaf3baa9d0c52a03c75004d2cd8156a6dd1feabfc16731885a8f75688a81',
+'base-merge.sh':'daab2f97947eadc6428c9ee24beabb6557af4d4bfed860061eff3931fd8d1165',
+'pr-push.sh':'978d8c26d31a3271b1e4d3944c46e9b56e51899d32caa992edc17af9d7e5a36f',
+'reply-resolve.sh':'1eb1bfe02ab26e10f4d899e585d3c5f1edbdab89df81a6cb7e97326906465bc5',
+'state.sh':'36de2cc8c03d1367770a7c9eecbb20b6200ea9aeaa882722b3ce5b6f29931c2a',
+'merge-gate.sh':'8604b5726b1adffacb458ceea80231002005475a9fb384cd115b5f54ea467c58',
+'worktree-remove.sh':'74fb286a283a14d97944e8c2deaf0c24c2d42e41fd544f07227b7539522d4f97',
+'recover-prep.sh':'49d42c88ba4792d7fea012f2df11943acd5011d7a0b1a40350c031f57c5a234c',
+'fetch-tree.sh':'f885743bc35fa7807bf89d51638271d117a7294537c0d03f937e37659c198729',
+'declared-deps.sh':'0213c50eae75f407c10727ad3fb37ad03260430259e866c5da2582f477af21e7',
+'repo-scan.sh':'6bedf172a0a568d7999f90cd37ce1d9638cf07e9c2915395fa19a29fefd61461',
 }
 
 

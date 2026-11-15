@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
-import { externalChecksReply, hashPrecheckReply, signedReply, skipLabelsReply, wrapTreeReply } from './lib/signed-output.mjs'
+import { externalChecksReply, hashPrecheckReply, signedReply, skipLabelsReply, stateVerifyReply, wrapTreeReply } from './lib/signed-output.mjs'
 import { requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
@@ -179,7 +179,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
     if (label === 'script-hash-precheck') return hashPrecheckReply(prompt)
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
     if (label === 'state:load') return { ok: true, fileExisted: saved !== null, items: saved ?? {}, highWaterBytes: 0, highWaterVersion: saved ? 2 : 0 }
-    if (label === 'state:load-verify') return saved === null ? { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 } : { ...stateVerifyFor(saved), highWaterVersion: 2 }
+    if (label === 'state:load-verify') return stateVerifyReply(prompt, saved === null ? { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 } : { ...stateVerifyFor(saved), highWaterVersion: 2 })
     if (label === 'plan:issue-tree') return wrapTreeReply(prompt, { nodes: structuredClone(nodes) })
     if (label === 'detect:external-checks') return externalChecksReply(prompt)
     if (label.startsWith('plan:declared-deps')) {
