@@ -2994,7 +2994,7 @@ const STATE_VERIFY_MAX_PAGES=50
 function isValidStateVerifyEnvelope(r,nonce,page){
 const s=verifySignedOutput(r,nonce,sha256Hex(`${STATE_FILE}\n${page}`))
 const p=s.payload
-return s.ok&&p.mode==='verify'&&p.page===page&&['ok','nofile','error'].includes(p.outcome)&&Array.isArray(p.entries)&&isInt(p.pages)&&p.pages>=1&&p.pages<=STATE_VERIFY_MAX_PAGES
+return s.ok&&p.mode==='verify'&&p.page===page&&['ok','nofile','error'].includes(p.outcome)&&Array.isArray(p.entries)&&isInt(p.pages)&&p.pages>=1
 }
 
 
@@ -3036,6 +3036,7 @@ SIGNED_OUTPUT_INSTRUCTION,
 )
 if(!result)return null
 ps.push(result.payload)
+if(ps[0].pages>STATE_VERIFY_MAX_PAGES)throw new Error(`状態ファイル（${STATE_FILE}）の項目数が照合の上限 ${STATE_VERIFY_MAX_PAGES * 100} 件を超えるため停止した`)
 }
 return mergeStateVerify(ps)
 }
@@ -3624,19 +3625,19 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'dd605c2280c7a83e8a393f7d01bc6b001399d008ba6c0173cdce6dabab75bbf1',
-'measure-free-disk.sh':'c9e77d4e87783909ffe24ed8ab11156ab72e6c96a7c889426747b27bdeb39891',
-'observe-pr.sh':'d218eaf3baa9d0c52a03c75004d2cd8156a6dd1feabfc16731885a8f75688a81',
-'base-merge.sh':'daab2f97947eadc6428c9ee24beabb6557af4d4bfed860061eff3931fd8d1165',
-'pr-push.sh':'978d8c26d31a3271b1e4d3944c46e9b56e51899d32caa992edc17af9d7e5a36f',
-'reply-resolve.sh':'1eb1bfe02ab26e10f4d899e585d3c5f1edbdab89df81a6cb7e97326906465bc5',
-'state.sh':'36de2cc8c03d1367770a7c9eecbb20b6200ea9aeaa882722b3ce5b6f29931c2a',
-'merge-gate.sh':'8604b5726b1adffacb458ceea80231002005475a9fb384cd115b5f54ea467c58',
-'worktree-remove.sh':'74fb286a283a14d97944e8c2deaf0c24c2d42e41fd544f07227b7539522d4f97',
-'recover-prep.sh':'49d42c88ba4792d7fea012f2df11943acd5011d7a0b1a40350c031f57c5a234c',
-'fetch-tree.sh':'f885743bc35fa7807bf89d51638271d117a7294537c0d03f937e37659c198729',
-'declared-deps.sh':'0213c50eae75f407c10727ad3fb37ad03260430259e866c5da2582f477af21e7',
-'repo-scan.sh':'6bedf172a0a568d7999f90cd37ce1d9638cf07e9c2915395fa19a29fefd61461',
+'measure-residual-bytes.sh':'164f83d1ac2b3be574f19f49079ffeb581eafc94578c3a621a1d6b6d523338cb',
+'measure-free-disk.sh':'e491401f3484ee639c5480ff341d800ac3f4eaece19bcdd397ee2c97703c3ca8',
+'observe-pr.sh':'732aeb28fe457112ba8bf27457357acc28458e236ae30eceb621605117e0befc',
+'base-merge.sh':'6dc236d2e8dd0404a747deddfef3be8de04885d906b0b94948a686193b61a0cd',
+'pr-push.sh':'3091b487eddb384e6b874553bb76dbb6c637da70a7e6f10863db05bdf9d7bc71',
+'reply-resolve.sh':'d467dcf74c84b82b979a1716b195f8e4f681e32635d41ec40a335e1ec03af675',
+'state.sh':'7e4a92d81e599b2c1ed92ccf7a602f56bb5a272ad1392b2085a6ad9ec1bb59c9',
+'merge-gate.sh':'9041441ce7424c952f544d49e3fb33ecad57689d71cf326280c795c63a02f442',
+'worktree-remove.sh':'cc34ce11780e9f9243ba47b651c54e72dd7ea5defd4260cb59cc352a3429c705',
+'recover-prep.sh':'48b23c0bea7083804232f1de59530da0f83f9915e494af9c69dc7026de0a5441',
+'fetch-tree.sh':'8c101884cfc23e01248dd26746440f1421f463774b7e2e7103464c5eeb8eaeaf',
+'declared-deps.sh':'d967b275aed919ba16d981bb78920bd892215f5cf36aa9b600b41bc5d08ae461',
+'repo-scan.sh':'a3b2600d5172c29ca239630ffc863ccc56e3edc4ffefc4fb25ad4645cc7288af',
 }
 
 

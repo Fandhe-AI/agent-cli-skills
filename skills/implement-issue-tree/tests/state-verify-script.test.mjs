@@ -5,8 +5,8 @@
 //  (2) 実スクリプトを実 jq で走らせ、封筒（nonce・sha256・入力の束縛）・ページ送り・outcome（ok / nofile / error）を、
 //      利用できる bash すべて（/bin/bash 3.2 と PATH の bash 5 等）で検査する。
 //  (3) 差分テスト: 従来のインラインのコマンド（P5 より前の state:load-verify プロンプトに埋め込まれていたもの）を同じ入力に
-//      流し、キーのダイジェスト・件数・高水位・項目ごとのハッシュが一致すること、従来が黙って誤った値を返し得た入力は
-//      新しい版が error にすること（従来より緩くならない）を確かめる。
+//      流し、キーのダイジェスト・件数・高水位・項目ごとのハッシュが一致すること、従来が使えない・誤った値を返した入力と、
+//      従来は値を返したが新しい版が受理しない入力（停止側に厳しくした分）が error になること（従来より緩くならない）を確かめる。
 //  (4) 読み取り専用の固定: ファイルのバイト・更新時刻・ディレクトリの内容が変わらない、無いファイルのとき _/issue-trees も
 //      作らない、書き込み不可の場所でも成功する、ライブラリに書き込みの綴りが無い、verify の分岐が書き込みの準備より前にある。
 // 実時間では待たない。LC_ALL を変えても結果が同じことも確かめる（判定がロケールに依存しない）。
@@ -14,7 +14,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -134,11 +134,18 @@ for (const bash of BASHES) {
     }
   })
 
-  test(`[${bash}] error: 壊れた JSON・空ファイル・オブジェクトでない・items が配列や文字列・高水位が非整数・ディレクトリ・複数の値は nofile にせず error（payload は空）`, { skip: !jq }, () => {
+  test(`[${bash}] error: 壊れた JSON・空ファイル・オブジェクトでない・items が配列や文字列や false・高水位が非負整数の number でない（false・文字列・負・小数）・ディレクトリ・複数の値は nofile にせず error（payload は空）`, { skip: !jq }, () => {
     const bad = ['not json', '', '[]', 'null', '"x"', '{"items":[]}', '{"items":"x"}', '{"items":5}', '{"items":{}}{"items":{}}',
+      // jq の // は false も既定値に置き換える。items: false をキー 0 件の ok にしない
+      '{"items":false}', '{"items":true}',
+      // 高水位は number だけ（false を 0 に・文字列の "4096" を 4096 にしない）。Bytes と Version の両方
+      '{"items":{},"perWorktreeByteReserveHighWater":false}', '{"items":{},"perWorktreeByteReserveHighWater":"4096"}',
+      '{"items":{},"perWorktreeByteReserveHighWaterVersion":false}', '{"items":{},"perWorktreeByteReserveHighWaterVersion":"2"}',
+      '{"items":{},"perWorktreeByteReserveHighWaterVersion":-1}', '{"items":{},"perWorktreeByteReserveHighWaterVersion":1.5}',
+      '{"items":{},"perWorktreeByteReserveHighWater":{}}',
       '{"items":{},"perWorktreeByteReserveHighWater":1.5}', '{"items":{},"perWorktreeByteReserveHighWater":"abc"}', '{"items":{},"perWorktreeByteReserveHighWater":-1}',
       '{"items":{},"perWorktreeByteReserveHighWaterVersion":true}', '{"items":{},"perWorktreeByteReserveHighWater":1e30}',
-      // 16 桁以上のキー（旧版は通した）。黙って落とさず error
+      // 16 桁以上のキー（旧版は正しいハッシュを返していた。新しい版は受理しない = 停止側に厳しくした分）
       `{"items":{"${'9'.repeat(16)}":{}}}`,
       // 末尾に改行の付いたキー（jq の $ は末尾の改行の前にも当たる）。1 行 1 件の一覧から引けないので受理しない
       '{"items":{"5\\n":{"a":1},"6":{}}}']
@@ -153,6 +160,31 @@ for (const bash of BASHES) {
     const sb = sandbox()
     mkdirSync(sb.abs(FILE))
     assert.equal(envelope(sb.verify(bash)).payload.outcome, 'error', 'ディレクトリ')
+  })
+
+  test(`[${bash}] ok: 無い・null の items と高水位は従来どおり受理する（高水位は 0）`, { skip: !jq }, () => {
+    for (const state of ['{}', '{"items":null}', '{"items":{"3":{}},"perWorktreeByteReserveHighWater":null,"perWorktreeByteReserveHighWaterVersion":null}']) {
+      const p = envelope(sandbox(state).verify(bash)).payload
+      assert.equal(p.outcome, 'ok', state)
+      assert.equal(p.highWaterBytes, 0, state)
+      assert.equal(p.highWaterVersion, 0, state)
+    }
+  })
+
+  test(`[${bash}] error: --file がシンボリックリンクなら（リンク先が正しい状態ファイルでも・リンク切れでも）error。nofile にしない`, { skip: !jq }, () => {
+    const sb = sandbox()
+    writeFileSync(sb.abs('real.json'), JSON.stringify({ parent: 1, items: itemsOf(2) }))
+    symlinkSync('../../real.json', sb.abs(FILE))
+    assert.equal(envelope(sb.verify(bash)).payload.outcome, 'error', 'リンク先が正しい状態ファイル')
+    const dangling = sandbox()
+    symlinkSync('no-such.json', dangling.abs(FILE))
+    assert.equal(envelope(dangling.verify(bash)).payload.outcome, 'error', 'リンク切れ')
+  })
+
+  test(`[${bash}] error: 15 桁を超えるキーは、要求したページに無くても全ページで error（ページによって結果が変わらない）`, { skip: !jq }, () => {
+    // 文字列昇順で "9…" は "100"…"199" より後ろ = 2 ページ目
+    const sb = sandbox({ parent: 1, items: { ...itemsOf(100), ['9'.repeat(16)]: { a: 1 } } })
+    for (const pg of [0, 1]) assert.equal(envelope(sb.verify(bash, pg)).payload.outcome, 'error', `page ${pg}`)
   })
 
   test(`[${bash}] 外部由来の文字列（項目の中身・パス）を payload にも標準エラーにも出さない`, { skip: !jq }, () => {
@@ -296,11 +328,30 @@ for (const bash of BASHES) {
     }
   })
 
-  test(`[${bash}] 差分: 従来が黙って誤った値を返し得た入力（壊れた JSON・items が配列・16 桁以上のキー・非整数の高水位）は error にし、従来より緩くならない`, { skip: !jq }, () => {
-    for (const state of ['not json', '{"items":[1,2]}', '{"items":{},"perWorktreeByteReserveHighWater":1.5}', `{"items":{"${'9'.repeat(16)}":{"a":1}}}`, '{"items":{}} {"items":{}}']) {
+  test(`[${bash}] 差分: 従来が使えない・誤った値を返した入力（壊れた JSON・items が配列・複数の値・改行を含むキー・非整数の高水位）は error にし、従来より緩くならない`, { skip: !jq }, () => {
+    // 従来の出力: KEYS 行が壊れる（ホストの形式検査で停止）か、誤ったダイジェスト・ハッシュを返すか、高水位が整数でない（ホストの型検査で停止）
+    for (const state of ['not json', '{"items":[1,2]}', '{"items":{}} {"items":{}}', '{"items":{"5\\n":{"a":1},"6":{}}}', '{"items":{},"perWorktreeByteReserveHighWater":1.5}', '{"items":{},"perWorktreeByteReserveHighWater":-1}', '{"items":{},"perWorktreeByteReserveHighWater":"4096"}']) {
       const sb = sandbox(state)
-      const n = envelope(sb.verify(bash)).payload
-      assert.equal(n.outcome, 'error', state)
+      const o = oldResult(sb, bash)
+      const oldUsable = !o.garbage && Array.isArray(o.hw) && o.hw.every((x) => Number.isInteger(x) && x >= 0) && o.entries.every((e) => /^[1-9]\d*$/.test(e.k ?? ''))
+      assert.equal(oldUsable, false, `従来も使える値を返さなかった: ${state}`)
+      assert.equal(envelope(sb.verify(bash)).payload.outcome, 'error', state)
+    }
+  })
+
+  test(`[${bash}] 差分: 従来は値を返したが新しい版は受理しない入力（16 桁以上のキー・items や高水位の false）は error（停止側に厳しくした分）`, { skip: !jq }, () => {
+    const cases = [
+      // 従来は正しいキーのダイジェスト・ハッシュを返した
+      [`{"items":{"${'9'.repeat(16)}":{"a":1}}}`, (o) => o.keysCount === 1 && o.entries.length === 1],
+      // 従来は // で false を既定値にした（キー 0 件・高水位 0）
+      ['{"items":false}', (o) => o.keysCount === 0 && o.hw[0] === 0],
+      ['{"items":{},"perWorktreeByteReserveHighWater":false}', (o) => o.keysCount === 0 && o.hw[0] === 0],
+    ]
+    for (const [state, oldOk] of cases) {
+      const sb = sandbox(state)
+      const o = oldResult(sb, bash)
+      assert.ok(!o.garbage && oldOk(o), `従来は値を返した: ${state}`)
+      assert.equal(envelope(sb.verify(bash)).payload.outcome, 'error', state)
     }
   })
 

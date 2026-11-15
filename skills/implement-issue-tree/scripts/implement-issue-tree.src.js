@@ -2966,7 +2966,7 @@ function verifyLoadedItems(items, check) {
   return { adopted, dropped, unverified, verified: hashes !== null && unverified.length === 0 && dropped.length === 0 }
 }
 
-// state:load-verify の isValid（Bugbot 指摘）。fileExists だけの応答（例 { fileExists: true }）を受理すると sonnet へのフォールバックが走らず全項目不採用に落ちるため、state:load と同じく必須フィールドの型をすべて検証する。hashes の値も 64 桁小文字 16 進のみ受理する（不正な応答はフォールバックへ回し、それでも不成立なら呼び出し側が状態なしとして扱う）。
+// 照合入力 { fileExists, hashes, keysSha256, keysCount, highWaterBytes, highWaterVersion } の形の検査（Bugbot 指摘）。P5 以降はエージェントの応答の isValid ではなく、mergeStateVerify が全ページの封筒から組み立てた値の最終検査（封筒の isValid は isValidStateVerifyEnvelope）。必須フィールドの型をすべて検証し、hashes の値は 64 桁小文字 16 進のみ受理する。不成立なら mergeStateVerify が null を返し、loadState が停止する（状態なしに倒さない）。
 function isValidStateVerifyResult(r) {
   const h = r?.hashes
   return (
@@ -2989,12 +2989,12 @@ const STATE_VERIFY_PAYLOAD_SCHEMA = obj(['entries', 'highWaterBytes', 'highWater
     highWaterBytes: SV_INT, highWaterVersion: SV_INT, inputSha256: SV_STR, keysCount: SV_INT, keysSha256: SV_STR, mode: SV_STR, outcome: SV_STR, page: SV_INT, pages: SV_INT,
   })
 
-// 封筒（ページ page）の isValid。転記ミス・別の呼び出しの流用・別のページの観測を弾く（sonnet へフォールバックする）。outcome が error の封筒は正しい観測なので受理する（フォールバックせず、mergeStateVerify が null にして呼び出し側が停止する）
+// 封筒（ページ page）の isValid。転記ミス・別の呼び出しの流用・別のページの観測を弾く（sonnet へフォールバックする）。outcome が error の封筒は正しい観測なので受理する（フォールバックせず、mergeStateVerify が null にして呼び出し側が停止する）。pages の上限超過も正しい観測なので受理し、readStateVerify が 1 ページ目の直後に専用の文で停止する（フォールバックしない・残りのページを取らない）
 const STATE_VERIFY_MAX_PAGES = 50
 function isValidStateVerifyEnvelope(r, nonce, page) {
   const s = verifySignedOutput(r, nonce, sha256Hex(`${STATE_FILE}\n${page}`))
   const p = s.payload
-  return s.ok && p.mode === 'verify' && p.page === page && ['ok', 'nofile', 'error'].includes(p.outcome) && Array.isArray(p.entries) && isInt(p.pages) && p.pages >= 1 && p.pages <= STATE_VERIFY_MAX_PAGES
+  return s.ok && p.mode === 'verify' && p.page === page && ['ok', 'nofile', 'error'].includes(p.outcome) && Array.isArray(p.entries) && isInt(p.pages) && p.pages >= 1
 }
 
 // 全ページの payload（検証済み）を従来の照合入力 { fileExists, hashes, keysSha256, keysCount, highWaterBytes, highWaterVersion } へ戻す純粋関数。nofile は「ファイルなし」、error（壊れた・読めない）・ページ間の食い違い（pages・keysSha256・keysCount・高水位・outcome）・不正なキーと重複キーは null（呼び出し側が停止する）。キーの欠落・追加は loadState の keysSha256 / keysCount の照合が止める
@@ -3014,7 +3014,7 @@ function mergeStateVerify(ps) {
   return isValidStateVerifyResult(r) ? r : null
 }
 
-// 状態ファイルの項目ハッシュを scripts/state.sh verify で取る（読み取り専用）。1 回 100 件のページを順に取り、各ページを封筒で照合する。nonce はラン内の呼び出し連番（loadState はラン開始時と終了時に呼ばれる）とページごとに一意。失敗（エージェントが haiku / sonnet とも有効な封筒を返せない・ページの食い違い・error）は null
+// 状態ファイルの項目ハッシュを scripts/state.sh verify で取る（読み取り専用）。1 回 100 件のページを順に取り、各ページを封筒で照合する。nonce はラン内の呼び出し連番（loadState はラン開始時と終了時に呼ばれる）とページごとに一意。失敗（エージェントが haiku / sonnet とも有効な封筒を返せない・ページの食い違い・error）は null。ページ数が上限を超える（5001 件以上）ときは 1 ページ目の直後に例外で止める（再実行や退避では解消しないので、loadState の汎用の停止文〔再実行・mv〕を出さない）
 let stateVerifySeq = 0
 async function readStateVerify() {
   const seq = (stateVerifySeq += 1)
@@ -3036,6 +3036,7 @@ async function readStateVerify() {
     )
     if (!result) return null
     ps.push(result.payload)
+    if (ps[0].pages > STATE_VERIFY_MAX_PAGES) throw new Error(`状態ファイル（${STATE_FILE}）の項目数が照合の上限 ${STATE_VERIFY_MAX_PAGES * 100} 件を超えるため停止した`)
   }
   return mergeStateVerify(ps)
 }
@@ -3080,10 +3081,10 @@ async function loadState() {
       )
     }
   }
-  // 内容照合（上の「状態ファイル読込の内容照合」節参照）。検証エージェントには読込結果を渡さない（独立観測を崩さないため）。未返却（outputMissing）は全項目不採用＝状態なしに倒す。
+  // 内容照合（上の「状態ファイル読込の内容照合」節参照）。検証エージェントには読込結果を渡さない（独立観測を崩さないため）。検証側が haiku / sonnet とも有効な封筒を返せない（readStateVerify が null）ときは下で停止する（状態なしに倒さない）。
   const check = await readStateVerify()
   // 照合自体が成立しない（検証エージェントが haiku / sonnet とも不成立、または読込側が既存と申告したファイルを検証側が見つけられない）場合は停止する（Codex P1）。全項目を状態なしにして続行すると、既存の monitoring 状態・PR 番号を失ったまま再実装・PR 作成へ進み得るため。ファイルが無く読込側が新規作成した場合（fileExisted: false）は従来どおり状態なしで続行する。検証側が返した hashes のキー集合を、jq が実ファイルから直接ハッシュ化したキー一覧（keysSha256）と
-  // 照合する（Codex P1）。両エージェントが同じ項目を読み落としても、件数を合わせて捏造しても、 sha256 は推測で合わせられないため不一致になり停止する。正規形は jq の keys と同じ文字列昇順の JSON 配列（末尾改行なし）。KEYS 行（ダイジェストと件数）はコマンド出力の先頭に出し、プレビューが切れても必ず見えるようにする（Bugbot 指摘: 末尾だと切れた出力から推測した値と自己参照で一致し得る）。件数（keysCount）も hashes の件数と照合する。
+  // 照合する（Codex P1）。両エージェントが同じ項目を読み落としても、件数を合わせて捏造しても、 sha256 は推測で合わせられないため不一致になり停止する。正規形は jq の keys と同じ文字列昇順の JSON 配列（末尾改行なし）。ダイジェストと件数は state.sh verify が全ページの封筒に載せ、mergeStateVerify がページ間の一致を要求する（以前の KEYS 行の置き換え。Bugbot 指摘の「切れた出力から推測した値と自己参照で一致し得る」経路は封筒の sha256 が塞ぐ）。件数（keysCount）も hashes の件数と照合する。
   if (!check || (check.fileExists === false && result.fileExisted) ||
     (check.fileExists && (sha256Hex(canonicalJson(Object.keys(check.hashes).sort())) !== check.keysSha256 ||
       Object.keys(check.hashes).length !== check.keysCount ||
@@ -4450,7 +4451,7 @@ const BLOCKED_STATE_CHUNK_SIZE = 100
 // 数え方: 本スクリプトの agent(...) 1 回 = ランタイムのエージェント 1 件。runStateAgent の sonnet フォールバック・agentRetryOnce の再試行・fix の再起動も agent() を呼び直すので、呼び出し箇所を書き換えず駆動部で agent を数える関数へ差し替えれば（wrapAgentCounting）実際の起動数と一致する。 pipeline() は使わない。呼ぶ前に数えるため、例外・null 返却の呼び出しも 1 件に入る（起動はした）。
 // 引数 agentCallLimit は「新規着手・monitoring 再開を止める判断に使う、ランタイム上限の想定値」で、呼び出しそのものは止めない。開始処理・終了処理・実行中の issue は上限を超えても続行する: 実行中の issue の途中で呼び出しを止めると、本機構が防ぎたい半端な状態をスクリプト自身が作るため。ハードキャップはランタイムが持つ。値は下限（AGENT_CALL_LIMIT_MIN）以上 1000 以下に限り、矛盾する入力（開始処理だけで使い切る値）は受理しない。
 const AGENT_RUN_LIMIT = 1000
-// 開始処理（未追跡検査・nonce・loadState と照合・ツリー取得・外部チェック観測・依存宣言と祖先とツリー外前提の取得・init-all・孤立スキャン・残置の観測・HEAD 検査）が着手前に使う呼び出し数の見込み。依存宣言はチャンク数に比例するため約 20 に余裕 10 を足した。スクリプトハッシュの予検査（script-hash-precheck。1 回、転記ミス・例外のときだけ 2 回）はこの余裕の内（下限 81 は変えない。Issue #603 第 4 弾）。開始時の観測は残置観測の組の取り直し（最大 +4 回。Issue #735）を含めても余裕内に収まる。
+// 開始処理（未追跡検査・nonce・loadState と照合・ツリー取得・外部チェック観測・依存宣言と祖先とツリー外前提の取得・init-all・孤立スキャン・残置の観測・HEAD 検査）が着手前に使う呼び出し数の見込み。依存宣言はチャンク数に比例するため約 20 に余裕 10 を足した。スクリプトハッシュの予検査（script-hash-precheck。1 回、転記ミス・例外のときだけ 2 回）はこの余裕の内（下限 81 は変えない。Issue #603 第 4 弾）。開始時の観測は残置観測の組の取り直し（最大 +4 回。Issue #735）を含めても余裕内に収まる。loadState の照合（state:load-verify）は ceil(状態ファイルの項目数 / 100) 回（転記ミスは各ページ +1 回の sonnet）で、101 件以上の 2 ページ目以降はこの見積りに入っていない（1,000 件で +9。Issue #603 計画 C の P5）。
 const AGENT_CALLS_START = 30
 function parseAgentCallLimit(raw) {
   if (raw == null) return AGENT_RUN_LIMIT
@@ -4465,7 +4466,7 @@ function parseAgentCallLimit(raw) {
 // 上限は fix 6 回・monitor 7 回・Review 往復で 60 を超えるが、実行中の issue は既にその一部を使っているため、残り全量を最悪値で見積もると着手を止めすぎる。これに 8 を足して 30 とする。 resume は monitoring 再開（Review までを省く。monitor 3 + fix/再 monitor 2 + 状態書込み 4 + merge 2 に余裕）、close は verify-close（close 1 + 状態書込み 2 + 余裕）。
 // セキュリティ専用の Review を有効にしたランは、見積りの Review 2 回ぶん（各ラウンド 1 体）を足す。
 const AGENT_CALLS_PER_ISSUE = { implement: 30 + (securityReviewEnabled ? 2 : 0), resume: 12, close: 6 }
-// 終了処理の予備の固定分。ループ後に走るのは writeBlockedStateBatch（下の chunks 分を別に加える）、 scanOrphanWorktrees、終了時 loadState、容量の終了時実測、スイープ、メイン worktree の未追跡検査と HEAD 検査（worktree:head-scan。開始時 1 回は使用済みに入り、終了時 1 回がここ）で、再測定の再試行を含めても約 20 に収まる。いずれも予算ゲートの対象ではなく無条件に実行される。
+// 終了処理の予備の固定分。ループ後に走るのは writeBlockedStateBatch（下の chunks 分を別に加える）、 scanOrphanWorktrees、終了時 loadState、容量の終了時実測、スイープ、メイン worktree の未追跡検査と HEAD 検査（worktree:head-scan。開始時 1 回は使用済みに入り、終了時 1 回がここ）で、再測定の再試行を含めても約 20 に収まる。いずれも予算ゲートの対象ではなく無条件に実行される。終了時 loadState の照合も ceil(項目数 / 100) 回で、2 ページ目以降はこの固定分に入っていない（開始処理と同じ）。
 const AGENT_CALLS_TERMINAL_BASE = 20
 const agentBudget = { limit: parseAgentCallLimit(argOf('agentCallLimit')), used: 0, enforced: false, stoppedDispatchAt: null, starts: 0, starved: false, neededLimit: null, held: [] }
 // 上限（budget.limit）を超えても呼び出しは止めない（上のコメント参照）。超えた最初の 1 回だけ warn で知らせる。

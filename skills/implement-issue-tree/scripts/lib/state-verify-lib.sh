@@ -12,15 +12,18 @@
 #       無い（tests/state-verify-script.test.mjs が静的に固定する）。
 # 出力: 封筒の payload は {entries:[{h,k}], highWaterBytes, highWaterVersion, inputSha256, keysCount, keysSha256, mode, outcome,
 #       page, pages}（キー昇順・空白なしの正規形。値は整数・64 桁 16 進・数字だけのキーと固定語彙）。
-#         outcome = ok（読めた）/ nofile（ファイルが存在しない）/ error（存在するが読めない・JSON として不正・.items が
-#                   オブジェクトでない・高水位が非負整数でない・キーが 15 桁を超える・項目のハッシュを取れない）。
+#         outcome = ok（読めた）/ nofile（ファイルが存在しない）/ error（シンボリックリンク・存在するが読めない・JSON として不正・
+#                   .items が〔無い・null 以外で〕オブジェクトでない・高水位が〔無い・null 以外で〕非負整数の number でない・
+#                   キーが 15 桁を超える〔全キーを 1 回で検査。要求したページ以外のキーでも error〕・項目のハッシュを取れない）。
 #       nofile と error は別: nofile だけがホストで「状態なし」へ進み得る。error は壊れた・読めない状態であり、ホストは停止する。
 #       項目の内容・ファイルの内容・パスは payload にも標準エラーにも出さない。
 # ページ: entries は 1 回に 100 件まで（ST_VERIFY_PAGE）。キーは jq の keys と同じ昇順で、page P は P*100 番目から。pages は
 #       全ページ数（キー 0 件でも 1）。各ページに keysSha256・keysCount・高水位を載せるので、ホストは全ページで一致を要求する。
 #       inputSha256 = sha256(「<ファイル>\n<page>」)。別のファイル・別のページの観測はホストの照合で拒否される。
-# 判定は従来のコマンドと同じ: キーの選別 K・項目のハッシュ（jq -jcS --arg k "$k" '.items[$k]'）・高水位の既定値（// 0）は
-#       同じ式を使う。従来より緩くならない（上の error の条件は、従来は黙って誤った値を返し得た箇所を止める側の追加）。
+# 判定は従来のコマンドと同じ: キーの選別 K・項目のハッシュ（jq -jcS --arg k "$k" '.items[$k]'）は同じ式、高水位は無い・null
+#       なら 0（従来の // 0 と同じ）。従来より緩くならない。上の error の条件は停止側の追加で、従来が誤った値を返し得た入力
+#       （改行を含むキー・複数の JSON 値・文字列の高水位〔従来は "4096" を文字列のまま出した〕）と、従来は値を返したが受理しない
+#       入力（16 桁以上のキー・.items や高水位の false）の両方を含む（references/script-trust-model.md の「従来との差」）。
 # 互換: macOS（bash 3.2・BSD）と Linux。mapfile・連想配列・GNU 専用フラグを使わない。
 #
 # このファイルは単体実行しない。run-verified.sh のハッシュ照合は scripts/lib/*.sh も対象に含む。
@@ -30,6 +33,9 @@
 ST_VERIFY_PAGE=100
 # 項目キー（正の整数の 10 進表記）の選別。従来のコマンドの K と同一
 ST_VERIFY_KEYS='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'
+# 高水位の欄の値: 無い・null は 0、number はそのまま、それ以外（false・文字列等）は何も出さない（sv_uint が空を拒否して error）。
+# // 0 にしない: // は false も 0 に置き換える。tostring にしない: 文字列の "4096" が 4096 になる
+ST_VERIFY_UINT='if . == null then 0 elif type == "number" then . else empty end | tostring'
 
 # $1 = nonce、$2 = 入力の sha256、$3 = page、$4 = outcome（nofile / error）。キーも項目も無い payload の封筒を出す
 sv_emit_empty() {
@@ -83,10 +89,12 @@ sv_run() {
     sv_emit_empty "${nonce}" "${input}" "${page}" nofile
     return $?
   fi
+  # シンボリックリンクは辿らない（-f はリンク先を見る。状態ファイルは state.sh が mv で置く通常のファイルだけ）。リンク切れも error
+  [ ! -L "${f}" ] || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
   [ -f "${f}" ] || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
   content=$(cat -- "${f}" 2>/dev/null) || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
-  # ちょうど 1 個の JSON オブジェクトで、.items が（無い・null でなければ）オブジェクトであること
-  if ! printf '%s' "${content}" | jq -s -e 'length == 1 and (.[0] | type == "object" and ((.items // {}) | type == "object"))' >/dev/null 2>&1; then
+  # ちょうど 1 個の JSON オブジェクトで、.items が（無い・null でなければ）オブジェクトであること（// は false も {} にするので使わない）
+  if ! printf '%s' "${content}" | jq -s -e 'length == 1 and (.[0] | type == "object" and (.items | . == null or type == "object"))' >/dev/null 2>&1; then
     sv_emit_empty "${nonce}" "${input}" "${page}" error
     return $?
   fi
@@ -95,10 +103,12 @@ sv_run() {
   sv_uint "${count}" || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
   # 末尾に改行の付いたキー（"5\n"。jq の $ は末尾の改行の前にも当たる）は、1 行 1 件の一覧から項目を引けず別のキーとして扱われてしまう。受理しない
   printf '%s' "${content}" | jq -e "${ST_VERIFY_KEYS} | all(.[]; contains(\"\\n\") | not)" >/dev/null 2>&1 || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
+  # 15 桁を超えるキーは全キーを 1 回で検査する（sv_items の検査は要求したページの分だけなので、ページによって結果が変わらないように）
+  printf '%s' "${keys_json}" | jq -e 'all(.[]; length <= 15)' >/dev/null 2>&1 || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
   keys_sha=$(printf '%s' "${keys_json}" | so_sha256) || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
-  hwb=$(printf '%s' "${content}" | jq -r '(.perWorktreeByteReserveHighWater // 0) | tostring' 2>/dev/null) || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
+  hwb=$(printf '%s' "${content}" | jq -r ".perWorktreeByteReserveHighWater | ${ST_VERIFY_UINT}" 2>/dev/null) || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
   sv_uint "${hwb}" || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
-  hwv=$(printf '%s' "${content}" | jq -r '(.perWorktreeByteReserveHighWaterVersion // 0) | tostring' 2>/dev/null) || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
+  hwv=$(printf '%s' "${content}" | jq -r ".perWorktreeByteReserveHighWaterVersion | ${ST_VERIFY_UINT}" 2>/dev/null) || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
   sv_uint "${hwv}" || { sv_emit_empty "${nonce}" "${input}" "${page}" error; return $?; }
   pages=$(((count + ST_VERIFY_PAGE - 1) / ST_VERIFY_PAGE))
   [ "${pages}" -ge 1 ] || pages=1

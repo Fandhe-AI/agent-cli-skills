@@ -159,11 +159,23 @@ test('ページを黙って欠かしたレスポンス（keysSha256 と entries 
   await assert.rejects(() => m.loadState(), /成立しなかったため停止した/)
 })
 
-test('pages が上限（50）を超える封筒は受理しない（取得の暴走を止める）', () => {
-  const h = hashesOf(items(2))
+test('pages が上限（50）を超える ok の封筒は正しい観測として受理し（sonnet へ回さない）、2 ページ目を取らずに専用の文で停止する（再実行・退避を勧めない）', async () => {
+  const all = items(2)
+  const h = hashesOf(all)
   const env = stateVerifyReply(`--nonce n --file ${FILE} --page 0`, checkOf(h), { pages: m.STATE_VERIFY_MAX_PAGES + 1 })
-  assert.equal(m.isValidStateVerifyEnvelope(env, 'n', 0), false)
+  assert.equal(m.isValidStateVerifyEnvelope(env, 'n', 0), true, '上限超過は転記ミスではない')
   assert.equal(m.STATE_VERIFY_MAX_PAGES, 50)
+  // ホストの停止経路を通しで: 偽の封筒（pages 51）
+  const calls = stub((opts, prompt) => (isVerify(opts) ? stateVerifyReply(prompt, checkOf(h), { pages: 51 }) : loadOk(all)))
+  const err = await m.loadState().then(() => null, (e) => e)
+  assert.ok(err instanceof Error, '停止する')
+  assert.match(err.message, /項目数が照合の上限 5000 件を超えるため停止した/)
+  assert.doesNotMatch(err.message, /再実行|mv |退避/, '再実行・退避では解消しないので勧めない')
+  assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load-verify'], 'フォールバックも 2 ページ目の取得もしない')
+  // ちょうど 50 ページは上限の内（停止せず 50 ページ目まで取る）
+  const at = stub((opts, prompt) => (isVerify(opts) ? stateVerifyReply(prompt, checkOf(h), { pages: 50 }) : loadOk(all)))
+  await m.loadState().catch(() => null)
+  assert.equal(at.filter((c) => isVerify(c.opts)).length, 50)
 })
 
 test('返却スキーマに自由形式の object（additionalProperties が真・hashes）が無い', () => {
