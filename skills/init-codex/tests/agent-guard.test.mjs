@@ -66,6 +66,7 @@ import {
   MG_ALLOW,
   FP805_FLIP,
   FP805_STAY_DENY,
+  FP805_AUDIT_DENY,
 } from './lib/agent-guard-cases.mjs'
 
 for (const bash of BASHES) {
@@ -130,6 +131,9 @@ for (const bash of BASHES) {
         }
         for (const [cmd, reason] of FP805_STAY_DENY) {
           it(`[805] deny ${reason}: ${JSON.stringify(cmd)}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
+        }
+        for (const [cmd, reason] of FP805_AUDIT_DENY) {
+          it(`[805 監査] deny ${reason}: ${JSON.stringify(cmd)}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
         }
       })
     }

@@ -30,7 +30,7 @@
 #   force-push     git push の --force / -f / --mirror / +<refspec>（`--` の後の + 始まりも）/
 #                  --force-with-lease（= 形・略記を含む）/ --force-if-includes。lease 付きでも
 #                  既存コミットを消せるため許可しない（全セッション）
-#   merge-guard    gh pr merge（本文・題名の値だけに merge の語がある `gh pr create|comment` は除く。下記）・REST / GraphQL のマージ・承認（gh pr review の --approve / -a、
+#   merge-guard    gh pr merge（本文・題名の値だけに merge の語があり、コマンド全体が厳格な文法に一致する `gh pr create|comment` は除く。下記）・REST / GraphQL のマージ・承認（gh pr review の --approve / -a、
 #                  reviews API の event=APPROVE・判定できない --input / @file 形、GraphQL の
 #                  addPullRequestReview / submitPullRequestReview + APPROVE）・gh alias・
 #                  gh extension（subagent が true / null のとき）
@@ -148,7 +148,7 @@ function emit_tok() {
   if (have) {
     if (rd == 1) rd = 0
     else if (rd == 2) { nhs++; hs[nhs] = cur; rd = 0 }
-    else { ntok++; tok[ntok] = cur; tS[ntok] = tok0; tE[ntok] = ipos }
+    else { ntok++; tok[ntok] = cur }
   }
   cur = ""; have = 0
 }
@@ -241,9 +241,8 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap
   }
   hk = husky_persist
   if (p > ntok) { if (seg_h) husky_persist = 1 } else if (seg_h || seg_s) hk = 1
-  # obfuscated（$'）とマージ判定の例外（下の gh_cand）が使う観測。どちらも「例外を認めない」側へ倒す材料。
+  # obfuscated（$'）の例外が使う観測。「例外を認めない」側へ倒す材料。
   note_shellish(p)
-  if (cdepth == 0) { nseg0++; if (nseg0 == 1) gh_cand() }
   # echo / printf は引数を表示するだけで、git の語があっても実行しない。
   # env・sudo 等のラッパー経由は読み飛ばしが近似（`env -a echo git push -f` は argv0 指定で git を実行する。
   # sudo の値を取る option の読み違いは echo の語を値として読む迂回になる）なので対象にしない。
@@ -270,87 +269,6 @@ function note_shellish(p,   i, b) {
     if (b ~ /^(eval|bash|sh|zsh|dash|ksh|source|\.|xargs|exec|-exec|-execdir|-ok|-okdir)$/) shellish = 1
   }
   if (p <= ntok && (index(tok[p], "$") > 0 || index(tok[p], "`") > 0)) shellish = 1
-}
-# `gh pr create|comment` の本文・題名の値（引用符つき 1 語・または記号を含まない語）か。`"$(cat <<'W' ... W)"` の形だけ別に見る。
-function inert_value(r,   n, c, mid) {
-  n = length(r)
-  if (n == 0) return 0
-  c = substr(r, 1, 1)
-  if (c == "\047") return (n >= 2 && substr(r, n, 1) == "\047" && index(substr(r, 2, n - 2), "\047") == 0)
-  if (c == "\"") {
-    if (n < 2 || substr(r, n, 1) != "\"") return 0
-    mid = substr(r, 2, n - 2)
-    if (index(mid, "\"") > 0 || index(mid, "$") > 0 || index(mid, "`") > 0 || index(mid, "\\") > 0) return cat_hd_ok(r)
-    return 1
-  }
-  return (r ~ "^[A-Za-z0-9._/@:+,%-]+$")
-}
-# 引用符つき区切り子のヒアドキュメントを cat するだけの `"$(cat <<'W'` 改行 本文 改行 `W` 改行 `)"` か（本文は展開されない）。
-function cat_hd_ok(r,   p, q, w, dash, nl, ln, found) {
-  if (substr(r, 1, 6) != "\"$(cat") return 0
-  p = 7
-  if (!isws(substr(r, p, 1))) return 0
-  while (isws(substr(r, p, 1))) p++
-  if (substr(r, p, 2) != "<<") return 0
-  p += 2; dash = 0
-  if (substr(r, p, 1) == "-") { dash = 1; p++ }
-  while (isws(substr(r, p, 1))) p++
-  if (substr(r, p, 1) != "\047") return 0
-  q = index(substr(r, p + 1), "\047")
-  if (q == 0) return 0
-  w = substr(r, p + 1, q - 1)
-  if (w !~ "^[A-Za-z0-9_]+$") return 0
-  p += q + 1
-  while (isws(substr(r, p, 1))) p++
-  if (substr(r, p, 1) != "\n") return 0
-  p++; found = 0
-  while (p <= length(r)) {
-    nl = index(substr(r, p), "\n")
-    if (nl == 0) return 0
-    ln = substr(r, p, nl - 1); p += nl
-    if (dash) sub(/^\t+/, "", ln)
-    if (ln == w) { found = 1; break }
-  }
-  if (!found) return 0
-  return (substr(r, p) ~ "^[ \t\n]*[)]\"$")
-}
-function try_mask(s, e) {
-  if (inert_value(substr(text, s, e - s))) { nm++; ms[nm] = s; me[nm] = e }
-}
-# マージ判定の例外の候補。コマンド全体が `gh pr create|comment` の単純コマンド 1 つ（先頭の語が gh・前置語なし・他のセグメントなし）
-# のときだけ、--body / -b / --title / -t の値（上の inert_value を満たすもの）を覆い隠す対象にする。
-function gh_cand(   lt, k, t, raw) {
-  cand_ok = 0
-  if (ntok < 3) return
-  lt = tolower(tok[1])
-  if (!(lt == "gh" || lt ~ /\/gh$/)) return
-  if (tok[2] != "pr" || (tok[3] != "create" && tok[3] != "comment")) return
-  cand_ok = 1
-  for (k = 4; k <= ntok; k++) {
-    t = tok[k]; raw = substr(text, tS[k], tE[k] - tS[k])
-    if (t == "--body" || t == "-b" || t == "--title" || t == "-t") { if (k < ntok) { k++; try_mask(tS[k], tE[k]) } }
-    else if (substr(raw, 1, 7) == "--body=") try_mask(tS[k] + 7, tE[k])
-    else if (substr(raw, 1, 8) == "--title=") try_mask(tS[k] + 8, tE[k])
-  }
-}
-# 覆い隠し対象を X に置き換えた元の文字列（対象が無い・例外の条件を満たさないときは元のまま）。
-function build_mask(   n, i, j, k, ts, te, out, pos) {
-  if (limit || !cand_ok || nseg0 != 1) return alltext
-  n = 0
-  for (i = 1; i <= nm; i++) { n++; as[n] = ms[i]; ae[n] = me[i] }
-  for (i = 1; i <= nhm; i++) { n++; as[n] = hms[i]; ae[n] = hme[i] }
-  for (i = 2; i <= n; i++) {
-    ts = as[i]; te = ae[i]; j = i - 1
-    while (j >= 1 && as[j] > ts) { as[j + 1] = as[j]; ae[j + 1] = ae[j]; j-- }
-    as[j + 1] = ts; ae[j + 1] = te
-  }
-  out = ""; pos = 1
-  for (k = 1; k <= n; k++) {
-    if (as[k] < pos) continue
-    out = out substr(alltext, pos, as[k] - pos) "X"
-    pos = ae[k]
-  }
-  return out substr(alltext, pos)
 }
 # 短縮オプションの束ね書きを走査する。stop に含まれる文字は以降が値なので打ち切る。
 function short_has(a, target, stop,   m, ch) {
@@ -724,8 +642,6 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
   split("", hs); cdepth = dp; husky_persist = hkin
   while (i <= len) {
     ch = substr(text, i, 1)
-    ipos = i
-    if (!have) tok0 = i
     if (ch == "\\") {
       nx = substr(text, i + 1, 1)
       if (nx != "\n") { cur = cur nx; have = 1 }
@@ -779,7 +695,7 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
     if (ch == "\n") {
       end_seg(); i++
       for (h = 1; h <= hdn; h++) {
-        body = ""; found = 0; hbs = i
+        body = ""; found = 0
         while (i <= len) {
           rest = substr(text, i)
           p = index(rest, "\n")
@@ -791,7 +707,6 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
         # 区切り子が見つからないまま入力の末尾に達した。bash は残り全部を本文として読むが、これが本物の
         # heredoc でなく読み違いだと後続の実コマンドを隠す（攻撃側が区切り子の行を用意できる）ので中身を見切れない。
         if (!found) limit = 1
-        if (cdepth == 0 && found && hdq[h]) { nhm++; hms[nhm] = hbs; hme[nhm] = i }
         if (body != "") { if (linecap) enqueue(body, linehk); else heredoc_subs(body) }
       }
       hdn = 0; linecap = 0; continue
@@ -831,7 +746,6 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
     if (ch == "<" || ch == ">") { redir_flush(); rd = 1; rdpos = i; rdc = ch; i++; continue }
     cur = cur ch; have = 1; i++
   }
-  ipos = len + 1
   end_seg()
   if (hdn > 0) limit = 1
 }
@@ -841,7 +755,6 @@ END {
   scan(alltext, 0, 0)
   for (qi = 1; qi <= nq && verdict == ""; qi++) scan(qs[qi], qd[qi], qh[qi])
   if (verdict == "" && limit) verdict = "nesting-limit"
-  if (MODE == "mask") { printf "%s", build_mask(); exit }
   # $' の検出（obfuscated）。元の文字列の `$'` を数え、単一引用符を閉じるだけの `$`（nben）を除いて 1 つでも残れば ansic。
   # 入れ子の解析が走った・文字列を評価して実行しうる語がある・関数定義・バッククォート・${ $[ があるときは、解析の読み違いや
   # 連結による `$'` の組み立てを排除できないので例外を認めず（従来どおり 1 つでもあれば ansic）にする。
@@ -1089,25 +1002,157 @@ contains_subsequence() {
 
 all_nf=$(strip_flags "$tokenized")
 
-# gh pr merge（あらゆる形）。例外は「コマンド全体が `gh pr create|comment` の単純コマンド 1 つ」で、その --body / -b / --title / -t
-# の値（引用符つき 1 語。記号を含まない語。引用符つき区切り子の heredoc を cat するだけの "$(cat <<'W' ... W)"・同じコマンドの
-# 標準入力になる引用符つき heredoc の本文）にだけ merge の語がある場合。その値を覆い隠した文字列でもう一度判定し、覆い隠しても
-# 残るなら（別のコマンド・値の外の語・展開を含む値）従来どおり deny する。覆い隠した後に ` ${ $[ が残るときは信用しない。
+# gh pr merge（あらゆる形）。例外は Issue #805 の「本文・題名に merge の語を書いた `gh pr create|comment`」だけで、
+# 判定は上の解析器（GIT_AWK・norm_of）から独立した認識器 GH_TEXT_AWK が行う。認識器はコマンド全体が次の文法に
+# 完全一致するときだけ、本文・題名の値を X に、標準入力の heredoc を取り除いた骨格を 1 行で出す（一致しなければ何も
+# 出さない）。骨格に対してもう一度 gh pr merge を探し、残れば（位置引数の merge 等）従来どおり deny する。
+# 解析器とシェルの解釈がずれても、文法の外の形はすべて例外にならない（Issue #805 の監査で見つかった迂回は、
+# 解析器の読み違いでシェルが実行する部分を「値」と見て覆い隠したことが原因だった）。
+#   コマンド全体   [空白] gh pr (create|comment) {空白 引数} [空白 標準入力の heredoc] [改行 1 つ]
+#                  gh は `gh` か `/…/gh`。区切りは空白・タブと、空白の直後の `\` 改行（行継続）だけ。
+#                  ; & | 改行・前置語・代入・`-R` の前置は文法の外。改行・タブ以外の制御文字（CR を含む）が
+#                  1 つでもあれば文法の外。
+#   引数           次の断片の連結: 記号を限った素の文字 [A-Za-z0-9_./:=,@+%-]、' を含まない単一引用符の文字列、
+#                  $ ` \ " を含まない二重引用符の文字列。それ以外の文字（$ ` \ ( ) # ; & | < > { } * ? [ ~ ! 等）は文法の外
+#   値の heredoc   --body / -b / --title / -t の直後の引数に限り、厳密に `"$(cat <<'D'` 改行 本文 `D` 改行 `)"`。
+#                  D は [A-Za-z_][A-Za-z0-9_]*。これがコマンドの最後の引数（後ろは空白か改行 1 つだけ）。
+#                  本文の各行は、先頭の空白・タブを除いて D で始まらない（bash 3.2 は字下げした D や `D)` でも閉じる）。
+#                  bash 3.2 は "$(...)" の中のヒアドキュメント本文も括弧・引用符として数えて ) を探すため、本文の各行は
+#                  どう数えても釣り合う形に限る: \ ${ $[ $' $" << を含まない（bash 3.2 は本文の $'…' $"…" も解釈する）。' " ` は同じ行で対になり、間に
+#                  ' " ` \ $ ( ) # を含まない。括弧は行の中で釣り合い途中で負にならない。括弧のある行に # を置かない
+#                  （# をコメントと読むかどうかが位置で変わる）
+#   標準入力の heredoc  `<<'D'` の直後が改行。本文の各行は先頭の空白・タブを除いて D で始まらない（本文の文字は自由）。
+#                  終端の行はちょうど D で、その後はコマンドの末尾（改行 1 つまで）。値の heredoc とは併用しない。<<- は認めない
+# この規則に合わない本文（対にならない ' を含む英文・行をまたぐ括弧など）も、標準入力の heredoc（`--body-file - <<'EOF'`）の形なら通る。
+read -r -d '' GH_TEXT_AWK <<'AWK' || true
+BEGIN {
+  for (k = 1; k < 32; k++) if (k != 9 && k != 10) ctl[sprintf("%c", k)] = 1
+  ctl[sprintf("%c", 127)] = 1
+  plain = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:=,@+%-"
+}
+{ s = (NR == 1) ? $0 : s "\n" $0 }
+function ch(i) { return substr(s, i, 1) }
+function isbl(c) { return (c == " " || c == "\t") }
+# p から始まる行（改行を含まない）を返し、次の行頭を np に置く（最後の行なら n + 1）。
+function line_at(p,   r, q) {
+  r = substr(s, p); q = index(r, "\n")
+  if (q == 0) { np = n + 1; return r }
+  np = p + q; return substr(r, 1, q - 1)
+}
+# 先頭の空白・タブを除いて d で始まるか（bash 3.2 は字下げした区切り子でも閉じる）。
+function starts_delim(l, d) { sub(/^[ \t]+/, "", l); return (substr(l, 1, length(d)) == d) }
+# 区切り子 `'D'` を p（' の位置）から読み、D を返す（形が違えば ""）。直後は改行でなければならない。終わりの位置を dp に置く。
+function read_delim(p,   q, d) {
+  q = index(substr(s, p + 1), "\047")
+  if (q == 0) return ""
+  d = substr(s, p + 1, q - 1)
+  if (d !~ /^[A-Za-z_][A-Za-z0-9_]*$/) return ""
+  dp = p + q + 1
+  if (ch(dp) != "\n") return ""
+  return d
+}
+# 値の heredoc の本文の 1 行が、引用符・括弧・コメントをどう数えても釣り合うか。
+function neutral_line(l,   i, c, q, inner, dep, par, hs) {
+  if (index(l, "\\") || index(l, "${") || index(l, "$[") || index(l, "$\047") || index(l, "$\"") || index(l, "<<")) return 0
+  dep = 0; par = 0; hs = 0
+  for (i = 1; i <= length(l); i++) {
+    c = substr(l, i, 1)
+    if (c == "\047" || c == "\"" || c == "`") {
+      q = index(substr(l, i + 1), c)
+      if (q == 0) return 0
+      inner = substr(l, i + 1, q - 1)
+      if (inner ~ /['"`\\$()#]/) return 0
+      i += q; continue
+    }
+    if (c == "(") { dep++; par = 1 }
+    else if (c == ")") { dep--; par = 1; if (dep < 0) return 0 }
+    else if (c == "#") hs = 1
+  }
+  return (dep == 0 && !(par && hs))
+}
+END {
+  n = length(s)
+  for (i = 1; i <= n; i++) if (ch(i) in ctl) exit
+  p = 1; nw = 0; skel = ""; mask = 0
+  while (isbl(ch(p))) p++
+  while (p <= n) {
+    c = ch(p)
+    if (c == "\n") { if (p == n) break; exit }
+    # 標準入力の heredoc（コマンドの最後）
+    if (substr(s, p, 3) == "<<\047") {
+      d = read_delim(p + 2); if (d == "") exit
+      p = dp + 1
+      while (1) {
+        if (p > n) exit
+        l = line_at(p)
+        if (l == d) { if (np <= n) exit; p = n + 1; break }
+        if (starts_delim(l, d)) exit
+        p = np
+      }
+      break
+    }
+    # 値の heredoc（コマンドの最後の引数）
+    if (substr(s, p, 10) == "\"$(cat <<\047") {
+      if (!mask) exit
+      d = read_delim(p + 9); if (d == "") exit
+      p = dp + 1
+      while (1) {
+        if (p > n) exit
+        l = line_at(p)
+        if (l == d) { p = np; break }
+        if (starts_delim(l, d) || !neutral_line(l)) exit
+        p = np
+      }
+      if (substr(s, p, 2) != ")\"") exit
+      p += 2
+      if (substr(s, p) !~ /^[ \t]*\n?$/) exit
+      skel = skel " X"; nw++; break
+    }
+    # 通常の引数（断片の連結）
+    w = ""; st = p
+    while (p <= n) {
+      c = ch(p)
+      if (index(plain, c)) { p++; continue }
+      if (c == "\047") { q = index(substr(s, p + 1), "\047"); if (q == 0) exit; p += q + 1; continue }
+      if (c == "\"") {
+        q = index(substr(s, p + 1), "\""); if (q == 0) exit
+        if (substr(s, p + 1, q - 1) ~ /[$`\\]/) exit
+        p += q + 1; continue
+      }
+      break
+    }
+    w = substr(s, st, p - st)
+    if (p <= n && !isbl(c) && c != "\n") exit
+    nw++
+    if (nw == 1) { if (w != "gh" && w !~ /^(\/[A-Za-z0-9_.-]+)*\/gh$/) exit }
+    else if (nw == 2) { if (w != "pr") exit }
+    else if (nw == 3) { if (w != "create" && w != "comment") exit }
+    if (mask) { w = "X"; mask = 0 }
+    else if (w == "--body" || w == "-b" || w == "--title" || w == "-t") mask = 1
+    else if (substr(w, 1, 7) == "--body=") w = "--body=X"
+    else if (substr(w, 1, 8) == "--title=") w = "--title=X"
+    skel = skel " " w
+    # 語の後の区切り（空白・タブと行継続。語の直後は上で空白か改行に限っているので、行継続は必ず空白の後になる）
+    while (p <= n) {
+      c = ch(p)
+      if (isbl(c)) p++
+      else if (c == "\\" && ch(p + 1) == "\n") p += 2
+      else break
+    }
+  }
+  if (nw < 3) exit
+  gsub(/\n/, " ", skel)
+  print skel
+}
+AWK
+
 if contains_subsequence "$all_nf" gh pr merge; then
-  merge_hit=1
-  masked=$(printf '%s\n' "$cmd" | awk -v MODE=mask "$GIT_AWK") || finish deny internal-error
-  if [ "$masked" != "$cmd" ]; then
-    case "$masked" in
-      *'`'*|*'${'*|*'$['*) : ;;
-      *)
-        m_norm=$(norm_of "$masked") || finish deny internal-error
-        m_tok=$(tokenize_of "$m_norm") || finish deny internal-error
-        m_nf=$(strip_flags "$m_tok")
-        contains_subsequence "$m_nf" gh pr merge || merge_hit=0
-        ;;
-    esac
-  fi
-  [ "$merge_hit" -eq 1 ] && finish deny merge-guard
+  gh_skel=$(printf '%s\n' "$cmd" | LC_ALL=C awk "$GH_TEXT_AWK") || finish deny internal-error
+  [ -n "$gh_skel" ] || finish deny merge-guard
+  s_norm=$(norm_of "$gh_skel") || finish deny internal-error
+  s_tok=$(tokenize_of "$s_norm") || finish deny internal-error
+  s_nf=$(strip_flags "$s_tok")
+  contains_subsequence "$s_nf" gh pr merge && finish deny merge-guard
 fi
 
 # gh api 経由のマージ・設定変更（merge-guard-hook.sh の gh api 判定と同じ）

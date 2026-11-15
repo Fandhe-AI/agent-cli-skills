@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 // agent-guard.sh の判定表（deny / allow のコーパス）。agent-guard.test.mjs と差分テスト
 // agent-guard-805.test.mjs が共有する。ここへ足した形は両方のテストに効く。
 
@@ -912,11 +914,15 @@ export const FP805_FLIP = [
   `gh pr create --title t --body "$(cat <<'EOF'\n## Summary\n- ready to merge\nEOF\n)"`,
   `gh pr create --title "fix: merge" --body "$(cat <<'EOF'\nsee gh pr merge docs\nEOF\n)"`,
   `gh pr comment 5 --body "$(cat <<'EOF'\nready to merge\nEOF\n)"`,
-  `gh pr comment 5 --body "$(cat <<-'EOF'\n\tready to merge\n\tEOF\n)"`,
   `gh pr create --body-file - <<'EOF'\nready to merge\nEOF`,
   `gh pr comment 5 -F - <<'EOF'\nready to merge\nEOF`,
-  `gh pr comment 5 --body-file - <<-'EOF'\n\tready to merge\n\tEOF`,
   `gh pr create --title t --body-file - <<'EOF'\nline1\n$(gh pr merge 1)\nEOF`,
+  // create-pr の正規形（行継続・値の heredoc が最後の引数）と、本文に括弧・対になった引用符を含む形
+  `gh pr create \\\n  --base main \\\n  --title "fix(skills): merge guard を直す" \\\n  --body "$(cat <<'EOF'\n## Summary\n- \`gh pr merge\` の誤検出を直す（$(...) の例: $(cat x) と "x"）\n\nCloses #805\nEOF\n)"`,
+  `gh pr comment 5 --body "$(cat <<'EOF'\nready to merge: \`gh pr merge 5 --squash\`\nEOF\n)"`,
+  `gh pr comment 5 -F - <<'EOF'\nit's ready to merge (see "$(gh pr merge 5)")\nEOF`,
+  `gh pr comment 5 -b 'ready to merge'\n`,
+  `\tgh pr comment 5 --body 'ready to merge'`,
 ]
 
 // FP805_STAY_DENY: 旧版でも新版でも deny のままでなければならない迂回の試行（理由コードつき）。
@@ -1008,4 +1014,68 @@ export const FP805_STAY_DENY = [
   [`gh pr comment 5 --body "$(cat file <<'EOF'\nready to merge\nEOF\n)"`, 'merge-guard'],
   [`gh pr comment 5 --body "$(cat <<EOF\n$(gh pr merge 5)\nEOF\n)"`, 'merge-guard'],
   [`gh pr comment 5 --body "$(cat <<'EOF'\nready to merge\nEOF\n)" "$(gh pr merge 5)"`, 'merge-guard'],
+  // --- Issue #805 の 2 回目の修正: 1c7120b（解析器に覆い隠す範囲を決めさせた版）の迂回と、認識器 GH_TEXT_AWK の各条件
+  // 型 1〜5 の最小再現（1c7120b の覆い隠しで通っていた迂回）
+  [`gh pr comment 1 -b "$(cat <<'W'\nW)";gh pr merge 1;"\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 -b "$(cat <<'W'\n\tW)";gh pr merge 1;"\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 -b "$(cat <<'W'\n  W )";gh pr merge 1;"\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 -F - $(<<'W'\nW)\ngh pr merge 1\nW\n)`, 'merge-guard'],
+  [`gh pr comment 1 -F - <(<<'W'\nW)\ngh pr merge 1\nW\n)`, 'merge-guard'],
+  [`gh pr comment 1 -F - <<'E'\r\nE\r\ngh pr merge 1\nE`, 'merge-guard'],
+  [`gh pr comment 1 -b "$(case x in x) " -b '";gh pr merge 1;"' ";;esac)"`, 'merge-guard'],
+  [`gh pr comment 1 -b "$( (:)# )" -b '\ngh pr merge 1\n' "x' )"`, 'merge-guard'],
+  // bash 3.2 は "$(...)" の中のヒアドキュメント本文の ) で置換を閉じる（本文は区切り子の規則を満たしていても通さない）
+  [`gh pr comment 1 --body "$(cat <<'EOF'\n)"; gh pr merge 1; echo "\nEOF\n)"`, 'merge-guard'],
+  [`gh pr create --title t --body "$(cat <<'EOF'\n)\n"\ngh pr merge 1\n"\nEOF\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\n<<X\n)"; gh pr merge 1; : "\nX\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'EOF'\nok (x)) ; gh pr merge 1 ; ((\nEOF\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'EOF'\n)"; gh pr merge 1; : "(\nEOF\n)"`, 'merge-guard'],
+  // 認識器の条件を 1 つずつ外したときに通ってしまう形（変異テストで、各条件を外すとこのどれかが通る）
+  [`gh pr comment 1 --body 'ready to merge\r'`, 'merge-guard'],
+  [`hub pr comment 1 --body "gh pr merge 1"`, 'merge-guard'],
+  [`gh issue comment 1 --body "see pr to merge"`, 'merge-guard'],
+  [`gh pr comment 1 "$(cat <<'W'\nready to merge\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge\nW\n)" --title x`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nit's ready to merge\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge (\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\n( # ) ready to merge\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\necho "a)" ready to merge\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge a\\b\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge \${x}\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge $[1]\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge <<X\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge $"x"\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge $'x'\nW\n)"`, 'obfuscated'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge\nWX\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W' \nready to merge\nW\n)"`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'E F'\nready to merge\nE F\n)"`, 'merge-guard'],
+  [`gh pr comment 1 -F - <<'E F'\nready to merge\nE F`, 'merge-guard'],
+  [`gh pr comment 1 -F - <<'E'\n E\ngh pr merge 1\nE`, 'merge-guard'],
+  [`gh pr comment 1 -F - <<'E'\nE)\ngh pr merge 1\nE`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge\nW\n))`, 'merge-guard'],
+  [`gh pr comment 1 --body "$(cat <<'W'\nready to merge\nW\n)"x`, 'merge-guard'],
+  [`gh pr comment 1 -F - <<'E'\nready to merge\nE\nx`, 'merge-guard'],
+  [`gh pr <<'E'\ngh pr merge 1\nE`, 'merge-guard'],
+  [`gh pr comment 1 --body 'ready to merge`, 'merge-guard'],
+  [`gh pr comment 1 --body "ready to merge`, 'merge-guard'],
+  [`gh pr comment 1 mer\\\nge --body x`, 'merge-guard'],
+  [`gh pr comment 1 --body x\\\ngh pr merge 1`, 'merge-guard'],
+  [`gh pr comment 1 --body x\n\ngh pr merge 1`, 'merge-guard'],
+  [`gh pr comment 1 --body "ready to merge" ~`, 'merge-guard'],
+  [`gh pr comment 1 --body "ready to merge" *`, 'merge-guard'],
+  [`gh pr comment 1 --body "ready to merge" !x`, 'merge-guard'],
+  [`\tgh pr comment 1 --body x;gh pr merge 1`, 'merge-guard'],
+  [`GH pr comment 1 --body "ready to merge"`, 'merge-guard'],
+  // <<- は認めない（1c7120b では通していた。字下げした区切り子は bash 3.2 の閉じ方と区別できない）
+  [`gh pr comment 1 --body "$(cat <<-'EOF'\n\tready to merge\n\tEOF\n)"`, 'merge-guard'],
+  [`gh pr comment 5 --body-file - <<-'EOF'\n\tready to merge\n\tEOF`, 'merge-guard'],
+  [`gh pr comment 1 -F - <<'E' --body "$(cat <<'W'\nx\nW\n)"\nready to merge\nE`, 'merge-guard'],
 ]
+
+// FP805_AUDIT_DENY: 1c7120b に対する敵対的検証で、旧版（7b7dbb4）は deny・1c7120b は allow で、実行すると
+// `gh pr merge 1` が走った 198 件（bash 3.2 / bash 5 / zsh のいずれか）。新版でも旧版と同じ理由で deny のままであること。
+// 形の内訳: "$(cat <<'W'" の本文の `W)` `W ` 等の行でシェルが heredoc を閉じる・引用符なしの $(<<'W' / <(<<'W'・
+// 区切り子の直後の CR・$(...) 内の case の `)`・$(...) 内で `)` 直後の `#`。
+export const FP805_AUDIT_DENY = JSON.parse(
+  readFileSync(new URL('../fixtures/agent-guard-805-audit.json', import.meta.url), 'utf8'),
+).map((cmd) => [cmd, 'merge-guard'])

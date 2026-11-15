@@ -13,7 +13,7 @@
 // 判定は /bin/bash（3.2）と PATH の bash（5 系）の両方で同じになることを確かめる。
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn, execFileSync } from 'node:child_process'
+import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
@@ -32,6 +32,7 @@ const corpus = [...new Set(Object.values(cases).filter(Array.isArray).flatMap((a
 const SUBSET = [...new Set([
   cases.FP805_FLIP,
   cases.FP805_STAY_DENY,
+  cases.FP805_AUDIT_DENY,
   cases.MG_REPO_DENY,
   cases.MG_MERGE_DENY,
   cases.MG_OBFUSCATED_DENY,
@@ -69,9 +70,9 @@ describe('差分テストの前提', () => {
     const covered = corpus.filter((c) => BASELINE[c] !== undefined).length
     assert.ok(covered >= corpus.length - 20, `fixture が覆うのは ${covered} / ${corpus.length} 件`)
   })
-  it('FP805_FLIP と FP805_STAY_DENY は全件 fixture にある（旧版の判定が凍結されている）', () => {
+  it('FP805_FLIP・FP805_STAY_DENY・FP805_AUDIT_DENY は全件 fixture にある（旧版の判定が凍結されている）', () => {
     for (const c of cases.FP805_FLIP) assert.ok(BASELINE[c], `fixture に無い: ${JSON.stringify(c)}`)
-    for (const [c] of cases.FP805_STAY_DENY) assert.ok(BASELINE[c], `fixture に無い: ${JSON.stringify(c)}`)
+    for (const [c] of [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY]) assert.ok(BASELINE[c], `fixture に無い: ${JSON.stringify(c)}`)
   })
   it('FP805_FLIP は旧版で subagent=true / null のとき deny だった形だけ', () => {
     for (const c of cases.FP805_FLIP) {
@@ -79,11 +80,50 @@ describe('差分テストの前提', () => {
       assert.match(BASELINE[c][2], /^deny /, JSON.stringify(c))
     }
   })
-  it('FP805_STAY_DENY は旧版でも同じ理由で deny だった形（subagent=true / null）', () => {
-    for (const [c, r] of cases.FP805_STAY_DENY) {
+  it('FP805_STAY_DENY と FP805_AUDIT_DENY は旧版でも同じ理由で deny だった形（subagent=true / null）', () => {
+    for (const [c, r] of [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY]) {
       assert.equal(BASELINE[c][1], `deny ${r}`, JSON.stringify(c))
       assert.equal(BASELINE[c][2], `deny ${r}`, JSON.stringify(c))
     }
+  })
+})
+
+// 認識器 GH_TEXT_AWK を単体で見る。ガード全体の判定は前段の解析器（GIT_AWK）にも止められるため、認識器の条件だけを
+// 外した変異がガード全体では見えないことがある。認識器は前段から独立に安全であるべきなので、ここで直接確かめる:
+// 迂回の試行（FP805_STAY_DENY・FP805_AUDIT_DENY）は全件「受理しない」か「骨格に merge の語が残る（ガードが deny する）」、
+// 誤検出の形（FP805_FLIP の gh の行）は全件受理され骨格に merge の語が残らない。
+describe('認識器 GH_TEXT_AWK（単体）', () => {
+  const src = readFileSync(GUARD, 'utf8')
+  const m = src.match(/^read -r -d '' GH_TEXT_AWK <<'AWK' \|\| true\n([\s\S]*?)\nAWK\n/m)
+  const rec = (command) => spawnSync('awk', [m[1]], { input: `${command}\n`, env: { ...process.env, LC_ALL: 'C' } })
+  const words = (skel) => skel.toString().trim().split(/\s+/)
+
+  it('ガードから認識器の awk を取り出せる', () => assert.ok(m, 'GH_TEXT_AWK が見つからない'))
+  it('迂回の試行は受理しないか、骨格に merge の語が残る', () => {
+    const leaked = []
+    for (const [c] of [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY]) {
+      const r = rec(c)
+      assert.equal(r.status, 0, JSON.stringify(c))
+      const out = r.stdout.toString()
+      if (out !== '' && !words(out).includes('merge')) leaked.push(c)
+    }
+    assert.deepEqual(leaked, [])
+  })
+  it('誤検出の形（gh の行）は受理され、骨格に merge の語が残らない', () => {
+    for (const c of cases.FP805_FLIP.filter((x) => /^\s*(\/usr\/bin\/)?gh /.test(x))) {
+      const out = rec(c).stdout.toString()
+      assert.notEqual(out, '', `受理されない: ${JSON.stringify(c)}`)
+      assert.ok(!words(out).includes('merge'), `骨格に merge が残る: ${JSON.stringify(c)} -> ${out}`)
+    }
+  })
+  it('骨格は値を X に、標準入力の heredoc を取り除いた形', () => {
+    const want = [
+      ['gh pr comment 5 --body "ready to merge"', 'gh pr comment 5 --body X'],
+      ["gh pr comment 5 --body=x merge -t 'a b'", 'gh pr comment 5 --body=X merge -t X'],
+      ["gh pr create \\\n  --base main \\\n  --title \"fix: merge\" \\\n  --body \"$(cat <<'EOF'\n## Summary #805\n- merge (x)\nEOF\n)\"", 'gh pr create --base main --title X --body X'],
+      ["gh pr comment 5 -F - <<'EOF'\nready to merge\nEOF", 'gh pr comment 5 -F -'],
+    ]
+    for (const [c, skel] of want) assert.equal(rec(c).stdout.toString().trim(), skel, JSON.stringify(c))
   })
 })
 
