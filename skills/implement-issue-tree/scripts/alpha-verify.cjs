@@ -7,7 +7,9 @@
 // - AST の形・リテラル・テンプレートの地の文・演算子・フラグが完全に同じ（プロンプト本文が 1 文字も変わらない）
 // - 参照と束縛の対応が同じ（各参照の解決先の宣言が、改名後も同じ位置の宣言になる）・自由変数は同名のまま・
 //   参照でない識別子（非計算のキー・メンバー名）は同名のまま・最上位の meta は改名しない・行数が同じ
-// - 新しい宣言名が特別な名前でない・関数値を文字列化していない（改名で関数の名前・ソース文字列が変わるため）
+// - 新しい宣言名が特別な名前でない・関数値を文字列化していない（改名で関数の名前・ソース文字列が変わるため）。
+//   関数値として追うのは宣言・関数式の束縛・const / 代入による別名まで。引数・オブジェクト・配列を経由した流出は
+//   追わない（その先の文字列化は見えない。現状の生成物では名前ベースの走査で関数値の文字列化は 0 件）
 // 保証しないこと: パーサは改名器と同じ Node 同梱の acorn なので、acorn が誤った AST を返す共通故障は見えない。
 // それは照合 1（token-diff.cjs が src と stage1 のトークン列を照合済み）と CI の V8 バイトコードオラクル
 // （tests/lib/v8-bytecode-oracle.cjs）で補う。対応外の構文（var・class・with・ラベル・eval・arguments・
@@ -141,6 +143,10 @@ function stringifySite(id, parent) {
     // 計算プロパティ（f["name"]・f[k]）はキーを判定しきれないので、関数値に対しては一律に拒否する
     if (parent.computed) return { why: '計算プロパティのオブジェクト' }
   }
+  // 分割代入（const {name} = f・({name} = f)）で関数のプロパティを取り出す
+  const pattern = (parent.type === 'VariableDeclarator' && parent.init === id && parent.id) ||
+    (parent.type === 'AssignmentExpression' && parent.right === id && parent.left)
+  if (pattern && pattern.type === 'ObjectPattern') return { why: '分割代入の元' }
   return null
 }
 
@@ -151,6 +157,7 @@ function analyze(ast, goal) {
   const fnDecls = new Set()
   const sites = []
   const aliases = [] // [別名の宣言 | 代入先の識別子, 値の識別子]（const a = f / a = f）
+  const assignedFns = [] // 後から関数式を代入される識別子（let a; a = () => 1）
   let bad = null
   walk.fullAncestor(ast, (n, _s, anc) => {
     if (bad) return
@@ -163,6 +170,7 @@ function analyze(ast, goal) {
     else if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init && (n.init.type === 'FunctionExpression' || n.init.type === 'ArrowFunctionExpression')) fnDecls.add(n.id)
     else if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init && n.init.type === 'Identifier') aliases.push([n.id, n.init])
     else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && n.right.type === 'Identifier') aliases.push([n.left, n.right])
+    else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && (n.right.type === 'FunctionExpression' || n.right.type === 'ArrowFunctionExpression')) assignedFns.push(n.left)
     if (n.type !== 'Identifier') return
     const site = stringifySite(n, anc[anc.length - 2])
     if (site) sites.push({ id: n, ...site })
@@ -183,6 +191,7 @@ function analyze(ast, goal) {
   })
   // 関数値を別名へ移した束縛も関数に解決されるものとして扱う（不動点まで。別名の別名を含む）
   const declOf = (id) => (res.get(id) === 'free' ? null : res.get(id) ?? null)
+  for (const id of assignedFns) if (declOf(id)) fnDecls.add(declOf(id))
   for (let changed = true; changed;) {
     changed = false
     for (const [target, value] of aliases) {

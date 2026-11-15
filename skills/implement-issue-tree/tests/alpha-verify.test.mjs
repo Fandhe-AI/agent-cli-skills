@@ -107,6 +107,10 @@ const CASES = [
   ['fnstr-computed-dynamic', 'function longName(){}use(longName[k])', 'function IA(){}use(IA[k])', false, 'mismatch', /関数値の文字列化.*計算プロパティのオブジェクト/],
   ['fnstr-alias-const', 'function f(){const longValue=()=>1;const alias=longValue;return alias.name}use(f)', 'function f(){const a=()=>1;const b=a;return b.name}use(f)', false, 'mismatch', /関数値の文字列化.*\.name のオブジェクト/],
   ['fnstr-alias-assign', 'function f(){const longValue=()=>1;let alias;alias=longValue;return `${alias}`}use(f)', 'function f(){const a=()=>1;let b;b=a;return `${b}`}use(f)', false, 'mismatch', /関数値の文字列化.*テンプレートの式/],
+  ['fnstr-assigned-later', 'function f(){let longName;longName=()=>1;return longName.name}use(f)', 'function f(){let a;a=()=>1;return a.name}use(f)', false, 'mismatch', /関数値の文字列化.*\.name のオブジェクト/],
+  ['fnstr-destructure-const', 'function f(){const longName=()=>1;const {name}=longName;return name}use(f)', 'function f(){const a=()=>1;const {name}=a;return name}use(f)', false, 'mismatch', /関数値の文字列化.*分割代入の元/],
+  ['fnstr-destructure-assign', 'function f(){const longName=()=>1;let name;({name}=longName);return name}use(f)', 'function f(){const a=()=>1;let name;({name}=a);return name}use(f)', false, 'mismatch', /関数値の文字列化.*分割代入の元/],
+  ['fnstr-destructure-object-ok', 'function f(){const o={name:1};const {name}=o;return name}use(f)', 'function f(){const a={name:1};const {name}=a;return name}use(f)', true, 'match'],
   ['fnstr-alias-array-ok', 'function f(){const xs=[1];const alias=xs;return alias.length}use(f)', 'function f(){const a=[1];const b=a;return b.length}use(f)', true, 'match'],
   // {__proto__} はデータプロパティ、{__proto__: x} はプロトタイプの設定。shorthand の展開を拒否する
   ['proto-shorthand-expanded', 'function f(){const __proto__={x:1};return {__proto__}}use(f)', 'function f(){const a={x:1};return {__proto__:a}}use(f)', false, 'mismatch', /__proto__ の shorthand/],
