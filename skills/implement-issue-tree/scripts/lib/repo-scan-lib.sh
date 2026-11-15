@@ -80,8 +80,8 @@ ${l}"
 }
 
 # 複数行の slug の候補（$1）から、形式の正しいものを昇順・重複なしで RS_APPS（改行区切り）へ、捨てた件数（形式不正の行の数。同じ不正な値が重複していても行ごとに数える）を RS_DROPPED へ入れる。
-# 件数の上限は設けない（3 件の PR × check-runs の 1 ページ 30 件なので高々 90 件。ホストが 100 件以内を検査する）。
-# 並びは LC_ALL=C の sort -u で固定する（ロケールで並びが変わらない）。空行は数えない。
+# 件数の上限は設けない（3 件の PR × check-runs の 1 ページ 100 件なので高々 300 件。ホストが 100 件以内を検査する）。
+# 並びは LC_ALL=C の sort -u で固定する（ロケールで並びが変わらない）。空行は数えない。sort の失敗（入力があるのに結果が空の場合を含む）は return 1（RS_APPS は空）。
 rs_collect_apps() {
   local line valid=""
   RS_APPS=""
@@ -97,7 +97,11 @@ rs_collect_apps() {
   done <<RS_EOF
 $1
 RS_EOF
-  [ -z "${valid}" ] || RS_APPS=$(printf '%s' "${valid}" | LC_ALL=C sort -u)
+  if [ -n "${valid}" ]; then
+    # sort が失敗したり、入力があるのに何も返さなかったりしたら、空の一覧（= 該当なし）として成功させず return 1。呼び出し側が取得失敗として数える
+    RS_APPS=$(printf '%s' "${valid}" | LC_ALL=C sort -u 2>/dev/null) || { RS_APPS=""; return 1; }
+    [ -n "${RS_APPS}" ] || return 1
+  fi
   return 0
 }
 
@@ -114,9 +118,9 @@ RS_EOF
 }
 
 # 改行区切りの番号から、番号として正しいものだけを昇順・重複なしにしてカンマ区切りで出す（空なら何も出さない）。
-# 1 行でも番号の形でなければ非ゼロ（gh の応答が想定外 = 取得失敗として扱う。黙って捨てて一覧を欠かさない）。
+# 1 行でも番号の形でなければ非ゼロ（gh の応答が想定外 = 取得失敗として扱う。黙って捨てて一覧を欠かさない）。sort・paste の失敗も非ゼロ。
 rs_sorted_numbers() {
-  local line valid=""
+  local line valid="" sorted joined
   while IFS= read -r line; do
     [ -n "${line}" ] || continue
     rs_valid_number "${line}" || return 1
@@ -125,7 +129,14 @@ rs_sorted_numbers() {
   done <<RS_EOF
 $1
 RS_EOF
-  [ -z "${valid}" ] || printf '%s' "${valid}" | LC_ALL=C sort -un | paste -sd, -
+  [ -n "${valid}" ] || return 0
+  # パイプにすると sort が失敗しても paste が空文字で成功し、番号が空の成功として扱われる。段を分けて各段の終了コードを見る。
+  # 入力が非空なのに結果が空になる場合も失敗（sort が何も返さずに 0 で終わる等）
+  sorted=$(printf '%s' "${valid}" | LC_ALL=C sort -un 2>/dev/null) || return 1
+  [ -n "${sorted}" ] || return 1
+  joined=$(printf '%s\n' "${sorted}" | paste -sd, - 2>/dev/null) || return 1
+  [ -n "${joined}" ] || return 1
+  printf '%s\n' "${joined}"
 }
 
 # ラベル $1 がラベル名の一覧（改行区切り。$2）にあるか。ASCII の大文字小文字を区別しない完全一致（旧コマンドの grep -Fxiq の、ロケールに依存しない版）。

@@ -127,7 +127,7 @@ volta run --node 22 node skills/implement-issue-tree/tests/tools/mutate.mjs --ru
   - ロケール: `LC_ALL` を `C` / `en_US.UTF-8` / `ja_JP.UTF-8` に変えても出力が同じこと（並び・番号の数値順・全角文字の absent）。
   - 取り違え: ラベルの並びが違う入力で作られた封筒はホストの入力の束縛で拒否され、そのラベルの結果として採られない（`repo-scan-host`）。
 - 既存テストの stub が `plan:skip-labels` に平らな `{ entries: [{ i, x, numbers }] }` を返す場合は、`tests/lib/stub-run.mjs` が封筒に包む（`wrapSkipLabelsReply`。x = 1 は absent、entries に無い添字は failed）。`detect:external-checks` の既定の応答は `externalChecksReply(prompt)`。
-- 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run RS1-script-null-app-kept …`（`RS1`〜`RS17`）。
+- 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run RS1-script-null-app-kept …`（`RS1`〜`RS22`）。
 
 ## ツリー取得（Issue #668）
 

@@ -109,8 +109,8 @@ if [ "${mode}" = external-checks ]; then
     [ "${seen}" -le 3 ] || break
     if ! rs_valid_sha "${s}"; then errs=$((errs + 1)); continue; fi
     prs=$((prs + 1))
-    # check-runs はページ送りなし（旧コマンドと同じ。1 ページ目の 30 件）。取得できなかった PR は無視して続ける
-    if out=$(gh api "${base}/commits/${s}/check-runs" --jq "${RS_APPS_JQ}" 2>/dev/null </dev/null); then
+    # check-runs はページ送りなし。per_page=100 で 1 ページ目に最大 100 件（旧コマンドは既定の 30 件で、31 件目以降の App を取りこぼした）。取得できなかった PR は無視して続ける
+    if out=$(gh api "${base}/commits/${s}/check-runs?per_page=100" --jq "${RS_APPS_JQ}" 2>/dev/null </dev/null); then
       raw="${raw}${out}
 "
     else
@@ -119,7 +119,8 @@ if [ "${mode}" = external-checks ]; then
   done <<RS_EOF
 ${shas}
 RS_EOF
-  rs_collect_apps "${raw}"
+  # slug の整列（sort）の失敗は apps を空として成功させず、取得の失敗として errs に数える（部分結果。旧コマンドの失敗の扱いと同じ向き）
+  rs_collect_apps "${raw}" || errs=$((errs + 1))
   emit "$(rs_payload_external "$(rs_json_slugs "${RS_APPS}")" "${prs}" "${errs}" "${RS_DROPPED}" "${input_sha}")"
   exit 0
 fi
@@ -133,7 +134,7 @@ absent=""
 failed=""
 for l in "$@"; do
   i=$((i + 1))
-  enc=$(jq -rn --arg l "${l}" '$l | @uri') || enc=""
+  enc=$(jq -rn --arg l "${l}" '$l | @uri' 2>/dev/null) || enc=""
   out=""
   nums=""
   if [ -n "${enc}" ] \

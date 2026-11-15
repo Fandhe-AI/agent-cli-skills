@@ -7,7 +7,7 @@
 // 実行した結果と新スクリプトの結果を突き合わせる（意味を変えていないことの確認。差が出る入力は『意図した差』として明示する）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,6 +51,16 @@ function envelopeOf(r) {
   return e
 }
 
+// 偽のコマンドを stub の bin（PATH の先頭）へ置く。本物は PATH の先頭 1 要素（stub の bin）を外して呼ぶ。
+// 引数の並びが argsLine と完全に一致する呼び出しだけ action を実行する（他の呼び出しは本物へ渡す）
+function installFake(stub, name, argsLine, action) {
+  const f = join(stub.bin, name)
+  writeFileSync(f, `#!/bin/sh\nif [ "$*" = '${argsLine}' ]; then ${action}; fi\nPATH=\${PATH#*:}\nexec ${name} "$@"\n`)
+  chmodSync(f, 0o755)
+}
+const FAIL_STATUS = 'cat >/dev/null; echo "${0##*/}: boom secret-token" >&2; exit 2' // 標準エラーへ本文を出して失敗
+const EMPTY_SUCCESS = 'cat >/dev/null; exit 0' // 何も出さずに成功（入力があるのに空の結果）
+
 export function registerRepoScanTests(bash) {
   const T = (name, fn, o = {}) => test(`[${bash}] ${name}`, { skip: !haveJq && 'jq が無い', ...o }, fn)
   const ext = (stub, extra = [], opts = {}) => run(bash, stub, ['--mode', 'external-checks', '--nonce', NONCE, ...extra], opts)
@@ -71,14 +81,14 @@ export function registerRepoScanTests(bash) {
     assert.equal(signed.ok, true, JSON.stringify(signed))
   })
 
-  T('external-checks: gh の呼び出しは pr list 1 回 + 各 PR の check-runs 1 回（ページ送りなし・GET だけ）で、cwd のリポジトリ（{owner}/{repo}）を使う', () => {
+  T('external-checks: gh の呼び出しは pr list 1 回 + 各 PR の check-runs 1 回（per_page=100・ページ送りなし・GET だけ）で、cwd のリポジトリ（{owner}/{repo}）を使う', () => {
     const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }, { headRefOid: B }], checkRuns: { [A]: checkRuns(['x']), [B]: checkRuns(['y']) } })
     assert.equal(ext(stub).status, 0)
     const calls = stub.calls()
     assert.equal(calls.length, 3)
     assert.match(calls[0], /^pr list --state merged --limit 3 --json headRefOid --jq /)
     assert.ok(!calls[0].includes(' -R '))
-    assert.ok(calls[1].startsWith(`api repos/{owner}/{repo}/commits/${A}/check-runs --jq `) && !calls.some((c) => c.includes('--paginate')))
+    assert.ok(calls[1].startsWith(`api repos/{owner}/{repo}/commits/${A}/check-runs?per_page=100 --jq `) && !calls.some((c) => c.includes('--paginate')))
     assert.ok(!calls.some((c) => /-X |-f |-F |--method|--input/.test(c)), '書き込み系の指定がある')
   })
 
@@ -185,6 +195,27 @@ export function registerRepoScanTests(bash) {
     assert.deepEqual(envelopeOf(ext(makeGhRepoScanStub(data))).payload.apps, ['cursor'])
   })
 
+  T('external-checks: check-runs は per_page=100 で取るので、31 件目以降にしか無い外部 App も拾う（旧コマンドは既定の 30 件で取りこぼした）', () => {
+    // 先頭 35 件は GitHub Actions、36 件目だけが外部 App。per_page を付けない呼び出しは偽 gh が 30 件で切る（実 GitHub と同じ）
+    const slugs = [...Array.from({ length: 35 }, () => 'github-actions'), 'late-app']
+    const data = { prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns(slugs) } }
+    const old = spawnSync(bash, ['-c', OLD_EXTERNAL], { env: makeGhRepoScanStub(data).env(), encoding: 'utf8' })
+    assert.equal(old.status, 0, old.stderr)
+    assert.deepEqual(old.stdout.split('\n').filter((l) => l !== ''), [], '旧コマンドは 31 件目以降の App を取りこぼす（前提の自己検証）')
+    assert.deepEqual(envelopeOf(ext(makeGhRepoScanStub(data))).payload.apps, ['late-app'])
+  })
+
+  T('external-checks: slug の整列（sort）が失敗しても、入力があるのに空の結果で成功しても、apps を空の成功にせず errs に数える', () => {
+    for (const action of [FAIL_STATUS, EMPTY_SUCCESS]) {
+      const stub = makeGhRepoScanStub({ prs: [{ headRefOid: A }], checkRuns: { [A]: checkRuns(['cursor', 'codecov']) } })
+      installFake(stub, 'sort', '-u', action)
+      const r = ext(stub)
+      const e = envelopeOf(r)
+      assert.deepEqual([e.payload.apps, e.payload.errs, e.payload.prs], [[], 1, 1], action)
+      assert.ok(!r.stdout.includes('boom') && !r.stdout.includes('secret'), '偽 sort の標準エラーは封筒に出ない')
+    }
+  })
+
   // ---------------- skip-labels ----------------
 
   T('skip-labels: ラベルごとの open issue 番号を昇順・重複なし・PR を除いて返し、ページ送りを跨ぐ', () => {
@@ -285,6 +316,27 @@ export function registerRepoScanTests(bash) {
     assert.deepEqual(e.payload.failed, [2, 3], '番号でない行（想定外の応答）は欠かさず失敗に倒す')
     assert.equal(r.stderr, 'FAILED 2\nFAILED 3\n')
     assert.ok(!r.stdout.includes('boom') && !r.stdout.includes('secret'))
+  })
+
+  T('skip-labels: 番号の整列（sort）が失敗しても、入力があるのに空の結果で成功しても、番号が空の成功にせず failed に出す（入力が空のラベルは成功のまま）', () => {
+    for (const action of [FAIL_STATUS, EMPTY_SUCCESS]) {
+      const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }, { name: 'b' }], issues: { a: issueList([3, 1]), b: issueList([]) } })
+      installFake(stub, 'sort', '-un', action)
+      const r = skip(stub, ['a', 'b'])
+      const e = envelopeOf(r)
+      assert.deepEqual([e.payload.entries, e.payload.failed], [[{ i: 2, numbers: [] }], [1]], action)
+      assert.equal(r.stderr, 'FAILED 1\n', '標準エラーは固定語彙と添字だけ（偽 sort の本文は出ない）')
+    }
+  })
+
+  T('skip-labels: ラベルのエンコード（jq）が失敗したラベルは gh を呼ばずに failed に出し、標準エラーに jq の本文を出さない', () => {
+    const stub = makeGhRepoScanStub({ labels: [{ name: 'a' }], issues: { a: issueList([1]) } })
+    installFake(stub, 'jq', '-rn --arg l a $l | @uri', 'echo "jq: boom secret-token" >&2; exit 5')
+    const r = skip(stub, ['a'])
+    const e = envelopeOf(r)
+    assert.deepEqual([e.payload.entries, e.payload.failed], [[], [1]])
+    assert.equal(r.stderr, 'FAILED 1\n')
+    assert.equal(stub.callsTo('issues?'), 0, 'エンコードできなかったラベルで issues を引かない')
   })
 
   T('skip-labels: 全ラベルが失敗しても封筒は出る（終了コード 0。判定はホスト）', () => {

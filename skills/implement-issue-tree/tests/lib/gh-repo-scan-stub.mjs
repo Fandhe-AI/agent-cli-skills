@@ -25,6 +25,7 @@ echo "$*" >> "$dir/calls.log"
 jqf=""
 route=""
 flab=""
+cap=""
 prev=""
 for a in "$@"; do
   case "$prev" in
@@ -48,7 +49,11 @@ case "$1" in
     ;;
   api)
     case "$route" in
-      */check-runs) sha=\${route%/check-runs}; key="check_\${sha##*/}" ;;
+      */check-runs|*/check-runs\\?*)
+        r=\${route%%\\?*}; sha=\${r%/check-runs}; key="check_\${sha##*/}"
+        # 実 GitHub は per_page を省くと 30 件で切る。per_page=100 を付けた呼び出しだけ 100 件まで返す（偽 gh もその挙動に揃える）
+        case "$route" in *per_page=100*) cap=100 ;; *) cap=30 ;; esac
+        ;;
       */labels|*/labels\\?*) key="labels" ;;
       */issues\\?*) enc=\${route#*labels=}; enc=\${enc%%&*}; key="issues_$(printf '%s' "$enc" | tr '%' '=')" ;;
       */issues) enc=$(printf '%s' "$flab" | jq -sRr @uri); key="issues_$(printf '%s' "$enc" | tr '%' '=')" ;;
@@ -60,8 +65,13 @@ esac
 if [ -f "$dir/r/$key.out" ]; then
   rc=0
   [ -f "$dir/r/$key.rc" ] && rc=$(cat "$dir/r/$key.rc")
+  src="$dir/r/$key.out"
+  if [ -n "$cap" ] && [ ! -f "$dir/r/$key.raw" ]; then
+    jq -c ".check_runs |= .[:$cap]" < "$src" > "$dir/r/$key.cap" || exit 5
+    src="$dir/r/$key.cap"
+  fi
   if [ -n "$jqf" ] && [ ! -f "$dir/r/$key.raw" ]; then
-    jq -r "$jqf" < "$dir/r/$key.out" || exit 5
+    jq -r "$jqf" < "$src" || exit 5
   else
     cat "$dir/r/$key.out"
   fi
