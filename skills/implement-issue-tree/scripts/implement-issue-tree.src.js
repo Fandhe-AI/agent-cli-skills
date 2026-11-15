@@ -6066,14 +6066,15 @@ const treeFetch = await fetchTree()
 const tree = { nodes: treeFetch.nodes }
 
 // 外部チェック観測: 直前 3 件の merged PR の check-runs から GitHub Actions 以外の App slug を抽出する（scripts/repo-scan.sh）。観測は参考値で、構成の確定は args.externalChecks の明示入力のみ（Issue #147）。
+// 観測が判断の材料として載るのは未確定時の停止理由だけなので、externalChecks の明示時（parseExternalChecks は配列か undefined を返すので [] も真）と dryRun（見積りの返却に載らない）では起動せず、未観測（apps: []・停止理由の観測欄は「未観測」）とする（Issue #806）。
+const detectSkip = externalChecksInput || dryRunEnabled
 const detectNonce = boundaryNonce(`detect-external-checks:${repoArg}`)
-const detectResult = await agent(externalChecksPrompt(detectNonce), { label: 'detect:external-checks', phase: 'Tree', model: 'haiku', effort: 'low', schema: EXTERNAL_CHECKS_SCHEMA })
 // 観測結果（参考値）。取得失敗（null）・封筒の照合失敗時は空配列として扱う。
-const detected = observedExternalApps(detectResult, detectNonce)
+const detected = detectSkip ? { apps: [] } : observedExternalApps(await agent(externalChecksPrompt(detectNonce), { label: 'detect:external-checks', phase: 'Tree', model: 'haiku', effort: 'low', schema: EXTERNAL_CHECKS_SCHEMA }), detectNonce)
 if (!detected) log('⚠️ 外部チェックの観測を採用しない（出力封筒の照合失敗）。観測なしで続行する')
 else if (detected.errs > 0) log(`⚠️ 外部チェックの観測で gh の失敗が ${detected.errs} 件あった（取得できた分だけで続行する）`)
 const observedCheckApps = detected?.apps ?? []
-// baseMergePrompt の期待リポジトリは args.repo 由来の repoArg のみへ束縛する（detectResult 等のエージェント自己申告値は使わない。PR #443 codex P0）。
+// baseMergePrompt の期待リポジトリは args.repo 由来の repoArg のみへ束縛する（観測等のエージェント自己申告値は使わない。PR #443 codex P0）。
 const expectedRepo = repoArg
 // 外部チェック構成の確定（Issue #147）。観測は完全性を保証しないため、明示入力がない限り常に確定不能とする。監視・待機・レポートは slug 配列、G0 の context 照合はエントリ配列を使う。
 const externalCheckApps = externalChecksInput?.map((e) => e.app) ?? observedCheckApps
@@ -6083,8 +6084,8 @@ const externalChecksContextsConfirmed =
   externalChecksInput !== undefined && externalChecksInput.every((e) => e.contexts.length > 0)
 // merge-exec へ渡す確定エントリ（観測フォールバックは contexts なしの参考値。未確定ランでは allowMerge=false に固定されるため context が G0 照合に使われることはない）。
 const externalCheckEntries = externalChecksInput ?? observedCheckApps.map((a) => ({ app: a, contexts: [] }))
-// 観測結果は「参考値」としてログ・マージ停止理由に残す（確定情報としては使わない）。
-const observedAppsNote = observedCheckApps.length > 0 ? observedCheckApps.map(sanitize).join(', ') : 'なし'
+// 観測結果は「参考値」として未確定時の停止理由に残す（確定情報としては使わない）。
+const observedAppsNote = detectSkip ? '未観測' : observedCheckApps.length > 0 ? observedCheckApps.map(sanitize).join(', ') : 'なし'
 // 確定不能時の停止理由・再実行手順。監視 blocked とホスト側ゲートの双方から参照するため 1 か所に集約。
 const EXTERNAL_CHECKS_UNCONFIRMED_REASON =
   '外部チェック（GitHub Actions 以外の CI / レビュー App）の構成が args.externalChecks で明示されていないため自動マージを停止した'
@@ -6096,8 +6097,8 @@ const EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON =
 if (externalChecksInput !== undefined) {
   log(
     externalCheckApps.length > 0
-      ? `外部チェック（args.externalChecks による明示指定）: ${externalChecksInput.map((e) => `${sanitize(e.app)}${e.contexts.length > 0 ? `（信頼済み context: ${e.contexts.map(sanitize).join(' / ')}）` : '（context 未宣言。クライアント側自動マージは fail-closed）'}`).join(', ')}（観測結果は参考値: ${observedAppsNote}）`
-      : `外部チェックなし（args.externalChecks: [] による明示確定）。GitHub Actions の green のみで判定する（観測結果は参考値: ${observedAppsNote}）`,
+      ? `外部チェック（args.externalChecks による明示指定）: ${externalChecksInput.map((e) => `${sanitize(e.app)}${e.contexts.length > 0 ? `（信頼済み context: ${e.contexts.map(sanitize).join(' / ')}）` : '（context 未宣言。クライアント側自動マージは fail-closed）'}`).join(', ')}`
+      : '外部チェックなし（args.externalChecks: [] による明示確定）。GitHub Actions の green のみで判定する',
   )
 } else {
   log(`⚠️ ${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`)
