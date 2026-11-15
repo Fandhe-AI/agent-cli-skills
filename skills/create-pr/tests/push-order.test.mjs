@@ -91,8 +91,36 @@ test('フェンスはベースブランチの判定を git push より前に持�
   assert.doesNotMatch(pushFence, /\[\[/, '[ ] で書く（zsh / bash 共通）')
 })
 
-function git(cwd, ...args) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
+// テストの git とフェンスが共通で使う、呼び出し元から隔離した環境。git hook の中など GIT_DIR・GIT_WORK_TREE・
+// GIT_INDEX_FILE が設定された状態で流しても、一時リポジトリ以外（呼び出し元のリポジトリ）へ config・commit・push が
+// 作用しないよう GIT_ で始まる変数をすべて外し、system / global の config（commit.gpgsign 等）も読ませない。
+// HOME も一時ディレクトリにして、シェルの起動ファイル（BASH_ENV・ENV・ZDOTDIR 経由を含む）を読ませない。
+function isolatedEnv(root) {
+  const home = join(root, 'home')
+  mkdirSync(home, { recursive: true })
+  const globalConfig = join(home, 'gitconfig')
+  writeFileSync(globalConfig, '')
+  const env = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith('GIT_') || k === 'BASH_ENV' || k === 'ENV' || k === 'ZDOTDIR') continue
+    env[k] = v
+  }
+  return {
+    ...env,
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, '.config'),
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: globalConfig,
+    GIT_AUTHOR_NAME: 't',
+    GIT_AUTHOR_EMAIL: 't@example.invalid',
+    GIT_COMMITTER_NAME: 't',
+    GIT_COMMITTER_EMAIL: 't@example.invalid',
+    GH_HOST: 'gh.invalid',
+  }
+}
+
+function gitWith(env, cwd, ...args) {
+  const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' })
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`)
   return r.stdout.trim()
 }
@@ -100,6 +128,8 @@ function git(cwd, ...args) {
 // bare の origin と作業リポジトリ（main に 1 コミット push 済み・ローカルの main にはさらに未 push の 1 コミット）を作る。
 function sandbox() {
   const root = mkdtempSync(join(tmpdir(), 'create-pr-push-'))
+  const env = isolatedEnv(root)
+  const git = (cwd, ...args) => gitWith(env, cwd, ...args)
   const origin = join(root, 'origin.git')
   const work = join(root, 'work')
   const bin = join(root, 'bin')
@@ -107,8 +137,6 @@ function sandbox() {
   mkdirSync(work)
   git(root, 'init', '--bare', '-b', 'main', origin)
   git(work, 'init', '-b', 'main')
-  git(work, 'config', 'user.email', 't@example.invalid')
-  git(work, 'config', 'user.name', 't')
   git(work, 'remote', 'add', 'origin', origin)
   writeFileSync(join(work, 'a'), '1')
   git(work, 'add', 'a')
@@ -120,16 +148,16 @@ function sandbox() {
   const gh = join(bin, 'gh')
   writeFileSync(gh, '#!/bin/sh\n[ -n "$FAKE_GH_FAIL" ] && { echo "gh: boom" >&2; exit 1; }\nprintf \'%s\\n\' "${FAKE_BASE-main}"\n')
   chmodSync(gh, 0o755)
-  return { root, origin, work, bin }
+  return { root, origin, work, bin, env, git }
 }
 
-const remoteRefs = (origin) => git(origin, 'for-each-ref', '--format=%(refname) %(objectname)')
+const remoteRefs = (sb, repo = sb.origin) => sb.git(repo, 'for-each-ref', '--format=%(refname) %(objectname)')
 
-function runFence(shell, sb, env = {}) {
+function runFence(shell, sb, extra = {}) {
   return spawnSync(shell, ['-c', pushFence], {
     cwd: sb.work,
     encoding: 'utf8',
-    env: { ...process.env, PATH: `${sb.bin}:${process.env.PATH}`, ...env },
+    env: { ...sb.env, PATH: `${sb.bin}:${sb.env.PATH}`, ...extra },
   })
 }
 
@@ -139,11 +167,11 @@ for (const shell of SHELLS) {
   test(`[${shell}] ベースブランチ上では push せず exit 1 で止まる`, () => {
     const sb = sandbox()
     try {
-      const before = remoteRefs(sb.origin)
+      const before = remoteRefs(sb)
       const r = runFence(shell, sb)
       assert.equal(r.status, 1, r.stderr)
       assert.match(r.stderr, /ベースブランチ（main）そのもの/)
-      assert.equal(remoteRefs(sb.origin), before, 'origin は変わらない')
+      assert.equal(remoteRefs(sb), before, 'origin は変わらない')
     } finally {
       rmSync(sb.root, { recursive: true, force: true })
     }
@@ -152,11 +180,11 @@ for (const shell of SHELLS) {
   test(`[${shell}] feature ブランチでは push される`, () => {
     const sb = sandbox()
     try {
-      git(sb.work, 'checkout', '-b', 'feat/1-x')
+      sb.git(sb.work, 'checkout', '-b', 'feat/1-x')
       const r = runFence(shell, sb)
       assert.equal(r.status, 0, r.stderr)
-      const head = git(sb.work, 'rev-parse', 'HEAD')
-      assert.match(remoteRefs(sb.origin), new RegExp(`refs/heads/feat/1-x ${head}`))
+      const head = sb.git(sb.work, 'rev-parse', 'HEAD')
+      assert.match(remoteRefs(sb), new RegExp(`refs/heads/feat/1-x ${head}`))
     } finally {
       rmSync(sb.root, { recursive: true, force: true })
     }
@@ -175,7 +203,7 @@ for (const shell of SHELLS) {
   test(`[${shell}] ベース上の判定は大文字小文字を含め完全一致で、別名のブランチは止めない`, () => {
     const sb = sandbox()
     try {
-      git(sb.work, 'checkout', '-b', 'main-fix')
+      sb.git(sb.work, 'checkout', '-b', 'main-fix')
       assert.equal(runFence(shell, sb).status, 0)
     } finally {
       rmSync(sb.root, { recursive: true, force: true })
@@ -185,11 +213,11 @@ for (const shell of SHELLS) {
   test(`[${shell}] detached HEAD では push せず exit 1 で止まる`, () => {
     const sb = sandbox()
     try {
-      git(sb.work, 'checkout', '--detach')
-      const before = remoteRefs(sb.origin)
+      sb.git(sb.work, 'checkout', '--detach')
+      const before = remoteRefs(sb)
       const r = runFence(shell, sb)
       assert.equal(r.status, 1, r.stderr)
-      assert.equal(remoteRefs(sb.origin), before)
+      assert.equal(remoteRefs(sb), before)
     } finally {
       rmSync(sb.root, { recursive: true, force: true })
     }
@@ -198,15 +226,73 @@ for (const shell of SHELLS) {
   test(`[${shell}] ベースブランチ名を取得できない（gh 失敗・空出力）ときは push せず exit 1 で止まる（fail-closed）`, () => {
     const sb = sandbox()
     try {
-      git(sb.work, 'checkout', '-b', 'feat/2-y')
-      const before = remoteRefs(sb.origin)
+      sb.git(sb.work, 'checkout', '-b', 'feat/2-y')
+      const before = remoteRefs(sb)
       for (const env of [{ FAKE_GH_FAIL: '1' }, { FAKE_BASE: '' }]) {
         const r = runFence(shell, sb, env)
         assert.equal(r.status, 1, r.stderr)
-        assert.equal(remoteRefs(sb.origin), before, 'origin は変わらない')
+        assert.equal(remoteRefs(sb), before, 'origin は変わらない')
       }
     } finally {
       rmSync(sb.root, { recursive: true, force: true })
+    }
+  })
+}
+
+// ---- 呼び出し元の git 環境からの隔離 ----
+
+// 呼び出し元が指す（はずの）リポジトリ。feature ブランチ上で自前の origin を持つので、隔離が効かなければ
+// フェンスはここのブランチを dummy の origin へ push し、upstream の設定を config へ書き込む。
+function dummyRepo() {
+  const root = mkdtempSync(join(tmpdir(), 'create-pr-push-dummy-'))
+  const env = isolatedEnv(root)
+  const git = (cwd, ...args) => gitWith(env, cwd, ...args)
+  const origin = join(root, 'origin.git')
+  const work = join(root, 'work')
+  mkdirSync(work)
+  git(root, 'init', '--bare', '-b', 'main', origin)
+  git(work, 'init', '-b', 'feat/9-dummy')
+  git(work, 'remote', 'add', 'origin', origin)
+  writeFileSync(join(work, 'd'), 'x')
+  git(work, 'add', 'd')
+  git(work, 'commit', '-m', 'dummy')
+  const snapshot = () => ({
+    refs: git(work, 'for-each-ref', '--format=%(refname) %(objectname)'),
+    originRefs: git(origin, 'for-each-ref', '--format=%(refname) %(objectname)'),
+    config: readFileSync(join(work, '.git', 'config'), 'utf8'),
+    head: readFileSync(join(work, '.git', 'HEAD'), 'utf8'),
+    index: readFileSync(join(work, '.git', 'index')).toString('base64'),
+  })
+  return { root, work, snapshot }
+}
+
+const OUTER_GIT_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']
+
+for (const shell of SHELLS) {
+  test(`[${shell}] 呼び出し元の GIT_DIR・GIT_WORK_TREE・GIT_INDEX_FILE が別リポジトリを指していても、テストの git とフェンスはそこへ作用しない`, () => {
+    const dummy = dummyRepo()
+    const saved = Object.fromEntries(OUTER_GIT_VARS.map((k) => [k, process.env[k]]))
+    let sb
+    try {
+      const before = dummy.snapshot()
+      process.env.GIT_DIR = join(dummy.work, '.git')
+      process.env.GIT_WORK_TREE = dummy.work
+      process.env.GIT_INDEX_FILE = join(dummy.work, '.git', 'index')
+      sb = sandbox()
+      sb.git(sb.work, 'checkout', '-b', 'feat/3-z')
+      const r = runFence(shell, sb)
+      assert.equal(r.status, 0, r.stderr)
+      const head = sb.git(sb.work, 'rev-parse', 'HEAD')
+      assert.match(remoteRefs(sb), new RegExp(`refs/heads/feat/3-z ${head}`), '一時リポジトリの origin へ push される')
+      for (const k of OUTER_GIT_VARS) delete process.env[k]
+      assert.deepEqual(dummy.snapshot(), before, '呼び出し元のリポジトリは refs・config・HEAD・index とも変わらない')
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+      if (sb) rmSync(sb.root, { recursive: true, force: true })
+      rmSync(dummy.root, { recursive: true, force: true })
     }
   })
 }
