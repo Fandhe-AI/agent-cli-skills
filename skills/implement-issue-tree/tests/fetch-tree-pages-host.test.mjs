@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { runScript, BASE_ARGS, importDefinitions, source } from './lib/stub-run.mjs'
 import { treePagesFetchReply, treePageReply } from './lib/signed-output.mjs'
+import { filterOfPrompt, requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
 
 const LEAVES = [2, 3, 4, 5]
 const truth = () => [
@@ -212,8 +213,8 @@ function runTaskTree(bodies) {
       if (isPage(label)) return treePageReply(prompt, parts[pageOf(prompt) - 1], TSV)
       if (label === 'plan:issue-tree-release') return { ok: true }
       if (label.startsWith('plan:declared-deps')) {
-        const filter = /--jq '([^']*)'\) && printf/.exec(prompt)[1]
-        const numbers = /for n in ([0-9 ]+); do/.exec(prompt)[1].trim().split(' ').map(Number)
+        const filter = filterOfPrompt(prompt)
+        const numbers = requestedNumbersOf(prompt)
         return {
           entries: numbers.map((number) => {
             const out = JSON.parse(execFileSync('jq', ['-c', filter], { input: JSON.stringify({ number, body: bodies[number] ?? '' }) }).toString())
