@@ -24,6 +24,12 @@
 //       括弧・カンマ式の最後・条件式の枝・論理式は親の位置を引き継ぎ、配列リテラルの要素は配列の位置で判定する
 //       （配列を object にしてよいのは length と、第 1 引数が関数式か束縛された関数の反復メソッドだけ）。それ以外の位置
 //       （計算キー・in・比較・+・テンプレート・タグ・typeof・自由変数や名前空間の関数の引数など）はすべて拒否する
+//       派生の判定: 自由変数の別名は、束縛を作るすべての形（宣言・代入・引数や分割代入の既定値・入れ子のパターン・
+//       for-in / for-of の頭部）について、パターンと値の式の組で判定し、用途で 2 つに分ける。(a) の呼び出し先には広い派生
+//       （値の式に自由変数を 1 つでも含めば、パターンが束縛する名前すべてを別名とみなす。偽陽性の側）を使う。(b) の名前空間
+//       には狭い派生（値の式の構造だけを見て、自由変数そのもの・メンバー連鎖・配列 / オブジェクトリテラルの要素・条件式の
+//       枝が自由変数を根に持つときだけ別名とみなす。呼び出しの結果は別名にしない）を使う。(b) に広い派生を使うと、
+//       Object.keys(o) や args.x から作った配列の .map(f) まで名前空間の呼び出しとして拒否してしまう（実物の stage1 で 44 件）
 // 保証しないこと（残るリスク）:
 // - 直接の関数式と追跡済みの束縛については、許可リスト外の位置をすべて拒否する。残るのは追跡外の別名だけで、
 //   束縛された関数の引数・オブジェクトのプロパティ・配列の要素・戻り値を経た関数値（function g(x){return `${x}`}g(f)・
@@ -298,7 +304,7 @@ function analyze(ast, goal) {
   const sites = []
   const aliases = [] // [別名の宣言 | 代入先の識別子, 値の識別子]（const a = f / a = f）
   const assignedFns = [] // 後から関数式を代入される識別子（let a; a = () => 1）
-  const derivedCands = [] // [束縛 | 代入先の識別子, 初期値のメンバー連鎖 | 識別子]（const S = String・const log = console.log）
+  const derivedCands = [] // [束縛を作るパターン（識別子・分割代入）, 値の式]（宣言・代入・既定値・for-in / for-of の頭部）
   const observed = [] // 関数の名前・ソースを観測し得る構文（受け手を問わない一律の拒否）
   // script ゴールの包み関数（検証器が足したもの。入力の関数式ではない）
   const wrapper = goal === 'script' ? ast.body[0].expression : null
@@ -317,9 +323,14 @@ function analyze(ast, goal) {
     else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && isFunctionValue(n.right)) assignedFns.push(n.left)
     // 既定値が関数の束縛（function f(g = () => 1)・const {g = () => 1} = o）も関数値を受け取り得る
     else if (n.type === 'AssignmentPattern' && n.left.type === 'Identifier' && isFunctionValue(n.right)) assignedFns.push(n.left)
-    // 分割代入（const {log} = console）は、取り出した束縛すべてを候補にする
-    if (n.type === 'VariableDeclarator' && n.init && (n.init.type === 'Identifier' || n.init.type === 'MemberExpression')) for (const id of boundIds(n.id)) derivedCands.push([id, n.init])
-    else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && (n.right.type === 'Identifier' || n.right.type === 'MemberExpression')) derivedCands.push([n.left, n.right])
+    // 束縛を作るすべての形（宣言・代入・引数や分割代入の既定値・for-in / for-of の頭部）を、パターンと値の式の組で集める。
+    // 入れ子の既定値は AssignmentPattern として別に集まる
+    if (n.type === 'VariableDeclarator' && n.init) derivedCands.push([n.id, n.init])
+    else if (n.type === 'AssignmentExpression' && n.operator === '=') derivedCands.push([n.left, n.right])
+    else if (n.type === 'AssignmentPattern') derivedCands.push([n.left, n.right])
+    else if ((n.type === 'ForOfStatement' || n.type === 'ForInStatement') && n.left) {
+      derivedCands.push([n.left.type === 'VariableDeclaration' ? n.left.declarations[0].id : n.left, n.right])
+    }
     const seen = observeSite(n)
     if (seen) observed.push({ why: seen, start: n.start })
     // 直接の関数式・アローは常に、識別子は関数束縛に解決されたときだけ（解決後に絞る）、許可リスト外の位置を拒否する
@@ -358,21 +369,68 @@ function analyze(ast, goal) {
       }
     }
   }
-  // 自由変数（とそのメンバー連鎖）を初期値に持つ束縛は、自由変数の別名として扱う（const S = String; S(f) を (a) で通さない）
+  // 自由変数の派生は用途で 2 つに分ける（冒頭の「派生の判定」）。
+  // 広い派生（(a) の呼び出し先の判定にだけ使う）: 値の式に自由変数（または派生した束縛）の識別子が 1 つでも含まれる束縛は、
+  // パターンが束縛する名前をすべて自由変数の別名とみなす（const S = String・function f(S = String)・
+  // const {String: S} = globalThis・[S] = [String] を (a) で通さない。偽陽性の側に倒す）。関数式・アローの中身は値の式に
+  // 数えない（値は新しい関数）
   const derived = new Set()
   const rootOf = (e) => {
     while (e.type === 'MemberExpression') e = e.object
     return e
   }
   const isGlobal = (id) => id.type === 'Identifier' && (res.get(id) === 'free' || derived.has(declOf(id)))
+  const valueIds = (e, out) => {
+    if (!e || typeof e.type !== 'string' || isFunctionValue(e)) return out
+    if (e.type === 'Identifier') out.push(e)
+    else if (e.type === 'MemberExpression') {
+      valueIds(e.object, out)
+      if (e.computed) valueIds(e.property, out)
+    } else if (e.type === 'Property') {
+      if (e.computed) valueIds(e.key, out)
+      valueIds(e.value, out)
+    } else {
+      for (const k of Object.keys(e)) {
+        if (POSITION_KEYS.has(k)) continue
+        const v = e[k]
+        if (Array.isArray(v)) v.forEach((x) => valueIds(x, out))
+        else if (v && typeof v.type === 'string') valueIds(v, out)
+      }
+    }
+    return out
+  }
+  const cands = derivedCands.map(([pattern, value]) => [boundIds(pattern).map(declOf).filter(Boolean), valueIds(value, [])])
   for (let changed = true; changed;) {
     changed = false
-    for (const [target, init] of derivedCands) {
-      const t = declOf(target)
-      if (t && !derived.has(t) && isGlobal(rootOf(init))) {
-        derived.add(t)
-        changed = true
-      }
+    for (const [decls, ids] of cands) {
+      if (decls.every((t) => derived.has(t)) || !ids.some(isGlobal)) continue
+      for (const t of decls) derived.add(t)
+      changed = true
+    }
+  }
+  // 狭い派生（(b) の名前空間の判定にだけ使う）: 値の式の構造だけを見て、自由変数そのもの・そのメンバー連鎖・配列 /
+  // オブジェクトリテラルの要素・条件式 / 論理式の枝・カンマ式の最後が自由変数（または狭く派生した束縛）を根に持つときだけ
+  // 名前空間の別名とみなす（const R = Reflect・const {log} = console）。呼び出しの結果などの新しい値は別名にしない
+  // （const xs = Object.keys(o); xs.map(f) を名前空間の呼び出しとして拒否しない）
+  const nsDerived = new Set()
+  const isNs =(id) => id.type === 'Identifier' && (res.get(id) === 'free' || nsDerived.has(declOf(id)))
+  const nsRoots = (e, out) => {
+    if (!e) return out
+    if (e.type === 'Identifier' || e.type === 'MemberExpression') out.push(rootOf(e))
+    else if (e.type === 'ArrayExpression') e.elements.forEach((x) => nsRoots(x && x.type === 'SpreadElement' ? x.argument : x, out))
+    else if (e.type === 'ObjectExpression') e.properties.forEach((x) => nsRoots(x.type === 'SpreadElement' ? x.argument : x.value, out))
+    else if (e.type === 'ConditionalExpression') { nsRoots(e.consequent, out); nsRoots(e.alternate, out) }
+    else if (e.type === 'LogicalExpression') { nsRoots(e.left, out); nsRoots(e.right, out) }
+    else if (e.type === 'SequenceExpression') nsRoots(e.expressions[e.expressions.length - 1], out)
+    return out
+  }
+  const nsCands = derivedCands.map(([pattern, value]) => [boundIds(pattern).map(declOf).filter(Boolean), nsRoots(value, [])])
+  for (let changed = true; changed;) {
+    changed = false
+    for (const [decls, ids] of nsCands) {
+      if (decls.every((t) => nsDerived.has(t)) || !ids.some(isNs)) continue
+      for (const t of decls) nsDerived.add(t)
+      changed = true
     }
   }
   const isFnValue = (e) => isFunctionValue(e) || (e.type === 'Identifier' && fnDecls.has(res.get(e)))
@@ -388,7 +446,7 @@ function analyze(ast, goal) {
     if (!CALLBACK_METHODS.has(k)) return false
     if (SECOND_ARG_ONLY.has(k) && call.arguments[1] !== child) return false
     if (SELF_CALL.has(k)) return isFnValue(c.object)
-    if (!isGlobal(rootOf(c.object))) return true
+    if (!isNs(rootOf(c.object))) return true
     return c.object.type === 'Identifier' && res.get(c.object) === 'free' && NAMESPACE_OK.has(c.object.name)
   }
   // 関数値を要素に持つ配列の反復: 第 1 引数が関数式か、束縛された（自由変数の別名でない）識別子のとき

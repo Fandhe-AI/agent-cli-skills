@@ -197,6 +197,16 @@ const CASES = [
   ['pos-fn-String-alias', 'const S=String;use(S(()=>1))', 'const S=String;use(S(()=>1))', false, 'mismatch', /関数式が CallExpression\.arguments（許可されない呼び出し先）/],
   ['pos-bound-member-alias', 'const lg=console.log;const longName=()=>1;lg(longName)', 'const lg=console.log;const a=()=>1;lg(a)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
   ['pos-bound-destructured-global', 'const {log:lg}=console;const longName=()=>1;lg(longName)', 'const {log:lg}=console;const a=()=>1;lg(a)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  // 自由変数の別名は束縛を作るすべての形で判定する（既定値・分割代入・配列の分割代入・入れ子・for-of）
+  ['pos-derived-default-param', 'function f(S=String){const longName=()=>1;return S(longName)}use(f)', 'function f(S=String){const a=()=>1;return S(a)}use(f)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-derived-destructure-globalThis', 'const {String:S}=globalThis;const longName=()=>1;use(S(longName))', 'const {String:S}=globalThis;const a=()=>1;use(S(a))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-derived-array-assign', 'let S;[S]=[String];const longName=()=>1;use(S(longName))', 'let S;[S]=[String];const a=()=>1;use(S(a))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-derived-object-assign-default', 'let S;({S}={S:String});const longName=()=>1;use(S(longName))', 'let S;({S}={S:String});const a=()=>1;use(S(a))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-derived-nested-default', 'const {a:[S=String]=[]}={};const longName=()=>1;use(S(longName))', 'const {a:[S=String]=[]}={};const b=()=>1;use(S(b))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-derived-for-of', 'for(const S of [String]){const longName=()=>1;use(S(longName))}', 'for(const S of [String]){const a=()=>1;use(S(a))}', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  // 名前空間の別名（狭い派生）: const R = Reflect は名前空間。呼び出しの結果から作った配列は名前空間にしない
+  ['pos-ns-alias-reflect-get', 'const R=Reflect;const longName=()=>1;use(R.get(o,longName))', 'const R=Reflect;const a=()=>1;use(R.get(o,a))', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
+  ['pos-ns-call-result-map-ok', 'const xs=Object.keys(o);const longName=(x)=>x;use(xs.map(longName))', 'const xs=Object.keys(o);const a=(b)=>b;use(xs.map(a))', true, 'match'],
   ['pos-bound-alias-of-alias', 'const S=String;const T=S;const longName=()=>1;use(T(longName))', 'const S=String;const T=S;const a=()=>1;use(T(a))', false, 'mismatch', /（許可されない呼び出し先）/],
   ['pos-bound-String-call', 'const longName=()=>1;use(String.call(null,longName))', 'const a=()=>1;use(String.call(null,a))', false, 'mismatch', /（許可されない呼び出し先）/],
   ['pos-bound-free-String', 'const longName=()=>1;use(String(longName))', 'const a=()=>1;use(String(a))', false, 'mismatch', /（許可されない呼び出し先）/],
@@ -206,12 +216,12 @@ const CASES = [
   ['pos-bound-free-callee', 'const longName=()=>1;foo(longName)', 'const a=()=>1;foo(a)', false, 'mismatch', /関数の束縛が CallExpression\.arguments（許可されない呼び出し先）/],
   // 許可される呼び出し先（束縛された関数・既知のコールバックメソッド・setTimeout 等・new Promise・Array.from）
   ['pos-args-allowed-ok', 'function pool(list,cb){return list.map(cb)}function run(xs){const longName=(x)=>x;const m=new Map();const st=new Set();xs.map(longName);xs.filter((x)=>x).forEach(longName);xs.reduce((a,b)=>a+b,0);Promise.resolve(1).then(longName).catch(()=>0).finally(()=>0);setTimeout(longName,1);setInterval(()=>0,1);queueMicrotask(()=>0);m.set("k",longName);st.add(longName);xs.push(longName);Array.from(xs,longName);"x".replace(/x/g,longName);[longName].map((g)=>g());[longName].forEach(pool);longName.call(null,longName);pool(xs,longName);return [new Promise((r)=>r(1)),pool(xs,(x)=>x)]}use(run)',
-   'function pool(a,b){return a.map(b)}function run(a){const b=(c)=>c;const c=new Map();const d=new Set();a.map(b);a.filter((e)=>e).forEach(b);a.reduce((e,f)=>e+f,0);Promise.resolve(1).then(b).catch(()=>0).finally(()=>0);setTimeout(b,1);setInterval(()=>0,1);queueMicrotask(()=>0);c.set("k",b);d.add(b);a.push(b);Array.from(a,b);"x".replace(/x/g,b);[b].map((e)=>e());[b].forEach(pool);b.call(null,b);pool(a,b);return [new Promise((e)=>e(1)),pool(a,(e)=>e)]}use(run)', true, 'match'],
+    'function pool(a,b){return a.map(b)}function run(a){const b=(c)=>c;const c=new Map();const d=new Set();a.map(b);a.filter((e)=>e).forEach(b);a.reduce((e,f)=>e+f,0);Promise.resolve(1).then(b).catch(()=>0).finally(()=>0);setTimeout(b,1);setInterval(()=>0,1);queueMicrotask(()=>0);c.set("k",b);d.add(b);a.push(b);Array.from(a,b);"x".replace(/x/g,b);[b].map((e)=>e());[b].forEach(pool);b.call(null,b);pool(a,b);return [new Promise((e)=>e(1)),pool(a,(e)=>e)]}use(run)', true, 'match'],
   ['pos-bound-replace-first-arg', 'const longName=()=>1;use("x".replace(longName,"y"))', 'const a=()=>1;use("x".replace(a,"y"))', false, 'mismatch', /（許可されない呼び出し先）/],
 
   // 許可される位置（呼ぶ・引数に渡す・代入・return・.call 等・既定値・配列リテラル経由の引数・置換関数）
   ['pos-allowed-ok', 'function f(longCb){return longCb()}const longName=()=>1;let other;other=longName;const o={m:longName,longName};use(f(longName),(()=>2)(),longName.call(null),longName.apply(null,[]),longName.bind(null),longName.length,o,other,[longName].map((g)=>g()),"x".replace(/x/g,()=>"y"),c?longName:null,c||longName);function g(h=()=>1){return h}use(g,function(){return longName})',
-   'function f(a){return a()}const b=()=>1;let c0;c0=b;const o={m:b,longName:b};use(f(b),(()=>2)(),b.call(null),b.apply(null,[]),b.bind(null),b.length,o,c0,[b].map((g)=>g()),"x".replace(/x/g,()=>"y"),c?b:null,c||b);function g(h=()=>1){return h}use(g,function(){return b})', true, 'match'],
+    'function f(a){return a()}const b=()=>1;let c0;c0=b;const o={m:b,longName:b};use(f(b),(()=>2)(),b.call(null),b.apply(null,[]),b.bind(null),b.length,o,c0,[b].map((g)=>g()),"x".replace(/x/g,()=>"y"),c?b:null,c||b);function g(h=()=>1){return h}use(g,function(){return b})', true, 'match'],
   ['pos-new-callee-ok', 'const longName=function(){};use(new longName())', 'const a=function(){};use(new a())', true, 'match'],
 
   // 例外は受け手が構文上必ず数値になる式だけ（数値リテラル・単項 + - ~・算術とビット演算の二項式）
