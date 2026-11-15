@@ -127,11 +127,22 @@ fix(api): レスポンスのエラーハンドリングを修正
 
 Step 2 のセキュリティチェックで HIGH / MEDIUM が無いと確かめた後にだけ、現在のブランチをリモートへ push する（対処後に再試行する場合は、対処後の差分で Step 2 をやり直してから push する）。push した時点で差分がリモートへ公開されるため、Step 2 より前や HIGH / MEDIUM が残っている間は `git push` を実行しない。
 
+ベースブランチの判定を push より前に置き、1 つのブロックで完結させる。ベースブランチ（既定は `gh repo view` が返す既定ブランチ。リポジトリの規約が `develop` 等なら `base=` をその名前に置き換える）の上にいるとき、detached HEAD のとき、ベースブランチ名または現在のブランチ名を取得できないときは、push せずに `exit 1` で止めて報告する。
+
 ```bash
+base="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)" || base=""
+branch="$(git symbolic-ref --quiet --short HEAD)" || branch=""
+if [ -z "${base}" ] || [ -z "${branch}" ]; then
+  echo "ベースブランチまたは現在のブランチ名を取得できない（detached HEAD を含む）。push しない" >&2
+  exit 1
+fi
+if [ "${branch}" = "${base}" ]; then
+  echo "現在のブランチがベースブランチ（${base}）そのもの。push しない" >&2
+  exit 1
+fi
 git push -u origin HEAD
 ```
 
-- 現在のブランチがベースブランチ（`main` 等）そのものなら、push せずに止めて報告する。
 - push が拒否された場合（non-fast-forward・保護ルール・hook 等）は、`--force`・`--force-with-lease` を含む force 系の push で上書きしない。拒否の内容を報告して止める。
 - 同名のブランチが既にリモートにあっても、同じコマンドで push してよい（送る差分が無ければ何も変わらない）。
 
@@ -139,7 +150,7 @@ push が成功したら PR を作成する。
 
 ```bash
 gh pr create \
-  --base main \
+  --base <base> \
   --title "type(scope): subject" \
   --body "$(cat <<'EOF'
 ...
