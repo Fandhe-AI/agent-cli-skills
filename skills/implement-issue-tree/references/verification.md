@@ -355,7 +355,7 @@ node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
 の状態ファイル復元。`{ runs, headSha }` を返す） / `optinRecordMarkerLine`（sha・result・command の順で束縛） /
 `renderOptinRecordSection`（`<sha>`/`<result>` プレースホルダのテンプレート） /
 `classifyOptinRecordGate`（headRefOid の検証を含む） / `combineOptinRecordGate`（`fixOptin`・
-`gateHeadSha` の sha 一致判定を含む） / `observeOptinRecord`（`observe-pr.sh --mode optin-record` の封筒の照合。`--json body,headRefOid` の
+`gateHeadSha` の sha 一致判定を含む） / `observeOptinRecord`（`observe-pr.sh --mode optin-record` の封筒の照合と、合格時の独立な 2 回目の観測との一致 `pairOptinRecordObservations`。`--json body,headRefOid` の
 単一取得はスクリプト内） / `mergeExecutePrompt` の `expectedHeadSha` パラメータ）を変更した場合の確認手順。
 
 ```bash

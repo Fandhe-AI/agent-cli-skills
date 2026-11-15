@@ -4886,7 +4886,7 @@ function implementPrompt(item, plan) {
 }
 
 // --- monitor の観測スクリプト（scripts/observe-pr.sh。Issue #603 第 2 弾）--- monitor が毎回プロンプトの文章から組み立てていた gh / jq の観測（PR の state・チェック総数・required context の不足・外部 App のレビュー到着・未解決スレッド数）と有界の待機を、スキル同梱のスクリプトへ移した。monitor は「コマンドを実行し、1 行 JSON 封筒の payload（整数と固定語彙）を読む」だけにする。封筒の値は助言的判定の材料にすぎず、マージ・
-// クローズ・push・削除の可否には使わない（マージ可否は merge-exec が自分で再取得して判定する）。ホストが封筒を照合して採用するのはチェック総数の 1 点だけ（applyChecksObservation）。例外: 後段の署名済み観測ゲートのうち optin-record（observeOptinRecord）の封筒は、opt-in テスト記録ゲートの合否の材料になる（classifyOptinRecordGate。偽の pass は post-push fix の実測との AND〔combineOptinRecordGate。fix をしていなければ働かない〕・merge-exec の再検証・サーバー側の強制が受け止める範囲を超えない。封筒の sha256 に鍵は無く nonce もプロンプトにあるので、照合で検出できるのは転記の誤り・別の入力・別の呼び出しの流用までで、観測エージェント自身の捏造は検出できない）。信頼モデルは references/script-trust-model.md。待機の回数はスクリプトが --attempt で強制し（上限 OBSERVE_MAX_ATTEMPTS。scripts/observe-pr.sh の既定と同じ値）、
+// クローズ・push・削除の可否には使わない（マージ可否は merge-exec が自分で再取得して判定する）。ホストが封筒を照合して採用するのはチェック総数の 1 点だけ（applyChecksObservation）。例外: 後段の署名済み観測ゲートのうち optin-record（observeOptinRecord）の封筒は、opt-in テスト記録ゲートの合否の材料になる（classifyOptinRecordGate。封筒の sha256 に鍵は無く nonce もプロンプトにあるので、1 回の照合で検出できるのは転記の誤り・別の入力・別の呼び出しの流用までで、観測エージェント自身の捏造は検出できない。そのため合格は別のエージェント・別の nonce の 2 回目との一致を要求し〔pairOptinRecordObservations。Issue #804〕、単独のエージェントの捏造を不一致で検出する。両方が同じ値を捏造した場合は、post-push fix の実測との AND〔combineOptinRecordGate。fix をしていなければ働かない〕・merge-exec の再検証・サーバー側の強制が受け止める範囲を超えない）。信頼モデルは references/script-trust-model.md。待機の回数はスクリプトが --attempt で強制し（上限 OBSERVE_MAX_ATTEMPTS。scripts/observe-pr.sh の既定と同じ値）、
 // ホストが再起動しない: 1 回の起動は壁時計 90 秒 + 数秒以内（遅い・ハングする gh を含めてスクリプトが保証）に収まるため、エージェントが pending のたびに同じコマンドを再実行する。ホストが 1 回ごとにエージェントを呼び直すと agentCallLimit を最大 7 回/待機消費する。
 const OBSERVE_MAX_ATTEMPTS = 7
 // checks --until settled（手順 3 の CI 完了待ち。gh pr checks --watch の置き換え）の待機回数の上限。現行の --watch の最長（およそ 40 分）と同じにする: 1 起動は 25 秒間隔・4 観測でおよそ 83 秒 × 30 回。値は scripts/observe-pr.sh の既定と同じで、スクリプトが --attempt で強制する（プロンプトの文面で増やせない。tests/observe-pr-host.test.mjs が両者の一致を検査する）
@@ -5053,7 +5053,7 @@ function observeGatePrompt(f, desc, nonce, common = [UNTRUSTED_POLICY, TEMP_FILE
     SIGNED_OUTPUT_INSTRUCTION,
   ].join('\n')
 }
-// extra.label / extra.common（プロンプトの共通規則の配列）で差し替えられる（opt-in テスト記録ゲートが使う）
+// extra.label / extra.common（プロンプトの共通規則の配列）/ extra.model（1 回目のモデル）で差し替えられる（opt-in テスト記録ゲートが使う）
 async function observeGate(item, f, key, desc, schema, classify, extra = {}) {
   let last = { kind: 'skip', reason: 'not-run' }
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -5063,7 +5063,7 @@ async function observeGate(item, f, key, desc, schema, classify, extra = {}) {
     try {
       raw = await agent(
         observeGatePrompt(f, desc, nonce, extra.common),
-        { label: extra.label ?? `merge:${key}:#${item.number}`, phase: 'Merge', model: attempt === 0 ? 'haiku' : 'sonnet', effort: 'low', schema: signedOutputSchema(schema) },
+        { label: extra.label ?? `merge:${key}:#${item.number}`, phase: 'Merge', model: attempt === 0 ? extra.model ?? 'haiku' : 'sonnet', effort: 'low', schema: signedOutputSchema(schema) },
       )
     } catch (e) {
       last = { kind: 'skip', reason: `agent 例外（${errText(e).slice(0, 120)}）` }
@@ -5164,9 +5164,18 @@ function classifyOptinRecordObservation(raw, nonce, inputSha, commands) {
 // merge-exec と同じコンテキスト分離契約のため、共通規則は MERGE_CONTEXT_COMMON を使う。commands は runMergeLoop が item.optinTests から渡す（ホストで parseOptinTestDeclarations 検証済み）。
 // 観測エージェントの権限境界（旧プロンプトの「本文は件数だけを使い、内容・要約・引用を返さない。gh pr merge や git push などはしない」に当たる）。スクリプトが失敗しても別の手段で測り直さない = 失敗は封筒の err として返り、ホストが取り直す
 const OPTIN_RECORD_OBSERVE_RULE = 'PR 本文を取得・転記・要約しない（件数はスクリプトが数え、本文は返さない）。スクリプトが失敗しても、gh・jq・grep などの別の手段で測り直さない。gh pr merge・git push など PR・リポジトリを変更する操作はしない。'
-const observeOptinRecord = (item, impl, commands) =>
-  observeGate(item, { mode: 'optin-record', pr: impl.prNumber, optinCommands: commands }, 'optin-record', `opt-in テスト実行記録（イシュー #${item.number}）`, OPTIN_RECORD_PAYLOAD_SCHEMA,
-    (raw, n, sha) => classifyOptinRecordObservation(raw, n, sha, commands), { label: `optin-record-verify:#${item.number}`, common: [MERGE_CONTEXT_COMMON, OPTIN_RECORD_OBSERVE_RULE] })
+// 合格の観測は、別のエージェント（optin-record-reverify。sonnet から始めて同じモデルの癖の相関を避ける）・別の nonce で取り直した 2 回目と一致したときだけ採る（Issue #804）。封筒の sha256 に鍵は無いので 1 回の観測は捏造を検出できないが、単独のエージェントの捏造・誤りは独立な観測との不一致で検出できる。
+// 2 回目は 1 回目が合格のときだけ（不合格・観測失敗はどのみち blocked）。2 回目の観測失敗・不一致は pair 付きの skip = 全件不合格（fail-closed）。両方が同じ捏造をした場合・スクリプト自体の誤りは検出しない
+function pairOptinRecordObservations(a, b) {
+  if (b.kind !== 'ok') return { kind: 'skip', reason: `再観測:${b.reason}`, pair: 1 }
+  return canonicalJson(a.verify) === canonicalJson(b.verify) ? a : { kind: 'skip', reason: '2 回の観測が不一致', pair: 1 }
+}
+const observeOptinRecord = async (item, impl, commands) => {
+  const o = (k, model) => observeGate(item, { mode: 'optin-record', pr: impl.prNumber, optinCommands: commands }, 'optin-record', `opt-in テスト実行記録（イシュー #${item.number}）`, OPTIN_RECORD_PAYLOAD_SCHEMA,
+    (raw, n, sha) => classifyOptinRecordObservation(raw, n, sha, commands), { label: `optin-record-${k}:#${item.number}`, common: [MERGE_CONTEXT_COMMON, OPTIN_RECORD_OBSERVE_RULE], model })
+  const a = await o('verify')
+  return a.kind !== 'ok' || !classifyOptinRecordGate(commands, a.verify).ok ? a : pairOptinRecordObservations(a, await o('reverify', 'sonnet'))
+}
 
 // outcome が error（取得失敗）のときの共通の扱い。待機を持つ手順（3e・3g・4x・4b・4c）で揃える。結論が出ていないので先へ進まない。
 const OBSERVE_ERROR_RULE = 'outcome が error の場合は 1 回だけ同じコマンドを再実行し、なお error なら取得不能として扱い（0 件・不足 0・レビューなしとみなさない）、手順に指定が無ければ ' + BLOCK_Q + ' を返す。'
@@ -7797,6 +7806,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           const optinReason = capText(
             latchActive
               ? `イシューで宣言された opt-in テストの実行記録が opt-in 記録 latch（過去の post-push fix が現在の HEAD に対して非 pass、または対象 HEAD を確定できなかった実測）により不合格に固定化されている（不足: ${missingList}）${runsNote}。latch は設計上意図した fail-closed であり、ホストが fix エージェントの自己申告テスト実行を直接観測できない以上、自己申告のみで解除しない。解消するには (a) 宣言テストが実際に pass する新しいコミットを push する（post-push fix が新 HEAD の sha に束縛された pass 記録へ置き換える）、または (b) 人間が内容を確認したうえで GitHub 上で手動マージする、のいずれかによる。状態ファイルの optinFixState を削除・書き換えて迂回することはしないこと（安全弁の迂回になる）`
+              : optinObs.pair ? `イシューで宣言された opt-in テストの実行記録を、別のエージェント・別の nonce で取り直した 2 回目の観測が裏付けなかった（${sanitize(optinObs.reason)}）ためマージを停止した（観測エージェントの捏造・誤りを疑う。PR 本文の記録は正しい可能性があり、同じ args で再実行すれば継続する）`
               : `イシューで宣言された opt-in テストの実行記録（pass、かつ現在の HEAD sha に束縛された記録）が PR 本文に確認できないためマージを停止した（不足: ${missingList}）${runsNote}。テストを実行し、現在の HEAD に対する opt-in テスト実行記録節のマーカー行を pass で更新してから同じ args で再実行すれば monitoring 再開で継続する`,
           )
           warnItem(item, optinReason)

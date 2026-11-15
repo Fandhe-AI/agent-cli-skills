@@ -5063,7 +5063,7 @@ let raw
 try{
 raw=await agent(
 observeGatePrompt(f,desc,nonce,extra.common),
-{label:extra.label??`merge:${key}:#${item.number}`,phase:'Merge',model:attempt===0?'haiku':'sonnet',effort:'low',schema:signedOutputSchema(schema)},
+{label:extra.label??`merge:${key}:#${item.number}`,phase:'Merge',model:attempt===0?extra.model??'haiku':'sonnet',effort:'low',schema:signedOutputSchema(schema)},
 )
 }catch(e){
 last={kind:'skip',reason:`agent 例外（${errText(e).slice(0, 120)}）`}
@@ -5164,9 +5164,18 @@ return{kind:'ok',reason:'',verify:{headRefOid:p.headSha,counts:p.pass.map((x,i)=
 
 
 const OPTIN_RECORD_OBSERVE_RULE='PR 本文を取得・転記・要約しない（件数はスクリプトが数え、本文は返さない）。スクリプトが失敗しても、gh・jq・grep などの別の手段で測り直さない。gh pr merge・git push など PR・リポジトリを変更する操作はしない。'
-const observeOptinRecord=(item,impl,commands)=>
-observeGate(item,{mode:'optin-record',pr:impl.prNumber,optinCommands:commands},'optin-record',`opt-in テスト実行記録（イシュー #${item.number}）`,OPTIN_RECORD_PAYLOAD_SCHEMA,
-(raw,n,sha)=>classifyOptinRecordObservation(raw,n,sha,commands),{label:`optin-record-verify:#${item.number}`,common:[MERGE_CONTEXT_COMMON,OPTIN_RECORD_OBSERVE_RULE]})
+
+
+function pairOptinRecordObservations(a,b){
+if(b.kind!=='ok')return{kind:'skip',reason:`再観測:${b.reason}`,pair:1}
+return canonicalJson(a.verify)===canonicalJson(b.verify)?a:{kind:'skip',reason:'2 回の観測が不一致',pair:1}
+}
+const observeOptinRecord=async(item,impl,commands)=>{
+const o=(k,model)=>observeGate(item,{mode:'optin-record',pr:impl.prNumber,optinCommands:commands},'optin-record',`opt-in テスト実行記録（イシュー #${item.number}）`,OPTIN_RECORD_PAYLOAD_SCHEMA,
+(raw,n,sha)=>classifyOptinRecordObservation(raw,n,sha,commands),{label:`optin-record-${k}:#${item.number}`,common:[MERGE_CONTEXT_COMMON,OPTIN_RECORD_OBSERVE_RULE],model})
+const a=await o('verify')
+return a.kind!=='ok'|| !classifyOptinRecordGate(commands,a.verify).ok?a:pairOptinRecordObservations(a,await o('reverify','sonnet'))
+}
 
 
 const OBSERVE_ERROR_RULE='outcome が error の場合は 1 回だけ同じコマンドを再実行し、なお error なら取得不能として扱い（0 件・不足 0・レビューなしとみなさない）、手順に指定が無ければ '+BLOCK_Q+' を返す。'
@@ -7797,6 +7806,7 @@ const latchActive=isOptinLatchActive(lastFixOptin,optinGateHeadSha)
 const optinReason=capText(
 latchActive
 ?`イシューで宣言された opt-in テストの実行記録が opt-in 記録 latch（過去の post-push fix が現在の HEAD に対して非 pass、または対象 HEAD を確定できなかった実測）により不合格に固定化されている（不足: ${missingList}）${runsNote}。latch は設計上意図した fail-closed であり、ホストが fix エージェントの自己申告テスト実行を直接観測できない以上、自己申告のみで解除しない。解消するには (a) 宣言テストが実際に pass する新しいコミットを push する（post-push fix が新 HEAD の sha に束縛された pass 記録へ置き換える）、または (b) 人間が内容を確認したうえで GitHub 上で手動マージする、のいずれかによる。状態ファイルの optinFixState を削除・書き換えて迂回することはしないこと（安全弁の迂回になる）`
+:optinObs.pair?`イシューで宣言された opt-in テストの実行記録を、別のエージェント・別の nonce で取り直した 2 回目の観測が裏付けなかった（${sanitize(optinObs.reason)}）ためマージを停止した（観測エージェントの捏造・誤りを疑う。PR 本文の記録は正しい可能性があり、同じ args で再実行すれば継続する）`
 :`イシューで宣言された opt-in テストの実行記録（pass、かつ現在の HEAD sha に束縛された記録）が PR 本文に確認できないためマージを停止した（不足: ${missingList}）${runsNote}。テストを実行し、現在の HEAD に対する opt-in テスト実行記録節のマーカー行を pass で更新してから同じ args で再実行すれば monitoring 再開で継続する`,
 )
 warnItem(item,optinReason)
