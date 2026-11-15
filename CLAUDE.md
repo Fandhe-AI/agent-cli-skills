@@ -18,6 +18,7 @@ skills/                               -- スキル本体（各ディレクトリ
     tests/                            -- node:test 回帰テスト（新規作成・--root 両経路とも scripts/ のスクリプトを直接実行・引数検証・edit 失敗の終了コード伝播・ライブラリ契約・Step 6 の呼び出しフェンス検査と 3 レイアウト探索・プレースホルダー残りで中止・ページング・一時ファイル削除・Step 3 雛形への --root マージ・コードフェンス内の行を見出しと誤認しない／閉じ忘れフェンスで中止・update-issue-tree の管理マーカー区間と退避 `<details>` を壊さない／マーカー不整合・同名見出しの重複で中止）
   create-plan/
   create-pr/
+    tests/                            -- node:test 回帰テスト（SKILL.md の静的検査: git push が Step 2 のセキュリティチェックより後・gh pr create より前・前提条件に push 済みの要求が無い・force 系の push をしない・sandbox 節の git push と .git 書き込み）
   implement-issue/
   implement-issue-tree/
     references/                       -- 自動マージ設計・検証手順・復旧・レポート書式・スクリプト実行の信頼モデル（script-trust-model.md）・テストの流し方と変異テストの使い方（testing.md）
