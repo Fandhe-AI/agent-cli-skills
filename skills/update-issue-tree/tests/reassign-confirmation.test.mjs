@@ -23,11 +23,24 @@ function section(n) {
   return m ? rest.slice(0, m.index + 1) : rest;
 }
 
+// Step 2 の非対話の扱いは 2 つの箇条書き (a) / (b) に分かれる。それぞれの本文を取り出す。
+// (b) の下には入れ子の依存の扱いが続くため、(b) は次の非入れ子の行（空行）までを返す。
+function nonInteractiveBranches() {
+  const s = section(2);
+  const aStart = s.indexOf('- (a) ');
+  const bStart = s.indexOf('- (b) ');
+  assert.ok(aStart >= 0, 'Step 2 に (a) の箇条書きが無い');
+  assert.ok(bStart > aStart, 'Step 2 に (b) の箇条書きが無い、または (a) より前にある');
+  const bEnd = s.indexOf('\n\n', bStart);
+  assert.ok(bEnd > bStart, '(b) の箇条書きの終端が無い');
+  return { before: s.slice(0, aStart), a: s.slice(aStart, bStart), b: s.slice(bStart, bEnd), after: s.slice(bEnd) };
+}
+
 test('Step 3 は「確認なしで」が返答にならない明示承認の定型文を持つ', () => {
   const s = section(3);
   assert.match(s, /この会話の中でユーザーの明示の返答を得るまで `scripts\/reassign-sub-issue\.sh`/);
   assert.match(s, /起動時の指示に含まれる「確認なしで」「そのまま進めて」等は、この確認の返答にならない/);
-  assert.match(s, /返答を得られない環境（非対話実行）では実行せずに/);
+  assert.match(s, /返答を得られない環境（非対話実行）のうち、起動時に確認を省く明示がある場合（Step 2 の \(b\)）では、実行せずに/);
 });
 
 test('Step 3 に起動時の確認省略の明示を承認とみなす文が無い', () => {
@@ -56,23 +69,58 @@ test('Step 2 の起動時の確認省略は付け替え以外の変更に限ら�
   assert.doesNotMatch(s, /に限り、確認を省いて続行してよい/);
 });
 
-// 非対話で付け替えの返答が得られないときに止めるのは付け替えだけ。起動時に「確認なしで」がある
-// ランが、付け替えに依存しない承認済みの後続手順（Step 5〜8）へ一度も届かない形に戻さない
-// （PR #812 の Bugbot 指摘）。起動時の明示が無い非対話ランは従来どおり何も書かずに止まる。
-test('Step 2 は非対話で付け替えの返答が無いとき付け替えだけをスキップし承認済みの他の手順を続ける', () => {
-  const s = section(2);
-  assert.match(s, /非対話で付け替えの返答が得られない場合は付け替え（Step 3 \/ Step 4）だけをスキップし/);
-  assert.match(s, /起動時の指示で承認済みの付け替えに依存しない手順は続ける/);
-  assert.match(s, /明示があるときは、非対話で付け替えの返答が得られなくても全書き込みは止めない/);
+// 非対話で付け替えの返答が得られないときの扱いは、起動時の指示に確認を省く明示があるかで分かれる。
+// (a) 明示が無ければ何も書かずに止まる。(b) 明示があれば付け替えだけをスキップして続ける。
+// スキップと続行の文が (a) の後に結びつかず、後の文が勝って承認なしの書き込みが走る形に戻さない
+// （PR #812 の Bugbot 指摘）。
+test('Step 2 の非対話の扱いは起動時の明示の有無で (a) / (b) に分かれる', () => {
+  const { before } = nonInteractiveBranches();
+  assert.match(before, /非対話実行）の扱いは、起動時の指示に確認を省く明示があるかで次の 2 つに分かれる。/);
 });
 
-test('Step 2 は起動時の省略の明示が無い非対話ランを従来どおり全書き込み停止にする', () => {
-  const s = section(2);
-  assert.match(s, /起動時の指示にこの確認を省くことの明示が無ければ、書き込みをせず確認事項を報告して止める/);
+test('Step 2 の (a) は明示が無い非対話実行で書き込まず止まり続行規則を適用しない', () => {
+  const { a } = nonInteractiveBranches();
+  assert.match(a, /^- \(a\) 起動時の指示に確認を省く明示が無い非対話実行/);
+  assert.match(a, /書き込みを一切せず、棚卸し対象と確認事項を報告して止める/);
+  assert.match(a, /以降の手順（Step 3〜8）へ進まない/);
+  assert.match(a, /\(b\) の続行規則は適用しない/);
+  // スキップ・続行の文は (a) の下に現れない
+  assert.doesNotMatch(a, /だけをスキップ/);
+  assert.doesNotMatch(a, /依存しない手順は続ける/);
+  assert.doesNotMatch(a, /全書き込みは止めない/);
 });
 
-test('Step 2 は後続手順ごとの付け替えへの依存を書く', () => {
+test('Step 2 の (b) は明示がある非対話実行で付け替えだけをスキップし承認済みの他の手順を続ける', () => {
+  const { b } = nonInteractiveBranches();
+  assert.match(b, /^- \(b\) 起動時の指示に確認を省く明示がある非対話実行/);
+  assert.match(b, /全書き込みは止めない/);
+  assert.match(b, /非対話で付け替えの返答が得られない場合は付け替え（Step 3 \/ Step 4）だけをスキップし/);
+  assert.match(b, /起動時の指示で承認済みの付け替えに依存しない手順は続ける/);
+  assert.match(b, /この \(b\) の場合にだけ適用する/);
+});
+
+test('スキップと続行の文は (b) の下にだけ現れ (a) と前置きには現れない', () => {
+  const { before, a, b, after } = nonInteractiveBranches();
+  for (const re of [
+    /非対話で付け替えの返答が得られない場合は付け替え（Step 3 \/ Step 4）だけをスキップし/,
+    /依存しない手順は続ける/,
+  ]) {
+    assert.match(b, re);
+    assert.doesNotMatch(before, re);
+    assert.doesNotMatch(a, re);
+    assert.doesNotMatch(after, re);
+  }
+});
+
+test('Step 2 は後続手順ごとの付け替えへの依存を (b) の入れ子として書く', () => {
   const s = section(2);
+  // 依存の扱いは (b) の箇条書き（先頭の行より深い入れ子）に収まり、(a) には無い
+  const { a, b } = nonInteractiveBranches();
+  assert.doesNotMatch(a, /Step 5（新 Phase 親の新設）/);
+  assert.match(b, /\n {2}- Step 5（新 Phase 親の新設）と Step 7（分解）は/);
+  assert.match(b, /\n {2}- Step 6（ラベル同期）は/);
+  assert.match(b, /\n {2}- Step 8（ルート本文の更新）は/);
+  assert.match(b, /\n {2}- Step 9 の要確認事項にスキップした付け替えの対象を記載する/);
   assert.match(s, /Step 5（新 Phase 親の新設）と Step 7（分解）は[^。]*続ける/);
   assert.match(s, /Step 6（ラベル同期）は[^。]*付け替えをスキップしたときは対象の issue を同期の対象から外す/);
   assert.match(s, /Step 8（ルート本文の更新）は[^。]*続け[^。]*`REASSIGNED_COUNT` \/ `ORPHAN_COUNT` へ `0` を代入する/);
@@ -83,6 +131,9 @@ test('Step 3 の非対話の扱いは付け替えだけをスキップし他の�
   const s = section(3);
   assert.match(s, /付け替え（Step 3 \/ Step 4）だけをスキップする/);
   assert.match(s, /起動時の指示で承認済みの付け替えに依存しない手順は続ける/);
+  // 条件（Step 2 の (b)）がスキップの文より前に置かれ、(a) はこの節へ進まない
+  assert.match(s, /非対話実行）のうち、起動時に確認を省く明示がある場合（Step 2 の \(b\)）では、実行せずに[^。]*付け替え（Step 3 \/ Step 4）だけをスキップする/);
+  assert.match(s, /（Step 2 の \(a\)）は、何も書かずに止まるため、この節へ進まない/);
 });
 
 test('Step 2 と Step 3 に非対話で全書き込みを止める形の文言が残っていない', () => {
@@ -105,7 +156,7 @@ test('検証節はスキップした付け替え対象の残置を Step 9 の記
   const rest = text.slice(start + 1);
   const m = rest.match(/\n## /);
   const v = m ? rest.slice(0, m.index + 1) : rest;
-  assert.match(v, /Step 3 \/ Step 4 をスキップした対象は、残置のままになるためこの確認の例外として扱い/);
+  assert.match(v, /Step 2 の \(b\) により Step 3 \/ Step 4 をスキップした対象は、残置のままになるためこの確認の例外として扱い/);
 });
 
 test('Step 2 に「全書き込みを止める」の字面が残っていない', () => {
