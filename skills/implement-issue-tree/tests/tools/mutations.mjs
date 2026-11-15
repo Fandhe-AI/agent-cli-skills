@@ -39,6 +39,11 @@ const FETCH_TREE_HOST = ['fetch-tree-host.test.mjs']
 const FETCH_TREE_FAILURE = ['fetch-tree-failure.test.mjs']
 const FETCH_TREE_PAGES = ['fetch-tree-pages-host.test.mjs']
 const FETCH_TREE_SCRIPT = ['fetch-tree.test.mjs', 'fetch-tree-alt-bash.test.mjs']
+const RS = 'scripts/repo-scan.sh'
+const RS_LIB = 'scripts/lib/repo-scan-lib.sh'
+const RS_SCRIPT = ['repo-scan.test.mjs']
+const RS_UNIT = ['repo-scan-unit.test.mjs']
+const RS_HOST = ['repo-scan-host.test.mjs']
 
 export const MUTATIONS = [
   { id: 'AF1-unregistered-unobservable-as-not-registered', file: WR, from: "    if [ \"$(wr_path_state \"${path}\")\" = unknown ]; then T_WT='retained-unobservable'; return 0; fi\n", to: '', tests: [...WR_REAL, 'worktree-remove-alt-bash.test.mjs'], note: "登録の無いパスの有無を確かめられない（読めない親）とき not-registered / 実体なしと返す（ホストが消えたものとして追跡を外す）" },
@@ -432,6 +437,23 @@ export const MUTATIONS = [
   { id: 'FT23-script-optin-no-length-cap', file: 'scripts/lib/fetch-tree-lib.sh', from: '| optin_cap]', to: ']', tests: [...FETCH_TREE_SCRIPT, 'fetch-tree-optin.test.mjs'], note: "1 値 300 文字の上限で切らない（スキーマ超過で停止、または切り詰めが valid になる）" },
   { id: 'FT24-script-optin-no-count-cap', file: 'scripts/lib/fetch-tree-lib.sh', from: '| if length > 20 then .[:19] + ["?"] else . end end;', to: '| . end;', tests: [...FETCH_TREE_SCRIPT, 'fetch-tree-optin.test.mjs'], note: "20 件の上限を超える宣言をそのまま出す（スキーマ超過）" },
   { id: 'FT25-script-optin-digest-drops-optin', file: 'scripts/lib/fetch-tree-lib.sh', from: '    lines="${lines}${num}${tab}${optin}\n', to: '    lines="${lines}${num}${tab}\n', tests: [...FETCH_TREE_SCRIPT, 'fetch-tree-unit.test.mjs'], note: "optinSha256 に第 7 欄を含めない" },
+  // repo-scan.sh（detect:external-checks・plan:skip-labels の切り出し。計画 C の P4）
+  { id: 'RS1-script-null-app-kept', file: RS_LIB, from: '| .app.slug | select(type == "string")]', to: '| .app.slug]', tests: RS_SCRIPT, note: "P4: app が null の check-run を落とさない（文字列 null が外部 App として待たされる）" },
+  { id: 'RS2-script-slug-format-unchecked', file: RS_LIB, from: "    '' | *[!a-z0-9-]* | -*) return 1 ;;\n  esac\n  [ \"${#1}\" -le \"${RS_SLUG_MAX}\" ]", to: "    '') return 1 ;;\n  esac\n  [ \"${#1}\" -le \"${RS_SLUG_MAX}\" ]", tests: [...RS_SCRIPT, ...RS_UNIT], note: "P4: slug の形式を検査しない（外部由来の文字列がホストのプロンプトへ届く）" },
+  { id: 'RS3-script-apps-not-unique-sorted', file: RS_LIB, from: "RS_APPS=$(printf '%s' \"${valid}\" | LC_ALL=C sort -u)", to: "RS_APPS=$(printf '%s' \"${valid}\")", tests: [...RS_SCRIPT, ...RS_UNIT], note: "P4: slug を昇順・重複なしにしない（ホストの昇順検査で拒否され、観測が丸ごと捨てられる）" },
+  { id: 'RS4-script-checkrun-failure-uncounted', file: RS, from: "    else\n      errs=$((errs + 1))\n    fi\n  done <<RS_EOF", to: "    else\n      :\n    fi\n  done <<RS_EOF", tests: RS_SCRIPT, note: "P4: check-runs の取得失敗を errs に数えない（部分結果であることがホストに伝わらない）" },
+  { id: 'RS5-script-input-binding-drops-labels', file: RS_LIB, from: '  for l in "$@"; do\n    text="${text}', to: '  for l in; do\n    text="${text}', tests: [...RS_SCRIPT, ...RS_UNIT], note: "P4: 入力の束縛にラベルを含めない（転記でラベルが欠けた出力が別のラベルの結果として通る）" },
+  { id: 'RS6-script-label-not-encoded', file: RS, from: 'issues?state=open&labels=${enc}&per_page=100', to: 'issues?state=open&labels=${l}&per_page=100', tests: RS_SCRIPT, note: "P4: ラベルをパーセントエンコードせずクエリ文字列へ入れる（空白・& # % を含むラベルが別のクエリになる）" },
+  { id: 'RS7-script-absent-case-sensitive', file: RS_LIB, from: "map(ascii_downcase) | index($l | ascii_downcase) != null", to: "map(ascii_downcase) | index($l) != null", tests: RS_SCRIPT, note: "P4: 存在確認が大文字小文字を区別する（旧コマンドの grep -i と違い、大文字を含むラベルが absent になる）" },
+  { id: 'RS8-script-bad-number-line-skipped', file: RS_LIB, from: '    rs_valid_number "${line}" || return 1\n', to: '    rs_valid_number "${line}" || continue\n', tests: [...RS_SCRIPT, ...RS_UNIT], note: "P4: 番号でない行を黙って捨てる（想定外の応答の一覧が欠けたまま取得成功になる fail-open）" },
+  { id: 'RS9-script-labels-failure-as-absent', file: RS, from: 'else names_ok=0; fi', to: 'else names_ok=1; fi', tests: RS_SCRIPT, note: "P4: ラベル一覧の取得失敗を空の一覧として扱う（全ラベルが absent になる）" },
+  { id: 'RS10-script-sha-unchecked', file: RS, from: '    if ! rs_valid_sha "${s}"; then errs=$((errs + 1)); continue; fi\n', to: '', tests: RS_SCRIPT, note: "P4: gh の出力の sha の形を検査せず gh api のパスへ入れる" },
+  { id: 'RS11-script-output-cap-dropped', file: RS, from: '  [ "${#env}" -le "${MAX_OUT_BYTES}" ] || {', to: '  true || {', tests: RS_SCRIPT, note: "P4: 封筒の大きさの上限を外す（Bash の出力上限で中央が欠けた封筒を転記させる）" },
+  { id: 'RS12-host-skip-input-unbound', file: SRC, from: "verifySignedOutput(reply, nonce, repoScanInputSha256('skip-labels', repoArg, skipLabelsInput))", to: 'verifySignedOutput(reply, nonce)', tests: RS_HOST, note: "P4: 対象外ラベルの封筒の入力の束縛を照合しない（ラベルの並びが違う入力の結果を採る）" },
+  { id: 'RS13-host-slug-format-unchecked', file: SRC, from: '/^[a-z0-9][a-z0-9-]{0,63}$/.test(x)', to: 'true', tests: RS_HOST, note: "P4: 外部チェック観測の slug の形式をホストで検査しない" },
+  { id: 'RS14-host-partition-unchecked', file: SRC, from: 'ids.length + p.failed.length !== total || ', to: '', tests: ['skip-labels.test.mjs'], note: "P4: entries と failed が全添字を覆うことを検査しない（欠落した添字が missing にも failed にも出ない）" },
+  { id: 'RS15-host-skip-nonce-fixed', file: SRC, from: 'boundaryNonce(`skip-labels:${attempt}:', to: 'boundaryNonce(`skip-labels:1:', tests: ['skip-labels.test.mjs'], note: "P4: 再試行の nonce を 1 回目と同じにする（前回の封筒を流用しても通る）" },
+  { id: 'RS16-host-external-input-unbound', file: SRC, from: "verifySignedOutput(reply, nonce, repoScanInputSha256('external-checks', repoArg))", to: 'verifySignedOutput(reply, nonce)', tests: RS_HOST, note: "P4: 外部チェック観測の封筒の入力の束縛（repo）を照合しない" },
   // ページ経路（Issue #690）
   { id: 'FP1-page-input-unchecked', file: SRC, from: "checkTreeNodes(result, nonce, pageInput, attempt)", to: "checkTreeNodes(result, nonce, undefined, attempt)", tests: FETCH_TREE_PAGES, note: "#690: ページの封筒が tsvSha256 とページ番号に束縛されていること（inputSha256）を照合しない（別ページの出力の流用が通る）" },
   { id: 'FP2-page-dir-unchecked', file: SRC, from: "if (!treePageDirOk(p.dir)) return", to: "if (false) return", tests: FETCH_TREE_PAGES, note: "#690: エージェントが返した dir の形を検査せずにコマンドへ埋め込む" },

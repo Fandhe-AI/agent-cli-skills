@@ -1617,8 +1617,6 @@ const DECLARED_DEPS_MAX_PER_NODE = 100
 const DECLARED_DEPS_TABLE_MAX = 120000
 // 転記の検査値。ホストはシェルを持たずコマンド出力を直接照合できないため、jq がイシュー番号と deps から計算した sig をエージェントに転記させ、ホストが返却 deps から同じ式で再計算して照合する（deps の脱落・書き換え・並べ替えといった転記の誤りを契約違反として検出し再試行へ回す）。保証の範囲は偶発的な転記の誤りの検出に限る（抽出エージェントは本文テキストを読まず、式を意図的に再計算して検査値を偽造する前提は置かない）。各項を法 1000000007 で丸め、jq（倍精度）・gojq・JS の整数演算が一致する範囲に収める。
 const DECLARED_DEPS_SIG_MOD = 1000000007
-const DECLARED_DEPS_SIG_JQ =
-  '.sig = ((((.number * 7919) % 1000000007) + ([.deps | to_entries[] | (((.key + 1) * .value * 104729) % 1000000007)] | add // 0)) % 1000000007)'
 function declaredDepsChecksum(number, deps) {
   const sum = deps.reduce((acc, d, i) => acc + (((i + 1) * d * 104729) % DECLARED_DEPS_SIG_MOD), 0)
   return (((number * 7919) % DECLARED_DEPS_SIG_MOD) + sum) % DECLARED_DEPS_SIG_MOD
@@ -1855,7 +1853,7 @@ const OUT_OF_TREE_STATE_SCHEMA = obj(['entries'], {
       description: 'コマンド出力の各行（{"number": N, "state": "...", "sig": S}）をそのまま転記した配列',
     },
   })
-// state 転記の検査値（DECLARED_DEPS_SIG_JQ と同じ方式・同じ法）。jq が number と state から計算した sig を転記させ、ホストが同じ式で再計算して照合する（OPEN を CLOSED と書き違える等の偶発的な転記の誤りを検出し、不一致はその回を破棄・再試行、なお取れなければ unknown = 待機へ倒す）。
+// state 転記の検査値（declaredDepsChecksum と同じ方式・同じ法）。jq が number と state から計算した sig を転記させ、ホストが同じ式で再計算して照合する（OPEN を CLOSED と書き違える等の偶発的な転記の誤りを検出し、不一致はその回を破棄・再試行、なお取れなければ unknown = 待機へ倒す）。
 const OUT_OF_TREE_STATE_CODES = { OPEN: 1, CLOSED: 2, MERGED: 3 }
 const OUT_OF_TREE_STATE_SIG_JQ =
   '.sig = (((.number * 7919) + (({"OPEN": 1, "CLOSED": 2, "MERGED": 3}[.state] // 0) * 104729)) % 1000000007)'
@@ -1989,40 +1987,45 @@ function outOfTreeBlockNote(deps) {
   return `ツリー外の前提イシュー ${formatIssueList(deps)} が open のため未着手（close 後に再実行すると着手する）`
 }
 
-// 対象外ラベル（Issue #720）の取得。ノードごとには引かず、ラベルごとにリポジトリ全体の open issue 番号を 1 エージェントで列挙し（labels= はカンマで AND になるためラベルごとのループ）、ホストがツリーのノード番号と突き合わせる。転記の検査値は DECLARED_DEPS_SIG_JQ / declaredDepsChecksum を流用する（number = ラベルの 1 始まりの添字、deps = 昇順の番号）。ホストは添字だけでラベルを引き、エージェントが返した文字列は使わない。
-// gh のエラーは標準出力に出るため、成否は終了コードで判定する（失敗は FAILED 行 = entries に含めない）。
-const SKIP_LABELS_SCHEMA = obj(['entries'], {
-    entries: {
-      type: 'array',
-      items: obj(['i', 'x', 'numbers', 'sig'], { i: { type: 'number' }, x: { type: 'number' }, numbers: { type: 'array', items: { type: 'number' } }, sig: { type: 'number' } }),
-    },
-  })
-function skipLabelsPrompt(labels) {
-  const q = `{number: ($i * 2 + $x), deps: unique} | ${DECLARED_DEPS_SIG_JQ} | {i: $i, x: $x, numbers: .deps, sig: .sig}`
-  const R = repoArg ? `repos/${repoArg}` : 'repos/{owner}/{repo}'
+// 対象外ラベル（Issue #720）の取得。ノードごとには引かず、ラベルごとにリポジトリ全体の open issue 番号を 1 エージェントで列挙し（labels= はカンマで AND になるためラベルごとのループ）、ホストがツリーのノード番号と突き合わせる。ホストは添字だけでラベルを引き、エージェントが返した文字列は使わない。
+// 取得は scripts/repo-scan.sh --mode skip-labels（以前はプロンプトに埋め込んだ gh + jq のコマンドをエージェントが転記して実行していた）。エージェントは起動行を実行して封筒（nonce・payload・sha256）を転記するだけで、ホストは封筒を再計算して照合する（verifySignedOutput）。payload の inputSha256 はラベルの並びと repo を束縛する（添字がラベルの意味を決めるため。転記でラベルが欠けたり入れ替わったりした出力を別のラベルの結果として採らない）。
+// 失敗は payload.failed の添字（entries に含めない）。ラベル一覧を取得できなかったときは absent を判定しない。
+const INT_ARRAY_SCHEMA = { type: 'array', items: { type: 'integer' } }
+const SKIP_LABELS_SCHEMA = signedOutputSchema(obj(['absent', 'entries', 'failed', 'inputSha256'], {
+    absent: INT_ARRAY_SCHEMA,
+    entries: { type: 'array', items: obj(['i', 'numbers'], { i: { type: 'integer' }, numbers: INT_ARRAY_SCHEMA }) },
+    failed: INT_ARRAY_SCHEMA,
+    inputSha256: { type: 'string' },
+  }))
+// repo-scan.sh の入力の束縛（scripts/lib/repo-scan-lib.sh の rs_input_sha と同じ定義）。mode は external-checks か skip-labels
+function repoScanInputSha256(mode, repo, labels = []) {
+  return sha256Hex(['repo-scan', mode, repo ?? '', ...labels].join('\n'))
+}
+// repo-scan.sh を run-verified.sh 経由で起動する 1 行。rest は --repo の後ろ。repoArg は isValidRepoSlug 済み。skillDir・nonce 未指定（プロンプトの文面だけを検査する単体テスト）はプレースホルダを書く（実ランでは駆動部冒頭の検証で必ず値が入る）
+function repoScanCommand(mode, nonce, rest = '') {
+  return `bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['repo-scan.sh']} repo-scan.sh --mode ${mode} --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${repoArg ? ` --repo ${repoArg}` : ''}${rest}`
+}
+function skipLabelsPrompt(labels, nonce) {
   return [
     '対象外ラベルの付いた open issue の番号を機械取得するタスク（判断・補完はしない）。',
     MERGE_CONTEXT_COMMON,
-    '次のコマンドを 1 回だけそのまま実行する:',
-    `names=$(gh api -X GET ${R}/labels -f per_page=100 --paginate --jq '.[].name') && k=1 || k=0; i=0; for l in ${labels.map(shellSingleQuote).join(' ')}; do i=$((i+1)); x=0; if [ "$k" = 1 ] && ! printf '%s\\n' "$names" | grep -Fxiq -- "$l"; then x=1; fi; out=$(gh api -X GET ${R}/issues -f state=open -f labels="$l" -f per_page=100 --paginate --jq '.[]|select(.pull_request==null)|.number') && printf %s "$out" | jq -sc --argjson i "$i" --argjson x "$x" '${q}' || echo "FAILED $i" >&2; done`,
-    '標準出力の全行を entries へ出力どおりに転記して返す（推測で追加・変更しない。numbers が空でも行は返す。x はラベルがリポジトリに無いとき 1）。標準エラーに FAILED と出た i は含めない。',
+    '次のコマンドを 1 回だけ一字一句そのまま実行する（引用符内はラベル名のデータ）:',
+    repoScanCommand('skip-labels', nonce, ` -- ${labels.map(shellSingleQuote).join(' ')}`),
+    SIGNED_OUTPUT_INSTRUCTION,
   ].join('\n')
 }
-// x = 1 はラベルがリポジトリに存在しない（typo・未作成）。fail-closed にはせず警告と absent で知らせる。返却を検証する。依頼外の添字は無視し、重複・昇順でない番号・sig 不一致は契約違反として throw （呼び出し側が回を破棄して 1 回だけ再試行）。依頼した添字の欠落は missing（取得失敗 = fail-closed）。
-function collectSkipLabelEntries(requested, result) {
+// 封筒を照合した payload から、依頼した添字の取得結果を取り出す。依頼外の添字は無視し、重複・範囲外・昇順でない番号・entries と failed の食い違い（全添字がどちらか 1 つにだけ現れる）・absent が entries に無いものは契約違反として throw（呼び出し側が回を破棄して 1 回だけ再試行）。依頼した添字の欠落は missing（取得失敗 = fail-closed）。total はラベルの総数。
+function collectSkipLabelEntries(requested, p, total) {
   const want = new Set(requested)
-  const byIndex = new Map()
-  const absent = []
-  for (const e of Array.isArray(result?.entries) ? result.entries : []) {
-    if (!want.has(e?.i)) continue
-    const nums = e.numbers
-    if (byIndex.has(e.i) || (e.x !== 0 && e.x !== 1) || !Array.isArray(nums) || !nums.every((x, k) => isInt(x) && x > 0 && (k === 0 || x > nums[k - 1])) || e.sig !== declaredDepsChecksum(e.i * 2 + e.x, nums)) {
-      throw new Error(`対象外ラベルの取得結果が契約違反（添字 ${e.i}。重複・x・番号の形・sig 不一致）`)
-    }
-    byIndex.set(e.i, nums)
-    if (e.x === 1) absent.push(e.i)
+  const es = Array.isArray(p?.entries) ? p.entries : []
+  const ids = es.map((e) => e?.i)
+  const idx = (a) => Array.isArray(a) && a.length === new Set(a).size && a.every((x) => isInt(x) && x >= 1 && x <= total)
+  if (!idx(p?.absent) || !idx(p?.failed) || !idx(ids) || ids.length + p.failed.length !== total || p.failed.some((i) => ids.includes(i)) || p.absent.some((i) => !ids.includes(i)) ||
+    es.some((e) => !Array.isArray(e.numbers) || !e.numbers.every((x, k) => isInt(x) && x > 0 && (k === 0 || x > e.numbers[k - 1])))) {
+    throw new Error('対象外ラベルの取得結果が契約違反（添字の重複・範囲・番号の形・entries と failed・absent の食い違い）')
   }
-  return { byIndex, absent, missing: requested.filter((i) => !byIndex.has(i)) }
+  const byIndex = new Map(es.filter((e) => want.has(e.i)).map((e) => [e.i, e.numbers]))
+  return { byIndex, absent: p.absent.filter((i) => want.has(i)), missing: requested.filter((i) => !byIndex.has(i)) }
 }
 // 対象外にする open ノードを決める。戻り値 hit: Map<番号, ラベル | null>。1 つでも取得できなかったラベルがあれば、どのノードがそのラベルを持つか分からないため open ノードを全て対象外（label = null）にする。
 function classifySkipLabels(nodes, labels, byIndex, missing) {
@@ -2607,14 +2610,31 @@ const CLOSE_SCHEMA = obj(['closed', 'summary'], {
     summary: { type: 'string' },
   })
 
-// Tree フェーズ末尾の外部チェック App 検出スキーマ。観測結果は「参考値」であり apps: [] は「観測では確定できなかった」の意。確定は args.externalChecks の明示入力のみで行う。
-const EXTERNAL_CHECKS_SCHEMA = obj(['apps'], {
-    apps: {
-      type: 'array',
-      items: { type: 'string' },
-      description: '外部チェック App slug の一意配列（例: ["cursor"]）。検出なしなら空配列',
-    },
-  })
+// Tree フェーズ末尾の外部チェック App 観測の返却スキーマ（scripts/repo-scan.sh --mode external-checks の封筒）。観測結果は「参考値」であり apps: [] は「観測では確定できなかった」の意。確定は args.externalChecks の明示入力のみで行う。
+const EXTERNAL_CHECKS_SCHEMA = signedOutputSchema(obj(['apps', 'dropped', 'errs', 'inputSha256', 'prs'], {
+    apps: { type: 'array', items: { type: 'string' } },
+    dropped: { type: 'integer' },
+    errs: { type: 'integer' },
+    inputSha256: { type: 'string' },
+    prs: { type: 'integer' },
+  }))
+// 外部チェック観測のプロンプト（nonce は呼び出しごと）。gh pr list・check-runs の取得・slug の絞り込みは repo-scan.sh が持つ
+function externalChecksPrompt(nonce) {
+  return [
+    '外部チェック観測タスク（結果は参考値。構成の確定は args.externalChecks の明示入力で行う）。',
+    COMMON,
+    '次のコマンドを 1 回だけ一字一句そのまま実行する:',
+    repoScanCommand('external-checks', nonce),
+    SIGNED_OUTPUT_INSTRUCTION,
+  ].join('\n')
+}
+// 観測の返却の照合（純粋関数）。封筒（nonce・入力の束縛・sha256）が通り、apps が slug の形式（小文字英数字とハイフン・64 文字以内）・昇順・重複なし・100 件以内のときだけ { apps, errs } を返し、通らなければ null（呼び出し側は apps: [] で続行する。この観測は参考値で、マージ・push の可否には使わない）。
+function observedExternalApps(reply, nonce) {
+  const s = verifySignedOutput(reply, nonce, repoScanInputSha256('external-checks', repoArg))
+  const a = s.payload?.apps
+  const ok = s.ok && Array.isArray(a) && a.length <= 100 && a.every((x, k) => isStr(x) && /^[a-z0-9][a-z0-9-]{0,63}$/.test(x) && (k === 0 || x > a[k - 1])) && isInt(s.payload.errs) && s.payload.errs >= 0
+  return ok ? { apps: a, errs: s.payload.errs } : null
+}
 
 // per-issue Plan エージェントの返却スキーマ。 plan 本文は Implement エージェントへ引数で渡す（worktree 跨ぎのファイル参照を避けるため）。
 const PLAN_SCHEMA = obj(['plan', 'summary'], {
@@ -3574,6 +3594,7 @@ const SCRIPT_SHA256 = {
   'recover-prep.sh': '@@SCRIPT_SHA256:recover-prep.sh@@',
   'fetch-tree.sh': '@@SCRIPT_SHA256:fetch-tree.sh@@',
   'declared-deps.sh': '@@SCRIPT_SHA256:declared-deps.sh@@',
+  'repo-scan.sh': '@@SCRIPT_SHA256:repo-scan.sh@@',
 }
 
 // 測定スクリプトを run-verified.sh 経由で起動するコマンド行（rest は --nonce の後ろに続く部分）。skillDir は parseSkillDirArg が引用符・展開を壊す文字を除外済みなので単一引用符で包める。未指定は例外（呼び出し側の catch が fail-closed の null にする）
@@ -5985,32 +6006,14 @@ phase('Tree')
 const treeFetch = await fetchTree()
 const tree = { nodes: treeFetch.nodes }
 
-// 外部チェック観測: 直前 3 件の merged PR の check-runs から GitHub Actions 以外の App slug を抽出する。観測は参考値で、構成の確定は args.externalChecks の明示入力のみ（Issue #147）。
-const detectResult = await agent(
-  [
-    `外部チェック観測タスク（結果は参考値として扱われる。構成の確定は args.externalChecks の明示入力で行う）。`,
-    COMMON,
-    '直前 3 件の merged PR から GitHub Actions 以外の CI チェック App を検出する。',
-    '手順:',
-    `1. REPO=$(gh repo view --json owner,name --jq '"\\(.owner.login)/\\(.name)"') を実行してリポジトリを取得する。`,
-    `2. 以下のコマンドで外部チェック App slug を収集する:`,
-    `   gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \\`,
-    `     | xargs -I{} sh -c 'gh api "repos/$2/commits/$1/check-runs" --jq "$3" 2>/dev/null' \\`,
-    `         _ {} "$REPO" '[.check_runs[] | select(.app.slug != "github-actions") | .app.slug] | .[]' \\`,
-    `     | sort -u`,
-    `   （SHA は xargs の '{}' を直接 URL に展開せず sh -c の位置引数 $1 経由で、REPO も export せず位置引数 $2 経由で渡す。`,
-    `   REPO を子シェル内で "\${REPO}" と展開すると、非 export の変数は sh -c の子シェルに渡らず空文字になり、`,
-    `   gh api が必ず失敗して常に apps: [] へフォールバックするため、必ず位置引数で渡すこと。`,
-    `   jq フィルタも sh -c の文字列内へ入れ子のシングルクォートで埋め込むと構文エラーになるため、`,
-    `   外側の独立した引数（$3）として渡す。上記コマンドはそのままの形で実行できる）`,
-    '3. merged PR が 0 件・コマンド失敗・出力が空の場合は apps: [] を返す（新規リポで停止しない）。',
-    '4. 収集した slug を重複排除して apps 配列として返す（例: ["cursor"]）。',
-    '返却: apps（外部 App slug の一意配列。検出なしなら空配列）。',
-  ].join('\n'),
-  { label: 'detect:external-checks', phase: 'Tree', model: 'haiku', effort: 'low', schema: EXTERNAL_CHECKS_SCHEMA },
-)
-// 観測結果（参考値）。取得失敗（null）時は空配列として扱う。
-const observedCheckApps = detectResult?.apps ?? []
+// 外部チェック観測: 直前 3 件の merged PR の check-runs から GitHub Actions 以外の App slug を抽出する（scripts/repo-scan.sh）。観測は参考値で、構成の確定は args.externalChecks の明示入力のみ（Issue #147）。
+const detectNonce = boundaryNonce(`detect-external-checks:${repoArg}`)
+const detectResult = await agent(externalChecksPrompt(detectNonce), { label: 'detect:external-checks', phase: 'Tree', model: 'haiku', effort: 'low', schema: EXTERNAL_CHECKS_SCHEMA })
+// 観測結果（参考値）。取得失敗（null）・封筒の照合失敗時は空配列として扱う。
+const detected = observedExternalApps(detectResult, detectNonce)
+if (!detected) log('⚠️ 外部チェックの観測を採用しない（出力封筒の照合失敗）。観測なしで続行する')
+else if (detected.errs > 0) log(`⚠️ 外部チェックの観測で gh の失敗が ${detected.errs} 件あった（取得できた分だけで続行する）`)
+const observedCheckApps = detected?.apps ?? []
 // baseMergePrompt の期待リポジトリは args.repo 由来の repoArg のみへ束縛する（detectResult 等のエージェント自己申告値は使わない。PR #443 codex P0）。
 const expectedRepo = repoArg
 // 外部チェック構成の確定（Issue #147）。観測は完全性を保証しないため、明示入力がない限り常に確定不能とする。監視・待機・レポートは slug 配列、G0 の context 照合はエントリ配列を使う。
@@ -6176,7 +6179,15 @@ if (skipLabelsInput) {
   let pending = skipLabelsInput.map((_, k) => k + 1)
   for (let attempt = 1; attempt <= 2 && pending.length > 0; attempt++) {
     try {
-      const r = collectSkipLabelEntries(pending, await agent(skipLabelsPrompt(skipLabelsInput), { label: `plan:skip-labels${attempt > 1 ? '-retry' : ''}`, phase: 'Tree', model: 'haiku', effort: 'low', schema: SKIP_LABELS_SCHEMA }))
+      // 呼び出しごとの nonce（試行・依頼する添字で変える。前回の封筒を実行せず流用しても受理されない）。封筒の照合に通らない転記は契約違反としてこの回を破棄する
+      const nonce = boundaryNonce(`skip-labels:${attempt}:${repoArg}:${pending.join(',')}`)
+      const reply = await agent(skipLabelsPrompt(skipLabelsInput, nonce), { label: `plan:skip-labels${attempt > 1 ? '-retry' : ''}`, phase: 'Tree', model: 'haiku', effort: 'low', schema: SKIP_LABELS_SCHEMA })
+      const signed = verifySignedOutput(reply, nonce, repoScanInputSha256('skip-labels', repoArg, skipLabelsInput))
+      if (!signed.ok) {
+        log(`⚠️ 対象外ラベルの取得（${attempt} 回目）を破棄した: 出力封筒の照合に失敗した（${signed.reason}）`)
+        continue
+      }
+      const r = collectSkipLabelEntries(pending, signed.payload, skipLabelsInput.length)
       for (const [i, nums] of r.byIndex) byIndex.set(i, nums)
       pending = r.missing
       for (const i of r.absent) absent.add(i)

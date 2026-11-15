@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
-import { hashPrecheckReply, wrapTreeReply } from './lib/signed-output.mjs'
+import { externalChecksReply, hashPrecheckReply, wrapTreeReply } from './lib/signed-output.mjs'
 import { requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
 
 const SCRIPT_PATH = process.env.IIT_BLOCKED_BATCH_SCRIPT_PATH ?? join(
@@ -341,7 +341,7 @@ async function runScript({ args, nodes, saved = null, ootStates = { [OOT]: 'OPEN
     }
     // スクリプトが返却ノードを書き換える（optinTests の採用結果）ため、実行ごとに複製して返す。
     if (label === 'plan:issue-tree') return wrapTreeReply(prompt, { nodes: structuredClone(nodes) })
-    if (label === 'detect:external-checks') return { apps: [] }
+    if (label === 'detect:external-checks') return externalChecksReply(prompt)
     if (label.startsWith('plan:declared-deps')) {
             return { entries: requestedNumbersOf(prompt).map((n) => ({ number: n, deps: [], sig: declaredDepsChecksum(n, []) })) }
     }

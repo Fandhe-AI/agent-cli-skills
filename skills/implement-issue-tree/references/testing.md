@@ -119,6 +119,16 @@ volta run --node 22 node skills/implement-issue-tree/tests/tools/mutate.mjs --ru
 - `tests/optin-record-unit.test.mjs`（`scripts/lib/optin-record-lib.sh` の表: 宣言コマンドの許可形・本文の正規化・マーカー行の固定文字列一致〔pass は行全体・fail と not-run は部分一致で、U+3000・NBSP・U+2028 が付いた行も数える〕・pass と pass 以外の件数・パイプの途中の失敗は偽の tr / sed / grep で `return 1`。bash ごと）・`tests/observe-pr-optin-record.test.mjs`（偽 gh で実スクリプトを bash 3.2 / 5 の両方で実行: 件数・`gh pr view` が 1 回・`-R` 束縛・取得失敗と応答の形の違いは `err:1`・`body` が null は 0 件・引数の誤りは exit 2 で gh を呼ばない・`inputSha256` が個数と順序を束縛・全角空白付きの fail 行・本文の文字列が標準出力と標準エラーに出ないこと・偽の tr の失敗は `err:1`）・`tests/optin-record-gate.test.mjs`（ホスト: 封筒の nonce・sha256・入力の不一致と payload の形の拒否、観測失敗の haiku → sonnet の 1 回取り直しと全件不合格、プロンプトが固定コマンドの実行と転記だけであること・本文を取得せず測り直さない権限境界の文が入っていること・Unicode の空白付きの pass 以外の行でゲートが不合格になること）。マーカー行の書式（writer = `optinRecordMarkerLine`・`optinRecordRewriteLines`、reader = lib）の往復は `optin-tests-gate.test.mjs` の群 F が本物の lib で検査する。
 - 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run OR1-optin-count-substring …`（`OR1`〜`OR10`）。
 
+## 外部チェック観測と対象外ラベルの取得（`repo-scan.sh`・計画 C の P4）
+
+- `tests/repo-scan-unit.test.mjs`（lib の表。形式検査・整列・収集・入力の束縛・payload の正規形を 1 回の bash 起動で）・`tests/repo-scan.test.mjs` と `tests/repo-scan-alt-bash.test.mjs`（偽 gh `tests/lib/gh-repo-scan-stub.mjs` で実スクリプトを bash ごとに並列実行。本体は `tests/lib/repo-scan-suite.mjs`）・`tests/repo-scan-host.test.mjs`（ホストの封筒照合の表・プロンプトの配線・返却スキーマ・実スクリプトの標準出力をホストの照合に通す結合）。
+  - 偽 gh は `--jq` を応答の JSON に単体の jq で適用する（スクリプトが渡す jq フィルタそのものが実行される）。呼び出しは `calls.log` に残り、GET だけであること・`-f` を使わないこと・ラベルがパーセントエンコードされることを検査する。
+  - 旧コマンド（切り出し前の origin/main がプロンプトへ埋め込んでいた文字列）は `tests/fixtures/repo-scan-old-external-checks-main.txt` と `repo-scan-old-skip-labels-main.txt` に凍結し、同じ偽 gh の応答で実行した結果と新スクリプトの結果を突き合わせる（apps・番号・存在確認・失敗が一致）。差が出る入力は『意図した差』として別テストで固定する（app が null の check-run を新版は落とす・check-runs の取得失敗の HTTP エラー本文を新版は apps に混ぜない）。
+  - ロケール: `LC_ALL` を `C` / `en_US.UTF-8` / `ja_JP.UTF-8` に変えても出力が同じこと（並び・番号の数値順・全角文字の absent）。
+  - 取り違え: ラベルの並びが違う入力で作られた封筒はホストの入力の束縛で拒否され、そのラベルの結果として採られない（`repo-scan-host`）。
+- 既存テストの stub が `plan:skip-labels` に平らな `{ entries: [{ i, x, numbers }] }` を返す場合は、`tests/lib/stub-run.mjs` が封筒に包む（`wrapSkipLabelsReply`。x = 1 は absent、entries に無い添字は failed）。`detect:external-checks` の既定の応答は `externalChecksReply(prompt)`。
+- 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run RS1-script-null-app-kept …`（`RS1`〜`RS16`）。
+
 ## ツリー取得（Issue #668）
 
 - `tests/fetch-tree-unit.test.mjs`（lib の表）・`tests/fetch-tree.test.mjs` と `tests/fetch-tree-alt-bash.test.mjs`（偽 gh `tests/lib/gh-tree-stub.mjs` で実スクリプトを bash ごとに並列実行。本体は `tests/lib/fetch-tree-suite.mjs`）・`tests/fetch-tree-host.test.mjs`（stub agent で実装スクリプト全体を実行し、検査値の照合と取り直しを確かめる）。`tests/fetch-tree-failure.test.mjs`（偽 gh の実スクリプトの終了コード 5 / 6 / 7 と stderr をホストのログ・最終例外で確かめる。1 回目と最終の文面の出し分け・未信頼値の扱い・schema）。期待する検査値は `tests/lib/signed-output.mjs` の `treeFetchReply` が node:crypto で独立に計算する。
