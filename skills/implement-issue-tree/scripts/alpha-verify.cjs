@@ -24,6 +24,11 @@
 //       括弧・カンマ式の最後・条件式の枝・論理式は親の位置を引き継ぎ、配列リテラルの要素は配列の位置で判定する
 //       （配列を object にしてよいのは length と、第 1 引数が関数式か束縛された関数の反復メソッドだけ）。それ以外の位置
 //       （計算キー・in・比較・+・テンプレート・タグ・typeof・自由変数や名前空間の関数の引数など）はすべて拒否する
+//       コンテナ: 関数値を入れた配列・入れ子のコンテナを呼び出しの引数に渡す形は、呼び出し先によらず拒否する。例外は、
+//       関数値を非計算キーの値として直に入れたオブジェクトリテラルを (a) の局所束縛の呼び出し先へ渡す形
+//       （f({ isValid: g })）だけ。局所束縛の呼び出し先へ関数値をそのまま渡す形はもとから許可しており、受け側での文字列化は
+//       追跡外の別名として残るリスクに入れてある。オブジェクトの非計算キーに直に入れて渡す形も、受け側を経るという点で
+//       同じ種類のリスクで、新しいリスクは増えない（実物の stage1 では runStateAgent(prompt, { ..., isValid }) の 11 件）
 //       派生の判定: 自由変数の別名は、束縛を作るすべての形（宣言・代入・引数や分割代入の既定値・入れ子のパターン・
 //       for-in / for-of の頭部）について、パターンと値の式の組で判定し、用途で 2 つに分ける。(a) の呼び出し先には広い派生
 //       （値の式に自由変数を 1 つでも含めば、パターンが束縛する名前すべてを別名とみなす。偽陽性の側）を使う。(b) の名前空間
@@ -33,7 +38,8 @@
 // 保証しないこと（残るリスク）:
 // - 直接の関数式と追跡済みの束縛については、許可リスト外の位置をすべて拒否する。残るのは追跡外の別名だけで、
 //   束縛された関数の引数・オブジェクトのプロパティ・配列の要素・戻り値を経た関数値（function g(x){return `${x}`}g(f)・
-//   o.m = f; String(o.m)・const xs = [f]; xs.join() など）は、その先の文字列化が見えない。引数で受け取った自由変数の
+//   o.m = f; String(o.m)・const xs = [f]; xs.join()・局所関数に f({ k: g }) で渡したオブジェクトのプロパティなど）は、
+//   その先の文字列化が見えない。引数で受け取った自由変数の
 //   関数（function g(S){return S(f)}g(String)）と、呼び出しの結果として返る名前空間（const R = getReflect(); R.get(o, f)。
 //   狭い派生は呼び出しの結果を別名にしない）も見えない。キーを持たない反射
 //   （Object.getOwnPropertyDescriptors）・Error の stack（関数名を含む）も見えない。改名後の生成物で全テスト
@@ -193,7 +199,7 @@ function fnPositionDenied(anc, i, mode, res) {
   if (!p) return 'Program'
   const up = (m = mode) => fnPositionDenied(anc, i - 1, m, res)
   const key = Object.keys(p).find((k) => p[k] === child || (Array.isArray(p[k]) && p[k].includes(child))) ?? '?'
-  const label = `${p.type}.${key}${mode === 'container' ? '（配列の要素）' : ''}`
+  const label = `${p.type}.${key}${mode === 'value' ? '' : '（配列・オブジェクトの要素）'}`
   switch (p.type) {
     // 値を引き継ぐ位置は親の位置で判定する
     case 'ParenthesizedExpression':
@@ -228,8 +234,11 @@ function fnPositionDenied(anc, i, mode, res) {
     case 'ArrowFunctionExpression':
       return p.body === child || p.params.includes(child) ? null : label
     case 'Property': {
+      // オブジェクトリテラルの値は、オブジェクトの位置で判定する。関数値を非計算キーの値として直に入れたものは 'object'、
+      // 配列や入れ子のオブジェクトを経たものは 'container'
       const gp = anc[i - 2]
-      return gp && gp.type === 'ObjectExpression' && p.value === child && !p.computed ? null : label
+      if (!gp || gp.type !== 'ObjectExpression' || p.value !== child || p.computed) return label
+      return fnPositionDenied(anc, i - 2, mode === 'value' ? 'object' : 'container', res)
     }
     case 'ReturnStatement':
     case 'ExportDefaultDeclaration':
@@ -240,6 +249,12 @@ function fnPositionDenied(anc, i, mode, res) {
     case 'CallExpression':
     case 'NewExpression':
       if (p.callee === child) return mode === 'value' ? null : label
+      // 関数値を入れた配列・入れ子のコンテナを引数に渡すのは、呼び出し先によらず拒否する（受け側で要素がどう使われるかは
+      // 呼び出し先の許可リストでは決まらない: "x".replace(/x/, [f])・Array.from([f], String)）。例外は、関数値を非計算キーの
+      // 値として直に入れたオブジェクトリテラル（f({ isValid: g })）を (a) の局所束縛の呼び出し先へ渡す形だけ
+      // （関数値をそのまま渡す形と同じく、受け側での文字列化は追跡外の別名として残るリスクに入る。冒頭参照）
+      if (mode === 'container') return label
+      if (mode === 'object') return { label, arg: { call: p, child, objectArg: true } }
       // 呼び出し先が許可リストに当たるかは、全識別子の解決と関数束縛の追跡の後に判定する
       return { label: `${label}（許可されない呼び出し先）`, arg: { call: p, child } }
     case 'MemberExpression': {
@@ -437,8 +452,9 @@ function analyze(ast, goal) {
   }
   const isFnValue = (e) => isFunctionValue(e) || (e.type === 'Identifier' && fnDecls.has(res.get(e)))
   // 呼び出しの引数に関数値を渡してよいか（冒頭の (a)〜(c)）
-  const argAllowed = ({ call, child }) => {
+  const argAllowed = ({ call, child, objectArg }) => {
     const c = call.callee
+    if (objectArg) return c.type === 'Identifier' && res.get(c) !== 'free' && !derived.has(declOf(c))
     if (c.type === 'Identifier') {
       if (res.get(c) === 'free') return call.type === 'NewExpression' ? c.name === 'Promise' : CALLBACK_FREE.has(c.name)
       return !derived.has(declOf(c))
