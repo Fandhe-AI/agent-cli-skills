@@ -210,6 +210,8 @@ contribute-skill, sync-skills-lock
 
 create-skill, create-agent, sweep-sync-prs
 
+管理スキルの frontmatter には `metadata.internal: "true"` を付ける（付けないと skills CLI の `--list` と `--all` に出て downstream に誤って配布されるため。新しく管理スキルを足すときも同じにする）。
+
 ### 参照スキル（.claude/skills/ に配置）
 
 github-docs, anthropic-claude-code, anthropic-claude-code-extend, openai-codex, opencode-usage, opencode-build

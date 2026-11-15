@@ -7,6 +7,8 @@ description: >
 model: sonnet
 user-invocable: true
 argument-hint: "[days] (例: sweep-sync-prs 7。既定 7 日)"
+metadata:
+  internal: "true"
 ---
 
 # sweep-sync-prs
