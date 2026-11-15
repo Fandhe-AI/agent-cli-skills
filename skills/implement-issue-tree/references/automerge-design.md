@@ -567,9 +567,11 @@ Issue 本文・PR 本文・レビュー本文を一切読まないコンテキ�
 加える」という要求は、merge-exec に到達する前に同じ合格条件で止めることで実現し、
 `mergeExecutePrompt` / `MERGE_EXEC_SCHEMA` / `classifyMergeExecDispatch` はこのゲートのために変更しない。
 
-**検証は別コンテキストの読み取り専用エージェント（`optinRecordVerifyPrompt`）が行う**。PR 本文は
-一時ファイルへ落とし、宣言コマンドごとの pass / 非 pass マーカー行数のみを返す（本文テキスト・
-コマンド文字列はコンテキストにも返却値にも含めない）。ホスト側 `classifyOptinRecordGate` が
+**観測は別コンテキストの読み取り専用エージェント（`optin-record-verify:#N`。`observeOptinRecord`）が
+`observe-pr.sh --mode optin-record` を実行して行う**（Issue #603。かつてのプロンプトに埋め込んだ gh・
+正規化・grep の手順の書き写しをやめ、スクリプトの封筒をホストが照合する。`script-trust-model.md` 参照）。
+PR 本文はスクリプトの中だけで読み、宣言コマンドごとの pass / 非 pass マーカー行数のみが封筒に載る
+（本文テキスト・コマンド文字列はコンテキストにも返却値にも含めない）。ホスト側 `classifyOptinRecordGate` が
 「pass 行が 1 件以上、かつ同一コマンドの pass 以外の記録行が 0 件」を合格条件とし、取得失敗・
 件数不一致・非整数・負数はすべて不合格側へ倒す（fail-closed）。
 
@@ -594,8 +596,8 @@ base 取り込みだけで HEAD が進んだラウンド — でも同様に fai
 記録を書くエージェント（`prCreatePrompt` 手順 0d・`optinRecordUpdateInstructions` 手順 a）は
 `git rev-parse HEAD`（＝実際に push した／する HEAD）を自分で取得してマーカーへ埋め込む。
 
-`optinRecordVerifyPrompt` は `gh pr view --json body,headRefOid` を単一呼び出しで取得し、
-headRefOid が 40 桁 sha として取得・検証できなければ `fetchFailed: true` と同じ扱いで全件不合格
+観測スクリプトは `gh pr view --json body,headRefOid` を単一呼び出しで取得し、
+headRefOid が 40 桁 sha として取得・検証できなければ取得失敗（`err:1`。ホストでは `fetchFailed: true` と同じ扱い）で全件不合格
 にする。妥当なら、宣言コマンドごとに **その headRefOid に対する** pass / fail / not-run の 3 種類
 を固定文字列 `-cxF` で数える（sha が一致しない行はどの grep にも一致せず自動的に集計から除外
 される）。`classifyOptinRecordGate` はこの headRefOid 自体の検証を主要な合否入力に含める
@@ -604,7 +606,7 @@ headRefOid が 40 桁 sha として取得・検証できなければ `fetchFaile
 として扱われ、pass 以外の判定へ自動的に倒れる。
 
 **TOCTOU 対策として merge-exec へ期待 HEAD sha を渡す**（`mergeExecutePrompt` のパラメータ
-`expectedHeadSha`）。`optinRecordVerifyPrompt` が確認した headRefOid とマージ実行時点の実際の
+`expectedHeadSha`）。観測が確認した headRefOid（封筒の `headSha`）とマージ実行時点の実際の
 HEAD がずれる（ゲート確認後に別の push が入る）競合を防ぐため、merge-exec は手順 2 で自己取得
 した headRefOid がこの期待値と一致することを追加で確認し、不一致なら既存の `reason: head-moved`
 （このラウンドは再試行され、次ラウンドの monitor が実状態を観測し直す）で辞退する。
@@ -634,7 +636,7 @@ Merge ループの post-push fix（`pushAfterFix: true`）が opt-in テスト�
 `lastFixOptin`（プロセスローカルの `let`。`{ runs, headSha }`）として保持し
 `combineOptinRecordGate` で PR 本文ベースの判定と AND する。
 マーカー自体が sha に束縛されているため、この AND は主たる防御ではなく多層防御であり、
-`fixOptin.headSha` が `optinRecordVerifyPrompt` の検証済み headRefOid と一致する場合のみ働く
+`fixOptin.headSha` が観測（`observeOptinRecord`）で検証済みの headRefOid と一致する場合のみ働く
 （不一致＝HEAD がさらに進んだ場合は override せず、PR 本文側の sha 束縛判定にそのまま委ねる —
 古い実測で新しい HEAD の PR を永久に止めない可用性上の配慮。安全性は失わない: gate 自身の
 sha 束縛判定はそのまま効くため）。**ただしこれは「headSha を確定できた上で HEAD が進んだ」場合
@@ -688,7 +690,7 @@ fail-closed で停止する」参照）。
 行わないため gate 自身の再判定でも解除できない。
 
 **判定は `isOptinLatchActive` が行うが、マージ許可には一切影響させない。** `optinGateHeadSha`
-（このラウンドで `optinRecordVerifyPrompt` が観測した現在の headRefOid）が `sanitizeSha` を
+（このラウンドで `observeOptinRecord` が観測した現在の headRefOid）が `sanitizeSha` を
 通らない場合は常に `false` を返す。確定していれば、`lastFixOptin.unbound === true`、または
 `lastFixOptin.headSha` が `optinGateHeadSha` と一致し、かつ `runs` に非 pass が 1 件でもあれば
 latch と判定する。この判定結果は**終端メッセージの出し分けにのみ**使い、latch と判定された

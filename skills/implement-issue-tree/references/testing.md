@@ -114,6 +114,11 @@ volta run --node 22 node skills/implement-issue-tree/tests/tools/mutate.mjs --ru
 - `node --test` の中から実行器を呼ぶと環境変数 `NODE_TEST_CONTEXT` が子の `node --test` へ引き継がれ、赤でも exit 0 を
   返す。実行器は子へ渡す環境からこれを外している（外さないと全変異が `SURVIVED` になる）。
 
+## opt-in テスト記録ゲートの観測（Issue #603）
+
+- `tests/optin-record-unit.test.mjs`（`scripts/lib/optin-record-lib.sh` の表: 宣言コマンドの許可形・本文の正規化・マーカー行の行全体の固定文字列一致・pass と pass 以外の件数。bash ごと）・`tests/observe-pr-optin-record.test.mjs`（偽 gh で実スクリプトを bash 3.2 / 5 の両方で実行: 件数・`gh pr view` が 1 回・`-R` 束縛・取得失敗と応答の形の違いは `err:1`・`body` が null は 0 件・引数の誤りは exit 2 で gh を呼ばない・`inputSha256` が個数と順序を束縛）・`tests/optin-record-gate.test.mjs`（ホスト: 封筒の nonce・sha256・入力の不一致と payload の形の拒否、観測失敗の haiku → sonnet の 1 回取り直しと全件不合格、プロンプトが固定コマンドの実行と転記だけであること）。マーカー行の書式（writer = `optinRecordMarkerLine`・`optinRecordRewriteLines`、reader = lib）の往復は `optin-tests-gate.test.mjs` の群 F が本物の lib で検査する。
+- 変異テスト: `node skills/implement-issue-tree/tests/tools/mutate.mjs --run OR1-optin-count-substring …`（`OR1`〜`OR10`）。
+
 ## ツリー取得（Issue #668）
 
 - `tests/fetch-tree-unit.test.mjs`（lib の表）・`tests/fetch-tree.test.mjs` と `tests/fetch-tree-alt-bash.test.mjs`（偽 gh `tests/lib/gh-tree-stub.mjs` で実スクリプトを bash ごとに並列実行。本体は `tests/lib/fetch-tree-suite.mjs`）・`tests/fetch-tree-host.test.mjs`（stub agent で実装スクリプト全体を実行し、検査値の照合と取り直しを確かめる）。`tests/fetch-tree-failure.test.mjs`（偽 gh の実スクリプトの終了コード 5 / 6 / 7 と stderr をホストのログ・最終例外で確かめる。1 回目と最終の文面の出し分け・未信頼値の扱い・schema）。期待する検査値は `tests/lib/signed-output.mjs` の `treeFetchReply` が node:crypto で独立に計算する。

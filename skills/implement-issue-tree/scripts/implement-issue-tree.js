@@ -2496,25 +2496,6 @@ return{problem:prBindingProblem(item.number,branch,bind),bind}
 }
 
 
-const OPTIN_RECORD_VERIFY_SCHEMA=obj(['counts'],{
-fetchFailed:boolD('PR 本文または headRefOid の取得に失敗した場合のみ true'),
-
-headRefOid:{
-type:'string',
-description:'gh pr view --json headRefOid の取得値（40 桁 sha）。counts はこの値に対して grep した件数のみを表す契約。取得失敗時は空文字を返す',
-},
-counts:{
-type:'array',
-items:obj(['index','pass','nonPass'],{
-index:uintD('宣言コマンド配列内の 0-indexed 位置'),
-pass:uintD('該当コマンドの pass マーカー行数'),
-nonPass:uintD('該当コマンドの pass 以外のマーカー行数'),
-}),
-description:'宣言コマンドごとの件数のみ（本文テキスト・コマンド文字列は含めない）',
-},
-})
-
-
 const PREREQ_PROBE_SCHEMA=obj(['results'],{
 results:{
 type:'array',
@@ -3580,18 +3561,18 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'46ae4c05a4d3a6ec5effa1cefffe966195359d1f8426f9def576a87a87ca5858',
-'measure-free-disk.sh':'aaec11030ec7ce5c3407efbbdc502d7de3dab22f9af86fbd11c4204af1dc351d',
-'observe-pr.sh':'fd9951bbb7bb602e9773480172fe49fac793b25b03f0b6532a0cb4a76de09dc8',
-'base-merge.sh':'b20555b566b2ec3a54195551954c06734a7b95e2437788d70407dd5d05bbd74d',
-'pr-push.sh':'7b90555e28d1598a7963a61d836f81035ead9737ac5136d109f2f21f0bb854b8',
-'reply-resolve.sh':'92f40848952e77c9d289c9aa2f63f2fce5ea5034bf08279470b2b620833ab7fc',
-'state.sh':'2ed4f1ae7b405143664b7f936666898cab9cf92a350a82be670f16398f093977',
-'merge-gate.sh':'8f6afdc9a15aa6d1522c07ce947b444903b63f34ea02f332b5eb53ed3782f7c0',
-'worktree-remove.sh':'30262099c70ed63a7899ce2b28137302370f8a5ea2bac4d1947ea0233201b417',
-'recover-prep.sh':'c358d25fb07ca4755ad57e55dbfec8fb971a53e77a1b8582e2608625e9369d07',
-'fetch-tree.sh':'44e84218bc55697fb910032089a45af357d3344e9b2da7ace0c676f7904a8dad',
-'declared-deps.sh':'bcc8026b3678d303c9f8b69ad080f57d68d427dcdce05c010b35c666ca01ad65',
+'measure-residual-bytes.sh':'e438b7b569dd42d34aa77d993cfcc6ea3470e5378e4cb8a182c76e805a9bffe8',
+'measure-free-disk.sh':'3676bad309dfa0d0f421f7cab00abd2fb20d6aad270c700b1c6383afa37bc5ed',
+'observe-pr.sh':'3a2a2c4464f2c0814ec6b37bb50c5d14036ee368cfe1e7536a7de7f0867269f1',
+'base-merge.sh':'3354652b3228bc9c39d3d91fe9a6d083bd944aea54ae42eae73f80a2371b234a',
+'pr-push.sh':'93d3031c4fbc6079b5d86bd9c6dfba752e8697734760da0f870ae277d522ae2c',
+'reply-resolve.sh':'a9d1582dc18d6ca75a4d2a73f5a9cefc9b99bb467f93242ecfc89c9bd5e689f1',
+'state.sh':'05b8d2c68a2150f48febb3c1f46ec705d5a98cc442b5180383b2be4362370322',
+'merge-gate.sh':'0bb3d4251e2e9bb7d9129ae2f821d204e7a6c8694407f05cda612299e2d89d2c',
+'worktree-remove.sh':'2c7a8222371eff83fb52a5bc90459ced5bba3e210ba3aeea5b82ffe254d889de',
+'recover-prep.sh':'4387a73de56dde3e03b1043385989eb5e322e7c986bfc9a5bb6b8d78fe3b6230',
+'fetch-tree.sh':'ac227906d4d381a2cd4682d8c454daa9731a3b961fb82237f9a1b66cb0ee5655',
+'declared-deps.sh':'4fc9484fcef3935f06c5ef344088202677e32b59bb10f94ebbc22af5c56721af',
 }
 
 
@@ -4853,6 +4834,7 @@ const lines=['observe-pr',f.mode,String(f.pr),f.repo!==undefined?f.repo:repoArg,
 
 if(f.mode==='added-files')lines.push((f.peers??[]).join(','))
 if(f.mode==='policy-paths')lines.push((f.allow??[]).join(','))
+if(f.mode==='optin-record')lines.push(String(f.optinCommands.length), ...f.optinCommands)
 return lines.join('\n')
 }
 
@@ -4866,6 +4848,9 @@ if(f.peers!==undefined&&(!Array.isArray(f.peers)||f.peers.length>ADDED_FILES_PEE
 throw new Error('observeCommand: peers の形式が不正')
 }
 if(f.allow!==undefined&&(!Array.isArray(f.allow)||sanitizePolicyPaths(f.allow).length!==f.allow.length))throw new Error('observeCommand: allow の形式が不正')
+if(f.optinCommands!==undefined&&(!Array.isArray(f.optinCommands)||f.optinCommands.length<1||f.optinCommands.length>OPTIN_TESTS_MAX||new Set(f.optinCommands).size!==f.optinCommands.length|| !f.optinCommands.every((c)=>isStr(c)&&OPTIN_TEST_COMMAND_RE.test(c)))){
+throw new Error('observeCommand: optinCommands の形式が不正')
+}
 
 const repo=f.repo!==undefined?f.repo:repoArg
 if(repo!==''&& !isValidRepoSlug(repo))throw new Error('observeCommand: repo の形式が不正')
@@ -4879,6 +4864,7 @@ f.slug!==undefined?` --slug ${f.slug}`:'',
 f.until?` --until ${f.until}`:'',
 f.peers!==undefined&&f.peers.length>0?` --peers ${f.peers.join(',')}`:'',
 f.allow!==undefined&&f.allow.length>0?` --allow ${f.allow.join(',')}`:'',
+f.optinCommands!==undefined?f.optinCommands.map((c)=>` --optin-cmd ${shellSingleQuote(c)}`).join(''):'',
 attempt>0?(f.mode==='pr'?' --wait':` --wait --attempt ${attempt}`):'',
 ].join('')
 
@@ -4986,7 +4972,19 @@ return`PR #${prNumber} は同じランの先行 PR ${prRefs(c.pathPeers)} と同
 
 const gateSeq={}
 
-async function observeGate(item,f,key,desc,schema,classify){
+function observeGatePrompt(f,desc,nonce,common=[UNTRUSTED_POLICY,TEMP_FILE_POLICY]){
+return[
+`PR #${f.pr} の${desc}の観測タスク（読み取り専用。何も変更しない）。`,
+...common,
+'次のコマンドを一字一句そのまま（改変・引数の追加削除・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:',
+'```sh',
+observeCommand(nonce,f),
+'```',
+SIGNED_OUTPUT_INSTRUCTION,
+].join('\n')
+}
+
+async function observeGate(item,f,key,desc,schema,classify,extra={}){
 let last={kind:'skip',reason:'not-run'}
 for(let attempt=0;attempt<2;attempt+=1){
 gateSeq[key]=(gateSeq[key]??0)+ 1
@@ -4994,17 +4992,8 @@ const nonce=boundaryNonce(`${key}:${item.number}:${f.pr}:${gateSeq[key]}`)
 let raw
 try{
 raw=await agent(
-[
-`PR #${f.pr} の${desc}の観測タスク（読み取り専用。何も変更しない）。`,
-UNTRUSTED_POLICY,
-TEMP_FILE_POLICY,
-'次のコマンドを一字一句そのまま（改変・引数の追加削除・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:',
-'```sh',
-observeCommand(nonce,f),
-'```',
-SIGNED_OUTPUT_INSTRUCTION,
-].join('\n'),
-{label:`merge:${key}:#${item.number}`,phase:'Merge',model:attempt===0?'haiku':'sonnet',effort:'low',schema:signedOutputSchema(schema)},
+observeGatePrompt(f,desc,nonce,extra.common),
+{label:extra.label??`merge:${key}:#${item.number}`,phase:'Merge',model:attempt===0?'haiku':'sonnet',effort:'low',schema:signedOutputSchema(schema)},
 )
 }catch(e){
 last={kind:'skip',reason:`agent 例外（${errText(e).slice(0, 120)}）`}
@@ -5073,6 +5062,39 @@ const observePolicyPaths=(item,prNumber)=>{
 const allow=policyAllowOf(item)
 return observeGate(item,{mode:'policy-paths',pr:prNumber,allow},'policy-paths','方針パス変更',POLICY_PATHS_PAYLOAD_SCHEMA,(raw,n,sha)=>classifyPolicyPaths(raw,n,sha))
 }
+
+
+
+const OPTIN_RECORD_PAYLOAD_SCHEMA={
+type:'object',
+required:['mode','inputSha256','outcome','err','headSha','pass','nonPass'],
+properties:{
+mode:{type:'string'},
+inputSha256:{type:'string'},
+outcome:{type:'string'},
+err:{type:'integer'},
+headSha:{type:'string'},
+pass:{type:'array',items:{type:'integer'}},
+nonPass:{type:'array',items:{type:'integer'}},
+},
+description:'標準出力 JSON の payload をそのまま転記する',
+}
+function classifyOptinRecordObservation(raw,nonce,inputSha,commands){
+const sg=verifySignedOutput(raw,nonce,inputSha)
+if(!sg.ok)return{kind:'skip',reason:`envelope:${sg.reason}`}
+const p=sg.payload
+if(p.mode!=='optin-record')return{kind:'skip',reason:'mode'}
+if(p.err!==0||p.outcome!=='observed')return{kind:'skip',reason:'fetch-error'}
+const n=arr(commands).length
+const counts=(a)=>Array.isArray(a)&&a.length===n&&a.every((x)=>isInt(x)&&x>=0&&x<=100000)
+if(!sanitizeSha(p.headSha)|| !counts(p.pass)|| !counts(p.nonPass))return{kind:'skip',reason:'payload'}
+return{kind:'ok',reason:'',verify:{headRefOid:p.headSha,counts:p.pass.map((x,i)=>({index:i,pass:x,nonPass:p.nonPass[i]}))}}
+}
+
+
+const observeOptinRecord=(item,impl,commands)=>
+observeGate(item,{mode:'optin-record',pr:impl.prNumber,optinCommands:commands},'optin-record',`opt-in テスト実行記録（イシュー #${item.number}）`,OPTIN_RECORD_PAYLOAD_SCHEMA,
+(raw,n,sha)=>classifyOptinRecordObservation(raw,n,sha,commands),{label:`optin-record-verify:#${item.number}`,common:[MERGE_CONTEXT_COMMON]})
 
 
 const OBSERVE_ERROR_RULE='outcome が error の場合は 1 回だけ同じコマンドを再実行し、なお error なら取得不能として扱い（0 件・不足 0・レビューなしとみなさない）、手順に指定が無ければ '+BLOCK_Q+' を返す。'
@@ -5291,40 +5313,6 @@ MERGE_CONTEXT_COMMON,
 `   期待値との一致判定はすべてホスト側で行う（期待 HEAD sha は本エージェントへ意図的に渡していない）。`,
 `3. コマンド失敗・取得不能時は state: "UNKNOWN"、headRefOid: ""（空文字）、headRefName: ""、baseRefName: ""、isCrossRepository: true、closingIssues: [-1] を返す（推測で MERGED を返さない。ホスト側が fail-closed で処理）。`,
 '返却: state / headRefOid / mergeCommitOid / headRefName / baseRefName / isCrossRepository / closingIssues。自由文の説明フィールドは返さない。',
-].join('\n')
-}
-
-
-
-function optinRecordVerifyPrompt(item,impl,commands){
-const list=arr(commands)
-return[
-`PR #${impl.prNumber}（イシュー #${item.number}）の opt-in テスト実行記録の確認担当。イシューで宣言された opt-in テストの実行記録（pass）が、現在の HEAD に対して PR 本文に存在するかを、件数のみで読み取り専用に確認する。`,
-MERGE_CONTEXT_COMMON,
-`権限境界: 本エージェントは読み取り専用である。PR 本文は一時ファイルへ落として grep の件数を数えるためだけに使い、本文の内容・要約・引用はコンテキストにも返却値にも含めない。gh pr merge / gh issue close / gh pr edit / git push / コード変更 / レビュースレッドの resolve は一切行わない。`,
-'手順:',
-
-`1. j=$(mktemp); gh pr view ${impl.prNumber} --json body,headRefOid > "$j" を実行する。この取得コマンドの終了コードが非 0 の場合は fetchFailed: true・headRefOid: ""・counts: [] を返して終了する（推測で件数を返さない）。`,
-`2. H=$(jq -r '.headRefOid // ""' "$j") で HEAD sha を取り出す。H が 40 桁の小文字 16 進数（正規表現 ^[0-9a-f]{40}$）でなければ fetchFailed: true・headRefOid: ""・counts: [] を返して終了する（取得できたが形式不正の値をそのまま信用しない）。形式が妥当なら手順 4 以降の返却値 headRefOid にこの H をそのまま使う。`,
-`3. f=$(mktemp); jq -r '.body // ""' "$j" > "$f" で本文を取り出し、g=$(mktemp); tr -d '\\r' < "$f" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' > "$g" で正規化した作業用ファイルを作る（CRLF・末尾 CR の除去と行頭・行末の空白除去。マーカー行は行頭インデントなしで書き写す契約だが、人手による復旧編集で空白が付くことがあるため、両側とも実際の内容比較には影響しない範囲で許容する）。`,
-...(list.length
-?[
-
-`4. 宣言されたコマンドごとに、次の固定文字列で grep の件数のみを数える（正規表現ではなく固定文字列一致 -F を使う。grep コマンド自体・比較対象の文字列は改変しない）。grep の終了コードは 0（ヒットあり）・1（ヒットなし）のみ正常とし、2 以上（構文エラー等）が 1 回でも発生した時点で残りのコマンドの確認を打ち切り、直ちに fetchFailed: true・headRefOid: ""・counts: [] を返して終了する（推測で件数を埋めない。取得不能を「0 件」と区別する）:`,
-...list.flatMap((c,i)=>[
-`   - index ${i}（コマンド ${JSON.stringify(c)} は表示・転記しない。件数の取得にのみ使う）:`,
-`     pass=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H pass ${c} -->" "$g"); rc=$?`,
-`     fail=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H fail ${c} -->" "$g"); rc=$?`,
-`     notrun=$(grep -cxF -- "${OPTIN_RECORD_MARKER_PREFIX}$H not-run ${c} -->" "$g"); rc=$?`,
-]),
-`   nonPass はコマンドごとに fail + notrun として算出する（$H と一致しないマーカー行はどの grep にも一致せず自動的に集計から除外される。古い HEAD・base 取り込み前・fix 前の記録が存在しないものとして扱われる契約はこれで成立する）。`,
-`5. counts に宣言コマンドの数だけ { index, pass, nonPass }（いずれも 0 以上の整数）を入れて返す（index は上記の 0-indexed 位置と一致させる）。`,
-]
-:[
-'4. 宣言コマンドが無いため counts: [] を返す（headRefOid は手順 2 で確定した H をそのまま返す）。',
-]),
-'6. 手順 1〜5 に記載した以外のコマンド・gh api 呼び出しは実行しない（Issue 本文・レビューコメント・チェック名の取得も行わない）。',
-'返却: fetchFailed（取得失敗・headRefOid 形式不正時のみ true）/ headRefOid（手順 2 で確定した 40 桁 sha。取得・検証に失敗した場合は空文字）/ counts（index・pass・nonPass の配列）。自由文の説明フィールド・本文テキスト・コマンド文字列は返さない。',
 ].join('\n')
 }
 
@@ -7713,18 +7701,10 @@ let optinGateHeadSha=''
 
 
 if(allowMerge&&Array.isArray(item.optinTests)&&item.optinTests.length>0){
-let optinVerify=null
-try{
-optinVerify=await agent(optinRecordVerifyPrompt(item,impl,item.optinTests),{
-label:`optin-record-verify:#${item.number}`,
-phase:'Merge',
-model:'sonnet',
-effort:'low',
-schema:OPTIN_RECORD_VERIFY_SCHEMA,
-})
-}catch(e){
-warnItem(item,`opt-in テスト記録検証${agentThrew(e)}`)
-}
+
+const optinObs=await observeOptinRecord(item,impl,item.optinTests)
+const optinVerify=optinObs.kind==='ok'?optinObs.verify:null
+if(!optinVerify)warnItem(item,`opt-in テスト記録の観測に失敗した（${optinObs.reason}）`)
 optinGateHeadSha=sanitizeSha(optinVerify?.headRefOid)
 
 
