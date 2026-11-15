@@ -105,7 +105,7 @@ fi
 
 # python3 必須（状態署名・復元処理が使う）。無いと npx 実行後の検査・復元の途中で
 # command-not-found になり fail-open するため、環境全体の条件として npx 実行前に
-# exit 1 でループ全体を停止する（skip しない。残置なし）。
+# exit 1 でループ全体を停止する（fail-closed。skip しない。残置なし）。
 if ! command -v python3 >/dev/null 2>&1; then
   echo "エラー: python3 が見つかりません。状態署名・復元処理で python3 が必要です。導入してから再実行してください（fail-closed）。" >&2
   exit 1
@@ -790,6 +790,11 @@ PYEOF
 #     署名するため chmod・ディレクトリ→symlink 置換は検出される。不存在だった場合のみ omit
 #     して初回インストールの正当な親作成を誤検知にしない（omit でも配下の走査は継続する
 #     ため、同居する他スキルのツリーは引き続き保護される）
+#
+# REPO_SIG_OMITS は前後 2 回の呼び出しで同一でなければならない（実行後の存在有無で
+# 再判定すると、初回インストールの正当な新規作成が前後不一致＝誤検知になる）。
+# 空配列の "${arr[@]}" 展開は bash 3.2 の set -u で unbound になるため
+# ${arr[@]+...} 形式で参照する。
 REPO_SIG_OMITS=()
 # 既定は prune-under（既存許可先向け）。初回インストール（実行前に不存在）の場合のみ
 # npx 実行前の判定ブロックで prune へ切り替える。前後 2 回の呼び出しで同一で
@@ -1035,8 +1040,8 @@ PYEOF
 # 無条件に呼ぶと呼び出し元の案内メッセージより先に停止し得る）。.gitignore 対象の残置
 # （Issue #413）は -fdx ではなく remove_new_ignored_in_scope（実行前インベントリとの
 # 突き合わせ）で解消する（既存 ignored ファイルの巻き添え削除防止）。
-# SCOPE_PATH_COMPROMISED=1（許可先経路の symlink 化・非ディレクトリ化、または実行後の配下
-# symlink 検出）では、checkout・clean・ignored 削除のパス走査がリンク先（リポジトリ外を
+# SCOPE_PATH_COMPROMISED=1（verify_scope_path_after_run が許可先経路の symlink 化・
+# 非ディレクトリ化を検出、または実行後の配下 symlink 走査が検出）では、checkout・clean・ignored 削除のパス走査がリンク先（リポジトリ外を
 # 含む）へ向かい得るため、skills-lock.json の復元のみ行い、許可先配下への削除系操作は
 # 一切行わず案内に留める（fail-closed）。
 # LOCK_FILE_COMPROMISED=1（skills-lock.json が npx 実行中に symlink へ置換）では、素の
@@ -1111,7 +1116,7 @@ contract_worktree_backup() {
 revert_in_scope() {
   local skip_clean="${1:-0}"
   # 呼び出し元が「実際に checkout / clean が走ったか」を判定できるよう、この呼び出し内で
-  # 保全のため checkout・clean・復元をスキップした場合のみ 1 を立てる。post-npx の呼び出し
+  # 保全のため checkout・clean・復元をスキップした場合のみ 1 を立てる（Issue #418 系）。post-npx の呼び出し
   # 元がこの値を見ずに「スコープ内の変更はリバートしました」と無条件表示すると、worktree に
   # 未退避の変更が残っているのに復元済みと誤認させる。個別の原因フラグの寄せ集めで表示分岐
   # すると SCOPE_PATH_COMPROMISED 経路のような変種を取りこぼすため、スキップの有無は
@@ -1370,13 +1375,13 @@ fi
 # 添字アクセスはそのコピーに対して行う。npx（[0]）・tee（[1]）両方を読む理由: tee が
 # ディスク容量不足等で非ゼロ終了すると NPX_OUTPUT_FILE が空・不完全なまま残り得るが、
 # npx 自体は成功（exit 0）し得るため、tee 側の失敗は npx の終了コードだけを見る分岐
-# からは検出できない。TEE_STATUS が非ゼロなら、その不完全な NPX_OUTPUT_FILE を前提に
-# した「Invalid agents」no-op 判定を信頼せず、NPX_STATUS を強制的に失敗へ倒して以降の
-# 失敗経路（事後スコープ外検査・スコープ内リバート・skip）へ合流させる。
-# errexit の無効化（scripts/skills-lock-update.sh と同じ理由。詳細は上記節参照）:
+# からは検出できない（Issue #410）。TEE_STATUS が非ゼロなら、その不完全な NPX_OUTPUT_FILE
+# を前提にした「Invalid agents」no-op 判定を信頼せず、NPX_STATUS を強制的に失敗へ倒して
+# 以降の失敗経路（事後スコープ外検査・スコープ内リバート・skip）へ合流させる。
+# errexit の無効化（scripts/skills-lock-update.sh と同じ理由。詳細は下記節参照）:
 # npx 行の前後だけ errexit を無効化し、pipeline の終了コードを PIPESTATUS から読む。
-# `set -e` 下で無効化を欠くと、npx の非ゼロ終了でパイプラインごとシェルが終了し、事後の
-# スコープ外検査・スコープ内リバートに到達できないまま部分書き込みが残置される。
+# `set -e`/`pipefail` 下で無効化を欠くと、npx の非ゼロ終了でパイプラインごとシェルが
+# 終了し、事後のスコープ外検査・スコープ内リバートに到達できないまま部分書き込みが残置される。
 # 元の状態（`$-`）を保存し、元々有効だった場合のみ再有効化する: 本フェンスは errexit が
 # 無効なエージェント対話シェルへコピペ実行され得るため、無条件 `set -e` で復元すると
 # 呼び出し元シェルへ errexit を新規に有効化し、同一シェルで後続する Step 6 却下コマンド等が
@@ -1546,7 +1551,8 @@ if ! git -c status.renames=false status --porcelain -z -uall > "${SNAP_AFTER}"; 
   # revert_in_scope が CONTRACT_UNTRACKED_BACKUP_FAILED を検知して checkout・clean を
   # 保全のためスキップした場合、worktree には未退避の変更が残っている（「リバート
   # しました」は虚偽になる）。REVERT_IN_SCOPE_SKIPPED で分岐し、その場合は
-  # revert_in_scope 自身が案内済みの警告と重複させず、完了を意味する文言は出さない。
+  # revert_in_scope 自身が案内済みの警告と重複させず、完了を意味する文言は出さない
+  # （Issue #418 系）。
   if [[ "${REVERT_IN_SCOPE_SKIPPED:-0}" -ne 1 ]]; then
     echo "スコープ内（skills-lock.json / .agents/skills/${SKILL_NAME}/）の変更はリバートしました。" >&2
   fi
@@ -1919,8 +1925,8 @@ Step 4 の clean ガードにより `npx` 実行前の当該ディレクトリ�
 # npx・apply が新規作成した未追跡ファイルは git clean で即削除せず一時ディレクトリへ退避する
 # (checker が契約ディレクトリ内へ移動・新規作成したファイルの唯一のコピーであり得るため。
 # 退避先を確認し、不要と判断してから手動で削除する)。退避(mktemp -d / mktemp /
-# git ls-files / mkdir / mv)自体の失敗を検査せず git restore --worktree へ進むと、退避されなかった
-# 「唯一のコピー」が PRE_SYNC_TREE の内容で無音に上書きされ、データ喪失になる(Issue #418)。
+# git ls-files / mkdir / mv)自体の失敗を検査せず git restore --worktree へ進むと、退避されなかった「唯一の
+# コピー」が PRE_SYNC_TREE の内容で無音に上書きされ、データ喪失になる(Issue #418)。
 # このフェンスはループ外側でユーザーが直接実行する手動手順のため、mktemp -d /
 # mktemp / git ls-files の失敗は復元へ一切進まず即座に停止する（自動復元経路(Step 4 の
 # restore_contract_scope)のような「index のみへ降格して継続」は行わない）
