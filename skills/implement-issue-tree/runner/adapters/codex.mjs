@@ -28,7 +28,10 @@
 //   allowMerge は hook のコマンド行へ --merge-re を埋めるかどうかで切り替える。
 //
 // permission profile は 2 種（:read-only を土台に、ネットワークは有効）:
-//   iit_read: worktree ではない cwd（メイン worktree。観測・状態・計画）。cwd は読み取りのみ・TMPDIR だけ書ける。
+//   iit_read: worktree ではない cwd（メイン worktree。観測・状態・計画）。cwd は読み取りのみ・TMPDIR と
+//             状態ファイルの置き場 <main>/_/issue-trees だけ書ける（state:load がモデルの段で状態ファイルを初期化する。
+//             プロンプトの一時ファイル配置規則が例外として許す唯一の書き込み先。Phase 3 の通しで、無いと非 dryRun の
+//             初回が「状態ファイルの初期化に失敗」で止まった）。
 //   iit_impl: 隔離 worktree。worktree・<main>/.git/{objects,refs,logs,packed-refs,packed-refs.lock}・
 //             <main>/.git/worktrees/<name>（正確なパス）・TMPDIR が書ける。.git/hooks と .git/config は読み取りのまま。
 //   どちらも .codex は読み取り・認証ファイル（<CODEX_HOME>/auth.json と ~/.codex/auth.json）は deny。
@@ -69,13 +72,15 @@ export function linkedWorktreeGit(cwd) {
 
 /**
  * permission profile の `-c` 引数（2 引数 × 2）。純関数。
- * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, home: string, git: null | { gitdir: string, commonDir: string }, extraWritePaths?: string[] }} o
+ * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, home: string, git: null | { gitdir: string, commonDir: string }, stateDir?: string|null, extraWritePaths?: string[] }} o
+ *   stateDir: 状態ファイルの置き場（<main>/_/issue-trees）。iit_read のときだけ書けるようにする
  */
-export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, extraWritePaths = [] }) {
+export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stateDir = null, extraWritePaths = [] }) {
   const name = kind === 'impl' ? 'iit_impl' : 'iit_read'
   const ws = kind === 'impl' ? { '.': 'write' } : { '.': 'read' }
   ws['.codex'] = 'read'
   const fs = { ':minimal': 'read', [tmpDir]: 'write' }
+  if (kind !== 'impl' && stateDir) fs[stateDir] = 'write'
   if (kind === 'impl' && git) {
     for (const p of ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.lock']) fs[join(git.commonDir, p)] = 'write'
     fs[git.gitdir] = 'write'
@@ -144,6 +149,7 @@ export function createAdapter(cfg) {
   const tc = cfg.toolConfig ?? {}
   const bin = tc.codexBin ?? 'codex'
     const tmpDir = join(cfg.runDir, 'tmp')
+  const stateDir = join(cfg.mainRoot, '_', 'issue-trees')
   const baseEnv = { ...(cfg.env ?? process.env) }
   const home = baseEnv.HOME ?? homedir()
   let codexHome = null
@@ -204,7 +210,7 @@ export function createAdapter(cfg) {
       writeFileSync(sp, JSON.stringify(strictifySchema(schema)))
       args.push('--output-schema', sp)
     }
-    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, extraWritePaths: tc.extraWritePaths }))
+    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stateDir, extraWritePaths: tc.extraWritePaths }))
     args.push(...buildHookArgs({ hookScript: HOOK_SCRIPT, guardScript, hookLog, allowMerge: Boolean(allowMerge) }))
     if (resume) args.push(resume.sessionRef)
     args.push('-')

@@ -238,6 +238,9 @@ test('permission profile: 通常 cwd は read・linked worktree は impl（gitdi
   assert.match(read, /^permissions=\{iit_read=\{extends=":read-only"/)
   assert.match(read, /":workspace_roots"=\{"\."="read"/)
   assert.equal(read.includes('objects'), false)
+  // 状態ファイルの置き場は iit_read だけ書ける（state:load の初期化）。iit_impl には足さない
+  const stateDir = JSON.stringify(join(t.mainRoot, '_', 'issue-trees'))
+  assert.ok(read.includes(`${stateDir}="write"`), 'iit_read は <main>/_/issue-trees を書ける')
   assert.ok(c1.argv.includes('default_permissions="iit_read"'))
   const impl = prof(c2)
   assert.match(impl, /":workspace_roots"=\{"\."="write"/)
@@ -246,6 +249,7 @@ test('permission profile: 通常 cwd は read・linked worktree は impl（gitdi
   assert.equal(impl.includes(`${JSON.stringify(join(t.mainRoot, '.git'))}=`), false, '.git 全体は書き込み可にしない')
   assert.equal(impl.includes('.git/hooks'), false)
   assert.equal(impl.includes('.git/config'), false)
+  assert.equal(impl.includes(stateDir), false, 'iit_impl に状態ファイルの置き場は足さない')
   for (const x of [read, impl]) {
     assert.ok(x.includes('".codex"="read"'))
     assert.ok(x.includes(`${JSON.stringify(join(t.fakeHome, '.codex', 'auth.json'))}="deny"`))
@@ -265,6 +269,16 @@ test('permission profile: 通常 cwd は read・linked worktree は impl（gitdi
 test('buildProfileArgs: req.profile で上書きでき、extraWritePaths が加わる', () => {
   const a = buildProfileArgs({ kind: 'impl', cwd: '/w', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, extraWritePaths: ['/origin'] })
   assert.ok(a[1].includes('"/origin"="write"'))
+})
+
+test('buildProfileArgs: stateDir は iit_read のときだけ書き込みに加わり、メイン worktree 全体は読み取りのまま', () => {
+  const base = { cwd: '/m', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, stateDir: '/m/_/issue-trees' }
+  const read = buildProfileArgs({ ...base, kind: 'read' })[1]
+  assert.ok(read.includes('"/m/_/issue-trees"="write"'))
+  assert.ok(read.includes('":workspace_roots"={"."="read"'))
+  assert.equal(read.includes('"/m"='), false)
+  assert.equal(buildProfileArgs({ ...base, kind: 'impl' })[1].includes('issue-trees'), false)
+  assert.equal(buildProfileArgs({ ...base, kind: 'read', stateDir: null })[1].includes('issue-trees'), false)
 })
 
 // ---------------------------------------------------------------------------
