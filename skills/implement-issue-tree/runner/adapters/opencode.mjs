@@ -10,7 +10,8 @@
 //     allow-all は付けない（session.create で付けると config の permissions が打ち消されるため）。
 //   - 配布物の plugin は親を持たない top-level セッションを main とみなしてマージ系を制限しない。ランナーのセッションは
 //     すべて top-level なので、ランナー専用 plugin が agent-guard.sh を「常に subagent=true」で呼ぶ（Codex の codex-hook.sh と同じ意味）。
-//     allowMerge の serve だけ、MERGE_EXEC_COMMAND の完全一致の 1 形を plugin のオプションで素通しにする。
+//     allowMerge の serve だけ、MERGE_EXEC_COMMAND の完全一致の 1 形を plugin のオプションで素通しにする（permission に後半だけが
+//     届く版では、plugin が tool.execute.before で全文の一致を確かめた呼び出しにだけ許可を対応づける）。
 //   - plugin の読み込みは start で確かめる。plugin は初期化時に serve ごとの nonce を目印ファイルへ書き、アダプタがそれを読む
 //     （実機で GET /api/plugin は空・/shell は permission を通らず、他に確かめる手段が無い）。確かめられなければ prereq。
 //   - 完了は SSE（session.execution.*）を主とし、取りこぼしに備えて `/api/session/active` とメッセージ末尾の idle で突き合わせる。
@@ -37,9 +38,9 @@ const USAGE_LIMIT_RE = /rate.?limit|quota|usage.?limit|too many requests|\b429\b
 const PLUGIN_DIR = join(dirname(fileURLToPath(import.meta.url)), 'opencode-plugin')
 
 // allowMerge の serve で素通しにするのは MERGE_EXEC_COMMAND の完全一致だけ（Codex の codex-hook.sh に渡す --merge-re と
-// 同じ 1 形・同じ意味）。permission の resource が `HEAD_SHA=...` の代入と `gh pr merge ...` に分かれて届く場合に備えた
-// 後半だけの形は、代入なしの gh pr merge を素通しにするため置かない。Phase 3 の実機確認で分かれて届くと分かったら、
-// そのときに分割後の 2 形の対応づけ（同じ呼び出しの前半と後半か）を含めて見直す。
+// 同じ 1 形・同じ意味）。後半だけの形（代入を落とした `gh pr merge … "$HEAD_SHA"`）の正規表現は、代入なしの gh pr merge を
+// 素通しにするため置かない。OpenCode v2.2.7 の permission には後半だけが届く（Phase 3 の実測）ので、plugin は
+// tool.execute.before でこの完全一致を確かめた呼び出しを記録し、同じ呼び出し（source.id 等）の後半だけを通す（plugin 冒頭）。
 export const MERGE_RES = Object.freeze([MERGE_EXEC_COMMAND.source])
 
 const freePort = () => new Promise((resolve, reject) => {
