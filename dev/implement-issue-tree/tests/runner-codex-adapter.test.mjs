@@ -185,9 +185,9 @@ test('環境: TMPDIR・TMPPREFIX と GIT_CONFIG を渡す', async () => {
   const t = setup({ turns: [okTurn()] })
   await t.adapter.run(t.req())
   const { env } = t.calls()[0]
-  assert.equal(env.TMPDIR, join(t.runDir, 'tmp'))
+  assert.equal(env.TMPDIR, join(t.runDir, 'tmp', 'a1'))
   // zsh の here-doc の一時ファイルを TMPDIR（両 profile で書ける）の下へ向ける
-  assert.equal(env.TMPPREFIX, join(t.runDir, 'tmp', 'zsh'))
+  assert.equal(env.TMPPREFIX, join(t.runDir, 'tmp', 'a1', 'zsh'))
   assert.equal(env.GIT_CONFIG_KEY_0, 'branch.autoSetupMerge')
   assert.equal(env.GIT_CONFIG_VALUE_0, 'false')
   assert.equal(env.GIT_CONFIG_COUNT, '1')
@@ -585,4 +585,23 @@ test('HIGH-1: iit_impl は gitdir を write にしたうえで commondir・gitdi
   const r = buildProfileArgs({ kind: 'read', cwd: '/m', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, platform: 'linux' })[1]
   assert.equal(r.includes('commondir'), false)
   assert.equal(buildProfileArgs({ kind: 'impl', cwd: '/w', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, platform: 'linux' })[1].includes('commondir'), false)
+})
+
+test('TMPDIR（LOW-13）: エージェントごとに <runDir>/tmp/<logDir の名前>。profile もその場所だけを書け、修復ターン（同じ logDir）は同じ場所を使う', async () => {
+  const t = setup({ turns: [okTurn(), okTurn(), okTurn()] })
+  const r1 = await t.adapter.run(t.req({ name: '0001-plan_2' }))
+  await t.adapter.run(t.req({ name: '0002-impl_2' }))
+  await t.adapter.run(t.req({ name: '0001-plan_2', resume: { sessionRef: r1.sessionRef, message: 'fix' } }))
+  const [a, b, a2] = t.calls()
+  const ta = join(t.runDir, 'tmp', '0001-plan_2')
+  const tb = join(t.runDir, 'tmp', '0002-impl_2')
+  assert.equal(a.env.TMPDIR, ta)
+  assert.equal(b.env.TMPDIR, tb)
+  assert.equal(a2.env.TMPDIR, ta, '修復ターンは同じ TMPDIR')
+  assert.equal(b.env.TMPPREFIX, join(tb, 'zsh'))
+  const prof = (c) => c.argv.find((x) => x.startsWith('permissions='))
+  assert.ok(prof(a).includes(`${JSON.stringify(ta)}="write"`))
+  assert.equal(prof(a).includes(JSON.stringify(tb)), false, '他のエージェントの TMPDIR は書けない')
+  assert.equal(prof(a).includes(`${JSON.stringify(join(t.runDir, 'tmp'))}=`), false, 'ラン全体の tmp は書けない')
+  assert.ok(existsSync(ta) && existsSync(tb))
 })

@@ -44,6 +44,9 @@
 //             <main>/.git/worktrees/<name>（正確なパス）・TMPDIR が書ける。.git/hooks と .git/config は読み取りのまま。
 //             gitdir の下の commondir・gitdir・config.worktree と worktree の .git は read に戻す（GITDIR_READ_ONLY）。
 //   どちらも .codex は読み取り・認証ファイル（<CODEX_HOME>/auth.json と ~/.codex/auth.json）は deny。
+//   TMPDIR はエージェントごとに <runDir>/tmp/<logDir の名前>（監査 e670648 の LOW-13。ラン全体で 1 つだと、並行する
+//   別のエージェントの一時ファイル〔コミットメッセージ・PR 本文等〕を読み書きできた）。修復ターンは同じ logDir なので
+//   同じ場所を使う。生成物のプロンプトはエージェント間で一時ファイルを受け渡さない（TEMP_FILE_POLICY は自分の mktemp だけ）。
 //   darwin では両方に /private/var/tmp（/var/tmp の実体）を書き込み可として足す（sandbox の書き込み範囲を広げる）。
 //   macOS の /bin/bash 3.2 は here-doc の一時ファイルを TMPDIR ではなく /var/tmp に作り（書けなければ /tmp →
 //   /usr/tmp → cwd の順に探す）、どこにも書けないと here-doc が「cannot create temp file」で落ちるため。
@@ -217,7 +220,14 @@ const killGroup = (pid, sig) => { try { process.kill(-pid, sig) } catch { /* 既
 export function createAdapter(cfg) {
   const tc = cfg.toolConfig ?? {}
   const bin = tc.codexBin ?? 'codex'
-  const tmpDir = join(cfg.runDir, 'tmp')
+  // エージェント別の TMPDIR の親。start / close の codex 呼び出し（--version・delete）はここを TMPDIR にする
+  const tmpRoot = join(cfg.runDir, 'tmp')
+  /** エージェント別の TMPDIR（<tmpRoot>/<logDir の名前>）。名前が空・. ・.. なら例外（実行しない）。 */
+  const agentTmpDir = (logDir) => {
+    const name = typeof logDir === 'string' ? basename(logDir) : ''
+    if (name === '' || name === '.' || name === '..') throw new AdapterError('denied', 'logDir から TMPDIR を決められない')
+    return join(tmpRoot, name)
+  }
   const platform = cfg.platform ?? process.platform
   const baseEnv = { ...(cfg.env ?? process.env) }
   const home = baseEnv.HOME ?? homedir()
@@ -230,7 +240,7 @@ export function createAdapter(cfg) {
 
   const resolveCodexHome = () => resolve(tc.codexHome ?? baseEnv.CODEX_HOME ?? join(home, '.codex'))
 
-  const childEnv = (merge = null) => {
+  const childEnv = (merge = null, tmpDir = tmpRoot) => {
     // TMPPREFIX: zsh の here-doc の一時ファイルの接頭辞（ファイル冒頭の「シェル」）。TMPDIR と同じく両 profile で書ける
     const env = { ...baseEnv, CODEX_HOME: codexHome, TMPDIR: tmpDir, TMPPREFIX: join(tmpDir, 'zsh') }
     // merge 段は対象リポジトリを固定する（gh pr merge <N> を別リポジトリへ向けさせない。MEDIUM-8）
@@ -253,7 +263,7 @@ export function createAdapter(cfg) {
     guardScript = findGuardScript({ toolConfig: tc, skillDir: cfg.skillDir, mainRoot: cfg.mainRoot })
     if (!guardScript) throw new AdapterError('prereq', GUARD_SCRIPT_MISSING)
     if (!existsSync(HOOK_SCRIPT)) throw new AdapterError('prereq', 'codex-hook.sh が見つからない')
-    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(tmpRoot, { recursive: true })
     started = true
   }
 
@@ -267,6 +277,8 @@ export function createAdapter(cfg) {
     const merge = checkMerge(req.allowMerge === true, req.merge)
     const { prompt, schema, model, effort, cwd, timeoutMs, resume = null, logDir } = req
     mkdirSync(logDir, { recursive: true })
+    const tmpDir = agentTmpDir(logDir)
+    mkdirSync(tmpDir, { recursive: true })
     const n = readdirSync(logDir).filter((f) => /^events-t\d+\.jsonl$/.test(f)).length + 1
     const tag = `t${n}`
     const hookLog = join(logDir, 'hook.log')
@@ -299,7 +311,7 @@ export function createAdapter(cfg) {
       let err = ''
       let timedOut = false
       let settled = false
-      const p = spawn(bin, args, { cwd, env: childEnv(merge), stdio: ['pipe', 'pipe', 'pipe'], detached: true })
+      const p = spawn(bin, args, { cwd, env: childEnv(merge, tmpDir), stdio: ['pipe', 'pipe', 'pipe'], detached: true })
       running.add(p)
       const termTimer = setTimeout(() => {
         timedOut = true
