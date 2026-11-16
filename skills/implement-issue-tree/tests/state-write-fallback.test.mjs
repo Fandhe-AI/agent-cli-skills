@@ -17,6 +17,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { trackTmp } from './lib/tmp-track.mjs'
+import { buildStage1 } from './lib/mangle-harness.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -24,10 +25,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
   '..', 'scripts', 'implement-issue-tree.src.js',
-)
-const DIST_SCRIPT_PATH = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..', 'scripts', 'implement-issue-tree.js',
 )
 const DRIVER_MARKER = '__IMPLEMENT_ISSUE_TREE_DRIVER_START__'
 
@@ -406,8 +403,10 @@ test('Recover の掃除ゲート（continue / discard）はいずれも classify
   assert.match(driverPart.slice(discardCleanupIdx, discardCleanupIdx + 1000), /classifyStateWriteFailureStatus\(/)
 })
 
-test('生成物 implement-issue-tree.js にも runStateAgent と STATE_AGENT_MODEL_CHAIN が存在する（ビルド漏れ検知）', () => {
-  const dist = readFileSync(DIST_SCRIPT_PATH, 'utf8')
+// 検査対象は段 1（src からコメント・空白を除いた生成物）。実行ファイルの鮮度は build-workflow.test の --check が保証し、
+// 実行ファイルでは識別子が短縮され得るため、実行ファイルの識別子名は直接検査しない
+test('ビルドの段 1 の生成物にも runStateAgent と STATE_AGENT_MODEL_CHAIN が存在する（ビルド漏れ検知）', () => {
+  const dist = buildStage1()
   assert.match(dist, /function runStateAgent\(/)
   assert.match(dist, /STATE_AGENT_MODEL_CHAIN/)
   assert.match(dist, /classifyStateWriteFailureStatus/)

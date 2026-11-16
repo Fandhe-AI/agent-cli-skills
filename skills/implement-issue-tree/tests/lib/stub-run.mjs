@@ -57,11 +57,13 @@ function buildTree(leaves) {
 export const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: '/repo/.claude/skills/implement-issue-tree' }
 
 /**
- * @param {{ args: object, leaves?: number[], override?: (label: string, opts: object, prompt: string) => any }} params
+ * `scriptText` は実行する実装スクリプトのテキストの選択（既定は開発ファイル src。stage1 など `export const meta` で
+ * 始まる任意のテキストを渡すと、同じ stub・同じ条件でそれを実行する）。定義部のスライス（importDefinitions）は常に src を使う。
+ * @param {{ args: object, leaves?: number[], scriptText?: string, override?: (label: string, opts: object, prompt: string) => any }} params
  *   override が undefined 以外を返したらその値を応答にする。
  * @returns {Promise<{ result: any, calls: Array<{ prompt: string, opts: object }>, logs: string[] }>}
  */
-export async function runScript({ args, leaves = [2], override = () => undefined }) {
+export async function runScript({ args, leaves = [2], scriptText = source, override = () => undefined }) {
   const nodes = buildTree(leaves)
   const calls = []
   const logs = []
@@ -107,7 +109,7 @@ export async function runScript({ args, leaves = [2], override = () => undefined
     await Promise.resolve()
     return handler(prompt, opts)
   }
-  const fn = new AsyncFunction('args', 'agent', 'log', 'phase', scriptBody)
+  const fn = new AsyncFunction('args', 'agent', 'log', 'phase', scriptText === source ? scriptBody : stripMetaExport(scriptText))
   const result = await fn(args, agent, (m) => { logs.push(m) }, () => {})
   return { result, calls, logs }
 }

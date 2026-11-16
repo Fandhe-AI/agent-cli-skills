@@ -25,14 +25,28 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  stripComments, squeezeSpaces, shouldSqueezeSpace, buildArtifact, verifyTokenParity, runBuild, parseArgs, embedScriptHashes, SQUEEZE_REFUSAL_RULES, SRC_PATH, DIST_PATH,
+  stripComments, squeezeSpaces, shouldSqueezeSpace, buildArtifact, buildStage1, verifyTokenParity, runBuild, parseArgs, embedScriptHashes, SQUEEZE_REFUSAL_RULES, SRC_PATH, DIST_PATH,
 } from '../scripts/build-workflow.mjs'
+import { alphaVerify, patchKnownObservation } from './lib/mangle-harness.mjs'
+import { BASE_ARGS, runScript } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = fileURLToPath(new URL('../scripts/build-workflow.mjs', import.meta.url))
 // 開発ファイルは目印（スクリプトのハッシュ）を持つため、ビルダーと同じく置換してから比較する
 const readSrcEmbedded = () => embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), dirname(SRC_PATH))
 const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const TOKEN_DIFF_HELPER = fileURLToPath(new URL('../scripts/token-diff.cjs', import.meta.url))
+
+// ビルドは 2 段（段 1 = コメント・空白の除去と照合 1〔トークン完全一致〕、段 2 = 識別子の改名と照合 2〔α 同値〕）に
+// 分かれる計画で、段 2 が入る前の今は生成物 = 段 1。テストは「段 1 を見る」「2 段の照合を見る」形に書き、
+// 段 2 が入っても（識別子名・テキストの完全一致に頼らず）成り立つ表明だけを置く。
+// 変換前後（before → after）が α 同値であることを検証器で確かめる（検証器は acorn を要するため子プロセスで起動する）
+const assertAlphaOk = async (before, after, name = 'alpha') => {
+  const r = (await alphaVerify([{ name, before, after }])).get(name)
+  assert.equal(r.ok, true, `α 同値でない: ${r.kind} ${r.detail}`)
+}
+// class（private 名を含む）は改名器の対応外になる計画のため、class を使うフィクスチャでは CLI（ビルド全体）の検査を外し、
+// 段 1 の検査（buildArtifact + verifyTokenParity）だけを残す
+const usesClass = (text) => /\bclass\b/.test(text)
 
 // 実物の開発ファイル（約 900 KB）のビルドとトークン照合は 1 回約 7 秒かかる。実物への --check は 1 回だけ、このファイルの読み込み時に
 // 子プロセスで始め（相対パスで起動する形 = 作業ディレクトリがリポジトリルートで、スクリプトを相対パスで渡す）、他のテストを
@@ -668,13 +682,18 @@ test('トークン列一致（acorn）: 固定ケースで変換前後のトー�
   assert.deepEqual(unparsable, [])
 })
 
-test('トークン列一致（acorn）: 実ファイル implement-issue-tree.src.js と生成物の全トークンが一致する', () => {
+test('2 段の照合（acorn）: 実ファイルの src と段 1 の全トークンが一致し、段 1 と生成物が α 同値である', async () => {
   const src = readSrcEmbedded()
   const dist = readFileSync(DIST_PATH, 'utf8')
-  // before は生の src（acorn はコメントを読み飛ばす）なので、コメント除去・インデント除去・
+  const stage1 = buildArtifact(src)
+  // 照合 1: before は生の src（acorn はコメントを読み飛ばす）なので、コメント除去・インデント除去・
   // 空白除去の全体が「トークン列と各トークンの開始行を変えない」ことを独立実装で検証する
-  const [result] = compareTokensWithParser([{ name: 'implement-issue-tree', before: src, after: dist }])
+  const [result] = compareTokensWithParser([{ name: 'implement-issue-tree', before: src, after: stage1 }])
   assert.equal(result.ok, true, result.detail)
+  // 照合 2: 生成物は段 1 に対して α 同値（識別子の一貫した改名だけの差）。今は生成物 = 段 1 で恒等になる。
+  // 検証器の一律の拒否に当たる既知の 1 か所（h.toString(36)）は、件数と場所を確かめて両側とも同じ形に置き換えてから見る
+  // （src を書き換える PR で置き換えを外す。tests/lib/mangle-harness.mjs の patchKnownObservation）
+  await assertAlphaOk(await patchKnownObservation(stage1), await patchKnownObservation(dist))
 })
 
 // 下流の同期 PR で Cursor Bugbot が指摘した「詰めるとトークン列が変わる入力」3 種。現在の src には
@@ -1296,18 +1315,21 @@ const runBuilder = (srcText, extra = []) => {
 }
 
 for (const [name, { text, keep, expected }] of Object.entries(LEXER_SLASH_FIXED)) {
-  test(`lexer の / 判別: ${name} はビルドが通り、中身を変えない`, () => {
+  test(`lexer の / 判別: ${name} はビルドが通り、中身を変えない`, async () => {
     const out = buildArtifact(text)
     for (const part of keep) assert.ok(out.includes(part), `${JSON.stringify(part)} が生成物から消えた・変わった: ${JSON.stringify(out)}`)
     if (expected !== undefined) assert.equal(out, expected)
     // パーサ文脈つきの照合（ビルドが使うのと同じ）で、変換前後のトークン列が一致する
     const [result] = compareTokensWithParser([{ name, before: text, after: out }])
     assert.equal(result.ok, true, result.detail)
+    // class を使うフィクスチャは段 1 の検査までで、CLI（ビルド全体）は走らせない
+    if (usesClass(text)) return
     const r = runBuilder(text)
     assert.equal(r.status, 0, r.stderr)
     assert.match(r.stdout, /トークン照合 ok/)
     assert.equal(r.written, true)
-    assert.equal(r.distText, out)
+    // 書かれた生成物は段 1 の出力と α 同値（識別子の改名が入っても成り立つ）
+    await assertAlphaOk(out, r.distText)
   })
 }
 
@@ -1543,7 +1565,8 @@ for (const [name, { code, result }] of Object.entries(WORD_PROPERTY_CASES)) {
     const expected = await runLikeRuntime(src)
     assert.deepEqual(expected, result)
     assert.deepEqual(await runLikeRuntime(out), result)
-    assert.equal(runBuilder(src).status, 0)
+    // class（private 名）を使う入力は段 1 の検査までで、CLI（ビルド全体）は走らせない
+    if (!usesClass(src)) assert.equal(runBuilder(src).status, 0)
   })
 }
 
@@ -1704,13 +1727,39 @@ test('verifyTokenParity: 中身を変えた生成物は最初の差の位置（�
   }
 })
 
-test('ビルド時のトークン照合: 正常な開発ファイルはビルドが通り、生成ファイルが書かれる', () => {
+test('ビルド時のトークン照合: 正常な開発ファイルはビルドが通り、生成ファイルが書かれる', async () => {
   const text = `${META_HEADER}const x = a / 2 + " / a  +  b "\nconst re = /\`/.test(s)\nconst t = \`l1\n  i   t  =  1\`\n`
   const r = runBuilder(text)
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stdout, /トークン照合 ok/)
   assert.equal(r.written, true)
-  assert.equal(r.distText, buildArtifact(text))
+  await assertAlphaOk(buildArtifact(text), r.distText)
+})
+
+test('buildStage1: ハッシュ埋め込み・空白除去・照合 1 を行い、runBuild と同じ段 1 を返す', () => {
+  const text = `${META_HEADER}const x = a / 2 + " / a  +  b "\nconst re = /\`/.test(s)\n`
+  const { src, stage1 } = buildStage1(text, helperDir)
+  assert.equal(src, text)
+  assert.equal(stage1, buildArtifact(text))
+  // 照合 1 が失敗したら throw する（照合ヘルパーの差し替えは parity 引数。CLI からは渡せない）
+  assert.throws(() => buildStage1(text, helperDir, { execPath: join(helperDir, 'no-such-node') }), /トークン照合を実行できない/)
+  // 生成物の書き込みはしない（runBuild だけが書く）
+  const r = runBuilder(text)
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.distText, stage1)
+})
+
+test('stub-run: scriptText に段 1 を渡すと、ハッシュ埋め込み済みの src と同じ agent 呼び出し列・ログ・戻り値になる', async () => {
+  // 既定（src）は目印 @@SCRIPT_SHA256:…@@ を含みプロンプトが変わるため、比べる側もハッシュ埋め込み済みの src を渡す
+  const embedded = readSrcEmbedded()
+  const stage1 = buildArtifact(embedded)
+  const args = { ...BASE_ARGS, parallel: 1 }
+  const bySrc = await runScript({ args, scriptText: embedded })
+  const byStage1 = await runScript({ args, scriptText: stage1 })
+  assert.ok(bySrc.calls.length > 0)
+  assert.deepEqual(byStage1.calls, bySrc.calls)
+  assert.deepEqual(byStage1.logs, bySrc.logs)
+  assert.deepEqual(byStage1.result, bySrc.result)
 })
 
 // 照合を実行できない・結果を解釈できない場合は、検査を省略して通さずに止める（fail-closed）。
