@@ -320,3 +320,17 @@ test('件数の記録: shell の呼び出しごとに sessionID を callLog へ�
   // callLog も保護する（書き換えて件数を合わせられないように）
   assert.ok(await throwsOf(() => p.before(toolEv(`echo ses_x >> ${callLog}`))))
 })
+
+test('merge-exec の対応づけ（MEDIUM-8）: mergeRes を PR 番号で具体化した serve では、別の PR 番号の全文は記録せずガードに回し、後半も通さない', async () => {
+  const { mergeExecCommandFor } = await import('../../../skills/implement-issue-tree/runner/lib/guard.mjs')
+  const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n', { mergeRes: [mergeExecCommandFor(7).source] })
+  const p = await loadBoth({ ...s.options, guardScript: REAL_GUARD })
+  const sha = 'b'.repeat(40)
+  const full = (n) => `HEAD_SHA="${sha}"; gh pr merge ${n} --squash --delete-branch --match-head-commit "$HEAD_SHA"`
+  const tail = (n) => `gh pr merge ${n} --squash --delete-branch --match-head-commit "$HEAD_SHA"`
+  assert.ok(await throwsOf(() => p.before(toolEv(full(8)))), '別の PR はガードの merge-guard で拒否')
+  assert.equal((await p.evaluate(permEv([tail(8)]))).effect, 'deny')
+  const call7 = { sessionID: 'ses_7', messageID: 'msg_7', id: 'call_7' }
+  assert.equal(await throwsOf(() => p.before(toolEv(full(7), call7))), null, '自分の PR は記録だけ')
+  assert.notEqual((await p.evaluate(permEv([tail(7)], { sessionID: 'ses_7', source: { type: 'tool', messageID: 'msg_7', id: 'call_7' } }))).effect, 'deny')
+})

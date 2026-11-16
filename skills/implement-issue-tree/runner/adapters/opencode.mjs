@@ -4,13 +4,15 @@
 // worktree 作成は agent-host の責務で、ここでは持たない。
 //
 // 設計（実測の根拠は _/local-plans/iit-runners-phase0.md の 0-3・0-6・0-8）:
-//   - serve は自前で空きポートに起動する。通常用と merge-exec 用の 2 つで、merge-exec 用は allowMerge の run が来たときだけ
-//     遅延起動する。設定は環境変数 OPENCODE_CONFIG_CONTENT（インライン JSON）で渡し、ホストの設定ファイルには書かない。
+//   - serve は自前で空きポートに起動する。通常用と merge-exec 用で、merge-exec 用は allowMerge の run が来たときだけ、PR ごとに
+//     遅延起動する（監査 e670648 の MEDIUM-8）。merge 用は、素通しにする形を guard.mergeExecCommandFor(req.merge.prNumber) に
+//     絞り、serve の env に GH_REPO=req.merge.repo を固定する。req.merge が null・不正なら allowMerge として扱わない
+//     （merge 用 serve を作らず通常用で走らせる。fail-closed）。merge 用 serve は close まで残す。設定は環境変数 OPENCODE_CONFIG_CONTENT（インライン JSON）で渡し、ホストの設定ファイルには書かない。
 //   - 設定は permissions / policies（guard.opencodeRules）の deny と、ランナー専用 plugin（opencode-plugin/）の有効化。
 //     allow-all は付けない（session.create で付けると config の permissions が打ち消されるため）。
 //   - 配布物の plugin は親を持たない top-level セッションを main とみなしてマージ系を制限しない。ランナーのセッションは
 //     すべて top-level なので、ランナー専用 plugin が agent-guard.sh を「常に subagent=true」で呼ぶ（Codex の codex-hook.sh と同じ意味）。
-//     allowMerge の serve だけ、MERGE_EXEC_COMMAND の完全一致の 1 形を plugin のオプションで素通しにする（permission に後半だけが
+//     merge 用の serve だけ、その PR 番号の merge-exec の完全一致の 1 形を plugin のオプションで素通しにする（permission に後半だけが
 //     届く版では、plugin が tool.execute.before で全文の一致を確かめた呼び出しにだけ許可を対応づける）。
 //   - ガードの置き場（agent-guard.sh・ランナー専用 plugin・OpenCode の利用者設定ディレクトリ・`.opencode/(hooks|plugins?)/`・
 //     `opencode.json(c)`）への edit を permissions と policies の両方で拒否する（protectRules。guard.opencodeRules の結果に足す）。
@@ -41,12 +43,14 @@ import { dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { AdapterError } from '../lib/adapter-error.mjs'
-import { MERGE_EXEC_COMMAND } from '../lib/guard.mjs'
+import { MERGE_EXEC_COMMAND, mergeExecCommandFor } from '../lib/guard.mjs'
 import { GUARD_SCRIPT_MISSING, findGuardScript } from '../lib/guard-script.mjs'
 
 const USAGE_LIMIT_RE = /rate.?limit|quota|usage.?limit|too many requests|\b429\b|insufficient.?(credit|quota|balance)/i
 const PLUGIN_DIR = join(dirname(fileURLToPath(import.meta.url)), 'opencode-plugin')
 
+// 一般形の参照（PR 番号を問わない形）。merge 用 serve が実際に渡すのは mergeTarget の mergeExecCommandFor(prNumber) で、
+// これより狭い。以下は一般形についての説明で、PR 番号で具体化しても同じ。
 // allowMerge の serve で素通しにするのは MERGE_EXEC_COMMAND の完全一致だけ（Codex の codex-hook.sh に渡す --merge-re と
 // 同じ 1 形・同じ意味）。後半だけの形（代入を落とした `gh pr merge … "$HEAD_SHA"`）の正規表現は、代入なしの gh pr merge を
 // 素通しにするため置かない。OpenCode v2.2.7 の permission には後半だけが届く（Phase 3 の実測）ので、plugin は
@@ -56,6 +60,20 @@ export const MERGE_RES = Object.freeze([MERGE_EXEC_COMMAND.source])
 const MARKER_WAIT_MS = 5000
 const MESSAGE_PAGE = 100
 const MESSAGE_PAGE_MAX = 1000 // 100 件 × 1000 ページを超えるセッションは数え切れないものとして拒否する
+
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+
+/**
+ * req.merge（契約: null | { prNumber, repo }。allowMerge が true のときだけ入る）を検証する。allowMerge でない・merge が無い・
+ * 不正のときは null（merge 用 serve を使わない）。
+ */
+export function mergeTarget(req) {
+  const m = req?.allowMerge === true ? req.merge : null
+  if (!m || typeof m !== 'object') return null
+  if (!Number.isSafeInteger(m.prNumber) || m.prNumber < 1) return null
+  if (typeof m.repo !== 'string' || !REPO_RE.test(m.repo) || m.repo.split('/').some((x) => x === '.' || x === '..')) return null
+  return { prNumber: m.prNumber, repo: m.repo }
+}
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer()
@@ -134,9 +152,10 @@ export function createAdapter(cfg) {
     if (!guardScript) throw new AdapterError('prereq', GUARD_SCRIPT_MISSING)
   }
 
-  async function startServe(kind) {
+  /** kind は 'normal' か `merge-<prNumber>`。merge は merge 用のときの { prNumber, repo }。 */
+  async function startServe(kind, merge) {
     ensureGuardScript()
-    const allowMerge = kind === 'merge'
+    const allowMerge = merge !== null
     const configDirs = opencodeConfigDirs(baseEnv)
     const rules = mergeRules(cfg.guard.opencodeRules({ allowMerge }), protectRules({ files: [guardScript], dirs: [PLUGIN_DIR, ...configDirs] }))
     const port = await freePort()
@@ -147,12 +166,12 @@ export function createAdapter(cfg) {
     const nonce = randomBytes(16).toString('hex')
     const markerPath = join(cfg.runDir, `opencode-plugin-${kind}.marker`)
     const callLog = join(cfg.runDir, `opencode-calls-${kind}.log`)
-    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? MERGE_RES : [], markerPath, nonce, protectedPaths: configDirs.map((d) => resolve(d)), callLog }
-    const env = { ...baseEnv, OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildConfigContent({ rules, pluginDir: PLUGIN_DIR, options })) }
+    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? [mergeExecCommandFor(merge.prNumber).source] : [], markerPath, nonce, protectedPaths: configDirs.map((d) => resolve(d)), callLog }
+    const env = { ...baseEnv, ...(allowMerge ? { GH_REPO: merge.repo } : {}), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildConfigContent({ rules, pluginDir: PLUGIN_DIR, options })) }
     const child = spawn(command[0], [...command.slice(1), 'serve', '--hostname', '127.0.0.1', '--port', String(port)], { cwd: cfg.mainRoot, env, stdio: ['ignore', outFd, errFd], detached: true })
     closeSync(outFd)
     closeSync(errFd)
-    const serve = { kind, allowMerge, nonce, markerPath, callLog, locations: new Set(), child, base: `http://127.0.0.1:${port}`, exited: false, exitInfo: null, subs: new Set(), sseCtrl: null, spawnError: null }
+    const serve = { kind, allowMerge, repo: merge?.repo ?? null, nonce, markerPath, callLog, locations: new Set(), child, base: `http://127.0.0.1:${port}`, exited: false, exitInfo: null, subs: new Set(), sseCtrl: null, spawnError: null }
     serve.auth = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`
     child.on('error', (e) => { serve.spawnError = e })
     child.on('exit', (code, signal) => { serve.exited = true; serve.exitInfo = `code=${code} signal=${signal}` })
@@ -281,9 +300,10 @@ export function createAdapter(cfg) {
     while (!serve.exited && Date.now() < end) await sleep(50)
   }
 
-  function getServe(kind) {
+  function getServe(merge = null) {
+    const kind = merge ? `merge-${merge.prNumber}` : 'normal'
     if (!serves.has(kind)) {
-      const p = startServe(kind)
+      const p = startServe(kind, merge)
       serves.set(kind, p)
       p.catch(() => serves.delete(kind)) // 失敗は次の呼び出しで作り直せる
     }
@@ -374,7 +394,7 @@ export function createAdapter(cfg) {
     async start() {
       try { await execVersion() } catch (e) { throw new AdapterError('prereq', `opencode を実行できない: ${e.message}`) }
       ensureGuardScript()
-      await getServe('normal')
+      await getServe(null)
     },
 
     async run(req) {
@@ -388,7 +408,9 @@ export function createAdapter(cfg) {
         serve = sessions.get(sid)
         if (!serve) throw new AdapterError('api', `不明なセッション: ${sid}`, { sessionRef: sid })
       } else {
-        serve = await getServe(req.allowMerge ? 'merge' : 'normal')
+        const merge = mergeTarget(req)
+        serve = await getServe(merge)
+        if (merge && serve.repo !== merge.repo) throw new AdapterError('api', `PR ${merge.prNumber} の merge 用 serve は ${serve.repo} に固定済みで、${merge.repo} には使えない`)
         const body = { title: req.label, location: { directory: req.cwd } }
         const variant = req.variant ?? req.effort ?? null
         const model = req.model ?? tc.defaultModel ?? null

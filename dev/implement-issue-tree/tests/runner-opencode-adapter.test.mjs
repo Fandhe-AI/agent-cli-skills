@@ -14,7 +14,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { SKILL_DIR } from './lib/paths.mjs'
 import { MERGE_RES, createAdapter, opencodeConfigDirs, protectRules } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
-import { MERGE_EXEC_COMMAND, codexRules, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
+import { MERGE_EXEC_COMMAND, codexRules, mergeExecCommandFor, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 
 const PLUGIN_DIR = join(SKILL_DIR, 'runner', 'adapters', 'opencode-plugin')
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'lib', 'fake-opencode-server.mjs')
@@ -32,7 +32,7 @@ function setup(extra = {}) {
     runDir,
     toolConfig: { command: [process.execPath, FAKE], pollMs: 20, startTimeoutMs: 10000, deleteSessions: true, ...extra.toolConfig },
     guard: { codexRules, opencodeRules },
-    env: { ...process.env, FAKE_OC_LOG: log, ...extra.env },
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GH_REPO')), FAKE_OC_LOG: log, ...extra.env },
   })
   let n = 0
   const req = (over = {}) => {
@@ -73,7 +73,7 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     await t.adapter.run(t.req())
     assert.equal(starts(t.records()).length, 1, 'allowMerge でない run では merge 用 serve を起動しない')
 
-    await t.adapter.run(t.req({ allowMerge: true }))
+    await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 7, repo: 'octo/repo' } }))
     recs = starts(t.records())
     assert.equal(recs.length, 2)
     const [normal, merge] = recs
@@ -83,7 +83,7 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.ok(merge.config.permissions.some((r) => /gh pr review\*--approve/.test(r.resource)), '承認の deny は残る')
     assert.ok(merge.config.permissions.some((r) => r.resource.includes('--admin')), '--admin の deny は残る')
     assert.equal(JSON.stringify(merge.config).includes('"effect":"allow"'), false)
-    assert.deepEqual(merge.config.plugins[0].options.mergeRes, MERGE_RES, 'merge 用だけ MERGE_EXEC_COMMAND を素通しにする')
+    assert.deepEqual(merge.config.plugins[0].options.mergeRes, [mergeExecCommandFor(7).source], 'merge 用だけ、その PR 番号で具体化した merge-exec を素通しにする')
     assert.deepEqual(MERGE_RES, [MERGE_EXEC_COMMAND.source], '完全一致の 1 形だけ（Codex の --merge-re と同じ）')
     assert.notEqual(merge.config.plugins[0].options.nonce, o.nonce, 'serve ごとに別の nonce')
   } finally { await t.adapter.close() }
@@ -125,7 +125,7 @@ test('セッション: 親セッションは作らない。model は Ref にな�
   await t.adapter.start()
   try {
     await t.adapter.run(t.req({ model: 'prov/some/model-x', effort: 'low' }))
-    const r2 = t.req({ allowMerge: true, model: null, effort: 'low' })
+    const r2 = t.req({ allowMerge: true, merge: { prNumber: 3, repo: 'octo/repo' }, model: null, effort: 'low' })
     await t.adapter.run(r2)
     const posts = t.records().filter((r) => r.ev === 'http' && r.method === 'POST' && r.path === '/api/session')
     const child = posts.find((r) => r.body.title === 't1')
@@ -296,5 +296,41 @@ test('件数照合: plugin を通っていない shell の実行があれば den
     assert.equal(e.kind, 'denied')
     assert.match(e.message, /ガードの欠落/)
     assert.match(readFileSync(join(r.logDir, 'error.txt'), 'utf8'), /^denied:/)
+  } finally { await t.adapter.close() }
+})
+
+// MEDIUM-8（監査 e670648）: merge-exec の許可を PR 番号とリポジトリに縛る。req.merge は契約の形
+// （null | { prNumber, repo }。allowMerge が true のときだけ入る）を agent-host が渡す前提で、ここでは req に直接入れる。
+test('merge 用 serve: 照合を mergeExecCommandFor(prNumber) に絞り、env の GH_REPO を repo に固定する。PR ごとに別の serve', async () => {
+  const t = setup({ env: { GH_REPO: 'evil/other' } })
+  await t.adapter.start()
+  try {
+    await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 12, repo: 'octo/repo' } }))
+    await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 12, repo: 'octo/repo' } }))
+    await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 13, repo: 'octo/repo' } }))
+    const [normal, m12, m13, ...rest] = starts(t.records())
+    assert.equal(rest.length, 0, '同じ PR は同じ serve を使う')
+    assert.deepEqual(m12.config.plugins[0].options.mergeRes, [mergeExecCommandFor(12).source])
+    assert.deepEqual(m13.config.plugins[0].options.mergeRes, [mergeExecCommandFor(13).source])
+    const re = new RegExp(m12.config.plugins[0].options.mergeRes[0])
+    const cmd = (n) => `HEAD_SHA="${'a'.repeat(40)}"; gh pr merge ${n} --squash --delete-branch --match-head-commit "$HEAD_SHA"`
+    assert.ok(re.test(cmd(12)))
+    assert.ok(!re.test(cmd(13)) && !re.test(cmd(1)) && !re.test(cmd(120)), '別の PR 番号は通さない')
+    assert.equal(m12.ghRepo, 'octo/repo', '利用者の環境の GH_REPO より req.merge.repo を優先して固定する')
+    assert.equal(m13.ghRepo, 'octo/repo')
+    assert.equal(normal.ghRepo, 'evil/other', '通常用の serve の env は変えない')
+    assert.notEqual(m12.config.plugins[0].options.markerPath, m13.config.plugins[0].options.markerPath, 'ファイルは serve ごとに分ける')
+  } finally { await t.adapter.close() }
+})
+
+test('merge 用 serve: req.merge が null・不正なら allowMerge として扱わず、merge 用 serve を作らない（通常用で走らせる）', async () => {
+  const t = setup()
+  await t.adapter.start()
+  try {
+    for (const merge of [undefined, null, { prNumber: 0, repo: 'o/r' }, { prNumber: 1.5, repo: 'o/r' }, { prNumber: '7', repo: 'o/r' }, { prNumber: 7, repo: 'bad' }, { prNumber: 7, repo: 'o/r;x' }, { prNumber: 7 }]) {
+      const out = await t.adapter.run(t.req({ allowMerge: true, ...(merge === undefined ? {} : { merge }) }))
+      assert.match(out.text, /^reply-/)
+    }
+    assert.equal(starts(t.records()).length, 1, '通常用の serve だけ')
   } finally { await t.adapter.close() }
 })

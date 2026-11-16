@@ -38,6 +38,12 @@
 /** merge-exec の完全一致の形（src の merge プロンプトの手順 3 と同じ形）。照合は plugin / hook 側が行う。 */
 export const MERGE_EXEC_COMMAND = /^HEAD_SHA="[0-9a-f]{40}"; gh pr merge [1-9][0-9]* --squash --delete-branch --match-head-commit "\$HEAD_SHA"$/
 
+/** PR 番号で具体化した merge-exec の完全一致の形。prNumber が正の安全な整数でなければ throw する。 */
+export function mergeExecCommandFor(prNumber) {
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1) throw new TypeError('mergeExecCommandFor: prNumber は正の整数')
+  return new RegExp(`^HEAD_SHA="[0-9a-f]{40}"; gh pr merge ${prNumber} --squash --delete-branch --match-head-commit "\\$HEAD_SHA"$`)
+}
+
 /** GraphQL の mutation 名の呼び出し（`name(` と `name (`）。名前だけの一致は repo 名・ブランチ名と衝突し、ThreadReply 等の別 mutation も巻き込む。 */
 const mutationGlobs = (name) => [`gh api*${name}(*`, `gh api*${name} (*`]
 

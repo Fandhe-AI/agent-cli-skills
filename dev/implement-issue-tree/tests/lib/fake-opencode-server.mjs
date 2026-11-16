@@ -36,7 +36,7 @@ const LOG = process.env.FAKE_OC_LOG
 const PASSWORD = process.env.OPENCODE_PASSWORD
 const rec = (o) => { if (LOG) appendFileSync(LOG, `${JSON.stringify(o)}\n`) }
 
-rec({ ev: 'start', pid: process.pid, port, hasPassword: Boolean(PASSWORD), config: process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : null, cwd: process.cwd() })
+rec({ ev: 'start', pid: process.pid, port, hasPassword: Boolean(PASSWORD), config: process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : null, cwd: process.cwd(), ghRepo: process.env.GH_REPO ?? null })
 
 const pluginEntry = process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT).plugins?.[0] : null
 const instances = new Map() // location directory -> { before: fn[] }
