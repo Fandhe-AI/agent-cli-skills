@@ -465,6 +465,15 @@ check(
   (g, r, i) => assert.equal(g.out, ['/a/b', '/a/b', '/a/b', '/a/b', '/a/b', '/a/b/c', '/', '/', '/', '/a/.hid', '/a b/c', '/a/.b./c'][i], JSON.stringify(r)),
 )
 
+// wr_real: 実在するディレクトリは pwd -P の実体、無いパスは wr_norm_path で字面を正規化する（実在する祖先を実体にする wr_loose_real とは別）
+check(
+  'wr_real: 実在するパスは実体、存在しないパスは末尾の / ・// ・/./ を畳んだ字面（sweep の保持照合が綴りの違いで見落とさない）',
+  [
+    ['wr_real', '/usr/'], ['wr_real', '/usr//./'], ['wr_real', '/nonexistent-wr-real/x/'], ['wr_real', '/nonexistent-wr-real//x/./y/'], ['wr_real', '/nonexistent-wr-real/x/.'],
+  ],
+  (g, r, i) => assert.equal(g.out, ['/usr', '/usr', '/nonexistent-wr-real/x', '/nonexistent-wr-real/x/y', '/nonexistent-wr-real/x'][i], JSON.stringify(r)),
+)
+
 // HEAD 0000…（ブランチ ref を消した登録）は detached と同じく保全する。大小を区別する照合は fold のときだけ
 const WZ = `worktree /r/wz${NL}HEAD ${'0'.repeat(40)}${NL}branch refs/heads/gone`
 check(
