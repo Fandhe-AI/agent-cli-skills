@@ -86,23 +86,25 @@ CI では恒久的な回帰検知能力を `workflow-loadability.test.mjs` の�
 
 ### 非信頼データ境界の適用確認（Issue #87）
 
+以下の grep は、生成物が束縛名（変数・関数・引数）を短縮するため、識別子を探すものは開発ファイル（`.src.js`）に対して流す。文字列リテラル・プロパティ名を探すものは生成物のままでよい（改名されない）。
+
 ```bash
 # UNTRUSTED_POLICY が COMMON に組み込まれていること
-grep -n "UNTRUSTED_POLICY" scripts/implement-issue-tree.js
+grep -n "UNTRUSTED_POLICY" scripts/implement-issue-tree.src.js
 # untrusted() の適用箇所（planPrompt / implementPrompt / prCreatePrompt / fixPrompt /
 # closePrompt / recoverPrompt / recoverImplementPrompt / lowFindingsCommentPrompt の 8 関数）
-grep -n "untrusted(" scripts/implement-issue-tree.js
+grep -n "untrusted(" scripts/implement-issue-tree.src.js
 # 副作用エージェント（implement / fix / recover-implement）が Issue 本文を読まないこと（--json number,title 限定）
 grep -n "gh issue view" scripts/implement-issue-tree.js
 # コンテキスト分離（Issue #144 / #145）: monitorPrompt に merge / close 権限がなく、mergeExecutePrompt がレビュー本文を読まないこと
 grep -n "gh pr merge\|gh issue close" scripts/implement-issue-tree.js
 # State プロンプトが固定フェンス・固定 HEREDOC デリミタを使っていないこと
-grep -n "PATCH_EOF\|boundaryNonce" scripts/implement-issue-tree.js
+grep -n "PATCH_EOF\|boundaryNonce" scripts/implement-issue-tree.src.js
 # worktree 削除の安全性（Issue #139 / #142 / #148）
-grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree\|implement-issue-tree-owner" scripts/implement-issue-tree.js
+grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree\|implement-issue-tree-owner" scripts/implement-issue-tree.src.js
 grep -n "wipCommitted !== true\|cleanupMode: 'discard'" scripts/implement-issue-tree.src.js
-grep -n "orphanDeleteCandidates" scripts/implement-issue-tree.js
-grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scripts/implement-issue-tree.js
+grep -n "orphanDeleteCandidates" scripts/implement-issue-tree.src.js
+grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scripts/implement-issue-tree.src.js
 ```
 
 期待結果（目視確認。専用の回帰テストは無い）:
@@ -182,12 +184,12 @@ command -v shellcheck >/dev/null && shellcheck scripts/merge-guard-hook.sh
 grep -vE '^\s*#' scripts/merge-guard-hook.sh | grep -nE "ALLOW_RE|expectedCommand|merge-grants/grant-" || echo "allow 経路の実ロジックなし（deny 専用）"
 
 # 3. grant / canary / branch-protection ゲートと、PR #206 で撤回した arm の残骸が無いこと
-grep -n "issueMergeGrant\|buildMergeCommand\|ensureMergeGuardActive\|ensureBranchProtection\|IIT_MERGE_GRANT\|MERGE_GRANT_DIR" scripts/implement-issue-tree.js || echo "撤去済み（コメントの言及を除く）"
-grep -nE "autoMergePrecheck|autoMergeArmable|autoMergeArmPrompt|AUTO_MERGE_PRECHECK" scripts/implement-issue-tree.js && echo "NG: precheck/arm 残骸あり" || echo "OK: precheck/arm 残骸なし"
+grep -n "issueMergeGrant\|buildMergeCommand\|ensureMergeGuardActive\|ensureBranchProtection\|IIT_MERGE_GRANT\|MERGE_GRANT_DIR" scripts/implement-issue-tree.src.js || echo "撤去済み（コメントの言及を除く）"
+grep -nE "autoMergePrecheck|autoMergeArmable|autoMergeArmPrompt|AUTO_MERGE_PRECHECK" scripts/implement-issue-tree.src.js && echo "NG: precheck/arm 残骸あり" || echo "OK: precheck/arm 残骸なし"
 grep -vE '^\s*#' scripts/merge-guard-hook.sh | grep -nE -- "--auto --squash|carve" && echo "NG: hook carve-out 残骸あり" || echo "OK: hook carve-out 残骸なし"
 
 # 4. boundaryNonce / ensureBoundaryNonceSeed は保持されていること（fix / state 用）
-grep -n "function boundaryNonce\|async function ensureBoundaryNonceSeed" scripts/implement-issue-tree.js
+grep -n "function boundaryNonce\|async function ensureBoundaryNonceSeed" scripts/implement-issue-tree.src.js
 
 # 5. G0 から classic protection API の判定式が撤去されていること（0 件）
 grep -n "protection/required_status_checks\|protection/enforce_admins\|required_conversation_resolution\|bypass_pull_request_allowances\|collaborators/" scripts/implement-issue-tree.js
@@ -222,7 +224,7 @@ wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
 ```bash
 node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
 # 駆動部（境界マーカーより下）の markBlockedByDeps 呼び出しが cascade の 1 箇所だけであること → 1
-awk '/__IMPLEMENT_ISSUE_TREE_DRIVER_START__/,0' skills/implement-issue-tree/scripts/implement-issue-tree.js | grep -c "await markBlockedByDeps(item, failedDeps)"
+awk '/__IMPLEMENT_ISSUE_TREE_DRIVER_START__/,0' skills/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c "await markBlockedByDeps(item, failedDeps)"
 ```
 
 出力が 2 以上なら dispatch ループ内の即時確定が復活、0 なら cascade 側が壊れている。
@@ -262,7 +264,7 @@ node --test skills/implement-issue-tree/tests/optin-tests-gate.test.mjs
 node --test skills/implement-issue-tree/tests/state-write-fallback.test.mjs \
   skills/implement-issue-tree/tests/pr-saved-failsafe.test.mjs
 # 目視補助: 終端分類関数が runOne の catch・reviewing / monitoring 遷移・Recover の掃除ゲートから参照されること
-grep -n "classifyStateWriteFailureStatus\|classifyUncaughtFailureStatus\|knownPrByIssue" skills/implement-issue-tree/scripts/implement-issue-tree.js
+grep -n "classifyStateWriteFailureStatus\|classifyUncaughtFailureStatus\|knownPrByIssue" skills/implement-issue-tree/scripts/implement-issue-tree.src.js
 wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
 ```
 

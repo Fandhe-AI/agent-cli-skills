@@ -1792,7 +1792,7 @@ const runBuildOn = (srcText, { checkOnly = false, parity = {}, mangle = {}, alph
     const distPath = join(dir, 'out.js')
     writeFileSync(srcPath, srcText)
     const r = runBuild({ srcPath, distPath, checkOnly, parity, mangle, alpha })
-    return { ...r, distExists: existsSync(distPath) }
+    return { ...r, distExists: existsSync(distPath), distText: existsSync(distPath) ? readFileSync(distPath, 'utf8') : null }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -1897,12 +1897,34 @@ test('runBuild: 改名器が class を拒否する開発ファイルはビルド
   assert.equal(r.distExists, false)
   assert.match(r.stderr.join('\n'), /mangle: class/)
 })
-test('runBuild: 改名後の生成物は mangleStage1 の出力と一致し、書かれる', async () => {
-  const text = `${META_HEADER}const longName = " / a  +  b "\nconst another = longName.length\n`
+test('runBuild: 書かれる生成物は段 1 の改名結果と一致し、束縛名が短縮されている', async () => {
+  const text = `${META_HEADER}const longName = " / a  +  b "\nconst another = longName.length\nexport_use(another)\n`
   const r = runBuildOn(text)
   assert.equal(r.status, 0, r.stderr.join('\n'))
   assert.equal(r.wrote, true)
+  const stage1 = buildArtifact(text)
+  assert.equal(r.distText, await mangleStage1Text(stage1))
+  assert.notEqual(r.distText, stage1)
+  assert.doesNotMatch(r.distText, /longName/)
 })
+
+// 正しい形（{ code }）で返すが、文字列の中身まで変える偽の改名器。検証器が止めなければならない（照合 2 の引数の配線の検査）。
+// 'ab' → 'xy' は束縛名でなくリテラルを変えるので、α 同値でない
+const FAKE_MANGLER = writeHelper('fake-mangler.cjs', '')
+writeFileSync(
+  FAKE_MANGLER,
+  `let t = ''\nprocess.stdin.on('data', (d) => { t += d })\nprocess.stdin.on('end', () => { process.stdout.write(JSON.stringify({ code: t.replace(/ab/g, 'xy') })) })\n`,
+)
+const AB_SRC = `${META_HEADER}const s = "ab"\nuse(s)\n`
+for (const checkOnly of [false, true]) {
+  test(`runBuild${checkOnly ? '（--check）' : ''}: 改名器がリテラルを書き換えると α 照合が止め、status 1 で書かない`, () => {
+    const r = runBuildOn(AB_SRC, { checkOnly, mangle: { helperPath: FAKE_MANGLER } })
+    assert.equal(r.status, 1, `ビルドが成功してしまった: ${r.stdout.join('\n')}`)
+    assert.equal(r.wrote, false)
+    assert.equal(r.distExists, false)
+    assert.match(r.stderr.join('\n'), /改名後の生成物が段 1 と α 同値でない/)
+  })
+}
 
 test('runBuild: --check 相当でも照合ヘルパーが失敗すれば status 1 で、鮮度比較へ進まない', () => {
   const r = runBuildOn(GOOD_SRC, { checkOnly: true, parity: { helperPath: BAD_HELPERS['終了コード 3 で終わる'].path } })

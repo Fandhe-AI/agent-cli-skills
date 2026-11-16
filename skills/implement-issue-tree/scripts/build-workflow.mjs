@@ -1,8 +1,8 @@
 // implement-issue-tree の実行ファイル（Workflow へ渡す配布物）を開発ファイルから生成する
 // ビルダー。開発ファイル implement-issue-tree.src.js（コメント込み・編集はこちらだけ）から
-// コメントのみを除去した implement-issue-tree.js を生成する。Workflow ランタイムのハード上限
+// コメント・空白を除き束縛名を短縮した implement-issue-tree.js を生成する。Workflow ランタイムのハード上限
 // 512 KiB（tests/lib/workflow-script-contract.mjs 参照）に対しコメントが約 28% を占めるため、
-// 実行ファイルからコメントを落としてサイズ予算を確保し、開発ファイル側はコメント量の制約から
+// 実行ファイルからコメントを落とし束縛名を短縮してサイズ予算を確保し、開発ファイル側はコメント量の制約から
 // 解放する（設計の経緯は PR #241 → 本分離）。
 //
 // 変換は 4 段で、「コメント除去」「コード行の先頭インデント除去」「トークン間の不要な半角スペースの
@@ -10,7 +10,8 @@
 // scripts/mangle-identifiers.cjs）を行う。改行の除去等の minify はしない。段 2 の改名は行の内側だけで行い、
 // プロパティ名・文字列・テンプレートの地の文・正規表現・自由変数は変えない。コメント行は空行化し
 // 改行を全て保持するため、生成物と開発ファイルの行番号は完全に一致する（スタックトレース・
-// エラー行の突き合わせ用）。一方、先頭インデントと空白を落とすため**列番号は一致しない**。
+// エラー行の突き合わせ用）。一方、先頭インデントと空白を落とし束縛名を短縮するため**列番号は一致しない**
+// （スタックトレースの関数名・変数名も開発ファイルの名前と一致しない）。
 // テンプレートリテラル内（`${}` 式部分を含む）・文字列リテラル・正規表現リテラルは一切変更しない
 // （プロンプトに埋め込む bash・YAML 等は継続行のインデントが内容の一部）。インデント除去と
 // 空白除去は 512 KiB 予算（tests/lib/workflow-script-contract.mjs）を行番号一致を保ったまま
@@ -871,8 +872,8 @@ export function verifyTokenParity(src, artifact, { helperPath = TOKEN_DIFF_PATH,
 /**
  * ビルドの前半（段 1）。目印をスクリプトのハッシュへ置換し、コメント・インデント・不要な空白を除去して、
  * 変換前後のトークン照合（照合 1）まで行う。戻り値の `src` はハッシュ埋め込み済みの開発ファイル、`stage1` は
- * 照合を通った段 1 の生成物。照合に失敗したら throw する（fail-closed）。runBuild はこれを呼ぶだけで、
- * 挙動は従来のビルドと同じ。`parity` は verifyTokenParity へ渡す差し替え（テスト専用）。
+ * 照合を通った段 1 の生成物（束縛名は未短縮）。照合に失敗したら throw する（fail-closed）。runBuild はこのあと
+ * mangleStage1（改名）→ verifyAlpha（照合 2）を行って生成物にする。`parity` は verifyTokenParity へ渡す差し替え（テスト専用）。
  */
 export function buildStage1(rawSrc, scriptsDir, parity = {}) {
   const src = embedScriptHashes(rawSrc, scriptsDir)
