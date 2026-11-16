@@ -4,8 +4,8 @@
 # 呼び出し元: worktree-remove.sh（Issue #603 第 7 弾）。削除してよいかの判断（モードと観測 → 削除・強制削除・保持）、lock の扱い、
 #             git の出力の読み取り、入力の形式検証を、git を呼ぶ本体から切り出したもの。切り出した理由は、テストが 1 回の
 #             bash 起動でこれらの関数へ表の全ケースを渡せるようにするため（lib/pr-push-lib.sh と同じ）。
-# 契約: どの関数も exit せず、gh・ネットワークを呼ばない。git を呼ぶのは wr_common_dir（カレントのメイン worktree で使う）と、それを使う wr_repo_matches の
-#       カレント側だけで、付属 worktree の中では git を呼ばない（wr_gitlink_check はファイルの読み取りだけで照合する）。パスの実体化に cd / pwd -P を使う。
+# 契約: どの関数も exit せず、gh・ネットワークを呼ばない。git を呼ぶのは wr_trust_cwd だけで、それもカレントの root と共通ディレクトリをファイルの読み取りだけで
+#       確かめた後に限る。付属 worktree の中では git を呼ばない（wr_gitlink_check はファイルの読み取りだけで照合する）。パスの実体化に cd / pwd -P を使う。
 #       結果は WR_* 変数・標準出力・return 値で返す。source 元のシェル状態を壊さないため set -e / set -u / trap / exit は置かない。
 #       二重 source は無害。
 # 互換: macOS（BSD userland・bash 3.2）と Linux（GNU・busybox）。paste・bc・mapfile・連想配列・GNU 専用フラグを使わない。
@@ -283,17 +283,32 @@ wr_real() {
   fi
 }
 
-# ディレクトリ（$1）が属するリポジトリの共通 git ディレクトリの実体。ディレクトリが無い・リポジトリの外なら何も出さず非 0
-wr_common_dir() {
-  local c
-  [ -d "$1" ] || return 1
-  c=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) && [ -n "${c}" ] || return 1
-  case "${c}" in
-    /*) ;;
-    *) c="$1/${c}" ;;
-  esac
-  [ -d "${c}" ] || return 1
-  (cd "${c}" 2>/dev/null && pwd -P)
+# ディレクトリ（$1）から上へたどって最初に .git（ファイル・ディレクトリ・シンボリックリンク）を持つディレクトリの実体。git を呼ばない。見つからなければ何も出さず非 0
+wr_find_top() {
+  local d
+  d=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  while [ ! -e "${d}/.git" ] && [ ! -L "${d}/.git" ]; do
+    [ "${d}" != / ] && [ -n "${d}" ] || return 1
+    d=${d%/*}
+    [ -n "${d}" ] || d=/
+  done
+  printf '%s\n' "${d}"
+}
+
+# カレントから信頼する共通 git ディレクトリを求めて TRUSTED_COMMON に入れる（求められなければ空）。カレントのリポジトリに対する最初の git より前に呼ぶ。
+# まず git を呼ばずに、カレントの root（wr_find_top）と共通ディレクトリ（wr_main_common。付属 worktree なら wr_gitlink_check に通ること）をファイルだけで求める。
+# カレントの .git が偽なら、git はその偽の共通ディレクトリの config とフックを使うので、ここで外れたら git を 1 回も呼ばない。
+# 求められたときだけ、git の見る root（rev-parse --show-toplevel）がそれと同じかを確かめる（git の探索とずれていれば信頼しない）。
+# 空のとき呼び出し側は、カレントのリポジトリでも付属 worktree の中でも git を呼ばずに fail-closed にする
+TRUSTED_COMMON=""
+wr_trust_cwd() {
+  local top c g
+  TRUSTED_COMMON=""
+  top=$(wr_find_top .) || return 0
+  c=$(wr_main_common "${top}") || return 0
+  g=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  [ -n "${g}" ] && [ "$(wr_real "${g}")" = "${top}" ] || return 0
+  TRUSTED_COMMON=${c}
 }
 
 # --- worktree の git ディレクトリの照合（git を呼ばずにファイルだけを読む） ---
@@ -302,7 +317,7 @@ wr_common_dir() {
 # サンドボックスの外で動くこのスクリプトの git がそのコマンドを実行してしまう。そこで worktree の中で git を呼ぶ前に、
 # 次の照合をファイルの読み取りだけで行い、通らなければ git を呼ばない（呼び出し側は保持の語で fail-closed にする）。
 
-# カレントの worktree の root（$1。カレントで git rev-parse --show-toplevel が返したもの）から、信頼する共通 git ディレクトリの実体を出す。
+# カレントの worktree の root（$1。wr_find_top がファイルだけで求めたもの）から、信頼する共通 git ディレクトリの実体を出す。
 # メイン worktree: .git が実ディレクトリ（シンボリックリンクでない）で commondir を持たないとき、その実体。
 # 付属 worktree（ランを付属 worktree で起動したセッション）: .git ファイル → git ディレクトリ → commondir で共通ディレクトリを求め、それが commondir を持たない
 # 実ディレクトリで、カレント自身が wr_gitlink_check に通るときだけ、その共通ディレクトリ（カレントの git ディレクトリと .git はメインの場合の .git/config と同じく
@@ -330,15 +345,24 @@ wr_main_common() {
 # 4096 バイト以下で CR・NUL を含まないときだけ 0。2 行目がある・空・読めないときは非 0
 WR_LINE=""
 wr_read_one_line() {
-  local n line=""
+  local n z last line=""
   WR_LINE=""
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
   n=$(wc -c <"$1" 2>/dev/null | tr -d ' ') || return 1
   case "${n}" in '' | *[!0-9]*) return 1 ;; esac
   [ "${n}" -gt 0 ] && [ "${n}" -le 4096 ] || return 1
+  # NUL を元のバイト列で数える。bash の read は NUL を黙って読み飛ばすので、バイト数の照合だけでは『fake<NUL>/../..』のような行
+  # （git は NUL の手前までを使い、ここでは NUL を除いた全体を見る）を見落とす。読めないときは 0 バイトに数えて外れる側
+  z=$(LC_ALL=C tr -d '\000' <"$1" 2>/dev/null | wc -c | tr -d ' ')
+  [ "${z}" = "${n}" ] || return 1
   IFS= read -r line <"$1" || [ -n "${line}" ] || return 1
-  # バイト数が 1 行分（LC_ALL=C の ${#line} はバイト数）と合わなければ、2 行目か NUL がある
-  [ "${n}" -eq "${#line}" ] || [ "${n}" -eq $((${#line} + 1)) ] || return 1
+  # バイト数が 1 行分（LC_ALL=C の ${#line} はバイト数）と合わなければ 2 行目がある
+  if [ "${n}" -ne "${#line}" ]; then
+    [ "${n}" -eq $((${#line} + 1)) ] || return 1
+    # 余分な 1 バイトを改行と推定せず、末尾のバイトが本当に \n（0a）であることを確かめる
+    last=$(tail -c 1 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    [ "${last}" = 0a ] || return 1
+  fi
   case "${line}" in '' | *$'\r'*) return 1 ;; esac
   WR_LINE=${line}
 }
@@ -421,7 +445,8 @@ wr_repo_matches() {
       [ -n "${base}" ] || base=/
     done
   fi
-  here=$(wr_common_dir .) || return 1
+  # カレント側は wr_trust_cwd がファイルだけで求めた信頼する共通ディレクトリ（ここでは git を呼ばない）
+  here=${TRUSTED_COMMON:-}
   [ -n "${here}" ] && [ -d "${base}" ] || return 1
   d=$(cd "${base}" 2>/dev/null && pwd -P) || return 1
   while [ ! -e "${d}/.git" ] && [ ! -L "${d}/.git" ]; do

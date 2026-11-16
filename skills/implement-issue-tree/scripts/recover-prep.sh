@@ -35,7 +35,8 @@
 #       wipCommitted:false にする（discard の可否は worktree-remove.sh が初期化済み submodule の存在で保持として判定する）。
 # 付属 worktree の中の git: worktree-remove.sh と同じく、worktree の中で git を呼ぶ前に wr_gitlink_check（ファイルの読み取りだけの照合）を行う。通らなければ git を
 #       呼ばず、回復対象は mismatch（toplevel-mismatch）、握り手は解放しない（in-use）。握り手の HEAD.lock は照合済みの git ディレクトリへ書く。
-#       信頼する共通ディレクトリを求められない（リポジトリの外・カレントの付属 worktree が照合に通らない）ときは何もしない（list-failed）。
+#       信頼する共通ディレクトリを求められない（リポジトリの外・カレントの付属 worktree が照合に通らない）ときは、--mode free を含めて git を 1 回も呼ばずに何もしない
+#       （list-failed。free は detached:failed）。信頼の起点はカレントのリポジトリに対する最初の git より前にファイルだけで求める（wr_trust_cwd）。
 #       初期化済み submodule があれば WIP コミットを作らない（add・commit が submodule の中を観測する）。フックは通す（WIP コミット。--no-verify を使わない）。
 # 出力: 標準出力の最後の 1 行が `RECOVER_PREP_RESULT {json}`。値は固定語彙・真偽・件数・40 桁 16 進の sha と、検証済みのブランチ名だけ
 #       （パス・hook の出力・外部由来の文字列を入れない。診断は標準エラーへ）。結果を出せたときは、失敗や未確定を含めて exit 0。
@@ -69,9 +70,9 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 3
 . "${script_dir}/lib/recover-prep-lib.sh" || exit 3
 
 # 信頼する共通 git ディレクトリ（カレントの worktree から wr_main_common が求めたもの）。付属 worktree の中で git を呼ぶ前に、その .git・commondir・gitdir を
-# これとファイルの読み取りだけで照合する（wr_gitlink_check。worktree-remove.sh と同じ）。求められなければ空で、付属 worktree は照合に通らない
-wr_top=$(git rev-parse --show-toplevel 2>/dev/null) || wr_top=""
-TRUSTED_COMMON=$(wr_main_common "${wr_top}") || TRUSTED_COMMON=""
+# これとファイルの読み取りだけで照合する（wr_gitlink_check。worktree-remove.sh と同じ）。カレントのリポジトリに対する最初の git より前に、ファイルだけで求める
+# （wr_trust_cwd）。求められなければ空で、どのモードでも git を 1 回も呼ばずに fail-closed にする（下の list-failed）
+wr_trust_cwd
 
 usage() {
   echo "使い方: recover-prep.sh --base BASE [--worktree PATH] [--branch BRANCH]（--worktree か --branch の少なくとも 1 つ）／ recover-prep.sh --mode free --base BASE --branch BRANCH [--worktree PATH]" >&2
@@ -237,7 +238,8 @@ detach_holder_locked() {
   hlock="${hgd}/HEAD.lock"
   ( set -C; printf '%s\n' "$3" >"${hlock}" ) 2>/dev/null || return 1
   cur=""
-  IFS= read -r cur <"${hgd}/HEAD" || true
+  # HEAD も照合と同じ読み方（NUL・2 行目・シンボリックリンクを拒否）で読む。読めなければ一致しない側
+  if wr_read_one_line "${hgd}/HEAD"; then cur=${WR_LINE}; fi
   if [ "${cur}" != "ref: refs/heads/$2" ] || [ "$(git --no-optional-locks -c core.fsmonitor=false -C "${hd}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" != "$3" ]; then
     # 確認が崩れたときは HEAD を元のバイト列のまま書き戻してロックを手放す（rm を使わない。読めなければロックを残して失敗にする = git の更新が失敗して気づける）
     cat "${hgd}/HEAD" >"${hlock}" 2>/dev/null || return 1
@@ -322,6 +324,15 @@ free_holders() {
   return 0
 }
 
+# 信頼する共通ディレクトリを求められない（リポジトリの外・カレントの付属 worktree が照合に通らない）ときは、free を含むどのモードでも何もしない。カレントのリポジトリで
+# 走る git（ref の読み取り・一覧・fetch の ref 更新が呼ぶ reference-transaction フック・update-ref）は、カレントの共通ディレクトリの config とフックを使い、照合に通らない
+# 付属 worktree ではそれが偽物であり得る。free は解放せず detached:failed（結果は助言的）
+if [ -z "${TRUSTED_COMMON}" ]; then
+  RP_RESOLVED=0
+  RP_REASON='list-failed'
+  if [ "${mode}" = free ]; then RP_BRANCH=${branch}; R_DETACHED=failed; fi
+  emit
+fi
 if [ "${mode}" = free ]; then
   # 握り手の解放だけを行うモード（Issue #755）。旧 worktree の状態調査・WIP コミット・base の取得・差分は行わない。結果は助言的
   RP_RESOLVED=0
@@ -341,9 +352,6 @@ if [ "${mode}" = free ]; then
   fi
   emit
 fi
-# 信頼する共通ディレクトリを求められない（リポジトリの外・カレントの付属 worktree が照合に通らない）ときは何もしない。カレントのリポジトリで走る git（一覧・
-# fetch の ref 更新が呼ぶ reference-transaction フック・update-ref）は、カレントの共通ディレクトリの config とフックを使い、照合に通らない付属 worktree ではそれが偽物であり得る
-if [ -z "${TRUSTED_COMMON}" ]; then RP_RESOLVED=0; RP_REASON='list-failed'; emit; fi
 # 1. 旧 worktree の状態
 wtstate=missing
 head_branch=""
@@ -416,7 +424,7 @@ if [ "${wtstate}" = live ] && [ -z "${head_branch}" ]; then
         if [ "${arc}" = 0 ] && ! adopt_same; then arc=1; fi
       fi
       if [ "${arc}" = 0 ]; then
-        printf 'start\nverify refs/heads/%s %s\nsymref-update HEAD refs/heads/%s oid %s\nprepare\ncommit\n' "${adopt_branch}" "${adopt_head}" "${adopt_branch}" "${adopt_head}" | git -C "${path}" update-ref --no-deref --stdin >/dev/null 2>&1 || arc=$?
+        printf 'start\nverify refs/heads/%s %s\nsymref-update HEAD refs/heads/%s oid %s\nprepare\ncommit\n' "${adopt_branch}" "${adopt_head}" "${adopt_branch}" "${adopt_head}" | git --no-optional-locks -c core.fsmonitor=false -C "${path}" update-ref --no-deref --stdin >/dev/null 2>&1 || arc=$?
       fi
       # 付け直し後の HEAD がブランチ経由で adopt_head のままであること（回収成功の根拠）
       if [ "${arc}" = 0 ] && [ "$(git --no-optional-locks -c core.fsmonitor=false -C "${path}" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)" != "${adopt_head}" ]; then arc=1; fi

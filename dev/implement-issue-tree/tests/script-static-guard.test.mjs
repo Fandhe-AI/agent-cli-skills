@@ -62,7 +62,7 @@ const GIT_UPDATE_REF_ALLOWED = /^\s*git update-ref -d "\$\{(base_ref|branch_ref)
 const GIT_UPDATE_REF_CAS_ALLOWED = /^\s*git update-ref "refs\/heads\/\$\{adopt_branch\}" "\$\{adopt_head\}" "\$\{adopt_tip\}" >\/dev\/null 2>&1 \|\| arc=\$\?\s*$/
 // HEAD の付け直しは symbolic-ref ではなく、HEAD の旧値（oid）を指定した symref-update と付け直し先ブランチ先端の verify を update-ref --stdin の 1 トランザクションで行う（確認と書き換えの間に
 // 積まれたコミットやブランチ先端の移動を上書きしない）。許可形は recover-prep.sh の 1 行だけ。symbolic-ref の書き込みは一切許可しない（読み取り -q [--short] HEAD 2>/dev/null は許す）
-const GIT_SYMREF_UPDATE_ALLOWED = /^\s*printf 'start\\nverify refs\/heads\/%s %s\\nsymref-update HEAD refs\/heads\/%s oid %s\\nprepare\\ncommit\\n' "\$\{adopt_branch\}" "\$\{adopt_head\}" "\$\{adopt_branch\}" "\$\{adopt_head\}" \| git -C "\$\{path\}" update-ref --no-deref --stdin >\/dev\/null 2>&1 \|\| arc=\$\?\s*$/
+const GIT_SYMREF_UPDATE_ALLOWED = /^\s*printf 'start\\nverify refs\/heads\/%s %s\\nsymref-update HEAD refs\/heads\/%s oid %s\\nprepare\\ncommit\\n' "\$\{adopt_branch\}" "\$\{adopt_head\}" "\$\{adopt_branch\}" "\$\{adopt_head\}" \| git --no-optional-locks -c core\.fsmonitor=false -C "\$\{path\}" update-ref --no-deref --stdin >\/dev\/null 2>&1 \|\| arc=\$\?\s*$/
 // 握り手の解放（Issue #755）は update-ref を使わない。git は同じ HEAD の symref-verify と更新を 1 トランザクションに入れられないため、HEAD.lock を排他作成した下で確認して
 // mv で確定する（detach_holder_locked）。この書き込み行が recover-prep.sh の 1 か所だけであることは専用テストで固定する
 const HOLDER_HEAD_MV_ALLOWED = /^\s*mv -f "\$\{hlock\}" "\$\{hgd\}\/HEAD"\s*$/
@@ -305,6 +305,8 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
       'git update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?', 'git -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || true',
       'git -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?; git update-ref -d x', 'git -C "${holder}" update-ref --stdin', '"git" -C "${holder}" update-ref --no-deref HEAD "${holder_tip}" "${holder_tip}" >/dev/null 2>&1 || hrc=$?',
       '"git" update-ref -d "refs/heads/x"', 'git "update-ref" -d "refs/heads/x"', 'git -C x update-ref -d "refs/heads/x"', "git update-ref -d 'refs/heads/x'",
+      // HEAD の付け直し（symref-update）の崩し方: 付属 worktree の中の git に --no-optional-locks -c core.fsmonitor=false が無い形
+      'printf \'start\\nverify refs/heads/%s %s\\nsymref-update HEAD refs/heads/%s oid %s\\nprepare\\ncommit\\n\' "${adopt_branch}" "${adopt_head}" "${adopt_branch}" "${adopt_head}" | git -C "${path}" update-ref --no-deref --stdin >/dev/null 2>&1 || arc=$?',
     ],
     'git add / git commit は許可形（recover-prep.sh の WIP コミットの 1 行）以外を拒否': [
       // 対象の worktree を明示しない（メイン worktree が暗黙の対象になる）・変数以外のパス・メッセージの変更・フラグの追加・引用符付き
@@ -395,7 +397,7 @@ test('自己検査: 正当な行（読み取りの gh api・graphql の query・
     'git update-ref -d "${base_ref}" >/dev/null 2>&1 || true',
     'git update-ref -d "${branch_ref}" >/dev/null 2>&1 || true',
     'git update-ref "refs/heads/${adopt_branch}" "${adopt_head}" "${adopt_tip}" >/dev/null 2>&1 || arc=$?',
-    'printf \'start\\nverify refs/heads/%s %s\\nsymref-update HEAD refs/heads/%s oid %s\\nprepare\\ncommit\\n\' "${adopt_branch}" "${adopt_head}" "${adopt_branch}" "${adopt_head}" | git -C "${path}" update-ref --no-deref --stdin >/dev/null 2>&1 || arc=$?',
+    'printf \'start\\nverify refs/heads/%s %s\\nsymref-update HEAD refs/heads/%s oid %s\\nprepare\\ncommit\\n\' "${adopt_branch}" "${adopt_head}" "${adopt_branch}" "${adopt_head}" | git --no-optional-locks -c core.fsmonitor=false -C "${path}" update-ref --no-deref --stdin >/dev/null 2>&1 || arc=$?',
     'hsym=$(git -C "${holder}" symbolic-ref -q HEAD 2>/dev/null) || hsym=""',
     'head_branch=$(git -C "${path}" symbolic-ref -q --short HEAD 2>/dev/null) || head_branch=""',
     'wt_full=$(git -C "${path}" symbolic-ref -q HEAD 2>/dev/null) || wt_full=""',

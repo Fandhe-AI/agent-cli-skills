@@ -543,8 +543,8 @@ monitor の CI 完了待ち（旧 `gh pr checks --watch`）を、第 2 弾の `o
 
 worktree の中で git を呼ぶ前に、git を使わずファイルの読み取りだけで次を確かめる。1 つでも外れたら git を呼ばない。
 
-- 信頼する共通ディレクトリは、カレントで `git rev-parse --show-toplevel` した先から `wr_main_common` が求める。メイン worktree なら `.git` が実ディレクトリで `commondir` を持たないときのその `pwd -P`。ランを付属 worktree で起動したセッション（カレントが付属 worktree）なら、`.git` ファイル → git ディレクトリ → `commondir` で求めた共通ディレクトリが `commondir` を持たず、カレント自身が下の照合に通るときのその共通ディレクトリ（カレントの `.git` と git ディレクトリは、メインの場合の `.git/config` と同じくランの非隔離側の場所で、隔離 worktree のエージェントが書ける `<共通>/worktrees/<自分の名前>/` とは別）。求められない（リポジトリの外・照合の不一致・`--separate-git-dir` のメイン）なら空で、付属 worktree の中の git・remove・prune・ブランチの削除・`recover-prep.sh` の処理全体を行わない。
-- worktree の `.git` がシンボリックリンクでない通常ファイルで、ちょうど 1 行（末尾の改行は任意・CR / NUL なし・4096 バイト以下）の `gitdir: <パス>`。
+- 信頼する共通ディレクトリは、カレントのリポジトリに対する最初の git より前に、ファイルだけで求める（`wr_trust_cwd`）。カレントから上へたどって最初に `.git` を持つディレクトリ（`wr_find_top`）から `wr_main_common` が求め、求められたときだけ git の見る root（`rev-parse --show-toplevel`）がそれと同じかを確かめる（git の探索とずれていれば信頼しない）。カレントの `.git` が偽なら、git は一覧や ref の読み取りでもその偽の共通ディレクトリの config とフックを使うので、求められなければ git を 1 回も呼ばない（`--mode free` を含むどのモードも）。メイン worktree なら `.git` が実ディレクトリで `commondir` を持たないときのその `pwd -P`。ランを付属 worktree で起動したセッション（カレントが付属 worktree）なら、`.git` ファイル → git ディレクトリ → `commondir` で求めた共通ディレクトリが `commondir` を持たず、カレント自身が下の照合に通るときのその共通ディレクトリ（カレントの `.git` と git ディレクトリは、メインの場合の `.git/config` と同じくランの非隔離側の場所で、隔離 worktree のエージェントが書ける `<共通>/worktrees/<自分の名前>/` とは別）。求められない（リポジトリの外・照合の不一致・`--separate-git-dir` のメイン）なら空で、カレントのリポジトリの一覧・ref の読み取りを含めて git を呼ばず、付属 worktree の中の git・remove・prune・ブランチの削除・`recover-prep.sh` の処理全体（`--mode free` を含む）を行わない。
+- worktree の `.git` がシンボリックリンクでない通常ファイルで、ちょうど 1 行（末尾の改行は任意・CR / NUL なし・4096 バイト以下）の `gitdir: <パス>`。1 行の読み取り（`wr_read_one_line`。`commondir`・逆向きの `gitdir`・握り手の `HEAD` も同じ）は、NUL の有無を元のバイト列で数え（`tr -d '\000'` 後のバイト数と `wc -c` の一致）、末尾の余分な 1 バイトは実際に `\n` であることを確かめる。bash 5 の `read` は NUL を黙って読み飛ばし、git は NUL の手前までを使うので、『偽<NUL>/../本物』（末尾改行なし）の行はバイト数の照合だけでは本物に見えて通ってしまう（bash 3.2 の `read` は NUL で行を切るので長さの照合で落ちる）。
 - そのパスの実体（相対パスは worktree からの解決）が `<共通>/worktrees/<名前>` の直下。
 - `<gitdir>/commondir` が 1 行で、その実体が共通ディレクトリと一致。
 - `<gitdir>/gitdir`（逆向き）が 1 行の `<…>/.git` で、その親の実体が worktree と一致。
@@ -560,12 +560,14 @@ worktree の中で git を呼ぶ前に、git を使わずファイルの読み�
 | `worktree-remove.sh` | check-absent の `--repo-root` | `unknown` |
 | `recover-prep.sh` | 回復対象の worktree | `resolved: false`・`toplevel-mismatch`・`wip: skipped` |
 | `recover-prep.sh` | `--mode free` の握り手 | `in-use`（解放しない） |
-| `recover-prep.sh` | 信頼する共通ディレクトリを求められない | `list-failed` |
+| `recover-prep.sh` | 信頼する共通ディレクトリを求められない | `list-failed`（`--mode free` は `detached: failed`） |
+| `worktree-remove.sh` | 信頼する共通ディレクトリを求められない | remove・sweep は `retained-broken`、ブランチは `keep`、check-absent は `unknown`、prune はしない |
 
 ### 補助策
 
 - worktree の中の git には `--no-optional-locks -c core.fsmonitor=false` を付ける（照合の後の多重防御）。削除の `git worktree remove` / `unlock` には `-c core.fsmonitor=false` を付ける（静的ガードが形を固定）。
 - submodule の中へ降りない: 汚れの観測は `--ignore-submodules=all`、`git submodule status` は使わない。初期化済み submodule（`ls-files -s` の gitlink のうち `<パス>/.git` があるもの、または `<gitdir>/modules` が空でない）は中を観測できないので、`worktree-remove.sh` は superseded でも `retained-submodule` で保持し、`recover-prep.sh` は WIP コミットを作らず（親の `add`・`commit` も submodule の中を観測する）`wip: submodule`・`wipCommitted: false` にする（従来は superseded で消し、clean なら `wip: none`、親の変更は WIP に積んでいた）。worktree は削除側が保持するので、親の変更も消えない。
+- HEAD の付け直しの `update-ref --stdin` を含め、worktree の中で呼ぶ git にはすべてこのフラグを付ける。付けないのは形を静的ガードが固定している WIP の `add`・`commit` の 1 行だけ（下の残る限界）。
 - 削除の直前にもう一度照合し、`<共通>/worktrees/` の下にシンボリックリンクがあれば `git worktree remove` も `git worktree prune` もしない（両者はリンク先の中身を消す）。prune を飛ばした件数は `pruneSkipped` に足す。
 - `recover-prep.sh` は `GIT_DIR`・`GIT_WORK_TREE`・`GIT_COMMON_DIR`・`GIT_INDEX_FILE` を外す。
 - `core.hooksPath=/dev/null` は付けない（静的ガードが `core.hooksPath` の綴りを一律に禁じており、照合後に呼ぶコマンドでフックを走らせるのは WIP コミットだけで、そこは `--no-verify` 禁止の方針どおりフックを通す）。`GIT_CONFIG_NOSYSTEM` も付けない（システムの設定はエージェントが書けない）。
@@ -573,13 +575,14 @@ worktree の中で git を呼ぶ前に、git を使わずファイルの読み�
 ### 残る限界
 
 - メインの config にある相対パスの `core.hooksPath`（husky 等）は、WIP コミットのときに付属 worktree の中から解決されるので、エージェントが書けるフックが走り得る（フックを通す方針との両立は未解決）。
+- WIP の `add`・`commit` の行は形が静的ガードで固定されていて `--no-optional-locks -c core.fsmonitor=false` を付けていない。照合からこの行までの間に設定をすり替えられる余地（TOCTOU）が残る。
 - メインの `.git` が gitfile（`--separate-git-dir`）のリポジトリ、カレントが照合に通らないランは、保持・確定しない側へ倒れる。
 - 管理ディレクトリをシンボリックリンクへ置き換える操作を実際のサンドボックスがエージェントに許すかは未確認（許す前提で塞いだ）。
 - `pr-push.sh`・`base-merge.sh`・`reply-resolve.sh`・`observe-pr.sh` は直接実行されず、カレントが隔離 worktree のエージェントが起動するので、この照合の対象外。
 
 ### この節の検証範囲
 
-`dev/implement-issue-tree/tests/worktree-git-harden.test.mjs` が、仕込み 7 種（commondir・gitdir 行〔余分な空行・相対パス〕・`.git` のディレクトリ・シンボリックリンク・`config.worktree`・偽の submodule）のそれぞれについて、`worktree-remove.sh`（superseded・discard・sweep）と `recover-prep.sh` の実行後にマーカーが無く worktree が残ること、素の `git status` ではマーカーが作られること（陽性対照）を bash 3.2 と 5 で固定する。あわせて `--mode free` の握り手、管理ディレクトリのシンボリックリンクがあると remove・sweep が何も消さずリンク先も残ること（prune の直前の同じ検査は削除と prune の間に置かれたリンクへの多重防御で、`wr_admin_links` の単体だけを固定）、正規の worktree（絶対パス・Git 2.48 以降なら相対パスの形）の削除・回復・check-absent、`wr_gitlink_check` を 1 か所ずつ崩した 16 形の拒否、`check-absent` が仕込みのある worktree を不在と言わず、仕込んだ worktree を `--repo-root` に渡すと `unknown` になること、カレントが付属 worktree のラン（照合に通れば動き、カレント自身の `.git` が崩れていれば何もしない）を固定する。変異は H01（commondir の照合を外す）・H02（`config.worktree` を許す）・H03（submodule があっても WIP コミットを作る）を足し、W02・C05（`--ignore-submodules=none` へ戻す）をこのテストで殺す形に改めた。e148ca4 のスクリプトに対して同じテストを流すと、仕込み 7 種 × 2 スクリプト × 2 bash の 28 件はすべてマーカーが作られて落ちる（`check-absent` は修正前も `rev-parse` しか呼ばずマーカーは作られない）。
+`dev/implement-issue-tree/tests/worktree-git-harden.test.mjs` が、仕込み 7 種（commondir・gitdir 行〔余分な空行・相対パス〕・`.git` のディレクトリ・シンボリックリンク・`config.worktree`・偽の submodule）のそれぞれについて、`worktree-remove.sh`（superseded・discard・sweep）と `recover-prep.sh` の実行後にマーカーが無く worktree が残ること、素の `git status` ではマーカーが作られること（陽性対照）を bash 3.2 と 5 で固定する。あわせて `--mode free` の握り手、管理ディレクトリのシンボリックリンクがあると remove・sweep が何も消さずリンク先も残ること（prune の直前の同じ検査は削除と prune の間に置かれたリンクへの多重防御で、`wr_admin_links` の単体だけを固定）、正規の worktree（絶対パス・Git 2.48 以降なら相対パスの形）の削除・回復・check-absent、`wr_gitlink_check` を 1 か所ずつ崩した 16 形の拒否、`check-absent` が仕込みのある worktree を不在と言わず、仕込んだ worktree を `--repo-root` に渡すと `unknown` になること、カレントが付属 worktree のラン（照合に通れば動き、カレント自身の `.git` が崩れていれば何もしない）を固定する。NUL を混ぜた `commondir`・`.git`（末尾改行なし。bash 5 で修正前はマーカーが作られ worktree の中身まで消えた）を仕込みに加え、`wr_gitlink_check` の単体で NUL（末尾改行の有無の両方・`.git`・`commondir`・逆向きの `gitdir`）・CR の形の拒否と、末尾改行の無い正規の形が通ることを固定する。カレントの `.git` が照合に通らないとき、recover・free・remove・sweep・check-absent のどれも git を 1 回も呼ばない（PATH の先頭に置いた git の代役の記録が空）ことも固定する。変異は H01（commondir の照合を外す）・H02（`config.worktree` を許す）・H03（submodule があっても WIP コミットを作る）・H04（NUL を数えず、末尾の余分な 1 バイトが改行かも確かめない。2 つの確認は NUL について互いに重なるので両方を外す）・H05〜H09（信頼の起点を確かめる前に git を呼ぶ・未確立のまま一覧・ブランチ・check-absent の git を呼ぶ）・H10（`update-ref --stdin` のフラグを外す。静的ガードが殺す）を足し、W02・C05（`--ignore-submodules=none` へ戻す）をこのテストで殺す形に改めた。e148ca4 のスクリプトに対して同じテストを流すと、仕込み 7 種 × 2 スクリプト × 2 bash の 28 件はすべてマーカーが作られて落ちる（`check-absent` は修正前も `rev-parse` しか呼ばずマーカーは作られない）。
 
 ## ハッシュ埋め込みと鮮度
 

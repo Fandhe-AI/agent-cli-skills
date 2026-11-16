@@ -40,6 +40,7 @@
 #       もう一度照合し、<共通>/worktrees/ の下にシンボリックリンクがあれば remove・prune をしない（リンク先の中身を消す）。補助として worktree の git には
 #       --no-optional-locks -c core.fsmonitor=false を付け、submodule の中へは降りない（--ignore-submodules=all。submodule status は使わない。初期化済みは保持）。
 #       信頼する共通ディレクトリはカレントの worktree から wr_main_common が求めたもの（メインの .git の実体、または照合に通るカレントの付属 worktree の共通ディレクトリ）。
+#       カレントのリポジトリに対する最初の git より前にファイルだけで求め（wr_trust_cwd）、求められなければカレントのリポジトリでも git を呼ばない。
 #       求められなければ付属 worktree の中の git・remove・prune・ブランチの削除をしない。
 # 確認の方法: `git -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=all`（利用者の status.showUntrackedFiles や
 #       グローバルの除外ファイル〔core.excludesFile・~/.config/git/ignore〕に左右されない形。素の status は設定で
@@ -122,9 +123,9 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 3
 . "${script_dir}/lib/worktree-remove-lib.sh" || exit 3
 
 # 信頼する共通 git ディレクトリ（カレントの worktree から wr_main_common が求めたもの）。付属 worktree の中で git を呼ぶ前に、その worktree の .git・commondir・gitdir を
-# これとファイルの読み取りだけで照合する（wr_gitlink_check）。求められないときは空で、付属 worktree の中では git を呼ばず保持する
-wr_top=$(git rev-parse --show-toplevel 2>/dev/null) || wr_top=""
-TRUSTED_COMMON=$(wr_main_common "${wr_top}") || TRUSTED_COMMON=""
+# これとファイルの読み取りだけで照合する（wr_gitlink_check）。カレントのリポジトリに対する最初の git より前に、ファイルだけで求める（wr_trust_cwd）。
+# 求められないときは空で、カレントのリポジトリでも付属 worktree の中でも git を呼ばない（remove・sweep は保持、check-absent は unknown、ブランチは消さない）
+wr_trust_cwd
 
 usage() {
   echo "使い方: worktree-remove.sh remove --mode (superseded|discard) [--path P] [--branch B --base BASE] [--head SHA] [--expect-branch B] [--require-missing] / sweep --file _/issue-trees/N.json（候補は標準入力）/ check-absent --path P [--repo-root R]" >&2
@@ -190,6 +191,8 @@ remove_one() {
   # 字面を正規化してから使う（末尾の / と /.・連続する /・途中の /./。.. は入力検証が拒否済み）。remove は実体の無いパスを自分では
   # 解決せず、登録の字面と比べるので、正規化しない綴りで指すと登録を見つけても消せない
   path=$(wr_norm_path "${path}")
+  # 信頼する共通ディレクトリが無ければ、カレントのリポジトリの一覧も取らずに保持する（カレントの .git が偽なら、一覧の git もその偽の config を読む）
+  if [ -z "${TRUSTED_COMMON}" ]; then T_WT=retained-broken; return 0; fi
   list=$(git worktree list --porcelain 2>/dev/null) || { T_WT=failed; return 0; }
   wr_find_entry "${list}" "${path}"
   if [ "${WR_REGISTERED}" != 1 ] && [ ! -e "${path}" ] && [ ! -L "${path}" ]; then
@@ -369,6 +372,7 @@ PRUNE_SKIPPED=0
 safe_prune() {
   local plist plinks
   PRUNE_SKIPPED=0
+  [ -n "${TRUSTED_COMMON}" ] || { PRUNE_SKIPPED=1; return 0; }
   plist=$(git worktree list --porcelain 2>/dev/null) || { PRUNE_SKIPPED=1; return 0; }
   # 1 回の走査で、各登録の有無を 1 回だけ観測して risk と unobservable に互いに素に振り分ける（観測できない登録は prune が不在と扱って落とすので数える）
   wr_prune_scan "${plist}"
@@ -413,7 +417,13 @@ if [ "${cmd}" = check-absent ]; then
   path=$(wr_norm_path "${path}")
   ca_ok=1
   ca_ci=0
-  ca_list=$(git worktree list --porcelain 2>/dev/null) || { ca_ok=0; ca_list=""; }
+  ca_list=""
+  # 信頼する共通ディレクトリが無ければ一覧を取らない（unknown）
+  if [ -z "${TRUSTED_COMMON}" ]; then
+    ca_ok=0
+  else
+    ca_list=$(git worktree list --porcelain 2>/dev/null) || { ca_ok=0; ca_list=""; }
+  fi
   # 一覧を取るのはカレントのリポジトリ。対象のリポジトリと違えば登録を見落として absent に倒れるので、確定できないとき・違うときは unknown
   [ "${ca_ok}" -eq 0 ] || wr_repo_matches "${repo_root}" "${path}" || ca_ok=0
   ca_fs=$(wr_path_state "${path}")
@@ -475,7 +485,7 @@ if [ "${cmd}" = remove ]; then
   # --path の結果（T_WT・T_DIRTY・T_UNLOCKED）は後始末の結果で上書きしない（元の worktree が残ったように見えるのを防ぐ）。後始末の結果は holder と、ブランチを消すかの判断にだけ使う
   did_remove=0
   if [ "${T_WT}" = removed ]; then did_remove=1; fi
-  if [ -n "${branch}" ] && wr_wt_gone "${T_WT}"; then
+  if [ -n "${branch}" ] && [ -n "${TRUSTED_COMMON}" ] && wr_wt_gone "${T_WT}"; then
     hl=$(git worktree list --porcelain 2>/dev/null) || hl=""
     wr_branch_holder "${hl}" "${branch}"
     holder=${WR_HOLDER}
@@ -512,11 +522,15 @@ if [ "${cmd}" = remove ]; then
     # 後始末が保持・失敗なら、ブランチはまだ登録が掴んでいるので消さない（keep）
     { wr_wt_gone "${T_WT}" && { [ -z "${holder_word}" ] || [ "${holder_word}" = removed ] || [ "${holder_free}" = 1 ]; }; } && gone=1
     exists=0
-    if sha=$(git rev-parse --verify -q "refs/heads/${branch}^{commit}" 2>/dev/null); then exists=1; else sha=""; fi
-    act=$(wr_branch_action "${branch}" "${base}" "${gone}" "${exists}")
-    # 信頼する共通ディレクトリを求められないときはブランチを消さない（git branch -D はカレントの共通ディレクトリのフック〔reference-transaction〕を走らせる。
-    # 照合に通らないカレントではそれが偽物であり得る）
-    if [ "${act}" = delete ] && [ -z "${TRUSTED_COMMON}" ]; then act=keep; fi
+    # 信頼する共通ディレクトリを求められないときはブランチを調べず消さない（keep。git はカレントの共通ディレクトリの config を読み、git branch -D は
+    # そこのフック〔reference-transaction〕を走らせる。照合に通らないカレントではそれが偽物であり得る）
+    if [ -z "${TRUSTED_COMMON}" ]; then
+      sha=""
+      act=keep
+    else
+      if sha=$(git rev-parse --verify -q "refs/heads/${branch}^{commit}" 2>/dev/null); then exists=1; else sha=""; fi
+      act=$(wr_branch_action "${branch}" "${base}" "${gone}" "${exists}")
+    fi
     case "${act}" in
       delete)
         # 先頭 sha は消す前に結果へ出す（消した後は gc まで到達不能なオブジェクトとして残るだけで、reflog には残らない）

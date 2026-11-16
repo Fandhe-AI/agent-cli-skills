@@ -4,6 +4,8 @@
 // 攻撃の前提: 実装エージェントは自分の worktree と <メイン>/.git/worktrees/<名前>/ を書ける。そこで次のいずれかを仕込むと、素の git は
 // 偽の config を読み、core.fsmonitor に置いたコマンド（ここではマーカーファイルを作るだけ）を実行する。
 //   commondir       <git ディレクトリ>/commondir を偽の共通ディレクトリへ向ける
+//   commondir-nul   commondir を『偽<NUL>/../本物』（末尾改行なし）にする。git は NUL の手前（偽）を使い、bash の read は NUL を読み飛ばして本物に見える
+//   gitfile-nul     .git ファイルを『gitdir: 偽<NUL>/../本物』（末尾改行なし）にする（同上）
 //   gitfile         worktree の .git ファイルを偽の git ディレクトリへ向ける（余分な空行つき・相対パスの形も）
 //   dotgit-dir      worktree の .git をリポジトリ丸ごと（ディレクトリ）に置き換える
 //   dotgit-symlink  worktree の .git を偽のリポジトリへのシンボリックリンクにする
@@ -17,7 +19,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { availableBashes } from './lib/signed-output.mjs'
 import { gitEnv, makeRepo } from './lib/worktree-sandbox.mjs'
@@ -58,6 +60,21 @@ const ATTACKS = {
     writeFileSync(join(fg, 'gitdir'), `${join(w, '.git')}\n`)
     // 余分な空行（git は末尾の空白を落として読む）
     writeFileSync(join(w, '.git'), `gitdir: ${fg}\n\n`)
+  },
+  'commondir-nul'(repo, w, marker) {
+    const fake = fakeGitDir(repo, w, join(repo.root, 'fake-common'), marker)
+    // bash の read には『<偽>/../<本物の共通ディレクトリ>』（本物へ解決される）に見え、git には『<偽>』に見える
+    writeFileSync(join(gitDirOf(repo, w), 'commondir'), `${fake}\0/../${relative(repo.root, join(repo.main, '.git'))}`)
+  },
+  'gitfile-nul'(repo, w, marker) {
+    const g = gitDirOf(repo, w)
+    const fg = join(repo.root, 'fake-gitdir')
+    const fake = fakeGitDir(repo, w, join(repo.root, 'fake-common'), marker)
+    mkdirSync(fg, { recursive: true })
+    for (const f of ['HEAD', 'index']) cpSync(join(g, f), join(fg, f))
+    writeFileSync(join(fg, 'commondir'), `${fake}\n`)
+    writeFileSync(join(fg, 'gitdir'), `${join(w, '.git')}\n`)
+    writeFileSync(join(w, '.git'), `gitdir: ${fg}\0/../${relative(repo.root, g)}`)
   },
   'gitfile-relative'(repo, w, marker) {
     const g = gitDirOf(repo, w)
@@ -305,8 +322,55 @@ for (const bash of availableBashes()) {
     }
   })
 
+  test(`${tag} カレントの .git が照合に通らないとき、どのモードでも git を 1 回も呼ばずに fail-closed にする（recover・free・remove・sweep・check-absent）`, () => {
+    const repo = makeRepo()
+    // PATH の先頭に置く git の代役: 呼ばれたことを記録して本物へ渡す
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()
+    const shim = join(repo.root, 'shim')
+    const log = join(repo.root, 'git-calls.log')
+    mkdirSync(shim)
+    writeFileSync(join(shim, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >>'${log}'\nexec '${realGit}' "$@"\n`, { mode: 0o755 })
+    const env = { ...gitEnv(repo.root), PATH: `${shim}:${process.env.PATH}` }
+    const run = (script, args, cwd, input) => {
+      rmSync(log, { force: true })
+      const r = spawnSync(bash, [script, ...args], { cwd, input, encoding: 'utf8', env })
+      const m = /^(?:WORKTREE_REMOVE|RECOVER_PREP)_RESULT (\{.*\})$/.exec(r.stdout.trim().split('\n').pop() ?? '')
+      return { status: r.status, stderr: r.stderr, result: m ? JSON.parse(m[1]) : null, calls: existsSync(log) ? readFileSync(log, 'utf8') : '' }
+    }
+    const session = repo.addWorktree('session')
+    const a = repo.addWorktree('a')
+    repo.write(a.path, 'u.txt', 'u\n')
+    const h = repo.addWorktree('holder')
+    // 対照: 照合に通るカレント（メイン）では代役が呼ばれる（代役が効いていることの確認）
+    const c0 = run(RP, ['--mode', 'free', '--base', 'main', '--branch', h.branch], repo.main)
+    assert.notEqual(c0.calls, '', '対照: 代役の git が呼ばれていない')
+    // カレント（ランを起動したセッションの付属 worktree）の commondir を偽の共通ディレクトリへ向ける
+    const marker = join(repo.root, 'PWNED')
+    ATTACKS.commondir(repo, session.path, marker)
+    repo.write(session.path, '_/issue-trees/1.json', JSON.stringify({ items: {} }))
+    const cases = [
+      ['free', RP, ['--mode', 'free', '--base', 'main', '--branch', h.branch], (r) => assert.deepEqual([r.reason, r.detached], ['list-failed', 'failed'])],
+      ['recover', RP, ['--worktree', a.path, '--branch', a.branch, '--base', 'main'], (r) => assert.deepEqual([r.resolved, r.reason, r.wipCommitted], [false, 'list-failed', false])],
+      ['remove', WR, ['remove', '--mode', 'discard', '--path', a.path, '--branch', a.branch, '--base', 'main'], (r) => assert.deepEqual([r.worktree, r.branch, r.retained], ['retained-broken', 'keep', true])],
+      ['sweep', WR, ['sweep', '--file', '_/issue-trees/1.json'], (r) => assert.deepEqual(r.removed, []), JSON.stringify([a.path])],
+      ['check-absent', WR, ['check-absent', '--path', join(repo.root, 'gone')], (r) => assert.equal(r.worktree, 'unknown')],
+    ]
+    for (const [label, script, args, expect, input] of cases) {
+      const r = run(script, args, session.path, input)
+      assert.equal(r.status, 0, `${label}: ${r.stderr}`)
+      assert.ok(r.result, `${label}: 結果の行が無い`)
+      expect(r.result)
+      assert.equal(r.calls, '', `${label}: 信頼の起点を確かめる前に git を呼んだ: ${r.calls}`)
+      assert.ok(!existsSync(marker), `${label}: スクリプトが偽の config のコマンドを実行した`)
+    }
+    assert.ok(existsSync(join(a.path, 'u.txt')), 'worktree を消さない')
+    assert.equal(repo.git(h.path, 'symbolic-ref', '-q', 'HEAD'), `refs/heads/${h.branch}`, '握り手を解放しない')
+    assert.equal(repo.git(repo.main, 'rev-parse', '--verify', '-q', `refs/heads/${a.branch}`).length, 40, 'ブランチを消さない')
+    assertPlantWorks(repo, session.path, marker, 'session commondir')
+  })
+
   // wr_gitlink_check の単体: 正規の形は通り、1 か所ずつ崩すと通らない（git を呼ばずにファイルだけで判定する）
-  test(`${tag} wr_gitlink_check: 正規の形だけを通し、余分な行・CR・逆向きの不一致・commondir の欠落・config.worktree・管理ディレクトリの外を拒否する`, () => {
+  test(`${tag} wr_gitlink_check: 正規の形（末尾改行なしを含む）だけを通し、余分な行・CR・NUL・逆向きの不一致・commondir の欠落・config.worktree・管理ディレクトリの外を拒否する`, () => {
     const repo = makeRepo()
     const common = repo.git(repo.main, 'rev-parse', '--path-format=absolute', '--git-common-dir')
     const check = (w) => spawnSync(bash, ['-c', '. "$1"; wr_gitlink_check "$2" "$(cd "$3" && pwd -P)" && printf %s "$WR_GITDIR"', 'x', LIB, w, common], { encoding: 'utf8' })
@@ -314,6 +378,18 @@ for (const bash of availableBashes()) {
     const r0 = check(ok.path)
     assert.equal(r0.status, 0, r0.stderr)
     assert.equal(r0.stdout, gitDirOf(repo, ok.path))
+    // NUL の形が解決先に使う実在のディレクトリ（NUL を読み飛ばすと『<decoy>/../本物』で本物へ解決される）
+    const decoy = join(repo.root, 'decoy')
+    mkdirSync(decoy)
+    // 正規の形で末尾改行の無いもの（.git・commondir・gitdir のどれも）は通る
+    const nolf = repo.addWorktree('nolf')
+    const ng = gitDirOf(repo, nolf.path)
+    writeFileSync(join(nolf.path, '.git'), `gitdir: ${ng}`)
+    writeFileSync(join(ng, 'commondir'), '../..')
+    writeFileSync(join(ng, 'gitdir'), join(nolf.path, '.git'))
+    const r1 = check(nolf.path)
+    assert.equal(r1.status, 0, `末尾改行の無い正規の形: ${r1.stderr}`)
+    assert.equal(r1.stdout, ng)
     const cases = [
       ['.git の 2 行目', (w, g) => writeFileSync(join(w, '.git'), `gitdir: ${g}\nx\n`)],
       ['.git の末尾の空行', (w, g) => writeFileSync(join(w, '.git'), `gitdir: ${g}\n\n`)],
@@ -331,6 +407,16 @@ for (const bash of availableBashes()) {
       ['.git がディレクトリ', (w) => { rmSync(join(w, '.git')); mkdirSync(join(w, '.git')) }],
       ['.git がシンボリックリンク', (w, g) => { writeFileSync(join(repo.root, 'gf'), `gitdir: ${g}\n`); rmSync(join(w, '.git')); symlinkSync(join(repo.root, 'gf'), join(w, '.git')) }],
       ['.git が無い', (w) => rmSync(join(w, '.git'))],
+      // NUL（bash の read は読み飛ばすが git は手前で切る）。末尾改行なしの形は、NUL を除けば正規の行と同じバイト数の照合に通ってしまう形
+      ['.git の NUL（末尾改行なし）', (w, g) => writeFileSync(join(w, '.git'), `gitdir: ${decoy}\0/../${relative(repo.root, g)}`)],
+      ['.git の NUL（末尾改行あり）', (w, g) => writeFileSync(join(w, '.git'), `gitdir: ${decoy}\0/../${relative(repo.root, g)}\n`)],
+      ['commondir の NUL（末尾改行なし）', (w, g) => writeFileSync(join(g, 'commondir'), `${decoy}\0/../${relative(repo.root, common)}`)],
+      ['commondir の NUL（末尾改行あり）', (w, g) => writeFileSync(join(g, 'commondir'), `${decoy}\0/../${relative(repo.root, common)}\n`)],
+      ['逆向きの gitdir の NUL（末尾改行なし）', (w, g) => writeFileSync(join(g, 'gitdir'), `${join(w, '.git')}\0`)],
+      ['逆向きの gitdir の NUL（末尾改行あり）', (w, g) => writeFileSync(join(g, 'gitdir'), `${join(w, '.git')}\0\n`)],
+      ['commondir の CR（改行の前）', (w, g) => writeFileSync(join(g, 'commondir'), '../..\r\n')],
+      ['commondir の CR（末尾改行なし）', (w, g) => writeFileSync(join(g, 'commondir'), '../..\r')],
+      ['.git の CR（末尾改行なし）', (w, g) => writeFileSync(join(w, '.git'), `gitdir: ${g}\r`)],
     ]
     // 崩す前に全部作る（崩した管理ディレクトリがあると後の git worktree add が失敗する）
     const wts = cases.map((_, i) => repo.addWorktree(`c${i}`)).map((w) => ({ ...w, gd: gitDirOf(repo, w.path) }))
