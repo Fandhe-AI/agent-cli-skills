@@ -113,10 +113,21 @@ function extractFunctionBody(fnSignature, stopSignature) {
   return source.slice(start, end)
 }
 
+// 封筒つきスクリプトの共通の呼び出し器。プロンプトの定型（TEMP_FILE_POLICY・UNTRUSTED_POLICY・SIGNED_OUTPUT_INSTRUCTION）はここが持つ
+function signedRunnerBody() {
+  return extractFunctionBody('function runSignedScript(', '\n}\n')
+}
+
+test('runSignedScript: プロンプトの定型として TEMP_FILE_POLICY・UNTRUSTED_POLICY・SIGNED_OUTPUT_INSTRUCTION を必ず含める', () => {
+  const body = signedRunnerBody()
+  assert.match(body, /\[task, UNTRUSTED_POLICY, TEMP_FILE_POLICY, howTo, '```sh', command, '```', SIGNED_OUTPUT_INSTRUCTION\]\.join\('\\n'\)/)
+})
+
 test('measureResidualBytesOnce: プロンプトは TEMP_FILE_POLICY と UNTRUSTED_POLICY を含み、一時ファイルを作らせず、1 回の Bash 呼び出しで実行させる', () => {
   const body = extractFunctionBody('async function measureResidualBytesOnce(', 'async function measureResidualWorktreeBytesDetailed(')
-  assert.match(body, /TEMP_FILE_POLICY/)
-  assert.match(body, /UNTRUSTED_POLICY/)
+  // TEMP_FILE_POLICY・UNTRUSTED_POLICY は共通の呼び出し器が入れる（上のテスト）。ここはそれを通すこと
+  assert.match(body, /await runSignedScript\(/)
+  assert.doesNotMatch(body, /await agent\(/)
   assert.match(body, /1 回の Bash 呼び出しで実行/)
   // 旧実装の一時ファイル経路（tf 変数・.lines・mktemp・rm）がプロンプト生成に残っていない
   assert.doesNotMatch(body, /\btf\b|\.lines|mktemp|\brm\b|tmpFile/)
@@ -126,8 +137,8 @@ test('measureResidualBytesOnce: プロンプトは TEMP_FILE_POLICY と UNTRUSTE
 
 test('measureFreeDiskKib: プロンプトは TEMP_FILE_POLICY と UNTRUSTED_POLICY を含み、一時ファイルを作らせず、1 回の Bash 呼び出しで実行させる', () => {
   const body = extractFunctionBody('async function measureFreeDiskKib(path) {', 'const MAIN_UNTRACKED_SCHEMA = {')
-  assert.match(body, /TEMP_FILE_POLICY/)
-  assert.match(body, /UNTRUSTED_POLICY/)
+  assert.match(body, /await runSignedScript\(/)
+  assert.doesNotMatch(body, /await agent\(/)
   assert.match(body, /1 回の Bash 呼び出しで実行/)
   assert.doesNotMatch(body, /\btf\b|\.line\b|mktemp|\brm\b|tmpFile/)
   assert.match(body, /verifySignedOutput\(v, tmpNonce, /)
