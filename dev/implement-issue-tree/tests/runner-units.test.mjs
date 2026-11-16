@@ -1,10 +1,13 @@
 // ランナー共通層の純関数（guard・preamble・models・extract-json）の表テスト。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { trackTmp } from './lib/tmp-track.mjs'
+import { mergePrNumberOf } from '../../../skills/implement-issue-tree/runner/lib/merge-target.mjs'
 import { MERGE_EXEC_COMMAND, mergeExecCommandFor, DENY_FORMS, activeForms, codexRules, expandPrefix, opencodePatterns, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 import { buildPreamble, buildRepairPrompt, buildSchemaInstruction, buildWorktreeNotice, composePrompt } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
 import { DEFAULT_CONFIG_PATH, IIT_EFFORTS, IIT_MODELS, loadConfig, resolveModel, resolveTimeoutMs, validateConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
@@ -519,4 +522,21 @@ test('mergeExecCommandFor（MEDIUM-8）: その PR 番号の完全一致の形�
   for (const c of [form(13), form(120), form(1), `${form(12)}; echo x`, ` ${form(12)}`]) assert.equal(re.test(c), false, c)
   assert.equal(MERGE_EXEC_COMMAND.test(form(12)), true)
   for (const bad of [0, -1, 1.5, '12', NaN, 2 ** 53]) assert.throws(() => mergeExecCommandFor(bad), TypeError, String(bad))
+})
+
+test('mergePrNumberOf（MEDIUM-8）: src の実物の mergeExecutePrompt（allowMerge=true の全文）から impl.prNumber を取り、allowMerge=false の全文では null', async () => {
+  // g0-gates.test.mjs と同じく、駆動部マーカーより前の定義部を切り出して mergeExecutePrompt を export する
+  const srcPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
+  const src = readFileSync(srcPath, 'utf8')
+  const at = src.indexOf('__IMPLEMENT_ISSUE_TREE_DRIVER_START__')
+  assert.ok(at > 0)
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-runner-merge-prompt-')))
+  const sliced = join(dir, 'defs.mjs')
+  writeFileSync(sliced, `${src.slice(0, src.lastIndexOf('\n', at))}\nexport { mergeExecutePrompt }\n`)
+  const { mergeExecutePrompt } = await import(pathToFileURL(sliced).href)
+  const entries = [{ app: 'cursor', contexts: ['Cursor Bugbot'] }]
+  for (const [pr, issue] of [[123, 42], [7, 7], [1, 999]]) {
+    assert.equal(mergePrNumberOf(mergeExecutePrompt({ number: issue }, { prNumber: pr }, true, entries, 'a'.repeat(40), 'n1')), pr, `PR ${pr}`)
+    assert.equal(mergePrNumberOf(mergeExecutePrompt({ number: issue }, { prNumber: pr }, false, [])), null, `PR ${pr}（回復専用）`)
+  }
 })
