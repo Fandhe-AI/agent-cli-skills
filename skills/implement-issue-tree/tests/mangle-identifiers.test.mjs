@@ -33,6 +33,7 @@ const CONVERSIONS = [
   ['分割代入の代入（宣言でない）の shorthand', 'function f(o){let value;({value}=o);return value}', 'function f(o){let a;({value:a}=o);return a}'],
   ['直下のブロックから外側の束縛を参照（捕捉しない）', 'function f(){const outerName=1;{const innerName=2;use(outerName,innerName)}}', 'function f(){const a=1;{const b=2;use(a,b)}}'],
   ['__proto__ の束縛は改名しない（shorthand を展開するとプロトタイプの設定になる）', 'function f(){const __proto__={x:1};const value=2;return {__proto__,value}}', 'function f(){const __proto__={x:1};const a=2;return {__proto__,value:a}}'],
+  ['局所の割り当ては浅いスコープが先（深い宣言が位置で先でも）', 'function f(){return [1].map(()=>{const inner1=1;return inner1+outer1});const outer1=2}', 'function f(){return [1].map(()=>{const b=1;return b+a});const a=2}'],
   ['rest 引数と配列パターン', 'function f(...rest){const [first,,third]=rest;return first+third}', 'function f(...a){const [b,,c]=a;return b+c}'],
 ]
 
@@ -85,6 +86,35 @@ test('局所の名前が 1 文字を使い切っても予約語・注入名・�
   assert.ok(declared.some((n) => n.length === 2), '2 文字の名前まで割り当てが進んでいない（検査が空振り）')
   const v = await alphaVerify([{ name: 'many', before: input, after: r.code }])
   assert.equal(v.get('many').ok, true, v.get('many').detail)
+})
+
+test('局所の名前が 1000 個まで進んでも 2 文字の予約語（do・if・in・of・as）を新しい名前に使わない', async () => {
+  // 2 文字の名前は 55 番目から始まり、do は約 257 番目・if は約 563 番目・of は約 941 番目。1000 個で全部を通る
+  const locals = Array.from({ length: 1000 }, (_, i) => `localName${i}`)
+  const input = H + `function f(){${locals.map((n) => `const ${n}=${JSON.stringify(n)};`).join('')}return ()=>[${locals.join(',')}]}`
+  const [r] = await mangleBatch([input])
+  assert.equal(r.ok, true, r.error)
+  const declared = [...r.code.matchAll(/const ([^=]+)="localName/g)].map((m) => m[1])
+  assert.equal(declared.length, 1000)
+  assert.equal(new Set(declared).size, 1000, '同じスコープの名前が重複した')
+  for (const n of ['do', 'if', 'in', 'of', 'as']) assert.ok(!declared.includes(n), `予約語 ${n} を使った`)
+  const v = await alphaVerify([{ name: 'many1000', before: input, after: r.code }])
+  assert.equal(v.get('many1000').ok, true, v.get('many1000').detail)
+})
+
+test('最上位の名前が 2 文字の表をほぼ使い切っても予約語を使わず、宣言の並びを変えても割り当ては同じ', async () => {
+  const lines = Array.from({ length: 3000 }, (_, i) => `function top${i}(){return ${i}}`)
+  const [fwd, rev] = await mangleBatch([H + lines.join('\n'), H + [...lines].reverse().join('\n')])
+  assert.equal(fwd.ok, true, fwd.error)
+  assert.equal(rev.ok, true, rev.error)
+  const declared = body(fwd.code).split('\n').map((l) => /^function ([^(]+)\(/.exec(l)[1])
+  assert.equal(new Set(declared).size, 3000)
+  assert.ok(declared.every((n) => n.length === 2), '最上位の名前が 2 文字でない')
+  for (const n of ['do', 'if', 'in', 'of', 'as']) assert.ok(!declared.includes(n), `予約語 ${n} を使った`)
+  // 衝突したときの置き場所は名前の順で決める（並びに依存すると、src の関数の順を変えただけで全部の名前が動く）
+  assert.deepEqual(body(rev.code).split('\n').sort(), body(fwd.code).split('\n').sort())
+  const v = await alphaVerify([{ name: 'top3000', before: H + lines.join('\n'), after: fwd.code }])
+  assert.equal(v.get('top3000').ok, true, v.get('top3000').detail)
 })
 
 test('決定性と行数: 同じ入力は同じ出力、改行の数は変わらない', async () => {
