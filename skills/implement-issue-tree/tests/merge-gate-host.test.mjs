@@ -94,7 +94,7 @@ async function runMerge(execReply) {
   const prNumbers = []
   const out = await runScript({
     args: ARGS,
-    override: (label, opts, prompt) => {
+    override: (label, _opts, prompt) => {
       if (label.startsWith('pr-bind:#')) return { state: 'OPEN', headRefOid: HEAD, headRefName: 'feat/2-x', baseRefName: 'main', isCrossRepository: false, closingIssues: [2] }
       if (label.startsWith('merge:#')) return { state: 'ready', summary: 'マージ条件充足', headSha: HEAD }
       if (label.startsWith('merge-exec:#')) {
@@ -111,7 +111,7 @@ const gateInputOf = (prompt) => {
   const m = /--pr (\d+) --base \S+/.exec(prompt)
   return inputSha256(inputOf(Number(m[1]), '', ''))
 }
-const merged = (prompt, gate) => ({ merged: true, reason: 'merged', summary: 'マージ済み', issueClosed: true, headSha: HEAD, ...(gate === undefined ? {} : { gate }) })
+const merged = (_prompt, gate) => ({ merged: true, reason: 'merged', summary: 'マージ済み', issueClosed: true, headSha: HEAD, ...(gate === undefined ? {} : { gate }) })
 const honest = (prompt, over = {}) => makeEnvelope(nonceOf(prompt), { mode: 'merge-gate', err: 0, verdict: 'ok', stage: 'done', detail: 'ok', headSha: HEAD, inputSha256: gateInputOf(prompt), checks: 2, notGreen: 0, unresolved: 0, requiredTotal: 2, clientOnly: 0, unbound: 0, unissued: 0, ...over })
 const doneOf = (result) => result.done.find((d) => d.issue === 2)
 
@@ -143,7 +143,7 @@ test('結合: 封筒が無い・nonce 違い・sha256 不一致・別入力・ve
 test('結合: already-merged の回復は封筒を要求しない（新規マージではない）', async () => {
   const { result } = await runScript({
     args: { ...ARGS, autoMerge: true },
-    override: (label, opts, prompt) => {
+    override: (label) => {
       if (label.startsWith('pr-bind:#')) return { state: 'OPEN', headRefOid: HEAD, headRefName: 'feat/2-x', baseRefName: 'main', isCrossRepository: false, closingIssues: [2] }
       if (label.startsWith('merge:#')) return { state: 'ready', summary: 'ok', headSha: HEAD }
       if (label.startsWith('merge-exec:#')) return { merged: true, reason: 'already-merged', summary: '既にマージ済み', issueClosed: true, headSha: '' }
@@ -159,7 +159,7 @@ test('結合: merge-exec 呼び出しごとに nonce が別で、前の呼び出
   let first = null
   const { result } = await runScript({
     args: ARGS,
-    override: (label, opts, prompt) => {
+    override: (label, _opts, prompt) => {
       if (label.startsWith('pr-bind:#')) return { state: 'OPEN', headRefOid: HEAD, headRefName: 'feat/2-x', baseRefName: 'main', isCrossRepository: false, closingIssues: [2] }
       if (label.startsWith('merge:#')) return { state: 'ready', summary: 'ok', headSha: HEAD }
       if (label.startsWith('merge-exec:#')) {

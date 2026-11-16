@@ -349,7 +349,7 @@ test('ラン終了時の報告: 台帳へ kind retained で載った worktree（
 const GIB_KIB = 1024 * 1024
 // du の応答: 入力のパス列に FIX_A が含まれていれば 1 GiB、なければ 1 MiB（測定の対象に保持したパスが入るかを見る）
 function bytesExtra(measured) {
-  return (label, opts, prompt) => {
+  return (label, _opts, prompt) => {
     if (label === 'worktree:residual-bytes') {
       const input = commandInputOf(prompt) ?? ''
       measured.push(input.split('\n'))
@@ -526,7 +526,7 @@ test('バイト軸（実装スクリプト全体）: fix がパスを返さず�
 const MERGE_ARGS = { ...BASE_ARGS, maxResidualWorktreeBytes: 512 * 1024 * 1024, maxResidualWorktrees: 100 }
 // 測定の呼び出しと fix の起動を時系列で記録する（fix より後の測定だけを見るため）
 function timeline(events, pathBytes) {
-  return (label, opts, prompt) => {
+  return (label, _opts, prompt) => {
     if (label === 'fix:#2') events.push('fix')
     if (label === 'worktree:residual-bytes') {
       const input = commandInputOf(prompt) ?? ''

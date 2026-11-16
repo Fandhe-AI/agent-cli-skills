@@ -178,7 +178,7 @@ test('結合: 別ラウンドの monitor 呼び出しは別の nonce を持つ�
 // 「HEAD が動いた」と読める形で混ぜない。HEAD は動いておらず、PR が未マージなだけである。
 test('結合: autoMerge 無効で ready になった PR の停止 note は、回復専用 merge-exec の内部理由 head-moved を転記せず「未マージのまま」と書く', async () => {
   const { result, calls } = await run(
-    (prompt) => ({ state: 'ready', summary: 'マージ条件充足', headSha: SHA }),
+    () => ({ state: 'ready', summary: 'マージ条件充足', headSha: SHA }),
     { mergeExecReply: () => ({ merged: false, reason: 'head-moved', summary: 'head-moved で終了。PR は MERGED ではなかった', issueClosed: false }) },
   )
   assert.ok(calls.some((c) => c.opts.label.startsWith('merge-exec:#')), '回復専用の merge-exec が走る')

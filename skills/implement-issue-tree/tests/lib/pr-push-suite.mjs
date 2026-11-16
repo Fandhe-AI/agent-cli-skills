@@ -633,7 +633,7 @@ export function registerPrPushTests(bash) {
     const reused = result(run(bash, sb, prArgs(prFiles(sb)), { GHPR_LIST_JSON: list([[12, BASE, tip]]) }))
     assert.deepEqual(reused, { mode: 'pr', status: 'reused', prNumber: 12, milestone: 'not-used' })
     const cases = [
-      [(x) => list([[12, BASE, 'f'.repeat(40)]]), 'head-mismatch', 12],
+      [() => list([[12, BASE, 'f'.repeat(40)]]), 'head-mismatch', 12],
       [(x) => list([[12, 'develop', x]]), 'base-mismatch', undefined],
       [(x) => list([[12, BASE, x], [13, BASE, x]]), 'ambiguous', undefined],
     ]

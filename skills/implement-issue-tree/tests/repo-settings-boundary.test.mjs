@@ -26,7 +26,6 @@ const source = readFileSync(SCRIPT_PATH, 'utf8')
 const markerIndex = source.indexOf(DRIVER_MARKER)
 if (markerIndex < 0) throw new Error(`テスト境界マーカー ${DRIVER_MARKER} が実装スクリプトに存在しない`)
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
-const driverPart = source.slice(markerIndex)
 const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-repo-settings-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-repo-settings-defs.mjs')
 const SLICE_EXPORTS = [

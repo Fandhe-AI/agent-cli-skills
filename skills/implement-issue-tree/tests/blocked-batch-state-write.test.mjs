@@ -62,7 +62,7 @@ const exportList = SLICE_EXPORTS.map((n) => `__opt_${n} as ${n}`).join(', ')
 writeFileSync(slicePath, `${definitionPart}\n${optionalExports}\nexport { ${exportList} }\n`)
 const mod = await import(pathToFileURL(slicePath).href)
 const {
-  runStateAgent, ensureBoundaryNonceSeed, declaredDepsChecksum, outOfTreeStateChecksum, sha256Hex, canonicalJson,
+  ensureBoundaryNonceSeed, declaredDepsChecksum, outOfTreeStateChecksum, sha256Hex, canonicalJson,
   parseDryRun, formatIssueList, isUnchangedStatePatch, writeBlockedStateBatch, estimateDispatch, BLOCKED_STATE_CHUNK_SIZE,
 } = mod
 

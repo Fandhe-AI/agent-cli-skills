@@ -82,7 +82,7 @@ test('1 ページだけ書き写しを誤ると、そのページだけを取り
 })
 
 test('同じページが 2 回とも構造不一致なら停止し、後続 agent は 0 件・片づけは呼ばれる', async () => {
-  const bad = (label, prompt, parts) => {
+  const bad = (_label, prompt, parts) => {
     const p = pageOf(prompt)
     if (p !== 3) return treePageReply(prompt, parts[p - 1], TSV)
     return treePageReply(prompt, parts[2].map((x) => ({ ...x, state: 'closed' })), TSV, { digestNodes: parts[2] })
@@ -94,7 +94,7 @@ test('同じページが 2 回とも構造不一致なら停止し、後続 agen
 })
 
 test('ページの title だけの不一致は取り直しのあと警告つきで続行する（titleMismatch: true）', async () => {
-  const titleOff = (label, prompt, parts) => {
+  const titleOff = (_label, prompt, parts) => {
     const p = pageOf(prompt)
     if (p !== 1) return treePageReply(prompt, parts[p - 1], TSV)
     return treePageReply(prompt, parts[0].map((x) => (x.number === 2 ? { ...x, title: 'issue 2 ' } : x)), TSV, { digestNodes: parts[0] })
@@ -106,7 +106,7 @@ test('ページの title だけの不一致は取り直しのあと警告つき�
 })
 
 test('ページの封筒が別ページの入力に束縛されていると拒否する（流用の検出）', async () => {
-  const swapped = (label, prompt, parts) => {
+  const swapped = (_label, prompt, parts) => {
     const p = pageOf(prompt)
     // ページ 1 の内容を、ページ 2 の入力の束縛で返す = 別の呼び出し（別ページ）の出力の流用
     if (p === 2) return treePageReply(prompt, parts[1], TSV, { payload: { inputSha256: 'f'.repeat(64) } })
@@ -193,7 +193,7 @@ test('ページの optinTests の書き写し誤りは、そのページだけ�
   let n = 0
   const { calls } = await run({
     all,
-    page: (label, prompt, parts) => {
+    page: (_label, prompt, parts) => {
       const p = pageOf(prompt)
       if (parts[p - 1].some((x) => x.number === 3) && n++ === 0) return treePageReply(prompt, optinOff(parts[p - 1]), TSV, { digestNodes: parts[p - 1] })
       return treePageReply(prompt, parts[p - 1], TSV)
@@ -204,7 +204,7 @@ test('ページの optinTests の書き写し誤りは、そのページだけ�
 
 test('ページの optinTests の書き写し誤りが 2 回続くと、title のように続行せず停止し、後続 agent は 0 件・片づけは呼ばれる', async () => {
   const all = truthWithOptin()
-  const bad = (label, prompt, parts) => {
+  const bad = (_label, prompt, parts) => {
     const p = pageOf(prompt)
     if (parts[p - 1].some((x) => x.number === 3)) return treePageReply(prompt, optinOff(parts[p - 1]), TSV, { digestNodes: parts[p - 1] })
     return treePageReply(prompt, parts[p - 1], TSV)

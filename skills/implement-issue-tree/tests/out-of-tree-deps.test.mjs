@@ -62,7 +62,6 @@ const {
   outOfTreeStateChecksum,
   ROOT_ANCESTOR_DEPTH,
   ROOT_ANCESTOR_TRUNCATED,
-  ROOT_ANCESTOR_MAX_ROUNDS,
   collectOutOfTreeDeps,
   outOfTreeStatePrompt,
   rootAncestorsPrompt,

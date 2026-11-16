@@ -50,7 +50,6 @@ function envelope(r) {
 }
 // ホストが再計算する入力文字列（implement-issue-tree.src.js の observeInputText と同じ定義）
 const inputOf = (f) => ['observe-pr', f.mode, f.pr, f.repo ?? '', f.base ?? '', f.branch ?? '', f.issue ?? '', f.slug ?? '', f.until ?? ''].join('\n')
-const page = (names) => JSON.stringify({ total_count: names.length, check_runs: names.map((name) => ({ name, app: { slug: 'github-actions' } })) })
 
 for (const bash of BASHES) {
   const tag = `[${bash}]`
