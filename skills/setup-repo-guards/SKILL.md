@@ -84,7 +84,7 @@ ARG_EOF_7f3a9c
 # 次の組へ進む（exit 1 はシェルごと終了するため使わない）
 validate_pair() {
   local repo="$1" visibility="$2" name
-  local repo_re='^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
+  local repo_re='(^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$)'
   # CR は read -r が除去しないため、束縛後の値で検出できる（改行は束縛時の bind_ok で検査済み）
   case "${repo}${visibility}" in *$'\r'*) echo "不正な入力: CR を含む"; return 1 ;; esac
   if ! [[ "${repo}" =~ ${repo_re} ]]; then echo "不正な repo: 形式外"; return 1; fi
@@ -152,7 +152,7 @@ tmp="$(mktemp -d)" || exit 1
 trap 'rm -rf "${tmp}"' EXIT
 # latest を commit SHA に解決（取得中にタグが動いても同じ commit を使う）
 sha="$(gh api repos/Fandhe-AI/actions/commits/latest --jq .sha)" || exit 1
-printf '%s' "${sha}" | grep -Eq '^[0-9a-f]{40}$' || { echo "SHA の形式が不正のため中止"; exit 1; }
+printf '%s' "${sha}" | grep -Eq '(^[0-9a-f]{40}$)' || { echo "SHA の形式が不正のため中止"; exit 1; }
 # gh api はエラー本文も stdout へ出すため、成否は終了コードで判定する
 gh api --method GET -H 'Accept: application/vnd.github.raw' -f ref="${sha}" \
   repos/Fandhe-AI/actions/contents/ai-review/templates/ai-review.single.yml \
