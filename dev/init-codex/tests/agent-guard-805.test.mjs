@@ -28,7 +28,9 @@ const pathBash = execFileSync('/bin/sh', ['-c', 'command -v bash']).toString().t
 const BASHES = [...new Set(['/bin/bash', pathBash])]
 const SUBAGENTS = [false, true, null]
 
-const corpus = [...new Set(Object.values(cases).filter(Array.isArray).flatMap((arr) => arr.map((e) => (Array.isArray(e) ? e[0] : e))))]
+// 認証情報・マージキュー投入の表は #805 の凍結後に足した判定で、旧版との差分テストの対象ではない。
+const POST_805 = new Set(['CRED_DENY', 'CRED_ALLOW', 'ENQUEUE_DENY'])
+const corpus = [...new Set(Object.entries(cases).filter(([k, v]) => Array.isArray(v) && !POST_805.has(k)).map(([, v]) => v).flatMap((arr) => arr.map((e) => (Array.isArray(e) ? e[0] : e))))]
 
 const SUBSET = [...new Set([
   cases.FP805_FLIP,

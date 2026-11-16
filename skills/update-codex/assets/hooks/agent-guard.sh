@@ -30,10 +30,13 @@
 #   force-push     git push の --force / -f / --mirror / +<refspec>（`--` の後の + 始まりも）/
 #                  --force-with-lease（= 形・略記を含む）/ --force-if-includes。lease 付きでも
 #                  既存コミットを消せるため許可しない（全セッション）
-#   merge-guard    gh pr merge（本文・題名の値だけに merge の語があり、コマンド全体が厳格な文法に一致する `gh pr create|comment` は除く。下記）・REST / GraphQL のマージ・承認（gh pr review の --approve / -a、
+#   merge-guard    （マージキュー投入 enqueuePullRequest を含む）gh pr merge（本文・題名の値だけに merge の語があり、コマンド全体が厳格な文法に一致する `gh pr create|comment` は除く。下記）・REST / GraphQL のマージ・承認（gh pr review の --approve / -a、
 #                  reviews API の event=APPROVE・判定できない --input / @file 形、GraphQL の
 #                  addPullRequestReview / submitPullRequestReview + APPROVE）・gh alias・
 #                  gh extension（subagent が true / null のとき）
+#   credential-read  認証情報の読み出し（subagent が true / null のとき）: gh auth token・gh auth status の
+#                  --show-token / -t・git credential（fill / get 系）・printenv / env の引数なし・printenv で
+#                  TOKEN / SECRET / KEY 等を名指す形・hosts.yml（gh の設定）の語・codex を含むコマンドの auth.json
 #   repo-settings  ruleset・branch protection・リポジトリ本体の書き込み・gh repo edit 等
 #                  （subagent が true / null のとき）
 #   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
@@ -1246,7 +1249,7 @@ if contains_subsequence "$all_nf" gh api; then
   if evidence '/merges([[:space:]?]|$)'; then
     finish deny merge-guard
   fi
-  if evidence 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
+  if evidence 'mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch'; then
     finish deny merge-guard
   fi
 
@@ -1480,5 +1483,98 @@ if contains_subsequence "$all_nf" gh extension \
   || contains_subsequence "$all_nf" gh extensions; then
   finish deny merge-guard
 fi
+
+# 認証情報の読み出し（subagent が true / null のときだけ。main の利用者操作は上の false の出口で対象外）。
+# gh が内部で hosts.yml を読むのはコマンド文字列に現れないので、スクリプト経由の gh 利用は止めない。
+# 読み手のコマンド名は許可リストにせず、パスの語（hosts.yml・auth.json）の一致で止める。
+# 引用符とバックスラッシュを除いた norm（cd してから hosts.yml だけを書く形も含む）に対して照合する。
+if match_ere "$norm" '(^|[^A-Za-z0-9_.-])hosts[.]yml([^A-Za-z0-9_.-]|$)'; then
+  finish deny credential-read
+fi
+if match_ere "$norm" '(^|[^A-Za-z0-9_.-])auth[.]json([^A-Za-z0-9_.-]|$)' \
+  && match_ere "$norm" '[Cc][Oo][Dd][Ee][Xx]'; then
+  finish deny credential-read
+fi
+if match_ere "$norm" '(^|[ /])[.]config/gh(/|[ ;]|$)' || match_ere "$norm" '/proc/[^ ]*/environ'; then
+  finish deny credential-read
+fi
+# gh auth token・gh auth status の --show-token / -t・git credential（fill・get 系）・printenv / env の環境変数の一覧と、
+# 認証情報らしい名前の名指し。コミットメッセージ等の文字列中の語（`gh auth token` の説明）を誤検出しないよう、
+# いずれもコマンド位置（先頭・; | & ( ) 改行の後・
+# sudo / command / exec 等の前置語の後・bash -c の中）の printenv と env だけを見る。
+cred_text=$(printf '%s\n' "$cmd" \
+  | awk '{ if (sub(/\\$/, "")) printf "%s", $0; else printf "%s ; ", $0 }' \
+  | tr -d "'\"" | tr -d '\\' \
+  | sed -e 's/[$]{IFS}/ /g' -e 's/[$]IFS/ /g' -e 's/[$]/ /g' -e 's/[;&|(){}`<>]/ ; /g') || finish deny internal-error
+cred_hit=$(printf '%s\n' "$cred_text" | awk '
+  function lastseg(x) { sub(/.*\//, "", x); return tolower(x) }
+  BEGIN {
+    nw = split("sudo doas command exec builtin nohup time nice then do else elif if while until ! xargs", wl, " ")
+    for (k = 1; k <= nw; k++) wrap[wl[k]] = 1
+  }
+  {
+    n = split($0, t, /[ \t]+/)
+    cp = 1; mode = ""; hasarg = 0; skip = 0
+    for (i = 1; i <= n + 1; i++) {
+      w = (i <= n) ? t[i] : ";"
+      if (w == "") continue
+      if (w == ";") {
+        if (mode == "P" && !hasarg) { print "hit"; exit }
+        if (mode == "E") { print "hit"; exit }
+        cp = 1; mode = ""; hasarg = 0; skip = 0; skip2 = 0
+        continue
+      }
+      if (skip) { skip = 0; continue }
+      if (mode == "G") {
+        if (substr(w, 1, 1) == "-") continue
+        if (w == "auth") { mode = "GA"; continue }
+        mode = ""; cp = 0; continue
+      }
+      if (mode == "GA") {
+        if (w == "token") { print "hit"; exit }
+        if (w == "status") { mode = "GS"; continue }
+        mode = ""; continue
+      }
+      if (mode == "GS") {
+        if (w == "--show-token" || w ~ /^-[A-Za-z]*t[A-Za-z]*$/) { print "hit"; exit }
+        continue
+      }
+      if (mode == "T") {
+        if (skip2) { skip2 = 0; continue }
+        if (w == "-c" || w == "-C" || w == "--git-dir" || w == "--work-tree" || w == "--namespace") { skip2 = 1; continue }
+        if (substr(w, 1, 1) == "-") continue
+        if (w == "credential") { print "hit"; exit }
+        if (w ~ /^credential-/) { mode = "TC"; continue }
+        mode = ""; continue
+      }
+      if (mode == "TC") {
+        if (w == "fill" || w == "get") { print "hit"; exit }
+        mode = ""; continue
+      }
+      if (mode == "P") {
+        if (substr(w, 1, 1) == "-") continue
+        hasarg = 1
+        if (toupper(w) ~ /TOKEN|SECRET|KEY|PASSW|CREDENTIAL/) { print "hit"; exit }
+        continue
+      }
+      if (mode == "E") {
+        if (w == "-u" || w == "-C" || w == "--unset" || w == "--chdir") { skip = 1; continue }
+        if (w == "-S" || w == "--split-string") { mode = ""; cp = 1; continue }
+        if (substr(w, 1, 1) == "-" || index(w, "=") > 0) continue
+        mode = ""; cp = 1
+      }
+      if (w == "-c" || tolower(w) == "eval") { cp = 1; continue }
+      if (!cp) continue
+      b = lastseg(w)
+      if (b in wrap) continue
+      if (substr(w, 1, 1) == "-" || w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue
+      cp = 0
+      if (b == "printenv") { mode = "P"; hasarg = 0 }
+      else if (b == "env") { mode = "E" }
+      else if (b == "gh") { mode = "G" }
+      else if (b == "git") { mode = "T"; skip2 = 0 }
+    }
+  }') || finish deny internal-error
+[ "$cred_hit" = hit ] && finish deny credential-read
 
 finish allow
