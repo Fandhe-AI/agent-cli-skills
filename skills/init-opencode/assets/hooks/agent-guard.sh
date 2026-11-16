@@ -74,9 +74,10 @@
 #   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
 #                  C0 と DEL）を含むコマンド（subagent が true / null のとき）。`$'` がすべて単一引用符の末尾の `$` と
 #                  閉じ引用符（`grep -c '^hi$' f`・`RE='x$'` の次の行に別のコマンド）だと引用符の状態を追って確かめられた
-#                  ときは除く（字句解析器 SQ_LITERAL_AWK。下記）。追い切れない形（ヒアドキュメント・バッククォート・
-#                  二重引用符の中の $' 等）は、コマンド全体が評価器にならないコマンドの許可リストだけの単純コマンド
-#                  またはパイプラインで、厳格な文法に一致するときだけ除く（認識器 SQ_DOLLAR_AWK。下記）
+#                  うえ、すべての単純コマンドの先頭語が評価器にならないコマンドの許可リストに入っている（`$(...)` の中と
+#                  パイプの各段も含む）ときは除く（字句解析器 SQ_LITERAL_AWK。下記）。それ以外の形（ヒアドキュメント・
+#                  バッククォート・二重引用符の中の $'・許可リストの外のコマンド等）は、コマンド全体が評価器にならない
+#                  コマンドの許可リストだけの単純コマンドまたはパイプラインで、厳格な文法に一致するときだけ除く（認識器 SQ_DOLLAR_AWK。下記）
 #   nesting-limit  bash -c / eval / heredoc / $(...) / env -S の入れ子が解析の上限（深さ 8・件数 512）を
 #                  超えた、ダブルクォート内の $( や `（引用符なし heredoc 本文の $( や `）の閉じを見つけられない、
 #                  または heredoc の区切り子が見つからないまま入力の末尾に達した。中身を見切れないため
@@ -1193,18 +1194,32 @@ END {
 AWK
 
 # 1 段目の字句解析器。状態は「通常」「単一引用符の中（S）」「二重引用符の中（D）」の 3 つで、$( に入るたびに
-# 状態を積んで通常から始め直し、対応する ) で戻す（中の ( ) は数えて対応を取る）。バックスラッシュは通常と二重引用符の中で
-# 次の 1 文字を飛ばす。コメントは通常の状態で語の先頭（直前が行頭・空白・タブ・改行・; | &。どれもエスケープされていない）の
-# # から行末まで。
-# raw の `$'` の個数と「S の閉じ引用符の直前が `$`」の個数が一致し、すべての引用符・$( ・( が閉じたときだけ literal を出す。
-# 次の形は何も出さない（2 段目へ倒す。今と同じ判定）:
+# 状態を積んで通常から始め直し、対応する ) で戻す。バックスラッシュは通常と二重引用符の中で次の 1 文字を飛ばす
+# （バックスラッシュと改行の組は語を区切らない）。コメントは通常の状態で語の先頭（直前が行頭・空白・タブ・改行・; | &。
+# どれもエスケープされていない）の # から行末まで。
+# 引用符の状態に加えて、単純コマンドごとに先頭語を読む（入力の先頭、; | & 改行の後、( と $( の直後、制御語の後）。
+# 先頭語は許可リスト OK の素の語（引用符・展開・エスケープ・パスを含まない）でなければならない。OK は評価器にならない
+# コマンドだけで、create-commit Step 2 (a) と変更理由の 5 形に要るものに限る。評価器は列挙しない（載っていない語はすべて倒す）。
+# 単一引用符の中身は、評価器が連結して評価すると ANSI-C 引用符になる（`printf '%s%s' 'gh pr $' "'\x6derge' 1" | bash`）。
+# そのため、許可リストの外のコマンドが 1 つでもあれば literal を出さない。OK のコマンドも、引数や環境から評価器になる経路を塞ぐ:
+#   [        `[ -z "…" ]` と `[ -n "…" ]` の形だけ（bash 5 の `[ -v 'a[$(…)]' ]` は添字を評価する）。2 つ目の語は
+#            二重引用符で始め、引用符の外の展開を含まない
+#   printf   最初の引数（書式）は - で始まらない単一引用符の文字列 1 つで、変換は %s・%b・%c・%% だけ（bash 5 の
+#            `printf -v 'a[$(…)]'` と zsh の `printf '%d' 'path[$(…)]'` は添字の $(…) を実行する）
+#   git      2 つ目の語は diff か rev-parse（-c 等の全体オプションを置けない）。展開を含む引数・--output・--ext-diff・
+#            --textconv は倒す
+#   grep     SQ_DOLLAR_AWK と同じ除外（引用符を外した値で --filter 等・--- ・-@）。展開を含む引数は "$NAME" か "${NAME}"
+#            の 1 語だけで、NAME への代入が入力の中にあり、すべて - で始まらない単一引用符の文字列 1 つのとき
+#   exit     数字 1 語だけ
+# 代入だけの語（NAME=…）は先頭語として読み飛ばすが、代入の後にコマンドが続く形（`X=1 grep`）・PATH・HOME・IFS・
+# GIT_*・*PAGER* 等の環境を変える名前は倒す。リダイレクトは `>&2` のように数字の複製だけ（ファイルへの書き込みと読み込みは倒す）。
+# ( はコマンドの先頭（サブシェル）だけ（`<(…)`・zsh のグロブ修飾子 `.(e:'…':)`・`f()` は倒す）。
+# 次の形も何も出さない（2 段目へ倒す。今と同じ判定）:
 #   通常の状態の $'（本物の ANSI-C）・二重引用符の中の $'（eval / bash -c で ANSI-C になる）・$" ・$[ ・$(( ・((・
-#   バッククォート・名前だけでない ${…}・<< を含む入力（ヒアドキュメント）・case の語・$( の中のコメント・
+#   バッククォート・名前だけでない ${…}・<< を含む入力（ヒアドキュメント）・case・$( の中のコメント・
 #   直前が < > ( ) かエスケープされた文字（`a\ #`・`a\<改行>#`）の #（語の途中かどうかを置換・括弧・エスケープの後で
 #   読み違えると、引用符の開きを読み飛ばして状態が反転する）・閉じていない引用符や括弧。
-# literal のときの単一引用符の中身は、別のコマンドが評価器として連結して評価すると ANSI-C 引用符になりうる
-# （`printf '%s%s' 'gh pr $' "'\x6derge' 1" | bash`）。ただし同じ文字列は `'gh pr '\$` のように `$'` を書かずに作れ、
-# その形はこの検査の対象外なので、評価器への受け渡しはこの検査では止めない（止めるのはコマンド自身の ANSI-C 引用符だけ）。
+# raw の `$'` の個数と「S の閉じ引用符の直前が `$`」の個数が一致し、すべての引用符・$( ・( が閉じたときだけ literal を出す。
 read -r -d '' SQ_LITERAL_AWK <<'AWK' || true
 { s = (NR == 1) ? $0 : s "\n" $0 }
 function ch(i) { return substr(s, i, 1) }
@@ -1214,29 +1229,95 @@ function wordstart(i,   c) {
   c = ch(i - 1)
   return (c == " " || c == "\t" || c == "\n" || c == ";" || c == "|" || c == "&")
 }
+# i から始まる語の生の並び（引用符を含む。区切り文字か空白で止める）と、引用符・バックスラッシュを外した値
+function rawword(i) { return match(substr(s, i), /^[^ \t\n;|&()<>]+/) ? substr(s, i, RLENGTH) : "" }
+function unq(w) { gsub(/[\047"\\]/, "", w); return w }
+# 語の後に続いてよい文字（空白・区切り・入力の末尾）
+function isend(c) { return c == "" || c ~ /^[ \t\n;|&)]$/ }
+# 代入だけの語。値が - で始まらない単一引用符の文字列 1 つなら good、それ以外は bad（grep の "$NAME" の判定に使う）
+function assign(i, nm,   j, e) {
+  if (nm ~ /^(PATH|HOME|IFS|ENV|BASH_ENV|CDPATH|SHELLOPTS|BASHOPTS|PS4|EDITOR|VISUAL|ZDOTDIR|.*PAGER.*|GIT_.*|LESS.*|XDG_.*|LD_.*|DYLD_.*|GREP_.*)$/) exit
+  j = i + length(nm) + 1
+  e = (ch(j) == "\047") ? index(substr(s, j + 1), "\047") : 0
+  if (e > 1 && ch(j + 1) != "-" && isend(ch(j + e + 1))) { if (!(nm in bad)) good[nm] = 1 }
+  else { bad[nm] = 1; delete good[nm] }
+}
+# 語の始まり。先頭語と引数を検査し、読み飛ばす文字数を返す（0 なら字句解析を続ける）
+function word(i,   w, v, k, nm, u, e) {
+  w = rawword(i); wx[sp] = 0
+  if (cs[sp] == "X") exit
+  if (cs[sp] == "1" || cs[sp] == "A") {
+    if (match(w, /^[A-Za-z_][A-Za-z0-9_]*=/)) { nm = substr(w, 1, RLENGTH - 1); assign(i, nm); cs[sp] = "A"; return RLENGTH }
+    if (cs[sp] == "A") exit
+    if (w ~ /^(if|then|else|elif|while|until|do|!|[{])$/) return length(w)
+    if (w ~ /^(fi|done|[}])$/) { cs[sp] = "X"; return length(w) }
+    if (!(w in OK)) exit
+    cmd[sp] = w; na[sp] = 0; cs[sp] = "0"; return length(w)
+  }
+  k = ++na[sp]; v = unq(w)
+  if (cmd[sp] == "grep") {
+    if (v ~ /^--(filter|pager|view|format-open|config|save-config)/ || substr(v, 1, 3) == "---" || substr(v, 1, 2) == "-@") exit
+    # 単一引用符の中の $ は展開ではない
+    u = w; gsub(/\047[^\047]*\047/, "", u)
+    if (index(u, "$")) {
+      if (!match(w, /^"[$]([A-Za-z_][A-Za-z0-9_]*|[{][A-Za-z_][A-Za-z0-9_]*[}])"$/)) exit
+      nm = w; gsub(/[^A-Za-z0-9_]/, "", nm); used[nm] = 1
+    }
+  } else if (cmd[sp] == "git") {
+    if (k == 1 && w !~ /^(diff|rev-parse)$/) exit
+    if (v ~ /^--(output|ext-diff|textconv)/) exit
+    wx[sp] = 2
+  } else if (cmd[sp] == "printf") {
+    if (k == 1) {
+      # 書式は単一引用符の文字列 1 つで、変換は %s・%b・%c・%% だけ（zsh の %d・%*s は引数を算術評価し、添字の $(…) を実行する）
+      e = index(substr(s, i + 1), "\047"); u = substr(s, i + 1, e - 1)
+      if (ch(i) != "\047" || e < 2 || ch(i + 1) == "-" || !isend(ch(i + e + 1))) exit
+      gsub(/%%/, "", u); gsub(/%[-#0 +]*[0-9]*([.][0-9]*)?[sbc]/, "", u)
+      if (index(u, "%")) exit
+    }
+  } else if (cmd[sp] == "[") {
+    if (k == 1 && w !~ /^-[zn]$/) exit
+    if (k == 2) { if (ch(i) != "\"") exit; wx[sp] = 1 }
+    if (k == 3) { if (w != "]") exit; cs[sp] = "X" }
+  } else if (cmd[sp] == "exit") {
+    if (k > 1 || w !~ /^[0-9]+$/) exit
+  }
+  return 0
+}
 END {
   t = s; raw = gsub(/[$]\047/, "", t)
   if (raw == 0) exit
   # 追い切れない形は判定しない（呼び出し側が SQ_DOLLAR_AWK の判定に倒す）
   if (index(s, "<<") || s ~ /(^|[^A-Za-z0-9_])case([^A-Za-z0-9_]|$)/) exit
+  split("echo printf grep ls git cut [ exit", a, " "); for (k in a) OK[a[k]] = 1
   n = length(s); st = "N"; par = 0; sp = 0; lit = 0; esc = 0; i = 1
+  cs[0] = "1"; inw[0] = 0; wx[0] = 0
   while (i <= n) {
     c = ch(i)
     if (st == "S") {
       if (c == "\047") { if (ch(i - 1) == "$") lit++; st = "N" }
       i++; continue
     }
-    # esc はエスケープされた文字の位置
+    # esc はエスケープされた文字の位置。バックスラッシュと改行の組は語を区切らない
+    if (c == "\\" && ch(i + 1) == "\n") { esc = i + 1; i += 2; continue }
+    if (st == "N" && !inw[sp] && c !~ /^[ \t\n;|&()<>#]$/) {
+      # 数字だけの語に続く < > はリダイレクトの番号（語として数えない）
+      if (match(substr(s, i), /^[0-9]+[<>]/)) { i += RLENGTH - 1; continue }
+      inw[sp] = 1; k = word(i)
+      if (k) { i += k; continue }
+    }
     if (c == "\\") { esc = i + 1; i += 2; continue }
     if (c == "`") exit
     if (c == "$") {
+      if (wx[sp] == 2 || (wx[sp] == 1 && st == "N")) exit
       d = ch(i + 1)
       # 通常の状態の $' は ANSI-C 引用符。二重引用符の中の $'・$"・$[ も判定しない
       if (d == "\047" || d == "\"" || d == "[") exit
       if (d == "(") {
         if (ch(i + 2) == "(") exit
         stst[sp] = st; stpar[sp] = par; sp++
-        st = "N"; par = 0; i += 2; continue
+        st = "N"; par = 0; cs[sp] = "1"; inw[sp] = 0; wx[sp] = 0; cmd[sp] = ""; na[sp] = 0
+        i += 2; continue
       }
       if (d == "{") {
         if (!match(substr(s, i + 2), /^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?@*!$-])}/)) exit
@@ -1260,17 +1341,26 @@ END {
       i++; continue
     }
     if (c == "(") {
-      if (ch(i + 1) == "(") exit
-      par++; i++; continue
+      if (ch(i + 1) == "(" || cs[sp] != "1") exit
+      par++; inw[sp] = 0; i++; continue
     }
     if (c == ")") {
-      if (par > 0) { par--; i++; continue }
+      if (par > 0) { par--; cs[sp] = "X"; inw[sp] = 0; i++; continue }
       if (sp == 0) exit
       sp--; st = stst[sp]; par = stpar[sp]; i++; continue
     }
+    if (c == "<") exit
+    if (c == ">") {
+      if (!match(substr(s, i), /^>&[0-9]+/) || !isend(ch(i + RLENGTH))) exit
+      inw[sp] = 0; i += RLENGTH; continue
+    }
+    if (c == " " || c == "\t") { inw[sp] = 0; i++; continue }
+    if (c == "\n" || c == ";" || c == "|" || c == "&") { inw[sp] = 0; cs[sp] = "1"; i++; continue }
     i++
   }
-  if (st == "N" && sp == 0 && par == 0 && lit == raw) print "literal"
+  if (st != "N" || sp != 0 || par != 0 || lit != raw) exit
+  for (nm in used) if (!(nm in good)) exit
+  print "literal"
 }
 AWK
 

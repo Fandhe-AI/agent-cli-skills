@@ -1,11 +1,14 @@
 // agent-guard.sh の `$'` の字句解析（SQ_LITERAL_AWK）のテスト。
-// 1 段目の字句解析は raw の `$'` がすべて「単一引用符の末尾の `$` と閉じ引用符」のときだけ obfuscated の検査を外す。
+// 1 段目の字句解析は raw の `$'` がすべて「単一引用符の末尾の `$` と閉じ引用符」で、すべての単純コマンドの先頭語が
+// 評価器にならないコマンドの許可リストに入っているときだけ obfuscated の検査を外す。
 // 引用符の状態を読み違えると本物の ANSI-C 引用符を見落とすので、正解を実シェルに置いて確かめる:
 //   - 標準手順の実物（create-commit の Step 2 (a) のブロック）は SKILL.md から取り出して allow になること
 //   - 固定語彙から組み立てた入力を /bin/bash -c と /bin/zsh -c で実行し、目印 `e$'c'ho IIT_SQ_MARK` が
 //     ANSI-C 引用符として解かれた（`echo IIT_SQ_MARK` か単独の `IIT_SQ_MARK` が出た）入力は、ガードが必ず deny を返すこと。
 //     逆に allow になった入力では、どちらのシェルでも目印が解かれていないこと
-// 実行するのは echo（目印が解かれると echo になる）・代入・ヒアドキュメントだけで、入力は下の固定語彙の組み合わせに限る。
+//   - 目印を評価器（パイプの先の bash / sh・bash -c・sh -c・eval）が連結して組み直す形も同じ語彙に入れる
+// 実行するのは echo（目印が解かれると echo になる）・printf・代入・ヒアドキュメントと、目印の文字列だけを評価する
+// bash / sh / eval で、入力は下の固定語彙の組み合わせに限る。
 // 各入力は空の一時ディレクトリを cwd・HOME にして実行する。/bin/zsh が無い環境では実シェルの差分テストを skip する。
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -78,6 +81,17 @@ const MARK = "e$'c'ho IIT_SQ_MARK"
 // 中で読むと、最初の ' が引用符を閉じて `$'c'` が ANSI-C 引用符になる（状態の反転を見落とす変異を捕まえる）
 const MARK_SQ = "echo 'e$'c'ho IIT_SQ_MARK'"
 const MARKS = [MARK, MARK_SQ]
+// 目印を `$` で終わる単一引用符の文字列と後ろの語に分け、評価器に連結させて組み直す形（PR #847 の codex P0 の形）。
+// 評価器が評価するのは目印の文字列（`e$'c'ho IIT_SQ_MARK`）だけ
+const EVAL_MARKS = [
+  `printf '%s%s' 'e$' "'c'ho IIT_SQ_MARK" | bash`,
+  `printf '%s%s' 'e$' "'c'ho IIT_SQ_MARK" | sh`,
+  `echo 'e$'"'c'ho IIT_SQ_MARK" | bash`,
+  `bash -c 'e$'"'c'ho IIT_SQ_MARK"`,
+  `sh -c 'e$'"'c'ho IIT_SQ_MARK"`,
+  `eval 'e$'"'c'ho IIT_SQ_MARK"`,
+  `echo "$(printf '%s%s' 'e$' "'c'ho IIT_SQ_MARK" | bash)"`,
+]
 // 目印が ANSI-C 引用符として解かれたか（解かれないと `e$cho` / `e$'c'ho` のままで、この 2 つの形は出ない）
 const decoded = (out) => /echo IIT_SQ_MARK|^IIT_SQ_MARK$/m.test(out)
 
@@ -126,6 +140,15 @@ function corpus() {
       for (const g of FRAG) out.add(f + '\n' + m + '\n' + g)
     }
   }
+  for (const m of EVAL_MARKS) {
+    out.add(m)
+    for (const f of FRAG) {
+      for (const j of JOIN) {
+        out.add(f + j + m)
+        out.add(m + j + f)
+      }
+    }
+  }
   return [...out]
 }
 
@@ -171,5 +194,7 @@ describe('実シェルとの差分（/bin/bash -c・/bin/zsh -c）', { skip: exi
   it('両方の向きを実際に通っている（目印が解かれる入力と、目印の文字列を含んだまま allow になる入力がある）', () => {
     assert.ok(rows.some((r) => r.hit), '目印が解かれる入力が無い')
     assert.ok(rows.some((r) => r.v === 'allow' && MARKS.some((m) => r.c.includes(m))), '目印の文字列を含んで allow になる入力が無い')
+    // 評価器の形でも目印が解かれている（評価器の形の判定を実際に確かめている）
+    assert.ok(rows.some((r) => r.hit && EVAL_MARKS.some((m) => r.c.includes(m))), '評価器の形で目印が解かれる入力が無い')
   })
 })

@@ -5985,6 +5985,121 @@
       "allow",
       "deny obfuscated",
       "deny obfuscated"
+    ],
+    "printf '%s%s' 'gh pr $' \"'\\x6derge' 1\" | sh": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo \"$(printf '%s%s' 'gh pr $' \"'\\x6derge' 1\" | bash)\"": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "printf '%s%s' 'gh pr $' \"'\\x6derge' 1\" | grep x | bash": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "printf '%d' 'path[$(gh pr $'\"'\\x6derge' 1)]\"": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "printf '%*s' 'path[$(gh pr $'\"'\\x6derge' 1)]\" x": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "printf -v 'a[$(gh pr $'\"'\\x6derge' 1)]\" x": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "[ -v 'a[$(gh pr $'\"'\\x6derge' 1)]\" ]": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "[ -z \"x\" -o -v 'a[$(gh pr $'\"'\\x6derge' 1)]\" ]": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "[ -z 'a$' ]": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "git -c 'core.pager=gh pr $'\"'\\x6derge' 1\" diff": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "git log --grep 'a$'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "git diff --ext-diff 'a$'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "GIT_PAGER='gh pr $'\"'\\x6derge' 1\"; git diff": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "PAGER='gh pr $'; git diff": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "PS4='$(gh pr $'\"'\\x6derge' 1)'; set -x; echo": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "ls .(e:'gh pr $'\"'\\x6derge' 1\":)": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "P=\"--pager=sh\"; grep \"$P\" 'a$' f": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "grep \"$P\" 'a$' f": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "P='--pager=sh'; grep \"$P\" 'a$' f": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "exit 'a[$(gh pr $'\"'\\x6derge' 1)]\"": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "[ -v \"$(printf '%s%s' 'a[$(gh pr $' \"'\\x6derge' 1)]\")\" ]": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "printf '%s%s\n' '[core]fsmonitor = gh pr $' \"'\\x6derge' 1\" >> .git/config; git diff": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "grep 'a$' f; grep 'b$' < f": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
     ]
   }
 }

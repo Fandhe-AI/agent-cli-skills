@@ -956,14 +956,86 @@ export const FP805_STAY_DENY = [
   [`echo "\${x:-"'"}" $'\\x67\\x68' pr merge 1`, 'obfuscated'],
   [`echo '$' \`echo $'\\x67\\x68'\``, 'obfuscated'],
   [`cat <<'EOF'\ngrep '^a$'\nEOF`, 'obfuscated'],
-  // 引用符の外の $'（評価器へ渡す形）・二重引用符の中の $'（eval / bash -c で ANSI-C になる）・バッククォート・
-  // 名前だけでない ${…}。字句解析器 SQ_LITERAL_AWK は literal を出さず、許可リストの文法（SQ_DOLLAR_AWK）で止まる
+  // `$` で終わる文字列を別の語と連結して評価する形（例外は許可リストの先頭語の単純コマンド・パイプラインに限る）
+  [`f() { eval "$1$2"; }; f 'gh pr $' "'\\x6derge' 1"`, 'obfuscated'],
+  [`printf '%s%s' 'gh pr $' "'\\x6derge' 1" | bash`, 'obfuscated'],
+  [`a='gh pr $'; b="'\\x6derge' 1"; sh -c "$a$b"`, 'obfuscated'],
+  [`find . -maxdepth 0 -exec sh -c '$0$1' 'gh pr $' "'\\x6derge' 1" \\;`, 'obfuscated'],
+  [`bash -c 'echo '"'"'$'"'"'\\x67h'"'"`, 'obfuscated'],
   [`eval 'gh pr merge '$'1'`, 'obfuscated'],
+  [`S=sh; $S -c 'gh pr $'" '\\x6derge' 1"`, 'obfuscated'],
+  [`xargs -0 sh -c < f; grep '^a$' f`, 'obfuscated'],
+  [`source x.sh; grep '^a$' f`, 'obfuscated'],
+  [`g() { :; }; grep '^a$' f`, 'obfuscated'],
+  [`function g { :; }; grep '^a$' f`, 'obfuscated'],
+  [`grep '^a$' f \`true\``, 'obfuscated'],
+  [`echo \${x:-1}; grep '^a$' f`, 'obfuscated'],
+  // 評価器の拒否リスト（前の版の note_shellish）に無い評価器で `'gh pr $'` と別の語を連結して評価する形（PR #820 の codex P0）。
+  // 例外は許可リストの先頭語・`|` だけのパイプライン・素の語と引用符の引数の文法（SQ_DOLLAR_AWK）に完全一致するときだけ
+  [`awk 'BEGIN {system("bash -c \\"" ARGV[1] ARGV[2] "\\"")}' 'gh pr $' "'\\x6derge' 1"`, 'obfuscated'],
+  [`awk '{print}' 'a$'`, 'obfuscated'],
+  [`perl -e 'system(@ARGV)' 'gh pr $' "'\\x6derge' 1"`, 'obfuscated'],
+  [`python3 -c 'import os,sys; os.system(sys.argv[1]+sys.argv[2])' 'gh pr $' "'\\x6derge' 1"`, 'obfuscated'],
+  [`python -c 'print(1)' 'a$'`, 'obfuscated'],
+  [`sed 'e' 'gh pr $'`, 'obfuscated'],
+  [`find . -name 'x$' -exec sh -c 'echo' ';'`, 'obfuscated'],
+  [`find . -name '*.sh$'`, 'obfuscated'],
+  [`xargs sh -c 'echo' 'gh pr $'`, 'obfuscated'],
+  [`env grep 'a$' f`, 'obfuscated'],
+  [`env -S 'sh -c' 'gh pr $'`, 'obfuscated'],
+  [`time grep 'a$' f`, 'obfuscated'],
+  [`command grep 'a$' f`, 'obfuscated'],
+  [`builtin echo 'a$'`, 'obfuscated'],
+  [`exec grep 'a$' f`, 'obfuscated'],
+  [`nice grep 'a$' f`, 'obfuscated'],
+  [`nohup grep 'a$' f`, 'obfuscated'],
+  [`timeout 5 grep 'a$' f`, 'obfuscated'],
   [`eval grep "'a$'" f`, 'obfuscated'],
   [`bash -c "grep 'a$' f"`, 'obfuscated'],
-  [`grep '^a$' f \`true\``, 'obfuscated'],
+  [`echo 'gh pr $'"'\\x6derge' 1" | bash`, 'obfuscated'],
+  [`cat 'gh pr $' | sh`, 'obfuscated'],
+  [`gh pr list --search 'x$'`, 'obfuscated'],
+  // 許可リストのコマンドでも外部コマンドを起動する・変数へ代入するオプション、許可リストに入れないコマンド
+  [`sort --compress-program=bash -S 1 'a$'`, 'obfuscated'],
+  [`sort 'a$'`, 'obfuscated'],
+  [`rg --pre sh 'a$' .`, 'obfuscated'],
+  [`rg --pre=sh 'a$' .`, 'obfuscated'],
+  [`rg --hostname-bin=sh 'a$' .`, 'obfuscated'],
+  [`printf -v x '%s' 'a$'`, 'obfuscated'],
+  // shell の組み込みの test・[・printf は数値の引数・-v の名前・%d の値を算術式として評価し、添字の $(…) を実行する
+  [`test 'a$' = b -o -v 'x[$(m=merge; gh pr $m 1)]'`, 'obfuscated'],
+  [`[ 'a$' = b -o 'x[$(m=merge; gh pr $m 1)]' -eq 0 ]`, 'obfuscated'],
+  [`test 'x[$(m=merge; gh pr $m 1)]' -lt 1 -o 'a$' = b`, 'obfuscated'],
+  [`printf '%d' 'x[$(m=merge; gh pr $m 1)]' 'a$'`, 'obfuscated'],
+  [`[ 'a$' = x ]`, 'obfuscated'],
+  [`test 'a$' = x`, 'obfuscated'],
+  [`grep --filter='*:sh -c' 'gh pr $' f`, 'obfuscated'],
+  [`grep --pager=sh 'a$' f`, 'obfuscated'],
+  // 先頭語の形（パス付き・引用符・大文字）と代入の前置き
+  [`/usr/bin/grep 'a$' f`, 'obfuscated'],
+  [`./grep 'a$' f`, 'obfuscated'],
+  [`'grep' 'a$' f`, 'obfuscated'],
+  [`GREP 'a$' f`, 'obfuscated'],
+  [`X=1 grep 'a$' f`, 'obfuscated'],
+  [`LC_ALL=C grep 'a$' f`, 'obfuscated'],
+  // 複数コマンド・置換・グループ・否定
+  [`grep 'a$' f |& cat`, 'obfuscated'],
+  [`grep 'a$' f | | cat`, 'obfuscated'],
+  [`grep 'a$' $(echo f)`, 'obfuscated'],
   [`grep 'a$' \`echo f\``, 'obfuscated'],
-  [`echo \${x:-1}; grep '^a$' f`, 'obfuscated'],
+  [`grep 'a$' <(echo f)`, 'obfuscated'],
+  [`grep 'a$' f > >(cat)`, 'obfuscated'],
+  // 引数・リダイレクトの形（素の語・引用符の外の文字、制御文字）
+  [`grep 'a$' f > "$out"`, 'obfuscated'],
+  [`grep 'a$' f > 'out'`, 'obfuscated'],
+  [`grep 'a$' f 2>&1x`, 'obfuscated'],
+  [`grep 'a$' "x$y"`, 'obfuscated'],
+  [`grep 'a$' $x`, 'obfuscated'],
+  // 前の版（d049e57）では通していたが、許可リストの文法の外なので旧版どおり deny に戻した誤検出の形（複数コマンド・
+  // 置換・評価器になりうる git・引用符の中の改行）
+  [`git log --grep='x$' -n 1`, 'obfuscated'],
+  [`git commit -m 'price 5$'`, 'obfuscated'],
+  [`git log --grep='x$' -n 1 | grep 'y$'`, 'obfuscated'],
   // --- merge: コマンドとしての merge
   [`gh pr create --body x; gh pr merge 1`, 'merge-guard'],
   [`gh pr create --body x && gh pr merge 1`, 'merge-guard'],
@@ -1087,10 +1159,11 @@ export const FP805_AUDIT_DENY = JSON.parse(
 // --- `$'` の字句解析（SQ_LITERAL_AWK）: 単一引用符の末尾の `$` と閉じ引用符だけの `$'` -------------------------
 // SQ_LITERAL_FLIP: subagent が true / null のとき、旧版（Issue #805 の前・7b7dbb4。この変更の直前の e148ca4 でも同じ）は
 // deny obfuscated、新版は allow になる形。
-// raw の `$'` がすべて「単一引用符の中の `$` と閉じ引用符」で、ANSI-C 引用符が 1 つも無いと字句解析で確かめられる形は、
-// コマンドの形（複合コマンド・代入・置換・評価器）を問わず obfuscated にしない。評価器へ `'gh pr $'` を渡して別の語と
-// 連結させる形もここに入る: 同じ文字列は `'gh pr '\$` のように `$'` を書かずに作れ、その形は e148ca4 でも allow だった
-// （この検査が止めていたのは綴りだけで、評価器への受け渡しはこの検査の対象外）。
+// raw の `$'` がすべて「単一引用符の中の `$` と閉じ引用符」で、ANSI-C 引用符が 1 つも無いと字句解析で確かめられ、かつ
+// すべての単純コマンドの先頭語（`$(...)` の中とパイプの各段も含む）が評価器にならないコマンドの許可リスト
+// （echo・printf・grep・ls・git・cut・[・exit）に入っている形だけ。単一引用符の中身は評価器が連結して評価すると ANSI-C
+// 引用符になる（`printf '%s%s' 'gh pr $' "'\\x6derge' 1" | bash`）ため、許可リストの外のコマンド（評価器・ラッパー・
+// パス付きや引用符つきの先頭語・代入の前置き）を 1 つでも含む形は FP805_STAY_DENY に残す。
 // 差分テスト（agent-guard-805.test.mjs）は、旧版から通るようになった形がこの一覧と FP805_FLIP の和に過不足なく一致することを確かめる。
 // create-commit の Step 2 (a) のブロックは SKILL.md から取り出して agent-guard-sq-literal.test.mjs が見る（凍結した fixture に入れない）。
 export const SQ_LITERAL_FLIP = [
@@ -1102,108 +1175,40 @@ export const SQ_LITERAL_FLIP = [
   `RE_CREDFILE='\\.(pem|key)$'\nRE_OK='\\.(example|pub)$'\ngit diff --staged --name-only | grep -E "\${RE_CREDFILE}" | grep -vE "\${RE_OK}" || echo none`,
   `grep 'a$' f # it's a comment\necho "it's" 'b$'`,
   `echo "$(printf '%s' 'a$' | grep -c 'a$')"`,
-  // 以下は FP805_STAY_DENY から移した形（許可リストの文法 SQ_DOLLAR_AWK の外だが、ANSI-C 引用符は無い）
+  // 以下は FP805_STAY_DENY から移した形（許可リストの文法 SQ_DOLLAR_AWK の外だが、ANSI-C 引用符は無く、先頭語はすべて許可リスト）
+  // `$` で終わる単一引用符の文字列に別の語が続く形
   `echo '$''x'`,
   `echo '$'"x"`,
   `echo '$'x`,
-  // `$` で終わる文字列を別の語と連結して評価する形（例外は許可リストの先頭語の単純コマンド・パイプラインに限る）
-  `f() { eval "$1$2"; }; f 'gh pr $' "'\\x6derge' 1"`,
-  `printf '%s%s' 'gh pr $' "'\\x6derge' 1" | bash`,
-  `a='gh pr $'; b="'\\x6derge' 1"; sh -c "$a$b"`,
-  `find . -maxdepth 0 -exec sh -c '$0$1' 'gh pr $' "'\\x6derge' 1" \\;`,
-  `bash -c 'echo '"'"'$'"'"'\\x67h'"'"`,
-  `S=sh; $S -c 'gh pr $'" '\\x6derge' 1"`,
-  `xargs -0 sh -c < f; grep '^a$' f`,
-  `source x.sh; grep '^a$' f`,
-  `g() { :; }; grep '^a$' f`,
-  `function g { :; }; grep '^a$' f`,
+  // 置換・printf の書式（%s だけ）
   `echo "$(grep '^a$' f)"`,
-  // 評価器の拒否リスト（前の版の note_shellish）に無い評価器で `'gh pr $'` と別の語を連結して評価する形（PR #820 の codex P0）。
-  // 例外は許可リストの先頭語・`|` だけのパイプライン・素の語と引用符の引数の文法（SQ_DOLLAR_AWK）に完全一致するときだけ
-  `awk 'BEGIN {system("bash -c \\"" ARGV[1] ARGV[2] "\\"")}' 'gh pr $' "'\\x6derge' 1"`,
-  `awk '{print}' 'a$'`,
-  `perl -e 'system(@ARGV)' 'gh pr $' "'\\x6derge' 1"`,
-  `python3 -c 'import os,sys; os.system(sys.argv[1]+sys.argv[2])' 'gh pr $' "'\\x6derge' 1"`,
-  `python -c 'print(1)' 'a$'`,
-  `sed 'e' 'gh pr $'`,
-  `find . -name 'x$' -exec sh -c 'echo' ';'`,
-  `find . -name '*.sh$'`,
-  `xargs sh -c 'echo' 'gh pr $'`,
-  `env grep 'a$' f`,
-  `env -S 'sh -c' 'gh pr $'`,
-  `time grep 'a$' f`,
-  `command grep 'a$' f`,
-  `builtin echo 'a$'`,
-  `exec grep 'a$' f`,
-  `nice grep 'a$' f`,
-  `nohup grep 'a$' f`,
-  `timeout 5 grep 'a$' f`,
-  `echo 'gh pr $'"'\\x6derge' 1" | bash`,
-  `cat 'gh pr $' | sh`,
-  `gh pr list --search 'x$'`,
-  // 許可リストのコマンドでも外部コマンドを起動する・変数へ代入するオプション、許可リストに入れないコマンド
-  `sort --compress-program=bash -S 1 'a$'`,
-  `sort 'a$'`,
-  `rg --pre sh 'a$' .`,
-  `rg --pre=sh 'a$' .`,
-  `rg --hostname-bin=sh 'a$' .`,
-  `printf -v x '%s' 'a$'`,
-  // shell の組み込みの test・[・printf は数値の引数・-v の名前・%d の値を算術式として評価し、添字の $(…) を実行する
-  `test 'a$' = b -o -v 'x[$(m=merge; gh pr $m 1)]'`,
-  `[ 'a$' = b -o 'x[$(m=merge; gh pr $m 1)]' -eq 0 ]`,
-  `test 'x[$(m=merge; gh pr $m 1)]' -lt 1 -o 'a$' = b`,
-  `printf '%d' 'x[$(m=merge; gh pr $m 1)]' 'a$'`,
+  `x=$(grep -c '^hi$' f)`,
   `printf '%s' 'a$'`,
-  `[ 'a$' = x ]`,
-  `test 'a$' = x`,
-  `grep --filter='*:sh -c' 'gh pr $' f`,
-  `grep --pager=sh 'a$' f`,
-  // 先頭語の形（パス付き・引用符・大文字）と代入の前置き
-  `/usr/bin/grep 'a$' f`,
-  `./grep 'a$' f`,
-  `'grep' 'a$' f`,
-  `GREP 'a$' f`,
-  `X=1 grep 'a$' f`,
-  `LC_ALL=C grep 'a$' f`,
-  // 複数コマンド・置換・グループ・否定
+  `printf '%s\n' '$'`,
+  // 複数コマンド・グループ・否定
   `grep 'a$' f; echo ok`,
   `grep 'a$' f && echo ok`,
   `grep 'a$' f || echo ok`,
   `grep 'a$' f & echo ok`,
-  `grep 'a$' f |& cat`,
-  `grep 'a$' f | | cat`,
   `grep 'a$' f |`,
-  `grep 'a$' $(echo f)`,
-  `grep 'a$' <(echo f)`,
-  `grep 'a$' f > >(cat)`,
+  `grep -E '^a$'; echo ok`,
+  `grep '^a$' f && grep '^b$' g`,
   `{ grep 'a$' f; }`,
   `( grep 'a$' f )`,
   `! grep 'a$' f`,
-  // 引数・リダイレクトの形（素の語・引用符の外の文字、制御文字）
-  `grep 'a$' f > "$out"`,
-  `grep 'a$' f > 'out'`,
-  `grep 'a$' f 2>&1x`,
-  `grep 'a$' "x$y"`,
+  // 引数の形（引用符の外の文字・コメント・グロブ・チルダ・制御文字）
   `grep 'a$' "x\\y"`,
-  `grep 'a$' $x`,
   `grep 'a$' f # c`,
   `grep 'a$' f*`,
   `grep 'a$' ~/f`,
   `grep 'a$'\tf\r`,
-  // 前の版（d049e57）では通していたが、許可リストの文法の外なので旧版どおり deny に戻した誤検出の形（複数コマンド・
-  // 置換・評価器になりうる git・引用符の中の改行）
-  `grep -E '^a$'; echo ok`,
-  `grep '^a$' f && grep '^b$' g`,
-  `x=$(grep -c '^hi$' f)`,
-  `git log --grep='x$' -n 1`,
-  `git commit -m 'price 5$'`,
-  `printf '%s\n' '$'`,
-  `git log --grep='x$' -n 1 | grep 'y$'`,
 ]
 
 // SQ_LITERAL_DENY: 字句解析を足しても deny obfuscated のままでなければならない形。本物の ANSI-C 引用符（`$(...)` の中・
 // 引用符の直後）と、引用符の状態を狂わせて ANSI-C 引用符を単一引用符の中に見せかける形（コメント・語の途中の #・
 // 二重引用符の中の '・\'・ヒアドキュメントの本文・< > の直後の #・$(...) の中のコメント・case）、閉じていない引用符。
+// 加えて、`$'` はすべて単一引用符の末尾でも、評価器や評価する引数が単一引用符の中身を連結して ANSI-C 引用符に組み直す形
+// （先頭語の許可リストと引数・代入・リダイレクトの制限で 2 段目へ倒し、旧版どおり止める）。
 export const SQ_LITERAL_DENY = [
   [`echo "$(echo $'\\x67')"`, 'obfuscated'],
   [`echo $(gh $'pr' merge 1)`, 'obfuscated'],
@@ -1228,6 +1233,35 @@ export const SQ_LITERAL_DENY = [
   [`echo <(echo a)#'\n';g$'h' pr merge 1 #'`, 'obfuscated'],
   [`grep 'a$' f '`, 'obfuscated'],
   [`grep 'a$' "f`, 'obfuscated'],
+  // 先頭語の許可リスト（PR #847 の codex P0）: 評価器が単一引用符の中身を連結して ANSI-C 引用符に組み直す形。
+  // パイプの先・$(...) の中の評価器、許可リストのコマンドでも添字・算術・-v を評価する引数（bash 5 の [ -v と printf -v、
+  // zsh の printf %d・%*s）、git の全体オプション・許可しない副コマンド・--ext-diff、環境を変える代入（GIT_PAGER・PAGER・
+  // PS4）、zsh のグロブ修飾子、入力の中で単一引用符の文字列 1 つとして代入されていない変数を grep の引数に使う形
+  [`printf '%s%s' 'gh pr $' "'\\x6derge' 1" | bash`, 'obfuscated'],
+  [`printf '%s%s' 'gh pr $' "'\\x6derge' 1" | sh`, 'obfuscated'],
+  [`echo "$(printf '%s%s' 'gh pr $' "'\\x6derge' 1" | bash)"`, 'obfuscated'],
+  [`printf '%s%s' 'gh pr $' "'\\x6derge' 1" | grep x | bash`, 'obfuscated'],
+  [`printf '%d' 'path[$(gh pr $'"'\\x6derge' 1)]"`, 'obfuscated'],
+  [`printf '%*s' 'path[$(gh pr $'"'\\x6derge' 1)]" x`, 'obfuscated'],
+  [`printf -v 'a[$(gh pr $'"'\\x6derge' 1)]" x`, 'obfuscated'],
+  [`[ -v 'a[$(gh pr $'"'\\x6derge' 1)]" ]`, 'obfuscated'],
+  [`[ -z "x" -o -v 'a[$(gh pr $'"'\\x6derge' 1)]" ]`, 'obfuscated'],
+  [`[ -z 'a$' ]`, 'obfuscated'],
+  [`git -c 'core.pager=gh pr $'"'\\x6derge' 1" diff`, 'obfuscated'],
+  [`git log --grep 'a$'`, 'obfuscated'],
+  [`git diff --ext-diff 'a$'`, 'obfuscated'],
+  [`GIT_PAGER='gh pr $'"'\\x6derge' 1"; git diff`, 'obfuscated'],
+  [`PAGER='gh pr $'; git diff`, 'obfuscated'],
+  [`PS4='$(gh pr $'"'\\x6derge' 1)'; set -x; echo`, 'obfuscated'],
+  [`ls .(e:'gh pr $'"'\\x6derge' 1":)`, 'obfuscated'],
+  [`P="--pager=sh"; grep "$P" 'a$' f`, 'obfuscated'],
+  [`grep "$P" 'a$' f`, 'obfuscated'],
+  [`P='--pager=sh'; grep "$P" 'a$' f`, 'obfuscated'],
+  [`exit 'a[$(gh pr $'"'\\x6derge' 1)]"`, 'obfuscated'],
+  // 計算した名前を [ -v に渡す形・設定ファイルへ書いてから git に読ませる形・入力のリダイレクト（読み込みも倒す）
+  [`[ -v "$(printf '%s%s' 'a[$(gh pr $' "'\\x6derge' 1)]")" ]`, 'obfuscated'],
+  [`printf '%s%s\n' '[core]fsmonitor = gh pr $' "'\\x6derge' 1" >> .git/config; git diff`, 'obfuscated'],
+  [`grep 'a$' f; grep 'b$' < f`, 'obfuscated'],
 ]
 
 // --- 認証情報の読み出し（subagent が true / null のときだけ deny。main は対象外）-----------------
