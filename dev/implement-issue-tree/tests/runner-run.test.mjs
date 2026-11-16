@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
-import { BASE_ARGS, buildTree } from './lib/stub-run.mjs'
+import { BASE_ARGS, buildTree, makeDefaultReply } from './lib/stub-run.mjs'
 import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 import { ADAPTERS_DIR, importAdapter, main, parseCli, UsageError } from '../../../skills/implement-issue-tree/runner/run.mjs'
@@ -58,6 +58,17 @@ test('CLI: 引数の誤りは終了コード 2（使い方を stderr に出し�
     assert.equal(r.status, 2, `${argv.join(' ')}\n${r.stderr}`)
     assert.match(r.stderr, /ランナー: /)
     assert.equal(r.stdout, '')
+    assert.equal(r.wrote, false)
+  }
+})
+
+test('CLI: --help / -h は使い方を stdout に出して終了コード 0（gh・アダプタを見ず、何も書かない）', () => {
+  for (const argv of [['--help'], ['-h'], ['--tool', 'codex', '--help']]) {
+    const r = cli(argv)
+    assert.equal(r.status, 0, `${argv.join(' ')}\n${r.stderr}`)
+    assert.match(r.stdout, /^使い方: node run\.mjs --tool codex\|opencode --args <args\.json>/)
+    assert.match(r.stdout, /README\.md/)
+    assert.equal(r.stderr, '')
     assert.equal(r.wrote, false)
   }
 })
@@ -194,6 +205,11 @@ test('main: 正常終了は 0。result.json・stdout・meta.json の形、アダ
   assert.equal(typeof cfg.guard.codexRules, 'function')
   assert.equal(typeof cfg.guard.opencodeRules, 'function')
   assert.equal(cfg.toolConfig.deleteSessions, true)
+  // 設定ファイルの toolConfig.<tool> がアダプタへ届く（既定は default.json の toolConfig.codex）
+  assert.equal(cfg.toolConfig.codexBin, 'codex')
+  assert.equal(cfg.toolConfig.killGraceMs, 2000)
+  assert.equal(cfg.toolConfig.trustProject, false)
+  assert.equal(cfg.toolConfig.command, undefined, '他ツールの toolConfig は混ざらない')
   assert.equal(seen.skillDir, realpathSync(join(RUN_MJS, '..', '..')), 'args.skillDir の既定はこのスキル')
   assert.equal(a.calls[0].allowMerge, false, 'plan は autoMerge でもマージを許さない')
   assert.equal(a.instances[0].closed, 1)
@@ -201,9 +217,24 @@ test('main: 正常終了は 0。result.json・stdout・meta.json の形、アダ
 
 test('main: --dry-run で本物の生成物を流すと、result に見積り（startable・blocked）がそのまま入る', async () => {
   const args = { ...BASE_ARGS }
-  const a = makeFakeAdapterModule({ defaults: { args: { ...args, dryRun: true }, nodes: buildTree([2, 3]) } })
+  const defaults = { args: { ...args, dryRun: true }, nodes: buildTree([2, 3]) }
+  const a = makeFakeAdapterModule({ defaults })
   const x = deps({ mod: a })
+  // 実行仕様の段（状態の読み込み等）はアダプタへ回らず run-verified.sh で直接実行される。deps.spawnScript で差し替え、
+  // 既定応答表の値を launcher の出力の形（envelope は JSON 1 行・line:<語> は `<語> <JSON>`・exit-ok は終了コード）で返す
+  const reply = makeDefaultReply(defaults)
+  const launched = []
+  x.d.spawnScript = async (file, argv, _opts, { label, prompt, spec }) => {
+    launched.push(label)
+    const v = reply(prompt, { label })
+    if (spec.ret === 'exit-ok') return { code: v?.ok === true ? 0 : 1, stdout: '', stderr: '', timedOut: false, overflow: false }
+    if (v === null || v === undefined) return { code: 1, stdout: '', stderr: '', timedOut: false, overflow: false }
+    const line = spec.ret === 'envelope' ? JSON.stringify(v) : `${spec.ret.slice('line:'.length)} ${JSON.stringify(v)}`
+    return { code: 0, stdout: `${line}\n`, stderr: '', timedOut: false, overflow: false }
+  }
   assert.equal(await main(['--tool', 'codex', '--args', argsFile(args), '--dry-run', '--no-build-check'], x.d), 0, x.err.join(''))
+  assert.ok(launched.length > 0, '仕様の段が deps.spawnScript を通っていない')
+  assert.equal(a.calls.filter((r) => launched.includes(r.label)).length, 0, '仕様の段がアダプタへ回った')
   const body = JSON.parse(x.out[0])
   assert.equal(body.result.dryRun, true)
   assert.equal(body.result.startable.count, 3)

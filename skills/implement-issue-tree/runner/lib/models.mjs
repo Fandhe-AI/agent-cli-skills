@@ -46,6 +46,16 @@ export function validateConfig(config) {
     }
     for (const name of Object.keys(table)) if (!IIT_MODELS.includes(name)) fail(`models.${tool} に未知のモデル名 ${name}`)
   }
+  // toolConfig.<tool> はアダプタ固有の設定（キーの意味は adapters/<tool>.mjs 冒頭）。run.mjs がそのままアダプタの
+  // cfg.toolConfig へ渡すため、ここでは形だけを見る（キーの検査はアダプタの責務）
+  if (config.toolConfig !== undefined) {
+    if (!isPlainObject(config.toolConfig)) fail('toolConfig')
+    for (const [tool, tc] of Object.entries(config.toolConfig)) {
+      if (!TOOLS.includes(tool)) fail(`toolConfig に未知のツール ${tool}`)
+      if (!isPlainObject(tc)) fail(`toolConfig.${tool}`)
+      for (const k of ['deleteSessions', 'models', 'timeoutsSec']) if (k in tc) fail(`toolConfig.${tool}.${k} は置けない（cleanup・models・timeoutsSec を使う）`)
+    }
+  }
   return config
 }
 

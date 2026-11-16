@@ -429,9 +429,9 @@ test('実行仕様の時間切れ: プロセスグループごと止めて失敗
 test('許可表は P6 文書の対象の段をすべて持ち、判断の段（plan:# impl: review: merge:# merge-exec 等）を持たない', () => {
   const want = ['state:update:#2', 'state:high-water', 'state:high-water-set', 'state:init-all', 'state:update-batch:3', 'state:load-verify', 'state:load-verify:p1', 'script-hash-precheck',
     'plan:issue-tree-release', 'free:#2', 'worktree:absent:#2', 'worktree:sweep', 'worktree:residual-bytes', 'worktree:free-disk-bytes', 'detect:external-checks',
-    'plan:skip-labels', 'plan:skip-labels-retry', 'merge:added-files:#2', 'merge:policy-paths:#2', 'merge:optin-record:#2', 'state:cleanup:#2']
+    'plan:skip-labels', 'plan:skip-labels-retry', 'merge:added-files:#2', 'merge:policy-paths:#2', 'optin-record-verify:#2', 'optin-record-reverify:#2', 'state:cleanup:#2']
   for (const l of want) assert.ok(EXEC_RULES.some((r) => r.re.test(l)), l)
-  const deny = ['plan:#2', 'impl:#2', 'review:#2', 'security-review:#2', 'fix:#2', 'pr-create:#2', 'pr-bind:#2', 'merge:#2', 'merge-exec:#2', 'merge-verify:#2', 'close:#2', 'recover:#2', 'base-merge:#2',
+  const deny = ['plan:#2', 'impl:#2', 'review:#2', 'security-review:#2', 'fix:#2', 'pr-create:#2', 'pr-bind:#2', 'merge:#2', 'merge-exec:#2', 'merge-verify:#2', 'merge:optin-record:#2', 'close:#2', 'recover:#2', 'base-merge:#2',
     'plan:issue-tree', 'plan:issue-tree-page-1', 'plan:declared-deps-1', 'state:load', 'state:load-fill', 'nonce:seed', 'worktree:orphan-scan', 'worktree:head-scan', 'prereq:probe']
   for (const l of deny) assert.ok(!EXEC_RULES.some((r) => r.re.test(l)), l)
 })

@@ -16,7 +16,7 @@
 //
 // toolConfig のキー（既定値は runner/config/default.json の toolConfig.codex。コード側の既定も同じ）:
 //   deleteSessions: close でラン中に作ったセッションを `codex delete --force` する（契約どおり）
-//   codexBin ("codex")・codexHome（上記）・guardScript（agent-guard.sh の絶対パス。既定は探索）・
+//   codexBin ("codex")・codexHome（上記）・guardScript（agent-guard.sh の絶対パス。既定は lib/guard-script.mjs の探索）・
 //   trustProject (false)・killGraceMs (2000。SIGTERM から SIGKILL までの猶予)・extraWritePaths ([]。push 先のローカル origin 等)
 // req の任意の追加: profile ('read' | 'impl'。permission profile の上書き)。
 //
@@ -42,6 +42,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AdapterError } from '../lib/adapter-error.mjs'
 import { MERGE_EXEC_COMMAND } from '../lib/guard.mjs'
+import { GUARD_SCRIPT_MISSING, findGuardScript } from '../lib/guard-script.mjs'
 import { decodeStrictText, strictifySchema } from './codex-strict.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -51,18 +52,6 @@ const USAGE_LIMIT = /usage[ _-]?limit|UsageLimitExceeded/i
 
 const q = (s) => JSON.stringify(s)
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
-
-/** 見つかった agent-guard.sh の絶対パス（無ければ null）。 */
-export function findGuardScript({ toolConfig = {}, skillDir, mainRoot }) {
-  const cands = [
-    toolConfig.guardScript,
-    skillDir && join(skillDir, '..', 'init-codex', 'assets', 'hooks', 'agent-guard.sh'),
-    mainRoot && join(mainRoot, '.codex', 'hooks', 'agent-guard.sh'),
-    mainRoot && join(mainRoot, 'skills', 'init-codex', 'assets', 'hooks', 'agent-guard.sh'),
-  ].filter(Boolean)
-  for (const c of cands) if (existsSync(c)) return resolve(c)
-  return null
-}
 
 /** cwd が linked worktree なら { gitdir, commonDir }（gitdir は <main>/.git/worktrees/<name>）。違えば null。 */
 export function linkedWorktreeGit(cwd) {
@@ -184,7 +173,7 @@ export function createAdapter(cfg) {
     const j = await execFileP('jq', ['--version'], { env: childEnv(), timeout: 30000 })
     if (j.err) throw new AdapterError('prereq', 'jq が見つからない（Codex の hook が fail-closed になるため必須）')
     guardScript = findGuardScript({ toolConfig: tc, skillDir: cfg.skillDir, mainRoot: cfg.mainRoot })
-    if (!guardScript) throw new AdapterError('prereq', 'agent-guard.sh が見つからない（skills/init-codex/assets/hooks/ か toolConfig.guardScript）')
+    if (!guardScript) throw new AdapterError('prereq', GUARD_SCRIPT_MISSING)
     if (!existsSync(HOOK_SCRIPT)) throw new AdapterError('prereq', 'codex-hook.sh が見つからない')
     mkdirSync(tmpDir, { recursive: true })
     started = true

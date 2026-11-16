@@ -138,9 +138,14 @@ test('decode: __proto__ キーは own プロパティとして残る（検証側
 test('start: codex が無ければ prereq・agent-guard.sh が無くても prereq', async () => {
   const a = setup({ turns: [okTurn()], toolConfig: { codexBin: 'codex-does-not-exist' } })
   await rejectsKind(a.adapter.start(), 'prereq')
+  // 明示の guardScript が無ければ、既定の探索先（init-codex の配布物）に写しがあっても使わず prereq（lib/guard-script.mjs）
   const b = setup({ turns: [okTurn()], toolConfig: { guardScript: '/nonexistent/agent-guard.sh' } })
-  // 既定の探索先（init-codex の配布物）に見つかるため、明示の guardScript が無くても start は成功する
-  await b.adapter.start()
+  const e = await b.adapter.start().then(() => null, (err) => err)
+  assert.equal(e?.kind, 'prereq')
+  assert.match(e.message, /init-codex か init-opencode を導入する/)
+  // 明示しなければ既定の探索先に見つかり、start は成功する
+  const c = setup({ turns: [okTurn()] })
+  await c.adapter.start()
 })
 
 test('run: exec の引数の組み立て（新規）', async () => {

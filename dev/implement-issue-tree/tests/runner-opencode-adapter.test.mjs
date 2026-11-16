@@ -82,7 +82,7 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.ok(merge.config.permissions.some((r) => r.resource.includes('--admin')), '--admin の deny は残る')
     assert.equal(JSON.stringify(merge.config).includes('"effect":"allow"'), false)
     assert.deepEqual(merge.config.plugins[0].options.mergeRes, MERGE_RES, 'merge 用だけ MERGE_EXEC_COMMAND を素通しにする')
-    assert.ok(MERGE_RES.includes(MERGE_EXEC_COMMAND.source))
+    assert.deepEqual(MERGE_RES, [MERGE_EXEC_COMMAND.source], '完全一致の 1 形だけ（Codex の --merge-re と同じ）')
     assert.notEqual(merge.config.plugins[0].options.nonce, o.nonce, 'serve ごとに別の nonce')
   } finally { await t.adapter.close() }
 })

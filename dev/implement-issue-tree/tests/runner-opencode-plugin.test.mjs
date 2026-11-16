@@ -90,12 +90,13 @@ test('allowMerge の serve では MERGE_EXEC_COMMAND の完全一致だけをガ
   const s = sandbox('#!/bin/bash\necho "AGENT_GUARD_RESULT deny merge-guard"\nexit 2\n', { mergeRes: [...MERGE_RES] })
   const ev = await load(s.options)
   assert.notEqual((await ev({ resources: [MERGE_CMD] })).effect, 'deny', '完全一致の 1 形')
-  assert.notEqual((await ev({ resources: [MERGE_TAIL] })).effect, 'deny', '代入が別 resource に分かれた形')
   assert.match(readFileSync(s.options.log, 'utf8'), /allow-mergeform/)
   for (const bad of [
     `${MERGE_CMD}; gh pr review 7 --approve`,
     `${MERGE_CMD} && gh pr review 7 --approve`,
     `${MERGE_CMD}\ngh pr review 7 --approve`,
+    // 代入を除いた後半だけの形は素通しにしない（Codex の --merge-re と同じ完全一致の 1 形だけ）
+    MERGE_TAIL,
     'gh pr merge 7 --squash',
     'gh pr merge 7 --squash --admin',
     MERGE_CMD.replace(SHA, 'HEAD'),

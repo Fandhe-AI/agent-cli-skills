@@ -24,6 +24,11 @@
       "codexBin": "codex",
       "killGraceMs": 2000,
       "trustProject": false
+    },
+    "opencode": {
+      "command": ["opencode"],
+      "pollMs": 2000,
+      "startTimeoutMs": 30000
     }
   },
   "models": {

@@ -8,7 +8,7 @@
 // （引数・設定・gh 認証・アダプタの有無・生成物の鮮度）と、結果の保存・アダプタの後片づけ・明示の exit を担う。
 //
 // 終了コード（計画 C の仕様）:
-//   0 ホストが return した
+//   0 ホストが return した（--help / -h で使い方を stdout に出したときも 0）
 //   1 ホストが例外で終わった
 //   2 引数の誤り（CLI・args.json・設定ファイル）
 //   3 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・アダプタの start() 失敗）
@@ -127,8 +127,16 @@ export async function main(argv, deps = {}) {
     makeRunId = newRunId,
     env = process.env,
     onSignal = (handler) => { process.once('SIGINT', handler); process.once('SIGTERM', handler) },
+    // 実行仕様の段の起動（agent-host の cfg.spawnScript）。テストが偽の launcher へ差し替える。省略時は agent-host の実物
+    spawnScript,
   } = deps
   const err = (msg) => stderr(`${msg}\n`)
+
+  // 使い方の表示は他の引数より先に見る（何も読まず・書かずに 0 で終わる。詳細は runner/README.md）
+  if (argv.includes('--help') || argv.includes('-h')) {
+    await stdout(`${USAGE}\n詳細: ${join(HERE, 'README.md')}\n`)
+    return 0
+  }
 
   // ---- 2: 引数・設定 ----
   let cli, args, config
@@ -210,7 +218,9 @@ export async function main(argv, deps = {}) {
       skillDir: args.skillDir,
       mainRoot,
       runDir,
-      toolConfig: { deleteSessions: config.cleanup.deleteSessions, models: config.models[cli.tool], timeoutsSec: config.timeoutsSec },
+      // 設定ファイルの toolConfig.<tool>（codexBin・command・guardScript 等。キーは adapters/<tool>.mjs 冒頭）に、
+      // ツール共通の値を重ねる。共通の値と同名のキーは validateConfig が拒否するので、上書きの順序には依存しない
+      toolConfig: { ...(config.toolConfig?.[cli.tool] ?? {}), deleteSessions: config.cleanup.deleteSessions, models: config.models[cli.tool], timeoutsSec: config.timeoutsSec },
       guard: { codexRules, opencodeRules },
       env,
     })
@@ -243,7 +253,7 @@ export async function main(argv, deps = {}) {
 
   const agent = createAgentHost({
     adapter,
-    cfg: { config, skillDir: args.skillDir, mainRoot, runId, runDir, args, maxParallel: cli.maxParallel ?? undefined, log },
+    cfg: { config, skillDir: args.skillDir, mainRoot, runId, runDir, args, maxParallel: cli.maxParallel ?? undefined, log, ...(spawnScript ? { spawnScript } : {}) },
   })
   let code
   let result = null

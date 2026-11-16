@@ -107,8 +107,8 @@ export const EXEC_RULES = Object.freeze([
   rule('plan:skip-labels', 'repo-scan.sh', ['skip-labels'], 'envelope', null),
   rule('merge:added-files(?::#\\d+)?', 'observe-pr.sh', ['added-files'], 'envelope', null),
   rule('merge:policy-paths(?::#\\d+)?', 'observe-pr.sh', ['policy-paths'], 'envelope', null),
-  rule('merge:optin-record(?::#\\d+)?', 'observe-pr.sh', ['optin-record'], 'envelope', null),
-  // opt-in テスト記録ゲートは observeGate の extra.label でこの名前になる（P6 src の observeGate 呼び出し）
+  // opt-in テスト記録ゲートは observeGate の extra.label でこの名前になる（src の observeOptinRecord）。observeGate の
+  // 既定の label（merge:optin-record:#N）は使われないため表に置かない（runner-exec-rules.test.mjs が全行の到達を縛る）
   rule('optin-record-(?:verify|reverify):#\\d+', 'observe-pr.sh', ['optin-record'], 'envelope', null),
 ])
 

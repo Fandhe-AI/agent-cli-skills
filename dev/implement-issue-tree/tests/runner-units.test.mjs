@@ -426,6 +426,11 @@ test('models: validateConfig は表の欠落・未知のモデル名・不正な
     (c) => { c.timeoutsSec.byPhase.Plan = -1 },
     (c) => { c.cleanup.deleteSessions = 'yes' },
     (c) => { delete c.models.opencode },
+    (c) => { c.toolConfig = [] },
+    (c) => { c.toolConfig.claude = {} },
+    (c) => { c.toolConfig.codex = 'codex' },
+    (c) => { c.toolConfig.opencode.deleteSessions = false },
+    (c) => { c.toolConfig.codex.models = {} },
   ]
   for (const mutate of mutations) {
     const c = base()
@@ -433,6 +438,7 @@ test('models: validateConfig は表の欠落・未知のモデル名・不正な
     assert.throws(() => validateConfig(c), /ランナー設定が不正/, mutate.toString())
   }
   assert.doesNotThrow(() => validateConfig(base()))
+  assert.doesNotThrow(() => validateConfig((({ toolConfig: _, ...c }) => c)(base())), 'toolConfig は省ける')
 })
 
 test('models: 時間切れは phase ごとの表、無ければ default（ミリ秒）', () => {
@@ -475,8 +481,13 @@ test('extract-json: 壊れた塊は飛ばして内側の有効な object を探�
   }
 })
 
-test('extract-json: 配列の中の object は取り出す。大きすぎる入力・閉じない括弧の大量入力は有界の時間で終わる', () => {
-  assert.equal(extractLastJson('[{"a":1}]')?.a, 1, '配列の中の object は object として取り出される')
+test('extract-json: 最上位が配列なら中の object を取り出さない。大きすぎる入力・閉じない括弧の大量入力は有界の時間で終わる', () => {
+  // 応答全体・応答全体を包むフェンスの中身が object 以外の JSON なら、中の object を答えとみなさない（修復ターンへ回す）
+  for (const top of ['[{"a":1}]', ' [ {"a":1} ] ', '```json\n[{"a":1}]\n```', '[{"a":1},{"b":2}]', '"{\\"a\\":1}"', 'null']) {
+    assert.equal(extractLastJson(top), undefined, top)
+  }
+  // 文章の中に置かれた配列は最上位ではない。中の object がちょうど 1 つなら従来どおり取り出す
+  assert.deepEqual(extractLastJson('結果: [{"a":1}]'), { a: 1 })
   assert.equal(extractLastJson('x'.repeat(3 * 1024 * 1024)), undefined)
   const t0 = Date.now()
   assert.equal(extractLastJson('{'.repeat(200_000)), undefined)

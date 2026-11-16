@@ -17,36 +17,30 @@
 //   - ask（許可要求・フォーム）は検知したら interrupt して denied にする（reject すると別の形で続けてしまう）。
 //   - 出力は応答テキストだけを返す。JSON の抽出・検証・修復の判断は agent-host。
 //   - `/api/model`・`/api/config` は API キーを含み得るので呼ばず、ログにも残さない。
+//
+// toolConfig のキー（既定値は runner/config/default.json の toolConfig.opencode。コード側の既定も同じ）:
+//   deleteSessions（run.mjs が cleanup.deleteSessions から渡す）・command (["opencode"]。serve を起動するコマンドの配列)・
+//   pollMs (2000)・startTimeoutMs (30000)・defaultModel（models 表の model が null の段に使う。省略で利用者の既定）・
+//   guardScript（agent-guard.sh の絶対パス。既定は lib/guard-script.mjs の探索）
 import { spawn, execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { AdapterError } from '../lib/adapter-error.mjs'
 import { MERGE_EXEC_COMMAND } from '../lib/guard.mjs'
+import { GUARD_SCRIPT_MISSING, findGuardScript } from '../lib/guard-script.mjs'
 
 const USAGE_LIMIT_RE = /rate.?limit|quota|usage.?limit|too many requests|\b429\b|insufficient.?(credit|quota|balance)/i
 const PLUGIN_DIR = join(dirname(fileURLToPath(import.meta.url)), 'opencode-plugin')
 
-// merge-exec のコマンドは permission の resource が `HEAD_SHA=...` の代入と `gh pr merge ...` に分かれて届く可能性があるため、
-// 代入を除いた後半の形も素通しにする（Phase 0-3 の試作と同じ）。前半が見つからない形になったら完全一致だけにする。
-const MERGE_TAIL_SOURCE = MERGE_EXEC_COMMAND.source.replace(/^\^HEAD_SHA="\[0-9a-f\]\{40\}"; /, '^')
-export const MERGE_RES = Object.freeze([...new Set([MERGE_EXEC_COMMAND.source, MERGE_TAIL_SOURCE])])
-
-/** agent-guard.sh の絶対パス（無ければ null）。探索順は Codex アダプタと同じ。 */
-export function findGuardScript({ toolConfig = {}, skillDir, mainRoot }) {
-  const cands = [
-    toolConfig.guardScript,
-    skillDir && join(skillDir, '..', 'init-opencode', 'assets', 'hooks', 'agent-guard.sh'),
-    skillDir && join(skillDir, '..', 'init-codex', 'assets', 'hooks', 'agent-guard.sh'),
-    mainRoot && join(mainRoot, '.opencode', 'hooks', 'agent-guard.sh'),
-    mainRoot && join(mainRoot, '.codex', 'hooks', 'agent-guard.sh'),
-  ].filter(Boolean)
-  for (const c of cands) if (existsSync(c)) return resolve(c)
-  return null
-}
+// allowMerge の serve で素通しにするのは MERGE_EXEC_COMMAND の完全一致だけ（Codex の codex-hook.sh に渡す --merge-re と
+// 同じ 1 形・同じ意味）。permission の resource が `HEAD_SHA=...` の代入と `gh pr merge ...` に分かれて届く場合に備えた
+// 後半だけの形は、代入なしの gh pr merge を素通しにするため置かない。Phase 3 の実機確認で分かれて届くと分かったら、
+// そのときに分割後の 2 形の対応づけ（同じ呼び出しの前半と後半か）を含めて見直す。
+export const MERGE_RES = Object.freeze([MERGE_EXEC_COMMAND.source])
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer()
@@ -90,7 +84,7 @@ export function createAdapter(cfg) {
 
   function ensureGuardScript() {
     guardScript ??= findGuardScript({ toolConfig: tc, skillDir: cfg.skillDir, mainRoot: cfg.mainRoot })
-    if (!guardScript) throw new AdapterError('prereq', 'agent-guard.sh が見つからない（toolConfig.guardScript か init-opencode / init-codex の assets/hooks/）')
+    if (!guardScript) throw new AdapterError('prereq', GUARD_SCRIPT_MISSING)
   }
 
   async function startServe(kind) {

@@ -1,5 +1,7 @@
 // iit ランナー専用の OpenCode plugin: shell 実行許可（permission.evaluate）で共通ガード agent-guard.sh を呼ぶ。
-// Codex 側の codex-hook.sh と同じ意味にそろえてある。
+// Codex 側の codex-hook.sh と同じ意味にそろえてある。ログの形式（`<epoch 秒>\t<コード>`）・共通のコード（allow・
+// allow-mergeform・deny-guard-missing・deny-error・deny-noresult・deny:<理由>）・拒否の文言も codex-hook.sh と同じ
+// （runner-guard-parity.test.mjs が縛る）。plugin だけのコードは deny-bad-event・deny-protected-edit・deny-budget。
 //
 // 配布物の plugin（init-opencode）との違い: ランナーのセッションは親を持たない top-level になり、配布物の plugin は
 // それを main とみなしてマージ・承認を制限しない。そのためここでは agent-guard.sh を「常に subagent=true」で呼ぶ。
@@ -30,6 +32,14 @@ const NON_SHELL_ACTIONS = new Set([
 ])
 
 const deny = (event, message) => { event.effect = 'deny'; event.message = message }
+
+// ガードの判定結果のコード → 拒否の文言（codex-hook.sh の emit_deny と同じ文字列）
+const guardDenyMessage = (code) => {
+  if (code === 'deny-guard-missing') return 'iit-runner: ガードが見つからないため拒否した'
+  if (code === 'deny-error') return 'iit-runner: ガードが異常終了したため拒否した'
+  if (code.startsWith('deny:')) return `iit-runner: ガードの判定により拒否した（${code}）`
+  return 'iit-runner: ガードの結果を得られないため拒否した'
+}
 
 /** 設定を検査して正規化する。不備があれば null（全 deny にする）。 */
 function readOptions(options) {
@@ -76,7 +86,7 @@ function evaluate(opts, event) {
     const remaining = deadline - Date.now()
     if (remaining <= 0) { log('deny-budget'); return deny(event, 'iit-runner: 判定の時間の上限を超えたため拒否した') }
     const v = judge(opts.guardScript, command, Math.min(GUARD_TIMEOUT_MS, remaining))
-    if (v.deny) { log(v.code); return deny(event, `iit-runner: ガードの判定により拒否した（${v.code}）`) }
+    if (v.deny) { log(v.code); return deny(event, guardDenyMessage(v.code)) }
     log('allow')
   }
 }
