@@ -12,6 +12,9 @@
 //     すべて top-level なので、ランナー専用 plugin が agent-guard.sh を「常に subagent=true」で呼ぶ（Codex の codex-hook.sh と同じ意味）。
 //     allowMerge の serve だけ、MERGE_EXEC_COMMAND の完全一致の 1 形を plugin のオプションで素通しにする（permission に後半だけが
 //     届く版では、plugin が tool.execute.before で全文の一致を確かめた呼び出しにだけ許可を対応づける）。
+//   - ガードの置き場（agent-guard.sh・ランナー専用 plugin・OpenCode の利用者設定ディレクトリ・`.opencode/(hooks|plugins?)/`・
+//     `opencode.json(c)`）への edit を permissions と policies の両方で拒否する（protectRules。guard.opencodeRules の結果に足す）。
+//     同じパスは plugin の options.protectedPaths にも渡し、plugin が edit と shell からの書き込みを拒否する（plugin 冒頭の「保護」）。
 //   - plugin の読み込みは start で確かめる。plugin は初期化時に serve ごとの nonce を目印ファイルへ書き、アダプタがそれを読む
 //     （実機で GET /api/plugin は空・/shell は permission を通らず、他に確かめる手段が無い）。確かめられなければ prereq。
 //   - 完了は SSE（session.execution.*）を主とし、取りこぼしに備えて `/api/session/active` とメッセージ末尾の idle で突き合わせる。
@@ -25,9 +28,10 @@
 //   guardScript（agent-guard.sh の絶対パス。既定は lib/guard-script.mjs の探索）
 import { spawn, execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
-import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { AdapterError } from '../lib/adapter-error.mjs'
@@ -64,6 +68,38 @@ export function buildConfigContent({ rules, pluginDir, options }) {
   return { permissions: rules.permissions, policies: rules.policies, plugins: [{ package: pluginDir, options }] }
 }
 
+const realOr = (p) => { try { return realpathSync(p) } catch { return resolve(p) } }
+const uniq = (xs) => [...new Set(xs)]
+
+/** OpenCode の利用者設定ディレクトリ（plugins・設定）。XDG_CONFIG_HOME・OPENCODE_CONFIG_DIR を反映する。 */
+export function opencodeConfigDirs(env) {
+  const home = env.HOME || homedir()
+  return uniq([join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode'), ...(env.OPENCODE_CONFIG_DIR ? [resolve(env.OPENCODE_CONFIG_DIR)] : [])])
+}
+
+// 位置を問わない保護の形（配布物の plugin の PROTECTED_EDIT と同じ対象の glob 版。glob の * は / も含む）
+const PROTECTED_EDIT_GLOBS = ['*.opencode/hooks/*', '*.opencode/plugin/*', '*.opencode/plugins/*', '*opencode.json', '*opencode.jsonc']
+
+/**
+ * ガードの置き場への edit の拒否（permissions と policies）。files は完全一致、dirs は完全一致と配下。
+ * パスは書かれたままの形と realpath の両方を入れる（外部のパスは正規化済みの絶対パスで照合される）。
+ * @param {{ files: string[], dirs: string[] }} p
+ */
+export function protectRules({ files, dirs }) {
+  const resources = uniq([
+    ...files.flatMap((f) => [resolve(f), realOr(f)]),
+    ...dirs.flatMap((d) => [resolve(d), realOr(d)]).flatMap((d) => [d, `${d}/*`]),
+    ...PROTECTED_EDIT_GLOBS,
+  ])
+  return {
+    permissions: resources.map((resource) => ({ action: 'edit', resource, effect: 'deny' })),
+    policies: resources.map((resource) => ({ action: 'tool.use', resource: `edit:${resource}`, effect: 'deny' })),
+  }
+}
+
+/** permissions / policies を連結する（後勝ちのため、足す側を後ろに置く）。 */
+const mergeRules = (...rs) => ({ permissions: rs.flatMap((r) => r.permissions), policies: rs.flatMap((r) => r.policies) })
+
 /** 応答メッセージ（assistant）の text 部分をつなぐ。 */
 const messageText = (msg) => (Array.isArray(msg?.content) ? msg.content.filter((p) => p?.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('') : '')
 
@@ -91,7 +127,8 @@ export function createAdapter(cfg) {
   async function startServe(kind) {
     ensureGuardScript()
     const allowMerge = kind === 'merge'
-    const rules = cfg.guard.opencodeRules({ allowMerge })
+    const configDirs = opencodeConfigDirs(baseEnv)
+    const rules = mergeRules(cfg.guard.opencodeRules({ allowMerge }), protectRules({ files: [guardScript], dirs: [PLUGIN_DIR, ...configDirs] }))
     const port = await freePort()
     const password = randomBytes(16).toString('hex')
     mkdirSync(cfg.runDir, { recursive: true })
@@ -99,7 +136,7 @@ export function createAdapter(cfg) {
     const errFd = openSync(join(cfg.runDir, `opencode-serve-${kind}.err`), 'a')
     const nonce = randomBytes(16).toString('hex')
     const markerPath = join(cfg.runDir, `opencode-plugin-${kind}.marker`)
-    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? MERGE_RES : [], markerPath, nonce }
+    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? MERGE_RES : [], markerPath, nonce, protectedPaths: configDirs.map((d) => resolve(d)) }
     const env = { ...baseEnv, OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildConfigContent({ rules, pluginDir: PLUGIN_DIR, options })) }
     const child = spawn(command[0], [...command.slice(1), 'serve', '--hostname', '127.0.0.1', '--port', String(port)], { cwd: cfg.mainRoot, env, stdio: ['ignore', outFd, errFd], detached: true })
     closeSync(outFd)

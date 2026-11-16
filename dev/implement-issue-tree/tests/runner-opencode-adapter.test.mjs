@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { SKILL_DIR } from './lib/paths.mjs'
-import { MERGE_RES, createAdapter } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
+import { MERGE_RES, createAdapter, opencodeConfigDirs, protectRules } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 import { MERGE_EXEC_COMMAND, codexRules, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 
@@ -85,6 +85,37 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.deepEqual(MERGE_RES, [MERGE_EXEC_COMMAND.source], '完全一致の 1 形だけ（Codex の --merge-re と同じ）')
     assert.notEqual(merge.config.plugins[0].options.nonce, o.nonce, 'serve ごとに別の nonce')
   } finally { await t.adapter.close() }
+})
+
+test('保護: ガード本体・plugin の置き場・OpenCode の設定ディレクトリ・.opencode/(hooks|plugins?)/・opencode.json(c) への edit を permissions と policies で拒否する', async () => {
+  const home = join(tmpdir(), 'iit-oc-home-x')
+  const t = setup({ env: { HOME: home, XDG_CONFIG_HOME: '' } })
+  await t.adapter.start()
+  try {
+    const { config: cfg } = starts(t.records())[0]
+    const o = cfg.plugins[0].options
+    const editDeny = cfg.permissions.filter((r) => r.action === 'edit' && r.effect === 'deny').map((r) => r.resource)
+    const editPolicy = cfg.policies.filter((r) => r.action === 'tool.use' && r.resource.startsWith('edit:') && r.effect === 'deny').map((r) => r.resource.slice(5))
+    const cfgDir = join(home, '.config', 'opencode')
+    for (const want of [o.guardScript, cfg.plugins[0].package, `${realpathSync(cfg.plugins[0].package)}/*`, cfgDir, `${cfgDir}/*`, '*.opencode/plugins/*', '*.opencode/plugin/*', '*.opencode/hooks/*', '*opencode.jsonc', '*opencode.json']) {
+      assert.ok(editDeny.includes(want), `permissions: ${want}`)
+      assert.ok(editPolicy.includes(want), `policies: ${want}`)
+    }
+    assert.deepEqual(o.protectedPaths, [cfgDir], 'plugin にも設定ディレクトリを渡す')
+    // 既存の shell の deny（opencodeRules）は残り、edit の deny はその後ろ（後勝ち）に置く
+    const firstEdit = cfg.permissions.findIndex((r) => r.action === 'edit')
+    assert.ok(firstEdit > cfg.permissions.findIndex((r) => r.resource === 'gh pr merge*'))
+  } finally { await t.adapter.close() }
+})
+
+test('protectRules と opencodeConfigDirs: XDG_CONFIG_HOME・OPENCODE_CONFIG_DIR を反映し、ファイルは完全一致・ディレクトリは配下も拒否する', () => {
+  assert.deepEqual(opencodeConfigDirs({ HOME: '/h', XDG_CONFIG_HOME: '/x' }), ['/x/opencode'])
+  assert.deepEqual(opencodeConfigDirs({ HOME: '/h', OPENCODE_CONFIG_DIR: '/c' }), ['/h/.config/opencode', '/c'])
+  const r = protectRules({ files: ['/nonexistent-iit/g.sh'], dirs: ['/nonexistent-iit/p'] })
+  const res = r.permissions.map((x) => x.resource)
+  assert.ok(res.includes('/nonexistent-iit/g.sh') && !res.includes('/nonexistent-iit/g.sh/*'))
+  assert.ok(res.includes('/nonexistent-iit/p') && res.includes('/nonexistent-iit/p/*'))
+  assert.equal(r.policies.length, r.permissions.length)
 })
 
 test('セッション: 親セッションは作らない。model は Ref になり、model が null なら model も variant も送らずログに残す', async () => {

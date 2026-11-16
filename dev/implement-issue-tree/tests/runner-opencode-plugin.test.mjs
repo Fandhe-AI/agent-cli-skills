@@ -106,14 +106,15 @@ test('allowMerge の serve では MERGE_EXEC_COMMAND の完全一致だけをガ
   ]) assert.equal((await ev({ resources: [bad] })).effect, 'deny', bad)
 })
 
-test('resources のうち 1 つでも拒否なら全体が拒否になる。非 shell の action は触らず、ガードの置き場の編集は拒否', async () => {
+test('resources のうち 1 つでも拒否なら全体が拒否になる。非 shell の action は触らず、ガードのログの編集は拒否', async () => {
   const s = sandbox('#!/bin/bash\ncmd=$(cat)\ncase "$cmd" in *evil*) echo "AGENT_GUARD_RESULT deny merge-guard"; exit 2;; esac\necho AGENT_GUARD_RESULT allow\n')
   const ev = await load(s.options)
   assert.equal((await ev({ resources: ['ls', 'evil cmd'] })).effect, 'deny')
   assert.notEqual((await ev({ resources: ['ls', 'pwd'] })).effect, 'deny')
   assert.notEqual((await ev({ action: 'read', resources: ['/etc/hosts'] })).effect, 'deny')
   assert.notEqual((await ev({ action: 'edit', resources: ['src/a.js'] })).effect, 'deny')
-  assert.equal((await ev({ action: 'edit', resources: ['_/iit-runner/x/opencode-guard/y'] })).effect, 'deny')
+  assert.equal((await ev({ action: 'edit', resources: [s.options.log] })).effect, 'deny', 'ログ')
+  assert.equal((await ev({ action: 'edit', resources: [s.options.markerPath] })).effect, 'deny', '目印')
   assert.equal((await ev({ action: 'shell', resources: 'not-array' })).effect, 'deny')
   assert.equal(existsSync(s.options.log), true)
 })
@@ -192,4 +193,73 @@ test('merge-exec の対応づけ: tool.execute.before は壊れたイベント�
   const p = await loadBoth(s.options)
   for (const bad of [null, {}, { tool: 'shell', input: null }, toolEv(MERGE_CMD, { id: undefined }), toolEv(MERGE_CMD, { sessionID: '' }), toolEv(42)]) await p.before(bad)
   assert.equal((await p.evaluate(permEv([MERGE_TAIL]))).effect, 'deny')
+})
+
+// MEDIUM-3（監査 e670648）: ガードの置き場の保護。配布物の plugin と同じ PROTECTED_EDIT（`.opencode/(hooks|plugins?)/`・
+// `opencode.json(c)`）、実際に使う guardScript と plugin 自身の置き場の realpath（完全一致と配下）、options.protectedPaths
+// （アダプタが渡す ~/.config/opencode・ランのログと目印）への書き込みを、edit 系 action と shell の両方で拒否する。
+const PLUGIN_REAL = realpathSync(join(SKILL_DIR, 'runner', 'adapters', 'opencode-plugin'))
+
+async function loadAt(options, directory) {
+  let hook = null
+  await plugin.setup({ options, location: { directory }, permission: { hook: async (name, fn) => { if (name === 'evaluate') hook = fn } } })
+  return async (event) => { const e = { action: 'shell', resources: [], ...event }; await hook(e); return e }
+}
+
+test('保護: edit 系はガード本体・plugin の置き場・設定ファイル・保護パスへの書き込みを拒否し、他は通す', async () => {
+  const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
+  const cfgDir = join(s.dir, 'home', '.config', 'opencode')
+  const ev = await loadAt({ ...s.options, protectedPaths: [cfgDir] }, s.dir)
+  for (const r of [
+    s.options.guardScript,
+    'agent-guard.sh', // location からの相対で guardScript に解決される
+    './sub/../agent-guard.sh',
+    join(PLUGIN_REAL, 'index.js'),
+    PLUGIN_REAL,
+    '.opencode/plugins/agent-guard/index.js',
+    '.opencode/plugin/x.js',
+    '../.opencode/hooks/agent-guard.sh',
+    'opencode.jsonc',
+    'sub/OpenCode.JSON',
+    join(cfgDir, 'plugins', 'evil.js'),
+    join(cfgDir, 'opencode.jsonc'),
+  ]) {
+    const e = await ev({ action: 'edit', resources: ['src/ok.js', r] })
+    assert.equal(e.effect, 'deny', r)
+  }
+  for (const r of ['src/a.js', `${s.options.guardScript}.bak`, join(s.dir, 'agent-guard.sh.d', 'x'), '.opencode/agents/a.md', 'docs/opencode.md']) {
+    assert.notEqual((await ev({ action: 'edit', resources: [r] })).effect, 'deny', r)
+  }
+  assert.match(readFileSync(s.options.log, 'utf8'), /\tdeny-protected-edit\n/)
+})
+
+test('保護: shell からの書き込み（リダイレクト・cp・mv・tee・sed -i 等）は拒否し、読み取り（cat・grep 等）は通す', async () => {
+  const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
+  const g = s.options.guardScript
+  const ev = await loadAt({ ...s.options, protectedPaths: [join(s.dir, 'home', '.config', 'opencode')] }, s.dir)
+  for (const c of [
+    `echo x > ${g}`,
+    `printf 'x' >> ${g}`,
+    `cp /tmp/x ${g}`,
+    `mv /tmp/x ${join(PLUGIN_REAL, 'index.js')}`,
+    `cat /tmp/x | tee ${join(PLUGIN_REAL, 'index.js')}`,
+    "sed -i '' 's/deny/allow/' .opencode/plugins/agent-guard/index.js",
+    'rm -f .opencode/hooks/agent-guard.sh',
+    'ln -sf /bin/true .opencode/hooks/agent-guard.sh',
+    'echo {} > opencode.jsonc',
+    'mkdir -p ~/.config/opencode/plugins && cp evil.js ~/.config/opencode/plugins/',
+    'cat > $HOME/.config/opencode/opencode.jsonc',
+    `chmod 000 ${g}`,
+    'echo x > agent-guard.sh', // location からの相対
+  ]) assert.equal((await ev({ resources: [c] })).effect, 'deny', c)
+  for (const c of [
+    `cat ${g}`,
+    'grep -n deny .opencode/plugins/agent-guard/index.js',
+    `head -5 ${join(PLUGIN_REAL, 'index.js')} 2>/dev/null`,
+    'ls -la ~/.config/opencode',
+    `wc -l ${g} && git diff --stat`,
+    'echo hello > out.txt',
+    'git add .opencode/plugins/x.js && git commit -m "opencode.jsonc の説明を直す"',
+    'if test -f opencode.jsonc; then cat opencode.jsonc; fi',
+  ]) assert.notEqual((await ev({ resources: [c] })).effect, 'deny', c)
 })
