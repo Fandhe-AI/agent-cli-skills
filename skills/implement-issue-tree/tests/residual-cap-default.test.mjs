@@ -26,6 +26,13 @@ const source = readFileSync(SCRIPT_PATH, 'utf8')
 // Issue #603: 測定のシェルはプロンプトから scripts/measure-residual-bytes.sh へ移った。字面で固定していた契約は
 // このファイルの文面で引き続き固定し、実行して確かめる検証は measure-scripts.test.mjs が担う
 const residualScript = readFileSync(join(dirname(SCRIPT_PATH), 'measure-residual-bytes.sh'), 'utf8')
+// 封筒つきスクリプトの共通の呼び出し器（measureResidualBytesOnce が通す）の本体。プロンプトの定型はここが持つ
+function signedRunnerBody() {
+  const start = source.indexOf('function runSignedScript(')
+  const end = source.indexOf('\n}\n', start)
+  assert.ok(start >= 0 && end > start, 'runSignedScript の本体を特定できること')
+  return source.slice(start, end)
+}
 const markerIndex = source.indexOf(DRIVER_MARKER)
 if (markerIndex < 0) {
   throw new Error(`テスト境界マーカー ${DRIVER_MARKER} が実装スクリプトに存在しない（削除・改名は回帰テストを無効化する）`)
@@ -222,11 +229,12 @@ test('measureMainWorktreeContentBytes はメイン worktree 全体から .git・
 test('measureResidualWorktreeBytesDetailed はプロンプトへ渡す前に sanitizeWorktreePath で全パスを検証し、UNTRUSTED_POLICY を含める（codex-review P0 対応）', () => {
   assert.match(source, /const sanitizedPaths = paths\.map\(\(p\) => sanitizeWorktreePath/)
   assert.match(source, /if \(sanitizedPaths\.some\(\(p\) => p === ''\)\) {/)
-  // measureResidualBytesOnce のプロンプト配列に UNTRUSTED_POLICY が直接含まれること
+  // measureResidualBytesOnce は共通の呼び出し器 runSignedScript を通し、そのプロンプト配列に UNTRUSTED_POLICY が直接含まれること
   const fnStart = source.indexOf('async function measureResidualBytesOnce(')
   const fnEnd = source.indexOf('async function measureResidualWorktreeBytesDetailed(', fnStart)
   assert.ok(fnStart >= 0 && fnEnd > fnStart)
-  assert.match(source.slice(fnStart, fnEnd), /UNTRUSTED_POLICY,/)
+  assert.match(source.slice(fnStart, fnEnd), /await runSignedScript\(/)
+  assert.match(signedRunnerBody(), /UNTRUSTED_POLICY,/)
   // ホストの許可文字集合検証に加えて、スクリプトも許可文字集合外のパスを du へ渡さず err に数える（二重化）
   assert.match(residualScript, /\*\[!A-Za-z0-9\/_\.\$\{sp\}-\]\*/)
   assert.match(residualScript, /\*\.\.\*/)
@@ -540,7 +548,8 @@ test('measureResidualWorktreeBytesDetailed は存在しないパスを ENOENT �
   const fnStart = source.indexOf('async function measureResidualBytesOnce(')
   const fnEnd = source.indexOf('\n// 残置 worktree のディスク使用量（KiB）と、測定時点で既に存在しなかったパス数', fnStart)
   assert.ok(fnStart >= 0 && fnEnd > fnStart)
-  assert.match(source.slice(fnStart, fnEnd), /SIGNED_OUTPUT_INSTRUCTION,/)
+  assert.match(source.slice(fnStart, fnEnd), /await runSignedScript\(/)
+  assert.match(signedRunnerBody(), /SIGNED_OUTPUT_INSTRUCTION\]/)
   assert.match(source, /3 項目を観測値のまま StructuredOutput へ転記する'/)
   assert.match(source, /'（再計算・補完・修正をしない。ホストが再計算して照合し、不一致なら破棄する）。'/)
   assert.match(source, /Number\.isInteger\(v\?\.err\) && v\.err === 0/)
