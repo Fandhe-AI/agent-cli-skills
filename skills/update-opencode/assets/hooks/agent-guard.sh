@@ -785,13 +785,15 @@ cmd_clean=$(printf '%s' "$cmd" | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'
 #   段             先頭語 { 空白 (引数 | リダイレクト) }
 #   先頭語         下の許可リストの語と完全一致する素の語（引用符・パス・大文字を含む形は文法の外）。
 #                  許可リストは引数を shell のコードとして評価せず、外部コマンドも起動しないコマンドに限る:
-#                  grep egrep fgrep rg wc head tail cut tr uniq ls cat echo printf test [ jq basename dirname
+#                  grep egrep fgrep rg wc head tail cut tr uniq ls cat echo jq basename dirname
 #                  diff cmp comm nl column fold。sed（GNU の e コマンド）・awk・perl・python・find・xargs・env・
 #                  sort（--compress-program）・git・gh・shell・eval・source・command・exec・time 等は入れない。
+#                  shell の組み込みの test・[・printf も入れない（数値の引数・-v の名前・%d の値を算術式として評価し、
+#                  `x[$(…)]` の添字の置換を実行する。bash 3.2 / 5・zsh・dash・ksh で実測）。
 #                  rg の --pre / --hostname-bin（外部コマンドを起動する）、grep を ugrep で置き換えた環境の --filter /
-#                  --pager / --view / --config 等（同）、printf の -v（変数への代入）は文法の外
+#                  --pager / --view / --config 等（同）は文法の外
 #   引数           次の断片の連結: 素の文字 [A-Za-z0-9_./:=,@+%-]、単一引用符の文字列（中身は自由）、
-#                  $ ` \ ! を含まない二重引用符の文字列。`[` `]` だけの語も認める。`$` で終わる単一引用符の
+#                  $ ` \ ! を含まない二重引用符の文字列。`$` で終わる単一引用符の
 #                  文字列は語の最後の断片で、直後は空白・タブ・| < > か末尾（`'$''x'` `'$'"x"` `'$'x` は文法の外）
 #   リダイレクト   [数字] (< | > | >>) [空白] 素の語、または [数字] (<& | >&) 数字。<< <<< <> >| &> は文法の外
 # この文法では引用符の外に `$` が現れないので、元の文字列の `$'` はすべて単一引用符を閉じる `$` になる
@@ -799,7 +801,7 @@ cmd_clean=$(printf '%s' "$cmd" | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'
 read -r -d '' SQ_DOLLAR_AWK <<'AWK' || true
 BEGIN {
   plain = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:=,@+%-"
-  nc = split("grep egrep fgrep rg wc head tail cut tr uniq ls cat echo printf test [ jq basename dirname diff cmp comm nl column fold", cl, " ")
+  nc = split("grep egrep fgrep rg wc head tail cut tr uniq ls cat echo jq basename dirname diff cmp comm nl column fold", cl, " ")
   for (k = 1; k <= nc; k++) okcmd[cl[k]] = 1
   for (k = 1; k < 32; k++) if (k != 9) ctl[sprintf("%c", k)] = 1
   ctl[sprintf("%c", 127)] = 1
@@ -813,7 +815,6 @@ function isplain(c) { return (c != "" && index(plain, c) > 0) }
 # p から引数を 1 つ読む。成功なら 1 を返し、引用符を外した値を wv に置き、p を語の直後へ進める。
 function argword(   st, c, q, inner, sqd) {
   wv = ""; st = p; sqd = 0
-  if ((ch(p) == "[" || ch(p) == "]") && isend(ch(p + 1))) { wv = ch(p); p++; return 1 }
   while (p <= n) {
     c = ch(p)
     if (!isplain(c) && c != "\047" && c != "\"") break
@@ -838,8 +839,7 @@ END {
   while (1) {
     while (isbl(ch(p))) p++
     st = p
-    if (ch(p) == "[" && isend(ch(p + 1))) p++
-    else while (isplain(ch(p))) p++
+    while (isplain(ch(p))) p++
     cmd = substr(s, st, p - st)
     if (!(cmd in okcmd) || !isend(ch(p))) exit
     while (1) {
@@ -864,7 +864,6 @@ END {
       }
       if (!argword()) exit
       if (cmd == "rg" && (substr(wv, 1, 5) == "--pre" || substr(wv, 1, 14) == "--hostname-bin")) exit
-      if (cmd == "printf" && substr(wv, 1, 2) == "-v") exit
       if (cmd ~ /^[ef]?grep$/ && (wv ~ /^--(filter|pager|view|format-open|config|save-config)/ || substr(wv, 1, 3) == "---" || substr(wv, 1, 2) == "-@")) exit
     }
   }

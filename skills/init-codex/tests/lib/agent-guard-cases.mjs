@@ -901,8 +901,6 @@ export const FP805_FLIP = [
   `grep -c 'ok$' f 2>&1 | tail -n 1`,
   `cat f | grep -v '^#' | grep 'x$' | wc -l`,
   `ls | grep '\\.md$'`,
-  `[ 'a$' = x ]`,
-  `test 'a$' = x`,
   `jq -r '.name' f.json | grep 'x$'`,
   `cut -d: -f1 f | grep 'x$' > out.txt`,
   // 2. gh pr create / comment の引数の値の中の merge（コマンド全体がその 1 つだけのとき）
@@ -998,6 +996,14 @@ export const FP805_STAY_DENY = [
   [`rg --pre=sh 'a$' .`, 'obfuscated'],
   [`rg --hostname-bin=sh 'a$' .`, 'obfuscated'],
   [`printf -v x '%s' 'a$'`, 'obfuscated'],
+  // shell の組み込みの test・[・printf は数値の引数・-v の名前・%d の値を算術式として評価し、添字の $(…) を実行する
+  [`test 'a$' = b -o -v 'x[$(m=merge; gh pr $m 1)]'`, 'obfuscated'],
+  [`[ 'a$' = b -o 'x[$(m=merge; gh pr $m 1)]' -eq 0 ]`, 'obfuscated'],
+  [`test 'x[$(m=merge; gh pr $m 1)]' -lt 1 -o 'a$' = b`, 'obfuscated'],
+  [`printf '%d' 'x[$(m=merge; gh pr $m 1)]' 'a$'`, 'obfuscated'],
+  [`printf '%s' 'a$'`, 'obfuscated'],
+  [`[ 'a$' = x ]`, 'obfuscated'],
+  [`test 'a$' = x`, 'obfuscated'],
   [`grep --filter='*:sh -c' 'gh pr $' f`, 'obfuscated'],
   [`grep --pager=sh 'a$' f`, 'obfuscated'],
   // 先頭語の形（パス付き・引用符・大文字）と代入の前置き

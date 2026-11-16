@@ -5815,6 +5815,31 @@
       "allow",
       "deny obfuscated",
       "deny obfuscated"
+    ],
+    "test 'a$' = b -o -v 'x[$(m=merge; gh pr $m 1)]'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "[ 'a$' = b -o 'x[$(m=merge; gh pr $m 1)]' -eq 0 ]": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "test 'x[$(m=merge; gh pr $m 1)]' -lt 1 -o 'a$' = b": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "printf '%d' 'x[$(m=merge; gh pr $m 1)]' 'a$'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "printf '%s' 'a$'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
     ]
   }
 }

@@ -139,8 +139,8 @@ describe('認識器 SQ_DOLLAR_AWK（単体）', () => {
     assert.equal(r.status, 0, JSON.stringify(command))
     return r.stdout.toString() === 'ok\n'
   }
-  const ALLOWED = ['grep', 'egrep', 'fgrep', 'rg', 'wc', 'head', 'tail', 'cut', 'tr', 'uniq', 'ls', 'cat', 'echo', 'printf', 'test', '[', 'jq', 'basename', 'dirname', 'diff', 'cmp', 'comm', 'nl', 'column', 'fold']
-  const EVALUATORS = ['sed', 'awk', 'gawk', 'perl', 'python', 'python3', 'ruby', 'node', 'find', 'xargs', 'env', 'git', 'gh', 'sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'eval', 'source', '.', 'command', 'builtin', 'exec', 'time', 'nice', 'nohup', 'timeout', 'sudo', 'sort', 'less', 'vim', 'parallel', 'watch', 'make', 'ssh']
+  const ALLOWED = ['grep', 'egrep', 'fgrep', 'rg', 'wc', 'head', 'tail', 'cut', 'tr', 'uniq', 'ls', 'cat', 'echo', 'jq', 'basename', 'dirname', 'diff', 'cmp', 'comm', 'nl', 'column', 'fold']
+  const EVALUATORS = ['test', '[', '[[', 'printf', 'let', 'declare', 'read', 'sed', 'awk', 'gawk', 'perl', 'python', 'python3', 'ruby', 'node', 'find', 'xargs', 'env', 'git', 'gh', 'sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'eval', 'source', '.', 'command', 'builtin', 'exec', 'time', 'nice', 'nohup', 'timeout', 'sudo', 'sort', 'less', 'vim', 'parallel', 'watch', 'make', 'ssh']
 
   it('ガードから認識器の awk を取り出せる', () => assert.ok(m, 'SQ_DOLLAR_AWK が見つからない'))
   it('先頭語は許可リストの語だけ通る', () => {
@@ -164,7 +164,7 @@ describe('認識器 SQ_DOLLAR_AWK（単体）', () => {
     ],
     '先頭語（素の語の完全一致）': [
       [`grep 'a$'`, `/usr/bin/grep 'a$'`, `./grep 'a$'`, `'grep' 'a$'`, `"grep" 'a$'`, `g'rep' 'a$'`, `GREP 'a$'`, `grepx 'a$'`, `$g 'a$'`],
-      [`[ 'a$' = x ]`, `[[ 'a$' = x ]]`, `[x 'a$'`],
+      [`echo 'a$' x`, `[ 'a$' = x ]`, `[[ 'a$' = x ]]`, `[x 'a$'`, `test 'a$' = x`],
     ],
     '引数（素の語・単一引用符・$ ` \\ ! を含まない二重引用符の連結）': [
       [`grep 'a$' "b" x'y'"z"`, `grep 'a$' "$b"`, `grep 'a$' "\\b"`, `grep 'a$' "\`b\`"`, `grep 'a$' "!b"`, `grep 'a$' $b`,
@@ -175,9 +175,9 @@ describe('認識器 SQ_DOLLAR_AWK（単体）', () => {
       [`grep 'a$' <i >o 2>e >>a 2>&1 1>&2`, `grep 'a$' <<o`, `grep 'a$' <<<o`, `grep 'a$' <>o`, `grep 'a$' >|o`, `grep 'a$' &>o`,
         `grep 'a$' >&o`, `grep 'a$' > 'o'`, `grep 'a$' > "o"`, `grep 'a$' >`, `grep 'a$' 2>&1x`],
     ],
-    '外部コマンドの起動・代入になるオプション': [
+    '外部コマンドの起動・算術式の評価になるオプションとコマンド': [
       [`rg -n 'a$' .`, `rg --pre sh 'a$' .`, `rg --pre=sh 'a$' .`, `rg '--pre=sh' 'a$' .`, `rg --hostname-bin=sh 'a$' .`],
-      [`printf '%s' 'a$'`, `printf -v x 'a$'`, `printf '-v' x 'a$'`],
+      [`echo -n 'a$'`, `printf '%s' 'a$'`, `printf -v x 'a$'`, `printf '%d' 'x[$(m=merge; gh pr $m 1)]' 'a$'`],
       [`grep -c 'a$' f`, `grep --filter='*:sh' 'a$' f`, `egrep --filter=x 'a$' f`, `fgrep --pager=sh 'a$' f`, `grep --view 'a$' f`,
         `grep --config=x 'a$' f`, `grep --save-config 'a$'`, `grep ---x 'a$' f`, `grep -@ 'a$' f`, `grep '--filter=x' 'a$' f`],
     ],
