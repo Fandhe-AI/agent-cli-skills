@@ -21,34 +21,18 @@ gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100"
 
 Workflow の返却値（`done`・`failures`・`notStarted`）を確認し、`failures` と `notStarted` が空であることを確認する。
 
-以降の節は `scripts/implement-issue-tree.src.js`（開発ファイル）または生成物 `scripts/implement-issue-tree.js` を変更したときの確認手順。決定的に固定できる部分は回帰テストが担うため、各節では「どのテストが何を固定するか」と、テストが拾わない手動確認だけを書く。
+以降の節は `dev/implement-issue-tree/scripts/implement-issue-tree.src.js`（開発ファイル）または生成物 `scripts/implement-issue-tree.js` を変更したときの確認手順。決定的に固定できる部分は回帰テストが担うため、各節では「どのテストが何を固定するか」と、テストが拾わない手動確認だけを書く。
 
 ### Workflow 起動可否の検証（Issue #277）
 
-前提: 編集は `scripts/implement-issue-tree.src.js` に対して行い、`node skills/implement-issue-tree/scripts/build-workflow.mjs` で生成物 `scripts/implement-issue-tree.js`（Workflow へ渡すのはこちら）を再生成してから本節を実行する。生成時の acorn 照合と中止条件は `build-workflow.mjs` 冒頭と SKILL.md を参照。生成物と開発ファイルの同期は `tests/build-workflow.test.mjs`（鮮度ゲート）が固定する。
+前提: 編集は `dev/implement-issue-tree/scripts/implement-issue-tree.src.js` に対して行い、`node dev/implement-issue-tree/scripts/build-workflow.mjs` で生成物 `scripts/implement-issue-tree.js`（Workflow へ渡すのはこちら）を再生成してから本節を実行する。生成時の acorn 照合と中止条件は `build-workflow.mjs` 冒頭と SKILL.md を参照。生成物と開発ファイルの同期は `dev/implement-issue-tree/tests/build-workflow.test.mjs`（鮮度ゲート）が固定する。
 
-起動可否の判定実装は `tests/lib/workflow-script-contract.mjs` の 1 箇所に集約され、CI の `workflow-loadability.test.mjs` と下の手動コマンドが同じ実装を使う。`workflow-loadability.test.mjs` が CI で動くのは上流（`Fandhe-AI/agent-cli-skills`）の `js-tests` ジョブだけで、下流の vendoring 先には同梱されるのみ（CI 登録は不要）。
-
-スキルの配置は導入形態で 3 レイアウトに分かれる（`../SKILL.md` の「使い方」参照）。次のコマンドは配置を優先順位付きで解決するので、どのレイアウトでもそのまま使える:
+起動可否の判定実装は `dev/implement-issue-tree/tests/lib/workflow-script-contract.mjs` の 1 箇所に集約され、CI の `workflow-loadability.test.mjs` と下の手動コマンドが同じ実装を使う。テストと開発専用ファイルは上流（`Fandhe-AI/agent-cli-skills`）の `dev/implement-issue-tree/` にだけあり、下流の vendoring 先には配布されない。そのため下のコマンドは上流のリポジトリルートで実行する（`workflow-loadability.test.mjs` は上流の `js-tests` ジョブが CI で実行する）。
 
 ```bash
-# スキルディレクトリを導入形態非依存に解決する（優先順位: skills/ → .agents/skills/ → .claude/skills/）。
-# 上流では skills/ と .claude/skills/（symlink）の両方が存在し得るため、複数一致時も中止せず先勝ちで解決する。
-IIT_SKILL_DIR=""
-for CANDIDATE in "skills/implement-issue-tree" ".agents/skills/implement-issue-tree" ".claude/skills/implement-issue-tree"; do
-  if [ -f "${CANDIDATE}/tests/lib/workflow-script-contract.mjs" ]; then
-    IIT_SKILL_DIR="${CANDIDATE}"
-    break
-  fi
-done
-if [ -z "${IIT_SKILL_DIR}" ]; then
-  echo "エラー: implement-issue-tree のスキルディレクトリが見つからない（skills/ / .agents/skills/ / .claude/skills/ のいずれにも存在しない）" >&2
-  exit 1
-fi
-
-node --test "${IIT_SKILL_DIR}/tests/workflow-loadability.test.mjs"
-node "${IIT_SKILL_DIR}/tests/lib/workflow-script-contract.mjs" \
-  "${IIT_SKILL_DIR}/scripts/implement-issue-tree.js"
+node --test dev/implement-issue-tree/tests/workflow-loadability.test.mjs
+node dev/implement-issue-tree/tests/lib/workflow-script-contract.mjs \
+  skills/implement-issue-tree/scripts/implement-issue-tree.js
 ```
 
 **行頭 `export ` 全件除去後の `node --check` は使用禁止**: `export` の混入自体を検査前に消すため、壊れたスクリプトでも常に通る。`workflow-script-contract.mjs` は meta 宣言の `export` だけを除去し、残りはランタイムと同じ評価形態（`AsyncFunction`）の構文解析に委ねる。
@@ -64,21 +48,21 @@ node "${IIT_SKILL_DIR}/tests/lib/workflow-script-contract.mjs" \
 3. 起動時は `name` 指定ではなく絶対パスの `scriptPath` を使う（`name` 指定はセッション開始時のキャッシュを参照するため、修正直後は古い版で失敗する）
 4. 結果を下表へバージョン・実施日とともに追記する
 5. 再実行トリガ: Claude Code・Workflow ハーネスのバージョン更新時、またはテストスイートが予測しなかった起動失敗が観測されたとき
-6. 乖離が確認された場合: `tests/lib/workflow-script-contract.mjs` の評価形態（`AsyncFunction` ラップ・`stripMetaExport` の対象）を実測に合わせて更新し、`workflow-loadability.test.mjs` へ対応する変異ケースを追加する
+6. 乖離が確認された場合: `dev/implement-issue-tree/tests/lib/workflow-script-contract.mjs` の評価形態（`AsyncFunction` ラップ・`stripMetaExport` の対象）を実測に合わせて更新し、`workflow-loadability.test.mjs` へ対応する変異ケースを追加する
 
 | Claude Code バージョン | 実施日 | 結果 |
 | --- | --- | --- |
 | （未実施） | — | Workflow 起動用のツールを持つ環境で未実施。次回バージョン更新時または実施可能な環境で実施し、この行を更新すること |
 
-**履歴コミットに対する回帰検知能力の実証（一回限りの手動実行。CI テストではない）**: 上流リポジトリ専用（`git show <sha>:...` は git 履歴を使うため、履歴を持たない下流では実行しない）。`IIT_SKILL_DIR` は上の解決スニペットで束縛しておく。
+**履歴コミットに対する回帰検知能力の実証（一回限りの手動実行。CI テストではない）**: 上流リポジトリ専用（`git show <sha>:...` は git 履歴を使うため、履歴を持たない下流では実行しない）。
 
 ```bash
 git show efae3ab:skills/implement-issue-tree/scripts/implement-issue-tree.js \
-  | node "${IIT_SKILL_DIR}/tests/lib/workflow-script-contract.mjs" -
+  | node dev/implement-issue-tree/tests/lib/workflow-script-contract.mjs -
 # 期待: oversize-hard（528,837 B > 524,288）と parse-error の 2 違反、exit 1
 
 git show 1b5a647:skills/implement-issue-tree/scripts/implement-issue-tree.js \
-  | node "${IIT_SKILL_DIR}/tests/lib/workflow-script-contract.mjs" -
+  | node dev/implement-issue-tree/tests/lib/workflow-script-contract.mjs -
 # 期待: parse-error のみ（379,538 B でサイズは通る）、exit 1
 ```
 
@@ -90,21 +74,21 @@ CI では恒久的な回帰検知能力を `workflow-loadability.test.mjs` の�
 
 ```bash
 # UNTRUSTED_POLICY が COMMON に組み込まれていること
-grep -n "UNTRUSTED_POLICY" scripts/implement-issue-tree.src.js
+grep -n "UNTRUSTED_POLICY" dev/implement-issue-tree/scripts/implement-issue-tree.src.js
 # untrusted() の適用箇所（planPrompt / implementPrompt / prCreatePrompt / fixPrompt /
 # closePrompt / recoverPrompt / recoverImplementPrompt / lowFindingsCommentPrompt の 8 関数）
-grep -n "untrusted(" scripts/implement-issue-tree.src.js
+grep -n "untrusted(" dev/implement-issue-tree/scripts/implement-issue-tree.src.js
 # 副作用エージェント（implement / fix / recover-implement）が Issue 本文を読まないこと（--json number,title 限定）
 grep -n "gh issue view" scripts/implement-issue-tree.js
 # コンテキスト分離（Issue #144 / #145）: monitorPrompt に merge / close 権限がなく、mergeExecutePrompt がレビュー本文を読まないこと
 grep -n "gh pr merge\|gh issue close" scripts/implement-issue-tree.js
 # State プロンプトが固定フェンス・固定 HEREDOC デリミタを使っていないこと
-grep -n "PATCH_EOF\|boundaryNonce" scripts/implement-issue-tree.src.js
+grep -n "PATCH_EOF\|boundaryNonce" dev/implement-issue-tree/scripts/implement-issue-tree.src.js
 # worktree 削除の安全性（Issue #139 / #142 / #148）
-grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree\|implement-issue-tree-owner" scripts/implement-issue-tree.src.js
-grep -n "wipCommitted !== true\|cleanupMode: 'discard'" scripts/implement-issue-tree.src.js
-grep -n "orphanDeleteCandidates" scripts/implement-issue-tree.src.js
-grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scripts/implement-issue-tree.src.js
+grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree\|implement-issue-tree-owner" dev/implement-issue-tree/scripts/implement-issue-tree.src.js
+grep -n "wipCommitted !== true\|cleanupMode: 'discard'" dev/implement-issue-tree/scripts/implement-issue-tree.src.js
+grep -n "orphanDeleteCandidates" dev/implement-issue-tree/scripts/implement-issue-tree.src.js
+grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" dev/implement-issue-tree/scripts/implement-issue-tree.src.js
 ```
 
 期待結果（目視確認。専用の回帰テストは無い）:
@@ -120,12 +104,12 @@ grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scrip
 `maxResidualWorktrees`（件数軸。既定 100・`0` は上限なし）と `maxResidualWorktreeBytes`（バイト軸。既定 50 GiB・`0` はこの軸のみ無効）のゲートを変更した場合、次のテストを流す。
 
 ```bash
-node --test skills/implement-issue-tree/tests/residual-cap-default.test.mjs \
-  skills/implement-issue-tree/tests/residual-byte-fallback.test.mjs \
-  skills/implement-issue-tree/tests/residual-byte-measure-retry.test.mjs \
-  skills/implement-issue-tree/tests/residual-average-latch-scope.test.mjs \
-  skills/implement-issue-tree/tests/worktree-observe-retry.test.mjs \
-  skills/implement-issue-tree/tests/worktree-retained-ledger.test.mjs
+node --test dev/implement-issue-tree/tests/residual-cap-default.test.mjs \
+  dev/implement-issue-tree/tests/residual-byte-fallback.test.mjs \
+  dev/implement-issue-tree/tests/residual-byte-measure-retry.test.mjs \
+  dev/implement-issue-tree/tests/residual-average-latch-scope.test.mjs \
+  dev/implement-issue-tree/tests/worktree-observe-retry.test.mjs \
+  dev/implement-issue-tree/tests/worktree-retained-ledger.test.mjs
 ```
 
 テストが固定するもの:
@@ -155,12 +139,12 @@ grep -nE "worktree remove|--force" scripts/implement-issue-tree.js
 
 ### メイン worktree への一時ファイル残置防止・未追跡ファイル検査の適用確認（Issue #497）
 
-`TEMP_FILE_POLICY` の挿入先、測定スクリプトの `tf` 単一代入と `"$tf"` 参照、`ORPHAN_BYTES_SCHEMA` の `count` 必須化とホスト側の件数照合、メイン worktree の未追跡検査（ラン開始直後と `return` 前の 2 回の差分を `mainWorktreeUntracked` とログ警告で報告・状態ファイル自身は除外するが `mktemp` 残骸は除外しない・削除は一切しない）は `tests/temp-file-placement.test.mjs` が固定する。
+`TEMP_FILE_POLICY` の挿入先、測定スクリプトの `tf` 単一代入と `"$tf"` 参照、`ORPHAN_BYTES_SCHEMA` の `count` 必須化とホスト側の件数照合、メイン worktree の未追跡検査（ラン開始直後と `return` 前の 2 回の差分を `mainWorktreeUntracked` とログ警告で報告・状態ファイル自身は除外するが `mktemp` 残骸は除外しない・削除は一切しない）は `dev/implement-issue-tree/tests/temp-file-placement.test.mjs` が固定する。
 
 ```bash
-node --test skills/implement-issue-tree/tests/temp-file-placement.test.mjs
+node --test dev/implement-issue-tree/tests/temp-file-placement.test.mjs
 # 目視補助: 引用なしの変数展開によるリダイレクトが残っていないこと
-grep -nE '> *\.lines|> *\$[a-zA-Z_]+\.lines[^"'"'"']' scripts/implement-issue-tree.src.js
+grep -nE '> *\.lines|> *\$[a-zA-Z_]+\.lines[^"'"'"']' dev/implement-issue-tree/scripts/implement-issue-tree.src.js
 # 検出経路が削除呼び出しを追加していないこと
 grep -nE "rm -rf|git clean|git worktree remove" scripts/implement-issue-tree.js
 ```
@@ -184,12 +168,12 @@ command -v shellcheck >/dev/null && shellcheck scripts/merge-guard-hook.sh
 grep -vE '^\s*#' scripts/merge-guard-hook.sh | grep -nE "ALLOW_RE|expectedCommand|merge-grants/grant-" || echo "allow 経路の実ロジックなし（deny 専用）"
 
 # 3. grant / canary / branch-protection ゲートと、PR #206 で撤回した arm の残骸が無いこと
-grep -n "issueMergeGrant\|buildMergeCommand\|ensureMergeGuardActive\|ensureBranchProtection\|IIT_MERGE_GRANT\|MERGE_GRANT_DIR" scripts/implement-issue-tree.src.js || echo "撤去済み（コメントの言及を除く）"
-grep -nE "autoMergePrecheck|autoMergeArmable|autoMergeArmPrompt|AUTO_MERGE_PRECHECK" scripts/implement-issue-tree.src.js && echo "NG: precheck/arm 残骸あり" || echo "OK: precheck/arm 残骸なし"
+grep -n "issueMergeGrant\|buildMergeCommand\|ensureMergeGuardActive\|ensureBranchProtection\|IIT_MERGE_GRANT\|MERGE_GRANT_DIR" dev/implement-issue-tree/scripts/implement-issue-tree.src.js || echo "撤去済み（コメントの言及を除く）"
+grep -nE "autoMergePrecheck|autoMergeArmable|autoMergeArmPrompt|AUTO_MERGE_PRECHECK" dev/implement-issue-tree/scripts/implement-issue-tree.src.js && echo "NG: precheck/arm 残骸あり" || echo "OK: precheck/arm 残骸なし"
 grep -vE '^\s*#' scripts/merge-guard-hook.sh | grep -nE -- "--auto --squash|carve" && echo "NG: hook carve-out 残骸あり" || echo "OK: hook carve-out 残骸なし"
 
 # 4. boundaryNonce / ensureBoundaryNonceSeed は保持されていること（fix / state 用）
-grep -n "function boundaryNonce\|async function ensureBoundaryNonceSeed" scripts/implement-issue-tree.src.js
+grep -n "function boundaryNonce\|async function ensureBoundaryNonceSeed" dev/implement-issue-tree/scripts/implement-issue-tree.src.js
 
 # 5. G0 から classic protection API の判定式が撤去されていること（0 件）
 grep -n "protection/required_status_checks\|protection/enforce_admins\|required_conversation_resolution\|bypass_pull_request_allowances\|collaborators/" scripts/implement-issue-tree.js
@@ -201,10 +185,10 @@ grep -n "protection/required_status_checks\|protection/enforce_admins\|required_
 
 `reviewPrompt()` と `fixPrompt()` の push 前分岐を変更した場合、比較基準が `origin/<base-branch>` の 3 点ドット diff に統一されていること、3 拠点（SKILL.md / reviewPrompt / fixPrompt の push 前分岐）が乖離していないことを確認する。ローカル base ref を基準にすると、ローカルが origin より遅れているだけで無関係な祖先コミットの差分がレビュー対象に混入する（実測では diff の大半がノイズになり Review が収束しなかった）。`origin/<base-branch>` なら比較点は分岐点に固定され、ラン中に origin が進んでも fetch なしで動かない。
 
-`tests/review-diff-base.test.mjs` が固定する: 群 A（reviewPrompt 契約・「origin/ なし」の負のアサーション）、群 B（SKILL.md と script の乖離防止・fixPrompt 含む）、群 C（一時 git リポジトリでの A〜D の `--name-only` 実測シナリオ）、群 D（base 最新化契約。`remote.origin.fetch` を持たない remote で、保存先を省いた `git fetch origin <base>` は `refs/remotes/origin/<base>` を作らず、保存先つき refspec は作る・前進させる。Issue #361）。
+`dev/implement-issue-tree/tests/review-diff-base.test.mjs` が固定する: 群 A（reviewPrompt 契約・「origin/ なし」の負のアサーション）、群 B（SKILL.md と script の乖離防止・fixPrompt 含む）、群 C（一時 git リポジトリでの A〜D の `--name-only` 実測シナリオ）、群 D（base 最新化契約。`remote.origin.fetch` を持たない remote で、保存先を省いた `git fetch origin <base>` は `refs/remotes/origin/<base>` を作らず、保存先つき refspec は作る・前進させる。Issue #361）。
 
 ```bash
-node --test skills/implement-issue-tree/tests/review-diff-base.test.mjs
+node --test dev/implement-issue-tree/tests/review-diff-base.test.mjs
 # 目視補助: 比較・分岐点操作系の git コマンドで origin/ なしの ${baseBranch} が 0 件であること
 #（fetch は動詞集合に含めないため、正常運用の `git fetch origin ${baseBranch}` は誤検出しない）
 grep -nE 'git (diff|merge|checkout|rebase|rev-parse)[^`]*\$\{baseBranch\}' skills/implement-issue-tree/scripts/implement-issue-tree.js | grep -vF 'origin/${baseBranch}'
@@ -219,37 +203,37 @@ wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
 
 `classifyDispatchReadiness` / `selectPrereqProbeTargets` / `applyPrereqTransitions` / `probePrereqCompletion` またはスケジューラ（dispatch ループ・cascade）を変更した場合、blocked の即時確定が dispatch ループ内へ復活せず、唯一の choke point（cascade）に一元化されていることを確認する。
 
-`tests/dep-reeval.test.mjs` が固定する: 純粋関数 5 種、受入条件 3（前提 merged への遷移 → 下流の再判定）、駆動部配線の source-scan、MERGED 判定が `prBindingProblem` と同じ結び付け照合（別 issue の MERGED PR を受理しない・Issue #533 の再現ケース）。
+`dev/implement-issue-tree/tests/dep-reeval.test.mjs` が固定する: 純粋関数 5 種、受入条件 3（前提 merged への遷移 → 下流の再判定）、駆動部配線の source-scan、MERGED 判定が `prBindingProblem` と同じ結び付け照合（別 issue の MERGED PR を受理しない・Issue #533 の再現ケース）。
 
 ```bash
-node --test skills/implement-issue-tree/tests/dep-reeval.test.mjs
+node --test dev/implement-issue-tree/tests/dep-reeval.test.mjs
 # 駆動部（境界マーカーより下）の markBlockedByDeps 呼び出しが cascade の 1 箇所だけであること → 1
-awk '/__IMPLEMENT_ISSUE_TREE_DRIVER_START__/,0' skills/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c "await markBlockedByDeps(item, failedDeps)"
+awk '/__IMPLEMENT_ISSUE_TREE_DRIVER_START__/,0' dev/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c "await markBlockedByDeps(item, failedDeps)"
 ```
 
 出力が 2 以上なら dispatch ループ内の即時確定が復活、0 なら cascade 側が壊れている。
 
 ## opt-in テスト記録ゲートの適用確認（Issue #495）
 
-`validateOptinCommandForm` / `parseOptinTestCommands` / `parseOptinTestDeclarations` / `sanitizeOptinTestRuns` / `restoreOptinFixState` / `optinRecordMarkerLine` / `renderOptinRecordSection` / `classifyOptinRecordGate` / `combineOptinRecordGate` / `observeOptinRecord` / `mergeExecutePrompt` の `expectedHeadSha` を変更した場合の手順。純粋関数・状態復元・封筒の照合と 2 回観測の一致・宣言なしイシューでのプロンプト出力完全一致（既定無効の確認）は `tests/optin-tests-gate.test.mjs` が固定する。
+`validateOptinCommandForm` / `parseOptinTestCommands` / `parseOptinTestDeclarations` / `sanitizeOptinTestRuns` / `restoreOptinFixState` / `optinRecordMarkerLine` / `renderOptinRecordSection` / `classifyOptinRecordGate` / `combineOptinRecordGate` / `observeOptinRecord` / `mergeExecutePrompt` の `expectedHeadSha` を変更した場合の手順。純粋関数・状態復元・封筒の照合と 2 回観測の一致・宣言なしイシューでのプロンプト出力完全一致（既定無効の確認）は `dev/implement-issue-tree/tests/optin-tests-gate.test.mjs` が固定する。
 
 ```bash
 # 1. merge-exec のコンテキスト分離（Issue #145 / #160）が退行していないこと。
 #    mergeExecutePrompt の関数本体に限って数える（ファイル全体への grep -c は fixPrompt 等にヒットして退行を見逃す・PR #503）
 awk '/^function mergeExecutePrompt\(/{f=1;print;next} f&&/^function /{exit} f' \
-  skills/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c 'optin'
+  dev/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c 'optin'
 awk '/^function mergeExecutePrompt\(/{f=1;print;next} f&&/^function /{exit} f' \
-  skills/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c -- '--json body'
+  dev/implement-issue-tree/scripts/implement-issue-tree.src.js | grep -c -- '--json body'
 
 # 2. マージ前ゲートが新規マージ経路（!recoveryOnly）にのみ配線されていること（ドライバ部に 1 箇所）
-grep -n 'observeOptinRecord(' skills/implement-issue-tree/scripts/implement-issue-tree.src.js
+grep -n 'observeOptinRecord(' dev/implement-issue-tree/scripts/implement-issue-tree.src.js
 
 # 3. ビルド鮮度・サイズ
-node skills/implement-issue-tree/scripts/build-workflow.mjs --check
+node dev/implement-issue-tree/scripts/build-workflow.mjs --check
 wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
 
 # 4. 回帰テスト
-node --test skills/implement-issue-tree/tests/optin-tests-gate.test.mjs
+node --test dev/implement-issue-tree/tests/optin-tests-gate.test.mjs
 ```
 
 手順 1 は両方 `0`、手順 2 は 1 箇所、手順 3 は `--check` 通過かつ 512,000 B 以下、手順 4 は全 pass・fail 0 であること。
@@ -258,13 +242,13 @@ node --test skills/implement-issue-tree/tests/optin-tests-gate.test.mjs
 
 `runStateAgent` / `updateStateDetailed` / `updateState` / `initAllPending` / `persistPerWorktreeByteReserveHighWater` / `loadState`、または `classifyStateWriteFailureStatus` / `classifyUncaughtFailureStatus` を変更した場合、state 系 5 ラベル（`state:update` / `state:cleanup` / `state:init-all` / `state:high-water` / `state:load`）と blocked の一括記録用 `state:update-batch`（Issue #585・`writeBlockedStateChunk`）が `runStateAgent` 経由のままで、呼び出し元の終端分類が新設の純粋関数に一元化されたままであることを確認する。
 
-`tests/state-write-fallback.test.mjs` が固定する: 層 1（スタブ agent の振る舞い）、層 2（純粋関数の入出力表）、層 3（配線の source-scan。`STATE_AGENT_MODEL_CHAIN` 以外に `state:*` を直書きしないことを含む）。`tests/pr-saved-failsafe.test.mjs` は Merge ループ fail-safe 契約（Issue #465）への非退行確認。
+`dev/implement-issue-tree/tests/state-write-fallback.test.mjs` が固定する: 層 1（スタブ agent の振る舞い）、層 2（純粋関数の入出力表）、層 3（配線の source-scan。`STATE_AGENT_MODEL_CHAIN` 以外に `state:*` を直書きしないことを含む）。`dev/implement-issue-tree/tests/pr-saved-failsafe.test.mjs` は Merge ループ fail-safe 契約（Issue #465）への非退行確認。
 
 ```bash
-node --test skills/implement-issue-tree/tests/state-write-fallback.test.mjs \
-  skills/implement-issue-tree/tests/pr-saved-failsafe.test.mjs
+node --test dev/implement-issue-tree/tests/state-write-fallback.test.mjs \
+  dev/implement-issue-tree/tests/pr-saved-failsafe.test.mjs
 # 目視補助: 終端分類関数が runOne の catch・reviewing / monitoring 遷移・Recover の掃除ゲートから参照されること
-grep -n "classifyStateWriteFailureStatus\|classifyUncaughtFailureStatus\|knownPrByIssue" skills/implement-issue-tree/scripts/implement-issue-tree.src.js
+grep -n "classifyStateWriteFailureStatus\|classifyUncaughtFailureStatus\|knownPrByIssue" dev/implement-issue-tree/scripts/implement-issue-tree.src.js
 wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js
 ```
 

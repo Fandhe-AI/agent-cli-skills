@@ -103,8 +103,8 @@ gh auth status >/dev/null 2>&1 || { echo "gh が未認証。gh auth login を案
 4. PR が無いリポは open PR の検索だけでは漏れる。canary の blob sha で鮮度を判定する。`.claude/skills/<name>` は symlink でも実ディレクトリでもよい（`.claude/rules/skill-vendoring-layout.md`）ので、取得先は 2 か所を順に試す。まず `.agents/skills/...`、404 のときだけ `.claude/skills/...`。
    ```bash
    git fetch origin
-   git rev-parse origin/main:skills/implement-issue-tree/scripts/implement-issue-tree.src.js
-   p=skills/implement-issue-tree/scripts/implement-issue-tree.src.js
+   git rev-parse origin/main:skills/implement-issue-tree/scripts/implement-issue-tree.js
+   p=skills/implement-issue-tree/scripts/implement-issue-tree.js
    # 出力は "file <sha>" / "other <type>" / "404" / "unknown <HTTP>" のいずれか 1 行
    probe() {
      f="repos/Fandhe-AI/$r/contents/$1/$p"
@@ -244,9 +244,9 @@ gh pr merge <n> -R "Fandhe-AI/$r" --squash --match-head-commit "${approved_sha}"
 
 ### Step 6: 上流を修正するとき
 
-- implement-issue-tree を直す場合は `.src.js` だけを編集し、`node skills/implement-issue-tree/scripts/build-workflow.mjs` で生成し直す。
+- implement-issue-tree を直す場合は `.src.js` だけを編集し、`node dev/implement-issue-tree/scripts/build-workflow.mjs` で生成し直す。
 - 生成物のサイズ予算 `WORKFLOW_SCRIPT_BUDGET_BYTES = 512000` は引き上げない。ビルド後に `wc -c skills/implement-issue-tree/scripts/implement-issue-tree.js` を実行し、512000 との差を見る。差が小さいときは、機能を足す前に圧縮だけの PR を先に出す。
-- テストは `node --test skills/implement-issue-tree/tests/*.test.mjs` のように、`*.test.mjs` の glob で渡して全件流す。
+- テストは `node --test dev/implement-issue-tree/tests/*.test.mjs` のように、`*.test.mjs` の glob で渡して全件流す。
 - コミットは Conventional Commits(`.claude/rules/conventional-commits.md`)。`--no-verify` は禁止。
 
 ### Step 7: 完了確認と報告
