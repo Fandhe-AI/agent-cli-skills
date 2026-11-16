@@ -48,6 +48,27 @@
 
 payload には**入力の束縛** `inputSha256` を入れる。残置バイトは標準入力のパス列（末尾の改行 1 つを除く）、空き容量は対象パスの SHA-256 で、ホストは自分が送った値（`sha256Hex(パス列)`）から再計算して `verifySignedOutput` の第 3 引数で照合する。nonce は「どの呼び出しの出力か」を、`inputSha256` は「ホストが送った入力を測った出力か」を結び付ける。nonce は `boundaryNonce` に**呼び出し連番**を含めて作り、同じ対象を何度測っても呼び出し・再試行ごとに異なる（連番を含めないと同じパスの測定は同じ nonce になり、前回の封筒を流用しても受理される。PR #611 codex P1）。
 
+## 機械的な段の実行仕様（`<!-- iit-exec v1 ... -->`・Phase P6）
+
+モデルの判断が要らず、スクリプトを 1 回実行して結果を返すだけの段は、プロンプトの **0 行目**に機械可読の 1 行を持つ。モデルを介さずに直接実行するランナー（Codex / OpenCode 版）はこの 0 行目だけを読む（本文の他の場所・文言からの抜き出しはしない）。Workflow 版のモデルにとっては何もさせない HTML コメントで、手順は従来どおり本文のコマンドを実行する（挙動は変わらない）。
+
+```
+<!-- iit-exec v1 {"v":1,"script":"state.sh","sha256":"<64 桁>","argv":["--file","_/issue-trees/1.json","verify","--page","0"],"ret":"envelope"} -->
+```
+
+| キー | 意味 |
+|------|------|
+| `script` | `scripts/` 直下の固定名。許可リストは `SCRIPT_SHA256` の表と、`--verify-only` だけの `run-verified.sh` |
+| `sha256` | `SCRIPT_SHA256[script]`（`--verify-only` の行は無し）。ランナーは `bash <skillDir>/scripts/run-verified.sh <sha256> <script> ...argv` を shell を介さず `execFile` で起動する（ハッシュ照合は launcher が毎回行う。飛ばさない） |
+| `argv` | `<script>` の後ろの引数の配列。`--nonce` も含む。本文のコマンドの引数を `shellWords` で分解したもの（単一引用符と `'\''` だけを読み、展開・連結・リダイレクトは例外） |
+| `stdinHex` | 標準入力の UTF-8 を 16 進にした文字列（ヒアドキュメントの段だけ。本文のヒアドキュメントの内容 + 末尾の改行と同じ）。未信頼の自由文を 0 行目へ生で出さないため 16 進にする |
+| `ret` | 結果の返し方。`envelope` = 標準出力の最終行の JSON をそのまま返す（ホストが封筒を照合する）/ `exit-ok` = 終了コード 0 なら `{ ok: true }`・他は `{ ok: false }` / `line:<語>` = `<語>` に続く最終行の JSON を返す（`STATE_RESULT`・`WORKTREE_REMOVE_RESULT`） |
+
+- **対象の段（label）**: `state:*` の書き込み（`state:update`・`state:high-water`・`state:high-water-set`・`state:init-all`・一括更新）・`state:load-verify`・`script-hash-precheck`・`plan:issue-tree-release`・`free:#N`・`worktree:absent`・`worktree:sweep`・`worktree:residual-bytes`・`worktree:free-disk-bytes`・`detect:external-checks`・`plan:skip-labels`・`merge:added-files` / `merge:policy-paths` / `merge:optin-record`・closed の後始末と使い捨て worktree の掃除（`state:cleanup:#N` のうち状態の書き戻し〔手順 2〕が付かない形だけ）。
+- **対象外**: 判断を含む段（ツリー取得 `plan:issue-tree`〔本文を読んで dependsOn を判断する〕・依存宣言の抽出〔レート制限の判断がある〕・Plan / Implement / Review / fix / PR 作成 / monitor / merge-exec / 回復 / base-merge〔隔離 worktree と pwd を使う〕・`git worktree list` などの生コマンドの段）と、2 つのスクリプトを続けて実行する形の掃除。これらの 0 行目には仕様が付かない。
+- **偽の行が混ざらない理由**: 仕様は src が組んだ文字列の先頭にだけ置く（位置固定）。値はホストが検証済みの引数から作り（`worktreeQuote`・`isValidBranchName` 等を通ったもの）、JSON は `<` `>` `&` U+2028 U+2029 を `\u` エスケープして 1 行にする。issue 本文・タイトル・note などの未信頼データは本文側にしか入らず、対象外の段の 0 行目は src の固定文字列で始まる（`exec-spec.test.mjs` が敵対的な値で縛る）。組めない値（許可外の文字・lone surrogate）は例外にせず仕様なしにし、ランナーはその段をモデルへ回す。
+- **直接実行しても信頼境界は変わらない**: 封筒の照合（nonce・sha256・入力の束縛）はホストが従来どおり行う。ランナーは標準出力の文字列を解釈せずそのまま返し、照合を省かない。失敗時（非 0 終了・結果の行なし）の既定の返り値は本文の手順と同じにする（`exit-ok` と `STATE_RESULT` は `{ ok: false }`、`WORKTREE_REMOVE_RESULT` は `{ ok: false, retained: true, worktree: "" }`、`envelope` は null）。
+
 ## 何を防ぐか
 
 | 事象 | 検出の仕組み |

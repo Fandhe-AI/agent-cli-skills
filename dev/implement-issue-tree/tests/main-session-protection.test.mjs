@@ -181,6 +181,17 @@ function enclosingHeader(callIdx) {
   return source.slice(idx + 1, source.indexOf('\n', idx + 1))
 }
 
+// プロンプトの先頭に付く実行仕様の行（Phase P6: `execSpecLine(...) + [...]`）を読み飛ばし、本文の組み立て側を検査対象にする
+function skipExecSpec(head) {
+  if (!head.startsWith('execSpecLine(')) return head
+  let depth = 0
+  for (let i = 'execSpecLine'.length; i < head.length; i++) {
+    if (head[i] === '(') depth++
+    else if (head[i] === ')' && --depth === 0) return head.slice(i + 1).replace(/^\s*\+\s*/, '')
+  }
+  throw new Error('execSpecLine( の閉じ括弧が無い')
+}
+
 test('#591: 全 agent / runStateAgent 呼び出しのプロンプトに共通規則（TEMP_FILE_POLICY 系）が届く（挿入漏れの走査）', () => {
   const sites = collectAgentCallSites()
   assert.ok(sites.length >= 25, `走査対象の呼び出しを十分に検出できること（実際: ${sites.length}）`)
@@ -188,7 +199,7 @@ test('#591: 全 agent / runStateAgent 呼び出しのプロンプトに共通規
   let checked = 0
   for (const s of sites) {
     // 第 1 引数の形で解決方法を決める。
-    const callHead = s.after.trimStart()
+    const callHead = skipExecSpec(s.after.trimStart())
     const labelIdx = callHead.indexOf('label:')
     let region
     const fnCall = /^([A-Za-z_]\w*)\(/.exec(callHead)
