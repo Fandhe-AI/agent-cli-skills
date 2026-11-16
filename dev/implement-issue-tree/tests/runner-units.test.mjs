@@ -55,6 +55,7 @@ const GUARD_DENY = {
     "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
     "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
     "gh api graphql -f query='mutation { mergeBranch(input:{}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { enqueuePullRequest(input:{}) { clientMutationId } }'",
   ],
   'api-review': [
     "gh api graphql -f query='mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }'",
@@ -66,16 +67,15 @@ const GUARD_DENY = {
     'git -C /repo push --force origin x', 'git push -fu origin x', 'git push --force-with origin x',
   ],
   'git-no-verify': ['git commit --no-verify -m x', 'git commit -n -m x', 'git push --no-verify', 'git commit -nm x', 'git -c core.hooksPath=/dev/null commit -m x'],
-}
-
-// agent-guard.sh が（subagent=true でも）まだ止めない形。配布物のガードの穴で、別 PR で agent-guard.sh を直す。
-// rules / permissions だけが止める。ガードが直ると下のテストが落ちるので、その時点でこの表から GUARD_DENY へ移す。
-const GUARD_GAPS = {
-  'api-merge': ["gh api graphql -f query='mutation { enqueuePullRequest(input:{}) { clientMutationId } }'"],
   'auth-token': ['gh auth token', 'gh auth status --show-token', 'printenv GH_TOKEN', 'printenv'],
   'git-credential': ['git credential fill'],
   'auth-file': ['cat ~/.config/gh/hosts.yml', 'cat ~/.codex/auth.json', 'cd ~/.config/gh && cat hosts.yml', 'cd ~/.config/gh;cat hosts.yml', 'cd ~/.config/gh&&cat hosts.yml', 'cd ~/.config/gh|cat', '(cd ~/.config/gh)', 'cat "$HOME/.config/gh"/hosts.yml', 'base64 ~/.config/gh/hosts.yml'],
 }
+
+// agent-guard.sh が（subagent=true でも）まだ止めない形。配布物のガードの穴で、rules / permissions だけが止める。
+// ガードが直ると下のテストが落ちるので、その時点でこの表から GUARD_DENY へ移す（DENY_FORMS の guardGap も外す）。
+// enqueuePullRequest・認証トークンの表示・git credential・認証ファイルの読み取りは PR #845 で塞いで GUARD_DENY へ移した。
+const GUARD_GAPS = {}
 
 const GUARD_ALLOW = [
   'gh pr view 1 --json state', 'gh pr create --title t --body-file b.md', 'gh api -X GET repos/o/r/pulls/1/reviews', 'gh pr checks 1',
@@ -251,9 +251,11 @@ test('guard: rules から外した REST の形は rules に出ず、agent-guard.
   for (const [cmd, r] of graphql) assert.equal(r.decision, 'deny', cmd)
 })
 
-test('guard: agent-guard.sh が止めない認証ファイルの読み取りと GraphQL の enqueuePullRequest は、rules / permissions が止める', () => {
+test('guard: 認証ファイルの読み取りと GraphQL の enqueuePullRequest は、agent-guard.sh に加えて rules / permissions も止める', () => {
   const globs = opencodePatterns().map(globToRegExp)
-  for (const cmd of [...GUARD_GAPS['auth-file'], ...GUARD_GAPS['api-merge']]) assert.ok(globs.some((re) => re.test(cmd)), cmd)
+  const enqueue = GUARD_DENY['api-merge'].filter((cmd) => cmd.includes('enqueuePullRequest'))
+  assert.equal(enqueue.length, 1)
+  for (const cmd of [...GUARD_DENY['auth-file'], ...enqueue]) assert.ok(globs.some((re) => re.test(cmd)), cmd)
 })
 
 test('guard: スレッドへの返信 mutation（addPullRequestReviewThreadReply）と resolveReviewThread は rules に掛からず、レビュー本体の mutation は掛かる', () => {

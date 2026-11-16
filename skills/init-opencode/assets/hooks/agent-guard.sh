@@ -52,8 +52,11 @@
 #                  codex を含むコマンドの auth.json・/proc と組の environ。パスは小文字へ寄せ // と /./ と /x/../ を畳んで照合する
 #                  （macOS の FS は大文字小文字を区別しない）。--opt=VALUE・-xVALUE・name=@file・@file;type=x・name=<file の VALUE も
 #                  オプション名を問わず同じ判定にかける（over-deny 許容）。空白を含む語は文章として見ないが、語全体が絶対・~・.・$HOME 始まりで
-#                  末尾が保護対象のパス部品なら見る。git config の --edit / -e / edit と、--list・--get-regexp・--get-urlmatch・--edit の
-#                  一意な前置き（--lis・--get-regex）・git var -l・git credential-* の fill / get（位置を問わず）・
+#                  末尾が保護対象のパス部品なら見る。git config の --edit / -e / edit と、--list・--get-regexp・--get-urlmatch・--regexp・
+#                  --url・--edit の一意な前置き（--lis・--get-regex・--reg・--ur）・git config の -f / --file / --blob の値（独立した語・
+#                  = 連結〔--file=X・--fi=X・--blob=X〕・短い形の連結〔-fX・-lfX〕のどれでも。--blob の <rev>:<path> は path も）・git var -l（束ね書きを含む）と
+#                  --list・その一意な前置き（--l・--li・--lis）・git の -xVALUE 連結の VALUE が ~/.config/gh の形・
+#                  git credential-* の fill / get（位置を問わず）・
 #                  git diff / grep の --no-index が読む外部ファイル・grep 等へ渡す ~ / ~/.config / ~/.codex そのもの。
 #                  文字列として扱う形は止めない: commit メッセージ・gh の --body / --title の値・引用符つき heredoc の本文・
 #                  echo / printf の引数・grep / rg / ag / ack の検索パターン（最初の位置引数と -e の値。2 つ目以降はファイル）・
@@ -322,7 +325,7 @@ function gh_flags(k) {
   }
   return k
 }
-function cred_check(p, wr,   cb, i, k, t, lt, np, fl, pos, sub1, j, sk, haspat, hasp, wflag, lflag, eflag, noidx, grepv) {
+function cred_check(p, wr,   cb, i, k, t, lt, np, fl, pos, sub1, j, sk, haspat, hasp, wflag, lflag, eflag, noidx, grepv, m, c, v) {
   for (i = 1; i <= nrin; i++) cred_tok(rin[i])
   # command -v / -V は名前の検索だけで実行しない（`command -v printenv`・`command -v set`・`command -v export`）。
   if (cmdv) return
@@ -373,15 +376,21 @@ function cred_check(p, wr,   cb, i, k, t, lt, np, fl, pos, sub1, j, sk, haspat, 
     while (k <= ntok) {
       t = tok[k]
       if (t == "-c" || t == "-C" || t == "--git-dir" || t == "--work-tree" || t == "--namespace") { if (ghdir(tok[k + 1])) cred_hit = 1; k += 2 }
-      else if (t ~ /^-/) { i = index(t, "="); if (i > 0 && ghdir(substr(t, i + 1))) cred_hit = 1; k++ }
+      else if (t ~ /^-/) { i = index(t, "="); if (i > 0 && ghdir(substr(t, i + 1))) cred_hit = 1; if (t ~ /^-[^-]./ && ghdir(substr(t, 3))) cred_hit = 1; k++ }
       else break
     }
     if (k > ntok) return
     sub1 = tok[k]
     if (sub1 == "credential") cred_hit = 1
     else if (sub1 ~ /^credential-/) { for (j = k + 1; j <= ntok; j++) if (tok[j] == "fill" || tok[j] == "get") cred_hit = 1 }
-    # git var -l は設定の全変数を一覧する（git config -l と同じ）。
-    else if (sub1 == "var") { for (j = k + 1; j <= ntok; j++) if (tok[j] ~ /^-[A-Za-z]*l[A-Za-z]*$/) cred_hit = 1 }
+    # git var -l は設定の全変数を一覧する（git config -l と同じ）。短い形は束ね書き・値つき（-xl・-l=x）も、長い形は
+    # --list とその一意な前置き（--l・--li・--lis。= 連結形も）も止める（git の版で受け付ける形が違うため over-deny 側に倒す）。
+    else if (sub1 == "var") {
+      for (j = k + 1; j <= ntok; j++) {
+        t = tok[j]; lt = t; sub(/=.*$/, "", lt)
+        if ((t ~ /^-[^-]/ && t ~ /l/) || opt_is(lt, "--list", 3)) cred_hit = 1
+      }
+    }
     else if (sub1 == "config") {
       wflag = 0; lflag = 0; eflag = 0; np = 0
       for (j = k + 1; j <= ntok; j++) {
@@ -389,13 +398,37 @@ function cred_check(p, wr,   cb, i, k, t, lt, np, fl, pos, sub1, j, sk, haspat, 
         if (t == "--unset" || t == "--unset-all" || t == "--add" || t == "--replace-all") wflag = 1
         # 設定の一覧・正規表現／URL 照合の読み出しは extraheader の値（認証ヘッダ）を含み得る。キーを 1 つだけ名指す --get は止めない。
         # git の long option は一意な前置きへ略せるので前置きも同一視する。--edit は設定全体をエディタで開く。
-        if (t ~ /^--/) {
-          lt = t; sub(/=.*$/, "", lt)
-          if (opt_is(lt, "--list", 4) || opt_is(lt, "--get-regexp", 7) || opt_is(lt, "--get-urlmatch", 7) || lt == "--regexp" || lt == "--url") lflag = 1
+        # 値を取る option（--file・--blob・--type・--default・--comment・--value と -f・-t）は、独立した語なら次の語、
+        # = 連結形（--file=X・--fi=X）・短い形の連結（-fX・-lfX・-f=X）なら同じ語の残りが値。--file / --blob の値は
+        # どの書き方でも開く形として見る。--regexp・--url も一意な前置き（--reg・--ur）を同一視する。
+        if (t ~ /^--./) {
+          lt = t; sub(/=.*$/, "", lt); i = index(t, "=")
+          if (opt_is(lt, "--list", 4) || opt_is(lt, "--get-regexp", 7) || opt_is(lt, "--get-urlmatch", 7) || opt_is(lt, "--regexp", 5) || opt_is(lt, "--url", 4)) lflag = 1
           if (opt_is(lt, "--edit", 3)) eflag = 1
+          if (opt_is(lt, "--file", 4) || opt_is(lt, "--blob", 4)) {
+            if (i > 0) v = substr(t, i + 1); else { v = tok[j + 1]; j++ }
+            cred_tok(v)
+            # --blob の値 <rev>:<path> は path 側も見る（cat .git-credentials と同じ扱い）。
+            if (opt_is(lt, "--blob", 4) && index(v, ":") > 0) cred_tok(substr(v, index(v, ":") + 1))
+          }
+          else if (i == 0 && (opt_is(lt, "--type", 3) || opt_is(lt, "--default", 3) || opt_is(lt, "--comment", 4) || opt_is(lt, "--value", 4))) j++
+          continue
         }
-        else if (t ~ /^-[A-Za-z]+$/) { if (t ~ /l/) lflag = 1; if (t ~ /e/) eflag = 1 }
-        if (t ~ /^-/) { if (t == "-f" || t == "--file" || t == "--blob") cred_tok(tok[j + 1]); if (t == "-f" || t == "--file" || t == "--blob" || t == "--type" || t == "-t" || t == "--default") j++; continue }
+        if (t ~ /^-[^-]/) {
+          for (m = 2; m <= length(t); m++) {
+            c = substr(t, m, 1)
+            if (c == "l") lflag = 1
+            else if (c == "e") eflag = 1
+            else if (c == "f" || c == "t") {
+              v = substr(t, m + 1)
+              if (v == "") { v = tok[j + 1]; j++ }
+              if (c == "f") cred_tok(v)
+              break
+            }
+          }
+          continue
+        }
+        if (t ~ /^-/) continue
         np++
         if (np == 1 && t == "list") lflag = 1
         if (np == 1 && t == "edit") eflag = 1
@@ -413,7 +446,8 @@ function cred_check(p, wr,   cb, i, k, t, lt, np, fl, pos, sub1, j, sk, haspat, 
       if (sk) { sk = 0; continue }
       if (t == "-m" || t == "--message") { sk = 1; continue }
       if (t ~ /^--message=/ || t ~ /^-m./) continue
-      if (t ~ /^-/) { i = index(t, "="); if (i > 0 && ghdir(substr(t, i + 1))) cred_hit = 1; continue }
+      # --opt=VALUE と短い形の連結 -xVALUE（git diff -O<file> 等）の VALUE も ~/.config/gh かを見る。
+      if (t ~ /^-/) { i = index(t, "="); if (i > 0 && ghdir(substr(t, i + 1))) cred_hit = 1; if (t ~ /^-[^-]./ && ghdir(substr(t, 3))) cred_hit = 1; continue }
       if (ghdir(t)) cred_hit = 1
       if (noidx) cred_tok(t)
     }
