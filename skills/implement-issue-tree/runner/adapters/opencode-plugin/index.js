@@ -1,6 +1,7 @@
 // iit ランナー専用の OpenCode plugin: shell 実行許可（permission.evaluate）で共通ガード agent-guard.sh を呼ぶ。
 // Codex 側の codex-hook.sh と同じ意味にそろえてある。ログの形式（`<epoch 秒>\t<コード>`）・共通のコード（allow・
-// allow-mergeform・deny-guard-missing・deny-error・deny-noresult・deny:<理由>）・拒否の文言も codex-hook.sh と同じ
+// allow-mergeform・deny-guard-missing・deny-error・deny-noresult・deny:<理由>）・拒否の文言（obfuscated・credential-read の
+// 手がかりの 1 文を含む。下の DENY_HINTS）も codex-hook.sh と同じ
 // （runner-guard-parity.test.mjs が縛る）。plugin だけのコードは deny-bad-event・deny-protected-edit・deny-budget。
 //
 // 配布物の plugin（init-opencode）との違い: ランナーのセッションは親を持たない top-level になり、配布物の plugin は
@@ -168,11 +169,19 @@ function takeMergeBind(binds, event) {
   return b.at + MERGE_BIND_TTL_MS >= Date.now() && event.resources.length === 1 && event.resources[0] === b.tail
 }
 
+// 理由コードごとの言い直しの手がかり（codex-hook.sh の deny_hint と同じ文字列。runner-guard-parity.test.mjs が文言を固定する）。
+// モデルが理由コードだけでは原因を特定できず中止した 2 つ（Phase 3）に限る。書き方の言い直しだけを示し、止められた操作を
+// 別の綴りで迂回しないことを必ず添える。ガードを回避する方法は書かない。
+const DENY_HINTS = {
+  obfuscated: "。手がかり: 単一引用符の文字列の末尾に $ を置かない（正規表現は全体を括弧で包み、'(…$)' の形にする）。$'…' と $IFS は使わない。止められた操作そのものを別の綴りで迂回しない。",
+  'credential-read': '。手がかり: 名前に TOKEN・SECRET・PASSWORD・KEY などを含む変数は、展開も表示もしない。件数などは、そうした語を含まない名前（例: hits）の変数に入れる。止められた操作そのものを別の綴りで迂回しない。',
+}
+
 // ガードの判定結果のコード → 拒否の文言（codex-hook.sh の emit_deny と同じ文字列）
 const guardDenyMessage = (code) => {
   if (code === 'deny-guard-missing') return 'iit-runner: ガードが見つからないため拒否した'
   if (code === 'deny-error') return 'iit-runner: ガードが異常終了したため拒否した'
-  if (code.startsWith('deny:')) return `iit-runner: ガードの判定により拒否した（${code}）`
+  if (code.startsWith('deny:')) return `iit-runner: ガードの判定により拒否した（${code}）${Object.hasOwn(DENY_HINTS, code.slice(5)) ? DENY_HINTS[code.slice(5)] : ''}`
   return 'iit-runner: ガードの結果を得られないため拒否した'
 }
 

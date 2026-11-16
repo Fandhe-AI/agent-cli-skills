@@ -21,6 +21,9 @@
 #   ログ 1 行 = `<epoch 秒>\t<コード>`。共通のコードは allow・allow-mergeform・deny-guard-missing・deny-error・
 #   deny-noresult・deny:<ガードの理由>。Codex だけのものは deny-args・deny-no-jq・deny-nocmd。
 #   拒否の文言は `iit-runner: ` で始め、ガードの判定による拒否は `ガードの判定により拒否した（deny:<理由>）`。
+#   理由が obfuscated・credential-read のときだけ、文言の後ろに言い直しの手がかりを 1 文足す（deny_hint。plugin の
+#   DENY_HINTS と同じ文字列）。手がかりは書き方の言い直しだけで、止められた操作を別の綴りで迂回しないことを必ず添える。
+#   文字列は JSON へそのまま埋めるため、`"` と `\` と制御文字を含めない（単一引用符で囲み、展開させない）。
 #   ガードの結果行は agent-guard.sh の契約どおり `AGENT_GUARD_RESULT allow` か `AGENT_GUARD_RESULT deny[ <理由>]`
 #   （理由は [a-z-]+。それ以外の形は deny-noresult。理由を JSON へそのまま埋めるため、形を絞ってから使う）。
 set -uf
@@ -34,6 +37,14 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+
+# 理由コードごとの言い直しの手がかり（無いコードは空）。先頭の「。」は文言の続きとして付ける。
+deny_hint() {
+  case "$1" in
+    obfuscated) printf '%s' '。手がかり: 単一引用符の文字列の末尾に $ を置かない（正規表現は全体を括弧で包み、'"'"'(…$)'"'"' の形にする）。$'"'"'…'"'"' と $IFS は使わない。止められた操作そのものを別の綴りで迂回しない。' ;;
+    credential-read) printf '%s' '。手がかり: 名前に TOKEN・SECRET・PASSWORD・KEY などを含む変数は、展開も表示もしない。件数などは、そうした語を含まない名前（例: hits）の変数に入れる。止められた操作そのものを別の綴りで迂回しない。' ;;
+  esac
+}
 
 log() { [ -n "$LOG" ] && printf '%s\t%s\n' "$(date +%s)" "$1" >> "$LOG"; return 0; }
 emit_deny() {
@@ -68,7 +79,7 @@ if [ "$last" = 'AGENT_GUARD_RESULT allow' ]; then
 elif [[ "$last" =~ $deny_re ]]; then
   reason="${BASH_REMATCH[2]:-unknown}"
   log "deny:${reason}"
-  emit_deny "iit-runner: ガードの判定により拒否した（deny:${reason}）"
+  emit_deny "iit-runner: ガードの判定により拒否した（deny:${reason}）$(deny_hint "$reason")"
 else
   log deny-noresult; emit_deny 'iit-runner: ガードの結果を得られないため拒否した'
 fi

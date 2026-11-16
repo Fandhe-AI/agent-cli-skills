@@ -188,7 +188,56 @@ for (const path of REAL_GUARDS) {
       assert.deepEqual(h, p, cmd)
       assert.deepEqual(h.codes, [code], cmd)
       assert.equal(h.deny, code.startsWith('deny'), cmd)
-      if (h.deny) assert.equal(h.message, `iit-runner: ガードの判定により拒否した（${code}）`, cmd)
+      if (h.deny) assert.equal(h.message, `iit-runner: ガードの判定により拒否した（${code}）${HINTS[code] ?? ''}`, cmd)
+    }
+  })
+}
+
+// 理由コードごとの言い直しの手がかり（Phase 3 で、モデルが理由コードだけでは原因を特定できず中止した 2 つ）。
+// 文言はここで固定する（両アダプタで同じ文字列。手がかりは言い直しの方法だけで、止められた操作を別の綴りで迂回しないことを添える）。
+const HINTS = {
+  'deny:obfuscated': "。手がかり: 単一引用符の文字列の末尾に $ を置かない（正規表現は全体を括弧で包み、'(…$)' の形にする）。$'…' と $IFS は使わない。止められた操作そのものを別の綴りで迂回しない。",
+  'deny:credential-read': '。手がかり: 名前に TOKEN・SECRET・PASSWORD・KEY などを含む変数は、展開も表示もしない。件数などは、そうした語を含まない名前（例: hits）の変数に入れる。止められた操作そのものを別の綴りで迂回しない。',
+}
+
+// 手がかりの対の実測: 左は配布物のガードが該当の理由で止める形、右は手がかりどおりに言い直した形（ガードは allow）。
+const HINT_PAIRS = [
+  ['deny:obfuscated', `pat='(token|secret)$'; n=$(grep -cE "$pat" f); echo "$n"`, `pat='((token|secret)$)'; n=$(grep -cE "$pat" f); echo "$n"`],
+  ['deny:obfuscated', String.raw`n=$(git diff | grep -cE '^\+.*foo$'); echo $n`, String.raw`n=$(git diff | grep -cE '(^\+.*foo$)'); echo $n`],
+  ['deny:credential-read', 'TOKEN_HITS=$(grep -c token f); echo $TOKEN_HITS', 'hits=$(grep -c token f); echo $hits'],
+]
+
+test('拒否の文言: obfuscated と credential-read には言い直しの手がかりを 1 文足し、両アダプタ（hook の JSON・plugin の permission と全文の throw）で同じ文字列', async () => {
+  for (const [code, hint] of Object.entries(HINTS)) {
+    assert.ok(hint.includes('止められた操作そのものを別の綴りで迂回しない'), code)
+    assert.ok(!/["\\\u0000-\u001f]/.test(hint), `${code}: JSON に埋めるため " と \\ と制御文字を含めない`)
+    const body = `#!/bin/bash\necho "AGENT_GUARD_RESULT deny ${code.slice(5)}"\nexit 2\n`
+    const want = `iit-runner: ガードの判定により拒否した（${code}）${hint}`
+    const h = viaHook(body, 'x')
+    const p = await viaPlugin(body, 'x')
+    assert.equal(h.message, want, 'hook（JSON.parse 後の permissionDecisionReason）')
+    assert.equal(p.message, want, 'plugin の permission.evaluate')
+    // 全文の判定（tool.execute.before）の throw も同じ文言
+    const t = await viaPlugin(body, 'x', { bind: 'x' })
+    assert.equal(t.message, want, 'plugin の tool.execute.before')
+  }
+  // 手がかりを持たない理由は従来どおり理由コードだけ
+  const plain = viaHook('#!/bin/bash\necho "AGENT_GUARD_RESULT deny no-verify"\nexit 2\n', 'x')
+  assert.equal(plain.message, 'iit-runner: ガードの判定により拒否した（deny:no-verify）')
+  assert.deepEqual(await viaPlugin('#!/bin/bash\necho "AGENT_GUARD_RESULT deny no-verify"\nexit 2\n', 'x'), plain)
+})
+
+for (const path of REAL_GUARDS) {
+  test(`手がかりは配布物の agent-guard.sh（${path.split('/skills/')[1]}）に対して正しい: 止められる形は該当の理由で deny、言い直した形は allow`, async () => {
+    for (const [code, bad, good] of HINT_PAIRS) {
+      const hb = viaHook({ path }, bad)
+      const pb = await viaPlugin({ path }, bad)
+      assert.deepEqual(hb, pb, bad)
+      assert.deepEqual(hb.codes, [code], bad)
+      assert.equal(hb.message, `iit-runner: ガードの判定により拒否した（${code}）${HINTS[code]}`, bad)
+      const hg = viaHook({ path }, good)
+      assert.deepEqual(hg.codes, ['allow'], good)
+      assert.deepEqual(await viaPlugin({ path }, good), hg, good)
     }
   })
 }
