@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
-import { createAdapter, buildProfileArgs, classifyFailure, summarizeEvents, DARWIN_HEREDOC_TMP, platformWritePaths } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
+import { createAdapter, buildProfileArgs, classifyFailure, summarizeEvents, DARWIN_HEREDOC_TMP, platformWritePaths, stdinWritesOf, blankJsStrings, findRollouts } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
 import { decodeStrictText, strictifySchema } from '../../../skills/implement-issue-tree/runner/adapters/codex-strict.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 
@@ -202,14 +202,15 @@ test('CODEX_HOME: 呼び出し元の環境変数 → 無ければ ~/.codex を s
   await a.close()
   const cs = t.calls()
   assert.deepEqual(cs.map((c) => c.env?.CODEX_HOME ?? c.env), [ch, ch, ch])
-  assert.equal(existsSync(ch), false, 'アダプタは CODEX_HOME を作らない')
+  // CODEX_HOME の下にあるのは（偽）codex 自身が書くセッションの記録だけで、アダプタは何も作らない
+  assert.deepEqual(readdirSync(ch), ['sessions'], 'アダプタは CODEX_HOME に何も作らない')
   assert.equal(existsSync(join(t.runDir, 'codex-home')), false)
   // 未指定なら ~/.codex（HOME は偽ホーム）。ホームのファイルには何も書かない
   const t2 = setup({ turns: [okTurn()] })
   await t2.adapter.run(t2.req())
   assert.equal(t2.calls()[0].env.CODEX_HOME, join(t2.fakeHome, '.codex'))
-  assert.equal(existsSync(join(t2.fakeHome, '.codex')), false)
-  assert.deepEqual(readdirSync(t2.fakeHome), [])
+  assert.deepEqual(readdirSync(t2.fakeHome), ['.codex'])
+  assert.deepEqual(readdirSync(join(t2.fakeHome, '.codex')), ['sessions'])
   // toolConfig.codexHome が最優先
   const t3 = setup({ turns: [okTurn()], toolConfig: { codexHome: ch } })
   await t3.adapter.run(t3.req())
@@ -631,4 +632,96 @@ test('killSync（LOW-11）: 実行中の codex のプロセスグループ（孫
   await assert.rejects(p)
   for (let i = 0; i < 30 && alive(gc); i++) await new Promise((r) => setTimeout(r, 100))
   assert.equal(alive(gc), false, '孫の sleep が残っていない')
+})
+
+// ---------------------------------------------------------------------------
+// MEDIUM-5（監査 e670648）: write_stdin の事後検知
+// 記録の形は 2026-11-17 の codex-cli 0.169.0・gpt-6.1-sol の 1 回の実測（code mode の custom_tool_call "exec"）を手で組んだもの
+// ---------------------------------------------------------------------------
+
+const rollout = (id, items) => [{ type: 'session_meta', payload: { id } }, ...items.map((payload) => ({ type: 'response_item', payload }))].map((l) => JSON.stringify(l)).join('\n')
+const exec = (input) => ({ type: 'custom_tool_call', name: 'exec', call_id: 'c', input })
+
+test('MEDIUM-5 stdinWritesOf: 実測の形。空の chars（poll）は数えず、空でない chars を数える', () => {
+  const r = stdinWritesOf(rollout(U1, [
+    exec('text(await tools.exec_command({cmd:"bash --noprofile --norc -i",tty:true}));\n'),
+    exec('text(await tools.write_stdin({session_id:42023,chars:"",yield_time_ms:1000}));\n'),
+    exec('text(await tools.write_stdin({session_id:42023,chars:"echo IIT > /tmp/m\\n"}));\n'),
+    exec('text(await tools.write_stdin({session_id:42023,chars:"exit\\n"}));\n'),
+  ]))
+  assert.deepEqual(r, { writes: 2, sessionIds: [U1], badLines: 0 })
+})
+
+test('MEDIUM-5 stdinWritesOf: 直接の function_call（arguments は JSON 文字列・オブジェクト）も同じ規則で数える', () => {
+  const fc = (args) => ({ type: 'function_call', name: 'write_stdin', call_id: 'c', arguments: args })
+  assert.equal(stdinWritesOf(rollout(U1, [fc('{"session_id":1,"chars":""}'), fc({ session_id: 1 })])).writes, 0)
+  assert.equal(stdinWritesOf(rollout(U1, [fc('{"session_id":1,"chars":"ls\\n"}')])).writes, 1)
+  assert.equal(stdinWritesOf(rollout(U1, [fc('{not json')])).writes, 1, '解釈できない引数は数える')
+  assert.equal(stdinWritesOf(rollout(U1, [fc({ session_id: 1, chars: 5 })])).writes, 1)
+  assert.equal(stdinWritesOf(rollout(U1, [{ ...fc('{"chars":"x"}'), name: 'functions.write_stdin' }])).writes, 1)
+})
+
+test('MEDIUM-5 stdinWritesOf: tools の別名・計算されたプロパティ・式の引数は解釈できないとして数える。文字列とコメントの中の語は数えない', () => {
+  const w = (input) => stdinWritesOf(rollout(U1, [exec(input)])).writes
+  for (const input of [
+    'const t = tools; await t.write_stdin({session_id:1,chars:"x"})',
+    'await tools["write_stdin"]({session_id:1,chars:"x"})',
+    'const { write_stdin } = tools; await write_stdin({session_id:1,chars:""})',
+    'await tools.write_stdin({session_id:1,chars:c})',
+    'await tools.write_stdin({session_id:1,chars:"" + "x"})',
+    'await tools.write_stdin({session_id:1,chars:`${x}`})',
+    'await tools.write_stdin(args)',
+    'const f = tools.write_stdin; await f({session_id:1,chars:"x"})',
+  ]) assert.ok(w(input) >= 1, input)
+  for (const input of [
+    'text(await tools.exec_command({cmd:"ls dev/tools && grep -n write_stdin README.md"}))',
+    '// tools[x] と write_stdin はコメント\ntext(await tools.exec_command({cmd:\'echo "tools"\'}))',
+    'await tools.write_stdin({ "session_id": 7, "chars": \'\', max_output_tokens: 100, })',
+  ]) assert.equal(w(input), 0, input)
+  // 名前が exec でない custom_tool_call（apply_patch 等の本文）は見ない
+  assert.equal(stdinWritesOf(rollout(U1, [{ type: 'custom_tool_call', name: 'apply_patch', input: 'tools.write_stdin({session_id:1,chars:"x"})' }])).writes, 0)
+  // 利用者メッセージの本文は見ない
+  assert.equal(stdinWritesOf(rollout(U1, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'tools.write_stdin({session_id:1,chars:"x"})' }] }])).writes, 0)
+  assert.equal(stdinWritesOf('{"type":"session_meta","payload":{"id":"x"}}\n{broken').badLines, 1)
+})
+
+test('MEDIUM-5 blankJsStrings: 長さを保って文字列とコメントの中身だけを消す。${} を含むテンプレートは残す', () => {
+  const s = 'a("tools\\"x") /* tools */ b(`t${tools}`) // tools'
+  const b = blankJsStrings(s)
+  assert.equal(b.length, s.length)
+  assert.equal((b.match(/tools/g) ?? []).length, 1)
+  assert.match(b, /`t\$\{tools\}`/)
+})
+
+test('MEDIUM-5: 空でない write_stdin のあるターンは denied（出力を返さない）。空の poll だけなら通る', async () => {
+  const t = setup({ turns: [okTurn({ codeMode: ['text(await tools.write_stdin({session_id:3,chars:"gh pr merge 5 --admin\\n"}));'] })] })
+  await rejectsKind(t.adapter.run(t.req()), 'denied')
+  assert.match(readFileSync(join(t.runDir, 'agents', 'a1', 'stdin-check-t1.txt'), 'utf8'), /write_stdin が 1 件/)
+  const t2 = setup({ turns: [okTurn({ codeMode: ['text(await tools.exec_command({cmd:"bash -i",tty:true}));', 'text(await tools.write_stdin({session_id:3,chars:""}));'] })] })
+  assert.equal((await t2.adapter.run(t2.req())).text, '{"ok":true}')
+})
+
+test('MEDIUM-5: resume のターンでも同じ記録（追記）を見て、前のターンの分を含めて検知する', async () => {
+  const t = setup({ turns: [okTurn(), okTurn({ codeMode: ['await tools.write_stdin({session_id:1,chars:"x"})'] })] })
+  const r = await t.adapter.run(t.req())
+  await assert.rejects(t.adapter.run(t.req({ resume: { sessionRef: r.sessionRef, message: 'm' } })), (e) => e.kind === 'denied' && e.sessionRef === U1)
+})
+
+test('MEDIUM-5: 記録が無い・2 つある・session_meta の id が違う場合は denied（fail-closed）', async () => {
+  for (const over of [{ noRollout: true }, { extraRollout: true }, { rolloutId: U2 }]) {
+    const t = setup({ turns: [okTurn(over)] })
+    await rejectsKind(t.adapter.run(t.req()), 'denied')
+  }
+})
+
+test('MEDIUM-5 findRollouts: 名前の -<id>.jsonl だけで探し、symlink は除く', async () => {
+  const t = setup({ turns: [okTurn()] })
+  await t.adapter.run(t.req())
+  const home = join(t.fakeHome, '.codex')
+  assert.equal(findRollouts(home, U1).length, 1)
+  assert.deepEqual(findRollouts(home, U2), [])
+  const { symlinkSync } = await import('node:fs')
+  symlinkSync(findRollouts(home, U1)[0], join(home, 'sessions', `rollout-x-${U2}.jsonl`))
+  assert.deepEqual(findRollouts(home, U2), [], 'symlink は記録として読まない')
+  assert.deepEqual(findRollouts(join(t.root, 'none'), U1), [])
 })

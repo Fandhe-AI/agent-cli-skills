@@ -28,7 +28,17 @@
 //   既知の穴（監査 e670648 の MEDIUM-5・実測済み）: exec_command で開いた対話シェルへ write_stdin で送った行は、
 //   hook（PreToolUse）にも command_execution にも現れず、(1)(2) のどちらも通らない。matcher を "*" にしても
 //   write_stdin の呼び出しは記録されず（記録用の hook は jq の失敗を捨てていたので、呼ばれなかったとまでは確かめていない）、
-//   hook の入力は command だけで tty の有無も見えず、`-c features.unified_exec=false` も効かなかった（codex-cli 0.169.0）。塞ぐ手段はランナー側に無い（README の既知の限界）。
+//   hook の入力は command だけで tty の有無も見えず、`-c features.unified_exec=false` も効かなかった（codex-cli 0.169.0）。
+//   unified exec を止められるのは managed requirements（システム全体の設定）だけで、ランナーからは事前に塞げない。
+//   そこで (4) 事後検知: 成功したターンの後、自分のセッションの記録（<CODEX_HOME>/sessions/**/rollout-*-<id>.jsonl）を読み、
+//   入力が空でない write_stdin の呼び出しがあれば AdapterError('denied') にする（出力をホストへ流さない）。記録が見つからない・
+//   1 つに決まらない・解釈できない場合も denied（fail-closed）。読むのは自分の sessionRef の記録だけで、認証ファイルは開かない。
+//   記録の形（2026-11-17・codex-cli 0.169.0・gpt-6.1-sol の 1 回の実測。scratchpad の sec-int/m5）: モデルの tool 呼び出しは
+//   code mode の custom_tool_call（name "exec"）の input に JavaScript の文字列として入る
+//   （例: `text(await tools.write_stdin({session_id:42023,chars:"",yield_time_ms:1000}));`）。直接の function_call
+//   （name "write_stdin"・arguments は JSON 文字列）の形も同じ規則で見る（stdinWritesOf）。code mode の input は静的に読むだけ
+//   なので、tools を別名・計算されたプロパティで参照された場合は「解釈できない」として denied に倒すが、それ以上の難読化
+//   （globalThis 経由等）は検知できない（best-effort。README の既知の限界）。
 //   allowMerge は hook のコマンド行へ --merge-re を埋めるかどうかで切り替える。埋める形は req.merge の PR 番号で
 //   具体化した guard.mergeExecCommandFor(prNumber) で、merge 段の子の env には GH_REPO=<req.merge.repo> を固定する
 //   （監査 e670648 の MEDIUM-8。汎用の MERGE_EXEC_COMMAND は別の PR 番号・GH_REPO を向けた別リポジトリでも通った）。
@@ -73,7 +83,7 @@
 //
 // 時間切れ: プロセスグループへ SIGTERM、猶予後に SIGKILL（孫も止まる。setsid で抜けた孫は止められない）。
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -203,6 +213,115 @@ export function summarizeEvents(jsonl) {
   return s
 }
 
+// write_stdin の引数のうち、空の入力（出力の poll）として許すキーと値の形。chars は空の文字列リテラルだけ
+const POLL_ARG = /^\s*(["']?)(session_id|chars|yield_time_ms|max_output_tokens)\1\s*:\s*(.*?)\s*$/s
+const POLL_VALUE = { session_id: /^\d+$/, chars: /^(?:""|''|``)$/, yield_time_ms: /^\d+$/, max_output_tokens: /^\d+$/ }
+
+/** code mode の input 中の `tools.write_stdin({…})` の引数のテキストが、空の入力の poll だけか。 */
+function isPollArgs(body) {
+  if (/[{}()[\]]/.test(body)) return false // 入れ子・式は読まない（解釈できない側に倒す）
+  const parts = body.split(',').filter((p, i, a) => !(i === a.length - 1 && p.trim() === '')) // 末尾のカンマは許す
+  if (parts.length === 0) return false
+  const seen = new Set()
+  for (const p of parts) {
+    const m = POLL_ARG.exec(p)
+    if (!m || seen.has(m[2]) || !POLL_VALUE[m[2]].test(m[3])) return false
+    seen.add(m[2])
+  }
+  return seen.has('session_id')
+}
+
+/**
+ * JavaScript のテキストから文字列リテラルの中身とコメントを空白に置き換える（長さと位置は変えない）。
+ * `${…}` を含むテンプレートリテラルは式を含むので置き換えない（コードとして読む側に倒す）。
+ */
+export function blankJsStrings(src) {
+  const out = src.split('')
+  let i = 0
+  const blank = (a, b) => { for (let k = a; k < b; k++) if (out[k] !== '\n') out[k] = ' ' }
+  while (i < src.length) {
+    const c = src[i]
+    if (c === '/' && src[i + 1] === '/') { const e = src.indexOf('\n', i); const end = e < 0 ? src.length : e; blank(i, end); i = end; continue }
+    if (c === '/' && src[i + 1] === '*') { const e = src.indexOf('*/', i + 2); const end = e < 0 ? src.length : e + 2; blank(i, end); i = end; continue }
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1
+      while (j < src.length && src[j] !== c) j += src[j] === '\\' ? 2 : 1
+      const end = Math.min(j, src.length)
+      if (!(c === '`' && src.slice(i + 1, end).includes('${'))) blank(i + 1, end)
+      i = end + 1
+      continue
+    }
+    i++
+  }
+  return out.join('')
+}
+
+/**
+ * code mode（custom_tool_call の name "exec"）の input を静的に読み、空でない（か解釈できない）write_stdin の数を返す。
+ * 文字列リテラルとコメントの中は見ない（コマンドに `tools` という語が入るのは普通にある）。コードの部分の `tools` は
+ * `tools.<名前>(` の直接の呼び出しだけを読める形とし、それ以外の参照（別名・計算されたプロパティ・分割代入）と、
+ * `tools.write_stdin(` 以外の形の `write_stdin` は、解釈できないものとして 1 件と数える（fail-closed）。
+ */
+function codeModeStdinWrites(input) {
+  const code = blankJsStrings(input)
+  let n = 0
+  let direct = 0
+  for (const m of code.matchAll(/(?<![\w$])tools(?![\w$])/g)) {
+    const at = m.index + m[0].length
+    const call = /^\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/.exec(code.slice(at))
+    if (!call) { n++; continue }
+    if (call[1] !== 'write_stdin') continue
+    direct++
+    // 引数は元のテキストから読む（chars の値を見るため）。位置は code と同じ
+    const args = /^\s*\{([^]*?)\}\s*\)/.exec(input.slice(at + call[0].length))
+    if (!args || !isPollArgs(args[1])) n++
+  }
+  const named = [...code.matchAll(/(?<![\w$])write_stdin(?![\w$])/g)].length
+  return n + Math.max(0, named - direct)
+}
+
+/**
+ * セッションの記録（rollout の JSONL）から、入力が空でない write_stdin の呼び出しを数える。純関数。
+ * 戻り値: { writes: 空でない（か解釈できない）呼び出しの数, sessionIds: session_meta の id の一覧, badLines: JSON でない行の数 }
+ * 形は 2026-11-17 の実測（ファイル冒頭の (4)）。直接の function_call（arguments は JSON 文字列かオブジェクト）と、
+ * code mode の custom_tool_call（name "exec"・input は JavaScript）の両方を見る。
+ */
+export function stdinWritesOf(jsonl) {
+  const r = { writes: 0, sessionIds: [], badLines: 0 }
+  for (const line of String(jsonl).split('\n')) {
+    if (line.trim() === '') continue
+    let e
+    try { e = JSON.parse(line) } catch { r.badLines++; continue }
+    const p = e?.payload
+    if (e?.type === 'session_meta' && typeof p?.id === 'string') { r.sessionIds.push(p.id); continue }
+    if (e?.type !== 'response_item' || p === null || typeof p !== 'object') continue
+    if (p.type === 'function_call' && typeof p.name === 'string' && /(?:^|\.)write_stdin$/.test(p.name)) {
+      let a = p.arguments
+      if (typeof a === 'string') { try { a = JSON.parse(a) } catch { a = undefined } }
+      if (a === null || typeof a !== 'object' || (a.chars !== undefined && typeof a.chars !== 'string')) r.writes++
+      else if (typeof a.chars === 'string' && a.chars !== '') r.writes++
+    } else if (p.type === 'custom_tool_call' && p.name === 'exec') {
+      if (typeof p.input !== 'string') r.writes++
+      else r.writes += codeModeStdinWrites(p.input)
+    }
+  }
+  return r
+}
+
+/**
+ * <codexHome>/sessions の下から、ファイル名が `-<id>.jsonl` で終わる記録を探す（名前だけで探し、他のセッションのファイルは開かない）。
+ * symlink・通常ファイルでないものは除く。戻り値は絶対パスの配列。
+ */
+export function findRollouts(codexHome, id) {
+  const dir = join(codexHome, 'sessions')
+  let names
+  try { names = readdirSync(dir, { recursive: true }) } catch { return [] }
+  const suffix = `-${id}.jsonl`
+  return names.map(String).filter((f) => basename(f).startsWith('rollout-') && f.endsWith(suffix)).map((f) => join(dir, f)).filter((p) => {
+    try { return lstatSync(p).isFile() } catch { return false }
+  })
+}
+
 /** 終了状態から失敗の kind を決める。純関数。失敗でなければ null。 */
 export function classifyFailure({ timedOut, spawnError, exitCode, signal, summary }) {
   if (timedOut) return { kind: 'timeout', message: '時間切れ' }
@@ -275,6 +394,26 @@ export function createAdapter(cfg) {
   }
 
   const countLines = (p) => (existsSync(p) ? readFileSync(p, 'utf8').split('\n').filter(Boolean).length : 0)
+
+  /**
+   * セッションの記録を読み、入力が空でない write_stdin があれば理由の文字列を返す（無ければ null）。
+   * 記録が 0 件・2 件以上・session_meta の id が合わない・JSON でない行がある・id が UUID でない場合も理由を返す（fail-closed）。
+   */
+  function checkStdinWrites(ids) {
+    if (ids.size === 0) return 'write_stdin の事後検知: 確かめるセッションが無い（thread.started も resume 先も無い）'
+    for (const id of ids) {
+      if (!UUID.test(id)) return `write_stdin の事後検知: セッション ID の形が不正（${String(id).slice(0, 80)}）`
+      const files = findRollouts(codexHome, id)
+      if (files.length !== 1) return `write_stdin の事後検知: セッション ${id} の記録が ${files.length} 件（1 件に決まらない）。出力を使わない`
+      let text
+      try { text = readFileSync(files[0], 'utf8') } catch (e) { return `write_stdin の事後検知: セッション ${id} の記録を読めない（${e.code ?? e.message}）` }
+      const r = stdinWritesOf(text)
+      if (r.badLines > 0) return `write_stdin の事後検知: セッション ${id} の記録に JSON でない行が ${r.badLines} 行ある`
+      if (!r.sessionIds.includes(id)) return `write_stdin の事後検知: 記録の session_meta がセッション ${id} と一致しない`
+      if (r.writes > 0) return `write_stdin の事後検知: セッション ${id} に入力が空でない（か解釈できない）write_stdin が ${r.writes} 件ある。ガードを通らずに実行された可能性があるので出力を使わない`
+    }
+    return null
+  }
 
   async function run(req) {
     await start()
@@ -356,6 +495,13 @@ export function createAdapter(cfg) {
     const hookLines = countLines(hookLog) - hookBefore
     if (hookLines < summary.commandCount) {
       throw new AdapterError('denied', `ガードの欠落: hook の呼び出し ${hookLines} 件がコマンド実行 ${summary.commandCount} 件より少ない`, extra)
+    }
+    // write_stdin の事後検知（冒頭の (4)。MEDIUM-5）。このターンの thread と resume 先のセッションの記録を全部見る
+    const ids = new Set([...summary.threadIds.filter((id) => UUID.test(id)), ...(resume ? [resume.sessionRef] : [])])
+    const stdinProblem = checkStdinWrites(ids)
+    if (stdinProblem) {
+      try { writeFileSync(join(logDir, `stdin-check-${tag}.txt`), `${stdinProblem}\n`) } catch { /* ログ失敗で判定を変えない */ }
+      throw new AdapterError('denied', stdinProblem, extra)
     }
     let text = null
     try { text = readFileSync(lastPath, 'utf8') } catch { /* 下で代替 */ }

@@ -58,7 +58,7 @@ _/iit-runner/<runId>/
     meta.json                  { label, seq, sessionRef, outcome, kind?, status?, reason?, startedAt, endedAt, ... }
     request.json・prompt.txt   モデルへ回した段の入力
     exec.json・stdout.txt・stderr.txt   実行仕様で直接実行した段
-    （アダプタのログ: Codex は events-t<N>.jsonl・final-t<N>.txt、OpenCode は events.jsonl・final.txt・error.txt）
+    （アダプタのログ: Codex は events-t<N>.jsonl・final-t<N>.txt・stdin-check-t<N>.txt〔write_stdin の事後検知で拒否したとき〕、OpenCode は events.jsonl・final.txt・error.txt）
 ```
 
 - `result` はホストの return 値そのまま（dryRun なら `startable`・`blocked` 等の見積り）。終了コードが 0 以外のときは `null`。
@@ -105,9 +105,18 @@ _/iit-runner/<runId>/
   通らずに実行される（codex-cli 0.169.0 で実測。matcher を `*` にしても `write_stdin` の呼び出しは hook の記録に
   残らず、`-c features.unified_exec=false` も効かなかった。記録用の hook は入力を jq で読み、jq の失敗を捨てていた
   ため、`write_stdin` で hook が呼ばれなかったとまでは確かめていない。送った行がガードを通らずに実行されたことは
-  確かめた）。ランナーからは塞げないため、`agent-guard.sh` と同じくサーバー側の
-  ruleset で補う。対話シェルは sandbox の中で起動されるため、書ける場所の制限（permission profile）は及ぶ想定である
-  （この経路での書き込み拒否は実測していない）。
+  確かめた）。unified exec を無効にできるのは managed requirements（システム全体の設定）だけで、ランナーからは
+  事前に塞げない。これは「ファイルに書いたスクリプトを実行すると、ガードはスクリプトの中身を見ない」のと同じ類型の
+  残余で、`agent-guard.sh` と同じくサーバー側の ruleset で補う。対話シェルは sandbox の中で起動されるため、書ける場所の
+  制限（permission profile）は及ぶ想定である（この経路での書き込み拒否は実測していない）。
+  - 事後検知: Codex アダプタは各ターンの後に自分のセッションの記録（`<CODEX_HOME>/sessions/` の下の
+    `rollout-*-<セッション ID>.jsonl`。読むのはこれだけで、認証ファイルは開かない）を読み、入力が空でない
+    `write_stdin` があればその段を拒否（denied）にして出力をホストへ流さない。記録が見つからない・1 つに決まらない・
+    読めない場合も拒否する。実行そのものは止められず、止まるのはその結果の利用だけである。
+  - codex-cli 0.169.0（`gpt-6.1-sol`）では tool の呼び出しが code mode（`exec` の入力の JavaScript）として記録される。
+    検知はその JavaScript を静的に読むだけなので、`tools` を別名・計算されたプロパティで参照した呼び出しは
+    拒否に倒すが、`globalThis` 経由等の難読化は検知できない（best-effort）。モデルが `spawn_agent` で起動した
+    子エージェントのセッションの記録は見ていない。
 - エージェントは、ランナーと同じ OS ユーザーで、ランナーの環境変数を引き継いで動く（両ツール共通）。環境変数にある秘密
   （`GH_TOKEN` 等）は読め、gh の認証はエージェントの gh からそのまま使える。ガードは認証ファイルの読み出しの形を止めるが、
   環境変数の読み出しは止めない（`node -e` による読み出しが `agent-guard.sh` で allow になることを監査で実測）。被害の範囲は、

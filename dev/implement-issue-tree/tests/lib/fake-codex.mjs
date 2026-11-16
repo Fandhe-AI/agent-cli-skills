@@ -14,10 +14,18 @@
 //     exitCode,              終了コード（既定 0。fail 指定時は 1）
 //     hang: true,            終了せず待つ（時間切れ試験）。SIGTERM を無視する
 //     grandchild: <pid file>,孫プロセス（sleep）を同じプロセスグループで起動し、pid を書く
+//     codeMode: [input, …],  セッションの記録へ code mode の呼び出し（custom_tool_call・name "exec"・input は JavaScript）を書く
+//     functionCalls: [{ name, arguments }, …], セッションの記録へ直接の function_call を書く
+//     noRollout: true,       セッションの記録を書かない（記録が見つからない状況）
+//     extraRollout: true,    同じ ID の記録をもう 1 つ別の日付の下に書く（1 つに決まらない状況）
+//     rolloutId,             記録の session_meta の id（既定は threadId。食い違いの再現）
 //   }
+// セッションの記録: 実 codex と同じく <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<時刻>-<threadId>.jsonl に書く
+// （resume は同じファイルへ追記する。形は 2026-11-17 の codex-cli 0.169.0 の実測を手で組んだもの）。
 // 記録: FAKE_CODEX_LOG（JSON Lines）へ { argv, env: {…}, stdin, cwd } か { delete: id } を追記する。
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 const argv = process.argv.slice(2)
 const log = process.env.FAKE_CODEX_LOG
@@ -51,6 +59,24 @@ const threadId = turn.threadId ?? '00000000-0000-4000-8000-000000000001'
 const outPath = argv[argv.indexOf('-o') + 1]
 ev({ type: 'thread.started', thread_id: threadId })
 ev({ type: 'turn.started' })
+
+if (!turn.noRollout && process.env.CODEX_HOME) {
+  const dir = join(process.env.CODEX_HOME, 'sessions', '2026', '11', '17')
+  const file = join(dir, `rollout-2026-11-17T04-29-58-${threadId}.jsonl`)
+  mkdirSync(dir, { recursive: true })
+  const lines = []
+  if (!existsSync(file)) lines.push({ type: 'session_meta', payload: { id: turn.rolloutId ?? threadId, cli_version: '0.169.0', source: 'exec' } })
+  lines.push({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'tools.write_stdin({session_id:1,chars:"x"})' }] } })
+  let k = 0
+  for (const input of turn.codeMode ?? []) lines.push({ type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: `call_${++k}`, input, status: 'completed' } })
+  for (const fc of turn.functionCalls ?? []) lines.push({ type: 'response_item', payload: { type: 'function_call', call_id: `call_${++k}`, ...fc } })
+  appendFileSync(file, lines.map((l) => `${JSON.stringify(l)}\n`).join(''))
+  if (turn.extraRollout) {
+    const d2 = join(process.env.CODEX_HOME, 'sessions', '2026', '11', '18')
+    mkdirSync(d2, { recursive: true })
+    writeFileSync(join(d2, `rollout-2026-11-18T00-00-00-${threadId}.jsonl`), readFileSync(file))
+  }
+}
 
 if (turn.grandchild) {
   const g = spawn('sleep', ['300'], { stdio: 'ignore' })
