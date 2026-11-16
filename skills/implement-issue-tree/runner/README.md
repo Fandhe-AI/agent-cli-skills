@@ -98,6 +98,12 @@ _/iit-runner/<runId>/
 - OpenCode の merge-exec の対応づけは、全文を `tool.execute.before` で、実際に走るコマンドを permission の後半の完全一致で確かめる。
   代入の部分（`HEAD_SHA="…"`）は permission に出ないため、同じ serve に読み込まれた別の plugin が代入だけを書き換えた場合は
   検知できない（エージェントの入力からは届かない範囲。詳細は `adapters/opencode-plugin/index.js` 冒頭）。
+- Codex で、モデルが `exec_command` で対話シェル（`bash -i` 等）を開き `write_stdin` でコマンドを送ると、送った行は
+  PreToolUse hook（`agent-guard.sh`・merge-exec の完全一致）にも `command_execution` の件数照合にも現れず、ガードを
+  通らずに実行される（codex-cli 0.169.0 で実測。matcher を `*` にしても `write_stdin` は hook に来ず、
+  `-c features.unified_exec=false` も効かなかった）。ランナーからは塞げないため、`agent-guard.sh` と同じくサーバー側の
+  ruleset で補う。対話シェルは sandbox の中で起動されるため、書ける場所の制限（permission profile）は及ぶ想定である
+  （この経路での書き込み拒否は実測していない）。
 - `agent-guard.sh` の既知の限界（変数経由・`$(…)` 経由のコマンドは止まらない）はランナーでも同じ。サーバー側の ruleset で補う
   （自動マージの前提となる構成は `references/automerge-design.md`）。
 - OpenCode の model・variant の割り当てと段ごとの時間切れは暫定値（`config/default.json` の `notes`）。

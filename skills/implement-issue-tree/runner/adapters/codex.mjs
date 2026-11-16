@@ -25,6 +25,10 @@
 //   (2) hook が呼び出しごとに 1 行ログを書き、終了時に「ログの増分 >= command_execution の数」を確かめる
 //       （満たさなければ AdapterError('denied')・ガードの欠落）、
 //   (3) resume にも同じ hook 引数を渡す（渡さない turn ではマージが通った）。
+//   既知の穴（監査 e670648 の MEDIUM-5・実測済み）: exec_command で開いた対話シェルへ write_stdin で送った行は、
+//   hook（PreToolUse）にも command_execution にも現れず、(1)(2) のどちらも通らない。matcher を "*" にしても
+//   write_stdin の呼び出しは記録されず、hook の入力は command だけで tty の有無も見えず、`-c features.unified_exec=false`
+//   も効かなかった（codex-cli 0.169.0）。塞ぐ手段はランナー側に無い（README の既知の限界）。
 //   allowMerge は hook のコマンド行へ --merge-re を埋めるかどうかで切り替える。
 //
 // permission profile は 2 種（:read-only を土台に、ネットワークは有効）:
