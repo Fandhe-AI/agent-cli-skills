@@ -736,3 +736,39 @@ test('MEDIUM-5 findRollouts: 名前の -<id>.jsonl だけで探し、symlink は
   assert.deepEqual(findRollouts(home, U2), [], 'symlink は記録として読まない')
   assert.deepEqual(findRollouts(join(t.root, 'none'), U1), [])
 })
+
+// ---------------------------------------------------------------------------
+// write_stdin の事前の封じ（PR #851 の P0。codex-cli 0.169.0 の実測: hook の入力は tool_input.command だけで tty が見えず、
+// write_stdin では PreToolUse が呼ばれない。tty の無いセッションの stdin は閉じていて write_stdin が失敗し、
+// features.unified_exec_tty=false で exec_command の tty:true が「TTY execution is disabled by config」で拒否される）
+// ---------------------------------------------------------------------------
+
+test('P0 write_stdin: exec にも resume にも -c features.unified_exec_tty=false を渡す（hook の前に置く）', async () => {
+  const t = setup({ turns: [okTurn(), okTurn()] })
+  const r = await t.adapter.run(t.req())
+  await t.adapter.run(t.req({ resume: { sessionRef: r.sessionRef, message: 'm' } }))
+  for (const c of t.calls()) {
+    const i = c.argv.indexOf('features.unified_exec_tty=false')
+    assert.ok(i > 0 && c.argv[i - 1] === '-c', c.argv.join(' '))
+    assert.ok(i < c.argv.findIndex((x) => x.startsWith('hooks.PreToolUse=')))
+  }
+})
+
+test('P0 write_stdin: start は同じ CODEX_HOME と -c で `codex features list` を読み、unified_exec_tty が false でなければ prereq で止める', async () => {
+  const ok = setup({ turns: [okTurn()] })
+  await ok.adapter.start()
+  const fl = readFileSync(`${join(ok.root, 'fake.log')}.features`, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  assert.equal(fl.length, 1)
+  assert.deepEqual(fl[0].argv, ['features', 'list', '-c', 'features.unified_exec_tty=false'])
+  assert.equal(fl[0].env.CODEX_HOME, join(ok.fakeHome, '.codex'))
+  for (const mode of ['tty-forced', 'no-line', 'fail']) {
+    const t = setup({ turns: [okTurn()] })
+    const a = createAdapter({ skillDir: SKILL_DIR, mainRoot: t.mainRoot, runDir: t.runDir, toolConfig: {}, env: { ...t.env, FAKE_CODEX_FEATURES: mode } })
+    const e = await a.start().then(() => null, (err) => err)
+    assert.equal(e?.kind, 'prereq', mode)
+    assert.match(e.message, /unified_exec_tty/, mode)
+    // 確かめられない環境では codex exec を 1 度も起動しない
+    await assert.rejects(a.run(t.req()), (err) => err.kind === 'prereq')
+    assert.equal(t.calls().length, 0, mode)
+  }
+})

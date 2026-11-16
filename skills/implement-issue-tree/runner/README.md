@@ -100,16 +100,18 @@ _/iit-runner/<runId>/
 - OpenCode の merge-exec の対応づけは、全文を `tool.execute.before` で、実際に走るコマンドを permission の後半の完全一致で確かめる。
   代入の部分（`HEAD_SHA="…"`）は permission に出ないため、同じ serve に読み込まれた別の plugin が代入だけを書き換えた場合は
   検知できない（エージェントの入力からは届かない範囲。詳細は `adapters/opencode-plugin/index.js` 冒頭）。
-- Codex で、モデルが `exec_command` で対話シェル（`bash -i` 等）を開き `write_stdin` でコマンドを送ると、送った行は
-  PreToolUse hook（`agent-guard.sh`・merge-exec の完全一致）にも `command_execution` の件数照合にも現れず、ガードを
-  通らずに実行される（codex-cli 0.169.0 で実測。matcher を `*` にしても `write_stdin` の呼び出しは hook の記録に
-  残らず、`-c features.unified_exec=false` も効かなかった。記録用の hook は入力を jq で読み、jq の失敗を捨てていた
-  ため、`write_stdin` で hook が呼ばれなかったとまでは確かめていない。送った行がガードを通らずに実行されたことは
-  確かめた）。unified exec を無効にできるのは managed requirements（システム全体の設定）だけで、ランナーからは
-  事前に塞げない。これは「ファイルに書いたスクリプトを実行すると、ガードはスクリプトの中身を見ない」のと同じ類型の
-  残余で、`agent-guard.sh` と同じくサーバー側の ruleset で補う。対話シェルは sandbox の中で起動されるため、書ける場所の
-  制限（permission profile）は及ぶ想定である（この経路での書き込み拒否は実測していない）。
-  - 事後検知: Codex アダプタは各ターンの後に自分のセッションの記録（`<CODEX_HOME>/sessions/` の下の
+- Codex で、モデルが `exec_command` で対話シェル（`bash -i` 等。tty のあるセッション）を開き `write_stdin` でコマンドを
+  送ると、送った行は PreToolUse hook（`agent-guard.sh`・merge-exec の完全一致）にも `command_execution` の件数照合にも
+  現れない（codex-cli 0.169.0・2026-11-17 の実測: jq を使わず必ず 1 行追記する hook を matcher `*`・`.*`・指定なしで登録
+  しても、`write_stdin` では hook が呼ばれず、送った行は実行された。hook の入力は `tool_input.command` だけで tty の有無は
+  見えない。`-c features.unified_exec=false` は managed requirements に固定されて効かない）。
+  - 事前の封じ: Codex アダプタは `-c features.unified_exec_tty=false` を exec・resume に渡す。同じ実測で、tty を求める
+    `exec_command` は「TTY execution is disabled by config」で拒否され、tty の無いセッション（走り続けて stdin を読む
+    コマンドを含む）への `write_stdin` は「stdin is closed for this session」で失敗し、送った行は実行されなかった。
+    `start` で `codex features list -c features.unified_exec_tty=false` を読み、`unified_exec_tty` が `false` と確かめられ
+    なければ前提の不足（終了コード 3）で止める（managed requirements 等で tty を外せない環境では起動しない）。
+    モデルが `spawn_agent` で起動した子エージェントにこの設定が引き継がれるかは測っていない。
+  - 事後検知（事前の封じの補い）: Codex アダプタは各ターンの後に自分のセッションの記録（`<CODEX_HOME>/sessions/` の下の
     `rollout-*-<セッション ID>.jsonl`。読むのはこれだけで、認証ファイルは開かない）を読み、入力が空でない
     `write_stdin` があればその段を拒否（denied）にして出力をホストへ流さない。記録が見つからない・1 つに決まらない・
     読めない場合も拒否する。実行そのものは止められず、止まるのはその結果の利用だけである。

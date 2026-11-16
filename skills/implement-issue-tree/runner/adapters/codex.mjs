@@ -25,12 +25,18 @@
 //   (2) hook が呼び出しごとに 1 行ログを書き、終了時に「ログの増分 >= command_execution の数」を確かめる
 //       （満たさなければ AdapterError('denied')・ガードの欠落）、
 //   (3) resume にも同じ hook 引数を渡す（渡さない turn ではマージが通った）。
-//   既知の穴（監査 e670648 の MEDIUM-5・実測済み）: exec_command で開いた対話シェルへ write_stdin で送った行は、
-//   hook（PreToolUse）にも command_execution にも現れず、(1)(2) のどちらも通らない。matcher を "*" にしても
-//   write_stdin の呼び出しは記録されず（記録用の hook は jq の失敗を捨てていたので、呼ばれなかったとまでは確かめていない）、
-//   hook の入力は command だけで tty の有無も見えず、`-c features.unified_exec=false` も効かなかった（codex-cli 0.169.0）。
-//   unified exec を止められるのは managed requirements（システム全体の設定）だけで、ランナーからは事前に塞げない。
-//   そこで (4) 事後検知: 成功したターンの後、自分のセッションの記録（<CODEX_HOME>/sessions/**/rollout-*-<id>.jsonl）を読み、
+//   穴（監査 e670648 の MEDIUM-5・PR #851 の P0。実測済み）: exec_command で開いた対話シェルへ write_stdin で送った行は、
+//   hook（PreToolUse）にも command_execution にも現れず、(1)(2) のどちらも通らない。2026-11-17（codex-cli 0.169.0・gpt-6.1-sol。
+//   scratchpad の cx-probe）に、jq を使わず stdin を生のまま保存して必ず 1 行追記する hook を matcher "*"・".*"・指定なしの
+//   3 つで同時に登録して測った: どれも exec_command（tool_name "Bash"）では呼ばれ、write_stdin では呼ばれず、送った
+//   `echo PROBE > marker` は実行された（marker が作られた。同じ回の exec_command の `echo PROBE > marker2` は deny で止まった）。
+//   hook の入力は tool_input.command だけで tty の有無は見えない。`-c features.unified_exec=false` は効かない（managed
+//   requirements で true に固定される）。
+//   (4) 事前の封じ（TTY_OFF）: `-c features.unified_exec_tty=false` を exec・resume に渡す。同じ実測で、tty:true の exec_command は
+//   「TTY execution is disabled by config」で拒否され、tty の無いセッション（`sh -c 'sleep 8; while read …'` のように走り続ける
+//   ものを含む）への write_stdin は「stdin is closed for this session」で失敗し、marker は作られなかった。start で
+//   `codex features list -c <TTY_OFF>` を読み、unified_exec_tty が false と確かめられなければ prereq で止める。
+//   (5) 事後検知（(4) の補い）: 成功したターンの後、自分のセッションの記録（<CODEX_HOME>/sessions/**/rollout-*-<id>.jsonl）を読み、
 //   入力が空でない write_stdin の呼び出しがあれば AdapterError('denied') にする（出力をホストへ流さない）。記録が見つからない・
 //   1 つに決まらない・解釈できない場合も denied（fail-closed）。読むのは自分の sessionRef の記録だけで、認証ファイルは開かない。
 //   記録の形（2026-11-17・codex-cli 0.169.0・gpt-6.1-sol の 1 回の実測。scratchpad の sec-int/m5）: モデルの tool 呼び出しは
@@ -113,6 +119,27 @@ export function platformWritePaths(platform) {
  * stash・switch -c は通った（2026-11-17。Linux の bubblewrap は未測定）。
  */
 export const GITDIR_READ_ONLY = Object.freeze(['commondir', 'gitdir', 'config.worktree'])
+
+/**
+ * 対話シェル（tty のある unified exec セッション）を作らせない `-c`。exec と resume の両方に渡す（PR #851 の P0）。
+ * write_stdin で送った行は PreToolUse hook を通らない（matcher "*"・".*"・指定なしのどれでも hook は呼ばれなかった）が、
+ * tty の無いセッションは stdin が閉じていて write_stdin が「stdin is closed for this session」で失敗する。
+ * この設定で exec_command の tty:true は「TTY execution is disabled by config」で拒否される
+ * （2026-11-17・codex-cli 0.169.0・gpt-6.1-sol の実測。scratchpad の cx-probe。unified_exec 自体は managed requirements で
+ * 外せないが、unified_exec_tty は -c で外せた）。効いていることは start で `codex features list` により確かめる。
+ */
+export const TTY_OFF = 'features.unified_exec_tty=false'
+
+/**
+ * `codex features list` の出力から unified_exec_tty の有効状態を読む。純関数。
+ * @returns {boolean|null} 行が 1 つだけで true / false が読めたときその値、他は null（確かめられない）
+ */
+export function ttyFeatureOf(stdout) {
+  const rows = String(stdout).split('\n').map((l) => l.trim().split(/\s+/)).filter((w) => w[0] === 'unified_exec_tty')
+  if (rows.length !== 1) return null
+  const v = rows[0].at(-1)
+  return v === 'true' ? true : v === 'false' ? false : null
+}
 
 const q = (s) => JSON.stringify(s)
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
@@ -292,7 +319,7 @@ function codeModeStdinWrites(input) {
 /**
  * セッションの記録（rollout の JSONL）から、入力が空でない write_stdin の呼び出しを数える。純関数。
  * 戻り値: { writes: 空でない（か解釈できない）呼び出しの数, sessionIds: session_meta の id の一覧, badLines: JSON でない行の数 }
- * 形は 2026-11-17 の実測（ファイル冒頭の (4)）。直接の function_call（arguments は JSON 文字列かオブジェクト）と、
+ * 形は 2026-11-17 の実測（ファイル冒頭の (5)）。直接の function_call（arguments は JSON 文字列かオブジェクト）と、
  * code mode の custom_tool_call（name "exec"・input は JavaScript）の両方を見る。
  */
 export function stdinWritesOf(jsonl) {
@@ -393,6 +420,13 @@ export function createAdapter(cfg) {
     codexHome = resolveCodexHome()
     const r = await execFileP(bin, ['--version'], { env: childEnv(), timeout: 30000 })
     if (r.err) throw new AdapterError('prereq', `codex を実行できない（${bin}）: ${r.err.code ?? r.err.message}`)
+    // 対話シェルを事前に塞げる構成かを確かめる（TTY_OFF。確かめられない・効かない環境では止める。exec は 1 度も起動しない）
+    const f = await execFileP(bin, ['features', 'list', '-c', TTY_OFF], { env: childEnv(), timeout: 30000 })
+    const tty = f.err ? null : ttyFeatureOf(f.stdout)
+    if (tty !== false) {
+      const why = f.err ? `codex features list が失敗（${f.err.code ?? f.err.message}）` : tty === null ? 'codex features list に unified_exec_tty の行が無い・読めない' : '-c で false にしても unified_exec_tty が true のまま（managed requirements 等）'
+      throw new AdapterError('prereq', `unified_exec_tty を無効にできることを確かめられない（${why}）。tty のある対話シェルへ write_stdin で送った行はガードを通らないため、起動しない`)
+    }
     const j = await execFileP('jq', ['--version'], { env: childEnv(), timeout: 30000 })
     if (j.err) throw new AdapterError('prereq', 'jq が見つからない（Codex の hook が fail-closed になるため必須）')
     guardScript = findGuardScript({ toolConfig: tc, skillDir: cfg.skillDir, mainRoot: cfg.mainRoot })
@@ -454,6 +488,7 @@ export function createAdapter(cfg) {
       args.push('--output-schema', sp)
     }
     args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot, home, git, writablePaths, extraWritePaths: tc.extraWritePaths, platform }))
+    args.push('-c', TTY_OFF)
     args.push(...buildHookArgs({ hookScript: HOOK_SCRIPT, guardScript, hookLog, merge }))
     if (resume) args.push(resume.sessionRef)
     args.push('-')
@@ -505,7 +540,7 @@ export function createAdapter(cfg) {
     if (hookLines < summary.commandCount) {
       throw new AdapterError('denied', `ガードの欠落: hook の呼び出し ${hookLines} 件がコマンド実行 ${summary.commandCount} 件より少ない`, extra)
     }
-    // write_stdin の事後検知（冒頭の (4)。MEDIUM-5）。このターンの thread と resume 先のセッションの記録を全部見る
+    // write_stdin の事後検知（冒頭の (5)。MEDIUM-5）。このターンの thread と resume 先のセッションの記録を全部見る
     const ids = new Set([...summary.threadIds.filter((id) => UUID.test(id)), ...(resume ? [resume.sessionRef] : [])])
     const stdinProblem = checkStdinWrites(ids)
     if (stdinProblem) {

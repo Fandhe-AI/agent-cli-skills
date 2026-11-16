@@ -23,6 +23,7 @@
 // セッションの記録: 実 codex と同じく <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<時刻>-<threadId>.jsonl に書く
 // （resume は同じファイルへ追記する。形は 2026-11-17 の codex-cli 0.169.0 の実測を手で組んだもの）。
 // 記録: FAKE_CODEX_LOG（JSON Lines）へ { argv, env: {…}, stdin, cwd } か { delete: id } を追記する。
+// `features list` は下の分岐（<FAKE_CODEX_LOG>.features へ記録）。
 import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -36,6 +37,20 @@ if (argv[0] === 'delete') {
   rec({ delete: argv.at(-1), force: argv.includes('--force'), env: { CODEX_HOME: process.env.CODEX_HOME } })
   console.log(`Deleted session ${argv.at(-1)}.`)
   process.exit(process.env.FAKE_CODEX_DELETE_FAIL === argv.at(-1) ? 1 : 0)
+}
+// `codex features list`（start の unified_exec_tty の確認）。実 codex の出力と同じ「名前 段階 有効」の表。
+// 記録は FAKE_CODEX_LOG とは別の <FAKE_CODEX_LOG>.features へ書く（exec の記録の順番を変えない）。
+// FAKE_CODEX_FEATURES: tty-forced（-c で false にしても true のまま。managed requirements の再現）/ no-line（行が無い）/ fail（非 0 終了）
+if (argv[0] === 'features' && argv[1] === 'list') {
+  if (log) appendFileSync(`${log}.features`, `${JSON.stringify({ argv, env: { CODEX_HOME: process.env.CODEX_HOME ?? null } })}\n`)
+  const mode = process.env.FAKE_CODEX_FEATURES ?? ''
+  if (mode === 'fail') process.exit(2)
+  const off = argv.includes('features.unified_exec_tty=false')
+  const tty = mode === 'tty-forced' ? 'true' : off ? 'false' : 'true'
+  console.log('unified_exec                             stable             true')
+  if (mode !== 'no-line') console.log(`unified_exec_tty                         stable             ${tty}`)
+  console.log('unified_exec_zsh_fork                    removed            false')
+  process.exit(0)
 }
 if (argv[0] !== 'exec') process.exit(64)
 
