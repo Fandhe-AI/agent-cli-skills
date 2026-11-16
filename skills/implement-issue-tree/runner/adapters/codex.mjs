@@ -34,6 +34,7 @@
 //             初回が「状態ファイルの初期化に失敗」で止まった）。
 //   iit_impl: 隔離 worktree。worktree・<main>/.git/{objects,refs,logs,packed-refs,packed-refs.lock}・
 //             <main>/.git/worktrees/<name>（正確なパス）・TMPDIR が書ける。.git/hooks と .git/config は読み取りのまま。
+//             gitdir の下の commondir・gitdir・config.worktree と worktree の .git は read に戻す（GITDIR_READ_ONLY）。
 //   どちらも .codex は読み取り・認証ファイル（<CODEX_HOME>/auth.json と ~/.codex/auth.json）は deny。
 //   darwin では両方に /private/var/tmp（/var/tmp の実体）を書き込み可として足す（sandbox の書き込み範囲を広げる）。
 //   macOS の /bin/bash 3.2 は here-doc の一時ファイルを TMPDIR ではなく /var/tmp に作り（書けなければ /tmp →
@@ -80,6 +81,13 @@ export function platformWritePaths(platform) {
   return platform === 'darwin' ? [DARWIN_HEREDOC_TMP] : []
 }
 
+/**
+ * iit_impl で gitdir（write）の下を read に戻すファイル。`codex sandbox`（codex-cli 0.169.0・macOS Seatbelt）の実測で、
+ * 戻した後は追記・unlink・新規作成・rename での上書き・symlink の作成が失敗し、commit・amend・reset・merge・rebase・
+ * stash・switch -c は通った（2026-11-17。Linux の bubblewrap は未測定）。
+ */
+export const GITDIR_READ_ONLY = Object.freeze(['commondir', 'gitdir', 'config.worktree'])
+
 const q = (s) => JSON.stringify(s)
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 
@@ -113,6 +121,12 @@ export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stat
   if (kind === 'impl' && git) {
     for (const p of ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.lock']) fs[join(git.commonDir, p)] = 'write'
     fs[git.gitdir] = 'write'
+    // gitdir の下で git の行き先を決めるファイルだけ read に戻す（監査 e670648 の HIGH-1。commondir を偽の共通ディレクトリへ
+    // 向けると、sandbox の外で走る worktree-remove.sh の status が偽 config の core.fsmonitor を起動し得た）。
+    // より具体的なパスの指定が優先される（permission-profiles.md）。書き込みが要る側（index・HEAD・*.lock・MERGE_HEAD・
+    // rebase-merge/ 等）は列挙しきれないので gitdir 全体の write に任せ、戻す側を列挙する。
+    for (const f of GITDIR_READ_ONLY) fs[join(git.gitdir, f)] = 'read'
+    fs[join(cwd, '.git')] = 'read'
   }
   for (const p of platformWritePaths(platform)) fs[p] = 'write'
   for (const p of extraWritePaths) fs[p] = 'write'

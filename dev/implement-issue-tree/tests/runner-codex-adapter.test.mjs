@@ -521,3 +521,21 @@ test('HIGH-2: req.worktreeGitdir がメインの .git/worktrees/ の直下でな
   }
   assert.equal(t.calls().length, 0, 'codex を起動しない')
 })
+
+// ---------------------------------------------------------------------------
+// HIGH-1（監査 e670648）: gitdir を write にしても commondir 等の書き換えで sandbox を抜けられない
+// ---------------------------------------------------------------------------
+
+test('HIGH-1: iit_impl は gitdir を write にしたうえで commondir・gitdir・config.worktree と worktree の .git を read に戻す', () => {
+  const git = { gitdir: '/m/.git/worktrees/w1', commonDir: '/m/.git' }
+  const p = buildProfileArgs({ kind: 'impl', cwd: '/m/.claude/worktrees/w1', codexHome: '/c', tmpDir: '/t', home: '/h', git, platform: 'linux' })[1]
+  assert.ok(p.includes('"/m/.git/worktrees/w1"="write"'))
+  for (const f of ['commondir', 'gitdir', 'config.worktree']) assert.ok(p.includes(`"/m/.git/worktrees/w1/${f}"="read"`), f)
+  assert.ok(p.includes('"/m/.claude/worktrees/w1/.git"="read"'))
+  // 書き込みの必要なもの（index・HEAD・logs・rebase-merge/ 等）は列挙せず、gitdir 全体の write に任せる
+  assert.equal(/"\/m\/\.git\/worktrees\/w1\/(index|HEAD|logs)"=/.test(p), false)
+  // read の profile と git の無い impl には足さない
+  const r = buildProfileArgs({ kind: 'read', cwd: '/m', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, platform: 'linux' })[1]
+  assert.equal(r.includes('commondir'), false)
+  assert.equal(buildProfileArgs({ kind: 'impl', cwd: '/w', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, platform: 'linux' })[1].includes('commondir'), false)
+})
