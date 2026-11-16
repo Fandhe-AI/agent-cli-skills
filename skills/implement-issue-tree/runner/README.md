@@ -89,8 +89,8 @@ _/iit-runner/<runId>/
 - Codex の実モデルでの通しで、コマンド実行後に最終応答を返さず止まる事象が run の 2〜4 割で起きる。
   時間切れで `null` になり、ホストの再試行・fail-closed に倒れるため誤った値は通らないが、その分ランが長くなる。
 - Codex はモデルのコマンドを利用者のログインシェル（macOS の既定は zsh）で実行し、呼び出しごとに bash へ固定する設定が無い
-  （子の `SHELL=/bin/bash` も効かないことを実測済み）。代替策として、アダプタが初回のプロンプトの先頭に「複数行は
-  `bash <<'EOF'` で実行し、`status` 等の特殊変数名に代入しない」旨の注意を足し、zsh の here-doc が sandbox 内で書けるよう
+  （子の `SHELL=/bin/bash` も効かないことを実測済み）。代替策として、共通の前置き（`lib/preamble.mjs`）に「複数行は
+  `bash <<'EOF'` で実行し、`status` 等の特殊変数名に代入しない」旨の注意を入れ、Codex アダプタは zsh の here-doc が sandbox 内で書けるよう
   子の env に `TMPPREFIX=<TMPDIR>/zsh` を入れる。モデルが注意に従わず zsh の特殊変数に代入した段は失敗し、ホストの再試行・
   fail-closed に倒れる。
 - `result.json`（と stdout）の `result` はホストの return 値をそのまま写すため、issue のタイトル・エージェントの応答に

@@ -18,7 +18,7 @@ import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { createAgentHost, EXEC_RULES, checkExecRule, interpretExecResult, parseExecSpec } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
 import { AdapterError, KINDS } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 import { loadConfig, resolveModel } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
-import { buildPreamble, buildSchemaInstruction } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
+import { buildPreamble, buildSchemaInstruction, SHELL_NOTE } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
 
 const root = trackTmp(realpathSync(mkdtempSync(join(tmpdir(), 'iit-runner-host-'))))
 const mainRoot = join(root, 'main')
@@ -84,6 +84,14 @@ const withSpec = (spec, body = '本文: このコマンドを実行する') => `
 const hex = (s) => Buffer.from(s, 'utf8').toString('hex')
 
 // ---- モデルへ回す段 ----
+
+test('前置きのシェルの注意: zsh の可能性・bash の here-doc で実行・特殊変数名に代入しない を含み、前置きに入る', () => {
+  assert.match(SHELL_NOTE, /zsh/)
+  assert.ok(SHELL_NOTE.includes("bash <<'EOF'"))
+  assert.match(SHELL_NOTE, /`status`/)
+  assert.match(SHELL_NOTE, /特殊変数名に代入しない/)
+  assert.ok(buildPreamble().split('\n').includes(SHELL_NOTE))
+})
 
 test('前置き・元のプロンプト・schema 指示の順に組み、契約どおりの req をアダプタへ渡す', async () => {
   const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }) })
