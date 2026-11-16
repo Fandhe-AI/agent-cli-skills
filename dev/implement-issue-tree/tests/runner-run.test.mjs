@@ -372,6 +372,27 @@ test('main（LOW-11）: シグナルの処理は start より前に登録し、�
   assert.deepEqual(exits, [129])
 })
 
+test('main（LOW-11）: シグナルの close が進行中に本流が close を呼んでも、同じ後片づけの完了を待ってから戻る', async () => {
+  const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  let closeDone = false
+  const mod = {
+    createAdapter(cfg) {
+      const ad = a.createAdapter(cfg)
+      return { ...ad, async close() { await new Promise((r) => setTimeout(r, 50)); closeDone = true } }
+    },
+  }
+  let handler
+  let signalDone
+  const x = deps({ mod, workflow: tinyWorkflow(async () => { signalDone = handler('SIGTERM'); return {} }) })
+  x.d.onSignal = (h) => { handler = h }
+  const exits = []
+  x.d.exit = (code) => { exits.push(code) }
+  await main(['--tool', 'codex', '--args', argsFile({ parent: 1 }), '--no-build-check'], x.d)
+  assert.equal(closeDone, true, '本流は進行中の close を待つ（セッション削除の途中で戻らない）')
+  await signalDone
+  assert.deepEqual(exits, [143])
+})
+
 test('main（LOW-11）: start 後の想定外の例外（結果の書き出しの失敗）でもアダプタを close する', async () => {
   const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
   const x = deps({ mod: a, workflow: tinyWorkflow(async () => ({})) })

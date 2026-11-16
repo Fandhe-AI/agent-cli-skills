@@ -275,15 +275,18 @@ export async function main(argv, deps = {}) {
     prereq(`アダプタを作れない: ${why.slice(0, 400)}`)
     return finish(3, null, `アダプタを作れない: ${why.slice(0, 400)}`)
   }
-  let closed = false
-  const close = async () => {
-    if (closed) return
-    closed = true
-    try {
-      await adapter.close()
-    } catch (e) {
-      log(`⚠️ ランナー: アダプタの後片づけが失敗した: ${String(e?.message ?? e).slice(0, 200)}`)
-    }
+  // 後片づけは 1 回だけ走らせ、2 回目以降の呼び出しにも同じ Promise を返す（シグナルの close が進行中に本流が close を
+  // 呼んでも、セッションの削除が終わる前に戻って exit しないように）
+  let closing = null
+  const close = () => {
+    closing ??= (async () => {
+      try {
+        await adapter.close()
+      } catch (e) {
+        log(`⚠️ ランナー: アダプタの後片づけが失敗した: ${String(e?.message ?? e).slice(0, 200)}`)
+      }
+    })()
+    return closing
   }
   // 中断・終了時の後片づけ（監査 e670648 の LOW-11）。start() より前に登録する（start 中の中断でも子を残さない）。
   //   - 同期の kill: アダプタの killSync（任意。契約への追加）と実行仕様の子（spawnScript）のプロセスグループを
