@@ -427,9 +427,11 @@ test('実行仕様: label と script・mode・ret・fail が許可表と合わ�
     ['ret 違い', 'state:update:#2', { script: 'state.sh', sha256: SHA, argv: ['--file', 'f', 'merge'], ret: 'exit-ok' }, STATE_WRITE, { ok: false }],
     ['fail 違い', 'state:update:#2', { script: 'state.sh', sha256: SHA, argv: ['--file', 'f', 'merge'], ret: 'line:STATE_RESULT', fail: { ok: true } }, STATE_WRITE, { ok: false }],
     ['--mode が 2 つ', 'detect:external-checks', { script: 'repo-scan.sh', sha256: SHA, argv: ['--mode', 'external-checks', '--mode', 'skip-labels'], ret: 'envelope' }, ENVELOPE, null],
-    ['表に無い label（判断の段）', 'merge-exec:#2', { script: 'state.sh', sha256: SHA, argv: ['--file', 'f', 'merge'], ret: 'line:STATE_RESULT', fail: { ok: false } }, STATE_WRITE, { ok: false }],
-    ['表に無い label・fail なし（sweep の形）', 'plan:#2', { script: 'worktree-remove.sh', sha256: SHA, argv: ['sweep'], ret: 'line:WORKTREE_REMOVE_RESULT' }, SWEEP, { removed: [] }],
-    ['接頭辞だけ一致する label', 'state:update:#2x', { script: 'state.sh', sha256: SHA, argv: ['--file', 'f', 'merge'], ret: 'line:STATE_RESULT' }, STATE_WRITE, { ok: false }],
+    // 表に無い label は、照合できない仕様の fail を返さず null（LOW-14。成功に見える fail をそのまま返さない）
+    ['表に無い label（判断の段）', 'merge-exec:#2', { script: 'state.sh', sha256: SHA, argv: ['--file', 'f', 'merge'], ret: 'line:STATE_RESULT', fail: { ok: false } }, STATE_WRITE, null],
+    ['表に無い label・fail なし（sweep の形）', 'plan:#2', { script: 'worktree-remove.sh', sha256: SHA, argv: ['sweep'], ret: 'line:WORKTREE_REMOVE_RESULT' }, SWEEP, null],
+    ['表に無い label・成功に見える fail', 'plan:#2', { script: 'state.sh', sha256: SHA, argv: ['--file', 'f', 'merge'], ret: 'line:STATE_RESULT', fail: { ok: true } }, STATE_WRITE, null],
+    ['接頭辞だけ一致する label', 'state:update:#2x', { script: 'state.sh', sha256: SHA, argv: ['--file', 'f', 'merge'], ret: 'line:STATE_RESULT' }, STATE_WRITE, null], // 表に無い label と同じ扱い
   ]
   for (const [name, label, spec, schema, want] of cases) {
     control({ out: 'STATE_RESULT {"ok":true}\n' })

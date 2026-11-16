@@ -162,11 +162,10 @@ export function parseExecSpec(prompt) {
  */
 export function checkExecRule(label, spec) {
   const r = EXEC_RULES.find((x) => x.re.test(label))
-  // 表に無い label: 失敗値は仕様の fail を使い、無ければ ret の既定（sweep は ret だけでは決まらないので argv で見る）
-  if (!r) {
-    const fallback = 'fail' in spec ? spec.fail : spec.script === 'worktree-remove.sh' && spec.argv[0] === 'sweep' ? FAIL_SWEEP : FAIL_BY_RET[spec.ret] ?? null
-    return { ok: false, reason: 'label が許可表に無い', fail: fallback }
-  }
+  // 表に無い label: 失敗値は null（応答なし）。仕様の fail は表と照合できないため使わない（監査 e670648 の LOW-14。
+  // 成功に見える値〔{ ok: true } 等〕を検証なしにホストへ返さない）。契約の「実行せず fail を返す」は、表にあって
+  // script・mode・ret・fail が食い違う label の話で、その場合は下の no() が表の fail を返す
+  if (!r) return { ok: false, reason: 'label が許可表に無い', fail: null }
   const no = (reason) => ({ ok: false, reason, fail: r.fail })
   if (spec.script !== r.script) return no(`script が label の許可と違う（${r.script} のみ）`)
   if (!r.modes.includes(MODE_OF[spec.script](spec.argv))) return no('mode が label の許可と違う')

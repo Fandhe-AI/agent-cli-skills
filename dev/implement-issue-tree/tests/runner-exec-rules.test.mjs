@@ -158,4 +158,6 @@ test('許可表と食い違う仕様（script・mode・ret・fail の 1 つ違�
     const r = checkExecRule(label, spec)
     assert.equal(r.ok, false, why)
   }
+  // 表に無い label の失敗値は仕様の fail ではなく null（LOW-14）
+  assert.equal(checkExecRule('plan:#2', { ...base, fail: { ok: true } }).fail, null)
 })
