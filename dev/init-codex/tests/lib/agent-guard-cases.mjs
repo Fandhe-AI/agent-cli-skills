@@ -86,6 +86,8 @@ export const GIT_DENY = [
   ['git --attr-source HEAD push -- +main', 'force-push'],
   ['git -C d --attr-source HEAD commit -n -m x', 'no-verify'],
   ['git --git-dir .git push -f', 'force-push'],
+  ['git -C $Z . push -f', 'force-push'],
+  ['git -c $Z a.b=c push -f', 'force-push'],
 ]
 
 export const GIT_ALLOW = [
@@ -1468,6 +1470,10 @@ export const CRED_DENY = [
   "git -C d -c x=y credential fill",
   "git -C d config --get-regexp .",
   "git -Cwt add config",
+  // 値が $ を含む語は展開で実行時に 0 語になり得る（Z が未設定なら `git -C . credential fill`）ので読み飛ばさない
+  "git -C $Z . credential fill",
+  "git -C \"$Z\" . credential fill",
+  "git -c $Z a.b=c credential fill",
   "git credential-cache exit",
   "git credential-store --file x erase",
   "git config --global user.email x@example.com",

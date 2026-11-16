@@ -324,11 +324,13 @@ function cred_tok(t,   v) {
 function homeparent(t) { return (normpath(t) ~ /^(~|[$]home|[$][{]home[}])(\/([.]config|[.]codex))?\/?$/) }
 # git / gh（tok[c]）のサブコマンドを探し始める添字。git のときだけ、独立した形の `-C <dir>`・`-c <k=v>` を値ごと読み飛ばす
 # （この 2 つはどの版の git でも必ず値を 1 つ取る。連結形 -Cdir・-ck=v と他の option は読み飛ばさない）。
-# -c の値のキー（hookspath・alias.）は hook_swap が別に見る。読み飛ばすと ntok を超えることがある（`git -C`・`git -C d`）。
+# 値が空の語・$ やバッククォートを含む語（展開で実行時に 0 語や複数語になり得る。`git -C $Z . credential fill`）なら読み飛ばさず、
+# option の後ろとして語の集合で見る。-c の値のキー（hookspath・alias.）は hook_swap が別に見る。
+# 読み飛ばすと ntok を超えることがある（`git -C`・`git -C d`）。
 function sub_pos(c,   k, b) {
   k = c + 1
   b = tolower(tok[c]); sub(/^.*\//, "", b)
-  if (b == "git") while (k + 1 <= ntok && (tok[k] == "-C" || tok[k] == "-c")) k += 2
+  if (b == "git") while (k + 1 <= ntok && (tok[k] == "-C" || tok[k] == "-c") && tok[k + 1] != "" && tok[k + 1] !~ /[$`]/) k += 2
   return k
 }
 # git / gh（tok[c]）のサブコマンドが正規表現 re に当たり得るか。sub_pos の語が option でなければ、それが確かにサブコマンドなので
