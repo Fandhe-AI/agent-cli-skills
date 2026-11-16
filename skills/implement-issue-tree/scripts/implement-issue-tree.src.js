@@ -151,7 +151,7 @@ function treeFetchFailureReason(failure, attempt) {
 // ツリー取得 agent のプロンプト。取得そのもの（幅優先・ページ送り・siblingIndex・件数の自己点検）は scripts/fetch-tree.sh が行い、エージェントはコマンドを 1 回実行して出力を nodes へ写し、封筒を転記するだけにする（Issue #668）。 page === 0 は取得（ページ数が 2 以上なら封筒だけを転記し nodes は空。手順 4 も行わない）、page >= 1 はホストが 1 ページごとに起動する
 // ページ読み（そのページの行だけを写し、そのページの open ノードで手順 4 を行う。1 体が扱う量を 1 ページに限る。Issue #690）。opt-in テスト宣言（optinTests）は取得スクリプトが本文から抽出・正規化して TSV の第 7 欄に出し、エージェントは手順 2 で写すだけで本文を読まない（封筒の optinSha256 でホストが照合する）。兄弟のタスク ID（「前の工程（TASK-x-y）」等）の解決は、単一ページ（page === 0 で pages が 1）の手順 4 だけが LLM に課す。ページ読みは他ページの兄弟のタイトルを持たず突き合わせを完遂できない（番号の推測を招く）ため課さない。ページ経路でページ跨ぎの兄弟参照を解決するのは、連結後の全ノードを使うホストの declared-deps
 // （buildSiblingTaskTable → extractDeclaredDeps → mergeDeclaredDeps）だけである。表を作れない親は下のホスト側で停止する。
-function treeFetchPrompt(nonce, command, page) {
+function treeFetchPrompt(command, page) {
   // 本文の取得も取得したツリーと同じリポジトリに束縛する（既定の gh リポジトリが args.repo と違う場合の取り違え防止）
   const repoOpt = repoArg ? ` -R ${repoArg}` : ''
   const only = page === 0 ? 'pages が 1 のときだけ、' : ''
@@ -235,7 +235,7 @@ async function fetchTreePages(main, mainNonce, inputSha) {
       const command = scriptInvocation('fetch-tree.sh', nonce, ` --page ${p} --dir ${shellSingleQuote(dir)}`)
       let result = null
       try {
-        result = await agent(treeFetchPrompt(nonce, command, p), { label: `plan:issue-tree-page-${p}${attempt === 1 ? '' : '-retry'}`, phase: 'Tree', model: 'sonnet', effort: 'medium', schema: TREE_SCHEMA })
+        result = await agent(treeFetchPrompt(command, p), { label: `plan:issue-tree-page-${p}${attempt === 1 ? '' : '-retry'}`, phase: 'Tree', model: 'sonnet', effort: 'medium', schema: TREE_SCHEMA })
       } catch (e) {
         reason = `ツリー取得 agent が失敗: ${errText(e)}`
         log(`⚠️ （ページ ${p}・試行 ${attempt}）${reason}`)
@@ -280,7 +280,7 @@ async function fetchTree() {
     try {
       nonce = boundaryNonce(`fetch-tree:${attempt}:${parent}:${repoArg}`)
       const command = scriptInvocation('fetch-tree.sh', nonce, ` --root ${parent}${repoArg ? ` --repo ${repoArg}` : ''}`)
-      result = await agent(treeFetchPrompt(nonce, command, 0), { label: attempt === 1 ? 'plan:issue-tree' : 'plan:issue-tree-retry', phase: 'Tree', model: 'sonnet', effort: 'medium', schema: TREE_SCHEMA })
+      result = await agent(treeFetchPrompt(command, 0), { label: attempt === 1 ? 'plan:issue-tree' : 'plan:issue-tree-retry', phase: 'Tree', model: 'sonnet', effort: 'medium', schema: TREE_SCHEMA })
     } catch (e) {
       lastReason = `ツリー取得 agent が失敗: ${errText(e)}`
       log(`⚠️ （試行 ${attempt}）${lastReason}`)
@@ -648,6 +648,9 @@ function intD(description) {
 function boolD(description) {
   return { type: 'boolean', description }
 }
+// type だけの定型スキーマ（生成物サイズ予算のため共有する。スキーマはどこでも書き換えないので同じオブジェクトを共有してよい）。
+const SV_INT = { type: 'integer' }
+const SV_STR = { type: 'string' }
 // 頻出する型判定の共通化（生成物サイズ予算 Issue #762）。展開後の判定は従来の式と同一。
 function isInt(v) {
   return Number.isInteger(v)
@@ -1490,7 +1493,7 @@ const TREE_SCHEMA = obj(['nodes'], {
       type: 'array',
       items: obj(['number', 'title', 'state', 'parent', 'siblingIndex', 'dependsOn', 'subIssuesTotal', 'optinTests'], {
           number: { type: 'number' },
-          title: { type: 'string' },
+          title: SV_STR,
           state: strD('open または closed'),
           // ホスト側 findIncompleteTreeNodes が「nodes 内の直下の子の件数」と照合して取得漏れを検出する基準値。エージェントの数え直しでは取得漏れと同じ誤りを再現し得るため API 値の転記に限る。
           subIssuesTotal: {
@@ -1851,7 +1854,7 @@ const OUT_OF_TREE_DONE_STATES = new Set(['CLOSED', 'MERGED'])
 const OUT_OF_TREE_STATE_SCHEMA = obj(['entries'], {
     entries: {
       type: 'array',
-      items: obj(['number', 'state', 'sig'], { number: { type: 'number' }, state: { type: 'string' }, sig: { type: 'number' } }),
+      items: obj(['number', 'state', 'sig'], { number: { type: 'number' }, state: SV_STR, sig: { type: 'number' } }),
       description: 'コマンド出力の各行（{"number": N, "state": "...", "sig": S}）をそのまま転記した配列',
     },
   })
@@ -1992,12 +1995,12 @@ function outOfTreeBlockNote(deps) {
 // 対象外ラベル（Issue #720）の取得。ノードごとには引かず、ラベルごとにリポジトリ全体の open issue 番号を 1 エージェントで列挙し（labels= はカンマで AND になるためラベルごとのループ）、スクリプトがツリーの open ノードの番号（--numbers。Issue #807）との交わりへ絞って返し、ホストもツリーのノード番号と突き合わせる。ホストは添字だけでラベルを引き、エージェントが返した文字列は使わない。
 // 取得は scripts/repo-scan.sh --mode skip-labels（以前はプロンプトに埋め込んだ gh + jq のコマンドをエージェントが転記して実行していた）。エージェントは起動行を実行して封筒（nonce・payload・sha256）を転記するだけで、ホストは封筒を再計算して照合する（verifySignedOutput）。payload の inputSha256 はラベルの並び・repo・ノード番号の集合を束縛する（添字がラベルの意味を決めるため。転記でラベルが欠けたり入れ替わったりした出力を別のラベルの結果として採らない）。
 // 失敗は payload.failed の添字（entries に含めない）。ラベル一覧を取得できなかったときは absent を判定しない。
-const INT_ARRAY_SCHEMA = { type: 'array', items: { type: 'integer' } }
+const INT_ARRAY_SCHEMA = { type: 'array', items: SV_INT }
 const SKIP_LABELS_SCHEMA = signedOutputSchema(obj(['absent', 'entries', 'failed', 'inputSha256'], {
     absent: INT_ARRAY_SCHEMA,
-    entries: { type: 'array', items: obj(['i', 'numbers'], { i: { type: 'integer' }, numbers: INT_ARRAY_SCHEMA }) },
+    entries: { type: 'array', items: obj(['i', 'numbers'], { i: SV_INT, numbers: INT_ARRAY_SCHEMA }) },
     failed: INT_ARRAY_SCHEMA,
-    inputSha256: { type: 'string' },
+    inputSha256: SV_STR,
   }))
 // repo-scan.sh の入力の束縛（scripts/lib/repo-scan-lib.sh の rs_input_sha と同じ定義）。mode は external-checks か skip-labels。rest は skip-labels の [ノード番号のカンマ区切り, ...ラベル]（Issue #807）
 function repoScanInputSha256(mode, repo, rest = []) {
@@ -2072,7 +2075,7 @@ function notifyBlockedPrompt(root, w) {
 const OPTIN_RUN_ITEM_SCHEMA = obj(['command', 'result'], {
     command: { type: 'string', maxLength: 300 },
     result: { type: 'string', enum: OPTIN_RECORD_RESULTS },
-    exitCode: { type: 'integer' },
+    exitCode: SV_INT,
     detail: { type: 'string', maxLength: 300 },
   })
 const PUSH_CI_PROPS = {
@@ -2091,8 +2094,8 @@ const WORKTREE_PATH_PROP = strD('pwd の結果（worktree の絶対パス）。�
 // prNumber は push 前 review フローでは未作成（0）のため必須外（PR 作成は Review 通過後）。 worktreePath は required（Issue #404）: 省略されると台帳計上が path: '' となりバイト実測ゲートが恒久停止し得るため入口で申告漏れを減らす。「pwd を確定できない場合のみ空文字」の契約は残す（空文字はホスト側の物理一覧フォールバックが受け止める）。
 const IMPL_SCHEMA = obj(['branch', 'summary', 'worktreePath'], {
     prNumber: { type: 'number', description: 'push 前 review フローでは常に 0（PR はまだ作成しない）' },
-    branch: { type: 'string' },
-    summary: { type: 'string' },
+    branch: SV_STR,
+    summary: SV_STR,
     worktreePath: WORKTREE_PATH_PROP,
     // out-of-scope 項目専用フィールド。summary の文字列マッチ抽出は誤混入を招いたため（#92）、専用フィールド化して PR 作成フェーズが推測抽出せずに済むようにした。
     outOfScope: {
@@ -2159,12 +2162,12 @@ const MERGE_SCHEMA = obj(['state', 'summary'], {
       required: ['nonce', 'payload', 'sha256'],
       description: '--until を持たない最後の checks コマンド（手順 2 と 3e の待機つき。手順 3 の --until settled は含めない）の標準出力 1 行 JSON を観測値のまま転記する（再計算・補完・修正をしない）',
       properties: {
-        nonce: { type: 'string' },
-        sha256: { type: 'string' },
+        nonce: SV_STR,
+        sha256: SV_STR,
         payload: obj(['mode', 'err', 'total', 'inputSha256'], {
-            attempt: { type: 'integer' }, checkRuns: { type: 'integer' }, err: { type: 'integer' }, headSha: { type: 'string' },
-            inputSha256: { type: 'string' }, maxAttempts: { type: 'integer' }, mode: { type: 'string' }, outcome: { type: 'string' },
-            statuses: { type: 'integer' }, total: { type: 'integer' },
+            attempt: SV_INT, checkRuns: SV_INT, err: SV_INT, headSha: SV_STR,
+            inputSha256: SV_STR, maxAttempts: SV_INT, mode: SV_STR, outcome: SV_STR,
+            statuses: SV_INT, total: SV_INT,
           }),
       },
     },
@@ -2211,15 +2214,15 @@ const MERGE_EXEC_SCHEMA = {
       required: ['nonce', 'payload', 'sha256'],
       description: '手順 2 のスクリプトの標準出力 1 行 JSON を観測値のまま転記する（再計算・補完・修正をしない）',
       properties: {
-        nonce: { type: 'string' },
-        sha256: { type: 'string' },
+        nonce: SV_STR,
+        sha256: SV_STR,
         payload: {
           type: 'object',
           required: ['mode', 'err', 'verdict', 'stage', 'detail', 'headSha', 'inputSha256', 'checks', 'notGreen', 'unresolved', 'requiredTotal', 'clientOnly', 'unbound', 'unissued'],
           properties: {
-            checks: { type: 'integer' }, clientOnly: { type: 'integer' }, detail: { type: 'string' }, err: { type: 'integer' }, headSha: { type: 'string' },
-            inputSha256: { type: 'string' }, mode: { type: 'string' }, notGreen: { type: 'integer' }, requiredTotal: { type: 'integer' }, stage: { type: 'string' },
-            unbound: { type: 'integer' }, unissued: { type: 'integer' }, unresolved: { type: 'integer' }, verdict: { type: 'string' },
+            checks: SV_INT, clientOnly: SV_INT, detail: SV_STR, err: SV_INT, headSha: SV_STR,
+            inputSha256: SV_STR, mode: SV_STR, notGreen: SV_INT, requiredTotal: SV_INT, stage: SV_STR,
+            unbound: SV_INT, unissued: SV_INT, unresolved: SV_INT, verdict: SV_STR,
           },
         },
       },
@@ -2459,7 +2462,7 @@ const MERGE_VERIFY_SCHEMA = obj(['state', 'headRefOid', 'headRefName', 'baseRefN
     isCrossRepository: boolD('isCrossRepository; true if unavailable'),
     closingIssues: {
       type: 'array',
-      items: { type: 'integer' },
+      items: SV_INT,
       description: 'closingIssuesReferences numbers; [-1] if unavailable ([] = none)',
     },
   })
@@ -2506,7 +2509,7 @@ const PREREQ_PROBE_SCHEMA = obj(['results'], {
     results: {
       type: 'array',
       items: obj(['issue', 'issueState', 'prState', 'headRefName', 'baseRefName', 'isCrossRepository', 'closingIssues'], {
-          issue: { type: 'integer' },
+          issue: SV_INT,
           issueState: {
             type: 'string',
             description: 'gh issue view --json state の値（OPEN / CLOSED）。取得失敗は UNKNOWN（推測で CLOSED を返さない）',
@@ -2517,10 +2520,10 @@ const PREREQ_PROBE_SCHEMA = obj(['results'], {
           },
           pr: intD('照合に使った PR 番号（無ければ 0）'),
           // PR と issue の結び付け照合用（prBindingProblem。Issue #533）。MERGE_VERIFY_SCHEMA と同じ理由で required・失敗値は不成立になる値（"" / true / [-1]）。自由文は持たせない。
-          headRefName: { type: 'string' },
-          baseRefName: { type: 'string' },
+          headRefName: SV_STR,
+          baseRefName: SV_STR,
           isCrossRepository: { type: 'boolean' },
-          closingIssues: { type: 'array', items: { type: 'integer' } },
+          closingIssues: { type: 'array', items: SV_INT },
         }),
     },
   })
@@ -2528,7 +2531,7 @@ const PREREQ_PROBE_SCHEMA = obj(['results'], {
 // worktreePath を required 化（Issue #404）。理由は IMPL_SCHEMA と同じ。
 const FIX_SCHEMA = obj(['pushed', 'summary', 'worktreePath'], {
     pushed: { type: 'boolean' },
-    summary: { type: 'string' },
+    summary: SV_STR,
     worktreePath: WORKTREE_PATH_PROP,
     routingError: {
       type: 'boolean',
@@ -2584,7 +2587,7 @@ const FIX_SCHEMA = obj(['pushed', 'summary', 'worktreePath'], {
 // base 取り込み専用エージェント（baseMergePrompt）の返却スキーマ（Issue #441）。monitor の conflicting・merge-exec の not-mergeable 由来のみで起動し、レビュー指摘の修正は行わないため FIX_SCHEMA から独立させる（fixCount とは別予算の baseMergeCount で管理される）。
 const BASE_MERGE_SCHEMA = obj(['pushed', 'summary', 'worktreePath'], {
     pushed: { type: 'boolean' },
-    summary: { type: 'string' },
+    summary: SV_STR,
     worktreePath: WORKTREE_PATH_PROP,
     routingError: {
       type: 'boolean',
@@ -2609,16 +2612,16 @@ const BASE_MERGE_SCHEMA = obj(['pushed', 'summary', 'worktreePath'], {
 
 const CLOSE_SCHEMA = obj(['closed', 'summary'], {
     closed: { type: 'boolean' },
-    summary: { type: 'string' },
+    summary: SV_STR,
   })
 
 // Tree フェーズ末尾の外部チェック App 観測の返却スキーマ（scripts/repo-scan.sh --mode external-checks の封筒）。観測結果は「参考値」であり apps: [] は「観測では確定できなかった」の意。確定は args.externalChecks の明示入力のみで行う。
 const EXTERNAL_CHECKS_SCHEMA = signedOutputSchema(obj(['apps', 'dropped', 'errs', 'inputSha256', 'prs'], {
-    apps: { type: 'array', items: { type: 'string' } },
-    dropped: { type: 'integer' },
-    errs: { type: 'integer' },
-    inputSha256: { type: 'string' },
-    prs: { type: 'integer' },
+    apps: { type: 'array', items: SV_STR },
+    dropped: SV_INT,
+    errs: SV_INT,
+    inputSha256: SV_STR,
+    prs: SV_INT,
   }))
 // 外部チェック観測のプロンプト（nonce は呼び出しごと）。gh pr list・check-runs の取得・slug の絞り込みは repo-scan.sh が持つ
 function externalChecksPrompt(nonce, repo) {
@@ -2641,18 +2644,18 @@ function observedExternalApps(reply, nonce, repo) {
 // per-issue Plan エージェントの返却スキーマ。 plan 本文は Implement エージェントへ引数で渡す（worktree 跨ぎのファイル参照を避けるため）。
 const PLAN_SCHEMA = obj(['plan', 'summary'], {
     plan: strD('実装計画の本文（markdown）'),
-    summary: { type: 'string' },
+    summary: SV_STR,
     policyPaths: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 200 }, description: '計画が変える方針パス（CI 構成・CODEOWNERS）。ディレクトリは / 終わり。なければ空配列' },
   })
 
 // Review 通過後の push + PR 作成エージェントのスキーマ。Review を全て通過してから push・PR 作成を行う。prNumber: 0 は PR 作成失敗。既存 open PR 再利用時はその番号を返す（Issue #135）。
 const PR_CREATE_SCHEMA = obj(['prNumber', 'summary', 'worktreePath'], {
     prNumber: { type: 'number', description: '作成した PR 番号。既存 open PR を再利用した場合はその番号。作成も再利用もできなければ 0' },
-    summary: { type: 'string' },
+    summary: SV_STR,
     // pr-create の worktree は push 完了時点で origin に成果が存在するため保持価値がない。呼び出し元が返却直後に削除して残骸の蓄積を防ぐ（イシュー close 時まで残さない）。
     worktreePath: WORKTREE_PATH_PROP,
     // prepare が diverged のときだけ [localSha, remoteSha]。自己申告で、使い道は failed と blocked の振り分けだけ（マージ・削除の判断には使わない。誤申告の最悪ケースは halt を 1 回数えないこと）。required にしない（旧出力との互換）。
-    divergedShas: { type: 'array', maxItems: 2, items: { type: 'string' } },
+    divergedShas: { type: 'array', maxItems: 2, items: SV_STR },
     // push 直後の CI 起動確認（Issue #479）。いずれもエージェントの自己申告値でありマージ判定には使わない（ホストは mergeableAfterPush === 'CONFLICTING' を base 取り込み分岐へ直行するヒントとしてのみ使い、誤申告の最悪ケースは baseMergeCount を 1 消費するだけで有界）。旧エージェント出力との互換のため required にはしない（省略時はヒントなしとして扱われる）。
     ...PUSH_CI_PROPS,
     // opt-in テスト記録ゲート（PR #503 3 巡目 codex P1）。手順 0c で push 前に再実行した結果。マージ判定には PR 本文へ書いた sha 束縛マーカー（手順 1c・2）を主とし、これは診断ログ専用（FIX_SCHEMA.optinTestRuns と同型）。
@@ -2984,8 +2987,6 @@ const STATE_FILL_SCHEMA = obj(['items'], { items: { type: 'object', additionalPr
 const isValidStateFillResult = (r) => r?.items !== null && typeof r?.items === 'object' && !Array.isArray(r.items)
 
 // state:load-verify の返却（scripts/state.sh verify の封筒。Issue #603 計画 C の P5）。payload は固定欄と entries（[{k: 項目番号, h: そのハッシュ}]）だけで、自由形式の object を持たない。
-const SV_INT = { type: 'integer' }
-const SV_STR = { type: 'string' }
 const STATE_VERIFY_PAYLOAD_SCHEMA = obj(['entries', 'highWaterBytes', 'highWaterVersion', 'inputSha256', 'keysCount', 'keysSha256', 'mode', 'outcome', 'page', 'pages'], {
     entries: { type: 'array', items: obj(['h', 'k'], { h: SV_STR, k: SV_STR }) },
     highWaterBytes: SV_INT, highWaterVersion: SV_INT, inputSha256: SV_STR, keysCount: SV_INT, keysSha256: SV_STR, mode: SV_STR, outcome: SV_STR, page: SV_INT, pages: SV_INT,
@@ -4091,7 +4092,7 @@ const MAIN_UNTRACKED_SCHEMA = {
     paths: {
       type: 'array',
       maxItems: 1000,
-      items: { type: 'string' },
+      items: SV_STR,
       description: '`?? ` 接頭辞を除いた未追跡パスの一覧（順不同可）。count と件数が一致すること',
     },
   },
@@ -4365,7 +4366,7 @@ const LEDGER_ONLY_KINDS = new Set(['retained', 'replacement'])
 const SWEEP_SCHEMA = obj(['removed'], {
     removed: {
       type: 'array',
-      items: { type: 'string' },
+      items: SV_STR,
       description: '結果の行の removed（削除した worktree の絶対パス一覧）をそのまま転記する。削除ゼロなら空配列',
     },
   })
@@ -4973,21 +4974,21 @@ const ADDED_FILES_PAYLOAD_SCHEMA = {
   type: 'object',
   required: ['mode', 'inputSha256', 'outcome', 'err', 'state', 'added', 'numbered', 'samePath', 'seqPeer', 'seqBase', 'truncated', 'pathPeers', 'seqPeers'],
   properties: {
-    mode: { type: 'string' },
-    inputSha256: { type: 'string' },
-    outcome: { type: 'string' },
-    err: { type: 'integer' },
-    attempt: { type: 'integer' },
-    maxAttempts: { type: 'integer' },
-    state: { type: 'string' },
-    added: { type: 'integer' },
-    numbered: { type: 'integer' },
-    samePath: { type: 'integer' },
-    seqPeer: { type: 'integer' },
-    seqBase: { type: 'integer' },
-    truncated: { type: 'integer' },
-    pathPeers: { type: 'array', items: { type: 'integer' } },
-    seqPeers: { type: 'array', items: { type: 'integer' } },
+    mode: SV_STR,
+    inputSha256: SV_STR,
+    outcome: SV_STR,
+    err: SV_INT,
+    attempt: SV_INT,
+    maxAttempts: SV_INT,
+    state: SV_STR,
+    added: SV_INT,
+    numbered: SV_INT,
+    samePath: SV_INT,
+    seqPeer: SV_INT,
+    seqBase: SV_INT,
+    truncated: SV_INT,
+    pathPeers: { type: 'array', items: SV_INT },
+    seqPeers: { type: 'array', items: SV_INT },
   },
   description: '標準出力 JSON の payload をそのまま転記する',
 }
@@ -5005,13 +5006,20 @@ function addedFilesPeers(issueNumber, prNumber, knownPrs, savedEntries) {
   return [...set].sort((a, b) => b - a).slice(0, ADDED_FILES_PEERS_MAX).sort((a, b) => a - b)
 }
 
+// observe-pr.sh の観測封筒（added-files・policy-paths・optin-record）に共通の前置き（純粋関数）。封筒の照合・mode・取得の成否のどれかが通らなければ skip の分類（各 classify* がそのまま返す）を、通れば { p: payload } を返す。呼び出し側は kind の有無で分ける（成功側は kind を持たない）。
+function observedPayload(raw, nonce, inputSha, mode) {
+  const sg = verifySignedOutput(raw, nonce, inputSha)
+  if (!sg.ok) return { kind: 'skip', reason: `envelope:${sg.reason}` }
+  const p = sg.payload
+  if (p.mode !== mode) return { kind: 'skip', reason: 'mode' }
+  if (p.err !== 0 || p.outcome !== 'observed') return { kind: 'skip', reason: 'fetch-error' }
+  return { p }
+}
 // added-files の封筒の分類（純粋関数）。kind は path（同じパスの新規追加あり）/ seq（連番の衝突あり）/ none（衝突なし・OPEN でない）/ skip（照合・取得・形の失敗。ゲートを飛ばす）。pathPeers / seqPeers は依頼した peers に含まれる番号だけを受理する。
 function classifyAddedFiles(raw, nonce, inputSha, peers) {
-  const signed = verifySignedOutput(raw, nonce, inputSha)
-  if (!signed.ok) return { kind: 'skip', reason: `envelope:${signed.reason}` }
-  const p = signed.payload
-  if (p.mode !== 'added-files') return { kind: 'skip', reason: 'mode' }
-  if (p.err !== 0 || p.outcome !== 'observed') return { kind: 'skip', reason: 'fetch-error' }
+  const o = observedPayload(raw, nonce, inputSha, 'added-files')
+  if (o.kind) return o
+  const p = o.p
   const isCount = (x) => isInt(x) && x >= 0 && x <= 100000
   const want = new Set(peers)
   const isPeers = (a) => Array.isArray(a) && a.length <= ADDED_FILES_PEERS_MAX && a.every((n) => want.has(n))
@@ -5093,25 +5101,23 @@ const POLICY_PATHS_PAYLOAD_SCHEMA = {
   type: 'object',
   required: ['mode', 'inputSha256', 'outcome', 'err', 'state', 'files', 'policy', 'unplanned', 'truncated'],
   properties: {
-    mode: { type: 'string' },
-    inputSha256: { type: 'string' },
-    outcome: { type: 'string' },
-    err: { type: 'integer' },
-    state: { type: 'string' },
-    files: { type: 'integer' },
-    policy: { type: 'integer' },
-    unplanned: { type: 'integer' },
-    truncated: { type: 'integer' },
+    mode: SV_STR,
+    inputSha256: SV_STR,
+    outcome: SV_STR,
+    err: SV_INT,
+    state: SV_STR,
+    files: SV_INT,
+    policy: SV_INT,
+    unplanned: SV_INT,
+    truncated: SV_INT,
   },
   description: '標準出力 JSON の payload をそのまま転記する',
 }
 // 封筒の分類（純粋関数）。kind は unplanned（宣言外の方針パスあり）/ truncated（一覧が切り詰められ確かめられない）/ none（なし・OPEN でない）/ skip（照合・取得・形の失敗）
 function classifyPolicyPaths(raw, nonce, inputSha) {
-  const sg = verifySignedOutput(raw, nonce, inputSha)
-  if (!sg.ok) return { kind: 'skip', reason: `envelope:${sg.reason}` }
-  const p = sg.payload
-  if (p.mode !== 'policy-paths') return { kind: 'skip', reason: 'mode' }
-  if (p.err !== 0 || p.outcome !== 'observed') return { kind: 'skip', reason: 'fetch-error' }
+  const o = observedPayload(raw, nonce, inputSha, 'policy-paths')
+  if (o.kind) return o
+  const p = o.p
   const ok = (x) => isInt(x) && x >= 0 && x <= 100000
   if (![p.files, p.policy, p.unplanned, p.truncated].every(ok) || p.unplanned > p.policy || !['OPEN', 'MERGED', 'CLOSED'].includes(p.state)) return { kind: 'skip', reason: 'payload' }
   if (p.state !== 'OPEN') return { kind: 'none', reason: 'not-open' }
@@ -5141,22 +5147,20 @@ const OPTIN_RECORD_PAYLOAD_SCHEMA = {
   type: 'object',
   required: ['mode', 'inputSha256', 'outcome', 'err', 'headSha', 'pass', 'nonPass'],
   properties: {
-    mode: { type: 'string' },
-    inputSha256: { type: 'string' },
-    outcome: { type: 'string' },
-    err: { type: 'integer' },
-    headSha: { type: 'string' },
-    pass: { type: 'array', items: { type: 'integer' } },
-    nonPass: { type: 'array', items: { type: 'integer' } },
+    mode: SV_STR,
+    inputSha256: SV_STR,
+    outcome: SV_STR,
+    err: SV_INT,
+    headSha: SV_STR,
+    pass: { type: 'array', items: SV_INT },
+    nonPass: { type: 'array', items: SV_INT },
   },
   description: '標準出力 JSON の payload をそのまま転記する',
 }
 function classifyOptinRecordObservation(raw, nonce, inputSha, commands) {
-  const sg = verifySignedOutput(raw, nonce, inputSha)
-  if (!sg.ok) return { kind: 'skip', reason: `envelope:${sg.reason}` }
-  const p = sg.payload
-  if (p.mode !== 'optin-record') return { kind: 'skip', reason: 'mode' }
-  if (p.err !== 0 || p.outcome !== 'observed') return { kind: 'skip', reason: 'fetch-error' }
+  const o = observedPayload(raw, nonce, inputSha, 'optin-record')
+  if (o.kind) return o
+  const p = o.p
   const n = arr(commands).length
   const counts = (a) => Array.isArray(a) && a.length === n && a.every((x) => isInt(x) && x >= 0 && x <= 100000)
   if (!sanitizeSha(p.headSha) || !counts(p.pass) || !counts(p.nonPass)) return { kind: 'skip', reason: 'payload' }

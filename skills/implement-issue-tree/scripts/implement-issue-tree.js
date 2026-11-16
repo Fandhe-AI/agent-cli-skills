@@ -151,7 +151,7 @@ treeFetchRetrySuffix(attempt,'終了コードの意味に従い原因を除く�
 
 
 
-function treeFetchPrompt(nonce,command,page){
+function treeFetchPrompt(command,page){
 
 const repoOpt=repoArg?` -R ${repoArg}`:''
 const only=page===0?'pages が 1 のときだけ、':''
@@ -235,7 +235,7 @@ const nonce=boundaryNonce(`fetch-tree-page:${p}:${attempt}:${tsvSha}`)
 const command=scriptInvocation('fetch-tree.sh',nonce,` --page ${p} --dir ${shellSingleQuote(dir)}`)
 let result=null
 try{
-result=await agent(treeFetchPrompt(nonce,command,p),{label:`plan:issue-tree-page-${p}${attempt === 1 ? '' : '-retry'}`,phase:'Tree',model:'sonnet',effort:'medium',schema:TREE_SCHEMA})
+result=await agent(treeFetchPrompt(command,p),{label:`plan:issue-tree-page-${p}${attempt === 1 ? '' : '-retry'}`,phase:'Tree',model:'sonnet',effort:'medium',schema:TREE_SCHEMA})
 }catch(e){
 reason=`ツリー取得 agent が失敗: ${errText(e)}`
 log(`⚠️ （ページ ${p}・試行 ${attempt}）${reason}`)
@@ -280,7 +280,7 @@ let nonce=''
 try{
 nonce=boundaryNonce(`fetch-tree:${attempt}:${parent}:${repoArg}`)
 const command=scriptInvocation('fetch-tree.sh',nonce,` --root ${parent}${repoArg ? ` --repo ${repoArg}` : ''}`)
-result=await agent(treeFetchPrompt(nonce,command,0),{label:attempt===1?'plan:issue-tree':'plan:issue-tree-retry',phase:'Tree',model:'sonnet',effort:'medium',schema:TREE_SCHEMA})
+result=await agent(treeFetchPrompt(command,0),{label:attempt===1?'plan:issue-tree':'plan:issue-tree-retry',phase:'Tree',model:'sonnet',effort:'medium',schema:TREE_SCHEMA})
 }catch(e){
 lastReason=`ツリー取得 agent が失敗: ${errText(e)}`
 log(`⚠️ （試行 ${attempt}）${lastReason}`)
@@ -648,6 +648,9 @@ return{type:'integer',description}
 function boolD(description){
 return{type:'boolean',description}
 }
+
+const SV_INT={type:'integer'}
+const SV_STR={type:'string'}
 
 function isInt(v){
 return Number.isInteger(v)
@@ -1490,7 +1493,7 @@ nodes:{
 type:'array',
 items:obj(['number','title','state','parent','siblingIndex','dependsOn','subIssuesTotal','optinTests'],{
 number:{type:'number'},
-title:{type:'string'},
+title:SV_STR,
 state:strD('open または closed'),
 
 subIssuesTotal:{
@@ -1851,7 +1854,7 @@ const OUT_OF_TREE_DONE_STATES=new Set(['CLOSED','MERGED'])
 const OUT_OF_TREE_STATE_SCHEMA=obj(['entries'],{
 entries:{
 type:'array',
-items:obj(['number','state','sig'],{number:{type:'number'},state:{type:'string'},sig:{type:'number'}}),
+items:obj(['number','state','sig'],{number:{type:'number'},state:SV_STR,sig:{type:'number'}}),
 description:'コマンド出力の各行（{"number": N, "state": "...", "sig": S}）をそのまま転記した配列',
 },
 })
@@ -1992,12 +1995,12 @@ return`ツリー外の前提イシュー ${formatIssueList(deps)} が open の�
 
 
 
-const INT_ARRAY_SCHEMA={type:'array',items:{type:'integer'}}
+const INT_ARRAY_SCHEMA={type:'array',items:SV_INT}
 const SKIP_LABELS_SCHEMA=signedOutputSchema(obj(['absent','entries','failed','inputSha256'],{
 absent:INT_ARRAY_SCHEMA,
-entries:{type:'array',items:obj(['i','numbers'],{i:{type:'integer'},numbers:INT_ARRAY_SCHEMA})},
+entries:{type:'array',items:obj(['i','numbers'],{i:SV_INT,numbers:INT_ARRAY_SCHEMA})},
 failed:INT_ARRAY_SCHEMA,
-inputSha256:{type:'string'},
+inputSha256:SV_STR,
 }))
 
 function repoScanInputSha256(mode,repo,rest=[]){
@@ -2072,7 +2075,7 @@ COMMON,
 const OPTIN_RUN_ITEM_SCHEMA=obj(['command','result'],{
 command:{type:'string',maxLength:300},
 result:{type:'string',enum:OPTIN_RECORD_RESULTS},
-exitCode:{type:'integer'},
+exitCode:SV_INT,
 detail:{type:'string',maxLength:300},
 })
 const PUSH_CI_PROPS={
@@ -2091,8 +2094,8 @@ const WORKTREE_PATH_PROP=strD('pwd の結果（worktree の絶対パス）。省
 
 const IMPL_SCHEMA=obj(['branch','summary','worktreePath'],{
 prNumber:{type:'number',description:'push 前 review フローでは常に 0（PR はまだ作成しない）'},
-branch:{type:'string'},
-summary:{type:'string'},
+branch:SV_STR,
+summary:SV_STR,
 worktreePath:WORKTREE_PATH_PROP,
 
 outOfScope:{
@@ -2159,12 +2162,12 @@ type:'object',
 required:['nonce','payload','sha256'],
 description:'--until を持たない最後の checks コマンド（手順 2 と 3e の待機つき。手順 3 の --until settled は含めない）の標準出力 1 行 JSON を観測値のまま転記する（再計算・補完・修正をしない）',
 properties:{
-nonce:{type:'string'},
-sha256:{type:'string'},
+nonce:SV_STR,
+sha256:SV_STR,
 payload:obj(['mode','err','total','inputSha256'],{
-attempt:{type:'integer'},checkRuns:{type:'integer'},err:{type:'integer'},headSha:{type:'string'},
-inputSha256:{type:'string'},maxAttempts:{type:'integer'},mode:{type:'string'},outcome:{type:'string'},
-statuses:{type:'integer'},total:{type:'integer'},
+attempt:SV_INT,checkRuns:SV_INT,err:SV_INT,headSha:SV_STR,
+inputSha256:SV_STR,maxAttempts:SV_INT,mode:SV_STR,outcome:SV_STR,
+statuses:SV_INT,total:SV_INT,
 }),
 },
 },
@@ -2211,15 +2214,15 @@ type:'object',
 required:['nonce','payload','sha256'],
 description:'手順 2 のスクリプトの標準出力 1 行 JSON を観測値のまま転記する（再計算・補完・修正をしない）',
 properties:{
-nonce:{type:'string'},
-sha256:{type:'string'},
+nonce:SV_STR,
+sha256:SV_STR,
 payload:{
 type:'object',
 required:['mode','err','verdict','stage','detail','headSha','inputSha256','checks','notGreen','unresolved','requiredTotal','clientOnly','unbound','unissued'],
 properties:{
-checks:{type:'integer'},clientOnly:{type:'integer'},detail:{type:'string'},err:{type:'integer'},headSha:{type:'string'},
-inputSha256:{type:'string'},mode:{type:'string'},notGreen:{type:'integer'},requiredTotal:{type:'integer'},stage:{type:'string'},
-unbound:{type:'integer'},unissued:{type:'integer'},unresolved:{type:'integer'},verdict:{type:'string'},
+checks:SV_INT,clientOnly:SV_INT,detail:SV_STR,err:SV_INT,headSha:SV_STR,
+inputSha256:SV_STR,mode:SV_STR,notGreen:SV_INT,requiredTotal:SV_INT,stage:SV_STR,
+unbound:SV_INT,unissued:SV_INT,unresolved:SV_INT,verdict:SV_STR,
 },
 },
 },
@@ -2459,7 +2462,7 @@ baseRefName:strD('baseRefName; "" if unavailable'),
 isCrossRepository:boolD('isCrossRepository; true if unavailable'),
 closingIssues:{
 type:'array',
-items:{type:'integer'},
+items:SV_INT,
 description:'closingIssuesReferences numbers; [-1] if unavailable ([] = none)',
 },
 })
@@ -2506,7 +2509,7 @@ const PREREQ_PROBE_SCHEMA=obj(['results'],{
 results:{
 type:'array',
 items:obj(['issue','issueState','prState','headRefName','baseRefName','isCrossRepository','closingIssues'],{
-issue:{type:'integer'},
+issue:SV_INT,
 issueState:{
 type:'string',
 description:'gh issue view --json state の値（OPEN / CLOSED）。取得失敗は UNKNOWN（推測で CLOSED を返さない）',
@@ -2517,10 +2520,10 @@ description:'gh pr view --json state の値（MERGED / OPEN / CLOSED）。PR 番
 },
 pr:intD('照合に使った PR 番号（無ければ 0）'),
 
-headRefName:{type:'string'},
-baseRefName:{type:'string'},
+headRefName:SV_STR,
+baseRefName:SV_STR,
 isCrossRepository:{type:'boolean'},
-closingIssues:{type:'array',items:{type:'integer'}},
+closingIssues:{type:'array',items:SV_INT},
 }),
 },
 })
@@ -2528,7 +2531,7 @@ closingIssues:{type:'array',items:{type:'integer'}},
 
 const FIX_SCHEMA=obj(['pushed','summary','worktreePath'],{
 pushed:{type:'boolean'},
-summary:{type:'string'},
+summary:SV_STR,
 worktreePath:WORKTREE_PATH_PROP,
 routingError:{
 type:'boolean',
@@ -2584,7 +2587,7 @@ description:'optinTestRuns を計測した HEAD の sha（40 桁小文字 16 進
 
 const BASE_MERGE_SCHEMA=obj(['pushed','summary','worktreePath'],{
 pushed:{type:'boolean'},
-summary:{type:'string'},
+summary:SV_STR,
 worktreePath:WORKTREE_PATH_PROP,
 routingError:{
 type:'boolean',
@@ -2609,16 +2612,16 @@ description:'分岐 (c) の commit-msg hook 拒否時のみ true（その際 com
 
 const CLOSE_SCHEMA=obj(['closed','summary'],{
 closed:{type:'boolean'},
-summary:{type:'string'},
+summary:SV_STR,
 })
 
 
 const EXTERNAL_CHECKS_SCHEMA=signedOutputSchema(obj(['apps','dropped','errs','inputSha256','prs'],{
-apps:{type:'array',items:{type:'string'}},
-dropped:{type:'integer'},
-errs:{type:'integer'},
-inputSha256:{type:'string'},
-prs:{type:'integer'},
+apps:{type:'array',items:SV_STR},
+dropped:SV_INT,
+errs:SV_INT,
+inputSha256:SV_STR,
+prs:SV_INT,
 }))
 
 function externalChecksPrompt(nonce,repo){
@@ -2641,18 +2644,18 @@ return ok?{apps:a,errs:s.payload.errs}:null
 
 const PLAN_SCHEMA=obj(['plan','summary'],{
 plan:strD('実装計画の本文（markdown）'),
-summary:{type:'string'},
+summary:SV_STR,
 policyPaths:{type:'array',maxItems:20,items:{type:'string',maxLength:200},description:'計画が変える方針パス（CI 構成・CODEOWNERS）。ディレクトリは / 終わり。なければ空配列'},
 })
 
 
 const PR_CREATE_SCHEMA=obj(['prNumber','summary','worktreePath'],{
 prNumber:{type:'number',description:'作成した PR 番号。既存 open PR を再利用した場合はその番号。作成も再利用もできなければ 0'},
-summary:{type:'string'},
+summary:SV_STR,
 
 worktreePath:WORKTREE_PATH_PROP,
 
-divergedShas:{type:'array',maxItems:2,items:{type:'string'}},
+divergedShas:{type:'array',maxItems:2,items:SV_STR},
 
 ...PUSH_CI_PROPS,
 
@@ -2984,8 +2987,6 @@ const STATE_FILL_SCHEMA=obj(['items'],{items:{type:'object',additionalProperties
 const isValidStateFillResult=(r)=>r?.items!==null&&typeof r?.items==='object'&& !Array.isArray(r.items)
 
 
-const SV_INT={type:'integer'}
-const SV_STR={type:'string'}
 const STATE_VERIFY_PAYLOAD_SCHEMA=obj(['entries','highWaterBytes','highWaterVersion','inputSha256','keysCount','keysSha256','mode','outcome','page','pages'],{
 entries:{type:'array',items:obj(['h','k'],{h:SV_STR,k:SV_STR})},
 highWaterBytes:SV_INT,highWaterVersion:SV_INT,inputSha256:SV_STR,keysCount:SV_INT,keysSha256:SV_STR,mode:SV_STR,outcome:SV_STR,page:SV_INT,pages:SV_INT,
@@ -4091,7 +4092,7 @@ description:'git status --porcelain --untracked-files=all の出力を grep -c \
 paths:{
 type:'array',
 maxItems:1000,
-items:{type:'string'},
+items:SV_STR,
 description:'`?? ` 接頭辞を除いた未追跡パスの一覧（順不同可）。count と件数が一致すること',
 },
 },
@@ -4365,7 +4366,7 @@ const LEDGER_ONLY_KINDS=new Set(['retained','replacement'])
 const SWEEP_SCHEMA=obj(['removed'],{
 removed:{
 type:'array',
-items:{type:'string'},
+items:SV_STR,
 description:'結果の行の removed（削除した worktree の絶対パス一覧）をそのまま転記する。削除ゼロなら空配列',
 },
 })
@@ -4973,21 +4974,21 @@ const ADDED_FILES_PAYLOAD_SCHEMA={
 type:'object',
 required:['mode','inputSha256','outcome','err','state','added','numbered','samePath','seqPeer','seqBase','truncated','pathPeers','seqPeers'],
 properties:{
-mode:{type:'string'},
-inputSha256:{type:'string'},
-outcome:{type:'string'},
-err:{type:'integer'},
-attempt:{type:'integer'},
-maxAttempts:{type:'integer'},
-state:{type:'string'},
-added:{type:'integer'},
-numbered:{type:'integer'},
-samePath:{type:'integer'},
-seqPeer:{type:'integer'},
-seqBase:{type:'integer'},
-truncated:{type:'integer'},
-pathPeers:{type:'array',items:{type:'integer'}},
-seqPeers:{type:'array',items:{type:'integer'}},
+mode:SV_STR,
+inputSha256:SV_STR,
+outcome:SV_STR,
+err:SV_INT,
+attempt:SV_INT,
+maxAttempts:SV_INT,
+state:SV_STR,
+added:SV_INT,
+numbered:SV_INT,
+samePath:SV_INT,
+seqPeer:SV_INT,
+seqBase:SV_INT,
+truncated:SV_INT,
+pathPeers:{type:'array',items:SV_INT},
+seqPeers:{type:'array',items:SV_INT},
 },
 description:'標準出力 JSON の payload をそのまま転記する',
 }
@@ -5006,12 +5007,19 @@ return[...set].sort((a,b)=>b-a).slice(0,ADDED_FILES_PEERS_MAX).sort((a,b)=>a-b)
 }
 
 
-function classifyAddedFiles(raw,nonce,inputSha,peers){
-const signed=verifySignedOutput(raw,nonce,inputSha)
-if(!signed.ok)return{kind:'skip',reason:`envelope:${signed.reason}`}
-const p=signed.payload
-if(p.mode!=='added-files')return{kind:'skip',reason:'mode'}
+function observedPayload(raw,nonce,inputSha,mode){
+const sg=verifySignedOutput(raw,nonce,inputSha)
+if(!sg.ok)return{kind:'skip',reason:`envelope:${sg.reason}`}
+const p=sg.payload
+if(p.mode!==mode)return{kind:'skip',reason:'mode'}
 if(p.err!==0||p.outcome!=='observed')return{kind:'skip',reason:'fetch-error'}
+return{p}
+}
+
+function classifyAddedFiles(raw,nonce,inputSha,peers){
+const o=observedPayload(raw,nonce,inputSha,'added-files')
+if(o.kind)return o
+const p=o.p
 const isCount=(x)=>isInt(x)&&x>=0&&x<=100000
 const want=new Set(peers)
 const isPeers=(a)=>Array.isArray(a)&&a.length<=ADDED_FILES_PEERS_MAX&&a.every((n)=>want.has(n))
@@ -5093,25 +5101,23 @@ const POLICY_PATHS_PAYLOAD_SCHEMA={
 type:'object',
 required:['mode','inputSha256','outcome','err','state','files','policy','unplanned','truncated'],
 properties:{
-mode:{type:'string'},
-inputSha256:{type:'string'},
-outcome:{type:'string'},
-err:{type:'integer'},
-state:{type:'string'},
-files:{type:'integer'},
-policy:{type:'integer'},
-unplanned:{type:'integer'},
-truncated:{type:'integer'},
+mode:SV_STR,
+inputSha256:SV_STR,
+outcome:SV_STR,
+err:SV_INT,
+state:SV_STR,
+files:SV_INT,
+policy:SV_INT,
+unplanned:SV_INT,
+truncated:SV_INT,
 },
 description:'標準出力 JSON の payload をそのまま転記する',
 }
 
 function classifyPolicyPaths(raw,nonce,inputSha){
-const sg=verifySignedOutput(raw,nonce,inputSha)
-if(!sg.ok)return{kind:'skip',reason:`envelope:${sg.reason}`}
-const p=sg.payload
-if(p.mode!=='policy-paths')return{kind:'skip',reason:'mode'}
-if(p.err!==0||p.outcome!=='observed')return{kind:'skip',reason:'fetch-error'}
+const o=observedPayload(raw,nonce,inputSha,'policy-paths')
+if(o.kind)return o
+const p=o.p
 const ok=(x)=>isInt(x)&&x>=0&&x<=100000
 if(![p.files,p.policy,p.unplanned,p.truncated].every(ok)||p.unplanned>p.policy|| !['OPEN','MERGED','CLOSED'].includes(p.state))return{kind:'skip',reason:'payload'}
 if(p.state!=='OPEN')return{kind:'none',reason:'not-open'}
@@ -5141,22 +5147,20 @@ const OPTIN_RECORD_PAYLOAD_SCHEMA={
 type:'object',
 required:['mode','inputSha256','outcome','err','headSha','pass','nonPass'],
 properties:{
-mode:{type:'string'},
-inputSha256:{type:'string'},
-outcome:{type:'string'},
-err:{type:'integer'},
-headSha:{type:'string'},
-pass:{type:'array',items:{type:'integer'}},
-nonPass:{type:'array',items:{type:'integer'}},
+mode:SV_STR,
+inputSha256:SV_STR,
+outcome:SV_STR,
+err:SV_INT,
+headSha:SV_STR,
+pass:{type:'array',items:SV_INT},
+nonPass:{type:'array',items:SV_INT},
 },
 description:'標準出力 JSON の payload をそのまま転記する',
 }
 function classifyOptinRecordObservation(raw,nonce,inputSha,commands){
-const sg=verifySignedOutput(raw,nonce,inputSha)
-if(!sg.ok)return{kind:'skip',reason:`envelope:${sg.reason}`}
-const p=sg.payload
-if(p.mode!=='optin-record')return{kind:'skip',reason:'mode'}
-if(p.err!==0||p.outcome!=='observed')return{kind:'skip',reason:'fetch-error'}
+const o=observedPayload(raw,nonce,inputSha,'optin-record')
+if(o.kind)return o
+const p=o.p
 const n=arr(commands).length
 const counts=(a)=>Array.isArray(a)&&a.length===n&&a.every((x)=>isInt(x)&&x>=0&&x<=100000)
 if(!sanitizeSha(p.headSha)|| !counts(p.pass)|| !counts(p.nonPass))return{kind:'skip',reason:'payload'}
