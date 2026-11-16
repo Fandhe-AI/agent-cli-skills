@@ -15,7 +15,6 @@ import { importDefinitions, runScript, BASE_ARGS, driverPart } from './lib/stub-
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 const SHA = 'c'.repeat(40)
-const OTHER = 'd'.repeat(40)
 const WT = '/repo/wt/old'
 
 const m = await importDefinitions(
@@ -405,7 +404,7 @@ test('結合: 1 ランの後始末は上限 10 件で、超えた分は見送っ
   const { result, calls } = await runScript({
     args: BASE_ARGS,
     leaves: numbers,
-    override: (label, _opts, prompt) => {
+    override: (label) => {
       if (label === 'plan:issue-tree') return { nodes: [{ number: 1, title: 'root', state: 'open', parent: 0, siblingIndex: 0, dependsOn: [], subIssuesTotal: 12 }, ...numbers.map((n, i) => ({ number: n, title: `issue ${n}`, state: 'closed', parent: 1, siblingIndex: i, dependsOn: [], subIssuesTotal: 0 }))] }
       if (label === 'state:load') return { ok: true, fileExisted: true, items, highWaterBytes: 0, highWaterVersion: 0 }
       if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: numbers.length, highWaterBytes: 0, highWaterVersion: 0 }

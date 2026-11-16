@@ -530,8 +530,6 @@ function assertBudgetFragment(note, limit, where) {
   assert.equal(n, heldUsed(frag) + heldRequired(frag), `${where}: N = 保留時の使用量 + 必要量（上乗せしない）: ${frag}`)
 }
 const planned = (run, n) => run.calls.some((c) => c.opts.label.startsWith(`plan:#${n}`))
-// 閉じた状態にしたノード（再実行では完了済みの verify-close とその子）。
-const withClosed = (tree, numbers) => tree.map((nd) => (numbers.includes(nd.number) ? { ...nd, state: 'closed' } : nd))
 
 test('結合: 開始処理で予算を使い切り最初の 1 件も着手できなくても throw せず、starved と観測値を返し、保存される note も保留時の観測値を報告する (Bugbot D → 終了時判定)', async () => {
   const { result, calls, logs } = await runScript({ args: { ...BASE_ARGS, agentCallLimit: 81 }, leaves: MANY })

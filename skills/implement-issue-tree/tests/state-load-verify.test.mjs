@@ -69,8 +69,6 @@ const {
   branchMatchesIssue,
   loadState,
   ensureBoundaryNonceSeed,
-  mergeStateVerify,
-  isValidStateVerifyEnvelope,
   mergeVerifyPrompt,
   monitorPrompt,
   mergeExecutePrompt,
@@ -82,7 +80,7 @@ const {
   MERGE_VERIFY_SCHEMA,
 } = await import(pathToFileURL(slicePath).href)
 
-import { stateVerifyReply, makeEnvelope, nonceOf, inputSha256 } from './lib/signed-output.mjs'
+import { stateVerifyReply, nonceOf } from './lib/signed-output.mjs'
 globalThis.agent = async () => ({ seedHex: 'c'.repeat(64) })
 await ensureBoundaryNonceSeed()
 
@@ -726,7 +724,7 @@ test('駆動部: state-unverified の issue は dispatch 前に blocked（halt �
 test('checkPrBinding: 例外・未返却・fork の PR は問題ありを返し、同一リポの本 issue ブランチは空文字を返す', async () => {
   const calls = []
   globalThis.log = () => {}
-  globalThis.agent = async (prompt, opts) => { calls.push(opts.label); throw new Error('boom') }
+  globalThis.agent = async (_prompt, opts) => { calls.push(opts.label); throw new Error('boom') }
   assert.equal(await checkPrBinding({ number: 365 }, 1371, 'feat/365-bar'), 'PR not found')
   globalThis.agent = async () => ({ state: 'OPEN', isCrossRepository: true, baseRefName: 'main', headRefName: 'feat/365-bar', closingIssues: [] })
   assert.equal(await checkPrBinding({ number: 365 }, 1371, 'feat/365-bar'), 'cross-repository')

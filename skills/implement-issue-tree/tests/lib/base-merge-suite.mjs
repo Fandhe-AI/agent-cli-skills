@@ -497,7 +497,7 @@ export function registerBaseMergeTests(bash) {
     // 2 つ目の worktree は先行側の push 後のブランチを取り込み直す（取り込む差分が無ければ no-op）。共有 ref が残っていることが肝心
     const v2 = result(run(bash, { ...sb, wt: wt2 }))
     assert.equal(typeof v2.pushed, 'boolean')
-    for (const [i, r] of shared.entries()) assert.notEqual(git(sb.wt, 'for-each-ref', r), '', `${r} は消えていない`)
+    for (const r of shared) assert.notEqual(git(sb.wt, 'for-each-ref', r), '', `${r} は消えていない`)
     assert.equal(git(sb.wt, 'rev-parse', shared[0]), before[0], '共有の base 追跡 ref は書き換わっていない')
     assert.deepEqual(sb.gitCalls().filter((c) => /^update-ref -d refs\/remotes\//.test(c)), [], '共有 ref の削除を呼んでいない')
     // 各 worktree の固定 ref は worktree ごと（先行側の ref が後発に上書きされない）

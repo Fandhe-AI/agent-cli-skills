@@ -131,7 +131,7 @@ for (const bash of BASHES) {
   t('取得失敗（gh pr view・check-runs・status の失敗、壊れた JSON）は err=1 / error。0 件・CONFLICTING に畳み込まない', () => {
     const body = { out: '{"message":"Bad Gateway"}', exit: 1 }
     const cases = {
-      'pr view 失敗': (head) => ({ prview: body, ...checks(1) }),
+      'pr view 失敗': () => ({ prview: body, ...checks(1) }),
       'pr view 壊れた JSON': () => ({ prview: { out: '{"x":1}' }, ...checks(1) }),
       'check-runs 失敗': (head) => ({ prview: { out: prJson(head) }, 'check-runs-total': body, status: { out: '{"statuses":[]}' } }),
       'status 失敗': (head) => ({ prview: { out: prJson(head) }, 'check-runs-total': { out: '{"total_count":2}' }, status: body }),

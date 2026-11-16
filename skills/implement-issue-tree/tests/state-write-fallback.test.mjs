@@ -265,7 +265,7 @@ test('(i) loadState は haiku・sonnet とも失敗すると throw し、メッ�
 
 test('(j) 並列呼び出しでも state:cleanup / state:update の呼び出しは全体として直列化される（enqueueStateWrite）', async () => {
   const order = []
-  globalThis.agent = async (prompt, opts) => {
+  globalThis.agent = async (_prompt, opts) => {
     order.push(opts.label)
     // 直列化されていれば、issue #108 のマージ 1 回 + issue #109 のマージ 1 回のみで割り込まない
     // （いずれも 1 回目で ok:true のためフォールバックは発生しない）。

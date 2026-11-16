@@ -8,7 +8,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { join } from 'node:path'
 import { importDefinitions, runScript, BASE_ARGS } from './lib/stub-run.mjs'
 import { availableBashes, externalChecksReply, makeEnvelope, parseRepoScanCommand, repoScanInputSha256, skipLabelsInputSha256, skipLabelsReply, toolExists, treeFetchReply, TREE_DEFAULT_REPO } from './lib/signed-output.mjs'
 import { makeGhRepoScanStub, checkRuns, issueList } from './lib/gh-repo-scan-stub.mjs'
@@ -86,7 +85,7 @@ test('repoScanInputSha256 / repoScanCommand: ホストの定義がスクリプ�
 test('detect:external-checks: 封筒が通れば observed として返却値に載る', async () => {
   const { result, calls, logs } = await runScript({
     args: ARGS(),
-    override: (label, opts, prompt) => (label === 'detect:external-checks' ? externalChecksReply(prompt, { apps: ['cursor'], prs: 3 }) : undefined),
+    override: (label, _opts, prompt) => (label === 'detect:external-checks' ? externalChecksReply(prompt, { apps: ['cursor'], prs: 3 }) : undefined),
   })
   assert.deepEqual(result.externalChecksObserved, ['cursor'])
   assert.equal(result.externalChecksConfirmed, false, '観測は参考値で、構成の確定にはならない')
@@ -95,7 +94,7 @@ test('detect:external-checks: 封筒が通れば observed として返却値に�
 })
 
 // Issue #806: 観測が判断に載るのは未確定時の停止理由だけ。明示時と dryRun では起動しない（観測で App が見つかる応答を置いても呼ばれないことで確かめる）
-const cursorObserved = (label, opts, prompt) => (label === 'detect:external-checks' ? externalChecksReply(prompt, { apps: ['cursor'] }) : undefined)
+const cursorObserved = (label, _opts, prompt) => (label === 'detect:external-checks' ? externalChecksReply(prompt, { apps: ['cursor'] }) : undefined)
 const detectCalls = (calls) => calls.filter((c) => c.opts.label === 'detect:external-checks').length
 
 test('detect:external-checks: 未指定なら起動し、停止理由の文言に観測した apps が入る', async () => {
@@ -136,7 +135,7 @@ test('detect:external-checks: 封筒が通らなければ apps: [] で続行し�
     ['入力の束縛が違う（別の repo）', (prompt) => externalChecksReply(prompt, { inputSha256: repoScanInputSha256('external-checks', 'Fandhe-AI/other') })],
     ['slug の形式不正', (prompt) => externalChecksReply(prompt, { apps: ['evil;rm'] })],
   ]) {
-    const { result, calls, logs } = await runScript({ args: ARGS(), override: (label, opts, prompt) => (label === 'detect:external-checks' ? mk(prompt) : undefined) })
+    const { result, calls, logs } = await runScript({ args: ARGS(), override: (label, _opts, prompt) => (label === 'detect:external-checks' ? mk(prompt) : undefined) })
     assert.deepEqual(result.externalChecksObserved, [], name)
     assert.equal(calls.filter((c) => c.opts.label === 'detect:external-checks').length, 1, name)
     assert.ok(logs.some((m) => m.includes('外部チェックの観測を採用しない')), name)
@@ -146,7 +145,7 @@ test('detect:external-checks: 封筒が通らなければ apps: [] で続行し�
 test('detect:external-checks: gh の失敗があった封筒は取れた分で続行し、失敗の件数を警告する', async () => {
   const { result, logs } = await runScript({
     args: ARGS(),
-    override: (label, opts, prompt) => (label === 'detect:external-checks' ? externalChecksReply(prompt, { apps: ['cursor'], errs: 2 }) : undefined),
+    override: (label, _opts, prompt) => (label === 'detect:external-checks' ? externalChecksReply(prompt, { apps: ['cursor'], errs: 2 }) : undefined),
   })
   assert.deepEqual(result.externalChecksObserved, ['cursor'])
   assert.ok(logs.some((m) => m.includes('gh の失敗が 2 件')))
@@ -177,7 +176,7 @@ test('args.repo 未指定: 観測・対象外ラベルの起動行の --repo と
   const { result, calls } = await runScript({
     args: ARGS({ skipLabels: ['owner:human'] }),
     leaves: [2, 3],
-    override: (label, opts, prompt) => {
+    override: (label, _opts, prompt) => {
       if (label === 'plan:issue-tree') return treeReplyWithRepo(prompt, [2, 3], treeRepo)
       if (label === 'detect:external-checks') return externalChecksReply(prompt, { apps: ['cursor'] })
       if (label === 'plan:skip-labels') return skipLabelsReply(prompt, { entries: [{ i: 1, numbers: [3] }] })
@@ -204,7 +203,7 @@ test('args.repo 未指定: 別の repo（空の repo を含む）で作った封
     const { result, logs } = await runScript({
       args: ARGS({ skipLabels: ['a'] }),
       leaves: [2],
-      override: (label, opts, prompt) => {
+      override: (label, _opts, prompt) => {
         if (label !== 'detect:external-checks' && !label.startsWith('plan:skip-labels')) return undefined
         const c = parseRepoScanCommand(prompt)
         if (label === 'detect:external-checks') return makeEnvelope(c.nonce, { apps: ['cursor'], dropped: 0, errs: 0, inputSha256: repoScanInputSha256('external-checks', bad), prs: 3 })
@@ -223,7 +222,7 @@ test('args.repo 未指定でツリー取得の封筒の repo が形式不正な�
     const { result, calls, logs } = await runScript({
       args: ARGS({ skipLabels: ['a'] }),
       leaves: [2, 3],
-      override: (label, opts, prompt) => (label === 'plan:issue-tree' ? treeReplyWithRepo(prompt, [2, 3], repo) : undefined),
+      override: (label, _opts, prompt) => (label === 'plan:issue-tree' ? treeReplyWithRepo(prompt, [2, 3], repo) : undefined),
     })
     assert.equal(scanLabels(calls).length, 0, repo)
     assert.deepEqual(result.skippedLabels.matched, [1, 2, 3], repo)
@@ -257,7 +256,7 @@ for (const bash of availableBashes()) {
     const stub = makeGhRepoScanStub({ prs: [{ headRefOid: 'a'.repeat(40) }], checkRuns: { ['a'.repeat(40)]: checkRuns(['cursor', 'github-actions', 'codecov']) } })
     const { result, logs } = await runScript({
       args: ARGS(),
-      override: (label, opts, prompt) => (label === 'detect:external-checks' ? runRealScan(bash, stub, prompt) : undefined),
+      override: (label, _opts, prompt) => (label === 'detect:external-checks' ? runRealScan(bash, stub, prompt) : undefined),
     })
     assert.deepEqual(result.externalChecksObserved, ['codecov', 'cursor'])
     assert.ok(!logs.some((m) => m.includes('観測を採用しない')))
@@ -272,7 +271,7 @@ for (const bash of availableBashes()) {
     const { result, calls } = await runScript({
       args: ARGS({ skipLabels: labels }),
       leaves: [2, 3, 4, 5],
-      override: (label, opts, prompt) => (label === 'plan:skip-labels' ? runRealScan(bash, stub, prompt) : undefined),
+      override: (label, _opts, prompt) => (label === 'plan:skip-labels' ? runRealScan(bash, stub, prompt) : undefined),
     })
     assert.deepEqual(result.skippedLabels, { labels, matched: [2, 3, 4], unknown: [], absent: ['typo'] })
     assert.deepEqual(labelsOf(calls).filter((l) => /^plan:#/.test(l)), ['plan:#5'], '対象外の葉に Plan を起動した')
@@ -287,7 +286,7 @@ for (const bash of availableBashes()) {
     const { result, calls } = await runScript({
       args: ARGS({ skipLabels: ['owner:human'] }),
       leaves: [2, 4, 5, 6],
-      override: (label, opts, prompt) => {
+      override: (label, _opts, prompt) => {
         if (label !== 'plan:skip-labels') return undefined
         const env = runRealScan(bash, stub, prompt)
         bytes = JSON.stringify(env).length
@@ -305,7 +304,7 @@ for (const bash of availableBashes()) {
     const { result, calls } = await runScript({
       args: ARGS({ skipLabels: labels }),
       leaves: [2, 3],
-      override: (label, opts, prompt) => (label.startsWith('plan:skip-labels') ? runRealScan(bash, stub, prompt) : undefined),
+      override: (label, _opts, prompt) => (label.startsWith('plan:skip-labels') ? runRealScan(bash, stub, prompt) : undefined),
     })
     assert.deepEqual(labelsOf(calls).filter((l) => l.startsWith('plan:skip-labels')), ['plan:skip-labels', 'plan:skip-labels-retry'])
     assert.deepEqual(result.skippedLabels.unknown, ['b'])
@@ -320,7 +319,7 @@ test('取り違え: ラベルの並びが違う入力で作られた封筒は採
   const { result, calls, logs } = await runScript({
     args: ARGS({ skipLabels: labels }),
     leaves: [2, 3],
-    override: (label, opts, prompt) => {
+    override: (label, _opts, prompt) => {
       if (!label.startsWith('plan:skip-labels')) return undefined
       n++
       const c = parseRepoScanCommand(prompt)

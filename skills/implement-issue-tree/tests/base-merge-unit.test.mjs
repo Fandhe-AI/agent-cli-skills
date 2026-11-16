@@ -57,7 +57,7 @@ function table(bash, rows) {
 }
 // expect: 0 = 受理、1 = 拒否
 function check(bash, fn, cases, extra = () => []) {
-  const res = table(bash, cases.map(([input, expect]) => [fn, input, ...extra(input)]))
+  const res = table(bash, cases.map(([input]) => [fn, input, ...extra(input)]))
   const bad = []
   cases.forEach(([input, expect], i) => {
     if (res[i].rc !== expect) bad.push(`${JSON.stringify(input)}: 期待 ${expect} / 実際 ${res[i].rc}`)

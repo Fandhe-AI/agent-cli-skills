@@ -278,7 +278,7 @@ const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
 function recoverRun({ decision, wipCommitted, cleanup, branch = 'feat/2-x', argsExtra = {} }) {
   return runScript({
     args: { ...BASE_ARGS, ...argsExtra },
-    override: (label, opts, prompt) => {
+    override: (label) => {
       if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: ITEM }, highWaterBytes: 0, highWaterVersion: 0 }
       if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
       if (label === 'recover:#2') return { decision, branch, wipCommitted, worktreeMissing: false, reason: 'test', brief: { done: 'd', remaining: 'r', broken: '' } }
@@ -387,7 +387,7 @@ test('Recover continue / discard: 掃除が保持し、failed の書き戻しも
     let writes = 0
     const { calls, result } = await runScript({
       args: BASE_ARGS,
-      override: (label, opts, prompt) => {
+      override: (label) => {
         if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: ITEM }, highWaterBytes: 0, highWaterVersion: 0 }
         if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
         if (label === 'recover:#2') return { decision, branch: 'feat/2-x', wipCommitted: true, worktreeMissing: false, reason: 'test', brief: { done: 'd', remaining: 'r', broken: '' } }
@@ -423,7 +423,7 @@ function absentRun({ absent, recover = {}, saved = BLOCKED, cleanup = { ok: true
   const h = { 2: m.sha256Hex(m.canonicalJson(saved)) }
   return runScript({
     args: BASE_ARGS,
-    override: (label, opts, prompt) => {
+    override: (label) => {
       if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: saved }, highWaterBytes: 0, highWaterVersion: 0 }
       if (label === 'state:load-verify') return { fileExists: true, hashes: h, keysSha256: bKeysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
       if (label === 'recover:#2') return { decision: 'discard', branch: '', wipCommitted: false, worktreeMissing: true, reason: 'test', ...recover }

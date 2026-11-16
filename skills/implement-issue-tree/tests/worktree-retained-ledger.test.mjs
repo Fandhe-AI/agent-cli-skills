@@ -297,10 +297,59 @@ test('保持が無いラン: 保持の見出しは出ない', async () => {
   assert.deepEqual(result.retainedWorktrees, [])
 })
 
+// 上の 2 つのシナリオの保持（FIX_A）は、引き継ぎ済みの新が保持された分（slotRetainedPaths）として案内に出る。台帳（ephemeralWorktrees）には
+// kind retained が 1 件も載らないので、使い捨ての一覧から retained を除く条件を外しても一覧は変わらない（変異 R13 が生き残った理由）。
+// ここでは台帳へ kind retained で載る経路（どこにも数えられていないパスの保持）を通す: 前のランが blocked で残した closed の子 #2 の
+// worktree を closed 後始末が保持する。#3 は通常どおり進み、使い捨て worktree（review / pr-create）を記録する
+const defs = await importDefinitions(['sha256Hex', 'canonicalJson'], 'retained-ledger-report')
+const CLOSED_WT = '/repo/wt/closed-2'
+
+test('ラン終了時の報告: 台帳へ kind retained で載った worktree（closed 後始末の保持）は、使い捨ての一覧と返却値 ephemeralWorktrees に出ない', async () => {
+  const saved = { status: 'blocked', branch: 'feat/2-x', worktree: CLOSED_WT, pr: 77 }
+  const hashes = { 2: defs.sha256Hex(defs.canonicalJson(saved)) }
+  const keysSha256 = defs.sha256Hex(defs.canonicalJson(Object.keys(hashes).sort()))
+  const { result, logs } = await runScript({
+    args: { ...BASE_ARGS, maxResidualWorktrees: 100 },
+    leaves: [2, 3],
+    override: (label) => {
+      if (label === 'plan:issue-tree') {
+        return {
+          nodes: [
+            { number: 1, title: 'root', state: 'open', parent: 0, siblingIndex: 0, dependsOn: [], subIssuesTotal: 2 },
+            { number: 2, title: 'issue 2', state: 'closed', parent: 1, siblingIndex: 0, dependsOn: [], subIssuesTotal: 0 },
+            { number: 3, title: 'issue 3', state: 'open', parent: 1, siblingIndex: 1, dependsOn: [], subIssuesTotal: 0 },
+          ],
+        }
+      }
+      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: saved }, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'pr-bind:#2') return { state: 'MERGED', headRefOid: 'c'.repeat(40), headRefName: 'feat/2-x', baseRefName: 'main', isCrossRepository: false, closingIssues: [2] }
+      if (label === 'state:cleanup:#2') return { ok: false, retained: true, worktree: 'retained-dirty' }
+      return undefined
+    },
+  })
+  // 前提: 保持は台帳経由（slotRetainedPaths 経由ではない）。ここが崩れると以下の検査は空振りになる
+  assert.ok(logs.includes(`#2: 消えたと確認できなかった worktree を残置の台帳へ載せた（${CLOSED_WT}）`), '保持した worktree を台帳へ kind retained で載せる')
+  assert.deepEqual(result.retainedWorktrees, [{ issue: 2, kind: 'retained', path: CLOSED_WT }])
+
+  assert.ok(!result.ephemeralWorktrees.some((e) => e.kind === 'retained' || e.path === CLOSED_WT), '返却値の使い捨て一覧に保持した worktree を入れない')
+  assert.deepEqual(result.ephemeralWorktrees.map((e) => e.kind), ['review', 'pr-create'])
+
+  const disposableHead = logs.findIndex((l) => l.startsWith('使い捨て worktree（review'))
+  const retainedHead = logs.findIndex((l) => l.startsWith('削除せず保持した worktree'))
+  assert.ok(disposableHead >= 0 && retainedHead > disposableHead, '見出しは使い捨て → 保持の順に 2 つ出る')
+  assert.match(logs[disposableHead], /を 2 件記録した/, '使い捨ての件数に保持した worktree を数えない')
+  const listed = (from, to) => logs.slice(from + 1, to).filter((l) => /^ {2}(#|\()/.test(l))
+  const disposableLines = listed(disposableHead, retainedHead)
+  assert.equal(disposableLines.length, 2)
+  assert.ok(!disposableLines.some((l) => l.includes('(retained)') || l.includes(CLOSED_WT)), '保持した worktree は使い捨ての一覧に出ない')
+  assert.deepEqual(listed(retainedHead, logs.length).filter((l) => l.includes(CLOSED_WT)), [`  #2 (retained): ${CLOSED_WT}`], '保持の一覧に 1 回だけ出る')
+})
+
 const GIB_KIB = 1024 * 1024
 // du の応答: 入力のパス列に FIX_A が含まれていれば 1 GiB、なければ 1 MiB（測定の対象に保持したパスが入るかを見る）
 function bytesExtra(measured) {
-  return (label, opts, prompt) => {
+  return (label, _opts, prompt) => {
     if (label === 'worktree:residual-bytes') {
       const input = commandInputOf(prompt) ?? ''
       measured.push(input.split('\n'))
@@ -477,7 +526,7 @@ test('バイト軸（実装スクリプト全体）: fix がパスを返さず�
 const MERGE_ARGS = { ...BASE_ARGS, maxResidualWorktreeBytes: 512 * 1024 * 1024, maxResidualWorktrees: 100 }
 // 測定の呼び出しと fix の起動を時系列で記録する（fix より後の測定だけを見るため）
 function timeline(events, pathBytes) {
-  return (label, opts, prompt) => {
+  return (label, _opts, prompt) => {
     if (label === 'fix:#2') events.push('fix')
     if (label === 'worktree:residual-bytes') {
       const input = commandInputOf(prompt) ?? ''
