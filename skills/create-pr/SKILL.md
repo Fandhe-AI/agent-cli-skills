@@ -18,12 +18,18 @@ user-invocable: true
 
 ### Step 1: 変更内容を分析する
 
-```bash
-git log main..HEAD --oneline
-git diff main...HEAD --stat
-```
+ベースブランチは Step 5 と同じ方法（`gh repo view` が返す既定ブランチ）で解決し、そのリモート追跡ブランチ（`origin/<base>`）との差分を見る。リポジトリの規約が `develop` 等なら、Step 5 と同じく `base=` をその名前に置き換える。ベースブランチ名を取得できないときは `exit 1` で止めて報告する。コードブロックは独立したシェルで実行され得るため、変数の引き継ぎに依存せず、このブロックの中で解決する。
 
-ベースブランチはリポジトリの規約に従う（`main` / `develop` 等）。
+```bash
+base="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)" || base=""
+if [ -z "${base}" ]; then
+  echo "ベースブランチ名を取得できない。差分を確認できないため中止する" >&2
+  exit 1
+fi
+git fetch origin "${base}"
+git log "origin/${base}..HEAD" --oneline
+git diff "origin/${base}...HEAD" --stat
+```
 
 ### Step 2: セキュリティチェック（必須）
 

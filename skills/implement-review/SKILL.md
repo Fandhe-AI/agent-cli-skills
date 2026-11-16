@@ -13,12 +13,19 @@ user-invocable: true
 
 ### Step 1: 変更内容を確認する
 
+ベースブランチは `gh repo view` が返す既定ブランチで解決する。リポジトリの規約が `develop` 等なら `base=` をその名前に置き換える。取得できないときは `exit 1` で止めて報告する。
+
 ```bash
-git diff main...HEAD --stat
-git diff main...HEAD
+base="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)" || base=""
+if [ -z "${base}" ]; then
+  echo "ベースブランチ名を取得できない。差分を確認できないため中止する" >&2
+  exit 1
+fi
+git fetch origin "${base}"
+git diff "origin/${base}...HEAD" --stat
+git diff "origin/${base}...HEAD"
 ```
 
-ベースブランチはリポジトリの規約に従う（`main` / `develop` 等）。
 または特定のファイル・ディレクトリを対象にする（ユーザーが指定した場合）。
 
 ### Step 2: ①仕様準拠レビュー
