@@ -302,6 +302,13 @@ export function writablePathsFor(label, mainRoot) {
   return STATE_LOAD_LABEL.test(label) ? [join(mainRoot, '_', 'issue-trees')] : []
 }
 
+// ツリーの取得（PR #851 の P1）: plan:issue-tree（と -retry）は fetch-tree.sh --root で自分の TMPDIR に
+// iit-tree.XXXXXX/tree.tsv を作り、2 ページ以上なら plan:issue-tree-page-N（と -retry）が --page --dir でそれを読む。
+// アダプタはエージェントごとに TMPDIR を分けて他の分を読ませない（Codex の LOW-13）ため、ページの段にだけ
+// ツリーの段の logDir を req.readTmpOf（読んでよい前の段の TMPDIR。アダプタが自分の配置へ写す）として渡す。書き込みは足さない
+const TREE_LABEL = /^plan:issue-tree(?:-retry)?$/
+const TREE_PAGE_LABEL = /^plan:issue-tree-page-[1-9][0-9]*(?:-retry)?$/
+
 const safeLabel = (label) => label.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80) || '_'
 
 /**
@@ -342,6 +349,8 @@ export function createAgentHost({ adapter, cfg }) {
   const seq = createSequencer()
   const limiter = createLimiter(maxParallel)
   let adapterCalls = 0
+  // ツリーの段（TREE_LABEL）の logDir。ページの段の req.readTmpOf になる（起動した順）
+  const treeLogDirs = []
   // 内容の固定。run.mjs の固定（より早い時点）を優先し、launcher と signed-output.sh は無ければここで固定する
   const pins = mergePins(Array.isArray(cfg.pins) ? cfg.pins : [], pinFiles(launcherPinPaths(skillDir)))
   let tampered = ''
@@ -468,8 +477,10 @@ export function createAgentHost({ adapter, cfg }) {
       logDir: logDir ?? '',
       worktreeGitdir,
       writablePaths: writablePathsFor(label, mainRoot),
+      readTmpOf: TREE_PAGE_LABEL.test(label) ? [...treeLogDirs] : [],
     }
-    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, merge, timeoutMs, worktree: worktreePath ?? null, worktreeGitdir, writablePaths: req.writablePaths })
+    if (TREE_LABEL.test(label) && logDir) treeLogDirs.push(logDir)
+    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, merge, timeoutMs, worktree: worktreePath ?? null, worktreeGitdir, writablePaths: req.writablePaths, readTmpOf: req.readTmpOf })
     writeLog(logDir, 'prompt.txt', req.prompt)
     // meta.json の outcome は ok / null の 2 値、詳細（修復の有無・失敗の理由）は status・reason に置く
     const outcome = (status, extra = {}) => Object.assign(rec, { outcome: status === 'ok' || status === 'repaired' ? 'ok' : 'null', status, sessionRef }, extra)

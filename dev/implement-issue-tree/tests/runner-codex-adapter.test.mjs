@@ -772,3 +772,25 @@ test('P0 write_stdin: start は同じ CODEX_HOME と -c で `codex features list
     assert.equal(t.calls().length, 0, mode)
   }
 })
+
+test('readTmpOf（PR #851 の P1）: 前の段の logDir をその TMPDIR へ写し read で足す（tmpRoot の deny より後・書き込みは足さない）。<runDir>/agents/ 直下でなければ codex を起動しない', async () => {
+  const t = setup({ turns: [okTurn()] })
+  const tree = join(t.runDir, 'agents', '0001-plan_issue-tree')
+  await t.adapter.run(t.req({ name: '0002-plan_issue-tree-page-1', readTmpOf: [tree] }))
+  const p = t.calls()[0].argv.find((x) => x.startsWith('permissions='))
+  const td = JSON.stringify(join(t.runDir, 'tmp', '0001-plan_issue-tree'))
+  assert.ok(p.includes(`${td}="read"`), p)
+  assert.equal(p.includes(`${td}="write"`), false)
+  assert.ok(p.indexOf(`${JSON.stringify(join(t.runDir, 'tmp'))}="deny"`) < p.indexOf(`${td}="read"`))
+  for (const bad of [[join(t.runDir, 'other', 'x')], [`${tree}/../0009-impl`], ['rel'], [join(t.runDir, 'agents')], 'x', [1]]) {
+    const u = setup({ turns: [okTurn()] })
+    await assert.rejects(u.adapter.run(u.req({ readTmpOf: bad })), (e) => e instanceof AdapterError && e.kind === 'denied', JSON.stringify(bad))
+    assert.equal(u.calls().length, 0)
+  }
+  // 無し・空は足さない
+  const v = setup({ turns: [okTurn()] })
+  await v.adapter.run(v.req({ readTmpOf: [] }))
+  const pv = v.calls()[0].argv.find((x) => x.startsWith('permissions='))
+  const reads = [...pv.matchAll(/"([^"]+)"="read"/g)].map((m) => m[1])
+  assert.equal(reads.some((r) => r.startsWith(`${join(v.runDir, 'tmp')}/`)), false, `TMPDIR の read を足さない: ${reads}`)
+})

@@ -609,3 +609,29 @@ test('固定（P0）: signed-output.sh・cfg.pins のファイル（ガード等
   const c = makeHost({ cfg: { skillDir: sd3, pins: pinFiles([g3]) }, reply: () => { writeFileSync(g3, 'exit 0 # changed\n'); return { ok: true, n: 1 } } })
   assert.equal(await c.agent('P', { label: 'x', phase: 'Quick', schema: SCHEMA }), null)
 })
+
+test('readTmpOf（PR #851 の P1）: ツリーのページの段（plan:issue-tree-page-N・-retry）にだけ、それまでのツリーの段（plan:issue-tree・-retry）の logDir を渡す。他の段・runDir 無しは空', async () => {
+  const runDir = join(root, `rt-run-${Math.random().toString(16).slice(2)}`)
+  const { agent, calls } = makeHost({ cfg: { runDir }, reply: () => ({ ok: true, n: 1 }) })
+  for (const label of ['plan:issue-tree-page-1', 'plan:issue-tree', 'plan:issue-tree-retry', 'plan:issue-tree-page-1', 'plan:issue-tree-page-12-retry', 'plan:#2', 'plan:issue-tree-page-0', 'plan:issue-tree-pages', 'impl:#2']) {
+    await agent('p', { label, schema: SCHEMA })
+  }
+  const dirs = [join(runDir, 'agents', '0002-plan_issue-tree'), join(runDir, 'agents', '0003-plan_issue-tree-retry')]
+  assert.deepEqual(calls.map((r) => [r.label, r.readTmpOf]), [
+    ['plan:issue-tree-page-1', []], // ツリーの段より前
+    ['plan:issue-tree', []],
+    ['plan:issue-tree-retry', []],
+    ['plan:issue-tree-page-1', dirs],
+    ['plan:issue-tree-page-12-retry', dirs],
+    ['plan:#2', []],
+    ['plan:issue-tree-page-0', []],
+    ['plan:issue-tree-pages', []],
+    ['impl:#2', []],
+  ])
+  const reqLog = JSON.parse(readFileSync(join(runDir, 'agents', '0004-plan_issue-tree-page-1', 'request.json'), 'utf8'))
+  assert.deepEqual(reqLog.readTmpOf, dirs)
+  const b = makeHost({ reply: () => ({ ok: true, n: 1 }) })
+  await b.agent('p', { label: 'plan:issue-tree', schema: SCHEMA })
+  await b.agent('p', { label: 'plan:issue-tree-page-1', schema: SCHEMA })
+  assert.deepEqual(b.calls[1].readTmpOf, [])
+})

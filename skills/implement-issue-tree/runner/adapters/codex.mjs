@@ -57,6 +57,10 @@
 //   （とそのフォールバック）だけが <main>/_/issue-trees を受け取る（モデルの段で状態ファイルを初期化する。Phase 3 の通しで、
 //   無いと非 dryRun の初回が「状態ファイルの初期化に失敗」で止まった〔27c90eb〕。全段で常時 write にしていたのは
 //   監査 e670648 の MEDIUM-4 で、plan・monitor・merge-exec 等が状態ファイルを書き換えられた）。
+//   req.readTmpOf（agent-host がツリーのページの段 plan:issue-tree-page-N にだけ、ツリーの段の logDir を渡す）は、その段の
+//   TMPDIR を read で足す（PR #851 の P1。fetch-tree.sh --root が TMPDIR に作った iit-tree.XXXXXX/tree.tsv を --page が読む。
+//   tmpRoot 全体は deny のままで、より具体的な read が勝つ。2026-11-17 に `codex sandbox -P iit_read` で、足した TMPDIR は
+//   読めて書けず、他の段の TMPDIR は読めないままであることを確かめた）。
 //   iit_impl: 隔離 worktree。worktree・<main>/.git/{objects,refs,logs,packed-refs,packed-refs.lock}・
 //             <main>/.git/worktrees/<name>（正確なパス）・TMPDIR が書ける。.git/hooks と .git/config は読み取りのまま。
 //             gitdir の下の commondir・gitdir・config.worktree と worktree の .git は read に戻す（GITDIR_READ_ONLY）。
@@ -169,18 +173,22 @@ export function checkWritablePaths(v) {
 
 /**
  * permission profile の `-c` 引数（2 引数 × 2）。純関数。
- * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, tmpRoot?: string|null, home: string, git: null | { gitdir: string, commonDir: string }, writablePaths?: string[], extraWritePaths?: string[], platform?: string }} o
+ * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, tmpRoot?: string|null, readablePaths?: string[], home: string, git: null | { gitdir: string, commonDir: string }, writablePaths?: string[], extraWritePaths?: string[], platform?: string }} o
  *   tmpRoot: エージェント別 TMPDIR の親（<runDir>/tmp）。渡すと deny にする（他のエージェントの分を読めなくする）。
+ *   readablePaths: tmpRoot の下で read に戻す前の段の TMPDIR（req.readTmpOf を agentTmpDir で写したもの）。
  *            tmpDir はその下で、より具体的なパスとして write が優先される
  *   writablePaths: req.writablePaths（agent-host が label ごとに決める追加の書き込み可パス。checkWritablePaths で検証済み）
  *   platform: process.platform の値（テストが注入する）。darwin なら両 profile に DARWIN_HEREDOC_TMP を足す
  */
-export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot = null, home, git, writablePaths = [], extraWritePaths = [], platform = process.platform }) {
+export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot = null, readablePaths = [], home, git, writablePaths = [], extraWritePaths = [], platform = process.platform }) {
   const name = kind === 'impl' ? 'iit_impl' : 'iit_read'
   const ws = kind === 'impl' ? { '.': 'write' } : { '.': 'read' }
   ws['.codex'] = 'read'
   const fs = { ':minimal': 'read' }
   if (tmpRoot) fs[tmpRoot] = 'deny'
+  // 前の段の TMPDIR のうち読んでよいもの（req.readTmpOf から作る。plan:issue-tree-page-N が plan:issue-tree の
+  // iit-tree.XXXXXX/tree.tsv を読む）。tmpRoot の deny より具体的なので read が勝つ。書き込みは許さない
+  for (const p of readablePaths) fs[p] = 'read'
   fs[tmpDir] = 'write'
   if (kind === 'impl' && git) {
     for (const p of ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.lock']) fs[join(git.commonDir, p)] = 'write'
@@ -390,6 +398,17 @@ export function createAdapter(cfg) {
     if (name === '' || name === '.' || name === '..') throw new AdapterError('denied', 'logDir から TMPDIR を決められない')
     return join(tmpRoot, name)
   }
+  /**
+   * req.readTmpOf（読んでよい前の段の logDir。agent-host がツリーのページの段にだけ渡す）を、その段の TMPDIR へ写す。
+   * <runDir>/agents/ 直下の正規化済みの絶対パスでなければ例外（実行しない）。無ければ []。
+   */
+  const readableTmpDirs = (v) => {
+    if (v === null || v === undefined) return []
+    const agents = join(cfg.runDir, 'agents')
+    const ok = Array.isArray(v) && v.every((p) => typeof p === 'string' && isAbsolute(p) && resolve(p) === p && dirname(p) === agents)
+    if (!ok) throw new AdapterError('denied', 'readTmpOf が <runDir>/agents/ 直下の絶対パスの配列でない')
+    return v.map(agentTmpDir)
+  }
   const platform = cfg.platform ?? process.platform
   const baseEnv = { ...(cfg.env ?? process.env) }
   const home = baseEnv.HOME ?? homedir()
@@ -463,6 +482,7 @@ export function createAdapter(cfg) {
     // 起動前に検証する（不正な worktreeGitdir・writablePaths では codex を起動しない）
     worktreeGit(cfg.mainRoot, req.worktreeGitdir)
     const writablePaths = checkWritablePaths(req.writablePaths)
+    const readablePaths = readableTmpDirs(req.readTmpOf)
     const merge = checkMerge(req.allowMerge === true, req.merge)
     const { prompt, schema, model, effort, cwd, timeoutMs, resume = null, logDir } = req
     mkdirSync(logDir, { recursive: true })
@@ -487,7 +507,7 @@ export function createAdapter(cfg) {
       writeFileSync(sp, JSON.stringify(strictifySchema(schema)))
       args.push('--output-schema', sp)
     }
-    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot, home, git, writablePaths, extraWritePaths: tc.extraWritePaths, platform }))
+    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot, readablePaths, home, git, writablePaths, extraWritePaths: tc.extraWritePaths, platform }))
     args.push('-c', TTY_OFF)
     args.push(...buildHookArgs({ hookScript: HOOK_SCRIPT, guardScript, hookLog, merge }))
     if (resume) args.push(resume.sessionRef)
