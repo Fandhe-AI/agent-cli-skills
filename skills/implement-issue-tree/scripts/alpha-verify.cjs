@@ -22,7 +22,8 @@
 //       名前空間なら Array・Promise・Object の直下だけ。call・apply・bind は object が関数値のときだけ。replace /
 //       replaceAll は第 2 引数だけ）(c) setTimeout・setInterval・queueMicrotask・new Promise のどれかのときだけ通す。
 //       括弧・カンマ式の最後・条件式の枝・論理式は親の位置を引き継ぎ、配列リテラルの要素は配列の位置で判定する
-//       （配列を object にしてよいのは length と、第 1 引数が関数式か束縛された関数の反復メソッドだけ）。それ以外の位置
+//       （配列を object にしてよいのは length と、第 1 引数が関数式か束縛された関数の反復メソッドだけ。関数値を入れた
+//       オブジェクトリテラルは、メンバーの値が関数値そのものになり得るので length を含めてメンバーを読まない）。それ以外の位置
 //       （計算キー・in・比較・+・テンプレート・タグ・typeof・自由変数や名前空間の関数の引数など）はすべて拒否する
 //       コンテナ: 関数値を入れた配列・入れ子のコンテナを呼び出しの引数に渡す形は、呼び出し先によらず拒否する。例外は、
 //       関数値を非計算キーの値として直に入れたオブジェクトリテラルを (a) の局所束縛の呼び出し先へ渡す形
@@ -262,6 +263,9 @@ function fnPositionDenied(anc, i, mode, res) {
       const k = p.property.type === 'Identifier' ? p.property.name : null
       if (k === null || SOURCE_MEMBERS.has(k)) return label
       if (mode === 'value') return null
+      // オブジェクトリテラル: メンバーの値は入れた関数値そのものになり得る（({ length: f }).length・({ k: f }).k）ので、
+      // どのメンバーを読んでも拒否する
+      if (child.type !== 'ArrayExpression') return label
       // 配列リテラル: 要素数だけを見る length と、反復の呼び出し（第 1 引数のコールバックを解決後に判定）だけを許可する
       if (k === 'length') return null
       const call = anc[i - 2]
