@@ -482,3 +482,10 @@ test('部品: parseExecSpec・checkExecRule・interpretExecResult', () => {
   assert.equal(interpretExecResult('exit-ok', { code: 0, stdout: '', timedOut: true }), undefined)
   assert.deepEqual(interpretExecResult('line:STATE_RESULT', { code: 0, stdout: 'a\nSTATE_RESULT {"ok":false,"reason":"r"}\n\n' }), { ok: false, reason: 'r' })
 })
+
+test('writablePaths（MEDIUM-4）: state:load とそのフォールバックだけに <main>/_/issue-trees を渡す（load-fill・load-verify・他の段は空）', async () => {
+  const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }) })
+  const want = { 'state:load': true, 'state:load:fallback-sonnet': true, 'state:load-fill': false, 'state:load-fill:fallback-sonnet': false, 'state:load-verify': false, 'state:loader': false, 'plan:issue-tree': false, 'merge-exec:#2': false, 'state:load:retry': false }
+  for (const label of Object.keys(want)) await agent('p', { label, schema: SCHEMA })
+  for (const r of calls) assert.deepEqual(r.writablePaths, want[r.label] ? [join(mainRoot, '_', 'issue-trees')] : [], r.label)
+})

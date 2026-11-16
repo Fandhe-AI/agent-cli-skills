@@ -28,10 +28,11 @@
 //   allowMerge は hook のコマンド行へ --merge-re を埋めるかどうかで切り替える。
 //
 // permission profile は 2 種（:read-only を土台に、ネットワークは有効）:
-//   iit_read: worktree ではない cwd（メイン worktree。観測・状態・計画）。cwd は読み取りのみ・TMPDIR と
-//             状態ファイルの置き場 <main>/_/issue-trees だけ書ける（state:load がモデルの段で状態ファイルを初期化する。
-//             プロンプトの一時ファイル配置規則が例外として許す唯一の書き込み先。Phase 3 の通しで、無いと非 dryRun の
-//             初回が「状態ファイルの初期化に失敗」で止まった）。
+//   iit_read: worktree ではない cwd（メイン worktree。観測・状態・計画）。cwd は読み取りのみ・TMPDIR だけ書ける。
+//   どちらの profile にも req.writablePaths（契約。agent-host が label ごとに決める）を write で足す。いまは state:load
+//   （とそのフォールバック）だけが <main>/_/issue-trees を受け取る（モデルの段で状態ファイルを初期化する。Phase 3 の通しで、
+//   無いと非 dryRun の初回が「状態ファイルの初期化に失敗」で止まった〔27c90eb〕。全段で常時 write にしていたのは
+//   監査 e670648 の MEDIUM-4 で、plan・monitor・merge-exec 等が状態ファイルを書き換えられた）。
 //   iit_impl: 隔離 worktree。worktree・<main>/.git/{objects,refs,logs,packed-refs,packed-refs.lock}・
 //             <main>/.git/worktrees/<name>（正確なパス）・TMPDIR が書ける。.git/hooks と .git/config は読み取りのまま。
 //             gitdir の下の commondir・gitdir・config.worktree と worktree の .git は read に戻す（GITDIR_READ_ONLY）。
@@ -106,18 +107,25 @@ export function worktreeGit(mainRoot, worktreeGitdir) {
   return { gitdir: worktreeGitdir, commonDir: join(mainRoot, '.git') }
 }
 
+/** req.writablePaths を検証して返す（無ければ []）。正規化済みの絶対パスの配列でなければ例外（実行しない）。 */
+export function checkWritablePaths(v) {
+  if (v === null || v === undefined) return []
+  const ok = Array.isArray(v) && v.every((p) => typeof p === 'string' && isAbsolute(p) && resolve(p) === p)
+  if (!ok) throw new AdapterError('denied', 'writablePaths が正規化済みの絶対パスの配列でない')
+  return v
+}
+
 /**
  * permission profile の `-c` 引数（2 引数 × 2）。純関数。
- * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, home: string, git: null | { gitdir: string, commonDir: string }, stateDir?: string|null, extraWritePaths?: string[], platform?: string }} o
- *   stateDir: 状態ファイルの置き場（<main>/_/issue-trees）。iit_read のときだけ書けるようにする
+ * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, home: string, git: null | { gitdir: string, commonDir: string }, writablePaths?: string[], extraWritePaths?: string[], platform?: string }} o
+ *   writablePaths: req.writablePaths（agent-host が label ごとに決める追加の書き込み可パス。checkWritablePaths で検証済み）
  *   platform: process.platform の値（テストが注入する）。darwin なら両 profile に DARWIN_HEREDOC_TMP を足す
  */
-export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stateDir = null, extraWritePaths = [], platform = process.platform }) {
+export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, writablePaths = [], extraWritePaths = [], platform = process.platform }) {
   const name = kind === 'impl' ? 'iit_impl' : 'iit_read'
   const ws = kind === 'impl' ? { '.': 'write' } : { '.': 'read' }
   ws['.codex'] = 'read'
   const fs = { ':minimal': 'read', [tmpDir]: 'write' }
-  if (kind !== 'impl' && stateDir) fs[stateDir] = 'write'
   if (kind === 'impl' && git) {
     for (const p of ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.lock']) fs[join(git.commonDir, p)] = 'write'
     fs[git.gitdir] = 'write'
@@ -130,6 +138,7 @@ export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stat
   }
   for (const p of platformWritePaths(platform)) fs[p] = 'write'
   for (const p of extraWritePaths) fs[p] = 'write'
+  for (const p of writablePaths) fs[p] = 'write'
   fs[join(codexHome, 'auth.json')] = 'deny'
   fs[join(home, '.codex', 'auth.json')] = 'deny'
   const entries = (o) => Object.entries(o).map(([k, v]) => `${q(k)}=${q(v)}`).join(', ')
@@ -195,7 +204,6 @@ export function createAdapter(cfg) {
   const bin = tc.codexBin ?? 'codex'
   const tmpDir = join(cfg.runDir, 'tmp')
   const platform = cfg.platform ?? process.platform
-  const stateDir = join(cfg.mainRoot, '_', 'issue-trees')
   const baseEnv = { ...(cfg.env ?? process.env) }
   const home = baseEnv.HOME ?? homedir()
   let codexHome = null
@@ -236,8 +244,9 @@ export function createAdapter(cfg) {
 
   async function run(req) {
     await start()
-    // 起動前に検証する（不正な worktreeGitdir では codex を起動しない）
+    // 起動前に検証する（不正な worktreeGitdir・writablePaths では codex を起動しない）
     worktreeGit(cfg.mainRoot, req.worktreeGitdir)
+    const writablePaths = checkWritablePaths(req.writablePaths)
     const { prompt, schema, model, effort, cwd, allowMerge = false, timeoutMs, resume = null, logDir } = req
     mkdirSync(logDir, { recursive: true })
     const n = readdirSync(logDir).filter((f) => /^events-t\d+\.jsonl$/.test(f)).length + 1
@@ -259,7 +268,7 @@ export function createAdapter(cfg) {
       writeFileSync(sp, JSON.stringify(strictifySchema(schema)))
       args.push('--output-schema', sp)
     }
-    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stateDir, extraWritePaths: tc.extraWritePaths, platform }))
+    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, writablePaths, extraWritePaths: tc.extraWritePaths, platform }))
     args.push(...buildHookArgs({ hookScript: HOOK_SCRIPT, guardScript, hookLog, allowMerge: Boolean(allowMerge) }))
     if (resume) args.push(resume.sessionRef)
     args.push('-')

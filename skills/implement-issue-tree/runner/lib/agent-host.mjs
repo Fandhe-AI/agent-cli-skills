@@ -273,6 +273,16 @@ function createLimiter(max) {
   }
 }
 
+// 状態ファイルの置き場（<main>/_/issue-trees）を追加の書き込み可にする段（契約の req.writablePaths。監査 e670648 の MEDIUM-4）。
+// モデルの段で状態ファイルを書くのは state:load（無ければ初期化する）だけである。src の runStateAgent が付ける
+// `:fallback-<model>` を含め、読み取り専用の state:load-fill・直接実行の state:load-verify には一致させない
+const STATE_LOAD_LABEL = /^state:load(?::fallback-[a-z0-9]+)?$/
+
+/** label ごとの追加の書き込み可パス（絶対パスの配列）。 */
+export function writablePathsFor(label, mainRoot) {
+  return STATE_LOAD_LABEL.test(label) ? [join(mainRoot, '_', 'issue-trees')] : []
+}
+
 const safeLabel = (label) => label.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80) || '_'
 
 /**
@@ -406,8 +416,9 @@ export function createAgentHost({ adapter, cfg }) {
       resume: null,
       logDir: logDir ?? '',
       worktreeGitdir,
+      writablePaths: writablePathsFor(label, mainRoot),
     }
-    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, timeoutMs, worktree: worktreePath ?? null, worktreeGitdir })
+    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, timeoutMs, worktree: worktreePath ?? null, worktreeGitdir, writablePaths: req.writablePaths })
     writeLog(logDir, 'prompt.txt', req.prompt)
     // meta.json の outcome は ok / null の 2 値、詳細（修復の有無・失敗の理由）は status・reason に置く
     const outcome = (status, extra = {}) => Object.assign(rec, { outcome: status === 'ok' || status === 'repaired' ? 'ok' : 'null', status, sessionRef }, extra)

@@ -164,6 +164,12 @@ for (const c of CASES) {
     for (const r of got.adapterCalls) {
       if (r.cwd !== got.mainRoot) assert.ok(r.cwd.startsWith(`${got.mainRoot}/.claude/worktrees/${RUN_ID}-`), r.cwd)
     }
+    // 追加の書き込み可パス（MEDIUM-4）: 生成物の state:load（状態ファイルの初期化をモデルが行う段）だけが
+    // <main>/_/issue-trees を受け取る（27c90eb で直した初回の初期化の経路）。他の段は空
+    const loads = got.adapterCalls.filter((r) => /^state:load(?::fallback-[a-z0-9]+)?$/.test(r.label))
+    assert.ok(loads.length >= 1, 'state:load がアダプタへ回る')
+    for (const r of loads) assert.deepEqual(r.writablePaths, [join(got.mainRoot, '_', 'issue-trees')], r.label)
+    for (const r of got.adapterCalls.filter((x) => !loads.includes(x))) assert.deepEqual(r.writablePaths, [], r.label)
     assert.equal(got.stats.calls, got.calls.length)
     assert.ok(got.stats.maxActive <= c.args.parallel, `同時実行 ${got.stats.maxActive}`)
   })

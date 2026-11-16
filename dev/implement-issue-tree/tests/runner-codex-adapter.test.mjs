@@ -241,9 +241,9 @@ test('permission profile: 通常 cwd は read・req.worktreeGitdir があれば 
   assert.match(read, /^permissions=\{iit_read=\{extends=":read-only"/)
   assert.match(read, /":workspace_roots"=\{"\."="read"/)
   assert.equal(read.includes('objects'), false)
-  // 状態ファイルの置き場は iit_read だけ書ける（state:load の初期化）。iit_impl には足さない
+  // 状態ファイルの置き場は常時 write にしない（MEDIUM-4。state:load だけ agent-host が req.writablePaths で渡す）
   const stateDir = JSON.stringify(join(t.mainRoot, '_', 'issue-trees'))
-  assert.ok(read.includes(`${stateDir}="write"`), 'iit_read は <main>/_/issue-trees を書ける')
+  assert.equal(read.includes(stateDir), false, 'iit_read でも <main>/_/issue-trees を常時は書けない')
   assert.ok(c1.argv.includes('default_permissions="iit_read"'))
   const impl = prof(c2)
   assert.match(impl, /":workspace_roots"=\{"\."="write"/)
@@ -274,21 +274,39 @@ test('buildProfileArgs: req.profile で上書きでき、extraWritePaths が加�
   assert.ok(a[1].includes('"/origin"="write"'))
 })
 
-test('buildProfileArgs: stateDir は iit_read のときだけ書き込みに加わり、メイン worktree 全体は読み取りのまま', () => {
-  const base = { cwd: '/m', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, stateDir: '/m/_/issue-trees' }
-  const read = buildProfileArgs({ ...base, kind: 'read' })[1]
+test('buildProfileArgs: writablePaths だけが追加の書き込み可になり、メイン worktree 全体は読み取りのまま（MEDIUM-4）', () => {
+  const base = { cwd: '/m', codexHome: '/c', tmpDir: '/t', home: '/h', git: null }
+  const read = buildProfileArgs({ ...base, kind: 'read', writablePaths: ['/m/_/issue-trees'] })[1]
   assert.ok(read.includes('"/m/_/issue-trees"="write"'))
   assert.ok(read.includes('":workspace_roots"={"."="read"'))
   assert.equal(read.includes('"/m"='), false)
-  assert.equal(buildProfileArgs({ ...base, kind: 'impl' })[1].includes('issue-trees'), false)
-  assert.equal(buildProfileArgs({ ...base, kind: 'read', stateDir: null })[1].includes('issue-trees'), false)
+  assert.equal(buildProfileArgs({ ...base, kind: 'read' })[1].includes('issue-trees'), false, '既定では足さない')
+  assert.equal(buildProfileArgs({ ...base, kind: 'read', writablePaths: [] })[1].includes('issue-trees'), false)
+})
+
+test('writablePaths（MEDIUM-4）: agent-host の state:load（とフォールバック）だけ iit_read に <main>/_/issue-trees の write が入る（27c90eb の初期化の経路）。不正な値は denied', async () => {
+  const t = setup({ turns: [okTurn(), okTurn(), okTurn(), okTurn()] })
+  const prof = (c) => c.argv.find((x) => x.startsWith('permissions='))
+  const sd = join(t.mainRoot, '_', 'issue-trees')
+  const { createAgentHost } = await import('../../../skills/implement-issue-tree/runner/lib/agent-host.mjs')
+  const { loadConfig } = await import('../../../skills/implement-issue-tree/runner/lib/models.mjs')
+  const host = createAgentHost({ adapter: t.adapter, cfg: { config: loadConfig(), skillDir: SKILL_DIR, mainRoot: t.mainRoot, runId: 'wf_0123abcd-4ef', runDir: t.runDir } })
+  const S = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }
+  for (const label of ['state:load', 'state:load:fallback-sonnet', 'state:load-fill', 'plan:issue-tree']) await host('p', { label, schema: S })
+  const ps = t.calls().map(prof)
+  assert.equal(ps.length, 4)
+  assert.ok(ps[0].includes(`${JSON.stringify(sd)}="write"`), 'state:load')
+  assert.ok(ps[1].includes(`${JSON.stringify(sd)}="write"`), 'state:load:fallback-sonnet')
+  assert.equal(ps[2].includes('issue-trees'), false, 'state:load-fill')
+  assert.equal(ps[3].includes('issue-trees'), false, 'plan:issue-tree')
+  for (const bad of [['rel/x'], ['/a/../b'], [1], 'x']) await rejectsKind(t.adapter.run(t.req({ name: 'wp', writablePaths: bad })), 'denied')
 })
 
 test('buildProfileArgs: darwin だけ両 profile に /private/var/tmp（bash 3.2 の here-doc の置き場）を足す', () => {
   assert.equal(DARWIN_HEREDOC_TMP, '/private/var/tmp')
   assert.deepEqual(platformWritePaths('darwin'), ['/private/var/tmp'])
   for (const p of ['linux', 'freebsd', 'win32', undefined]) assert.deepEqual(platformWritePaths(p), [], String(p))
-  const base = { cwd: '/m', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, stateDir: '/m/_/issue-trees' }
+  const base = { cwd: '/m', codexHome: '/c', tmpDir: '/t', home: '/h', git: null }
   const vt = '"/private/var/tmp"="write"'
   for (const kind of ['read', 'impl']) {
     assert.ok(buildProfileArgs({ ...base, kind, platform: 'darwin' })[1].includes(vt), `darwin ${kind}`)
