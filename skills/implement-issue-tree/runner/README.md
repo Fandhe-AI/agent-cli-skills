@@ -102,8 +102,10 @@ _/iit-runner/<runId>/
   検知できない（エージェントの入力からは届かない範囲。詳細は `adapters/opencode-plugin/index.js` 冒頭）。
 - Codex で、モデルが `exec_command` で対話シェル（`bash -i` 等）を開き `write_stdin` でコマンドを送ると、送った行は
   PreToolUse hook（`agent-guard.sh`・merge-exec の完全一致）にも `command_execution` の件数照合にも現れず、ガードを
-  通らずに実行される（codex-cli 0.169.0 で実測。matcher を `*` にしても `write_stdin` は hook に来ず、
-  `-c features.unified_exec=false` も効かなかった）。ランナーからは塞げないため、`agent-guard.sh` と同じくサーバー側の
+  通らずに実行される（codex-cli 0.169.0 で実測。matcher を `*` にしても `write_stdin` の呼び出しは hook の記録に
+  残らず、`-c features.unified_exec=false` も効かなかった。記録用の hook は入力を jq で読み、jq の失敗を捨てていた
+  ため、`write_stdin` で hook が呼ばれなかったとまでは確かめていない。送った行がガードを通らずに実行されたことは
+  確かめた）。ランナーからは塞げないため、`agent-guard.sh` と同じくサーバー側の
   ruleset で補う。対話シェルは sandbox の中で起動されるため、書ける場所の制限（permission profile）は及ぶ想定である
   （この経路での書き込み拒否は実測していない）。
 - エージェントは、ランナーと同じ OS ユーザーで、ランナーの環境変数を引き継いで動く（両ツール共通）。環境変数にある秘密

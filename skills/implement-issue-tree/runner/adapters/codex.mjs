@@ -27,8 +27,8 @@
 //   (3) resume にも同じ hook 引数を渡す（渡さない turn ではマージが通った）。
 //   既知の穴（監査 e670648 の MEDIUM-5・実測済み）: exec_command で開いた対話シェルへ write_stdin で送った行は、
 //   hook（PreToolUse）にも command_execution にも現れず、(1)(2) のどちらも通らない。matcher を "*" にしても
-//   write_stdin の呼び出しは記録されず、hook の入力は command だけで tty の有無も見えず、`-c features.unified_exec=false`
-//   も効かなかった（codex-cli 0.169.0）。塞ぐ手段はランナー側に無い（README の既知の限界）。
+//   write_stdin の呼び出しは記録されず（記録用の hook は jq の失敗を捨てていたので、呼ばれなかったとまでは確かめていない）、
+//   hook の入力は command だけで tty の有無も見えず、`-c features.unified_exec=false` も効かなかった（codex-cli 0.169.0）。塞ぐ手段はランナー側に無い（README の既知の限界）。
 //   allowMerge は hook のコマンド行へ --merge-re を埋めるかどうかで切り替える。埋める形は req.merge の PR 番号で
 //   具体化した guard.mergeExecCommandFor(prNumber) で、merge 段の子の env には GH_REPO=<req.merge.repo> を固定する
 //   （監査 e670648 の MEDIUM-8。汎用の MERGE_EXEC_COMMAND は別の PR 番号・GH_REPO を向けた別リポジトリでも通った）。
