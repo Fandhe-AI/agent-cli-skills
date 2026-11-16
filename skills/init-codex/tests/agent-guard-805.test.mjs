@@ -8,7 +8,8 @@
 //
 // 旧版の fixture（tests/fixtures/agent-guard-baseline-805.json）は Issue #805 の前（7b7dbb4）の agent-guard.sh を、
 // コーパスの全コマンド × subagent {false, true, null} で流した結果。ref の存在に依らないよう凍結してある。
-// コーパスへ形を足したときは、旧版を取り出して同じ流し方で fixture を作り直す。fixture に無いコマンドは差分の対象外
+// コーパスへ形を足したときは、旧版を取り出して同じ流し方で fixture を作り直す（既存のキーの値は変えず、足した形だけを
+// 末尾へ加える。`JSON.stringify(v, null, 2)` に改行を足して書く。.editorconfig の字下げは 2 の倍数）。fixture に無いコマンドは差分の対象外
 // （通常の deny / allow の表が見る）。
 // 判定は /bin/bash（3.2）と PATH の bash（5 系）の両方で同じになることを確かめる。
 import { describe, it } from 'node:test'
@@ -125,6 +126,68 @@ describe('認識器 GH_TEXT_AWK（単体）', () => {
     ]
     for (const [c, skel] of want) assert.equal(rec(c).stdout.toString().trim(), skel, JSON.stringify(c))
   })
+})
+
+// 認識器 SQ_DOLLAR_AWK（`$'` の例外）を単体で見る。PR #820 の codex P0（評価器の拒否リストに無い awk の system 等で
+// `'gh pr $'` と別の語を連結して評価する形が通った）を受けて、例外は許可リストの文法に完全一致するときだけにした。
+// 文法の各条件（コマンドの形・先頭語・引数とリダイレクトの形）について、その条件だけで落ちる形と通る対照を並べる。
+describe('認識器 SQ_DOLLAR_AWK（単体）', () => {
+  const src = readFileSync(GUARD, 'utf8')
+  const m = src.match(/^read -r -d '' SQ_DOLLAR_AWK <<'AWK' \|\| true\n([\s\S]*?)\nAWK\n/m)
+  const ok = (command) => {
+    const r = spawnSync('awk', [m[1]], { input: `${command}\n`, env: { ...process.env, LC_ALL: 'C' } })
+    assert.equal(r.status, 0, JSON.stringify(command))
+    return r.stdout.toString() === 'ok\n'
+  }
+  const ALLOWED = ['grep', 'egrep', 'fgrep', 'rg', 'wc', 'head', 'tail', 'cut', 'tr', 'uniq', 'ls', 'cat', 'echo', 'printf', 'test', '[', 'jq', 'basename', 'dirname', 'diff', 'cmp', 'comm', 'nl', 'column', 'fold']
+  const EVALUATORS = ['sed', 'awk', 'gawk', 'perl', 'python', 'python3', 'ruby', 'node', 'find', 'xargs', 'env', 'git', 'gh', 'sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'eval', 'source', '.', 'command', 'builtin', 'exec', 'time', 'nice', 'nohup', 'timeout', 'sudo', 'sort', 'less', 'vim', 'parallel', 'watch', 'make', 'ssh']
+
+  it('ガードから認識器の awk を取り出せる', () => assert.ok(m, 'SQ_DOLLAR_AWK が見つからない'))
+  it('先頭語は許可リストの語だけ通る', () => {
+    for (const c of ALLOWED) assert.ok(ok(`${c} 'a$'`), c)
+    for (const c of EVALUATORS) assert.ok(!ok(`${c} 'a$'`), c)
+  })
+  it('誤検出の形（FP805_FLIP の `$\'` を含む行）は受理する', () => {
+    for (const c of cases.FP805_FLIP.filter((x) => x.includes("$'") && !/^\s*(\/usr\/bin\/)?gh /.test(x))) assert.ok(ok(c), JSON.stringify(c))
+  })
+  it('迂回の試行（`$\'` を含む FP805_STAY_DENY・FP805_AUDIT_DENY）は受理しない', () => {
+    const leaked = [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY].map(([c]) => c).filter((c) => c.includes("$'") && ok(c))
+    assert.deepEqual(leaked, [])
+  })
+  // [受理する対照, 受理しない形, …]
+  const PAIRS = {
+    'コマンドの形（単純コマンド・| のパイプラインだけ）': [
+      [`grep 'a$' f | wc -l`, `grep 'a$' f; wc -l`, `grep 'a$' f ; wc -l`, `grep 'a$' f && wc -l`, `grep 'a$' f || wc -l`, `grep 'a$' f & wc -l`, `grep 'a$' f |& wc -l`,
+        `grep 'a$' f | | wc -l`, `| grep 'a$' f`, `grep 'a$' f |`, `grep 'a$' f\nwc -l`, `grep 'a$' $(f)`, `grep 'a$' \`f\``,
+        `grep 'a$' <(f)`, `grep 'a$' f >(f)`, `X=1 grep 'a$' f`, `{ grep 'a$' f; }`, `(grep 'a$' f)`, `! grep 'a$' f`, `grep 'a$' f # x`],
+      [`grep\t'a$'\tf`, `grep 'a$' f\r`, `grep 'a\r$' f`, `grep 'a\x0b$' f`, `grep 'a\x1b$' f`, `grep 'a$' f\x0b`, `grep 'a$' f\x7f`, `grep 'a$' f\n`],
+    ],
+    '先頭語（素の語の完全一致）': [
+      [`grep 'a$'`, `/usr/bin/grep 'a$'`, `./grep 'a$'`, `'grep' 'a$'`, `"grep" 'a$'`, `g'rep' 'a$'`, `GREP 'a$'`, `grepx 'a$'`, `$g 'a$'`],
+      [`[ 'a$' = x ]`, `[[ 'a$' = x ]]`, `[x 'a$'`],
+    ],
+    '引数（素の語・単一引用符・$ ` \\ ! を含まない二重引用符の連結）': [
+      [`grep 'a$' "b" x'y'"z"`, `grep 'a$' "$b"`, `grep 'a$' "\\b"`, `grep 'a$' "\`b\`"`, `grep 'a$' "!b"`, `grep 'a$' $b`,
+        `grep 'a$' f*`, `grep 'a$' ~/f`, `grep 'a$' {a,b}`, `grep 'a$' 'b`, `grep 'a$' "b`],
+      [`grep 'a$' f`, `grep 'a$'b f`, `grep 'a$''b' f`, `grep 'a$'"b" f`, `grep 'a$'$'b' f`, `grep "a$'" f`, `grep $'a' f`],
+    ],
+    'リダイレクト（素の語か fd の複製）': [
+      [`grep 'a$' <i >o 2>e >>a 2>&1 1>&2`, `grep 'a$' <<o`, `grep 'a$' <<<o`, `grep 'a$' <>o`, `grep 'a$' >|o`, `grep 'a$' &>o`,
+        `grep 'a$' >&o`, `grep 'a$' > 'o'`, `grep 'a$' > "o"`, `grep 'a$' >`, `grep 'a$' 2>&1x`],
+    ],
+    '外部コマンドの起動・代入になるオプション': [
+      [`rg -n 'a$' .`, `rg --pre sh 'a$' .`, `rg --pre=sh 'a$' .`, `rg '--pre=sh' 'a$' .`, `rg --hostname-bin=sh 'a$' .`],
+      [`printf '%s' 'a$'`, `printf -v x 'a$'`, `printf '-v' x 'a$'`],
+    ],
+  }
+  for (const [name, groups] of Object.entries(PAIRS)) {
+    it(name, () => {
+      for (const [good, ...bad] of groups) {
+        assert.ok(ok(good), `受理されない: ${JSON.stringify(good)}`)
+        assert.deepEqual(bad.filter(ok), [], `受理してしまう (${name})`)
+      }
+    })
+  }
 })
 
 // 2 つの bash は並列に流す（各 bash の中の項目は順に実行する。結果を後続の項目が読むため）。

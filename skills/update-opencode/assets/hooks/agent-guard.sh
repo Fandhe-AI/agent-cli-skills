@@ -38,7 +38,8 @@
 #                  （subagent が true / null のとき）
 #   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
 #                  C0 と DEL）を含むコマンド（subagent が true / null のとき）。単一引用符の末尾の `$` で閉じる形
-#                  （`grep -c '^hi$' f`）は ANSI-C クォートではないので除く。下記
+#                  （`grep -c '^hi$' f`）は、コマンド全体が評価器にならないコマンドの許可リストだけの単純コマンド
+#                  またはパイプラインで、厳格な文法に一致するときだけ除く（認識器 SQ_DOLLAR_AWK。下記）
 #   nesting-limit  bash -c / eval / heredoc / $(...) / env -S の入れ子が解析の上限（深さ 8・件数 512）を
 #                  超えた、ダブルクォート内の $( や `（引用符なし heredoc 本文の $( や `）の閉じを見つけられない、
 #                  または heredoc の区切り子が見つからないまま入力の末尾に達した。中身を見切れないため
@@ -241,8 +242,6 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap
   }
   hk = husky_persist
   if (p > ntok) { if (seg_h) husky_persist = 1 } else if (seg_h || seg_s) hk = 1
-  # obfuscated（$'）の例外が使う観測。「例外を認めない」側へ倒す材料。
-  note_shellish(p)
   # echo / printf は引数を表示するだけで、git の語があっても実行しない。
   # env・sudo 等のラッパー経由は読み飛ばしが近似（`env -a echo git push -f` は argv0 指定で git を実行する。
   # sudo の値を取る option の読み違いは echo の語を値として読む迂回になる）なので対象にしない。
@@ -259,16 +258,6 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap
   }
   # -c の無い shell は here-string の語を、同じ行のヒアドキュメント本体（newline の処理で読む）とともに script として読む。
   if (cap) for (m = 1; m <= nhs; m++) enqueue(hs[m], hk)
-}
-# 文字列を評価して実行しうる語（shell・eval・source・xargs・find の -exec 等）がコマンド列のどこかにあるか、コマンド位置の語が
-# 変数・置換を含むか。`'gh pr $'` のように `$` で終わる単一引用符の文字列を別の引数と連結して実行できるため、
-# その場合は後述の `$'` の例外を認めない。
-function note_shellish(p,   i, b) {
-  for (i = 1; i <= ntok; i++) {
-    b = tolower(tok[i]); sub(/^.*\//, "", b)
-    if (b ~ /^(eval|bash|sh|zsh|dash|ksh|source|\.|xargs|exec|-exec|-execdir|-ok|-okdir)$/) shellish = 1
-  }
-  if (p <= ntok && (index(tok[p], "$") > 0 || index(tok[p], "`") > 0)) shellish = 1
 }
 # 短縮オプションの束ね書きを走査する。stop に含まれる文字は以降が値なので打ち切る。
 function short_has(a, target, stop,   m, ch) {
@@ -652,13 +641,8 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
       if (r > 0) { cur = cur ansi_dec(substr(text, i + 2, r - i - 3)); have = 1; i = r; continue }
     }
     if (ch == "\047") {
-      have = 1; i++; sq0 = i
+      have = 1; i++
       while (i <= len && (c2 = substr(text, i, 1)) != "\047") { cur = cur c2; i++ }
-      # `...$'` で閉じる単一引用符（`grep -c '^hi$' f`）の `$` は ANSI-C 引用符の開きではない。閉じの直後が語の区切りのものだけ数える。
-      if (cdepth == 0 && i <= len && i > sq0 && substr(text, i - 1, 1) == "$") {
-        nx2 = substr(text, i + 1, 1)
-        if (nx2 == "" || index(" \t\r\n;&|<>()", nx2) > 0) nben++
-      }
       i++; continue
     }
     if (ch == "\"") {
@@ -755,21 +739,11 @@ END {
   scan(alltext, 0, 0)
   for (qi = 1; qi <= nq && verdict == ""; qi++) scan(qs[qi], qd[qi], qh[qi])
   if (verdict == "" && limit) verdict = "nesting-limit"
-  # $' の検出（obfuscated）。元の文字列の `$'` を数え、単一引用符を閉じるだけの `$`（nben）を除いて 1 つでも残れば ansic。
-  # 入れ子の解析が走った・文字列を評価して実行しうる語がある・関数定義・バッククォート・${ $[ があるときは、解析の読み違いや
-  # 連結による `$'` の組み立てを排除できないので例外を認めず（従来どおり 1 つでもあれば ansic）にする。
-  rawn = 0; rp = 1
-  while ((rq = index(substr(alltext, rp), "$\047")) > 0) { rawn++; rp += rq + 1 }
-  nvoid = (nq > 0 || shellish || index(alltext, "`") > 0 || index(alltext, "${") > 0 || index(alltext, "$[") > 0 \
-    || alltext ~ "[A-Za-z0-9_.:-]+[ \t]*[(][ \t]*[)]" || alltext ~ "(^|[^A-Za-z0-9_])function[ \t]")
-  printf "%s %s\n", (verdict == "") ? "ok" : verdict, (rawn > (nvoid ? 0 : nben)) ? "ansic" : "clean"
+  printf "%s\n", (verdict == "") ? "ok" : verdict
 }
 AWK
 
 git_verdict=$(printf '%s\n' "$cmd" | awk "$GIT_AWK") || finish deny internal-error
-# awk の出力は「判定 ansic|clean」の 1 行。ansic は元のコマンドに ANSI-C 引用符（$'...'）が残るという意味。
-git_ansic=${git_verdict#* }
-git_verdict=${git_verdict%% *}
 case "$git_verdict" in
   ok) : ;;
   no-verify) finish deny no-verify ;;
@@ -801,12 +775,103 @@ cmd_clean=$(printf '%s' "$cmd" | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'
 [ "$cmd_clean" = "$cmd" ] || finish deny obfuscated
 
 # デコード用プリミティブ（ANSI-C クォート・IFS 展開）は文字削除の正規化では意味が復元できない
-# ため、構文の存在自体を raw のコマンドに対して deny する。`$'` の判定は GIT_AWK の末尾の ansic（元の
-# コマンドに残る `$'` の数が、単一引用符の末尾の `$` で閉じる形を除いて 1 つ以上）で行う。その例外は、
-# 閉じの直後が語の区切りで、入れ子の解析・文字列を評価しうる語・関数定義・バッククォート・${ $[ が無いときだけ
-# 認める（`'gh pr $'` と別の語を連結して評価する形を通さないため）。IFS は従来どおり raw に対して判定する。
-if [ "$git_ansic" != clean ]; then
-  finish deny obfuscated
+# ため、構文の存在自体を raw のコマンドに対して deny する（merge-guard-hook.sh と同じ判定）。
+# 例外は Issue #805 の「単一引用符の末尾の `$` で閉じる形」（`grep -c '^hi$' f`）だけで、判定は上の解析器
+# （GIT_AWK）から独立した認識器 SQ_DOLLAR_AWK が行う。認識器はコマンド全体が次の文法に完全一致するときだけ
+# ok を出す（一致しなければ何も出さない）。評価器になりうるコマンドを並べて止める拒否リストは使わない
+# （awk の system・perl -e 等、一覧に無い評価器で `'gh pr $'` と別の語を連結して評価する形が漏れるため）。
+#   コマンド全体   [空白] 段 { [空白] | [空白] 段 } [空白]。1 行だけで、タブ以外の制御文字（改行・CR を含む）は文法の外。
+#                  ; & && || 改行・$( ` <( >(・代入の前置き・コメントは文法の外
+#   段             先頭語 { 空白 (引数 | リダイレクト) }
+#   先頭語         下の許可リストの語と完全一致する素の語（引用符・パス・大文字を含む形は文法の外）。
+#                  許可リストは引数を shell のコードとして評価せず、外部コマンドも起動しないコマンドに限る:
+#                  grep egrep fgrep rg wc head tail cut tr uniq ls cat echo printf test [ jq basename dirname
+#                  diff cmp comm nl column fold。sed（GNU の e コマンド）・awk・perl・python・find・xargs・env・
+#                  sort（--compress-program）・git・gh・shell・eval・source・command・exec・time 等は入れない。
+#                  rg の --pre / --hostname-bin（外部コマンドを起動する）と printf の -v（変数への代入）は文法の外
+#   引数           次の断片の連結: 素の文字 [A-Za-z0-9_./:=,@+%-]、単一引用符の文字列（中身は自由）、
+#                  $ ` \ ! を含まない二重引用符の文字列。`[` `]` だけの語も認める。`$` で終わる単一引用符の
+#                  文字列は語の最後の断片で、直後は空白・タブ・| < > か末尾（`'$''x'` `'$'"x"` `'$'x` は文法の外）
+#   リダイレクト   [数字] (< | > | >>) [空白] 素の語、または [数字] (<& | >&) 数字。<< <<< <> >| &> は文法の外
+# この文法では引用符の外に `$` が現れないので、元の文字列の `$'` はすべて単一引用符を閉じる `$` になる
+# （ANSI-C 引用符は 1 つも無い）。IFS は従来どおり raw に対して判定する。
+read -r -d '' SQ_DOLLAR_AWK <<'AWK' || true
+BEGIN {
+  plain = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:=,@+%-"
+  nc = split("grep egrep fgrep rg wc head tail cut tr uniq ls cat echo printf test [ jq basename dirname diff cmp comm nl column fold", cl, " ")
+  for (k = 1; k <= nc; k++) okcmd[cl[k]] = 1
+  for (k = 1; k < 32; k++) if (k != 9) ctl[sprintf("%c", k)] = 1
+  ctl[sprintf("%c", 127)] = 1
+}
+{ s = $0; nl = NR }
+function ch(i) { return substr(s, i, 1) }
+function isbl(c) { return (c == " " || c == "\t") }
+# 語の後に来てよい文字（語の区切り）。
+function isend(c) { return (c == "" || c == " " || c == "\t" || c == "|" || c == "<" || c == ">") }
+function isplain(c) { return (c != "" && index(plain, c) > 0) }
+# p から引数を 1 つ読む。成功なら 1 を返し、引用符を外した値を wv に置き、p を語の直後へ進める。
+function argword(   st, c, q, inner, sqd) {
+  wv = ""; st = p; sqd = 0
+  if ((ch(p) == "[" || ch(p) == "]") && isend(ch(p + 1))) { wv = ch(p); p++; return 1 }
+  while (p <= n) {
+    c = ch(p)
+    if (!isplain(c) && c != "\047" && c != "\"") break
+    # `$` で終わる単一引用符の後ろに断片が続く（`'$''x'` 等）
+    if (sqd) return 0
+    if (isplain(c)) { wv = wv c; p++; continue }
+    q = index(substr(s, p + 1), c)
+    if (q == 0) return 0
+    inner = substr(s, p + 1, q - 1)
+    if (c == "\"" && inner ~ /[$`\\!]/) return 0
+    if (c == "\047" && q > 1 && substr(inner, q - 1, 1) == "$") sqd = 1
+    wv = wv inner; p += q + 1
+  }
+  if (p == st) return 0
+  return isend(ch(p))
+}
+END {
+  if (nl != 1) exit
+  n = length(s)
+  for (i = 1; i <= n; i++) if (ch(i) in ctl) exit
+  p = 1
+  while (1) {
+    while (isbl(ch(p))) p++
+    st = p
+    if (ch(p) == "[" && isend(ch(p + 1))) p++
+    else while (isplain(ch(p))) p++
+    cmd = substr(s, st, p - st)
+    if (!(cmd in okcmd) || !isend(ch(p))) exit
+    while (1) {
+      while (isbl(ch(p))) p++
+      c = ch(p)
+      if (c == "") { print "ok"; exit }
+      if (c == "|") { p++; break }
+      if (substr(s, p) ~ /^[0-9]?(<|>)/) {
+        if (c != "<" && c != ">") p++
+        if (substr(s, p, 2) == ">>") p += 2
+        else p++
+        if (ch(p) == "&") {
+          p++
+          if (ch(p) !~ /^[0-9]$/ || !isend(ch(p + 1))) exit
+          p++; continue
+        }
+        while (isbl(ch(p))) p++
+        st = p
+        while (isplain(ch(p))) p++
+        if (p == st || !isend(ch(p))) exit
+        continue
+      }
+      if (!argword()) exit
+      if (cmd == "rg" && (substr(wv, 1, 5) == "--pre" || substr(wv, 1, 14) == "--hostname-bin")) exit
+      if (cmd == "printf" && substr(wv, 1, 2) == "-v") exit
+    }
+  }
+}
+AWK
+
+if printf '%s' "$cmd" | grep -qE "[$]'"; then
+  sq_ok=$(printf '%s\n' "$cmd" | LC_ALL=C awk "$SQ_DOLLAR_AWK") || finish deny internal-error
+  [ "$sq_ok" = ok ] || finish deny obfuscated
 fi
 if printf '%s' "$cmd" | grep -qE '[$]\{?IFS'; then
   finish deny obfuscated
