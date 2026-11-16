@@ -44,6 +44,7 @@ const MESSAGES = {
   "force-push": "agent-guard: 履歴を書き換える git push（--force / -f / --force-with-lease / --force-if-includes / +refspec）は禁止されている。必要なら人間に依頼すること",
   "merge-guard": "agent-guard: サブエージェントからのマージ・承認・gh の alias / extension 実行は禁止されている",
   "repo-settings": "agent-guard: サブエージェントからのリポジトリ設定・ruleset の変更は禁止されている",
+  "credential-read": "agent-guard: サブエージェントからの認証情報の読み出し（gh auth token・環境変数の一覧・hosts.yml 等）は禁止されている",
   obfuscated: "agent-guard: 難読化されたコマンド（$'...'・$IFS 展開）は許可されない",
   "nesting-limit": "agent-guard: コマンドの入れ子が深い、または $( ・バッククォート・ヒアドキュメントの閉じを解析できないため拒否した",
   "bad-input": "agent-guard: ガードがコマンドを解釈できなかったため拒否した",

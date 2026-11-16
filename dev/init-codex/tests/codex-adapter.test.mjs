@@ -67,6 +67,16 @@ for (const bash of BASHES) {
       assert.equal(r.code, 0)
       denyOf(r.out)
     })
+    it('subagent の認証情報の読み出しは deny・main は出力なし', async () => {
+      for (const c of ['gh auth token', 'printenv GH_TOKEN', 'cat ~/.config/gh/hosts.yml']) {
+        const r = await runAdapter(bash, subEvent(c))
+        assert.match(r.out, /"permissionDecision":"deny"/, c)
+        assert.doesNotMatch(r.out, /ガードの判定により拒否した/, c)
+        const m = await runAdapter(bash, mainEvent(c))
+        assert.equal(m.out, '', c)
+      }
+    })
+
     it('main の gh pr merge は出力なし', async () => {
       const r = await runAdapter(bash, mainEvent('gh pr merge 1 --squash'))
       assert.equal(r.code, 0)

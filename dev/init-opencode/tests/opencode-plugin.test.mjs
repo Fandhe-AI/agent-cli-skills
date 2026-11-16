@@ -133,6 +133,22 @@ describe('agent-guard plugin', { concurrency: true }, () => {
     assert.equal(main.event.effect, 'allow')
   })
 
+  it('サブエージェントの認証情報の読み出しとマージキュー投入は deny・main では不変', async () => {
+    const url = layout()
+    const cmds = ['gh auth token', 'printenv GH_TOKEN', 'env', 'cat ~/.config/gh/hosts.yml', 'git credential fill',
+      "gh api graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'"]
+    for (const c of cmds) {
+      const sub = await run(url, 'sub', shellEvent([c]))
+      assert.equal(sub.event.effect, 'deny', c)
+      assert.match(sub.event.message, /サブエージェント/)
+      const main = await run(url, 'main', shellEvent([c]))
+      assert.equal(main.event.effect, 'allow', c)
+    }
+    for (const c of ['gh auth status', 'git status', 'cat README.md', 'printenv PATH']) {
+      assert.equal((await run(url, 'sub', shellEvent([c]))).event.effect, 'allow', c)
+    }
+  })
+
   it('session.get は { sessionID } で呼ぶ', async () => {
     const { calls } = await run(layout(), 'sub', shellEvent(['git status']))
     assert.deepEqual(calls, [{ sessionID: 'ses_e280051f5ffeh0WJo8cybpQmES' }])
