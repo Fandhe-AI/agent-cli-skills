@@ -11,7 +11,7 @@
 //   0 ホストが return した（--help / -h で使い方を stdout に出したときも 0）
 //   1 ホストが例外で終わった
 //   2 引数の誤り（CLI・args.json・設定ファイル）
-//   3 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・必要なスキルの不在・アダプタの start() 失敗）
+//   3 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・必要なスキルの不在・autoMerge のときの repo の解決・アダプタの start() 失敗）
 // 2 / 3 の経路（アダプタの生成・start() の失敗を除く）は _/iit-runner/<runId>/ を作る前に抜ける（何も書かない）。
 //
 // 出力の形（通し確認の判定器が読む。変えるときは判定器とそろえる）:
@@ -41,6 +41,7 @@ import { isAdapterError } from './lib/adapter-error.mjs'
 import { codexRules, opencodeRules } from './lib/guard.mjs'
 import { loadWorkflow } from './lib/load-workflow.mjs'
 import { loadConfig, TOOLS } from './lib/models.mjs'
+import { isRepoSlug } from './lib/merge-target.mjs'
 import { missingSkills, missingSkillsMessage } from './lib/skills-prereq.mjs'
 import { newRunId, resolveMainRoot } from './lib/worktree.mjs'
 
@@ -95,6 +96,17 @@ export function checkGhAuth() {
   return r.status === 0 ? { ok: true } : { ok: false, reason: r.error ? `gh を起動できない（${r.error.code ?? r.error.message}）` : `gh auth status が終了コード ${r.status}` }
 }
 
+/**
+ * メイン worktree の owner/repo を gh repo view で 1 回だけ決める（GET のみ。契約の req.merge.repo。MEDIUM-8）。
+ * 継いだ GH_REPO は外す（メイン worktree の remote から決め、利用者の env の別リポジトリを拾わない）。
+ */
+export function resolveRepo(mainRoot, env = process.env) {
+  const { GH_REPO: _ignored, ...rest } = env
+  const r = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], { cwd: mainRoot, env: rest, encoding: 'utf8', timeout: 60_000 })
+  if (r.error || r.status !== 0) return { ok: false, reason: r.error ? `gh を起動できない（${r.error.code ?? r.error.message}）` : `gh repo view が終了コード ${r.status}` }
+  return { ok: true, repo: r.stdout.trim() }
+}
+
 /** 開発用チェックアウトなら build-workflow.mjs --check を実行する。ビルダーが無ければ照合なし（ok）。 */
 export function checkBuild(skillDir) {
   const builder = join(skillDir, '..', '..', 'dev', 'implement-issue-tree', 'scripts', 'build-workflow.mjs')
@@ -121,6 +133,8 @@ export async function main(argv, deps = {}) {
     stderr = (s) => { process.stderr.write(s) },
     cwd = process.cwd(),
     ghAuth = checkGhAuth,
+    // autoMerge のときだけ使う owner/repo の解決（{ ok, repo } | { ok: false, reason }）。テストが偽の値へ差し替える
+    repoOf = resolveRepo,
     build = checkBuild,
     loadAdapter = importAdapter,
     load = loadWorkflow,
@@ -194,6 +208,15 @@ export async function main(argv, deps = {}) {
   }
   const missing = skillsMissing({ tool: cli.tool, root: mainRoot })
   if (missing.length > 0) return prereq(missingSkillsMessage(cli.tool, missing))
+  // マージ対象のリポジトリ（MEDIUM-8）。autoMerge のときだけ決める（マージしないランでは gh を余分に呼ばない）。
+  // 決められなければ前提の不足（3）で止める（自動マージを黙って無効にしたままランを進めない）
+  let repo = null
+  if (args.autoMerge === true) {
+    const r = repoOf(mainRoot, env)
+    if (!r.ok) return prereq(`マージ対象のリポジトリを決められない: ${String(r.reason ?? '').slice(0, 160)}`)
+    if (!isRepoSlug(r.repo)) return prereq('gh repo view の nameWithOwner が owner/repo の形でない')
+    repo = r.repo
+  }
 
   // ---- ラン ----
   const runId = makeRunId()
@@ -258,7 +281,7 @@ export async function main(argv, deps = {}) {
 
   const agent = createAgentHost({
     adapter,
-    cfg: { config, skillDir: args.skillDir, mainRoot, runId, runDir, args, maxParallel: cli.maxParallel ?? undefined, log, ...(spawnScript ? { spawnScript } : {}) },
+    cfg: { config, skillDir: args.skillDir, mainRoot, runId, runDir, args, repo, maxParallel: cli.maxParallel ?? undefined, log, ...(spawnScript ? { spawnScript } : {}) },
   })
   let code
   let result = null

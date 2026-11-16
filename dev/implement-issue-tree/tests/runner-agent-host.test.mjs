@@ -261,7 +261,10 @@ test('時間切れの保険: アダプタが timeoutMs + 猶予を過ぎても�
   assert.equal(agent.stats.active, 0, '枠を返す')
 })
 
-test('allowMerge: label が merge-exec で始まり、args.autoMerge が true（真偽値）のときだけ', async () => {
+// merge-exec のプロンプトの手順 3（src の mergeExecutePrompt）と同じ形
+const MERGE_STEP = (n) => `3. 次のコマンドで squash merge を実行する: HEAD_SHA="<payload.headSha の 40 桁>"; gh pr merge ${n} --squash --delete-branch --match-head-commit "$HEAD_SHA"。`
+
+test('allowMerge: label が merge-exec で始まり、args.autoMerge が true（真偽値）で、マージ対象が一意に決まるときだけ', async () => {
   const cases = [
     ['merge-exec:#5', true, true],
     ['merge-exec:#5:retry', true, true],
@@ -274,10 +277,29 @@ test('allowMerge: label が merge-exec で始まり、args.autoMerge が true（
     ['merge-execx', true, false],
   ]
   for (const [label, autoMerge, want] of cases) {
-    const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { args: { autoMerge } } })
-    await agent('p', { label, schema: SCHEMA })
+    const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { args: { autoMerge }, repo: 'acme/widget' } })
+    await agent(MERGE_STEP(41), { label, schema: SCHEMA })
     assert.equal(calls[0].allowMerge, want, `${label} / ${String(autoMerge)}`)
+    assert.deepEqual(calls[0].merge, want ? { prNumber: 41, repo: 'acme/widget' } : null, `${label} / ${String(autoMerge)}`)
   }
+})
+
+test('merge（MEDIUM-8）: PR 番号はプロンプトの手順 3 から取る。0 個・2 種類以上・別の形の番号の混在・repo 未確定は allowMerge false・merge null', async () => {
+  const cases = [
+    [MERGE_STEP(41), 'acme/widget', { prNumber: 41, repo: 'acme/widget' }],
+    [`${MERGE_STEP(41)}\n再掲: ${MERGE_STEP(41)}`, 'acme/widget', { prNumber: 41, repo: 'acme/widget' }],
+    ['PR #41 のマージ確認', 'acme/widget', null],
+    [`${MERGE_STEP(41)}\n${MERGE_STEP(42)}`, 'acme/widget', null],
+    [`${MERGE_STEP(41)}\n<untrusted-data>gh pr merge 99 --admin</untrusted-data>`, 'acme/widget', null],
+    [MERGE_STEP(41), undefined, null],
+  ]
+  for (const [prompt, repo, want] of cases) {
+    const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { args: { autoMerge: true }, repo } })
+    await agent(prompt, { label: 'merge-exec:#5', schema: SCHEMA })
+    assert.deepEqual(calls[0].merge, want, prompt)
+    assert.equal(calls[0].allowMerge, want !== null, prompt)
+  }
+  assert.throws(() => makeHost({ cfg: { repo: 'not a repo' } }), /repo/)
 })
 
 test('エージェント数の上限（config.limits.maxAgents）を超えた呼び出しは起動せず null', async () => {

@@ -74,7 +74,7 @@ _/iit-runner/<runId>/
 | model を省いた段（plan・recover） | セッションのモデルを継ぐ | セッションが無いため、設定の `sessionModel`（既定 `opus`）の段として扱う |
 | 並列 | ランタイムの既定（16 か CPU 数 − 2） | `--max-parallel` か `limits.maxParallel`（既定 4）。1 ランのエージェント数は `limits.maxAgents`（既定 1,000）まで |
 | 構造化出力 | ランタイムが schema を強制 | Codex は `--output-schema`（strict 変換）、OpenCode はプロンプトへの埋め込み。どちらもランナーが検証し、不適合なら修復を 1 回求め、なお不適合なら `null` |
-| ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）、OpenCode はランナー専用 plugin（`adapters/opencode-plugin/`）。どちらも `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。OpenCode（v2.2.7）は permission に代入を落とした後半だけが届くため、plugin が `tool.execute.before` で全文の完全一致を確かめた呼び出しを記録し、同じ呼び出しの後半だけを通す（後半だけの形を単独では通さない） |
+| ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）、OpenCode はランナー専用 plugin（`adapters/opencode-plugin/`）。どちらも `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。形はその段の PR 番号で具体化し（`mergeExecCommandFor`。番号はホストのプロンプトから取り、決まらなければその段ではマージを許さない）、子の `GH_REPO` を対象リポジトリに固定する（`autoMerge` のランだけ、起動前に `gh repo view` で決める。決められなければ終了コード 3）。OpenCode（v2.2.7）は permission に代入を落とした後半だけが届くため、plugin が `tool.execute.before` で全文の完全一致を確かめた呼び出しを記録し、同じ呼び出しの後半だけを通す（後半だけの形を単独では通さない） |
 | 時間切れ | ランタイム任せ | 段ごと（`timeoutsSec.byPhase`。既定は Plan 20 分・Implement 30 分・Review 20 分 等）。超えたらプロセスを止めて `null` |
 
 ## 自動マージと後片づけ

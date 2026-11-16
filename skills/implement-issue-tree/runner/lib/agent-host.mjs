@@ -33,6 +33,7 @@ import { extractJsonObject } from './extract-json.mjs'
 import { resolveModel, resolveTimeoutMs } from './models.mjs'
 import { buildRepairPrompt, composePrompt } from './preamble.mjs'
 import { assertSupportedSchema, sanitizeErrorLine, validate } from './schema-validate.mjs'
+import { isRepoSlug, mergePrNumberOf } from './merge-target.mjs'
 import { createSequencer, createWorktree, verifyWorktreeGitdir } from './worktree.mjs'
 
 // ---- 実行仕様 ----
@@ -293,6 +294,7 @@ const safeLabel = (label) => label.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80
  *   runId: string,             // wf_<16 進 8>-<16 進 3>
  *   runDir?: string,           // _/iit-runner/<runId>。無ければエージェント別のログを書かない
  *   args?: object,             // 生成物に渡す args（autoMerge を読む）
+ *   repo?: string|null,        // owner/repo（run.mjs が autoMerge のとき gh repo view で決める。req.merge.repo になる）
  *   maxParallel?: number,      // --max-parallel。無ければ config.limits.maxParallel
  *   log?: (msg: string) => void,
  *   timeoutGraceMs?: number,   // アダプタが時間切れで止まらなかったときの保険の猶予（既定 30 秒）
@@ -316,6 +318,8 @@ export function createAgentHost({ adapter, cfg }) {
   const makeWorktree = cfg.createWorktree ?? createWorktree
   const runScript = cfg.spawnScript ?? spawnScript
   const autoMerge = cfg.args?.autoMerge === true
+  const repo = cfg.repo ?? null
+  if (repo !== null && !isRepoSlug(repo)) throw new TypeError('cfg.repo は owner/repo の形')
   const seq = createSequencer()
   const limiter = createLimiter(maxParallel)
   let adapterCalls = 0
@@ -403,6 +407,14 @@ export function createAgentHost({ adapter, cfg }) {
       worktreePath = wt.path
       if (wt.gitdir !== undefined) worktreeGitdir = verifyWorktreeGitdir(mainRoot, wt.gitdir)
     }
+    // マージしてよい対象（契約の req.merge。MEDIUM-8）。PR 番号は前置きを足す前のホストのプロンプトから取る。
+    // 決められなければ allowMerge も false にする（fail-closed）
+    let merge = null
+    if (autoMerge && /^merge-exec(?::|$)/.test(label)) {
+      const prNumber = mergePrNumberOf(prompt)
+      if (prNumber !== null && repo !== null) merge = { prNumber, repo }
+      else log(`⚠️ ${label}: マージ対象を決められない（${prNumber === null ? 'プロンプトの PR 番号が 0 個か 2 種類以上' : 'repo が未確定'}）。この段ではマージを許さない`)
+    }
     const req = {
       prompt: composePrompt({ prompt, schema, worktreePath }),
       schema,
@@ -411,14 +423,15 @@ export function createAgentHost({ adapter, cfg }) {
       effort: tool === 'opencode' ? resolved.variant : resolved.effort,
       cwd,
       label,
-      allowMerge: autoMerge && /^merge-exec(?::|$)/.test(label),
+      allowMerge: merge !== null,
+      merge,
       timeoutMs,
       resume: null,
       logDir: logDir ?? '',
       worktreeGitdir,
       writablePaths: writablePathsFor(label, mainRoot),
     }
-    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, timeoutMs, worktree: worktreePath ?? null, worktreeGitdir, writablePaths: req.writablePaths })
+    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, merge, timeoutMs, worktree: worktreePath ?? null, worktreeGitdir, writablePaths: req.writablePaths })
     writeLog(logDir, 'prompt.txt', req.prompt)
     // meta.json の outcome は ok / null の 2 値、詳細（修復の有無・失敗の理由）は status・reason に置く
     const outcome = (status, extra = {}) => Object.assign(rec, { outcome: status === 'ok' || status === 'repaired' ? 'ok' : 'null', status, sessionRef }, extra)

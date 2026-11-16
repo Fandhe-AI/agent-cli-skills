@@ -31,12 +31,19 @@
 // rules と permissions は補助層で、先頭一致・文字列照合のため入れ子や変数を含む形は止められない。
 //
 // マージ系の権限分離: マージを許すのは「autoMerge: true のランの merge-exec ラベル」だけで、許すのは
-// MERGE_EXEC_COMMAND の完全一致の 1 形だけ。この完全一致の 1 形の強制は plugin / hook 側の責務で、
+// MERGE_EXEC_COMMAND の完全一致の 1 形だけ（Codex は PR 番号で具体化した mergeExecCommandFor(prNumber) に絞り、
+// 子の env に GH_REPO を固定する。PR 番号と repo は agent-host が req.merge で渡す。lib/merge-target.mjs）。この完全一致の 1 形の強制は plugin / hook 側の責務で、
 // ここは mergeOnly の形（gh pr merge）を allowMerge の一覧から外すだけである。外した後も
 // `gh pr merge --admin`・`--auto`、承認、REST / GraphQL のマージ、認証情報の読み出しは一覧に残る。
 
 /** merge-exec の完全一致の形（src の merge プロンプトの手順 3 と同じ形）。照合は plugin / hook 側が行う。 */
 export const MERGE_EXEC_COMMAND = /^HEAD_SHA="[0-9a-f]{40}"; gh pr merge [1-9][0-9]* --squash --delete-branch --match-head-commit "\$HEAD_SHA"$/
+
+/** PR 番号で具体化した merge-exec の完全一致の形。prNumber が正の安全な整数でなければ throw する。 */
+export function mergeExecCommandFor(prNumber) {
+  if (!Number.isSafeInteger(prNumber) || prNumber < 1) throw new TypeError('mergeExecCommandFor: prNumber は正の整数')
+  return new RegExp(`^HEAD_SHA="[0-9a-f]{40}"; gh pr merge ${prNumber} --squash --delete-branch --match-head-commit "\\$HEAD_SHA"$`)
+}
 
 /** GraphQL の mutation 名の呼び出し（`name(` と `name (`）。名前だけの一致は repo 名・ブランチ名と衝突し、ThreadReply 等の別 mutation も巻き込む。 */
 const mutationGlobs = (name) => [`gh api*${name}(*`, `gh api*${name} (*`]

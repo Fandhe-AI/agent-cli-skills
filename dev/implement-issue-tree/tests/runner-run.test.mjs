@@ -15,7 +15,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { BASE_ARGS, buildTree, makeDefaultReply } from './lib/stub-run.mjs'
 import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
-import { ADAPTERS_DIR, importAdapter, main, parseCli, UsageError } from '../../../skills/implement-issue-tree/runner/run.mjs'
+import { ADAPTERS_DIR, importAdapter, main, parseCli, resolveRepo, UsageError } from '../../../skills/implement-issue-tree/runner/run.mjs'
 import { REQUIRED_SKILLS } from '../../../skills/implement-issue-tree/runner/lib/skills-prereq.mjs'
 
 const RUN_MJS = fileURLToPath(new URL('../../../skills/implement-issue-tree/runner/run.mjs', import.meta.url))
@@ -97,15 +97,16 @@ test('parseCli: 既定値と各フラグ', () => {
 })
 
 // main() の差し替え一式。workflow を渡さなければ本物の生成物を読む
-function deps({ mainRoot = newMain(), mod, workflow, gh = { ok: true }, build = { ok: true } } = {}) {
+function deps({ mainRoot = newMain(), mod, workflow, gh = { ok: true }, build = { ok: true }, repo = { ok: true, repo: 'acme/widget' } } = {}) {
   const out = []
   const err = []
-  const calls = { build: 0 }
+  const calls = { build: 0, repoOf: [] }
   const d = {
     stdout: async (s) => { out.push(s) },
     stderr: (s) => { err.push(s) },
     cwd: root,
     ghAuth: () => gh,
+    repoOf: (root, env) => { calls.repoOf.push({ root, env }); return repo },
     build: () => { calls.build++; return build },
     loadAdapter: async () => mod,
     mainRootOf: () => mainRoot,
@@ -284,4 +285,47 @@ test('importAdapter: 実ファイルの動的 import。無い・createAdapter �
   assert.equal(typeof mod.createAdapter, 'function')
   assert.equal(mod.createAdapter({ a: 1 }).name, 'opencode')
   assert.equal(ADAPTERS_DIR, join(RUN_MJS, '..', 'adapters'))
+})
+
+test('main（MEDIUM-8）: autoMerge のときだけ start 前に gh repo view で repo を 1 回決め、agent-host の merge に渡す。失敗は 3 で _/iit-runner を作らない', async () => {
+  const STEP = 'HEAD_SHA="<payload.headSha の 40 桁>"; gh pr merge 7 --squash --delete-branch --match-head-commit "$HEAD_SHA"'
+  const flow = () => tinyWorkflow(async (args, agent) => ({ r: await agent(STEP, { label: 'merge-exec:#7', schema: SCHEMA }) }))
+  const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  const x = deps({ mod: a, workflow: flow() })
+  assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1, autoMerge: true }), '--no-build-check'], x.d), 0)
+  assert.equal(x.calls.repoOf.length, 1)
+  assert.equal(x.calls.repoOf[0].root, x.mainRoot)
+  assert.deepEqual(a.calls[0].merge, { prNumber: 7, repo: 'acme/widget' })
+  assert.equal(a.calls[0].allowMerge, true)
+
+  const b = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  const y = deps({ mod: b, workflow: flow() })
+  assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1 }), '--no-build-check'], y.d), 0)
+  assert.equal(y.calls.repoOf.length, 0, 'autoMerge でなければ gh repo view を呼ばない')
+  assert.equal(b.calls[0].allowMerge, false)
+  assert.equal(b.calls[0].merge, null)
+
+  for (const repo of [{ ok: false, reason: 'gh repo view が失敗' }, { ok: true, repo: 'bad repo' }]) {
+    const c = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+    const z = deps({ mod: c, workflow: flow(), repo })
+    assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1, autoMerge: true }), '--no-build-check'], z.d), 3)
+    assert.equal(existsSync(join(z.mainRoot, '_', 'iit-runner')), false)
+    assert.equal(c.instances.length, 0)
+  }
+})
+
+test('resolveRepo（MEDIUM-8）: メイン worktree で gh repo view --json nameWithOwner を実行し、継いだ GH_REPO は外す。失敗は ok: false', () => {
+  const bin = join(root, 'fake-gh-repo')
+  mkdirSync(bin, { recursive: true })
+  const rec = join(bin, 'rec')
+  writeFileSync(join(bin, 'gh'), `#!/bin/bash\nprintf '%s\\n' "$*" "$(pwd -P)" "\${GH_REPO-unset}" > '${rec}'\n[ -f '${bin}/fail' ] && exit 4\necho acme/widget\n`)
+  chmodSync(join(bin, 'gh'), 0o755)
+  const where = newMain()
+  const env = { PATH: `${bin}:${process.env.PATH}`, GH_HOST: 'gh.invalid', GH_REPO: 'evil/other' }
+  assert.deepEqual(resolveRepo(where, env), { ok: true, repo: 'acme/widget' })
+  assert.deepEqual(readFileSync(rec, 'utf8').split('\n').slice(0, 3), ['repo view --json nameWithOwner --jq .nameWithOwner', realpathSync(where), 'unset'])
+  writeFileSync(join(bin, 'fail'), '')
+  const r = resolveRepo(where, env)
+  assert.equal(r.ok, false)
+  assert.match(r.reason, /終了コード 4/)
 })

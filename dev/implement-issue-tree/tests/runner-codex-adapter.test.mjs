@@ -424,14 +424,43 @@ test('hook: allowMerge=false ではマージ・承認が止まり、通常のコ
 test('hook: allowMerge=true は merge-exec の完全一致の 1 形だけを通す', async () => {
   const cmds = [MERGE_EXEC, `${MERGE_EXEC}; echo x`, `echo a; ${MERGE_EXEC}`, 'gh pr merge 12 --admin', 'gh pr review 12 --approve', `HEAD_SHA="${SHA}"; gh pr merge 12 --squash --admin --delete-branch --match-head-commit "$HEAD_SHA"`]
   const t = setup({ turns: [okTurn({ toolCalls: cmds })] })
-  await t.adapter.run(t.req({ allowMerge: true }))
+  await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 12, repo: 'acme/widget' } }))
   assert.deepEqual(statuses(t).map((x) => x[1]), ['completed', 'declined', 'declined', 'declined', 'declined', 'declined'])
+})
+
+test('hook（MEDIUM-8）: 許す形は req.merge の PR 番号だけ（別の PR 番号の完全一致の形は止める）。merge 段の子の env に GH_REPO を固定する', async () => {
+  const other = MERGE_EXEC.replace('gh pr merge 12 ', 'gh pr merge 13 ')
+  const t = setup({ turns: [okTurn({ toolCalls: [MERGE_EXEC, other] }), okTurn({ toolCalls: [MERGE_EXEC] })] })
+  await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 12, repo: 'acme/widget' } }))
+  assert.deepEqual(statuses(t).map((x) => x[1]), ['completed', 'declined'], 'PR 13 の形は通さない')
+  const [c1] = t.calls()
+  assert.equal(c1.env.GH_REPO, 'acme/widget')
+  const hook = c1.argv.find((x) => x.startsWith('hooks.PreToolUse='))
+  assert.ok(hook.includes('gh pr merge 12 --squash'), hook)
+  // allowMerge でも merge が無ければ --merge-re を出さない（汎用の形へ倒さない）。GH_REPO も足さない
+  await t.adapter.run(t.req({ name: 'a2', allowMerge: true }))
+  assert.deepEqual(statuses(t, 'a2').map((x) => x[1]), ['declined'])
+  const c2 = t.calls()[1]
+  assert.equal(c2.argv.find((x) => x.startsWith('hooks.PreToolUse=')).includes('--merge-re'), false)
+  assert.equal(c2.env.GH_REPO, null)
+})
+
+test('merge（MEDIUM-8）: 形の不正な req.merge は denied で codex を起動しない。allowMerge でない段では merge を使わない', async () => {
+  const t = setup({ turns: [okTurn()] })
+  for (const merge of [{ prNumber: 0, repo: 'a/b' }, { prNumber: 1.5, repo: 'a/b' }, { prNumber: '12', repo: 'a/b' }, { prNumber: 12, repo: 'a' }, { prNumber: 12, repo: 'a/b c' }, { prNumber: 12, repo: '-a/b' }, { prNumber: 12, repo: 'a/..' }, 'x']) {
+    await rejectsKind(t.adapter.run(t.req({ name: 'bad', allowMerge: true, merge })), 'denied')
+  }
+  assert.equal(t.calls().length, 0)
+  await t.adapter.run(t.req({ name: 'nm', merge: { prNumber: 12, repo: 'acme/widget' } }))
+  const c = t.calls()[0]
+  assert.equal(c.argv.find((x) => x.startsWith('hooks.PreToolUse=')).includes('--merge-re'), false)
+  assert.equal(c.env.GH_REPO, null)
 })
 
 test('hook: コマンド行は `|| exit 2` で終わり timeout を指定せず、allowMerge の有無で --merge-re が切り替わる', async () => {
   const t = setup({ turns: [okTurn(), okTurn()] })
   await t.adapter.run(t.req())
-  await t.adapter.run(t.req({ name: 'a2', allowMerge: true }))
+  await t.adapter.run(t.req({ name: 'a2', allowMerge: true, merge: { prNumber: 12, repo: 'acme/widget' } }))
   const hookOf = (c) => c.argv.find((x) => x.startsWith('hooks.PreToolUse='))
   const [h1, h2] = t.calls().map(hookOf)
   for (const h of [h1, h2]) {

@@ -29,7 +29,10 @@
 //   hook（PreToolUse）にも command_execution にも現れず、(1)(2) のどちらも通らない。matcher を "*" にしても
 //   write_stdin の呼び出しは記録されず、hook の入力は command だけで tty の有無も見えず、`-c features.unified_exec=false`
 //   も効かなかった（codex-cli 0.169.0）。塞ぐ手段はランナー側に無い（README の既知の限界）。
-//   allowMerge は hook のコマンド行へ --merge-re を埋めるかどうかで切り替える。
+//   allowMerge は hook のコマンド行へ --merge-re を埋めるかどうかで切り替える。埋める形は req.merge の PR 番号で
+//   具体化した guard.mergeExecCommandFor(prNumber) で、merge 段の子の env には GH_REPO=<req.merge.repo> を固定する
+//   （監査 e670648 の MEDIUM-8。汎用の MERGE_EXEC_COMMAND は別の PR 番号・GH_REPO を向けた別リポジトリでも通った）。
+//   allowMerge でも req.merge が無ければ --merge-re を出さない（汎用の形へは倒さない。マージは hook に止められる）。
 //
 // permission profile は 2 種（:read-only を土台に、ネットワークは有効）:
 //   iit_read: worktree ではない cwd（メイン worktree。観測・状態・計画）。cwd は読み取りのみ・TMPDIR だけ書ける。
@@ -69,7 +72,8 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AdapterError } from '../lib/adapter-error.mjs'
-import { MERGE_EXEC_COMMAND } from '../lib/guard.mjs'
+import { mergeExecCommandFor } from '../lib/guard.mjs'
+import { isMergeTarget } from '../lib/merge-target.mjs'
 import { GUARD_SCRIPT_MISSING, findGuardScript } from '../lib/guard-script.mjs'
 import { decodeStrictText, strictifySchema } from './codex-strict.mjs'
 
@@ -150,10 +154,17 @@ export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, writ
   return ['-c', `permissions={${name}={${prof}}}`, '-c', `default_permissions=${q(name)}`]
 }
 
-/** hook の `-c` 引数（`--dangerously-bypass-hook-trust` を含む）。 */
-export function buildHookArgs({ hookScript, guardScript, hookLog, allowMerge }) {
+/** req.merge を検証して返す（allowMerge でない・merge が無ければ null）。形が不正なら例外（実行しない）。 */
+export function checkMerge(allowMerge, merge) {
+  if (!allowMerge || merge === null || merge === undefined) return null
+  if (!isMergeTarget(merge)) throw new AdapterError('denied', 'merge が { prNumber: 正の整数, repo: owner/repo } の形でない')
+  return merge
+}
+
+/** hook の `-c` 引数（`--dangerously-bypass-hook-trust` を含む）。merge は checkMerge を通した値か null。 */
+export function buildHookArgs({ hookScript, guardScript, hookLog, merge = null }) {
   const parts = ['bash', shq(hookScript), '--guard', shq(guardScript), '--log', shq(hookLog)]
-  if (allowMerge) parts.push('--merge-re', shq(MERGE_EXEC_COMMAND.source))
+  if (merge !== null) parts.push('--merge-re', shq(mergeExecCommandFor(merge.prNumber).source))
   const command = `${parts.join(' ')} || exit 2`
   return ['-c', `hooks.PreToolUse=[{matcher="^Bash$", hooks=[{type="command", command=${q(command)}}]}]`, '--dangerously-bypass-hook-trust']
 }
@@ -219,9 +230,11 @@ export function createAdapter(cfg) {
 
   const resolveCodexHome = () => resolve(tc.codexHome ?? baseEnv.CODEX_HOME ?? join(home, '.codex'))
 
-  const childEnv = () => {
+  const childEnv = (merge = null) => {
     // TMPPREFIX: zsh の here-doc の一時ファイルの接頭辞（ファイル冒頭の「シェル」）。TMPDIR と同じく両 profile で書ける
     const env = { ...baseEnv, CODEX_HOME: codexHome, TMPDIR: tmpDir, TMPPREFIX: join(tmpDir, 'zsh') }
+    // merge 段は対象リポジトリを固定する（gh pr merge <N> を別リポジトリへ向けさせない。MEDIUM-8）
+    if (merge !== null) env.GH_REPO = merge.repo
     // 追跡ブランチの自動設定を止める（0-2）。既存の GIT_CONFIG_* があれば続きの番号へ足す。
     const n = Number.parseInt(env.GIT_CONFIG_COUNT ?? '0', 10) || 0
     env[`GIT_CONFIG_KEY_${n}`] = 'branch.autoSetupMerge'
@@ -251,7 +264,8 @@ export function createAdapter(cfg) {
     // 起動前に検証する（不正な worktreeGitdir・writablePaths では codex を起動しない）
     worktreeGit(cfg.mainRoot, req.worktreeGitdir)
     const writablePaths = checkWritablePaths(req.writablePaths)
-    const { prompt, schema, model, effort, cwd, allowMerge = false, timeoutMs, resume = null, logDir } = req
+    const merge = checkMerge(req.allowMerge === true, req.merge)
+    const { prompt, schema, model, effort, cwd, timeoutMs, resume = null, logDir } = req
     mkdirSync(logDir, { recursive: true })
     const n = readdirSync(logDir).filter((f) => /^events-t\d+\.jsonl$/.test(f)).length + 1
     const tag = `t${n}`
@@ -273,7 +287,7 @@ export function createAdapter(cfg) {
       args.push('--output-schema', sp)
     }
     args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, writablePaths, extraWritePaths: tc.extraWritePaths, platform }))
-    args.push(...buildHookArgs({ hookScript: HOOK_SCRIPT, guardScript, hookLog, allowMerge: Boolean(allowMerge) }))
+    args.push(...buildHookArgs({ hookScript: HOOK_SCRIPT, guardScript, hookLog, merge }))
     if (resume) args.push(resume.sessionRef)
     args.push('-')
     writeFileSync(join(logDir, `argv-${tag}.json`), JSON.stringify(args))
@@ -285,7 +299,7 @@ export function createAdapter(cfg) {
       let err = ''
       let timedOut = false
       let settled = false
-      const p = spawn(bin, args, { cwd, env: childEnv(), stdio: ['pipe', 'pipe', 'pipe'], detached: true })
+      const p = spawn(bin, args, { cwd, env: childEnv(merge), stdio: ['pipe', 'pipe', 'pipe'], detached: true })
       running.add(p)
       const termTimer = setTimeout(() => {
         timedOut = true

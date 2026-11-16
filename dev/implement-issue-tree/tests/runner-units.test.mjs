@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { MERGE_EXEC_COMMAND, DENY_FORMS, activeForms, codexRules, expandPrefix, opencodePatterns, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
+import { MERGE_EXEC_COMMAND, mergeExecCommandFor, DENY_FORMS, activeForms, codexRules, expandPrefix, opencodePatterns, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 import { buildPreamble, buildRepairPrompt, buildSchemaInstruction, buildWorktreeNotice, composePrompt } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
 import { DEFAULT_CONFIG_PATH, IIT_EFFORTS, IIT_MODELS, loadConfig, resolveModel, resolveTimeoutMs, validateConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 import { extractLastJson } from '../../../skills/implement-issue-tree/runner/lib/extract-json.mjs'
@@ -510,4 +510,13 @@ test('preamble: 修復プロンプトの errors は 1 行・200 文字までに�
   assert.equal(lines.length, 1)
   assert.ok(lines[0].length <= 210)
   assert.ok(!p.includes('\u0000'))
+})
+
+test('mergeExecCommandFor（MEDIUM-8）: その PR 番号の完全一致の形だけに一致し、汎用の形の部分集合。正の安全な整数でなければ throw', () => {
+  const form = (n) => `HEAD_SHA="${'a'.repeat(40)}"; gh pr merge ${n} --squash --delete-branch --match-head-commit "$HEAD_SHA"`
+  const re = mergeExecCommandFor(12)
+  assert.equal(re.test(form(12)), true)
+  for (const c of [form(13), form(120), form(1), `${form(12)}; echo x`, ` ${form(12)}`]) assert.equal(re.test(c), false, c)
+  assert.equal(MERGE_EXEC_COMMAND.test(form(12)), true)
+  for (const bad of [0, -1, 1.5, '12', NaN, 2 ** 53]) assert.throws(() => mergeExecCommandFor(bad), TypeError, String(bad))
 })
