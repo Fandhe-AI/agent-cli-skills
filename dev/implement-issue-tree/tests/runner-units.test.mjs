@@ -74,7 +74,7 @@ const GUARD_GAPS = {
   'api-merge': ["gh api graphql -f query='mutation { enqueuePullRequest(input:{}) { clientMutationId } }'"],
   'auth-token': ['gh auth token', 'gh auth status --show-token', 'printenv GH_TOKEN', 'printenv'],
   'git-credential': ['git credential fill'],
-  'auth-file': ['cat ~/.config/gh/hosts.yml', 'cat ~/.codex/auth.json', 'cd ~/.config/gh && cat hosts.yml', 'base64 ~/.config/gh/hosts.yml'],
+  'auth-file': ['cat ~/.config/gh/hosts.yml', 'cat ~/.codex/auth.json', 'cd ~/.config/gh && cat hosts.yml', 'cd ~/.config/gh;cat hosts.yml', 'cd ~/.config/gh&&cat hosts.yml', 'cd ~/.config/gh|cat', '(cd ~/.config/gh)', 'cat "$HOME/.config/gh"/hosts.yml', 'base64 ~/.config/gh/hosts.yml'],
 }
 
 const GUARD_ALLOW = [
