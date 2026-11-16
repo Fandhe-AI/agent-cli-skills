@@ -492,6 +492,7 @@ export const MUTATIONS = [
   { id: 'RS35-script-count-line-unchecked', file: RS, from: '      if [ "${n}" != 0 ] && ! is_uint "${n}"; then', to: '      if false; then', tests: RS_SCRIPT, note: "#809: 件数行の形を検査しない（check_runs が配列でない応答・想定外の出力を取得成功として扱う）" },
   { id: 'RS24-host-scan-repo-unbound', file: SRC, from: "const scanRepo = repoArg || (isValidRepoSlug(treeFetch.repo) ? treeFetch.repo : '')", to: "const scanRepo = repoArg", tests: RS_HOST, note: "#808: args.repo が無いとき repo-scan.sh をツリーのリポジトリへ束縛しない（観測・対象外ラベルを呼ばない／別のリポジトリを読む）" },
   { id: 'RS25-host-scan-repo-unchecked', file: SRC, from: "(isValidRepoSlug(treeFetch.repo) ? treeFetch.repo : '')", to: "(treeFetch.repo ?? '')", tests: RS_HOST, note: "#808: ツリー取得の封筒の repo（エージェントの転記）を形式検査せず起動行へ入れる" },
+  { id: 'FT33-one-page-extra-fields-accepted', file: SRC, from: 'signed.ok && (signed.payload.dir !== undefined || signed.payload.tsvSha256 !== undefined)', to: 'false', tests: FETCH_TREE_HOST, note: "1 ページの封筒に dir・tsvSha256 が付いていても拒否しない（sha256 を作り直した封筒が通る）" },
   { id: 'FT-repo-from-cwd-blank', file: 'scripts/fetch-tree.sh', from: '    && valid_repo "${tree_repo}" || {', to: '    || {', tests: FETCH_TREE_SCRIPT, note: "#808: repository_url から得たリポジトリの形式を検査しない（空・不正な値を封筒の repo に出し、ホストが別のリポジトリを走査し得る）" },
   // ページ経路（Issue #690）
   { id: 'FP1-page-input-unchecked', file: SRC, from: "checkTreeNodes(result, nonce, pageInput, attempt)", to: "checkTreeNodes(result, nonce, undefined, attempt)", tests: FETCH_TREE_PAGES, note: "#690: ページの封筒が tsvSha256 とページ番号に束縛されていること（inputSha256）を照合しない（別ページの出力の流用が通る）" },

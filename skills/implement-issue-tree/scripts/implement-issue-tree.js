@@ -301,6 +301,12 @@ a=`ツリー取得の封筒が不正（${b}）`+Xl(d,'ツリー規模（exit 7 �
 log(`⚠️ （試行 ${d}）${a}`)
 continue
 }
+
+if(h.ok&&(h.payload.dir!==undefined||h.payload.tsvSha256!==undefined)){
+a='1 ページの封筒に dir または tsvSha256 が含まれている（ページ経路の欄）'+Xl(d,'エージェントの書き写しの誤り、または取得スクリプトの出力を確かめる')
+log(`⚠️ （試行 ${d}）${a}`)
+continue
+}
 const i=d4(e,f,c,d)
 if(i.reason!==undefined){a=i.reason;log(`⚠️ （試行 ${d}）${a}`);continue}
 const{nodes:j,folded:k,verified:l}=i
