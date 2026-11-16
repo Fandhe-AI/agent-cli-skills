@@ -6100,6 +6100,26 @@
       "allow",
       "deny obfuscated",
       "deny obfuscated"
+    ],
+    "[ -z \"\"{x,-o,-v,'a[$(gh pr $'\"'\\x6derge' 1)]\"} ]": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "grep {--filter=x,y} 'a$' f": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "V='path[$(gh pr $'\"'\\x6derge' 1)]\"; echo $path[V]": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "V='*(e:gh pr $'\"'\\x6derge' 1:)\"; echo $~V": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
     ]
   }
 }

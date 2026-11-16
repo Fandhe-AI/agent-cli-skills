@@ -1262,6 +1262,11 @@ export const SQ_LITERAL_DENY = [
   [`[ -v "$(printf '%s%s' 'a[$(gh pr $' "'\\x6derge' 1)]")" ]`, 'obfuscated'],
   [`printf '%s%s\n' '[core]fsmonitor = gh pr $' "'\\x6derge' 1" >> .git/config; git diff`, 'obfuscated'],
   [`grep 'a$' f; grep 'b$' < f`, 'obfuscated'],
+  // 字句解析の外で語を作る展開: ブレース展開で [ や grep に -v・--filter を足す形、zsh の添字（$NAME[…] は算術として評価する）・$~（グロブ修飾子）
+  [`[ -z ""{x,-o,-v,'a[$(gh pr $'"'\\x6derge' 1)]"} ]`, 'obfuscated'],
+  [`grep {--filter=x,y} 'a$' f`, 'obfuscated'],
+  [`V='path[$(gh pr $'"'\\x6derge' 1)]"; echo $path[V]`, 'obfuscated'],
+  [`V='*(e:gh pr $'"'\\x6derge' 1:)"; echo $~V`, 'obfuscated'],
 ]
 
 // --- 認証情報の読み出し（subagent が true / null のときだけ deny。main は対象外）-----------------
