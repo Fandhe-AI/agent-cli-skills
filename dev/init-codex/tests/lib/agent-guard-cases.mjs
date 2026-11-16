@@ -225,10 +225,7 @@ export const FIX_ALLOW = [
   'git commit -m "$(cat <<\'EOF\'\nfeat: x\n\nHUSKY=0 git commit -n; git config core.hooksPath x\nEOF\n)"',
   // 読み取り・リダイレクト・here-string・算術
   'git config --get core.hooksPath',
-  'git config --get-all core.hooksPath',
   'git config core.hooksPath',
-  'git config get core.hooksPath',
-  'git config --global --get core.hooksPath',
   // 設定の一覧・--get-regexp は認証ヘッダを含み得るので credential-read で止める（CRED_DENY）。ここは no-verify の判定の対象外
   'git config alias.p',
   'git config --get alias.p',
@@ -1443,6 +1440,43 @@ export const CRED_DENY = [
   "git config --get http.extraheader '--unset=|.'",
   "git config --get-regexp . '--add=|.'",
   "git config --get http.extraheader --add",
+  // 4 巡目の指摘: サブコマンドの位置を探さず語の集合で見る（値を取る global option の後ろ）・秘密変数の展開は command -V でも止める・
+  // git config は option を含まない完全形だけ通す（旧 CRED_ALLOW・HOOKCONF_ALLOW のうち option を含む形と credential-* の helper 呼び出しをここへ移した。
+  // skills/ と implement-issue-tree.src.js の呼び出しに同じ形が無いことを grep で確かめた）
+  "gh --jq . auth token",
+  "gh --json id auth token",
+  "gh --template '{{.}}' auth token",
+  "git --config-env x=y credential fill",
+  "git --config-env core.pager=PATH credential fill",
+  "command -V \"$GH_TOKEN\"",
+  "command -v \"$GH_TOKEN\"",
+  "git --config-env x=y diff --no-index /dev/null ~/.netrc",
+  "git -C d config user.name t",
+  "git -C . var GIT_EDITOR",
+  "git credential-cache exit",
+  "git credential-store --file x erase",
+  "git config --global user.email x@example.com",
+  "git config --list --unset core.editor",
+  "git config --unset http.extraHeader",
+  "git config --file=.gitmodules --get submodule.x.url",
+  "git config -f.gitmodules --get submodule.x.url",
+  "git config --fi=.gitmodules --get x",
+  "git config --blob=HEAD:.gitmodules --get x",
+  "git config --blob HEAD:.gitmodules --get x",
+  "git config --type=bool --get core.bare",
+  "git config --type bool --get core.bare",
+  "git config -tbool --get core.bare",
+  "git config --default x --get core.editor",
+  "git config --fixed-value --get x y",
+  "git config --includes --get user.name",
+  "git config --no-includes --get user.name",
+  "git config --bool --get core.bare",
+  "git config set user.name x",
+  "git config set --comment n user.name x",
+  "git config --fil x user.name y",
+  "git config set --type bool core.bare true",
+  "git config rename-section foo bar",
+  "git config remove-section foo",
 ]
 
 export const CRED_ALLOW = [
@@ -1450,7 +1484,6 @@ export const CRED_ALLOW = [
   'gh auth status --hostname github.com',
   'gh auth login --help',
   'git status',
-  'git credential-cache exit',
   'git log --oneline',
   'cat README.md',
   'printenv PATH',
@@ -1531,10 +1564,7 @@ export const CRED_ALLOW = [
   "export GH_HOST=x; gh pr view 1",
   "bash -c 'set -euo pipefail; echo ok'",
   "git config user.name t",
-  "git config --local core.hooksPath",
   "git config --get remote.origin.url",
-  "git config --global user.email x@example.com",
-  "git config --list --unset core.editor",
   "cat <<'EOF'\n$GH_TOKEN\n${GITHUB_TOKEN}\nEOF",
   "cat <<EOF\n$HOME\nEOF",
   "cat <<< \"$HOME\"",
@@ -1574,9 +1604,7 @@ export const CRED_ALLOW = [
   "gh pr create -bhosts.yml",
   "gh issue create --title=\"hosts.yml\"",
   "git config --get user.Name",
-  "git config --unset http.extraHeader",
   "git var GIT_AUTHOR_IDENT",
-  "git credential-store --file x erase",
   "git diff HEAD~1",
   "git grep foo",
   "git --git-dir=.git log",
@@ -1600,20 +1628,20 @@ export const CRED_ALLOW = [
   "git var GIT_AUTHOR_IDENT",
   "git config user.name",
   "git config get user.name",
-  "git config --file=.gitmodules --get submodule.x.url",
-  "git config -f.gitmodules --get submodule.x.url",
-  "git config --fi=.gitmodules --get x",
-  "git config --blob=HEAD:.gitmodules --get x",
-  "git config --blob HEAD:.gitmodules --get x",
-  "git config --type=bool --get core.bare",
-  "git config --type bool --get core.bare",
-  "git config -tbool --get core.bare",
-  "git config --default x --get core.editor",
-  "git config --fixed-value --get x y",
-  "git config --includes --get user.name",
-  "git config --no-includes --get user.name",
-  "git config --bool --get core.bare",
   "git diff -U3 HEAD",
+  // 4 巡目: skills/ と implement-issue-tree.src.js を grep して拾った実在の呼び出し（allow コーパス）と、語の集合で見る判定の対照
+  // （直後の語が option でなければそれだけをサブコマンドとして見る）
+  "command -v gh && gh auth status",
+  "gh auth status &> /dev/null",
+  "gh auth status > /dev/null 2>&1",
+  "git config user.name t && git config user.email t@example.invalid",
+  "git config --get core.hooksPath",
+  "git config core.hooksPath",
+  "git config alias.p",
+  "gh pr create --title auth --body token",
+  "git add config",
+  "git checkout credential-x",
+  "git log -- var",
 ]
 
 // マージキュー投入の GraphQL mutation（mergePullRequest と同じ扱い）。
@@ -1624,9 +1652,9 @@ export const ENQUEUE_DENY = [
 ]
 
 // git config での core.hooksPath / alias.* の設定（no-verify・全セッション）。#805 の凍結後に足した判定で、旧版との差分テスト
-// （agent-guard-805.test.mjs）の対象外（POST_805）。cred_check と共通の option 解析 gconf_opt の規則（一意な前置き・= 連結・
-// 短い形の束ね書き・値を取る option の読み飛ばし）と、キーより後ろ・`--` の後ろを位置引数として数える規則、set / unset の
-// subcommand 形、rename-section / remove-section で core / alias の節を移す・消す形を見る。
+// （agent-guard-805.test.mjs）の対象外（POST_805）。option の文法は真似ず許可リストで見る: hookspath を含む語か alias.* の語がある
+// git config / -c と、core / alias の節名と rename-section / remove-section（`re` 始まりの語）がある git config は、読み取りの完全形
+// `git config KEY`・`git config --get KEY` 以外をすべて止める（値を取るかが版で変わる option を含む形は読み取りでも止める）。
 export const HOOKCONF_DENY = [
   ['git config --fil x core.hooksPath /dev/null', 'no-verify'],
   ['git config --fil=x core.hooksPath /dev/null', 'no-verify'],
@@ -1661,19 +1689,31 @@ export const HOOKCONF_DENY = [
   ['git config set --all alias.p push', 'no-verify'],
   ['git config set --append alias.p push', 'no-verify'],
   ['git config --bl x alias.p push', 'no-verify'],
+  // 4 巡目: --co / --c は --comment の無い git（2.39 等）では --color の省略になり、キー・値の読み方が変わる。option を含む形は止める
+  ['git config --co core.hooksPath /dev/null', 'no-verify'],
+  ['git config --c core.hooksPath /dev/null', 'no-verify'],
+  // 読み取りの完全形以外（旧 FIX_ALLOW・HOOKCONF_ALLOW・CRED_ALLOW から移した。skills/ と implement-issue-tree.src.js の呼び出しに無い）
+  ['git config --get-all core.hooksPath', 'no-verify'],
+  ['git config get core.hooksPath', 'no-verify'],
+  ['git config --global --get core.hooksPath', 'no-verify'],
+  ['git config --local core.hooksPath', 'no-verify'],
+  ['git config --type=path --get core.hooksPath', 'no-verify'],
+  ['git config --get-a core.hooksPath', 'no-verify'],
+  ['git config get --all core.hooksPath', 'no-verify'],
+  ['git config --get core.hooksPath x', 'no-verify'],
+  ['git -C d config --get core.hooksPath', 'no-verify'],
+  ['git --config-env x=y config core.hooksPath /dev/null', 'no-verify'],
 ]
 
-// 同じ解析で止めない形（hooksPath / alias でない設定・hooksPath の読み取り・core / alias に関わらない rename-section / remove-section）。
+// 同じ解析で止めない形（hooksPath / alias でない設定と、core / alias に関わらない -c・-c の後ろに無い hooksPath の語）。全セッションで allow。
 export const HOOKCONF_ALLOW = [
   'git config core.editor vim',
-  'git config set user.name x',
-  'git config set --comment n user.name x',
-  'git config --fil x user.name y',
-  'git config set --type bool core.bare true',
-  'git config --type=path --get core.hooksPath',
-  'git config --get-a core.hooksPath',
-  'git config get --all core.hooksPath',
-  'git config --get core.hooksPath x',
-  'git config rename-section foo bar',
-  'git config remove-section foo',
+  // 実在の呼び出し（skills/ の grep で拾った allow コーパス）
+  'git -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none',
+  'git -C wt -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none',
+  'git -c status.renames=false status --porcelain -z -uall',
+  'git config user.name t && git config user.email t@example.invalid',
+  // -c が別の意味（grep の件数・commit の再編集）で、hooksPath の語が設定キーでない
+  'git grep -c hooksPath',
+  'git commit -c HEAD -m "x hooksPath"',
 ]
