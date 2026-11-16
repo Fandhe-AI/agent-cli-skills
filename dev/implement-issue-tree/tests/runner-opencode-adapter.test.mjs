@@ -16,7 +16,7 @@ import { MERGE_RES, createAdapter, credentialReadRules, opencodeConfigDirs, prot
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 import { createAgentHost } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
 import { loadConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
-import { MERGE_EXEC_COMMAND, codexRules, mergeExecCommandFor, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
+import { MERGE_EXEC_COMMAND, READ_ALLOW_FORMS, codexRules, mergeExecCommandFor, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 
 const PLUGIN_DIR = join(SKILL_DIR, 'runner', 'adapters', 'opencode-plugin')
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'lib', 'fake-opencode-server.mjs')
@@ -47,9 +47,23 @@ function setup(extra = {}) {
 }
 
 const starts = (recs) => recs.filter((r) => r.ev === 'start')
+
+// allow は READ_ALLOW_FORMS の完全一致の shell の読み取りだけで、permissions・policies とも shell の全 deny より後ろにある（後勝ち）。
+// allow-all（action・resource の `*`）や wildcard つきの allow は無い。
+function assertOnlyReadAllows(cfg) {
+  for (const [key, toRes] of [['permissions', (r) => r], ['policies', (r) => `shell:${r}`]]) {
+    const list = cfg[key]
+    const allows = list.filter((r) => r.effect === 'allow')
+    assert.deepEqual(allows.map((r) => r.resource), READ_ALLOW_FORMS.map(toRes), `${key}: allow は読み取りの完全一致の形だけ`)
+    for (const r of allows) assert.ok(!/[*?]/.test(r.resource) && r.action !== '*', `${key}: wildcard の allow がある`)
+    const isShell = (r) => r.action === 'shell' || r.resource.startsWith('shell:')
+    const lastShellDeny = list.findLastIndex((r) => isShell(r) && r.effect === 'deny')
+    assert.ok(list.findIndex((r) => r.effect === 'allow') > lastShellDeny, `${key}: allow が shell の deny より前にある`)
+  }
+}
 const kindOf = async (p) => { try { await p } catch (e) { return e } throw new Error('失敗するはずが成功した') }
 
-test('設定: allow-all が無く、deny と plugin が入る。allowMerge の run だけ別の serve で merge の deny が外れる', async () => {
+test('設定: allow-all が無く（allow は hooksPath の読み取りの完全一致だけ）、deny と plugin が入る。allowMerge の run だけ別の serve で merge の deny が外れる', async () => {
   const t = setup()
   await t.adapter.start()
   try {
@@ -57,7 +71,7 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.equal(recs.length, 1, 'start では通常用の serve だけ')
     const cfg = recs[0].config
     assert.ok(recs[0].hasPassword)
-    assert.equal(JSON.stringify(cfg).includes('"effect":"allow"'), false, 'allow を含まない')
+    assertOnlyReadAllows(cfg)
     assert.equal(cfg.permissions.some((r) => r.action === '*'), false)
     assert.ok(cfg.permissions.some((r) => r.effect === 'deny' && r.resource === 'gh pr merge*'))
     assert.ok(cfg.policies.some((r) => r.action === 'tool.use' && r.resource === 'shell:gh pr merge*'))
@@ -84,7 +98,7 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.equal(merge.config.policies.some((r) => r.resource === 'shell:gh pr merge*'), false)
     assert.ok(merge.config.permissions.some((r) => /gh pr review\*--approve/.test(r.resource)), '承認の deny は残る')
     assert.ok(merge.config.permissions.some((r) => r.resource.includes('--admin')), '--admin の deny は残る')
-    assert.equal(JSON.stringify(merge.config).includes('"effect":"allow"'), false)
+    assertOnlyReadAllows(merge.config)
     assert.deepEqual(merge.config.plugins[0].options.mergeRes, [mergeExecCommandFor(7).source], 'merge 用だけ、その PR 番号で具体化した merge-exec を素通しにする')
     assert.deepEqual(MERGE_RES, [MERGE_EXEC_COMMAND.source], '完全一致の 1 形だけ（Codex の --merge-re と同じ）')
     assert.notEqual(merge.config.plugins[0].options.nonce, o.nonce, 'serve ごとに別の nonce')

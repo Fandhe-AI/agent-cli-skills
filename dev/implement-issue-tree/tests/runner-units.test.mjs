@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { mergeNumberKinds, mergePrNumberOf } from '../../../skills/implement-issue-tree/runner/lib/merge-target.mjs'
-import { MERGE_EXEC_COMMAND, mergeExecCommandFor, DENY_FORMS, activeForms, codexRules, expandPrefix, opencodePatterns, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
+import { MERGE_EXEC_COMMAND, READ_ALLOW_FORMS, mergeExecCommandFor, DENY_FORMS, activeForms, codexRules, expandPrefix, opencodePatterns, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 import { buildPreamble, buildRepairPrompt, buildSchemaInstruction, buildWorktreeNotice, composePrompt } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
 import { DEFAULT_CONFIG_PATH, IIT_EFFORTS, IIT_MODELS, loadConfig, resolveModel, resolveTimeoutMs, validateConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 import { extractLastJson } from '../../../skills/implement-issue-tree/runner/lib/extract-json.mjs'
@@ -273,13 +273,102 @@ test('guard: スレッドへの返信 mutation（addPullRequestReviewThreadReply
   assert.ok(globs.some((re) => re.test(addSp)))
 })
 
-test('guard: opencodeRules は permissions と policies を同じパターンで作る', () => {
+test('guard: opencodeRules は permissions と policies を同じパターンで作る（deny の全形の後ろに、読み取りの完全一致の allow だけを置く）', () => {
+  for (const opts of [{}, { allowMerge: true }]) {
+    const rules = opencodeRules(opts)
+    assert.equal(rules.permissions.length, rules.policies.length)
+    for (const p of rules.permissions) assert.deepEqual(Object.keys(p), ['action', 'resource', 'effect']), assert.equal(p.action, 'shell')
+    for (const p of rules.policies) assert.match(p.resource, /^shell:/), assert.equal(p.action, 'tool.use')
+    const n = opencodePatterns(opts).length
+    assert.deepEqual(rules.permissions.map((p) => [p.resource, p.effect]), [...opencodePatterns(opts).map((r) => [r, 'deny']), ...READ_ALLOW_FORMS.map((r) => [r, 'allow'])])
+    assert.deepEqual(rules.policies.map((p) => [p.resource, p.effect]), [...opencodePatterns(opts).map((r) => [`shell:${r}`, 'deny']), ...READ_ALLOW_FORMS.map((r) => [`shell:${r}`, 'allow'])])
+    assert.equal(rules.permissions.slice(0, n).every((p) => p.effect === 'deny'), true)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// OpenCode の permissions / policies の評価（.claude/skills/opencode-usage の permissions.md・policies.md）を写した評価器。
+//   - resource は全体一致の glob。`*` は 0 文字以上（/ を含む）、`?` は 1 文字、他は文字そのもの。
+//   - shell の glob が ` *` で終わるときは、引数なしの形（` *` の前まで）にも一致する。
+//   - permissions も policies も、一致した規則のうち最後のものが勝つ。
+//   - permissions で一致が無いときは既定の base policy（`*` `*` allow）が効くので allow。policies で一致が無いときも allow。
+//   - policies は allow / ask を deny に変えるだけで、許可は与えない（最終結果は permissions の結果、ただし policies が deny なら deny）。
+// ---------------------------------------------------------------------------
+const ocGlob = (g) => {
+  const body = (x) => x.split('').map((c) => (c === '*' ? '.*' : c === '?' ? '.' : c.replace(/[.+^${}()|[\]\\]/g, '\\$&'))).join('')
+  return g.endsWith(' *') ? new RegExp(`^${body(g.slice(0, -2))}( .*)?$`, 's') : new RegExp(`^${body(g)}$`, 's')
+}
+const lastMatch = (list, resource) => list.reduce((acc, r) => (ocGlob(r.resource).test(resource) ? r.effect : acc), null)
+function ocDecide(rules, cmd) {
+  const perm = lastMatch(rules.permissions, cmd) ?? 'allow'
+  const pol = lastMatch(rules.policies, `shell:${cmd}`) ?? 'allow'
+  return pol === 'deny' ? 'deny' : perm
+}
+
+const HOOKSPATH_READS = ['git config core.hooksPath', 'git config --get core.hooksPath', 'git config --get-all core.hooksPath', 'git rev-parse --git-path hooks']
+const HOOKSPATH_WRITES = [
+  'git config core.hooksPath /tmp/h', 'git config core.hooksPath ""', 'git config --get core.hooksPath x', 'git config --unset core.hooksPath',
+  'git config --unset-all core.hooksPath', 'git config --add core.hooksPath /tmp/h', 'git config --replace-all core.hooksPath /tmp/h',
+  'git config --local core.hooksPath /tmp/h', 'git config --global core.hooksPath /tmp/h', 'git config set core.hooksPath /tmp/h',
+  'git config unset core.hooksPath', 'git -c core.hooksPath=/dev/null commit -m x', 'git -c core.hooksPath=/tmp/h push origin x',
+  'git -C . config core.hooksPath /tmp/h', 'git config core.hooksPath  /tmp/h',
+]
+
+test('guard: 評価器の自己検査（ドキュメントの例どおりに後勝ち・` *` の引数なし一致・? の 1 文字）', () => {
+  const rules = { permissions: [
+    { action: 'shell', resource: '*', effect: 'ask' }, { action: 'shell', resource: 'git status *', effect: 'allow' }, { action: 'shell', resource: 'git push *', effect: 'deny' },
+  ], policies: [] }
+  assert.equal(ocDecide(rules, 'git status'), 'allow')
+  assert.equal(ocDecide(rules, 'git status --short'), 'allow')
+  assert.equal(ocDecide(rules, 'git push'), 'deny')
+  assert.equal(ocDecide(rules, 'git -C . push'), 'ask')
+  assert.equal(ocDecide({ permissions: [{ action: 'shell', resource: 'a?c', effect: 'deny' }], policies: [] }, 'abc'), 'deny')
+  assert.equal(ocDecide({ permissions: [{ action: 'shell', resource: 'a?c', effect: 'deny' }], policies: [] }, 'abbc'), 'allow')
+  // policies の deny は permissions の allow を打ち消し、policies の後ろの allow は前の deny を打ち消す
+  const pol = (list) => ({ permissions: [{ action: 'shell', resource: 'x', effect: 'allow' }], policies: list })
+  assert.equal(ocDecide(pol([{ action: 'tool.use', resource: 'shell:x', effect: 'deny' }]), 'x'), 'deny')
+  assert.equal(ocDecide(pol([{ action: 'tool.use', resource: 'shell:x', effect: 'deny' }, { action: 'tool.use', resource: 'shell:x', effect: 'allow' }]), 'x'), 'allow')
+})
+
+test('guard: core.hooksPath の読み取り 4 形は OpenCode の permissions / policies で allow、書き込みの形は deny のまま（allowMerge でも同じ）', () => {
+  assert.deepEqual([...READ_ALLOW_FORMS], HOOKSPATH_READS)
+  for (const opts of [{}, { allowMerge: true }]) {
+    const rules = opencodeRules(opts)
+    for (const cmd of HOOKSPATH_READS) assert.equal(ocDecide(rules, cmd), 'allow', `読み取り: ${cmd}`)
+    for (const cmd of HOOKSPATH_WRITES) assert.equal(ocDecide(rules, cmd), 'deny', `書き込み: ${cmd}`)
+    // permissions だけ・policies だけの片側でも、書き込みは deny のまま
+    for (const cmd of HOOKSPATH_WRITES) {
+      assert.equal(lastMatch(rules.permissions, cmd), 'deny', `permissions: ${cmd}`)
+      assert.equal(lastMatch(rules.policies, `shell:${cmd}`), 'deny', `policies: ${cmd}`)
+    }
+    // 修正前（allow を外した一覧）では、読み取り 3 形が止まっていた（Phase 3 の記録の再現）
+    const before = { permissions: rules.permissions.filter((r) => r.effect === 'deny'), policies: rules.policies.filter((r) => r.effect === 'deny') }
+    for (const cmd of HOOKSPATH_READS.slice(0, 3)) assert.equal(ocDecide(before, cmd), 'deny', `修正前: ${cmd}`)
+  }
+})
+
+test('guard: 読み取りの allow は git-no-verify の glob 以外の deny を打ち消さない（allow の形に一致する deny は git*core.hooksPath* だけ）', () => {
+  const other = opencodePatterns().filter((g) => g !== 'git*core.hooksPath*').map(ocGlob)
+  for (const cmd of READ_ALLOW_FORMS) assert.ok(!other.some((re) => re.test(cmd)), cmd)
+  // 他の deny の形は、読み取りの allow を足した後も全部 deny のまま
   const rules = opencodeRules()
-  assert.equal(rules.permissions.length, rules.policies.length)
-  for (const p of rules.permissions) assert.deepEqual(Object.keys(p), ['action', 'resource', 'effect']), assert.equal(p.effect, 'deny')
-  for (const p of rules.policies) assert.match(p.resource, /^shell:/)
-  assert.deepEqual(rules.permissions.map((p) => p.resource), opencodePatterns())
-  assert.deepEqual(rules.policies.map((p) => p.resource), opencodePatterns().map((r) => `shell:${r}`))
+  for (const [id, cmds] of Object.entries(GUARD_DENY)) {
+    for (const cmd of cmds) {
+      const hit = opencodePatterns().some((g) => ocGlob(g).test(cmd))
+      if (hit) assert.equal(ocDecide(rules, cmd), 'deny', `${id}: ${cmd}`)
+    }
+  }
+})
+
+test('guard: 全文を見る agent-guard.sh（Codex hook 経由・subagent=true）の判定は変えていない。書き込みの形は全部 deny、読み取りは --get-all だけ deny', async () => {
+  const reads = await Promise.all(HOOKSPATH_READS.map(async (cmd) => [cmd, await codexHook(cmd)]))
+  assert.deepEqual(reads.map(([cmd, r]) => [cmd, r.decision]), [
+    ['git config core.hooksPath', 'allow'], ['git config --get core.hooksPath', 'allow'],
+    // option を含む形はガードが一律に止める（agent-guard.sh の no-verify の説明）。permissions で allow にしても全体では止まる
+    ['git config --get-all core.hooksPath', 'deny'], ['git rev-parse --git-path hooks', 'allow'],
+  ])
+  const writes = await Promise.all(HOOKSPATH_WRITES.map(async (cmd) => [cmd, await codexHook(cmd)]))
+  for (const [cmd, r] of writes) assert.equal(r.decision, 'deny', cmd)
 })
 
 test('guard: allowMerge では gh pr merge の素の形だけを外し、--admin・--auto・承認・REST/GraphQL のマージ・認証は残す', () => {

@@ -74,6 +74,23 @@ export const DENY_FORMS = Object.freeze([
   { id: 'git-no-verify', mergeOnly: false, note: 'フックの迂回（--no-verify・commit -n・core.hooksPath）', prefixes: [['git', 'commit', ['--no-verify', '-n']], ['git', 'push', '--no-verify']], globs: ['git commit*--no-verify*', 'git push*--no-verify*', 'git*core.hooksPath*'] },
 ])
 
+/**
+ * deny の glob に掛かるが通す読み取りの形（OpenCode の permissions / policies に、deny の後ろへ allow で置く。後勝ち）。
+ * `git*core.hooksPath*`（git-no-verify）は書き込み（値を渡す・--unset・`-c core.hooksPath=…`）を止めるための粗い glob で、
+ * 標準手順の読み取り `git config core.hooksPath` まで止めていた（Phase 3 の OpenCode で 6 回）。値の引数を伴わない読み取りだけを
+ * 完全一致の文字列（`*` も `?` も含めない。値を足した形・前後に語を足した形には一致しない）で戻す。複合コマンドは OpenCode の
+ * スキャナが分けた部分ごとに評価され、どれか 1 つでも deny なら全体が deny のままである。
+ * 全文を見る agent-guard.sh（plugin・Codex の hook）の判定は変えない。ガードは `git config KEY`・`git config --get KEY` だけを
+ * 通し、option を含む `--get-all` は止める（値を取るかが版で変わる option を一律に止める方針）ため、`--get-all` はここで allow に
+ * しても全体では止まる。`git rev-parse --git-path hooks` は deny の glob に掛からないので、一覧に置くのは対応を明示するためである。
+ */
+export const READ_ALLOW_FORMS = Object.freeze([
+  'git config core.hooksPath',
+  'git config --get core.hooksPath',
+  'git config --get-all core.hooksPath',
+  'git rev-parse --git-path hooks',
+])
+
 const isWord = (x) => typeof x === 'string'
 
 /** argv の選択肢（配列の要素）を展開し、語の列の全組み合わせを返す。 */
@@ -114,9 +131,17 @@ export function opencodePatterns(opts = {}) {
  */
 export function opencodeRules(opts = {}) {
   const patterns = opencodePatterns(opts)
+  // permissions も policies も最後に一致した規則が勝つ（.claude/skills/opencode-usage の permissions.md・policies.md の Order）。
+  // READ_ALLOW_FORMS の allow は全 deny の後ろに置き、policies 側にも同じ位置で置く（permissions だけに置くと policies の deny が残る）。
   return {
-    permissions: patterns.map((resource) => ({ action: 'shell', resource, effect: 'deny' })),
-    policies: patterns.map((resource) => ({ action: 'tool.use', resource: `shell:${resource}`, effect: 'deny' })),
+    permissions: [
+      ...patterns.map((resource) => ({ action: 'shell', resource, effect: 'deny' })),
+      ...READ_ALLOW_FORMS.map((resource) => ({ action: 'shell', resource, effect: 'allow' })),
+    ],
+    policies: [
+      ...patterns.map((resource) => ({ action: 'tool.use', resource: `shell:${resource}`, effect: 'deny' })),
+      ...READ_ALLOW_FORMS.map((resource) => ({ action: 'tool.use', resource: `shell:${resource}`, effect: 'allow' })),
+    ],
   }
 }
 
