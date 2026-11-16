@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { SKILL_DIR } from './lib/paths.mjs'
@@ -40,7 +40,7 @@ const allowGuard = (stdinLog) => `#!/bin/bash\ncat >> '${stdinLog}'; echo >> '${
 test('目印: setup が nonce を markerPath へ書く', async () => {
   const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
   await load(s.options)
-  assert.equal(readFileSync(s.options.markerPath, 'utf8'), 'nonce-1')
+  assert.deepEqual(JSON.parse(readFileSync(s.options.markerPath, 'utf8')), { nonce: 'nonce-1', directory: null }, 'location が無ければ directory は null')
 })
 
 test('subagent=true 固定でガードを呼ぶ。allow は素通し・ログにコマンドを書かない', async () => {
@@ -210,8 +210,16 @@ const PLUGIN_REAL = realpathSync(join(SKILL_DIR, 'runner', 'adapters', 'opencode
 
 async function loadAt(options, directory) {
   let hook = null
-  await plugin.setup({ options, location: { directory }, permission: { hook: async (name, fn) => { if (name === 'evaluate') hook = fn } } })
-  return async (event) => { const e = { action: 'shell', resources: [], ...event }; await hook(e); return e }
+  let before = null
+  await plugin.setup({
+    options,
+    location: { directory },
+    permission: { hook: async (name, fn) => { if (name === 'evaluate') hook = fn } },
+    tool: { hook: async (name, fn) => { if (name === 'execute.before') before = fn } },
+  })
+  const ev = async (event) => { const e = { action: 'shell', resources: [], ...event }; await hook(e); return e }
+  ev.before = before
+  return ev
 }
 
 test('保護: edit 系はガード本体・plugin の置き場・設定ファイル・保護パスへの書き込みを拒否し、他は通す', async () => {
@@ -296,4 +304,19 @@ test('全文の判定: shell で resource が 0 件の permission.evaluate は�
   const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
   const ev = await load(s.options)
   assert.equal((await ev({ action: 'shell', resources: [] })).effect, 'deny')
+})
+
+test('件数の記録: shell の呼び出しごとに sessionID を callLog へ書く（拒否する呼び出しも含む）。shell 以外は書かない。目印は location 付き', async () => {
+  const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
+  const callLog = join(dirname(s.options.log), 'calls.log')
+  const where = dirname(s.options.log)
+  const p = await loadAt({ ...s.options, guardScript: REAL_GUARD, callLog }, where)
+  await p.before(toolEv('git status', { sessionID: 'ses_a' }))
+  assert.ok(await throwsOf(() => p.before(toolEv('export HUSKY=0; git commit -m x', { sessionID: 'ses_a' }))))
+  await p.before(toolEv('ls', { sessionID: 'ses_b' }))
+  await p.before({ tool: 'write', ...CALL, input: { path: 'a.txt' } })
+  assert.deepEqual(readFileSync(callLog, 'utf8').split('\n').filter(Boolean), ['ses_a', 'ses_a', 'ses_b'])
+  assert.deepEqual(JSON.parse(readFileSync(s.options.markerPath, 'utf8')), { nonce: 'nonce-1', directory: where })
+  // callLog も保護する（書き換えて件数を合わせられないように）
+  assert.ok(await throwsOf(() => p.before(toolEv(`echo ses_x >> ${callLog}`))))
 })

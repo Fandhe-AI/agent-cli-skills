@@ -11,8 +11,11 @@
 //   log          呼び出しごとに 1 行を追記するログ（必須。コマンド文字列は書かない）
 //   mergeRes     配列。allowMerge の serve だけに渡される正規表現（source）。1 つでも一致したコマンドは素通し
 //                （merge-exec の完全一致の 1 形。正本は runner/lib/guard.mjs の MERGE_EXEC_COMMAND）。下の「merge-exec の対応づけ」も参照
-//   markerPath   読み込まれた目印を書くファイル。nonce と組で、アダプタが start で確かめる
+//   markerPath   読み込まれた目印を書くファイル。setup のたびに `{"nonce","directory"}` を 1 行（JSONL）追記する。
+//                plugin は location ごとに読み込まれるため、アダプタは start と、各セッションの location（worktree）で確かめる
 //   nonce        serve ごとの乱数
+//   callLog      shell の呼び出しを受けるたびに sessionID を 1 行追記するファイル（省略可）。アダプタが終了時に、
+//                セッションの shell の実行件数と突き合わせる（ガードを通っていない実行の検知。監査 e670648 の MEDIUM-7）
 //   protectedPaths  配列。書き込みを拒否する絶対パス（完全一致と配下）。アダプタが ~/.config/opencode・ランのログと目印を渡す。
 //                guardScript と plugin 自身の置き場は options に無くても常に保護する（下の「保護」）
 //
@@ -54,7 +57,7 @@
 // fail-closed: 設定の不備・ガードが無い・起動できない・時間切れ・異常終了・結果行なし・契約外の出力はすべて deny。
 // ガードとの契約は agent-guard.sh 冒頭が正典: stdin {"command", "subagent"}、stdout 最終行 `AGENT_GUARD_RESULT allow|deny <理由>`。
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, realpathSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, posix, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -85,7 +88,7 @@ const realOr = (p) => { try { return realpathSync(p) } catch { return resolve(p)
 
 /** 保護する絶対パスの一覧（畳み込み済み）。guardScript・plugin 自身・自分のログと目印は常に含める。 */
 function protectedRoots(opts) {
-  const list = [opts.guardScript, PLUGIN_SELF, opts.log, ...(typeof opts.markerPath === 'string' ? [opts.markerPath] : []), ...opts.protectedPaths]
+  const list = [opts.guardScript, PLUGIN_SELF, opts.log, ...[opts.markerPath, opts.callLog].filter((x) => typeof x === 'string' && x !== ''), ...opts.protectedPaths]
   return [...new Set(list.flatMap((p) => [resolve(p), realOr(p)]).map(fold))]
 }
 
@@ -185,7 +188,8 @@ function readOptions(options) {
   }
   const protectedPaths = Array.isArray(o.protectedPaths) ? o.protectedPaths : []
   if (!protectedPaths.every((p) => typeof p === 'string' && isAbsolute(p))) return null
-  return { guardScript: o.guardScript, log: o.log, mergeRes, markerPath: o.markerPath, nonce: o.nonce, protectedPaths }
+  if (o.callLog !== undefined && (typeof o.callLog !== 'string' || !isAbsolute(o.callLog))) return null
+  return { guardScript: o.guardScript, log: o.log, mergeRes, markerPath: o.markerPath, nonce: o.nonce, protectedPaths, callLog: o.callLog ?? null }
 }
 
 function judge(guardScript, command, timeoutMs) {
@@ -209,6 +213,10 @@ function beforeTool(opts, binds, env, event) {
   if (!event || typeof event !== 'object') reject('deny-bad-event', 'iit-runner: 対象を解釈できないため拒否した')
   const key = bindKey(event.sessionID, event.messageID, event.id)
   if (key) binds.delete(key)
+  // 件数の突き合わせ用。判定の前に、拒否する呼び出しも含めて記録する（拒否された呼び出しもメッセージに tool part として残る）
+  if (event.tool === 'shell' && opts.callLog) {
+    try { appendFileSync(opts.callLog, `${typeof event.sessionID === 'string' ? event.sessionID.replace(/\s/g, '') : '-'}\n`) } catch { /* 記録の失敗は件数不足としてアダプタが拒否する */ }
+  }
   const command = event.input?.command
   if (typeof command !== 'string') {
     if (event.tool === 'shell') reject('deny-bad-event', 'iit-runner: 対象を解釈できないため拒否した')
@@ -271,7 +279,7 @@ export default {
       })
     }
     // 目印は全文の判定まで登録できたときだけ書く（書かなければアダプタが prereq で止める）
-    if (opts && toolHook && opts.markerPath && opts.nonce) writeFileSync(opts.markerPath, String(opts.nonce))
+    if (opts && toolHook && opts.markerPath && opts.nonce) appendFileSync(opts.markerPath, `${JSON.stringify({ nonce: String(opts.nonce), directory: dir ?? null })}\n`)
     await ctx.permission.hook('evaluate', async (event) => {
       try {
         if (!opts) return deny(event, 'iit-runner: plugin の設定が不正なため拒否した')

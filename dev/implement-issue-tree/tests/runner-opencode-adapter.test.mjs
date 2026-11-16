@@ -66,7 +66,9 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.deepEqual(o.mergeRes, [], '通常用は merge の素通しを持たない')
     assert.ok(existsSync(o.guardScript) && /agent-guard\.sh$/.test(o.guardScript))
     assert.match(o.nonce, /^[0-9a-f]{32}$/)
-    assert.equal(readFileSync(o.markerPath, 'utf8'), o.nonce, 'plugin が目印を書いた')
+    const marks = readFileSync(o.markerPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    assert.deepEqual(marks, [{ nonce: o.nonce, directory: t.mainRoot }], 'plugin が mainRoot の location で目印を書いた')
+    assert.equal(o.callLog, join(dirname(o.markerPath), 'opencode-calls-normal.log'))
 
     await t.adapter.run(t.req())
     assert.equal(starts(t.records()).length, 1, 'allowMerge でない run では merge 用 serve を起動しない')
@@ -262,4 +264,37 @@ test('deleteSessions が false なら削除しない', async () => {
   await t.adapter.run(t.req())
   await t.adapter.close()
   assert.equal(t.records().some((r) => r.ev === 'delete'), false)
+})
+
+// MEDIUM-7（監査 e670648）: plugin は location ごとに読み込まれ（v2.2.7 の実測: その location への最初の GET /api/agent か
+// prompt で setup が走り、session.create では走らない）、start の確認は serve の cwd の 1 か所だけだった。
+test('目印: session.create の後でその location の目印を確かめ、無ければ走らせない', async () => {
+  const t = setup({ env: { FAKE_OC_NOPLUGIN_AT: 'wt-noplugin' } })
+  await t.adapter.start()
+  try {
+    const ok = join(t.root, 'wt-ok')
+    mkdirSync(ok)
+    const out = await t.adapter.run(t.req({ cwd: ok }))
+    assert.match(out.text, /^reply-1:/)
+    const bad = join(t.root, 'wt-noplugin')
+    mkdirSync(bad)
+    const e = await kindOf(t.adapter.run(t.req({ cwd: bad, prompt: 'must not run' })))
+    assert.equal(e.kind, 'prereq')
+    assert.match(e.message, /plugin/)
+    assert.equal(t.records().some((r) => r.ev === 'http' && r.path.endsWith('/prompt') && r.body?.text === 'must not run'), false, 'prompt を送らない')
+  } finally { await t.adapter.close() }
+})
+
+test('件数照合: plugin を通っていない shell の実行があれば denied（ガードの欠落）。通っていれば成功', async () => {
+  const t = setup()
+  await t.adapter.start()
+  try {
+    const out = await t.adapter.run(t.req({ prompt: '[[SHELL:3]] ok' }))
+    assert.match(out.text, /^reply-1:/)
+    const r = t.req({ prompt: '[[SHELL:1]] [[SHELL_UNHOOKED:1]] x' })
+    const e = await kindOf(t.adapter.run(r))
+    assert.equal(e.kind, 'denied')
+    assert.match(e.message, /ガードの欠落/)
+    assert.match(readFileSync(join(r.logDir, 'error.txt'), 'utf8'), /^denied:/)
+  } finally { await t.adapter.close() }
 })
