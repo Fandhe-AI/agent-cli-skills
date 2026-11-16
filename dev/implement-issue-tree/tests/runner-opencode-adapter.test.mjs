@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { SKILL_DIR } from './lib/paths.mjs'
-import { MERGE_RES, createAdapter, opencodeConfigDirs, protectRules } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
+import { MERGE_RES, createAdapter, credentialReadRules, opencodeConfigDirs, protectRules } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 import { MERGE_EXEC_COMMAND, codexRules, mergeExecCommandFor, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 
@@ -333,4 +333,32 @@ test('merge 用 serve: req.merge が null・不正なら allowMerge として扱
     }
     assert.equal(starts(t.records()).length, 1, '通常用の serve だけ')
   } finally { await t.adapter.close() }
+})
+
+// LOW-9（監査 e670648）: read tool で認証ファイルを読めないようにする（中身は読まない。パスだけを決める）
+test('認証ファイル: gh の設定・Codex の auth.json・OpenCode の認証（auth.json・opencode.db）への read を permissions と policies で拒否する', async () => {
+  const home = join(tmpdir(), 'iit-oc-home-y')
+  const t = setup({ env: { HOME: home, XDG_CONFIG_HOME: '', XDG_DATA_HOME: '', GH_CONFIG_DIR: '', CODEX_HOME: '', OPENCODE_DB: '/nonexistent-iit/custom.db' } })
+  await t.adapter.start()
+  try {
+    const { config: cfg } = starts(t.records())[0]
+    const readDeny = cfg.permissions.filter((r) => r.action === 'read' && r.effect === 'deny').map((r) => r.resource)
+    const readPolicy = cfg.policies.filter((r) => r.action === 'tool.use' && r.resource.startsWith('read:') && r.effect === 'deny').map((r) => r.resource.slice(5))
+    for (const want of [
+      join(home, '.config', 'gh'), `${join(home, '.config', 'gh')}/*`,
+      join(home, '.codex', 'auth.json'),
+      join(home, '.local', 'share', 'opencode', 'auth.json'),
+      `${join(home, '.local', 'share', 'opencode', 'opencode.db')}*`,
+      '/nonexistent-iit/custom.db*',
+    ]) {
+      assert.ok(readDeny.includes(want), `permissions: ${want}`)
+      assert.ok(readPolicy.includes(want), `policies: ${want}`)
+    }
+  } finally { await t.adapter.close() }
+})
+
+test('credentialReadRules: GH_CONFIG_DIR・XDG_CONFIG_HOME・CODEX_HOME・XDG_DATA_HOME を反映する', () => {
+  const res = credentialReadRules({ HOME: '/h', GH_CONFIG_DIR: '/g', CODEX_HOME: '/c', XDG_DATA_HOME: '/d' }).permissions.map((r) => r.resource)
+  for (const want of ['/g', '/g/*', '/c/auth.json', '/d/opencode/auth.json', '/d/opencode/opencode.db*']) assert.ok(res.includes(want), want)
+  assert.ok(credentialReadRules({ HOME: '/h', XDG_CONFIG_HOME: '/x' }).permissions.some((r) => r.resource === '/x/gh/*'))
 })

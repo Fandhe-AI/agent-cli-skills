@@ -17,6 +17,9 @@
 //   - ガードの置き場（agent-guard.sh・ランナー専用 plugin・OpenCode の利用者設定ディレクトリ・`.opencode/(hooks|plugins?)/`・
 //     `opencode.json(c)`）への edit を permissions と policies の両方で拒否する（protectRules。guard.opencodeRules の結果に足す）。
 //     同じパスは plugin の options.protectedPaths にも渡し、plugin が edit と shell からの書き込みを拒否する（plugin 冒頭の「保護」）。
+//   - 認証ファイル（gh の設定ディレクトリ・Codex の auth.json・OpenCode の auth.json と opencode.db）への read を
+//     permissions と policies で拒否する（credentialReadRules。監査 e670648 の LOW-9）。shell からの読み出しは agent-guard.sh の
+//     credential-read が止める。パスは env から決めるだけで、中身は読まない。
 //   - plugin の読み込みは目印で確かめる。plugin は setup のたびに serve ごとの nonce と location を目印ファイルへ 1 行書き、
 //     アダプタがそれを読む（実機で GET /api/plugin は空・/shell は permission を通らず、他に確かめる手段が無い）。plugin は
 //     location ごとに読み込まれる（v2.2.7 の実測: その location への最初の GET /api/agent か prompt で setup が走り、
@@ -125,6 +128,30 @@ export function protectRules({ files, dirs }) {
   }
 }
 
+/**
+ * 認証ファイルへの read の拒否（permissions と policies）。ディレクトリは完全一致と配下、opencode.db は -wal / -shm も含める。
+ * パスは書かれたままの形と realpath の両方（realpath はパスの解決だけで、ファイルの中身は読まない）。
+ * @param {Record<string, string | undefined>} env
+ */
+export function credentialReadRules(env) {
+  const home = env.HOME || homedir()
+  const ghDir = env.GH_CONFIG_DIR || join(env.XDG_CONFIG_HOME || join(home, '.config'), 'gh')
+  const codexAuth = join(env.CODEX_HOME || join(home, '.codex'), 'auth.json')
+  const ocData = join(env.XDG_DATA_HOME || join(home, '.local', 'share'), 'opencode')
+  const both = (p) => uniq([resolve(p), realOr(p)])
+  const resources = uniq([
+    ...both(ghDir).flatMap((d) => [d, `${d}/*`]),
+    ...both(codexAuth),
+    ...both(join(ocData, 'auth.json')),
+    ...both(join(ocData, 'opencode.db')).map((f) => `${f}*`),
+    ...(env.OPENCODE_DB ? both(env.OPENCODE_DB).map((f) => `${f}*`) : []),
+  ])
+  return {
+    permissions: resources.map((resource) => ({ action: 'read', resource, effect: 'deny' })),
+    policies: resources.map((resource) => ({ action: 'tool.use', resource: `read:${resource}`, effect: 'deny' })),
+  }
+}
+
 /** permissions / policies を連結する（後勝ちのため、足す側を後ろに置く）。 */
 const mergeRules = (...rs) => ({ permissions: rs.flatMap((r) => r.permissions), policies: rs.flatMap((r) => r.policies) })
 
@@ -157,7 +184,7 @@ export function createAdapter(cfg) {
     ensureGuardScript()
     const allowMerge = merge !== null
     const configDirs = opencodeConfigDirs(baseEnv)
-    const rules = mergeRules(cfg.guard.opencodeRules({ allowMerge }), protectRules({ files: [guardScript], dirs: [PLUGIN_DIR, ...configDirs] }))
+    const rules = mergeRules(cfg.guard.opencodeRules({ allowMerge }), protectRules({ files: [guardScript], dirs: [PLUGIN_DIR, ...configDirs] }), credentialReadRules(baseEnv))
     const port = await freePort()
     const password = randomBytes(16).toString('hex')
     mkdirSync(cfg.runDir, { recursive: true })
