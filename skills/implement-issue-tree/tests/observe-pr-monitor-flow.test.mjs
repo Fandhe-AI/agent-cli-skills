@@ -89,7 +89,7 @@ async function run(monitorReply, { args = ARGS, mergeExecReply = () => null } = 
 
 const monitorCalls = (calls) => calls.filter((c) => /^merge:#\d+(:retry)?$/.test(c.opts.label))
 const timeoutWith = (prompt, extra) => ({ state: 'timeout', summary: '監視上限', headSha: SHA, ...extra(nonceOf(prompt)) })
-const REROUTED = /check-run 0 件のまま timeout を返した。再監視せず conflicting/
+const REROUTED = /check-run 0 件のまま timeout を返した。conflicting/
 const NOT_ADOPTED = /監視エージェントの checksTotal（0）を採用しない/
 
 test('結合: 正しい封筒つきの checksTotal 0 の timeout は conflicting へ再判定される（封筒の total が根拠）', async () => {
