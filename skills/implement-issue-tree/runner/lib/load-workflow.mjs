@@ -15,9 +15,9 @@
 //
 // 呼び出し元: runner/run.mjs（agent-host.mjs が作った agent を渡す）と、テスト（偽 agent を渡す）。
 // 関数を評価するだけで実行はしない。実行（run）は呼び出し側が引数を渡して行う。
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -47,15 +47,43 @@ export function stripMeta(text) {
   return body
 }
 
+/** スキルディレクトリ（runner の 1 つ上）。path 指定の生成物はこの中に限る。 */
+const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+
 /**
  * 生成物を読み込み、評価できる形にする。
  * 返す run は呼ぶたびに本体を新しく実行する（状態は引数と agent の閉包だけ）。
  * `bytes`・`sha256` は起動ログと鮮度の記録に使う（バイト列そのものの SHA-256）。
- * @param {{ path?: string }} [options]
+ *
+ * 信頼境界: 読み込んだ本体は AsyncFunction でランナーのプロセス内で評価される（コードの実行になる）。
+ *   - `path` を指定したときは `expectedSha256`（64 桁 hex）が必須で、バイト列の SHA-256 が一致しなければ
+ *     評価の前に例外にする。さらに realpath がスキルディレクトリの中でなければ拒否する
+ *     （シンボリックリンクで外へ出る形も拒否。テストが別の場所の生成物を読むときだけ `allowOutsideSkillDir: true`）。
+ *   - `path` を省略した既定（配布物の生成物）は、期待値を実行時に得られない（鮮度の照合 build-workflow --check は
+ *     開発側 dev/ の機構で、配布物の外にあるため）。そのため評価はするが SHA-256 を返して呼び出し元が記録する。
+ *     `expectedSha256` を渡したときは既定パスでも照合する。
+ * @param {{ path?: string, expectedSha256?: string, allowOutsideSkillDir?: boolean }} [options]
  * @returns {{ path: string, bytes: number, sha256: string, run: (args: object, agent: Function, log: Function, phase: Function) => Promise<any> }}
  */
-export function loadWorkflow({ path = DEFAULT_WORKFLOW_PATH } = {}) {
+export function loadWorkflow({ path, expectedSha256, allowOutsideSkillDir = false } = {}) {
+  const explicit = path !== undefined
+  if (explicit && !/^[0-9a-f]{64}$/.test(expectedSha256 ?? '')) {
+    throw new Error('path を指定するときは expectedSha256（小文字 64 桁 hex）が必須')
+  }
+  if (!explicit) path = DEFAULT_WORKFLOW_PATH
+  if (explicit) {
+    // 検査した実体をそのまま読む（検査と読み込みの間でリンクを差し替えられないようにする）
+    const real = realpathSync(path)
+    if (!allowOutsideSkillDir && !real.startsWith(realpathSync(SKILL_DIR) + sep)) {
+      throw new Error('生成物のパスがスキルディレクトリの外にある')
+    }
+    path = real
+  }
   const raw = readFileSync(path)
+  const sha256 = createHash('sha256').update(raw).digest('hex')
+  if (expectedSha256 !== undefined && sha256 !== expectedSha256) {
+    throw new Error('生成物の SHA-256 が期待値と一致しない（評価しない）')
+  }
   const text = raw.toString('utf8')
   const body = stripMeta(text)
   // 評価（構文解析）はここで 1 度だけ行い、構文エラーは読み込み時点で表に出す。呼び出しは run で行う。
@@ -63,7 +91,7 @@ export function loadWorkflow({ path = DEFAULT_WORKFLOW_PATH } = {}) {
   return {
     path,
     bytes: raw.length,
-    sha256: createHash('sha256').update(raw).digest('hex'),
+    sha256,
     /**
      * args はパース済みのオブジェクトで渡す（文字列だと生成物は別の分岐に入る）。
      * agent / log / phase は Workflow の注入グローバルと同じ呼び出し形（agent は (prompt, opts) → Promise）。

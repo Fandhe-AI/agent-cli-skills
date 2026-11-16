@@ -6,7 +6,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync, symlinkSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { join } from 'node:path'
 import { loadWorkflow, stripMeta, DEFAULT_WORKFLOW_PATH } from '../../../skills/implement-issue-tree/runner/lib/load-workflow.mjs'
 import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
@@ -65,4 +67,56 @@ test('dryRun の返却値は、src を評価した stub-run と生成物を評�
   const src = await runScript({ args, leaves: [2, 3, 4], target: 'src' })
   const dist = await runScript({ args, leaves: [2, 3, 4], target: 'dist' })
   assert.deepEqual(dist.result, src.result)
+})
+
+// path 指定の読み込み（評価はコードの実行になるため、期待 SHA-256 とスキルディレクトリ内の制約を課す）
+const GOOD = 'export const meta={a:1}\nreturn args.x'
+const sha = (t) => createHash('sha256').update(t).digest('hex')
+function tmpWorkflow(text) {
+  const dir = trackTmp(realpathSync(mkdtempSync(join(tmpdir(), 'iit-runner-load-'))))
+  const file = join(dir, 'w.js')
+  writeFileSync(file, text)
+  return { dir, file }
+}
+
+test('path を指定するときは expectedSha256 が必須（無い・形が不正なら評価せず例外）', () => {
+  const { file } = tmpWorkflow(GOOD)
+  for (const bad of [undefined, '', 'abc', sha(GOOD).toUpperCase(), `${sha(GOOD)}0`]) {
+    assert.throws(() => loadWorkflow({ path: file, expectedSha256: bad, allowOutsideSkillDir: true }), /expectedSha256/, String(bad))
+  }
+})
+
+test('path 指定: SHA-256 が一致しなければ評価せず例外、一致すれば読める', async () => {
+  const { file } = tmpWorkflow(GOOD)
+  assert.throws(() => loadWorkflow({ path: file, expectedSha256: '0'.repeat(64), allowOutsideSkillDir: true }), /一致しない/)
+  const wf = loadWorkflow({ path: file, expectedSha256: sha(GOOD), allowOutsideSkillDir: true })
+  assert.equal(wf.sha256, sha(GOOD))
+  assert.equal(await wf.run({ x: 7 }, () => {}, () => {}, () => {}), 7)
+})
+
+test('path 指定: スキルディレクトリの外は、テスト用フラグが無ければ拒否（SHA が一致していても）', () => {
+  const { file } = tmpWorkflow(GOOD)
+  assert.throws(() => loadWorkflow({ path: file, expectedSha256: sha(GOOD) }), /スキルディレクトリの外/)
+})
+
+test('path 指定: スキルディレクトリ内のシンボリックリンクが外を指していても拒否（realpath で判定）', () => {
+  const { file } = tmpWorkflow(GOOD)
+  const link = join(DEFAULT_WORKFLOW_PATH, '..', `.link-test-${process.pid}.js`)
+  symlinkSync(file, link)
+  try {
+    assert.throws(() => loadWorkflow({ path: link, expectedSha256: sha(GOOD) }), /スキルディレクトリの外/)
+  } finally {
+    rmSync(link, { force: true })
+  }
+})
+
+test('path 指定: スキルディレクトリ内の実体は読める（既定の生成物を明示パス + 期待値で）', () => {
+  const raw = readFileSync(DEFAULT_WORKFLOW_PATH)
+  const wf = loadWorkflow({ path: DEFAULT_WORKFLOW_PATH, expectedSha256: createHash('sha256').update(raw).digest('hex') })
+  assert.equal(wf.bytes, raw.length)
+})
+
+test('既定パス: 期待値が無くても読め（SHA-256 を返して記録する）、expectedSha256 を渡せば照合する', () => {
+  assert.match(loadWorkflow().sha256, /^[0-9a-f]{64}$/)
+  assert.throws(() => loadWorkflow({ expectedSha256: '0'.repeat(64) }), /一致しない/)
 })

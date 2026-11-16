@@ -2,150 +2,178 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { MERGE_EXEC_COMMAND, DENY_FORMS, classify, opencodeRules, splitCommand } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
+import { spawn } from 'node:child_process'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { MERGE_EXEC_COMMAND, DENY_FORMS, activeForms, codexRules, expandPrefix, opencodePatterns, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 import { buildPreamble, buildRepairPrompt, buildSchemaInstruction, buildWorktreeNotice, composePrompt } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
 import { DEFAULT_CONFIG_PATH, IIT_EFFORTS, IIT_MODELS, loadConfig, resolveModel, resolveTimeoutMs, validateConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 import { extractLastJson } from '../../../skills/implement-issue-tree/runner/lib/extract-json.mjs'
 
 // ---------------------------------------------------------------------------
-// guard
+// guard（deny する形の一覧と、そこから作る Codex rules / OpenCode permissions）
+//
+// コマンドの判定は配布済みの agent-guard.sh が行う。ここでは一覧の各形を、Codex の PreToolUse hook の
+// アダプタ（codex-pretooluse.sh）経由で実際に起動した agent-guard.sh に渡し、deny になることを確かめる。
+// 入力は JSON を標準入力に渡すだけで、対象のコマンドは実行しない。
 // ---------------------------------------------------------------------------
 
 const SHA = 'a'.repeat(40)
 const MERGE_EXEC = `HEAD_SHA="${SHA}"; gh pr merge 12 --squash --delete-branch --match-head-commit "$HEAD_SHA"`
 
-// [コマンド, 拒否する形]。マージ・承認の素の形と、bash -c・env・eval・入れ子・クォート分割・グローバルフラグの包みを含む
-const DENY_TABLE = [
-  ['gh pr merge 1 --squash', 'pr-merge'],
-  ['gh pr merge 1', 'pr-merge'],
-  ["bash -c 'gh pr merge 1 --squash'", 'pr-merge'],
-  ['sh -c "gh pr merge 1"', 'pr-merge'],
-  ["bash -lc 'gh pr merge 1'", 'pr-merge'],
-  ["bash -c \"bash -c 'gh pr merge 1'\"", 'pr-merge'],
-  ["env GH_HOST=x bash -c 'gh pr merge 1'", 'pr-merge'],
-  ["env -S 'gh pr merge 1'", 'pr-merge'],
-  ["eval 'gh pr merge 1'", 'pr-merge'],
-  ['echo ok && gh pr merge 1', 'pr-merge'],
-  ['echo ok; gh pr merge 1', 'pr-merge'],
-  ['(gh pr merge 1)', 'pr-merge'],
-  ['x=$(gh pr merge 1)', 'pr-merge'],
-  ["gh pr 'mer'ge 1", 'pr-merge'],
-  ['gh -R o/r pr merge 1', 'pr-merge'],
-  ['gh --repo o/r pr merge 1', 'pr-merge'],
-  ['/usr/local/bin/gh pr merge 1', 'pr-merge'],
-  ['command gh pr merge 1', 'pr-merge'],
-  [`HEAD_SHA="${SHA}"; gh pr merge 12 --squash --delete-branch --match-head-commit "$HEAD_SHA"`, 'pr-merge'], // allowMerge なしでは拒否
-  ['gh pr review 1 --approve', 'pr-approve'],
-  ['gh pr review 1 -a', 'pr-approve'],
-  ['gh pr review 1 -a -b ok', 'pr-approve'],
-  ["bash -c 'gh pr review 1 --approve'", 'pr-approve'],
-  ['gh api -X PUT repos/o/r/pulls/1/merge', 'api-merge'],
-  ['gh api repos/o/r/pulls/1/merge -X PUT', 'api-merge'],
-  ["gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'", 'api-merge'],
-  ["gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'", 'api-merge'],
-  ["gh api graphql -f query='mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }'", 'api-review'],
-  ['gh api graphql --input q.json', 'api-review'],
-  ['gh api repos/o/r/pulls/1/reviews -f event=APPROVE', 'api-review'],
-  ['gh api repos/o/r/pulls/1/reviews', 'api-review'], // メソッドが読めない形は拒否側に倒す（GET を明示した形だけ通す）
-  ['gh api -X POST repos/o/r/pulls/1/reviews', 'api-review'],
-  ['gh auth token', 'auth-token'],
-  ['gh auth status --show-token', 'auth-token'],
-  ['gh auth status -t', 'auth-token'],
-  ['printenv GH_TOKEN', 'auth-token'],
-  ['cat ~/.config/gh/hosts.yml', 'auth-file'],
-  ["bash -c 'cat ~/.codex/auth.json'", 'auth-file'],
-  ['git push --force origin x', 'git-force-push'],
-  ['git push -f origin x', 'git-force-push'],
-  ['git push --force-with-lease origin x', 'git-force-push'],
-  ['git push origin +x:y', 'git-force-push'],
-  ['git commit --no-verify -m x', 'git-no-verify'],
-  ['git commit -n -m x', 'git-no-verify'],
-  ['git push --no-verify', 'git-no-verify'],
+const HOOKS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'init-codex', 'assets', 'hooks')
+
+// Codex の PreToolUse 入力。agent_id があれば subagent=true（ランナーのエージェントはこの形）。
+function codexHook(command, { subagent = true } = {}) {
+  return new Promise((resolve, reject) => {
+    const p = spawn('bash', [join(HOOKS, 'codex-pretooluse.sh')], { stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = ''
+    p.stdout.on('data', (d) => { out += d })
+    p.on('error', reject)
+    p.on('close', (code) => {
+      let decision = 'allow'
+      if (out.trim() !== '') decision = JSON.parse(out).hookSpecificOutput.permissionDecision
+      resolve({ code, decision })
+    })
+    p.stdin.on('error', () => {})
+    p.stdin.end(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, ...(subagent ? { agent_id: 'agent-1' } : {}) }))
+  })
+}
+
+// 形の id ごとに、agent-guard.sh が deny する例。バイパス形（演算子・制御構文・ラッパー・リダイレクト・オプションの位置）を含む。
+const GUARD_DENY = {
+  'pr-merge': [
+    'gh pr merge 1 --squash', 'gh pr merge 1', "bash -c 'gh pr merge 1'", 'echo ok && gh pr merge 1', '(gh pr merge 1)',
+    'gh -R o/r pr merge 1', 'gh pr -Rowner/repo merge 1', '/usr/local/bin/gh pr merge 1', 'command gh pr merge 1',
+    'if true; then gh pr merge 1; fi', 'for i in 1; do gh pr merge $i; done', '{ gh pr merge 1; }', '>/dev/null gh pr merge 1',
+    'env -u X gh pr merge 1', 'command -p gh pr merge 1', 'nice -n 10 gh pr merge 1', 'timeout 10 gh pr merge 1',
+  ],
+  'pr-merge-bypass': ['gh pr merge 1 --admin', 'gh pr merge 1 --auto --squash'],
+  'pr-approve': ['gh pr review 1 --approve', 'gh pr review 1 -a', "bash -c 'gh pr review 1 --approve'", "gh api repos/o/r/pulls/1/reviews -f event=APPROVE -f body='-X GET'"],
+  'api-merge': [
+    'gh api -X PUT repos/o/r/pulls/1/merge', 'gh api repos/o/r/pulls/1/merge -X PUT', 'gh api -X POST repos/o/r/merges', 'gh api repos/o/r/merges -f base=main -f head=x',
+    "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { mergeBranch(input:{}) { clientMutationId } }'",
+  ],
+  'api-review': [
+    "gh api graphql -f query='mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }'",
+    'gh api graphql --input q.json', 'gh api graphql --input=q.json', 'gh api graphql -Fquery=@q', 'gh api repos/o/r/pulls/1/reviews -f event=APPROVE',
+  ],
+  'gh-alias-extension': ["gh alias set m 'pr merge'", 'gh alias import a.yml', 'gh extension install o/r', 'gh extension exec x'],
+  'git-force-push': [
+    'git push --force origin x', 'git push -f origin x', 'git push --force-with-lease origin x', 'git push origin +x:y',
+    'git -C /repo push --force origin x', 'git push -fu origin x', 'git push --force-with origin x',
+  ],
+  'git-no-verify': ['git commit --no-verify -m x', 'git commit -n -m x', 'git push --no-verify', 'git commit -nm x', 'git -c core.hooksPath=/dev/null commit -m x'],
+}
+
+// agent-guard.sh が（subagent=true でも）まだ止めない形。配布物のガードの穴で、別 PR で agent-guard.sh を直す。
+// rules / permissions だけが止める。ガードが直ると下のテストが落ちるので、その時点でこの表から GUARD_DENY へ移す。
+const GUARD_GAPS = {
+  'api-merge': ["gh api graphql -f query='mutation { enqueuePullRequest(input:{}) { clientMutationId } }'"],
+  'auth-token': ['gh auth token', 'gh auth status --show-token', 'printenv GH_TOKEN', 'printenv'],
+  'git-credential': ['git credential fill'],
+  'auth-file': ['cat ~/.config/gh/hosts.yml', 'cat ~/.codex/auth.json', 'cd ~/.config/gh && cat hosts.yml', 'base64 ~/.config/gh/hosts.yml'],
+}
+
+const GUARD_ALLOW = [
+  'gh pr view 1 --json state', 'gh pr create --title t --body-file b.md', 'gh api -X GET repos/o/r/pulls/1/reviews', 'gh pr checks 1',
+  'git push origin feat/1-x', 'git commit -m "docs: マージの説明"', 'git status', "bash -c 'git status && gh pr view 1'", 'ls -la', 'node --test x.mjs',
 ]
 
-const ALLOW_TABLE = [
-  'gh pr view 1 --json state',
-  'gh pr create --title t --body-file b.md',
-  'gh api -X GET repos/o/r/pulls/1/reviews',
-  'gh pr review 1 --comment --body x',
-  'gh pr checks 1',
-  'git push origin feat/1-x',
-  'git commit -m "docs: マージの説明"',
-  'git status',
-  "bash -c 'git status && gh pr view 1'",
-  'echo "gh pr merge"', // 引用符の中の文字列は実行ではない
-  'ls -la',
-  'node --test x.mjs',
-]
-
-test('guard: 拒否する形の表（bash -c・env・eval・入れ子・クォート分割・括弧・絶対パスの包みを含む）', () => {
-  for (const [cmd, form] of DENY_TABLE) {
-    assert.deepEqual(classify(cmd), { decision: 'deny', form }, cmd)
+test('guard: 一覧の各形の例は、実際に起動した agent-guard.sh（Codex hook 経由・subagent=true）で deny になる', async () => {
+  const rows = Object.entries(GUARD_DENY).flatMap(([id, cmds]) => cmds.map((cmd) => [id, cmd]))
+  const results = await Promise.all(rows.map(async ([id, cmd]) => [id, cmd, await codexHook(cmd)]))
+  for (const [id, cmd, r] of results) {
+    assert.equal(r.decision, 'deny', `${id}: ${cmd}`)
+    assert.equal(r.code, 0, `${id}: ${cmd}`)
   }
 })
 
-test('guard: 通す形の表（誤検出しない）', () => {
-  for (const cmd of ALLOW_TABLE) assert.deepEqual(classify(cmd), { decision: 'allow' }, cmd)
+test('guard: 通常の作業コマンドは agent-guard.sh で allow（誤検出しない）', async () => {
+  const results = await Promise.all(GUARD_ALLOW.map(async (cmd) => [cmd, await codexHook(cmd)]))
+  for (const [cmd, r] of results) assert.equal(r.decision, 'allow', cmd)
 })
 
-test('guard: merge-exec の完全一致の 1 形だけが allowMerge で通り、それ以外のマージ系はすべて拒否のまま', () => {
-  assert.match(MERGE_EXEC, MERGE_EXEC_COMMAND)
-  assert.deepEqual(classify(MERGE_EXEC, { allowMerge: true }), { decision: 'allow' })
-  assert.deepEqual(classify(MERGE_EXEC, { allowMerge: false }).decision, 'deny')
-  const variants = [
-    `${MERGE_EXEC}; gh pr review 12 --approve`,
-    `${MERGE_EXEC} && gh pr review 12 --approve`,
-    `${MERGE_EXEC}\ngh pr review 12 --approve`,
-    `echo x; ${MERGE_EXEC}`,
-    `bash -c '${MERGE_EXEC}'`,
-    `HEAD_SHA="${'b'.repeat(39)}"; gh pr merge 12 --squash --delete-branch --match-head-commit "$HEAD_SHA"`,
-    `HEAD_SHA="${SHA}"; gh pr merge 12 --merge --delete-branch --match-head-commit "$HEAD_SHA"`,
-    `HEAD_SHA="${SHA}"; gh pr merge 12 --squash --match-head-commit "$HEAD_SHA"`,
-    `HEAD_SHA="${SHA}"; gh pr merge 12 --squash --delete-branch --match-head-commit "$HEAD_SHA" --admin`,
-    'gh pr merge 12 --squash',
-    `HEAD_SHA="${SHA}"; gh pr merge 012 --squash --delete-branch --match-head-commit "$HEAD_SHA"`,
-    `HEAD_SHA="${SHA}"; gh pr merge 12 --squash --delete-branch --match-head-commit "$HEAD_SHA"\n`,
-  ]
-  for (const cmd of variants) assert.equal(classify(cmd, { allowMerge: true }).decision, 'deny', cmd)
-  // allowMerge でも承認・認証・force は通らない
-  for (const cmd of ['gh pr review 1 --approve', 'gh auth token', 'git push --force origin x']) {
-    assert.equal(classify(cmd, { allowMerge: true }).decision, 'deny', cmd)
-  }
+test('guard: git の規則は subagent でなくても有効で、マージ系は subagent のときだけ止まる（ランナーは常に subagent=true で呼ぶ前提）', async () => {
+  assert.equal((await codexHook('git push --force origin x', { subagent: false })).decision, 'deny')
+  assert.equal((await codexHook('git commit --no-verify -m x', { subagent: false })).decision, 'deny')
+  assert.equal((await codexHook('gh pr merge 1', { subagent: false })).decision, 'allow')
+  assert.equal((await codexHook('gh pr merge 1', { subagent: true })).decision, 'deny')
 })
 
-test('guard: 入れ子が深すぎる・文字列でない入力は拒否側（fail-closed）', () => {
-  let cmd = 'gh pr view 1'
-  for (let i = 0; i < 12; i++) cmd = `bash -c ${JSON.stringify(cmd)}`
-  assert.deepEqual(classify(cmd), { decision: 'deny', form: 'nesting-limit' })
-  for (const bad of [undefined, null, 5, {}]) assert.deepEqual(classify(bad), { decision: 'deny', form: 'bad-input' })
+test('guard: agent-guard.sh がまだ止めない形（配布物のガードの穴）の現状を固定する。穴を塞いだらこの表を GUARD_DENY へ移す', async () => {
+  const rows = Object.entries(GUARD_GAPS).flatMap(([id, cmds]) => cmds.map((cmd) => [id, cmd]))
+  const results = await Promise.all(rows.map(async ([id, cmd]) => [id, cmd, await codexHook(cmd)]))
+  for (const [id, cmd, r] of results) assert.equal(r.decision, 'allow', `${id}: ${cmd}（ガードが直った。GUARD_DENY へ移す）`)
 })
 
-test('guard: splitCommand は区切りで分け、クォートを外して連結する', () => {
-  assert.deepEqual(splitCommand("a b; c 'd e' \"f\\\"g\" h'i'j && k | l"), [['a', 'b'], ['c', 'd e', 'f"g', 'hij'], ['k'], ['l']])
-  assert.deepEqual(splitCommand(''), [])
-})
-
-test('guard: DENY_FORMS は id が一意で、mergeOnly はマージ系だけ。OpenCode のパターンは全形が持つ', () => {
+test('guard: DENY_FORMS の id は一意で、全形が GUARD_DENY か GUARD_GAPS に例を持ち、guardGap の形は GUARD_GAPS に載る', () => {
   const ids = DENY_FORMS.map((f) => f.id)
   assert.equal(new Set(ids).size, ids.length)
-  assert.deepEqual(DENY_FORMS.filter((f) => f.mergeOnly).map((f) => f.id), ['pr-merge', 'api-merge'])
-  for (const f of DENY_FORMS) assert.ok(f.opencode.length > 0, f.id)
-  // 表で拒否する形の id は全部 DENY_FORMS にある
-  const known = new Set([...ids, 'nesting-limit', 'bad-input'])
-  for (const [, form] of DENY_TABLE) assert.ok(known.has(form), form)
+  for (const f of DENY_FORMS) {
+    assert.ok(f.prefixes.length + f.globs.length > 0, `${f.id}: パターンが無い`)
+    assert.ok(GUARD_DENY[f.id] || GUARD_GAPS[f.id], `${f.id}: 例が無い`)
+    assert.equal(Boolean(f.guardGap), Boolean(GUARD_GAPS[f.id]), `${f.id}: guardGap と GUARD_GAPS が食い違う`)
+  }
+  for (const id of [...Object.keys(GUARD_DENY), ...Object.keys(GUARD_GAPS)]) assert.ok(ids.includes(id), id)
+  assert.deepEqual(DENY_FORMS.filter((f) => f.mergeOnly).map((f) => f.id), ['pr-merge'])
+  assert.match(MERGE_EXEC, MERGE_EXEC_COMMAND)
 })
 
-test('guard: opencodeRules は permissions と policies を同じパターンで作り、allowMerge ではマージ系だけを外す', () => {
-  const deny = opencodeRules()
-  const merge = opencodeRules({ allowMerge: true })
-  assert.equal(deny.permissions.length, deny.policies.length)
-  for (const p of deny.permissions) assert.deepEqual(Object.keys(p), ['action', 'resource', 'effect']), assert.equal(p.effect, 'deny')
-  for (const p of deny.policies) assert.match(p.resource, /^shell:/)
-  const res = (rules) => rules.permissions.map((p) => p.resource)
-  assert.ok(res(deny).includes('gh pr merge*'))
-  assert.ok(!res(merge).includes('gh pr merge*'))
-  assert.ok(res(merge).includes('gh pr review*--approve*'), '承認は merge-exec でも拒否')
-  assert.ok(res(merge).includes('gh auth token*'))
+test('guard: 追加した形（/merges・mergeBranch・enqueuePullRequest・gh alias・gh extension）が一覧にある', () => {
+  const all = opencodePatterns().join('\n')
+  for (const needle of ['gh api *merge*', 'gh api *enqueuePullRequest*', 'gh alias set*', 'gh alias import*', 'gh extension install*', 'gh extension exec*', 'gh ext install*']) {
+    assert.ok(all.includes(needle), needle)
+  }
+})
+
+test('guard: opencodeRules は permissions と policies を同じパターンで作る', () => {
+  const rules = opencodeRules()
+  assert.equal(rules.permissions.length, rules.policies.length)
+  for (const p of rules.permissions) assert.deepEqual(Object.keys(p), ['action', 'resource', 'effect']), assert.equal(p.effect, 'deny')
+  for (const p of rules.policies) assert.match(p.resource, /^shell:/)
+  assert.deepEqual(rules.permissions.map((p) => p.resource), opencodePatterns())
+  assert.deepEqual(rules.policies.map((p) => p.resource), opencodePatterns().map((r) => `shell:${r}`))
+})
+
+test('guard: allowMerge では gh pr merge の素の形だけを外し、--admin・--auto・承認・REST/GraphQL のマージ・認証は残す', () => {
+  const deny = opencodePatterns()
+  const merge = opencodePatterns({ allowMerge: true })
+  assert.ok(deny.includes('gh pr merge*') && deny.includes('gh * pr merge*'))
+  assert.ok(!merge.includes('gh pr merge*') && !merge.includes('gh * pr merge*'))
+  for (const keep of ['gh pr merge*--admin*', 'gh pr merge*--auto*', 'gh * pr merge*--admin*', 'gh pr review*--approve*', 'gh api *merge*', 'gh api *enqueuePullRequest*', 'gh auth token*', 'git push --force*', 'gh alias set*']) {
+    assert.ok(merge.includes(keep), keep)
+  }
+  assert.deepEqual(deny.filter((p) => !merge.includes(p)), ['gh pr merge*', 'gh * pr merge*'])
+})
+
+test('guard: Codex rules と OpenCode permissions は同じ一覧から作られ、prefixes の全組み合わせが両方にあり、allowMerge の外し方も同じ', () => {
+  for (const opts of [{}, { allowMerge: true }]) {
+    const codex = codexRules(opts)
+    const oc = opencodePatterns(opts)
+    const forms = activeForms(opts)
+    const argvs = forms.flatMap((f) => f.prefixes.flatMap(expandPrefix))
+    assert.equal((codex.match(/^prefix_rule\(/gm) ?? []).length, forms.flatMap((f) => f.prefixes).length)
+    for (const argv of argvs) {
+      assert.ok(codex.includes(JSON.stringify(argv.join(' '))), `Codex に無い: ${argv.join(' ')}`)
+      assert.ok(oc.includes(`${argv.join(' ')}*`), `OpenCode に無い: ${argv.join(' ')}`)
+    }
+    // globs は OpenCode だけ。Codex には出ない
+    for (const f of forms) for (const g of f.globs) assert.ok(oc.includes(g), g)
+    assert.ok(codex.includes('decision = "forbidden"'))
+    assert.ok(!/decision = "(allow|prompt)"/.test(codex))
+  }
+  const merge = codexRules({ allowMerge: true })
+  assert.ok(codexRules().includes('["gh", "pr", "merge"]'))
+  assert.ok(!merge.includes('["gh", "pr", "merge"]'))
+  assert.ok(merge.includes('["gh", "auth", "token"]'))
+})
+
+test('guard: expandPrefix は選択肢の全組み合わせを展開する', () => {
+  assert.deepEqual(expandPrefix(['git', 'push', ['--force', '-f']]), [['git', 'push', '--force'], ['git', 'push', '-f']])
+  assert.deepEqual(expandPrefix(['gh', ['a', 'b'], ['x', 'y']]).length, 4)
 })
 
 // ---------------------------------------------------------------------------
@@ -271,11 +299,19 @@ test('models: 時間切れは phase ごとの表、無ければ default（ミリ
 // extract-json
 // ---------------------------------------------------------------------------
 
-test('extract-json: 素の JSON・コードフェンス・前後の文章つき・最後のオブジェクトを取り出す', () => {
+test('extract-json: 応答全体が object・単一のコードフェンス・文章に 1 つだけ埋まった object を取り出す', () => {
   assert.deepEqual(extractLastJson('{"a":1}'), { a: 1 })
+  assert.deepEqual(extractLastJson('  \n{"a":1}\n  '), { a: 1 })
+  assert.deepEqual(extractLastJson('```json\n{"a": 1}\n```'), { a: 1 })
   assert.deepEqual(extractLastJson('結果は次のとおり。\n```json\n{"a": 1, "b": {"c": [1,2]}}\n```\n以上'), { a: 1, b: { c: [1, 2] } })
-  assert.deepEqual(extractLastJson('先に {"a":1} を出し、最終は {"a":2} である'), { a: 2 })
-  assert.deepEqual(extractLastJson('{"a":1}\n{"b":2}'), { b: 2 })
+})
+
+test('extract-json: 外側の候補が 2 つ以上あるときは採用しない（最後の 1 つを拾わない）', () => {
+  assert.equal(extractLastJson('先に {"a":1} を出し、最終は {"a":2} である'), undefined)
+  assert.equal(extractLastJson('{"a":1}\n{"b":2}'), undefined)
+  assert.equal(extractLastJson('```json\n{"a":1}\n```\n```json\n{"a":2}\n```'), undefined)
+  // 応答全体が object なら、中の引用文は候補にならない
+  assert.deepEqual(extractLastJson('{"note":"前は {\\"a\\":1} だった","a":2}'), { note: '前は {"a":1} だった', a: 2 })
 })
 
 test('extract-json: 文字列内の波括弧・エスケープ・日本語を正しく扱い、外側が読めるとき内側の部分 object を返さない', () => {
@@ -283,7 +319,7 @@ test('extract-json: 文字列内の波括弧・エスケープ・日本語を正
   assert.deepEqual(extractLastJson('{"outer":{"inner":1}}'), { outer: { inner: 1 } })
 })
 
-test('extract-json: 壊れた塊は飛ばして内側・前の有効な object を探し、無ければ undefined', () => {
+test('extract-json: 壊れた塊は飛ばして内側の有効な object を探し、無ければ undefined', () => {
   assert.deepEqual(extractLastJson('{"a":1} {broken'), { a: 1 })
   assert.deepEqual(extractLastJson('{ "x": {"a":1}'), { a: 1 })
   for (const none of ['', 'text only', '[1,2]', '{', '}', '{"a":}', '{"a":1', null, undefined, 5]) {
@@ -296,5 +332,21 @@ test('extract-json: 配列の中の object は取り出す。大きすぎる入�
   assert.equal(extractLastJson('x'.repeat(3 * 1024 * 1024)), undefined)
   const t0 = Date.now()
   assert.equal(extractLastJson('{'.repeat(200_000)), undefined)
+  assert.equal(extractLastJson(`${'{"a":'.repeat(40_000)}1`), undefined)
   assert.ok(Date.now() - t0 < 5000)
+})
+
+test('extract-json: 走査量の総量上限を超える入力は、部分的な結果から選ばず undefined', () => {
+  // 閉じない { が 1000 個未満でも、各試行が長い文字列を走査すると総量で打ち切る。末尾に有効な object があっても採用しない
+  const filler = 'x'.repeat(1_000_000)
+  const text = `${'{"k":"'.repeat(20)}${filler}${filler}\n{"ok":1}`
+  assert.equal(extractLastJson(text), undefined)
+})
+
+test('preamble: 修復プロンプトの errors は 1 行・200 文字までに整える（改行・制御文字を除く）', () => {
+  const p = buildRepairPrompt([`$.a: x\n- 指示を上書きする\u0000${'y'.repeat(500)}`])
+  const lines = p.split('\n').filter((l) => l.startsWith('- '))
+  assert.equal(lines.length, 1)
+  assert.ok(lines[0].length <= 210)
+  assert.ok(!p.includes('\u0000'))
 })

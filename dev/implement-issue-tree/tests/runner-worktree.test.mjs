@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { trackTmp } from './lib/tmp-track.mjs'
-import { createSequencer, createWorktree, newRunId, resolveDefaultBranch, resolveMainRoot, worktreeNames } from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
+import { maskUrlCredentials, createSequencer, createWorktree, newRunId, resolveDefaultBranch, resolveMainRoot, worktreeNames } from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }
 const git = (cwd, ...args) => {
@@ -109,7 +109,7 @@ test('createWorktree: fetch に失敗したら例外（古い起点で隔離を�
 
 test('createWorktree: 不正な基点ブランチ名は例外', () => {
   const sb = sandbox()
-  for (const bad of ['-x', 'a b', 'a;b', '$(x)']) {
+  for (const bad of ['-x', 'a b', 'a;b', '$(x)', 'a..b', 'a@{1}', '@{-1}', 'a~1', 'x.lock', '/a', 'a//b']) {
     assert.throws(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, baseBranch: bad }), /基点ブランチ名/, bad)
   }
 })
@@ -130,4 +130,31 @@ test('resolveDefaultBranch: origin/HEAD を優先し、無ければ origin/main�
   assert.throws(() => resolveDefaultBranch(sb.main), /既定ブランチ/)
   git(sb.main, 'update-ref', 'refs/remotes/origin/master', git(sb.main, 'rev-parse', 'HEAD'))
   assert.equal(resolveDefaultBranch(sb.main), 'master')
+})
+
+test('createWorktree: メイン worktree が相対パス・pid が整数でないときは例外', () => {
+  const sb = sandbox()
+  assert.throws(() => createWorktree({ mainRoot: 'rel/main', runId: newRunId(), n: 1 }), /絶対パス/)
+  assert.throws(() => worktreeNames('rel', 'wf_4b37e3aa-d5b', 1), /絶対パス/)
+  for (const pid of [0, -1, 1.5, '1', NaN, '1; x']) {
+    assert.throws(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, pid }), /pid/, String(pid))
+  }
+})
+
+test('createWorktree: 先頭が - のパスにならない（-- で区切って渡す）', () => {
+  const sb = sandbox()
+  const wt = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, lock: false })
+  assert.ok(wt.path.startsWith('/'))
+})
+
+test('maskUrlCredentials: URL の user:pass@ を伏せ、認証情報の無い URL・文は変えない', () => {
+  assert.equal(maskUrlCredentials('fatal: unable to access https://user:pa55@github.com/o/r.git/'), 'fatal: unable to access https://***@github.com/o/r.git/')
+  assert.equal(maskUrlCredentials('ssh://git:tok@h/x and https://a@b/c'), 'ssh://***@h/x and https://***@b/c')
+  assert.equal(maskUrlCredentials('https://github.com/o/r.git'), 'https://github.com/o/r.git')
+})
+
+test('git の失敗文に載る URL の認証情報は伏せられる', () => {
+  const sb = sandbox()
+  git(sb.main, 'remote', 'set-url', 'origin', 'https://user:SECRETPASS@127.0.0.1:1/o/r.git')
+  assert.throws(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1 }), (e) => !e.message.includes('SECRETPASS'))
 })

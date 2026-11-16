@@ -1,228 +1,114 @@
-// ランナーが起動するエージェントに対して、拒否するコマンドの形の一覧と、その生成元になる判定器。
+// ランナーが起動するエージェントに対して拒否するコマンド形の一覧と、そこから Codex の rules と
+// OpenCode の permissions / policies を機械的に作る関数。
 //
-// 位置づけ: ベストエフォートの第一の防御線。実効の防御はサーバー側の ruleset と G0 にある
-// （Workflow 版の merge-guard-hook と同じ位置づけ。_/local-plans/iit-runners-phase0.md の 0-3）。
-// 実際にコマンドを止めるのは次の 2 つで、本モジュールはその入力と、同じ形を確かめるテスト用の判定器を持つ。
-//   - Codex: hook 1 本（init-codex の agent-guard.sh を、ランナーが「常に subagent=true」で呼ぶ）。
-//     rules は使わない（`-c` では効かない）。hook の組み立てはアダプタ（Phase 2a）の責務で、ここには持たない。
-//   - OpenCode: plugin（同じ agent-guard）と permissions・policies。opencodeRules() がその一覧を作る。
+// 位置づけ: 強制はここではしない。コマンドを実際に止めるのは次の 2 つで、どちらも配布済みの共通ガードを使う。
+//   - Codex: PreToolUse hook（init-codex の agent-guard.sh。ランナーが subagent=true で呼ぶ）。
+//   - OpenCode: plugin（init-opencode の agent-guard。同じ agent-guard.sh を呼ぶ）。
+// シェルの入れ子・env -S・演算子の解析はそちらが持つ。本モジュールにはコマンド文字列の判定器を持たない
+// （弱い複製が配布物のガードと食い違うのを避けるため。方針の経緯は _/local-plans/iit-runners-codex-opencode.md）。
+// 一覧の各形が agent-guard.sh で deny になることは dev/implement-issue-tree/tests/runner-units.test.mjs が
+// 実際に agent-guard.sh を起動して確かめ、agent-guard.sh がまだ止めない形（guardGap）は同じテストが現状を固定する。
 //
-// マージ系の権限分離: マージを許すのは「autoMerge: true のランの merge-exec ラベル」だけ。許すのは
-// 次の完全一致の 1 形だけで、承認を `;`・`&&`・改行でつないだ形などは MERGE_EXEC_COMMAND に一致せず拒否される。
-//   HEAD_SHA="<40 桁 hex>"; gh pr merge <N> --squash --delete-branch --match-head-commit "$HEAD_SHA"
+// 実効の防御はサーバー側の ruleset と G0 にある（Workflow 版の merge-guard-hook と同じ位置づけ）。
+// rules と permissions は補助層で、先頭一致・文字列照合のため入れ子や変数を含む形は止められない。
 //
-// 止められない形（既知の限界）: 変数経由・`$(…)` の出力を使う組み立て・書き込みツールで作ったスクリプトの
-// 実行・引用符による語の分割のうち hook / permissions が見ない形。classify はクォートの連結と
-// `bash -c` / `env` / `eval` の入れ子は展開して見るが、網羅は保証しない。
+// マージ系の権限分離: マージを許すのは「autoMerge: true のランの merge-exec ラベル」だけで、許すのは
+// MERGE_EXEC_COMMAND の完全一致の 1 形だけ。この完全一致の 1 形の強制は plugin / hook 側の責務で、
+// ここは mergeOnly の形（gh pr merge）を allowMerge の一覧から外すだけである。外した後も
+// `gh pr merge --admin`・`--auto`、承認、REST / GraphQL のマージ、認証情報の読み出しは一覧に残る。
 
-/** merge-exec の完全一致の形（src の merge プロンプトの手順 3 と同じ形）。 */
+/** merge-exec の完全一致の形（src の merge プロンプトの手順 3 と同じ形）。照合は plugin / hook 側が行う。 */
 export const MERGE_EXEC_COMMAND = /^HEAD_SHA="[0-9a-f]{40}"; gh pr merge [1-9][0-9]* --squash --delete-branch --match-head-commit "\$HEAD_SHA"$/
 
-const MAX_DEPTH = 8
-
 /**
- * 拒否する形の一覧。mergeOnly は merge-exec の完全一致の形だけを例外にできる形（それ以外は常に拒否）。
- * opencode は OpenCode の permissions / policies へ渡す文字列照合のパターン（サブコマンドごとに照合される）。
+ * 拒否する形の一覧。
+ *   prefixes: argv の先頭一致で書ける形（要素の配列は選択肢）。Codex の prefix_rule と OpenCode の glob の両方を作る。
+ *   globs: 位置が不定で先頭一致では書けない形。OpenCode の glob だけを作る（Codex の rules は先頭一致のため書けない）。
+ *   mergeOnly: allowMerge の一覧から外す形（gh pr merge だけ）。
+ *   guardGap: agent-guard.sh が（subagent=true でも）止めない形を含む。rules / permissions だけが止める。
  */
 export const DENY_FORMS = Object.freeze([
-  { id: 'pr-merge', mergeOnly: true, note: 'gh pr merge', opencode: ['gh pr merge*', 'gh * pr merge*'] },
-  { id: 'api-merge', mergeOnly: true, note: 'REST の /merge と GraphQL のマージ系 mutation', opencode: ['gh api *merge*', 'gh api graphql*'] },
-  { id: 'pr-approve', mergeOnly: false, note: 'gh pr review の --approve / -a', opencode: ['gh pr review*--approve*', 'gh pr review* -a*', 'gh * pr review*--approve*'] },
-  { id: 'api-review', mergeOnly: false, note: 'reviews API の書き込みと GraphQL のレビュー mutation', opencode: ['gh api *reviews*'] },
-  { id: 'auth-token', mergeOnly: false, note: '認証トークンの表示（gh auth token・status --show-token・環境変数の表示）', opencode: ['gh auth token*', 'gh auth status*-t*', 'gh auth status*--show-token*', 'printenv GH_TOKEN*', 'printenv GITHUB_TOKEN*'] },
-  { id: 'auth-file', mergeOnly: false, note: 'gh / Codex の認証ファイルの読み取り', opencode: ['*gh/hosts.yml*', '*.codex/auth.json*'] },
-  { id: 'git-force-push', mergeOnly: false, note: 'force 系の push', opencode: ['git push --force *', 'git push -f *', 'git push --force-with-lease *', 'git push --force-with-lease=* *', 'git push --force-if-includes *', 'git push --mirror *'] },
-  { id: 'git-no-verify', mergeOnly: false, note: 'フックの迂回', opencode: ['git commit --no-verify *', 'git commit -n *', 'git push --no-verify *'] },
+  { id: 'pr-merge', mergeOnly: true, note: 'gh pr merge', prefixes: [['gh', 'pr', 'merge']], globs: [] },
+  { id: 'pr-merge-bypass', mergeOnly: false, note: 'gh pr merge の --admin（保護の迂回）と --auto（自動マージ予約）', prefixes: [], globs: ['gh pr merge*--admin*', 'gh pr merge*--auto*'] },
+  { id: 'pr-approve', mergeOnly: false, note: 'gh pr review の --approve / -a', prefixes: [], globs: ['gh pr review*--approve*', 'gh pr review* -a*'] },
+  { id: 'api-merge', mergeOnly: false, note: 'REST の /merge・/merges（POST）と GraphQL のマージ系 mutation（mergePullRequest・mergeBranch・enqueuePullRequest・enablePullRequestAutoMerge）', guardGap: true, prefixes: [], globs: ['gh api *merge*', 'gh api *Merge*', 'gh api *enqueuePullRequest*'] },
+  { id: 'api-review', mergeOnly: false, note: 'reviews API と GraphQL のレビュー mutation、中身を見られない GraphQL の入力（--input・@ファイル）', prefixes: [], globs: ['gh api *reviews*', 'gh api*addPullRequestReview*', 'gh api*submitPullRequestReview*', 'gh api*graphql*--input*', 'gh api*graphql*=@*'] },
+  { id: 'gh-alias-extension', mergeOnly: false, note: 'gh alias の定義・取り込みと gh extension の導入・実行（拒否した形の別名・外部コードの実行になる）', prefixes: [['gh', 'alias', ['set', 'import']], ['gh', ['extension', 'ext'], ['install', 'exec']]], globs: [] },
+  { id: 'auth-token', mergeOnly: false, note: '認証トークンの表示（gh auth token・status --show-token・環境変数の一覧）', guardGap: true, prefixes: [['gh', 'auth', 'token'], ['gh', 'auth', 'status', ['--show-token', '-t']], ['printenv']], globs: [] },
+  { id: 'git-credential', mergeOnly: false, note: 'git の認証情報ヘルパーの呼び出し（credential fill 等）', guardGap: true, prefixes: [['git', 'credential']], globs: [] },
+  { id: 'auth-file', mergeOnly: false, note: 'gh / Codex の認証ファイルとその置き場の読み取り', guardGap: true, prefixes: [], globs: ['*.config/gh*', '*hosts.yml*', '*.codex/auth*'] },
+  { id: 'git-force-push', mergeOnly: false, note: 'force 系の push', prefixes: [['git', 'push', ['--force', '-f', '--force-with-lease', '--force-if-includes', '--mirror']]], globs: ['git push*--force*', 'git push* -f*', 'git push*--mirror*', 'git push* +*'] },
+  { id: 'git-no-verify', mergeOnly: false, note: 'フックの迂回（--no-verify・commit -n・core.hooksPath）', prefixes: [['git', 'commit', ['--no-verify', '-n']], ['git', 'push', '--no-verify']], globs: ['git commit*--no-verify*', 'git push*--no-verify*', 'git*core.hooksPath*'] },
 ])
 
-const MERGE_MUTATIONS = /\b(mergePullRequest|enablePullRequestAutoMerge)\b/
-const REVIEW_MUTATIONS = /\b(addPullRequestReview|submitPullRequestReview)\b/
-const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
-const PASSTHROUGH = new Set(['command', 'exec', 'nohup', 'time', 'sudo', 'nice', 'builtin'])
-const GH_VALUE_FLAGS = new Set(['-R', '--repo', '--hostname'])
+const isWord = (x) => typeof x === 'string'
 
-/**
- * シェルの文字列を、区切り（; & | 改行 括弧 バッククォート）ごとの語の列へ分ける。
- * クォートは外して連結する（`gh pr 'mer'ge` は gh pr merge になる）。簡易な字句解析で、
- * 展開・リダイレクト・ヒアドキュメントは解釈しない。
- * @param {string} text
- * @returns {string[][]}
- */
-export function splitCommand(text) {
-  const segments = []
-  let words = []
-  let word = ''
-  let inWord = false
-  let quote = null
-  const endWord = () => { if (inWord) words.push(word); word = ''; inWord = false }
-  const endSeg = () => { endWord(); if (words.length > 0) segments.push(words); words = [] }
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]
-    if (quote === "'") {
-      if (c === "'") quote = null
-      else word += c
-    } else if (quote === '"') {
-      if (c === '"') quote = null
-      else if (c === '\\' && i + 1 < text.length) word += text[++i]
-      else word += c
-    } else if (c === "'" || c === '"') {
-      quote = c
-      inWord = true
-    } else if (c === '\\' && i + 1 < text.length) {
-      word += text[++i]
-      inWord = true
-    } else if (/[;&|\n()`]/.test(c)) {
-      endSeg()
-    } else if (/\s/.test(c)) {
-      endWord()
-    } else {
-      word += c
-      inWord = true
-    }
+/** argv の選択肢（配列の要素）を展開し、語の列の全組み合わせを返す。 */
+export function expandPrefix(pattern) {
+  let acc = [[]]
+  for (const tok of pattern) {
+    const alts = isWord(tok) ? [tok] : tok
+    acc = acc.flatMap((a) => alts.map((t) => [...a, t]))
   }
-  endSeg()
-  return segments
+  return acc
 }
 
-const baseName = (w) => w.slice(w.lastIndexOf('/') + 1)
-
-/** セグメントの先頭から、環境変数の代入と素通しのラッパーを外す。env -S の文字列は第 2 戻り値で返す。 */
-function stripPrefix(words) {
-  let i = 0
-  let splitString = null
-  for (;;) {
-    const w = words[i]
-    if (w === undefined) break
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) { i++; continue }
-    const b = baseName(w)
-    if (b === 'env') {
-      i++
-      while (i < words.length && (words[i].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]))) {
-        if (words[i] === '-S' || words[i] === '--split-string') { splitString = words[i + 1] ?? ''; i += 2; continue }
-        if (words[i].startsWith('-S') && words[i].length > 2) { splitString = words[i].slice(2); i++; continue }
-        i++
-      }
-      continue
-    }
-    if (PASSTHROUGH.has(b)) { i++; continue }
-    break
-  }
-  return { rest: words.slice(i), splitString }
+/** gh / git の前置きグローバルオプション（`gh -R x pr merge`・`git -C d push`）を許す形を足す。 */
+function withGlobalOptionVariant(glob) {
+  const m = /^(gh|git) (\S.*)$/.exec(glob)
+  return m && !m[2].startsWith('*') ? [glob, `${m[1]} * ${m[2]}`] : [glob]
 }
 
-/** 入れ子（bash -c・eval・env -S）を展開した、実行されうる全セグメントの語の列。深さ超過は null。 */
-function expand(text, depth) {
-  if (depth > MAX_DEPTH) return null
+/** allowMerge に応じた有効な形。Codex と OpenCode は必ずここを通して同じ集合から作る。 */
+export function activeForms({ allowMerge = false } = {}) {
+  return DENY_FORMS.filter((f) => !(allowMerge && f.mergeOnly))
+}
+
+/** OpenCode へ渡す glob の一覧（prefixes 由来と globs 由来。重複なし）。 */
+export function opencodePatterns(opts = {}) {
   const out = []
-  for (const seg of splitCommand(text)) {
-    const { rest, splitString } = stripPrefix(seg)
-    if (splitString !== null) {
-      const inner = expand(splitString, depth + 1)
-      if (inner === null) return null
-      out.push(...inner)
-    }
-    if (rest.length === 0) continue
-    out.push(rest)
-    const head = baseName(rest[0])
-    let script
-    if (SHELLS.has(head)) {
-      const k = rest.findIndex((w, idx) => idx > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(w))
-      if (k > 0) script = rest.slice(k + 1).find((w) => !w.startsWith('-')) ?? ''
-    } else if (head === 'eval') {
-      script = rest.slice(1).join(' ')
-    }
-    if (script !== undefined) {
-      const inner = expand(script, depth + 1)
-      if (inner === null) return null
-      out.push(...inner)
-    }
+  for (const f of activeForms(opts)) {
+    for (const p of f.prefixes) for (const argv of expandPrefix(p)) out.push(...withGlobalOptionVariant(`${argv.join(' ')}*`))
+    for (const g of f.globs) out.push(...withGlobalOptionVariant(g))
   }
-  return out
-}
-
-function ghFormOf(words) {
-  // gh のグローバルフラグ（-R x など）を外してサブコマンドを得る
-  const args = []
-  for (let i = 1; i < words.length; i++) {
-    const w = words[i]
-    if (GH_VALUE_FLAGS.has(w)) { i++; continue }
-    if (/^(-R|--repo|--hostname)=/.test(w)) continue
-    args.push(w)
-  }
-  const [a, b] = args
-  if (a === 'pr' && b === 'merge') return 'pr-merge'
-  if (a === 'pr' && b === 'review') {
-    if (args.some((w) => w === '--approve' || w.startsWith('--approve=') || /^-[A-Za-z]*a[A-Za-z]*$/.test(w))) return 'pr-approve'
-    return null
-  }
-  if (a === 'auth' && b === 'token') return 'auth-token'
-  if (a === 'auth' && b === 'status' && args.some((w) => w === '--show-token' || /^-[A-Za-z]*t[A-Za-z]*$/.test(w))) return 'auth-token'
-  if (a === 'api') {
-    const joined = args.slice(1).join(' ')
-    if (b === 'graphql' || args.includes('graphql')) {
-      if (MERGE_MUTATIONS.test(joined)) return 'api-merge'
-      if (REVIEW_MUTATIONS.test(joined)) return 'api-review'
-      // クエリがファイル・標準入力から来る形は、中身を見られないため拒否側に倒す
-      if (args.some((w) => w === '--input' || /^query=@/.test(w) || w === '-F' || w === '--field')) return 'api-review'
-      return null
-    }
-    if (/\/pulls\/[^/\s]+\/merge\b/.test(joined) || /\/merge(\s|$)/.test(joined)) return 'api-merge'
-    if (/\/pulls\/[^/\s]+\/reviews\b/.test(joined)) {
-      const m = /(?:-X|--method)[= ]?\s*([A-Za-z]+)/.exec(args.join(' '))
-      return m && m[1].toUpperCase() === 'GET' ? null : 'api-review'
-    }
-  }
-  return null
-}
-
-function gitFormOf(words) {
-  const args = words.slice(1)
-  const sub = args.find((w) => !w.startsWith('-'))
-  if (sub === 'push') {
-    if (args.some((w) => w === '--force' || w === '-f' || w.startsWith('--force-with-lease') || w === '--force-if-includes' || w === '--mirror' || /^\+[^+]/.test(w))) return 'git-force-push'
-    if (args.includes('--no-verify')) return 'git-no-verify'
-  }
-  if (sub === 'commit' && args.some((w) => w === '--no-verify' || w === '-n')) return 'git-no-verify'
-  return null
-}
-
-function otherFormOf(words) {
-  const head = baseName(words[0])
-  if (head === 'printenv' && words.slice(1).some((w) => /^(GH_TOKEN|GITHUB_TOKEN)$/.test(w))) return 'auth-token'
-  if (/^(cat|less|more|head|tail|bat|grep|sed|awk|cp|xxd|od|strings)$/.test(head) && words.slice(1).some((w) => /gh\/hosts\.yml|\.codex\/auth\.json/.test(w))) return 'auth-file'
-  return null
+  return [...new Set(out)]
 }
 
 /**
- * コマンド文字列を判定する。allowMerge は「autoMerge のランの merge-exec ラベル」のときだけ true。
- * @param {string} command
- * @param {{ allowMerge?: boolean }} [opts]
- * @returns {{ decision: 'allow' } | { decision: 'deny', form: string }}
- */
-export function classify(command, { allowMerge = false } = {}) {
-  if (typeof command !== 'string') return { decision: 'deny', form: 'bad-input' }
-  if (allowMerge && MERGE_EXEC_COMMAND.test(command)) return { decision: 'allow' }
-  const segs = expand(command, 0)
-  if (segs === null) return { decision: 'deny', form: 'nesting-limit' }
-  for (const words of segs) {
-    const head = baseName(words[0])
-    const form = head === 'gh' ? ghFormOf(words) : head === 'git' ? gitFormOf(words) : otherFormOf(words)
-    // mergeOnly の形は、完全一致の 1 形（上で許可済み）以外は allowMerge でも拒否する
-    if (form !== null) return { decision: 'deny', form }
-  }
-  return { decision: 'allow' }
-}
-
-/**
- * OpenCode の permissions / policies（init-opencode の opencode.jsonc と同じ形式）。
- * allowMerge の serve（merge-exec 専用）では mergeOnly の形を含めない。session.create で allow-all は付けない
- * （config の permissions が打ち消されるため。Phase 0-6）。policies は session の許可では外せない。
+ * OpenCode の permissions / policies（init-opencode の opencode.jsonc と同じ形式）。session.create で
+ * allow-all は付けない（config の permissions が打ち消されるため。Phase 0-6）。policies は session の許可では外せない。
  * @param {{ allowMerge?: boolean }} [opts]
  */
-export function opencodeRules({ allowMerge = false } = {}) {
-  const patterns = DENY_FORMS.filter((f) => !(allowMerge && f.mergeOnly)).flatMap((f) => f.opencode)
+export function opencodeRules(opts = {}) {
+  const patterns = opencodePatterns(opts)
   return {
     permissions: patterns.map((resource) => ({ action: 'shell', resource, effect: 'deny' })),
     policies: patterns.map((resource) => ({ action: 'tool.use', resource: `shell:${resource}`, effect: 'deny' })),
   }
+}
+
+const quote = (s) => JSON.stringify(s)
+
+/**
+ * Codex の rules ファイル（execpolicy の prefix_rule）の本文。prefixes のある形だけが対象で、globs は含まない。
+ * 各規則の match には展開した全組み合わせを入れる（Codex は読み込み時に match が pattern に一致することを検証する）。
+ * @param {{ allowMerge?: boolean }} [opts]
+ */
+export function codexRules(opts = {}) {
+  const blocks = []
+  for (const f of activeForms(opts)) {
+    for (const p of f.prefixes) {
+      const pattern = p.map((t) => (isWord(t) ? quote(t) : `[${t.map(quote).join(', ')}]`)).join(', ')
+      const match = expandPrefix(p).map((argv) => quote(argv.join(' ')))
+      blocks.push([
+        'prefix_rule(',
+        `    pattern = [${pattern}],`,
+        '    decision = "forbidden",',
+        `    justification = ${quote(`拒否する形（${f.id}）: ${f.note}`)},`,
+        `    match = [${match.join(', ')}],`,
+        ')',
+      ].join('\n'))
+    }
+  }
+  return `${blocks.join('\n')}\n`
 }

@@ -9,6 +9,8 @@
 // モデルにさせるか、ランナーがスクリプトを直接実行するかはオーナー判断待ち。後者になると、該当ラベルには
 // この前置きの転記指示を付けない可能性がある。
 
+import { sanitizeErrorLine } from './schema-validate.mjs'
+
 const SCHEMA_PRETTY_LIMIT = 60_000
 
 /** Claude Code の語彙の読み替え文。 */
@@ -60,7 +62,7 @@ export function buildRepairPrompt(errors) {
   const list = (errors.length > 0 ? errors : ['応答から JSON オブジェクトを取り出せなかった']).slice(0, 20)
   return [
     '直前の応答は指定の JSON Schema に適合しなかった。次の点を直して、JSON オブジェクト 1 つだけを返し直すこと。',
-    ...list.map((e) => `- ${e}`),
+    ...list.map((e) => `- ${sanitizeErrorLine(e)}`),
     'コマンドを実行し直さない。すでに得た観測値を使い、値を作らない。分からない項目は schema の指示に従う。',
   ].join('\n')
 }

@@ -17,14 +17,19 @@
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 
 const RUN_ID = /^wf_[0-9a-f]{8}-[0-9a-f]{3}$/
+
+/** git の出力に載った URL の認証情報（`scheme://user:pass@host`）を伏せる。エラー文・ログへ流さないため。 */
+export function maskUrlCredentials(text) {
+  return String(text).replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+@/g, '$1***@')
+}
 
 function git(cwd, args, { allowFail = false } = {}) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
   if (r.status !== 0 && !allowFail) {
-    throw new Error(`git ${args[0]} が失敗した（終了コード ${r.status}）: ${(r.stderr || '').trim().split('\n')[0]}`)
+    throw new Error(`git ${args[0]} が失敗した（終了コード ${r.status}）: ${maskUrlCredentials((r.stderr || '').trim().split('\n')[0])}`)
   }
   return r.status === 0 ? r.stdout.trim() : null
 }
@@ -42,6 +47,7 @@ export function createSequencer() {
 }
 
 export function worktreeNames(mainRoot, runId, n) {
+  if (typeof mainRoot !== 'string' || !isAbsolute(mainRoot)) throw new Error(`メイン worktree のパスは絶対パスで渡す: ${String(mainRoot).slice(0, 80)}`)
   if (!RUN_ID.test(runId)) throw new Error(`runId の形が不正: ${runId}`)
   if (!Number.isInteger(n) || n < 1) throw new Error(`通し番号が不正: ${n}`)
   return {
@@ -75,13 +81,17 @@ export function resolveDefaultBranch(mainRoot) {
  */
 export function createWorktree({ mainRoot, runId, n, baseBranch, fetch = true, lock = true, pid = process.pid }) {
   const { path, branch } = worktreeNames(mainRoot, runId, n)
+  if (!Number.isInteger(pid) || pid < 1) throw new Error(`pid が不正: ${pid}`)
   const base = baseBranch ?? resolveDefaultBranch(mainRoot)
-  if (!/^[A-Za-z0-9._\/-]+$/.test(base) || base.startsWith('-')) throw new Error(`基点ブランチ名が不正: ${base}`)
+  // 名前の検証は git 自身の規則（`--branch` は @{-1} 等を展開するので、展開されず元の名前のままのものだけ通す）に、
+  // シェルが特別扱いする文字を持たない制限を重ねる（git は `$(x)` のような名前も有効とするため）
+  const checked = typeof base === 'string' && /^[A-Za-z0-9._\/-]+$/.test(base) && !base.startsWith('-') ? git(mainRoot, ['check-ref-format', '--branch', base], { allowFail: true }) : null
+  if (checked !== base) throw new Error(`基点ブランチ名が不正: ${String(base).slice(0, 80)}`)
   // 「作成時点の最新の origin/<既定>」を起点にする。fetch の失敗は握りつぶさない（古い起点で隔離を作らない）
   if (fetch) git(mainRoot, ['fetch', '--quiet', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`])
   const baseSha = git(mainRoot, ['rev-parse', '--verify', `refs/remotes/origin/${base}^{commit}`])
   mkdirSync(join(mainRoot, '.claude', 'worktrees'), { recursive: true })
-  git(mainRoot, ['worktree', 'add', '--quiet', '--no-track', '-b', branch, path, baseSha])
-  if (lock) git(mainRoot, ['worktree', 'lock', '--reason', `claude agent ${runId}-${n} (pid ${pid})`, path])
+  git(mainRoot, ['worktree', 'add', '--quiet', '--no-track', '-b', branch, '--', path, baseSha])
+  if (lock) git(mainRoot, ['worktree', 'lock', '--reason', `claude agent ${runId}-${n} (pid ${pid})`, '--', path])
   return { path, branch, baseBranch: base, baseSha }
 }
