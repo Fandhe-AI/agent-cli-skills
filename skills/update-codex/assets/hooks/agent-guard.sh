@@ -139,7 +139,8 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 # 引数」であり、マージ系のように前段の出力を後段が読む構造（`printf ... | gh api --input -`）を
 # 見る必要がないため。引用符を理解するのは、`git commit -m "fix -n handling"` や
 # ヒアドキュメントのコミットメッセージ本文に書かれた語を誤検知しないため。
-# 検査するもの（git のグローバルオプション -c / -C / --git-dir 等はサブコマンドの前で読み飛ばす）:
+# 検査するもの（サブコマンドは git の直後の `-C <dir>`・`-c <k=v>` を読み飛ばした後の語。そこが他の global option
+# 〔--git-dir・--attr-source 等〕なら、後ろの hook を飛ばせるサブコマンド名の語をそれぞれサブコマンドとみなす）:
 #   - hook を飛ばせるサブコマンドの --no-verify（git の一意な略記 --no-v… も同一視）
 #   - commit の短縮 -n（-an のような束ね書きも。-m 等の値を取るオプション以降は値として扱う）
 #   - push の --force / -f（束ね書きも。-o 以降は値）/ --force-with-lease / --force-if-includes /
@@ -321,29 +322,41 @@ function cred_tok(t,   v) {
 }
 # 検索コマンドへ渡すホームやその設定ディレクトリそのもの（再帰検索で hosts.yml 等の中身が出る）。
 function homeparent(t) { return (normpath(t) ~ /^(~|[$]home|[$][{]home[}])(\/([.]config|[.]codex))?\/?$/) }
-# git / gh（tok[c]）のサブコマンドが正規表現 re に当たり得るか。直後の語が option でなければ、それが確かにサブコマンドなので
-# その語だけを見る。直後が option のときは、option が値を取るか（版で変わる）を推測せず、後ろのどれかの語が re に当たれば
+# git / gh（tok[c]）のサブコマンドを探し始める添字。git のときだけ、独立した形の `-C <dir>`・`-c <k=v>` を値ごと読み飛ばす
+# （この 2 つはどの版の git でも必ず値を 1 つ取る。連結形 -Cdir・-ck=v と他の option は読み飛ばさない）。
+# -c の値のキー（hookspath・alias.）は hook_swap が別に見る。読み飛ばすと ntok を超えることがある（`git -C`・`git -C d`）。
+function sub_pos(c,   k, b) {
+  k = c + 1
+  b = tolower(tok[c]); sub(/^.*\//, "", b)
+  if (b == "git") while (k + 1 <= ntok && (tok[k] == "-C" || tok[k] == "-c")) k += 2
+  return k
+}
+# git / gh（tok[c]）のサブコマンドが正規表現 re に当たり得るか。sub_pos の語が option でなければ、それが確かにサブコマンドなので
+# その語だけを見る。option のときは、option が値を取るか（版で変わる）を推測せず、後ろのどれかの語が re に当たれば
 # サブコマンドとみなす（over-deny 側。`gh --jq . auth token`・`git --config-env x=y credential fill`）。
-function sub_is(c, re,   k) {
-  if (c + 1 > ntok) return 0
-  if (tok[c + 1] !~ /^-/) return (tok[c + 1] ~ re)
-  for (k = c + 2; k <= ntok; k++) if (tok[k] ~ re) return 1
+function sub_is(c, re,   k, s) {
+  s = sub_pos(c)
+  if (s > ntok) return 0
+  if (tok[s] !~ /^-/) return (tok[s] ~ re)
+  for (k = s + 1; k <= ntok; k++) if (tok[k] ~ re) return 1
   return 0
 }
 # git config の設定キーの形（節名 . 名前。. を含み、option や subcommand〔list・get 等〕と取り違えない）。
 function conf_key(t) { return (t ~ /^[A-Za-z][A-Za-z0-9-]*[.][^ \t\n]+$/) }
-# 認証情報の判定で通す git config の完全形（tok[c] が git）。option を 1 つも含まない次の形だけ:
+# 認証情報の判定で通す git config の完全形（tok[c] が git。前置きの `-C <dir>`・`-c <k=v>` は sub_pos が読み飛ばす）。
+# config の後ろに option を 1 つも含まない次の形だけ:
 #   config KEY・config --get KEY・config get KEY（読み取り。KEY が extraheader〔認証ヘッダ〕を含まない）、config KEY VALUE（書き込み）
 # 一覧・照合・--file / --blob・--edit・scope の指定など option の付いた形は、値を取るかを推測せずすべて止める（git の版で option の
-# 集合が違い、接頭辞の省略の解釈も変わるため。例: --co は --comment の無い git では --color の省略になる）。
-function conf_ok(c,   n, a, b) {
-  n = ntok - c; a = tok[c + 2]; b = tok[c + 3]
-  if (tok[c + 1] != "config") return 0
+# 集合が違い、同じ省略形〔--co 等〕がどの option を指すかも版によって変わり得るため）。
+function conf_ok(c,   n, a, b, s) {
+  s = sub_pos(c)
+  n = ntok - s + 1; a = tok[s + 1]; b = tok[s + 2]
+  if (tok[s] != "config") return 0
   if (n == 2) return (conf_key(a) && tolower(a) !~ /extraheader/)
   if (n == 3 && (a == "--get" || a == "get")) return (conf_key(b) && tolower(b) !~ /extraheader/)
   return (n == 3 && conf_key(a))
 }
-function cred_check(p, wr,   cb, i, k, t, np, fl, pos, j, sk, haspat, noidx, grepv) {
+function cred_check(p, wr,   cb, i, k, t, np, fl, pos, j, sk, haspat, noidx, grepv, vs) {
   for (i = 1; i <= nrin; i++) cred_tok(rin[i])
   # 秘密らしい変数の展開（二重引用符内・引用符なし。${!x} の間接展開を含む）は、どのコマンドの引数でも標準出力・通信・ログへ流れ得る
   # （gh pr comment --body "$GH_TOKEN"・git commit -m "$GH_TOKEN"・curl -d "$GITHUB_TOKEN"・`command -V "$GH_TOKEN"` は
@@ -386,11 +399,13 @@ function cred_check(p, wr,   cb, i, k, t, np, fl, pos, j, sk, haspat, noidx, gre
     return
   }
   if (cb == "git") {
-    # サブコマンドの位置は探さず（global option が値を取るかは版で変わる）、sub_is の語の集合で見る。
+    # サブコマンドは sub_is で見る（`-C <dir>`・`-c <k=v>` だけ読み飛ばし、他の global option が前にあれば語の集合で見る。
+    # 値を取るかが版で変わるため）。
     # git credential と credential-*（helper の直接呼び出し。fill / get 以外も）は止める。
     if (sub_is(p, "^credential(-.*)?$")) cred_hit = 1
-    # git var は変数名 1 つの完全形（git var GIT_EDITOR）だけ通す。-l / --list・その前置き・option の付いた形は止める。
-    if (sub_is(p, "^var$") && !(ntok == p + 2 && tok[p + 1] == "var" && tok[p + 2] ~ /^[A-Za-z_][A-Za-z0-9_]*$/)) cred_hit = 1
+    # git var は変数名 1 つの完全形（git var GIT_EDITOR。前置きは `-C <dir>`・`-c <k=v>` だけ）を通す。-l / --list・他の option の付いた形は止める。
+    vs = sub_pos(p)
+    if (sub_is(p, "^var$") && !(ntok == vs + 1 && tok[vs] == "var" && tok[vs + 1] ~ /^[A-Za-z_][A-Za-z0-9_]*$/)) cred_hit = 1
     # git config は conf_ok の完全形だけ通す（一覧・照合・extraheader の読み出し・--file / --blob・--edit を含む他の形は止める）。
     if (sub_is(p, "^config$") && !conf_ok(p)) cred_hit = 1
     # --no-index（git diff / grep が作業ツリーの外のファイルを読む）の語があれば、サブコマンドを問わず全引数をファイルとして見る。
@@ -578,19 +593,25 @@ function hook_swap(c,   k, t, hit, sec, re, n) {
   if (tok[c + 1] == "config" && (n == 2 || (n == 3 && tok[c + 2] == "--get")) && t ~ /^(core[.]hookspath|alias[.][a-z0-9_-]+)$/) return
   setv("no-verify")
 }
-function git_args(j, hk,   t, scmd, k, a, hooked, dd, eq, nm) {
+function git_hooked(w) { return (w == "commit" || w == "push" || w == "merge" || w == "rebase" || w == "cherry-pick" || w == "am" || w == "revert" || w == "pull") }
+# git（tok[j - 1]）の --no-verify・commit -n・force push を見る。サブコマンドの位置は sub_is と同じ方式で決める:
+# `-C <dir>`・`-c <k=v>` を読み飛ばした後の語が option でなければそれがサブコマンド。option（--attr-source・--git-dir 等。
+# 値を取るかが版で変わる）なら、後ろの hook を飛ばせるサブコマンド名の語をそれぞれサブコマンドとみなして見る（over-deny 側）。
+function git_args(j, hk,   s, k, hit) {
   hook_swap(j - 1)
-  while (j <= ntok) {
-    t = tok[j]
-    if (t == "-c" || t == "--config-env") j += 2
-    else if (t == "-C" || t == "--git-dir" || t == "--work-tree" || t == "--namespace" || t == "--super-prefix") j += 2
-    else if (substr(t, 1, 1) == "-") j++
-    else break
-  }
-  if (j > ntok) return
+  s = sub_pos(j - 1)
+  if (s > ntok) return
+  if (tok[s] !~ /^-/) { git_scan(s, hk); return }
+  hit = 0
+  for (k = s + 1; k <= ntok; k++) if (git_hooked(tok[k])) { hit = 1; git_scan(k, 0) }
+  if (hk && hit) setv("no-verify")
+}
+# tok[j] をサブコマンドとして、その後ろの引数を見る。
+function git_scan(j, hk,   scmd, k, a, hooked, dd, eq, nm) {
   scmd = tok[j]
-  hooked = (scmd == "commit" || scmd == "push" || scmd == "merge" || scmd == "rebase" || scmd == "cherry-pick" || scmd == "am" || scmd == "revert" || scmd == "pull")
+  hooked = git_hooked(scmd)
   if (hk && hooked) setv("no-verify")
+  dd = 0
   for (k = j + 1; k <= ntok; k++) {
     a = tok[k]
     # `--` 以降は引数（パス・ref 名）でありフラグ判定しない。ただし push の + 始まりの refspec は

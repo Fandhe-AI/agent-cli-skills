@@ -79,6 +79,13 @@ export const GIT_DENY = [
   ['git commit --author=a -m x -n', 'no-verify'],
   ['git push -o x --force', 'force-push'],
   ['git push --push-option=x -f', 'force-push'],
+  // 5 巡目: `-C <dir>`・`-c <k=v>` の後ろが他の global option（値を取るかが版で変わる）なら、後ろの commit / push 等の語をそれぞれ
+  // サブコマンドとみなす（位置で探すと --attr-source の値 HEAD をサブコマンドと取り違えていた）
+  ['git --attr-source HEAD push -f', 'force-push'],
+  ['git --attr-source HEAD commit --no-verify -m x', 'no-verify'],
+  ['git --attr-source HEAD push -- +main', 'force-push'],
+  ['git -C d --attr-source HEAD commit -n -m x', 'no-verify'],
+  ['git --git-dir .git push -f', 'force-push'],
 ]
 
 export const GIT_ALLOW = [
@@ -133,6 +140,11 @@ export const GIT_ALLOW = [
   'echo SUB-MARK',
   'echo MAIN-MARK',
   'git status --short',
+  // 5 巡目: 語の集合で見ても commit / push の語の後ろに禁止フラグが無ければ通す
+  'git --attr-source HEAD log --oneline',
+  'git --git-dir=.git push origin main',
+  'git --no-pager push origin main',
+  'git --git-dir .git commit -m x',
 ]
 
 // --- 判定漏れの是正（M1 / M2 / M4 / M5 / L2 / L3）の回帰 --------------------------------
@@ -1451,8 +1463,11 @@ export const CRED_DENY = [
   "command -V \"$GH_TOKEN\"",
   "command -v \"$GH_TOKEN\"",
   "git --config-env x=y diff --no-index /dev/null ~/.netrc",
-  "git -C d config user.name t",
-  "git -C . var GIT_EDITOR",
+  // 5 巡目: 独立した形の `-C <dir>`・`-c <k=v>` だけ値ごと読み飛ばす。読み飛ばした後でも option の付いた形・連結形 -Cdir は止める
+  "git -C . var -l",
+  "git -C d -c x=y credential fill",
+  "git -C d config --get-regexp .",
+  "git -Cwt add config",
   "git credential-cache exit",
   "git credential-store --file x erase",
   "git config --global user.email x@example.com",
@@ -1642,6 +1657,12 @@ export const CRED_ALLOW = [
   "git add config",
   "git checkout credential-x",
   "git log -- var",
+  // 5 巡目: 独立した形の `-C <dir>`・`-c <k=v>` は値ごと読み飛ばし、-C の無い形と同じに判定する（旧 CRED_DENY から移した 2 件を含む）
+  "git -C wt add config",
+  "git -C wt diff -- config",
+  "git -C d config user.name t",
+  "git -C . var GIT_EDITOR",
+  "git -c x=y -C d config user.name t",
 ]
 
 // マージキュー投入の GraphQL mutation（mergePullRequest と同じ扱い）。
@@ -1689,7 +1710,7 @@ export const HOOKCONF_DENY = [
   ['git config set --all alias.p push', 'no-verify'],
   ['git config set --append alias.p push', 'no-verify'],
   ['git config --bl x alias.p push', 'no-verify'],
-  // 4 巡目: --co / --c は --comment の無い git（2.39 等）では --color の省略になり、キー・値の読み方が変わる。option を含む形は止める
+  // 4 巡目: git の版で option の集合が違い、--co / --c の省略がどの option を指すかも変わり得る。option を含む形は止める
   ['git config --co core.hooksPath /dev/null', 'no-verify'],
   ['git config --c core.hooksPath /dev/null', 'no-verify'],
   // 読み取りの完全形以外（旧 FIX_ALLOW・HOOKCONF_ALLOW・CRED_ALLOW から移した。skills/ と implement-issue-tree.src.js の呼び出しに無い）
