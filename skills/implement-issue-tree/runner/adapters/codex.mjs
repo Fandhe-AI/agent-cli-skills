@@ -35,6 +35,12 @@
 //   iit_impl: 隔離 worktree。worktree・<main>/.git/{objects,refs,logs,packed-refs,packed-refs.lock}・
 //             <main>/.git/worktrees/<name>（正確なパス）・TMPDIR が書ける。.git/hooks と .git/config は読み取りのまま。
 //   どちらも .codex は読み取り・認証ファイル（<CODEX_HOME>/auth.json と ~/.codex/auth.json）は deny。
+//   darwin では両方に /private/var/tmp（/var/tmp の実体）を書き込み可として足す（sandbox の書き込み範囲を広げる）。
+//   macOS の /bin/bash 3.2 は here-doc の一時ファイルを TMPDIR ではなく /var/tmp に作り（書けなければ /tmp →
+//   /usr/tmp → cwd の順に探す）、どこにも書けないと here-doc が「cannot create temp file」で落ちるため。
+//   `codex sandbox` での実測（2026-11-17・codex-cli 0.169.0）: iit_read は無しで失敗・ありで成功。iit_impl は cwd
+//   （worktree）へのフォールバックで通っていただけで、`cd /` の後は無しで失敗・ありで成功した。
+//   zsh の here-doc（一時ファイルは $TMPPREFIX。既定 /tmp/zsh）はこの追加では直らない（別の扱い）。
 //   既定は cwd の `.git` がファイルなら iit_impl、そうでなければ iit_read。req.profile で上書きできる（契約への任意の追加）。
 //
 // 時間切れ: プロセスグループへ SIGTERM、猶予後に SIGKILL（孫も止まる。setsid で抜けた孫は止められない）。
@@ -52,6 +58,14 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const HOOK_SCRIPT = join(HERE, 'codex-hook.sh')
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const USAGE_LIMIT = /usage[ _-]?limit|UsageLimitExceeded/i
+
+/** darwin の /bin/bash 3.2 が here-doc の一時ファイルを置く場所（/var/tmp は symlink なので実体のパス）。 */
+export const DARWIN_HEREDOC_TMP = '/private/var/tmp'
+
+/** プラットフォームごとに両 profile へ足す書き込み可能パス。純関数（platform は process.platform の値）。 */
+export function platformWritePaths(platform) {
+  return platform === 'darwin' ? [DARWIN_HEREDOC_TMP] : []
+}
 
 const q = (s) => JSON.stringify(s)
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
@@ -72,10 +86,11 @@ export function linkedWorktreeGit(cwd) {
 
 /**
  * permission profile の `-c` 引数（2 引数 × 2）。純関数。
- * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, home: string, git: null | { gitdir: string, commonDir: string }, stateDir?: string|null, extraWritePaths?: string[] }} o
+ * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, home: string, git: null | { gitdir: string, commonDir: string }, stateDir?: string|null, extraWritePaths?: string[], platform?: string }} o
  *   stateDir: 状態ファイルの置き場（<main>/_/issue-trees）。iit_read のときだけ書けるようにする
+ *   platform: process.platform の値（テストが注入する）。darwin なら両 profile に DARWIN_HEREDOC_TMP を足す
  */
-export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stateDir = null, extraWritePaths = [] }) {
+export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stateDir = null, extraWritePaths = [], platform = process.platform }) {
   const name = kind === 'impl' ? 'iit_impl' : 'iit_read'
   const ws = kind === 'impl' ? { '.': 'write' } : { '.': 'read' }
   ws['.codex'] = 'read'
@@ -85,6 +100,7 @@ export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stat
     for (const p of ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.lock']) fs[join(git.commonDir, p)] = 'write'
     fs[git.gitdir] = 'write'
   }
+  for (const p of platformWritePaths(platform)) fs[p] = 'write'
   for (const p of extraWritePaths) fs[p] = 'write'
   fs[join(codexHome, 'auth.json')] = 'deny'
   fs[join(home, '.codex', 'auth.json')] = 'deny'
@@ -143,12 +159,14 @@ function execFileP(file, args, opts) {
 const killGroup = (pid, sig) => { try { process.kill(-pid, sig) } catch { /* 既に終了 */ } }
 
 /**
- * @param {{ skillDir: string, mainRoot: string, runDir: string, toolConfig?: object, guard?: object, env?: object }} cfg
+ * @param {{ skillDir: string, mainRoot: string, runDir: string, toolConfig?: object, guard?: object, env?: object, platform?: string }} cfg
+ *   platform: 省略時は process.platform（テストが注入する。permission profile の darwin 分岐に使う）
  */
 export function createAdapter(cfg) {
   const tc = cfg.toolConfig ?? {}
   const bin = tc.codexBin ?? 'codex'
-    const tmpDir = join(cfg.runDir, 'tmp')
+  const tmpDir = join(cfg.runDir, 'tmp')
+  const platform = cfg.platform ?? process.platform
   const stateDir = join(cfg.mainRoot, '_', 'issue-trees')
   const baseEnv = { ...(cfg.env ?? process.env) }
   const home = baseEnv.HOME ?? homedir()
@@ -210,7 +228,7 @@ export function createAdapter(cfg) {
       writeFileSync(sp, JSON.stringify(strictifySchema(schema)))
       args.push('--output-schema', sp)
     }
-    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stateDir, extraWritePaths: tc.extraWritePaths }))
+    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, stateDir, extraWritePaths: tc.extraWritePaths, platform }))
     args.push(...buildHookArgs({ hookScript: HOOK_SCRIPT, guardScript, hookLog, allowMerge: Boolean(allowMerge) }))
     if (resume) args.push(resume.sessionRef)
     args.push('-')

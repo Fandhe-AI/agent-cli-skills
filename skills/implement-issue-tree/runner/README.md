@@ -12,7 +12,7 @@ implement-issue-tree の生成物（`scripts/implement-issue-tree.js`）を無�
 | Node.js | 生成物と `runner/` を ES モジュールとして読み込める版（テストは v24.13.0 で実行） |
 | gh | `gh auth status` が通ること（通らなければ終了コード 3）。テスト環境は 2.102.0 |
 | bash・jq | 実行仕様の段（`scripts/run-verified.sh` 経由）と、Codex の hook・OpenCode の plugin がガードを呼ぶのに使う。jq が無いと Codex は起動しない（hook が fail-closed になるため）。テスト環境は bash 3.2.57（`/bin/bash`）・5.3.9、jq 1.7.1 |
-| Codex | `--tool codex` のとき。`codex` コマンド（Phase 0 の実測は 0.164.0）。設定の `toolConfig.codex.codexBin` で別のパスにできる。`CODEX_HOME` は呼び出し元のもの（無ければ `~/.codex`）を使い、認証ファイルは読まない |
+| Codex | `--tool codex` のとき。`codex` コマンド（Phase 0 の実測は 0.164.0）。設定の `toolConfig.codex.codexBin` で別のパスにできる。`CODEX_HOME` は呼び出し元のもの（無ければ `~/.codex`）を使い、認証ファイルは読まない。macOS では sandbox の書き込み可能範囲に `/private/var/tmp` を足す（`/bin/bash` 3.2 が here-doc の一時ファイルをそこへ作るため。詳細は `adapters/codex.mjs` 冒頭） |
 | OpenCode | `--tool opencode` のとき。`opencode` コマンド（Phase 0 の実測は v2.2.7）。ランナーが専用の `opencode serve` を空きポートで起動し、終了時に止める（既に動いている serve には触れない） |
 | 共通ガード | `agent-guard.sh`。ランナーは同梱しない。init-codex か init-opencode を導入する（対象リポジトリの `.codex/hooks/` か `.opencode/hooks/` に置かれる）か、設定の `toolConfig.<tool>.guardScript` に絶対パスを指定する。探索順は `lib/guard-script.mjs` 冒頭（両ツール共通）。見つからなければ終了コード 3 |
 

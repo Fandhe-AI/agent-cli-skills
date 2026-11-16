@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
-import { createAdapter, buildProfileArgs, classifyFailure, summarizeEvents } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
+import { createAdapter, buildProfileArgs, classifyFailure, summarizeEvents, DARWIN_HEREDOC_TMP, platformWritePaths } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
 import { decodeStrictText, strictifySchema } from '../../../skills/implement-issue-tree/runner/adapters/codex-strict.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 
@@ -279,6 +279,33 @@ test('buildProfileArgs: stateDir は iit_read のときだけ書き込みに加�
   assert.equal(read.includes('"/m"='), false)
   assert.equal(buildProfileArgs({ ...base, kind: 'impl' })[1].includes('issue-trees'), false)
   assert.equal(buildProfileArgs({ ...base, kind: 'read', stateDir: null })[1].includes('issue-trees'), false)
+})
+
+test('buildProfileArgs: darwin だけ両 profile に /private/var/tmp（bash 3.2 の here-doc の置き場）を足す', () => {
+  assert.equal(DARWIN_HEREDOC_TMP, '/private/var/tmp')
+  assert.deepEqual(platformWritePaths('darwin'), ['/private/var/tmp'])
+  for (const p of ['linux', 'freebsd', 'win32', undefined]) assert.deepEqual(platformWritePaths(p), [], String(p))
+  const base = { cwd: '/m', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, stateDir: '/m/_/issue-trees' }
+  const vt = '"/private/var/tmp"="write"'
+  for (const kind of ['read', 'impl']) {
+    assert.ok(buildProfileArgs({ ...base, kind, platform: 'darwin' })[1].includes(vt), `darwin ${kind}`)
+    const linux = buildProfileArgs({ ...base, kind, platform: 'linux' })[1]
+    assert.equal(linux.includes('var/tmp'), false, `linux ${kind}`)
+    // symlink の /var/tmp 自体は書き込み可にしない（実体のパスだけ）
+    assert.equal(buildProfileArgs({ ...base, kind, platform: 'darwin' })[1].includes('"/var/tmp"'), false)
+  }
+})
+
+test('permission profile: createAdapter の cfg.platform が buildProfileArgs まで届く（省略時は process.platform）', async () => {
+  const t = setup({ turns: [okTurn(), okTurn(), okTurn()] })
+  const prof = (c) => c.argv.find((x) => x.startsWith('permissions='))
+  const mk = (platform) => createAdapter({ skillDir: SKILL_DIR, mainRoot: t.mainRoot, runDir: t.runDir, toolConfig: {}, env: t.env, ...(platform ? { platform } : {}) })
+  await mk('darwin').run(t.req({ name: 'd' }))
+  assert.ok(prof(t.calls().at(-1)).includes('"/private/var/tmp"="write"'))
+  await mk('linux').run(t.req({ name: 'l' }))
+  assert.equal(prof(t.calls().at(-1)).includes('var/tmp'), false)
+  await mk(undefined).run(t.req({ name: 'x' }))
+  assert.equal(prof(t.calls().at(-1)).includes('"/private/var/tmp"="write"'), process.platform === 'darwin')
 })
 
 // ---------------------------------------------------------------------------
