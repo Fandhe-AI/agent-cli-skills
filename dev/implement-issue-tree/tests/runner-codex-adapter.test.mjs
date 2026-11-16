@@ -265,8 +265,9 @@ test('permission profile: 通常 cwd は read・req.worktreeGitdir があれば 
   const p3 = prof(t.calls().at(-1))
   assert.ok(p3.includes(`${JSON.stringify(join(t.root, 'ch', 'auth.json'))}="deny"`))
   assert.ok(p3.includes(`${JSON.stringify(join(t.fakeHome, '.codex', 'auth.json'))}="deny"`))
-  assert.equal(p3.split('"deny"').length - 1, 2)
-  assert.equal(read.split('"deny"').length - 1, 1, 'CODEX_HOME が ~/.codex と同じなら deny は 1 つ')
+  // 認証ファイルの deny に加え、<runDir>/tmp の deny が 1 つある（LOW-13）
+  assert.equal(p3.split('"deny"').length - 1, 3)
+  assert.equal(read.split('"deny"').length - 1, 2, 'CODEX_HOME が ~/.codex と同じなら認証ファイルの deny は 1 つ（+ tmp の deny）')
 })
 
 test('buildProfileArgs: req.profile で上書きでき、extraWritePaths が加わる', () => {
@@ -602,8 +603,20 @@ test('TMPDIR（LOW-13）: エージェントごとに <runDir>/tmp/<logDir の�
   const prof = (c) => c.argv.find((x) => x.startsWith('permissions='))
   assert.ok(prof(a).includes(`${JSON.stringify(ta)}="write"`))
   assert.equal(prof(a).includes(JSON.stringify(tb)), false, '他のエージェントの TMPDIR は書けない')
-  assert.equal(prof(a).includes(`${JSON.stringify(join(t.runDir, 'tmp'))}=`), false, 'ラン全体の tmp は書けない')
+  // ラン全体の tmp は deny（他のエージェントの TMPDIR を読めない）。自分の分だけより具体的な write で開ける
+  assert.ok(prof(a).includes(`${JSON.stringify(join(t.runDir, 'tmp'))}="deny"`), 'ラン全体の tmp は deny')
   assert.ok(existsSync(ta) && existsSync(tb))
+})
+
+test('buildProfileArgs（LOW-13）: tmpRoot を渡すと deny にし、自分の tmpDir は write のまま。渡さなければ足さない', () => {
+  for (const kind of ['read', 'impl']) {
+    const r = buildProfileArgs({ kind, cwd: '/w', codexHome: '/c', tmpDir: '/r/tmp/a', tmpRoot: '/r/tmp', home: '/h', git: null, platform: 'linux' })[1]
+    assert.ok(r.includes('"/r/tmp"="deny"'), kind)
+    assert.ok(r.includes('"/r/tmp/a"="write"'), kind)
+    assert.ok(r.indexOf('"/r/tmp"="deny"') < r.indexOf('"/r/tmp/a"="write"'), `${kind}: deny を先に書く（実測と同じ並び）`)
+  }
+  const none = buildProfileArgs({ kind: 'read', cwd: '/w', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, platform: 'linux' })[1]
+  assert.equal(none.split('="deny"').length - 1, 2, 'tmpRoot 無しなら deny は認証ファイル 2 件だけ')
 })
 
 test('killSync（LOW-11）: 実行中の codex のプロセスグループ（孫まで）を同期で SIGKILL する', async () => {

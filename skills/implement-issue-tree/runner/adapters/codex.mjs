@@ -45,7 +45,10 @@
 //             gitdir の下の commondir・gitdir・config.worktree と worktree の .git は read に戻す（GITDIR_READ_ONLY）。
 //   どちらも .codex は読み取り・認証ファイル（<CODEX_HOME>/auth.json と ~/.codex/auth.json）は deny。
 //   TMPDIR はエージェントごとに <runDir>/tmp/<logDir の名前>（監査 e670648 の LOW-13。ラン全体で 1 つだと、並行する
-//   別のエージェントの一時ファイル〔コミットメッセージ・PR 本文等〕を読み書きできた）。修復ターンは同じ logDir なので
+//   別のエージェントの一時ファイル〔コミットメッセージ・PR 本文等〕を読み書きできた）。<runDir>/tmp 全体は deny にして
+//   自分の分だけを write で開ける（土台の :read-only は全体を読めるので、write を分けるだけでは他の分を読めた。
+//   2026-11-17・codex-cli 0.169.0 の `codex sandbox -P iit_read` の実測で、deny 無しは他の分の cat・ls が通り、
+//   deny ありは失敗し、自分の分の読み書きは通った。Linux の bubblewrap では未実測）。修復ターンは同じ logDir なので
 //   同じ場所を使う。生成物のプロンプトはエージェント間で一時ファイルを受け渡さない（TEMP_FILE_POLICY は自分の mktemp だけ）。
 //   darwin では両方に /private/var/tmp（/var/tmp の実体）を書き込み可として足す（sandbox の書き込み範囲を広げる）。
 //   macOS の /bin/bash 3.2 は here-doc の一時ファイルを TMPDIR ではなく /var/tmp に作り（書けなければ /tmp →
@@ -128,15 +131,19 @@ export function checkWritablePaths(v) {
 
 /**
  * permission profile の `-c` 引数（2 引数 × 2）。純関数。
- * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, home: string, git: null | { gitdir: string, commonDir: string }, writablePaths?: string[], extraWritePaths?: string[], platform?: string }} o
+ * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, tmpRoot?: string|null, home: string, git: null | { gitdir: string, commonDir: string }, writablePaths?: string[], extraWritePaths?: string[], platform?: string }} o
+ *   tmpRoot: エージェント別 TMPDIR の親（<runDir>/tmp）。渡すと deny にする（他のエージェントの分を読めなくする）。
+ *            tmpDir はその下で、より具体的なパスとして write が優先される
  *   writablePaths: req.writablePaths（agent-host が label ごとに決める追加の書き込み可パス。checkWritablePaths で検証済み）
  *   platform: process.platform の値（テストが注入する）。darwin なら両 profile に DARWIN_HEREDOC_TMP を足す
  */
-export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, writablePaths = [], extraWritePaths = [], platform = process.platform }) {
+export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot = null, home, git, writablePaths = [], extraWritePaths = [], platform = process.platform }) {
   const name = kind === 'impl' ? 'iit_impl' : 'iit_read'
   const ws = kind === 'impl' ? { '.': 'write' } : { '.': 'read' }
   ws['.codex'] = 'read'
-  const fs = { ':minimal': 'read', [tmpDir]: 'write' }
+  const fs = { ':minimal': 'read' }
+  if (tmpRoot) fs[tmpRoot] = 'deny'
+  fs[tmpDir] = 'write'
   if (kind === 'impl' && git) {
     for (const p of ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.lock']) fs[join(git.commonDir, p)] = 'write'
     fs[git.gitdir] = 'write'
@@ -298,7 +305,7 @@ export function createAdapter(cfg) {
       writeFileSync(sp, JSON.stringify(strictifySchema(schema)))
       args.push('--output-schema', sp)
     }
-    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, home, git, writablePaths, extraWritePaths: tc.extraWritePaths, platform }))
+    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot, home, git, writablePaths, extraWritePaths: tc.extraWritePaths, platform }))
     args.push(...buildHookArgs({ hookScript: HOOK_SCRIPT, guardScript, hookLog, merge }))
     if (resume) args.push(resume.sessionRef)
     args.push('-')
