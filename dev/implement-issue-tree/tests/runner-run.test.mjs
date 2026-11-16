@@ -15,7 +15,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { BASE_ARGS, buildTree } from './lib/stub-run.mjs'
 import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
-import { main, parseCli, UsageError } from '../../../skills/implement-issue-tree/runner/run.mjs'
+import { ADAPTERS_DIR, importAdapter, main, parseCli, UsageError } from '../../../skills/implement-issue-tree/runner/run.mjs'
 
 const RUN_MJS = fileURLToPath(new URL('../../../skills/implement-issue-tree/runner/run.mjs', import.meta.url))
 const root = trackTmp(realpathSync(mkdtempSync(join(tmpdir(), 'iit-runner-run-'))))
@@ -210,4 +210,17 @@ test('main: --dry-run で本物の生成物を流すと、result に見積り（
   assert.equal(typeof body.result.blocked.count, 'number')
   assert.match(body.workflowSha256, /^[0-9a-f]{64}$/)
   assert.equal(readdirSync(join(x.runDir, 'agents')).length, 8)
+})
+
+test('importAdapter: 実ファイルの動的 import。無い・createAdapter を持たないものは null、正しい形はモジュール', async () => {
+  const dir = join(root, 'adapters')
+  mkdirSync(dir)
+  writeFileSync(join(dir, 'codex.mjs'), 'export const name = "x"\n')
+  writeFileSync(join(dir, 'opencode.mjs'), 'export function createAdapter(cfg) { return { name: "opencode", cfg } }\n')
+  assert.equal(await importAdapter('codex', join(root, 'no-such-dir')), null)
+  assert.equal(await importAdapter('codex', dir), null)
+  const mod = await importAdapter('opencode', dir)
+  assert.equal(typeof mod.createAdapter, 'function')
+  assert.equal(mod.createAdapter({ a: 1 }).name, 'opencode')
+  assert.equal(ADAPTERS_DIR, join(RUN_MJS, '..', 'adapters'))
 })
