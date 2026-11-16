@@ -5,8 +5,10 @@
 // 実行ファイルからコメントを落としてサイズ予算を確保し、開発ファイル側はコメント量の制約から
 // 解放する（設計の経緯は PR #241 → 本分離）。
 //
-// 変換は「コメント除去」「コード行の先頭インデント除去」「トークン間の不要な半角スペースの
-// 除去」の 3 つだけで、これ以外の minify（識別子短縮・改行除去等）はしない: コメント行は空行化し
+// 変換は 4 段で、「コメント除去」「コード行の先頭インデント除去」「トークン間の不要な半角スペースの
+// 除去」（段 1・トークン列は変えない）のあと、「束縛名（変数・関数・引数）の短縮」（段 2・
+// scripts/mangle-identifiers.cjs）を行う。改行の除去等の minify はしない。段 2 の改名は行の内側だけで行い、
+// プロパティ名・文字列・テンプレートの地の文・正規表現・自由変数は変えない。コメント行は空行化し
 // 改行を全て保持するため、生成物と開発ファイルの行番号は完全に一致する（スタックトレース・
 // エラー行の突き合わせ用）。一方、先頭インデントと空白を落とすため**列番号は一致しない**。
 // テンプレートリテラル内（`${}` 式部分を含む）・文字列リテラル・正規表現リテラルは一切変更しない
@@ -64,6 +66,12 @@
 // 目印が残らず、スクリプトを書き換えると生成物の内容が変わるため `--check` の鮮度ゲートが検出する。ハッシュを
 // 実行前に照合するのは scripts/run-verified.sh（references/script-trust-model.md）。
 //
+// 段 2 の照合（照合 2）: 改名後のテキストが段 1 に対して α 同値（識別子の一貫した改名だけの差。リテラル・テンプレートの
+// 地の文・構造・自由変数は完全一致）であることを、改名器とは独立の検証器（scripts/alpha-verify.cjs）が module と
+// script の両ゴールで確かめる。改名器が class・var・ラベル等の対応外の構文を見つけたとき、検証器が不一致・パース不能・
+// 実行不能・想定外の出力を返したときは、いずれも生成ファイルを書かずに非ゼロ終了する（fail-closed）。改名や照合を
+// 外す CLI 引数・環境変数は無い。ビルド順は 埋め込み → 段 1 → 照合 1 → 改名 → 照合 2。
+//
 // 生成物の鮮度（開発ファイルとの同期）は tests/build-workflow.test.mjs が CI で検証する —
 // 生成物を直接編集したりビルドを忘れたりすると byte 不一致で fail する。
 //
@@ -84,6 +92,8 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const SRC_PATH = join(HERE, 'implement-issue-tree.src.js')
 export const DIST_PATH = join(HERE, 'implement-issue-tree.js')
 export const TOKEN_DIFF_PATH = join(HERE, 'token-diff.cjs')
+export const MANGLE_PATH = join(HERE, 'mangle-identifiers.cjs')
+export const ALPHA_VERIFY_PATH = join(HERE, 'alpha-verify.cjs')
 
 // 直後の `/` を正規表現リテラルの開始と判定するキーワード。識別子・数値の直後の `/` は
 // 除算として素通しする（標準的な division / regex 判別ヒューリスティック）。
@@ -871,14 +881,60 @@ export function buildStage1(rawSrc, scriptsDir, parity = {}) {
   return { src, stage1 }
 }
 
+// 改名器・検証器の子プロセスを `node --expose-internals` で起動する（acorn は内部モジュールでこの形でしか読めない）。
+// 起動できない・非ゼロ終了・stdout が JSON でない場合は throw する（fail-closed）。
+function runHelperJson(label, helperPath, execPath, input) {
+  const r = spawnSync(execPath, ['--expose-internals', helperPath], { input, encoding: 'utf8', maxBuffer: 1 << 28 })
+  if (r.error || r.status !== 0) {
+    throw new Error(
+      `${label}を実行できない（検査を省略せず中止する）: ` +
+        `${r.error ? r.error.message : `status ${r.status}${r.signal ? ` signal ${r.signal}` : ''}`} ${r.stderr ?? ''}`.trim(),
+    )
+  }
+  try {
+    return JSON.parse(r.stdout)
+  } catch (e) {
+    throw new Error(`${label}の出力を解釈できない（JSON として読めない。検査を省略せず中止する）: ${e.message}`)
+  }
+}
+
 /**
- * ビルド本体（CLI が使う関数）。開発ファイルから生成物を作ってトークン照合し、書き込む（`checkOnly` では
+ * 段 1 の生成物の束縛名を短縮する（scripts/mangle-identifiers.cjs）。対応外の構文（class・var・ラベル・with 等）は
+ * 改名器が拒否するので throw になる。戻り値は改名後のテキストで、そのままでは使わず必ず verifyAlpha を通す。
+ * `helperPath` / `execPath` は差し替え用（テスト専用。CLI からは渡せない）。
+ */
+export function mangleStage1(stage1, { helperPath = MANGLE_PATH, execPath = process.execPath } = {}) {
+  const out = runHelperJson('識別子の改名', helperPath, execPath, stage1)
+  if (typeof out?.code !== 'string' || out.code === '') {
+    throw new Error('識別子の改名の出力が想定の形でない（code が空の文字列でない。検査を省略せず中止する）')
+  }
+  return out.code
+}
+
+/**
+ * 段 1 と改名後のテキストが α 同値であることを独立の検証器（scripts/alpha-verify.cjs）で照合する（照合 2）。
+ * ok: true の 1 件を明示的に受け取ったときだけ通り、不一致・パース不能・実行不能・出力が想定の形でない場合は throw する。
+ * `helperPath` / `execPath` は差し替え用（テスト専用。CLI からは渡せない）。
+ */
+export function verifyAlpha(stage1, mangled, { helperPath = ALPHA_VERIFY_PATH, execPath = process.execPath } = {}) {
+  const out = runHelperJson('α 同値の照合', helperPath, execPath, JSON.stringify([{ name: 'build', before: stage1, after: mangled }]))
+  const results = out?.results
+  if (!Array.isArray(results) || results.length !== 1 || typeof results[0]?.ok !== 'boolean') {
+    throw new Error('α 同値の照合の結果を解釈できない（results が 1 件の { ok: boolean } でない。検査を省略せず中止する）')
+  }
+  const [r] = results
+  if (r.ok === true && r.kind === 'match') return
+  throw new Error(`改名後の生成物が段 1 と α 同値でない（${r.kind}）: ${r.detail}`)
+}
+
+/**
+ * ビルド本体（CLI が使う関数）。開発ファイルから段 1 を作ってトークン照合（照合 1）→ 識別子の改名 → α 同値の照合（照合 2）を行い、書き込む（`checkOnly` では
  * 書かず、既存の実行ファイルとの一致だけ確かめる）。標準出力・標準エラーに出す行と終了コードを返し、
  * 出力と終了は呼び出し側（CLI）が行う。照合に失敗したら生成ファイルは書かない。
- * `parity` は verifyTokenParity へ渡す差し替え（`helperPath` / `execPath`。テスト専用で、CLI の引数からは渡せない）。
+ * `parity` / `mangle` / `alpha` は照合 1・改名器・照合 2 へ渡す差し替え（`helperPath` / `execPath`。テスト専用で、CLI の引数からは渡せない）。
  * `scriptsDir` はハッシュを埋め込むスクリプトの置き場の差し替え（テスト専用。既定は開発ファイルと同じディレクトリで、CLI の引数からは渡せない）。
  */
-export function runBuild({ srcPath = SRC_PATH, distPath = DIST_PATH, checkOnly = false, parity = {}, scriptsDir = dirname(srcPath) } = {}) {
+export function runBuild({ srcPath = SRC_PATH, distPath = DIST_PATH, checkOnly = false, parity = {}, mangle = {}, alpha = {}, scriptsDir = dirname(srcPath) } = {}) {
   const startedAt = Date.now()
   let src
   let artifact
@@ -886,7 +942,8 @@ export function runBuild({ srcPath = SRC_PATH, distPath = DIST_PATH, checkOnly =
     // 目印をスクリプトのハッシュへ置換した文字列を、以降の変換とトークン照合の「開発ファイル」として扱う
     const stage = buildStage1(readFileSync(srcPath, 'utf8'), scriptsDir, parity)
     src = stage.src
-    artifact = stage.stage1
+    artifact = mangleStage1(stage.stage1, mangle)
+    verifyAlpha(stage.stage1, artifact, alpha)
   } catch (e) {
     return { status: 1, stdout: [], stderr: [`ビルド中止（${distPath} は書き込まない）: ${e.message}`], wrote: false }
   }
@@ -908,14 +965,14 @@ export function runBuild({ srcPath = SRC_PATH, distPath = DIST_PATH, checkOnly =
         wrote: false,
       }
     }
-    return { status: 0, stdout: [`鮮度 ok: ${outBytes} B（src ${srcBytes} B・トークン照合 ok・${elapsed}s）`], stderr: [], wrote: false }
+    return { status: 0, stdout: [`鮮度 ok: ${outBytes} B（src ${srcBytes} B・トークン照合 ok・α 照合 ok・${elapsed}s）`], stderr: [], wrote: false }
   }
   writeFileSync(distPath, artifact)
   return {
     status: 0,
     stdout: [
       `生成完了: ${distPath}`,
-      `src ${srcBytes} B → dist ${outBytes} B（-${srcBytes - outBytes} B, -${Math.round(((srcBytes - outBytes) / srcBytes) * 100)}%・トークン照合 ok・${elapsed}s）`,
+      `src ${srcBytes} B → dist ${outBytes} B（-${srcBytes - outBytes} B, -${Math.round(((srcBytes - outBytes) / srcBytes) * 100)}%・トークン照合 ok・α 照合 ok・${elapsed}s）`,
     ],
     stderr: [],
     wrote: true,

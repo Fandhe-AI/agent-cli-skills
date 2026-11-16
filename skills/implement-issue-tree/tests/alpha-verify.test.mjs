@@ -8,8 +8,6 @@
 //   (b) CLI の異常系 — 入力の形が違えば非ゼロ終了し、stdout に何も書かない（呼び出し側が一致と誤読しない）
 //   (c) 実物 — src から作った stage1 の恒等が一致し（手順 6 が実物で 0 件であることを含む）、
 //       実物の規模でも手順 6 が当たること。生成物は次の段で改名済みになるので、コミット済みの生成物は読まない。
-//       一律の拒否に当たる既知の 1 か所（h.toString(36)）は、件数と場所を確かめてから (h>>>0) に置き換えて見る
-//       （PR 3 で src を書き換えたら置き換えを外す。tests/lib/mangle-harness.mjs の patchKnownObservation）
 // acorn は `node --expose-internals` の子プロセスでしか読めないため、検証器は CLI として起動する。
 // 件数・バイト数などの実測値は固定しない（main が進むと変わる）。
 import { test } from 'node:test'
@@ -19,7 +17,6 @@ import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnAsync } from './lib/run-async.mjs'
 import { buildArtifact, embedScriptHashes, SRC_PATH } from '../scripts/build-workflow.mjs'
-import { patchKnownObservation } from './lib/mangle-harness.mjs'
 
 const VERIFIER = fileURLToPath(new URL('../scripts/alpha-verify.cjs', import.meta.url))
 const KINDS = new Set(['match', 'mismatch', 'source-unparsable', 'artifact-unparsable'])
@@ -343,10 +340,8 @@ test('CLI: 入力の形が違えば非ゼロ終了し、stdout に何も書か�
 // (c) 実物
 
 test('実物: stage1 の恒等は一致し（手順 6 は 0 件）、関数値の文字列化を足すと実物の規模でも拒否する', async () => {
-  // ビルダーと同じ手順で stage1（コメント・空白を除いた生成物）を作る。一律の拒否に当たる既知の 1 か所は、
-  // 件数（ちょうど 1 件）・offset・前後の文字列を確かめてから置き換える。PR 3 で src の該当行を
-  // (h>>>0).toString(36) に書き換えると件数が 0 になり patchKnownObservation が落ちるので、そのときこの置き換えを外す
-  const stage1 = await patchKnownObservation(buildArtifact(embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), dirname(SRC_PATH))))
+  // ビルダーと同じ手順で stage1（コメント・空白を除いた生成物）を作る
+  const stage1 = buildArtifact(embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), dirname(SRC_PATH)))
   // 実物に無い名前の関数宣言と、その文字列化を最終行の末尾に足す（行数を変えない）。
   // before = after にして拒否の理由を手順 6 だけにする
   let fn = 'alphaVerifyProbe'

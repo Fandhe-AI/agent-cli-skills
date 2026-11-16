@@ -787,7 +787,7 @@ function boundaryNonce(keyMaterial) {
     h3 = Math.imul(h3 ^ (c + i), 0x27220a95) >>> 0
     h4 = Math.imul(h4 + (c ^ (i & 0xff)), 0xc2b2ae35) >>> 0
   }
-  const pad = (h) => h.toString(36).padStart(7, '0')
+  const pad = (h) => (h >>> 0).toString(36).padStart(7, '0')
   return `${pad(h1)}${pad(h2)}${pad(h3)}${pad(h4)}`
 }
 
