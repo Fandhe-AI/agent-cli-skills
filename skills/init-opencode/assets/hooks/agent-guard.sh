@@ -25,7 +25,12 @@
 #                  --no-verify（略記を含む）、または commit の -n。フックの無効化・差し替えも同じ
 #                  コードで止める: -c / --config-env の core.hooksPath、git config での
 #                  core.hooksPath の設定・解除、コマンド先頭の HUSKY=0 / HUSKY_SKIP_HOOKS=1、
-#                  alias の定義（-c alias.* と git config alias.*。値は解決せず定義自体を拒否）
+#                  alias の定義（-c alias.* と git config alias.*。値は解決せず定義自体を拒否）。
+#                  git config の option は一意な前置き（--fil・--ty・--co・--v）・= 連結・短い形の束ね書きも読み、
+#                  値を取る option（--file・--blob・--type・--default・--comment・--value・--url と -f・-t）は値ごと飛ばす。
+#                  キーより後ろと `--` の後ろの語は git と同じく位置引数として数える（`git config core.hooksPath --get`
+#                  は設定）。set / unset の subcommand 形と、rename-section / remove-section で core / alias の節を
+#                  移す・消す形（移す先が core / alias の形を含む）も止める
 #                  （全セッション）
 #   force-push     git push の --force / -f / --mirror / +<refspec>（`--` の後の + 始まりも）/
 #                  --force-with-lease（= 形・略記を含む）/ --force-if-includes。lease 付きでも
@@ -317,6 +322,43 @@ function cred_tok(t,   v) {
 # 検索コマンドへ渡すホームやその設定ディレクトリそのもの（再帰検索で hosts.yml 等の中身が出る）。
 function homeparent(t) { return (normpath(t) ~ /^(~|[$]home|[$][{]home[}])(\/([.]config|[.]codex))?\/?$/) }
 function opt_is(t, full, min) { return (length(t) >= min && t == substr(full, 1, length(t))) }
+# git config の option 1 語（tok[j]。`-` 始まりで `--` 以外）を読み、意味を gco_* へ置く。値を次の語で取ったら 1 を返す
+# （呼び出し側は 1 語飛ばす）。cred_check（認証情報の読み出し）と config_args（フックの差し替え）が同じ規則で読む。
+#   git の long option は一意な前置きへ略せる（--fil・--ty・--co・--v）。min は他の option と区別できる最短の長さで、
+#   それより短い前置きは git 自身が曖昧として拒否する。値は = 連結（--file=X）・次の語（--file X）・短い形の連結
+#   （-fX・-zfX・-f=X は値 =X）のどれでも取る。
+#   gco_list:  一覧・照合の読み出し（--list・--get-regexp・--get-urlmatch・--regexp・--url と -l）
+#   gco_get:   キーを名指す読み出し（--get・--get-all）
+#   gco_edit:  --edit・-e
+#   gco_write: --unset・--unset-all・--add・--replace-all
+#   gco_fv / gco_blob: --file / --blob / -f の値と、それが --blob のものか
+function gconf_opt(j,   t, lt, i, m, c, v, used) {
+  t = tok[j]; gco_list = 0; gco_get = 0; gco_edit = 0; gco_write = 0; gco_fv = ""; gco_blob = 0; used = 0
+  if (t ~ /^--./) {
+    lt = t; sub(/=.*$/, "", lt); i = index(t, "=")
+    if (opt_is(lt, "--list", 4) || opt_is(lt, "--get-regexp", 7) || opt_is(lt, "--get-urlmatch", 7) || opt_is(lt, "--regexp", 5) || opt_is(lt, "--url", 4)) gco_list = 1
+    if (lt == "--get" || opt_is(lt, "--get-all", 7)) gco_get = 1
+    if (opt_is(lt, "--edit", 3)) gco_edit = 1
+    if (lt == "--unset" || opt_is(lt, "--unset-all", 9) || opt_is(lt, "--add", 4) || opt_is(lt, "--replace-all", 5)) gco_write = 1
+    if (opt_is(lt, "--file", 4) || opt_is(lt, "--blob", 4) || opt_is(lt, "--type", 3) || opt_is(lt, "--default", 3) || opt_is(lt, "--comment", 3) || opt_is(lt, "--value", 3) || opt_is(lt, "--url", 4)) {
+      if (i > 0) v = substr(t, i + 1); else { v = tok[j + 1]; used = 1 }
+      if (opt_is(lt, "--file", 4) || opt_is(lt, "--blob", 4)) { gco_fv = v; gco_blob = opt_is(lt, "--blob", 4) }
+    }
+    return used
+  }
+  for (m = 2; m <= length(t); m++) {
+    c = substr(t, m, 1)
+    if (c == "l") gco_list = 1
+    else if (c == "e") gco_edit = 1
+    else if (c == "f" || c == "t") {
+      v = substr(t, m + 1)
+      if (v == "") { v = tok[j + 1]; used = 1 }
+      if (c == "f") gco_fv = v
+      break
+    }
+  }
+  return used
+}
 # gh の option を読み飛ばして次の位置引数の位置を返す。値を取る option（-R / --repo / --hostname。= 連結形は 1 語）は値ごと飛ばす。
 function gh_flags(k) {
   while (k <= ntok && tok[k] ~ /^-/) {
@@ -325,7 +367,7 @@ function gh_flags(k) {
   }
   return k
 }
-function cred_check(p, wr,   cb, i, k, t, lt, np, fl, pos, sub1, j, sk, haspat, hasp, wflag, lflag, eflag, noidx, grepv, m, c, v) {
+function cred_check(p, wr,   cb, i, k, t, lt, np, fl, pos, sub1, j, sk, haspat, hasp, wflag, lflag, eflag, noidx, grepv) {
   for (i = 1; i <= nrin; i++) cred_tok(rin[i])
   # command -v / -V は名前の検索だけで実行しない（`command -v printenv`・`command -v set`・`command -v export`）。
   if (cmdv) return
@@ -395,37 +437,17 @@ function cred_check(p, wr,   cb, i, k, t, lt, np, fl, pos, sub1, j, sk, haspat, 
       wflag = 0; lflag = 0; eflag = 0; np = 0
       for (j = k + 1; j <= ntok; j++) {
         t = tok[j]
-        if (t == "--unset" || t == "--unset-all" || t == "--add" || t == "--replace-all") wflag = 1
         # 設定の一覧・正規表現／URL 照合の読み出しは extraheader の値（認証ヘッダ）を含み得る。キーを 1 つだけ名指す --get は止めない。
-        # git の long option は一意な前置きへ略せるので前置きも同一視する。--edit は設定全体をエディタで開く。
-        # 値を取る option（--file・--blob・--type・--default・--comment・--value と -f・-t）は、独立した語なら次の語、
-        # = 連結形（--file=X・--fi=X）・短い形の連結（-fX・-lfX・-f=X）なら同じ語の残りが値。--file / --blob の値は
-        # どの書き方でも開く形として見る。--regexp・--url も一意な前置き（--reg・--ur）を同一視する。
-        if (t ~ /^--./) {
-          lt = t; sub(/=.*$/, "", lt); i = index(t, "=")
-          if (opt_is(lt, "--list", 4) || opt_is(lt, "--get-regexp", 7) || opt_is(lt, "--get-urlmatch", 7) || opt_is(lt, "--regexp", 5) || opt_is(lt, "--url", 4)) lflag = 1
-          if (opt_is(lt, "--edit", 3)) eflag = 1
-          if (opt_is(lt, "--file", 4) || opt_is(lt, "--blob", 4)) {
-            if (i > 0) v = substr(t, i + 1); else { v = tok[j + 1]; j++ }
-            cred_tok(v)
-            # --blob の値 <rev>:<path> は path 側も見る（cat .git-credentials と同じ扱い）。
-            if (opt_is(lt, "--blob", 4) && index(v, ":") > 0) cred_tok(substr(v, index(v, ":") + 1))
-          }
-          else if (i == 0 && (opt_is(lt, "--type", 3) || opt_is(lt, "--default", 3) || opt_is(lt, "--comment", 4) || opt_is(lt, "--value", 4))) j++
-          continue
-        }
-        if (t ~ /^-[^-]/) {
-          for (m = 2; m <= length(t); m++) {
-            c = substr(t, m, 1)
-            if (c == "l") lflag = 1
-            else if (c == "e") eflag = 1
-            else if (c == "f" || c == "t") {
-              v = substr(t, m + 1)
-              if (v == "") { v = tok[j + 1]; j++ }
-              if (c == "f") cred_tok(v)
-              break
-            }
-          }
+        # --edit は設定全体をエディタで開く。option の読み方（一意な前置き・= 連結・短い形の束ね書き・値を取る option）は gconf_opt。
+        # --file / --blob の値はどの書き方でも開く形として見る。--blob の <rev>:<path> は path 側も見る（cat .git-credentials と同じ扱い）。
+        if (t ~ /^-./ && t != "--") {
+          j += gconf_opt(j)
+          if (gco_list) lflag = 1
+          if (gco_edit) eflag = 1
+          # 書き込みの option はキーより前だけ。git はキーより後ろを位置引数（値の正規表現）として読むので、
+          # `git config --get http.extraheader --unset=x` は読み出しのまま。
+          if (gco_write && np == 0) wflag = 1
+          if (gco_fv != "") { cred_tok(gco_fv); if (gco_blob && index(gco_fv, ":") > 0) cred_tok(substr(gco_fv, index(gco_fv, ":") + 1)) }
           continue
         }
         if (t ~ /^-/) continue
@@ -599,21 +621,35 @@ function conf_bad(kv,   lk) {
   return (lk ~ /^core\.hookspath([=]|$)/ || lk ~ /^alias\./)
 }
 # git config の引数列。core.hooksPath / alias.* を「設定・解除する形」だけ拒否する
-# （--get 系・引数がキー 1 つだけの読み取りは許可）。
-function config_args(k,   a, ro, wflag, np, key, nkey) {
-  ro = 0; wflag = 0; np = 0; key = ""; nkey = 0
+# （--get 系・引数がキー 1 つだけの読み取りは許可）。option の読み方は cred_check と同じ gconf_opt（一意な前置き
+# 〔--fil・--ty・--co・--v〕・= 連結・短い形の束ね書き・値を取る option の読み飛ばし）。git は最初の位置引数（キー）より
+# 後ろと `--` の後ろを option として読まない（`git config core.hooksPath --get` は値 --get の設定、`git config set core.x -y`
+# は値 -y の設定）ので、そこから先はすべて位置引数として数える。新しい形の subcommand（get / list / set / unset）は
+# キーより前の最初の位置引数として読む（git は config の直後だけを subcommand と見るが、版の差に備えて位置を広く取る）。
+# rename-section / remove-section（--rename-section・--remove-section を含む）は、移す前後どちらかの節が core / alias なら
+# 節ごと差し替える・消す形（core.hooksPath / alias.* の設定・解除と同じ）として拒否する。
+function config_args(k,   a, ro, wflag, key, nkey, dd, sc, ren) {
+  ro = 0; wflag = 0; key = ""; nkey = 0; dd = 0; sc = 0; ren = 0
   for (; k <= ntok; k++) {
     a = tok[k]
-    if (a == "--get" || a == "--get-all" || a == "--get-regexp" || a == "--get-urlmatch" || a == "--list" || a == "-l") ro = 1
-    else if (a == "--unset" || a == "--unset-all" || a == "--add" || a == "--replace-all") wflag = 1
-    else if (a == "-f" || a == "--file" || a == "--blob" || a == "--type" || a == "-t" || a == "--default") k++
-    else if (substr(a, 1, 1) == "-") continue
-    else {
-      np++
-      if (np == 1 && (a == "get" || a == "list")) ro = 1
-      else if (np == 1 && (a == "set" || a == "unset")) wflag = 1
-      else { nkey++; if (nkey == 1) key = a }
+    if (!dd && nkey == 0 && a == "--") { dd = 1; continue }
+    if (!dd && nkey == 0 && a ~ /^-./) {
+      if (opt_is(a, "--rename-section", 5) || opt_is(a, "--remove-section", 5)) ren = 1
+      k += gconf_opt(k)
+      if (gco_list || gco_get) ro = 1
+      if (gco_write) wflag = 1
+      continue
     }
+    if (nkey == 0 && !sc && (a == "get" || a == "list" || a == "set" || a == "unset" || a == "rename-section" || a == "remove-section")) {
+      sc = 1
+      if (a == "get" || a == "list") ro = 1
+      else if (a == "rename-section" || a == "remove-section") ren = 1
+      else wflag = 1
+      continue
+    }
+    nkey++
+    if (nkey == 1) key = a
+    if (ren && nkey <= 2 && tolower(a) ~ /^(core|alias)([.]|$)/) setv("no-verify")
   }
   if (key != "" && conf_bad(key) && (wflag || (!ro && nkey >= 2))) setv("no-verify")
 }

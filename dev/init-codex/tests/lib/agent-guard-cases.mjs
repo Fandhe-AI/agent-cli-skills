@@ -1439,6 +1439,10 @@ export const CRED_DENY = [
   "git config --fil=x --lis",
   "git diff -O~/.config/gh/hosts.yml",
   "git -C~/.config/gh log",
+  // 書き込みの option はキーより前だけ効く（キーより後ろは git が値の正規表現として読む）
+  "git config --get http.extraheader '--unset=|.'",
+  "git config --get-regexp . '--add=|.'",
+  "git config --get http.extraheader --add",
 ]
 
 export const CRED_ALLOW = [
@@ -1617,4 +1621,59 @@ export const ENQUEUE_DENY = [
   `gh api graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:"x"}){clientMutationId}}'`,
   `gh api graphql -f query='mutation($i:EnqueuePullRequestInput!){enqueuePullRequest(input:$i){clientMutationId}}'`,
   `gh api graphql -f query='mutation{ enqueuePullRequest (input:{pullRequestId:"x"}){clientMutationId}}'`,
+]
+
+// git config での core.hooksPath / alias.* の設定（no-verify・全セッション）。#805 の凍結後に足した判定で、旧版との差分テスト
+// （agent-guard-805.test.mjs）の対象外（POST_805）。cred_check と共通の option 解析 gconf_opt の規則（一意な前置き・= 連結・
+// 短い形の束ね書き・値を取る option の読み飛ばし）と、キーより後ろ・`--` の後ろを位置引数として数える規則、set / unset の
+// subcommand 形、rename-section / remove-section で core / alias の節を移す・消す形を見る。
+export const HOOKCONF_DENY = [
+  ['git config --fil x core.hooksPath /dev/null', 'no-verify'],
+  ['git config --fil=x core.hooksPath /dev/null', 'no-verify'],
+  ['git config -fx core.hooksPath /dev/null', 'no-verify'],
+  ['git config -zfx core.hooksPath /dev/null', 'no-verify'],
+  ['git config --comment n core.hooksPath /x', 'no-verify'],
+  ['git config set --comment n core.hooksPath /x', 'no-verify'],
+  ['git config set --co n core.hooksPath /x', 'no-verify'],
+  ['git config set --value x core.hooksPath /y', 'no-verify'],
+  ['git config set --v x core.hooksPath /y', 'no-verify'],
+  ['git config --ty path core.hooksPath /x', 'no-verify'],
+  ['git config --ty=path core.hooksPath /x', 'no-verify'],
+  ['git config -tpath core.hooksPath /x', 'no-verify'],
+  ['git config --d x core.hooksPath /y', 'no-verify'],
+  ['git config core.hooksPath --get', 'no-verify'],
+  ['git config core.hooksPath -x', 'no-verify'],
+  ['git config set core.hooksPath -x', 'no-verify'],
+  ['git config -- core.hooksPath /x', 'no-verify'],
+  ['git config set -- core.hooksPath -x', 'no-verify'],
+  ['git config unset --all core.hooksPath', 'no-verify'],
+  ['git config --unset-a core.hooksPath', 'no-verify'],
+  ['git config --ad core.hooksPath x', 'no-verify'],
+  ['git config --rep core.hooksPath x', 'no-verify'],
+  ['git config rename-section foo core', 'no-verify'],
+  ['git config --rename-section foo alias', 'no-verify'],
+  ['git config --rena foo core', 'no-verify'],
+  ['git config rename-section core foo', 'no-verify'],
+  ['git config rename-section alias x', 'no-verify'],
+  ['git config remove-section core', 'no-verify'],
+  ['git config --remove-section alias', 'no-verify'],
+  ['git config --rem core', 'no-verify'],
+  ['git config set --all alias.p push', 'no-verify'],
+  ['git config set --append alias.p push', 'no-verify'],
+  ['git config --bl x alias.p push', 'no-verify'],
+]
+
+// 同じ解析で止めない形（hooksPath / alias でない設定・hooksPath の読み取り・core / alias に関わらない rename-section / remove-section）。
+export const HOOKCONF_ALLOW = [
+  'git config core.editor vim',
+  'git config set user.name x',
+  'git config set --comment n user.name x',
+  'git config --fil x user.name y',
+  'git config set --type bool core.bare true',
+  'git config --type=path --get core.hooksPath',
+  'git config --get-a core.hooksPath',
+  'git config get --all core.hooksPath',
+  'git config --get core.hooksPath x',
+  'git config rename-section foo bar',
+  'git config remove-section foo',
 ]

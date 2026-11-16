@@ -67,6 +67,8 @@ import {
   CRED_DENY,
   CRED_ALLOW,
   ENQUEUE_DENY,
+  HOOKCONF_DENY,
+  HOOKCONF_ALLOW,
   FP805_FLIP,
   FP805_STAY_DENY,
   FP805_AUDIT_DENY,
@@ -87,6 +89,12 @@ for (const bash of BASHES) {
         }
         for (const cmd of FIX_ALLOW) {
           it(`allow: ${JSON.stringify(cmd)}`, async () => expectAllow(await run(bash, cmd, subagent)))
+        }
+        for (const [cmd, reason] of HOOKCONF_DENY) {
+          it(`[hookconf] deny ${reason}: ${cmd}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
+        }
+        for (const cmd of HOOKCONF_ALLOW) {
+          it(`[hookconf] allow: ${cmd}`, async () => expectAllow(await run(bash, cmd, subagent)))
         }
         for (const [cmd, reason] of NEST_DENY) {
           it(`deny ${reason}: ${JSON.stringify(cmd.length > 200 ? `${cmd.slice(0, 60)}…(${cmd.length}字)` : cmd)}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
