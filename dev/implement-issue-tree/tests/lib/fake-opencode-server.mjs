@@ -35,7 +35,7 @@ rec({ ev: 'start', pid: process.pid, port, hasPassword: Boolean(PASSWORD), confi
 const pluginEntry = process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT).plugins?.[0] : null
 if (pluginEntry && !process.env.FAKE_OC_NOPLUGIN) {
   const mod = await import(pathToFileURL(join(pluginEntry.package, 'index.js')).href)
-  await mod.default.setup({ options: pluginEntry.options, permission: { hook: async () => {} } })
+  await mod.default.setup({ options: pluginEntry.options, permission: { hook: async () => {} }, tool: { hook: async () => {} } })
 }
 
 const sessions = new Map() // id -> { id, parentID, title, location, messages, active, seq, timer }

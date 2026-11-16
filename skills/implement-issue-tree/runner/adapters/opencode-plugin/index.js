@@ -16,6 +16,17 @@
 //   protectedPaths  配列。書き込みを拒否する絶対パス（完全一致と配下）。アダプタが ~/.config/opencode・ランのログと目印を渡す。
 //                guardScript と plugin 自身の置き場は options に無くても常に保護する（下の「保護」）
 //
+// 全文の判定（監査 e670648 の MEDIUM-6。全 serve）:
+//   permission.evaluate の resource は OpenCode のスキャナが分解した後の形で、代入・export・cd だけのコマンドでは
+//   permission.evaluate 自体が来ない（v2.2.7 の実測: `A=1`・`export B=2`・`cd .` は発火せず、`X=$(echo hi)` は `echo hi`
+//   だけが届く）。`export HUSKY=0; git commit -m x` は全文ならガードが no-verify で止めるが、resource の `git commit -m x`
+//   だけでは通る。そこで tool.execute.before に届く input.command の全文を、Codex の hook と同じくガードに通し、deny なら
+//   throw で呼び出しを拒否する（throw した呼び出しは実行されない。実測）。permission.evaluate の resource ごとの判定も残す
+//   （shell.create.before で書き換わった後の実際に走る形を見る）。shell で resource が 0 件の permission.evaluate は拒否する。
+//   順序: (1) merge 用 serve で全文が mergeRes に完全一致したら、ガードを呼ばずに対応づけの記録だけをする（下記。
+//   全文をガードに通すと merge-guard で拒否されるため）。(2) 保護パスへの書き込み（下の「保護」）は拒否。(3) 全文をガードへ。
+//   ctx.tool.hook が無い版では全文を判定できないので、目印を書かない（アダプタが prereq で止める。fail-closed）。
+//
 // merge-exec の対応づけ（mergeRes が空でない serve だけ）:
 //   OpenCode v2.2.7 の permission.evaluate に届く resource は、shell の代入（`HEAD_SHA="…";`）を落とした後半
 //   （`gh pr merge N --squash --delete-branch --match-head-commit "$HEAD_SHA"`）の 1 件だけで、全文はどこにも無い
@@ -133,15 +144,10 @@ const MERGE_BIND_MAX = 64
 /** sessionID・messageID・id の組をキーにする。どれかが文字列でなければ null（記録しない・照合しない）。 */
 const bindKey = (sessionID, messageID, id) => ([sessionID, messageID, id].every((v) => typeof v === 'string' && v !== '') ? `${sessionID}\u0000${messageID}\u0000${id}` : null)
 
-/** tool.execute.before: mergeRes に完全一致した shell の呼び出しだけを記録する。 */
-function recordMergeCall(opts, binds, event) {
-  const key = bindKey(event?.sessionID, event?.messageID, event?.id)
-  if (!key) return
-  binds.delete(key)
-  const command = event.input?.command
-  if (event.tool !== 'shell' || typeof command !== 'string' || !opts.mergeRes.some((re) => re.test(command))) return
+/** mergeRes に完全一致した shell の呼び出しを記録する（同じ組の古い記録は呼び出し側で消してある）。 */
+function recordMergeCall(binds, key, command) {
   const i = command.indexOf('; ')
-  if (i < 0) return
+  if (!key || i < 0) return
   const now = Date.now()
   for (const [k, v] of binds) if (v.at + MERGE_BIND_TTL_MS < now) binds.delete(k)
   while (binds.size >= MERGE_BIND_MAX) binds.delete(binds.keys().next().value)
@@ -193,6 +199,28 @@ function judge(guardScript, command, timeoutMs) {
   return { deny: true, code: `deny:${m[2] ?? 'unknown'}` }
 }
 
+/**
+ * tool.execute.before（全 serve）: shell の全文をガードに通す。拒否は throw（呼び出しが実行されない）。冒頭の「全文の判定」。
+ * shell 以外でも input.command が文字列の tool（名前が変わった shell・plugin 定義）は同じく全文を判定する。
+ */
+function beforeTool(opts, binds, env, event) {
+  const log = (what) => { try { appendFileSync(opts.log, `${Math.floor(Date.now() / 1000)}\t${what}\n`) } catch { /* ログ失敗は判定を変えない */ } }
+  const reject = (code, message) => { log(code); throw new Error(message) }
+  if (!event || typeof event !== 'object') reject('deny-bad-event', 'iit-runner: 対象を解釈できないため拒否した')
+  const key = bindKey(event.sessionID, event.messageID, event.id)
+  if (key) binds.delete(key)
+  const command = event.input?.command
+  if (typeof command !== 'string') {
+    if (event.tool === 'shell') reject('deny-bad-event', 'iit-runner: 対象を解釈できないため拒否した')
+    return
+  }
+  if (event.tool === 'shell' && opts.mergeRes.length > 0 && opts.mergeRes.some((re) => re.test(command))) return recordMergeCall(binds, key, command)
+  if (shellTouchesProtected(command, env.roots, env.baseDir)) reject('deny-protected-edit', MSG_PROTECTED)
+  const v = judge(opts.guardScript, command, GUARD_TIMEOUT_MS)
+  if (v.deny) reject(v.code, guardDenyMessage(v.code))
+  log('allow')
+}
+
 function evaluate(opts, binds, event, env) {
   const log = (what) => { try { appendFileSync(opts.log, `${Math.floor(Date.now() / 1000)}\t${what}\n`) } catch { /* ログ失敗は判定を変えない */ } }
   if (event.effect === 'deny') return
@@ -208,7 +236,11 @@ function evaluate(opts, binds, event, env) {
     } else if (resources.some((r) => isProtectedPath(r, env.roots, env.baseDir))) { log('deny-protected-edit'); return deny(event, MSG_PROTECTED) }
     if (action === 'edit') return
   }
-  if (resources.length === 0) return
+  if (resources.length === 0) {
+    if (action !== 'shell') return
+    log('deny-bad-event')
+    return deny(event, 'iit-runner: 対象を解釈できないため拒否した')
+  }
   if (action === 'shell' && opts.mergeRes.length > 0 && resources.every((r) => typeof r === 'string') && takeMergeBind(binds, event)) { log('allow-mergeform'); return }
   const deadline = Date.now() + TOTAL_BLOCK_BUDGET_MS
   for (const command of resources) {
@@ -230,14 +262,16 @@ export default {
     const dir = typeof ctx.location?.directory === 'string' && isAbsolute(ctx.location.directory) ? ctx.location.directory : null
     const env = opts ? { roots: protectedRoots(opts), baseDir: dir ? realOr(dir) : null } : null
     const binds = new Map() // merge-exec の対応づけ（冒頭の説明）。mergeRes が空の serve では何も記録しない
-    if (opts && opts.mergeRes.length > 0 && typeof ctx.tool?.hook === 'function') {
-      // 記録の失敗は「記録なし」= 後半の形はガードに回って拒否される（fail-closed）ので、例外は外へ出さない
-      await ctx.tool.hook('execute.before', async (event) => { try { recordMergeCall(opts, binds, event) } catch { /* 記録しない */ } })
+    const toolHook = typeof ctx.tool?.hook === 'function'
+    if (opts && toolHook) {
+      // 拒否と判定中の例外はどちらも throw のまま返す（呼び出しが実行されない = fail-closed）
+      await ctx.tool.hook('execute.before', async (event) => beforeTool(opts, binds, env, event))
       await ctx.tool.hook('execute.after', async (event) => {
         try { const k = bindKey(event?.sessionID, event?.messageID, event?.id); if (k) binds.delete(k) } catch { /* 消し損ねは期限で消える */ }
       })
     }
-    if (opts?.markerPath && opts.nonce) writeFileSync(opts.markerPath, String(opts.nonce))
+    // 目印は全文の判定まで登録できたときだけ書く（書かなければアダプタが prereq で止める）
+    if (opts && toolHook && opts.markerPath && opts.nonce) writeFileSync(opts.markerPath, String(opts.nonce))
     await ctx.permission.hook('evaluate', async (event) => {
       try {
         if (!opts) return deny(event, 'iit-runner: plugin の設定が不正なため拒否した')

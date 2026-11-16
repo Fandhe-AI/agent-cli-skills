@@ -1,5 +1,6 @@
 // ランナー専用 OpenCode plugin（runner/adapters/opencode-plugin）の単体テスト。
 // plugin を node で読み込み、偽の ctx と偽の agent-guard.sh で permission.evaluate の判定を確かめる。
+// load は permission の hook だけを受け取り、tool の hook は登録を受け付けて捨てる（実際の serve と同じく ctx.tool はある）。
 // 確かめること: subagent=true 固定で呼ぶ・allow / deny / 異常終了 / 結果行なしの扱い（fail-closed）・
 // allowMerge の有無で MERGE_EXEC_COMMAND の扱いが変わる・目印ファイル・ログにコマンドを書かない。
 // merge-exec の対応づけ: tool.execute.before で全文の完全一致を確かめた呼び出しの後半だけを、同じ呼び出しの
@@ -30,7 +31,7 @@ function sandbox(guardBody, { mergeRes = [] } = {}) {
 
 async function load(options) {
   let hook = null
-  await plugin.setup({ options, permission: { hook: async (name, fn) => { if (name === 'evaluate') hook = fn } } })
+  await plugin.setup({ options, permission: { hook: async (name, fn) => { if (name === 'evaluate') hook = fn } }, tool: { hook: async () => {} } })
   return async (event) => { const e = { action: 'shell', resources: [], ...event }; await hook(e); return e }
 }
 
@@ -153,7 +154,7 @@ test('merge-exec の対応づけ: 後半だけの形は、対応する記録が�
   const s = sandbox(MERGE_DENY, { mergeRes: [...MERGE_RES] })
   const deny = async (name, setup, ev) => {
     const p = await loadBoth(s.options)
-    await setup(p)
+    await setup(p).catch(() => {}) // 完全一致しない全文は tool.execute.before がガードに回して throw する（それでも後半は通さないこと）
     assert.equal((await p.evaluate(ev)).effect, 'deny', name)
   }
   await deny('記録なし', async () => {}, permEv([MERGE_TAIL]))
@@ -172,27 +173,34 @@ test('merge-exec の対応づけ: 後半だけの形は、対応する記録が�
   await deny('tool.execute.after で記録が消えた後', async (p) => { await p.before(toolEv(MERGE_CMD)); await p.after({ ...toolEv(MERGE_CMD), status: 'completed' }) }, permEv([MERGE_TAIL]))
 })
 
-test('merge-exec の対応づけ: allowMerge でない serve は tool.execute.before を登録せず、後半の形はガードに従う', async () => {
+test('merge-exec の対応づけ: allowMerge でない serve は全文の一致も記録せずガードに回し、後半の形もガードに従う', async () => {
   const s = sandbox(MERGE_DENY, { mergeRes: [] })
   const p = await loadBoth(s.options)
-  assert.equal(p.before, null)
-  assert.equal(p.after, null)
+  assert.ok(await throwsOf(() => p.before(toolEv(MERGE_CMD))), '全文はガードの merge-guard で拒否')
   assert.equal((await p.evaluate(permEv([MERGE_TAIL]))).effect, 'deny')
   assert.equal((await p.evaluate(permEv([MERGE_CMD]))).effect, 'deny')
 })
 
-test('merge-exec の対応づけ: ctx.tool が無くても setup は通り、後半の形は拒否のまま（fail-closed）', async () => {
+test('ctx.tool が無い版: setup は通るが目印を書かない（全文を判定できないのでアダプタが止める）。後半の形は拒否のまま', async () => {
   const s = sandbox(MERGE_DENY, { mergeRes: [...MERGE_RES] })
-  const ev = await load(s.options)
-  assert.equal((await ev(permEv([MERGE_TAIL]))).effect, 'deny')
-  assert.notEqual((await ev(permEv([MERGE_CMD]))).effect, 'deny', '全文の 1 形は従来どおり')
+  let hook = null
+  await plugin.setup({ options: s.options, permission: { hook: async (name, fn) => { hook = fn } } })
+  assert.equal(existsSync(s.options.markerPath), false, '目印なし')
+  const e = permEv([MERGE_TAIL])
+  await hook(e)
+  assert.equal(e.effect, 'deny')
 })
 
-test('merge-exec の対応づけ: tool.execute.before は壊れたイベントでも例外を出さず、記録しない', async () => {
+test('tool.execute.before は壊れたイベントを拒否（throw）するか、記録せずに返す。どちらでも後半の形は通らない', async () => {
   const s = sandbox(MERGE_DENY, { mergeRes: [...MERGE_RES] })
   const p = await loadBoth(s.options)
-  for (const bad of [null, {}, { tool: 'shell', input: null }, toolEv(MERGE_CMD, { id: undefined }), toolEv(MERGE_CMD, { sessionID: '' }), toolEv(42)]) await p.before(bad)
+  for (const bad of [null, 'x', { tool: 'shell', input: null }, toolEv(42)]) assert.ok(await throwsOf(() => p.before(bad)), JSON.stringify(bad))
+  // shell 以外でコマンドを持たない tool（write 等）は全文の判定の対象外
+  assert.equal(await throwsOf(() => p.before({ tool: 'write', ...CALL, input: { path: 'a.txt', content: 'x' } })), null)
+  // 組が欠けた完全一致は記録しない（throw もしない）
+  for (const bad of [toolEv(MERGE_CMD, { id: undefined }), toolEv(MERGE_CMD, { sessionID: '' })]) assert.equal(await throwsOf(() => p.before(bad)), null)
   assert.equal((await p.evaluate(permEv([MERGE_TAIL]))).effect, 'deny')
+  assert.ok(readFileSync(s.options.log, 'utf8').includes('\tdeny-bad-event\n'))
 })
 
 // MEDIUM-3（監査 e670648）: ガードの置き場の保護。配布物の plugin と同じ PROTECTED_EDIT（`.opencode/(hooks|plugins?)/`・
@@ -262,4 +270,30 @@ test('保護: shell からの書き込み（リダイレクト・cp・mv・tee�
     'git add .opencode/plugins/x.js && git commit -m "opencode.jsonc の説明を直す"',
     'if test -f opencode.jsonc; then cat opencode.jsonc; fi',
   ]) assert.notEqual((await ev({ resources: [c] })).effect, 'deny', c)
+})
+
+// MEDIUM-6（監査 e670648）: permission.evaluate の resource は OpenCode のスキャナが分解した後の形で、代入・export・cd だけの
+// コマンドでは permission.evaluate 自体が来ない（v2.2.7 の実測: `A=1`・`export B=2`・`cd .` は resource 0 件で発火せず、
+// `X=$(echo hi)` は `echo hi` だけが届く）。そのため全 serve で tool.execute.before に届く全文もガードに通す。
+const REAL_GUARD = join(SKILL_DIR, '..', 'init-opencode', 'assets', 'hooks', 'agent-guard.sh')
+const throwsOf = async (fn) => { try { await fn(); return null } catch (e) { return e } }
+
+test('全文の判定: allowMerge でない serve も tool.execute.before で全文をガードに通し、deny なら呼び出しを拒否する（throw）', async () => {
+  const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
+  const p = await loadBoth({ ...s.options, guardScript: REAL_GUARD })
+  assert.equal(typeof p.before, 'function', '全 serve で登録する')
+  // 実測の形: export だけの部分は resource に出ず、後ろの git commit だけが permission に届く
+  const e = await throwsOf(() => p.before(toolEv('export HUSKY=0; git commit -m x')))
+  assert.ok(e, '全文はフックの無効化（no-verify）として拒否する')
+  assert.equal(e.message, 'iit-runner: ガードの判定により拒否した（deny:no-verify）')
+  assert.notEqual((await p.evaluate(permEv(['git commit -m x']))).effect, 'deny', '分解後の resource だけならガードは通す（全文の判定が要る理由）')
+  assert.equal(await throwsOf(() => p.before(toolEv('git status'))), null, 'allow は通す')
+  const codes = readFileSync(s.options.log, 'utf8').split('\n').filter(Boolean).map((l) => l.split('\t')[1])
+  assert.deepEqual(codes, ['deny:no-verify', 'allow', 'allow'])
+})
+
+test('全文の判定: shell で resource が 0 件の permission.evaluate は拒否する', async () => {
+  const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
+  const ev = await load(s.options)
+  assert.equal((await ev({ action: 'shell', resources: [] })).effect, 'deny')
 })
