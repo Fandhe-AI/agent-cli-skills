@@ -106,6 +106,11 @@ _/iit-runner/<runId>/
   `-c features.unified_exec=false` も効かなかった）。ランナーからは塞げないため、`agent-guard.sh` と同じくサーバー側の
   ruleset で補う。対話シェルは sandbox の中で起動されるため、書ける場所の制限（permission profile）は及ぶ想定である
   （この経路での書き込み拒否は実測していない）。
+- エージェントは、ランナーと同じ OS ユーザーで、ランナーの環境変数を引き継いで動く（両ツール共通）。環境変数にある秘密
+  （`GH_TOKEN` 等）は読め、gh の認証はエージェントの gh からそのまま使える。ガードは認証ファイルの読み出しの形を止めるが、
+  環境変数の読み出しは止めない（`node -e` による読み出しが `agent-guard.sh` で allow になることを監査で実測）。被害の範囲は、
+  gh のトークンの権限とサーバー側の ruleset で抑える（ランナーに渡す環境には、ランに要らない秘密を入れない）。
+  OpenCode に固有の点（serve のパスワード等）は OpenCode の項に書く。
 - `agent-guard.sh` の既知の限界（変数経由・`$(…)` 経由のコマンドは止まらない）はランナーでも同じ。サーバー側の ruleset で補う
   （自動マージの前提となる構成は `references/automerge-design.md`）。
 - OpenCode の model・variant の割り当てと段ごとの時間切れは暫定値（`config/default.json` の `notes`）。
