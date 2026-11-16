@@ -22,12 +22,13 @@ export function makeFakeAdapterModule({ reply, defaults, name = 'codex', delayMs
   const answer = reply ?? ((req) => fallback(req.prompt, { label: req.label }))
   let sessions = 0
   function createAdapter(cfg) {
-    const state = { cfg, started: 0, closed: 0 }
+    const state = { cfg, started: 0, closed: 0, killed: 0 }
     instances.push(state)
     return {
       name,
       async start() { state.started++ },
       async close() { state.closed++ },
+      killSync() { state.killed++ },
       async run(req) {
         calls.push(req)
         const sessionRef = req.resume ? req.resume.sessionRef : `fake-session-${++sessions}`

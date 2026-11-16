@@ -174,6 +174,17 @@ export function checkExecRule(label, spec) {
   return { ok: true, rule: r }
 }
 
+// 実行中の spawnScript の子（プロセスグループの長）。ランナーの終了時に killScriptsSync が同期で止める（LOW-11）
+const liveScripts = new Set()
+
+/** 実行中の spawnScript の子のプロセスグループを同期で SIGKILL する（process の exit・シグナルの処理から呼ぶ）。 */
+export function killScriptsSync() {
+  for (const c of liveScripts) {
+    try { process.kill(-c.pid, 'SIGKILL') } catch { try { c.kill('SIGKILL') } catch { /* 既に終了 */ } }
+  }
+  liveScripts.clear()
+}
+
 /**
  * スクリプトを shell なしで起動する既定の実装。detached でプロセスグループを作り、時間切れ・出力超過では
  * グループごと止める（gh などの孫プロセスを残さない）。
@@ -184,6 +195,7 @@ export function spawnScript(file, args, { cwd, input, timeoutMs, env = process.e
     let child
     try {
       child = spawn(file, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true })
+      if (child.pid !== undefined) liveScripts.add(child)
     } catch (e) {
       resolve({ code: null, stdout: '', stderr: '', timedOut: false, overflow: false, error: String(e?.message ?? e) })
       return
@@ -212,6 +224,7 @@ export function spawnScript(file, args, { cwd, input, timeoutMs, env = process.e
       if (settled) return
       settled = true
       clearTimeout(timer)
+      liveScripts.delete(child)
       resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), timedOut, overflow, ...(error ? { error } : {}) })
     }
     child.on('error', (e) => finish(null, String(e?.message ?? e)))

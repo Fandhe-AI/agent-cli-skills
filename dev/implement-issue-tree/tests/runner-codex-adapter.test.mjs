@@ -605,3 +605,17 @@ test('TMPDIR（LOW-13）: エージェントごとに <runDir>/tmp/<logDir の�
   assert.equal(prof(a).includes(`${JSON.stringify(join(t.runDir, 'tmp'))}=`), false, 'ラン全体の tmp は書けない')
   assert.ok(existsSync(ta) && existsSync(tb))
 })
+
+test('killSync（LOW-11）: 実行中の codex のプロセスグループ（孫まで）を同期で SIGKILL する', async () => {
+  const pidFile = join(tmpdir(), `iit-gc-ks-${process.pid}`)
+  trackTmp(pidFile)
+  const t = setup({ turns: [okTurn({ hang: true, grandchild: pidFile })] })
+  assert.equal(typeof t.adapter.killSync, 'function')
+  const p = t.adapter.run(t.req({ timeoutMs: 60000 }))
+  for (let i = 0; i < 50 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 100))
+  const gc = Number(readFileSync(pidFile, 'utf8'))
+  t.adapter.killSync()
+  await assert.rejects(p)
+  for (let i = 0; i < 30 && alive(gc); i++) await new Promise((r) => setTimeout(r, 100))
+  assert.equal(alive(gc), false, '孫の sleep が残っていない')
+})

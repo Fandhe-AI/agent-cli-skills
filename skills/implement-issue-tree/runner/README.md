@@ -81,8 +81,10 @@ _/iit-runner/<runId>/
 
 - `autoMerge: true` の前提（サーバー側の強制の実測〔G0〕・`externalChecks` の明示）は Workflow 版と同じで、判定もホストの
   同じコードが行う（`references/automerge-design.md`）。ランナーがマージを許すのは merge-exec の段の 1 コマンドだけである。
-- 終了時（中断の SIGINT・SIGTERM を含む）に、アダプタが起動したプロセス（OpenCode の serve）を止め、
-  `cleanup.deleteSessions`（既定 true）ならラン中に作ったセッションを削除する。隔離 worktree の後始末はホストの判断に従う。
+- 終了時（中断の SIGINT・SIGTERM・SIGHUP を含む）に、アダプタが起動したプロセス（Codex の exec・OpenCode の serve）と
+  実行仕様の段の子を止め、`cleanup.deleteSessions`（既定 true）ならラン中に作ったセッションを削除する。シグナルの処理は
+  アダプタの起動より前に登録し、終了コードは 128 + シグナル番号。想定外の例外で落ちたときも、既知のプロセスグループは
+  終了時に同期で SIGKILL する（セッションの削除は行えないことがある）。隔離 worktree の後始末はホストの判断に従う。
 
 ## 既知の限界
 

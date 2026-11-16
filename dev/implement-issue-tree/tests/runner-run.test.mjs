@@ -15,7 +15,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { BASE_ARGS, buildTree, makeDefaultReply } from './lib/stub-run.mjs'
 import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
-import { ADAPTERS_DIR, importAdapter, main, parseCli, resolveRepo, UsageError } from '../../../skills/implement-issue-tree/runner/run.mjs'
+import { ADAPTERS_DIR, importAdapter, main, parseCli, registerSignals, resolveRepo, UsageError } from '../../../skills/implement-issue-tree/runner/run.mjs'
 import { REQUIRED_SKILLS } from '../../../skills/implement-issue-tree/runner/lib/skills-prereq.mjs'
 
 const RUN_MJS = fileURLToPath(new URL('../../../skills/implement-issue-tree/runner/run.mjs', import.meta.url))
@@ -112,6 +112,7 @@ function deps({ mainRoot = newMain(), mod, workflow, gh = { ok: true }, build = 
     mainRootOf: () => mainRoot,
     makeRunId: () => RUN_ID,
     onSignal: () => {},
+    onExit: () => {},
     env: { HOME: '/nonexistent' },
   }
   if (workflow) d.load = () => workflow
@@ -347,4 +348,44 @@ test('main（LOW-15）: args.skillDir はこのランナーのスキルと realp
   const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
   const x = deps({ mod: a, workflow: tinyWorkflow(async () => ({})) })
   assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1, skillDir: link }), '--no-build-check'], x.d), 0)
+})
+
+test('main（LOW-11）: シグナルの処理は start より前に登録し、終了時の同期 kill（アダプタと実行仕様の子）を登録する。シグナルでは kill → close → 128+番号で exit', async () => {
+  const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  const x = deps({ mod: a, workflow: tinyWorkflow(async () => ({})) })
+  let handler
+  let startedAtRegister
+  const exits = []
+  const onExit = []
+  x.d.onSignal = (h) => { handler = h; startedAtRegister = a.instances[0].started }
+  x.d.onExit = (fn) => { onExit.push(fn) }
+  x.d.exit = (code) => { exits.push(code) }
+  assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1 }), '--no-build-check'], x.d), 0)
+  assert.equal(startedAtRegister, 0, 'start() より前に登録する')
+  assert.equal(onExit.length, 1)
+  onExit[0]()
+  assert.equal(a.instances[0].killed, 1, '終了時はアダプタの killSync を呼ぶ')
+  // シグナル（close 済みのランでも kill は走り、close は 1 回だけ）
+  await handler('SIGHUP')
+  assert.equal(a.instances[0].killed, 2)
+  assert.equal(a.instances[0].closed, 1)
+  assert.deepEqual(exits, [129])
+})
+
+test('main（LOW-11）: start 後の想定外の例外（結果の書き出しの失敗）でもアダプタを close する', async () => {
+  const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  const x = deps({ mod: a, workflow: tinyWorkflow(async () => ({})) })
+  x.d.stdout = async () => { throw new Error('EPIPE') }
+  await assert.rejects(main(['--tool', 'codex', '--args', argsFile({ parent: 1 }), '--no-build-check'], x.d), /EPIPE/)
+  assert.equal(a.instances[0].closed, 1)
+})
+
+test('registerSignals（LOW-11）: SIGINT・SIGTERM・SIGHUP を 1 回ずつ登録し、シグナル名をハンドラへ渡す', () => {
+  const seen = []
+  const proc = { once: (sig, fn) => seen.push([sig, fn]) }
+  const got = []
+  registerSignals((s) => got.push(s), proc)
+  assert.deepEqual(seen.map((x) => x[0]), ['SIGINT', 'SIGTERM', 'SIGHUP'])
+  for (const [sig, fn] of seen) fn()
+  assert.deepEqual(got, ['SIGINT', 'SIGTERM', 'SIGHUP'])
 })

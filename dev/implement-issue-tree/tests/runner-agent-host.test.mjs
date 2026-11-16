@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
-import { createAgentHost, EXEC_RULES, checkExecRule, interpretExecResult, parseExecSpec } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
+import { createAgentHost, EXEC_RULES, checkExecRule, interpretExecResult, killScriptsSync, parseExecSpec, spawnScript } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
 import { AdapterError, KINDS } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 import { loadConfig, resolveModel } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 import { buildPreamble, buildSchemaInstruction, SHELL_NOTE } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
@@ -512,4 +512,17 @@ test('writablePaths（MEDIUM-4）: state:load とそのフォールバックだ�
   const want = { 'state:load': true, 'state:load:fallback-sonnet': true, 'state:load-fill': false, 'state:load-fill:fallback-sonnet': false, 'state:load-verify': false, 'state:loader': false, 'plan:issue-tree': false, 'merge-exec:#2': false, 'state:load:retry': false }
   for (const label of Object.keys(want)) await agent('p', { label, schema: SCHEMA })
   for (const r of calls) assert.deepEqual(r.writablePaths, want[r.label] ? [join(mainRoot, '_', 'issue-trees')] : [], r.label)
+})
+
+test('killScriptsSync（LOW-11）: 実行中の spawnScript のプロセスグループを同期で SIGKILL する', async () => {
+  const pidFile = join(root, 'ks-gc.pid')
+  const p = spawnScript('bash', ['-c', `sleep 300 & echo $! > '${pidFile}'; wait`], { cwd: root, input: '', timeoutMs: 60000 })
+  for (let i = 0; i < 50 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 50))
+  const gc = Number(readFileSync(pidFile, 'utf8'))
+  killScriptsSync()
+  const r = await p
+  assert.notEqual(r.code, 0)
+  const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+  for (let i = 0; i < 30 && alive(gc); i++) await new Promise((r2) => setTimeout(r2, 100))
+  assert.equal(alive(gc), false)
 })

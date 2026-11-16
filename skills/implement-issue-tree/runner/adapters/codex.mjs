@@ -372,5 +372,10 @@ export function createAdapter(cfg) {
     return result
   }
 
-  return { name: 'codex', start, run, close }
+  /** 実行中の codex のプロセスグループを同期で SIGKILL する（ランナーの終了時・シグナルの処理。close を待てない経路用）。 */
+  function killSync() {
+    for (const p of running) killGroup(p.pid, 'SIGKILL')
+  }
+
+  return { name: 'codex', start, run, close, killSync }
 }

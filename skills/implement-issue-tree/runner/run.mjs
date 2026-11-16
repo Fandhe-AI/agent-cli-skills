@@ -36,7 +36,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createAgentHost } from './lib/agent-host.mjs'
+import { createAgentHost, killScriptsSync } from './lib/agent-host.mjs'
 import { isAdapterError } from './lib/adapter-error.mjs'
 import { codexRules, opencodeRules } from './lib/guard.mjs'
 import { loadWorkflow } from './lib/load-workflow.mjs'
@@ -123,6 +123,14 @@ export async function importAdapter(tool, dir = ADAPTERS_DIR) {
   return typeof mod.createAdapter === 'function' ? mod : null
 }
 
+/** 止めるシグナル（SIGHUP は端末を閉じたとき）。終了コードは 128 + 番号。 */
+const SIGNAL_CODES = Object.freeze({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 })
+
+/** SIGINT・SIGTERM・SIGHUP を 1 回ずつ登録し、受けたシグナル名でハンドラを呼ぶ（2 回目は既定の動作で即終了する）。 */
+export function registerSignals(handler, proc = process) {
+  for (const sig of Object.keys(SIGNAL_CODES)) proc.once(sig, () => handler(sig))
+}
+
 /**
  * 起動から終了コードまで。テストは deps で外部とのやりとり（gh・アダプタ・生成物・メイン worktree）を差し替える。
  * @returns {Promise<number>} 終了コード
@@ -141,7 +149,10 @@ export async function main(argv, deps = {}) {
     mainRootOf = resolveMainRoot,
     makeRunId = newRunId,
     env = process.env,
-    onSignal = (handler) => { process.once('SIGINT', handler); process.once('SIGTERM', handler) },
+    onSignal = registerSignals,
+    // process の exit 時に同期で呼ぶ関数の登録（想定外の例外で落ちたときも呼ばれる）と、シグナル時の exit
+    onExit = (fn) => { process.once('exit', fn) },
+    exit = (code) => process.exit(code),
     // 実行仕様の段の起動（agent-host の cfg.spawnScript）。テストが偽の launcher へ差し替える。省略時は agent-host の実物
     spawnScript,
     // 生成物が名指しするスキルの存在確認（lib/skills-prereq.mjs）。見つからない名前の配列を返す
@@ -274,6 +285,20 @@ export async function main(argv, deps = {}) {
       log(`⚠️ ランナー: アダプタの後片づけが失敗した: ${String(e?.message ?? e).slice(0, 200)}`)
     }
   }
+  // 中断・終了時の後片づけ（監査 e670648 の LOW-11）。start() より前に登録する（start 中の中断でも子を残さない）。
+  //   - 同期の kill: アダプタの killSync（任意。契約への追加）と実行仕様の子（spawnScript）のプロセスグループを
+  //     SIGKILL する。process の exit（想定外の例外で落ちた場合を含む）でも呼ぶ。close を待てない経路の保険
+  //   - シグナル: 同期の kill の後に close（セッションの削除）を待って 128 + 番号で exit する
+  const killSync = () => {
+    try { adapter.killSync?.() } catch { /* 片づけの失敗で止めない */ }
+    try { killScriptsSync() } catch { /* 同上 */ }
+  }
+  onExit(killSync)
+  onSignal((sig) => {
+    log(`ランナー: ${sig} を受けたので後片づけして終了する`)
+    killSync()
+    return close().finally(() => exit(SIGNAL_CODES[sig] ?? 130))
+  })
 
   try {
     await adapter.start()
@@ -283,27 +308,29 @@ export async function main(argv, deps = {}) {
     prereq(`アダプタの起動に失敗: ${why.slice(0, 400)}`)
     return finish(3, null, `アダプタの起動に失敗: ${why.slice(0, 400)}`)
   }
-  // 中断時もアダプタが起動したプロセス・セッションを片づける
-  onSignal(() => { close().finally(() => process.exit(130)) })
-
-  const agent = createAgentHost({
-    adapter,
-    cfg: { config, skillDir: args.skillDir, mainRoot, runId, runDir, args, repo, maxParallel: cli.maxParallel ?? undefined, log, ...(spawnScript ? { spawnScript } : {}) },
-  })
-  let code
-  let result = null
-  let error
+  // 以降の想定外の例外（ホストの組み立て・結果の書き出しの失敗等）でもアダプタを片づける。close は 1 回だけ
   try {
-    result = await workflow.run(args, agent, log, phase)
-    code = 0
-  } catch (e) {
-    code = 1
-    error = String(e?.stack ?? e?.message ?? e).slice(0, 4000)
-    log(`ランナー: ホストが例外で終わった: ${String(e?.message ?? e).slice(0, 400)}`)
+    const agent = createAgentHost({
+      adapter,
+      cfg: { config, skillDir: args.skillDir, mainRoot, runId, runDir, args, repo, maxParallel: cli.maxParallel ?? undefined, log, ...(spawnScript ? { spawnScript } : {}) },
+    })
+    let code
+    let result = null
+    let error
+    try {
+      result = await workflow.run(args, agent, log, phase)
+      code = 0
+    } catch (e) {
+      code = 1
+      error = String(e?.stack ?? e?.message ?? e).slice(0, 4000)
+      log(`ランナー: ホストが例外で終わった: ${String(e?.message ?? e).slice(0, 400)}`)
+    }
+    log(`ランナー: agent() ${agent.stats.calls} 回（アダプタ ${agent.stats.adapterCalls} 回）`)
+    await close()
+    return await finish(code, result, error)
+  } finally {
+    await close()
   }
-  log(`ランナー: agent() ${agent.stats.calls} 回（アダプタ ${agent.stats.adapterCalls} 回）`)
-  await close()
-  return finish(code, result, error)
 }
 
 // CLI として起動されたときだけ実行する（テストは import して main を呼ぶ）
