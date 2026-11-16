@@ -26,6 +26,7 @@ const BASHES = [...new Set(['/bin/bash', pathBash])]
 const which = (c) => execFileSync('/bin/sh', ['-c', `command -v ${c}`]).toString().trim()
 const REAL_GREP = which('grep')
 const REAL_TR = which('tr')
+const REAL_AWK = which('awk')
 
 function writeExe(path, body) {
   writeFileSync(path, body)
@@ -93,12 +94,18 @@ for (const bash of BASHES) {
     let alwaysDir
     let selectiveDir
     let trDir
+    let awkDir
+    let awkEmptyDir
+    let awkUnknownDir
     before(() => {
       dir = mkdtempSync(join(tmpdir(), 'agent-guard-grepfail-'))
       alwaysDir = join(dir, 'always')
       selectiveDir = join(dir, 'selective')
       trDir = join(dir, 'tr')
-      for (const d of [alwaysDir, selectiveDir, trDir]) mkdirSync(d)
+      awkDir = join(dir, 'awk')
+      awkEmptyDir = join(dir, 'awk-empty')
+      awkUnknownDir = join(dir, 'awk-unknown')
+      for (const d of [alwaysDir, selectiveDir, trDir, awkDir, awkEmptyDir, awkUnknownDir]) mkdirSync(d)
       writeExe(join(alwaysDir, 'grep'), '#!/bin/sh\nexit 2\n')
       writeExe(join(selectiveDir, 'grep'), [
         '#!/bin/sh',
@@ -116,6 +123,26 @@ for (const bash of BASHES) {
         `exec '${REAL_TR}' "$@"`,
         '',
       ].join('\n'))
+      // 認証情報の判定（GIT_AWK の cred_check）を載せた awk の呼び出しだけを失敗させる。他の awk は本物へ渡す
+      writeExe(join(awkDir, 'awk'), [
+        '#!/bin/sh',
+        'for a in "$@"; do',
+        '  case "$a" in *cred_check*) exit 2 ;; esac',
+        'done',
+        `exec '${REAL_AWK}' "$@"`,
+        '',
+      ].join('\n'))
+      // 判定の awk が exit 0 のまま何も出力しない（結果の語が空）・未知の語を出力する偽 awk。どちらも許可へ倒さず internal-error にする
+      for (const [d, word] of [[awkEmptyDir, ''], [awkUnknownDir, 'surely-unknown-verdict']]) {
+        writeExe(join(d, 'awk'), [
+          '#!/bin/sh',
+          'for a in "$@"; do',
+          `  case "$a" in *cred_check*) ${word === '' ? ': ; exit 0' : `printf '%s\\n' '${word}'; exit 0`} ;; esac`,
+          'done',
+          `exec '${REAL_AWK}' "$@"`,
+          '',
+        ].join('\n'))
+      }
     })
     after(() => rmSync(dir, { recursive: true, force: true }))
 
@@ -146,6 +173,25 @@ for (const bash of BASHES) {
           it('素通しの対照: deny merge-guard: gh pr review 5 --approve', async () => {
             expectDeny(await run(bash, 'gh pr review 5 --approve', subagent, { pathPrefix: selectiveDir, env: { GREP_FAIL_KEY: 'ZZ_NEVER_MATCH_ZZ' } }), 'merge-guard')
           })
+        })
+
+        describe('認証情報の判定（GIT_AWK の cred_check）を載せた awk の失敗', { concurrency: 8 }, () => {
+          // cred_text の awk | tr | sed のパイプは GIT_AWK へ置き換えた。awk の異常終了は結果行の前に deny へ倒れる
+          for (const cmd of ['printenv', 'ls', 'git status']) {
+            it(`deny internal-error: ${cmd}`, async () => {
+              expectDeny(await run(bash, cmd, subagent, { pathPrefix: awkDir }), 'internal-error')
+            })
+          }
+        })
+
+        describe('判定の awk が exit 0 で空出力・未知の語を出力しても許可へ倒れない', { concurrency: 8 }, () => {
+          for (const [label, dirOf] of [['空出力', () => awkEmptyDir], ['未知の語', () => awkUnknownDir]]) {
+            for (const cmd of ['printenv', 'ls', 'git status']) {
+              it(`deny internal-error（${label}）: ${cmd}`, async () => {
+                expectDeny(await run(bash, cmd, subagent, { pathPrefix: dirOf() }), 'internal-error')
+              })
+            }
+          }
         })
 
         describe('レビュー承認の検査に使う tr の失敗', { concurrency: 8 }, () => {

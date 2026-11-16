@@ -64,6 +64,11 @@ import {
   MG_MERGE_DENY,
   MG_OBFUSCATED_DENY,
   MG_ALLOW,
+  CRED_DENY,
+  CRED_ALLOW,
+  ENQUEUE_DENY,
+  HOOKCONF_DENY,
+  HOOKCONF_ALLOW,
   FP805_FLIP,
   FP805_STAY_DENY,
   FP805_AUDIT_DENY,
@@ -84,6 +89,12 @@ for (const bash of BASHES) {
         }
         for (const cmd of FIX_ALLOW) {
           it(`allow: ${JSON.stringify(cmd)}`, async () => expectAllow(await run(bash, cmd, subagent)))
+        }
+        for (const [cmd, reason] of HOOKCONF_DENY) {
+          it(`[hookconf] deny ${reason}: ${cmd}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
+        }
+        for (const cmd of HOOKCONF_ALLOW) {
+          it(`[hookconf] allow: ${cmd}`, async () => expectAllow(await run(bash, cmd, subagent)))
         }
         for (const [cmd, reason] of NEST_DENY) {
           it(`deny ${reason}: ${JSON.stringify(cmd.length > 200 ? `${cmd.slice(0, 60)}…(${cmd.length}字)` : cmd)}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
@@ -111,6 +122,12 @@ for (const bash of BASHES) {
       }
     })
 
+    describe('subagent=false: 認証情報の読み出しは利用者操作として対象外', { concurrency: 8 }, () => {
+      for (const cmd of CRED_DENY) {
+        it(`allow: ${cmd}`, async () => expectAllow(await run(bash, cmd, false)))
+      }
+    })
+
     for (const subagent of [true, null]) {
       describe(`subagent=${subagent}: merge-guard の deny 対象`, { concurrency: 8 }, () => {
         for (const cmd of MG_REPO_DENY) {
@@ -118,6 +135,15 @@ for (const bash of BASHES) {
         }
         for (const cmd of MG_MERGE_DENY) {
           it(`deny merge-guard: ${cmd}`, async () => expectDeny(await run(bash, cmd, subagent), 'merge-guard'))
+        }
+        for (const cmd of ENQUEUE_DENY) {
+          it(`deny merge-guard（マージキュー投入）: ${cmd}`, async () => expectDeny(await run(bash, cmd, subagent), 'merge-guard'))
+        }
+        for (const cmd of CRED_DENY) {
+          it(`deny credential-read: ${cmd}`, async () => expectDeny(await run(bash, cmd, subagent), 'credential-read'))
+        }
+        for (const cmd of CRED_ALLOW) {
+          it(`allow（誤検出なし）: ${cmd}`, async () => expectAllow(await run(bash, cmd, subagent)))
         }
         for (const cmd of MG_OBFUSCATED_DENY) {
           it(`deny obfuscated: ${cmd}`, async () => expectDeny(await run(bash, cmd, subagent), 'obfuscated'))

@@ -90,7 +90,7 @@ cat skills-lock.json 2>/dev/null | head -20 || true
 | 区分 | 作るもの | 補足 |
 |------|---------|------|
 | AGENTS.md | 管理区間（新規作成・追記・差し替えのどれか） | `agents-md-block.sh --check` で結果語彙を先に示す。管理区間の外は変えない |
-| hook | `.codex/hooks/agent-guard.sh`・`codex-pretooluse.sh`・`codex-session-start.sh` と `.codex/hooks.json` | PreToolUse（`^Bash$`）と SessionStart。判定は 1 本の bash スクリプトに集約 |
+| hook | `.codex/hooks/agent-guard.sh`・`codex-pretooluse.sh`・`codex-session-start.sh` と `.codex/hooks.json` | PreToolUse（`^Bash$`）と SessionStart。判定は 1 本の bash スクリプトに集約。サブエージェントには、マージ・承認（マージキュー投入を含む）・リポジトリ設定の変更に加え、認証情報の読み出し（`gh auth token`・環境変数の一覧・`hosts.yml` 等）も止める |
 | rules | `.codex/rules/agent-guard.rules` | force push と `--no-verify` の典型形を forbidden に、取り消せない操作・公開範囲や設定の変更（`gh project item-delete`・`gh project edit`・`gh api` の PUT / PATCH / DELETE）を prompt にする補助層。prompt は非対話では拒否になる（実機）。対話では承認要求になる（Codex の参照文書による。実機は未検証） |
 | agents | `.codex/agents/` の `researcher.toml`・`implementer.toml`・`reviewer.toml` | model は書かず親を継承する |
 | スキル | 未導入のワークフロースキル（9 件のうち） | `.agents/skills/` に導入。Codex 上の動作は保証しない（Step 8 参照） |

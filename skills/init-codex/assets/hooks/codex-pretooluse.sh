@@ -24,6 +24,7 @@ reason_for() {
     force-push) printf '%s' '履歴を書き換える push（--force / --force-with-lease / +refspec）は禁止されている。必要なら人間に依頼すること' ;;
     merge-guard) printf '%s' 'サブエージェントによるマージ・承認は禁止されている。人間または親が実行すること' ;;
     repo-settings) printf '%s' 'サブエージェントによるリポジトリ設定・ruleset の変更は禁止されている' ;;
+    credential-read) printf '%s' 'サブエージェントによる認証情報の読み出し（gh auth token・環境変数の一覧・hosts.yml 等）は禁止されている' ;;
     obfuscated) printf '%s' '難読化されたコマンド（$'"'"'...'"'"' や $IFS 展開）は拒否される' ;;
     nesting-limit) printf '%s' 'コマンドの入れ子が深い、または $( ・バッククォート・ヒアドキュメントの閉じを解析できないため拒否した' ;;
     bad-input) printf '%s' 'hook 入力を解釈できないため拒否した' ;;

@@ -99,7 +99,7 @@ head -20 skills-lock.json 2>/dev/null || true
 |------|---------|------|
 | AGENTS.md | 管理区間（新規作成・追記・差し替えのどれか） | `agents-md-block.sh --check` で結果語彙を先に示す。管理区間の外は変えない |
 | 設定 | `opencode.jsonc`（直下） | `permissions` / `policies` で典型形の deny。字面一致のため順序違いは止められない補助層。ガード本体・plugin・設定ファイルへの edit の deny も含む（エージェントが置換してガードを無効にするのを防ぐ） |
-| ガード | `.opencode/hooks/agent-guard.sh` と `.opencode/plugins/agent-guard/index.js` | 主判定。plugin が `agent-guard.sh` を呼び、deny ならコマンドを止める。判定は 1 本の bash スクリプトに集約 |
+| ガード | `.opencode/hooks/agent-guard.sh` と `.opencode/plugins/agent-guard/index.js` | 主判定。plugin が `agent-guard.sh` を呼び、deny ならコマンドを止める。判定は 1 本の bash スクリプトに集約。サブエージェントには、マージ・承認（マージキュー投入を含む）・リポジトリ設定の変更に加え、認証情報の読み出し（`gh auth token`・環境変数の一覧・`hosts.yml` 等）も止める |
 | agents | `.opencode/agents/` の `researcher.md`・`implementer.md`・`reviewer.md` | researcher / reviewer は shell 不可の読み取り専用 |
 | スキル | 未導入のワークフロースキル（9 件のうち） | `.agents/skills/` に導入。OpenCode 上の動作は保証しない（Step 6 参照） |
 

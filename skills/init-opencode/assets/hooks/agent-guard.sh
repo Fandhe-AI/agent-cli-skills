@@ -25,15 +25,45 @@
 #                  --no-verify（略記を含む）、または commit の -n。フックの無効化・差し替えも同じ
 #                  コードで止める: -c / --config-env の core.hooksPath、git config での
 #                  core.hooksPath の設定・解除、コマンド先頭の HUSKY=0 / HUSKY_SKIP_HOOKS=1、
-#                  alias の定義（-c alias.* と git config alias.*。値は解決せず定義自体を拒否）
+#                  alias の定義（-c alias.* と git config alias.*。値は解決せず定義自体を拒否）。
+#                  git config は option の文法を真似ず許可リストで見る: hookspath を含む語か alias.* の語がある形と、
+#                  core / alias の節名の語と rename-section / remove-section（`re` 始まりの語）がある形は、読み取りの
+#                  完全形 `git config KEY`・`git config --get KEY`（KEY は core.hooksPath か alias.<名前>）以外をすべて
+#                  止める（option を含む形は、値を取るかが git の版で変わるので読み取りに見えても止める）
 #                  （全セッション）
 #   force-push     git push の --force / -f / --mirror / +<refspec>（`--` の後の + 始まりも）/
 #                  --force-with-lease（= 形・略記を含む）/ --force-if-includes。lease 付きでも
 #                  既存コミットを消せるため許可しない（全セッション）
-#   merge-guard    gh pr merge（本文・題名の値だけに merge の語があり、コマンド全体が厳格な文法に一致する `gh pr create|comment` は除く。下記）・REST / GraphQL のマージ・承認（gh pr review の --approve / -a、
+#   merge-guard    （マージキュー投入 enqueuePullRequest を含む）gh pr merge（本文・題名の値だけに merge の語があり、コマンド全体が厳格な文法に一致する `gh pr create|comment` は除く。下記）・REST / GraphQL のマージ・承認（gh pr review の --approve / -a、
 #                  reviews API の event=APPROVE・判定できない --input / @file 形、GraphQL の
 #                  addPullRequestReview / submitPullRequestReview + APPROVE）・gh alias・
 #                  gh extension（subagent が true / null のとき）
+#   credential-read  認証情報の読み出し（subagent が true / null のとき）。引用符と heredoc を解釈したトークンに対して判定する。
+#                  サブコマンドの位置は探さない（global option が値を取るかは版で変わる）。git / gh の直後の語が option でなければ
+#                  それをサブコマンドとし、option なら後ろの語の集合で見る: gh で auth の語があり token・git-credential・
+#                  --show-token(=…)・-t(=…)（束ね書きを含む）の語がある形、git で credential / credential-* の語がある形、
+#                  git var の変数名 1 つ（git var GIT_EDITOR）以外の形、git config で option を含まない完全形
+#                  （config KEY・config --get KEY・config get KEY〔KEY が extraheader を含まない〕・config KEY VALUE）以外の形
+#                  （一覧・照合・--file / --blob・--edit・scope の指定を含む）・
+#                  .git/config をファイルとして開く形・printenv / env の引数なし（代入だけの env を含む）・printenv で
+#                  TOKEN / SECRET / KEY / AUTH / COOKIE / SESSION / BEARER / _PAT 等を名指す形・echo / printf の
+#                  TOKEN / SECRET / PASSW / API_KEY 系の変数展開（引用符なしと二重引用符内。単一引用符内は文字列）と
+#                  ${!x} の間接展開（どのコマンドの引数でも〔gh pr comment --body "$GH_TOKEN"・curl -d "$GITHUB_TOKEN" 等〕・
+#                  here-string `<<< "$GH_TOKEN"`・引用符なし heredoc の本文。除くのはコマンド前置きの代入〔コマンド名より前の
+#                  X=$GH_TOKEN。export / declare / typeset / local / readonly の引数を含む〕だけで、curl -d "t=$GH_TOKEN"・
+#                  gh api -f body=$GH_TOKEN のようにコマンドの引数にある NAME=… は止める。引用符つき heredoc の本文は文字列。秘密変数の展開は command -v / -V の引数でも止める）・
+#                  双方向リダイレクト <> の対象・
+#                  export / declare / typeset の引数なしと -p / -x（export は -n も）・引数なしの set・compgen -e・ps の e / -E・
+#                  security の find-generic-password / find-internet-password / dump-keychain・secret-tool の lookup / search・
+#                  ファイルとして開く形の hosts.yml / ~/.config/gh / .git-credentials / .netrc（`< file` の入力リダイレクトを含む）・
+#                  codex を含むコマンドの auth.json・/proc と組の environ。パスは小文字へ寄せ // と /./ と /x/../ を畳んで照合する
+#                  （macOS の FS は大文字小文字を区別しない）。--opt=VALUE・-xVALUE・name=@file・@file;type=x・name=<file の VALUE も
+#                  オプション名を問わず同じ判定にかける（over-deny 許容）。空白を含む語は文章として見ないが、語全体が絶対・~・.・$HOME 始まりで
+#                  末尾が保護対象のパス部品なら見る。git の -xVALUE 連結の VALUE が ~/.config/gh の形・
+#                  --no-index（略記を含む）の語がある git の引数（git diff / grep が読む外部ファイル）・grep 等へ渡す ~ / ~/.config / ~/.codex そのもの。
+#                  文字列として扱う形は止めない: commit メッセージ・gh の --body / --title の値・引用符つき heredoc の本文・
+#                  echo / printf の引数・grep / rg / ag / ack の検索パターン（最初の位置引数と -e の値。2 つ目以降はファイル）・
+#                  git の引数（git grep / log / diff 等。~/.config/gh だけは止める）・空白を含む語。
 #   repo-settings  ruleset・branch protection・リポジトリ本体の書き込み・gh repo edit 等
 #                  （subagent が true / null のとき）
 #   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
@@ -109,7 +139,8 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 # 引数」であり、マージ系のように前段の出力を後段が読む構造（`printf ... | gh api --input -`）を
 # 見る必要がないため。引用符を理解するのは、`git commit -m "fix -n handling"` や
 # ヒアドキュメントのコミットメッセージ本文に書かれた語を誤検知しないため。
-# 検査するもの（git のグローバルオプション -c / -C / --git-dir 等はサブコマンドの前で読み飛ばす）:
+# 検査するもの（サブコマンドは git の直後の `-C <dir>`・`-c <k=v>` を読み飛ばした後の語。そこが他の global option
+# 〔--git-dir・--attr-source 等〕なら、後ろの hook を飛ばせるサブコマンド名の語をそれぞれサブコマンドとみなす）:
 #   - hook を飛ばせるサブコマンドの --no-verify（git の一意な略記 --no-v… も同一視）
 #   - commit の短縮 -n（-an のような束ね書きも。-m 等の値を取るオプション以降は値として扱う）
 #   - push の --force / -f（束ね書きも。-o 以降は値）/ --force-with-lease / --force-if-includes /
@@ -153,26 +184,53 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 #     判定は subagent が true / null のときだけ）
 #   - alias は -c と git config での定義だけを止める。利用者の設定ファイルに既にある alias、
 #     include.path 経由の設定取り込み、GIT_CONFIG_* 環境変数、SKIP= 等の他のフック回避
+#   - include.path・includeIf.*.path の設定（git config・-c）で、core.hooksPath を書いたファイルを取り込む差し替え
+#   - main セッションの git config -e / --edit（EDITOR / GIT_EDITOR を差し替えた形を含む）での core.hooksPath の書き換え
 #   - HUSKY=0 は同じコマンド文字列内の代入だけを見る（別の呼び出しで export 済みのものは見えない）
+#   - 認証情報の読み出し（credential-read）の残存ギャップ: 値を取るラッパー（`timeout 10 gh auth token`・`xargs` への分割など。
+#     コマンド位置を読み違える点は gh pr merge のマージ系判定と同じ限界）、glob（`cat ~/.config/g*/h*.yml`）、
+#     curl で API を直接叩く・`node -e`・`python -c` 等のスクリプト言語、変数経由（`f=hosts.yml; cat $f`）・eval で組み立てる形、
+#     検索コマンドの option の値の読み違い（`rg -g hosts.yml pat` は値として通す）、`grep -r token ~/.config` 以外のディレクトリ指定（~ / ~/.config / ~/.codex そのものは止める）・`find ~ -exec cat {} +`、
+#     `jq -n env` / `jq -n '$ENV'`（jq 自身の環境参照）、~/.aws/credentials・~/.npmrc・~/.ssh/id_* を開く形（対象は gh と codex と
+#     git の認証だけ）、トークンを URL に埋めたリモートを `git remote -v` で表示する形、`xargs env` / `find -exec env`
+#     （env の引数なしは見るが、xargs の後ろの env は値なしの呼び出しとして読み分けない）、`$(git rev-parse --git-dir)/config` のように
+#     組み立てた .git/config、空白を含む相対パス（`cat "my dir/.netrc"`）・cd したあとの相対（`cd ~/.codex && cat auth.json`・
+#     `cd /proc/self; cat environ`）、`cat $(echo ~/.netrc)` のようにコマンド置換で作ったパス、gh 以外のツールの token 取得
+#     （`gcloud auth print-access-token`・`aws configure get`・`op read`・`pass show`・`kubectl get secret`）、
+#     git の他のファイル読み出し（`git hash-object`・`git show` で外部ファイルを読む形）
 read -r -d '' GIT_AWK <<'AWK' || true
 function isws(c) { return (c == " " || c == "\t" || c == "\r") }
 # 語を確定する。リダイレクトの直後の語（rd == 1。対象のファイル名・fd）はコマンドでも引数でもないので積まない。
 # here-string の語（rd == 2）は shell が script として読むときのために tok と別の hs へ積む。
 function emit_tok() {
   if (have) {
-    if (rd == 1) rd = 0
-    else if (rd == 2) { nhs++; hs[nhs] = cur; rd = 0 }
-    else { ntok++; tok[ntok] = cur }
+    # 入力リダイレクト（< file）の対象は読み出しなので、認証情報の判定のためだけに別へ積む。
+    if (rd == 1) { if (rdc == "<") { nrin++; rin[nrin] = cur } rd = 0 }
+    else if (rd == 2) { nhs++; hs[nhs] = cur; hsv[nhs] = curv; rd = 0 }
+    else { ntok++; tok[ntok] = cur; tokv[ntok] = curv }
   }
-  cur = ""; have = 0
+  cur = ""; have = 0; curv = ""
+}
+# $ の直後の変数名（${NAME...} は } まで）。引用符なしと二重引用符の中の展開だけを認証情報の判定に使う。
+function var_at(k,   o, n, r) {
+  if (substr(text, k, 1) == "{") { r = index(substr(text, k), "}"); return (r > 0 && r < 80) ? substr(text, k, r) : "" }
+  o = ""; n = 0
+  while (k <= len && n < 80 && substr(text, k, 1) ~ /[A-Za-z0-9_]/) { o = o substr(text, k, 1); k++; n++ }
+  return o
 }
 # リダイレクト演算子（< > <<<）の手前の語を片づける。`2>` `{fd}>` の fd 指定は語ではないので捨てる。
 function redir_flush() {
-  if (have && (cur ~ /^[0-9]+$/ || cur ~ /^[{][A-Za-z_][A-Za-z0-9_]*[}]$/)) { cur = ""; have = 0 }
+  if (have && (cur ~ /^[0-9]+$/ || cur ~ /^[{][A-Za-z_][A-Za-z0-9_]*[}]$/)) { cur = ""; curv = ""; have = 0 }
   else emit_tok()
 }
 function setv(v) { if (verdict == "") verdict = v }
-function end_seg() { emit_tok(); if (ntok > 0) analyze(); ntok = 0; nhs = 0; rd = 0; split("", hs) }
+function end_seg(   hm) {
+  emit_tok()
+  # here-string（`cat <<< "$GH_TOKEN"`）は変数の値を標準入力へ流すので、読む側のコマンドを問わず秘密らしい変数の展開を止める。
+  for (hm = 1; hm <= nhs; hm++) if (secret_ref(hsv[hm])) cred_hit = 1
+  if (ntok > 0 || nrin > 0) analyze()
+  ntok = 0; nhs = 0; nrin = 0; rd = 0; split("", hs); split("", hsv)
+}
 # 入れ子の中身（bash -c の値・eval の引数・ヒアドキュメント本体・$(...) の中・env -S の値）を作業キューへ積む。
 # 深さ・件数の上限を超えたら中身を見切れないので limit を立てる（結果は deny nesting-limit）。
 function enqueue(s, h) {
@@ -207,7 +265,218 @@ function shell_args(j, hk,   t, cf, sf, b, lc) {
   return (sf ? 0 : 2)
 }
 # env -S / --split-string の値を作業キューへ積み、回避の代入を含むかを返す。
-function env_split(v, hh) { enqueue(v, hh); return split_has_h(v) }
+function env_split(v, hh) { esplit = 1; enqueue(v, hh); return split_has_h(v) }
+# --- 認証情報の読み出し（subagent が true / null のときだけ結果を使う。判定は analyze から呼ぶ）-------------
+# セグメントのトークン（引用符・heredoc 本体を解釈済み）に対して判定するので、コミットメッセージや PR 本文の語、
+# 引用符つき heredoc の本文、検索パターンはコマンドとして読まない。結果は cred_hit 等のグローバルへ積み、END で集約する。
+function secret_name(w) { return (toupper(w) ~ /TOKEN|SECRET|KEY|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION|BEARER|(^|_)PAT$/) }
+function secret_ref(v) { return (secret_var(v) || index(v, "{!") > 0) }
+function secret_var(v) { return (toupper(v) ~ /TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|BEARER|COOKIE|(^|[^A-Z0-9])AUTH([^A-Z]|$)|(^|_)PAT([^A-Z0-9_]|$)/) }
+# パスの正規化。macOS の FS は大文字小文字を区別しないので小文字へ寄せ、// と /./ と /x/../ を畳む。
+function normpath(s,   n) {
+  s = tolower(s)
+  gsub(/\/+/, "/", s)
+  for (n = 0; n < 8 && s ~ /\/[.]\//; n++) gsub(/\/[.]\//, "/", s)
+  for (n = 0; n < 8 && s ~ /[^\/]+\/[.][.]\//; n++) sub(/[^\/]+\/[.][.]\//, "", s)
+  return s
+}
+function ghdir(t,   s) {
+  s = normpath(t)
+  return (s !~ /[ \t\n]/ && (s ~ /(^|[\/])[.]config[\/]gh([\/]|$)/ || s ~ /xdg_config_home[}]?[\/]gh([\/]|$)/ || s ~ /[$][{]?gh_config_dir/))
+}
+# 空白を含む語は文章の値とみなして見ないが、語全体が認証ファイルのパス形（先頭が / ~ . $HOME で、末尾が保護対象の部品）なら見る。
+function pathshape(s) {
+  return (s ~ /^(~|[.]|\/|[$]home|[$][{]home[}])[^\n]*(\/[.]config\/gh(\/[^\/]*)?|\/gh\/hosts[.]yml|\/[.]netrc|\/[.]git-credentials|\/[.]git\/config|\/[.]codex\/auth[.]json)$/)
+}
+# ファイルとして開き得る 1 語
+function cred_one(t,   s) {
+  if (t == "") return
+  s = normpath(t)
+  if (s ~ /[ \t\n]/) { if (pathshape(s)) cred_hit = 1; return }
+  if (s ~ /(^|[^a-z0-9_.-])hosts[.]yml([^a-z0-9_.-]|$)/) cred_hit = 1
+  if (ghdir(s)) cred_hit = 1
+  if (s ~ /(^|[\/])[.](git-credentials|netrc)$/) cred_hit = 1
+  if (s ~ /(^|[\/])[.]git[\/]config$/) cred_hit = 1
+  if (s ~ /(^|[^a-z0-9_.-])auth[.]json([^a-z0-9_.-]|$)/) cred_aj = 1
+  if (s ~ /codex/) cred_cx = 1
+  if (s ~ /(^|[\/])environ$/) cred_env = 1
+  if (s ~ /(^|[\/])proc([\/]|$)/) cred_proc = 1
+}
+# @ または < の後ろ（curl の -d @file・-F name=@file;type=x・-F name=<file）をファイルとして見る。
+function cred_at(v,   i, w) {
+  i = index(v, "@")
+  if (i > 0) { w = substr(v, i + 1); cred_one(w); sub(/;.*$/, "", w); cred_one(w) }
+  i = index(v, "<")
+  if (i > 0) { w = substr(v, i + 1); cred_one(w); sub(/;.*$/, "", w); cred_one(w) }
+}
+# 連結形 `--opt=VALUE`・`name=@file`・`-xVALUE` の VALUE も取り出して見る（オプション名では限定しない）。
+function cred_part(v,   i, w) {
+  i = index(v, "=")
+  if (i > 0) { w = substr(v, i + 1); cred_one(w); cred_at(w) }
+  cred_at(v)
+}
+function cred_tok(t,   v) {
+  cred_one(t)
+  if (t ~ /^-[^-]/) { v = substr(t, 3); cred_one(v); cred_part(v) }
+  cred_part(t)
+}
+# 検索コマンドへ渡すホームやその設定ディレクトリそのもの（再帰検索で hosts.yml 等の中身が出る）。
+function homeparent(t) { return (normpath(t) ~ /^(~|[$]home|[$][{]home[}])(\/([.]config|[.]codex))?\/?$/) }
+# git / gh（tok[c]）のサブコマンドを探し始める添字。git のときだけ、独立した形の `-C <dir>`・`-c <k=v>` を値ごと読み飛ばす
+# （この 2 つはどの版の git でも必ず値を 1 つ取る。連結形 -Cdir・-ck=v と他の option は読み飛ばさない）。
+# 値が空の語・$ やバッククォートを含む語（展開で実行時に 0 語や複数語になり得る。`git -C $Z . credential fill`）なら読み飛ばさず、
+# option の後ろとして語の集合で見る。-c の値のキー（hookspath・alias.）は hook_swap が別に見る。
+# 読み飛ばすと ntok を超えることがある（`git -C`・`git -C d`）。
+function sub_pos(c,   k, b) {
+  k = c + 1
+  b = tolower(tok[c]); sub(/^.*\//, "", b)
+  if (b == "git") while (k + 1 <= ntok && (tok[k] == "-C" || tok[k] == "-c") && tok[k + 1] != "" && tok[k + 1] !~ /[$`]/) k += 2
+  return k
+}
+# git / gh（tok[c]）のサブコマンドが正規表現 re に当たり得るか。sub_pos の語が option でなければ、それが確かにサブコマンドなので
+# その語だけを見る。option のときは、option が値を取るか（版で変わる）を推測せず、後ろのどれかの語が re に当たれば
+# サブコマンドとみなす（over-deny 側。`gh --jq . auth token`・`git --config-env x=y credential fill`）。
+function sub_is(c, re,   k, s) {
+  s = sub_pos(c)
+  if (s > ntok) return 0
+  if (tok[s] !~ /^-/) return (tok[s] ~ re)
+  for (k = s + 1; k <= ntok; k++) if (tok[k] ~ re) return 1
+  return 0
+}
+# git config の設定キーの形（節名 . 名前。. を含み、option や subcommand〔list・get 等〕と取り違えない）。
+function conf_key(t) { return (t ~ /^[A-Za-z][A-Za-z0-9-]*[.][^ \t\n]+$/) }
+# 認証情報の判定で通す git config の完全形（tok[c] が git。前置きの `-C <dir>`・`-c <k=v>` は sub_pos が読み飛ばす）。
+# config の後ろに option を 1 つも含まない次の形だけ:
+#   config KEY・config --get KEY・config get KEY（読み取り。KEY が extraheader〔認証ヘッダ〕を含まない）、config KEY VALUE（書き込み）
+# 一覧・照合・--file / --blob・--edit・scope の指定など option の付いた形は、値を取るかを推測せずすべて止める（git の版で option の
+# 集合が違い、同じ省略形〔--co 等〕がどの option を指すかも版によって変わり得るため）。
+function conf_ok(c,   n, a, b, s) {
+  s = sub_pos(c)
+  n = ntok - s + 1; a = tok[s + 1]; b = tok[s + 2]
+  if (tok[s] != "config") return 0
+  if (n == 2) return (conf_key(a) && tolower(a) !~ /extraheader/)
+  if (n == 3 && (a == "--get" || a == "get")) return (conf_key(b) && tolower(b) !~ /extraheader/)
+  return (n == 3 && conf_key(a))
+}
+function cred_check(p, wr,   cb, i, k, t, np, fl, pos, j, sk, haspat, noidx, grepv, vs) {
+  for (i = 1; i <= nrin; i++) cred_tok(rin[i])
+  # 秘密らしい変数の展開（二重引用符内・引用符なし。${!x} の間接展開を含む）は、どのコマンドの引数でも標準出力・通信・ログへ流れ得る
+  # （gh pr comment --body "$GH_TOKEN"・git commit -m "$GH_TOKEN"・curl -d "$GITHUB_TOKEN"・`command -V "$GH_TOKEN"` は
+  # `command: <値>: not found` で値を出す）。代入の語（X=$GH_TOKEN）は値を表示しないので除く。下のどの早期 return よりも先に見る。
+  for (k = 1; k <= ntok; k++) if (tokv[k] != "" && secret_ref(tokv[k]) && !(k < p && tok[k] ~ /^[A-Za-z_][A-Za-z0-9_]*=/)) cred_hit = 1
+  # command -v / -V は名前の検索だけで実行しない（`command -v printenv`・`command -v set`・`command -v export`）。
+  if (cmdv) return
+  if (exi > 0) {
+    np = 0; fl = ""; pos = ""
+    for (k = exi + 1; k <= ntok; k++) { t = tok[k]; if (t ~ /^-/) fl = fl t; else { np++; pos = pos " " t } }
+    if (np == 0) { if (fl == "" || fl ~ /p/ || fl ~ /x/ || (wr == "export" && fl ~ /n/)) cred_hit = 1 }
+    else if (fl ~ /p/ && secret_name(pos)) cred_hit = 1
+  }
+  if (p > ntok) { if (wr == "env" && !esplit) cred_hit = 1; return }
+  while (tolower(tok[p]) ~ /(^|\/)xargs$/) {
+    p++
+    while (p <= ntok && tok[p] ~ /^-/) p++
+    if (p > ntok) return
+  }
+  cb = tolower(tok[p]); sub(/^.*\//, "", cb)
+  # echo / printf の引数の秘密変数の展開（${!x} の間接展開を含む）は冒頭の展開検査が見る。
+  if (cb == "echo" || cb == "printf") return
+  if (cb == "gh") {
+    # gh auth の token・git-credential と、--show-token(=…) / -t(=…)（status の短縮。束ね書き -ht も）は、位置を問わず語の集合で見る。
+    if (sub_is(p, "^auth$")) {
+      for (k = p + 1; k <= ntok; k++) {
+        t = tok[k]
+        if (t == "token" || t == "git-credential" || t ~ /^--show-token(=.*)?$/ || t ~ /^-[A-Za-z]*t[A-Za-z]*(=.*)?$/) cred_hit = 1
+      }
+    }
+    # 本文・題名の値は文章。--body-file 等のファイル指定と他の引数は開く形として見る。
+    sk = 0
+    for (k = p + 1; k <= ntok; k++) {
+      t = tok[k]
+      if (sk) { sk = 0; continue }
+      if (t == "--body" || t == "-b" || t == "--title" || t == "-t" || t == "--message" || t == "-m" || t == "--notes") { sk = 1; continue }
+      if (t ~ /^--(body|title|message|notes)=/ || t ~ /^-[btm]./) continue
+      cred_tok(t)
+    }
+    return
+  }
+  if (cb == "git") {
+    # サブコマンドは sub_is で見る（`-C <dir>`・`-c <k=v>` だけ読み飛ばし、他の global option が前にあれば語の集合で見る。
+    # 値を取るかが版で変わるため）。
+    # git credential と credential-*（helper の直接呼び出し。fill / get 以外も）は止める。
+    if (sub_is(p, "^credential(-.*)?$")) cred_hit = 1
+    # git var は変数名 1 つの完全形（git var GIT_EDITOR。前置きは `-C <dir>`・`-c <k=v>` だけ）を通す。-l / --list・他の option の付いた形は止める。
+    vs = sub_pos(p)
+    if (sub_is(p, "^var$") && !(ntok == vs + 1 && tok[vs] == "var" && tok[vs + 1] ~ /^[A-Za-z_][A-Za-z0-9_]*$/)) cred_hit = 1
+    # git config は conf_ok の完全形だけ通す（一覧・照合・extraheader の読み出し・--file / --blob・--edit を含む他の形は止める）。
+    if (sub_is(p, "^config$") && !conf_ok(p)) cred_hit = 1
+    # --no-index（git diff / grep が作業ツリーの外のファイルを読む）の語があれば、サブコマンドを問わず全引数をファイルとして見る。
+    noidx = 0
+    for (j = p + 1; j <= ntok; j++) if (tok[j] ~ /^--no-i(n(d(e(x)?)?)?)?$/) noidx = 1
+    # global option の値（-C ~/.config/gh・--git-dir=…）も同じ並びで見る。
+    sk = 0
+    for (j = p + 1; j <= ntok; j++) {
+      t = tok[j]
+      if (sk) { sk = 0; continue }
+      if (t == "-m" || t == "--message") { sk = 1; continue }
+      if (t ~ /^--message=/ || t ~ /^-m./) continue
+      # --opt=VALUE と短い形の連結 -xVALUE（git diff -O<file> 等）の VALUE も ~/.config/gh かを見る。
+      if (t ~ /^-/) { i = index(t, "="); if (i > 0 && ghdir(substr(t, i + 1))) cred_hit = 1; if (t ~ /^-[^-]./ && ghdir(substr(t, 3))) cred_hit = 1; continue }
+      if (ghdir(t)) cred_hit = 1
+      if (noidx) cred_tok(t)
+    }
+    return
+  }
+  if (cb == "printenv") {
+    np = 0
+    for (k = p + 1; k <= ntok; k++) { if (tok[k] ~ /^-/) continue; np++; if (secret_name(tok[k])) cred_hit = 1 }
+    if (np == 0) cred_hit = 1
+  }
+  else if (cb == "set") { if (p == ntok) cred_hit = 1 }
+  else if (cb == "compgen") {
+    for (k = p + 1; k <= ntok; k++) {
+      if (tok[k] ~ /^-[A-Za-z]*e[A-Za-z]*$/) cred_hit = 1
+      if (tok[k] == "-A" && (tok[k + 1] == "export" || tok[k + 1] == "variable")) cred_hit = 1
+    }
+  }
+  else if (cb == "ps") {
+    sk = 0
+    for (k = p + 1; k <= ntok; k++) {
+      t = tok[k]
+      if (sk) { sk = 0; continue }
+      if (t ~ /^-/) {
+        if (t ~ /^-[A-Za-z]*E/) cred_hit = 1
+        if (t ~ /^-[opuUCGgtsO]$/ || t ~ /^-[A-Za-z]*o$/) sk = 1
+      }
+      else if (t ~ /^[A-Za-z]*e[A-Za-z]*$/) cred_hit = 1
+    }
+  }
+  else if (cb == "security") {
+    for (k = p + 1; k <= ntok; k++) if (tolower(tok[k]) ~ /^(find-generic-password|find-internet-password|dump-keychain|export)$/) cred_hit = 1
+  }
+  else if (cb == "secret-tool") {
+    for (k = p + 1; k <= ntok; k++) if (tok[k] == "lookup" || tok[k] == "search") cred_hit = 1
+  }
+  # 検索コマンドの検索パターン（最初の位置引数・-e の値）は文字列として扱う。それ以降の引数はファイルとして見る。
+  grepv = (cb ~ /^(grep|egrep|fgrep|rg|ag|ack)$/)
+  haspat = 0; sk = 0
+  for (k = p + 1; k <= ntok; k++) {
+    t = tok[k]
+    if (sk) { sk = 0; continue }
+    if (grepv && t ~ /^-/) {
+      if (t == "-e" || t == "--regexp") { sk = 1; haspat = 1; continue }
+      if (t == "-f" || t == "--file") { haspat = 1; cred_tok(tok[k + 1]); k++; continue }
+      if (t ~ /^--file=/) { haspat = 1; cred_tok(substr(t, 8)); continue }
+      if (t ~ /^-f./) { haspat = 1; cred_tok(substr(t, 3)); continue }
+      if (t ~ /^--regexp=/ || t ~ /^-e./) { haspat = 1; continue }
+      if (index(" -A -B -C -m -d -D -g -t -T -j -M --include --exclude --exclude-dir --glob --iglob --type --type-not --max-count --context --after-context --before-context --label --max-depth ", " " t " ") > 0) sk = 1
+      continue
+    }
+    if (grepv && !haspat) { haspat = 1; continue }
+    cred_tok(t)
+    if (grepv && homeparent(t)) cred_hit = 1
+  }
+}
 function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap, ch, rest) {
   # コマンド位置の前置語（{ then do else ! time 等のキーワードと env・sudo・export・declare 等のラッパー）・
   # 代入（FOO=1 HUSKY=0 git ...）・ラッパーの option を読み飛ばし、フック回避の代入を拾う。
@@ -215,14 +484,17 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap
   # -S / --split-string の値は回避の代入があれば同じセグメントの後続の git に効くものとして扱い（seg_s。
   # 後のセグメントへは持ち越さない）、値そのものも別に解析する（`env -S 'HUSKY=0 git commit'`・`env -S 'git push -f'`）。
   # sudo / doas / nice の値を取る option も同様に読み飛ばす（`sudo -u root HUSKY=0 git ...`）。
-  p = 1; seg_h = 0; seg_s = 0; noecho = 0; wr = ""
+  p = 1; seg_h = 0; seg_s = 0; noecho = 0; wr = ""; exi = 0; esplit = 0; cmdv = 0
   while (p <= ntok) {
     t = tok[p]; lt = tolower(t)
     if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { if (t == "HUSKY=0" || t == "HUSKY_SKIP_HOOKS=1") seg_h = 1; p++ }
     else if (t ~ /^([{]|then|do|else|elif|if|while|until|!)$/) { wr = ""; p++ }
     else if (t == "time") { wr = "time"; p++ }
-    else if (lt ~ /(^|\/)(env|sudo|doas|nice|nohup|command|exec|builtin)$/ || lt == "export" || lt == "declare" || lt == "typeset") {
-      noecho = 1; wr = lt; sub(/^.*\//, "", wr); p++
+    else if (lt ~ /(^|\/)(env|sudo|doas|nice|nohup|command|exec|builtin)$/ || lt == "export" || lt == "declare" || lt == "typeset" || lt == "local" || lt == "readonly") {
+      noecho = 1; wr = lt; sub(/^.*\//, "", wr)
+      if (wr == "export" || wr == "declare" || wr == "typeset" || wr == "local" || wr == "readonly") exi = p
+      if (wr == "command" && p < ntok && tok[p + 1] ~ /^-[A-Za-z]*[vV]/) cmdv = 1
+      p++
     }
     else if (wr == "time" && t == "-p") p++
     else if (wr != "" && wr != "time" && t ~ /^-./) {
@@ -253,6 +525,7 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap
     }
     else break
   }
+  cred_check(p, wr)
   hk = husky_persist
   if (p > ntok) { if (seg_h) husky_persist = 1 } else if (seg_h || seg_s) hk = 1
   # echo / printf は引数を表示するだけで、git の語があっても実行しない。
@@ -294,45 +567,53 @@ function opt_val_next(a, longs, stops,   m, ch) {
   }
   return 0
 }
-# git の設定キー（-c の値・git config のキー）がフック・alias の差し替えか。
-function conf_bad(kv,   lk) {
-  lk = tolower(kv)
-  return (lk ~ /^core\.hookspath([=]|$)/ || lk ~ /^alias\./)
-}
-# git config の引数列。core.hooksPath / alias.* を「設定・解除する形」だけ拒否する
-# （--get 系・引数がキー 1 つだけの読み取りは許可）。
-function config_args(k,   a, ro, wflag, np, key, nkey) {
-  ro = 0; wflag = 0; np = 0; key = ""; nkey = 0
-  for (; k <= ntok; k++) {
-    a = tok[k]
-    if (a == "--get" || a == "--get-all" || a == "--get-regexp" || a == "--get-urlmatch" || a == "--list" || a == "-l") ro = 1
-    else if (a == "--unset" || a == "--unset-all" || a == "--add" || a == "--replace-all") wflag = 1
-    else if (a == "-f" || a == "--file" || a == "--blob" || a == "--type" || a == "-t" || a == "--default") k++
-    else if (substr(a, 1, 1) == "-") continue
-    else {
-      np++
-      if (np == 1 && (a == "get" || a == "list")) ro = 1
-      else if (np == 1 && (a == "set" || a == "unset")) wflag = 1
-      else { nkey++; if (nkey == 1) key = a }
-    }
+# フックの差し替え（全セッション。理由 no-verify）。tok[c] が git。option の文法は真似ず、語の集合で見る:
+#   - -c / --config-env の値（次の語・-cKEY=…・--config-env=…。位置を問わない）のキーが core.hooksPath（大文字小文字を無視し
+#     .hookspath を含む）か alias.*
+#   - git config（sub_is）で、hookspath を含む語か alias.* の語がある。または core / alias の節名そのものの語と、
+#     rename-section / remove-section（--ren… / --rem… の省略を含む `re` 始まりの語）がある
+# 当たったうち通すのは、option を含まない読み取りの完全形 `git config KEY`・`git config --get KEY`（KEY は core.hooksPath か
+# alias.<名前>）だけ。値を取るかが版で変わる option（--comment / --color 等）を含む形は、読み取りに見えても止める。
+function conf_bad(kv) { kv = tolower(kv); return (index(kv, ".hookspath") > 0 || kv ~ /^alias[.]/) }
+function hook_swap(c,   k, t, hit, sec, re, n) {
+  for (k = c + 1; k <= ntok; k++) {
+    t = tok[k]
+    if ((t == "-c" || t == "--config-env") && conf_bad(tok[k + 1])) setv("no-verify")
+    else if (t ~ /^-c./ && conf_bad(substr(t, 3))) setv("no-verify")
+    else if (t ~ /^--config-env=/ && conf_bad(substr(t, 14))) setv("no-verify")
   }
-  if (key != "" && conf_bad(key) && (wflag || (!ro && nkey >= 2))) setv("no-verify")
-}
-function git_args(j, hk,   t, scmd, k, a, hooked, dd, eq, nm) {
-  while (j <= ntok) {
-    t = tok[j]
-    if (t == "-c" || t == "--config-env") { if (conf_bad(tok[j + 1])) setv("no-verify"); j += 2 }
-    else if (substr(t, 1, 2) == "-c" && length(t) > 2) { if (conf_bad(substr(t, 3))) setv("no-verify"); j++ }
-    else if (t == "-C" || t == "--git-dir" || t == "--work-tree" || t == "--namespace" || t == "--super-prefix") j += 2
-    else if (substr(t, 1, 12) == "--config-env" && conf_bad(substr(t, 14))) { setv("no-verify"); j++ }
-    else if (substr(t, 1, 1) == "-") j++
-    else break
+  if (!sub_is(c, "^config$")) return
+  hit = 0; sec = 0; re = 0
+  for (k = c + 1; k <= ntok; k++) {
+    t = tolower(tok[k])
+    if (index(t, "hookspath") > 0 || t ~ /^alias[.]/) hit = 1
+    if (t == "core" || t == "alias") sec = 1
+    if (t ~ /^(--)?re/) re = 1
   }
-  if (j > ntok) return
+  if (!hit && !(sec && re)) return
+  n = ntok - c; t = tolower(tok[ntok])
+  if (tok[c + 1] == "config" && (n == 2 || (n == 3 && tok[c + 2] == "--get")) && t ~ /^(core[.]hookspath|alias[.][a-z0-9_-]+)$/) return
+  setv("no-verify")
+}
+function git_hooked(w) { return (w == "commit" || w == "push" || w == "merge" || w == "rebase" || w == "cherry-pick" || w == "am" || w == "revert" || w == "pull") }
+# git（tok[j - 1]）の --no-verify・commit -n・force push を見る。サブコマンドの位置は sub_is と同じ方式で決める:
+# `-C <dir>`・`-c <k=v>` を読み飛ばした後の語が option でなければそれがサブコマンド。option（--attr-source・--git-dir 等。
+# 値を取るかが版で変わる）なら、後ろの hook を飛ばせるサブコマンド名の語をそれぞれサブコマンドとみなして見る（over-deny 側）。
+function git_args(j, hk,   s, k, hit) {
+  hook_swap(j - 1)
+  s = sub_pos(j - 1)
+  if (s > ntok) return
+  if (tok[s] !~ /^-/) { git_scan(s, hk); return }
+  hit = 0
+  for (k = s + 1; k <= ntok; k++) if (git_hooked(tok[k])) { hit = 1; git_scan(k, 0) }
+  if (hk && hit) setv("no-verify")
+}
+# tok[j] をサブコマンドとして、その後ろの引数を見る。
+function git_scan(j, hk,   scmd, k, a, hooked, dd, eq, nm) {
   scmd = tok[j]
-  if (scmd == "config") config_args(j + 1)
-  hooked = (scmd == "commit" || scmd == "push" || scmd == "merge" || scmd == "rebase" || scmd == "cherry-pick" || scmd == "am" || scmd == "revert" || scmd == "pull")
+  hooked = git_hooked(scmd)
   if (hk && hooked) setv("no-verify")
+  dd = 0
   for (k = j + 1; k <= ntok; k++) {
     a = tok[k]
     # `--` 以降は引数（パス・ref 名）でありフラグ判定しない。ただし push の + 始まりの refspec は
@@ -538,6 +819,8 @@ function heredoc_subs(b,   st, sl, k, c, c2, r) {
     }
     if (c == "$") {
       c2 = substr(text, k + 1, 1)
+      # 引用符なし heredoc の本文はシェルが展開して標準入力へ流すので、秘密らしい変数の展開（${!x} の間接展開を含む）も止める。
+      if (secret_ref(var_at(k + 1))) cred_hit = 1
       if (c2 == "(") {
         if (substr(text, k + 2, 1) == "(") { r = arith_end(k + 3, 1, 0); if (r > 0) { k = r; continue } }
         r = sub_end(k + 2)
@@ -639,9 +922,9 @@ function assign_pos(   m, t) {
 }
 # 1 つの文字列をトークン化して各セグメントを解析する。入れ子の中身は enqueue で積み、END が順に流す。
 function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body, found) {
-  text = txt; len = length(text); i = 1; cur = ""; have = 0; ntok = 0; nhs = 0; rd = 0; rdpos = -5; rdc = ""
+  text = txt; len = length(text); i = 1; cur = ""; curv = ""; have = 0; ntok = 0; nhs = 0; nrin = 0; rd = 0; rdpos = -5; rdc = ""
   abn = 0; hdn = 0; linecap = 0; linehk = 0
-  split("", hs); cdepth = dp; husky_persist = hkin
+  split("", hs); split("", hsv); cdepth = dp; husky_persist = hkin
   while (i <= len) {
     ch = substr(text, i, 1)
     if (ch == "\\") {
@@ -680,6 +963,7 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
           limit = 1
         }
         if (c2 == "$" && substr(text, i + 1, 1) == "{" && substr(text, i + 2, 1) ~ /^[ \t\n|]$/) limit = 1
+        if (c2 == "$") curv = curv " " var_at(i + 1)
         cur = cur c2; i++
       }
       i++; continue
@@ -713,7 +997,7 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
     if (ch == "$" && substr(text, i + 1, 1) == "{") {
       # bash 5.3 の ${ cmd; } / ${| cmd; } は中身がコマンドそのもの。値として読まず（echo の引数として見逃さない）fail-closed にする。
       if (substr(text, i + 2, 1) ~ /^[ \t\n|]$/) limit = 1
-      else { r = pe_end(i + 2, 1, 0); if (r > 0) { cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
+      else { r = pe_end(i + 2, 1, 0); if (r > 0) { curv = curv " " substr(text, i + 1, r - i - 1); cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
     }
     # 配列の添字つき代入 x[1<<2]=y と複合代入 a=([1<<2]=y) は、代入を置ける位置では添字・中身を含めて 1 語
     # （その << は heredoc でない）。引数の位置（`ls x[; cmd; y]=1`）では bash も 1 語にしないので読まない。
@@ -740,7 +1024,10 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
       hdn++; hdw[hdn] = w; hdd[hdn] = dash; hdq[hdn] = hdquoted
       continue
     }
+    # 双方向リダイレクト <> は読み書きで開くので、対象を入力側（rdc が <）として検査する。
+    if (ch == ">" && rd == 1 && rdc == "<" && rdpos == i - 1) { rdpos = i; i++; continue }
     if (ch == "<" || ch == ">") { redir_flush(); rd = 1; rdpos = i; rdc = ch; i++; continue }
+    if (ch == "$") curv = curv " " var_at(i + 1)
     cur = cur ch; have = 1; i++
   }
   end_seg()
@@ -752,13 +1039,16 @@ END {
   scan(alltext, 0, 0)
   for (qi = 1; qi <= nq && verdict == ""; qi++) scan(qs[qi], qd[qi], qh[qi])
   if (verdict == "" && limit) verdict = "nesting-limit"
+  if (verdict == "" && (cred_hit || (cred_aj && cred_cx) || (cred_env && cred_proc))) verdict = "ok-cred"
   printf "%s\n", (verdict == "") ? "ok" : verdict
 }
 AWK
 
+cred_pending=0
 git_verdict=$(printf '%s\n' "$cmd" | awk "$GIT_AWK") || finish deny internal-error
 case "$git_verdict" in
   ok) : ;;
+  ok-cred) cred_pending=1 ;;
   no-verify) finish deny no-verify ;;
   force-push) finish deny force-push ;;
   nesting-limit) finish deny nesting-limit ;;
@@ -1246,7 +1536,7 @@ if contains_subsequence "$all_nf" gh api; then
   if evidence '/merges([[:space:]?]|$)'; then
     finish deny merge-guard
   fi
-  if evidence 'mergePullRequest|enablePullRequestAutoMerge|mergeBranch'; then
+  if evidence 'mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch'; then
     finish deny merge-guard
   fi
 
@@ -1480,5 +1770,10 @@ if contains_subsequence "$all_nf" gh extension \
   || contains_subsequence "$all_nf" gh extensions; then
   finish deny merge-guard
 fi
+
+# 認証情報の読み出し（subagent が true / null のときだけ。main の利用者操作は上の false の出口で対象外）。
+# 判定は GIT_AWK の cred_check が行う（引用符・heredoc を解釈したトークンに対して。上の結果 ok-cred）。
+# gh が内部で hosts.yml を読むのはコマンド文字列に現れないので、スクリプト経由の gh 利用は止めない。
+[ "$cred_pending" -eq 1 ] && finish deny credential-read
 
 finish allow
