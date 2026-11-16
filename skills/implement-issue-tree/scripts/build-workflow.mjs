@@ -859,6 +859,19 @@ export function verifyTokenParity(src, artifact, { helperPath = TOKEN_DIFF_PATH,
 }
 
 /**
+ * ビルドの前半（段 1）。目印をスクリプトのハッシュへ置換し、コメント・インデント・不要な空白を除去して、
+ * 変換前後のトークン照合（照合 1）まで行う。戻り値の `src` はハッシュ埋め込み済みの開発ファイル、`stage1` は
+ * 照合を通った段 1 の生成物。照合に失敗したら throw する（fail-closed）。runBuild はこれを呼ぶだけで、
+ * 挙動は従来のビルドと同じ。`parity` は verifyTokenParity へ渡す差し替え（テスト専用）。
+ */
+export function buildStage1(rawSrc, scriptsDir, parity = {}) {
+  const src = embedScriptHashes(rawSrc, scriptsDir)
+  const stage1 = buildArtifact(src)
+  verifyTokenParity(src, stage1, parity)
+  return { src, stage1 }
+}
+
+/**
  * ビルド本体（CLI が使う関数）。開発ファイルから生成物を作ってトークン照合し、書き込む（`checkOnly` では
  * 書かず、既存の実行ファイルとの一致だけ確かめる）。標準出力・標準エラーに出す行と終了コードを返し、
  * 出力と終了は呼び出し側（CLI）が行う。照合に失敗したら生成ファイルは書かない。
@@ -871,9 +884,9 @@ export function runBuild({ srcPath = SRC_PATH, distPath = DIST_PATH, checkOnly =
   let artifact
   try {
     // 目印をスクリプトのハッシュへ置換した文字列を、以降の変換とトークン照合の「開発ファイル」として扱う
-    src = embedScriptHashes(readFileSync(srcPath, 'utf8'), scriptsDir)
-    artifact = buildArtifact(src)
-    verifyTokenParity(src, artifact, parity)
+    const stage = buildStage1(readFileSync(srcPath, 'utf8'), scriptsDir, parity)
+    src = stage.src
+    artifact = stage.stage1
   } catch (e) {
     return { status: 1, stdout: [], stderr: [`ビルド中止（${distPath} は書き込まない）: ${e.message}`], wrote: false }
   }
