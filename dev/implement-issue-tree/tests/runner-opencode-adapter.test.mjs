@@ -14,6 +14,8 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { SKILL_DIR } from './lib/paths.mjs'
 import { MERGE_RES, createAdapter, credentialReadRules, opencodeConfigDirs, protectRules } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
+import { createAgentHost } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
+import { loadConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 import { MERGE_EXEC_COMMAND, codexRules, mergeExecCommandFor, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 
 const PLUGIN_DIR = join(SKILL_DIR, 'runner', 'adapters', 'opencode-plugin')
@@ -361,4 +363,83 @@ test('credentialReadRules: GH_CONFIG_DIR・XDG_CONFIG_HOME・CODEX_HOME・XDG_DA
   const res = credentialReadRules({ HOME: '/h', GH_CONFIG_DIR: '/g', CODEX_HOME: '/c', XDG_DATA_HOME: '/d' }).permissions.map((r) => r.resource)
   for (const want of ['/g', '/g/*', '/c/auth.json', '/d/opencode/auth.json', '/d/opencode/opencode.db*']) assert.ok(res.includes(want), want)
   assert.ok(credentialReadRules({ HOME: '/h', XDG_CONFIG_HOME: '/x' }).permissions.some((r) => r.resource === '/x/gh/*'))
+})
+
+// 契約の追記（2026-11-17・監査修正の取り込み）: killSync は起動した serve のプロセスグループを同期で SIGKILL する。
+// run.mjs がシグナル受信時と exit 時に呼ぶ（close を待てない経路）。
+const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+async function waitDead(pids, ms = 5000) {
+  const end = Date.now() + ms
+  while (pids.some(alive) && Date.now() < end) await new Promise((r) => setTimeout(r, 20))
+  return pids.filter(alive)
+}
+
+test('killSync: 起動済みの serve（通常用と merge 用）を孫ごと同期で SIGKILL する', async () => {
+  const gpid = join(trackTmp(realpathSync(mkdtempSync(join(tmpdir(), 'iit-oc-gpid-')))), 'grandchild.pid')
+  const t2 = setup({ env: { FAKE_OC_GRANDCHILD: gpid } })
+  await t2.adapter.start()
+  await t2.adapter.run(t2.req({ allowMerge: true, merge: { prNumber: 3, repo: 'octo/repo' } }))
+  const pids = starts(t2.records()).map((r) => r.pid)
+  assert.equal(pids.length, 2)
+  const g = Number(readFileSync(gpid, 'utf8'))
+  assert.ok([...pids, g].every(alive))
+  const ret = t2.adapter.killSync()
+  assert.equal(ret, undefined, '同期（Promise を返さない）')
+  assert.deepEqual(await waitDead([...pids, g]), [], 'serve と同じプロセスグループの孫が止まる')
+  await t2.adapter.close() // 止めた後の close も返る
+})
+
+test('killSync: 起動待ち（まだ待ち受けていない）の serve も止める。start は失敗で返る', async () => {
+  const t = setup({ env: { FAKE_OC_NOLISTEN: '1' }, toolConfig: { startTimeoutMs: 20000 } })
+  const p = t.adapter.start().then(() => null, (e) => e)
+  const end = Date.now() + 10000
+  while (starts(t.records()).length === 0 && Date.now() < end) await new Promise((r) => setTimeout(r, 20))
+  const [{ pid }] = starts(t.records())
+  const t0 = Date.now()
+  t.adapter.killSync()
+  assert.deepEqual(await waitDead([pid]), [])
+  const e = await p
+  assert.ok(e instanceof AdapterError && e.kind === 'prereq', '起動待ちは serve の終了で prereq')
+  assert.ok(Date.now() - t0 < 10000, '起動の時間切れを待たない')
+  await t.adapter.close()
+})
+
+// 統合の経路（sec-host の agent-host が作る req.merge を sec-oc の OpenCode アダプタが受け取る）: 実の createAgentHost と
+// 実のアダプタを偽 serve でつなぎ、merge-exec の段で PR ごとの merge 用 serve が、その PR 番号の形と GH_REPO で起動すること。
+// MERGE_STEP は src の mergeExecutePrompt の手順 3 と同じ形（runner-agent-host.test.mjs と同じ）
+const MERGE_STEP = (n) => `3. 次のコマンドで squash merge を実行する: HEAD_SHA="<payload.headSha の 40 桁>"; gh pr merge ${n} --squash --delete-branch --match-head-commit "$HEAD_SHA"。`
+const HOST_SCHEMA = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+
+test('統合: agent-host の req.merge で、OpenCode アダプタが PR ごとの merge 用 serve を GH_REPO 固定・PR 番号の形で起動する', async () => {
+  const t = setup({ env: { GH_REPO: 'evil/other' } })
+  const host = (cfg) => createAgentHost({ adapter: t.adapter, cfg: { config: loadConfig(), skillDir: SKILL_DIR, mainRoot: t.mainRoot, runId: 'wf_0123abcd-4ef', runDir: join(t.runDir, 'host'), args: { autoMerge: true }, ...cfg } })
+  await t.adapter.start()
+  try {
+    const agent = host({ repo: 'octo/repo' })
+    await agent(MERGE_STEP(41), { label: 'merge-exec:#5', schema: HOST_SCHEMA })
+    let recs = starts(t.records())
+    assert.equal(recs.length, 2, '通常用 + PR 41 の merge 用')
+    const m41 = recs[1]
+    assert.equal(m41.ghRepo, 'octo/repo', 'agent-host の repo（cfg.repo）を merge 用 serve の GH_REPO に固定する')
+    assert.deepEqual(m41.config.plugins[0].options.mergeRes, [mergeExecCommandFor(41).source])
+    assert.deepEqual(recs[0].config.plugins[0].options.mergeRes, [], '通常用は素通しを持たない')
+    assert.equal(recs[0].ghRepo, 'evil/other', '通常用の env は変えない')
+
+    // 同じ PR は同じ serve、別の PR は別の serve
+    await agent(MERGE_STEP(41), { label: 'merge-exec:#5', schema: HOST_SCHEMA })
+    await agent(MERGE_STEP(42), { label: 'merge-exec:#6', schema: HOST_SCHEMA })
+    recs = starts(t.records())
+    assert.equal(recs.length, 3)
+    assert.deepEqual(recs[2].config.plugins[0].options.mergeRes, [mergeExecCommandFor(42).source])
+
+    // 決まらないとき（番号が 2 種類・回復専用の文面・merge-exec 以外の label）は merge 用 serve を作らず、通常用で走る
+    await agent(`${MERGE_STEP(41)}\n${MERGE_STEP(43)}`, { label: 'merge-exec:#5', schema: HOST_SCHEMA })
+    await agent('回復専用: gh pr merge の実行も行わない（常に禁止）', { label: 'merge-exec:#5', schema: HOST_SCHEMA })
+    await agent(MERGE_STEP(44), { label: 'merge-verify:#5', schema: HOST_SCHEMA })
+    // repo が未確定（cfg.repo なし）なら merge 用 serve を作らない
+    await host({})(MERGE_STEP(45), { label: 'merge-exec:#7', schema: HOST_SCHEMA })
+    // autoMerge でないランでも作らない
+    await host({ repo: 'octo/repo', args: { autoMerge: false } })(MERGE_STEP(46), { label: 'merge-exec:#8', schema: HOST_SCHEMA })
+    assert.equal(starts(t.records()).length, 3, '決まらない段では merge 用 serve を起動しない')
+  } finally { await t.adapter.close() }
 })

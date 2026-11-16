@@ -20,7 +20,10 @@
 // 読み込む（実の plugin を import して ctx.location つきで setup を呼び、目印を書かせる。session.create では読み込まない）。
 // メッセージ一覧は cursor でページを送れる（cursor.next は末尾でも返る。実機と同じ）。
 // FAKE_OC_FOREIGN=<id> を渡すと、アダプタが作っていない既存セッションを 1 つ持つ（削除されないことの確認用）。
-import { appendFileSync } from 'node:fs'
+// FAKE_OC_GRANDCHILD=<pid ファイル> で、同じプロセスグループに孫（sleep）を起動して pid を書く（killSync の確認用）。
+// FAKE_OC_NOLISTEN=1 で待ち受けない（起動待ちの serve の再現）。
+import { spawn } from 'node:child_process'
+import { appendFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -177,5 +180,10 @@ const server = createServer(async (req, res) => {
     return send(404, { error: 'not found' })
   })
 })
-server.listen(port, '127.0.0.1')
+if (process.env.FAKE_OC_GRANDCHILD) {
+  const g = spawn('sleep', ['300'], { stdio: 'ignore' })
+  writeFileSync(process.env.FAKE_OC_GRANDCHILD, String(g.pid))
+}
+if (!process.env.FAKE_OC_NOLISTEN) server.listen(port, '127.0.0.1')
+else setInterval(() => {}, 1000)
 process.on('SIGTERM', () => process.exit(0))

@@ -32,6 +32,8 @@
 //   - ask（許可要求・フォーム）は検知したら interrupt して denied にする（reject すると別の形で続けてしまう）。
 //   - 出力は応答テキストだけを返す。JSON の抽出・検証・修復の判断は agent-host。
 //   - `/api/model`・`/api/config` は API キーを含み得るので呼ばず、ログにも残さない。
+//   - 後片づけ: close は自分のセッションを消して serve を止める。killSync（契約の任意メソッド）は close を待てない経路
+//     （run.mjs のシグナル受信・exit）用で、起動した serve（起動待ちを含む）のプロセスグループを同期で SIGKILL する。
 //
 // toolConfig のキー（既定値は runner/config/default.json の toolConfig.opencode。コード側の既定も同じ）:
 //   deleteSessions（run.mjs が cleanup.deleteSessions から渡す）・command (["opencode"]。serve を起動するコマンドの配列)・
@@ -48,6 +50,7 @@ import { fileURLToPath } from 'node:url'
 import { AdapterError } from '../lib/adapter-error.mjs'
 import { MERGE_EXEC_COMMAND, mergeExecCommandFor } from '../lib/guard.mjs'
 import { GUARD_SCRIPT_MISSING, findGuardScript } from '../lib/guard-script.mjs'
+import { isMergeTarget } from '../lib/merge-target.mjs'
 
 const USAGE_LIMIT_RE = /rate.?limit|quota|usage.?limit|too many requests|\b429\b|insufficient.?(credit|quota|balance)/i
 const PLUGIN_DIR = join(dirname(fileURLToPath(import.meta.url)), 'opencode-plugin')
@@ -64,17 +67,15 @@ const MARKER_WAIT_MS = 5000
 const MESSAGE_PAGE = 100
 const MESSAGE_PAGE_MAX = 1000 // 100 件 × 1000 ページを超えるセッションは数え切れないものとして拒否する
 
-const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
-
 /**
- * req.merge（契約: null | { prNumber, repo }。allowMerge が true のときだけ入る）を検証する。allowMerge でない・merge が無い・
- * 不正のときは null（merge 用 serve を使わない）。
+ * req.merge（契約: null | { prNumber, repo }。allowMerge が true のときだけ入る）を検証する。形の判定は共通層の
+ * isMergeTarget（agent-host・Codex アダプタと同じ。repo は owner/repo）。allowMerge でない・merge が無い・不正のときは
+ * null（merge 用 serve を使わず通常用で走らせる。マージは通常用 serve の deny と plugin に止められる。fail-closed。
+ * Codex アダプタは不正な merge を例外にするが、どちらもマージは起きない）。
  */
 export function mergeTarget(req) {
   const m = req?.allowMerge === true ? req.merge : null
-  if (!m || typeof m !== 'object') return null
-  if (!Number.isSafeInteger(m.prNumber) || m.prNumber < 1) return null
-  if (typeof m.repo !== 'string' || !REPO_RE.test(m.repo) || m.repo.split('/').some((x) => x === '.' || x === '..')) return null
+  if (!isMergeTarget(m)) return null
   return { prNumber: m.prNumber, repo: m.repo }
 }
 
@@ -168,6 +169,8 @@ export function createAdapter(cfg) {
   let guardScript = null
   const serves = new Map() // kind -> Promise<Serve>
   const sessions = new Map() // sid -> Serve（自分が作ったもの全部）
+  // 起動した serve の子プロセス（起動待ちのものを含む）。killSync が同期で使う（serves は Promise なので同期では引けない）
+  const children = new Set()
   let closed = false
 
   const execVersion = () => new Promise((resolve, reject) => {
@@ -196,12 +199,14 @@ export function createAdapter(cfg) {
     const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? [mergeExecCommandFor(merge.prNumber).source] : [], markerPath, nonce, protectedPaths: configDirs.map((d) => resolve(d)), callLog }
     const env = { ...baseEnv, ...(allowMerge ? { GH_REPO: merge.repo } : {}), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildConfigContent({ rules, pluginDir: PLUGIN_DIR, options })) }
     const child = spawn(command[0], [...command.slice(1), 'serve', '--hostname', '127.0.0.1', '--port', String(port)], { cwd: cfg.mainRoot, env, stdio: ['ignore', outFd, errFd], detached: true })
+    // 起動待ちの await より前に登録する（起動待ちの間にシグナルで終わっても killSync で止められるように）
+    children.add(child)
     closeSync(outFd)
     closeSync(errFd)
     const serve = { kind, allowMerge, repo: merge?.repo ?? null, nonce, markerPath, callLog, locations: new Set(), child, base: `http://127.0.0.1:${port}`, exited: false, exitInfo: null, subs: new Set(), sseCtrl: null, spawnError: null }
     serve.auth = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`
     child.on('error', (e) => { serve.spawnError = e })
-    child.on('exit', (code, signal) => { serve.exited = true; serve.exitInfo = `code=${code} signal=${signal}` })
+    child.on('exit', (code, signal) => { serve.exited = true; serve.exitInfo = `code=${code} signal=${signal}`; children.delete(child) })
     serve.api = async (path, init = {}) => {
       let r
       try {
@@ -511,6 +516,16 @@ export function createAdapter(cfg) {
       }
       serves.clear()
       sessions.clear()
+    },
+
+    /**
+     * 起動した serve（起動待ちを含む）のプロセスグループを同期で SIGKILL する（契約の任意メソッド。run.mjs がシグナル受信時と
+     * exit 時に呼ぶ。close を待てない経路用）。セッションの削除はしない。
+     */
+    killSync() {
+      for (const c of children) {
+        try { process.kill(-c.pid, 'SIGKILL') } catch { try { c.kill('SIGKILL') } catch { /* 既に無い */ } }
+      }
     },
   }
 }
