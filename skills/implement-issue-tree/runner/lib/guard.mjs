@@ -1,5 +1,10 @@
-// ランナーが起動するエージェントに対して拒否するコマンド形の一覧と、そこから Codex の rules と
-// OpenCode の permissions / policies を機械的に作る関数。
+// ランナーが起動するエージェントに対して拒否するコマンド形の一覧と、そこから OpenCode の permissions / policies
+// （OpenCode アダプタが補助の防御として渡す）と Codex の rules を機械的に作る関数。
+//
+// Codex の rules（codexRules）は Codex アダプタでは使わない（phase0 の決定: rules は `-c` では効かず、読ませるには
+// project を trusted にする必要がある。trusted にすると worktree の .codex/hooks.json が bypass で動くため採らない）。
+// codexRules は、一覧が両ツールで同じ形になることを確かめるテスト（runner-units.test.mjs）と、init-codex の rules との
+// 対応を見る参照のために残す。Codex の補助の層は permission profile（書ける場所）で、コマンド形の判定は hook だけが行う。
 //
 // 位置づけ: 強制はここではしない。コマンドを実際に止めるのは次の 2 つで、どちらも配布済みの共通ガードを使う。
 //   - Codex: PreToolUse hook（init-codex の agent-guard.sh。ランナーが subagent=true で呼ぶ）。
@@ -28,7 +33,7 @@
 // それでも `gh -R o/r issue create --title "pr merge"` のようにオプション付きでタイトルに形そのものを書く場合は掛かり得る。
 //
 // 実効の防御はサーバー側の ruleset と G0 にある（Workflow 版の merge-guard-hook と同じ位置づけ）。
-// rules と permissions は補助層で、先頭一致・文字列照合のため入れ子や変数を含む形は止められない。
+// permissions（と、使うとすれば rules）は補助層で、先頭一致・文字列照合のため入れ子や変数を含む形は止められない。
 //
 // マージ系の権限分離: マージを許すのは「autoMerge: true のランの merge-exec ラベル」だけで、許すのは
 // MERGE_EXEC_COMMAND の完全一致の 1 形だけ（Codex は PR 番号で具体化した mergeExecCommandFor(prNumber) に絞り、
@@ -119,6 +124,7 @@ const quote = (s) => JSON.stringify(s)
 
 /**
  * Codex の rules ファイル（execpolicy の prefix_rule）の本文。prefixes のある形だけが対象で、globs は含まない。
+ * Codex アダプタは渡さない（ファイル冒頭。`-c` では効かないため）。一覧の対応のテストと参照用。
  * 各規則の match には展開した全組み合わせを入れる（Codex は読み込み時に match が pattern に一致することを検証する）。
  * @param {{ allowMerge?: boolean }} [opts]
  */
