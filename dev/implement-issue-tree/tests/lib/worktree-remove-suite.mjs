@@ -172,17 +172,21 @@ export function registerWorktreeRemoveTests(bash) {
     assert.equal(sup(repo, b.path).result.worktree, 'removed')
   })
 
-  smTest(`${tag} submodule 初期化済み・clean: discard は保持（コミットが worktree 専用の modules にしか無いことがある）、superseded は消す`, () => {
+  // 初期化済み submodule の中は観測しない（その config はエージェントが書ける <git ディレクトリ>/modules/ の下にあり、中へ降りる git がそこのコマンドを実行し得る）。
+  // 中の変更の有無を言えないので、superseded でも --force で消さずに保持する
+  smTest(`${tag} submodule 初期化済み・clean: discard も superseded も保持する（中を観測しないので clean と言えない）`, () => {
     const repo = makeRepo({ submodule: true })
     const a = repo.addWorktree('a')
     repo.initSubmodule(a.path)
     const d = dis(repo, a.path, ['--branch', a.branch, '--base', 'main'])
     assert.deepEqual([d.result.worktree, d.result.branch, d.result.ok], ['retained-submodule', 'keep', false])
     assert.ok(existsSync(a.path))
-    assert.equal(sup(repo, a.path).result.worktree, 'removed')
+    const s = sup(repo, a.path)
+    assert.deepEqual([s.result.worktree, s.result.retained, s.result.ok], ['retained-submodule', true, true])
+    assert.ok(existsSync(join(a.path, 'sm')))
   })
 
-  smTest(`${tag} submodule 内の変更・未追跡・新コミット: superseded も保持する（discard は汚れとして保持）`, () => {
+  smTest(`${tag} submodule 内の変更・未追跡・新コミット: superseded も discard も retained-submodule で保持する`, () => {
     const cases = [
       ['tracked', (repo, w) => repo.write(w, 'sm/f', 'changed\n')],
       ['untracked', (repo, w) => repo.write(w, 'sm/new.txt', 'n\n')],
@@ -198,7 +202,7 @@ export function registerWorktreeRemoveTests(bash) {
       assert.equal(s.result.retained, true)
       assert.equal(s.result.ok, true, 'superseded の保持は非致命')
       assert.ok(existsSync(join(a.path, 'sm')), `${name}: 実体が残る`)
-      assert.equal(dis(repo, a.path).result.worktree, 'retained-dirty', name)
+      assert.equal(dis(repo, a.path).result.worktree, 'retained-submodule', name)
     }
   })
 

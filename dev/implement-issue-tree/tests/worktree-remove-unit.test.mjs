@@ -253,7 +253,7 @@ check(
 
 // wr_plan MODE DIRTY SUB_DIRTY SUB_INIT
 check(
-  'wr_plan: superseded は汚れていても force（submodule の未記録の変更・確認不能は retain-unobservable で保持）、discard は汚れ・初期化済み submodule で保持し --force を使わない',
+  'wr_plan: superseded は汚れていても force（submodule の未記録の変更・初期化済み submodule は retain-submodule、確認不能は retain-unobservable で保持）、discard は汚れ・初期化済み submodule で保持し --force を使わない',
   [
     ['wr_plan', 'superseded', '0', '0', '0'], ['wr_plan', 'superseded', '5', '0', '0'], ['wr_plan', 'superseded', '5', '1', '0'], ['wr_plan', 'superseded', '1', '1', '2'],
     ['wr_plan', 'superseded', '0', '0', '3'], ['wr_plan', 'superseded', '-1', '0', '0'],
@@ -261,7 +261,7 @@ check(
     ['wr_plan', 'discard', '-1', '0', '0'], ['wr_plan', 'bogus', '0', '0', '0'], ['wr_plan', '', '0', '0', '0'],
     ['wr_plan', 'superseded', '-2', '0', '0'], ['wr_plan', 'discard', '-2', '0', '0'],
   ],
-  (g, r, i) => assert.equal(g.out, ['force', 'force', 'retain-submodule', 'retain-submodule', 'force', 'retain-unobservable', 'plain', 'retain-dirty', 'retain-submodule', 'retain-dirty', 'retain-unobservable', 'retain-dirty', 'retain-dirty', 'retain-broken', 'retain-broken'][i], JSON.stringify(r)),
+  (g, r, i) => assert.equal(g.out, ['force', 'force', 'retain-submodule', 'retain-submodule', 'retain-submodule', 'retain-unobservable', 'plain', 'retain-dirty', 'retain-submodule', 'retain-dirty', 'retain-unobservable', 'retain-dirty', 'retain-dirty', 'retain-broken', 'retain-broken'][i], JSON.stringify(r)),
 )
 
 // wr_count_status TEXT（v2 形式。@@ が改行）→ WR_DIRTY, WR_SUB_DIRTY

@@ -41,7 +41,9 @@ const GIT_PUSH_ALLOWED = { test: (line) => GIT_PUSH_PLAIN_ALLOWED.test(line) || 
 // （確認と削除を同じプロセスで行うスクリプト。Issue #603 第 7 弾）。ほかの形（--force の二重指定 -f -f・変数以外の引数・別のスクリプト）は
 // すべて拒否する。許可形が worktree-remove.sh にしか無いことは下の専用テストで固定する。引用符付きの git / サブコマンドは許可形ではない
 const GIT_WORKTREE_RM_CALL = new RegExp(`${GIT_SUB('worktree').source}\\s+["']?(remove|unlock|move)\\b`)
-const GIT_WORKTREE_RM_ALLOWED = /^\s*git worktree (remove( --force)?|unlock) -- "\$\{path\}"( >\/dev\/null 2>&1)? \|\| rc=\$\?\s*$/
+// 許可形は -c core.fsmonitor=false を必ず前に持つ（--force なしの remove は中で git status を走らせ、その子プロセスにも -c が引き継がれる。
+// 付属 worktree の config から fsmonitor のコマンドを実行させない補助の防御。主の防御は remove_one の .git の照合）
+const GIT_WORKTREE_RM_ALLOWED = /^\s*git -c core\.fsmonitor=false worktree (remove( --force)?|unlock) -- "\$\{path\}"( >\/dev\/null 2>&1)? \|\| rc=\$\?\s*$/
 // git は長いオプションの一意な省略形（--del・--dele・--forc・--mo）を受け付け、オプションは引用符で囲んでもシェルでは同じ（"-D"・'--delete'）。
 // 削除（-d / -D / --delete）に加え、ref を上書きする -f / --force・-M / -m / --move（改名）・-C（強制コピー）も対象にする。
 // --format・--list・--show-current など別のオプションは拾わない（省略形の直後は空白・= ・引用符・行末に限る）
@@ -265,6 +267,10 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
       'git worktree unlock "$p"', 'git worktree unlock -- "$p"', 'git worktree unlock -- "${p}"', 'git worktree unlock -- /tmp/x', 'git -C "${dir}" worktree remove -- "${path}"',
       '"git" worktree remove -- "${path}"', 'git "worktree" remove -- "${path}"', 'git worktree "remove" -- "${path}"', 'git worktree remove -- "${path}" && git worktree remove -- "${other}"',
       'git worktree remove --force -- "${path}"; rm -rf x', 'git worktree remove --force -- "${path}" >/dev/null 2>&1 || true', 'git worktree remove --force -- "${path}" || rc=$? # x',
+      // -c core.fsmonitor=false の無い旧形・別の値・別の設定を足した形
+      'git worktree remove -- "${path}" >/dev/null 2>&1 || rc=$?', 'git worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?',
+      'git -c core.fsmonitor=true worktree remove -- "${path}" || rc=$?', 'git -c core.fsmonitor=false -c x=y worktree remove -- "${path}" || rc=$?',
+      'git -c core.fsmonitor=false -C "${dir}" worktree remove -- "${path}" || rc=$?',
     ],
     'git branch の削除・上書き・改名（-d / -D / -f / -M / -m / -C / --delete と省略形・引用符つき）は許可形（git branch -D -- "${branch}"）以外を拒否': [
       // 長いオプションの省略形・引用符つきのオプション・ref の上書き / 改名
@@ -404,10 +410,10 @@ test('自己検査: 正当な行（読み取りの gh api・graphql の query・
     'git branch --show-current',
     'git worktree add -- "${path}" HEAD',
     'git worktree list --porcelain',
-    'git worktree remove -- "${path}" >/dev/null 2>&1 || rc=$?',
-    'git worktree remove --force -- "${path}" >/dev/null 2>&1 || rc=$?',
-    'git worktree remove --force -- "${path}" || rc=$?',
-    'git worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?',
+    'git -c core.fsmonitor=false worktree remove -- "${path}" >/dev/null 2>&1 || rc=$?',
+    'git -c core.fsmonitor=false worktree remove --force -- "${path}" >/dev/null 2>&1 || rc=$?',
+    'git -c core.fsmonitor=false worktree remove --force -- "${path}" || rc=$?',
+    'git -c core.fsmonitor=false worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?',
     'git worktree list --porcelain',
     'git worktree prune >/dev/null 2>&1 || true',
     'git branch -D -- "${branch}" >/dev/null 2>&1 || rc=$?',
@@ -479,9 +485,9 @@ test('git worktree remove / unlock と git branch -D の許可形は worktree-re
   assert.deepEqual(
     found.worktree.map((f) => f.l),
     [
-      'git worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?',
-      'git worktree remove --force -- "${path}" >/dev/null 2>&1 || rc=$?',
-      'git worktree remove -- "${path}" >/dev/null 2>&1 || rc=$?',
+      'git -c core.fsmonitor=false worktree unlock -- "${path}" >/dev/null 2>&1 || rc=$?',
+      'git -c core.fsmonitor=false worktree remove --force -- "${path}" >/dev/null 2>&1 || rc=$?',
+      'git -c core.fsmonitor=false worktree remove -- "${path}" >/dev/null 2>&1 || rc=$?',
     ],
   )
   assert.deepEqual(found.branch.map((f) => f.l), ['git branch -D -- "${branch}" >/dev/null 2>&1 || rc=$?'])
