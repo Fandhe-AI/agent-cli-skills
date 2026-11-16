@@ -14,7 +14,7 @@ import { execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'merge-guard-hook.sh')
+const HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'merge-guard-hook.sh')
 
 function run(command, { agentId = 'agent-1' } = {}) {
   const input = { tool_name: 'Bash', tool_input: { command } }

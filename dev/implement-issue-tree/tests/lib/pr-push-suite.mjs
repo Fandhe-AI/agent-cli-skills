@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 import { toolExists } from './signed-output.mjs'
 import { BASE, BRANCH, REPO, git, makeSandbox } from './git-sandbox.mjs'
 
-export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'pr-push.sh')
+export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'pr-push.sh')
 const jqAvailable = toolExists('jq')
 const MUTATING = /^(fetch|checkout|merge|push|commit|reset|switch)( |$)/
 const TOKEN = 'ghp_SECRETTOKEN0123456789abcdef'

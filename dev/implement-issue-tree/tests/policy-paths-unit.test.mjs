@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { availableBashes, toolExists } from './lib/signed-output.mjs'
 
-const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'policy-paths-lib.sh')
+const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'policy-paths-lib.sh')
 
 // 1 行 1 ケース（許可 TAB files の JSON。空の許可は _ で書く = 先頭の TAB は read に潰される）を読、`<番号> <rc> [<出力>]` を返す
 const DRIVER = `

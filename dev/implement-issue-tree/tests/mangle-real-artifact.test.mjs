@@ -1,6 +1,7 @@
 // 実物の stage1（src から作る現行のビルド結果）を改名器に通し、独立の検証器で α 同値と判定されることを確かめる
 // （ビルドには未接続。コミット済みの生成物は変えない）。あわせて、改名済みの参照を 1 か所ずつ差し替えた
 // 決定的な変異体を検証器が全件止めること（束縛判定が実物で働いている証拠）を確かめる。
+import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -66,7 +67,7 @@ const SCENARIOS = {
 }
 for (const [name, { args, leaves }] of Object.entries(SCENARIOS)) {
   test(`実物の実行: 生成物（改名済み）と src は ${name} で agent 呼び出し・ログ・戻り値が完全一致する`, async () => {
-    const embedded = embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), dirname(SRC_PATH))
+    const embedded = embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), SHIPPED_SCRIPTS)
     const dist = readFileSync(DIST_PATH, 'utf8')
     assert.notEqual(dist, embedded)
     const bySrc = await runScript({ args, leaves, scriptText: embedded })

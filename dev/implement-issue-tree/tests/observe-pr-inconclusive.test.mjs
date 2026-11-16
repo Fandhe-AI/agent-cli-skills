@@ -22,7 +22,7 @@ import { availableBashes, toolExists } from './lib/signed-output.mjs'
 import { createObserveStub } from './lib/gh-observe-stub.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SCRIPT = join(HERE, '..', 'scripts', 'observe-pr.sh')
+const SCRIPT = join(HERE, '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'observe-pr.sh')
 const SRC = join(HERE, '..', 'scripts', 'implement-issue-tree.src.js')
 const NONCE = 'k3x9a0b1c2d4e5f6g7h8i9j0k1l2'
 const SHA = 'a1'.repeat(20)

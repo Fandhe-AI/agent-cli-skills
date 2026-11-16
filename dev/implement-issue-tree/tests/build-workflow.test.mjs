@@ -14,6 +14,7 @@
 //   (e) ビルド時のトークン照合 — lexer の `/` 判別の固定ケースと、判別できない入力・照合ヘルパーの
 //       失敗（実行できない・出力が想定の形でない）でビルドが生成ファイルを書かずに中止すること。
 // 生成物のサイズ・パースゲートは workflow-loadability.test.mjs が担う（対象は実行ファイル）。
+import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
 import { test, after, describe } from 'node:test'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import assert from 'node:assert/strict'
@@ -32,7 +33,7 @@ import { BASE_ARGS, runScript } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = fileURLToPath(new URL('../scripts/build-workflow.mjs', import.meta.url))
 // 開発ファイルは目印（スクリプトのハッシュ）を持つため、ビルダーと同じく置換してから比較する
-const readSrcEmbedded = () => embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), dirname(SRC_PATH))
+const readSrcEmbedded = () => embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), SHIPPED_SCRIPTS)
 const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const TOKEN_DIFF_HELPER = fileURLToPath(new URL('../scripts/token-diff.cjs', import.meta.url))
 
@@ -52,7 +53,7 @@ const usesClass = (text) => /\bclass\b/.test(text)
 // 走らせている間に終わらせる。結果は 2 つのテスト（鮮度ゲートと相対パス起動の CLI ガード）が共有する。
 // --check の判定は『開発ファイルから再生成した結果が実行ファイルと byte 一致し、かつ変換前後のトークン列が一致する』ことなので、
 // 旧テストが同じ再生成をこのプロセスの中で繰り返していた分（鮮度ゲートと symlink 起動で各 7 秒）はここへ集約した。
-const REAL_CHECK = spawnAsync(process.execPath, ['skills/implement-issue-tree/scripts/build-workflow.mjs', '--check'], { cwd: REPO_ROOT, env: process.env })
+const REAL_CHECK = spawnAsync(process.execPath, ['dev/implement-issue-tree/scripts/build-workflow.mjs', '--check'], { cwd: REPO_ROOT, env: process.env })
 
 // ---------------------------------------------------------------------------
 // (a) lexer 固定ケース
@@ -1054,7 +1055,7 @@ test('実行ファイルは開発ファイルからの再生成結果と byte �
   assert.ok(
     r.status === 0 && /鮮度 ok/.test(r.stdout),
     '実行ファイル implement-issue-tree.js が開発ファイル implement-issue-tree.src.js と同期していない。' +
-      '編集は .src.js に対して行い、node skills/implement-issue-tree/scripts/build-workflow.mjs で再生成すること' +
+      '編集は .src.js に対して行い、node dev/implement-issue-tree/scripts/build-workflow.mjs で再生成すること' +
       `（実行ファイルの直接編集は次のビルドで消える）。--check: status ${r.status} / ${r.stdout}${r.stderr}`,
   )
 })

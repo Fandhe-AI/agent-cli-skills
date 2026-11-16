@@ -18,7 +18,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-const HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'merge-guard-hook.sh')
+const HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'merge-guard-hook.sh')
 
 const pathBash = execFileSync('/bin/sh', ['-c', 'command -v bash']).toString().trim()
 const BASHES = [...new Set(['/bin/bash', pathBash])]

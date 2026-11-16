@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { availableBashes, toolExists } from './lib/signed-output.mjs'
 
-const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'observe-checks-lib.sh')
+const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'observe-checks-lib.sh')
 const US = '\u001f'
 
 const DRIVER = `

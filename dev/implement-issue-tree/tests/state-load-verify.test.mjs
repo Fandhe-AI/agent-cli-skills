@@ -23,7 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT_PATH = join(HERE, '..', 'scripts', 'implement-issue-tree.src.js')
-const SAMPLE_STATE_PATH = join(HERE, '..', 'sample', 'state-example.json')
+const SAMPLE_STATE_PATH = join(HERE, '..', '..', '..', 'skills', 'implement-issue-tree', 'sample', 'state-example.json')
 const DRIVER_MARKER = '__IMPLEMENT_ISSUE_TREE_DRIVER_START__'
 
 const source = readFileSync(SCRIPT_PATH, 'utf8')

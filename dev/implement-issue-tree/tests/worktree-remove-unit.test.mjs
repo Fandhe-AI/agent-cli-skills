@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { availableBashes } from './lib/signed-output.mjs'
 
-const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'worktree-remove-lib.sh')
+const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'worktree-remove-lib.sh')
 const US = '\u001f'
 const NL = '@@' // 表の中の改行（ドライバが改行へ戻す）
 

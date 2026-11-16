@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts')
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 export const DECLARED_DEPS_SH = join(SCRIPTS, 'declared-deps.sh')
 
 // プロンプトの抽出コマンドの --numbers（カンマ区切り）を整数の配列にする

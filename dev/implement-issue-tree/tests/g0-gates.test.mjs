@@ -9,6 +9,7 @@
 // パースのみ）を一時ファイルへ切り出して import する。マーカーより上に駆動部の副作用がない
 // ことは、args 未注入でこの import 自体が成功することで検証される（駆動部が混入すれば
 // agent / phase 等の未定義参照で必ず失敗する）。
+import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
@@ -223,11 +224,11 @@ test('G0 は strict 適用を要件にしない（並列ランを止めるため
   // スクリプトと判定ライブラリのコード行（コメントを除く）が strict を読まないことで固定する。
   // 詳細: references/automerge-design.md「strict を G0 の要件にしない理由」節。
   for (const f of ['merge-gate.sh', join('lib', 'merge-gate-lib.sh')]) {
-    const code = readFileSync(join(dirname(SCRIPT_PATH), f), 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+    const code = readFileSync(join(SHIPPED_SCRIPTS, f), 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
     assert.ok(!/strict/i.test(code), `${f} のコード行が strict に触れている`)
   }
   // 非要件であることはスクリプトの先頭コメントに残り、後続の読み手が「抜け漏れ」と誤読して復活させない。
-  const header = readFileSync(join(dirname(SCRIPT_PATH), 'merge-gate.sh'), 'utf8')
+  const header = readFileSync(join(SHIPPED_SCRIPTS, 'merge-gate.sh'), 'utf8')
   assert.ok(header.includes('strict_required_status_checks_policy は読まない'))
 })
 
@@ -254,7 +255,7 @@ test('mergeExecutePrompt: externalChecks なし確定（[]）の新規マージ�
 
 test('merge-gate.sh が返し得る verdict は、すべて merge-exec の返却 reason の enum に含まれる（ok を除く）', () => {
   // 正本は MERGE_EXEC_SCHEMA の enum。スクリプトが enum 外の語を返すと、ホストは reason を受理できず systemic failure になる。
-  const text = readFileSync(join(dirname(SCRIPT_PATH), 'merge-gate.sh'), 'utf8')
+  const text = readFileSync(join(SHIPPED_SCRIPTS, 'merge-gate.sh'), 'utf8')
   const verdicts = new Set([...text.matchAll(/\bstop ([a-z-]+) [a-z0-9-]+ [a-z0-9-]+/g)].map((m) => m[1]))
   assert.ok(verdicts.size >= 8, `stop の呼び出しから verdict を取り出せていない: ${[...verdicts].join(',')}`)
   for (const v of verdicts) assert.ok(v === 'ok' || MERGE_EXEC_VALID_REASONS.has(v), `${v} は reason の enum に無い`)

@@ -25,7 +25,7 @@ const SCRIPT_PATH = join(
 )
 const SKILL_MD_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'SKILL.md',
+  '..', '..', '..', 'skills', 'implement-issue-tree', 'SKILL.md',
 )
 // マーカー文字列はソース中に 1 回しか現れてはならない（g0-gates.test.mjs が出現回数を固定して
 // いる）ため、リテラルを直接書かず分割して組み立てる（他テストと同じ流儀）。

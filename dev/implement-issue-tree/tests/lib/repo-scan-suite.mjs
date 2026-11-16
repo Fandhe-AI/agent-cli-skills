@@ -17,7 +17,7 @@ import { importDefinitions } from './stub-run.mjs'
 import { bundleSha256 } from '../../scripts/build-workflow.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-export const SCRIPTS = join(HERE, '..', '..', 'scripts')
+export const SCRIPTS = join(HERE, '..', '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 export const SCRIPT = join(SCRIPTS, 'repo-scan.sh')
 const RUN_VERIFIED = join(SCRIPTS, 'run-verified.sh')
 const FIXTURES = join(HERE, '..', 'fixtures')

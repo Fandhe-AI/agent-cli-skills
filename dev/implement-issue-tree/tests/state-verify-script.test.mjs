@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { availableBashes, toolExists, expectedSha256, canonicalPayload } from './lib/signed-output.mjs'
 
-const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 const SCRIPT = join(SCRIPTS, 'state.sh')
 const LIB = join(SCRIPTS, 'lib', 'state-verify-lib.sh')
 const BASHES = availableBashes()
@@ -326,7 +326,7 @@ function newResult(sb, bash) {
 for (const bash of BASHES) {
   test(`[${bash}] 差分: 従来のコマンドと、キーのダイジェスト・件数・高水位・項目ごとのハッシュが一致する（日本語・DEL・入れ子・数字以外のキー・先頭ゼロ・巨大な数値）`, { skip: !jq }, () => {
     const cases = {
-      sample: JSON.parse(readFileSync(join(SCRIPTS, '..', 'sample', 'state-example.json'), 'utf8')),
+      sample: JSON.parse(readFileSync(join(SCRIPTS, '..', '..', '..', 'skills', 'implement-issue-tree', 'sample', 'state-example.json'), 'utf8')),
       unicodeDel: { parent: 1, perWorktreeByteReserveHighWater: 53687091200, perWorktreeByteReserveHighWaterVersion: 2, items: { 3: { note: 'a\u007fb\u0001\t\n\\" é😀 全角　空白', n: [1, -2, 0, 123456789], o: { b: 1, a: { d: [], c: {} } } }, 12: { status: 'x' }, 9: null, 10: 5, 11: [1, { z: 1, a: 2 }], 13: true } },
       // 項目そのものが文字列（jq -j は生のまま出す。改行・末尾の改行・印と同じ " 1 文字・空文字を含む）。スクリプトは 1 件ずつ取り直す経路で従来と同じハッシュを返す
       stringItems: { parent: 1, items: { 4: 'a\nb', 5: 'tail\n\n', 6: '"', 7: '', 8: { s: 'x' }, 9: '日本語' } },

@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { availableBashes, toolExists } from './lib/signed-output.mjs'
 
-const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'added-files-lib.sh')
+const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'added-files-lib.sh')
 
 // 1 行 1 ケース（関数名 TAB 入力 JSON）を読み、`<番号> <rc> [<出力>]` を返す
 const DRIVER = `

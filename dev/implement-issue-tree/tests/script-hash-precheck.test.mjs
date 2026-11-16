@@ -21,7 +21,7 @@ import { availableBashes, expectedSha256, hashPrecheckReply, inputSha256, makeEn
 import { BASE_ARGS, importDefinitions, runScript } from './lib/stub-run.mjs'
 import { bundleSha256 } from '../scripts/build-workflow.mjs'
 
-const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 const NONCE = 'abc123xyz'
 
 function cloneScripts() {

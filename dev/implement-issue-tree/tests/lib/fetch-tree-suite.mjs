@@ -20,7 +20,7 @@ import { expectedSha256 } from './signed-output.mjs'
 import { bundleSha256 } from '../../scripts/build-workflow.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-export const SCRIPTS = join(HERE, '..', '..', 'scripts')
+export const SCRIPTS = join(HERE, '..', '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 export const SCRIPT = join(SCRIPTS, 'fetch-tree.sh')
 export const RUN_VERIFIED = join(SCRIPTS, 'run-verified.sh')
 const NONCE = 'abc123nonce'

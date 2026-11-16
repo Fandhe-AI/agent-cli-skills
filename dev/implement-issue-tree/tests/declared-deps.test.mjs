@@ -1,6 +1,7 @@
 // 本文の依存宣言の機械抽出（scripts/declared-deps.sh のフィルタ・collectDeclaredDeps・mergeDeclaredDeps）の
 // 決定的回帰テスト。optin-tests-gate.test.mjs と同じスライス方式（DRIVER マーカーより上を切り出し
 // export を付与して import する）で、モデル出力に依存しない純粋関数と jq フィルタ自体を検証する。
+import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -85,7 +86,7 @@ function filterFor(table) {
   return filterCache.get(arg)
 }
 const DECLARED_DEPS_FILTER = filterFor(null)
-const SCRIPT_TEXT = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', name), 'utf8')
+const SCRIPT_TEXT = (name) => readFileSync(join(SHIPPED_SCRIPTS, name), 'utf8')
 
 function runFilter(body) {
   const out = execFileSync('jq', ['-c', DECLARED_DEPS_FILTER], { input: JSON.stringify({ number: 1, body }) })

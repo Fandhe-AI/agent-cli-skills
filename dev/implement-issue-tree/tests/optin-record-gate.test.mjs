@@ -85,7 +85,7 @@ test('classifyOptinRecordObservation: モード違い・取得失敗・形の不
 for (const bash of availableBashes()) {
   test(`[${bash}] 実コマンド行: observeCommand の文字列を bash -c で run-verified.sh 経由で実行した封筒を、ホストの照合が受理する`, { skip: !toolExists('jq') }, () => {
     const here = dirname(fileURLToPath(import.meta.url))
-    const scriptsDir = join(here, '..', 'scripts')
+    const scriptsDir = join(here, '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
     const cmds = ['make e2e', 'cargo test -- --ignored', 'cargo test -p a_b --features x=1,y -- --ignored']
     const f = { mode: 'optin-record', pr: 7, optinCommands: cmds }
     const nonce = 'e2ecommand0nonce1'
@@ -113,7 +113,7 @@ for (const bash of availableBashes()) {
 // LC_ALL=C が削らない Unicode の空白が付いた fail / not-run 行でも、実スクリプトの件数からゲートが不合格になる（監査 MEDIUM の再現）。
 // 旧版（利用者のロケールの sed）は pass 1・pass 以外 1 で blocked にしていた。pass 以外が 0 件に減ると fail-open になる
 for (const bash of availableBashes()) {
-  const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'optin-record-lib.sh')
+  const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'optin-record-lib.sh')
   const bodies = {
     全角空白付きの_fail: `${marker(SHA, 'pass', 'make e2e')}\n\u3000${marker(SHA, 'fail', 'make e2e')}`,
     末尾_NBSP_付きの_fail: `${marker(SHA, 'pass', 'make e2e')}\n${marker(SHA, 'fail', 'make e2e')}\u00a0`,

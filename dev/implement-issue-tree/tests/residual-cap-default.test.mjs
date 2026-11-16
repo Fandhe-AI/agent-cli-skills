@@ -8,6 +8,7 @@
 // （トップレベル return・注入グローバル args / agent / log / phase）を含み module として
 // 丸ごと import できないため、__IMPLEMENT_ISSUE_TREE_DRIVER_START__ マーカーより上
 // （定義部のみ）を一時ファイルへ切り出して import する。
+import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
@@ -25,7 +26,7 @@ const DRIVER_MARKER = '__IMPLEMENT_ISSUE_TREE_DRIVER_START__'
 const source = readFileSync(SCRIPT_PATH, 'utf8')
 // Issue #603: 測定のシェルはプロンプトから scripts/measure-residual-bytes.sh へ移った。字面で固定していた契約は
 // このファイルの文面で引き続き固定し、実行して確かめる検証は measure-scripts.test.mjs が担う
-const residualScript = readFileSync(join(dirname(SCRIPT_PATH), 'measure-residual-bytes.sh'), 'utf8')
+const residualScript = readFileSync(join(SHIPPED_SCRIPTS, 'measure-residual-bytes.sh'), 'utf8')
 // 封筒つきスクリプトの共通の呼び出し器（measureResidualBytesOnce が通す）の本体。プロンプトの定型はここが持つ
 function signedRunnerBody() {
   const start = source.indexOf('function runSignedScript(')

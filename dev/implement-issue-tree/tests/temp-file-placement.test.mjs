@@ -19,6 +19,7 @@
 // 一時ファイルへ切り出して import する。agent() を呼ぶ非同期関数（measure*・scan*）は
 // グローバル注入前提のため直接呼び出さず、他の回帰テスト（remeasureResidualBytesNow 等）と
 // 同じ「ソーステキストの部分一致固定」で契約を確認する。
+import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
@@ -145,7 +146,7 @@ test('measureFreeDiskKib: プロンプトは TEMP_FILE_POLICY と UNTRUSTED_POLI
 })
 
 test('測定スクリプトと launcher は一時ファイルを作らず、ファイルを削除せず、/dev/null と標準エラー以外へリダイレクトしない', () => {
-  const dir = dirname(SCRIPT_PATH)
+  const dir = SHIPPED_SCRIPTS
   for (const name of ['measure-residual-bytes.sh', 'measure-free-disk.sh', 'run-verified.sh', 'lib/signed-output.sh']) {
     const code = readFileSync(join(dir, name), 'utf8')
       .split('\n')

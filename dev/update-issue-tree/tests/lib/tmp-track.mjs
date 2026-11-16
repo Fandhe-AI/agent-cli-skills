@@ -1,5 +1,5 @@
 // テストが mkdtempSync で作った一時ディレクトリを、プロセス終了時に必ず消すための登録簿。
-// （skills/implement-issue-tree/tests/lib/tmp-track.mjs と同じ内容。スキルは個別に配布されるため、スキルをまたぐ import はせず、
+// （dev/implement-issue-tree/tests/lib/tmp-track.mjs と同じ内容。スキルは個別に配布されるため、スキルをまたぐ import はせず、
 //   このスキルのテストが自分のコピーを使う。変更するときは両方を揃える）
 //
 // 各テストファイルは node:test により独立したプロセスで走る。モジュール先頭（await import の前）や

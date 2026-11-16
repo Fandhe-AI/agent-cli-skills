@@ -71,7 +71,7 @@ fix 自身の未検証な判断に委ねられる。そのため AGENTS.md「例
 | `changedFiles` | 同じ compare の `.files[].filename`（上限 200 件） |
 | `path`（`unresolvedComments` の各要素） | GraphQL `reviewThreads` の `path` フィールド（手順 5 の走査に相乗り） |
 
-ホストは純粋関数でこの観測値から決定的に許可リストを算出する（`skills/implement-issue-tree/tests/resolve-host-proof.test.mjs` が契約を固定）:
+ホストは純粋関数でこの観測値から決定的に許可リストを算出する（`dev/implement-issue-tree/tests/resolve-host-proof.test.mjs` が契約を固定）:
 
 - **`applyResolveProofObservation(proofState, obs, lastRoundPushed)`**: 直前ラウンドの
   `fix.pushed` が `true` で、かつ今回の `compareStatus` が `ahead` のときだけ「push がリモートに
@@ -522,7 +522,7 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
 ### 救済ラウンドの終端分類
 
-merge 監視ループ（`runMergeLoop`）は「強制スレッド再走査の救済ラウンド」機構を持つ（SKILL.md の「強制スレッド再走査の救済ラウンド」節参照）。本節はその終端分類の判定表と設計根拠を記録する。実装は `reconcileRescueRoundState(lastState, rescueRoundActive, timeoutExecReason)`（`scripts/implement-issue-tree.js`）、回帰テストは `tests/merge-loop-rescan.test.mjs`。
+merge 監視ループ（`runMergeLoop`）は「強制スレッド再走査の救済ラウンド」機構を持つ（SKILL.md の「強制スレッド再走査の救済ラウンド」節参照）。本節はその終端分類の判定表と設計根拠を記録する。実装は `reconcileRescueRoundState(lastState, rescueRoundActive, timeoutExecReason)`（`scripts/implement-issue-tree.js`）、回帰テストは `dev/implement-issue-tree/tests/merge-loop-rescan.test.mjs`。
 
 **設計上の制約**:
 
@@ -545,12 +545,12 @@ merge 監視ループ（`runMergeLoop`）は「強制スレッド再走査の救
 
 - **monitor 由来を `blocked` に留める理由**: 救済は「未解決スレッドの内容を取り直すための追加試行」であり、観測に失敗しても「未解決スレッドが残っている」という元の品質ブロックの事実は変わらない。
 - **merge-exec 由来を `failed` へ戻す理由**: 救済ラウンドの再走査自体は成立しており（`forceThreadRescan` は monitor が `unresolved-comments` / `ready` を返した時点で解除済み）、未解決スレッドが残っているとは断定できない。実体はマージ操作そのものの失敗である。
-- **3 reason を一律 `failed` にする理由（パリティであり新しい厳格化ではない）**: 救済ラウンド**外**の同じ reason は現状すでに、監視予算が尽きた時点で `failed` 終端になる。救済ラウンド内だけ `blocked` へ倒すと、恒常的な merge 失敗ほど halt 防御から逃れやすくなるという逆転が生じる。一律 `failed` は非救済ラウンドとの対称性（パリティ）であり、`tests/merge-loop-rescan.test.mjs` の「対称ケース」テストが両者の結果一致を検証する。
+- **3 reason を一律 `failed` にする理由（パリティであり新しい厳格化ではない）**: 救済ラウンド**外**の同じ reason は現状すでに、監視予算が尽きた時点で `failed` 終端になる。救済ラウンド内だけ `blocked` へ倒すと、恒常的な merge 失敗ほど halt 防御から逃れやすくなるという逆転が生じる。一律 `failed` は非救済ラウンドとの対称性（パリティ）であり、`dev/implement-issue-tree/tests/merge-loop-rescan.test.mjs` の「対称ケース」テストが両者の結果一致を検証する。
 - **運用上の帰結（明記する）**: monitor の楽観的 `ready` と merge-exec の `checks-not-green` が食い違うケースは、救済ラウンドで起きた場合も次回ラン自動再開（`blocked`）ではなく `failed` 終端になる。追跡は失われない — `lastExecDeferralNote`（一過性 reason の直近の見送り理由）が終端 note へ運ばれる。
 
 **配線（`timeoutExecReason` の受け渡し）**:
 
-`roundTimeoutExecReason`（ループ外で宣言・ラウンド先頭で `''` へリセット）が出所を運ぶ。宣言をループ外に置く理由は `forceThreadRescanBudgetUsed`（延長ラッチ・ラウンドを跨いで**保持する**契約）と同じ「ループ内宣言だと毎ラウンド初期化される」ためではなく、choke point・一過性 reason 分岐・ラウンド先頭リセットの 3 箇所すべてから同一変数を参照・代入する必要があるという JS のスコープ上の都合にすぎない。むしろ意味は逆で、この変数は**ラウンドを跨いで保持してはならない**（リセットを落とすと前ラウンドの merge-exec 由来 reason が今ラウンドの monitor 由来 timeout へ漏れ、`blocked` が静かに `failed` へ化ける）。一過性 reason 分岐（`head-moved` / `checks-not-green` / `merge-failed`）は分岐条件の**リテラル** `execReason` のみを代入し、エージェント自己申告の自由テキスト（`execSummaryText`）は代入しない（A03 インジェクション対策。分類入力に未検証文字列を混入させない）。`tests/merge-loop-rescan.test.mjs` の構造アサーションがリセット位置・代入内容の両方を固定する。
+`roundTimeoutExecReason`（ループ外で宣言・ラウンド先頭で `''` へリセット）が出所を運ぶ。宣言をループ外に置く理由は `forceThreadRescanBudgetUsed`（延長ラッチ・ラウンドを跨いで**保持する**契約）と同じ「ループ内宣言だと毎ラウンド初期化される」ためではなく、choke point・一過性 reason 分岐・ラウンド先頭リセットの 3 箇所すべてから同一変数を参照・代入する必要があるという JS のスコープ上の都合にすぎない。むしろ意味は逆で、この変数は**ラウンドを跨いで保持してはならない**（リセットを落とすと前ラウンドの merge-exec 由来 reason が今ラウンドの monitor 由来 timeout へ漏れ、`blocked` が静かに `failed` へ化ける）。一過性 reason 分岐（`head-moved` / `checks-not-green` / `merge-failed`）は分岐条件の**リテラル** `execReason` のみを代入し、エージェント自己申告の自由テキスト（`execSummaryText`）は代入しない（A03 インジェクション対策。分類入力に未検証文字列を混入させない）。`dev/implement-issue-tree/tests/merge-loop-rescan.test.mjs` の構造アサーションがリセット位置・代入内容の両方を固定する。
 
 ## opt-in テスト実行記録ゲート（Issue #495）
 

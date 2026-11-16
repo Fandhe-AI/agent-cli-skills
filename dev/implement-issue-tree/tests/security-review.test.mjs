@@ -393,7 +393,7 @@ test('例外: reject と null（StructuredOutput 欠落）は別経路 — null 
 // 起動時の fail-closed（配布物 implement-issue-tree.js で検証）
 // ---------------------------------------------------------------------------
 
-const DIST = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.js'), 'utf8')
+const DIST = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'implement-issue-tree.js'), 'utf8')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 async function startup(args) {
   const calls = []

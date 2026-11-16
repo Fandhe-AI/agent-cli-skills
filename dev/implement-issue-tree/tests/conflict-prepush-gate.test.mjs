@@ -3,7 +3,7 @@
 // fixPrompt(pushAfterFix: true)）と、monitor の mergeable: CONFLICTING 検出ルーティング
 // （monitorPrompt）をプロンプト契約として固定する。
 //
-// 読み込み方式は skills/implement-issue-tree/tests/g0-gates.test.mjs と同じ: 対象スクリプトは
+// 読み込み方式は dev/implement-issue-tree/tests/g0-gates.test.mjs と同じ: 対象スクリプトは
 // Workflow ハーネス専用文法（トップレベル return・注入グローバル args / agent / log / phase）を
 // 含むため module として丸ごと import できない。__IMPLEMENT_ISSUE_TREE_DRIVER_START__ マーカー
 // より上（定義部のみ）を一時ファイルへ切り出し、対象関数へ export を付与して import する。
