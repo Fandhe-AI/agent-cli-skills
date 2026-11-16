@@ -70,45 +70,52 @@ const SKILL_MD_PATH = join(
   '..', 'SKILL.md',
 )
 const skillMd = readFileSync(SKILL_MD_PATH, 'utf8')
+// 検知コマンド (A)/(B) と対処手順の本体は references/residual-check.md へ移した。
+// 前提条件節（awk）と「よくある失敗」表は SKILL.md に残るため両方を読む。
+const RESIDUAL_MD_PATH = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..', 'references', 'residual-check.md',
+)
+const residualMd = readFileSync(RESIDUAL_MD_PATH, 'utf8')
 
 // ---------------------------------------------------------------------------
 // 群 A: SKILL.md 記述の固定
 // ---------------------------------------------------------------------------
 test('群A: (A) は取得失敗・空出力を UNDETERMINED として扱う', () => {
-  assert.match(skillMd, /UNDETERMINED/)
+  assert.match(residualMd, /UNDETERMINED/)
 })
 
 test('群A: (A) は dup=<D> bad=<B> 形式で重複件数と結論内訳を返す', () => {
-  assert.match(skillMd, /dup=<D> bad=<B>/)
-  assert.match(skillMd, /dup=%d bad=%d/)
+  assert.match(residualMd, /dup=<D> bad=<B>/)
+  assert.match(residualMd, /dup=%d bad=%d/)
 })
 
 test('群A: (A) は gh api の終了コードを検証してから件数を返す', () => {
-  assert.match(skillMd, /終了コードを見る/)
-  assert.match(skillMd, /status=\$\?/)
+  assert.match(residualMd, /終了コードを見る/)
+  assert.match(residualMd, /status=\$\?/)
 })
 
 test('群A: 「対処」は cancelled run 0 件の分岐を明記する', () => {
-  assert.match(skillMd, /cancelled run が \*\*0 件\*\*/)
+  assert.match(residualMd, /cancelled run が \*\*0 件\*\*/)
 })
 
 test('群A: 「対処」は判定不能（前提 0）を rerun せず blocked として扱う', () => {
-  assert.match(skillMd, /前提 0（判定不能の扱い）/)
-  assert.match(skillMd, /判定不能を「重複なし」と読んで CI 由来を除外してはならない/)
+  assert.match(residualMd, /前提 0（判定不能の扱い）/)
+  assert.match(residualMd, /判定不能を「重複なし」と読んで CI 由来を除外してはならない/)
 })
 
 test('群A: 「対処」は conclusion（bad）を含めて重複を判定する', () => {
-  assert.match(skillMd, /D >= 1 かつ P = 0 かつ B >= 1/)
-  assert.match(skillMd, /D >= 1 かつ B = 0 かつ P = 0/)
+  assert.match(residualMd, /D >= 1 かつ P = 0 かつ B >= 1/)
+  assert.match(residualMd, /D >= 1 かつ B = 0 かつ P = 0/)
 })
 
 test('群A: 「対処」は pending（未完了）を含む重複を正常な再実行と断定しない（Issue #338 P1）', () => {
-  assert.match(skillMd, /D >= 1 かつ P >= 1/)
-  assert.match(skillMd, /pending.*BLOCKED.*直接原因/)
+  assert.match(residualMd, /D >= 1 かつ P >= 1/)
+  assert.match(residualMd, /pending.*BLOCKED.*直接原因/)
 })
 
 test('群A: (A)/(B) の権限境界（チェック名をエージェントの文脈へ出さない）は維持される', () => {
-  assert.match(skillMd, /チェック名・エラー本文は出力に現れない/)
+  assert.match(residualMd, /チェック名・エラー本文は出力に現れない/)
 })
 
 test('群A: 「よくある失敗」表に判定不能の誤読パターンが追加されている', () => {
@@ -122,10 +129,10 @@ test('群A: 前提条件節が awk の command -v 確認と不在時の扱いを
 
 test('群A: (A) の awk 存在チェックは gh api fetch より先に実行される（Issue #338 PR #354 Bugbot 指摘: awk gate runs after fetch）', () => {
   const startMarker = '# (A) エージェントが実行してよい形'
-  const startIdx = skillMd.indexOf(startMarker)
+  const startIdx = residualMd.indexOf(startMarker)
   assert.ok(startIdx >= 0, '(A) セクションが見つからない')
-  const commandVIdx = skillMd.indexOf('command -v awk', startIdx)
-  const ghApiIdx = skillMd.indexOf('gh api --paginate "repos/{owner}/{repo}/commits', startIdx)
+  const commandVIdx = residualMd.indexOf('command -v awk', startIdx)
+  const ghApiIdx = residualMd.indexOf('gh api --paginate "repos/{owner}/{repo}/commits', startIdx)
   assert.ok(commandVIdx >= 0, 'command -v awk が見つからない')
   assert.ok(ghApiIdx >= 0, 'gh api fetch 行が見つからない')
   assert.ok(
@@ -135,19 +142,19 @@ test('群A: (A) の awk 存在チェックは gh api fetch より先に実行さ
 })
 
 test('群A: (A) は rows=$(gh api ...) の代入を if の条件式へ置き errexit 下でも失敗分岐へ到達する（Issue #338 P1）', () => {
-  assert.match(skillMd, /if rows=\$\(gh api --paginate "repos\/\{owner\}\/\{repo\}\/commits/)
+  assert.match(residualMd, /if rows=\$\(gh api --paginate "repos\/\{owner\}\/\{repo\}\/commits/)
 })
 
 // ---------------------------------------------------------------------------
 // 群 B: 旧文言の再発防止
 // ---------------------------------------------------------------------------
 test('群B: 旧文言「1 以上なら重複あり」は 0 回（判定不能を重複なしと誤読させない）', () => {
-  const matches = skillMd.match(/1 以上なら重複あり/g)
+  const matches = residualMd.match(/1 以上なら重複あり/g)
   assert.equal(matches, null)
 })
 
 test('群B: rows=$(gh api ...) が if の条件式に含まれず独立した単純コマンドのまま残る箇所は 0 件（errexit 下で失敗分岐へ到達できなくなる退行を防ぐ）', () => {
-  const bareAssignment = skillMd.match(/\nrows=\$\(gh api/g)
+  const bareAssignment = residualMd.match(/\nrows=\$\(gh api/g)
   assert.equal(bareAssignment, null)
 })
 
@@ -169,7 +176,7 @@ function extractAwkProgram(markdown) {
   return markdown.slice(bodyStart, endIdx + 1)
 }
 
-const awkProgram = extractAwkProgram(skillMd)
+const awkProgram = extractAwkProgram(residualMd)
 
 function runAwk(rows) {
   return execFileSync('awk', ['-F', '\t', awkProgram], {
@@ -311,7 +318,7 @@ function extractShellSnippet(markdown) {
   return markdown.slice(startIdx, endIdx)
 }
 
-const shellSnippet = extractShellSnippet(skillMd)
+const shellSnippet = extractShellSnippet(residualMd)
 
 /**
  * 偽の `gh` を置いた一時 PATH を作り、(A) のスニペットを bash で実行する。

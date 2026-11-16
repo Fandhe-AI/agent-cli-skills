@@ -23,7 +23,7 @@ skills/                               -- スキル本体（各ディレクトリ
     tests/                            -- node:test 回帰テスト（SKILL.md の静的検査: git push が Step 2 のセキュリティチェックより後・gh pr create より前・前提条件に push 済みの要求が無い・force 系の push をしない・sandbox 節の git push と .git 書き込み）
   implement-issue/
   implement-issue-tree/
-    references/                       -- 自動マージ設計・検証手順・復旧・レポート書式・スクリプト実行の信頼モデル（script-trust-model.md）・テストの流し方と変異テストの使い方（testing.md）
+    references/                       -- 引数の詳細（args-reference.md）・opt-in テスト宣言の詳細（optin-tests.md）・base 取り込み専用ループ（base-merge.md）・cancel された run の残存 check の検知と対処（residual-check.md。residual-check-detection テストが (A) のスクリプトを抽出して実行）・自動マージ設計・検証手順・復旧・レポート書式・スクリプト実行の信頼モデル（script-trust-model.md）・テストの流し方と変異テストの使い方（testing.md）
     sample/                           -- 引数例・ツリー例
     scripts/                          -- 観測（observe-pr.sh・fetch-tree.sh・repo-scan.sh・declared-deps.sh・measure-*.sh）、封筒つき出力と launcher（lib/signed-output.sh・run-verified.sh）、push・PR（pr-push.sh・base-merge.sh・reply-resolve.sh）、マージ前検証（merge-gate.sh・merge-guard-hook.sh）、worktree 掃除と回復（worktree-remove.sh・recover-prep.sh）、状態書き込み（state.sh）、ビルダー（build-workflow.mjs・token-diff.cjs。implement-issue-tree.src.js が編集対象・implement-issue-tree.js は生成物で直接編集禁止）。純関数は lib/*-lib.sh（source 専用）。各スクリプトの契約は冒頭コメントと references/script-trust-model.md
     tests/                            -- node:test の回帰テスト（lib の表の単体検査・偽 gh と実 git のサンドボックスによるスクリプト実行・ホスト配線・ビルダーと変異テスト tools/）。流し方と変異テストは references/testing.md
