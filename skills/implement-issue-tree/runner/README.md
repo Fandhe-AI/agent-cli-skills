@@ -98,6 +98,20 @@ _/iit-runner/<runId>/
 - OpenCode の merge-exec の対応づけは、全文を `tool.execute.before` で、実際に走るコマンドを permission の後半の完全一致で確かめる。
   代入の部分（`HEAD_SHA="…"`）は permission に出ないため、同じ serve に読み込まれた別の plugin が代入だけを書き換えた場合は
   検知できない（エージェントの入力からは届かない範囲。詳細は `adapters/opencode-plugin/index.js` 冒頭）。
+- OpenCode の serve のパスワード（`OPENCODE_PASSWORD`）は serve の env にあり、エージェントの shell の子プロセスにも引き継がれる。
+  `node -e "...process.env.OPENCODE_PASSWORD..."` のような読み出しは `agent-guard.sh` を通る（allow。監査 e670648 の実測）。
+  パスワードを得たエージェントは、ランナーの serve の HTTP API を直接呼べる。そのうち次の 2 つは、ランナーのガードで止められない。
+  - `POST /api/session/:id/shell` は permission を通らない（Phase 0 の実測）。ランナー自身はこれを呼ばない。
+  - `PATCH /api/experimental/config` で global config（利用者の設定）を書き換えられる。ランナーの設定は `OPENCODE_CONFIG_CONTENT`
+    で渡しているが、書き換えた global config がランの後の OpenCode の利用に残り得る。
+  ランナーが行う shell の件数の照合（plugin の記録とメッセージの shell の tool part の比較）は、これらの API の実行が tool part に
+  現れる場合だけ働く（現れるかどうかは確かめていない）。サーバー側の ruleset と、ランの後の利用者設定の確認で補う。
+- OpenCode のガードの置き場（`agent-guard.sh`・ランナー専用 plugin・`~/.config/opencode/`・`.opencode/(hooks|plugins?)/`・
+  `opencode.json(c)`・ランのガードのログと目印）への書き込みの拒否は、edit 系はパスの照合、shell はコマンド文字列の照合である。
+  変数・間接参照・別名のパスを使う shell の書き込みは止まらない（best-effort）。対象リポジトリに `opencode.json(c)` という名前の
+  ファイル（例: 配布物の雛形）があると、その編集も拒否される（配布物の plugin と同じ過剰側の判定）。
+- OpenCode の merge 用 serve は PR ごとに起動し、ランの終了（close）まで残す（同じ PR の再試行で使い回すため）。
+  1 ランで多くの PR を自動マージすると、その数だけ serve が並ぶ。
 - `agent-guard.sh` の既知の限界（変数経由・`$(…)` 経由のコマンドは止まらない）はランナーでも同じ。サーバー側の ruleset で補う
   （自動マージの前提となる構成は `references/automerge-design.md`）。
 - OpenCode の model・variant の割り当てと段ごとの時間切れは暫定値（`config/default.json` の `notes`）。
