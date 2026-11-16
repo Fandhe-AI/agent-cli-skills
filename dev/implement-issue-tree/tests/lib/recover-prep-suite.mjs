@@ -337,16 +337,19 @@ export function registerRecoverPrepTests(bash) {
   })
 
   const smTest = toolExists('git') ? test : test.skip
-  smTest(`${tag} submodule 初期化済み・clean: WIP は作らず wipCommitted:true（初期化済み submodule の保持は worktree-remove.sh が判定する）`, () => {
+  // 初期化済み submodule の中は観測しない（--ignore-submodules=all。中へ降りる git が <git ディレクトリ>/modules/ の下の config のコマンドを実行し得る）。
+  // 中の未コミット変更の有無を言えないので、退避完了（wipCommitted:true）とは言わない
+  smTest(`${tag} submodule 初期化済み・clean: WIP は作らず、中を観測しないので submodule・wipCommitted:false`, () => {
     const repo = makeRecoverRepo({ submodule: true })
     repo.git(repo.main, 'push', '-q', 'origin', 'main')
     const a = repo.addWorktree('a')
     repo.initSubmodule(a.path)
     const r = prep(repo, a)
-    assert.deepEqual([r.result.wip, r.result.wipCommitted, r.result.dirty], ['none', true, 0])
+    assert.deepEqual([r.result.wip, r.result.wipCommitted, r.result.dirty], ['submodule', false, 0])
   })
 
-  smTest(`${tag} submodule 内の未コミット変更: 親の WIP コミットに入らないので submodule・wipCommitted:false。ほかの変更は WIP に積む`, () => {
+  // 初期化済み submodule があれば WIP コミットも作らない（add・commit が submodule の中を観測し、中の config のコマンドを実行し得る）。worktree は削除側が保持する
+  smTest(`${tag} submodule 内の未コミット変更: submodule・wipCommitted:false。初期化済み submodule があるので親の変更も WIP に積まず、そのまま残す`, () => {
     const repo = makeRecoverRepo({ submodule: true })
     repo.git(repo.main, 'push', '-q', 'origin', 'main')
     // 利用者の設定が submodule の変更を隠していても観測する（--ignore-submodules=none）
@@ -360,7 +363,8 @@ export function registerRecoverPrepTests(bash) {
     repo.write(a.path, 'u.txt', 'u\n')
     const mixed = prep(repo, a)
     assert.deepEqual([mixed.result.wip, mixed.result.wipCommitted], ['submodule', false])
-    assert.equal(logSubjects(repo, a.branch)[0], WIP_SUBJECT, '親で記録できる変更は積む')
+    assert.notEqual(logSubjects(repo, a.branch)[0], WIP_SUBJECT, 'WIP コミットを作らない')
+    assert.equal(readFileSync(join(a.path, 'u.txt'), 'utf8'), 'u\n', '親の変更は worktree に残る')
     assert.equal(readFileSync(join(a.path, 'sm', 'f'), 'utf8'), 'dirty-in-submodule\n')
   })
 
@@ -929,7 +933,7 @@ export function registerRecoverPrepTests(bash) {
     repo.git(a.path, 'commit', '-q', '-m', 'bump sm')
     assert.equal(repo.git(a.path, 'diff', '--name-only', 'main...HEAD'), '', '前提: 設定のもとで素の diff は submodule ポインタの変更を隠す')
     const r = prep(repo, a)
-    assert.deepEqual([r.result.wip, r.result.diff, r.result.commitsAhead, r.result.filesChanged], ['none', 'nonempty', 1, 1])
+    assert.deepEqual([r.result.wip, r.result.diff, r.result.commitsAhead, r.result.filesChanged], ['submodule', 'nonempty', 1, 1])
   })
 
   test(`${tag} base の取得に失敗: diff:unknown・baseFetched:false。stale な追跡 ref が残っていても空とは言わない。WIP は積む`, () => {
@@ -984,7 +988,7 @@ export function registerRecoverPrepTests(bash) {
     }
   })
 
-  test(`${tag} cwd がリポジトリの外: worktree の一覧を取れず確定しない（list-failed）。何も書かない。リポジトリの中（worktree の中を含む）なら動く`, () => {
+  test(`${tag} cwd がリポジトリの外: worktree の一覧を取れず確定しない（list-failed）。何も書かない。リポジトリの中（照合に通る付属 worktree の中を含む）なら動く`, () => {
     const repo = makeRecoverRepo()
     const a = repo.addWorktree('a')
     repo.write(a.path, 'u.txt', 'u\n')
@@ -992,6 +996,7 @@ export function registerRecoverPrepTests(bash) {
     const r = run(repo, ['--worktree', a.path, '--branch', a.branch, '--base', 'main'], { cwd: join(repo.root, 'wts') })
     assert.deepEqual([r.result.resolved, r.result.reason, r.result.wip, r.result.wipCommitted], [false, 'list-failed', 'skipped', false])
     assert.equal(repo.head(a.path), before)
+    // 付属 worktree の中（ランを付属 worktree で起動したセッション）: .git・git ディレクトリ・commondir の照合に通るので、その共通ディレクトリを信頼して動く
     const inside = run(repo, ['--worktree', a.path, '--branch', a.branch, '--base', 'main'], { cwd: a.path })
     assert.equal(inside.result.wip, 'committed')
   })

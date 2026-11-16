@@ -25,11 +25,16 @@
 #                  --no-verify（略記を含む）、または commit の -n。フックの無効化・差し替えも同じ
 #                  コードで止める: -c / --config-env の core.hooksPath、git config での
 #                  core.hooksPath の設定・解除、コマンド先頭の HUSKY=0 / HUSKY_SKIP_HOOKS=1、
-#                  alias の定義（-c alias.* と git config alias.*。値は解決せず定義自体を拒否）。
-#                  git config は option の文法を真似ず許可リストで見る: hookspath を含む語か alias.* の語がある形と、
-#                  core / alias の節名の語と rename-section / remove-section（`re` 始まりの語）がある形は、読み取りの
-#                  完全形 `git config KEY`・`git config --get KEY`（KEY は core.hooksPath か alias.<名前>）以外をすべて
-#                  止める（option を含む形は、値を取るかが git の版で変わるので読み取りに見えても止める）
+#                  alias の定義（-c alias.* と git config alias.*。値は解決せず定義自体を拒否）、設定ファイルの取り込み
+#                  （-c / --config-env と git config の include.path・includeIf.<条件>.path。取り込んだファイルの中で
+#                  core.hooksPath を差し替えられる）、git config の編集（-e / --edit / edit。EDITOR / GIT_EDITOR を差し替えれば
+#                  core.hooksPath を直接書き換えられる）。
+#                  git config は option の文法を真似ず許可リストで見る: hookspath を含む語か alias.* / include.* / includeIf.* の
+#                  語がある形、core / alias / include / includeIf の節名の語と rename-section / remove-section（`re` 始まりの語）が
+#                  ある形、編集を指し得る語（- の直後の英字の並びに e がある短い option・--edit の省略・edit）がある形は、読み取りの完全形
+#                  `git config KEY`・`git config --get KEY`（KEY は core.hooksPath・alias.<名前>・include.path・
+#                  includeIf.<条件>.path）以外をすべて止める（option を含む形は、値を取るかが git の版で変わるので読み取りに
+#                  見えても止める）
 #                  （全セッション）
 #   force-push     git push の --force / -f / --mirror / +<refspec>（`--` の後の + 始まりも）/
 #                  --force-with-lease（= 形・略記を含む）/ --force-if-includes。lease 付きでも
@@ -44,7 +49,7 @@
 #                  --show-token(=…)・-t(=…)（束ね書きを含む）の語がある形、git で credential / credential-* の語がある形、
 #                  git var の変数名 1 つ（git var GIT_EDITOR）以外の形、git config で option を含まない完全形
 #                  （config KEY・config --get KEY・config get KEY〔KEY が extraheader を含まない〕・config KEY VALUE）以外の形
-#                  （一覧・照合・--file / --blob・--edit・scope の指定を含む）・
+#                  （一覧・照合・--file / --blob・scope の指定を含む。--edit は上の no-verify が先に止める）・
 #                  .git/config をファイルとして開く形・printenv / env の引数なし（代入だけの env を含む）・printenv で
 #                  TOKEN / SECRET / KEY / AUTH / COOKIE / SESSION / BEARER / _PAT 等を名指す形・echo / printf の
 #                  TOKEN / SECRET / PASSW / API_KEY 系の変数展開（引用符なしと二重引用符内。単一引用符内は文字列）と
@@ -182,10 +187,8 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 #   - merge-guard 側（subagent が true / null のときの判定）の `>&` `>|` は従来どおり直前の文字で判定する
 #   - main セッションでの難読化（変数間接・base64 復元・ブレース / glob 展開。obfuscated の
 #     判定は subagent が true / null のときだけ）
-#   - alias は -c と git config での定義だけを止める。利用者の設定ファイルに既にある alias、
-#     include.path 経由の設定取り込み、GIT_CONFIG_* 環境変数、SKIP= 等の他のフック回避
-#   - include.path・includeIf.*.path の設定（git config・-c）で、core.hooksPath を書いたファイルを取り込む差し替え
-#   - main セッションの git config -e / --edit（EDITOR / GIT_EDITOR を差し替えた形を含む）での core.hooksPath の書き換え
+#   - alias と include.path / includeIf.*.path は -c / --config-env と git config での定義だけを止める。利用者の設定ファイルに
+#     既にある alias・include（取り込み先のファイルの中身は見ない）、GIT_CONFIG_* 環境変数、SKIP= 等の他のフック回避
 #   - HUSKY=0 は同じコマンド文字列内の代入だけを見る（別の呼び出しで export 済みのものは見えない）
 #   - 認証情報の読み出し（credential-read）の残存ギャップ: 値を取るラッパー（`timeout 10 gh auth token`・`xargs` への分割など。
 #     コマンド位置を読み違える点は gh pr merge のマージ系判定と同じ限界）、glob（`cat ~/.config/g*/h*.yml`）、
@@ -569,13 +572,20 @@ function opt_val_next(a, longs, stops,   m, ch) {
 }
 # フックの差し替え（全セッション。理由 no-verify）。tok[c] が git。option の文法は真似ず、語の集合で見る:
 #   - -c / --config-env の値（次の語・-cKEY=…・--config-env=…。位置を問わない）のキーが core.hooksPath（大文字小文字を無視し
-#     .hookspath を含む）か alias.*
-#   - git config（sub_is）で、hookspath を含む語か alias.* の語がある。または core / alias の節名そのものの語と、
-#     rename-section / remove-section（--ren… / --rem… の省略を含む `re` 始まりの語）がある
-# 当たったうち通すのは、option を含まない読み取りの完全形 `git config KEY`・`git config --get KEY`（KEY は core.hooksPath か
-# alias.<名前>）だけ。値を取るかが版で変わる option（--comment / --color 等）を含む形は、読み取りに見えても止める。
-function conf_bad(kv) { kv = tolower(kv); return (index(kv, ".hookspath") > 0 || kv ~ /^alias[.]/) }
-function hook_swap(c,   k, t, hit, sec, re, n) {
+#     .hookspath を含む）か alias.*、または include.* / includeIf.*（= を含む値だけ。取り込んだファイルの中で core.hooksPath を
+#     差し替えられる。キーと値は分けない。includeIf の条件には = を書けるので、どこで分かれても前置きで見る）
+#   - git config（sub_is）で、hookspath を含む語か alias.* / include.* / includeIf.* の語がある。または core / alias / include /
+#     includeIf の節名そのものの語と、rename-section / remove-section（--ren… / --rem… の省略を含む `re` 始まりの語）がある
+#   - git config（sub_is）で、編集（設定ファイルを EDITOR / GIT_EDITOR で開く。core.hooksPath を直接書き換えられる）を指し得る語がある:
+#     短い option の語で、- の直後から続く英字の並びに e があるもの（束ね書き。`-ef<file>` は -e と -f <file> の束で編集になり、
+#     `git config KEY -e` もキーの後ろの -e を読んで編集になる。-f~/.netrc・-f.gitmodules は英字の並びが f で、e は連結した値の中なので
+#     見ない）・--edit の省略（--e 以上）・
+#     edit の語（option を含まない `git config KEY VALUE` の VALUE は除く）
+# 当たったうち通すのは、option を含まない読み取りの完全形 `git config KEY`・`git config --get KEY`（KEY は core.hooksPath・
+# alias.<名前>・include.path・includeIf.<条件>.path）だけ。値を取るかが版で変わる option（--comment / --color 等）を含む形は、
+# 読み取りに見えても止める。
+function conf_bad(kv) { kv = tolower(kv); return (index(kv, ".hookspath") > 0 || kv ~ /^alias[.]/ || kv ~ /^include(if)?[.][^=]*=/) }
+function hook_swap(c,   k, t, hit, sec, re, n, s) {
   for (k = c + 1; k <= ntok; k++) {
     t = tok[k]
     if ((t == "-c" || t == "--config-env") && conf_bad(tok[k + 1])) setv("no-verify")
@@ -584,15 +594,19 @@ function hook_swap(c,   k, t, hit, sec, re, n) {
   }
   if (!sub_is(c, "^config$")) return
   hit = 0; sec = 0; re = 0
+  s = sub_pos(c)
   for (k = c + 1; k <= ntok; k++) {
     t = tolower(tok[k])
-    if (index(t, "hookspath") > 0 || t ~ /^alias[.]/) hit = 1
-    if (t == "core" || t == "alias") sec = 1
+    if (index(t, "hookspath") > 0 || t ~ /^(alias|include|includeif)[.]/) hit = 1
+    if (t == "core" || t == "alias" || t == "include" || t == "includeif") sec = 1
     if (t ~ /^(--)?re/) re = 1
+    if (t ~ /^-[a-z]*e/) hit = 1
+    if (length(t) >= 3 && index("--edit", t) == 1) hit = 1
+    if (t == "edit" && !(tok[s] == "config" && ntok == s + 2 && k == s + 2 && conf_key(tok[s + 1]))) hit = 1
   }
   if (!hit && !(sec && re)) return
   n = ntok - c; t = tolower(tok[ntok])
-  if (tok[c + 1] == "config" && (n == 2 || (n == 3 && tok[c + 2] == "--get")) && t ~ /^(core[.]hookspath|alias[.][a-z0-9_-]+)$/) return
+  if (tok[c + 1] == "config" && (n == 2 || (n == 3 && tok[c + 2] == "--get")) && t ~ /^(core[.]hookspath|alias[.][a-z0-9_-]+|include[.]path|includeif[.].+[.]path)$/) return
   setv("no-verify")
 }
 function git_hooked(w) { return (w == "commit" || w == "push" || w == "merge" || w == "rebase" || w == "cherry-pick" || w == "am" || w == "revert" || w == "pull") }
