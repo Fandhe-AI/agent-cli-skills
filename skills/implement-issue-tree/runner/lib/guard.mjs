@@ -9,6 +9,13 @@
 // 一覧の各形が agent-guard.sh で deny になることは dev/implement-issue-tree/tests/runner-units.test.mjs が
 // 実際に agent-guard.sh を起動して確かめ、agent-guard.sh がまだ止めない形（guardGap）は同じテストが現状を固定する。
 //
+// 読み取りを巻き込む粗い形は rules / permissions に入れない。rules は先頭一致、permissions は glob で、
+// メソッド（GET と POST）を区別できない。たとえば `gh api *reviews*` は monitor が実行する読み取り
+// `gh api --paginate "repos/{owner}/{repo}/pulls/<PR>/reviews"`（外部レビューの本文を取って fix へ渡す）も拒否してしまう。
+// そのためレビューの書き込み（`-f event=APPROVE`・`-X POST` 等）は、引数を実際に解析する agent-guard.sh
+// （hook / plugin）の責務とし、ここには置かない。`gh pr review --approve` のような読み取りと衝突しない形だけを残す。
+// 一覧が読み取りコマンドを拒否しないことは runner-units.test.mjs が src のプロンプトの読み取り形で確かめる。
+//
 // 実効の防御はサーバー側の ruleset と G0 にある（Workflow 版の merge-guard-hook と同じ位置づけ）。
 // rules と permissions は補助層で、先頭一致・文字列照合のため入れ子や変数を含む形は止められない。
 //
@@ -32,7 +39,7 @@ export const DENY_FORMS = Object.freeze([
   { id: 'pr-merge-bypass', mergeOnly: false, note: 'gh pr merge の --admin（保護の迂回）と --auto（自動マージ予約）', prefixes: [], globs: ['gh pr merge*--admin*', 'gh pr merge*--auto*'] },
   { id: 'pr-approve', mergeOnly: false, note: 'gh pr review の --approve / -a', prefixes: [], globs: ['gh pr review*--approve*', 'gh pr review* -a*'] },
   { id: 'api-merge', mergeOnly: false, note: 'REST の /merge・/merges（POST）と GraphQL のマージ系 mutation（mergePullRequest・mergeBranch・enqueuePullRequest・enablePullRequestAutoMerge）', guardGap: true, prefixes: [], globs: ['gh api *merge*', 'gh api *Merge*', 'gh api *enqueuePullRequest*'] },
-  { id: 'api-review', mergeOnly: false, note: 'reviews API と GraphQL のレビュー mutation、中身を見られない GraphQL の入力（--input・@ファイル）', prefixes: [], globs: ['gh api *reviews*', 'gh api*addPullRequestReview*', 'gh api*submitPullRequestReview*', 'gh api*graphql*--input*', 'gh api*graphql*=@*'] },
+  { id: 'api-review', mergeOnly: false, note: 'GraphQL のレビュー mutation、中身を見られない GraphQL の入力（--input・@ファイル）。REST の reviews への書き込みは GET と区別できないため agent-guard.sh に任せる（読み取りの `gh api .../pulls/N/reviews` を巻き込まない）', prefixes: [], globs: ['gh api*addPullRequestReview*', 'gh api*submitPullRequestReview*', 'gh api*graphql*--input*', 'gh api*graphql*=@*'] },
   { id: 'gh-alias-extension', mergeOnly: false, note: 'gh alias の定義・取り込みと gh extension の導入・実行（拒否した形の別名・外部コードの実行になる）', prefixes: [['gh', 'alias', ['set', 'import']], ['gh', ['extension', 'ext'], ['install', 'exec']]], globs: [] },
   { id: 'auth-token', mergeOnly: false, note: '認証トークンの表示（gh auth token・status --show-token・環境変数の一覧）', guardGap: true, prefixes: [['gh', 'auth', 'token'], ['gh', 'auth', 'status', ['--show-token', '-t']], ['printenv']], globs: [] },
   { id: 'git-credential', mergeOnly: false, note: 'git の認証情報ヘルパーの呼び出し（credential fill 等）', guardGap: true, prefixes: [['git', 'credential']], globs: [] },

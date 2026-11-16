@@ -129,6 +129,49 @@ test('guard: 追加した形（/merges・mergeBranch・enqueuePullRequest・gh a
   }
 })
 
+// src の各エージェントのプロンプトが指示している gh / git の読み取りコマンド（dev/implement-issue-tree/scripts/implement-issue-tree.src.js）。
+// rules / permissions が、これらを拒否しないこと（読み取りを巻き込む粗い形を一覧に入れない）を縛る。
+const READ_COMMANDS = [
+  'gh api --paginate "repos/{owner}/{repo}/pulls/12/reviews"',
+  'gh api --paginate "repos/{owner}/{repo}/pulls/12/comments"',
+  'gh api --paginate "repos/{owner}/{repo}/issues/7/sub_issues?per_page=100"',
+  `gh api repos/{owner}/{repo}/compare/${SHA}...${'b'.repeat(40)} --jq '{status:.status,files:[.files[].filename]}'`,
+  'gh api rate_limit',
+  'gh api repos/o/r/issues/7',
+  "gh api graphql -F owner='{owner}' -F name='{repo}' -F n=7 -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){number parent{number}}}}' --jq '.data'",
+  "gh api graphql -F owner='{owner}' -F name='{repo}' -F n=12 -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved path comments(first:1){nodes{body url}}}}}}}'",
+  'gh pr view 12 --json state,headRefOid,mergeCommit',
+  'gh pr view 12 --json state,mergeable',
+  'gh pr view 12 --json files',
+  'gh pr checks 12',
+  'gh issue view 7 --json number,state',
+  'gh run view 99 --log-failed',
+  'git fetch origin',
+  'git diff --check',
+  'git log -1 --format=%s',
+  'git remote get-url origin',
+]
+
+// OpenCode の glob（`*` は任意の文字列）を全体一致の正規表現にする。
+const globToRegExp = (g) => new RegExp(`^${g.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`)
+
+test('guard: src のプロンプトが指示する gh / git の読み取りコマンドは、Codex rules にも OpenCode permissions にも掛からない', () => {
+  for (const opts of [{}, { allowMerge: true }]) {
+    const globs = opencodePatterns(opts).map(globToRegExp)
+    const argvs = activeForms(opts).flatMap((f) => f.prefixes.flatMap(expandPrefix)).map((a) => a.join(' '))
+    for (const cmd of READ_COMMANDS) {
+      assert.ok(!globs.some((re) => re.test(cmd)), `OpenCode の glob に掛かる: ${cmd}`)
+      assert.ok(!argvs.some((a) => cmd === a || cmd.startsWith(`${a} `)), `Codex の prefix_rule に掛かる: ${cmd}`)
+    }
+  }
+})
+
+test('guard: レビューの読み取りを巻き込む `gh api *reviews*` は一覧に無い（書き込みは agent-guard.sh が止める）', async () => {
+  assert.ok(!opencodePatterns().some((p) => p.includes('reviews')))
+  assert.equal((await codexHook('gh api repos/o/r/pulls/1/reviews -f event=APPROVE')).decision, 'deny')
+  assert.equal((await codexHook('gh api --paginate "repos/o/r/pulls/1/reviews"')).decision, 'allow')
+})
+
 test('guard: opencodeRules は permissions と policies を同じパターンで作る', () => {
   const rules = opencodeRules()
   assert.equal(rules.permissions.length, rules.policies.length)
@@ -185,6 +228,15 @@ test('preamble: StructuredOutput と Bash の読み替えを含む', () => {
   assert.match(p, /StructuredOutput/)
   assert.match(p, /Bash/)
   assert.match(p, /JSON/)
+})
+
+test('preamble: 形式の指示は additionalProperties: true の object（動的キーのマップ）のキーを禁じない', () => {
+  const schema = { type: 'object', required: ['items'], properties: { items: { type: 'object', additionalProperties: true } } }
+  const text = buildSchemaInstruction(schema)
+  assert.ok(!text.includes('schema に無いキーは足さない'))
+  assert.match(text, /additionalProperties に従う/)
+  assert.match(text, /true[^。]*の object は[^。]*キーを自由に持てる/)
+  assert.match(text, /false の object には properties に無いキーを足さない/)
 })
 
 test('preamble: worktree の通知は絶対パスだけ受け付ける', () => {

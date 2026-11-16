@@ -38,7 +38,7 @@ export function buildSchemaInstruction(schema) {
   if (text.length > SCHEMA_PRETTY_LIMIT) text = JSON.stringify(schema)
   return [
     '【最終応答の形式】最終応答は、次の JSON Schema に従う JSON オブジェクト 1 つだけにする。',
-    '前後に文章・コードフェンス・注釈を付けない。キー名は schema のとおりにし、schema に無いキーは足さない。',
+    '前後に文章・コードフェンス・注釈を付けない。キー名は schema のとおりにする。追加のキーの可否は各 object の additionalProperties に従う（true または未指定の object は、イシュー番号をキーにした動的マップのようにキーを自由に持てる。false の object には properties に無いキーを足さない）。',
     '```json',
     text,
     '```',
