@@ -69,7 +69,7 @@ _/iit-runner/<runId>/
   実行中に遅延で読むガード（`agent-guard.sh`）・Codex の hook（`adapters/codex-hook.sh`）・OpenCode のランナー専用 plugin
   （`adapters/opencode-plugin/` の全ファイル）の sha256 を固定し、`host.log` に記録する。実行仕様の段の起動前とモデルの段の
   各ターンの前後に照合し、1 度でも食い違えば以降の段はすべて実行しない（実行仕様は `exec-refused` で失敗値、モデルの段は
-  `null`。`reason` は `pin-mismatch`）。照合から起動までの間の差し替え（TOCTOU）と、固定より前の書き換えは防がない。
+  `null`。`reason` は `pin-mismatch`）。照合から起動までの間の差し替え（TOCTOU）と、固定より前の書き換え、1 つのターンの中で書き換えて元に戻したもの（hook・ガードはターン中に読まれ、照合はターンの前後だけ）は防がない。
 - 隔離 worktree は `<mainRoot>/.claude/worktrees/<runId>-<n>` に作る。
 
 ## Workflow 版との違い

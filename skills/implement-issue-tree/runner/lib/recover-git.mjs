@@ -49,7 +49,8 @@ export function recoverGitFor(label, prompt, { skillDir, mainRoot }) {
   } catch {
     return fetchOnly // 実体が無い（dead worktree）: WIP コミットは無い
   }
-  if (dirname(real) !== parent) return fetchOnly
+  // .claude/worktrees 自体が symlink 等で別の場所にあるときも足さない（アダプタは <main>/.claude/worktrees/ の直下の形だけを受ける）
+  if (dirname(real) !== parent || parent !== join(mainRoot, '.claude', 'worktrees')) return fetchOnly
   const wts = join(commonDir, 'worktrees')
   let names
   try { names = readdirSync(wts) } catch { return fetchOnly }
@@ -59,7 +60,8 @@ export function recoverGitFor(label, prompt, { skillDir, mainRoot }) {
   })
   if (found.length !== 1) return fetchOnly
   try {
-    return { commonDir, worktree: real, gitdir: verifyWorktreeGitdir(mainRoot, join(wts, found[0])) }
+    const gitdir = verifyWorktreeGitdir(mainRoot, join(wts, found[0]))
+    return dirname(gitdir) === wts ? { commonDir, worktree: real, gitdir } : fetchOnly
   } catch {
     return fetchOnly
   }

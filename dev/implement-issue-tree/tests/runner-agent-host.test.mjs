@@ -10,7 +10,7 @@
 // 実時間で待つのは時間切れの 2 件だけ（上限 1 秒の設定で確かめる）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { trackTmp } from './lib/tmp-track.mjs'
@@ -665,4 +665,15 @@ test('recoverGit（PR #851 の P1）: recover:#N にだけ、プロンプトの 
   ]
   for (const [label, prompt] of cases) await agent(prompt, { label, schema: SCHEMA })
   cases.forEach(([label, , want], i) => assert.deepEqual(calls[i].recoverGit, want, `${i}: ${label}`))
+  // .claude/worktrees 自体が symlink（実体が別の場所）なら worktree は足さず base の取得の分だけ（アダプタが拒否する形を渡さない）
+  const mr2 = join(root, `rec-main2-${Math.random().toString(16).slice(2)}`)
+  const real2 = join(root, `rec-wts-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(join(real2, 'old-1'), { recursive: true })
+  mkdirSync(join(mr2, '.claude'), { recursive: true })
+  symlinkSync(real2, join(mr2, '.claude', 'worktrees'))
+  mkdirSync(join(mr2, '.git', 'worktrees', 'old-1'), { recursive: true })
+  writeFileSync(join(mr2, '.git', 'worktrees', 'old-1', 'gitdir'), `${join(real2, 'old-1')}/.git\n`)
+  const h2 = makeHost({ cfg: { mainRoot: mr2 }, reply: () => ({ ok: true, n: 1 }) })
+  await h2.agent(P(` --base 'main' --worktree '${join(mr2, '.claude', 'worktrees', 'old-1')}'`), { label: 'recover:#2', schema: SCHEMA })
+  assert.deepEqual(h2.calls[0].recoverGit, { commonDir: join(mr2, '.git'), worktree: null, gitdir: null })
 })
