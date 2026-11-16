@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
-import { mergePrNumberOf } from '../../../skills/implement-issue-tree/runner/lib/merge-target.mjs'
+import { mergeNumberKinds, mergePrNumberOf } from '../../../skills/implement-issue-tree/runner/lib/merge-target.mjs'
 import { MERGE_EXEC_COMMAND, mergeExecCommandFor, DENY_FORMS, activeForms, codexRules, expandPrefix, opencodePatterns, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 import { buildPreamble, buildRepairPrompt, buildSchemaInstruction, buildWorktreeNotice, composePrompt } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
 import { DEFAULT_CONFIG_PATH, IIT_EFFORTS, IIT_MODELS, loadConfig, resolveModel, resolveTimeoutMs, validateConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
@@ -538,5 +538,8 @@ test('mergePrNumberOf（MEDIUM-8）: src の実物の mergeExecutePrompt（allow
   for (const [pr, issue] of [[123, 42], [7, 7], [1, 999]]) {
     assert.equal(mergePrNumberOf(mergeExecutePrompt({ number: issue }, { prNumber: pr }, true, entries, 'a'.repeat(40), 'n1')), pr, `PR ${pr}`)
     assert.equal(mergePrNumberOf(mergeExecutePrompt({ number: issue }, { prNumber: pr }, false, [])), null, `PR ${pr}（回復専用）`)
+    // 回復専用の全文は gh pr merge <N> を 1 つも含まない（agent-host が警告を出さない条件）。新規マージの全文は 1 種類
+    assert.equal(mergeNumberKinds(mergeExecutePrompt({ number: issue }, { prNumber: pr }, false, [])), 0, `PR ${pr}（回復専用の種類数）`)
+    assert.equal(mergeNumberKinds(mergeExecutePrompt({ number: issue }, { prNumber: pr }, true, entries, 'a'.repeat(40), 'n1')), 1, `PR ${pr}（種類数）`)
   }
 })

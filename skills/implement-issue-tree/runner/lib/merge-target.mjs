@@ -32,6 +32,16 @@ export function mergePrNumberOf(prompt) {
   return Number.isSafeInteger(v) && v >= 1 ? v : null
 }
 
+/**
+ * プロンプト中の形を問わない `gh pr merge <N>` の番号の種類数。0 なら、そのプロンプトはマージのコマンドを含まない
+ * （生成物の回復専用の merge-exec。手順 3 が allowMerge=false の文面になり gh pr merge を出力しない）。
+ * agent-host が「番号が決まらない」警告を、マージのコマンドを含むのに 1 種類に決まらない場合だけに絞るために使う。
+ */
+export function mergeNumberKinds(prompt) {
+  if (typeof prompt !== 'string') return 0
+  return new Set([...prompt.matchAll(ANY_FORM)].map((m) => m[1])).size
+}
+
 /** req.merge の形（正の安全な整数の prNumber と owner/repo の repo）か。 */
 export const isMergeTarget = (m) =>
   m !== null && typeof m === 'object' && Number.isSafeInteger(m.prNumber) && m.prNumber >= 1 && isRepoSlug(m.repo)

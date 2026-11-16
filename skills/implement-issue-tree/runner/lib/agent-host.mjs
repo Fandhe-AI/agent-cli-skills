@@ -33,7 +33,7 @@ import { extractJsonObject } from './extract-json.mjs'
 import { resolveModel, resolveTimeoutMs } from './models.mjs'
 import { buildRepairPrompt, composePrompt } from './preamble.mjs'
 import { assertSupportedSchema, sanitizeErrorLine, validate } from './schema-validate.mjs'
-import { isRepoSlug, mergePrNumberOf } from './merge-target.mjs'
+import { isRepoSlug, mergeNumberKinds, mergePrNumberOf } from './merge-target.mjs'
 import { createSequencer, createWorktree, verifyWorktreeGitdir } from './worktree.mjs'
 
 // ---- 実行仕様 ----
@@ -420,12 +420,15 @@ export function createAgentHost({ adapter, cfg }) {
       if (wt.gitdir !== undefined) worktreeGitdir = verifyWorktreeGitdir(mainRoot, wt.gitdir)
     }
     // マージしてよい対象（契約の req.merge。MEDIUM-8）。PR 番号は前置きを足す前のホストのプロンプトから取る。
-    // 決められなければ allowMerge も false にする（fail-closed）
+    // 決められなければ allowMerge も false にする（fail-closed）。プロンプトが gh pr merge <N> を 1 つも含まないのは
+    // 回復専用の merge-exec（生成物が allowMerge=false の文面で呼ぶ。マージしない段）なので、警告を出さない
     let merge = null
     if (autoMerge && /^merge-exec(?::|$)/.test(label)) {
       const prNumber = mergePrNumberOf(prompt)
+      const kinds = mergeNumberKinds(prompt)
       if (prNumber !== null && repo !== null) merge = { prNumber, repo }
-      else log(`⚠️ ${label}: マージ対象を決められない（${prNumber === null ? 'プロンプトの PR 番号が 0 個か 2 種類以上' : 'repo が未確定'}）。この段ではマージを許さない`)
+      else if (prNumber === null && kinds === 0) { /* 回復専用の段: マージのコマンドを含まない */ }
+      else log(`⚠️ ${label}: マージ対象を決められない（${prNumber === null ? `プロンプトの gh pr merge の PR 番号が ${kinds} 種類で、手順 3 の形の 1 種類に決まらない` : 'repo が未確定'}）。この段ではマージを許さない`)
     }
     const req = {
       prompt: composePrompt({ prompt, schema, worktreePath }),

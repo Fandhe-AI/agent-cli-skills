@@ -302,6 +302,25 @@ test('merge（MEDIUM-8）: PR 番号はプロンプトの手順 3 から取る�
   assert.throws(() => makeHost({ cfg: { repo: 'not a repo' } }), /repo/)
 })
 
+test('merge の警告: gh pr merge <N> を含まない回復専用の merge-exec では警告を出さず、含むのに 1 種類に決まらない・repo 未確定なら出す', async () => {
+  const cases = [
+    ['回復専用（マージのコマンドを含まない。gh pr merge の実行も行わない）', 'acme/widget', false],
+    [MERGE_STEP(41), 'acme/widget', false],
+    [`${MERGE_STEP(41)}\n${MERGE_STEP(42)}`, 'acme/widget', true],
+    ['gh pr merge 41 --admin だけ（手順 3 の形が無い）', 'acme/widget', true],
+    [MERGE_STEP(41), undefined, true],
+  ]
+  for (const [prompt, repo, warn] of cases) {
+    const logs = []
+    const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { args: { autoMerge: true }, repo, log: (m) => logs.push(m) } })
+    await agent(prompt, { label: 'merge-exec:#5', schema: SCHEMA })
+    const warned = logs.filter((m) => m.includes('マージ対象を決められない'))
+    assert.equal(warned.length, warn ? 1 : 0, prompt)
+    if (warn && repo !== undefined) assert.match(warned[0], /PR 番号が \d 種類/)
+    if (!warn && prompt.startsWith('回復専用')) assert.equal(calls[0].allowMerge, false)
+  }
+})
+
 test('エージェント数の上限（config.limits.maxAgents）を超えた呼び出しは起動せず null', async () => {
   const c = config()
   c.limits.maxAgents = 2
