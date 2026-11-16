@@ -86,7 +86,7 @@ test('parseSkipLabels: 形式不正は throw（配列でない・11 件・空文
 
 test('skipLabelsPrompt: 起動行は run-verified.sh 経由の repo-scan.sh の 1 行で、ラベルは単一引用符化し、gh・jq のコマンドを含まない', () => {
   const p = D.skipLabelsPrompt(['owner:human', "it's $(rm -rf x) `y`"], 'n0nce', 'o/r', '1,2,30')
-  const line = p.split('\n').find((l) => l.includes('repo-scan.sh'))
+  const line = p.split('\n').find((l) => l.startsWith('bash ') && l.includes('repo-scan.sh'))
   assert.match(line, /^bash '<skillDir>\/scripts\/run-verified\.sh' \S+ repo-scan\.sh --mode skip-labels --nonce n0nce --repo o\/r --numbers 1,2,30 -- 'owner:human' 'it'\\''s \$\(rm -rf x\) `y`'$/)
   assert.deepEqual(parseRepoScanCommand(p), { mode: 'skip-labels', nonce: 'n0nce', repo: 'o/r', numbers: '1,2,30', labels: ['owner:human', "it's $(rm -rf x) `y`"] })
   assert.ok(!/gh api repos|--paginate|jq -|grep -F/.test(p), '転記させるコマンドがプロンプトに残っている')

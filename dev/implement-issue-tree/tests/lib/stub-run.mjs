@@ -17,6 +17,8 @@ import { externalChecksReply, hashPrecheckReply, skipLabelsReply, stateVerifyRep
 import { requestedNumbersOf } from './declared-deps-prompt.mjs'
 
 export const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'implement-issue-tree.src.js')
+// 配布する生成物（コメント・空白除去と識別子短縮済み）。ランナーが評価する対象で、runScript の target: 'dist' で選べる。
+export const DIST_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'implement-issue-tree.js')
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
 
 export const source = readFileSync(SCRIPT_PATH, 'utf8')
@@ -44,7 +46,7 @@ const { declaredDepsChecksum, outOfTreeStateChecksum } = await importDefinitions
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const scriptBody = stripMetaExport(source)
 
-function buildTree(leaves) {
+export function buildTree(leaves) {
   const nodes = [{ number: 1, title: 'root', state: 'open', parent: 0, siblingIndex: 0, dependsOn: [], subIssuesTotal: leaves.length }]
   leaves.forEach((n, i) => nodes.push({ number: n, title: `issue ${n}`, state: 'open', parent: 1, siblingIndex: i, dependsOn: [], subIssuesTotal: 0 }))
   return nodes
@@ -57,21 +59,14 @@ function buildTree(leaves) {
 export const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: '/repo/.claude/skills/implement-issue-tree' }
 
 /**
- * `scriptText` は実行する実装スクリプトのテキストの選択（既定は開発ファイル src。stage1 など `export const meta` で
- * 始まる任意のテキストを渡すと、同じ stub・同じ条件でそれを実行する）。定義部のスライス（importDefinitions）は常に src を使う。
- * @param {{ args: object, leaves?: number[], scriptText?: string, override?: (label: string, opts: object, prompt: string) => any }} params
- *   override が undefined 以外を返したらその値を応答にする。
- * @returns {Promise<{ result: any, calls: Array<{ prompt: string, opts: object }>, logs: string[] }>}
+ * ラベル別の既定応答表（1 issue が plan → impl → review → pr-create → PR 照合 → monitor まで進む最小の応答）。
+ * override 処理を含まない素の表で、runScript と、ランナーの偽アダプタ（runner-e2e-stub）が共有する。
+ * @param {{ args: object, nodes: object[] }} ctx
+ * @returns {(prompt: string, opts: object) => any}
  */
-export async function runScript({ args, leaves = [2], scriptText = source, override = () => undefined }) {
-  const nodes = buildTree(leaves)
-  const calls = []
-  const logs = []
-  const handler = (prompt, opts) => {
+export function makeDefaultReply({ args, nodes }) {
+  return (prompt, opts) => {
     const label = opts.label
-    const overridden = override(label, opts, prompt)
-    // ツリー取得は封筒つきで返る（Issue #668）。override が平らな { nodes } を返したら封筒に包む（封筒の形・null・Error はそのまま）
-    if (overridden !== undefined) return label.startsWith('plan:issue-tree') ? wrapTreeReply(prompt, overridden) : label.startsWith('plan:skip-labels') ? wrapSkipLabelsReply(prompt, overridden) : label.startsWith('state:load-verify') ? stateVerifyReply(prompt, overridden) : overridden
     const n = Number(/#(\d+)/.exec(label)?.[1])
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
     if (label === 'script-hash-precheck') return hashPrecheckReply(prompt)
@@ -103,6 +98,30 @@ export async function runScript({ args, leaves = [2], scriptText = source, overr
     if (label.startsWith('merge:#')) return { state: 'blocked', blockedReason: 'quality', summary: '監視中断', unresolvedComments: [] }
     if (label.startsWith('state:')) return { ok: true }
     return null
+  }
+}
+
+/**
+ * `scriptText` は実行する実装スクリプトのテキストの選択（既定は開発ファイル src。stage1 など `export const meta` で
+ * 始まる任意のテキストを渡すと、同じ stub・同じ条件でそれを実行する）。定義部のスライス（importDefinitions）は常に src を使う。
+ * `target: 'dist'` は生成物（DIST_PATH）を評価する（scriptText より優先）。既定は src。
+ * @param {{ args: object, leaves?: number[], scriptText?: string, target?: 'src'|'dist', override?: (label: string, opts: object, prompt: string) => any }} params
+ *   override が undefined 以外を返したらその値を応答にする。
+ * @returns {Promise<{ result: any, calls: Array<{ prompt: string, opts: object }>, logs: string[] }>}
+ */
+export async function runScript({ args, leaves = [2], scriptText = source, target = 'src', override = () => undefined }) {
+  if (target !== 'src' && target !== 'dist') throw new Error(`target は src か dist: ${target}`)
+  if (target === 'dist') scriptText = readFileSync(DIST_PATH, 'utf8')
+  const nodes = buildTree(leaves)
+  const calls = []
+  const logs = []
+  const defaultReply = makeDefaultReply({ args, nodes })
+  const handler = (prompt, opts) => {
+    const label = opts.label
+    const overridden = override(label, opts, prompt)
+    // ツリー取得は封筒つきで返る（Issue #668）。override が平らな { nodes } を返したら封筒に包む（封筒の形・null・Error はそのまま）
+    if (overridden !== undefined) return label.startsWith('plan:issue-tree') ? wrapTreeReply(prompt, overridden) : label.startsWith('plan:skip-labels') ? wrapSkipLabelsReply(prompt, overridden) : label.startsWith('state:load-verify') ? stateVerifyReply(prompt, overridden) : overridden
+    return defaultReply(prompt, opts)
   }
   const agent = async (prompt, opts) => {
     calls.push({ prompt, opts })
