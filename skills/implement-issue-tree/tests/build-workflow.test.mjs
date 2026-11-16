@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url'
 import {
   stripComments, squeezeSpaces, shouldSqueezeSpace, buildArtifact, buildStage1, verifyTokenParity, runBuild, parseArgs, embedScriptHashes, SQUEEZE_REFUSAL_RULES, SRC_PATH, DIST_PATH,
 } from '../scripts/build-workflow.mjs'
-import { alphaVerify, patchKnownObservation } from './lib/mangle-harness.mjs'
+import { alphaVerify, mangleText } from './lib/mangle-harness.mjs'
 import { BASE_ARGS, runScript } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = fileURLToPath(new URL('../scripts/build-workflow.mjs', import.meta.url))
@@ -36,16 +36,15 @@ const readSrcEmbedded = () => embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), 
 const REPO_ROOT = resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const TOKEN_DIFF_HELPER = fileURLToPath(new URL('../scripts/token-diff.cjs', import.meta.url))
 
-// ビルドは 2 段（段 1 = コメント・空白の除去と照合 1〔トークン完全一致〕、段 2 = 識別子の改名と照合 2〔α 同値〕）に
-// 分かれる計画で、段 2 が入る前の今は生成物 = 段 1。テストは「段 1 を見る」「2 段の照合を見る」形に書き、
-// 段 2 が入っても（識別子名・テキストの完全一致に頼らず）成り立つ表明だけを置く。
+// ビルドは 2 段（段 1 = コメント・空白の除去と照合 1〔トークン完全一致〕、段 2 = 識別子の改名と照合 2〔α 同値〕）。
+// 生成物は段 2 の出力なので、段 1 は buildArtifact、生成物との関係は α 同値の検証器と `mangleText(段 1).code` との一致で見る。
 // 変換前後（before → after）が α 同値であることを検証器で確かめる（検証器は acorn を要するため子プロセスで起動する）
 const assertAlphaOk = async (before, after, name = 'alpha') => {
   const r = (await alphaVerify([{ name, before, after }])).get(name)
   assert.equal(r.ok, true, `α 同値でない: ${r.kind} ${r.detail}`)
 }
-// class（private 名を含む）は改名器の対応外になる計画のため、class を使うフィクスチャでは CLI（ビルド全体）の検査を外し、
-// 段 1 の検査（buildArtifact + verifyTokenParity）だけを残す
+// class（private 名を含む）は改名器の対応外なので、class を使うフィクスチャは段 1 の検査（buildArtifact + verifyTokenParity）と
+// 「CLI（ビルド全体）が中止して生成ファイルを書かない」ことだけを見る
 const usesClass = (text) => /\bclass\b/.test(text)
 
 // 実物の開発ファイル（約 900 KB）のビルドとトークン照合は 1 回約 7 秒かかる。実物への --check は 1 回だけ、このファイルの読み込み時に
@@ -690,10 +689,8 @@ test('2 段の照合（acorn）: 実ファイルの src と段 1 の全トーク
   // 空白除去の全体が「トークン列と各トークンの開始行を変えない」ことを独立実装で検証する
   const [result] = compareTokensWithParser([{ name: 'implement-issue-tree', before: src, after: stage1 }])
   assert.equal(result.ok, true, result.detail)
-  // 照合 2: 生成物は段 1 に対して α 同値（識別子の一貫した改名だけの差）。今は生成物 = 段 1 で恒等になる。
-  // 検証器の一律の拒否に当たる既知の 1 か所（h.toString(36)）は、件数と場所を確かめて両側とも同じ形に置き換えてから見る
-  // （src を書き換える PR で置き換えを外す。tests/lib/mangle-harness.mjs の patchKnownObservation）
-  await assertAlphaOk(await patchKnownObservation(stage1), await patchKnownObservation(dist))
+  // 照合 2: 生成物は段 1 に対して α 同値（識別子の一貫した改名だけの差）
+  await assertAlphaOk(stage1, dist)
 })
 
 // 下流の同期 PR で Cursor Bugbot が指摘した「詰めるとトークン列が変わる入力」3 種。現在の src には
@@ -1322,13 +1319,19 @@ for (const [name, { text, keep, expected }] of Object.entries(LEXER_SLASH_FIXED)
     // パーサ文脈つきの照合（ビルドが使うのと同じ）で、変換前後のトークン列が一致する
     const [result] = compareTokensWithParser([{ name, before: text, after: out }])
     assert.equal(result.ok, true, result.detail)
-    // class を使うフィクスチャは段 1 の検査までで、CLI（ビルド全体）は走らせない
-    if (usesClass(text)) return
     const r = runBuilder(text)
+    if (usesClass(text)) {
+      // class は改名器の対応外: ビルドは非ゼロで中止し、生成ファイルを書かない
+      assert.notEqual(r.status, 0, `ビルドが成功してしまった: ${r.stdout}`)
+      assert.equal(r.written, false, 'class で中止したのに生成ファイルが書かれた')
+      assert.match(r.stderr, /ビルド中止.*mangle: class/s)
+      return
+    }
     assert.equal(r.status, 0, r.stderr)
-    assert.match(r.stdout, /トークン照合 ok/)
+    assert.match(r.stdout, /トークン照合 ok・α 照合 ok/)
     assert.equal(r.written, true)
-    // 書かれた生成物は段 1 の出力と α 同値（識別子の改名が入っても成り立つ）
+    // 書かれた生成物は段 1 の出力を改名したもので、段 1 と α 同値である
+    assert.equal(r.distText, (await mangleText(out)).code)
     await assertAlphaOk(out, r.distText)
   })
 }
@@ -1565,8 +1568,14 @@ for (const [name, { code, result }] of Object.entries(WORD_PROPERTY_CASES)) {
     const expected = await runLikeRuntime(src)
     assert.deepEqual(expected, result)
     assert.deepEqual(await runLikeRuntime(out), result)
-    // class（private 名）を使う入力は段 1 の検査までで、CLI（ビルド全体）は走らせない
-    if (!usesClass(src)) assert.equal(runBuilder(src).status, 0)
+    // class（private 名）を使う入力は改名器の対応外でビルドが中止し、生成ファイルを書かない。それ以外は通る
+    const built = runBuilder(src)
+    if (usesClass(src)) {
+      assert.notEqual(built.status, 0)
+      assert.equal(built.written, false)
+    } else {
+      assert.equal(built.status, 0, built.stderr)
+    }
   })
 }
 
@@ -1731,12 +1740,13 @@ test('ビルド時のトークン照合: 正常な開発ファイルはビルド
   const text = `${META_HEADER}const x = a / 2 + " / a  +  b "\nconst re = /\`/.test(s)\nconst t = \`l1\n  i   t  =  1\`\n`
   const r = runBuilder(text)
   assert.equal(r.status, 0, r.stderr)
-  assert.match(r.stdout, /トークン照合 ok/)
+  assert.match(r.stdout, /トークン照合 ok・α 照合 ok/)
   assert.equal(r.written, true)
+  assert.equal(r.distText, (await mangleText(buildArtifact(text))).code)
   await assertAlphaOk(buildArtifact(text), r.distText)
 })
 
-test('buildStage1: ハッシュ埋め込み・空白除去・照合 1 を行い、runBuild と同じ段 1 を返す', () => {
+test('buildStage1: ハッシュ埋め込み・空白除去・照合 1 を行い、runBuild の段 1 を返す', async () => {
   const text = `${META_HEADER}const x = a / 2 + " / a  +  b "\nconst re = /\`/.test(s)\n`
   const { src, stage1 } = buildStage1(text, helperDir)
   assert.equal(src, text)
@@ -1746,7 +1756,7 @@ test('buildStage1: ハッシュ埋め込み・空白除去・照合 1 を行い�
   // 生成物の書き込みはしない（runBuild だけが書く）
   const r = runBuilder(text)
   assert.equal(r.status, 0, r.stderr)
-  assert.equal(r.distText, stage1)
+  assert.equal(r.distText, (await mangleStage1Text(stage1)), '生成物は段 1 の改名結果')
 })
 
 test('stub-run: scriptText に段 1 を渡すと、ハッシュ埋め込み済みの src と同じ agent 呼び出し列・ログ・戻り値になる', async () => {
@@ -1775,18 +1785,19 @@ const writeHelper = (name, body) => {
   return path
 }
 // CLI 本体が使う runBuild を、一時ファイルの開発ファイルに対して呼ぶ（照合ヘルパーを差し替えられる）
-const runBuildOn = (srcText, { checkOnly = false, parity = {} } = {}) => {
+const runBuildOn = (srcText, { checkOnly = false, parity = {}, mangle = {}, alpha = {} } = {}) => {
   const dir = trackTmp(mkdtempSync(join(tmpdir(), 'build-workflow-run-')))
   try {
     const srcPath = join(dir, 'in.src.js')
     const distPath = join(dir, 'out.js')
     writeFileSync(srcPath, srcText)
-    const r = runBuild({ srcPath, distPath, checkOnly, parity })
-    return { ...r, distExists: existsSync(distPath) }
+    const r = runBuild({ srcPath, distPath, checkOnly, parity, mangle, alpha })
+    return { ...r, distExists: existsSync(distPath), distText: existsSync(distPath) ? readFileSync(distPath, 'utf8') : null }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 }
+const mangleStage1Text = async (stage1) => (await mangleText(stage1)).code
 const GOOD_SRC = `${META_HEADER}const s = " / a  +  b "\n`
 const UNREADABLE = /トークン照合の結果を解釈できない/
 const BAD_HELPERS = {
@@ -1843,6 +1854,77 @@ test('verifyTokenParity: 実行ファイル（node）が存在しないと throw
     /トークン照合を実行できない.*ENOENT/s,
   )
 })
+
+// 改名器（段 2）と検証器（照合 2）の失敗: どちらも書かずに status 1 で中止し、--check でも鮮度比較へ進まない
+const BAD_STAGE2_HELPERS = {
+  '終了コード 3 で終わる': { path: writeHelper('s2-exit3.cjs', 'process.exit(3)') },
+  '存在しないパス': { path: join(helperDir, 'no-such-stage2.cjs') },
+  '出力が空': { path: writeHelper('s2-empty.cjs', '') },
+  '出力が JSON でない': { path: writeHelper('s2-garbage.cjs', "process.stdout.write('not json')") },
+  '出力が {}': { path: writeHelper('s2-object.cjs', "process.stdout.write('{}')") },
+}
+for (const [name, { path }] of Object.entries(BAD_STAGE2_HELPERS)) {
+  for (const checkOnly of [false, true]) {
+    test(`runBuild${checkOnly ? '（--check）' : ''}: 改名器が${name}と status 1 で、書かない`, () => {
+      const r = runBuildOn(GOOD_SRC, { checkOnly, mangle: { helperPath: path } })
+      assert.equal(r.status, 1, `ビルドが成功してしまった: ${r.stdout.join('\n')}`)
+      assert.equal(r.distExists, false)
+      assert.match(r.stderr.join('\n'), /ビルド中止.*識別子の改名/s)
+    })
+    test(`runBuild${checkOnly ? '（--check）' : ''}: 検証器が${name}と status 1 で、書かない`, () => {
+      const r = runBuildOn(GOOD_SRC, { checkOnly, alpha: { helperPath: path } })
+      assert.equal(r.status, 1, `ビルドが成功してしまった: ${r.stdout.join('\n')}`)
+      assert.equal(r.distExists, false)
+      assert.match(r.stderr.join('\n'), /ビルド中止.*α 同値の照合/s)
+    })
+  }
+}
+test('runBuild: 検証器が不一致を返したら status 1 で、書かない（ok: false・ok のみで kind が match でない場合も通さない）', () => {
+  const cases = {
+    不一致: `{"results":[{"ok":false,"kind":"mismatch","detail":"差あり"}]}`,
+    'ok だが kind が match でない': `{"results":[{"ok":true,"kind":"mismatch","detail":"x"}]}`,
+  }
+  for (const [label, out] of Object.entries(cases)) {
+    const r = runBuildOn(GOOD_SRC, { alpha: { helperPath: writeHelper(`alpha-${label.length}.cjs`, `process.stdout.write(${JSON.stringify(out)})`) } })
+    assert.equal(r.status, 1, label)
+    assert.equal(r.distExists, false, label)
+    assert.match(r.stderr.join('\n'), /改名後の生成物が段 1 と α 同値でない/, label)
+  }
+})
+test('runBuild: 改名器が class を拒否する開発ファイルはビルドが中止し、書かない', () => {
+  const r = runBuildOn(`${META_HEADER}class K {}\n`)
+  assert.equal(r.status, 1)
+  assert.equal(r.distExists, false)
+  assert.match(r.stderr.join('\n'), /mangle: class/)
+})
+test('runBuild: 書かれる生成物は段 1 の改名結果と一致し、束縛名が短縮されている', async () => {
+  const text = `${META_HEADER}const longName = " / a  +  b "\nconst another = longName.length\nexport_use(another)\n`
+  const r = runBuildOn(text)
+  assert.equal(r.status, 0, r.stderr.join('\n'))
+  assert.equal(r.wrote, true)
+  const stage1 = buildArtifact(text)
+  assert.equal(r.distText, await mangleStage1Text(stage1))
+  assert.notEqual(r.distText, stage1)
+  assert.doesNotMatch(r.distText, /longName/)
+})
+
+// 正しい形（{ code }）で返すが、文字列の中身まで変える偽の改名器。検証器が止めなければならない（照合 2 の引数の配線の検査）。
+// 'ab' → 'xy' は束縛名でなくリテラルを変えるので、α 同値でない
+const FAKE_MANGLER = writeHelper('fake-mangler.cjs', '')
+writeFileSync(
+  FAKE_MANGLER,
+  `let t = ''\nprocess.stdin.on('data', (d) => { t += d })\nprocess.stdin.on('end', () => { process.stdout.write(JSON.stringify({ code: t.replace(/ab/g, 'xy') })) })\n`,
+)
+const AB_SRC = `${META_HEADER}const s = "ab"\nuse(s)\n`
+for (const checkOnly of [false, true]) {
+  test(`runBuild${checkOnly ? '（--check）' : ''}: 改名器がリテラルを書き換えると α 照合が止め、status 1 で書かない`, () => {
+    const r = runBuildOn(AB_SRC, { checkOnly, mangle: { helperPath: FAKE_MANGLER } })
+    assert.equal(r.status, 1, `ビルドが成功してしまった: ${r.stdout.join('\n')}`)
+    assert.equal(r.wrote, false)
+    assert.equal(r.distExists, false)
+    assert.match(r.stderr.join('\n'), /改名後の生成物が段 1 と α 同値でない/)
+  })
+}
 
 test('runBuild: --check 相当でも照合ヘルパーが失敗すれば status 1 で、鮮度比較へ進まない', () => {
   const r = runBuildOn(GOOD_SRC, { checkOnly: true, parity: { helperPath: BAD_HELPERS['終了コード 3 で終わる'].path } })
