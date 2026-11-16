@@ -1249,13 +1249,16 @@ test('駆動部: latch 終端メッセージ文言に「削除するか」「削
   assert.match(section, /削除・書き換えて迂回することはしないこと/)
 })
 
-test('ドキュメント: recovery.md・automerge-design.md・SKILL.md・state-example.json のいずれにも optinFixState を削除・改変して latch を迂回する実行指示（「削除するか」「エントリごと削除してから」等）が残っていない', () => {
+test('ドキュメント: recovery.md・automerge-design.md・SKILL.md（と SKILL.md から移した args-reference.md・optin-tests.md）・state-example.json のいずれにも optinFixState を削除・改変して latch を迂回する実行指示（「削除するか」「エントリごと削除してから」等）が残っていない', () => {
   // dirname(import.meta.url) は skills/implement-issue-tree/tests。'..' で
   // skills/implement-issue-tree/ 相対のパスを組み立てる（SCRIPT_PATH と同じ組み立て方）。
+  // args-reference.md・optin-tests.md は SKILL.md の本文を移した先。外すと SKILL.md だった範囲の検査が黙って狭くなる。
   const files = [
     'references/recovery.md',
     'references/automerge-design.md',
     'SKILL.md',
+    'references/args-reference.md',
+    'references/optin-tests.md',
     'sample/state-example.json',
   ]
   const forbidden = [/削除するか/, /エントリごと削除してから/, /attempted: false へ書き換えてから/]
