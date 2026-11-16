@@ -72,8 +72,10 @@
 #   repo-settings  ruleset・branch protection・リポジトリ本体の書き込み・gh repo edit 等
 #                  （subagent が true / null のとき）
 #   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
-#                  C0 と DEL）を含むコマンド（subagent が true / null のとき）。単一引用符の末尾の `$` で閉じる形
-#                  （`grep -c '^hi$' f`）は、コマンド全体が評価器にならないコマンドの許可リストだけの単純コマンド
+#                  C0 と DEL）を含むコマンド（subagent が true / null のとき）。`$'` がすべて単一引用符の末尾の `$` と
+#                  閉じ引用符（`grep -c '^hi$' f`・`RE='x$'` の次の行に別のコマンド）だと引用符の状態を追って確かめられた
+#                  ときは除く（字句解析器 SQ_LITERAL_AWK。下記）。追い切れない形（ヒアドキュメント・バッククォート・
+#                  二重引用符の中の $' 等）は、コマンド全体が評価器にならないコマンドの許可リストだけの単純コマンド
 #                  またはパイプラインで、厳格な文法に一致するときだけ除く（認識器 SQ_DOLLAR_AWK。下記）
 #   nesting-limit  bash -c / eval / heredoc / $(...) / env -S の入れ子が解析の上限（深さ 8・件数 512）を
 #                  超えた、ダブルクォート内の $( や `（引用符なし heredoc 本文の $( や `）の閉じを見つけられない、
@@ -1093,9 +1095,12 @@ cmd_clean=$(printf '%s' "$cmd" | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'
 
 # デコード用プリミティブ（ANSI-C クォート・IFS 展開）は文字削除の正規化では意味が復元できない
 # ため、構文の存在自体を raw のコマンドに対して deny する（merge-guard-hook.sh と同じ判定）。
-# 例外は Issue #805 の「単一引用符の末尾の `$` で閉じる形」（`grep -c '^hi$' f`）だけで、判定は上の解析器
-# （GIT_AWK）から独立した認識器 SQ_DOLLAR_AWK が行う。認識器はコマンド全体が次の文法に完全一致するときだけ
-# ok を出す（一致しなければ何も出さない）。評価器になりうるコマンドを並べて止める拒否リストは使わない
+# 例外は Issue #805 の「単一引用符の末尾の `$` で閉じる形」（`grep -c '^hi$' f`）だけで、2 段で判定する。
+#   1 段目（SQ_LITERAL_AWK。下記）: 引用符の状態を追い、raw の `$'` がすべて「単一引用符の中の `$` と閉じ引用符」なら
+#     literal を出す。このときは ANSI-C 引用符が 1 つも無いので例外とする（コマンドの形は問わない）。
+#   2 段目（SQ_DOLLAR_AWK）: 1 段目が literal を出さないとき、従来どおりコマンド全体が許可リストの文法に一致するときだけ例外。
+# どちらも上の解析器（GIT_AWK）から独立している。2 段目の認識器 SQ_DOLLAR_AWK はコマンド全体が次の文法に
+# 完全一致するときだけ ok を出す（一致しなければ何も出さない）。評価器になりうるコマンドを並べて止める拒否リストは使わない
 # （awk の system・perl -e 等、一覧に無い評価器で `'gh pr $'` と別の語を連結して評価する形が漏れるため）。
 #   コマンド全体   [空白] 段 { [空白] | [空白] 段 } [空白]。1 行だけで、タブ以外の制御文字（改行・CR を含む）は文法の外。
 #                  ; & && || 改行・$( ` <( >(・代入の前置き・コメントは文法の外
@@ -1187,9 +1192,91 @@ END {
 }
 AWK
 
+# 1 段目の字句解析器。状態は「通常」「単一引用符の中（S）」「二重引用符の中（D）」の 3 つで、$( に入るたびに
+# 状態を積んで通常から始め直し、対応する ) で戻す（中の ( ) は数えて対応を取る）。バックスラッシュは通常と二重引用符の中で
+# 次の 1 文字を飛ばす。コメントは通常の状態で語の先頭（直前が行頭・空白・タブ・改行・; | & ( )）の # から行末まで。
+# raw の `$'` の個数と「S の閉じ引用符の直前が `$`」の個数が一致し、すべての引用符・$( ・( が閉じたときだけ literal を出す。
+# 次の形は何も出さない（2 段目へ倒す。今と同じ判定）:
+#   通常の状態の $'（本物の ANSI-C）・二重引用符の中の $'（eval / bash -c で ANSI-C になる）・$" ・$[ ・$(( ・((・
+#   バッククォート・名前だけでない ${…}・<< を含む入力（ヒアドキュメント）・case の語・< > 直後の #・$( の中のコメント・
+#   閉じていない引用符や括弧。
+# literal のときの単一引用符の中身は、別のコマンドが評価器として連結して評価すると ANSI-C 引用符になりうる
+# （`printf '%s%s' 'gh pr $' "'\x6derge' 1" | bash`）。ただし同じ文字列は `'gh pr '\$` のように `$'` を書かずに作れ、
+# その形はこの検査の対象外なので、評価器への受け渡しはこの検査では止めない（止めるのはコマンド自身の ANSI-C 引用符だけ）。
+read -r -d '' SQ_LITERAL_AWK <<'AWK' || true
+{ s = (NR == 1) ? $0 : s "\n" $0 }
+function ch(i) { return substr(s, i, 1) }
+# `#` がコメントを始める位置（直前が行頭・空白・タブ・改行・; | & ( )）。
+function wordstart(i,   c) {
+  if (i == 1) return 1
+  c = ch(i - 1)
+  return (c == " " || c == "\t" || c == "\n" || c == ";" || c == "|" || c == "&" || c == "(" || c == ")")
+}
+END {
+  t = s; raw = gsub(/[$]\047/, "", t)
+  if (raw == 0) exit
+  # 追い切れない形は判定しない（呼び出し側が SQ_DOLLAR_AWK の判定に倒す）
+  if (index(s, "<<") || s ~ /(^|[^A-Za-z0-9_])case([^A-Za-z0-9_]|$)/) exit
+  n = length(s); st = "N"; par = 0; sp = 0; lit = 0; i = 1
+  while (i <= n) {
+    c = ch(i)
+    if (st == "S") {
+      if (c == "\047") { if (ch(i - 1) == "$") lit++; st = "N" }
+      i++; continue
+    }
+    if (c == "\\") { i += 2; continue }
+    if (c == "`") exit
+    if (c == "$") {
+      d = ch(i + 1)
+      # 通常の状態の $' は ANSI-C 引用符。二重引用符の中の $'・$"・$[ も判定しない
+      if (d == "\047" || d == "\"" || d == "[") exit
+      if (d == "(") {
+        if (ch(i + 2) == "(") exit
+        stst[sp] = st; stpar[sp] = par; sp++
+        st = "N"; par = 0; i += 2; continue
+      }
+      if (d == "{") {
+        if (!match(substr(s, i + 2), /^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?@*!$-])}/)) exit
+        i += 2 + RLENGTH; continue
+      }
+      i++; continue
+    }
+    if (st == "D") {
+      if (c == "\"") st = "N"
+      i++; continue
+    }
+    if (c == "\047") { st = "S"; i++; continue }
+    if (c == "\"") { st = "D"; i++; continue }
+    if (c == "#") {
+      if (i > 1 && (ch(i - 1) == "<" || ch(i - 1) == ">")) exit
+      if (wordstart(i)) {
+        if (sp > 0) exit
+        while (i <= n && ch(i) != "\n") i++
+        continue
+      }
+      i++; continue
+    }
+    if (c == "(") {
+      if (ch(i + 1) == "(") exit
+      par++; i++; continue
+    }
+    if (c == ")") {
+      if (par > 0) { par--; i++; continue }
+      if (sp == 0) exit
+      sp--; st = stst[sp]; par = stpar[sp]; i++; continue
+    }
+    i++
+  }
+  if (st == "N" && sp == 0 && par == 0 && lit == raw) print "literal"
+}
+AWK
+
 if match_ere "$cmd" "[$]'"; then
-  sq_ok=$(printf '%s\n' "$cmd" | LC_ALL=C awk "$SQ_DOLLAR_AWK") || finish deny internal-error
-  [ "$sq_ok" = ok ] || finish deny obfuscated
+  sq_lit=$(printf '%s\n' "$cmd" | LC_ALL=C awk "$SQ_LITERAL_AWK") || finish deny internal-error
+  if [ "$sq_lit" != literal ]; then
+    sq_ok=$(printf '%s\n' "$cmd" | LC_ALL=C awk "$SQ_DOLLAR_AWK") || finish deny internal-error
+    [ "$sq_ok" = ok ] || finish deny obfuscated
+  fi
 fi
 if match_ere "$cmd" '[$]\{?IFS'; then
   finish deny obfuscated

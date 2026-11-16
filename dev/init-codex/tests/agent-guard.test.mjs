@@ -72,6 +72,8 @@ import {
   FP805_FLIP,
   FP805_STAY_DENY,
   FP805_AUDIT_DENY,
+  SQ_LITERAL_FLIP,
+  SQ_LITERAL_DENY,
 } from './lib/agent-guard-cases.mjs'
 
 for (const bash of BASHES) {
@@ -160,6 +162,13 @@ for (const bash of BASHES) {
         }
         for (const [cmd, reason] of FP805_AUDIT_DENY) {
           it(`[805 監査] deny ${reason}: ${JSON.stringify(cmd)}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
+        }
+        // `$'` の字句解析: 単一引用符の末尾の `$` だけなら形を問わず通り、本物の ANSI-C 引用符と状態を狂わせる形は止まる
+        for (const cmd of SQ_LITERAL_FLIP) {
+          it(`[sq-literal] allow: ${JSON.stringify(cmd)}`, async () => expectAllow(await run(bash, cmd, subagent)))
+        }
+        for (const [cmd, reason] of SQ_LITERAL_DENY) {
+          it(`[sq-literal] deny ${reason}: ${JSON.stringify(cmd)}`, async () => expectDeny(await run(bash, cmd, subagent), reason))
         }
       })
     }

@@ -5,6 +5,8 @@
 // なるのは指定した誤検出の形だけ」。そこで tests/lib/agent-guard-cases.mjs の全コーパス（既存の deny / allow の表・
 // 迂回の試行・誤検出の形）を、旧版の判定を凍結した fixture と新版の判定で突き合わせ、deny から allow へ変わった
 // ものが FP805_FLIP と過不足なく一致すること（subagent=false では 1 件も変わらないこと）を確かめる。
+// その後に `$'` の字句解析（SQ_LITERAL_AWK）で通すようにした形（SQ_LITERAL_FLIP）も、同じ旧版からの差分として数える
+// （旧版から通るようになった形 = FP805_FLIP と SQ_LITERAL_FLIP の和）。
 //
 // 旧版の fixture（tests/fixtures/agent-guard-baseline-805.json）は Issue #805 の前（7b7dbb4）の agent-guard.sh を、
 // コーパスの全コマンド × subagent {false, true, null} で流した結果。ref の存在に依らないよう凍結してある。
@@ -32,10 +34,15 @@ const SUBAGENTS = [false, true, null]
 const POST_805 = new Set(['CRED_DENY', 'CRED_ALLOW', 'ENQUEUE_DENY', 'HOOKCONF_DENY', 'HOOKCONF_ALLOW'])
 const corpus = [...new Set(Object.entries(cases).filter(([k, v]) => Array.isArray(v) && !POST_805.has(k)).map(([, v]) => v).flatMap((arr) => arr.map((e) => (Array.isArray(e) ? e[0] : e))))]
 
+// 旧版から deny → allow へ変わってよい形
+const FLIP_ALL = [...cases.FP805_FLIP, ...cases.SQ_LITERAL_FLIP]
+
 const SUBSET = [...new Set([
   cases.FP805_FLIP,
   cases.FP805_STAY_DENY,
   cases.FP805_AUDIT_DENY,
+  cases.SQ_LITERAL_FLIP,
+  cases.SQ_LITERAL_DENY,
   cases.MG_REPO_DENY,
   cases.MG_MERGE_DENY,
   cases.MG_OBFUSCATED_DENY,
@@ -73,18 +80,18 @@ describe('差分テストの前提', () => {
     const covered = corpus.filter((c) => BASELINE[c] !== undefined).length
     assert.ok(covered >= corpus.length - 20, `fixture が覆うのは ${covered} / ${corpus.length} 件`)
   })
-  it('FP805_FLIP・FP805_STAY_DENY・FP805_AUDIT_DENY は全件 fixture にある（旧版の判定が凍結されている）', () => {
-    for (const c of cases.FP805_FLIP) assert.ok(BASELINE[c], `fixture に無い: ${JSON.stringify(c)}`)
-    for (const [c] of [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY]) assert.ok(BASELINE[c], `fixture に無い: ${JSON.stringify(c)}`)
+  it('FP805_FLIP・FP805_STAY_DENY・FP805_AUDIT_DENY・SQ_LITERAL_FLIP・SQ_LITERAL_DENY は全件 fixture にある（旧版の判定が凍結されている）', () => {
+    for (const c of FLIP_ALL) assert.ok(BASELINE[c], `fixture に無い: ${JSON.stringify(c)}`)
+    for (const [c] of [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY, ...cases.SQ_LITERAL_DENY]) assert.ok(BASELINE[c], `fixture に無い: ${JSON.stringify(c)}`)
   })
-  it('FP805_FLIP は旧版で subagent=true / null のとき deny だった形だけ', () => {
-    for (const c of cases.FP805_FLIP) {
+  it('FP805_FLIP と SQ_LITERAL_FLIP は旧版で subagent=true / null のとき deny だった形だけ', () => {
+    for (const c of FLIP_ALL) {
       assert.match(BASELINE[c][1], /^deny /, JSON.stringify(c))
       assert.match(BASELINE[c][2], /^deny /, JSON.stringify(c))
     }
   })
-  it('FP805_STAY_DENY と FP805_AUDIT_DENY は旧版でも同じ理由で deny だった形（subagent=true / null）', () => {
-    for (const [c, r] of [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY]) {
+  it('FP805_STAY_DENY・FP805_AUDIT_DENY・SQ_LITERAL_DENY は旧版でも同じ理由で deny だった形（subagent=true / null）', () => {
+    for (const [c, r] of [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY, ...cases.SQ_LITERAL_DENY]) {
       assert.equal(BASELINE[c][1], `deny ${r}`, JSON.stringify(c))
       assert.equal(BASELINE[c][2], `deny ${r}`, JSON.stringify(c))
     }
@@ -152,9 +159,13 @@ describe('認識器 SQ_DOLLAR_AWK（単体）', () => {
   it('誤検出の形（FP805_FLIP の `$\'` を含む行）は受理する', () => {
     for (const c of cases.FP805_FLIP.filter((x) => x.includes("$'") && !/^\s*(\/usr\/bin\/)?gh /.test(x))) assert.ok(ok(c), JSON.stringify(c))
   })
-  it('迂回の試行（`$\'` を含む FP805_STAY_DENY・FP805_AUDIT_DENY）は受理しない', () => {
-    const leaked = [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY].map(([c]) => c).filter((c) => c.includes("$'") && ok(c))
+  it('迂回の試行（`$\'` を含む FP805_STAY_DENY・FP805_AUDIT_DENY・SQ_LITERAL_DENY）は受理しない', () => {
+    const leaked = [...cases.FP805_STAY_DENY, ...cases.FP805_AUDIT_DENY, ...cases.SQ_LITERAL_DENY].map(([c]) => c).filter((c) => c.includes("$'") && ok(c))
     assert.deepEqual(leaked, [])
+  })
+  // SQ_LITERAL_FLIP を通すのは 1 段目の字句解析（SQ_LITERAL_AWK）で、この認識器の文法は変えていない
+  it('SQ_LITERAL_FLIP は許可リストの文法の外（受理しない）', () => {
+    assert.deepEqual(cases.SQ_LITERAL_FLIP.filter(ok), [])
   })
   // [受理する対照, 受理しない形, …]
   const PAIRS = {
@@ -210,7 +221,7 @@ describe('旧版 → 新版の差分', { concurrency: BASHES.length }, () => {
         assert.equal(results.length, jobs.length)
       })
 
-      it('通るようになったのは FP805_FLIP と過不足なく一致する（subagent=true / null）', () => {
+      it('通るようになったのは FP805_FLIP と SQ_LITERAL_FLIP の和と過不足なく一致する（subagent=true / null）', () => {
         const flipped = { true: new Set(), null: new Set() }
         jobs.forEach(([c, s], i) => {
           if (s === false) return
@@ -218,14 +229,14 @@ describe('旧版 → 新版の差分', { concurrency: BASHES.length }, () => {
           if (was.startsWith('deny') && results[i] === 'allow') flipped[String(s)].add(c)
         })
         for (const key of ['true', 'null']) {
-          const want = new Set(cases.FP805_FLIP)
+          const want = new Set(FLIP_ALL)
           assert.deepEqual([...flipped[key]].filter((c) => !want.has(c)), [], `想定外に通るようになった (subagent=${key})`)
           assert.deepEqual([...want].filter((c) => !flipped[key].has(c)), [], `通るはずが止まったまま (subagent=${key})`)
         }
       })
 
-      it('旧版と判定が変わったのは FP805_FLIP の deny → allow だけ（理由コードも同じ）', () => {
-        const flip = new Set(cases.FP805_FLIP)
+      it('旧版と判定が変わったのは FP805_FLIP と SQ_LITERAL_FLIP の deny → allow だけ（理由コードも同じ）', () => {
+        const flip = new Set(FLIP_ALL)
         const diffs = []
         jobs.forEach(([c, s], i) => {
           const was = BASELINE[c][SUBAGENTS.indexOf(s)]

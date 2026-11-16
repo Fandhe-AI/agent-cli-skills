@@ -5840,6 +5840,131 @@
       "allow",
       "deny obfuscated",
       "deny obfuscated"
+    ],
+    "echo \"$X\" | grep 'a$'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "grep 'a$' f && echo \"$X\"": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "ls \"$(git rev-parse --git-common-dir)/hooks\" | grep -v '\\.sample$'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "RE='(x)$'\necho ok": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "RE_CREDFILE='\\.(pem|key)$'\nRE_OK='\\.(example|pub)$'\ngit diff --staged --name-only | grep -E \"${RE_CREDFILE}\" | grep -vE \"${RE_OK}\" || echo none": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "grep 'a$' f # it's a comment\necho \"it's\" 'b$'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo \"$(printf '%s' 'a$' | grep -c 'a$')\"": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo \"$(echo $'\\x67')\"": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo $(gh $'pr' merge 1)": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "x=$(g$'h' pr merge 1)": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo \"x\"$'y'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo 'a'$'b'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo 'a$' \"b\"$'c'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "# it's\ng$'h' pr merge 1\n# it's": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo a# ; g$'h' pr merge 1": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo \"it's\" ; g$'h' pr merge 1": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo it\\'s ; g$'h' pr merge 1": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "cat <<EOF\nit's\nEOF\ng$'h' pr merge 1": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "grep 'a$' f # it's\ng$'h' pr merge 1": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo >#it's\ng$'h' pr merge 1\n'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo $(echo 'a$' # it's\n) ; g$'h' pr merge 1": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "case x in x) echo 'a$' ;; esac ; g$'h' pr merge 1": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo \\$'x'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "grep 'a$' f '": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "grep 'a$' \"f": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
     ]
   }
 }
