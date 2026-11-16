@@ -26,7 +26,10 @@ if [ -z "${base}" ]; then
   echo "ベースブランチ名を取得できない。差分を確認できないため中止する" >&2
   exit 1
 fi
-git fetch origin "${base}"
+git fetch origin "+refs/heads/${base}:refs/remotes/origin/${base}" || {
+  echo "git fetch に失敗した。ネットワーク・認証・ブランチ名を確認して報告する" >&2
+  exit 1
+}
 git log "origin/${base}..HEAD" --oneline
 git diff "origin/${base}...HEAD" --stat
 ```
@@ -35,7 +38,7 @@ git diff "origin/${base}...HEAD" --stat
 
 サブエージェントを使える環境では、読み取り専用の調査用サブエージェントへ委譲してセキュリティ確認を行う。使えない環境では同じ手順を自分で実行する。渡す入力は次の 3 点で、どちらで実行しても同じ結果になるようにする。
 
-- 差分: Step 1 の `git diff <base>...HEAD`
+- 差分: Step 1 の `git diff origin/<base>...HEAD`
 - 観点: 次の確認項目
 - 出力形式: 問題なし、または `ファイル:行`・重大度（HIGH / MEDIUM / LOW）・説明・推奨修正の一覧
 
