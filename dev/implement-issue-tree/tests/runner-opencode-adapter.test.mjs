@@ -12,10 +12,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { SKILL_DIR } from './lib/paths.mjs'
-import { createAdapter } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
+import { MERGE_RES, createAdapter } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
-import { codexRules, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
+import { MERGE_EXEC_COMMAND, codexRules, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 
+const PLUGIN_DIR = join(SKILL_DIR, 'runner', 'adapters', 'opencode-plugin')
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'lib', 'fake-opencode-server.mjs')
 
 function setup(extra = {}) {
@@ -59,9 +60,13 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.ok(cfg.permissions.some((r) => r.effect === 'deny' && r.resource === 'gh pr merge*'))
     assert.ok(cfg.policies.some((r) => r.action === 'tool.use' && r.resource === 'shell:gh pr merge*'))
     assert.equal(cfg.plugins.length, 1)
-    assert.ok(existsSync(join(cfg.plugins[0], 'index.js')), 'plugin の実体が runDir に置かれる')
-    assert.ok(existsSync(join(cfg.plugins[0], '..', '..', 'hooks', 'agent-guard.sh')), 'plugin が解決する ../../hooks/agent-guard.sh がある')
-    assert.match(cfg.plugins[0], /\.opencode\/plugins\/agent-guard$/, 'plugin の編集拒否の対象になる配置')
+    const o = cfg.plugins[0].options
+    assert.equal(cfg.plugins[0].package, PLUGIN_DIR, 'ランナー専用 plugin（配布物の plugin ではない）')
+    assert.ok(existsSync(join(cfg.plugins[0].package, 'index.js')))
+    assert.deepEqual(o.mergeRes, [], '通常用は merge の素通しを持たない')
+    assert.ok(existsSync(o.guardScript) && /agent-guard\.sh$/.test(o.guardScript))
+    assert.match(o.nonce, /^[0-9a-f]{32}$/)
+    assert.equal(readFileSync(o.markerPath, 'utf8'), o.nonce, 'plugin が目印を書いた')
 
     await t.adapter.run(t.req())
     assert.equal(starts(t.records()).length, 1, 'allowMerge でない run では merge 用 serve を起動しない')
@@ -76,25 +81,37 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.ok(merge.config.permissions.some((r) => /gh pr review\*--approve/.test(r.resource)), '承認の deny は残る')
     assert.ok(merge.config.permissions.some((r) => r.resource.includes('--admin')), '--admin の deny は残る')
     assert.equal(JSON.stringify(merge.config).includes('"effect":"allow"'), false)
+    assert.deepEqual(merge.config.plugins[0].options.mergeRes, MERGE_RES, 'merge 用だけ MERGE_EXEC_COMMAND を素通しにする')
+    assert.ok(MERGE_RES.includes(MERGE_EXEC_COMMAND.source))
+    assert.notEqual(merge.config.plugins[0].options.nonce, o.nonce, 'serve ごとに別の nonce')
   } finally { await t.adapter.close() }
 })
 
-test('セッション: 通常用は親セッションの子（plugin がサブエージェントと判定する）、merge 用は親なし。model は Ref になる', async () => {
+test('セッション: 親セッションは作らない。model は Ref になり、model が null なら model も variant も送らずログに残す', async () => {
   const t = setup()
   await t.adapter.start()
   try {
     await t.adapter.run(t.req({ model: 'prov/some/model-x', effort: 'low' }))
-    await t.adapter.run(t.req({ allowMerge: true, model: null }))
+    const r2 = t.req({ allowMerge: true, model: null, effort: 'low' })
+    await t.adapter.run(r2)
     const posts = t.records().filter((r) => r.ev === 'http' && r.method === 'POST' && r.path === '/api/session')
-    const parent = posts.find((r) => r.body.title === 'iit-runner:parent')
     const child = posts.find((r) => r.body.title === 't1')
-    const mergeSession = posts.find((r) => r.body.title === 't2')
-    assert.deepEqual(parent.body.permissions, [{ action: '*', resource: '*', effect: 'deny' }], '親セッションは何も許可しない')
-    assert.ok(child.body.parentID, '通常用のセッションに parentID')
+    const noModel = posts.find((r) => r.body.title === 't2')
+    assert.equal(posts.some((r) => r.body.parentID), false, 'parentID を使わない')
     assert.deepEqual(child.body.model, { providerID: 'prov', id: 'some/model-x', variant: 'low' })
-    assert.equal('parentID' in mergeSession.body, false, 'merge 用のセッションに parentID は付けない')
-    assert.equal('model' in mergeSession.body, false, 'model が null ならツールの既定')
-    assert.equal(posts.some((r) => 'permissions' in r.body && r.body.title !== 'iit-runner:parent'), false, 'エージェントのセッションに permissions（allow-all）を付けない')
+    assert.equal('model' in noModel.body, false)
+    assert.match(readFileSync(join(r2.logDir, 'adapter.log'), 'utf8'), /model 未指定/)
+    assert.equal(posts.some((r) => 'permissions' in r.body), false, 'セッションに permissions（allow-all）を付けない')
+  } finally { await t.adapter.close() }
+})
+
+test('toolConfig.defaultModel があれば model が null のときに使う', async () => {
+  const t = setup({ toolConfig: { defaultModel: 'bifrost/qwen' } })
+  await t.adapter.start()
+  try {
+    await t.adapter.run(t.req({ effort: 'medium' }))
+    const post = t.records().find((r) => r.ev === 'http' && r.method === 'POST' && r.path === '/api/session' && r.body.title === 't1')
+    assert.deepEqual(post.body.model, { providerID: 'bifrost', id: 'qwen', variant: 'medium' })
   } finally { await t.adapter.close() }
 })
 
@@ -173,14 +190,21 @@ test('失敗の分類: failed は api、レート制限は usage-limit、serve �
   } finally { await t.adapter.close() }
 })
 
-test('prereq: 起動コマンドが無い・ガードの資産が無い', async () => {
+test('prereq: 起動コマンドが無い・agent-guard.sh が無い・plugin の目印が無い', async () => {
   const a = setup({ toolConfig: { command: ['/nonexistent/opencode-xyz'] } })
   assert.equal((await kindOf(a.adapter.start())).kind, 'prereq')
   await a.adapter.close()
 
-  const b = setup({ toolConfig: { guardAssetsDir: '/nonexistent/assets' } })
-  assert.equal((await kindOf(b.adapter.start())).kind, 'prereq')
-  await b.adapter.close()
+  const noGuard = createAdapter({ skillDir: '/nonexistent/skills/x', mainRoot: a.mainRoot, runDir: a.runDir, toolConfig: { command: [process.execPath, FAKE] }, guard: { codexRules, opencodeRules }, env: process.env })
+  assert.equal((await kindOf(noGuard.start())).kind, 'prereq')
+  await noGuard.close()
+
+  const c = setup({ env: { FAKE_OC_NOPLUGIN: '1' } })
+  const e = await kindOf(c.adapter.start())
+  assert.equal(e.kind, 'prereq')
+  assert.match(e.message, /plugin/)
+  await c.adapter.close()
+  assert.ok(c.records().length > 0, 'serve は起動したが、目印が無いので走らせなかった')
 })
 
 test('close は自分が作ったセッションだけ削除し、自分の serve だけ止める', async () => {

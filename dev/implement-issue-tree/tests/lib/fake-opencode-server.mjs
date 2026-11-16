@@ -11,9 +11,13 @@
 //   上記なし   assistant が `reply-<n>:<prompt の先頭>` と返して execution.succeeded
 //
 // 記録: 環境変数 FAKE_OC_LOG のファイルへ 1 行 1 JSON で追記する（start・http・delete）。
+// FAKE_OC_NOPLUGIN=1 で config の plugin を読み込まない（目印ファイルが書かれない）。
+// 読み込むときは実の plugin（runner/adapters/opencode-plugin）を import して setup を呼び、目印を書かせる。
 // FAKE_OC_FOREIGN=<id> を渡すと、アダプタが作っていない既存セッションを 1 つ持つ（削除されないことの確認用）。
 import { appendFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const argv = process.argv.slice(2)
 if (argv[0] === '--version') {
@@ -27,6 +31,12 @@ const PASSWORD = process.env.OPENCODE_PASSWORD
 const rec = (o) => { if (LOG) appendFileSync(LOG, `${JSON.stringify(o)}\n`) }
 
 rec({ ev: 'start', pid: process.pid, port, hasPassword: Boolean(PASSWORD), config: process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : null, cwd: process.cwd() })
+
+const pluginEntry = process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT).plugins?.[0] : null
+if (pluginEntry && !process.env.FAKE_OC_NOPLUGIN) {
+  const mod = await import(pathToFileURL(join(pluginEntry.package, 'index.js')).href)
+  await mod.default.setup({ options: pluginEntry.options, permission: { hook: async () => {} } })
+}
 
 const sessions = new Map() // id -> { id, parentID, title, location, messages, active, seq, timer }
 let nextId = 1
@@ -79,6 +89,7 @@ const server = createServer((req, res) => {
     if (!authed) return send(401, { error: 'unauthorized' })
     const p = url.pathname
     if (p === '/api/info') return send(200, { data: { version: '2.2.7' } })
+    if (p === '/api/agent') return send(200, { data: [] })
     if (p === '/api/event') {
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       res.write(`data: ${JSON.stringify({ type: 'server.connected', data: {} })}\n\n`)
