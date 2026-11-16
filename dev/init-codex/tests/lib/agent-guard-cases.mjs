@@ -1377,13 +1377,6 @@ export const CRED_DENY = [
   "git config --get HTTP.EXTRAHEADER",
   "git config --get-all http.https://github.com/.extraHeader",
   "git config get http.extraHeader",
-  "git config --edit",
-  "git config -e",
-  "git config --global --edit",
-  "git config --local -e",
-  "git config --file x --edit",
-  "git config edit",
-  "git config --ed",
   "git config --lis",
   "git config --get-regex x",
   "git config --get-urlm http.x https://github.com",
@@ -1446,7 +1439,6 @@ export const CRED_DENY = [
   "git config get --ur=https://github.com http",
   "git config get --url https://github.com http",
   "git config -zl",
-  "git config -le",
   "git config --fil=x --lis",
   "git diff -O~/.config/gh/hosts.yml",
   "git -C~/.config/gh log",
@@ -1679,9 +1671,10 @@ export const ENQUEUE_DENY = [
 ]
 
 // git config での core.hooksPath / alias.* の設定（no-verify・全セッション）。#805 の凍結後に足した判定で、旧版との差分テスト
-// （agent-guard-805.test.mjs）の対象外（POST_805）。option の文法は真似ず許可リストで見る: hookspath を含む語か alias.* の語がある
-// git config / -c と、core / alias の節名と rename-section / remove-section（`re` 始まりの語）がある git config は、読み取りの完全形
-// `git config KEY`・`git config --get KEY` 以外をすべて止める（値を取るかが版で変わる option を含む形は読み取りでも止める）。
+// （agent-guard-805.test.mjs）の対象外（POST_805）。option の文法は真似ず許可リストで見る: hookspath を含む語か alias.* / include.* /
+// includeIf.* の語がある git config / -c / --config-env と、core / alias / include / includeIf の節名と rename-section /
+// remove-section（`re` 始まりの語）がある git config と、編集（-e を含む短い option・--edit の省略・edit の語）を指し得る git config は、
+// 読み取りの完全形 `git config KEY`・`git config --get KEY` 以外をすべて止める（値を取るかが版で変わる option を含む形は読み取りでも止める）。
 export const HOOKCONF_DENY = [
   ['git config --fil x core.hooksPath /dev/null', 'no-verify'],
   ['git config --fil=x core.hooksPath /dev/null', 'no-verify'],
@@ -1730,6 +1723,50 @@ export const HOOKCONF_DENY = [
   ['git config --get core.hooksPath x', 'no-verify'],
   ['git -C d config --get core.hooksPath', 'no-verify'],
   ['git --config-env x=y config core.hooksPath /dev/null', 'no-verify'],
+  // include.path / includeIf.<条件>.path（取り込んだファイルの中で core.hooksPath を差し替えられる）。main セッションでも止める
+  ['git config include.path /tmp/x', 'no-verify'],
+  ['git config INCLUDE.PATH /tmp/x', 'no-verify'],
+  ['git config includeIf.gitdir:/x/.path /tmp/y', 'no-verify'],
+  ['git config --add include.path /tmp/x', 'no-verify'],
+  ['git config --replace-all include.path /tmp/x', 'no-verify'],
+  ['git config --global include.path ~/x', 'no-verify'],
+  ['git config set include.path /tmp/x', 'no-verify'],
+  ['git config set includeIf.gitdir:~/w/.path /tmp/x', 'no-verify'],
+  ['git config --file .git/config include.path /tmp/x', 'no-verify'],
+  ['git config --unset include.path', 'no-verify'],
+  ['git config --get-all include.path', 'no-verify'],
+  ['git config get include.path', 'no-verify'],
+  ['git config --rename-section foo include', 'no-verify'],
+  ['git config rename-section foo includeIf.gitdir:/x/', 'no-verify'],
+  ['git config --rena foo includeif', 'no-verify'],
+  ['git -c include.path=/tmp/x commit -m x', 'no-verify'],
+  ['git -c Include.Path=/tmp/x status', 'no-verify'],
+  ['git -cinclude.path=/x status', 'no-verify'],
+  ['git -c includeIf.onbranch:main.path=/tmp/x push', 'no-verify'],
+  ['git -c includeIf.gitdir:/a=b/.path=/tmp/x status', 'no-verify'],
+  ['git --config-env include.path=X status', 'no-verify'],
+  ['git --config-env=include.path=X status', 'no-verify'],
+  ['git --config-env=includeIf.gitdir:/w/.path=X commit -m x', 'no-verify'],
+  ['git -C d -c include.path=/tmp/x status', 'no-verify'],
+  // git config -e / --edit / edit（EDITOR / GIT_EDITOR を差し替えれば core.hooksPath を直接書き換えられる）。旧 CRED_DENY から移した。main セッションでも止める
+  ['git config --edit', 'no-verify'],
+  ['git config -e', 'no-verify'],
+  ['git config --global --edit', 'no-verify'],
+  ['git config --local -e', 'no-verify'],
+  ['git config --file x --edit', 'no-verify'],
+  ['git config edit', 'no-verify'],
+  ['git config --ed', 'no-verify'],
+  ['git config --e', 'no-verify'],
+  ['git config edit --global', 'no-verify'],
+  ['git config --global edit', 'no-verify'],
+  ['git config -ze', 'no-verify'],
+  ['git config -le', 'no-verify'],
+  ['git config user.name -e', 'no-verify'],
+  ['git config set user.name edit', 'no-verify'],
+  ['git -C d config -e', 'no-verify'],
+  ['git --git-dir=x config --edit', 'no-verify'],
+  ["GIT_EDITOR='sed -i s/a/b/' git config --global --edit", 'no-verify'],
+  ['EDITOR=./x.sh git config edit', 'no-verify'],
 ]
 
 // 同じ解析で止めない形（hooksPath / alias でない設定と、core / alias に関わらない -c・-c の後ろに無い hooksPath の語）。全セッションで allow。
@@ -1743,4 +1780,12 @@ export const HOOKCONF_ALLOW = [
   // -c が別の意味（grep の件数・commit の再編集）で、hooksPath の語が設定キーでない
   'git grep -c hooksPath',
   'git commit -c HEAD -m "x hooksPath"',
+  // include の読み取りの完全形と、include / edit の語が設定キーや編集の指定でない形
+  'git config include.path',
+  'git config --get include.path',
+  'git config --get includeIf.gitdir:/x/.path',
+  'git config user.name edit',
+  'git grep -c include.path',
+  'git grep -e include.path',
+  'git commit -m "git config -e と include.path"',
 ]
