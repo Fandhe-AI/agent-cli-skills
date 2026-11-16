@@ -16,6 +16,17 @@
 // （hook / plugin）の責務とし、ここには置かない。`gh pr review --approve` のような読み取りと衝突しない形だけを残す。
 // 一覧が読み取りコマンドを拒否しないことは runner-units.test.mjs が src のプロンプトの読み取り形で確かめる。
 //
+// 利用者が決める文字列（owner / repo・ブランチ名・ファイルパス・PR や issue のタイトル・本文）と衝突する形も入れない。
+// glob はコマンド全体への部分一致なので、`gh api *merge*` のような広い一致は `gh api repos/acme/merge-tool/issues/7`
+// の通常の読み取りまで拒否する。REST のエンドポイントと HTTP メソッド（`-X PUT .../pulls/N/merge`・`.../merges`）、
+// `*hosts.yml*` のようなファイル名だけの一致も agent-guard.sh（引数を解析する）に任せる。残すのは次の形だけである。
+//   - サブコマンドの先頭一致（`gh pr merge`・`gh pr review --approve`・`git push --force` 等。Codex の prefix_rule は argv の語単位の一致）
+//   - GraphQL の mutation 名（mergePullRequest 等。利用者の名前と衝突しない固有の語）と `--no-verify`・`--force` 系のフラグ
+//   - 認証ファイルのパス（`.config/gh/` 配下・`.codex/auth.json`）
+// gh / git の前置きグローバルオプション付きの形（`gh -R o/r pr merge`）は、gh / git の直後の語が `-` で始まる場合だけ
+// 掛ける（`git * credential*` のように書くと `git commit -m "credential の扱い"` まで掛かるため）。
+// それでも `gh -R o/r issue create --title "pr merge"` のようにオプション付きでタイトルに形そのものを書く場合は掛かり得る。
+//
 // 実効の防御はサーバー側の ruleset と G0 にある（Workflow 版の merge-guard-hook と同じ位置づけ）。
 // rules と permissions は補助層で、先頭一致・文字列照合のため入れ子や変数を含む形は止められない。
 //
@@ -27,6 +38,9 @@
 /** merge-exec の完全一致の形（src の merge プロンプトの手順 3 と同じ形）。照合は plugin / hook 側が行う。 */
 export const MERGE_EXEC_COMMAND = /^HEAD_SHA="[0-9a-f]{40}"; gh pr merge [1-9][0-9]* --squash --delete-branch --match-head-commit "\$HEAD_SHA"$/
 
+/** GraphQL の mutation 名の呼び出し（`name(` と `name (`）。名前だけの一致は repo 名・ブランチ名と衝突し、ThreadReply 等の別 mutation も巻き込む。 */
+const mutationGlobs = (name) => [`gh api*${name}(*`, `gh api*${name} (*`]
+
 /**
  * 拒否する形の一覧。
  *   prefixes: argv の先頭一致で書ける形（要素の配列は選択肢）。Codex の prefix_rule と OpenCode の glob の両方を作る。
@@ -37,13 +51,13 @@ export const MERGE_EXEC_COMMAND = /^HEAD_SHA="[0-9a-f]{40}"; gh pr merge [1-9][0
 export const DENY_FORMS = Object.freeze([
   { id: 'pr-merge', mergeOnly: true, note: 'gh pr merge', prefixes: [['gh', 'pr', 'merge']], globs: [] },
   { id: 'pr-merge-bypass', mergeOnly: false, note: 'gh pr merge の --admin（保護の迂回）と --auto（自動マージ予約）', prefixes: [], globs: ['gh pr merge*--admin*', 'gh pr merge*--auto*'] },
-  { id: 'pr-approve', mergeOnly: false, note: 'gh pr review の --approve / -a', prefixes: [], globs: ['gh pr review*--approve*', 'gh pr review* -a*'] },
-  { id: 'api-merge', mergeOnly: false, note: 'REST の /merge・/merges（POST）と GraphQL のマージ系 mutation（mergePullRequest・mergeBranch・enqueuePullRequest・enablePullRequestAutoMerge）', guardGap: true, prefixes: [], globs: ['gh api *merge*', 'gh api *Merge*', 'gh api *enqueuePullRequest*'] },
-  { id: 'api-review', mergeOnly: false, note: 'GraphQL のレビュー mutation、中身を見られない GraphQL の入力（--input・@ファイル）。REST の reviews への書き込みは GET と区別できないため agent-guard.sh に任せる（読み取りの `gh api .../pulls/N/reviews` を巻き込まない）', prefixes: [], globs: ['gh api*addPullRequestReview*', 'gh api*submitPullRequestReview*', 'gh api*graphql*--input*', 'gh api*graphql*=@*'] },
+  { id: 'pr-approve', mergeOnly: false, note: 'gh pr review の --approve と -a（語単位。本文中の -abc は掛けない）', prefixes: [], globs: ['gh pr review*--approve*', 'gh pr review* -a', 'gh pr review* -a *'] },
+  { id: 'api-merge', mergeOnly: false, note: 'GraphQL のマージ系 mutation の呼び出し形（mergePullRequest・mergeBranch・enqueuePullRequest・enablePullRequestAutoMerge）。REST の /merge・/merges は owner / repo 名と衝突するため agent-guard.sh に任せる', guardGap: true, prefixes: [], globs: ['mergePullRequest', 'enablePullRequestAutoMerge', 'mergeBranch', 'enqueuePullRequest'].flatMap(mutationGlobs) },
+  { id: 'api-review', mergeOnly: false, note: 'GraphQL のレビュー mutation（addPullRequestReview・submitPullRequestReview。スレッドへの返信 addPullRequestReviewThreadReply は掛けない）、中身を見られない GraphQL の入力（--input・@ファイル。エンドポイントが graphql のときだけ）。REST の reviews への書き込みは GET と区別できないため agent-guard.sh に任せる（読み取りの `gh api .../pulls/N/reviews` を巻き込まない）', prefixes: [], globs: [...['addPullRequestReview', 'submitPullRequestReview'].flatMap(mutationGlobs), 'gh api graphql *--input*', 'gh api graphql *=@*'] },
   { id: 'gh-alias-extension', mergeOnly: false, note: 'gh alias の定義・取り込みと gh extension の導入・実行（拒否した形の別名・外部コードの実行になる）', prefixes: [['gh', 'alias', ['set', 'import']], ['gh', ['extension', 'ext'], ['install', 'exec']]], globs: [] },
   { id: 'auth-token', mergeOnly: false, note: '認証トークンの表示（gh auth token・status --show-token・環境変数の一覧）', guardGap: true, prefixes: [['gh', 'auth', 'token'], ['gh', 'auth', 'status', ['--show-token', '-t']], ['printenv']], globs: [] },
   { id: 'git-credential', mergeOnly: false, note: 'git の認証情報ヘルパーの呼び出し（credential fill 等）', guardGap: true, prefixes: [['git', 'credential']], globs: [] },
-  { id: 'auth-file', mergeOnly: false, note: 'gh / Codex の認証ファイルとその置き場の読み取り', guardGap: true, prefixes: [], globs: ['*.config/gh*', '*hosts.yml*', '*.codex/auth*'] },
+  { id: 'auth-file', mergeOnly: false, note: 'gh / Codex の認証ファイルとその置き場の読み取り（`hosts.yml` だけの一致は利用者のファイル名と衝突するため置かない）', guardGap: true, prefixes: [], globs: ['*.config/gh/*', '*.config/gh', '*.config/gh *', '*/gh/hosts.yml*', '*.codex/auth.json*'] },
   { id: 'git-force-push', mergeOnly: false, note: 'force 系の push', prefixes: [['git', 'push', ['--force', '-f', '--force-with-lease', '--force-if-includes', '--mirror']]], globs: ['git push*--force*', 'git push* -f*', 'git push*--mirror*', 'git push* +*'] },
   { id: 'git-no-verify', mergeOnly: false, note: 'フックの迂回（--no-verify・commit -n・core.hooksPath）', prefixes: [['git', 'commit', ['--no-verify', '-n']], ['git', 'push', '--no-verify']], globs: ['git commit*--no-verify*', 'git push*--no-verify*', 'git*core.hooksPath*'] },
 ])
@@ -60,10 +74,10 @@ export function expandPrefix(pattern) {
   return acc
 }
 
-/** gh / git の前置きグローバルオプション（`gh -R x pr merge`・`git -C d push`）を許す形を足す。 */
+/** gh / git の前置きグローバルオプション（`gh -R x pr merge`・`git -C d push`）を許す形を足す。直後の語は `-` 始まりに限る。 */
 function withGlobalOptionVariant(glob) {
   const m = /^(gh|git) (\S.*)$/.exec(glob)
-  return m && !m[2].startsWith('*') ? [glob, `${m[1]} * ${m[2]}`] : [glob]
+  return m && !m[2].startsWith('*') ? [glob, `${m[1]} -* ${m[2]}`] : [glob]
 }
 
 /** allowMerge に応じた有効な形。Codex と OpenCode は必ずここを通して同じ集合から作る。 */

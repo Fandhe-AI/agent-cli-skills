@@ -124,7 +124,7 @@ test('guard: DENY_FORMS の id は一意で、全形が GUARD_DENY か GUARD_GAP
 
 test('guard: 追加した形（/merges・mergeBranch・enqueuePullRequest・gh alias・gh extension）が一覧にある', () => {
   const all = opencodePatterns().join('\n')
-  for (const needle of ['gh api *merge*', 'gh api *enqueuePullRequest*', 'gh alias set*', 'gh alias import*', 'gh extension install*', 'gh extension exec*', 'gh ext install*']) {
+  for (const needle of ['gh api*mergePullRequest(*', 'gh api*mergeBranch(*', 'gh api*enablePullRequestAutoMerge(*', 'gh api*enqueuePullRequest(*', 'gh alias set*', 'gh alias import*', 'gh extension install*', 'gh extension exec*', 'gh ext install*']) {
     assert.ok(all.includes(needle), needle)
   }
 })
@@ -172,6 +172,102 @@ test('guard: レビューの読み取りを巻き込む `gh api *reviews*` は�
   assert.equal((await codexHook('gh api --paginate "repos/o/r/pulls/1/reviews"')).decision, 'allow')
 })
 
+// 利用者が決める文字列（owner / repo・ブランチ・パス・タイトル・本文）に merge・review・approve・admin・auto・force・delete・token 等が
+// 入った読み取りと通常の書き込み。rules / permissions のどれにも掛からないこと（掛かると導入先の通常作業を止める）。
+const USER_STRING_COMMANDS = [
+  'gh api repos/acme/merge-tool/issues/7',
+  'gh api repos/acme/MergeTool/issues/7',
+  'gh api repos/acme/merges-app/pulls/3/files',
+  'gh api --paginate repos/acme/enqueue-queue/pulls',
+  'gh api repos/review-org/approve-app/pulls/3/files',
+  'gh api repos/review-org/approve-app/pulls/3/reviews',
+  'gh api repos/acme/graphql-js/issues -F body=@note.md',
+  'gh api repos/acme/auth-token-service/issues/1',
+  'gh api repos/acme/mergeBranch-demo/branches/main',
+  'gh pr view 5 -R admin/auto-merge',
+  'gh pr view 5 --json mergeCommit,autoMergeRequest',
+  'gh pr create --title "fix: merge の扱い" --body "approve と --approve の説明。auto-merge と force push の注意"',
+  'gh pr create --base release/auto-merge --head feat/delete-branch',
+  'gh issue create --title "docs: pr merge の手順" --body "gh pr review の -a は使わない"',
+  'gh pr review 5 --comment --body "use -abc and merge notes"',
+  'gh pr comment 5 --body "reviews / approve / admin の話"',
+  'git push origin feat/merge-queue',
+  'git push -u origin feat/admin-token',
+  'git push origin feat/force-update:feat/force-update',
+  'git fetch origin release/force-update',
+  'git checkout -b feat/no-verify-docs',
+  'git commit -m "fix: credential の扱いと hosts.yml の説明"',
+  'git add ansible/hosts.yml docs/auth-token.md .codex/author-notes.md',
+  'cat ansible/hosts.yml',
+  'cat docs/config/ghost/readme.md',
+  'git log --oneline -- skills/merge-tool',
+  'git diff origin/main -- src/review/approve.ts',
+]
+
+test('guard: 利用者が決める名前にキーワード（merge・review・approve・admin・auto・force・token 等）を含む読み取り・通常操作は、Codex rules にも OpenCode permissions / policies にも掛からない', () => {
+  for (const opts of [{}, { allowMerge: true }]) {
+    const rules = opencodeRules(opts)
+    const globs = opencodePatterns(opts).map(globToRegExp)
+    const argvs = activeForms(opts).flatMap((f) => f.prefixes.flatMap(expandPrefix)).map((a) => a.join(' '))
+    for (const cmd of USER_STRING_COMMANDS) {
+      assert.ok(!globs.some((re) => re.test(cmd)), `OpenCode の glob に掛かる: ${cmd}`)
+      assert.ok(!rules.permissions.some((p) => globToRegExp(p.resource).test(cmd)), `permissions に掛かる: ${cmd}`)
+      assert.ok(!rules.policies.some((p) => globToRegExp(p.resource.replace(/^shell:/, '')).test(cmd)), `policies に掛かる: ${cmd}`)
+      assert.ok(!argvs.some((a) => cmd === a || cmd.startsWith(`${a} `)), `Codex の prefix_rule に掛かる: ${cmd}`)
+    }
+  }
+})
+
+test('guard: 一覧の glob は広い部分一致（`gh api *…`・`gh * …` 型の前置き・`*hosts.yml*`・`*.config/gh*`・`*.codex/auth*`）を含まない', () => {
+  const broad = new Set(['*hosts.yml*', '*.config/gh*', '*.codex/auth*', 'gh api *merge*', 'gh api *Merge*'])
+  for (const g of opencodePatterns()) {
+    assert.ok(!broad.has(g), g)
+    assert.ok(!/^gh api \*/.test(g), `gh api の直後が * の広い形: ${g}`)
+    assert.ok(!/^(gh|git) \* /.test(g), `直後の語が - 始まりでない前置きの形: ${g}`)
+  }
+})
+
+// agent-guard.sh に任せた形（rules / permissions からは外した）。rules には出ないが、ガードは subagent で deny する。
+const GUARD_ONLY_DENY = [
+  'gh api -X PUT repos/acme/merge-tool/pulls/1/merge',
+  'gh api --method PUT repos/o/r/pulls/1/merge',
+  'gh api -XPUT repos/o/r/pulls/1/merge',
+  'gh api repos/o/r/pulls/1/merge -f merge_method=squash',
+  'gh api -X POST repos/o/r/merges -f base=main -f head=x',
+  'gh api repos/o/r/pulls/1/reviews -f event=APPROVE',
+  'gh api -X POST repos/o/r/pulls/1/reviews -f event=APPROVE',
+  "gh api graphql -f query='mutation { addPullRequestReview(input: {event: APPROVE}) { clientMutationId } }'",
+]
+
+test('guard: rules から外した REST の形は rules に出ず、agent-guard.sh（subagent=true）が deny する', async () => {
+  const all = opencodePatterns().map(globToRegExp)
+  const results = await Promise.all(GUARD_ONLY_DENY.map(async (cmd) => [cmd, await codexHook(cmd)]))
+  for (const [cmd, r] of results) {
+    if (/graphql/.test(cmd)) continue
+    assert.ok(!all.some((re) => re.test(cmd)), `rules に掛かる（外したはず）: ${cmd}`)
+    assert.equal(r.decision, 'deny', `ガードが止めない: ${cmd}`)
+  }
+  const graphql = results.filter(([cmd]) => /graphql/.test(cmd))
+  for (const [cmd, r] of graphql) assert.equal(r.decision, 'deny', cmd)
+})
+
+test('guard: agent-guard.sh が止めない認証ファイルの読み取りと GraphQL の enqueuePullRequest は、rules / permissions が止める', () => {
+  const globs = opencodePatterns().map(globToRegExp)
+  for (const cmd of [...GUARD_GAPS['auth-file'], ...GUARD_GAPS['api-merge']]) assert.ok(globs.some((re) => re.test(cmd)), cmd)
+})
+
+test('guard: スレッドへの返信 mutation（addPullRequestReviewThreadReply）と resolveReviewThread は rules に掛からず、レビュー本体の mutation は掛かる', () => {
+  const globs = opencodePatterns().map(globToRegExp)
+  const reply = "gh api graphql -f query='mutation { addPullRequestReviewThreadReply(input:{}) { clientMutationId } }'"
+  const resolve = "gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:\"x\"}) { clientMutationId } }'"
+  const add = "gh api graphql -f query='mutation { addPullRequestReview(input:{}) { clientMutationId } }'"
+  const addSp = "gh api graphql -f query='mutation { addPullRequestReview (input:{}) { clientMutationId } }'"
+  assert.ok(!globs.some((re) => re.test(reply)))
+  assert.ok(!globs.some((re) => re.test(resolve)))
+  assert.ok(globs.some((re) => re.test(add)))
+  assert.ok(globs.some((re) => re.test(addSp)))
+})
+
 test('guard: opencodeRules は permissions と policies を同じパターンで作る', () => {
   const rules = opencodeRules()
   assert.equal(rules.permissions.length, rules.policies.length)
@@ -184,12 +280,12 @@ test('guard: opencodeRules は permissions と policies を同じパターンで
 test('guard: allowMerge では gh pr merge の素の形だけを外し、--admin・--auto・承認・REST/GraphQL のマージ・認証は残す', () => {
   const deny = opencodePatterns()
   const merge = opencodePatterns({ allowMerge: true })
-  assert.ok(deny.includes('gh pr merge*') && deny.includes('gh * pr merge*'))
-  assert.ok(!merge.includes('gh pr merge*') && !merge.includes('gh * pr merge*'))
-  for (const keep of ['gh pr merge*--admin*', 'gh pr merge*--auto*', 'gh * pr merge*--admin*', 'gh pr review*--approve*', 'gh api *merge*', 'gh api *enqueuePullRequest*', 'gh auth token*', 'git push --force*', 'gh alias set*']) {
+  assert.ok(deny.includes('gh pr merge*') && deny.includes('gh -* pr merge*'))
+  assert.ok(!merge.includes('gh pr merge*') && !merge.includes('gh -* pr merge*'))
+  for (const keep of ['gh pr merge*--admin*', 'gh pr merge*--auto*', 'gh -* pr merge*--admin*', 'gh pr review*--approve*', 'gh api*mergePullRequest(*', 'gh api*enqueuePullRequest(*', 'gh auth token*', 'git push --force*', 'gh alias set*']) {
     assert.ok(merge.includes(keep), keep)
   }
-  assert.deepEqual(deny.filter((p) => !merge.includes(p)), ['gh pr merge*', 'gh * pr merge*'])
+  assert.deepEqual(deny.filter((p) => !merge.includes(p)), ['gh pr merge*', 'gh -* pr merge*'])
 })
 
 test('guard: Codex rules と OpenCode permissions は同じ一覧から作られ、prefixes の全組み合わせが両方にあり、allowMerge の外し方も同じ', () => {
