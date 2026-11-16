@@ -8,11 +8,17 @@
 //   [[LIMIT]]  execution.failed（error.message = rate limit exceeded）
 //   [[NOSSE]]  完了するが SSE の終端イベントを出さない（突き合わせでしか検知できない）
 //   [[DIE]]    serve プロセスが異常終了する
+//   [[SHELL:n]]  n 回の shell 呼び出しを、その location に読み込んだ plugin の tool.execute.before に通してから記録する
+//               （throw されたら status=error、通れば completed の tool part を assistant のメッセージに入れる）
+//   [[SHELL_UNHOOKED:n]]  n 回の shell 呼び出しを、plugin を通さずに completed として記録する（ガードの欠落の再現）
 //   上記なし   assistant が `reply-<n>:<prompt の先頭>` と返して execution.succeeded
 //
 // 記録: 環境変数 FAKE_OC_LOG のファイルへ 1 行 1 JSON で追記する（start・http・delete）。
-// FAKE_OC_NOPLUGIN=1 で config の plugin を読み込まない（目印ファイルが書かれない）。
-// 読み込むときは実の plugin（runner/adapters/opencode-plugin）を import して setup を呼び、目印を書かせる。
+// FAKE_OC_NOPLUGIN=1 で config の plugin を読み込まない（目印ファイルが書かれない）。FAKE_OC_NOPLUGIN_AT=<文字列> は、
+// その文字列を含む location でだけ読み込まない。
+// plugin は実機と同じく location ごとに、その location への最初の GET /api/agent（location 省略時は serve の cwd）か prompt で
+// 読み込む（実の plugin を import して ctx.location つきで setup を呼び、目印を書かせる。session.create では読み込まない）。
+// メッセージ一覧は cursor でページを送れる（cursor.next は末尾でも返る。実機と同じ）。
 // FAKE_OC_FOREIGN=<id> を渡すと、アダプタが作っていない既存セッションを 1 つ持つ（削除されないことの確認用）。
 import { appendFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -30,12 +36,24 @@ const LOG = process.env.FAKE_OC_LOG
 const PASSWORD = process.env.OPENCODE_PASSWORD
 const rec = (o) => { if (LOG) appendFileSync(LOG, `${JSON.stringify(o)}\n`) }
 
-rec({ ev: 'start', pid: process.pid, port, hasPassword: Boolean(PASSWORD), config: process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : null, cwd: process.cwd() })
+rec({ ev: 'start', pid: process.pid, port, hasPassword: Boolean(PASSWORD), config: process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : null, cwd: process.cwd(), ghRepo: process.env.GH_REPO ?? null })
 
 const pluginEntry = process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT).plugins?.[0] : null
-if (pluginEntry && !process.env.FAKE_OC_NOPLUGIN) {
-  const mod = await import(pathToFileURL(join(pluginEntry.package, 'index.js')).href)
-  await mod.default.setup({ options: pluginEntry.options, permission: { hook: async () => {} } })
+const instances = new Map() // location directory -> { before: fn[] }
+async function ensurePlugin(directory) {
+  if (instances.has(directory)) return instances.get(directory)
+  const inst = { before: [] }
+  instances.set(directory, inst)
+  if (!pluginEntry || process.env.FAKE_OC_NOPLUGIN) return inst
+  if (process.env.FAKE_OC_NOPLUGIN_AT && directory.includes(process.env.FAKE_OC_NOPLUGIN_AT)) return inst
+  const mod = await import(`${pathToFileURL(join(pluginEntry.package, 'index.js')).href}?loc=${encodeURIComponent(directory)}`)
+  await mod.default.setup({
+    options: pluginEntry.options,
+    location: { directory },
+    permission: { hook: async () => {} },
+    tool: { hook: async (name, fn) => { if (name === 'execute.before') inst.before.push(fn) } },
+  })
+  return inst
 }
 
 const sessions = new Map() // id -> { id, parentID, title, location, messages, active, seq, timer }
@@ -56,7 +74,20 @@ function finish(s, outcome, { sse = true, message = '' } = {}) {
   else emit('session.execution.failed', { sessionID: s.id, error: { type: 'provider', message } })
 }
 
-function startExecution(s, text) {
+async function shellCalls(s, n, hooked) {
+  const inst = hooked ? await ensurePlugin(s.location?.directory ?? process.cwd()) : { before: [] }
+  const msgId = mid()
+  const parts = []
+  for (let i = 0; i < n; i++) {
+    const ev = { tool: 'shell', sessionID: s.id, agent: 'build', messageID: msgId, id: `call_${msgId}_${i}`, input: { command: `echo fake-${i}` } }
+    let status = 'completed'
+    for (const f of inst.before) { try { await f(ev) } catch { status = 'error' } }
+    parts.push({ type: 'tool', id: ev.id, name: 'shell', executed: false, state: { status, input: ev.input } })
+  }
+  s.messages.push({ id: msgId, type: 'assistant', content: parts })
+}
+
+async function startExecution(s, text) {
   s.active = true
   s.messages.push({ id: mid(), type: 'user', content: [{ type: 'text', text }] })
   emit('session.execution.started', { sessionID: s.id })
@@ -67,6 +98,11 @@ function startExecution(s, text) {
     emit('permission.asked', s.pendingAsk)
     return
   }
+  await ensurePlugin(s.location?.directory ?? process.cwd())
+  const sh = /\[\[SHELL:(\d+)\]\]/.exec(text)
+  if (sh) await shellCalls(s, Number(sh[1]), true)
+  const un = /\[\[SHELL_UNHOOKED:(\d+)\]\]/.exec(text)
+  if (un) await shellCalls(s, Number(un[1]), false)
   s.timer = setTimeout(() => {
     if (text.includes('[[FAIL]]')) return finish(s, 'failed', { message: 'boom' })
     if (text.includes('[[LIMIT]]')) return finish(s, 'failed', { message: 'rate limit exceeded' })
@@ -76,12 +112,12 @@ function startExecution(s, text) {
   }, 30)
 }
 
-const server = createServer((req, res) => {
+const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
   const authed = req.headers.authorization === `Basic ${Buffer.from(`opencode:${PASSWORD}`).toString('base64')}`
   let raw = ''
   req.on('data', (c) => { raw += c })
-  req.on('end', () => {
+  req.on('end', async () => {
     let body = null
     try { body = raw ? JSON.parse(raw) : null } catch { /* 本文なし */ }
     rec({ ev: 'http', method: req.method, path: url.pathname, body, authed, port })
@@ -89,7 +125,10 @@ const server = createServer((req, res) => {
     if (!authed) return send(401, { error: 'unauthorized' })
     const p = url.pathname
     if (p === '/api/info') return send(200, { data: { version: '2.2.7' } })
-    if (p === '/api/agent') return send(200, { data: [] })
+    if (p === '/api/agent') {
+      await ensurePlugin(url.searchParams.get('location[directory]') ?? process.cwd())
+      return send(200, { data: [] })
+    }
     if (p === '/api/event') {
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       res.write(`data: ${JSON.stringify({ type: 'server.connected', data: {} })}\n\n`)
@@ -116,7 +155,7 @@ const server = createServer((req, res) => {
     }
     if (!s) return send(404, { error: 'not found' })
     if (req.method === 'GET' && sub === '') return send(200, { data: { id: s.id, parentID: s.parentID ?? undefined, tokens: { input: 10, output: 2, reasoning: 0, cache: { read: 5, write: 0 } } } })
-    if (req.method === 'POST' && sub === 'prompt') { startExecution(s, body.text); return send(200, { data: { ok: true } }) }
+    if (req.method === 'POST' && sub === 'prompt') { await startExecution(s, body.text); return send(200, { data: { ok: true } }) }
     if (req.method === 'POST' && sub === 'interrupt') {
       const was = s.active
       clearTimeout(s.timer)
@@ -127,8 +166,13 @@ const server = createServer((req, res) => {
     if (req.method === 'GET' && sub === 'form') return send(200, { data: [] })
     if (req.method === 'GET' && sub === 'message') {
       let list = s.messages.filter((x) => !url.searchParams.get('type') || x.type === url.searchParams.get('type'))
-      if (url.searchParams.get('order') === 'desc') list = [...list].reverse()
-      return send(200, { data: list.slice(0, Number(url.searchParams.get('limit') ?? 50)) })
+      const cur = url.searchParams.get('cursor')
+      const { order, at } = cur ? JSON.parse(Buffer.from(cur, 'base64url').toString()) : { order: url.searchParams.get('order') ?? 'asc', at: 0 }
+      if (order === 'desc') list = [...list].reverse()
+      const limit = Number(url.searchParams.get('limit') ?? 50)
+      const data = list.slice(at, at + limit)
+      const next = Buffer.from(JSON.stringify({ order, at: at + data.length })).toString('base64url')
+      return send(200, { data, cursor: { previous: null, next } })
     }
     return send(404, { error: 'not found' })
   })

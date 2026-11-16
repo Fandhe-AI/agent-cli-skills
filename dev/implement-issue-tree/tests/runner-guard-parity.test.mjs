@@ -90,7 +90,12 @@ async function viaPlugin(guardBody, command, { merge = false, bind = null, times
   })
   if (bind !== null) {
     assert.equal(typeof h['tool.execute.before'], 'function', 'allowMerge の serve は tool.execute.before を登録する')
-    await h['tool.execute.before']({ tool: 'shell', ...CALL, agent: 'build', input: { command: bind } })
+    // 完全一致しない全文は tool.execute.before がガードに回し、拒否なら throw する（その呼び出しは permission まで進まない）
+    try {
+      await h['tool.execute.before']({ tool: 'shell', ...CALL, agent: 'build', input: { command: bind } })
+    } catch (err) {
+      return { deny: true, message: err.message, codes: codes(log) }
+    }
   }
   let e = null
   for (let i = 0; i < times; i++) {

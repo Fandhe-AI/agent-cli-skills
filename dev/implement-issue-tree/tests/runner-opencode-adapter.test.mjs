@@ -12,9 +12,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { SKILL_DIR } from './lib/paths.mjs'
-import { MERGE_RES, createAdapter } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
+import { MERGE_RES, createAdapter, credentialReadRules, opencodeConfigDirs, protectRules } from '../../../skills/implement-issue-tree/runner/adapters/opencode.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
-import { MERGE_EXEC_COMMAND, codexRules, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
+import { MERGE_EXEC_COMMAND, codexRules, mergeExecCommandFor, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 
 const PLUGIN_DIR = join(SKILL_DIR, 'runner', 'adapters', 'opencode-plugin')
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'lib', 'fake-opencode-server.mjs')
@@ -32,7 +32,7 @@ function setup(extra = {}) {
     runDir,
     toolConfig: { command: [process.execPath, FAKE], pollMs: 20, startTimeoutMs: 10000, deleteSessions: true, ...extra.toolConfig },
     guard: { codexRules, opencodeRules },
-    env: { ...process.env, FAKE_OC_LOG: log, ...extra.env },
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GH_REPO')), FAKE_OC_LOG: log, ...extra.env },
   })
   let n = 0
   const req = (over = {}) => {
@@ -66,12 +66,14 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.deepEqual(o.mergeRes, [], '通常用は merge の素通しを持たない')
     assert.ok(existsSync(o.guardScript) && /agent-guard\.sh$/.test(o.guardScript))
     assert.match(o.nonce, /^[0-9a-f]{32}$/)
-    assert.equal(readFileSync(o.markerPath, 'utf8'), o.nonce, 'plugin が目印を書いた')
+    const marks = readFileSync(o.markerPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    assert.deepEqual(marks, [{ nonce: o.nonce, directory: t.mainRoot }], 'plugin が mainRoot の location で目印を書いた')
+    assert.equal(o.callLog, join(dirname(o.markerPath), 'opencode-calls-normal.log'))
 
     await t.adapter.run(t.req())
     assert.equal(starts(t.records()).length, 1, 'allowMerge でない run では merge 用 serve を起動しない')
 
-    await t.adapter.run(t.req({ allowMerge: true }))
+    await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 7, repo: 'octo/repo' } }))
     recs = starts(t.records())
     assert.equal(recs.length, 2)
     const [normal, merge] = recs
@@ -81,10 +83,41 @@ test('設定: allow-all が無く、deny と plugin が入る。allowMerge の r
     assert.ok(merge.config.permissions.some((r) => /gh pr review\*--approve/.test(r.resource)), '承認の deny は残る')
     assert.ok(merge.config.permissions.some((r) => r.resource.includes('--admin')), '--admin の deny は残る')
     assert.equal(JSON.stringify(merge.config).includes('"effect":"allow"'), false)
-    assert.deepEqual(merge.config.plugins[0].options.mergeRes, MERGE_RES, 'merge 用だけ MERGE_EXEC_COMMAND を素通しにする')
+    assert.deepEqual(merge.config.plugins[0].options.mergeRes, [mergeExecCommandFor(7).source], 'merge 用だけ、その PR 番号で具体化した merge-exec を素通しにする')
     assert.deepEqual(MERGE_RES, [MERGE_EXEC_COMMAND.source], '完全一致の 1 形だけ（Codex の --merge-re と同じ）')
     assert.notEqual(merge.config.plugins[0].options.nonce, o.nonce, 'serve ごとに別の nonce')
   } finally { await t.adapter.close() }
+})
+
+test('保護: ガード本体・plugin の置き場・OpenCode の設定ディレクトリ・.opencode/(hooks|plugins?)/・opencode.json(c) への edit を permissions と policies で拒否する', async () => {
+  const home = join(tmpdir(), 'iit-oc-home-x')
+  const t = setup({ env: { HOME: home, XDG_CONFIG_HOME: '' } })
+  await t.adapter.start()
+  try {
+    const { config: cfg } = starts(t.records())[0]
+    const o = cfg.plugins[0].options
+    const editDeny = cfg.permissions.filter((r) => r.action === 'edit' && r.effect === 'deny').map((r) => r.resource)
+    const editPolicy = cfg.policies.filter((r) => r.action === 'tool.use' && r.resource.startsWith('edit:') && r.effect === 'deny').map((r) => r.resource.slice(5))
+    const cfgDir = join(home, '.config', 'opencode')
+    for (const want of [o.guardScript, cfg.plugins[0].package, `${realpathSync(cfg.plugins[0].package)}/*`, cfgDir, `${cfgDir}/*`, '*.opencode/plugins/*', '*.opencode/plugin/*', '*.opencode/hooks/*', '*opencode.jsonc', '*opencode.json']) {
+      assert.ok(editDeny.includes(want), `permissions: ${want}`)
+      assert.ok(editPolicy.includes(want), `policies: ${want}`)
+    }
+    assert.deepEqual(o.protectedPaths, [cfgDir], 'plugin にも設定ディレクトリを渡す')
+    // 既存の shell の deny（opencodeRules）は残り、edit の deny はその後ろ（後勝ち）に置く
+    const firstEdit = cfg.permissions.findIndex((r) => r.action === 'edit')
+    assert.ok(firstEdit > cfg.permissions.findIndex((r) => r.resource === 'gh pr merge*'))
+  } finally { await t.adapter.close() }
+})
+
+test('protectRules と opencodeConfigDirs: XDG_CONFIG_HOME・OPENCODE_CONFIG_DIR を反映し、ファイルは完全一致・ディレクトリは配下も拒否する', () => {
+  assert.deepEqual(opencodeConfigDirs({ HOME: '/h', XDG_CONFIG_HOME: '/x' }), ['/x/opencode'])
+  assert.deepEqual(opencodeConfigDirs({ HOME: '/h', OPENCODE_CONFIG_DIR: '/c' }), ['/h/.config/opencode', '/c'])
+  const r = protectRules({ files: ['/nonexistent-iit/g.sh'], dirs: ['/nonexistent-iit/p'] })
+  const res = r.permissions.map((x) => x.resource)
+  assert.ok(res.includes('/nonexistent-iit/g.sh') && !res.includes('/nonexistent-iit/g.sh/*'))
+  assert.ok(res.includes('/nonexistent-iit/p') && res.includes('/nonexistent-iit/p/*'))
+  assert.equal(r.policies.length, r.permissions.length)
 })
 
 test('セッション: 親セッションは作らない。model は Ref になり、model が null なら model も variant も送らずログに残す', async () => {
@@ -92,7 +125,7 @@ test('セッション: 親セッションは作らない。model は Ref にな�
   await t.adapter.start()
   try {
     await t.adapter.run(t.req({ model: 'prov/some/model-x', effort: 'low' }))
-    const r2 = t.req({ allowMerge: true, model: null, effort: 'low' })
+    const r2 = t.req({ allowMerge: true, merge: { prNumber: 3, repo: 'octo/repo' }, model: null, effort: 'low' })
     await t.adapter.run(r2)
     const posts = t.records().filter((r) => r.ev === 'http' && r.method === 'POST' && r.path === '/api/session')
     const child = posts.find((r) => r.body.title === 't1')
@@ -231,4 +264,101 @@ test('deleteSessions が false なら削除しない', async () => {
   await t.adapter.run(t.req())
   await t.adapter.close()
   assert.equal(t.records().some((r) => r.ev === 'delete'), false)
+})
+
+// MEDIUM-7（監査 e670648）: plugin は location ごとに読み込まれ（v2.2.7 の実測: その location への最初の GET /api/agent か
+// prompt で setup が走り、session.create では走らない）、start の確認は serve の cwd の 1 か所だけだった。
+test('目印: session.create の後でその location の目印を確かめ、無ければ走らせない', async () => {
+  const t = setup({ env: { FAKE_OC_NOPLUGIN_AT: 'wt-noplugin' } })
+  await t.adapter.start()
+  try {
+    const ok = join(t.root, 'wt-ok')
+    mkdirSync(ok)
+    const out = await t.adapter.run(t.req({ cwd: ok }))
+    assert.match(out.text, /^reply-1:/)
+    const bad = join(t.root, 'wt-noplugin')
+    mkdirSync(bad)
+    const e = await kindOf(t.adapter.run(t.req({ cwd: bad, prompt: 'must not run' })))
+    assert.equal(e.kind, 'prereq')
+    assert.match(e.message, /plugin/)
+    assert.equal(t.records().some((r) => r.ev === 'http' && r.path.endsWith('/prompt') && r.body?.text === 'must not run'), false, 'prompt を送らない')
+  } finally { await t.adapter.close() }
+})
+
+test('件数照合: plugin を通っていない shell の実行があれば denied（ガードの欠落）。通っていれば成功', async () => {
+  const t = setup()
+  await t.adapter.start()
+  try {
+    const out = await t.adapter.run(t.req({ prompt: '[[SHELL:3]] ok' }))
+    assert.match(out.text, /^reply-1:/)
+    const r = t.req({ prompt: '[[SHELL:1]] [[SHELL_UNHOOKED:1]] x' })
+    const e = await kindOf(t.adapter.run(r))
+    assert.equal(e.kind, 'denied')
+    assert.match(e.message, /ガードの欠落/)
+    assert.match(readFileSync(join(r.logDir, 'error.txt'), 'utf8'), /^denied:/)
+  } finally { await t.adapter.close() }
+})
+
+// MEDIUM-8（監査 e670648）: merge-exec の許可を PR 番号とリポジトリに縛る。req.merge は契約の形
+// （null | { prNumber, repo }。allowMerge が true のときだけ入る）を agent-host が渡す前提で、ここでは req に直接入れる。
+test('merge 用 serve: 照合を mergeExecCommandFor(prNumber) に絞り、env の GH_REPO を repo に固定する。PR ごとに別の serve', async () => {
+  const t = setup({ env: { GH_REPO: 'evil/other' } })
+  await t.adapter.start()
+  try {
+    await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 12, repo: 'octo/repo' } }))
+    await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 12, repo: 'octo/repo' } }))
+    await t.adapter.run(t.req({ allowMerge: true, merge: { prNumber: 13, repo: 'octo/repo' } }))
+    const [normal, m12, m13, ...rest] = starts(t.records())
+    assert.equal(rest.length, 0, '同じ PR は同じ serve を使う')
+    assert.deepEqual(m12.config.plugins[0].options.mergeRes, [mergeExecCommandFor(12).source])
+    assert.deepEqual(m13.config.plugins[0].options.mergeRes, [mergeExecCommandFor(13).source])
+    const re = new RegExp(m12.config.plugins[0].options.mergeRes[0])
+    const cmd = (n) => `HEAD_SHA="${'a'.repeat(40)}"; gh pr merge ${n} --squash --delete-branch --match-head-commit "$HEAD_SHA"`
+    assert.ok(re.test(cmd(12)))
+    assert.ok(!re.test(cmd(13)) && !re.test(cmd(1)) && !re.test(cmd(120)), '別の PR 番号は通さない')
+    assert.equal(m12.ghRepo, 'octo/repo', '利用者の環境の GH_REPO より req.merge.repo を優先して固定する')
+    assert.equal(m13.ghRepo, 'octo/repo')
+    assert.equal(normal.ghRepo, 'evil/other', '通常用の serve の env は変えない')
+    assert.notEqual(m12.config.plugins[0].options.markerPath, m13.config.plugins[0].options.markerPath, 'ファイルは serve ごとに分ける')
+  } finally { await t.adapter.close() }
+})
+
+test('merge 用 serve: req.merge が null・不正なら allowMerge として扱わず、merge 用 serve を作らない（通常用で走らせる）', async () => {
+  const t = setup()
+  await t.adapter.start()
+  try {
+    for (const merge of [undefined, null, { prNumber: 0, repo: 'o/r' }, { prNumber: 1.5, repo: 'o/r' }, { prNumber: '7', repo: 'o/r' }, { prNumber: 7, repo: 'bad' }, { prNumber: 7, repo: 'o/r;x' }, { prNumber: 7 }]) {
+      const out = await t.adapter.run(t.req({ allowMerge: true, ...(merge === undefined ? {} : { merge }) }))
+      assert.match(out.text, /^reply-/)
+    }
+    assert.equal(starts(t.records()).length, 1, '通常用の serve だけ')
+  } finally { await t.adapter.close() }
+})
+
+// LOW-9（監査 e670648）: read tool で認証ファイルを読めないようにする（中身は読まない。パスだけを決める）
+test('認証ファイル: gh の設定・Codex の auth.json・OpenCode の認証（auth.json・opencode.db）への read を permissions と policies で拒否する', async () => {
+  const home = join(tmpdir(), 'iit-oc-home-y')
+  const t = setup({ env: { HOME: home, XDG_CONFIG_HOME: '', XDG_DATA_HOME: '', GH_CONFIG_DIR: '', CODEX_HOME: '', OPENCODE_DB: '/nonexistent-iit/custom.db' } })
+  await t.adapter.start()
+  try {
+    const { config: cfg } = starts(t.records())[0]
+    const readDeny = cfg.permissions.filter((r) => r.action === 'read' && r.effect === 'deny').map((r) => r.resource)
+    const readPolicy = cfg.policies.filter((r) => r.action === 'tool.use' && r.resource.startsWith('read:') && r.effect === 'deny').map((r) => r.resource.slice(5))
+    for (const want of [
+      join(home, '.config', 'gh'), `${join(home, '.config', 'gh')}/*`,
+      join(home, '.codex', 'auth.json'),
+      join(home, '.local', 'share', 'opencode', 'auth.json'),
+      `${join(home, '.local', 'share', 'opencode', 'opencode.db')}*`,
+      '/nonexistent-iit/custom.db*',
+    ]) {
+      assert.ok(readDeny.includes(want), `permissions: ${want}`)
+      assert.ok(readPolicy.includes(want), `policies: ${want}`)
+    }
+  } finally { await t.adapter.close() }
+})
+
+test('credentialReadRules: GH_CONFIG_DIR・XDG_CONFIG_HOME・CODEX_HOME・XDG_DATA_HOME を反映する', () => {
+  const res = credentialReadRules({ HOME: '/h', GH_CONFIG_DIR: '/g', CODEX_HOME: '/c', XDG_DATA_HOME: '/d' }).permissions.map((r) => r.resource)
+  for (const want of ['/g', '/g/*', '/c/auth.json', '/d/opencode/auth.json', '/d/opencode/opencode.db*']) assert.ok(res.includes(want), want)
+  assert.ok(credentialReadRules({ HOME: '/h', XDG_CONFIG_HOME: '/x' }).permissions.some((r) => r.resource === '/x/gh/*'))
 })

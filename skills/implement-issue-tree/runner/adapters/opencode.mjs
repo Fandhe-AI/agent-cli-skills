@@ -4,16 +4,30 @@
 // worktree 作成は agent-host の責務で、ここでは持たない。
 //
 // 設計（実測の根拠は _/local-plans/iit-runners-phase0.md の 0-3・0-6・0-8）:
-//   - serve は自前で空きポートに起動する。通常用と merge-exec 用の 2 つで、merge-exec 用は allowMerge の run が来たときだけ
-//     遅延起動する。設定は環境変数 OPENCODE_CONFIG_CONTENT（インライン JSON）で渡し、ホストの設定ファイルには書かない。
+//   - serve は自前で空きポートに起動する。通常用と merge-exec 用で、merge-exec 用は allowMerge の run が来たときだけ、PR ごとに
+//     遅延起動する（監査 e670648 の MEDIUM-8）。merge 用は、素通しにする形を guard.mergeExecCommandFor(req.merge.prNumber) に
+//     絞り、serve の env に GH_REPO=req.merge.repo を固定する。req.merge が null・不正なら allowMerge として扱わない
+//     （merge 用 serve を作らず通常用で走らせる。fail-closed）。merge 用 serve は close まで残す。設定は環境変数 OPENCODE_CONFIG_CONTENT（インライン JSON）で渡し、ホストの設定ファイルには書かない。
 //   - 設定は permissions / policies（guard.opencodeRules）の deny と、ランナー専用 plugin（opencode-plugin/）の有効化。
 //     allow-all は付けない（session.create で付けると config の permissions が打ち消されるため）。
 //   - 配布物の plugin は親を持たない top-level セッションを main とみなしてマージ系を制限しない。ランナーのセッションは
 //     すべて top-level なので、ランナー専用 plugin が agent-guard.sh を「常に subagent=true」で呼ぶ（Codex の codex-hook.sh と同じ意味）。
-//     allowMerge の serve だけ、MERGE_EXEC_COMMAND の完全一致の 1 形を plugin のオプションで素通しにする（permission に後半だけが
+//     merge 用の serve だけ、その PR 番号の merge-exec の完全一致の 1 形を plugin のオプションで素通しにする（permission に後半だけが
 //     届く版では、plugin が tool.execute.before で全文の一致を確かめた呼び出しにだけ許可を対応づける）。
-//   - plugin の読み込みは start で確かめる。plugin は初期化時に serve ごとの nonce を目印ファイルへ書き、アダプタがそれを読む
-//     （実機で GET /api/plugin は空・/shell は permission を通らず、他に確かめる手段が無い）。確かめられなければ prereq。
+//   - ガードの置き場（agent-guard.sh・ランナー専用 plugin・OpenCode の利用者設定ディレクトリ・`.opencode/(hooks|plugins?)/`・
+//     `opencode.json(c)`）への edit を permissions と policies の両方で拒否する（protectRules。guard.opencodeRules の結果に足す）。
+//     同じパスは plugin の options.protectedPaths にも渡し、plugin が edit と shell からの書き込みを拒否する（plugin 冒頭の「保護」）。
+//   - 認証ファイル（gh の設定ディレクトリ・Codex の auth.json・OpenCode の auth.json と opencode.db）への read を
+//     permissions と policies で拒否する（credentialReadRules。監査 e670648 の LOW-9）。shell からの読み出しは agent-guard.sh の
+//     credential-read が止める。パスは env から決めるだけで、中身は読まない。
+//   - plugin の読み込みは目印で確かめる。plugin は setup のたびに serve ごとの nonce と location を目印ファイルへ 1 行書き、
+//     アダプタがそれを読む（実機で GET /api/plugin は空・/shell は permission を通らず、他に確かめる手段が無い）。plugin は
+//     location ごとに読み込まれる（v2.2.7 の実測: その location への最初の GET /api/agent か prompt で setup が走り、
+//     session.create では走らない）ため、start で mainRoot を、各セッションの作成後にその location（worktree）を
+//     GET /api/agent?location[directory]=… で読み込ませて確かめる。確かめられなければ prompt を送らずに prereq。
+//   - ガードの欠落の検知（監査 e670648 の MEDIUM-7）: plugin は shell の呼び出しごとに sessionID を callLog へ書く。成功で
+//     終わったターンの後、セッションの assistant メッセージをすべて読み、shell の tool part の件数が callLog の件数を上回れば
+//     denied にする（Codex の hook.log と command_execution の突き合わせと同じ。ガードを通っていない実行の出力を後段へ流さない）。
 //   - 完了は SSE（session.execution.*）を主とし、取りこぼしに備えて `/api/session/active` とメッセージ末尾の idle で突き合わせる。
 //   - ask（許可要求・フォーム）は検知したら interrupt して denied にする（reject すると別の形で続けてしまう）。
 //   - 出力は応答テキストだけを返す。JSON の抽出・検証・修復の判断は agent-host。
@@ -25,23 +39,44 @@
 //   guardScript（agent-guard.sh の絶対パス。既定は lib/guard-script.mjs の探索）
 import { spawn, execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
-import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { AdapterError } from '../lib/adapter-error.mjs'
-import { MERGE_EXEC_COMMAND } from '../lib/guard.mjs'
+import { MERGE_EXEC_COMMAND, mergeExecCommandFor } from '../lib/guard.mjs'
 import { GUARD_SCRIPT_MISSING, findGuardScript } from '../lib/guard-script.mjs'
 
 const USAGE_LIMIT_RE = /rate.?limit|quota|usage.?limit|too many requests|\b429\b|insufficient.?(credit|quota|balance)/i
 const PLUGIN_DIR = join(dirname(fileURLToPath(import.meta.url)), 'opencode-plugin')
 
+// 一般形の参照（PR 番号を問わない形）。merge 用 serve が実際に渡すのは mergeTarget の mergeExecCommandFor(prNumber) で、
+// これより狭い。以下は一般形についての説明で、PR 番号で具体化しても同じ。
 // allowMerge の serve で素通しにするのは MERGE_EXEC_COMMAND の完全一致だけ（Codex の codex-hook.sh に渡す --merge-re と
 // 同じ 1 形・同じ意味）。後半だけの形（代入を落とした `gh pr merge … "$HEAD_SHA"`）の正規表現は、代入なしの gh pr merge を
 // 素通しにするため置かない。OpenCode v2.2.7 の permission には後半だけが届く（Phase 3 の実測）ので、plugin は
 // tool.execute.before でこの完全一致を確かめた呼び出しを記録し、同じ呼び出し（source.id 等）の後半だけを通す（plugin 冒頭）。
 export const MERGE_RES = Object.freeze([MERGE_EXEC_COMMAND.source])
+
+const MARKER_WAIT_MS = 5000
+const MESSAGE_PAGE = 100
+const MESSAGE_PAGE_MAX = 1000 // 100 件 × 1000 ページを超えるセッションは数え切れないものとして拒否する
+
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+
+/**
+ * req.merge（契約: null | { prNumber, repo }。allowMerge が true のときだけ入る）を検証する。allowMerge でない・merge が無い・
+ * 不正のときは null（merge 用 serve を使わない）。
+ */
+export function mergeTarget(req) {
+  const m = req?.allowMerge === true ? req.merge : null
+  if (!m || typeof m !== 'object') return null
+  if (!Number.isSafeInteger(m.prNumber) || m.prNumber < 1) return null
+  if (typeof m.repo !== 'string' || !REPO_RE.test(m.repo) || m.repo.split('/').some((x) => x === '.' || x === '..')) return null
+  return { prNumber: m.prNumber, repo: m.repo }
+}
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer()
@@ -63,6 +98,62 @@ export function parseModelRef(model, variant) {
 export function buildConfigContent({ rules, pluginDir, options }) {
   return { permissions: rules.permissions, policies: rules.policies, plugins: [{ package: pluginDir, options }] }
 }
+
+const realOr = (p) => { try { return realpathSync(p) } catch { return resolve(p) } }
+const uniq = (xs) => [...new Set(xs)]
+
+/** OpenCode の利用者設定ディレクトリ（plugins・設定）。XDG_CONFIG_HOME・OPENCODE_CONFIG_DIR を反映する。 */
+export function opencodeConfigDirs(env) {
+  const home = env.HOME || homedir()
+  return uniq([join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode'), ...(env.OPENCODE_CONFIG_DIR ? [resolve(env.OPENCODE_CONFIG_DIR)] : [])])
+}
+
+// 位置を問わない保護の形（配布物の plugin の PROTECTED_EDIT と同じ対象の glob 版。glob の * は / も含む）
+const PROTECTED_EDIT_GLOBS = ['*.opencode/hooks/*', '*.opencode/plugin/*', '*.opencode/plugins/*', '*opencode.json', '*opencode.jsonc']
+
+/**
+ * ガードの置き場への edit の拒否（permissions と policies）。files は完全一致、dirs は完全一致と配下。
+ * パスは書かれたままの形と realpath の両方を入れる（外部のパスは正規化済みの絶対パスで照合される）。
+ * @param {{ files: string[], dirs: string[] }} p
+ */
+export function protectRules({ files, dirs }) {
+  const resources = uniq([
+    ...files.flatMap((f) => [resolve(f), realOr(f)]),
+    ...dirs.flatMap((d) => [resolve(d), realOr(d)]).flatMap((d) => [d, `${d}/*`]),
+    ...PROTECTED_EDIT_GLOBS,
+  ])
+  return {
+    permissions: resources.map((resource) => ({ action: 'edit', resource, effect: 'deny' })),
+    policies: resources.map((resource) => ({ action: 'tool.use', resource: `edit:${resource}`, effect: 'deny' })),
+  }
+}
+
+/**
+ * 認証ファイルへの read の拒否（permissions と policies）。ディレクトリは完全一致と配下、opencode.db は -wal / -shm も含める。
+ * パスは書かれたままの形と realpath の両方（realpath はパスの解決だけで、ファイルの中身は読まない）。
+ * @param {Record<string, string | undefined>} env
+ */
+export function credentialReadRules(env) {
+  const home = env.HOME || homedir()
+  const ghDir = env.GH_CONFIG_DIR || join(env.XDG_CONFIG_HOME || join(home, '.config'), 'gh')
+  const codexAuth = join(env.CODEX_HOME || join(home, '.codex'), 'auth.json')
+  const ocData = join(env.XDG_DATA_HOME || join(home, '.local', 'share'), 'opencode')
+  const both = (p) => uniq([resolve(p), realOr(p)])
+  const resources = uniq([
+    ...both(ghDir).flatMap((d) => [d, `${d}/*`]),
+    ...both(codexAuth),
+    ...both(join(ocData, 'auth.json')),
+    ...both(join(ocData, 'opencode.db')).map((f) => `${f}*`),
+    ...(env.OPENCODE_DB ? both(env.OPENCODE_DB).map((f) => `${f}*`) : []),
+  ])
+  return {
+    permissions: resources.map((resource) => ({ action: 'read', resource, effect: 'deny' })),
+    policies: resources.map((resource) => ({ action: 'tool.use', resource: `read:${resource}`, effect: 'deny' })),
+  }
+}
+
+/** permissions / policies を連結する（後勝ちのため、足す側を後ろに置く）。 */
+const mergeRules = (...rs) => ({ permissions: rs.flatMap((r) => r.permissions), policies: rs.flatMap((r) => r.policies) })
 
 /** 応答メッセージ（assistant）の text 部分をつなぐ。 */
 const messageText = (msg) => (Array.isArray(msg?.content) ? msg.content.filter((p) => p?.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('') : '')
@@ -88,10 +179,12 @@ export function createAdapter(cfg) {
     if (!guardScript) throw new AdapterError('prereq', GUARD_SCRIPT_MISSING)
   }
 
-  async function startServe(kind) {
+  /** kind は 'normal' か `merge-<prNumber>`。merge は merge 用のときの { prNumber, repo }。 */
+  async function startServe(kind, merge) {
     ensureGuardScript()
-    const allowMerge = kind === 'merge'
-    const rules = cfg.guard.opencodeRules({ allowMerge })
+    const allowMerge = merge !== null
+    const configDirs = opencodeConfigDirs(baseEnv)
+    const rules = mergeRules(cfg.guard.opencodeRules({ allowMerge }), protectRules({ files: [guardScript], dirs: [PLUGIN_DIR, ...configDirs] }), credentialReadRules(baseEnv))
     const port = await freePort()
     const password = randomBytes(16).toString('hex')
     mkdirSync(cfg.runDir, { recursive: true })
@@ -99,12 +192,13 @@ export function createAdapter(cfg) {
     const errFd = openSync(join(cfg.runDir, `opencode-serve-${kind}.err`), 'a')
     const nonce = randomBytes(16).toString('hex')
     const markerPath = join(cfg.runDir, `opencode-plugin-${kind}.marker`)
-    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? MERGE_RES : [], markerPath, nonce }
-    const env = { ...baseEnv, OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildConfigContent({ rules, pluginDir: PLUGIN_DIR, options })) }
+    const callLog = join(cfg.runDir, `opencode-calls-${kind}.log`)
+    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? [mergeExecCommandFor(merge.prNumber).source] : [], markerPath, nonce, protectedPaths: configDirs.map((d) => resolve(d)), callLog }
+    const env = { ...baseEnv, ...(allowMerge ? { GH_REPO: merge.repo } : {}), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildConfigContent({ rules, pluginDir: PLUGIN_DIR, options })) }
     const child = spawn(command[0], [...command.slice(1), 'serve', '--hostname', '127.0.0.1', '--port', String(port)], { cwd: cfg.mainRoot, env, stdio: ['ignore', outFd, errFd], detached: true })
     closeSync(outFd)
     closeSync(errFd)
-    const serve = { kind, allowMerge, child, base: `http://127.0.0.1:${port}`, exited: false, exitInfo: null, subs: new Set(), sseCtrl: null, spawnError: null }
+    const serve = { kind, allowMerge, repo: merge?.repo ?? null, nonce, markerPath, callLog, locations: new Set(), child, base: `http://127.0.0.1:${port}`, exited: false, exitInfo: null, subs: new Set(), sseCtrl: null, spawnError: null }
     serve.auth = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`
     child.on('error', (e) => { serve.spawnError = e })
     child.on('exit', (code, signal) => { serve.exited = true; serve.exitInfo = `code=${code} signal=${signal}` })
@@ -134,18 +228,57 @@ export function createAdapter(cfg) {
       stopServe(serve)
       throw new AdapterError('prereq', `opencode serve が起動しない（${serve.spawnError?.message ?? serve.exitInfo ?? '時間切れ'}）`)
     }
-    // plugin の読み込みの確認。plugin は場所（ディレクトリ）ごとの実行環境が最初に作られるときに読み込まれ、serve の起動直後ではない
-    // （実機: 設定済みでも、その場所へ API が来るまで setup が呼ばれない）。参照だけの GET /api/agent で実行環境を作らせて促す。
-    const loaded = () => { try { return readFileSync(markerPath, 'utf8') === nonce } catch { return false } }
-    await serve.api('/api/agent').catch(() => null)
-    const end = Date.now() + 5000
-    while (!loaded() && Date.now() < end && !serve.exited) await sleep(50)
-    if (!loaded()) {
+    // plugin の読み込みの確認（冒頭）。serve の cwd（mainRoot）の location で確かめる
+    if (!(await ensureLocation(serve, cfg.mainRoot))) {
       stopServe(serve)
       throw new AdapterError('prereq', 'ランナー専用の plugin が読み込まれたことを確かめられない（目印ファイルが無い）。ガード無しでは走らせない')
     }
     await startSse(serve)
     return serve
+  }
+
+  /** 目印に、この serve の nonce と location（realpath で比較）の組があるか。 */
+  function markerHas(serve, want) {
+    let lines
+    try { lines = readFileSync(serve.markerPath, 'utf8').split('\n') } catch { return false }
+    return lines.some((l) => {
+      try {
+        const m = JSON.parse(l)
+        return m?.nonce === serve.nonce && typeof m.directory === 'string' && realOr(m.directory) === want
+      } catch { return false }
+    })
+  }
+
+  /** location に plugin を読み込ませ、目印で確かめる（参照だけの GET /api/agent で、その location の実行環境を作らせる）。 */
+  async function ensureLocation(serve, directory) {
+    const want = realOr(directory)
+    if (serve.locations.has(want)) return true
+    await serve.api(`/api/agent?${new URLSearchParams({ 'location[directory]': directory })}`).catch(() => null)
+    const end = Date.now() + MARKER_WAIT_MS // setup はその応答の後に走ることがある（実測）ので、目印を待つ
+    while (!markerHas(serve, want) && Date.now() < end && !serve.exited) await sleep(50)
+    if (!markerHas(serve, want)) return false
+    serve.locations.add(want)
+    return true
+  }
+
+  /** セッションの assistant メッセージ中の shell の tool part の件数（cursor でページを送る）。 */
+  async function shellCount(serve, sid) {
+    let n = 0
+    let q = `type=assistant&order=asc&limit=${MESSAGE_PAGE}`
+    for (let page = 0; page < MESSAGE_PAGE_MAX; page++) {
+      const r = await serve.api(`/api/session/${sid}/message?${q}`)
+      if (r.status !== 200 || !Array.isArray(r.json?.data)) throw new AdapterError('api', `件数の突き合わせでメッセージ取得が HTTP ${r.status}`, { sessionRef: sid })
+      for (const m of r.json.data) for (const p of Array.isArray(m?.content) ? m.content : []) if (p?.type === 'tool' && p.name === 'shell') n++
+      const next = r.json.cursor?.next
+      if (r.json.data.length < MESSAGE_PAGE || typeof next !== 'string' || next === '') return n
+      q = `type=assistant&limit=${MESSAGE_PAGE}&cursor=${encodeURIComponent(next)}` // cursor と order は併用しない（API の仕様）
+    }
+    throw new AdapterError('api', `件数の突き合わせ: メッセージが ${MESSAGE_PAGE * MESSAGE_PAGE_MAX} 件を超えて数え切れない`, { sessionRef: sid })
+  }
+
+  /** plugin がこのセッションの shell の呼び出しとして記録した件数。 */
+  function hookedCount(serve, sid) {
+    try { return readFileSync(serve.callLog, 'utf8').split('\n').filter((l) => l === sid).length } catch { return 0 }
   }
 
   /** SSE を購読し、sessionID 付きのイベントを購読者へ配る。切れたら serve が生きている間は再接続する。 */
@@ -194,9 +327,10 @@ export function createAdapter(cfg) {
     while (!serve.exited && Date.now() < end) await sleep(50)
   }
 
-  function getServe(kind) {
+  function getServe(merge = null) {
+    const kind = merge ? `merge-${merge.prNumber}` : 'normal'
     if (!serves.has(kind)) {
-      const p = startServe(kind)
+      const p = startServe(kind, merge)
       serves.set(kind, p)
       p.catch(() => serves.delete(kind)) // 失敗は次の呼び出しで作り直せる
     }
@@ -287,7 +421,7 @@ export function createAdapter(cfg) {
     async start() {
       try { await execVersion() } catch (e) { throw new AdapterError('prereq', `opencode を実行できない: ${e.message}`) }
       ensureGuardScript()
-      await getServe('normal')
+      await getServe(null)
     },
 
     async run(req) {
@@ -301,7 +435,9 @@ export function createAdapter(cfg) {
         serve = sessions.get(sid)
         if (!serve) throw new AdapterError('api', `不明なセッション: ${sid}`, { sessionRef: sid })
       } else {
-        serve = await getServe(req.allowMerge ? 'merge' : 'normal')
+        const merge = mergeTarget(req)
+        serve = await getServe(merge)
+        if (merge && serve.repo !== merge.repo) throw new AdapterError('api', `PR ${merge.prNumber} の merge 用 serve は ${serve.repo} に固定済みで、${merge.repo} には使えない`)
         const body = { title: req.label, location: { directory: req.cwd } }
         const variant = req.variant ?? req.effort ?? null
         const model = req.model ?? tc.defaultModel ?? null
@@ -314,12 +450,17 @@ export function createAdapter(cfg) {
       }
 
       mkdirSync(req.logDir, { recursive: true })
-      if (modelNote) { try { appendFileSync(join(req.logDir, 'adapter.log'), `${modelNote}\n`) } catch { /* ログ失敗で止めない */ } }
-      const logEv = (ev) => { try { appendFileSync(join(req.logDir, 'events.jsonl'), `${JSON.stringify({ t: Date.now(), type: ev.type, data: ev.data })}\n`) } catch { /* ログ失敗で本処理を止めない */ } }
-      const fail = (kind, message) => {
-        try { appendFileSync(join(req.logDir, 'error.txt'), `${kind}: ${message}\n`) } catch { /* 同上 */ }
+      const failNow = (kind, message) => {
+        try { appendFileSync(join(req.logDir, 'error.txt'), `${kind}: ${message}\n`) } catch { /* ログ失敗で止めない */ }
         return new AdapterError(kind, message, { sessionRef: sid })
       }
+      // この location（worktree）で plugin が読み込まれたことを、prompt の前に確かめる（冒頭）
+      if (!req.resume && !(await ensureLocation(serve, req.cwd))) {
+        throw failNow('prereq', `ランナー専用の plugin がこの location で読み込まれたことを確かめられない（${req.cwd}）。プロジェクト設定で無効にされた可能性がある。ガード無しでは走らせない`)
+      }
+      if (modelNote) { try { appendFileSync(join(req.logDir, 'adapter.log'), `${modelNote}\n`) } catch { /* ログ失敗で止めない */ } }
+      const logEv = (ev) => { try { appendFileSync(join(req.logDir, 'events.jsonl'), `${JSON.stringify({ t: Date.now(), type: ev.type, data: ev.data })}\n`) } catch { /* ログ失敗で本処理を止めない */ } }
+      const fail = failNow
 
       let t
       try {
@@ -341,6 +482,11 @@ export function createAdapter(cfg) {
         const msg = t.message || '実行が failed で終了した（詳細なし）'
         throw fail(USAGE_LIMIT_RE.test(msg) ? 'usage-limit' : 'api', msg)
       }
+      // ガードの欠落の検知（冒頭）。記録より実行が多ければ、ガードを通らずに走った shell がある
+      let shells
+      try { shells = await shellCount(serve, sid) } catch (e) { throw fail('api', e.message) }
+      const hooked = hookedCount(serve, sid)
+      if (shells > hooked) throw fail('denied', `ガードの欠落: shell の実行 ${shells} 件に対し plugin の記録は ${hooked} 件。出力を使わない`)
       const text = await finalText(serve, sid)
       try { writeFileSync(join(req.logDir, 'final.txt'), text) } catch { /* 同上 */ }
       return { text, sessionRef: sid, usage: await usageOf(serve, sid) }

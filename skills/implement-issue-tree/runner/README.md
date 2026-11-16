@@ -74,7 +74,7 @@ _/iit-runner/<runId>/
 | model を省いた段（plan・recover） | セッションのモデルを継ぐ | セッションが無いため、設定の `sessionModel`（既定 `opus`）の段として扱う |
 | 並列 | ランタイムの既定（16 か CPU 数 − 2） | `--max-parallel` か `limits.maxParallel`（既定 4）。1 ランのエージェント数は `limits.maxAgents`（既定 1,000）まで |
 | 構造化出力 | ランタイムが schema を強制 | Codex は `--output-schema`（strict 変換）、OpenCode はプロンプトへの埋め込み。どちらもランナーが検証し、不適合なら修復を 1 回求め、なお不適合なら `null` |
-| ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）、OpenCode はランナー専用 plugin（`adapters/opencode-plugin/`）。どちらも `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。形はその段の PR 番号で具体化し（`mergeExecCommandFor`。番号はホストのプロンプトから取り、決まらなければその段ではマージを許さない）、子の `GH_REPO` を対象リポジトリに固定する（`autoMerge` のランだけ、起動前に `gh repo view` で決める。決められなければ終了コード 3）。OpenCode（v2.2.7）は permission に代入を落とした後半だけが届くため、plugin が `tool.execute.before` で全文の完全一致を確かめた呼び出しを記録し、同じ呼び出しの後半だけを通す（後半だけの形を単独では通さない） |
+| ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）、OpenCode はランナー専用 plugin（`adapters/opencode-plugin/`）。どちらも `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。形はその段の PR 番号で具体化し（`mergeExecCommandFor`。番号はホストのプロンプトから取り、決まらなければその段ではマージを許さない）、子の `GH_REPO` を対象リポジトリに固定する（`autoMerge` のランだけ、起動前に `gh repo view` で決める。決められなければ終了コード 3）。Codex は merge 段の `codex exec` の env に、OpenCode は PR ごとに起動する merge 用 serve の env に固定する。OpenCode（v2.2.7）は permission に代入を落とした後半だけが届くため、plugin は全 serve で `tool.execute.before` の全文をガードに通し、merge 用 serve ではその PR の完全一致を確かめた呼び出しを記録して、同じ呼び出しの後半だけを通す（後半だけの形を単独では通さない）。plugin の読み込みはセッションの location ごとに目印で確かめ、ターンの後に shell の実行件数を plugin の記録と照合する（Codex は hook のログと `command_execution` の件数を照合する） |
 | 時間切れ | ランタイム任せ | 段ごと（`timeoutsSec.byPhase`。既定は Plan 20 分・Implement 30 分・Review 20 分 等）。超えたらプロセスを止めて `null` |
 
 ## 自動マージと後片づけ
@@ -116,6 +116,20 @@ _/iit-runner/<runId>/
 - ツールの出力（コマンドの出力・エージェントが読んだファイルの中身・応答）は、`_/iit-runner/<runId>/agents/*/` の
   `events*.jsonl` 等にそのまま残る。秘密を出力したコマンドがあれば、それも残る。`_/` は gitignore 済みだが、ログを共有・
   転記する前に中身を確かめ、要らなくなったら消す。
+- OpenCode の serve のパスワード（`OPENCODE_PASSWORD`）は serve の env にあり、エージェントの shell の子プロセスにも引き継がれる。
+  `node -e "...process.env.OPENCODE_PASSWORD..."` のような読み出しは `agent-guard.sh` を通る（allow。監査 e670648 の実測）。
+  パスワードを得たエージェントは、ランナーの serve の HTTP API を直接呼べる。そのうち次の 2 つは、ランナーのガードで止められない。
+  - `POST /api/session/:id/shell` は permission を通らない（Phase 0 の実測）。ランナー自身はこれを呼ばない。
+  - `PATCH /api/experimental/config` で global config（利用者の設定）を書き換えられる。ランナーの設定は `OPENCODE_CONFIG_CONTENT`
+    で渡しているが、書き換えた global config がランの後の OpenCode の利用に残り得る。
+  ランナーが行う shell の件数の照合（plugin の記録とメッセージの shell の tool part の比較）は、これらの API の実行が tool part に
+  現れる場合だけ働く（現れるかどうかは確かめていない）。サーバー側の ruleset と、ランの後の利用者設定の確認で補う。
+- OpenCode のガードの置き場（`agent-guard.sh`・ランナー専用 plugin・`~/.config/opencode/`・`.opencode/(hooks|plugins?)/`・
+  `opencode.json(c)`・ランのガードのログと目印）への書き込みの拒否は、edit 系はパスの照合、shell はコマンド文字列の照合である。
+  変数・間接参照・別名のパスを使う shell の書き込みは止まらない（best-effort）。対象リポジトリに `opencode.json(c)` という名前の
+  ファイル（例: 配布物の雛形）があると、その編集も拒否される（配布物の plugin と同じ過剰側の判定）。
+- OpenCode の merge 用 serve は PR ごとに起動し、ランの終了（close）まで残す（同じ PR の再試行で使い回すため）。
+  1 ランで多くの PR を自動マージすると、その数だけ serve が並ぶ。
 - `agent-guard.sh` の既知の限界（変数経由・`$(…)` 経由のコマンドは止まらない）はランナーでも同じ。サーバー側の ruleset で補う
   （自動マージの前提となる構成は `references/automerge-design.md`）。
 - OpenCode の model・variant の割り当てと段ごとの時間切れは暫定値（`config/default.json` の `notes`）。
