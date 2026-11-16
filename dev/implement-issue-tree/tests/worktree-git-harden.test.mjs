@@ -176,7 +176,7 @@ for (const bash of availableBashes()) {
   }
 
   for (const [name, plant] of Object.entries(ATTACKS)) {
-    test(`${tag} worktree-remove.sh check-absent: ${name} の仕込みでも git にコマンドを実行させず、不在と言わない`, () => {
+    test(`${tag} worktree-remove.sh check-absent: ${name} の仕込みでも git にコマンドを実行させず、不在と言わない。仕込んだ worktree を --repo-root に渡すと照合に通らず unknown`, () => {
       const repo = makeRepo()
       const w = repo.addWorktree('w')
       const marker = join(repo.root, 'PWNED')
@@ -185,6 +185,12 @@ for (const bash of availableBashes()) {
       assert.equal(r.status, 0, r.stderr)
       assert.ok(!existsSync(marker), `${name}: スクリプトが偽の config のコマンドを実行した`)
       assert.ok(!['absent', 'prunable'].includes(r.result.worktree), `${name}: ${JSON.stringify(r.result)}`)
+      // --repo-root の照合（wr_repo_matches）: 仕込んだ worktree をリポジトリの根として渡すと、その中で git を呼ばずに不一致（unknown）にする。
+      // submodule の仕込みは worktree 自身の .git を崩さないので照合に通る（present）
+      const rr = runWR(repo, ['check-absent', '--path', join(repo.root, 'gone'), '--repo-root', w.path])
+      assert.equal(rr.status, 0, rr.stderr)
+      assert.ok(!existsSync(marker), `${name}: --repo-root の照合で偽の config のコマンドを実行した`)
+      assert.equal(rr.result.worktree, name === 'submodule' ? 'absent' : 'unknown', `${name}: ${JSON.stringify(rr.result)}`)
       assertPlantWorks(repo, w.path, marker, name)
     })
   }

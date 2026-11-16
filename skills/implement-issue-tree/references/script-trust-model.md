@@ -550,14 +550,14 @@ worktree の中で git を呼ぶ前に、git を使わずファイルの読み�
 - `<gitdir>/gitdir`（逆向き）が 1 行の `<…>/.git` で、その親の実体が worktree と一致。
 - `<gitdir>/config.worktree` が無い（`extensions.worktreeConfig` の有無によらず拒否する）。
 
-`--mode check-absent` の `wr_repo_matches` も同じ照合（メインの `.git` は `wr_main_common`）に置き換え、対象の中では git を呼ばない。
+`--mode check-absent` が `--repo-root` をカレントのリポジトリと突き合わせる `wr_repo_matches` も同じ照合（`.git` が実ディレクトリなら `wr_main_common`）に置き換え、`--repo-root` の中では git を呼ばない（修正前もここは `rev-parse` だけで、コマンドの実行には至らなかった）。
 
 ### 外れたときの結果（既存の語）
 
 | スクリプト | 対象 | 結果 |
 |-----------|------|------|
 | `worktree-remove.sh` | remove（superseded・discard）・sweep | `retained-broken`（削除しない・ブランチも消さない） |
-| `worktree-remove.sh` | check-absent | `unknown` |
+| `worktree-remove.sh` | check-absent の `--repo-root` | `unknown` |
 | `recover-prep.sh` | 回復対象の worktree | `resolved: false`・`toplevel-mismatch`・`wip: skipped` |
 | `recover-prep.sh` | `--mode free` の握り手 | `in-use`（解放しない） |
 | `recover-prep.sh` | 信頼する共通ディレクトリを求められない | `list-failed` |
@@ -579,7 +579,7 @@ worktree の中で git を呼ぶ前に、git を使わずファイルの読み�
 
 ### この節の検証範囲
 
-`dev/implement-issue-tree/tests/worktree-git-harden.test.mjs` が、仕込み 7 種（commondir・gitdir 行〔余分な空行・相対パス〕・`.git` のディレクトリ・シンボリックリンク・`config.worktree`・偽の submodule）のそれぞれについて、`worktree-remove.sh`（superseded・discard・sweep）と `recover-prep.sh` の実行後にマーカーが無く worktree が残ること、素の `git status` ではマーカーが作られること（陽性対照）を bash 3.2 と 5 で固定する。あわせて `--mode free` の握り手、管理ディレクトリのシンボリックリンクがあると remove・sweep が何も消さずリンク先も残ること（prune の直前の同じ検査は削除と prune の間に置かれたリンクへの多重防御で、`wr_admin_links` の単体だけを固定）、正規の worktree（絶対パス・Git 2.48 以降なら相対パスの形）の削除・回復・check-absent、`wr_gitlink_check` を 1 か所ずつ崩した 16 形の拒否、`check-absent` が仕込みのある worktree を不在と言わないこと、カレントが付属 worktree のラン（照合に通れば動き、カレント自身の `.git` が崩れていれば何もしない）を固定する。変異は H01（commondir の照合を外す）・H02（`config.worktree` を許す）・H03（submodule があっても WIP コミットを作る）を足し、W02・C05（`--ignore-submodules=none` へ戻す）をこのテストで殺す形に改めた。e148ca4 のスクリプトに対して同じテストを流すと、仕込み 7 種 × 2 スクリプト × 2 bash の 28 件はすべてマーカーが作られて落ちる（`check-absent` は修正前も `rev-parse` しか呼ばずマーカーは作られない）。
+`dev/implement-issue-tree/tests/worktree-git-harden.test.mjs` が、仕込み 7 種（commondir・gitdir 行〔余分な空行・相対パス〕・`.git` のディレクトリ・シンボリックリンク・`config.worktree`・偽の submodule）のそれぞれについて、`worktree-remove.sh`（superseded・discard・sweep）と `recover-prep.sh` の実行後にマーカーが無く worktree が残ること、素の `git status` ではマーカーが作られること（陽性対照）を bash 3.2 と 5 で固定する。あわせて `--mode free` の握り手、管理ディレクトリのシンボリックリンクがあると remove・sweep が何も消さずリンク先も残ること（prune の直前の同じ検査は削除と prune の間に置かれたリンクへの多重防御で、`wr_admin_links` の単体だけを固定）、正規の worktree（絶対パス・Git 2.48 以降なら相対パスの形）の削除・回復・check-absent、`wr_gitlink_check` を 1 か所ずつ崩した 16 形の拒否、`check-absent` が仕込みのある worktree を不在と言わず、仕込んだ worktree を `--repo-root` に渡すと `unknown` になること、カレントが付属 worktree のラン（照合に通れば動き、カレント自身の `.git` が崩れていれば何もしない）を固定する。変異は H01（commondir の照合を外す）・H02（`config.worktree` を許す）・H03（submodule があっても WIP コミットを作る）を足し、W02・C05（`--ignore-submodules=none` へ戻す）をこのテストで殺す形に改めた。e148ca4 のスクリプトに対して同じテストを流すと、仕込み 7 種 × 2 スクリプト × 2 bash の 28 件はすべてマーカーが作られて落ちる（`check-absent` は修正前も `rev-parse` しか呼ばずマーカーは作られない）。
 
 ## ハッシュ埋め込みと鮮度
 
