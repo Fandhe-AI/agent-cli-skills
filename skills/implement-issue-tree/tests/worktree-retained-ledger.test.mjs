@@ -400,6 +400,20 @@ test('バイト軸: fix が 1 回だけのとき、実装 worktree が保持さ�
 
 // ---- 3. 計上規則（Issue #624）----
 
+test('引き継ぎ済みのパスが保持されても、開始時観測にもあるパスは案内用の slotRetainedPaths に載せない（台帳・開始時観測が案内に出す）。開始時観測に無ければ載せる', async () => {
+  const f = await fresh('ledger-start-slot')
+  stub(() => ({ ok: true }))
+  // 開始時観測にも引き継ぎにもあるパス: 案内は開始時観測側が出すので二重に出さない
+  f.residualStartPathSet.add('/tmp/both-1')
+  f.slotInheritedPaths.add('/tmp/both-1')
+  f.recordRetainedWorktree(1, '/tmp/both-1')
+  assert.ok(!f.slotRetainedPaths.has('/tmp/both-1'))
+  // 引き継ぎだけにあるパスは載せる（対照。載せる側の経路が生きていることの確認）
+  f.slotInheritedPaths.add('/tmp/slot-2')
+  f.recordRetainedWorktree(2, '/tmp/slot-2')
+  assert.equal(f.slotRetainedPaths.get('/tmp/slot-2'), 2)
+})
+
 test('planReplacementAccounting の表: 旧が消えたら件数は動かず新を引き継ぐ。消えなければ旧（未計上のときだけ）と新を載せる。旧のパスが空でも新は載せる', async () => {
   const f = (await fresh('ledger-plan')).planReplacementAccounting
   const P = (o) => f({ oldPath: '/o', oldRemoved: false, newPath: '/n', oldCounted: false, newCounted: false, ...o })
@@ -418,6 +432,9 @@ test('planReplacementAccounting の表: 旧が消えたら件数は動かず新�
     ['旧のパスが空・新も不明', { oldPath: '', newPath: '' }, { ...none, addReplacement: true }],
     ['旧が空で消えたと渡されても消えた扱いにしない', { oldPath: '', oldRemoved: true }, { ...none, addReplacement: true }],
     ['新旧が同じパス', { newPath: '/o' }, { ...none, addRetainedOld: true }],
+    // 旧のパスが空のとき、旧は『掃除を試みていない』ので引き継ぎ元にならない。呼び出し元は isWorktreeCounted('') が常に偽なので oldCounted を真にしないが、純関数の契約として固定する
+    ['旧が空・消えたと渡され・計上済みと渡されても新を引き継がず 1 件載せる', { oldPath: '', oldRemoved: true, oldCounted: true }, { ...none, addReplacement: true }],
+    ['旧が空・消えていない・計上済みと渡されても新を引き継がず 1 件載せる', { oldPath: '', oldRemoved: false, oldCounted: true }, { ...none, addReplacement: true }],
   ]
   for (const [name, over, want] of rows) assert.deepEqual(P(over), want, name)
 })
