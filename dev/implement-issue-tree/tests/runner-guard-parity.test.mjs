@@ -4,7 +4,11 @@
 // 両者は agent-guard.sh を「常に subagent=true」で呼ぶ同じ意味の写しで、アダプタはログの行数でガードの欠落を数える。
 // 片方だけ文言やコードを変えると、ログを読む側（人・agent-host のレポート）がツールごとに読み分けることになるため、
 // 共通のコード（allow・allow-mergeform・deny-guard-missing・deny-error・deny-noresult・deny:<理由>）と文言をここで縛る。
-// allowMerge の素通しは両者とも MERGE_EXEC_COMMAND の完全一致の 1 形だけ（Codex は --merge-re、plugin は mergeRes）。
+// allowMerge の素通し: コマンド全体が MERGE_EXEC_COMMAND に完全一致した 1 形は、両者ともガードを呼ばずに allow-mergeform で通す
+// （Codex は --merge-re、plugin は mergeRes）。OpenCode v2.2.7 は permission に代入を落とした後半だけを渡すため、plugin は
+// allowMerge の serve でだけ tool.execute.before で全文の完全一致を確かめた呼び出しを記録し、同じ呼び出し（sessionID・
+// messageID・id の組）の後半を 1 回限り通す。後半だけの形は、対応する記録が無ければ両者ともガードに回して拒否する。
+// ガードの判定そのものの写しも、#845 後の配布物の agent-guard.sh（init-codex / init-opencode の写し）で両者が一致することを確かめる。
 // 合わせて、両アダプタの agent-guard.sh の探索（runner/lib/guard-script.mjs）と見つからないときの prereq の文言が共通であることも確かめる。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -42,9 +46,22 @@ const codes = (log) => readFileSync(log, 'utf8').split('\n').filter(Boolean).map
   return l.split('\t')[1]
 })
 
+// 配布物の agent-guard.sh（4 写しは同一。asset-sync のテストが縛る）。ランナーが既定で探す 2 つを使う
+const REAL_GUARDS = ['init-codex', 'init-opencode'].map((s) => join(SKILL_DIR, '..', s, 'assets', 'hooks', 'agent-guard.sh'))
+
+/** 偽ガードの本文（文字列・null）か、{ path } で既存のガードを指す。ログ用のディレクトリと組で返す。 */
+function guardFor(g) {
+  if (g && typeof g === 'object') {
+    const dir = join(root, `g${++seq}`)
+    mkdirSync(dir)
+    return { dir, guard: g.path }
+  }
+  return makeGuard(g)
+}
+
 /** codex-hook.sh を 1 回呼び、{ deny, message, codes } を返す。 */
 function viaHook(guardBody, command, { merge = false } = {}) {
-  const { dir, guard } = makeGuard(guardBody)
+  const { dir, guard } = guardFor(guardBody)
   const log = join(dir, 'hook.log')
   const args = [HOOK, '--guard', guard, '--log', log, ...(merge ? ['--merge-re', MERGE_EXEC_COMMAND.source] : [])]
   const r = spawnSync('bash', args, { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8' })
@@ -54,14 +71,32 @@ function viaHook(guardBody, command, { merge = false } = {}) {
   return { deny: out !== '', message: reason, codes: codes(log) }
 }
 
-/** plugin の evaluate を 1 回呼び、{ deny, message, codes } を返す。 */
-async function viaPlugin(guardBody, command, { merge = false } = {}) {
-  const { dir, guard } = makeGuard(guardBody)
+// OpenCode v2.2.7 の実測のイベントの形（runner-opencode-plugin.test.mjs と同じ）
+const CALL = { sessionID: 'ses_1', messageID: 'msg_1', id: 'call_1' }
+
+/**
+ * plugin の evaluate を呼び、{ deny, message, codes } を返す（最後の evaluate の判定。codes はログ全体）。
+ * 実際の serve と同じく tool の hook も渡す。bind を与えると、先に tool.execute.before へその全文を同じ呼び出しの組で渡す。
+ * times は同じ setup で同じ permission を続けて評価する回数（記録が 1 回限りかを見る）。
+ */
+async function viaPlugin(guardBody, command, { merge = false, bind = null, times = 1 } = {}) {
+  const { dir, guard } = guardFor(guardBody)
   const log = join(dir, 'plugin.log')
-  let hook = null
-  await plugin.setup({ options: { guardScript: guard, log, mergeRes: merge ? [...MERGE_RES] : [] }, permission: { hook: async (n, fn) => { if (n === 'evaluate') hook = fn } } })
-  const e = { action: 'shell', resources: [command] }
-  await hook(e)
+  const h = {}
+  await plugin.setup({
+    options: { guardScript: guard, log, mergeRes: merge ? [...MERGE_RES] : [] },
+    permission: { hook: async (n, fn) => { h[`permission.${n}`] = fn } },
+    tool: { hook: async (n, fn) => { h[`tool.${n}`] = fn } },
+  })
+  if (bind !== null) {
+    assert.equal(typeof h['tool.execute.before'], 'function', 'allowMerge の serve は tool.execute.before を登録する')
+    await h['tool.execute.before']({ tool: 'shell', ...CALL, agent: 'build', input: { command: bind } })
+  }
+  let e = null
+  for (let i = 0; i < times; i++) {
+    e = { sessionID: CALL.sessionID, agent: 'build', action: 'shell', resources: [command], metadata: {}, source: { type: 'tool', messageID: CALL.messageID, id: CALL.id }, effect: 'allow' }
+    await h['permission.evaluate'](e)
+  }
   return { deny: e.effect === 'deny', message: e.effect === 'deny' ? e.message : null, codes: codes(log) }
 }
 
@@ -86,7 +121,7 @@ for (const [name, body, cmd, want] of CASES) {
   })
 }
 
-test('allowMerge: 両者とも MERGE_EXEC_COMMAND の完全一致だけを、ガードを呼ばずに allow-mergeform で通す', async () => {
+test('allowMerge: 全文の完全一致は両者とも、ガードを呼ばずに allow-mergeform で通す。後半だけ・続きつきは記録が無ければガードに回る', async () => {
   const denyAll = '#!/bin/bash\necho "AGENT_GUARD_RESULT deny merge-guard"\nexit 2\n'
   for (const [cmd, wantDeny] of [
     [MERGE_CMD, false],
@@ -100,6 +135,58 @@ test('allowMerge: 両者とも MERGE_EXEC_COMMAND の完全一致だけを、ガ
     assert.deepEqual(h.codes, [wantDeny ? 'deny:merge-guard' : 'allow-mergeform'], cmd)
   }
 })
+
+test('allowMerge（plugin の対応づけ）: 全文の一致を記録した呼び出しの後半は、Codex が全文を受けたときと同じく allow-mergeform。記録は 1 回限り', async () => {
+  const denyAll = '#!/bin/bash\necho "AGENT_GUARD_RESULT deny merge-guard"\nexit 2\n'
+  const tail = MERGE_CMD.slice(MERGE_CMD.indexOf('; ') + 2)
+  // Codex は全文を受ける。OpenCode は記録つきで後半を受ける。どちらも同じ結果になる
+  const h = viaHook(denyAll, MERGE_CMD, { merge: true })
+  const p = await viaPlugin(denyAll, tail, { merge: true, bind: MERGE_CMD })
+  assert.deepEqual(h, p)
+  assert.deepEqual(p.codes, ['allow-mergeform'])
+  // 同じ記録で 2 回目の permission は通さず、ガードに回る
+  const twice = await viaPlugin(denyAll, tail, { merge: true, bind: MERGE_CMD, times: 2 })
+  assert.equal(twice.deny, true)
+  assert.deepEqual(twice.codes, ['allow-mergeform', 'deny:merge-guard'])
+  // 全文が完全一致しない呼び出し（続きつき）の記録では、後半を通さない
+  const tailed = await viaPlugin(denyAll, tail, { merge: true, bind: `${MERGE_CMD}; gh pr review 9 --approve` })
+  assert.equal(tailed.deny, true)
+  assert.deepEqual(tailed.codes, ['deny:merge-guard'])
+  // allowMerge でない serve では、記録の経路そのものが無い
+  const off = await viaPlugin(denyAll, tail)
+  assert.equal(off.deny, true)
+  assert.deepEqual(off.codes, ['deny:merge-guard'])
+})
+
+// #845 後の配布物の agent-guard.sh の判定（probe で実測した値）を、両アダプタが同じコード・同じ文言で写すこと。
+// 認証情報の読み出しとマージキュー投入は #845 より前のガードでは allow だった（ランナーは rules / permissions だけで止めていた）。
+const REAL_CASES = [
+  ['git status', {}, 'allow'],
+  ['gh pr view 9 --json state', {}, 'allow'],
+  ['gh auth token', {}, 'deny:credential-read'],
+  ['printenv GH_TOKEN', {}, 'deny:credential-read'],
+  ['git credential fill', {}, 'deny:credential-read'],
+  ['cat ~/.codex/auth.json', {}, 'deny:credential-read'],
+  ['cd ~/.config/gh;cat hosts.yml', {}, 'deny:credential-read'],
+  ["gh api graphql -f query='mutation { enqueuePullRequest(input:{}) { clientMutationId } }'", {}, 'deny:merge-guard'],
+  ['git push --force origin x', {}, 'deny:force-push'],
+  [MERGE_CMD, {}, 'deny:merge-guard'],
+  [MERGE_CMD, { merge: true }, 'allow-mergeform'],
+  [MERGE_CMD.slice(MERGE_CMD.indexOf('; ') + 2), { merge: true }, 'deny:merge-guard'],
+]
+
+for (const path of REAL_GUARDS) {
+  test(`配布物の agent-guard.sh（${path.split('/skills/')[1]}）に対しても両者の判定・コード・文言が同じ`, async () => {
+    for (const [cmd, opt, code] of REAL_CASES) {
+      const h = viaHook({ path }, cmd, opt)
+      const p = await viaPlugin({ path }, cmd, opt)
+      assert.deepEqual(h, p, cmd)
+      assert.deepEqual(h.codes, [code], cmd)
+      assert.equal(h.deny, code.startsWith('deny'), cmd)
+      if (h.deny) assert.equal(h.message, `iit-runner: ガードの判定により拒否した（${code}）`, cmd)
+    }
+  })
+}
 
 test('agent-guard.sh の探索: 明示の guardScript はそれだけを見る・既定は init-codex / init-opencode の配布物と導入先', () => {
   const base = join(root, 'find')
