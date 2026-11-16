@@ -718,7 +718,7 @@ Codex のセッション内で `.codex/`・`.agents/` が読み取り専用に�
 
 **更新手順**:
 1. Step 4-4 フェンス内の `SKILLS_CLI_VERSION` を更新する（このスキル内での正の定義箇所はここ。Step 5 の案内フェンスも同じ値に揃える）
-2. `node --test skills/update-codex/tests/*.test.mjs` で exact semver・実行行の固定を検証する
+2. `node --test dev/update-codex/tests/*.test.mjs` で exact semver・実行行の固定を検証する
 3. 1 リポジトリで実際に実行し、差分が正常であることを確認する
 4. `chore(update-codex): skills CLI を X.Y.Z へ更新` でコミットする
 5. 同じ `skills` CLI を固定する `init-claude` / `update-claude` / `init-codex` / `init-opencode` / `update-opencode` / `sync-skills-lock` の同名節も同時更新することを推奨する（値の同期は必須ではないが、乖離した場合はどちらかの節にその旨を記録する）
