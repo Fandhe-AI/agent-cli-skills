@@ -24,7 +24,7 @@ const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
   '..', 'scripts', 'implement-issue-tree.src.js',
 )
-const SKILL_MD_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md')
+const SKILL_MD_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'SKILL.md')
 // マーカーはソース中に 1 回しか現れてはならない（g0-gates.test.mjs が出現回数を固定）ため分割して組み立てる。
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
 

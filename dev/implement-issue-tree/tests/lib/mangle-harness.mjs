@@ -1,6 +1,7 @@
 // 改名器・検証器・V8 オラクルのテストが共有する呼び出し口（テスト専用）。
 // 3 つとも Node 同梱 acorn を使うため node --expose-internals の子プロセスで起動する。
 // stage1 はコミット済みの生成物を読まずに src から作る（生成物は後続の PR で改名済みに変わるため）。
+import { SHIPPED_SCRIPTS } from './paths.mjs'
 import { readFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -17,7 +18,7 @@ const DRIVER_PATH = join(HERE, 'mangle-driver.cjs')
 
 // 現行のビルドの stage1（ハッシュ埋め込み + コメント・空白除去。トークン照合はビルダーのテストが担う）
 export function buildStage1() {
-  return buildArtifact(embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), dirname(SRC_PATH)))
+  return buildArtifact(embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), SHIPPED_SCRIPTS))
 }
 
 async function runJson(path, input, args = []) {

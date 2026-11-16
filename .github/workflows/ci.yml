@@ -76,8 +76,8 @@ jobs:
         run: |
           node --version
           shopt -s globstar failglob
-          # 配布物 skills/ と開発専用 dev/ の両方を拾う（dev/ への移行中は両方にテストが存在する）。
-          node --test skills/*/tests/**/*.test.mjs dev/*/tests/**/*.test.mjs
+          # テストは配布物 skills/ の外の dev/<name>/tests/ にある。
+          node --test dev/*/tests/**/*.test.mjs
 
   # --------------------------------------------------
   # py-tests（update-external 乖離検知の判定ロジック回帰テスト）

@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { availableBashes } from './lib/signed-output.mjs'
 
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'reply-resolve.sh')
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'reply-resolve.sh')
 const SHA = 'b'.repeat(40)
 const REPO = 'Fandhe-AI/agent-cli-skills'
 const BRANCH = 'fix/759-x'

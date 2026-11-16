@@ -5,7 +5,7 @@
 // conflicting 状態へ写像されることを、モデル出力に依存しない JS 純粋部分（引数パーサ・
 // プロンプト契約・状態写像・スキーマ・駆動部のソース走査）で固定する。
 //
-// 読み込み方式は skills/implement-issue-tree/tests/g0-gates.test.mjs と同一（マーカー切り出し
+// 読み込み方式は dev/implement-issue-tree/tests/g0-gates.test.mjs と同一（マーカー切り出し
 // スライス方式）。実装スクリプトは Workflow ハーネス専用文法のため module として丸ごと import
 // できないための回避策であり、他のテストファイルと重複しても踏襲する。
 import { test } from 'node:test'
@@ -166,11 +166,11 @@ test('実装スクリプト: base-merge 返却のログ専用 3 項目を読む�
 // tests/base-merge.test.mjs が実 git で固定し、ここは『エージェントに何を実行させ、何を返させるか』のプロンプト契約を固定する。
 // ---------------------------------------------------------------------------
 
-const BASE_MERGE_SH = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'base-merge.sh'), 'utf8')
+const BASE_MERGE_SH = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'base-merge.sh'), 'utf8')
 // コメント行を除いたスクリプト本文（禁止語の検査をコメント中の説明文で誤検出しない）
 const baseMergeCode = BASE_MERGE_SH.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
 // 許可ホストの定数と URL 照合の関数は lib/base-merge-lib.sh（スクリプト本体から無変更で切り出したもの。テストが表で単体検査するため）
-const BASE_MERGE_LIB_SH = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'base-merge-lib.sh'), 'utf8')
+const BASE_MERGE_LIB_SH = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'base-merge-lib.sh'), 'utf8')
 const baseMergeLibCode = BASE_MERGE_LIB_SH.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
 const commandOf = (prompt) => /```sh\n([\s\S]*?)\n```/.exec(prompt)?.[1]
 

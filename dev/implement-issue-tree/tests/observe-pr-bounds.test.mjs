@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { availableBashes, toolExists } from './lib/signed-output.mjs'
 import { createObserveStub } from './lib/gh-observe-stub.mjs'
 
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'observe-pr.sh')
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'observe-pr.sh')
 const NONCE = 'k3x9a0b1c2d4e5f6g7h8i9j0k1l2'
 const SHA = 'a1'.repeat(20)
 const BASHES = availableBashes()

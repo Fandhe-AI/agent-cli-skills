@@ -7,15 +7,16 @@
 //       survived（検査が欠陥を見逃した = テストが弱い）と判定する。全テスト（約 80 秒）を毎回流さない。
 //
 // 使い方（リポジトリルートで）:
-//   node skills/implement-issue-tree/tests/tools/mutate.mjs --list
-//   node skills/implement-issue-tree/tests/tools/mutate.mjs --run U02-host-suffix [id ...] [--jobs 4]
-//   node skills/implement-issue-tree/tests/tools/mutate.mjs --run all
-//   node skills/implement-issue-tree/tests/tools/mutate.mjs --def <定義ファイル> --run all
+//   node dev/implement-issue-tree/tests/tools/mutate.mjs --list
+//   node dev/implement-issue-tree/tests/tools/mutate.mjs --run U02-host-suffix [id ...] [--jobs 4]
+//   node dev/implement-issue-tree/tests/tools/mutate.mjs --run all
+//   node dev/implement-issue-tree/tests/tools/mutate.mjs --def <定義ファイル> --run all
 //   --list           定義の id・対象ファイル・流すテスト・説明を出す
 //   --run ID...|all  変異体を作って判定する。同時に走らせる数は --jobs（既定 4）
 //   --def FILE       既定の tools/mutations.mjs の代わりに読む定義ファイル（`export const MUTATIONS = [...]`）
 //   --tests A,B      定義の tests の代わりに、この tests/ 内のテストファイルだけを流す（どのテストが捕まえるかの切り分け用）
-//   --skill DIR      コピー元のスキルのディレクトリ（既定はこのファイルのあるスキル）。別の版（例: git archive で取り出した
+//   --skill DIR      コピー元の配布物 skills/<name>/ のディレクトリ（既定は本物）。--dev DIR は dev/<name>/ のコピー元（省略時は
+//                    --skill を渡したなら同じ DIR、渡さなければ本物）。別の版（例: git archive で取り出した
 //                    main）に同じ変異を当てて、テストの検出力を版どうしで比べるために使う
 //   --timeout SEC    変異 1 件あたりの期限（秒・既定 600 = 10 分）。超えたら子プロセス群（孫を含む）を SIGKILL で止め、
 //                    `killed (by: timeout)` と報告する（ハングする変異体が全体を止めない）
@@ -24,9 +25,9 @@
 //
 // 変異の定義（MUTATIONS の要素）:
 //   { id, file, from, to, tests: ['xxx.test.mjs', ...], note?, rebuild? }
-//   file   スキルのディレクトリ（skills/implement-issue-tree）からの相対パス。from がそのファイルにちょうど 1 か所だけ
+//   file   スキル配置の相対パス（scripts/・lib・SKILL.md は skills/implement-issue-tree/、tests/ と開発専用の scripts は dev/implement-issue-tree/）。from がそのファイルにちょうど 1 か所だけ
 //          あること（0 か所・2 か所以上は invalid。弱い置換を黙って当てない）
-//   tests  tests/ からの相対パス。流すのはこのファイルだけ
+//   tests  dev/implement-issue-tree/tests/ からの相対パス。流すのはこのファイルだけ
 //   rebuild true / false / 省略（自動）。自動は .sh・.src.js・build-workflow.mjs を変えたときだけ生成物を再ビルドする
 //          （スクリプトを変えると埋め込みハッシュが変わるので、再ビルドしないと『ハッシュ不一致』で偽の赤になる）。
 //          再ビルドがトークン照合などで中止したら、変異体は出荷用のビルドゲートで止まったので killed（by: build）と扱う
@@ -37,7 +38,7 @@
 //   invalid  置換が当たらない・ファイルが無い、テストが signal で終了した（exit が無い）、実行されたテストが 0 件（全 skip・0 件登録）
 //            のいずれか。invalid は検査が弱いのか判定できなかったという意味で、survived とも killed とも数えない
 //
-// 安全: 作業ツリーは一切書き換えない。スキルのディレクトリを一時ディレクトリへ（リポジトリ内の深さ skills/<name>/ を保って）
+// 安全: 作業ツリーは一切書き換えない。skills/<name>/ と dev/<name>/ を一時ディレクトリへ（リポジトリ内の配置と深さを保って）
 //       コピーし、コピーの上で置換・再ビルド・テストを行う。作業コピーは終了時に必ず消す。
 // 終了コード: 0 = 実行した変異体がすべて killed、1 = survived・invalid が 1 つ以上、2 = 使い方の誤り
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -47,8 +48,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SKILL_DIR = resolve(HERE, '..', '..')
 const SKILL_NAME = 'implement-issue-tree'
+// 開発専用ファイル（tests・src・ビルダー・照合ヘルパー）は dev/<name>/、配布物は skills/<name>/ にある。作業コピーも同じ配置で作る
+const DEV_DIR = resolve(HERE, '..', '..')
+const SKILL_DIR = resolve(DEV_DIR, '..', '..', 'skills', SKILL_NAME)
+const DEV_SCRIPTS = new Set(['implement-issue-tree.src.js', 'build-workflow.mjs', 'token-diff.cjs', 'mangle-identifiers.cjs', 'alpha-verify.cjs'])
+
+// 変異の file（スキル配置の相対パス）が dev/ 側か skills/ 側かを決める。tests/ 配下と開発専用の scripts は dev/ 側
+export function isDevFile(file) {
+  return file.startsWith('tests/') || (file.startsWith('scripts/') && DEV_SCRIPTS.has(file.slice('scripts/'.length)))
+}
+// 変異の file の実体の場所。root は skills/<name>/ と dev/<name>/ を持つ親ディレクトリ（作業コピーまたは実リポジトリ）
+export function locateFile(root, file) {
+  return join(root, isDevFile(file) ? 'dev' : 'skills', SKILL_NAME, file)
+}
 const DEFAULT_DEF = join(HERE, 'mutations.mjs')
 
 // 子プロセス（再ビルド・node --test）の環境。node --test の中から呼ばれると NODE_TEST_CONTEXT が引き継がれ、入れ子の
@@ -164,35 +177,40 @@ async function loadDefinitions(path) {
   return mod.MUTATIONS
 }
 
-// 1 つの変異体を判定する。skillDir は変異の対象（既定は本物のスキル。コピー元として読むだけ）
-export async function runMutation(m, { skillDir = SKILL_DIR, keep = false, nodeBin = process.execPath, testsOverride = null, timeoutSec = DEFAULT_TIMEOUT_SEC } = {}) {
+// 1 つの変異体を判定する。skillDir・devDir は変異の対象（既定は本物の skills/ と dev/。コピー元として読むだけ）。
+// skillDir だけを渡したときは devDir も同じディレクトリ（配布物と開発ファイルが 1 か所にある版・テスト用の偽スキル）として扱う
+export async function runMutation(m, { skillDir = SKILL_DIR, devDir = skillDir === SKILL_DIR ? DEV_DIR : skillDir, keep = false, nodeBin = process.execPath, testsOverride = null, timeoutSec = DEFAULT_TIMEOUT_SEC } = {}) {
   const started = Date.now()
   const remainingMs = () => timeoutSec * 1000 - (Date.now() - started)
   const timeoutResult = () => done('killed', { by: 'timeout', detail: `${timeoutSec} 秒の期限を超えたため子プロセス群を止めた` })
   const done = (status, extra = {}) => ({ id: m.id, status, seconds: (Date.now() - started) / 1000, ...extra })
   const work = realpathSync(mkdtempSync(join(tmpdir(), 'iit-mutate-')))
   try {
-    // リポジトリ内の深さを保つ（build-workflow.test.mjs が ../../.. をリポジトリルートとして相対パスで --check を実行する）
+    // リポジトリ内の配置と深さを保つ（build-workflow.test.mjs が ../../.. をリポジトリルートとして相対パスで --check を実行する）
     const copy = join(work, 'skills', SKILL_NAME)
+    const devCopy = join(work, 'dev', SKILL_NAME)
     mkdirSync(dirname(copy), { recursive: true })
-    cpSync(skillDir, copy, { recursive: true, filter: (src) => !src.endsWith('.DS_Store') })
-    const target = join(copy, m.file)
+    mkdirSync(dirname(devCopy), { recursive: true })
+    const filter = (src) => !src.endsWith('.DS_Store')
+    cpSync(skillDir, copy, { recursive: true, filter })
+    cpSync(devDir, devCopy, { recursive: true, filter })
+    const target = locateFile(work, m.file)
     if (!existsSync(target)) return done('invalid', { detail: `対象ファイルが無い: ${m.file}` })
     const applied = applyMutation(readFileSync(target, 'utf8'), m.from, m.to)
     if (!applied.ok) return done('invalid', { detail: applied.reason })
     writeFileSync(target, applied.text)
 
     if (needsRebuild(m)) {
-      const b = await runGroup(nodeBin, [join(copy, 'scripts', 'build-workflow.mjs')], { cwd: copy, env: childEnv(), timeoutMs: remainingMs() })
+      const b = await runGroup(nodeBin, [join(devCopy, 'scripts', 'build-workflow.mjs')], { cwd: work, env: childEnv(), timeoutMs: remainingMs() })
       if (b.timedOut) return timeoutResult()
       if (b.status !== 0) return done('killed', { by: 'build', detail: (b.stderr || b.stdout).trim().split('\n').pop().slice(0, 160) })
     }
 
     const tmp = join(work, 'tmp')
     mkdirSync(tmp, { recursive: true })
-    const files = (testsOverride ?? m.tests).map((t) => join('tests', t))
-    for (const f of files) if (!existsSync(join(copy, f))) return done('invalid', { detail: `流すテストファイルが無い: ${f}` })
-    const t = await runGroup(nodeBin, ['--test', '--test-reporter=spec', ...files], { cwd: copy, env: childEnv({ TMPDIR: tmp }), timeoutMs: remainingMs() })
+    const files = (testsOverride ?? m.tests).map((t) => join('dev', SKILL_NAME, 'tests', t))
+    for (const f of files) if (!existsSync(join(work, f))) return done('invalid', { detail: `流すテストファイルが無い: ${f}` })
+    const t = await runGroup(nodeBin, ['--test', '--test-reporter=spec', ...files], { cwd: work, env: childEnv({ TMPDIR: tmp }), timeoutMs: remainingMs() })
     if (t.timedOut) return timeoutResult()
     // exit が無い = テストランナーが signal で終了した。赤とは言えない（緑とも言えない）ので killed にも survived にもしない
     if (t.status === null) return done('invalid', { detail: `テストが signal ${t.signal} で終了した（exit なし）` })
@@ -212,16 +230,17 @@ export async function runMutation(m, { skillDir = SKILL_DIR, keep = false, nodeB
 }
 
 function parseArgs(argv) {
-  const out = { list: false, run: null, def: DEFAULT_DEF, keep: false, jobs: 4, tests: null, skill: SKILL_DIR, timeoutSec: DEFAULT_TIMEOUT_SEC, error: null }
+  const out = { list: false, run: null, def: DEFAULT_DEF, keep: false, jobs: 4, tests: null, skill: SKILL_DIR, dev: null, timeoutSec: DEFAULT_TIMEOUT_SEC, error: null }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--list') out.list = true
     else if (a === '--keep') out.keep = true
-    else if (a === '--def' || a === '--jobs' || a === '--tests' || a === '--skill' || a === '--timeout') {
+    else if (a === '--def' || a === '--jobs' || a === '--tests' || a === '--skill' || a === '--dev' || a === '--timeout') {
       const v = argv[++i]
       if (v === undefined || v.startsWith('--')) return { ...out, error: `${a} に値が無い` }
       if (a === '--def') out.def = v
       else if (a === '--skill') out.skill = resolve(v)
+      else if (a === '--dev') out.dev = resolve(v)
       else if (a === '--tests') out.tests = v.split(',').filter(Boolean)
       else if (a === '--timeout') {
         if (!/^[1-9][0-9]{0,5}$/.test(v)) return { ...out, error: '--timeout は 1〜999999 の整数（秒）' }
@@ -267,7 +286,7 @@ async function main() {
   const worker = async () => {
     while (next < wanted.length) {
       const m = wanted[next++]
-      const r = await runMutation(m, { skillDir: args.skill, keep: args.keep, testsOverride: args.tests, timeoutSec: args.timeoutSec })
+      const r = await runMutation(m, { skillDir: args.skill, ...(args.dev ? { devDir: args.dev } : {}), keep: args.keep, testsOverride: args.tests, timeoutSec: args.timeoutSec })
       results.push(r)
       const label = { killed: 'KILLED  ', survived: 'SURVIVED', invalid: 'INVALID ' }[r.status]
       console.log(`${label} ${r.id}${r.by ? ` (by: ${r.by})` : ''} ${r.seconds.toFixed(1)}s${r.detail ? ` — ${r.detail}` : ''}`)

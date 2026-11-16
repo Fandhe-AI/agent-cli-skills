@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const skill = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md'), 'utf8')
+const skill = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'SKILL.md'), 'utf8')
 const blocks = [...skill.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1])
 
 test('SKILL.md の ```json ブロックはすべて JSON として解析できる', () => {

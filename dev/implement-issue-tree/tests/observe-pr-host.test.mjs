@@ -21,7 +21,7 @@ import { createObserveStubPages as createObserveStub } from './lib/gh-observe-st
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT_PATH = join(HERE, '..', 'scripts', 'implement-issue-tree.src.js')
-const OBSERVE_SH = join(HERE, '..', 'scripts', 'observe-pr.sh')
+const OBSERVE_SH = join(HERE, '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'observe-pr.sh')
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
 const source = readFileSync(SCRIPT_PATH, 'utf8')
 const markerIndex = source.indexOf(DRIVER_MARKER)

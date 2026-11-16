@@ -2,6 +2,7 @@
 // g0-gates.test.mjs と同じスライス方式（DRIVER マーカーより上を切り出し export を付与して
 // import する）で、モデル出力に依存しない純粋関数・プロンプト契約・既定無効（宣言なしイシューは
 // 出力が完全に不変）を検証する。
+import { SKILL_DIR } from './lib/paths.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -750,7 +751,7 @@ test('fixPrompt: pushAfterFix=false（push 前 Review ループ）では optinTe
 // かつてはプロンプトの grep 手順をテスト内に写して再現していたが（写しと本物がずれ得る）、手順は scripts/lib/optin-record-lib.sh へ移った
 // （Issue #603）ので、その本物を source して正規化 + 3 種類（pass / fail / not-run）の固定文字列 -cxF の件数を数える。PR #503 3 巡目 codex P1:
 // sha 束縛。行頭インデント・CRLF が付いたマーカー行でも一致すること、sha が一致しない行は一致しないことを検証するのが目的。
-const OPTIN_RECORD_LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'optin-record-lib.sh')
+const OPTIN_RECORD_LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'optin-record-lib.sh')
 function grepShaResultCounts(bodyText, sha, command) {
   const script = '. "$1" && norm=$(optin_record_normalize) && optin_record_counts "$norm" "$2" "$3"'
   const out = execFileSync('bash', ['-c', script, 'bash', OPTIN_RECORD_LIB, sha, command], { input: `${bodyText}\n`, encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } })
@@ -1250,7 +1251,7 @@ test('駆動部: latch 終端メッセージ文言に「削除するか」「削
 })
 
 test('ドキュメント: recovery.md・automerge-design.md・SKILL.md（と SKILL.md から移した args-reference.md・optin-tests.md）・state-example.json のいずれにも optinFixState を削除・改変して latch を迂回する実行指示（「削除するか」「エントリごと削除してから」等）が残っていない', () => {
-  // dirname(import.meta.url) は skills/implement-issue-tree/tests。'..' で
+  // dirname(import.meta.url) は dev/implement-issue-tree/tests。'..' で
   // skills/implement-issue-tree/ 相対のパスを組み立てる（SCRIPT_PATH と同じ組み立て方）。
   // args-reference.md・optin-tests.md は SKILL.md の本文を移した先。外すと SKILL.md だった範囲の検査が黙って狭くなる。
   const files = [
@@ -1263,7 +1264,7 @@ test('ドキュメント: recovery.md・automerge-design.md・SKILL.md（と SKI
   ]
   const forbidden = [/削除するか/, /エントリごと削除してから/, /attempted: false へ書き換えてから/]
   for (const relPath of files) {
-    const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', ...relPath.split('/')), 'utf8')
+    const text = readFileSync(join(SKILL_DIR, ...relPath.split('/')), 'utf8')
     for (const pattern of forbidden) {
       assert.doesNotMatch(text, pattern, `${relPath} に迂回手順の指示が残っている: ${pattern}`)
     }

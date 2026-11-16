@@ -15,7 +15,7 @@ import { availableBashes, toolExists } from './lib/signed-output.mjs'
 import { spawnAsync } from './lib/run-async.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SCRIPT = join(HERE, '..', 'scripts', 'merge-gate.sh')
+const SCRIPT = join(HERE, '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'merge-gate.sh')
 const SRC = join(HERE, '..', 'scripts', 'implement-issue-tree.src.js')
 const MARKER = '__IMPLEMENT_ISSUE_TREE_DRIVER_START__'
 

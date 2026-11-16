@@ -10,12 +10,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
-import { applyMutation, countOccurrences, needsRebuild, parseSpecOutput, runMutation, validateDefinitions } from './tools/mutate.mjs'
+import { applyMutation, countOccurrences, locateFile, needsRebuild, parseSpecOutput, runMutation, validateDefinitions } from './tools/mutate.mjs'
 import { hangSeconds } from './lib/run-async.mjs'
 import { MUTATIONS } from './tools/mutations.mjs'
 
-const SKILL = join(dirname(fileURLToPath(import.meta.url)), '..')
-const TOOL = join(SKILL, 'tests', 'tools', 'mutate.mjs')
+const DEV = join(dirname(fileURLToPath(import.meta.url)), '..')
+const SKILL = join(DEV, '..', '..', 'skills', 'implement-issue-tree')
+const ROOT = join(DEV, '..', '..')
+const TOOL = join(DEV, 'tests', 'tools', 'mutate.mjs')
 
 test('countOccurrences / applyMutation: 置換はちょうど 1 か所に当たるときだけ当てる（0 か所・2 か所以上は当てない）', () => {
   assert.equal(countOccurrences('abcabc', 'bc'), 2)
@@ -55,11 +57,11 @@ test('同梱の変異定義: 形式が正しく、置換前の文字列が対象
   assert.ok(MUTATIONS.length >= 10, `定義が減っている: ${MUTATIONS.length}`)
   const bad = []
   for (const m of MUTATIONS) {
-    const n = countOccurrences(readFileSync(join(SKILL, m.file), 'utf8'), m.from)
+    const n = countOccurrences(readFileSync(locateFile(ROOT, m.file), 'utf8'), m.from)
     if (n !== 1) bad.push(`${m.id}: ${m.file} に ${n} か所`)
     for (const t of m.tests) {
       try {
-        readFileSync(join(SKILL, 'tests', t), 'utf8')
+        readFileSync(join(DEV, 'tests', t), 'utf8')
       } catch {
         bad.push(`${m.id}: テストファイルが無い ${t}`)
       }

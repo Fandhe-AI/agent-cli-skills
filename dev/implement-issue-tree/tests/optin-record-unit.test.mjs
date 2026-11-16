@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { availableBashes } from './lib/signed-output.mjs'
 import { trackTmp } from './lib/tmp-track.mjs'
 
-const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'optin-record-lib.sh')
+const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'optin-record-lib.sh')
 const SHA_A = 'a'.repeat(40)
 const SHA_B = 'b'.repeat(40)
 const marker = (sha, result, cmd) => `<!-- optin-test-record: ${sha} ${result} ${cmd} -->`

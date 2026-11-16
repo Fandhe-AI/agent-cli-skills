@@ -35,7 +35,7 @@ import {
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'scripts', 'implement-issue-tree.js',
+  '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'implement-issue-tree.js',
 )
 const source = readFileSync(SCRIPT_PATH, 'utf8')
 const byteLength = statSync(SCRIPT_PATH).size

@@ -14,7 +14,7 @@ import { importDefinitions } from './lib/stub-run.mjs'
 // ホストの treeOptinDigest（実ソースの定義部を読み込む）。シェルの ft_optin_digest と同じ値になること
 const { treeOptinDigest, treeNodesDigest, treeStructDigest } = await importDefinitions(['treeOptinDigest', 'treeNodesDigest', 'treeStructDigest'], 'fetch-tree-unit')
 
-const LIBDIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib')
+const LIBDIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib')
 const sha = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
 const US = '\u001f'
 

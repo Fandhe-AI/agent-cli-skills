@@ -5,6 +5,7 @@
 //   (2) monitorPrompt 手順 3g（clientMergeActive 限定・有界待機・件数のみ）
 //   (3) merge-exec (v-b) の一過性（checks-not-green）/ 構成問題（issuer-unbound）分岐
 // 読み込み方式は post-push-checks-gate.test.mjs と同一のマーカー切り出しスライス方式。
+import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
@@ -153,7 +154,7 @@ test('monitorPrompt(autoMerge 無効): 手順 3g を含まない', () => {
 // 第 6 弾（#603）で (v-b) の判定はプロンプトからスクリプトへ移った。判定の中身は merge-gate-unit.test.mjs / merge-gate.test.mjs が
 // 検査する。ここでは語彙の対応（未発行のみ = 一過性の checks-not-green、未束縛・取得不能 = issuer-unbound）だけを固定する
 test('merge-gate.sh (v-b): 未発行のみなら checks-not-green、未束縛・取得不能は issuer-unbound', () => {
-  const text = readFileSync(new URL('../scripts/merge-gate.sh', import.meta.url), 'utf8')
+  const text = readFileSync(new URL('../../../skills/implement-issue-tree/scripts/merge-gate.sh', import.meta.url), 'utf8')
   assert.ok(text.includes('stop checks-not-green g0 unissued'))
   assert.ok(text.includes('stop issuer-unbound g0 unbound'))
   assert.ok(text.includes('stop issuer-unbound g0 rsc-format 1'))
@@ -328,7 +329,7 @@ test('#586 手順 7・返却説明・checksTotal description は状態表を参�
 })
 
 test('#586 references/automerge-design.md は観測状態表（3 状態）と同じ意味になっている', () => {
-  const doc = readFileSync(join(dirname(SCRIPT_PATH), '..', 'references', 'automerge-design.md'), 'utf8')
+  const doc = readFileSync(join(SHIPPED_SCRIPTS, '..', 'references', 'automerge-design.md'), 'utf8')
   const line = doc.split('\n').find((l) => l.startsWith('3. **monitor の 0 件直行と `timeout` の限定**'))
   assert.ok(line, 'monitor の 0 件直行の節がない')
   for (const needle of ['整合', '確定 0 件', '不整合・取得不能', '30 秒間隔で最大 3 回', '`blocked` / `"quality"`', '3 状態は排他', '--until settled', '最大 30 回', '確定値 0 は含まない']) {

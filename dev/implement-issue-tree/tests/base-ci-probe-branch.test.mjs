@@ -32,11 +32,11 @@ import { execFileSync } from 'node:child_process'
 
 const DESIGN_DOC_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'references', 'automerge-design.md',
+  '..', '..', '..', 'skills', 'implement-issue-tree', 'references', 'automerge-design.md',
 )
 const SKILL_MD_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'SKILL.md',
+  '..', '..', '..', 'skills', 'implement-issue-tree', 'SKILL.md',
 )
 
 const SECTION_HEADING = '**補償策の成立確認（base CI プローブ）**'

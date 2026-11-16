@@ -12,7 +12,7 @@
 //   - 定義部をスライス import し、writeBlockedStateBatch 等を stub agent で直接実行する（単体）。
 //   - 実装スクリプト全体を Workflow ランタイムと同じ評価形態（AsyncFunction）で stub agent に対して
 //     実行し、エージェント起動のラベルと回数・返却値を観測する（結合）。実行する前に必ず
-//     skills/implement-issue-tree/scripts/implement-issue-tree.src.js を対象にする。
+//     dev/implement-issue-tree/scripts/implement-issue-tree.src.js を対象にする。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'

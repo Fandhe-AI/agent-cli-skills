@@ -15,7 +15,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { availableBashes, toolExists } from './lib/signed-output.mjs'
 import { bundleSha256 } from '../scripts/build-workflow.mjs'
 
-const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 const SCRIPT = join(SCRIPTS, 'state.sh')
 const LIB = join(SCRIPTS, 'lib', 'state-lib.sh')
 const BASHES = availableBashes()

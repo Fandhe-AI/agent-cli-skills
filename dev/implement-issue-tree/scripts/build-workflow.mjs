@@ -77,10 +77,10 @@
 // 生成物を直接編集したりビルドを忘れたりすると byte 不一致で fail する。
 //
 // 使い方:
-//   node skills/implement-issue-tree/scripts/build-workflow.mjs          # 生成して書き込み
-//   node skills/implement-issue-tree/scripts/build-workflow.mjs --check  # 書き込まず鮮度確認
+//   node dev/implement-issue-tree/scripts/build-workflow.mjs          # 生成して書き込み
+//   node dev/implement-issue-tree/scripts/build-workflow.mjs --check  # 書き込まず鮮度確認
 //   --src <path> / --dist <path> で入力の開発ファイル・出力（--check では比較対象）の実行ファイルを差し替える
-//   （テスト用。既定はこのディレクトリの implement-issue-tree.src.js / implement-issue-tree.js）。値が無い・
+//   （テスト用。既定はこのディレクトリの implement-issue-tree.src.js と skills/implement-issue-tree/scripts/implement-issue-tree.js）。値が無い・
 //   未知の引数は既定値へ戻らず使い方のエラー（exit 2）。トークン照合を差し替える引数は無い（迂回できてしまうため）。
 //   照合の差し替え（テスト用）は runBuild / verifyTokenParity の引数だけで行う
 import { spawnSync } from 'node:child_process'
@@ -90,8 +90,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+// 配布物（生成物と、そのハッシュ対象のスクリプト）は skills/ 側、開発専用ファイル（src・ビルダー・照合ヘルパー）は dev/ 側にある
+export const SKILL_SCRIPTS_DIR = join(HERE, '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 export const SRC_PATH = join(HERE, 'implement-issue-tree.src.js')
-export const DIST_PATH = join(HERE, 'implement-issue-tree.js')
+export const DIST_PATH = join(SKILL_SCRIPTS_DIR, 'implement-issue-tree.js')
 export const TOKEN_DIFF_PATH = join(HERE, 'token-diff.cjs')
 export const MANGLE_PATH = join(HERE, 'mangle-identifiers.cjs')
 export const ALPHA_VERIFY_PATH = join(HERE, 'alpha-verify.cjs')
@@ -933,9 +935,9 @@ export function verifyAlpha(stage1, mangled, { helperPath = ALPHA_VERIFY_PATH, e
  * 書かず、既存の実行ファイルとの一致だけ確かめる）。標準出力・標準エラーに出す行と終了コードを返し、
  * 出力と終了は呼び出し側（CLI）が行う。照合に失敗したら生成ファイルは書かない。
  * `parity` / `mangle` / `alpha` は照合 1・改名器・照合 2 へ渡す差し替え（`helperPath` / `execPath`。テスト専用で、CLI の引数からは渡せない）。
- * `scriptsDir` はハッシュを埋め込むスクリプトの置き場の差し替え（テスト専用。既定は開発ファイルと同じディレクトリで、CLI の引数からは渡せない）。
+ * `scriptsDir` はハッシュを埋め込むスクリプトの置き場の差し替え（テスト専用。既定は skills/implement-issue-tree/scripts で、CLI の引数からは渡せない）。
  */
-export function runBuild({ srcPath = SRC_PATH, distPath = DIST_PATH, checkOnly = false, parity = {}, mangle = {}, alpha = {}, scriptsDir = dirname(srcPath) } = {}) {
+export function runBuild({ srcPath = SRC_PATH, distPath = DIST_PATH, checkOnly = false, parity = {}, mangle = {}, alpha = {}, scriptsDir = SKILL_SCRIPTS_DIR } = {}) {
   const startedAt = Date.now()
   let src
   let artifact

@@ -10,6 +10,7 @@
 //       実物の規模でも手順 6 が当たること。生成物は次の段で改名済みになるので、コミット済みの生成物は読まない。
 // acorn は `node --expose-internals` の子プロセスでしか読めないため、検証器は CLI として起動する。
 // 件数・バイト数などの実測値は固定しない（main が進むと変わる）。
+import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -341,7 +342,7 @@ test('CLI: 入力の形が違えば非ゼロ終了し、stdout に何も書か�
 
 test('実物: stage1 の恒等は一致し（手順 6 は 0 件）、関数値の文字列化を足すと実物の規模でも拒否する', async () => {
   // ビルダーと同じ手順で stage1（コメント・空白を除いた生成物）を作る
-  const stage1 = buildArtifact(embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), dirname(SRC_PATH)))
+  const stage1 = buildArtifact(embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), SHIPPED_SCRIPTS))
   // 実物に無い名前の関数宣言と、その文字列化を最終行の末尾に足す（行数を変えない）。
   // before = after にして拒否の理由を手順 6 だけにする
   let fn = 'alphaVerifyProbe'

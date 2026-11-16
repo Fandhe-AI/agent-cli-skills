@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { availableBashes } from './lib/signed-output.mjs'
 import { BRANCH, git, makeSandbox } from './lib/git-sandbox.mjs'
 
-const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'push-verify.sh')
+const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'push-verify.sh')
 const BASHES = availableBashes()
 
 // ローカルに 1 コミット積んだ状態（detached HEAD）にして、lib を source して関数を呼ぶ

@@ -13,7 +13,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { availableBashes } from './lib/signed-output.mjs'
 import { runScript, BASE_ARGS } from './lib/stub-run.mjs'
 
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'declared-deps.sh')
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'declared-deps.sh')
 
 const node = (number, parent, title) => ({ number, title, state: 'open', parent, siblingIndex: number, dependsOn: [], subIssuesTotal: 0 })
 const TREE = [

@@ -25,7 +25,7 @@ import { toolExists } from './signed-output.mjs'
 import { BASE, BRANCH, MERGE_SUBJECT, PR, REPO, git, makeSandbox } from './git-sandbox.mjs'
 import { bundleSha256 } from '../../scripts/build-workflow.mjs'
 
-export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'base-merge.sh')
+export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'base-merge.sh')
 export const RUN_VERIFIED = join(dirname(SCRIPT), 'run-verified.sh')
 const jqAvailable = toolExists('jq')
 const ARGS = ['--pr', String(PR), '--branch', BRANCH, '--base', BASE, '--repo', REPO]

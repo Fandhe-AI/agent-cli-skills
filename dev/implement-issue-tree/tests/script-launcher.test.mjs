@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { availableBashes, toolExists } from './lib/signed-output.mjs'
 import { bundleSha256, embedScriptHashes, runBuild, SCRIPT_HASH_PLACEHOLDER_RE, DIST_PATH, SRC_PATH } from '../scripts/build-workflow.mjs'
 
-const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 const BASHES = availableBashes()
 const sh = (cmd) => spawnSync('sh', ['-c', cmd], { encoding: 'utf8' }).stdout.trim()
 
@@ -281,20 +281,20 @@ function buildFixture(scriptBody) {
 test('runBuild: 生成物に埋め込まれるハッシュはスクリプトの bundleSha256。スクリプトを書き換えると --check が鮮度エラーにする', () => {
   const { dir, srcPath, distPath } = buildFixture('echo v1\n')
   try {
-    const built = runBuild({ srcPath, distPath })
+    const built = runBuild({ scriptsDir: dir, srcPath, distPath })
     assert.equal(built.status, 0, built.stderr.join('\n'))
     const dist = readFileSync(distPath, 'utf8')
     assert.ok(dist.includes(bundleSha256(dir, 't.sh')))
     assert.ok(!dist.includes('@@'))
-    assert.equal(runBuild({ srcPath, distPath, checkOnly: true }).status, 0)
+    assert.equal(runBuild({ scriptsDir: dir, srcPath, distPath, checkOnly: true }).status, 0)
     // スクリプトだけを書き換える（開発ファイルは不変）
     writeFileSync(join(dir, 't.sh'), 'echo v2\n')
-    const stale = runBuild({ srcPath, distPath, checkOnly: true })
+    const stale = runBuild({ scriptsDir: dir, srcPath, distPath, checkOnly: true })
     assert.equal(stale.status, 1)
     assert.match(stale.stderr.join('\n'), /鮮度エラー/)
     // 再生成すると同期する
-    assert.equal(runBuild({ srcPath, distPath }).status, 0)
-    assert.equal(runBuild({ srcPath, distPath, checkOnly: true }).status, 0)
+    assert.equal(runBuild({ scriptsDir: dir, srcPath, distPath }).status, 0)
+    assert.equal(runBuild({ scriptsDir: dir, srcPath, distPath, checkOnly: true }).status, 0)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -303,7 +303,7 @@ test('runBuild: 生成物に埋め込まれるハッシュはスクリプトの 
 test('runBuild: スクリプトが無ければ生成物を書かずに中止する（status 1・wrote false）', () => {
   const { dir, srcPath, distPath } = buildFixture(null)
   try {
-    const r = runBuild({ srcPath, distPath })
+    const r = runBuild({ scriptsDir: dir, srcPath, distPath })
     assert.equal(r.status, 1)
     assert.equal(r.wrote, false)
     assert.equal(existsSync(distPath), false)

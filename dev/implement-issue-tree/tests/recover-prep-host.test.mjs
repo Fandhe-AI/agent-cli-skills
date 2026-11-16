@@ -92,7 +92,7 @@ test('第 1 層: wipCommitted が false（WIP を退避できなかった）な�
 test('recover-prep.sh は SCRIPT_SHA256 に載り（生成物には 64 桁のハッシュが埋まる）、recoverPrompt は SCRIPT_SHA256 経由で起動する', () => {
   assert.match(source, /'recover-prep\.sh': '@@SCRIPT_SHA256:recover-prep\.sh@@'/)
   assert.match(source, /scriptInvocation\('recover-prep\.sh', undefined, prepArgs\)/)
-  const dist = readFileSync(new URL('../scripts/implement-issue-tree.js', import.meta.url), 'utf8')
+  const dist = readFileSync(new URL('../../../skills/implement-issue-tree/scripts/implement-issue-tree.js', import.meta.url), 'utf8')
   assert.match(dist, /'recover-prep\.sh':'[0-9a-f]{64}'/)
   assert.doesNotMatch(dist, /@@SCRIPT_SHA256/)
 })

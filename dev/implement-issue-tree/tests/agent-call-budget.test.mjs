@@ -10,6 +10,7 @@
 //
 // 検証の二層構造: 定義部をスライス import して純粋関数を直接実行（単体）し、実装スクリプト全体を
 // Workflow ランタイムと同じ評価形態（AsyncFunction。agent は引数）で stub agent に対して実行する（結合）。
+import { SHIPPED_SCRIPTS } from './lib/paths.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
@@ -137,7 +138,7 @@ test('単体: agentBudgetHold は終了時の照合の予備（budget.terminalVe
 })
 
 test('単体: 生成元は agent() の呼び出し箇所を変えず、pipeline() も使わない（数え方が 1:1 で成り立つ前提）', () => {
-  const dist = readFileSync(join(dirname(SCRIPT_PATH), 'implement-issue-tree.js'), 'utf8')
+  const dist = readFileSync(join(SHIPPED_SCRIPTS, 'implement-issue-tree.js'), 'utf8')
   assert.doesNotMatch(dist, /\bpipeline\(/, 'pipeline() が増えると agent() 呼び出し数とランタイムの数がずれる（コメント除去済みの生成物で検査）')
   assert.ok(driverPart.includes('agent = countedAgent'), '駆動部で agent を再束縛する')
   assert.ok(driverPart.includes('wrapAgentCounting(agent, agentBudget, log)'), '超過の警告をラン中のログへ出す')

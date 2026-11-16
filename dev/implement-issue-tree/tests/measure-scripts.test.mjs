@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { availableBashes, expectedSha256, inputSha256, toolExists } from './lib/signed-output.mjs'
 
-const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 const RESIDUAL = join(SCRIPTS, 'measure-residual-bytes.sh')
 const FREE = join(SCRIPTS, 'measure-free-disk.sh')
 const NONCE = 'k3x9a0b1c2d4e5f6g7h8i9j0k1l2'

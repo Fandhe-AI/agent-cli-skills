@@ -23,8 +23,8 @@ import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { expectedSha256, makeEnvelope, nonceOf, signedReply } from './lib/signed-output.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SKILL_DIR = join(HERE, '..')
-const SCRIPT_PATH = join(SKILL_DIR, 'scripts', 'implement-issue-tree.src.js')
+const SKILL_DIR = join(HERE, '..', '..', '..', 'skills', 'implement-issue-tree')
+const SCRIPT_PATH = join(HERE, '..', 'scripts', 'implement-issue-tree.src.js')
 const DRIVER_MARKER = '__IMPLEMENT_ISSUE_TREE_DRIVER_START__'
 
 const source = readFileSync(SCRIPT_PATH, 'utf8')

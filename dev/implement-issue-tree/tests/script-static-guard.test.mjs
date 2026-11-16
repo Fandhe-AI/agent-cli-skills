@@ -15,7 +15,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts')
 const EXCLUDED = new Set(['merge-guard-hook.sh'])
 
 // 検査パターン。{ label, test(line) }。test は連結済みのコード 1 行を受ける。

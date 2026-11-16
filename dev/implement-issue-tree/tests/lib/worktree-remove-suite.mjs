@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { gitEnv, makeRepo, runScript } from './worktree-sandbox.mjs'
 import { toolExists } from './signed-output.mjs'
 
-export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'worktree-remove.sh')
+export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'worktree-remove.sh')
 
 // 終了済みの子プロセスの pid（その時点では存在しない）
 function deadPid() {

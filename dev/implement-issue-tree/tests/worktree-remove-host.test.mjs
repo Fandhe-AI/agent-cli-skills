@@ -568,7 +568,7 @@ test('verifyDiscardSafety / DISCARD_SAFETY_SCHEMA / discard-safety は残って�
   assert.doesNotMatch(source, /verifyDiscardSafety|DISCARD_SAFETY_SCHEMA|discard-safety/)
   assert.doesNotMatch(source, /reflog から復元(可能|できる)|削除後も reflog/)
   assert.match(source, /'worktree-remove\.sh': '@@SCRIPT_SHA256:worktree-remove\.sh@@'/)
-  const dist = readFileSync(new URL('../scripts/implement-issue-tree.js', import.meta.url), 'utf8')
+  const dist = readFileSync(new URL('../../../skills/implement-issue-tree/scripts/implement-issue-tree.js', import.meta.url), 'utf8')
   assert.match(dist, /'worktree-remove\.sh':'[0-9a-f]{64}'/)
 })
 

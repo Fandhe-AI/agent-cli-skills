@@ -15,8 +15,8 @@ import { fileURLToPath } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const DIST = readFileSync(join(HERE, '..', 'scripts', 'implement-issue-tree.js'), 'utf8')
-const SAMPLE = JSON.parse(readFileSync(join(HERE, '..', 'sample', 'args-example.json'), 'utf8'))
+const DIST = readFileSync(join(HERE, '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'implement-issue-tree.js'), 'utf8')
+const SAMPLE = JSON.parse(readFileSync(join(HERE, '..', '..', '..', 'skills', 'implement-issue-tree', 'sample', 'args-example.json'), 'utf8'))
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const STOP = 'STOP-AT-FIRST-AGENT'
 

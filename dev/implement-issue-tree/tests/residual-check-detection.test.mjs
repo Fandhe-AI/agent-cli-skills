@@ -67,14 +67,14 @@ import { execFileSync } from 'node:child_process'
 
 const SKILL_MD_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'SKILL.md',
+  '..', '..', '..', 'skills', 'implement-issue-tree', 'SKILL.md',
 )
 const skillMd = readFileSync(SKILL_MD_PATH, 'utf8')
 // 検知コマンド (A)/(B) と対処手順の本体は references/residual-check.md へ移した。
 // 前提条件節（awk）と「よくある失敗」表は SKILL.md に残るため両方を読む。
 const RESIDUAL_MD_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'references', 'residual-check.md',
+  '..', '..', '..', 'skills', 'implement-issue-tree', 'references', 'residual-check.md',
 )
 const residualMd = readFileSync(RESIDUAL_MD_PATH, 'utf8')
 

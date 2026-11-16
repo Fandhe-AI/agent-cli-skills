@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { availableBashes } from './lib/signed-output.mjs'
 import { REPO } from './lib/git-sandbox.mjs'
 
-const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'base-merge-lib.sh')
+const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'lib', 'base-merge-lib.sh')
 const BASHES = availableBashes()
 const WANT = REPO.toLowerCase() // スクリプトは小文字化した期待 owner/repo を渡す
 const TOKEN = 'ghp_SECRETTOKEN0123456789abcdef'

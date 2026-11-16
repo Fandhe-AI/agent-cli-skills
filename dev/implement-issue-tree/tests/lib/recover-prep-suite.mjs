@@ -19,7 +19,7 @@ import { gitEnv, makeRepo } from './worktree-sandbox.mjs'
 import { toolExists } from './signed-output.mjs'
 import { bundleSha256 } from '../../scripts/build-workflow.mjs'
 
-export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'recover-prep.sh')
+export const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'skills', 'implement-issue-tree', 'scripts', 'recover-prep.sh')
 const SHA40 = /^[0-9a-f]{40}$/
 const WIP_SUBJECT = 'chore(recover): 中断時の未コミット変更を退避'
 
