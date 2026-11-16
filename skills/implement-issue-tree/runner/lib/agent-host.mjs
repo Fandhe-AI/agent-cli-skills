@@ -33,7 +33,7 @@ import { extractJsonObject } from './extract-json.mjs'
 import { resolveModel, resolveTimeoutMs } from './models.mjs'
 import { buildRepairPrompt, composePrompt } from './preamble.mjs'
 import { assertSupportedSchema, sanitizeErrorLine, validate } from './schema-validate.mjs'
-import { createSequencer, createWorktree } from './worktree.mjs'
+import { createSequencer, createWorktree, verifyWorktreeGitdir } from './worktree.mjs'
 
 // ---- 実行仕様 ----
 
@@ -382,11 +382,16 @@ export function createAgentHost({ adapter, cfg }) {
     const resolved = resolveModel(config, tool, { model: opts.model, effort: opts.effort })
     let cwd = mainRoot
     let worktreePath
+    // 隔離 worktree の git ディレクトリ（契約の req.worktreeGitdir。HIGH-2）。作成直後に検証した値だけを渡し、
+    // アダプタは worktree の .git ファイルを読まない。修復ターン（resume）も同じ req から作るので読み直さない。
+    // 作成関数が gitdir を返さない（テストの差し替え）ときは null（アダプタは git の書き込みを足さない）
+    let worktreeGitdir = null
     if (opts.isolation === 'worktree') {
-      // 失敗は例外のまま上げる（契約で throw してよい 2 つのうちの 1 つ）
+      // 失敗は例外のまま上げる（契約で throw してよい 2 つのうちの 1 つ。gitdir の検証失敗も作成失敗として扱う）
       const wt = makeWorktree({ mainRoot, runId, n })
       cwd = wt.path
       worktreePath = wt.path
+      if (wt.gitdir !== undefined) worktreeGitdir = verifyWorktreeGitdir(mainRoot, wt.gitdir)
     }
     const req = {
       prompt: composePrompt({ prompt, schema, worktreePath }),
@@ -400,8 +405,9 @@ export function createAgentHost({ adapter, cfg }) {
       timeoutMs,
       resume: null,
       logDir: logDir ?? '',
+      worktreeGitdir,
     }
-    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, timeoutMs, worktree: worktreePath ?? null })
+    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, timeoutMs, worktree: worktreePath ?? null, worktreeGitdir })
     writeLog(logDir, 'prompt.txt', req.prompt)
     // meta.json の outcome は ok / null の 2 値、詳細（修復の有無・失敗の理由）は status・reason に置く
     const outcome = (status, extra = {}) => Object.assign(rec, { outcome: status === 'ok' || status === 'repaired' ? 'ok' : 'null', status, sessionRef }, extra)

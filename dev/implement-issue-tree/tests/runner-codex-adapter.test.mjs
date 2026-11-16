@@ -226,7 +226,7 @@ test('環境: 既存の GIT_CONFIG_COUNT の続きの番号に足す', async () 
   assert.equal(env.GIT_CONFIG_KEY_1, 'branch.autoSetupMerge')
 })
 
-test('permission profile: 通常 cwd は read・linked worktree は impl（gitdir の正確なパスと git の共有領域だけ書ける）', async () => {
+test('permission profile: 通常 cwd は read・req.worktreeGitdir があれば impl（gitdir の正確なパスと git の共有領域だけ書ける）', async () => {
   const t = setup({ turns: [okTurn(), okTurn()] })
   await t.adapter.run(t.req())
   const wt = join(t.mainRoot, '.claude', 'worktrees', 'wf_x-1')
@@ -234,7 +234,7 @@ test('permission profile: 通常 cwd は read・linked worktree は impl（gitdi
   const gitdir = join(t.mainRoot, '.git', 'worktrees', 'wf_x-1')
   mkdirSync(gitdir, { recursive: true })
   writeFileSync(join(wt, '.git'), `gitdir: ${gitdir}\n`)
-  await t.adapter.run(t.req({ name: 'a2', cwd: wt }))
+  await t.adapter.run(t.req({ name: 'a2', cwd: wt, worktreeGitdir: gitdir }))
   const [c1, c2] = t.calls()
   const prof = (c) => c.argv.find((x) => x.startsWith('permissions='))
   const read = prof(c1)
@@ -480,4 +480,44 @@ test('AdapterError: 未知の kind は拒否し、sessionRef を持てる', () =
   assert.equal(e.name, 'AdapterError')
   assert.equal(e.sessionRef, U1)
   assert.ok(e instanceof Error)
+})
+
+// ---------------------------------------------------------------------------
+// HIGH-2（監査 e670648）: worktree の .git ファイルの中身で書き込み範囲が広がらない
+// ---------------------------------------------------------------------------
+
+test('HIGH-2: 細工した worktree の .git（gitdir: <任意パス>）を読んで書き込み範囲を広げない。gitdir は req.worktreeGitdir だけを使い resume でも読み直さない', async () => {
+  const t = setup({ turns: [okTurn(), okTurn(), okTurn()] })
+  const prof = (c) => c.argv.find((x) => x.startsWith('permissions='))
+  const wt = join(t.mainRoot, '.claude', 'worktrees', 'wf_x-1')
+  mkdirSync(wt, { recursive: true })
+  const gitdir = join(t.mainRoot, '.git', 'worktrees', 'wf_x-1')
+  mkdirSync(gitdir, { recursive: true })
+  // 攻撃: .git を任意のパス（例: スキルの scripts/）へ向ける。2 つ上の objects 等も書けるようになっていた
+  const evil = join(t.root, 'evil', 'a', 'b')
+  writeFileSync(join(wt, '.git'), `gitdir: ${evil}\n`)
+  // (1) req.worktreeGitdir 無し: .git を読まない。worktree でも書き込み範囲に evil 系のパスは入らない
+  await t.adapter.run(t.req({ name: 'h2a', cwd: wt }))
+  const p1 = prof(t.calls().at(-1))
+  assert.equal(p1.includes(join(t.root, 'evil')), false, '.git の中身のパスを書き込み可にしない')
+  assert.ok(t.calls().at(-1).argv.includes('default_permissions="iit_read"'), 'worktreeGitdir が無ければ impl にしない')
+  // (2) req.worktreeGitdir あり: その値だけを使う。resume の前に .git を書き換えても変わらない
+  writeFileSync(join(wt, '.git'), `gitdir: ${gitdir}\n`)
+  const r = await t.adapter.run(t.req({ name: 'h2b', cwd: wt, worktreeGitdir: gitdir }))
+  writeFileSync(join(wt, '.git'), `gitdir: ${evil}\n`)
+  await t.adapter.run(t.req({ name: 'h2b', cwd: wt, worktreeGitdir: gitdir, resume: { sessionRef: r.sessionRef, message: 'm' } }))
+  for (const c of t.calls().slice(-2)) {
+    const p = prof(c)
+    assert.ok(p.includes(`${JSON.stringify(gitdir)}="write"`))
+    assert.equal(p.includes(join(t.root, 'evil')), false, 'resume でも .git を読み直さない')
+    assert.ok(c.argv.includes('default_permissions="iit_impl"'))
+  }
+})
+
+test('HIGH-2: req.worktreeGitdir がメインの .git/worktrees/ の直下でなければ実行しない（denied）', async () => {
+  const t = setup({ turns: [okTurn()] })
+  for (const bad of [join(t.root, 'evil'), join(t.mainRoot, '.git'), join(t.mainRoot, '.git', 'worktrees'), join(t.mainRoot, '.git', 'worktrees', 'a', 'b'), 'rel/x', `${join(t.mainRoot, '.git', 'worktrees', 'a')}/..`]) {
+    await rejectsKind(t.adapter.run(t.req({ name: 'h2c', worktreeGitdir: bad })), 'denied')
+  }
+  assert.equal(t.calls().length, 0, 'codex を起動しない')
 })

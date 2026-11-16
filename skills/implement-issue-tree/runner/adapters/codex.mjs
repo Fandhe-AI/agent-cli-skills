@@ -52,13 +52,15 @@
 //   (2) 共通の前置き（lib/preamble.mjs の SHELL_NOTE）で、複数行は `bash <<'EOF'` で実行し zsh の特殊変数名に代入しない
 //       よう指示する（Phase 3 の通しで、モデルの `status=$?` が zsh の読み取り専用変数に当たって落ちた）。契約上アダプタは
 //       プロンプトを加工しないので、ここでは足さない。
-//   既定は cwd の `.git` がファイルなら iit_impl、そうでなければ iit_read。req.profile で上書きできる（契約への任意の追加）。
+//   既定は req.worktreeGitdir（契約。agent-host が worktree 作成直後に検証した値）があれば iit_impl、無ければ iit_read。
+//   worktree の `.git` ファイルは読まない（書き換えで書き込み範囲を広げられるため。監査 e670648 の HIGH-2）。
+//   req.profile で上書きできる（契約への任意の追加）。
 //
 // 時間切れ: プロセスグループへ SIGTERM、猶予後に SIGKILL（孫も止まる。setsid で抜けた孫は止められない）。
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AdapterError } from '../lib/adapter-error.mjs'
 import { MERGE_EXEC_COMMAND } from '../lib/guard.mjs'
@@ -81,18 +83,19 @@ export function platformWritePaths(platform) {
 const q = (s) => JSON.stringify(s)
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 
-/** cwd が linked worktree なら { gitdir, commonDir }（gitdir は <main>/.git/worktrees/<name>）。違えば null。 */
-export function linkedWorktreeGit(cwd) {
-  const f = join(cwd, '.git')
-  try {
-    if (!statSync(f).isFile()) return null
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(f, 'utf8'))
-    if (!m) return null
-    const gitdir = resolve(cwd, m[1])
-    return { gitdir, commonDir: dirname(dirname(gitdir)) }
-  } catch {
-    return null
-  }
+/**
+ * req.worktreeGitdir（agent-host が worktree 作成直後に検証した git ディレクトリ）から profile 用の git 情報を作る。
+ * worktree の `.git` ファイルは読まない（エージェントが書き換え得るため。監査 e670648 の HIGH-2）。
+ * null / undefined は null（git の書き込みを足さない）。メインの `.git/worktrees/` の直下でない値は例外（実行しない）。
+ * @returns {null | { gitdir: string, commonDir: string }}
+ */
+export function worktreeGit(mainRoot, worktreeGitdir) {
+  if (worktreeGitdir === null || worktreeGitdir === undefined) return null
+  const parent = join(mainRoot, '.git', 'worktrees')
+  const ok = typeof worktreeGitdir === 'string' && isAbsolute(worktreeGitdir) && resolve(worktreeGitdir) === worktreeGitdir &&
+    dirname(worktreeGitdir) === parent && basename(worktreeGitdir) !== ''
+  if (!ok) throw new AdapterError('denied', `worktreeGitdir がメインの .git/worktrees/ の直下に無い: ${String(worktreeGitdir).slice(0, 160)}`)
+  return { gitdir: worktreeGitdir, commonDir: join(mainRoot, '.git') }
 }
 
 /**
@@ -219,13 +222,15 @@ export function createAdapter(cfg) {
 
   async function run(req) {
     await start()
+    // 起動前に検証する（不正な worktreeGitdir では codex を起動しない）
+    worktreeGit(cfg.mainRoot, req.worktreeGitdir)
     const { prompt, schema, model, effort, cwd, allowMerge = false, timeoutMs, resume = null, logDir } = req
     mkdirSync(logDir, { recursive: true })
     const n = readdirSync(logDir).filter((f) => /^events-t\d+\.jsonl$/.test(f)).length + 1
     const tag = `t${n}`
     const hookLog = join(logDir, 'hook.log')
     const lastPath = join(logDir, `final-${tag}.txt`)
-    const git = linkedWorktreeGit(cwd)
+    const git = worktreeGit(cfg.mainRoot, req.worktreeGitdir)
     const kind = req.profile ?? (git ? 'impl' : 'read')
 
     const args = ['exec']

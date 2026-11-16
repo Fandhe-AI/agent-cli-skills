@@ -3,11 +3,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, realpathSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { trackTmp } from './lib/tmp-track.mjs'
-import { maskUrlCredentials, createSequencer, createWorktree, newRunId, resolveDefaultBranch, resolveMainRoot, worktreeNames } from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
+import { maskUrlCredentials, createSequencer, createWorktree, newRunId, resolveDefaultBranch, resolveMainRoot, verifyWorktreeGitdir, worktreeNames } from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }
 const git = (cwd, ...args) => {
@@ -157,4 +157,24 @@ test('git の失敗文に載る URL の認証情報は伏せられる', () => {
   const sb = sandbox()
   git(sb.main, 'remote', 'set-url', 'origin', 'https://user:SECRETPASS@127.0.0.1:1/o/r.git')
   assert.throws(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1 }), (e) => !e.message.includes('SECRETPASS'))
+})
+
+test('createWorktree: gitdir は作成直後に git へ問い合わせた <main>/.git/worktrees/<name> の realpath（HIGH-2）', () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const wt = createWorktree({ mainRoot: sb.main, runId, n: 1, lock: false })
+  assert.equal(wt.gitdir, realpathSync(join(sb.main, '.git', 'worktrees', `${runId}-1`)))
+})
+
+test('verifyWorktreeGitdir: メインの .git/worktrees/ の直下だけを通す（symlink で外へ向けた値・入れ子・相対パスは例外）', () => {
+  const sb = sandbox()
+  const wt = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, lock: false })
+  assert.equal(verifyWorktreeGitdir(sb.main, wt.gitdir), wt.gitdir)
+  const outside = join(sb.root, 'outside')
+  mkdirSync(join(outside, 'x'), { recursive: true })
+  const link = join(sb.main, '.git', 'worktrees', 'linked')
+  symlinkSync(outside, link)
+  for (const bad of [outside, link, join(sb.main, '.git'), join(sb.main, '.git', 'worktrees'), join(wt.gitdir, 'logs'), 'rel/x']) {
+    assert.throws(() => verifyWorktreeGitdir(sb.main, bad), /git ディレクトリ/, bad)
+  }
 })

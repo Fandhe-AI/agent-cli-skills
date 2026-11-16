@@ -203,6 +203,35 @@ test('isolation: worktree は通し番号で作った worktree を cwd にし、
   assert.equal(failing.calls.length, 0)
 })
 
+test('worktreeGitdir（HIGH-2）: 作成関数が返した gitdir を検証した realpath だけを渡し、修復ターンでも同じ値。隔離しない段・gitdir を返さない作成関数は null。メインの .git/worktrees/ 直下でなければ例外', async () => {
+  const wtRoot = join(mainRoot, '.git', 'worktrees')
+  const gd = join(wtRoot, `${RUN_ID}-x`)
+  mkdirSync(gd, { recursive: true })
+  let turn = 0
+  const { agent, calls } = makeHost({
+    reply: () => (turn++ === 0 ? 'not json' : { ok: true, n: 1 }),
+    cfg: { createWorktree: (p) => ({ path: `${p.mainRoot}/.claude/worktrees/${p.runId}-${p.n}`, gitdir: gd }) },
+  })
+  await agent('b', { label: 'impl:#2', schema: SCHEMA, isolation: 'worktree' })
+  assert.equal(calls.length, 2)
+  for (const r of calls) assert.equal(r.worktreeGitdir, realpathSync(gd), r.resume ? '修復ターンも同じ値' : '初回')
+  await agent('a', { label: 'plan:#2', schema: SCHEMA })
+  assert.equal(calls.at(-1).worktreeGitdir, null, '隔離しない段は null')
+
+  const noGd = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { createWorktree: (p) => ({ path: `${p.mainRoot}/.claude/worktrees/w` }) } })
+  await noGd.agent('b', { label: 'impl:#2', schema: SCHEMA, isolation: 'worktree' })
+  assert.equal(noGd.calls[0].worktreeGitdir, null, 'path から推測しない')
+
+  const outside = join(root, 'evil-gitdir')
+  mkdirSync(outside, { recursive: true })
+  for (const bad of [outside, wtRoot, join(mainRoot, '.git'), join(gd, 'x'), 'rel/x']) {
+    if (bad.endsWith('/x') && bad.startsWith('/')) mkdirSync(bad, { recursive: true })
+    const h = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { createWorktree: (p) => ({ path: `${p.mainRoot}/.claude/worktrees/w`, gitdir: bad }) } })
+    await assert.rejects(h.agent('b', { label: 'impl:#2', schema: SCHEMA, isolation: 'worktree' }), /git ディレクトリ/, bad)
+    assert.equal(h.calls.length, 0, `アダプタを呼ばない: ${bad}`)
+  }
+})
+
 test('並列上限: 同時に走るアダプタ呼び出しは maxParallel を超えない', async () => {
   let running = 0
   let peak = 0
