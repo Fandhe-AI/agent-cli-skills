@@ -545,3 +545,67 @@ test('killScriptsSync（LOW-11）: 実行中の spawnScript のプロセスグ�
   for (let i = 0; i < 30 && alive(gc); i++) await new Promise((r2) => setTimeout(r2, 100))
   assert.equal(alive(gc), false)
 })
+
+// ---------------------------------------------------------------------------
+// 内容の固定（PR #851 の P0。lib/pins.mjs）: ホストが直接起動する launcher と、照合より前に source される signed-output.sh、
+// run.mjs が起動前に固定したファイル（cfg.pins）を、段の起動前（とモデルの段の後）に照合し、食い違えば以降の段を実行しない
+// ---------------------------------------------------------------------------
+
+function pinnedSkill() {
+  const d = join(root, `pinskill-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(join(d, 'scripts', 'lib'), { recursive: true })
+  writeFileSync(join(d, 'scripts', 'run-verified.sh'), readFileSync(join(skillDir, 'scripts', 'run-verified.sh')))
+  chmodSync(join(d, 'scripts', 'run-verified.sh'), 0o755)
+  writeFileSync(join(d, 'scripts', 'lib', 'signed-output.sh'), '# signed-output\n')
+  return d
+}
+const EXIT_OK = { v: 1, script: 'fetch-tree.sh', sha256: SHA, argv: ['--release', '--dir', '/tmp/x'], ret: 'exit-ok' }
+
+test('固定（P0）: launcher を host の作成後に書き換えると、実行仕様の段を起動せず exec-refused・失敗値。以降の段もすべて止める', async () => {
+  const sd = pinnedSkill()
+  const runDir = join(root, `pin-run-${Math.random().toString(16).slice(2)}`)
+  const { agent, calls } = makeHost({ cfg: { skillDir: sd, runDir }, reply: () => ({ ok: true, n: 1 }) })
+  control({ code: 0 })
+  assert.deepEqual(await agent(withSpec(EXIT_OK), { label: 'plan:issue-tree-release', phase: 'Quick', model: 'haiku', schema: STATE_WRITE }), { ok: true })
+  assert.ok(recorded(), '固定どおりなら起動する')
+  // エージェントが launcher を書き換えた想定
+  writeFileSync(join(sd, 'scripts', 'run-verified.sh'), '#!/bin/bash\necho pwned > /dev/null\nexit 0\n')
+  control({ code: 0 })
+  assert.deepEqual(await agent(withSpec(EXIT_OK), { label: 'plan:issue-tree-release', phase: 'Quick', model: 'haiku', schema: STATE_WRITE }), { ok: false })
+  assert.equal(recorded(), null, '書き換えた launcher を起動しない')
+  const metas = readdirSync(join(runDir, 'agents')).sort().map((d) => JSON.parse(readFileSync(join(runDir, 'agents', d, 'meta.json'), 'utf8')))
+  assert.equal(metas[1].status, 'exec-refused')
+  assert.match(metas[1].reason, /run-verified\.sh/)
+  // 元に戻しても止めたまま（以降のモデルの段もアダプタを呼ばない）
+  writeFileSync(join(sd, 'scripts', 'run-verified.sh'), readFileSync(join(skillDir, 'scripts', 'run-verified.sh')))
+  assert.deepEqual(await agent(withSpec(EXIT_OK), { label: 'plan:issue-tree-release', phase: 'Quick', model: 'haiku', schema: STATE_WRITE }), { ok: false })
+  assert.equal(await agent('P', { label: 'x', phase: 'Quick', schema: SCHEMA }), null)
+  assert.equal(calls.length, 0)
+})
+
+test('固定（P0）: signed-output.sh・cfg.pins のファイル（ガード等）の書き換え・後から現れたファイルも同じく止める。モデルの段の最中の書き換えは結果を捨てる', async () => {
+  // signed-output.sh（--verify-only の枝が照合より前に source する）
+  const sd = pinnedSkill()
+  const a = makeHost({ cfg: { skillDir: sd } })
+  writeFileSync(join(sd, 'scripts', 'lib', 'signed-output.sh'), 'touch /tmp/x\n')
+  control({ code: 0 })
+  assert.deepEqual(await a.agent(withSpec(EXIT_OK), { label: 'plan:issue-tree-release', phase: 'Quick', model: 'haiku', schema: STATE_WRITE }), { ok: false })
+  assert.equal(recorded(), null)
+  // cfg.pins（run.mjs が起動前に固定したガード）: モデルの段の前に照合し、アダプタを呼ばない
+  const sd2 = pinnedSkill()
+  const guard = join(sd2, 'guard.sh')
+  writeFileSync(guard, 'exit 0\n')
+  const late = join(sd2, 'late.sh')
+  const { pinFiles } = await import('../../../skills/implement-issue-tree/runner/lib/pins.mjs')
+  const b = makeHost({ cfg: { skillDir: sd2, pins: pinFiles([guard, late]) }, reply: () => ({ ok: true, n: 1 }) })
+  assert.deepEqual(await b.agent('P', { label: 'x', phase: 'Quick', schema: SCHEMA }), { ok: true, n: 1 })
+  writeFileSync(late, 'echo\n')
+  assert.equal(await b.agent('P', { label: 'x', phase: 'Quick', schema: SCHEMA }), null, '固定時に無かったファイルが現れた')
+  assert.equal(b.calls.length, 1)
+  // モデルの段の最中にガードが書き換えられたら、適合した応答でも返さない
+  const sd3 = pinnedSkill()
+  const g3 = join(sd3, 'guard.sh')
+  writeFileSync(g3, 'exit 0\n')
+  const c = makeHost({ cfg: { skillDir: sd3, pins: pinFiles([g3]) }, reply: () => { writeFileSync(g3, 'exit 0 # changed\n'); return { ok: true, n: 1 } } })
+  assert.equal(await c.agent('P', { label: 'x', phase: 'Quick', schema: SCHEMA }), null)
+})

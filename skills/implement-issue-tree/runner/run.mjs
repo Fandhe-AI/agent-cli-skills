@@ -42,6 +42,7 @@ import { codexRules, opencodeRules } from './lib/guard.mjs'
 import { loadWorkflow } from './lib/load-workflow.mjs'
 import { loadConfig, TOOLS } from './lib/models.mjs'
 import { isRepoSlug } from './lib/merge-target.mjs'
+import { pinFiles, pinPathsFor } from './lib/pins.mjs'
 import { missingSkills, missingSkillsMessage } from './lib/skills-prereq.mjs'
 import { newRunId, resolveMainRoot } from './lib/worktree.mjs'
 
@@ -258,15 +259,21 @@ export async function main(argv, deps = {}) {
     await stdout(`${JSON.stringify(body)}\n`)
     return exitCode
   }
+  // 設定ファイルの toolConfig.<tool>（codexBin・command・guardScript 等。キーは adapters/<tool>.mjs 冒頭）に、
+  // ツール共通の値を重ねる。共通の値と同名のキーは validateConfig が拒否するので、上書きの順序には依存しない
+  const toolConfig = { ...(config.toolConfig?.[cli.tool] ?? {}), deleteSessions: config.cleanup.deleteSessions, models: config.models[cli.tool], timeoutsSec: config.timeoutsSec }
+  // 内容の固定（PR #851 の P0。lib/pins.mjs）。アダプタを作る前・エージェントを 1 つも起動する前に、ホストが直接起動する
+  // launcher（と照合より前に source される signed-output.sh）と、ツールが実行中に遅延で読むガード（agent-guard.sh。
+  // アダプタと同じ入力で探す）・Codex の hook・OpenCode のランナー専用 plugin を固定する。照合は agent-host が段ごとに行う
+  const pins = pinFiles(pinPathsFor({ tool: cli.tool, skillDir: args.skillDir, mainRoot, toolConfig, adaptersDir: ADAPTERS_DIR }))
+  log(`ランナー: 内容を固定したファイル ${pins.length} 件（${pins.map((p) => `${p.path.split('/').pop()}=${p.sha256 === null ? 'absent' : p.sha256.slice(0, 12)}`).join(' ')}）`)
   let adapter
   try {
     adapter = mod.createAdapter({
       skillDir: args.skillDir,
       mainRoot,
       runDir,
-      // 設定ファイルの toolConfig.<tool>（codexBin・command・guardScript 等。キーは adapters/<tool>.mjs 冒頭）に、
-      // ツール共通の値を重ねる。共通の値と同名のキーは validateConfig が拒否するので、上書きの順序には依存しない
-      toolConfig: { ...(config.toolConfig?.[cli.tool] ?? {}), deleteSessions: config.cleanup.deleteSessions, models: config.models[cli.tool], timeoutsSec: config.timeoutsSec },
+      toolConfig,
       guard: { codexRules, opencodeRules },
       env,
     })
@@ -315,7 +322,7 @@ export async function main(argv, deps = {}) {
   try {
     const agent = createAgentHost({
       adapter,
-      cfg: { config, skillDir: args.skillDir, mainRoot, runId, runDir, args, repo, maxParallel: cli.maxParallel ?? undefined, log, ...(spawnScript ? { spawnScript } : {}) },
+      cfg: { config, skillDir: args.skillDir, mainRoot, runId, runDir, args, repo, maxParallel: cli.maxParallel ?? undefined, log, pins, ...(spawnScript ? { spawnScript } : {}) },
     })
     let code
     let result = null

@@ -63,7 +63,13 @@ _/iit-runner/<runId>/
 
 - `result` はホストの return 値そのまま（dryRun なら `startable`・`blocked` 等の見積り）。終了コードが 0 以外のときは `null`。
 - `meta.json` の `outcome` は `ok`（schema に適合した値）/ `null`（未返却）/ `exec-spec`（直接実行した段）/ `throw`（呼び出しの不備・worktree 作成の失敗）。
-  直接実行した段の `status` は `exec-ok`・`exec-fail`・`exec-refused`（許可表に合わない・仕様行が壊れている）・`exec-invalid`。
+  直接実行した段の `status` は `exec-ok`・`exec-fail`・`exec-refused`（許可表に合わない・仕様行が壊れている・下の固定と食い違う）・`exec-invalid`。
+- 内容の固定（`lib/pins.mjs`）: アダプタを作る前（エージェントを 1 つも起動する前）に、ホストが直接起動する
+  `scripts/run-verified.sh` と、その `--verify-only` の枝が照合より前に読む `scripts/lib/signed-output.sh`、ツールが
+  実行中に遅延で読むガード（`agent-guard.sh`）・Codex の hook（`adapters/codex-hook.sh`）・OpenCode のランナー専用 plugin
+  （`adapters/opencode-plugin/` の全ファイル）の sha256 を固定し、`host.log` に記録する。実行仕様の段の起動前とモデルの段の
+  各ターンの前後に照合し、1 度でも食い違えば以降の段はすべて実行しない（実行仕様は `exec-refused` で失敗値、モデルの段は
+  `null`。`reason` は `pin-mismatch`）。照合から起動までの間の差し替え（TOCTOU）と、固定より前の書き換えは防がない。
 - 隔離 worktree は `<mainRoot>/.claude/worktrees/<runId>-<n>` に作る。
 
 ## Workflow 版との違い

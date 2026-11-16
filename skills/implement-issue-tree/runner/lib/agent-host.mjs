@@ -19,6 +19,11 @@
 // （EXEC_RULES）に合わない仕様は実行せず失敗値を返す。封筒の照合（nonce・sha256・入力の束縛）は従来どおり
 // ホストが行い、ここは標準出力の最終行を解釈せずに返すだけである。
 //
+// 内容の固定（PR #851 の P0。lib/pins.mjs）: 作成時に launcher（scripts/run-verified.sh）と照合より前に source される
+// scripts/lib/signed-output.sh の sha256 を固定し、run.mjs がエージェントの起動前に固定した cfg.pins（ガード・hook・plugin）と
+// 合わせて、実行仕様の段の起動前・モデルの段の各ターンの前後に照合する。1 度でも食い違えば、以降の段はすべて実行しない
+// （実行仕様は exec-refused で失敗値、モデルの段は null。reason は pin-mismatch）。照合から起動までの差し替え（TOCTOU）は防がない。
+//
 // ログ: cfg.runDir があれば、呼び出しごとに <runDir>/agents/<seq 4 桁>-<label>/ へ meta.json（通し確認の判定器が読む。
 // 形は run.mjs 冒頭の「出力の形」）・request.json・prompt.txt（モデルへ回した段）・exec.json / stdout.txt / stderr.txt
 // （直接実行した段）を書く。アダプタ自身のログ（stderr・JSONL・最終テキスト）は req.logDir の同じ場所に置かれる。
@@ -34,6 +39,7 @@ import { resolveModel, resolveTimeoutMs } from './models.mjs'
 import { buildRepairPrompt, composePrompt } from './preamble.mjs'
 import { assertSupportedSchema, sanitizeErrorLine, validate } from './schema-validate.mjs'
 import { isRepoSlug, mergeNumberKinds, mergePrNumberOf } from './merge-target.mjs'
+import { checkPins, launcherPinPaths, mergePins, pinFiles } from './pins.mjs'
 import { createSequencer, createWorktree, verifyWorktreeGitdir } from './worktree.mjs'
 
 // ---- 実行仕様 ----
@@ -312,6 +318,7 @@ const safeLabel = (label) => label.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80
  *   timeoutGraceMs?: number,   // アダプタが時間切れで止まらなかったときの保険の猶予（既定 30 秒）
  *   createWorktree?: Function, // テスト用の差し替え（既定は worktree.mjs の実物）
  *   spawnScript?: Function,    // テスト用の差し替え（既定は spawnScript）
+ *   pins?: ReadonlyArray<{ path: string, sha256: string|null }>, // run.mjs がエージェントの起動前に取った固定（lib/pins.mjs）
  * } }} p
  * @returns {(prompt: string, opts: object) => Promise<object|null>} stats（calls・active・maxActive・adapterCalls）を持つ
  */
@@ -335,6 +342,17 @@ export function createAgentHost({ adapter, cfg }) {
   const seq = createSequencer()
   const limiter = createLimiter(maxParallel)
   let adapterCalls = 0
+  // 内容の固定。run.mjs の固定（より早い時点）を優先し、launcher と signed-output.sh は無ければここで固定する
+  const pins = mergePins(Array.isArray(cfg.pins) ? cfg.pins : [], pinFiles(launcherPinPaths(skillDir)))
+  let tampered = ''
+  /** 固定と照合する。食い違いは覚えておき、以降はファイルを読まずに同じ理由を返す（元に戻されても止めたまま）。 */
+  const pinMismatch = () => {
+    if (!tampered) {
+      tampered = checkPins(pins)
+      if (tampered) log(`⚠️ ランナー: 起動時に固定したファイルが書き換えられたため、以降の段を実行しない（${tampered}）`)
+    }
+    return tampered
+  }
 
   // エージェント別のログ。書けなくても本処理は止めない（ログはラン後の調査用）
   const writeLog = (dir, name, data) => {
@@ -357,6 +375,11 @@ export function createAgentHost({ adapter, cfg }) {
       return structuredClone(checked.fail)
     }
     const fail = () => structuredClone(checked.rule.fail)
+    const mismatch = pinMismatch()
+    if (mismatch) {
+      Object.assign(rec, { status: 'exec-refused', reason: `pin-mismatch: ${mismatch}` })
+      return fail()
+    }
     const launcher = join(skillDir, 'scripts', 'run-verified.sh')
     const args = spec.script === 'run-verified.sh' ? [launcher, ...spec.argv] : [launcher, spec.sha256, spec.script, ...spec.argv]
     const input = spec.stdinHex === undefined ? Buffer.alloc(0) : Buffer.from(spec.stdinHex, 'hex')
@@ -454,6 +477,10 @@ export function createAgentHost({ adapter, cfg }) {
     let sessionRef = null
     let errors = []
     for (let turn = 0; turn <= repairAttempts; turn++) {
+      if (pinMismatch()) {
+        outcome('null', { reason: 'pin-mismatch', detail: tampered })
+        return null
+      }
       const r = await callAdapter(turn === 0 ? req : { ...req, resume: { sessionRef, message: buildRepairPrompt(errors) } })
       if (r.watchdog) {
         log(`⚠️ ${label}: アダプタが時間切れ（${timeoutMs} ms + 猶予）を過ぎても戻らないため未返却として扱う`)
@@ -467,6 +494,11 @@ export function createAgentHost({ adapter, cfg }) {
         return null
       }
       sessionRef = typeof r.value?.sessionRef === 'string' ? r.value.sessionRef : sessionRef
+      // ターンの最中に書き換えられていたら、適合した応答でも返さない
+      if (pinMismatch()) {
+        outcome('null', { reason: 'pin-mismatch', detail: tampered })
+        return null
+      }
       const c = check(schema, r.value?.text)
       if (c.ok) {
         outcome(turn === 0 ? 'ok' : 'repaired', { usage: r.value?.usage ?? null })

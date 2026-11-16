@@ -410,3 +410,23 @@ test('registerSignals（LOW-11）: SIGINT・SIGTERM・SIGHUP を 1 回ずつ登�
   for (const [sig, fn] of seen) fn()
   assert.deepEqual(got, ['SIGINT', 'SIGTERM', 'SIGHUP'])
 })
+
+test('main（PR #851 の P0）: アダプタを作る前にガード等の内容を固定し agent-host へ渡す。start 以降に書き換われば段を実行しない', async () => {
+  const guard = join(root, `guard-${++seq}.sh`)
+  writeFileSync(guard, '#!/bin/bash\nexit 0\n')
+  const base = JSON.parse(readFileSync(fileURLToPath(new URL('../../../skills/implement-issue-tree/runner/config/default.json', import.meta.url)), 'utf8'))
+  base.toolConfig = { ...(base.toolConfig ?? {}), codex: { ...(base.toolConfig?.codex ?? {}), guardScript: guard } }
+  const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  // start の時点（固定の後・エージェントの前）でガードが書き換わった想定
+  const mod = { createAdapter: (cfg) => { const ad = a.createAdapter(cfg); const s0 = ad.start; ad.start = async () => { await s0(); writeFileSync(guard, '#!/bin/bash\nexit 0 # 書き換え\n') }; return ad } }
+  let got
+  const x = deps({ mod, workflow: tinyWorkflow(async (args, agent) => { got = await agent('p', { label: 'plan:#2', schema: SCHEMA }); return {} }) })
+  assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1 }), '--config', argsFile(base), '--no-build-check'], x.d), 0)
+  assert.equal(got, null)
+  assert.equal(a.calls.length, 0, 'アダプタを呼ばない')
+  const meta = JSON.parse(readFileSync(join(x.runDir, 'agents', '0001-plan_2', 'meta.json'), 'utf8'))
+  assert.equal(meta.reason, 'pin-mismatch')
+  assert.match(meta.detail, /guard-\d+\.sh/)
+  const hl = readFileSync(join(x.runDir, 'host.log'), 'utf8')
+  assert.match(hl, /内容を固定したファイル 4 件（run-verified\.sh=[0-9a-f]{12} signed-output\.sh=[0-9a-f]{12} guard-\d+\.sh=[0-9a-f]{12} codex-hook\.sh=[0-9a-f]{12}）/)
+})
