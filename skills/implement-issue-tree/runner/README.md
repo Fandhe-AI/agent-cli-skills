@@ -111,6 +111,9 @@ _/iit-runner/<runId>/
   環境変数の読み出しは止めない（`node -e` による読み出しが `agent-guard.sh` で allow になることを監査で実測）。被害の範囲は、
   gh のトークンの権限とサーバー側の ruleset で抑える（ランナーに渡す環境には、ランに要らない秘密を入れない）。
   OpenCode に固有の点（serve のパスワード等）は OpenCode の項に書く。
+- ツールの出力（コマンドの出力・エージェントが読んだファイルの中身・応答）は、`_/iit-runner/<runId>/agents/*/` の
+  `events*.jsonl` 等にそのまま残る。秘密を出力したコマンドがあれば、それも残る。`_/` は gitignore 済みだが、ログを共有・
+  転記する前に中身を確かめ、要らなくなったら消す。
 - `agent-guard.sh` の既知の限界（変数経由・`$(…)` 経由のコマンドは止まらない）はランナーでも同じ。サーバー側の ruleset で補う
   （自動マージの前提となる構成は `references/automerge-design.md`）。
 - OpenCode の model・variant の割り当てと段ごとの時間切れは暫定値（`config/default.json` の `notes`）。
