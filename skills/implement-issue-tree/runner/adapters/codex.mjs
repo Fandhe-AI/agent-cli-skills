@@ -40,7 +40,17 @@
 //   /usr/tmp → cwd の順に探す）、どこにも書けないと here-doc が「cannot create temp file」で落ちるため。
 //   `codex sandbox` での実測（2026-11-17・codex-cli 0.169.0）: iit_read は無しで失敗・ありで成功。iit_impl は cwd
 //   （worktree）へのフォールバックで通っていただけで、`cd /` の後は無しで失敗・ありで成功した。
-//   zsh の here-doc（一時ファイルは $TMPPREFIX。既定 /tmp/zsh）はこの追加では直らない（別の扱い）。
+//   zsh の here-doc（一時ファイルは $TMPPREFIX。既定 /tmp/zsh）はこの追加では直らない（下の「シェル」）。
+//
+// シェル: Codex はモデルのコマンドを利用者のログインシェル（macOS の既定は /bin/zsh）の `-c` / `-lc` で実行する。
+//   呼び出しごとに bash へ固定する設定は無い（openai-codex の reference の config-reference.md「Shell / environment /
+//   execution」・config-advanced.md にシェルを選ぶキーは無い。allow_login_shell は login の可否、
+//   shell_environment_policy は環境変数だけ）。子の env の SHELL=/bin/bash も効かない（2026-11-17・codex-cli 0.169.0 の
+//   `codex exec` 1 回の実測で、コマンドは `/bin/zsh -c …`・ZSH_VERSION=5.9 で実行された）。代替策として:
+//   (1) 子の env に TMPPREFIX=<TMPDIR>/zsh を入れる（zsh の here-doc の一時ファイルを書ける場所へ向ける。`codex sandbox`
+//       の実測で、無いと iit_read・iit_impl とも zsh の here-doc が失敗し、あると成功した。書き込み範囲は広げない）、
+//   (2) 初回のプロンプトの先頭に SHELL_NOTE を足す（複数行は `bash <<'EOF'` で実行し、zsh の特殊変数名に代入しない。
+//       Phase 3 の通しで、モデルの `status=$?` が zsh の読み取り専用変数に当たって落ちた）。resume の修復ターンには足さない。
 //   既定は cwd の `.git` がファイルなら iit_impl、そうでなければ iit_read。req.profile で上書きできる（契約への任意の追加）。
 //
 // 時間切れ: プロセスグループへ SIGTERM、猶予後に SIGKILL（孫も止まる。setsid で抜けた孫は止められない）。
@@ -66,6 +76,11 @@ export const DARWIN_HEREDOC_TMP = '/private/var/tmp'
 export function platformWritePaths(platform) {
   return platform === 'darwin' ? [DARWIN_HEREDOC_TMP] : []
 }
+
+/** 初回のプロンプトの先頭に足すシェルの注意（ファイル冒頭の「シェル」）。 */
+export const SHELL_NOTE =
+  "【シェル】コマンドを実行するシェルは zsh の可能性がある。複数行のスクリプトは `bash <<'EOF'` … `EOF` の形で bash に渡して実行し、" +
+  '`status` 等のシェルの特殊変数名に代入しない。'
 
 const q = (s) => JSON.stringify(s)
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
@@ -180,7 +195,8 @@ export function createAdapter(cfg) {
   const resolveCodexHome = () => resolve(tc.codexHome ?? baseEnv.CODEX_HOME ?? join(home, '.codex'))
 
   const childEnv = () => {
-    const env = { ...baseEnv, CODEX_HOME: codexHome, TMPDIR: tmpDir }
+    // TMPPREFIX: zsh の here-doc の一時ファイルの接頭辞（ファイル冒頭の「シェル」）。TMPDIR と同じく両 profile で書ける
+    const env = { ...baseEnv, CODEX_HOME: codexHome, TMPDIR: tmpDir, TMPPREFIX: join(tmpDir, 'zsh') }
     // 追跡ブランチの自動設定を止める（0-2）。既存の GIT_CONFIG_* があれば続きの番号へ足す。
     const n = Number.parseInt(env.GIT_CONFIG_COUNT ?? '0', 10) || 0
     env[`GIT_CONFIG_KEY_${n}`] = 'branch.autoSetupMerge'
@@ -235,7 +251,7 @@ export function createAdapter(cfg) {
     writeFileSync(join(logDir, `argv-${tag}.json`), JSON.stringify(args))
 
     const hookBefore = countLines(hookLog)
-    const input = resume ? resume.message : prompt
+    const input = resume ? resume.message : `${SHELL_NOTE}\n\n${prompt}`
     const res = await new Promise((done) => {
       let out = ''
       let err = ''

@@ -37,7 +37,7 @@ rec({
   argv,
   stdin,
   cwd: process.cwd(),
-  env: Object.fromEntries(['CODEX_HOME', 'TMPDIR', 'HOME', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1'].map((k) => [k, process.env[k] ?? null])),
+  env: Object.fromEntries(['CODEX_HOME', 'TMPDIR', 'TMPPREFIX', 'HOME', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1'].map((k) => [k, process.env[k] ?? null])),
 })
 
 const scenario = JSON.parse(readFileSync(process.env.FAKE_CODEX_SCENARIO, 'utf8'))

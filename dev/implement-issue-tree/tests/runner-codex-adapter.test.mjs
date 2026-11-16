@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
-import { createAdapter, buildProfileArgs, classifyFailure, summarizeEvents, DARWIN_HEREDOC_TMP, platformWritePaths } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
+import { createAdapter, buildProfileArgs, classifyFailure, summarizeEvents, DARWIN_HEREDOC_TMP, platformWritePaths, SHELL_NOTE } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
 import { decodeStrictText, strictifySchema } from '../../../skills/implement-issue-tree/runner/adapters/codex-strict.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 
@@ -158,7 +158,8 @@ test('run: exec の引数の組み立て（新規）', async () => {
   const a = c.argv
   assert.deepEqual(a.slice(0, 2), ['exec', '--json'])
   assert.equal(a.at(-1), '-')
-  assert.equal(c.stdin, 'P')
+  // 初回はシェルの注意（zsh 対策の代替策）を先頭に足し、元のプロンプトは改変しない
+  assert.equal(c.stdin, `${SHELL_NOTE}\n\nP`)
   assert.ok(a.includes('--ignore-user-config'))
   assert.equal(argOf(a, '-m'), 'gpt-6.1-sol')
   assert.ok(a.includes('model_reasoning_effort="high"'))
@@ -180,11 +181,13 @@ test('run: model が null なら -m を付けず、trustProject で inline の t
   assert.ok(a.some((x) => x.startsWith('projects={') && x.includes('trust_level="trusted"')))
 })
 
-test('環境: TMPDIR と GIT_CONFIG を渡す', async () => {
+test('環境: TMPDIR・TMPPREFIX と GIT_CONFIG を渡す', async () => {
   const t = setup({ turns: [okTurn()] })
   await t.adapter.run(t.req())
   const { env } = t.calls()[0]
   assert.equal(env.TMPDIR, join(t.runDir, 'tmp'))
+  // zsh の here-doc の一時ファイルを TMPDIR（両 profile で書ける）の下へ向ける
+  assert.equal(env.TMPPREFIX, join(t.runDir, 'tmp', 'zsh'))
   assert.equal(env.GIT_CONFIG_KEY_0, 'branch.autoSetupMerge')
   assert.equal(env.GIT_CONFIG_VALUE_0, 'false')
   assert.equal(env.GIT_CONFIG_COUNT, '1')
@@ -279,6 +282,13 @@ test('buildProfileArgs: stateDir は iit_read のときだけ書き込みに加�
   assert.equal(read.includes('"/m"='), false)
   assert.equal(buildProfileArgs({ ...base, kind: 'impl' })[1].includes('issue-trees'), false)
   assert.equal(buildProfileArgs({ ...base, kind: 'read', stateDir: null })[1].includes('issue-trees'), false)
+})
+
+test('シェルの注意: bash の here-doc で実行し、zsh の特殊変数名に代入しないことを指示する', () => {
+  assert.match(SHELL_NOTE, /zsh/)
+  assert.ok(SHELL_NOTE.includes("bash <<'EOF'"))
+  assert.match(SHELL_NOTE, /`status`/)
+  assert.match(SHELL_NOTE, /特殊変数名に代入しない/)
 })
 
 test('buildProfileArgs: darwin だけ両 profile に /private/var/tmp（bash 3.2 の here-doc の置き場）を足す', () => {
