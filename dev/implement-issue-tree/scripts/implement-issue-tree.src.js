@@ -301,6 +301,12 @@ async function fetchTree() {
       log(`⚠️ （試行 ${attempt}）${lastReason}`)
       continue
     }
+    // 1 ページの封筒は dir・tsvSha256 を持たない（fetch-tree.sh の仕様）。sha256 は転記した値にしか効かないため、余分な欄があれば封筒の書き換えとみなして拒否する
+    if (signed.ok && (signed.payload.dir !== undefined || signed.payload.tsvSha256 !== undefined)) {
+      lastReason = '1 ページの封筒に dir または tsvSha256 が含まれている（ページ経路の欄）' + treeFetchRetrySuffix(attempt, 'エージェントの書き写しの誤り、または取得スクリプトの出力を確かめる')
+      log(`⚠️ （試行 ${attempt}）${lastReason}`)
+      continue
+    }
     const c = checkTreeNodes(result, nonce, inputSha, attempt)
     if (c.reason !== undefined) { lastReason = c.reason; log(`⚠️ （試行 ${attempt}）${lastReason}`); continue }
     const { nodes, folded, verified } = c

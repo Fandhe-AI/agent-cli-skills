@@ -95,6 +95,24 @@ for (const [name, tamper] of [
   })
 }
 
+// 余分な欄が sha256 まで含めて整合している（エージェントが封筒を作り直した）場合は検査値では弾けない。pages が 1 の封筒に dir・tsvSha256 が
+// あればホストが拒否する（1 回取り直し、2 回続けば停止）。
+for (const [name, extra] of [
+  ['dir', { dir: '/tmp/iit-tree.x' }],
+  ['空文字の dir', { dir: '' }],
+  ['tsvSha256', { tsvSha256: 'a'.repeat(64) }],
+]) {
+  const withExtra = (prompt) => treeFetchReply(prompt, baseNodes(), { payload: extra })
+  test(`1 ページの封筒に整合した ${name} が付いていると 2 回とも拒否して停止する`, async () => {
+    await assert.rejects(run([withExtra, withExtra]), /dir または tsvSha256/)
+  })
+  test(`1 ページの封筒に整合した ${name} が付いていても、取り直しで正しければ続行する`, async () => {
+    const { result, logs } = await run([withExtra, honest])
+    assert.equal(result.treeFetch.attempts, 2)
+    assert.ok(logs.some((l) => l.includes('dir または tsvSha256')))
+  })
+}
+
 // title だけの書き写し誤り（構造 5 欄は一致）。Issue #687
 const titleOff = (p, title = 'b ') => treeFetchReply(p, baseNodes().map((n) => (n.number === 3 ? { ...n, title } : n)), { digestNodes: baseNodes() })
 
