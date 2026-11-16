@@ -34,9 +34,18 @@
 #                  reviews API の event=APPROVE・判定できない --input / @file 形、GraphQL の
 #                  addPullRequestReview / submitPullRequestReview + APPROVE）・gh alias・
 #                  gh extension（subagent が true / null のとき）
-#   credential-read  認証情報の読み出し（subagent が true / null のとき）: gh auth token・gh auth status の
-#                  --show-token / -t・git credential（fill / get 系）・printenv / env の引数なし・printenv で
-#                  TOKEN / SECRET / KEY 等を名指す形・hosts.yml（gh の設定）の語・codex を含むコマンドの auth.json
+#   credential-read  認証情報の読み出し（subagent が true / null のとき）。引用符と heredoc を解釈したトークンに対して判定する。
+#                  gh auth token・gh auth git-credential・gh auth status の --show-token(=…) / -t(=…)・git credential
+#                  （fill / get 系）・git config の extraheader の読み出し・printenv / env の引数なし・printenv で
+#                  TOKEN / SECRET / KEY / AUTH / COOKIE / SESSION / BEARER / _PAT 等を名指す形・echo / printf の
+#                  TOKEN / SECRET / PASSW / API_KEY 系の変数展開（引用符なしと二重引用符内。単一引用符内は文字列）・
+#                  export / declare / typeset の引数なしと -p / -x・引数なしの set・compgen -e・ps の e / -E・
+#                  security の find-generic-password / find-internet-password / dump-keychain・secret-tool の lookup / search・
+#                  ファイルとして開く形の hosts.yml / ~/.config/gh / .git-credentials / .netrc（`< file` の入力リダイレクトを含む）・
+#                  codex を含むコマンドの auth.json・/proc と組の environ。
+#                  文字列として扱う形は止めない: commit メッセージ・gh の --body / --title の値・引用符つき heredoc の本文・
+#                  echo / printf の引数・grep / rg / ag / ack の検索パターン（最初の位置引数と -e の値。2 つ目以降はファイル）・
+#                  git の引数（git grep / log / diff 等。~/.config/gh だけは止める）・空白を含む語。
 #   repo-settings  ruleset・branch protection・リポジトリ本体の書き込み・gh repo edit 等
 #                  （subagent が true / null のとき）
 #   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
@@ -157,25 +166,37 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 #   - alias は -c と git config での定義だけを止める。利用者の設定ファイルに既にある alias、
 #     include.path 経由の設定取り込み、GIT_CONFIG_* 環境変数、SKIP= 等の他のフック回避
 #   - HUSKY=0 は同じコマンド文字列内の代入だけを見る（別の呼び出しで export 済みのものは見えない）
+#   - 認証情報の読み出し（credential-read）の残存ギャップ: 値を取るラッパー（`timeout 10 gh auth token`・`xargs` への分割など。
+#     コマンド位置を読み違える点は gh pr merge のマージ系判定と同じ限界）、glob（`cat ~/.config/g*/h*.yml`）、
+#     curl で API を直接叩く・`node -e`・`python -c` 等のスクリプト言語、変数経由（`f=hosts.yml; cat $f`）・eval で組み立てる形、
+#     検索コマンドの option の値の読み違い（`rg -g hosts.yml pat` は値として通す）、`grep -r token ~/.config` のようなディレクトリ指定
 read -r -d '' GIT_AWK <<'AWK' || true
 function isws(c) { return (c == " " || c == "\t" || c == "\r") }
 # 語を確定する。リダイレクトの直後の語（rd == 1。対象のファイル名・fd）はコマンドでも引数でもないので積まない。
 # here-string の語（rd == 2）は shell が script として読むときのために tok と別の hs へ積む。
 function emit_tok() {
   if (have) {
-    if (rd == 1) rd = 0
+    # 入力リダイレクト（< file）の対象は読み出しなので、認証情報の判定のためだけに別へ積む。
+    if (rd == 1) { if (rdc == "<") { nrin++; rin[nrin] = cur } rd = 0 }
     else if (rd == 2) { nhs++; hs[nhs] = cur; rd = 0 }
-    else { ntok++; tok[ntok] = cur }
+    else { ntok++; tok[ntok] = cur; tokv[ntok] = curv }
   }
-  cur = ""; have = 0
+  cur = ""; have = 0; curv = ""
+}
+# $ の直後の変数名（${NAME...} は } まで）。引用符なしと二重引用符の中の展開だけを認証情報の判定に使う。
+function var_at(k,   o, n, r) {
+  if (substr(text, k, 1) == "{") { r = index(substr(text, k), "}"); return (r > 0 && r < 80) ? substr(text, k, r) : "" }
+  o = ""; n = 0
+  while (k <= len && n < 80 && substr(text, k, 1) ~ /[A-Za-z0-9_]/) { o = o substr(text, k, 1); k++; n++ }
+  return o
 }
 # リダイレクト演算子（< > <<<）の手前の語を片づける。`2>` `{fd}>` の fd 指定は語ではないので捨てる。
 function redir_flush() {
-  if (have && (cur ~ /^[0-9]+$/ || cur ~ /^[{][A-Za-z_][A-Za-z0-9_]*[}]$/)) { cur = ""; have = 0 }
+  if (have && (cur ~ /^[0-9]+$/ || cur ~ /^[{][A-Za-z_][A-Za-z0-9_]*[}]$/)) { cur = ""; curv = ""; have = 0 }
   else emit_tok()
 }
 function setv(v) { if (verdict == "") verdict = v }
-function end_seg() { emit_tok(); if (ntok > 0) analyze(); ntok = 0; nhs = 0; rd = 0; split("", hs) }
+function end_seg() { emit_tok(); if (ntok > 0 || nrin > 0) analyze(); ntok = 0; nhs = 0; nrin = 0; rd = 0; split("", hs) }
 # 入れ子の中身（bash -c の値・eval の引数・ヒアドキュメント本体・$(...) の中・env -S の値）を作業キューへ積む。
 # 深さ・件数の上限を超えたら中身を見切れないので limit を立てる（結果は deny nesting-limit）。
 function enqueue(s, h) {
@@ -210,7 +231,140 @@ function shell_args(j, hk,   t, cf, sf, b, lc) {
   return (sf ? 0 : 2)
 }
 # env -S / --split-string の値を作業キューへ積み、回避の代入を含むかを返す。
-function env_split(v, hh) { enqueue(v, hh); return split_has_h(v) }
+function env_split(v, hh) { esplit = 1; enqueue(v, hh); return split_has_h(v) }
+# --- 認証情報の読み出し（subagent が true / null のときだけ結果を使う。判定は analyze から呼ぶ）-------------
+# セグメントのトークン（引用符・heredoc 本体を解釈済み）に対して判定するので、コミットメッセージや PR 本文の語、
+# 引用符つき heredoc の本文、検索パターンはコマンドとして読まない。結果は cred_hit 等のグローバルへ積み、END で集約する。
+function secret_name(w) { return (toupper(w) ~ /TOKEN|SECRET|KEY|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION|BEARER|(^|_)PAT$/) }
+function secret_var(v) { return (toupper(v) ~ /TOKEN|SECRET|PASSW|API_?KEY|CREDENTIAL|BEARER|(^|_)PAT([^A-Z0-9_]|$)/) }
+function ghdir(t) { return (t !~ /[ \t\n]/ && t ~ /(^|[\/])[.]config[\/]gh([\/]|$)/) }
+# ファイルとして開き得る 1 語。空白を含む語は文章の値とみなして見ない。
+function cred_tok(t) {
+  if (t == "" || t ~ /[ \t\n]/) return
+  if (t ~ /(^|[^A-Za-z0-9_.-])hosts[.]yml([^A-Za-z0-9_.-]|$)/) cred_hit = 1
+  if (ghdir(t)) cred_hit = 1
+  if (t ~ /(^|[\/])[.](git-credentials|netrc)$/) cred_hit = 1
+  if (t ~ /(^|[^A-Za-z0-9_.-])auth[.]json([^A-Za-z0-9_.-]|$)/) cred_aj = 1
+  if (tolower(t) ~ /codex/) cred_cx = 1
+  if (t ~ /(^|[\/])environ$/) cred_env = 1
+  if (t ~ /(^|[\/])proc([\/]|$)/) cred_proc = 1
+}
+function cred_check(p, wr,   cb, i, k, t, np, fl, pos, sub1, j, sk, haspat, hasp, wflag, grepv) {
+  for (i = 1; i <= nrin; i++) cred_tok(rin[i])
+  if (exi > 0) {
+    np = 0; fl = ""; pos = ""
+    for (k = exi + 1; k <= ntok; k++) { t = tok[k]; if (t ~ /^-/) fl = fl t; else { np++; pos = pos " " t } }
+    if (np == 0) { if (fl == "" || fl ~ /p/ || fl ~ /x/) cred_hit = 1 }
+    else if (fl ~ /p/ && secret_name(pos)) cred_hit = 1
+  }
+  if (p > ntok) { if (wr == "env" && !esplit && !cmdv) cred_hit = 1; return }
+  while (tolower(tok[p]) ~ /(^|\/)xargs$/) {
+    p++
+    while (p <= ntok && tok[p] ~ /^-/) p++
+    if (p > ntok) return
+  }
+  cb = tolower(tok[p]); sub(/^.*\//, "", cb)
+  if (cb == "echo" || cb == "printf") {
+    for (k = p + 1; k <= ntok; k++) if (tokv[k] != "" && secret_var(tokv[k])) cred_hit = 1
+    return
+  }
+  if (cb == "gh") {
+    k = p + 1
+    while (k <= ntok && tok[k] ~ /^-/) k++
+    if (k <= ntok && tok[k] == "auth") {
+      k++
+      while (k <= ntok && tok[k] ~ /^-/) k++
+      sub1 = tok[k]
+      if (sub1 == "token" || sub1 == "git-credential") cred_hit = 1
+      else if (sub1 == "status") {
+        for (j = k + 1; j <= ntok; j++) if (tok[j] ~ /^--show-token(=.*)?$/ || tok[j] ~ /^-[A-Za-z]*t(=.*)?$/) cred_hit = 1
+      }
+    }
+    # 本文・題名の値は文章。--body-file 等のファイル指定と他の引数は開く形として見る。
+    sk = 0
+    for (k = p + 1; k <= ntok; k++) {
+      t = tok[k]
+      if (sk) { sk = 0; continue }
+      if (t == "--body" || t == "-b" || t == "--title" || t == "-t" || t == "--message" || t == "-m" || t == "--notes") { sk = 1; continue }
+      if (t ~ /^-/) continue
+      cred_tok(t)
+    }
+    return
+  }
+  if (cb == "git") {
+    k = p + 1
+    while (k <= ntok) {
+      t = tok[k]
+      if (t == "-c" || t == "-C" || t == "--git-dir" || t == "--work-tree" || t == "--namespace") { if (ghdir(tok[k + 1])) cred_hit = 1; k += 2 }
+      else if (t ~ /^-/) k++
+      else break
+    }
+    if (k > ntok) return
+    sub1 = tok[k]
+    if (sub1 == "credential") cred_hit = 1
+    else if (sub1 ~ /^credential-/ && (tok[k + 1] == "fill" || tok[k + 1] == "get")) cred_hit = 1
+    else if (sub1 == "config") {
+      wflag = 0
+      for (j = k + 1; j <= ntok; j++) if (tok[j] == "--unset" || tok[j] == "--unset-all" || tok[j] == "--add" || tok[j] == "--replace-all") wflag = 1
+      for (j = k + 1; j <= ntok; j++) if (tok[j] ~ /extraheader/ && !wflag) cred_hit = 1
+    }
+    sk = 0
+    for (j = k + 1; j <= ntok; j++) {
+      t = tok[j]
+      if (sk) { sk = 0; continue }
+      if (t == "-m" || t == "--message") { sk = 1; continue }
+      if (t ~ /^-/) continue
+      if (ghdir(t)) cred_hit = 1
+    }
+    return
+  }
+  if (cb == "printenv") {
+    np = 0
+    for (k = p + 1; k <= ntok; k++) { if (tok[k] ~ /^-/) continue; np++; if (secret_name(tok[k])) cred_hit = 1 }
+    if (np == 0) cred_hit = 1
+  }
+  else if (cb == "set") { if (p == ntok) cred_hit = 1 }
+  else if (cb == "compgen") {
+    for (k = p + 1; k <= ntok; k++) {
+      if (tok[k] ~ /^-[A-Za-z]*e[A-Za-z]*$/) cred_hit = 1
+      if (tok[k] == "-A" && (tok[k + 1] == "export" || tok[k + 1] == "variable")) cred_hit = 1
+    }
+  }
+  else if (cb == "ps") {
+    sk = 0
+    for (k = p + 1; k <= ntok; k++) {
+      t = tok[k]
+      if (sk) { sk = 0; continue }
+      if (t ~ /^-/) {
+        if (t ~ /^-[A-Za-z]*E/) cred_hit = 1
+        if (t ~ /^-[opuUCGgtsO]$/) sk = 1
+      }
+      else if (t ~ /^[A-Za-z]*e[A-Za-z]*$/) cred_hit = 1
+    }
+  }
+  else if (cb == "security") {
+    for (k = p + 1; k <= ntok; k++) if (tok[k] == "find-generic-password" || tok[k] == "find-internet-password" || tok[k] == "dump-keychain") cred_hit = 1
+  }
+  else if (cb == "secret-tool") {
+    for (k = p + 1; k <= ntok; k++) if (tok[k] == "lookup" || tok[k] == "search") cred_hit = 1
+  }
+  # 検索コマンドの検索パターン（最初の位置引数・-e の値）は文字列として扱う。それ以降の引数はファイルとして見る。
+  grepv = (cb ~ /^(grep|egrep|fgrep|rg|ag|ack)$/)
+  haspat = 0; sk = 0
+  for (k = p + 1; k <= ntok; k++) {
+    t = tok[k]
+    if (sk) { sk = 0; continue }
+    if (grepv && t ~ /^-/) {
+      if (t == "-e" || t == "--regexp") { sk = 1; haspat = 1; continue }
+      if (t == "-f" || t == "--file") { cred_tok(tok[k + 1]); k++; continue }
+      if (index(" -A -B -C -m -d -D -g -t -T -j -M --include --exclude --exclude-dir --glob --iglob --type --type-not --max-count --context --after-context --before-context --label --max-depth ", " " t " ") > 0) sk = 1
+      continue
+    }
+    if (t ~ /^-/) continue
+    if (grepv && !haspat) { haspat = 1; continue }
+    cred_tok(t)
+  }
+}
 function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap, ch, rest) {
   # コマンド位置の前置語（{ then do else ! time 等のキーワードと env・sudo・export・declare 等のラッパー）・
   # 代入（FOO=1 HUSKY=0 git ...）・ラッパーの option を読み飛ばし、フック回避の代入を拾う。
@@ -218,14 +372,17 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap
   # -S / --split-string の値は回避の代入があれば同じセグメントの後続の git に効くものとして扱い（seg_s。
   # 後のセグメントへは持ち越さない）、値そのものも別に解析する（`env -S 'HUSKY=0 git commit'`・`env -S 'git push -f'`）。
   # sudo / doas / nice の値を取る option も同様に読み飛ばす（`sudo -u root HUSKY=0 git ...`）。
-  p = 1; seg_h = 0; seg_s = 0; noecho = 0; wr = ""
+  p = 1; seg_h = 0; seg_s = 0; noecho = 0; wr = ""; exi = 0; esplit = 0; cmdv = 0
   while (p <= ntok) {
     t = tok[p]; lt = tolower(t)
     if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { if (t == "HUSKY=0" || t == "HUSKY_SKIP_HOOKS=1") seg_h = 1; p++ }
     else if (t ~ /^([{]|then|do|else|elif|if|while|until|!)$/) { wr = ""; p++ }
     else if (t == "time") { wr = "time"; p++ }
     else if (lt ~ /(^|\/)(env|sudo|doas|nice|nohup|command|exec|builtin)$/ || lt == "export" || lt == "declare" || lt == "typeset") {
-      noecho = 1; wr = lt; sub(/^.*\//, "", wr); p++
+      noecho = 1; wr = lt; sub(/^.*\//, "", wr)
+      if (wr == "export" || wr == "declare" || wr == "typeset") exi = p
+      if (wr == "command" && p < ntok && tok[p + 1] ~ /^-[A-Za-z]*[vV]/) cmdv = 1
+      p++
     }
     else if (wr == "time" && t == "-p") p++
     else if (wr != "" && wr != "time" && t ~ /^-./) {
@@ -256,6 +413,7 @@ function analyze(   i, m, t, lt, p, v, seg_h, seg_s, noecho, wr, vl, hk, st, cap
     }
     else break
   }
+  cred_check(p, wr)
   hk = husky_persist
   if (p > ntok) { if (seg_h) husky_persist = 1 } else if (seg_h || seg_s) hk = 1
   # echo / printf は引数を表示するだけで、git の語があっても実行しない。
@@ -642,7 +800,7 @@ function assign_pos(   m, t) {
 }
 # 1 つの文字列をトークン化して各セグメントを解析する。入れ子の中身は enqueue で積み、END が順に流す。
 function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body, found) {
-  text = txt; len = length(text); i = 1; cur = ""; have = 0; ntok = 0; nhs = 0; rd = 0; rdpos = -5; rdc = ""
+  text = txt; len = length(text); i = 1; cur = ""; curv = ""; have = 0; ntok = 0; nhs = 0; nrin = 0; rd = 0; rdpos = -5; rdc = ""
   abn = 0; hdn = 0; linecap = 0; linehk = 0
   split("", hs); cdepth = dp; husky_persist = hkin
   while (i <= len) {
@@ -683,6 +841,7 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
           limit = 1
         }
         if (c2 == "$" && substr(text, i + 1, 1) == "{" && substr(text, i + 2, 1) ~ /^[ \t\n|]$/) limit = 1
+        if (c2 == "$") curv = curv " " var_at(i + 1)
         cur = cur c2; i++
       }
       i++; continue
@@ -716,7 +875,7 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
     if (ch == "$" && substr(text, i + 1, 1) == "{") {
       # bash 5.3 の ${ cmd; } / ${| cmd; } は中身がコマンドそのもの。値として読まず（echo の引数として見逃さない）fail-closed にする。
       if (substr(text, i + 2, 1) ~ /^[ \t\n|]$/) limit = 1
-      else { r = pe_end(i + 2, 1, 0); if (r > 0) { cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
+      else { r = pe_end(i + 2, 1, 0); if (r > 0) { curv = curv " " substr(text, i + 1, r - i - 1); cur = cur substr(text, i, r - i); have = 1; i = r; continue } }
     }
     # 配列の添字つき代入 x[1<<2]=y と複合代入 a=([1<<2]=y) は、代入を置ける位置では添字・中身を含めて 1 語
     # （その << は heredoc でない）。引数の位置（`ls x[; cmd; y]=1`）では bash も 1 語にしないので読まない。
@@ -744,6 +903,7 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
       continue
     }
     if (ch == "<" || ch == ">") { redir_flush(); rd = 1; rdpos = i; rdc = ch; i++; continue }
+    if (ch == "$") curv = curv " " var_at(i + 1)
     cur = cur ch; have = 1; i++
   }
   end_seg()
@@ -755,13 +915,16 @@ END {
   scan(alltext, 0, 0)
   for (qi = 1; qi <= nq && verdict == ""; qi++) scan(qs[qi], qd[qi], qh[qi])
   if (verdict == "" && limit) verdict = "nesting-limit"
+  if (verdict == "" && (cred_hit || (cred_aj && cred_cx) || (cred_env && cred_proc))) verdict = "ok-cred"
   printf "%s\n", (verdict == "") ? "ok" : verdict
 }
 AWK
 
+cred_pending=0
 git_verdict=$(printf '%s\n' "$cmd" | awk "$GIT_AWK") || finish deny internal-error
 case "$git_verdict" in
   ok) : ;;
+  ok-cred) cred_pending=1 ;;
   no-verify) finish deny no-verify ;;
   force-push) finish deny force-push ;;
   nesting-limit) finish deny nesting-limit ;;
@@ -1485,96 +1648,8 @@ if contains_subsequence "$all_nf" gh extension \
 fi
 
 # 認証情報の読み出し（subagent が true / null のときだけ。main の利用者操作は上の false の出口で対象外）。
+# 判定は GIT_AWK の cred_check が行う（引用符・heredoc を解釈したトークンに対して。上の結果 ok-cred）。
 # gh が内部で hosts.yml を読むのはコマンド文字列に現れないので、スクリプト経由の gh 利用は止めない。
-# 読み手のコマンド名は許可リストにせず、パスの語（hosts.yml・auth.json）の一致で止める。
-# 引用符とバックスラッシュを除いた norm（cd してから hosts.yml だけを書く形も含む）に対して照合する。
-if match_ere "$norm" '(^|[^A-Za-z0-9_.-])hosts[.]yml([^A-Za-z0-9_.-]|$)'; then
-  finish deny credential-read
-fi
-if match_ere "$norm" '(^|[^A-Za-z0-9_.-])auth[.]json([^A-Za-z0-9_.-]|$)' \
-  && match_ere "$norm" '[Cc][Oo][Dd][Ee][Xx]'; then
-  finish deny credential-read
-fi
-if match_ere "$norm" '(^|[ /])[.]config/gh(/|[ ;]|$)' || match_ere "$norm" '/proc/[^ ]*/environ'; then
-  finish deny credential-read
-fi
-# gh auth token・gh auth status の --show-token / -t・git credential（fill・get 系）・printenv / env の環境変数の一覧と、
-# 認証情報らしい名前の名指し。コミットメッセージ等の文字列中の語（`gh auth token` の説明）を誤検出しないよう、
-# いずれもコマンド位置（先頭・; | & ( ) 改行の後・
-# sudo / command / exec 等の前置語の後・bash -c の中）の printenv と env だけを見る。
-cred_text=$(printf '%s\n' "$cmd" \
-  | awk '{ if (sub(/\\$/, "")) printf "%s", $0; else printf "%s ; ", $0 }' \
-  | tr -d "'\"" | tr -d '\\' \
-  | sed -e 's/[$]{IFS}/ /g' -e 's/[$]IFS/ /g' -e 's/[$]/ /g' -e 's/[;&|(){}`<>]/ ; /g') || finish deny internal-error
-cred_hit=$(printf '%s\n' "$cred_text" | awk '
-  function lastseg(x) { sub(/.*\//, "", x); return tolower(x) }
-  BEGIN {
-    nw = split("sudo doas command exec builtin nohup time nice then do else elif if while until ! xargs", wl, " ")
-    for (k = 1; k <= nw; k++) wrap[wl[k]] = 1
-  }
-  {
-    n = split($0, t, /[ \t]+/)
-    cp = 1; mode = ""; hasarg = 0; skip = 0
-    for (i = 1; i <= n + 1; i++) {
-      w = (i <= n) ? t[i] : ";"
-      if (w == "") continue
-      if (w == ";") {
-        if (mode == "P" && !hasarg) { print "hit"; exit }
-        if (mode == "E") { print "hit"; exit }
-        cp = 1; mode = ""; hasarg = 0; skip = 0; skip2 = 0
-        continue
-      }
-      if (skip) { skip = 0; continue }
-      if (mode == "G") {
-        if (substr(w, 1, 1) == "-") continue
-        if (w == "auth") { mode = "GA"; continue }
-        mode = ""; cp = 0; continue
-      }
-      if (mode == "GA") {
-        if (w == "token") { print "hit"; exit }
-        if (w == "status") { mode = "GS"; continue }
-        mode = ""; continue
-      }
-      if (mode == "GS") {
-        if (w == "--show-token" || w ~ /^-[A-Za-z]*t[A-Za-z]*$/) { print "hit"; exit }
-        continue
-      }
-      if (mode == "T") {
-        if (skip2) { skip2 = 0; continue }
-        if (w == "-c" || w == "-C" || w == "--git-dir" || w == "--work-tree" || w == "--namespace") { skip2 = 1; continue }
-        if (substr(w, 1, 1) == "-") continue
-        if (w == "credential") { print "hit"; exit }
-        if (w ~ /^credential-/) { mode = "TC"; continue }
-        mode = ""; continue
-      }
-      if (mode == "TC") {
-        if (w == "fill" || w == "get") { print "hit"; exit }
-        mode = ""; continue
-      }
-      if (mode == "P") {
-        if (substr(w, 1, 1) == "-") continue
-        hasarg = 1
-        if (toupper(w) ~ /TOKEN|SECRET|KEY|PASSW|CREDENTIAL/) { print "hit"; exit }
-        continue
-      }
-      if (mode == "E") {
-        if (w == "-u" || w == "-C" || w == "--unset" || w == "--chdir") { skip = 1; continue }
-        if (w == "-S" || w == "--split-string") { mode = ""; cp = 1; continue }
-        if (substr(w, 1, 1) == "-" || index(w, "=") > 0) continue
-        mode = ""; cp = 1
-      }
-      if (w == "-c" || tolower(w) == "eval") { cp = 1; continue }
-      if (!cp) continue
-      b = lastseg(w)
-      if (b in wrap) continue
-      if (substr(w, 1, 1) == "-" || w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue
-      cp = 0
-      if (b == "printenv") { mode = "P"; hasarg = 0 }
-      else if (b == "env") { mode = "E" }
-      else if (b == "gh") { mode = "G" }
-      else if (b == "git") { mode = "T"; skip2 = 0 }
-    }
-  }') || finish deny internal-error
-[ "$cred_hit" = hit ] && finish deny credential-read
+[ "$cred_pending" -eq 1 ] && finish deny credential-read
 
 finish allow
