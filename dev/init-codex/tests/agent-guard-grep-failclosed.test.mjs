@@ -95,13 +95,17 @@ for (const bash of BASHES) {
     let selectiveDir
     let trDir
     let awkDir
+    let awkEmptyDir
+    let awkUnknownDir
     before(() => {
       dir = mkdtempSync(join(tmpdir(), 'agent-guard-grepfail-'))
       alwaysDir = join(dir, 'always')
       selectiveDir = join(dir, 'selective')
       trDir = join(dir, 'tr')
       awkDir = join(dir, 'awk')
-      for (const d of [alwaysDir, selectiveDir, trDir, awkDir]) mkdirSync(d)
+      awkEmptyDir = join(dir, 'awk-empty')
+      awkUnknownDir = join(dir, 'awk-unknown')
+      for (const d of [alwaysDir, selectiveDir, trDir, awkDir, awkEmptyDir, awkUnknownDir]) mkdirSync(d)
       writeExe(join(alwaysDir, 'grep'), '#!/bin/sh\nexit 2\n')
       writeExe(join(selectiveDir, 'grep'), [
         '#!/bin/sh',
@@ -128,6 +132,17 @@ for (const bash of BASHES) {
         `exec '${REAL_AWK}' "$@"`,
         '',
       ].join('\n'))
+      // 判定の awk が exit 0 のまま何も出力しない（結果の語が空）・未知の語を出力する偽 awk。どちらも許可へ倒さず internal-error にする
+      for (const [d, word] of [[awkEmptyDir, ''], [awkUnknownDir, 'surely-unknown-verdict']]) {
+        writeExe(join(d, 'awk'), [
+          '#!/bin/sh',
+          'for a in "$@"; do',
+          `  case "$a" in *cred_check*) ${word === '' ? ': ; exit 0' : `printf '%s\\n' '${word}'; exit 0`} ;; esac`,
+          'done',
+          `exec '${REAL_AWK}' "$@"`,
+          '',
+        ].join('\n'))
+      }
     })
     after(() => rmSync(dir, { recursive: true, force: true }))
 
@@ -166,6 +181,16 @@ for (const bash of BASHES) {
             it(`deny internal-error: ${cmd}`, async () => {
               expectDeny(await run(bash, cmd, subagent, { pathPrefix: awkDir }), 'internal-error')
             })
+          }
+        })
+
+        describe('判定の awk が exit 0 で空出力・未知の語を出力しても許可へ倒れない', { concurrency: 8 }, () => {
+          for (const [label, dirOf] of [['空出力', () => awkEmptyDir], ['未知の語', () => awkUnknownDir]]) {
+            for (const cmd of ['printenv', 'ls', 'git status']) {
+              it(`deny internal-error（${label}）: ${cmd}`, async () => {
+                expectDeny(await run(bash, cmd, subagent, { pathPrefix: dirOf() }), 'internal-error')
+              })
+            }
           }
         })
 

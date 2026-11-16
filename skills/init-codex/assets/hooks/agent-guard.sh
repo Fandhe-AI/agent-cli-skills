@@ -36,10 +36,16 @@
 #                  gh extension（subagent が true / null のとき）
 #   credential-read  認証情報の読み出し（subagent が true / null のとき）。引用符と heredoc を解釈したトークンに対して判定する。
 #                  gh auth token・gh auth git-credential・gh auth status の --show-token(=…) / -t(=…)・git credential
-#                  （fill / get 系）・git config の extraheader の読み出し・printenv / env の引数なし・printenv で
+#                  （fill / get 系）・git config の extraheader の読み出しと、書き込みの無い一覧・照合
+#                  （-l / --list / list / --get-regexp / --get-urlmatch。--get でキーを 1 つ名指す形は許可）・
+#                  .git/config をファイルとして開く形・printenv / env の引数なし（代入だけの env を含む）・printenv で
 #                  TOKEN / SECRET / KEY / AUTH / COOKIE / SESSION / BEARER / _PAT 等を名指す形・echo / printf の
-#                  TOKEN / SECRET / PASSW / API_KEY 系の変数展開（引用符なしと二重引用符内。単一引用符内は文字列）・
-#                  export / declare / typeset の引数なしと -p / -x・引数なしの set・compgen -e・ps の e / -E・
+#                  TOKEN / SECRET / PASSW / API_KEY 系の変数展開（引用符なしと二重引用符内。単一引用符内は文字列）と
+#                  ${!x} の間接展開（どのコマンドの引数でも〔gh pr comment --body "$GH_TOKEN"・curl -d "$GITHUB_TOKEN" 等〕・
+#                  here-string `<<< "$GH_TOKEN"`・引用符なし heredoc の本文。X=$GH_TOKEN の代入の語は除く。
+#                  引用符つき heredoc の本文は文字列）・gh のグローバル option の値（-R / --repo / --hostname）を飛ばした auth token・
+#                  双方向リダイレクト <> の対象・
+#                  export / declare / typeset の引数なしと -p / -x（export は -n も）・引数なしの set・compgen -e・ps の e / -E・
 #                  security の find-generic-password / find-internet-password / dump-keychain・secret-tool の lookup / search・
 #                  ファイルとして開く形の hosts.yml / ~/.config/gh / .git-credentials / .netrc（`< file` の入力リダイレクトを含む）・
 #                  codex を含むコマンドの auth.json・/proc と組の environ。
@@ -169,7 +175,11 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 #   - 認証情報の読み出し（credential-read）の残存ギャップ: 値を取るラッパー（`timeout 10 gh auth token`・`xargs` への分割など。
 #     コマンド位置を読み違える点は gh pr merge のマージ系判定と同じ限界）、glob（`cat ~/.config/g*/h*.yml`）、
 #     curl で API を直接叩く・`node -e`・`python -c` 等のスクリプト言語、変数経由（`f=hosts.yml; cat $f`）・eval で組み立てる形、
-#     検索コマンドの option の値の読み違い（`rg -g hosts.yml pat` は値として通す）、`grep -r token ~/.config` のようなディレクトリ指定
+#     検索コマンドの option の値の読み違い（`rg -g hosts.yml pat` は値として通す）、`grep -r token ~/.config` のようなディレクトリ指定、
+#     `jq -n env` / `jq -n '$ENV'`（jq 自身の環境参照）、~/.aws/credentials・~/.npmrc・~/.ssh/id_* を開く形（対象は gh と codex と
+#     git の認証だけ）、トークンを URL に埋めたリモートを `git remote -v` で表示する形、`xargs env` / `find -exec env`
+#     （env の引数なしは見るが、xargs の後ろの env は値なしの呼び出しとして読み分けない）、`$(git rev-parse --git-dir)/config` のように
+#     組み立てた .git/config
 read -r -d '' GIT_AWK <<'AWK' || true
 function isws(c) { return (c == " " || c == "\t" || c == "\r") }
 # 語を確定する。リダイレクトの直後の語（rd == 1。対象のファイル名・fd）はコマンドでも引数でもないので積まない。
@@ -178,7 +188,7 @@ function emit_tok() {
   if (have) {
     # 入力リダイレクト（< file）の対象は読み出しなので、認証情報の判定のためだけに別へ積む。
     if (rd == 1) { if (rdc == "<") { nrin++; rin[nrin] = cur } rd = 0 }
-    else if (rd == 2) { nhs++; hs[nhs] = cur; rd = 0 }
+    else if (rd == 2) { nhs++; hs[nhs] = cur; hsv[nhs] = curv; rd = 0 }
     else { ntok++; tok[ntok] = cur; tokv[ntok] = curv }
   }
   cur = ""; have = 0; curv = ""
@@ -196,7 +206,13 @@ function redir_flush() {
   else emit_tok()
 }
 function setv(v) { if (verdict == "") verdict = v }
-function end_seg() { emit_tok(); if (ntok > 0 || nrin > 0) analyze(); ntok = 0; nhs = 0; nrin = 0; rd = 0; split("", hs) }
+function end_seg(   hm) {
+  emit_tok()
+  # here-string（`cat <<< "$GH_TOKEN"`）は変数の値を標準入力へ流すので、読む側のコマンドを問わず秘密らしい変数の展開を止める。
+  for (hm = 1; hm <= nhs; hm++) if (secret_ref(hsv[hm])) cred_hit = 1
+  if (ntok > 0 || nrin > 0) analyze()
+  ntok = 0; nhs = 0; nrin = 0; rd = 0; split("", hs); split("", hsv)
+}
 # 入れ子の中身（bash -c の値・eval の引数・ヒアドキュメント本体・$(...) の中・env -S の値）を作業キューへ積む。
 # 深さ・件数の上限を超えたら中身を見切れないので limit を立てる（結果は deny nesting-limit）。
 function enqueue(s, h) {
@@ -236,6 +252,7 @@ function env_split(v, hh) { esplit = 1; enqueue(v, hh); return split_has_h(v) }
 # セグメントのトークン（引用符・heredoc 本体を解釈済み）に対して判定するので、コミットメッセージや PR 本文の語、
 # 引用符つき heredoc の本文、検索パターンはコマンドとして読まない。結果は cred_hit 等のグローバルへ積み、END で集約する。
 function secret_name(w) { return (toupper(w) ~ /TOKEN|SECRET|KEY|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION|BEARER|(^|_)PAT$/) }
+function secret_ref(v) { return (secret_var(v) || index(v, "{!") > 0) }
 function secret_var(v) { return (toupper(v) ~ /TOKEN|SECRET|PASSW|API_?KEY|CREDENTIAL|BEARER|(^|_)PAT([^A-Z0-9_]|$)/) }
 function ghdir(t) { return (t !~ /[ \t\n]/ && t ~ /(^|[\/])[.]config[\/]gh([\/]|$)/) }
 # ファイルとして開き得る 1 語。空白を含む語は文章の値とみなして見ない。
@@ -244,20 +261,34 @@ function cred_tok(t) {
   if (t ~ /(^|[^A-Za-z0-9_.-])hosts[.]yml([^A-Za-z0-9_.-]|$)/) cred_hit = 1
   if (ghdir(t)) cred_hit = 1
   if (t ~ /(^|[\/])[.](git-credentials|netrc)$/) cred_hit = 1
+  if (t ~ /(^|[\/])[.]git[\/]config$/) cred_hit = 1
   if (t ~ /(^|[^A-Za-z0-9_.-])auth[.]json([^A-Za-z0-9_.-]|$)/) cred_aj = 1
   if (tolower(t) ~ /codex/) cred_cx = 1
   if (t ~ /(^|[\/])environ$/) cred_env = 1
   if (t ~ /(^|[\/])proc([\/]|$)/) cred_proc = 1
 }
-function cred_check(p, wr,   cb, i, k, t, np, fl, pos, sub1, j, sk, haspat, hasp, wflag, grepv) {
+# gh の option を読み飛ばして次の位置引数の位置を返す。値を取る option（-R / --repo / --hostname。= 連結形は 1 語）は値ごと飛ばす。
+function gh_flags(k) {
+  while (k <= ntok && tok[k] ~ /^-/) {
+    if (tok[k] == "-R" || tok[k] == "--repo" || tok[k] == "--hostname") k++
+    k++
+  }
+  return k
+}
+function cred_check(p, wr,   cb, i, k, t, np, fl, pos, sub1, j, sk, haspat, hasp, wflag, lflag, grepv) {
   for (i = 1; i <= nrin; i++) cred_tok(rin[i])
+  # command -v / -V は名前の検索だけで実行しない（`command -v printenv`・`command -v set`・`command -v export`）。
+  if (cmdv) return
+  # 秘密らしい変数の展開（二重引用符内・引用符なし。${!x} の間接展開を含む）は、どのコマンドの引数でも標準出力・通信・ログへ流れ得る
+  # （gh pr comment --body "$GH_TOKEN"・git commit -m "$GH_TOKEN"・curl -d "$GITHUB_TOKEN"）。代入の語（X=$GH_TOKEN）は値を表示しないので除く。
+  for (k = 1; k <= ntok; k++) if (tokv[k] != "" && tok[k] !~ /^[A-Za-z_][A-Za-z0-9_]*=/ && secret_ref(tokv[k])) cred_hit = 1
   if (exi > 0) {
     np = 0; fl = ""; pos = ""
     for (k = exi + 1; k <= ntok; k++) { t = tok[k]; if (t ~ /^-/) fl = fl t; else { np++; pos = pos " " t } }
-    if (np == 0) { if (fl == "" || fl ~ /p/ || fl ~ /x/) cred_hit = 1 }
+    if (np == 0) { if (fl == "" || fl ~ /p/ || fl ~ /x/ || (wr == "export" && fl ~ /n/)) cred_hit = 1 }
     else if (fl ~ /p/ && secret_name(pos)) cred_hit = 1
   }
-  if (p > ntok) { if (wr == "env" && !esplit && !cmdv) cred_hit = 1; return }
+  if (p > ntok) { if (wr == "env" && !esplit) cred_hit = 1; return }
   while (tolower(tok[p]) ~ /(^|\/)xargs$/) {
     p++
     while (p <= ntok && tok[p] ~ /^-/) p++
@@ -265,19 +296,18 @@ function cred_check(p, wr,   cb, i, k, t, np, fl, pos, sub1, j, sk, haspat, hasp
   }
   cb = tolower(tok[p]); sub(/^.*\//, "", cb)
   if (cb == "echo" || cb == "printf") {
-    for (k = p + 1; k <= ntok; k++) if (tokv[k] != "" && secret_var(tokv[k])) cred_hit = 1
+    # ${!x} は間接展開で、x が指す変数を判定できないので展開名に {! を含む形も止める。
+    for (k = p + 1; k <= ntok; k++) if (tokv[k] != "" && secret_ref(tokv[k])) cred_hit = 1
     return
   }
   if (cb == "gh") {
-    k = p + 1
-    while (k <= ntok && tok[k] ~ /^-/) k++
+    k = gh_flags(p + 1)
     if (k <= ntok && tok[k] == "auth") {
-      k++
-      while (k <= ntok && tok[k] ~ /^-/) k++
+      k = gh_flags(k + 1)
       sub1 = tok[k]
       if (sub1 == "token" || sub1 == "git-credential") cred_hit = 1
       else if (sub1 == "status") {
-        for (j = k + 1; j <= ntok; j++) if (tok[j] ~ /^--show-token(=.*)?$/ || tok[j] ~ /^-[A-Za-z]*t(=.*)?$/) cred_hit = 1
+        for (j = k + 1; j <= ntok; j++) if (tok[j] ~ /^--show-token(=.*)?$/ || tok[j] ~ /^-[A-Za-z]*t[A-Za-z]*(=.*)?$/) cred_hit = 1
       }
     }
     # 本文・題名の値は文章。--body-file 等のファイル指定と他の引数は開く形として見る。
@@ -304,8 +334,17 @@ function cred_check(p, wr,   cb, i, k, t, np, fl, pos, sub1, j, sk, haspat, hasp
     if (sub1 == "credential") cred_hit = 1
     else if (sub1 ~ /^credential-/ && (tok[k + 1] == "fill" || tok[k + 1] == "get")) cred_hit = 1
     else if (sub1 == "config") {
-      wflag = 0
-      for (j = k + 1; j <= ntok; j++) if (tok[j] == "--unset" || tok[j] == "--unset-all" || tok[j] == "--add" || tok[j] == "--replace-all") wflag = 1
+      wflag = 0; lflag = 0; np = 0
+      for (j = k + 1; j <= ntok; j++) {
+        t = tok[j]
+        if (t == "--unset" || t == "--unset-all" || t == "--add" || t == "--replace-all") wflag = 1
+        # 設定の一覧・正規表現／URL 照合の読み出しは extraheader の値（認証ヘッダ）を含み得る。キーを 1 つだけ名指す --get は止めない。
+        if (t == "--list" || t == "--get-regexp" || t == "--get-urlmatch" || t == "--regexp" || (t ~ /^-[A-Za-z]*l[A-Za-z]*$/ && t !~ /^--/)) lflag = 1
+        if (t ~ /^-/) { if (t == "-f" || t == "--file" || t == "--blob" || t == "--type" || t == "-t" || t == "--default") j++; continue }
+        np++
+        if (np == 1 && t == "list") lflag = 1
+      }
+      if (lflag && !wflag) cred_hit = 1
       for (j = k + 1; j <= ntok; j++) if (tok[j] ~ /extraheader/ && !wflag) cred_hit = 1
     }
     sk = 0
@@ -337,7 +376,7 @@ function cred_check(p, wr,   cb, i, k, t, np, fl, pos, sub1, j, sk, haspat, hasp
       if (sk) { sk = 0; continue }
       if (t ~ /^-/) {
         if (t ~ /^-[A-Za-z]*E/) cred_hit = 1
-        if (t ~ /^-[opuUCGgtsO]$/) sk = 1
+        if (t ~ /^-[opuUCGgtsO]$/ || t ~ /^-[A-Za-z]*o$/) sk = 1
       }
       else if (t ~ /^[A-Za-z]*e[A-Za-z]*$/) cred_hit = 1
     }
@@ -356,7 +395,10 @@ function cred_check(p, wr,   cb, i, k, t, np, fl, pos, sub1, j, sk, haspat, hasp
     if (sk) { sk = 0; continue }
     if (grepv && t ~ /^-/) {
       if (t == "-e" || t == "--regexp") { sk = 1; haspat = 1; continue }
-      if (t == "-f" || t == "--file") { cred_tok(tok[k + 1]); k++; continue }
+      if (t == "-f" || t == "--file") { haspat = 1; cred_tok(tok[k + 1]); k++; continue }
+      if (t ~ /^--file=/) { haspat = 1; cred_tok(substr(t, 8)); continue }
+      if (t ~ /^-f./) { haspat = 1; cred_tok(substr(t, 3)); continue }
+      if (t ~ /^--regexp=/ || t ~ /^-e./) { haspat = 1; continue }
       if (index(" -A -B -C -m -d -D -g -t -T -j -M --include --exclude --exclude-dir --glob --iglob --type --type-not --max-count --context --after-context --before-context --label --max-depth ", " " t " ") > 0) sk = 1
       continue
     }
@@ -699,6 +741,8 @@ function heredoc_subs(b,   st, sl, k, c, c2, r) {
     }
     if (c == "$") {
       c2 = substr(text, k + 1, 1)
+      # 引用符なし heredoc の本文はシェルが展開して標準入力へ流すので、秘密らしい変数の展開（${!x} の間接展開を含む）も止める。
+      if (secret_ref(var_at(k + 1))) cred_hit = 1
       if (c2 == "(") {
         if (substr(text, k + 2, 1) == "(") { r = arith_end(k + 3, 1, 0); if (r > 0) { k = r; continue } }
         r = sub_end(k + 2)
@@ -802,7 +846,7 @@ function assign_pos(   m, t) {
 function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body, found) {
   text = txt; len = length(text); i = 1; cur = ""; curv = ""; have = 0; ntok = 0; nhs = 0; nrin = 0; rd = 0; rdpos = -5; rdc = ""
   abn = 0; hdn = 0; linecap = 0; linehk = 0
-  split("", hs); cdepth = dp; husky_persist = hkin
+  split("", hs); split("", hsv); cdepth = dp; husky_persist = hkin
   while (i <= len) {
     ch = substr(text, i, 1)
     if (ch == "\\") {
@@ -902,6 +946,8 @@ function scan(txt, dp, hkin,   ch, nx, c2, h, rest, p, line, r, dash, w, i, body
       hdn++; hdw[hdn] = w; hdd[hdn] = dash; hdq[hdn] = hdquoted
       continue
     }
+    # 双方向リダイレクト <> は読み書きで開くので、対象を入力側（rdc が <）として検査する。
+    if (ch == ">" && rd == 1 && rdc == "<" && rdpos == i - 1) { rdpos = i; i++; continue }
     if (ch == "<" || ch == ">") { redir_flush(); rd = 1; rdpos = i; rdc = ch; i++; continue }
     if (ch == "$") curv = curv " " var_at(i + 1)
     cur = cur ch; have = 1; i++
