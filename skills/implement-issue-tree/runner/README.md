@@ -32,7 +32,7 @@ node <skillDir>/runner/run.mjs --tool codex|opencode --args <args.json> \
 | 引数 | 意味 |
 |------|------|
 | `--tool codex\|opencode` | 必須。使うアダプタ（`adapters/<tool>.mjs`） |
-| `--args <args.json>` | 必須。Workflow 版の args と同じ JSON オブジェクト（`parent`・`parallel`・`autoMerge`・`externalChecks` 等。キーの意味は `references/args-reference.md`）。`skillDir` を省くとこのスキルの場所になる（指定するなら絶対パス） |
+| `--args <args.json>` | 必須。Workflow 版の args と同じ JSON オブジェクト（`parent`・`parallel`・`autoMerge`・`externalChecks` 等。キーの意味は `references/args-reference.md`）。`skillDir` を省くとこのスキルの場所になる（指定するなら、このスキルと同じ場所〔realpath が一致〕を指す絶対パス。違えば終了コード 2） |
 | `--config <config.json>` | 省略時は `config/default.json`。モデル・強さの対応表、段ごとの時間切れ、並列の上限、ツール別の設定（`toolConfig.<tool>`） |
 | `--max-parallel N` | 同時に動かすエージェント数の上限（1〜999）。省略時は設定の `limits.maxParallel`（既定 4） |
 | `--dry-run` | args に `dryRun: true` を入れて流す（GitHub へは何も書かず、着手できる件数・blocked の見積りを `result` に返す）。状態の読み込み等の読み取りの段は実行する |
@@ -70,7 +70,7 @@ _/iit-runner/<runId>/
 
 | 項目 | Workflow 版 | ランナー |
 |------|-------------|----------|
-| 機械的な段（状態の読み書き・観測・掃除。プロンプト 0 行目に `<!-- iit-exec v1 … -->` を持つ段） | モデルがコマンドを実行して封筒を返す | モデルを介さず `bash <skillDir>/scripts/run-verified.sh …` を shell なしで直接実行する。label ごとの許可表（`lib/agent-host.mjs` の `EXEC_RULES`）に合わない仕様は実行せずその段の失敗値を返し、仕様行が壊れていれば `null`。封筒の照合はホストが従来どおり行う（`references/script-trust-model.md`） |
+| 機械的な段（状態の読み書き・観測・掃除。プロンプト 0 行目に `<!-- iit-exec v1 … -->` を持つ段） | モデルがコマンドを実行して封筒を返す | モデルを介さず `bash <skillDir>/scripts/run-verified.sh …` を shell なしで直接実行する。label ごとの許可表（`lib/agent-host.mjs` の `EXEC_RULES`）に合わない仕様は実行せずその段の失敗値（表の値）を返し、表に無い label・仕様行が壊れているときは `null`。封筒の照合はホストが従来どおり行う（`references/script-trust-model.md`） |
 | model を省いた段（plan・recover） | セッションのモデルを継ぐ | セッションが無いため、設定の `sessionModel`（既定 `opus`）の段として扱う |
 | 並列 | ランタイムの既定（16 か CPU 数 − 2） | `--max-parallel` か `limits.maxParallel`（既定 4）。1 ランのエージェント数は `limits.maxAgents`（既定 1,000）まで |
 | 構造化出力 | ランタイムが schema を強制 | Codex は `--output-schema`（strict 変換）、OpenCode はプロンプトへの埋め込み。どちらもランナーが検証し、不適合なら修復を 1 回求め、なお不適合なら `null` |
