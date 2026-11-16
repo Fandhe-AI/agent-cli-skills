@@ -1673,7 +1673,7 @@ export const ENQUEUE_DENY = [
 // git config での core.hooksPath / alias.* の設定（no-verify・全セッション）。#805 の凍結後に足した判定で、旧版との差分テスト
 // （agent-guard-805.test.mjs）の対象外（POST_805）。option の文法は真似ず許可リストで見る: hookspath を含む語か alias.* / include.* /
 // includeIf.* の語がある git config / -c / --config-env と、core / alias / include / includeIf の節名と rename-section /
-// remove-section（`re` 始まりの語）がある git config と、編集（-e を含む短い option・--edit の省略・edit の語）を指し得る git config は、
+// remove-section（`re` 始まりの語）がある git config と、編集（- の直後の英字の並びに e がある短い option・--edit の省略・edit の語）を指し得る git config は、
 // 読み取りの完全形 `git config KEY`・`git config --get KEY` 以外をすべて止める（値を取るかが版で変わる option を含む形は読み取りでも止める）。
 export const HOOKCONF_DENY = [
   ['git config --fil x core.hooksPath /dev/null', 'no-verify'],
@@ -1761,6 +1761,10 @@ export const HOOKCONF_DENY = [
   ['git config --global edit', 'no-verify'],
   ['git config -ze', 'no-verify'],
   ['git config -le', 'no-verify'],
+  // -e と値を取る -f の束（-ef<file> は -e と -f <file>。実 git 2.54 で編集になることを確認）
+  ['git config -ef.git/config', 'no-verify'],
+  ['git config -ef~/.gitconfig', 'no-verify'],
+  ['git config -zef x', 'no-verify'],
   ['git config user.name -e', 'no-verify'],
   ['git config set user.name edit', 'no-verify'],
   ['git -C d config -e', 'no-verify'],

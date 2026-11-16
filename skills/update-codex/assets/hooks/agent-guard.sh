@@ -31,7 +31,7 @@
 #                  core.hooksPath を直接書き換えられる）。
 #                  git config は option の文法を真似ず許可リストで見る: hookspath を含む語か alias.* / include.* / includeIf.* の
 #                  語がある形、core / alias / include / includeIf の節名の語と rename-section / remove-section（`re` 始まりの語）が
-#                  ある形、編集を指し得る語（-e を含む短い option・--edit の省略・edit）がある形は、読み取りの完全形
+#                  ある形、編集を指し得る語（- の直後の英字の並びに e がある短い option・--edit の省略・edit）がある形は、読み取りの完全形
 #                  `git config KEY`・`git config --get KEY`（KEY は core.hooksPath・alias.<名前>・include.path・
 #                  includeIf.<条件>.path）以外をすべて止める（option を含む形は、値を取るかが git の版で変わるので読み取りに
 #                  見えても止める）
@@ -577,8 +577,9 @@ function opt_val_next(a, longs, stops,   m, ch) {
 #   - git config（sub_is）で、hookspath を含む語か alias.* / include.* / includeIf.* の語がある。または core / alias / include /
 #     includeIf の節名そのものの語と、rename-section / remove-section（--ren… / --rem… の省略を含む `re` 始まりの語）がある
 #   - git config（sub_is）で、編集（設定ファイルを EDITOR / GIT_EDITOR で開く。core.hooksPath を直接書き換えられる）を指し得る語がある:
-#     英字だけの短い option の語で e を含むもの（束ね書き。`git config KEY -e` もキーの後ろの -e を読んで編集になる。-f~/.netrc・
-#     -f.gitmodules のように英字以外を含む語は連結した値なので見ない）・--edit の省略（--e 以上）・
+#     短い option の語で、- の直後から続く英字の並びに e があるもの（束ね書き。`-ef<file>` は -e と -f <file> の束で編集になり、
+#     `git config KEY -e` もキーの後ろの -e を読んで編集になる。-f~/.netrc・-f.gitmodules は英字の並びが f で、e は連結した値の中なので
+#     見ない）・--edit の省略（--e 以上）・
 #     edit の語（option を含まない `git config KEY VALUE` の VALUE は除く）
 # 当たったうち通すのは、option を含まない読み取りの完全形 `git config KEY`・`git config --get KEY`（KEY は core.hooksPath・
 # alias.<名前>・include.path・includeIf.<条件>.path）だけ。値を取るかが版で変わる option（--comment / --color 等）を含む形は、
@@ -599,7 +600,7 @@ function hook_swap(c,   k, t, hit, sec, re, n, s) {
     if (index(t, "hookspath") > 0 || t ~ /^(alias|include|includeif)[.]/) hit = 1
     if (t == "core" || t == "alias" || t == "include" || t == "includeif") sec = 1
     if (t ~ /^(--)?re/) re = 1
-    if (t ~ /^-[a-z]*e[a-z]*$/) hit = 1
+    if (t ~ /^-[a-z]*e/) hit = 1
     if (length(t) >= 3 && index("--edit", t) == 1) hit = 1
     if (t == "edit" && !(tok[s] == "config" && ntok == s + 2 && k == s + 2 && conf_key(tok[s + 1]))) hit = 1
   }
