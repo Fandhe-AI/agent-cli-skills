@@ -141,7 +141,7 @@ test('単体: 生成元は agent() の呼び出し箇所を変えず、pipeline(
   const dist = readFileSync(join(SHIPPED_SCRIPTS, 'implement-issue-tree.js'), 'utf8')
   assert.doesNotMatch(dist, /\bpipeline\(/, 'pipeline() が増えると agent() 呼び出し数とランタイムの数がずれる（コメント除去済みの生成物で検査）')
   assert.ok(driverPart.includes('agent = countedAgent'), '駆動部で agent を再束縛する')
-  assert.ok(driverPart.includes('wrapAgentCounting(agent, agentBudget, log)'), '超過の警告をラン中のログへ出す')
+  assert.ok(driverPart.includes('wrapAgentCounting(guardExecSpecPrompt(agent, log), agentBudget, log)'), '超過の警告をラン中のログへ出す')
   assert.ok(!definitionPart.includes('agent = countedAgent'), '定義部に置くとスライス import のテストが ReferenceError になる')
 })
 
