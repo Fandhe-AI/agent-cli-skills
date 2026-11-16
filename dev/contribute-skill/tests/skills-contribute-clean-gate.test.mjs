@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'skills-contribute.sh');
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'contribute-skill', 'scripts', 'skills-contribute.sh');
 const SECRET = 'TOPSECRET_VALUE_12345';
 
 function gitEnv(root, extra = {}) {

@@ -14,8 +14,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SCRIPT = join(HERE, '..', 'assets', 'scripts', 'codex-hooks-merge.sh')
-const TEMPLATE = join(HERE, '..', 'assets', 'codex', 'hooks.json')
+const SCRIPT = join(HERE, '..', '..', '..', 'skills', 'update-codex', 'assets', 'scripts', 'codex-hooks-merge.sh')
+const TEMPLATE = join(HERE, '..', '..', '..', 'skills', 'update-codex', 'assets', 'codex', 'hooks.json')
 const tmpl = JSON.parse(readFileSync(TEMPLATE, 'utf8'))
 
 const pathBash = spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim()

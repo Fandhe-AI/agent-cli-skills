@@ -9,7 +9,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const OC = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'opencode')
+const OC = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'init-opencode', 'assets', 'opencode')
 
 // 組み込みの agent・スキル ID（衝突すると警告なしでプロジェクト側が上書きする）。
 const BUILTIN_IDS = ['opencode', 'report', 'browser', 'general', 'explore', 'build', 'plan', 'compaction', 'title', 'summary', 'scout']

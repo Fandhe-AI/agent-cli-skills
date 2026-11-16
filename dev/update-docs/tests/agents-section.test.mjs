@@ -15,10 +15,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SCRIPT = join(HERE, '..', 'scripts', 'agents-section.sh')
-const CODEX_SCRIPT = join(HERE, '..', '..', 'init-codex', 'assets', 'scripts', 'agents-md-block.sh')
-const CODEX_TEMPLATE = join(HERE, '..', '..', 'init-codex', 'assets', 'agents-md-block.md')
-const GUARDS_SKILL = join(HERE, '..', '..', 'setup-repo-guards', 'SKILL.md')
+const SCRIPT = join(HERE, '..', '..', '..', 'skills', 'update-docs', 'scripts', 'agents-section.sh')
+const CODEX_SCRIPT = join(HERE, '..', '..', '..', 'skills', 'init-codex', 'assets', 'scripts', 'agents-md-block.sh')
+const CODEX_TEMPLATE = join(HERE, '..', '..', '..', 'skills', 'init-codex', 'assets', 'agents-md-block.md')
+const GUARDS_SKILL = join(HERE, '..', '..', '..', 'skills', 'setup-repo-guards', 'SKILL.md')
 
 const START = '<!-- agent-cli-skills:update-docs:start -->'
 const END = '<!-- agent-cli-skills:update-docs:end -->'

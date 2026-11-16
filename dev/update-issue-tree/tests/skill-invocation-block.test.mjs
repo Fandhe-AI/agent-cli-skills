@@ -33,7 +33,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md')
+const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'update-issue-tree', 'SKILL.md')
 
 // 付け替えを実行する ```bash フェンスのみを抽出する。件数が 2 から変化したら
 // （新ブロック追加・削除）このテストが落ち、伝播修正の当て漏れに気づける設計にする。
@@ -57,7 +57,7 @@ function extractReassignBlocks() {
 const SCRIPTS_RELATIVE = join('skills', 'update-issue-tree', 'scripts')
 const STUB_RELATIVE = join(SCRIPTS_RELATIVE, 'reassign-sub-issue.sh')
 const LIB_RELATIVE = join(SCRIPTS_RELATIVE, 'reassign-lib.sh')
-const LIB_SOURCE = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'reassign-lib.sh')
+const LIB_SOURCE = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'update-issue-tree', 'scripts', 'reassign-lib.sh')
 
 // 出荷される実体の reassign-lib.sh を tmp レイアウトへ複製する。テスト用の写しを作らないのは、
 // ライブラリ自身の解決ロジック（自分の実体位置から兄弟の reassign-sub-issue.sh を導出する）

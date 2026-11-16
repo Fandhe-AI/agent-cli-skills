@@ -13,8 +13,8 @@ import { fileURLToPath } from 'node:url'
 
 const run = promisify(execFile)
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SCRIPT = join(HERE, '..', 'assets', 'scripts', 'opencode-config-merge.mjs')
-const TEMPLATE = join(HERE, '..', 'assets', 'opencode', 'opencode.jsonc')
+const SCRIPT = join(HERE, '..', '..', '..', 'skills', 'update-opencode', 'assets', 'scripts', 'opencode-config-merge.mjs')
+const TEMPLATE = join(HERE, '..', '..', '..', 'skills', 'update-opencode', 'assets', 'opencode', 'opencode.jsonc')
 
 const dirs = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'oc-merge-')); dirs.push(d); return d }

@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 
-const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..')
+const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'sync-skills-lock')
 const SKILL_MD_PATH = join(SKILL_DIR, 'SKILL.md')
 
 function extractBashFences(content) {

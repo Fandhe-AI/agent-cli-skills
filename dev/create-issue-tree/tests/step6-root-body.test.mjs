@@ -28,13 +28,13 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md')
+const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'create-issue-tree', 'SKILL.md')
 
 // 新規作成経路は scripts/create-root-body.sh へ切り出した（Issue #555）。SKILL.md からの
 // ブロック抽出ではなく、スクリプトを直接実行して検証する。
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'create-root-body.sh')
-const MERGE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'merge-root-body.sh')
-const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'tree-lib.sh')
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'create-issue-tree', 'scripts', 'create-root-body.sh')
+const MERGE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'create-issue-tree', 'scripts', 'merge-root-body.sh')
+const LIB = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'create-issue-tree', 'scripts', 'tree-lib.sh')
 
 // gh スタブ。api .../issues/<n>/sub_issues?...page=<p> には fixture/sub_<n>_<p>.json を返し、
 // 無ければ exit 1（API 失敗）。issue edit は引数と --body-file の中身を記録する。
@@ -1277,7 +1277,7 @@ test('(D10) 見出し行に <!-- を含む本文は中止する', () => {
 
 // 方針（Issue #678）: コードスパン・HTML コメント・エスケープの状態は追わない。判定範囲に曖昧な記号があれば中止する。
 test('(E1) 状態追跡のコード（strip_code・pend・incomment・エスケープ除去）を持たず、未閉じ <details> は edit せず中止する', () => {
-  const src = readFileSync(new URL('../scripts/merge-root-body.sh', import.meta.url), 'utf8')
+  const src = readFileSync(new URL('../../../skills/create-issue-tree/scripts/merge-root-body.sh', import.meta.url), 'utf8')
   for (const dead of ['strip_code', 'pend_hit', 'incomment', 'gsub(/[\\\\]<']) assert.ok(!src.includes(dead), `${dead} が残っている`)
   const ng = runRootFull(withOld('<details><summary>x</summary>'), [issue(111, 'feat: 新しい子')])
   assert.equal(ng.r.status, 1, ng.r.stderr)
@@ -1443,7 +1443,7 @@ test('(G5) 旧形式のエスケープ（\\|）が残る本文は中止し、文
 
 // Issue #683: update-issue-tree の管理区間の出力を create-issue-tree の --root 再マージへ通す往復。
 // update-issue-tree が無い配布形態（スキル単体の配布）では skip する。スキルをまたぐ import はしない。
-const UPDATE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'update-issue-tree', 'scripts', 'update-root-body.sh')
+const UPDATE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'update-issue-tree', 'scripts', 'update-root-body.sh')
 const UPDATE_GH_STUB = `#!/usr/bin/env bash
 D="\${STUB_DIR}"
 case "$1" in

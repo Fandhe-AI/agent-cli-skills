@@ -17,10 +17,8 @@ skills/                               -- スキル本体（各ディレクトリ
   create-issue/
   create-issue-tree/
     scripts/                          -- create-root-body.sh（Step 6 新規作成経路のルート本文生成・実ツリーから表を作りプレースホルダー残りで中止）、merge-root-body.sh（Step 6 --root 経路・既存ルート本文へ今回の Phase 行・セクションをマージ）、tree-lib.sh（list_subs・count_open_desc・CELL・プレースホルダー正規表現の共通ヘルパー・source 専用）
-    tests/                            -- node:test 回帰テスト（新規作成・--root 両経路とも scripts/ のスクリプトを直接実行・引数検証・edit 失敗の終了コード伝播・ライブラリ契約・Step 6 の呼び出しフェンス検査と 3 レイアウト探索・プレースホルダー残りで中止・ページング・一時ファイル削除・Step 3 雛形への --root マージ・コードフェンス内の行を見出しと誤認しない／閉じ忘れフェンスで中止・update-issue-tree の管理マーカー区間と退避 `<details>` を壊さない／マーカー不整合・同名見出しの重複で中止）
   create-plan/
   create-pr/
-    tests/                            -- node:test 回帰テスト（SKILL.md の静的検査: git push が Step 2 のセキュリティチェックより後・gh pr create より前・前提条件に push 済みの要求が無い・force 系の push をしない・sandbox 節の git push と .git 書き込み）
   implement-issue/
   implement-issue-tree/
     references/                       -- 引数の詳細（args-reference.md）・opt-in テスト宣言の詳細（optin-tests.md）・base 取り込み専用ループ（base-merge.md）・cancel された run の残存 check の検知と対処（residual-check.md。residual-check-detection テストが (A) のスクリプトを抽出して実行）・自動マージ設計・検証手順・復旧・レポート書式・スクリプト実行の信頼モデル（script-trust-model.md）・テストの流し方と変異テストの使い方（testing.md）
@@ -32,26 +30,19 @@ skills/                               -- スキル本体（各ディレクトリ
   init-claude/
   init-codex/
     assets/                           -- hooks（agent-guard.sh 共通ガード・codex-pretooluse.sh・codex-session-start.sh）・codex（hooks.json・rules・agents）・scripts/agents-md-block.sh（AGENTS.md 管理区間）
-    tests/                            -- node:test 回帰テスト（agent-guard・codex-adapter・agents-md-block・asset-sync・version-pin）
   init-opencode/
     assets/                           -- opencode（plugins/agent-guard・opencode.jsonc・agents）・hooks/agent-guard.sh（共通ガード）・scripts/agents-md-block.sh（AGENTS.md 管理区間）
-    tests/                            -- node:test 回帰テスト（opencode-plugin・opencode-config・asset-sync・version-pin）
   update-docs/
     scripts/                          -- select-target.sh（更新対象の選択。CLAUDE.md があれば claude、無く AGENTS.md があれば agents、同一ファイルは agents、どちらも無ければ none）、agents-section.sh（AGENTS.md の update-docs 専用区間だけを追記・差し替え。区間外はバイト不変・マーカー不整合と agents-md 区間との入れ子は書かず停止・32 KiB 超は警告）
-    tests/                            -- node:test 回帰テスト（select-target の選択と無変更・agents-section の追記・差し替え・unchanged・停止条件・フェンス・32768 バイト境界・init-codex との往復、SKILL.md Step 0 のフェンス）
   update-issue-tree/
     scripts/                          -- reassign-sub-issue.sh（closed 親下の残置 open issue 付け替え・孤児再配置。DELETE→POST を単一プロセスで冪等に実行。cross-repository sub-issue は非対応で exit 2）、reassign-lib.sh（Step 3/4 の呼び出し側共有ヘルパー。計画配列の存在・型検証と終了ステータス解釈。両フェンスが自己完結的に source する）、update-root-body.sh（Step 8 のルート本文部分更新。マーカー間の管理ブロックのみ差し替え・既存本文は保持・マーカー無し本文は旧 Phase 表を details へ退避して移行・exit 4/5 で fail-closed）
-    tests/                            -- node:test 回帰テスト（DELETE 失敗時に POST が呼ばれないこと、Step 8 の既存本文保持・移行・冪等・並行編集検知・マーカー不整合停止等・タイトルの文字参照変換〔create-issue-tree の CELL と同じ出力〕・旧形式の書き直し・create-issue-tree の --root 再マージとの往復〔相手のスキルが無ければ skip〕）、lib/ に gh スタブ（作る一時ディレクトリは tmp-track.mjs でプロセス終了時に消す）
   update-claude/
   update-codex/
     assets/                           -- init-codex と同じ資産（hooks・codex・scripts/agents-md-block.sh）・scripts/codex-hooks-merge.sh（hooks.json のマージ）
-    tests/                            -- node:test 回帰テスト（asset-sync・codex-hooks-merge・version-pin）
   update-opencode/
     assets/                           -- init-opencode と同じ資産（opencode・hooks・scripts/agents-md-block.sh）・scripts/opencode-config-merge.mjs（opencode.jsonc のマージ）
-    tests/                            -- node:test 回帰テスト（asset-sync・opencode-config-merge・version-pin）
   setup-repo-guards/
     scripts/                          -- verify-ai-review-wrapper.sh（Step 1 で commit SHA 固定取得した ai-review wrapper の配置前検査。allow-list 方式〔with の値はキーごとの 1 行 plain scalar・types / branches は要素ごとの完全一致・文字列の位置〔name・ジョブ ID・group・with の文字列キー・branches の要素〕では引用符なしで null・真偽値・数値・日付に解決される値を拒否〔YAML 1.1 と 1.2 の和集合・引用符で囲めば許可〕・concurrency は任意だがあれば group 必須〕・ジョブ構造は状態機械で追い uses・権限・provider を現在のジョブへ束縛・uses 完全一致 1 件・特権トリガー／run／secrets: inherit／過剰権限を拒否・ファイル内容は出力しない・exit 0 合格 / 1 不合格 / 2 使い方の誤り）
-    tests/                            -- node:test 回帰テスト（合格形・1 項目ずつの変異で不合格・型付き scalar × 文字列の位置の直積と引用符つきの対照・concurrency の group 必須・実行できる全 bash〔/bin/bash 3.2 と PATH の bash 5〕で結果が一致すること・上流テンプレートの実物 fixture〔fixtures/〕・PyYAML による oracle〔値の型まで str を要求〕・空ファイルとエラー JSON・使い方の誤り・出力に内容を含めないこと）
   project-init/
   project-add-items/
   project-create-issues/
@@ -61,8 +52,34 @@ skills/                               -- スキル本体（各ディレクトリ
   project-archive-done/
   contribute-skill/
     scripts/                          -- skills-contribute.sh（upstream 反映スクリプト。lock 照合は fail-closed・コピー前に対象スキルの作業ツリー clean 検査を行う）
-    tests/                            -- node:test 回帰テスト（lock 不在・未登録・source 欠落・解析失敗の中止、未コミット・未追跡・ignore 対象の検出時にコピー前で中止すること）
   sync-skills-lock/
+dev/                                  -- 開発専用（配布物 skills/ の外・下流へ配布されない）。dev/<name>/tests/ が skills/<name>/ のテスト（implement-issue-tree の分は別 PR で移す）
+  contribute-skill/
+    tests/                            -- node:test 回帰テスト（lock 不在・未登録・source 欠落・解析失敗の中止、未コミット・未追跡・ignore 対象の検出時にコピー前で中止すること）
+  create-issue-tree/
+    tests/                            -- node:test 回帰テスト（新規作成・--root 両経路とも scripts/ のスクリプトを直接実行・引数検証・edit 失敗の終了コード伝播・ライブラリ契約・Step 6 の呼び出しフェンス検査と 3 レイアウト探索・プレースホルダー残りで中止・ページング・一時ファイル削除・Step 3 雛形への --root マージ・コードフェンス内の行を見出しと誤認しない／閉じ忘れフェンスで中止・update-issue-tree の管理マーカー区間と退避 `<details>` を壊さない／マーカー不整合・同名見出しの重複で中止）
+  create-pr/
+    tests/                            -- node:test 回帰テスト（SKILL.md の静的検査: git push が Step 2 のセキュリティチェックより後・gh pr create より前・前提条件に push 済みの要求が無い・force 系の push をしない・sandbox 節の git push と .git 書き込み）
+  init-claude/
+    tests/                            -- node:test 回帰テスト（version-pin）
+  init-codex/
+    tests/                            -- node:test 回帰テスト（agent-guard・codex-adapter・agents-md-block・asset-sync・version-pin）
+  init-opencode/
+    tests/                            -- node:test 回帰テスト（opencode-plugin・opencode-config・asset-sync・version-pin）
+  setup-repo-guards/
+    tests/                            -- node:test 回帰テスト（合格形・1 項目ずつの変異で不合格・型付き scalar × 文字列の位置の直積と引用符つきの対照・concurrency の group 必須・実行できる全 bash〔/bin/bash 3.2 と PATH の bash 5〕で結果が一致すること・上流テンプレートの実物 fixture〔fixtures/〕・PyYAML による oracle〔値の型まで str を要求〕・空ファイルとエラー JSON・使い方の誤り・出力に内容を含めないこと）
+  sync-skills-lock/
+    tests/                            -- node:test 回帰テスト（checker・restore・scope-guard・version-pin 等）
+  update-claude/
+    tests/                            -- node:test 回帰テスト（version-pin）
+  update-codex/
+    tests/                            -- node:test 回帰テスト（asset-sync・codex-hooks-merge・version-pin）
+  update-docs/
+    tests/                            -- node:test 回帰テスト（select-target の選択と無変更・agents-section の追記・差し替え・unchanged・停止条件・フェンス・32768 バイト境界・init-codex との往復、SKILL.md Step 0 のフェンス）
+  update-issue-tree/
+    tests/                            -- node:test 回帰テスト（DELETE 失敗時に POST が呼ばれないこと、Step 8 の既存本文保持・移行・冪等・並行編集検知・マーカー不整合停止等・タイトルの文字参照変換〔create-issue-tree の CELL と同じ出力〕・旧形式の書き直し・create-issue-tree の --root 再マージとの往復〔相手のスキルが無ければ skip〕）、lib/ に gh スタブ（作る一時ディレクトリは tmp-track.mjs でプロセス終了時に消す）
+  update-opencode/
+    tests/                            -- node:test 回帰テスト（asset-sync・opencode-config-merge・version-pin）
 .claude/
   agents/
     research/

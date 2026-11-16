@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { mkdtempSync, copyFileSync, rmSync, readFileSync, readdirSync, chmodSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
-const ASSETS = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets')
+const ASSETS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'init-codex', 'assets')
 const HOOKS = join(ASSETS, 'hooks')
 const ADAPTER = join(HOOKS, 'codex-pretooluse.sh')
 

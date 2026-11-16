@@ -15,7 +15,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SCRIPT = join(HERE, '..', 'scripts', 'select-target.sh')
+const SCRIPT = join(HERE, '..', '..', '..', 'skills', 'update-docs', 'scripts', 'select-target.sh')
 
 const pathBash = spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim()
 const BASHES = [...new Set(['/bin/bash', pathBash].filter((b) => b && existsSync(b)))]

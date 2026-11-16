@@ -27,7 +27,7 @@ import { readFileSync } from 'node:fs'
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'scripts', 'skills-lock-update.sh',
+  '..', '..', '..', 'skills', 'sync-skills-lock', 'scripts', 'skills-lock-update.sh',
 )
 
 // スクリプト本体から `path_state() { ... }` の関数定義ブロックだけを抽出する。

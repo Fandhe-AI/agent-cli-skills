@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md');
+const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'update-issue-tree', 'SKILL.md');
 const text = readFileSync(SKILL_MD, 'utf8');
 
 // `### Step N:` から次の `### ` 見出し（または `## `）までを取り出す

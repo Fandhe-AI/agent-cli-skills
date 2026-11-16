@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import cp from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 
-const ASSETS = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets')
+const ASSETS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'init-opencode', 'assets')
 const PLUGIN_SRC = join(ASSETS, 'opencode', 'plugins', 'agent-guard', 'index.js')
 const GUARD_SRC = join(ASSETS, 'hooks', 'agent-guard.sh')
 

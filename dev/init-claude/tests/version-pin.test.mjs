@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..')
+const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'init-claude')
 const SKILL_MD_PATH = join(SKILL_DIR, 'SKILL.md')
 
 const EXACT_SEMVER = /^[0-9]+\.[0-9]+\.[0-9]+$/

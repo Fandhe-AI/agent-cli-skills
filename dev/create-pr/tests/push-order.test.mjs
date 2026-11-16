@@ -15,7 +15,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SKILL = readFileSync(join(HERE, '..', 'SKILL.md'), 'utf8')
+const SKILL = readFileSync(join(HERE, '..', '..', '..', 'skills', 'create-pr', 'SKILL.md'), 'utf8')
 
 // 見出し行から次の同レベル以上の見出しまでを返す。見つからなければテストを失敗させる。
 function section(heading, level) {

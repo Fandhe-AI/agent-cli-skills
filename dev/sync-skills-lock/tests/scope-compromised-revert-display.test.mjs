@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'scripts', 'skills-lock-update.sh',
+  '..', '..', '..', 'skills', 'sync-skills-lock', 'scripts', 'skills-lock-update.sh',
 )
 
 const SKILL_NAME = 'dummy-skill'

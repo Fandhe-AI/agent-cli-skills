@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'scripts', 'skills-lock-update.sh',
+  '..', '..', '..', 'skills', 'sync-skills-lock', 'scripts', 'skills-lock-update.sh',
 )
 
 // スクリプト本文から restore_help() の定義行〜対応する閉じ括弧行までを抽出する。

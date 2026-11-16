@@ -8,7 +8,7 @@ import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/skills-contribute.sh');
+const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../skills/contribute-skill/scripts/skills-contribute.sh');
 const UP = 'Fandhe-AI/agent-cli-skills';
 
 function run({ lock, name = 'foo', upstream = UP }) {

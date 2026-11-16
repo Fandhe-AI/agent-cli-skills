@@ -9,9 +9,11 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const testsDir = dirname(fileURLToPath(import.meta.url));
-const selfDir = dirname(testsDir);
-const skillsDir = dirname(selfDir);
-const self = basename(selfDir);
+// テストは dev/<name>/tests/ にあり、検査対象のスキル本体は skills/<name>/ にある。
+const devDir = join(testsDir, '..', '..');
+const skillsDir = join(testsDir, '..', '..', '..', 'skills');
+const self = basename(dirname(testsDir));
+const selfDir = join(skillsDir, self);
 
 const ALL = ['init-codex', 'update-codex', 'init-opencode', 'update-opencode'];
 const COMMON = ['hooks/agent-guard.sh', 'agents-md-block.md', 'scripts/agents-md-block.sh'];
@@ -53,9 +55,9 @@ for (const other of ALL.filter((n) => n !== self)) {
 
   test(`${TEST_FILE} が ${other} とバイト同一`, (t) => {
     if (!present(other)) return t.skip(`兄弟スキル ${other} が無い導入先のため比較できない`);
-    const b = join(sibling(other), TEST_FILE);
+    const b = join(devDir, other, TEST_FILE);
     assert.ok(existsSync(b), `${other}/${TEST_FILE} が無い`);
-    assert.equal(sha(join(selfDir, TEST_FILE)), sha(b));
+    assert.equal(sha(join(devDir, self, TEST_FILE)), sha(b));
   });
 }
 

@@ -17,7 +17,7 @@ import { createGhStub } from './lib/gh-stub.mjs'
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'scripts', 'reassign-sub-issue.sh',
+  '..', '..', '..', 'skills', 'update-issue-tree', 'scripts', 'reassign-sub-issue.sh',
 )
 
 function run(args, fixture) {

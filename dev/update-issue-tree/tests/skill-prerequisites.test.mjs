@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md')
+const SKILL_MD = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'update-issue-tree', 'SKILL.md')
 
 // 「## 前提条件」見出しから次の「## 」見出しまでのテキストを切り出す。
 function extractPrerequisitesSection() {

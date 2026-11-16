@@ -31,7 +31,7 @@ const REAL_GIT = execFileSync('/bin/bash', ['-c', 'command -v git'], { encoding:
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
-  '..', 'scripts', 'skills-lock-update.sh',
+  '..', '..', '..', 'skills', 'sync-skills-lock', 'scripts', 'skills-lock-update.sh',
 )
 
 const SKILL_NAME = 'dummy-skill'

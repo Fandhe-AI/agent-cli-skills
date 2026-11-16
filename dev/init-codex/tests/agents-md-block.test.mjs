@@ -13,8 +13,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SCRIPT = join(HERE, '..', 'assets', 'scripts', 'agents-md-block.sh')
-const TEMPLATE = join(HERE, '..', 'assets', 'agents-md-block.md')
+const SCRIPT = join(HERE, '..', '..', '..', 'skills', 'init-codex', 'assets', 'scripts', 'agents-md-block.sh')
+const TEMPLATE = join(HERE, '..', '..', '..', 'skills', 'init-codex', 'assets', 'agents-md-block.md')
 const START = '<!-- agent-cli-skills:agents-md:start -->'
 const END = '<!-- agent-cli-skills:agents-md:end -->'
 

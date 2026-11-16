@@ -16,8 +16,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SKILL_MD = resolve(HERE, '../SKILL.md');
-const SCRIPT = resolve(HERE, '../scripts/skills-contribute.sh');
+const SKILL_MD = resolve(HERE, '../../../skills/contribute-skill/SKILL.md');
+const SCRIPT = resolve(HERE, '../../../skills/contribute-skill/scripts/skills-contribute.sh');
 const EXPECTED = '^[a-z][a-z0-9-]+$';
 
 // 1 か所だけに一致することを確かめてから取り出す（置き場所が増減したら気づけるように）

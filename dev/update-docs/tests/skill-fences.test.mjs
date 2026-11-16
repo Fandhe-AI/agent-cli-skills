@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SKILL_DIR = join(HERE, '..')
+const SKILL_DIR = join(HERE, '..', '..', '..', 'skills', 'update-docs')
 const SKILL = readFileSync(join(SKILL_DIR, 'SKILL.md'), 'utf8')
 
 const pathBash = spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim()

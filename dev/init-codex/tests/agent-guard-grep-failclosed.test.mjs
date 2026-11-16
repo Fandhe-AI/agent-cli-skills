@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
-const GUARD = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'hooks', 'agent-guard.sh')
+const GUARD = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'skills', 'init-codex', 'assets', 'hooks', 'agent-guard.sh')
 
 const pathBash = execFileSync('/bin/sh', ['-c', 'command -v bash']).toString().trim()
 const BASHES = [...new Set(['/bin/bash', pathBash])]

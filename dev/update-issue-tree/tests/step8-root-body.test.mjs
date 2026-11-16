@@ -14,8 +14,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const SKILL_MD = join(HERE, '..', 'SKILL.md')
-const SCRIPT = join(HERE, '..', 'scripts', 'update-root-body.sh')
+const SKILL_MD = join(HERE, '..', '..', '..', 'skills', 'update-issue-tree', 'SKILL.md')
+const SCRIPT = join(HERE, '..', '..', '..', 'skills', 'update-issue-tree', 'scripts', 'update-root-body.sh')
 
 const PB = '<!-- update-issue-tree:phase-plan:begin -->'
 const PE = '<!-- update-issue-tree:phase-plan:end -->'

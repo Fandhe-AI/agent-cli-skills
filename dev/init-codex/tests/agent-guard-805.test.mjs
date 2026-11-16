@@ -21,7 +21,7 @@ import { readFileSync } from 'node:fs'
 import * as cases from './lib/agent-guard-cases.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const GUARD = join(here, '..', 'assets', 'hooks', 'agent-guard.sh')
+const GUARD = join(here, '..', '..', '..', 'skills', 'init-codex', 'assets', 'hooks', 'agent-guard.sh')
 const BASELINE = JSON.parse(readFileSync(join(here, 'fixtures', 'agent-guard-baseline-805.json'), 'utf8')).verdicts
 
 const pathBash = execFileSync('/bin/sh', ['-c', 'command -v bash']).toString().trim()

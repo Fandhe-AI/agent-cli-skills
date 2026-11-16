@@ -12,7 +12,7 @@ import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/verify-ai-review-wrapper.sh');
+const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../skills/setup-repo-guards/scripts/verify-ai-review-wrapper.sh');
 
 // Fandhe-AI/actions の ai-review.single.yml の有効行と同形
 const GOOD = `# コメント
