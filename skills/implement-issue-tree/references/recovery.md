@@ -239,6 +239,11 @@ Recover の機械的な部分 — 対象ブランチの解決・WIP commit（フ
 **後始末の上限と再試行**。成立しない候補は状態が変わらず毎ラン再試行され、1 件あたり 2〜3 回（最大 6 回）のエージェント呼び出しを使うため、2 つの歯止めを設ける。
 
 - (a) 1 ランで試みる候補は最大 10 件（`CLOSED_CLEANUP_PER_RUN_MAX`）で、**試行回数の少ない順**（未試行が先・同数はキュー順）に試す。一過性の結果（OPEN・fork・pr-bind の部分取得や失敗・`retained-locked`・`retained-unobservable` など）は記録されず、キュー順だと先頭 10 件が毎ラン枠を使い切って後ろが `defer-cap` のままになる。そのため試した候補の項目へ `closedCleanupAttempts: <整数>`（記録されずに終わった試行の回数。ランタイムに `Date.now()` が無いので時刻でなく回数）を書く（`status`・`worktree`・`pr` は書かず、書けなくても後始末は壊れない）。超過分と予算不足（残りが 6 + 20 回未満。着手し得る open の実装ノードが残るときはその 1 件分の 30 回も予約）の見送りは次のランへ回り、件数は結果の `closedCleanup`（`run` / `defer-cap` / `defer-budget`）に出る。
+- (b) 決定的に成立しなかった候補は、項目に `closedCleanupTried: { pr, worktree, reason }` を書き、同じ `pr` と `worktree` の間は次のランから再試行しない（`closedCleanupAttempts` は順番を回すだけで、こちらが再試行そのものを止める）。`reason` は次の 3 値。
+  - `binding`: pr-bind の 4 項目（`isCrossRepository` が false・`baseRefName` と `headRefName` が空でない・`closingIssues` に取得不能の `-1` がない）をすべて取得できたうえで結び付きが成立しないとき。部分取得は番兵を含み得るので記録しない。`isCrossRepository: true` は取得不能の既定値と本物の fork が区別できないので、fork も記録しない。
+  - `not-merged`: 未マージの CLOSED。
+  - `retained`: 掃除の結果行の `worktree` が `retained-dirty` / `retained-submodule` / `retained-head-mismatch` / `retained-detached` / `retained-broken` / `retained-unregistered` のとき。`retained-broken`（`.git` 破損・git の対象が worktree 自身でない）は読み直しても解消しない。`retained-head-mismatch` は unborn の HEAD への `--head` を、`retained-detached` は実体の無い detached・HEAD 0000… の登録を含む。一過性か区別できない失敗は、毎ランの pr-bind と掃除のやり直しで `defer-cap` が詰まるより安全なので記録側へ倒す。
+- **記録しない一過性の失敗**: `retained-locked`（生きている lock。セッション終了で外れ得る）・`retained-unobservable`（`git status` の失敗など観測の失敗で、汚れや不一致を確認したわけではない）・PR の取得失敗・`headRefOid` の取得失敗・掃除の結果なし・非 0 終了・launcher の不一致（`run-verified.sh` の exit 3 / 4）・例外・OPEN の PR。記録は書かず、(a) の `closedCleanupAttempts` だけを増やして次のランで再試行する。
 
 記録が今の `pr` と `worktree` に一致する間、その候補は次のランから飛ばされる（`pr-bind` も起動しない）。`status`・`worktree`・`pr` は書き換えないので、保持した worktree が sweep や孤立スキャンで消える経路は増えない。**記録が再試行を止める条件はファイルシステムではなく記録そのもの**で、人が worktree を直したり削除したりしても記録が残る限り再試行されない。再試行したいときは `_/issue-trees/<親>.json` の該当項目から `closedCleanupTried` を消す（`jq 'del(.items["<N>"].closedCleanupTried)'`。他の実行が走っていないときに行う）。`pr` か `worktree` が別の値に更新された項目（Recover で新しい worktree を作った場合など）は記録が古くなり、自動的に再び候補になる。
 
