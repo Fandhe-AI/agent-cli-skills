@@ -3,7 +3,7 @@
 // セッション削除を確かめる。実際の codex・ネットワーク・ホームの設定には触れない。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readdirSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -185,11 +185,27 @@ test('環境: TMPDIR と GIT_CONFIG を渡す', async () => {
   assert.equal(env.GIT_CONFIG_COUNT, '1')
 })
 
-test('環境: ホームの .codex に何も作られず、CODEX_HOME は runDir/codex-home', async () => {
-  const t = setup({ turns: [okTurn()] })
-  await t.adapter.run(t.req())
-  assert.equal(t.calls()[0].env.CODEX_HOME.startsWith(t.runDir), true)
-  assert.equal(existsSync(join(t.fakeHome, '.codex')), false)
+test('CODEX_HOME: 呼び出し元の環境変数 → 無ければ ~/.codex を start で 1 回解決し、exec・resume・delete に同じ値を渡す', async () => {
+  const t = setup({ turns: [okTurn(), okTurn()], toolConfig: { deleteSessions: true } })
+  const ch = join(t.root, 'caller-codex-home')
+  const a = createAdapter({ skillDir: SKILL_DIR, mainRoot: t.mainRoot, runDir: t.runDir, toolConfig: { deleteSessions: true }, env: { ...t.env, CODEX_HOME: ch } })
+  const r = await a.run(t.req())
+  await a.run(t.req({ resume: { sessionRef: r.sessionRef, message: 'm' } }))
+  await a.close()
+  const cs = t.calls()
+  assert.deepEqual(cs.map((c) => c.env?.CODEX_HOME ?? c.env), [ch, ch, ch])
+  assert.equal(existsSync(ch), false, 'アダプタは CODEX_HOME を作らない')
+  assert.equal(existsSync(join(t.runDir, 'codex-home')), false)
+  // 未指定なら ~/.codex（HOME は偽ホーム）。ホームのファイルには何も書かない
+  const t2 = setup({ turns: [okTurn()] })
+  await t2.adapter.run(t2.req())
+  assert.equal(t2.calls()[0].env.CODEX_HOME, join(t2.fakeHome, '.codex'))
+  assert.equal(existsSync(join(t2.fakeHome, '.codex')), false)
+  assert.deepEqual(readdirSync(t2.fakeHome), [])
+  // toolConfig.codexHome が最優先
+  const t3 = setup({ turns: [okTurn()], toolConfig: { codexHome: ch } })
+  await t3.adapter.run(t3.req())
+  assert.equal(t3.calls()[0].env.CODEX_HOME, ch)
 })
 
 test('環境: 既存の GIT_CONFIG_COUNT の続きの番号に足す', async () => {
@@ -227,11 +243,18 @@ test('permission profile: 通常 cwd は read・linked worktree は impl（gitdi
   assert.equal(impl.includes('.git/config'), false)
   for (const x of [read, impl]) {
     assert.ok(x.includes('".codex"="read"'))
-    assert.ok(x.includes(`${JSON.stringify(join(t.runDir, 'codex-home', 'auth.json'))}="deny"`))
     assert.ok(x.includes(`${JSON.stringify(join(t.fakeHome, '.codex', 'auth.json'))}="deny"`))
     assert.ok(x.includes('network={enabled=true}'))
   }
   assert.ok(c2.argv.includes('default_permissions="iit_impl"'))
+  // CODEX_HOME が ~/.codex と別なら、両方の auth.json を deny する
+  const a3 = createAdapter({ skillDir: SKILL_DIR, mainRoot: t.mainRoot, runDir: t.runDir, toolConfig: {}, env: { ...t.env, CODEX_HOME: join(t.root, 'ch') } })
+  await a3.run(t.req({ name: 'a3' }))
+  const p3 = prof(t.calls().at(-1))
+  assert.ok(p3.includes(`${JSON.stringify(join(t.root, 'ch', 'auth.json'))}="deny"`))
+  assert.ok(p3.includes(`${JSON.stringify(join(t.fakeHome, '.codex', 'auth.json'))}="deny"`))
+  assert.equal(p3.split('"deny"').length - 1, 2)
+  assert.equal(read.split('"deny"').length - 1, 1, 'CODEX_HOME が ~/.codex と同じなら deny は 1 つ')
 })
 
 test('buildProfileArgs: req.profile で上書きでき、extraWritePaths が加わる', () => {
@@ -388,7 +411,7 @@ test('close: deleteSessions=true のとき、このアダプタが作ったセ�
   assert.deepEqual([...r.deleted].sort(), [U1, U2])
   const dels = t.calls().filter((c) => c.delete)
   assert.deepEqual(dels.map((d) => d.delete).sort(), [U1, U2])
-  assert.ok(dels.every((d) => d.force && d.env.CODEX_HOME === join(t.runDir, 'codex-home')))
+  assert.ok(dels.every((d) => d.force && d.env.CODEX_HOME === join(t.fakeHome, '.codex')))
 })
 
 test('close: deleteSessions=false なら削除しない・削除失敗は failed に載せて投げない・UUID 形でない ID は削除しない', async () => {

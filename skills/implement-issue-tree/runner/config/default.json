@@ -19,6 +19,13 @@
   "cleanup": {
     "deleteSessions": true
   },
+  "toolConfig": {
+    "codex": {
+      "codexBin": "codex",
+      "killGraceMs": 2000,
+      "trustProject": false
+    }
+  },
   "models": {
     "codex": {
       "haiku": { "model": "gpt-6-luna", "effort": "low" },

@@ -9,10 +9,16 @@
 //     -c hooks.PreToolUse=[…agent-guard を呼ぶ hook…] --dangerously-bypass-hook-trust [<sessionRef>] -
 //   プロンプトは標準入力（`-`）で渡す。
 //
-// ホームに書かない: CODEX_HOME は明示する（既定は runDir/codex-home。認証が要る場合は toolConfig.codexHome に
-// 認証済みのホームを渡すか、cfg.env で CODEX_API_KEY 等を渡す。認証ファイルはアダプタが読まない・コピーしない）。
-// `--ignore-user-config` でホームの config.toml を読まない。プロジェクトは trusted にしない
+// CODEX_HOME: start で 1 回だけ解決し（toolConfig.codexHome → cfg.env.CODEX_HOME → ~/.codex）、exec・resume・delete の
+// すべてに同じ値を明示で渡す。アダプタはホームへ何も作らず、認証ファイルを読まない・コピーしない。
+// `--ignore-user-config` でホームの config.toml を読まない（-m は必ず明示する）。プロジェクトは trusted にしない
 // （trusted にすると worktree の .codex/hooks.json が bypass で動くため。toolConfig.trustProject: true で付けられる）。
+//
+// toolConfig のキー（既定値は runner/config/default.json の toolConfig.codex。コード側の既定も同じ）:
+//   deleteSessions: close でラン中に作ったセッションを `codex delete --force` する（契約どおり）
+//   codexBin ("codex")・codexHome（上記）・guardScript（agent-guard.sh の絶対パス。既定は探索）・
+//   trustProject (false)・killGraceMs (2000。SIGTERM から SIGKILL までの猶予)・extraWritePaths ([]。push 先のローカル origin 等)
+// req の任意の追加: profile ('read' | 'impl'。permission profile の上書き)。
 //
 // ガード（0-3）: hook は fail-open（スクリプトが無い・exit 1・時間切れで素通し）なので、
 //   (1) コマンド行は `bash <hook> … || exit 2`・timeout は指定しない、
@@ -148,15 +154,17 @@ const killGroup = (pid, sig) => { try { process.kill(-pid, sig) } catch { /* 既
 export function createAdapter(cfg) {
   const tc = cfg.toolConfig ?? {}
   const bin = tc.codexBin ?? 'codex'
-  const codexHome = resolve(tc.codexHome ?? join(cfg.runDir, 'codex-home'))
-  const tmpDir = join(cfg.runDir, 'tmp')
+    const tmpDir = join(cfg.runDir, 'tmp')
   const baseEnv = { ...(cfg.env ?? process.env) }
   const home = baseEnv.HOME ?? homedir()
+  let codexHome = null
   const killGraceMs = tc.killGraceMs ?? 2000
   const sessions = new Set()
   const running = new Set()
   let guardScript = null
   let started = false
+
+  const resolveCodexHome = () => resolve(tc.codexHome ?? baseEnv.CODEX_HOME ?? join(home, '.codex'))
 
   const childEnv = () => {
     const env = { ...baseEnv, CODEX_HOME: codexHome, TMPDIR: tmpDir }
@@ -170,6 +178,7 @@ export function createAdapter(cfg) {
 
   async function start() {
     if (started) return
+    codexHome = resolveCodexHome()
     const r = await execFileP(bin, ['--version'], { env: childEnv(), timeout: 30000 })
     if (r.err) throw new AdapterError('prereq', `codex を実行できない（${bin}）: ${r.err.code ?? r.err.message}`)
     const j = await execFileP('jq', ['--version'], { env: childEnv(), timeout: 30000 })
@@ -177,7 +186,6 @@ export function createAdapter(cfg) {
     guardScript = findGuardScript({ toolConfig: tc, skillDir: cfg.skillDir, mainRoot: cfg.mainRoot })
     if (!guardScript) throw new AdapterError('prereq', 'agent-guard.sh が見つからない（skills/init-codex/assets/hooks/ か toolConfig.guardScript）')
     if (!existsSync(HOOK_SCRIPT)) throw new AdapterError('prereq', 'codex-hook.sh が見つからない')
-    mkdirSync(codexHome, { recursive: true })
     mkdirSync(tmpDir, { recursive: true })
     started = true
   }
