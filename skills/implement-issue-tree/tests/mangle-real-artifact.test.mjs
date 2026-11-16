@@ -3,7 +3,11 @@
 // 決定的な変異体を検証器が全件止めること（束縛判定が実物で働いている証拠）を確かめる。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { WORKFLOW_SCRIPT_BUDGET_BYTES } from './lib/workflow-script-contract.mjs'
+import { SRC_PATH, DIST_PATH, embedScriptHashes } from '../scripts/build-workflow.mjs'
+import { BASE_ARGS, runScript } from './lib/stub-run.mjs'
 import { buildStage1, mangleText, alphaVerify, refswapMutants } from './lib/mangle-harness.mjs'
 
 const stage1 = buildStage1()
@@ -48,3 +52,28 @@ test('実物の変異: 参照を別の束縛・自由なグローバル・未宣
   const byObservation = mutants.filter((_m, i) => /観測し得る構文/.test(r.get(`m${i}`).detail)).map((m) => `${m.kind} ${m.from}→${m.to} @${m.at}`)
   assert.deepEqual(byObservation, [])
 })
+
+// コミット済みの生成物（改名済み）を、ハッシュ埋め込み済みの src と同じ stub・同じ条件で実行し、
+// agent() 呼び出しの列（プロンプト・opts）・ログ・戻り値が完全に一致することを複数の引数で確かめる
+// （改名がプロンプト本文・実行の挙動を変えていないことの実行による確認。静的な保証は検証器が持つ）
+const SCENARIOS = {
+  base: { args: { ...BASE_ARGS }, leaves: [2] },
+  dryRun: { args: { ...BASE_ARGS, dryRun: true }, leaves: [2, 3, 4] },
+  securityReview: { args: { ...BASE_ARGS, securityReview: true }, leaves: [2] },
+  models: { args: { ...BASE_ARGS, models: { review: 'opus' } }, leaves: [2] },
+  parallel3: { args: { ...BASE_ARGS, parallel: 3 }, leaves: [2, 3, 4, 5] },
+  phaseGate: { args: { ...BASE_ARGS, phaseGate: true }, leaves: [2, 3] },
+}
+for (const [name, { args, leaves }] of Object.entries(SCENARIOS)) {
+  test(`実物の実行: 生成物（改名済み）と src は ${name} で agent 呼び出し・ログ・戻り値が完全一致する`, async () => {
+    const embedded = embedScriptHashes(readFileSync(SRC_PATH, 'utf8'), dirname(SRC_PATH))
+    const dist = readFileSync(DIST_PATH, 'utf8')
+    assert.notEqual(dist, embedded)
+    const bySrc = await runScript({ args, leaves, scriptText: embedded })
+    const byDist = await runScript({ args, leaves, scriptText: dist })
+    assert.ok(bySrc.calls.length > 0, '前提: src が agent を 1 回以上呼ぶ')
+    assert.deepEqual(byDist.calls, bySrc.calls)
+    assert.deepEqual(byDist.logs, bySrc.logs)
+    assert.deepEqual(byDist.result, bySrc.result)
+  })
+}
