@@ -16,14 +16,20 @@ import { BASE_ARGS, buildTree, makeDefaultReply } from './lib/stub-run.mjs'
 import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 import { ADAPTERS_DIR, importAdapter, main, parseCli, UsageError } from '../../../skills/implement-issue-tree/runner/run.mjs'
+import { REQUIRED_SKILLS } from '../../../skills/implement-issue-tree/runner/lib/skills-prereq.mjs'
 
 const RUN_MJS = fileURLToPath(new URL('../../../skills/implement-issue-tree/runner/run.mjs', import.meta.url))
 const root = trackTmp(realpathSync(mkdtempSync(join(tmpdir(), 'iit-runner-run-'))))
 const RUN_ID = 'wf_0123abcd-4ef'
 let seq = 0
-const newMain = () => {
+// メイン worktree。既定で生成物が名指しするスキルを .agents/skills に置く（両ツールの探索先。起動時検査を通す）
+const newMain = ({ skills = REQUIRED_SKILLS, skillsDir = '.agents/skills' } = {}) => {
   const d = join(root, `main-${++seq}`)
   mkdirSync(d)
+  for (const n of skills) {
+    mkdirSync(join(d, skillsDir, n), { recursive: true })
+    writeFileSync(join(d, skillsDir, n, 'SKILL.md'), `---\nname: ${n}\n---\n`)
+  }
   return d
 }
 const argsFile = (obj, name = `args-${++seq}.json`) => {
@@ -129,6 +135,30 @@ test('main: アダプタが無い・読み込みで例外・生成物を読め�
     assert.deepEqual(x.out, [])
   }
   assert.equal(a.instances.length, 0, 'アダプタを作っていない')
+})
+
+test('main: 生成物が名指しするスキルが探索先に無ければ 3 で、足りない名前を示し、_/iit-runner を作らない', async () => {
+  const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  const wf = () => tinyWorkflow(async () => { throw new Error('呼ばれない') })
+  const cases = [
+    ['codex', newMain({ skills: [] }), /create-commit, create-pr, implement-review/],
+    ['codex', newMain({ skills: ['create-commit', 'create-pr'] }), /: implement-review（codex の探索先 \.agents\/skills/],
+    // Codex は .claude/skills を読まない
+    ['codex', newMain({ skillsDir: '.claude/skills' }), /create-commit, create-pr, implement-review/],
+    ['opencode', newMain({ skills: ['implement-review'] }), /create-commit, create-pr（opencode の探索先/],
+  ]
+  for (const [tool, mainRoot, re] of cases) {
+    const x = deps({ mod: a, mainRoot, workflow: wf() })
+    assert.equal(await main(['--tool', tool, '--args', argsFile({ parent: 1 }), '--no-build-check'], x.d), 3, x.err.join(''))
+    assert.match(x.err.join(''), /前提の不足: 必要なスキルが対象リポジトリに無い/)
+    assert.match(x.err.join(''), re)
+    assert.equal(existsSync(join(mainRoot, '_')), false)
+    assert.deepEqual(x.out, [])
+  }
+  assert.equal(a.instances.length, 0, 'アダプタを作っていない')
+  // OpenCode は .claude/skills にあれば通る
+  const ok = deps({ mod: a, mainRoot: newMain({ skillsDir: '.claude/skills' }), workflow: tinyWorkflow(async () => 'done') })
+  assert.equal(await main(['--tool', 'opencode', '--args', argsFile({ parent: 1 }), '--no-build-check'], ok.d), 0, ok.err.join(''))
 })
 
 test('main: --no-build-check が無ければ鮮度の照合を呼ぶ', async () => {

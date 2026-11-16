@@ -11,7 +11,7 @@
 //   0 ホストが return した（--help / -h で使い方を stdout に出したときも 0）
 //   1 ホストが例外で終わった
 //   2 引数の誤り（CLI・args.json・設定ファイル）
-//   3 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・アダプタの start() 失敗）
+//   3 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・必要なスキルの不在・アダプタの start() 失敗）
 // 2 / 3 の経路（アダプタの生成・start() の失敗を除く）は _/iit-runner/<runId>/ を作る前に抜ける（何も書かない）。
 //
 // 出力の形（通し確認の判定器が読む。変えるときは判定器とそろえる）:
@@ -41,6 +41,7 @@ import { isAdapterError } from './lib/adapter-error.mjs'
 import { codexRules, opencodeRules } from './lib/guard.mjs'
 import { loadWorkflow } from './lib/load-workflow.mjs'
 import { loadConfig, TOOLS } from './lib/models.mjs'
+import { missingSkills, missingSkillsMessage } from './lib/skills-prereq.mjs'
 import { newRunId, resolveMainRoot } from './lib/worktree.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -129,6 +130,8 @@ export async function main(argv, deps = {}) {
     onSignal = (handler) => { process.once('SIGINT', handler); process.once('SIGTERM', handler) },
     // 実行仕様の段の起動（agent-host の cfg.spawnScript）。テストが偽の launcher へ差し替える。省略時は agent-host の実物
     spawnScript,
+    // 生成物が名指しするスキルの存在確認（lib/skills-prereq.mjs）。見つからない名前の配列を返す
+    skillsMissing = missingSkills,
   } = deps
   const err = (msg) => stderr(`${msg}\n`)
 
@@ -189,6 +192,8 @@ export async function main(argv, deps = {}) {
   } catch (e) {
     return prereq(`メイン worktree を特定できない: ${String(e?.message ?? e).slice(0, 160)}`)
   }
+  const missing = skillsMissing({ tool: cli.tool, root: mainRoot })
+  if (missing.length > 0) return prereq(missingSkillsMessage(cli.tool, missing))
 
   // ---- ラン ----
   const runId = makeRunId()

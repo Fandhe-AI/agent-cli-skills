@@ -15,6 +15,7 @@ implement-issue-tree の生成物（`scripts/implement-issue-tree.js`）を無�
 | Codex | `--tool codex` のとき。`codex` コマンド（Phase 0 の実測は 0.164.0）。設定の `toolConfig.codex.codexBin` で別のパスにできる。`CODEX_HOME` は呼び出し元のもの（無ければ `~/.codex`）を使い、認証ファイルは読まない。macOS では sandbox の書き込み可能範囲に `/private/var/tmp` を足す（`/bin/bash` 3.2 が here-doc の一時ファイルをそこへ作るため。詳細は `adapters/codex.mjs` 冒頭） |
 | OpenCode | `--tool opencode` のとき。`opencode` コマンド（Phase 0 の実測は v2.2.7）。ランナーが専用の `opencode serve` を空きポートで起動し、終了時に止める（既に動いている serve には触れない） |
 | 共通ガード | `agent-guard.sh`。ランナーは同梱しない。init-codex か init-opencode を導入する（対象リポジトリの `.codex/hooks/` か `.opencode/hooks/` に置かれる）か、設定の `toolConfig.<tool>.guardScript` に絶対パスを指定する。探索順は `lib/guard-script.mjs` 冒頭（両ツール共通）。見つからなければ終了コード 3 |
+| スキル | 生成物のプロンプトが名指しするスキル（`create-commit`・`create-pr`・`implement-review`。一覧は `lib/skills-prereq.mjs` の `REQUIRED_SKILLS`）が、対象リポジトリのメイン worktree の探索先にあること。Codex は `.agents/skills/<name>/SKILL.md`、OpenCode は `.opencode/skills`・`.opencode/skill`・`.claude/skills`・`.agents/skills` のどれか（利用者のホームの探索先は見ない）。init-codex・init-opencode が `.agents/skills/` に導入する。実装・レビューの段は base から作る隔離 worktree で動くので、コミット済みであること（検査は存在だけを見る）。足りなければ終了コード 3 |
 
 ランナーの外側で、implement-issue-tree の前提（sub-issues・ruleset・`externalChecks` 等）はスキル本体の
 `SKILL.md` と `references/` に従う。
@@ -45,7 +46,7 @@ node <skillDir>/runner/run.mjs --tool codex|opencode --args <args.json> \
 | 0 | ホストが return した（`--help` も 0） |
 | 1 | ホストが例外で終わった（`result.json` の `error` に理由） |
 | 2 | 引数の誤り（CLI・args.json・設定ファイル）。何も書かない |
-| 3 | 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・アダプタの起動失敗）。アダプタの生成・起動の失敗だけは `result.json` を書く |
+| 3 | 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・必要なスキルの不在・アダプタの起動失敗）。アダプタの生成・起動の失敗だけは `result.json` を書く |
 
 ## 出力（`<mainRoot>/_/iit-runner/<runId>/`）
 
