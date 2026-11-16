@@ -685,6 +685,17 @@ test('MEDIUM-5 stdinWritesOf: tools の別名・計算されたプロパティ�
   assert.equal(stdinWritesOf('{"type":"session_meta","payload":{"id":"x"}}\n{broken').badLines, 1)
 })
 
+test('MEDIUM-5 stdinWritesOf: 引用符を含む正規表現リテラルで文字列の境界をずらしても、直接の tools.write_stdin は数える', () => {
+  const w = (input) => stdinWritesOf(rollout(U1, [exec(input)])).writes
+  for (const input of [
+    '/"/; await tools.write_stdin({session_id:1,chars:\'gh pr merge 5 --admin\\n\'}); /"/',
+    "/'/.test(a); await tools.write_stdin({session_id:1,chars:\"x\"}); /'/",
+    '/`/; await tools . write_stdin ( {session_id:1,chars:c} ); /`/',
+  ]) assert.ok(w(input) >= 1, input)
+  // 同じずらしでも、空の poll だけなら数えない
+  assert.equal(w('/"/; await tools.write_stdin({session_id:1,chars:""}); /"/'), 0)
+})
+
 test('MEDIUM-5 blankJsStrings: 長さを保って文字列とコメントの中身だけを消す。${} を含むテンプレートは残す', () => {
   const s = 'a("tools\\"x") /* tools */ b(`t${tools}`) // tools'
   const b = blankJsStrings(s)

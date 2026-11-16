@@ -37,8 +37,9 @@
 //   code mode の custom_tool_call（name "exec"）の input に JavaScript の文字列として入る
 //   （例: `text(await tools.write_stdin({session_id:42023,chars:"",yield_time_ms:1000}));`）。直接の function_call
 //   （name "write_stdin"・arguments は JSON 文字列）の形も同じ規則で見る（stdinWritesOf）。code mode の input は静的に読むだけ
-//   なので、tools を別名・計算されたプロパティで参照された場合は「解釈できない」として denied に倒すが、それ以上の難読化
-//   （globalThis 経由等）は検知できない（best-effort。README の既知の限界）。
+//   なので、tools を別名・計算されたプロパティで参照された場合は「解釈できない」として denied に倒す。文字列の空白化は
+//   正規表現リテラルを知らないため、元のテキストの `tools.write_stdin(` も別に数える。正規表現リテラルで境界をずらしたうえで
+//   別名・計算されたプロパティを使う形や、globalThis 経由等の難読化は検知できない（best-effort。README の既知の限界）。
 //   allowMerge は hook のコマンド行へ --merge-re を埋めるかどうかで切り替える。埋める形は req.merge の PR 番号で
 //   具体化した guard.mergeExecCommandFor(prNumber) で、merge 段の子の env には GH_REPO=<req.merge.repo> を固定する
 //   （監査 e670648 の MEDIUM-8。汎用の MERGE_EXEC_COMMAND は別の PR 番号・GH_REPO を向けた別リポジトリでも通った）。
@@ -277,7 +278,15 @@ function codeModeStdinWrites(input) {
     if (!args || !isPollArgs(args[1])) n++
   }
   const named = [...code.matchAll(/(?<![\w$])write_stdin(?![\w$])/g)].length
-  return n + Math.max(0, named - direct)
+  // 空白化は正規表現リテラルを知らない（`/"/` のような引用符を含む正規表現で文字列の境界がずれ、直接の呼び出しまで
+  // 空白になる）。そこで元のテキストでも `tools.write_stdin(` を全部拾い、poll の形でないものを数えて大きい方を採る。
+  // 誤検知はコマンドの文字列にこの綴りそのものが入る場合に限られる
+  let raw = 0
+  for (const m of input.matchAll(/(?<![\w$])tools\s*\.\s*write_stdin\s*\(/g)) {
+    const args = /^\s*\{([^]*?)\}\s*\)/.exec(input.slice(m.index + m[0].length))
+    if (!args || !isPollArgs(args[1])) raw++
+  }
+  return Math.max(n + Math.max(0, named - direct), raw)
 }
 
 /**
