@@ -1085,7 +1085,8 @@ export const FP805_AUDIT_DENY = JSON.parse(
 ).map((cmd) => [cmd, 'merge-guard'])
 
 // --- `$'` の字句解析（SQ_LITERAL_AWK）: 単一引用符の末尾の `$` と閉じ引用符だけの `$'` -------------------------
-// SQ_LITERAL_FLIP: subagent が true / null のとき、旧版（Issue #805 の前・e148ca4）は deny obfuscated、新版は allow になる形。
+// SQ_LITERAL_FLIP: subagent が true / null のとき、旧版（Issue #805 の前・7b7dbb4。この変更の直前の e148ca4 でも同じ）は
+// deny obfuscated、新版は allow になる形。
 // raw の `$'` がすべて「単一引用符の中の `$` と閉じ引用符」で、ANSI-C 引用符が 1 つも無いと字句解析で確かめられる形は、
 // コマンドの形（複合コマンド・代入・置換・評価器）を問わず obfuscated にしない。評価器へ `'gh pr $'` を渡して別の語と
 // 連結させる形もここに入る: 同じ文字列は `'gh pr '\$` のように `$'` を書かずに作れ、その形は e148ca4 でも allow だった
@@ -1220,6 +1221,11 @@ export const SQ_LITERAL_DENY = [
   [`echo $(echo 'a$' # it's\n) ; g$'h' pr merge 1`, 'obfuscated'],
   [`case x in x) echo 'a$' ;; esac ; g$'h' pr merge 1`, 'obfuscated'],
   [`echo \\$'x'`, 'obfuscated'],
+  // 直前の文字がエスケープされている・置換の直後の #（語の途中。コメントと読むと次の行の ' を閉じ引用符と取り違える）
+  [`echo a\\ #'\n';g$'h' pr merge 1 #'`, 'obfuscated'],
+  [`echo a\\\n#'\n';g$'h' pr merge 1 #'`, 'obfuscated'],
+  [`echo $(echo a)#'\n';g$'h' pr merge 1 #'`, 'obfuscated'],
+  [`echo <(echo a)#'\n';g$'h' pr merge 1 #'`, 'obfuscated'],
   [`grep 'a$' f '`, 'obfuscated'],
   [`grep 'a$' "f`, 'obfuscated'],
 ]

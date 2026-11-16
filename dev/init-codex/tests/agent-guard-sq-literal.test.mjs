@@ -87,6 +87,13 @@ const FRAG = [
   "# it's",
   "echo a# it's",
   "echo a#'",
+  // 直前の文字がエスケープされている・置換や括弧の直後の #（語の途中なのでコメントではない）
+  "echo a\\ #'",
+  "echo a\\;#'",
+  "echo a\\\n#'",
+  "echo $(echo a)#'",
+  "echo <(echo a)#'",
+  "echo a(#'",
   "echo 'x' # it's",
   "echo \"it's\"",
   "echo it\\'s",

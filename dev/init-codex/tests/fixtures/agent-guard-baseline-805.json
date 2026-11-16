@@ -5965,6 +5965,26 @@
       "allow",
       "deny obfuscated",
       "deny obfuscated"
+    ],
+    "echo a\\ #'\n';g$'h' pr merge 1 #'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo a\\\n#'\n';g$'h' pr merge 1 #'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo $(echo a)#'\n';g$'h' pr merge 1 #'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "echo <(echo a)#'\n';g$'h' pr merge 1 #'": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
     ]
   }
 }
