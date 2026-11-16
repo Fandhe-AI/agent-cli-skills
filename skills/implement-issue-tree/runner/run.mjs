@@ -177,6 +177,13 @@ export async function main(argv, deps = {}) {
     err('ランナー: args.skillDir は絶対パス')
     return 2
   }
+  // 実行仕様の段は <skillDir>/scripts/run-verified.sh を直接起動するため、生成物・許可表と同じスキルの写しに限る
+  // （監査 e670648 の LOW-15。別の場所の run-verified.sh を args から指せないようにする）
+  const realOr = (p) => { try { return realpathSync(p) } catch { return null } }
+  if (realOr(args.skillDir) === null || realOr(args.skillDir) !== realOr(SKILL_DIR)) {
+    err(`ランナー: args.skillDir はこのランナーのスキル（${SKILL_DIR}）と同じ場所でなければならない`)
+    return 2
+  }
   if (cli.dryRun) args.dryRun = true
 
   // ---- 3: 前提（安い順。どれも _/iit-runner を作る前） ----

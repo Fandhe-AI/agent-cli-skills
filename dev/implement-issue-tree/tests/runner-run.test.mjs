@@ -7,7 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -247,7 +247,8 @@ test('main: 正常終了は 0。result.json・stdout・meta.json の形、アダ
 })
 
 test('main: --dry-run で本物の生成物を流すと、result に見積り（startable・blocked）がそのまま入る', async () => {
-  const args = { ...BASE_ARGS }
+  // skillDir はこのスキル（LOW-15 で別の場所は 2 になる。BASE_ARGS の '/repo/…' は stub-run 用の架空の値）
+  const args = { ...BASE_ARGS, skillDir: realpathSync(join(RUN_MJS, '..', '..')) }
   const defaults = { args: { ...args, dryRun: true }, nodes: buildTree([2, 3]) }
   const a = makeFakeAdapterModule({ defaults })
   const x = deps({ mod: a })
@@ -328,4 +329,22 @@ test('resolveRepo（MEDIUM-8）: メイン worktree で gh repo view --json name
   const r = resolveRepo(where, env)
   assert.equal(r.ok, false)
   assert.match(r.reason, /終了コード 4/)
+})
+
+test('main（LOW-15）: args.skillDir はこのランナーのスキルと realpath が同じでなければ 2（存在しない・別のスキルの写し）。symlink 経由の同じ場所は通る', async () => {
+  const other = join(root, 'other-skill')
+  mkdirSync(join(other, 'scripts'), { recursive: true })
+  for (const skillDir of [other, join(root, 'missing-skill'), join(realpathSync(join(RUN_MJS, '..', '..')), 'scripts')]) {
+    const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+    const x = deps({ mod: a, workflow: tinyWorkflow(async () => ({})) })
+    assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1, skillDir }), '--no-build-check'], x.d), 2, skillDir)
+    assert.match(x.err.join(''), /args\.skillDir/)
+    assert.equal(existsSync(join(x.mainRoot, '_')), false)
+    assert.equal(a.instances.length, 0)
+  }
+  const link = join(root, 'skill-link')
+  symlinkSync(realpathSync(join(RUN_MJS, '..', '..')), link)
+  const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  const x = deps({ mod: a, workflow: tinyWorkflow(async () => ({})) })
+  assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1, skillDir: link }), '--no-build-check'], x.d), 0)
 })
