@@ -998,6 +998,8 @@ export const FP805_STAY_DENY = [
   [`rg --pre=sh 'a$' .`, 'obfuscated'],
   [`rg --hostname-bin=sh 'a$' .`, 'obfuscated'],
   [`printf -v x '%s' 'a$'`, 'obfuscated'],
+  [`grep --filter='*:sh -c' 'gh pr $' f`, 'obfuscated'],
+  [`grep --pager=sh 'a$' f`, 'obfuscated'],
   // 先頭語の形（パス付き・引用符・大文字）と代入の前置き
   [`/usr/bin/grep 'a$' f`, 'obfuscated'],
   [`./grep 'a$' f`, 'obfuscated'],

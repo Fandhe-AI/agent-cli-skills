@@ -178,6 +178,8 @@ describe('認識器 SQ_DOLLAR_AWK（単体）', () => {
     '外部コマンドの起動・代入になるオプション': [
       [`rg -n 'a$' .`, `rg --pre sh 'a$' .`, `rg --pre=sh 'a$' .`, `rg '--pre=sh' 'a$' .`, `rg --hostname-bin=sh 'a$' .`],
       [`printf '%s' 'a$'`, `printf -v x 'a$'`, `printf '-v' x 'a$'`],
+      [`grep -c 'a$' f`, `grep --filter='*:sh' 'a$' f`, `egrep --filter=x 'a$' f`, `fgrep --pager=sh 'a$' f`, `grep --view 'a$' f`,
+        `grep --config=x 'a$' f`, `grep --save-config 'a$'`, `grep ---x 'a$' f`, `grep -@ 'a$' f`, `grep '--filter=x' 'a$' f`],
     ],
   }
   for (const [name, groups] of Object.entries(PAIRS)) {

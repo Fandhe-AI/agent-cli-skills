@@ -788,7 +788,8 @@ cmd_clean=$(printf '%s' "$cmd" | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'
 #                  grep egrep fgrep rg wc head tail cut tr uniq ls cat echo printf test [ jq basename dirname
 #                  diff cmp comm nl column fold。sed（GNU の e コマンド）・awk・perl・python・find・xargs・env・
 #                  sort（--compress-program）・git・gh・shell・eval・source・command・exec・time 等は入れない。
-#                  rg の --pre / --hostname-bin（外部コマンドを起動する）と printf の -v（変数への代入）は文法の外
+#                  rg の --pre / --hostname-bin（外部コマンドを起動する）、grep を ugrep で置き換えた環境の --filter /
+#                  --pager / --view / --config 等（同）、printf の -v（変数への代入）は文法の外
 #   引数           次の断片の連結: 素の文字 [A-Za-z0-9_./:=,@+%-]、単一引用符の文字列（中身は自由）、
 #                  $ ` \ ! を含まない二重引用符の文字列。`[` `]` だけの語も認める。`$` で終わる単一引用符の
 #                  文字列は語の最後の断片で、直後は空白・タブ・| < > か末尾（`'$''x'` `'$'"x"` `'$'x` は文法の外）
@@ -864,6 +865,7 @@ END {
       if (!argword()) exit
       if (cmd == "rg" && (substr(wv, 1, 5) == "--pre" || substr(wv, 1, 14) == "--hostname-bin")) exit
       if (cmd == "printf" && substr(wv, 1, 2) == "-v") exit
+      if (cmd ~ /^[ef]?grep$/ && (wv ~ /^--(filter|pager|view|format-open|config|save-config)/ || substr(wv, 1, 3) == "---" || substr(wv, 1, 2) == "-@")) exit
     }
   }
 }

@@ -5805,6 +5805,16 @@
       "allow",
       "deny obfuscated",
       "deny obfuscated"
+    ],
+    "grep --filter='*:sh -c' 'gh pr $' f": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
+    ],
+    "grep --pager=sh 'a$' f": [
+      "allow",
+      "deny obfuscated",
+      "deny obfuscated"
     ]
   }
 }
