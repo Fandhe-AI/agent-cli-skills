@@ -794,3 +794,40 @@ test('readTmpOf（PR #851 の P1）: 前の段の logDir をその TMPDIR へ写
   const reads = [...pv.matchAll(/"([^"]+)"="read"/g)].map((m) => m[1])
   assert.equal(reads.some((r) => r.startsWith(`${join(v.runDir, 'tmp')}/`)), false, `TMPDIR の read を足さない: ${reads}`)
 })
+
+test('recoverGit（PR #851 の P1）: 回復の段は読み取りの profile のまま、共通ディレクトリと FETCH_HEAD、検証済みの旧 worktree と gitdir を write で足す。.git/config・hooks・gitdir の行き先・worktree の .git は read のまま', async () => {
+  const t = setup({ turns: [okTurn(), okTurn()] })
+  const g = join(t.mainRoot, '.git')
+  const wt = join(t.mainRoot, '.claude', 'worktrees', 'old-1')
+  const gd = join(g, 'worktrees', 'old-1')
+  await t.adapter.run(t.req({ label: 'recover:#2', recoverGit: { commonDir: g, worktree: wt, gitdir: gd } }))
+  await t.adapter.run(t.req({ label: 'recover:#2', recoverGit: { commonDir: g, worktree: null, gitdir: null } }))
+  const [a, b] = t.calls().map((c) => c.argv.find((x) => x.startsWith('permissions=')))
+  const has = (p, path, v) => p.includes(`${JSON.stringify(path)}="${v}"`)
+  assert.ok(a.startsWith('permissions={iit_read='), '読み取りの profile のまま')
+  for (const p of [a, b]) {
+    for (const d of ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.lock', 'FETCH_HEAD']) assert.ok(has(p, join(g, d), 'write'), d)
+    for (const d of ['config', 'hooks', 'HEAD', 'index']) assert.equal(p.includes(JSON.stringify(join(g, d))), false, d)
+    assert.ok(p.includes('":workspace_roots"={"."="read"'))
+  }
+  assert.ok(has(a, wt, 'write') && has(a, gd, 'write'))
+  for (const f of ['commondir', 'gitdir', 'config.worktree']) assert.ok(has(a, join(gd, f), 'read'), f)
+  assert.ok(has(a, join(wt, '.git'), 'read'))
+  assert.equal(b.includes(JSON.stringify(wt)) || b.includes(JSON.stringify(gd)), false, 'worktree が無ければ足さない')
+  // 不正な形は codex を起動しない
+  for (const bad of [
+    { commonDir: '/elsewhere/.git', worktree: null, gitdir: null },
+    { commonDir: g, worktree: join(t.mainRoot, 'outside'), gitdir: gd },
+    { commonDir: g, worktree: wt, gitdir: join(t.mainRoot, 'x') },
+    { commonDir: g, worktree: wt, gitdir: null },
+    { commonDir: g, worktree: `${wt}/../old-2`, gitdir: gd },
+    'x',
+  ]) {
+    const u = setup({ turns: [okTurn()] })
+    await assert.rejects(u.adapter.run(u.req({ label: 'recover:#2', recoverGit: bad })), (e) => e instanceof AdapterError && e.kind === 'denied', JSON.stringify(bad))
+    assert.equal(u.calls().length, 0)
+  }
+  // 隔離 worktree の段（impl）と同時には受けない
+  const w = setup({ turns: [okTurn()] })
+  await assert.rejects(w.adapter.run(w.req({ worktreeGitdir: gd, recoverGit: { commonDir: g, worktree: null, gitdir: null } })), (e) => e.kind === 'denied')
+})

@@ -61,6 +61,12 @@
 //   TMPDIR を read で足す（PR #851 の P1。fetch-tree.sh --root が TMPDIR に作った iit-tree.XXXXXX/tree.tsv を --page が読む。
 //   tmpRoot 全体は deny のままで、より具体的な read が勝つ。2026-11-17 に `codex sandbox -P iit_read` で、足した TMPDIR は
 //   読めて書けず、他の段の TMPDIR は読めないままであることを確かめた）。
+//   req.recoverGit（agent-host が回復の段 recover:#N にだけ渡す。lib/recover-git.mjs）は iit_read のまま、<main>/.git の
+//   objects・refs・logs・packed-refs(.lock)・FETCH_HEAD（recover-prep.sh の base の取得）と、検証できた旧 worktree とその
+//   gitdir（WIP コミット。GITDIR_READ_ONLY と worktree の .git は read に戻す）を write で足す（PR #851 の P1）。
+//   2026-11-17 に `codex sandbox -P iit_read` で実物の recover-prep.sh を流し、足さないと wip:commit-failed・baseFetched:false、
+//   足すと wipCommitted:true・baseFetched:true になり、.git/config・.git/hooks・commondir・gitdir・worktree の .git・
+//   メイン worktree と .git 直下は書けないままであることを確かめた。
 //   iit_impl: 隔離 worktree。worktree・<main>/.git/{objects,refs,logs,packed-refs,packed-refs.lock}・
 //             <main>/.git/worktrees/<name>（正確なパス）・TMPDIR が書ける。.git/hooks と .git/config は読み取りのまま。
 //             gitdir の下の commondir・gitdir・config.worktree と worktree の .git は read に戻す（GITDIR_READ_ONLY）。
@@ -154,6 +160,9 @@ const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
  * null / undefined は null（git の書き込みを足さない）。メインの `.git/worktrees/` の直下でない値は例外（実行しない）。
  * @returns {null | { gitdir: string, commonDir: string }}
  */
+/** 共通ディレクトリ（<main>/.git）の下で commit・fetch・update-ref が書く場所。hooks・config は含めない。 */
+const COMMON_WRITE = ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.lock']
+
 export function worktreeGit(mainRoot, worktreeGitdir) {
   if (worktreeGitdir === null || worktreeGitdir === undefined) return null
   const parent = join(mainRoot, '.git', 'worktrees')
@@ -161,6 +170,21 @@ export function worktreeGit(mainRoot, worktreeGitdir) {
     dirname(worktreeGitdir) === parent && basename(worktreeGitdir) !== ''
   if (!ok) throw new AdapterError('denied', `worktreeGitdir がメインの .git/worktrees/ の直下に無い: ${String(worktreeGitdir).slice(0, 160)}`)
   return { gitdir: worktreeGitdir, commonDir: join(mainRoot, '.git') }
+}
+
+/**
+ * req.recoverGit（回復の段の git の書き込み先。agent-host が lib/recover-git.mjs で決める）を検証して返す（無ければ null）。
+ * 共通ディレクトリは <main>/.git、worktree は <main>/.claude/worktrees/ の直下、gitdir は <main>/.git/worktrees/ の直下で、
+ * worktree と gitdir は両方あるか両方無いか。合わなければ例外（実行しない）。
+ */
+export function checkRecoverGit(mainRoot, v) {
+  if (v === null || v === undefined) return null
+  const norm = (p) => typeof p === 'string' && isAbsolute(p) && resolve(p) === p
+  const ok = typeof v === 'object' && v.commonDir === join(mainRoot, '.git') &&
+    ((v.worktree === null && v.gitdir === null) ||
+      (norm(v.worktree) && dirname(v.worktree) === join(mainRoot, '.claude', 'worktrees') && norm(v.gitdir) && dirname(v.gitdir) === join(mainRoot, '.git', 'worktrees')))
+  if (!ok) throw new AdapterError('denied', 'recoverGit がメインの .git・.claude/worktrees/・.git/worktrees/ の形でない')
+  return { commonDir: v.commonDir, worktree: v.worktree, gitdir: v.gitdir }
 }
 
 /** req.writablePaths を検証して返す（無ければ []）。正規化済みの絶対パスの配列でなければ例外（実行しない）。 */
@@ -180,7 +204,7 @@ export function checkWritablePaths(v) {
  *   writablePaths: req.writablePaths（agent-host が label ごとに決める追加の書き込み可パス。checkWritablePaths で検証済み）
  *   platform: process.platform の値（テストが注入する）。darwin なら両 profile に DARWIN_HEREDOC_TMP を足す
  */
-export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot = null, readablePaths = [], home, git, writablePaths = [], extraWritePaths = [], platform = process.platform }) {
+export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot = null, readablePaths = [], home, git, recover = null, writablePaths = [], extraWritePaths = [], platform = process.platform }) {
   const name = kind === 'impl' ? 'iit_impl' : 'iit_read'
   const ws = kind === 'impl' ? { '.': 'write' } : { '.': 'read' }
   ws['.codex'] = 'read'
@@ -190,15 +214,30 @@ export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot = null,
   // iit-tree.XXXXXX/tree.tsv を読む）。tmpRoot の deny より具体的なので read が勝つ。書き込みは許さない
   for (const p of readablePaths) fs[p] = 'read'
   fs[tmpDir] = 'write'
+  // 共通ディレクトリのうち commit・fetch が書く場所（.git/hooks と .git/config は含めない）
+  const commonWrites = (commonDir) => { for (const p of COMMON_WRITE) fs[join(commonDir, p)] = 'write' }
+  // 付属 worktree の gitdir を書けるようにし、git の行き先を決めるファイルと worktree の .git ファイルだけ read に戻す
+  // （監査 e670648 の HIGH-1。commondir を偽の共通ディレクトリへ向けると、sandbox の外で走る worktree-remove.sh の status が
+  // 偽 config の core.fsmonitor を起動し得た）。より具体的なパスの指定が優先される（permission-profiles.md）。書き込みが要る側
+  // （index・HEAD・*.lock・MERGE_HEAD・rebase-merge/ 等）は列挙しきれないので gitdir 全体の write に任せ、戻す側を列挙する。
+  const gitdirWrites = (gitdir, worktree) => {
+    fs[gitdir] = 'write'
+    for (const f of GITDIR_READ_ONLY) fs[join(gitdir, f)] = 'read'
+    fs[join(worktree, '.git')] = 'read'
+  }
   if (kind === 'impl' && git) {
-    for (const p of ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.lock']) fs[join(git.commonDir, p)] = 'write'
-    fs[git.gitdir] = 'write'
-    // gitdir の下で git の行き先を決めるファイルだけ read に戻す（監査 e670648 の HIGH-1。commondir を偽の共通ディレクトリへ
-    // 向けると、sandbox の外で走る worktree-remove.sh の status が偽 config の core.fsmonitor を起動し得た）。
-    // より具体的なパスの指定が優先される（permission-profiles.md）。書き込みが要る側（index・HEAD・*.lock・MERGE_HEAD・
-    // rebase-merge/ 等）は列挙しきれないので gitdir 全体の write に任せ、戻す側を列挙する。
-    for (const f of GITDIR_READ_ONLY) fs[join(git.gitdir, f)] = 'read'
-    fs[join(cwd, '.git')] = 'read'
+    commonWrites(git.commonDir)
+    gitdirWrites(git.gitdir, cwd)
+  }
+  // 回復の段（recover:#N。req.recoverGit）: cwd はメイン worktree。recover-prep.sh が base を取得し（共通ディレクトリと
+  // FETCH_HEAD）、旧 worktree が検証できたときだけ、その worktree と gitdir に WIP コミットする（PR #851 の P1）
+  if (kind === 'read' && recover) {
+    commonWrites(recover.commonDir)
+    fs[join(recover.commonDir, 'FETCH_HEAD')] = 'write'
+    if (recover.worktree && recover.gitdir) {
+      fs[recover.worktree] = 'write'
+      gitdirWrites(recover.gitdir, recover.worktree)
+    }
   }
   for (const p of platformWritePaths(platform)) fs[p] = 'write'
   for (const p of extraWritePaths) fs[p] = 'write'
@@ -483,6 +522,8 @@ export function createAdapter(cfg) {
     worktreeGit(cfg.mainRoot, req.worktreeGitdir)
     const writablePaths = checkWritablePaths(req.writablePaths)
     const readablePaths = readableTmpDirs(req.readTmpOf)
+    const recover = checkRecoverGit(cfg.mainRoot, req.recoverGit)
+    if (recover && req.worktreeGitdir) throw new AdapterError('denied', 'recoverGit は隔離 worktree の段では受けない')
     const merge = checkMerge(req.allowMerge === true, req.merge)
     const { prompt, schema, model, effort, cwd, timeoutMs, resume = null, logDir } = req
     mkdirSync(logDir, { recursive: true })
@@ -507,7 +548,7 @@ export function createAdapter(cfg) {
       writeFileSync(sp, JSON.stringify(strictifySchema(schema)))
       args.push('--output-schema', sp)
     }
-    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot, readablePaths, home, git, writablePaths, extraWritePaths: tc.extraWritePaths, platform }))
+    args.push(...buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot, readablePaths, home, git, recover, writablePaths, extraWritePaths: tc.extraWritePaths, platform }))
     args.push('-c', TTY_OFF)
     args.push(...buildHookArgs({ hookScript: HOOK_SCRIPT, guardScript, hookLog, merge }))
     if (resume) args.push(resume.sessionRef)

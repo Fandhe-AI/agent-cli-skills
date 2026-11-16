@@ -94,6 +94,12 @@ _/iit-runner/<runId>/
 
 ## 既知の限界
 
+- Codex の回復の段（`recover:#N`）は読み取りの profile に、`<main>/.git` の objects・refs・logs・packed-refs・`FETCH_HEAD` と、
+  ホストのプロンプトの `recover-prep.sh` の行から取って検証できた旧 worktree（`<main>/.claude/worktrees/` の直下で、
+  `<main>/.git/worktrees/` に登録がちょうど 1 つあるもの）とその gitdir だけを書き込み可として足す（`lib/recover-git.mjs`）。
+  他の worktree の gitdir は足さないため、使用中ブランチの解放（Issue #755。握り手の gitdir に `HEAD.lock` を作る）は
+  この段のサンドボックスでは書けない（解放の経路は実測していない）。`.claude/worktrees/` の外にある旧 worktree は WIP コミットできず、
+  `wipCommitted:false` で保全される。
 - Codex の実モデルでの通しで、コマンド実行後に最終応答を返さず止まる事象が run の 2〜4 割で起きる。
   時間切れで `null` になり、ホストの再試行・fail-closed に倒れるため誤った値は通らないが、その分ランが長くなる。
 - Codex はモデルのコマンドを利用者のログインシェル（macOS の既定は zsh）で実行し、呼び出しごとに bash へ固定する設定が無い

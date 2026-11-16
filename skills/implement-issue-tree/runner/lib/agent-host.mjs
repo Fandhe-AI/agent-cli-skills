@@ -40,6 +40,7 @@ import { buildRepairPrompt, composePrompt } from './preamble.mjs'
 import { assertSupportedSchema, sanitizeErrorLine, validate } from './schema-validate.mjs'
 import { isRepoSlug, mergeNumberKinds, mergePrNumberOf } from './merge-target.mjs'
 import { checkPins, launcherPinPaths, mergePins, pinFiles } from './pins.mjs'
+import { recoverGitFor } from './recover-git.mjs'
 import { createSequencer, createWorktree, verifyWorktreeGitdir } from './worktree.mjs'
 
 // ---- 実行仕様 ----
@@ -478,9 +479,11 @@ export function createAgentHost({ adapter, cfg }) {
       worktreeGitdir,
       writablePaths: writablePathsFor(label, mainRoot),
       readTmpOf: TREE_PAGE_LABEL.test(label) ? [...treeLogDirs] : [],
+      // 回復の段（recover:#N）の git の書き込み先（lib/recover-git.mjs。旧 worktree はホストのプロンプトの行から取って検証する）
+      recoverGit: opts.isolation === 'worktree' ? null : recoverGitFor(label, prompt, { skillDir, mainRoot }),
     }
     if (TREE_LABEL.test(label) && logDir) treeLogDirs.push(logDir)
-    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, merge, timeoutMs, worktree: worktreePath ?? null, worktreeGitdir, writablePaths: req.writablePaths, readTmpOf: req.readTmpOf })
+    writeLog(logDir, 'request.json', { seq: n, label, phase: opts.phase ?? null, iitModel: resolved.name, model: req.model, effort: req.effort, cwd, allowMerge: req.allowMerge, merge, timeoutMs, worktree: worktreePath ?? null, worktreeGitdir, writablePaths: req.writablePaths, readTmpOf: req.readTmpOf, recoverGit: req.recoverGit })
     writeLog(logDir, 'prompt.txt', req.prompt)
     // meta.json の outcome は ok / null の 2 値、詳細（修復の有無・失敗の理由）は status・reason に置く
     const outcome = (status, extra = {}) => Object.assign(rec, { outcome: status === 'ok' || status === 'repaired' ? 'ok' : 'null', status, sessionRef }, extra)

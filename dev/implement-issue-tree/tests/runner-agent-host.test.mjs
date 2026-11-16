@@ -635,3 +635,34 @@ test('readTmpOf（PR #851 の P1）: ツリーのページの段（plan:issue-tr
   await b.agent('p', { label: 'plan:issue-tree-page-1', schema: SCHEMA })
   assert.deepEqual(b.calls[1].readTmpOf, [])
 })
+
+test('recoverGit（PR #851 の P1）: recover:#N にだけ、プロンプトの recover-prep.sh の行（ちょうど 1 つ）の --worktree を検証して渡す。決められなければ base の取得の分だけ、行が無い・2 つ以上なら null', async () => {
+  const mr = join(root, `rec-main-${Math.random().toString(16).slice(2)}`)
+  const wt = join(mr, '.claude', 'worktrees', 'old-1')
+  mkdirSync(wt, { recursive: true })
+  mkdirSync(join(mr, '.git', 'worktrees', 'old-1'), { recursive: true })
+  writeFileSync(join(mr, '.git', 'worktrees', 'old-1', 'gitdir'), `${wt}/.git\n`)
+  mkdirSync(join(mr, '.claude', 'worktrees', 'unreg'), { recursive: true })
+  mkdirSync(join(mr, 'outside'), { recursive: true })
+  const line = (rest) => `bash '${skillDir}/scripts/run-verified.sh' ${'c'.repeat(64)} recover-prep.sh${rest}`
+  const P = (rest, extra = '') => `イシュー #2 の回復\n手順:\n\`\`\`sh\n${line(rest)}\n\`\`\`\n${extra}`
+  const { agent, calls } = makeHost({ cfg: { mainRoot: mr }, reply: () => ({ ok: true, n: 1 }) })
+  const cases = [
+    ['recover:#2', P(` --base 'main' --worktree '${wt}' --branch 'feat/2-x'`), { commonDir: join(mr, '.git'), worktree: wt, gitdir: join(mr, '.git', 'worktrees', 'old-1') }],
+    ['recover:#2', P(" --base 'main' --branch 'feat/2-x'"), { commonDir: join(mr, '.git'), worktree: null, gitdir: null }],
+    // 未登録・.claude/worktrees の外・実体が無い（dead）は base の取得の分だけ
+    ['recover:#2', P(` --base 'main' --worktree '${join(mr, '.claude', 'worktrees', 'unreg')}'`), { commonDir: join(mr, '.git'), worktree: null, gitdir: null }],
+    ['recover:#2', P(` --base 'main' --worktree '${join(mr, 'outside')}'`), { commonDir: join(mr, '.git'), worktree: null, gitdir: null }],
+    ['recover:#2', P(` --base 'main' --worktree '${join(mr, '.claude', 'worktrees', 'gone')}'`), { commonDir: join(mr, '.git'), worktree: null, gitdir: null }],
+    ['recover:#2', P(` --base 'main' --worktree '${mr}'`), { commonDir: join(mr, '.git'), worktree: null, gitdir: null }],
+    // タイトル等に同じ形の行が混ざって 2 つになれば何も足さない
+    ['recover:#2', P(` --base 'main' --worktree '${wt}'`, line(` --base 'main' --worktree '${join(mr, 'outside')}'`)), null],
+    ['recover:#2', 'recover-prep.sh を実行する', null],
+    ['recover:#2', P(` --base 'main' --worktree '${wt}'; touch /tmp/x`), null],
+    // 回復の段でなければ何も足さない
+    ['plan:#2', P(` --base 'main' --worktree '${wt}'`), null],
+    ['recover:#2-retry', P(` --base 'main' --worktree '${wt}'`), null],
+  ]
+  for (const [label, prompt] of cases) await agent(prompt, { label, schema: SCHEMA })
+  cases.forEach(([label, , want], i) => assert.deepEqual(calls[i].recoverGit, want, `${i}: ${label}`))
+})
