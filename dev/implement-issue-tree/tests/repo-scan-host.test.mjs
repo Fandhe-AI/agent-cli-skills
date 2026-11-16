@@ -67,7 +67,7 @@ test('observedExternalApps: 100 件ちょうどは採用する', () => {
 
 test('externalChecksPrompt: 起動行は run-verified.sh 経由の repo-scan.sh の 1 行で、gh・xargs・jq のコマンドを書かない', () => {
   const p = D.externalChecksPrompt('n1', REPO)
-  const line = p.split('\n').find((l) => l.includes('repo-scan.sh'))
+  const line = p.split('\n').find((l) => l.startsWith('bash ') && l.includes('repo-scan.sh'))
   assert.match(line, /^bash '<skillDir>\/scripts\/run-verified\.sh' \S+ repo-scan\.sh --mode external-checks --nonce n1 --repo o\/r$/)
   assert.ok(!/xargs|sh -c|gh pr list|gh api repos|--jq|sort -u|REPO=/.test(p), '転記させるコマンドがプロンプトに残っている')
   assert.ok(p.includes('標準出力は nonce・payload・sha256 を持つ 1 行の JSON'), '封筒の転記指示')
