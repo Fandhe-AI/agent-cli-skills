@@ -119,7 +119,7 @@ test('保護: ガード本体・plugin の置き場・OpenCode の設定ディ�
       assert.ok(editDeny.includes(want), `permissions: ${want}`)
       assert.ok(editPolicy.includes(want), `policies: ${want}`)
     }
-    assert.deepEqual(o.protectedPaths, [cfgDir], 'plugin にも設定ディレクトリを渡す')
+    assert.deepEqual(o.protectedPaths, [cfgDir, SKILL_DIR], 'plugin にも設定ディレクトリとスキルの置き場を渡す')
     // 既存の shell の deny（opencodeRules）は残り、edit の deny はその後ろ（後勝ち）に置く
     const firstEdit = cfg.permissions.findIndex((r) => r.action === 'edit')
     assert.ok(firstEdit > cfg.permissions.findIndex((r) => r.resource === 'gh pr merge*'))
@@ -455,5 +455,115 @@ test('統合: agent-host の req.merge で、OpenCode アダプタが PR ごと�
     // autoMerge でないランでも作らない
     await host({ repo: 'octo/repo', args: { autoMerge: false } })(MERGE_STEP(46), { label: 'merge-exec:#8', schema: HOST_SCHEMA })
     assert.equal(starts(t.records()).length, 3, '決まらない段では merge 用 serve を起動しない')
+  } finally { await t.adapter.close() }
+})
+
+// --- serve が応答しないときの期限（API 要求と本文の読み取り。止まったと確認できなければ serve を終了させる）---
+const dead = async (pid, ms = 3000) => (await waitDead([pid], ms)).length === 0
+const elapsed = async (fn) => { const t0 = Date.now(); let err = null; try { await fn() } catch (e) { err = e } return { ms: Date.now() - t0, err } }
+
+test('期限: prompt の応答が来なくても apiTimeoutMs で戻り、interrupt も応答しなければ serve を終了させる。次の run は新しい serve で走る', { timeout: 20000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 300 }, env: { FAKE_OC_HANGS: 'prompt,interrupt' } })
+  await t.adapter.start()
+  try {
+    const pid = starts(t.records())[0].pid
+    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ timeoutMs: 60000 })))
+    assert.ok(err instanceof AdapterError && err.kind === 'api', `api で失敗する: ${err?.message}`)
+    assert.ok(ms < 5000, `期限（${ms} ms）が apiTimeoutMs に従う`)
+    assert.ok(t.records().some((r) => r.ev === 'http' && /\/interrupt$/.test(r.path)), 'セッションを止めようとした')
+    assert.ok(await dead(pid), '止まったと確認できなかったので serve を終了させた')
+    const e2 = await kindOf(t.adapter.run(t.req({ timeoutMs: 60000 })))
+    assert.ok(e2 instanceof AdapterError)
+    assert.equal(starts(t.records()).length, 2, '終了した serve は作り直す')
+  } finally { await t.adapter.close() }
+})
+
+test('期限: prompt の本文の読み取りが止まっても期限で戻る（fetch の応答だけでなく本文にも期限）', { timeout: 20000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 300 }, env: { FAKE_OC_PARTIAL: 'prompt', FAKE_OC_HANGS: 'interrupt' } })
+  await t.adapter.start()
+  try {
+    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ timeoutMs: 60000 })))
+    assert.ok(err instanceof AdapterError && err.kind === 'api')
+    assert.ok(ms < 5000, `本文の読み取りの期限（${ms} ms）`)
+  } finally { await t.adapter.close() }
+})
+
+test('期限: 時間切れの interrupt が応答しなければ serve を終了させ、SIGTERM を無視する serve は SIGKILL で止める', { timeout: 20000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 300 }, env: { FAKE_OC_HANGS: 'interrupt', FAKE_OC_IGNORE_TERM: '1' } })
+  await t.adapter.start()
+  try {
+    const pid = starts(t.records())[0].pid
+    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ prompt: '[[HANG]]', timeoutMs: 400 })))
+    assert.equal(err?.kind, 'timeout')
+    assert.ok(ms < 8000, `戻りが期限内（${ms} ms）`)
+    assert.ok(await dead(pid, 5000), 'SIGKILL で止めた')
+  } finally { await t.adapter.close() }
+})
+
+test('期限: 取りこぼし突き合わせの GET が応答しなくても run の deadline で timeout に戻る', { timeout: 20000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 5000 }, env: { FAKE_OC_HANGS: 'active' } })
+  await t.adapter.start()
+  try {
+    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ prompt: '[[HANG]]', timeoutMs: 500 })))
+    assert.equal(err?.kind, 'timeout')
+    assert.ok(ms < 3000, `各要求は残り時間で打ち切る（${ms} ms）`)
+  } finally { await t.adapter.close() }
+})
+
+test('期限: close のセッション削除が応答しなくても戻り、serve を止める', { timeout: 20000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 300 }, env: { FAKE_OC_HANGS: 'delete' } })
+  await t.adapter.start()
+  const pid = starts(t.records())[0].pid
+  await t.adapter.run(t.req())
+  await t.adapter.run(t.req())
+  const { ms } = await elapsed(() => t.adapter.close())
+  assert.ok(ms < 6000, `close の戻り（${ms} ms）`)
+  assert.ok(await dead(pid))
+})
+
+test('期限: apiTimeoutMs が無ければ timeoutsSec.default と 30 秒の小さいほう', async () => {
+  // 設定からの導出だけを見る（serve への要求が通る間は結果に影響しない）。値は偽 serve の hang 時間で観測する
+  const t = setup({ toolConfig: { timeoutsSec: { default: 1, byPhase: {} } }, env: { FAKE_OC_HANGS: 'prompt,interrupt' } })
+  await t.adapter.start()
+  try {
+    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ timeoutMs: 60000 })))
+    assert.equal(err?.kind, 'api')
+    assert.ok(ms >= 900 && ms < 6000, `timeoutsSec.default（1 秒）から決まる（${ms} ms）`)
+  } finally { await t.adapter.close() }
+})
+
+// --- スキルの置き場（cfg.skillDir）の保護 ---
+test('保護: cfg.skillDir（とその realpath）への edit を permissions と policies で拒否し、plugin にも渡す', async () => {
+  const t = setup()
+  await t.adapter.start()
+  try {
+    const { config: cfg } = starts(t.records())[0]
+    const o = cfg.plugins[0].options
+    const editDeny = cfg.permissions.filter((r) => r.action === 'edit' && r.effect === 'deny').map((r) => r.resource)
+    const editPolicy = cfg.policies.filter((r) => r.resource.startsWith('edit:') && r.effect === 'deny').map((r) => r.resource.slice(5))
+    for (const d of [SKILL_DIR, realpathSync(SKILL_DIR)]) {
+      for (const want of [d, `${d}/*`]) {
+        assert.ok(editDeny.includes(want), `permissions: ${want}`)
+        assert.ok(editPolicy.includes(want), `policies: ${want}`)
+      }
+    }
+    assert.ok(o.protectedPaths.includes(SKILL_DIR), 'plugin の protectedPaths にも入る（edit と shell の書き込みを拒否）')
+  } finally { await t.adapter.close() }
+})
+
+test('保護: 実の plugin が skillDir 配下の launcher への edit を拒否する（permission.evaluate）', async () => {
+  const t = setup()
+  await t.adapter.start()
+  try {
+    const { config: cfg } = starts(t.records())[0]
+    const plugin = (await import(`${new URL(`file://${join(PLUGIN_DIR, 'index.js')}`).href}?skill-protect`)).default
+    let hook
+    await plugin.setup({ options: { ...cfg.plugins[0].options, markerPath: join(t.runDir, 'm2'), nonce: 'n' }, location: { directory: t.mainRoot }, permission: { hook: async (n, fn) => { hook = fn } }, tool: { hook: async () => {} }, shell: { hook: async () => {} } })
+    const ev = { action: 'edit', resources: [join(SKILL_DIR, 'scripts', 'run-verified.sh')] }
+    await hook(ev)
+    assert.equal(ev.effect, 'deny')
+    const other = { action: 'edit', resources: [join(t.mainRoot, 'src', 'a.js')] }
+    await hook(other)
+    assert.notEqual(other.effect, 'deny')
   } finally { await t.adapter.close() }
 })

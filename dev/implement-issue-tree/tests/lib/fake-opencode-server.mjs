@@ -22,6 +22,9 @@
 // FAKE_OC_FOREIGN=<id> を渡すと、アダプタが作っていない既存セッションを 1 つ持つ（削除されないことの確認用）。
 // FAKE_OC_GRANDCHILD=<pid ファイル> で、同じプロセスグループに孫（sleep）を起動して pid を書く（killSync の確認用）。
 // FAKE_OC_NOLISTEN=1 で待ち受けない（起動待ちの serve の再現）。
+// FAKE_OC_HANGS=<名前のカンマ区切り> で、その API が応答を返さない（接続は開いたまま）。名前は prompt・interrupt・delete・active・message。
+// FAKE_OC_PARTIAL=<同じ名前の区切り> は、ヘッダと本文の一部だけ返して終わらせない（本文の読み取りが止まる serve の再現）。
+// FAKE_OC_IGNORE_TERM=1 で SIGTERM を無視する（SIGKILL でしか止まらない serve の再現）。
 import { spawn } from 'node:child_process'
 import { appendFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -37,6 +40,8 @@ if (argv[0] !== 'serve') process.exit(64)
 const port = Number(argv[argv.indexOf('--port') + 1])
 const LOG = process.env.FAKE_OC_LOG
 const PASSWORD = process.env.OPENCODE_PASSWORD
+const HANGS = new Set((process.env.FAKE_OC_HANGS ?? '').split(',').filter(Boolean))
+const PARTIAL = new Set((process.env.FAKE_OC_PARTIAL ?? '').split(',').filter(Boolean))
 const rec = (o) => { if (LOG) appendFileSync(LOG, `${JSON.stringify(o)}\n`) }
 
 rec({ ev: 'start', pid: process.pid, port, hasPassword: Boolean(PASSWORD), config: process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : null, cwd: process.cwd(), ghRepo: process.env.GH_REPO ?? null })
@@ -54,6 +59,7 @@ async function ensurePlugin(directory) {
     options: pluginEntry.options,
     location: { directory },
     permission: { hook: async () => {} },
+    shell: { hook: async () => {} },
     tool: { hook: async (name, fn) => { if (name === 'execute.before') inst.before.push(fn) } },
   })
   return inst
@@ -127,6 +133,9 @@ const server = createServer(async (req, res) => {
     const send = (status, data) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(data === undefined ? '' : JSON.stringify(data)) }
     if (!authed) return send(401, { error: 'unauthorized' })
     const p = url.pathname
+    const apiName = req.method === 'POST' && /\/prompt$/.test(p) ? 'prompt' : req.method === 'POST' && /\/interrupt$/.test(p) ? 'interrupt' : req.method === 'DELETE' ? 'delete' : p === '/api/session/active' ? 'active' : /\/message$/.test(p) ? 'message' : null
+    if (apiName && HANGS.has(apiName)) return
+    if (apiName && PARTIAL.has(apiName)) { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"data":'); return }
     if (p === '/api/info') return send(200, { data: { version: '2.2.7' } })
     if (p === '/api/agent') {
       await ensurePlugin(url.searchParams.get('location[directory]') ?? process.cwd())
@@ -186,4 +195,5 @@ if (process.env.FAKE_OC_GRANDCHILD) {
 }
 if (!process.env.FAKE_OC_NOLISTEN) server.listen(port, '127.0.0.1')
 else setInterval(() => {}, 1000)
-process.on('SIGTERM', () => process.exit(0))
+if (!process.env.FAKE_OC_IGNORE_TERM) process.on('SIGTERM', () => process.exit(0))
+else process.on('SIGTERM', () => {})

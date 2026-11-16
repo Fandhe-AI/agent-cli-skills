@@ -127,16 +127,23 @@ _/iit-runner/<runId>/
 - ツールの出力（コマンドの出力・エージェントが読んだファイルの中身・応答）は、`_/iit-runner/<runId>/agents/*/` の
   `events*.jsonl` 等にそのまま残る。秘密を出力したコマンドがあれば、それも残る。`_/` は gitignore 済みだが、ログを共有・
   転記する前に中身を確かめ、要らなくなったら消す。
-- OpenCode の serve のパスワード（`OPENCODE_PASSWORD`）は serve の env にあり、エージェントの shell の子プロセスにも引き継がれる。
-  `node -e "...process.env.OPENCODE_PASSWORD..."` のような読み出しは `agent-guard.sh` を通る（allow。監査 e670648 の実測）。
-  パスワードを得たエージェントは、ランナーの serve の HTTP API を直接呼べる。そのうち次の 2 つは、ランナーのガードで止められない。
-  - `POST /api/session/:id/shell` は permission を通らない（Phase 0 の実測）。ランナー自身はこれを呼ばない。
-  - `PATCH /api/experimental/config` で global config（利用者の設定）を書き換えられる。ランナーの設定は `OPENCODE_CONFIG_CONTENT`
-    で渡しているが、書き換えた global config がランの後の OpenCode の利用に残り得る。
-  ランナーが行う shell の件数の照合（plugin の記録とメッセージの shell の tool part の比較）は、これらの API の実行が tool part に
-  現れる場合だけ働く（現れるかどうかは確かめていない）。サーバー側の ruleset と、ランの後の利用者設定の確認で補う。
+- OpenCode の serve のパスワード（`OPENCODE_PASSWORD`）は serve の env で渡す。ランナー専用 plugin が `shell.create.before` の
+  フックで、エージェントの shell の子へ渡す env から `OPENCODE_PASSWORD`（と `OPENCODE_SERVER_PASSWORD`・`OPENCODE_SERVER_USERNAME`）を
+  消す（全 serve。merge 用を含む）。v2.2.7 の実機で、shell から `printenv OPENCODE_PASSWORD | wc -c` が 0 になることを確かめた。
+  `ctx.shell.hook` が無い版では plugin が目印を書かず、アダプタが prereq で止める。
+  - 残る経路: serve プロセス自身の env は、同じ OS ユーザーなら `ps eww -p <serve の pid>` で読める（macOS の実機で
+    `ps eww -p <pid> | grep -c OPENCODE_PASSWORD` が 1。同じ OS ユーザーで動くので原理的に閉じられない。OpenCode v2.2.7 には
+    パスワードをファイル・ソケット・引数以外で渡す手段がなく、引数も `ps` で読める）。読めればエージェントは serve の HTTP API を
+    直接呼べ、そのうち `POST /api/session/:id/shell` は permission を通らず、`PATCH /api/experimental/config` は global config
+    （利用者の設定）を書き換えられる。ランナーが行う shell の件数の照合（plugin の記録とメッセージの shell の tool part の比較）は、
+    これらの API の実行が tool part に現れる場合だけ働く（現れるかどうかは確かめていない）。サーバー側の ruleset と、ランの後の
+    利用者設定の確認で補う。
+  - `OPENCODE_CONFIG_CONTENT`（ランナーの設定。plugin の目印の nonce・ガードのパスを含む。認証情報ではない）は shell の env に残る。
+- OpenCode の serve への各要求と本文の読み取りには期限がある（`toolConfig.opencode.apiTimeoutMs`。既定は `timeoutsSec.default` と
+  30 秒の小さいほう。run の中の要求は run の残り時間でも打ち切る）。応答が来ないときは、セッションを interrupt し、止まったと
+  確認できなければ serve を（SIGTERM、続けて SIGKILL で）終了させる。終了した serve は次の run で作り直す。
 - OpenCode のガードの置き場（`agent-guard.sh`・ランナー専用 plugin・`~/.config/opencode/`・`.opencode/(hooks|plugins?)/`・
-  `opencode.json(c)`・ランのガードのログと目印）への書き込みの拒否は、edit 系はパスの照合、shell はコマンド文字列の照合である。
+  `opencode.json(c)`・スキルの置き場（`args.skillDir`。実行仕様の launcher `scripts/run-verified.sh` を含む）・ランのガードのログと目印）への書き込みの拒否は、edit 系はパスの照合、shell はコマンド文字列の照合である。
   変数・間接参照・別名のパスを使う shell の書き込みは止まらない（best-effort）。対象リポジトリに `opencode.json(c)` という名前の
   ファイル（例: 配布物の雛形）があると、その編集も拒否される（配布物の plugin と同じ過剰側の判定）。
 - OpenCode の merge 用 serve は PR ごとに起動し、ランの終了（close）まで残す（同じ PR の再試行で使い回すため）。
