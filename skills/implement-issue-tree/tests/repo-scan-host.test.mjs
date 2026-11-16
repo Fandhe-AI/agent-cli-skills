@@ -113,7 +113,7 @@ test('detect:external-checks: externalChecks を明示（[] を含む）した�
     assert.equal(result.externalChecksConfirmed, true, name)
     assert.deepEqual(result.externalChecks, externalChecks.map((e) => e.app ?? e), name)
     assert.ok(!logs.some((m) => m.includes('観測を採用しない') || m.includes('観測結果は参考値')), name)
-    assert.ok(logs.some((m) => m.includes(externalChecks.length ? '外部チェック（args.externalChecks による明示指定）' : '外部チェックなし（args.externalChecks: [] による明示確定）')), name)
+    assert.ok(logs.some((m) => m.includes(externalChecks.length ? '外部チェック（args.externalChecks）: ' : '外部チェックなし（args.externalChecks: []）')), name)
   }
 })
 

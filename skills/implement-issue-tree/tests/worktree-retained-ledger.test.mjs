@@ -280,7 +280,7 @@ test('ラン終了時の報告: 保持した worktree は使い捨てと別の�
   assert.match(logs[retainedHead], /retained-locked/)
   assert.match(logs[retainedHead], /retained-submodule/)
   assert.match(logs[retainedHead], /中身を確認してから手動で対処/)
-  assert.doesNotMatch(logs[retainedHead], /不要であれば git worktree remove で手動削除/)
+  assert.doesNotMatch(logs[retainedHead], /不要なら git worktree remove で削除/)
   const listed = (from, to) => logs.slice(from + 1, to).filter((l) => /^ {2}(#|\()/.test(l))
   const disposableLines = listed(disposableHead, retainedHead > disposableHead ? retainedHead : logs.length)
   assert.ok(disposableLines.length > 0)

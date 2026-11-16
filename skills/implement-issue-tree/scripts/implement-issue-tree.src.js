@@ -2870,7 +2870,7 @@ async function runStateAgent(prompt, { label, schema, isValid }) {
     if (isValid(result)) return { result, outputMissing: false, attempts }
     const isLast = model === STATE_AGENT_MODEL_CHAIN[STATE_AGENT_MODEL_CHAIN.length - 1]
     if (!isLast) {
-      log(`⚠️ ${attemptLabel}: StructuredOutput 未返却相当（例外・null・schema 不適合）。次のモデルへフォールバックする`)
+      log(`⚠️ ${attemptLabel}: StructuredOutput 未返却相当。次のモデルへフォールバックする`)
     }
   }
   return { result: null, outputMissing: true, attempts }
@@ -3240,7 +3240,7 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
       if (cleanupPromptText && !mergeOk) {
         cleanupOk = false
         cleanupRetained = true
-        log(`⚠️ #${issueNumber}: 状態ファイル更新に失敗したため worktree / branch の掃除をスキップした（回復情報の保全を優先。worktree は最終スイープで回収されるが branch は残存し、discard 経路は本関数の戻り値 false の検知で終端として保全する）`)
+        log(`⚠️ #${issueNumber}: 状態ファイル更新に失敗したため worktree / branch の掃除をスキップした（回復情報を保全する）`)
       } else if (cleanupPromptText) {
         const { result: cleanupResult, outputMissing } = await runStateAgent(cleanupPromptText, {
           label: `state:cleanup:#${issueNumber}`,
@@ -3257,7 +3257,7 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
         } else if (!cleanupOk) {
           log(`⚠️ worktree / branch 掃除失敗（issue #${issueNumber}）: ${cleanupRetained ? 'worktree を保持した（未コミット変更・初期化済み submodule・lock・削除の失敗のいずれか）' : 'ブランチの削除を完了できなかった'}`)
         } else if (cleanupRetained) {
-          log(`⚠️ #${issueNumber}: 旧 worktree を保持した（lock・submodule の未記録の変更・削除の失敗のいずれか。最終スイープまたは手動で回収する）`)
+          log(`⚠️ #${issueNumber}: 旧 worktree を保持した（lock・submodule の変更・削除失敗。最終スイープか手動で回収する）`)
         }
         if (cleanupBranchSha && deleteBranchName) {
           log(`#${issueNumber}: ブランチ ${sanitize(deleteBranchName)} の削除前の先頭 sha は ${cleanupBranchSha}（削除後は reflog に残らない。復元は git branch <名前> <sha>。gc までの間に限る）`)
@@ -3347,7 +3347,7 @@ async function cleanupClosedMergedWorktree(item, cand, outcome = {}) {
   const tried = async (reason, text) => {
     // settled は記録が書けたと分かってから立てる。書けなかった候補は次のランでも候補のままなので、呼び出し側が試行回数を書いて先頭の枠を譲らせる
     if (await updateState(n, { closedCleanupTried: { pr: cand.pr, worktree: cand.worktree, reason } })) outcome.settled = true
-    else log(`⚠️ #${n}: closed 後始末の試行済み記録を書けなかった（試行回数で順番を回す）`)
+    else log(`⚠️ #${n}: closed 後始末の試行済み記録を書けなかった`)
     return text
   }
   const { problem, bind } = await fetchPrBinding(item, cand.pr, cand.branch)
@@ -3390,7 +3390,7 @@ async function cleanupClosedMergedWorktree(item, cand, outcome = {}) {
   }
   if (!removed) {
     recordRetainedWorktree(n, w)
-    log(`⚠️ #${n}: closed 後始末で worktree を保持した（PR #${cand.pr} の head と HEAD の不一致・lock・未コミット変更・初期化済み submodule・結果なしのいずれか。状態は変えない）`)
+    log(`⚠️ #${n}: closed 後始末で worktree を保持した（PR #${cand.pr} の head 不一致・lock・未コミット変更・submodule・結果なし。状態は変えない）`)
     const text = `closed 後始末なし（PR #${cand.pr} はマージ済みだが worktree を保持した。status は変更しない）`
     // スクリプトが結果行の固定語で保持理由を明示したときだけ記録する（結果なし・非 0 終了・lock・例外は一過性として次の実行で再試行）
     return retainedReason ? tried(retainedReason, text) : text
@@ -3401,7 +3401,7 @@ async function cleanupClosedMergedWorktree(item, cand, outcome = {}) {
   // merged へ書けたときだけ settled。失敗すると状態は blocked / monitoring のままで次のランも候補なので、試行回数を書かせる
   if (ok) outcome.settled = true
   else {
-    log(`⚠️ #${n}: closed 後始末で worktree は破棄したが、状態ファイルの merged 更新に失敗した（次の実行で同じ経路が再試行する）`)
+    log(`⚠️ #${n}: closed 後始末で worktree は破棄したが、状態ファイルの merged 更新に失敗した（次の実行で再試行する）`)
     return `closed 後始末: worktree を破棄した（PR #${cand.pr} はマージ済み）。状態の更新に失敗`
   }
   return `closed 後始末: PR #${cand.pr} のマージ済みを確認し、worktree を破棄して状態を merged にした`
@@ -3851,7 +3851,7 @@ async function precheckScriptHashes() {
       throw new Error(`スクリプトの版ずれまたは改変の疑い: 埋め込みハッシュと args.skillDir（${skillDir}）の実ファイルが一致しない（不一致 ${r.mismatch} 件・欠落 ${r.missing} 件${r.first ? `・先頭 ${r.first}` : ''}）。何も着手せずに停止した。Workflow とスキルディレクトリの版を揃える（スキルを同期し直す）`)
     }
     last = r.reason
-    log(`⚠️ スクリプトハッシュの予検査の出力を採用しない（${r.reason}。転記ミス・スクリプト未実行・別の表の疑い）`)
+    log(`⚠️ スクリプトハッシュの予検査の出力を採用しない（${r.reason}）`)
   }
   throw new Error(`スクリプトのハッシュを検査できなかった（${last}）。args.skillDir（${skillDir}）に run-verified.sh があるか、sha256sum / shasum が使えるかを確認する。何も着手せずに停止した`)
 }
@@ -3923,7 +3923,7 @@ async function measureResidualWorktreeBytesDetailed(paths) {
   // sanitizeWorktreePath へ強制検証してから渡す構造的防御（PR #390）。1 件でも外れれば全体中止。
   const sanitizedPaths = paths.map((p) => sanitizeWorktreePath(isStr(p) ? p : ''))
   if (sanitizedPaths.some((p) => p === '')) {
-    log('⚠️ 残置 worktree のディスク使用量測定: 許可文字集合外のパスを検出したため測定を中止した（fail-closed）')
+    log('⚠️ 残置 worktree のディスク使用量測定: 許可文字集合外のパスのため測定を中止した（fail-closed）')
     return null
   }
   try {
@@ -3935,7 +3935,7 @@ async function measureResidualWorktreeBytesDetailed(paths) {
         : classifyResidualByteReport(once.report, sanitizedPaths.length)
       if (r.ok) {
         if (r.missing > 0) {
-          log(`残置 worktree ディスク使用量測定: 並行 cleanup 等により ${r.missing} 件のパスが測定時点で既に存在しなかった（0 として扱った）`)
+          log(`残置 worktree ディスク使用量測定: ${r.missing} 件のパスが測定時点で存在しなかった（0 として扱った）`)
         }
         return { kib: r.kib, missing: r.missing, dup: r.dup }
       }
@@ -3946,17 +3946,17 @@ async function measureResidualWorktreeBytesDetailed(paths) {
         } else if (r.reason === 'output-missing') {
           log(
             once.envelope === 'nonce' || once.envelope === 'sha256' || once.envelope === 'input'
-              ? `⚠️ 残置 worktree ディスク使用量測定の出力封筒の照合に失敗した（${once.envelope} 不一致。転記ミス・スクリプト未実行・別のパスを測った疑い）`
-              : '⚠️ 残置 worktree ディスク使用量測定の結果が欠落または不完全（StructuredOutput 欠落・スクリプトの起動失敗の疑い）',
+              ? `⚠️ 残置 worktree ディスク使用量測定の出力封筒の照合に失敗した（${once.envelope} 不一致）`
+              : '⚠️ 残置 worktree ディスク使用量測定の結果が欠落または不完全',
           )
         } else {
-          log(`⚠️ 残置 worktree ディスク使用量測定の count が対象パス数と不一致（count=${rv?.count ?? '欠落'}・対象 ${sanitizedPaths.length} 件・err=${rv?.err ?? '不明'}）。転記失敗の疑い`)
+          log(`⚠️ 残置 worktree ディスク使用量測定の count が対象パス数と不一致（count=${rv?.count ?? '欠落'}・対象 ${sanitizedPaths.length} 件・err=${rv?.err ?? '不明'}）`)
         }
         if (attempt < RESIDUAL_BYTE_MEASURE_MAX_RETRIES) {
           log(`別エージェントで再測定する（${attempt + 1}/${RESIDUAL_BYTE_MEASURE_MAX_RETRIES}）`)
           continue
         }
-        log(`再測定を使い切った（skillDir=${skillDir}。スクリプトの欠落・ハッシュ不一致で出力が無い場合もある）。観測失敗として扱う（fail-closed）`)
+        log(`再測定を使い切った（skillDir=${skillDir}）。観測失敗として扱う（fail-closed）`)
         return null
       }
       log(`⚠️ 残置 worktree ディスク使用量測定が失敗した（reason=${r.reason}・err=${rv?.err ?? '不明'}・missing=${rv?.missing ?? '欠落'}）。再測定せず観測失敗として扱う`)
@@ -3996,7 +3996,7 @@ async function measureMainWorktreeContentBytes(mainPath, entries) {
     if (nestedMeasured === null) return null
     nestedKib = nestedMeasured.kib
     log(
-      `メイン worktree 配下の linked worktree ${nestedPaths.length} 件（${mib(nestedKib * 1024)} MiB）をメイン内容の見積りから除外した（残置バイト軸では別途計上済み）`,
+      `メイン worktree 配下の linked worktree ${nestedPaths.length} 件（${mib(nestedKib * 1024)} MiB）をメイン内容の見積りから除外した`,
     )
   }
   return computeMainContentKib({ totalKib, gitKib, nestedKib })
@@ -4016,7 +4016,7 @@ let freeDiskMeasureCallSeq = 0
 async function measureFreeDiskKib(path) {
   const sanitized = sanitizeWorktreePath(typeof path === 'string' ? path : '')
   if (sanitized === '') {
-    log('⚠️ 実ディスク空き容量の測定: 許可文字集合外のパスを検出したため測定を中止した（fail-closed）')
+    log('⚠️ 実ディスク空き容量の測定: 許可文字集合外のパスのため測定を中止した（fail-closed）')
     return null
   }
   try {
@@ -4049,7 +4049,7 @@ async function measureFreeDiskKib(path) {
       if (Number.isInteger(v?.err) && v.err === 0 && Number.isInteger(v?.freeKib) && v.freeKib >= 0) {
         return v.freeKib
       }
-      log('⚠️ 実ディスク空き容量測定が失敗として報告された（df 実行不能・出力欠損・転記失敗等）')
+      log('⚠️ 実ディスク空き容量測定が失敗として報告された')
       if (attempt === 0) log('別エージェントで再測定する（1/1）')
     }
     return null
@@ -4256,7 +4256,7 @@ function reviveAfterCleanup(rawPath, oldRawPath) {
 function recordEphemeralWorktree(issueNumber, rawPath, kind, { revive = true } = {}) {
   // 未宣言 kind は予約を過小にする実装ミスのため警告する。記録は継続する（落とすと実測まで過小になり上限 latch が弱まる。予約が過小でも実測超過の時点で新規着手は停止する）。
   if (!(kind in EPHEMERAL_KIND_MAX)) {
-    log(`⚠️ #${issueNumber}: 使い捨て worktree の kind '${kind}' が EPHEMERAL_KIND_MAX に未宣言（予約契約違反。生成経路を追加したら最大数を宣言すること）`)
+    log(`⚠️ #${issueNumber}: 使い捨て worktree の kind '${kind}' が EPHEMERAL_KIND_MAX に未宣言（予約契約違反）`)
   }
   const p = sanitizeWorktreePath(rawPath ?? '')
   if (!p) {
@@ -4324,7 +4324,7 @@ function applyReplacementAccounting(issueNumber, oldPath, rawNewPath, oldRemoved
   if (plan.inheritPath) slotInheritedPaths.add(plan.inheritPath)
   if (plan.inheritUnknown) {
     slotUnknownLiveCount += 1
-    log(`⚠️ #${issueNumber}: 置換後の worktree のパスを取得できなかった（件数は引き継ぐ。バイトは物理一覧で測る。git worktree list で確認すること）`)
+    log(`⚠️ #${issueNumber}: 置換後の worktree のパスを取得できなかった（件数は引き継ぐ。git worktree list で確認すること）`)
   }
 }
 
@@ -4332,7 +4332,7 @@ function recordReplacementWorktree(issueNumber, rawPath) {
   const p = sanitizeWorktreePath(rawPath ?? '')
   if (!p) {
     ephemeralWorktrees.push({ issue: issueNumber, kind: 'replacement', path: '' })
-    log(`#${issueNumber}: 置換後の worktree のパスを取得できないまま旧 worktree を保持した（件数のみ 1 件計上する。git worktree list で確認すること）`)
+    log(`#${issueNumber}: 置換後の worktree のパスを取得できないまま旧 worktree を保持した（1 件計上。git worktree list で確認すること）`)
     return true
   }
   // live への戻しは呼び出し元の applyReplacementAccounting が新旧の同一判定つきで行う（ここで戻すと、同じ呼び出しで削除を確認した旧と同じパスの新を live にしてしまう）
@@ -4359,7 +4359,7 @@ async function sweepClosedWorktrees(orphanPaths = []) {
   try {
     candidates = [...new Set([...sweepEligiblePaths, ...orphanPaths])].map(sanitizeWorktreePath).filter((p) => p !== '' && !sweepHeldPaths.has(p))
     if (candidates.length === 0) {
-      log('worktree スイープ: 削除を試みた worktree・検出した孤立 worktree がない（または discard で保持した worktree だけ）ため削除を行わない')
+      log('worktree スイープ: 削除対象がないため削除しない')
       return []
     }
     const candidatesJson = JSON.stringify(candidates)
@@ -4423,7 +4423,7 @@ async function initAllPending(queueItems) {
     ),
   )
   if (outputMissing) {
-    log(`⚠️ 状態ファイル一括初期化: エージェントが ${BOTH_NO_OUT}（既存エントリは影響を受けない。以後の per-issue 初期化は各イシューの updateState が担う）`)
+    log(`⚠️ 状態ファイル一括初期化: エージェントが ${BOTH_NO_OUT}（既存エントリは影響なし。以後は各イシューの updateState が初期化する）`)
   } else if (result?.ok !== true) {
     log(`⚠️ 状態ファイル一括初期化失敗: エージェントが ok:false を返した`)
   }
@@ -4466,7 +4466,7 @@ function wrapAgentCounting(raw, budget, warn = () => {}) {
     budget.used += 1
     if (!warned && budget.used > budget.limit) {
       warned = true
-      warn(`⚠️ エージェント呼び出し数が想定上限 ${budget.limit} を超えた（使用 ${budget.used}）。呼び出しは止めない。ランタイムの上限（${AGENT_RUN_LIMIT}）に達すると打ち切られる`)
+      warn(`⚠️ エージェント呼び出し数が想定上限 ${budget.limit} を超えた（使用 ${budget.used}）。止めないがランタイムの上限 ${AGENT_RUN_LIMIT} で打ち切られる`)
     }
     return raw(...a)
   }
@@ -6014,7 +6014,7 @@ if (!skillDir) {
   const countedAgent = wrapAgentCounting(agent, agentBudget, log)
   try { agent = countedAgent } catch { /* 下の同一性検査で検出する */ }
   agentBudget.enforced = agent === countedAgent
-  if (!agentBudget.enforced) log('⚠️ agent を数える関数へ差し替えられないため、エージェント呼び出し数の予算ゲートは無効（返却値 agentBudget.enforced: false）')
+  if (!agentBudget.enforced) log('⚠️ agent を数える関数へ差し替えられないため予算ゲートは無効（agentBudget.enforced: false）')
 }
 
 // --- Restore フェーズ: 状態ファイルを読み込む ---
@@ -6023,7 +6023,7 @@ phase('Restore')
 // メイン worktree 未追跡ファイル検査のベースライン観測（Issue #497 AC2）。本ラン内のどのエージェント呼び出し（ensureBoundaryNonceSeed・loadState を含む）よりも先に取得し、それら自身が万一残置を作った場合も「本ラン開始前から存在していた」と誤ってマスクしないようにする。scanMainWorktreeUntracked は boundaryNonce や状態ファイルに依存しない独立の読み取り専用タスクのため、ここへ最優先で置ける。
 const mainUntrackedBaseline = await scanMainWorktreeUntracked('baseline')
 if (!mainUntrackedBaseline.observed) {
-  log('メイン worktree の未追跡ファイル検査（開始時）は未観測。ラン終了時の差分検出は成立しない見込み（git status で手動確認すること）')
+  log('メイン worktree の未追跡ファイル検査（開始時）は未観測（git status で手動確認すること）')
 }
 // メイン worktree の HEAD の開始時観測（Issue #591）。未追跡検査と同じく最初のエージェント呼び出しより前に取る（それら自身が HEAD を動かしても開始時の値をマスクしないため）。
 const mainHeadBaseline = await scanMainWorktreeHead('baseline')
@@ -6087,8 +6087,8 @@ const EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON =
 if (externalChecksInput !== undefined) {
   log(
     externalCheckApps.length > 0
-      ? `外部チェック（args.externalChecks による明示指定）: ${externalChecksInput.map((e) => `${sanitize(e.app)}${e.contexts.length > 0 ? `（信頼済み context: ${e.contexts.map(sanitize).join(' / ')}）` : '（context 未宣言。クライアント側自動マージは fail-closed）'}`).join(', ')}`
-      : '外部チェックなし（args.externalChecks: [] による明示確定）。GitHub Actions の green のみで判定する',
+      ? `外部チェック（args.externalChecks）: ${externalChecksInput.map((e) => `${sanitize(e.app)}${e.contexts.length > 0 ? `（信頼済み context: ${e.contexts.map(sanitize).join(' / ')}）` : '（context 未宣言。自動マージは fail-closed）'}`).join(', ')}`
+      : '外部チェックなし（args.externalChecks: []）。GitHub Actions の green のみで判定する',
   )
 } else {
   log(`⚠️ ${EXTERNAL_CHECKS_UNCONFIRMED_REASON}`)
@@ -6099,11 +6099,11 @@ const AUTO_MERGE_DISABLED_REASON =
 // ラン開始時に自動マージの状態を確定ログへ残す。autoMerge: true + externalChecksConfirmed + externalChecksContextsConfirmed の opt-in ランに限りクライアント側 squash merge を実行する（ファイル冒頭コメントと SKILL.md 参照）。
 log(autoMergeEnabled
   ? (externalChecksConfirmed && externalChecksContextsConfirmed
-      ? '✅ 自動マージ: 有効（クライアント側 squash merge。リポジトリオーナーの明示 opt-in。SKILL.md および references/automerge-design.md「クライアント側自動マージの設計」節参照。monitor の ready 判定後、merge-exec が HEAD sha を自己取得して checks・未解決スレッド数・外部チェック起動・G0（ベースブランチのサーバー側強制の実測: required checks の bypass 不能性・レビュースレッド解消の必須化・手順 3 の合格判定対象チェック context の required 化・外部チェック App の宣言 context + App ID 組束縛の required 化。strict = base 最新化必須は並列ランを止めるため要件に含めない）を独立再検証したうえで --match-head-commit 付き squash merge を実行する。monitor の出力はマージ経路の入力に使われない）'
+      ? '✅ 自動マージ: 有効（opt-in。merge-exec が HEAD の checks・未解決スレッド・外部チェック・G0 を再検証して --match-head-commit 付き squash merge を実行する）'
       : externalChecksConfirmed
-        ? `⚠️ 自動マージ: opt-in 指定あり（autoMerge: true）だが外部チェック App の信頼済み check context が未宣言のため実行しない（fail-closed）。${EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON}`
-        : '⚠️ 自動マージ: opt-in 指定あり（autoMerge: true）だが externalChecks が未確定のため実行しない（fail-closed）。args に externalChecks を明示（{"app": "<slug>", "context": "<required check context>"} 形式。なしの場合は [] で確定）して再実行すればクライアント側マージが有効になる')
-  : '⚠️ 自動マージ: 無効（args.autoMerge が true でないため。Issue #165 の fail-closed）。実装・push 前 Review・PR 作成・CI 監視・fix ループまでは従来どおり自動実行し、PR はマージ可能状態の blocked で停止する')
+        ? `⚠️ 自動マージ: autoMerge: true だが外部チェックの context が未宣言のため実行しない（fail-closed）。${EXTERNAL_CHECKS_CONTEXT_UNCONFIRMED_REASON}`
+        : '⚠️ 自動マージ: autoMerge: true だが externalChecks が未確定のため実行しない（fail-closed）。externalChecks を明示（{"app", "context"} の組。なしは []）して再実行すること')
+  : '⚠️ 自動マージ: 無効（args.autoMerge が true でない）。PR はマージ可能状態の blocked で停止する')
 
 // エージェント返却値の整数検証（スキーマ宣言のみに依存しない）
 for (const n of tree.nodes) {
@@ -6128,7 +6128,7 @@ for (const n of tree.nodes) {
     log(`#${n.number}: opt-in テスト宣言 ${n.optinTests.map(sanitize).join(' / ')}`)
     // verify-close（子を持つ親ノード）は PR を作らないため記録ゲートの適用対象外。
     if (hasChildren) {
-      log(`⚠️ #${n.number}: 子イシューを持つノードに opt-in テスト宣言があるが、このノードは PR を作成しないため記録ゲートは適用されない`)
+      log(`⚠️ #${n.number}: 子イシューを持つノードは PR を作らないため、opt-in テスト宣言の記録ゲートは適用されない`)
     }
   }
   // invalid 宣言で blocked 終端するのは runImplement のみ。子を持つノードは runVerifyClose へ進み invalid を参照しないため、警告文言も実挙動に合わせて出し分ける（Issue #502）。
@@ -6190,13 +6190,13 @@ const outOfTreeDeps = { open: [], unknown: [], closed: [], ancestors: [] }
       acc = merged
       if (chunk.truncatedAt === null) break
       if (round === ROOT_ANCESTOR_MAX_ROUNDS) {
-        log(`⚠️ ルートの祖先チェーン取得が安全上限 ${ROOT_ANCESTOR_MAX_ROUNDS} ラウンド（最大 ${ROOT_ANCESTOR_MAX_ROUNDS * ROOT_ANCESTOR_DEPTH} 段）に達したため #${chunk.truncatedAt} より先の祖先確認を打ち切った。それより先はツリー外前提として通常どおり state を見て待つ`)
+        log(`⚠️ ルートの祖先チェーン取得が安全上限 ${ROOT_ANCESTOR_MAX_ROUNDS} ラウンド（最大 ${ROOT_ANCESTOR_MAX_ROUNDS * ROOT_ANCESTOR_DEPTH} 段）に達したため #${chunk.truncatedAt} より先の祖先確認を打ち切った（先はツリー外前提として待つ）`)
         break
       }
       cur = chunk.truncatedAt
     }
     ancestors = acc
-    if (!ancestors) log('⚠️ ルートの祖先チェーンを取得できなかった、または (number, parent) の連鎖が整合しなかったため、祖先の除外なしでツリー外前提を判定する（待つ側へ倒す）')
+    if (!ancestors) log('⚠️ ルートの祖先チェーンを取得・照合できないため、祖先を除外せずツリー外前提を判定する（待つ側へ倒す）')
     const chunks = []
     for (let i = 0; i < fetchable.length; i += DECLARED_DEPS_CHUNK_SIZE) chunks.push(fetchable.slice(i, i + DECLARED_DEPS_CHUNK_SIZE))
     await Promise.all(chunks.map(async (chunk, index) => {
@@ -6215,8 +6215,8 @@ const outOfTreeDeps = { open: [], unknown: [], closed: [], ancestors: [] }
   }
   Object.assign(outOfTreeDeps, classifyOutOfTreeDeps(requested, states, ancestors))
   // 祖先として除外した番号は、実際にツリー外依存に現れたもの（classifyOutOfTreeDeps の ancestors）だけを明示する。
-  if (outOfTreeDeps.ancestors.length > 0) log(`ツリー外の前提のうちルートの祖先 ${outOfTreeDeps.ancestors.map((d) => `#${d}`).join(', ')} は待たない（祖先は子の完了を待つ側）`)
-  if (outOfTreeDeps.unknown.length > 0) log(`⚠️ ツリー外の前提 ${outOfTreeDeps.unknown.map((d) => `#${d}`).join(', ')} の state を取得できなかった（gh の失敗・存在しない番号・上限超過）。open 扱いで待つ（fail-closed）`)
+  if (outOfTreeDeps.ancestors.length > 0) log(`ツリー外の前提のうちルートの祖先 ${outOfTreeDeps.ancestors.map((d) => `#${d}`).join(', ')} は待たない`)
+  if (outOfTreeDeps.unknown.length > 0) log(`⚠️ ツリー外の前提 ${outOfTreeDeps.unknown.map((d) => `#${d}`).join(', ')} の state を取得できなかった。open 扱いで待つ（fail-closed）`)
   if (requested.length > 0) log(`ツリー外の前提イシュー: open ${outOfTreeDeps.open.length} 件${outOfTreeDeps.open.length > 0 ? `（${outOfTreeDeps.open.map((d) => `#${d}`).join(', ')}）` : ''}・closed ${outOfTreeDeps.closed.length} 件・取得不能 ${outOfTreeDeps.unknown.length} 件`)
 }
 
@@ -6252,7 +6252,7 @@ if (skipLabelsInput && skipNums) {
   skippedLabels.matched = [...c.hit.keys()].sort((a, b) => a - b)
   skippedLabels.unknown = c.unknownLabels
   skippedLabels.absent = [...absent].sort((a, b) => a - b).map((i) => sanitize(skipLabelsInput[i - 1]))
-  if (absent.size > 0) log(`⚠️ 対象外ラベル ${skippedLabels.absent.join(', ')} はリポジトリに存在しない（typo か未作成。対象外は効かない）`)
+  if (absent.size > 0) log(`⚠️ 対象外ラベル ${skippedLabels.absent.join(', ')} はリポジトリに存在しない（typo か未作成）`)
   log(c.unknownLabels.length > 0
     ? `⚠️ 対象外ラベル ${c.unknownLabels.map(sanitize).join(', ')} の一覧を取得できず、open ノード ${c.hit.size} 件を全て待たせる（fail-closed）`
     : `対象外ラベルの open ノード: ${formatIssueList([...c.hit.keys()])}`)
@@ -6362,12 +6362,12 @@ if (!dryRunEnabled) {
   if (residualGateActive) [runStartOrphanEntries, independentCount, observeTries] = await observeWorktreeList()
   else runStartOrphanEntries = await scanOrphanWorktrees()
   if (observeTries > 1 && !worktreeCountsDiffer(runStartOrphanEntries, independentCount)) {
-    log(`残置観測の食い違いを取り直した（${observeTries} 組目で一致。並行ランの変化か）`)
+    log(`残置観測の食い違いを取り直した（${observeTries} 組目で一致）`)
   }
   mainWorktreePath = findMainWorktreePath(runStartOrphanEntries)
   // メイン worktree を特定できないスキャン（isMain 転記の不整合・観測失敗）では孤立記録を全体として見送る（fail-closed）。isMain とパス一致の両除外が効かない状態で続行すると、 baseBranch 以外の issue 命名ブランチを checkout したメイン worktree を孤立として状態ファイルへ記録し、後続の削除候補生成へ載せ得るため（PR #390 codex-review P1）
   if (!mainWorktreePath && runStartOrphanEntries.length > 0) {
-    log('⚠️ メイン worktree を特定できなかったため、開始時の孤立 worktree 追跡記録をこのランでは見送る（fail-closed）')
+    log('⚠️ メイン worktree を特定できないため開始時の孤立 worktree 記録を見送る（fail-closed）')
   }
   // 照合で捨てた項目（savedEntry = {}）の worktree・branch を上書きしないよう、状態ファイルの全項目を照合できた場合だけ記録する（ラン末尾の freshVerified と対。fail-closed）。
   if (!savedItemsVerified) log('⚠️ 内容照合未成立のため開始時の孤立 worktree 記録を見送る')
@@ -6413,7 +6413,7 @@ if (!dryRunEnabled) {
       })
     } else {
       // 両軸とも明示オプトアウト時は観測失敗でも抑止しない（ゲート無効の意思表示が優先）。
-      log(`⚠️ ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。上限ゲートは無効（maxResidualWorktrees: 0 / maxResidualWorktreeBytes: 0）のため続行する`)
+      log(`⚠️ ラン開始時の worktree 残置観測に失敗した（${scanFailureDetail}）。上限ゲートが無効のため続行する`)
     }
   } else {
     residualObserved = true
@@ -6433,7 +6433,7 @@ if (!dryRunEnabled) {
       for (const p of residual.paths) log(`  ${p}`)
     } else if (maxResidualWorktrees > 0 && residual.count >= Math.ceil(maxResidualWorktrees * 0.8)) {
       // 早期警告（上限の 8 割到達）。停止はしないが、次ラン以降で上限に達する見込みを知らせる。
-      log(`⚠️ 残置 worktree が ${residual.count} 件（上限 ${maxResidualWorktrees} 件の 8 割超）。不要な worktree の手動削除を検討すること`)
+      log(`⚠️ 残置 worktree が ${residual.count} 件（上限 ${maxResidualWorktrees} 件の 8 割超）。不要なら手動削除すること`)
     } else {
       log(`残置 worktree 観測: ${residual.count} 件（上限 ${maxResidualWorktrees > 0 ? `${maxResidualWorktrees} 件` : 'なし'}）`)
     }
@@ -6472,7 +6472,7 @@ if (!dryRunEnabled) {
             paths: residual.paths,
           })
         ) {
-          log(`⚠️ ${detail}（既に件数上限で着手を停止済みのため追加の抑止はしない）`)
+          log(`⚠️ ${detail}（件数上限で着手停止済み）`)
         }
       } else {
         residualBytesObserved = true
@@ -6499,11 +6499,11 @@ if (!dryRunEnabled) {
           await setPerWorktreeByteReserveHighWater(highWaterDecision.rewriteBytes)
           if (highWaterDecision.reason === 'legacy') {
             log(
-              `旧形式の高水位（version !== ${HIGH_WATER_SCHEMA_VERSION}）を無効化した（ネスト二重計上を含み得るため。Issue #496）`,
+              `旧形式の高水位（version !== ${HIGH_WATER_SCHEMA_VERSION}）を無効化した`,
             )
           } else if (highWaterDecision.reason === 'decay') {
             log(
-              `1 worktree あたりの容量予約の高水位が実測から大きく乖離していたため${mib(highWaterDecision.rewriteBytes)} MiB へ段階的に引き下げた（残置実測 ${residualSampleCount} 件の平均を含む今回の見積りとの比較）`,
+              `1 worktree あたりの容量予約の高水位が実測から乖離していたため${mib(highWaterDecision.rewriteBytes)} MiB へ段階的に引き下げた（残置実測 ${residualSampleCount} 件の平均と比較）`,
             )
           }
         }
@@ -6522,7 +6522,7 @@ if (!dryRunEnabled) {
         )
         if (perWorktreeByteReserve < rawPerWorktreeByteReserve) {
           log(
-            `⚠️ 1 worktree あたりの容量予約見積り ${mib(rawPerWorktreeByteReserve)} MiB は容量上限に対して過大なため ${mib(perWorktreeByteReserve)} MiB へクランプした（メイン worktree に gitignored なビルド成果物・依存関係が含まれる場合に起こり得る）。実消費の超過検知は実測ベースの再測定・latch が別途担う`,
+            `⚠️ 1 worktree あたりの容量予約見積り ${mib(rawPerWorktreeByteReserve)} MiB は容量上限に対して過大なため ${mib(perWorktreeByteReserve)} MiB へクランプした`,
           )
         }
 
@@ -6584,7 +6584,7 @@ if (!dryRunEnabled) {
             log(`⚠️ ${detail}（既に件数上限で着手を停止済み）`)
           }
         } else if (bytes >= Math.ceil(maxResidualWorktreeBytes * 0.8)) {
-          log(`⚠️ 残置 worktree のディスク使用量が ${mib(bytes)} MiB（容量上限 ${residualMiB()} MiB の 8 割超）。不要な worktree の手動削除を検討すること`)
+          log(`⚠️ 残置 worktree のディスク使用量が ${mib(bytes)} MiB（容量上限 ${residualMiB()} MiB の 8 割超）。不要なら手動削除すること`)
         } else {
           log(`残置 worktree ディスク使用量観測: ${mib(bytes)} MiB（容量上限 ${residualMiB()} MiB）。1 worktree あたり予約 ${mib(perWorktreeByteReserve)} MiB`)
         }
@@ -6755,7 +6755,7 @@ async function runImplement(item) {
     if (why) return stopUnverified(`状態ファイルの PR #${saved.pr} を本イシューに結び付けられない（${sanitize(why)}）`)
   }
   if (saved.status === 'monitoring' && !isResumeFromMonitoring) {
-    logItem(item, `状態ファイルの branch が不正または空のため monitoring 再開を諦め、通常の impl から実行する`)
+    logItem(item, `状態ファイルの branch が不正または空のため monitoring 再開せず impl から実行する`)
   }
   // 保存済み fixCount は monitor ループからの正常再開時のみ引き継ぐ。impl からやり直す場合は新 PR のため 0 にリセット（旧 fixCount を引き継ぐと fix が走る前に上限到達しうる）。
   const savedFixCount =
@@ -7023,7 +7023,7 @@ async function runImplement(item) {
             logDemote(item, 'discard', reason)
             return await failItem(item, reason)
           }
-          logItem(item, `Recover → discard（解決した branch ${rejectedBranch} は命名規約 <type>/${item.number}-<short-name> に合わない）、旧 worktree のみ掃除して通常 Plan へ。branch は削除せず残す`)
+          logItem(item, `Recover → discard（解決した branch ${rejectedBranch} は命名規約 <type>/${item.number}-<short-name> に合わない）、旧 worktree のみ掃除して通常 Plan へ（branch は残す）`)
           if (!(await discardWorktreeOnly(`branch ${rejectedBranch} と旧 worktree`, rejectedBranch))) return false
           // 掃除の成功を確認できてから、保存済みの branch / pr を切り離す（保持・失敗のときは元の値を残す）
           if (isInt(saved.pr) && saved.pr > 0) logItem(item, `保存済みの PR #${saved.pr} を pr: 0 で切り離して新規に実装する`)
@@ -7050,7 +7050,7 @@ async function runImplement(item) {
           // 結果が removed でなくても（保持・失敗・結果なし・例外）planning へは進む。登録が残るだけで、消えたと確認できなければ updateStateDetailed が台帳へ載せる（件数・バイトを過小に数えない）
           const prunableCleanup = await updateStateDetailed(item.number, absentPatch, { cleanupWorktree: sanitizedRecoverWorktree, cleanupMode: 'discard', requireMissing: true })
           if (!(prunableCleanup.ok && prunableCleanup.retained === false)) {
-            log(`#${item.number}: 旧登録 ${sanitize(sanitizedRecoverWorktree)} を片づけられなかった（保持・失敗・結果なし。確認のあとに実体が作り直された場合を含み、その実体は消していない）。消えたと確認できないので台帳に載せて新規 Plan へ進む`)
+            log(`#${item.number}: 旧登録 ${sanitize(sanitizedRecoverWorktree)} を片づけられなかった（保持・失敗・結果なし。確認のあとに実体が作り直された場合を含み、その実体は消していない）。台帳に載せて新規 Plan へ進む`)
           }
         } else {
           await updateState(item.number, absentPatch)
@@ -7399,7 +7399,7 @@ async function runImplement(item) {
     // Issue #479: push 直後の CI 起動確認（エージェント自己申告）。マージ判定には使わず、状態ファイルへの記録（人間が _/issue-trees/<n>.json で確認できる）と、CONFLICTING のときに Merge ループの最初のラウンドを monitor 非起動で base 取り込みへ回すヒントに使う。
     const prCreateChecksStarted = prCreateResult.checksStarted === true
     const prCreatePushMergeable = normalizePushMergeable(prCreateResult.mergeableAfterPush)
-    logItem(item, `push 直後の CI 起動確認（自己申告・マージ判定には未使用） checksStarted=${prCreateChecksStarted} mergeableAfterPush=${prCreatePushMergeable}`)
+    logItem(item, `push 直後の CI 起動確認（自己申告） checksStarted=${prCreateChecksStarted} mergeableAfterPush=${prCreatePushMergeable}`)
     // PR 作成完了: monitoring へ更新して Merge ループへ引き継ぐ。pr 未永続化のまま続行すると重複 PR を作成するため成功を検証し、失敗時は 1 回リトライ、それでも失敗なら終端で停止する。
     {
       // pushChecksStarted / pushMergeable は Issue #479 の観測記録（診断用。再開時の判定には使わない — 再開後は monitor がサーバー側の実値を再観測する）。
@@ -7455,7 +7455,7 @@ async function runImplement(item) {
         })
         logItem(item, `最終 Review の Low 指摘を PR #${impl.prNumber} にコメント追加した`)
       } catch (e) {
-        warnItem(item, `最終 Review の Low 指摘コメント投稿に失敗した（非致命、マージ監視は継続する）: ${sanitize(e?.message ?? String(e))}`)
+        warnItem(item, `最終 Review の Low 指摘コメント投稿に失敗した（非致命）: ${sanitize(e?.message ?? String(e))}`)
       }
     }
     return await runMergeLoop(item, impl, fixCount, currentWorktreePath, [], '', [], [], 0, prCreatePushMergeable)
@@ -7560,7 +7560,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     const terminalWriteOk = await updateState(item.number, { status: terminalStatus, pr: impl.prNumber, fixCount, baseMergeCount, note: reason, outOfScopeLog, outOfScopeSeen: [...seenOutOfScopeThreadIds].slice(0, OUT_OF_SCOPE_SEEN_MAX), lastUnresolvedInfo, lastUnresolvedComments, optinFixState: lastFixOptin ? { attempted: true, runs: lastFixOptin.runs, headSha: lastFixOptin.headSha, unbound: lastFixOptin.unbound === true } : undefined })
     // この choke point は元々戻り値を確認していなかった（挙動は変えない: リトライや追加の fail-closed 分岐は入れない）。書込み失敗自体は稀だが、気づかず放置されると次回実行が古い状態から再開して混乱を招くため、少なくともログで可視化する（PR #503 3 巡目後のセキュリティ監査 Low 指摘）。
     if (!terminalWriteOk) {
-      warnItem(item, `終端状態（${terminalStatus}）の状態ファイル永続化に失敗した。次回実行時に古い状態から再開する可能性がある`)
+      warnItem(item, `終端状態（${terminalStatus}）の状態ファイル永続化に失敗した（次回は古い状態から再開し得る）`)
     }
     // recordFailure へ構造化データを渡す（レポート生成側が該当節を組み立てる。非空のみ付与）。 status も状態ファイルと同じ値を渡して一致させる（'blocked' は halt 非カウント）。
     recordFailure({
@@ -7594,7 +7594,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     const seededMonitorResult = seededConflictRound
       ? { state: 'conflicting', summary: 'push 直後の CI 起動確認が mergeable: CONFLICTING を報告した（Issue #479。コンフリクト PR は pull_request トリガの check-run が起動しないため、監視ラウンドを消費せず base 取り込みへ直行する）' }
       : null
-    if (seededConflictRound) logItem(item, `push 直後の CI 起動確認が CONFLICTING を報告、監視ラウンドを消費せず base 取り込みへ直行する`)
+    if (seededConflictRound) logItem(item, `push 直後の CI 起動確認が CONFLICTING を報告、base 取り込みへ直行する`)
     let m = null
     if (seededConflictRound) {
       m = seededMonitorResult
@@ -7612,7 +7612,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       const checksApplied = applyChecksObservation(m, [observeNonces[monitorAttempt.n === 2 ? 1 : 0], `${observeNonces[monitorAttempt.n === 2 ? 1 : 0]}w`], sha256Hex(observeInputText({ mode: 'checks', pr: impl.prNumber })))
       m = checksApplied.result
       if (checksApplied.reason && checksApplied.claimed !== undefined) {
-        warnItem(item, `監視エージェントの checksTotal（${String(checksApplied.claimed).slice(0, 12)}）を採用しない（checksObservation: ${checksApplied.reason}）。取得失敗と同じ扱いで checksTotal を省略する`)
+        warnItem(item, `監視エージェントの checksTotal（${String(checksApplied.claimed).slice(0, 12)}）を採用しない（checksObservation: ${checksApplied.reason}）。checksTotal を省略する`)
       }
     }
     if (m != null && !seededConflictRound) unmonitoredPrs.delete(item.number)
@@ -7622,7 +7622,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // Issue #479: チェックが 1 件も無いまま返された timeout は受理しない。ここでの「チェック」は check-run + commit status の合計（gh pr checks / merge-exec と同じ集計定義。Issue #480）であり、monitor は取得失敗時に checksTotal を省略する契約のため、この分岐へ来るのは「実測で 0 件と確定した」場合だけである。総数 0 件は「コンフリクトで pull_request CI が構造的に起動しない」典型であり、timeout として次
     // ラウンドへ回すと監視枠（7 ラウンド・最長およそ 40 分/ラウンド）を空費した末に failed 終端する。conflicting へ再判定し base 取り込みで解消を試みる（baseMergeCount で有界・ expectedRepo 未確定ガードあり。上限到達時は既存の conflicting 分岐が quality + blocked で終端するためループは延びない）。checksTotal 省略（旧エージェント出力）は従来どおり timeout のまま扱う。
     if (lastState === 'timeout' && m?.checksTotal === 0) {
-      logItem(item, `監視エージェントが check-run 0 件のまま timeout を返した。再監視せず conflicting（base 取り込み）へ再判定する`)
+      logItem(item, `監視エージェントが check-run 0 件のまま timeout を返した。conflicting（base 取り込み）へ再判定する`)
       lastState = 'conflicting'
     }
     // resolve (b) ホスト観測（Issue #430。fix 申告 sha 不使用）。seed ラウンド（Issue #479）は実観測が無いため観測も lastRoundPushed の消費も行わない（直前の fix が積んだクレジットを合成ラウンドで捨てると、次の実 monitor ラウンドで resolve (b) が成立しなくなる）。
@@ -7633,7 +7633,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     }
     // 'merged' は監視エージェントが返してはならない非推奨値。'ready' と読み替える（実マージは merge-exec の独立検証を必ず経るため未検証マージは成立しない）。
     if (lastState === 'merged') {
-      logItem(item, `監視エージェントが非推奨の state: merged を返した。ready として扱いマージ実行エージェントで再検証する`)
+      logItem(item, `監視エージェントが非推奨の state: merged を返した。ready として再検証する`)
       lastState = 'ready'
     }
     // 強制再走査フラグは monitor が手順 5 の走査を実行したラウンド（unresolved-comments / ready）で解除する。needs-fix / timeout / blocked では持ち越す（走査未実施の可能性が残るため）。
@@ -7699,9 +7699,9 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       const peers = addedFilesPeers(item.number, impl.prNumber, knownPrByIssue, Object.entries(savedItems))
       const collision = await observeAddedFileCollisions(item, impl.prNumber, peers)
       if (collision.kind === 'skip') {
-        warnItem(item, `新規追加ファイルの衝突を確かめられなかった（${collision.reason}）。この判定を飛ばして続行する`)
+        warnItem(item, `新規追加ファイルの衝突を確かめられなかった（${collision.reason}）。判定を飛ばして続行する`)
       } else if (collision.truncated > 0) {
-        warnItem(item, `ファイルが 100 件を超える PR が ${collision.truncated} 本あり、新規追加ファイルの衝突は先頭 100 件だけで確かめた`)
+        warnItem(item, `ファイル 100 件超の PR が ${collision.truncated} 本あり、追加ファイルの衝突は先頭 100 件だけで確かめた`)
       }
       if (collision.kind === 'path') {
         const reason = addedFilePathBlockedReason(impl.prNumber, collision)
@@ -7729,7 +7729,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         ...(externalChecksConfirmed && !externalChecksContextsConfirmed ? ['外部チェック App の信頼済み check context が未宣言（slug のみの旧形式）'] : []),
         ...(!autoMergeEnabled ? ['自動マージが無効（args.autoMerge が true でない。Issue #165）'] : []),
       ].join('・')
-      logItem(item, `${recoveryOnlyCauses}のため新規マージは行わない。PR がマージ済み（サーバー側 auto-merge によるマージ完了を含む）の場合のクローズ回復のみ試行する`)
+      logItem(item, `${recoveryOnlyCauses}のため新規マージは行わない。PR がマージ済みの場合のクローズ回復のみ試行する`)
       // opt-in テスト記録ゲート（Issue #495）は新規マージ経路（allowMerge）にのみ適用され、回復専用経路では検証エージェントを起動しない。宣言がある場合は人間がマージ前に PR 本文の実行記録を確認する必要がある旨をここで注意喚起する（新規マージが起きない経路のため自動判定は行わない）。
       if (hasOptin(item)) {
         logItem(item, `本イシューは opt-in テスト（${item.optinTests.map(sanitize).join(' / ')}）を宣言している。${HUMAN_CHECK_OPTIN}`)
@@ -7761,7 +7761,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
         }
         prAlreadyMerged = mergedProbe?.state === 'MERGED'
         if (prAlreadyMerged) {
-          logItem(item, `新規マージ経路だが独立確認で PR が既に MERGED と判定した（人間による手動マージ等）。opt-in ゲートを起動せず already-merged 回復経路へ合流する`)
+          logItem(item, `新規マージ経路だが PR が既に MERGED（手動マージ等）。opt-in ゲートを起動せず already-merged 回復経路へ合流する`)
         }
       }
       // allowMerge はホスト導出の boolean のみ（monitor の headSha はマージ経路に渡さず、 merge-exec の自己取得値を merge-verify の独立観測と突き合わせる）。回復専用経路（recoveryOnly）、または新規マージ経路でも PR が既に MERGED と独立確認できた場合（prAlreadyMerged。Issue #509）は、いずれも手順 5 の文面自体をホスト側で分岐しマージコマンドを含めない。
@@ -7808,7 +7808,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       }
       if (lastState === 'ready') {
         if (!allowMerge) {
-          warnItem(item, `新規マージは行わずマージ済み確認のみ実行する（${prAlreadyMerged ? 'PR が既に MERGED と独立確認されたため（Issue #509）' : '回復専用経路。opt-out または外部チェック未確定'}）`)
+          warnItem(item, `新規マージは行わずマージ済み確認のみ実行する（${prAlreadyMerged ? 'PR が既に MERGED と独立確認されたため' : '回復専用経路。opt-out または外部チェック未確定'}）`)
         }
         // 回復専用経路は「MERGED ならクローズ確認のみ」。opt-in 経路は G0 と全条件の独立再検証後に squash merge を実行する。例外は x = null として null 返却と同じ経路へ合流させる（Issue #465。捕捉せず抜けると catch-all まで飛び追跡情報を failMergeTerminal を経由せず失う）。
         let x = null
@@ -7882,7 +7882,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             if (x?.issueClosed !== true) {
               mergedButIssueOpen = true
               lastState = 'timeout'
-              warnItem(item, `PR はマージ済みだがイシューのクローズを確認できなかった。クローズ確認を再試行する`)
+              warnItem(item, `PR はマージ済みだがイシューのクローズを確認できなかった。再試行する`)
               continue
             }
             mergedButIssueOpen = false
@@ -7933,7 +7933,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             forceThreadRescanBudgetUsed = rescan.rescueUsed
             // 延長した回だけ pending を立てる。残枠があった回は後続ラウンドが続くため、その回の timeout を品質ブロックへ写像すると実際の失敗を隠すことになる。
             if (rescan.granted) rescueRoundPending = true
-            logItem(item, `マージ実行エージェントが未解決スレッドを検出したが内容が未取得のため、fix を起動せず次ラウンドの監視でスレッド再走査を強制する${rescan.granted ? '（監視枠が尽きていたため再走査用に 1 回だけ延長した）' : ''}`)
+            logItem(item, `マージ実行エージェントが未解決スレッドを検出したが内容が未取得のため、次ラウンドの監視で再走査する${rescan.granted ? '（監視枠を 1 回延長した）' : ''}`)
             continue
           }
           logItem(item, `マージ実行エージェントが未解決スレッドを検出したため fix ループへ回す`)
@@ -8205,7 +8205,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       const fixChecksStarted = f.checksStarted === true
       const fixPushMergeable = normalizePushMergeable(f.mergeableAfterPush)
       pendingPushConflict = f.pushed === true && fixPushMergeable === 'CONFLICTING'
-      logItem(item, `fix の push 直後 CI 起動確認（自己申告・マージ判定には未使用） pushed=${f.pushed === true} checksStarted=${fixChecksStarted} mergeableAfterPush=${fixPushMergeable}`)
+      logItem(item, `fix の push 直後 CI 起動確認（自己申告） pushed=${f.pushed === true} checksStarted=${fixChecksStarted} mergeableAfterPush=${fixPushMergeable}`)
       // opt-in テスト記録ゲート（Issue #495 Medium 2 → PR #503 2/3 巡目 codex P0）: post-push fix が再実行した結果（+ その対象 HEAD の sha）を lastFixOptin へ保持し、マージ前ゲート（combineOptinRecordGate）の独立判定材料にする。PR 本文更新（optinRecordUpdateInstructions）が失敗・省略された場合でも、ここで保持した実測結果が PR 本文の古い pass マーカーより優先されるため fail-open にならない（3 巡目でマーカー
       // 自体に sha を束縛したため主防御は PR 本文側に移ったが、これは多層防御として残す）。 f.pushed === true（積んだコミットが実際にリモート HEAD へ反映済みと確認できた場合のみ。手順 4 の 2 条件判定と同じ根拠。optinRecordUpdateInstructions 手順 a の SHA 取得も同じ条件でのみ実行される契約のため f.optinHeadSha もこの場合のみ意味を持つ）の場合のみ更新する。pushed: false のラウンド（変更なし・resolve のみ等）はテスト対象のコード状態
       // がリモート HEAD に反映されていないため、直前の pushed: true ラウンドの記録を保持し続ける（上書きしない）。
@@ -8230,11 +8230,11 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             }))
             lastFixOptin = { runs: unboundRuns, headSha: '', unbound: true }
             optinFixStatePatch = { attempted: true, runs: unboundRuns, headSha: '', unbound: true }
-            warnItem(item, `post-push fix が optinHeadSha を報告しなかった（または 40 桁 sha 形式でない）。次回のマージ前ゲートは現在の HEAD に関わらず不合格として扱う（fail-closed）`)
+            warnItem(item, `post-push fix が optinHeadSha（40 桁 sha）を報告しなかった。次回のマージ前ゲートは不合格とする（fail-closed）`)
           }
         }
         if (fixOptinRuns.some((r) => r.result !== 'pass')) {
-          warnItem(item, `post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。現在の HEAD に対する PR 本文マーカーが pass で更新されていなければマージ前ゲートで不合格として扱う`)
+          warnItem(item, `post-push fix の opt-in テスト再実行に pass 以外の結果あり（${fixOptinRuns.filter((r) => r.result !== 'pass').map((r) => `${r.command}: ${r.result}`).join(' / ')}）。PR 本文マーカーが現 HEAD の pass でなければマージ前ゲートで不合格`)
         }
       }
       // f.resolvedThreadIds（fix 自己申告）は形式検証してログ専用（マージ判定には渡さない。実効性は次周回 monitor が独立確認する）。
@@ -8294,7 +8294,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
           }
           const entry = newOutOfScopeEntries[i]
           outOfScopeLog.push(entry)
-          logItem(item, `fix エージェントが対象外と判断したコメント（${entry}。resolve は行わず記録のみ。最終レポートで issue 化・手動 resolve を判断する）`)
+          logItem(item, `fix エージェントが対象外と判断したコメント（${entry}。resolve せず記録のみ）`)
         }
       }
       // 旧パスは stale になるため有効・無効を問わず必ず新値で上書きする
@@ -8323,7 +8323,7 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
       noPushRounds = advanceNoPushRounds(noPushRounds, f.pushed === true, newlyResolvedThisRound)
       if (!f.pushed) {
         if (newlyResolvedThisRound > 0) {
-          log(`PR #${impl.prNumber} の修正エージェントは push 不要だが新規スレッド resolve（${newlyResolvedThisRound} 件）を報告、進捗ありとしてマージ条件を再判定する`)
+          log(`PR #${impl.prNumber} の修正エージェントは push 不要だが新規スレッド resolve（${newlyResolvedThisRound} 件）を報告、マージ条件を再判定する`)
         } else if (noPushRounds >= 2) {
           // 「修正済みで push 不要」の場合があるため 1 回は再監視し、resolve も push も無いラウンドが 2 回連続なら進展がないため blocked とする。
           lastState = 'blocked'
@@ -8359,10 +8359,10 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // mergedButIssueOpen の timeout 経路は救済の観測失敗と別物のため、ガードして品質ブロックフラグを立てない（分類は元から blocked）。
     if (reconciled.terminate && !mergedButIssueOpen) {
       rescueTimeoutQualityBlock = reconciled.qualityBlock
-      logItem(item, `救済ラウンドがスレッド内容を観測できないまま timeout したため、未解決スレッド由来の品質ブロックとして終端させる（次回実行で monitoring 再開の対象）`)
+      logItem(item, `救済ラウンドがスレッド内容を観測できないまま timeout した。品質ブロックとして終端する（次回 monitoring 再開の対象）`)
     } else if (reconciled.timeoutOrigin === 'merge-exec' && !mergedButIssueOpen) {
       // #365: 救済ラウンドの再走査は成立したが merge-exec がマージを見送った。品質ブロックへ分類せず既定の 'failed'（halt カウント対象）で終端し halt 防御迂回の回帰を断つ。
-      logItem(item, `救済ラウンドの再走査は成立したが merge-exec が見送ったため（${roundTimeoutExecReason}）、品質ブロックへ分類せず failed（halt カウント対象）で終端する`)
+      logItem(item, `救済ラウンドの再走査後に merge-exec が見送った（${roundTimeoutExecReason}）。failed（halt カウント対象）で終端する`)
     }
     const terminalStatus = classifyMergeTerminalStatus({ lastState, lastBlockedReason, routingErrorDetected, mergedButIssueOpen, rescueTimeoutQualityBlock })
     if (lastState === 'blocked') {
@@ -8461,7 +8461,7 @@ for (const item of queue) {
         })
         // done ではなく failedSet に入れる: 完了が検証できない以上「前提充足」として後続を進めてはならない。failedSet 入りにより依存する後続は markBlockedByDeps で blocked になる。dispatch ループは failedSet も skip するため本人は再実行されない
         failedSet.add(item.number)
-        warnItem(item, `状態ファイルは ${saved.status} だが GitHub では open。再開情報がないため skip し、後続イシューをブロックする（手動確認が必要）`)
+        warnItem(item, `状態ファイルは ${saved.status} だが GitHub では open。再開情報がないため skip し後続をブロックする（要手動確認）`)
       }
     }
   }
@@ -8482,7 +8482,7 @@ for (const { item, cleanup, skipEntry, attempts } of orderClosedCleanupCandidate
       }
     }
   } else if (closedCleanupRun[gate] === 1) {
-    logItem(item, `closed 後始末を見送った（${gate === 'defer-cap' ? `1 ランの上限 ${CLOSED_CLEANUP_PER_RUN_MAX} 件。試行の少ない候補から回すので次の実行で順番が回る` : `エージェント呼び出し数の予算不足${queueHasOpenImplement ? '（着手し得る実装ノード 1 件分を予約済み）' : ''}。使用 ${agentBudget.used}/${agentBudget.limit}`}。以降の見送り件数は結果の closedCleanup に出す。次の実行で再試行する）`)
+    logItem(item, `closed 後始末を見送った（${gate === 'defer-cap' ? `1 ランの上限 ${CLOSED_CLEANUP_PER_RUN_MAX} 件` : `エージェント呼び出し数の予算不足${queueHasOpenImplement ? '（着手し得る実装ノード 1 件分を予約済み）' : ''}。使用 ${agentBudget.used}/${agentBudget.limit}`}。件数は closedCleanup に出す。次の実行で再試行する）`)
   }
 }
 const work = queue.filter((q) => q.state === 'open' && !done.has(q.number))
@@ -8525,7 +8525,7 @@ for (const item of queue) {
       continue
     }
     if (isAncestor(d, item.number)) {
-      log(`#${item.number} の dependsOn #${d} は祖先イシューのため無視する（親は子の完了を待つ側）`)
+      log(`#${item.number} の dependsOn #${d} は祖先イシューのため無視する`)
       continue
     }
     depsMap.get(item.number).add(d)
@@ -8544,7 +8544,7 @@ if (phaseGateEnabled) {
     phaseGateEdgeKeys.add(`${from}->${to}`)
   }
   if (order.length > 1) {
-    log(`Phase ゲート有効: ${order.map((n) => `#${n}`).join(' → ')}（sub-issues リスト順。前 Phase の全子孫が merged/closed になるまで次 Phase に着手しない）`)
+    log(`Phase ゲート有効: ${order.map((n) => `#${n}`).join(' → ')}（sub-issues リスト順）`)
   }
 }
 function findDependencyCycle() {
@@ -8803,7 +8803,7 @@ async function remeasureResidualBytesNow() {
       // 物理一覧は測定専用の差し替えで削除経路へは流さない。confirmedRemovedPaths による除外も行わない（fallback.paths は今この瞬間の確定スナップショットで、除外は過小評価の fail-open になる。Issue #404）。全パスを測定する。
       targetPaths = unionMeasurePaths(fallback.paths, targetPaths)
       log(
-        `残置 worktree バイト実測: 台帳に未検証エントリ ${unverifiedEphemeralCount} 件があるため物理一覧 ${targetPaths.length} 件へフォールバックして実測する`,
+        `残置 worktree バイト実測: 台帳に未検証エントリ ${unverifiedEphemeralCount} 件があるため物理一覧 ${targetPaths.length} 件を実測する`,
       )
     } else {
       fallbackDetail = fallback.detail
@@ -8882,7 +8882,7 @@ async function remeasureResidualBytesNow() {
     for (const resolvedPath of resolution.paths) implementPathSet.add(resolvedPath)
     if (resolution.paths.length > 0) {
       log(
-        `残置 worktree バイト実測: 未検証 implement エントリ ${resolution.paths.length} 件のパスを物理一覧から帰属解決し、1 worktree あたりの予約見積りの測定対象へ含めた`,
+        `残置 worktree バイト実測: 未検証 implement エントリ ${resolution.paths.length} 件のパスを物理一覧から解決し、予約見積りの測定対象へ含めた`,
       )
     }
     if (resolution.unresolvedIssues.length > 0) {
@@ -8900,7 +8900,7 @@ async function remeasureResidualBytesNow() {
         })
       ) {
         log(
-          `⚠️ implement worktree のパスを確定できない未検証エントリが残る（既に新規着手を停止済みのため追加の抑止はしない）`,
+          `⚠️ implement worktree のパスを確定できない未検証エントリが残る（新規着手は停止済み）`,
         )
       }
       return lastByteRemeasureOutcome
@@ -8924,7 +8924,7 @@ async function remeasureResidualBytesNow() {
         })
       ) {
         log(
-          `⚠️ implement worktree のみのディスク使用量実測に失敗した（既に新規着手を停止済みのため追加の抑止はしない）`,
+          `⚠️ implement worktree のみのディスク使用量実測に失敗した（新規着手は停止済み）`,
         )
       }
       return lastByteRemeasureOutcome
@@ -8938,12 +8938,12 @@ async function remeasureResidualBytesNow() {
       })
       if (avgActualBytes === null) {
         log(
-          `1 worktree あたりの容量予約見積りの更新を見送った（implement worktree ${implementResidualCount} 件がすべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
+          `1 worktree あたりの容量予約見積りの更新を見送った（implement worktree ${implementResidualCount} 件がすべて測定時点で存在しない。測定失敗ではない）`,
         )
       } else {
         if (avgActualBytes > rawPerWorktreeByteReserve) {
           log(
-            `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ${mib(rawPerWorktreeByteReserve)} MiB → ${mib(avgActualBytes)} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
+            `1 worktree あたりの容量予約見積りを実測で更新: ${mib(rawPerWorktreeByteReserve)} MiB → ${mib(avgActualBytes)} MiB（implement worktree ${implementResidualCount} 件のみを実測）`,
           )
           rawPerWorktreeByteReserve = avgActualBytes
         }
@@ -8961,12 +8961,12 @@ async function remeasureResidualBytesNow() {
     })
     if (avgActualBytes === null) {
       log(
-        `1 worktree あたりの容量予約見積りの更新を見送った（残置全件 ${targetPaths.length} 件がすべて測定時点で存在せず平均の分母が 0 になったため。測定失敗ではない）`,
+        `1 worktree あたりの容量予約見積りの更新を見送った（残置全件 ${targetPaths.length} 件がすべて測定時点で存在しない。測定失敗ではない）`,
       )
     } else {
       if (avgActualBytes > rawPerWorktreeByteReserve) {
         log(
-          `1 worktree あたりの容量予約見積りをラン中の実測に合わせて更新: ${mib(rawPerWorktreeByteReserve)} MiB → ${mib(avgActualBytes)} MiB（implement worktree データが無いため残置全件 ${targetPaths.length} 件の平均へフォールバック）`,
+          `1 worktree あたりの容量予約見積りを実測で更新: ${mib(rawPerWorktreeByteReserve)} MiB → ${mib(avgActualBytes)} MiB（implement が無いため残置全件 ${targetPaths.length} 件の平均へフォールバック）`,
         )
         rawPerWorktreeByteReserve = avgActualBytes
       }
@@ -9043,7 +9043,7 @@ async function probePrereqCompletion(targets) {
     })
   } catch (e) {
     log(
-      `⚠️ 前提完了プローブが一時的に失敗したため、この周回は遷移なしとして継続する（次周回で再判定する）: ${e?.message ?? e}`,
+      `⚠️ 前提完了プローブが失敗した。この周回は遷移なしで続行する: ${e?.message ?? e}`,
     )
     return 0
   }
@@ -9063,7 +9063,7 @@ async function probePrereqCompletion(targets) {
       done.delete(t.issue)
       failedSet.add(t.issue)
       log(
-        `⚠️ #${t.issue}: 前提完了遷移の状態ファイル更新に失敗したため、この周回では遷移を確定せず failedSet へロールバックした（fail-closed。次回プローブで再判定する）`,
+        `⚠️ #${t.issue}: 前提完了遷移の状態ファイル更新に失敗したため failedSet へ戻した（次回プローブで再判定する）`,
       )
       continue
     }
@@ -9095,8 +9095,8 @@ async function probePrereqCompletion(targets) {
     appliedCount += 1
     log(
       halted
-        ? `#${t.issue}: ラン中に外部完了を検知（${t.kind}）。halt 中のため下流の着手は再開せず、次回ランで反映される`
-        : `#${t.issue}: ラン中に外部完了を検知（${t.kind}）。前提充足として下流を同一ラン内で再判定する`,
+        ? `#${t.issue}: ラン中に外部完了を検知（${t.kind}）。halt 中のため下流は次回ランで反映される`
+        : `#${t.issue}: ラン中に外部完了を検知（${t.kind}）。下流を同一ラン内で再判定する`,
     )
   }
   return appliedCount
@@ -9120,8 +9120,8 @@ while (true) {
         if (!depDeferredLogged.has(n)) {
           depDeferredLogged.add(n)
           log([...ds].some((d) => outOfTreeWait.has(d))
-            ? `#${n}: ツリー外の前提が open のため保留（close 後の再実行で再評価する）`
-            : `#${n}: 前提が失敗・ブロック中のため保留（前提の外部完了を検知したら同一ラン内で再判定する）`)
+            ? `#${n}: ツリー外の前提が open のため保留`
+            : `#${n}: 前提が失敗・ブロック中のため保留`)
         }
         continue
       }
@@ -9133,7 +9133,7 @@ while (true) {
       if (budgetHold) {
         if (agentBudget.stoppedDispatchAt === null) {
           agentBudget.stoppedDispatchAt = agentBudget.used
-          log(`⚠️ エージェント呼び出し数が上限 ${agentBudget.limit} に近いため新規着手を停止する（使用 ${agentBudget.used}・残り ${budgetHold.remaining}・#${n} に必要 ${budgetHold.required}）。実行中の issue の完了を優先する`)
+          log(`⚠️ エージェント呼び出し数が上限 ${agentBudget.limit} に近いため新規着手を停止する（使用 ${agentBudget.used}・残り ${budgetHold.remaining}・#${n} に必要 ${budgetHold.required}）`)
         }
         // 保留時に観測した値（使用量・required・chunks・この周回に要った上限の目安 needed）を残す。note・終了ログ・neededLimit・返却値 agentBudget.held の唯一の根拠。
         agentBudgetHeld.set(n, { used: agentBudget.used, required: budgetHold.required, chunks: budgetHold.chunks, needed: budgetHold.needed })
@@ -9513,7 +9513,7 @@ if (blockedStateWrite.requested > 0) {
   log(`blocked の状態ファイル記録: 対象 ${blockedStateWrite.requested} 件（保存済みと同一で省略 ${blockedStateWrite.unchanged} 件・書き込み ${blockedStateWrite.written} / ${blockedStateWrite.attempted} 件・エージェント ${blockedStateWrite.chunks} 回）`)
 }
 if (blockedStateWrite.unwritten > 0) {
-  log(`⚠️ blocked の状態ファイル記録: ${blockedStateWrite.unwritten} 件を書けなかった（失敗チャンク ${blockedStateWrite.failedChunks} 回。先頭: ${formatIssueList(blockedStateWrite.unwrittenIssues)}）。返却値の done と状態ファイルの件数がずれている。エージェント数の上限（1 ラン 1,000）への到達でも起きる。同じ引数で再実行すると未記録分が書き直される`)
+  log(`⚠️ blocked の状態ファイル記録: ${blockedStateWrite.unwritten} 件を書けなかった（失敗チャンク ${blockedStateWrite.failedChunks} 回。先頭: ${formatIssueList(blockedStateWrite.unwrittenIssues)}）。返却値の done と状態ファイルの件数がずれる。エージェント数の上限（1 ラン 1,000）でも起きる。同じ引数で再実行すると書き直される`)
 }
 
 // 待機中の issue の通知（args.notifyBlocked。Issue #720）。待ちがあるときだけルート issue へ 1 回コメントする（dryRun は上で返却済みのため投稿しない）。コメントは非致命。メインセッションの通知は返却値の blockedWaiting を SKILL.md Step 8 が読んで行う（Workflow からは通知できない）。再実行のたびにコメントは増える（opt-in のため許容）。
@@ -9537,7 +9537,7 @@ const unmonitoredPrList = [...unmonitoredPrs].map(([issue, e]) => ({ issue, pr: 
 // resumable は照合と pr の保存（updateState の成否確認）が済んだ PR だけ true。それ以外は状態ファイルに pr が無い（または照合未了）ため、再実行しても monitor からの再開の条件を満たさない。
 const unmonitoredFmt = (resumable) => unmonitoredPrList.filter((e) => e.resumable === resumable).map((e) => `#${e.issue}→PR #${e.pr}`).join(', ')
 if (unmonitoredFmt(true)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr 保存済み）: ${unmonitoredFmt(true)}。再実行すると monitor からの再開を試みる（状態ファイルに再開情報がある）`)
-if (unmonitoredFmt(false)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr が無い／照合未了）: ${unmonitoredFmt(false)}。再実行では monitor から再開しない。GitHub 上で PR を手動確認すること（状態ファイルの unverifiedPr があれば再実行で再照合される）`)
+if (unmonitoredFmt(false)) log(`⚠️ PR 作成済みで未監視（状態ファイルに pr が無い／照合未了）: ${unmonitoredFmt(false)}。再実行では monitor から再開しない。GitHub 上で PR を手動確認すること`)
 log(`エージェント呼び出し数: ${agentBudget.used}/${agentBudget.limit}（新規着手停止時点 ${agentBudget.stoppedDispatchAt ?? 'なし'}）`)
 if (agentBudget.starved) log(`⚠️ 予算不足で 1 件も着手していない。${budgetHeldText(neededRow, agentBudget.limit, agentBudget.starts)}`)
 
@@ -9566,7 +9566,7 @@ if (orphanEntriesAtEnd.length > 0) {
   if (!freshVerified) log('⚠️ 内容照合未成立のため終了時の孤立 worktree 記録・削除を見送る')
   // メイン worktree を特定できないスキャンでは孤立の記録・削除候補生成を全体として見送る（fail-closed。開始時スキャンの同種ガードと対。PR #390 codex-review P1）
   if (!mainWorktreePathAtEnd) {
-    log('⚠️ メイン worktree を特定できなかったため、終了時の孤立 worktree 記録・削除候補生成をこのランでは見送る（fail-closed）')
+    log('⚠️ メイン worktree を特定できないため終了時の孤立 worktree 記録・削除を見送る（fail-closed）')
   }
   for (const entry of mainWorktreePathAtEnd && freshVerified ? orphanEntriesAtEnd : []) {
     if (entry?.isMain) continue
@@ -9587,7 +9587,7 @@ if (orphanEntriesAtEnd.length > 0) {
       if (savedEntryAtEnd.worktree === p) {
         orphanDeleteCandidates.push(p)
       } else {
-        log(`#${matched.number}: ブランチ名が一致する worktree を検出したが、状態ファイルに記録された worktree と一致しないため削除しない（${p}）。不要であれば手動で削除すること`)
+        log(`#${matched.number}: ブランチ名が一致するが状態ファイルの記録と異なる worktree は削除しない（${p}）`)
       }
     } else {
       // 既に追跡済みなら上書きしない（ラン開始時の同種ガードと揃える）。
@@ -9604,7 +9604,7 @@ const sweptWorktrees = await sweepClosedWorktrees(orphanDeleteCandidates)
 // --- 使い捨て worktree の一覧報告 --- 自動削除しない（Issue #142）ため、残骸の存在を利用者が把握できるよう記録簿を出力する。 implement は一覧から除く（案内に載せると failed イシューの未マージ成果を誤削除しかねない）。
 const disposableWorktrees = ephemeralWorktrees.filter((e) => e.kind !== 'implement' && e.kind !== 'replacement' && e.kind !== 'retained')
 if (disposableWorktrees.length > 0) {
-  log(`使い捨て worktree（review / pr-create / fix-routing-error）を ${disposableWorktrees.length} 件記録した。自動削除はしていないため、不要であれば git worktree remove で手動削除すること:`)
+  log(`使い捨て worktree（review / pr-create / fix-routing-error）を ${disposableWorktrees.length} 件記録した（自動削除しない。不要なら git worktree remove で削除すること）:`)
   for (const e of disposableWorktrees) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 // 掃除が削除せず保持した（またはスイープでも消せなかった）worktree。使い捨てとは別: 未コミットの変更や submodule の記録されていない変更を持つ
@@ -9614,7 +9614,7 @@ const retainedLedger = [
   ...[...slotRetainedPaths].map(([path, issue]) => ({ issue, kind: 'retained', path })),
 ]
 if (retainedLedger.length > 0) {
-  log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: 汚れ〔retained-dirty〕・git の対象が worktree 自身でない〔retained-broken〕・git status や HEAD を一過性に観測できなかった〔retained-unobservable〕・lock〔retained-locked〕・submodule の変更〔retained-submodule〕・worktree の HEAD と --branch の不一致〔retained-branch-mismatch〕・head の不一致や detached〔retained-head-mismatch / retained-detached〕・未登録の実体〔retained-unregistered〕など。スイープでも消せなかったものを含む）。中身を確認してから手動で対処すること:`)
+  log(`削除せず保持した worktree を ${retainedLedger.length} 件記録した（理由: retained-dirty・retained-broken・retained-unobservable・retained-locked・retained-submodule・retained-branch-mismatch・retained-head-mismatch・retained-detached・retained-unregistered など。スイープで消せなかったものを含む）。中身を確認してから手動で対処すること:`)
   for (const e of retainedLedger) log(`  ${e.issue ? `#${e.issue}` : '(スイープ)'} (${e.kind}): ${e.path || '（パス不明。git worktree list で確認すること）'}`)
 }
 
@@ -9640,7 +9640,7 @@ if (maxResidualWorktreeBytes > 0 && residualBytesObserved) {
     else hasUnverifiedEndPath = true
   }
   if (hasUnverifiedEndPath) {
-    log('⚠️ ラン終了時の測定対象に検証不可な worktree パスが含まれるため測定不成立として扱う（overLimit: true で報告する。fail-closed）')
+    log('⚠️ ラン終了時の測定対象に検証不可な worktree パスがあるため測定不成立（overLimit: true で報告する）')
   } else {
     const endTargetPaths = endFallbackPaths ?? rawEndPaths.filter((p) => !confirmedRemovedPaths.has(p))
     const endKib = endTargetPaths.length > 0 ? await measureResidualWorktreeBytes(endTargetPaths) : 0
@@ -9648,7 +9648,7 @@ if (maxResidualWorktreeBytes > 0 && residualBytesObserved) {
       residualBytesAtEnd = endKib * 1024
       residualBytesEndObserved = true
     } else {
-      log('⚠️ ラン終了時の残置 worktree ディスク使用量の実測に失敗した。容量上限の充足を確認できないため、次ラン開始時は観測失敗の fail-closed で新規着手が停止する見込み（overLimit: true として報告する）')
+      log('⚠️ ラン終了時の残置 worktree ディスク使用量の実測に失敗した（overLimit: true として報告する。次ランは fail-closed で新規着手が止まる見込み）')
     }
   }
 }
@@ -9659,15 +9659,15 @@ const residualBytesOverLimit =
 // overLimit は「次ラン開始時に新規着手が停止する見込み」の統合シグナル（件数・バイトの OR）
 const residualOverLimit = residualCountOverLimit || residualBytesOverLimit
 if (!residualObserved) {
-  log('⚠️ ラン開始時の残置 worktree 観測が成立しなかったため、残置総数の上限判定は未確定（未観測）。git worktree list で手動確認すること')
+  log('⚠️ ラン開始時の残置 worktree 観測が不成立のため残置総数の上限判定は未確定。git worktree list で確認すること')
 } else if (residualCountOverLimit) {
-  log(`⚠️ ラン終了時の残置 worktree 総数が上限を超過（${residualTotalAtEnd} 件 / 上限 ${maxResidualWorktrees} 件。開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${residualAddedThisRun} 件）。次ラン開始時に新規着手が停止する見込み。git worktree remove で手動掃除すること`)
+  log(`⚠️ ラン終了時の残置 worktree 総数が上限を超過（${residualTotalAtEnd} 件 / 上限 ${maxResidualWorktrees} 件。開始時 ${residualObservedAtStart} 件＋本ラン積み増し ${residualAddedThisRun} 件）。次ランは新規着手が止まる見込み。git worktree remove で掃除すること`)
 } else if (maxResidualWorktrees > 0 && residualTotalAtEnd >= Math.ceil(maxResidualWorktrees * 0.8)) {
-  log(`⚠️ ラン終了時の残置 worktree 総数が上限の 8 割超（${residualTotalAtEnd} 件 / 上限 ${maxResidualWorktrees} 件）。不要な worktree の手動削除を検討すること`)
+  log(`⚠️ ラン終了時の残置 worktree 総数が上限の 8 割超（${residualTotalAtEnd} 件 / 上限 ${maxResidualWorktrees} 件）。不要なら手動削除すること`)
 }
 if (residualBytesOverLimit) {
   if (residualBytesEndObserved) {
-    log(`⚠️ ラン終了時の残置 worktree ディスク使用量が容量上限を超過（実測 ${mib(residualBytesAtEnd)} MiB / 上限 ${residualMiB()} MiB）。次ラン開始時に新規着手が停止する見込み。git worktree remove で手動掃除すること`)
+    log(`⚠️ ラン終了時の残置 worktree ディスク使用量が容量上限を超過（実測 ${mib(residualBytesAtEnd)} MiB / 上限 ${residualMiB()} MiB）。次ランは新規着手が止まる見込み。git worktree remove で掃除すること`)
   }
 }
 
@@ -9675,7 +9675,7 @@ if (residualBytesOverLimit) {
 const mainUntrackedEnd = await scanMainWorktreeUntracked('end')
 const mainUntrackedDiff = diffMainWorktreeUntracked(mainUntrackedBaseline, mainUntrackedEnd, STATE_FILE)
 if (!mainUntrackedDiff.observed) {
-  log('メイン worktree の未追跡ファイル検査は未観測（開始時または終了時の観測が不成立）。git status で手動確認すること')
+  log('メイン worktree の未追跡ファイル検査は未観測。git status で手動確認すること')
 } else {
   const warning = formatMainWorktreeUntrackedWarning(mainUntrackedDiff)
   if (warning) log(warning)
