@@ -31,7 +31,7 @@ function sandbox(guardBody, { mergeRes = [] } = {}) {
 
 async function load(options) {
   let hook = null
-  await plugin.setup({ options, permission: { hook: async (name, fn) => { if (name === 'evaluate') hook = fn } }, tool: { hook: async () => {} } })
+  await plugin.setup({ options, permission: { hook: async (name, fn) => { if (name === 'evaluate') hook = fn } }, tool: { hook: async () => {} }, shell: { hook: async () => {} } })
   return async (event) => { const e = { action: 'shell', resources: [], ...event }; await hook(e); return e }
 }
 
@@ -216,6 +216,7 @@ async function loadAt(options, directory) {
     location: { directory },
     permission: { hook: async (name, fn) => { if (name === 'evaluate') hook = fn } },
     tool: { hook: async (name, fn) => { if (name === 'execute.before') before = fn } },
+    shell: { hook: async () => {} },
   })
   const ev = async (event) => { const e = { action: 'shell', resources: [], ...event }; await hook(e); return e }
   ev.before = before
@@ -333,4 +334,21 @@ test('merge-exec の対応づけ（MEDIUM-8）: mergeRes を PR 番号で具体�
   const call7 = { sessionID: 'ses_7', messageID: 'msg_7', id: 'call_7' }
   assert.equal(await throwsOf(() => p.before(toolEv(full(7), call7))), null, '自分の PR は記録だけ')
   assert.notEqual((await p.evaluate(permEv([tail(7)], { sessionID: 'ses_7', source: { type: 'tool', messageID: 'msg_7', id: 'call_7' } }))).effect, 'deny')
+})
+
+// --- serve の管理 API の認証情報を、エージェントの shell の子の env から消す ---
+test('shell.create.before: OPENCODE_PASSWORD 等を env から消し、他の変数は残す。ctx.shell.hook が無い版は目印を書かない', async () => {
+  const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
+  const hooks = {}
+  await plugin.setup({ options: s.options, permission: { hook: async () => {} }, tool: { hook: async () => {} }, shell: { hook: async (name, fn) => { hooks[name] = fn } } })
+  assert.equal(typeof hooks['create.before'], 'function')
+  const event = { command: 'x', cwd: '/', timeout: 1, shell: 'sh', env: { OPENCODE_PASSWORD: 'p', OPENCODE_SERVER_PASSWORD: 'q', PATH: '/bin', GH_TOKEN: 'keep' } }
+  await hooks['create.before'](event)
+  assert.deepEqual(event.env, { PATH: '/bin', GH_TOKEN: 'keep' }, '消すのは serve の認証に使う変数だけ')
+  await hooks['create.before']({ command: 'x' }) // env が無い形でも落ちない
+  assert.equal(existsSync(s.options.markerPath), true)
+
+  const s2 = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
+  await plugin.setup({ options: s2.options, permission: { hook: async () => {} }, tool: { hook: async () => {} } })
+  assert.equal(existsSync(s2.options.markerPath), false, 'ctx.shell.hook が無ければ認証情報を消せないので目印を書かない（アダプタが止める）')
 })

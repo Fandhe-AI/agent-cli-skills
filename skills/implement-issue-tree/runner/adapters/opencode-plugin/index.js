@@ -29,7 +29,8 @@
 //   （shell.create.before で書き換わった後の実際に走る形を見る）。shell で resource が 0 件の permission.evaluate は拒否する。
 //   順序: (1) merge 用 serve で全文が mergeRes に完全一致したら、ガードを呼ばずに対応づけの記録だけをする（下記。
 //   全文をガードに通すと merge-guard で拒否されるため）。(2) 保護パスへの書き込み（下の「保護」）は拒否。(3) 全文をガードへ。
-//   ctx.tool.hook が無い版では全文を判定できないので、目印を書かない（アダプタが prereq で止める。fail-closed）。
+//   ctx.tool.hook が無い版では全文を判定できないので、目印を書かない（アダプタが prereq で止める。fail-closed）。ctx.shell.hook が
+//   無い版も同じ（下の「serve の認証情報」）。
 //
 // merge-exec の対応づけ（mergeRes が空でない serve だけ）:
 //   OpenCode v2.2.7 の permission.evaluate に届く resource は、shell の代入（`HEAD_SHA="…";`）を落とした後半
@@ -55,6 +56,12 @@
 //   相対は ctx.location.directory を起点に解決する。shell はコマンド文字列に保護パスが現れ、かつ読み取りだけの形
 //   （READ_ONLY_COMMANDS の語だけで、出力のリダイレクトが無い）でないときに拒否する。文字列照合なので、変数・間接参照・
 //   別名のパスでは抜ける（best-effort。README の既知の限界）。
+// serve の認証情報（監査・PR #851 の codex 指摘）: アダプタは serve の env に OPENCODE_PASSWORD を渡す。エージェントの shell の子が
+//   継承すると、serve の管理 API（permission を通らない POST /api/session/:id/shell・利用者設定を書き換える
+//   PATCH /api/experimental/config）を直接呼べる。そこで ctx.shell.hook('create.before') で、shell の子へ渡す env から消す
+//   （SCRUB_ENV。全 serve。v2.2.7 の実測: /shell でも同じフックが走り、`printenv OPENCODE_PASSWORD | wc -c` が 0 になる）。
+//   ctx.shell.hook が無い版では目印を書かない（アダプタが prereq で止める。fail-closed）。
+//   限界: serve プロセス自身の env は同じ OS ユーザーなら `ps eww -p <pid>` で読める（README の既知の限界）。
 // fail-closed: 設定の不備・ガードが無い・起動できない・時間切れ・異常終了・結果行なし・契約外の出力はすべて deny。
 // ガードとの契約は agent-guard.sh 冒頭が正典: stdin {"command", "subagent"}、stdout 最終行 `AGENT_GUARD_RESULT allow|deny <理由>`。
 import { spawnSync } from 'node:child_process'
@@ -73,6 +80,9 @@ const NON_SHELL_ACTIONS = new Set([
   'read', 'glob', 'grep', 'subagent', 'skill', 'question', 'webfetch', 'websearch', 'external_directory',
   'browser', 'experimental_image_generate', 'opencode_list_mcp_resources', 'opencode_read_mcp_resource',
 ])
+
+// shell の子の env から消す変数（serve の管理 API の認証に使うもの）
+const SCRUB_ENV = ['OPENCODE_PASSWORD', 'OPENCODE_SERVER_PASSWORD', 'OPENCODE_SERVER_USERNAME']
 
 const deny = (event, message) => { event.effect = 'deny'; event.message = message }
 const MSG_PROTECTED = 'iit-runner: ガード本体・plugin・設定ファイル・ランのログは編集できない'
@@ -280,6 +290,13 @@ export default {
     const env = opts ? { roots: protectedRoots(opts), baseDir: dir ? realOr(dir) : null } : null
     const binds = new Map() // merge-exec の対応づけ（冒頭の説明）。mergeRes が空の serve では何も記録しない
     const toolHook = typeof ctx.tool?.hook === 'function'
+    const shellHook = typeof ctx.shell?.hook === 'function'
+    if (opts && shellHook) {
+      await ctx.shell.hook('create.before', async (event) => {
+        const e = event?.env
+        if (e && typeof e === 'object') for (const k of SCRUB_ENV) delete e[k]
+      })
+    }
     if (opts && toolHook) {
       // 拒否と判定中の例外はどちらも throw のまま返す（呼び出しが実行されない = fail-closed）
       await ctx.tool.hook('execute.before', async (event) => beforeTool(opts, binds, env, event))
@@ -288,7 +305,7 @@ export default {
       })
     }
     // 目印は全文の判定まで登録できたときだけ書く（書かなければアダプタが prereq で止める）
-    if (opts && toolHook && opts.markerPath && opts.nonce) appendFileSync(opts.markerPath, `${JSON.stringify({ nonce: String(opts.nonce), directory: dir ?? null })}\n`)
+    if (opts && toolHook && shellHook && opts.markerPath && opts.nonce) appendFileSync(opts.markerPath, `${JSON.stringify({ nonce: String(opts.nonce), directory: dir ?? null })}\n`)
     await ctx.permission.hook('evaluate', async (event) => {
       try {
         if (!opts) return deny(event, 'iit-runner: plugin の設定が不正なため拒否した')

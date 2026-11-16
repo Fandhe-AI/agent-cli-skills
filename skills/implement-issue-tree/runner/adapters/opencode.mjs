@@ -15,7 +15,7 @@
 //     merge 用の serve だけ、その PR 番号の merge-exec の完全一致の 1 形を plugin のオプションで素通しにする（permission に後半だけが
 //     届く版では、plugin が tool.execute.before で全文の一致を確かめた呼び出しにだけ許可を対応づける）。
 //   - ガードの置き場（agent-guard.sh・ランナー専用 plugin・OpenCode の利用者設定ディレクトリ・`.opencode/(hooks|plugins?)/`・
-//     `opencode.json(c)`）への edit を permissions と policies の両方で拒否する（protectRules。guard.opencodeRules の結果に足す）。
+//     `opencode.json(c)`・スキルの置き場 cfg.skillDir）への edit を permissions と policies の両方で拒否する（protectRules。guard.opencodeRules の結果に足す）。
 //     同じパスは plugin の options.protectedPaths にも渡し、plugin が edit と shell からの書き込みを拒否する（plugin 冒頭の「保護」）。
 //   - 認証ファイル（gh の設定ディレクトリ・Codex の auth.json・OpenCode の auth.json と opencode.db）への read を
 //     permissions と policies で拒否する（credentialReadRules。監査 e670648 の LOW-9）。shell からの読み出しは agent-guard.sh の
@@ -37,7 +37,8 @@
 //
 // toolConfig のキー（既定値は runner/config/default.json の toolConfig.opencode。コード側の既定も同じ）:
 //   deleteSessions（run.mjs が cleanup.deleteSessions から渡す）・command (["opencode"]。serve を起動するコマンドの配列)・
-//   pollMs (2000)・startTimeoutMs (30000)・defaultModel（models 表の model が null の段に使う。省略で利用者の既定）・
+//   pollMs (2000)・startTimeoutMs (30000)・apiTimeoutMs（serve への各要求と本文の読み取りの期限。既定は run.mjs が渡す
+//   timeoutsSec.default と 30 秒の小さいほう。run の中の要求は run の残り時間でも打ち切る）・defaultModel（models 表の model が null の段に使う。省略で利用者の既定）・
 //   guardScript（agent-guard.sh の絶対パス。既定は lib/guard-script.mjs の探索）
 import { spawn, execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
@@ -164,6 +165,7 @@ export function createAdapter(cfg) {
   const command = Array.isArray(tc.command) ? tc.command : [tc.command ?? 'opencode']
   const pollMs = tc.pollMs ?? 2000
   const startTimeoutMs = tc.startTimeoutMs ?? 30000
+  const apiTimeoutMs = Number.isFinite(tc.apiTimeoutMs) && tc.apiTimeoutMs > 0 ? tc.apiTimeoutMs : Math.min(30000, Number.isFinite(tc.timeoutsSec?.default) && tc.timeoutsSec.default > 0 ? tc.timeoutsSec.default * 1000 : 30000)
   const deleteSessions = tc.deleteSessions === true
   const baseEnv = cfg.env ?? process.env
   let guardScript = null
@@ -187,7 +189,10 @@ export function createAdapter(cfg) {
     ensureGuardScript()
     const allowMerge = merge !== null
     const configDirs = opencodeConfigDirs(baseEnv)
-    const rules = mergeRules(cfg.guard.opencodeRules({ allowMerge }), protectRules({ files: [guardScript], dirs: [PLUGIN_DIR, ...configDirs] }), credentialReadRules(baseEnv))
+    // スキルの置き場も保護する（実行仕様の launcher `scripts/run-verified.sh` を、エージェントが edit で書き換えて
+    // ホストの直接実行を乗っ取るのを防ぐ多層防御。主の対策は agent-host 側の launcher の sha256 固定）。shell からの書き込みは best-effort
+    const skillDirs = typeof cfg.skillDir === 'string' && cfg.skillDir !== '' ? [resolve(cfg.skillDir)] : []
+    const rules = mergeRules(cfg.guard.opencodeRules({ allowMerge }), protectRules({ files: [guardScript], dirs: [PLUGIN_DIR, ...configDirs, ...skillDirs] }), credentialReadRules(baseEnv))
     const port = await freePort()
     const password = randomBytes(16).toString('hex')
     mkdirSync(cfg.runDir, { recursive: true })
@@ -196,7 +201,7 @@ export function createAdapter(cfg) {
     const nonce = randomBytes(16).toString('hex')
     const markerPath = join(cfg.runDir, `opencode-plugin-${kind}.marker`)
     const callLog = join(cfg.runDir, `opencode-calls-${kind}.log`)
-    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? [mergeExecCommandFor(merge.prNumber).source] : [], markerPath, nonce, protectedPaths: configDirs.map((d) => resolve(d)), callLog }
+    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? [mergeExecCommandFor(merge.prNumber).source] : [], markerPath, nonce, protectedPaths: [...configDirs.map((d) => resolve(d)), ...skillDirs], callLog }
     const env = { ...baseEnv, ...(allowMerge ? { GH_REPO: merge.repo } : {}), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildConfigContent({ rules, pluginDir: PLUGIN_DIR, options })) }
     const child = spawn(command[0], [...command.slice(1), 'serve', '--hostname', '127.0.0.1', '--port', String(port)], { cwd: cfg.mainRoot, env, stdio: ['ignore', outFd, errFd], detached: true })
     // 起動待ちの await より前に登録する（起動待ちの間にシグナルで終わっても killSync で止められるように）
@@ -207,14 +212,21 @@ export function createAdapter(cfg) {
     serve.auth = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`
     child.on('error', (e) => { serve.spawnError = e })
     child.on('exit', (code, signal) => { serve.exited = true; serve.exitInfo = `code=${code} signal=${signal}`; children.delete(child) })
-    serve.api = async (path, init = {}) => {
+    // 各要求と本文の読み取りに期限を付ける（deadline があればその残り時間でも打ち切る）。serve が応答しないと、呼び出し側が
+    // run の deadline 判定へ戻れないため。期限切れは timedOut = true の AdapterError で、呼び出し側が止まったかを確かめる
+    serve.api = async (path, { deadline, ...init } = {}) => {
+      const limit = deadline === undefined ? apiTimeoutMs : Math.max(1, Math.min(apiTimeoutMs, deadline - Date.now()))
+      const signal = AbortSignal.timeout(limit)
       let r
+      let text
       try {
-        r = await fetch(serve.base + path, { ...init, headers: { authorization: serve.auth, 'content-type': 'application/json', ...(init.headers ?? {}) } })
+        r = await fetch(serve.base + path, { ...init, signal, headers: { authorization: serve.auth, 'content-type': 'application/json', ...(init.headers ?? {}) } })
+        text = await r.text()
       } catch (e) {
-        throw new AdapterError(serve.exited ? 'exit' : 'api', `serve への接続に失敗: ${path} ${e.message}${serve.exited ? `（serve が終了: ${serve.exitInfo}）` : ''}`)
+        const err = new AdapterError(serve.exited ? 'exit' : 'api', `serve への接続に失敗: ${path} ${signal.aborted ? `期限切れ（${limit} ms）` : e.message}${serve.exited ? `（serve が終了: ${serve.exitInfo}）` : ''}`)
+        if (signal.aborted) err.timedOut = true
+        throw err
       }
-      const text = await r.text()
       let json = null
       try { json = JSON.parse(text) } catch { /* 本文が JSON でない応答は json=null */ }
       return { status: r.status, json, text }
@@ -224,7 +236,7 @@ export function createAdapter(cfg) {
     let up = false
     while (Date.now() < deadline && !serve.exited && !serve.spawnError) {
       try {
-        const r = await fetch(`${serve.base}/api/info`, { headers: { authorization: serve.auth } })
+        const r = await fetch(`${serve.base}/api/info`, { headers: { authorization: serve.auth }, signal: AbortSignal.timeout(2000) })
         if (r.status === 200) { up = true; break }
       } catch { /* まだ待ち受けていない */ }
       await sleep(100)
@@ -332,33 +344,54 @@ export function createAdapter(cfg) {
     while (!serve.exited && Date.now() < end) await sleep(50)
   }
 
-  function getServe(merge = null) {
+  async function getServe(merge = null) {
     const kind = merge ? `merge-${merge.prNumber}` : 'normal'
-    if (!serves.has(kind)) {
-      const p = startServe(kind, merge)
-      serves.set(kind, p)
-      p.catch(() => serves.delete(kind)) // 失敗は次の呼び出しで作り直せる
+    const cur = serves.get(kind)
+    if (cur) {
+      const s = await cur // 起動の失敗はそのまま呼び出し側へ返る（下の catch で次の呼び出しは作り直す）
+      if (!s.exited) return s
+      if (serves.get(kind) === cur) serves.delete(kind) // 終了した（止めた・落ちた）serve は作り直す
     }
-    return serves.get(kind)
+    const p = startServe(kind, merge)
+    serves.set(kind, p)
+    p.catch(() => { if (serves.get(kind) === p) serves.delete(kind) }) // 失敗は次の呼び出しで作り直せる
+    return p
   }
 
-  async function interrupt(serve, sid) {
-    try { await serve.api(`/api/session/${sid}/interrupt`, { method: 'POST' }) } catch { /* 止める努力のみ */ }
+  /** セッションを interrupt する。止まったと確認できた（2xx）ときだけ true。 */
+  async function interrupt(serve, sid, deadline) {
+    try {
+      const r = await serve.api(`/api/session/${sid}/interrupt`, { method: 'POST', deadline })
+      return r.status >= 200 && r.status < 300
+    } catch { return false }
   }
 
-  async function pollState(serve, sid) {
+  /** serve をプロセスグループごと終了させる（SIGTERM → 待つ → SIGKILL）。 */
+  async function killServe(serve) {
+    stopServe(serve)
+    await waitExit(serve, 1500)
+    if (!serve.exited) { try { process.kill(-serve.child.pid, 'SIGKILL') } catch { try { serve.child.kill('SIGKILL') } catch { /* 既に無い */ } } }
+    await waitExit(serve, 1000)
+  }
+
+  /** セッションを止める。止まったと確認できなければ serve を終了させる（元のセッションが動き続けないように）。 */
+  async function haltSession(serve, sid) {
+    if (!(await interrupt(serve, sid))) await killServe(serve)
+  }
+
+  async function pollState(serve, sid, deadline) {
     const [a, m] = await Promise.all([
-      serve.api('/api/session/active').catch(() => null),
-      serve.api(`/api/session/${sid}/message?order=desc&limit=1`).catch(() => null),
+      serve.api('/api/session/active', { deadline }).catch(() => null),
+      serve.api(`/api/session/${sid}/message?order=desc&limit=1`, { deadline }).catch(() => null),
     ])
     const active = !!(a?.json?.data && typeof a.json.data === 'object' && sid in a.json.data)
     const tail = m?.json?.data?.[0] ?? null
     return { active, tailId: tail?.id ?? null, tailType: tail?.type ?? null, outcome: tail?.outcome ?? null }
   }
 
-  async function pendingAsk(serve, sid) {
+  async function pendingAsk(serve, sid, deadline) {
     for (const kind of ['permission', 'form']) {
-      const r = await serve.api(`/api/session/${sid}/${kind}`).catch(() => null)
+      const r = await serve.api(`/api/session/${sid}/${kind}`, { deadline }).catch(() => null)
       if (r?.status === 200 && Array.isArray(r.json?.data) && r.json.data.length > 0) return kind
     }
     return null
@@ -366,7 +399,7 @@ export function createAdapter(cfg) {
 
   /** prompt を送って完了を待つ。戻り値は終了の種類。 */
   async function runTurn(serve, sid, text, deadline, log) {
-    const before = await pollState(serve, sid)
+    const before = await pollState(serve, sid, deadline)
     let terminal = null
     let wake
     const woke = new Promise((r) => { wake = r })
@@ -381,7 +414,14 @@ export function createAdapter(cfg) {
     }
     serve.subs.add(sub)
     try {
-      const p = await serve.api(`/api/session/${sid}/prompt`, { method: 'POST', body: JSON.stringify({ text }) })
+      let p
+      try {
+        p = await serve.api(`/api/session/${sid}/prompt`, { method: 'POST', body: JSON.stringify({ text }), deadline })
+      } catch (e) {
+        // 要求が届いたか分からない。セッションが動き続けないよう止め、止まったと確認できなければ serve を終了させる
+        if (e?.timedOut) await haltSession(serve, sid)
+        throw new AdapterError(e?.timedOut && Date.now() >= deadline ? 'timeout' : (e.kind ?? 'api'), e.message, { sessionRef: sid }) // run の時間を使い切った期限切れは timeout
+      }
       if (p.status !== 200) throw new AdapterError('api', `prompt が HTTP ${p.status}`, { sessionRef: sid })
       let idleStreak = 0
       while (!terminal) {
@@ -390,9 +430,9 @@ export function createAdapter(cfg) {
         await Promise.race([woke, sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())))])
         if (terminal) break
         // 取りこぼしの突き合わせ（SSE は再生されない）
-        const ask = await pendingAsk(serve, sid)
+        const ask = await pendingAsk(serve, sid, deadline)
         if (ask) { terminal = { kind: 'ask', via: 'poll', what: ask }; break }
-        const st = await pollState(serve, sid)
+        const st = await pollState(serve, sid, deadline)
         if (!st.active && st.tailType === 'idle' && st.tailId !== before.tailId) {
           idleStreak++
           if (idleStreak >= 2) terminal = { kind: st.outcome === 'succeeded' ? 'succeeded' : st.outcome === 'interrupted' ? 'interrupted' : 'failed', via: 'poll', message: '' }
@@ -475,11 +515,11 @@ export function createAdapter(cfg) {
         throw e
       }
       if (t.kind === 'timeout') {
-        await interrupt(serve, sid)
+        await haltSession(serve, sid)
         throw fail('timeout', `時間切れ（${req.timeoutMs} ms）。セッションを interrupt した`)
       }
       if (t.kind === 'ask') {
-        await interrupt(serve, sid)
+        await haltSession(serve, sid)
         throw fail('denied', `許可要求（${t.what}）が出たため interrupt した。ask は許可しない`)
       }
       if (t.kind === 'interrupted') throw fail('api', 'セッションが外部から interrupt された')
@@ -504,9 +544,10 @@ export function createAdapter(cfg) {
       if (deleteSessions) {
         // 自分が作ったセッションだけを消す（子 → 親の順）。他のセッションは一覧もしない。
         const ids = [...sessions.keys()].reverse()
+        const unresponsive = new Set() // 期限切れになった serve への削除は続けない（serve はこの後止める）
         for (const sid of ids) {
           const s = sessions.get(sid)
-          if (s && !s.exited) await s.api(`/api/session/${sid}`, { method: 'DELETE' }).catch(() => null)
+          if (s && !s.exited && !unresponsive.has(s)) await s.api(`/api/session/${sid}`, { method: 'DELETE' }).catch((e) => { if (e?.timedOut) unresponsive.add(s); return null })
         }
       }
       for (const s of live) stopServe(s)
