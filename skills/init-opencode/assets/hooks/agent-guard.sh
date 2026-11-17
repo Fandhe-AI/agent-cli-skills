@@ -274,7 +274,7 @@ function env_split(v, hh) { esplit = 1; enqueue(v, hh); return split_has_h(v) }
 # 引用符つき heredoc の本文、検索パターンはコマンドとして読まない。結果は cred_hit 等のグローバルへ積み、END で集約する。
 function secret_name(w) { return (toupper(w) ~ /TOKEN|SECRET|KEY|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION|BEARER|(^|_)PAT$/) }
 function secret_ref(v) { return (secret_var(v) || index(v, "{!") > 0) }
-function secret_var(v) { return (toupper(v) ~ /TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|BEARER|COOKIE|(^|[^A-Z0-9])AUTH([^A-Z]|$)|(^|_)PAT([^A-Z0-9_]|$)/) }
+function secret_var(v) { return (toupper(v) ~ /TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|BEARER|COOKIE|(^|[^A-Z0-9])AUTH([^A-Z]|$)|(^|[^A-Z0-9])PAT([^A-Z0-9_]|$)/) }
 # パスの正規化。macOS の FS は大文字小文字を区別しないので小文字へ寄せ、// と /./ と /x/../ を畳む。
 function normpath(s,   n) {
   s = tolower(s)
