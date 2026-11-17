@@ -22,6 +22,8 @@
 #      コミット後の同じ観測で汚れが無いこと。フックの拒否・フックによる書き換え・submodule 内の未コミットの変更・入れ子の git リポジトリ・
 #      未マージのエントリ・マージ／cherry-pick／revert／rebase の途中があれば false（推測で true にしない）。コミットの終了コードが成功でも、
 #      HEAD が進んでいない・進んだが前の HEAD との差分が空（フックが commit のあとで変更を捨てた）なら empty-commit・false。拒否されたときの add は戻さない（staged は worktree-remove.sh が汚れとして保持する）
+#      add -A は作業ツリーにディレクトリの無い gitlink を削除として index から落とすので、add の前の index を木に記録し、落ちた gitlink を戻してからコミットする
+#      （戻せなければコミットせず index を add の前に戻して commit-failed。Issue #867）
 #   3. 対象ブランチが確定したら `git fetch origin refs/heads/<base>:refs/remotes/origin/<base>` で base を最新化し、
 #      `git diff --quiet --no-ext-diff --ignore-submodules=none <base>...<branch>` で差分の有無を調べる（利用者の diff.ignoreSubmodules や
 #      diff.external に左右されない。submodule ポインタだけの変更も差分に数える）（fetch に失敗したら unknown。空とは扱わない）。差分があれば先行コミット数と変更ファイル数も出す
@@ -180,6 +182,42 @@ gitlink_changes() {
 # 汚れの行数（$1）に gitlink の差（$2。-1 = 読めなかった）を足す。どちらかが -1 なら -1
 add_dirty() {
   if [ "$1" -lt 0 ] || [ "$2" -lt 0 ]; then echo -1; else echo $(($1 + $2)); fi
+}
+
+# index に gitlink（mode 160000）のエントリがあるか（$1 = worktree のパス）。読めなければ「ある」と答える（呼び出し側は gitlink を守る経路へ進む）
+gl_present() {
+  local out
+  out=$(git --no-optional-locks -c core.fsmonitor=false -C "$1" ls-files -s 2>/dev/null) || return 0
+  case $'\n'"${out}" in *$'\n'160000\ *) return 0 ;; esac
+  return 1
+}
+
+# index から消えた gitlink の件数（$1 = worktree のパス、$2 = add の前の index を write-tree した木。読めなければ -1）。木では gitlink（160000）で、
+# index に同じパスのエントリが無いもの（`:160000 000000 … D`）を数える。型の変更（gitlink → 通常ファイル。160000 → 100644）は作業ツリーの
+# 内容を add が拾ったものなので数えない。-z なしの出力はパスを引用するが、行数と先頭の mode は変わらない
+gl_lost() {
+  local raw line n=0
+  raw=$(git --no-optional-locks -c core.fsmonitor=false -C "$1" diff-index --cached --raw --no-renames --no-ext-diff --ignore-submodules=none "$2" 2>/dev/null) || { echo -1; return 0; }
+  while IFS= read -r line; do
+    case "${line}" in ':160000 000000 '*) n=$((n + 1)) ;; esac
+  done <<<"${raw}"
+  echo "${n}"
+}
+
+# add -A が index から落とした gitlink を戻す（$1 = worktree のパス、$2 = add の前の index を write-tree した木）。作業ツリーにディレクトリの無い
+# gitlink（未初期化 submodule の index だけの追加など）を add -A は削除として扱い、パスと sha を index から消す（Issue #867。戻さないと
+# 追加を失ったままコミットし、削除側は clean と見て worktree を消し得る）。木と index の比較を -z で読み（パスの空白・改行・先頭の - を
+# そのまま扱う）、消えたものを木の sha で `update-index --add --cacheinfo` する。戻したあとの同じ比較で消えたものが 0 件なら 0、残れば 1
+gl_restore() {
+  local meta p rest osha
+  while IFS= read -r -d '' meta && IFS= read -r -d '' p; do
+    case "${meta}" in ':160000 000000 '*) ;; *) continue ;; esac
+    rest=${meta#:160000 000000 }
+    osha=${rest%% *}
+    case "${osha}" in '' | *[!0-9a-f]*) continue ;; esac
+    git -c core.fsmonitor=false -C "$1" update-index --add --cacheinfo "160000,${osha},${p}" >&2 || true
+  done < <(git --no-optional-locks -c core.fsmonitor=false -C "$1" diff-index --cached --raw -z --no-renames --no-ext-diff --ignore-submodules=none "$2" 2>/dev/null)
+  [ "$(gl_lost "$1" "$2")" = 0 ]
 }
 
 # マージ・cherry-pick・revert・rebase の途中か（未解決の途中状態。add -A は確定させてしまうので触らない）。ref とディレクトリの両方で見る
@@ -488,7 +526,27 @@ if [ "${wtstate}" = live ]; then
       old_head=$(git --no-optional-locks -c core.fsmonitor=false -C "${path}" rev-parse -q --verify HEAD 2>/dev/null) || old_head=""
       # 件名の type は commit-msg フックの type 検証（feat|fix|…|chore）を通すため chore にする（wip は拒否される・Issue #718）
       # stdin を閉じる（stdin 待ちのフックがハングしない）。フックの出力は標準エラーへ（標準出力の最後の 1 行を結果に保つ）
-      git -C "${path}" add -A >&2 && git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?
+      # index に gitlink があれば add の前の index を木に記録し、add -A が落とした gitlink（ディレクトリの無い追加など）を戻してからコミットする（Issue #867）。
+      # 記録できない・戻せない（同じ場所に通常ファイルがありファイルとディレクトリが衝突する等）ときはコミットせず、index を add の前に戻して
+      # commit-failed にする（gitlink は index に残り、汚れとして数え続けられる）
+      glbase=""
+      if gl_present "${path}"; then
+        glbase=$(git -c core.fsmonitor=false -C "${path}" write-tree 2>/dev/null) || glbase=""
+        [ -n "${glbase}" ] || crc=1
+      fi
+      if [ "${crc}" = 0 ]; then
+        git -C "${path}" add -A >&2 || crc=$?
+      fi
+      if [ "${crc}" = 0 ] && [ -n "${glbase}" ] && ! gl_restore "${path}" "${glbase}"; then
+        crc=1
+        git -c core.fsmonitor=false -C "${path}" read-tree "${glbase}" >&2 || echo "recover-prep: index を add の前に戻せなかった" >&2
+        echo "recover-prep: add -A が落とした gitlink を戻せない。コミットしない" >&2
+      fi
+      if [ "${crc}" = 0 ]; then
+        git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?
+      fi
+      # フックが gitlink をコミットと index の両方から落とすと、コミット後の観測は空になる。index に戻して汚れとして観測させる（退避完了と言わない）
+      if [ -n "${glbase}" ]; then gl_restore "${path}" "${glbase}" || true; fi
       # コミットの実体: 成功の終了コードでも、フックがあとで変更を捨てると HEAD が進まない・進んでも差分が空になる（汚れは無く見える）
       cstate=made
       if [ "${crc}" = 0 ]; then

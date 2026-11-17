@@ -46,6 +46,16 @@ export function registerRecoverPrepTests(bash) {
   }
   const prep = (repo, w, extra = []) => run(repo, ['--worktree', w.path, '--branch', w.branch, '--base', 'main', ...extra])
   const logSubjects = (repo, ref) => repo.git(repo.main, 'log', '--format=%s', ref).split('\n')
+  // ref の木の直下のエントリ p の `<mode> <type> <sha>`（無ければ null）。-z で読み、パスの改行・空白をそのまま比べる
+  const treeEntry = (repo, ref, p) => {
+    for (const rec of repo.git(repo.main, 'ls-tree', '-z', ref).split('\0')) {
+      const i = rec.indexOf('\t')
+      if (i >= 0 && rec.slice(i + 1) === p) return rec.slice(0, i)
+    }
+    return null
+  }
+  // 空白・先頭の - を含むパス（改行を含むパスは ls-files -s が引用して出し、初期化済みかを照合できないので、WIP を作らない側に倒れる）
+  const ODD = '-g l x'
   const hook = (repo, name, body) => {
     const dir = join(repo.main, '.git', 'hooks')
     mkdirSync(dir, { recursive: true })
@@ -350,9 +360,11 @@ export function registerRecoverPrepTests(bash) {
 
   // Issue #867: 未初期化 submodule の gitlink だけの変更（index の付け替え・削除・追加）は --ignore-submodules=all の status に出ない。汚れに数えないと
   // wip:none・wipCommitted:true（退避済み）と報告して、変更を index に残したままにしていた。index と HEAD の木の比較（中へは降りない）で数える。
-  // 付け替え・削除は WIP コミットに入る。ディレクトリの無い gitlink の追加は add -A が index から落として commit が「nothing to commit」で失敗するので、
-  // commit-failed・wipCommitted:false（退避完了とは言わない。worktree は削除側が汚れとして保持する）
-  smTest(`${tag} submodule 未初期化で gitlink だけを付け替え・削除・追加: 汚れに数え、付け替え・削除は WIP コミットに含めて退避完了、追加は退避完了と言わない`, () => {
+  // 付け替え・削除・追加は WIP コミットに入る。ディレクトリの無い gitlink の追加は add -A が削除として index から落とすので、add の前の index を
+  // 記録し、消えた gitlink を戻してからコミットする（戻さないと、追加だけなら commit-failed のまま追加を失い、通常ファイルの変更が同時にあれば
+  // その変更だけをコミットして committed・true と報告していた）。戻せないとき（同じ場所に通常ファイルがあり、ファイルとディレクトリが衝突する）は
+  // コミットせず index を add の前に戻し、commit-failed・false（gitlink は index に残り、削除側が汚れとして保持する）
+  smTest(`${tag} submodule 未初期化で gitlink だけを付け替え・削除・追加: 汚れに数え、WIP コミットに含めて退避完了。戻せない追加はコミットせず index に残す`, () => {
     // リポジトリは 1 つを共有し、形ごとに別の worktree（別のブランチ）を使う（makeRecoverRepo の生成が重いので 1 回にする）
     const repo = makeRecoverRepo({ submodule: true })
     repo.git(repo.main, 'push', '-q', 'origin', 'main')
@@ -372,6 +384,12 @@ export function registerRecoverPrepTests(bash) {
     const committed = [
       ['付け替え', (repo, w, other) => repo.git(w, 'update-index', '--cacheinfo', `160000,${other},sm`), (repo, a, other) => assert.equal(repo.git(repo.main, 'rev-parse', `${a.branch}:sm`), other, '付け替えた gitlink がコミットに入る')],
       ['削除', (repo, w) => repo.git(w, 'update-index', '--force-remove', 'sm'), (repo, a) => assert.equal(repo.git(repo.main, 'ls-tree', a.branch, 'sm'), '', 'gitlink の削除がコミットに入る')],
+      ['追加だけ', (repo, w, other) => repo.git(w, 'update-index', '--add', '--cacheinfo', `160000,${other},sm2`), (repo, a, other) => assert.equal(treeEntry(repo, a.branch, 'sm2'), `160000 commit ${other}`, '追加した gitlink がコミットに入る')],
+      // パスの空白・先頭の - を壊さない（-z で読み、引数 1 つで渡す）
+      ['追加 + 通常ファイルの変更', (repo, w, other) => { repo.git(w, 'update-index', '--add', '--cacheinfo', `160000,${other},${ODD}`); repo.write(w, 'a.txt', 'changed\n') }, (repo, a, other) => {
+        assert.equal(treeEntry(repo, a.branch, ODD), `160000 commit ${other}`, '追加した gitlink がコミットに入る')
+        assert.equal(repo.git(repo.main, 'show', `${a.branch}:a.txt`), 'changed', '通常ファイルの変更もコミットに入る')
+      }],
     ]
     for (const [name, mutate, verify] of committed) {
       const { repo, a, other, before, r } = setup(mutate)
@@ -381,9 +399,22 @@ export function registerRecoverPrepTests(bash) {
       verify(repo, a, other)
       assert.equal(repo.git(a.path, 'diff-index', '--cached', '--raw', 'HEAD'), '', `${name}: index に変更が残らない`)
     }
-    const added = setup((repo, w, other) => repo.git(w, 'update-index', '--add', '--cacheinfo', `160000,${other},sm2`))
-    assert.deepEqual([added.r.result.wip, added.r.result.wipCommitted], ['commit-failed', false], `追加: ${JSON.stringify(added.r.result)}`)
-    assert.equal(added.repo.head(added.a.path), added.before, '追加: WIP コミットを作らない')
+    // 改行を含むパスの gitlink の追加: 引用されたパスは初期化済みかを照合できないので WIP を作らず（submodule・false）、gitlink は index に残る
+    const nl = setup((repo, w, other) => repo.git(w, 'update-index', '--add', '--cacheinfo', `160000,${other},-n l\nx`))
+    assert.deepEqual([nl.r.result.wip, nl.r.result.wipCommitted], ['submodule', false], `改行を含むパス: ${JSON.stringify(nl.r.result)}`)
+    assert.equal(nl.repo.head(nl.a.path), nl.before, '改行を含むパス: WIP コミットを作らない')
+    assert.equal(nl.repo.git(nl.a.path, 'ls-files', '-s', '-z', '--', '-n l\nx'), `160000 ${nl.other} 0\t-n l\nx\0`, '改行を含むパス: gitlink は index に残る')
+    // 戻せない: gitlink d/sm3 を追加し、作業ツリーの d を通常ファイルにする（add -A は d/sm3 を落として d を足し、d/sm3 の戻しはファイルと衝突する）
+    const df = setup((repo, w, other) => { repo.git(w, 'update-index', '--add', '--cacheinfo', `160000,${other},d/sm3`); repo.write(w, 'd', 'file\n') })
+    assert.deepEqual([df.r.result.wip, df.r.result.wipCommitted], ['commit-failed', false], `戻せない追加: ${JSON.stringify(df.r.result)}`)
+    assert.equal(df.repo.head(df.a.path), df.before, '戻せない追加: WIP コミットを作らない')
+    assert.equal(df.repo.git(df.a.path, 'ls-files', '-s', '--', 'd'), `160000 ${df.other} 0\td/sm3`, '戻せない追加: gitlink は index に残り、index は add の前に戻る（ファイルの d は足さない）')
+    // フックが gitlink をコミットと index の両方から落とす: コミット後の観測は空になるが、index に戻して汚れとして残す（退避完了と言わない）。
+    // フックは共有の .git/hooks に置くので、この形を最後にする
+    hook(repo, 'pre-commit', 'git rm -q --cached sm4 >/dev/null 2>&1 || true')
+    const dropped = setup((repo, w, other) => { repo.git(w, 'update-index', '--add', '--cacheinfo', `160000,${other},sm4`); repo.write(w, 'a.txt', 'dropped\n') })
+    assert.deepEqual([dropped.r.result.wip, dropped.r.result.wipCommitted], ['residual-dirty', false], `フックが落とす: ${JSON.stringify(dropped.r.result)}`)
+    assert.equal(dropped.repo.git(dropped.a.path, 'ls-files', '-s', '--', 'sm4'), `160000 ${dropped.other} 0\tsm4`, 'フックが落とす: gitlink は index に残る')
   })
 
   // 初期化済み submodule があれば WIP コミットも作らない（add・commit が submodule の中を観測し、中の config のコマンドを実行し得る）。worktree は削除側が保持する

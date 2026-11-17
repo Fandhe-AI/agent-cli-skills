@@ -74,12 +74,14 @@ const REF_ASSIGN_ALLOWED = /^(base_ref|branch_ref)="refs\/worktree\/[a-z-]+\/(ba
 const refBinding = (line) => REF_NAME.test(line.replace(REF_READ, ''))
 const refBindingRejected = (line) => refBinding(line) && !REF_ASSIGN_ALLOWED.test(line.trim())
 
-// git add / git commit は recover-prep.sh の決まった 1 行だけが使う（旧 worktree の未コミット変更を WIP コミットとして対象ブランチへ退避する。
-// Issue #603 第 9 弾）。必ず `git -C "${path}"` で対象の worktree を明示し（メイン worktree を暗黙の対象にしない）、フックを通す（-n・--no-verify・
+// git add / git commit は recover-prep.sh の決まった 2 行（add の 1 行と commit の 1 行）だけが使う（旧 worktree の未コミット変更を WIP コミットとして
+// 対象ブランチへ退避する。Issue #603 第 9 弾）。2 行に分けるのは、add -A が落とした gitlink を戻せたかを commit の前に判定するため（Issue #867）。必ず `git -C "${path}"` で対象の worktree を明示し（メイン worktree を暗黙の対象にしない）、フックを通す（-n・--no-verify・
 // --no-verify の省略形は別のパターンが拒否する）。コミットメッセージは固定。stdin を閉じ、出力は標準エラーへ送る。ほかの形はすべて拒否する。
 // 許可形がこのファイルにしか無いことは下の専用テストで固定する。引用符付きの git / サブコマンドは許可形ではない
 const GIT_ADD_COMMIT_CALL = new RegExp(`${GIT_SUB('(?:add|commit)').source}`)
-const GIT_WIP_ALLOWED = /^\s*git -C "\$\{path\}" add -A >&2 && git -C "\$\{path\}" commit -q -m "chore\(recover\): 中断時の未コミット変更を退避" <\/dev\/null >&2 \|\| crc=\$\?\s*$/
+const WIP_ADD_LINE = 'git -C "${path}" add -A >&2 || crc=$?'
+const WIP_COMMIT_LINE = 'git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?'
+const GIT_WIP_ALLOWED = { test: (line) => line.trim() === WIP_ADD_LINE || line.trim() === WIP_COMMIT_LINE }
 
 // reply-resolve.sh（Issue #759）の 2 つの mutation 定数。返信と resolve の決め打ちの 1 行ずつだけを許可形とし、
 // 本文を引数で受ける形・別の mutation・他スクリプトへのコピーは許さない（許可形が reply-resolve.sh にしか無いことは専用テストで固定）
@@ -155,7 +157,7 @@ const PATTERNS = [
     test: (line) => GIT_SYMREF_CALL.test(line) && !GIT_SYMREF_READ.test(line),
   },
   {
-    label: 'git add / git commit は許可形（recover-prep.sh の WIP コミットの 1 行）以外を拒否',
+    label: 'git add / git commit は許可形（recover-prep.sh の WIP コミットの add と commit の 2 行）以外を拒否',
     test: (line) => GIT_ADD_COMMIT_CALL.test(line) && !GIT_WIP_ALLOWED.test(line),
   },
   {
@@ -308,7 +310,7 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
       // HEAD の付け直し（symref-update）の崩し方: 付属 worktree の中の git に --no-optional-locks -c core.fsmonitor=false が無い形
       'printf \'start\\nverify refs/heads/%s %s\\nsymref-update HEAD refs/heads/%s oid %s\\nprepare\\ncommit\\n\' "${adopt_branch}" "${adopt_head}" "${adopt_branch}" "${adopt_head}" | git -C "${path}" update-ref --no-deref --stdin >/dev/null 2>&1 || arc=$?',
     ],
-    'git add / git commit は許可形（recover-prep.sh の WIP コミットの 1 行）以外を拒否': [
+    'git add / git commit は許可形（recover-prep.sh の WIP コミットの add と commit の 2 行）以外を拒否': [
       // 対象の worktree を明示しない（メイン worktree が暗黙の対象になる）・変数以外のパス・メッセージの変更・フラグの追加・引用符付き
       'git add -A', 'git add .', 'git add -- a.txt', 'git commit -m x', 'git commit --amend --no-edit', 'git commit -F "${msgfile}"', 'git commit --no-edit',
       'git -C "${other}" add -A', 'git -C "$path" add -A', 'git -C . add -A', 'git -C "${path}" add --force .', 'git -C "${path}" add -f x', 'git -C "${path}" add -N .',
@@ -317,6 +319,10 @@ test('自己検査: 各パターンは悪い例に発火する（パターンが
       'git -C "${path}" add -A >&2 && git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" </dev/null >&2 || true',
       'git -C "${path}" add -A >&2 && git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?; git -C "${path}" add -f x',
       'git -C "${path}" add -A >&2 && git -C "${path}" commit -q -m "wip(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?',
+      // 2 行の形の崩し方: 旧の結合行・add の失敗を捨てる・commit の stdin を閉じない・同じ行に別の add を足す
+      'git -C "${path}" add -A >&2 && git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?',
+      'git -C "${path}" add -A >&2 || true', 'git -C "${path}" add -A || crc=$?', 'git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" >&2 || crc=$?',
+      'git -C "${path}" add -A >&2 || crc=$?; git -C "${path}" add -f x', '[ "${crc}" != 0 ] || git -C "${path}" add -A >&2 || crc=$?',
       '"git" -C "${path}" add -A', 'git "add" -A', 'git -C "${path}" "commit" -m x', "git -C x 'add' y", 'git -c user.name=x commit -m x', 'git -c core.hooksPath=/x commit -m x',
     ],
     'git push の -f 系短縮オプション': ['git push -f origin HEAD', 'git push origin HEAD -f', 'git push -uf origin HEAD'],
@@ -377,7 +383,8 @@ test('自己検査: 正当な行（読み取りの gh api・graphql の query・
     'git config --get remote.origin.url',
     'git config --list',
     'git ls-remote origin "refs/heads/$1"',
-    'git -C "${path}" add -A >&2 && git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?',
+    'git -C "${path}" add -A >&2 || crc=$?',
+    '  git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?',
     'git -C "${path}" -c core.excludesFile= status --porcelain=v2 -uall --ignore-submodules=none',
     'gh -R "${repo}" api repos/o/r/commits/x/check-runs',
     'gh -R "${repo}" api graphql -f query="${Q}" -F owner="${o}"',
@@ -528,21 +535,21 @@ test('worktree-remove.sh の check-absent ブロックは読み取り専用: git
   assert.doesNotMatch(bodyCode, /\bgit\b|\brm\b|>|\bmkdir\b|\btouch\b/)
 })
 
-test('git add / git commit の許可形は recover-prep.sh だけにあり、決まった 1 行（git -C "${path}" の WIP コミット）だけが存在する。フックを回避する綴りを伴わない', () => {
+test('git add / git commit の許可形は recover-prep.sh だけにあり、決まった 2 行（git -C "${path}" の add -A と WIP コミット。add が先）だけが存在する。フックを回避する綴りを伴わない', () => {
   const found = []
   for (const { name, path } of targets()) {
     for (const { n, l } of codeLines(readFileSync(path, 'utf8'))) if (GIT_ADD_COMMIT_CALL.test(l)) found.push({ name, n, l: l.trim() })
   }
-  assert.deepEqual(found.map((f) => f.name), ['recover-prep.sh'], JSON.stringify(found))
-  assert.equal(found.length, 1, '許可形は 1 行だけ')
-  assert.ok(GIT_WIP_ALLOWED.test(found[0].l), found[0].l)
-  assert.equal(found[0].l, 'git -C "${path}" add -A >&2 && git -C "${path}" commit -q -m "chore(recover): 中断時の未コミット変更を退避" </dev/null >&2 || crc=$?')
-  // 同じ行がフック回避の綴りを持たない（--no-verify の省略形・-n）。--no-verbose のような別のオプションは --no-verify の検査に誤検出されない
-  for (const p of PATTERNS.filter((x) => x.label === '--no-verify' || x.label.startsWith('git commit -n'))) assert.equal(p.test(found[0].l), false, p.label)
+  assert.deepEqual(found.map((f) => f.name), ['recover-prep.sh', 'recover-prep.sh'], JSON.stringify(found))
+  assert.equal(found.length, 2, '許可形は add と commit の 2 行だけ')
+  assert.deepEqual(found.map((f) => f.l), [WIP_ADD_LINE, WIP_COMMIT_LINE])
+  assert.ok(found[0].n < found[1].n, 'add が commit より先')
+  // 2 行ともフック回避の綴りを持たない（--no-verify の省略形・-n）。--no-verbose のような別のオプションは --no-verify の検査に誤検出されない
+  for (const f of found) for (const p of PATTERNS.filter((x) => x.label === '--no-verify' || x.label.startsWith('git commit -n'))) assert.equal(p.test(f.l), false, `${p.label}: ${f.l}`)
   assert.equal(PATTERNS.find((x) => x.label === '--no-verify').test('git commit --no-verbose'), false)
 })
 
-test('recover-prep.sh はブランチの削除・reset・checkout・clean・stash・push・マージを持たない（読み取りと WIP コミットと base の fetch だけ）。fetch は refs/remotes/origin/ へ保存する 1 形', () => {
+test('recover-prep.sh はブランチの削除・reset・checkout・clean・stash・push・マージを持たない（読み取りと WIP コミット〔add -A が落とした gitlink を戻す update-index・read-tree を含む〕と base の fetch だけ）。fetch は refs/remotes/origin/ へ保存する 1 形', () => {
   const path = targets().find((t) => t.name === 'recover-prep.sh').path
   const code = codeLines(readFileSync(path, 'utf8')).map((x) => x.l)
   const joined = code.join('\n')
