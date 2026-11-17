@@ -32,6 +32,7 @@ while IFS="$US" read -r fn a b c d e f g; do
   WR_DIRTY=0; WR_SUB_DIRTY=0; WR_REGISTERED=0; WR_MAIN=0; WR_LOCKED=0; WR_LOCK_REASON=""; WR_LOCK_PID=""; WR_LOCK_START=""
   case "$fn" in
     wr_count_status) wr_count_status "$(nl "$a")" ;;
+    wr_count_gitlink_raw) out=$(wr_count_gitlink_raw "$(nl "$a")" 2>&1) || rc=$? ;;
     wr_find_entry) wr_find_entry "$(nl "$a")" "$b" ;;
     wr_find_detached) wr_find_entry "$(nl "$a")" "$b"; out=$WR_DETACHED ;;
     wr_find_fold) wr_find_entry "$(nl "$a")" "$b" 1; out=$WR_REGISTERED ;;
@@ -284,6 +285,25 @@ check(
     ['wr_count_status', `? a\\${NL}? nested/${NL}? b\\\\`],
   ],
   (g, r, i) => assert.deepEqual([g.dirty, g.sub], [[0, 0], [1, 0], [3, 0], [1, 1], [2, 1], [1, 0], [1, 0], [1, 1], [1, 0], [1, 0], [1, 0], [3, 0]][i], JSON.stringify(r)),
+)
+
+// wr_count_gitlink_raw RAW（`git diff-index --cached --raw` の出力。@@ が改行）→ どちらかの mode が 160000 の行数（Issue #867。
+// 未初期化 submodule の gitlink の付け替え・追加・削除は --ignore-submodules=all の status に出ない）。行の中身はここで実 git が出した形
+const RAW = (om, nm, st, p) => `:${om} ${nm} ${'a'.repeat(40)} ${'b'.repeat(40)} ${st}\t${p}`
+check(
+  'wr_count_gitlink_raw: index と HEAD の木の差のうち、どちらかの mode が 160000 の行（付け替え・追加・削除・型の変更）だけを数える',
+  [
+    ['wr_count_gitlink_raw', ''],
+    ['wr_count_gitlink_raw', RAW('160000', '160000', 'M', 'sm')],
+    ['wr_count_gitlink_raw', RAW('000000', '160000', 'A', 'sm2')],
+    ['wr_count_gitlink_raw', RAW('160000', '000000', 'D', 'sm')],
+    ['wr_count_gitlink_raw', RAW('160000', '100644', 'T', 'sm')],
+    ['wr_count_gitlink_raw', RAW('100644', '100644', 'M', 'a.txt')],
+    ['wr_count_gitlink_raw', `${RAW('100644', '100644', 'M', 'a.txt')}${NL}${RAW('160000', '160000', 'M', 'sm')}${NL}${RAW('000000', '160000', 'A', 'x 160000')}`],
+    // パスや sha に 160000 が現れても mode の位置でなければ数えない。: で始まらない行は無視する
+    ['wr_count_gitlink_raw', `${RAW('100644', '100644', 'M', '160000')}${NL}160000 160000 x${NL}${NL}`],
+  ],
+  (g, r, i) => assert.equal(g.out, ['0', '1', '1', '1', '1', '0', '2', '0'][i], JSON.stringify(r)),
 )
 
 const LIST = (...entries) => entries.join(`${NL}${NL}`)

@@ -172,6 +172,35 @@ export function registerWorktreeRemoveTests(bash) {
     assert.equal(sup(repo, b.path).result.worktree, 'removed')
   })
 
+  // Issue #867: 未初期化 submodule の gitlink だけの変更（index の付け替え・追加・削除）は --ignore-submodules=all の status に出ない。
+  // 汚れに数えないと、discard は素の git worktree remove に拒まれて failed（原因の分からない失敗）で止まっていた。
+  // index と HEAD の木の比較（submodule の中へは降りない）で数え、discard は retained-dirty で保持、superseded は汚れの件数を記録して消す
+  smTest(`${tag} submodule 未初期化で gitlink だけを付け替え・追加・削除: discard は retained-dirty で保持、superseded は dirty を記録して消す`, () => {
+    const cases = [
+      ['付け替え', (repo, w, other) => repo.git(w, 'update-index', '--cacheinfo', `160000,${other},sm`)],
+      ['追加', (repo, w, other) => repo.git(w, 'update-index', '--add', '--cacheinfo', `160000,${other},sm2`)],
+      ['削除', (repo, w) => repo.git(w, 'update-index', '--force-remove', 'sm')],
+    ]
+    // リポジトリは 1 つを共有し、形ごとに別の worktree を使う（makeRepo の生成が重いので 1 回にする）
+    const repo = makeRepo({ submodule: true })
+    repo.write(repo.sub, 'f', 'two\n')
+    repo.git(repo.sub, 'commit', '-q', '-am', 's2')
+    for (const [i, [name, mutate]] of cases.entries()) {
+      const a = repo.addWorktree(`g${i}`)
+      assert.ok(!existsSync(join(a.path, 'sm', '.git')), '前提: worktree の submodule は未初期化')
+      mutate(repo, a.path, repo.head(repo.sub))
+      assert.equal(repo.git(a.path, '-c', 'core.excludesFile=', 'status', '--porcelain=v2', '-uall', '--ignore-submodules=all'), '', `${name}: 前提: --ignore-submodules=all の status には出ない`)
+      const d = dis(repo, a.path, ['--branch', a.branch, '--base', 'main'])
+      assert.equal(d.status, 0, d.stderr)
+      assert.deepEqual([d.result.worktree, d.result.branch, d.result.retained, d.result.ok], ['retained-dirty', 'keep', true, false], `${name}: ${JSON.stringify(d.result)}`)
+      assert.ok(d.result.dirty >= 1, `${name}: ${JSON.stringify(d.result)}`)
+      assert.ok(existsSync(a.path), `${name}: 実体が残る`)
+      const s = sup(repo, a.path)
+      assert.deepEqual([s.result.worktree, s.result.ok], ['removed', true], `${name}: ${JSON.stringify(s.result)}`)
+      assert.ok(s.result.dirty >= 1, `${name}: 汚れの件数を記録する: ${JSON.stringify(s.result)}`)
+    }
+  })
+
   // 初期化済み submodule の中は観測しない（その config はエージェントが書ける <git ディレクトリ>/modules/ の下にあり、中へ降りる git がそこのコマンドを実行し得る）。
   // 中の変更の有無を言えないので、superseded でも --force で消さずに保持する
   smTest(`${tag} submodule 初期化済み・clean: discard も superseded も保持する（中を観測しないので clean と言えない）`, () => {

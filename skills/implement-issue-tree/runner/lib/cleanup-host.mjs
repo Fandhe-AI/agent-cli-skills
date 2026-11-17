@@ -24,7 +24,7 @@
 //   - 字面で <main>/.claude/worktrees/ の直下（<main> は mainRoot そのもの、またはその realpath）。.claude/worktrees は symlink で外へ出ない
 //   - 実体があれば、その realpath も同じ直下（symlink で外を指さない）でディレクトリ。実体が無い（手で消された）ときは拒まない
 //     （拒むと状態の記録が消えないまま残る。worktree-remove.sh が not-registered か登録だけの片づけで扱う）
-//   - <main>/.git/worktrees/ の下にその worktree を指す gitdir があれば、ちょうど 1 つで、realpath がその直下、commondir が
+//   - <main>/.git/worktrees/ の下にその worktree を指す gitdir（中身が相対パスなら gitdir ファイルのディレクトリを基準に直す）があれば、ちょうど 1 つで、realpath がその直下、commondir が
 //     <main>/.git を指し、worktree の .git ファイルがその gitdir を指す
 //   - 状態ファイル（_/issue-trees/<parent>.json）の .items["N"].worktree が、そのパスか空文字（JSON マージが先に空にした形）
 //
@@ -32,6 +32,7 @@
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { verifyWorktreeGitdir } from './worktree.mjs'
+import { gitdirTarget } from './recover-git.mjs'
 
 // runStateAgent がモデルを切り替えるときに付ける `:fallback-<model>` だけを許す（:retry 等は付かない）
 export const CLEANUP_LABEL = /^state:cleanup:#([1-9][0-9]*)(?::fallback-[a-z0-9]+)*$/
@@ -125,12 +126,13 @@ export function checkCleanupTarget({ mainRoot, path, parent, issue }) {
       if (dirname(real) !== wtParent) return no('worktree の実体が <main>/.claude/worktrees/ の直下にない（symlink で外を指す）')
       if (!lstatSync(real).isDirectory()) return no('worktree の実体がディレクトリでない')
     }
-    // この worktree を指す gitdir（<main>/.git/worktrees/<name>/gitdir の中身が <worktree>/.git）
+    // この worktree を指す gitdir（<main>/.git/worktrees/<name>/gitdir の中身が <worktree>/.git）。中身が相対パス
+    // （worktree.useRelativePaths=true）なら gitdir ファイルのディレクトリを基準に直して比べる（Issue #865。recover-git.mjs と同じ gitdirTarget）
     const wts = join(commonDir, 'worktrees')
     const want = new Set([`${p}/.git`, `${join(wtParent, basename(p))}/.git`, ...(real ? [`${real}/.git`] : [])])
     const names = lstatOrNull(wts) === null ? [] : readdirSync(wts)
     const found = names.filter((n) => {
-      try { return want.has(readFileSync(join(wts, n, 'gitdir'), 'utf8').replace(/\n$/, '')) } catch { return false }
+      try { return want.has(gitdirTarget(join(wts, n))) } catch { return false }
     })
     if (found.length > 1) return no('この worktree を指す gitdir が 2 つ以上ある')
     if (found.length === 1) {
