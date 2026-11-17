@@ -520,11 +520,16 @@ test('createWorktree: add の前からあるディレクトリは、add が失�
  * list（worktree list）。呼ばれた種類を log へ 1 行ずつ書く（worktree add も add として書く）。
  * addThenFail なら worktree add を本物の git で行った後に終了コード 1 で返す（add が作った後に失敗した状態の再現）。
  */
-function checkFailGitDir(root, branch, { fail = [], addThenFail = false } = {}) {
+function checkFailGitDir(root, branch, { fail = [], addThenFail = false, floodList = [] } = {}) {
   const dir = join(root, `fakegit-check-${Math.random().toString(16).slice(2)}`)
   mkdirSync(dir)
   const log = join(dir, 'calls.log')
-  const cases = fail.map(({ kind, nth, code }) => `  "${kind}:${nth}") echo "fatal: injected ${kind} check failure" >&2; exit ${code} ;;`).join('\n')
+  // floodList の回の worktree list は、本物の一覧の前に 1 MiB を超える別の worktree の行を出す（一覧の先頭だけを読むと本物の行が落ちる）
+  const flood = `awk 'BEGIN { for (i = 0; i < 20000; i++) printf "worktree /pad/%06d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\nHEAD 0\\n\\n", i }'`
+  const cases = [
+    ...fail.map(({ kind, nth, code }) => `  "${kind}:${nth}") echo "fatal: injected ${kind} check failure" >&2; exit ${code} ;;`),
+    ...floodList.map((nth) => `  "list:${nth}") ${flood}; exec ${JSON.stringify(REAL_GIT)} "$@" ;;`),
+  ].join('\n')
   writeFileSync(join(dir, 'git'), `#!/bin/sh
 kind=other
 case "$1 $2" in
@@ -603,6 +608,31 @@ test('createWorktree: add の後の登録の確認が失敗したら、worktree 
     }))
   assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${path}`), '確認できなかった登録は消さない')
   assert.ok(existsSync(path))
+})
+
+test('createWorktree: add の後の worktree list が 1 MiB の保持の上限を超えたら、切った一覧で「未登録」と読まず、worktree もディレクトリも消さない', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const { path, branch } = worktreeNames(sb.main, runId, 1)
+  const fake = checkFailGitDir(sb.root, branch, { floodList: [2], addThenFail: true })
+  await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })), (e) => {
+      assert.match(e.message, /injected worktree add failure after create/)
+      assert.ok(e.message.includes(`worktree ${path}`), e.message)
+      return true
+    }))
+  assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${path}`), '確かめられなかった登録は消さない')
+  assert.ok(existsSync(path), '登録済みの worktree のディレクトリを rmSync しない')
+})
+
+test('unlockOwnWorktree: worktree list が 1 MiB の保持の上限を超えたら unregistered ではなく error（lock は外さない）', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const wt = await createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false })
+  const fake = checkFailGitDir(sb.root, wt.branch, { floodList: [1, 2, 3] })
+  const got = await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () => worktreeMod.unlockOwnWorktree({ mainRoot: sb.main, path: wt.path, reason: wt.lockReason }))
+  assert.equal(got, 'error')
+  assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`locked ${wt.lockReason}`), 'lock が残る')
 })
 
 test('createWorktree: add の前のパスの確認が ENOENT 以外のエラーなら add へ進まない', { skip: process.getuid?.() === 0 ? 'root では権限のエラーを作れない' : false }, async () => {

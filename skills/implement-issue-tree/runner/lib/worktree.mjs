@@ -87,7 +87,9 @@ function git(cwd, args, { allowFail = false } = {}) {
 /** createWorktree の git の既定の上限（fetch は origin との通信を含むので長め）。設定の timeoutsSec.worktree で変えられる（run.mjs）。 */
 export const DEFAULT_FETCH_TIMEOUT_MS = 300_000
 export const DEFAULT_GIT_TIMEOUT_MS = 120_000
-// 標準出力・標準エラーの保持の上限（使うのは rev-parse の 1 行と失敗文の 1 行目だけ）
+// 標準出力・標準エラーの保持の上限。標準出力は rev-parse の 1 行のほか、isRegistered・unlockOwnWorktree・relockOwnWorktree が
+// `worktree list --porcelain` の全体を読む。切った一覧では登録を「無い」と読み違えるため、標準出力が上限を超えた呼び出しは
+// 成功として返さない（gitAsync）。標準エラーは失敗文の 1 行目だけを使うので、超えても切るだけにする
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 
 // 実行中の非同期 git（プロセスグループの長）。detached で端末の Ctrl-C が届かないため、ランナーの終了時に
@@ -106,6 +108,8 @@ export function killGitSync() {
  * 非同期の git。detached（setsid）で制御端末から外し、ssh が /dev/tty で尋ねて止まらないようにする。
  * timeoutMs を超えたらプロセスグループへ SIGKILL を送り、終了を待たずに例外にする（パイプを握った孫で待ち続けない）。
  * 成功なら標準出力（前後の空白を除く）、allowFail で失敗なら null。allowExit に挙げた終了コードも null（それ以外の失敗は例外）。
+ * 標準出力が MAX_GIT_OUTPUT_BYTES を超えたら、終了コードによらず失敗にする（allowFail なら null、そうでなければ例外。
+ * allowExit の null は「無い」の意味で使われるため、そちらでは null にしない）。
  */
 function gitAsync(cwd, args, { timeoutMs, allowFail = false, allowExit = [] }) {
   return new Promise((resolve, reject) => {
@@ -142,7 +146,10 @@ function gitAsync(cwd, args, { timeoutMs, allowFail = false, allowExit = [] }) {
     child.stderr.on('data', (b) => { if (errBytes < MAX_GIT_OUTPUT_BYTES) err.push(b); errBytes += b.length })
     child.on('error', (e) => settle(() => reject(spawnFailure(e))))
     child.on('close', (code) => settle(() => {
-      if (code === 0) resolve(Buffer.concat(out).toString('utf8').trim())
+      if (outBytes > MAX_GIT_OUTPUT_BYTES) {
+        if (allowFail) resolve(null)
+        else reject(new Error(`git ${args[0]} の標準出力が上限（${MAX_GIT_OUTPUT_BYTES} バイト）を超えた（切った出力は使わない）`))
+      } else if (code === 0) resolve(Buffer.concat(out).toString('utf8').trim())
       else if (allowFail || allowExit.includes(code)) resolve(null)
       else reject(gitFailure(args, code, Buffer.concat(err).toString('utf8')))
     }))
