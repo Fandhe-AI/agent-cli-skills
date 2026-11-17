@@ -18,7 +18,7 @@ import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { gitEnv, makeRepo } from './lib/worktree-sandbox.mjs'
 import { SCRIPT_HASH_PLACEHOLDER_RE, bundleSha256 } from '../scripts/build-workflow.mjs'
 import { createAgentHost, spawnScript } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
-import { checkCleanupTarget } from '../../../skills/implement-issue-tree/runner/lib/cleanup-host.mjs'
+import { checkCleanupTarget, parseCleanupPrompt } from '../../../skills/implement-issue-tree/runner/lib/cleanup-host.mjs'
 import { loadConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 
 const SKILL_DIR = fileURLToPath(new URL('../../../skills/implement-issue-tree', import.meta.url))
@@ -123,7 +123,7 @@ test('正常系（実体が手で消された worktree）: 拒まずに worktree
 test('保持（discard・未コミット変更あり）: 2 段目を起動せず、状態の worktree の記録を残す', async () => {
   const s = setup()
   s.repo.write(s.wt, 'dirty.txt', 'x\n')
-  const { prompt, label } = await cleanupPromptOf(2, { worktree: '' }, { cleanupWorktree: s.wt, cleanupMode: 'discard' })
+  const { prompt, label } = await cleanupPromptOf(2, { worktree: '' }, { cleanupWorktree: s.wt, cleanupMode: 'discard', expectBranch: 'feat/2-x' })
   const h = makeHost(s.main, s.repo.root)
   const got = await h.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
   assert.equal(h.calls.length, 0)
@@ -253,6 +253,40 @@ test('拒否（状態ファイルの記録が別の worktree・label の N と�
   const extra = prompt.replace('```sh\n', `\`\`\`sh\nbash '${SKILL_DIR}/scripts/run-verified.sh' ${'0'.repeat(64)} state.sh --file _/issue-trees/1.json init\n`)
   await assertRefused(s, extra, label, '起動の行の追加', /起動する行が 2 つでない/)
   assert.equal(existsSync(s.wt), true)
+})
+
+test('拒否（結びつけの無い discard）: --expect-branch・--branch・--require-missing のどれも無い discard はホストが実行しない', async () => {
+  const s = setup()
+  s.repo.write(s.wt, 'kept.txt', 'x\n')
+  s.repo.git(s.wt, 'add', '-A')
+  s.repo.git(s.wt, 'commit', '-q', '-m', 'kept')
+  const { prompt, label } = await cleanupPromptOf(2, { worktree: '' }, { cleanupWorktree: s.wt, cleanupMode: 'discard' })
+  assert.match(prompt, /--mode discard --path '[^']+'$/m, '結びつけの無い形のプロンプトになっている')
+  await assertRefused(s, prompt, label, '結びつけの無い discard', /結びつけ/)
+  assert.equal(existsSync(s.wt), true, 'worktree を消さない')
+})
+
+test('結びつけの無い discard の拒否を入れても、src の discard の呼び出し（expectBranch・deleteBranch・requireMissing）はすべて読める。置き換えの掃除は実行仕様の形でこの読み取りを通らない', async () => {
+  const wt = '/repo/main/.claude/worktrees/wf_0123abcd-4ef-2'
+  const shapes = [
+    // 規約外ブランチの worktree だけを消す（discardWorktreeOnly）・continue の掃除
+    ['expectBranch（規約外）', { worktree: '' }, { cleanupWorktree: wt, cleanupMode: 'discard', expectBranch: 'worktree-wf_0123abcd-4ef-2' }, / --expect-branch 'worktree-wf_0123abcd-4ef-2'$/m],
+    ['expectBranch（continue）', { status: 'implementing', branch: 'feat/2-x', worktree: '' }, { cleanupWorktree: wt, cleanupMode: 'discard', expectBranch: 'feat/2-x' }, / --expect-branch 'feat\/2-x'$/m],
+    // discard の破棄（ブランチも消す）
+    ['deleteBranch', { branch: 'feat/2-x' }, { cleanupWorktree: wt, cleanupMode: 'discard', deleteBranch: true }, / --branch 'feat\/2-x' --base 'main'$/m],
+    // prunable な旧登録の片づけ
+    ['requireMissing', { status: 'planning', worktree: '' }, { cleanupWorktree: wt, cleanupMode: 'discard', requireMissing: true }, / --require-missing$/m],
+  ]
+  for (const [why, patch, options, re] of shapes) {
+    const { prompt, label } = await cleanupPromptOf(2, patch, options)
+    assert.match(prompt, re, why)
+    assert.doesNotMatch(prompt.split('\n', 1)[0], /iit-exec/, `${why}: 掃除の複合段の形`)
+    const r = parseCleanupPrompt(label, prompt, { skillDir: SKILL_DIR })
+    assert.equal(r?.ok, true, `${why}: ${r?.reason}`)
+  }
+  // 置き換え（旧 worktree を消して新しいパスを記録する）は実行仕様の行を持ち、cleanup-host ではなく直接実行へ回る
+  const { prompt } = await cleanupPromptOf(2, { status: 'failed', worktree: '/repo/main/.claude/worktrees/wf_0123abcd-4ef-9' }, { cleanupWorktree: wt, cleanupMode: 'discard', expectBranch: 'feat/2-x', replacementWorktree: '/repo/main/.claude/worktrees/wf_0123abcd-4ef-9' })
+  assert.match(prompt.split('\n', 1)[0], /iit-exec/, '置き換えの掃除は実行仕様の形')
 })
 
 test('label のモデル切り替えの接尾辞（:fallback-<model>）は同じ段として直接実行する', async () => {
