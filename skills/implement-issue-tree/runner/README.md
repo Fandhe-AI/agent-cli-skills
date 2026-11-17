@@ -86,7 +86,7 @@ _/iit-runner/<runId>/
 | 並列 | ランタイムの既定（16 か CPU 数 − 2） | `--max-parallel` か `limits.maxParallel`（既定 4）。1 ランのエージェント数は `limits.maxAgents`（既定 1,000）まで |
 | 構造化出力 | ランタイムが schema を強制 | Codex は `--output-schema`（strict 変換）。ランナーが検証し、不適合なら修復を 1 回求め、なお不適合なら `null` |
 | ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）が `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。形はその段の PR 番号で具体化し（`mergeExecCommandFor`。番号はホストのプロンプトから取り、決まらなければその段ではマージを許さない）、子の `GH_REPO` を対象リポジトリに固定する（`autoMerge` のランだけ、起動前に `gh repo view` で決める。決められなければ終了コード 3）。同じ `autoMerge` のランでは、生成物が merge-gate・push・観測に使う `args.repo` をこの値と照合し、違えば終了コード 2（検証と実行の対象がずれる）。`args.repo` が無ければ、継いだ `GH_REPO` が違うとき終了コード 3（観測・PR 作成は `GH_REPO` のリポジトリで行われるため）。`autoMerge` でないランは照合しない（push は `pr-push.sh` の routing ガードが origin と `args.repo` を照合する）。Codex は merge 段の `codex exec` の env に固定する。ターンの後に hook のログと `command_execution` の件数を照合する。拒否の文言は理由コードを含み、`obfuscated` と `credential-read` だけは言い直しの手がかりを 1 文足す（止められた操作を別の綴りで迂回しないことを添える） |
-| 時間切れ | ランタイム任せ | 段ごと（`timeoutsSec.byPhase`。既定は Plan 20 分・Implement 30 分・Review 20 分 等）。超えたらプロセスを止めて `null` |
+| 時間切れ | ランタイム任せ | 段ごと（`timeoutsSec.byPhase`。既定は Plan 20 分・Implement 30 分・Review 20 分 等）。超えたらプロセスを止めて `null`。隔離 worktree を作る git は `timeoutsSec.worktree`（秒。`fetch` は origin との通信を含む fetch で既定 300 = 5 分、`git` はそれ以外の 1 回ごとで既定 120 = 2 分。どちらも省略可・正の整数）を上限にし、超えたらプロセスグループを止めて worktree の作成の失敗（例外）にする |
 
 ## 自動マージと後片づけ
 
@@ -97,7 +97,8 @@ _/iit-runner/<runId>/
   アダプタの起動より前に登録し、終了コードは 128 + シグナル番号。想定外の例外で落ちたときも、既知のプロセスグループは
   終了時に同期で SIGKILL する（セッションの削除は行えないことがある）。Codex の exec の本体が終わったときは
   （正常終了・異常終了・SIGTERM で本体だけが終わった場合を含む）、その場で同じプロセスグループへ SIGKILL を送り、残った子・孫を
-  止める。隔離 worktree の後始末はホストの判断に従う。
+  止める。実行仕様の段の子も同じく、終わったときにプロセスグループへ SIGKILL を送り、時間切れ・出力超過で止めた後は猶予
+  （2 秒）を過ぎても標準出力が閉じなければ待たずに失敗として決着する。隔離 worktree の後始末はホストの判断に従う。
 
 ## 既知の限界
 

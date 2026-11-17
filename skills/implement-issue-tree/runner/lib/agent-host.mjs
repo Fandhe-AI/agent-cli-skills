@@ -21,8 +21,8 @@
 //
 // 内容の固定（PR #851 の P0。lib/pins.mjs）: 作成時に launcher（scripts/run-verified.sh）と照合より前に source される
 // scripts/lib/signed-output.sh の sha256 を固定し、run.mjs がエージェントの起動前に固定した cfg.pins（ガード・hook・plugin）と
-// 合わせて、実行仕様の段の起動前・モデルの段の各ターンの前後に照合する。1 度でも食い違えば、以降の段はすべて実行しない
-// （実行仕様は exec-refused で失敗値、モデルの段は null。reason は pin-mismatch）。照合から起動までの差し替え（TOCTOU）は防がない。
+// 合わせて、実行仕様の段の起動前・モデルの段の隔離 worktree の作成前と各ターンの前後に照合する。1 度でも食い違えば、以降の段は
+// すべて実行しない（実行仕様は exec-refused で失敗値、モデルの段は worktree を作らずに null。reason は pin-mismatch）。照合から起動までの差し替え（TOCTOU）は防がない。
 //
 // ログ: cfg.runDir があれば、呼び出しごとに <runDir>/agents/<seq 4 桁>-<label>/ へ meta.json（通し確認の判定器が読む。
 // 形は run.mjs 冒頭の「出力の形」）・request.json・prompt.txt（モデルへ回した段）・exec.json / stdout.txt / stderr.txt
@@ -199,10 +199,15 @@ export function killScriptsSync() {
 
 /**
  * スクリプトを shell なしで起動する既定の実装。detached でプロセスグループを作り、時間切れ・出力超過では
- * グループごと止める（gh などの孫プロセスを残さない）。
+ * グループごと止める（gh などの孫プロセスを残さない）。止めた後 killGraceMs（既定 2 秒）を過ぎても close が来なければ
+ * （新しいセッションへ抜けた孫が標準出力を握っている・子が D 状態にある等）、close を待たずに timedOut / overflow を
+ * 立てたまま code: null で決着する（並列の枠を握り続けない）。子が終わったとき（正常終了を含む）は、その場で同じ
+ * プロセスグループへ SIGKILL を送り、標準入出力を閉じて残った孫も止める（終了後は liveScripts から外れ、killScriptsSync の
+ * 対象にならないため。adapters/codex.mjs と同じ。回収直後に送るので pid の再利用で別のグループは撃たない）。
+ * 新しいセッションへ抜けた孫はグループの外にいるため止められない。
  * @returns {Promise<{ code: number|null, stdout: string, stderr: string, timedOut: boolean, overflow: boolean, error?: string }>}
  */
-export function spawnScript(file, args, { cwd, input, timeoutMs, env = process.env }) {
+export function spawnScript(file, args, { cwd, input, timeoutMs, env = process.env, killGraceMs = 2000 }) {
   return new Promise((resolve) => {
     let child
     try {
@@ -219,11 +224,18 @@ export function spawnScript(file, args, { cwd, input, timeoutMs, env = process.e
     let timedOut = false
     let overflow = false
     let settled = false
-    const killGroup = () => {
+    let forceTimer = null
+    const signalGroup = () => {
       try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch { /* 既に終了 */ } }
+    }
+    // 時間切れ・出力超過: グループを止め、猶予の後は close を待たずに決着する（猶予のタイマーは 1 本だけ）
+    const killGroup = () => {
+      signalGroup()
+      if (forceTimer === null) forceTimer = setTimeout(() => finish(null, undefined, true), killGraceMs)
     }
     const timer = setTimeout(() => { timedOut = true; killGroup() }, timeoutMs)
     child.stdout.on('data', (b) => {
+      if (overflow) return
       outBytes += b.length
       if (outBytes > MAX_STDOUT_BYTES) { overflow = true; killGroup(); return }
       out.push(b)
@@ -232,14 +244,18 @@ export function spawnScript(file, args, { cwd, input, timeoutMs, env = process.e
       if (errBytes < MAX_STDERR_BYTES) err.push(b.subarray(0, MAX_STDERR_BYTES - errBytes))
       errBytes += b.length
     })
-    const finish = (code, error) => {
+    const finish = (code, error, forced = false) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(forceTimer)
       liveScripts.delete(child)
+      // close が来ていない: 抜けた孫が握る pipe の読み口を閉じる（イベントループを握らせず、決着後に溜め込まない）
+      if (forced) { child.stdout.destroy(); child.stderr.destroy() }
       resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), timedOut, overflow, ...(error ? { error } : {}) })
     }
     child.on('error', (e) => finish(null, String(e?.message ?? e)))
+    child.on('exit', () => { try { process.kill(-child.pid, 'SIGKILL') } catch { /* グループに残りが無い */ } })
     child.on('close', (code) => finish(code))
     // 標準入力を読まないスクリプトが先に閉じても落ちないようにする
     child.stdin.on('error', () => {})
@@ -508,6 +524,11 @@ export function createAgentHost({ adapter, cfg }) {
   }
 
   async function runModel({ prompt, opts, label, schema, n, logDir, timeoutMs, rec }) {
+    // 固定の食い違いの後は、隔離 worktree も作らない（fetch・worktree add・lock の .git への書き込みを起こさない）
+    if (pinMismatch()) {
+      Object.assign(rec, { outcome: 'null', status: 'null', sessionRef: null, reason: 'pin-mismatch', detail: tampered })
+      return null
+    }
     const resolved = resolveModel(config, tool, { model: opts.model, effort: opts.effort })
     let cwd = mainRoot
     let worktreePath

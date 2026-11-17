@@ -557,6 +557,51 @@ test('killScriptsSync（LOW-11）: 実行中の spawnScript のプロセスグ�
   assert.equal(alive(gc), false)
 })
 
+// 孫の pid を書いたファイルを待って読む（孫か spawnScript の子が書く）。書かれなければ null
+async function readPid(file) {
+  for (let i = 0; i < 100 && !(existsSync(file) && readFileSync(file, 'utf8').trim() !== ''); i++) await new Promise((r) => setTimeout(r, 20))
+  return existsSync(file) ? Number(readFileSync(file, 'utf8')) : null
+}
+const isAlive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+const killPid = (pid) => { if (pid) try { process.kill(pid, 'SIGKILL') } catch { /* 既に終了 */ } }
+
+test('spawnScript: 新しいセッションへ抜けた孫が標準出力を握っても、kill の後の猶予を過ぎたら timedOut のまま決着する', async () => {
+  // perl の setsid で孫をプロセスグループの外へ出す（macOS に setsid コマンドは無い）。孫は setsid の後に自分の pid を書き、
+  // stdout を継いだまま眠る（子が時間切れで先に止められても、孫の pid は残る）
+  const pidFile = join(root, `ss-esc-${Math.random().toString(16).slice(2)}.pid`)
+  const script = 'if (!fork()) { POSIX::setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; exec "sleep", "30" } sleep 30'
+  const p = spawnScript('perl', ['-MPOSIX', '-e', script, pidFile], { cwd: root, input: '', timeoutMs: 200, killGraceMs: 200 })
+  let timer
+  let gc = null
+  try {
+    gc = await readPid(pidFile)
+    assert.ok(gc, '孫が起動しない')
+    const deadline = new Promise((r) => { timer = setTimeout(() => r('hung'), 3000) })
+    const r = await Promise.race([p, deadline])
+    assert.notEqual(r, 'hung', 'close を待ち続けて決着しない')
+    assert.equal(r.timedOut, true)
+    assert.equal(r.code, null)
+    assert.ok(isAlive(gc), '前提: 孫はグループの外にいて SIGKILL が届かない')
+  } finally {
+    clearTimeout(timer)
+    killPid(gc)
+  }
+})
+
+test('spawnScript: 子が exit 0 で終わったら、標準入出力を閉じて残った孫もプロセスグループごと止める', async () => {
+  const pidFile = join(root, `ss-bg-${Math.random().toString(16).slice(2)}.pid`)
+  const r = await spawnScript('bash', ['-c', `sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; exit 0`], { cwd: root, input: '', timeoutMs: 10_000 })
+  const gc = await readPid(pidFile)
+  try {
+    assert.ok(gc, '孫が起動しない')
+    assert.equal(r.code, 0)
+    for (let i = 0; i < 20 && isAlive(gc); i++) await new Promise((r2) => setTimeout(r2, 25))
+    assert.equal(isAlive(gc), false, '決着の後も孫が生きている')
+  } finally {
+    killPid(gc)
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 内容の固定（PR #851 の P0。lib/pins.mjs）: ホストが直接起動する launcher と、照合より前に source される signed-output.sh、
 // run.mjs が起動前に固定したファイル（cfg.pins）を、段の起動前（とモデルの段の後）に照合し、食い違えば以降の段を実行しない
@@ -619,6 +664,26 @@ test('固定（P0）: signed-output.sh・cfg.pins のファイル（ガード等
   writeFileSync(g3, 'exit 0\n')
   const c = makeHost({ cfg: { skillDir: sd3, pins: pinFiles([g3]) }, reply: () => { writeFileSync(g3, 'exit 0 # changed\n'); return { ok: true, n: 1 } } })
   assert.equal(await c.agent('P', { label: 'x', phase: 'Quick', schema: SCHEMA }), null)
+})
+
+test('固定（P0）: 食い違いの後の隔離の段は worktree を作らずに null（reason: pin-mismatch）。アダプタも呼ばない', async () => {
+  const sd = pinnedSkill()
+  const guard = join(sd, 'guard.sh')
+  writeFileSync(guard, 'exit 0\n')
+  const runDir = join(root, `pin-wt-${Math.random().toString(16).slice(2)}`)
+  const { pinFiles } = await import('../../../skills/implement-issue-tree/runner/lib/pins.mjs')
+  const made = []
+  const { agent, calls } = makeHost({
+    cfg: { skillDir: sd, runDir, pins: pinFiles([guard]), createWorktree: (p) => { made.push(p.n); return { path: `${p.mainRoot}/.claude/worktrees/${p.runId}-${p.n}` } } },
+    reply: () => ({ ok: true, n: 1 }),
+  })
+  writeFileSync(guard, 'exit 0 # changed\n')
+  for (let i = 0; i < 3; i++) assert.equal(await agent('P', { label: `impl:#${i + 2}`, phase: 'Quick', schema: SCHEMA, isolation: 'worktree' }), null)
+  assert.deepEqual(made, [], 'worktree を作らない')
+  assert.equal(calls.length, 0)
+  const metas = readdirSync(join(runDir, 'agents')).sort().map((d) => JSON.parse(readFileSync(join(runDir, 'agents', d, 'meta.json'), 'utf8')))
+  assert.deepEqual(metas.map((m) => [m.outcome, m.reason]), [['null', 'pin-mismatch'], ['null', 'pin-mismatch'], ['null', 'pin-mismatch']])
+  assert.match(metas[0].detail, /guard\.sh/)
 })
 
 test('readTmpOf（PR #851 の P1）: ツリーのページの段（plan:issue-tree-page-N・-retry）にだけ、それまでのツリーの段（plan:issue-tree・-retry）の logDir を渡す。他の段・runDir 無しは空', async () => {
