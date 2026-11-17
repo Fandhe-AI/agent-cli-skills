@@ -50,7 +50,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 ## 機械的な段の実行仕様（`<!-- iit-exec v1 ... -->`・Phase P6）
 
-モデルの判断が要らず、スクリプトを 1 回実行して結果を返すだけの段は、プロンプトの **0 行目**に機械可読の 1 行を持つ。モデルを介さずに直接実行するランナー（Codex / OpenCode 版）はこの 0 行目だけを読む（本文の他の場所・文言からの抜き出しはしない）。Workflow 版のモデルにとっては何もさせない HTML コメントで、手順は従来どおり本文のコマンドを実行する（挙動は変わらない）。
+モデルの判断が要らず、スクリプトを 1 回実行して結果を返すだけの段は、プロンプトの **0 行目**に機械可読の 1 行を持つ。モデルを介さずに直接実行するランナー（Codex 版）はこの 0 行目だけを読む（本文の他の場所・文言からの抜き出しはしない）。Workflow 版のモデルにとっては何もさせない HTML コメントで、手順は従来どおり本文のコマンドを実行する（挙動は変わらない）。
 
 ```
 <!-- iit-exec v1 {"v":1,"script":"state.sh","sha256":"<64 桁>","argv":["--file","_/issue-trees/1.json","verify","--page","0"],"ret":"envelope","fail":null} -->
@@ -65,8 +65,8 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 | `ret` | 結果の返し方。`envelope` = 標準出力の最終行の JSON をそのまま返す（ホストが封筒を照合する）/ `exit-ok` = 終了コード 0 なら `{ ok: true }`・他は `{ ok: false }` / `line:<語>` = `<語>` に続く最終行の JSON を返す（`STATE_RESULT`・`WORKTREE_REMOVE_RESULT`） |
 | `fail` | 失敗時（スクリプトの非 0 終了・結果の行なし・封筒なし）にランナーが返す値。本文のプロンプトが指示している失敗値と同じで、`ret` ごとに決まる（下の表）。`envelope` は JSON の `null` |
 
-- **対象の段（label）**: `state:*` の書き込み（`state:update`・`state:high-water`・`state:high-water-set`・`state:init-all`・一括更新）・`state:load-verify`・`script-hash-precheck`・`plan:issue-tree-release`・`free:#N`・`worktree:absent`・`worktree:sweep`・`worktree:residual-bytes`・`worktree:free-disk-bytes`・`detect:external-checks`・`plan:skip-labels`・`merge:added-files` / `merge:policy-paths` / `merge:optin-record`・closed の後始末と使い捨て worktree の掃除（`state:cleanup:#N` のうち状態の書き戻し〔手順 2〕が付かない形だけ）。
-- **対象外**: 判断を含む段（ツリー取得 `plan:issue-tree`〔本文を読んで dependsOn を判断する〕・依存宣言の抽出〔レート制限の判断がある〕・Plan / Implement / Review / fix / PR 作成 / monitor / merge-exec / 回復 / base-merge〔隔離 worktree と pwd を使う〕・`git worktree list` などの生コマンドの段）と、2 つのスクリプトを続けて実行する形の掃除。これらの 0 行目には仕様が付かない。
+- **対象の段（label）**: `state:*` の書き込み（`state:update`・`state:high-water`・`state:high-water-set`・`state:init-all`・一括更新）・`state:load-verify`・`script-hash-precheck`・`plan:issue-tree-release`・`free:#N`・`worktree:absent`・`worktree:sweep`・`worktree:residual-bytes`・`worktree:free-disk-bytes`・`detect:external-checks`・`plan:skip-labels`・`merge:added-files` / `merge:policy-paths`・opt-in テスト記録ゲートの観測（`optin-record-verify:#N` / `optin-record-reverify:#N`。observe-pr.sh `--mode optin-record`）・closed の後始末と使い捨て worktree の掃除（`state:cleanup:#N` のうち状態の書き戻し〔手順 2〕が付かない形だけ）。
+- **対象外**: 判断を含む段（ツリー取得 `plan:issue-tree`〔本文を読んで dependsOn を判断する〕・依存宣言の抽出〔レート制限の判断がある〕・Plan / Implement / Review / fix / PR 作成 / monitor / merge-exec / 回復 / base-merge〔隔離 worktree と pwd を使う〕・`git worktree list` などの生コマンドの段）と、2 つのスクリプトを続けて実行する形の掃除。これらの 0 行目には仕様が付かない。ただし 2 つのスクリプトを続けて実行する形の掃除（`state:cleanup:#N`。worktree-remove.sh の後に条件つきで state.sh merge）は判断を含まないため、ランナーは仕様の代わりに本文の 2 本の起動行を行単位の完全一致で読み、対象をホストで確かめてから直接実行する（`runner/lib/cleanup-host.mjs`。読み取りの profile のモデルでは削除も状態の書き込みもできないため）。
 - **偽の行が混ざらない理由**: 仕様は src が組んだ文字列の先頭にだけ置く（位置固定）。値はホストが検証済みの引数から作り（`worktreeQuote`・`isValidBranchName` 等を通ったもの）、JSON は `<` `>` `&` U+2028 U+2029 を `\u` エスケープして 1 行にする。issue 本文・タイトル・note などの未信頼データは本文側にしか入らず、対象外の段の 0 行目は src の固定文字列で始まる（`exec-spec.test.mjs` が敵対的な値で縛る）。組めない値（許可外の文字・lone surrogate）は例外にせず仕様なしにし、ランナーはその段をモデルへ回す。
 - **直接実行しても信頼境界は変わらない**: 封筒の照合（nonce・sha256・入力の束縛）はホストが従来どおり行う。ランナーは標準出力の文字列を解釈せずそのまま返し、照合を省かない。
 
@@ -75,16 +75,17 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 | 段（label） | `ret` | `fail` |
 |------|------|------|
 | `state:*` の書き込み | `line:STATE_RESULT` | `{"ok":false}` |
-| `state:load-verify` / `script-hash-precheck` / `worktree:residual-bytes` / `worktree:free-disk-bytes` / `detect:external-checks` / `plan:skip-labels` / `merge:*` | `envelope` | `null` |
+| `state:load-verify` / `script-hash-precheck` / `worktree:residual-bytes` / `worktree:free-disk-bytes` / `detect:external-checks` / `plan:skip-labels` / `merge:added-files` / `merge:policy-paths` / `optin-record-(verify\|reverify):#N` | `envelope` | `null` |
 | `plan:issue-tree-release` / `free:#N` | `exit-ok` | `{"ok":false}` |
 | `worktree:absent` / 後始末の `remove` | `line:WORKTREE_REMOVE_RESULT` | `{"ok":false,"retained":true,"worktree":""}` |
 | `worktree:sweep` | `line:WORKTREE_REMOVE_RESULT` | `{"removed":[]}` |
 
-ランナー（Codex / OpenCode 版。実装は別 PR）の契約:
+ランナー（Codex 版。`runner/lib/agent-host.mjs`）の契約:
 
 - **失敗は stdout を見ずに `fail` を返す。** スクリプトが非 0 で終了したら、標準出力に結果らしい行があっても読まず、仕様の `fail` をそのまま返す。結果の行（`ret` が `line:<語>`）や封筒（`envelope`）が標準出力に無いときも同じ。
 - **cwd はメイン worktree のルート。** 本文のコマンドと同じ場所で起動する（隔離 worktree やスキルディレクトリで起動しない）。`execFile` の `cwd` に明示する。
-- **label ごとの許可を持ち、合わなければ拒否する。** ランナーは label ごとに許可する `script`・`mode`（argv の `--mode` / 先頭語）・`ret` を持ち、仕様がそれと合わなければ実行せずその段をモデルへ回す。`script` は許可リストと完全一致（パス区切り・`..`・大文字小文字違いを許さない）で、`sha256` は launcher が照合する。
+- **label ごとの許可を持ち、合わなければ実行せず `fail` を返す。** ランナーは label ごとに許可する `script`・`mode`（argv の `--mode` / 先頭語）・`ret`・`fail` を持ち（`EXEC_RULES`）、仕様がそれと 1 つでも合わない・label が表に無いときは、実行もせずモデルへも回さず、その段の `fail` を返す（fail-closed。仕様を持つ段をモデルへ回すと、許可表で縛った形の外でコマンドが動き得るため）。`script` は許可リストと完全一致（パス区切り・`..`・大文字小文字違いを許さない）で、`sha256` は launcher が照合する。生成物が出す全仕様が許可表に合うことと、許可表の全行に生成物の段が当たることは `dev/implement-issue-tree/tests/runner-exec-rules.test.mjs` が縛る。
+- **仕様行そのものが壊れていれば `null`。** 0 行目が `<!-- iit-exec` で始まるのに規定の形で読めない（区切り・JSON・キー・型・`v`・`sha256` の形の不備）ときは、実行もモデルへの回送もせず `null`（未返却と同じ値）を返す。上の「組めない値は仕様なし（0 行目に仕様を置かない）→ モデルへ回す」とは別で、こちらは 0 行目に仕様らしい行があるのに読めない場合である。
 - **多層防御（src 側）**: `agent()` を呼ぶ共通の入口（`guardExecSpecPrompt`）が、`<!-- iit-exec` で始まるのに `execSpecLine` が作った行でないプロンプトの先頭へ改行を足し、偽の仕様行が 0 行目にならないようにする（例外では止めない）。上のランナー側の許可と合わせて、仕様の位置固定だけに頼らない。
 
 ## 何を防ぐか

@@ -16,8 +16,8 @@
 // 失敗は例外（0-5 の方針: throw するのは worktree の作成失敗だけ）。git は引数配列で起動し、シェルを経由しない。
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { mkdirSync, realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 
 const RUN_ID = /^wf_[0-9a-f]{8}-[0-9a-f]{3}$/
 
@@ -75,9 +75,29 @@ export function resolveDefaultBranch(mainRoot) {
 }
 
 /**
+ * linked worktree の git ディレクトリ（`<mainRoot>/.git/worktrees/<name>`）を検証して realpath を返す。
+ * realpath の親がメインの `.git/worktrees` の realpath と一致しなければ例外。Codex アダプタはこの値だけを
+ * permission profile の書き込み可に入れ、worktree の `.git` ファイルは読まない（監査 e670648 の HIGH-2。
+ * `.git` はエージェントが書き換え得るため、中身を信じると書き込み範囲を任意のパスへ広げられる）。
+ */
+export function verifyWorktreeGitdir(mainRoot, gitdir) {
+  if (typeof gitdir !== 'string' || !isAbsolute(gitdir)) throw new Error(`worktree の git ディレクトリが絶対パスでない: ${String(gitdir).slice(0, 80)}`)
+  let real, parent
+  try {
+    real = realpathSync(gitdir)
+    parent = realpathSync(join(mainRoot, '.git', 'worktrees'))
+  } catch (e) {
+    throw new Error(`worktree の git ディレクトリを解決できない: ${String(e?.code ?? e?.message ?? e).slice(0, 80)}`)
+  }
+  if (dirname(real) !== parent || basename(real) === '') throw new Error(`worktree の git ディレクトリがメインの .git/worktrees/ の直下に無い: ${real.slice(0, 160)}`)
+  return real
+}
+
+/**
  * isolation: 'worktree' の worktree を作る。
+ * gitdir は作成直後（エージェントが触る前）に git へ問い合わせて検証した値（verifyWorktreeGitdir）。
  * @param {{ mainRoot: string, runId: string, n: number, baseBranch?: string, fetch?: boolean, lock?: boolean, pid?: number }} p
- * @returns {{ path: string, branch: string, baseBranch: string, baseSha: string }}
+ * @returns {{ path: string, branch: string, baseBranch: string, baseSha: string, gitdir: string }}
  */
 export function createWorktree({ mainRoot, runId, n, baseBranch, fetch = true, lock = true, pid = process.pid }) {
   const { path, branch } = worktreeNames(mainRoot, runId, n)
@@ -93,5 +113,6 @@ export function createWorktree({ mainRoot, runId, n, baseBranch, fetch = true, l
   mkdirSync(join(mainRoot, '.claude', 'worktrees'), { recursive: true })
   git(mainRoot, ['worktree', 'add', '--quiet', '--no-track', '-b', branch, '--', path, baseSha])
   if (lock) git(mainRoot, ['worktree', 'lock', '--reason', `claude agent ${runId}-${n} (pid ${pid})`, '--', path])
-  return { path, branch, baseBranch: base, baseSha }
+  const gitdir = verifyWorktreeGitdir(mainRoot, git(path, ['rev-parse', '--absolute-git-dir']))
+  return { path, branch, baseBranch: base, baseSha, gitdir }
 }

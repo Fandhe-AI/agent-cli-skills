@@ -96,3 +96,26 @@ test('recover-prep.sh は SCRIPT_SHA256 に載り（生成物には 64 桁のハ
   assert.match(dist, /'recover-prep\.sh':'[0-9a-f]{64}'/)
   assert.doesNotMatch(dist, /@@SCRIPT_SHA256/)
 })
+
+// ランナー（Codex 版）の回復の段の git の書き込み先（runner/lib/recover-git.mjs。PR #851 の P1）は、この生成物が組む
+// recover-prep.sh の行を読んで旧 worktree を決める。行の形がずれると黙って書き込みを足さなくなるため、実際のプロンプトで縛る
+test('recoverPrompt × ランナーの recoverGitFor: 生成物が組んだ行から旧 worktree と gitdir を決められる（行の形のずれを検知する）', async () => {
+  const { mkdirSync, mkdtempSync, realpathSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { trackTmp } = await import('./lib/tmp-track.mjs')
+  const { recoverGitFor } = await import('../../../skills/implement-issue-tree/runner/lib/recover-git.mjs')
+  const mr = trackTmp(realpathSync(mkdtempSync(join(tmpdir(), 'iit-recover-git-'))))
+  const wt = join(mr, '.claude', 'worktrees', 'old-1')
+  mkdirSync(wt, { recursive: true })
+  mkdirSync(join(mr, '.git', 'worktrees', 'old-1'), { recursive: true })
+  writeFileSync(join(mr, '.git', 'worktrees', 'old-1', 'gitdir'), `${wt}/.git\n`)
+  const opt = { skillDir: BASE_ARGS.skillDir, mainRoot: mr }
+  // stub-run は src を流すので、ビルダーが埋める sha256 の置き場（@@SCRIPT_SHA256:<名前>@@）を同じ 64 桁の形に置き換える
+  const { SCRIPT_HASH_PLACEHOLDER_RE } = await import('../scripts/build-workflow.mjs')
+  const built = (p) => p.replace(SCRIPT_HASH_PLACEHOLDER_RE, 'c'.repeat(64))
+  const both = built(promptOf((await recoverRun({ ...WITH_BOTH, worktree: wt }, DISCARD)).calls))
+  assert.deepEqual(recoverGitFor('recover:#2', both, opt), { commonDir: join(mr, '.git'), worktree: wt, gitdir: join(mr, '.git', 'worktrees', 'old-1') })
+  const branchOnly = built(promptOf((await recoverRun(BRANCH_ONLY, DISCARD)).calls))
+  assert.deepEqual(recoverGitFor('recover:#2', branchOnly, opt), { commonDir: join(mr, '.git'), worktree: null, gitdir: null })
+})

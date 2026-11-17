@@ -2,8 +2,10 @@
 //
 // 役割: 生成物（src も含め）を変えずに動かす方針のため、プロンプト本文の「StructuredOutput」
 // 「Bash 呼び出し」はそのまま残る。agent-host がエージェントへ渡す前に、この前置きと schema 指示を足す。
-// 純関数だけ（I/O なし）。ツール別の差（Codex は --output-schema で形式を強制できる、OpenCode はできない）は
-// 前置きに持ち込まず、アダプタ側の指示で補う。
+// 純関数だけ（I/O なし）。ツール別の差（Codex は --output-schema で形式を強制できる）は
+// 前置きに持ち込まず、アダプタ側の指示で補う。例外はシェルの注意（buildPreamble の最後の行）: 実測は Codex（モデルの
+// コマンドが利用者のログインシェル zsh で動き、bash へ固定できない。adapters/codex.mjs 冒頭の「シェル」）だが、
+// 契約上アダプタはプロンプトを加工しないため共通の前置きに置く。bash で動くツールにも害は無い。
 //
 // 未確定（agent-host 実装時に決める）: 機械的なラベル（state:load-verify 等）で、64 桁 hex の封筒の転記を
 // モデルにさせるか、ランナーがスクリプトを直接実行するかはオーナー判断待ち。後者になると、該当ラベルには
@@ -13,6 +15,10 @@ import { sanitizeErrorLine } from './schema-validate.mjs'
 
 const SCHEMA_PRETTY_LIMIT = 60_000
 
+/** シェルの注意（ファイル冒頭の例外）。シェルは zsh の可能性があるため、here-doc 経由で bash に渡させ、特殊変数への代入を避けさせる。 */
+export const SHELL_NOTE =
+  "- シェルは zsh の可能性がある。複数行のスクリプトは `bash <<'EOF'` … `EOF` の形で bash に渡して実行し、`status` 等のシェルの特殊変数名に代入しない。"
+
 /** Claude Code の語彙の読み替え文。 */
 export function buildPreamble() {
   return [
@@ -20,6 +26,7 @@ export function buildPreamble() {
     '- 「StructuredOutput」「StructuredOutput ツール」は、最終応答として JSON Schema に従う JSON オブジェクトを 1 つだけ返すことを指す。ツール呼び出しではない。前後に説明文・コードフェンスを付けない。',
     '- 「Bash」「Bash 呼び出し」は、シェルコマンドの実行を指す。',
     '- 指示に無い操作（追加の調査・別の方法での測り直し・値の補完）はしない。コマンドが失敗したときは、指示された失敗の返し方に従う。',
+    SHELL_NOTE,
   ].join('\n')
 }
 
