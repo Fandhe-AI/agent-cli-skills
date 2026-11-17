@@ -13,7 +13,7 @@ paths:
 | 区分 | スキル | 扱い |
 |------|--------|------|
 | 適用対象 | `skills/` の全スキル（下記の適用外を除く） | 本規約に従う |
-| 適用外（Claude Code 専用） | implement-issue-tree・init-claude・update-claude | 本規約の対象外。implement-issue-tree は別計画で追随する |
+| 適用外（Claude Code 専用） | implement-issue-tree・init-claude・update-claude | 本規約の対象外。implement-issue-tree は Codex では専用のランナー（`skills/implement-issue-tree/references/runners.md`）で動かし、SKILL.md 本文は中立化しない（OpenCode は未対応・#853） |
 | 適用対象（ツール名を書いてよい） | init-codex・update-codex・init-opencode・update-opencode | Codex / OpenCode のツール名・固有の仕様を書いてよい。それ以外（Claude Code 専用の記述〔`$ARGUMENTS`・`AskUserQuestion` 等〕の禁止・sandbox 節の必須）は適用対象と同じで、静的検査の対象 |
 
 ## 決定: 手順はツール固有の機構に依存させない

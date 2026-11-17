@@ -21,7 +21,8 @@ skills/                               -- スキル本体（各ディレクトリ
   create-pr/
   implement-issue/
   implement-issue-tree/
-    references/                       -- 引数の詳細（args-reference.md）・opt-in テスト宣言の詳細（optin-tests.md）・base 取り込み専用ループ（base-merge.md）・cancel された run の残存 check の検知と対処（residual-check.md。residual-check-detection テストが (A) のスクリプトを抽出して実行）・自動マージ設計・検証手順・復旧・レポート書式・スクリプト実行の信頼モデル（script-trust-model.md）・テストの流し方と変異テストの使い方（testing.md）
+    references/                       -- 引数の詳細（args-reference.md）・opt-in テスト宣言の詳細（optin-tests.md）・base 取り込み専用ループ（base-merge.md）・cancel された run の残存 check の検知と対処（residual-check.md。residual-check-detection テストが (A) のスクリプトを抽出して実行）・自動マージ設計・検証手順・復旧・レポート書式・スクリプト実行の信頼モデル（script-trust-model.md）・テストの流し方と変異テストの使い方（testing.md）・Codex 版ランナーの使い方・前提・終了コード・制約（runners.md）
+    runner/                           -- Codex 版ランナー（run.mjs が生成物 implement-issue-tree.js を変えずに評価し、agent() だけを adapters/codex.mjs で実装。lib/ にホスト側の直接実行〔agent-host.mjs・cleanup-host.mjs〕・ガード・pin・設定検証、config/default.json。OpenCode は未対応〔#853〕。使い方は references/runners.md）
     sample/                           -- 引数例・ツリー例
     scripts/                          -- 観測（observe-pr.sh・fetch-tree.sh・repo-scan.sh・declared-deps.sh・measure-*.sh）、封筒つき出力と launcher（lib/signed-output.sh・run-verified.sh）、push・PR（pr-push.sh・base-merge.sh・reply-resolve.sh）、マージ前検証（merge-gate.sh・merge-guard-hook.sh）、worktree 掃除と回復（worktree-remove.sh・recover-prep.sh）、状態書き込み（state.sh）、生成物 implement-issue-tree.js（直接編集禁止・開発ファイルは dev/ 側）。純関数は lib/*-lib.sh（source 専用）。各スクリプトの契約は冒頭コメントと references/script-trust-model.md
   implement-review/
@@ -57,7 +58,7 @@ dev/                                  -- 開発専用（配布物 skills/ の外
     tests/                            -- node:test 回帰テスト（lock 不在・未登録・source 欠落・解析失敗の中止、未コミット・未追跡・ignore 対象の検出時にコピー前で中止すること）
   implement-issue-tree/
     scripts/                          -- 開発ファイル（implement-issue-tree.src.js が編集対象）とビルダー（build-workflow.mjs・token-diff.cjs・mangle-identifiers.cjs・alpha-verify.cjs。コメント・空白除去 → トークン照合 → 束縛名の改名 → α 同値の照合の順で、どれかが失敗すれば書かない。生成物は skills/implement-issue-tree/scripts/implement-issue-tree.js）
-    tests/                            -- node:test の回帰テスト（lib の表の単体検査・偽 gh と実 git のサンドボックスによるスクリプト実行・ホスト配線・ビルダーと変異テスト tools/）。流し方と変異テストは skills/implement-issue-tree/references/testing.md
+    tests/                            -- node:test の回帰テスト（lib の表の単体検査・偽 gh と実 git のサンドボックスによるスクリプト実行・ホスト配線・ビルダーと変異テスト tools/）・runner-*.test.mjs（ランナーの単体・偽 codex による結合テスト）。流し方と変異テストは skills/implement-issue-tree/references/testing.md
   create-issue-tree/
     tests/                            -- node:test 回帰テスト（新規作成・--root 両経路とも scripts/ のスクリプトを直接実行・引数検証・edit 失敗の終了コード伝播・ライブラリ契約・Step 6 の呼び出しフェンス検査と 3 レイアウト探索・プレースホルダー残りで中止・ページング・一時ファイル削除・Step 3 雛形への --root マージ・コードフェンス内の行を見出しと誤認しない／閉じ忘れフェンスで中止・update-issue-tree の管理マーカー区間と退避 `<details>` を壊さない／マーカー不整合・同名見出しの重複で中止）
   create-pr/
