@@ -62,6 +62,7 @@ _/iit-runner/<runId>/
     meta.json                  { label, seq, sessionRef, outcome, kind?, status?, reason?, startedAt, endedAt, ... }
     request.json・prompt.txt   モデルへ回した段の入力
     exec.json・stdout.txt・stderr.txt   実行仕様で直接実行した段
+    exec-<script>.json・stdout-<script>.txt・stderr-<script>.txt   ホストが直接実行した worktree 掃除の複合段（script ごと）
     （アダプタのログ: Codex は events-t<N>.jsonl・final-t<N>.txt・stdin-check-t<N>.txt〔write_stdin の事後検知で拒否したとき〕)
 ```
 
@@ -80,6 +81,7 @@ _/iit-runner/<runId>/
 | 項目 | Workflow 版 | ランナー |
 |------|-------------|----------|
 | 機械的な段（状態の読み書き・観測・掃除。プロンプト 0 行目に `<!-- iit-exec v1 … -->` を持つ段） | モデルがコマンドを実行して封筒を返す | モデルを介さず `bash <skillDir>/scripts/run-verified.sh …` を shell なしで直接実行する。label ごとの許可表（`lib/agent-host.mjs` の `EXEC_RULES`）に合わない仕様は実行せずその段の失敗値（表の値）を返し、表に無い label・仕様行が壊れているときは `null`。封筒の照合はホストが従来どおり行う（`references/script-trust-model.md`） |
+| worktree 掃除の複合段（`state:cleanup:#N` のうち、worktree を消して状態の worktree を空にする形。0 行目に仕様が無い） | モデルが `worktree-remove.sh` を実行し、結果の語が removed / not-registered / skipped のときだけ `state.sh merge` で記録を空にする（セッションの権限で書ける） | 読み取りの profile のモデルでは書けないため、モデルへ回さずホストが直接実行する（`lib/cleanup-host.mjs`。PR #851 の codex P1）。2 本の起動行・本文を行単位の完全一致で読み、label の N と本文の numbers を束縛する。対象は `<main>/.claude/worktrees/` の直下（symlink で外へ出ない）で、gitdir があれば `<main>/.git/worktrees/` の直下・commondir がメインの `.git`、状態ファイルの記録がそのパスか空文字のものに限る。読めない・確かめられないときは何も起動せず `{"ok":false,"retained":true,"worktree":""}`。権限を足す形にしないのは、gitdir の commondir 等を書けるようにすると HIGH-1 の経路を開き直すため |
 | model を省いた段（plan・recover） | セッションのモデルを継ぐ | セッションが無いため、設定の `sessionModel`（既定 `opus`）の段として扱う |
 | 並列 | ランタイムの既定（16 か CPU 数 − 2） | `--max-parallel` か `limits.maxParallel`（既定 4）。1 ランのエージェント数は `limits.maxAgents`（既定 1,000）まで |
 | 構造化出力 | ランタイムが schema を強制 | Codex は `--output-schema`（strict 変換）。ランナーが検証し、不適合なら修復を 1 回求め、なお不適合なら `null` |

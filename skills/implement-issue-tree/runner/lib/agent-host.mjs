@@ -28,6 +28,10 @@
 // 形は run.mjs 冒頭の「出力の形」）・request.json・prompt.txt（モデルへ回した段）・exec.json / stdout.txt / stderr.txt
 // （直接実行した段）を書く。アダプタ自身のログ（stderr・JSONL・最終テキスト）は req.logDir の同じ場所に置かれる。
 //
+// worktree 掃除の複合段（PR #851 の codex P1。lib/cleanup-host.mjs）: label が state:cleanup:#N（と :fallback-<model>）で 0 行目が
+// 実行仕様でない呼び出しは、モデルへ回さず、プロンプトの worktree-remove.sh と state.sh の行をホストが検証して順に直接実行する
+// （読めない・対象を確かめられないときは何も実行せず失敗値。読み取りの profile のモデルでは削除も状態の書き込みもできないため）。
+//
 // 呼び出し元: runner/run.mjs（生成物の agent 引数に渡す）と dev/implement-issue-tree/tests/runner-*.test.mjs。
 import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -41,6 +45,7 @@ import { assertSupportedSchema, sanitizeErrorLine, validate } from './schema-val
 import { isRepoSlug, mergeNumberKinds, mergePrNumberOf } from './merge-target.mjs'
 import { checkPins, launcherPinPaths, mergePins, pinFiles } from './pins.mjs'
 import { recoverGitFor } from './recover-git.mjs'
+import { CLEANUP_LABEL, CLEAR_WORDS, checkCleanupTarget, parseCleanupPrompt } from './cleanup-host.mjs'
 import { createSequencer, createWorktree, verifyWorktreeGitdir } from './worktree.mjs'
 
 // ---- 実行仕様 ----
@@ -415,6 +420,70 @@ export function createAgentHost({ adapter, cfg }) {
     return value
   }
 
+  // worktree 掃除の複合段（lib/cleanup-host.mjs）。1 段目（worktree-remove.sh remove）の語が removed / not-registered / skipped の
+  // ときだけ 2 段目（state.sh merge で .items["N"].worktree を空にする）を起動する。2 段目の失敗は ok だけを false にする（プロンプトの
+  // 手順 2 と同じ）。時間切れは 2 本で 1 つの予算。返す値は 1 段目の結果の行から ok・retained・branchSha・worktree の語だけを写したもの
+  async function runHostCleanup(label, schema, prompt, logDir, timeoutMs, rec) {
+    rec.outcome = 'exec-spec'
+    rec.kind = 'host-cleanup'
+    const fail = () => structuredClone(FAIL_WORKTREE)
+    const refuse = (reason) => {
+      log(`⚠️ ${label}: worktree 掃除の段を実行しない（${reason}）`)
+      Object.assign(rec, { status: 'exec-refused', reason })
+      return fail()
+    }
+    const p = parseCleanupPrompt(label, prompt, { skillDir })
+    if (!p.ok) return refuse(`プロンプトを読めない: ${p.reason}`)
+    if (Number.isInteger(cfg.args?.parent) && cfg.args.parent !== p.parent) return refuse('状態ファイルの番号が args.parent と違う')
+    const target = checkCleanupTarget({ mainRoot, path: p.path, parent: p.parent, issue: p.issue })
+    if (!target.ok) return refuse(`対象を確かめられない: ${target.reason}`)
+    const launcher = join(skillDir, 'scripts', 'run-verified.sh')
+    const deadline = Date.now() + timeoutMs
+    const started = Date.now()
+    const step = async (name, sha256, argv, stdin) => {
+      const mismatch = pinMismatch()
+      if (mismatch) return { refused: `pin-mismatch: ${mismatch}` }
+      const input = Buffer.from(stdin, 'utf8')
+      writeLog(logDir, `exec-${name}.json`, { script: name, argv, stdinBytes: input.length, cwd: mainRoot })
+      const r = await runScript('bash', [launcher, sha256, name, ...argv], { cwd: mainRoot, input, timeoutMs: Math.max(1, deadline - Date.now()) }, { label, prompt })
+      writeLog(logDir, `stdout-${name}.txt`, r.stdout ?? '')
+      writeLog(logDir, `stderr-${name}.txt`, r.stderr ?? '')
+      return { r }
+    }
+    const s1 = await step('worktree-remove.sh', p.remove.sha256, p.remove.argv, '')
+    if (s1.refused) return refuse(s1.refused)
+    const raw = interpretExecResult('line:WORKTREE_REMOVE_RESULT', s1.r)
+    const base = { code: s1.r.code, timedOut: s1.r.timedOut, overflow: s1.r.overflow }
+    if (raw === undefined || typeof raw.ok !== 'boolean' || typeof raw.retained !== 'boolean') {
+      log(`⚠️ ${label}: worktree-remove.sh の直接実行が失敗した（終了コード ${s1.r.code}${s1.r.timedOut ? '・時間切れ' : ''}）`)
+      Object.assign(rec, { status: 'exec-fail', step: 'worktree-remove.sh', ...base, durationMs: Date.now() - started })
+      return fail()
+    }
+    const value = {
+      ok: raw.ok,
+      retained: raw.retained,
+      branchSha: typeof raw.branchSha === 'string' && /^[0-9a-f]{40}$/.test(raw.branchSha) ? raw.branchSha : '',
+      worktree: typeof raw.worktree === 'string' && /^[a-z-]{1,40}$/.test(raw.worktree) ? raw.worktree : '',
+    }
+    let cleared = false
+    if (CLEAR_WORDS.includes(value.worktree)) {
+      const s2 = await step('state.sh', p.state.sha256, p.state.argv, p.state.stdin)
+      const st = s2.refused ? undefined : interpretExecResult('line:STATE_RESULT', s2.r)
+      cleared = st?.ok === true
+      if (!cleared) {
+        log(`⚠️ ${label}: 状態ファイルの worktree を空にできなかった（${s2.refused ?? `終了コード ${s2.r.code}`}）`)
+        value.ok = false
+      }
+    }
+    const v = validate(schema, value)
+    if (!v.ok) {
+      Object.assign(rec, { status: 'exec-invalid', errors: v.errors, ...base, durationMs: Date.now() - started })
+      return fail()
+    }
+    Object.assign(rec, { status: 'exec-ok', worktreeWord: value.worktree, stateCleared: cleared, ...base, durationMs: Date.now() - started })
+    return value
+  }
+
   // アダプタ 1 回分。保険の時間切れ（timeoutMs + 猶予）を過ぎたら待つのをやめる（アダプタの停止責務の取りこぼし対策）
   async function callAdapter(req) {
     adapterCalls++
@@ -556,6 +625,7 @@ export function createAgentHost({ adapter, cfg }) {
           return null
         }
         if (parsed.kind === 'spec') return await runDirect(parsed.spec, label, schema, prompt, logDir, timeoutMs, rec)
+        if (CLEANUP_LABEL.test(label) && opts.isolation === undefined) return await runHostCleanup(label, schema, prompt, logDir, timeoutMs, rec)
         return await runModel({ prompt, opts, label, schema, n, logDir, timeoutMs, rec })
       } finally {
         release()
