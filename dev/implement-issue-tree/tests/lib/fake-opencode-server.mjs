@@ -27,6 +27,10 @@
 // FAKE_OC_PARTIAL=<同じ名前の区切り> は、ヘッダと本文の一部だけ返して終わらせない（本文の読み取りが止まる serve の再現）。
 // FAKE_OC_RESET=prompt で、prompt を受理して実行を始めた後、応答を返さずに接続を切る（要求が届いたか分からない通信エラーの再現）。
 // FAKE_OC_IGNORE_TERM=1 で SIGTERM を無視する（SIGKILL でしか止まらない serve の再現）。
+// FAKE_OC_PROMPT_STATUS=<HTTP status> で、prompt にその status を返す。FAKE_OC_PROMPT_STARTED=1 を足すと、実行を始めてから返す
+// （受理の後に 200 以外を返す serve の再現）。足さなければ実行を始めない（受理していない拒否の再現）。
+// FAKE_OC_HANGS_AFTER_IDLE=<名前のカンマ区切り> は、セッションの実行が終わった後（最後のメッセージが idle）だけ、その API が応答を
+// 返さない。名前は message（GET /message）・get（GET /api/session/<id>）。成功の後の件数・本文・usage の取得が止まる serve の再現。
 import { spawn } from 'node:child_process'
 import { appendFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -45,6 +49,7 @@ const PASSWORD = process.env.OPENCODE_PASSWORD
 const HANGS = new Set((process.env.FAKE_OC_HANGS ?? '').split(',').filter(Boolean))
 const PARTIAL = new Set((process.env.FAKE_OC_PARTIAL ?? '').split(',').filter(Boolean))
 const RESET = new Set((process.env.FAKE_OC_RESET ?? '').split(',').filter(Boolean))
+const HANGS_AFTER_IDLE = new Set((process.env.FAKE_OC_HANGS_AFTER_IDLE ?? '').split(',').filter(Boolean))
 const rec = (o) => { if (LOG) appendFileSync(LOG, `${JSON.stringify(o)}\n`) }
 
 rec({ ev: 'start', pid: process.pid, port, hasPassword: Boolean(PASSWORD), config: process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : null, cwd: process.cwd(), ghRepo: process.env.GH_REPO ?? null })
@@ -169,8 +174,14 @@ const server = createServer(async (req, res) => {
       return send(200, { data: true })
     }
     if (!s) return send(404, { error: 'not found' })
+    const idle = s.messages.at(-1)?.type === 'idle'
+    if (req.method === 'GET' && idle && ((sub === '' && HANGS_AFTER_IDLE.has('get')) || (sub === 'message' && HANGS_AFTER_IDLE.has('message')))) return
     if (req.method === 'GET' && sub === '') return send(200, { data: { id: s.id, parentID: s.parentID ?? undefined, tokens: { input: 10, output: 2, reasoning: 0, cache: { read: 5, write: 0 } } } })
     if (req.method === 'POST' && sub === 'prompt') {
+      if (process.env.FAKE_OC_PROMPT_STATUS) {
+        if (process.env.FAKE_OC_PROMPT_STARTED) await startExecution(s, body.text)
+        return send(Number(process.env.FAKE_OC_PROMPT_STATUS), { error: 'fake' })
+      }
       await startExecution(s, body.text)
       if (RESET.has('prompt')) { req.socket.destroy(); return }
       return send(200, { data: { ok: true } })

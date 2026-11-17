@@ -72,6 +72,12 @@ const MARKER_WAIT_MS = 5000
 // そちら。halt 全体（これ + killServe の最大 2.5 秒）を agent-host の watchdog の猶予（timeoutMs + 30 秒）に収める（PR #851 の
 // Bugbot。apiTimeoutMs を丸ごと待つと猶予を超え、halt の最中に run が見放されて、別の run が使い回し始めた serve を止め得た）
 const HALT_INTERRUPT_MS = 5000
+// prompt の 200 以外の応答のうち、受け付けていない（実行を始めていない）と言えるもの。OpenCode v2 の session.prompt が文書化する
+// 拒否（400 InvalidRequestError・401 UnauthorizedError・404 SessionNotFound / LocationNotFound）は、入力の検証・認証・対象の解決で
+// 落ちたもので、受け付けの前に返る。これだけは halt を省く。409 ConflictError（セッションの状態の衝突。何かが動いている可能性が
+// ある）・5xx（受け付けの後の失敗かもしれない）・200 以外の 2xx や 3xx 等の文書に無い応答は、受理されたかを確定できないので
+// 止める（PR #851 の codex P1 の続き）
+const PROMPT_NOT_ADMITTED = new Set([400, 401, 404])
 const MESSAGE_PAGE = 100
 const MESSAGE_PAGE_MAX = 1000 // 100 件 × 1000 ページを超えるセッションは数え切れないものとして拒否する
 
@@ -297,11 +303,11 @@ export function createAdapter(cfg) {
   }
 
   /** セッションの assistant メッセージ中の shell の tool part の件数（cursor でページを送る）。 */
-  async function shellCount(serve, sid) {
+  async function shellCount(serve, sid, deadline) {
     let n = 0
     let q = `type=assistant&order=asc&limit=${MESSAGE_PAGE}`
     for (let page = 0; page < MESSAGE_PAGE_MAX; page++) {
-      const r = await serve.api(`/api/session/${sid}/message?${q}`)
+      const r = await serve.api(`/api/session/${sid}/message?${q}`, { deadline })
       if (r.status !== 200 || !Array.isArray(r.json?.data)) throw new AdapterError('api', `件数の突き合わせでメッセージ取得が HTTP ${r.status}`, { sessionRef: sid })
       for (const m of r.json.data) for (const p of Array.isArray(m?.content) ? m.content : []) if (p?.type === 'tool' && p.name === 'shell') n++
       const next = r.json.cursor?.next
@@ -451,7 +457,10 @@ export function createAdapter(cfg) {
         await haltSession(serve, sid)
         throw new AdapterError(e?.timedOut && Date.now() >= deadline ? 'timeout' : (e.kind ?? 'api'), e.message, { sessionRef: sid }) // run の時間を使い切った期限切れは timeout
       }
-      if (p.status !== 200) throw new AdapterError('api', `prompt が HTTP ${p.status}`, { sessionRef: sid })
+      if (p.status !== 200) {
+        if (!PROMPT_NOT_ADMITTED.has(p.status)) await haltSession(serve, sid) // 受理されたかを確定できない応答は止める
+        throw new AdapterError('api', `prompt が HTTP ${p.status}`, { sessionRef: sid })
+      }
       let idleStreak = 0
       while (!terminal) {
         if (Date.now() >= deadline) return { kind: 'timeout' }
@@ -473,8 +482,8 @@ export function createAdapter(cfg) {
     }
   }
 
-  async function finalText(serve, sid) {
-    const r = await serve.api(`/api/session/${sid}/message?type=assistant&order=desc&limit=5`)
+  async function finalText(serve, sid, deadline) {
+    const r = await serve.api(`/api/session/${sid}/message?type=assistant&order=desc&limit=5`, { deadline })
     if (r.status !== 200) throw new AdapterError('api', `メッセージ取得が HTTP ${r.status}`, { sessionRef: sid })
     for (const m of r.json?.data ?? []) {
       const t = messageText(m)
@@ -483,8 +492,8 @@ export function createAdapter(cfg) {
     return ''
   }
 
-  async function usageOf(serve, sid) {
-    const r = await serve.api(`/api/session/${sid}`).catch(() => null)
+  async function usageOf(serve, sid, deadline) {
+    const r = await serve.api(`/api/session/${sid}`, { deadline }).catch(() => null)
     const tk = r?.json?.data?.tokens
     return tk ? { input: tk.input ?? 0, cached: tk.cache?.read ?? 0, output: tk.output ?? 0, reasoning: tk.reasoning ?? 0 } : undefined
   }
@@ -556,14 +565,19 @@ export function createAdapter(cfg) {
         const msg = t.message || '実行が failed で終了した（詳細なし）'
         throw fail(USAGE_LIMIT_RE.test(msg) ? 'usage-limit' : 'api', msg)
       }
+      // 成功の後の取得（件数・本文・usage）は、ターンの残りの時間で打ち切る。残りが halt と同じ短い期限より短ければその期限
+      // （1 要求ごとの apiTimeoutMs では、ページ送りの件数の取得が watchdog の猶予を超え得るため。PR #851 の Bugbot の続き）。
+      // 打ち切ったら件数・本文は照合できないものとしてこの段を失敗にし（黙って通さない）、usage は無しにする
+      const after = Math.max(deadline, Date.now() + Math.min(apiTimeoutMs, HALT_INTERRUPT_MS))
       // ガードの欠落の検知（冒頭）。記録より実行が多ければ、ガードを通らずに走った shell がある
       let shells
-      try { shells = await shellCount(serve, sid) } catch (e) { throw fail('api', e.message) }
+      try { shells = await shellCount(serve, sid, after) } catch (e) { throw fail('api', `shell の件数を照合できない（出力を使わない）: ${e.message}`) }
       const hooked = hookedCount(serve, sid)
       if (shells > hooked) throw fail('denied', `ガードの欠落: shell の実行 ${shells} 件に対し plugin の記録は ${hooked} 件。出力を使わない`)
-      const text = await finalText(serve, sid)
+      let text
+      try { text = await finalText(serve, sid, after) } catch (e) { throw fail('api', `最終テキストを取得できない: ${e.message}`) }
       try { writeFileSync(join(req.logDir, 'final.txt'), text) } catch { /* 同上 */ }
-      return { text, sessionRef: sid, usage: await usageOf(serve, sid) }
+      return { text, sessionRef: sid, usage: await usageOf(serve, sid, after) }
     },
 
     async close() {

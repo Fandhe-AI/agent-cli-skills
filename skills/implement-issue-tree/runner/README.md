@@ -160,7 +160,16 @@ _/iit-runner/<runId>/
   接続のリセット・本文の切断で要求が届いたか分からないときも）は、セッションを interrupt し、止まったと
   確認できなければ serve を（SIGTERM、続けて SIGKILL で）終了させる。この interrupt の応答は `apiTimeoutMs` と 5 秒の小さいほうまで
   しか待たない（serve の停止を含めて、ホストの保険の時間切れ〔段の時間切れ + 30 秒〕より前に終える）。終了した serve は次の run で
-  作り直す。
+  作り直す。prompt が 200 以外を返したときも、受け付けていないと言える拒否（OpenCode v2 の `session.prompt` が文書化する
+  400・401・404）を除き、受理されたかを確定できないものとして同じく止める（409・5xx・文書に無い応答）。成功の後の取得
+  （shell の件数・最終テキスト・usage）は、ターンの残りの時間（残りが 5 秒より短ければ `apiTimeoutMs` と 5 秒の小さいほう）で
+  打ち切り、件数か最終テキストを取れなければ照合できないものとしてその段を失敗にする（usage は無しにする）。
+- Codex exec・OpenCode serve の本体が終わった直後に、そのプロセスグループを SIGKILL する。`setsid` 等で新しいセッション・
+  プロセスグループへ抜けた子孫は、このグループの停止では止まらない（ランナーは子孫を pid で追わない）。
+- `autoMerge` のランで `args.repo` を照合するマージ先は、メイン worktree での `gh repo view` の解決である。gh の remote の解決は
+  `upstream` を `origin` より先に取るため、fork の構成（`origin` が fork・`upstream` が親）では親が解決先になり、`args.repo` に
+  fork を指定した `autoMerge` のランは終了コード 2 で起動しない（gh の remote の優先順位に基づく判断で、fork の構成の実機では
+  確かめていない）。
 - OpenCode のガードの置き場（`agent-guard.sh`・ランナー専用 plugin・`~/.config/opencode/`・`.opencode/(hooks|plugins?)/`・
   `opencode.json(c)`・ランのガードのログと目印）への書き込みの拒否は、edit 系はパスの照合、shell はコマンド文字列の照合である。
   スキルの置き場（`args.skillDir`。実行仕様の launcher `scripts/run-verified.sh` を含む）は edit 系のパスの照合だけで拒否する。

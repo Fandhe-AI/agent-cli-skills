@@ -675,3 +675,80 @@ test('prompt の通信エラー: interrupt も応答しなければ serve を止
     assert.ok(await dead(pid), '止まったと確かめられないので serve を止めた')
   } finally { await t.adapter.close() }
 })
+
+// --- prompt の 200 以外の応答（PR #851 の codex P1 の続き）: 受理されたかを確定できなければ止める ---
+// OpenCode v2 の session.prompt が文書化する拒否（400 InvalidRequestError・401 UnauthorizedError・404 SessionNotFound /
+// LocationNotFound）だけは受け付けていないと言えるので止めない。それ以外（409 ConflictError・5xx・200 以外の 2xx 等）は止める
+test('prompt の非 200: 受理の後の 500・409・202 では interrupt してから失敗を返す（セッションが動き続けない）', { timeout: 30000 }, async () => {
+  for (const code of [500, 409, 202]) {
+    const t = setup({ env: { FAKE_OC_PROMPT_STATUS: String(code), FAKE_OC_PROMPT_STARTED: '1' } })
+    await t.adapter.start()
+    try {
+      const e = await kindOf(t.adapter.run(t.req({ prompt: '[[HANG]]', timeoutMs: 60000 })))
+      assert.ok(e instanceof AdapterError && e.kind === 'api', `${code}: api で失敗する: ${e?.message}`)
+      assert.ok(t.records().some((r) => r.ev === 'http' && r.path === `/api/session/${e.sessionRef}/interrupt`), `${code}: 受理されたかもしれないセッションを止めた`)
+    } finally { await t.adapter.close() }
+  }
+})
+
+test('prompt の非 200: 受理されたかを確かめられない 500 で interrupt も応答しなければ serve を止める', { timeout: 30000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 500 }, env: { FAKE_OC_PROMPT_STATUS: '500', FAKE_OC_PROMPT_STARTED: '1', FAKE_OC_HANGS: 'interrupt' } })
+  await t.adapter.start()
+  try {
+    const pid = starts(t.records())[0].pid
+    const e = await kindOf(t.adapter.run(t.req({ prompt: '[[HANG]]', timeoutMs: 60000 })))
+    assert.equal(e.kind, 'api')
+    assert.ok(await dead(pid), '止まったと確かめられないので serve を止めた')
+  } finally { await t.adapter.close() }
+})
+
+test('prompt の非 200: 受け付けていない 400・401・404 では止めない（serve を使い回す）', { timeout: 30000 }, async () => {
+  for (const code of [400, 401, 404]) {
+    const t = setup({ env: { FAKE_OC_PROMPT_STATUS: String(code) } })
+    await t.adapter.start()
+    try {
+      const pid = starts(t.records())[0].pid
+      const e = await kindOf(t.adapter.run(t.req({ timeoutMs: 60000 })))
+      assert.equal(e.kind, 'api', String(code))
+      assert.match(e.message, new RegExp(`HTTP ${code}`))
+      assert.equal(t.records().some((r) => r.ev === 'http' && /\/interrupt$/.test(r.path)), false, `${code}: interrupt を送らない`)
+      assert.ok(alive(pid), `${code}: serve は止めない`)
+    } finally { await t.adapter.close() }
+  }
+})
+
+// --- 成功の後の取得の期限（PR #851 の Bugbot の続き）: shell の件数・本文・usage の取得は、ターンの残りの時間（無ければ halt と
+// 同じ短い期限）で打ち切る。件数・本文を取れなければ照合できないものとしてその段を失敗にし、usage は無しにする ---
+test('成功の後の期限: メッセージの取得が応答しなければ、apiTimeoutMs を待たずに件数を照合できないものとして失敗する', { timeout: 60000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 20000 }, env: { FAKE_OC_HANGS_AFTER_IDLE: 'message' } })
+  await t.adapter.start()
+  try {
+    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ prompt: '[[SHELL:1]]', timeoutMs: 400 })))
+    assert.ok(err instanceof AdapterError && err.kind === 'api', `照合できないので失敗する: ${err?.message}`)
+    assert.match(err.message, /件数/)
+    assert.ok(ms < 12000, `apiTimeoutMs（20000 ms）を待たない（${ms} ms）`)
+  } finally { await t.adapter.close() }
+})
+
+test('成功の後の期限: ターンの残りの時間があればその時間で打ち切る', { timeout: 60000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 20000 }, env: { FAKE_OC_HANGS_AFTER_IDLE: 'message' } })
+  await t.adapter.start()
+  try {
+    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ timeoutMs: 8000 })))
+    assert.equal(err?.kind, 'api')
+    assert.ok(ms >= 7000 && ms < 12000, `ターンの残り（約 8000 ms）で打ち切る（${ms} ms）`)
+  } finally { await t.adapter.close() }
+})
+
+test('成功の後の期限: usage の取得が応答しなければ、短い期限で usage 無しの成功を返す', { timeout: 60000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 20000 }, env: { FAKE_OC_HANGS_AFTER_IDLE: 'get' } })
+  await t.adapter.start()
+  try {
+    let value
+    const { ms, err } = await elapsed(async () => { value = await t.adapter.run(t.req({ timeoutMs: 400 })) })
+    assert.equal(err, null, err?.message)
+    assert.match(value.text, /^reply-1:/)
+    assert.equal(value.usage, undefined)
+    assert.ok(ms < 12000, `apiTimeoutMs（20000 ms）を待たない（${ms} ms）`)
+  } finally { await t.adapter.close() }
+})
