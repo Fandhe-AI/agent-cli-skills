@@ -730,13 +730,15 @@ test('成功の後の期限: メッセージの取得が応答しなければ、
   } finally { await t.adapter.close() }
 })
 
-test('成功の後の期限: ターンの残りの時間があればその時間で打ち切る', { timeout: 60000 }, async () => {
-  const t = setup({ toolConfig: { apiTimeoutMs: 20000 }, env: { FAKE_OC_HANGS_AFTER_IDLE: 'message' } })
+// 完了の SSE より先に取りこぼしの突き合わせ（メッセージの取得）へ入ると、その取得も run の deadline まで止まるため、成功の後の
+// 取得は短い期限（5 秒）の側になり得る（全テストの負荷の下で 13 秒を実測）。上限は apiTimeoutMs（60 秒）より十分短い 20 秒で見る
+test('成功の後の期限: ターンの残りの時間があればその時間で打ち切る', { timeout: 90000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 60000 }, env: { FAKE_OC_HANGS_AFTER_IDLE: 'message' } })
   await t.adapter.start()
   try {
     const { ms, err } = await elapsed(() => t.adapter.run(t.req({ timeoutMs: 8000 })))
     assert.equal(err?.kind, 'api')
-    assert.ok(ms >= 7000 && ms < 12000, `ターンの残り（約 8000 ms）で打ち切る（${ms} ms）`)
+    assert.ok(ms >= 7000 && ms < 20000, `ターンの残り（約 8000 ms。最大でそれ + 5 秒）で打ち切り、apiTimeoutMs（60000 ms）を待たない（${ms} ms）`)
   } finally { await t.adapter.close() }
 })
 
