@@ -445,8 +445,10 @@ export function createAdapter(cfg) {
       try {
         p = await serve.api(`/api/session/${sid}/prompt`, { method: 'POST', body: JSON.stringify({ text }), deadline })
       } catch (e) {
-        // 要求が届いたか分からない。セッションが動き続けないよう止め、止まったと確認できなければ serve を終了させる
-        if (e?.timedOut) await haltSession(serve, sid)
+        // 要求が届いたか分からない（期限切れに限らず、受理の後の接続のリセット・本文の切断も同じ。serve.api が投げるのは
+        // 通信の失敗だけ）。agent-host は失敗で並列枠を解放して再試行し得るので、元のセッションが動き続けないよう種類を問わず
+        // 止め、止まったと確認できなければ serve を終了させてから失敗を返す（PR #851 の codex P1）
+        await haltSession(serve, sid)
         throw new AdapterError(e?.timedOut && Date.now() >= deadline ? 'timeout' : (e.kind ?? 'api'), e.message, { sessionRef: sid }) // run の時間を使い切った期限切れは timeout
       }
       if (p.status !== 200) throw new AdapterError('api', `prompt が HTTP ${p.status}`, { sessionRef: sid })

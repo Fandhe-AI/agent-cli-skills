@@ -651,3 +651,27 @@ test('halt の期限: interrupt が応答すれば、時間切れの後も serve
     assert.equal(starts(t.records()).length, 1, '作り直さない')
   } finally { await t.adapter.close() }
 })
+
+// --- prompt の通信エラー（PR #851 の codex P1）: 要求が届いたか分からない失敗は、期限切れでなくてもセッションを止める ---
+test('prompt の通信エラー: 受理の後に接続が切れたら interrupt してから失敗を返す（serve は使い回せる）', { timeout: 20000 }, async () => {
+  const t = setup({ env: { FAKE_OC_RESET: 'prompt' } })
+  await t.adapter.start()
+  try {
+    const pid = starts(t.records())[0].pid
+    const e = await kindOf(t.adapter.run(t.req({ prompt: '[[HANG]]', timeoutMs: 60000 })))
+    assert.ok(e instanceof AdapterError && e.kind === 'api', `api で失敗する: ${e?.message}`)
+    assert.ok(t.records().some((r) => r.ev === 'http' && r.path === `/api/session/${e.sessionRef}/interrupt`), '受理されたかもしれないセッションを止めた')
+    assert.ok(alive(pid), 'interrupt が応答したので serve は止めない')
+  } finally { await t.adapter.close() }
+})
+
+test('prompt の通信エラー: interrupt も応答しなければ serve を止めてから失敗を返す', { timeout: 30000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 500 }, env: { FAKE_OC_RESET: 'prompt', FAKE_OC_HANGS: 'interrupt' } })
+  await t.adapter.start()
+  try {
+    const pid = starts(t.records())[0].pid
+    const e = await kindOf(t.adapter.run(t.req({ prompt: '[[HANG]]', timeoutMs: 60000 })))
+    assert.equal(e.kind, 'api')
+    assert.ok(await dead(pid), '止まったと確かめられないので serve を止めた')
+  } finally { await t.adapter.close() }
+})

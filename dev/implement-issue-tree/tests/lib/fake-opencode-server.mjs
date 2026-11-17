@@ -25,6 +25,7 @@
 // FAKE_OC_NOLISTEN=1 で待ち受けない（起動待ちの serve の再現）。
 // FAKE_OC_HANGS=<名前のカンマ区切り> で、その API が応答を返さない（接続は開いたまま）。名前は prompt・interrupt・delete・active・message。
 // FAKE_OC_PARTIAL=<同じ名前の区切り> は、ヘッダと本文の一部だけ返して終わらせない（本文の読み取りが止まる serve の再現）。
+// FAKE_OC_RESET=prompt で、prompt を受理して実行を始めた後、応答を返さずに接続を切る（要求が届いたか分からない通信エラーの再現）。
 // FAKE_OC_IGNORE_TERM=1 で SIGTERM を無視する（SIGKILL でしか止まらない serve の再現）。
 import { spawn } from 'node:child_process'
 import { appendFileSync, writeFileSync } from 'node:fs'
@@ -43,6 +44,7 @@ const LOG = process.env.FAKE_OC_LOG
 const PASSWORD = process.env.OPENCODE_PASSWORD
 const HANGS = new Set((process.env.FAKE_OC_HANGS ?? '').split(',').filter(Boolean))
 const PARTIAL = new Set((process.env.FAKE_OC_PARTIAL ?? '').split(',').filter(Boolean))
+const RESET = new Set((process.env.FAKE_OC_RESET ?? '').split(',').filter(Boolean))
 const rec = (o) => { if (LOG) appendFileSync(LOG, `${JSON.stringify(o)}\n`) }
 
 rec({ ev: 'start', pid: process.pid, port, hasPassword: Boolean(PASSWORD), config: process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : null, cwd: process.cwd(), ghRepo: process.env.GH_REPO ?? null })
@@ -168,7 +170,11 @@ const server = createServer(async (req, res) => {
     }
     if (!s) return send(404, { error: 'not found' })
     if (req.method === 'GET' && sub === '') return send(200, { data: { id: s.id, parentID: s.parentID ?? undefined, tokens: { input: 10, output: 2, reasoning: 0, cache: { read: 5, write: 0 } } } })
-    if (req.method === 'POST' && sub === 'prompt') { await startExecution(s, body.text); return send(200, { data: { ok: true } }) }
+    if (req.method === 'POST' && sub === 'prompt') {
+      await startExecution(s, body.text)
+      if (RESET.has('prompt')) { req.socket.destroy(); return }
+      return send(200, { data: { ok: true } })
+    }
     if (req.method === 'POST' && sub === 'interrupt') {
       const was = s.active
       clearTimeout(s.timer)

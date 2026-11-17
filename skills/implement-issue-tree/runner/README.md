@@ -156,7 +156,8 @@ _/iit-runner/<runId>/
     利用者設定の確認で補う。
   - `OPENCODE_CONFIG_CONTENT`（ランナーの設定。plugin の目印の nonce・ガードのパスを含む。認証情報ではない）は shell の env に残る。
 - OpenCode の serve への各要求と本文の読み取りには期限がある（`toolConfig.opencode.apiTimeoutMs`。既定は `timeoutsSec.default` と
-  30 秒の小さいほう。run の中の要求は run の残り時間でも打ち切る）。応答が来ないときは、セッションを interrupt し、止まったと
+  30 秒の小さいほう。run の中の要求は run の残り時間でも打ち切る）。応答が来ないとき（prompt の送信では、期限切れに限らず
+  接続のリセット・本文の切断で要求が届いたか分からないときも）は、セッションを interrupt し、止まったと
   確認できなければ serve を（SIGTERM、続けて SIGKILL で）終了させる。この interrupt の応答は `apiTimeoutMs` と 5 秒の小さいほうまで
   しか待たない（serve の停止を含めて、ホストの保険の時間切れ〔段の時間切れ + 30 秒〕より前に終える）。終了した serve は次の run で
   作り直す。
