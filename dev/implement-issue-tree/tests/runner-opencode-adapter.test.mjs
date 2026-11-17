@@ -723,7 +723,7 @@ test('成功の後の期限: メッセージの取得が応答しなければ、
   const t = setup({ toolConfig: { apiTimeoutMs: 20000 }, env: { FAKE_OC_HANGS_AFTER_IDLE: 'message' } })
   await t.adapter.start()
   try {
-    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ prompt: '[[SHELL:1]]', timeoutMs: 400 })))
+    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ prompt: '[[SHELL:1]]', timeoutMs: 3000 }))) // 残りが 5 秒より短いターン（短い期限の経路）。負荷の下でも prompt が収まる長さ
     assert.ok(err instanceof AdapterError && err.kind === 'api', `照合できないので失敗する: ${err?.message}`)
     assert.match(err.message, /件数/)
     assert.ok(ms < 12000, `apiTimeoutMs（20000 ms）を待たない（${ms} ms）`)
@@ -745,7 +745,7 @@ test('成功の後の期限: usage の取得が応答しなければ、短い期
   await t.adapter.start()
   try {
     let value
-    const { ms, err } = await elapsed(async () => { value = await t.adapter.run(t.req({ timeoutMs: 400 })) })
+    const { ms, err } = await elapsed(async () => { value = await t.adapter.run(t.req({ timeoutMs: 3000 })) }) // 同上
     assert.equal(err, null, err?.message)
     assert.match(value.text, /^reply-1:/)
     assert.equal(value.usage, undefined)
