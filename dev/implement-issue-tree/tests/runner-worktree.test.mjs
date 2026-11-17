@@ -510,3 +510,114 @@ test('createWorktree: add の前からあるディレクトリは、add が失�
   assert.equal(readFileSync(join(path, 'mine.txt'), 'utf8'), 'keep\n')
   assert.equal(branches(), br, '今回作られたブランチがあれば消す（元からのブランチは変えない）')
 })
+
+// ---------------------------------------------------------------------------
+// 状態の確認の失敗（不存在と読み取りエラーの区別）。確認できないものは消さない
+// ---------------------------------------------------------------------------
+
+/**
+ * 状態の確認の n 回目だけを指定の終了コードで失敗させる偽 git。種類は branch（refs/heads/<branch> を読む rev-parse・show-ref）と
+ * list（worktree list）。呼ばれた種類を log へ 1 行ずつ書く（worktree add も add として書く）。
+ * addThenFail なら worktree add を本物の git で行った後に終了コード 1 で返す（add が作った後に失敗した状態の再現）。
+ */
+function checkFailGitDir(root, branch, { fail = [], addThenFail = false } = {}) {
+  const dir = join(root, `fakegit-check-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(dir)
+  const log = join(dir, 'calls.log')
+  const cases = fail.map(({ kind, nth, code }) => `  "${kind}:${nth}") echo "fatal: injected ${kind} check failure" >&2; exit ${code} ;;`).join('\n')
+  writeFileSync(join(dir, 'git'), `#!/bin/sh
+kind=other
+case "$1 $2" in
+  "worktree add") kind=add ;;
+  "worktree list") kind=list ;;
+esac
+if [ "$1" = rev-parse ] || [ "$1" = show-ref ]; then
+  for a in "$@"; do [ "$a" = ${JSON.stringify(`refs/heads/${branch}`)} ] && kind=branch; done
+fi
+echo "$kind" >> ${JSON.stringify(log)}
+n=$(grep -cx "$kind" ${JSON.stringify(log)})
+case "$kind:$n" in
+${cases}
+esac
+if [ "$kind" = add ] && [ ${addThenFail ? 1 : 0} = 1 ]; then
+  ${JSON.stringify(REAL_GIT)} "$@"
+  echo "fatal: injected worktree add failure after create" >&2
+  exit 1
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`)
+  chmodSync(join(dir, 'git'), 0o755)
+  return { dir, calls: () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []) }
+}
+
+test('createWorktree: add の前のブランチの確認が読み取りエラー（終了コード 128）なら add へ進まず、既にあるブランチを消さない', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const { branch } = worktreeNames(sb.main, runId, 1)
+  git(sb.main, 'branch', branch, 'HEAD')
+  const sha = git(sb.main, 'rev-parse', `refs/heads/${branch}`)
+  const fake = checkFailGitDir(sb.root, branch, { fail: [{ kind: 'branch', nth: 1, code: 128 }] })
+  const err = await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false }).then(() => null, (e) => e))
+  const r = spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: sb.main, encoding: 'utf8', env: ENV })
+  assert.equal(r.stdout.trim(), sha, '既にあるブランチが残る')
+  assert.ok(!fake.calls().includes('add'), `worktree add へ進まない: ${fake.calls().join(',')}`)
+  assert.match(err?.message ?? '', /worktree add の前の状態/)
+})
+
+test('createWorktree: add の前の登録の確認が失敗したら add へ進まない', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const { branch } = worktreeNames(sb.main, runId, 1)
+  const fake = checkFailGitDir(sb.root, branch, { fail: [{ kind: 'list', nth: 1, code: 128 }] })
+  await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })), /worktree add の前の状態/))
+  assert.ok(!fake.calls().includes('add'), fake.calls().join(','))
+})
+
+test('createWorktree: add の後のブランチの確認が読み取りエラー（終了コード 128）なら、ブランチを消さずに文面へ足す', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const { path, branch } = worktreeNames(sb.main, runId, 1)
+  const fake = checkFailGitDir(sb.root, branch, { fail: [{ kind: 'branch', nth: 2, code: 128 }], addThenFail: true })
+  await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })), (e) => {
+      assert.match(e.message, /^git worktree が失敗した（終了コード 1）: fatal: injected worktree add failure after create/)
+      assert.ok(e.message.includes(`ブランチ ${branch}`), e.message)
+      return true
+    }))
+  assert.equal(git(sb.main, 'rev-parse', `refs/heads/${branch}`).length, 40, '確認できなかったブランチは消さない')
+  // 登録は確認できた（今回現れた）ので片づける
+  assert.ok(!git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${path}`))
+})
+
+test('createWorktree: add の後の登録の確認が失敗したら、worktree もディレクトリも消さずに文面へ足す', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const { path, branch } = worktreeNames(sb.main, runId, 1)
+  const fake = checkFailGitDir(sb.root, branch, { fail: [{ kind: 'list', nth: 2, code: 128 }], addThenFail: true })
+  await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })), (e) => {
+      assert.match(e.message, /injected worktree add failure after create/)
+      assert.ok(e.message.includes(`worktree ${path}`), e.message)
+      return true
+    }))
+  assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${path}`), '確認できなかった登録は消さない')
+  assert.ok(existsSync(path))
+})
+
+test('createWorktree: add の前のパスの確認が ENOENT 以外のエラーなら add へ進まない', { skip: process.getuid?.() === 0 ? 'root では権限のエラーを作れない' : false }, async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const { branch } = worktreeNames(sb.main, runId, 1)
+  const parent = join(sb.main, '.claude', 'worktrees')
+  mkdirSync(parent, { recursive: true })
+  chmodSync(parent, 0o000)
+  const fake = checkFailGitDir(sb.root, branch)
+  try {
+    await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+      assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })), /worktree add の前の状態/))
+  } finally {
+    chmodSync(parent, 0o755)
+  }
+  assert.ok(!fake.calls().includes('add'), fake.calls().join(','))
+})
