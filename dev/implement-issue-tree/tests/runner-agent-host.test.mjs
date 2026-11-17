@@ -539,10 +539,12 @@ test('部品: parseExecSpec・checkExecRule・interpretExecResult', () => {
   assert.deepEqual(interpretExecResult('line:STATE_RESULT', { code: 0, stdout: 'a\nSTATE_RESULT {"ok":false,"reason":"r"}\n\n' }), { ok: false, reason: 'r' })
 })
 
-test('writablePaths（MEDIUM-4）: state:load とそのフォールバックだけに <main>/_/issue-trees を渡す（load-fill・load-verify・他の段は空）', async () => {
-  const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }) })
-  const want = { 'state:load': true, 'state:load:fallback-sonnet': true, 'state:load-fill': false, 'state:load-fill:fallback-sonnet': false, 'state:load-verify': false, 'state:loader': false, 'plan:issue-tree': false, 'merge-exec:#2': false, 'state:load:retry': false }
-  for (const label of Object.keys(want)) await agent('p', { label, schema: SCHEMA })
+test('writablePaths（MEDIUM-4）: state:load とそのフォールバックだけに <main>/_/issue-trees を渡す（load-verify・他の段は空。load-fill はモデルへ回らない）', async () => {
+  // 状態ファイルが無い初回（mainRoot に _/issue-trees/1.json は無い）: state:load は初期化のためモデルへ回る
+  const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { args: { parent: 1 } } })
+  const want = { 'state:load': true, 'state:load:fallback-sonnet': true, 'state:load-fill': null, 'state:load-fill:fallback-sonnet': null, 'state:load-verify': false, 'state:loader': false, 'plan:issue-tree': false, 'merge-exec:#2': false, 'state:load:retry': false }
+  for (const label of Object.keys(want)) await agent('p _/issue-trees/1.json', { label, schema: SCHEMA })
+  assert.deepEqual(calls.map((r) => r.label), Object.keys(want).filter((l) => want[l] !== null), 'state:load-fill はホストが状態ファイルを読む（lib/state-read.mjs）')
   for (const r of calls) assert.deepEqual(r.writablePaths, want[r.label] ? [join(mainRoot, '_', 'issue-trees')] : [], r.label)
 })
 

@@ -44,6 +44,13 @@
 // cwd にする。gh は -R 無し（GH_REPO は flag と数えない）でもローカルにブランチがあるときだけローカル削除を試みるので、git リポジトリの
 // 外ではローカル削除を試みず、リモートのブランチ削除まで進む。置き場がリポジトリの中になってしまうときはマージを許さない（fail-closed）。
 //
+// 状態ファイルの読み込みの段（lib/state-read.mjs）: label が state:load・state:load-fill（と :fallback-<model>）で 0 行目が実行仕様でない
+// 隔離なしの呼び出しは、モデルへ回さず、args の parent から決めた状態ファイル（_/issue-trees/<parent>.json）をホストが読んで、
+// 渡された schema の形（items は番号 → 項目のオブジェクト）で返す（モデルが長い値を書き写し損ねて state:load-verify との照合が
+// 不成立になった）。キーは決めず items を丸ごと返す。状態ファイルがあるのに読めない・形が違う・置き場の外のときは、モデルの段が
+// 返すのと同じ照合不成立に倒れる値（state:load は ok: false・fileExisted: true、state:load-fill は items: {}）を返し、読む対象を
+// 決められないときは null。状態ファイルが無いときの state:load（初回の初期化）だけは従来どおりモデルの段へ回す。
+//
 // 呼び出し元: runner/run.mjs（生成物の agent 引数に渡す）と dev/implement-issue-tree/tests/runner-*.test.mjs。
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -59,6 +66,7 @@ import { isRepoSlug, mergeNumberKinds, mergePrNumberOf } from './merge-target.mj
 import { checkPins, launcherPinPaths, mergePins, pinFiles } from './pins.mjs'
 import { recoverGitFor } from './recover-git.mjs'
 import { CLEANUP_LABEL, CLEAR_WORDS, checkCleanupTarget, parseCleanupPrompt } from './cleanup-host.mjs'
+import { STATE_READ_LABEL, readStateFile, stateDirOf, stateFileOf, stateParentOf } from './state-read.mjs'
 import { createSequencer, createWorktree, gitLocationFreeEnv, relockOwnWorktree, unlockOwnWorktree, verifyWorktreeGitdir } from './worktree.mjs'
 
 // ---- 実行仕様 ----
@@ -328,13 +336,14 @@ function createLimiter(max) {
 }
 
 // 状態ファイルの置き場（<main>/_/issue-trees）を追加の書き込み可にする段（契約の req.writablePaths。監査 e670648 の MEDIUM-4）。
-// モデルの段で状態ファイルを書くのは state:load（無ければ初期化する）だけである。src の runStateAgent が付ける
+// モデルの段で状態ファイルを書くのは state:load（無ければ初期化する）だけである。状態ファイルがあるときの state:load は
+// ホストが読むので（lib/state-read.mjs）、モデルへ回るのは初期化のときだけになる。src の runStateAgent が付ける
 // `:fallback-<model>` を含め、読み取り専用の state:load-fill・直接実行の state:load-verify には一致させない
 const STATE_LOAD_LABEL = /^state:load(?::fallback-[a-z0-9]+)?$/
 
 /** label ごとの追加の書き込み可パス（絶対パスの配列）。 */
 export function writablePathsFor(label, mainRoot) {
-  return STATE_LOAD_LABEL.test(label) ? [join(mainRoot, '_', 'issue-trees')] : []
+  return STATE_LOAD_LABEL.test(label) ? [stateDirOf(mainRoot)] : []
 }
 
 // ツリーの取得（PR #851 の P1）: plan:issue-tree（と -retry）は fetch-tree.sh --root で自分の TMPDIR に
@@ -611,6 +620,51 @@ export function createAgentHost({ adapter, cfg }) {
     return value
   }
 
+  // 状態ファイルの読み込みの段（lib/state-read.mjs）。値を返したら終わり、undefined ならモデルの段へ回す
+  // （状態ファイルが無いときの state:load = 初回の初期化だけ）
+  function runHostStateRead(label, schema, prompt, logDir, rec) {
+    const fill = STATE_READ_LABEL.exec(label)[1] === '-fill'
+    const started = Date.now()
+    const direct = (status, extra = {}) => Object.assign(rec, { outcome: 'exec-spec', direct: 'host-state-read', status, durationMs: Date.now() - started }, extra)
+    // 固定の食い違いの後は、モデルの段と同じく何もせず null
+    const mismatch = pinMismatch()
+    if (mismatch) {
+      direct('exec-refused', { reason: `pin-mismatch: ${mismatch}` })
+      return null
+    }
+    const parent = stateParentOf(cfg.args)
+    const rel = parent === null ? null : stateFileOf(parent)
+    // 読む対象を決められない・プロンプトが同じ状態ファイルを指さない: 何も読まない
+    if (rel === null || !prompt.includes(rel)) {
+      const reason = rel === null ? 'args の parent から状態ファイルを決められない' : 'プロンプトが args の parent の状態ファイルを指さない'
+      log(`⚠️ ${label}: 状態ファイルを読まない（${reason}）`)
+      direct('exec-refused', { reason })
+      return null
+    }
+    const r = readStateFile({ mainRoot, parent })
+    writeLog(logDir, 'state-read.json', { file: rel, kind: r.kind, ...(r.kind === 'bad' ? { reason: r.reason } : {}), ...(r.kind === 'ok' ? { keys: Object.keys(r.items).length } : {}) })
+    if (r.kind === 'absent' && !fill) {
+      log(`${label}: 状態ファイル（${rel}）が無いため、初期化をモデルの段へ回す`)
+      return undefined
+    }
+    let value
+    if (r.kind === 'ok') {
+      value = fill ? { items: r.items } : { ok: true, fileExisted: true, items: r.items, highWaterBytes: r.highWaterBytes, highWaterVersion: r.highWaterVersion }
+    } else {
+      // モデルの段が返すのと同じ照合不成立に倒れる値（state:load は loadState が停止し、state:load-fill は項目が未照合のまま残る）
+      if (r.kind === 'bad') log(`⚠️ ${label}: 状態ファイル（${rel}）を読めない（${r.reason}）`)
+      value = fill ? { items: {} } : { ok: false, fileExisted: true, items: {}, highWaterBytes: 0, highWaterVersion: 0 }
+    }
+    const v = validate(schema, value)
+    if (!v.ok) {
+      log(`⚠️ ${label}: 状態ファイルから作った値が schema に適合しないため null を返す`)
+      direct('exec-invalid', { errors: v.errors })
+      return null
+    }
+    direct(r.kind === 'ok' ? 'exec-ok' : 'exec-fail', { stateFile: r.kind, ...(r.kind === 'bad' ? { reason: r.reason } : {}) })
+    return value
+  }
+
   // アダプタ 1 回分。保険の時間切れ（timeoutMs + 猶予）を過ぎたら待つのをやめる（アダプタの停止責務の取りこぼし対策）
   async function callAdapter(req) {
     adapterCalls++
@@ -774,6 +828,10 @@ export function createAgentHost({ adapter, cfg }) {
         }
         if (parsed.kind === 'spec') return await runDirect(parsed.spec, label, schema, prompt, logDir, timeoutMs, rec)
         if (CLEANUP_LABEL.test(label) && opts.isolation === undefined) return await runHostCleanup(label, schema, prompt, logDir, timeoutMs, rec)
+        if (STATE_READ_LABEL.test(label) && opts.isolation === undefined) {
+          const value = runHostStateRead(label, schema, prompt, logDir, rec)
+          if (value !== undefined) return value
+        }
         const using = { path: null, mergeCwd: null }
         try {
           return await runModel({ prompt, opts, label, schema, n, logDir, timeoutMs, rec, using })

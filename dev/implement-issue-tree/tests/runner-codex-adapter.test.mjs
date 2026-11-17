@@ -347,20 +347,20 @@ test('buildProfileArgs: writablePaths だけが追加の書き込み可になり
 })
 
 test('writablePaths（MEDIUM-4）: agent-host の state:load（とフォールバック）だけ iit_read に <main>/_/issue-trees の write が入る（27c90eb の初期化の経路）。不正な値は denied', async () => {
-  const t = setup({ turns: [okTurn(), okTurn(), okTurn(), okTurn()] })
+  const t = setup({ turns: [okTurn(), okTurn(), okTurn()] })
   const prof = (c) => c.argv.find((x) => x.startsWith('permissions='))
   const sd = join(t.mainRoot, '_', 'issue-trees')
   const { createAgentHost } = await import('../../../skills/implement-issue-tree/runner/lib/agent-host.mjs')
   const { loadConfig } = await import('../../../skills/implement-issue-tree/runner/lib/models.mjs')
-  const host = createAgentHost({ adapter: t.adapter, cfg: { config: loadConfig(), skillDir: SKILL_DIR, mainRoot: t.mainRoot, runId: 'wf_0123abcd-4ef', runDir: t.runDir } })
+  const host = createAgentHost({ adapter: t.adapter, cfg: { config: loadConfig(), skillDir: SKILL_DIR, mainRoot: t.mainRoot, runId: 'wf_0123abcd-4ef', runDir: t.runDir, args: { parent: 1 } } })
   const S = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }
-  for (const label of ['state:load', 'state:load:fallback-sonnet', 'state:load-fill', 'plan:issue-tree']) await host('p', { label, schema: S })
+  // 状態ファイルが無い初回: state:load（とフォールバック）は初期化のためモデルへ回る。state:load-fill はホストが読み（lib/state-read.mjs）、モデルへ回らない
+  for (const label of ['state:load', 'state:load:fallback-sonnet', 'state:load-fill', 'plan:issue-tree']) await host('p _/issue-trees/1.json', { label, schema: S })
   const ps = t.calls().map(prof)
-  assert.equal(ps.length, 4)
+  assert.equal(ps.length, 3)
   assert.ok(ps[0].includes(`${JSON.stringify(sd)}="write"`), 'state:load')
   assert.ok(ps[1].includes(`${JSON.stringify(sd)}="write"`), 'state:load:fallback-sonnet')
-  assert.equal(ps[2].includes('issue-trees'), false, 'state:load-fill')
-  assert.equal(ps[3].includes('issue-trees'), false, 'plan:issue-tree')
+  assert.equal(ps[2].includes('issue-trees'), false, 'plan:issue-tree')
   for (const bad of [['rel/x'], ['/a/../b'], [1], 'x']) await rejectsKind(t.adapter.run(t.req({ name: 'wp', writablePaths: bad })), 'denied')
 })
 

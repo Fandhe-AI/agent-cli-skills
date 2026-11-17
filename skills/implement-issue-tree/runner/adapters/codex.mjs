@@ -56,7 +56,8 @@
 // permission profile は 2 種（:read-only を土台に、ネットワークは有効）:
 //   iit_read: worktree ではない cwd（メイン worktree。観測・状態・計画）。cwd は読み取りのみ・TMPDIR だけ書ける。
 //   どちらの profile にも req.writablePaths（契約。agent-host が label ごとに決める）を write で足す。いまは state:load
-//   （とそのフォールバック）だけが <main>/_/issue-trees を受け取る（モデルの段で状態ファイルを初期化する。Phase 3 の通しで、
+//   （とそのフォールバック）だけが <main>/_/issue-trees を受け取る（モデルの段で状態ファイルを初期化する。状態ファイルがあるときの
+//   state:load は agent-host が直接読むので〔lib/state-read.mjs〕、モデルへ回るのは状態ファイルが無い初回だけ。Phase 3 の通しで、
 //   無いと非 dryRun の初回が「状態ファイルの初期化に失敗」で止まった〔27c90eb〕。全段で常時 write にしていたのは
 //   監査 e670648 の MEDIUM-4 で、plan・monitor・merge-exec 等が状態ファイルを書き換えられた）。
 //   req.readTmpOf（agent-host がツリーのページの段 plan:issue-tree-page-N にだけ、ツリーの段の logDir を渡す）は、その段の
