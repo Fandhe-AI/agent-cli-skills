@@ -68,7 +68,8 @@ const PLUGIN_DIR = join(dirname(fileURLToPath(import.meta.url)), 'opencode-plugi
 export const MERGE_RES = Object.freeze([MERGE_EXEC_COMMAND.source])
 
 const MARKER_WAIT_MS = 5000
-// halt（時間切れ・ask・prompt の通信エラーの後のセッションの停止）で interrupt の応答を待つ上限。apiTimeoutMs がこれより短ければ
+// halt（時間切れ・ask・prompt の通信エラーと受理を確定できない 200 以外の応答の後のセッションの停止）で interrupt の応答を待つ上限。成功の後の
+// 件数・本文・usage の取得も、ターンの残りがこれより短ければこの長さで打ち切る。apiTimeoutMs がこれより短ければ
 // そちら。halt 全体（これ + killServe の最大 2.5 秒）を agent-host の watchdog の猶予（timeoutMs + 30 秒）に収める（PR #851 の
 // Bugbot。apiTimeoutMs を丸ごと待つと猶予を超え、halt の最中に run が見放されて、別の run が使い回し始めた serve を止め得た）
 const HALT_INTERRUPT_MS = 5000

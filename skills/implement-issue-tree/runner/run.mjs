@@ -238,8 +238,8 @@ export async function main(argv, deps = {}) {
   //   - args.repo が無く、継いだ GH_REPO が解決先と違う: 観測・PR 作成は GH_REPO のリポジトリで、マージ（と merge-exec の段の
   //     検証）は解決先で行われ、PR 番号を別のリポジトリへ当てることになる → 前提の不足（3）
   // autoMerge でないランは照合しない（gh も呼ばない）。解決先をどこにも使わず、push は pr-push.sh の routing ガード（origin の URL と
-  // --repo の照合）が fail-closed で止める。gh repo view の解決は remote の名前の優先（upstream が origin より先）に従うため、
-  // fork の構成（origin が fork・upstream が親）で args.repo に fork を指定した、これまで動いていたランを拒否してしまう。
+  // --repo の照合）が fail-closed で止める。gh repo view の解決は remote の名前の優先（upstream が origin より先）に従うと見ており（fork の構成の実機では未確認）、
+  // fork の構成（origin が fork・upstream が親）で args.repo に fork を指定した、これまで動いていたランを拒否し得る。
   // 決められなければ前提の不足（3）で止める（自動マージを黙って無効にしたままランを進めない）
   let repo = null
   if (args.autoMerge === true) {
