@@ -49,9 +49,10 @@ jobs:
   js-tests:
     name: JS unit tests
     runs-on: ubuntu-latest
-    # 依存インストールなしの軽量ジョブ。hang 検知の保険として打ち切る。main で 4 分 20 秒前後かかり、
-    # 5 分では負荷の高い runner やテスト追加で取り消されるため 15 分にする（2026-11-16）。
-    timeout-minutes: 15
+    # 依存インストールなしの軽量ジョブ。hang 検知の保険として打ち切る。2026-11-17 時点で 8〜14 分
+    # （#848 657 秒・#850 681 秒・#854 775 秒・#855 820 秒）かかり、15 分では負荷の高い runner や
+    # テスト追加で取り消される（#855 の初回は 15 分で CANCELLED）。安定のため 30 分にする。
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
