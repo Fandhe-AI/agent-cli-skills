@@ -81,12 +81,12 @@ _/iit-runner/<runId>/
 | 項目 | Workflow 版 | ランナー |
 |------|-------------|----------|
 | 機械的な段（状態の読み書き・観測・掃除。プロンプト 0 行目に `<!-- iit-exec v1 … -->` を持つ段） | モデルがコマンドを実行して封筒を返す | モデルを介さず `bash <skillDir>/scripts/run-verified.sh …` を shell なしで直接実行する。label ごとの許可表（`lib/agent-host.mjs` の `EXEC_RULES`）に合わない仕様は実行せずその段の失敗値（表の値）を返し、表に無い label・仕様行が壊れているときは `null`。封筒の照合はホストが従来どおり行う（`references/script-trust-model.md`） |
-| worktree 掃除の複合段（`state:cleanup:#N` のうち、worktree を消して状態の worktree を空にする形。0 行目に仕様が無い） | モデルが `worktree-remove.sh` を実行し、結果の語が removed / not-registered / skipped のときだけ `state.sh merge` で記録を空にする（セッションの権限で書ける） | 読み取りの profile のモデルでは書けないため、モデルへ回さずホストが直接実行する（`lib/cleanup-host.mjs`。PR #851 の codex P1）。2 本の起動行・本文を行単位の完全一致で読み、label の N と本文の numbers を束縛する。対象は `<main>/.claude/worktrees/` の直下（symlink で外へ出ない）で、gitdir があれば `<main>/.git/worktrees/` の直下・commondir がメインの `.git`、状態ファイルの記録がそのパスか空文字のものに限る。読めない・確かめられないときは何も起動せず `{"ok":false,"retained":true,"worktree":""}`。権限を足す形にしないのは、gitdir の commondir 等を書けるようにすると HIGH-1 の経路を開き直すため |
+| worktree 掃除の複合段（`state:cleanup:#N` のうち、worktree を消して状態の worktree を空にする形。0 行目に仕様が無い） | モデルが `worktree-remove.sh` を実行し、結果の語が removed / not-registered / skipped のときだけ `state.sh merge` で記録を空にする（セッションの権限で書ける） | 読み取りの profile のモデルでは書けないため、モデルへ回さずホストが直接実行する（`lib/cleanup-host.mjs`。PR #851 の codex P1）。2 本の起動行・本文を行単位の完全一致で読み、label の N と本文の numbers を束縛する。対象は `<main>/.claude/worktrees/` の直下（symlink で外へ出ない）で、gitdir があれば `<main>/.git/worktrees/` の直下・commondir がメインの `.git`、状態ファイルの記録がそのパスか空文字のものに限る。discard は結びつけ（`--expect-branch`・`--branch`・`--require-missing` のどれか）が付いた形だけを読む（無い形は HEAD を照合せずに消すため）。読めない・確かめられないときは何も起動せず `{"ok":false,"retained":true,"worktree":""}`。権限を足す形にしないのは、gitdir の commondir 等を書けるようにすると HIGH-1 の経路を開き直すため |
 | model を省いた段（plan・recover） | セッションのモデルを継ぐ | セッションが無いため、設定の `sessionModel`（既定 `opus`）の段として扱う |
 | 並列 | ランタイムの既定（16 か CPU 数 − 2） | `--max-parallel` か `limits.maxParallel`（既定 4）。1 ランのエージェント数は `limits.maxAgents`（既定 1,000）まで |
-| 構造化出力 | ランタイムが schema を強制 | Codex は `--output-schema`（strict 変換）。ランナーが検証し、不適合なら修復を 1 回求め、なお不適合なら `null` |
+| 構造化出力 | ランタイムが schema を強制 | Codex は `--output-schema`（strict 変換。strict では全キーが必須になるため、元が任意のキーは null を許し、説明に「省くときは null」を足して、戻すときに null の欄を落とす）。ランナーが検証し、不適合なら修復を 1 回求め、なお不適合なら `null` |
 | ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）が `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。形はその段の PR 番号で具体化し（`mergeExecCommandFor`。番号はホストのプロンプトから取り、決まらなければその段ではマージを許さない）、子の `GH_REPO` を対象リポジトリに固定する（`autoMerge` のランだけ、起動前に `gh repo view` で決める。決められなければ終了コード 3）。同じ `autoMerge` のランでは、生成物が merge-gate・push・観測に使う `args.repo` をこの値と照合し、違えば終了コード 2（検証と実行の対象がずれる）。`args.repo` が無ければ、継いだ `GH_REPO` が違うとき終了コード 3（観測・PR 作成は `GH_REPO` のリポジトリで行われるため）。`autoMerge` でないランは照合しない（push は `pr-push.sh` の routing ガードが origin と `args.repo` を照合する）。Codex は merge 段の `codex exec` の env に固定する。ターンの後に hook のログと `command_execution` の件数を照合する。拒否の文言は理由コードを含み、`obfuscated` と `credential-read`、マージを許す段の `merge-guard` だけは言い直しの手がかりを 1 文足す（止められた操作を別の綴りで迂回しないことを添える）。マージを許す段は、リポジトリの外の空ディレクトリ（`os.tmpdir()` の下。段の後に消す）を cwd にして `--skip-git-repo-check` で起動する（`gh pr merge --delete-branch` がローカルのブランチを見つけず、sandbox で書けない `.git/refs` の削除を試みないように。ローカルの head のブランチは残る）。置き場がリポジトリの中になるときはその段ではマージを許さない |
-| 時間切れ | ランタイム任せ | 段ごと（`timeoutsSec.byPhase`。既定は Plan 20 分・Implement 30 分・Review 20 分 等）。超えたらプロセスを止めて `null`。隔離 worktree を作る git は `timeoutsSec.worktree`（秒。`fetch` は origin との通信を含む fetch で既定 300 = 5 分、`git` はそれ以外の 1 回ごとで既定 120 = 2 分。どちらも省略可・正の整数）を上限にし、超えたらプロセスグループを止めて worktree の作成の失敗（例外）にする |
+| 時間切れ | ランタイム任せ | 段ごと（`timeoutsSec.byPhase`。既定は Plan 20 分・Implement 30 分・Review 20 分 等）。超えたらプロセスを止めて `null`。隔離 worktree を作る git は `timeoutsSec.worktree`（秒。`fetch` は origin との通信を含む fetch で既定 300 = 5 分、`git` はそれ以外の 1 回ごとで既定 120 = 2 分。どちらも省略可・正の整数）を上限にし、超えたらプロセスグループへ SIGTERM を送り（git が作りかけの `*.lock` を片づけられるように）、git が終わるか 2 秒の猶予を過ぎたら（そのときは SIGKILL して）worktree の作成の失敗（例外）にする。標準出力が 1 MiB を超えた git は、切った出力を使わずに失敗として扱う |
 
 ## 自動マージと後片づけ
 
@@ -97,8 +97,8 @@ _/iit-runner/<runId>/
   アダプタの起動より前に登録し、終了コードは 128 + シグナル番号。想定外の例外で落ちたときも、既知のプロセスグループは
   終了時に同期で SIGKILL する（セッションの削除は行えないことがある）。Codex の exec の本体が終わったときは
   （正常終了・異常終了・SIGTERM で本体だけが終わった場合を含む）、その場で同じプロセスグループへ SIGKILL を送り、残った子・孫を
-  止める。実行仕様の段の子も同じく、終わったときにプロセスグループへ SIGKILL を送り、時間切れ・出力超過で止めた後は猶予
-  （2 秒）を過ぎても標準出力が閉じなければ待たずに失敗として決着する。隔離 worktree の後始末はホストの判断に従う。
+  止める。Codex の exec と実行仕様の段の子は、時間切れ・出力超過で止めた後、猶予（2 秒。exec の時間切れは猶予 + 1 秒）を過ぎても
+  標準出力が閉じなければ待たずに失敗として決着する。実行仕様の段の子も、終わったときにプロセスグループへ SIGKILL を送る。隔離 worktree の後始末はホストの判断に従う。
 - 隔離 worktree は作成時にランナーの pid で lock する（`claude agent <runId>-<n> (pid <pid>)`）。`worktree-remove.sh` を起動するのも同じ
   プロセスなので、そのままではスクリプトから lock が生存と見え、旧 worktree が `retained-locked` で残る。そこで `worktree-remove.sh` を
   直接実行する段（掃除の複合段・`state:cleanup:#N` の remove・最終スイープ）の前に、対象のうち「このランナーが作り、いま隔離の段が使って
@@ -154,6 +154,8 @@ _/iit-runner/<runId>/
 - ツールの出力（コマンドの出力・エージェントが読んだファイルの中身・応答）は、`_/iit-runner/<runId>/agents/*/` の
   `events*.jsonl` 等にそのまま残る。秘密を出力したコマンドがあれば、それも残る。`_/` は gitignore 済みだが、ログを共有・
   転記する前に中身を確かめ、要らなくなったら消す。
+- メインの `.git`（または `.git/worktrees`）が symlink のリポジトリでは、隔離 worktree を作れない（作成時の gitdir の検査が Codex
+  アダプタと同じ基準で拒否し、作った worktree とブランチを片づけて例外にする。隔離の段は `null` になる）。
 - Codex exec の本体が終わった直後に、そのプロセスグループを SIGKILL する。`setsid` 等で新しいセッション・
   プロセスグループへ抜けた子孫は、このグループの停止では止まらない（ランナーは子孫を pid で追わない）。
 - `autoMerge` のランで `args.repo` を照合するマージ先は、メイン worktree での `gh repo view` の解決である。gh の remote の解決は
