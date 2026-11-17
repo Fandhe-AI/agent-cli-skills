@@ -286,11 +286,61 @@ test('killGitSync: 実行中の fetch のプロセスグループを同期で止
   assert.ok(Date.now() - t0 < 5000)
 })
 
+/** fetch だけを差し替える偽 git。fetch は自分の lock ファイルを作って応答を待つ。onTerm が 'cleanup' なら SIGTERM で lock を消して終わり、'ignore' なら SIGTERM を無視する。 */
+function termGitDir(root, onTerm) {
+  const dir = join(root, `fakegit-term-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(dir)
+  const lock = join(dir, 'origin-main.lock')
+  const pidFile = join(dir, 'fetch.pid')
+  const trap = onTerm === 'cleanup' ? `trap 'rm -f ${JSON.stringify(lock)}; exit 143' TERM` : "trap '' TERM"
+  writeFileSync(join(dir, 'git'), `#!/bin/sh
+if [ "$1" = fetch ]; then
+  echo $$ > ${JSON.stringify(pidFile)}
+  : > ${JSON.stringify(lock)}
+  ${trap}
+  sleep 30 &
+  wait $!
+  sleep 30 &
+  wait $!
+  exit 1
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`)
+  chmodSync(join(dir, 'git'), 0o755)
+  return { dir, lock, pidFile }
+}
+
+test('createWorktree: fetch の時間切れはまず SIGTERM を送り、git が lockfile を片づけて終わるのを待ってから例外にする（いきなり SIGKILL しない）', async () => {
+  const sb = sandbox()
+  const fake = termGitDir(sb.root, 'cleanup')
+  await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetchTimeoutMs: 300 })), /git fetch が 300 ms で時間切れ/))
+  // 例外の時点で片づけが済んでいる（後続の git と死にかけの git が競合しない）
+  assert.equal(existsSync(fake.lock), false, 'SIGTERM で git が自分の lock を消している')
+})
+
+test('createWorktree: SIGTERM を無視する git は猶予（注入）の後に SIGKILL し、終了を待たずに例外にする', async () => {
+  const sb = sandbox()
+  const fake = termGitDir(sb.root, 'ignore')
+  const t0 = Date.now()
+  await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetchTimeoutMs: 200, gitKillGraceMs: 200 })), /git fetch が 200 ms で時間切れ/))
+  const elapsed = Date.now() - t0
+  assert.ok(elapsed < 3000, `時間切れ + 猶予で戻り、fetch の 30 秒を待たない（${elapsed} ms）`)
+  const pid = Number(readFileSync(fake.pidFile, 'utf8').trim())
+  let alive = true
+  for (let i = 0; i < 40 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 25)) } catch { alive = false }
+  }
+  assert.equal(alive, false, 'SIGTERM を無視した git も残らない')
+})
+
 test('createWorktree: 時間切れの値が正の整数でなければ例外', async () => {
   const sb = sandbox()
   for (const bad of [0, -1, 1.5, '100', NaN]) {
     await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, fetchTimeoutMs: bad }), /fetchTimeoutMs/, String(bad))
     await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, gitTimeoutMs: bad }), /gitTimeoutMs/, String(bad))
+    await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, gitKillGraceMs: bad }), /gitKillGraceMs/, String(bad))
   }
 })
 

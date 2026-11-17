@@ -22,7 +22,8 @@
 // git の環境: 継いだ GIT_DIR 等（gitLocationFreeEnv）を外して起動する。残すと git は cwd ではなくその変数が指す
 // リポジトリを対象にする（シェル側は worktree-remove.sh・recover-prep.sh が unset している）。
 // createWorktree の git は非同期で、時間切れ（fetch とそれ以外で別の上限）を付ける。origin が応答しないときに
-// イベントループごと止めない（並行するエージェントのタイマ・シグナル処理・並列の枠を止めない）。
+// イベントループごと止めない（並行するエージェントのタイマ・シグナル処理・並列の枠を止めない）。時間切れはまず SIGTERM を送り
+// （git が *.lock を片づけられるように）、終わらなければ猶予の後に SIGKILL する。
 // 同じ mainRoot への createWorktree の git（fetch〜add〜lock〜gitdir の検証、失敗時の片づけまで）はキュー（serialize）で
 // 1 本ずつ流す。非同期にしたことで並列の呼び出しが同じ origin/<既定> を同時に更新したり、片づけ（worktree remove・
 // branch -D）が別の worktree add と重なったりして、ref・管理領域・packed-refs の lock の競合で失敗し得るため。
@@ -87,6 +88,8 @@ function git(cwd, args, { allowFail = false } = {}) {
 /** createWorktree の git の既定の上限（fetch は origin との通信を含むので長め）。設定の timeoutsSec.worktree で変えられる（run.mjs）。 */
 export const DEFAULT_FETCH_TIMEOUT_MS = 300_000
 export const DEFAULT_GIT_TIMEOUT_MS = 120_000
+/** 時間切れの SIGTERM から SIGKILL までの既定の猶予（adapters/codex.mjs の killGraceMs・agent-host の spawnScript と同じ値）。 */
+export const DEFAULT_GIT_KILL_GRACE_MS = 2000
 // 標準出力・標準エラーの保持の上限。標準出力は rev-parse の 1 行のほか、isRegistered・unlockOwnWorktree・relockOwnWorktree が
 // `worktree list --porcelain` の全体を読む。切った一覧では登録を「無い」と読み違えるため、標準出力が上限を超えた呼び出しは
 // 成功として返さない（gitAsync）。標準エラーは失敗文の 1 行目だけを使うので、超えても切るだけにする
@@ -106,12 +109,15 @@ export function killGitSync() {
 
 /**
  * 非同期の git。detached（setsid）で制御端末から外し、ssh が /dev/tty で尋ねて止まらないようにする。
- * timeoutMs を超えたらプロセスグループへ SIGKILL を送り、終了を待たずに例外にする（パイプを握った孫で待ち続けない）。
+ * timeoutMs を超えたらプロセスグループへ SIGTERM を送る（git は SIGTERM なら作りかけの *.lock〔index.lock・refs の lock〕を消して終わる。
+ * SIGKILL では消えずに残り、後続の git が lock で失敗する）。git が終わったら（exit）、グループの残りを SIGKILL してから例外にする
+ * （後続の git〔add の失敗の片づけ等〕が死にかけの git と重ならないように）。killGraceMs を過ぎても終わらなければ SIGKILL を送り、
+ * 終了を待たずに例外にする（パイプを握った孫で待ち続けない。close ではなく exit で決着するのも同じ理由）。
  * 成功なら標準出力（前後の空白を除く）、allowFail で失敗なら null。allowExit に挙げた終了コードも null（それ以外の失敗は例外）。
  * 標準出力が MAX_GIT_OUTPUT_BYTES を超えたら、終了コードによらず失敗にする（allowFail なら null、そうでなければ例外。
  * allowExit の null は「無い」の意味で使われるため、そちらでは null にしない）。
  */
-function gitAsync(cwd, args, { timeoutMs, allowFail = false, allowExit = [] }) {
+function gitAsync(cwd, args, { timeoutMs, killGraceMs = DEFAULT_GIT_KILL_GRACE_MS, allowFail = false, allowExit = [] }) {
   return new Promise((resolve, reject) => {
     const spawnFailure = (e) => new Error(`git ${args[0]} を起動できない: ${String(e?.code ?? e?.message ?? e).slice(0, 80)}`)
     let child
@@ -127,32 +133,49 @@ function gitAsync(cwd, args, { timeoutMs, allowFail = false, allowExit = [] }) {
     let outBytes = 0
     let errBytes = 0
     let settled = false
+    let timedOut = false
     let timer = null
+    let killTimer = null
     const settle = (fn) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(killTimer)
       liveGits.delete(child)
       fn()
     }
-    timer = setTimeout(() => {
-      try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch { /* 既に終了 */ } }
-      // 自分の側のパイプを閉じる（グループの外へ逃げた孫が握っていても、このプロセスを引き留めない）
+    const signalGroup = (sig) => {
+      try { process.kill(-child.pid, sig) } catch { try { child.kill(sig) } catch { /* 既に終了 */ } }
+    }
+    // 時間切れの決着。自分の側のパイプを閉じる（グループの外へ逃げた孫が握っていても、このプロセスを引き留めない）
+    const failTimedOut = () => settle(() => {
       child.stdout.destroy()
       child.stderr.destroy()
-      settle(() => reject(new Error(`git ${args[0]} が ${timeoutMs} ms で時間切れになった（プロセスグループを止めた）`)))
+      reject(new Error(`git ${args[0]} が ${timeoutMs} ms で時間切れになった（プロセスグループを止めた）`))
+    })
+    timer = setTimeout(() => {
+      timedOut = true
+      signalGroup('SIGTERM')
+      killTimer = setTimeout(() => { signalGroup('SIGKILL'); failTimedOut() }, killGraceMs)
     }, timeoutMs)
+    // SIGTERM で終わった: グループに残った子・孫を止めてから決着する（回収直後に送るので pid の再利用で別のグループは撃たない）
+    child.on('exit', () => { if (timedOut) { signalGroup('SIGKILL'); failTimedOut() } })
     child.stdout.on('data', (b) => { if (outBytes < MAX_GIT_OUTPUT_BYTES) out.push(b); outBytes += b.length })
     child.stderr.on('data', (b) => { if (errBytes < MAX_GIT_OUTPUT_BYTES) err.push(b); errBytes += b.length })
     child.on('error', (e) => settle(() => reject(spawnFailure(e))))
-    child.on('close', (code) => settle(() => {
+    child.on('close', (code) => {
+      // 時間切れの後に閉じた（exit より先に届いた場合も）: 終了コードによらず時間切れとして決着する
+      if (timedOut) { failTimedOut(); return }
+      settle(() => closeResult(code))
+    })
+    const closeResult = (code) => {
       if (outBytes > MAX_GIT_OUTPUT_BYTES) {
         if (allowFail) resolve(null)
         else reject(new Error(`git ${args[0]} の標準出力が上限（${MAX_GIT_OUTPUT_BYTES} バイト）を超えた（切った出力は使わない）`))
       } else if (code === 0) resolve(Buffer.concat(out).toString('utf8').trim())
       else if (allowFail || allowExit.includes(code)) resolve(null)
       else reject(gitFailure(args, code, Buffer.concat(err).toString('utf8')))
-    }))
+    }
   })
 }
 
@@ -237,17 +260,17 @@ export function verifyWorktreeGitdir(mainRoot, gitdir) {
  * add の後の lock・gitdir の検証が失敗したら、作った worktree とブランチを片づけてから元の例外を投げる。
  * 片づけも失敗したら、残ったパス・ブランチを例外の文面に足す（利用者が手で消せるように）。
  * @param {{ mainRoot: string, runId: string, n: number, baseBranch?: string, fetch?: boolean, lock?: boolean, pid?: number,
- *   fetchTimeoutMs?: number, gitTimeoutMs?: number }} p
+ *   fetchTimeoutMs?: number, gitTimeoutMs?: number, gitKillGraceMs?: number }} p
  * @returns {Promise<{ path: string, branch: string, baseBranch: string, baseSha: string, gitdir: string, lockReason: string|null }>}
  *   lockReason は付けた lock の理由（lock: false なら null）。agent-host が unlockOwnWorktree の照合に使う
  */
-export async function createWorktree({ mainRoot, runId, n, baseBranch, fetch = true, lock = true, pid = process.pid, fetchTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS }) {
+export async function createWorktree({ mainRoot, runId, n, baseBranch, fetch = true, lock = true, pid = process.pid, fetchTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS, gitKillGraceMs = DEFAULT_GIT_KILL_GRACE_MS }) {
   const { path, branch } = worktreeNames(mainRoot, runId, n)
   if (!Number.isInteger(pid) || pid < 1) throw new Error(`pid が不正: ${pid}`)
-  for (const [name, v] of [['fetchTimeoutMs', fetchTimeoutMs], ['gitTimeoutMs', gitTimeoutMs]]) {
+  for (const [name, v] of [['fetchTimeoutMs', fetchTimeoutMs], ['gitTimeoutMs', gitTimeoutMs], ['gitKillGraceMs', gitKillGraceMs]]) {
     if (!Number.isInteger(v) || v < 1) throw new Error(`${name} が不正: ${String(v).slice(0, 40)}`)
   }
-  const g = (cwd, args, opts = {}) => gitAsync(cwd, args, { timeoutMs: gitTimeoutMs, ...opts })
+  const g = (cwd, args, opts = {}) => gitAsync(cwd, args, { timeoutMs: gitTimeoutMs, killGraceMs: gitKillGraceMs, ...opts })
   const base = baseBranch ?? resolveDefaultBranch(mainRoot)
   // 名前の検証は git 自身の規則（`--branch` は @{-1} 等を展開するので、展開されず元の名前のままのものだけ通す）に、
   // シェルが特別扱いする文字を持たない制限を重ねる（git は `$(x)` のような名前も有効とするため）
@@ -302,9 +325,9 @@ export async function createWorktree({ mainRoot, runId, n, baseBranch, fetch = t
  * 汚れ・submodule・登録の判定はしない（呼び出し後の worktree-remove.sh が行う）。同じ mainRoot の createWorktree と同じキューで直列にする。
  * @returns {Promise<'unlocked'|'not-locked'|'other-lock'|'unregistered'|'error'>}
  */
-export async function unlockOwnWorktree({ mainRoot, path, reason, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS }) {
+export async function unlockOwnWorktree({ mainRoot, path, reason, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS, gitKillGraceMs = DEFAULT_GIT_KILL_GRACE_MS }) {
   if (typeof path !== 'string' || !isAbsolute(path) || typeof reason !== 'string' || reason === '' || reason.includes('\n')) return 'error'
-  const g = (args) => gitAsync(mainRoot, args, { timeoutMs: gitTimeoutMs })
+  const g = (args) => gitAsync(mainRoot, args, { timeoutMs: gitTimeoutMs, killGraceMs: gitKillGraceMs })
   let queueKey = mainRoot
   try { queueKey = realpathSync(mainRoot) } catch { /* 渡された形のまま */ }
   return serialize(queueKey, async () => {
@@ -327,9 +350,9 @@ export async function unlockOwnWorktree({ mainRoot, path, reason, gitTimeoutMs =
  * reason で lock する（別の lock が付いていれば触らない）。
  * @returns {Promise<'relocked'|'locked'|'unregistered'|'error'>}
  */
-export async function relockOwnWorktree({ mainRoot, path, reason, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS }) {
+export async function relockOwnWorktree({ mainRoot, path, reason, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS, gitKillGraceMs = DEFAULT_GIT_KILL_GRACE_MS }) {
   if (typeof path !== 'string' || !isAbsolute(path) || typeof reason !== 'string' || reason === '' || reason.includes('\n')) return 'error'
-  const g = (args) => gitAsync(mainRoot, args, { timeoutMs: gitTimeoutMs })
+  const g = (args) => gitAsync(mainRoot, args, { timeoutMs: gitTimeoutMs, killGraceMs: gitKillGraceMs })
   let queueKey = mainRoot
   try { queueKey = realpathSync(mainRoot) } catch { /* 渡された形のまま */ }
   return serialize(queueKey, async () => {
