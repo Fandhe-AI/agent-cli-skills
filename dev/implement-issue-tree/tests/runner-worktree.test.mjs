@@ -3,10 +3,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { trackTmp } from './lib/tmp-track.mjs'
+import { worktreeGit } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
 import { maskUrlCredentials, createSequencer, createWorktree, newRunId, resolveDefaultBranch, resolveMainRoot, verifyWorktreeGitdir, worktreeNames } from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
 import * as worktreeMod from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
 
@@ -178,6 +179,39 @@ test('verifyWorktreeGitdir: メインの .git/worktrees/ の直下だけを通�
   for (const bad of [outside, link, join(sb.main, '.git'), join(sb.main, '.git', 'worktrees'), join(wt.gitdir, 'logs'), 'rel/x']) {
     assert.throws(() => verifyWorktreeGitdir(sb.main, bad), /git ディレクトリ/, bad)
   }
+})
+
+test('createWorktree: メインの .git が symlink のリポジトリは、Codex アダプタの検査（worktreeGit）と同じく拒否し、登録・ブランチ・パスを残さない', async () => {
+  const sb = sandbox()
+  const elsewhere = join(sb.root, 'elsewhere')
+  mkdirSync(elsewhere)
+  renameSync(join(sb.main, '.git'), join(elsewhere, 'r.git'))
+  symlinkSync(join(elsewhere, 'r.git'), join(sb.main, '.git'))
+  const list = () => git(sb.main, 'worktree', 'list', '--porcelain')
+  const branches = () => git(sb.main, 'branch', '--list', '--format=%(refname)')
+  const [wl, br] = [list(), branches()]
+  const runId = newRunId()
+  await assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false })), /\.git が symlink/)
+  assert.equal(list(), wl, 'worktree の一覧が作成前と同じ')
+  assert.equal(branches(), br, 'ブランチが作成前と同じ')
+  assert.equal(existsSync(join(sb.main, '.claude', 'worktrees', `${runId}-1`)), false)
+})
+
+test('verifyWorktreeGitdir と worktreeGit の基準が同じ: mainRoot の途中の symlink は両方が通し、.git の symlink は両方が拒む', async () => {
+  const sb = sandbox()
+  const via = join(sb.root, 'via')
+  symlinkSync(sb.main, via)
+  const wt = await createWorktree({ mainRoot: via, runId: newRunId(), n: 1, fetch: false, lock: false })
+  assert.equal(verifyWorktreeGitdir(via, wt.gitdir), wt.gitdir)
+  assert.equal(worktreeGit(via, wt.gitdir).gitdir, wt.gitdir)
+  // .git を外へ移して symlink にした後は、作成済みの gitdir の realpath もどちらの検査も通らない
+  const elsewhere = join(sb.root, 'elsewhere')
+  mkdirSync(elsewhere)
+  renameSync(join(sb.main, '.git'), join(elsewhere, 'r.git'))
+  symlinkSync(join(elsewhere, 'r.git'), join(sb.main, '.git'))
+  const moved = realpathSync(join(sb.main, '.git', 'worktrees', basename(wt.gitdir)))
+  assert.throws(() => verifyWorktreeGitdir(sb.main, moved), /\.git が symlink/)
+  assert.throws(() => worktreeGit(sb.main, moved), /\.git\/worktrees/)
 })
 
 // ---------------------------------------------------------------------------

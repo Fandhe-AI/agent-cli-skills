@@ -236,15 +236,22 @@ export function resolveDefaultBranch(mainRoot) {
  * realpath の親がメインの `.git/worktrees` の realpath と一致しなければ例外。Codex アダプタはこの値だけを
  * permission profile の書き込み可に入れ、worktree の `.git` ファイルは読まない（監査 e670648 の HIGH-2。
  * `.git` はエージェントが書き換え得るため、中身を信じると書き込み範囲を任意のパスへ広げられる）。
+ * 基準は Codex アダプタの worktreeGit と同じ: `.git/worktrees` の realpath が `<mainRoot の realpath>/.git/worktrees`
+ * そのもの（`.git`・`.git/worktrees` が symlink でない）であることも要求する。mainRoot の途中の symlink は解決して通す。
+ * 片方だけが通すと、作成は成功して隔離の段がすべて denied になり、lock 済みの worktree が残る。
  */
 export function verifyWorktreeGitdir(mainRoot, gitdir) {
   if (typeof gitdir !== 'string' || !isAbsolute(gitdir)) throw new Error(`worktree の git ディレクトリが絶対パスでない: ${String(gitdir).slice(0, 80)}`)
-  let real, parent
+  let real, parent, rootReal
   try {
     real = realpathSync(gitdir)
     parent = realpathSync(join(mainRoot, '.git', 'worktrees'))
+    rootReal = realpathSync(mainRoot)
   } catch (e) {
     throw new Error(`worktree の git ディレクトリを解決できない: ${String(e?.code ?? e?.message ?? e).slice(0, 80)}`)
+  }
+  if (parent !== join(rootReal, '.git', 'worktrees')) {
+    throw new Error(`メインの .git が symlink のリポジトリ（.git/worktrees の実体が ${parent.slice(0, 160)}）は隔離の段に対応しない`)
   }
   if (dirname(real) !== parent || basename(real) === '') throw new Error(`worktree の git ディレクトリがメインの .git/worktrees/ の直下に無い: ${real.slice(0, 160)}`)
   return real
