@@ -330,3 +330,83 @@ test('createWorktree: add 自体の失敗（同じ番号の衝突）では、既
   assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${first.path}`))
   assert.equal(git(sb.main, 'rev-parse', '--verify', '--quiet', `refs/heads/${first.branch}`).length, 40)
 })
+
+// ---------------------------------------------------------------------------
+// 並列の fetch の直列化・時間切れで止めた add の途中状態の片づけ
+// ---------------------------------------------------------------------------
+
+/** fetch の開始と終了を log へ書き、間で少し待ってから本物の git へ渡す偽 git を置いたディレクトリ。 */
+function fetchLoggingGitDir(root, log) {
+  const dir = join(root, `fakegit-fetchlog-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(dir)
+  writeFileSync(join(dir, 'git'), `#!/bin/sh
+if [ "$1" = fetch ]; then
+  echo "start $$" >> ${JSON.stringify(log)}
+  sleep 0.15
+  ${JSON.stringify(REAL_GIT)} "$@"; s=$?
+  echo "end $$" >> ${JSON.stringify(log)}
+  exit $s
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`)
+  chmodSync(join(dir, 'git'), 0o755)
+  return dir
+}
+
+test('createWorktree: 同じ mainRoot へ並列に呼んでも fetch は重ならず、前の呼び出しの失敗で後続は止まらない', async () => {
+  const sb = sandbox()
+  const log = join(sb.root, 'fetch.log')
+  const fake = fetchLoggingGitDir(sb.root, log)
+  const runId = newRunId()
+  const results = await withEnv({ PATH: `${fake}:${process.env.PATH}` }, () => Promise.allSettled([
+    createWorktree({ mainRoot: sb.main, runId, n: 1, lock: false }),
+    // origin に無いブランチ。fetch が失敗する（後続の呼び出しを止めないこと）
+    createWorktree({ mainRoot: sb.main, runId, n: 2, lock: false, baseBranch: 'nope' }),
+    createWorktree({ mainRoot: sb.main, runId, n: 3, lock: false }),
+  ]))
+  assert.deepEqual(results.map((r) => r.status), ['fulfilled', 'rejected', 'fulfilled'], results.map((r) => r.reason?.message).join(' / '))
+  assert.match(results[1].reason.message, /git fetch が失敗/)
+  const events = readFileSync(log, 'utf8').trim().split('\n').map((l) => l.split(' ')[0])
+  assert.deepEqual(events, ['start', 'end', 'start', 'end', 'start', 'end'], 'fetch は 1 本ずつ走る')
+})
+
+/** post-checkout フックで眠らせ、worktree add が worktree・ブランチを作った後に止まる状態を作る。 */
+function hangAfterAdd(sb) {
+  const hooks = join(sb.root, `hooks-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(hooks)
+  writeFileSync(join(hooks, 'post-checkout'), '#!/bin/sh\nsleep 30\n')
+  chmodSync(join(hooks, 'post-checkout'), 0o755)
+  git(sb.main, 'config', 'core.hooksPath', hooks)
+}
+
+test('createWorktree: 時間切れで止めた worktree add の途中状態（今回作った worktree・ブランチ・パス）を片づけてから例外にする', async () => {
+  const sb = sandbox()
+  const list = () => git(sb.main, 'worktree', 'list', '--porcelain')
+  const branches = () => git(sb.main, 'branch', '--list', '--format=%(refname)')
+  // 既にある worktree・ブランチ（片づけで触らないこと）
+  const keep = await createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, lock: false })
+  const [wl, br] = [list(), branches()]
+  hangAfterAdd(sb)
+  const runId = newRunId()
+  await assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, gitTimeoutMs: 1000 })),
+    (e) => /git worktree が 1000 ms で時間切れ/.test(e.message) && !/片づけ/.test(e.message))
+  assert.equal(list(), wl, 'worktree の一覧が作成前と同じ')
+  assert.equal(branches(), br, 'ブランチが作成前と同じ')
+  assert.equal(existsSync(join(sb.main, '.claude', 'worktrees', `${runId}-1`)), false)
+  assert.ok(existsSync(keep.path))
+})
+
+test('createWorktree: 時間切れで止めた add の片づけも失敗したら、残ったパスとブランチを文面に足す', async () => {
+  const sb = sandbox()
+  hangAfterAdd(sb)
+  const runId = newRunId()
+  const { path, branch } = worktreeNames(sb.main, runId, 1)
+  const fake = fakeGitDir(sb.root, ['worktree remove'])
+  await withEnv({ PATH: `${fake}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, gitTimeoutMs: 1000 })), (e) => {
+      assert.match(e.message, /^git worktree が 1000 ms で時間切れ/)
+      assert.ok(e.message.includes(path), e.message)
+      assert.ok(e.message.includes(branch), e.message)
+      return true
+    }))
+})

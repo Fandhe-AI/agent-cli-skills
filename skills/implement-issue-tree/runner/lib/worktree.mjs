@@ -15,14 +15,17 @@
 //
 // 失敗は例外（0-5 の方針: throw するのは worktree の作成失敗だけ）。git は引数配列で起動し、シェルを経由しない。
 // add の後（lock・gitdir の検証）で失敗したら、作った worktree とブランチを片づけてから例外にする（ホストはパスを知らないため）。
+// add 自体の失敗（時間切れで止めた途中状態を含む）では、add の前に無かったもの（ブランチ・worktree の登録・パス）だけを片づける。
 //
 // git の環境: 継いだ GIT_DIR 等（gitLocationFreeEnv）を外して起動する。残すと git は cwd ではなくその変数が指す
 // リポジトリを対象にする（シェル側は worktree-remove.sh・recover-prep.sh が unset している）。
 // createWorktree の git は非同期で、時間切れ（fetch とそれ以外で別の上限）を付ける。origin が応答しないときに
 // イベントループごと止めない（並行するエージェントのタイマ・シグナル処理・並列の枠を止めない）。
+// 同じ mainRoot への fetch〜add はキュー（serialize）で 1 本ずつ流す。非同期にしたことで並列の呼び出しが同じ
+// origin/<既定> を同時に更新し、ref の lock の競合で後続の作成が失敗し得るため。
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 
 const RUN_ID = /^wf_[0-9a-f]{8}-[0-9a-f]{3}$/
@@ -143,6 +146,18 @@ function gitAsync(cwd, args, { timeoutMs, allowFail = false }) {
   })
 }
 
+// mainRoot ごとの直列化のキュー（最後に積んだ処理の Promise。失敗も成功として扱い、後続を止めない）
+const queues = new Map()
+
+/** 同じ key の fn を積んだ順に 1 本ずつ実行する。戻り値は fn の結果（失敗はそのまま投げる）。 */
+function serialize(key, fn) {
+  const run = (queues.get(key) ?? Promise.resolve()).then(fn)
+  const tail = run.then(() => {}, () => {})
+  queues.set(key, tail)
+  tail.then(() => { if (queues.get(key) === tail) queues.delete(key) })
+  return run
+}
+
 /** `wf_<16 進 8>-<16 進 3>` 形の runId を作る。 */
 export function newRunId() {
   const h = randomBytes(6).toString('hex')
@@ -205,6 +220,8 @@ export function verifyWorktreeGitdir(mainRoot, gitdir) {
 /**
  * isolation: 'worktree' の worktree を作る（非同期。git は時間切れ付きで起動し、イベントループを止めない）。
  * gitdir は作成直後（エージェントが触る前）に git へ問い合わせて検証した値（verifyWorktreeGitdir）。
+ * 同じ mainRoot への fetch〜add は直列にする（並列の呼び出しで origin/<既定> の更新が競合しないように）。
+ * add 自体が失敗したら（時間切れで止めた途中状態を含む）、add の前に無かったブランチ・登録・パスだけを片づける。
  * add の後の lock・gitdir の検証が失敗したら、作った worktree とブランチを片づけてから元の例外を投げる。
  * 片づけも失敗したら、残ったパス・ブランチを例外の文面に足す（利用者が手で消せるように）。
  * @param {{ mainRoot: string, runId: string, n: number, baseBranch?: string, fetch?: boolean, lock?: boolean, pid?: number,
@@ -223,12 +240,30 @@ export async function createWorktree({ mainRoot, runId, n, baseBranch, fetch = t
   // シェルが特別扱いする文字を持たない制限を重ねる（git は `$(x)` のような名前も有効とするため）
   const checked = typeof base === 'string' && /^[A-Za-z0-9._\/-]+$/.test(base) && !base.startsWith('-') ? await g(mainRoot, ['check-ref-format', '--branch', base], { allowFail: true }) : null
   if (checked !== base) throw new Error(`基点ブランチ名が不正: ${String(base).slice(0, 80)}`)
-  // 「作成時点の最新の origin/<既定>」を起点にする。fetch の失敗・時間切れは握りつぶさない（古い起点で隔離を作らない）
-  if (fetch) await g(mainRoot, ['fetch', '--quiet', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`], { timeoutMs: fetchTimeoutMs })
-  const baseSha = await g(mainRoot, ['rev-parse', '--verify', `refs/remotes/origin/${base}^{commit}`])
-  mkdirSync(join(mainRoot, '.claude', 'worktrees'), { recursive: true })
-  // add 自体の失敗（同じ番号の衝突等）は片づけない（その worktree・ブランチは今回作ったものではない）
-  await g(mainRoot, ['worktree', 'add', '--quiet', '--no-track', '-b', branch, '--', path, baseSha])
+  let queueKey = mainRoot
+  try { queueKey = realpathSync(mainRoot) } catch { /* 解決できなければ渡された形のまま（後の git が失敗を返す） */ }
+  const baseSha = await serialize(queueKey, async () => {
+    // 「作成時点の最新の origin/<既定>」を起点にする。fetch の失敗・時間切れは握りつぶさない（古い起点で隔離を作らない）
+    if (fetch) await g(mainRoot, ['fetch', '--quiet', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`], { timeoutMs: fetchTimeoutMs })
+    const sha = await g(mainRoot, ['rev-parse', '--verify', `refs/remotes/origin/${base}^{commit}`])
+    mkdirSync(join(mainRoot, '.claude', 'worktrees'), { recursive: true })
+    // add の前にあったもの（同じ番号の衝突等）は、add が失敗しても片づけない。調べられなければ add へ進まない
+    const before = { worktree: await isRegistered(mainRoot, path, g), branch: await branchExists(mainRoot, branch, g), path: existsSync(path) }
+    if (before.worktree === null || before.branch === null) throw new Error('worktree add の前の状態（登録・ブランチ）を調べられない')
+    try {
+      await g(mainRoot, ['worktree', 'add', '--quiet', '--no-track', '-b', branch, '--', path, sha])
+    } catch (e) {
+      // 時間切れで止めた add は、ブランチ・登録・パスを作った途中で残り得る。今回新しく現れたものだけを片づける
+      // （後の調べが失敗した〔null〕ときも、前に無かったものは今回のものなので片づけを試みる）
+      const made = {
+        worktree: !before.worktree && (await isRegistered(mainRoot, path, g).catch(() => null)) !== false,
+        branch: !before.branch && (await branchExists(mainRoot, branch, g).catch(() => null)) !== false,
+        path: !before.path && existsSync(path),
+      }
+      throw made.worktree || made.branch || made.path ? await discardCreated(mainRoot, path, branch, e, g, made) : e
+    }
+    return sha
+  })
   try {
     if (lock) await g(mainRoot, ['worktree', 'lock', '--reason', `claude agent ${runId}-${n} (pid ${pid})`, '--', path])
     const gitdir = verifyWorktreeGitdir(mainRoot, await g(path, ['rev-parse', '--absolute-git-dir']))
@@ -238,16 +273,33 @@ export async function createWorktree({ mainRoot, runId, n, baseBranch, fetch = t
   }
 }
 
+/** path が mainRoot のリポジトリの worktree として登録されているか（一覧を取れなければ null）。 */
+async function isRegistered(mainRoot, path, g) {
+  const out = await g(mainRoot, ['worktree', 'list', '--porcelain'], { allowFail: true })
+  return out === null ? null : out.split('\n').includes(`worktree ${path}`)
+}
+
+/** ローカルブランチ branch があるか（rev-parse の --verify --quiet。無いと終了コード 1）。 */
+async function branchExists(mainRoot, branch, g) {
+  return (await g(mainRoot, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { allowFail: true })) !== null
+}
+
 /**
- * add の後に失敗した worktree を片づけ、投げる例外を返す（元の文面を保ち、片づけの失敗はその後ろに足す）。
+ * 今回作った worktree・ブランチ・パスを片づけ、投げる例外を返す（元の文面を保ち、片づけの失敗はその後ろに足す）。
  * 作成直後でエージェントは触っていないので、変更の有無を見ずに消す。lock 済み（lock の後の検証で失敗）なら先に外す。
+ * made で片づける対象を絞る（add 自体の失敗では、add の前に無かったものだけ。add の後の失敗ではすべて）。
  */
-async function discardCreated(mainRoot, path, branch, original, g) {
+async function discardCreated(mainRoot, path, branch, original, g, made = { worktree: true, branch: true, path: true }) {
   const left = []
-  await g(mainRoot, ['worktree', 'unlock', '--', path], { allowFail: true }).catch(() => null)
-  if (!(await g(mainRoot, ['worktree', 'remove', '--force', '--', path]).then(() => true, () => false))) left.push(`worktree ${path}`)
+  if (made.worktree) {
+    await g(mainRoot, ['worktree', 'unlock', '--', path], { allowFail: true }).catch(() => null)
+    if (!(await g(mainRoot, ['worktree', 'remove', '--force', '--', path]).then(() => true, () => false))) left.push(`worktree ${path}`)
+  } else if (made.path && existsSync(path)) {
+    // 登録の前に止まった add のディレクトリ（add の前には無かった）
+    try { rmSync(path, { recursive: true, force: true }) } catch { left.push(`パス ${path}`) }
+  }
   // worktree が残っているとブランチは消せない（チェックアウト中）。消せなかった分だけ文面に足す
-  if (!(await g(mainRoot, ['branch', '-D', branch]).then(() => true, () => false))) left.push(`ブランチ ${branch}`)
+  if (made.branch && !(await g(mainRoot, ['branch', '-D', branch]).then(() => true, () => false))) left.push(`ブランチ ${branch}`)
   const e = original instanceof Error ? original : new Error(String(original))
   if (left.length > 0) {
     e.message = `${e.message}（作った worktree の片づけにも失敗した。残っている: ${left.join('・')}。手で消す: git worktree unlock / git worktree remove --force / git branch -D）`
