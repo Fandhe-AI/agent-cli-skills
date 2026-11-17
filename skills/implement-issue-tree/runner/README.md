@@ -45,8 +45,8 @@ node <skillDir>/runner/run.mjs --tool codex|opencode --args <args.json> \
 |--------|------|
 | 0 | ホストが return した（`--help` も 0） |
 | 1 | ホストが例外で終わった（`result.json` の `error` に理由） |
-| 2 | 引数の誤り（CLI・args.json・設定ファイル）。何も書かない |
-| 3 | 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・必要なスキルの不在・アダプタの起動失敗）。アダプタの生成・起動の失敗だけは `result.json` を書く |
+| 2 | 引数の誤り（CLI・args.json・設定ファイル。`args.repo` がメイン worktree のリポジトリ〔`gh repo view`。大文字小文字は区別しない〕と違う場合を含む）。何も書かない |
+| 3 | 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・必要なスキルの不在・`autoMerge` か `args.repo` があるときのリポジトリの解決・`args.repo` の無い `autoMerge` で環境変数 `GH_REPO` が解決先と違う・アダプタの起動失敗）。アダプタの生成・起動の失敗だけは `result.json` を書く |
 
 ## 出力（`<mainRoot>/_/iit-runner/<runId>/`）
 
@@ -80,7 +80,7 @@ _/iit-runner/<runId>/
 | model を省いた段（plan・recover） | セッションのモデルを継ぐ | セッションが無いため、設定の `sessionModel`（既定 `opus`）の段として扱う |
 | 並列 | ランタイムの既定（16 か CPU 数 − 2） | `--max-parallel` か `limits.maxParallel`（既定 4）。1 ランのエージェント数は `limits.maxAgents`（既定 1,000）まで |
 | 構造化出力 | ランタイムが schema を強制 | Codex は `--output-schema`（strict 変換）、OpenCode はプロンプトへの埋め込み。どちらもランナーが検証し、不適合なら修復を 1 回求め、なお不適合なら `null` |
-| ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）、OpenCode はランナー専用 plugin（`adapters/opencode-plugin/`）。どちらも `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。形はその段の PR 番号で具体化し（`mergeExecCommandFor`。番号はホストのプロンプトから取り、決まらなければその段ではマージを許さない）、子の `GH_REPO` を対象リポジトリに固定する（`autoMerge` のランだけ、起動前に `gh repo view` で決める。決められなければ終了コード 3）。Codex は merge 段の `codex exec` の env に、OpenCode は PR ごとに起動する merge 用 serve の env に固定する。OpenCode（v2.2.7）は permission に代入を落とした後半だけが届くため、plugin は全 serve で `tool.execute.before` の全文をガードに通し、merge 用 serve ではその PR の完全一致を確かめた呼び出しを記録して、同じ呼び出しの後半だけを通す（後半だけの形を単独では通さない）。plugin の読み込みはセッションの location ごとに目印で確かめ、ターンの後に shell の実行件数を plugin の記録と照合する（Codex は hook のログと `command_execution` の件数を照合する）。拒否の文言は理由コードを含み、`obfuscated` と `credential-read` だけは言い直しの手がかりを 1 文足す（両ツールで同じ文字列。止められた操作を別の綴りで迂回しないことを添える）。OpenCode の permissions / policies は deny の後ろに `core.hooksPath` の読み取り（`READ_ALLOW_FORMS`。完全一致の 4 形）の allow を置く（後勝ち）。書き込みの形は deny のままで、全文を見るガードの判定も変えていない（`git config --get-all core.hooksPath` はガードが止める） |
+| ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）、OpenCode はランナー専用 plugin（`adapters/opencode-plugin/`）。どちらも `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。形はその段の PR 番号で具体化し（`mergeExecCommandFor`。番号はホストのプロンプトから取り、決まらなければその段ではマージを許さない）、子の `GH_REPO` を対象リポジトリに固定する（`autoMerge` のランだけ、起動前に `gh repo view` で決める。決められなければ終了コード 3）。生成物が merge-gate・push・観測に使う `args.repo` は、指定があれば〔`autoMerge` を問わず〕この値と照合し、違えば終了コード 2。`args.repo` の無い `autoMerge` のランは、継いだ `GH_REPO` が違えば終了コード 3（生成物の gh は `GH_REPO` を見るため）。Codex は merge 段の `codex exec` の env に、OpenCode は PR ごとに起動する merge 用 serve の env に固定する。OpenCode（v2.2.7）は permission に代入を落とした後半だけが届くため、plugin は全 serve で `tool.execute.before` の全文をガードに通し、merge 用 serve ではその PR の完全一致を確かめた呼び出しを記録して、同じ呼び出しの後半だけを通す（後半だけの形を単独では通さない）。plugin の読み込みはセッションの location ごとに目印で確かめ、ターンの後に shell の実行件数を plugin の記録と照合する（Codex は hook のログと `command_execution` の件数を照合する）。拒否の文言は理由コードを含み、`obfuscated` と `credential-read` だけは言い直しの手がかりを 1 文足す（両ツールで同じ文字列。止められた操作を別の綴りで迂回しないことを添える）。OpenCode の permissions / policies は deny の後ろに `core.hooksPath` の読み取り（`READ_ALLOW_FORMS`。完全一致の 4 形）の allow を置く（後勝ち）。書き込みの形は deny のままで、全文を見るガードの判定も変えていない（`git config --get-all core.hooksPath` はガードが止める） |
 | 時間切れ | ランタイム任せ | 段ごと（`timeoutsSec.byPhase`。既定は Plan 20 分・Implement 30 分・Review 20 分 等）。超えたらプロセスを止めて `null` |
 
 ## 自動マージと後片づけ

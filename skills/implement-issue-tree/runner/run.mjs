@@ -10,8 +10,9 @@
 // 終了コード（計画 C の仕様）:
 //   0 ホストが return した（--help / -h で使い方を stdout に出したときも 0）
 //   1 ホストが例外で終わった
-//   2 引数の誤り（CLI・args.json・設定ファイル）
-//   3 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・必要なスキルの不在・autoMerge のときの repo の解決・アダプタの start() 失敗）
+//   2 引数の誤り（CLI・args.json・設定ファイル。args.repo がメイン worktree のリポジトリと違う場合を含む）
+//   3 前提の不足（gh 認証・アダプタの不在・生成物の鮮度・必要なスキルの不在・autoMerge か args.repo があるときの repo の解決・
+//     args.repo が無い autoMerge で継いだ GH_REPO が解決先と違う・アダプタの start() 失敗）
 // 2 / 3 の経路（アダプタの生成・start() の失敗を除く）は _/iit-runner/<runId>/ を作る前に抜ける（何も書かない）。
 //
 // 出力の形（通し確認の判定器が読む。変えるときは判定器とそろえる）:
@@ -142,7 +143,7 @@ export async function main(argv, deps = {}) {
     stderr = (s) => { process.stderr.write(s) },
     cwd = process.cwd(),
     ghAuth = checkGhAuth,
-    // autoMerge のときだけ使う owner/repo の解決（{ ok, repo } | { ok: false, reason }）。テストが偽の値へ差し替える
+    // autoMerge か args.repo があるときだけ使う owner/repo の解決（{ ok, repo } | { ok: false, reason }）。テストが偽の値へ差し替える
     repoOf = resolveRepo,
     build = checkBuild,
     loadAdapter = importAdapter,
@@ -227,14 +228,30 @@ export async function main(argv, deps = {}) {
   }
   const missing = skillsMissing({ tool: cli.tool, root: mainRoot })
   if (missing.length > 0) return prereq(missingSkillsMessage(cli.tool, missing))
-  // マージ対象のリポジトリ（MEDIUM-8）。autoMerge のときだけ決める（マージしないランでは gh を余分に呼ばない）。
+  // マージ対象のリポジトリ（MEDIUM-8）と args.repo の照合（PR #851 の codex P0）。
+  // メイン worktree の repo（gh repo view）は merge 段の GH_REPO に固定する値で、隔離 worktree の作成元でもある。生成物は
+  // merge-gate・push・観測の --repo / -R に args.repo を使い、無ければ gh の既定の解決（継いだ GH_REPO が最優先）に任せる。
+  // 両者が違うと、検証したリポジトリと別のリポジトリでマージし得る（autoMerge でなくても、別のリポジトリのツリー・PR を観測する）。
+  //   - args.repo があれば（autoMerge を問わない）解決先と照合し、違えば引数の誤り（2）。owner/repo は大文字小文字を区別しない
+  //     （GitHub と生成物の照合と同じ）。args.repo は書き換えずに渡す（形の検証は生成物の parseRepoArg）
+  //   - args.repo が無い autoMerge のランは、継いだ GH_REPO が解決先と違えば前提の不足（3）
+  //   - どちらでもなければ gh を呼ばない（照合する相手が無い。生成物の gh はメイン worktree と同じ解決をする）
   // 決められなければ前提の不足（3）で止める（自動マージを黙って無効にしたままランを進めない）
+  const argRepo = args.repo ?? null // 生成物の parseRepoArg と同じく null・undefined は未指定
   let repo = null
-  if (args.autoMerge === true) {
+  if (args.autoMerge === true || argRepo !== null) {
     const r = repoOf(mainRoot, env)
-    if (!r.ok) return prereq(`マージ対象のリポジトリを決められない: ${String(r.reason ?? '').slice(0, 160)}`)
+    if (!r.ok) return prereq(`対象のリポジトリを決められない: ${String(r.reason ?? '').slice(0, 160)}`)
     if (!isRepoSlug(r.repo)) return prereq('gh repo view の nameWithOwner が owner/repo の形でない')
-    repo = r.repo
+    const same = (x) => typeof x === 'string' && x.toLowerCase() === r.repo.toLowerCase()
+    if (argRepo !== null && !same(argRepo)) {
+      err(`ランナー: args.repo（${String(argRepo).slice(0, 120)}）がメイン worktree のリポジトリ（${r.repo}）と一致しない。マージ・push・観測の対象がずれるため起動しない`)
+      return 2
+    }
+    if (argRepo === null && typeof env.GH_REPO === 'string' && env.GH_REPO !== '' && !same(env.GH_REPO)) {
+      return prereq(`環境変数 GH_REPO（${env.GH_REPO.slice(0, 120)}）がメイン worktree のリポジトリ（${r.repo}）と一致しない。args.repo が無いとき生成物の gh は GH_REPO を見るため、マージの検証と実行の対象がずれる。GH_REPO を外すか args.repo を指定する`)
+    }
+    if (args.autoMerge === true) repo = r.repo
   }
 
   // ---- ラン ----
