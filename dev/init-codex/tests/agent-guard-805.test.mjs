@@ -28,8 +28,9 @@ const pathBash = execFileSync('/bin/sh', ['-c', 'command -v bash']).toString().t
 const BASHES = [...new Set(['/bin/bash', pathBash])]
 const SUBAGENTS = [false, true, null]
 
-// 認証情報・マージキュー投入・git config のフック差し替えの表は #805 の凍結後に足した判定で、旧版との差分テストの対象ではない。
-const POST_805 = new Set(['CRED_DENY', 'CRED_ALLOW', 'ENQUEUE_DENY', 'HOOKCONF_DENY', 'HOOKCONF_ALLOW'])
+// 認証情報・マージキュー投入・git config のフック差し替えの表と Issue #849 の表は #805 の凍結後に足した判定で、旧版との差分テストの
+// 対象ではない（#849 の表は agent-guard-sq-dollar-849.test.mjs が 36ecad6 の凍結と比べる）。
+const POST_805 = new Set(['CRED_DENY', 'CRED_ALLOW', 'ENQUEUE_DENY', 'HOOKCONF_DENY', 'HOOKCONF_ALLOW', 'FP849_FLIP', 'FP849_TIGHTEN', 'FP849_STAY_DENY'])
 const corpus = [...new Set(Object.entries(cases).filter(([k, v]) => Array.isArray(v) && !POST_805.has(k)).map(([, v]) => v).flatMap((arr) => arr.map((e) => (Array.isArray(e) ? e[0] : e))))]
 
 const SUBSET = [...new Set([
@@ -158,11 +159,13 @@ describe('認識器 SQ_DOLLAR_AWK（単体）', () => {
   })
   // [受理する対照, 受理しない形, …]
   const PAIRS = {
-    'コマンドの形（単純コマンド・| のパイプラインだけ）': [
-      [`grep 'a$' f | wc -l`, `grep 'a$' f; wc -l`, `grep 'a$' f ; wc -l`, `grep 'a$' f && wc -l`, `grep 'a$' f || wc -l`, `grep 'a$' f & wc -l`, `grep 'a$' f |& wc -l`,
-        `grep 'a$' f | | wc -l`, `| grep 'a$' f`, `grep 'a$' f |`, `grep 'a$' f\nwc -l`, `grep 'a$' $(f)`, `grep 'a$' \`f\``,
+    // 許可リストの段を ; && || 改行でつなぐ形は Issue #849 で受理する側へ移した（agent-guard-sq-dollar-849.test.mjs）
+    'コマンドの形（許可リストの段の | のパイプラインと ; && || 改行の連結だけ）': [
+      [`grep 'a$' f | wc -l`, `grep 'a$' f & wc -l`, `grep 'a$' f |& wc -l`, `grep 'a$' f;`, `grep 'a$' f ;;`, `grep 'a$' f &&`,
+        `grep 'a$' f | | wc -l`, `| grep 'a$' f`, `grep 'a$' f |`, `grep 'a$' f &&\nwc -l`, `grep 'a$' $(f)`, `grep 'a$' \`f\``,
         `grep 'a$' <(f)`, `grep 'a$' f >(f)`, `X=1 grep 'a$' f`, `{ grep 'a$' f; }`, `(grep 'a$' f)`, `! grep 'a$' f`, `grep 'a$' f # x`],
-      [`grep\t'a$'\tf`, `grep 'a$' f\r`, `grep 'a\r$' f`, `grep 'a\x0b$' f`, `grep 'a\x1b$' f`, `grep 'a$' f\x0b`, `grep 'a$' f\x7f`, `grep 'a$' f\n`],
+      [`grep\t'a$'\tf`, `grep 'a$' f\r`, `grep 'a\r$' f`, `grep 'a\x0b$' f`, `grep 'a\x1b$' f`, `grep 'a$' f\x0b`, `grep 'a$' f\x7f`],
+      [`grep 'a$' f; wc -l`, `grep 'a$' f; sh`, `grep 'a$' f && sh -c x`, `grep 'a$' f || bash`, `grep 'a$' f\nsh`, `grep 'a$'; wc -l`, `grep 'a$'|| wc -l`],
     ],
     '先頭語（素の語の完全一致）': [
       [`grep 'a$'`, `/usr/bin/grep 'a$'`, `./grep 'a$'`, `'grep' 'a$'`, `"grep" 'a$'`, `g'rep' 'a$'`, `GREP 'a$'`, `grepx 'a$'`, `$g 'a$'`],

@@ -73,8 +73,8 @@
 #                  （subagent が true / null のとき）
 #   obfuscated     ANSI-C クォート $'...' や $IFS 展開、判定の目印に使う制御文字（\t \n \r 以外の
 #                  C0 と DEL）を含むコマンド（subagent が true / null のとき）。単一引用符の末尾の `$` で閉じる形
-#                  （`grep -c '^hi$' f`）は、コマンド全体が評価器にならないコマンドの許可リストだけの単純コマンド
-#                  またはパイプラインで、厳格な文法に一致するときだけ除く（認識器 SQ_DOLLAR_AWK。下記）
+#                  （`grep -c '^hi$' f`）は、コマンド全体が評価器にならないコマンドの許可リストだけのパイプラインを
+#                  ; && || 改行でつないだ形で、厳格な文法に一致するときだけ除く（認識器 SQ_DOLLAR_AWK。下記。Issue #805・#849）
 #   nesting-limit  bash -c / eval / heredoc / $(...) / env -S の入れ子が解析の上限（深さ 8・件数 512）を
 #                  超えた、ダブルクォート内の $( や `（引用符なし heredoc 本文の $( や `）の閉じを見つけられない、
 #                  または heredoc の区切り子が見つからないまま入力の末尾に達した。中身を見切れないため
@@ -1097,41 +1097,70 @@ cmd_clean=$(printf '%s' "$cmd" | LC_ALL=C tr -d '\001-\010\013\014\016-\037\177'
 # （GIT_AWK）から独立した認識器 SQ_DOLLAR_AWK が行う。認識器はコマンド全体が次の文法に完全一致するときだけ
 # ok を出す（一致しなければ何も出さない）。評価器になりうるコマンドを並べて止める拒否リストは使わない
 # （awk の system・perl -e 等、一覧に無い評価器で `'gh pr $'` と別の語を連結して評価する形が漏れるため）。
-#   コマンド全体   [空白] 段 { [空白] | [空白] 段 } [空白]。1 行だけで、タブ以外の制御文字（改行・CR を含む）は文法の外。
-#                  ; & && || 改行・$( ` <( >(・代入の前置き・コメントは文法の外
+# Issue #849 で広げたのは段の連結（; && || 改行）だけで、許可リストで書く（文法に無い形はすべて従来どおり deny）。
+# 連結した形では echo の段も文法の外（echo は #805 の 1 本のパイプラインの形でだけ通す）。
+#   コマンド全体   [空白] パイプライン { [空白] 連結 [空白] パイプライン } [空白] [改行の並び]。
+#                  連結は ; && || と改行（空行・行頭の空白を含む）。; && || の後は同じ行にパイプラインが要る
+#                  （末尾の ;・;;・& ・|&・&>・改行を挟む && は文法の外）。連結がある形では echo の段は文法の外。
+#                  タブと改行以外の制御文字（CR を含む）は文法の外。
+#                  $( ` <( >(・$((・代入（NAME=…）・行継続（\ と改行）・ヒアドキュメント・ブレース展開・コメント・
+#                  ( { ! と制御語（if・for 等）・関数定義は文法の外
+#   パイプライン   段 { [空白] | [空白] 段 }
 #   段             先頭語 { 空白 (引数 | リダイレクト) }
 #   先頭語         下の許可リストの語と完全一致する素の語（引用符・パス・大文字を含む形は文法の外）。
 #                  許可リストは引数を shell のコードとして評価せず、外部コマンドも起動しないコマンドに限る:
 #                  grep egrep fgrep rg wc head tail cut tr uniq ls cat echo jq basename dirname
-#                  diff cmp comm nl column fold。sed（GNU の e コマンド）・awk・perl・python・find・xargs・env・
-#                  sort（--compress-program）・git・gh・shell・eval・source・command・exec・time 等は入れない。
+#                  diff cmp comm nl column fold。sed（GNU の e コマンド・w コマンド）・awk・perl・python・find・xargs・env・
+#                  sort（--compress-program）・git・gh・shell・eval・source・.・command・builtin・exec・time 等は入れない。
 #                  shell の組み込みの test・[・printf も入れない（数値の引数・-v の名前・%d の値を算術式として評価し、
 #                  `x[$(…)]` の添字の置換を実行する。bash 3.2 / 5・zsh・dash・ksh で実測）。
 #                  rg の --pre / --hostname-bin（外部コマンドを起動する）、grep を ugrep で置き換えた環境の --filter /
-#                  --pager / --view / --config 等（同）は文法の外
-#   引数           次の断片の連結: 素の文字 [A-Za-z0-9_./:=,@+%-]、単一引用符の文字列（中身は自由）、
-#                  $ ` \ ! を含まない二重引用符の文字列。`$` で終わる単一引用符の
-#                  文字列は語の最後の断片で、直後は空白・タブ・| < > か末尾（`'$''x'` `'$'"x"` `'$'x` は文法の外）
-#   リダイレクト   [数字] (< | > | >>) [空白] 素の語、または [数字] (<& | >&) 数字。<< <<< <> >| &> は文法の外
-# この文法では引用符の外に `$` が現れないので、元の文字列の `$'` はすべて単一引用符を閉じる `$` になる
+#                  --pager / --view / --query / -Q / --config / --save-config 等（同）は文法の外。長いオプションは
+#                  省略形（--pag 等。危険なオプション名の先頭部分）と、危険なオプション名で始まる語も倒す
+#   引数           次の断片の連結: 素の文字 [A-Za-z0-9_./:=,@+%-]、単一引用符の文字列（改行以外は自由）、
+#                  $ ` \ ! と改行を含まない二重引用符の文字列。`$` で終わる単一引用符の文字列は語の最後の断片で、
+#                  直後は空白・タブ・改行・パイプの | か末尾（`'$''x'` `'$'"x"` `'$'x` `'$';` `'$'||` `'$'>f` は文法の外）。
+#                  = で始まる語（zsh がコマンドのパスへ置き換える =cmd）と、< > の直前の 2 桁以上の数字だけの語
+#                  （shell は fd 番号と読む）は文法の外。
+#   リダイレクト   [数字] (< | > | >>) [空白] 素の語（= で始まる語は除く）、または [数字] (<& | >&) 数字。
+#                  << <<< <> >| &> は文法の外
+# この文法では `$` が単一引用符の中にしか現れないので、元の文字列の `$'` はすべて単一引用符を閉じる `$` になる
 # （ANSI-C 引用符は 1 つも無い）。IFS は従来どおり raw に対して判定する。
+# 例外が外すのは obfuscated の判定だけで、後続の merge-guard・credential-read 等の判定はそのまま走る。
 read -r -d '' SQ_DOLLAR_AWK <<'AWK' || true
 BEGIN {
   plain = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:=,@+%-"
   nc = split("grep egrep fgrep rg wc head tail cut tr uniq ls cat echo jq basename dirname diff cmp comm nl column fold", cl, " ")
   for (k = 1; k <= nc; k++) okcmd[cl[k]] = 1
-  for (k = 1; k < 32; k++) if (k != 9) ctl[sprintf("%c", k)] = 1
+  for (k = 1; k < 32; k++) if (k != 9 && k != 10) ctl[sprintf("%c", k)] = 1
   ctl[sprintf("%c", 127)] = 1
+  # 外部コマンドを起動する（設定ファイル経由を含む）長いオプション。grep は ugrep で置き換えた環境を含む
+  ng = split("--filter --pager --view --query --format-open --config --save-config", gdanger, " ")
+  nr = split("--pre --hostname-bin", rdanger, " ")
 }
-{ s = $0; nl = NR }
+{ s = (NR == 1) ? $0 : s "\n" $0 }
 function ch(i) { return substr(s, i, 1) }
 function isbl(c) { return (c == " " || c == "\t") }
 # 語の後に来てよい文字（語の区切り）。
-function isend(c) { return (c == "" || c == " " || c == "\t" || c == "|" || c == "<" || c == ">") }
+function isend(c) { return (c == "" || c == " " || c == "\t" || c == "\n" || c == "|" || c == "<" || c == ">" || c == ";" || c == "&") }
+# `$` で終わる単一引用符の直後（位置 i）に来てよい文字（空白・行末・パイプの | だけ。|| と |& は除く）。
+function sqend(i,   c) {
+  c = ch(i)
+  return (c == "" || c == " " || c == "\t" || c == "\n" || (c == "|" && ch(i + 1) != "|" && ch(i + 1) != "&"))
+}
 function isplain(c) { return (c != "" && index(plain, c) > 0) }
+# v が list の長いオプション（m 個）か、その省略形か、それで始まる語なら 1。
+function danger(v, list, m,   k, e, nm) {
+  if (substr(v, 1, 2) != "--" || length(v) < 3) return 0
+  e = index(v, "="); nm = (e > 0) ? substr(v, 1, e - 1) : v
+  for (k = 1; k <= m; k++) if (index(list[k], nm) == 1 || index(nm, list[k]) == 1) return 1
+  return 0
+}
 # p から引数を 1 つ読む。成功なら 1 を返し、引用符を外した値を wv に置き、p を語の直後へ進める。
 function argword(   st, c, q, inner, sqd) {
   wv = ""; st = p; sqd = 0
+  # = で始まる語は zsh がコマンドのパスへ置き換える（=cmd）
+  if (ch(p) == "=") return 0
   while (p <= n) {
     c = ch(p)
     if (!isplain(c) && c != "\047" && c != "\"") break
@@ -1141,29 +1170,50 @@ function argword(   st, c, q, inner, sqd) {
     q = index(substr(s, p + 1), c)
     if (q == 0) return 0
     inner = substr(s, p + 1, q - 1)
+    if (index(inner, "\n")) return 0
     if (c == "\"" && inner ~ /[$`\\!]/) return 0
     if (c == "\047" && q > 1 && substr(inner, q - 1, 1) == "$") sqd = 1
     wv = wv inner; p += q + 1
   }
   if (p == st) return 0
-  return isend(ch(p))
+  # < > の直前の 2 桁以上の数字だけの語は fd 番号（1 桁は呼び出し側がリダイレクトとして先に読む）
+  if (substr(s, st, p - st) ~ /^[0-9]+$/ && (ch(p) == "<" || ch(p) == ">")) return 0
+  return sqd ? sqend(p) : isend(ch(p))
 }
 END {
-  if (nl != 1) exit
   n = length(s)
   for (i = 1; i <= n; i++) if (ch(i) in ctl) exit
   p = 1
+  # conn: ; && || 改行の連結がある、hasecho: echo の段がある（両方そろうと文法の外）
+  conn = 0; hasecho = 0
   while (1) {
+    # 段の先頭語（; && || | 改行の後は同じ行に先頭語が要る）
     while (isbl(ch(p))) p++
     st = p
     while (isplain(ch(p))) p++
     cmd = substr(s, st, p - st)
     if (!(cmd in okcmd) || !isend(ch(p))) exit
+    if (cmd == "echo") hasecho = 1
+    if (conn && hasecho) exit
     while (1) {
       while (isbl(ch(p))) p++
       c = ch(p)
       if (c == "") { print "ok"; exit }
-      if (c == "|") { p++; break }
+      if (c == "\n") {
+        while (isbl(ch(p)) || ch(p) == "\n") p++
+        if (ch(p) == "") { print "ok"; exit }
+        conn = 1; break
+      }
+      if (c == ";") { p++; conn = 1; break }
+      if (c == "&") {
+        if (ch(p + 1) != "&") exit
+        p += 2; conn = 1; break
+      }
+      if (c == "|") {
+        if (ch(p + 1) == "&") exit
+        if (ch(p + 1) == "|") { p += 2; conn = 1 } else p++
+        break
+      }
       if (substr(s, p) ~ /^[0-9]?(<|>)/) {
         if (c != "<" && c != ">") p++
         if (substr(s, p, 2) == ">>") p += 2
@@ -1176,12 +1226,12 @@ END {
         while (isbl(ch(p))) p++
         st = p
         while (isplain(ch(p))) p++
-        if (p == st || !isend(ch(p))) exit
+        if (p == st || ch(st) == "=" || !isend(ch(p))) exit
         continue
       }
       if (!argword()) exit
-      if (cmd == "rg" && (substr(wv, 1, 5) == "--pre" || substr(wv, 1, 14) == "--hostname-bin")) exit
-      if (cmd ~ /^[ef]?grep$/ && (wv ~ /^--(filter|pager|view|format-open|config|save-config)/ || substr(wv, 1, 3) == "---" || substr(wv, 1, 2) == "-@")) exit
+      if (cmd == "rg" && danger(wv, rdanger, nr)) exit
+      if (cmd ~ /^[ef]?grep$/ && (danger(wv, gdanger, ng) || substr(wv, 1, 3) == "---" || substr(wv, 1, 2) == "-@" || wv ~ /^-[^-]*Q/)) exit
     }
   }
 }
