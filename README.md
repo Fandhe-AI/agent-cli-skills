@@ -74,6 +74,8 @@ opencode run --standalone --auto '@create-commit staged の変更を、確認な
 claude -p '/create-commit staged の変更を、確認なしでコミットまで進めてよい'
 ```
 
+`implement-issue-tree` は Codex ではスキルから直接ではなく同梱のランナーで動かす（OpenCode は未対応）。起動方法と制約は [runners.md](./skills/implement-issue-tree/references/runners.md) を参照。
+
 Codex の既定 sandbox は `.git`・`.agents`・`.codex` を読み取り専用にする。`codex exec` では昇格の要求が出ないため、`.git` に書くスキルは上の permissions で実行する。サブエージェントへ委譲するスキルは、Codex では `--ephemeral` を付けると委譲せず自分で実行する。
 
 ## リポジトリ構成
