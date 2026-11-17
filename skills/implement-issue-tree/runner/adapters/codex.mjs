@@ -51,6 +51,7 @@
 //   具体化した guard.mergeExecCommandFor(prNumber) で、merge 段の子の env には GH_REPO=<req.merge.repo> を固定する
 //   （監査 e670648 の MEDIUM-8。汎用の MERGE_EXEC_COMMAND は別の PR 番号・GH_REPO を向けた別リポジトリでも通った）。
 //   allowMerge でも req.merge が無ければ --merge-re を出さない（汎用の形へは倒さない。マージは hook に止められる）。
+//   req.merge がある段は、cwd がリポジトリの外（agent-host が作る空ディレクトリ）なので --skip-git-repo-check を付ける。
 //
 // permission profile は 2 種（:read-only を土台に、ネットワークは有効）:
 //   iit_read: worktree ではない cwd（メイン worktree。観測・状態・計画）。cwd は読み取りのみ・TMPDIR だけ書ける。
@@ -570,6 +571,10 @@ export function createAdapter(cfg) {
     if (model) args.push('-m', model)
     if (effort) args.push('-c', `model_reasoning_effort=${q(effort)}`)
     if (!resume) args.push('-C', cwd)
+    // マージを許す段は、agent-host がリポジトリの外の空ディレクトリを cwd にする（gh pr merge --delete-branch がローカルの
+    // ブランチを見つけず、sandbox で書けない .git/refs への削除を試みないように）。codex exec は git リポジトリの外では
+    // このフラグが無いと起動しないため、その段だけ付ける（resume も同じ cwd で続く）
+    if (merge !== null) args.push('--skip-git-repo-check')
     if (tc.trustProject) args.push('-c', `projects={${q(cwd)}={trust_level="trusted"}}`)
     if (schema) {
       const sp = join(logDir, 'schema-strict.json')

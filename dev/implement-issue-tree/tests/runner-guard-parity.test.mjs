@@ -53,11 +53,11 @@ function guardFor(g) {
 }
 
 /** codex-hook.sh を 1 回呼び、{ deny, message, codes } を返す。 */
-function viaHook(guardBody, command, { merge = false } = {}) {
+function viaHook(guardBody, command, { merge = false, cwd } = {}) {
   const { dir, guard } = guardFor(guardBody)
   const log = join(dir, 'hook.log')
   const args = [HOOK, '--guard', guard, '--log', log, ...(merge ? ['--merge-re', MERGE_EXEC_COMMAND.source] : [])]
-  const r = spawnSync('bash', args, { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8' })
+  const r = spawnSync('bash', args, { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8', ...(cwd ? { cwd } : {}) })
   assert.equal(r.status, 0, r.stderr)
   const out = r.stdout.trim()
   const reason = out === '' ? null : JSON.parse(out).hookSpecificOutput.permissionDecisionReason
@@ -119,7 +119,7 @@ for (const path of REAL_GUARDS) {
       const h = viaHook({ path }, cmd, opt)
       assert.deepEqual(h.codes, [code], cmd)
       assert.equal(h.deny, code.startsWith('deny'), cmd)
-      if (h.deny) assert.equal(h.message, `iit-runner: ガードの判定により拒否した（${code}）${HINTS[code] ?? ''}`, cmd)
+      if (h.deny) assert.equal(h.message, `iit-runner: ガードの判定により拒否した（${code}）${hintFor(code, opt) ?? ''}`, cmd)
     }
   })
 }
@@ -130,6 +130,28 @@ const HINTS = {
   'deny:obfuscated': "。手がかり: 単一引用符の文字列の末尾に $ を置かない（正規表現は全体を括弧で包み、'(…$)' の形にする）。$'…' と $IFS は使わない。止められた操作そのものを別の綴りで迂回しない。",
   'deny:credential-read': '。手がかり: 名前に TOKEN・SECRET・PASSWORD・KEY・PAT などを含む変数（大文字小文字を問わない。pat も該当する）は、展開も表示もしない。件数などは、そうした語を含まない名前（例: hits）の変数に入れる。止められた操作そのものを別の綴りで迂回しない。',
 }
+
+// merge-guard の手がかりは、マージを許す段（--merge-re あり）だけに付ける（Phase 4。モデルが手順 3 の 1 行を
+// bash の here-doc で包み、完全一致の形から外れて止められた）。マージを許さない段では、どの形でもマージは止まるので付けない
+const MERGE_HINT = '。手がかり: この段で通るマージは、手順 3 に示された 1 行そのものだけである。bash・here-doc・-c で包まず、変数の代入を別の呼び出しに分けず、その 1 行をそのまま 1 回で実行する。止められた操作そのものを別の綴りで迂回しない。'
+const hintFor = (code, { merge = false } = {}) => (code === 'deny:merge-guard' ? (merge ? MERGE_HINT : undefined) : HINTS[code])
+
+test('拒否の文言（Phase 4）: merge-guard の手がかりは --merge-re があるときだけ足す', () => {
+  assert.ok(!/["\\\u0000-\u001f]/.test(MERGE_HINT), 'JSON に埋めるため " と \\ と制御文字を含めない')
+  const body = '#!/bin/bash\necho "AGENT_GUARD_RESULT deny merge-guard"\nexit 2\n'
+  assert.equal(viaHook(body, 'x', { merge: true }).message, `iit-runner: ガードの判定により拒否した（deny:merge-guard）${MERGE_HINT}`)
+  assert.equal(viaHook(body, 'x').message, 'iit-runner: ガードの判定により拒否した（deny:merge-guard）')
+  // マージを許す段の cwd はリポジトリの外（agent-host が作る空ディレクトリ）。そこでも手順 3 の 1 行そのものは通る
+  const outside = trackTmp(mkdtempSync(join(tmpdir(), 'iit-merge-')))
+  for (const path of REAL_GUARDS) assert.deepEqual(viaHook({ path }, MERGE_CMD, { merge: true, cwd: outside }), { deny: false, message: null, codes: ['allow-mergeform'] })
+  // 実測の形: 手順 3 の 1 行を here-doc で包むと完全一致から外れ、配布物のガードが止める（手がかりつき）
+  const wrapped = `bash <<'EOF'\n${MERGE_CMD}\nEOF`
+  for (const path of REAL_GUARDS) {
+    const h = viaHook({ path }, wrapped, { merge: true })
+    assert.deepEqual(h.codes, ['deny:merge-guard'])
+    assert.equal(h.message, `iit-runner: ガードの判定により拒否した（deny:merge-guard）${MERGE_HINT}`)
+  }
+})
 
 // 手がかりの対の実測: 左は配布物のガードが該当の理由で止める形、右は手がかりどおりに言い直した形（ガードは allow）。
 const HINT_PAIRS = [

@@ -122,7 +122,12 @@ for (const c of CASES) {
     const ref = await runScript({ args: structuredClone(c.args), leaves: c.leaves, target: 'src' })
     const got = await runThroughRunner({ args: c.args, leaves: c.leaves })
 
-    assert.deepEqual(got.result, ref.result, '終端状態（ホストの return 値）')
+    // 隔離の段の worktreePath は、ランナーが作ったパスに置き換わる（stub-run 側は既定応答の書き写しのまま）。
+    // ランナー側のパスが作った worktree のどれかであることを確かめてから、両側のパスを伏せて比べる
+    const made = new Set(got.worktrees.map((n) => `${got.mainRoot}/.claude/worktrees/${RUN_ID}-${n}`))
+    for (const w of got.result?.ephemeralWorktrees ?? []) assert.ok(made.has(w.path), `ランナーが作ったパスに置き換わる: ${w.path}`)
+    const masked = (r) => (r && Array.isArray(r.ephemeralWorktrees) ? { ...r, ephemeralWorktrees: r.ephemeralWorktrees.map((w) => ({ ...w, path: '<worktree>' })) } : r)
+    assert.deepEqual(masked(got.result), masked(ref.result), '終端状態（ホストの return 値。worktree のパスを除く）')
     const a = got.calls.filter((x) => !isSpec(x)).map(shape)
     const b = ref.calls.filter((x) => !isSpec(x)).map(shape)
     if (c.ordered) assert.deepEqual(a, b, '呼び出し列（仕様の段を除く・順序つき）')

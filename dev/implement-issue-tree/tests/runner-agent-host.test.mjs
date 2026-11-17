@@ -13,7 +13,9 @@ import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { trackTmp } from './lib/tmp-track.mjs'
+import { gitEnv, makeRepo } from './lib/worktree-sandbox.mjs'
 import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { createAgentHost, EXEC_RULES, checkExecRule, interpretExecResult, killScriptsSync, parseExecSpec, spawnScript } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
 import { AdapterError, KINDS } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
@@ -788,4 +790,84 @@ test('recoverGit（PR #851 の Bugbot）: mainRoot の途中に symlink があ�
   const got3 = recoverGitFor('recover:#2', line(join(link3, '.claude', 'worktrees', 'old-1')), { skillDir, mainRoot: link3 })
   assert.deepEqual(got3, { commonDir: join(real3, '.git'), worktree: null, gitdir: null })
   assert.deepEqual(checkRecoverGit(link3, got3), got3)
+})
+
+// ---- Phase 4（実リポジトリでの通し確認）で見つかった 4 件 ----
+
+test('前置き（Phase 4）: マージを許す merge-exec の段は here-doc の指示を外し、手順 3 のマージコマンドを示された 1 行のまま実行させる。他の段・回復専用の merge-exec は従来どおり', async () => {
+  const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { args: { autoMerge: true }, repo: 'acme/widget' } })
+  await agent(MERGE_STEP(41), { label: 'merge-exec:#5', schema: SCHEMA })
+  const merge = calls[0]
+  assert.equal(merge.allowMerge, true)
+  assert.equal(merge.prompt.includes("<<'EOF'"), false, 'here-doc の指示を含まない')
+  assert.equal(merge.prompt.includes(SHELL_NOTE), false)
+  assert.ok(merge.prompt.includes('示された 1 行のまま'), merge.prompt.slice(0, 800))
+  assert.match(merge.prompt, /`status` 等のシェルの特殊変数名に代入しない/, 'zsh の特殊変数の注意は残す')
+  await agent('回復専用（マージのコマンドを含まない）', { label: 'merge-exec:#5', schema: SCHEMA })
+  await agent('p', { label: 'plan:#2', schema: SCHEMA })
+  for (const req of calls.slice(1)) {
+    assert.equal(req.allowMerge, false)
+    assert.ok(req.prompt.includes(SHELL_NOTE), req.label)
+    assert.equal(req.prompt.includes('示された 1 行のまま'), false, req.label)
+  }
+})
+
+test('worktreePath（Phase 4）: 隔離 worktree の段の値の worktreePath は、ランナーが作ったパスで上書きし、違っていたらログに残す。キーが無い値・隔離しない段は変えない', async () => {
+  const WT_SCHEMA = { type: 'object', required: ['pushed'], properties: { pushed: { type: 'boolean' }, worktreePath: { type: 'string' } } }
+  const logs = []
+  let reply = (req) => ({ pushed: false, worktreePath: `${req.cwd} absolute path?` })
+  const { agent } = makeHost({
+    reply: (req) => reply(req),
+    cfg: { log: (m) => logs.push(m), createWorktree: (p) => ({ path: `${p.mainRoot}/.claude/worktrees/${p.runId}-${p.n}` }) },
+  })
+  const want = `${mainRoot}/.claude/worktrees/${RUN_ID}-1`
+  assert.deepEqual(await agent('fix', { label: 'fix:#5', schema: WT_SCHEMA, isolation: 'worktree' }), { pushed: false, worktreePath: want })
+  const warned = logs.filter((m) => m.includes('worktreePath'))
+  assert.equal(warned.length, 1, logs.join('\n'))
+  assert.match(warned[0], /fix:#5/)
+  // 同じ値なら黙って通す
+  reply = (req) => ({ pushed: true, worktreePath: req.cwd })
+  assert.deepEqual(await agent('fix', { label: 'fix:#5', schema: WT_SCHEMA, isolation: 'worktree' }), { pushed: true, worktreePath: `${mainRoot}/.claude/worktrees/${RUN_ID}-2` })
+  assert.equal(logs.filter((m) => m.includes('worktreePath')).length, 1)
+  // キーが無い値には足さない
+  reply = () => ({ pushed: true })
+  assert.deepEqual(await agent('fix', { label: 'fix:#5', schema: WT_SCHEMA, isolation: 'worktree' }), { pushed: true })
+  // 隔離しない段は変えない
+  reply = () => ({ pushed: false, worktreePath: '/elsewhere' })
+  assert.deepEqual(await agent('x', { label: 'merge:#5', schema: WT_SCHEMA }), { pushed: false, worktreePath: '/elsewhere' })
+})
+
+test('merge-exec の cwd（Phase 4）: マージを許す段はリポジトリの外の空ディレクトリを cwd にし（gh pr merge がローカルのブランチを見つけない）、終わったら消す。回復専用の merge-exec と他の段は mainRoot', async () => {
+  const repo = makeRepo()
+  repo.git(repo.main, 'branch', 'feat/5-x')
+  const seen = []
+  const reply = (req) => {
+    const r = spawnSync('git', ['rev-parse', '--verify', '--quiet', 'refs/heads/feat/5-x'], { cwd: req.cwd, env: gitEnv(repo.root), encoding: 'utf8' })
+    seen.push({ label: req.label, cwd: req.cwd, exists: existsSync(req.cwd), branchFound: r.status === 0 })
+    return { ok: true, n: 1 }
+  }
+  const agent = createAgentHost({ adapter: makeFakeAdapterModule({ reply }).createAdapter({}), cfg: { config: config(), skillDir, mainRoot: repo.main, runId: RUN_ID, args: { autoMerge: true }, repo: 'acme/widget' } })
+  await agent(MERGE_STEP(41), { label: 'merge-exec:#5', schema: SCHEMA })
+  await agent('回復専用（マージのコマンドを含まない）', { label: 'merge-exec:#5', schema: SCHEMA })
+  await agent('p', { label: 'merge:#5', schema: SCHEMA })
+  const [m, rec, other] = seen
+  assert.notEqual(m.cwd, repo.main)
+  assert.equal(m.exists, true, '段の間は cwd がある')
+  assert.equal(m.branchFound, false, 'cwd の git からはメインのローカルブランチが見えない')
+  assert.equal(existsSync(m.cwd), false, '段の後に消す')
+  assert.equal(rec.cwd, repo.main, '回復専用（GH_REPO を固定しない）は mainRoot')
+  assert.equal(rec.branchFound, true)
+  assert.equal(other.cwd, repo.main)
+})
+
+test('merge-exec の cwd（Phase 4）: 置き場がリポジトリの中ならマージを許さない（ローカルのブランチ削除で失敗する形にしない）', async () => {
+  const repo = makeRepo()
+  const logs = []
+  const { agent, calls } = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { args: { autoMerge: true }, repo: 'acme/widget', mergeCwdParent: repo.main, log: (x) => logs.push(x) } })
+  await agent(MERGE_STEP(41), { label: 'merge-exec:#5', schema: SCHEMA })
+  assert.equal(calls[0].allowMerge, false)
+  assert.equal(calls[0].merge, null)
+  assert.equal(calls[0].cwd, mainRoot)
+  assert.ok(logs.some((x) => x.includes('リポジトリの外')), logs.join('\n'))
+  assert.deepEqual(readdirSync(repo.main).filter((f) => f.startsWith('iit-merge-')), [], '作った置き場は消す')
 })

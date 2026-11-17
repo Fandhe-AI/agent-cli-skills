@@ -231,7 +231,8 @@ export function verifyWorktreeGitdir(mainRoot, gitdir) {
  * 片づけも失敗したら、残ったパス・ブランチを例外の文面に足す（利用者が手で消せるように）。
  * @param {{ mainRoot: string, runId: string, n: number, baseBranch?: string, fetch?: boolean, lock?: boolean, pid?: number,
  *   fetchTimeoutMs?: number, gitTimeoutMs?: number }} p
- * @returns {Promise<{ path: string, branch: string, baseBranch: string, baseSha: string, gitdir: string }>}
+ * @returns {Promise<{ path: string, branch: string, baseBranch: string, baseSha: string, gitdir: string, lockReason: string|null }>}
+ *   lockReason は付けた lock の理由（lock: false なら null）。agent-host が unlockOwnWorktree の照合に使う
  */
 export async function createWorktree({ mainRoot, runId, n, baseBranch, fetch = true, lock = true, pid = process.pid, fetchTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS }) {
   const { path, branch } = worktreeNames(mainRoot, runId, n)
@@ -277,11 +278,62 @@ export async function createWorktree({ mainRoot, runId, n, baseBranch, fetch = t
     }
     // lock・検証とその失敗の片づけもキューの中で行う（片づけが同じリポジトリの別の add と重ならないように）
     try {
-      if (lock) await g(mainRoot, ['worktree', 'lock', '--reason', `claude agent ${runId}-${n} (pid ${pid})`, '--', path])
+      const lockReason = lock ? `claude agent ${runId}-${n} (pid ${pid})` : null
+      if (lock) await g(mainRoot, ['worktree', 'lock', '--reason', lockReason, '--', path])
       const gitdir = verifyWorktreeGitdir(mainRoot, await g(path, ['rev-parse', '--absolute-git-dir']))
-      return { path, branch, baseBranch: base, baseSha: sha, gitdir }
+      return { path, branch, baseBranch: base, baseSha: sha, gitdir, lockReason }
     } catch (e) {
       throw await discardCreated(mainRoot, path, branch, e, g)
+    }
+  })
+}
+
+/**
+ * このランナーが createWorktree で付けた lock だけを外す（Phase 4。ランナーは自分の pid で lock し、同じプロセスが worktree-remove.sh を
+ * 起動するため、スクリプトからは lock が常に生存と見え、旧 worktree が retained-locked で残った）。`git worktree list --porcelain` の
+ * その worktree の `locked <理由>` が reason と完全一致するときだけ unlock する（利用者・別のセッションが付け直した lock は外さない）。
+ * 汚れ・submodule・登録の判定はしない（呼び出し後の worktree-remove.sh が行う）。同じ mainRoot の createWorktree と同じキューで直列にする。
+ * @returns {Promise<'unlocked'|'not-locked'|'other-lock'|'unregistered'|'error'>}
+ */
+export async function unlockOwnWorktree({ mainRoot, path, reason, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS }) {
+  if (typeof path !== 'string' || !isAbsolute(path) || typeof reason !== 'string' || reason === '' || reason.includes('\n')) return 'error'
+  const g = (args) => gitAsync(mainRoot, args, { timeoutMs: gitTimeoutMs })
+  let queueKey = mainRoot
+  try { queueKey = realpathSync(mainRoot) } catch { /* 渡された形のまま */ }
+  return serialize(queueKey, async () => {
+    try {
+      const block = (await g(['worktree', 'list', '--porcelain'])).split('\n\n').map((b) => b.split('\n')).find((ls) => ls[0] === `worktree ${path}`)
+      if (!block) return 'unregistered'
+      const locked = block.find((l) => l === 'locked' || l.startsWith('locked '))
+      if (locked === undefined) return 'not-locked'
+      if (locked !== `locked ${reason}`) return 'other-lock'
+      await g(['worktree', 'unlock', '--', path])
+      return 'unlocked'
+    } catch {
+      return 'error'
+    }
+  })
+}
+
+/**
+ * unlockOwnWorktree で外した lock を、スクリプトが worktree を残したとき（retained-dirty 等）に付け直す。登録があり lock が無いときだけ
+ * reason で lock する（別の lock が付いていれば触らない）。
+ * @returns {Promise<'relocked'|'locked'|'unregistered'|'error'>}
+ */
+export async function relockOwnWorktree({ mainRoot, path, reason, gitTimeoutMs = DEFAULT_GIT_TIMEOUT_MS }) {
+  if (typeof path !== 'string' || !isAbsolute(path) || typeof reason !== 'string' || reason === '' || reason.includes('\n')) return 'error'
+  const g = (args) => gitAsync(mainRoot, args, { timeoutMs: gitTimeoutMs })
+  let queueKey = mainRoot
+  try { queueKey = realpathSync(mainRoot) } catch { /* 渡された形のまま */ }
+  return serialize(queueKey, async () => {
+    try {
+      const block = (await g(['worktree', 'list', '--porcelain'])).split('\n\n').map((b) => b.split('\n')).find((ls) => ls[0] === `worktree ${path}`)
+      if (!block) return 'unregistered'
+      if (block.some((l) => l === 'locked' || l.startsWith('locked '))) return 'locked'
+      await g(['worktree', 'lock', '--reason', reason, '--', path])
+      return 'relocked'
+    } catch {
+      return 'error'
     }
   })
 }

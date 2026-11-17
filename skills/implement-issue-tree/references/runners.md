@@ -68,7 +68,7 @@ node <skillDir>/runner/run.mjs --tool codex --args args.json
 - 前提は Workflow 版と同じで、判定もホストの同じコードが行う。サーバー側の強制の実測（G0）と `externalChecks` の明示（全 App の信頼済み context 宣言込み）が要る。構成は [automerge-design.md](automerge-design.md) に従う。
 - マージを許すのは merge-exec の段の 1 コマンド（`gh pr merge <N> --squash --delete-branch --match-head-commit`）だけで、PR 番号と対象リポジトリを固定する。merge-exec 以外の段の `gh pr merge` と、`gh pr review --approve` は、ガードが拒否する（変数・`$(…)` 経由の形は止まらない。次節）。
 - `autoMerge: true` のランは、起動前にメイン worktree で `gh repo view` を実行して対象リポジトリを決める。`args.repo` が違えば終了コード 2、`args.repo` が無く環境変数 `GH_REPO` が解決先と違えば終了コード 3。gh は remote の解決で `upstream` を `origin` より先に取るため、fork の構成（`origin` が fork・`upstream` が親）で `args.repo` に fork を指定すると終了コード 2 になると見込まれる（実機では未確認）。
-- merge-exec の `gh pr merge --delete-branch` は、ローカルのブランチ削除に失敗し得る。リモートのマージは先に済んでいる。
+- merge-exec の段（マージを許す形）は、リポジトリの外の空ディレクトリを作業ディレクトリにして起動する。`gh pr merge --delete-branch` はローカルに head のブランチがあるときだけローカルの削除を試みるため、この段は sandbox で書けない `.git/refs` に触れず、リモートのマージとリモートのブランチ削除まで進む。ローカルの head のブランチは消さずに残る。置き場をリポジトリの外に作れないときは、その段ではマージを許さない。
 
 ### 構造化出力
 

@@ -312,3 +312,101 @@ test('#865 相対パスの gitdir: commondir を別の場所へ向けたもの�
   writeFileSync(join(u.main, '.git', 'worktrees', 'dup', 'gitdir'), `${u.wt}/.git\n`)
   assert.equal(checkCleanupTarget({ mainRoot: u.main, path: u.wt, parent: PARENT, issue: 2 }).reason, 'この worktree を指す gitdir が 2 つ以上ある')
 })
+
+// ---- Phase 4: ランナーが自分の pid で lock した worktree（retained-locked で残った 3 件）----
+// ランナーは隔離 worktree を `claude agent <runId>-<n> (pid <ランナーの pid>)` で lock し、同じプロセスが worktree-remove.sh を
+// 起動するので、lock は常に生存と判定されて保持になっていた。ホストは自分が作った worktree（作成時の lock の理由と一致するもの）
+// だけを、スクリプトの前に unlock する。
+
+/** createWorktree の差し替え: 実 git で .claude/worktrees/<runId>-<n> を作り、ランナーと同じ形で自分の pid の lock を付ける。 */
+function lockedWorktreeMaker(repo, main) {
+  return ({ runId, n }) => {
+    const name = `${runId}-${n}`
+    const dir = join(main, '.claude', 'worktrees', name)
+    repo.addWorktree(name, { dir, branch: `worktree-${name}` })
+    const lockReason = `claude agent ${name} (pid ${process.pid})`
+    repo.git(main, 'worktree', 'lock', '--reason', lockReason, dir)
+    return { path: dir, lockReason }
+  }
+}
+/** ランナーを通さずに作った、同じ形の lock の worktree（対照）。 */
+function foreignLocked(repo, main, name) {
+  const dir = join(main, '.claude', 'worktrees', name)
+  repo.addWorktree(name, { dir, branch: `worktree-${name}` })
+  repo.git(main, 'worktree', 'lock', '--reason', `claude agent ${name} (pid ${process.pid})`, dir)
+  return dir
+}
+const lockedOf = (repo, main, dir) => repo.git(main, 'worktree', 'list', '--porcelain').split('\n\n').some((b) => b.startsWith(`worktree ${dir}\n`) && /\nlocked/.test(b))
+
+function hostWithWorktrees(repo, main) {
+  const mod = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  const scripts = []
+  const run = (file, argv, opts) => { scripts.push(argv[2]); return spawnScript(file, argv, { ...opts, env: gitEnv(repo.root) }) }
+  const logs = []
+  const agent = createAgentHost({ adapter: mod.createAdapter({}), cfg: { config: loadConfig(), skillDir: SKILL_DIR, mainRoot: main, runId: RUN_ID, args: { parent: PARENT }, spawnScript: run, createWorktree: lockedWorktreeMaker(repo, main), log: (x) => logs.push(x) } })
+  return { agent, logs, scripts, mod }
+}
+const OK_SCHEMA = { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+const specLine = (spec) => `<!-- iit-exec v1 ${JSON.stringify(spec)} -->`
+const removeSpec = (path, mode = 'superseded') => `${specLine({ v: 1, script: 'worktree-remove.sh', sha256: bundleSha256(SCRIPTS_DIR, 'worktree-remove.sh'), argv: ['remove', '--mode', mode, '--path', path], ret: 'line:WORKTREE_REMOVE_RESULT' })}\n掃除`
+
+test('Phase 4 掃除の複合段: ランナーが作って自分の pid で lock した旧 worktree は unlock してから消す。ランナーが作っていない同じ形の lock は外さず retained-locked', async () => {
+  const s = setup({ issue: 2, name: 'pre-existing' })
+  const h = hostWithWorktrees(s.repo, s.main)
+  await h.agent('impl', { label: 'impl:#2', schema: OK_SCHEMA, isolation: 'worktree' })
+  const own = join(s.main, '.claude', 'worktrees', `${RUN_ID}-1`)
+  assert.equal(lockedOf(s.repo, s.main, own), true, '作成時に lock されている')
+  writeFileSync(s.stateFile, `${JSON.stringify({ items: { 2: { status: 'merged', worktree: own } } })}\n`)
+  const { prompt, label } = await cleanupPromptOf(2, { status: 'merged', worktree: own }, { cleanupWorktree: own })
+  const got = await h.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+  assert.deepEqual(got, { ok: true, retained: false, branchSha: '', worktree: 'removed' }, h.logs.join('\n'))
+  assert.equal(existsSync(own), false)
+
+  const foreign = foreignLocked(s.repo, s.main, `${RUN_ID}-99`)
+  writeFileSync(s.stateFile, `${JSON.stringify({ items: { 2: { status: 'merged', worktree: foreign } } })}\n`)
+  const c = await cleanupPromptOf(2, { status: 'merged', worktree: foreign }, { cleanupWorktree: foreign })
+  const kept = await h.agent(c.prompt, { label: c.label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+  assert.equal(kept.worktree, 'retained-locked')
+  assert.equal(lockedOf(s.repo, s.main, foreign), true, '集合に無い worktree は unlock しない')
+})
+
+test('Phase 4 実行仕様の掃除（state:cleanup:#N の remove）と最終スイープ: ランナーが作った lock の worktree だけを unlock してから渡す。--require-missing と実行中の段の worktree は unlock しない', async () => {
+  const s = setup({ issue: 2, name: 'pre-existing' })
+  const h = hostWithWorktrees(s.repo, s.main)
+  for (let i = 0; i < 4; i++) await h.agent('impl', { label: `impl:#${i + 2}`, schema: OK_SCHEMA, isolation: 'worktree' })
+  const own = (n) => join(s.main, '.claude', 'worktrees', `${RUN_ID}-${n}`)
+  const FAIL = { ok: false, retained: true, worktree: '' }
+  const r1 = await h.agent(removeSpec(own(1)), { label: 'state:cleanup:#2', schema: CLEANUP_SCHEMA })
+  assert.equal(r1.worktree, 'removed', h.logs.join('\n'))
+  assert.equal(existsSync(own(1)), false)
+  // --require-missing の結びつけはスクリプトが lock を外さない経路。ホストも外さない
+  const req = `${specLine({ v: 1, script: 'worktree-remove.sh', sha256: bundleSha256(SCRIPTS_DIR, 'worktree-remove.sh'), argv: ['remove', '--mode', 'discard', '--path', own(2), '--require-missing'], ret: 'line:WORKTREE_REMOVE_RESULT', fail: FAIL })}\n掃除`
+  await h.agent(req, { label: 'state:cleanup:#3', schema: CLEANUP_SCHEMA })
+  assert.equal(lockedOf(s.repo, s.main, own(2)), true, '--require-missing では unlock しない')
+
+  const foreign = foreignLocked(s.repo, s.main, `${RUN_ID}-98`)
+  const candidates = JSON.stringify([own(3), foreign])
+  const sweep = `${specLine({ v: 1, script: 'worktree-remove.sh', sha256: bundleSha256(SCRIPTS_DIR, 'worktree-remove.sh'), argv: ['sweep', '--file', `_/issue-trees/${PARENT}.json`], ret: 'line:WORKTREE_REMOVE_RESULT', stdinHex: Buffer.from(`${candidates}\n`).toString('hex') })}\nスイープ`
+  const sw = await h.agent(sweep, { label: 'worktree:sweep', schema: SWEEP_SCHEMA })
+  assert.deepEqual(sw.removed, [own(3)], h.logs.join('\n'))
+  assert.equal(lockedOf(s.repo, s.main, foreign), true, 'スイープでも集合に無い worktree は unlock しない')
+  // スクリプトが残した（discard で汚れている）自分の worktree は、作成時の理由で lock し直す
+  writeFileSync(join(own(4), 'dirty.txt'), 'x\n')
+  const kept = await h.agent(removeSpec(own(4), 'discard'), { label: 'state:cleanup:#5', schema: CLEANUP_SCHEMA })
+  assert.equal(kept.worktree, 'retained-dirty')
+  assert.equal(lockedOf(s.repo, s.main, own(4)), true, '残った worktree は lock し直す')
+  assert.ok(s.repo.git(s.main, 'worktree', 'list', '--porcelain').includes(`locked claude agent ${RUN_ID}-4 (pid ${process.pid})`))
+
+  // 実行中の隔離の段の worktree（まだエージェントが使っている）は unlock しない
+  let during = null
+  const busy = makeFakeAdapterModule({
+    reply: async (r) => {
+      during = await agent2(removeSpec(r.cwd), { label: 'state:cleanup:#9', schema: CLEANUP_SCHEMA })
+      return { ok: true }
+    },
+  })
+  const agent2 = createAgentHost({ adapter: busy.createAdapter({}), cfg: { config: loadConfig(), skillDir: SKILL_DIR, mainRoot: s.main, runId: 'wf_0123abcd-777', args: { parent: PARENT }, spawnScript: (f, a, o) => spawnScript(f, a, { ...o, env: gitEnv(s.repo.root) }), createWorktree: lockedWorktreeMaker(s.repo, s.main) } })
+  await agent2('impl', { label: 'impl:#9', schema: OK_SCHEMA, isolation: 'worktree' })
+  assert.equal(during.worktree, 'retained-locked')
+})
+const SWEEP_SCHEMA = { type: 'object', required: ['removed'], properties: { removed: { type: 'array', items: { type: 'string' } } } }
