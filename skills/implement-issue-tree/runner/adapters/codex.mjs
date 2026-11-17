@@ -100,7 +100,7 @@
 //
 // 時間切れ: プロセスグループへ SIGTERM、猶予後に SIGKILL（孫も止まる。setsid で抜けた孫は止められない）。
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -175,14 +175,17 @@ export function worktreeGit(mainRoot, worktreeGitdir) {
 /**
  * req.recoverGit（回復の段の git の書き込み先。agent-host が lib/recover-git.mjs で決める）を検証して返す（無ければ null）。
  * 共通ディレクトリは <main>/.git、worktree は <main>/.claude/worktrees/ の直下、gitdir は <main>/.git/worktrees/ の直下で、
- * worktree と gitdir は両方あるか両方無いか。合わなければ例外（実行しない）。
+ * worktree と gitdir は両方あるか両方無いか。<main> は mainRoot の realpath（lib/recover-git.mjs と同じ基準）。合わなければ例外（実行しない）。
  */
 export function checkRecoverGit(mainRoot, v) {
   if (v === null || v === undefined) return null
   const norm = (p) => typeof p === 'string' && isAbsolute(p) && resolve(p) === p
-  const ok = typeof v === 'object' && v.commonDir === join(mainRoot, '.git') &&
+  // lib/recover-git.mjs と同じく、メイン worktree の realpath を基準にする（パスの解決だけで、ファイルは読まない）
+  let root
+  try { root = realpathSync(mainRoot) } catch { root = mainRoot }
+  const ok = typeof v === 'object' && v.commonDir === join(root, '.git') &&
     ((v.worktree === null && v.gitdir === null) ||
-      (norm(v.worktree) && dirname(v.worktree) === join(mainRoot, '.claude', 'worktrees') && norm(v.gitdir) && dirname(v.gitdir) === join(mainRoot, '.git', 'worktrees')))
+      (norm(v.worktree) && dirname(v.worktree) === join(root, '.claude', 'worktrees') && norm(v.gitdir) && dirname(v.gitdir) === join(root, '.git', 'worktrees')))
   if (!ok) throw new AdapterError('denied', 'recoverGit がメインの .git・.claude/worktrees/・.git/worktrees/ の形でない')
   return { commonDir: v.commonDir, worktree: v.worktree, gitdir: v.gitdir }
 }

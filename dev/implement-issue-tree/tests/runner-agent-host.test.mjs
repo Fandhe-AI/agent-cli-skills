@@ -19,6 +19,8 @@ import { createAgentHost, EXEC_RULES, checkExecRule, interpretExecResult, killSc
 import { AdapterError, KINDS } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 import { loadConfig, resolveModel } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 import { buildPreamble, buildSchemaInstruction, SHELL_NOTE } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
+import { recoverGitFor } from '../../../skills/implement-issue-tree/runner/lib/recover-git.mjs'
+import { checkRecoverGit } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
 
 const root = trackTmp(realpathSync(mkdtempSync(join(tmpdir(), 'iit-runner-host-'))))
 const mainRoot = join(root, 'main')
@@ -676,4 +678,40 @@ test('recoverGit（PR #851 の P1）: recover:#N にだけ、プロンプトの 
   const h2 = makeHost({ cfg: { mainRoot: mr2 }, reply: () => ({ ok: true, n: 1 }) })
   await h2.agent(P(` --base 'main' --worktree '${join(mr2, '.claude', 'worktrees', 'old-1')}'`), { label: 'recover:#2', schema: SCHEMA })
   assert.deepEqual(h2.calls[0].recoverGit, { commonDir: join(mr2, '.git'), worktree: null, gitdir: null })
+})
+
+// PR #851 の Bugbot: mainRoot の途中に symlink がある（macOS の /tmp → /private/tmp 等）と、.claude/worktrees の realpath が
+// 解決していない join(mainRoot, …) と一致せず、実体が直下にある worktree でも WIP コミットの書き込みを足さなかった。
+// run.mjs は mainRoot を realpath にしてから渡すのでランナーの経路では起きないが、関数の単体でも realpath 同士で比べる。
+// アダプタの検証（checkRecoverGit）も同じ基準で受け、.claude/worktrees 自体が symlink なら従来どおり base の取得だけにする
+test('recoverGit（PR #851 の Bugbot）: mainRoot の途中に symlink があっても、実体が .claude/worktrees の直下の worktree は足し、アダプタの検証も通る', () => {
+  const real = join(root, `rec-real-${Math.random().toString(16).slice(2)}`)
+  const link = join(root, `rec-link-${Math.random().toString(16).slice(2)}`)
+  const wtReal = join(real, '.claude', 'worktrees', 'old-1')
+  mkdirSync(wtReal, { recursive: true })
+  mkdirSync(join(real, '.git', 'worktrees', 'old-1'), { recursive: true })
+  writeFileSync(join(real, '.git', 'worktrees', 'old-1', 'gitdir'), `${wtReal}/.git\n`)
+  symlinkSync(real, link)
+  const line = (wt) => `bash '${skillDir}/scripts/run-verified.sh' ${'c'.repeat(64)} recover-prep.sh --base 'main' --worktree '${wt}'`
+  const want = { commonDir: join(real, '.git'), worktree: wtReal, gitdir: join(real, '.git', 'worktrees', 'old-1') }
+  for (const wt of [join(link, '.claude', 'worktrees', 'old-1'), wtReal]) {
+    const got = recoverGitFor('recover:#2', line(wt), { skillDir, mainRoot: link })
+    assert.deepEqual(got, want, wt)
+    assert.deepEqual(checkRecoverGit(link, got), want, 'アダプタの検証も同じ mainRoot で通る')
+  }
+  // 解決済みの mainRoot でも同じ結果（従来の経路）
+  assert.deepEqual(recoverGitFor('recover:#2', line(wtReal), { skillDir, mainRoot: real }), want)
+  // .claude/worktrees 自体が外を指す symlink なら、mainRoot の途中の symlink と重なっても base の取得だけ（801e987 の判定）
+  const real3 = join(root, `rec-real3-${Math.random().toString(16).slice(2)}`)
+  const out3 = join(root, `rec-out3-${Math.random().toString(16).slice(2)}`)
+  const link3 = join(root, `rec-link3-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(join(out3, 'old-1'), { recursive: true })
+  mkdirSync(join(real3, '.claude'), { recursive: true })
+  symlinkSync(out3, join(real3, '.claude', 'worktrees'))
+  mkdirSync(join(real3, '.git', 'worktrees', 'old-1'), { recursive: true })
+  writeFileSync(join(real3, '.git', 'worktrees', 'old-1', 'gitdir'), `${join(out3, 'old-1')}/.git\n`)
+  symlinkSync(real3, link3)
+  const got3 = recoverGitFor('recover:#2', line(join(link3, '.claude', 'worktrees', 'old-1')), { skillDir, mainRoot: link3 })
+  assert.deepEqual(got3, { commonDir: join(real3, '.git'), worktree: null, gitdir: null })
+  assert.deepEqual(checkRecoverGit(link3, got3), got3)
 })

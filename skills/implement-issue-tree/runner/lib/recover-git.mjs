@@ -12,6 +12,9 @@
 // gitdir がちょうど 1 つある場合だけ足す。決められなければ base の取得に要る場所だけを足す（WIP コミットは失敗し、
 // recover-prep.sh は wipCommitted:false を返して worktree は保全される）。
 // .git/config・.git/hooks・gitdir の commondir・gitdir・config.worktree・worktree の .git ファイルはアダプタが read のまま残す。
+// 比較と返すパスはメイン worktree の realpath を基準にする（mainRoot の途中の symlink〔macOS の /tmp → /private/tmp 等〕で
+// 判定が外れないように。PR #851 の Bugbot。run.mjs は realpath 済みの mainRoot を渡すので、ランナーの経路では従来と同じ値になる）。
+// アダプタの検証（adapters/codex.mjs の checkRecoverGit）も同じ基準で受ける。
 //
 // 呼び出し元: lib/agent-host.mjs（req.recoverGit）。アダプタ側の検証と profile は adapters/codex.mjs の checkRecoverGit・buildProfileArgs。
 import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
@@ -36,7 +39,9 @@ export function recoverGitFor(label, prompt, { skillDir, mainRoot }) {
   const re = new RegExp(`^bash '${escapeRe(skillDir)}/scripts/run-verified\\.sh' [0-9a-f]{64} recover-prep\\.sh --base ${Q}(?: --worktree ${Q})?(?: --branch ${Q})?$`)
   const hits = prompt.split('\n').map((l) => re.exec(l)).filter(Boolean)
   if (hits.length !== 1) return null
-  const commonDir = join(mainRoot, '.git')
+  let root
+  try { root = realpathSync(mainRoot) } catch { return null }
+  const commonDir = join(root, '.git')
   try { if (!lstatSync(commonDir).isDirectory()) return null } catch { return null }
   const fetchOnly = { commonDir, worktree: null, gitdir: null }
   const wt = hits[0][2]
@@ -44,13 +49,14 @@ export function recoverGitFor(label, prompt, { skillDir, mainRoot }) {
   let real, parent
   try {
     real = realpathSync(wt)
-    parent = realpathSync(join(mainRoot, '.claude', 'worktrees'))
+    parent = realpathSync(join(root, '.claude', 'worktrees'))
     if (!lstatSync(real).isDirectory()) return fetchOnly
   } catch {
     return fetchOnly // 実体が無い（dead worktree）: WIP コミットは無い
   }
-  // .claude/worktrees 自体が symlink 等で別の場所にあるときも足さない（アダプタは <main>/.claude/worktrees/ の直下の形だけを受ける）
-  if (dirname(real) !== parent || parent !== join(mainRoot, '.claude', 'worktrees')) return fetchOnly
+  // .claude/worktrees 自体が symlink 等で別の場所にあるときも足さない（アダプタは <main>/.claude/worktrees/ の直下の形だけを受ける）。
+  // 比べる相手は解決したメイン worktree の下の未解決の .claude/worktrees（両辺を realpath にすると自明に一致して、この判定が消える）
+  if (dirname(real) !== parent || parent !== join(root, '.claude', 'worktrees')) return fetchOnly
   const wts = join(commonDir, 'worktrees')
   let names
   try { names = readdirSync(wts) } catch { return fetchOnly }
@@ -60,7 +66,7 @@ export function recoverGitFor(label, prompt, { skillDir, mainRoot }) {
   })
   if (found.length !== 1) return fetchOnly
   try {
-    const gitdir = verifyWorktreeGitdir(mainRoot, join(wts, found[0]))
+    const gitdir = verifyWorktreeGitdir(root, join(wts, found[0]))
     return dirname(gitdir) === wts ? { commonDir, worktree: real, gitdir } : fetchOnly
   } catch {
     return fetchOnly
