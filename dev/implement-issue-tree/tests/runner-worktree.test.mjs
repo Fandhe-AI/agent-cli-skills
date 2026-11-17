@@ -410,3 +410,47 @@ test('createWorktree: 時間切れで止めた add の片づけも失敗した�
       return true
     }))
 })
+
+/** worktree add で、-- の次のパスにディレクトリだけを作って失敗する偽 git（登録の前に止まった add の再現）。 */
+function addMkdirThenFailGitDir(root) {
+  const dir = join(root, `fakegit-addmkdir-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(dir)
+  writeFileSync(join(dir, 'git'), `#!/bin/sh
+if [ "$1 $2" = "worktree add" ]; then
+  next=0
+  for a in "$@"; do
+    if [ "$next" = 1 ]; then mkdir -p "$a"; echo partial > "$a/x"; break; fi
+    [ "$a" = -- ] && next=1
+  done
+  echo "fatal: injected worktree add failure" >&2
+  exit 1
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`)
+  chmodSync(join(dir, 'git'), 0o755)
+  return dir
+}
+
+test('createWorktree: 登録の前に止まった add が作ったディレクトリ（add の前に無かった）を消し、元の例外を投げる', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const { path } = worktreeNames(sb.main, runId, 1)
+  const fake = addMkdirThenFailGitDir(sb.root)
+  await withEnv({ PATH: `${fake}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })),
+      (e) => /injected worktree add failure/.test(e.message) && !/片づけ/.test(e.message)))
+  assert.equal(existsSync(path), false)
+})
+
+test('createWorktree: add の前からあるディレクトリは、add が失敗しても中身ごと残す', async () => {
+  const sb = sandbox()
+  const branches = () => git(sb.main, 'branch', '--list', '--format=%(refname)')
+  const br = branches()
+  const runId = newRunId()
+  const { path } = worktreeNames(sb.main, runId, 1)
+  mkdirSync(path, { recursive: true })
+  writeFileSync(join(path, 'mine.txt'), 'keep\n')
+  await assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })), /git worktree が失敗/)
+  assert.equal(readFileSync(join(path, 'mine.txt'), 'utf8'), 'keep\n')
+  assert.equal(branches(), br, '今回作られたブランチがあれば消す（元からのブランチは変えない）')
+})
