@@ -316,11 +316,11 @@ test('main（MEDIUM-8）: autoMerge のときだけ start 前に gh repo view �
   }
 })
 
-// PR #851 の codex P0: マージ先（gh repo view で決めた repo。merge 段の GH_REPO に固定する）と、生成物が merge-gate・push・観測の
-// --repo / -R に使う args.repo（無ければ gh の既定の解決。継いだ GH_REPO が最優先）が食い違うと、検証したリポジトリと別のリポジトリで
-// マージし得た。args.repo があれば（autoMerge でなくても）解決先と大文字小文字を区別せずに照合し、違えば 2。args.repo が無い
-// autoMerge のランは、継いだ GH_REPO が解決先と違えば 3（生成物の gh が GH_REPO の repo を見るため）
-test('main（PR #851 の codex P0）: args.repo とメイン worktree の repo を照合し、違えば 2・_/iit-runner を作らない。GH_REPO のずれは 3', async () => {
+// PR #851 の codex P0: マージ先（gh repo view で決めた repo。merge-exec の段の GH_REPO に固定し、merge-gate.sh も gh pr merge も
+// その段で走る）と、生成物が merge-gate・push・観測の --repo / -R に使う args.repo（無ければ gh の既定の解決。継いだ GH_REPO が
+// 最優先）が食い違うと、検証したリポジトリと別のリポジトリでマージし得た。autoMerge のランで args.repo があれば解決先と大文字小文字を
+// 区別せずに照合し、違えば 2。args.repo が無ければ、継いだ GH_REPO が解決先と違えば 3。autoMerge でないランは照合しない
+test('main（PR #851 の codex P0）: autoMerge のランで args.repo とマージ先を照合し、違えば 2・_/iit-runner を作らない。GH_REPO のずれは 3', async () => {
   const STEP = 'HEAD_SHA="<payload.headSha の 40 桁>"; gh pr merge 7 --squash --delete-branch --match-head-commit "$HEAD_SHA"'
   const flow = () => tinyWorkflow(async (args, agent) => ({ repo: args.repo ?? null, r: await agent(STEP, { label: 'merge-exec:#7', schema: SCHEMA }) }))
   const run = async (argsObj, { env, repo } = {}) => {
@@ -330,33 +330,26 @@ test('main（PR #851 の codex P0）: args.repo とメイン worktree の repo �
     const code = await main(['--tool', 'codex', '--args', argsFile({ parent: 1, ...argsObj }), '--no-build-check'], x.d)
     return { code, x, a, wrote: existsSync(join(x.mainRoot, '_', 'iit-runner')), err: x.err.join('') }
   }
-  // 一致（大文字小文字は区別しない）: autoMerge でもそうでなくても走る。args.repo は書き換えない
-  for (const autoMerge of [true, false]) {
-    const ok = await run({ autoMerge, repo: 'ACME/Widget' })
-    assert.equal(ok.code, 0, ok.err)
-    assert.equal(ok.x.calls.repoOf.length, 1)
-    assert.equal(JSON.parse(ok.x.out.join('')).result.repo, 'ACME/Widget', 'args.repo はそのまま生成物へ渡す')
-    assert.deepEqual(ok.a.calls[0].merge, autoMerge ? { prNumber: 7, repo: 'acme/widget' } : null)
+  // 一致（大文字小文字は区別しない）: 走る。args.repo は書き換えずに生成物へ渡す
+  const ok = await run({ autoMerge: true, repo: 'ACME/Widget' })
+  assert.equal(ok.code, 0, ok.err)
+  assert.equal(ok.x.calls.repoOf.length, 1)
+  assert.equal(JSON.parse(ok.x.out.join('')).result.repo, 'ACME/Widget')
+  assert.deepEqual(ok.a.calls[0].merge, { prNumber: 7, repo: 'acme/widget' })
+  // 不一致: 2（何も書かない・アダプタを作らない）
+  for (const repo of ['acme/other', 'evil/widget', 7]) {
+    const ng = await run({ autoMerge: true, repo })
+    assert.equal(ng.code, 2, String(repo))
+    assert.match(ng.err, /args\.repo/)
+    assert.equal(ng.wrote, false)
+    assert.equal(ng.a.instances.length, 0)
   }
-  // 不一致: autoMerge でもそうでなくても 2（何も書かない・アダプタを作らない）
-  for (const autoMerge of [true, false]) {
-    for (const repo of ['acme/other', 'evil/widget', 7]) {
-      const ng = await run({ autoMerge, repo })
-      assert.equal(ng.code, 2, `${autoMerge} ${repo}`)
-      assert.match(ng.err, /args\.repo/)
-      assert.equal(ng.wrote, false)
-      assert.equal(ng.a.instances.length, 0)
-    }
-  }
-  // args.repo があるのに解決できなければ 3
-  const unres = await run({ repo: 'acme/widget' }, { repo: { ok: false, reason: 'gh repo view が失敗' } })
-  assert.equal(unres.code, 3)
-  assert.equal(unres.wrote, false)
-  // args.repo が null・無しで autoMerge でなければ照合しない（gh repo view も呼ばない）
-  for (const argsObj of [{}, { repo: null }]) {
+  // autoMerge でないランは照合しない（gh repo view も呼ばない。push は pr-push.sh の routing ガードが origin と照合する）
+  for (const argsObj of [{ repo: 'acme/other' }, {}, { repo: null }]) {
     const none = await run(argsObj, { env: { GH_REPO: 'evil/other' } })
-    assert.equal(none.code, 0)
+    assert.equal(none.code, 0, JSON.stringify(argsObj))
     assert.equal(none.x.calls.repoOf.length, 0)
+    assert.equal(none.a.calls[0].merge, null)
   }
   // args.repo が無い autoMerge: 継いだ GH_REPO が解決先と違えば 3、同じ（大文字小文字を問わない）・空なら走る
   const gh = await run({ autoMerge: true }, { env: { GH_REPO: 'evil/other' } })
