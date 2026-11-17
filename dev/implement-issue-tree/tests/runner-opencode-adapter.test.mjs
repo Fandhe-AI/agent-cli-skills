@@ -604,3 +604,24 @@ test('後片づけ: serve の本体が異常終了しても、同じグループ
     await t.adapter.close()
   } finally { t.cleanup() }
 })
+
+// --- 終了した serve の作り直し（PR #851 の Bugbot）: 並列の run が同時に終了済みの serve を見ても作り直しは 1 つ ---
+test('作り直し: 終了した serve を並列の run が同時に見ても、作り直す serve は 1 つで、close は起動した serve をすべて止める', { timeout: 30000 }, async () => {
+  const t = setup()
+  let left = null
+  await t.adapter.start()
+  try {
+    const first = starts(t.records())[0].pid
+    process.kill(first, 'SIGKILL')
+    assert.ok(await dead(first))
+    const outs = await Promise.all([t.adapter.run(t.req()), t.adapter.run(t.req()), t.adapter.run(t.req())])
+    for (const o of outs) assert.match(o.text, /^reply-1:/)
+    assert.equal(starts(t.records()).length, 2, '作り直しは 1 回だけ（元の 1 つ + 作り直しの 1 つ）')
+  } finally {
+    await t.adapter.close()
+    // 失敗しても残った serve を止める（残るとテストのプロセスが終わらない）。判定は下で行う
+    left = await waitDead(starts(t.records()).map((r) => r.pid), 5000)
+    for (const p of left) { try { process.kill(p, 'SIGKILL') } catch { /* 既に無い */ } }
+  }
+  assert.deepEqual(left, [], 'close の後に serve が残らない')
+})

@@ -173,6 +173,8 @@ export function createAdapter(cfg) {
   const baseEnv = cfg.env ?? process.env
   let guardScript = null
   const serves = new Map() // kind -> Promise<Serve>
+  // 起動した serve すべて（作り直しで serves から外れたものを含む）。close はこちらを止める
+  const allServes = new Set()
   const sessions = new Map() // sid -> Serve（自分が作ったもの全部）
   // 起動した serve の子プロセス（起動待ちのものを含む）。killSync が同期で使う（serves は Promise なので同期では引けない）
   const children = new Set()
@@ -213,6 +215,7 @@ export function createAdapter(cfg) {
     closeSync(errFd)
     const serve = { kind, allowMerge, repo: merge?.repo ?? null, nonce, markerPath, callLog, locations: new Set(), child, base: `http://127.0.0.1:${port}`, exited: false, exitInfo: null, subs: new Set(), sseCtrl: null, spawnError: null }
     serve.auth = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`
+    allServes.add(serve)
     child.on('error', (e) => { serve.spawnError = e })
     // 本体が終わったら（SIGTERM で本体だけ終わった・異常終了した場合を含む）、同じプロセスグループに残った子・孫をその場で
     // SIGKILL する。本体の終了で止める対象（children・stopServe・close）から外れるため、ここで止めないと残る（PR #851 の codex P1）。
@@ -355,14 +358,19 @@ export function createAdapter(cfg) {
     while (!serve.exited && Date.now() < end) await sleep(50)
   }
 
+  // 終了した（止めた・落ちた）serve は作り直す。作り直しは同じ kind で 1 つにまとめる: await の後に serves を読み直し、
+  // 別の呼び出しが既に作り直していればそれを使う（並列の run が同時に終了済みの serve を見て、それぞれ startServe を呼ぶと、
+  // 後の serves.set が先の serve を孤児にする。PR #851 の Bugbot）。読み直しから serves.set までは await を挟まない
   async function getServe(merge = null) {
     const kind = merge ? `merge-${merge.prNumber}` : 'normal'
-    const cur = serves.get(kind)
-    if (cur) {
+    for (;;) {
+      const cur = serves.get(kind)
+      if (!cur) break
       const s = await cur // 起動の失敗はそのまま呼び出し側へ返る（下の catch で次の呼び出しは作り直す）
       if (!s.exited) return s
-      if (serves.get(kind) === cur) serves.delete(kind) // 終了した（止めた・落ちた）serve は作り直す
+      if (serves.get(kind) === cur) { serves.delete(kind); break }
     }
+    if (closed) throw new AdapterError('api', 'アダプタは close 済み')
     const p = startServe(kind, merge)
     serves.set(kind, p)
     p.catch(() => { if (serves.get(kind) === p) serves.delete(kind) }) // 失敗は次の呼び出しで作り直せる
@@ -550,8 +558,9 @@ export function createAdapter(cfg) {
 
     async close() {
       closed = true
-      const all = [...serves.values()]
-      const live = (await Promise.all(all.map((p) => p.catch(() => null)))).filter(Boolean)
+      // 起動待ちの serve は起動の結果を待ってから止める。止める対象は serves に残る分ではなく、起動した serve すべて
+      await Promise.all([...serves.values()].map((p) => p.catch(() => null)))
+      const live = [...allServes]
       if (deleteSessions) {
         // 自分が作ったセッションだけを消す（子 → 親の順）。他のセッションは一覧もしない。
         const ids = [...sessions.keys()].reverse()
@@ -567,6 +576,7 @@ export function createAdapter(cfg) {
         if (!s.exited) { try { process.kill(-s.child.pid, 'SIGKILL') } catch { /* 既に無い */ } }
       }
       serves.clear()
+      allServes.clear()
       sessions.clear()
     },
 
