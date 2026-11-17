@@ -938,5 +938,6 @@ test('merge 段の cwd（Phase 4）: req.merge があるときだけ exec・resu
   assert.equal(c1.cwd, outside)
   assert.deepEqual(c2.argv.slice(0, 2), ['exec', 'resume'])
   assert.ok(c2.argv.includes('--skip-git-repo-check'), 'resume にも付ける')
+  assert.equal(c2.cwd, outside, '修復のターンも同じ cwd で続く')
   assert.equal(c3.argv.includes('--skip-git-repo-check'), false, 'マージしない段には付けない')
 })

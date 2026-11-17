@@ -514,8 +514,12 @@ export function createAgentHost({ adapter, cfg }) {
     const started = Date.now()
     const unlocked = await unlockOwn(removeTargets(spec, input), label)
     if (unlocked.length > 0) rec.unlocked = unlocked
-    const r = await runScript('bash', args, { cwd: mainRoot, input, timeoutMs }, { label, prompt, spec })
-    await relockOwn(unlocked, label)
+    let r
+    try {
+      r = await runScript('bash', args, { cwd: mainRoot, input, timeoutMs }, { label, prompt, spec })
+    } finally {
+      await relockOwn(unlocked, label)
+    }
     writeLog(logDir, 'stdout.txt', r.stdout ?? '')
     writeLog(logDir, 'stderr.txt', r.stderr ?? '')
     const value = interpretExecResult(spec.ret, r)
@@ -568,8 +572,12 @@ export function createAgentHost({ adapter, cfg }) {
     }
     const unlocked = p.remove.argv.includes('--require-missing') ? [] : await unlockOwn([p.path], label)
     if (unlocked.length > 0) rec.unlocked = unlocked
-    const s1 = await step('worktree-remove.sh', p.remove.sha256, p.remove.argv, '')
-    await relockOwn(unlocked, label)
+    let s1
+    try {
+      s1 = await step('worktree-remove.sh', p.remove.sha256, p.remove.argv, '')
+    } finally {
+      await relockOwn(unlocked, label)
+    }
     if (s1.refused) return refuse(s1.refused)
     const raw = interpretExecResult('line:WORKTREE_REMOVE_RESULT', s1.r)
     const base = { code: s1.r.code, timedOut: s1.r.timedOut, overflow: s1.r.overflow }

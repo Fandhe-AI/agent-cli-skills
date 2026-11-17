@@ -53,11 +53,11 @@ function guardFor(g) {
 }
 
 /** codex-hook.sh を 1 回呼び、{ deny, message, codes } を返す。 */
-function viaHook(guardBody, command, { merge = false } = {}) {
+function viaHook(guardBody, command, { merge = false, cwd } = {}) {
   const { dir, guard } = guardFor(guardBody)
   const log = join(dir, 'hook.log')
   const args = [HOOK, '--guard', guard, '--log', log, ...(merge ? ['--merge-re', MERGE_EXEC_COMMAND.source] : [])]
-  const r = spawnSync('bash', args, { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8' })
+  const r = spawnSync('bash', args, { input: JSON.stringify({ tool_input: { command } }), encoding: 'utf8', ...(cwd ? { cwd } : {}) })
   assert.equal(r.status, 0, r.stderr)
   const out = r.stdout.trim()
   const reason = out === '' ? null : JSON.parse(out).hookSpecificOutput.permissionDecisionReason
@@ -141,6 +141,9 @@ test('拒否の文言（Phase 4）: merge-guard の手がかりは --merge-re �
   const body = '#!/bin/bash\necho "AGENT_GUARD_RESULT deny merge-guard"\nexit 2\n'
   assert.equal(viaHook(body, 'x', { merge: true }).message, `iit-runner: ガードの判定により拒否した（deny:merge-guard）${MERGE_HINT}`)
   assert.equal(viaHook(body, 'x').message, 'iit-runner: ガードの判定により拒否した（deny:merge-guard）')
+  // マージを許す段の cwd はリポジトリの外（agent-host が作る空ディレクトリ）。そこでも手順 3 の 1 行そのものは通る
+  const outside = trackTmp(mkdtempSync(join(tmpdir(), 'iit-merge-')))
+  for (const path of REAL_GUARDS) assert.deepEqual(viaHook({ path }, MERGE_CMD, { merge: true, cwd: outside }), { deny: false, message: null, codes: ['allow-mergeform'] })
   // 実測の形: 手順 3 の 1 行を here-doc で包むと完全一致から外れ、配布物のガードが止める（手がかりつき）
   const wrapped = `bash <<'EOF'\n${MERGE_CMD}\nEOF`
   for (const path of REAL_GUARDS) {
