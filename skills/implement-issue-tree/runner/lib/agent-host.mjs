@@ -1,4 +1,4 @@
-// 生成物（implement-issue-tree.js）の `agent(prompt, opts)` を、Codex / OpenCode のアダプタで実装する境界。
+// 生成物（implement-issue-tree.js）の `agent(prompt, opts)` を、Codex のアダプタで実装する境界。
 //
 // 役割: Workflow ランタイムが agent() で担っていたこと（StructuredOutput の強制・隔離 worktree・並列・時間切れ）を、
 // ツールに依存しない形でここに集める。アダプタ（runner/adapters/<tool>.mjs）は「完成形のプロンプトを 1 回流して
@@ -467,8 +467,7 @@ export function createAgentHost({ adapter, cfg }) {
       prompt: composePrompt({ prompt, schema, worktreePath }),
       schema,
       model: resolved.model,
-      // OpenCode は推論の強さを variant で表す（models.mjs の表）。契約の req に variant の欄が無いため effort に入れる
-      effort: tool === 'opencode' ? resolved.variant : resolved.effort,
+      effort: resolved.effort,
       cwd,
       label,
       allowMerge: merge !== null,

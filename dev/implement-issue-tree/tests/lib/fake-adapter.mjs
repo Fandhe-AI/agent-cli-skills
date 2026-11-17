@@ -1,5 +1,5 @@
 // ランナーのテスト用の偽アダプタ。契約（_/local-plans/iit-runner-adapter-contract.md の「アダプタの契約」）どおりの
-// createAdapter を持ち、実ツール（codex / opencode）を起動せずに応答を返す。
+// createAdapter を持ち、実ツール（codex）を起動せずに応答を返す。
 //
 // 応答は reply(req, ctx) が決める。既定は stub-run.mjs の makeDefaultReply（ラベル別の既定応答表）を、
 // 完成形のプロンプト（agent-host が前置き・schema 指示を付けたもの）に適用して JSON 文字列にする。

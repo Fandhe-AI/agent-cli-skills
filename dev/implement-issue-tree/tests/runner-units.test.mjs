@@ -8,13 +8,13 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { mergeNumberKinds, mergePrNumberOf } from '../../../skills/implement-issue-tree/runner/lib/merge-target.mjs'
-import { MERGE_EXEC_COMMAND, READ_ALLOW_FORMS, mergeExecCommandFor, DENY_FORMS, activeForms, codexRules, expandPrefix, opencodePatterns, opencodeRules } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
+import { MERGE_EXEC_COMMAND, mergeExecCommandFor, DENY_FORMS, activeForms, codexRules, expandPrefix } from '../../../skills/implement-issue-tree/runner/lib/guard.mjs'
 import { buildPreamble, buildRepairPrompt, buildSchemaInstruction, buildWorktreeNotice, composePrompt } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
 import { DEFAULT_CONFIG_PATH, IIT_EFFORTS, IIT_MODELS, loadConfig, resolveModel, resolveTimeoutMs, validateConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 import { extractLastJson } from '../../../skills/implement-issue-tree/runner/lib/extract-json.mjs'
 
 // ---------------------------------------------------------------------------
-// guard（deny する形の一覧と、そこから作る Codex rules / OpenCode permissions）
+// guard（deny する形の一覧と、そこから作る Codex rules）
 //
 // コマンドの判定は配布済みの agent-guard.sh が行う。ここでは一覧の各形を、Codex の PreToolUse hook の
 // アダプタ（codex-pretooluse.sh）経由で実際に起動した agent-guard.sh に渡し、deny になることを確かめる。
@@ -126,7 +126,7 @@ test('guard: DENY_FORMS の id は一意で、全形が GUARD_DENY か GUARD_GAP
 })
 
 test('guard: 追加した形（/merges・mergeBranch・enqueuePullRequest・gh alias・gh extension）が一覧にある', () => {
-  const all = opencodePatterns().join('\n')
+  const all = formPatterns().join('\n')
   for (const needle of ['gh api*mergePullRequest(*', 'gh api*mergeBranch(*', 'gh api*enablePullRequestAutoMerge(*', 'gh api*enqueuePullRequest(*', 'gh alias set*', 'gh alias import*', 'gh extension install*', 'gh extension exec*', 'gh ext install*']) {
     assert.ok(all.includes(needle), needle)
   }
@@ -155,22 +155,24 @@ const READ_COMMANDS = [
   'git remote get-url origin',
 ]
 
-// OpenCode の glob（`*` は任意の文字列）を全体一致の正規表現にする。
+// glob（`*` は任意の文字列）を全体一致の正規表現にする。
 const globToRegExp = (g) => new RegExp(`^${g.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`)
+// 一覧の形を glob で書いたもの（prefixes は `<argv>*`、globs はそのまま）。位置が不定な形も含めて、広すぎる形が混ざらないことの検査に使う。
+const formPatterns = (opts = {}) => [...new Set(activeForms(opts).flatMap((f) => [...f.prefixes.flatMap(expandPrefix).map((a) => `${a.join(' ')}*`), ...f.globs]))]
 
-test('guard: src のプロンプトが指示する gh / git の読み取りコマンドは、Codex rules にも OpenCode permissions にも掛からない', () => {
+test('guard: src のプロンプトが指示する gh / git の読み取りコマンドは、Codex rules にも一覧の glob にも掛からない', () => {
   for (const opts of [{}, { allowMerge: true }]) {
-    const globs = opencodePatterns(opts).map(globToRegExp)
+    const globs = formPatterns(opts).map(globToRegExp)
     const argvs = activeForms(opts).flatMap((f) => f.prefixes.flatMap(expandPrefix)).map((a) => a.join(' '))
     for (const cmd of READ_COMMANDS) {
-      assert.ok(!globs.some((re) => re.test(cmd)), `OpenCode の glob に掛かる: ${cmd}`)
+      assert.ok(!globs.some((re) => re.test(cmd)), `一覧の glob に掛かる: ${cmd}`)
       assert.ok(!argvs.some((a) => cmd === a || cmd.startsWith(`${a} `)), `Codex の prefix_rule に掛かる: ${cmd}`)
     }
   }
 })
 
 test('guard: レビューの読み取りを巻き込む `gh api *reviews*` は一覧に無い（書き込みは agent-guard.sh が止める）', async () => {
-  assert.ok(!opencodePatterns().some((p) => p.includes('reviews')))
+  assert.ok(!formPatterns().some((p) => p.includes('reviews')))
   assert.equal((await codexHook('gh api repos/o/r/pulls/1/reviews -f event=APPROVE')).decision, 'deny')
   assert.equal((await codexHook('gh api --paginate "repos/o/r/pulls/1/reviews"')).decision, 'allow')
 })
@@ -207,15 +209,12 @@ const USER_STRING_COMMANDS = [
   'git diff origin/main -- src/review/approve.ts',
 ]
 
-test('guard: 利用者が決める名前にキーワード（merge・review・approve・admin・auto・force・token 等）を含む読み取り・通常操作は、Codex rules にも OpenCode permissions / policies にも掛からない', () => {
+test('guard: 利用者が決める名前にキーワード（merge・review・approve・admin・auto・force・token 等）を含む読み取り・通常操作は、Codex rules にも一覧の glob にも掛からない', () => {
   for (const opts of [{}, { allowMerge: true }]) {
-    const rules = opencodeRules(opts)
-    const globs = opencodePatterns(opts).map(globToRegExp)
+    const globs = formPatterns(opts).map(globToRegExp)
     const argvs = activeForms(opts).flatMap((f) => f.prefixes.flatMap(expandPrefix)).map((a) => a.join(' '))
     for (const cmd of USER_STRING_COMMANDS) {
-      assert.ok(!globs.some((re) => re.test(cmd)), `OpenCode の glob に掛かる: ${cmd}`)
-      assert.ok(!rules.permissions.some((p) => globToRegExp(p.resource).test(cmd)), `permissions に掛かる: ${cmd}`)
-      assert.ok(!rules.policies.some((p) => globToRegExp(p.resource.replace(/^shell:/, '')).test(cmd)), `policies に掛かる: ${cmd}`)
+      assert.ok(!globs.some((re) => re.test(cmd)), `一覧の glob に掛かる: ${cmd}`)
       assert.ok(!argvs.some((a) => cmd === a || cmd.startsWith(`${a} `)), `Codex の prefix_rule に掛かる: ${cmd}`)
     }
   }
@@ -223,7 +222,7 @@ test('guard: 利用者が決める名前にキーワード（merge・review・ap
 
 test('guard: 一覧の glob は広い部分一致（`gh api *…`・`gh * …` 型の前置き・`*hosts.yml*`・`*.config/gh*`・`*.codex/auth*`）を含まない', () => {
   const broad = new Set(['*hosts.yml*', '*.config/gh*', '*.codex/auth*', 'gh api *merge*', 'gh api *Merge*'])
-  for (const g of opencodePatterns()) {
+  for (const g of formPatterns()) {
     assert.ok(!broad.has(g), g)
     assert.ok(!/^gh api \*/.test(g), `gh api の直後が * の広い形: ${g}`)
     assert.ok(!/^(gh|git) \* /.test(g), `直後の語が - 始まりでない前置きの形: ${g}`)
@@ -243,7 +242,7 @@ const GUARD_ONLY_DENY = [
 ]
 
 test('guard: rules から外した REST の形は rules に出ず、agent-guard.sh（subagent=true）が deny する', async () => {
-  const all = opencodePatterns().map(globToRegExp)
+  const all = formPatterns().map(globToRegExp)
   const results = await Promise.all(GUARD_ONLY_DENY.map(async (cmd) => [cmd, await codexHook(cmd)]))
   for (const [cmd, r] of results) {
     if (/graphql/.test(cmd)) continue
@@ -255,14 +254,14 @@ test('guard: rules から外した REST の形は rules に出ず、agent-guard.
 })
 
 test('guard: 認証ファイルの読み取りと GraphQL の enqueuePullRequest は、agent-guard.sh に加えて rules / permissions も止める', () => {
-  const globs = opencodePatterns().map(globToRegExp)
+  const globs = formPatterns().map(globToRegExp)
   const enqueue = GUARD_DENY['api-merge'].filter((cmd) => cmd.includes('enqueuePullRequest'))
   assert.equal(enqueue.length, 1)
   for (const cmd of [...GUARD_DENY['auth-file'], ...enqueue]) assert.ok(globs.some((re) => re.test(cmd)), cmd)
 })
 
 test('guard: スレッドへの返信 mutation（addPullRequestReviewThreadReply）と resolveReviewThread は rules に掛からず、レビュー本体の mutation は掛かる', () => {
-  const globs = opencodePatterns().map(globToRegExp)
+  const globs = formPatterns().map(globToRegExp)
   const reply = "gh api graphql -f query='mutation { addPullRequestReviewThreadReply(input:{}) { clientMutationId } }'"
   const resolve = "gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:\"x\"}) { clientMutationId } }'"
   const add = "gh api graphql -f query='mutation { addPullRequestReview(input:{}) { clientMutationId } }'"
@@ -273,38 +272,6 @@ test('guard: スレッドへの返信 mutation（addPullRequestReviewThreadReply
   assert.ok(globs.some((re) => re.test(addSp)))
 })
 
-test('guard: opencodeRules は permissions と policies を同じパターンで作る（deny の全形の後ろに、読み取りの完全一致の allow だけを置く）', () => {
-  for (const opts of [{}, { allowMerge: true }]) {
-    const rules = opencodeRules(opts)
-    assert.equal(rules.permissions.length, rules.policies.length)
-    for (const p of rules.permissions) assert.deepEqual(Object.keys(p), ['action', 'resource', 'effect']), assert.equal(p.action, 'shell')
-    for (const p of rules.policies) assert.match(p.resource, /^shell:/), assert.equal(p.action, 'tool.use')
-    const n = opencodePatterns(opts).length
-    assert.deepEqual(rules.permissions.map((p) => [p.resource, p.effect]), [...opencodePatterns(opts).map((r) => [r, 'deny']), ...READ_ALLOW_FORMS.map((r) => [r, 'allow'])])
-    assert.deepEqual(rules.policies.map((p) => [p.resource, p.effect]), [...opencodePatterns(opts).map((r) => [`shell:${r}`, 'deny']), ...READ_ALLOW_FORMS.map((r) => [`shell:${r}`, 'allow'])])
-    assert.equal(rules.permissions.slice(0, n).every((p) => p.effect === 'deny'), true)
-  }
-})
-
-// ---------------------------------------------------------------------------
-// OpenCode の permissions / policies の評価（.claude/skills/opencode-usage の permissions.md・policies.md）を写した評価器。
-//   - resource は全体一致の glob。`*` は 0 文字以上（/ を含む）、`?` は 1 文字、他は文字そのもの。
-//   - shell の glob が ` *` で終わるときは、引数なしの形（` *` の前まで）にも一致する。
-//   - permissions も policies も、一致した規則のうち最後のものが勝つ。
-//   - permissions で一致が無いときは既定の base policy（`*` `*` allow）が効くので allow。policies で一致が無いときも allow。
-//   - policies は allow / ask を deny に変えるだけで、許可は与えない（最終結果は permissions の結果、ただし policies が deny なら deny）。
-// ---------------------------------------------------------------------------
-const ocGlob = (g) => {
-  const body = (x) => x.split('').map((c) => (c === '*' ? '.*' : c === '?' ? '.' : c.replace(/[.+^${}()|[\]\\]/g, '\\$&'))).join('')
-  return g.endsWith(' *') ? new RegExp(`^${body(g.slice(0, -2))}( .*)?$`, 's') : new RegExp(`^${body(g)}$`, 's')
-}
-const lastMatch = (list, resource) => list.reduce((acc, r) => (ocGlob(r.resource).test(resource) ? r.effect : acc), null)
-function ocDecide(rules, cmd) {
-  const perm = lastMatch(rules.permissions, cmd) ?? 'allow'
-  const pol = lastMatch(rules.policies, `shell:${cmd}`) ?? 'allow'
-  return pol === 'deny' ? 'deny' : perm
-}
-
 const HOOKSPATH_READS = ['git config core.hooksPath', 'git config --get core.hooksPath', 'git config --get-all core.hooksPath', 'git rev-parse --git-path hooks']
 const HOOKSPATH_WRITES = [
   'git config core.hooksPath /tmp/h', 'git config core.hooksPath ""', 'git config --get core.hooksPath x', 'git config --unset core.hooksPath',
@@ -313,52 +280,6 @@ const HOOKSPATH_WRITES = [
   'git config unset core.hooksPath', 'git -c core.hooksPath=/dev/null commit -m x', 'git -c core.hooksPath=/tmp/h push origin x',
   'git -C . config core.hooksPath /tmp/h', 'git config core.hooksPath  /tmp/h',
 ]
-
-test('guard: 評価器の自己検査（ドキュメントの例どおりに後勝ち・` *` の引数なし一致・? の 1 文字）', () => {
-  const rules = { permissions: [
-    { action: 'shell', resource: '*', effect: 'ask' }, { action: 'shell', resource: 'git status *', effect: 'allow' }, { action: 'shell', resource: 'git push *', effect: 'deny' },
-  ], policies: [] }
-  assert.equal(ocDecide(rules, 'git status'), 'allow')
-  assert.equal(ocDecide(rules, 'git status --short'), 'allow')
-  assert.equal(ocDecide(rules, 'git push'), 'deny')
-  assert.equal(ocDecide(rules, 'git -C . push'), 'ask')
-  assert.equal(ocDecide({ permissions: [{ action: 'shell', resource: 'a?c', effect: 'deny' }], policies: [] }, 'abc'), 'deny')
-  assert.equal(ocDecide({ permissions: [{ action: 'shell', resource: 'a?c', effect: 'deny' }], policies: [] }, 'abbc'), 'allow')
-  // policies の deny は permissions の allow を打ち消し、policies の後ろの allow は前の deny を打ち消す
-  const pol = (list) => ({ permissions: [{ action: 'shell', resource: 'x', effect: 'allow' }], policies: list })
-  assert.equal(ocDecide(pol([{ action: 'tool.use', resource: 'shell:x', effect: 'deny' }]), 'x'), 'deny')
-  assert.equal(ocDecide(pol([{ action: 'tool.use', resource: 'shell:x', effect: 'deny' }, { action: 'tool.use', resource: 'shell:x', effect: 'allow' }]), 'x'), 'allow')
-})
-
-test('guard: core.hooksPath の読み取り 4 形は OpenCode の permissions / policies で allow、書き込みの形は deny のまま（allowMerge でも同じ）', () => {
-  assert.deepEqual([...READ_ALLOW_FORMS], HOOKSPATH_READS)
-  for (const opts of [{}, { allowMerge: true }]) {
-    const rules = opencodeRules(opts)
-    for (const cmd of HOOKSPATH_READS) assert.equal(ocDecide(rules, cmd), 'allow', `読み取り: ${cmd}`)
-    for (const cmd of HOOKSPATH_WRITES) assert.equal(ocDecide(rules, cmd), 'deny', `書き込み: ${cmd}`)
-    // permissions だけ・policies だけの片側でも、書き込みは deny のまま
-    for (const cmd of HOOKSPATH_WRITES) {
-      assert.equal(lastMatch(rules.permissions, cmd), 'deny', `permissions: ${cmd}`)
-      assert.equal(lastMatch(rules.policies, `shell:${cmd}`), 'deny', `policies: ${cmd}`)
-    }
-    // 修正前（allow を外した一覧）では、読み取り 3 形が止まっていた（Phase 3 の記録の再現）
-    const before = { permissions: rules.permissions.filter((r) => r.effect === 'deny'), policies: rules.policies.filter((r) => r.effect === 'deny') }
-    for (const cmd of HOOKSPATH_READS.slice(0, 3)) assert.equal(ocDecide(before, cmd), 'deny', `修正前: ${cmd}`)
-  }
-})
-
-test('guard: 読み取りの allow は git-no-verify の glob 以外の deny を打ち消さない（allow の形に一致する deny は git*core.hooksPath* だけ）', () => {
-  const other = opencodePatterns().filter((g) => g !== 'git*core.hooksPath*').map(ocGlob)
-  for (const cmd of READ_ALLOW_FORMS) assert.ok(!other.some((re) => re.test(cmd)), cmd)
-  // 他の deny の形は、読み取りの allow を足した後も全部 deny のまま
-  const rules = opencodeRules()
-  for (const [id, cmds] of Object.entries(GUARD_DENY)) {
-    for (const cmd of cmds) {
-      const hit = opencodePatterns().some((g) => ocGlob(g).test(cmd))
-      if (hit) assert.equal(ocDecide(rules, cmd), 'deny', `${id}: ${cmd}`)
-    }
-  }
-})
 
 test('guard: 全文を見る agent-guard.sh（Codex hook 経由・subagent=true）の判定は変えていない。書き込みの形は全部 deny、読み取りは --get-all だけ deny', async () => {
   const reads = await Promise.all(HOOKSPATH_READS.map(async (cmd) => [cmd, await codexHook(cmd)]))
@@ -372,28 +293,28 @@ test('guard: 全文を見る agent-guard.sh（Codex hook 経由・subagent=true�
 })
 
 test('guard: allowMerge では gh pr merge の素の形だけを外し、--admin・--auto・承認・REST/GraphQL のマージ・認証は残す', () => {
-  const deny = opencodePatterns()
-  const merge = opencodePatterns({ allowMerge: true })
-  assert.ok(deny.includes('gh pr merge*') && deny.includes('gh -* pr merge*'))
-  assert.ok(!merge.includes('gh pr merge*') && !merge.includes('gh -* pr merge*'))
-  for (const keep of ['gh pr merge*--admin*', 'gh pr merge*--auto*', 'gh -* pr merge*--admin*', 'gh pr review*--approve*', 'gh api*mergePullRequest(*', 'gh api*enqueuePullRequest(*', 'gh auth token*', 'git push --force*', 'gh alias set*']) {
+  const deny = formPatterns()
+  const merge = formPatterns({ allowMerge: true })
+  assert.ok(deny.includes('gh pr merge*'))
+  assert.ok(!merge.includes('gh pr merge*'))
+  for (const keep of ['gh pr merge*--admin*', 'gh pr merge*--auto*', 'gh pr review*--approve*', 'gh api*mergePullRequest(*', 'gh api*enqueuePullRequest(*', 'gh auth token*', 'git push --force*', 'gh alias set*']) {
     assert.ok(merge.includes(keep), keep)
   }
-  assert.deepEqual(deny.filter((p) => !merge.includes(p)), ['gh pr merge*', 'gh -* pr merge*'])
+  assert.deepEqual(deny.filter((p) => !merge.includes(p)), ['gh pr merge*'])
 })
 
-test('guard: Codex rules と OpenCode permissions は同じ一覧から作られ、prefixes の全組み合わせが両方にあり、allowMerge の外し方も同じ', () => {
+test('guard: Codex rules は一覧から作られ、prefixes の全組み合わせが rules と glob の両方にあり、allowMerge の外し方も同じ', () => {
   for (const opts of [{}, { allowMerge: true }]) {
     const codex = codexRules(opts)
-    const oc = opencodePatterns(opts)
+    const oc = formPatterns(opts)
     const forms = activeForms(opts)
     const argvs = forms.flatMap((f) => f.prefixes.flatMap(expandPrefix))
     assert.equal((codex.match(/^prefix_rule\(/gm) ?? []).length, forms.flatMap((f) => f.prefixes).length)
     for (const argv of argvs) {
       assert.ok(codex.includes(JSON.stringify(argv.join(' '))), `Codex に無い: ${argv.join(' ')}`)
-      assert.ok(oc.includes(`${argv.join(' ')}*`), `OpenCode に無い: ${argv.join(' ')}`)
+      assert.ok(oc.includes(`${argv.join(' ')}*`), `glob に無い: ${argv.join(' ')}`)
     }
-    // globs は OpenCode だけ。Codex には出ない
+    // globs は rules に出ない（先頭一致で書けない）
     for (const f of forms) for (const g of f.globs) assert.ok(oc.includes(g), g)
     assert.ok(codex.includes('decision = "forbidden"'))
     assert.ok(!/decision = "(allow|prompt)"/.test(codex))
@@ -469,28 +390,19 @@ test('preamble: 修復プロンプトは errors を列挙し、空なら JSON �
 test('models: 既定の設定ファイルは検査を通り、全ツール × 全モデル名の表がある', () => {
   const c = loadConfig()
   assert.equal(DEFAULT_CONFIG_PATH.endsWith('runner/config/default.json'), true)
-  for (const tool of ['codex', 'opencode']) for (const m of IIT_MODELS) assert.ok(c.models[tool][m], `${tool}.${m}`)
+  for (const tool of ['codex']) for (const m of IIT_MODELS) assert.ok(c.models[tool][m], `${tool}.${m}`)
 })
 
 test('models: Codex の対応表（phase0 の 0-7）', () => {
   const c = loadConfig()
   const at = (model, effort) => resolveModel(c, 'codex', { model, effort })
-  assert.deepEqual(at('haiku', 'low'), { name: 'haiku', model: 'gpt-6-luna', effort: 'low', variant: null })
-  assert.deepEqual(at('sonnet', 'medium'), { name: 'sonnet', model: 'gpt-6.1-sol', effort: 'medium', variant: null })
-  assert.deepEqual(at('opus', 'high'), { name: 'opus', model: 'gpt-6.1-sol', effort: 'high', variant: null })
-  assert.deepEqual(at('fable', 'high'), { name: 'fable', model: 'gpt-6-astra', effort: 'high', variant: null })
+  assert.deepEqual(at('haiku', 'low'), { name: 'haiku', model: 'gpt-6-luna', effort: 'low' })
+  assert.deepEqual(at('sonnet', 'medium'), { name: 'sonnet', model: 'gpt-6.1-sol', effort: 'medium' })
+  assert.deepEqual(at('opus', 'high'), { name: 'opus', model: 'gpt-6.1-sol', effort: 'high' })
+  assert.deepEqual(at('fable', 'high'), { name: 'fable', model: 'gpt-6-astra', effort: 'high' })
   // effort は opts を優先し、省略時は表の値
   assert.equal(at('opus', 'low').effort, 'low')
   assert.equal(at('opus', undefined).effort, 'high')
-})
-
-test('models: OpenCode は variant の梯子で段を代用し、model は null（利用者の既定）。fable は opus と同じ', () => {
-  const c = loadConfig()
-  const at = (m) => resolveModel(c, 'opencode', { model: m })
-  assert.deepEqual(at('haiku'), { name: 'haiku', model: null, effort: null, variant: 'low' })
-  assert.equal(at('sonnet').variant, 'medium')
-  assert.equal(at('opus').variant, null)
-  assert.deepEqual({ ...at('fable'), name: 'opus' }, at('opus'))
 })
 
 test('models: model 省略は sessionModel の段（plan・recover の継承に当たる）', () => {
@@ -502,6 +414,7 @@ test('models: model 省略は sessionModel の段（plan・recover の継承に�
 test('models: 未知のツール・モデル名・effort は例外（fail-closed）', () => {
   const c = loadConfig()
   assert.throws(() => resolveModel(c, 'claude', {}), /未知のツール/)
+  assert.throws(() => resolveModel(c, 'opencode', {}), /未知のツール/)
   for (const m of ['gpt', 'Opus', '', null]) assert.throws(() => resolveModel(c, 'codex', { model: m }), /未知のモデル名/, String(m))
   for (const e of ['xhigh', 'LOW', '', null]) assert.throws(() => resolveModel(c, 'codex', { model: 'opus', effort: e }), /未知の effort/, String(e))
   assert.deepEqual([...IIT_EFFORTS], ['low', 'medium', 'high'])
@@ -513,17 +426,17 @@ test('models: validateConfig は表の欠落・未知のモデル名・不正な
     (c) => { c.version = 2 },
     (c) => { c.sessionModel = 'gpt' },
     (c) => { delete c.models.codex.fable },
-    (c) => { c.models.opencode.extra = { model: null } },
+    (c) => { c.models.codex.extra = { model: null } },
     (c) => { c.models.codex.opus.effort = 'xhigh' },
     (c) => { c.models.codex.opus.model = '' },
     (c) => { c.limits.maxParallel = 0 },
     (c) => { c.timeoutsSec.byPhase.Plan = -1 },
     (c) => { c.cleanup.deleteSessions = 'yes' },
-    (c) => { delete c.models.opencode },
+    (c) => { delete c.models.codex },
     (c) => { c.toolConfig = [] },
     (c) => { c.toolConfig.claude = {} },
     (c) => { c.toolConfig.codex = 'codex' },
-    (c) => { c.toolConfig.opencode.deleteSessions = false },
+    (c) => { c.toolConfig.opencode = {} },
     (c) => { c.toolConfig.codex.models = {} },
   ]
   for (const mutate of mutations) {

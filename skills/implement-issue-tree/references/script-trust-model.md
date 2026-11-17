@@ -50,7 +50,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 ## 機械的な段の実行仕様（`<!-- iit-exec v1 ... -->`・Phase P6）
 
-モデルの判断が要らず、スクリプトを 1 回実行して結果を返すだけの段は、プロンプトの **0 行目**に機械可読の 1 行を持つ。モデルを介さずに直接実行するランナー（Codex / OpenCode 版）はこの 0 行目だけを読む（本文の他の場所・文言からの抜き出しはしない）。Workflow 版のモデルにとっては何もさせない HTML コメントで、手順は従来どおり本文のコマンドを実行する（挙動は変わらない）。
+モデルの判断が要らず、スクリプトを 1 回実行して結果を返すだけの段は、プロンプトの **0 行目**に機械可読の 1 行を持つ。モデルを介さずに直接実行するランナー（Codex 版）はこの 0 行目だけを読む（本文の他の場所・文言からの抜き出しはしない）。Workflow 版のモデルにとっては何もさせない HTML コメントで、手順は従来どおり本文のコマンドを実行する（挙動は変わらない）。
 
 ```
 <!-- iit-exec v1 {"v":1,"script":"state.sh","sha256":"<64 桁>","argv":["--file","_/issue-trees/1.json","verify","--page","0"],"ret":"envelope","fail":null} -->
@@ -80,7 +80,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 | `worktree:absent` / 後始末の `remove` | `line:WORKTREE_REMOVE_RESULT` | `{"ok":false,"retained":true,"worktree":""}` |
 | `worktree:sweep` | `line:WORKTREE_REMOVE_RESULT` | `{"removed":[]}` |
 
-ランナー（Codex / OpenCode 版。`runner/lib/agent-host.mjs`）の契約:
+ランナー（Codex 版。`runner/lib/agent-host.mjs`）の契約:
 
 - **失敗は stdout を見ずに `fail` を返す。** スクリプトが非 0 で終了したら、標準出力に結果らしい行があっても読まず、仕様の `fail` をそのまま返す。結果の行（`ret` が `line:<語>`）や封筒（`envelope`）が標準出力に無いときも同じ。
 - **cwd はメイン worktree のルート。** 本文のコマンドと同じ場所で起動する（隔離 worktree やスキルディレクトリで起動しない）。`execFile` の `cwd` に明示する。

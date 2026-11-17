@@ -16,13 +16,11 @@
 # fail-closed: 引数不備・jq 無し・ガード無し・結果行なしはすべて deny。呼び出し側のコマンド行は
 # `bash <このファイル> … || exit 2` とし、このスクリプト自体が異常終了しても止める。
 #
-# ログの形式と拒否の文言は OpenCode のランナー専用 plugin（opencode-plugin/index.js）とそろえる
-# （runner-guard-parity.test.mjs が同じガード出力に対する両者のログ行・文言の一致を縛る）:
-#   ログ 1 行 = `<epoch 秒>\t<コード>`。共通のコードは allow・allow-mergeform・deny-guard-missing・deny-error・
-#   deny-noresult・deny:<ガードの理由>。Codex だけのものは deny-args・deny-no-jq・deny-nocmd。
+# ログの形式と拒否の文言（runner-guard-parity.test.mjs が同じガード出力に対するログ行・文言を縛る）:
+#   ログ 1 行 = `<epoch 秒>\t<コード>`。コードは allow・allow-mergeform・deny-guard-missing・deny-error・
+#   deny-noresult・deny:<ガードの理由>・deny-args・deny-no-jq・deny-nocmd。
 #   拒否の文言は `iit-runner: ` で始め、ガードの判定による拒否は `ガードの判定により拒否した（deny:<理由>）`。
-#   理由が obfuscated・credential-read のときだけ、文言の後ろに言い直しの手がかりを 1 文足す（deny_hint。plugin の
-#   DENY_HINTS と同じ文字列）。手がかりは書き方の言い直しだけで、止められた操作を別の綴りで迂回しないことを必ず添える。
+#   理由が obfuscated・credential-read のときだけ、文言の後ろに言い直しの手がかりを 1 文足す（deny_hint）。手がかりは書き方の言い直しだけで、止められた操作を別の綴りで迂回しないことを必ず添える。
 #   文字列は JSON へそのまま埋めるため、`"` と `\` と制御文字を含めない（単一引用符で囲み、展開させない）。
 #   ガードの結果行は agent-guard.sh の契約どおり `AGENT_GUARD_RESULT allow` か `AGENT_GUARD_RESULT deny[ <理由>]`
 #   （理由は [a-z-]+。それ以外の形は deny-noresult。理由を JSON へそのまま埋めるため、形を絞ってから使う）。

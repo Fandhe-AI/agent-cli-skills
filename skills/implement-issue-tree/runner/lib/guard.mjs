@@ -1,14 +1,14 @@
-// ランナーが起動するエージェントに対して拒否するコマンド形の一覧と、そこから OpenCode の permissions / policies
-// （OpenCode アダプタが補助の防御として渡す）と Codex の rules を機械的に作る関数。
+// ランナーが起動するエージェントに対して拒否するコマンド形の一覧と、そこから Codex の rules を機械的に作る関数。
+// OpenCode は未対応（Issue #853）。globs は Codex の rules に出ない形（位置が不定で先頭一致で書けない）の記録として残し、
+// OpenCode を戻すときの入力と、agent-guard.sh が止める形の例の対応（runner-units.test.mjs）に使う。
 //
 // Codex の rules（codexRules）は Codex アダプタでは使わない（phase0 の決定: rules は `-c` では効かず、読ませるには
 // project を trusted にする必要がある。trusted にすると worktree の .codex/hooks.json が bypass で動くため採らない）。
-// codexRules は、一覧が両ツールで同じ形になることを確かめるテスト（runner-units.test.mjs）と、init-codex の rules との
+// codexRules は、一覧と rules が対応することを確かめるテスト（runner-units.test.mjs）と、init-codex の rules との
 // 対応を見る参照のために残す。Codex の補助の層は permission profile（書ける場所）で、コマンド形の判定は hook だけが行う。
 //
-// 位置づけ: 強制はここではしない。コマンドを実際に止めるのは次の 2 つで、どちらも配布済みの共通ガードを使う。
-//   - Codex: PreToolUse hook（init-codex の agent-guard.sh。ランナーが subagent=true で呼ぶ）。
-//   - OpenCode: plugin（init-opencode の agent-guard。同じ agent-guard.sh を呼ぶ）。
+// 位置づけ: 強制はここではしない。コマンドを実際に止めるのは Codex の PreToolUse hook（init-codex の agent-guard.sh。
+// ランナーが subagent=true で呼ぶ）で、配布済みの共通ガードを使う。
 // シェルの入れ子・env -S・演算子の解析はそちらが持つ。本モジュールにはコマンド文字列の判定器を持たない
 // （弱い複製が配布物のガードと食い違うのを避けるため。方針の経緯は _/local-plans/iit-runners-codex-opencode.md）。
 // 一覧の各形が agent-guard.sh で deny になることは dev/implement-issue-tree/tests/runner-units.test.mjs が
@@ -55,8 +55,8 @@ const mutationGlobs = (name) => [`gh api*${name}(*`, `gh api*${name} (*`]
 
 /**
  * 拒否する形の一覧。
- *   prefixes: argv の先頭一致で書ける形（要素の配列は選択肢）。Codex の prefix_rule と OpenCode の glob の両方を作る。
- *   globs: 位置が不定で先頭一致では書けない形。OpenCode の glob だけを作る（Codex の rules は先頭一致のため書けない）。
+ *   prefixes: argv の先頭一致で書ける形（要素の配列は選択肢）。Codex の prefix_rule を作る。
+ *   globs: 位置が不定で先頭一致では書けない形。Codex の rules には出さない（先頭一致のため書けない）。
  *   mergeOnly: allowMerge の一覧から外す形（gh pr merge だけ）。
  *   guardGap: agent-guard.sh が（subagent=true でも）止めない形を含む。rules / permissions だけが止める。
  */
@@ -74,23 +74,6 @@ export const DENY_FORMS = Object.freeze([
   { id: 'git-no-verify', mergeOnly: false, note: 'フックの迂回（--no-verify・commit -n・core.hooksPath）', prefixes: [['git', 'commit', ['--no-verify', '-n']], ['git', 'push', '--no-verify']], globs: ['git commit*--no-verify*', 'git push*--no-verify*', 'git*core.hooksPath*'] },
 ])
 
-/**
- * deny の glob に掛かるが通す読み取りの形（OpenCode の permissions / policies に、deny の後ろへ allow で置く。後勝ち）。
- * `git*core.hooksPath*`（git-no-verify）は書き込み（値を渡す・--unset・`-c core.hooksPath=…`）を止めるための粗い glob で、
- * 標準手順の読み取り `git config core.hooksPath` まで止めていた（Phase 3 の OpenCode で 6 回）。値の引数を伴わない読み取りだけを
- * 完全一致の文字列（`*` も `?` も含めない。値を足した形・前後に語を足した形には一致しない）で戻す。複合コマンドは OpenCode の
- * スキャナが分けた部分ごとに評価され、どれか 1 つでも deny なら全体が deny のままである。
- * 全文を見る agent-guard.sh（plugin・Codex の hook）の判定は変えない。ガードは `git config KEY`・`git config --get KEY` だけを
- * 通し、option を含む `--get-all` は止める（値を取るかが版で変わる option を一律に止める方針）ため、`--get-all` はここで allow に
- * しても全体では止まる。`git rev-parse --git-path hooks` は deny の glob に掛からないので、一覧に置くのは対応を明示するためである。
- */
-export const READ_ALLOW_FORMS = Object.freeze([
-  'git config core.hooksPath',
-  'git config --get core.hooksPath',
-  'git config --get-all core.hooksPath',
-  'git rev-parse --git-path hooks',
-])
-
 const isWord = (x) => typeof x === 'string'
 
 /** argv の選択肢（配列の要素）を展開し、語の列の全組み合わせを返す。 */
@@ -103,46 +86,9 @@ export function expandPrefix(pattern) {
   return acc
 }
 
-/** gh / git の前置きグローバルオプション（`gh -R x pr merge`・`git -C d push`）を許す形を足す。直後の語は `-` 始まりに限る。 */
-function withGlobalOptionVariant(glob) {
-  const m = /^(gh|git) (\S.*)$/.exec(glob)
-  return m && !m[2].startsWith('*') ? [glob, `${m[1]} -* ${m[2]}`] : [glob]
-}
-
-/** allowMerge に応じた有効な形。Codex と OpenCode は必ずここを通して同じ集合から作る。 */
+/** allowMerge に応じた有効な形。Codex の rules はここを通して作る。 */
 export function activeForms({ allowMerge = false } = {}) {
   return DENY_FORMS.filter((f) => !(allowMerge && f.mergeOnly))
-}
-
-/** OpenCode へ渡す glob の一覧（prefixes 由来と globs 由来。重複なし）。 */
-export function opencodePatterns(opts = {}) {
-  const out = []
-  for (const f of activeForms(opts)) {
-    for (const p of f.prefixes) for (const argv of expandPrefix(p)) out.push(...withGlobalOptionVariant(`${argv.join(' ')}*`))
-    for (const g of f.globs) out.push(...withGlobalOptionVariant(g))
-  }
-  return [...new Set(out)]
-}
-
-/**
- * OpenCode の permissions / policies（init-opencode の opencode.jsonc と同じ形式）。session.create で
- * allow-all は付けない（config の permissions が打ち消されるため。Phase 0-6）。policies は session の許可では外せない。
- * @param {{ allowMerge?: boolean }} [opts]
- */
-export function opencodeRules(opts = {}) {
-  const patterns = opencodePatterns(opts)
-  // permissions も policies も最後に一致した規則が勝つ（.claude/skills/opencode-usage の permissions.md・policies.md の Order）。
-  // READ_ALLOW_FORMS の allow は全 deny の後ろに置き、policies 側にも同じ位置で置く（permissions だけに置くと policies の deny が残る）。
-  return {
-    permissions: [
-      ...patterns.map((resource) => ({ action: 'shell', resource, effect: 'deny' })),
-      ...READ_ALLOW_FORMS.map((resource) => ({ action: 'shell', resource, effect: 'allow' })),
-    ],
-    policies: [
-      ...patterns.map((resource) => ({ action: 'tool.use', resource: `shell:${resource}`, effect: 'deny' })),
-      ...READ_ALLOW_FORMS.map((resource) => ({ action: 'tool.use', resource: `shell:${resource}`, effect: 'allow' })),
-    ],
-  }
 }
 
 const quote = (s) => JSON.stringify(s)

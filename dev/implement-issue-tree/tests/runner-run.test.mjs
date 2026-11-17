@@ -3,7 +3,7 @@
 //     アダプタの有無に依存しないよう、アダプタを読む前の段で止まる経路を使う）。どちらも _/iit-runner を作らない。
 //   - main() を import して外部とのやりとり（gh・アダプタ・生成物・メイン worktree）を差し替え、2 / 3 / 1 / 0 の
 //     各経路・result.json と stdout の形・meta.json・アダプタの start / close を確かめる。
-// 本物の gh・codex・opencode は起動しない。メイン worktree は一時ディレクトリに差し替える（本物の _/ に書かない）。
+// 本物の gh・codex は起動しない。メイン worktree は一時ディレクトリに差し替える（本物の _/ に書かない）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -57,7 +57,7 @@ function cli(argv) {
 
 test('CLI: 引数の誤りは終了コード 2（使い方を stderr に出し、何も書かない）', () => {
   const ok = argsFile({ parent: 1 })
-  for (const argv of [[], ['--tool', 'claude', '--args', ok], ['--tool', 'codex'], ['--tool', 'codex', '--args'], ['--tool', 'codex', '--args', ok, '--bogus'],
+  for (const argv of [[], ['--tool', '../claude', '--args', ok], ['--tool', 'Claude', '--args', ok], ['--tool', 'codex'], ['--tool', 'codex', '--args'], ['--tool', 'codex', '--args', ok, '--bogus'],
     ['--tool', 'codex', '--args', ok, '--max-parallel', '0'], ['--tool', 'codex', '--args', join(root, 'missing.json')], ['--tool', 'codex', '--args', argsFile('[1]')],
     ['--tool', 'codex', '--args', argsFile('{')], ['--tool', 'codex', '--args', ok, '--config', argsFile({ version: 2 })], ['--tool', 'codex', '--args', argsFile({ skillDir: 'rel' })]]) {
     const r = cli(argv)
@@ -72,7 +72,7 @@ test('CLI: --help / -h は使い方を stdout に出して終了コード 0（gh
   for (const argv of [['--help'], ['-h'], ['--tool', 'codex', '--help']]) {
     const r = cli(argv)
     assert.equal(r.status, 0, `${argv.join(' ')}\n${r.stderr}`)
-    assert.match(r.stdout, /^使い方: node run\.mjs --tool codex\|opencode --args <args\.json>/)
+    assert.match(r.stdout, /^使い方: node run\.mjs --tool codex --args <args\.json>/)
     assert.match(r.stdout, /README\.md/)
     assert.equal(r.stderr, '')
     assert.equal(r.wrote, false)
@@ -80,7 +80,7 @@ test('CLI: --help / -h は使い方を stdout に出して終了コード 0（gh
 })
 
 test('CLI: gh の認証が通らなければ終了コード 3（アダプタ・生成物を読む前に止まり、何も書かない）', () => {
-  for (const tool of ['codex', 'opencode']) {
+  for (const tool of ['codex', 'opencode']) { // opencode はアダプタを探す前（gh の確認）で止まる
     const r = cli(['--tool', tool, '--args', argsFile({ parent: 1 }), '--no-build-check'])
     assert.equal(r.status, 3, r.stderr)
     assert.match(r.stderr, /前提の不足: gh auth status が終了コード 1/)
@@ -90,7 +90,7 @@ test('CLI: gh の認証が通らなければ終了コード 3（アダプタ・�
 })
 
 test('parseCli: 既定値と各フラグ', () => {
-  assert.deepEqual(parseCli(['--tool', 'opencode', '--args', 'a.json']), { tool: 'opencode', argsPath: 'a.json', configPath: null, maxParallel: null, dryRun: false, buildCheck: true })
+  assert.deepEqual(parseCli(['--tool', 'codex', '--args', 'a.json']), { tool: 'codex', argsPath: 'a.json', configPath: null, maxParallel: null, dryRun: false, buildCheck: true })
   assert.deepEqual(parseCli(['--args', 'a.json', '--tool', 'codex', '--config', 'c.json', '--max-parallel', '3', '--dry-run', '--no-build-check']),
     { tool: 'codex', argsPath: 'a.json', configPath: 'c.json', maxParallel: 3, dryRun: true, buildCheck: false })
   assert.throws(() => parseCli(['--tool', 'codex', '--args', 'a', '--max-parallel', '1.5']), UsageError)
@@ -139,6 +139,17 @@ test('main: アダプタが無い・読み込みで例外・生成物を読め�
   assert.equal(a.instances.length, 0, 'アダプタを作っていない')
 })
 
+test('main: --tool opencode は未対応で、アダプタが無い経路の終了コード 3（Issue #853 を案内し、_/iit-runner を作らない）', async () => {
+  const mainRoot = newMain()
+  const x = deps({ mainRoot, mod: null })
+  x.d.loadAdapter = (tool) => importAdapter(tool)
+  assert.equal(await main(['--tool', 'opencode', '--args', argsFile({ parent: 1 }), '--no-build-check'], x.d), 3, x.err.join(''))
+  assert.match(x.err.join(''), /前提の不足: アダプタ adapters\/opencode\.mjs が無い/)
+  assert.match(x.err.join(''), /#853/)
+  assert.equal(existsSync(join(mainRoot, '_')), false)
+  assert.deepEqual(x.out, [])
+})
+
 test('main: 生成物が名指しするスキルが探索先に無ければ 3 で、足りない名前を示し、_/iit-runner を作らない', async () => {
   const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
   const wf = () => tinyWorkflow(async () => { throw new Error('呼ばれない') })
@@ -147,7 +158,6 @@ test('main: 生成物が名指しするスキルが探索先に無ければ 3 �
     ['codex', newMain({ skills: ['create-commit', 'create-pr'] }), /: implement-review（codex の探索先 \.agents\/skills/],
     // Codex は .claude/skills を読まない
     ['codex', newMain({ skillsDir: '.claude/skills' }), /create-commit, create-pr, implement-review/],
-    ['opencode', newMain({ skills: ['implement-review'] }), /create-commit, create-pr（opencode の探索先/],
   ]
   for (const [tool, mainRoot, re] of cases) {
     const x = deps({ mod: a, mainRoot, workflow: wf() })
@@ -158,9 +168,6 @@ test('main: 生成物が名指しするスキルが探索先に無ければ 3 �
     assert.deepEqual(x.out, [])
   }
   assert.equal(a.instances.length, 0, 'アダプタを作っていない')
-  // OpenCode は .claude/skills にあれば通る
-  const ok = deps({ mod: a, mainRoot: newMain({ skillsDir: '.claude/skills' }), workflow: tinyWorkflow(async () => 'done') })
-  assert.equal(await main(['--tool', 'opencode', '--args', argsFile({ parent: 1 }), '--no-build-check'], ok.d), 0, ok.err.join(''))
 })
 
 test('main: --no-build-check が無ければ鮮度の照合を呼ぶ', async () => {
@@ -177,8 +184,8 @@ test('main: アダプタの生成・start() の失敗は 3。result.json に err
   const startFail = makeFakeAdapterModule()
   const orig = startFail.createAdapter
   startFail.createAdapter = (cfg) => ({ ...orig(cfg), start: async () => { throw new AdapterError('prereq', 'codex が古い') } })
-  const ctorFail = { createAdapter: () => { throw new AdapterError('prereq', 'opencode が無い') } }
-  for (const [mod, re] of [[startFail, /アダプタの起動に失敗: prereq: codex が古い/], [ctorFail, /アダプタを作れない: prereq: opencode が無い/]]) {
+  const ctorFail = { createAdapter: () => { throw new AdapterError('prereq', 'codex が無い') } }
+  for (const [mod, re] of [[startFail, /アダプタの起動に失敗: prereq: codex が古い/], [ctorFail, /アダプタを作れない: prereq: codex が無い/]]) {
     const x = deps({ mod, workflow: tinyWorkflow(async () => { throw new Error('呼ばれない') }) })
     assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1 })], x.d), 3)
     const body = JSON.parse(readFileSync(join(x.runDir, 'result.json'), 'utf8'))
@@ -193,10 +200,10 @@ test('main: アダプタの生成・start() の失敗は 3。result.json に err
 test('main: ホストが例外で終われば 1（result.json に error・アダプタは close）', async () => {
   const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
   const x = deps({ mod: a, workflow: tinyWorkflow(async (args, agent) => { await agent('p', { label: 'x', schema: SCHEMA }); throw new Error('木が壊れている') }) })
-  assert.equal(await main(['--tool', 'opencode', '--args', argsFile({ parent: 1 })], x.d), 1)
+  assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1 })], x.d), 1)
   const body = JSON.parse(readFileSync(join(x.runDir, 'result.json'), 'utf8'))
   assert.equal(body.exitCode, 1)
-  assert.equal(body.tool, 'opencode')
+  assert.equal(body.tool, 'codex')
   assert.equal(body.result, null)
   assert.match(body.error, /木が壊れている/)
   assert.equal(a.instances[0].started, 1)
@@ -235,7 +242,7 @@ test('main: 正常終了は 0。result.json・stdout・meta.json の形、アダ
   assert.equal(cfg.mainRoot, x.mainRoot)
   assert.equal(cfg.runDir, x.runDir)
   assert.equal(typeof cfg.guard.codexRules, 'function')
-  assert.equal(typeof cfg.guard.opencodeRules, 'function')
+  assert.equal(cfg.guard.opencodeRules, undefined)
   assert.equal(cfg.toolConfig.deleteSessions, true)
   // 設定ファイルの toolConfig.<tool> がアダプタへ届く（既定は default.json の toolConfig.codex）
   assert.equal(cfg.toolConfig.codexBin, 'codex')
@@ -280,12 +287,12 @@ test('importAdapter: 実ファイルの動的 import。無い・createAdapter �
   const dir = join(root, 'adapters')
   mkdirSync(dir)
   writeFileSync(join(dir, 'codex.mjs'), 'export const name = "x"\n')
-  writeFileSync(join(dir, 'opencode.mjs'), 'export function createAdapter(cfg) { return { name: "opencode", cfg } }\n')
+  writeFileSync(join(dir, 'other.mjs'), 'export function createAdapter(cfg) { return { name: "other", cfg } }\n')
   assert.equal(await importAdapter('codex', join(root, 'no-such-dir')), null)
   assert.equal(await importAdapter('codex', dir), null)
-  const mod = await importAdapter('opencode', dir)
+  const mod = await importAdapter('other', dir)
   assert.equal(typeof mod.createAdapter, 'function')
-  assert.equal(mod.createAdapter({ a: 1 }).name, 'opencode')
+  assert.equal(mod.createAdapter({ a: 1 }).name, 'other')
   assert.equal(ADAPTERS_DIR, join(RUN_MJS, '..', 'adapters'))
 })
 

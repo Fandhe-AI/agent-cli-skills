@@ -142,7 +142,7 @@ test('start: codex が無ければ prereq・agent-guard.sh が無くても prere
   const b = setup({ turns: [okTurn()], toolConfig: { guardScript: '/nonexistent/agent-guard.sh' } })
   const e = await b.adapter.start().then(() => null, (err) => err)
   assert.equal(e?.kind, 'prereq')
-  assert.match(e.message, /init-codex か init-opencode を導入する/)
+  assert.match(e.message, /init-codex を導入する/)
   // 明示しなければ既定の探索先に見つかり、start は成功する
   const c = setup({ turns: [okTurn()] })
   await c.adapter.start()

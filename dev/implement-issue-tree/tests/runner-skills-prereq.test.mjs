@@ -1,8 +1,8 @@
 // ランナーの起動時検査「生成物が名指しするスキルの存在」（runner/lib/skills-prereq.mjs）の検査。
 //   - REQUIRED_SKILLS が src（implement-issue-tree.src.js）の名指しと両方向で一致し続けること
 //   - src に出るスキル名がすべて「必須」か「言及のみ」に分類されていること（新しい名指しを黙って見落とさない）
-//   - 必須スキルが init-codex / init-opencode の導入対象に入っていること（入っていないと配布先が起動できない）
-//   - ツールごとの探索先（codex は .agents/skills だけ、opencode は 4 か所）で判定すること
+//   - 必須スキルが init-codex の導入対象に入っていること（入っていないと配布先が起動できない）
+//   - ツールごとの探索先（codex は .agents/skills だけ）で判定すること
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
@@ -44,8 +44,8 @@ test('src に出るスキル名は、必須か言及のみのどちらかに分�
   for (const n of REQUIRED_SKILLS) assert.ok(names.includes(n), `${n} はこのリポジトリのスキル`)
 })
 
-test('必須スキルは init-codex・init-opencode の導入対象に入っている', () => {
-  for (const tool of ['codex', 'opencode']) {
+test('必須スキルは init-codex の導入対象に入っている', () => {
+  for (const tool of ['codex']) {
     const md = readFileSync(join(SKILLS, `init-${tool}`, 'SKILL.md'), 'utf8')
     const m = /for s in ([a-z0-9 \\\n-]+?); do/.exec(md)
     assert.ok(m, `init-${tool} の導入ループ`)
@@ -79,20 +79,12 @@ test('missingSkills: codex は .agents/skills だけを探す', () => {
   assert.deepEqual(missingSkills({ tool: 'codex', root: repoWith([['.agents/skills', ['create-commit']]]) }), ['create-pr', 'implement-review'])
 })
 
-test('missingSkills: opencode は .opencode/skills・.opencode/skill・.claude/skills・.agents/skills のどれかにあればよい', () => {
-  assert.deepEqual(SKILL_DIRS.opencode, ['.opencode/skills', '.opencode/skill', '.claude/skills', '.agents/skills'])
-  for (const dir of SKILL_DIRS.opencode) assert.deepEqual(missingSkills({ tool: 'opencode', root: repoWith([[dir, REQUIRED_SKILLS]]) }), [], dir)
-  // 探索先をまたいで揃っていてもよい
-  const mixed = repoWith([['.claude/skills', ['create-commit']], ['.agents/skills', ['create-pr']], ['.opencode/skills', ['implement-review']]])
-  assert.deepEqual(missingSkills({ tool: 'opencode', root: mixed }), [])
-  assert.deepEqual(missingSkills({ tool: 'opencode', root: repoWith([]) }), [...REQUIRED_SKILLS])
-})
-
 test('missingSkills: ディレクトリだけで SKILL.md が無ければ不在・未知のツールは例外', () => {
   const d = repoWith([])
   for (const n of REQUIRED_SKILLS) mkdirSync(join(d, '.agents', 'skills', n, 'SKILL.md'), { recursive: true })
   assert.deepEqual(missingSkills({ tool: 'codex', root: d }), [...REQUIRED_SKILLS], 'SKILL.md がディレクトリなら不在')
   assert.throws(() => missingSkills({ tool: 'claude', root: d }), /未知のツール/)
+  assert.throws(() => missingSkills({ tool: 'opencode', root: d }), /未知のツール/)
   // isFile を注入できる（判定の入口は 1 つ）
   const seen = []
   assert.deepEqual(missingSkills({ tool: 'codex', root: '/r', isFile: (p) => { seen.push(p); return true } }), [])
@@ -105,6 +97,4 @@ test('missingSkillsMessage: 足りない名前・探索先・導入の案内を�
   assert.match(m, /\.agents\/skills\/<name>\/SKILL\.md/)
   assert.match(m, /init-codex/)
   assert.match(m, /コミット/)
-  const o = missingSkillsMessage('opencode', ['create-pr'])
-  for (const dir of SKILL_DIRS.opencode) assert.ok(o.includes(`${dir}/<name>/SKILL.md`), dir)
 })

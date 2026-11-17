@@ -4,8 +4,8 @@
 // 役割: run-verified.sh はスクリプト本体と scripts/lib/*.sh のハッシュを照合してから起動するが、launcher 自身は照合の対象外で
 // （run-verified.sh 冒頭の「限界」）、--verify-only の枝は照合より前に lib/signed-output.sh を source する。エージェントが
 // これらを書き換えられる構成では、ホストが直接起動する launcher を通じて任意のコードがサンドボックスの外で走る。
-// また、ガード（agent-guard.sh）・Codex の hook（codex-hook.sh）・OpenCode のランナー専用 plugin は、ツールがエージェントの
-// 実行中に遅延で読む（hook は呼び出しごと、merge 用 serve の plugin は最初のマージ段で）。そこでこれらの内容を
+// また、ガード（agent-guard.sh）・Codex の hook（codex-hook.sh）は、ツールがエージェントの
+// 実行中に遅延で読む（hook は呼び出しごと）。そこでこれらの内容を
 // エージェントの起動前に固定し、agent-host（lib/agent-host.mjs）が実行仕様の段の起動前と、モデルの段の前後で照合する。
 // 1 度でも食い違えば、以降の段はすべて実行しない（agent-host の tampered）。
 //
@@ -15,7 +15,7 @@
 //
 // 呼び出し元: runner/run.mjs（pinPathsFor → pinFiles を createAdapter の前に）、lib/agent-host.mjs（checkPins）。
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { findGuardScript } from './guard-script.mjs'
 
@@ -24,16 +24,9 @@ export function launcherPinPaths(skillDir) {
   return [join(skillDir, 'scripts', 'run-verified.sh'), join(skillDir, 'scripts', 'lib', 'signed-output.sh')]
 }
 
-/** dir の下の通常ファイル（再帰。読めなければ空）。 */
-function filesUnder(dir) {
-  let names
-  try { names = readdirSync(dir, { recursive: true }) } catch { return [] }
-  return names.map((n) => join(dir, String(n))).filter((p) => { try { return statSync(p).isFile() } catch { return false } }).sort()
-}
-
 /**
- * ツールごとに固定するファイルの一覧。純関数ではない（ガードの探索・plugin の列挙でファイルシステムを読む）。
- * @param {{ tool: 'codex'|'opencode', skillDir: string, mainRoot: string, toolConfig?: object, adaptersDir: string }} p
+ * ツールごとに固定するファイルの一覧。純関数ではない（ガードの探索でファイルシステムを読む）。
+ * @param {{ tool: 'codex', skillDir: string, mainRoot: string, toolConfig?: object, adaptersDir: string }} p
  *   toolConfig はアダプタへ渡すものと同じ値（ガードの探索をアダプタと同じ入力で行う。lib/guard-script.mjs）
  */
 export function pinPathsFor({ tool, skillDir, mainRoot, toolConfig = {}, adaptersDir }) {
@@ -41,7 +34,6 @@ export function pinPathsFor({ tool, skillDir, mainRoot, toolConfig = {}, adapter
   const guard = findGuardScript({ toolConfig, skillDir, mainRoot })
   if (guard) out.push(guard)
   if (tool === 'codex') out.push(join(adaptersDir, 'codex-hook.sh'))
-  if (tool === 'opencode') out.push(...filesUnder(join(adaptersDir, 'opencode-plugin')))
   return [...new Set(out)]
 }
 

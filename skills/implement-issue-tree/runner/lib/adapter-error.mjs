@@ -4,7 +4,7 @@
 //   - アダプタの start() / run() / close() は、失敗を AdapterError(kind, message, { sessionRef? }) で投げる。
 //   - kind は KINDS の 6 つだけ。agent-host は run() の AdapterError をすべて null（Workflow 版の
 //     「StructuredOutput が返らなかった」と同じ値）に倒し、run.mjs は start() の 'prereq' を終了コード 3 にする。
-//   - sessionRef は修復ターンや後片づけのための参照（Codex のセッション UUID・OpenCode のセッション ID）。
+//   - sessionRef は修復ターンや後片づけのための参照（Codex のセッション UUID）。
 // message はログにだけ載せる。秘密（トークン・認証ファイルの中身）を入れないのはアダプタの責務。
 
 /** kind の一覧。timeout = 時間切れで停止した / usage-limit = 利用上限 / exit = プロセスの異常終了 /

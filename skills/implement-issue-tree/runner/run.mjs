@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// implement-issue-tree の Codex / OpenCode 版ランナーの起動口。
+// implement-issue-tree の Codex 版ランナーの起動口。
 //
-//   node <skillDir>/runner/run.mjs --tool codex|opencode --args <args.json> [--config <config.json>] [--max-parallel N] [--dry-run] [--no-build-check]
+//   node <skillDir>/runner/run.mjs --tool codex --args <args.json> [--config <config.json>] [--max-parallel N] [--dry-run] [--no-build-check]
 //
 // 役割: 生成物（scripts/implement-issue-tree.js）を無変更のまま評価し、agent 引数に agent-host（lib/agent-host.mjs）が
-// 作った関数を渡して、Workflow 版と同じホスト判断を Codex / OpenCode のエージェントで動かす。起動前の拒否
+// 作った関数を渡して、Workflow 版と同じホスト判断を Codex のエージェントで動かす。起動前の拒否
 // （引数・設定・gh 認証・アダプタの有無・生成物の鮮度）と、結果の保存・アダプタの後片づけ・明示の exit を担う。
 //
 // 終了コード（計画 C の仕様）:
@@ -39,7 +39,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createAgentHost, killScriptsSync } from './lib/agent-host.mjs'
 import { isAdapterError } from './lib/adapter-error.mjs'
-import { codexRules, opencodeRules } from './lib/guard.mjs'
+import { codexRules } from './lib/guard.mjs'
 import { loadWorkflow } from './lib/load-workflow.mjs'
 import { loadConfig, TOOLS } from './lib/models.mjs'
 import { isRepoSlug } from './lib/merge-target.mjs'
@@ -50,7 +50,7 @@ import { newRunId, resolveMainRoot } from './lib/worktree.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const SKILL_DIR = dirname(HERE)
 export const ADAPTERS_DIR = join(HERE, 'adapters')
-const USAGE = '使い方: node run.mjs --tool codex|opencode --args <args.json> [--config <config.json>] [--max-parallel N] [--dry-run] [--no-build-check]'
+const USAGE = '使い方: node run.mjs --tool codex --args <args.json> [--config <config.json>] [--max-parallel N] [--dry-run] [--no-build-check]'
 
 export class UsageError extends Error {}
 
@@ -75,7 +75,8 @@ export function parseCli(argv) {
     else if (a === '--no-build-check') out.buildCheck = false
     else throw new UsageError(`未知の引数: ${String(a).slice(0, 40)}`)
   }
-  if (!TOOLS.includes(out.tool)) throw new UsageError(`--tool は ${TOOLS.join(' / ')}`)
+  // 名前の形だけを見る。対応していないツール（opencode を含む）は、アダプタが無い経路（前提の不足・終了コード 3）で止める
+  if (typeof out.tool !== 'string' || !/^[a-z][a-z0-9-]{0,30}$/.test(out.tool)) throw new UsageError(`--tool は ${TOOLS.join(' / ')}`)
   if (out.argsPath === null) throw new UsageError('--args が無い')
   return out
 }
@@ -209,7 +210,7 @@ export async function main(argv, deps = {}) {
   } catch (e) {
     return prereq(`アダプタ ${cli.tool} を読み込めない: ${String(e?.message ?? e).slice(0, 160)}`)
   }
-  if (!mod) return prereq(`アダプタ adapters/${cli.tool}.mjs が無い`)
+  if (!mod) return prereq(`アダプタ adapters/${cli.tool}.mjs が無い${cli.tool === 'opencode' ? '（OpenCode は未対応。Issue #853 で再設計する）' : `（対応しているツール: ${TOOLS.join(' / ')}）`}`)
   let workflow
   try {
     workflow = load()
@@ -285,7 +286,7 @@ export async function main(argv, deps = {}) {
   const toolConfig = { ...(config.toolConfig?.[cli.tool] ?? {}), deleteSessions: config.cleanup.deleteSessions, models: config.models[cli.tool], timeoutsSec: config.timeoutsSec }
   // 内容の固定（PR #851 の P0。lib/pins.mjs）。アダプタを作る前・エージェントを 1 つも起動する前に、ホストが直接起動する
   // launcher（と照合より前に source される signed-output.sh）と、ツールが実行中に遅延で読むガード（agent-guard.sh。
-  // アダプタと同じ入力で探す）・Codex の hook・OpenCode のランナー専用 plugin を固定する。照合は agent-host が段ごとに行う
+  // アダプタと同じ入力で探す）・Codex の hook を固定する。照合は agent-host が段ごとに行う
   const pins = pinFiles(pinPathsFor({ tool: cli.tool, skillDir: args.skillDir, mainRoot, toolConfig, adaptersDir: ADAPTERS_DIR }))
   log(`ランナー: 内容を固定したファイル ${pins.length} 件（${pins.map((p) => `${p.path.split('/').pop()}=${p.sha256 === null ? 'absent' : p.sha256.slice(0, 12)}`).join(' ')}）`)
   let adapter
@@ -295,7 +296,7 @@ export async function main(argv, deps = {}) {
       mainRoot,
       runDir,
       toolConfig,
-      guard: { codexRules, opencodeRules },
+      guard: { codexRules },
       env,
     })
   } catch (e) {

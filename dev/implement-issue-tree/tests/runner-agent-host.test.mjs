@@ -113,13 +113,10 @@ test('前置き・元のプロンプト・schema 指示の順に組み、契約�
   assert.deepEqual(req.schema, SCHEMA)
 })
 
-test('model 省略は config.sessionModel の段。OpenCode は effort の欄に variant を入れる', async () => {
+test('model 省略は config.sessionModel の段', async () => {
   const c = makeHost({ reply: () => ({ ok: true, n: 1 }) })
   await c.agent('p', { label: 'recover:#2', schema: SCHEMA })
   assert.equal(c.calls[0].model, BASE_CONFIG.models.codex[BASE_CONFIG.sessionModel].model)
-  const o = makeHost({ reply: () => ({ ok: true, n: 1 }), name: 'opencode' })
-  await o.agent('p', { label: 'plan:#2', model: 'haiku', effort: 'high', schema: SCHEMA })
-  assert.equal(o.calls[0].effort, BASE_CONFIG.models.opencode.haiku.variant)
 })
 
 // 不正出力の注入。1 回目に不正 → 修復で適合なら修復後の値、2 回とも不正なら null。どの場合も不適合な値はホストへ渡らない

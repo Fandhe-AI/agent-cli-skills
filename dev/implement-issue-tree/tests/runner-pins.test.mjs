@@ -13,18 +13,16 @@ import { checkPins, launcherPinPaths, mergePins, pinFiles, pinPathsFor } from '.
 const root = trackTmp(realpathSync(mkdtempSync(join(tmpdir(), 'iit-runner-pins-'))))
 const sha = (s) => createHash('sha256').update(s).digest('hex')
 
-test('pinPathsFor: launcher と signed-output.sh・ガード（明示の guardScript）・codex は hook・opencode は plugin の全ファイル', () => {
+test('pinPathsFor: launcher と signed-output.sh・ガード（明示の guardScript）・codex は hook', () => {
   const skillDir = join(root, 'skill')
   const adaptersDir = join(root, 'adapters')
-  mkdirSync(join(adaptersDir, 'opencode-plugin', 'sub'), { recursive: true })
-  writeFileSync(join(adaptersDir, 'opencode-plugin', 'index.js'), 'x')
-  writeFileSync(join(adaptersDir, 'opencode-plugin', 'sub', 'a.js'), 'y')
   const guard = join(root, 'agent-guard.sh')
   writeFileSync(guard, 'exit 0\n')
   const base = { skillDir, mainRoot: join(root, 'main'), toolConfig: { guardScript: guard }, adaptersDir }
   assert.deepEqual(launcherPinPaths(skillDir), [join(skillDir, 'scripts', 'run-verified.sh'), join(skillDir, 'scripts', 'lib', 'signed-output.sh')])
   assert.deepEqual(pinPathsFor({ tool: 'codex', ...base }), [...launcherPinPaths(skillDir), guard, join(adaptersDir, 'codex-hook.sh')])
-  assert.deepEqual(pinPathsFor({ tool: 'opencode', ...base }), [...launcherPinPaths(skillDir), guard, join(adaptersDir, 'opencode-plugin', 'index.js'), join(adaptersDir, 'opencode-plugin', 'sub', 'a.js')])
+  // 対応していないツールには hook を足さない（共通の固定だけ）
+  assert.deepEqual(pinPathsFor({ tool: 'opencode', ...base }), [...launcherPinPaths(skillDir), guard])
   // ガードが見つからなければ（アダプタの start が prereq で止める）一覧に入れない
   assert.deepEqual(pinPathsFor({ tool: 'codex', ...base, toolConfig: { guardScript: join(root, 'none.sh') } }), [...launcherPinPaths(skillDir), join(adaptersDir, 'codex-hook.sh')])
 })
