@@ -65,10 +65,10 @@ node <skillDir>/runner/run.mjs --tool codex --args args.json
 
 ### autoMerge
 
-- 前提は Workflow 版と同じで、判定もホストの同じコードが行う。サーバー側の強制の実測（G0）と `externalChecks` の明示（全 App の信頼済み context 宣言込み）が要る。構成は [automerge-design.md](automerge-design.md) と `.claude/rules/ruleset-policy.md` の方針に従う。
-- マージを許すのは merge-exec の段の 1 コマンド（`gh pr merge <N> --squash --delete-branch --match-head-commit`）だけで、PR 番号と対象リポジトリを固定する。他の段が `gh pr merge` や `gh pr review` を実行すると、ガードが拒否する。
-- `autoMerge: true` のランは、起動前にメイン worktree で `gh repo view` を実行して対象リポジトリを決める。`args.repo` が違えば終了コード 2、`args.repo` が無く環境変数 `GH_REPO` が解決先と違えば終了コード 3。fork の構成（`origin` が fork・`upstream` が親）では親が解決先になる。
-- `gh pr merge --delete-branch` は、ローカルのブランチ削除に失敗し得る（worktree で使用中のブランチ等）。リモートのマージは先に済んでいるので、マージ自体は成立している。ローカルに残ったブランチは後で手で消す。
+- 前提は Workflow 版と同じで、判定もホストの同じコードが行う。サーバー側の強制の実測（G0）と `externalChecks` の明示（全 App の信頼済み context 宣言込み）が要る。構成は [automerge-design.md](automerge-design.md) に従う。
+- マージを許すのは merge-exec の段の 1 コマンド（`gh pr merge <N> --squash --delete-branch --match-head-commit`）だけで、PR 番号と対象リポジトリを固定する。merge-exec 以外の段の `gh pr merge` と、`gh pr review --approve` は、ガードが拒否する（変数・`$(…)` 経由の形は止まらない。次節）。
+- `autoMerge: true` のランは、起動前にメイン worktree で `gh repo view` を実行して対象リポジトリを決める。`args.repo` が違えば終了コード 2、`args.repo` が無く環境変数 `GH_REPO` が解決先と違えば終了コード 3。gh は remote の解決で `upstream` を `origin` より先に取るため、fork の構成（`origin` が fork・`upstream` が親）で `args.repo` に fork を指定すると終了コード 2 になると見込まれる（実機では未確認）。
+- merge-exec の `gh pr merge --delete-branch` は、ローカルのブランチ削除に失敗し得る。リモートのマージは先に済んでいる。
 
 ### 構造化出力
 
