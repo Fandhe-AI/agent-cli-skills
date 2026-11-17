@@ -208,6 +208,56 @@ test('読む対象を決められない（args の parent が無い・プロン�
   assert.equal(other.calls.length, 0)
 })
 
+// 状態ファイルが無いときの置き場の symlink（下流の Bugbot 指摘 H04）。absent は初期化をモデルの段へ回し、置き場を書き込み可で
+// 渡す経路なので、ファイルがあるときの置き場の検査と同じく bad に倒す。リンク先には状態ファイルを置かない（ファイルがある
+// ときの検査とは別の経路を確かめる）
+const NOFILE_OUT = join(root, 'outside-nofile')
+mkdirSync(join(NOFILE_OUT, 'under', 'issue-trees'), { recursive: true })
+mkdirSync(join(NOFILE_OUT, 'trees'), { recursive: true })
+const newMain = (withUnderscore) => {
+  const main = join(root, `case-${++caseSeq}`)
+  mkdirSync(withUnderscore ? join(main, '_') : main, { recursive: true })
+  return main
+}
+
+/** 状態ファイルが無く置き場が symlink のメイン worktree で、state:load・state:load-fill がモデルを起動せず照合不成立に倒れること。 */
+async function assertNoFileSymlinkRefused(cases) {
+  const load = await loadPrompt()
+  const fill = await fillPrompt()
+  for (const [name, make] of cases) {
+    const main = make()
+    const h = makeHost(main)
+    assert.deepEqual(await h.agent(load.prompt, load.opts), LOAD_FAIL, `${name}（state:load）`)
+    assert.deepEqual(await h.agent(fill.prompt, fill.opts), FILL_FAIL, `${name}（state:load-fill）`)
+    assert.equal(h.calls.length, 0, `${name}: モデル（アダプタ）を起動しない`)
+    assert.ok(h.logs.some((x) => x.includes('symlink')), `${name}: 理由をログに出す\n${h.logs.join('\n')}`)
+  }
+}
+
+test('fail-closed（状態ファイルが無い）: `_` が symlink（外を指す・リンク先が無い）なら、初期化をモデルへ回さず照合不成立に倒れる値を返す', async () => {
+  await assertNoFileSymlinkRefused([
+    ['_ が外を指す symlink', () => { const main = newMain(false); symlinkSync(join(NOFILE_OUT, 'under'), join(main, '_')); return main }],
+    ['_ がリンク先の無い symlink', () => { const main = newMain(false); symlinkSync(join(NOFILE_OUT, 'missing'), join(main, '_')); return main }],
+  ])
+})
+
+test('fail-closed（状態ファイルが無い）: `_/issue-trees` が symlink（外を指す・リンク先が無い）なら、初期化をモデルへ回さず照合不成立に倒れる値を返す', async () => {
+  await assertNoFileSymlinkRefused([
+    ['_/issue-trees が外を指す symlink', () => { const main = newMain(true); symlinkSync(join(NOFILE_OUT, 'trees'), join(main, '_', 'issue-trees')); return main }],
+    ['_/issue-trees がリンク先の無い symlink', () => { const main = newMain(true); symlinkSync(join(NOFILE_OUT, 'missing'), join(main, '_', 'issue-trees')); return main }],
+  ])
+})
+
+test('状態ファイルが無く置き場の途中も無い（_ が無い・_ だけある）ときは従来どおり absent で、初期化をモデルの段へ回す', async () => {
+  const load = await loadPrompt()
+  for (const main of [newMain(false), newMain(true)]) {
+    const h = makeHost(main)
+    await h.agent(load.prompt, load.opts)
+    assert.deepEqual(h.calls.map((c) => c.label), ['state:load'])
+    assert.deepEqual(h.calls[0].writablePaths, [join(main, '_', 'issue-trees')])
+  }
+})
+
 test('初回（状態ファイルが無い）の state:load だけは従来どおりモデルの段へ回し、初期化のための書き込み可パスを渡す', async () => {
   const s = setup(null)
   const load = await loadPrompt()

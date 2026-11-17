@@ -443,4 +443,35 @@ test('Phase 4 実行仕様の掃除（state:cleanup:#N の remove）と最終ス
   await agent2('impl', { label: 'impl:#9', schema: OK_SCHEMA, isolation: 'worktree' })
   assert.equal(during.worktree, 'retained-locked')
 })
+
+test('保険の時間切れ（watchdog）の後も、adapter.run が決着するまでは使用中の worktree として lock を外さない（下流の Bugbot 指摘 H01）', async () => {
+  const s = setup({ issue: 2, name: 'pre-existing' })
+  // 時間切れのタイマーは差し替えて手で発火させる（実時間で待たない）
+  const fires = []
+  const timers = { setTimeout: (fn) => { fires.push(fn); return fires.length }, clearTimeout: () => {} }
+  let finish
+  const mod = makeFakeAdapterModule({ reply: () => new Promise((r) => { finish = r }) })
+  const logs = []
+  const run = (file, argv, opts) => spawnScript(file, argv, { ...opts, env: gitEnv(s.repo.root) })
+  const agent = createAgentHost({ adapter: mod.createAdapter({}), cfg: { config: loadConfig(), skillDir: SKILL_DIR, mainRoot: s.main, runId: RUN_ID, args: { parent: PARENT }, spawnScript: run, createWorktree: lockedWorktreeMaker(s.repo, s.main), timers, log: (x) => logs.push(x) } })
+  const pending = agent('impl', { label: 'impl:#2', schema: OK_SCHEMA, isolation: 'worktree' })
+  while (mod.calls.length === 0) await new Promise((r) => setImmediate(r))
+  const own = mod.calls[0].cwd
+  assert.equal(own, join(s.main, '.claude', 'worktrees', `${RUN_ID}-1`))
+  assert.equal(fires.length, 1)
+  fires[0]()
+  assert.equal(await pending, null, '時間切れの段は未返却')
+  // アダプタはまだ戻っていない（モデルが worktree を使っているかもしれない）ので、掃除は lock を外さず保持にする
+  const kept = await agent(removeSpec(own), { label: 'state:cleanup:#2', schema: CLEANUP_SCHEMA })
+  assert.equal(kept.worktree, 'retained-locked', logs.join('\n'))
+  assert.equal(existsSync(own), true)
+  assert.equal(lockedOf(s.repo, s.main, own), true)
+  assert.ok(logs.some((x) => x.includes('使用中')), logs.join('\n'))
+  // adapter.run が決着したら使用中ではなくなり、ランナーが付けた lock を外して消せる
+  finish({ ok: true })
+  await new Promise((r) => setImmediate(r))
+  const gone = await agent(removeSpec(own), { label: 'state:cleanup:#2', schema: CLEANUP_SCHEMA })
+  assert.equal(gone.worktree, 'removed', logs.join('\n'))
+  assert.equal(existsSync(own), false)
+})
 const SWEEP_SCHEMA = { type: 'object', required: ['removed'], properties: { removed: { type: 'array', items: { type: 'string' } } } }
