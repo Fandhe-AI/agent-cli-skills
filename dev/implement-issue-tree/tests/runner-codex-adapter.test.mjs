@@ -11,6 +11,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { createAdapter, buildProfileArgs, classifyFailure, summarizeEvents, DARWIN_HEREDOC_TMP, platformWritePaths, stdinWritesOf, blankJsStrings, findRollouts, worktreeGit } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
 import { decodeStrictText, strictifySchema } from '../../../skills/implement-issue-tree/runner/adapters/codex-strict.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
+import { importDefinitions } from './lib/stub-run.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FAKE = join(HERE, 'lib', 'fake-codex.mjs')
@@ -76,7 +77,7 @@ test('strictify: 全 object は additionalProperties:false・required は全キ�
   assert.deepEqual(s.required, ['ok', 'note', 'state', 'reason', 'items', 'payload', 'list'])
   assert.deepEqual(s.properties.ok, { type: 'boolean' })
   assert.deepEqual(s.properties.note.type, ['string', 'null'])
-  assert.deepEqual(s.properties.state, { type: ['string', 'null'], enum: ['a', 'b', null] })
+  assert.deepEqual(s.properties.state, { type: ['string', 'null'], enum: ['a', 'b', null], description: OMIT_HINT })
   assert.deepEqual(s.properties.reason.type, ['string', 'null'])
   const li = s.properties.list.items
   assert.deepEqual(li.required, ['n', 'tag'])
@@ -84,6 +85,41 @@ test('strictify: 全 object は additionalProperties:false・required は全キ�
   assert.equal(li.additionalProperties, false)
   assert.equal(SCHEMA.additionalProperties, undefined, '入力は変更しない')
   assert.deepEqual(SCHEMA.required, ['ok', 'payload'])
+})
+
+// strict 変換が任意キーの説明に足す、欄を省くときの書き方（codex-strict.mjs の nullable と同じ文面）
+const OMIT_HINT = 'この欄を省くときは null を書く'
+
+test('strictify: 元が任意のキーの説明に「省くときは null」を足す（説明が無ければ作る・anyOf で包む形も）。required と元から null を許すキーには足さない', () => {
+  const s = strictifySchema({
+    type: 'object',
+    required: ['r'],
+    properties: {
+      r: { type: 'string', description: '必須' },
+      a: { type: 'string', description: '封筒に出たときだけ転記' },
+      b: { type: 'integer' },
+      c: { oneOf: [{ type: 'string' }, { type: 'integer' }], description: 'どちらか' },
+      d: { type: ['string', 'null'], description: 'null は値' },
+      o: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'], description: '失敗時だけ' },
+    },
+  })
+  assert.equal(s.properties.r.description, '必須')
+  assert.equal(s.properties.a.description, `封筒に出たときだけ転記（${OMIT_HINT}）`)
+  assert.equal(s.properties.b.description, OMIT_HINT)
+  assert.deepEqual(s.properties.c.anyOf.at(-1), { type: 'null' })
+  assert.equal(s.properties.c.description, `どちらか（${OMIT_HINT}）`)
+  assert.equal(s.properties.d.description, 'null は値')
+  assert.equal(s.properties.o.description, `失敗時だけ（${OMIT_HINT}）`)
+  assert.equal(s.properties.o.properties.x.description, undefined, '入れ子の required のキーには足さない')
+})
+
+test('strictify: ツリー取得の封筒（TREE_SCHEMA）の任意の欄 dir・tsvSha256・page・repo に「省くときは null」が付き、null は戻すときに落ちる', async () => {
+  const { TREE_SCHEMA } = await importDefinitions(['TREE_SCHEMA'], 'runner-codex-strict')
+  const p = strictifySchema(TREE_SCHEMA).properties.payload.properties
+  for (const k of ['dir', 'tsvSha256', 'page', 'repo']) assert.ok(p[k].description.endsWith(`（${OMIT_HINT}）`), `${k}: ${p[k].description}`)
+  for (const k of ['count', 'inputSha256']) assert.ok(!p[k].description.includes(OMIT_HINT), k)
+  const back = JSON.parse(decodeStrictText(TREE_SCHEMA, JSON.stringify({ nonce: 'n', sha256: 's', failure: null, nodes: [], payload: { pages: 1, page: null, dir: null, tsvSha256: null, count: 1, inputSha256: 'a', nodesSha256: 'b', optinSha256: 'c', structSha256: 'd', taskIdSha256: 'e', repo: 'o/r' } })))
+  assert.deepEqual(Object.keys(back.payload).sort(), ['count', 'inputSha256', 'nodesSha256', 'optinSha256', 'pages', 'repo', 'structSha256', 'taskIdSha256'])
 })
 
 test('strictify: 自由形式の object は [{key,value}] の配列になる（型付きは値の型、無しは JSON 文字列）', () => {
@@ -911,6 +947,21 @@ test('extraWritePaths（P1）: 文字列・相対・非正規化・"/" は起動
 test('出力の上限（P2）: stdout が上限を超えたらプロセスグループを止めて exit で失敗する', async () => {
   const t = setup({ turns: [okTurn({ flood: { stream: 'stdout', bytes: 17 * 1024 * 1024 } })] })
   await assert.rejects(t.adapter.run(t.req({ timeoutMs: 12000 })), (e) => e instanceof AdapterError && e.kind === 'exit' && /上限/.test(e.message))
+})
+
+test('出力の上限: 新しいセッションへ抜けた孫がパイプを握っていても、猶予の後に close を待たずに失敗する（段の時間上限まで枠を握らない）', async () => {
+  const pidFile = join(tmpdir(), `iit-escaped-${process.pid}-${Math.random().toString(16).slice(2)}`)
+  trackTmp(pidFile)
+  const t = setup({ turns: [okTurn({ escapedHolder: pidFile, flood: { stream: 'stdout', bytes: 17 * 1024 * 1024 } })], toolConfig: { killGraceMs: 200 } })
+  const timeoutMs = 5000
+  const t0 = Date.now()
+  try {
+    await assert.rejects(t.adapter.run(t.req({ timeoutMs })), (e) => e instanceof AdapterError && e.kind === 'exit' && /上限/.test(e.message))
+    const elapsed = Date.now() - t0
+    assert.ok(elapsed < timeoutMs / 2, `時間上限（${timeoutMs} ms）を待たずに戻る（${elapsed} ms）`)
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL') } catch { /* 既に無い */ }
+  }
 })
 
 test('出力の上限（P2）: stderr が暴走しても（上限超で）止めて失敗する', async () => {

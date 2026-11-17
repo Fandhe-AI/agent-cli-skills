@@ -20,6 +20,7 @@
 //
 // 読み取りは recover-git.mjs と同じく行単位の完全一致で、どちらの行もちょうど 1 つ、run-verified.sh を起動する行は全体で 2 つだけのときに限る。
 // 値（sha256・パス・ブランチ名・状態ファイルの番号・イシュー番号）はプロンプトの行から取り、label の N と本文の numbers を束縛する。
+// discard は結びつけ（--expect-branch・--branch・--require-missing のどれか 1 つ）が付いた形だけを読む（無い形は HEAD を照合せずに消すため）。
 // 対象の worktree は、ホストが次を確かめたものに限る（checkCleanupTarget）:
 //   - 字面で <main>/.claude/worktrees/ の直下（<main> は mainRoot そのもの、またはその realpath）。.claude/worktrees は symlink で外へ出ない
 //   - 実体があれば、その realpath も同じ直下（symlink で外を指さない）でディレクトリ。実体が無い（手で消された）ときは拒まない
@@ -74,10 +75,14 @@ export function parseCleanupPrompt(label, prompt, { skillDir }) {
   const body = `[{"numbers":[${issue}],"patch":{"worktree":""}}]`
   if (lines[stAt[0] + 1] !== body || lines[stAt[0] + 2] !== 'STATE_EOF') return no('state.sh の本文が label のイシューの worktree を空にする 1 行でない')
   const [, rmSha, mode, path, expectBranch, requireMissing, branch, base] = r
-  // 生成物の worktreeRemoveRest と同じ組み合わせだけ（discard 以外に結びつけは付かない・--require-missing は他と併用しない）
+  // 生成物の worktreeRemoveRest が組める形のうち、src が実際に出す組み合わせだけ（discard 以外に結びつけは付かない・
+  // --require-missing は他と併用しない・discard には結びつけが 1 つ要る）
   if (mode !== 'discard' && (expectBranch || requireMissing || branch)) return no('superseded に discard 専用の引数がある')
   if (requireMissing && (expectBranch || branch)) return no('--require-missing と他の結びつけが併用されている')
   if (expectBranch && branch) return no('--expect-branch と --branch が併用されている')
+  // 結びつけの無い discard は、clean な worktree なら固有のコミットごと消す。src の discard の呼び出しはどれも結びつけを付ける
+  // （--expect-branch・--branch・--require-missing）ので、無い形は状態ファイルの破損等で値が落ちたものとして実行しない
+  if (mode === 'discard' && !expectBranch && !requireMissing && !branch) return no('discard に結びつけ（--expect-branch・--branch・--require-missing）が無い')
   const argv = ['remove', '--mode', mode, '--path', path]
   if (expectBranch) argv.push('--expect-branch', expectBranch)
   if (requireMissing) argv.push('--require-missing')

@@ -3,10 +3,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { trackTmp } from './lib/tmp-track.mjs'
+import { worktreeGit } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
 import { maskUrlCredentials, createSequencer, createWorktree, newRunId, resolveDefaultBranch, resolveMainRoot, verifyWorktreeGitdir, worktreeNames } from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
 import * as worktreeMod from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
 
@@ -180,6 +181,39 @@ test('verifyWorktreeGitdir: メインの .git/worktrees/ の直下だけを通�
   }
 })
 
+test('createWorktree: メインの .git が symlink のリポジトリは、Codex アダプタの検査（worktreeGit）と同じく拒否し、登録・ブランチ・パスを残さない', async () => {
+  const sb = sandbox()
+  const elsewhere = join(sb.root, 'elsewhere')
+  mkdirSync(elsewhere)
+  renameSync(join(sb.main, '.git'), join(elsewhere, 'r.git'))
+  symlinkSync(join(elsewhere, 'r.git'), join(sb.main, '.git'))
+  const list = () => git(sb.main, 'worktree', 'list', '--porcelain')
+  const branches = () => git(sb.main, 'branch', '--list', '--format=%(refname)')
+  const [wl, br] = [list(), branches()]
+  const runId = newRunId()
+  await assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false })), /\.git が symlink/)
+  assert.equal(list(), wl, 'worktree の一覧が作成前と同じ')
+  assert.equal(branches(), br, 'ブランチが作成前と同じ')
+  assert.equal(existsSync(join(sb.main, '.claude', 'worktrees', `${runId}-1`)), false)
+})
+
+test('verifyWorktreeGitdir と worktreeGit の基準が同じ: mainRoot の途中の symlink は両方が通し、.git の symlink は両方が拒む', async () => {
+  const sb = sandbox()
+  const via = join(sb.root, 'via')
+  symlinkSync(sb.main, via)
+  const wt = await createWorktree({ mainRoot: via, runId: newRunId(), n: 1, fetch: false, lock: false })
+  assert.equal(verifyWorktreeGitdir(via, wt.gitdir), wt.gitdir)
+  assert.equal(worktreeGit(via, wt.gitdir).gitdir, wt.gitdir)
+  // .git を外へ移して symlink にした後は、作成済みの gitdir の realpath もどちらの検査も通らない
+  const elsewhere = join(sb.root, 'elsewhere')
+  mkdirSync(elsewhere)
+  renameSync(join(sb.main, '.git'), join(elsewhere, 'r.git'))
+  symlinkSync(join(elsewhere, 'r.git'), join(sb.main, '.git'))
+  const moved = realpathSync(join(sb.main, '.git', 'worktrees', basename(wt.gitdir)))
+  assert.throws(() => verifyWorktreeGitdir(sb.main, moved), /\.git が symlink/)
+  assert.throws(() => worktreeGit(sb.main, moved), /\.git\/worktrees/)
+})
+
 // ---------------------------------------------------------------------------
 // 継いだ git の環境変数（#860）・fetch の時間切れ（#861）・lock 失敗の片づけ（#862）
 // ---------------------------------------------------------------------------
@@ -286,11 +320,61 @@ test('killGitSync: 実行中の fetch のプロセスグループを同期で止
   assert.ok(Date.now() - t0 < 5000)
 })
 
+/** fetch だけを差し替える偽 git。fetch は自分の lock ファイルを作って応答を待つ。onTerm が 'cleanup' なら SIGTERM で lock を消して終わり、'ignore' なら SIGTERM を無視する。 */
+function termGitDir(root, onTerm) {
+  const dir = join(root, `fakegit-term-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(dir)
+  const lock = join(dir, 'origin-main.lock')
+  const pidFile = join(dir, 'fetch.pid')
+  const trap = onTerm === 'cleanup' ? `trap 'rm -f ${JSON.stringify(lock)}; exit 143' TERM` : "trap '' TERM"
+  writeFileSync(join(dir, 'git'), `#!/bin/sh
+if [ "$1" = fetch ]; then
+  echo $$ > ${JSON.stringify(pidFile)}
+  : > ${JSON.stringify(lock)}
+  ${trap}
+  sleep 30 &
+  wait $!
+  sleep 30 &
+  wait $!
+  exit 1
+fi
+exec ${JSON.stringify(REAL_GIT)} "$@"
+`)
+  chmodSync(join(dir, 'git'), 0o755)
+  return { dir, lock, pidFile }
+}
+
+test('createWorktree: fetch の時間切れはまず SIGTERM を送り、git が lockfile を片づけて終わるのを待ってから例外にする（いきなり SIGKILL しない）', async () => {
+  const sb = sandbox()
+  const fake = termGitDir(sb.root, 'cleanup')
+  await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetchTimeoutMs: 300 })), /git fetch が 300 ms で時間切れ/))
+  // 例外の時点で片づけが済んでいる（後続の git と死にかけの git が競合しない）
+  assert.equal(existsSync(fake.lock), false, 'SIGTERM で git が自分の lock を消している')
+})
+
+test('createWorktree: SIGTERM を無視する git は猶予（注入）の後に SIGKILL し、終了を待たずに例外にする', async () => {
+  const sb = sandbox()
+  const fake = termGitDir(sb.root, 'ignore')
+  const t0 = Date.now()
+  await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetchTimeoutMs: 200, gitKillGraceMs: 200 })), /git fetch が 200 ms で時間切れ/))
+  const elapsed = Date.now() - t0
+  assert.ok(elapsed < 3000, `時間切れ + 猶予で戻り、fetch の 30 秒を待たない（${elapsed} ms）`)
+  const pid = Number(readFileSync(fake.pidFile, 'utf8').trim())
+  let alive = true
+  for (let i = 0; i < 40 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 25)) } catch { alive = false }
+  }
+  assert.equal(alive, false, 'SIGTERM を無視した git も残らない')
+})
+
 test('createWorktree: 時間切れの値が正の整数でなければ例外', async () => {
   const sb = sandbox()
   for (const bad of [0, -1, 1.5, '100', NaN]) {
     await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, fetchTimeoutMs: bad }), /fetchTimeoutMs/, String(bad))
     await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, gitTimeoutMs: bad }), /gitTimeoutMs/, String(bad))
+    await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, gitKillGraceMs: bad }), /gitKillGraceMs/, String(bad))
   }
 })
 
@@ -520,11 +604,16 @@ test('createWorktree: add の前からあるディレクトリは、add が失�
  * list（worktree list）。呼ばれた種類を log へ 1 行ずつ書く（worktree add も add として書く）。
  * addThenFail なら worktree add を本物の git で行った後に終了コード 1 で返す（add が作った後に失敗した状態の再現）。
  */
-function checkFailGitDir(root, branch, { fail = [], addThenFail = false } = {}) {
+function checkFailGitDir(root, branch, { fail = [], addThenFail = false, floodList = [] } = {}) {
   const dir = join(root, `fakegit-check-${Math.random().toString(16).slice(2)}`)
   mkdirSync(dir)
   const log = join(dir, 'calls.log')
-  const cases = fail.map(({ kind, nth, code }) => `  "${kind}:${nth}") echo "fatal: injected ${kind} check failure" >&2; exit ${code} ;;`).join('\n')
+  // floodList の回の worktree list は、本物の一覧の前に 1 MiB を超える別の worktree の行を出す（一覧の先頭だけを読むと本物の行が落ちる）
+  const flood = `awk 'BEGIN { for (i = 0; i < 20000; i++) printf "worktree /pad/%06d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\nHEAD 0\\n\\n", i }'`
+  const cases = [
+    ...fail.map(({ kind, nth, code }) => `  "${kind}:${nth}") echo "fatal: injected ${kind} check failure" >&2; exit ${code} ;;`),
+    ...floodList.map((nth) => `  "list:${nth}") ${flood}; exec ${JSON.stringify(REAL_GIT)} "$@" ;;`),
+  ].join('\n')
   writeFileSync(join(dir, 'git'), `#!/bin/sh
 kind=other
 case "$1 $2" in
@@ -603,6 +692,31 @@ test('createWorktree: add の後の登録の確認が失敗したら、worktree 
     }))
   assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${path}`), '確認できなかった登録は消さない')
   assert.ok(existsSync(path))
+})
+
+test('createWorktree: add の後の worktree list が 1 MiB の保持の上限を超えたら、切った一覧で「未登録」と読まず、worktree もディレクトリも消さない', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const { path, branch } = worktreeNames(sb.main, runId, 1)
+  const fake = checkFailGitDir(sb.root, branch, { floodList: [2], addThenFail: true })
+  await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () =>
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })), (e) => {
+      assert.match(e.message, /injected worktree add failure after create/)
+      assert.ok(e.message.includes(`worktree ${path}`), e.message)
+      return true
+    }))
+  assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${path}`), '確かめられなかった登録は消さない')
+  assert.ok(existsSync(path), '登録済みの worktree のディレクトリを rmSync しない')
+})
+
+test('unlockOwnWorktree: worktree list が 1 MiB の保持の上限を超えたら unregistered ではなく error（lock は外さない）', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const wt = await createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false })
+  const fake = checkFailGitDir(sb.root, wt.branch, { floodList: [1, 2, 3] })
+  const got = await withEnv({ PATH: `${fake.dir}:${process.env.PATH}` }, () => worktreeMod.unlockOwnWorktree({ mainRoot: sb.main, path: wt.path, reason: wt.lockReason }))
+  assert.equal(got, 'error')
+  assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`locked ${wt.lockReason}`), 'lock が残る')
 })
 
 test('createWorktree: add の前のパスの確認が ENOENT 以外のエラーなら add へ進まない', { skip: process.getuid?.() === 0 ? 'root では権限のエラーを作れない' : false }, async () => {
