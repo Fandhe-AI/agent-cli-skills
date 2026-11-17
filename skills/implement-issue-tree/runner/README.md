@@ -59,7 +59,7 @@ _/iit-runner/<runId>/
   result.json                  { runId, tool, exitCode, workflowSha256, startedAt, endedAt, result, error? }（stdout にも同じ JSON を 1 行）
   host.log                     ホストの log() と phase()
   agents/<seq 4 桁>-<label>/   agent() 1 回につき 1 つ
-    meta.json                  { label, seq, sessionRef, outcome, kind?, status?, reason?, startedAt, endedAt, ... }
+    meta.json                  { label, seq, sessionRef, outcome, kind?, direct?, status?, reason?, startedAt, endedAt, ... }
     request.json・prompt.txt   モデルへ回した段の入力
     exec.json・stdout.txt・stderr.txt   実行仕様で直接実行した段
     exec-<script>.json・stdout-<script>.txt・stderr-<script>.txt   ホストが直接実行した worktree 掃除の複合段（script ごと）
@@ -67,7 +67,7 @@ _/iit-runner/<runId>/
 ```
 
 - `result` はホストの return 値そのまま（dryRun なら `startable`・`blocked` 等の見積り）。終了コードが 0 以外のときは `null`。
-- `meta.json` の `outcome` は `ok`（schema に適合した値）/ `null`（未返却）/ `exec-spec`（直接実行した段）/ `throw`（呼び出しの不備・worktree 作成の失敗）。
+- `meta.json` の `outcome` は `ok`（schema に適合した値）/ `null`（未返却）/ `exec-spec`（直接実行した段）/ `throw`（呼び出しの不備・worktree 作成の失敗）。`direct: "host-cleanup"` は worktree 掃除の複合段をホストが直接実行したことを示す（`kind` はアダプタの失敗種別に使う）。
   直接実行した段の `status` は `exec-ok`・`exec-fail`・`exec-refused`（許可表に合わない・仕様行が壊れている・下の固定と食い違う）・`exec-invalid`。
 - 内容の固定（`lib/pins.mjs`）: アダプタを作る前（エージェントを 1 つも起動する前）に、ホストが直接起動する
   `scripts/run-verified.sh` と、その `--verify-only` の枝が照合より前に読む `scripts/lib/signed-output.sh`、ツールが

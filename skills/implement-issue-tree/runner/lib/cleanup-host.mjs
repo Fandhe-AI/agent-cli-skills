@@ -108,20 +108,26 @@ export function checkCleanupTarget({ mainRoot, path, parent, issue }) {
     const wtParent = join(root, '.claude', 'worktrees')
     const commonDir = join(root, '.git')
     if (!lstatSync(commonDir).isDirectory()) return no('メインの .git がディレクトリでない')
-    if (typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path || basename(path) === '') return no('パスが正規化済みの絶対パスでない')
-    if (dirname(path) !== wtParent && dirname(path) !== join(mainRoot, '.claude', 'worktrees')) return no('パスが <main>/.claude/worktrees/ の直下でない')
+    if (typeof path !== 'string' || !isAbsolute(path)) return no('パスが絶対パスでない')
+    // .. の区間は扱わない（生成物の sanitizeWorktreePath と同じ）。. の区間・末尾の /・// は src の記録に残り得るため、
+    // 位置の検査は正規化した形で行い、argv と状態の記録の照合は元の綴りのまま行う
+    if (path.split('/').includes('..')) return no('パスに .. の区間がある')
+    const p = resolve(path)
+    if (basename(p) === '') return no('パスが worktree を指さない')
+    if (dirname(p) !== wtParent && dirname(p) !== join(mainRoot, '.claude', 'worktrees')) return no('パスが <main>/.claude/worktrees/ の直下でない')
     // .claude/worktrees 自体が symlink 等で別の場所にあるときは扱わない（無ければ worktree も無い）
     if (lstatOrNull(join(root, '.claude', 'worktrees')) !== null && realpathSync(wtParent) !== wtParent) return no('.claude/worktrees がメイン worktree の外を指す')
-    const own = lstatOrNull(path)
+    // 末尾の / があると lstat が symlink を辿るため、正規化した形で調べる
+    const own = lstatOrNull(p)
     let real = null
     if (own !== null) {
-      real = realpathSync(path)
+      real = realpathSync(p)
       if (dirname(real) !== wtParent) return no('worktree の実体が <main>/.claude/worktrees/ の直下にない（symlink で外を指す）')
       if (!lstatSync(real).isDirectory()) return no('worktree の実体がディレクトリでない')
     }
     // この worktree を指す gitdir（<main>/.git/worktrees/<name>/gitdir の中身が <worktree>/.git）
     const wts = join(commonDir, 'worktrees')
-    const want = new Set([`${path}/.git`, `${join(wtParent, basename(path))}/.git`, ...(real ? [`${real}/.git`] : [])])
+    const want = new Set([`${p}/.git`, `${join(wtParent, basename(p))}/.git`, ...(real ? [`${real}/.git`] : [])])
     const names = lstatOrNull(wts) === null ? [] : readdirSync(wts)
     const found = names.filter((n) => {
       try { return want.has(readFileSync(join(wts, n, 'gitdir'), 'utf8').replace(/\n$/, '')) } catch { return false }

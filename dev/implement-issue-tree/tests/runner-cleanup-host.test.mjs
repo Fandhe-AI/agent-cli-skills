@@ -196,6 +196,41 @@ test('拒否（.claude/worktrees の直下の名前が symlink で外の worktre
   assert.equal(existsSync(join(real, `${RUN_ID}-2`)), true)
 })
 
+test('パスの綴り（末尾の /・//）: 位置は正規化した形で確かめて直接実行し、末尾の / つきの symlink・.. の区間は拒否する', async () => {
+  // 生成物の sanitizeWorktreePath は末尾の / や // を通すため、状態の記録にはその綴りが残り得る
+  for (const spell of [(w) => `${w}/`, (w) => w.replace('/.claude/', '//.claude/')]) {
+    const s = setup()
+    const rec = spell(s.wt)
+    writeFileSync(s.stateFile, `${JSON.stringify({ items: { 2: { worktree: rec } } })}\n`)
+    const { prompt, label } = await cleanupPromptOf(2, { status: 'merged', worktree: rec }, { cleanupWorktree: rec })
+    const h = makeHost(s.main, s.repo.root)
+    const got = await h.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+    assert.equal(h.calls.length, 0, `${rec}: アダプタを呼ばない`)
+    assert.doesNotMatch(h.logs.join('\n'), /worktree 掃除の段を実行しない/, `${rec}: ホストは拒否しない`)
+    assert.deepEqual(got, { ok: true, retained: false, branchSha: '', worktree: 'removed' }, `${rec}: ${h.logs.join('\n')}`)
+    assert.deepEqual(h.scripts, ['worktree-remove.sh', 'state.sh'], rec)
+    assert.equal(existsSync(s.wt), false, `${rec}: worktree が消える`)
+    assert.equal(existsSync(s.gitdir), false, `${rec}: gitdir が消える`)
+    assert.equal(s.state().items['2'].worktree, '', `${rec}: 状態の worktree が空になる`)
+  }
+  // 末尾の / があると lstat が symlink を辿る。正規化した形で調べるので外を指す symlink は拒否される
+  const t = setup()
+  const out = t.repo.addWorktree('outside').path
+  const link = `${join(t.main, '.claude', 'worktrees', 'link-1')}/`
+  symlinkSync(out, link.slice(0, -1))
+  writeFileSync(t.stateFile, `${JSON.stringify({ items: { 2: { worktree: link } } })}\n`)
+  const p1 = await cleanupPromptOf(2, { status: 'merged', worktree: link }, { cleanupWorktree: link })
+  await assertRefused(t, p1.prompt, p1.label, '末尾の / つきの symlink', /symlink で外を指す/)
+  assert.equal(existsSync(out), true)
+  // .. の区間（生成物の sanitizeWorktreePath が通さないため、プロンプトを直接書き換えて確かめる）
+  const u = setup()
+  const p2 = await cleanupPromptOf(2, { status: 'merged', worktree: u.wt }, { cleanupWorktree: u.wt })
+  const dotted = u.wt.replace('/.claude/worktrees/', '/.claude/worktrees/../worktrees/')
+  writeFileSync(u.stateFile, `${JSON.stringify({ items: { 2: { worktree: dotted } } })}\n`)
+  await assertRefused(u, p2.prompt.split(`'${u.wt}'`).join(`'${dotted}'`), p2.label, '.. の区間', /\.\. の区間がある/)
+  assert.equal(existsSync(u.wt), true)
+})
+
 test('拒否（gitdir の commondir を付け替えている）', async () => {
   const s = setup()
   const fake = join(s.repo.root, 'fake.git')

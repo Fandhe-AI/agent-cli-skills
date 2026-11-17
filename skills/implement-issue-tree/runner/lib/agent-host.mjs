@@ -425,7 +425,8 @@ export function createAgentHost({ adapter, cfg }) {
   // 手順 2 と同じ）。時間切れは 2 本で 1 つの予算。返す値は 1 段目の結果の行から ok・retained・branchSha・worktree の語だけを写したもの
   async function runHostCleanup(label, schema, prompt, logDir, timeoutMs, rec) {
     rec.outcome = 'exec-spec'
-    rec.kind = 'host-cleanup'
+    // kind はアダプタの失敗種別に使うキーのため、直接実行の種類は別のキーに置く
+    rec.direct = 'host-cleanup'
     const fail = () => structuredClone(FAIL_WORKTREE)
     const refuse = (reason) => {
       log(`⚠️ ${label}: worktree 掃除の段を実行しない（${reason}）`)
