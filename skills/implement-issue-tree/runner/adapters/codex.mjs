@@ -165,11 +165,16 @@ const COMMON_WRITE = ['objects', 'refs', 'logs', 'packed-refs', 'packed-refs.loc
 
 export function worktreeGit(mainRoot, worktreeGitdir) {
   if (worktreeGitdir === null || worktreeGitdir === undefined) return null
-  const parent = join(mainRoot, '.git', 'worktrees')
+  // メイン worktree の realpath を基準にする（agent-host の verifyWorktreeGitdir が返す realpath の gitdir と同じ基準。
+  // mainRoot の途中の symlink で正しい gitdir を拒まないように。PR #851 の Bugbot）。.git/worktrees 自体は解決しない
+  // （外を指す symlink なら直下と見なさない）
+  let root
+  try { root = realpathSync(mainRoot) } catch { root = mainRoot }
+  const parent = join(root, '.git', 'worktrees')
   const ok = typeof worktreeGitdir === 'string' && isAbsolute(worktreeGitdir) && resolve(worktreeGitdir) === worktreeGitdir &&
     dirname(worktreeGitdir) === parent && basename(worktreeGitdir) !== ''
   if (!ok) throw new AdapterError('denied', `worktreeGitdir がメインの .git/worktrees/ の直下に無い: ${String(worktreeGitdir).slice(0, 160)}`)
-  return { gitdir: worktreeGitdir, commonDir: join(mainRoot, '.git') }
+  return { gitdir: worktreeGitdir, commonDir: join(root, '.git') }
 }
 
 /**

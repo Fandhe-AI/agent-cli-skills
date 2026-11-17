@@ -3,12 +3,12 @@
 // セッション削除を確かめる。実際の codex・ネットワーク・ホームの設定には触れない。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, readdirSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readdirSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { trackTmp } from './lib/tmp-track.mjs'
-import { createAdapter, buildProfileArgs, classifyFailure, summarizeEvents, DARWIN_HEREDOC_TMP, platformWritePaths, stdinWritesOf, blankJsStrings, findRollouts } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
+import { createAdapter, buildProfileArgs, classifyFailure, summarizeEvents, DARWIN_HEREDOC_TMP, platformWritePaths, stdinWritesOf, blankJsStrings, findRollouts, worktreeGit } from '../../../skills/implement-issue-tree/runner/adapters/codex.mjs'
 import { decodeStrictText, strictifySchema } from '../../../skills/implement-issue-tree/runner/adapters/codex-strict.mjs'
 import { AdapterError } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 
@@ -584,6 +584,27 @@ test('HIGH-2: req.worktreeGitdir がメインの .git/worktrees/ の直下でな
     await rejectsKind(t.adapter.run(t.req({ name: 'h2c', worktreeGitdir: bad })), 'denied')
   }
   assert.equal(t.calls().length, 0, 'codex を起動しない')
+})
+
+// PR #851 の Bugbot（指摘 3 と同じ形）: agent-host の verifyWorktreeGitdir は realpath の gitdir を渡すが、worktreeGit は
+// 解決していない join(mainRoot, '.git', 'worktrees') と比べていた。mainRoot の途中に symlink があると正しい gitdir を denied にした。
+// realpath 同士で比べ、commonDir も realpath にする。.git/worktrees 自体が外を指す symlink なら従来どおり denied
+test('worktreeGit（PR #851 の Bugbot）: mainRoot の途中に symlink があっても realpath の gitdir を受け、.git/worktrees 自体の symlink は拒む', () => {
+  const base = realpathSync(trackTmp(mkdtempSync(join(tmpdir(), 'iit-codex-wtg-'))))
+  const real = join(base, 'real')
+  const link = join(base, 'link')
+  mkdirSync(join(real, '.git', 'worktrees', 'a'), { recursive: true })
+  symlinkSync(real, link)
+  const gd = join(real, '.git', 'worktrees', 'a')
+  assert.deepEqual(worktreeGit(link, gd), { gitdir: gd, commonDir: join(real, '.git') })
+  assert.deepEqual(worktreeGit(real, gd), { gitdir: gd, commonDir: join(real, '.git') }, '解決済みの mainRoot は従来と同じ')
+  // .git/worktrees 自体が外を指す symlink
+  const real2 = join(base, 'real2')
+  const out = join(base, 'out')
+  mkdirSync(join(out, 'a'), { recursive: true })
+  mkdirSync(join(real2, '.git'), { recursive: true })
+  symlinkSync(out, join(real2, '.git', 'worktrees'))
+  assert.throws(() => worktreeGit(real2, join(out, 'a')), (e) => e.kind === 'denied')
 })
 
 // ---------------------------------------------------------------------------
