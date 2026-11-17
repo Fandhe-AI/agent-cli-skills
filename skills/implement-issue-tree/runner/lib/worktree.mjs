@@ -21,8 +21,9 @@
 // リポジトリを対象にする（シェル側は worktree-remove.sh・recover-prep.sh が unset している）。
 // createWorktree の git は非同期で、時間切れ（fetch とそれ以外で別の上限）を付ける。origin が応答しないときに
 // イベントループごと止めない（並行するエージェントのタイマ・シグナル処理・並列の枠を止めない）。
-// 同じ mainRoot への fetch〜add はキュー（serialize）で 1 本ずつ流す。非同期にしたことで並列の呼び出しが同じ
-// origin/<既定> を同時に更新し、ref の lock の競合で後続の作成が失敗し得るため。
+// 同じ mainRoot への createWorktree の git（fetch〜add〜lock〜gitdir の検証、失敗時の片づけまで）はキュー（serialize）で
+// 1 本ずつ流す。非同期にしたことで並列の呼び出しが同じ origin/<既定> を同時に更新したり、片づけ（worktree remove・
+// branch -D）が別の worktree add と重なったりして、ref・管理領域・packed-refs の lock の競合で失敗し得るため。
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
@@ -220,7 +221,8 @@ export function verifyWorktreeGitdir(mainRoot, gitdir) {
 /**
  * isolation: 'worktree' の worktree を作る（非同期。git は時間切れ付きで起動し、イベントループを止めない）。
  * gitdir は作成直後（エージェントが触る前）に git へ問い合わせて検証した値（verifyWorktreeGitdir）。
- * 同じ mainRoot への fetch〜add は直列にする（並列の呼び出しで origin/<既定> の更新が競合しないように）。
+ * 同じ mainRoot への git 操作（fetch〜add〜lock〜検証、失敗時の片づけまで）は 1 つのキューで直列にする
+ * （並列の呼び出しで origin/<既定> の更新や管理領域・packed-refs の書き込みが競合しないように）。
  * add 自体が失敗したら（時間切れで止めた途中状態を含む）、add の前に無かったブランチ・登録・パスだけを片づける。
  * add の後の lock・gitdir の検証が失敗したら、作った worktree とブランチを片づけてから元の例外を投げる。
  * 片づけも失敗したら、残ったパス・ブランチを例外の文面に足す（利用者が手で消せるように）。
@@ -242,7 +244,7 @@ export async function createWorktree({ mainRoot, runId, n, baseBranch, fetch = t
   if (checked !== base) throw new Error(`基点ブランチ名が不正: ${String(base).slice(0, 80)}`)
   let queueKey = mainRoot
   try { queueKey = realpathSync(mainRoot) } catch { /* 解決できなければ渡された形のまま（後の git が失敗を返す） */ }
-  const baseSha = await serialize(queueKey, async () => {
+  return serialize(queueKey, async () => {
     // 「作成時点の最新の origin/<既定>」を起点にする。fetch の失敗・時間切れは握りつぶさない（古い起点で隔離を作らない）
     if (fetch) await g(mainRoot, ['fetch', '--quiet', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`], { timeoutMs: fetchTimeoutMs })
     const sha = await g(mainRoot, ['rev-parse', '--verify', `refs/remotes/origin/${base}^{commit}`])
@@ -262,15 +264,15 @@ export async function createWorktree({ mainRoot, runId, n, baseBranch, fetch = t
       }
       throw made.worktree || made.branch || made.path ? await discardCreated(mainRoot, path, branch, e, g, made) : e
     }
-    return sha
+    // lock・検証とその失敗の片づけもキューの中で行う（片づけが同じリポジトリの別の add と重ならないように）
+    try {
+      if (lock) await g(mainRoot, ['worktree', 'lock', '--reason', `claude agent ${runId}-${n} (pid ${pid})`, '--', path])
+      const gitdir = verifyWorktreeGitdir(mainRoot, await g(path, ['rev-parse', '--absolute-git-dir']))
+      return { path, branch, baseBranch: base, baseSha: sha, gitdir }
+    } catch (e) {
+      throw await discardCreated(mainRoot, path, branch, e, g)
+    }
   })
-  try {
-    if (lock) await g(mainRoot, ['worktree', 'lock', '--reason', `claude agent ${runId}-${n} (pid ${pid})`, '--', path])
-    const gitdir = verifyWorktreeGitdir(mainRoot, await g(path, ['rev-parse', '--absolute-git-dir']))
-    return { path, branch, baseBranch: base, baseSha, gitdir }
-  } catch (e) {
-    throw await discardCreated(mainRoot, path, branch, e, g)
-  }
 }
 
 /** path が mainRoot のリポジトリの worktree として登録されているか（一覧を取れなければ null）。 */

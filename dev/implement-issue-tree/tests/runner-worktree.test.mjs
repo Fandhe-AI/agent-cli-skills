@@ -370,6 +370,62 @@ test('createWorktree: 同じ mainRoot へ並列に呼んでも fetch は重な�
   assert.deepEqual(events, ['start', 'end', 'start', 'end', 'start', 'end'], 'fetch は 1 本ずつ走る')
 })
 
+/**
+ * 管理領域を変える git（worktree add・lock・unlock・remove と branch -D）の開始と終了を log へ書く偽 git。
+ * 引数の末尾が `<runId>-<N>` のものを N 件目の呼び出しとして記録する。1 件目の lock だけ少し待ってから失敗する。
+ */
+function adminLoggingGitDir(root, log, runId) {
+  const dir = join(root, `fakegit-adminlog-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(dir)
+  writeFileSync(join(dir, 'git'), `#!/bin/sh
+case "$1 $2" in
+  "worktree add"|"worktree lock"|"worktree unlock"|"worktree remove"|"branch -D") ;;
+  *) exec ${JSON.stringify(REAL_GIT)} "$@" ;;
+esac
+tag=?
+for a in "$@"; do
+  case "$a" in *${runId}-1) tag=1 ;; *${runId}-2) tag=2 ;; esac
+done
+echo "$tag $1-$2 start" >> ${JSON.stringify(log)}
+if [ "$tag $1 $2" = "1 worktree lock" ]; then
+  sleep 0.2
+  echo "$tag $1-$2 end" >> ${JSON.stringify(log)}
+  echo "fatal: injected worktree lock failure" >&2
+  exit 1
+fi
+${JSON.stringify(REAL_GIT)} "$@"; s=$?
+echo "$tag $1-$2 end" >> ${JSON.stringify(log)}
+exit $s
+`)
+  chmodSync(join(dir, 'git'), 0o755)
+  return dir
+}
+
+test('createWorktree: 1 件目の lock の失敗の片づけが終わるまで、同じ mainRoot の 2 件目の worktree add は始まらない', async () => {
+  const sb = sandbox()
+  const log = join(sb.root, 'admin.log')
+  const runId = newRunId()
+  const fake = adminLoggingGitDir(sb.root, log, runId)
+  const results = await withEnv({ PATH: `${fake}:${process.env.PATH}` }, () => Promise.allSettled([
+    createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false }),
+    createWorktree({ mainRoot: sb.main, runId, n: 2, fetch: false }),
+  ]))
+  assert.deepEqual(results.map((r) => r.status), ['rejected', 'fulfilled'], results.map((r) => r.reason?.message).join(' / '))
+  assert.match(results[0].reason.message, /injected worktree lock failure/)
+  const events = readFileSync(log, 'utf8').trim().split('\n')
+  assert.deepEqual(events, [
+    '1 worktree-add start', '1 worktree-add end',
+    '1 worktree-lock start', '1 worktree-lock end',
+    '1 worktree-unlock start', '1 worktree-unlock end',
+    '1 worktree-remove start', '1 worktree-remove end',
+    '1 branch--D start', '1 branch--D end',
+    '2 worktree-add start', '2 worktree-add end',
+    '2 worktree-lock start', '2 worktree-lock end',
+  ], '1 件目の add〜片づけの後に 2 件目の add が始まる')
+  assert.equal(existsSync(worktreeNames(sb.main, runId, 1).path), false)
+  assert.ok(existsSync(results[1].value.path))
+})
+
 /** post-checkout フックで眠らせ、worktree add が worktree・ブランチを作った後に止まる状態を作る。 */
 function hangAfterAdd(sb) {
   const hooks = join(sb.root, `hooks-${Math.random().toString(16).slice(2)}`)
