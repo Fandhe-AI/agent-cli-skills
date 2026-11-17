@@ -1,5 +1,5 @@
 // ランナーが起動するエージェントに対して拒否するコマンド形の一覧と、そこから Codex の rules を機械的に作る関数。
-// OpenCode は未対応（Issue #853）。globs は Codex の rules に出ない形（位置が不定で先頭一致で書けない）の記録として残し、
+// OpenCode は未対応。globs は Codex の rules に出ない形（位置が不定で先頭一致で書けない）の記録として残し、
 // OpenCode を戻すときの入力と、agent-guard.sh が止める形の例の対応（runner-units.test.mjs）に使う。
 //
 // Codex の rules（codexRules）は Codex アダプタでは使わない（phase0 の決定: rules は `-c` では効かず、読ませるには

@@ -45,7 +45,7 @@ import { loadConfig, TOOLS } from './lib/models.mjs'
 import { isRepoSlug } from './lib/merge-target.mjs'
 import { pinFiles, pinPathsFor } from './lib/pins.mjs'
 import { missingSkills, missingSkillsMessage } from './lib/skills-prereq.mjs'
-import { newRunId, resolveMainRoot } from './lib/worktree.mjs'
+import { createWorktree, gitLocationFreeEnv, killGitSync, newRunId, resolveMainRoot } from './lib/worktree.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const SKILL_DIR = dirname(HERE)
@@ -102,9 +102,10 @@ export function checkGhAuth() {
 /**
  * メイン worktree の owner/repo を gh repo view で 1 回だけ決める（GET のみ。契約の req.merge.repo。MEDIUM-8）。
  * 継いだ GH_REPO は外す（メイン worktree の remote から決め、利用者の env の別リポジトリを拾わない）。
+ * 継いだ GIT_DIR 等（gitLocationFreeEnv）も外す（gh は remote を git で読むため、別のリポジトリの remote を拾わない）。
  */
 export function resolveRepo(mainRoot, env = process.env) {
-  const { GH_REPO: _ignored, ...rest } = env
+  const { GH_REPO: _ignored, ...rest } = gitLocationFreeEnv(env)
   const r = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], { cwd: mainRoot, env: rest, encoding: 'utf8', timeout: 60_000 })
   if (r.error || r.status !== 0) return { ok: false, reason: r.error ? `gh を起動できない（${r.error.code ?? r.error.message}）` : `gh repo view が終了コード ${r.status}` }
   return { ok: true, repo: r.stdout.trim() }
@@ -160,6 +161,8 @@ export async function main(argv, deps = {}) {
     spawnScript,
     // 生成物が名指しするスキルの存在確認（lib/skills-prereq.mjs）。見つからない名前の配列を返す
     skillsMissing = missingSkills,
+    // 隔離 worktree の作成（agent-host の cfg.createWorktree。設定の timeoutsSec.worktree を重ねて渡す）。テストが差し替える
+    createWorktree: makeWorktree = createWorktree,
   } = deps
   const err = (msg) => stderr(`${msg}\n`)
 
@@ -210,7 +213,7 @@ export async function main(argv, deps = {}) {
   } catch (e) {
     return prereq(`アダプタ ${cli.tool} を読み込めない: ${String(e?.message ?? e).slice(0, 160)}`)
   }
-  if (!mod) return prereq(`アダプタ adapters/${cli.tool}.mjs が無い${cli.tool === 'opencode' ? '（OpenCode は未対応。Issue #853 で再設計する）' : `（対応しているツール: ${TOOLS.join(' / ')}）`}`)
+  if (!mod) return prereq(`アダプタ adapters/${cli.tool}.mjs が無い${cli.tool === 'opencode' ? '（OpenCode は未対応）' : `（対応しているツール: ${TOOLS.join(' / ')}）`}`)
   let workflow
   try {
     workflow = load()
@@ -242,9 +245,12 @@ export async function main(argv, deps = {}) {
   // --repo の照合）が fail-closed で止める。gh repo view の解決は remote の名前の優先（upstream が origin より先）に従うと見ており（fork の構成の実機では未確認）、
   // fork の構成（origin が fork・upstream が親）で args.repo に fork を指定した、これまで動いていたランを拒否し得る。
   // 決められなければ前提の不足（3）で止める（自動マージを黙って無効にしたままランを進めない）
+  // 子（gh repo view・アダプタが起動するツール）へ渡す env。継いだ GIT_DIR 等を外す（残すと git の対象が cwd でなく
+  // その変数の指すリポジトリになる。lib/worktree.mjs の gitLocationFreeEnv）。GH_REPO の照合は env のまま行う
+  const childEnv = gitLocationFreeEnv(env)
   let repo = null
   if (args.autoMerge === true) {
-    const r = repoOf(mainRoot, env)
+    const r = repoOf(mainRoot, childEnv)
     if (!r.ok) return prereq(`マージ対象のリポジトリを決められない: ${String(r.reason ?? '').slice(0, 160)}`)
     if (!isRepoSlug(r.repo)) return prereq('gh repo view の nameWithOwner が owner/repo の形でない')
     const same = (x) => typeof x === 'string' && x.toLowerCase() === r.repo.toLowerCase()
@@ -297,7 +303,7 @@ export async function main(argv, deps = {}) {
       runDir,
       toolConfig,
       guard: { codexRules },
-      env,
+      env: childEnv,
     })
   } catch (e) {
     const why = isAdapterError(e) ? `${e.kind}: ${e.message}` : String(e?.message ?? e)
@@ -324,6 +330,7 @@ export async function main(argv, deps = {}) {
   const killSync = () => {
     try { adapter.killSync?.() } catch { /* 片づけの失敗で止めない */ }
     try { killScriptsSync() } catch { /* 同上 */ }
+    try { killGitSync() } catch { /* 同上（隔離 worktree の作成中の git。detached で端末の Ctrl-C が届かない） */ }
   }
   onExit(killSync)
   onSignal((sig) => {
@@ -340,11 +347,21 @@ export async function main(argv, deps = {}) {
     prereq(`アダプタの起動に失敗: ${why.slice(0, 400)}`)
     return finish(3, null, `アダプタの起動に失敗: ${why.slice(0, 400)}`)
   }
+  // 隔離 worktree の git の上限（設定の timeoutsSec.worktree。秒）。無ければ作成関数の既定（fetch 5 分・ほか 2 分）
+  const wtSec = config.timeoutsSec.worktree ?? {}
+  const wtTimeouts = {
+    ...(wtSec.fetch !== undefined ? { fetchTimeoutMs: wtSec.fetch * 1000 } : {}),
+    ...(wtSec.git !== undefined ? { gitTimeoutMs: wtSec.git * 1000 } : {}),
+  }
   // 以降の想定外の例外（ホストの組み立て・結果の書き出しの失敗等）でもアダプタを片づける。close は 1 回だけ
   try {
     const agent = createAgentHost({
       adapter,
-      cfg: { config, skillDir: args.skillDir, mainRoot, runId, runDir, args, repo, maxParallel: cli.maxParallel ?? undefined, log, pins, ...(spawnScript ? { spawnScript } : {}) },
+      cfg: {
+        config, skillDir: args.skillDir, mainRoot, runId, runDir, args, repo, maxParallel: cli.maxParallel ?? undefined, log, pins,
+        createWorktree: (p) => makeWorktree({ ...p, ...wtTimeouts }),
+        ...(spawnScript ? { spawnScript } : {}),
+      },
     })
     let code
     let result = null
@@ -374,6 +391,10 @@ const invokedDirectly = (() => {
   }
 })()
 if (invokedDirectly) {
+  // 継いだ GIT_DIR 等（リポジトリの位置を変える git の変数）をプロセスの env から外す。gh の認証確認・実行仕様の段の
+  // launcher（agent-host の spawnScript は既定で process.env を渡す）を含む、以降に起動するすべての子が継がないように
+  const kept = new Set(Object.keys(gitLocationFreeEnv(process.env)))
+  for (const k of Object.keys(process.env)) if (!kept.has(k)) delete process.env[k]
   // パイプ先では stdout / stderr の書き込みが非同期になり得るので、空の書き込みの完了（先行分の書き出し後）を待ってから exit する
   const flush = () => Promise.all([process.stdout, process.stderr].map((s) => new Promise((r) => s.write('', () => r()))))
   main(process.argv.slice(2)).then(

@@ -217,14 +217,38 @@ test('CODEX_HOME: 呼び出し元の環境変数 → 無ければ ~/.codex を s
   assert.equal(t3.calls()[0].env.CODEX_HOME, ch)
 })
 
-test('環境: 既存の GIT_CONFIG_COUNT の続きの番号に足す', async () => {
+test('環境: 継いだ GIT_CONFIG_COUNT・KEY・VALUE は渡さず、アダプタの設定だけを 0 番に置く（#860。-c と同じ設定を継がせない）', async () => {
   const t = setup({ turns: [okTurn()] })
-  const a2 = createAdapter({ skillDir: SKILL_DIR, mainRoot: t.mainRoot, runDir: t.runDir, toolConfig: {}, env: { ...t.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'x.y', GIT_CONFIG_VALUE_0: 'z' } })
+  const a2 = createAdapter({ skillDir: SKILL_DIR, mainRoot: t.mainRoot, runDir: t.runDir, toolConfig: {}, env: { ...t.env, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'x.y', GIT_CONFIG_VALUE_0: 'z', GIT_CONFIG_KEY_1: 'core.worktree', GIT_CONFIG_VALUE_1: '/elsewhere' } })
   await a2.run(t.req())
   const { env } = t.calls()[0]
-  assert.equal(env.GIT_CONFIG_COUNT, '2')
-  assert.equal(env.GIT_CONFIG_KEY_0, 'x.y')
-  assert.equal(env.GIT_CONFIG_KEY_1, 'branch.autoSetupMerge')
+  assert.equal(env.GIT_CONFIG_COUNT, '1')
+  assert.equal(env.GIT_CONFIG_KEY_0, 'branch.autoSetupMerge')
+  assert.equal(env.GIT_CONFIG_VALUE_0, 'false')
+  assert.equal(env.GIT_CONFIG_KEY_1, null)
+  assert.equal(env.GIT_CONFIG_VALUE_1, null)
+})
+
+test('環境: 継いだ GIT_DIR・GIT_WORK_TREE・GIT_INDEX_FILE 等のリポジトリの位置を変える変数を Codex の子へ渡さない（#860）', async () => {
+  const t = setup({ turns: [okTurn()], toolConfig: { deleteSessions: true } })
+  const foreign = { GIT_DIR: '/other/.git', GIT_WORK_TREE: '/other', GIT_INDEX_FILE: '/other/.git/index', GIT_COMMON_DIR: '/other/.git', GIT_OBJECT_DIRECTORY: '/other/.git/objects', GIT_CONFIG_PARAMETERS: "'core.bare'='true'", GIT_CEILING_DIRECTORIES: '/' }
+  const a2 = createAdapter({ skillDir: SKILL_DIR, mainRoot: t.mainRoot, runDir: t.runDir, toolConfig: { deleteSessions: true }, env: { ...t.env, ...foreign } })
+  await a2.run(t.req())
+  await a2.close()
+  const { env } = t.calls()[0]
+  for (const k of Object.keys(foreign)) assert.equal(env[k], null, k)
+  // 外したのは git の変数だけで、ほかは継ぐ
+  assert.equal(env.HOME, t.fakeHome)
+})
+
+test('start: TMPDIR のディレクトリを作ってから codex を起動する（存在しない TMPDIR で起動しない）', async () => {
+  const t = setup({ turns: [okTurn()] })
+  await t.adapter.start()
+  const log = join(t.root, 'fake.log.version')
+  const recs = readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  assert.equal(recs.length, 1)
+  assert.equal(recs[0].tmpdir, join(t.runDir, 'tmp'))
+  assert.equal(recs[0].tmpdirExists, true)
 })
 
 test('permission profile: 通常 cwd は read・req.worktreeGitdir があれば impl（gitdir の正確なパスと git の共有領域だけ書ける）', async () => {

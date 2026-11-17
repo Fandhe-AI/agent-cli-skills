@@ -14,6 +14,10 @@
       "Review": 1200,
       "Recover": 1800,
       "Merge": 900
+    },
+    "worktree": {
+      "fetch": 300,
+      "git": 120
     }
   },
   "cleanup": {
@@ -37,7 +41,8 @@
   "notes": [
     "出典: _/local-plans/iit-runners-phase0.md の 0-7・0-8（2026-11-15）。Codex の haiku(luna low) は状態の読み込み系だけで合格し、REVIEW は不合格だったため判断を伴う段には使わない。",
     "Codex の effort は agent() の opts.effort があればそれを優先し、無ければこの表の値を使う。",
-    "OpenCode は未対応（Issue #853 でエージェントの shell を OS の sandbox で囲う設計をしてから戻す）。",
+    "OpenCode は未対応（エージェントの shell を OS の sandbox で囲う設計をしてから戻す）。",
+    "timeoutsSec.worktree は隔離 worktree を作る git の上限（fetch は origin との通信を含む。git はそれ以外の 1 回ごと）。超えたらプロセスグループを止めて作成の失敗にする。",
     "未確定: timeoutsSec は実測の分布（Codex 中央値 12.5 秒、成功時の最大約 125 秒。REVIEW の中央値は Codex 40〜95 秒）から置いた暫定値。",
     "sessionModel は Workflow 版の「model 省略 = セッションのモデルを継ぐ」（plan・recover）に当たる段。ランナーにはセッションが無いため明示する。"
   ]

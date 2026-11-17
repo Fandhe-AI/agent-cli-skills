@@ -27,7 +27,7 @@
 // セッションの記録: 実 codex と同じく <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<時刻>-<threadId>.jsonl に書く
 // （resume は同じファイルへ追記する。形は 2026-11-17 の codex-cli 0.169.0 の実測を手で組んだもの）。
 // 記録: FAKE_CODEX_LOG（JSON Lines）へ { argv, env: {…}, stdin, cwd } か { delete: id } を追記する。
-// `features list` は下の分岐（<FAKE_CODEX_LOG>.features へ記録）。
+// `features list` は下の分岐（<FAKE_CODEX_LOG>.features へ記録）。`--version` は <FAKE_CODEX_LOG>.version へ記録する。
 import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -36,7 +36,12 @@ const argv = process.argv.slice(2)
 const log = process.env.FAKE_CODEX_LOG
 const rec = (o) => log && appendFileSync(log, `${JSON.stringify(o)}\n`)
 
-if (argv[0] === '--version') { console.log('codex-cli 0.169.0'); process.exit(0) }
+// `--version`（start の最初の起動）。起動時点で TMPDIR のディレクトリがあるかを <FAKE_CODEX_LOG>.version へ記録する
+if (argv[0] === '--version') {
+  if (log) appendFileSync(`${log}.version`, `${JSON.stringify({ tmpdir: process.env.TMPDIR ?? null, tmpdirExists: typeof process.env.TMPDIR === 'string' && existsSync(process.env.TMPDIR) })}\n`)
+  console.log('codex-cli 0.169.0')
+  process.exit(0)
+}
 if (argv[0] === 'delete') {
   rec({ delete: argv.at(-1), force: argv.includes('--force'), env: { CODEX_HOME: process.env.CODEX_HOME } })
   console.log(`Deleted session ${argv.at(-1)}.`)
@@ -64,7 +69,8 @@ rec({
   argv,
   stdin,
   cwd: process.cwd(),
-  env: Object.fromEntries(['CODEX_HOME', 'TMPDIR', 'TMPPREFIX', 'HOME', 'GH_REPO', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1'].map((k) => [k, process.env[k] ?? null])),
+  env: Object.fromEntries(['CODEX_HOME', 'TMPDIR', 'TMPPREFIX', 'HOME', 'GH_REPO', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1',
+    'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_CONFIG_PARAMETERS', 'GIT_CEILING_DIRECTORIES'].map((k) => [k, process.env[k] ?? null])),
 })
 
 const scenario = JSON.parse(readFileSync(process.env.FAKE_CODEX_SCENARIO, 'utf8'))
