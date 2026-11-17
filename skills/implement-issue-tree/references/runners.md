@@ -10,7 +10,7 @@ implement-issue-tree の本体は Claude Code の Workflow ランタイムで動
 |--------|------|
 | Claude Code | Workflow 版（SKILL.md のフロー）で動く |
 | Codex | ランナーで動く（`--tool codex`） |
-| OpenCode | 未対応。`--tool opencode` は終了コード 3 で止まる。Issue #853 で OS の sandbox を使って再設計する（優先度は低い） |
+| OpenCode | 未対応。`--tool opencode` は終了コード 3 で止まる。エージェントの shell を OS の sandbox で囲う再設計が済むまで対応しない |
 
 ## 前提
 

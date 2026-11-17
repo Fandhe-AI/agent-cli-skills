@@ -5,10 +5,10 @@ implement-issue-tree の生成物（`scripts/implement-issue-tree.js`）を無�
 自動マージの可否）は Workflow 版と同じコードが行い、ランナーはエージェントの起動・出力の検証・隔離 worktree・
 並列の制限・ログだけを担う。
 
-## OpenCode は未対応（Issue #853）
+## OpenCode は未対応
 
 OpenCode 版のアダプタは外してある（`--tool opencode` は「アダプタが無い」として終了コード 3）。OpenCode のエージェントの
-shell を OS の sandbox で囲う設計を Issue #853 で行ってから戻す。実装はブランチ `wip/iit-runner-opencode` に保存してある。
+shell を OS の sandbox で囲う設計が済むまで戻さない。
 
 ## 前提
 
@@ -35,7 +35,7 @@ node <skillDir>/runner/run.mjs --tool codex --args <args.json> \
 
 | 引数 | 意味 |
 |------|------|
-| `--tool codex` | 必須。使うアダプタ（`adapters/<tool>.mjs`）。`opencode` は未対応で終了コード 3（Issue #853） |
+| `--tool codex` | 必須。使うアダプタ（`adapters/<tool>.mjs`）。`opencode` は未対応で終了コード 3 |
 | `--args <args.json>` | 必須。Workflow 版の args と同じ JSON オブジェクト（`parent`・`parallel`・`autoMerge`・`externalChecks` 等。キーの意味は `references/args-reference.md`）。`skillDir` を省くとこのスキルの場所になる（指定するなら、このスキルと同じ場所〔realpath が一致〕を指す絶対パス。違えば終了コード 2） |
 | `--config <config.json>` | 省略時は `config/default.json`。モデル・強さの対応表、段ごとの時間切れ、並列の上限、ツール別の設定（`toolConfig.<tool>`） |
 | `--max-parallel N` | 同時に動かすエージェント数の上限（1〜999）。省略時は設定の `limits.maxParallel`（既定 4） |
