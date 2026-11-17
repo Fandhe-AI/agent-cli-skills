@@ -216,7 +216,8 @@ test('gitLocationFreeEnv: --local-env-vars の一覧・GIT_CONFIG_KEY/VALUE_<n>�
   const env = { ...keep, ...Object.fromEntries([...local, ...extra].map((k) => [k, 'x'])) }
   assert.deepEqual(worktreeMod.gitLocationFreeEnv(env), keep)
   assert.equal(env.GIT_DIR, 'x', '元の env は変えない')
-  // 外す一覧は git 自身の一覧をすべて含む（git の版が上がって増えたら落ちる）
+  // 外す一覧は git 自身の一覧をすべて含む。git の版が上がって一覧に変数が増えたら落ちる（意図した検知: 増えた変数を
+  // GIT_LOCATION_ENV_VARS へ足すか、外さない理由を確かめる）。2.40 より前の git が出す GIT_INTERNAL_SUPER_PREFIX も一覧に持つ
   for (const k of local) assert.ok(worktreeMod.GIT_LOCATION_ENV_VARS.includes(k), k)
   assert.deepEqual(worktreeMod.gitSafeEnv(env), { ...keep, GIT_TERMINAL_PROMPT: '0' })
 })
@@ -301,7 +302,7 @@ test('createWorktree: worktree lock が失敗したら、作った worktree と�
   const runId = newRunId()
   const fake = fakeGitDir(sb.root, ['worktree lock'])
   await withEnv({ PATH: `${fake}:${process.env.PATH}` }, () =>
-    assert.rejects(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false }), (e) => /git worktree が失敗/.test(e.message) && /injected worktree lock failure/.test(e.message) && !/片づけ/.test(e.message)))
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false })), (e) => /git worktree が失敗/.test(e.message) && /injected worktree lock failure/.test(e.message) && !/片づけ/.test(e.message)))
   assert.equal(list(), wl, 'worktree の一覧が作成前と同じ')
   assert.equal(branches(), br, 'ブランチが作成前と同じ')
   assert.equal(existsSync(join(sb.main, '.claude', 'worktrees', `${runId}-1`)), false)
@@ -313,7 +314,7 @@ test('createWorktree: lock の後の片づけも失敗したら、元の失敗�
   const { path, branch } = worktreeNames(sb.main, runId, 1)
   const fake = fakeGitDir(sb.root, ['worktree lock', 'worktree remove'])
   await withEnv({ PATH: `${fake}:${process.env.PATH}` }, () =>
-    assert.rejects(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false }), (e) => {
+    assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false })), (e) => {
       assert.match(e.message, /^git worktree が失敗した（終了コード 1）: fatal: injected worktree lock failure/)
       assert.ok(e.message.includes(path), e.message)
       assert.ok(e.message.includes(branch), e.message)
@@ -325,7 +326,7 @@ test('createWorktree: add 自体の失敗（同じ番号の衝突）では、既
   const sb = sandbox()
   const runId = newRunId()
   const first = await createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })
-  await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false }), /git worktree が失敗/)
+  await assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })), /git worktree が失敗/)
   assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${first.path}`))
   assert.equal(git(sb.main, 'rev-parse', '--verify', '--quiet', `refs/heads/${first.branch}`).length, 40)
 })

@@ -35,7 +35,7 @@ export function maskUrlCredentials(text) {
 /**
  * リポジトリの位置・中身の解釈を変える git の環境変数。`git rev-parse --local-env-vars`（git がサブモジュール等の
  * 別リポジトリへ入るときに外す一覧）に、探索の範囲を変えるもの（GIT_CEILING_DIRECTORIES・GIT_DISCOVERY_ACROSS_FILESYSTEM・
- * GIT_NAMESPACE）と実行ファイルの場所（GIT_EXEC_PATH）を足したもの。GIT_CONFIG_KEY_<n>・GIT_CONFIG_VALUE_<n> も外す
+ * GIT_NAMESPACE）と実行ファイルの場所（GIT_EXEC_PATH）、古い git の一覧にあった GIT_INTERNAL_SUPER_PREFIX を足したもの。GIT_CONFIG_KEY_<n>・GIT_CONFIG_VALUE_<n> も外す
  * （GIT_CONFIG_COUNT と組で -c と同じ設定になるため）。GIT_CONFIG_GLOBAL・GIT_CONFIG_SYSTEM・GIT_CONFIG_NOSYSTEM は
  * 位置を変えない利用者の設定なので残す。
  */
@@ -43,6 +43,8 @@ export const GIT_LOCATION_ENV_VARS = Object.freeze([
   'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_OBJECT_DIRECTORY',
   'GIT_DIR', 'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE', 'GIT_NO_REPLACE_OBJECTS',
   'GIT_REPLACE_REF_BASE', 'GIT_PREFIX', 'GIT_SHALLOW_FILE', 'GIT_COMMON_DIR',
+  // 2.40 より前の git の --local-env-vars に含まれる（古い git の環境から起動されても外す）
+  'GIT_INTERNAL_SUPER_PREFIX',
   'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_NAMESPACE', 'GIT_EXEC_PATH',
 ])
 const GIT_LOCATION_ENV = new Set(GIT_LOCATION_ENV_VARS)
