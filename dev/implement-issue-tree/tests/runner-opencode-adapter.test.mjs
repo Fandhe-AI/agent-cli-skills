@@ -570,3 +570,37 @@ test('保護: 実の plugin が skillDir 配下の launcher への edit を拒�
     assert.notEqual(other.effect, 'deny')
   } finally { await t.adapter.close() }
 })
+
+// --- serve の本体の終了と、同じプロセスグループの子・孫（PR #851 の codex P1）---
+// 本体の exit だけで止める対象から外すと、SIGTERM を無視する子や、本体の異常終了で残った孫に SIGKILL が届かない
+const gcSetup = (extra = {}) => {
+  const pidFile = join(trackTmp(realpathSync(mkdtempSync(join(tmpdir(), 'iit-oc-gc-')))), 'grandchild.pid')
+  const t = setup({ ...extra, env: { FAKE_OC_GRANDCHILD: pidFile, ...extra.env } })
+  const gc = () => Number(readFileSync(pidFile, 'utf8'))
+  const cleanup = () => { try { process.kill(gc(), 'SIGKILL') } catch { /* 既に無い */ } }
+  return { ...t, gc, cleanup }
+}
+
+test('後片づけ: close は、本体が SIGTERM で終わっても SIGTERM を無視する同じグループの孫まで止める', { timeout: 20000 }, async () => {
+  const t = gcSetup({ env: { FAKE_OC_GRANDCHILD_IGNORE_TERM: '1' } })
+  try {
+    await t.adapter.start()
+    await t.adapter.run(t.req())
+    const pid = starts(t.records())[0].pid
+    assert.ok(alive(t.gc()))
+    await t.adapter.close()
+    assert.ok(await dead(pid), '本体は止まった')
+    assert.deepEqual(await waitDead([t.gc()], 3000), [], 'SIGTERM を無視する孫が残っていない')
+  } finally { t.cleanup() }
+})
+
+test('後片づけ: serve の本体が異常終了しても、同じグループに残った孫を止める（close を待たずに・close の後も残らない）', { timeout: 20000 }, async () => {
+  const t = gcSetup()
+  try {
+    await t.adapter.start()
+    const e = await kindOf(t.adapter.run(t.req({ prompt: '[[DIE]]' })))
+    assert.equal(e.kind, 'exit')
+    assert.deepEqual(await waitDead([t.gc()], 3000), [], '本体の終了で孫も止める')
+    await t.adapter.close()
+  } finally { t.cleanup() }
+})

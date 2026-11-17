@@ -90,7 +90,9 @@ _/iit-runner/<runId>/
 - 終了時（中断の SIGINT・SIGTERM・SIGHUP を含む）に、アダプタが起動したプロセス（Codex の exec・OpenCode の serve）と
   実行仕様の段の子を止め、`cleanup.deleteSessions`（既定 true）ならラン中に作ったセッションを削除する。シグナルの処理は
   アダプタの起動より前に登録し、終了コードは 128 + シグナル番号。想定外の例外で落ちたときも、既知のプロセスグループは
-  終了時に同期で SIGKILL する（セッションの削除は行えないことがある）。隔離 worktree の後始末はホストの判断に従う。
+  終了時に同期で SIGKILL する（セッションの削除は行えないことがある）。Codex の exec・OpenCode の serve の本体が終わったときは
+  （正常終了・異常終了・SIGTERM で本体だけが終わった場合を含む）、その場で同じプロセスグループへ SIGKILL を送り、残った子・孫を
+  止める。隔離 worktree の後始末はホストの判断に従う。
 
 ## 既知の限界
 

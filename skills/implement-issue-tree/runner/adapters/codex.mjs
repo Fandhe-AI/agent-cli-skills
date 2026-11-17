@@ -582,6 +582,9 @@ export function createAdapter(cfg) {
       p.stdout.on('data', (d) => { out += d })
       p.stderr.on('data', (d) => { err += d })
       p.on('error', (e) => finish({ exitCode: null, spawnError: e.code ?? e.message }))
+      // codex が終わったら（正常終了を含む）、同じプロセスグループに残った子・孫をその場で SIGKILL する。終了後は running から
+      // 外れて close・killSync の対象にならないため（PR #851 の codex P1）。回収直後に送るので pid の再利用で別のグループは撃たない
+      p.on('exit', () => killGroup(p.pid, 'SIGKILL'))
       p.on('close', (exitCode, signal) => finish({ exitCode, signal }))
       p.stdin.on('error', () => {})
       p.stdin.end(input)

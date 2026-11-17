@@ -500,6 +500,21 @@ test('時間切れ: SIGTERM を無視する子と孫のプロセスまで止ま�
   assert.equal(alive(gc), false, '孫の sleep が残っていない')
 })
 
+test('後片づけ（PR #851 の codex P1）: codex exec が正常に終わっても、同じプロセスグループに残った孫を止める', async () => {
+  const pidFile = join(tmpdir(), `iit-gc-ok-${process.pid}`)
+  trackTmp(pidFile)
+  const t = setup({ turns: [okTurn({ grandchild: pidFile })] })
+  try {
+    const out = await t.adapter.run(t.req())
+    assert.equal(out.sessionRef, U1)
+    const gc = Number(readFileSync(pidFile, 'utf8'))
+    for (let i = 0; i < 30 && alive(gc); i++) await new Promise((r) => setTimeout(r, 100))
+    assert.equal(alive(gc), false, '孫の sleep が残っていない')
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL') } catch { /* 既に無い */ }
+  }
+})
+
 test('close: deleteSessions=true のとき、このアダプタが作ったセッションだけを --force で削除する', async () => {
   const t = setup({ turns: [okTurn({ threadId: U1 }), okTurn({ threadId: U2 }), okTurn({ threadId: U2 })], toolConfig: { deleteSessions: true } })
   await t.adapter.run(t.req())

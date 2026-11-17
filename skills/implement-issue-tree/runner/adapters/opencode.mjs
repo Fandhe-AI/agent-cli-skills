@@ -35,6 +35,8 @@
 //   - `/api/model`・`/api/config` は API キーを含み得るので呼ばず、ログにも残さない。
 //   - 後片づけ: close は自分のセッションを消して serve を止める。killSync（契約の任意メソッド）は close を待てない経路
 //     （run.mjs のシグナル受信・exit）用で、起動した serve（起動待ちを含む）のプロセスグループを同期で SIGKILL する。
+//     serve の本体が終わったとき（SIGTERM で本体だけが終わった・異常終了した）は、その場でプロセスグループへ SIGKILL を送り、
+//     同じグループに残った子・孫を止める（本体の終了で children・stopServe・close の対象から外れるため）。
 //
 // toolConfig のキー（既定値は runner/config/default.json の toolConfig.opencode。コード側の既定も同じ）:
 //   deleteSessions（run.mjs が cleanup.deleteSessions から渡す）・command (["opencode"]。serve を起動するコマンドの配列)・
@@ -212,7 +214,15 @@ export function createAdapter(cfg) {
     const serve = { kind, allowMerge, repo: merge?.repo ?? null, nonce, markerPath, callLog, locations: new Set(), child, base: `http://127.0.0.1:${port}`, exited: false, exitInfo: null, subs: new Set(), sseCtrl: null, spawnError: null }
     serve.auth = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`
     child.on('error', (e) => { serve.spawnError = e })
-    child.on('exit', (code, signal) => { serve.exited = true; serve.exitInfo = `code=${code} signal=${signal}`; children.delete(child) })
+    // 本体が終わったら（SIGTERM で本体だけ終わった・異常終了した場合を含む）、同じプロセスグループに残った子・孫をその場で
+    // SIGKILL する。本体の終了で止める対象（children・stopServe・close）から外れるため、ここで止めないと残る（PR #851 の codex P1）。
+    // 本体の回収直後に送るので、pid の再利用で別のグループを撃つことはない（グループに残りがあれば pgid は再利用されない）
+    child.on('exit', (code, signal) => {
+      serve.exited = true
+      serve.exitInfo = `code=${code} signal=${signal}`
+      try { process.kill(-child.pid, 'SIGKILL') } catch { /* グループに残りが無い */ }
+      children.delete(child)
+    })
     // 各要求と本文の読み取りに期限を付ける（deadline があればその残り時間でも打ち切る）。serve が応答しないと、呼び出し側が
     // run の deadline 判定へ戻れないため。期限切れは timedOut = true の AdapterError で、呼び出し側が止まったかを確かめる
     serve.api = async (path, { deadline, ...init } = {}) => {

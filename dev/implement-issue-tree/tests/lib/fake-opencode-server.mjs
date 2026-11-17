@@ -21,6 +21,7 @@
 // メッセージ一覧は cursor でページを送れる（cursor.next は末尾でも返る。実機と同じ）。
 // FAKE_OC_FOREIGN=<id> を渡すと、アダプタが作っていない既存セッションを 1 つ持つ（削除されないことの確認用）。
 // FAKE_OC_GRANDCHILD=<pid ファイル> で、同じプロセスグループに孫（sleep）を起動して pid を書く（killSync の確認用）。
+// FAKE_OC_GRANDCHILD_IGNORE_TERM=1 を足すと、孫を SIGTERM を無視するプロセスにする（本体だけが SIGTERM で終わる serve の再現）。
 // FAKE_OC_NOLISTEN=1 で待ち受けない（起動待ちの serve の再現）。
 // FAKE_OC_HANGS=<名前のカンマ区切り> で、その API が応答を返さない（接続は開いたまま）。名前は prompt・interrupt・delete・active・message。
 // FAKE_OC_PARTIAL=<同じ名前の区切り> は、ヘッダと本文の一部だけ返して終わらせない（本文の読み取りが止まる serve の再現）。
@@ -190,7 +191,9 @@ const server = createServer(async (req, res) => {
   })
 })
 if (process.env.FAKE_OC_GRANDCHILD) {
-  const g = spawn('sleep', ['300'], { stdio: 'ignore' })
+  const g = process.env.FAKE_OC_GRANDCHILD_IGNORE_TERM
+    ? spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setTimeout(() => {}, 300000)"], { stdio: 'ignore' })
+    : spawn('sleep', ['300'], { stdio: 'ignore' })
   writeFileSync(process.env.FAKE_OC_GRANDCHILD, String(g.pid))
 }
 if (!process.env.FAKE_OC_NOLISTEN) server.listen(port, '127.0.0.1')
