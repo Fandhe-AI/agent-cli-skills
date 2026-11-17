@@ -3,12 +3,19 @@
 // PR #847 は例外を広げるたびに抜け道が見つかって収束しなかったので、次の 4 つで確かめる:
 //   1. 抜け道 1〜6 と敵役の試行（tests/lib/agent-guard-cases.mjs の FP849_STAY_DENY）が subagent=true / null で deny のまま
 //   2. 認識器を単体で取り出し、通す形（FP849_FLIP）だけを受理し、それ以外（FP849_STAY_DENY・FP849_TIGHTEN）を受理しない
-//   3. 全コーパスを #849 の前（36ecad6）の判定を凍結した fixture（fixtures/agent-guard-baseline-849.json）と比べ、変わったのが
+//   3. コーパスを #849 の前（36ecad6）の判定を凍結した fixture（fixtures/agent-guard-baseline-849.json）と比べ、変わったのが
 //      FP849_FLIP（deny → allow）と FP849_TIGHTEN（allow → deny）だけで、subagent=false は 1 件も変わらない
 //   4. 実シェル（/bin/bash 3.2・PATH の bash・/bin/zsh）との差分:
 //      (a) PR #847 の語彙（目印 `e$'c'ho IIT_SQ_MARK` を ANSI-C 引用符として解かせる形）で、目印が解かれた入力は必ず deny
 //      (b) 固定語彙から組み立てた入力のうちガードが allow にしたものを、許可リストの語を引数の記録だけする偽コマンドに
 //          置き換えて実行し、各シェルが渡した引数が「単一引用符の中は文字どおり（末尾の `$` も文字の `$`）」の読みと一致する
+// CI の JS unit tests は 15 分で打ち切られ、既存のテストだけで 11〜13 分かかる（2026-11-17）。ガードの起動は 1 回あたり
+// 数十ミリ秒の CPU を使うので、既定では次の範囲に絞る。AGENT_GUARD_849_FULL=1 で全件を流す（ガードの文法を変えたときに手元で使う）:
+//   - 3 の差分は、FP849 の表と、agent-guard-805.test.mjs が覆わないコマンド（POST_805 の表と 805 の fixture に無いもの）のうち `$'` を含むもの。
+//     805 テストは残りのコーパスを subagent 3 通りで 805 の凍結と完全一致させる（旧版も新版も通る）ので、旧版と新版の判定は等しい。
+//     `$'` を含まないコマンドは、変えた認識器が呼ばれない（`[$]'` に一致したときだけ呼ばれ、subagent=false はその前に allow で終わる）
+//   - 4 (a) は、目印がどれかのシェルで解かれた入力だけをガードに流し、生成する組み合わせも絞る
+//   - 4 (b) は `$'` を含む入力だけをガードに流し、echo の 2 引数の組み合わせを絞る
 // fixture はコーパス（agent-guard-cases.mjs の全表）の全件を 36ecad6 の agent-guard.sh で /bin/bash に流した結果。
 // コーパスへ形を足したときは、36ecad6 の agent-guard.sh を取り出して同じ流し方で足した形を加える（1 行 1 件・字下げ 4）。
 import { describe, it, after } from 'node:test'
@@ -29,10 +36,16 @@ const BASHES = [...new Set(['/bin/bash', pathBash])]
 const ZSH = '/bin/zsh'
 const SHELLS = [...BASHES, ...(existsSync(ZSH) ? [ZSH] : [])]
 const SUBAGENTS = [false, true, null]
+const FULL = process.env.AGENT_GUARD_849_FULL === '1'
 
 const corpus = [...new Set(Object.values(cases).filter(Array.isArray).flatMap((arr) => arr.map((e) => (Array.isArray(e) ? e[0] : e))))]
 const FLIP = new Set(cases.FP849_FLIP)
 const TIGHTEN = new Set(cases.FP849_TIGHTEN)
+const flat = (arr) => arr.map((e) => (Array.isArray(e) ? e[0] : e))
+// agent-guard-805.test.mjs が 805 の凍結と完全一致させるコマンド（同ファイルの POST_805 と同じ表を除き、805 の fixture にあるもの）
+const POST_805 = new Set(['CRED_DENY', 'CRED_ALLOW', 'ENQUEUE_DENY', 'HOOKCONF_DENY', 'HOOKCONF_ALLOW', 'FP849_FLIP', 'FP849_TIGHTEN', 'FP849_STAY_DENY'])
+const BASELINE_805 = JSON.parse(readFileSync(join(here, 'fixtures', 'agent-guard-baseline-805.json'), 'utf8')).verdicts
+const PINNED_BY_805 = new Set(Object.entries(cases).filter(([k, v]) => Array.isArray(v) && !POST_805.has(k)).flatMap(([, v]) => flat(v)).filter((c) => BASELINE_805[c] !== undefined))
 
 // input が無いときの標準入力は /dev/null にする。node の 'pipe' は macOS ではソケットで、/bin/bash（3.2）は標準入力が
 // ソケットだと遠隔シェルとみなして BASH_ENV を読まないことがある（偽コマンドへの置き換えが効かず、組み込みの echo が走る）
@@ -70,14 +83,18 @@ async function pool(items, fn, n = 12) {
 }
 
 // --- 1. 抜け道と敵役（ガード全体） -----------------------------------------------------------------------
-describe('Issue #849 の表（ガード全体・subagent=true / null）', () => {
-  for (const bash of BASHES) {
+const WANT_849 = [
+  ...cases.FP849_STAY_DENY.map(([c, r]) => [c, `deny ${r}`]),
+  ...cases.FP849_FLIP.map((c) => [c, 'allow']),
+  ...cases.FP849_TIGHTEN.map((c) => [c, 'deny obfuscated']),
+]
+const WANT_849_MAP = new Map(WANT_849)
+
+// /bin/bash の subagent=true / null は 3 が同じ期待（理由コードを含む）で見るので、ここは残りの bash（既定は subagent=true だけ）
+describe('Issue #849 の表（ガード全体）', () => {
+  for (const bash of FULL ? BASHES : BASHES.slice(1)) {
     it(`抜け道 1〜6 と敵役の試行は deny・通す形は allow・締めた形は deny（${bash}）`, async () => {
-      const jobs = [
-        ...cases.FP849_STAY_DENY.map(([c, r]) => [c, `deny ${r}`]),
-        ...cases.FP849_FLIP.map((c) => [c, 'allow']),
-        ...cases.FP849_TIGHTEN.map((c) => [c, 'deny obfuscated']),
-      ].flatMap(([c, want]) => [true, null].map((s) => [c, s, want]))
+      const jobs = WANT_849.flatMap(([c, want]) => (FULL ? [true, null] : [true]).map((s) => [c, s, want]))
       const got = await pool(jobs, ([c, s]) => verdict(bash, c, s))
       const miss = jobs.filter((j, i) => got[i] !== j[2]).map(([c, s, want], i) => `${JSON.stringify(c)} subagent=${s}: ${want} が欲しいが ${got[i]}`)
       assert.deepEqual(miss, [])
@@ -117,13 +134,14 @@ describe('旧版（36ecad6）→ 新版の差分', { concurrency: BASHES.length 
     for (const c of FLIP) assert.deepEqual(BASELINE[c].slice(1), ['deny obfuscated', 'deny obfuscated'], JSON.stringify(c))
     for (const c of TIGHTEN) assert.deepEqual(BASELINE[c].slice(1), ['allow', 'allow'], JSON.stringify(c))
   })
-  for (const bash of BASHES) {
-    // /bin/bash（3.2）は全コーパス。もう一方の bash は `$'` とマージ系に関わる表だけ（両 bash の結果が同じことは
-    // agent-guard.test.mjs の表が全件で見ている）
+  for (const bash of FULL ? BASHES : BASHES.slice(0, 1)) {
+    // 全件: /bin/bash（3.2）は全コーパス、もう一方の bash は `$'` とマージ系に関わる表だけ（両 bash の結果が同じことは
+    // agent-guard.test.mjs の表が全件で見ている）。既定: /bin/bash で 805 テストが覆わない `$'` を含むコマンドだけ（冒頭の注記）
     const SUBSET = new Set([cases.FP849_FLIP, cases.FP849_TIGHTEN, cases.FP849_STAY_DENY, cases.FP805_FLIP, cases.FP805_STAY_DENY,
-      cases.MG_OBFUSCATED_DENY, cases.MG_ALLOW, cases.PARSE_ALLOW_MAIN].flatMap((arr) => arr.map((e) => (Array.isArray(e) ? e[0] : e))))
-    const targets = bash === BASHES[0] ? corpus : corpus.filter((c) => SUBSET.has(c))
-    it(`${bash}: 変わったのは FP849_FLIP の deny → allow と FP849_TIGHTEN の allow → deny だけで、subagent=false は 1 件も変わらない`, async () => {
+      cases.MG_OBFUSCATED_DENY, cases.MG_ALLOW, cases.PARSE_ALLOW_MAIN].flatMap(flat))
+    const targets = !FULL ? corpus.filter((c) => WANT_849_MAP.has(c) || (!PINNED_BY_805.has(c) && c.includes("$'")))
+      : bash === BASHES[0] ? corpus : corpus.filter((c) => SUBSET.has(c))
+    it(`${bash}: 変わったのは FP849_FLIP の deny → allow と FP849_TIGHTEN の allow → deny だけで、subagent=false は 1 件も変わらない`, async (t) => {
       const jobs = targets.flatMap((c) => SUBAGENTS.map((s, k) => [c, s, k]))
       const got = await pool(jobs, ([c, s]) => verdict(bash, c, s))
       const diffs = []
@@ -131,6 +149,8 @@ describe('旧版（36ecad6）→ 新版の差分', { concurrency: BASHES.length 
       const tightened = new Set()
       jobs.forEach(([c, s, k], i) => {
         const was = BASELINE[c][k]
+        // FP849 の表は、旧版との差分に加えて期待（理由コードを含む）と一致する
+        if (s !== false && WANT_849_MAP.has(c) && got[i] !== WANT_849_MAP.get(c)) diffs.push(`${JSON.stringify(c)} subagent=${s}: ${WANT_849_MAP.get(c)} が欲しいが ${got[i]}`)
         if (was === got[i]) return
         if (s !== false && FLIP.has(c) && was === 'deny obfuscated' && got[i] === 'allow') { flipped.add(c); return }
         if (s !== false && TIGHTEN.has(c) && was === 'allow' && got[i] === 'deny obfuscated') { tightened.add(c); return }
@@ -140,6 +160,7 @@ describe('旧版（36ecad6）→ 新版の差分', { concurrency: BASHES.length 
       assert.deepEqual([...FLIP].filter((c) => !flipped.has(c)), [], '通るはずが止まったまま')
       assert.deepEqual([...TIGHTEN].filter((c) => !tightened.has(c)), [], '止まるはずが通ったまま')
       assert.ok(jobs.filter(([, s]) => s === false).length >= targets.length)
+      t.diagnostic(`比べたコマンド ${targets.length} 件 × subagent 3 通り`)
     })
   }
 })
@@ -194,18 +215,22 @@ const FRAG = [
 ]
 const JOIN = ['\n', ' ; ', ' && ', ' || ', ' | ']
 
+// 既定: 目印 2 つは全断片 × 全連結、評価器の形は #849 で通す断片（FRAG の末尾 5 つ）× 改行と ; の連結、前後を挟む形は後ろの断片を
+// 末尾 5 つに絞る。全件（AGENT_GUARD_849_FULL=1）はすべての組み合わせ
 function markCorpus() {
   const out = new Set()
+  const tail = FRAG.slice(-5)
   for (const m of [MARK, MARK_SQ, ...EVAL_MARKS]) {
     out.add(m)
-    for (const f of FRAG) {
-      for (const j of JOIN) {
+    const evalForm = m !== MARK && m !== MARK_SQ
+    for (const f of FULL || !evalForm ? FRAG : tail) {
+      for (const j of FULL || !evalForm ? JOIN : ['\n', ' ; ']) {
         out.add(f + j + m)
         out.add(m + j + f)
       }
     }
   }
-  for (const f of FRAG) for (const g of FRAG) out.add(f + '\n' + MARK_SQ + '\n' + g)
+  for (const f of FRAG) for (const g of FULL ? FRAG : tail) out.add(f + '\n' + MARK_SQ + '\n' + g)
   return [...out]
 }
 
@@ -220,8 +245,10 @@ describe('実シェルとの差分 (a): 目印が解かれた入力は deny', ()
       const dir = mkdtempSync(join(tmp, 'c-'))
       const env = { PATH: '/usr/bin:/bin', HOME: dir, ZDOTDIR: dir, LC_ALL: 'C', X: 'x' }
       const outs = await Promise.all(SHELLS.map((sh) => run(sh, ['-c', c], { cwd: dir, env })))
-      const v = await verdict(BASHES[0], c, true)
-      return { c, hit: outs.some(decoded), v, left: readdirSync(dir) }
+      const hit = outs.some(decoded)
+      // ガードは目印が解かれた入力だけに流す（全件モードではすべて）
+      const v = hit || FULL ? await verdict(BASHES[0], c, true) : null
+      return { c, hit, v, left: readdirSync(dir) }
     })
     assert.ok(inputs.length >= 500, `生成件数が少ない: ${inputs.length}`)
   })
@@ -229,12 +256,12 @@ describe('実シェルとの差分 (a): 目印が解かれた入力は deny', ()
     assert.deepEqual(rows.filter((r) => r.hit && !r.v.startsWith('deny')).map((r) => `${r.v}: ${JSON.stringify(r.c)}`), [])
   })
   it('判定に内部エラー・入力エラーが無い・実行でファイルが作られていない', () => {
-    assert.deepEqual(rows.filter((r) => !/^(allow|deny [a-z-]+)$/.test(r.v) || /internal-error|bad-input|no-jq/.test(r.v)).map((r) => `${r.v}: ${JSON.stringify(r.c)}`), [])
+    assert.deepEqual(rows.filter((r) => r.v !== null && (!/^(allow|deny [a-z-]+)$/.test(r.v) || /internal-error|bad-input|no-jq/.test(r.v))).map((r) => `${r.v}: ${JSON.stringify(r.c)}`), [])
     assert.deepEqual(rows.filter((r) => r.left.length > 0).map((r) => `${r.left.join(',')}: ${JSON.stringify(r.c)}`), [])
   })
   // 入力はすべて目印か評価器の形を含むので allow は出ない（allow の側は (b) が見る）
   it('空振りしていない（目印が解かれる入力・評価器の形で解かれる入力がある）', (t) => {
-    t.diagnostic(`目印が解かれた入力 ${rows.filter((r) => r.hit).length} 件・deny ${rows.filter((r) => r.v.startsWith('deny')).length} 件`)
+    t.diagnostic(`生成 ${rows.length} 件・目印が解かれた入力 ${rows.filter((r) => r.hit).length} 件・そのうち deny ${rows.filter((r) => r.hit && r.v.startsWith('deny')).length} 件`)
     assert.ok(rows.filter((r) => r.hit).length >= 100, '目印が解かれる入力が少ない')
     assert.ok(rows.some((r) => r.hit && EVAL_MARKS.some((m) => r.c.includes(m))), '評価器の形で目印が解かれる入力が無い')
   })
@@ -329,7 +356,7 @@ function argvCorpus() {
   const REDIR = ['', ' 2>&1', ' >o', ' <f', ' 2>/dev/null', '>o', ' >=x', ' 10>o', ' 3<f']
   const out = new Set()
   for (const c of CMDS) for (const a of ARGS) out.add(`${c} ${a}`)
-  for (const a of ARGS) for (const b of ARGS) out.add(`echo ${a} ${b}`)
+  for (const a of ARGS) for (const b of FULL ? ARGS : ARGS.slice(0, 8)) out.add(`echo ${a} ${b}`)
   let k = 0
   for (const a of ARGS) {
     for (const s of SEPS) {
@@ -361,9 +388,10 @@ describe('実シェルとの差分 (b): allow の入力で各シェルが渡す�
   })
 
   it(`固定語彙から ${inputs.length} 件を生成し、allow の入力を ${SHELLS.join('・')} で実行して引数を比べる（不一致 0 件）`, async () => {
-    const v = await pool(inputs, (c) => verdict(BASHES[0], c, true))
     // `$'` を含まない入力は認識器を通らない（obfuscated の判定の外）ので比べない
-    allowed = inputs.filter((c, i) => v[i] === 'allow' && c.includes("$'"))
+    const sq = inputs.filter((c) => c.includes("$'"))
+    const v = await pool(sq, (c) => verdict(BASHES[0], c, true))
+    allowed = sq.filter((c, i) => v[i] === 'allow')
     const miss = []
     await pool(allowed, async (c) => {
       const want = literalReading(c)
