@@ -220,7 +220,12 @@ export function killScriptsSync() {
 
 /**
  * スクリプトを shell なしで起動する既定の実装。detached でプロセスグループを作り、時間切れ・出力超過では
- * グループごと止める（gh などの孫プロセスを残さない）。止めた後 killGraceMs（既定 2 秒）を過ぎても close が来なければ
+ * グループごと止める（gh などの孫プロセスを残さない）。時間切れはまず SIGTERM を送り（git は SIGTERM なら作りかけの
+ * *.lock〔index.lock・refs の lock〕を消して終わる。SIGKILL では残り、後続の git が lock で失敗する。lib/worktree.mjs の
+ * gitAsync と同じ）、killGraceMs（既定 2 秒）を過ぎてもプロセスグループが空にならなければ SIGKILL を送る。SIGTERM の後は、
+ * 子（launcher の bash。trap を持たず先に終わる）の exit でも close でもグループを撃たず、グループが空になるのを待って決着する
+ * （worktree-remove.sh 等の git は標準出力・標準エラーを /dev/null へ向けるため、close は git の片づけの完了を意味しない）。
+ * 出力超過はその場で SIGKILL を送る。SIGKILL の後さらに killGraceMs を過ぎても close が来なければ
  * （新しいセッションへ抜けた孫が標準出力を握っている・子が D 状態にある等）、close を待たずに timedOut / overflow を
  * 立てたまま code: null で決着する（並列の枠を握り続けない）。子が終わったとき（正常終了を含む）は、その場で同じ
  * プロセスグループへ SIGKILL を送り、標準入出力を閉じて残った孫も止める（終了後は liveScripts から外れ、killScriptsSync の
@@ -246,15 +251,27 @@ export function spawnScript(file, args, { cwd, input, timeoutMs, env = process.e
     let overflow = false
     let settled = false
     let forceTimer = null
-    const signalGroup = () => {
-      try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch { /* 既に終了 */ } }
+    let termTimer = null
+    let killed = false
+    let drainTimer = null
+    const signalGroup = (sig) => {
+      try { process.kill(-child.pid, sig) } catch { try { child.kill(sig) } catch { /* 既に終了 */ } }
     }
-    // 時間切れ・出力超過: グループを止め、猶予の後は close を待たずに決着する（猶予のタイマーは 1 本だけ）
+    // SIGTERM を送ったが SIGKILL はまだ: 子の exit・close ではグループを撃たず、空になるか猶予の満了まで git の片づけを待つ
+    const terminating = () => timedOut && !killed
+    // グループに生きたプロセスが残るか（kill 0 が ESRCH なら空。メンバーが居る間は pgid は再利用されない）
+    const groupAlive = () => { try { process.kill(-child.pid, 0); return true } catch (e) { return e?.code === 'EPERM' } }
+    // 出力超過・SIGTERM の猶予切れ: グループを SIGKILL で止め、猶予の後は close を待たずに決着する（猶予のタイマーは 1 本だけ）
     const killGroup = () => {
-      signalGroup()
+      killed = true
+      signalGroup('SIGKILL')
       if (forceTimer === null) forceTimer = setTimeout(() => finish(null, undefined, true), killGraceMs)
     }
-    const timer = setTimeout(() => { timedOut = true; killGroup() }, timeoutMs)
+    const timer = setTimeout(() => {
+      timedOut = true
+      signalGroup('SIGTERM')
+      termTimer = setTimeout(killGroup, killGraceMs)
+    }, timeoutMs)
     child.stdout.on('data', (b) => {
       if (overflow) return
       outBytes += b.length
@@ -269,15 +286,24 @@ export function spawnScript(file, args, { cwd, input, timeoutMs, env = process.e
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(termTimer)
       clearTimeout(forceTimer)
+      clearInterval(drainTimer)
       liveScripts.delete(child)
       // close が来ていない: 抜けた孫が握る pipe の読み口を閉じる（イベントループを握らせず、決着後に溜め込まない）
       if (forced) { child.stdout.destroy(); child.stderr.destroy() }
       resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), timedOut, overflow, ...(error ? { error } : {}) })
     }
     child.on('error', (e) => finish(null, String(e?.message ?? e)))
-    child.on('exit', () => { try { process.kill(-child.pid, 'SIGKILL') } catch { /* グループに残りが無い */ } })
-    child.on('close', (code) => finish(code))
+    child.on('exit', () => { if (!terminating()) signalGroup('SIGKILL') })
+    child.on('close', (code) => {
+      // SIGTERM の後: グループが空になってから決着する（空にならなければ termTimer の SIGKILL と forceTimer が決着させる）
+      if (terminating() && groupAlive()) {
+        drainTimer = setInterval(() => { if (!groupAlive()) finish(code) }, 25)
+        return
+      }
+      finish(code)
+    })
     // 標準入力を読まないスクリプトが先に閉じても落ちないようにする
     child.stdin.on('error', () => {})
     child.stdin.end(input)
