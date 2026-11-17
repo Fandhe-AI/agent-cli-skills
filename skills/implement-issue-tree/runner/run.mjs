@@ -23,7 +23,7 @@
 //   <mainRoot>/_/iit-runner/<runId>/agents/<seq 4 桁>-<label>/meta.json（agent() 1 回につき 1 つ。lib/agent-host.mjs）:
 //     { label, seq, sessionRef, outcome, kind?, startedAt, endedAt, ... }
 //     outcome は ok（schema に適合した値を返した。修復ターン後も ok）/ null（未返却）/ exec-spec（実行仕様で
-//     直接実行した段。sessionRef は null）/ throw（呼び出しの不備・worktree 作成失敗で例外）。kind は AdapterError の kind。
+//     直接実行した段と、ホストが直接実行・直接読んだ段〔direct: host-cleanup・host-state-read〕。sessionRef は null）/ throw（呼び出しの不備・worktree 作成失敗で例外）。kind は AdapterError の kind。
 //     sessionRef は最後に使った会話の参照（修復ターンで同じ値ならそのまま）。status・reason は詳細。
 //   <mainRoot>/_/iit-runner/<runId>/host.log はホストの log() と phase()。
 //
