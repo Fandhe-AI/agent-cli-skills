@@ -304,9 +304,12 @@ remove_one() {
       fi
       # 未初期化 submodule の gitlink だけの変更（index での付け替え・追加・削除）は --ignore-submodules=all の status に出ない（Issue #867）。
       # 汚れに数えないと discard は素の git worktree remove に拒まれて failed になる。index と HEAD の木（コミットが無ければ空の木）を
-      # 比べた gitlink の差を汚れに足す（--cached は index と木だけを読み、submodule の中へは降りない）。比べられなければ確認不能
+      # 比べた gitlink の差を汚れに足す（--cached は index と木だけを読み、submodule の中へは降りない）。比べられなければ確認不能。
+      # 空の木と比べるのは unborn と決まったときだけ（コミットを一過性に読めなかっただけなら、全 gitlink を変更と数えず確認不能にする）
       gl_base=${wt_sha}
-      [ -n "${gl_base}" ] || gl_base=$(git --no-optional-locks -c core.fsmonitor=false -C "${path}" hash-object -t tree /dev/null 2>/dev/null) || gl_base=""
+      if [ -z "${gl_base}" ] && [ "${wt_unborn}" = 1 ]; then
+        gl_base=$(git --no-optional-locks -c core.fsmonitor=false -C "${path}" hash-object -t tree /dev/null 2>/dev/null) || gl_base=""
+      fi
       if [ -n "${gl_base}" ] &&
         gl_raw=$(git --no-optional-locks -c core.fsmonitor=false -C "${path}" diff-index --cached --raw --no-renames --no-ext-diff --ignore-submodules=none "${gl_base}" 2>/dev/null); then
         WR_DIRTY=$((WR_DIRTY + $(wr_count_gitlink_raw "${gl_raw}")))

@@ -348,14 +348,12 @@ export function registerRecoverPrepTests(bash) {
     assert.deepEqual([r.result.wip, r.result.wipCommitted, r.result.dirty], ['submodule', false, 0])
   })
 
-  // Issue #867: 未初期化 submodule の gitlink だけの変更（index の付け替え・削除）は --ignore-submodules=all の status に出ない。汚れに数えないと
-  // wip:none・wipCommitted:true（退避済み）と報告して、変更を index に残したままにしていた。index と HEAD の木の比較（中へは降りない）で数えて WIP コミットに含める
-  smTest(`${tag} submodule 未初期化で gitlink だけを付け替え・削除: 汚れに数えて WIP コミットに含め、退避完了（wipCommitted:true）`, () => {
-    const cases = [
-      ['付け替え', (repo, w, other) => repo.git(w, 'update-index', '--cacheinfo', `160000,${other},sm`), (repo, a, other) => assert.equal(repo.git(repo.main, 'rev-parse', `${a.branch}:sm`), other, '付け替えた gitlink がコミットに入る')],
-      ['削除', (repo, w) => repo.git(w, 'update-index', '--force-remove', 'sm'), (repo, a) => assert.equal(repo.git(repo.main, 'ls-tree', a.branch, 'sm'), '', 'gitlink の削除がコミットに入る')],
-    ]
-    for (const [name, mutate, verify] of cases) {
+  // Issue #867: 未初期化 submodule の gitlink だけの変更（index の付け替え・削除・追加）は --ignore-submodules=all の status に出ない。汚れに数えないと
+  // wip:none・wipCommitted:true（退避済み）と報告して、変更を index に残したままにしていた。index と HEAD の木の比較（中へは降りない）で数える。
+  // 付け替え・削除は WIP コミットに入る。ディレクトリの無い gitlink の追加は add -A が index から落として commit が「nothing to commit」で失敗するので、
+  // commit-failed・wipCommitted:false（退避完了とは言わない。worktree は削除側が汚れとして保持する）
+  smTest(`${tag} submodule 未初期化で gitlink だけを付け替え・削除・追加: 汚れに数え、付け替え・削除は WIP コミットに含めて退避完了、追加は退避完了と言わない`, () => {
+    const setup = (mutate) => {
       const repo = makeRecoverRepo({ submodule: true })
       repo.git(repo.main, 'push', '-q', 'origin', 'main')
       repo.write(repo.sub, 'f', 'two\n')
@@ -366,13 +364,24 @@ export function registerRecoverPrepTests(bash) {
       mutate(repo, a.path, other)
       const r = prep(repo, a)
       assert.equal(r.status, 0, r.stderr)
+      assert.ok(r.result.dirty >= 1, JSON.stringify(r.result))
+      return { repo, a, other, before, r }
+    }
+    const committed = [
+      ['付け替え', (repo, w, other) => repo.git(w, 'update-index', '--cacheinfo', `160000,${other},sm`), (repo, a, other) => assert.equal(repo.git(repo.main, 'rev-parse', `${a.branch}:sm`), other, '付け替えた gitlink がコミットに入る')],
+      ['削除', (repo, w) => repo.git(w, 'update-index', '--force-remove', 'sm'), (repo, a) => assert.equal(repo.git(repo.main, 'ls-tree', a.branch, 'sm'), '', 'gitlink の削除がコミットに入る')],
+    ]
+    for (const [name, mutate, verify] of committed) {
+      const { repo, a, other, before, r } = setup(mutate)
       assert.deepEqual([r.result.wip, r.result.wipCommitted], ['committed', true], `${name}: ${JSON.stringify(r.result)}`)
-      assert.ok(r.result.dirty >= 1, `${name}: ${JSON.stringify(r.result)}`)
       assert.equal(logSubjects(repo, a.branch)[0], WIP_SUBJECT, name)
       assert.notEqual(repo.head(a.path), before, name)
       verify(repo, a, other)
       assert.equal(repo.git(a.path, 'diff-index', '--cached', '--raw', 'HEAD'), '', `${name}: index に変更が残らない`)
     }
+    const added = setup((repo, w, other) => repo.git(w, 'update-index', '--add', '--cacheinfo', `160000,${other},sm2`))
+    assert.deepEqual([added.r.result.wip, added.r.result.wipCommitted], ['commit-failed', false], `追加: ${JSON.stringify(added.r.result)}`)
+    assert.equal(added.repo.head(added.a.path), added.before, '追加: WIP コミットを作らない')
   })
 
   // 初期化済み submodule があれば WIP コミットも作らない（add・commit が submodule の中を観測し、中の config のコマンドを実行し得る）。worktree は削除側が保持する
