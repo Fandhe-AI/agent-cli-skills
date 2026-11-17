@@ -3,7 +3,7 @@
 // 役割: 生成物（src も含め）を変えずに動かす方針のため、プロンプト本文の「StructuredOutput」
 // 「Bash 呼び出し」はそのまま残る。agent-host がエージェントへ渡す前に、この前置きと schema 指示を足す。
 // 純関数だけ（I/O なし）。ツール別の差（Codex は --output-schema で形式を強制できる）は
-// 前置きに持ち込まず、アダプタ側の指示で補う。例外はシェルの注意（buildPreamble の最後の行）: 実測は Codex（モデルの
+// 前置きに持ち込まず、アダプタ側の指示で補う。例外はシェルの注意（buildPreamble の最後の行。マージを許す段だけ MERGE_SHELL_NOTE）: 実測は Codex（モデルの
 // コマンドが利用者のログインシェル zsh で動き、bash へ固定できない。adapters/codex.mjs 冒頭の「シェル」）だが、
 // 契約上アダプタはプロンプトを加工しないため共通の前置きに置く。bash で動くツールにも害は無い。
 //
@@ -19,14 +19,27 @@ const SCHEMA_PRETTY_LIMIT = 60_000
 export const SHELL_NOTE =
   "- シェルは zsh の可能性がある。複数行のスクリプトは `bash <<'EOF'` … `EOF` の形で bash に渡して実行し、`status` 等のシェルの特殊変数名に代入しない。"
 
-/** Claude Code の語彙の読み替え文。 */
-export function buildPreamble() {
+/**
+ * マージを許す段（merge-exec。agent-host が req.merge を決めた段）のシェルの注意。ガードが通すのは手順 3 の 1 行の完全一致
+ * だけなので、SHELL_NOTE の here-doc の指示を外し、その 1 行を包まずに実行させる（Phase 4 の通しで、モデルが SHELL_NOTE に従って
+ * 手順 3 の 1 行を `bash <<'EOF'` で包み、ガードに止められてマージできなかった）。この段の他のコマンドも 1 行で足りる。
+ */
+export const MERGE_SHELL_NOTE = [
+  '- シェルは zsh の可能性がある。`status` 等のシェルの特殊変数名に代入しない。',
+  '- 手順 3 のマージコマンドは、bash・here-doc・`-c` で包まず、変数の代入を別の呼び出しに分けず、示された 1 行のまま 1 回のコマンドとして実行する（この段でマージが通るのは、その 1 行の完全一致だけである）。',
+].join('\n')
+
+/**
+ * Claude Code の語彙の読み替え文。
+ * @param {{ merge?: boolean }} [o]  merge: マージを許す段（シェルの注意を MERGE_SHELL_NOTE にする）
+ */
+export function buildPreamble({ merge = false } = {}) {
   return [
     '【実行環境の読み替え】このプロンプトは Claude Code 向けに書かれている。次のとおり読み替えて従うこと。',
     '- 「StructuredOutput」「StructuredOutput ツール」は、最終応答として JSON Schema に従う JSON オブジェクトを 1 つだけ返すことを指す。ツール呼び出しではない。前後に説明文・コードフェンスを付けない。',
     '- 「Bash」「Bash 呼び出し」は、シェルコマンドの実行を指す。',
     '- 指示に無い操作（追加の調査・別の方法での測り直し・値の補完）はしない。コマンドが失敗したときは、指示された失敗の返し方に従う。',
-    SHELL_NOTE,
+    merge ? MERGE_SHELL_NOTE : SHELL_NOTE,
   ].join('\n')
 }
 
@@ -52,10 +65,13 @@ export function buildSchemaInstruction(schema) {
   ].join('\n')
 }
 
-/** 前置き + 元のプロンプト + 形式の指示の順に組み立てる（計画 C「agent() の契約」の prompt の行）。 */
-export function composePrompt({ prompt, schema, worktreePath }) {
+/**
+ * 前置き + 元のプロンプト + 形式の指示の順に組み立てる（計画 C「agent() の契約」の prompt の行）。
+ * merge は agent-host がマージを許した段（req.merge が決まった merge-exec）だけ true にする。
+ */
+export function composePrompt({ prompt, schema, worktreePath, merge = false }) {
   if (typeof prompt !== 'string') throw new TypeError('prompt は文字列')
-  const parts = [buildPreamble()]
+  const parts = [buildPreamble({ merge: merge === true })]
   if (worktreePath !== undefined) parts.push(buildWorktreeNotice(worktreePath))
   parts.push(prompt, buildSchemaInstruction(schema))
   return parts.join('\n\n')

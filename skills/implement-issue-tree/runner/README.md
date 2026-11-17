@@ -85,7 +85,7 @@ _/iit-runner/<runId>/
 | model を省いた段（plan・recover） | セッションのモデルを継ぐ | セッションが無いため、設定の `sessionModel`（既定 `opus`）の段として扱う |
 | 並列 | ランタイムの既定（16 か CPU 数 − 2） | `--max-parallel` か `limits.maxParallel`（既定 4）。1 ランのエージェント数は `limits.maxAgents`（既定 1,000）まで |
 | 構造化出力 | ランタイムが schema を強制 | Codex は `--output-schema`（strict 変換）。ランナーが検証し、不適合なら修復を 1 回求め、なお不適合なら `null` |
-| ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）が `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。形はその段の PR 番号で具体化し（`mergeExecCommandFor`。番号はホストのプロンプトから取り、決まらなければその段ではマージを許さない）、子の `GH_REPO` を対象リポジトリに固定する（`autoMerge` のランだけ、起動前に `gh repo view` で決める。決められなければ終了コード 3）。同じ `autoMerge` のランでは、生成物が merge-gate・push・観測に使う `args.repo` をこの値と照合し、違えば終了コード 2（検証と実行の対象がずれる）。`args.repo` が無ければ、継いだ `GH_REPO` が違うとき終了コード 3（観測・PR 作成は `GH_REPO` のリポジトリで行われるため）。`autoMerge` でないランは照合しない（push は `pr-push.sh` の routing ガードが origin と `args.repo` を照合する）。Codex は merge 段の `codex exec` の env に固定する。ターンの後に hook のログと `command_execution` の件数を照合する。拒否の文言は理由コードを含み、`obfuscated` と `credential-read` だけは言い直しの手がかりを 1 文足す（止められた操作を別の綴りで迂回しないことを添える） |
+| ガード | 起動したセッションの設定（hooks・permissions）に従う | Codex は PreToolUse hook（`adapters/codex-hook.sh`）が `agent-guard.sh` を subagent として呼ぶ。マージは merge-exec の段だけ、`MERGE_EXEC_COMMAND`（`lib/guard.mjs`）の完全一致の 1 形を通す。形はその段の PR 番号で具体化し（`mergeExecCommandFor`。番号はホストのプロンプトから取り、決まらなければその段ではマージを許さない）、子の `GH_REPO` を対象リポジトリに固定する（`autoMerge` のランだけ、起動前に `gh repo view` で決める。決められなければ終了コード 3）。同じ `autoMerge` のランでは、生成物が merge-gate・push・観測に使う `args.repo` をこの値と照合し、違えば終了コード 2（検証と実行の対象がずれる）。`args.repo` が無ければ、継いだ `GH_REPO` が違うとき終了コード 3（観測・PR 作成は `GH_REPO` のリポジトリで行われるため）。`autoMerge` でないランは照合しない（push は `pr-push.sh` の routing ガードが origin と `args.repo` を照合する）。Codex は merge 段の `codex exec` の env に固定する。ターンの後に hook のログと `command_execution` の件数を照合する。拒否の文言は理由コードを含み、`obfuscated` と `credential-read`、マージを許す段の `merge-guard` だけは言い直しの手がかりを 1 文足す（止められた操作を別の綴りで迂回しないことを添える）。マージを許す段は、リポジトリの外の空ディレクトリ（`os.tmpdir()` の下。段の後に消す）を cwd にして `--skip-git-repo-check` で起動する（`gh pr merge --delete-branch` がローカルのブランチを見つけず、sandbox で書けない `.git/refs` の削除を試みないように。ローカルの head のブランチは残る）。置き場がリポジトリの中になるときはその段ではマージを許さない |
 | 時間切れ | ランタイム任せ | 段ごと（`timeoutsSec.byPhase`。既定は Plan 20 分・Implement 30 分・Review 20 分 等）。超えたらプロセスを止めて `null`。隔離 worktree を作る git は `timeoutsSec.worktree`（秒。`fetch` は origin との通信を含む fetch で既定 300 = 5 分、`git` はそれ以外の 1 回ごとで既定 120 = 2 分。どちらも省略可・正の整数）を上限にし、超えたらプロセスグループを止めて worktree の作成の失敗（例外）にする |
 
 ## 自動マージと後片づけ
@@ -99,6 +99,14 @@ _/iit-runner/<runId>/
   （正常終了・異常終了・SIGTERM で本体だけが終わった場合を含む）、その場で同じプロセスグループへ SIGKILL を送り、残った子・孫を
   止める。実行仕様の段の子も同じく、終わったときにプロセスグループへ SIGKILL を送り、時間切れ・出力超過で止めた後は猶予
   （2 秒）を過ぎても標準出力が閉じなければ待たずに失敗として決着する。隔離 worktree の後始末はホストの判断に従う。
+- 隔離 worktree は作成時にランナーの pid で lock する（`claude agent <runId>-<n> (pid <pid>)`）。`worktree-remove.sh` を起動するのも同じ
+  プロセスなので、そのままではスクリプトから lock が生存と見え、旧 worktree が `retained-locked` で残る。そこで `worktree-remove.sh` を
+  直接実行する段（掃除の複合段・`state:cleanup:#N` の remove・最終スイープ）の前に、対象のうち「このランナーが作り、いま隔離の段が使って
+  いない」worktree だけ、lock の理由が作成時と一致するときに unlock し、スクリプトが残したものは同じ理由で lock し直す。作った worktree の
+  集合はプロセス内だけに持ち、label やプロンプトからは足さない。`--require-missing` の呼び出しでは外さない。汚れ・submodule の判定は
+  スクリプトが行う。
+- 隔離 worktree の段が返す値の `worktreePath` は、モデルが書き写した値ではなく、ランナーが作ったパスに置き換えて返す（違っていたら
+  ログに残す。キーが無い値には足さない）。
 
 ## 既知の限界
 
@@ -112,7 +120,8 @@ _/iit-runner/<runId>/
   時間切れで `null` になり、ホストの再試行・fail-closed に倒れるため誤った値は通らないが、その分ランが長くなる。
 - Codex はモデルのコマンドを利用者のログインシェル（macOS の既定は zsh）で実行し、呼び出しごとに bash へ固定する設定が無い
   （子の `SHELL=/bin/bash` も効かないことを実測済み）。代替策として、共通の前置き（`lib/preamble.mjs`）に「複数行は
-  `bash <<'EOF'` で実行し、`status` 等の特殊変数名に代入しない」旨の注意を入れ、Codex アダプタは zsh の here-doc が sandbox 内で書けるよう
+  `bash <<'EOF'` で実行し、`status` 等の特殊変数名に代入しない」旨の注意を入れ（マージを許す merge-exec の段だけは here-doc の指示を外し、
+  手順 3 のマージコマンドを包まずに示された 1 行のまま実行させる。ガードが通すのはその 1 行の完全一致だけのため）、Codex アダプタは zsh の here-doc が sandbox 内で書けるよう
   子の env に `TMPPREFIX=<TMPDIR>/zsh` を入れる。モデルが注意に従わず zsh の特殊変数に代入した段は失敗し、ホストの再試行・
   fail-closed に倒れる。
 - `result.json`（と stdout）の `result` はホストの return 値をそのまま写すため、issue のタイトル・エージェントの応答に

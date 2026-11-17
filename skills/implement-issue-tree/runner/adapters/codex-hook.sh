@@ -20,7 +20,7 @@
 #   ログ 1 行 = `<epoch 秒>\t<コード>`。コードは allow・allow-mergeform・deny-guard-missing・deny-error・
 #   deny-noresult・deny:<ガードの理由>・deny-args・deny-no-jq・deny-nocmd。
 #   拒否の文言は `iit-runner: ` で始め、ガードの判定による拒否は `ガードの判定により拒否した（deny:<理由>）`。
-#   理由が obfuscated・credential-read のときだけ、文言の後ろに言い直しの手がかりを 1 文足す（deny_hint）。手がかりは書き方の言い直しだけで、止められた操作を別の綴りで迂回しないことを必ず添える。
+#   理由が obfuscated・credential-read のとき、と --merge-re があるときの merge-guard だけ、文言の後ろに言い直しの手がかりを 1 文足す（deny_hint）。手がかりは書き方の言い直しだけで、止められた操作を別の綴りで迂回しないことを必ず添える。
 #   文字列は JSON へそのまま埋めるため、`"` と `\` と制御文字を含めない（単一引用符で囲み、展開させない）。
 #   ガードの結果行は agent-guard.sh の契約どおり `AGENT_GUARD_RESULT allow` か `AGENT_GUARD_RESULT deny[ <理由>]`
 #   （理由は [a-z-]+。それ以外の形は deny-noresult。理由を JSON へそのまま埋めるため、形を絞ってから使う）。
@@ -41,7 +41,10 @@ deny_hint() {
   case "$1" in
     obfuscated) printf '%s' '。手がかり: 単一引用符の文字列の末尾に $ を置かない（正規表現は全体を括弧で包み、'"'"'(…$)'"'"' の形にする）。$'"'"'…'"'"' と $IFS は使わない。止められた操作そのものを別の綴りで迂回しない。' ;;
     credential-read) printf '%s' '。手がかり: 名前に TOKEN・SECRET・PASSWORD・KEY・PAT などを含む変数（大文字小文字を問わない。pat も該当する）は、展開も表示もしない。件数などは、そうした語を含まない名前（例: hits）の変数に入れる。止められた操作そのものを別の綴りで迂回しない。' ;;
+    # マージを許す段（--merge-re あり）だけ。完全一致の 1 形から外れた書き方（here-doc・bash -c で包む等）で止められたときの言い直し
+    merge-guard) [ -n "$MERGE_RE" ] && printf '%s' '。手がかり: この段で通るマージは、手順 3 に示された 1 行そのものだけである。bash・here-doc・-c で包まず、変数の代入を別の呼び出しに分けず、その 1 行をそのまま 1 回で実行する。止められた操作そのものを別の綴りで迂回しない。' ;;
   esac
+  return 0
 }
 
 log() { [ -n "$LOG" ] && printf '%s\t%s\n' "$(date +%s)" "$1" >> "$LOG"; return 0; }

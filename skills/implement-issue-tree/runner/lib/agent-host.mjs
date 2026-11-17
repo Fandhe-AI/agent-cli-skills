@@ -32,10 +32,23 @@
 // 実行仕様でない呼び出しは、モデルへ回さず、プロンプトの worktree-remove.sh と state.sh の行をホストが検証して順に直接実行する
 // （読めない・対象を確かめられないときは何も実行せず失敗値。読み取りの profile のモデルでは削除も状態の書き込みもできないため）。
 //
+// ランナー自身の lock（Phase 4 の通し確認で、旧 worktree が retained-locked で残った）: 隔離 worktree は作成時に
+// `claude agent <runId>-<n> (pid <ランナーの pid>)` で lock され、worktree-remove.sh を起動するのも同じプロセスなので、スクリプトからは
+// lock が常に生存と見える。worktree-remove.sh を直接実行する段（掃除の複合段・state:cleanup:#N の remove・worktree:sweep）の前に、
+// 対象のうち「このホストが makeWorktree で作り、いま隔離の段が使っていない」worktree だけ、lock の理由が作成時と一致するときに unlock し、
+// スクリプトが消さなかったものは同じ理由で lock し直す。集合はプロセス内だけに持ち、label やプロンプトからは足さない。--require-missing
+// （スクリプトも lock を外さない結びつけ）では外さない。汚れ・submodule の判定はスクリプトに任せる。
+//
+// マージを許す段の cwd（Phase 4 の通し確認で、リモートのマージは済んだのに `gh pr merge --delete-branch` がローカルのブランチ削除で
+// sandbox に拒まれ merge-failed を返した）: req.merge を決めた merge-exec は、リポジトリの外の空ディレクトリ（os.tmpdir() の下）を
+// cwd にする。gh は -R 無し（GH_REPO は flag と数えない）でもローカルにブランチがあるときだけローカル削除を試みるので、git リポジトリの
+// 外ではローカル削除を試みず、リモートのブランチ削除まで進む。置き場がリポジトリの中になってしまうときはマージを許さない（fail-closed）。
+//
 // 呼び出し元: runner/run.mjs（生成物の agent 引数に渡す）と dev/implement-issue-tree/tests/runner-*.test.mjs。
-import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { isAdapterError } from './adapter-error.mjs'
 import { extractJsonObject } from './extract-json.mjs'
@@ -46,7 +59,7 @@ import { isRepoSlug, mergeNumberKinds, mergePrNumberOf } from './merge-target.mj
 import { checkPins, launcherPinPaths, mergePins, pinFiles } from './pins.mjs'
 import { recoverGitFor } from './recover-git.mjs'
 import { CLEANUP_LABEL, CLEAR_WORDS, checkCleanupTarget, parseCleanupPrompt } from './cleanup-host.mjs'
-import { createSequencer, createWorktree, verifyWorktreeGitdir } from './worktree.mjs'
+import { createSequencer, createWorktree, gitLocationFreeEnv, relockOwnWorktree, unlockOwnWorktree, verifyWorktreeGitdir } from './worktree.mjs'
 
 // ---- 実行仕様 ----
 
@@ -368,8 +381,14 @@ export function createAgentHost({ adapter, cfg }) {
   const autoMerge = cfg.args?.autoMerge === true
   const repo = cfg.repo ?? null
   if (repo !== null && !isRepoSlug(repo)) throw new TypeError('cfg.repo は owner/repo の形')
+  const mergeCwdParent = cfg.mergeCwdParent ?? tmpdir()
+  if (typeof mergeCwdParent !== 'string' || !isAbsolute(mergeCwdParent)) throw new TypeError('cfg.mergeCwdParent は絶対パス')
   const seq = createSequencer()
   const limiter = createLimiter(maxParallel)
+  // このホストが makeWorktree で作った worktree（パス → 作成時の lock の理由）と、いま隔離の段が使っている worktree。
+  // 入力（label・プロンプト）からは足さない
+  const ownLocks = new Map()
+  const busy = new Set()
   let adapterCalls = 0
   // ツリーの段（TREE_LABEL）の logDir。ページの段の req.readTmpOf になる（起動した順）
   const treeLogDirs = []
@@ -396,6 +415,83 @@ export function createAgentHost({ adapter, cfg }) {
     }
   }
 
+  /** 自分が作った worktree のキー（作成時のパス）。集合に無ければ null。 */
+  const ownKey = (p) => {
+    if (typeof p !== 'string' || !isAbsolute(p)) return null
+    const r = resolve(p)
+    if (ownLocks.has(r)) return r
+    try {
+      const real = realpathSync(r)
+      if (ownLocks.has(real)) return real
+    } catch { /* 実体が無い */ }
+    return null
+  }
+  /** worktree-remove.sh の前に、自分の lock だけを外す。外したキーの配列を返す（後で relockOwn に渡す）。 */
+  async function unlockOwn(paths, label) {
+    const done = []
+    for (const p of paths) {
+      const key = ownKey(p)
+      if (key === null || done.includes(key)) continue
+      if (busy.has(key)) {
+        log(`⚠️ ${label}: 隔離の段が使用中の worktree なので lock を外さない（${key}）`)
+        continue
+      }
+      const r = await unlockOwnWorktree({ mainRoot, path: key, reason: ownLocks.get(key) })
+      if (r === 'unlocked') {
+        log(`${label}: ランナーが作成時に付けた lock を外してから掃除する（${key}）`)
+        done.push(key)
+      } else if (r === 'other-lock' || r === 'error') {
+        log(`⚠️ ${label}: lock を外さない（${r === 'other-lock' ? '作成時と違う理由の lock' : 'lock を確かめられない'}: ${key}）`)
+      }
+    }
+    return done
+  }
+  /** スクリプトの後、まだ登録が残る（保持された）ものを作成時の理由で lock し直す。 */
+  async function relockOwn(keys, label) {
+    for (const key of keys) {
+      const r = await relockOwnWorktree({ mainRoot, path: key, reason: ownLocks.get(key) })
+      if (r === 'relocked') log(`${label}: 残った worktree を lock し直した（${key}）`)
+      else if (r === 'error') log(`⚠️ ${label}: 残った worktree を lock し直せない（${key}）`)
+    }
+  }
+  /** 直接実行する worktree-remove.sh の対象のパス（remove の --path・sweep の候補）。--require-missing は空（lock を外さない）。 */
+  const removeTargets = (spec, input) => {
+    if (spec.script !== 'worktree-remove.sh') return []
+    const a = spec.argv
+    if (a[0] === 'remove') {
+      if (a.includes('--require-missing')) return []
+      const i = a.indexOf('--path')
+      return i >= 0 && typeof a[i + 1] === 'string' ? [a[i + 1]] : []
+    }
+    if (a[0] === 'sweep') {
+      try {
+        const list = JSON.parse(input.toString('utf8'))
+        return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
+
+  /**
+   * マージを許す段の cwd を作る（リポジトリの外の空ディレクトリ）。git が work tree の中と判定する場所なら作った物を消して null。
+   */
+  const makeMergeCwd = (label) => {
+    let dir = null
+    try {
+      dir = realpathSync(mkdtempSync(join(mergeCwdParent, 'iit-merge-')))
+      // GIT_DIR・GIT_CEILING_DIRECTORIES 等を外した環境で、上へたどって git リポジトリが見つからないことを確かめる
+      const r = spawnSync('git', ['rev-parse', '--git-dir'], { cwd: dir, env: gitLocationFreeEnv(), stdio: ['ignore', 'ignore', 'ignore'], timeout: 10_000 })
+      if (r.status !== 128) throw new Error(r.status === 0 ? 'git リポジトリの中にある' : `判定できない（git の終了コード ${r.status}）`)
+      return dir
+    } catch (e) {
+      log(`⚠️ ${label}: マージの段の cwd をリポジトリの外に用意できない（${sanitizeErrorLine(e?.message ?? e)}）。この段ではマージを許さない`)
+      if (dir !== null) try { rmSync(dir, { recursive: true, force: true }) } catch { /* 消せなくても続ける */ }
+      return null
+    }
+  }
+
   async function runDirect(spec, label, schema, prompt, logDir, timeoutMs, rec) {
     // 直接実行の段は会話が無い（sessionRef は null のまま）。成否は status に残す
     rec.outcome = 'exec-spec'
@@ -416,7 +512,10 @@ export function createAgentHost({ adapter, cfg }) {
     const input = spec.stdinHex === undefined ? Buffer.alloc(0) : Buffer.from(spec.stdinHex, 'hex')
     writeLog(logDir, 'exec.json', { script: spec.script, argv: spec.argv, ret: spec.ret, stdinBytes: input.length, cwd: mainRoot })
     const started = Date.now()
+    const unlocked = await unlockOwn(removeTargets(spec, input), label)
+    if (unlocked.length > 0) rec.unlocked = unlocked
     const r = await runScript('bash', args, { cwd: mainRoot, input, timeoutMs }, { label, prompt, spec })
+    await relockOwn(unlocked, label)
     writeLog(logDir, 'stdout.txt', r.stdout ?? '')
     writeLog(logDir, 'stderr.txt', r.stderr ?? '')
     const value = interpretExecResult(spec.ret, r)
@@ -467,7 +566,10 @@ export function createAgentHost({ adapter, cfg }) {
       writeLog(logDir, `stderr-${name}.txt`, r.stderr ?? '')
       return { r }
     }
+    const unlocked = p.remove.argv.includes('--require-missing') ? [] : await unlockOwn([p.path], label)
+    if (unlocked.length > 0) rec.unlocked = unlocked
     const s1 = await step('worktree-remove.sh', p.remove.sha256, p.remove.argv, '')
+    await relockOwn(unlocked, label)
     if (s1.refused) return refuse(s1.refused)
     const raw = interpretExecResult('line:WORKTREE_REMOVE_RESULT', s1.r)
     const base = { code: s1.r.code, timedOut: s1.r.timedOut, overflow: s1.r.overflow }
@@ -523,7 +625,7 @@ export function createAgentHost({ adapter, cfg }) {
     return v.ok ? { ok: true, value: obj } : { ok: false, errors: v.errors }
   }
 
-  async function runModel({ prompt, opts, label, schema, n, logDir, timeoutMs, rec }) {
+  async function runModel({ prompt, opts, label, schema, n, logDir, timeoutMs, rec, using }) {
     // 固定の食い違いの後は、隔離 worktree も作らない（fetch・worktree add・lock の .git への書き込みを起こさない）
     if (pinMismatch()) {
       Object.assign(rec, { outcome: 'null', status: 'null', sessionRef: null, reason: 'pin-mismatch', detail: tampered })
@@ -541,6 +643,9 @@ export function createAgentHost({ adapter, cfg }) {
       const wt = await makeWorktree({ mainRoot, runId, n })
       cwd = wt.path
       worktreePath = wt.path
+      if (typeof wt.lockReason === 'string' && wt.lockReason !== '' && typeof wt.path === 'string') ownLocks.set(wt.path, wt.lockReason)
+      busy.add(wt.path)
+      using.path = wt.path
       if (wt.gitdir !== undefined) worktreeGitdir = verifyWorktreeGitdir(mainRoot, wt.gitdir)
     }
     // マージしてよい対象（契約の req.merge。MEDIUM-8）。PR 番号は前置きを足す前のホストのプロンプトから取る。
@@ -550,12 +655,18 @@ export function createAgentHost({ adapter, cfg }) {
     if (autoMerge && /^merge-exec(?::|$)/.test(label)) {
       const prNumber = mergePrNumberOf(prompt)
       const kinds = mergeNumberKinds(prompt)
-      if (prNumber !== null && repo !== null) merge = { prNumber, repo }
-      else if (prNumber === null && kinds === 0) { /* 回復専用の段: マージのコマンドを含まない */ }
+      if (prNumber !== null && repo !== null) {
+        const dir = makeMergeCwd(label)
+        if (dir !== null) {
+          merge = { prNumber, repo }
+          cwd = dir
+          using.mergeCwd = dir
+        }
+      } else if (prNumber === null && kinds === 0) { /* 回復専用の段: マージのコマンドを含まない */ }
       else log(`⚠️ ${label}: マージ対象を決められない（${prNumber === null ? `プロンプトの gh pr merge の PR 番号が ${kinds} 種類で、手順 3 の形の 1 種類に決まらない` : 'repo が未確定'}）。この段ではマージを許さない`)
     }
     const req = {
-      prompt: composePrompt({ prompt, schema, worktreePath }),
+      prompt: composePrompt({ prompt, schema, worktreePath, merge: merge !== null }),
       schema,
       model: resolved.model,
       effort: resolved.effort,
@@ -605,6 +716,13 @@ export function createAgentHost({ adapter, cfg }) {
       }
       const c = check(schema, r.value?.text)
       if (c.ok) {
+        // 隔離の段の worktreePath は、モデルの書き写しでなくランナーが作ったパスを返す（Phase 4 の通し確認で、fix の段が
+        // パスの後ろに語を足した値を返し、ホストの sanitizeWorktreePath が空にして追跡できなくなった）
+        if (worktreePath !== undefined && isPlainObject(c.value) && Object.hasOwn(c.value, 'worktreePath') && c.value.worktreePath !== worktreePath) {
+          log(`⚠️ ${label}: 返された worktreePath が作成したパスと違うため、作成したパスに置き換える（返された値: ${sanitizeErrorLine(String(c.value.worktreePath)).slice(0, 200)}）`)
+          c.value.worktreePath = worktreePath
+          rec.worktreePathReplaced = true
+        }
         outcome(turn === 0 ? 'ok' : 'repaired', { usage: r.value?.usage ?? null })
         return c.value
       }
@@ -648,7 +766,15 @@ export function createAgentHost({ adapter, cfg }) {
         }
         if (parsed.kind === 'spec') return await runDirect(parsed.spec, label, schema, prompt, logDir, timeoutMs, rec)
         if (CLEANUP_LABEL.test(label) && opts.isolation === undefined) return await runHostCleanup(label, schema, prompt, logDir, timeoutMs, rec)
-        return await runModel({ prompt, opts, label, schema, n, logDir, timeoutMs, rec })
+        const using = { path: null, mergeCwd: null }
+        try {
+          return await runModel({ prompt, opts, label, schema, n, logDir, timeoutMs, rec, using })
+        } finally {
+          if (using.path !== null) busy.delete(using.path)
+          if (using.mergeCwd !== null) {
+            try { rmSync(using.mergeCwd, { recursive: true, force: true }) } catch (e) { log(`⚠️ ${label}: マージの段の cwd を消せない: ${sanitizeErrorLine(e?.message ?? e)}`) }
+          }
+        }
       } finally {
         release()
       }
