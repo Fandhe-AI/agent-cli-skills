@@ -3099,8 +3099,7 @@ async function loadState() {
   // 照合する（Codex P1）。両エージェントが同じ項目を読み落としても、件数を合わせて捏造しても、 sha256 は推測で合わせられないため不一致になり停止する。正規形は jq の keys と同じ文字列昇順の JSON 配列（末尾改行なし）。ダイジェストと件数は state.sh verify が全ページの封筒に載せ、mergeStateVerify がページ間の一致を要求する（以前の KEYS 行の置き換え。Bugbot 指摘の「切れた出力から推測した値と自己参照で一致し得る」経路は封筒の sha256 が塞ぐ）。件数（keysCount）も hashes の件数と照合する。
   if (!check || (check.fileExists === false && result.fileExisted) ||
     (check.fileExists && (sha256Hex(canonicalJson(Object.keys(check.hashes).sort())) !== check.keysSha256 ||
-      Object.keys(check.hashes).length !== check.keysCount ||
-      check.highWaterBytes !== result.highWaterBytes || check.highWaterVersion !== result.highWaterVersion))) {
+      Object.keys(check.hashes).length !== check.keysCount))) {
     throw new Error(
       `状態ファイル（${STATE_FILE}）の内容照合が成立しなかったため停止した（新規着手 0 件）。再実行し、解消しなければ退避（mv ${STATE_FILE} ${STATE_FILE}.aside）して確認する`,
     )
@@ -3132,15 +3131,15 @@ async function loadState() {
       `⚠️ state-unverified ${unverified.length} 件（再取得 2 巡後も未照合: ${unverified.slice(0, 20).join(', ')}）`,
     )
   }
-  // 高水位は読込・検証の両エージェントの値の一致を上の停止条件で要求済み（不一致を 0 へ置き換えて続行すると過去の実測に基づく容量予約を失い並列着手時に容量を過小評価するため、停止する。Codex P1）。ファイルを検証できなかった新規作成時のみ 0 / 0（高水位なし・version 0 は decideRunStartHighWater が無効化する安全側。Issue #471 / #496）。
+  // 高水位の正本は state.sh verify の封筒（mergeStateVerify がページ間の一致と非負整数を検査済み）とし、読込エージェントの書き写した値は使わない。以前は両エージェントの一致を停止条件にしていたが、P5（Issue #603）で検証側が決定的なスクリプトになった後は、読込側（haiku）が `jq . > /dev/null` だけで hw を 0 / 0 と返すと、正しい状態ファイルでも毎回「内容照合が成立しなかった」で止まっていた（高水位が 0 以外のファイルで再現）。0 へ置き換えて続行しない（容量予約を失わない。Codex P1）点は、検証側の値を採ることで保つ。ファイルを検証できなかった新規作成時のみ 0 / 0（高水位なし・version 0 は decideRunStartHighWater が無効化する安全側。Issue #471 / #496）。
   const hwOk = check.fileExists === true
   return {
     items: adopted,
     verified,
     unverified: unverified.map(Number),
     keys: hwOk ? Object.keys(check.hashes) : [],
-    highWaterBytes: hwOk ? result.highWaterBytes : 0,
-    highWaterVersion: hwOk ? result.highWaterVersion : 0,
+    highWaterBytes: hwOk ? check.highWaterBytes : 0,
+    highWaterVersion: hwOk ? check.highWaterVersion : 0,
   }
 }
 

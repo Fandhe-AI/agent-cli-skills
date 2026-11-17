@@ -3099,8 +3099,7 @@ const d=await zn()
 
 if(!d||(d.fileExists===false&&b.fileExisted)||
 (d.fileExists&&(UF(gx(Object.keys(d.hashes).sort()))!==d.keysSha256||
-Object.keys(d.hashes).length!==d.keysCount||
-d.highWaterBytes!==b.highWaterBytes||d.highWaterVersion!==b.highWaterVersion))){
+Object.keys(d.hashes).length!==d.keysCount))){
 throw new Error(
 `状態ファイル（${Hz}）の内容照合が成立しなかったため停止した（新規着手 0 件）。再実行し、解消しなければ退避（mv ${Hz} ${Hz}.aside）して確認する`,
 )
@@ -3139,8 +3138,8 @@ items:f,
 verified:i,
 unverified:h.map(Number),
 keys:j?Object.keys(d.hashes):[],
-highWaterBytes:j?b.highWaterBytes:0,
-highWaterVersion:j?b.highWaterVersion:0,
+highWaterBytes:j?d.highWaterBytes:0,
+highWaterVersion:j?d.highWaterVersion:0,
 }
 }
 

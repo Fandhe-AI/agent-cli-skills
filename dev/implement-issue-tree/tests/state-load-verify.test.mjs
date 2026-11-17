@@ -293,7 +293,7 @@ test('loadState: 捏造 items（PR = issue + 1006）は採用せず state-unveri
   assert.ok(logs.some((l) => /state-unverified 4 件/.test(l)))
 })
 
-test('loadState: 実ファイルと一致する items は採用し、高水位は両エージェントが一致しなければ停止する', async () => {
+test('loadState: 実ファイルと一致する items は採用し、高水位は検証側（state.sh verify）の値を採る', async () => {
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
@@ -307,14 +307,28 @@ test('loadState: 実ファイルと一致する items は採用し、高水位�
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
-      : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: Object.keys(SAMPLE_JQ_HASHES).length, highWaterBytes: 1, highWaterVersion: 2 })
-  // 高水位が両エージェントで食い違う場合は 0 へ置き換えて続行せず停止する（容量予約を失わない。Codex P1）
-  await assert.rejects(() => loadState(), /成立しなかったため停止した/)
-  installAgentStub((opts) =>
-    opts.label === 'state:load'
-      ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
-      : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: 4, highWaterBytes: 4096, highWaterVersion: 1 })
-  await assert.rejects(() => loadState(), /成立しなかったため停止した/)
+      : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: Object.keys(SAMPLE_JQ_HASHES).length, highWaterBytes: 1, highWaterVersion: 1 })
+  // 読込側の書き写しが食い違っても停止せず、0 へも置き換えず、検証側の値を採る（容量予約を失わない。Codex P1）
+  const r2 = await loadState()
+  assert.equal(r2.verified, true)
+  assert.equal(r2.highWaterBytes, 1)
+  assert.equal(r2.highWaterVersion, 1)
+})
+
+test('loadState: 読込側が items 空・高水位 0 / 0 を返しても、検証側の高水位を採り fill で全件を取り直して続行する', async () => {
+  // 実ランの失敗形: haiku が `jq . > /dev/null` だけで items: {}・hw 0 / 0 を返し、検証側は hw > 0 を返す。以前は hw の不一致で停止していた
+  const { calls } = installAgentStub((opts) => {
+    if (opts.label === 'state:load') return loadResult({}, { highWaterBytes: 0, highWaterVersion: 0 })
+    if (opts.label.startsWith('state:load-fill')) return { items: sampleItems }
+    return { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: Object.keys(SAMPLE_JQ_HASHES).length, highWaterBytes: 5133176832, highWaterVersion: 2 }
+  })
+  const r = await loadState()
+  assert.equal(r.verified, true)
+  assert.deepEqual(Object.keys(r.items).sort(), ['42', '43', '44', '45'])
+  assert.deepEqual(r.unverified, [])
+  assert.equal(r.highWaterBytes, 5133176832)
+  assert.equal(r.highWaterVersion, 2)
+  assert.ok(calls.some((c) => c.opts.label.startsWith('state:load-fill')))
 })
 
 test('loadState: closedCleanupTried を持つ項目（読込側が入れ子のキー順を変えて返す）も採用し verified: true', async () => {
