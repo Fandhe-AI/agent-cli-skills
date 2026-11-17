@@ -592,14 +592,16 @@ test('spawnScript: 新しいセッションへ抜けた孫が標準出力を握�
   }
 })
 
-test('spawnScript: 時間切れはまず SIGTERM を送り、子が先に終わっても孫の片づけ（git の *.lock の削除に当たる）を SIGKILL で撃たない', async () => {
-  // 子の bash は trap を持たず SIGTERM で先に終わる（launcher と同じ）。孫は SIGTERM の trap で少し待ってから印を書く
-  const mark = join(root, `ss-term-${Math.random().toString(16).slice(2)}.done`)
-  const script = `( trap 'sleep 0.3; echo cleaned > "${mark}"; exit 0' TERM; while :; do sleep 0.05; done ); :`
-  const r = await spawnScript('bash', ['-c', script], { cwd: root, input: '', timeoutMs: 300, killGraceMs: 2000 })
-  assert.equal(r.timedOut, true)
-  assert.equal(existsSync(mark) ? readFileSync(mark, 'utf8').trim() : null, 'cleaned', 'SIGTERM の片づけが SIGKILL で打ち切られた')
-})
+for (const [name, redirect] of [['標準出力を握る孫', ''], ['標準出力・標準エラーを /dev/null へ向けた孫（close が先に来る）', ' >/dev/null 2>&1']]) {
+  test(`spawnScript: 時間切れはまず SIGTERM を送り、子が先に終わっても${name}の片づけ（git の *.lock の削除に当たる）を SIGKILL で撃たない`, async () => {
+    // 子の bash は trap を持たず SIGTERM で先に終わる（launcher と同じ）。孫は SIGTERM の trap で少し待ってから印を書く
+    const mark = join(root, `ss-term-${Math.random().toString(16).slice(2)}.done`)
+    const script = `( trap 'sleep 0.3; echo cleaned > "${mark}"; exit 0' TERM; while :; do sleep 0.05; done )${redirect}; :`
+    const r = await spawnScript('bash', ['-c', script], { cwd: root, input: '', timeoutMs: 300, killGraceMs: 2000 })
+    assert.equal(r.timedOut, true)
+    assert.equal(existsSync(mark) ? readFileSync(mark, 'utf8').trim() : null, 'cleaned', 'SIGTERM の片づけが SIGKILL で打ち切られた')
+  })
+}
 
 test('spawnScript: SIGTERM を無視する孫は、猶予の後に SIGKILL で止めて timedOut で決着する', async () => {
   const pidFile = join(root, `ss-ign-${Math.random().toString(16).slice(2)}.pid`)
