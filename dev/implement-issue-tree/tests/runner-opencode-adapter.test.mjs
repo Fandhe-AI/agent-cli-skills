@@ -625,3 +625,29 @@ test('作り直し: 終了した serve を並列の run が同時に見ても、
   }
   assert.deepEqual(left, [], 'close の後に serve が残らない')
 })
+
+// --- halt の期限（PR #851 の Bugbot）: interrupt が応答しないとき、halt 全体が agent-host の watchdog の猶予（30 秒）に収まる ---
+test('halt の期限: 時間切れの interrupt が応答しなくても、apiTimeoutMs を丸ごと待たずに短い期限で serve を止めて戻る', { timeout: 60000 }, async () => {
+  const t = setup({ toolConfig: { apiTimeoutMs: 20000 }, env: { FAKE_OC_HANGS: 'interrupt' } })
+  await t.adapter.start()
+  try {
+    const pid = starts(t.records())[0].pid
+    const { ms, err } = await elapsed(() => t.adapter.run(t.req({ prompt: '[[HANG]]', timeoutMs: 400 })))
+    assert.equal(err?.kind, 'timeout')
+    assert.ok(ms < 12000, `halt が apiTimeoutMs（20000 ms）を待たない（${ms} ms）`)
+    assert.ok(await dead(pid), '止まったと確かめられないので serve を止めた')
+  } finally { await t.adapter.close() }
+})
+
+test('halt の期限: interrupt が応答すれば、時間切れの後も serve は止めずに次の run で使い回す', { timeout: 20000 }, async () => {
+  const t = setup()
+  await t.adapter.start()
+  try {
+    const pid = starts(t.records())[0].pid
+    const e = await kindOf(t.adapter.run(t.req({ prompt: '[[HANG]]', timeoutMs: 400 })))
+    assert.equal(e.kind, 'timeout')
+    assert.ok(alive(pid), 'serve は生きている')
+    assert.match((await t.adapter.run(t.req())).text, /^reply-1:/)
+    assert.equal(starts(t.records()).length, 1, '作り直さない')
+  } finally { await t.adapter.close() }
+})

@@ -68,6 +68,10 @@ const PLUGIN_DIR = join(dirname(fileURLToPath(import.meta.url)), 'opencode-plugi
 export const MERGE_RES = Object.freeze([MERGE_EXEC_COMMAND.source])
 
 const MARKER_WAIT_MS = 5000
+// halt（時間切れ・ask・prompt の通信エラーの後のセッションの停止）で interrupt の応答を待つ上限。apiTimeoutMs がこれより短ければ
+// そちら。halt 全体（これ + killServe の最大 2.5 秒）を agent-host の watchdog の猶予（timeoutMs + 30 秒）に収める（PR #851 の
+// Bugbot。apiTimeoutMs を丸ごと待つと猶予を超え、halt の最中に run が見放されて、別の run が使い回し始めた serve を止め得た）
+const HALT_INTERRUPT_MS = 5000
 const MESSAGE_PAGE = 100
 const MESSAGE_PAGE_MAX = 1000 // 100 件 × 1000 ページを超えるセッションは数え切れないものとして拒否する
 
@@ -393,9 +397,13 @@ export function createAdapter(cfg) {
     await waitExit(serve, 1000)
   }
 
-  /** セッションを止める。止まったと確認できなければ serve を終了させる（元のセッションが動き続けないように）。 */
+  /**
+   * セッションを止める。止まったと確認できなければ serve を終了させる（元のセッションが動き続けないように）。
+   * interrupt は run の deadline ではなく halt 専用の短い期限で打ち切る（時間切れの後は run の残り時間が無く、
+   * 応答する serve まで止めてしまうため）。
+   */
   async function haltSession(serve, sid) {
-    if (!(await interrupt(serve, sid))) await killServe(serve)
+    if (!(await interrupt(serve, sid, Date.now() + Math.min(apiTimeoutMs, HALT_INTERRUPT_MS)))) await killServe(serve)
   }
 
   async function pollState(serve, sid, deadline) {

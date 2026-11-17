@@ -157,7 +157,9 @@ _/iit-runner/<runId>/
   - `OPENCODE_CONFIG_CONTENT`（ランナーの設定。plugin の目印の nonce・ガードのパスを含む。認証情報ではない）は shell の env に残る。
 - OpenCode の serve への各要求と本文の読み取りには期限がある（`toolConfig.opencode.apiTimeoutMs`。既定は `timeoutsSec.default` と
   30 秒の小さいほう。run の中の要求は run の残り時間でも打ち切る）。応答が来ないときは、セッションを interrupt し、止まったと
-  確認できなければ serve を（SIGTERM、続けて SIGKILL で）終了させる。終了した serve は次の run で作り直す。
+  確認できなければ serve を（SIGTERM、続けて SIGKILL で）終了させる。この interrupt の応答は `apiTimeoutMs` と 5 秒の小さいほうまで
+  しか待たない（serve の停止を含めて、ホストの保険の時間切れ〔段の時間切れ + 30 秒〕より前に終える）。終了した serve は次の run で
+  作り直す。
 - OpenCode のガードの置き場（`agent-guard.sh`・ランナー専用 plugin・`~/.config/opencode/`・`.opencode/(hooks|plugins?)/`・
   `opencode.json(c)`・ランのガードのログと目印）への書き込みの拒否は、edit 系はパスの照合、shell はコマンド文字列の照合である。
   スキルの置き場（`args.skillDir`。実行仕様の launcher `scripts/run-verified.sh` を含む）は edit 系のパスの照合だけで拒否する。
