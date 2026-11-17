@@ -128,14 +128,16 @@ for (const path of REAL_GUARDS) {
 // 文言はここで固定する（手がかりは言い直しの方法だけで、止められた操作を別の綴りで迂回しないことを添える）。
 const HINTS = {
   'deny:obfuscated': "。手がかり: 単一引用符の文字列の末尾に $ を置かない（正規表現は全体を括弧で包み、'(…$)' の形にする）。$'…' と $IFS は使わない。止められた操作そのものを別の綴りで迂回しない。",
-  'deny:credential-read': '。手がかり: 名前に TOKEN・SECRET・PASSWORD・KEY などを含む変数は、展開も表示もしない。件数などは、そうした語を含まない名前（例: hits）の変数に入れる。止められた操作そのものを別の綴りで迂回しない。',
+  'deny:credential-read': '。手がかり: 名前に TOKEN・SECRET・PASSWORD・KEY・PAT などを含む変数（大文字小文字を問わない。pat も該当する）は、展開も表示もしない。件数などは、そうした語を含まない名前（例: hits）の変数に入れる。止められた操作そのものを別の綴りで迂回しない。',
 }
 
 // 手がかりの対の実測: 左は配布物のガードが該当の理由で止める形、右は手がかりどおりに言い直した形（ガードは allow）。
 const HINT_PAIRS = [
-  ['deny:obfuscated', `pat='(token|secret)$'; n=$(grep -cE "$pat" f); echo "$n"`, `pat='((token|secret)$)'; n=$(grep -cE "$pat" f); echo "$n"`],
+  ['deny:obfuscated', `re='(token|secret)$'; n=$(grep -cE "$re" f); echo "$n"`, `re='((token|secret)$)'; n=$(grep -cE "$re" f); echo "$n"`],
   ['deny:obfuscated', String.raw`n=$(git diff | grep -cE '^\+.*foo$'); echo $n`, String.raw`n=$(git diff | grep -cE '(^\+.*foo$)'); echo $n`],
   ['deny:credential-read', 'TOKEN_HITS=$(grep -c token f); echo $TOKEN_HITS', 'hits=$(grep -c token f); echo $hits'],
+  // 小文字の pat（パターンの略）も #854 以降は PAT と同じ扱いで止まる。手がかりどおり別の名前にすれば通る
+  ['deny:credential-read', `pat='(foo)'; n=$(grep -cE "$pat" f); echo "$n"`, `re='(foo)'; n=$(grep -cE "$re" f); echo "$n"`],
 ]
 
 test('拒否の文言: obfuscated と credential-read には言い直しの手がかりを 1 文足す（hook の JSON）', () => {
