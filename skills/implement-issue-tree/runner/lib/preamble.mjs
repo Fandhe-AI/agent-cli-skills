@@ -62,8 +62,12 @@ export function composePrompt({ prompt, schema, worktreePath }) {
 }
 
 /**
- * 修復ターンの指示（同じ会話で 1 回だけ使う）。errors は schema-validate の errors か、
- * 「JSON を取り出せなかった」旨の短い文。値の中身は載せない。
+ * 修復ターンの指示（同じ会話で 1 回だけ使う）。値の中身は載せない。
+ * 呼び出し元は lib/agent-host.mjs の 1 か所で、check() の errors（文字列の配列）をそのまま渡す。
+ * @param {string[]} errors  schema-validate の errors（不適合の理由。先頭 20 件だけ使う）。
+ *   空の配列は応答から JSON を取り出せなかったことを表し、その旨の固定文 1 行に置き換える。
+ *   文字列そのもの（配列でない値）は受けない
+ * @returns {string}
  */
 export function buildRepairPrompt(errors) {
   const list = (errors.length > 0 ? errors : ['応答から JSON オブジェクトを取り出せなかった']).slice(0, 20)
