@@ -383,6 +383,13 @@ test('preamble: 修復プロンプトは errors を列挙し、空なら JSON �
   assert.equal((many.match(/^- e/gm) ?? []).length, 20)
 })
 
+test('preamble（Issue #856）: 修復プロンプトは文字列 1 つの errors でも落ちずに 1 件として列挙し、配列でも文字列でもない値は取り出し失敗の文にする', () => {
+  const p = buildRepairPrompt('$.ok: 型が boolean でない')
+  assert.match(p, /^- \$\.ok: 型が boolean でない$/m)
+  assert.equal((p.match(/^- /gm) ?? []).length, 1)
+  for (const v of [undefined, null, 3, { length: 1 }]) assert.match(buildRepairPrompt(v), /取り出せなかった/, String(v))
+})
+
 // ---------------------------------------------------------------------------
 // models
 // ---------------------------------------------------------------------------
