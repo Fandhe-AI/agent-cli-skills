@@ -17,7 +17,8 @@
 // toolConfig のキー（既定値は runner/config/default.json の toolConfig.codex。コード側の既定も同じ）:
 //   deleteSessions: close でラン中に作ったセッションを `codex delete --force` する（契約どおり）
 //   codexBin ("codex")・codexHome（上記）・guardScript（agent-guard.sh の絶対パス。既定は lib/guard-script.mjs の探索）・
-//   trustProject (false)・killGraceMs (2000。SIGTERM から SIGKILL までの猶予)・extraWritePaths ([]。push 先のローカル origin 等)
+//   trustProject (false)・killGraceMs (2000。SIGTERM から SIGKILL までの猶予)・extraWritePaths ([]。push 先のローカル origin 等。
+//   正規化済みの絶対パスの配列のみ。lib/path-list.mjs が設定の読み込みとアダプタの両方で検査する)
 // req の任意の追加: profile ('read' | 'impl'。permission profile の上書き)。
 //
 // ガード（0-3）: hook は fail-open（スクリプトが無い・exit 1・時間切れで素通し）なので、
@@ -106,6 +107,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AdapterError } from '../lib/adapter-error.mjs'
 import { mergeExecCommandFor } from '../lib/guard.mjs'
+import { isNormalizedAbsPathList } from '../lib/path-list.mjs'
 import { isMergeTarget } from '../lib/merge-target.mjs'
 import { GUARD_SCRIPT_MISSING, findGuardScript } from '../lib/guard-script.mjs'
 import { decodeStrictText, strictifySchema } from './codex-strict.mjs'
@@ -203,6 +205,13 @@ export function checkWritablePaths(v) {
   return v
 }
 
+/** toolConfig.extraWritePaths を検証して返す（無ければ []）。形が不正なら例外（文字列を 1 文字ずつ展開させない。PR #851 の P1）。 */
+export function checkExtraWritePaths(v) {
+  if (v === null || v === undefined) return []
+  if (!isNormalizedAbsPathList(v)) throw new AdapterError('denied', 'extraWritePaths が正規化済みの絶対パス（"/" 以外）の配列でない')
+  return v
+}
+
 /**
  * permission profile の `-c` 引数（2 引数 × 2）。純関数。
  * @param {{ kind: 'read'|'impl', cwd: string, codexHome: string, tmpDir: string, tmpRoot?: string|null, readablePaths?: string[], home: string, git: null | { gitdir: string, commonDir: string }, writablePaths?: string[], extraWritePaths?: string[], platform?: string }} o
@@ -248,7 +257,7 @@ export function buildProfileArgs({ kind, cwd, codexHome, tmpDir, tmpRoot = null,
     }
   }
   for (const p of platformWritePaths(platform)) fs[p] = 'write'
-  for (const p of extraWritePaths) fs[p] = 'write'
+  for (const p of checkExtraWritePaths(extraWritePaths)) fs[p] = 'write'
   for (const p of writablePaths) fs[p] = 'write'
   fs[join(codexHome, 'auth.json')] = 'deny'
   fs[join(home, '.codex', 'auth.json')] = 'deny'
@@ -428,6 +437,13 @@ function execFileP(file, args, opts) {
   return new Promise((res) => execFile(file, args, { ...opts, encoding: 'utf8' }, (err, stdout, stderr) => res({ err, stdout, stderr })))
 }
 
+// codex の標準出力・標準エラーの上限。直接実行側（lib/agent-host.mjs の spawnScript）と同じ値: 標準出力 16 MiB を超えたら
+// プロセスグループごと止めて失敗にする。標準エラーは先頭 1 MiB だけ残し（spawnScript と同じ）、暴走（残す量の 16 倍 =
+// 16 MiB 超）は標準出力と同様に止める。JSONL のイベントは 1 ターンで数 MiB に収まる実測（aggregated_output を含む）ため余裕がある。
+export const MAX_STDOUT_BYTES = 16 * 1024 * 1024
+export const MAX_STDERR_KEEP_BYTES = 1024 * 1024
+export const MAX_STDERR_TOTAL_BYTES = 16 * 1024 * 1024
+
 const killGroup = (pid, sig) => { try { process.kill(-pid, sig) } catch { /* 既に終了 */ } }
 
 /**
@@ -528,6 +544,7 @@ export function createAdapter(cfg) {
     await start()
     // 起動前に検証する（不正な worktreeGitdir・writablePaths では codex を起動しない）
     worktreeGit(cfg.mainRoot, req.worktreeGitdir)
+    checkExtraWritePaths(tc.extraWritePaths)
     const writablePaths = checkWritablePaths(req.writablePaths)
     const readablePaths = readableTmpDirs(req.readTmpOf)
     const recover = checkRecoverGit(cfg.mainRoot, req.recoverGit)
@@ -566,8 +583,12 @@ export function createAdapter(cfg) {
     const hookBefore = countLines(hookLog)
     const input = resume ? resume.message : prompt
     const res = await new Promise((done) => {
-      let out = ''
-      let err = ''
+      // Buffer のまま溜め、終了時に連結してから復号する（チャンクごとに文字列化すると UTF-8 の複数バイト文字が境界で壊れる）
+      const outChunks = []
+      const errChunks = []
+      let outBytes = 0
+      let errBytes = 0
+      let overflow = null
       let timedOut = false
       let settled = false
       const p = spawn(bin, args, { cwd, env: childEnv(merge, tmpDir), stdio: ['pipe', 'pipe', 'pipe'], detached: true })
@@ -585,10 +606,25 @@ export function createAdapter(cfg) {
         clearTimeout(termTimer)
         running.delete(p)
         if (timedOut) killGroup(p.pid, 'SIGKILL')
-        done({ out, err, timedOut, exitCode, signal, spawnError })
+        done({ out: Buffer.concat(outChunks).toString('utf8'), err: Buffer.concat(errChunks).toString('utf8'), timedOut, overflow, exitCode, signal, spawnError })
       }
-      p.stdout.on('data', (d) => { out += d })
-      p.stderr.on('data', (d) => { err += d })
+      const stop = (which) => {
+        if (overflow !== null) return
+        overflow = which
+        killGroup(p.pid, 'SIGKILL')
+      }
+      p.stdout.on('data', (d) => {
+        if (overflow !== null) return
+        outBytes += d.length
+        if (outBytes > MAX_STDOUT_BYTES) { stop('stdout'); return }
+        outChunks.push(d)
+      })
+      p.stderr.on('data', (d) => {
+        if (overflow !== null) return
+        if (errBytes < MAX_STDERR_KEEP_BYTES) errChunks.push(d.subarray(0, MAX_STDERR_KEEP_BYTES - errBytes))
+        errBytes += d.length
+        if (errBytes > MAX_STDERR_TOTAL_BYTES) stop('stderr')
+      })
       p.on('error', (e) => finish({ exitCode: null, spawnError: e.code ?? e.message }))
       // codex が終わったら（正常終了を含む）、同じプロセスグループに残った子・孫をその場で SIGKILL する。終了後は running から
       // 外れて close・killSync の対象にならないため（PR #851 の codex P1）。回収直後に送るので pid の再利用で別のグループは撃たない
@@ -605,6 +641,10 @@ export function createAdapter(cfg) {
     const sessionRef = summary.threadIds.find((id) => UUID.test(id)) ?? resume?.sessionRef ?? undefined
     const extra = sessionRef ? { sessionRef } : {}
 
+    if (res.overflow !== null) {
+      const limit = res.overflow === 'stdout' ? MAX_STDOUT_BYTES : MAX_STDERR_TOTAL_BYTES
+      throw new AdapterError('exit', `codex の${res.overflow === 'stdout' ? '標準出力' : '標準エラー'}が上限（${limit} バイト）を超えたのでプロセスグループを止めた`, extra)
+    }
     const failure = classifyFailure({ ...res, summary })
     if (failure) throw new AdapterError(failure.kind, failure.message, extra)
 

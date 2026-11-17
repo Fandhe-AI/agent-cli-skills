@@ -438,6 +438,13 @@ test('models: validateConfig は表の欠落・未知のモデル名・不正な
     (c) => { c.toolConfig.codex = 'codex' },
     (c) => { c.toolConfig.opencode = {} },
     (c) => { c.toolConfig.codex.models = {} },
+    (c) => { c.toolConfig.codex.extraWritePaths = '/tmp/origin' },
+    (c) => { c.toolConfig.codex.extraWritePaths = [''] },
+    (c) => { c.toolConfig.codex.extraWritePaths = ['rel/path'] },
+    (c) => { c.toolConfig.codex.extraWritePaths = ['/a/../b'] },
+    (c) => { c.toolConfig.codex.extraWritePaths = ['/tmp/'] },
+    (c) => { c.toolConfig.codex.extraWritePaths = [1] },
+    (c) => { c.toolConfig.codex.extraWritePaths = ['/'] },
   ]
   for (const mutate of mutations) {
     const c = base()
@@ -445,6 +452,9 @@ test('models: validateConfig は表の欠落・未知のモデル名・不正な
     assert.throws(() => validateConfig(c), /ランナー設定が不正/, mutate.toString())
   }
   assert.doesNotThrow(() => validateConfig(base()))
+  const okPaths = base()
+  okPaths.toolConfig.codex.extraWritePaths = ['/tmp/origin', '/var/x']
+  assert.doesNotThrow(() => validateConfig(okPaths))
   assert.doesNotThrow(() => validateConfig((({ toolConfig: _, ...c }) => c)(base())), 'toolConfig は省ける')
 })
 

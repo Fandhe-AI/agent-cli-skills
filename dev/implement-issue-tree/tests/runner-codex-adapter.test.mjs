@@ -661,7 +661,7 @@ test('killSync（LOW-11）: 実行中の codex のプロセスグループ（孫
   trackTmp(pidFile)
   const t = setup({ turns: [okTurn({ hang: true, grandchild: pidFile })] })
   assert.equal(typeof t.adapter.killSync, 'function')
-  const p = t.adapter.run(t.req({ timeoutMs: 60000 }))
+  const p = t.adapter.run(t.req({ timeoutMs: 12000 }))
   for (let i = 0; i < 50 && !existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 100))
   const gc = Number(readFileSync(pidFile, 'utf8'))
   t.adapter.killSync()
@@ -866,4 +866,37 @@ test('recoverGit（PR #851 の P1）: 回復の段は読み取りの profile の
   // 隔離 worktree の段（impl）と同時には受けない
   const w = setup({ turns: [okTurn()] })
   await assert.rejects(w.adapter.run(w.req({ worktreeGitdir: gd, recoverGit: { commonDir: g, worktree: null, gitdir: null } })), (e) => e.kind === 'denied')
+})
+
+// ---------------------------------------------------------------------------
+// extraWritePaths の検証・出力の上限・UTF-8 の境界（PR #851 の codex レビュー）
+// ---------------------------------------------------------------------------
+
+test('extraWritePaths（P1）: 文字列・相対・非正規化・"/" は起動前に denied（codex を起動しない）', async () => {
+  for (const bad of ['/tmp/origin', ['rel/path'], ['/a/../b'], ['/tmp/'], [''], [1], ['/'], {}]) {
+    const t = setup({ turns: [okTurn()], toolConfig: { extraWritePaths: bad } })
+    await rejectsKind(t.adapter.run(t.req()), 'denied')
+    assert.equal(t.calls().length, 0, `exec を呼ばない: ${JSON.stringify(bad)}`)
+  }
+  assert.throws(() => buildProfileArgs({ kind: 'impl', cwd: '/w', codexHome: '/c', tmpDir: '/t', home: '/h', git: null, extraWritePaths: '/tmp/origin' }), (e) => e instanceof AdapterError && e.kind === 'denied')
+  const t = setup({ turns: [okTurn()], toolConfig: { extraWritePaths: ['/tmp/origin'] } })
+  await t.adapter.run(t.req())
+  assert.ok(t.calls()[0].argv.some((a) => a.includes('"/tmp/origin"="write"')))
+})
+
+test('出力の上限（P2）: stdout が上限を超えたらプロセスグループを止めて exit で失敗する', async () => {
+  const t = setup({ turns: [okTurn({ flood: { stream: 'stdout', bytes: 17 * 1024 * 1024 } })] })
+  await assert.rejects(t.adapter.run(t.req({ timeoutMs: 12000 })), (e) => e instanceof AdapterError && e.kind === 'exit' && /上限/.test(e.message))
+})
+
+test('出力の上限（P2）: stderr が暴走しても（上限超で）止めて失敗する', async () => {
+  const t = setup({ turns: [okTurn({ flood: { stream: 'stderr', bytes: 17 * 1024 * 1024 } })] })
+  await assert.rejects(t.adapter.run(t.req({ timeoutMs: 12000 })), (e) => e instanceof AdapterError && e.kind === 'exit' && /上限/.test(e.message))
+})
+
+test('UTF-8（P2）: 日本語がチャンクの境界で割れても壊れない', async () => {
+  const msg = '日本語のテキスト'
+  const t = setup({ turns: [okTurn({ message: msg, splitUtf8: true, noOutputFile: true })] })
+  const out = await t.adapter.run(t.req({ schema: null }))
+  assert.equal(out.text, msg)
 })

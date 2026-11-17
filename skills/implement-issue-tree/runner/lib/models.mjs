@@ -10,12 +10,15 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isNormalizedAbsPathList } from './path-list.mjs'
 
 export const IIT_MODELS = Object.freeze(['haiku', 'sonnet', 'opus', 'fable'])
 export const IIT_EFFORTS = Object.freeze(['low', 'medium', 'high'])
 export const TOOLS = Object.freeze(['codex'])
 export const DEFAULT_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'config', 'default.json')
 
+/** toolConfig.<tool> のうち、パスの配列を受けるキー。 */
+const PATH_LIST_KEYS = Object.freeze(['extraWritePaths'])
 const isPlainObject = (x) => x !== null && typeof x === 'object' && !Array.isArray(x)
 const isPosInt = (x) => Number.isInteger(x) && x > 0
 
@@ -53,6 +56,8 @@ export function validateConfig(config) {
       if (!TOOLS.includes(tool)) fail(`toolConfig に未知のツール ${tool}`)
       if (!isPlainObject(tc)) fail(`toolConfig.${tool}`)
       for (const k of ['deleteSessions', 'models', 'timeoutsSec']) if (k in tc) fail(`toolConfig.${tool}.${k} は置けない（cleanup・models・timeoutsSec を使う）`)
+      // パスの配列を受けるキー（書き込み許可にそのまま入る。文字列は 1 文字ずつ展開されるので型まで見る）
+      for (const k of PATH_LIST_KEYS) if (k in tc && !isNormalizedAbsPathList(tc[k])) fail(`toolConfig.${tool}.${k} は正規化済みの絶対パス（"/" 以外）の配列`)
     }
   }
   return config

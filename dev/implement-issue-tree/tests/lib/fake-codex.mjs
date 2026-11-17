@@ -18,6 +18,10 @@
 //     functionCalls: [{ name, arguments }, …], セッションの記録へ直接の function_call を書く
 //     noRollout: true,       セッションの記録を書かない（記録が見つからない状況）
 //     extraRollout: true,    同じ ID の記録をもう 1 つ別の日付の下に書く（1 つに決まらない状況）
+//     splitUtf8: true,       agent_message のイベント行を、日本語の文字の途中（バイトの境界）で 2 回に分けて書く（間に待ちを入れる）
+//     flood: { stream: 'stdout'|'stderr', bytes },  指定のバイト数を改行なしで書き続けてから hang する（出力の上限の試験）
+//     splitUtf8: true,       agent_message のイベント行を、日本語の文字の途中（バイトの境界）で 2 回に分けて書く（間に待ちを入れる）
+//     flood: { stream: 'stdout'|'stderr', bytes },  指定のバイト数を書き続けてから hang する（出力の上限の試験。SIGTERM は無視）
 //     rolloutId,             記録の session_meta の id（既定は threadId。食い違いの再現）
 //   }
 // セッションの記録: 実 codex と同じく <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<時刻>-<threadId>.jsonl に書く
@@ -103,6 +107,17 @@ if (turn.hang) {
   await new Promise(() => {})
 }
 
+if (turn.flood) {
+  process.on('SIGTERM', () => {})
+  const out = turn.flood.stream === 'stderr' ? process.stderr : process.stdout
+  const chunk = Buffer.alloc(1024 * 1024, 'x')
+  for (let sent = 0; sent < turn.flood.bytes; sent += chunk.length) {
+    if (!out.write(chunk)) await new Promise((r) => out.once('drain', r))
+  }
+  setInterval(() => {}, 1000)
+  await new Promise(() => {})
+}
+
 const hookArg = argv.find((a) => a.startsWith('hooks.PreToolUse='))
 let n = 0
 for (const cmd of turn.toolCalls ?? []) {
@@ -131,7 +146,15 @@ if (turn.fail === 'exit') {
   process.stderr.write('segfault\n')
   process.exit(turn.exitCode ?? 139)
 }
-ev({ type: 'item.completed', item: { id: `item_${++n}`, type: 'agent_message', text: msg } })
+if (turn.splitUtf8) {
+  const line = Buffer.from(`${JSON.stringify({ type: 'item.completed', item: { id: `item_${++n}`, type: 'agent_message', text: msg } })}\n`)
+  const cut = line.indexOf(Buffer.from(msg)) + 1 // 先頭の文字の 2 バイト目（UTF-8 の途中）
+  process.stdout.write(line.subarray(0, cut))
+  await new Promise((r) => setTimeout(r, 100))
+  process.stdout.write(line.subarray(cut))
+} else {
+  ev({ type: 'item.completed', item: { id: `item_${++n}`, type: 'agent_message', text: msg } })
+}
 if (!turn.noOutputFile) writeFileSync(outPath, msg)
 ev({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 5, reasoning_output_tokens: 1 } })
 process.exit(turn.exitCode ?? 0)
