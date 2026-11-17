@@ -119,7 +119,8 @@ test('保護: ガード本体・plugin の置き場・OpenCode の設定ディ�
       assert.ok(editDeny.includes(want), `permissions: ${want}`)
       assert.ok(editPolicy.includes(want), `policies: ${want}`)
     }
-    assert.deepEqual(o.protectedPaths, [cfgDir, SKILL_DIR], 'plugin にも設定ディレクトリとスキルの置き場を渡す')
+    assert.deepEqual(o.protectedPaths, [cfgDir], 'plugin の shell 判定にも効く保護は設定ディレクトリだけ')
+    assert.deepEqual(o.editOnlyPaths, [SKILL_DIR], 'スキルの置き場は edit 系だけの保護として渡す')
     // 既存の shell の deny（opencodeRules）は残り、edit の deny はその後ろ（後勝ち）に置く
     const firstEdit = cfg.permissions.findIndex((r) => r.action === 'edit')
     assert.ok(firstEdit > cfg.permissions.findIndex((r) => r.resource === 'gh pr merge*'))
@@ -547,7 +548,9 @@ test('保護: cfg.skillDir（とその realpath）への edit を permissions �
         assert.ok(editPolicy.includes(want), `policies: ${want}`)
       }
     }
-    assert.ok(o.protectedPaths.includes(SKILL_DIR), 'plugin の protectedPaths にも入る（edit と shell の書き込みを拒否）')
+    assert.ok(o.editOnlyPaths.includes(SKILL_DIR), 'plugin の editOnlyPaths に入る（edit だけ拒否）')
+    assert.equal(o.protectedPaths.includes(SKILL_DIR), false, 'shell の判定の対象（protectedPaths）には入れない')
+    assert.equal(cfg.permissions.some((r) => r.action === 'shell' && String(r.resource).includes(SKILL_DIR)), false, 'shell の permission の deny にスキルの置き場を入れない')
   } finally { await t.adapter.close() }
 })
 

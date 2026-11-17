@@ -157,7 +157,10 @@ _/iit-runner/<runId>/
   30 秒の小さいほう。run の中の要求は run の残り時間でも打ち切る）。応答が来ないときは、セッションを interrupt し、止まったと
   確認できなければ serve を（SIGTERM、続けて SIGKILL で）終了させる。終了した serve は次の run で作り直す。
 - OpenCode のガードの置き場（`agent-guard.sh`・ランナー専用 plugin・`~/.config/opencode/`・`.opencode/(hooks|plugins?)/`・
-  `opencode.json(c)`・スキルの置き場（`args.skillDir`。実行仕様の launcher `scripts/run-verified.sh` を含む）・ランのガードのログと目印）への書き込みの拒否は、edit 系はパスの照合、shell はコマンド文字列の照合である。
+  `opencode.json(c)`・ランのガードのログと目印）への書き込みの拒否は、edit 系はパスの照合、shell はコマンド文字列の照合である。
+  スキルの置き場（`args.skillDir`。実行仕様の launcher `scripts/run-verified.sh` を含む）は edit 系のパスの照合だけで拒否する。
+  スキルの置き場はランナーが shell で実行させる場所でもあるため、shell のコマンド文字列は判定しない。shell からの書き込みは
+  `lib/pins.mjs` の sha256 の固定（各段の前後の照合）で検知する。
   変数・間接参照・別名のパスを使う shell の書き込みは止まらない（best-effort）。対象リポジトリに `opencode.json(c)` という名前の
   ファイル（例: 配布物の雛形）があると、その編集も拒否される（配布物の plugin と同じ過剰側の判定）。
 - OpenCode の merge 用 serve は PR ごとに起動し、ランの終了（close）まで残す（同じ PR の再試行で使い回すため）。

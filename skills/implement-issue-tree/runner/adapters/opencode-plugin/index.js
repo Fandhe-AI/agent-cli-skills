@@ -19,6 +19,8 @@
 //                セッションの shell の実行件数と突き合わせる（ガードを通っていない実行の検知。監査 e670648 の MEDIUM-7）
 //   protectedPaths  配列。書き込みを拒否する絶対パス（完全一致と配下）。アダプタが ~/.config/opencode・ランのログと目印を渡す。
 //                guardScript と plugin 自身の置き場は options に無くても常に保護する（下の「保護」）
+//   editOnlyPaths  配列。edit 系の書き込みだけを拒否する絶対パス（完全一致と配下）。shell のコマンド文字列は判定しない。
+//                アダプタがスキルの置き場（実行仕様の launcher を shell で実行させる場所）を渡す。shell からの書き込みは sha256 の固定で検知する
 //
 // 全文の判定（監査 e670648 の MEDIUM-6。全 serve）:
 //   permission.evaluate の resource は OpenCode のスキャナが分解した後の形で、代入・export・cd だけのコマンドでは
@@ -101,6 +103,11 @@ const realOr = (p) => { try { return realpathSync(p) } catch { return resolve(p)
 function protectedRoots(opts) {
   const list = [opts.guardScript, PLUGIN_SELF, opts.log, ...[opts.markerPath, opts.callLog].filter((x) => typeof x === 'string' && x !== ''), ...opts.protectedPaths]
   return [...new Set(list.flatMap((p) => [resolve(p), realOr(p)]).map(fold))]
+}
+
+/** edit 系だけで保護する絶対パス（畳み込み済み）。shell の判定には使わない（スキルの置き場は、ランナーが shell で実行させる場所でもあるため）。 */
+function editOnlyRoots(opts) {
+  return [...new Set(opts.editOnlyPaths.flatMap((p) => [resolve(p), realOr(p)]).map(fold))]
 }
 
 const under = (p, roots) => roots.some((r) => p === r || p.startsWith(r.endsWith('/') ? r : `${r}/`))
@@ -207,8 +214,10 @@ function readOptions(options) {
   }
   const protectedPaths = Array.isArray(o.protectedPaths) ? o.protectedPaths : []
   if (!protectedPaths.every((p) => typeof p === 'string' && isAbsolute(p))) return null
+  const editOnlyPaths = Array.isArray(o.editOnlyPaths) ? o.editOnlyPaths : []
+  if (!editOnlyPaths.every((p) => typeof p === 'string' && isAbsolute(p))) return null
   if (o.callLog !== undefined && (typeof o.callLog !== 'string' || !isAbsolute(o.callLog))) return null
-  return { guardScript: o.guardScript, log: o.log, mergeRes, markerPath: o.markerPath, nonce: o.nonce, protectedPaths, callLog: o.callLog ?? null }
+  return { guardScript: o.guardScript, log: o.log, mergeRes, markerPath: o.markerPath, nonce: o.nonce, protectedPaths, editOnlyPaths, callLog: o.callLog ?? null }
 }
 
 function judge(guardScript, command, timeoutMs) {
@@ -260,7 +269,7 @@ function evaluate(opts, binds, event, env) {
   if (action !== 'shell') {
     if (resources.some((r) => typeof r !== 'string')) {
       if (action === 'edit') { log('deny-bad-event'); return deny(event, 'iit-runner: 対象を解釈できないため拒否した') }
-    } else if (resources.some((r) => isProtectedPath(r, env.roots, env.baseDir))) { log('deny-protected-edit'); return deny(event, MSG_PROTECTED) }
+    } else if (resources.some((r) => isProtectedPath(r, env.editRoots, env.baseDir))) { log('deny-protected-edit'); return deny(event, MSG_PROTECTED) }
     if (action === 'edit') return
   }
   if (resources.length === 0) {
@@ -287,7 +296,7 @@ export default {
   async setup(ctx) {
     const opts = readOptions(ctx.options)
     const dir = typeof ctx.location?.directory === 'string' && isAbsolute(ctx.location.directory) ? ctx.location.directory : null
-    const env = opts ? { roots: protectedRoots(opts), baseDir: dir ? realOr(dir) : null } : null
+    const env = opts ? { roots: protectedRoots(opts), editRoots: [...protectedRoots(opts), ...editOnlyRoots(opts)], baseDir: dir ? realOr(dir) : null } : null
     const binds = new Map() // merge-exec の対応づけ（冒頭の説明）。mergeRes が空の serve では何も記録しない
     const toolHook = typeof ctx.tool?.hook === 'function'
     const shellHook = typeof ctx.shell?.hook === 'function'

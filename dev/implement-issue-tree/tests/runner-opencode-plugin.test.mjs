@@ -352,3 +352,23 @@ test('shell.create.before: OPENCODE_PASSWORD 等を env から消し、他の変
   await plugin.setup({ options: s2.options, permission: { hook: async () => {} }, tool: { hook: async () => {} } })
   assert.equal(existsSync(s2.options.markerPath), false, 'ctx.shell.hook が無ければ認証情報を消せないので目印を書かない（アダプタが止める）')
 })
+
+// スキルの置き場（options.editOnlyPaths）は edit 系だけ拒否する。ランナーが shell で run-verified.sh を実行させる場所のため、
+// shell のコマンド文字列は判定しない（shell からの書き換えは pins.mjs の sha256 の固定で検知する）。
+test('保護: editOnlyPaths は edit 系を拒否し、shell の run-verified.sh の実行（リダイレクト付きも）は通す。ガード本体への shell の書き込みは拒否のまま', async () => {
+  const s = sandbox('#!/bin/bash\necho AGENT_GUARD_RESULT allow\n')
+  const skill = join(s.dir, 'skill')
+  const launcher = join(skill, 'scripts', 'run-verified.sh')
+  const ev = await loadAt({ ...s.options, editOnlyPaths: [skill] }, s.dir)
+  assert.equal((await ev({ action: 'edit', resources: [launcher] })).effect, 'deny', 'edit は拒否')
+  for (const c of [
+    `bash ${launcher} --spec x > "$TMPDIR/out" 2>&1`,
+    `bash ${launcher} --spec x`,
+  ]) {
+    assert.notEqual((await ev({ resources: [c] })).effect, 'deny', `permission.evaluate: ${c}`)
+    await ev.before({ tool: 'shell', input: { command: c } }) // throw しない
+  }
+  const g = s.options.guardScript
+  assert.equal((await ev({ resources: [`echo x > ${g}`] })).effect, 'deny', 'ガード本体への shell の書き込みは拒否')
+  await assert.rejects(async () => ev.before({ tool: 'shell', input: { command: `echo x > ${g}` } }), /iit-runner/)
+})

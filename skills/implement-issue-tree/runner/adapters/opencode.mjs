@@ -16,7 +16,8 @@
 //     届く版では、plugin が tool.execute.before で全文の一致を確かめた呼び出しにだけ許可を対応づける）。
 //   - ガードの置き場（agent-guard.sh・ランナー専用 plugin・OpenCode の利用者設定ディレクトリ・`.opencode/(hooks|plugins?)/`・
 //     `opencode.json(c)`・スキルの置き場 cfg.skillDir）への edit を permissions と policies の両方で拒否する（protectRules。guard.opencodeRules の結果に足す）。
-//     同じパスは plugin の options.protectedPaths にも渡し、plugin が edit と shell からの書き込みを拒否する（plugin 冒頭の「保護」）。
+//     設定ディレクトリは plugin の options.protectedPaths に渡し、plugin が edit と shell からの書き込みを拒否する（plugin 冒頭の「保護」）。
+//     スキルの置き場は options.editOnlyPaths に渡し、edit だけ拒否する（shell は launcher の実行に使うため判定しない。shell からの書き換えは lib/pins.mjs の sha256 の固定で検知する）。
 //   - 認証ファイル（gh の設定ディレクトリ・Codex の auth.json・OpenCode の auth.json と opencode.db）への read を
 //     permissions と policies で拒否する（credentialReadRules。監査 e670648 の LOW-9）。shell からの読み出しは agent-guard.sh の
 //     credential-read が止める。パスは env から決めるだけで、中身は読まない。
@@ -201,7 +202,7 @@ export function createAdapter(cfg) {
     const nonce = randomBytes(16).toString('hex')
     const markerPath = join(cfg.runDir, `opencode-plugin-${kind}.marker`)
     const callLog = join(cfg.runDir, `opencode-calls-${kind}.log`)
-    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? [mergeExecCommandFor(merge.prNumber).source] : [], markerPath, nonce, protectedPaths: [...configDirs.map((d) => resolve(d)), ...skillDirs], callLog }
+    const options = { guardScript, log: join(cfg.runDir, `opencode-guard-${kind}.log`), mergeRes: allowMerge ? [mergeExecCommandFor(merge.prNumber).source] : [], markerPath, nonce, protectedPaths: configDirs.map((d) => resolve(d)), editOnlyPaths: skillDirs, callLog }
     const env = { ...baseEnv, ...(allowMerge ? { GH_REPO: merge.repo } : {}), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify(buildConfigContent({ rules, pluginDir: PLUGIN_DIR, options })) }
     const child = spawn(command[0], [...command.slice(1), 'serve', '--hostname', '127.0.0.1', '--port', String(port)], { cwd: cfg.mainRoot, env, stdio: ['ignore', outFd, errFd], detached: true })
     // 起動待ちの await より前に登録する（起動待ちの間にシグナルで終わっても killSync で止められるように）
